@@ -206,6 +206,13 @@ impl MmStruct {
         use super::vma::RiscVAddressSpaceLayout;
         use super::vma::AddressSpaceLayout;
 
+        // Teardown-race guard (mm/deferred_free.rs): register this
+        // struct's size class so its heap frees are time-deferred — an
+        // unaccounted &MmStruct borrower preempted mid-syscall must not
+        // resume on heap-reused memory. First writer wins; the size is
+        // fixed at compile time so this is idempotent.
+        crate::mm::deferred_free::register_deferred_size(core::mem::size_of::<MmStruct>());
+
         let vma_manager = VmaManager::new();
         let brk_default = if space_type == PageTableType::User {
             super::vma::RiscVAddressSpaceLayout::heap_start()
@@ -960,6 +967,27 @@ impl Drop for MmStruct {
                         }
                     }
                 }
+            }
+
+            // ===== VMA tree release under vma_write (walker exclusion) =====
+            // procfs generate_maps/smaps/status hold `vma_read()` across
+            // their whole btree iteration on an UNPINNED &MmStruct borrow
+            // of a foreign task. Freeing the btree nodes with the struct
+            // while such a reader navigates them is the #GP-in-btree-
+            // navigate family (reference OH log pid 554; exitwalk pid 314:
+            // atomic_load inside the node comparison chasing a
+            // non-canonical child pointer). Dropping the tree under its
+            // OWN write lock mutually excludes every vma_read holder — a
+            // reader that armed before us blocks the write acquisition
+            // until it finishes; readers after see an empty (dying) tree.
+            // Same treatment for the pinned-file table (get_vma_file
+            // readers). The struct's own heap slot still follows the
+            // grace-period wait below.
+            {
+                let mut mgr = self.vma_write();
+                // old tree's nodes are freed HERE, under the write lock
+                *mgr = VmaManager::new();
+                self.vma_files.write().clear();
             }
 
             // ===== Grace-period wait: hold off the free under raw borrowers =====

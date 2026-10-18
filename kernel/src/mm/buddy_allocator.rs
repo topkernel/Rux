@@ -775,9 +775,45 @@ pub fn buddy_stats() -> BuddyStats {
 /// This design can reduce memory fragmentation and improve small object allocation efficiency
 pub struct CombinedAllocator;
 
+/// The real (unintercepted) free path: slab-region or buddy-heap by
+/// pointer range. `CombinedAllocator::dealloc` routes here after the
+/// deferred-free check declines; the deferred-free drainer calls this
+/// directly so re-deferring is impossible.
+pub unsafe fn dealloc_direct(ptr: *mut u8, layout: Layout) {
+    if ptr.is_null() {
+        return;
+    }
+
+    let ptr_addr = ptr as usize;
+    let heap_start = HEAP_ALLOCATOR.heap_start.load(Ordering::Acquire);
+    let heap_end = HEAP_ALLOCATOR.heap_end.load(Ordering::Acquire);
+
+    // Slab-region membership uses the TRUE bounds registered by
+    // init_slab() (review 4.8) — the old `heap_end + hardcoded 4MB`
+    // duplicated the layout and silently diverged whenever the slab
+    // region moved or resized.
+    let in_slab = crate::mm::slab::slab_region()
+        .map(|(s, e)| ptr_addr >= s && ptr_addr < e)
+        .unwrap_or(false);
+
+    if in_slab {
+        // In Slab area, use kfree
+        crate::mm::kfree(ptr);
+    } else if ptr_addr >= heap_start && ptr_addr < heap_end {
+        // In Buddy heap area
+        HEAP_ALLOCATOR.dealloc(ptr, layout);
+    }
+    // Pointers in other regions are ignored
+}
+
 unsafe impl GlobalAlloc for CombinedAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         let size = layout.size();
+
+        // Opportunistic reclamation of time-deferred frees (see
+        // mm/deferred_free.rs): one relaxed load on the fast path; the
+        // same allocation churn that fills the pool drains it.
+        crate::mm::deferred_free::drain_if_due();
 
         // Small objects (<= 4096 bytes) try Slab allocator
         if size <= 4096 && crate::mm::slab::is_slab_initialized() {
@@ -797,25 +833,16 @@ unsafe impl GlobalAlloc for CombinedAllocator {
             return;
         }
 
-        let ptr_addr = ptr as usize;
-        let heap_start = HEAP_ALLOCATOR.heap_start.load(Ordering::Acquire);
-        let heap_end = HEAP_ALLOCATOR.heap_end.load(Ordering::Acquire);
-
-        // Slab-region membership uses the TRUE bounds registered by
-        // init_slab() (review 4.8) — the old `heap_end + hardcoded 4MB`
-        // duplicated the layout and silently diverged whenever the slab
-        // region moved or resized.
-        let in_slab = crate::mm::slab::slab_region()
-            .map(|(s, e)| ptr_addr >= s && ptr_addr < e)
-            .unwrap_or(false);
-
-        if in_slab {
-            // In Slab area, use kfree
-            crate::mm::kfree(ptr);
-        } else if ptr_addr >= heap_start && ptr_addr < heap_end {
-            // In Buddy heap area
-            HEAP_ALLOCATOR.dealloc(ptr, layout);
+        // Teardown-race guard (mm/deferred_free.rs): frees of the
+        // registered size class (MmStruct) are held back briefly so
+        // unaccounted &MmStruct borrowers (procfs generators) that were
+        // preempted mid-syscall resume against coherent post-teardown
+        // memory instead of heap-reused garbage (the #GP-in-btree
+        // family).
+        if crate::mm::deferred_free::try_defer(ptr, &layout) {
+            return;
         }
-        // Pointers in other regions are ignored
+
+        dealloc_direct(ptr, layout);
     }
 }
