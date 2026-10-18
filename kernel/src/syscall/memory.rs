@@ -780,6 +780,66 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                         }
                     }
 
+                    // Unmappable-fd gate (Linux parity, the b140 SIGBUS
+                    // family). Everything with a real mmap handler is
+                    // routed by now (binder, fb0, /dev/zero, ashmem,
+                    // drm/prime). What reaches the generic path with
+                    // fd >= 0 must be fault-servable as a file: an
+                    // inode-less fd (pipes, eventfd/timerfd, epoll,
+                    // sockets — bare anon_inode) or a leftover char
+                    // device has no mmap op on Linux and mmap returns
+                    // -ENODEV there. Mapping it FileBacked anyway
+                    // built a size-0 VMA whose first touch SIGBUSed
+                    // "past EOF", and the SIGBUS cascade then ran the
+                    // victim thread into its stack guard page:
+                    // accountmgr's OS_IPC_0 (pid 938) and hdf_devmgr's
+                    // OS_IPC_1 (pid 361) died exactly so, stranding
+                    // every binder waiter on their txn stacks (the
+                    // bootevent.account.ready stall).
+                    if vma_type == VmaType::FileBacked && fd >= 0 {
+                        let unmappable = unsafe {
+                            crate::fs::file::get_file_fd(fd as usize)
+                                .map(|f| {
+                                    let inode_opt = &*f.inode.get();
+                                    match inode_opt.as_ref() {
+                                        None => true, // bare anon_inode
+                                        Some(inode) => {
+                                            // Char devices, fifos and
+                                            // sockets without an earlier
+                                            // route have no fault source
+                                            // (device/fifo size 0).
+                                            inode.mode.is_char_device()
+                                                || inode.mode.is_fifo()
+                                                || inode.mode.is_socket()
+                                        }
+                                    }
+                                })
+                                .unwrap_or(false)
+                        };
+                        if unmappable {
+                            let ops_tag = unsafe {
+                                crate::fs::file::get_file_fd(fd as usize)
+                                    .and_then(|f| f.get_ops().map(|o| o as *const _ as usize))
+                                    .unwrap_or(0)
+                            };
+                            crate::pr_info!(
+                                "MMAP-ENODEV pid {} fd {} len {:#x} prot {:#x} flags {:#x} ops {:#x} path {}",
+                                crate::process::current_pid(),
+                                fd,
+                                actual_length,
+                                prot_flags,
+                                map_flags,
+                                ops_tag,
+                                unsafe {
+                                    crate::fs::file::get_file_fd(fd as usize)
+                                        .map(|f| f.path())
+                                        .unwrap_or_default()
+                                },
+                            );
+                            return mmap_error::ENODEV;
+                        }
+                    }
+
                     // Call AddressSpace::mmap
                     let result = address_space.mmap(
                         VirtAddr::new(addr),

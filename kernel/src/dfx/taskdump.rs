@@ -459,6 +459,13 @@ pub fn dump_all_tasks(reason: &str) {
             put_hex(task_ptr as u64);
             puts(" pid=");
             put_dec(t.pid() as u64);
+            // Thread-group attribution: comm alone cannot say which
+            // process an OS_FFRT_2_2 or OS_IPC_3 worker serves, and the
+            // b140 hunt needed exactly that (accountmgr's FFRT worker
+            // normal-exited mid-activation while its IPC threads kept
+            // answering callbacks). tgid= names the owner unambiguously.
+            puts(" tgid=");
+            put_dec(t.tgid() as u64);
             puts(" state=");
             puts(state_name(t.state().bits()));
             puts(" ti_cpu=");
