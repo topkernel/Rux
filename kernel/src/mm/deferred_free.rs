@@ -83,12 +83,13 @@ pub fn register_deferred_size(size: usize) {
     if size == 0 {
         return;
     }
+    // NOTE: no printk here — registration runs at the FIRST raw Task-slot
+    // init (idle-task creation), earlier than printk bring-up on riscv64;
+    // a pr_err there hung the boot at the banner (final2/final3 runs).
+    // Engagement (first successful defer) is witnessed later, post-boot.
     for slot in DEFER_SIZES.iter() {
         match slot.compare_exchange(0, size, Ordering::AcqRel, Ordering::Acquire) {
-            Ok(_) => {
-                crate::pr_err!("DEFERFREE: registered size class {}", size);
-                return;
-            }
+            Ok(_) => return,
             Err(v) if v == size => return, // already registered
             Err(_) => continue,
         }
