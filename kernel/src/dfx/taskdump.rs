@@ -494,6 +494,39 @@ pub fn dump_all_tasks(reason: &str) {
                     putc(b'.');
                 }
             }
+            // Last syscall from the forensic ring (backward scan for the
+            // newest entry with this pid): for a sleeping task it names
+            // the syscall it blocked in — the discriminator for
+            // "which kernel object is this waiter parked on" hunts
+            // (account-activation stall: epoll? futex? binder ioctl?
+            // signalfd?).
+            {
+                use crate::syscall::dispatch::{SYSCALL_CURSOR, SYSCALL_RING};
+                let cur = SYSCALL_CURSOR.load(core::sync::atomic::Ordering::Relaxed);
+                let len = SYSCALL_RING.len();
+                let mut found = false;
+                for k in 1..=len {
+                    let idx = (cur + len - (k % len)) % len;
+                    let e = &SYSCALL_RING[idx];
+                    if e.pid.load(core::sync::atomic::Ordering::Relaxed) == t.pid() {
+                        let nr = e.nr.load(core::sync::atomic::Ordering::Relaxed);
+                        let a0 = e.a0.load(core::sync::atomic::Ordering::Relaxed);
+                        let a1 = e.a1.load(core::sync::atomic::Ordering::Relaxed);
+                        puts(" lastsys=");
+                        put_dec(nr as u64);
+                        puts("(");
+                        put_hex(a0);
+                        putc(b',');
+                        put_hex(a1);
+                        puts(")");
+                        found = true;
+                        break;
+                    }
+                }
+                if !found {
+                    puts(" lastsys=?");
+                }
+            }
             putc(b'\n');
             #[cfg(feature = "dfx-taskdump-bt")]
             {

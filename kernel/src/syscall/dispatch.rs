@@ -226,6 +226,14 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
         None => syscall_no as i64,
     };
 
+    // FORENSIC ring ENTRY record (ret sentinel = in-flight): a task
+    // parked INSIDE a syscall (epoll_wait/binder ioctl/futex/read on a
+    // slow fd) never reaches the exit-side record below, so the exit-only
+    // ring showed its last COMPLETED call instead of the blocking one.
+    // The taskdump's lastsys= field decodes parked waiters through this.
+    SYSCALL_RING[SYSCALL_CURSOR.fetch_add(1, core::sync::atomic::Ordering::Relaxed) % SYSCALL_RING.len()]
+        .record(crate::process::current_pid(), syscall_no as u32, args[0], args[1], u64::MAX);
+
     // Dispatch based on system call number (sorted by number)
     let result: i64 = match syscall_no as u32 {
         // ==================== Linux AIO (NR 0-4) ====================
