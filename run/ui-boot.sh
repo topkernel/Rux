@@ -34,7 +34,12 @@ APPEND="$APPEND ohos.required_mount.system=/dev/block/vdb@/usr@ext4@ro,barrier=1
 APPEND="$APPEND ohos.required_mount.vendor=/dev/block/vdc@/vendor@ext4@ro,barrier=1@wait,required"
 APPEND="$APPEND ${EXTRA_APPEND:-}"
 
-DISKS="$(ro_drive 0 "$IMGDIR/updater.img")$(ro_drive 1 "$IMGDIR/system.img")$(ro_drive 2 "$IMGDIR/vendor.img")$(ro_drive 3 "$IMGDIR/sys_prod.img")$(ro_drive 4 "$IMGDIR/chip_prod.img")"
+# SYSTEMIMG: override the system drive (e.g. system-paint.img whose
+# /bin/bootanimation is the egl_painter seat). Defaults to the shared
+# oh-robot system.img (snapshot=on, pristine).
+SYSTEMIMG="${SYSTEMIMG:-$IMGDIR/system.img}"
+
+DISKS="$(ro_drive 0 "$IMGDIR/updater.img")$(ro_drive 1 "$SYSTEMIMG")$(ro_drive 2 "$IMGDIR/vendor.img")$(ro_drive 3 "$IMGDIR/sys_prod.img")$(ro_drive 4 "$IMGDIR/chip_prod.img")"
 # userdata: writable, file.locking=off (shared-machine rule), NO snapshot.
 DISKS="$DISKS -drive file=$USERDATA,if=none,id=ohd5,format=raw,file.locking=off -device virtio-blk-pci,drive=ohd5"
 
