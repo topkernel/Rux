@@ -1578,16 +1578,34 @@ fn shared_grow_locked(entry: &DevfsEntry, min_len: usize) -> usize {
 /// snapshot — reading the entry gives Linux-tmpfs behavior (b74: pid 1
 /// SIGBUSed at file_off 0 because its mapper inode still said 0 after
 /// the workspace had been ftruncated to 10MB through the creating fd).
-/// None for non-devfs-regular files.
+/// None for non-devfs files.
+///
+/// DEVFS INODES ONLY. The page-fault path calls this for EVERY
+/// file-backed VMA fault, whatever the filesystem — and other
+/// filesystems store non-pointer values in inode.private_data
+/// (selinuxfs: a NODES table index, procfs: a pid). Treating those as
+/// `*const DevfsEntry` and touching `entry.entry_type` was the
+/// deterministic NULL-deref panic ~7 min into OH boots (badaddr 0xa7 =
+/// selinuxfs `status` idx 11 + offsetof(DevfsEntry, entry_type) 0x9c,
+/// in DevEntryType::eq ← is_regular_file ← this function, when
+/// composer_host/render_service's libselinux selinux_status_open()
+/// mmapped /sys/fs/selinux/status MAP_SHARED and faulted it). The
+/// fs_id + S_IFREG gate rejects every foreign inode BEFORE
+/// private_data is dereferenced; a NULL private_data is rejected too.
 pub fn devfs_reg_current_size(file: &crate::fs::File) -> Option<u64> {
     // SAFETY: caller passes a valid File; only stable fields are read.
     unsafe {
         let inode = (*file.inode.get()).as_ref()?;
-        let ptr = inode.private_data?;
-        let entry = &*(ptr as *const DevfsEntry);
-        if !entry.is_regular_file() {
+        if inode.fs_id != crate::fs::inode::FS_ID_DEVFS
+            || !inode.mode.is_regular_file()
+        {
             return None;
         }
+        let ptr = inode.private_data?;
+        if ptr.is_null() {
+            return None;
+        }
+        let entry = &*(ptr as *const DevfsEntry);
         Some(entry.size.load(Ordering::Acquire))
     }
 }
@@ -1601,12 +1619,20 @@ pub fn shared_fault_file_page(file: &crate::fs::File, file_off: usize) -> Option
     // inode pointer field and its stable private_data are read.
     let entry = unsafe {
         let inode = (*file.inode.get()).as_ref()?;
+        // Same identity gate as devfs_reg_current_size: private_data is
+        // only a DevfsEntry pointer on devfs inodes (foreign filesystems
+        // store table indices/pids there — see that function's comment).
+        if inode.fs_id != crate::fs::inode::FS_ID_DEVFS
+            || !inode.mode.is_regular_file()
+        {
+            return None;
+        }
         let ptr = inode.private_data?;
+        if ptr.is_null() {
+            return None;
+        }
         &*(ptr as *const DevfsEntry)
     };
-    if !entry.is_regular_file() {
-        return None;
-    }
     let inode_size = unsafe {
         (*file.inode.get()).as_ref().map(|i| i.get_size() as usize).unwrap_or(0)
     };
@@ -2071,6 +2097,7 @@ pub static DEVFS_INODE_OPS: INodeOps = INodeOps {
 /// Called during mount to set up the root dentry's inode.
 pub fn create_root_inode(root_entry: &Arc<DevfsEntry>) -> alloc::sync::Arc<Inode> {
     let mut inode = Inode::new(1, InodeMode::new(InodeMode::S_IFDIR | 0o755));
+    inode.fs_id = crate::fs::inode::FS_ID_DEVFS;
     inode.ops = Some(&DEVFS_INODE_OPS);
     inode.private_data = Some(Arc::into_raw(Arc::clone(root_entry)) as *mut u8);
     alloc::sync::Arc::new(inode)
