@@ -206,6 +206,21 @@ impl MmStruct {
         use super::vma::RiscVAddressSpaceLayout;
         use super::vma::AddressSpaceLayout;
 
+        // Teardown-race guard (mm/deferred_free.rs): register this
+        // struct's size class so its heap frees are time-deferred — an
+        // unaccounted &MmStruct borrower preempted mid-syscall must not
+        // resume on heap-reused memory. The size that matters is the ARC
+        // ALLOCATION's: alloc::sync::Arc<MmStruct> frees a block holding
+        // ArcInner { strong, weak, MmStruct } — 16 bytes of refcount
+        // header before the struct (rounding to the 8-byte header align).
+        // Registering bare size_of::<MmStruct>() matched nothing and the
+        // freed slot was reused as string data within microseconds
+        // (exitwalk: PT-WALK-STALE roots spelled ASCII). First writer
+        // wins; both sizes are compile-time constants, so idempotent.
+        crate::mm::deferred_free::register_deferred_size(
+            (2 * core::mem::size_of::<usize>()) + core::mem::size_of::<MmStruct>(),
+        );
+
         let vma_manager = VmaManager::new();
         let brk_default = if space_type == PageTableType::User {
             super::vma::RiscVAddressSpaceLayout::heap_start()
@@ -930,7 +945,7 @@ impl Drop for MmStruct {
         // Free page tables when the last reference is dropped
         // Only free for user address spaces (not kernel)
         //
-        // Per-VMA teardown note (review 4.2, "Drop 不遍历 VMA"): the actual
+        // Per-VMA teardown note (review 4.2, "Drop does not walk the VMA tree"): the actual
         // page teardown walks the PAGE TABLES (free_user_page_tables visits
         // every leaf PTE, does page_remove_rmap + put_page and frees the
         // page-table pages). Driving VmaManager::unmap_pages per VMA here
@@ -939,6 +954,95 @@ impl Drop for MmStruct {
         // are already drained by that PTE walk.
         if self.space_type == PageTableType::User {
             crate::dfx::memwatch::MM_DROPS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+
+            // ===== SysV shm detach (exactly once, Linux exit_mmap parity) =====
+            // nattch must drop exactly once per mm, at the point its address
+            // space goes away — NOT per task exit (CLONE_VM siblings share
+            // one Arc) and not twice. do_exit's old pre-drop
+            // `Arc::strong_count == 1` check was racy: a concurrently
+            // cloned walker reference (ptrace/OOM/rmap) could make the
+            // check read >1 at exit and 1 by drop time (nattch leak), or
+            // two sibling exits could both observe 1 (double detach). The
+            // Drop impl runs exactly once by construction. Runs before the
+            // VMA tree is released with the struct.
+            {
+                let vma_mgr = self.vma_read();
+                for vma in vma_mgr.iter() {
+                    if vma.vma_type() == crate::mm::vma::VmaType::SharedMemory {
+                        let shmid = vma.file_fd();
+                        if shmid >= 0 {
+                            crate::ipc::sysv_shm::shm_detach_vma(shmid);
+                        }
+                    }
+                }
+            }
+
+            // ===== VMA tree release under vma_write (walker exclusion) =====
+            // procfs generate_maps/smaps/status hold `vma_read()` across
+            // their whole btree iteration on an UNPINNED &MmStruct borrow
+            // of a foreign task. Freeing the btree nodes with the struct
+            // while such a reader navigates them is the #GP-in-btree-
+            // navigate family (reference OH log pid 554; exitwalk pid 314:
+            // atomic_load inside the node comparison chasing a
+            // non-canonical child pointer). Dropping the tree under its
+            // OWN write lock mutually excludes every vma_read holder — a
+            // reader that armed before us blocks the write acquisition
+            // until it finishes; readers after see an empty (dying) tree.
+            // Same treatment for the pinned-file table (get_vma_file
+            // readers). The struct's own heap slot still follows the
+            // grace-period wait below.
+            {
+                let mut mgr = self.vma_write();
+                // old tree's nodes are freed HERE, under the write lock
+                *mgr = VmaManager::new();
+                self.vma_files.write().clear();
+            }
+
+            // ===== Grace-period wait: hold off the free under raw borrowers =====
+            // procfs generate_maps/smaps/status take `task.address_space()` —
+            // an UNACCOUNTED &MmStruct borrow of a foreign task. A CPU
+            // mid-syscall never reports an RCU quiescent state (quiescence
+            // needs a context switch, idle entry, or user return), so one
+            // grace period after the LAST task slot went None guarantees
+            // every such in-flight borrow has finished before we free the
+            // page tables and (with the struct) the VMA btree. This is the
+            // same idea as Linux freeing mm_struct via call_rcu in mmdrop.
+            // Skipped when we cannot schedule (spinlock held / IRQs off /
+            // softirq — e.g. an OOM-scan Arc dropped under a pid-hash
+            // bucket lock): those callers are restructured to drop outside
+            // their locks, this is the belt-and-braces guard.
+            if crate::interrupt::preempt::preempt_count() == 0
+                && crate::arch::cpu::get_interrupts_state()
+            {
+                crate::sync::rcu::synchronize_rcu();
+            }
+
+            // Teardown-context witness (FUT-STALE family): a teardown in a
+            // context that is not the (still-live) owner names a
+            // deferred/wrong-context drop — the shape the PTLEDGER
+            // DOUBLE-FREE ring then attributes. ZOMBIE owners have already
+            // dropped their mm (they just await reaping) and are NOT
+            // counted. Cheap, bounded print.
+            {
+                let owner = self.owner_pid();
+                let cur = crate::sched::get_current_pid() as i32;
+                let owner_live = crate::process::find_task_by_pid(owner as u32)
+                    .map(|t| {
+                        let st = t.state();
+                        !st.is_dead() && !st.contains(crate::process::task::TaskState::ZOMBIE)
+                    })
+                    .unwrap_or(false);
+                if owner > 0 && owner != cur && owner_live {
+                    static DEFER_REPORTS: AtomicUsize = AtomicUsize::new(0);
+                    if DEFER_REPORTS.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 8 {
+                        crate::pr_warn!(
+                            "MM-DROP-CTX: mm root={:#x} owner pid={} still alive, dropped in pid={} context",
+                            self.pgd, owner, cur
+                        );
+                    }
+                }
+            }
+
             unsafe {
                 crate::arch::mm::free_user_page_tables(self.pgd);
             }

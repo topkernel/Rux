@@ -329,6 +329,13 @@ fn try_to_unmap_inner(page: &Page, swap_entry: u64) -> i32 {
 
     let unmapped_count = Cell::new(0i32);
 
+    // mm-teardown vs spinlocks: for_each_task holds pid-hash bucket locks
+    // across the callback; an mm Arc dropped there could be the LAST
+    // reference, running the page-table teardown (which may schedule an
+    // RCU grace-period wait) under the spinlock. Collect the pinned Arcs
+    // under the locks (moved into the vector — never dropped there), then
+    // walk them with no locks held. RefCell: the walker takes F: Fn.
+    let mm_pins = Cell::new(Vec::<alloc::sync::Arc<crate::mm::mm_struct::MmStruct>>::new());
     crate::sched::for_each_task(|task_ptr| {
         // SAFETY: for_each_task provides valid task pointers; the task struct
         // is protected by the task list lock inside for_each_task.
@@ -338,12 +345,23 @@ fn try_to_unmap_inner(page: &Page, swap_entry: u64) -> i32 {
             // Skip tasks without an address space (kernel threads)
             // R25-2: PIN the address space — do_exit's set_address_space(None)
             // + Drop(MmStruct) free the page tables without the VMA lock;
-            // a raw borrow raced that free (NEW2-shaped UAF-read).
-            let _mm_arc = match task.address_space_arc() {
-                Some(a) => a,
-                None => return,
-            };
-            let mm = _mm_arc.as_ref();
+            // a raw borrow raced that free (NEW2-shaped UAF-read). The
+            // clone is mm-slot-lock serialized (cannot resurrect a freed
+            // Arc).
+            if let Some(mm_arc) = task.address_space_arc() {
+                let mut pins = mm_pins.take();
+                pins.push(mm_arc);
+                mm_pins.set(pins);
+            }
+        }
+    });
+
+    for mm_arc in mm_pins.take() {
+        // SAFETY: the Arc pins this mm (page tables and VMA tree stay
+        // allocated); the PTE walk/mutation below follows the same
+        // discipline the old closure body used.
+        unsafe {
+        let mm = mm_arc.as_ref();
 
             for target_vaddr in target_vaddrs.iter() {
                 let target_vaddr = *target_vaddr;
@@ -430,7 +448,7 @@ crate::mm::flush_tlb_page_local(target_vaddr as u64);
                 }
             }
         }
-    });
+    }
 
     unmapped_count.get()
 }

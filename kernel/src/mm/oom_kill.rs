@@ -85,15 +85,21 @@ impl OomControl {
 /// Higher score = more likely to be killed.
 pub fn oom_badness(task: &Task, totalpages: u64) -> u64 {
     // Skip kernel threads (no address space)
-    // R25-2 pattern: PIN the mm — the pid-hash bucket lock held by our
-    // caller does not stop a concurrent do_exit → exit_mm on another CPU
-    // from dropping the last mm reference (Drop frees the page tables).
+    // R25-2 pattern: PIN the mm — a concurrent do_exit → exit_mm on
+    // another CPU can drop the last mm reference (Drop frees the page
+    // tables). The clone is mm-slot-lock serialized, so it cannot
+    // resurrect a freed Arc.
+    // NOTE: this Arc's DROP must stay OUTSIDE pid-hash bucket locks (a
+    // last-reference drop runs the mm teardown, which may schedule).
     let mm_arc = match task.address_space_arc() {
         Some(a) => a,
         None => return 0,
     };
-    let mm = mm_arc.as_ref();
+    oom_badness_mm(task, mm_arc.as_ref(), totalpages)
+}
 
+/// Score with a pre-pinned mm (caller holds the Arc reference).
+fn oom_badness_mm(task: &Task, mm: &crate::mm::mm_struct::MmStruct, totalpages: u64) -> u64 {
     // Skip if MMF_OOM_DISABLE is set
     if mm.has_flag(MmFlags::MMF_OOM_DISABLE) {
         return 0;
@@ -138,9 +144,19 @@ pub fn oom_badness(task: &Task, totalpages: u64) -> u64 {
 /// Following Linux's select_bad_process() in mm/oom_kill.c.
 /// Iterates all tasks via PID hash table and picks the one with
 /// the highest oom_badness() score.
+///
+/// Two phases (mm teardown vs spinlocks): the pid-hash bucket lock is
+/// held across the walk, but a last-reference mm Arc drop now runs the
+/// full page-table teardown (which may schedule an RCU grace-period
+/// wait) — illegal under a spinlock. Phase 1 collects (pid, mm Arc)
+/// pairs under the bucket locks (the Arc is MOVED into the vector, never
+/// dropped there); phase 2 scores each candidate with no locks held.
 fn select_bad_process(oc: &mut OomControl) {
-    use crate::process::pid_hash::pid_hash_for_each_task;
+    use crate::process::pid_hash::{pid_hash_for_each_task, pid_hash_lookup_pinned};
 
+    // Phase 1: bucket-locked collection with the cheap per-task filters.
+    let mut candidates: alloc::vec::Vec<(u32, alloc::sync::Arc<crate::mm::mm_struct::MmStruct>)> =
+        alloc::vec::Vec::new();
     pid_hash_for_each_task(|task_ptr| unsafe {
         let task = &*task_ptr;
 
@@ -171,17 +187,48 @@ fn select_bad_process(oc: &mut OomControl) {
             return;
         }
 
-        let points = oom_badness(task, oc.totalpages);
-        if points == 0 {
-            return;
-        }
-
-        if points > oc.chosen_points {
-            oc.chosen = Some(task_ptr);
-            oc.chosen_pid = pid;
-            oc.chosen_points = points;
+        // Pin the mm (R25-2): moved into the vector — NOT dropped under
+        // the bucket lock.
+        match task.address_space_arc() {
+            Some(mm) => candidates.push((pid, mm)),
+            None => return,
         }
     });
+
+    // Phase 2: score outside every lock. The Task may have exited between
+    // the phases — re-resolve by pid (pinned) and skip stale entries;
+    // task-side fields (oom_score_adj, state) are read through the pin.
+    for (pid, mm_arc) in candidates {
+        let tp = pid_hash_lookup_pinned(pid);
+        if tp.is_null() {
+            continue;
+        }
+        let points = unsafe {
+            let task = &*tp;
+            // Exited while we were collecting: not a kill candidate.
+            let state = task.state();
+            if state == TaskState::new(TaskState::ZOMBIE) || state == TaskState::new(TaskState::DEAD) {
+                0
+            } else {
+                oom_badness_mm(task, mm_arc.as_ref(), oc.totalpages)
+            }
+        };
+        crate::process::task::Task::task_put(tp);
+
+        if points > oc.chosen_points {
+            // Re-resolve the winner as a raw pointer for the (existing)
+            // pin-verify in oom_kill_process — same discipline as before:
+            // the pointer crosses an unlocked window and is re-validated
+            // there by (pid, pointer) identity.
+            let winner = pid_hash_lookup_pinned(pid);
+            if !winner.is_null() {
+                oc.chosen = Some(winner);
+                oc.chosen_pid = pid;
+                oc.chosen_points = points;
+                crate::process::task::Task::task_put(winner);
+            }
+        }
+    }
 }
 
 // ==================== oom_kill_process ====================
@@ -235,9 +282,12 @@ fn oom_kill_process(oc: &mut OomControl) {
 
         // Step 2: Kill all processes sharing victim's mm (different thread groups).
         // Compare AddressSpace raw pointers to detect mm sharing.
-        // R25-2 pattern: clone the mm Arc — the bucket lock taken by the
-        // iteration below does not stop a concurrent do_exit → exit_mm
-        // from dropping the last reference to this mm.
+        // R25-2 pattern: the victim's mm Arc is cloned OUTSIDE the bucket
+        // lock (its drop may be a last-reference teardown — schedulable,
+        // never under a spinlock). The scan side only needs identity
+        // comparison, so it PEEKS the slot under the mm-slot lock without
+        // a reference: no Arc is cloned or dropped inside the bucket
+        // lock, and the pinned victim Arc makes the comparison ABA-free.
         let victim_mm_ptr = (*victim).address_space_arc()
             .map(|mm| mm.as_ref() as *const _ as usize);
         if let Some(mm_ptr) = victim_mm_ptr {
@@ -246,8 +296,8 @@ fn oom_kill_process(oc: &mut OomControl) {
                 if t.pid() == victim_pid {
                     return; // Skip the victim itself
                 }
-                let their_mm_ptr = t.address_space_arc()
-                    .map(|mm| mm.as_ref() as *const _ as usize);
+                let their_mm_ptr = t.mm_ptr_peek()
+                    .map(|mm| mm as usize);
                 if let Some(their_ptr) = their_mm_ptr {
                     if their_ptr == mm_ptr {
                         // Same mm, different task — kill it too

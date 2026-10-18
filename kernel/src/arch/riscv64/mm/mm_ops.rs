@@ -1110,6 +1110,27 @@ impl PageTableWalker {
         let vpn1 = virt_addr.vpn(1) as usize;
         let vpn0 = virt_addr.vpn(0) as usize;
 
+        // Root guard (x86_64 twin): a caller whose mm was freed under it
+        // (unpinned procfs borrow) feeds a garbage root ppn — bail with a
+        // bounded forensic line instead of dying in phys_to_virt OVERFLOW.
+        {
+            let root_pa = user_root_ppn << PAGE_SHIFT;
+            if crate::mm::page_desc::descs_published()
+                && root_pa != 0
+                && !crate::mm::phys_valid(root_pa as usize)
+            {
+                static ROOT_STALE: core::sync::atomic::AtomicUsize =
+                    core::sync::atomic::AtomicUsize::new(0);
+                if ROOT_STALE.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 8 {
+                    crate::pr_err!(
+                        "PT-WALK-STALE: root={:#x} va={:#x} ROOT phys {:#x} off-machine, pid={}",
+                        user_root_ppn, virt, root_pa,
+                        crate::sched::get_current_pid()
+                    );
+                }
+                return None;
+            }
+        }
         let root_table = get_page_table_virt(user_root_ppn << PAGE_SHIFT);
 
         let pte2 = (*root_table).get(vpn2);
@@ -1123,6 +1144,26 @@ impl PageTableWalker {
             let phys_base = pte2.ppn() << PAGE_SHIFT;
             let ppn = (phys_base + offset) >> PAGE_SHIFT;
             return Some((ppn, pte2.bits()));
+        }
+
+        // Stale-intermediate guard (x86_64 twin: exitwalk probe — a walker
+        // reaching an intermediate entry whose target is not machine
+        // memory is walking a freed/recycled frame; bail with a bounded
+        // forensic line instead of feeding garbage to get_page_table_virt).
+        {
+            let pa = pte2.ppn() << PAGE_SHIFT;
+            if crate::mm::page_desc::descs_published() && pa != 0 && !crate::mm::phys_valid(pa as usize) {
+                static WALK_STALE: core::sync::atomic::AtomicUsize =
+                    core::sync::atomic::AtomicUsize::new(0);
+                if WALK_STALE.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 8 {
+                    crate::pr_err!(
+                        "PT-WALK-STALE: root={:#x} va={:#x} lvl=2 pte={:#x} -> phys {:#x} off-machine, pid={}",
+                        user_root_ppn, virt, pte2.bits(), pa,
+                        crate::sched::get_current_pid()
+                    );
+                }
+                return None;
+            }
         }
 
         let ppn1 = pte2.ppn();
@@ -1144,6 +1185,23 @@ impl PageTableWalker {
             let ppn_4kb = phys_addr >> PAGE_SHIFT;
 
             return Some((ppn_4kb, pte1.bits()));
+        }
+
+        // Stale-intermediate guard (see the lvl=2 note above).
+        {
+            let pa = pte1.ppn() << PAGE_SHIFT;
+            if crate::mm::page_desc::descs_published() && pa != 0 && !crate::mm::phys_valid(pa as usize) {
+                static WALK_STALE1: core::sync::atomic::AtomicUsize =
+                    core::sync::atomic::AtomicUsize::new(0);
+                if WALK_STALE1.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 8 {
+                    crate::pr_err!(
+                        "PT-WALK-STALE: root={:#x} va={:#x} lvl=1 pte={:#x} -> phys {:#x} off-machine, pid={}",
+                        user_root_ppn, virt, pte1.bits(), pa,
+                        crate::sched::get_current_pid()
+                    );
+                }
+                return None;
+            }
         }
 
         let ppn0 = pte1.ppn();

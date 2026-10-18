@@ -28,6 +28,7 @@ pub mod hugepage;
 pub mod vmemmap;
 pub mod swap;
 pub mod compact;
+pub mod deferred_free;
 pub mod vdso;
 
 // pcp.rs (per-CPU pages) REMOVED (wave-6, review 4.6 / batch-4 S3): the

@@ -509,6 +509,10 @@ impl PtLedger {
             // freed. If the freeing context is NOT the registered owner and
             // the owner task is still alive, another mm shared this root (or
             // the tree was torn down out from under its live owner).
+            // The registry entry is CONSUMED on the first root free of this
+            // frame — the frame returns to the allocator and its next
+            // incarnation as a fork root gets a fresh registration; a stale
+            // entry turns every recycled root into a false-positive witness.
             if site == "root" {
                 for k in 0..FORK_ROOTS.len() {
                     let r = FORK_ROOTS[k].root.load(Relaxed);
@@ -524,6 +528,7 @@ impl PtLedger {
                                 );
                             }
                         }
+                        FORK_ROOTS[k].root.store(0, Relaxed);
                         break;
                     }
                 }
@@ -634,7 +639,15 @@ fn task_pid_alive(pid: u32) -> bool {
     let alive = core::sync::atomic::AtomicBool::new(false);
     crate::sched::for_each_task(|t| unsafe {
         if (*t).pid() as u32 == pid {
-            alive.store(true, core::sync::atomic::Ordering::Relaxed);
+            // ZOMBIE/DEAD tasks have already dropped their mm at do_exit —
+            // they stay in the pid hash until reaped but are NOT live
+            // owners. Counting them made the EARLY-ROOT-FREE witness fire
+            // on recycled root frames (stale registry entry + unreaped
+            // zombie owner) — the exitwalk probe tripped it within seconds.
+            let st = (*t).state();
+            if !st.is_dead() && !st.contains(crate::process::task::TaskState::ZOMBIE) {
+                alive.store(true, core::sync::atomic::Ordering::Relaxed);
+            }
         }
     });
     alive.load(core::sync::atomic::Ordering::Relaxed)

@@ -691,6 +691,22 @@ pub struct Task {
     /// Scheduler will use this PtRegs to restore child state
     fork_pt_regs: core::sync::atomic::AtomicU64,
 
+    /// mm-slot lock — serializes the `address_space` Option<Arc> swap in
+    /// set_address_space (exec / exit_mm / fork install) against foreign
+    /// readers cloning the Arc (address_space_arc: ptrace, OOM scan, rmap,
+    /// futex identity, taskdump). Without it a reader could load the Arc
+    /// pointer, the owner's exit drop the last reference (freeing the
+    /// MmStruct), and the reader's clone then resurrect freed memory with
+    /// a garbage refcount — the resurrected Arc's later drop runs
+    /// MmStruct::drop a SECOND time (the FUT-STALE / PTLEDGER
+    /// DOUBLE-FREE root-sharing family, fs-writestorm KVM round: pid 555
+    /// freed root 0x62961, pid 554 re-walked it and #GP'd in the VMA
+    /// btree). irqsave: trap/panic-context readers exist (riscv64 trap
+    /// printer). Leaf lock: never taken while holding other locks, and
+    /// the old Arc is dropped AFTER the unlock (its Drop may run the
+    /// whole page-table teardown).
+    mm_slot_lock: Spinlock<()>,
+
     /// Address space (mm_struct)
     /// None for kernel threads, Some for user processes
     /// Use Arc for CLONE_VM sharing between threads
@@ -1134,6 +1150,7 @@ impl Task {
             is_fork_child: core::sync::atomic::AtomicBool::new(false),
             fork_pt_regs: core::sync::atomic::AtomicU64::new(0),
             address_space: None,
+            mm_slot_lock: Spinlock::new(()),
             active_mm: None,
             thread: crate::arch::thread::ThreadStruct::new(),
             fdtable,
@@ -1424,8 +1441,32 @@ impl Task {
             None,
         );
         ptr::write(
+            (ptr as usize + offset_of!(Task, mm_slot_lock)) as *mut Spinlock<()>,
+            Spinlock::new(()),
+        );
+        ptr::write(
             (ptr as usize + offset_of!(Task, active_mm)) as *mut Option<*const AddressSpace>,
             None,
+        );
+        // Teardown-race guard (mm/deferred_free.rs): procfs walkers borrow
+        // the TASK unpinned (find_task_by_pid); the reaper on another CPU
+        // can free it mid-read. free_task_slot poisons the page before
+        // dealloc, so a time-deferred free leaves late readers looking at
+        // poison values (checked by the is_plausible_task_ptr guard
+        // family) instead of heap-reuse garbage pointers (the walker #GP
+        // family).
+        crate::mm::deferred_free::register_deferred_size(core::mem::size_of::<Task>());
+        // The walker path's other unpinned Arc borrows — fdtable
+        // (generate_maps resolves file paths per VMA) and the shared
+        // signal struct (generate_status reads ign/cgt masks) — get the
+        // same 250ms hold: sizes are the ArcInner block (2 refcount
+        // words) + the struct. Registered from here (types are pub,
+        // constructors live in fs//signal — outside the mm lane).
+        crate::mm::deferred_free::register_deferred_size(
+            2 * core::mem::size_of::<usize>() + core::mem::size_of::<crate::fs::file::FdTable>(),
+        );
+        crate::mm::deferred_free::register_deferred_size(
+            2 * core::mem::size_of::<usize>() + core::mem::size_of::<crate::signal::SignalStruct>(),
         );
         // Note: thread field already initialized above with ra=cpu_idle_loop;
         // do NOT reinitialize here or the entry point will be zeroed.
@@ -1893,8 +1934,32 @@ impl Task {
             None,
         );
         ptr::write(
+            (ptr as usize + offset_of!(Task, mm_slot_lock)) as *mut Spinlock<()>,
+            Spinlock::new(()),
+        );
+        ptr::write(
             (ptr as usize + offset_of!(Task, active_mm)) as *mut Option<*const AddressSpace>,
             None,
+        );
+        // Teardown-race guard (mm/deferred_free.rs): procfs walkers borrow
+        // the TASK unpinned (find_task_by_pid); the reaper on another CPU
+        // can free it mid-read. free_task_slot poisons the page before
+        // dealloc, so a time-deferred free leaves late readers looking at
+        // poison values (checked by the is_plausible_task_ptr guard
+        // family) instead of heap-reuse garbage pointers (the walker #GP
+        // family).
+        crate::mm::deferred_free::register_deferred_size(core::mem::size_of::<Task>());
+        // The walker path's other unpinned Arc borrows — fdtable
+        // (generate_maps resolves file paths per VMA) and the shared
+        // signal struct (generate_status reads ign/cgt masks) — get the
+        // same 250ms hold: sizes are the ArcInner block (2 refcount
+        // words) + the struct. Registered from here (types are pub,
+        // constructors live in fs//signal — outside the mm lane).
+        crate::mm::deferred_free::register_deferred_size(
+            2 * core::mem::size_of::<usize>() + core::mem::size_of::<crate::fs::file::FdTable>(),
+        );
+        crate::mm::deferred_free::register_deferred_size(
+            2 * core::mem::size_of::<usize>() + core::mem::size_of::<crate::signal::SignalStruct>(),
         );
         ptr::write(
             (ptr as usize + offset_of!(Task, thread)) as *mut crate::arch::thread::ThreadStruct,
@@ -2889,25 +2954,74 @@ impl Task {
         self.address_space.as_ref().map(|arc| arc.as_ref())
     }
 
-    /// Get reference to address space
+    /// Get reference to address space.
+    ///
+    /// CURRENT-task use only: the running task holds its own Arc, and only
+    /// its own exit/exec (same context) can drop it. For a FOREIGN task
+    /// the borrow is unaccounted — the target's exit_mm can free the
+    /// MmStruct (and its VMA btree) mid-walk (the /proc maps #GP family).
+    /// Foreign readers must use [`Task::address_space_arc`] (refcounted
+    /// pin) or [`Task::mm_ptr_peek`] (identity compare only).
     pub fn address_space(&self) -> Option<&AddressSpace> {
         self.address_space.as_ref().map(|arc| arc.as_ref())
     }
 
-    /// Set address space
+    /// Set address space.
+    ///
+    /// The slot swap runs under `mm_slot_lock` so a concurrent
+    /// `address_space_arc()` on another CPU either clones the OLD Arc
+    /// before our swap (it then holds a real reference — our drop of the
+    /// old Arc cannot free the mm) or observes the new value. The old
+    /// Arc is dropped AFTER releasing the lock: its Drop may run the
+    /// full page-table teardown (synchronize_rcu + free_user_page_tables)
+    /// and must never run under this (irqsave) spinlock.
     pub fn set_address_space(&mut self, addr_space: Option<alloc::sync::Arc<AddressSpace>>) {
-        // Update active_mm pointer
-        if let Some(ref aspace) = addr_space {
-            self.active_mm = Some(aspace.as_ref() as *const AddressSpace);
-        } else {
-            self.active_mm = None;
-        }
-        self.address_space = addr_space;
+        let old = {
+            let _g = self.mm_slot_lock.lock_irqsave();
+            // Update active_mm pointer (raw borrow mirror of the slot)
+            // inside the same critical section.
+            self.active_mm = addr_space.as_ref().map(|a| a.as_ref() as *const AddressSpace);
+            // Teardown-context attribution (FUT-STALE family): the task
+            // installing this mm is its owner; MmStruct::drop compares it
+            // against the dropping context to witness deferred teardowns.
+            if let Some(ref a) = addr_space {
+                a.set_owner_pid(self.pid() as i32);
+            }
+            core::mem::replace(&mut self.address_space, addr_space)
+        };
+        // Refcount drop (possible last-reference teardown) outside the lock.
+        drop(old);
     }
 
-    /// Get Arc reference to address space (for CLONE_VM)
+    /// Get Arc reference to address space (for CLONE_VM / foreign-task mm
+    /// pinning).
+    ///
+    /// The clone runs under `mm_slot_lock`, making it race-free against a
+    /// concurrent `set_address_space` on the owner CPU: an Arc clone can
+    /// no longer land on a slot whose last reference was just dropped
+    /// (the resurrected-Arc double-teardown engine). While the returned
+    /// Arc is held, the MmStruct, its VMA tree and its page tables cannot
+    /// be freed.
+    ///
+    /// NOTE: the returned Arc's DROP must not happen while holding a
+    /// spinlock — if it is the last reference, MmStruct::drop runs the
+    /// page-table teardown, which may schedule (grace-period wait).
     pub fn address_space_arc(&self) -> Option<alloc::sync::Arc<AddressSpace>> {
+        let _g = self.mm_slot_lock.lock_irqsave();
         self.address_space.clone()
+    }
+
+    /// Peek the mm Arc's address WITHOUT taking a reference (identity
+    /// comparison only — never dereference the result).
+    ///
+    /// For pid-hash bucket-locked scans (OOM sibling search) where an Arc
+    /// clone would be dropped under the bucket spinlock: a last-reference
+    /// drop there would run the mm teardown under a lock. Comparing raw
+    /// Arc addresses is ABA-safe when the other side of the comparison is
+    /// a live, refcount-pinned Arc.
+    pub fn mm_ptr_peek(&self) -> Option<*const AddressSpace> {
+        let _g = self.mm_slot_lock.lock_irqsave();
+        self.address_space.as_ref().map(|a| a.as_ref() as *const AddressSpace)
     }
 
     /// Get active address space (for kernel threads, this is borrowed address space)
