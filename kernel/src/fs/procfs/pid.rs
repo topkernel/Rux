@@ -131,14 +131,46 @@ fn task_comm(task: &crate::process::Task) -> alloc::borrow::Cow<'_, str> {
     alloc::borrow::Cow::Borrowed(&s[..len])
 }
 
+
+/// Pinned foreign-task guard for procfs generators: the /proc walkers hold
+/// raw &Task/&MmStruct borrows across multi-line (sometimes multi-second)
+/// reads; a concurrent exit frees that memory under the walker (the
+/// exitwalk #GP family). The guard pins the task slot (reaper cannot free
+/// while pinned) and releases on scope end — including every early return.
+struct PinnedTask {
+    ptr: *mut crate::process::task::Task,
+}
+impl PinnedTask {
+    fn lookup(pid: u32) -> Option<PinnedTask> {
+        let p = crate::process::pid_hash::pid_hash_lookup_pinned(pid);
+        if p.is_null() { None } else { Some(PinnedTask { ptr: p }) }
+    }
+    fn get(&mut self) -> &'static mut crate::process::task::Task {
+        // SAFETY: pinned at construction; released only in Drop. The
+        // 'static lifetime mirrors find_task_by_pid's contract — the pin
+        // extends the slot's validity for the whole borrow.
+        unsafe { &mut *self.ptr }
+    }
+}
+impl core::ops::Drop for PinnedTask {
+    fn drop(&mut self) {
+        crate::process::task::Task::task_put(self.ptr);
+    }
+}
+
 /// Generate /proc/[pid]/comm content (U2): "<comm>\n".
 pub fn generate_comm(pid: u64) -> Vec<u8> {
     use crate::process::{current_task, current_pid, find_task_by_pid};
 
+    let mut pinned;
     let task = if current_pid() as u64 == pid {
         current_task()
     } else {
-        find_task_by_pid(pid as u32)
+        pinned = match PinnedTask::lookup(pid as u32) {
+            Some(mut g) => g,
+            None => return Vec::new(),
+        };
+        Some(pinned.get())
     };
 
     match task {
@@ -167,10 +199,15 @@ pub fn generate_status(pid: u64) -> Vec<u8> {
     let mut content = String::new();
 
     // Try to get task info
+    let mut pinned;
     let task = if current_pid() as u64 == pid {
         current_task()
     } else {
-        find_task_by_pid(pid as u32)
+        pinned = match PinnedTask::lookup(pid as u32) {
+            Some(mut g) => g,
+            None => return Vec::new(),
+        };
+        Some(pinned.get())
     };
 
     let task = match task {
@@ -207,7 +244,7 @@ pub fn generate_status(pid: u64) -> Vec<u8> {
     // VmLck back). The old hardcoded zeros made every Vm* report 0 kB.
     let (vm_size_kb, vm_rss_kb, vm_lck_kb) = {
         let page_kb = (crate::mm::page::PAGE_SIZE / 1024) as u64;
-        let aspace = task.address_space();
+        let aspace = task.address_space_arc();
         let (total, rss) = match &aspace {
             Some(a) => (a.total_vm(), a.rss()),
             None => (0, 0),
@@ -374,10 +411,15 @@ pub fn environ_access_allowed(pid: u64) -> bool {
 pub fn generate_cmdline(pid: u64) -> Vec<u8> {
     use crate::process::{current_task, current_pid, find_task_by_pid};
 
+    let mut pinned;
     let task = if current_pid() as u64 == pid {
         current_task()
     } else {
-        find_task_by_pid(pid as u32)
+        pinned = match PinnedTask::lookup(pid as u32) {
+            Some(mut g) => g,
+            None => return Vec::new(),
+        };
+        Some(pinned.get())
     };
 
     let task = match task {
@@ -385,7 +427,7 @@ pub fn generate_cmdline(pid: u64) -> Vec<u8> {
         None => return Vec::new(),
     };
 
-    let addr_space = match task.address_space() {
+    let addr_space = match task.address_space_arc() {
         Some(a) => a,
         None => return Vec::new(),
     };
@@ -407,16 +449,21 @@ pub fn generate_cmdline(pid: u64) -> Vec<u8> {
 pub fn generate_stat(pid: u64) -> Vec<u8> {
     use crate::process::{current_task, current_pid, find_task_by_pid};
 
+    let mut pinned;
     let task = if current_pid() as u64 == pid {
         current_task()
     } else {
-        find_task_by_pid(pid as u32)
+        pinned = match PinnedTask::lookup(pid as u32) {
+            Some(mut g) => g,
+            None => return Vec::new(),
+        };
+        Some(pinned.get())
     };
 
     let (name_str, ppid, state_ch, vsize_pages, sig_mask, exit_code, utime, stime, cutime, cstime) = match task {
         Some(t) => {
             let ch = task_state_char(&t) as char;
-            let vsize = t.address_space().map(|mm| mm.total_vm()).unwrap_or(0);
+            let vsize = t.address_space_arc().map(|mm| mm.total_vm()).unwrap_or(0);
             let sigmask = t.sigmask;
             let ec = t.exit_code();
             use core::sync::atomic::Ordering::Relaxed;
@@ -515,10 +562,15 @@ pub fn generate_environ(pid: u64) -> Vec<u8> {
         return Vec::new();
     }
 
+    let mut pinned;
     let task = if current_pid() as u64 == pid {
         current_task()
     } else {
-        find_task_by_pid(pid as u32)
+        pinned = match PinnedTask::lookup(pid as u32) {
+            Some(mut g) => g,
+            None => return Vec::new(),
+        };
+        Some(pinned.get())
     };
 
     let task = match task {
@@ -526,7 +578,7 @@ pub fn generate_environ(pid: u64) -> Vec<u8> {
         None => return Vec::new(),
     };
 
-    let addr_space = match task.address_space() {
+    let addr_space = match task.address_space_arc() {
         Some(a) => a,
         None => return Vec::new(),
     };
@@ -559,7 +611,7 @@ pub fn generate_smaps(pid: u64) -> Vec<u8> {
         Some(t) => t,
         None => return maps,
     };
-    let addr_space = match task.address_space() {
+    let addr_space = match task.address_space_arc() {
         Some(a) => a,
         None => return maps,
     };
@@ -649,10 +701,15 @@ pub fn generate_maps(pid: u64) -> Vec<u8> {
     use crate::process::{current_task, current_pid, find_task_by_pid};
     use crate::mm::vma::{VmaFlags, VmaType};
 
+    let mut pinned;
     let task = if current_pid() as u64 == pid {
         current_task()
     } else {
-        find_task_by_pid(pid as u32)
+        pinned = match PinnedTask::lookup(pid as u32) {
+            Some(mut g) => g,
+            None => return Vec::new(),
+        };
+        Some(pinned.get())
     };
 
     let task = match task {
@@ -660,7 +717,7 @@ pub fn generate_maps(pid: u64) -> Vec<u8> {
         None => return Vec::new(),
     };
 
-    let addr_space = match task.address_space() {
+    let addr_space = match task.address_space_arc() {
         Some(a) => a,
         None => return Vec::new(),
     };
@@ -693,7 +750,14 @@ pub fn generate_maps(pid: u64) -> Vec<u8> {
             let fd = vma.file_fd();
             if fd >= 0 {
                 // Look up file from fdtable to get path and inode
-                match unsafe { task.fdtable().get_file(fd as usize) } {
+                // A pinned-but-exiting task may have torn its fdtable
+                // down already; maps paths then show no path (Linux
+                // shows the empty path for such VMAs too).
+                let file = match task.try_fdtable() {
+                    Some(ft) => unsafe { ft.get_file(fd as usize) },
+                    None => None,
+                };
+                match file {
                     Some(file) => {
                         let dentry_opt = unsafe { &*file.dentry.get() };
                         match dentry_opt {
