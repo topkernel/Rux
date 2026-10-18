@@ -89,23 +89,49 @@ fn alloc_pages_inner(gfp_flags: GfpFlags, order: usize) -> usize {
                 // page cache first, then anonymous pages to swap) and retry.
                 // Skipped for GFP_ATOMIC (IRQ contexts must not block on I/O)
                 // and while already inside reclaim (PF_MEMALLOC equivalent).
-                if gfp_flags.0 & GfpFlags::GFP_ATOMIC.0 == 0
-                    && IN_DIRECT_RECLAIM
-                        .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
-                        .is_ok()
-                {
-                    for _ in 0..8 {
-                        let freed = super::vmscan::try_to_free_pages(order as i32);
+                if gfp_flags.0 & GfpFlags::GFP_ATOMIC.0 == 0 {
+                    // GATE CONTENTION (the at-cap crawl): the gate used to be
+                    // take-it-or-skip — when another task was mid-reclaim,
+                    // THIS allocation skipped reclaim entirely and could
+                    // return 0 while the reclaimer was freeing a 32-page
+                    // batch (page-cache inserts bailed mid-batch, faults
+                    // OOM-killed loaders; faultlat3 at-cap: 10-20 s single-
+                    // page stalls). Wait for the gate instead: retry the
+                    // fastpath (the reclaimer's freed pages may already
+                    // cover us) and yield the CPU between attempts so the
+                    // reclaimer and kswapd actually run. Bounded — a stuck
+                    // holder falls through to the old skip path.
+                    let mut gate_attempts = 0u32;
+                    let mut held_gate = false;
+                    while gate_attempts < 64 {
+                        if IN_DIRECT_RECLAIM
+                            .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
+                            .is_ok()
+                        {
+                            held_gate = true;
+                            break;
+                        }
                         if let Some(pfn) = zone.alloc_pages(order) {
                             ZONE_ALLOCS.fetch_add(1, Ordering::Relaxed);
-                            IN_DIRECT_RECLAIM.store(0, Ordering::Release);
                             return pfn_to_phys(pfn);
                         }
-                        if freed == 0 {
-                            break; // no progress — do not spin
-                        }
+                        crate::sched::yield_cpu();
+                        gate_attempts += 1;
                     }
-                    IN_DIRECT_RECLAIM.store(0, Ordering::Release);
+                    if held_gate {
+                        for _ in 0..8 {
+                            let freed = super::vmscan::try_to_free_pages(order as i32);
+                            if let Some(pfn) = zone.alloc_pages(order) {
+                                ZONE_ALLOCS.fetch_add(1, Ordering::Relaxed);
+                                IN_DIRECT_RECLAIM.store(0, Ordering::Release);
+                                return pfn_to_phys(pfn);
+                            }
+                            if freed == 0 {
+                                break; // no progress — do not spin
+                            }
+                        }
+                        IN_DIRECT_RECLAIM.store(0, Ordering::Release);
+                    }
                 }
 
                 // High-order allocation failed: try compaction to reduce fragmentation

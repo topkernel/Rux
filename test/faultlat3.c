@@ -95,16 +95,19 @@ static void loader_child(int idx) {
     size_t npages = (size_t)st.st_size / 4096;
     unsigned long long acc = 0;
     unsigned long mx = 0;
+    long long t_start = now_us(), t_first = -1;
     for (size_t i = 0; i < npages; i++) {
         long long t0 = now_us();
         sink += p[i * 4096];
         unsigned long dt = (unsigned long)(now_us() - t0);
+        if (t_first < 0) t_first = now_us() - t_start;
         acc += dt;
         if (dt > mx) mx = dt;
     }
     putsu_("FAULTLAT3 loader ", (unsigned long)idx);
     putsu_(" pages=", npages);
-    putsu_(" avg=", (unsigned long)(acc / npages));
+    putsu_(" first-took=", (unsigned long)t_first);
+    putsu_("us avg=", (unsigned long)(acc / npages));
     putsu_("us max=", mx);
     puts_("us\n");
     _exit(0);
@@ -171,8 +174,16 @@ int main(void) {
      * floor for small files. Per-loader avg/max lines above carry the
      * precise per-page numbers. */
     {
-        unsigned long npages = (unsigned long)LOAD_MB * 256;
-        unsigned long slow_ms = 2 * npages;
+        /* npages comes from stat, not the compile-time LOAD_MB (the boot
+         * driver can stage larger files): 2 ms/page across the loader set
+         * is SLOW, with a 15 s floor for small files. */
+        size_t probe_pages = 0;
+        struct stat pst;
+        int pfd = open("/test/l0.bin", O_RDONLY);
+        if (pfd >= 0 && fstat(pfd, &pst) == 0) probe_pages = pst.st_size / 4096;
+        if (pfd >= 0) close(pfd);
+        if (probe_pages == 0) probe_pages = (size_t)LOAD_MB * 256;
+        unsigned long slow_ms = 2UL * (unsigned long)probe_pages;
         if (slow_ms < 15000) slow_ms = 15000;
         if (wall > slow_ms) puts_("FAULTLAT3 RESULT: SLOW wall_ms=");
         else puts_("FAULTLAT3 RESULT: FAST wall_ms=");
