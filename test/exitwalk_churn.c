@@ -61,8 +61,12 @@
 #define SMAPS_EVERY 7
 #endif
 
+#ifndef NSPAWNERS
 #define NSPAWNERS 2
+#endif
+#ifndef NWALKERS
 #define NWALKERS  2
+#endif
 
 #define CHURN_FILE "/test/exitwalk-churn.file"
 
@@ -396,6 +400,7 @@ int main(void)
         procs[nprocs++] = p;
         dprintf(2, "EXITWALK-ACTOR role=spawner%d pid=%d\n", i, p);
     }
+#if NWALKERS > 0
     for (i = 0; i < NWALKERS; i++) {
         pid_t p = fork();
         if (p == 0)
@@ -403,6 +408,7 @@ int main(void)
         procs[nprocs++] = p;
         dprintf(2, "EXITWALK-ACTOR role=walker%d pid=%d\n", i, p);
     }
+#endif
     {
         pid_t p = fork();
         if (p == 0)
@@ -426,7 +432,7 @@ int main(void)
                         p2 = fork();
                         if (p2 == 0)
                             spawner_main(j);
-                    } else if (j < NSPAWNERS + NWALKERS) {
+                    } else if (j < NSPAWNERS + NWALKERS && NWALKERS > 0) {
                         p2 = fork();
                         if (p2 == 0)
                             walker_main(j - NSPAWNERS);

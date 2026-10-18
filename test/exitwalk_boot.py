@@ -69,6 +69,8 @@ def main():
                     help="kvm (default; falls back to tcg) or tcg")
     ap.add_argument("--churn-delay-us", default="0",
                     help="per-spawner pacing in us (0 = pathological rate)")
+    ap.add_argument("--nwalkers", default="2",
+                    help="0 = churn-only mode (no /proc readers)")
     ap.add_argument("--smaps-every", default="7",
                     help="smaps every Nth pid (1 = every pid)")
     ap.add_argument("--dfx", default="",
@@ -88,6 +90,7 @@ def main():
                     f"-DPROBE_SECS={args.secs}",
                     f"-DCHURN_DELAY_US={args.churn_delay_us}",
                     f"-DSMAPS_EVERY={args.smaps_every}",
+                    f"-DNWALKERS={args.nwalkers}",
                     "-o", binp, src],
                    check=True, env=env)
 
@@ -115,7 +118,11 @@ def main():
     wedge = None
     forensic = None
     verdict = None
-    logp = os.path.join(WT, "runs", "exitwalk-x86.log")
+    # Unique per-run log: concurrent drivers previously truncated each
+    # other's serial capture (exitwalk-x86.log), crossing results between
+    # runs.
+    logp = os.path.join(WT, "runs",
+                        f"exitwalk-x86-{int(time.time())}-{os.getpid()}.log")
     os.makedirs(os.path.join(WT, "runs"), exist_ok=True)
     logf = open(logp, "wb")
     try:
