@@ -209,9 +209,17 @@ impl MmStruct {
         // Teardown-race guard (mm/deferred_free.rs): register this
         // struct's size class so its heap frees are time-deferred — an
         // unaccounted &MmStruct borrower preempted mid-syscall must not
-        // resume on heap-reused memory. First writer wins; the size is
-        // fixed at compile time so this is idempotent.
-        crate::mm::deferred_free::register_deferred_size(core::mem::size_of::<MmStruct>());
+        // resume on heap-reused memory. The size that matters is the ARC
+        // ALLOCATION's: alloc::sync::Arc<MmStruct> frees a block holding
+        // ArcInner { strong, weak, MmStruct } — 16 bytes of refcount
+        // header before the struct (rounding to the 8-byte header align).
+        // Registering bare size_of::<MmStruct>() matched nothing and the
+        // freed slot was reused as string data within microseconds
+        // (exitwalk: PT-WALK-STALE roots spelled ASCII). First writer
+        // wins; both sizes are compile-time constants, so idempotent.
+        crate::mm::deferred_free::register_deferred_size(
+            (2 * core::mem::size_of::<usize>()) + core::mem::size_of::<MmStruct>(),
+        );
 
         let vma_manager = VmaManager::new();
         let brk_default = if space_type == PageTableType::User {
