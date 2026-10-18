@@ -1112,12 +1112,27 @@ pub fn binder_close(file: &crate::fs::File) -> i32 {
             // Drop our remaining work, releasing buffers and node pins.
             for t in proc.im().threads.clone() {
                 let th = t.st();
-                for wk in th.todo.drain(..) {
+                let queued: Vec<Work> = th.todo.drain(..).collect();
+                for wk in queued {
+                    if let Work::Transaction(x) = &wk {
+                        wake_targets.extend(dead_reply_to_sender(world, &proc, x));
+                    }
                     finish_work(world, &proc, wk);
                 }
-                th.txn_stack.clear();
+                // In-flight txns the thread was processing: their senders
+                // wait for a reply the dying proc can never produce
+                // (Linux binder_release_work / send_failed_reply parity).
+                let in_flight: Vec<Arc<BinderTxn>> = th.txn_stack.drain(..).collect();
+                for x in in_flight {
+                    wake_targets.extend(dead_reply_to_sender(world, &proc, &x));
+                    finish_work(world, &proc, Work::Transaction(x));
+                }
             }
-            for wk in proc.im().todo.drain(..) {
+            let proc_queued: Vec<Work> = proc.im().todo.drain(..).collect();
+            for wk in proc_queued {
+                if let Work::Transaction(x) = &wk {
+                    wake_targets.extend(dead_reply_to_sender(world, &proc, x));
+                }
                 finish_work(world, &proc, wk);
             }
             // Parked oneway transactions on our nodes: their buffers live
@@ -1208,6 +1223,72 @@ unsafe fn unpin_txn_node(world: &World, t: &BinderTxn) {
     }
 }
 
+/// Deliver a BR_DEAD_REPLY to the SENDER of a sync transaction whose
+/// processing side is going away — and drop the txn from the sender's
+/// transaction stack.
+///
+/// Used by the thread-reap and proc-close paths for transactions that
+/// were queued (thread/proc todo) but never read, in addition to the
+/// classic in-flight (txn_stack) case. Without the reply the sender's
+/// BC_TRANSACTION blocks forever, and the stale stack entry keeps
+/// routing that thread's later NESTED sync calls to the dead target
+/// thread (the from-walk in binder_transaction matches on it), so one
+/// exited thread strands every future nested call of the same client
+/// thread too (b139: hdf_devmgr tid 341 exited with txn2053 queued on
+/// its todo; pid 532 tid 685 then sat 124s+ "waiting for reply, 1 txn
+/// stacked" while devmgr idled). Oneway txns never wait for a reply —
+/// no notification, matching Linux binder_release_work.
+///
+/// Returns the procs whose readers must be re-checked for wake-up
+/// AFTER WORLD is released (same contract as binder_reap_thread).
+///
+/// SAFETY: caller holds WORLD.
+unsafe fn dead_reply_to_sender(
+    world: &World,
+    dying: &Arc<BinderProc>,
+    txn: &Arc<BinderTxn>,
+) -> Vec<Arc<BinderProc>> {
+    let mut wakes: Vec<Arc<BinderProc>> = Vec::new();
+    if txn.flags & TF_ONE_WAY != 0 {
+        return wakes; // oneway: nobody is waiting
+    }
+    let Some(fp) = &txn.from_proc else {
+        return wakes;
+    };
+    let same = Arc::ptr_eq(fp, dying);
+    let mut delivered = false;
+    if let Some(ftid) = txn.from_tid {
+        let pool = if same {
+            dying.im().threads.clone()
+        } else {
+            pm(world, fp).im().threads.clone()
+        };
+        if let Some(ft) = pool.into_iter().find(|ct| ct.tid == ftid) {
+            let fth = ft.st();
+            // The call this thread is parked in is dead: unstack the
+            // txn so the from-walk stops routing nested calls to the
+            // vanished target (mirrors the BC_REPLY retain).
+            fth.txn_stack.retain(|t| !Arc::ptr_eq(t, txn));
+            fth.todo.push_back(Work::ReturnError(BR_DEAD_REPLY, 0));
+            fth.process_todo = true;
+            delivered = true;
+        }
+    }
+    if !delivered {
+        if same {
+            dying.im().todo.push_back(Work::ReturnError(BR_DEAD_REPLY, 0));
+        } else {
+            pm(world, fp).im().todo.push_back(Work::ReturnError(BR_DEAD_REPLY, 0));
+        }
+    }
+    if same {
+        wakes.push(dying.clone());
+    } else {
+        wakes.push(fp.clone());
+    }
+    wakes
+}
+
 /// Abort a pool thread's in-flight state and remove it from the pool.
 ///
 /// Shared by BINDER_THREAD_EXIT (musl's clean IPC-thread shutdown) and
@@ -1231,35 +1312,17 @@ unsafe fn binder_reap_thread(
     };
     let th = t.st();
     let mut self_wake = false;
-    for x in th.txn_stack.drain(..) {
+    // Materialize before iterating: dead_reply_to_sender can retain()
+    // the SENDER's txn_stack, which for a self-referencing txn is this
+    // very list — a lazy drain would be mutated mid-iteration.
+    let in_flight: Vec<Arc<BinderTxn>> = th.txn_stack.drain(..).collect();
+    for x in in_flight {
         // Sender wake-up for the never-coming reply.
-        if let Some(fp) = &x.from_proc {
-            let same = Arc::ptr_eq(fp, proc);
-            let mut delivered = false;
-            if let Some(ftid) = x.from_tid {
-                let pool = if same {
-                    proc.im().threads.clone()
-                } else {
-                    pm(world, fp).im().threads.clone()
-                };
-                if let Some(ft) = pool.into_iter().find(|ct| ct.tid == ftid) {
-                    let fth = ft.st();
-                    fth.todo.push_back(Work::ReturnError(BR_DEAD_REPLY, 0));
-                    fth.process_todo = true;
-                    delivered = true;
-                }
-            }
-            if !delivered {
-                if same {
-                    proc.im().todo.push_back(Work::ReturnError(BR_DEAD_REPLY, 0));
-                } else {
-                    pm(world, fp).im().todo.push_back(Work::ReturnError(BR_DEAD_REPLY, 0));
-                }
-            }
-            if same {
+        for fp in dead_reply_to_sender(world, proc, &x) {
+            if Arc::ptr_eq(&fp, proc) {
                 self_wake = true;
             } else {
-                wakes.push(fp.clone());
+                wakes.push(fp);
             }
         }
         // Free the delivered buffer + drop the node pin: an abandoned
@@ -1267,7 +1330,19 @@ unsafe fn binder_reap_thread(
         // (b92 samgr: pinned nodes never reached the 0-refs transition).
         finish_work(world, proc, Work::Transaction(x));
     }
-    for wk in th.todo.drain(..) {
+    let queued: Vec<Work> = th.todo.drain(..).collect();
+    for wk in queued {
+        // QUEUED work was never read: a sync txn's sender still waits
+        // for the reply that now can never come (b139 txn2053 shape).
+        if let Work::Transaction(x) = &wk {
+            for fp in dead_reply_to_sender(world, proc, x) {
+                if Arc::ptr_eq(&fp, proc) {
+                    self_wake = true;
+                } else {
+                    wakes.push(fp);
+                }
+            }
+        }
         finish_work(world, proc, wk);
     }
     proc.im().threads.retain(|ct| ct.tid != tid);
