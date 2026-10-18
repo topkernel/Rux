@@ -758,11 +758,11 @@ fn trace_ioctl(request: u32, ret: i64) {
     };
     let n = TRACE_COUNTS[slot].fetch_add(1, Ordering::Relaxed);
     if n == 0 {
-        crate::pr_info!("drm: first {} (ret {})", name, ret);
+        crate::pr_warn!("drm: first {} (ret {})", name, ret);
     } else if slot == T_ATOMIC && n % 100 == 0 {
-        crate::pr_info!("drm: atomic commits so far: {}", n + 1);
+        crate::pr_warn!("drm: atomic commits so far: {}", n + 1);
     } else if slot == T_DUMB && n % 50 == 0 {
-        crate::pr_info!("drm: dumb buffers so far: {}", n + 1);
+        crate::pr_warn!("drm: dumb buffers so far: {}", n + 1);
     }
     if ret < 0 && ret != -25 && n < 8 {
         crate::pr_warn!("drm: {} failed ret={}", name, ret);
@@ -1699,7 +1699,7 @@ fn present_fb(fb_id: u32) -> i64 {
         Some(true) => {
             static FIRST_FLIP: AtomicU32 = AtomicU32::new(0);
             if FIRST_FLIP.fetch_add(1, Ordering::Relaxed) == 0 {
-                crate::pr_info!(
+                crate::pr_warn!(
                     "drm: first page flip on screen (fb {} {}x{})",
                     fb_id,
                     width,

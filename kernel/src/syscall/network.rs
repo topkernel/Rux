@@ -2197,7 +2197,12 @@ pub fn sys_getsockopt(args: SyscallArgs) -> i64 {
         Some(v) => v,
         None => return -(errno::EFAULT as i64),
     };
-    if optlen == 0 || (optlen as i32) < 0 || optlen > 128 {
+    // Cap 256 (not 128): libselinux's getpeercon(3) calls getsockopt with
+    // INITCONTEXTLEN+1 = 256 for SO_PEERSEC — a smaller cap made every
+    // peer-label query fail EINVAL before the option dispatch ran, which
+    // turned init's param-service SELinux check into a hard "Forbid to set
+    // parameter bootevent.*" (b151). 0 and (socklen_t)-1 still EINVAL.
+    if optlen == 0 || (optlen as i32) < 0 || optlen > 256 {
         return -(errno::EINVAL as i64);
     }
     let optlen = optlen as usize;
@@ -2212,6 +2217,7 @@ pub fn sys_getsockopt(args: SyscallArgs) -> i64 {
         const SO_SNDTIMEO_GET: i32 = 21;
         const SOL_SOCKET_GET: i32 = 1;
         const SO_PEERCRED_GET: i32 = 17;
+        const SO_PEERSEC_GET: i32 = 31;
         if level == SOL_SOCKET_GET && optname == SO_PEERCRED_GET {
             // struct ucred { pid_t pid; uid_t uid; gid_t gid; } = 12 bytes.
             // dbus EXTERNAL auth reads the connecting client's identity
@@ -2236,6 +2242,77 @@ pub fn sys_getsockopt(args: SyscallArgs) -> i64 {
                     write_len,
                 );
                 let _ = crate::arch::uaccess::put_user(optlen_ptr, write_len as u32);
+            }
+            return 0;
+        }
+        if level == SOL_SOCKET_GET && optname == SO_PEERSEC_GET {
+            // SO_PEERSEC: the peer's LSM security context (getpeercon(3)).
+            // OpenHarmony's param service calls getpeercon() on the client
+            // socket inside SetParamCheck (libparaperm_checker), and a
+            // failure makes init forbid EVERY bootevent.* parameter set —
+            // which wedges bootanimation in WaitRenderServiceInit() polling
+            // bootevent.renderservice.ready forever (b151: 225k serial
+            // lines, black screen, render_service asleep after publishing
+            // SA 10). We have no policy engine, so synthesize a context
+            // "u:r:<peer comm>:s0": nothing parses it semantically — OH's
+            // selinux_check_access("parameter_service") hits the unknown
+            // class path and our selinuxfs deny_unknown=0 makes that
+            // ALLOW (same permissive answer the samgr SA gate relies on).
+            // ENOTCONN when there is no peer (Linux stream behavior).
+            let cred = match usock.peer_cred() {
+                Some(c) => c,
+                None => return -(errno::ENOTCONN as i64),
+            };
+            // Linux writes the context NUL-terminated and reports the
+            // length INCLUDING the NUL (selinux_socket_getpeersec_stream);
+            // a too-small buffer gets ERANGE with the needed size, and
+            // libselinux reallocs and retries with that size.
+            let mut ctx = [0u8; 32];
+            let mut n = 0usize;
+            for &b in b"u:r:" {
+                ctx[n] = b;
+                n += 1;
+            }
+            let mut have_name = false;
+            if cred.pid > 0 {
+                if let Some(task) = crate::process::find_task_by_pid(cred.pid as u32) {
+                    for &b in task.comm() {
+                        if b == 0 || n + 5 > ctx.len() {
+                            break;
+                        }
+                        if b.is_ascii_alphanumeric() || b == b'_' {
+                            ctx[n] = b;
+                            n += 1;
+                            have_name = true;
+                        }
+                    }
+                }
+            }
+            if !have_name {
+                for &b in b"init" {
+                    ctx[n] = b;
+                    n += 1;
+                }
+            }
+            ctx[n] = b':';
+            ctx[n + 1] = b's';
+            ctx[n + 2] = b'0';
+            n += 4; // ":s0" + NUL
+            if optlen < n {
+                // SAFETY: put_user is the exception-table (SUM=0 safe)
+                // copy path; optlen_ptr was validated at entry.
+                unsafe {
+                    let _ = crate::arch::uaccess::put_user(optlen_ptr, n as u32);
+                }
+                return -(errno::ERANGE as i64);
+            }
+            // SAFETY: optval validated with access_ok(optlen) at entry;
+            // copy_to_user/put_user are the exception-table (SUM=0 safe)
+            // paths.
+            unsafe {
+                crate::arch::uaccess::clear_user(optval, optlen.min(n));
+                crate::arch::uaccess::copy_to_user(optval, ctx.as_ptr(), n);
+                let _ = crate::arch::uaccess::put_user(optlen_ptr, n as u32);
             }
             return 0;
         }
