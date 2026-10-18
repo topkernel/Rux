@@ -1066,9 +1066,25 @@ pub fn unix_send(
         // ONLY inside hilogd (libEGL's stderr adapter prints '<message
         // truncated>' markers). The receiving sockets are bound to
         // .../hilogInput / .../hilogd.server — mirror graphics-relevant
-        // payloads to serial (the first boot run showed the whole system
-        // logs through hilog; an unfiltered tap exhausts its budget
-        // before the graphics cohort starts).
+        // logs to serial. Datagrams on hilogInput are HilogMsg records
+        // (base/hiviewdfx/hilog frameworks/libhilog/include/hilog_base.h),
+        // a __packed 28-byte header followed by tag and content:
+        //
+        //   off 0  u16 len            total: 28 + tagLen + contentLen
+        //   off 2  u16 bitfield       version:3 | type:4<<3 | level:3<<7
+        //                              | tagLen:6<<10   (little-endian)
+        //   off 4  u32 tv_sec   off 8  u32 tv_nsec  off 12 u32 mono_sec
+        //   off 16 u32 pid       off 20 u32 tid      off 24 u32 domain
+        //   off 28 u8 tag[tagLen]     NUL-terminated
+        //   off 28+tagLen u8 content  plain text: args are vsnprintf'd
+        //                              client-side; {private} args arrive
+        //                              as the literal "<private>"
+        //
+        // The first tap smeared the whole datagram through a printable
+        // filter, mixing header bytes into the text and hiding the exact
+        // EGL failure lines behind garbage ("EGLC0GL" etc). Decode the
+        // header, then tag: content, and only fall back to the smear for
+        // records that do not parse.
         {
             let is_hilog = target
                 .bound_name
@@ -1077,14 +1093,103 @@ pub fn unix_send(
                 .map(|n| n.ends_with("hilogInput") || n.ends_with("hilogd.server"))
                 .unwrap_or(false);
             if is_hilog && !data.is_empty() {
-                let mut text = [0u8; 120];
+                let mut text = [0u8; 160];
                 let mut k = 0usize;
-                for &b in data.iter() {
-                    if b >= 0x20 && b < 0x7f {
-                        text[k] = b;
-                        k += 1;
-                        if k == text.len() {
-                            break;
+                let mut prefix = [0u8; 24];
+                let mut plen = 0usize;
+                let mut decoded = false;
+                if data.len() >= 28 {
+                    let mlen = u16::from_le_bytes([data[0], data[1]]) as usize;
+                    let bits = u16::from_le_bytes([data[2], data[3]]) as usize;
+                    let level = (bits >> 7) & 0x7;
+                    let tag_len = (bits >> 10) & 0x3f;
+                    let mut pid = u32::from_le_bytes([data[16], data[17], data[18], data[19]]);
+                    if 28 + tag_len <= mlen && mlen <= data.len() {
+                        let lv = match level {
+                            3 => b'D',
+                            4 => b'I',
+                            5 => b'W',
+                            6 => b'E',
+                            7 => b'F',
+                            _ => b'?',
+                        };
+                        // "L<lv> <pid> " then "<tag>: <content>". OH builds
+                        // libhilog with __RECV_MSG_WITH_UCRED_: the header
+                        // pid stays 0 and the real sender rides
+                        // SCM_CREDENTIALS — stamp that pid on the tap line.
+                        if pid == 0 {
+                            if let Some(c) = cred.as_ref() {
+                                if c.pid > 0 {
+                                    pid = c.pid as u32;
+                                }
+                            }
+                        }
+                        let mut pfx: [u8; 16] = [0; 16];
+                        let mut n = 0usize;
+                        pfx[n] = lv;
+                        n += 1;
+                        let mut num = [0u8; 10];
+                        let mut nd = 0usize;
+                        let mut v = pid;
+                        loop {
+                            num[nd] = b'0' + (v % 10) as u8;
+                            nd += 1;
+                            v /= 10;
+                            if v == 0 {
+                                break;
+                            }
+                        }
+                        while nd > 0 {
+                            nd -= 1;
+                            pfx[n] = num[nd];
+                            n += 1;
+                        }
+                        pfx[n] = b' ';
+                        n += 1;
+                        plen = n;
+                        prefix[..n].copy_from_slice(&pfx[..n]);
+                        let tag = &data[28..28 + tag_len];
+                        let content = &data[28 + tag_len..mlen];
+                        let mut append = |src: &[u8], text: &mut [u8; 160], k: &mut usize| {
+                            for &b in src.iter() {
+                                if b == 0 {
+                                    break;
+                                }
+                                if b == b'\n' || b == b'\t' {
+                                    if *k < text.len() {
+                                        text[*k] = b' ';
+                                        *k += 1;
+                                    }
+                                    continue;
+                                }
+                                if b >= 0x20 && b < 0x7f && *k < text.len() {
+                                    text[*k] = b;
+                                    *k += 1;
+                                }
+                            }
+                        };
+                        append(tag, &mut text, &mut k);
+                        if k > 0 && k < text.len() {
+                            text[k] = b':';
+                            k += 1;
+                            text[k] = b' ';
+                            k += 1;
+                        } else if k < text.len() {
+                            text[k] = b':';
+                            k += 1;
+                        }
+                        append(content, &mut text, &mut k);
+                        decoded = true;
+                    }
+                }
+                if !decoded {
+                    for &b in data.iter() {
+                        if b >= 0x20 && b < 0x7f {
+                            text[k] = b;
+                            k += 1;
+                            if k == text.len() {
+                                break;
+                            }
                         }
                     }
                 }
@@ -1092,16 +1197,24 @@ pub fn unix_send(
                 // u17 lesson: "dri" matches "driver", "Render" matches
                 // the audio RenderRouters flood, "display" matches
                 // everything — keep the set tight and case-distinct.
-                const KEYS: [&str; 14] = [
-                    "EGL", "egl", "DRI", "Mesa", "mesa", "MESA", "gbm", "GBM", "virtio",
-                    "Composer", "composer", "Rosen", "rosen", "DISP",
+                const KEYS: [&str; 23] = [
+                    "EGL", "egl", "DRI", "dri2", "Mesa", "mesa", "gbm", "GBM", "virtio",
+                    "llvmpipe", "gallium", "swrast", "softpipe", "GL_", "GLES", "Composer",
+                    "composer", "Rosen", "rosen", "DISP", "gralloc", "Gralloc", "DRI2",
                 ];
-                if KEYS.iter().any(|key| s.contains(key)) {
+                // Mesa's egl_dri2 extension probe floods ~1200
+                // "[dri2_get_proc_address@...] procname = gl..." lines
+                // through the DISP tag right before the interesting
+                // window (screen create → llvmpipe init → verdict);
+                // skipping them keeps the budget for the verdict lines.
+                let flood = s.contains("procname = gl");
+                if !flood && KEYS.iter().any(|key| s.contains(key)) {
                     static HILOG_TAPS: core::sync::atomic::AtomicU32 =
                         core::sync::atomic::AtomicU32::new(0);
                     let n = HILOG_TAPS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-                    if n < 800 {
-                        crate::pr_warn!("hilog[{}] {}", n, s);
+                    if n < 3000 {
+                        let p = core::str::from_utf8(&prefix[..plen]).unwrap_or("");
+                        crate::pr_warn!("hilog[{}] {}{}", n, p, s);
                     }
                 }
             }

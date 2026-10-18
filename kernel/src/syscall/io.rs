@@ -627,6 +627,91 @@ pub fn sys_writev(args: SyscallArgs) -> i64 {
         return e;
     }
 
+    // Datagram writev must gather (Linux semantics): one writev() on a
+    // SOCK_DGRAM/SOCK_SEQPACKET unix socket is ONE datagram built from
+    // all iovecs concatenated — never one datagram per iovec. libhilog
+    // sends every HilogMsg as writev(header28, tag, content) on its
+    // connected DGRAM; the old per-iovec loop delivered three separate
+    // datagrams, so hilogd never saw a single well-formed log record
+    // (query output stayed empty, and the kernel hilog tap only ever
+    // saw orphaned binary headers and bare tag/content fragments).
+    // SOCK_STREAM keeps the per-iov loop: a byte stream has no record
+    // boundaries, so sequential writes are indistinguishable.
+    if let Some((usock, _)) = crate::net::unix::unix_file_of(fd) {
+        if matches!(
+            usock.kind,
+            crate::net::unix::UnixKind::Dgram | crate::net::unix::UnixKind::Seqpacket
+        ) && iovcnt > 0
+        {
+            // Bound the gathered datagram like sys_sendmsg does (R7-D4
+            // heap discipline; Linux answers an oversized message with
+            // EMSGSIZE).
+            const GATHER_MAX_TOTAL: usize = RW_CHUNK.saturating_mul(4);
+            let mut gathered: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+            // SAFETY: the iovec array was range-checked by check_iov_array;
+            // each entry's buffer is validated with access_ok before copy.
+            unsafe {
+                for i in 0..iovcnt {
+                    let mut iov = Iovec { iov_base: core::ptr::null(), iov_len: 0 };
+                    let uncopied = crate::arch::uaccess::copy_from_user(
+                        &mut iov as *mut Iovec as *mut u8,
+                        iov_ptr.add(i) as *const u8,
+                        core::mem::size_of::<Iovec>(),
+                    );
+                    if uncopied > 0 {
+                        return -errno::EFAULT as i64;
+                    }
+                    let base = iov.iov_base as usize;
+                    let len = iov.iov_len;
+                    if let Err(e) = iov_len_sanity(len) {
+                        return e;
+                    }
+                    if base == 0 || len == 0 {
+                        continue;
+                    }
+                    if !crate::arch::uaccess::access_ok(base, len) {
+                        return -errno::EFAULT as i64;
+                    }
+                    if gathered.len().saturating_add(len) > GATHER_MAX_TOTAL {
+                        return -errno::EMSGSIZE as i64;
+                    }
+                    let start = gathered.len();
+                    gathered.resize(start + len, 0);
+                    let uncopied = crate::arch::uaccess::copy_from_user(
+                        gathered.as_mut_ptr().add(start),
+                        base as *const u8,
+                        len,
+                    );
+                    if uncopied > 0 {
+                        return -errno::EFAULT as i64;
+                    }
+                }
+            }
+            if gathered.is_empty() {
+                return 0;
+            }
+            use crate::fs::get_file_fd;
+            // SAFETY: fd validated by unix_file_of above; the gathered
+            // buffer is a kernel slice, so file.write needs no user copy.
+            return unsafe {
+                match get_file_fd(fd) {
+                    Some(file) => {
+                        // O_RDONLY writev fails EBADF like write (write03/04
+                        // parity; the stream path below inherits the check
+                        // from sys_write, this gathered path needs its own).
+                        let mode = file.flags.load(core::sync::atomic::Ordering::Relaxed)
+                            & crate::fs::file::FileFlags::O_ACCMODE;
+                        if mode == crate::fs::file::FileFlags::O_RDONLY {
+                            return -errno::EBADF as i64;
+                        }
+                        file.write(gathered.as_ptr(), gathered.len()) as i64
+                    }
+                    None => -errno::EBADF as i64,
+                }
+            }
+        }
+    }
+
     let mut total_written: isize = 0;
     let mut has_valid_iov = false;
 
