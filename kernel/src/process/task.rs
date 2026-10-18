@@ -567,6 +567,18 @@ pub struct Task {
     ti_a1: core::sync::atomic::AtomicU64,
     ti_a2: core::sync::atomic::AtomicU64,
 
+    /// LASTSYS (stall hunts): the syscall this task most recently
+    /// ENTERED (nr + first two args). For a task parked inside a
+    /// blocking syscall (epoll_wait, binder ioctl, futex, slow fd read)
+    /// this names the call it is sleeping in — the global 2048-entry
+    /// forensic ring overwrites a parked waiter's record within
+    /// milliseconds under system-wide traffic, so per-task storage is
+    /// the only form that survives. Written at dispatch entry (Relaxed
+    /// stores); read by the DFX taskdump.
+    pub last_syscall_nr: core::sync::atomic::AtomicU32,
+    pub last_syscall_a0: AtomicU64,
+    pub last_syscall_a1: AtomicU64,
+
     // ==================== task_struct fields ====================
 
     /// Process state (volatile, visible across cores)
@@ -1116,6 +1128,9 @@ impl Task {
             ti_a0: core::sync::atomic::AtomicU64::new(0),
             ti_a1: core::sync::atomic::AtomicU64::new(0),
             ti_a2: core::sync::atomic::AtomicU64::new(0),
+            last_syscall_nr: core::sync::atomic::AtomicU32::new(0),
+            last_syscall_a0: AtomicU64::new(0),
+            last_syscall_a1: AtomicU64::new(0),
 
             // task_struct fields
             state,

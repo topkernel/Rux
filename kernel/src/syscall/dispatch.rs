@@ -142,6 +142,26 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
     let syscall_no = syscall_get_nr(regs);
     let mut args = syscall_get_arguments(regs);
 
+    // LASTSYS latch at the very top — BEFORE the x86_64 legacy early
+    // returns (arch_prctl 158, poll 7, select 23, dup2 33, pause 34,
+    // epoll_create 213, epoll_wait 232): glibc's epoll_wait() issues the
+    // NATIVE 232, so a task parked in an event loop latched under the
+    // later entry point showed its PREVIOUS syscall (a prctl!) instead
+    // of the epoll_wait it is sleeping in. The raw native number is
+    // stored; decode against the x86_64 table.
+    {
+        let cur = crate::sched::current();
+        if let Some(cur) = cur {
+            use core::sync::atomic::Ordering::Relaxed;
+            // SAFETY: cur is the running task.
+            unsafe {
+                (*cur).last_syscall_nr.store(syscall_no as u32, Relaxed);
+                (*cur).last_syscall_a0.store(args[0], Relaxed);
+                (*cur).last_syscall_a1.store(args[1], Relaxed);
+            }
+        }
+    }
+
     // x86_64: translate the native number/ABI onto the generic table
     // (identity for same-numbered entries, argument remaps for the
     // legacy no-`at` ABI). Untranslatable numbers report as unknown.
@@ -230,9 +250,21 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
     // parked INSIDE a syscall (epoll_wait/binder ioctl/futex/read on a
     // slow fd) never reaches the exit-side record below, so the exit-only
     // ring showed its last COMPLETED call instead of the blocking one.
-    // The taskdump's lastsys= field decodes parked waiters through this.
+    // Also latched into the task itself (last_syscall_*) — the ring is
+    // only 2048 entries, so a parked waiter's record is overwritten
+    // within milliseconds under system-wide traffic; the taskdump's
+    // lastsys= field reads the per-task latch.
     SYSCALL_RING[SYSCALL_CURSOR.fetch_add(1, core::sync::atomic::Ordering::Relaxed) % SYSCALL_RING.len()]
         .record(crate::process::current_pid(), syscall_no as u32, args[0], args[1], u64::MAX);
+    if let Some(cur) = crate::sched::current() {
+        use core::sync::atomic::Ordering::Relaxed;
+        // SAFETY: cur is the running task.
+        unsafe {
+            (*cur).last_syscall_nr.store(syscall_no as u32, Relaxed);
+            (*cur).last_syscall_a0.store(args[0], Relaxed);
+            (*cur).last_syscall_a1.store(args[1], Relaxed);
+        }
+    }
 
     // Dispatch based on system call number (sorted by number)
     let result: i64 = match syscall_no as u32 {
