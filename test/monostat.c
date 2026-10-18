@@ -115,9 +115,13 @@ int main(void) {
         if (dus < min_us) min_us = dus;
         mono_prev = mono;
 
-        /* 3. coarse clock coherence (every sample; cheap syscalls) */
+        /* 3. coarse clock coherence (every sample; cheap syscalls).
+         * Coarse is sampled in a SECOND syscall after monotonic —
+         * crossing a jiffy boundary between the two reads legitimately
+         * leaves coarse ahead by up to one tick (10 ms at HZ=100);
+         * only a lead beyond a tick+margin is a real inversion. */
         long long coarse = now_ns(CLOCK_MONOTONIC_COARSE);
-        if (coarse > mono) {
+        if (coarse - mono > coarse_lead_ns) {
             coarse_lead_ns = coarse - mono;
         } else if (mono - coarse > max_coarse_lag_ns) {
             max_coarse_lag_ns = mono - coarse;
@@ -166,7 +170,7 @@ int main(void) {
     else if (rt_back) fail = "realtime-went-backward";
     else if (max_us > 300000) fail = "delta-too-large";
     else if (min_us < 50000) fail = "delta-too-small";
-    else if (coarse_lead_ns > 0) fail = "coarse-ahead-of-monotonic";
+    else if (coarse_lead_ns > 15LL * 1000 * 1000) fail = "coarse-leads-by>15ms";
     else if (max_coarse_lag_ns > 40LL * 1000 * 1000) fail = "coarse-lag>40ms";
     else if (max_up_lag_ms > 5000) fail = "uptime-lag>5s";
 

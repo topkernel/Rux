@@ -116,28 +116,41 @@ def main():
     proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL,
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
-    # Host-timestamped tail of the serial log.
+    # Host-timestamped tail of the serial log: only NEW COMPLETE lines
+    # are parsed (offset-tracked — re-parsing the file each poll would
+    # duplicate samples, and a write-torn tail line parses as a bogus
+    # guest step backwards).
     samples = []   # (host_monotonic, guest_mono_ms)
     verdict = None
     panic = False
     paused = False
     pause_at = 20.0
     resume_jump = None
+    offset = 0
     try:
         t0 = time.monotonic()
         msock = None
         while time.monotonic() - t0 < args.duration + 120:
             if proc.poll() is not None:
                 break
+            data = b""
             try:
                 with open(serial, "rb") as f:
+                    f.seek(offset)
                     data = f.read()
+                    offset += len(data)
             except FileNotFoundError:
-                data = b""
+                pass
             if b"panicked" in data or b"Kernel panic" in data:
                 panic = True
                 break
-            for line in data.split(b"\n"):
+            lines = data.split(b"\n")
+            if not data.endswith(b"\n"):
+                # Torn tail: drop the partial line and rewind so the
+                # next poll re-reads it complete.
+                offset -= len(lines[-1])
+                lines = lines[:-1]
+            for line in lines:
                 if line.startswith(b"MONOSTAT t=") and b"mono_ms=" in line:
                     try:
                         gmono = int(line.split(b"mono_ms=")[1].split()[0])
@@ -171,7 +184,7 @@ def main():
                         pass
             if verdict is not None:
                 break
-            time.sleep(0.5)
+            time.sleep(0.1)
 
         if msock is not None:
             try:
@@ -180,36 +193,37 @@ def main():
                 pass
 
         # Host-vs-guest drift from the timestamped samples.
+        # Intervals whose HOST span exceeds 3 s contain a VM pause (the
+        # virtual clock freezes, so host time passes while guest time
+        # must not): excluded from the rate comparison, and the guest
+        # advance inside them is exactly the pause-jump metric.
         host_result = "SKIPPED (no samples)"
         if len(samples) >= 5 and not panic:
-            # Drop samples that span the pause window when paused.
-            if paused:
-                # resume_jump: guest ms jump across the pause vs the
-                # host-at-resume baseline. Recompute pairwise drifts on
-                # non-pause spans only; then measure the pause jump.
-                pass
-            (h0, g0), (h1, g1) = samples[0], samples[-1]
-            host_ms = (h1 - h0) * 1000.0
-            guest_ms = float(g1 - g0)
-            if paused:
-                # The sample pair spans the pause; guest_ms excludes the
-                # frozen time by design, so drift here == pause size —
-                # exclude it by using per-interval guest/host deltas and
-                # taking the max interval ratio as the pause-jump probe.
-                intervals = []
-                for i in range(1, len(samples)):
-                    dh = (samples[i][0] - samples[i - 1][0]) * 1000.0
-                    dg = float(samples[i][1] - samples[i - 1][1])
-                    intervals.append((dh, dg))
-                if intervals:
-                    dh, dg = max(intervals, key=lambda x: x[0])
-                    resume_jump = dg - 1000.0  # expected 1 s per sample
-                    steady = [iv for iv in intervals if iv[0] < 5000]
-                    if steady:
-                        hs = sum(iv[0] for iv in steady)
-                        gs = sum(iv[1] for iv in steady)
-                        host_ms, guest_ms = hs, gs
-            drift_ppm = int(abs(guest_ms - host_ms) / host_ms * 1e6) if host_ms > 0 else -1
+            host_ms = guest_ms = 0.0
+            for i in range(1, len(samples)):
+                dh = (samples[i][0] - samples[i - 1][0]) * 1000.0
+                dg = float(samples[i][1] - samples[i - 1][1])
+                if dh > 3000:
+                    # Pause-spanning interval: guest advance here IS the
+                    # jump (a sample due at the stop moment legitimately
+                    # accounts for ~1 s).
+                    jump = dg - 1000.0
+                    if resume_jump is None or jump > resume_jump:
+                        resume_jump = jump
+                    continue
+                if dg - dh > 1500:
+                    # Post-resume flush artifact: several serial lines
+                    # stamped at the same host moment (the driver slept
+                    # through the pause); real time cannot lag the guest
+                    # clock by >1.5 s in a 1 s window.
+                    jump = dg - 1000.0
+                    if resume_jump is None or jump > resume_jump:
+                        resume_jump = jump
+                    continue
+                host_ms += dh
+                guest_ms += dg
+            drift_ppm = (int(abs(guest_ms - host_ms) / host_ms * 1e6)
+                         if host_ms > 0 else -1)
             ok = drift_ppm < 5000 and (resume_jump is None or abs(resume_jump) < 2000)
             host_result = "%s drift_ppm=%d pause_guest_jump_ms=%s" % (
                 "PASS" if ok else "FAIL", drift_ppm,
