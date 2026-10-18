@@ -284,10 +284,10 @@ pub const FD_SETSIZE: usize = 1024;
 // ============================================================
 
 /// Futex waiter pool size
-pub const FUTEX_WAITER_POOL_SIZE: usize = 256;
+pub const FUTEX_WAITER_POOL_SIZE: usize = 8192;
 
 /// Futex hash table size
-pub const FUTEX_HASH_SIZE: usize = 64;
+pub const FUTEX_HASH_SIZE: usize = 512;
 
 // ============================================================
 // Graphics Configuration
