@@ -61,6 +61,20 @@ pub fn generate() -> Vec<u8> {
     content.push_str(&format!("HeapUsed:       {} kB\n", heap.used_bytes / 1024));
     content.push_str(&format!("HeapFree:       {} kB\n", heap.free_bytes / 1024));
 
+    // Page-cache op counters + effective cap (Rux extension, faultlat
+    // observability): hit/miss ratio shows whether the .so working set
+    // still thrashes the cache (a miss pays the ext4 big-lock + I/O path
+    // on the fault). Cap is dynamic: half of managed RAM, min 32MB.
+    {
+        let (hits, misses, evictions, demotions) =
+            crate::fs::page_cache::page_cache_stats();
+        content.push_str(&format!(
+            "PageCacheOps:   hits={} misses={} evictions={} demotions={} cap_pages={}\n",
+            hits, misses, evictions, demotions,
+            crate::fs::page_cache::page_cache_cap_pages()
+        ));
+    }
+
     // Active/Inactive memory
     let active_kb = active_file_kb + active_anon_kb;
     let inactive_kb = inactive_file_kb + inactive_anon_kb;

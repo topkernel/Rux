@@ -19,23 +19,77 @@
 //! small region around the kernel image.
 
 use alloc::collections::BTreeMap;
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use crate::sync::spinlock::Spinlock;
 use crate::mm::page_alloc::{alloc_page, alloc_page_batch, free_page};
-use crate::mm::zone::GfpFlags;
+use crate::mm::zone::{GfpFlags, ZoneType};
 use crate::mm::page_desc::{PageFlag, PageType, pfn_to_page_mut, Page};
 use crate::mm::lru;
-use crate::mm::pglist::{first_online_node_mut, LRU_INACTIVE_FILE, LRU_ACTIVE_FILE};
+use crate::mm::pglist::{first_online_node, LRU_INACTIVE_FILE};
 use crate::mm::{pfn_to_phys, PAGE_SIZE};
 use crate::arch::mm::{phys_to_virt, PhysAddr};
 
-/// Maximum cached pages across all inodes (8192 x 4KB = 32MB).
+/// Minimum cached pages across all inodes (8192 x 4KB = 32MB).
 ///
-/// Was 512 pages (2MB): smaller than one Ubuntu binary's text+data working
-/// set, so every exec/read cycle re-fetched from disk and a 10MB sequential
-/// read thrashed the LRU 5x over. 32MB still leaves the 2GB guest plenty of
-/// user memory and eviction/reclaim paths unchanged.
-const MAX_CACHED_PAGES: usize = 8192;
+/// Was the WHOLE cap (a fixed `MAX_CACHED_PAGES = 8192`): smaller than one
+/// Ubuntu binary's text+data working set, so every exec/read cycle
+/// re-fetched from disk and a 10MB sequential read thrashed the LRU 5x
+/// over. It is now the FLOOR of the dynamic cap below.
+const MIN_CACHED_PAGES: usize = 8192;
+
+/// Fraction of managed RAM the page cache may occupy before inserts evict
+/// (soft cap — see `max_cached_pages`).
+///
+/// The fixed 32MB cap was the OH `.so`-load thrash: the image's shared
+/// libraries alone are gigabytes, so with ~580 tasks faulting libraries
+/// EVERY fault was a cache miss + eviction + disk refetch + ext4 big-lock
+/// round trip, and measured ~1.5 s per fault (`SA:3002 OpenSo 802166ms`).
+/// Linux scales the page cache to reclaimable memory; Rux now caps it at
+/// half of managed RAM (reclaim still shrinks it below watermark via
+/// `shrink`, so user allocations keep headroom).
+const PAGE_CACHE_CAP_RAM_DIVISOR: usize = 2;
+
+/// Cached dynamic cap (0 = not computed yet). Computed lazily on first
+/// use; falls back to `MIN_CACHED_PAGES` before zone init.
+static PAGE_CACHE_CAP: AtomicUsize = AtomicUsize::new(0);
+
+/// Soft cap on total cached pages: half of managed RAM, at least 32MB.
+///
+/// Computed once (atomic compare-exchange); before the zone system is up
+/// the old fixed floor applies. Reads managed pages from all initialized
+/// zones — no allocation, no locks, safe from any insert path.
+#[inline]
+fn max_cached_pages() -> usize {
+    let cached = PAGE_CACHE_CAP.load(Ordering::Relaxed);
+    if cached != 0 {
+        return cached;
+    }
+    let mut total = 0usize;
+    if let Some(node) = first_online_node() {
+        for zt in [ZoneType::ZoneNormal, ZoneType::ZoneDma32, ZoneType::ZoneDma] {
+            if let Some(zone) = node.zone(zt) {
+                if zone.is_initialized() {
+                    total += zone.managed_pages();
+                }
+            }
+        }
+    }
+    if total == 0 {
+        return MIN_CACHED_PAGES; // zones not up yet — old fixed cap
+    }
+    let cap = core::cmp::max(total / PAGE_CACHE_CAP_RAM_DIVISOR, MIN_CACHED_PAGES);
+    let _ = PAGE_CACHE_CAP.compare_exchange(0, cap, Ordering::AcqRel, Ordering::Acquire);
+    PAGE_CACHE_CAP.load(Ordering::Relaxed)
+}
+
+/// Page-cache observability counters (Rux extension, /proc/meminfo
+/// `PageCacheOps:` line). Cheap relaxed atomics on the insert/evict paths;
+/// the point is ratio visibility on OH boots (hits vs misses vs evictions
+/// under the real service mixture).
+static STAT_HITS: AtomicU64 = AtomicU64::new(0);
+static STAT_MISSES: AtomicU64 = AtomicU64::new(0);
+static STAT_EVICTIONS: AtomicU64 = AtomicU64::new(0);
+static STAT_DEMOTIONS: AtomicU64 = AtomicU64::new(0);
 
 /// A cached page of file data, backed by a zone-allocated physical page frame.
 struct CachedPage {
@@ -109,6 +163,7 @@ impl PageCache {
             // the caller re-reads current data from disk.
             return None;
         }
+        STAT_HITS.fetch_add(1, Ordering::Relaxed);
         page.ref_count.fetch_add(1, Ordering::AcqRel);
 
         // Mark page as recently accessed for LRU rotation
@@ -134,6 +189,7 @@ impl PageCache {
         if page.invalidated {
             return None;
         }
+        STAT_HITS.fetch_add(1, Ordering::Relaxed);
         page.ref_count.fetch_add(1, Ordering::AcqRel);
         let page_desc = pfn_to_page_mut(page.pfn);
         if !page_desc.is_null() {
@@ -164,17 +220,15 @@ impl PageCache {
             return;
         }
 
+        STAT_MISSES.fetch_add(1, Ordering::Relaxed);
         let mut cache = self.inodes.lock();
 
         // Evict if needed (with progress check to prevent infinite loop
         // when all cached pages have ref_count > 0). The frame is already
         // in hand, so exceeding the soft cap by one page here is harmless
         // — the next insert evicts.
-        while self.total_pages.load(Ordering::Relaxed) as usize >= MAX_CACHED_PAGES {
-            let before = self.total_pages.load(Ordering::Relaxed);
-            Self::evict_one(&mut cache, &self.total_pages);
-            let after = self.total_pages.load(Ordering::Relaxed);
-            if after >= before {
+        while self.total_pages.load(Ordering::Relaxed) as usize >= max_cached_pages() {
+            if !Self::evict_one(&mut cache, &self.total_pages) {
                 break; // Cannot evict — all pages in use
             }
         }
@@ -213,8 +267,11 @@ impl PageCache {
                 (*page_desc).set_mapping(key as usize as *mut core::ffi::c_void);
                 (*page_desc).set_index(page_index as usize);
             }
-            // Add to LRU_INACTIVE_FILE — must happen after setting flags
-            lru::page_add_file_lru(unsafe { &*page_desc });
+            // Add to LRU_INACTIVE_FILE at the YOUNG end — must happen after
+            // setting flags. (Two-tier policy: young at head, reclaim from
+            // tail; linking at the tail made the eviction scan see the
+            // freshest page first.)
+            lru::page_add_file_lru_young(unsafe { &*page_desc });
         }
 
         // Copy data into the physical page via linear mapping
@@ -271,39 +328,22 @@ impl PageCache {
             return;
         }
         let key = cache_key(fs_id, ino);
-        let mut cache = self.inodes.lock();
 
-        // Eviction headroom for the whole run (soft cap — bounded loop, the
-        // batch may proceed slightly over if everything is pinned).
-        let mut evict_tries = 0u32;
-        while self.total_pages.load(Ordering::Relaxed) as usize + npages > MAX_CACHED_PAGES {
-            let before = self.total_pages.load(Ordering::Relaxed);
-            Self::evict_one(&mut cache, &self.total_pages);
-            let after = self.total_pages.load(Ordering::Relaxed);
-            if after >= before {
-                evict_tries += 1;
-                if evict_tries >= 32 {
-                    break;
-                }
-            }
-        }
-
-        let inode_cache = cache.entry(key).or_insert_with(|| InodePageCache {
-            pages: BTreeMap::new(),
-        });
-
-        // Allocate frames in order-0 batches (one zone lock per 64 pages),
-        // copy per page (order-0 frames are not contiguous), describe, link
-        // to the LRU in one locked batch, and insert into the inode map
-        // directly. Order-0 deliberately: eviction frees page-cache frames
-        // one page at a time, higher-order buddy chunks failed expensively
-        // (reclaim + compaction slowpaths), and a temp-map `append` proved
-        // 3x slower than direct inserts under the debug build.
+        // R-WRITESTORM-1 (the insert_batch twin): allocate EVERY frame
+        // BEFORE taking the inodes lock. The old loop called
+        // alloc_page_batch(GFP_KERNEL) under the lock; under memory
+        // pressure that enters the page-allocator slowpath →
+        // vmscan::try_to_free_pages → PageCache::shrink → inodes.lock() —
+        // the SAME lock the caller already holds: a spinlock self-deadlock
+        // with one CPU spinning forever (the OH b120/b121 wedge insert()
+        // was fixed for, resurrected here at RAM-scale cache pressure —
+        // every insert batch wedged a CPU, SA .so loads never completed).
+        // Chunked 64 frames at a time: each chunk allocates unlocked, then
+        // one locked section does eviction headroom + inserts for the
+        // chunk.
         const ALLOC_CHUNK: usize = 64;
         let mut phys_buf: [usize; ALLOC_CHUNK] = [0; ALLOC_CHUNK];
-        let mut lru_batch: [*mut Page; ALLOC_CHUNK] = [core::ptr::null_mut(); ALLOC_CHUNK];
-        let mut lru_n: usize = 0;
-        let mut appended: u32 = 0;
+
         let mut done: usize = 0;
         while done < npages {
             let want = core::cmp::min(ALLOC_CHUNK, npages - done);
@@ -313,6 +353,39 @@ impl PageCache {
                 // per-page fallback covers the tail.
                 break;
             }
+
+            let mut cache = self.inodes.lock();
+
+            // Eviction headroom for this chunk (soft cap — bounded loop,
+            // the batch may proceed slightly over if everything is
+            // pinned).
+            let mut evict_tries = 0u32;
+            while self.total_pages.load(Ordering::Relaxed) as usize + got > max_cached_pages() {
+                if !Self::evict_one(&mut cache, &self.total_pages) {
+                    evict_tries += 1;
+                    if evict_tries >= 32 {
+                        break;
+                    }
+                }
+            }
+
+            STAT_MISSES.fetch_add(1, Ordering::Relaxed);
+
+            let inode_cache = cache.entry(key).or_insert_with(|| InodePageCache {
+                pages: BTreeMap::new(),
+            });
+
+            // Copy per page (order-0 frames are not contiguous), describe,
+            // link to the LRU in one locked batch, and insert into the
+            // inode map directly. Order-0 deliberately: eviction frees
+            // page-cache frames one page at a time, higher-order buddy
+            // chunks failed expensively (reclaim + compaction slowpaths),
+            // and a temp-map `append` proved 3x slower than direct inserts
+            // under the debug build.
+            let mut lru_batch: [*mut Page; ALLOC_CHUNK] =
+                [core::ptr::null_mut(); ALLOC_CHUNK];
+            let mut lru_n: usize = 0;
+            let mut appended: u32 = 0;
             for k in 0..got {
                 let phys = phys_buf[k];
                 let pfn = phys / PAGE_SIZE;
@@ -357,14 +430,12 @@ impl PageCache {
                 );
                 appended += 1;
             }
-            done += got;
             if lru_n > 0 {
-                lru::page_add_file_lru_batch(&lru_batch[..lru_n]);
-                lru_n = 0;
+                lru::page_add_file_lru_young_batch(&lru_batch[..lru_n]);
             }
+            self.total_pages.fetch_add(appended, Ordering::Relaxed);
+            done += got;
         }
-
-        self.total_pages.fetch_add(appended, Ordering::Relaxed);
     }
 
     /// Pin up to `out.len()` consecutive cached pages starting at
@@ -419,6 +490,7 @@ impl PageCache {
             if page.invalidated {
                 break;
             }
+            STAT_HITS.fetch_add(1, Ordering::Relaxed);
             page.ref_count.fetch_add(1, Ordering::AcqRel);
             let page_desc = pfn_to_page_mut(page.pfn);
             if !page_desc.is_null() {
@@ -573,13 +645,8 @@ impl PageCache {
             if self.total_pages.load(Ordering::Relaxed) == 0 {
                 break;
             }
-            let before = self.total_pages.load(Ordering::Relaxed);
-            {
-                let mut cache = self.inodes.lock();
-                Self::evict_one(&mut cache, &self.total_pages);
-            }
-            let after = self.total_pages.load(Ordering::Relaxed);
-            if after >= before {
+            let mut cache = self.inodes.lock();
+            if !Self::evict_one(&mut cache, &self.total_pages) {
                 break;
             }
             freed += 1;
@@ -587,76 +654,110 @@ impl PageCache {
         freed
     }
 
-    /// Evict one page with ref_count == 0 from LRU_INACTIVE_FILE.
+    /// Evict one unreferenced page, two-tier (Linux file-LRU shape).
     ///
-    /// Walks the LRU list from the tail (least recently used end) looking
-    /// for a PageCache page with ref_count == 0 and no Referenced flag.
-    /// Referenced pages are moved to the active list and skipped.
+    /// 1. Walk LRU_INACTIVE_FILE from the TAIL — the oldest end, walking
+    ///    `lru_prev` toward younger pages. Pinned pages (ref_count > 0)
+    ///    are skipped. Referenced pages get the flag cleared and are
+    ///    activated onto the young end of LRU_ACTIVE_FILE. The first
+    ///    clean unreferenced page is evicted.
+    /// 2. If the inactive walk found nothing, demote the OLDEST active
+    ///    pages back onto the young end of inactive (second chance) and
+    ///    re-walk once. Without demotion every page that was ever served
+    ///    accumulated on the active list forever (`lru_deactivate` had no
+    ///    callers), eviction could not make progress, and inserts fell
+    ///    through to the hash-order map fallback — semantically RANDOM
+    ///    eviction, the OH multi-loader thrash amplifier.
+    /// 3. Safety net: BTreeMap scan (hash-key order) for pages the LRU
+    ///    walk cannot reach (descriptor-less frames, list corruption).
+    ///
+    /// History: the pre-two-tier walk started at the tail and followed
+    /// `lru_next` — the terminator direction — so it examined exactly ONE
+    /// page per call: the newest (fresh pages linked at the tail back
+    /// then), i.e. "evict the page most likely to be needed next".
+    ///
+    /// Returns true when a page was actually evicted.
     fn evict_one(
         cache: &mut BTreeMap<u64, InodePageCache>,
         total_pages: &AtomicU32,
-    ) {
-        // Walk LRU_INACTIVE_FILE looking for an evictable page cache page
-        let mut pfn = lru::lru_tail(LRU_INACTIVE_FILE);
-        let mut scanned = 0usize;
-        let max_scan = 64; // bound scan to limit latency
+    ) -> bool {
+        const MAX_SCAN: usize = 64; // bound scan to limit latency
+        const DEMOTE_BATCH: usize = 32;
 
-        while pfn != 0 && scanned < max_scan {
-            scanned += 1;
-            let page_desc = pfn_to_page_mut(pfn);
-            if page_desc.is_null() {
+        for _round in 0..2 {
+            let mut pfn = lru::lru_tail(LRU_INACTIVE_FILE);
+            let mut scanned = 0usize;
+
+            while pfn != 0 && scanned < MAX_SCAN {
+                scanned += 1;
+                let page_desc = pfn_to_page_mut(pfn);
+                if page_desc.is_null() {
+                    break;
+                }
+
+                unsafe {
+                    let page = &*page_desc;
+                    // Tail = oldest end; lru_prev walks toward the head
+                    // (younger). Capture BEFORE any move of this page.
+                    let next_pfn = page.lru_prev();
+
+                    // Only evict PageCache pages
+                    if page.page_type() != PageType::PageCache {
+                        pfn = next_pfn;
+                        continue;
+                    }
+
+                    // Check ref_count — pages being read are not evictable.
+                    // Use mapping (inode key) and index (page_index) for the
+                    // lookup.
+                    let ino = page.mapping() as u64;
+                    let page_index = page.index() as u64;
+
+                    let evictable = if let Some(inode_cache) = cache.get(&ino) {
+                        if let Some(cached) = inode_cache.pages.get(&page_index) {
+                            cached.ref_count.load(Ordering::Acquire) == 0
+                        } else {
+                            // Page not in BTreeMap — stale, should clean up
+                            true
+                        }
+                    } else {
+                        true
+                    };
+
+                    if !evictable {
+                        pfn = next_pfn;
+                        continue;
+                    }
+
+                    // Referenced: second chance — clear the flag, promote to
+                    // the young end of the active list, keep scanning.
+                    if page.test_flag(PageFlag::Referenced) {
+                        page.clear_flag(PageFlag::Referenced);
+                        lru::lru_activate_young(page);
+                        pfn = next_pfn;
+                        continue;
+                    }
+
+                    // Evict: remove from BTreeMap, LRU, and free page
+                    if let Some(inode_cache) = cache.get_mut(&ino) {
+                        inode_cache.pages.remove(&page_index);
+                    }
+                    lru::page_remove_lru(page);
+                    release_page_frame(pfn);
+                    total_pages.fetch_sub(1, Ordering::Relaxed);
+                    STAT_EVICTIONS.fetch_add(1, Ordering::Relaxed);
+                    return true;
+                }
+            }
+
+            // Inactive walk made no progress — demote the oldest ACTIVE
+            // pages to the young end of inactive and retry once. An empty
+            // active list (or nothing demotable) falls to the map scan.
+            let demoted = lru::lru_demote_active_file_oldest(DEMOTE_BATCH);
+            if demoted == 0 {
                 break;
             }
-
-            unsafe {
-                let page = &*page_desc;
-                let next_pfn = page.lru_next();
-
-                // Only evict PageCache pages
-                if page.page_type() != PageType::PageCache {
-                    pfn = next_pfn;
-                    continue;
-                }
-
-                // Check ref_count — pages being read are not evictable.
-                // We need to find the CachedPage in the BTreeMap to check.
-                // Use mapping (inode) and index (page_index) for lookup.
-                let ino = page.mapping() as u64;
-                let page_index = page.index() as u64;
-
-                let evictable = if let Some(inode_cache) = cache.get(&ino) {
-                    if let Some(cached) = inode_cache.pages.get(&page_index) {
-                        cached.ref_count.load(Ordering::Acquire) == 0
-                    } else {
-                        // Page not in BTreeMap — stale, should clean up
-                        true
-                    }
-                } else {
-                    true
-                };
-
-                if !evictable {
-                    pfn = next_pfn;
-                    continue;
-                }
-
-                // Check referenced flag — give recently accessed pages another chance
-                if page.test_flag(PageFlag::Referenced) {
-                    page.clear_flag(PageFlag::Referenced);
-                    lru::lru_activate(page);
-                    pfn = next_pfn;
-                    continue;
-                }
-
-                // Evict: remove from BTreeMap, LRU, and free page
-                if let Some(inode_cache) = cache.get_mut(&ino) {
-                    inode_cache.pages.remove(&page_index);
-                }
-                lru::page_remove_lru(page);
-                release_page_frame(pfn);
-                total_pages.fetch_sub(1, Ordering::Relaxed);
-                return;
-            }
+            STAT_DEMOTIONS.fetch_add(demoted as u64, Ordering::Relaxed);
         }
 
         // LRU walk exhausted — fall back to BTreeMap scan (safety net)
@@ -671,7 +772,7 @@ impl PageCache {
                             let p = &*page_desc;
                             if p.test_flag(PageFlag::Referenced) {
                                 p.clear_flag(PageFlag::Referenced);
-                                lru::lru_activate(p);
+                                lru::lru_activate_young(p);
                                 true
                             } else {
                                 false
@@ -695,9 +796,11 @@ impl PageCache {
                     release_page_frame(page.pfn);
                 }
                 total_pages.fetch_sub(1, Ordering::Relaxed);
-                return;
+                STAT_EVICTIONS.fetch_add(1, Ordering::Relaxed);
+                return true;
             }
         }
+        false
     }
 }
 
@@ -731,6 +834,25 @@ pub fn get_page_cache() -> &'static PageCache {
 /// Get the total number of cached pages (for /proc/meminfo).
 pub fn page_cache_total_pages() -> u32 {
     PAGE_CACHE.total_pages.load(Ordering::Relaxed)
+}
+
+/// Page-cache op counters (hits, misses, evictions, active demotions) for
+/// the /proc/meminfo `PageCacheOps:` Rux-extension line. Under the OH
+/// service mixture the hit/miss ratio is the direct read on whether the
+/// cache still thrashes (miss ≈ every fault pays the ext4 big lock).
+pub fn page_cache_stats() -> (u64, u64, u64, u64) {
+    (
+        STAT_HITS.load(Ordering::Relaxed),
+        STAT_MISSES.load(Ordering::Relaxed),
+        STAT_EVICTIONS.load(Ordering::Relaxed),
+        STAT_DEMOTIONS.load(Ordering::Relaxed),
+    )
+}
+
+/// Effective page-cache cap (dynamic: half of managed RAM, min 32MB).
+/// Exposed for the meminfo observability line.
+pub fn page_cache_cap_pages() -> usize {
+    max_cached_pages()
 }
 
 /// Resolve a MAP_SHARED file-mapping fault to the page-cache frame for

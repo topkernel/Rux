@@ -48,13 +48,25 @@ pub struct ScanControl {
 
 // ==================== Public API ====================
 
+/// Reclaim batch size (Linux SWAP_CLUSTER_MAX).
+///
+/// Reclaiming exactly the allocation size (`1 << order` = ONE page for the
+/// order-0 fault path) made every allocation under sustained pressure pay
+/// a full pass through the priority machinery per page freed: once the
+/// page cache legitimately grows to RAM scale (the dynamic page-cache
+/// cap), the allocator slowpath's 8 retry rounds moved 8 pages per
+/// allocation and the whole system crawled (OH boot: zero SA .so loads in
+/// 9 minutes, one CPU saturated in reclaim). Freeing a 32-page batch per
+/// pass is Linux's shape and amortizes the scan cost.
+const SWAP_CLUSTER_MAX: usize = 32;
+
 /// Top-level reclaim entry point.
 ///
 /// Runs a priority-loop following `balance_pgdat()` in mm/vmscan.c.
 /// Returns the number of pages reclaimed.
 pub fn balance_pgdat(order: i32) -> usize {
     let mut sc = ScanControl {
-        nr_to_reclaim: 1 << order.max(0) as usize,
+        nr_to_reclaim: core::cmp::max(1 << order.max(0) as usize, SWAP_CLUSTER_MAX),
         nr_scanned: 0,
         nr_reclaimed: 0,
         may_unmap: true,
