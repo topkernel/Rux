@@ -1271,6 +1271,11 @@ unsafe fn dead_reply_to_sender(
             fth.txn_stack.retain(|t| !Arc::ptr_eq(t, txn));
             fth.todo.push_back(Work::ReturnError(BR_DEAD_REPLY, 0));
             fth.process_todo = true;
+            // Exact-thread wake, same as the BC_REPLY path: the proc-wide
+            // pick-one wake (wake_proc_one) only selects threads with an
+            // EMPTY todo, so a thread carrying this ReturnError would
+            // sleep on until unrelated work arrived.
+            wake_thread(&ft);
             delivered = true;
         }
     }
