@@ -1735,7 +1735,12 @@ fn vma_file_by_range(
 /// # Safety
 /// Caller must ensure both old and new ranges are valid, page-aligned, and
 /// the old range is mapped.
-unsafe fn copy_old_to_new_pages(root_ppn: u64, old_addr: usize, new_addr: usize, size: usize) {
+unsafe fn copy_old_to_new_pages(
+    mm: &crate::mm::AddressSpace,
+    old_addr: usize,
+    new_addr: usize,
+    size: usize,
+) {
     use crate::arch::mm::{
         PAGE_SIZE, PAGE_SHIFT, PhysAddr, VirtAddr, map_page, phys_to_virt, PageTableEntry,
     };
@@ -1743,6 +1748,7 @@ unsafe fn copy_old_to_new_pages(root_ppn: u64, old_addr: usize, new_addr: usize,
     use crate::mm::page_desc::{pfn_to_page_mut, PageFlag};
     use crate::mm::zone::GfpFlags;
 
+    let root_ppn = mm.root_ppn();
     crate::arch::mm::mm_ops::MM_CTX.store(4, core::sync::atomic::Ordering::Relaxed);
 
     // R7-A5: serialize leaf-PTE mutations against fork's table walk and COW
@@ -1758,29 +1764,33 @@ unsafe fn copy_old_to_new_pages(root_ppn: u64, old_addr: usize, new_addr: usize,
             let old_phys = old_ppn << PAGE_SHIFT;
             let old_kvaddr = phys_to_virt(PhysAddr::new(old_phys)).bits() as *const u8;
 
-            // DESTINATION-PRESENT GUARD (b93 heap-corruption attribution,
-            // forensics rank 1): the destination range was created by
-            // mmap in this same syscall and its PTEs should all be holes.
-            // If a leaf is nevertheless PRESENT here, blind-mapping a
-            // fresh frame over it is the PTE-OVERWRITE-LIVE aliasing
-            // instant: the live frame's mapping loses its data (or its
-            // owner reads this copy's bytes), and the old frame leaks.
-            // Never overwrite a live leaf from this path — skip the page
-            // and log loudly (this "cannot happen" short of an upstream
-            // bug, so visibility beats guessing).
+            // DESTINATION-PRESENT: the destination range was created by
+            // mmap in this same syscall, so a present leaf can only be a
+            // racing same-mm demand fault's zero page (CLONE_VM threads
+            // touching the range between the MAP_FIXED install and this
+            // copy). Linux's mremap moves PTEs under mmap_lock and the
+            // move REPLACES the destination; skipping the page (the old
+            // b93 MREMAP-DST-LIVE guard) permanently lost the moved
+            // data. Tear the racing leaf down with full accounting and
+            // copy ours over it — never alias two frames at one VA.
+            // (b93 heap-corruption note: the hazard there was mapping a
+            // fresh frame OVER a live leaf without dropping its
+            // refcount/rmap; the teardown below is the fix for exactly
+            // that.)
             if crate::arch::mm::mm_ops::PageTableWalker::walk(root_ppn, new_virt).is_some() {
                 static DST_HIT_N: core::sync::atomic::AtomicUsize =
                     core::sync::atomic::AtomicUsize::new(0);
                 if DST_HIT_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 24 {
-                    crate::pr_err!(
-                        "MREMAP-DST-LIVE pid={} va={:#x} src={:#x} — refusing overwrite",
+                    crate::pr_info!(
+                        "MREMAP-DST-REPLACE pid={} va={:#x} src={:#x} — replacing racing leaf",
                         crate::process::current_pid(),
                         new_virt,
                         old_virt
                     );
                 }
-                offset += PAGE_SIZE as usize;
-                continue;
+                // SAFETY: PTE_MODIFY_LOCK is held (see above) and `mm` is
+                // the current task's address space.
+                unsafe { mm.unmap_one_user_leaf_locked(new_virt as usize) };
             }
 
             // Eagerly allocate + map the destination page (see comment above)
@@ -1810,7 +1820,7 @@ unsafe fn copy_old_to_new_pages(root_ppn: u64, old_addr: usize, new_addr: usize,
                 (*page).set_flag(PageFlag::SwapBacked);
                 (*page).set_index(new_virt as usize / (PAGE_SIZE as usize));
                 (*page).inc_mapcount();
-                if let Some(mm) = crate::sched::current().and_then(|t| t.address_space()) {
+                if crate::sched::current().and_then(|t| t.address_space()).is_some() {
                     crate::mm::rmap::page_record_mapping(
                         &*page,
                         mm as *const _ as usize,
@@ -1977,7 +1987,7 @@ fn sys_mremap_inner(args: [u64; 6]) -> i64 {
                     // Copy pages from old to new
                     let copy_size = old_size_aligned.min(new_size_aligned);
                     unsafe {
-                        copy_old_to_new_pages(root_ppn, old_addr, new_addr_arg, copy_size);
+                        copy_old_to_new_pages(address_space, old_addr, new_addr_arg, copy_size);
                     }
                     // Unmap old mapping
                     let _ = address_space.munmap(VirtAddr::new(old_addr), old_size_aligned);
@@ -2067,7 +2077,7 @@ fn sys_mremap_inner(args: [u64; 6]) -> i64 {
                     // copy_old_to_new_pages copies PTE contents (physical page data).
                     unsafe {
                         copy_old_to_new_pages(
-                            address_space.root_ppn(),
+                            address_space,
                             old_addr,
                             new_addr_val,
                             copy_size,
