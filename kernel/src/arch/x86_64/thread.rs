@@ -268,11 +268,16 @@ pub unsafe fn fpu_init() {
         let mut cr4: u64;
         core::arch::asm!("mov {}, cr4", out(reg) cr4, options(nomem, nostack));
         cr4 |= (1 << 9) | (1 << 10); // OSFXSR | OSXMMEEXCPT
-        // XSAVE enablement (guarded below by CPUID — the #NM handler
-        // re-runs this on ancient parts without it).
+        // XSAVE enablement. Guard on the CAPABILITY bit only: CPUID.1:ECX
+        // bit 27 (OSXSAVE) MIRRORS CR4.OSXSAVE and reads 0 until the OS
+        // sets it — checking both bits before writing CR4 made the gate
+        // always-fail and silently skipped AVX enablement (caught by the
+        // XCR0 print: "CPU reports no OSXSAVE" with ecx=0xf7f83203 — bit
+        // 26 set, bit 27 clear). The #NM handler re-runs this on ancient
+        // parts without XSAVE.
         let (_, _, feat_ecx, _) = crate::arch::x86_64::cpu::cpuid(1, 0);
-        let osxsave_ok = feat_ecx & (1 << 26) != 0 && feat_ecx & (1 << 27) != 0;
-        if osxsave_ok {
+        let xsave_capable = feat_ecx & (1 << 26) != 0;
+        if xsave_capable {
             cr4 |= 1 << 18; // OSXSAVE
         }
         core::arch::asm!("mov cr4, {}", in(reg) cr4, options(nostack, preserves_flags));
@@ -287,7 +292,7 @@ pub unsafe fn fpu_init() {
         // ANDed with the imm8-reachable set {x87, SSE, AVX, OPMASK,
         // ZMM_Hi256, Hi16_ZMM}. Setting a bit the CPU does not support
         // is #GP, so the CPUID mask (leaf 0xD EAX) gates each one.
-        if osxsave_ok {
+        if xsave_capable {
             let (d_eax, _, _, _) = crate::arch::x86_64::cpu::cpuid(0xd, 0);
             let mut mask: u64 = 0x3; // x87 | SSE — always
             if d_eax & (1 << 2) != 0 {
@@ -315,6 +320,35 @@ pub unsafe fn fpu_init() {
             // Only now may the switch paths use the xsave/xrstor pair
             // (they #UD while OSXSAVE is clear).
             XSAVE_READY.store(true, core::sync::atomic::Ordering::Release);
+            // b143 verification: the AVX #UD family (hdcd/processdump
+            // vmovaps) only dies when XCR0[AVX] failed to land — print
+            // the live register so a regression is one grep away.
+            let (lo, hi): (u32, u32);
+            // SAFETY: xgetbv reads XCR0 (OSXSAVE is set above).
+            unsafe {
+                core::arch::asm!(
+                    "xgetbv",
+                    lateout("eax") lo,
+                    lateout("edx") hi,
+                    in("ecx") 0u32,
+                    options(nostack, preserves_flags),
+                );
+            }
+            crate::pr_info!(
+                "fpu: OSXSAVE+XCR0={:#x}{} (cpu feature mask {:#x})",
+                ((hi as u64) << 32) | lo as u64,
+                if (((hi as u64) << 32) | lo as u64) & 4 != 0 {
+                    " AVX"
+                } else {
+                    " NO-AVX"
+                },
+                mask,
+            );
+        } else {
+            crate::pr_warn!(
+                "fpu: CPU reports no OSXSAVE (ecx={:#x}) — AVX stays disabled",
+                feat_ecx
+            );
         }
 
         // fninit alone leaves MXCSR at its reset-unknown value; load the
