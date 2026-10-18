@@ -115,17 +115,33 @@ impl ThreadStruct {
     /// Must run in the task's own context on the local CPU, with the FPU
     /// enabled (CR4.OSXSAVE set by `fpu_init`).
     pub unsafe fn fpu_save_for_switch(&mut self) {
-        // SAFETY: xsave64 writes at most the enabled components into the
-        // 4096-byte area; the FxsaveArea field is 64-byte aligned
-        /// (repr(align(64)) and the Task allocator honors alignment).
-        unsafe {
-            core::arch::asm!(
-                "xsave64 ({ptr})",
-                ptr = in(reg) self.fpu.bytes.as_mut_ptr(),
-                in("eax") 0xFFFF_FFFFu32,
-                in("edx") 0xFFFF_FFFFu32,
-                options(att_syntax, nostack, preserves_flags),
-            );
+        // Two encodings for one reason: XSAVE/XRSTOR #UD while
+        // CR4.OSXSAVE is clear, and the very first task switches of
+        // boot run before fpu_init has enabled it on that CPU. Until
+        // XSAVE_READY flips, use the legacy FXSAVE pair — XCR0 is
+        // clear in that window so there is no extended state to lose.
+        if !xsave_ready() {
+            // SAFETY: fxsave64 writes 512 bytes at the given address;
+            // the FxsaveArea field is 64-byte aligned.
+            unsafe {
+                core::arch::asm!(
+                    "fxsave64 ({ptr})",
+                    ptr = in(reg) self.fpu.bytes.as_mut_ptr(),
+                    options(att_syntax, nostack, preserves_flags),
+                );
+            }
+        } else {
+            // SAFETY: xsave64 writes at most the enabled components
+            // into the 4096-byte area.
+            unsafe {
+                core::arch::asm!(
+                    "xsave64 ({ptr})",
+                    ptr = in(reg) self.fpu.bytes.as_mut_ptr(),
+                    in("eax") 0xFFFF_FFFFu32,
+                    in("edx") 0xFFFF_FFFFu32,
+                    options(att_syntax, nostack, preserves_flags),
+                );
+            }
         }
         self.fpu_valid = true;
     }
@@ -150,13 +166,25 @@ impl ThreadStruct {
         // initial state when no image exists.
         unsafe {
             if self.fpu_valid {
-                core::arch::asm!(
-                    "xrstor64 ({ptr})",
-                    ptr = in(reg) self.fpu.bytes.as_ptr(),
-                    in("eax") 0xFFFF_FFFFu32,
-                    in("edx") 0xFFFF_FFFFu32,
-                    options(att_syntax, nostack, preserves_flags),
-                );
+                if xsave_ready() {
+                    // SAFETY: xrstor64 reads the image written by
+                    // fpu_save_for_switch (or built by mark_fpu_clean —
+                    // XSTATE_BV=0 initializes every extended component).
+                    core::arch::asm!(
+                        "xrstor64 ({ptr})",
+                        ptr = in(reg) self.fpu.bytes.as_ptr(),
+                        in("eax") 0xFFFF_FFFFu32,
+                        in("edx") 0xFFFF_FFFFu32,
+                        options(att_syntax, nostack, preserves_flags),
+                    );
+                } else {
+                    // SAFETY: legacy pair for the pre-fpu_init window.
+                    core::arch::asm!(
+                        "fxrstor64 ({ptr})",
+                        ptr = in(reg) self.fpu.bytes.as_ptr(),
+                        options(att_syntax, nostack, preserves_flags),
+                    );
+                }
             } else {
                 core::arch::asm!(
                     "fninit",
@@ -284,6 +312,9 @@ pub unsafe fn fpu_init() {
                 in("ecx") 0u32,
                 options(nostack, preserves_flags),
             );
+            // Only now may the switch paths use the xsave/xrstor pair
+            // (they #UD while OSXSAVE is clear).
+            XSAVE_READY.store(true, core::sync::atomic::Ordering::Release);
         }
 
         // fninit alone leaves MXCSR at its reset-unknown value; load the
@@ -309,6 +340,17 @@ static MXCSR_DEFAULT: u32 = 0x1F80;
 static AVX_ENABLED: core::sync::atomic::AtomicBool =
     core::sync::atomic::AtomicBool::new(false);
 
+/// Whether CR4.OSXSAVE (and XCR0) are programmed on this machine: the
+/// xsave/xrstor instructions #UD until OSXSAVE is set, and early-boot
+/// task switches can run before fpu_init — those use the legacy
+/// fxsave/fxrstor pair instead. Monotonic: once set it never clears.
+static XSAVE_READY: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
 fn avx_enabled() -> bool {
     AVX_ENABLED.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+fn xsave_ready() -> bool {
+    XSAVE_READY.load(core::sync::atomic::Ordering::Relaxed)
 }

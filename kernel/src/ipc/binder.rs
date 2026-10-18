@@ -3153,7 +3153,30 @@ fn binder_transaction(
         let w = world_lock();
         // SAFETY: under WORLD.
         unsafe {
-            let a = pm(w.as_ref().unwrap(), &target).im().alloc.as_ref().unwrap();
+            // b143b (boot mavx2/mud1 panics): the target can die and its
+            // buffer zone (im().alloc) be torn down between the
+            // resolution lock section above and this second one — the
+            // "access to dead proc N" warning followed by this unwrap
+            // PANICKED the kernel whenever a service died with a peer's
+            // transaction in flight (hiview→usb_host). Answer the sender
+            // the way Linux binder_transaction does for a freed target:
+            // BR_DEAD_REPLY, plus drop the strong-ref pin the first
+            // section took (there is no alloc left to release the block
+            // through).
+            let Some(a) = pm(w.as_ref().unwrap(), &target).im().alloc.as_ref() else {
+                if !reply && !oneway {
+                    if let Some(node) = &target_node {
+                        node.st().internal_strong_refs -= 1;
+                    }
+                }
+                *err_cmd = BR_DEAD_REPLY;
+                crate::pr_info!(
+                    "binder: txn #{} target proc {} died before copy — BR_DEAD_REPLY",
+                    txn_id,
+                    target.pid
+                );
+                return;
+            };
             (a.kvirt, a.user_base)
         }
     };
