@@ -379,18 +379,21 @@ int main(void)
         if (p == 0)
             spawner_main(i);
         procs[nprocs++] = p;
+        dprintf(2, "EXITWALK-ACTOR role=spawner%d pid=%d\n", i, p);
     }
     for (i = 0; i < NWALKERS; i++) {
         pid_t p = fork();
         if (p == 0)
             walker_main(i);
         procs[nprocs++] = p;
+        dprintf(2, "EXITWALK-ACTOR role=walker%d pid=%d\n", i, p);
     }
     {
         pid_t p = fork();
         if (p == 0)
             futex_main();
         procs[nprocs++] = p;
+        dprintf(2, "EXITWALK-ACTOR role=futex pid=%d\n", p);
     }
 
     deadline = now_ms() + PROBE_SECS * 1000.0;
@@ -418,6 +421,8 @@ int main(void)
                             futex_main();
                     }
                     procs[j] = p2;
+                    dprintf(2, "EXITWALK-RESPAWN role-idx=%d newpid=%d (old %d died)\n",
+                            j, p2, d);
                     break;
                 }
             }

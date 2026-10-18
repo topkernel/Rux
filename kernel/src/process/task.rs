@@ -1448,6 +1448,14 @@ impl Task {
             (ptr as usize + offset_of!(Task, active_mm)) as *mut Option<*const AddressSpace>,
             None,
         );
+        // Teardown-race guard (mm/deferred_free.rs): procfs walkers borrow
+        // the TASK unpinned (find_task_by_pid); the reaper on another CPU
+        // can free it mid-read. free_task_slot poisons the page before
+        // dealloc, so a time-deferred free leaves late readers looking at
+        // poison values (checked by the is_plausible_task_ptr guard
+        // family) instead of heap-reuse garbage pointers (the walker #GP
+        // family).
+        crate::mm::deferred_free::register_deferred_size(core::mem::size_of::<Task>());
         // Note: thread field already initialized above with ra=cpu_idle_loop;
         // do NOT reinitialize here or the entry point will be zeroed.
         ptr::write(
@@ -1921,6 +1929,14 @@ impl Task {
             (ptr as usize + offset_of!(Task, active_mm)) as *mut Option<*const AddressSpace>,
             None,
         );
+        // Teardown-race guard (mm/deferred_free.rs): procfs walkers borrow
+        // the TASK unpinned (find_task_by_pid); the reaper on another CPU
+        // can free it mid-read. free_task_slot poisons the page before
+        // dealloc, so a time-deferred free leaves late readers looking at
+        // poison values (checked by the is_plausible_task_ptr guard
+        // family) instead of heap-reuse garbage pointers (the walker #GP
+        // family).
+        crate::mm::deferred_free::register_deferred_size(core::mem::size_of::<Task>());
         ptr::write(
             (ptr as usize + offset_of!(Task, thread)) as *mut crate::arch::thread::ThreadStruct,
             crate::arch::thread::ThreadStruct::new(),

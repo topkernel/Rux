@@ -51,7 +51,18 @@ struct Entry {
     deadline: u64,
 }
 
-static DEFER_SIZE: AtomicUsize = AtomicUsize::new(0);
+/// Registered size classes whose frees are deferred (first writer wins
+/// per slot). Two live classes: the MmStruct ArcInner block and the Task
+/// page itself (procfs walkers also borrow the TASK unpinned — the reaper
+/// on another CPU can free it mid-read; free_task_slot poisons the page
+/// before dealloc, so late readers see poison values, never heap-reuse
+/// garbage pointers).
+static DEFER_SIZES: [AtomicUsize; 4] = [
+    AtomicUsize::new(0),
+    AtomicUsize::new(0),
+    AtomicUsize::new(0),
+    AtomicUsize::new(0),
+];
 static mut POOL: [Entry; POOL_CAP] = [Entry {
     ptr: 0,
     size: 0,
@@ -72,20 +83,21 @@ pub fn register_deferred_size(size: usize) {
     if size == 0 {
         return;
     }
-    if DEFER_SIZE
-        .compare_exchange(0, size, Ordering::AcqRel, Ordering::Acquire)
-        .is_ok()
-    {
-        crate::pr_err!(
-            "DEFERFREE: registered size class {} (MmStruct ArcInner block)",
-            size
-        );
+    for slot in DEFER_SIZES.iter() {
+        match slot.compare_exchange(0, size, Ordering::AcqRel, Ordering::Acquire) {
+            Ok(_) => {
+                crate::pr_err!("DEFERFREE: registered size class {}", size);
+                return;
+            }
+            Err(v) if v == size => return, // already registered
+            Err(_) => continue,
+        }
     }
 }
 
 #[inline]
 pub fn deferred_size() -> usize {
-    DEFER_SIZE.load(Ordering::Acquire)
+    DEFER_SIZES[0].load(Ordering::Acquire)
 }
 
 /// Maybe hold back this free. Returns true when the entry was queued
@@ -95,7 +107,17 @@ pub fn deferred_size() -> usize {
 /// Safe in any context (irqsave spinlock; no allocation).
 pub fn try_defer(ptr: *mut u8, layout: &Layout) -> bool {
     let size = layout.size();
-    if size == 0 || size != DEFER_SIZE.load(Ordering::Acquire) {
+    if size == 0 {
+        return false;
+    }
+    let mut matched = false;
+    for slot in DEFER_SIZES.iter() {
+        if slot.load(Ordering::Acquire) == size {
+            matched = true;
+            break;
+        }
+    }
+    if !matched {
         return false;
     }
     let now = crate::drivers::timer::get_jiffies();
