@@ -284,19 +284,28 @@ int main(void)
         }
     }
 
-    /* device-platform fallback (what a null default display forces) */
-    if (!dpy || 0) {
+    /* device-platform fallback: the real render_service may use the
+     * EGL_DEVICE enumeration instead of the default display — exercise
+     * both so the probe sees whichever path RS takes. */
+    {
+        int any_ok = 0;
+        (void)any_ok;
         if (eglQueryDevicesEXT) {
             EGLDeviceEXT devs[8]; int nd = 0;
             if (eglQueryDevicesEXT(8, devs, &nd) && nd > 0) {
                 printf("info A: %d EGL devices\n", nd);
                 ok("A: eglQueryDevicesEXT");
                 if (eglGetPlatformDisplay) {
-                    dpy = eglGetPlatformDisplay(EGL_PLATFORM_DEVICE_EXT, devs[0], NULL);
-                    if (dpy) {
+                    EGLDisplay dd = eglGetPlatformDisplay(EGL_PLATFORM_DEVICE_EXT, devs[0], NULL);
+                    if (dd) {
                         int maj = 0, min = 0;
-                        if (eglInitialize(dpy, &maj, &min)) ok("A: device display init");
-                        else { printf("FAIL A: device display init err=0x%x\n", eglGetError()); total++; dpy = 0; }
+                        if (eglInitialize(dd, &maj, &min)) {
+                            printf("info A: device display init %d.%d\n", maj, min);
+                            ok("A: device display init");
+                        } else {
+                            printf("FAIL A: device display init err=0x%x\n", eglGetError());
+                            total++;
+                        }
                     } else fail("A: eglGetPlatformDisplay(DEVICE)", "NULL");
                 }
             } else fail("A: eglQueryDevicesEXT", "no devices");

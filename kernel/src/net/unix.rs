@@ -1065,9 +1065,10 @@ pub fn unix_send(
         // hilog tap (drm/ui bring-up): OH's userspace log lines exist
         // ONLY inside hilogd (libEGL's stderr adapter prints '<message
         // truncated>' markers). The receiving sockets are bound to
-        // .../hilogInput / .../hilogd.server — mirror the first few
-        // hundred payloads' printable bytes to serial so the graphics
-        // failures name themselves on the console.
+        // .../hilogInput / .../hilogd.server — mirror graphics-relevant
+        // payloads to serial (the first boot run showed the whole system
+        // logs through hilog; an unfiltered tap exhausts its budget
+        // before the graphics cohort starts).
         {
             let is_hilog = target
                 .bound_name
@@ -1076,26 +1077,29 @@ pub fn unix_send(
                 .map(|n| n.ends_with("hilogInput") || n.ends_with("hilogd.server"))
                 .unwrap_or(false);
             if is_hilog && !data.is_empty() {
-                static HILOG_TAPS: core::sync::atomic::AtomicU32 =
-                    core::sync::atomic::AtomicU32::new(0);
-                let n = HILOG_TAPS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-                if n < 400 {
-                    let mut text = [0u8; 120];
-                    let mut k = 0usize;
-                    for &b in data.iter() {
-                        if b >= 0x20 && b < 0x7f {
-                            text[k] = b;
-                            k += 1;
-                            if k == text.len() {
-                                break;
-                            }
+                let mut text = [0u8; 120];
+                let mut k = 0usize;
+                for &b in data.iter() {
+                    if b >= 0x20 && b < 0x7f {
+                        text[k] = b;
+                        k += 1;
+                        if k == text.len() {
+                            break;
                         }
                     }
-                    crate::pr_warn!(
-                        "hilog[{}] {}",
-                        n,
-                        core::str::from_utf8(&text[..k]).unwrap_or("")
-                    );
+                }
+                let s = core::str::from_utf8(&text[..k]).unwrap_or("");
+                const KEYS: [&str; 16] = [
+                    "EGL", "egl", "DRI", "dri", "Mesa", "mesa", "MESA", "gbm", "GBM", "virtio",
+                    "composer", "Composer", "render", "Render", "RENDER", "DISP",
+                ];
+                if KEYS.iter().any(|key| s.contains(key)) {
+                    static HILOG_TAPS: core::sync::atomic::AtomicU32 =
+                        core::sync::atomic::AtomicU32::new(0);
+                    let n = HILOG_TAPS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                    if n < 600 {
+                        crate::pr_warn!("hilog[{}] {}", n, s);
+                    }
                 }
             }
         }
