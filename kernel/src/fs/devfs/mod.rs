@@ -503,6 +503,13 @@ fn devtmpfs_populate() {
         crate::drivers::access_tokenid::DEV_ACCESS_TOKENID,
         &crate::drivers::access_tokenid::TOKENID_OPS,
     );
+    // /dev/watchdog (misc 10:130): OH watchdog_service (init_watchdog.c)
+    // stats/opens it at boot; without the node the service waits 10s and
+    // dies (b151 pid 306). Non-firing softdog — see drivers/watchdog.rs.
+    let _ = registry::register_char_device(
+        crate::drivers::watchdog::DEV_WATCHDOG,
+        &crate::drivers::watchdog::WATCHDOG_OPS,
+    );
 
     let mut root = DEVFS_ROOT.lock_irqsave();
     let root_entry = match root.as_ref() {
@@ -523,6 +530,7 @@ fn devtmpfs_populate() {
         ("urandom", crate::fs::dev_t::DEV_URANDOM, 0o666),
         ("kmsg", crate::fs::dev_t::DEV_KMSG, 0o600),
         ("ashmem", crate::drivers::ashmem::DEV_ASHMEM, 0o666),
+        ("watchdog", crate::drivers::watchdog::DEV_WATCHDOG, 0o666),
         // NOTE: no "access_token_id" here — the node is registered below
         // with the ipc access-token registry (single store). This batch
         // inserts AFTER that registration, so a duplicate entry here
