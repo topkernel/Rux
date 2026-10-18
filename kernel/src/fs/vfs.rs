@@ -374,6 +374,18 @@ pub fn vfs_mount(
             });
             child.set_mount(mnt_desc.clone());
             state.mounts.push(mnt_desc);
+            // Mountpoint back-reference: dentries inside the mount climb
+            // parent==None at the mount root and must hop to THIS
+            // mountpoint dentry to carry the prefix (build_path_rooted).
+            // The hop existed but was never wired here — every path
+            // built from a dentry inside a mount was mount-relative
+            // (/dev/dri reported "/dri"), so dirfd-relative openat
+            // resolved "/dri/card0" → ENOENT: OH's composer VDI
+            // (FindAndOpenKmsCard) readdir'd /dev/dri fine but its
+            // openat(dirfd, "card0") failed silently, the DRM chain saw
+            // "can't open drm card device", zero displays, and the whole
+            // graphics stack ran screen-less (rs-egl r3-r8).
+            mounted_root.set_mountpoint_back(child.clone());
         } else {
             // Intermediate component — create if not exists
             let child = match current.lookup_child(&name) {
@@ -423,6 +435,8 @@ pub fn vfs_umount(mountpoint: &str) -> Result<(), i32> {
         let mut state = VFS_STATE.lock();
         state.mounts.retain(|m| !Arc::ptr_eq(m, &mnt));
     }
+    // Drop the mountpoint back-reference with the mount (see vfs_mount).
+    mnt.root.clear_mountpoint_back();
     *child.vfsmount.lock() = None;
     Ok(())
 }
@@ -467,6 +481,7 @@ pub fn vfs_move_mount(from: &str, to: &str) -> Result<(), i32> {
 
     // Detach from the source mountpoint.
     src_child.clear_mount();
+    mnt.root.clear_mountpoint_back();
 
     if to == "/" {
         // Root overlay: root inode := moved mount's root inode; the moved
@@ -509,6 +524,10 @@ pub fn vfs_move_mount(from: &str, to: &str) -> Result<(), i32> {
         };
         if is_last {
             child.set_mount(mnt.clone());
+            // Re-point the moved mount's root at the new mountpoint (the
+            // back-reference drives the mountpoint prefix in dentry paths;
+            // see vfs_mount).
+            mnt.root.set_mountpoint_back(child.clone());
         } else {
             current = follow_mount(child);
         }

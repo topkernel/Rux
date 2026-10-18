@@ -338,7 +338,13 @@ fn plane_name_prop() -> PropDesc {
 // ============================================================================
 
 /// The single display mode exposed on the connector. Struct layout is
-/// uapi struct drm_mode_modeinfo (72 bytes).
+/// uapi struct drm_mode_modeinfo (68 bytes: the horizontal/vertical
+/// fields are __u16 — the old "72" here overran libdrm's exactly-sized
+/// modeinfo array by 4 bytes, corrupting the caller's heap: the OH
+/// composer devhost took a user-mode #GP in ld.so right after its second
+/// GETCONNECTOR and died (r9, "RegHotPlugCallback_ failed 29189" =
+/// IPC ServiceDied — every later screen/hotplug registration lost its
+/// service).
 #[repr(C)]
 #[derive(Clone, Copy)]
 pub struct DrmModeInfo {
@@ -423,7 +429,17 @@ const DRM_IOCTL_DROP_MASTER: u32 = ioc(0, 0x1f, 0);
 const DRM_IOCTL_AUTH_MAGIC: u32 = ioc(1, 0x11, 4);
 const DRM_IOCTL_GEM_CLOSE: u32 = ioc(1, 0x09, 4);
 const DRM_IOCTL_PRIME_HANDLE_TO_FD: u32 = ioc(3, 0x2d, 16);
+/// Same ioctl with the CORRECT upstream size: struct drm_prime_handle
+/// is 12 bytes (handle, flags, fd — no pad). The 16-byte constant above
+/// was baked from a wrong layout, so OH libdrm's real
+/// DRM_IOWR(0x2d, sizeof 12) fell through to ENOTTY — the gralloc
+/// DrmAllocator logged "can not get fd from prime handle errno: 25"
+/// after a successful CREATE_DUMB and every AllocMem failed, killing
+/// the first real frame (r12). Match BOTH encodings.
+const DRM_IOCTL_PRIME_HANDLE_TO_FD_12: u32 = ioc(3, 0x2d, 12);
 const DRM_IOCTL_PRIME_FD_TO_HANDLE: u32 = ioc(3, 0x2e, 16);
+/// Correct-size alias (see DRM_IOCTL_PRIME_HANDLE_TO_FD_12).
+const DRM_IOCTL_PRIME_FD_TO_HANDLE_12: u32 = ioc(3, 0x2e, 12);
 const DRM_IOCTL_WAIT_VBLANK: u32 = ioc(3, 0x3a, 24);
 const DRM_IOCTL_MODE_GETRESOURCES: u32 = ioc(3, 0xa0, 64);
 // Sizes verified against the IMAGE's libdrm.so (constants embedded in
@@ -788,8 +804,8 @@ fn trace_ioctl(request: u32, ret: i64) {
         | DRM_IOCTL_MODE_GETPLANE
         | DRM_IOCTL_MODE_CREATEPROPBLOB => (T_RES, "enum"),
         DRM_IOCTL_MODE_CREATE_DUMB => (T_DUMB, "create_dumb"),
-        DRM_IOCTL_PRIME_HANDLE_TO_FD => (T_EXPORT, "prime_export"),
-        DRM_IOCTL_PRIME_FD_TO_HANDLE => (T_IMPORT, "prime_import"),
+        DRM_IOCTL_PRIME_HANDLE_TO_FD | DRM_IOCTL_PRIME_HANDLE_TO_FD_12 => (T_EXPORT, "prime_export"),
+        DRM_IOCTL_PRIME_FD_TO_HANDLE | DRM_IOCTL_PRIME_FD_TO_HANDLE_12 => (T_IMPORT, "prime_import"),
         DRM_IOCTL_MODE_ADDFB2 | DRM_IOCTL_MODE_ADDFB => (T_FB, "addfb"),
         DRM_IOCTL_MODE_ATOMIC | DRM_IOCTL_MODE_PAGE_FLIP => (T_ATOMIC, "atomic"),
         DRM_IOCTL_WAIT_VBLANK => (T_VBLANK, "wait_vblank"),
@@ -837,8 +853,10 @@ fn drm_ioctl_inner(request: u32, arg: usize) -> i64 {
             0
         }
         DRM_IOCTL_GEM_CLOSE => gem_close(rdu32_or(arg)),
-        DRM_IOCTL_PRIME_HANDLE_TO_FD => prime_handle_to_fd(arg),
-        DRM_IOCTL_PRIME_FD_TO_HANDLE => prime_fd_to_handle(arg),
+        DRM_IOCTL_PRIME_HANDLE_TO_FD => prime_handle_to_fd(arg, 16),
+        DRM_IOCTL_PRIME_HANDLE_TO_FD_12 => prime_handle_to_fd(arg, 12),
+        DRM_IOCTL_PRIME_FD_TO_HANDLE => prime_fd_to_handle(arg, 16),
+        DRM_IOCTL_PRIME_FD_TO_HANDLE_12 => prime_fd_to_handle(arg, 12),
         DRM_IOCTL_WAIT_VBLANK => wait_vblank(arg),
         DRM_IOCTL_MODE_GETRESOURCES => get_resources(arg),
         DRM_IOCTL_MODE_GETCRTC => get_crtc(arg),
@@ -1142,14 +1160,15 @@ fn get_connector(arg: usize) -> i64 {
     }
     if n_modes > 0 && modes_ptr != 0 {
         let n = (n_modes as usize).min(1);
-        if !crate::arch::uaccess::access_ok(modes_ptr, n * 72) {
+        const MODEINFO_SZ: usize = core::mem::size_of::<DrmModeInfo>();
+        if !crate::arch::uaccess::access_ok(modes_ptr, n * MODEINFO_SZ) {
             return -14;
         }
         if unsafe {
             crate::arch::uaccess::copy_to_user(
                 modes_ptr as *mut u8,
                 &mode as *const DrmModeInfo as *const u8,
-                n * 72,
+                n * MODEINFO_SZ,
             )
         } != 0
         {
@@ -1575,8 +1594,12 @@ fn map_dumb(arg: usize) -> i64 {
 
 /// PRIME_HANDLE_TO_FD: install an anonymous dma-buf-style file that
 /// carries the GEM object (mmap + DMA_BUF_IOCTL_SYNC + FD_TO_HANDLE).
-fn prime_handle_to_fd(arg: usize) -> i64 {
-    let Some(mut b) = copy_in::<16>(arg, 16) else { return -14 };
+fn prime_handle_to_fd(arg: usize, size: usize) -> i64 {
+    // Copy exactly the userspace struct size (12 upstream, 16 for the
+    // old baked constant): a fixed 16 would read/write 4 bytes past a
+    // 12-byte caller struct (stack corruption — same class as the
+    // modeinfo 72/68 bug).
+    let Some(mut b) = copy_in::<16>(arg, size) else { return -14 };
     let handle = rdu32(&b, 0);
     let flags = rdu32(&b, 4);
     let gem = {
@@ -1609,7 +1632,7 @@ fn prime_handle_to_fd(arg: usize) -> i64 {
     }
 
     wru32(&mut b, 8, fd as u32);
-    if !copy_out(arg, &b, 16) {
+    if !copy_out(arg, &b, size) {
         // Best effort: the fd is installed; userspace will just fail.
         return 0;
     }
@@ -1618,8 +1641,9 @@ fn prime_handle_to_fd(arg: usize) -> i64 {
 
 /// PRIME_FD_TO_HANDLE: resolve a prime fd back to a GEM handle. The fd
 /// may have been exported on the other node (or another process).
-fn prime_fd_to_handle(arg: usize) -> i64 {
-    let Some(mut b) = copy_in::<16>(arg, 16) else { return -14 };
+fn prime_fd_to_handle(arg: usize, size: usize) -> i64 {
+    // See prime_handle_to_fd: copy exactly the caller's struct size.
+    let Some(mut b) = copy_in::<16>(arg, size) else { return -14 };
     let prime_fd = rdu32(&b, 8) as i32;
     if prime_fd < 0 {
         return -22;
@@ -1643,7 +1667,7 @@ fn prime_fd_to_handle(arg: usize) -> i64 {
         }
     }
     wru32(&mut b, 0, handle);
-    if !copy_out(arg, &b, 16) {
+    if !copy_out(arg, &b, size) {
         return -14;
     }
     0

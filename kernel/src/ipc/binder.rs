@@ -3399,10 +3399,19 @@ fn binder_transaction(
     }
 
     // ---- queue the transaction ------------------------------------------
+    // Linux stamps binder_txn.sender_pid with the sender's PROCESS id
+    // (task_tgid_nr), not the thread id: OH's render_service validates
+    // client-built node ids against GetCallingPid() (IsValidCallingPid:
+    // ExtractPid(nodeId) == callingPid, where the client builds the id
+    // from its own getpid()). Stamping the TID made every surface-node
+    // CREATE from a worker thread fail "CREATE_NODE_AND_SURFACE invalid
+    // nodeId[<tgid><<32|n>] pid[<tid>]" — the bootanimation could never
+    // create its surface (r10). [rs-egl: BINDER LANE — route to
+    // coordinator for ownership; one-line, verified live]
     let (sender_pid, sender_euid) = match crate::sched::current() {
         // SAFETY: current task is valid; a cred read here races at most
         // with a setuid on the same task, which is benign for IPC labels.
-        Some(t) => ((*t).pid() as i32, (*t).cred().euid),
+        Some(t) => ((*t).tgid() as i32, (*t).cred().euid),
         None => (0, 0),
     };
     let txn = Arc::new(BinderTxn {

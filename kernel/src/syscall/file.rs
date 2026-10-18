@@ -66,7 +66,35 @@ pub fn sys_openat(args: SyscallArgs) -> i64 {
 
     let full_path = match resolve_user_path(dirfd, pathname_ptr) {
         Ok(p) => p,
-        Err(e) => return e as i64,
+        Err(e) => {
+            // OH DRM bring-up (rs-egl): the composer VDI's
+            // FindAndOpenKmsCard openat(dirfd, "card0") died silently —
+            // resolution failures return before every later trace, so
+            // name the dirfd-relative resolution failure directly.
+            if dirfd != -100 {
+                let mut pb = [0u8; PATH_MAX];
+                let name = match strncpy_from_user(pathname_ptr, pb.len(), &mut pb) {
+                    Ok(s) => core::str::from_utf8(s).unwrap_or(""),
+                    Err(_) => "",
+                };
+                if name.starts_with("card") || name.starts_with("renderD") {
+                    static ATRES_FAIL_N: core::sync::atomic::AtomicUsize =
+                        core::sync::atomic::AtomicUsize::new(0);
+                    let n = ATRES_FAIL_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                    if n < 16 {
+                        crate::pr_warn!(
+                            "openat-resolve-fail[{}] dirfd {} '{}' -> errno {} (pid {})",
+                            n,
+                            dirfd,
+                            name,
+                            -(e as i64),
+                            unsafe { crate::process::current_pid() }
+                        );
+                    }
+                }
+            }
+            return e as i64;
+        }
     };
 
     // OH bring-up: trace O_PATH opens (musl's fchmodat fallback opens
@@ -244,6 +272,49 @@ pub fn sys_openat(args: SyscallArgs) -> i64 {
     } else {
         crate::fs::file_open(&full_path, flags, mode)
     };
+
+    // OH DRM bring-up (rs-egl): the composer HDI's DrmDevice::Create
+    // (drm_device.cpp:90, passthrough-loaded into render_service) logs
+    // "can't open drm card device" — but its message carries no errno,
+    // and ENOENT-only tracing missed the real reason. Print every
+    // FAILED open under /dev/dri with the errno so the composer's
+    // failure is named directly (successes are already counted by the
+    // drm driver's own open trace).
+    if full_path.starts_with("/dev/dri") {
+        if let Err(e) = &result {
+            static DRIOpen_FAIL_N: core::sync::atomic::AtomicUsize =
+                core::sync::atomic::AtomicUsize::new(0);
+            let n = DRIOpen_FAIL_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            if n < 32 {
+                crate::pr_warn!(
+                    "dri-open-fail[{}] '{}' flags {:#x} -> errno {} (pid {})",
+                    n,
+                    full_path,
+                    flags,
+                    -e,
+                    unsafe { crate::process::current_pid() }
+                );
+            }
+        } else if (flags & O_DIRECTORY) != 0 {
+            // The composer's FindAndOpenKmsCard opendir()s /dev/dri and
+            // then openat(dirfd)«card0»s; a successful opendir followed
+            // by NO drm ioctl means readdir/openat/getdents broke —
+            // trace the directory open too so the whole walk is
+            // visible on serial.
+            static DRIDIR_OPEN_N: core::sync::atomic::AtomicUsize =
+                core::sync::atomic::AtomicUsize::new(0);
+            let n = DRIDIR_OPEN_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            if n < 8 {
+                crate::pr_warn!(
+                    "dri-dir-open[{}] '{}' flags {:#x} ok (pid {})",
+                    n,
+                    full_path,
+                    flags,
+                    unsafe { crate::process::current_pid() }
+                );
+            }
+        }
+    }
 
     // OH param-workspace hunt (b70): /dev/__parameters__/{param_sec_dac,
     // param_selinux} end up missing — init's GetSharedMem create-open
@@ -708,6 +779,63 @@ pub fn sys_getdents64(args: SyscallArgs) -> i64 {
 
     // Call VFS layer
     let result = file_getdents64(fd, &mut buffer, count);
+
+    // OH DRM bring-up (rs-egl): the composer VDI's FindAndOpenKmsCard
+    // opendir()s /dev/dri then openat()s "card0" per readdir entry; a
+    // getdents that returns no entries (or errors) leaves the loop empty
+    // and the composer reports "can't open drm card device" with no drm
+    // ioctl ever issued. Name the /dev/dri getdents result directly.
+    {
+        let path = crate::sched::get_current_fdtable()
+            .and_then(|ft| ft.get_file(fd))
+            .and_then(|f| {
+                let p = f.path();
+                if p.is_empty() { None } else { Some(p) }
+            });
+        if let Some(p) = path {
+            if p.ends_with("dri") {
+                static DRIDENTS_N: core::sync::atomic::AtomicUsize =
+                    core::sync::atomic::AtomicUsize::new(0);
+                let n = DRIDENTS_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                if n < 24 {
+                    match &result {
+                        Ok(b) => {
+                            // Entry dump (the composer's FindAndOpenKmsCard
+                            // strncmp()s d_name against "card" — if the
+                            // names/reclens are wrong the loop skips every
+                            // entry and "can't open drm card device" follows
+                            // with no openat ever issued; the raw bytes name
+                            // that directly).
+                            let mut txt = alloc::string::String::with_capacity(96);
+                            for &byte in buffer.iter().take((*b).min(96)) {
+                                if byte >= 0x20 && byte < 0x7f {
+                                    txt.push(byte as char);
+                                } else {
+                                    txt.push('.');
+                                }
+                            }
+                            crate::pr_warn!(
+                                "dri-getdents[{}] '{}' -> {} bytes: {} (pid {})",
+                                n,
+                                p,
+                                b,
+                                txt,
+                                unsafe { crate::process::current_pid() }
+                            );
+                        }
+                        Err(e) => crate::pr_warn!(
+                            "dri-getdents[{}] '{}' -> errno {} (pid {})",
+                            n,
+                            p,
+                            -e,
+                            unsafe { crate::process::current_pid() }
+                        ),
+                    }
+                }
+            }
+        }
+    }
+
     match result {
         Ok(bytes_read) => {
             // SAFETY: dirp validated with access_ok(count); bytes_read <= count.
