@@ -514,7 +514,17 @@ fn tracked_index(phys: usize) -> usize {
     if phys < base {
         return usize::MAX;
     }
-    (phys - base) / 4096
+    let idx = (phys - base) / 4096;
+    // The PFN->site table is a fixed 2 GiB window (PPAGE_TABLE_ENTRIES).
+    // On x86_64 q35 DRAM spans 0x0-0x7ffcd000 + 0x100000000-0x180000000,
+    // so a PFN past 2 GiB (high RAM) is outside the tracked range; an
+    // unguarded return made note_page_free's `table[first]` load panic
+    // with "index out of bounds: len 524288" the moment a high-RAM page
+    // was freed (dfx=memwatch boots died ~180 log lines in).
+    if idx >= PPAGE_TABLE_ENTRIES {
+        return usize::MAX;
+    }
+    idx
 }
 
 fn put_dec(v: u64) {

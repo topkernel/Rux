@@ -1087,6 +1087,38 @@ pub fn do_signal(regs: *mut crate::arch::pt_regs::PtRegs) -> bool {
         let action = (*current).signal.as_ref()
             .and_then(|s| s.get_action(sig));
 
+        // Global-init delivery filter (Linux get_signal()'s
+        // SIGNAL_UNKILLABLE rule, signal(7): "the only signals that can be
+        // delivered to process ID 1 are those for which it has installed a
+        // handler"). For pid 1, a dequeued signal with no installed
+        // handler is DISCARDED here instead of executed — SIGKILL/SIGSTOP
+        // included (no handler can exist for those), so a userspace
+        // broadcast/process-group kill (LTP kill10) still cannot take PID
+        // 1 down. This is deliberately on the DELIVERY path only: at send
+        // time the signal is queued like for any task, so a BLOCKED
+        // signal on init stays pending and remains observable through
+        // signalfd/sigwaitinfo — the systemd/OH-init reaper pattern
+        // (block SIGCHLD + read it via signalfd, no handler installed)
+        // depends on exactly that. Kernel-forced kills of a crashing init
+        // bypass do_signal (trap path calls do_exit directly).
+        if (*current).pid() == 1 && (*current).tgid() == 1 {
+            let handled = action
+                .as_ref()
+                .map(|a| a.action() == SigActionKind::Handler)
+                .unwrap_or(false);
+            if !handled {
+                // Discard without running a disposition. No handler frame
+                // is built, so convert any syscall-restart sentinel now
+                // (else the raw -512 could leak to userspace as a bogus
+                // errno — same engine as the traced-stop path above).
+                restart_syscall_no_handler(regs);
+                (*current).pending.remove(sig);
+                // Re-select: more signals may be pending behind this one.
+                delivered = true;
+                continue;
+            }
+        }
+
         // Snapshot the queued siginfo payload for this signal (kernel-
         // generated signals like SIGCHLD carry si_code/si_status here).
         // It is consumed together with the bitmap bit at the remove()
@@ -2134,25 +2166,27 @@ unsafe fn send_signal_locked_info(
         }
     }
 
-    // Linux prepare_signal(): the global init process only receives
-    // signals it has explicitly installed a handler for — every other
-    // signal, INCLUDING SIGKILL/SIGSTOP, is silently discarded. Without
-    // this, a broadcast/process-group kill escaping a test (LTP kill10's
-    // signal flood between 10 forked pgrps) reaches PID 1, kills the
-    // sweep runner, and powers the whole machine off mid-chunk.
-    // Kernel-forced kills of a crashing init bypass this funnel (the trap
-    // path calls do_exit directly), so a genuinely broken init still dies.
-    if task.pid() == 1 && task.tgid() == 1 {
-        let handled = task
-            .signal
-            .as_ref()
-            .and_then(|s| s.get_action(sig))
-            .map(|a| a.action() == SigActionKind::Handler)
-            .unwrap_or(false);
-        if !handled {
-            return Ok(());
-        }
-    }
+    // Linux semantics for the global init ("only signals it has a handler
+    // for are DELIVERED", signal(7)) are enforced at DELIVERY time in
+    // do_signal — never here at send time. The old send-time discard
+    // dropped BLOCKED signals before they could pend, which broke the
+    // pid-1 reaper pattern: OH init (and systemd) block SIGCHLD and read
+    // it through a signalfd, so no handler is ever installed. With the
+    // send-time filter every SIGCHLD to init vanished at the exit-notify
+    // path — init never reaped, dead services stayed zombies, and the
+    // critical-service restart (foundation hosts ams/bms/wms) never ran
+    // (OH boots died at bootanimation.finished with foundation SIGKILLed
+    // and unreaped). Linux's sig_ignored() explicitly exempts blocked
+    // signals ("Blocked signals are never ignored"); the SIGNAL_UNKILLABLE
+    // check lives in get_signal() — after dequeue, on the delivery path.
+    // do_signal reproduces that: for pid 1, a dequeued signal without an
+    // installed handler is discarded instead of executed (SIGKILL/SIGSTOP
+    // included — you cannot install handlers for those), so the LTP
+    // kill10 broadcast-kill protection is preserved, while pending
+    // blocked signals stay observable via signalfd/sigwaitinfo as on
+    // Linux. Kernel-forced kills of a crashing init bypass do_signal (the
+    // trap path calls do_exit directly), so a genuinely broken init still
+    // dies.
 
     // SIGKILL and SIGSTOP cannot be ignored
     if sig == Signal::SIGKILL as i32 || sig == Signal::SIGSTOP as i32 {
@@ -2181,12 +2215,48 @@ unsafe fn send_signal_locked_info(
         }
     };
 
-    // Linux prepare_signal(): a SIG_IGN disposition discards the signal
-    // BEFORE it is marked pending. The old add-then-remove left a
-    // transient pending bit that wait_event_interruptible polls could
-    // observe — the waiter then returned -ERESTARTSYS for a signal that
-    // vanished before delivery, leaking the raw -512 sentinel to
-    // userspace as a bogus errno.
+    // SFDDBG (launcher bring-up): trace every signal TO pid 1 through the
+    // send path — disposition, block state, pending-after. OH init blocks
+    // SIGCHLD and reads it via signalfd; any silent drop here wedges the
+    // whole service-restart machinery. Rate-limited.
+    if task.pid() == 1 {
+        static SFDDBG_N: core::sync::atomic::AtomicUsize =
+            core::sync::atomic::AtomicUsize::new(0);
+        if SFDDBG_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 200 {
+            let disp = signal_ref
+                .get_action(sig)
+                .map(|a| match a.action() {
+                    SigActionKind::Default => "DFL",
+                    SigActionKind::Ignore => "IGN",
+                    SigActionKind::Handler => "HND",
+                })
+                .unwrap_or("none");
+            let blocked = task.sigmask & (1u64 << (sig - 1)) != 0;
+            crate::pr_info!(
+                "SFDDBG: send->pid1 sig={} disp={} blocked={} pending={:#x}",
+                sig,
+                disp,
+                blocked,
+                task.pending.get_all()
+            );
+        }
+    }
+
+    // Linux sig_ignored() ordering: BLOCKED signals are NEVER ignored —
+    // check the block mask BEFORE the SIG_IGN discard. A task that blocks
+    // a signal and consumes it via signalfd/sigwaitinfo (systemd's and OH
+    // init's reaper: block SIGCHLD, read it from a signalfd, SIG_IGN
+    // disposition untouched) must see it pend; the old order ran the
+    // Ignore-drop first and the signal vanished before the fd could ever
+    // observe it (OH boots: init never reaped a single child; every dead
+    // service stayed zombie and the critical-service restart never ran).
+    //
+    // Linux prepare_signal(): a SIG_IGN disposition (and not blocked)
+    // discards the signal BEFORE it is marked pending. The old
+    // add-then-remove left a transient pending bit that
+    // wait_event_interruptible polls could observe — the waiter then
+    // returned -ERESTARTSYS for a signal that vanished before delivery,
+    // leaking the raw -512 sentinel to userspace as a bogus errno.
     //
     // sig_task_ignored() exception: a TRACED task never ignores a signal
     // (Linux's ptrace check exempts only SIGKILL/SIGSTOP, which bypass
@@ -2194,9 +2264,14 @@ unsafe fn send_signal_locked_info(
     // signal-delivery-stop, even one whose disposition is SIG_IGN (LTP
     // ptrace01/ptrace05: a TRACEME'd child SIG_IGN'ing a signal, or the
     // default-ignored SIGCHLD, still has to stop when the signal arrives).
-    if let Some(action) = signal_ref.get_action(sig) {
-        if action.action() == SigActionKind::Ignore && task.tracer_pid() == 0 {
-            return Ok(());
+    let sig_blocked = sig >= 1
+        && sig <= 64
+        && task.sigmask & (1u64 << (sig - 1)) != 0;
+    if !sig_blocked {
+        if let Some(action) = signal_ref.get_action(sig) {
+            if action.action() == SigActionKind::Ignore && task.tracer_pid() == 0 {
+                return Ok(());
+            }
         }
     }
 

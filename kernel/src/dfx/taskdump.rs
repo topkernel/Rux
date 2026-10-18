@@ -535,6 +535,27 @@ pub fn dump_all_tasks(reason: &str) {
                     putc(b'.');
                 }
             }
+            // Last syscall latched at dispatch ENTRY (per-task): for a
+            // sleeping task this names the syscall it is parked in —
+            // the discriminator for "which kernel object is this waiter
+            // on" hunts (account-activation stall: epoll? futex? binder
+            // ioctl? signalfd?).
+            {
+                let nr = t.last_syscall_nr.load(core::sync::atomic::Ordering::Relaxed);
+                if nr != 0 {
+                    let a0 = t.last_syscall_a0.load(core::sync::atomic::Ordering::Relaxed);
+                    let a1 = t.last_syscall_a1.load(core::sync::atomic::Ordering::Relaxed);
+                    puts(" lastsys=");
+                    put_dec(nr as u64);
+                    puts("(");
+                    put_hex(a0);
+                    putc(b',');
+                    put_hex(a1);
+                    puts(")");
+                } else {
+                    puts(" lastsys=?");
+                }
+            }
             putc(b'\n');
             #[cfg(feature = "dfx-taskdump-bt")]
             {

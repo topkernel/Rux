@@ -2591,6 +2591,18 @@ static SIGNALFD_WAKE_REGISTRY: crate::sync::spinlock::Spinlock<SignalfdWakeRegis
 /// instead of waiting out the poll interval.
 pub fn signalfd_notify_task(task: *mut crate::process::task::Task) {
     let registry = SIGNALFD_WAKE_REGISTRY.lock_irqsave();
+    // SFDDBG (launcher bring-up): did the wake reach a pid-1-owned fd?
+    // Zero bindings means the fd was never registered (or was closed).
+    if unsafe { (*task).pid() == 1 } {
+        static NT_N: core::sync::atomic::AtomicUsize =
+            core::sync::atomic::AtomicUsize::new(0);
+        if NT_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 100 {
+            crate::pr_info!(
+                "SFDDBG: notify pid1 registry_len={}",
+                registry.bindings.len()
+            );
+        }
+    }
     for (owner, wq) in registry.bindings.iter() {
         if *owner == task {
             // SAFETY: wq points into a boxed SignalFd alive until its close
@@ -2648,6 +2660,15 @@ fn signalfd_read(file: &crate::fs::File, buf: &mut [u8]) -> isize {
         let ready = pending & mask;
         if ready != 0 {
             let sig = ready.trailing_zeros() as i32 + 1;
+            // SFDDBG (launcher bring-up): a pid-1 signalfd consume — the
+            // moment init learns a child died (HandleSigChild follows).
+            if (*current).pid() == 1 {
+                static RD_N: core::sync::atomic::AtomicUsize =
+                    core::sync::atomic::AtomicUsize::new(0);
+                if RD_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 100 {
+                    crate::pr_info!("SFDDBG: pid1 read sfd consumed sig={}", sig);
+                }
+            }
             // Consume (sigtimedwait semantics): clear the bitmap bit and
             // take the queued info when present.
             // SAFETY: current is the running task's pointer.
