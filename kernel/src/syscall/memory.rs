@@ -2075,6 +2075,19 @@ fn sys_mremap_inner(args: [u64; 6]) -> i64 {
         return mmap_error::EFAULT;
     }
 
+    // NOTE (hilogd hunt, left as evidence for the mm lane): Linux
+    // vma_to_resize SPLITS a larger VMA at addr+old_len (the tail stays
+    // mapped as its own VMA — mremap() with old_len < mapping size does
+    // NOT truncate), and vma_expandable then still refuses in-place
+    // growth into an adjacent next VMA. A tail-TRIM variant (unmap the
+    // excess) was tried here and reverted: it made shrink-then-grow
+    // succeed but silently freed the merged neighbor's pages — data
+    // loss Linux never performs (test/mrpar.c case 2 catches it).
+    // hilogd's 66x MREMAP-FAIL storm (old_sz=4K new_sz=8K flags=0) is
+    // therefore NOT resolved by a syscall-side change; whether those
+    // calls succeed on Linux depends on VMA-merge visibility, which
+    // lives in mm/vma.rs.
+
     // 2. Decide operation type based on new_size
     if new_size_aligned == old_size_aligned {
         // NO_RESIZE: size unchanged
