@@ -457,6 +457,8 @@ const DRM_IOCTL_MODE_ADDFB2: u32 = ioc(3, 0xb8, 104);
 const DRM_IOCTL_MODE_ATOMIC: u32 = ioc(3, 0xbc, 56);
 const DRM_IOCTL_MODE_CREATEPROPBLOB: u32 = ioc(3, 0xbd, 16);
 const DRM_IOCTL_MODE_DESTROYPROPBLOB: u32 = ioc(3, 0xbe, 4);
+/// DRM_IOCTL_VIRTGPU_GETPARAM (virtio-gpu driver-private, nr 0x43).
+const DRM_IOCTL_VIRTGPU_GETPARAM: u32 = ioc(3, 0x43, 16);
 
 /// DRM_CAP_* ids queried through DRM_IOCTL_GET_CAP.
 const DRM_CAP_DUMB_BUFFER: u64 = 0x1;
@@ -760,7 +762,14 @@ fn trace_ioctl(request: u32, ret: i64) {
     };
     let n = TRACE_COUNTS[slot].fetch_add(1, Ordering::Relaxed);
     if n == 0 {
-        crate::pr_warn!("drm: first {} (ret {})", name, ret);
+        if slot == T_UNHANDLED {
+            // Include the raw request: the OH bring-up needs the exact
+            // ioctl number userspace asked for (e.g. Mesa's gbm/EGL path
+            // probing a driver-specific ioctl before falling back).
+            crate::pr_warn!("drm: first ENOTTY request={:#x} (ret {})", request, ret);
+        } else {
+            crate::pr_warn!("drm: first {} (ret {})", name, ret);
+        }
     } else if slot == T_ATOMIC && n % 100 == 0 {
         crate::pr_warn!("drm: atomic commits so far: {}", n + 1);
     } else if slot == T_DUMB && n % 50 == 0 {
@@ -815,8 +824,54 @@ fn drm_ioctl_inner(request: u32, arg: usize) -> i64 {
         DRM_IOCTL_MODE_ATOMIC => mode_atomic(arg),
         DRM_IOCTL_MODE_CREATEPROPBLOB => create_prop_blob(arg),
         DRM_IOCTL_MODE_DESTROYPROPBLOB => destroy_prop_blob(rdu32_or(arg)),
+        DRM_IOCTL_VIRTGPU_GETPARAM => virtgpu_getparam(arg),
         _ => -25, // ENOTTY
     }
+}
+
+/// DRM_IOCTL_VIRTGPU_GETPARAM (0xc0106443) — the first ioctl Mesa's
+/// virtio_gpu dri driver issues after the loader picks it via the
+/// DRM_IOCTL_VERSION name. The QEMU device here has no virgl/3D, so
+/// Linux reports 0 for every parameter and Mesa's virtio_gpu screen
+/// create fails cleanly, which is what routes gbm/EGL onto the
+/// kms_swrast (llvmpipe + dumb-buffer) fallback — the reference
+/// kernel's software-rendering path. Answering ENOTTY instead made
+/// gbm's driver attempt die without the swrast retry (boot u7:
+/// ENOTTY -> RS munmaps its 57MB Mesa image -> one card0 re-open ->
+/// silence).
+///
+/// struct drm_virtgpu_getparam { __u64 param; __u64 value; } — param in,
+/// value out, 0 on success; unknown param -> EINVAL (Linux).
+fn virtgpu_getparam(arg: usize) -> i64 {
+    let Some(mut b) = copy_in::<16>(arg, 16) else { return -14 };
+    let param = rdu64(&b, 0);
+    // VIRTGPU_PARAM_* (include/uapi/drm/virtgpu_drm.h). All zero: no 3D,
+    // no host-visible heaps, no cross-device, no context-init, no capsets.
+    const VIRTGPU_PARAM_3D_FEATURES: u64 = 1;
+    const VIRTGPU_PARAM_CAPSET_MAX_FIXUPS: u64 = 2;
+    const VIRTGPU_PARAM_RESOURCE_BASE_BUSY: u64 = 3;
+    const VIRTGPU_PARAM_HOST_VISIBLE: u64 = 4;
+    const VIRTGPU_PARAM_CROSS_DEVICE: u64 = 5;
+    const VIRTGPU_PARAM_CONTEXT_INIT: u64 = 6;
+    const VIRTGPU_PARAM_SUPPORTED_CAPSET_IDS: u64 = 8;
+    let supported = matches!(
+        param,
+        VIRTGPU_PARAM_3D_FEATURES
+            | VIRTGPU_PARAM_CAPSET_MAX_FIXUPS
+            | VIRTGPU_PARAM_RESOURCE_BASE_BUSY
+            | VIRTGPU_PARAM_HOST_VISIBLE
+            | VIRTGPU_PARAM_CROSS_DEVICE
+            | VIRTGPU_PARAM_CONTEXT_INIT
+            | VIRTGPU_PARAM_SUPPORTED_CAPSET_IDS
+    );
+    if !supported {
+        return -22; // EINVAL
+    }
+    wru64(&mut b, 8, 0);
+    if !copy_out(arg, &b, 16) {
+        return -14;
+    }
+    0
 }
 
 /// Read a lone u32 ioctl argument (RMFB, GEM_CLOSE, DESTROY_DUMB...).
