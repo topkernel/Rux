@@ -764,9 +764,47 @@ pub struct BuddyStats {
     pub free_count: usize,
 }
 
+/// LOCK-FREE rough heap census for the alloc-failure (ALLOCTHROW) print.
+///
+/// `buddy_stats()` takes the allocator irqsave lock, which is exactly
+/// what the OOM-moment print must not rely on (the failure can arrive
+/// with the caller holding unrelated locks; a wedged print would lose
+/// the panic). This walks the free lists through the atomics only and
+/// tolerates concurrent mutation: bounds-check every index, cap the
+/// per-order walk, and let a torn read terminate the chain. The numbers
+/// are a watermark, not an audit.
+///
+/// Returns (heap_size, free_bytes, blocks_at_order_0..=BUDDY_MAX_ORDER
+/// truncated to u32 counts) — kept as a plain tuple to avoid any
+/// formatting on the hot path.
+pub fn buddy_free_census_lockfree() -> (usize, usize, [u32; MAX_ORDER + 1]) {
+    let mut blocks = [0u32; MAX_ORDER + 1];
+    if HEAP_ALLOCATOR.initialized.load(Ordering::Acquire) == 0 {
+        return (0, 0, blocks);
+    }
+    let start = HEAP_ALLOCATOR.heap_start.load(Ordering::Acquire);
+    let end = HEAP_ALLOCATOR.heap_end.load(Ordering::Acquire);
+    let heap_size = end.saturating_sub(start);
+    let mut free_pages = 0usize;
+    for order in 0..=MAX_ORDER {
+        let mut page_idx = HEAP_ALLOCATOR.free_lists[order].load(Ordering::Acquire);
+        let mut hops = 0usize;
+        while page_idx != EMPTY_LIST && page_idx < MAX_PAGES && hops < MAX_PAGES {
+            blocks[order] = blocks[order].saturating_add(1);
+            free_pages += 1usize << order;
+            let next = HEAP_ALLOCATOR.meta.get(page_idx).next as usize;
+            if next == u32::MAX as usize || next >= MAX_PAGES {
+                break;
+            }
+            page_idx = next;
+            hops += 1;
+        }
+    }
+    (heap_size, free_pages * PAGE_SIZE, blocks)
+}
+
 /// Get Buddy allocator statistics
-pub fn buddy_stats() -> BuddyStats {
-    let mut stats = BuddyStats::default();
+pub fn buddy_stats() -> BuddyStats {    let mut stats = BuddyStats::default();
 
     if HEAP_ALLOCATOR.initialized.load(Ordering::Acquire) == 0 {
         return stats;

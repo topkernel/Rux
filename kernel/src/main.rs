@@ -179,6 +179,24 @@ fn alloc_error_handler(layout: core::alloc::Layout) -> ! {
         taskdump_raw_line(b" pid=");
         taskdump_dec(task.pid() as u64);
     }
+    // Heap watermark at the failure moment (r14 family: is the 1GB heap
+    // genuinely full, or did the free lists fragment/empty some other
+    // way?). Lock-free census — see buddy_free_census_lockfree; taking
+    // the allocator lock here could wedge the very print we die on.
+    {
+        let (heap_size, free_bytes, blocks) = crate::mm::buddy_free_census_lockfree();
+        taskdump_raw_line(b"\nALLOCTHROW heap: size=");
+        taskdump_dec((heap_size / 1024) as u64);
+        taskdump_raw_line(b"K free=");
+        taskdump_dec((free_bytes / 1024) as u64);
+        taskdump_raw_line(b"K blocks[o0..]=");
+        let max_o = blocks.len().min(8);
+        for i in 0..max_o {
+            taskdump_dec(blocks[i] as u64);
+            taskdump_raw_line(b" ");
+        }
+        taskdump_raw_line(b"\n");
+    }
     // R75-followup: the validated walk (memwatch::walk_fp_chain) stops at the
     // first frame that fails its `next > fp` plausibility check, which in the
     // paint-agent capture yielded no usable frames. Dump the chain LENIENTLY
@@ -189,14 +207,24 @@ fn alloc_error_handler(layout: core::alloc::Layout) -> ! {
     unsafe {
         let mut fp = crate::dfx::backtrace::current_frame_pointer();
         for _ in 0..16 {
-            if !(fp >= 0x8000_0000_0000_0000 && fp & 7 == 0) {
+            // plausible_fp: readable-kernel-memory only — a stale slot
+            // holding a canonical-but-unmapped value (guard region) must
+            // terminate the walk, not fault it (see memwatch::plausible_fp).
+            if !(fp >= 0x8000_0000_0000_0000
+                && fp & 7 == 0
+                && crate::dfx::memwatch::plausible_fp(fp))
+            {
                 break;
             }
             let ra = core::ptr::read_volatile((fp - 8) as *const u64);
             let next = core::ptr::read_volatile((fp - 0x10) as *const u64);
             taskdump_raw_line(b" ");
             taskdump_raw_line(format_hex(ra).as_bytes());
-            if !(next & 7 == 0 && next > fp && next < 0xffff_ffff_ffff_f000) {
+            if !(next & 7 == 0
+                && next > fp
+                && next < 0xffff_ffff_ffff_f000
+                && crate::dfx::memwatch::plausible_fp(next))
+            {
                 break;
             }
             fp = next;
@@ -470,6 +498,10 @@ pub fn rust_main_tail() -> ! {
                 span_size,
                 KERNEL_PHYS_LOAD_ADDR,
                 KERNEL_HEAP_PHYS,
+                // Contiguous-usable clamp for the heap+slab carve (holes
+                // are unmapped in the linear map — rs-egl r12/13/15);
+                // phys_size above stays the full PFN span on purpose.
+                mm::layout::heap_region_end(&memory_regions, KERNEL_HEAP_PHYS),
             );
             mm::layout::kernel_layout_init(layout);
             // Boot-time cross-check: heap/slab ranges must be reserved in
@@ -1283,10 +1315,18 @@ pub extern "C" fn rust_main() -> ! {
             .map(|r| r.base + r.size)
             .max()
             .unwrap_or(0);
+        // Contiguous-usable clamp: the carve must not cross a memory hole
+        // (x86_64 q35 4G: usable ends 0x7ffcd000, hole to 0x80000000, more
+        // RAM above 4G — a span bound alone put the heap tail + slab in
+        // unmapped hole DRAM; writes faulted with no fixup at first-frame
+        // composition, rs-egl r12/r13/r15). On hole-free machines (riscv64)
+        // the region end equals the span end and this is a no-op.
+        let heap_region_end = mm::layout::heap_region_end(&memory_regions, KERNEL_HEAP_PHYS);
         let eff = mm::layout::effective_static_regions(
             MEMORY_PHYS_BASE,
             phys_end.saturating_sub(MEMORY_PHYS_BASE),
             KERNEL_HEAP_PHYS,
+            heap_region_end,
         );
         let heap_start = eff.heap_start;
         let heap_size = eff.heap_size;
@@ -1304,8 +1344,8 @@ pub extern "C" fn rust_main() -> ! {
             mm::memblock_reserve(slab_start, slab_size).ok(); // Slab
         }
         crate::println!(
-            "boot: static regions phys_end={:#x} heap={:#x}+{:#x} slab={:#x}+{:#x}",
-            phys_end, heap_start, heap_size, slab_start, slab_size
+            "boot: static regions phys_end={:#x} heap_region_end={:#x} heap={:#x}+{:#x} slab={:#x}+{:#x}",
+            phys_end, heap_region_end, heap_start, heap_size, slab_start, slab_size
         );
         HEAP_SIZE_EFF.store(heap_size, core::sync::atomic::Ordering::Release);
         HEAP_SLAB_END_EFF.store(
