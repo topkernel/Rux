@@ -1097,6 +1097,21 @@ pub fn unix_send(
                         }
                     }
                 }
+                // SO_PASSCRED parity: Linux stamps the sender's
+                // {pid,uid,gid} into every skb at send time (scm.c
+                // __scm_send snapshots the current task unconditionally);
+                // the RECEIVER's recvmsg emits the SCM_CREDENTIALS cmsg
+                // only when the receiving socket has SO_PASSCRED set.
+                // hilogd's stats-query socket rides on this contract: its
+                // RequestStatsQuery derefs the cmsg buffer pointer
+                // unconditionally after a successful recvmsg (compiled
+                // path at libhilog.so+0x17efc reads [rax+0x18] with rax
+                // = msg_control when controllen < 16), so a receive
+                // without the cmsg is a NULL-deref SIGSEGV that kills
+                // the hilogd.server thread — no hilog visibility.
+                if cred.is_none() {
+                    cred = Some(current_unix_cred());
+                }
                 q.push_back(UnixSeg {
                     data: data.to_vec(),
                     files,

@@ -42,6 +42,8 @@ use crate::sync::spinlock::Spinlock;
 
 /// Linux DRM primary-node major.
 const DRM_MAJOR: u32 = 226;
+/// Same, exposed for the sysfs class registration (dev/char link names).
+pub const DRM_MAJOR_NUM: u32 = DRM_MAJOR;
 /// /dev/dri/card0 (primary node, opened by the composer).
 pub const DEV_DRM_CARD0: crate::fs::dev_t::DevNo = crate::fs::dev_t::DevNo::new(DRM_MAJOR, 0);
 /// /dev/dri/renderD128 (render node, opened by the gbm gralloc).
@@ -829,9 +831,14 @@ fn rdu32_or(arg: usize) -> u32 {
 
 fn drm_version(arg: usize) -> i64 {
     let Some(mut b) = copy_in::<64>(arg, 64) else { return -14 };
-    let name = b"rux-drm\0";
+    // Driver name must be "virtio_gpu": libdrm/Mesa's loader maps the
+    // kernel driver name onto the image's virtio_gpu_dri.so (with a
+    // kms_swrast fallback) — this is what the reference Linux 6.6
+    // virtio-gpu reports and what gbm's "failed to get driver name for
+    // fd" path matches on. Anything else leaves EGL without a driver.
+    let name = b"virtio_gpu\0";
     let date = b"20261014\0";
-    let desc = b"rux minimal DRM/KMS over virtio-gpu\0";
+    let desc = b"virtio-gpu DRM/KMS (rux)\0";
 
     let name_len = rdu64(&b, 16) as usize;
     let name_ptr = rdu64(&b, 24) as usize;
@@ -1998,6 +2005,13 @@ pub fn init_drm() -> Result<(), ()> {
     crate::fs::devfs::mkdir("graphics")?;
     crate::fs::devfs::mknod("graphics/fb0", crate::fs::dev_t::DEV_FB0, 0o666)?;
 
+    // sysfs class entries for the DRM nodes, rooted at the virtio-gpu
+    // PCI function: /sys/class/drm/{card0,renderD128} +
+    // /sys/dev/char/226:{0,128} + the PCI device dir libdrm's
+    // drmGetDevice(fd) walk needs (see register_drm_device).
+    let slot_name = gpu_pci_slot_name();
+    crate::fs::sysfs::register_drm_device(&slot_name);
+
     crate::pr_info!(
         "drm: /dev/dri/card0 + renderD128 registered (crtc={} conn={} enc={} plane={})",
         OBJ_CRTC,
@@ -2006,4 +2020,25 @@ pub fn init_drm() -> Result<(), ()> {
         OBJ_PLANE
     );
     Ok(())
+}
+
+/// PCI_SLOT_NAME of the probed virtio-gpu function ("0000:00:0b.0"),
+/// derived from the device's ECAM address. "0000:00:00.0" when the BDF
+/// cannot be recovered (the sysfs tree still gets a consistent shape).
+fn gpu_pci_slot_name() -> alloc::string::String {
+    use core::fmt::Write as _;
+    let bdf = crate::drivers::gpu::with_gpu_device(|dev| {
+        let off = dev.pci_ecam_addr().wrapping_sub(crate::drivers::pci::ecam_base());
+        (
+            ((off >> 20) & 0xff) as u8,
+            ((off >> 15) & 0x1f) as u8,
+            ((off >> 12) & 0x7) as u8,
+        )
+    });
+    let mut s = alloc::string::String::new();
+    let _ = match bdf {
+        Some((bus, slot, func)) => write!(s, "0000:{:02x}:{:02x}.{}", bus, slot, func),
+        None => write!(s, "0000:00:00.0"),
+    };
+    s
 }

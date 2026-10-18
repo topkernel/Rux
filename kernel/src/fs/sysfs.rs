@@ -94,6 +94,8 @@ pub enum KType {
     Input,
     /// tty class devices
     Tty,
+    /// DRM class devices (card0/renderD128 under /sys/class/drm)
+    Drm,
     /// /sys/devices/system/cpu
     Cpu,
     /// /sys/module
@@ -122,6 +124,7 @@ impl KType {
             KType::Block => Some("block"),
             KType::Input => Some("input"),
             KType::Tty => Some("tty"),
+            KType::Drm => Some("drm"),
             KType::Cpu => Some("cpu"),
             KType::Module => Some("module"),
             KType::Kernel => Some("kernel"),
@@ -1009,6 +1012,145 @@ pub fn unregister_input_event(reg: &InputEventReg) -> u64 {
     uevent_send_full(&devpath_ev, "remove", "input", &extra)
 }
 
+/// Register the virtio-gpu DRM class entries for the PCI function at
+/// `slot_name` (Linux PCI_SLOT_NAME spelling, e.g. "0000:00:04.0").
+///
+/// Everything here exists for libdrm + the Mesa gbm/EGL loader in the OH
+/// image (verified against the string tables of the image's
+/// /vendor/lib64/chipsetsdk/{libgbm.so,libEGL.so} and
+/// /system/lib64/chipset-sdk/libdrm.so):
+///
+/// ```text
+/// /sys/devices/pci0000:00/<slot>/vendor             "0x1af4\n"
+/// /sys/devices/pci0000:00/<slot>/device             "0x1050\n"
+/// /sys/devices/pci0000:00/<slot>/subsystem_vendor   "0x1af4\n"
+/// /sys/devices/pci0000:00/<slot>/subsystem_device   "0x1100\n"
+/// /sys/devices/pci0000:00/<slot>/subsystem          -> ../../../bus/pci
+/// /sys/devices/pci0000:00/<slot>/drm/card0          (uevent MAJOR=226 MINOR=0 DEVNAME=dri/card0)
+/// /sys/devices/pci0000:00/<slot>/drm/renderD128     (uevent MAJOR=226 MINOR=128 ...)
+/// /sys/class/drm/card0                -> ../../devices/pci0000:00/<slot>/drm/card0
+/// /sys/class/drm/renderD128           -> ../../devices/pci0000:00/<slot>/drm/renderD128
+/// /sys/dev/char/226:0                 -> ../../devices/pci0000:00/<slot>/drm/card0
+/// /sys/dev/char/226:128               -> ../../devices/pci0000:00/<slot>/drm/renderD128
+/// /sys/bus/pci/devices/<slot>         -> ../../../devices/pci0000:00/<slot>
+/// ```
+///
+/// drmGetDevice(fd) readlinks /sys/dev/char/226:<minor>, strips the
+/// trailing node component to find the PCI function, reads its
+/// subsystem/vendor/device ids, and enumerates <function>/drm/ for the
+/// sibling node names. gbm_create_device() then maps the kernel driver
+/// name (DRM_IOCTL_VERSION — "virtio_gpu" on the reference kernel) onto
+/// virtio_gpu_dri.so with a kms_swrast fallback. Without this tree the
+/// whole chain dies at the first readlink and no DRM ioctl beyond
+/// VERSION is ever issued — exactly the u1/b155 behavior (one card0
+/// open, then silence).
+pub fn register_drm_device(slot_name: &str) {
+    if sysfs_root().is_none() {
+        return;
+    }
+    // Idempotence: a second init pass must not duplicate the nodes.
+    if lookup_path(&format!("class/drm/card0")).is_some() {
+        return;
+    }
+
+    let devices = match lookup_path("devices") {
+        Some(d) => d,
+        None => return,
+    };
+
+    // ---- PCI root + function directory ----
+    let pci_root = match lookup_path("devices/pci0000:00") {
+        Some(d) => d,
+        None => mk_dir(&devices, "pci0000:00", KType::Generic),
+    };
+    let func = mk_dir(&pci_root, slot_name, KType::Generic);
+    for (nm, v) in [
+        ("vendor", "0x1af4\n"),            // Red Hat/virtio vendor id
+        ("device", "0x1050\n"),            // virtio-gpu modern device id
+        ("subsystem_vendor", "0x1af4\n"),  // QEMU default subsystem vendor
+        ("subsystem_device", "0x1100\n"),  // QEMU generic subsystem device
+        ("class", "0x030000\n"),           // PCI_CLASS_DISPLAY_VGA
+        ("revision", "0x00\n"),
+    ] {
+        let val = String::from(v);
+        attr_ro(&func, nm, move || val.as_bytes().to_vec());
+    }
+    // /sys/devices/pci0000:00/<slot>/subsystem -> ../../../bus/pci
+    mk_link(&func, "subsystem", "../../../bus/pci");
+    // Static PCI uevent (device_add on a PCI function).
+    add_env_uevent_attr(
+        &func,
+        &format!("/devices/pci0000:00/{}", slot_name),
+        vec![
+            (String::from("DRIVER"), String::from("virtio-pci")),
+            (String::from("PCI_SLOT_NAME"), String::from(slot_name)),
+            (String::from("PCI_CLASS"), String::from("30000")),
+            (
+                String::from("MODALIAS"),
+                format!("pci:v00001AF4d00001050sv00001AF4sd00001100bc03sc00i00"),
+            ),
+        ],
+    );
+
+    // ---- drm/ minor nodes on the function ----
+    let drm_dir = mk_dir(&func, "drm", KType::Drm);
+    for (name, minor, devname) in [
+        ("card0", 0u32, "dri/card0"),
+        ("renderD128", 128u32, "dri/renderD128"),
+    ] {
+        let node = mk_dir(&drm_dir, name, KType::Drm);
+        *node.devno.lock() = Some((crate::drivers::drm::DRM_MAJOR_NUM, minor));
+        *node.devname.lock() = Some(String::from(devname));
+        let (maj, min) = (crate::drivers::drm::DRM_MAJOR_NUM, minor);
+        attr_ro(&node, "dev", move || format!("{}:{}\n", maj, min).into_bytes());
+        // <node>/device -> the PCI function (libdrm's legacy
+        // "<node-path>/device" walk).
+        mk_link(&node, "device", "../..");
+        // <node>/subsystem -> the drm class dir.
+        mk_link(&node, "subsystem", "../../../../../class/drm");
+        add_uevent_attr(&node);
+    }
+
+    // ---- class + dev/char + bus links ----
+    let class_drm = match lookup_path("class/drm") {
+        Some(d) => d,
+        None => return,
+    };
+    mk_link(&class_drm, "card0", &format!("../../devices/pci0000:00/{}/drm/card0", slot_name));
+    mk_link(&class_drm, "renderD128", &format!("../../devices/pci0000:00/{}/drm/renderD128", slot_name));
+
+    if let Some(dev_char) = lookup_path("dev/char") {
+        mk_link(&dev_char, "226:0", &format!("../../devices/pci0000:00/{}/drm/card0", slot_name));
+        mk_link(
+            &dev_char,
+            "226:128",
+            &format!("../../devices/pci0000:00/{}/drm/renderD128", slot_name),
+        );
+    }
+    if let Some(pci_devices) = lookup_path("bus/pci/devices") {
+        mk_link(&pci_devices, slot_name, &format!("../../../devices/pci0000:00/{}", slot_name));
+    }
+
+    // Broadcast the node "add" uevents (coldboot parity; the events are
+    // informational for this boot since the nodes predate userland).
+    for (minor, devname) in [(0u32, "dri/card0"), (128u32, "dri/renderD128")] {
+        let maj = format!("{}", crate::drivers::drm::DRM_MAJOR_NUM);
+        let min = format!("{}", minor);
+        let dn = String::from(devname);
+        let extra: [(&str, &str); 3] = [
+            ("MAJOR", maj.as_str()),
+            ("MINOR", min.as_str()),
+            ("DEVNAME", dn.as_str()),
+        ];
+        uevent_send_full(
+            &format!("/devices/pci0000:00/{}/drm/{}", slot_name, devname),
+            "add",
+            "drm",
+            &extra,
+        );
+    }
+}
+
 /// Build a /sys/class/tty device directory.
 fn add_tty_device(class_tty: &Arc<KObject>, name: &str, major: u32, minor: u32) {
     let dev = mk_dir(class_tty, name, KType::Tty);
@@ -1076,6 +1218,12 @@ fn build_tree() -> Arc<KObject> {
     // /sys/class/input — skeleton; the inputN/eventN pairs register via
     // register_input_event() when evdev initializes.
     let _input = mk_dir(&class, "input", KType::Input);
+
+    // /sys/class/drm — skeleton (version file is static); the
+    // card0/renderD128 entries register via register_drm_device() when
+    // the virtio-gpu DRM nodes come up.
+    let drm_class = mk_dir(&class, "drm", KType::Drm);
+    attr_ro(&drm_class, "version", move || b"drm 1.1.0 20060810\n".to_vec());
 
     let tty = mk_dir(&class, "tty", KType::Tty);
     add_tty_device(&tty, "console", 5, 1);
@@ -1263,6 +1411,11 @@ fn build_tree() -> Arc<KObject> {
     mk_dir(&bus, "platform", KType::Generic);
     let _virtio_bus = mk_dir(&bus, "virtio", KType::Generic);
     let _block_bus = mk_dir(&bus, "block", KType::Block);
+    // /sys/bus/pci/devices — the per-function symlinks libdrm's
+    // drmGetDevice falls back to when /sys/dev/char is not usable
+    // ("/sys/bus/pci/devices/%04x:%02x:%02x.%d" is in the image's
+    // libdrm.so string table).
+    let _pci_bus_devices = mk_dir(&pci_bus, "devices", KType::Generic);
 
     root
 }

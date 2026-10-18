@@ -840,8 +840,13 @@ impl VirtioGpuDevice {
     }
 
     /// Flush display
-    pub fn flush(&self) {
-        let rect = self.display_rect;
+    /// Raw ECAM address of this function's PCI config space (for the
+    /// sysfs BDF derivation in drm::init_drm).
+    pub fn pci_ecam_addr(&self) -> u64 {
+        self.pci.pci_config.base_addr
+    }
+
+    pub fn flush(&self) {        let rect = self.display_rect;
 
         // 1. Transfer framebuffer data to device
         let _ = self.transfer_to_host_2d(self.resource_id, 0, &rect);

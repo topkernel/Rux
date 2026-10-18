@@ -3046,11 +3046,20 @@ pub fn sys_recvmsg(args: SyscallArgs) -> i64 {
             }
         }
         // SCM_RIGHTS / SCM_CREDENTIALS: install the attached files and
-        // write the cmsg chain.
+        // write the cmsg chain. Credentials are emitted only when the
+        // RECEIVING socket has SO_PASSCRED — Linux unix_{dgram,stream}
+        // gate the whole cred emission on the receiver's flag (the
+        // sender-side snapshot is unconditional; see the enqueue site in
+        // net::unix). hilogd's stats-query path requires it.
+        let emit_cred = if usock.options.lock().passcred {
+            r.cred
+        } else {
+            None
+        };
         let mut cmsg_bytes = 0usize;
-        if !r.files.is_empty() || r.cred.is_some() {
+        if !r.files.is_empty() || emit_cred.is_some() {
             // SAFETY: msg_ptr was access_ok(64)-validated at fn entry.
-            match unsafe { deliver_unix_cmsgs(msg_ptr, &r.files, r.cred) } {
+            match unsafe { deliver_unix_cmsgs(msg_ptr, &r.files, emit_cred) } {
                 Ok(n) => cmsg_bytes = n,
                 Err(e) => return e,
             }
@@ -3086,7 +3095,7 @@ pub fn sys_recvmsg(args: SyscallArgs) -> i64 {
         if r.truncated {
             out_flags |= MSG_TRUNC as u32;
         }
-        if (!r.files.is_empty() || r.cred.is_some()) && cmsg_bytes == 0 {
+        if (!r.files.is_empty() || emit_cred.is_some()) && cmsg_bytes == 0 {
             out_flags |= MSG_CTRUNC as u32;
         }
         // SAFETY: msg_ptr validated with access_ok(64) at entry.

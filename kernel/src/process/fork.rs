@@ -385,9 +385,40 @@ pub fn do_clone(args: CloneArgs) -> Result<Pid, i32> {
                 // task/stack allocation failure (ENOMEM): probe the PID
                 // allocator — if it is exhausted the failure was the PID.
                 return Err(match crate::process::pid::alloc_pid() {
-                    None => eagain(),
+                    None => {
+                        // OH bring-up: the "thread constructor failed:
+                        // Resource temporarily unavailable" storm that kills
+                        // render_service (and with it SA:10) lands here when
+                        // the pid space is drained. Name the state once.
+                        static EAGAIN_DUMPED: core::sync::atomic::AtomicBool =
+                            core::sync::atomic::AtomicBool::new(false);
+                        if !EAGAIN_DUMPED.swap(true, core::sync::atomic::Ordering::Relaxed) {
+                            crate::pr_warn!(
+                                "fork: EAGAIN by pid {} flags={:#x}: pid space exhausted ({}/{} live)",
+                                (*current_ptr).pid(),
+                                args.flags,
+                                crate::process::pid::allocated_count(),
+                                crate::process::pid::PID_MAX_DEFAULT
+                            );
+                        }
+                        eagain()
+                    }
                     Some(p) => {
                         crate::process::pid::free_pid(p);
+                        // Same visibility for the ENOMEM arm (Task/kernel
+                        // stack allocation failed — heap pressure).
+                        static ENOMEM_DUMPED: core::sync::atomic::AtomicBool =
+                            core::sync::atomic::AtomicBool::new(false);
+                        if !ENOMEM_DUMPED.swap(true, core::sync::atomic::Ordering::Relaxed) {
+                            let st = crate::mm::buddy_allocator::buddy_stats();
+                            crate::pr_warn!(
+                                "fork: ENOMEM by pid {} flags={:#x}: task/stack alloc failed (kernel heap {}K/{}K)",
+                                (*current_ptr).pid(),
+                                args.flags,
+                                st.used_bytes / 1024,
+                                st.heap_size / 1024
+                            );
+                        }
                         enomem()
                     }
                 });
