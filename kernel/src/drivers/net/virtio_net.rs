@@ -613,10 +613,19 @@ impl VirtIONetDevice {
             return None;
         }
 
-        // Update statistics
-        let mut stats = self.stats.lock_irqsave();
-        stats.rx_packets += 1;
-        stats.rx_bytes += pkt_data_len as u64;
+        // Update statistics. The stats guard MUST be dropped before
+        // recycle_rx_buffer(): recycle -> refill_rx_buffers re-takes
+        // rx_queue, so a guard held across line 623 inverts the lock
+        // order against the rx_queue -> stats nesting six lines up
+        // (this poll on another CPU holds rx_queue and waits for stats)
+        // — the two-CPU AB-BA wedge the watchdog flagged as
+        // lock=VIRTIO_NET+0x68 (rx_queue) vs +0xE8 (stats) under
+        // sustained RX (hdc file send, boot lr1/lr2).
+        {
+            let mut stats = self.stats.lock_irqsave();
+            stats.rx_packets += 1;
+            stats.rx_bytes += pkt_data_len as u64;
+        }
 
         // Free old RX buffer and post a replacement
         drop(queue_guard);
