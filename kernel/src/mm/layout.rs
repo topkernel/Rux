@@ -64,10 +64,38 @@ pub struct EffectiveStaticRegions {
     pub slab_size: usize,
 }
 
+/// End of the CONTIGUOUS USABLE region containing `heap_start`, or 0 when
+/// the base sits in no usable region.
+///
+/// The static carve (heap + slab) must stay inside one usable region:
+/// with memory holes (x86_64 q35/KVM 4G: usable RAM ends at 0x7ffcd000,
+/// a 208KB reserved hole follows up to 0x80000000, more usable RAM sits
+/// above 4G) a bound derived from the GLOBAL span max let the heap tail
+/// and the slab that follows it land in hole DRAM. The linear map only
+/// maps usable regions, so writes there page-fault with no fixup — the
+/// rs-egl r12/r13/r15 physmap-top crashes (kernel fault at
+/// 0xffff88807ffcd020 inside `Vec::push_mut` / `ext4_readdir`: a
+/// getdents64 Vec whose backing chunk was carved from the unmapped heap
+/// tail, exactly as the heap reached its end for the first time under
+/// the composition working set).
+///
+/// `regions` is the usable-region list (`cmdline::MemoryRegion`); the
+/// tightest containing region wins (regions should not nest, but the
+/// min() makes the bound safe if they do).
+pub fn heap_region_end(regions: &[crate::cmdline::MemoryRegion], heap_start: usize) -> usize {
+    regions
+        .iter()
+        .filter(|r| r.base <= heap_start && heap_start < r.base.saturating_add(r.size))
+        .map(|r| r.base.saturating_add(r.size))
+        .min()
+        .unwrap_or(0)
+}
+
 pub fn effective_static_regions(
     phys_base: usize,
     phys_size: usize,
     heap_start: usize,
+    heap_region_end: usize,
 ) -> EffectiveStaticRegions {
     /// Smallest user zone we are willing to hand the buddy when the heap
     /// must shrink to fit (16 MiB — enough for the minimal rootfs shell).
@@ -80,7 +108,16 @@ pub fn effective_static_regions(
     /// kernel cannot boot at all).
     const MIN_HEAP: usize = 32 * 1024 * 1024;
 
-    let phys_end = phys_base.saturating_add(phys_size);
+    // Clamp the carve to the containing usable region — never past a
+    // hole (see heap_region_end), and never past the global span either.
+    let span_end = phys_base.saturating_add(phys_size);
+    let phys_end = if heap_region_end >= phys_base {
+        span_end.min(heap_region_end)
+    } else {
+        // Heap base in no usable region: carve nothing; boot fails with
+        // the existing "no heap window" print instead of phantom DRAM.
+        phys_base
+    };
     let config_size = crate::config::KERNEL_HEAP_SIZE;
     let slab_size = DEFAULT_SLAB_SIZE;
 
@@ -175,11 +212,19 @@ impl KernelMemoryLayout {
     /// Initialize from memblock
     ///
     /// This should be called after memblock is initialized with memory regions.
+    ///
+    /// `heap_region_end` is the end of the contiguous USABLE region
+    /// containing the heap window base (see [`heap_region_end`]): the
+    /// heap+slab carve is clamped to it while `phys_size` stays the full
+    /// discovered span (the PFN-span consumers — user-address-space
+    /// validation, above-4G pages — must keep the global bound).
+    #[allow(clippy::too_many_arguments)]
     pub fn init_from_memblock(
         phys_base: usize,
         phys_size: usize,
         kernel_start: usize,
         kernel_end: usize,
+        heap_region_end: usize,
     ) -> Self {
         // Calculate heap region (after kernel)
         let _kernel_size = kernel_end - kernel_start;
@@ -187,7 +232,7 @@ impl KernelMemoryLayout {
         // Static regions clamped to the DISCOVERED memory map (the -m 512M
         // panic family — see effective_static_regions). The kernel_end
         // argument is KERNEL_HEAP_PHYS: the heap window base.
-        let eff = effective_static_regions(phys_base, phys_size, heap_start);
+        let eff = effective_static_regions(phys_base, phys_size, heap_start, heap_region_end);
         let heap_size = eff.heap_size;
 
         // Calculate slab region (after heap)
@@ -377,55 +422,71 @@ pub fn user_phys_end() -> usize {
 ///    the zone allocator (which seeds from memory minus reserved) would
 ///    hand those pages to a second owner.
 ///
-/// Panics at boot (deterministic, single-threaded) on violation.
-pub fn assert_memblock_consistency(layout: &KernelMemoryLayout) {
-    let phys_end = layout.phys_base.saturating_add(layout.phys_size);
+    /// Panics at boot (deterministic, single-threaded) on violation.
+    pub fn assert_memblock_consistency(layout: &KernelMemoryLayout) {
+        let phys_end = layout.phys_base.saturating_add(layout.phys_size);
 
-    assert!(
-        layout.heap_start >= layout.phys_base
-            && layout.heap_start.saturating_add(layout.heap_size) <= phys_end,
-        "layout: heap {:#x}+{:#x} outside physical memory {:#x}-{:#x}",
-        layout.heap_start,
-        layout.heap_size,
-        layout.phys_base,
-        phys_end
-    );
-    assert!(
-        layout.slab_start.saturating_add(layout.slab_size) <= phys_end,
-        "layout: slab {:#x}+{:#x} outside physical memory",
-        layout.slab_start,
-        layout.slab_size
-    );
-    assert!(
-        layout.slab_start == layout.heap_start + layout.heap_size,
-        "layout: slab {:#x} not adjacent to heap end {:#x}",
-        layout.slab_start,
-        layout.heap_start + layout.heap_size
-    );
-
-    let mb = super::memblock::memblock();
-    let regions = [
-        ("heap", layout.heap_start, layout.heap_size),
-        ("slab", layout.slab_start, layout.slab_size),
-    ];
-    for (name, base, size) in regions {
-        if size == 0 {
-            continue;
-        }
-        let first = base;
-        let last = base + size - PAGE_SIZE;
         assert!(
-            mb.is_reserved(first) && mb.is_reserved(last),
-            "layout: {} region {:#x}-{:#x} not fully reserved in memblock \
-             (first_reserved={} last_reserved={}) — double-ownership risk",
-            name,
-            base,
-            base + size,
-            mb.is_reserved(first),
-            mb.is_reserved(last)
+            layout.heap_start >= layout.phys_base
+                && layout.heap_start.saturating_add(layout.heap_size) <= phys_end,
+            "layout: heap {:#x}+{:#x} outside physical memory {:#x}-{:#x}",
+            layout.heap_start,
+            layout.heap_size,
+            layout.phys_base,
+            phys_end
         );
+        assert!(
+            layout.slab_start.saturating_add(layout.slab_size) <= phys_end,
+            "layout: slab {:#x}+{:#x} outside physical memory",
+            layout.slab_start,
+            layout.slab_size
+        );
+        assert!(
+            layout.slab_start == layout.heap_start + layout.heap_size,
+            "layout: slab {:#x} not adjacent to heap end {:#x}",
+            layout.slab_start,
+            layout.heap_start + layout.heap_size
+        );
+
+        let mb = super::memblock::memblock();
+        let regions = [
+            ("heap", layout.heap_start, layout.heap_size),
+            ("slab", layout.slab_start, layout.slab_size),
+        ];
+        for (name, base, size) in regions {
+            if size == 0 {
+                continue;
+            }
+            let first = base;
+            let last = base + size - PAGE_SIZE;
+            assert!(
+                mb.is_reserved(first) && mb.is_reserved(last),
+                "layout: {} region {:#x}-{:#x} not fully reserved in memblock \
+                 (first_reserved={} last_reserved={}) — double-ownership risk",
+                name,
+                base,
+                base + size,
+                mb.is_reserved(first),
+                mb.is_reserved(last)
+            );
+            // Hole guard (rs-egl r12/13/15 family): the static carve must
+            // sit inside USABLE DRAM. "Inside the span" is not enough on
+            // machines with holes (x86_64 q35: usable ends 0x7ffcd000,
+            // reserved hole to 0x80000000, more RAM above 4G) — the old
+            // span-based bound put the heap tail and the slab in unmapped
+            // hole DRAM and the first write page-faulted with no fixup.
+            assert!(
+                mb.is_memory(first) && mb.is_memory(last),
+                "layout: {} region {:#x}-{:#x} not inside usable RAM \
+                 (first_mem={} last_mem={}) — static carve crosses a memory hole",
+                name,
+                base,
+                base + size,
+                mb.is_memory(first),
+                mb.is_memory(last)
+            );
+        }
     }
-}
 
 /// Print memory layout information
 pub fn print_kernel_layout() {

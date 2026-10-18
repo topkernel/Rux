@@ -202,6 +202,7 @@ pub use meminfo::{
     is_memory_low, should_trigger_oom, MemoryInfo, MemorySummary,
 };
 pub use buddy_allocator::buddy_stats;
+pub use buddy_allocator::buddy_free_census_lockfree;
 pub use page_desc::page_desc_stats;
 pub use memblock::{
     memblock_init, memblock_add, memblock_reserve, memblock_reserve_nomap,

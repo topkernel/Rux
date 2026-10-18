@@ -100,17 +100,41 @@ static RSITES: [Site; 64] = [const {
 ///
 /// MUST be called with the frame at `fp` live on the current call stack
 /// (it is: callers pass their own s0 before doing anything else).
+/// Is `fp` a frame pointer the walk may dereference? It must point at
+/// READABLE kernel memory: the linear map (kernel stacks are heap
+/// allocations there) or the kernel image window (boot-time static
+/// stacks in .bss).
+///
+/// The old check (any canonical kernel address, `fp >= 0x8000...`) also
+/// accepted the very top of the canonical space — 0xffffffffffffff80 is
+/// canonical but sits in the unmapped guard region. A stale slot with
+/// that value made the diagnostic walk itself page-fault with no fixup
+/// (alloc-crash a1: kernel fault addr=0xffffffffffffff78, rip inside
+/// walk_fp_chain, from the alloc_page_table memwatch hook).
+#[cfg(feature = "x86_64")]
+pub fn plausible_fp(fp: u64) -> bool {
+    crate::arch::x86_64::mm::is_linear_mapping(fp as usize)
+        || (0xffff_ffff_8000_0000..0xffff_ffff_8200_0000).contains(&(fp as usize))
+}
+
+#[cfg(feature = "riscv64")]
+pub fn plausible_fp(fp: u64) -> bool {
+    // The kernel image is linked inside the linear region on riscv64
+    // (PAGE_OFFSET + phys), so the linear-map check covers both.
+    crate::arch::riscv64::mm::is_linear_mapping(fp as usize)
+}
+
 #[inline(never)]
 pub unsafe fn walk_fp_chain(mut fp: u64, out: &mut [u64]) {
     for slot in out.iter_mut() {
         *slot = 0;
-        if !(fp >= 0x8000_0000_0000_0000 && fp & 7 == 0) {
+        if !(fp >= 0x8000_0000_0000_0000 && fp & 7 == 0 && plausible_fp(fp)) {
             return;
         }
         let ra = core::ptr::read_volatile((fp - 8) as *const u64);
         let next = core::ptr::read_volatile((fp - 0x10) as *const u64);
         *slot = ra;
-        if !(next >= 0x8000_0000_0000_0000 && next & 7 == 0 && next > fp) {
+        if !(next >= 0x8000_0000_0000_0000 && next & 7 == 0 && next > fp && plausible_fp(next)) {
             return;
         }
         fp = next;
