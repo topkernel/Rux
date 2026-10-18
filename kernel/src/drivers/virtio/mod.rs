@@ -1261,17 +1261,23 @@ impl Drop for PciBlkGuard {
 /// console — printk may be wedged), then falls into the blocking
 /// acquire.
 pub(crate) fn pci_blk_lock(slot: usize) -> PciBlkGuard {
-    const CONTEND_SPIN: u32 = 20_000_000; // ~0.1-1 s: past mere contention
+    // Same order of magnitude as RawSpinlock's DEADLOCK_WARN_ITERS: the
+    // forensics line fires only when the wait has already outlived half
+    // the budget AND the lock is still held — pathological contention,
+    // not the healthy sub-millisecond bursts a storm produces (observed
+    // with a print-at-first-contention version: 50 transient holds in
+    // 3 min of dd/sync churn, all held_ms=0).
+    const CONTEND_SPIN: u32 = 100_000_000;
     let site = pci_blk_acquire_site();
-    let mut printed = false;
-    for _ in 0..CONTEND_SPIN {
+    let mut i = 0u32;
+    while i < CONTEND_SPIN {
         if let Some(g) = PCI_BLK_LOCKS[slot].try_lock_irqsave() {
             return PciBlkGuard::arm(slot, g, site);
         }
         core::hint::spin_loop();
-        if !printed && PCI_BLK_LOCKS[slot].is_locked() {
-            // Rate-limited inside; only called once per acquire.
-            printed = true;
+        i += 1;
+        if i == CONTEND_SPIN / 2 && PCI_BLK_LOCKS[slot].is_locked() {
+            // Half the budget spent and still contended: near-wedge.
             pci_blk_contended_forensics(slot, site);
         }
     }
