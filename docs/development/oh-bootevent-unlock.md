@@ -28,6 +28,17 @@ Date: 2026-10-18. Lane: `feature/oh-display` @ c6b7c79a (on top of main
       rides the same slow file-read path (launcher's ArkUI will hit it
       too). This is now the single common gate for both remaining pixel
       sources (bootanimation video, launcher UI).
+      Minimal reproduction attempts (test/faultlat*.c, this kernel,
+      q35 + virtio-blk-pci + KVM): single reader 54 us/page (with or
+      without journal), 6 concurrent processes on separate files
+      0.3–1 ms/page (max 26 ms), read() 1723 MiB/s — the raw kernel
+      read path is FAST. The OH-case slowness therefore needs the real
+      workload mixture (hundreds of tasks, /data writes + journal,
+      binder traffic) to reproduce; it is a fresh instrumented hunt
+      (dfx=memwatch + bio tracing on the OH image), not a raw-I/O bug.
+      Side finding: CLOCK_MONOTONIC in-guest jumped ~700 s during one
+      probe run (faultlat "total=701485ms" vs 54 us avg × 8192 pages) —
+      timer-lane bug, untracked so far.
    b. **hilogd SIGSEGVs early** (b154 line ~4774: rip in a file-backed
       lib, `Segfault at 0x18`, rax=0, right after an EFAULT on syscall
       240/mq_open-shaped args). With hilogd dead there is no hilog
