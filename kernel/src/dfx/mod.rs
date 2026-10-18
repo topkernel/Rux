@@ -47,6 +47,10 @@ pub mod driftwatch;
 pub mod scribble;
 /// R83 (R74 producer hunt): live task-header audit + victim dumps.
 pub mod r83hunt;
+/// CLOCK_MONOTONIC jump tripwire (dfx=monowatch): samples the shared
+/// timebase ~1 Hz and reports backward motion or multi-second spikes
+/// with the active clocksource named.
+pub mod monowatch;
 
 /// Initialize the DFX subsystem.
 ///
