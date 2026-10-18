@@ -654,6 +654,14 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
     // OH bring-up: name the call behind any ENOTDIR — the hilogd
     // service-socket chmod fails with errno 20 and no in-handler trace
     // sees it, so decode it here (pathname arg for the *at family).
+    // NOTE the label: this hook fires for BOTH shapes — real ENOTDIR
+    // (result -20) and ENOENT (result -2) on stat-family numbers
+    // [53,79,90] — and prints "missstat:" with the actual return value.
+    // The old constant "ENOTDIR:" label made correct ENOENT returns on
+    // missing musl-namespace paths ("/vendor/lib64/chipset-sdk-sp",
+    // "/dev/watchdog" before the node existed) read as an errno-20 bug
+    // across three independent investigations (b151/wdg1-wdg4; resolved
+    // by shimming the nr-79 arm — zero hits while the hook printed).
     if (result == -20 || (result == -2
             && [53u64, 79, 90].contains(&(syscall_no as u64))))
         && crate::process::current_pid() >= 300
@@ -669,8 +677,12 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
                     .unwrap_or("<efault>")
             } else { "-" };
             crate::pr_info!(
-                "ENOTDIR: nr={} a0={:#x} path='{}' a2={:#x} pid={}",
-                syscall_no, args[0], path, args[2],
+                "missstat: ret={} nr={} a0={:#x} path='{}' a2={:#x} pid={}",
+                result,
+                syscall_no,
+                args[0],
+                path,
+                args[2],
                 crate::process::current_pid()
             );
         }
