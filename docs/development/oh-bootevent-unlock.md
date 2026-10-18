@@ -127,3 +127,76 @@ bootanimation passes the wait and proceeds into the render setup.
 python3 test/drm_probe_boot.py --timeout 300   # PASS 31/31 + screendump
 python3 test/debug/shotstat.py work/drm_probe_shot-gpu0.ppm
 ```
+
+## faultlat addendum (2026-10-18, feature/faultlat): the page-cache side of the 1.5 s/fault family
+
+Lane: `feature/faultlat` @ cc7a66cc (from main 26e61516). Target: the
+`SA:3002 OpenSo 802166ms` stall (ranked blocker #1 above).
+
+### Root causes found in kernel/src/fs/page_cache.rs (all fixed on the branch)
+
+1. **Hard 32 MB cap** (`MAX_CACHED_PAGES = 8192`) vs a multi-GB `.so`
+   working set: every fault was miss + eviction + refetch + ext4-biglock
+   round trip. The cap is now half of managed RAM (min 32 MB), computed
+   lazily from zone `managed_pages`.
+2. **Anti-LRU eviction, twice over.** Fresh pages linked at the LRU
+   *tail* — the same end eviction scanned from — and the scan followed
+   `lru_next` from the tail, which is the list TERMINATOR direction: each
+   `evict_one` examined exactly one page, the newest. Concurrent fillers
+   evicted each other's freshest pages. File pages now enter at the young
+   end (head), the scan walks tail→head via `lru_prev`, Referenced pages
+   activate onto the young end of LRU_ACTIVE_FILE (mm/lru.rs additive
+   helpers; anon/vmscan untouched).
+3. **No active-list demotion** (`lru_deactivate` had zero callers): every
+   page ever served accumulated on LRU_ACTIVE_FILE, eviction stalled, and
+   inserts fell through to the hash-order BTreeMap fallback = random
+   eviction. `evict_one` now demotes the oldest ACTIVE_FILE pages back to
+   inactive (second chance) before the fallback.
+4. **`insert_batch` allocated frames UNDER the inodes lock** (the
+   R-WRITESTORM-1 self-deadlock `insert()` was fixed for, resurrected):
+   GFP_KERNEL slowpath → try_to_free_pages → shrink → inodes.lock held by
+   self. At RAM-scale cache pressure this wedged a CPU per fill batch.
+   Batches now allocate each 64-frame chunk before the lock.
+5. Two amplifier fixes on the reclaim side: `balance_pgdat` now reclaims
+   32-page batches (was exactly `1<<order` = ONE page per full pass), and
+   the allocator's `IN_DIRECT_RECLAIM` gate is acquired with a bounded
+   fastpath-retry + `yield_cpu()` wait instead of skipping reclaim and
+   failing the allocation while another task reclaims.
+
+### Numbers (test/faultlat3.c: 6 mmap loaders + 2 journal-commit writers, KVM q35 SMP2)
+
+| regime | baseline 26e61516 | fixed cc7a66cc |
+|---|---|---|
+| under-cap (6×16MB, 2G) | wall 49.2 s, worst avg 11.9 ms/page, max 0.9 s | wall 1.79 s, worst avg 360 µs/page |
+| at-cap (6×128MB vs 720MB cap, 2G) | wall 509 s, avg 13–15 ms/page, max 9.4 s | wall 58 s, avg 1.0–1.6 ms/page, 6/6 loaders |
+
+`/proc/meminfo` gained a Rux-extension `PageCacheOps:` line
+(hits/misses/evictions/demotions/cap_pages) — the hit/miss ratio is the
+direct thrash readout on any boot.
+
+### OH boots b1–b6 (this window): the SA-load chain is dead on the BASE kernel — not a faultlat regression
+
+Every OH boot on this kernel family (fixed AND a pristine-base control,
+KVM SMP2/SMP1 4G, `dfx=periodic,taskdump`) reaches 55 services started
+and then ZERO `OpenSo` lines ever complete; sa-host services (foundation
+pid ~511 among them) go ZOMBIE and are not restarted; clients wait
+forever. The one working reference, oh-display's b155 soak (same images
+via run/imgt, OLDER kernel build), had 12 OpenSo lines before
+media_service exec. Kernel delta base↔b155's build: the anim-block merge
+family (softdog node, biglock census/handoff-recovery, missstat) — worth
+a bisect from whichever lane owns that merge.
+
+Also decisive: **the userdata image matters**. With
+`oh-img/userdata-seeded.img` (md5 17c656…) every boot hard-wedges at
+~13.7k serial lines; with `userdata-tok.img` (md5 bb4be5…, what b155
+uses — nativetoken-pre-seeded) the boot stays alive and keeps processing
+(any kernel). The two images are NOT interchangeable despite the name.
+
+Serial logs: run/oh-b{1..6}, oh-bctl (base control) -serial.log in the
+faultlat worktree. Residual known-issue from the at-cap probe: one
+uniform ~17 s stall per loader run start (all loaders, once) — first
+contact of the six files + journal writers + reclaim settling; avg after
+it is healthy. Next steps for OH pixels: (1) bisect the base-kernel
+SA-load regression (b155's build vs 26e61516), (2) rerun the decisive
+boot on a base that completes OpenSo — the faultlat fix should then turn
+the OpenSo seconds into sub-second times.
