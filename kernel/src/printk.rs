@@ -287,9 +287,16 @@ fn acquire_emit_lock() -> bool {
         {
             return true;
         }
+        // Check the deadline on EVERY outer iteration: under pure CAS
+        // contention (lock bouncing free/held between rivals) the inner
+        // TTAS load below sees "free" immediately and never re-checks the
+        // clock — without this check the spin would not be bounded.
+        if crate::arch::cpu::read_time().saturating_sub(start) >= budget {
+            return false;
+        }
         // TTAS: park on a relaxed load until the holder releases instead
         // of re-issuing an atomic RMW every iteration (same rationale as
-        // RawSpinlock::lock). Re-check the clock every 512 spins.
+        // RawSpinlock::lock).
         let mut parked: u32 = 0;
         while CONSOLE_EMIT_LOCK.load(Ordering::Relaxed) {
             parked += 1;
