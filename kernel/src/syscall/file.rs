@@ -480,18 +480,44 @@ pub fn sys_close(args: SyscallArgs) -> i64 {
     }
 
     use crate::fs::close_file_fd;
+    // Capture a Weak handle BEFORE the close so the purge below can tell
+    // whether THIS close dropped the last fd-table reference to the open
+    // file description. A strong Arc here would keep the description
+    // alive and suppress its close op (pipe EOF, socket HUP) — a Weak
+    // observes without holding.
+    let desc_weak = crate::sched::get_current_fdtable().and_then(|ft| {
+        ft.get_file(fd)
+            .map(|f| alloc::sync::Arc::downgrade(&f))
+    });
     // SAFETY: fd is a valid file descriptor owned by the current process.
     unsafe {
         match close_file_fd(fd) {
             Ok(()) => {
-                // Linux eventpoll removes interest entries when the last
+                // Linux eventpoll removes interest entries when the LAST
                 // reference to the registered file description goes away
-                // (eventpoll_release). Best-effort same-process equivalent:
-                // purge this fd from every epoll instance the caller still
-                // holds open, so a stale entry cannot keep reporting
-                // EPOLLERR|EPOLLHUP forever (review批次1: close 后 epoll
-                // 条目不删).
-                crate::syscall::misc::epoll_purge_closed_fd(fd);
+                // (eventpoll_release — the epoll's own epi reference is
+                // what removes it, and only when THAT is the last one).
+                // Purging on ANY close was wrong in the cross-process
+                // shape: a forked child that inherited the fd table (and
+                // with it the epoll fd) closed its inherited copy on
+                // exit, and the purge — resolving "live" against the
+                // child's table, where the slot was just cleared —
+                // stripped the PARENT's live interest. appspawn's
+                // bundle-scan child did exactly this to the AppSpawn
+                // listener: after the child exited, the server's epoll
+                // held only its timer fd, every epoll_wait returned
+                // timer-only events, and client connections piled up in
+                // the accept queue (q reached 210 in sc18) with the
+                // server never accepting — the launcher chain's
+                // spawn-blocker. Gate the purge on this close being the
+                // description's last fd-table reference.
+                let others = desc_weak
+                    .as_ref()
+                    .map(alloc::sync::Weak::strong_count)
+                    .unwrap_or(1);
+                if others == 0 {
+                    crate::syscall::misc::epoll_purge_closed_fd(fd);
+                }
                 0
             }
             Err(e) => e as i64,
