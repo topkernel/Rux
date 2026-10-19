@@ -153,9 +153,16 @@ pub enum DfxSwitch {
     /// every hunt boot so clock jumps are caught live instead of
     /// inferred from impossible probe totals afterwards.
     MonoWatch,
+    /// TCP per-segment forensics (hdc file-send corruption hunt): every
+    /// inbound and outbound TCP segment prints seq/ack/len/flags plus
+    /// receiver rcv_nxt/rcv_wnd state, budget-limited. The b143
+    /// flags-only trace could not distinguish a data segment from a
+    /// zero-window probe or a dup-ACK storm; the first-send corruption
+    /// and mid-transfer connection drops need sequence-level timelines.
+    TcpTrace,
 }
 
-const SWITCH_COUNT: usize = 22;
+const SWITCH_COUNT: usize = 23;
 
 static SWITCHES: [AtomicBool; SWITCH_COUNT] = [const { AtomicBool::new(false) }; SWITCH_COUNT];
 
@@ -188,6 +195,7 @@ impl DfxSwitch {
             DfxSwitch::SyscallTrace => 19,
             DfxSwitch::FutexTrace => 20,
             DfxSwitch::MonoWatch => 21,
+            DfxSwitch::TcpTrace => 22,
         }
     }
 
@@ -215,6 +223,7 @@ impl DfxSwitch {
             "syscalltrace" => Some(DfxSwitch::SyscallTrace),
             "futextrace" => Some(DfxSwitch::FutexTrace),
             "monowatch" => Some(DfxSwitch::MonoWatch),
+            "tcptrace" => Some(DfxSwitch::TcpTrace),
             _ => None,
         }
     }

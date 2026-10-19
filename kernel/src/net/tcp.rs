@@ -113,6 +113,52 @@ fn tx_record_endpoints(
     }
 }
 
+/// dfx=tcptrace: sequence-level segment forensics for the hdc
+/// file-corruption hunt. Inbound lines print the receiver's post-parse
+/// view (nothing decoded yet); outbound lines print each emitted
+/// descriptor. Budget: 24000 lines per boot — enough for several full
+/// 1 MB transfers, then silent.
+fn tcp_trace_budget() -> bool {
+    static N: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+    if !crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::TcpTrace) {
+        return false;
+    }
+    N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 24000
+}
+
+fn tcp_trace_in(tcp_hdr: &TcpHdr, skb: &SkBuff, dest_port: u16) {
+    if !tcp_trace_budget() {
+        return;
+    }
+    let payload = (skb.len as usize).saturating_sub(tcp_hdr.header_len());
+    crate::pr_info!(
+        "tcp-in : {}->{} flags {:x} seq {:x} ack {:x} len {} win {}",
+        TcpPort::from_be(tcp_hdr.source),
+        dest_port,
+        tcp_hdr.flags,
+        TcpSeq::from_be(tcp_hdr.seq),
+        TcpAck::from_be(tcp_hdr.ack_seq),
+        payload,
+        tcp_hdr.window()
+    );
+}
+
+fn tcp_trace_out(d: &TcpTxDesc) {
+    if !tcp_trace_budget() {
+        return;
+    }
+    crate::pr_info!(
+        "tcp-out: {}->{} flags {:x} seq {:x} ack {:x} len {} win {}",
+        d.src_port,
+        d.dst_port,
+        d.flags,
+        d.seq,
+        d.ack,
+        d.len,
+        d.window
+    );
+}
+
 /// TCP sequence number
 pub type TcpSeq = u32;
 
@@ -694,6 +740,7 @@ impl TcpTxBatch {
     /// segment (TCP recovers via peer retransmit / our timers).
     pub fn emit_all(&mut self) {
         for d in self.descs.drain(..) {
+            tcp_trace_out(&d);
             let data = &self.arena[d.off..d.off + d.len];
             let mut skb = match crate::net::buffer::alloc_skb(1500) {
                 Some(s) => s,
@@ -2654,6 +2701,8 @@ impl TcpConnectionManager {
                 );
             }
         }
+
+        tcp_trace_in(tcp_hdr, skb, dest_port);
 
         let is_syn = tcp_hdr.syn() && !tcp_hdr.ack();
         let mut listen_parent: Option<i32> = None;
