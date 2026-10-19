@@ -477,6 +477,9 @@ fn dentry_relpath_below(anc: &Arc<Dentry>, d: &Arc<Dentry>) -> Option<Vec<String
     let mut comps: Vec<String> = Vec::new();
     loop {
         if Arc::ptr_eq(&cur, anc) {
+            // comps were collected child-first on the way up; the caller
+            // wants them ancestor-first (a path relative to `anc`).
+            comps.reverse();
             return Some(comps);
         }
         let next = {
