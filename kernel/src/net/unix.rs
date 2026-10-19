@@ -906,14 +906,26 @@ pub fn unix_connect(
             // "who asked appspawn to start what" without a guest shell.
             // AppSpawn/NativeSpawn/CJAppSpawn/HybridSpawn all end in
             // "Spawn"; other listeners stay silent.
+            // sc18 addendum: census the listener's wait queue around the
+            // wake (total, woken-flagged, awakened). The b14-sc18 wedge
+            // shape is "server parked in an infinite epoll_pwait, zero
+            // deliveries ever, accept queue fills" — entries==0 means the
+            // park never registered on this socket (poll_wait routing
+            // bug); entries>0 with woken>0 but awakened==0 is the VW
+            // sticky-skip lost wake (entry marked, task never scheduled).
             if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SockSnap) {
                 let name = server.bound_name.lock().clone();
                 if name.as_deref().map(|n| n.ends_with("Spawn")).unwrap_or(false) {
+                    let (tot, won) = server.wait_queue.vw_queue_census();
+                    let awok = server.wait_queue.wake_up_all();
                     crate::pr_warn!(
-                        "socksnap: CONNECT pid={} -> {} (server fid={:#x})",
+                        "socksnap: CONNECT pid={} -> {} (server fid={:#x}) wq=({},{}) woke={}",
                         crate::process::current_pid(),
                         key_shown(name.as_deref().unwrap_or("?")),
-                        fid
+                        fid,
+                        tot,
+                        won,
+                        awok
                     );
                 }
             }
