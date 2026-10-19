@@ -910,7 +910,21 @@ pub fn sys_mkdirat(args: SyscallArgs) -> i64 {
 
     match crate::fs::vfs::file_mkdir(&full_path, mode) {
         Ok(()) => 0,
-        Err(e) => e as i64,
+        Err(e) => {
+            // b18/sc18 appspawn hunt: DoSandboxRootFolderCreate fails with
+            // no errno on the guest side; the sandbox roots live under
+            // /mnt and /data, so surface failed mkdirs there on serial.
+            if e != -(17) && (full_path.starts_with("/mnt") || full_path.starts_with("/data")) {
+                crate::pr_info!(
+                    "mkdirfail '{}' mode {:#o}: {} (pid {})",
+                    full_path,
+                    mode,
+                    e,
+                    unsafe { crate::process::current_pid() }
+                );
+            }
+            e as i64
+        }
     }
 }
 
@@ -1772,11 +1786,15 @@ pub fn sys_mount(args: SyscallArgs) -> i64 {
         // the account-ready chain rides on diagnosing it; a handful of
         // mounts per boot, not per-transaction).
         let always = fs_type_str == "hmdfs" || fs_type_str == "sharefs";
-        if n < 24 || always {
+        {
             let ret = match crate::fs::mount::do_mount(source, target, fs_type_str, args[3], mount_data) {
                 Ok(()) => 0,
                 Err(e) => e,
             };
+            // b18/sc18: print EVERY failed mount, however late in the boot.
+            // The old n<24 gate made appspawn's DoSandboxRootFolderCreate
+            // failure (systemui spawn, hook stage 31) invisible — sandbox
+            // mounts happen thousands of mounts into the boot.
             if ret != 0 || n < 12 || always {
                 crate::pr_info!(
                     "mount[{}] '{}' -> '{}' type '{}' flags {:#x}: {}",
