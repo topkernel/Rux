@@ -1758,6 +1758,37 @@ pub fn sys_mount(args: SyscallArgs) -> i64 {
         }
     }
 
+    // Propagation-type change (Linux do_mount dispatch: REMOUNT → BIND →
+    // MOVE → propagation → new mount; this block sits after REMOUNT and
+    // MOVE). When flags carry ONLY propagation bits (MS_SHARED/MS_PRIVATE/
+    // MS_SLAVE/MS_UNBINDABLE, plus harmless modifiers like MS_REC),
+    // mount() changes the propagation type of the mount containing
+    // `target` — no new filesystem instance, fstype/source ignored. Rux
+    // mounts never propagate, so the change is a success no-op — but
+    // returning EINVAL killed real callers: OH init's sandbox prepare
+    // ("Failed set mount slave err = 22"), and the appspawn child's
+    // mount(NULL, "/", NULL, MS_SLAVE|MS_REC) right after creating the
+    // sandbox root dirs — b18 nailed DoSandboxRootFolderCreate dying at
+    // exactly mount[29] flags 0x84000 = MS_SLAVE|MS_REC → EINVAL, which
+    // failed every START_PROCESS (systemui, launcher) after the fork.
+    // (MS_BIND falls through to do_mount below, as before — a bind mount
+    // shares no bits with the propagation mask.)
+    const CHG_MS_UNBINDABLE: u64 = 1 << 17;
+    const CHG_MS_PRIVATE: u64 = 1 << 18;
+    const CHG_MS_SLAVE: u64 = 1 << 19;
+    const CHG_MS_SHARED: u64 = 1 << 20;
+    const CHG_PROPAGATION: u64 =
+        CHG_MS_SHARED | CHG_MS_PRIVATE | CHG_MS_SLAVE | CHG_MS_UNBINDABLE;
+    if args[3] & CHG_PROPAGATION != 0 {
+        let prop = args[3] & CHG_PROPAGATION;
+        // Multiple propagation types at once is EINVAL (Linux
+        // change_mount_flags rejects the combination).
+        if prop & prop.wrapping_sub(1) != 0 {
+            return -(errno::EINVAL as i64);
+        }
+        return 0;
+    }
+
     // Mount options string (mount(2) arg 5): consumed by tmpfs today
     // (its size= page budget — LTP's all-filesystems harness mounts
     // tmpfs with size=32M, and an unbounded tmpfs let preadv203's 118 MB
