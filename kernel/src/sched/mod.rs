@@ -26,6 +26,7 @@ pub mod stop_task;
 pub mod idle;
 pub mod fair;
 pub mod cgroup;
+pub mod wakewatch;
 
 pub use sched::{
     current,
