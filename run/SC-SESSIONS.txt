@@ -91,3 +91,46 @@ Session A update (05:0x, sc21 build announced):
   hilog slog tap dies ~line 33k so late state is kernel-lines only).
   That is downstream of the EROFS fix; the EIO->EROFS change makes us
   Linux-compatible but does not by itself create those dirs.
+
+Session A update (04:55, sc23 build announced):
+- sc22 (EROFS-fix kernel) VERIFIED: mkdirfail lines now -30 (EROFS) where
+  sc20/21 said -5; OH init tolerates and proceeds. Also: 7e43cbc9's
+  pivot_root WORKS in that build — services now run INSIDE the system
+  sandbox, a new world.
+- NEW GATE found in sc22 (root-caused): samgr denied EVERY
+  AddSystemAbility ("selinux permission denied! SA:5100,callSid:u:r:
+  init:s0") because the /sys bind hid the nested selinuxfs mount at
+  /sys/fs/selinux (sc21 still shows 'selinuxfs: class lookup' lines,
+  sc22 shows none). hdf_devmgr (critical) exited 1 four times ->
+  init panic-rebooted at ~line 20k. My fix: commit a1d30dcb
+  "feat(mount): MS_BIND|MS_REC clones nested mounts into the bind".
+- BUILDING sc23 now on a1d30dcb (bzImage changes again). sc22 stopped
+  by me (my QEMU); sc21 is the sibling shell's, untouched.
+
+Session A update (05:06, sc26 build announced):
+- sc25 (MS_REC relpath-fixed, commit f4b3e6af) BIG movement: selinuxfs
+  is reachable through the sandbox binds again, samgr accepts SA
+  registrations (0 denials, insert SA:5100 ok), 0 critical crashes,
+  0 reboots, 87 services; appspawn children get PAST the app-base
+  mount gate for the first time (result:-1 not 0xd000008).
+- NEXT gate (sc25): child dies at ChangeCurrentDir teardown —
+  umount2(".", MNT_DETACH) after pivot_root(p,p) fails (no stacked
+  old root in our jail-style pivot) -> sandbox_core.cpp:1272
+  "MNT_DETACH failed" -> "change current dir failed" -> hook -1 ->
+  exit 0, still no exec. My fix: commits 1ba5ddf5+57b2523f
+  (pivot_root records put_old in fs_struct; sys_umount consumes it
+  once on MNT_DETACH of that path). BUILDING sc26 on 57b2523f NOW.
+- NOTE /data/app/el1|el2/<uid>/... sources are STILL missing (BMS
+  install never creates the per-app dirs; parents exist, bindwalk
+  ino evidence). Children will exec but the app-base section still
+  fails on those — watch DoAppSandboxMountOnce.
+
+Session A routing addendum (05:2x, from YOUR b26 serial — read-only):
+pivot failures are gone (b25/b26: 0), umount fails 35 -> 1. The child
+now dies at:
+  E0 APPSPAWN: [appspawn_common.c:350]open dev_null error: 2
+  E0 APPSPAWN: [hisysevent_adapter.cpp:238]ReportSpawnChildProcessFail error, ret: -5
+i.e. /dev/null is missing inside the pivoted sandbox root — the child
+opens it for stdio redirection right before execve. So the next mount
+gap is the sandbox /dev (devtmpfs bind into /mnt/sandbox/<u>/<pkg>/dev
+or equivalent). No exec of any app binary yet in any boot.
