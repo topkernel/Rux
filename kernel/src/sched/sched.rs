@@ -2177,6 +2177,10 @@ unsafe fn pick_next_task(grq: &mut GlobalRunQueue, cpu_id: usize, prev: *mut Tas
 #[inline]
 unsafe fn mark_picked_on_cpu(task: *mut Task, is_repick: bool) {
     if !task.is_null() {
+        // Wakewatch forensics: consume the wake stamp and classify the
+        // wake→pick latency (direct-console prints follow the R34
+        // discipline — we hold the GRQ lock here).
+        crate::sched::wakewatch::check_picked(task, crate::arch::cpu_id() as usize);
         // Scribble hunter (R65 double-run seed tripwire): we hold the GRQ
         // lock here, so the ownership picture is stable. A task that is
         // STILL another CPU's published current (sched slot) or still
@@ -2559,6 +2563,9 @@ unsafe fn enqueue_task_locked(grq: &mut GlobalRunQueue, task: *mut Task) -> bool
         // the queue membership (R39 ordering, see above).
         (*task).set_state(TaskState::new(TaskState::RUNNING));
         grq.nr_running.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        // Wakewatch forensics: stamp every successful link (wake, fork,
+        // heal re-insert) so the pick side can measure wake→run latency.
+        crate::sched::wakewatch::note_wake(task);
     }
     inserted
 }
