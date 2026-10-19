@@ -617,6 +617,12 @@ pub fn vfs_bind_mount(
             for (rel, root, flags) in clones {
                 let sub = format!("{}/{}", target_norm.trim_end_matches('/'), rel.join("/"));
                 if let Some(ino) = root.get_inode() {
+                    crate::pr_info!(
+                        "bindrec: cloned '/{}' under '{}' (flags {:#x})",
+                        rel.join("/"),
+                        target,
+                        flags.bits()
+                    );
                     vfs_mount(&sub, ino, flags);
                 }
             }
