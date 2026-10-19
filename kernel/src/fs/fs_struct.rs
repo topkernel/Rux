@@ -153,7 +153,7 @@ impl FsStruct {
     /// Record the put_old of this process's last pivot_root (consumed by
     /// the matching umount2 — see the field doc).
     pub fn set_pivot_put_old(&self, path: &[u8]) {
-        *self.pivot_put_old.write() = alloc::vec::Vec::from(path);
+        *self.pivot_put_old.write() = Some(alloc::vec::Vec::from(path));
     }
 
     /// The recorded pivot put_old, if any.
