@@ -204,6 +204,9 @@ fn alloc_error_handler(layout: core::alloc::Layout) -> ! {
     if crate::dfx::memwatch::armed() {
         crate::dfx::memwatch::dump_heap_ledger();
     }
+    // The packing layer's own census (object counts vs pages) — this is
+    // the line that proves the 852MB of 4KB-per-object waste is packed.
+    crate::mm::small_alloc::census_line();
     // R75-followup: the validated walk (memwatch::walk_fp_chain) stops at the
     // first frame that fails its `next > fp` plausibility check, which in the
     // paint-agent capture yielded no usable frames. Dump the chain LENIENTLY

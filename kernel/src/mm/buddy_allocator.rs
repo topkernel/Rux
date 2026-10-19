@@ -605,6 +605,20 @@ unsafe impl GlobalAlloc for BuddyAllocator {
             return core::ptr::null_mut();
         }
 
+        // Small-object packing layer (alloc-crash r12-16): layouts that
+        // fit a <=1 KiB class are served from packed slab pages — one
+        // buddy page holds dozens of objects instead of one. Falls
+        // through to the plain buddy path if the layer cannot serve
+        // (uninitialized heap, out of pages).
+        if size <= crate::mm::small_alloc::SMALL_MAX
+            && align <= crate::mm::small_alloc::SMALL_MAX
+        {
+            let p = crate::mm::small_alloc::alloc(size, align);
+            if !p.is_null() {
+                return p;
+            }
+        }
+
         let _guard = self.lock.lock_irqsave();
         let ptr = self.alloc_blocks(order);
         if ptr.is_null() && size > 4 * 1024 * 1024 {
@@ -699,10 +713,55 @@ pub unsafe fn dealloc_untracked_pub(ptr: *mut u8, layout: Layout) {
 }
 
 impl BuddyAllocator {
+    /// Raw order-0 page for the small-object packing layer (mm/
+    /// small_alloc.rs): same accounting and locking as the GlobalAlloc
+    /// path (NET_PAGES, tripwires) but no memwatch note and no
+    /// size-to-order walk. Callers must NOT hold the buddy lock; the
+    /// small-alloc class lock MAY be held (class -> buddy order only).
+    pub unsafe fn alloc_page_raw(&self) -> *mut u8 {
+        if self.magic.load(Ordering::Acquire) != 0xDEADBEEF
+            || self.initialized.load(Ordering::Acquire) == 0
+        {
+            return core::ptr::null_mut();
+        }
+        let _guard = self.lock.lock_irqsave();
+        let ptr = self.alloc_blocks(0);
+        drop(_guard);
+        ptr
+    }
+
+    /// Raw order-0 free, the matching twin of alloc_page_raw.
+    pub unsafe fn free_page_raw(&self, ptr: *mut u8) {
+        if self.initialized.load(Ordering::Acquire) == 0 {
+            return;
+        }
+        let addr = ptr as usize;
+        let heap_start = self.heap_start.load(Ordering::Acquire);
+        let heap_end = self.heap_end.load(Ordering::Acquire);
+        if addr < heap_start || addr >= heap_end {
+            refused_free_note(FR_OUT_OF_WINDOW, addr, 0, 0, 0);
+            return;
+        }
+        let _guard = self.lock.lock_irqsave();
+        self.free_blocks(ptr, 0);
+        drop(_guard);
+    }
+}
+
+impl BuddyAllocator {
     /// The real buddy free path, unintercepted — the deferred-free
     /// drainer (mm/deferred_free.rs) calls this so a held-back entry can
     /// never be re-deferred.
     unsafe fn dealloc_untracked(&self, ptr: *mut u8, layout: Layout) {
+        // Small-object packing layer FIRST (alloc-crash r12-16): slab-page
+        // objects free through their page's freelist, never the buddy —
+        // and this must run before the R69 task-page probe, whose
+        // page-granular ownership bitmap would refuse frees of non-task
+        // objects sharing a (now packed) slab page with a live Task.
+        if crate::mm::small_alloc::free(ptr as usize) {
+            return;
+        }
+
         // R17-B withdrawn from the refuse path: the bitmap index aliases
         // for pages outside the heap's 8192-page window (stacks, page
         // tables), refusing legitimate frees and bleeding the machine to
