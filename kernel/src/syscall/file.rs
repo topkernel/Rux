@@ -2026,7 +2026,15 @@ pub fn sys_umount(args: SyscallArgs) -> i64 {
                     let po_str =
                         core::str::from_utf8(&po).unwrap_or("/");
                     let po_norm = crate::fs::path::path_normalize(po_str);
-                    if target == po_norm {
+                    // "/" also names the old-root stack for the
+                    // pivot_root(new, new) idiom: OH's appspawn child
+                    // chdir's into the sandbox root, pivots, and its cwd
+                    // collapses to "/" inside the new root — umount2(".",
+                    // MNT_DETACH) then arrives here as "/" (b25: children
+                    // 1185-1189 all EBUSY on exactly that). A pivot
+                    // happened in this fs (po is set), so the DETACH pops
+                    // the (unmodelled) old-root stack: no-op success.
+                    if target == po_norm || target == "/" {
                         fs.clear_pivot_put_old();
                         return 0;
                     }
