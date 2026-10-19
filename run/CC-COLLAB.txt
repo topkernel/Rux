@@ -34,3 +34,44 @@ Findings from the 21:45 session (so the other session does not redo it):
    logs MakeFromEncoded results per file + glReadPixels patch at
    eglSwapBuffers (draw-failure vs blit-failure discriminator) via
    /dev/kmsg -> serial. Boot as cc11 with private userdata.
+
+=== Final update 23:15 (session 0fcb454, before quota) ===
+
+Combined map of the black screen (both sessions' evidence):
+
+WORKING (proven tonight):
+- Scanout binding: the kva-painted checker oracle reached the ohgpu
+  scanout (co2 boot, run/oh-co2-auto0.ppm — 8 colors, 100% non-black,
+  stable 25+ min). Kernel->GEM->ADDFB2->ATOMIC->scanout chain is good.
+- Decode: 150/150 MakeFromEncoded calls in the real bootanimation
+  return w=800 h=800 (shim, cc11/cc12). ext4 reads byte-exact.
+- Draw: the single/early eglSwapBuffers frames contain non-black
+  pixels pre-blit (glReadPixels p0=000000ff — cc11/cc12/cc13).
+- Timer in isolation: usleep(16000) = 16.2ms avg, max 16.8ms
+  (test/sleep_probe_boot.py; 4 CPU spinners do not break it either).
+
+BROKEN (the remaining root cause — kernel, likely sched/timer/ipc):
+- The frame pipeline starves system-wide: composer vsync worker
+  (libdisplay_composer_vendor.z.so DrmVsyncWorker = usleep(16000) +
+  clock_gettime + pthread condvar, NO drm vblank ioctls) bursts at
+  60Hz (19ms median gap) but has gaps of 464/518/607/738 ms and ONE
+  41.5 s dead stop per boot (cc13, 183 sleeps over 47s window).
+  A 16ms sleep occasionally takes ~0.5-0.7s IN-PROCESS under the
+  loaded OH system — kernel timer/scheduling outlier under load.
+  Consequence: ~6-8 bootanimation frames per ~10 min window (want
+  150 at 30fps), RS repaints ~11 — screen stays effectively black.
+- render_service dies late (~2x per boot): SIGABRT in cc12, SIGSEGV
+  in cc13 (no user-mode trap dump). usb_host also SIGSEGV'd in cc13.
+  Suspect the same timer/wake family or the known scribbler class.
+- RS->client vsync uses NO socketpair (shim saw none) — binder or
+  shared-memory based; the bootanimation's 30Hz subscription gets
+  ticks at ~1/min.
+
+ROUTING: the outlier + dead-stop evidence points at wake/timer under
+load (sched lane) and/or futex/binder wake (ipc lane). Rigs committed:
+test/sleep_probe{,_boot}.py (add load mixtures to reproduce), decshim
+injection into composer_host (vendor-shim.img + VENDORIMG=), and the
+flip/import probes already in drm/mod.rs.
+
+Artifacts: run/oh-cc1[123]-serial.log, run/oh-co2-auto0.ppm (checker),
+run/oh-shotmon.csv, work/decode_probe_serial.log, work/sleep_probe_serial.log.

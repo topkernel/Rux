@@ -28,9 +28,19 @@ static unsigned long long ts_ns(void)
     return (unsigned long long)ts.tv_sec * 1000000000ULL + ts.tv_nsec;
 }
 
-int main(void)
+int main(int argc, char **argv)
 {
-    printf("SLEEP_PROBE: start\r\n");
+    int spinners = 0;
+    if (argc > 1)
+        spinners = atoi(argv[1]);
+    printf("SLEEP_PROBE: start spinners=%d\r\n", spinners);
+    for (int i = 0; i < spinners; i++) {
+        if (fork() == 0) {
+            volatile unsigned long x = 0;
+            for (;;)
+                x += 1;
+        }
+    }
 
     struct timespec res;
     clock_getres(CLOCK_MONOTONIC, &res);

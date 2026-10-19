@@ -76,7 +76,7 @@ def main():
            "-drive", "file=%s,if=none,id=rootfs,format=raw,file.locking=off" % img,
            "-device", "virtio-blk-pci,drive=rootfs",
            "-kernel", BZIMAGE,
-           "-append", "root=/dev/vda rw init=/test/sleep_probe console=ttyS0"]
+           "-append", "root=/dev/vda rw init=/test/sleep_probe %s console=ttyS0" % os.environ.get("SPIN", "")]
     print("[boot] qemu %s" % accel)
     proc = subprocess.Popen(cmd, stdin=subprocess.DEVNULL,
                             stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
