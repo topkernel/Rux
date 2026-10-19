@@ -2009,6 +2009,32 @@ pub fn sys_umount(args: SyscallArgs) -> i64 {
         }
     }
 
+    // Post-pivot cleanup umount2(put_old | ".", MNT_DETACH): our
+    // jail-style pivot_root stacks no real mount in the shared dentry
+    // tree, so there is nothing for vfs_umount to detach; Linux's
+    // pivot_root leaves the OLD root mounted at put_old and this umount
+    // drops it. When the target matches the caller's recorded put_old
+    // (OH appspawn sandbox_core.cpp:1272 umounts "." right after
+    // pivot_root(p, p); init's sandbox cleanup umounts put_old too),
+    // consume the marker and report success so the sandbox setup
+    // proceeds — the jail root itself is untouched.
+    if flags & MNT_DETACH != 0 {
+        if let Some(t) = crate::sched::current() {
+            // SAFETY: sched::current() yields a valid task reference.
+            if let Some(fs) = unsafe { (*t).fs_arc() } {
+                if let Some(po) = fs.pivot_put_old() {
+                    let po_str =
+                        core::str::from_utf8(&po).unwrap_or("/");
+                    let po_norm = crate::fs::path::path_normalize(po_str);
+                    if target == po_norm {
+                        fs.clear_pivot_put_old();
+                        return 0;
+                    }
+                }
+            }
+        }
+    }
+
     let ret = match crate::fs::vfs::vfs_umount(target) {
         Ok(()) => 0,
         Err(e) => e,

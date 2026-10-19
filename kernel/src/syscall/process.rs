@@ -3838,6 +3838,11 @@ pub fn sys_pivot_root(args: SyscallArgs) -> i64 {
     };
     if let Some(fs) = current.fs_arc() {
         fs.set_root_with_dentry(new_root.as_bytes(), root_dentry);
+        // Record put_old for the post-pivot cleanup umount2 (Linux leaves
+        // the old root MOUNTED at put_old; our jail-style pivot stacks
+        // nothing, so the matching umount2(MNT_DETACH) consumes the marker
+        // and reports success — OH's sandbox teardowns fail otherwise).
+        fs.set_pivot_put_old(put_old.as_bytes());
     }
     // (d) cwd: move into the new root when the old cwd fell outside it.
     let cwd = current.get_cwd();
