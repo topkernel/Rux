@@ -54,13 +54,21 @@ int main(int argc, char **argv)
     int granted_count = 0;
     for (int op = 0; op < maxop && op < 64 * 32; op++) {
         struct IoctlSetGetPermData d = { token, (uint32_t)op, 0 };
-        if (ioctl(fd, ACCESS_TOKENID_GET_PERMISSION, &d) != 0) {
-            fprintf(stderr, "permcheck: GET_PERMISSION op %d: %s\n", op,
-                    strerror(errno));
-            close(fd);
-            return 4;
+        // OH ABI: the verdict rides the ioctl RETURN VALUE (0/1), exactly
+        // like libtoken_setproc's GetPermissionFromKernel (isGranted =
+        // ret == 1); negative ret = errno (-ENODATA when no record).
+        errno = 0;
+        int ret = ioctl(fd, ACCESS_TOKENID_GET_PERMISSION, &d);
+        if (ret < 0) {
+            if (errno != 61) { /* ENODATA = no record: expected, skip */
+                fprintf(stderr, "permcheck: GET_PERMISSION op %d: %s\n", op,
+                        strerror(errno));
+                close(fd);
+                return 4;
+            }
+            continue;
         }
-        if (d.isGranted) {
+        if (ret == 1) {
             granted_count++;
             words[op / 32] |= 1u << (op % 32);
         }
