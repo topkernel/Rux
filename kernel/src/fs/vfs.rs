@@ -460,22 +460,30 @@ pub fn vfs_bind_mount(source: &str, target: &str, mnt_flags: MntFlags) -> Result
             // opened /data/app/el2/0/base/com.ohos.systemui one minute before
             // the child's bind of the same path failed ENOENT) — name the
             // deepest prefix that DOES resolve so the break is one glance.
+            // b22: also print the prefix's INODE — baked-image inodes are
+            // known (debugfs), so a mismatch proves the runtime shadowed or
+            // recreated the dir rather than the lookup being broken.
             if e == -2 {
                 let mut ok_until = String::from("/");
+                let mut ok_ino: u64 = 0;
                 let mut comps: Vec<&str> =
                     source.split('/').filter(|s| !s.is_empty()).collect();
                 while !comps.is_empty() {
                     let probe = format!("/{}", comps.join("/"));
-                    if path_lookup(&probe, 0).is_ok() {
+                    if let Ok(p) = path_lookup(&probe, 0) {
+                        if let Some(i) = p.inode.as_ref() {
+                            ok_ino = i.ino;
+                        }
                         ok_until = probe;
                         break;
                     }
                     comps.pop();
                 }
                 crate::pr_warn!(
-                    "bindwalk: '{}' ENOENT, resolves until '{}'",
+                    "bindwalk: '{}' ENOENT, resolves until '{}' ino={}",
                     source,
-                    ok_until
+                    ok_until,
+                    ok_ino
                 );
             }
             return Err(e);

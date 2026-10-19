@@ -1795,7 +1795,20 @@ pub fn sys_mount(args: SyscallArgs) -> i64 {
     if args[3] & BIND_MS_BIND != 0 {
         let mnt_flags = crate::fs::mount::translate_mnt_flags_public(args[3]);
         let ret = match crate::fs::vfs::vfs_bind_mount(source, target, mnt_flags) {
-            Ok(()) => 0,
+            Ok(()) => {
+                // Register in /proc/mounts AND the caller's mount namespace:
+                // OH's appspawn child self-binds the sandbox root precisely
+                // so pivot_root's is-mountpoint check passes (b22: sandbox
+                // setup completed, then `pivot /mnt/sandbox/0/<pkg> failed,
+                // err 22` because the bind was never registered anywhere).
+                crate::fs::mount::register_mount(
+                    source,
+                    target,
+                    "bind",
+                    if mnt_flags.is_readonly() { "ro" } else { "rw" },
+                );
+                0
+            }
             Err(e) => e,
         };
         if ret != 0 {
