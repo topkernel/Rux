@@ -982,6 +982,14 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
                     return ret;
                 }
             }
+            // Compose-content oracle: a prime import aimed at a live but
+            // non-DRM fd (the sender's fd number leaked through a parcel)
+            // fails here with ENOTTY before any DRM code runs — silent
+            // userspace-side. Log it; fall through to the generic path.
+            crate::drivers::drm::trace_foreign_prime_ioctl(request, fd, 25 /* ENOTTY */);
+        } else {
+            // fd number closed: EBADF, same silent-userspace effect.
+            crate::drivers::drm::trace_foreign_prime_ioctl(request, fd, 9 /* EBADF */);
         }
     }
 

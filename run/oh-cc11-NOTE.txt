@@ -1,0 +1,5 @@
+cc11 = compose-content shim boot (session agent 0f8cb454, relaunched 21:45).
+system-shim.img (LD_PRELOAD decshim into bootanimation) + private
+userdata-cc11.img. Distinct tag/socks from the other live session's
+cc10. Do not kill: owner session alive. Findings so far are in
+run/CC-COLLAB.txt.
