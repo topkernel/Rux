@@ -1867,7 +1867,7 @@ pub fn unix_listener_snapshot() {
             .bound_name
             .lock()
             .clone()
-            .unwrap_or_else(|| key_shown(key).to_string());
+            .unwrap_or_else(|| String::from(key_shown(key)));
         crate::pr_info!(
             "socksnap: LISTEN name={} q={} backlog={} fid={:#x}",
             key_shown(&name),

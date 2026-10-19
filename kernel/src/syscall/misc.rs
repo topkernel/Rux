@@ -106,6 +106,10 @@ struct EpollEntry {
     /// snapshot (a new edge), and readiness going fully idle resets it
     /// so the next arrival reports again. 0 = nothing reported yet.
     last_reported: u32,
+    /// dfx=socksnap (b16 appspawn hunt): how many times a wait delivered
+    /// this entry — a readable LT entry with reports==0 while its epoll's
+    /// wait_count grows is the lost-delivery signature.
+    reports: u64,
 }
 
 /// Epoll file structure (stored as File private_data)
@@ -115,6 +119,11 @@ struct EpollFile {
     /// the re-check timer, signal delivery, or `epoll_notify_file` once
     /// fd-side producers (pipe/socket/...) are wired to call it.
     wait_queue: crate::process::wait::WaitQueueHead,
+    /// dfx=socksnap (b16): creator pid, printed by the interest dump so an
+    /// epoll line can be tied to its owning process.
+    owner_pid: u32,
+    /// dfx=socksnap (b16): total completed wait syscalls on this instance.
+    wait_count: u64,
 }
 
 // ============================================================================
@@ -216,44 +225,61 @@ pub fn epoll_interest_snapshot() {
     if !crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SockSnap) {
         return;
     }
-    // (epoll ptr, [(fd, events, file_id, last_reported); ..]) — collected
-    // under the registry + entries locks, printed after release.
-    let mut out: alloc::vec::Vec<(usize, alloc::vec::Vec<(i32, u32, u64, u32)>)> =
-        alloc::vec::Vec::new();
+    // (epoll ptr, owner pid, wait count, [(fd, events, file_id, last_reported, reports); ..])
+    // — collected under the registry + entries locks, printed after release.
+    let mut out: alloc::vec::Vec<(
+        usize,
+        u32,
+        u64,
+        alloc::vec::Vec<(i32, u32, u64, u32, u64)>,
+    )> = alloc::vec::Vec::new();
     {
         let registry = EPOLL_WAKE_REGISTRY.lock_irqsave();
         for (_, ep) in registry.bindings.iter() {
             let ep_usize = *ep as usize;
-            if out.iter().any(|(p, _)| *p == ep_usize) {
+            if out.iter().any(|(p, _, _, _)| *p == ep_usize) {
                 continue; // one line per instance, not per binding
             }
             // SAFETY: `ep` came from Box::into_raw in sys_epoll_create and
             // its close op unregisters the binding before freeing, so it is
             // alive while we hold the registry lock.
             let epoll = unsafe { &**ep };
+            let owner = epoll.owner_pid;
+            let waits = epoll.wait_count;
             let entries = epoll.entries.lock();
-            let mut row: alloc::vec::Vec<(i32, u32, u64, u32)> = alloc::vec::Vec::new();
+            let mut row: alloc::vec::Vec<(i32, u32, u64, u32, u64)> = alloc::vec::Vec::new();
             for entry in entries.iter() {
                 if row.len() >= 24 {
                     break;
                 }
-                row.push((entry.fd, entry.events, entry.file_id, entry.last_reported));
+                row.push((
+                    entry.fd,
+                    entry.events,
+                    entry.file_id,
+                    entry.last_reported,
+                    entry.reports,
+                ));
             }
             let total = entries.len();
             drop(entries);
-            out.push((ep_usize, row));
+            out.push((ep_usize, owner, waits, row));
             if total > 24 {
                 crate::pr_warn!("socksnap: ep={:#x} has {} entries (truncated)", ep_usize, total);
             }
         }
     }
-    for (ep, row) in out.iter() {
-        let mut line: alloc::string::String =
-            alloc::format!("socksnap: ep={:#x} fds={}", ep, row.len());
-        for (fd, ev, fid, lr) in row.iter() {
+    for (ep, owner, waits, row) in out.iter() {
+        let mut line: alloc::string::String = alloc::format!(
+            "socksnap: ep={:#x} owner={} waits={} fds={}",
+            ep,
+            owner,
+            waits,
+            row.len()
+        );
+        for (fd, ev, fid, lr, rep) in row.iter() {
             line.push_str(&alloc::format!(
-                " [fd={} ev={:#x} fid={:#x} lr={:#x}]",
-                fd, ev, fid, lr
+                " [fd={} ev={:#x} fid={:#x} lr={:#x} rep={}]",
+                fd, ev, fid, lr, rep
             ));
         }
         crate::pr_info!("{}", line);
@@ -1294,6 +1320,8 @@ pub fn sys_epoll_create(args: SyscallArgs) -> i64 {
     let epoll = alloc::boxed::Box::new(EpollFile {
         entries: crate::sync::spinlock::Spinlock::new(alloc::vec::Vec::new()),
         wait_queue: crate::process::wait::WaitQueueHead::new(),
+        owner_pid: crate::process::current_pid(),
+        wait_count: 0,
     });
     let epoll_ptr = alloc::boxed::Box::into_raw(epoll) as *mut u8;
 
@@ -1590,6 +1618,7 @@ pub fn sys_epoll_ctl(args: SyscallArgs) -> i64 {
                         events: event.events,
                         data: event.data,
                         last_reported: 0,
+                        reports: 0,
                     });
                     Reg::Add(file_id)
                 }
@@ -1809,6 +1838,8 @@ pub fn sys_epoll_wait(args: SyscallArgs) -> i64 {
                         file.get_ops().map_or(core::ptr::null(), |o| o as *const _ as *const ()),
                     ));
                 }
+                // dfx=socksnap (b16): count the delivery.
+                entry.reports = entry.reports.saturating_add(1);
                 ready_events.push(EPollEvent {
                     events: ep_events & report_mask,
                     data: entry.data,
@@ -1874,6 +1905,8 @@ pub fn sys_epoll_wait(args: SyscallArgs) -> i64 {
             if uncopied > 0 {
                 return -(errno::EFAULT as i64);
             }
+            // dfx=socksnap (b16): one completed wait syscall.
+            epoll.wait_count = epoll.wait_count.saturating_add(1);
             return count as i64;
         }
 
