@@ -24,7 +24,7 @@ ro_drive() { # idx file
     printf ' -drive file=%s,if=none,id=ohd%d,format=raw,file.locking=off,snapshot=on -device virtio-blk-pci,drive=ohd%d' "$file" "$idx" "$idx"
 }
 
-USERDATA="$IMGDIR/userdata-tok.img"
+USERDATA="${USERDATA:-$IMGDIR/userdata-tok.img}"
 
 APPEND="ip=dhcp loglevel=${LOGLEVEL:-7} console=ttyS0,115200"
 APPEND="$APPEND init=init root=/dev/ram0 rw"
