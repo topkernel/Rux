@@ -436,10 +436,48 @@ const DRM_IOCTL_PRIME_HANDLE_TO_FD: u32 = ioc(3, 0x2d, 16);
 /// DrmAllocator logged "can not get fd from prime handle errno: 25"
 /// after a successful CREATE_DUMB and every AllocMem failed, killing
 /// the first real frame (r12). Match BOTH encodings.
+/// Same ioctl with the CORRECT upstream size: struct drm_prime_handle
+/// is 12 bytes (handle, flags, fd — no pad). The 16-byte constant above
+/// was baked from a wrong layout, so OH libdrm's real
+/// DRM_IOWR(0x2d, sizeof 12) fell through to ENOTTY — the gralloc
+/// DrmAllocator logged "can not get fd from prime handle errno: 25"
+/// after a successful CREATE_DUMB and every AllocMem failed, killing
+/// the first real frame (r12). Match BOTH encodings.
 const DRM_IOCTL_PRIME_HANDLE_TO_FD_12: u32 = ioc(3, 0x2d, 12);
 const DRM_IOCTL_PRIME_FD_TO_HANDLE: u32 = ioc(3, 0x2e, 16);
 /// Correct-size alias (see DRM_IOCTL_PRIME_HANDLE_TO_FD_12).
 const DRM_IOCTL_PRIME_FD_TO_HANDLE_12: u32 = ioc(3, 0x2e, 12);
+
+/// True when `request` is a PRIME_FD_TO_HANDLE ioctl number (either
+/// size encoding) — io.rs uses this to catch imports aimed at a fd that
+/// is not a DRM node (cross-process fd-number leaks fail exactly there).
+pub fn is_prime_import_request(request: u32) -> bool {
+    request == DRM_IOCTL_PRIME_FD_TO_HANDLE || request == DRM_IOCTL_PRIME_FD_TO_HANDLE_12
+}
+
+/// Bring-up oracle (compose-content): a prime import attempt that never
+/// reaches the DRM dispatch means the caller's fd is NOT a DRM file —
+/// the classic cross-process fd-number leak (a BufferHandle parcelled
+/// without binder FDA fixup carries the SENDER's fd number). The gallium
+/// swrast import path fails silently then ("eglCreateImageKHR failed,
+/// error EGL_SUCCESS", zero kernel ioctls). io.rs calls this when it
+/// sees a prime-import request number on a non-DRM fd (or a dead fd).
+pub fn trace_foreign_prime_ioctl(request: u32, fd: i32, err: i32) {
+    if !is_prime_import_request(request) {
+        return;
+    }
+    static FOREIGN_N: AtomicU32 = AtomicU32::new(0);
+    let n = FOREIGN_N.fetch_add(1, Ordering::Relaxed);
+    if n < 40 {
+        crate::pr_warn!(
+            "drm: prime-import on non-drm fd={} (err {}) pid={} #{}",
+            fd,
+            err,
+            crate::process::current_pid(),
+            n
+        );
+    }
+}
 const DRM_IOCTL_WAIT_VBLANK: u32 = ioc(3, 0x3a, 24);
 const DRM_IOCTL_MODE_GETRESOURCES: u32 = ioc(3, 0xa0, 64);
 // Sizes verified against the IMAGE's libdrm.so (constants embedded in
@@ -537,6 +575,9 @@ struct FbObject {
     _gem: Arc<GemObject>,
     width: u32,
     height: u32,
+    /// Row pitch in bytes (composer GEMs carry gralloc's 64-pixel
+    /// alignment: 720-wide content on a 3072-byte pitch).
+    pitch: u32,
     /// virtio_gpu format id the GEM bytes are laid out as.
     virtio_format: u32,
 }
@@ -637,10 +678,36 @@ fn prime_close(file: &crate::fs::file::File) -> i32 {
     0
 }
 
+/// lseek on a prime fd — Linux dma-buf parity (dma_buf_llseek): the
+/// file position ranges over the buffer's bytes and SEEK_END yields the
+/// buffer SIZE. The vendor kms-dri software winsys sizes every imported
+/// gralloc buffer with lseek(fd, 0, SEEK_END) and fails the import
+/// SILENTLY on -1 — with no lseek op the EGLImage path returned NULL
+/// with no error ("eglCreateImageKHR failed, error EGL_SUCCESS"), RS
+/// rendered into a shadow target, and every flipped GEM stayed zeroed
+/// (the black-screen root cause).
+fn prime_lseek(file: &crate::fs::file::File, offset: isize, whence: i32) -> isize {
+    let Some(gem) = prime_file_gem(file) else { return -9 };
+    let size = gem.size as i64;
+    let cur = file.get_pos() as i64;
+    let base = match whence {
+        0 => 0,        // SEEK_SET
+        1 => cur,      // SEEK_CUR
+        2 => size,     // SEEK_END: the buffer size (dma-buf semantics)
+        _ => return -22, // EINVAL
+    };
+    let target = base + offset as i64;
+    if target < 0 || target > size {
+        return -22; // EINVAL (dma_buf_llseek)
+    }
+    let _ = file.set_pos(target as u64);
+    target as isize
+}
+
 pub static PRIME_OPS: crate::fs::file::FileOps = crate::fs::file::FileOps {
     read: Some(prime_read),
     write: Some(prime_write),
-    lseek: None,
+    lseek: Some(prime_lseek),
     close: Some(prime_close),
     poll: None,
     read_at: None,
@@ -652,6 +719,51 @@ pub fn is_prime_file(file: &crate::fs::file::File) -> bool {
         Some(ops) => core::ptr::eq(ops as *const _, &PRIME_OPS as *const _),
         None => false,
     }
+}
+
+/// fstat(2) for DRM files. Linux parity the importers depend on:
+/// the /dev/dri nodes stat as character devices (rdev 226:0/226:128),
+/// and an exported dma-buf (prime) fd stats as a REGULAR file whose
+/// st_size is the backing buffer's size — gbm, Mesa's image-from-dmabuf
+/// and the OH composer's DrmGemBuffer size and validate their mappings
+/// through exactly that stat. Every anonymous-file stat path returned
+/// None for these files before, so fstat answered EBADF and the
+/// software EGLImage import of gralloc buffers bailed silently
+/// ("eglCreateImageKHR failed, error EGL_SUCCESS" — RS renders into a
+/// shadow target and the flipped GEMs stay zeroed/black).
+pub fn drm_file_stat(file: &crate::fs::file::File, stat: &mut crate::fs::Stat) -> Option<i32> {
+    if is_prime_file(file) {
+        let gem = prime_file_gem(file)?;
+        stat.st_dev = 0;
+        stat.st_ino = gem.id as u64;
+        stat.st_nlink = 1;
+        stat.st_uid = 0;
+        stat.st_gid = 0;
+        stat.st_rdev = 0;
+        stat.st_size = gem.size as i64;
+        stat.st_blocks = gem.size as i64 / 512;
+        stat.st_blksize = 4096;
+        stat.set_regular_file();
+        stat.st_mode |= 0o666;
+        return Some(0);
+    }
+    if is_drm_file(file) {
+        stat.st_dev = 0;
+        stat.st_ino = 0;
+        stat.st_nlink = 1;
+        stat.st_uid = 0;
+        stat.st_gid = 0;
+        // Userspace makedev encoding of 226:0 (both nodes share it; the
+        // minor only distinguishes renderD128, which nothing stats on).
+        stat.st_rdev = ((DRM_MAJOR as u64 & 0xfff) << 8) | 0;
+        stat.st_size = 0;
+        stat.st_blocks = 0;
+        stat.st_blksize = 4096;
+        stat.set_char_device();
+        stat.st_mode |= 0o666;
+        return Some(0);
+    }
+    None
 }
 
 /// GEM object backing a prime fd.
@@ -793,7 +905,21 @@ const T_UNHANDLED: usize = 7; // ENOTTY answers
 
 fn trace_ioctl(request: u32, ret: i64) {
     let (slot, name) = match request {
-        DRM_IOCTL_VERSION => return,
+        DRM_IOCTL_VERSION => {
+            // VERSION is every DRM client's first ioctl — an effective
+            // "node open" marker. First 8 callers with pid.
+            static VTRACE: AtomicU32 = AtomicU32::new(0);
+            let v = VTRACE.fetch_add(1, Ordering::Relaxed);
+            if v < 8 {
+                crate::pr_warn!(
+                    "drm: VERSION probe #{} pid={} (ret {})",
+                    v,
+                    crate::process::current_pid(),
+                    ret
+                );
+            }
+            return;
+        }
         DRM_IOCTL_MODE_GETRESOURCES
         | DRM_IOCTL_MODE_GETCRTC
         | DRM_IOCTL_MODE_GETENCODER
@@ -1649,12 +1775,71 @@ fn prime_fd_to_handle(arg: usize, size: usize) -> i64 {
         return -22;
     }
     let Some(file) = (unsafe { crate::fs::file::get_file_fd(prime_fd as usize) }) else {
+        static DEAD_N: AtomicU32 = AtomicU32::new(0);
+        let n = DEAD_N.fetch_add(1, Ordering::Relaxed);
+        if n < 20 {
+            crate::pr_warn!(
+                "drm: prime import fd={} DEAD (EBADF) pid={}",
+                prime_fd,
+                crate::process::current_pid()
+            );
+        }
         return -9; // EBADF
     };
     if !is_prime_file(&file) {
+        static NOTPRIME_N: AtomicU32 = AtomicU32::new(0);
+        let n = NOTPRIME_N.fetch_add(1, Ordering::Relaxed);
+        if n < 20 {
+            crate::pr_warn!(
+                "drm: prime import fd={} NOT a dma-buf (EINVAL) pid={}",
+                prime_fd,
+                crate::process::current_pid()
+            );
+        }
         return -22; // EINVAL: not a dma-buf
     }
     let Some(gem) = prime_file_gem(&file) else { return -22 };
+
+    // Compose-content probe: layer-texture imports carry the CLIENT's
+    // finished frame (the producer drew before queueing) — non-zero
+    // content here means the client rendered; zero means its rendering
+    // never reached the buffer.
+    static IMPORT_TRACE_N: AtomicU32 = AtomicU32::new(0);
+    let it = IMPORT_TRACE_N.fetch_add(1, Ordering::Relaxed);
+    if it < 24 || it % 20 == 0 {
+        let mut nz: usize = 0;
+        let mut clear: usize = 0;
+        let mut samples = [0u32; 3];
+        // SAFETY: gem.kva..gem.kva+size is the object's backing.
+        unsafe {
+            let base = gem.kva as *const u32;
+            for i in 0..gem.size / 4 {
+                let v = base.add(i).read_volatile();
+                if v != 0 {
+                    nz += 1;
+                    if v == 0xff00_0000 {
+                        clear += 1;
+                    }
+                }
+            }
+            let row_words = 983040 / 1280; // pitch/4 for these buffers
+            samples[0] = base.add(row_words * 640 + 360).read_volatile();
+            samples[1] = base.add(row_words * 640 + 200).read_volatile();
+            samples[2] = base.add(row_words * 300 + 360).read_volatile();
+        }
+        crate::pr_warn!(
+            "drm: import#{} pid={} fd={} gem={} nz={} clear={} s0={:08x} s1={:08x} s2={:08x}",
+            it,
+            crate::process::current_pid(),
+            prime_fd,
+            gem.id,
+            nz,
+            clear,
+            samples[0],
+            samples[1],
+            samples[2]
+        );
+    }
 
     // Re-register under the gem's id if the handle side was already
     // GEM_CLOSEd (cross-process import): the object stays alive through
@@ -1742,10 +1927,28 @@ fn add_fb_common(arg: usize, size: usize, handle: u32, width: u32, height: u32, 
             _gem: gem,
             width,
             height,
+            pitch,
             virtio_format: vfmt,
         },
     );
     drop(st);
+
+    // Bring-up trace: every FB creation (the composer makes one per
+    // present; the handle/pitch pair identifies which GEM backs it).
+    static FB_TRACE_N: AtomicU32 = AtomicU32::new(0);
+    let fn_ = FB_TRACE_N.fetch_add(1, Ordering::Relaxed);
+    if fn_ < 60 {
+        crate::pr_warn!(
+            "drm: addfb#{} fb={} gem={} {}x{} pitch={} fourcc={:#x}",
+            fn_,
+            fb_id,
+            handle,
+            width,
+            height,
+            pitch,
+            fourcc
+        );
+    }
 
     let mut out = [0u8; 104];
     wru32(&mut out, 0, fb_id);
@@ -1770,12 +1973,135 @@ fn rmfb(fb_id: u32) -> i64 {
 fn present_fb(fb_id: u32) -> i64 {
     // Snapshot the FB data under the lock, then run the virtio sequence
     // lock-free (device transactions can take milliseconds under TCG).
-    let (gem, width, height, vfmt) = {
+    let (gem, width, height, pitch, vfmt) = {
         let st = DRM_STATE.lock_irqsave();
         match st.fbs.get(&fb_id) {
-            Some(fb) => (fb._gem.clone(), fb.width, fb.height, fb.virtio_format),
+            Some(fb) => (
+                fb._gem.clone(),
+                fb.width,
+                fb.height,
+                fb.pitch,
+                fb.virtio_format,
+            ),
             None => return -22,
         }
+    };
+
+    // Bring-up content probe (compose-content): is the buffer the
+    // composer wants on screen actually non-zero at flip time? Black
+    // content -> userspace never rendered into this GEM; non-black with
+    // a black screen -> scanout binding. Sample every word (1M volatile
+    // reads ~ a few ms under KVM) for the first 40 flips, then 1-in-10.
+    // `paint` counts pixels that are NEITHER zero NOR the RS clear color
+    // (0xff000000) inside the visible columns — the bootanimation logo
+    // shows up there even when the background is opaque black.
+    static FLIP_TRACE_N: AtomicU32 = AtomicU32::new(0);
+    let ft = FLIP_TRACE_N.fetch_add(1, Ordering::Relaxed);
+    if ft < 40 || ft % 10 == 0 {
+        let mut nz: usize = 0;
+        let mut paint: usize = 0;
+        let mut samples = [0u32; 4];
+        // SAFETY: gem.kva..gem.kva+size is the object's own backing
+        // store; word-aligned reads stay inside the allocation.
+        unsafe {
+            let base = gem.kva as *const u32;
+            let words = gem.size / 4;
+            for i in 0..words {
+                let v = base.add(i).read_volatile();
+                if v != 0 {
+                    nz += 1;
+                }
+            }
+            let row_words = (pitch / 4) as usize;
+            let vis_words = width as usize;
+            for row in 0..height as usize {
+                let rowp = base.add(row * row_words);
+                for col in (0..vis_words).step_by(2) {
+                    let v = rowp.add(col).read_volatile();
+                    if v != 0 && v != 0xff00_0000 {
+                        paint += 1;
+                    }
+                }
+            }
+            let mid_row = (height as usize / 2) * row_words;
+            let last_row = (height as usize - 1).saturating_mul(row_words);
+            samples[0] = base.add(720 / 4).read_volatile();
+            samples[1] = base.add(row_words + 720 / 4).read_volatile();
+            samples[2] = base.add(mid_row + (width as usize / 2)).read_volatile();
+            samples[3] = base.add(last_row + 720 / 4).read_volatile();
+        }
+        crate::pr_warn!(
+            "drm: flip#{} fb={} gem={} {}x{} pitch={} vfmt={} nz={}/{} paint={} ctr={:08x} cmid={:08x}",
+            ft,
+            fb_id,
+            gem.id,
+            width,
+            height,
+            pitch,
+            vfmt,
+            nz,
+            gem.size / 4,
+            paint,
+            samples[0],
+            samples[2]
+        );
+    }
+
+    // Scanout-binding oracle (compose-content): every composer buffer so
+    // far carries ONLY the RS clear color (nz==clear, paint==0) — a black
+    // screen is then expected even with a perfect binding, which makes
+    // the black screen uninformative about the binding itself. To
+    // separate content from binding, the kernel paints a known banded
+    // checker through kva into the flipped GEM right before the flip's
+    // host transfer: if the pattern reaches the screen, kva==phys and
+    // the whole scanout chain is proven for the composer's own imported
+    // buffers; if the screen stays black, the binding (not content) is
+    // the bug. Painted on flips 1..=60 and every 5th after (any
+    // screendump in any inter-flip gap then catches it); the composer
+    // re-clears its buffers on reuse, so the probe self-erases.
+    if (1..=60).contains(&ft) || ft % 5 == 0 {
+        let row_words = (pitch / 4) as usize;
+        // SAFETY: writes stay in the visible columns of the GEM's own
+        // backing (width*4 <= pitch, row_words*height*4 <= size).
+        unsafe {
+            let base = gem.kva as *mut u32;
+            for row in 0..height as usize {
+                let rowp = base.add(row * row_words);
+                let band = row * 4 / height as usize;
+                let c = match band {
+                    0 => 0xff_d0_30_30, // red
+                    1 => 0xff_30_d0_30, // green
+                    2 => 0xff_30_30_d0, // blue
+                    _ => 0xff_f0_f0_f0, // white
+                };
+                for col in 0..width as usize {
+                    let v = if (row / 16 + col / 16 + ft as usize) % 8 == 0 {
+                        !c | 0xff00_0000
+                    } else {
+                        c
+                    };
+                    rowp.add(col).write_volatile(v);
+                }
+            }
+        }
+        crate::pr_warn!(
+            "drm: oracle#{} painted gem={} (banded checker via kva)",
+            ft,
+            gem.id
+        );
+    }
+
+    // Resource geometry: the GEM's real row pitch. Gralloc allocates
+    // FB buffers width-aligned to 64 pixels (720 content on a 768-pixel
+    // row, pitch 3072), so a resource built at the FB's 720 width makes
+    // QEMU read guest rows 2880 bytes apart — every row drifts 192
+    // bytes and the scanout shows a diagonally sheared frame. Build the
+    // resource at the memory's true geometry and display the FB rect as
+    // a scanout subrect (SET_SCANOUT crops by the resource stride).
+    let res_w = if pitch >= width * 4 && pitch % 4 == 0 && pitch / 4 >= width {
+        pitch / 4
+    } else {
+        width
     };
 
     let ok = crate::drivers::gpu::with_gpu_device(|gpu| {
@@ -1783,7 +2109,7 @@ fn present_fb(fb_id: u32) -> i64 {
         let mut res = gem.virtio_res.load(Ordering::Acquire);
         if res == 0 {
             let id = NEXT_VIRTIO_RES.fetch_add(1, Ordering::Relaxed);
-            if gpu.create_resource_2d_id(id, width, height, vfmt).is_none() {
+            if gpu.create_resource_2d_id(id, res_w, height, vfmt).is_none() {
                 return false;
             }
             if gpu.attach_backing_id(id, gem.phys, gem.size as u32).is_none() {
@@ -1792,19 +2118,22 @@ fn present_fb(fb_id: u32) -> i64 {
             gem.virtio_res.store(id, Ordering::Release);
             res = id;
         }
-        // Guest RAM -> host resource storage.
-        if !gpu.transfer_to_host_2d_id(res, 0, width, height) {
+        // Guest RAM -> host resource storage. Full-resource transfer:
+        // row stride res_w*4 == the GEM pitch, so the guest backing is
+        // read linearly, exactly as it is laid out.
+        if !gpu.transfer_to_host_2d_id(res, 0, res_w, height) {
             return false;
         }
-        // Bind to scanout when the resource changed since last flip.
+        // Bind to scanout when the resource changed since last flip;
+        // the scanout rect is the FB's (sub)rectangle of the resource.
         let cur = DRM_STATE.lock_irqsave().scanout_res;
         if cur != res {
-            if !gpu.set_scanout_id(0, res, width, height) {
+            if !gpu.set_scanout_rect(0, res, width, height, res_w) {
                 return false;
             }
             DRM_STATE.lock_irqsave().scanout_res = res;
         }
-        // Present.
+        // Present the displayed rect.
         gpu.resource_flush_id(res, width, height)
     });
     match ok {
@@ -1915,7 +2244,31 @@ fn mode_atomic(arg: usize) -> i64 {
     // belongs to.
     let mut flip_fb: u32 = 0;
     let mut idx = 0usize;
+    // Bring-up trace (compose-content): the exact property combo of
+    // every commit — the field-by-field diff against the painter's
+    // known-good (obj=plane, FB_ID only, flags=0) is how a wrong
+    // binding would show up. First 60 commits in full, then 1-in-25.
+    static ATOM_TRACE_N: AtomicU32 = AtomicU32::new(0);
+    let at = ATOM_TRACE_N.fetch_add(1, Ordering::Relaxed);
+    let trace_on = at < 60 || at % 25 == 0;
+    let mut trace = if trace_on {
+        alloc::string::String::with_capacity(128)
+    } else {
+        alloc::string::String::new()
+    };
+    if trace_on {
+        use core::fmt::Write as _;
+        let _ = write!(
+            &mut trace,
+            "atom#{} flags={:#x} nobj={} ",
+            at, flags, count_objs
+        );
+    }
     for oi in 0..count_objs {
+        if trace_on {
+            use core::fmt::Write as _;
+            let _ = write!(&mut trace, "obj{}[", objs[oi]);
+        }
         for _ in 0..counts[oi] as usize {
             if idx >= total {
                 break;
@@ -1924,6 +2277,10 @@ fn mode_atomic(arg: usize) -> i64 {
             let prop = props[idx];
             let value = values[idx];
             idx += 1;
+            if trace_on {
+                use core::fmt::Write as _;
+                let _ = write!(&mut trace, "{}={:#x},", prop, value);
+            }
             if obj == OBJ_PLANE && prop == PROP_PLANE_FB_ID {
                 flip_fb = value as u32;
             }
@@ -1931,6 +2288,15 @@ fn mode_atomic(arg: usize) -> i64 {
             // fixed, fences unsupported — accepted and ignored.
             let _ = (obj, value);
         }
+        if trace_on {
+            trace.push(']');
+        }
+    }
+    if trace_on {
+        if flags & DRM_MODE_ATOMIC_TEST_ONLY != 0 {
+            trace.push_str(" TEST");
+        }
+        crate::pr_warn!("drm: {}", trace);
     }
 
     if flags & DRM_MODE_ATOMIC_TEST_ONLY != 0 {
@@ -2071,9 +2437,25 @@ pub fn gem_mmap_resolve(
     offset: u64,
     len: usize,
 ) -> Option<(u64, usize)> {
+    // Bring-up trace (compose-content): who maps which GEM — RS's
+    // llvmpipe must map the SAME objects the composer flips.
+    static MMAP_TRACE_N: AtomicU32 = AtomicU32::new(0);
+    let mt = MMAP_TRACE_N.fetch_add(1, Ordering::Relaxed);
+    let trace = mt < 30;
     if is_prime_file(file) {
         let gem = prime_file_gem(file)?;
         let n = len.min(gem.size);
+        if trace {
+            crate::pr_warn!(
+                "drm: prime mmap#{} pid={} gem={} off={:#x} len={} -> phys={:#x}",
+                mt,
+                crate::process::current_pid(),
+                gem.id,
+                offset,
+                n,
+                gem.phys
+            );
+        }
         return Some((gem.phys + offset, n));
     }
     if is_drm_file(file) {
@@ -2084,6 +2466,16 @@ pub fn gem_mmap_resolve(
         }?;
         let off = offset & 0xfff;
         let n = len.min(gem.size.saturating_sub(off as usize));
+        if trace {
+            crate::pr_warn!(
+                "drm: node mmap#{} gem={} off={:#x} len={} -> phys={:#x}",
+                mt,
+                gem.id,
+                offset,
+                n,
+                gem.phys
+            );
+        }
         return Some((gem.phys + off, n));
     }
     None

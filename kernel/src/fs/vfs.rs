@@ -2998,6 +2998,12 @@ pub fn file_stat(fd: usize, stat: &mut Stat) -> Result<(), i32> {
                 if crate::fs::char_dev::char_dev_file_stat(&file, stat).is_some() {
                     return Ok(());
                 }
+                // DRM nodes + exported prime (dma-buf) fds: dma-buf must
+                // stat as a regular file with st_size == buffer size (the
+                // EGL/gbm importers validate through it).
+                if crate::drivers::drm::drm_file_stat(&file, stat).is_some() {
+                    return Ok(());
+                }
                 if mem_file_stat(&file, stat).is_some() {
                     return Ok(());
                 }

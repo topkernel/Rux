@@ -562,6 +562,24 @@ impl VirtioGpuDevice {
         self.set_scanout(scanout_id, resource_id, &rect).is_some()
     }
 
+    /// Bind a resource to scanout 0 showing the (0,0,w,h) subrect of a
+    /// resource that is `res_w` pixels wide (pitch-aligned GEMs: the
+    /// scanout rect crops by the resource stride, so the left `w`
+    /// columns display unsheared).
+    pub fn set_scanout_rect(
+        &self,
+        scanout_id: u32,
+        resource_id: u32,
+        width: u32,
+        height: u32,
+        res_w: u32,
+    ) -> bool {
+        debug_assert!(width <= res_w);
+        let rect = Rect { x: 0, y: 0, width, height };
+        let _ = res_w; // stride comes from the resource itself on the host
+        self.set_scanout(scanout_id, resource_id, &rect).is_some()
+    }
+
     /// Release a host-side resource (DRM GEM teardown).
     pub fn unref_resource(&self, resource_id: u32) -> bool {
         // RESOURCE_UNREF: header(24) + resource_id(4) + padding(4) = 32.
