@@ -468,6 +468,39 @@ pub fn vfs_umount(mountpoint: &str) -> Result<(), i32> {
     Ok(())
 }
 
+/// Relative component names from `anc` down to `d` (exclusive of `anc`),
+/// walking the dentry tree upward and hopping mount boundaries via the
+/// fs-root mountpoint back-references. None when `d` is not a strict
+/// descendant of `anc` (or is `anc` itself).
+fn dentry_relpath_below(anc: &Arc<Dentry>, d: &Arc<Dentry>) -> Option<Vec<String>> {
+    let mut cur = d.clone();
+    let mut comps: Vec<String> = Vec::new();
+    loop {
+        if Arc::ptr_eq(&cur, anc) {
+            return Some(comps);
+        }
+        let next = {
+            let parent = cur.parent.lock().clone();
+            match parent {
+                Some(p) => {
+                    comps.push(cur.get_name());
+                    p
+                }
+                None => {
+                    // Top of a mounted filesystem: hop to its mountpoint in
+                    // the covering tree so mounts under nested mounts are
+                    // still recognized as descendants.
+                    match cur.get_mountpoint_back() {
+                        Some(m) => m,
+                        None => return None,
+                    }
+                }
+            }
+        };
+        cur = next;
+    }
+}
+
 /// Bind mount: attach the subtree rooted at `source` over `target`
 /// (Linux mount(2) with MS_BIND — do_loopback). OH's appspawn sandbox
 /// construction binds /proc, /dev, /sys, /system/... into
@@ -479,7 +512,20 @@ pub fn vfs_umount(mountpoint: &str) -> Result<(), i32> {
 /// source resolution follows symlinks and mounts on the way (/system is
 /// a symlink into the /usr ext4 mount — the bind must capture the
 /// resolved inode, exactly what path_lookup yields).
-pub fn vfs_bind_mount(source: &str, target: &str, mnt_flags: MntFlags) -> Result<(), i32> {
+///
+/// `recursive` (MS_BIND|MS_REC — every OH sandbox bind carries it):
+/// clone the mounts nested under the source subtree at the
+/// corresponding target paths (Linux clone_mnt of the whole subtree).
+/// Without this the bind exposed only the source's own inode tree:
+/// the /sys bind hid selinuxfs at /sys/fs/selinux, samgr's selinux
+/// check failed closed, and every AddSystemAbility was denied —
+/// hdf_devmgr (critical) crash-looped into a panic reboot (sc22).
+pub fn vfs_bind_mount(
+    source: &str,
+    target: &str,
+    mnt_flags: MntFlags,
+    recursive: bool,
+) -> Result<(), i32> {
     let src = match path_lookup(source, 0) {
         Ok(p) => p,
         Err(e) => {
@@ -536,7 +582,46 @@ pub fn vfs_bind_mount(source: &str, target: &str, mnt_flags: MntFlags) -> Result
     } else {
         mnt_flags
     };
-    vfs_mount(target, inode, mnt_flags);
+    vfs_mount(target, inode.clone(), mnt_flags);
+
+    // MS_REC: clone the mounts nested under the source subtree to the
+    // same relative paths under the target (see the doc comment). The
+    // self-referential shapes are skipped by path prefix: OH appspawn
+    // bind-mounts /mnt/sandbox/<user>/<pkg> onto ITSELF with MS_REC to
+    // re-flag propagation — cloning its child mounts back into the same
+    // dentries would stack clones on the originals.
+    if recursive {
+        let target_norm = format!("/{}", target.trim_matches('/'));
+        let self_referential = target_norm == source
+            || target_norm.starts_with(&format!("{}/", source.trim_end_matches('/')));
+        if !self_referential {
+            let src_dentry = match src.dentry.clone() {
+                Some(d) => d,
+                None => return Ok(()),
+            };
+            let clones: Vec<(Vec<String>, Arc<Dentry>, MntFlags)> = {
+                let state = VFS_STATE.lock();
+                state
+                    .mounts
+                    .iter()
+                    .filter_map(|m| {
+                        let mp = m.root.get_mountpoint_back()?;
+                        let rel = dentry_relpath_below(&src_dentry, &mp)?;
+                        if rel.is_empty() {
+                            return None;
+                        }
+                        Some((rel, m.root.clone(), *m.flags.lock()))
+                    })
+                    .collect()
+            };
+            for (rel, root, flags) in clones {
+                let sub = format!("{}/{}", target_norm.trim_end_matches('/'), rel.join("/"));
+                if let Some(ino) = root.get_inode() {
+                    vfs_mount(&sub, ino, flags);
+                }
+            }
+        }
+    }
     Ok(())
 }
 

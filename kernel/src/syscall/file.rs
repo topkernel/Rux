@@ -1792,9 +1792,15 @@ pub fn sys_mount(args: SyscallArgs) -> i64 {
     // new mount SHARES the source directory's inode (see
     // vfs_bind_mount); fstype and data are ignored, as on Linux.
     const BIND_MS_BIND: u64 = 4096;
+    const BIND_MS_REC: u64 = 16384;
     if args[3] & BIND_MS_BIND != 0 {
         let mnt_flags = crate::fs::mount::translate_mnt_flags_public(args[3]);
-        let ret = match crate::fs::vfs::vfs_bind_mount(source, target, mnt_flags) {
+        let ret = match crate::fs::vfs::vfs_bind_mount(
+            source,
+            target,
+            mnt_flags,
+            args[3] & BIND_MS_REC != 0,
+        ) {
             Ok(()) => {
                 // Register in /proc/mounts AND the caller's mount namespace:
                 // OH's appspawn child self-binds the sandbox root precisely
