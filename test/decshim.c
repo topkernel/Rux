@@ -25,6 +25,9 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/socket.h>
+#include <sys/uio.h>
+#include <time.h>
 #include <unistd.h>
 
 typedef int (*get_width_t)(const void *);
@@ -115,7 +118,7 @@ __attribute__((visibility("default")))
 unsigned int decshim_eglSwapBuffers(void *dpy, void *surf)
 {
     static int probe_n = 0;
-    if (probe_n < 40) {
+    if (probe_n < 400) {
         gl_read_pixels_t rpx = (gl_read_pixels_t)dlsym(RTLD_NEXT, "glReadPixels");
         gl_get_error_t gerr = (gl_get_error_t)dlsym(RTLD_NEXT, "glGetError");
         if (rpx) {
@@ -133,7 +136,7 @@ unsigned int decshim_eglSwapBuffers(void *dpy, void *surf)
             probe_n++;
         } else {
             shim_log("DEC_SHIM: glReadPixels not resolvable");
-            probe_n = 40;
+            probe_n = 400;
         }
     }
     if (!real_swap)
@@ -145,6 +148,144 @@ unsigned int decshim_eglSwapBuffers(void *dpy, void *surf)
 
 asm(".globl eglSwapBuffers\n"
     ".set eglSwapBuffers, decshim_eglSwapBuffers");
+
+/* ---- unix-socket / vsync-channel trace ----------------------------- *
+ * cc11 showed exactly ONE eglSwapBuffers then a silent runner: the
+ * animation starves after its first frame while the composer keeps
+ * flipping RS repaints — the RS->client vsync channel (a unix
+ * socketpair) is the prime suspect. These interposers record the
+ * client side: which fds socketpair() creates and every small
+ * recv/read on them (vsync ticks are 8-byte packets). */
+
+static unsigned char unix_fds[4096]; /* fd -> 1 if from socketpair */
+static int sock_trace_n = 0;
+
+static unsigned long long mono_ms(void)
+{
+    struct timespec ts;
+    clock_gettime(CLOCK_MONOTONIC, &ts);
+    return (unsigned long long)ts.tv_sec * 1000UL + ts.tv_nsec / 1000000UL;
+}
+
+typedef int (*socketpair_t)(int, int, int, int *);
+static socketpair_t real_socketpair;
+
+__attribute__((visibility("default")))
+int decshim_socketpair(int domain, int type, int proto, int sv[2])
+{
+    if (!real_socketpair)
+        real_socketpair = (socketpair_t)dlsym(RTLD_NEXT, "socketpair");
+    int r = real_socketpair ? real_socketpair(domain, type, proto, sv) : -1;
+    if (r == 0 && domain == 1 /* AF_UNIX */ && sock_trace_n < 400) {
+        if (sv[0] >= 0 && sv[0] < 4096)
+            unix_fds[sv[0]] = 1;
+        if (sv[1] >= 0 && sv[1] < 4096)
+            unix_fds[sv[1]] = 1;
+        shim_log("DEC_SHIM[%llu]: socketpair type=%#x -> %d,%d",
+                 mono_ms(), type, sv[0], sv[1]);
+        sock_trace_n++;
+    }
+    return r;
+}
+asm(".globl socketpair\n.set socketpair, decshim_socketpair");
+
+static void note_recv(const char *what, int fd, ssize_t r,
+                      const void *buf, int fl)
+{
+    if (r <= 0 || r > 64)
+        return;
+    if (fd < 0 || fd >= 4096 || !unix_fds[fd])
+        return;
+    if (sock_trace_n >= 700)
+        return;
+    unsigned long long v = 0;
+    memcpy(&v, buf, r < 8 ? (size_t)r : 8);
+    shim_log("DEC_SHIM[%llu]: %s fd=%d n=%zd fl=%#x data=%016llx",
+             mono_ms(), what, fd, r, fl, v);
+    sock_trace_n++;
+}
+
+typedef ssize_t (*recv_t)(int, void *, size_t, int);
+typedef ssize_t (*recvfrom_t)(int, void *, size_t, int,
+                              void *, void *);
+typedef ssize_t (*read_t)(int, void *, size_t);
+
+__attribute__((visibility("default")))
+ssize_t decshim_recv(int fd, void *buf, size_t n, int fl)
+{
+    static recv_t real;
+    if (!real)
+        real = (recv_t)dlsym(RTLD_NEXT, "recv");
+    ssize_t r = real ? real(fd, buf, n, fl) : -1;
+    note_recv("recv", fd, r, buf, fl);
+    return r;
+}
+asm(".globl recv\n.set recv, decshim_recv");
+
+__attribute__((visibility("default")))
+ssize_t decshim_recvfrom(int fd, void *buf, size_t n, int fl,
+                         void *addr, void *len)
+{
+    static recvfrom_t real;
+    if (!real)
+        real = (recvfrom_t)dlsym(RTLD_NEXT, "recvfrom");
+    ssize_t r = real ? real(fd, buf, n, fl, addr, len) : -1;
+    note_recv("recvfrom", fd, r, buf, fl);
+    return r;
+}
+asm(".globl recvfrom\n.set recvfrom, decshim_recvfrom");
+
+__attribute__((visibility("default")))
+ssize_t decshim_read(int fd, void *buf, size_t n)
+{
+    static read_t real;
+    if (!real)
+        real = (read_t)dlsym(RTLD_NEXT, "read");
+    ssize_t r = real ? real(fd, buf, n) : -1;
+    note_recv("read", fd, r, buf, 0);
+    return r;
+}
+asm(".globl read\n.set read, decshim_read");
+
+typedef ssize_t (*send_t)(int, const void *, size_t, int);
+typedef ssize_t (*write_t)(int, const void *, size_t);
+
+__attribute__((visibility("default")))
+ssize_t decshim_send(int fd, const void *buf, size_t n, int fl)
+{
+    static send_t real;
+    if (!real)
+        real = (send_t)dlsym(RTLD_NEXT, "send");
+    ssize_t r = real ? real(fd, buf, n, fl) : -1;
+    note_recv("send", fd, r, buf, fl);
+    return r;
+}
+asm(".globl send\n.set send, decshim_send");
+
+__attribute__((visibility("default")))
+ssize_t decshim_sendto(int fd, const void *buf, size_t n, int fl,
+                       const void *addr, void *len)
+{
+    static recvfrom_t real;
+    if (!real)
+        real = (recvfrom_t)dlsym(RTLD_NEXT, "sendto");
+    ssize_t r = real ? real(fd, (void *)buf, n, fl, (void *)addr, len) : -1;
+    note_recv("sendto", fd, r, buf, fl);
+    return r;
+}
+asm(".globl sendto\n.set sendto, decshim_sendto");
+
+__attribute__((visibility("default")))
+ssize_t decshim_write(int fd, const void *buf, size_t n)
+{
+    static write_t real;
+    if (!real)
+        real = (write_t)dlsym(RTLD_NEXT, "write");
+    ssize_t r = real ? real(fd, buf, n) : -1;
+    note_recv("write", fd, r, buf, 0);
+    return r;
+}
+asm(".globl write\n.set write, decshim_write");
 
 /* ---- constructor --------------------------------------------------- */
 
