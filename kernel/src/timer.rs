@@ -570,8 +570,15 @@ pub fn timer_softirq_handler(_nr: usize) {
                         // per-CPU buffer, non-reentrant via SOFTIRQ guard.
                         let n = *len_ptr;
                         // Wakewatch: capture the fire lateness of this
-                        // one-shot (now_time - expires_time, ticks).
-                        let late = now_time.saturating_sub(entry.expires_time);
+                        // one-shot. HRES entries only — a jiffy entry's
+                        // expires_time is 0 and (now - 0) would report the
+                        // whole uptime as "lateness" (probe bug found on
+                        // wt5: late_max tracked boot age, not delay).
+                        let late = if entry.expires_time != 0 {
+                            now_time.saturating_sub(entry.expires_time)
+                        } else {
+                            0
+                        };
                         (*buf_ptr)[n] = (id, action, late);
                         *len_ptr = n + 1;
                     }
