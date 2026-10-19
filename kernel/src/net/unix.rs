@@ -927,6 +927,13 @@ pub fn unix_connect(
                         won,
                         awok
                     );
+                    // b20: the khungtaskd snapshot cadence wedges after its
+                    // first pass, so pin the watching epolls' counters to
+                    // THIS connect's timeline (waits/rep discrimination for
+                    // the epoll_pwait wedge; 5060e524 fixed the purge —
+                    // this verifies the listener interest now survives
+                    // spawn-child exits).
+                    crate::syscall::misc::epoll_dump_for_file(fid);
                 }
             }
             Ok(())

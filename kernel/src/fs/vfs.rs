@@ -453,7 +453,34 @@ pub fn vfs_umount(mountpoint: &str) -> Result<(), i32> {
 /// a symlink into the /usr ext4 mount — the bind must capture the
 /// resolved inode, exactly what path_lookup yields).
 pub fn vfs_bind_mount(source: &str, target: &str, mnt_flags: MntFlags) -> Result<(), i32> {
-    let src = path_lookup(source, 0)?;
+    let src = match path_lookup(source, 0) {
+        Ok(p) => p,
+        Err(e) => {
+            // b20: sources that demonstrably exist at runtime (SetBundleQuota
+            // opened /data/app/el2/0/base/com.ohos.systemui one minute before
+            // the child's bind of the same path failed ENOENT) — name the
+            // deepest prefix that DOES resolve so the break is one glance.
+            if e == -2 {
+                let mut ok_until = String::from("/");
+                let mut comps: Vec<&str> =
+                    source.split('/').filter(|s| !s.is_empty()).collect();
+                while !comps.is_empty() {
+                    let probe = format!("/{}", comps.join("/"));
+                    if path_lookup(&probe, 0).is_ok() {
+                        ok_until = probe;
+                        break;
+                    }
+                    comps.pop();
+                }
+                crate::pr_warn!(
+                    "bindwalk: '{}' ENOENT, resolves until '{}'",
+                    source,
+                    ok_until
+                );
+            }
+            return Err(e);
+        }
+    };
     let inode = match src.inode.clone() {
         Some(i) => i,
         None => match src.dentry.as_ref().and_then(|d| d.get_inode()) {
