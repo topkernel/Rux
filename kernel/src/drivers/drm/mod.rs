@@ -436,10 +436,48 @@ const DRM_IOCTL_PRIME_HANDLE_TO_FD: u32 = ioc(3, 0x2d, 16);
 /// DrmAllocator logged "can not get fd from prime handle errno: 25"
 /// after a successful CREATE_DUMB and every AllocMem failed, killing
 /// the first real frame (r12). Match BOTH encodings.
+/// Same ioctl with the CORRECT upstream size: struct drm_prime_handle
+/// is 12 bytes (handle, flags, fd — no pad). The 16-byte constant above
+/// was baked from a wrong layout, so OH libdrm's real
+/// DRM_IOWR(0x2d, sizeof 12) fell through to ENOTTY — the gralloc
+/// DrmAllocator logged "can not get fd from prime handle errno: 25"
+/// after a successful CREATE_DUMB and every AllocMem failed, killing
+/// the first real frame (r12). Match BOTH encodings.
 const DRM_IOCTL_PRIME_HANDLE_TO_FD_12: u32 = ioc(3, 0x2d, 12);
 const DRM_IOCTL_PRIME_FD_TO_HANDLE: u32 = ioc(3, 0x2e, 16);
 /// Correct-size alias (see DRM_IOCTL_PRIME_HANDLE_TO_FD_12).
 const DRM_IOCTL_PRIME_FD_TO_HANDLE_12: u32 = ioc(3, 0x2e, 12);
+
+/// True when `request` is a PRIME_FD_TO_HANDLE ioctl number (either
+/// size encoding) — io.rs uses this to catch imports aimed at a fd that
+/// is not a DRM node (cross-process fd-number leaks fail exactly there).
+pub fn is_prime_import_request(request: u32) -> bool {
+    request == DRM_IOCTL_PRIME_FD_TO_HANDLE || request == DRM_IOCTL_PRIME_FD_TO_HANDLE_12
+}
+
+/// Bring-up oracle (compose-content): a prime import attempt that never
+/// reaches the DRM dispatch means the caller's fd is NOT a DRM file —
+/// the classic cross-process fd-number leak (a BufferHandle parcelled
+/// without binder FDA fixup carries the SENDER's fd number). The gallium
+/// swrast import path fails silently then ("eglCreateImageKHR failed,
+/// error EGL_SUCCESS", zero kernel ioctls). io.rs calls this when it
+/// sees a prime-import request number on a non-DRM fd (or a dead fd).
+pub fn trace_foreign_prime_ioctl(request: u32, fd: i32, err: i32) {
+    if !is_prime_import_request(request) {
+        return;
+    }
+    static FOREIGN_N: AtomicU32 = AtomicU32::new(0);
+    let n = FOREIGN_N.fetch_add(1, Ordering::Relaxed);
+    if n < 40 {
+        crate::pr_warn!(
+            "drm: prime-import on non-drm fd={} (err {}) pid={} #{}",
+            fd,
+            err,
+            crate::process::current_pid(),
+            n
+        );
+    }
+}
 const DRM_IOCTL_WAIT_VBLANK: u32 = ioc(3, 0x3a, 24);
 const DRM_IOCTL_MODE_GETRESOURCES: u32 = ioc(3, 0xa0, 64);
 // Sizes verified against the IMAGE's libdrm.so (constants embedded in
@@ -657,6 +695,51 @@ pub fn is_prime_file(file: &crate::fs::file::File) -> bool {
     }
 }
 
+/// fstat(2) for DRM files. Linux parity the importers depend on:
+/// the /dev/dri nodes stat as character devices (rdev 226:0/226:128),
+/// and an exported dma-buf (prime) fd stats as a REGULAR file whose
+/// st_size is the backing buffer's size — gbm, Mesa's image-from-dmabuf
+/// and the OH composer's DrmGemBuffer size and validate their mappings
+/// through exactly that stat. Every anonymous-file stat path returned
+/// None for these files before, so fstat answered EBADF and the
+/// software EGLImage import of gralloc buffers bailed silently
+/// ("eglCreateImageKHR failed, error EGL_SUCCESS" — RS renders into a
+/// shadow target and the flipped GEMs stay zeroed/black).
+pub fn drm_file_stat(file: &crate::fs::file::File, stat: &mut crate::fs::Stat) -> Option<i32> {
+    if is_prime_file(file) {
+        let gem = prime_file_gem(file)?;
+        stat.st_dev = 0;
+        stat.st_ino = gem.id as u64;
+        stat.st_nlink = 1;
+        stat.st_uid = 0;
+        stat.st_gid = 0;
+        stat.st_rdev = 0;
+        stat.st_size = gem.size as i64;
+        stat.st_blocks = gem.size as i64 / 512;
+        stat.st_blksize = 4096;
+        stat.set_regular_file();
+        stat.st_mode |= 0o666;
+        return Some(0);
+    }
+    if is_drm_file(file) {
+        stat.st_dev = 0;
+        stat.st_ino = 0;
+        stat.st_nlink = 1;
+        stat.st_uid = 0;
+        stat.st_gid = 0;
+        // Userspace makedev encoding of 226:0 (both nodes share it; the
+        // minor only distinguishes renderD128, which nothing stats on).
+        stat.st_rdev = ((DRM_MAJOR as u64 & 0xfff) << 8) | 0;
+        stat.st_size = 0;
+        stat.st_blocks = 0;
+        stat.st_blksize = 4096;
+        stat.set_char_device();
+        stat.st_mode |= 0o666;
+        return Some(0);
+    }
+    None
+}
+
 /// GEM object backing a prime fd.
 // SAFETY: private_data holds a Box<Arc<GemObject>> installed at export.
 fn prime_file_gem(file: &crate::fs::file::File) -> Option<Arc<GemObject>> {
@@ -796,7 +879,21 @@ const T_UNHANDLED: usize = 7; // ENOTTY answers
 
 fn trace_ioctl(request: u32, ret: i64) {
     let (slot, name) = match request {
-        DRM_IOCTL_VERSION => return,
+        DRM_IOCTL_VERSION => {
+            // VERSION is every DRM client's first ioctl — an effective
+            // "node open" marker. First 8 callers with pid.
+            static VTRACE: AtomicU32 = AtomicU32::new(0);
+            let v = VTRACE.fetch_add(1, Ordering::Relaxed);
+            if v < 8 {
+                crate::pr_warn!(
+                    "drm: VERSION probe #{} pid={} (ret {})",
+                    v,
+                    crate::process::current_pid(),
+                    ret
+                );
+            }
+            return;
+        }
         DRM_IOCTL_MODE_GETRESOURCES
         | DRM_IOCTL_MODE_GETCRTC
         | DRM_IOCTL_MODE_GETENCODER
@@ -1652,9 +1749,27 @@ fn prime_fd_to_handle(arg: usize, size: usize) -> i64 {
         return -22;
     }
     let Some(file) = (unsafe { crate::fs::file::get_file_fd(prime_fd as usize) }) else {
+        static DEAD_N: AtomicU32 = AtomicU32::new(0);
+        let n = DEAD_N.fetch_add(1, Ordering::Relaxed);
+        if n < 20 {
+            crate::pr_warn!(
+                "drm: prime import fd={} DEAD (EBADF) pid={}",
+                prime_fd,
+                crate::process::current_pid()
+            );
+        }
         return -9; // EBADF
     };
     if !is_prime_file(&file) {
+        static NOTPRIME_N: AtomicU32 = AtomicU32::new(0);
+        let n = NOTPRIME_N.fetch_add(1, Ordering::Relaxed);
+        if n < 20 {
+            crate::pr_warn!(
+                "drm: prime import fd={} NOT a dma-buf (EINVAL) pid={}",
+                prime_fd,
+                crate::process::current_pid()
+            );
+        }
         return -22; // EINVAL: not a dma-buf
     }
     let Some(gem) = prime_file_gem(&file) else { return -22 };
@@ -2207,8 +2322,9 @@ pub fn gem_mmap_resolve(
         let n = len.min(gem.size);
         if trace {
             crate::pr_warn!(
-                "drm: prime mmap#{} gem={} off={:#x} len={} -> phys={:#x}",
+                "drm: prime mmap#{} pid={} gem={} off={:#x} len={} -> phys={:#x}",
                 mt,
+                crate::process::current_pid(),
                 gem.id,
                 offset,
                 n,
