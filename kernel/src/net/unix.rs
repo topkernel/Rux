@@ -610,14 +610,24 @@ fn unix_wait_round(
 
 /// Blocking recv engine: try recv, on would-block return EAGAIN
 /// (non-blocking) or wait on the socket's own queue and retry.
+///
+/// `peek` (MSG_PEEK, Linux recv(2)): return the data that the NEXT receive
+/// would return WITHOUT consuming it — the segment stays queued, ancillary
+/// data stays attached, and a subsequent non-peek receive returns the same
+/// bytes. hilogd's datagram reader probes each packet's 2-byte length
+/// header with `recv(fd, &len, 2, MSG_PEEK)` before the real recvmsg;
+/// without peek semantics the probe consumed the record's first two bytes
+/// and discarded the rest, so hilogd never saw one well-formed HilogMsg
+/// and `hilog` query output stayed empty.
 pub fn unix_recv_ctl(
     sock: &Arc<UnixSocket>,
     buf: &mut [u8],
     nonblock: bool,
     deadline: Option<u64>,
+    peek: bool,
 ) -> Result<UnixRecvResult, i32> {
     loop {
-        match unix_recv(sock, buf) {
+        match unix_recv(sock, buf, peek) {
             Ok(r) => return Ok(r),
             Err(e) if e != -11 => return Err(e),
             Err(_) => {}
@@ -1338,8 +1348,79 @@ fn unix_recv_eof() -> UnixRecvResult {
 
 /// Receive one message (STREAM: drain across segments; DGRAM: one
 /// segment). Returns EAGAIN when nothing is available.
-pub fn unix_recv(sock: &Arc<UnixSocket>, buf: &mut [u8]) -> Result<UnixRecvResult, i32> {
+///
+/// `peek` (MSG_PEEK): copy from the front of the queue WITHOUT popping —
+/// the record, its ancillary data and its sender name all stay queued for
+/// the next non-peek receive (Linux unix_dgram_recvmsg/unix_stream_read_generic
+/// MSG_PEEK semantics).
+pub fn unix_recv(
+    sock: &Arc<UnixSocket>,
+    buf: &mut [u8],
+    peek: bool,
+) -> Result<UnixRecvResult, i32> {
     let mut q = sock.recv_queue.lock();
+    if peek {
+        if let Some(front) = q.front() {
+            match sock.kind {
+                UnixKind::Dgram | UnixKind::Seqpacket => {
+                    // One record, boundaries visible through the peek.
+                    let orig_len = front.data.len();
+                    let take = orig_len.min(buf.len());
+                    buf[..take].copy_from_slice(&front.data[..take]);
+                    // Ancillary data is reported but NOT consumed.
+                    let files = front.files.clone();
+                    let cred = front.cred;
+                    let src = front.src.clone();
+                    drop(q);
+                    return Ok(UnixRecvResult {
+                        len: take,
+                        orig_len,
+                        src,
+                        files,
+                        cred,
+                        truncated: take < orig_len,
+                    });
+                }
+                UnixKind::Stream => {
+                    // Byte-stream peek: across as many queued segments as
+                    // the buffer holds, nothing consumed.
+                    let mut copied = 0usize;
+                    let mut orig_total = 0usize;
+                    let mut files = Vec::new();
+                    let mut cred: Option<UnixCred> = None;
+                    let mut src: Option<String> = None;
+                    for seg in q.iter() {
+                        orig_total += seg.data.len();
+                        let take = seg.data.len().min(buf.len() - copied);
+                        buf[copied..copied + take].copy_from_slice(&seg.data[..take]);
+                        copied += take;
+                        if cred.is_none() {
+                            cred = seg.cred;
+                        }
+                        if src.is_none() {
+                            src = seg.src.clone();
+                        }
+                        if copied >= buf.len() {
+                            break;
+                        }
+                    }
+                    drop(q);
+                    return Ok(UnixRecvResult {
+                        len: copied,
+                        orig_len: orig_total,
+                        src,
+                        files,
+                        cred,
+                        // A stream peek that stopped at the buffer edge with
+                        // more bytes queued is not a "record" truncation;
+                        // Linux reports no MSG_TRUNC for streams either.
+                        truncated: false,
+                    });
+                }
+            }
+        }
+        // Empty queue under peek: fall through to the EOF/EAGAIN tail below.
+    }
     match sock.kind {
         UnixKind::Stream => {
             if let Some(mut seg) = q.pop_front() {
@@ -1550,7 +1631,7 @@ fn unix_file_read(file: &File, buf: &mut [u8]) -> isize {
     };
     let nonblock = unix_file_nonblock(file);
     let deadline = socket.rcvtimeo_deadline();
-    match unix_recv_ctl(&socket, buf, nonblock, deadline) {
+    match unix_recv_ctl(&socket, buf, nonblock, deadline, false) {
         Ok(r) => r.len as isize,
         Err(e) => e as isize,
     }

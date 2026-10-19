@@ -2920,6 +2920,10 @@ pub fn sys_sendmsg(args: SyscallArgs) -> i64 {
 const MSG_DONTWAIT: i32 = 0x40;
 /// W3: MSG_TRUNC (reported in recvmsg's msg_flags).
 const MSG_TRUNC: i32 = 0x20;
+/// MSG_PEEK: receive without consuming (AF_UNIX — hilogd's datagram
+/// length probe reads the first 2 bytes of every HilogMsg this way; a
+/// consuming "peek" destroyed the record and hilog query stayed empty).
+const MSG_PEEK: i32 = 0x02;
 /// Ancillary data was dropped (control buffer too small) — reported in
 /// recvmsg's msg_flags like Linux.
 const MSG_CTRUNC: i32 = 0x08;
@@ -3015,7 +3019,8 @@ pub fn sys_recvmsg(args: SyscallArgs) -> i64 {
     if let Some((usock, file_nonblock)) = crate::net::unix::unix_file_of(fd as usize) {
         let nonblock = file_nonblock || (flags & MSG_DONTWAIT) != 0;
         let deadline = usock.rcvtimeo_deadline();
-        let r = match crate::net::unix::unix_recv_ctl(&usock, &mut buf, nonblock, deadline) {
+        let peek = (flags & MSG_PEEK) != 0;
+        let r = match crate::net::unix::unix_recv_ctl(&usock, &mut buf, nonblock, deadline, peek) {
             Ok(r) => r,
             Err(e) => return e as i64,
         };
@@ -3890,8 +3895,9 @@ pub fn sys_recvfrom(args: SyscallArgs) -> i64 {
         }
         kbuf.resize(stage, 0);
         let nonblock = file_nonblock || (flags & MSG_DONTWAIT) != 0;
+        let peek = (flags & MSG_PEEK) != 0;
         let deadline = usock.rcvtimeo_deadline();
-        return match crate::net::unix::unix_recv_ctl(&usock, kbuf.as_mut_slice(), nonblock, deadline)
+        return match crate::net::unix::unix_recv_ctl(&usock, kbuf.as_mut_slice(), nonblock, deadline, peek)
         {
             Ok(r) => {
                 if r.len > 0 {
