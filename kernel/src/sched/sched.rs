@@ -1072,6 +1072,37 @@ pub fn resched_cpu(cpu: usize) {
     }
 }
 
+/// Wakewatch heartbeat snapshot of the scheduler state (timer.rs prints
+/// it 1 Hz): [grq_nr, cfs_nr, idle_mask, need_resched_mask, then per CPU
+/// (pid, state word, preempt_count) for cpu0/cpu1]. Diagnostic reads
+/// only; called from the timer softirq with no scheduler locks held.
+pub fn ww_sched_snapshot() -> [u64; 10] {
+    let mut out = [0u64; 10];
+    out[0] = GlobalRunQueue::grq_nr_running() as u64;
+    out[1] = grq().cfs_rq.nr_running() as u64;
+    out[2] = grq().idle_cpus.load(core::sync::atomic::Ordering::Acquire) as u64;
+    for c in 0..MAX_CPUS {
+        // SAFETY: bounded NEED_RESCHED read; cpu_state(c) slots are
+        // init-time valid pointers (may race a concurrent switch — the
+        // values are diagnostic only).
+        unsafe {
+            if c < 2 {
+                out[3] |= (NEED_RESCHED[c].load(core::sync::atomic::Ordering::Acquire) as u64) << c;
+                let cur = cpu_state(c).current;
+                let base = 4 + c * 3;
+                if !cur.is_null() {
+                    out[base] = (*cur).pid() as u64;
+                    out[base + 1] = (*cur).state().bits() as u64;
+                    out[base + 2] = (*cur).preempt_count() as u64;
+                } else {
+                    out[base] = u64::MAX;
+                }
+            }
+        }
+    }
+    out
+}
+
 /// Idle-task pointer for a CPU (pre-created by `init`; used by the SMP
 /// bring-up to publish `current` on a secondary before its first tick).
 pub fn idle_task_ptr(cpu: usize) -> usize {

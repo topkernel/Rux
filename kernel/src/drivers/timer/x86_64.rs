@@ -220,6 +220,14 @@ fn increment_jiffies_from_timebase() {
 
 /// Clock interrupt handler (called from the x86_64 trap entry)
 pub fn timer_interrupt_handler() {
+    // Wakewatch: per-CPU timer-IRQ arrival count (storm detector — the
+    // heartbeat prints the per-second delta).
+    {
+        let cpu = crate::arch::cpu_id() as usize;
+        if cpu < crate::config::MAX_CPUS {
+            crate::timer::WW_TICK_IRQ[cpu].fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        }
+    }
     if timebase_precise() {
         // LAPIC-timer phase: idempotent, multi-CPU-safe jiffies.
         increment_jiffies_from_timebase();

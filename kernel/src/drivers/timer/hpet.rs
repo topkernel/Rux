@@ -59,17 +59,116 @@ static BASE: AtomicU64 = AtomicU64::new(0);
 /// capture: a wild kernel write changed BASE 0xffff8900fed00000 →
 /// 0xffff89004ed00000 mid-boot (one byte of the physical address); every
 /// subsequent clock read dereferenced an unmapped physmap address and
-/// the whole boot graph froze (all tasks crawling, serial silent). Any
-/// deviation from the locked value is a scribble: read_counter heals it
-/// back and reports once.
+/// the whole boot graph froze (all tasks crawling, serial silent).
 static BASE_LOCKED: AtomicU64 = AtomicU64::new(0);
+/// Redundant encoding of BASE_LOCKED (bitwise complement). The wt1
+/// capture (vsync-starvation hunt, 2026-10-19) showed the wild-write
+/// engine can take BASE AND the adjacent BASE_LOCKED in one smash:
+/// every read_time() then returned boot-epoch garbage, nanosleep
+/// deadlines landed minutes off (compose-content's 41.5 s dead stop and
+/// 0.5-0.7 s usleep blowouts), and the CPU finally wedged inside
+/// r32 with the smashed address (RIP=hpet::r32, RDI=0xffff89004ed000f4,
+/// IF=0). Linux parity for that family: the fixmap clocksource address
+/// is derived, never read back from scribbleable memory. Here the READ
+/// PATH derives its address from this validated pair (and falls back to
+/// the fixed q35 alias on any mismatch) — BASE itself is only the
+/// ready flag.
+static BASE_LOCKED_INV: AtomicU64 = AtomicU64::new(u64::MAX);
 /// HPET ticks per nominal-domain tick (CLOCK_FREQ units). QEMU: 100 MHz
 /// HPET / 10 MHz nominal = 10. 0 until `init` validated the period.
 static DIV: AtomicU64 = AtomicU64::new(0);
+/// Redundant encoding of DIV (bitwise complement). A zeroed DIV would
+/// panic the divide in read_time_nominal; validation heals it back (or
+/// falls back to the q35 constant 10).
+static DIV_INV: AtomicU64 = AtomicU64::new(u64::MAX);
 /// Value added to the HPET-derived reading so switching the timebase
 /// onto it cannot move the clock backward (same discipline as the TSC
 /// switch in x86_64.rs).
 static BOOT_OFFSET: AtomicU64 = AtomicU64::new(0);
+/// Redundant encoding of BOOT_OFFSET (bitwise complement).
+static BOOT_OFFSET_INV: AtomicU64 = AtomicU64::new(u64::MAX);
+/// Per-CPU last accepted reading (monotonic clamp — the clocksource
+/// watchdog analogue). A garbage read that lands below this CPU's last
+/// good time is re-read once and then FROZEN at the last good value
+/// (a brief stall beats a minutes-long jump; the timer wheel's hres
+/// deadlines are absolute, so a backward jump strands every sleeper
+/// until the clock re-reaches the pre-jump value — the dead-stop
+/// morphology). Per-CPU slots avoid a shared-line write on the hottest
+/// path in the system.
+static LAST_GOOD: [AtomicU64; crate::config::MAX_CPUS] =
+    [const { AtomicU64::new(0) }; crate::config::MAX_CPUS];
+
+/// Backward steps up to this size are clamped away as jitter (50 ms in
+/// the nominal 10 MHz tick domain).
+const SMALL_BACKWARD_CLAMP_TICKS: u64 =
+    50 * crate::config::TIMER_CLOCK_FREQ_HZ / 1000;
+
+/// Direct-console heal report, rate-gated to one line per 25 jiffies
+/// (callers may hold the TIMERS lock — R34 discipline: putchar_no_lock
+/// only, never printk from the clock read path).
+fn heal_report(prefix: &[u8], bad: u64, good: u64) {
+    static LAST: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+    let now = crate::drivers::timer::get_jiffies();
+    let last = LAST.load(Ordering::Relaxed);
+    if now.wrapping_sub(last) < 25 {
+        return;
+    }
+    if LAST
+        .compare_exchange(last, now, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return;
+    }
+    for &b in prefix {
+        crate::console::putchar_no_lock(b);
+    }
+    let mut v = bad;
+    for _ in 0..16 {
+        let nb = (v >> 60) as u8;
+        crate::console::putchar_no_lock(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 });
+        v <<= 4;
+    }
+    crate::console::putchar_no_lock(b'-');
+    crate::console::putchar_no_lock(b'>');
+    let mut v = good;
+    for _ in 0..16 {
+        let nb = (v >> 60) as u8;
+        crate::console::putchar_no_lock(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 });
+        v <<= 4;
+    }
+    crate::console::putchar_no_lock(b'\n');
+}
+
+/// Validate the locked base against its complement copy. Returns the
+/// alias VA to read, healing the pair (or falling back to the fixed q35
+/// alias) when a wild write has touched either half.
+fn validated_read_base() -> usize {
+    let locked = BASE_LOCKED.load(Ordering::Acquire);
+    let inv = BASE_LOCKED_INV.load(Ordering::Acquire);
+    if locked != 0 && locked == !inv {
+        return locked as usize;
+    }
+    // Corrupt pair: a wild write hit BASE_LOCKED and/or its complement.
+    // Fall back to the fixed q35 alias — the correct block on this
+    // platform (the ACPI table reports the same 0xFED00000) — and heal
+    // the pair so later reads take the fast path again. If the locked
+    // value merely lost its complement (still plausible), keep it.
+    let fallback = {
+        use crate::arch::mm::memory_layout::device_alias;
+        device_alias(HPET_FIXED_BASE as u64) as usize
+    };
+    let good = if locked != 0 && (locked as usize) & 0xFFF == 0 {
+        // Address still looks structurally valid: re-affirm it.
+        locked
+    } else {
+        fallback as u64
+    };
+    heal_report(b"hpet: clock base healed ", locked, good);
+    BASE_LOCKED.store(good, Ordering::Release);
+    BASE_LOCKED_INV.store(!good, Ordering::Release);
+    BASE.store(good, Ordering::Release);
+    good as usize
+}
 
 /// True once the HPET is the active timekeeper.
 #[inline]
@@ -103,27 +202,18 @@ unsafe fn w32(base: usize, off: usize, v: u32) {
 /// after ~5.8 kyr, so u64 arithmetic needs no wrap handling.
 #[inline]
 pub fn read_counter() -> u64 {
-    let mut base = BASE.load(Ordering::Acquire) as usize;
-    debug_assert!(base != 0);
-    // Scribble guard (see BASE_LOCKED): a fixed MMIO base that changed
-    // after init is a wild write — heal, report once, keep reading the
-    // real block instead of unmapped memory.
-    let good = BASE_LOCKED.load(Ordering::Acquire) as usize;
-    if good != 0 && base != good {
-        BASE.store(good as u64, Ordering::Release);
-        static REPORTED: core::sync::atomic::AtomicBool =
-            core::sync::atomic::AtomicBool::new(false);
-        if !REPORTED.swap(true, core::sync::atomic::Ordering::AcqRel) {
-            crate::pr_err!(
-                "hpet: BASE scribbled {:#x} -> healed {:#x}",
-                base,
-                good
-            );
-        }
-        base = good;
+    // The read address is DERIVED from the validated locked pair, never
+    // from BASE alone (wt1 capture: BASE and the old BASE-vs-LOCKED
+    // comparison were both defeated by one smash of the adjacent
+    // statics). BASE stays a pure ready flag here.
+    let base = validated_read_base();
+    // Re-arm the ready flag if a wild write zeroed it (ready()==false
+    // would degrade read_time() to the coarse jiffies fallback).
+    if BASE.load(Ordering::Acquire) as usize != base {
+        BASE.store(base as u64, Ordering::Release);
     }
     loop {
-        // SAFETY: BASE != 0 implies an initialized, mapped HPET.
+        // SAFETY: validated_read_base returned a validated, mapped block.
         let hi1 = unsafe { r32(base, HPET_CNTR_HI) } as u64;
         let lo = unsafe { r32(base, HPET_CNTR_LO) } as u64;
         let hi2 = unsafe { r32(base, HPET_CNTR_HI) } as u64;
@@ -133,11 +223,75 @@ pub fn read_counter() -> u64 {
     }
 }
 
-/// Current time in the nominal CLOCK_FREQ domain (HPET-based).
+/// Current time in the nominal CLOCK_FREQ domain (HPET-based), hardened
+/// against the wild-write engine:
+///  1. the counter address is derived from the validated locked pair
+///     (fallback: fixed q35 alias);
+///  2. DIV is validated (a zeroed DIV must panic-proof fall back);
+///  3. BOOT_OFFSET is validated against its complement copy;
+///  4. the result is clamped monotonic per CPU — a garbage read that
+///     lands below this CPU's last accepted value is re-read once and
+///     then FROZEN (never jump the clock backward: hres deadlines are
+///     absolute, a backward jump strands every sleeper).
 #[inline]
 pub fn read_time_nominal() -> u64 {
-    let div = DIV.load(Ordering::Acquire);
-    read_counter() / div + BOOT_OFFSET.load(Ordering::Acquire)
+    let div = {
+        let d = DIV.load(Ordering::Acquire);
+        let dinv = DIV_INV.load(Ordering::Acquire);
+        if d != 0 && d == !dinv {
+            d
+        } else {
+            // Scribbled (or zeroed): heal with the q35 constant — the
+            // platform's only validated divisor (init rejects hardware
+            // whose period is not an integer multiple of the nominal
+            // domain, and this kernel targets QEMU q35/virt).
+            const QEMU_DIV: u64 = 10; // 100 MHz HPET / 10 MHz nominal
+            heal_report(b"hpet: clock div healed ", d, QEMU_DIV);
+            DIV.store(QEMU_DIV, Ordering::Release);
+            DIV_INV.store(!QEMU_DIV, Ordering::Release);
+            QEMU_DIV
+        }
+    };
+    let offset = {
+        let o = BOOT_OFFSET.load(Ordering::Acquire);
+        let oinv = BOOT_OFFSET_INV.load(Ordering::Acquire);
+        if o == !oinv {
+            o
+        } else {
+            // Complement lost: the plain value is the better guess (a
+            // smashed value usually reads as a pointer, not the small
+            // early-boot offset; the monotonic clamp below catches any
+            // residual poison anyway). Heal the pair.
+            heal_report(b"hpet: clock offset healed ", oinv, o);
+            BOOT_OFFSET_INV.store(!o, Ordering::Release);
+            o
+        }
+    };
+    let raw = read_counter() / div + offset;
+
+    // Per-CPU monotonic guard (clocksource watchdog analogue). The read
+    // is already address/DIV/offset validated; what remains is read
+    // jitter and transient residual poison:
+    //  - a SMALL backward step (<= 50 ms) is clamped to the last good
+    //    value (tearing/rounding artifacts must never move the clock
+    //    back — hres deadlines are absolute);
+    //  - a LARGE backward step is a CORRECTION (e.g. a forward-poisoned
+    //    value was accepted a moment before validation healed the
+    //    offset) and is HONORED — freezing at a poisoned-high value
+    //    would stall the clock forever. Logged so the event is visible.
+    let cpu = crate::arch::cpu_id() as usize;
+    if cpu >= crate::config::MAX_CPUS {
+        return raw;
+    }
+    let last = LAST_GOOD[cpu].load(Ordering::Acquire);
+    if raw >= last.saturating_sub(SMALL_BACKWARD_CLAMP_TICKS) {
+        let accept = raw.max(last);
+        LAST_GOOD[cpu].store(accept, Ordering::Release);
+        return accept;
+    }
+    heal_report(b"hpet: clock corrected backward ", last, raw);
+    LAST_GOOD[cpu].store(raw, Ordering::Release);
+    raw
 }
 
 /// Discover, enable, and verify the HPET.  Idempotent; returns true when
@@ -252,11 +406,18 @@ pub fn init() -> bool {
     // Publish: offset first (the pre-HPET clock value at the switch
     // instant), then the base that flips read_time() onto the HPET.
     // Interrupts are off and APs are parked, so this is race-free.
+    // The complement copies arm the read-path validation (wt1: the
+    // wild-write engine took BASE and BASE_LOCKED together — adjacent
+    // statics — and poisoned every clock read; the pair + fixed-alias
+    // fallback make the read path derive a good address regardless).
     let continuity = crate::drivers::timer::x86_64::pre_hpet_time();
     DIV.store(div, Ordering::Release);
+    DIV_INV.store(!div, Ordering::Release);
     BOOT_OFFSET.store(continuity, Ordering::Release);
+    BOOT_OFFSET_INV.store(!continuity, Ordering::Release);
     BASE.store(base as u64, Ordering::Release);
     BASE_LOCKED.store(base as u64, Ordering::Release);
+    BASE_LOCKED_INV.store(!(base as u64), Ordering::Release);
     true
 }
 

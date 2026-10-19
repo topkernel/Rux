@@ -737,6 +737,10 @@ pub fn ww_note_rearm() {
     WW_REARM_N.fetch_add(1, Ordering::Relaxed);
 }
 
+/// Wakewatch: per-CPU timer-IRQ arrival counts (storm detector).
+pub static WW_TICK_IRQ: [AtomicU64; crate::config::MAX_CPUS] =
+    [const { AtomicU64::new(0) }; crate::config::MAX_CPUS];
+
 /// Per-CPU softirq-run age in ms (heartbeat helper); 0 = never ran.
 pub fn ww_hres_age_ms(cpu: usize) -> u64 {
     if cpu >= crate::config::MAX_CPUS {
@@ -752,32 +756,83 @@ pub fn ww_hres_age_ms(cpu: usize) -> u64 {
 
 /// Print one WW heartbeat line (called from the softirq, printk-safe
 /// context — the claim-inject probe above prints from here too).
+/// v2: adds the softirq-storm counters (per-vector dispatch deltas,
+/// softirq busy ticks), timer-IRQ rate, scheduler slots (per-CPU current
+/// pid/state/preempt_count, idle + need_resched masks, queue depths)
+/// and the wheel census (len, overdue backlog) — everything the wt1/wt2
+/// collapse discrimination needs on one line per second.
 fn ww_heartbeat(now_time: u64) {
+    use crate::interrupt::softirq::{WW_SOFTIRQ_RUNS, WW_SOFTIRQ_TICKS, WW_VEC_RUN};
+    static LAST_VEC: [AtomicU64; crate::interrupt::softirq::NR_SOFTIRQS] =
+        [const { AtomicU64::new(0) }; crate::interrupt::softirq::NR_SOFTIRQS];
+    static LAST_RUNS: AtomicU64 = AtomicU64::new(0);
+    static LAST_TICKS: AtomicU64 = AtomicU64::new(0);
+    static LAST_IRQ: [AtomicU64; crate::config::MAX_CPUS] =
+        [const { AtomicU64::new(0) }; crate::config::MAX_CPUS];
+
     let fire_n = WW_FIRE_N.load(Ordering::Relaxed);
     let late_max = WW_FIRE_LATE_MAX_MS.load(Ordering::Relaxed);
-    let late_n = WW_FIRE_LATE_N.load(Ordering::Relaxed);
     let pidmiss = WW_PIDMISS_N.load(Ordering::Relaxed);
-    let mut ages = [0u64; crate::config::MAX_CPUS];
-    for c in 0..crate::config::MAX_CPUS {
-        let last = WW_HRES_LAST[c].load(Ordering::Acquire);
-        ages[c] = if last == 0 {
-            0
-        } else {
-            (now_time.saturating_sub(last)) * 1000 / crate::config::TIMER_CLOCK_FREQ_HZ
-        };
+
+    let runs_d = WW_SOFTIRQ_RUNS.load(Ordering::Relaxed)
+        .saturating_sub(LAST_RUNS.load(Ordering::Relaxed));
+    // Divide first: raw tick deltas can approach u64::MAX (e.g. HRES_NEXT
+    // sentinel) and a *1000 would overflow in the debug build.
+    let ticks_per_ms = crate::config::TIMER_CLOCK_FREQ_HZ / 1000;
+    let busy_ms = WW_SOFTIRQ_TICKS
+        .load(Ordering::Relaxed)
+        .saturating_sub(LAST_TICKS.load(Ordering::Relaxed))
+        / ticks_per_ms;
+    let mut vecs = [0u64; crate::interrupt::softirq::NR_SOFTIRQS];
+    for v in 0..crate::interrupt::softirq::NR_SOFTIRQS {
+        vecs[v] = WW_VEC_RUN[v].load(Ordering::Relaxed) as u64
+            - LAST_VEC[v].load(Ordering::Relaxed);
+        LAST_VEC[v].store(WW_VEC_RUN[v].load(Ordering::Relaxed) as u64, Ordering::Relaxed);
     }
-    let (a0, a1, a2, a3) = (ages[0], ages[1], ages[2], ages[3]);
+    LAST_RUNS.store(WW_SOFTIRQ_RUNS.load(Ordering::Relaxed), Ordering::Relaxed);
+    LAST_TICKS.store(WW_SOFTIRQ_TICKS.load(Ordering::Relaxed), Ordering::Relaxed);
+
+    let mut irq_d = [0u64; crate::config::MAX_CPUS];
+    for c in 0..crate::config::MAX_CPUS {
+        let cur = WW_TICK_IRQ[c].load(Ordering::Relaxed);
+        irq_d[c] = cur.saturating_sub(LAST_IRQ[c].load(Ordering::Relaxed));
+        LAST_IRQ[c].store(cur, Ordering::Relaxed);
+    }
+
+    // Wheel census (short lock; heartbeat is 1 Hz and holds no timer
+    // locks at this point).
+    let (wheel_len, overdue) = {
+        let timers = TIMERS.lock_irqsave();
+        let len = timers.len();
+        let mut od = 0u64;
+        for e in timers.values() {
+            if e.expires_time != 0 && e.expires_time <= now_time {
+                od += 1;
+            }
+        }
+        (len, od)
+    };
+
+    let sched = crate::sched::sched::ww_sched_snapshot();
+
     crate::pr_info!(
-        "WW: hres_fires={} late_n={} late_max={}ms pidmiss={} rearm={} softirq_age_ms=[{},{},{},{}]",
+        "WW: fires={} late_max={}ms pidmiss={} rearm={} wheel={}/{} hres_next={}ms\nWW2: si_runs={} si_busy={}ms ticks=[{},{}] vec=[{},{},{},{},{},{},{},{},{},{}]\nWW3: grq={} cfs={} idle={:#x} nr={} cpu0=(pid={} st={:#x} pc={}) cpu1=(pid={} st={:#x} pc={})",
         fire_n,
-        late_n,
         late_max,
         pidmiss,
         WW_REARM_N.load(Ordering::Relaxed),
-        a0,
-        a1,
-        a2,
-        a3
+        overdue,
+        wheel_len,
+        HRES_NEXT.load(Ordering::Acquire).saturating_sub(now_time) / ticks_per_ms,
+        runs_d,
+        busy_ms,
+        irq_d[0],
+        irq_d[1],
+        vecs[0], vecs[1], vecs[2], vecs[3], vecs[4],
+        vecs[5], vecs[6], vecs[7], vecs[8], vecs[9],
+        sched[0], sched[1], sched[2], sched[3],
+        sched[4], sched[5], sched[6],
+        sched[7], sched[8], sched[9]
     );
     crate::sched::wakewatch::heartbeat();
 }
