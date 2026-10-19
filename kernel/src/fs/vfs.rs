@@ -276,6 +276,32 @@ pub fn vfs_remount(mountpoint: &str, new_flags: crate::fs::mount::MntFlags) -> R
     match found {
         Some(mnt) => {
             *mnt.flags.lock() = new_flags;
+            // Keep the underlying ext4's own ro latch in sync — its
+            // op-layer EROFS guard reads fs.read_only (sc21), so a
+            // remount,rw must reopen writes and remount,ro close them
+            // at the fs layer too. A metadata_csum image stays
+            // read-only regardless (mount-time downgrade policy: the
+            // write path does not maintain checksums).
+            if let Some(root_inode) = mnt.root.get_inode() {
+                if let Some(ops) = root_inode.ops {
+                    if core::ptr::eq(
+                        ops as *const _,
+                        &crate::fs::ext4::EXT4_INODE_OPS as *const _,
+                    ) {
+                        if let Some(p) = root_inode.private_data {
+                            let forced_ro = (*(p as *const crate::fs::ext4::Ext4FileSystem))
+                                .metadata_csum;
+                            // SAFETY: the fs instance lives for the mount;
+                            // read_only is a plain bool whose only writers
+                            // are mount setup and this remount path.
+                            unsafe {
+                                (*(p as *mut crate::fs::ext4::Ext4FileSystem)).read_only =
+                                    new_flags.is_readonly() || forced_ro;
+                            }
+                        }
+                    }
+                }
+            }
             Ok(())
         }
         None => Err(errno::Errno::InvalidArgument.as_neg_i32()),
@@ -495,6 +521,19 @@ pub fn vfs_bind_mount(source: &str, target: &str, mnt_flags: MntFlags) -> Result
             Some(i) => i,
             None => return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32()),
         },
+    };
+    // A bind clone inherits the source mount's read-only flag (Linux
+    // clone_mnt copies mnt_flags minus propagation bits — a bind of a ro
+    // mount IS ro; sc21). Without this, a mkdir/create under a bind of the
+    // ro /usr or /vendor ext4 slipped past check_not_readonly (the new
+    // mount carried only the syscall's flags), dove into the ext4 write
+    // machinery, and surfaced as EIO — sc20's sandbox prep saw
+    // mkdir '/mnt/sandbox/system/vendor/firmware' fail -5 where Linux
+    // answers EROFS and init merely warns and moves on.
+    let mnt_flags = if path_on_readonly_mount(source) {
+        MntFlags::new(mnt_flags.bits() | MntFlags::MNT_READONLY)
+    } else {
+        mnt_flags
     };
     vfs_mount(target, inode, mnt_flags);
     Ok(())
