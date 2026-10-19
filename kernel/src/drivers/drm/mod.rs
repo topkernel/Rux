@@ -678,10 +678,36 @@ fn prime_close(file: &crate::fs::file::File) -> i32 {
     0
 }
 
+/// lseek on a prime fd — Linux dma-buf parity (dma_buf_llseek): the
+/// file position ranges over the buffer's bytes and SEEK_END yields the
+/// buffer SIZE. The vendor kms-dri software winsys sizes every imported
+/// gralloc buffer with lseek(fd, 0, SEEK_END) and fails the import
+/// SILENTLY on -1 — with no lseek op the EGLImage path returned NULL
+/// with no error ("eglCreateImageKHR failed, error EGL_SUCCESS"), RS
+/// rendered into a shadow target, and every flipped GEM stayed zeroed
+/// (the black-screen root cause).
+fn prime_lseek(file: &crate::fs::file::File, offset: isize, whence: i32) -> isize {
+    let Some(gem) = prime_file_gem(file) else { return -9 };
+    let size = gem.size as i64;
+    let cur = file.get_pos() as i64;
+    let base = match whence {
+        0 => 0,        // SEEK_SET
+        1 => cur,      // SEEK_CUR
+        2 => size,     // SEEK_END: the buffer size (dma-buf semantics)
+        _ => return -22, // EINVAL
+    };
+    let target = base + offset as i64;
+    if target < 0 || target > size {
+        return -22; // EINVAL (dma_buf_llseek)
+    }
+    let _ = file.set_pos(target as u64);
+    target as isize
+}
+
 pub static PRIME_OPS: crate::fs::file::FileOps = crate::fs::file::FileOps {
     read: Some(prime_read),
     write: Some(prime_write),
-    lseek: None,
+    lseek: Some(prime_lseek),
     close: Some(prime_close),
     poll: None,
     read_at: None,
