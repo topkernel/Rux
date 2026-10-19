@@ -169,7 +169,7 @@ pub enum DfxSwitch {
     TcpTrace,
 }
 
-const SWITCH_COUNT: usize = 23;
+const SWITCH_COUNT: usize = 24;
 
 static SWITCHES: [AtomicBool; SWITCH_COUNT] = [const { AtomicBool::new(false) }; SWITCH_COUNT];
 
