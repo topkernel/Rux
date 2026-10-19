@@ -167,9 +167,18 @@ pub enum DfxSwitch {
     /// zero-window probe or a dup-ACK storm; the first-send corruption
     /// and mid-transfer connection drops need sequence-level timelines.
     TcpTrace,
+    /// khungtaskd-cadence dump of the AF_UNIX namespace and every epoll
+    /// interest set (appspawn-server wedge hunt, b15): one line per
+    /// LISTENING socket (key, accept-queue depth, backlog, file id) and
+    /// one per epoll instance reachable through the wake registry
+    /// (registered fd, events mask, file id, ET snapshot). Cross-
+    /// referencing the listener's file id against the epoll entries
+    /// answers "is the listener still registered" without a guest-side
+    /// /proc. OFF unless asked for with dfx=socksnap.
+    SockSnap,
 }
 
-const SWITCH_COUNT: usize = 24;
+const SWITCH_COUNT: usize = 25;
 
 static SWITCHES: [AtomicBool; SWITCH_COUNT] = [const { AtomicBool::new(false) }; SWITCH_COUNT];
 
@@ -204,6 +213,7 @@ impl DfxSwitch {
             DfxSwitch::FutexTrace => 20,
             DfxSwitch::MonoWatch => 21,
             DfxSwitch::TcpTrace => 22,
+            DfxSwitch::SockSnap => 24,
         }
     }
 
@@ -233,6 +243,7 @@ impl DfxSwitch {
             "futextrace" => Some(DfxSwitch::FutexTrace),
             "monowatch" => Some(DfxSwitch::MonoWatch),
             "tcptrace" => Some(DfxSwitch::TcpTrace),
+            "socksnap" => Some(DfxSwitch::SockSnap),
             _ => None,
         }
     }

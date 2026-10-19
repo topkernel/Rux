@@ -899,6 +899,24 @@ pub fn unix_connect(
             if fid != 0 {
                 crate::syscall::misc::epoll_notify_file(fid);
             }
+            // dfx=socksnap (launcher-chain hunt, b16): name every client
+            // that reaches a Spawn-family listener. The OH appspawn
+            // protocol is one connect + one request + one pid reply, so
+            // this line paired with the REQ dump in unix_send answers
+            // "who asked appspawn to start what" without a guest shell.
+            // AppSpawn/NativeSpawn/CJAppSpawn/HybridSpawn all end in
+            // "Spawn"; other listeners stay silent.
+            if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SockSnap) {
+                let name = server.bound_name.lock().clone();
+                if name.as_deref().map(|n| n.ends_with("Spawn")).unwrap_or(false) {
+                    crate::pr_warn!(
+                        "socksnap: CONNECT pid={} -> {} (server fid={:#x})",
+                        crate::process::current_pid(),
+                        key_shown(name.as_deref().unwrap_or("?")),
+                        fid
+                    );
+                }
+            }
             Ok(())
         }
         UnixKind::Dgram => {
@@ -1072,6 +1090,46 @@ pub fn unix_send(
             return Err(-32); // EPIPE
         }
 
+        // dfx=socksnap (launcher-chain hunt, b16): dump the head of every
+        // message whose receiving end belongs to a Spawn-family listener
+        // (AppSpawn/NativeSpawn/CJAppSpawn/HybridSpawn). The OH request
+        // carries the target process name as a C string inside the struct,
+        // so hex+printable of the first 64 bytes names the app being asked
+        // for. Replies from appspawn ride the same socket in the other
+        // direction (target = client socket, no Spawn bound name) and stay
+        // silent — only requests print.
+        if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SockSnap)
+            && !data.is_empty()
+        {
+            let is_spawn = target
+                .bound_name
+                .lock()
+                .as_ref()
+                .map(|n| n.ends_with("Spawn"))
+                .unwrap_or(false);
+            if is_spawn {
+                let n = data.len().min(64);
+                let mut hex = alloc::string::String::new();
+                for i in 0..n {
+                    hex.push_str(&alloc::format!("{:02x}", data[i]));
+                }
+                let mut txt: alloc::vec::Vec<u8> = alloc::vec::Vec::with_capacity(n);
+                for &b in &data[..n] {
+                    txt.push(if b >= 0x20 && b < 0x7f { b } else { b'.' });
+                }
+                let s = core::str::from_utf8(&txt).unwrap_or("");
+                let name = target.bound_name.lock().clone();
+                crate::pr_warn!(
+                    "socksnap: REQ pid={} -> {} len={} hex={} txt={}",
+                    crate::process::current_pid(),
+                    key_shown(name.as_deref().unwrap_or("?")),
+                    data.len(),
+                    hex,
+                    s
+                );
+            }
+        }
+
         // hilog tap (drm/ui bring-up): OH's userspace log lines exist
         // ONLY inside hilogd (libEGL's stderr adapter prints '<message
         // truncated>' markers). The receiving sockets are bound to
@@ -1237,6 +1295,38 @@ pub fn unix_send(
                     if n < 3000 {
                         let p = core::str::from_utf8(&prefix[..plen]).unwrap_or("");
                         crate::pr_warn!("hilog[{}] {}{}", n, p, s);
+                    }
+                }
+                // Spawn-chain tap (launcher hunt, b16): the appspawn ->
+                // fork -> exec/ArkTS-chain evidence lives in hilog under
+                // appspawn/ams/bms/ability-runtime tags, none of which the
+                // graphics filter above passes. b16 exhausted the 3000
+                // graphics taps before appspawn's single fork ever
+                // logged, so this cohort gets its own counter and budget.
+                // Exact tags first, then one substring set — "ppSpawn"
+                // spans AppSpawn/APPSPAWN/appspawn (the family of
+                // spellings OH actually emits) without matching unrelated
+                // words.
+                const SPAWN_TAGS: [&str; 10] = [
+                    "APPSPAWN", "AppSpawn", "Ams", "Bms", "BundleMgr",
+                    "AbilityRuntime", "AbilityManagerService", "CJAppspawn",
+                    "NativeService", "appspawn",
+                ];
+                const SPAWN_KEYS: [&str; 9] = [
+                    "ppSpawn", "StartAbility", "start ability", "bundleName",
+                    "AbilityManager", "appspawn", "OnForeground", "OnBackground",
+                    "AbilityScheduler",
+                ];
+                let spawn_hit = SPAWN_TAGS.iter().any(|t| {
+                    s.starts_with(t) && s.as_bytes().get(t.len()) == Some(&b':')
+                }) || SPAWN_KEYS.iter().any(|key| s.contains(key));
+                if spawn_hit {
+                    static SPAWN_TAPS: core::sync::atomic::AtomicU32 =
+                        core::sync::atomic::AtomicU32::new(0);
+                    let n = SPAWN_TAPS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                    if n < 3000 {
+                        let p = core::str::from_utf8(&prefix[..plen]).unwrap_or("");
+                        crate::pr_warn!("slog[{}] {}{}", n, p, s);
                     }
                 }
             }
@@ -1747,6 +1837,44 @@ pub fn unix_poll_unwait(file: &File, task: *mut crate::process::task::Task) {
     // SAFETY: same identity/ownership contract as unix_poll_wait.
     if let Some(socket) = unsafe { unix_of_file(file) } {
         socket.wait_queue.remove(task);
+    }
+}
+
+/// dfx=socksnap (appspawn wedge hunt, b15): one console line per
+/// LISTENING socket in the namespace — registry key, accept-queue depth,
+/// backlog cap, and the open-file-description id that epoll registrations
+/// key on. Cross-reference the printed file id against the epoll interest
+/// dump (syscall::misc::epoll_interest_snapshot) to decide whether a
+/// wedged server's listener is still registered anywhere. Purely
+/// diagnostic; self-gated, OFF unless dfx=socksnap is on the cmdline.
+pub fn unix_listener_snapshot() {
+    if !crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SockSnap) {
+        return;
+    }
+    let table = UNIX_TABLE.lock();
+    for (key, sock) in table.iter() {
+        if *sock.state.lock() != UnixState::Listening {
+            continue;
+        }
+        let q = sock.accept_queue.lock().len();
+        let bk = *sock.backlog.lock();
+        let fid = sock.file_id.load(core::sync::atomic::Ordering::Acquire);
+        // bound_name is the sun_path the server bound (display name);
+        // the registry key is an inode identity for fs sockets. Show
+        // the NAME — the launcher-chain hunt needs "which server is
+        // which" (AppSpawn vs hilogInput vs ...) without a guest shell.
+        let name = sock
+            .bound_name
+            .lock()
+            .clone()
+            .unwrap_or_else(|| key_shown(key).to_string());
+        crate::pr_info!(
+            "socksnap: LISTEN name={} q={} backlog={} fid={:#x}",
+            key_shown(&name),
+            q,
+            bk,
+            fid
+        );
     }
 }
 

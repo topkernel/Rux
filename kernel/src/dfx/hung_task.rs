@@ -131,6 +131,11 @@ extern "C" fn khungtaskd_fn(_arg: *mut core::ffi::c_void) -> i32 {
         // dfx=sleepsnap: name the syscall every other S-state thread is
         // parked in (appspawn-server wedge hunt, b11) — self-gated.
         crate::ipc::binder::sleep_snapshot();
+
+        // dfx=socksnap: AF_UNIX listener queue depths + every epoll
+        // interest set (appspawn-server wedge hunt, b15) — self-gated.
+        crate::net::unix::unix_listener_snapshot();
+        crate::syscall::misc::epoll_interest_snapshot();
     }
 
     RUNNING.store(false, Ordering::Release);

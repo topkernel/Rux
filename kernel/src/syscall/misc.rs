@@ -202,6 +202,64 @@ fn epoll_wake_unregister(file_id: u64, ep: *mut EpollFile) {
     registry.bindings.retain(|(id, e)| !(*id == file_id && *e == ep));
 }
 
+/// dfx=socksnap (appspawn wedge hunt, b15): dump the interest set of every
+/// epoll instance reachable through the wake registry — one line per
+/// instance listing up to 24 registered fds (fd number, events mask, file
+/// id, ET snapshot). Cross-reference against the AF_UNIX listener dump
+/// (net::unix::unix_listener_snapshot): a wedged server whose listener
+/// file id appears in NO interest set had its registration removed (or
+/// never made); one whose listener IS registered but never reports has a
+/// readiness bug. Lock order registry → entries matches epoll_notify_file.
+/// Formatting happens AFTER both locks drop (collect under lock, print
+/// outside). Purely diagnostic; self-gated by dfx=socksnap.
+pub fn epoll_interest_snapshot() {
+    if !crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SockSnap) {
+        return;
+    }
+    // (epoll ptr, [(fd, events, file_id, last_reported); ..]) — collected
+    // under the registry + entries locks, printed after release.
+    let mut out: alloc::vec::Vec<(usize, alloc::vec::Vec<(i32, u32, u64, u32)>)> =
+        alloc::vec::Vec::new();
+    {
+        let registry = EPOLL_WAKE_REGISTRY.lock_irqsave();
+        for (_, ep) in registry.bindings.iter() {
+            let ep_usize = *ep as usize;
+            if out.iter().any(|(p, _)| *p == ep_usize) {
+                continue; // one line per instance, not per binding
+            }
+            // SAFETY: `ep` came from Box::into_raw in sys_epoll_create and
+            // its close op unregisters the binding before freeing, so it is
+            // alive while we hold the registry lock.
+            let epoll = unsafe { &**ep };
+            let entries = epoll.entries.lock();
+            let mut row: alloc::vec::Vec<(i32, u32, u64, u32)> = alloc::vec::Vec::new();
+            for entry in entries.iter() {
+                if row.len() >= 24 {
+                    break;
+                }
+                row.push((entry.fd, entry.events, entry.file_id, entry.last_reported));
+            }
+            let total = entries.len();
+            drop(entries);
+            out.push((ep_usize, row));
+            if total > 24 {
+                crate::pr_warn!("socksnap: ep={:#x} has {} entries (truncated)", ep_usize, total);
+            }
+        }
+    }
+    for (ep, row) in out.iter() {
+        let mut line: alloc::string::String =
+            alloc::format!("socksnap: ep={:#x} fds={}", ep, row.len());
+        for (fd, ev, fid, lr) in row.iter() {
+            line.push_str(&alloc::format!(
+                " [fd={} ev={:#x} fid={:#x} lr={:#x}]",
+                fd, ev, fid, lr
+            ));
+        }
+        crate::pr_info!("{}", line);
+    }
+}
+
 /// Epoll file close callback
 fn epoll_file_close(file: &crate::fs::File) -> i32 {
     // R20-5: free the boxed EpollFile. The close op only runs on the LAST
