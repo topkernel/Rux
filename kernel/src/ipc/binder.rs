@@ -1800,6 +1800,69 @@ unsafe fn stall_thread_line(proc: &Arc<BinderProc>, t: &Arc<BinderThread>) {
 /// One report per wait episode. The first owing process gets a full
 /// per-thread dump (proc todo depth, looper/wait/stack state of every
 /// worker) so the next wedge names the exact thread that ate the wake.
+/// dfx=sleepsnap (b11 appspawn wedge hunt): one line per S-state task —
+/// comm/tid/state, the syscall number the thread is parked in, its rip
+/// and first two args, read from the fixed user entry frame at
+/// kernel_stack_top - PT_REGS_SIZE (same contract as the holder-task
+/// forensics in stall_thread_line). The appspawn server swallows client
+/// requests (write OK, reply never comes, no fork) while its kickdog
+/// thread lives: this names the exact syscall the server main thread is
+/// sleeping in, at khungtaskd cadence. Purely diagnostic; OFF unless
+/// dfx=sleepsnap is on the cmdline.
+pub fn sleep_snapshot() {
+    if !crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SleepSnap) {
+        return;
+    }
+    crate::sched::for_each_task(|task| {
+        // SAFETY: callback runs under the pid-hash bucket lock (same
+        // contract as hung_task's check_tasks); reads are confined to
+        // the task's own fields and its mapped kernel stack.
+        unsafe {
+            let tk = &*task;
+            if tk.pid() == 0 {
+                return;
+            }
+            let state = tk.state();
+            if !state.contains(crate::process::task::TaskState::INTERRUPTIBLE) {
+                return;
+            }
+            let top = tk.kernel_stack_top();
+            #[cfg(feature = "x86_64")]
+            let (rip, sys, a0, a1) = {
+                let regs = (top.wrapping_sub(
+                    crate::arch::x86_64::pt_regs::PT_REGS_SIZE,
+                )) as *const crate::arch::x86_64::pt_regs::PtRegs;
+                // SAFETY: diagnostic read of this task's own entry frame;
+                // the kernel stack stays mapped while the Task lives.
+                unsafe { ((*regs).rip, (*regs).orig_rax, (*regs).rdi, (*regs).rsi) }
+            };
+            #[cfg(feature = "riscv64")]
+            let (rip, sys, a0, a1) = {
+                let regs = (top.wrapping_sub(
+                    crate::arch::riscv64::pt_regs::PT_REGS_SIZE,
+                )) as *const crate::arch::riscv64::pt_regs::PtRegs;
+                // SAFETY: same contract as the x86_64 twin above.
+                unsafe { ((*regs).epc, (*regs).a7, (*regs).a0, (*regs).a1) }
+            };
+            #[cfg(not(any(feature = "x86_64", feature = "riscv64")))]
+            let (rip, sys, a0, a1) = (0u64, 0u64, 0u64, 0u64);
+            let comm = tk.comm();
+            let name = core::str::from_utf8(&comm[..])
+                .unwrap_or("")
+                .trim_end_matches('\0');
+            crate::pr_info!(
+                "sleepsnap: {} tid {} state={:#x} sys={} rip={:#x} a0={:#x} a1={:#x}",
+                name,
+                tk.pid(),
+                state.bits(),
+                sys,
+                rip,
+                a0,
+                a1
+            );        }
+    });
+}
+
 pub fn stall_report() {
     const STALL_SECS: u64 = 120;
     let now = crate::drivers::timer::get_jiffies();

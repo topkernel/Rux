@@ -139,6 +139,13 @@ pub enum DfxSwitch {
     /// Same failure shape as Steptrace's 2.7GB serial log. OFF unless
     /// asked for with dfx=syscalltrace.
     SyscallTrace,
+    /// khungtaskd-cadence snapshot of every S-state task's user entry
+    /// frame (comm, tid, syscall nr, rip, a0/a1) — the appspawn-server
+    /// wedge hunt (b11): clients write to the AppSpawn socket and the
+    /// server never accepts, while its kickdog thread lives. Names the
+    /// exact syscall the server main thread is parked in. OFF unless
+    /// asked for with dfx=sleepsnap.
+    SleepSnap,
     /// Futex wake-miss probe (b133 hunt): when a FUTEX_WAKE wants more
     /// waiters than it finds, scan every bucket for same-uaddr waiters
     /// under a non-matching key and report both mm identities — the
@@ -193,6 +200,7 @@ impl DfxSwitch {
             DfxSwitch::Ledger => 17,
             DfxSwitch::BinderTrace => 18,
             DfxSwitch::SyscallTrace => 19,
+            DfxSwitch::SleepSnap => 23,
             DfxSwitch::FutexTrace => 20,
             DfxSwitch::MonoWatch => 21,
             DfxSwitch::TcpTrace => 22,
@@ -221,6 +229,7 @@ impl DfxSwitch {
             "ledger" => Some(DfxSwitch::Ledger),
             "bindertrace" => Some(DfxSwitch::BinderTrace),
             "syscalltrace" => Some(DfxSwitch::SyscallTrace),
+            "sleepsnap" => Some(DfxSwitch::SleepSnap),
             "futextrace" => Some(DfxSwitch::FutexTrace),
             "monowatch" => Some(DfxSwitch::MonoWatch),
             "tcptrace" => Some(DfxSwitch::TcpTrace),

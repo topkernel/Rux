@@ -127,6 +127,10 @@ extern "C" fn khungtaskd_fn(_arg: *mut core::ffi::c_void) -> i32 {
         // S-state (invisible above); they mark an IPC chain that stopped
         // answering — the common OH bring-up stall shape.
         crate::ipc::binder::stall_report();
+
+        // dfx=sleepsnap: name the syscall every other S-state thread is
+        // parked in (appspawn-server wedge hunt, b11) — self-gated.
+        crate::ipc::binder::sleep_snapshot();
     }
 
     RUNNING.store(false, Ordering::Release);
