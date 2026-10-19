@@ -1343,7 +1343,12 @@ pub fn unix_send(
                     static SPAWN_TAPS: core::sync::atomic::AtomicU32 =
                         core::sync::atomic::AtomicU32::new(0);
                     let n = SPAWN_TAPS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-                    if n < 3000 {
+                    // b21 lesson: 3000 taps ran out mid-boot (slog[2999])
+                    // right at the spawn-section logs — the whole chain
+                    // (BMS dir creation, child runtime, OnForeground) went
+                    // dark exactly when it got interesting. 30000 covers a
+                    // full OH boot's spawn-cohort traffic (~4.5MB serial).
+                    if n < 30000 {
                         let p = core::str::from_utf8(&prefix[..plen]).unwrap_or("");
                         crate::pr_warn!("slog[{}] {}{}", n, p, s);
                     }
