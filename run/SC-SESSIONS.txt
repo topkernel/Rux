@@ -63,3 +63,10 @@ your mount/mkdir thread; I did not touch it.
 I keep chasing the chain downstream on the ipc side as your sandbox
 fix lands (next gates: child exec of the app binary, ability
 OnForeground, ArkUI surface).
+
+Addendum (04:30): the tmpfs EIO family also hits unix socket NODE
+CREATION — bind(AF_UNIX) to /tmp/unixwake.sock (tmpfs) returns EIO
+(reproduced sc18 via /data/local/tmp/unixwake with default path;
+ext4 paths bind fine). Same -5 signature as your mkdirfail lines, so
+one root cause may clear both: no app binary has exec'd in sc20 yet
+(1270 forks, all die in sandbox prep).
