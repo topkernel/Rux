@@ -441,6 +441,30 @@ pub fn vfs_umount(mountpoint: &str) -> Result<(), i32> {
     Ok(())
 }
 
+/// Bind mount: attach the subtree rooted at `source` over `target`
+/// (Linux mount(2) with MS_BIND — do_loopback). OH's appspawn sandbox
+/// construction binds /proc, /dev, /sys, /system/... into
+/// /mnt/sandbox/<user>/<pkg>/, and init's system sandbox binds chipsets
+/// the same way. The mount created at `target` SHARES the source
+/// directory's inode: the target exposes the same tree through the same
+/// inode ops (no copy, writes are visible on both sides, like Linux).
+/// Target existence is the caller's (sys_mount's) path_lookup check;
+/// source resolution follows symlinks and mounts on the way (/system is
+/// a symlink into the /usr ext4 mount — the bind must capture the
+/// resolved inode, exactly what path_lookup yields).
+pub fn vfs_bind_mount(source: &str, target: &str, mnt_flags: MntFlags) -> Result<(), i32> {
+    let src = path_lookup(source, 0)?;
+    let inode = match src.inode.clone() {
+        Some(i) => i,
+        None => match src.dentry.as_ref().and_then(|d| d.get_inode()) {
+            Some(i) => i,
+            None => return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32()),
+        },
+    };
+    vfs_mount(target, inode, mnt_flags);
+    Ok(())
+}
+
 /// Move a mount: mount(2) with MS_MOVE re-attaches the filesystem
 /// mounted at `from` over `to` (Linux move_mount/MS_MOVE — OH's
 /// switch_root moves /dev,/proc,/sys,/run into the new root's tree and

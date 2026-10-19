@@ -1758,6 +1758,32 @@ pub fn sys_mount(args: SyscallArgs) -> i64 {
         }
     }
 
+    // MS_BIND: attach the source subtree over the target (Linux
+    // do_loopback; dispatch order REMOUNT → BIND → MOVE → propagation).
+    // OH's appspawn sandbox construction binds /proc, /dev, /sys,
+    // /system/... into /mnt/sandbox/<user>/<pkg>/ — b19 showed every
+    // one failing EINVAL right after the propagation fix landed. The
+    // new mount SHARES the source directory's inode (see
+    // vfs_bind_mount); fstype and data are ignored, as on Linux.
+    const BIND_MS_BIND: u64 = 4096;
+    if args[3] & BIND_MS_BIND != 0 {
+        let mnt_flags = crate::fs::mount::translate_mnt_flags_public(args[3]);
+        let ret = match crate::fs::vfs::vfs_bind_mount(source, target, mnt_flags) {
+            Ok(()) => 0,
+            Err(e) => e,
+        };
+        if ret != 0 {
+            crate::pr_info!(
+                "bindmount '{}' -> '{}' flags {:#x}: {}",
+                source,
+                target,
+                args[3],
+                ret
+            );
+        }
+        return ret as i64;
+    }
+
     // Propagation-type change (Linux do_mount dispatch: REMOUNT → BIND →
     // MOVE → propagation → new mount; this block sits after REMOUNT and
     // MOVE). When flags carry ONLY propagation bits (MS_SHARED/MS_PRIVATE/
@@ -1771,8 +1797,6 @@ pub fn sys_mount(args: SyscallArgs) -> i64 {
     // sandbox root dirs — b18 nailed DoSandboxRootFolderCreate dying at
     // exactly mount[29] flags 0x84000 = MS_SLAVE|MS_REC → EINVAL, which
     // failed every START_PROCESS (systemui, launcher) after the fork.
-    // (MS_BIND falls through to do_mount below, as before — a bind mount
-    // shares no bits with the propagation mask.)
     const CHG_MS_UNBINDABLE: u64 = 1 << 17;
     const CHG_MS_PRIVATE: u64 = 1 << 18;
     const CHG_MS_SLAVE: u64 = 1 << 19;
