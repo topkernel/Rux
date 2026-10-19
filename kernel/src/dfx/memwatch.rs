@@ -100,17 +100,41 @@ static RSITES: [Site; 64] = [const {
 ///
 /// MUST be called with the frame at `fp` live on the current call stack
 /// (it is: callers pass their own s0 before doing anything else).
+/// Is `fp` a frame pointer the walk may dereference? It must point at
+/// READABLE kernel memory: the linear map (kernel stacks are heap
+/// allocations there) or the kernel image window (boot-time static
+/// stacks in .bss).
+///
+/// The old check (any canonical kernel address, `fp >= 0x8000...`) also
+/// accepted the very top of the canonical space — 0xffffffffffffff80 is
+/// canonical but sits in the unmapped guard region. A stale slot with
+/// that value made the diagnostic walk itself page-fault with no fixup
+/// (alloc-crash a1: kernel fault addr=0xffffffffffffff78, rip inside
+/// walk_fp_chain, from the alloc_page_table memwatch hook).
+#[cfg(feature = "x86_64")]
+pub fn plausible_fp(fp: u64) -> bool {
+    crate::arch::x86_64::mm::is_linear_mapping(fp as usize)
+        || (0xffff_ffff_8000_0000..0xffff_ffff_8200_0000).contains(&(fp as usize))
+}
+
+#[cfg(feature = "riscv64")]
+pub fn plausible_fp(fp: u64) -> bool {
+    // The kernel image is linked inside the linear region on riscv64
+    // (PAGE_OFFSET + phys), so the linear-map check covers both.
+    crate::arch::riscv64::mm::is_linear_mapping(fp as usize)
+}
+
 #[inline(never)]
 pub unsafe fn walk_fp_chain(mut fp: u64, out: &mut [u64]) {
     for slot in out.iter_mut() {
         *slot = 0;
-        if !(fp >= 0x8000_0000_0000_0000 && fp & 7 == 0) {
+        if !(fp >= 0x8000_0000_0000_0000 && fp & 7 == 0 && plausible_fp(fp)) {
             return;
         }
         let ra = core::ptr::read_volatile((fp - 8) as *const u64);
         let next = core::ptr::read_volatile((fp - 0x10) as *const u64);
         *slot = ra;
-        if !(next >= 0x8000_0000_0000_0000 && next & 7 == 0 && next > fp) {
+        if !(next >= 0x8000_0000_0000_0000 && next & 7 == 0 && next > fp && plausible_fp(next)) {
             return;
         }
         fp = next;
@@ -165,6 +189,22 @@ pub fn note_alloc(ptr: *mut u8, heap_start: usize, size: usize, frames: &[u64; S
     let b = bucket(size);
     ALLOC_BINS[b].fetch_add(1, Ordering::Relaxed);
 
+    // alloc-crash r12-16: ring of the most recent BIG allocations. The
+    // live-site table saturates its 250 slots within the first minutes of
+    // an OH boot, so the >2KB class (b12, everything clamped) can hold
+    // hundreds of MB invisibly — net=2631 live objects at the a3 death
+    // while livebins showed 14. The ring is append-only and never
+    // saturates: the last 32 allocations > 64KB are always nameable.
+    if size > 65536 {
+        let pos = BIG_RING_POS.fetch_add(1, Ordering::Relaxed) % 32;
+        BIG_RING[pos].size.store(size, Ordering::Relaxed);
+        BIG_RING[pos].ptr.store(ptr as usize, Ordering::Relaxed);
+        BIG_RING[pos].pid.store(crate::sched::get_current_pid() as usize, Ordering::Relaxed);
+        for i in 0..4.min(frames.len()) {
+            BIG_RING[pos].frames[i].store(frames[i] as usize, Ordering::Relaxed);
+        }
+    }
+
     if b >= 7 {
         let key = chain_key(b, frames);
         let s = &SITES[key % SITE_SLOTS];
@@ -210,6 +250,27 @@ pub static LIVE_BINS: [AtomicUsize; NUM_BINS] =
     [const { AtomicUsize::new(0) }; NUM_BINS];
 
 // ---------------------------------------------------------------------------
+// Big-allocation ring (alloc-crash r12-16): the last 32 allocations
+// larger than 64 KiB, with the first 4 frame-chain entries. See the
+// note_alloc comment for why the live-site table alone cannot see them.
+// ---------------------------------------------------------------------------
+pub struct BigRingSlot {
+    pub size: AtomicUsize,
+    pub ptr: AtomicUsize,
+    pub pid: AtomicUsize,
+    pub frames: [AtomicUsize; 4],
+}
+pub static BIG_RING: [BigRingSlot; 32] = [const {
+    BigRingSlot {
+        size: AtomicUsize::new(0),
+        ptr: AtomicUsize::new(0),
+        pid: AtomicUsize::new(0),
+        frames: [const { AtomicUsize::new(0) }; 4],
+    }
+}; 32];
+static BIG_RING_POS: AtomicUsize = AtomicUsize::new(0);
+
+// ---------------------------------------------------------------------------
 // Live-object accounting (page -> site-id table)
 //
 // The histograms above count EVENTS, which cannot distinguish a 5246x/s
@@ -219,10 +280,18 @@ pub static LIVE_BINS: [AtomicUsize; NUM_BINS] =
 // a monotonic `live` growth IS the leak, regardless of churn.
 // ---------------------------------------------------------------------------
 
-/// 128MB heap / 4KB pages. Keep in sync with the heap size in Kernel.toml
-/// (boot msg "heap region 128MB @ 0x80a00000"); out-of-range indices are
-/// simply not tracked.
-pub const TRACKED_PAGES: usize = 32768;
+/// Heap pages tracked by the page->site live table. Sized for the FULL
+/// kernel heap window (Kernel.toml kernel_heap_size=1024 → 1 GiB / 4 KiB
+/// = 262144 pages); the early-boot image mapping covers KERNEL_SIZE=64MB
+/// and .bss ends well under it, so the 256 KiB static array boots fine.
+/// out-of-range indices are simply not tracked.
+///
+/// alloc-crash r12-16: with the old 128MB table (32768 pages) every
+/// allocation landing past the 128MB mark interned a site and bumped
+/// allocs while its free could never be attributed back (PAGE_SITE had
+/// no entry) — the MEMLIVE dump showed the entire late boot as
+/// "leaking" and the table was useless exactly when the heap fills.
+pub const TRACKED_PAGES: usize = 262144;
 pub static PAGE_SITE: [AtomicU8; TRACKED_PAGES] = [const { AtomicU8::new(0) }; TRACKED_PAGES];
 
 /// Extended per-site live counters. Index+1 is the site id stored in
@@ -658,6 +727,22 @@ pub fn dump_mem() {
     if !ENABLED.load(Ordering::Relaxed) {
         return;
     }
+    dump_heap_ledger();
+    dump_page_ledger();
+}
+
+/// The heap-side ledger tables ONLY: size-class net growth (MEMBINS),
+/// hottest realloc sites, and the live-per-call-site table (MEMLIVE).
+///
+/// Pure atomics — no allocator locks, no allocation, no page-table walks,
+/// no lazily-carved tables — so it is safe to call from the exhausted
+/// heap path itself (alloc_error_handler / ALLOCTHROW), where taking the
+/// buddy lock or allocating a single byte would wedge the very print we
+/// die on.
+pub fn dump_heap_ledger() {
+    if !ENABLED.load(Ordering::Relaxed) {
+        return;
+    }
 
     // net growth per size class since boot (allocs - frees)
     taskdump_raw_line(b"MEMBINS class:net\n");
@@ -780,6 +865,72 @@ pub fn dump_mem() {
         taskdump_raw_line(b"\n");
     }
 
+    // alloc-crash r12-16: allocator page-flow + refused frees + the big-alloc
+    // ring. All plain atomics — safe on the exhausted-heap path.
+    taskdump_raw_line(b"MEMFLOW net pages per order (alloc - free)\n");
+    let mut net_total = 0usize;
+    for o in 0..=crate::config::BUDDY_MAX_ORDER {
+        let n = crate::mm::buddy_allocator::NET_PAGES[o].load(Ordering::Relaxed);
+        if n != 0 {
+            taskdump_raw_line(b" o");
+            put_dec(o as u64);
+            taskdump_raw_line(b"=");
+            put_dec(n as u64);
+            taskdump_raw_line(b"pages(");
+            put_dec((n * 4096 / 1024) as u64);
+            taskdump_raw_line(b"K) ");
+            net_total += n * 4096;
+        }
+    }
+    taskdump_raw_line(b"\n netpages=");
+    put_dec((net_total / 1024) as u64);
+    taskdump_raw_line(b"K\n");
+    taskdump_raw_line(b"MEMREFUSE out_of_win dblfree ordmis tasklive ordbig unaligned\n ");
+    for i in 0..6 {
+        put_dec(crate::mm::buddy_allocator::FREE_REFUSED[i].load(Ordering::Relaxed) as u64);
+        taskdump_raw_line(b" ");
+    }
+    taskdump_raw_line(b"\n refused-ring (addr order metaord metafree):\n");
+    for i in 0..16 {
+        let slot = i * 4;
+        let a = crate::mm::buddy_allocator::REFUSED_RING[slot].load(Ordering::Relaxed);
+        if a == 0 {
+            continue;
+        }
+        put_hex(a as u64);
+        taskdump_raw_line(b" o");
+        put_dec(crate::mm::buddy_allocator::REFUSED_RING[slot + 1].load(Ordering::Relaxed) as u64);
+        taskdump_raw_line(b" mo");
+        put_dec(crate::mm::buddy_allocator::REFUSED_RING[slot + 2].load(Ordering::Relaxed) as u64);
+        taskdump_raw_line(b" mf");
+        put_dec(crate::mm::buddy_allocator::REFUSED_RING[slot + 3].load(Ordering::Relaxed) as u64);
+        taskdump_raw_line(b"\n");
+    }
+    taskdump_raw_line(b"MEMBIG last-32 big allocs (size pid f1..f4):\n");
+    for i in 0..32 {
+        let sz = BIG_RING[i].size.load(Ordering::Relaxed);
+        if sz == 0 {
+            continue;
+        }
+        taskdump_raw_line(b" big sz=");
+        put_dec(sz as u64);
+        taskdump_raw_line(b" pid=");
+        put_dec(BIG_RING[i].pid.load(Ordering::Relaxed) as u64);
+        taskdump_raw_line(b" ptr=");
+        put_hex(BIG_RING[i].ptr.load(Ordering::Relaxed) as u64);
+        for f in 0..4 {
+            taskdump_raw_line(b" ");
+            put_hex(BIG_RING[i].frames[f].load(Ordering::Relaxed) as u64);
+        }
+        taskdump_raw_line(b"\n");
+    }
+}
+
+/// Physical-page accounting half of the periodic dump (MEMPSITES +
+/// kroot pollution). Kept separate from dump_heap_ledger because it may
+/// touch the lazily-carved PFN table (heap allocation) and walk page
+/// tables — NOT safe on the exhausted-heap path.
+fn dump_page_ledger() {
     // PHYSICAL-PAGE sites, sorted by net growth (top 10): net=allocs-frees
     // per allocation call-site chain. A monotonic net IS the page leak.
     taskdump_raw_line(b"MEMPSITES net allocs frees order f1..f12\n");

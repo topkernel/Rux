@@ -29,6 +29,7 @@ pub mod vmemmap;
 pub mod swap;
 pub mod compact;
 pub mod deferred_free;
+pub mod small_alloc;
 pub mod vdso;
 
 // pcp.rs (per-CPU pages) REMOVED (wave-6, review 4.6 / batch-4 S3): the
@@ -202,6 +203,7 @@ pub use meminfo::{
     is_memory_low, should_trigger_oom, MemoryInfo, MemorySummary,
 };
 pub use buddy_allocator::buddy_stats;
+pub use buddy_allocator::buddy_free_census_lockfree;
 pub use page_desc::page_desc_stats;
 pub use memblock::{
     memblock_init, memblock_add, memblock_reserve, memblock_reserve_nomap,

@@ -58,6 +58,52 @@ const MAX_PAGES: usize = HEAP_SIZE / PAGE_SIZE;
 /// Empty list marker (use out-of-range value)
 const EMPTY_LIST: usize = MAX_PAGES + 1;
 
+// ---------------------------------------------------------------------------
+// alloc-crash r12-16 forensics: exact page-flow accounting for the
+// "heap 100% full while the live-site ledger is nearly empty" contradiction
+// (a2: 1015808K window, 68K free; a3: 0K free, tracked-live ~13MB).
+//
+// NET_PAGES[order] counts pages HANDED OUT minus pages RETURNED at each
+// order (unconditional relaxed atomics — correctness-neutral). The sum
+// over orders is the allocator's own "used" figure; comparing it with the
+// free-list census at the ALLOCTHROW moment tells whether the pages are
+// held by live allocations or vanished from both the free lists and the
+// ledger (orphaning via the free-refuse paths below).
+//
+// FREE_REFUSED counts frees dropped on the floor by the guard rails —
+// every refusal permanently orphans that block's pages (the block never
+// returns to a free list). A refused-free count that grows with uptime IS
+// the leak when the live table is clean.
+// ---------------------------------------------------------------------------
+pub static NET_PAGES: [AtomicUsize; MAX_ORDER + 1] =
+    [const { AtomicUsize::new(0) }; MAX_ORDER + 1];
+
+/// Free-refusal breakdown, indexed by FreeRefuse kind.
+pub static FREE_REFUSED: [AtomicUsize; 8] = [const { AtomicUsize::new(0) }; 8];
+
+/// Free-refusal kinds (index into FREE_REFUSED).
+pub const FR_OUT_OF_WINDOW: usize = 0;
+pub const FR_DOUBLE_FREE: usize = 1;
+pub const FR_ORDER_MISMATCH: usize = 2;
+pub const FR_TASK_LIVE: usize = 3;
+pub const FR_ORDER_TOO_BIG: usize = 4;
+pub const FR_UNALIGNED: usize = 5;
+
+/// Last N refused frees: (addr, incoming order, meta_order, meta_free).
+pub static REFUSED_RING: [AtomicUsize; 64] = [const { AtomicUsize::new(0) }; 64];
+static REFUSED_RING_POS: AtomicUsize = AtomicUsize::new(0);
+
+fn refused_free_note(kind: usize, addr: usize, order: usize, meta_order: u8, meta_free: u8) {
+    FREE_REFUSED[kind.min(7)].fetch_add(1, Ordering::Relaxed);
+    let pos = REFUSED_RING_POS.fetch_add(1, Ordering::Relaxed) % 16;
+    let slot = pos * 4;
+    REFUSED_RING[slot].store(addr, Ordering::Relaxed);
+    REFUSED_RING[slot + 1].store(order, Ordering::Relaxed);
+    REFUSED_RING[slot + 2].store(meta_order as usize, Ordering::Relaxed);
+    REFUSED_RING[slot + 3].store(meta_free as usize, Ordering::Relaxed);
+}
+
+
 /// Block metadata (stored separately, not mixed with user data)
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -402,6 +448,7 @@ impl BuddyAllocator {
 
                 // Ensure final block is marked as allocated
                 self.init_block(page_idx, order, false);
+                NET_PAGES[order].fetch_add(1usize << order, Ordering::Relaxed);
 
                 let addr = self.page_idx_to_addr(page_idx);
                 // R18-1 (alloc-side handoff probe): if this page is already
@@ -472,10 +519,13 @@ impl BuddyAllocator {
                     );
                 }
                 crate::dfx::taint::add_taint(crate::dfx::taint::TaintFlags::BAD_PAGE); // R9-14 double-free/hoard
+                let kind = if meta.free != 0 { FR_DOUBLE_FREE } else { FR_ORDER_MISMATCH };
+                refused_free_note(kind, addr, order, meta.order, meta.free);
                 return;
             }
         }
         let mut current_order = order;
+        NET_PAGES[order].fetch_sub(1usize << order, Ordering::Relaxed);
 
         loop {
             // Boundary check: order cannot exceed MAX_ORDER
@@ -553,6 +603,20 @@ unsafe impl GlobalAlloc for BuddyAllocator {
                 );
             }
             return core::ptr::null_mut();
+        }
+
+        // Small-object packing layer (alloc-crash r12-16): layouts that
+        // fit a <=1 KiB class are served from packed slab pages — one
+        // buddy page holds dozens of objects instead of one. Falls
+        // through to the plain buddy path if the layer cannot serve
+        // (uninitialized heap, out of pages).
+        if size <= crate::mm::small_alloc::SMALL_MAX
+            && align <= crate::mm::small_alloc::SMALL_MAX
+        {
+            let p = crate::mm::small_alloc::alloc(size, align);
+            if !p.is_null() {
+                return p;
+            }
         }
 
         let _guard = self.lock.lock_irqsave();
@@ -649,10 +713,55 @@ pub unsafe fn dealloc_untracked_pub(ptr: *mut u8, layout: Layout) {
 }
 
 impl BuddyAllocator {
+    /// Raw order-0 page for the small-object packing layer (mm/
+    /// small_alloc.rs): same accounting and locking as the GlobalAlloc
+    /// path (NET_PAGES, tripwires) but no memwatch note and no
+    /// size-to-order walk. Callers must NOT hold the buddy lock; the
+    /// small-alloc class lock MAY be held (class -> buddy order only).
+    pub unsafe fn alloc_page_raw(&self) -> *mut u8 {
+        if self.magic.load(Ordering::Acquire) != 0xDEADBEEF
+            || self.initialized.load(Ordering::Acquire) == 0
+        {
+            return core::ptr::null_mut();
+        }
+        let _guard = self.lock.lock_irqsave();
+        let ptr = self.alloc_blocks(0);
+        drop(_guard);
+        ptr
+    }
+
+    /// Raw order-0 free, the matching twin of alloc_page_raw.
+    pub unsafe fn free_page_raw(&self, ptr: *mut u8) {
+        if self.initialized.load(Ordering::Acquire) == 0 {
+            return;
+        }
+        let addr = ptr as usize;
+        let heap_start = self.heap_start.load(Ordering::Acquire);
+        let heap_end = self.heap_end.load(Ordering::Acquire);
+        if addr < heap_start || addr >= heap_end {
+            refused_free_note(FR_OUT_OF_WINDOW, addr, 0, 0, 0);
+            return;
+        }
+        let _guard = self.lock.lock_irqsave();
+        self.free_blocks(ptr, 0);
+        drop(_guard);
+    }
+}
+
+impl BuddyAllocator {
     /// The real buddy free path, unintercepted — the deferred-free
     /// drainer (mm/deferred_free.rs) calls this so a held-back entry can
     /// never be re-deferred.
     unsafe fn dealloc_untracked(&self, ptr: *mut u8, layout: Layout) {
+        // Small-object packing layer FIRST (alloc-crash r12-16): slab-page
+        // objects free through their page's freelist, never the buddy —
+        // and this must run before the R69 task-page probe, whose
+        // page-granular ownership bitmap would refuse frees of non-task
+        // objects sharing a (now packed) slab page with a live Task.
+        if crate::mm::small_alloc::free(ptr as usize) {
+            return;
+        }
+
         // R17-B withdrawn from the refuse path: the bitmap index aliases
         // for pages outside the heap's 8192-page window (stacks, page
         // tables), refusing legitimate frees and bleeding the machine to
@@ -669,6 +778,7 @@ impl BuddyAllocator {
         let heap_end = self.heap_end.load(Ordering::Acquire);
 
         if ptr_addr < heap_start || ptr_addr >= heap_end {
+            refused_free_note(FR_OUT_OF_WINDOW, ptr_addr, self.size_to_order(size.max(align)), 0, 0);
             return;
         }
 
@@ -696,11 +806,13 @@ impl BuddyAllocator {
                 &frames,
             );
             crate::dfx::taint::add_taint(crate::dfx::taint::TaintFlags::BAD_PAGE); // R69 free-of-live
+            refused_free_note(FR_TASK_LIVE, ptr_addr, order, 0, 0);
             return;
         }
 
         // Check if order exceeds MAX_ORDER
         if order > MAX_ORDER {
+            refused_free_note(FR_ORDER_TOO_BIG, ptr_addr, order, 0, 0);
             return;
         }
 
@@ -710,6 +822,7 @@ impl BuddyAllocator {
         // carry consistent metadata, splicing bogus blocks into the
         // doubly-linked freelist.
         if self.addr_to_page_idx_checked(ptr as usize).map(|idx| idx % (1usize << order) != 0).unwrap_or(true) {
+            refused_free_note(FR_UNALIGNED, ptr_addr, order, 0, 0);
             return;
         }
 
@@ -764,9 +877,47 @@ pub struct BuddyStats {
     pub free_count: usize,
 }
 
+/// LOCK-FREE rough heap census for the alloc-failure (ALLOCTHROW) print.
+///
+/// `buddy_stats()` takes the allocator irqsave lock, which is exactly
+/// what the OOM-moment print must not rely on (the failure can arrive
+/// with the caller holding unrelated locks; a wedged print would lose
+/// the panic). This walks the free lists through the atomics only and
+/// tolerates concurrent mutation: bounds-check every index, cap the
+/// per-order walk, and let a torn read terminate the chain. The numbers
+/// are a watermark, not an audit.
+///
+/// Returns (heap_size, free_bytes, blocks_at_order_0..=BUDDY_MAX_ORDER
+/// truncated to u32 counts) — kept as a plain tuple to avoid any
+/// formatting on the hot path.
+pub fn buddy_free_census_lockfree() -> (usize, usize, [u32; MAX_ORDER + 1]) {
+    let mut blocks = [0u32; MAX_ORDER + 1];
+    if HEAP_ALLOCATOR.initialized.load(Ordering::Acquire) == 0 {
+        return (0, 0, blocks);
+    }
+    let start = HEAP_ALLOCATOR.heap_start.load(Ordering::Acquire);
+    let end = HEAP_ALLOCATOR.heap_end.load(Ordering::Acquire);
+    let heap_size = end.saturating_sub(start);
+    let mut free_pages = 0usize;
+    for order in 0..=MAX_ORDER {
+        let mut page_idx = HEAP_ALLOCATOR.free_lists[order].load(Ordering::Acquire);
+        let mut hops = 0usize;
+        while page_idx != EMPTY_LIST && page_idx < MAX_PAGES && hops < MAX_PAGES {
+            blocks[order] = blocks[order].saturating_add(1);
+            free_pages += 1usize << order;
+            let next = HEAP_ALLOCATOR.meta.get(page_idx).next as usize;
+            if next == u32::MAX as usize || next >= MAX_PAGES {
+                break;
+            }
+            page_idx = next;
+            hops += 1;
+        }
+    }
+    (heap_size, free_pages * PAGE_SIZE, blocks)
+}
+
 /// Get Buddy allocator statistics
-pub fn buddy_stats() -> BuddyStats {
-    let mut stats = BuddyStats::default();
+pub fn buddy_stats() -> BuddyStats {    let mut stats = BuddyStats::default();
 
     if HEAP_ALLOCATOR.initialized.load(Ordering::Acquire) == 0 {
         return stats;
