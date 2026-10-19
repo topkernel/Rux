@@ -3791,22 +3791,33 @@ pub fn sys_pivot_root(args: SyscallArgs) -> i64 {
         return -(errno::ENOTDIR as i64);
     }
 
-    // put_old must be strictly underneath new_root.
-    let under = if put_old == new_root {
-        false
-    } else {
-        put_old.starts_with(&if new_root == "/" {
+    // put_old must be underneath new_root — or EQUAL to it: Linux's check
+    // is is_subdir(put_old, new_root), and is_subdir(d, d) is true, so the
+    // documented idiom pivot_root(new_root, new_root) is legal. OH's
+    // appspawn sandbox (sandbox_core.cpp:1269) uses it; the old
+    // put_old == new_root → EINVAL rejected every sandbox pivot.
+    let under = put_old == new_root
+        || put_old.starts_with(&if new_root == "/" {
             alloc::string::String::from("/")
         } else {
             alloc::format!("{}/", new_root)
-        })
-    };
+        });
     if !under {
+        crate::pr_info!(
+            "pivot_root EINVAL(not-under): new='{}' put_old='{}'",
+            new_root,
+            put_old
+        );
         return -(errno::EINVAL as i64);
     }
 
     // new_root must be a mountpoint of the current mount namespace.
     if !crate::process::ns::ns_is_mountpoint(&new_root) {
+        crate::pr_info!(
+            "pivot_root EINVAL(not-mountpoint): new='{}' put_old='{}'",
+            new_root,
+            put_old
+        );
         return -(errno::EINVAL as i64);
     }
 
