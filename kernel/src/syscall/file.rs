@@ -1978,7 +1978,11 @@ pub fn sys_umount(args: SyscallArgs) -> i64 {
     } else {
         alloc::string::String::from(target)
     };
-    let target = target_owned.as_str();
+    // Normalize like Linux's user_path_at: OH's post-pivot cleanup calls
+    // umount2("<sandbox-root>/.", MNT_DETACH) and the literal "." component
+    // made vfs_umount's parent/name split fail EINVAL (sc23 umountfail
+    // trace), leaving init wedged in a half-prepared sandbox.
+    let target = crate::fs::path::path_normalize(&target_owned);
 
     // U1c: drop the mount row from the CALLER's mount namespace (the
     // dentry-level unmount below is global — recorded divergence).
