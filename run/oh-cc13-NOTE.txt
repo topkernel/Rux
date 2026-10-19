@@ -1,0 +1,4 @@
+cc13 = compose-content composer-shim boot (session 0f8cb454): system-shim
++ vendor-shim (LD_PRELOAD decshim v3 into BOTH bootanimation and
+composer_host — usleep/condvar timing for the vsync starvation hunt),
+private userdata-cc13.img. Do not kill: owner session alive.

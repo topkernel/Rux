@@ -287,6 +287,50 @@ ssize_t decshim_write(int fd, const void *buf, size_t n)
 }
 asm(".globl write\n.set write, decshim_write");
 
+/* ---- usleep / condvar timing (composer_host injection) ------------- *
+ * The vendor DrmVsyncWorker paces display vsync with usleep(16000) +
+ * a pthread condvar; standalone the kernel sleeps 16.2ms avg (sleep_
+ * probe), but the real boot starves the whole pipeline to ~1 frame
+ * per many seconds. These interposers time the sleeps and long
+ * condvar waits INSIDE the real composer process. */
+
+typedef int (*usleep_t)(unsigned);
+typedef int (*cond_wait_t)(void *, void *);
+
+__attribute__((visibility("default")))
+int decshim_usleep(unsigned us)
+{
+    static usleep_t real;
+    if (!real)
+        real = (usleep_t)dlsym(RTLD_NEXT, "usleep");
+    unsigned long long t0 = mono_ms();
+    int r = real ? real(us) : -1;
+    unsigned long long d = mono_ms() - t0;
+    if (us >= 15000 && us <= 17000 && sock_trace_n < 900) {
+        shim_log("DEC_SHIM[%llu]: usleep(%u) took %llu ms", mono_ms(), us, d);
+        sock_trace_n++;
+    }
+    return r;
+}
+asm(".globl usleep\n.set usleep, decshim_usleep");
+
+__attribute__((visibility("default")))
+int decshim_pthread_cond_wait(void *cv, void *lk)
+{
+    static cond_wait_t real;
+    if (!real)
+        real = (cond_wait_t)dlsym(RTLD_NEXT, "pthread_cond_wait");
+    unsigned long long t0 = mono_ms();
+    int r = real ? real(cv, lk) : -1;
+    unsigned long long d = mono_ms() - t0;
+    if (d >= 100 && sock_trace_n < 950) {
+        shim_log("DEC_SHIM[%llu]: cond_wait took %llu ms", mono_ms(), d);
+        sock_trace_n++;
+    }
+    return r;
+}
+asm(".globl pthread_cond_wait\n.set pthread_cond_wait, decshim_pthread_cond_wait");
+
 /* ---- constructor --------------------------------------------------- */
 
 __attribute__((constructor))

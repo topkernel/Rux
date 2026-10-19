@@ -39,7 +39,7 @@ APPEND="$APPEND ${EXTRA_APPEND:-}"
 # oh-robot system.img (snapshot=on, pristine).
 SYSTEMIMG="${SYSTEMIMG:-$IMGDIR/system.img}"
 
-DISKS="$(ro_drive 0 "$IMGDIR/updater.img")$(ro_drive 1 "$SYSTEMIMG")$(ro_drive 2 "$IMGDIR/vendor.img")$(ro_drive 3 "$IMGDIR/sys_prod.img")$(ro_drive 4 "$IMGDIR/chip_prod.img")"
+DISKS="$(ro_drive 0 "$IMGDIR/updater.img")$(ro_drive 1 "$SYSTEMIMG")$(ro_drive 2 "${VENDORIMG:-$IMGDIR/vendor.img}")$(ro_drive 3 "$IMGDIR/sys_prod.img")$(ro_drive 4 "$IMGDIR/chip_prod.img")"
 # userdata: writable, file.locking=off (shared-machine rule), NO snapshot.
 DISKS="$DISKS -drive file=$USERDATA,if=none,id=ohd5,format=raw,file.locking=off -device virtio-blk-pci,drive=ohd5"
 
