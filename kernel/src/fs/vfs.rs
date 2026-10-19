@@ -620,45 +620,50 @@ pub fn vfs_bind_mount(
 
     // MS_REC: clone the mounts nested under the source subtree to the
     // same relative paths under the target (see the doc comment). The
-    // self-referential shapes are skipped by path prefix: OH appspawn
-    // bind-mounts /mnt/sandbox/<user>/<pkg> onto ITSELF with MS_REC to
-    // re-flag propagation — cloning its child mounts back into the same
-    // dentries would stack clones on the originals.
+    // enumeration hops ONE mount boundary outward from the resolved
+    // source dentry: for a plain bind (/dev) that is equivalent, but for
+    // OH's SELF-bind (/mnt/sandbox/<user>/<pkg> onto itself, re-flagging
+    // propagation for pivot_root) the resolved dentry is the freshly
+    // attached bind root whose subtree is still EMPTY — the appspawn
+    // child mounts live under the ORIGINAL mountpoint dentry. Without
+    // the hop (and without cloning at all for self-binds) the fresh
+    // root shadowed the child binds: post-pivot /dev/null resolved to
+    // the bare tmpfs dir and the child died at appspawn_common.c:350
+    // "open dev_null error: 2" (sc27).
     if recursive {
+        let anc = match src.dentry.clone() {
+            Some(d) => d.get_mountpoint_back().unwrap_or(d),
+            None => return Ok(()),
+        };
+        let clones: Vec<(Vec<String>, Arc<Dentry>, MntFlags)> = {
+            let state = VFS_STATE.lock();
+            state
+                .mounts
+                .iter()
+                .filter_map(|m| {
+                    let mp = m.root.get_mountpoint_back()?;
+                    let rel = dentry_relpath_below(&anc, &mp)?;
+                    if rel.is_empty() {
+                        return None;
+                    }
+                    Some((rel, m.root.clone(), *m.flags.lock()))
+                })
+                .collect()
+        };
         let target_norm = format!("/{}", target.trim_matches('/'));
-        let self_referential = target_norm == source
-            || target_norm.starts_with(&format!("{}/", source.trim_end_matches('/')));
-        if !self_referential {
-            let src_dentry = match src.dentry.clone() {
-                Some(d) => d,
-                None => return Ok(()),
-            };
-            let clones: Vec<(Vec<String>, Arc<Dentry>, MntFlags)> = {
-                let state = VFS_STATE.lock();
-                state
-                    .mounts
-                    .iter()
-                    .filter_map(|m| {
-                        let mp = m.root.get_mountpoint_back()?;
-                        let rel = dentry_relpath_below(&src_dentry, &mp)?;
-                        if rel.is_empty() {
-                            return None;
-                        }
-                        Some((rel, m.root.clone(), *m.flags.lock()))
-                    })
-                    .collect()
-            };
-            for (rel, root, flags) in clones {
-                let sub = format!("{}/{}", target_norm.trim_end_matches('/'), rel.join("/"));
-                if let Some(ino) = root.get_inode() {
-                    crate::pr_info!(
-                        "bindrec: cloned '/{}' under '{}' (flags {:#x})",
-                        rel.join("/"),
-                        target,
-                        flags.bits()
-                    );
-                    vfs_mount(&sub, ino, flags);
-                }
+        for (rel, root, flags) in clones {
+            let sub = format!("{}/{}", target_norm.trim_end_matches('/'), rel.join("/"));
+            if let Some(ino) = root.get_inode() {
+                crate::pr_info!(
+                    "bindrec: cloned '/{}' under '{}' (flags {:#x})",
+                    rel.join("/"),
+                    target,
+                    flags.bits()
+                );
+                // The walk crosses the just-attached bind root, so the
+                // clone lands on the TARGET-side dentry — never stacked
+                // onto the original mount it was cloned from.
+                vfs_mount(&sub, ino, flags);
             }
         }
     }
