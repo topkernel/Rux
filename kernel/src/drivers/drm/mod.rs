@@ -2125,12 +2125,12 @@ fn mode_atomic(arg: usize) -> i64 {
     // binding would show up. First 60 commits in full, then 1-in-25.
     static ATOM_TRACE_N: AtomicU32 = AtomicU32::new(0);
     let at = ATOM_TRACE_N.fetch_add(1, Ordering::Relaxed);
-    let mut trace = if at < 60 || at % 25 == 0 {
+    let trace_on = at < 60 || at % 25 == 0;
+    let mut trace = if trace_on {
         alloc::string::String::with_capacity(128)
     } else {
         alloc::string::String::new()
     };
-    let trace_on = !trace.is_empty();
     if trace_on {
         use core::fmt::Write as _;
         let _ = write!(
