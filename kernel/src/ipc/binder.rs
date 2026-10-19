@@ -1002,7 +1002,15 @@ unsafe fn proc_ref(file: &crate::fs::File) -> Option<Arc<BinderProc>> {
 
 /// Called from devfs_open: allocate the per-open process context.
 pub fn binder_open(file: &crate::fs::File, ctx: BinderCtx) -> i32 {
-    let pid = crate::process::current_pid();
+    // Linux stamps binder_proc->pid from current->group_leader: the
+    // process id, not the opening thread's tid. GET_SENDER_INFO feeds
+    // this into the access-token registry lookup — with a worker-thread
+    // tid there, samgr would see a synthetic token for a tid ATM never
+    // allocated (same failure family as the tid-keyed access_token
+    // ioctl, b5).
+    let pid = crate::sched::current()
+        .map(|t| unsafe { (*t).tgid() as u32 })
+        .unwrap_or_else(crate::process::current_pid);
     let id = NEXT_PROC_ID.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     let proc = Arc::new(BinderProc::new(id, pid, ctx));
     {

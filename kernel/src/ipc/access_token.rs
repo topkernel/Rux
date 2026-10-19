@@ -76,15 +76,14 @@ fn empty() -> Registry {
 /// binder driver's BINDER_GET_ACCESS_TOKEN / BINDER_GET_SENDER_INFO to
 /// report senders to samgr.
 ///
-/// STOPGAP (b113-b116): nothing on this image ever calls
-/// ACCESS_TOKENID_SET_TOKENID — init's SetAccessToken path is compiled
-/// out (the "failed to set access token" warning never fired on any
-/// boot, even when the device was absent pre-ab45291d) and the services
-/// don't set their own, so for processes with no registered token we
-/// synthesize a stable per-pid NATIVE token instead of reporting 0
-/// (which reads as TOKEN_INVALID and got every AddSystemAbility denied
-/// — the HDF display-chain blocker). If the image's userspace ever
-/// starts setting real tokens, registered values take precedence.
+/// STOPGAP (b113-b116, revised b5→b6): this image's init DOES register
+/// real tokens — 85 services called ACCESS_TOKENID_SET_TOKENID on the b5
+/// boot (foundation pid 852 → 0x28075a4a). The synthetic per-pid fallback
+/// remains only for processes that never registered (early kthreads,
+/// host-shell stragglers); it is now addressed by TGID because the ioctl
+/// path keys by tgid, so it is at least stable per-process. If the
+/// image's userspace sets real tokens for everything, registered values
+/// always take precedence.
 pub fn token_of(pid: u32) -> (u64, u64) {
     let g = REGISTRY.lock_irqsave();
     let registered = g.as_ref().and_then(|r| r.by_pid.get(&pid)).copied();
@@ -151,7 +150,20 @@ fn enotty() -> i64 {
 fn access_token_ioctl(request: u32, arg: usize) -> i64 {
     use crate::arch::uaccess::{access_ok, copy_from_user, copy_to_user};
 
-    let pid = unsafe { crate::process::current_pid() };
+    // Key the registry by TGID, not the ioctl caller's tid. Tokens are
+    // per-PROCESS: init's service child calls SET between fork and exec
+    // (single-threaded, tid == tgid), but libbinder's GetSelfTokenID()
+    // fires from WORKER threads (IPCSkeleton on an in-process call —
+    // e.g. AMS thread 856 inside foundation, tgid 852). With the tid the
+    // lookup missed the 852 entry, fell into the synthetic fallback
+    // (0x28000000|856) and ATM denied GET_BUNDLE_INFO for a token it
+    // never allocated — StartHighestPriorityAbility's launcher query
+    // then retried forever (b5). Linux's drivers/accesstokenid keys by
+    // task_struct of the process; mirror the drivers/access_tokenid.rs
+    // port which already uses task.tgid().
+    let pid = crate::sched::current()
+        .map(|t| unsafe { (*t).tgid() as u32 })
+        .unwrap_or_else(crate::process::current_pid);
     // dfx=syscalltrace: the per-ioctl trace. Ungated this is the
     // highest-rate print of an OH boot — hdf_devmgr polls
     // GET_PERMISSION/GET_TOKENID in a tight loop from early boot on
