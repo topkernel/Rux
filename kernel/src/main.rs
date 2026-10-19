@@ -197,6 +197,13 @@ fn alloc_error_handler(layout: core::alloc::Layout) -> ! {
         }
         taskdump_raw_line(b"\n");
     }
+    // alloc-crash r12-16: the heap ledger at the exhaustion moment — the
+    // live-per-call-site table is the evidence that names the consumer.
+    // Pure atomics and raw UART (see dump_heap_ledger): no allocator lock,
+    // no allocation, safe to print while the heap is dead full.
+    if crate::dfx::memwatch::armed() {
+        crate::dfx::memwatch::dump_heap_ledger();
+    }
     // R75-followup: the validated walk (memwatch::walk_fp_chain) stops at the
     // first frame that fails its `next > fp` plausibility check, which in the
     // paint-agent capture yielded no usable frames. Dump the chain LENIENTLY

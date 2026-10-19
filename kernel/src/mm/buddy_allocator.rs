@@ -58,6 +58,52 @@ const MAX_PAGES: usize = HEAP_SIZE / PAGE_SIZE;
 /// Empty list marker (use out-of-range value)
 const EMPTY_LIST: usize = MAX_PAGES + 1;
 
+// ---------------------------------------------------------------------------
+// alloc-crash r12-16 forensics: exact page-flow accounting for the
+// "heap 100% full while the live-site ledger is nearly empty" contradiction
+// (a2: 1015808K window, 68K free; a3: 0K free, tracked-live ~13MB).
+//
+// NET_PAGES[order] counts pages HANDED OUT minus pages RETURNED at each
+// order (unconditional relaxed atomics — correctness-neutral). The sum
+// over orders is the allocator's own "used" figure; comparing it with the
+// free-list census at the ALLOCTHROW moment tells whether the pages are
+// held by live allocations or vanished from both the free lists and the
+// ledger (orphaning via the free-refuse paths below).
+//
+// FREE_REFUSED counts frees dropped on the floor by the guard rails —
+// every refusal permanently orphans that block's pages (the block never
+// returns to a free list). A refused-free count that grows with uptime IS
+// the leak when the live table is clean.
+// ---------------------------------------------------------------------------
+pub static NET_PAGES: [AtomicUsize; MAX_ORDER + 1] =
+    [const { AtomicUsize::new(0) }; MAX_ORDER + 1];
+
+/// Free-refusal breakdown, indexed by FreeRefuse kind.
+pub static FREE_REFUSED: [AtomicUsize; 8] = [const { AtomicUsize::new(0) }; 8];
+
+/// Free-refusal kinds (index into FREE_REFUSED).
+pub const FR_OUT_OF_WINDOW: usize = 0;
+pub const FR_DOUBLE_FREE: usize = 1;
+pub const FR_ORDER_MISMATCH: usize = 2;
+pub const FR_TASK_LIVE: usize = 3;
+pub const FR_ORDER_TOO_BIG: usize = 4;
+pub const FR_UNALIGNED: usize = 5;
+
+/// Last N refused frees: (addr, incoming order, meta_order, meta_free).
+pub static REFUSED_RING: [AtomicUsize; 64] = [const { AtomicUsize::new(0) }; 64];
+static REFUSED_RING_POS: AtomicUsize = AtomicUsize::new(0);
+
+fn refused_free_note(kind: usize, addr: usize, order: usize, meta_order: u8, meta_free: u8) {
+    FREE_REFUSED[kind.min(7)].fetch_add(1, Ordering::Relaxed);
+    let pos = REFUSED_RING_POS.fetch_add(1, Ordering::Relaxed) % 16;
+    let slot = pos * 4;
+    REFUSED_RING[slot].store(addr, Ordering::Relaxed);
+    REFUSED_RING[slot + 1].store(order, Ordering::Relaxed);
+    REFUSED_RING[slot + 2].store(meta_order as usize, Ordering::Relaxed);
+    REFUSED_RING[slot + 3].store(meta_free as usize, Ordering::Relaxed);
+}
+
+
 /// Block metadata (stored separately, not mixed with user data)
 #[repr(C)]
 #[derive(Clone, Copy)]
@@ -402,6 +448,7 @@ impl BuddyAllocator {
 
                 // Ensure final block is marked as allocated
                 self.init_block(page_idx, order, false);
+                NET_PAGES[order].fetch_add(1usize << order, Ordering::Relaxed);
 
                 let addr = self.page_idx_to_addr(page_idx);
                 // R18-1 (alloc-side handoff probe): if this page is already
@@ -472,10 +519,13 @@ impl BuddyAllocator {
                     );
                 }
                 crate::dfx::taint::add_taint(crate::dfx::taint::TaintFlags::BAD_PAGE); // R9-14 double-free/hoard
+                let kind = if meta.free != 0 { FR_DOUBLE_FREE } else { FR_ORDER_MISMATCH };
+                refused_free_note(kind, addr, order, meta.order, meta.free);
                 return;
             }
         }
         let mut current_order = order;
+        NET_PAGES[order].fetch_sub(1usize << order, Ordering::Relaxed);
 
         loop {
             // Boundary check: order cannot exceed MAX_ORDER
@@ -669,6 +719,7 @@ impl BuddyAllocator {
         let heap_end = self.heap_end.load(Ordering::Acquire);
 
         if ptr_addr < heap_start || ptr_addr >= heap_end {
+            refused_free_note(FR_OUT_OF_WINDOW, ptr_addr, self.size_to_order(size.max(align)), 0, 0);
             return;
         }
 
@@ -696,11 +747,13 @@ impl BuddyAllocator {
                 &frames,
             );
             crate::dfx::taint::add_taint(crate::dfx::taint::TaintFlags::BAD_PAGE); // R69 free-of-live
+            refused_free_note(FR_TASK_LIVE, ptr_addr, order, 0, 0);
             return;
         }
 
         // Check if order exceeds MAX_ORDER
         if order > MAX_ORDER {
+            refused_free_note(FR_ORDER_TOO_BIG, ptr_addr, order, 0, 0);
             return;
         }
 
@@ -710,6 +763,7 @@ impl BuddyAllocator {
         // carry consistent metadata, splicing bogus blocks into the
         // doubly-linked freelist.
         if self.addr_to_page_idx_checked(ptr as usize).map(|idx| idx % (1usize << order) != 0).unwrap_or(true) {
+            refused_free_note(FR_UNALIGNED, ptr_addr, order, 0, 0);
             return;
         }
 
