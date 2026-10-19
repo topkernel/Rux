@@ -1800,6 +1800,47 @@ fn prime_fd_to_handle(arg: usize, size: usize) -> i64 {
     }
     let Some(gem) = prime_file_gem(&file) else { return -22 };
 
+    // Compose-content probe: layer-texture imports carry the CLIENT's
+    // finished frame (the producer drew before queueing) — non-zero
+    // content here means the client rendered; zero means its rendering
+    // never reached the buffer.
+    static IMPORT_TRACE_N: AtomicU32 = AtomicU32::new(0);
+    let it = IMPORT_TRACE_N.fetch_add(1, Ordering::Relaxed);
+    if it < 24 || it % 20 == 0 {
+        let mut nz: usize = 0;
+        let mut clear: usize = 0;
+        let mut samples = [0u32; 3];
+        // SAFETY: gem.kva..gem.kva+size is the object's backing.
+        unsafe {
+            let base = gem.kva as *const u32;
+            for i in 0..gem.size / 4 {
+                let v = base.add(i).read_volatile();
+                if v != 0 {
+                    nz += 1;
+                    if v == 0xff00_0000 {
+                        clear += 1;
+                    }
+                }
+            }
+            let row_words = 983040 / 1280; // pitch/4 for these buffers
+            samples[0] = base.add(row_words * 640 + 360).read_volatile();
+            samples[1] = base.add(row_words * 640 + 200).read_volatile();
+            samples[2] = base.add(row_words * 300 + 360).read_volatile();
+        }
+        crate::pr_warn!(
+            "drm: import#{} pid={} fd={} gem={} nz={} clear={} s0={:08x} s1={:08x} s2={:08x}",
+            it,
+            crate::process::current_pid(),
+            prime_fd,
+            gem.id,
+            nz,
+            clear,
+            samples[0],
+            samples[1],
+            samples[2]
+        );
+    }
+
     // Re-register under the gem's id if the handle side was already
     // GEM_CLOSEd (cross-process import): the object stays alive through
     // the prime fd's Arc.
@@ -1951,10 +1992,14 @@ fn present_fb(fb_id: u32) -> i64 {
     // content -> userspace never rendered into this GEM; non-black with
     // a black screen -> scanout binding. Sample every word (1M volatile
     // reads ~ a few ms under KVM) for the first 40 flips, then 1-in-10.
+    // `paint` counts pixels that are NEITHER zero NOR the RS clear color
+    // (0xff000000) inside the visible columns — the bootanimation logo
+    // shows up there even when the background is opaque black.
     static FLIP_TRACE_N: AtomicU32 = AtomicU32::new(0);
     let ft = FLIP_TRACE_N.fetch_add(1, Ordering::Relaxed);
     if ft < 40 || ft % 10 == 0 {
         let mut nz: usize = 0;
+        let mut paint: usize = 0;
         let mut samples = [0u32; 4];
         // SAFETY: gem.kva..gem.kva+size is the object's own backing
         // store; word-aligned reads stay inside the allocation.
@@ -1962,20 +2007,31 @@ fn present_fb(fb_id: u32) -> i64 {
             let base = gem.kva as *const u32;
             let words = gem.size / 4;
             for i in 0..words {
-                if base.add(i).read_volatile() != 0 {
+                let v = base.add(i).read_volatile();
+                if v != 0 {
                     nz += 1;
                 }
             }
             let row_words = (pitch / 4) as usize;
+            let vis_words = width as usize;
+            for row in 0..height as usize {
+                let rowp = base.add(row * row_words);
+                for col in (0..vis_words).step_by(2) {
+                    let v = rowp.add(col).read_volatile();
+                    if v != 0 && v != 0xff00_0000 {
+                        paint += 1;
+                    }
+                }
+            }
             let mid_row = (height as usize / 2) * row_words;
             let last_row = (height as usize - 1).saturating_mul(row_words);
-            samples[0] = base.read_volatile();
-            samples[1] = base.add(row_words).read_volatile();
-            samples[2] = base.add(mid_row).read_volatile();
-            samples[3] = base.add(last_row).read_volatile();
+            samples[0] = base.add(720 / 4).read_volatile();
+            samples[1] = base.add(row_words + 720 / 4).read_volatile();
+            samples[2] = base.add(mid_row + (width as usize / 2)).read_volatile();
+            samples[3] = base.add(last_row + 720 / 4).read_volatile();
         }
         crate::pr_warn!(
-            "drm: flip#{} fb={} gem={} {}x{} pitch={} vfmt={} nz={}/{} px0={:08x} p1={:08x} pmid={:08x} plast={:08x}",
+            "drm: flip#{} fb={} gem={} {}x{} pitch={} vfmt={} nz={}/{} paint={} ctr={:08x} cmid={:08x}",
             ft,
             fb_id,
             gem.id,
@@ -1985,10 +2041,9 @@ fn present_fb(fb_id: u32) -> i64 {
             vfmt,
             nz,
             gem.size / 4,
+            paint,
             samples[0],
-            samples[1],
-            samples[2],
-            samples[3]
+            samples[2]
         );
     }
 
