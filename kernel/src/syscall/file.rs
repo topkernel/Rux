@@ -1983,6 +1983,7 @@ pub fn sys_umount(args: SyscallArgs) -> i64 {
     // made vfs_umount's parent/name split fail EINVAL (sc23 umountfail
     // trace), leaving init wedged in a half-prepared sandbox.
     let target = crate::fs::path::path_normalize(&target_owned);
+    let target = target.as_str();
 
     // U1c: drop the mount row from the CALLER's mount namespace (the
     // dentry-level unmount below is global — recorded divergence).
