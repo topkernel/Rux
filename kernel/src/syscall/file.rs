@@ -1998,10 +1998,24 @@ pub fn sys_umount(args: SyscallArgs) -> i64 {
         }
     }
 
-    match crate::fs::vfs::vfs_umount(target) {
+    let ret = match crate::fs::vfs::vfs_umount(target) {
         Ok(()) => 0,
-        Err(e) => e as i64,
+        Err(e) => e,
+    };
+    if ret != 0 {
+        // b24: after the (now-working) sandbox pivot, OH init's cleanup
+        // umount2(old_root, MNT_DETACH) fails EINVAL and wedges the boot
+        // in a half-pivoted state — name every failed umount so the
+        // topology gap is one glance.
+        crate::pr_info!(
+            "umountfail '{}' flags {:#x}: {} (pid {})",
+            target,
+            flags,
+            ret,
+            crate::process::current_pid()
+        );
     }
+    ret as i64
 }
 
 /// Per-mount MNT_EXPIRE bookkeeping: (armed, accessed-since-arm) keyed by
