@@ -76,15 +76,14 @@ fn empty() -> Registry {
 /// binder driver's BINDER_GET_ACCESS_TOKEN / BINDER_GET_SENDER_INFO to
 /// report senders to samgr.
 ///
-/// STOPGAP (b113-b116): nothing on this image ever calls
-/// ACCESS_TOKENID_SET_TOKENID — init's SetAccessToken path is compiled
-/// out (the "failed to set access token" warning never fired on any
-/// boot, even when the device was absent pre-ab45291d) and the services
-/// don't set their own, so for processes with no registered token we
-/// synthesize a stable per-pid NATIVE token instead of reporting 0
-/// (which reads as TOKEN_INVALID and got every AddSystemAbility denied
-/// — the HDF display-chain blocker). If the image's userspace ever
-/// starts setting real tokens, registered values take precedence.
+/// STOPGAP (b113-b116, revised b5→b6): this image's init DOES register
+/// real tokens — 85 services called ACCESS_TOKENID_SET_TOKENID on the b5
+/// boot (foundation pid 852 → 0x28075a4a). The synthetic per-pid fallback
+/// remains only for processes that never registered (early kthreads,
+/// host-shell stragglers); it is now addressed by TGID because the ioctl
+/// path keys by tgid, so it is at least stable per-process. If the
+/// image's userspace sets real tokens for everything, registered values
+/// always take precedence.
 pub fn token_of(pid: u32) -> (u64, u64) {
     let g = REGISTRY.lock_irqsave();
     let registered = g.as_ref().and_then(|r| r.by_pid.get(&pid)).copied();
@@ -151,7 +150,20 @@ fn enotty() -> i64 {
 fn access_token_ioctl(request: u32, arg: usize) -> i64 {
     use crate::arch::uaccess::{access_ok, copy_from_user, copy_to_user};
 
-    let pid = unsafe { crate::process::current_pid() };
+    // Key the registry by TGID, not the ioctl caller's tid. Tokens are
+    // per-PROCESS: init's service child calls SET between fork and exec
+    // (single-threaded, tid == tgid), but libbinder's GetSelfTokenID()
+    // fires from WORKER threads (IPCSkeleton on an in-process call —
+    // e.g. AMS thread 856 inside foundation, tgid 852). With the tid the
+    // lookup missed the 852 entry, fell into the synthetic fallback
+    // (0x28000000|856) and ATM denied GET_BUNDLE_INFO for a token it
+    // never allocated — StartHighestPriorityAbility's launcher query
+    // then retried forever (b5). Linux's drivers/accesstokenid keys by
+    // task_struct of the process; mirror the drivers/access_tokenid.rs
+    // port which already uses task.tgid().
+    let pid = crate::sched::current()
+        .map(|t| unsafe { (*t).tgid() as u32 })
+        .unwrap_or_else(crate::process::current_pid);
     // dfx=syscalltrace: the per-ioctl trace. Ungated this is the
     // highest-rate print of an OH boot — hdf_devmgr polls
     // GET_PERMISSION/GET_TOKENID in a tight loop from early boot on
@@ -257,42 +269,77 @@ fn access_token_ioctl(request: u32, arg: usize) -> i64 {
             }
             let token = u32::from_ne_bytes([buf[0], buf[1], buf[2], buf[3]]);
             let op = u32::from_ne_bytes([buf[4], buf[5], buf[6], buf[7]]);
+            // OH ABI (drivers/accesstokenid access_tokenid.c): the perm
+            // ioctls carry their verdict in the RETURN VALUE, not only in
+            // the struct: get_permission returns the permission BIT (0 or
+            // 1), -ENODATA when the token has no record, -EINVAL when
+            // op_code exceeds the 64-word bitmap. libtoken_setproc's
+            // GetPermissionFromKernel computes isGranted = (ret == 1) and
+            // falls back to the ATM service only when ret is NEGATIVE —
+            // returning plain 0 for a granted bit (this port's old
+            // behavior, b5-b9) made every kernel fast-path verify read as
+            // DENIED, which is what kept ImplicitQueryInfoByPriority's
+            // GET_BUNDLE_INFO verify failing while the bitmap actually
+            // granted it (AMS retried the launcher query forever).
+            // set_permission likewise returns -ENODATA instead of
+            // creating an entry. One deliberate deviation: OH gates
+            // ADD/REMOVE/SET on uid == 3020 (the standalone atm process);
+            // this image's accesstokenmanager is hosted INSIDE foundation
+            // (uid 5523), so the gate would starve the bitmap — pushes
+            // stay permissive here.
+            let word = (op / 32) as usize;
+            if word >= 64 {
+                return -22i64; // EINVAL
+            }
             if request == ACCESS_TOKENID_SET_PERMISSION {
                 // ioctl_set_get_perm_data.is_granted: bool at offset 8.
                 let granted = buf[8] != 0;
+                // dfx=syscalltrace forensics (b8): which opcode the
+                // verifier's compiled g_permList computes vs the one
+                // ATM's pusher set.
+                if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SyscallTrace) {
+                    crate::pr_info!(
+                        "atid: pid {} SET_PERM token {:#x} op {} granted {}",
+                        pid,
+                        token,
+                        op,
+                        granted
+                    );
+                }
                 let mut g = REGISTRY.lock_irqsave();
                 let r = g.get_or_insert_with(empty);
-                let e = r.perms.entry(token).or_insert([0u32; 64]);
-                let word = (op / 32) as usize;
-                if word < 64 {
-                    if granted {
-                        e[word] |= 1u32 << (op % 32);
-                    } else {
-                        e[word] &= !(1u32 << (op % 32));
+                match r.perms.get_mut(&token) {
+                    Some(e) => {
+                        if granted {
+                            e[word] |= 1u32 << (op % 32);
+                        } else {
+                            e[word] &= !(1u32 << (op % 32));
+                        }
+                        0
                     }
+                    None => -61i64, // ENODATA: no record to update
                 }
-                0
             } else {
                 let granted = {
                     let g = REGISTRY.lock_irqsave();
-                    g.as_ref()
-                        .and_then(|r| r.perms.get(&token))
-                        .map(|p| {
-                            p.get((op / 32) as usize)
-                                .map_or(0, |w| (*w >> (op % 32)) & 1)
-                                != 0
-                        })
-                        .unwrap_or(false)
+                    match g.as_ref().and_then(|r| r.perms.get(&token)) {
+                        Some(p) => (p[word] >> (op % 32)) & 1,
+                        None => return -61i64, // ENODATA -> userspace falls back to ATM
+                    }
                 };
-                buf[8] = granted as u8;
-                buf[9] = 0;
-                buf[10] = 0;
-                buf[11] = 0;
-                // SAFETY: arg validated, 12 bytes.
-                if unsafe { copy_to_user(arg as *mut u8, buf.as_ptr(), 12) } != 0 {
-                    return ebadf();
+                if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SyscallTrace) {
+                    crate::pr_info!(
+                        "atid: pid {} GET_PERM token {:#x} op {} -> granted {}",
+                        pid,
+                        token,
+                        op,
+                        granted
+                    );
                 }
-                0
+                // OH parity: the verdict rides the return value only — the
+                // driver never copies the struct back (libtoken_setproc
+                // discards the field and reads ret).
+                granted as i64
             }
         }
         _ => {
