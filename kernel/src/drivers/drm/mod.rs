@@ -537,6 +537,9 @@ struct FbObject {
     _gem: Arc<GemObject>,
     width: u32,
     height: u32,
+    /// Row pitch in bytes (composer GEMs carry gralloc's 64-pixel
+    /// alignment: 720-wide content on a 3072-byte pitch).
+    pitch: u32,
     /// virtio_gpu format id the GEM bytes are laid out as.
     virtio_format: u32,
 }
@@ -1742,10 +1745,28 @@ fn add_fb_common(arg: usize, size: usize, handle: u32, width: u32, height: u32, 
             _gem: gem,
             width,
             height,
+            pitch,
             virtio_format: vfmt,
         },
     );
     drop(st);
+
+    // Bring-up trace: every FB creation (the composer makes one per
+    // present; the handle/pitch pair identifies which GEM backs it).
+    static FB_TRACE_N: AtomicU32 = AtomicU32::new(0);
+    let fn_ = FB_TRACE_N.fetch_add(1, Ordering::Relaxed);
+    if fn_ < 60 {
+        crate::pr_warn!(
+            "drm: addfb#{} fb={} gem={} {}x{} pitch={} fourcc={:#x}",
+            fn_,
+            fb_id,
+            handle,
+            width,
+            height,
+            pitch,
+            fourcc
+        );
+    }
 
     let mut out = [0u8; 104];
     wru32(&mut out, 0, fb_id);
@@ -1770,12 +1791,77 @@ fn rmfb(fb_id: u32) -> i64 {
 fn present_fb(fb_id: u32) -> i64 {
     // Snapshot the FB data under the lock, then run the virtio sequence
     // lock-free (device transactions can take milliseconds under TCG).
-    let (gem, width, height, vfmt) = {
+    let (gem, width, height, pitch, vfmt) = {
         let st = DRM_STATE.lock_irqsave();
         match st.fbs.get(&fb_id) {
-            Some(fb) => (fb._gem.clone(), fb.width, fb.height, fb.virtio_format),
+            Some(fb) => (
+                fb._gem.clone(),
+                fb.width,
+                fb.height,
+                fb.pitch,
+                fb.virtio_format,
+            ),
             None => return -22,
         }
+    };
+
+    // Bring-up content probe (compose-content): is the buffer the
+    // composer wants on screen actually non-zero at flip time? Black
+    // content -> userspace never rendered into this GEM; non-black with
+    // a black screen -> scanout binding. Sample every word (1M volatile
+    // reads ~ a few ms under KVM) for the first 40 flips, then 1-in-10.
+    static FLIP_TRACE_N: AtomicU32 = AtomicU32::new(0);
+    let ft = FLIP_TRACE_N.fetch_add(1, Ordering::Relaxed);
+    if ft < 40 || ft % 10 == 0 {
+        let mut nz: usize = 0;
+        let mut samples = [0u32; 4];
+        // SAFETY: gem.kva..gem.kva+size is the object's own backing
+        // store; word-aligned reads stay inside the allocation.
+        unsafe {
+            let base = gem.kva as *const u32;
+            let words = gem.size / 4;
+            for i in 0..words {
+                if base.add(i).read_volatile() != 0 {
+                    nz += 1;
+                }
+            }
+            let row_words = (pitch / 4) as usize;
+            let mid_row = (height as usize / 2) * row_words;
+            let last_row = (height as usize - 1).saturating_mul(row_words);
+            samples[0] = base.read_volatile();
+            samples[1] = base.add(row_words).read_volatile();
+            samples[2] = base.add(mid_row).read_volatile();
+            samples[3] = base.add(last_row).read_volatile();
+        }
+        crate::pr_warn!(
+            "drm: flip#{} fb={} gem={} {}x{} pitch={} vfmt={} nz={}/{} px0={:08x} p1={:08x} pmid={:08x} plast={:08x}",
+            ft,
+            fb_id,
+            gem.id,
+            width,
+            height,
+            pitch,
+            vfmt,
+            nz,
+            gem.size / 4,
+            samples[0],
+            samples[1],
+            samples[2],
+            samples[3]
+        );
+    }
+
+    // Resource geometry: the GEM's real row pitch. Gralloc allocates
+    // FB buffers width-aligned to 64 pixels (720 content on a 768-pixel
+    // row, pitch 3072), so a resource built at the FB's 720 width makes
+    // QEMU read guest rows 2880 bytes apart — every row drifts 192
+    // bytes and the scanout shows a diagonally sheared frame. Build the
+    // resource at the memory's true geometry and display the FB rect as
+    // a scanout subrect (SET_SCANOUT crops by the resource stride).
+    let res_w = if pitch >= width * 4 && pitch % 4 == 0 && pitch / 4 >= width {
+        pitch / 4
+    } else {
+        width
     };
 
     let ok = crate::drivers::gpu::with_gpu_device(|gpu| {
@@ -1783,7 +1869,7 @@ fn present_fb(fb_id: u32) -> i64 {
         let mut res = gem.virtio_res.load(Ordering::Acquire);
         if res == 0 {
             let id = NEXT_VIRTIO_RES.fetch_add(1, Ordering::Relaxed);
-            if gpu.create_resource_2d_id(id, width, height, vfmt).is_none() {
+            if gpu.create_resource_2d_id(id, res_w, height, vfmt).is_none() {
                 return false;
             }
             if gpu.attach_backing_id(id, gem.phys, gem.size as u32).is_none() {
@@ -1792,19 +1878,22 @@ fn present_fb(fb_id: u32) -> i64 {
             gem.virtio_res.store(id, Ordering::Release);
             res = id;
         }
-        // Guest RAM -> host resource storage.
-        if !gpu.transfer_to_host_2d_id(res, 0, width, height) {
+        // Guest RAM -> host resource storage. Full-resource transfer:
+        // row stride res_w*4 == the GEM pitch, so the guest backing is
+        // read linearly, exactly as it is laid out.
+        if !gpu.transfer_to_host_2d_id(res, 0, res_w, height) {
             return false;
         }
-        // Bind to scanout when the resource changed since last flip.
+        // Bind to scanout when the resource changed since last flip;
+        // the scanout rect is the FB's (sub)rectangle of the resource.
         let cur = DRM_STATE.lock_irqsave().scanout_res;
         if cur != res {
-            if !gpu.set_scanout_id(0, res, width, height) {
+            if !gpu.set_scanout_rect(0, res, width, height, res_w) {
                 return false;
             }
             DRM_STATE.lock_irqsave().scanout_res = res;
         }
-        // Present.
+        // Present the displayed rect.
         gpu.resource_flush_id(res, width, height)
     });
     match ok {
@@ -1915,7 +2004,31 @@ fn mode_atomic(arg: usize) -> i64 {
     // belongs to.
     let mut flip_fb: u32 = 0;
     let mut idx = 0usize;
+    // Bring-up trace (compose-content): the exact property combo of
+    // every commit — the field-by-field diff against the painter's
+    // known-good (obj=plane, FB_ID only, flags=0) is how a wrong
+    // binding would show up. First 60 commits in full, then 1-in-25.
+    static ATOM_TRACE_N: AtomicU32 = AtomicU32::new(0);
+    let at = ATOM_TRACE_N.fetch_add(1, Ordering::Relaxed);
+    let mut trace = if at < 60 || at % 25 == 0 {
+        alloc::string::String::with_capacity(128)
+    } else {
+        alloc::string::String::new()
+    };
+    let trace_on = !trace.is_empty();
+    if trace_on {
+        use core::fmt::Write as _;
+        let _ = write!(
+            &mut trace,
+            "atom#{} flags={:#x} nobj={} ",
+            at, flags, count_objs
+        );
+    }
     for oi in 0..count_objs {
+        if trace_on {
+            use core::fmt::Write as _;
+            let _ = write!(&mut trace, "obj{}[", objs[oi]);
+        }
         for _ in 0..counts[oi] as usize {
             if idx >= total {
                 break;
@@ -1924,6 +2037,10 @@ fn mode_atomic(arg: usize) -> i64 {
             let prop = props[idx];
             let value = values[idx];
             idx += 1;
+            if trace_on {
+                use core::fmt::Write as _;
+                let _ = write!(&mut trace, "{}={:#x},", prop, value);
+            }
             if obj == OBJ_PLANE && prop == PROP_PLANE_FB_ID {
                 flip_fb = value as u32;
             }
@@ -1931,6 +2048,15 @@ fn mode_atomic(arg: usize) -> i64 {
             // fixed, fences unsupported — accepted and ignored.
             let _ = (obj, value);
         }
+        if trace_on {
+            trace.push(']');
+        }
+    }
+    if trace_on {
+        if flags & DRM_MODE_ATOMIC_TEST_ONLY != 0 {
+            trace.push_str(" TEST");
+        }
+        crate::pr_warn!("drm: {}", trace);
     }
 
     if flags & DRM_MODE_ATOMIC_TEST_ONLY != 0 {
@@ -2071,9 +2197,24 @@ pub fn gem_mmap_resolve(
     offset: u64,
     len: usize,
 ) -> Option<(u64, usize)> {
+    // Bring-up trace (compose-content): who maps which GEM — RS's
+    // llvmpipe must map the SAME objects the composer flips.
+    static MMAP_TRACE_N: AtomicU32 = AtomicU32::new(0);
+    let mt = MMAP_TRACE_N.fetch_add(1, Ordering::Relaxed);
+    let trace = mt < 30;
     if is_prime_file(file) {
         let gem = prime_file_gem(file)?;
         let n = len.min(gem.size);
+        if trace {
+            crate::pr_warn!(
+                "drm: prime mmap#{} gem={} off={:#x} len={} -> phys={:#x}",
+                mt,
+                gem.id,
+                offset,
+                n,
+                gem.phys
+            );
+        }
         return Some((gem.phys + offset, n));
     }
     if is_drm_file(file) {
@@ -2084,6 +2225,16 @@ pub fn gem_mmap_resolve(
         }?;
         let off = offset & 0xfff;
         let n = len.min(gem.size.saturating_sub(off as usize));
+        if trace {
+            crate::pr_warn!(
+                "drm: node mmap#{} gem={} off={:#x} len={} -> phys={:#x}",
+                mt,
+                gem.id,
+                offset,
+                n,
+                gem.phys
+            );
+        }
         return Some((gem.phys + off, n));
     }
     None
