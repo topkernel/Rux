@@ -886,6 +886,28 @@ pub fn sys_getdents64(args: SyscallArgs) -> i64 {
     }
 }
 
+/// datatap (el2/100 bundle-dir hunt, dt lane): one serial line per
+/// /data namespace mutation. The sc21 boot replaced or emptied the
+/// baked per-user-100 bundle dirs at runtime with no guest-side record
+/// (bindwalk saw el2/100/log as ino 172 and el1/100/database as ino 44
+/// — neither is the baked inode 79/41), so every relevant syscall's
+/// path + result is recorded kernel-side while dfx=datatap is on.
+fn datatap_enabled(path: &str) -> bool {
+    crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::DataTap)
+        && (path.starts_with("/data/") || path == "/data")
+}
+
+fn datatap_log(op: &str, path: &str, detail: &str, rc: i64) {
+    crate::pr_info!(
+        "apptap {} '{}' {} -> {} (pid {})",
+        op,
+        path,
+        detail,
+        rc,
+        unsafe { crate::process::current_pid() }
+    );
+}
+
 /// sys_mkdir - Create directory (legacy wrapper)
 ///
 /// NOTE: riscv64 has no plain `mkdir` syscall — kept for the in-kernel test
@@ -900,10 +922,14 @@ pub fn sys_mkdir(args: SyscallArgs) -> i64 {
         Err(e) => return e as i64,
     };
 
-    match crate::fs::vfs::file_mkdir(pathname, mode) {
+    let rc = match crate::fs::vfs::file_mkdir(pathname, mode) {
         Ok(()) => 0,
         Err(e) => e as i64,
+    };
+    if datatap_enabled(pathname) {
+        datatap_log("mkdir", pathname, &alloc::format!("mode {mode:#o}"), rc);
     }
+    rc
 }
 
 /// sys_mkdirat - Create directory relative to directory file descriptor
@@ -934,7 +960,7 @@ pub fn sys_mkdirat(args: SyscallArgs) -> i64 {
         return rc;
     }
 
-    match crate::fs::vfs::file_mkdir(&full_path, mode) {
+    let rc = match crate::fs::vfs::file_mkdir(&full_path, mode) {
         Ok(()) => 0,
         Err(e) => {
             // b18/sc18 appspawn hunt: DoSandboxRootFolderCreate fails with
@@ -951,7 +977,11 @@ pub fn sys_mkdirat(args: SyscallArgs) -> i64 {
             }
             e as i64
         }
+    };
+    if datatap_enabled(&full_path) {
+        datatap_log("mkdir", &full_path, &alloc::format!("mode {mode:#o}"), rc);
     }
+    rc
 }
 
 /// sys_rmdir - Remove empty directory
@@ -964,10 +994,14 @@ pub fn sys_rmdir(args: SyscallArgs) -> i64 {
         Err(e) => return e as i64,
     };
 
-    match crate::fs::vfs::file_rmdir(pathname) {
+    let rc = match crate::fs::vfs::file_rmdir(pathname) {
         Ok(()) => 0,
         Err(e) => e as i64,
+    };
+    if datatap_enabled(pathname) {
+        datatap_log("rmdir", pathname, "dir", rc);
     }
+    rc
 }
 
 /// sys_unlink - Remove file
@@ -1048,15 +1082,23 @@ pub fn sys_unlinkat(args: SyscallArgs) -> i64 {
     };
 
     if (flags & AT_REMOVEDIR) != 0 {
-        match crate::fs::vfs::file_rmdir(&full_path) {
+        let rc = match crate::fs::vfs::file_rmdir(&full_path) {
             Ok(()) => 0,
             Err(e) => e as i64,
+        };
+        if datatap_enabled(&full_path) {
+            datatap_log("rmdir", &full_path, "dir", rc);
         }
+        rc
     } else {
-        match crate::fs::vfs::file_unlink(&full_path) {
+        let rc = match crate::fs::vfs::file_unlink(&full_path) {
             Ok(()) => 0,
             Err(e) => e as i64,
+        };
+        if datatap_enabled(&full_path) {
+            datatap_log("unlink", &full_path, "file", rc);
         }
+        rc
     }
 }
 
@@ -1082,10 +1124,14 @@ pub fn sys_renameat(args: SyscallArgs) -> i64 {
         Err(e) => return e as i64,
     };
 
-    match crate::fs::vfs::vfs_rename(&old_full, &new_full) {
+    let rc = match crate::fs::vfs::vfs_rename(&old_full, &new_full) {
         Ok(()) => 0,
         Err(e) => e as i64,
+    };
+    if datatap_enabled(&old_full) || datatap_enabled(&new_full) {
+        datatap_log("rename", &old_full, &alloc::format!("=> '{new_full}'"), rc);
     }
+    rc
 }
 
 /// sys_readlinkat - Read symbolic link
@@ -2502,10 +2548,14 @@ pub fn sys_fchownat(args: SyscallArgs) -> i64 {
     // made lchown chown the target instead (LTP chown05 saw the link keep
     // root:root where it expected the nobody ownership it had set).
     let follow = flags & AT_SYMLINK_NOFOLLOW == 0;
-    match crate::fs::vfs::vfs_chown(full_path.as_ref(), uid, gid, follow) {
+    let rc = match crate::fs::vfs::vfs_chown(full_path.as_ref(), uid, gid, follow) {
         Ok(()) => 0,
         Err(e) => e as i64,
+    };
+    if datatap_enabled(&full_path) {
+        datatap_log("chown", &full_path, &alloc::format!("uid {uid} gid {gid}"), rc);
     }
+    rc
 }
 
 /// sys_ftruncate - Truncate an open file (syscall 46)
@@ -3593,10 +3643,14 @@ pub fn sys_setxattr(args: SyscallArgs) -> i64 {
         Ok(p) => p,
         Err(e) => return e as i64,
     };
-    match xattr_inode_by_path(&path, true) {
+    let rc = match xattr_inode_by_path(&path, true) {
         Ok(inode) => do_setxattr(&inode, args),
         Err(e) => e as i64,
+    };
+    if datatap_enabled(&path) {
+        datatap_log("setxattr", &path, "", rc);
     }
+    rc
 }
 
 pub fn sys_lsetxattr(args: SyscallArgs) -> i64 {
@@ -3604,10 +3658,14 @@ pub fn sys_lsetxattr(args: SyscallArgs) -> i64 {
         Ok(p) => p,
         Err(e) => return e as i64,
     };
-    match xattr_inode_by_path(&path, false) {
+    let rc = match xattr_inode_by_path(&path, false) {
         Ok(inode) => do_setxattr(&inode, args),
         Err(e) => e as i64,
+    };
+    if datatap_enabled(&path) {
+        datatap_log("lsetxattr", &path, "", rc);
     }
+    rc
 }
 
 pub fn sys_fsetxattr(args: SyscallArgs) -> i64 {
@@ -3622,10 +3680,14 @@ pub fn sys_getxattr(args: SyscallArgs) -> i64 {
         Ok(p) => p,
         Err(e) => return e as i64,
     };
-    match xattr_inode_by_path(&path, true) {
+    let rc = match xattr_inode_by_path(&path, true) {
         Ok(inode) => do_getxattr(&inode, args),
         Err(e) => e as i64,
+    };
+    if datatap_enabled(&path) {
+        datatap_log("getxattr", &path, "", rc);
     }
+    rc
 }
 
 pub fn sys_lgetxattr(args: SyscallArgs) -> i64 {
@@ -4762,8 +4824,17 @@ pub fn sys_renameat2(args: SyscallArgs) -> i64 {
         }
     }
 
-    match crate::fs::vfs::vfs_rename(&old, &new) {
+    let rc = match crate::fs::vfs::vfs_rename(&old, &new) {
         Ok(()) => 0,
         Err(e) => e as i64,
+    };
+    if datatap_enabled(&old) || datatap_enabled(&new) {
+        datatap_log(
+            "rename",
+            &old,
+            &alloc::format!("=> '{new}' flags {flags:#x}"),
+            rc,
+        );
     }
+    rc
 }

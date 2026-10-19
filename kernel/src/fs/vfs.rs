@@ -561,6 +561,37 @@ pub fn vfs_bind_mount(
                     ok_until,
                     ok_ino
                 );
+                // datatap (el2/100 hunt): dump the kernel's cached children
+                // of the deepest resolved dir — with the baked-image inos
+                // known from debugfs, a divergence here separates "guest
+                // mutated the tree" (runtime inodes) from "dcache went
+                // stale/wrong" (baked inos but lookup still misses).
+                if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::DataTap)
+                    && source.starts_with("/data/")
+                {
+                    if let Ok(p) = path_lookup(&ok_until, 0) {
+                        if let Some(ref d) = p.dentry {
+                            let kids: Vec<String> = d
+                                .children
+                                .lock()
+                                .iter()
+                                .map(|(n, c)| {
+                                    if c.is_negative() {
+                                        format!("{n}=NEG")
+                                    } else {
+                                        let ino = c.get_inode().map(|i| i.ino).unwrap_or(0);
+                                        format!("{n}={ino}")
+                                    }
+                                })
+                                .collect();
+                            crate::pr_warn!(
+                                "apptap dcache '{}': [{}]",
+                                ok_until,
+                                kids.join(" ")
+                            );
+                        }
+                    }
+                }
             }
             return Err(e);
         }
@@ -1119,6 +1150,26 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
             Some(c) => {
                 // Negative dentry — file known not to exist
                 if c.is_negative() {
+                    // datatap (el2/100 hunt): the negative cache has NO
+                    // invalidation on parent mutation, so a stale NEG entry
+                    // permanently hides freshly created files. Name hits
+                    // under /data so the dt boot can attribute each
+                    // "invisible" dir to either this cache or a real
+                    // on-disk absence.
+                    if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::DataTap) {
+                        let mut prefix = String::new();
+                        for c2 in components.iter().take(ci + 1) {
+                            prefix.push('/');
+                            prefix.push_str(c2);
+                        }
+                        if prefix.starts_with("/data/") {
+                            crate::pr_warn!(
+                                "apptap negdentry hit '{}' (cached ENOENT, pid {})",
+                                prefix,
+                                crate::process::current_pid()
+                            );
+                        }
+                    }
                     return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
                 }
                 // Check icache for fresh inode data
