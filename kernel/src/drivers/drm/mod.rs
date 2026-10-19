@@ -2056,9 +2056,10 @@ fn present_fb(fb_id: u32) -> i64 {
     // host transfer: if the pattern reaches the screen, kva==phys and
     // the whole scanout chain is proven for the composer's own imported
     // buffers; if the screen stays black, the binding (not content) is
-    // the bug. Painted on flips 1..=6 only; the composer re-clears its
-    // buffers on reuse, so the probe self-erases.
-    if (1..=6).contains(&ft) {
+    // the bug. Painted on flips 1..=60 and every 5th after (any
+    // screendump in any inter-flip gap then catches it); the composer
+    // re-clears its buffers on reuse, so the probe self-erases.
+    if (1..=60).contains(&ft) || ft % 5 == 0 {
         let row_words = (pitch / 4) as usize;
         // SAFETY: writes stay in the visible columns of the GEM's own
         // backing (width*4 <= pitch, row_words*height*4 <= size).
