@@ -289,11 +289,12 @@ pub fn vfs_remount(mountpoint: &str, new_flags: crate::fs::mount::MntFlags) -> R
                         &crate::fs::ext4::EXT4_INODE_OPS as *const _,
                     ) {
                         if let Some(p) = root_inode.private_data {
-                            let forced_ro = (*(p as *const crate::fs::ext4::Ext4FileSystem))
-                                .metadata_csum;
                             // SAFETY: the fs instance lives for the mount;
                             // read_only is a plain bool whose only writers
                             // are mount setup and this remount path.
+                            let forced_ro = unsafe {
+                                (*(p as *const crate::fs::ext4::Ext4FileSystem)).metadata_csum
+                            };
                             unsafe {
                                 (*(p as *mut crate::fs::ext4::Ext4FileSystem)).read_only =
                                     new_flags.is_readonly() || forced_ro;

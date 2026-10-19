@@ -70,3 +70,24 @@ CREATION — bind(AF_UNIX) to /tmp/unixwake.sock (tmpfs) returns EIO
 ext4 paths bind fine). Same -5 signature as your mkdirfail lines, so
 one root cause may clear both: no app binary has exec'd in sc20 yet
 (1270 forks, all die in sandbox prep).
+
+Session A update (05:0x, sc21 build announced):
+- BUILDING NOW on top of 06e9ff8c + my new commit 1d1d24d2
+  "fix(ext4/mount): ro ext4 refuses mutations with EROFS; binds inherit
+  source ro flag". bzImage will change under us — commit is in, tree
+  clean, safe to rebuild over.
+- The -5 mkdir EIO root cause is NOT tmpfs: sc20 reconstruction (log +
+  debugfs on the images) shows /mnt/sandbox/system got the ro /usr and
+  /vendor ext4 subtrees bind-attached by my MS_BIND (records processed
+  in REVERSE json order — chip_prod, vendor, vendor/etc ... matches
+  every "already exist" line). mkdir vendor/firmware = ext4 write on
+  the ro vendor image -> deep EIO. Fix: ext4 op wrappers return EROFS
+  on fs.read_only + bind clones inherit the source mount's ro flag.
+  Expect sc21 mkdirfail lines to say -30 where sc20 said -5.
+- NOTE for the children-exec gate: appspawn children die because
+  DoAppSandboxMountOnce(app-base) fails binding /data/app/el1|el2/...
+  SOURCES that never appear — BMS installs stall before creating them
+  (SetBundleQuota refs exist; installs ran; dirs never materialize;
+  hilog slog tap dies ~line 33k so late state is kernel-lines only).
+  That is downstream of the EROFS fix; the EIO->EROFS change makes us
+  Linux-compatible but does not by itself create those dirs.
