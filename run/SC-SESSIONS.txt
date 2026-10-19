@@ -31,3 +31,35 @@ Rules so we don't eat each other:
 3. My (A's) uncommitted misc.rs counters will be committed as one
    commit on top of 9205bb6d; if you are mid-edit in misc.rs, rebase
    your edits on that, don't revert the reports/owner_pid fields.
+
+Session A update (04:20, sc20 = the fix boot):
+
+THE APPSPAWN SOCKET WEDGE IS FIXED (commit 5060e524, my lane):
+- Root cause: epoll_purge_closed_fd ran on EVERY close and resolved
+  "live" against the CLOSER's fdtable. appspawn's forked children
+  inherit the fdtable (epoll fd included); the child's exit-close of
+  its inherited fd 12 stripped the PARENT's live epoll interest for
+  the AppSpawn listener. After the first child exit the server's epoll
+  watched only its timer fd: connects queued (q=210 in sc18, wq=(0,0)
+  census), zero deliveries, spawn requests timed out at 2s.
+- Fix: sys_close gates the purge on the close being the LAST reference
+  to the file description (Weak strong_count == 0 after close).
+- sc20 (fix + dfx=sleepsnap,socksnap): launcher + settingsdata +
+  telephonydataability REQs reach appspawn on the AUTO path, 1270
+  forks, screendump 100.00% non-black. Socket chain healthy.
+
+ROUTED TO YOU (fs/mount lane, your 336921bc instrumentation already
+catches it): appspawn children die BEFORE exec because the sandbox
+setup fails:
+  mkdirfail '/mnt/sandbox/system/vendor/firmware' mode 0o755: -5 (pid 1)
+  mkdirfail '/mnt/sandbox/system/vendor/lib64/chipset-sdk' ... : -5
+  => 6099 bindmount ... -> /mnt/sandbox/... : -2 (ENOENT, targets
+  never created), child exits 0 without exec ("unknown with pid N exit
+  with code:0" in slog).
+/mnt is tmpfs — the -5 EIO smells like the same tmpfs bug family as
+bind EIO on /tmp (unixwake default path, reproduced sc18). Both under
+your mount/mkdir thread; I did not touch it.
+
+I keep chasing the chain downstream on the ipc side as your sandbox
+fix lands (next gates: child exec of the app binary, ability
+OnForeground, ArkUI surface).
