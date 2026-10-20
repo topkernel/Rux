@@ -257,3 +257,54 @@ Session A addendum (12:0x, sc41):
   preloaded ACE runtime (result code 0xd000008 remains suspicious).
 - sc40 ohgpu: bootanimation ANIMATING fullscreen (8-color gradient,
   100% non-black, per-frame variation) - graphics path healthy.
+
+Session D update (12:3x, sc42 launched — new window, launcher endgame):
+- 0xd000008 DECODED: appspawn_utils.h enum — 0xD000008 = APPSPAWN_SANDBOX_MOUNT_FAIL.
+  The sc41 chain: sandbox_common bind /data/app/el1/100/database/com.ohos.launcher
+  ENOENT (fatal: check-action-status true in appdata-sandbox.json) -> hook stage 31
+  (prio 3000) fails -> NotifyResToParent(0xd000008) -> AppSpawnEnvClear (begetctl
+  hook prints) -> ProcessExit(0) = appspawn_server.c:49 'ExitCode:0' + quick_exit.
+  NOT a wrong terminal branch: OH userspace behaves correctly given missing dirs.
+- REFERENCE GROUND TRUTH (refw1 boot: oh-robot Linux bzImage + WRITABLE blank
+  userdata copy, launcher.ready at 16s): after boot /data/app/el1/100/database
+  contains per-bundle leaves (com.ohos.launcher uid 20010011 etc.). Linux creates
+  them; Rux does not. Artifacts: run/oh-img/userdata-refw.img (fsck'd), log
+  oh-refw1-serial.log.
+- IMAGE FORENSICS: userdata-lr.img (used by sc40/sc41; bindwalk ino 46 = baked
+  el1/100/database) carries a BAKED BMS DB (/service/el1/public/bms uid 3060)
+  claiming bundles installed, but ZERO per-bundle leaves under el1/100|el2/100.
+  Result: BMS restores 'installed' state, never reinstalls, spawn fails forever.
+  userdata-tok.img: only /service/el0 (access tokens), no /app, no BMS DB.
+- dt01 (datatap) reading: storage_daemon PrepareUserDirs(100) created
+  el1/100/{base,aot_compiler/*,shader_cache} but el1/100/database mkdir never
+  issued; uid-0 system bundles DID get bundle/public + el1/0/base leaves; NO
+  user-100 per-bundle leaves ever. Early init getxattr taps show -61 (ENODATA)
+  for /data/app/el1/100/database/com.ohos.launcher BEFORE any mkdirs — either
+  image-bake artifacts (dt01's userdata unverified) or phantom resolves.
+- sc42 BOOTING NOW: oh-boot-persist.sh, FRESH blank userdata copy
+  (userdata-blank-sc.img), dfx=datatap, 25min. Decides: (a) storage_daemon
+  creates el1/100/database on a truly blank image? (b) user-100 install pass
+  creates leaves? (c) spawn result flips to 0? shotmon watching for launcher UI.
+
+Session D update (13:0x, sc43/sc44 running):
+- sc43 (tok + datatap) CLEAN FIRST-BOOT story: /data mounts, storage_daemon
+  PrepareUserDirs(100, flags 31) creates the FULL skeleton incl el1/100/database
+  (so no phantom-lookup bug — earlier 'skips' were baked-image artifacts: dt01
+  ran the SEEDED image, sc41 the lr image).
+- Launcher INSTALL RUNS AND 'bundle added' fires (uid 20010009): installd-in-BMS
+  (sa_main pid 1066 + tid 1067, libbms.z.so carries InstalldHostImpl in-process)
+  creates {el1/bundle/public/<b>, el1/100/base/<b> (chown app-uid), shader_cache,
+  system_optimize, ark_profile, local shader_cache} — but NEVER el1/100/database/<b>
+  nor any el2/100/<sub>/<b> leaves. Same on every bundle (uid-0 too: el1/0 leaves
+  yes, el1/0/database/<b> never). Reference Linux creates them all (refw1 image
+  proof). ActiveUserKey/unlock flow matches the reference line-for-line; neither
+  side logs CreateElxBundleDataDir. => the database/el2 leaf creation is a SECOND
+  vector (libbms: CreateBundleDataDirWithVector/WithEl, GetCreateDirParamByBundleOption)
+  whose trigger never fires on Rux.
+- sc44 BOOTING (writable tok copy + datatap): plan = let BMS save its DB, kill,
+  offline-inject el1/100/database/<bundle> for every bundle under el1/100/base/,
+  boot sc45 on it and watch the spawn chain + shotmon for launcher UI.
+- hdc tconn fails both sides (auth); port 10178 is open but not a usable hdcd.
+- sc42 lesson: userdata-blank (mkfs defaults: journal+metadata_csum+csum_seed+
+  orphan_file) is REFUSED by our ext4 (correct per feature gate) -> /data never
+  mounted; use tok-family images (no-journal/no-csum) for experiments.

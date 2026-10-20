@@ -114,3 +114,4 @@ userspace/soft-fp/gcc-pin/
 runs/
 test/tokwrap
 test/futex_lost
+run/oh-x/
