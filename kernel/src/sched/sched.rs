@@ -1693,10 +1693,42 @@ pub fn wake_up_process(task: *mut Task) -> bool {
 
 #[inline(never)]
 pub fn schedule() {
+    // Recursion guard (kernel-preemption round 2, 2026-10-20). While a
+    // schedule() call is in progress on this task, the IRQ-exit preemption
+    // hook must not re-enter it: __schedule's tail restores the incoming
+    // task's saved IRQ state, and with IF re-enabled a timer tick can land
+    // inside the unwinding frame — re-entering schedule() on the same
+    // half-unwound stack (the reverted 2cf4bdc9 failure mode).
+    //
+    // Round 1 used a PREEMPT_ACTIVE bit inside preempt_count (the Linux
+    // CONFIG_PREEMPT design). sc65/sc66 falsified it for THIS tree: the
+    // count is per-task and there are residual cross-task imbalance
+    // producers in the pick/heal machinery (sc66 strand incumbents showed
+    // init carrying 0x04000001 and even 0x08000001 — leaked ACT bits plus
+    // a leaked PREEMPT_OFFSET), and every leaked count bit now has teeth:
+    // it makes the task permanently unpreemptable AND un-sleepable (the
+    // __schedule discipline refuses to switch out a task whose count is
+    // nonzero — the 160-291 s one-activation monopolies). A leaked TIF
+    // bit instead only disables preemption for that task; sleeping and
+    // the discipline semantics stay exact.
+    //
+    // TIF_IN_SCHED is a bit in the existing ti_flags word (no Task layout
+    // change — the scribble machinery is offset-sensitive). Set on entry,
+    // cleared on return from __schedule in the same frame (per-task, so
+    // coroutine resume/migration pair it correctly, unlike a per-CPU
+    // flag).
+    use crate::process::task::task_flags::TaskFlags;
+    const IN_SCHED: u32 = TaskFlags::TIF_IN_SCHED.bits();
+    if let Some(cur) = current() {
+        cur.set_ti_flag(IN_SCHED);
+    }
     // SAFETY: __schedule() manipulates raw task pointers and calls context_switch;
     // must be called from kernel context with valid current task pointer.
     unsafe {
         __schedule();
+    }
+    if let Some(cur) = current() {
+        cur.clear_ti_flag(IN_SCHED);
     }
 }
 
@@ -1951,6 +1983,12 @@ unsafe fn __schedule() {
     // it degenerates into a poll loop, which is the correct behavior for a
     // lock holder. Terminal states (ZOMBIE/DEAD) are exempt: the exit
     // path's final schedule() must always switch away.
+    //
+    // NOTE (kernel-preemption round 2): the schedule() recursion guard is
+    // TIF_IN_SCHED, a ti_flags bit — NOT a preempt_count bit — so this
+    // check needs no masking. (Round 1 used a PREEMPT_ACTIVE count bit;
+    // leaked count bits here would make sleepers unswitchable — see the
+    // sc65/sc66 one-activation monopolies.)
     {
         let prev_state = (*prev).state();
         if !prev_state.is_dead() && (*prev).preempt_count() != 0 {
@@ -3554,6 +3592,502 @@ pub fn scheduler_tick() {
     let cpu_id = crate::arch::cpu_id() as u64 as usize;
     crate::dfx::softlockup::touch(cpu_id);
 
+    // Kernel-preemption round 2 (2026-10-20): LEAK tripwire. A task whose
+    // preempt_count stays nonzero for seconds while it keeps RUNNING in
+    // task context is carrying a leaked count bit — with IRQ-exit kernel
+    // preemption such a leak means the task can never be preempted again,
+    // and (worse) __schedule's switch-out discipline refuses to ever put
+    // it to sleep: the 160-291 s one-activation monopolies of sc65/sc66
+    // (strand incumbents showed pid 1 at pc=0x04000001/0x08000001).
+    // Side-table keyed by Task pointer (wakewatch pattern; no Task layout
+    // change): record when a nonzero count is first seen, report the
+    // task + count after 2 s, clear when the count drains. Direct
+    // console, rate-gated — this runs from the timer tick.
+    {
+        static LEAK_TASK: [core::sync::atomic::AtomicU64;
+            crate::config::MAX_CPUS] =
+            [const { core::sync::atomic::AtomicU64::new(0) };
+                crate::config::MAX_CPUS];
+        static LEAK_SINCE: [core::sync::atomic::AtomicU64;
+            crate::config::MAX_CPUS] =
+            [const { core::sync::atomic::AtomicU64::new(0) };
+                crate::config::MAX_CPUS];
+        static LEAK_LAST_PRINT: core::sync::atomic::AtomicU64 =
+            core::sync::atomic::AtomicU64::new(0);
+        if cpu_id < crate::config::MAX_CPUS {
+            let cur = crate::sched::sched::cpu_state(cpu_id).current;
+            if !cur.is_null() {
+                let pc =
+                    unsafe { (*cur).preempt_count() };
+                let slot = &LEAK_TASK[cpu_id];
+                let since = &LEAK_SINCE[cpu_id];
+                if pc != 0 {
+                    let now = crate::drivers::timer::get_jiffies();
+                    let task_word = slot.load(core::sync::atomic::Ordering::Relaxed);
+                    if task_word == cur as usize as u64 {
+                        let t0 = since.load(core::sync::atomic::Ordering::Relaxed);
+                        if t0 != 0
+                            && now.wrapping_sub(t0) >= 200
+                        {
+                            let lp = LEAK_LAST_PRINT.load(
+                                core::sync::atomic::Ordering::Acquire);
+                            if now.wrapping_sub(lp) >= 20
+                                && LEAK_LAST_PRINT
+                                    .compare_exchange(
+                                        lp,
+                                        now,
+                                        core::sync::atomic::Ordering::AcqRel,
+                                        core::sync::atomic::Ordering::Acquire)
+                                    .is_ok()
+                            {
+                                use crate::console::putchar_no_lock as putchar;
+                                fn ph(v: u64) {
+                                    use crate::console::putchar_no_lock as putchar;
+                                    for sh in (0..16).rev() {
+                                        let n = ((v >> (sh * 4)) & 0xF) as u8;
+                                        putchar(if n < 10 {
+                                            b'0' + n
+                                        } else {
+                                            b'a' + n - 10
+                                        });
+                                    }
+                                }
+                                const M: &[u8] = b"\nPREEMPT-LEAK cpu=";
+                                for &b in M {
+                                    putchar(b);
+                                }
+                                ph(cpu_id as u64);
+                                const M2: &[u8] = b" pid=";
+                                for &b in M2 {
+                                    putchar(b);
+                                }
+                                ph(unsafe { (*cur).pid() } as u64);
+                                const M3: &[u8] = b" pc=";
+                                for &b in M3 {
+                                    putchar(b);
+                                }
+                                ph(pc as u32 as u64);
+                                const M4: &[u8] =
+                                    b" held_nonzero_for=";
+                                for &b in M4 {
+                                    putchar(b);
+                                }
+                                ph(now.wrapping_sub(t0));
+                                const M5: &[u8] = b"jiffies rip=";
+                                for &b in M5 {
+                                    putchar(b);
+                                }
+                                // The interrupted kernel instruction at
+                                // tick time: a leaked-count task poll-
+                                // loops in the wait whose schedule()
+                                // keeps being refused — this RIP names
+                                // that loop directly (symbolize with
+                                // addr2line).
+                                {
+                                    use crate::arch::pt_regs::PtRegs;
+                                    let pr = crate::arch::trap::current_pt_regs()
+                                        as *const PtRegs;
+                                    if !pr.is_null() {
+                                        ph(unsafe { (*pr).instruction_pointer() });
+                                    }
+                                }
+                                putchar(b'\n');
+                            }
+                        }
+                        // PREEMPT-HEAL (round 3c): a TASK-context base
+                        // count held for 10 s continuously is a phantom
+                        // — every real guard section is microseconds, and
+                        // the only 10 s holds in task context are the
+                        // unsleepable-monopoly wedges themselves. Zero it
+                        // (this runs in the tick IRQ on the task's own
+                        // CPU, so the task cannot be concurrently inside
+                        // a count mutation; other CPUs only ever add via
+                        // current()). The leaked task immediately becomes
+                        // sleepable/preemptible again. A legit 10 s-held
+                        // section (if one ever exists) is already a
+                        // wedge; its later unpairing sub will underflow,
+                        // clamp and REPORT rather than poison. This is
+                        // the safety net that lets IRQ-exit kernel
+                        // preemption stay enabled while the leak's
+                        // producer is still being hunted.
+                        let base = pc & !crate::interrupt::preempt::HARDIRQ_MASK;
+                        if base != 0 && now.wrapping_sub(t0) >= 1000 {
+                            unsafe {
+                                (*cur).ti_preempt_count_zero();
+                            }
+                            // Re-arm: next nonzero observation starts a
+                            // fresh window instead of re-healing each
+                            // tick.
+                            slot.store(0, core::sync::atomic::Ordering::Relaxed);
+                            since.store(0, core::sync::atomic::Ordering::Relaxed);
+                            use crate::console::putchar_no_lock as putchar;
+                            fn ph(v: u64) {
+                                use crate::console::putchar_no_lock as putchar;
+                                for sh in (0..16).rev() {
+                                    let n = ((v >> (sh * 4)) & 0xF) as u8;
+                                    putchar(if n < 10 {
+                                        b'0' + n
+                                    } else {
+                                        b'a' + n - 10
+                                    });
+                                }
+                            }
+                            const M: &[u8] = b"\nPREEMPT-HEAL cpu=";
+                            for &b in M {
+                                putchar(b);
+                            }
+                            ph(cpu_id as u64);
+                            const M2: &[u8] = b" pid=";
+                            for &b in M2 {
+                                putchar(b);
+                            }
+                            ph(unsafe { (*cur).pid() } as u64);
+                            const M3: &[u8] = b" was=";
+                            for &b in M3 {
+                                putchar(b);
+                            }
+                            ph(pc as u32 as u64);
+                            const M4: &[u8] = b" held_jiffies=";
+                            for &b in M4 {
+                                putchar(b);
+                            }
+                            ph(now.wrapping_sub(t0));
+                            putchar(b'\n');
+                        }
+                    } else {
+                        slot.store(
+                            cur as usize as u64,
+                            core::sync::atomic::Ordering::Relaxed);
+                        since.store(
+                            crate::drivers::timer::get_jiffies(),
+                            core::sync::atomic::Ordering::Relaxed);
+                    }
+                } else {
+                    slot.store(0, core::sync::atomic::Ordering::Relaxed);
+                    since.store(0, core::sync::atomic::Ordering::Relaxed);
+                }
+            }
+        }
+    }
+
+    // Kernel-preemption hunt round 3 (2026-10-21, sc69+): sc69 falsified
+    // the "hook causes the leak" hypothesis — the leak reproduces with
+    // the IRQ-exit hook compiled out, so the producer is pre-existing.
+    // The static audit of every preempt_count add/sub site finds no
+    // unpaired path, so the remaining producers are runtime shapes: a
+    // replayed acquire (a task resumed at a stale point re-running a
+    // guard's fetch_add) or a direct wild write into thread_info. Both
+    // violate ONE invariant: with no kernel preemption, a task that is
+    // parked (current on NO CPU) can never legally hold a nonzero
+    // preempt_count — guards exist only on the executing task, and the
+    // do_exit R9-3 windows are dead/exiting by the time they park.
+    //
+    // Round 3b: keep per-task last-walk snapshots (count, parked) in a
+    // side table. A task parked for TWO consecutive walks whose count
+    // went 0 -> nonzero in between is the unambiguous wild-write proof
+    // (no code path can add to a parked task); a task that acquired its
+    // count while running narrows the producer to a replayed acquire in
+    // that 40 ms window. PARKED-LEAK reports every parked-nonzero task
+    // as before; the walk also stamps PARKWALK-ARMED once at boot so a
+    // silent logic failure cannot masquerade as "no hits".
+    {
+        struct ParkSnap {
+            task: core::sync::atomic::AtomicUsize,
+            count: core::sync::atomic::AtomicI32,
+            parked: core::sync::atomic::AtomicBool,
+            seen: core::sync::atomic::AtomicU64,
+            /// When this task was first seen parked with a nonzero
+            /// count (0 = not currently in that state) — drives the
+            /// parked-victim side of PREEMPT-HEAL.
+            bad_since: core::sync::atomic::AtomicU64,
+        }
+        static SNAPS: [ParkSnap; 1024] = {
+            const FN: ParkSnap = ParkSnap {
+                task: core::sync::atomic::AtomicUsize::new(0),
+                count: core::sync::atomic::AtomicI32::new(0),
+                parked: core::sync::atomic::AtomicBool::new(false),
+                seen: core::sync::atomic::AtomicU64::new(0),
+                bad_since: core::sync::atomic::AtomicU64::new(0),
+            };
+            [FN; 1024]
+        };
+        static PARKWALK_LAST: core::sync::atomic::AtomicU64 =
+            core::sync::atomic::AtomicU64::new(0);
+        static PARKWALK_PRINT: core::sync::atomic::AtomicU64 =
+            core::sync::atomic::AtomicU64::new(0);
+        static PARKWALK_ARMED: core::sync::atomic::AtomicBool =
+            core::sync::atomic::AtomicBool::new(false);
+        let now = crate::drivers::timer::get_jiffies();
+        let last = PARKWALK_LAST.load(core::sync::atomic::Ordering::Acquire);
+        if now.wrapping_sub(last) >= 4
+            && PARKWALK_LAST
+                .compare_exchange(
+                    last,
+                    now,
+                    core::sync::atomic::Ordering::AcqRel,
+                    core::sync::atomic::Ordering::Acquire,
+                )
+                .is_ok()
+        {
+            if !PARKWALK_ARMED.swap(true, core::sync::atomic::Ordering::AcqRel) {
+                const MSG: &[u8] = b"PARKWALK-ARMED\n";
+                for &b in MSG {
+                    crate::console::putchar_no_lock(b);
+                }
+            }
+            // Walk epoch: a slot not refreshed for 2+ walks belongs to a
+            // dead/exited task and may be reclaimed for new tasks.
+            static WALK_EPOCH: core::sync::atomic::AtomicU64 =
+                core::sync::atomic::AtomicU64::new(0);
+            let epoch = WALK_EPOCH.fetch_add(1, core::sync::atomic::Ordering::AcqRel) + 1;
+            struct Visit {
+                task: *mut crate::process::Task,
+                pc: i32,
+                running: bool,
+            }
+            // The pid-hash walk holds bucket locks; do the side-table
+            // bookkeeping after collecting the snapshot (no locks held
+            // while touching SNAPS beyond atomics).
+            let mut visited: [Option<Visit>; 128] = [const { None }; 128];
+            let mut nvisited = 0usize;
+            crate::process::pid_hash::pid_hash_for_each_task_try(|task| {
+                unsafe {
+                    let pid = (*task).pid();
+                    if pid == 0 || pid == TASK_POISON {
+                        return;
+                    }
+                    // Skip the do_exit R9-3 windows: DEAD/ZOMBIE (and
+                    // anything PF_EXITING) may park with a transient
+                    // count while the exit path unwinds.
+                    if (*task).state().is_dead()
+                        || ((*task).ti_flags()
+                            & crate::process::task::task_flags::TaskFlags::PF_EXITING
+                                .bits()
+                            != 0)
+                    {
+                        return;
+                    }
+                    let pc = (*task).preempt_count();
+                    let mut running = false;
+                    for c in 0..crate::config::MAX_CPUS {
+                        if cpu_state(c).current == task {
+                            running = true;
+                            break;
+                        }
+                    }
+                    // Sample up to 128 tasks per walk, biased to the
+                    // interesting ones (nonzero count) so the table sees
+                    // leak transitions even under heavy task churn.
+                    if nvisited < 128 {
+                        let interesting = pc != 0;
+                        if interesting || (nvisited < 32) {
+                            visited[nvisited] = Some(Visit { task, pc, running });
+                            nvisited += 1;
+                        }
+                    }
+                }
+            });
+            for v in visited.iter().take(nvisited) {
+                let Visit { task, pc, running } = match v {
+                    Some(x) => x,
+                    None => continue,
+                };
+                // Find or (re)claim a slot.
+                let mut mine: Option<&ParkSnap> = None;
+                let mut free: Option<&ParkSnap> = None;
+                for s in SNAPS.iter() {
+                    let key = s.task.load(core::sync::atomic::Ordering::Relaxed);
+                    if key == *task as usize {
+                        mine = Some(s);
+                        break;
+                    }
+                    if key == 0 && free.is_none() {
+                        free = Some(s);
+                    }
+                }
+                let slot = match mine {
+                    Some(s) => Some(s),
+                    None => free,
+                };
+                let mut wildwrite_shape = false;
+                if let Some(s) = slot {
+                    let key = s.task.load(core::sync::atomic::Ordering::Relaxed);
+                    if key == *task as usize {
+                        let prev_pc =
+                            s.count.load(core::sync::atomic::Ordering::Relaxed);
+                        let prev_parked =
+                            s.parked.load(core::sync::atomic::Ordering::Relaxed);
+                        // Parked for two consecutive walks with a
+                        // 0 -> nonzero count transition in between: no
+                        // in-tree code path can do this. Wild write.
+                        wildwrite_shape =
+                            prev_parked && !*running && prev_pc == 0 && *pc != 0;
+                    } else if s.task
+                        .compare_exchange(
+                            0,
+                            *task as usize,
+                            core::sync::atomic::Ordering::AcqRel,
+                            core::sync::atomic::Ordering::Acquire,
+                        )
+                        .is_ok()
+                    {
+                        s.seen.store(epoch, core::sync::atomic::Ordering::Relaxed);
+                    }
+                    // Reclaim check happens lazily at claim time below.
+                }
+                if let Some(s) = slot {
+                    s.count.store(*pc, core::sync::atomic::Ordering::Relaxed);
+                    s.parked.store(!*running, core::sync::atomic::Ordering::Relaxed);
+                    s.seen.store(epoch, core::sync::atomic::Ordering::Relaxed);
+                }
+                // Parked-victim PREEMPT-HEAL (round 3d): the tick-side
+                // heal keys on the per-CPU LEAK slot, which resets every
+                // time the victim migrates or parks at a user boundary —
+                // sc71 showed exactly that (pid 0x13c parked with count 1
+                // for minutes, migrating between CPUs, never reaching the
+                // 10 s same-CPU window). This side keys on the TASK: a
+                // task seen parked (current on NO cpu) with a nonzero
+                // base count for 4 s of consecutive walks gets its count
+                // zeroed. A parked task holds no legal guard (guards live
+                // on the executing task), so the count is phantom by
+                // definition; zeroing lets the sleeper actually sleep.
+                if let Some(s) = slot {
+                    if !*running && *pc != 0 {
+                        let bad0 = s.bad_since.load(core::sync::atomic::Ordering::Relaxed);
+                        if bad0 == 0 {
+                            s.bad_since.store(now, core::sync::atomic::Ordering::Relaxed);
+                        } else if now.wrapping_sub(bad0) >= 400 {
+                            unsafe { (**task).ti_preempt_count_zero(); }
+                            s.bad_since.store(0, core::sync::atomic::Ordering::Relaxed);
+                            use crate::console::putchar_no_lock as putchar;
+                            fn ph(v: u64) {
+                                use crate::console::putchar_no_lock as putchar;
+                                for sh in (0..16).rev() {
+                                    let n = ((v >> (sh * 4)) & 0xF) as u8;
+                                    putchar(if n < 10 {
+                                        b'0' + n
+                                    } else {
+                                        b'a' + n - 10
+                                    });
+                                }
+                            }
+                            const M: &[u8] = b"\nPARKED-HEAL pid=";
+                            for &b in M {
+                                putchar(b);
+                            }
+                            ph(unsafe { (**task).pid() } as u64);
+                            const M2: &[u8] = b" was=";
+                            for &b in M2 {
+                                putchar(b);
+                            }
+                            ph(*pc as u32 as u64);
+                            const M3: &[u8] = b" held_jiffies=";
+                            for &b in M3 {
+                                putchar(b);
+                            }
+                            ph(now.wrapping_sub(bad0));
+                            putchar(b'\n');
+                        }
+                    } else {
+                        s.bad_since.store(0, core::sync::atomic::Ordering::Relaxed);
+                    }
+                }
+                if wildwrite_shape {
+                    // Report immediately, not rate-gated: this is the
+                    // proof event.
+                    use crate::console::putchar_no_lock as putchar;
+                    fn ph(v: u64) {
+                        use crate::console::putchar_no_lock as putchar;
+                        for sh in (0..16).rev() {
+                            let n = ((v >> (sh * 4)) & 0xF) as u8;
+                            putchar(if n < 10 {
+                                b'0' + n
+                            } else {
+                                b'a' + n - 10
+                            });
+                        }
+                    }
+                    const M: &[u8] = b"\nPARKED-WILDWRITE pid=";
+                    for &b in M {
+                        putchar(b);
+                    }
+                    ph(unsafe { (**task).pid() } as u64);
+                    const M2: &[u8] = b" pc=";
+                    for &b in M2 {
+                        putchar(b);
+                    }
+                    ph(*pc as u32 as u64);
+                    putchar(b'\n');
+                }
+                if *running || *pc == 0 {
+                    continue;
+                }
+                // Parked with a live count: report, rate-gated to one
+                // line per 2 s (direct console — IRQ context).
+                let lp = PARKWALK_PRINT.load(core::sync::atomic::Ordering::Acquire);
+                if now.wrapping_sub(lp) >= 20
+                    && PARKWALK_PRINT
+                        .compare_exchange(
+                            lp,
+                            now,
+                            core::sync::atomic::Ordering::AcqRel,
+                            core::sync::atomic::Ordering::Acquire,
+                        )
+                        .is_ok()
+                {
+                    use crate::console::putchar_no_lock as putchar;
+                    fn ph(v: u64) {
+                        use crate::console::putchar_no_lock as putchar;
+                        for sh in (0..16).rev() {
+                            let n = ((v >> (sh * 4)) & 0xF) as u8;
+                            putchar(if n < 10 {
+                                b'0' + n
+                            } else {
+                                b'a' + n - 10
+                            });
+                        }
+                    }
+                    const M: &[u8] = b"\nPARKED-LEAK pid=";
+                    for &b in M {
+                        putchar(b);
+                    }
+                    ph(unsafe { (**task).pid() } as u64);
+                    const M2: &[u8] = b" pc=";
+                    for &b in M2 {
+                        putchar(b);
+                    }
+                    ph(*pc as u32 as u64);
+                    const M3: &[u8] = b" state=";
+                    for &b in M3 {
+                        putchar(b);
+                    }
+                    ph(unsafe { (**task).state().bits() } as u64);
+                    const M4: &[u8] = b" tcpu=";
+                    for &b in M4 {
+                        putchar(b);
+                    }
+                    ph(unsafe { (**task).ti_cpu() } as u32 as u64);
+                    putchar(b'\n');
+                }
+            }
+            // Lazily reclaim slots whose tasks missed 2+ walks.
+            for s in SNAPS.iter() {
+                let key = s.task.load(core::sync::atomic::Ordering::Relaxed);
+                if key != 0 {
+                    let seen = s.seen.load(core::sync::atomic::Ordering::Relaxed);
+                    if epoch.wrapping_sub(seen) > 2 {
+                        let _ = s.task.compare_exchange(
+                            key,
+                            0,
+                            core::sync::atomic::Ordering::AcqRel,
+                            core::sync::atomic::Ordering::Acquire,
+                        );
+                    }
+                }
+            }
+        }
+    }
+
     // R84 (R74 producer-#2 hunt): the R83 idle-loop audit never ran
     // under the dbus storm (all harts busy) — validate headers from the
     // tick itself: current task every tick, full pid-hash walk every 4
@@ -3873,6 +4407,61 @@ pub fn scheduler_tick() {
 
 unsafe fn context_switch(prev: &mut Task, next: &mut Task) {
     let cpu_id = crate::arch::cpu_id() as u64 as usize;
+
+    // Leak-hunt round 3f: __schedule's discipline refuses to switch out
+    // any non-dead task with a nonzero preempt_count, so a prev reaching
+    // here with a live count means a DISCIPLINE-BYPASSING switch just
+    // happened — the exact event whose guard then drops in another task's
+    // context (the leak producer's other half). One compare + rare print;
+    // rate-gated direct console.
+    {
+        let pc = (*prev).preempt_count();
+        if pc != 0 && !(*prev).state().is_dead() {
+            static LAST: core::sync::atomic::AtomicU64 =
+                core::sync::atomic::AtomicU64::new(0);
+            let now = crate::drivers::timer::get_jiffies();
+            let last = LAST.load(core::sync::atomic::Ordering::Acquire);
+            if now.wrapping_sub(last) >= 20
+                && LAST
+                    .compare_exchange(
+                        last,
+                        now,
+                        core::sync::atomic::Ordering::AcqRel,
+                        core::sync::atomic::Ordering::Acquire,
+                    )
+                    .is_ok()
+            {
+                use crate::console::putchar_no_lock as putchar;
+                fn ph(v: u64) {
+                    use crate::console::putchar_no_lock as putchar;
+                    for sh in (0..16).rev() {
+                        let n = ((v >> (sh * 4)) & 0xF) as u8;
+                        putchar(if n < 10 {
+                            b'0' + n
+                        } else {
+                            b'a' + n - 10
+                        });
+                    }
+                }
+                const M: &[u8] = b"\nSWITCH-COUNT-LEAK prev_pid=";
+                for &b in M {
+                    putchar(b);
+                }
+                ph((*prev).pid() as u64);
+                const M2: &[u8] = b" pc=";
+                for &b in M2 {
+                    putchar(b);
+                }
+                ph(pc as u32 as u64);
+                const M3: &[u8] = b" next_pid=";
+                for &b in M3 {
+                    putchar(b);
+                }
+                ph((*next).pid() as u64);
+                putchar(b'\n');
+            }
+        }
+    }
 
     // R65 hunt (garbage-next guard): __switch_to saves callee registers
     // through `prev` and resumes through `next` (thread.sp/ret_addr are

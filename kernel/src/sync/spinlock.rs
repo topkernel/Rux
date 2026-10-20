@@ -450,7 +450,18 @@ impl<T: ?Sized> Drop for SpinlockGuard<'_, T> {
     #[inline]
     fn drop(&mut self) {
         self.lock.raw.unlock();
-        preempt_enable();
+        // Leak-hunt: pass the lock instance so the underflow report can
+        // name WHICH Spinlock double-dropped (static locks symbolize
+        // against the ELF; heap locks identify the owning object).
+            crate::interrupt::preempt::preempt_count_sub2_at(
+                crate::interrupt::preempt::PREEMPT_OFFSET,
+                core::panic::Location::caller(),
+                // RawSpinlock is Spinlock's first field, so its address
+                // IS the Spinlock instance's address (T may be ?Sized,
+                // making &Spinlock<T> a fat reference — go through the
+                // thin raw field pointer).
+                &self.lock.raw as *const RawSpinlock as usize,
+            );
     }
 }
 
@@ -548,6 +559,7 @@ impl<T: ?Sized> Drop for SpinlockBhGuard<'_, T> {
 // ==================== Inline helpers ====================
 
 #[inline]
+#[track_caller]
 fn preempt_disable() {
     crate::interrupt::preempt::preempt_count_add(
         crate::interrupt::preempt::PREEMPT_OFFSET,
@@ -555,9 +567,11 @@ fn preempt_disable() {
 }
 
 #[inline]
+#[track_caller]
 fn preempt_enable() {
-    crate::interrupt::preempt::preempt_count_sub(
+    crate::interrupt::preempt::preempt_count_sub_at(
         crate::interrupt::preempt::PREEMPT_OFFSET,
+        core::panic::Location::caller(),
     );
 }
 
@@ -572,6 +586,7 @@ fn irq_restore(flags: bool) {
 }
 
 #[inline]
+#[track_caller]
 fn bh_disable() {
     crate::interrupt::preempt::preempt_count_add(
         crate::interrupt::preempt::SOFTIRQ_OFFSET,
@@ -579,9 +594,11 @@ fn bh_disable() {
 }
 
 #[inline]
+#[track_caller]
 fn bh_enable() {
-    crate::interrupt::preempt::preempt_count_sub(
+    crate::interrupt::preempt::preempt_count_sub_at(
         crate::interrupt::preempt::SOFTIRQ_OFFSET,
+        core::panic::Location::caller(),
     );
 }
 

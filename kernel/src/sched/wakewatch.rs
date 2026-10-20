@@ -183,7 +183,17 @@ pub fn check_picked(task: *mut crate::process::Task, cpu: usize) {
                     );
                 ww_msg(b"/");
                 ww_u64(act_ns / 1_000_000);
-                ww_msg(b"ms)");
+                ww_msg(b"ms");
+                // Kernel-preemption round (sc65): an incumbent whose
+                // activation runs to tens of seconds is monopolizing its
+                // CPU, and with IRQ-exit preemption that is only possible
+                // while its preempt_count != 0. Print the count with the
+                // activation so the report names the discipline directly:
+                // 1 = a leaked PREEMPT_OFFSET (spinlock guard), 0x100 =
+                // a leaked bh, 0x4000000 = a leaked PREEMPT_ACTIVE.
+                ww_msg(b"/pc=");
+                ww_u64((*cur).preempt_count() as u32 as u64);
+                ww_msg(b")");
             }
         }
         // vruntime geometry (round 4): the victim's lead/lag against

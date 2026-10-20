@@ -96,10 +96,42 @@ pub fn preempt_count_add(val: i32) {
 }
 
 /// Subtract value from current task's preempt_count
+///
+/// #[track_caller]: on underflow the report names the guard's drop site
+/// (file:line) instead of this generic helper — the leak hunt's missing
+/// fingerprint (which lock family double-drops).
 #[inline]
+#[track_caller]
 pub fn preempt_count_sub(val: i32) {
+    let loc = core::panic::Location::caller();
     if let Some(task) = crate::sched::current() {
-        task.sub_preempt_count(val);
+        task.sub_preempt_count_at(val, loc);
+    }
+}
+
+/// `preempt_count_sub` with an explicit captured drop-site location —
+/// used by #[track_caller] inline helpers (spinlock guards) so the
+/// underflow report names the GUARD's line, not the helper's.
+#[inline]
+pub fn preempt_count_sub_at(
+    val: i32,
+    loc: &'static core::panic::Location<'static>,
+) {
+    if let Some(task) = crate::sched::current() {
+        task.sub_preempt_count_at(val, loc);
+    }
+}
+
+/// As `preempt_count_sub_at`, plus the guard's lock instance address for
+/// the underflow report (leak-hunt round 3e: name WHICH lock).
+#[inline]
+pub fn preempt_count_sub2_at(
+    val: i32,
+    loc: &'static core::panic::Location<'static>,
+    site: usize,
+) {
+    if let Some(task) = crate::sched::current() {
+        task.sub_preempt_count2_at(val, loc, site);
     }
 }
 
