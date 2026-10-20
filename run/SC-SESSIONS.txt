@@ -200,3 +200,47 @@ Session A update (09:0x, sc32 build booted, quota-relaunched window):
   child bind section succeeds -> pivot -> post-pivot /dev/null ->
   first app EXEC. If exec lands, next gates: OnForeground, ArkUI
   surface, ohgpu screendump.
+
+Session A update (11:5x, sc40 — T+4h snapshot):
+- GAUNTLET CLEARED SINCE sc28 (4 kernel fixes on this branch):
+  1. 74d6cdd2 — MS_REC clones attach INSIDE the fresh bind root
+     (the sc28 gate: inode-less stub 'sandbox' inside the /-bind copy
+     answered every /mnt/sandbox lookup with ENOENT; mkdir -2 x203k).
+     Effect: mkdir gate dead, MakeDirRecursive works, children reach
+     bind section.
+  2. a9595213 — vfs_mount attaches at the CALLER-visible mountpoint
+     (task-root prefix). The appspawn child's binds used to land on
+     the direct-global dentry side while its lookups walked the
+     through-system-sandbox side; post-pivot /dev/null hit a bare
+     tmpfs dir (appspawn_common.c:350, sc33-sc36). Effect: devnull
+     gate dead — probe shows lookup OK mode 0o20666 in-child.
+  3. 0c12e3af — rate-limit bindrec/sbxbind/devopen prints (the UART
+     itself broke appspawn's 3s child watchdog; sc37 printed 1.01M
+     bindrec lines and every spawn died exit -9).
+  4. 344c8fa0 — self-binds skip the MS_REC clone phase (redundant
+     after (2); ~50 duplicate mounts per spawn bloated the registry
+     until enumerations blew the 3s watchdog, sc38 'wait child
+     timeout').
+- sc39/sc40 STATE: 54+ pivots per boot, 26-64 spawn COMPLETIONS per
+  boot ('Child process:com.ohos.launcher success') — first ever. The
+  OH bootanimation is ANIMATING FULLSCREEN on ohgpu (8-color gradient,
+  100% non-black, counts vary frame to frame). RSSurfaceOhosGl
+  RequestFrame 720x1280 flowing.
+- REMAINING GATE: every spawn child still exits 0 right after hook 34
+  (appspawn_server.c:49 'ExitCode:0') — no dlopen of the ability
+  runtime in the child, AMS restarts the ability forever. The spawn
+  result code is 0xd000008 (the value my sc25 notes flagged as the
+  pre-fix failure code) — suspicious: the child reports 'success' but
+  hands AMS 0xd000008. execfail trace (in sc40 build) printed NOTHING:
+  the child never calls execve at all — consistent with OH's in-process
+  dlopen spawn model (appspawn preloads libace_*.z.so itself).
+- NEXT (for whoever picks this up): find why the child exits instead
+  of running the runtime. Candidate angles: (a) decode of the spawn
+  msg flags/processType — maybe the child takes a wrong terminal path;
+  (b) strace the child's final syscalls (dfx switch or a per-pid last-N
+  ring dump on exit for deep-root processes); (c) the 0xd000008 result
+  code — where does appspawn compute it (hook [31]/[34] chain or the
+  begetctl hook at stage 34 prio 5000, 'Enter begetctl boot without
+  BEGETCTL_BOOT flag set').
+- test/bindmkdir.c = fast minimal-rootfs repro for the whole sandbox
+  mount idiom (<2min per cycle; passes on current HEAD).
