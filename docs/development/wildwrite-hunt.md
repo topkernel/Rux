@@ -452,6 +452,150 @@ windows — unchanged by chunking, as expected.
   MmStruct Arc refcounts for blast radius; MM-DROP-CTX is the
   in-kernel witness already in place.
 
+## Session 5 (continuation agent — buddy marking fix, wedge re-verification, per-mm lock design)
+
+Inherited: the ww-s2 chain was mid-r9 with the driver alive and
+self-continuing. Claimed as-is — r9 completed its full 2700 s (0
+watchpoint hits, 0 heals) and the driver advanced to r10 on its own at
+06:19; no restart needed. 0 WW-HIT across all ten armed runs so far.
+
+### The buddy marking fix (a80974df)
+
+The session-4 design bomb, defused on the marking-cost side. The heap
+buddy marked every page of a block on each add_to_free_list /
+remove_from_free_list / init_block via per-page `meta.get_mut()` calls
+(bounds assert + UnsafeCell deref per page) under the single irqsave
+heap lock. On the 1 GiB heap (2^18 pages, seeded as one order-18 block
+since init_sized takes the largest aligned order that fits) an
+order-scale add/remove walked 262144 heavy iterations per level; under
+MTTCG with the other CPU spin-waiting on the same lock word (TCG
+exclusive-access amplification), that is the minutes-scale,
+effectively-terminal grind gdb caught in ww-v2. The net-side R50 note
+(tcp_timer.rs) is the same pathology observed at order-14.
+
+Fix (buddy_allocator.rs only):
+
+- Per-page free state moves to a word-strided `AtomicU64` bitmap
+  (`free_bits`, INV-HEAP-3): an order-18 fill is 4096 masked word RMWs.
+  `BlockMeta.free` stays authoritative for list LEADERS; the R9-14
+  double-free check consults the bitmap, which is exact for aliased
+  interior pages too (previously interior bytes, best-effort).
+- Interior `order` bytes are kept via a tight raw-pointer byte fill
+  (single up-front bounds assert, no per-page call): the ORDER_MISMATCH
+  arm and report fidelity of the R9-14/R17 tripwires are preserved.
+- Refusal-kind labels follow the bitmap authority.
+
+Leader metadata, free-list operations, and the merge logic are
+byte-for-byte unchanged. MAX_ORDER stays 20 (config test asserts it);
+no order above 18 can exist on this heap because get_buddy_idx(p, 18)
+exceeds MAX_PAGES and coalescing stops. Known follow-up, deliberately
+NOT in this commit: the split path double-fills each buddy half
+(init_block + add_to_free_list) and the retained-half init_block fills
+are dead writes — all cheap now, worth folding into the per-mm-lock
+rework if that file is touched again.
+
+### Wedge re-verification (the merge gate for 7b7a82b5)
+
+Controlled boots, ww-boot.sh conditions (q35/smp2/4G/snapshot,
+dfx=taskdump,watchdog,periodic), worktree kernel = HEAD with the buddy
+fix on top of the chunking:
+
+| boot | kernel | outcome |
+|------|--------|---------|
+| ww-v1 (s4) | chunked | froze ~23 min, terminal |
+| ww-v2 (s4) | chunked | froze ~19 min, terminal (strand_max 1079s) |
+| ww-bf-sanity (5 min) | chunked+buddyfix | healthy storm, wakes 540k, 0 panics |
+| ww-bf-v1 (45 min) | chunked+buddyfix | FULL budget, wakes 11.35M advancing to the end, avg_run 4ms, 0 KERNPANIC/ALLOCTHROW, strand_max 470s |
+| ww-bf-v2 (45 min) | chunked+buddyfix | FULL budget, wakes 11.64M, avg_run 4ms, 0 KERNPANIC/ALLOCTHROW, 1115 forks; strand_max 615s (one late single-task monster, wakes never stalled) |
+
+bf-v1 detail: through the 19-23 min wedge window wakes advanced ~6k per
+heartbeat continuously. strand_max ratcheted 90s → 206s → 470s at
+wakes 6.2-8.3M while avg_run STAYED at 4ms and wakes never stalled —
+single-task stranding (the fork-walk monopoly / structural-wall
+residual), NOT the system-wide freeze of v1/v2 (both of which froze
+wakes entirely and never recovered; v2 produced only ~1k further wakes
+across its last 25 min vs bf-v1's 8M). bf-v2 mirrors it: a 615s
+single-task monster near the end with wakes advancing normally
+throughout.
+
+Verdict: the heap-grind freeze mechanism is fixed by the marking
+change; the 2/2-vs-0/8 correlation that blocked the chunking merge is
+resolved at 0/2 freezes on the fixed kernel (bf-v1 + bf-v2), with the
+wedge mechanism gdb-proven pre-existing and untouched by 7b7a82b5.
+The mm chunking (7b7a82b5) + a80974df are MERGE-READY AS A PAIR —
+main should take both together (chunking alone still carries the
+buddy-grind wedge; the fix alone leaves the multi-second fork-walk
+strands).
+
+### Per-mm lock design (the wall endgame — spec for the implementing session)
+
+Current shape: ONE global `PTE_MODIFY_LOCK` (Spinlock, per-arch static
+in arch/*/mm/mm_ops.rs) serializes every leaf-PTE write + rmap update
+across ALL mms. The chunking (7b7a82b5) reduced hold granularity to
+per-leaf-table; the residual monsters (bf-v1's 470s strand, baseline's
+400s class) are same-lock cross-mm queueing plus no kernel preemption.
+
+Key discovery: `MmStruct.pgd_lock` (RwSpinlock) is VESTIGIAL — zero
+callers of pgd_read()/pgd_write(). It can be repurposed/replaced by the
+per-mm PTE lock without touching any existing user.
+
+Site census (x86_64 + arch-neutral): page_fault.rs x6 (demand fault
+map+rmap, COW fault), mmu_init.rs x8 (teardown chunks, munmap/mprotect
+leaf clears, huge-leaf frees), mm_ops.rs x18 (brk, unmap, map helpers,
+set_pte, fork-walk chunks), mm/rmap.rs x1 (unmap clearing), mm/
+compact.rs x1 (migration PTE), syscall/memory.rs x3 (mmap/mprotect/
+remap), drivers/ashmem.rs x1, ipc/binder.rs + ipc/sysv_shm.rs (IPC
+line's territory — coordinate).
+
+Hard constraints:
+
+1. All-or-nothing per exclusion domain, per arch: if the demand fault
+   takes mm-A's lock while the fork walk takes the global, they do not
+   exclude each other. Every x86_64 site must switch in ONE change
+   (riscv64 keeps the global until its own migration — gate through an
+   arch hook, e.g. `pte_lock_for(mm)` returning the global on riscv64).
+2. Cross-mm sequences: rmap-driven unmap (reclaim/swap/migration) can
+   clear PTEs in SEVERAL mms under one logical operation — needs
+   per-mm locks taken one at a time (never nested) or ordered by
+   MmStruct address, with each mm Arc-pinned across its section.
+   Kernel-half writes (copy_kernel_mappings, device alias installs)
+   stay on a global kernel-table lock.
+3. Fork: parent-side COW downgrades take the PARENT's per-mm lock per
+   chunk; child-side writes go to unpublished private tables and need
+   no lock (already true for the chunked walk).
+4. Teardown: dying mm's own lock, per chunk — uncontended by
+   construction (last-Arc + synchronize_rcu drain at mm_struct.rs:1017).
+5. irqsave variants must survive the migration (the fault paths use
+   plain lock(); rmap/compact/ashmem use lock_irqsave() — the per-mm
+   lock needs both).
+6. Lock ordering: vma_manager (RwSpinlock) → per-mm pte_lock →
+   page_desc locks; document in docs/architecture/lock-ordering.md
+   before the first hunk.
+
+Suggested staging for the implementing session: (1) add the lock field
++ arch hook, keep the global everywhere (compile-only change); (2)
+one-patch switch of all x86_64 sites + lock-ordering doc; (3) OH
+45-min boots x2 + LTP fork/mmap families (the mm oh-suites) before
+push. The IPC-line sites (binder/sysv_shm) should be migrated in
+coordination with that line, not unilaterally.
+
+### Chain status this session
+
+- r9 (inherited, driver alive): full budget, 0 hits, 0 heals; driver
+  self-advanced to r10 at 06:19 — the claim-then-watch protocol works.
+- r10 (FROZEN = PRE-chunking kernel): wedged ~15 min in — serial
+  frozen 06:34 onward, wakes stuck at 3.00M, si_busy=2000ms+2016ms
+  (softirq running 2 s straight), ticks halved, 0 KERNPANIC. This is a
+  heap-grind freeze ON THE BASELINE KERNEL (the same family ww-v2's
+  gdb sample proved): tally now 1 terminal wedge in 11 frozen-kernel
+  chain boots, vs 0/2 on chunked+buddyfix. Further evidence the grind
+  pre-dates and is independent of the chunking commit.
+- The chain driver tree (wrapper -> ww-chain.sh -> ww-hunt.py -> qemu)
+  was killed externally again ~07:04 (session-infra cleanup, same class
+  as the 05:34 kill in session-4's record). Relaunched from r11 at
+  07:07 (`./run/ww-chain.sh ww-s2 100 12371 11`, session-5 log).
+  0 WW-HIT in every armed run to date (r1-r10 + all manual boots).
+
 ## Where this leaves the hunt (handoff)
 
 The attribution machinery now exists and is proven end-to-end; the
