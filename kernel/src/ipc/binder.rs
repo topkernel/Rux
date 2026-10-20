@@ -2107,8 +2107,11 @@ unsafe fn outstanding_from_tid(world: &World, pid: u32, tid: u32) -> alloc::stri
 /// SAFETY: caller holds WORLD.
 unsafe fn hist_line(t: &Arc<BinderThread>) {
     let th = t.st();
-    let mut s = alloc::string::String::new();
     use core::fmt::Write;
+    // Newline every 8 entries — the console's printk buffer splits longer
+    // lines mid-entry (sc75: "PARK(0,0)binder-stall:" splices).
+    let mut s = alloc::string::String::new();
+    let mut n = 0;
     for k in 0..BHIST {
         let idx = (th.hcur + k) % BHIST;
         let e = &th.hist[idx];
@@ -2116,8 +2119,12 @@ unsafe fn hist_line(t: &Arc<BinderThread>) {
             continue;
         }
         let _ = write!(s, " {}({},{})@{}", ev_name(e.ev), e.a, e.b, e.j);
+        n += 1;
+        if n % 8 == 0 {
+            let _ = writeln!(s);
+        }
     }
-    crate::pr_warn!("binder-stall:   hist tid {} {}", t.tid, s);
+    crate::pr_warn!("binder-stall:   hist tid {} ({} events):{}", t.tid, n, s);
 }
 
 /// Wait-queue census + task state for a stalled reader — the live-wake
