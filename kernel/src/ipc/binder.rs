@@ -2249,14 +2249,18 @@ unsafe fn user_park_stack_dump(t: &Arc<BinderThread>) {
         }
         if let Some(vm) = vmas.find(crate::mm::page::VirtAddr::new(v as usize)) {
             let off = vm.offset() + (v as usize - vm.start().as_usize());
+            // Instruction bytes at the frame (Session F's byte-match method:
+            // search these bytes at fileoff in the debugfs-extracted .so).
+            let bytes = read_u64_at(v).unwrap_or(0);
             crate::pr_warn!(
-                "binder-stall:   ustack[{}]={:#x} vma={:#x}-{:#x} fd={} fileoff={:#x}",
+                "binder-stall:   ustack[{}]={:#x} vma={:#x}-{:#x} fd={} fileoff={:#x} bytes={:#018x}",
                 i,
                 v,
                 vm.start().as_usize(),
                 vm.end().as_usize(),
                 vm.file_fd(),
-                off
+                off,
+                bytes
             );
         }
     }
