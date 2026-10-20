@@ -622,7 +622,21 @@ pub const PRINTK_RING_BUFFER_SIZE: usize = {};
         kernel_version,
         target_platform,
         // Memory
-        get_usize("memory", "kernel_heap_size", 16) * 1024 * 1024,
+        // kernel_heap_size is clamped per arch: the OH x86_64 lane runs with
+        // 1024 MiB, but on riscv64 (-m 1G/2G QEMU targets) a heap region that
+        // large overruns the memory map and kills the boot before the console
+        // comes up (merge gate 2026-10-19: Kernel.toml 1024 broke every
+        // riscv64 minimal-rootfs smoke silently). Keeping one shared value in
+        // Kernel.toml is fine — riscv64 can never see more than 128 MiB of it.
+        {
+            let heap_mb = get_usize("memory", "kernel_heap_size", 16);
+            let heap_mb = if target_platform.contains("riscv") {
+                heap_mb.min(128)
+            } else {
+                heap_mb
+            };
+            heap_mb * 1024 * 1024
+        },
         get_usize("memory", "physical_memory", 2048) * 1024 * 1024,
         get_usize("memory", "page_size", 4096),
         get_usize("memory", "page_size", 4096).trailing_zeros() as usize,
