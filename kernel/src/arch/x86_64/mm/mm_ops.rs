@@ -194,7 +194,7 @@ impl MmStruct {
                     // one leaf-PTE writer left outside PTE_MODIFY_LOCK
                     // (same protocol as the demand-fault paths in
                     // page_fault.rs).
-                    let _pte_guard = PTE_MODIFY_LOCK.lock_irqsave();
+                    let _pte_guard = PTE_MODIFY_LOCK.lock();
                     // Re-check under the lock: a racing thread of this mm
                     // (CLONE_VM) may have mapped this address between the
                     // walk above and here; mapping again would orphan the
@@ -718,7 +718,7 @@ impl MmStruct {
     /// Unmap physical pages in specified range
     fn unmap_pages(&self, start: PageVirtAddr, size: usize) -> Result<(), MapError> {
         // Serialize against fork's table walk and COW faults (PTE lock).
-        let _pte_guard = PTE_MODIFY_LOCK.lock_irqsave();
+        let _pte_guard = PTE_MODIFY_LOCK.lock();
         let mut addr = start.as_usize();
         let end = addr.saturating_add(size);
 
@@ -940,7 +940,7 @@ impl MmStruct {
             return; // refuse kernel-range rewrites
         }
 
-        let _pte_guard = PTE_MODIFY_LOCK.lock_irqsave();
+        let _pte_guard = PTE_MODIFY_LOCK.lock();
         let mut va = aligned_start;
         while va < end {
             let a = VirtAddr::new(va);
@@ -1046,7 +1046,7 @@ impl MmStruct {
 
         // SAFETY: self.pgd is a valid root PPN for the current address space. The caller
         // (fork) guarantees the parent address space is fully initialized and consistent.
-        let _pte_guard = PTE_MODIFY_LOCK.lock_irqsave();
+        let _pte_guard = PTE_MODIFY_LOCK.lock();
         let new_root_ppn = unsafe {
             copy_page_table_cow(self.pgd, &cow_exempt).ok_or(MapError::OutOfMemory)?
         };
@@ -1404,7 +1404,7 @@ pub unsafe fn map_user_region(
     flags: u64,
 ) {
     // Serialize against fork's table walk (PTE lock coverage).
-    let _pte_guard = PTE_MODIFY_LOCK.lock_irqsave();
+    let _pte_guard = PTE_MODIFY_LOCK.lock();
     let virt_end_checked = virt_start.checked_add(size);
     let virt_end_val = match virt_end_checked {
         Some(v) => v,
@@ -1920,7 +1920,7 @@ pub enum CowFaultResult {
 
 /// Handle copy-on-write page fault (4-level walk under PTE_MODIFY_LOCK)
 pub unsafe fn handle_cow_fault(root_ppn: u64, fault_addr: VirtAddr) -> CowFaultResult {
-    let _pte_guard = PTE_MODIFY_LOCK.lock_irqsave();
+    let _pte_guard = PTE_MODIFY_LOCK.lock();
     use crate::mm::page_desc::pfn_to_page_mut;
 
     let virt_addr = fault_addr.bits();

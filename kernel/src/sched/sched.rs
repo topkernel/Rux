@@ -1026,6 +1026,24 @@ pub fn need_resched() -> bool {
     }
 }
 
+/// Voluntary preemption point (launcher perf gate round 3, 2026-10-20).
+///
+/// With no kernel preemption, a task inside a long kernel-side loop
+/// (task-teardown sweeps, resource drops) monopolizes its CPU until the
+/// loop ends even with need_resched set by every tick — the steady
+/// WAKE-STRANDED family under the OH thread-churn load. Unlike
+/// IRQ-exit preemption (tried in 2cf4bdc9, reverted in 0ced11da: it
+/// poisoned preempt_counts by interrupting code that was never written
+/// to be switched mid-flight), this yields ONLY at points the caller
+/// KNOWS are switch-safe: task context, no locks, no bh, no RCU read
+/// side (all enforced by the preemptible() check), no per-CPU state
+/// straddling the call.
+pub fn cond_resched() {
+    if need_resched() && crate::interrupt::preempt::preemptible() {
+        schedule();
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn asm_need_resched() -> i64 {
     if need_resched() { 1 } else { 0 }
@@ -1112,6 +1130,50 @@ pub fn idle_task_ptr(cpu: usize) -> usize {
         unsafe { __secondary_idle_tasks[cpu] }
     } else {
         0
+    }
+}
+
+/// Wakewatch: CFS timeline geometry for the strand report — the victim's
+/// vruntime, the queue's min_vruntime, and the leftmost queued vruntime
+/// (all raw ns; caller computes deltas). Diagnostic reads under the GRQ
+/// lock (check_picked holds it).
+pub fn ww_cfs_geometry(task: *mut Task) -> (u64, u64, u64) {
+    let g = grq();
+    // SAFETY: scalar sched-entity read of the task being picked (GRQ
+    // held); queue walk of the leftmost key only.
+    unsafe {
+        let vr = (*task).sched_entity().get_vruntime();
+        let minv = g.cfs_rq.get_min_vruntime();
+        let leftv = g
+            .cfs_rq
+            .leftmost_vruntime()
+            .unwrap_or(minv);
+        (vr, minv, leftv)
+    }
+}
+
+/// Wakewatch: diagnostic state of a possibly-stalled CPU for the
+/// TIMER-SOFTIRQ-STALL report — its current task's pid and preempt_count
+/// plus the RIP of its most recent trap frame. Values race live
+/// execution (the target CPU keeps running); they name the context the
+/// stall recoverer found, nothing more.
+pub fn ww_stalled_cpu_state(cpu: usize) -> (u64, u64, u64) {
+    if cpu >= MAX_CPUS {
+        return (0, 0, 0);
+    }
+    let cur = cpu_state(cpu).current;
+    if cur.is_null() {
+        return (0, 0, crate::arch::trap::pt_regs_rip_for_cpu(cpu));
+    }
+    // SAFETY: init-time valid slot pointer; reads of stable Task fields
+    // (pid, preempt_count) are diagnostic-only and tolerate a concurrent
+    // switch (worst case a torn-but-bounded value).
+    unsafe {
+        (
+            (*cur).pid() as u64,
+            (*cur).preempt_count() as u64,
+            crate::arch::trap::pt_regs_rip_for_cpu(cpu),
+        )
     }
 }
 
@@ -1545,6 +1607,11 @@ pub fn free_task_slot(task_ptr: *mut Task) {
         // the exit paths, so their drops here are no-ops there; on the
         // fork unwind paths dropping the cloned Arcs is exactly the
         // correct refcount decrement.
+        // Wakewatch: invalidate the wake stamp keyed by this address
+        // BEFORE the page is recycled — a new Task at the same address
+        // must not inherit the old occupant's stamp (phantom-strand
+        // guard, see wakewatch::note_task_freed).
+        crate::sched::wakewatch::note_task_freed(task_ptr);
         unsafe {
             core::ptr::drop_in_place(task_ptr);
         }

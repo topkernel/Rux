@@ -435,6 +435,12 @@ impl CfsRunQueue {
         self.min_vruntime.load(Ordering::Acquire)
     }
 
+    /// Wakewatch: the leftmost queued entity's vruntime (None when the
+    /// timeline is empty). Diagnostic read; callers hold the GRQ lock.
+    pub fn leftmost_vruntime(&self) -> Option<u64> {
+        self.tasks_timeline.iter().next().map(|(&k, _)| k.vruntime)
+    }
+
     /// Update minimum vruntime
     ///
     /// Linux update_min_vruntime semantics (review batch 8): the value is the

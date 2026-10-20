@@ -96,6 +96,18 @@ pub fn note_wake(task: *mut crate::process::Task) {
     WAKE_N.fetch_add(1, Ordering::Relaxed);
 }
 
+/// Invalidate `task`'s side-table stamp at task destruction. The slot
+/// key is the Task ADDRESS and task pages are recycled, so without this
+/// a recycled Task at the same address inherits the previous occupant's
+/// wake stamp — the first pick of the NEW task then reports a phantom
+/// strand spanning the old task's whole lifetime (multi-ten-second
+/// WAKE-STRANDED outliers that were never real scheduling events).
+pub fn note_task_freed(task: *mut crate::process::Task) {
+    let slot = slot_of(task);
+    slot.stamp.store(0, Ordering::Release);
+    slot.task.store(0, Ordering::Release);
+}
+
 /// Consume the stamp at pick time; classify and report. Called from
 /// mark_picked_on_cpu under the GRQ lock — prints go through the direct
 /// console (R34 discipline), rate-gated to one line per 2 jiffies.
@@ -141,6 +153,53 @@ pub fn check_picked(task: *mut crate::process::Task, cpu: usize) {
         ww_u64(ms);
         ww_msg(b"ms policy=");
         ww_u64(unsafe { (*task).policy() as u64 });
+        // Monster-strand forensics (launcher perf gate round 3): name
+        // each CPU's incumbent and its CURRENT-activation run length so
+        // the report answers "what was the CPU doing instead" directly —
+        // a kernel-loop hog shows a huge activation length; a healthy
+        // rotation shows small ones.
+        for c in 0..crate::config::MAX_CPUS {
+            let cur = crate::sched::sched::cpu_state(c).current;
+            ww_msg(b" h");
+            ww_u64(c as u64);
+            ww_msg(b"=(");
+            if cur.is_null() {
+                ww_msg(b"nil)");
+                continue;
+            }
+            // SAFETY: init-time valid slot pointer; scalar field reads
+            // tolerate a concurrent switch (diagnostic only).
+            unsafe {
+                ww_u64((*cur).pid() as u64);
+                ww_msg(b"/p");
+                ww_u64((*cur).policy() as u64);
+                let se = (*cur).sched_entity();
+                let act_ns = se
+                    .sum_exec_runtime
+                    .load(core::sync::atomic::Ordering::Relaxed)
+                    .saturating_sub(
+                        se.prev_sum_exec_runtime
+                            .load(core::sync::atomic::Ordering::Relaxed),
+                    );
+                ww_msg(b"/");
+                ww_u64(act_ns / 1_000_000);
+                ww_msg(b"ms)");
+            }
+        }
+        // vruntime geometry (round 4): the victim's lead/lag against
+        // min_vruntime and the queue's leftmost. A lead of ~strand_ms
+        // says "former CPU hog waiting for the pack" (fair, if blunt);
+        // a small lead with a big strand says the pick walk kept
+        // skipping it (ownership/affinity/throttle) or charging is
+        // inflated (runaway).
+        {
+            let (vr, minv, leftv) = crate::sched::sched::ww_cfs_geometry(task);
+            ww_msg(b" vr=");
+            ww_u64(vr.saturating_sub(minv) / 1_000_000);
+            ww_msg(b"ms lead-lag=");
+            ww_u64(leftv.saturating_sub(vr) / 1_000_000);
+            ww_msg(b"ms");
+        }
         ww_msg(b"\n");
     }
 }

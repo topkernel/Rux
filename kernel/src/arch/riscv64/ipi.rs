@@ -281,8 +281,16 @@ pub fn smp_call_function(target: usize, func: fn(*mut core::ffi::c_void), info: 
     // Send CallFunction IPI
     send_ipi_type(target, IpiType::CallFunction);
 
-    // Spin-wait for completion (safe under BKL)
+    // Wait for completion. Perf gate (2026-10-20): this used to be a
+    // pure spin — and with no kernel preemption, a caller waiting on a
+    // target CPU stuck in a long preempt-disabled section (e.g. fork's
+    // COW page-table walk) monopolized ITS OWN CPU too, so one walk on
+    // CPU-A plus one membarrier on CPU-B froze BOTH. Yielding here is
+    // safe: the csd is Box-pinned (not stack), nothing holds the CSD
+    // lock at this point, and the memory stays valid until done is
+    // observed (sleeping tasks keep their frames; the Box frees below).
     while !csd.done.load(Ordering::Acquire) {
+        crate::sched::cond_resched();
         core::hint::spin_loop();
     }
 

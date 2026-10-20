@@ -844,7 +844,7 @@ pub unsafe fn free_user_page_tables(root_ppn: u64) {
     // Serialize against concurrent fork copies / COW faults on ANY mm: the
     // pages freed here can be immediately reallocated as page tables or
     // COW copies by another CPU (PTE_MODIFY_LOCK, NEW2 class).
-    let _pte_guard = super::mm_ops::PTE_MODIFY_LOCK.lock_irqsave();
+    let _pte_guard = super::mm_ops::PTE_MODIFY_LOCK.lock();
 
     let root_phys = root_ppn << PAGE_SHIFT;
     let root_table = get_page_table_virt(root_phys);

@@ -71,14 +71,21 @@ static TX_RECOVERY_PENDING: AtomicBool = AtomicBool::new(false);
 static TX_LAST_NOTICE: core::sync::atomic::AtomicU64 =
     core::sync::atomic::AtomicU64::new(0);
 
-/// Upper bound on LSR.THRE polls per byte before dropping it. A healthy
-/// 115200 UART asserts THRE within one character time (~87µs ≈ tens of
-/// `inb` polls under KVM); this budget is orders of magnitude above that
-/// so a merely slow console never drops bytes, while a genuinely stalled
-/// one costs at most one bounded wait per stall episode (the latch above
-/// makes every following byte a single probe).
+/// WALL-TIME bound for one LSR.THRE wait (time ticks; 2 ms). The old
+/// budget counted iterations (UART_TX_POLL_BUDGET, 1e6 tries), and one
+/// `inb` under KVM costs a VM exit (~1-2 µs), so 1e6 tries is a 1-2 s
+/// spin. Every THRE wait runs either with IRQs disabled (the UART
+/// irqsave lock, IRQ-context printk) or inside a syscall holding it —
+/// so a slow/stalled chardev turned that budget into multi-second
+/// IRQ-off windows: TIMER-SOFTIRQ-STALL ~1 s ages, TIMER-LATE-FIRE
+/// 1-4 s, WAKE-STRANDED outliers (the launcher-line IPC perf gate,
+/// 2026-10-20). A healthy QEMU 16550 with a draining chardev asserts
+/// THRE on the first probe; 2 ms covers a full 16-byte FIFO drain at
+/// 115200 with margin. Beyond the bound the existing TX_STALLED
+/// latch/drop discipline takes over (one bounded wait per episode,
+/// single probe per byte afterwards).
 #[cfg(feature = "x86_64")]
-const UART_TX_POLL_BUDGET: u32 = 1_000_000;
+const UART_THRE_WAIT_TICKS: u64 = crate::config::TIMER_CLOCK_FREQ_HZ / 500;
 
 /// Print a rate-limited notice (once per second) about how many bytes the
 /// console TX stall dropped. Called from the printk entry paths BEFORE
@@ -290,15 +297,19 @@ impl Uart {
             }
             // Poll LSR bit 5 (THR Empty) before writing THR — the 8250
             // drops characters written while the shift register is busy.
-            // BOUNDED (printk-wedge / OH b140): this poll was unbounded, so
-            // a stalled UART froze the CPU with the printk emit lock held
-            // and wedged the whole machine. Give up after
-            // UART_TX_POLL_BUDGET tries, drop the byte, and latch the
-            // stall so subsequent bytes cost one probe each.
-            let mut tries: u32 = 0;
+            // BOUNDED by WALL TIME (UART perf gate, 2026-10-20): the old
+            // 1e6-try budget was 1-2 s of IRQ-off/lock-held spin under
+            // KVM when the chardev stalled (one `inb` = one VM exit).
+            // The wait runs with the UART irqsave lock held (or from
+            // IRQ-context printk with IF=0), so those spins were exactly
+            // the TIMER-SOFTIRQ-STALL / TIMER-LATE-FIRE episodes. Give
+            // up after UART_THRE_WAIT_TICKS of read_time(), latch the
+            // stall, and drop the byte.
+            let start = crate::arch::cpu::read_time();
             while read_reg(COM1_BASE, UART_LSR) & LSR_THRE == 0 {
-                tries = tries.saturating_add(1);
-                if tries >= UART_TX_POLL_BUDGET {
+                if crate::arch::cpu::read_time().saturating_sub(start)
+                    >= UART_THRE_WAIT_TICKS
+                {
                     TX_STALLED.store(true, Ordering::Release);
                     TX_DROPPED.fetch_add(1, Ordering::Relaxed);
                     return;
