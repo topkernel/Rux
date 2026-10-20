@@ -1864,6 +1864,91 @@ unsafe fn stall_thread_line(proc: &Arc<BinderProc>, t: &Arc<BinderThread>) {
                         crate::sync::futex::task_futex_mm_id(task),
                         woken
                     );
+                    // sc75: read the futex WORD through the HOLDER's own
+                    // page tables (khungtaskd's get_user would use the
+                    // wrong mm). The word says whether the lock is still
+                    // owned (pthread mutexes store the owner tid) or
+                    // already released — a released word plus a sleeping
+                    // waiter is a lost futex wake; an owned word names the
+                    // owner to chase.
+                    let word = tk
+                        .address_space()
+                        .and_then(|aspace| {
+                            let root = aspace.root_ppn();
+                            // SAFETY: read-only diagnostic walk of the
+                            // holder's live user page tables.
+                            unsafe {
+                                crate::arch::mm::mm_ops::PageTableWalker::walk(
+                                    root,
+                                    uaddr as u64,
+                                )
+                            }
+                            .map(|(ppn, _)| {
+                                let pa = (ppn as usize) << 12;
+                                let kv = crate::arch::mm::phys_to_virt(
+                                    crate::arch::mm::PhysAddr::new(pa as u64),
+                                )
+                                .bits() as usize
+                                    + (uaddr & 0xfff);
+                                // SAFETY: the walked leaf maps the holder's
+                                // own futex word; one volatile u32 read.
+                                unsafe { core::ptr::read_volatile(kv as *const u32) }
+                            })
+                        });
+                    match word {
+                        Some(v) => {
+                            crate::pr_warn!(
+                                "binder-stall:    futex word = {:#x} (owner tid {})",
+                                v,
+                                v
+                            );
+                            // Chase a plausible owner tid (glibc stores the
+                            // owner TID in the mutex word for
+                            // error-checking/recursive mutexes).
+                            if v > 0 && v < 0x00ff_ffff {
+                                let owner =
+                                    unsafe { crate::sched::find_task_by_pid(v) };
+                                if !owner.is_null() {
+                                    let ot = unsafe { &*owner };
+                                    let otop = ot.kernel_stack_top();
+                                    #[cfg(feature = "x86_64")]
+                                    let (osys, orip) = {
+                                        let regs = (otop.wrapping_sub(
+                                            crate::arch::x86_64::pt_regs::PT_REGS_SIZE,
+                                        )) as *const crate::arch::x86_64::pt_regs::PtRegs;
+                                        // SAFETY: diagnostic read of the
+                                        // owner's entry frame.
+                                        unsafe { ((*regs).orig_rax, (*regs).rip) }
+                                    };
+                                    #[cfg(feature = "riscv64")]
+                                    let (osys, orip) = {
+                                        let regs = (otop.wrapping_sub(
+                                            crate::arch::riscv64::pt_regs::PT_REGS_SIZE,
+                                        )) as *const crate::arch::riscv64::pt_regs::PtRegs;
+                                        // SAFETY: same contract, riscv64.
+                                        unsafe { ((*regs).a7, (*regs).epc) }
+                                    };
+                                    #[cfg(not(any(feature = "x86_64", feature = "riscv64")))]
+                                    let (osys, orip) = (0u64, 0u64);
+                                    crate::pr_warn!(
+                                        "binder-stall:    owner tid {} state={:#x} sys={:#x} rip={:#x}",
+                                        v,
+                                        ot.state().bits(),
+                                        osys,
+                                        orip
+                                    );
+                                } else {
+                                    crate::pr_warn!(
+                                        "binder-stall:    owner tid {} NOT FOUND (exited while holding?)",
+                                        v
+                                    );
+                                }
+                            }
+                        }
+                        None => crate::pr_warn!(
+                            "binder-stall:    futex word unreadable (page absent)"
+                        ),
+                    }
                 }
             }
         }
@@ -2196,6 +2281,20 @@ pub fn stall_report() {
                             thread_census_line(t);
                             hist_line(t);
                         }
+                    }
+                    // sc75: the owing proc's full futex-waiter graph — the
+                    // intra-process contention set (each entry: waiting tid,
+                    // uaddr, woken). The wedge terminal so far is handlers
+                    // blocked on per-thread-stack condvar/mutex words.
+                    let fw = crate::sync::futex::waiters_of_tgid(op.pid);
+                    if !fw.is_empty() {
+                        let mut s = alloc::string::String::new();
+                        use core::fmt::Write;
+                        for (pid, uaddr, woken) in fw {
+                            let _ = write!(s, " [{}:{:#x} w={}]", pid, uaddr, woken);
+                        }
+                        crate::pr_warn!("binder-stall: futex waiters of pid {}:", op.pid);
+                        crate::pr_warn!("binder-stall:{}", s);
                     }
                 }
             }

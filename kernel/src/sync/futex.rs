@@ -241,6 +241,51 @@ pub fn waiter_of(task: *mut Task) -> Option<(usize, usize, bool)> {
     None
 }
 
+/// Diagnostic (sc75 launcher IPC death loop): every live futex waiter that
+/// belongs to `tgid` — the intra-process contention graph. Returns
+/// (task_pid, uaddr, woken) triples; the binder stall dump prints them so a
+/// handler blocked on a per-call condvar/mutex names the whole wait set and
+/// each one's woken state. Entries whose task is no longer in the pid hash
+/// are skipped (exit-race guard for the raw task deref).
+pub fn waiters_of_tgid(tgid: u32) -> alloc::vec::Vec<(u32, usize, bool)> {
+    let mut out = alloc::vec::Vec::new();
+    for b in HASH_HEADS.iter() {
+        let h = b.lock_irqsave();
+        let mut idx = *h;
+        while let Some(i) = idx {
+            // SAFETY: slot indices come from chain links under the bucket
+            // lock; the tuple is copied out under the slot lock.
+            let (entry, next) = {
+                let slot = WAITER_POOL[i].lock_irqsave();
+                match *slot {
+                    Some(ref w) if !w.task.is_null() => {
+                        // SAFETY: liveness verified via the pid hash before
+                        // the tgid read; the derefs touch only pid fields.
+                        let t = unsafe { (*w.task).pid() };
+                        let live = core::ptr::eq(
+                            // SAFETY: diagnostic pid-hash lookup.
+                            unsafe { crate::sched::find_task_by_pid(t) },
+                            w.task,
+                        );
+                        let hit = live && (unsafe { (*w.task).tgid() as u32 } == tgid);
+                        (Some((hit, t, w.key.uaddr, w.woken)), w.next)
+                    }
+                    Some(ref w2) => (None, w2.next),
+                    None => (None, None),
+                }
+            };
+            match entry {
+                Some((true, pid, uaddr, woken)) => out.push((pid, uaddr, woken)),
+                Some((false, ..)) => {}
+                None => break,
+            }
+            idx = next;
+        }
+        drop(h);
+    }
+    out
+}
+
 /// Allocate a waiter slot
 fn alloc_waiter() -> Option<usize> {
     for i in 0..WAITER_POOL_SIZE {
