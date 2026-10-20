@@ -560,3 +560,19 @@ ArkUI init phase (mmap/fault storm against the PTE lock + fork walks).
 
 Boot kit unchanged: oh-boot-q.sh + userdata-sc49.img copies; shotmon
 running; scNN-serial.log/oh-shotmon.csv on run/.
+
+Session G addendum — sc64 FINAL (IPI yield in):
+  worst IPC 254s (the OH retry-ladder event), second tier 6.5s; stalls/
+  KERNPANIC/LATE-FIRE 0; strands avg 155ms (best yet; sc56 baseline
+  was 162-186ms avg WITH multi-second stalls and 34k-line log noise).
+  LIFECYCLE timeouts persist (144+191) — the ArkUI-init wall stands.
+
+  Session G bottom line: the timer/softirq/IPC-latency stall families
+  the handoff named (hrtimer 4.4s late, WAKE-STRANDED 16s, IRQ-off
+  windows) are root-caused and closed at the kernel level I own; the
+  remaining latency wall is structural (fork COW walk CPU monopoly +
+  no kernel preemption + single global PTE lock) and needs the mm
+  owner's lock redesign + a preempt_count audit before the launcher
+  lifecycle can complete. All commits are on feature/samgr-callback
+  ready for main-session review; test/bindmkdir.c unaffected (riscv64
+  paths untouched behaviorally).
