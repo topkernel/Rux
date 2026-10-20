@@ -55,6 +55,7 @@ pub use sched::{
     // Preemptive scheduling support
     need_resched,
     set_need_resched,
+    cond_resched,
     scheduler_tick,
     // SMP multi-core support
     cpu_idle_loop,

@@ -673,6 +673,24 @@ pub fn current_pt_regs() -> *const PtRegs {
     CURRENT_PT_REGS[cpu].load(core::sync::atomic::Ordering::Relaxed) as *const PtRegs
 }
 
+/// Wakewatch: RIP of another CPU's most recent trap frame, for the
+/// TIMER-SOFTIRQ-STALL report. Diagnostic read of a slot the target CPU
+/// owns; races live execution (worst case a torn-but-bounded value).
+/// 0 when no frame is live or the slot holds a non-canonical pointer.
+pub fn pt_regs_rip_for_cpu(cpu: usize) -> u64 {
+    if cpu >= crate::config::MAX_CPUS {
+        return 0;
+    }
+    let p = CURRENT_PT_REGS[cpu].load(core::sync::atomic::Ordering::Relaxed) as *const PtRegs;
+    if p.is_null() || !crate::sched::sched::kernel_ptr_canonical(p as *const u8) {
+        return 0;
+    }
+    // SAFETY: canonical kernel address; the frame page stays mapped
+    // (physmap/linear addresses of kernel stacks are never unmapped),
+    // so the scalar read cannot fault — any value is diagnostic-only.
+    unsafe { core::ptr::addr_of!((*p).rip).read() }
+}
+
 /// pt_regs of the current task's user frame (stack_top - sizeof(PtRegs))
 pub fn current_task_pt_regs() -> Option<&'static mut PtRegs> {
     let task = crate::sched::current()?;
@@ -992,11 +1010,101 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize, vector: u64) {
     }
 }
 
+/// Rate gate for the IRQ-OFF-WINDOW probe: at most one direct-console
+/// report per 2 s of jiffies (episodes can cluster; the log must not).
+fn ww_irqwin_budget_ok() -> bool {
+    static LAST: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+    let now = crate::drivers::timer::get_jiffies();
+    let last = LAST.load(core::sync::atomic::Ordering::Acquire);
+    if now.wrapping_sub(last) < 20 {
+        return false;
+    }
+    LAST.compare_exchange(last, now, core::sync::atomic::Ordering::AcqRel, core::sync::atomic::Ordering::Acquire)
+        .is_ok()
+}
+
 /// Shared timer-tick body (used by both the LAPIC-timer vector and the
 /// legacy PIC IRQ0 fallback) — faithful port of the riscv64 twin.
 fn handle_timer_tick(regs: &mut PtRegs, cpu: usize) {
     // Increment interrupt counter for /proc/interrupts
     crate::fs::procfs::interrupts::timer_inc(cpu);
+
+    // Wakewatch long-IRQ-off-window probe (UART perf gate round 2,
+    // 2026-10-20): THIS tick arriving >100 ms after the previous one on
+    // this CPU is the recovery IRQ of a long IF=0 window — the frame and
+    // stack below are the culprit's, live, at the exact moment the window
+    // broke (the pending tick fired at the first sti). Direct-console
+    // print (IRQ context, R34 discipline), rate-gated to one per 2 s.
+    // Symbolize the text-range words offline with addr2line.
+    {
+        let age_ms = crate::timer::ww_tick_age_ms(cpu);
+        if age_ms > 100 && ww_irqwin_budget_ok() {
+            use crate::console::putchar_no_lock as putchar;
+            fn ph(v: u64) {
+                use crate::console::putchar_no_lock as putchar;
+                for sh in (0..16).rev() {
+                    let n = ((v >> (sh * 4)) & 0xF) as u8;
+                    putchar(if n < 10 { b'0' + n } else { b'a' + n - 10 });
+                }
+            }
+            let cur = crate::sched::current();
+            let (pid, pc) = unsafe {
+                match cur {
+                    Some(t) => ((*t).pid() as u64, (*t).preempt_count() as u64),
+                    None => (0, 0),
+                }
+            };
+            let msg: &[u8] = b"\nWW: IRQ-OFF-WINDOW cpu=";
+            for &b in msg {
+                putchar(b);
+            }
+            ph(cpu as u64);
+            let msg: &[u8] = b" age=";
+            for &b in msg {
+                putchar(b);
+            }
+            ph(age_ms);
+            let msg: &[u8] = b"ms pid=";
+            for &b in msg {
+                putchar(b);
+            }
+            ph(pid);
+            let msg: &[u8] = b" pc=";
+            for &b in msg {
+                putchar(b);
+            }
+            ph(pc);
+            let msg: &[u8] = b" rip=";
+            for &b in msg {
+                putchar(b);
+            }
+            ph(regs.rip);
+            let msg: &[u8] = b" rsp=";
+            for &b in msg {
+                putchar(b);
+            }
+            ph(regs.rsp);
+            // Stack words in kernel text — return addresses of the
+            // in-window call chain. Guarded by the canonical + text-range
+            // checks; anything else prints as '.'.
+            let (lo, hi) = crate::sched::sched::kernel_text_window();
+            if crate::sched::sched::kernel_ptr_canonical(regs.rsp as *const u8) {
+                for i in 0..12 {
+                    let addr = regs.rsp as *const u64;
+                    // SAFETY: canonical kernel address; the kernel stack
+                    // stays mapped, so the scalar read cannot fault.
+                    let w = unsafe { core::ptr::addr_of!((*addr.add(i))).read_volatile() };
+                    putchar(b' ');
+                    if w >= lo && w < hi {
+                        ph(w);
+                    } else {
+                        putchar(b'.');
+                    }
+                }
+            }
+            putchar(b'\n');
+        }
+    }
 
     // Skip scheduler logic during early boot (no current task).
     if crate::sched::current().is_none() {

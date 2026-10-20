@@ -345,6 +345,11 @@ pub fn sweep_dead_threads(leader: *mut Task) {
         // SAFETY: m came from the leader's dead list (DEAD, hash-removed,
         // final switch-out completed).
         unsafe { free_dead_member(m) };
+        // Perf gate (2026-10-20): the sweep frees stacks, PtRegs and Arc
+        // references per member under the OH thread-churn load; without
+        // a yield point a long sweep monopolizes this CPU (steady
+        // WAKE-STRANDED family). Safe point: no locks held here.
+        crate::sched::cond_resched();
     }
 }
 

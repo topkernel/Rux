@@ -1562,6 +1562,9 @@ pub fn binder_mmap_handler(
     // exclusive inside OUR VMA — zap it and install the binder frame so
     // the kvirt/PTE pairing (binder's coherence contract) holds.
     {
+        #[cfg(feature = "x86_64")]
+        let _pte_guard = crate::arch::mm::mm_ops::PTE_MODIFY_LOCK.lock();
+        #[cfg(not(feature = "x86_64"))]
         let _pte_guard = crate::arch::mm::mm_ops::PTE_MODIFY_LOCK.lock_irqsave();
         for i in 0..(size / PAGE_SIZE) {
             let va = vaddr + i * PAGE_SIZE;

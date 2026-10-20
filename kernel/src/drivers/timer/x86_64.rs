@@ -221,11 +221,16 @@ fn increment_jiffies_from_timebase() {
 /// Clock interrupt handler (called from the x86_64 trap entry)
 pub fn timer_interrupt_handler() {
     // Wakewatch: per-CPU timer-IRQ arrival count (storm detector — the
-    // heartbeat prints the per-second delta).
+    // heartbeat prints the per-second delta) + last-arrival stamp, so a
+    // TIMER-SOFTIRQ-STALL report can tell "this CPU's timer IRQs stopped
+    // arriving too" (long IRQ-off window: putc/uart_write/console lock)
+    // from "ticks kept arriving but softirq dispatch was skipped"
+    // (in_softirq deferral / stuck SOFTIRQ_IN_PROGRESS).
     {
         let cpu = crate::arch::cpu_id() as usize;
         if cpu < crate::config::MAX_CPUS {
             crate::timer::WW_TICK_IRQ[cpu].fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            crate::timer::ww_note_tick_arrival(cpu);
         }
     }
     if timebase_precise() {

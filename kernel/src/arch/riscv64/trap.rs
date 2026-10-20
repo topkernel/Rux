@@ -73,6 +73,26 @@ pub fn current_pt_regs() -> *const PtRegs {
     CURRENT_PT_REGS[cpu].load(core::sync::atomic::Ordering::Relaxed) as *const PtRegs
 }
 
+/// Wakewatch: RIP-equivalent (epc) of another CPU's most recent trap
+/// frame, for the TIMER-SOFTIRQ-STALL report. Diagnostic read of a slot
+/// the target CPU owns; races live execution (worst case a torn-but-
+/// bounded value from a frame being built). 0 when no frame is live.
+pub fn pt_regs_rip_for_cpu(cpu: usize) -> u64 {
+    if cpu >= crate::config::MAX_CPUS {
+        return 0;
+    }
+    let p = CURRENT_PT_REGS[cpu].load(core::sync::atomic::Ordering::Relaxed) as *const PtRegs;
+    if p.is_null() || !crate::sched::sched::kernel_ptr_canonical(p as *const u8) {
+        return 0;
+    }
+    // SAFETY: the slot holds either a live trap frame on that CPU's
+    // kernel stack or a stale-but-mapped one; one volatile-ish scalar
+    // read of the epc field cannot fault (the frame page stays mapped
+    // while any task on that stack exists, and the diagnostic consumer
+    // tolerates any value).
+    unsafe { core::ptr::addr_of!((*p).epc).read() }
+}
+
 /// Initialize trap handling
 pub fn init() {
     // SAFETY: stvec and sscratch are supervisor CSRs; writing them at init time is safe

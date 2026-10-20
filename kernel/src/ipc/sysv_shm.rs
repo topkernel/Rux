@@ -822,7 +822,10 @@ pub fn sys_shmat(args: [u64; 6]) -> i64 {
             // R7-A5: map+refcount under the PTE lock (same discipline as
             // the demand-fault paths).
             crate::arch::mm::mm_ops::MM_CTX.store(1, core::sync::atomic::Ordering::Relaxed);
-            let _pte_guard = crate::arch::mm::mm_ops::PTE_MODIFY_LOCK.lock_irqsave();
+        #[cfg(feature = "x86_64")]
+        let _pte_guard = crate::arch::mm::mm_ops::PTE_MODIFY_LOCK.lock();
+        #[cfg(not(feature = "x86_64"))]
+        let _pte_guard = crate::arch::mm::mm_ops::PTE_MODIFY_LOCK.lock_irqsave();
             map_user_page(
                 root_ppn,
                 MmVirtAddr::new((attach_addr + i * PAGE_SIZE) as u64),

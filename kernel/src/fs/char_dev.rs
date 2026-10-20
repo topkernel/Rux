@@ -88,17 +88,38 @@ pub unsafe fn uart_read(buf: *mut u8, count: usize) -> isize {
 
 pub unsafe fn uart_write(buf: *const u8, count: usize) -> isize {
     let slice = core::slice::from_raw_parts(buf, count);
-    // R20-4 (PIPE2 pp=0 root cause): take the UART lock ONCE for the
-    // whole buffer. The old per-byte putchar let two CPUs interleave at
-    // byte granularity — the nettest PIPE2 reader's `write(2, "PIPE-OK\n")`
-    // raced the parent's P2d status print and the marker got split
-    // ("PIPE-P2d(wa=...)OK"), so the gate grepped 0 hits while the
-    // pipeline itself worked (nettest PASS). One lock acquisition per
-    // write() makes console output atomic per syscall, like Linux's
-    // console_lock-held emit.
-    let uart = console::lock();
-    for &b in slice {
-        uart.putc(b);
+    // R20-4 (PIPE2 pp=0 root cause): console output must stay atomic
+    // against other task-context writers, or the nettest PIPE2 marker
+    // splits and the gate greps 0 hits. The old fix took the UART lock
+    // ONCE for the whole buffer.
+    //
+    // UART perf gate (2026-10-20): that whole-buffer acquisition is
+    // `lock_irqsave` — a 256-byte condev chunk then held IRQs disabled
+    // for the entire chunk's THRE pacing (and up to the full putc stall
+    // budget on a slow chardev), which under the OH hilog volume
+    // (~34k lines/boot through /dev/ttyS0) produced the multi-second
+    // IRQ-off windows behind TIMER-SOFTIRQ-STALL / TIMER-LATE-FIRE /
+    // WAKE-STRANDED and the 102 s IPC SendRequest regressions.
+    // Compromise: re-acquire per UART_TX_CHUNK bytes. Atomicity is
+    // preserved at 32-byte granularity — every status marker the test
+    // suites grep (PIPE-OK\n, PASS/FAIL lines) fits well inside 32
+    // bytes, so two task-context writers still cannot split one, while
+    // the IRQ-off windows shrink from whole-buffer to sub-chunk (the
+    // per-byte putc stall bound lives in console.rs). Byte dropping on
+    // TX_STALLED is unchanged (putc latches and drops per its budget).
+    const UART_TX_CHUNK: usize = 32;
+    let mut idx = 0usize;
+    while idx < slice.len() {
+        let end = core::cmp::min(idx + UART_TX_CHUNK, slice.len());
+        {
+            let uart = console::lock();
+            let mut i = idx;
+            while i < end {
+                uart.putc(slice[i]);
+                i += 1;
+            }
+        }
+        idx = end;
     }
     count as isize
 }
