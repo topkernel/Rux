@@ -367,16 +367,31 @@ pub fn timer_softirq_handler(_nr: usize) {
         // while the machine is up is timer-starved (IRQ-off windows or
         // softirq overflow with a starved ksoftirqd). One print per
         // episode start, rate-gated globally.
+        //
+        // UART perf gate (2026-10-20): the report now also carries the
+        // stalled CPU's timer-IRQ arrival age and its current task
+        // (pid/preempt_count/RIP). tick_age ≈ softirq age ⇒ that CPU's
+        // timer IRQs stopped arriving too ⇒ a long IF=0 window (UART
+        // THRE poll under the console lock was the convicted producer).
+        // tick_age small but softirq age large ⇒ IRQs arrived and the
+        // dispatch was skipped (in_softirq deferral to a starved
+        // ksoftirqd, or stuck SOFTIRQ_IN_PROGRESS).
         for c in 0..crate::config::MAX_CPUS {
             let l = WW_HRES_LAST[c].load(Ordering::Acquire);
             if l != 0 && now_time.saturating_sub(l) > crate::config::TIMER_CLOCK_FREQ_HZ {
                 if ww_latefire_budget_ok() {
+                    let tick_age_ms = ww_tick_age_ms(c);
+                    let (pid, pc, rip) = crate::sched::sched::ww_stalled_cpu_state(c);
                     crate::pr_err!(
-                        "WW: TIMER-SOFTIRQ-STALL cpu={} age={}ms n={}",
+                        "WW: TIMER-SOFTIRQ-STALL cpu={} age={}ms tick_age={}ms n={} pid={} pc={:#x} rip={:#x}",
                         c,
                         (now_time.saturating_sub(l)) * 1000
                             / crate::config::TIMER_CLOCK_FREQ_HZ,
-                        WW_HRES_N[c].load(Ordering::Relaxed)
+                        tick_age_ms,
+                        WW_HRES_N[c].load(Ordering::Relaxed),
+                        pid,
+                        pc,
+                        rip
                     );
                 }
             }
@@ -747,6 +762,38 @@ pub fn ww_note_rearm() {
 /// Wakewatch: per-CPU timer-IRQ arrival counts (storm detector).
 pub static WW_TICK_IRQ: [AtomicU64; crate::config::MAX_CPUS] =
     [const { AtomicU64::new(0) }; crate::config::MAX_CPUS];
+
+/// Wakewatch: per-CPU stamp of the last timer-IRQ arrival (time ticks;
+/// 0 = never). Lets the TIMER-SOFTIRQ-STALL report discriminate "IRQs
+/// stopped arriving" (IF=0 window) from "arrived but dispatch skipped".
+static WW_TICK_LAST: [AtomicU64; crate::config::MAX_CPUS] =
+    [const { AtomicU64::new(0) }; crate::config::MAX_CPUS];
+
+/// Wakewatch: record a timer-IRQ arrival on `cpu` (x86_64 tick path).
+pub fn ww_note_tick_arrival(cpu: usize) {
+    if cpu < crate::config::MAX_CPUS {
+        WW_TICK_LAST[cpu].store(read_time_stamp(), Ordering::Release);
+    }
+}
+
+#[inline]
+fn read_time_stamp() -> u64 {
+    crate::drivers::timer::read_time()
+}
+
+/// Wakewatch: age in ms of cpu's last timer-IRQ arrival (0 = never
+/// arrived — pre-tick boot, or the stamp predates the LAPIC switch).
+pub fn ww_tick_age_ms(cpu: usize) -> u64 {
+    if cpu >= crate::config::MAX_CPUS {
+        return 0;
+    }
+    let last = WW_TICK_LAST[cpu].load(Ordering::Acquire);
+    if last == 0 {
+        return 0;
+    }
+    let age = crate::drivers::timer::read_time().saturating_sub(last);
+    age * 1000 / crate::config::TIMER_CLOCK_FREQ_HZ
+}
 
 /// Per-CPU softirq-run age in ms (heartbeat helper); 0 = never ran.
 pub fn ww_hres_age_ms(cpu: usize) -> u64 {

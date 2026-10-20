@@ -673,6 +673,24 @@ pub fn current_pt_regs() -> *const PtRegs {
     CURRENT_PT_REGS[cpu].load(core::sync::atomic::Ordering::Relaxed) as *const PtRegs
 }
 
+/// Wakewatch: RIP of another CPU's most recent trap frame, for the
+/// TIMER-SOFTIRQ-STALL report. Diagnostic read of a slot the target CPU
+/// owns; races live execution (worst case a torn-but-bounded value).
+/// 0 when no frame is live or the slot holds a non-canonical pointer.
+pub fn pt_regs_rip_for_cpu(cpu: usize) -> u64 {
+    if cpu >= crate::config::MAX_CPUS {
+        return 0;
+    }
+    let p = CURRENT_PT_REGS[cpu].load(core::sync::atomic::Ordering::Relaxed) as *const PtRegs;
+    if p.is_null() || !crate::sched::sched::kernel_ptr_canonical(p as *const u8) {
+        return 0;
+    }
+    // SAFETY: canonical kernel address; the frame page stays mapped
+    // (physmap/linear addresses of kernel stacks are never unmapped),
+    // so the scalar read cannot fault — any value is diagnostic-only.
+    unsafe { core::ptr::addr_of!((*p).rip).read() }
+}
+
 /// pt_regs of the current task's user frame (stack_top - sizeof(PtRegs))
 pub fn current_task_pt_regs() -> Option<&'static mut PtRegs> {
     let task = crate::sched::current()?;

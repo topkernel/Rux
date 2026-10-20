@@ -1115,6 +1115,31 @@ pub fn idle_task_ptr(cpu: usize) -> usize {
     }
 }
 
+/// Wakewatch: diagnostic state of a possibly-stalled CPU for the
+/// TIMER-SOFTIRQ-STALL report — its current task's pid and preempt_count
+/// plus the RIP of its most recent trap frame. Values race live
+/// execution (the target CPU keeps running); they name the context the
+/// stall recoverer found, nothing more.
+pub fn ww_stalled_cpu_state(cpu: usize) -> (u64, u64, u64) {
+    if cpu >= MAX_CPUS {
+        return (0, 0, 0);
+    }
+    let cur = cpu_state(cpu).current;
+    if cur.is_null() {
+        return (0, 0, crate::arch::trap::pt_regs_rip_for_cpu(cpu));
+    }
+    // SAFETY: init-time valid slot pointer; reads of stable Task fields
+    // (pid, preempt_count) are diagnostic-only and tolerate a concurrent
+    // switch (worst case a torn-but-bounded value).
+    unsafe {
+        (
+            (*cur).pid() as u64,
+            (*cur).preempt_count() as u64,
+            crate::arch::trap::pt_regs_rip_for_cpu(cpu),
+        )
+    }
+}
+
 // ==================== Per-CPU Accessors ====================
 
 /// Get per-CPU state for the current CPU.
