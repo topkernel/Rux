@@ -415,6 +415,43 @@ make the marking amortized. The net-side trigger (TcpTxBatch growth to
 USEGV-F (service-side errno-as-pointer): 120 victims in both mmoh and r5
 windows — unchanged by chunking, as expected.
 
+### Session-4 close-out addendum
+
+- v2 never recovered: after the 19-min wedge it produced only ~1k more
+  wakes across its remaining ~25 min (final wakes 3.38M, strand_max
+  ratcheted to 1079s). The heap-grind freeze is effectively terminal for
+  a boot, not a transient. 0 KERNPANIC/ALLOCTHROW to the end.
+- The chain driver task was killed externally at 05:34 (r8 died with it
+  at 32/45 min — clean partial: 0 WW-HIT, 0 panics, armed, storming).
+  Relaunched from r9 at 05:35; chain continues on the frozen kernel.
+- Cross-line convergence (launcher line Session I / A, relayed): the
+  preempt_count leak producer is fingerprinted as a SpinlockGuard whose
+  add/drop executes in TWO task contexts (hit sites: fs::inode::ICACHE,
+  fs::locks::RECORD_LOCK_TABLE, VFS heap spinlocks) — same engine class
+  as this hunt's wild writer. Their IPC wedge is shape-DISTINCT from my
+  buddy grind (four binder holders INTERRUPTIBLE-parked in
+  ioctl(BINDER_WRITE_READ) with todo=0 — lost-work, not lock-grind), but
+  their MM-DROP-CTX witness (an mm owned by a live pid dropped in
+  another pid's context — mm_struct.rs, THIS line's territory) fired in
+  the same seconds as their 116s strand. Emerging picture: one engine,
+  two downstream faces (buddy-meta corruption → lock-grind here;
+  park/state corruption → lost-work there).
+- Negative checks from my boots: MM-DROP-CTX = 0 in v1/v2/r7/r8/mmoh
+  serials; sleeping tasks with leaked preempt counts = 0 in v2's
+  periodic taskdumps (pre- and post-wedge). My windows show no engine
+  fingerprint — the wedge stands on the buddy grind alone. The order-18
+  coalescing anomaly (impossible with 229MB in use unless free-mark
+  metadata lied) remains the one place engine corruption could enter my
+  mechanism; correlation only, unproven.
+- Next-session mm work, in order: (1) buddy free/merge marking cost —
+  the O(2^order) mark-every-page loops under the single irqsave heap
+  lock are the grind; make interior marking a dfx-gated debug check or
+  amortize it (careful: R9-14/R17 tripwires rely on the marks);
+  (2) per-mm locks (the wall endgame) once the wedge correlation is
+  resolved; (3) if the engine capture lands, audit buddy meta and
+  MmStruct Arc refcounts for blast radius; MM-DROP-CTX is the
+  in-kernel witness already in place.
+
 ## Where this leaves the hunt (handoff)
 
 The attribution machinery now exists and is proven end-to-end; the
