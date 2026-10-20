@@ -1,35 +1,49 @@
 #!/usr/bin/env python3
 """ww-gdbscript.py — generate the gdb command file for the wildwrite hunt.
 
-Hardware watchpoints on the hpet victim statics (this build's addresses,
-from `nm target/x86_64-unknown-none/debug/rux`):
-  .data: BASE_LOCKED_INV / BOOT_OFFSET_INV / DIV_INV
-  .bss : BASE_LOCKED / BOOT_OFFSET / DIV / BASE
-(LAST_GOOD is written on every clock read — excluded.)
+Hardware watchpoints on the hpet victim statics, addresses derived from
+`nm` of the CURRENT build (the wildwatch commit moved the quiet statics
+into hpet::GUARD — a page-exclusive cluster; the watch set therefore
+targets the GUARD members directly so watchpoint boots work on both the
+pre- and post-relocation layouts).
 
-Every hit logs rip + symbol + registers + stack window and continues.
-Legit writers are a known small set (hpet::init at early boot — before
-attach; heal paths in validated_read_base / read_time_nominal /
-read_counter). Any OTHER rip is the wild writer.
+Note: do NOT combine with dfx=wildwatch — the RO trap faults the store
+before it lands, so the watchpoint would never see a value change.
+
+Legit writers post-attach are only the heal paths in
+validated_read_base / read_time_nominal (recognizable rip). Anything
+else IS the wild writer.
 """
 
+import re
+import subprocess
 import sys
 
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 12371
-ELF = (
-    "/home/william/rux-agents/wildwrite-hunt/"
-    "target/x86_64-unknown-none/debug/rux"
-)
+ROOT = "/home/william/rux-agents/wildwrite-hunt"
+ELF = f"{ROOT}/target/x86_64-unknown-none/debug/rux"
 
-# name -> address (regenerate with nm if the kernel is rebuilt)
+nm = subprocess.run(["nm", ELF], capture_output=True, text=True, check=True).stdout
+
+def addr(sym_suffix):
+    for line in nm.splitlines():
+        m = re.match(r"^([0-9a-f]+) [bBdDtTrR] (\S+)$", line)
+        if m and m.group(2).endswith(sym_suffix):
+            return int(m.group(1), 16)
+    raise SystemExit(f"symbol ending in {sym_suffix} not found")
+
+guard = addr("4hpet5GUARD")
+
 WATCHES = {
-    "BASE_LOCKED_INV": 0xFFFFFFFF807BF608,
-    "BOOT_OFFSET_INV": 0xFFFFFFFF807BF610,
-    "DIV_INV": 0xFFFFFFFF807BF618,
-    "BASE_LOCKED": 0xFFFFFFFF80D02D90,
-    "BOOT_OFFSET": 0xFFFFFFFF80D02D98,
-    "DIV": 0xFFFFFFFF80D02DA0,
-    "BASE": 0xFFFFFFFF80D02DA8,
+    # GUARD cluster: canary page (two spots) + the member qwords.
+    "GUARD_CANARY_LO": guard + 0x000,
+    "GUARD_CANARY_MID": guard + 0x7F8,
+    "BASE_LOCKED": guard + 0x1000,
+    "BASE_LOCKED_INV": guard + 0x1008,
+    "DIV": guard + 0x1010,
+    "DIV_INV": guard + 0x1018,
+    "BOOT_OFFSET": guard + 0x1020,
+    "BOOT_OFFSET_INV": guard + 0x1028,
 }
 
 out = []
@@ -40,20 +54,19 @@ out.append("set width 0")
 out.append("set print thread-events off")
 out.append(f"file {ELF}")
 out.append(f"target remote 127.0.0.1:{PORT}")
-for name, addr in WATCHES.items():
-    out.append(f"watch *(unsigned long long*)0x{addr:x}")
+for name, a in WATCHES.items():
+    out.append(f"watch *(unsigned long long*)0x{a:x}")
     out.append("commands")
     out.append("silent")
     out.append(
-        f'printf "WW-HIT {name} old->new, rip=%p rsp=%p rbp=%p\\n", '
-        "$rip, $rsp, $rbp"
+        f'printf "WW-HIT {name} rip=%p rsp=%p rbp=%p\\n", $rip, $rsp, $rbp'
     )
     out.append("info symbol $rip")
-    out.append("info registers")
-    out.append("x/32gx $rsp")
+    out.append("info registers rip rsp rbp rax rbx rcx rdx rsi rdi r8 r9 r10 r11 r12 r13 r14 r15")
+    out.append("x/24gx $rsp")
     out.append("continue")
     out.append("end")
-out.append("printf \"WW-ARMED %d watchpoints\\n\"" % len(WATCHES))
+out.append(f'printf "WW-ARMED {len(WATCHES)} watchpoints, GUARD=0x{guard:x}\\n"')
 out.append("continue")
 
 print("\n".join(out))
