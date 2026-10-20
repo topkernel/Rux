@@ -1570,6 +1570,11 @@ pub fn free_task_slot(task_ptr: *mut Task) {
         // the exit paths, so their drops here are no-ops there; on the
         // fork unwind paths dropping the cloned Arcs is exactly the
         // correct refcount decrement.
+        // Wakewatch: invalidate the wake stamp keyed by this address
+        // BEFORE the page is recycled — a new Task at the same address
+        // must not inherit the old occupant's stamp (phantom-strand
+        // guard, see wakewatch::note_task_freed).
+        crate::sched::wakewatch::note_task_freed(task_ptr);
         unsafe {
             core::ptr::drop_in_place(task_ptr);
         }

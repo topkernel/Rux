@@ -96,6 +96,18 @@ pub fn note_wake(task: *mut crate::process::Task) {
     WAKE_N.fetch_add(1, Ordering::Relaxed);
 }
 
+/// Invalidate `task`'s side-table stamp at task destruction. The slot
+/// key is the Task ADDRESS and task pages are recycled, so without this
+/// a recycled Task at the same address inherits the previous occupant's
+/// wake stamp — the first pick of the NEW task then reports a phantom
+/// strand spanning the old task's whole lifetime (multi-ten-second
+/// WAKE-STRANDED outliers that were never real scheduling events).
+pub fn note_task_freed(task: *mut crate::process::Task) {
+    let slot = slot_of(task);
+    slot.stamp.store(0, Ordering::Release);
+    slot.task.store(0, Ordering::Release);
+}
+
 /// Consume the stamp at pick time; classify and report. Called from
 /// mark_picked_on_cpu under the GRQ lock — prints go through the direct
 /// console (R34 discipline), rate-gated to one line per 2 jiffies.
