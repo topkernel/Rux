@@ -344,6 +344,28 @@ pub fn vfs_mount(
     root_inode: Arc<Inode>,
     mnt_flags: MntFlags,
 ) -> Option<Arc<Dentry>> {
+    // Namespace discipline (sc36): attach at the mountpoint AS THE
+    // CALLER SEES IT. path_lookup prefixes absolute paths with the
+    // task root, but this walk started at the GLOBAL root — a
+    // prefixed process (appspawn child inside the system sandbox)
+    // binding /mnt/sandbox/0/<pkg>/dev attached the mount on the
+    // direct-global dentry side, while every later lookup walked the
+    // through-sandbox-prefix side: two dentry trees over the same
+    // tmpfs nodes, mounts visible from one side only. Post-pivot
+    // /dev/null resolved to the bare tmpfs dir and the spawn child
+    // died at appspawn_common.c:350 (sc33-sc36). Prepend the task root
+    // exactly like make_absolute_rooted; kernel threads and early boot
+    // (root "/") are unchanged.
+    let owned_mountpoint;
+    let mountpoint = {
+        let root = get_process_root();
+        if root != "/" && mountpoint.starts_with('/') {
+            owned_mountpoint = format!("{}{}", root.trim_end_matches('/'), mountpoint);
+            owned_mountpoint.as_str()
+        } else {
+            mountpoint
+        }
+    };
     let mut state = VFS_STATE.lock();
 
     // Ensure VFS root dentry exists
