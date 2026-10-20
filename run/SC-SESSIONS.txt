@@ -755,3 +755,34 @@ impossible-shape ring evidence, known-crash filter):
 - Offline symbolization kit ready: /tmp/oh-libs/{syslib64(1073),
   vendorlib64(228)} extracted from the images; method verified against
   the known crash site. PARK-STACK frames print fd+fileoff+bytes.
+
+Session J update 3 (07:4x — ROOT CAUSE FOUND AND FIXED: one sync txn
+per read):
+
+sc79's park-stack + ring closed the impossible shape:
+- tid 796 (distributeddata service, caller frames byte-matched to
+  libdistributeddataservice.z.so): ring shows TXN_RECV(12919)@11372
+  TXN_RECV(12932)@11372 — TWO sync txns delivered in ONE read (the
+  second was a from-walk redirect already sitting on the thread's own
+  todo). Kernel stacked both; OH libipc dispatches one command per
+  TransactWithDriver iteration. The first handler's nested call made
+  its BC_REPLY pop the WRONG stack top (the undispatched second txn):
+  replies crossed, accounting desynced, thread strands in a read owing
+  a reply with NO outstanding nested txn (the SERVER-OWING shape
+  reproduced across sc74/77/78/79).
+- CASCADE: crossed/never-delivered replies -> client chains wait
+  forever -> samgr AddSystemAbility pile-ups (the 16-reader rwlock
+  freeze) -> os-account proxy fetch failures ("Get proxy failed") ->
+  SA hosts restart-loop -> launcher chain freezes.
+- FIX (landed): binder_thread_read breaks the drain loop after staging
+  ONE sync (non-reply) transaction — Linux parity. Ring event
+  TXN_RECV_END added. sc80 validates.
+- W2 verdict: the 2 wake-refusal hits were the benign R42 double-wake
+  race (state flipped RUNNING by a concurrent wake) — the wake path is
+  clean; the earlier "WAKE-RUN-LEAK" 230 hits were mostly healthy
+  idle workers waking+reparking (cfs_linked=0 is correct for parked
+  tasks; pick_state=PICK_LIVE persists on every sleeper — red herring).
+- Remaining known-issues (not kernel): libusb_pnp_manager.z.so+0x15bac
+  NULL list-walk crash-loop (devhost_usb, byte-verified vs vendor lib);
+  OH per-call condvar waits in SA handlers are load-bearing on reply
+  latency, so residual slowness still hurts.
