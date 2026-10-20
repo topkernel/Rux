@@ -1353,6 +1353,60 @@ pub fn unix_send(
                         crate::pr_warn!("slog[{}] {}{}", n, p, s);
                     }
                 }
+                // ACCOUNT cohort (sc43 hunt): the USER_UNLOCKED publish chain
+                // — osaccount SendToStorageAccountStart -> UnlockUser ->
+                // ActiveUserKey/PrepareStartUser -> SetIsVerified ->
+                // PublishCommonEvent(USER_UNLOCKED) -> BMS
+                // user_unlocked_event_subscriber creating the per-bundle
+                // el1/100/database dirs — is the one link that never fires on
+                // Rux. accountmgr's hilog (domain 0xd001b00, tags OsAccount/
+                // AccountMgr/AccountFwk) was invisible to both cohorts above.
+                const ACCT_TAGS: [&str; 7] = [
+                    "OsAccount", "AccountMgr", "AccountFwk", "ACCOUNT",
+                    "AccountSA", "StorageManager", "StorageDaemon",
+                ];
+                const ACCT_KEYS: [&str; 8] = [
+                    "USER_UNLOCKED", "UnlockUser", "PrepareStartUser",
+                    "ActiveUserKey", "is unlocked", "user_unlocked",
+                    "need CreateBundleDataDir", "OsAccount",
+                ];
+                let acct_hit = ACCT_TAGS.iter().any(|t| {
+                    s.starts_with(t) && s.as_bytes().get(t.len()) == Some(&b':')
+                }) || ACCT_KEYS.iter().any(|key| s.contains(key));
+                if acct_hit {
+                    static ACCT_TAPS: core::sync::atomic::AtomicU32 =
+                        core::sync::atomic::AtomicU32::new(0);
+                    let n = ACCT_TAPS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                    if n < 6000 {
+                        let p = core::str::from_utf8(&prefix[..plen]).unwrap_or("");
+                        crate::pr_warn!("alog[{}] {}{}", n, p, s);
+                    }
+                }
+                // INSTALLD cohort (sc45 hunt): installd-in-BMS creates
+                // el1/<uid>/base/<b> but never el1/<uid>/database/<b> nor
+                // any el2 leaf on Rux, while the Linux reference creates
+                // all of them. The BMSInstalld tag (domain 0xD001122)
+                // logs every abort reason in CreateBundleDataDir
+                // ("Base directory does not existed",
+                // "HapFileRestorecon failed", "MkOwnerDir failed errno")
+                // but was invisible to every cohort above.
+                const ILD_TAGS: [&str; 1] = ["BMSInstalld"];
+                const ILD_KEYS: [&str; 6] = [
+                    "CreateBundleDataDir", "HapFileRestorecon", "SetDirApl",
+                    "MkOwnerDir", "does not existed", "installd permission",
+                ];
+                let ild_hit = ILD_TAGS.iter().any(|t| {
+                    s.starts_with(t) && s.as_bytes().get(t.len()) == Some(&b':')
+                }) || ILD_KEYS.iter().any(|key| s.contains(key));
+                if ild_hit {
+                    static ILD_TAPS: core::sync::atomic::AtomicU32 =
+                        core::sync::atomic::AtomicU32::new(0);
+                    let n = ILD_TAPS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                    if n < 10000 {
+                        let p = core::str::from_utf8(&prefix[..plen]).unwrap_or("");
+                        crate::pr_warn!("ilog[{}] {}{}", n, p, s);
+                    }
+                }
             }
         }
 

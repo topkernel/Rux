@@ -117,3 +117,4 @@ test/futex_lost
 test/permcheck
 test/tokprobe
 test/unixwake
+run/oh-x/
