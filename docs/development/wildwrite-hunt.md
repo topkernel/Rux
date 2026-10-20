@@ -267,6 +267,14 @@ Consequences for the hunt:
   (`git push ssh://git@ssh.github.com:443/topkernel/Rux.git ...`);
   origin now at 5aed2ed6. Host key added to known_hosts (TOFU via
   ssh-keyscan). Shared origin URL left untouched.
+- USEGV-F observation (r1, full 45-min WP=1 boot): 5 victim pids
+  (502/708/768/799/1044), each dying exactly 3 times at the IDENTICAL
+  rip=0x7ff082996bac rsp/rbp (pid-restart loop, 3 attempts then give up),
+  always cr2=0x0 rax=-16, faulting instruction `48 8b 03` (mov rax,[rbx],
+  rbx=0) in a FileBacked lib page (fd=6, voff 0x15bac). Matches the
+  archived errno-as-pointer reading; unaffected by the F1b kernel-side
+  discipline, as expected for a service-side bug. Rate: ~5 victims /
+  boot-hour, stable vs session-2 notes.
 
 ## Where this leaves the hunt (handoff)
 
