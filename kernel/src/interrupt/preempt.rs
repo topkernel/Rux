@@ -150,8 +150,24 @@ pub fn irq_exit() {
     // softirq handlers inline at exit: the handler can spin on the very
     // lock the interrupted holder owns (lock_bh was a lie before). Deferring
     // to ksoftirqd is always safe.
-    if !in_irq() && !in_softirq() && crate::sched::current().is_some() {
-        crate::interrupt::softirq::invoke_softirq();
+    //
+    // Dispatch black hole fix (UART perf gate round 2, 2026-10-20): the
+    // timer IRQ raises its softirqs via raise_softirq_irqoff (no
+    // ksoftirqd wake — it expects THIS path to run them). When the skip
+    // fires, nothing else ever dispatches them until some LATER IRQ
+    // happens to exit outside a bh section — a task looping through
+    // lock_bh sections with sub-tick iterations starved its CPU's
+    // Hrtimer softirq for seconds (TIMER-SOFTIRQ-STALL tick_age=0ms
+    // shape: ticks arriving, dispatch skipped). Linux drains at
+    // local_bh_enable(); until that exists here, waking ksoftirqd at the
+    // skip point closes the hole: the pending bits stay set, and the
+    // woken kthread drains them as soon as the scheduler picks it.
+    if crate::sched::current().is_some() {
+        if !in_irq() && !in_softirq() {
+            crate::interrupt::softirq::invoke_softirq();
+        } else if !in_irq() && in_softirq() {
+            crate::interrupt::ksoftirqd::wakeup_ksoftirqd();
+        }
     }
 }
 
