@@ -21,7 +21,10 @@ import sys
 
 PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 12371
 ROOT = "/home/william/rux-agents/wildwrite-hunt"
-ELF = f"{ROOT}/target/x86_64-unknown-none/debug/rux"
+# Frozen copy of the hunt kernel ELF — must stay in sync with the
+# ww-boot.sh KERNEL frozen bzImage (a rebuild for unrelated mm work
+# would move GUARD and put the watchpoints at stale addresses).
+ELF = f"{ROOT}/run/ww-hunt-frozen-rux.elf"
 
 nm = subprocess.run(["nm", ELF], capture_output=True, text=True, check=True).stdout
 
