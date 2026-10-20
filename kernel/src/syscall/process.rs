@@ -756,6 +756,57 @@ pub fn sys_exit(args: SyscallArgs) -> i64 {
 pub fn sys_exit_group(args: SyscallArgs) -> i64 {
     // Same Linux pre-shift as sys_exit (see the comment there).
     let status = (((args[0] as u32) & 0xFF) << 8) as i32;
+    // sc40 gate: every appspawn child completes its sandbox hooks then
+    // exits 0 here without ever running the ability runtime — dump the
+    // child's last syscalls from the forensic ring so the terminal
+    // sequence (what it read/checked right before deciding to die) is
+    // on the serial. Deep-root (app sandbox) processes only.
+    {
+        let root = crate::sched::current()
+            .and_then(|t| unsafe { (*t).fs_arc() })
+            .map(|fs| fs.get_root())
+            .unwrap_or_default();
+        let root_str = core::str::from_utf8(&root).unwrap_or("");
+        let deep = root_str
+            .split('/')
+            .filter(|s| !s.is_empty())
+            .count() >= 4;
+        if deep {
+            use core::sync::atomic::Ordering::Relaxed;
+            let pid = unsafe { crate::process::current_pid() } as u32;
+            let mut picks: [(u32, u64, u64, u64); 12] = [(0, 0, 0, 0); 12];
+            let mut n = 0usize;
+            for e in crate::syscall::dispatch::SYSCALL_RING.iter() {
+                if e.pid.load(Relaxed) == pid && n < picks.len() {
+                    picks[n] = (
+                        e.nr.load(Relaxed),
+                        e.a0.load(Relaxed),
+                        e.a1.load(Relaxed),
+                        e.ret.load(Relaxed),
+                    );
+                    n += 1;
+                }
+            }
+            crate::pr_warn!(
+                "childexit pid={} root='{}' status={:#x} last{}:",
+                pid,
+                root_str,
+                args[0] as u32,
+                n
+            );
+            for i in (0..n).rev() {
+                let (nr, a0, a1, ret) = picks[i];
+                crate::pr_warn!(
+                    "  [{:02}] nr={} a0={:#x} a1={:#x} -> {}",
+                    i,
+                    nr,
+                    a0,
+                    a1,
+                    ret as i64
+                );
+            }
+        }
+    }
     crate::process::exit::do_exit_group(status);
     0 // unreachable
 }
