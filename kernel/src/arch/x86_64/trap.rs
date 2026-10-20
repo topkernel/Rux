@@ -1073,19 +1073,22 @@ fn ww_irqwin_budget_ok() -> bool {
 ///   trap_handler's tail and trap_exit's kernel restore.
 fn irq_exit_maybe_preempt_kernel(regs: &PtRegs) {
     use crate::process::task::task_flags::TaskFlags;
-    // Experiment gate (kernel-preemption hunt): sc69 (hook off) vs sc70
-    // (hook on) settled the A/B — the preempt-count leak is pre-existing
-    // in BOTH arms, but with the hook ON every leaked task became a
-    // multi-minute kernel-mode monopolist (sc70: 309+ s; hook-off sc69:
-    // 2.6 s, bounded by the count-blind user-mode boundary switch).
-    // sc72 re-enables the hook TOGETHER with PREEMPT-HEAL (scheduler_tick
-    // zeroes phantom task-context counts held >10 s): a leaked task is
-    // then bounded to a 10 s monopoly instead of minutes, which is the
-    // condition under which IRQ-exit kernel preemption can stay enabled
-    // while the leak's producer (a guard whose add and drop execute in
-    // two task contexts while the victim runs — sc71 showed the count is
-    // acquired while running, not a parked wild write) is still hunted.
-    const PREEMPT_HOOK_ENABLED: bool = true;
+    // LANDING STATE after the sc69-sc73 A/B ladder:
+    // - The preempt_count leak is PRE-EXISTING (sc69: hook compiled out,
+    //   leak present; disassembly-verified) — a plain SpinlockGuard whose
+    //   add and drop execute in two different task contexts while the
+    //   victim runs. sc73's lock fingerprints name the hot instances:
+    //   fs::inode::ICACHE, fs::locks::RECORD_LOCK_TABLE (statics) plus
+    //   heap Spinlocks — the VFS-path double-run engine. Producer hunt
+    //   continues (needs the pick/heal or scribble fix; not this hook).
+    // - With the hook ON the leak is amplified: leaked tasks become
+    //   kernel-mode monopolists (sc70: 309 s; sc73 with both heals still
+    //   86 s / 29 heals). With the hook OFF the same leaks self-bound at
+    //   user-mode boundaries (~2.6 s, sc69) and the heals bound the rest.
+    // Therefore the hook stays OFF by default; PREEMPT-HEAL/PARKED-HEAL
+    // stay as the safety net either way. Flip to true only after the
+    // producer is fixed.
+    const PREEMPT_HOOK_ENABLED: bool = false;
     if !PREEMPT_HOOK_ENABLED {
         return;
     }
