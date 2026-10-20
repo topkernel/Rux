@@ -248,6 +248,21 @@ pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
             regs.rip,
             crate::sched::get_current_pid()
         );
+        // dfx=wildwatch (wildwrite-hunt): a write fault inside a guarded
+        // region IS the wild writer caught in the act — banner it so the
+        // serial line is unmissable, then let the normal printer below
+        // carry rip + the rbp walk into the KERNPANIC dump.
+        #[cfg(feature = "x86_64")]
+        if (access_type & FaultFlags::WRITE) != 0
+            && crate::dfx::wildwatch::is_armed(fault_addr.bits() as usize)
+        {
+            println!(
+                "WILDWRITE-CAUGHT addr={:#x} rip={:#x} pid={} — guarded region store, writer below:",
+                fault_addr.bits(),
+                regs.rip,
+                crate::sched::get_current_pid()
+            );
+        }
         // OH bring-up forensics: walk the frame-pointer chain so the
         // faulting CALLER is visible (write_volatile-style leaf frames
         // otherwise hide the driver that computed the bad address).

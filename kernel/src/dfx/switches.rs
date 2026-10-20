@@ -186,9 +186,19 @@ pub enum DfxSwitch {
     /// guest-side record of who did it — this tap answers that from the
     /// kernel side. OFF unless asked for with dfx=datatap.
     DataTap,
+    /// Wild-write attribution tripwire (wildwrite-hunt line): the hpet
+    /// quiet-statics guard cluster (plus its canary page) goes READ-ONLY
+    /// in the kernel page tables after init, in every alias (kernel-half
+    /// link VAs, linear map, low identity). The b77/wt1 wild-write
+    /// engine's smash then page-faults AT THE WRITER — the existing
+    /// kernel-#PF printer hands over rip + rbp walk + KERNPANIC dump.
+    /// The canary page is also checksum-verified from the timer cadence
+    /// (DMA-class writers bypass PTEs). One arming print per boot; zero
+    /// traffic until a hit. See dfx/wildwatch.rs.
+    WildWatch,
 }
 
-const SWITCH_COUNT: usize = 26;
+const SWITCH_COUNT: usize = 27;
 
 static SWITCHES: [AtomicBool; SWITCH_COUNT] = [const { AtomicBool::new(false) }; SWITCH_COUNT];
 
@@ -225,6 +235,7 @@ impl DfxSwitch {
             DfxSwitch::TcpTrace => 22,
             DfxSwitch::SockSnap => 24,
             DfxSwitch::DataTap => 25,
+            DfxSwitch::WildWatch => 26,
         }
     }
 
@@ -256,6 +267,7 @@ impl DfxSwitch {
             "tcptrace" => Some(DfxSwitch::TcpTrace),
             "socksnap" => Some(DfxSwitch::SockSnap),
             "datatap" => Some(DfxSwitch::DataTap),
+            "wildwatch" => Some(DfxSwitch::WildWatch),
             _ => None,
         }
     }
