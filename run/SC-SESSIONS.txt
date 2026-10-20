@@ -786,3 +786,49 @@ sc79's park-stack + ring closed the impossible shape:
   NULL list-walk crash-loop (devhost_usb, byte-verified vs vendor lib);
   OH per-call condvar waits in SA handlers are load-bearing on reply
   latency, so residual slowness still hurts.
+
+Session J FINAL (2026-10-21 08:0x — one-txn-per-read landed and validated;
+samgr rwlock freeze isolated as the remaining blocker):
+
+VALIDATION (sc80, fix in, 25-min quiet boot on scgold copy):
+- impossible shape (SERVER-OWING + NO outstanding txn): sc77=2, sc79=2,
+  sc80=0 — GONE. Rings now show TXN_RECV immediately followed by
+  TXN_RECV_END (exactly one sync delivery per read).
+- binder reply-stalls per boot: sc74=9 -> sc77=7 -> sc79=7 -> sc80=4.
+- KERNPANIC 0 everywhere; bindmkdir/ltp paths untouched.
+- worst strand still 26-270s family across boots — that is the CPU
+  contention storm (BMS scan + OH polling + incumbent pid 316 with the
+  leaked preempt_count), NOT the reply bug; it fluctuates with host load.
+- MILESTONE: not reached (OnForeground 0; screen still the 8-color
+  oracle checker). Remaining blocker chain: samgr (pid 334) still
+  freezes on the abilityMapLock_ rwlock word 0x80000010 (WAITERS + 16
+  readers) — all samgr threads futex-blocked; no samgr thread dies
+  mid-service (THREAD-DIED-SERVICING never fired for samgr), so the
+  16 readers are live threads stuck inside read-lock scopes or a stale
+  count. NEXT SESSION: dump which samgr threads hold the read lock
+  (walk each thread's user stack for the CheckSystemAbility/
+  GetSystemAbility frame + rip; or instrument musl rdlock via the
+  futex-word deltas), and check the event-runner (workHandler_) state
+  — it is invisible to the binder dump (not a binder thread).
+
+COMMITS this session (all English, feature/samgr-callback):
+- W1: wait.rs clear_woken on refused wake (sticky-skip lost-wake retry)
+- binder forensics: 24-event transition ring + atomic single-printk
+  record, SERVER-OWING/CLIENT-WAIT discriminator, world-wide
+  outstanding-txn search, woken census, futex word + neighbors via
+  holder page tables, per-tgid futex waiter graph, comm naming,
+  user park-stack dump with fd/fileoff/instruction bytes
+- heals: stall-scan rekick (15s) + retodo wake_proc_one re-run
+- detectors: THREAD-DIED-SERVICING, WAKE-RUN-LEAK kick verification,
+  W2 wake-refusal branch reports
+- ROOT-CAUSE FIX: one sync transaction per read (Linux parity)
+- notes: three SC-SESSIONS updates with the full evidence chain
+
+TOOLING for the tree: /tmp/oh-libs/{syslib64,vendorlib64} extracted
+libs (byte-match symbolization method verified twice); reproduce with
+debugfs dump from run/oh-img/{system,vendor}.img.
+
+Session I constraints honored: no mm/** or dfx/switches.rs edits;
+only own QEMU PIDs killed (sc78 restart); max 2 own QEMUs at a time;
+shared images snapshot+file.locking=off, userdata private reflink
+copies; English commits; early wip snapshots.
