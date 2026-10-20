@@ -249,6 +249,25 @@ Consequences for the hunt:
 - WP arming verified live via gdbstub probe (ww-cr0probe): cr0=0x80010013
   [PG WP ET MP PE] on BOTH the BSP and the AP (was 0x80000013 pre-fix).
 
+## Session 3 (continuation agent)
+
+- ww-s2-r2 (interrupted): session-2's window died 15 min into r2's 45-min
+  budget (serial last write 01:34:37, boot started ~01:19:39). Verdict
+  after full-log grep: counts as a CLEAN PARTIAL — 53245 serial lines,
+  storm fully active (cow faults, WW heartbeats, wakes=3.26M), 0 WW-HIT,
+  0 KERNPANIC, 0 ALLOCTHROW in serial and gdb logs; watchpoints were
+  armed (8-point set, WW-ARMED in gdb log). Interruption was external
+  (window death kills the chain), not a kernel event.
+- Chain resumed from r3: ww-chain.sh gained a `first` (4th) arg so
+  restarts continue numbering instead of overwriting run/ww-s2-rN-*
+  history. ww-s2-r3 verified armed and storming before this session's
+  other work started.
+- Branch push: port 22 and github.com:443 both time out from this host,
+  but ssh.github.com:443 is reachable. Pushed with a one-shot URL
+  (`git push ssh://git@ssh.github.com:443/topkernel/Rux.git ...`);
+  origin now at 5aed2ed6. Host key added to known_hosts (TOFU via
+  ssh-keyscan). Shared origin URL left untouched.
+
 ## Where this leaves the hunt (handoff)
 
 The attribution machinery now exists and is proven end-to-end; the
