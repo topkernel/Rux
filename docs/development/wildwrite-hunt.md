@@ -207,6 +207,30 @@ Consequences for the hunt:
 - wildwatch's per-CPU enable_write_protect stays (idempotent, harmless
   belt-and-suspenders if a future path clears WP).
 
+### F2 archaeology (b77/wt1 raw captures re-read against the F2 correction)
+
+- b77 (oh-display/run/oh-b77-serial.log, 6387 lines): the freeze point
+  is the **sdc fork/exec boundary** — last serial lines are init's
+  `Sync exec: /system/bin/sdc`, `fork: parent=1, child=318`, execve,
+  and one final child-stack COW fault (0x7fffffffd088), then silence.
+  Immediately BEFORE that: a wall of param-service failures
+  (`Create directory ... failed err=2/5`,
+  `mmap err 19 file /dev/__parameters__/`, persist-parameter
+  rename/open failures). Confirms the handoff note that sdc cycles were
+  the b77-era trigger context. F1b lens: the param workspace is the
+  devfs-shared-mapping + fork + supervisor-memcpy surface — precisely
+  the family the WP fix now disciplines.
+- wt1 (wake-timer/run/oh-wt1-serial.log): deep-storm context — pids
+  ~1000+, binder 1M mmap churn (0x7ff08a…), BIGMUNMAP, and
+  WW: TIMER-LATE-FIRE with ~349 s accumulated lateness
+  (hres_fires=908988 late_n=894045). The lateness is post-smash
+  symptomology (BASE already bad → read_time garbage → deadlines
+  miscomputed), not the trigger.
+- Net: two distinct trigger contexts (early-boot sdc exec vs deep
+  binder/mmap storm) hitting the same victim neighborhood. The
+  GUARD-cluster watch set covers it either way; the chain's Mode B
+  boots traverse both phases (45-min budget spans the storm).
+
 ## Where this leaves the hunt (handoff)
 
 The attribution machinery now exists and is proven end-to-end; the
