@@ -1382,6 +1382,31 @@ pub fn unix_send(
                         crate::pr_warn!("alog[{}] {}{}", n, p, s);
                     }
                 }
+                // INSTALLD cohort (sc45 hunt): installd-in-BMS creates
+                // el1/<uid>/base/<b> but never el1/<uid>/database/<b> nor
+                // any el2 leaf on Rux, while the Linux reference creates
+                // all of them. The BMSInstalld tag (domain 0xD001122)
+                // logs every abort reason in CreateBundleDataDir
+                // ("Base directory does not existed",
+                // "HapFileRestorecon failed", "MkOwnerDir failed errno")
+                // but was invisible to every cohort above.
+                const ILD_TAGS: [&str; 1] = ["BMSInstalld"];
+                const ILD_KEYS: [&str; 6] = [
+                    "CreateBundleDataDir", "HapFileRestorecon", "SetDirApl",
+                    "MkOwnerDir", "does not existed", "installd permission",
+                ];
+                let ild_hit = ILD_TAGS.iter().any(|t| {
+                    s.starts_with(t) && s.as_bytes().get(t.len()) == Some(&b':')
+                }) || ILD_KEYS.iter().any(|key| s.contains(key));
+                if ild_hit {
+                    static ILD_TAPS: core::sync::atomic::AtomicU32 =
+                        core::sync::atomic::AtomicU32::new(0);
+                    let n = ILD_TAPS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                    if n < 10000 {
+                        let p = core::str::from_utf8(&prefix[..plen]).unwrap_or("");
+                        crate::pr_warn!("ilog[{}] {}{}", n, p, s);
+                    }
+                }
             }
         }
 
