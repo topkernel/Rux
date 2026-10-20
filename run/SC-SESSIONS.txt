@@ -436,3 +436,127 @@ BOOT-VARIANTS kit (all on run/):
     images but 0-in-3 on sc49-image boots; EPIPE signature =
     "IPCObjectProxy PrintErrorDetailedInfo error:32" burst during the
     os-account subscribe storm. IPC-lane bug, separate from perf.
+
+Session G update (2026-10-21 01:4x, sc59-63 — perf gate hunt, successor window):
+- LINE CORRECTION: the launcher/OH boot line is x86_64 q35 KVM
+  (oh-boot-q.sh → bzImage), NOT riscv64. All analysis must use the
+  x86_64 twin (LAPIC periodic tick, no hrtimer one-shot: x86 set_timer/
+  set_next_trigger/rearm_for_hres are no-ops; hres sleeps quantize to
+  the 10 ms grid and are collected by the next tick's softirq).
+- LANDED (branch, all English commits):
+  * 6f46835a perf(console): x86 putc THRE wait bounded by 2 ms wall
+    time (was 1e6 polls ≈ 1-2 s under KVM) + uart_write locks per 32
+    bytes instead of per whole buffer. uart_write held the UART
+    irqsave lock across the whole write buffer — with ~34k hilog
+    lines/boot through /dev/ttyS0 this produced multi-second IRQ-off
+    windows.
+  * aa742f18 fix(softirq): irq_exit that must skip dispatch (interrupted
+    task holds a bh section) now wakes ksoftirqd — before, softirqs
+    raised from the timer IRQ sat pending with NO dispatch path (the
+    TIMER-SOFTIRQ-STALL tick_age=0ms shape). + live stack probe at long
+    IRQ-off windows (IRQ-OFF-WINDOW prints rip/rsp/12 text-range stack
+    words at the recovery tick).
+  * 0d09ba6f dfx(wakewatch): wake stamps invalidated at task free
+    (recycled Task addresses inherited stale stamps → phantom strands).
+  * c41b54b8 cond_resched() + yield in sweep_dead_threads' member loop.
+  * 664fc946+dec21e92 strand report enrichment: per-CPU incumbents
+    (pid/policy/activation-ms) + CFS geometry (vruntime vs min vs
+    leftmost).
+  * 2e5c010e perf(mm): x86_64 PTE_MODIFY_LOCK plain-lock (IRQs on):
+    fork COW walk/mprotect/munmap held the global lock irqsave — a big
+    fork froze both CPUs' ticks for the walk length. All takers are
+    task-context; riscv64 keeps irqsave (cfg-gated shared sites).
+- TRIED AND REVERTED: 2cf4bdc9 kernel-mode preemption at IRQ exit
+  (preempt_schedule_irq) — poisoned a task's preempt_count to -1
+  (unprotected mid-syscall invariants exist), cpu0 softirq froze 196 s,
+  user pfault classified in_interrupt → KERNPANIC. Reverted in 0ced11da.
+  Full kernel preemption needs a preempt_count audit of task-context
+  per-CPU state first; do not re-land blindly.
+- MEASURED (scNN = boots on copies of the sc49 golden image, quiet,
+  loglevel 4):
+  * sc56 (baseline): strand>1s: 22, worst IPC 123 s, TIMER-LATE-FIRE
+    1042 ms, stalls ~1 s recurring.
+  * sc59 (UART fix): stalls 5×~2.3 s, worst IPC 196 s — monsters remain.
+  * sc61 (UART+blackhole+probe): stalls 1, worst IPC 33.5 s.
+  * sc62 (+phantom fix+cond_resched): stalls 0, worst IPC 206 s
+    (AbilityManager StartAbility), strand>1s 72 — clusters of concurrent
+    1.5-2.9 s strands with incumbents rotating at 0-3 ms activations:
+    NOT a CPU hog, NOT softirq stalls — pick/vruntime family. pid 304
+    strands repeatedly (8×).
+- sc63 BOOTING: PTE-lock conversion + vruntime geometry in strand
+  reports. Geometry will separate 'former CPU hog waiting out its
+  vruntime lead' (fair) from 'charging inflation runaway' / pick-skip.
+- OH-side observation: LnnState/os-account query loop spams the log
+  continuously (every few lines) — OH userspace busy-polling adds IPC
+  load; and drm oracle checker (compose-content diagnostic) paints 1-in-
+  5 composer flips — shotmon sees 8-color checker when the composer
+  stalls on a painted frame; real UI frames are 4-of-5 flips.
+
+Session G FINAL (2026-10-21 02:0x — perf gate: four kernel stall sources
+closed, structural wall identified and documented):
+
+LANDED on feature/samgr-callback (all verified booting, no panics):
+  1. 6f46835a perf(console): x86 putc THRE wait 2ms wall bound (was 1e6
+     polls ≈ 1-2s KVM); uart_write locks per 32B not per buffer.
+  2. aa742f18 fix(softirq): irq_exit that skips dispatch under a bh
+     section now wakes ksoftirqd (was a dispatch black hole — softirqs
+     raised from the timer IRQ had NO recovery path). Plus the
+     IRQ-OFF-WINDOW probe (live stack at long IF=0 windows).
+  3. 0d09ba6f dfx(wakewatch): clear wake stamps at task free (recycled
+     addresses were reporting phantom strands).
+  4. c41b54b8/7c439a6e cond_resched() + first user in
+     sweep_dead_threads.
+  5. 664fc946/dec21e92 strand report: per-CPU incumbents + CFS
+     vruntime geometry (vr/lead-lag).
+  6. 2e5c010e perf(mm): x86_64 PTE_MODIFY_LOCK plain-lock (IRQs on) —
+     fork COW walk / mprotect / munmap no longer freeze ticks on BOTH
+     the holder and the spinners. riscv64 unchanged (cfg-gated sites).
+  7. ecef333a perf(ipi): smp_call_function wait yields (cond_resched)
+     — membarrier against a fork-walking CPU no longer freezes the
+     caller's CPU too.
+
+REVERTED: 2cf4bdc9 IRQ-exit kernel preemption — poisoned a
+preempt_count to -1 (task-context per-CPU state exists that is not
+preempt_count-protected), cpu0 softirq froze 196s, user pfault →
+KERNPANIC. Revert: 0ced11da. Re-landing needs a full audit of
+task-context per-CPU assumptions; do not blind-copy.
+
+NUMBERS (quiet boots on sc49-golden copies, 25 min each):
+  sc56 baseline: worst IPC 123s, stalls ~1s recurring, late_max 1042ms
+  sc59 (fix 1):            worst 196s — stalls 5x2.3s (2 shapes named)
+  sc61 (1+2):              worst 33.5s, stalls 1
+  sc62 (+3+4):             worst 206s, stalls 0 — strand clusters named
+  sc63 (+6):               worst 207s once (OH retry ladder), else ≤4s,
+                           stalls 0, KERNPANIC 0, strands avg 235ms
+  sc64 (all): RUNNING (IPI yield last)
+  TIMER-SOFTIRQ-STALL / TIMER-LATE-FIRE families: GONE since sc62.
+  The ~200s AbilityManager cost is OH's own retry ladder (5x40s
+  LIFECYCLE timeouts): the lifecycle still never completes.
+
+STRUCTURAL WALL (next session / mm owner — needs kernel/src/mm work,
+documented here because sched/timer alone cannot cross it):
+  - The fork COW walk (arch/x86_64/mm/mm_ops.rs copy_page_table_cow
+    under PTE_MODIFY_LOCK, called from AddressSpace::fork) monopolizes
+    its CPU preempt-disabled for the walk length (seconds for a large
+    mm under KVM). The 2e5c010e conversion fixed tick starvation but
+    NOT the CPU monopoly; the 30s WAKE-STRANDED monsters (vr=0ms,
+    leftmost, both CPUs' incumbents rotating 0-11ms activations at
+    recovery) are exactly both-CPUs-monopolized windows (walk on A +
+    membarrier-spin or PTE-lock waiter on B).
+  - Chunking the walk (release PTE lock per leaf-table + cond_resched)
+    is blocked on teardown semantics: free_user_page_tables
+    (mm_struct.rs Drop / exec.rs) serializes ONLY via PTE_MODIFY_LOCK
+    (no vma_write), so releasing mid-walk can dangle the walk into
+    freed tables. Proper fix = an mm-side fork-vs-teardown RW lock or
+    per-mm locks (Linux mmap_lock semantics) + preemptible walk. That
+    redesign belongs to the mm owner (kernel/src/mm is the wildwrite
+    agent's territory).
+  - Full kernel preemption (the other half of the wall) needs the
+    preempt_count audit noted above.
+
+MILESTONE: not reached — screen still bootanimation logo (sc63) /
+oracle checker (sc61) — the launcher lifecycle chain times out in the
+ArkUI init phase (mmap/fault storm against the PTE lock + fork walks).
+
+Boot kit unchanged: oh-boot-q.sh + userdata-sc49.img copies; shotmon
+running; scNN-serial.log/oh-shotmon.csv on run/.
