@@ -295,6 +295,126 @@ Consequences for the hunt:
   boot-hour on the F1b-fixed kernel. USEGV-F: 5 distinct pids x 3
   attempts each — same shape and rate as r1. Chain auto-advanced to r4.
 
+## Session 4 (continuation agent — mm chunking verification + wedge attribution)
+
+Inherited state: session-3's window died 03:02 mid-verification of 7b7a82b5
+("chunk the fork COW walk and mm teardown"). Reconstructed: chain r5 had run
+its full 45 min (02:39-03:24) and r6 died externally at 15 min (03:39, no
+kernel event, no host OOM record); the predecessor's manual boots survived as
+/tmp/wwtest/mm1-serial.log (bare ramdisk boot, idle 2h, 0 panics — killed by
+me after data extraction) and mmoh-serial.log (OH boot of the chunked kernel,
+~15-17 min, session-killed).
+
+### Build verification
+
+`PLATFORM=x86_64 make build` on the clean HEAD tree is a cargo no-op that
+re-produces the byte-identical bzImage (md5 56b1be30...): the binary mm1/mmoh
+booted IS the committed chunking code. config.rs regenerates to x86_64 over
+the merged riscv64 copy (same generated-artifact quirk as session 2's
+e432831e; recommitted here). Branch push: the handoff's "push pending" was
+stale — remote feature/wildwrite-hunt already sat at 7b7a82b5.
+
+### mm chunking: measured effect (before the wedge finding)
+
+Strand distributions (WAKE-STRANDED events, sed-extracted):
+
+| boot | kernel | window | total | avg | max | 1-5s | >5s |
+|------|--------|--------|-------|-----|-----|------|-----|
+| ww-s2-r5 (chain) | frozen, no chunking | 45 min | 17902 | 473ms | 200932ms | 2075 | 56 |
+| mmoh (inherited) | chunked | ~15-17 min | 16305 | 133ms | 10019ms | 55 | 2 |
+| ww-s2-r7 (chain, concurrent control) | frozen | 45 min | — | — | 424624ms | — | — |
+
+Chunking cut multi-second strands ~14x per hour and the max monster 20-200x
+in the mmoh window, but the metric is NOT zero, and r7 shows the baseline
+still rolls 400s-class monsters while progressing. Consistent with the
+SC-SESSIONS wall analysis: chunking is step 1; per-mm locks + kernel
+preemption are still required.
+
+### The wedge (blocks the verdict)
+
+ww-v1 (45-min controlled OH boot, chunked kernel, ww-boot.sh conditions,
+no gdb): at ~23 min the boot fully froze — wakes frozen at 3.09M (+4 per
+90s), 169 runnable, both CPUs' incumbents parked at preempt_count
+257/258-260 for minutes, ticks halved, 0 KERNPANIC/ALLOCTHROW/forensics.
+Killed at ~28 min.
+
+ww-v2 (same binary, + dfx=taskdump,watchdog,periodic): wedge REPRODUCED at
+~19 min (wakes frozen at 3.38M). The kernel probes named it, then a live
+gdbstub attach (port 12391, both CPUs interrupted) settled it:
+
+- cpu1: `tcp_timer_tick` (timer softirq) → drop `TcpTxBatch` → Vec<u8>
+  dealloc → `BuddyAllocator::free_blocks` → `add_to_free_list` — grinding
+  the R17-A mark-every-page loop, sampled mid-iteration with 0x2c24a
+  iterations remaining = ORDER-18 (whole-heap-scale) block marking, under
+  the heap lock (irqsave).
+- cpu0: same `tcp_timer_tick` → `TcpTxBatch::reserve` → Vec grow →
+  `BuddyAllocator::alloc` — spinning on the same irqsave heap lock (this
+  is the TIMER-SOFTIRQ-STALL IF=0 window; its pt_regs rip fossil showed
+  enable_irq, the task-dump pids — hilogd.rd_kmsg read, sysevent_source
+  munmap — were only the interrupted tasks, not the mechanism).
+
+The wedge LIFTED after ~15 min (v2 wakes resumed; strand_max had ratcheted
+to 253s during the stall) — a slow grind, not a deadlock. The deadlock
+watchdog never fired (no single lock HOLD threshold crossed; the holder was
+making progress).
+
+Root shape: a kernel-heap buddy pathology — BUDDY_MAX_ORDER=20 over a
+2^18-page heap, and the free/merge path's add/remove marking is O(2^order)
+PER LEVEL under one global irqsave lock. An order-18-scale marking pass in
+a debug (unoptimized) kernel under TCG holds the ONLY heap lock for tens
+of seconds to minutes while the other CPU's TCP timer spins on it. Both
+CPUs run tcp_timer softirqs, so once one grinds the other piles on.
+
+Correlation vs chunking: 2/2 chunked boots (v1, v2) hit the full freeze;
+0/8 frozen-kernel boots (r1-r8) did — but the mechanism touches no code the
+chunking commit changed (buddy_allocator, net/tcp timer). The concurrent
+baseline r8 spent its own multi-minute deep slump (avg_run 16ms, 47s
+strand_max, ~40x slowed wake rate) — the pathology exists on the baseline
+too, at lower intensity. A timing-mediated amplification via the chunked
+kernel's longer mm-critical sections is plausible but unproven.
+
+### Code review findings on 7b7a82b5 (from the diff read)
+
+- Teardown chunking: every structural free (leaf table, PMD, PUD) completes
+  inside one PTE-lock chunk; the exec.rs free_user_page_tables caller is an
+  error-path RAII guard over a FRESH address space (no concurrent users);
+  the Drop caller is last-Arc with the mm_struct.rs:1017 synchronize_rcu
+  drain. Sound.
+- Fork chunking exclusion: verified that ONLY free_user_page_tables frees
+  intermediate tables (grep: all free_page_table* sites are in
+  mmu_init.rs's teardown walk) — munmap/mprotect clear leaf PTEs only, so
+  the "faults only ADD tables" argument holds.
+- REOPENED WINDOW (documented risk, 0 observed occurrences): fork's
+  snapshot-first re-pairs OLD VMAs with NEW PTEs — a concurrent PROT
+  DOWNGRADE mprotect landing between the snapshot era and the walk gives
+  the child (PROT_NONE marker PTE + writable snapshot VMA), which can trip
+  the fault handler's "already mapped + no perms" kill — the same
+  R-WRITESTORM-3 SIGSEGV/EACCES family. 0 Permission-denied lines in
+  mmoh/v1/v2 serial. Worth hardening if this shape ever prints.
+- Teardown root-table free is now lockless (was under the whole-walk lock)
+  — benign: the tree is dead (last-Arc + rcu drain).
+
+### Verdict
+
+7b7a82b5 is NOT validated for merge on this evidence. It delivers a real
+~order-of-magnitude strand-latency improvement (mmoh window) and its
+exclusion analysis survives code review, but (a) the strand metric does
+not reach zero (expected — per-mm locks + preemption still missing), and
+(b) both controlled boots hit a full-system heap-grind freeze that the
+8 baseline chain boots dodged. The freeze itself is attributed to a
+pre-existing buddy/TCP-timer pathology (gdb-proven), so it is not a
+regression mechanism in the commit — but the correlation stands at 2/2
+vs 0/8 and needs either more boots or the buddy-hold fix before the mm
+chunking rides into main. Candidate mm-side fixes (my territory, next
+session): cap/trim the per-level O(2^order) marking (the interior marks
+exist for the R9-14/R17 tripwires — they can be a debug/dfx-gated check
+instead of an always-on hot-path cost), and/or split the heap lock or
+make the marking amortized. The net-side trigger (TcpTxBatch growth to
+~10^5 elements) belongs to whoever owns net/tcp.
+
+USEGV-F (service-side errno-as-pointer): 120 victims in both mmoh and r5
+windows — unchanged by chunking, as expected.
+
 ## Where this leaves the hunt (handoff)
 
 The attribution machinery now exists and is proven end-to-end; the
