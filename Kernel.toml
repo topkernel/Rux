@@ -31,7 +31,7 @@ enable_riscv64 = true
 # reclaimable); the window here is a static carveout, so it must be
 # sized for the real working set. Whether usage also LEAKS past this
 # is Agent C's memwatch hunt — this only buys the launcher a chance.
-kernel_heap_size = 1024
+kernel_heap_size = 128
 # Physical memory size (MB)
 physical_memory = 2048
 # Page size
