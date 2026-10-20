@@ -1821,6 +1821,12 @@ unsafe fn stall_thread_line(proc: &Arc<BinderProc>, t: &Arc<BinderThread>) {
             let task = unsafe { crate::sched::find_task_by_pid(t.tid) };
             if !task.is_null() {
                 let tk = unsafe { &*task };
+                let comm = {
+                    let c = tk.comm();
+                    core::str::from_utf8(&c[..])
+                        .unwrap_or("")
+                        .trim_end_matches('\0')
+                };
                 let top = tk.kernel_stack_top();
                 #[cfg(feature = "x86_64")]
                 let (rip, sys, a0, a1) = {
@@ -1843,7 +1849,8 @@ unsafe fn stall_thread_line(proc: &Arc<BinderProc>, t: &Arc<BinderThread>) {
                 #[cfg(not(any(feature = "x86_64", feature = "riscv64")))]
                 let (rip, sys, a0, a1) = (0u64, 0u64, 0u64, 0u64);
                 crate::pr_warn!(
-                    "binder-stall:    holder task state={:#x} rip={:#x} sys={:#x} a0={:#x} a1={:#x}",
+                    "binder-stall:    holder task comm='{}' state={:#x} rip={:#x} sys={:#x} a0={:#x} a1={:#x}",
+                    comm,
                     tk.state().bits(),
                     rip,
                     sys,
@@ -2269,9 +2276,22 @@ pub fn stall_report() {
             for owner in &dump_owners {
                 if let Some(op) = world.procs.iter().find(|p| Arc::ptr_eq(p, owner)) {
                     let opm = pm(world, op);
+                    // Name the owing process via its main thread's comm.
+                    let pname = unsafe {
+                        let mt = crate::sched::find_task_by_pid(op.pid);
+                        if mt.is_null() {
+                            "?"
+                        } else {
+                            let c = (*mt).comm();
+                            core::str::from_utf8(&c[..])
+                                .unwrap_or("?")
+                                .trim_end_matches('\0')
+                        }
+                    };
                     crate::pr_warn!(
-                        "binder-stall: owing pid {} proc todo depth {} threads {}",
+                        "binder-stall: owing pid {} ('{}') proc todo depth {} threads {}",
                         op.pid,
+                        pname,
                         opm.im().todo.len(),
                         opm.im().threads.len()
                     );
