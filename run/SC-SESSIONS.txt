@@ -377,3 +377,62 @@ Session F update (2026-10-20 22:5x, sc49/sc50 — 0xd000008 ROOT-CAUSED AND FIXE
   report) to symbolize.
 - Screen still the static OH logo (4281 colors) — bootanimation waiting
   for a real launcher surface.
+
+Session F FINAL (2026-10-21 00:0x — two kernel fixes landed, launcher reaches runtime):
+
+FIX 1 (95dbe15c) — the 0xd000008 root cause, CLOSED:
+  xattr::get(security.selinux) on an unstored label now returns
+  "u:object_r:unlabeled:s0" (SELinux-enabled Linux ABI: the kernel owns
+  inode labels, ENODATA is impossible). Chain was: lgetfilecon -1 ->
+  libhap_restorecon GetSecontext abort -> installd CreateBundleDataDir
+  returns after base/<b> but before database/<b> + el2 leaves ->
+  sandbox bind fatal -> APPSPAWN_SANDBOX_MOUNT_FAIL. sc49 VERIFIED:
+  database leaves + 170 el2 leaves created by real installd, 24
+  bundles installed, 0xd000008 count ZERO, launcher processes ran.
+
+FIX 2 (cba465d1) — appspawn-child SIGSEGV, CLOSED:
+  /proc/self/attr/current never reads empty (default "u:r:unlabeled:s0").
+  libselinux getprocattrcon_raw maps an empty read to *context=NULL
+  with SUCCESS return; HapDomainSetcontext feeds that NULL to
+  context_new() -> every appspawn child died right after the
+  "SetSelinuxCon IsDeveloperModeOn" log. sc56 VERIFIED: "SetSelinuxCon
+  success for com.ohos.launcher", full hook chain 31/33/34 completes,
+  spawn responses "result: 0x0 pid: 1435..." — first ever COMPLETE
+  spawns; launcher MainAbility loads (LIFECYCLE_HALF_TIMEOUT fires
+  mid-lifecycle, i.e. the ability is created).
+
+FORENSICS added (f72a8705 + in 2d01a669): USEGV-FOR ripfile/voff +
+ripbytes (instruction bytes at rip) — symbolized crashes offline by
+byte-matching .so files extracted from the images (script-free method:
+extract /system/lib64/**.so + /vendor/lib64/*.so via debugfs, search
+the ripbytes at the reported voff). Known crash sites:
+  - libusb_pnp_manager.z.so+0x15bac list walk NULL node (hdf usb_host
+    crash-loop, pre-existing, launcher-unrelated)
+  - chipset-sdk-sp/libselinux.z.so context_new+0x5c (fixed by FIX 2)
+NOTE: grep -c on the bzImage gives false negatives for strings — use
+`strings -a bzImage | grep` to verify build content; and `git stash`
+ate an uncommitted trap.rs edit once (always commit before building).
+
+NEW GATE (the next session's target): SYSTEM PERF. App lifecycles time
+out because IPC SendRequest costs grow from ~1s (early) to 102s (late)
+— with a QUIET kernel (loglevel=4, oh-boot-q.sh, no datatap) it is just
+as bad, so it is NOT logging load. The dfx watchdog prints (when on)
+show the smoking gun: hrtimers firing seconds late (late_max 4387ms)
+and WAKE-STRANDED runnable threads stranded up to 16s on a CPU. Looks
+like an SMP wakeup/idle-balance bug (sched/timer lane). Spawn+mounts
+all work; the boot just crawls. A perf fix here plausibly drops the
+whole desktop chain (OnForeground -> ArkUI -> ohgpu launcher UI) in one
+go — sc56/sc58 boots got 45+ successful spawns each.
+
+BOOT-VARIANTS kit (all on run/):
+  - oh-boot-q.sh       = oh-boot-w.sh with loglevel=4 (quiet milestones)
+  - userdata-sc49.img  = GOLD: full install state (bmsdb + database
+    leaves on disk). Boot a COPY of it to skip installs entirely (BMS
+    DB-restore path, no installd needed) — sc55/56/58 all used it and
+    none hit the installs-start stall.
+  - The installs-start stall (sc47/48/50-52/54: samgr dynamic-proc
+    ctl.start never reaches init, SA:511 15s timeouts, account-kv
+    InnerInit fails, 22x IPC EPIPEs) reproduces ~4-in-5 on FRESH
+    images but 0-in-3 on sc49-image boots; EPIPE signature =
+    "IPCObjectProxy PrintErrorDetailedInfo error:32" burst during the
+    os-account subscribe storm. IPC-lane bug, separate from perf.
