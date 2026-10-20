@@ -3836,6 +3836,17 @@ pub fn sys_pivot_root(args: SyscallArgs) -> i64 {
         Ok(vpath) => vpath.dentry.clone(),
         Err(_) => None,
     };
+    // sc29 hunt: the recorded root STRING is the user argument, but the
+    // resolved dentry may live at a different GLOBAL path (a chroot prefix
+    // like /usr can be in effect at pivot time) — every later prefixed
+    // lookup walks the string against the global tree. Print both.
+    if let Some(rd) = root_dentry.as_ref() {
+        crate::pr_info!(
+            "pivot_root: arg='{}' resolved dentry global='{}'",
+            new_root,
+            rd.build_path()
+        );
+    }
     if let Some(fs) = current.fs_arc() {
         fs.set_root_with_dentry(new_root.as_bytes(), root_dentry);
         // Record put_old for the post-pivot cleanup umount2 (Linux leaves
