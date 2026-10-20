@@ -167,9 +167,28 @@ pub enum DfxSwitch {
     /// zero-window probe or a dup-ACK storm; the first-send corruption
     /// and mid-transfer connection drops need sequence-level timelines.
     TcpTrace,
+    /// khungtaskd-cadence dump of the AF_UNIX namespace and every epoll
+    /// interest set (appspawn-server wedge hunt, b15): one line per
+    /// LISTENING socket (key, accept-queue depth, backlog, file id) and
+    /// one per epoll instance reachable through the wake registry
+    /// (registered fd, events mask, file id, ET snapshot). Cross-
+    /// referencing the listener's file id against the epoll entries
+    /// answers "is the listener still registered" without a guest-side
+    /// /proc. OFF unless asked for with dfx=socksnap.
+    SockSnap,
+    /// /data namespace mutation trace (el2/100 bundle-dir hunt, dt lane):
+    /// every mkdir/rmdir/unlink/rename/chown/xattr under /data prints one
+    /// line with its result, bindwalk ENOENTs dump the kernel's cached
+    /// children of the deepest resolved dir, and negative-dentry hits
+    /// under /data are named. sc21 showed the baked per-user-100 bundle
+    /// dirs replaced or emptied at runtime (el2/100/log -> ino 172,
+    /// el1/100/database -> ino 44; neither is the baked inode) with no
+    /// guest-side record of who did it — this tap answers that from the
+    /// kernel side. OFF unless asked for with dfx=datatap.
+    DataTap,
 }
 
-const SWITCH_COUNT: usize = 24;
+const SWITCH_COUNT: usize = 26;
 
 static SWITCHES: [AtomicBool; SWITCH_COUNT] = [const { AtomicBool::new(false) }; SWITCH_COUNT];
 
@@ -204,6 +223,8 @@ impl DfxSwitch {
             DfxSwitch::FutexTrace => 20,
             DfxSwitch::MonoWatch => 21,
             DfxSwitch::TcpTrace => 22,
+            DfxSwitch::SockSnap => 24,
+            DfxSwitch::DataTap => 25,
         }
     }
 
@@ -233,6 +254,8 @@ impl DfxSwitch {
             "futextrace" => Some(DfxSwitch::FutexTrace),
             "monowatch" => Some(DfxSwitch::MonoWatch),
             "tcptrace" => Some(DfxSwitch::TcpTrace),
+            "socksnap" => Some(DfxSwitch::SockSnap),
+            "datatap" => Some(DfxSwitch::DataTap),
             _ => None,
         }
     }

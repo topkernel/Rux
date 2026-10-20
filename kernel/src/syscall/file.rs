@@ -273,6 +273,78 @@ pub fn sys_openat(args: SyscallArgs) -> i64 {
         crate::fs::file_open(&full_path, flags, mode)
     };
 
+    // sc33/sc34 hunt: the pivoted appspawn child dies at
+    // appspawn_common.c:350 'open dev_null error: 2'. The first 60-line
+    // budget was eaten by boot noise (param-service, cpuset/memcg
+    // walkers — all with the 3-segment SYSTEM sandbox root); gate to
+    // processes rooted in a 4+-segment APP sandbox root
+    // ('/mnt/sandbox/<uid>/<pkg>') so only appspawn children print.
+    // sc36: also resolve the path OURSELVES and print the inode — the
+    // walk trails were silent for the failing opens, so the ENOENT is
+    // post-lookup; name what the lookup found.
+    if full_path.starts_with("/dev/") {
+        let root = crate::sched::current()
+            .and_then(|t| unsafe { (*t).fs_arc() })
+            .map(|fs| fs.get_root())
+            .unwrap_or_default();
+        let root_str = core::str::from_utf8(&root).unwrap_or("?");
+        let deep_root = root_str
+            .split('/')
+            .filter(|s| !s.is_empty())
+            .count() >= 4;
+        if deep_root {
+            let mut detail = alloc::string::String::new();
+            match crate::fs::vfs::path_lookup(&full_path, 0) {
+                Ok(vp) => {
+                    if let Some(i) = vp.inode.as_ref() {
+                        detail.push_str(&alloc::format!(
+                            "lookup OK ino={:#x} mode={:#o} fs_id={} ops={}",
+                            i.ino,
+                            i.mode.bits(),
+                            i.fs_id,
+                            i.ops.is_some()
+                        ));
+                    } else {
+                        detail.push_str("lookup OK but NO inode");
+                    }
+                }
+                Err(e) => {
+                    detail.push_str(&alloc::format!("lookup ERR {}", e));
+                }
+            }
+            // sc37 lesson: per-spawn probes x appspawn retry storms
+            // flooded the UART; 400 lines name every distinct gate.
+            static PROBE_N: core::sync::atomic::AtomicUsize =
+                core::sync::atomic::AtomicUsize::new(0);
+            if PROBE_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 400 {
+                crate::pr_warn!(
+                    "devopen-probe '{}' flags {:#x} root='{}' {} (pid {})",
+                    full_path,
+                    flags,
+                    root_str,
+                    detail,
+                    unsafe { crate::process::current_pid() }
+                );
+            }
+            if let Err(e) = &result {
+                static DEVOPEN_FAIL_N: core::sync::atomic::AtomicUsize =
+                    core::sync::atomic::AtomicUsize::new(0);
+                let n = DEVOPEN_FAIL_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                if n < 200 {
+                    crate::pr_warn!(
+                        "devopen-fail[{}] '{}' flags {:#x} -> errno {} root='{}' (pid {})",
+                        n,
+                        full_path,
+                        flags,
+                        -e,
+                        root_str,
+                        unsafe { crate::process::current_pid() }
+                    );
+                }
+            }
+        }
+    }
+
     // OH DRM bring-up (rs-egl): the composer HDI's DrmDevice::Create
     // (drm_device.cpp:90, passthrough-loaded into render_service) logs
     // "can't open drm card device" — but its message carries no errno,
@@ -480,18 +552,44 @@ pub fn sys_close(args: SyscallArgs) -> i64 {
     }
 
     use crate::fs::close_file_fd;
+    // Capture a Weak handle BEFORE the close so the purge below can tell
+    // whether THIS close dropped the last fd-table reference to the open
+    // file description. A strong Arc here would keep the description
+    // alive and suppress its close op (pipe EOF, socket HUP) — a Weak
+    // observes without holding.
+    let desc_weak = crate::sched::get_current_fdtable().and_then(|ft| {
+        ft.get_file(fd)
+            .map(|f| alloc::sync::Arc::downgrade(&f))
+    });
     // SAFETY: fd is a valid file descriptor owned by the current process.
     unsafe {
         match close_file_fd(fd) {
             Ok(()) => {
-                // Linux eventpoll removes interest entries when the last
+                // Linux eventpoll removes interest entries when the LAST
                 // reference to the registered file description goes away
-                // (eventpoll_release). Best-effort same-process equivalent:
-                // purge this fd from every epoll instance the caller still
-                // holds open, so a stale entry cannot keep reporting
-                // EPOLLERR|EPOLLHUP forever (review批次1: close 后 epoll
-                // 条目不删).
-                crate::syscall::misc::epoll_purge_closed_fd(fd);
+                // (eventpoll_release — the epoll's own epi reference is
+                // what removes it, and only when THAT is the last one).
+                // Purging on ANY close was wrong in the cross-process
+                // shape: a forked child that inherited the fd table (and
+                // with it the epoll fd) closed its inherited copy on
+                // exit, and the purge — resolving "live" against the
+                // child's table, where the slot was just cleared —
+                // stripped the PARENT's live interest. appspawn's
+                // bundle-scan child did exactly this to the AppSpawn
+                // listener: after the child exited, the server's epoll
+                // held only its timer fd, every epoll_wait returned
+                // timer-only events, and client connections piled up in
+                // the accept queue (q reached 210 in sc18) with the
+                // server never accepting — the launcher chain's
+                // spawn-blocker. Gate the purge on this close being the
+                // description's last fd-table reference.
+                let others = desc_weak
+                    .as_ref()
+                    .map(alloc::sync::Weak::strong_count)
+                    .unwrap_or(1);
+                if others == 0 {
+                    crate::syscall::misc::epoll_purge_closed_fd(fd);
+                }
                 0
             }
             Err(e) => e as i64,
@@ -860,6 +958,28 @@ pub fn sys_getdents64(args: SyscallArgs) -> i64 {
     }
 }
 
+/// datatap (el2/100 bundle-dir hunt, dt lane): one serial line per
+/// /data namespace mutation. The sc21 boot replaced or emptied the
+/// baked per-user-100 bundle dirs at runtime with no guest-side record
+/// (bindwalk saw el2/100/log as ino 172 and el1/100/database as ino 44
+/// — neither is the baked inode 79/41), so every relevant syscall's
+/// path + result is recorded kernel-side while dfx=datatap is on.
+fn datatap_enabled(path: &str) -> bool {
+    crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::DataTap)
+        && (path.starts_with("/data/") || path == "/data")
+}
+
+fn datatap_log(op: &str, path: &str, detail: &str, rc: i64) {
+    crate::pr_info!(
+        "apptap {} '{}' {} -> {} (pid {})",
+        op,
+        path,
+        detail,
+        rc,
+        unsafe { crate::process::current_pid() }
+    );
+}
+
 /// sys_mkdir - Create directory (legacy wrapper)
 ///
 /// NOTE: riscv64 has no plain `mkdir` syscall — kept for the in-kernel test
@@ -874,10 +994,14 @@ pub fn sys_mkdir(args: SyscallArgs) -> i64 {
         Err(e) => return e as i64,
     };
 
-    match crate::fs::vfs::file_mkdir(pathname, mode) {
+    let rc = match crate::fs::vfs::file_mkdir(pathname, mode) {
         Ok(()) => 0,
         Err(e) => e as i64,
+    };
+    if datatap_enabled(pathname) {
+        datatap_log("mkdir", pathname, &alloc::format!("mode {mode:#o}"), rc);
     }
+    rc
 }
 
 /// sys_mkdirat - Create directory relative to directory file descriptor
@@ -908,10 +1032,28 @@ pub fn sys_mkdirat(args: SyscallArgs) -> i64 {
         return rc;
     }
 
-    match crate::fs::vfs::file_mkdir(&full_path, mode) {
+    let rc = match crate::fs::vfs::file_mkdir(&full_path, mode) {
         Ok(()) => 0,
-        Err(e) => e as i64,
+        Err(e) => {
+            // b18/sc18 appspawn hunt: DoSandboxRootFolderCreate fails with
+            // no errno on the guest side; the sandbox roots live under
+            // /mnt and /data, so surface failed mkdirs there on serial.
+            if e != -(17) && (full_path.starts_with("/mnt") || full_path.starts_with("/data")) {
+                crate::pr_info!(
+                    "mkdirfail '{}' mode {:#o}: {} (pid {})",
+                    full_path,
+                    mode,
+                    e,
+                    unsafe { crate::process::current_pid() }
+                );
+            }
+            e as i64
+        }
+    };
+    if datatap_enabled(&full_path) {
+        datatap_log("mkdir", &full_path, &alloc::format!("mode {mode:#o}"), rc);
     }
+    rc
 }
 
 /// sys_rmdir - Remove empty directory
@@ -924,10 +1066,14 @@ pub fn sys_rmdir(args: SyscallArgs) -> i64 {
         Err(e) => return e as i64,
     };
 
-    match crate::fs::vfs::file_rmdir(pathname) {
+    let rc = match crate::fs::vfs::file_rmdir(pathname) {
         Ok(()) => 0,
         Err(e) => e as i64,
+    };
+    if datatap_enabled(pathname) {
+        datatap_log("rmdir", pathname, "dir", rc);
     }
+    rc
 }
 
 /// sys_unlink - Remove file
@@ -1008,15 +1154,23 @@ pub fn sys_unlinkat(args: SyscallArgs) -> i64 {
     };
 
     if (flags & AT_REMOVEDIR) != 0 {
-        match crate::fs::vfs::file_rmdir(&full_path) {
+        let rc = match crate::fs::vfs::file_rmdir(&full_path) {
             Ok(()) => 0,
             Err(e) => e as i64,
+        };
+        if datatap_enabled(&full_path) {
+            datatap_log("rmdir", &full_path, "dir", rc);
         }
+        rc
     } else {
-        match crate::fs::vfs::file_unlink(&full_path) {
+        let rc = match crate::fs::vfs::file_unlink(&full_path) {
             Ok(()) => 0,
             Err(e) => e as i64,
+        };
+        if datatap_enabled(&full_path) {
+            datatap_log("unlink", &full_path, "file", rc);
         }
+        rc
     }
 }
 
@@ -1042,10 +1196,14 @@ pub fn sys_renameat(args: SyscallArgs) -> i64 {
         Err(e) => return e as i64,
     };
 
-    match crate::fs::vfs::vfs_rename(&old_full, &new_full) {
+    let rc = match crate::fs::vfs::vfs_rename(&old_full, &new_full) {
         Ok(()) => 0,
         Err(e) => e as i64,
+    };
+    if datatap_enabled(&old_full) || datatap_enabled(&new_full) {
+        datatap_log("rename", &old_full, &alloc::format!("=> '{new_full}'"), rc);
     }
+    rc
 }
 
 /// sys_readlinkat - Read symbolic link
@@ -1744,6 +1902,80 @@ pub fn sys_mount(args: SyscallArgs) -> i64 {
         }
     }
 
+    // MS_BIND: attach the source subtree over the target (Linux
+    // do_loopback; dispatch order REMOUNT → BIND → MOVE → propagation).
+    // OH's appspawn sandbox construction binds /proc, /dev, /sys,
+    // /system/... into /mnt/sandbox/<user>/<pkg>/ — b19 showed every
+    // one failing EINVAL right after the propagation fix landed. The
+    // new mount SHARES the source directory's inode (see
+    // vfs_bind_mount); fstype and data are ignored, as on Linux.
+    const BIND_MS_BIND: u64 = 4096;
+    const BIND_MS_REC: u64 = 16384;
+    if args[3] & BIND_MS_BIND != 0 {
+        let mnt_flags = crate::fs::mount::translate_mnt_flags_public(args[3]);
+        let ret = match crate::fs::vfs::vfs_bind_mount(
+            source,
+            target,
+            mnt_flags,
+            args[3] & BIND_MS_REC != 0,
+        ) {
+            Ok(()) => {
+                // Register in /proc/mounts AND the caller's mount namespace:
+                // OH's appspawn child self-binds the sandbox root precisely
+                // so pivot_root's is-mountpoint check passes (b22: sandbox
+                // setup completed, then `pivot /mnt/sandbox/0/<pkg> failed,
+                // err 22` because the bind was never registered anywhere).
+                crate::fs::mount::register_mount(
+                    source,
+                    target,
+                    "bind",
+                    if mnt_flags.is_readonly() { "ro" } else { "rw" },
+                );
+                0
+            }
+            Err(e) => e,
+        };
+        if ret != 0 {
+            crate::pr_info!(
+                "bindmount '{}' -> '{}' flags {:#x}: {}",
+                source,
+                target,
+                args[3],
+                ret
+            );
+        }
+        return ret as i64;
+    }
+
+    // Propagation-type change (Linux do_mount dispatch: REMOUNT → BIND →
+    // MOVE → propagation → new mount; this block sits after REMOUNT and
+    // MOVE). When flags carry ONLY propagation bits (MS_SHARED/MS_PRIVATE/
+    // MS_SLAVE/MS_UNBINDABLE, plus harmless modifiers like MS_REC),
+    // mount() changes the propagation type of the mount containing
+    // `target` — no new filesystem instance, fstype/source ignored. Rux
+    // mounts never propagate, so the change is a success no-op — but
+    // returning EINVAL killed real callers: OH init's sandbox prepare
+    // ("Failed set mount slave err = 22"), and the appspawn child's
+    // mount(NULL, "/", NULL, MS_SLAVE|MS_REC) right after creating the
+    // sandbox root dirs — b18 nailed DoSandboxRootFolderCreate dying at
+    // exactly mount[29] flags 0x84000 = MS_SLAVE|MS_REC → EINVAL, which
+    // failed every START_PROCESS (systemui, launcher) after the fork.
+    const CHG_MS_UNBINDABLE: u64 = 1 << 17;
+    const CHG_MS_PRIVATE: u64 = 1 << 18;
+    const CHG_MS_SLAVE: u64 = 1 << 19;
+    const CHG_MS_SHARED: u64 = 1 << 20;
+    const CHG_PROPAGATION: u64 =
+        CHG_MS_SHARED | CHG_MS_PRIVATE | CHG_MS_SLAVE | CHG_MS_UNBINDABLE;
+    if args[3] & CHG_PROPAGATION != 0 {
+        let prop = args[3] & CHG_PROPAGATION;
+        // Multiple propagation types at once is EINVAL (Linux
+        // change_mount_flags rejects the combination).
+        if prop & prop.wrapping_sub(1) != 0 {
+            return -(errno::EINVAL as i64);
+        }
+        return 0;
+    }
+
     // Mount options string (mount(2) arg 5): consumed by tmpfs today
     // (its size= page budget — LTP's all-filesystems harness mounts
     // tmpfs with size=32M, and an unbounded tmpfs let preadv203's 118 MB
@@ -1772,11 +2004,15 @@ pub fn sys_mount(args: SyscallArgs) -> i64 {
         // the account-ready chain rides on diagnosing it; a handful of
         // mounts per boot, not per-transaction).
         let always = fs_type_str == "hmdfs" || fs_type_str == "sharefs";
-        if n < 24 || always {
+        {
             let ret = match crate::fs::mount::do_mount(source, target, fs_type_str, args[3], mount_data) {
                 Ok(()) => 0,
                 Err(e) => e,
             };
+            // b18/sc18: print EVERY failed mount, however late in the boot.
+            // The old n<24 gate made appspawn's DoSandboxRootFolderCreate
+            // failure (systemui spawn, hook stage 31) invisible — sandbox
+            // mounts happen thousands of mounts into the boot.
             if ret != 0 || n < 12 || always {
                 crate::pr_info!(
                     "mount[{}] '{}' -> '{}' type '{}' flags {:#x}: {}",
@@ -1860,7 +2096,12 @@ pub fn sys_umount(args: SyscallArgs) -> i64 {
     } else {
         alloc::string::String::from(target)
     };
-    let target = target_owned.as_str();
+    // Normalize like Linux's user_path_at: OH's post-pivot cleanup calls
+    // umount2("<sandbox-root>/.", MNT_DETACH) and the literal "." component
+    // made vfs_umount's parent/name split fail EINVAL (sc23 umountfail
+    // trace), leaving init wedged in a half-prepared sandbox.
+    let target = crate::fs::path::path_normalize(&target_owned);
+    let target = target.as_str();
 
     // U1c: drop the mount row from the CALLER's mount namespace (the
     // dentry-level unmount below is global — recorded divergence).
@@ -1886,10 +2127,58 @@ pub fn sys_umount(args: SyscallArgs) -> i64 {
         }
     }
 
-    match crate::fs::vfs::vfs_umount(target) {
-        Ok(()) => 0,
-        Err(e) => e as i64,
+    // Post-pivot cleanup umount2(put_old | ".", MNT_DETACH): our
+    // jail-style pivot_root stacks no real mount in the shared dentry
+    // tree, so there is nothing for vfs_umount to detach; Linux's
+    // pivot_root leaves the OLD root mounted at put_old and this umount
+    // drops it. When the target matches the caller's recorded put_old
+    // (OH appspawn sandbox_core.cpp:1272 umounts "." right after
+    // pivot_root(p, p); init's sandbox cleanup umounts put_old too),
+    // consume the marker and report success so the sandbox setup
+    // proceeds — the jail root itself is untouched.
+    if flags & MNT_DETACH != 0 {
+        if let Some(t) = crate::sched::current() {
+            // SAFETY: sched::current() yields a valid task reference.
+            if let Some(fs) = unsafe { (*t).fs_arc() } {
+                if let Some(po) = fs.pivot_put_old() {
+                    let po_str =
+                        core::str::from_utf8(&po).unwrap_or("/");
+                    let po_norm = crate::fs::path::path_normalize(po_str);
+                    // "/" also names the old-root stack for the
+                    // pivot_root(new, new) idiom: OH's appspawn child
+                    // chdir's into the sandbox root, pivots, and its cwd
+                    // collapses to "/" inside the new root — umount2(".",
+                    // MNT_DETACH) then arrives here as "/" (b25: children
+                    // 1185-1189 all EBUSY on exactly that). A pivot
+                    // happened in this fs (po is set), so the DETACH pops
+                    // the (unmodelled) old-root stack: no-op success.
+                    if target == po_norm || target == "/" {
+                        fs.clear_pivot_put_old();
+                        return 0;
+                    }
+                }
+            }
+        }
     }
+
+    let ret = match crate::fs::vfs::vfs_umount(target) {
+        Ok(()) => 0,
+        Err(e) => e,
+    };
+    if ret != 0 {
+        // b24: after the (now-working) sandbox pivot, OH init's cleanup
+        // umount2(old_root, MNT_DETACH) fails EINVAL and wedges the boot
+        // in a half-pivoted state — name every failed umount so the
+        // topology gap is one glance.
+        crate::pr_info!(
+            "umountfail '{}' flags {:#x}: {} (pid {})",
+            target,
+            flags,
+            ret,
+            crate::process::current_pid()
+        );
+    }
+    ret as i64
 }
 
 /// Per-mount MNT_EXPIRE bookkeeping: (armed, accessed-since-arm) keyed by
@@ -2331,10 +2620,14 @@ pub fn sys_fchownat(args: SyscallArgs) -> i64 {
     // made lchown chown the target instead (LTP chown05 saw the link keep
     // root:root where it expected the nobody ownership it had set).
     let follow = flags & AT_SYMLINK_NOFOLLOW == 0;
-    match crate::fs::vfs::vfs_chown(full_path.as_ref(), uid, gid, follow) {
+    let rc = match crate::fs::vfs::vfs_chown(full_path.as_ref(), uid, gid, follow) {
         Ok(()) => 0,
         Err(e) => e as i64,
+    };
+    if datatap_enabled(&full_path) {
+        datatap_log("chown", &full_path, &alloc::format!("uid {uid} gid {gid}"), rc);
     }
+    rc
 }
 
 /// sys_ftruncate - Truncate an open file (syscall 46)
@@ -3422,10 +3715,14 @@ pub fn sys_setxattr(args: SyscallArgs) -> i64 {
         Ok(p) => p,
         Err(e) => return e as i64,
     };
-    match xattr_inode_by_path(&path, true) {
+    let rc = match xattr_inode_by_path(&path, true) {
         Ok(inode) => do_setxattr(&inode, args),
         Err(e) => e as i64,
+    };
+    if datatap_enabled(&path) {
+        datatap_log("setxattr", &path, "", rc);
     }
+    rc
 }
 
 pub fn sys_lsetxattr(args: SyscallArgs) -> i64 {
@@ -3433,10 +3730,14 @@ pub fn sys_lsetxattr(args: SyscallArgs) -> i64 {
         Ok(p) => p,
         Err(e) => return e as i64,
     };
-    match xattr_inode_by_path(&path, false) {
+    let rc = match xattr_inode_by_path(&path, false) {
         Ok(inode) => do_setxattr(&inode, args),
         Err(e) => e as i64,
+    };
+    if datatap_enabled(&path) {
+        datatap_log("lsetxattr", &path, "", rc);
     }
+    rc
 }
 
 pub fn sys_fsetxattr(args: SyscallArgs) -> i64 {
@@ -3451,10 +3752,14 @@ pub fn sys_getxattr(args: SyscallArgs) -> i64 {
         Ok(p) => p,
         Err(e) => return e as i64,
     };
-    match xattr_inode_by_path(&path, true) {
+    let rc = match xattr_inode_by_path(&path, true) {
         Ok(inode) => do_getxattr(&inode, args),
         Err(e) => e as i64,
+    };
+    if datatap_enabled(&path) {
+        datatap_log("getxattr", &path, "", rc);
     }
+    rc
 }
 
 pub fn sys_lgetxattr(args: SyscallArgs) -> i64 {
@@ -4591,8 +4896,17 @@ pub fn sys_renameat2(args: SyscallArgs) -> i64 {
         }
     }
 
-    match crate::fs::vfs::vfs_rename(&old, &new) {
+    let rc = match crate::fs::vfs::vfs_rename(&old, &new) {
         Ok(()) => 0,
         Err(e) => e as i64,
+    };
+    if datatap_enabled(&old) || datatap_enabled(&new) {
+        datatap_log(
+            "rename",
+            &old,
+            &alloc::format!("=> '{new}' flags {flags:#x}"),
+            rc,
+        );
     }
+    rc
 }

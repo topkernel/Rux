@@ -695,7 +695,35 @@ pub fn sys_execve(args: SyscallArgs) -> i64 {
         Err(e) => return e,
     };
 
-    do_execve(pathname_str, &argv, &envp, 0) as i64
+    let rc = do_execve(pathname_str, &argv, &envp, 0) as i64;
+    // sc39 gate: the launcher spawn child completes every sandbox hook
+    // ('Child process:com.ohos.launcher success') then exits 0 WITHOUT
+    // exec'ing — name any failed exec of an app-shaped path (a bare
+    // execve ENOENT is otherwise invisible on the serial).
+    if rc < 0
+        && (pathname_str.starts_with("/data/")
+            || pathname_str.starts_with("/mnt/sandbox/"))
+    {
+        static EXEC_FAIL_N: core::sync::atomic::AtomicUsize =
+            core::sync::atomic::AtomicUsize::new(0);
+        let n = EXEC_FAIL_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        if n < 120 {
+            let root = crate::sched::current()
+                .and_then(|t| unsafe { (*t).fs_arc() })
+                .map(|fs| fs.get_root())
+                .unwrap_or_default();
+            let root_str = core::str::from_utf8(&root).unwrap_or("?");
+            crate::pr_warn!(
+                "execfail[{}] '{}' -> {} root='{}' (pid {})",
+                n,
+                pathname_str,
+                rc,
+                root_str,
+                unsafe { crate::process::current_pid() }
+            );
+        }
+    }
+    rc
 }
 
 /// sys_exit - Exit the CALLING THREAD only (Linux exit(2) semantics)
@@ -728,6 +756,57 @@ pub fn sys_exit(args: SyscallArgs) -> i64 {
 pub fn sys_exit_group(args: SyscallArgs) -> i64 {
     // Same Linux pre-shift as sys_exit (see the comment there).
     let status = (((args[0] as u32) & 0xFF) << 8) as i32;
+    // sc40 gate: every appspawn child completes its sandbox hooks then
+    // exits 0 here without ever running the ability runtime — dump the
+    // child's last syscalls from the forensic ring so the terminal
+    // sequence (what it read/checked right before deciding to die) is
+    // on the serial. Deep-root (app sandbox) processes only.
+    {
+        let root = crate::sched::current()
+            .and_then(|t| unsafe { (*t).fs_arc() })
+            .map(|fs| fs.get_root())
+            .unwrap_or_default();
+        let root_str = core::str::from_utf8(&root).unwrap_or("");
+        let deep = root_str
+            .split('/')
+            .filter(|s| !s.is_empty())
+            .count() >= 4;
+        if deep {
+            use core::sync::atomic::Ordering::Relaxed;
+            let pid = unsafe { crate::process::current_pid() } as u32;
+            let mut picks: [(u32, u64, u64, u64); 12] = [(0, 0, 0, 0); 12];
+            let mut n = 0usize;
+            for e in crate::syscall::dispatch::SYSCALL_RING.iter() {
+                if e.pid.load(Relaxed) == pid && n < picks.len() {
+                    picks[n] = (
+                        e.nr.load(Relaxed),
+                        e.a0.load(Relaxed),
+                        e.a1.load(Relaxed),
+                        e.ret.load(Relaxed),
+                    );
+                    n += 1;
+                }
+            }
+            crate::pr_warn!(
+                "childexit pid={} root='{}' status={:#x} last{}:",
+                pid,
+                root_str,
+                args[0] as u32,
+                n
+            );
+            for i in (0..n).rev() {
+                let (nr, a0, a1, ret) = picks[i];
+                crate::pr_warn!(
+                    "  [{:02}] nr={} a0={:#x} a1={:#x} -> {}",
+                    i,
+                    nr,
+                    a0,
+                    a1,
+                    ret as i64
+                );
+            }
+        }
+    }
     crate::process::exit::do_exit_group(status);
     0 // unreachable
 }
@@ -3791,22 +3870,33 @@ pub fn sys_pivot_root(args: SyscallArgs) -> i64 {
         return -(errno::ENOTDIR as i64);
     }
 
-    // put_old must be strictly underneath new_root.
-    let under = if put_old == new_root {
-        false
-    } else {
-        put_old.starts_with(&if new_root == "/" {
+    // put_old must be underneath new_root — or EQUAL to it: Linux's check
+    // is is_subdir(put_old, new_root), and is_subdir(d, d) is true, so the
+    // documented idiom pivot_root(new_root, new_root) is legal. OH's
+    // appspawn sandbox (sandbox_core.cpp:1269) uses it; the old
+    // put_old == new_root → EINVAL rejected every sandbox pivot.
+    let under = put_old == new_root
+        || put_old.starts_with(&if new_root == "/" {
             alloc::string::String::from("/")
         } else {
             alloc::format!("{}/", new_root)
-        })
-    };
+        });
     if !under {
+        crate::pr_info!(
+            "pivot_root EINVAL(not-under): new='{}' put_old='{}'",
+            new_root,
+            put_old
+        );
         return -(errno::EINVAL as i64);
     }
 
     // new_root must be a mountpoint of the current mount namespace.
     if !crate::process::ns::ns_is_mountpoint(&new_root) {
+        crate::pr_info!(
+            "pivot_root EINVAL(not-mountpoint): new='{}' put_old='{}'",
+            new_root,
+            put_old
+        );
         return -(errno::EINVAL as i64);
     }
 
@@ -3825,8 +3915,24 @@ pub fn sys_pivot_root(args: SyscallArgs) -> i64 {
         Ok(vpath) => vpath.dentry.clone(),
         Err(_) => None,
     };
+    // sc29 hunt: the recorded root STRING is the user argument, but the
+    // resolved dentry may live at a different GLOBAL path (a chroot prefix
+    // like /usr can be in effect at pivot time) — every later prefixed
+    // lookup walks the string against the global tree. Print both.
+    if let Some(rd) = root_dentry.as_ref() {
+        crate::pr_info!(
+            "pivot_root: arg='{}' resolved dentry global='{}'",
+            new_root,
+            rd.build_path()
+        );
+    }
     if let Some(fs) = current.fs_arc() {
         fs.set_root_with_dentry(new_root.as_bytes(), root_dentry);
+        // Record put_old for the post-pivot cleanup umount2 (Linux leaves
+        // the old root MOUNTED at put_old; our jail-style pivot stacks
+        // nothing, so the matching umount2(MNT_DETACH) consumes the marker
+        // and reports success — OH's sandbox teardowns fail otherwise).
+        fs.set_pivot_put_old(put_old.as_bytes());
     }
     // (d) cwd: move into the new root when the old cwd fell outside it.
     let cwd = current.get_cwd();

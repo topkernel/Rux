@@ -44,6 +44,13 @@ pub struct FsStruct {
     /// global root). Same self-healing rationale as cwd_dentry.
     root_dentry: RwSpinlock<Option<Arc<Dentry>>>,
 
+    /// put_old recorded by this process's last pivot_root(2) (jail-style
+    /// pivot stacks no real mount — see sys_pivot_root). The post-pivot
+    /// cleanup umount2(put_old | ".", MNT_DETACH) consumes it: Linux
+    /// leaves the OLD root mounted at put_old and that umount drops it;
+    /// here it just reports success for the matching path once.
+    pivot_put_old: RwSpinlock<Option<alloc::vec::Vec<u8>>>,
+
     /// File creation mask
     umask: AtomicU32,
 }
@@ -56,6 +63,7 @@ impl FsStruct {
             root: RwSpinlock::new(alloc::vec::Vec::from(&b"/"[..])),
             cwd_dentry: RwSpinlock::new(None),
             root_dentry: RwSpinlock::new(None),
+            pivot_put_old: RwSpinlock::new(None),
             umask: AtomicU32::new(0o022),  // Default umask
         }
     }
@@ -140,6 +148,22 @@ impl FsStruct {
     /// The recorded chroot root dentry, if any.
     pub fn root_dentry(&self) -> Option<Arc<Dentry>> {
         self.root_dentry.read().clone()
+    }
+
+    /// Record the put_old of this process's last pivot_root (consumed by
+    /// the matching umount2 — see the field doc).
+    pub fn set_pivot_put_old(&self, path: &[u8]) {
+        *self.pivot_put_old.write() = Some(alloc::vec::Vec::from(path));
+    }
+
+    /// The recorded pivot put_old, if any.
+    pub fn pivot_put_old(&self) -> Option<alloc::vec::Vec<u8>> {
+        self.pivot_put_old.read().clone()
+    }
+
+    /// Clear the pivot marker (consumed / context reset).
+    pub fn clear_pivot_put_old(&self) {
+        *self.pivot_put_old.write() = None;
     }
 
     /// Copy the full filesystem context (cwd/root strings, cwd/root

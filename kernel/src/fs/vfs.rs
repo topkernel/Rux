@@ -276,6 +276,33 @@ pub fn vfs_remount(mountpoint: &str, new_flags: crate::fs::mount::MntFlags) -> R
     match found {
         Some(mnt) => {
             *mnt.flags.lock() = new_flags;
+            // Keep the underlying ext4's own ro latch in sync — its
+            // op-layer EROFS guard reads fs.read_only (sc21), so a
+            // remount,rw must reopen writes and remount,ro close them
+            // at the fs layer too. A metadata_csum image stays
+            // read-only regardless (mount-time downgrade policy: the
+            // write path does not maintain checksums).
+            if let Some(root_inode) = mnt.root.get_inode() {
+                if let Some(ops) = root_inode.ops {
+                    if core::ptr::eq(
+                        ops as *const _,
+                        &crate::fs::ext4::EXT4_INODE_OPS as *const _,
+                    ) {
+                        if let Some(p) = root_inode.private_data {
+                            // SAFETY: the fs instance lives for the mount;
+                            // read_only is a plain bool whose only writers
+                            // are mount setup and this remount path.
+                            let forced_ro = unsafe {
+                                (*(p as *const crate::fs::ext4::Ext4FileSystem)).metadata_csum
+                            };
+                            unsafe {
+                                (*(p as *mut crate::fs::ext4::Ext4FileSystem)).read_only =
+                                    new_flags.is_readonly() || forced_ro;
+                            }
+                        }
+                    }
+                }
+            }
             Ok(())
         }
         None => Err(errno::Errno::InvalidArgument.as_neg_i32()),
@@ -309,11 +336,36 @@ pub fn shallow_dentry_walk(components: &[&str]) -> Option<Arc<Dentry>> {
 /// This replaces the old `mount_at()` string-based routing with dentry tree
 /// construction. The dentry tree allows `path_lookup()` to walk the tree
 /// and cross mount points via `follow_mount()`.
+///
+/// Returns the mounted filesystem's fresh root dentry (so recursive bind
+/// clones can attach INSIDE it), or None for the "/" overlay special case.
 pub fn vfs_mount(
     mountpoint: &str,
     root_inode: Arc<Inode>,
     mnt_flags: MntFlags,
-) {
+) -> Option<Arc<Dentry>> {
+    // Namespace discipline (sc36): attach at the mountpoint AS THE
+    // CALLER SEES IT. path_lookup prefixes absolute paths with the
+    // task root, but this walk started at the GLOBAL root — a
+    // prefixed process (appspawn child inside the system sandbox)
+    // binding /mnt/sandbox/0/<pkg>/dev attached the mount on the
+    // direct-global dentry side, while every later lookup walked the
+    // through-sandbox-prefix side: two dentry trees over the same
+    // tmpfs nodes, mounts visible from one side only. Post-pivot
+    // /dev/null resolved to the bare tmpfs dir and the spawn child
+    // died at appspawn_common.c:350 (sc33-sc36). Prepend the task root
+    // exactly like make_absolute_rooted; kernel threads and early boot
+    // (root "/") are unchanged.
+    let owned_mountpoint;
+    let mountpoint = {
+        let root = get_process_root();
+        if root != "/" && mountpoint.starts_with('/') {
+            owned_mountpoint = format!("{}{}", root.trim_end_matches('/'), mountpoint);
+            owned_mountpoint.as_str()
+        } else {
+            mountpoint
+        }
+    };
     let mut state = VFS_STATE.lock();
 
     // Ensure VFS root dentry exists
@@ -339,7 +391,7 @@ pub fn vfs_mount(
     // root dentry's inode, so children (proc, dev, etc.) remain accessible.
     if mountpoint == "/" {
         vfs_root.set_inode(mounted_root.get_inode().unwrap());
-        return;
+        return None;
     }
 
     // For non-root mountpoints (e.g., "/dev", "/proc"), walk from VFS root
@@ -386,6 +438,7 @@ pub fn vfs_mount(
             // "can't open drm card device", zero displays, and the whole
             // graphics stack ran screen-less (rs-egl r3-r8).
             mounted_root.set_mountpoint_back(child.clone());
+            return Some(mounted_root);
         } else {
             // Intermediate component — create if not exists
             let child = match current.lookup_child(&name) {
@@ -400,6 +453,9 @@ pub fn vfs_mount(
             current = child;
         }
     }
+    // Unreachable for non-empty component lists; an empty mountpoint
+    // string ("", "//") attaches nothing.
+    None
 }
 
 // ============================================================================
@@ -439,6 +495,380 @@ pub fn vfs_umount(mountpoint: &str) -> Result<(), i32> {
     mnt.root.clear_mountpoint_back();
     *child.vfsmount.lock() = None;
     Ok(())
+}
+
+/// Relative component names from `anc` down to `d` (exclusive of `anc`),
+/// walking the dentry tree upward and hopping mount boundaries via the
+/// fs-root mountpoint back-references. None when `d` is not a strict
+/// descendant of `anc` (or is `anc` itself).
+fn dentry_relpath_below(anc: &Arc<Dentry>, d: &Arc<Dentry>) -> Option<Vec<String>> {
+    let mut cur = d.clone();
+    let mut comps: Vec<String> = Vec::new();
+    loop {
+        if Arc::ptr_eq(&cur, anc) {
+            // comps were collected child-first on the way up; the caller
+            // wants them ancestor-first (a path relative to `anc`).
+            comps.reverse();
+            return Some(comps);
+        }
+        let next = {
+            let parent = cur.parent.lock().clone();
+            match parent {
+                Some(p) => {
+                    comps.push(cur.get_name());
+                    p
+                }
+                None => {
+                    // Top of a mounted filesystem: hop to its mountpoint in
+                    // the covering tree so mounts under nested mounts are
+                    // still recognized as descendants.
+                    match cur.get_mountpoint_back() {
+                        Some(m) => m,
+                        None => return None,
+                    }
+                }
+            }
+        };
+        cur = next;
+    }
+}
+
+/// Bind mount: attach the subtree rooted at `source` over `target`
+/// (Linux mount(2) with MS_BIND — do_loopback). OH's appspawn sandbox
+/// construction binds /proc, /dev, /sys, /system/... into
+/// /mnt/sandbox/<user>/<pkg>/, and init's system sandbox binds chipsets
+/// the same way. The mount created at `target` SHARES the source
+/// directory's inode: the target exposes the same tree through the same
+/// inode ops (no copy, writes are visible on both sides, like Linux).
+/// Target existence is the caller's (sys_mount's) path_lookup check;
+/// source resolution follows symlinks and mounts on the way (/system is
+/// a symlink into the /usr ext4 mount — the bind must capture the
+/// resolved inode, exactly what path_lookup yields).
+///
+/// `recursive` (MS_BIND|MS_REC — every OH sandbox bind carries it):
+/// clone the mounts nested under the source subtree at the
+/// corresponding target paths (Linux clone_mnt of the whole subtree).
+/// Without this the bind exposed only the source's own inode tree:
+/// the /sys bind hid selinuxfs at /sys/fs/selinux, samgr's selinux
+/// check failed closed, and every AddSystemAbility was denied —
+/// hdf_devmgr (critical) crash-looped into a panic reboot (sc22).
+pub fn vfs_bind_mount(
+    source: &str,
+    target: &str,
+    mnt_flags: MntFlags,
+    recursive: bool,
+) -> Result<(), i32> {
+    let src = match path_lookup(source, 0) {
+        Ok(p) => p,
+        Err(e) => {
+            // b20: sources that demonstrably exist at runtime (SetBundleQuota
+            // opened /data/app/el2/0/base/com.ohos.systemui one minute before
+            // the child's bind of the same path failed ENOENT) — name the
+            // deepest prefix that DOES resolve so the break is one glance.
+            // b22: also print the prefix's INODE — baked-image inodes are
+            // known (debugfs), so a mismatch proves the runtime shadowed or
+            // recreated the dir rather than the lookup being broken.
+            if e == -2 {
+                let mut ok_until = String::from("/");
+                let mut ok_ino: u64 = 0;
+                let mut comps: Vec<&str> =
+                    source.split('/').filter(|s| !s.is_empty()).collect();
+                while !comps.is_empty() {
+                    let probe = format!("/{}", comps.join("/"));
+                    if let Ok(p) = path_lookup(&probe, 0) {
+                        if let Some(i) = p.inode.as_ref() {
+                            ok_ino = i.ino;
+                        }
+                        ok_until = probe;
+                        break;
+                    }
+                    comps.pop();
+                }
+                crate::pr_warn!(
+                    "bindwalk: '{}' ENOENT, resolves until '{}' ino={}",
+                    source,
+                    ok_until,
+                    ok_ino
+                );
+                // datatap (el2/100 hunt): dump the kernel's cached children
+                // of the deepest resolved dir — with the baked-image inos
+                // known from debugfs, a divergence here separates "guest
+                // mutated the tree" (runtime inodes) from "dcache went
+                // stale/wrong" (baked inos but lookup still misses).
+                if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::DataTap)
+                    && source.starts_with("/data/")
+                {
+                    if let Ok(p) = path_lookup(&ok_until, 0) {
+                        if let Some(ref d) = p.dentry {
+                            let kids: Vec<String> = d
+                                .children
+                                .lock()
+                                .iter()
+                                .map(|(n, c)| {
+                                    if c.is_negative() {
+                                        format!("{n}=NEG")
+                                    } else {
+                                        let ino = c.get_inode().map(|i| i.ino).unwrap_or(0);
+                                        format!("{n}={ino}")
+                                    }
+                                })
+                                .collect();
+                            crate::pr_warn!(
+                                "apptap dcache '{}': [{}]",
+                                ok_until,
+                                kids.join(" ")
+                            );
+                        }
+                    }
+                }
+            }
+            return Err(e);
+        }
+    };
+    let inode = match src.inode.clone() {
+        Some(i) => i,
+        None => match src.dentry.as_ref().and_then(|d| d.get_inode()) {
+            Some(i) => i,
+            None => return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32()),
+        },
+    };
+    // A bind clone inherits the source mount's read-only flag (Linux
+    // clone_mnt copies mnt_flags minus propagation bits — a bind of a ro
+    // mount IS ro; sc21). Without this, a mkdir/create under a bind of the
+    // ro /usr or /vendor ext4 slipped past check_not_readonly (the new
+    // mount carried only the syscall's flags), dove into the ext4 write
+    // machinery, and surfaced as EIO — sc20's sandbox prep saw
+    // mkdir '/mnt/sandbox/system/vendor/firmware' fail -5 where Linux
+    // answers EROFS and init merely warns and moves on.
+    let mnt_flags = if path_on_readonly_mount(source) {
+        MntFlags::new(mnt_flags.bits() | MntFlags::MNT_READONLY)
+    } else {
+        mnt_flags
+    };
+    // sc31 hunt: what did the sandbox's own mounts actually capture? The
+    // '/'-bind at the sandbox's /mnt decides what /mnt/sandbox means for
+    // every pivoted process — print the resolved source dentry's GLOBAL
+    // path so the captured tree is unambiguous. Rate-limited alongside
+    // bindrec (sc37: per-spawn prints x retry storms flooded the UART).
+    if sbx_want(target) {
+        if let Some(ref sd) = src.dentry {
+            static SBXBIND_N: core::sync::atomic::AtomicUsize =
+                core::sync::atomic::AtomicUsize::new(0);
+            if SBXBIND_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 200 {
+                crate::pr_info!(
+                    "sbxbind '{}' -> '{}': src dentry global='{}' ino={:#x}",
+                    source,
+                    target,
+                    sd.build_path(),
+                    inode.ino
+                );
+            }
+        }
+    }
+    let fresh_root = vfs_mount(target, inode.clone(), mnt_flags);
+
+    // MS_REC: clone the mounts nested under the source subtree to the
+    // same relative paths under the target (see the doc comment). The
+    // enumeration hops ONE mount boundary outward from the resolved
+    // source dentry: for a plain bind (/dev) that is equivalent, but for
+    // OH's SELF-bind (/mnt/sandbox/<user>/<pkg> onto itself, re-flagging
+    // propagation for pivot_root) the resolved dentry is the freshly
+    // attached bind root whose subtree is still EMPTY — the appspawn
+    // child mounts live under the ORIGINAL mountpoint dentry. Without
+    // the hop (and without cloning at all for self-binds) the fresh
+    // root shadowed the child binds: post-pivot /dev/null resolved to
+    // the bare tmpfs dir and the child died at appspawn_common.c:350
+    // "open dev_null error: 2" (sc27).
+    //
+    // sc31 LESSON — clones attach by fs-walking INSIDE the fresh bind
+    // root, never by global-path vfs_mount() walks: the old global walk
+    // fabricated INODE-LESS placeholder dentries for missing
+    // intermediates (and stacked a clone of the just-made bind onto
+    // itself). The placeholders then answered real lookups: every
+    // '/mnt/...' resolution from inside the pivoted system sandbox hit
+    // the stub 'sandbox' inside the /-bind copy and failed ENOENT —
+    // appspawn's mkdir('/mnt/sandbox/100') returned -2 200k times and
+    // no app binary ever exec'd (sc28). Linux clone_mnt builds the new
+    // subtree by cloning dentries, so no placeholder can leak; here the
+    // equivalent discipline is: walk the fresh root with plain fs
+    // lookups (the bind root SHARES the source inode, so every mounted
+    // subpath resolves), cross into earlier clones for stacking, and
+    // DROP any clone whose path does not resolve — no fabrication.
+    if recursive {
+        let fresh_root = match fresh_root {
+            Some(r) => r,
+            None => return Ok(()),
+        };
+        // SELF-BINDS (source == target, OH's sandbox re-flag idiom):
+        // skip the clone phase. Since vfs_mount attaches at the
+        // CALLER-visible mountpoint (a9595213), every LATER bind's
+        // target walk crosses this self-bind and lands INSIDE the copy
+        // naturally — cloning the subtree again only stacks duplicate
+        // mounts, ~50 per appspawn spawn, each registered forever (the
+        // registry is never pruned), which made every later clone
+        // enumeration slower until spawns blew appspawn's 3s watchdog
+        // (sc37/sc38: 'wait child timeout', no app exec). The sc27
+        // reason for cloning self-binds (post-pivot /dev/null shadowed
+        // by a bare copy) is superseded by that attach-side fix.
+        {
+            let src_norm = source.trim_end_matches('/');
+            let tgt_norm = target.trim_end_matches('/');
+            if src_norm == tgt_norm {
+                return Ok(());
+            }
+        }
+        let anc = match src.dentry.clone() {
+            Some(d) => d.get_mountpoint_back().unwrap_or(d),
+            None => return Ok(()),
+        };
+        let clones: Vec<(Vec<String>, Arc<Dentry>, MntFlags)> = {
+            let state = VFS_STATE.lock();
+            state
+                .mounts
+                .iter()
+                .filter_map(|m| {
+                    // Never clone the just-attached bind onto itself.
+                    if Arc::ptr_eq(&m.root, &fresh_root) {
+                        return None;
+                    }
+                    let mp = m.root.get_mountpoint_back()?;
+                    let rel = dentry_relpath_below(&anc, &mp)?;
+                    if rel.is_empty() {
+                        return None;
+                    }
+                    Some((rel, m.root.clone(), *m.flags.lock()))
+                })
+                .collect()
+        };
+        for (rel, root, flags) in clones {
+            // Rate-limited (sc37 lesson): one boot printed 1,012,926 of
+            // these — ~50 clones per spawn x the appspawn retry storm —
+            // and the synchronous UART writes alone pushed every spawn
+            // past appspawn's 3s child watchdog (exit -9 mid-prep,
+            // forever). The clone list is visible in the first 200.
+            static BINDREC_N: core::sync::atomic::AtomicUsize =
+                core::sync::atomic::AtomicUsize::new(0);
+            if BINDREC_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 200 {
+                crate::pr_info!(
+                    "bindrec: cloned '/{}' under '{}' (flags {:#x})",
+                    rel.join("/"),
+                    target,
+                    flags.bits()
+                );
+            }
+            bind_clone_attach(&fresh_root, &rel, &root, flags);
+        }
+    }
+    Ok(())
+}
+
+/// Attach one MS_REC clone `src_root` at `rel` INSIDE the fresh bind root.
+///
+/// Walks the fresh root's dentry tree with dcache hits and fs lookups
+/// only — crossing mounts already cloned there so stacked submounts land
+/// where lookups traverse them — and silently drops the clone when a
+/// component does not resolve: the bind root SHARES the source inode, so
+/// every genuinely mounted subpath resolves; a miss means we would be
+/// fabricating a placeholder dentry, which is exactly the sc31 bug (stubs
+/// answered real lookups with ENOENT forever).
+fn bind_clone_attach(
+    fresh_root: &Arc<Dentry>,
+    rel: &[String],
+    src_root: &Arc<Dentry>,
+    flags: MntFlags,
+) {
+    let mut cur = fresh_root.clone();
+    let Some(last) = rel.last() else { return };
+    for comp in rel.iter() {
+        // Cross an earlier clone attached at this level: later siblings
+        // must land inside the stacked copy, matching lookup traversal.
+        cur = follow_mount(cur);
+        let is_last = core::ptr::eq(comp, last);
+        if is_last {
+            let child = match cur.lookup_child(comp) {
+                Some(c) => c,
+                None => {
+                    let dir_inode = match cur.get_inode() {
+                        Some(i) => i,
+                        None => return, // placeholder territory — drop the clone
+                    };
+                    let ops = match dir_inode.ops.as_ref() {
+                        Some(o) => o,
+                        None => return,
+                    };
+                    let child_inode = unsafe {
+                        let ino = match ops.lookup {
+                            Some(f) => match f(&*dir_inode, comp.as_bytes()) {
+                                Ok(ino) => ino,
+                                Err(_) => return, // absent in the source tree
+                            },
+                            None => return,
+                        };
+                        match ops.iget {
+                            Some(f) => match f(&*dir_inode, comp.as_bytes(), ino) {
+                                Ok(i) => i,
+                                Err(_) => return,
+                            },
+                            None => return,
+                        }
+                    };
+                    let d = Arc::new(Dentry::new(comp.clone()));
+                    d.set_inode(child_inode);
+                    d.set_parent(cur.clone());
+                    cur.add_child(comp.clone(), d.clone());
+                    d
+                }
+            };
+            let Some(root_inode) = src_root.get_inode() else { return };
+            let mounted_root = Arc::new(Dentry::new(String::from("/")));
+            mounted_root.set_inode(root_inode);
+            mounted_root.set_hashed();
+            let mnt_desc = Arc::new(VfsMountInternal {
+                root: mounted_root.clone(),
+                flags: Spinlock::new(flags),
+            });
+            child.set_mount(mnt_desc.clone());
+            mounted_root.set_mountpoint_back(child.clone());
+            let mut state = VFS_STATE.lock();
+            state.mounts.push(mnt_desc);
+            return;
+        }
+        // Intermediate component — dcache hit or fs lookup; never fabricate.
+        cur = match cur.lookup_child(comp) {
+            Some(c) => c,
+            None => {
+                let dir_inode = match cur.get_inode() {
+                    Some(i) => i,
+                    None => return,
+                };
+                let ops = match dir_inode.ops.as_ref() {
+                    Some(o) => o,
+                    None => return,
+                };
+                let child_inode = unsafe {
+                    let ino = match ops.lookup {
+                        Some(f) => match f(&*dir_inode, comp.as_bytes()) {
+                            Ok(ino) => ino,
+                            Err(_) => return,
+                        },
+                        None => return,
+                    };
+                    match ops.iget {
+                        Some(f) => match f(&*dir_inode, comp.as_bytes(), ino) {
+                            Ok(i) => i,
+                            Err(_) => return,
+                        },
+                        None => return,
+                    }
+                };
+                let d = Arc::new(Dentry::new(comp.clone()));
+                d.set_inode(child_inode);
+                d.set_parent(cur.clone());
+                cur.add_child(comp.clone(), d.clone());
+                d
+            }
+        };
+    }
 }
 
 /// Move a mount: mount(2) with MS_MOVE re-attaches the filesystem
@@ -824,6 +1254,95 @@ fn dentry_walk_no_symlink(path: &str) -> Option<Arc<Dentry>> {
 pub const LOOKUP_FOLLOW: u32 = 0x01;    // Follow symlinks (default)
 pub const LOOKUP_NOFOLLOW: u32 = 0x02;  // Don't follow final symlink
 
+// ---------------------------------------------------------------------------
+// sc29/sc30 hunt: trace failing lookups/creates under /mnt/sandbox with a
+// PER-PATH budget so the init sandbox-setup noise cannot starve the
+// interesting failures (appspawn child mkdir('/mnt/sandbox/100') -> ENOENT
+// forever while mkdir('/mnt/sandbox') -> EEXIST one syscall earlier).
+// sc29: stage=parentdir — the PARENT lookup fails; and resolution of
+// 'sandbox' flips fail->ok between consecutive lookups during setup.
+// ---------------------------------------------------------------------------
+fn sbx_want(path: &str) -> bool {
+    // App-sandbox paths only ('/mnt/sandbox/<uid>/<pkg>/...'): the
+    // system-sandbox hunt is closed (sc31), and the usage_report /
+    // hiview churn under /mnt/sandbox/system/... burned the trace
+    // tables (600 distinct paths -> silent dropouts, sc35).
+    let rest = match path.find("/mnt/sandbox/") {
+        Some(i) => &path[i + "/mnt/sandbox/".len()..],
+        None => return false,
+    };
+    let mut it = rest.split('/');
+    match it.next() {
+        Some(uid) => !uid.is_empty() && uid.bytes().all(|b| b.is_ascii_digit()),
+        None => false,
+    }
+}
+
+/// Budget-burn filter (sc30 lesson: the dynamic linker's library scan
+/// ("/mnt/sandbox/system/usr/.../*.so", hundreds of distinct paths)
+/// exhausted a 4000-line global cap in the first minutes of boot, before
+/// the appspawn stage ever ran).
+fn sbx_noise(path: &str) -> bool {
+    path.ends_with(".so") || path.contains("/lib")
+}
+
+fn sbx_trace(kind: &str, key: &str, detail: &str) {
+    static SBX_BUDGETS: Spinlock<Vec<(String, usize)>> = Spinlock::new(Vec::new());
+    static SBX_TOTAL: core::sync::atomic::AtomicUsize =
+        core::sync::atomic::AtomicUsize::new(0);
+    // sc33 lesson: counting ATTEMPTS against the global cap let the
+    // usage_report/hiview retry churn (five failed lookups per cycle,
+    // thousands of cycles) exhaust 30000 before the appspawn stage —
+    // while printing only ~1000 lines. Count PRINTS instead; the
+    // per-path cap (4) already bounds any single path.
+    let mut budgets = SBX_BUDGETS.lock();
+    let mut slot: Option<&mut usize> = None;
+    for (p, n) in budgets.iter_mut() {
+        if p.as_str() == key {
+            slot = Some(n);
+            break;
+        }
+    }
+    let n = match slot {
+        Some(n) => n,
+        None => {
+            if budgets.len() >= 600 {
+                return;
+            }
+            budgets.push((String::from(key), 0));
+            match budgets.last_mut() {
+                Some((_, n)) => n,
+                None => return,
+            }
+        }
+    };
+    if *n >= 4 {
+        return;
+    }
+    *n += 1;
+    let total = SBX_TOTAL.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    if total > 30000 {
+        return;
+    }
+    crate::pr_info!(
+        "sbx{}[{},p{}] {} (pid {})",
+        kind,
+        total,
+        *n,
+        detail,
+        unsafe { crate::process::current_pid() }
+    );
+}
+
+/// Parent-state summary for walk traces: name, inode presence+type, mount.
+fn sbx_dentry_state(d: &Arc<Dentry>) -> String {
+    let mnt = if d.get_mount().is_some() { "+mnt" } else { "-mnt" };
+    match d.get_inode() {
+        Some(i) => format!("'{}' ino={:#x} mode={:#o} {}", d.get_name(), i.ino, i.mode.bits(), mnt),
+        None => format!("'{}' NO-INODE {}", d.get_name(), mnt),
+    }
+}
+
 pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
     // Empty path is invalid
     if pathname.is_empty() {
@@ -836,6 +1355,14 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
     // cannot lexically climb out of the jail.
     let abs_path = make_absolute_rooted(pathname);
     let normalized = normalize_with_root(&abs_path, &get_process_root());
+
+    // sc30/sc31 hunt: collect a component-by-component trail for sandbox
+    // walks (the topology question — which mount each step lands in — is
+    // exactly what the serial needs to answer).
+    let sbx_tracing = (sbx_want(&normalized) || sbx_want(pathname))
+        && !sbx_noise(&normalized)
+        && !sbx_noise(pathname);
+    let mut trail = String::new();
 
     // Get VFS root dentry
     let vfs_root = VFS_STATE.lock().root_dentry.clone()
@@ -860,6 +1387,11 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
         .split('/')
         .filter(|s| !s.is_empty())
         .collect();
+
+    // sc30 hunt: count mount boundaries the walk actually crosses — the
+    // sandbox paths cross at least one bind; a divergence here vs the
+    // expected topology names the wrong-tree walk immediately.
+    let mut crossed: usize = if vfs_root.get_mount().is_some() { 1 } else { 0 };
 
     for (ci, component) in components.iter().enumerate() {
         // NAME_MAX check (review 5.5): components longer than 255 bytes can
@@ -926,6 +1458,40 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
             Some(c) => {
                 // Negative dentry — file known not to exist
                 if c.is_negative() {
+                    if sbx_tracing {
+                        sbx_trace(
+                            "walk",
+                            &format!("NEG {}", normalized),
+                            &format!(
+                                "'{}' NEG-dentry at '{}' | parent {} | crossed={} | trail={}",
+                                normalized,
+                                component,
+                                sbx_dentry_state(&current),
+                                crossed,
+                                trail
+                            ),
+                        );
+                    }
+                    // datatap (el2/100 hunt): the negative cache has NO
+                    // invalidation on parent mutation, so a stale NEG entry
+                    // permanently hides freshly created files. Name hits
+                    // under /data so the dt boot can attribute each
+                    // "invisible" dir to either this cache or a real
+                    // on-disk absence.
+                    if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::DataTap) {
+                        let mut prefix = String::new();
+                        for c2 in components.iter().take(ci + 1) {
+                            prefix.push('/');
+                            prefix.push_str(c2);
+                        }
+                        if prefix.starts_with("/data/") {
+                            crate::pr_warn!(
+                                "apptap negdentry hit '{}' (cached ENOENT, pid {})",
+                                prefix,
+                                crate::process::current_pid()
+                            );
+                        }
+                    }
                     return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
                 }
                 // Check icache for fresh inode data
@@ -938,8 +1504,26 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
             }
             None => {
                 // Not in dentry cache — ask the filesystem to look it up
-                let dir_inode = current.get_inode()
-                    .ok_or(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())?;
+                let dir_inode = match current.get_inode() {
+                    Some(i) => i,
+                    None => {
+                        if sbx_tracing {
+                            sbx_trace(
+                                "walk",
+                                &format!("NOINODE {}", normalized),
+                                &format!(
+                                    "'{}' parent dentry NO INODE at '{}' | state {} | crossed={} | trail={}",
+                                    normalized,
+                                    component,
+                                    sbx_dentry_state(&current),
+                                    crossed,
+                                    trail
+                                ),
+                            );
+                        }
+                        return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
+                    }
+                };
                 let ops = dir_inode.ops.as_ref()
                     .ok_or(errno::Errno::NotADirectory.as_neg_i32())?;
 
@@ -959,6 +1543,21 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
                                         d.set_negative();
                                         d.set_parent(current.clone());
                                         current.add_child(name, d);
+                                    }
+                                    if sbx_tracing {
+                                        sbx_trace(
+                                            "walk",
+                                            &format!("FS {}", normalized),
+                                            &format!(
+                                                "'{}' fs lookup '{}' -> {} | parent {} | crossed={} | trail={}",
+                                                normalized,
+                                                component,
+                                                e,
+                                                sbx_dentry_state(&current),
+                                                crossed,
+                                                trail
+                                            ),
+                                        );
                                     }
                                     return Err(e);
                                 }
@@ -984,7 +1583,19 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
                     crate::fs::inode::icache_add(child_inode);
 
                     // Move to child, follow mount, follow symlink
+                    let hopped = d.get_mount().is_some();
+                    if hopped {
+                        crossed += 1;
+                    }
                     current = follow_mount(d);
+                    if sbx_tracing {
+                        trail.push_str(&format!(
+                            "{}{}={} ",
+                            component,
+                            if hopped { "*" } else { "" },
+                            current.get_name()
+                        ));
+                    }
                     // Respect LOOKUP_NOFOLLOW on the final component here as
                     // well — lstat must not depend on dentry cache state.
                     let is_last = ci == components.len() - 1;
@@ -999,7 +1610,19 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
         };
 
         // Follow mount point at child, then follow symlink
+        let hopped = child.get_mount().is_some();
+        if hopped {
+            crossed += 1;
+        }
         current = follow_mount(child);
+        if sbx_tracing {
+            trail.push_str(&format!(
+                "{}{}={} ",
+                component,
+                if hopped { "*" } else { "" },
+                current.get_name()
+            ));
+        }
         // If LOOKUP_NOFOLLOW and this is the last component, skip symlink resolution
         let is_last = ci == components.len() - 1;
         if is_last && (flags & LOOKUP_NOFOLLOW) != 0 {
@@ -1011,8 +1634,25 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
 
     // Build VfsPath from final dentry
     let dentry = current.clone();
-    let inode = dentry.get_inode()
-        .ok_or(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())?;
+    let inode = match dentry.get_inode() {
+        Some(i) => i,
+        None => {
+            if sbx_tracing {
+                sbx_trace(
+                    "walk",
+                    &format!("FINAL {}", normalized),
+                    &format!(
+                        "'{}' FINAL dentry no inode | state {} | crossed={} | trail={}",
+                        normalized,
+                        sbx_dentry_state(&dentry),
+                        crossed,
+                        trail
+                    ),
+                );
+            }
+            return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
+        }
+    };
 
     // POSIX/Linux path resolution: a TRAILING SLASH demands a directory —
     // "file/" on a regular file is ENOTDIR, never a silent success (Linux
@@ -1398,11 +2038,33 @@ pub fn vfs_mkdir(pathname: &str, mode: u32) -> Result<(), i32> {
     // Serialize the lookup+mutate window (see VFS_MUTATION_LOCK note).
     let _mutation_guard = VFS_MUTATION_LOCK.guard();
 
+    // sc29/sc30 hunt: name the failing stage of a sandbox mkdir. parentdir
+    // failures also print the PREFIXED parent path the walk actually used.
+    let sbx_mkdir_stage = |st: &str, e: i32| {
+        if sbx_want(pathname) && !sbx_noise(pathname) {
+            let extra = if st == "parentdir" {
+                let (pp, _) = path_parent_and_name(pathname)
+                    .unwrap_or((String::from("?"), String::new()));
+                format!(" parent='{}'", make_absolute_rooted(&pp))
+            } else {
+                String::new()
+            };
+            sbx_trace(
+                "mkdir",
+                &format!("{} {}", pathname, st),
+                &format!("'{}' stage {} -> {}{}", pathname, st, e, extra),
+            );
+        }
+    };
+
     // EEXIST before any mutation (Linux do_mkdirat; LTP mkdir03) — the
     // old path left the "already exists" decision to the filesystem's
     // mkdir callback, which succeeded.
     match path_lookup(pathname, LOOKUP_NOFOLLOW) {
-        Ok(_) => return Err(errno::Errno::FileExists.as_neg_i32()),
+        Ok(_) => {
+            sbx_mkdir_stage("precheck", -17);
+            return Err(errno::Errno::FileExists.as_neg_i32());
+        }
         // Only a genuinely ABSENT name may be created. Other lookup
         // failures — ELOOP on a symlink ring (LTP mkdir03/rmdir02/
         // mkdirat02 43-hop rings), ENOTDIR, EACCES — propagate to the
@@ -1410,10 +2072,19 @@ pub fn vfs_mkdir(pathname: &str, mode: u32) -> Result<(), i32> {
         // parent walk's ENOTDIR (observed: 43 hops → ENOTDIR, 44+ →
         // ELOOP). Same rule sys_open already follows.
         Err(e) if e == -(errno::constants::ENOENT) => {}
-        Err(e) => return Err(e),
+        Err(e) => {
+            sbx_mkdir_stage("precheck", e);
+            return Err(e);
+        }
     }
 
-    let (parent_vpath, name) = lookup_parent_dir(pathname)?;
+    let (parent_vpath, name) = match lookup_parent_dir(pathname) {
+        Ok(v) => v,
+        Err(e) => {
+            sbx_mkdir_stage("parentdir", e);
+            return Err(e);
+        }
+    };
 
     // Get parent inode
     let parent_inode = parent_vpath.inode.as_ref()
@@ -1431,7 +2102,13 @@ pub fn vfs_mkdir(pathname: &str, mode: u32) -> Result<(), i32> {
     unsafe {
         if let Some(mkdir_fn) = ops.mkdir {
             let inode_mode = InodeMode::new(InodeMode::S_IFDIR | (mode & 0o7777));
-            let new_inode = mkdir_fn(parent_inode.as_ref(), name.as_bytes(), inode_mode)?;
+            let new_inode = match mkdir_fn(parent_inode.as_ref(), name.as_bytes(), inode_mode) {
+                Ok(i) => i,
+                Err(e) => {
+                    sbx_mkdir_stage("fs-mkdir", e);
+                    return Err(e);
+                }
+            };
 
             // inode_init_owner (Linux): a new entry gets the caller's fsuid,
             // and when the PARENT directory has S_ISGID set the child

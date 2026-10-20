@@ -2013,7 +2013,11 @@ unsafe fn ext4_setattr(inode: &Inode, attr: u32, arg1: u64, arg2: u64) -> i32 {
     // blocks (bitmap RMW) and rewrites the inode.
     let _ext4_guard = EXT4_BIG_LOCK.lock_fair();
 
-    let fs = match get_ext4_fs_from_inode(inode) {
+    // Every setattr flavor mutates on-disk state; a read-only mount
+    // answers EROFS (Linux notify_change/mnt_want_write; sc21). atime
+    // updates from reads call this too, but both callers discard the
+    // result, so read paths on ro images are unaffected.
+    let fs = match get_ext4_fs_rw_from_inode(inode) {
         Ok(fs) => fs,
         Err(e) => return e,
     };
@@ -2988,7 +2992,7 @@ unsafe fn ext4_iget(parent: &Inode, _name: &[u8], ino: Ino) -> Result<alloc::syn
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
 unsafe fn ext4_mkdir_wrapper(dir: &Inode, name: &[u8], mode: InodeMode) -> Result<alloc::sync::Arc<Inode>, i32> {
     let _ext4_guard = EXT4_BIG_LOCK.lock_fair();
-    let fs = get_ext4_fs_from_inode(dir)?;
+    let fs = get_ext4_fs_rw_from_inode(dir)?;
 
     // Call namei's ext4_mkdir
     let new_ino = namei::ext4_mkdir(fs, dir.ino as u32, name, mode.bits() as u16)?;
@@ -3028,7 +3032,7 @@ unsafe fn refresh_inode_cache(inode: &Inode, fs: &Ext4FileSystem) {
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
 unsafe fn ext4_rmdir_wrapper(dir: &Inode, name: &[u8]) -> i32 {
     let _ext4_guard = EXT4_BIG_LOCK.lock_fair();
-    let fs = match get_ext4_fs_from_inode(dir) {
+    let fs = match get_ext4_fs_rw_from_inode(dir) {
         Ok(f) => f,
         Err(e) => return e,
     };
@@ -3054,7 +3058,7 @@ unsafe fn ext4_rmdir_wrapper(dir: &Inode, name: &[u8]) -> i32 {
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
 unsafe fn ext4_create_wrapper(dir: &Inode, name: &[u8], mode: InodeMode) -> Result<alloc::sync::Arc<Inode>, i32> {
     let _ext4_guard = EXT4_BIG_LOCK.lock_fair();
-    let fs = get_ext4_fs_from_inode(dir)?;
+    let fs = get_ext4_fs_rw_from_inode(dir)?;
     let new_ino = namei::ext4_create(fs, dir.ino as u32, name, mode.bits() as u16)?;
 
     // Update parent directory's cached Ext4Inode
@@ -3071,7 +3075,7 @@ unsafe fn ext4_create_wrapper(dir: &Inode, name: &[u8], mode: InodeMode) -> Resu
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
 unsafe fn ext4_mknod_wrapper(dir: &Inode, name: &[u8], mode: InodeMode, dev: u64) -> Result<alloc::sync::Arc<Inode>, i32> {
     let _ext4_guard = EXT4_BIG_LOCK.lock_fair();
-    let fs = get_ext4_fs_from_inode(dir)?;
+    let fs = get_ext4_fs_rw_from_inode(dir)?;
     let new_ino = namei::ext4_mknod(fs, dir.ino as u32, name, mode.bits() as u16, dev)?;
 
     // Update parent directory's cached Ext4Inode
@@ -3088,7 +3092,7 @@ unsafe fn ext4_mknod_wrapper(dir: &Inode, name: &[u8], mode: InodeMode, dev: u64
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
 unsafe fn ext4_symlink_wrapper(dir: &Inode, name: &[u8], target: &[u8]) -> Result<alloc::sync::Arc<Inode>, i32> {
     let _ext4_guard = EXT4_BIG_LOCK.lock_fair();
-    let fs = get_ext4_fs_from_inode(dir)?;
+    let fs = get_ext4_fs_rw_from_inode(dir)?;
     let new_ino = namei::ext4_symlink(fs, dir.ino as u32, name, target)?;
 
     // Update parent directory's cached Ext4Inode
@@ -3105,7 +3109,7 @@ unsafe fn ext4_symlink_wrapper(dir: &Inode, name: &[u8], target: &[u8]) -> Resul
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
 unsafe fn ext4_link_wrapper(dir: &Inode, name: &[u8], target: &Inode) -> i32 {
     let _ext4_guard = EXT4_BIG_LOCK.lock_fair();
-    let fs = match get_ext4_fs_from_inode(dir) {
+    let fs = match get_ext4_fs_rw_from_inode(dir) {
         Ok(f) => f,
         Err(e) => return e,
     };
@@ -3132,7 +3136,7 @@ unsafe fn ext4_link_wrapper(dir: &Inode, name: &[u8], target: &Inode) -> i32 {
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
 unsafe fn ext4_unlink_wrapper(dir: &Inode, name: &[u8]) -> i32 {
     let _ext4_guard = EXT4_BIG_LOCK.lock_fair();
-    let fs = match get_ext4_fs_from_inode(dir) {
+    let fs = match get_ext4_fs_rw_from_inode(dir) {
         Ok(f) => f,
         Err(e) => return e,
     };
@@ -3154,7 +3158,7 @@ unsafe fn ext4_unlink_wrapper(dir: &Inode, name: &[u8]) -> i32 {
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
 unsafe fn ext4_rename_wrapper(old_dir: &Inode, old_name: &[u8], new_dir: &Inode, new_name: &[u8]) -> i32 {
     let _ext4_guard = EXT4_BIG_LOCK.lock_fair();
-    let fs = match get_ext4_fs_from_inode(old_dir) {
+    let fs = match get_ext4_fs_rw_from_inode(old_dir) {
         Ok(f) => f,
         Err(e) => return e,
     };
@@ -3173,6 +3177,23 @@ fn get_ext4_fs_from_inode(inode: &Inode) -> Result<&'static Ext4FileSystem, i32>
     unsafe {
         Ok(&*(fs_ptr as *const Ext4FileSystem))
     }
+}
+
+/// Mutating-op variant of get_ext4_fs_from_inode: a read-only-mounted ext4
+/// refuses writes with EROFS, the way Linux does (may_create checks
+/// IS_RDONLY(dir), ext4_new_inode its own sb_rdonly; sc21). The guard must
+/// sit at the op WRAPPERS because binds SHARE inodes with the original
+/// mount — check_not_readonly only sees the bind's own flags, and without
+/// the fs-level refusal a mkdir/create under a bind of the ro /usr or
+/// /vendor ext4 ran the full write path (bitmap RMW, superblock counter,
+/// journal) and failed deep inside with EIO, mis-reporting the errno
+/// (sc20: sandbox prep mkdirs under /mnt/sandbox/system returned -5).
+fn get_ext4_fs_rw_from_inode(inode: &Inode) -> Result<&'static Ext4FileSystem, i32> {
+    let fs = get_ext4_fs_from_inode(inode)?;
+    if fs.read_only {
+        return Err(errno::Errno::ReadOnlyFileSystem.as_neg_i32());
+    }
+    Ok(fs)
 }
 
 /// Get file operations for ext4 regular files and directories

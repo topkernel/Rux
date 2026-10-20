@@ -50,48 +50,52 @@ int main(int argc, char **argv)
     struct epoll_event ev = { .events = EPOLLIN, .data.fd = lfd };
     if (epoll_ctl(ep, EPOLL_CTL_ADD, lfd, &ev) < 0) { perror("epoll_ctl"); return 1; }
 
-    pid_t child = fork();
-    if (child == 0) {
-        /* give the parent a moment to enter epoll_wait */
-        usleep(200 * 1000);
-        int cfd = socket(AF_UNIX, SOCK_STREAM, 0);
-        if (cfd < 0) { perror("child socket"); _exit(1); }
-        if (connect(cfd, (struct sockaddr *)&sa, sizeof(sa)) < 0) {
-            perror("child connect"); _exit(2);
-        }
-        char buf[1056];
-        memset(buf, 'A', sizeof(buf));
-        ssize_t w = write(cfd, buf, sizeof(buf));
-        fprintf(stderr, "child: connect ok, wrote %zd\n", w);
-        /* keep the connection open for a while so data stays queued */
-        usleep(5 * 1000 * 1000);
-        close(cfd);
-        _exit(0);
-    }
-
     fprintf(stderr, "parent: waiting on epoll (listener %d)\n", lfd);
-    double t0 = now_ms();
-    struct epoll_event out;
-    int n = epoll_wait(ep, &out, 1, 4000);
-    double dt = now_ms() - t0;
-    if (n < 0) {
-        perror("epoll_wait");
-    } else if (n == 0) {
-        fprintf(stderr, "parent: TIMEOUT after %.1f ms — listener never ready (LOST WAKE)\n", dt);
-    } else {
-        fprintf(stderr, "parent: epoll_wait %d after %.1f ms fd=%d ev=%#x — accepting\n",
-                n, dt, out.data.fd, out.events);
-        int cfd = accept(lfd, NULL, NULL);
-        if (cfd < 0) {
-            perror("accept");
-        } else {
-            char buf[1100];
-            ssize_t r = read(cfd, buf, sizeof(buf));
-            fprintf(stderr, "parent: accepted %d, read %zd\n", cfd, r);
+    /* THREE sequential connections on one listener: the appspawn shape
+     * is connect #1 accepted early (cold-start child), then later
+     * connects never wake the loop — i.e. a readiness re-arm bug after
+     * a prior accept. The original probe accepted once and exited,
+     * which cannot see that. */
+    for (int round = 0; round < 3; round++) {
+        pid_t child = fork();
+        if (child == 0) {
+            usleep(200 * 1000);
+            int cfd = socket(AF_UNIX, SOCK_STREAM, 0);
+            if (cfd < 0) { perror("child socket"); _exit(1); }
+            if (connect(cfd, (struct sockaddr *)&sa, sizeof(sa)) < 0) {
+                perror("child connect"); _exit(2);
+            }
+            char buf[1056];
+            memset(buf, 'A', sizeof(buf));
+            ssize_t w = write(cfd, buf, sizeof(buf));
+            fprintf(stderr, "child%d: connect ok, wrote %zd\n", round, w);
+            usleep(1500 * 1000);
             close(cfd);
+            _exit(0);
         }
+        double t0 = now_ms();
+        struct epoll_event out;
+        int n = epoll_wait(ep, &out, 1, 4000);
+        double dt = now_ms() - t0;
+        if (n < 0) {
+            perror("epoll_wait");
+        } else if (n == 0) {
+            fprintf(stderr, "parent: round %d TIMEOUT after %.1f ms — listener never ready (LOST WAKE)\n", round, dt);
+        } else {
+            fprintf(stderr, "parent: round %d epoll_wait %d after %.1f ms fd=%d ev=%#x — accepting\n",
+                    round, n, dt, out.data.fd, out.events);
+            int cfd = accept(lfd, NULL, NULL);
+            if (cfd < 0) {
+                perror("accept");
+            } else {
+                char buf[1100];
+                ssize_t r = read(cfd, buf, sizeof(buf));
+                fprintf(stderr, "parent: round %d accepted %d, read %zd\n", round, cfd, r);
+                close(cfd);
+            }
+        }
+        int st; waitpid(child, &st, 0);
     }
-    int st; waitpid(child, &st, 0);
     fprintf(stderr, "parent: done\n");
 
     /* Mode 2: socketpair peer death. The appspawn server's cold-start

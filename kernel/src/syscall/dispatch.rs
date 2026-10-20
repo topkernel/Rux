@@ -728,6 +728,38 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
         }
     }
 
+    // b26: open/openat ENOENT with its own budget — the missstat hook's
+    // 40 lines are gone long before the appspawn children pivot, and the
+    // sandbox-side "/dev/null" ENOENT (appspawn_common.c:350 'open
+    // dev_null error: 2') needs the failing path + the task's root
+    // context to diagnose the in-sandbox walk.
+    if result == -2 && (syscall_no as u64 == 2 || syscall_no as u64 == 257) {
+        static OPEN_ENOENT_N: core::sync::atomic::AtomicUsize =
+            core::sync::atomic::AtomicUsize::new(0);
+        if OPEN_ENOENT_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 200 {
+            let mut pb = [0u8; 96];
+            let parg = if syscall_no as u64 == 257 { args[1] } else { args[0] };
+            let path = if parg != 0 {
+                crate::arch::uaccess::strncpy_from_user(
+                    parg as *const u8, pb.len(), &mut pb)
+                    .map(|s| core::str::from_utf8(s).unwrap_or("?"))
+                    .unwrap_or("<efault>")
+            } else { "-" };
+            // Root context: a pivoted child resolves against its jail.
+            let root = crate::sched::current()
+                .and_then(|t| unsafe { (*t).fs_arc() })
+                .map(|fs| fs.get_root())
+                .unwrap_or_default();
+            let root_str = core::str::from_utf8(&root).unwrap_or("?");
+            crate::pr_info!(
+                "openmiss: path='{}' root='{}' pid={}",
+                path,
+                root_str,
+                crate::process::current_pid()
+            );
+        }
+    }
+
     // STEPTRACE (dfx=steptrace): one line per syscall return. Left
     // ungated this flooded the emulated UART (2.7GB per OH boot) and the
     // printing alone slowed services enough to lose races — see the

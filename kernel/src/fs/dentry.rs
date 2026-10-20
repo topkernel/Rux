@@ -333,6 +333,13 @@ impl Dentry {
         *self.mountpoint.lock() = Some(Arc::downgrade(&mountpoint));
     }
 
+    /// The mountpoint this fs-root dentry is mounted on, if any (see
+    /// set_mountpoint_back). Used by ancestry walks that must cross mount
+    /// boundaries upward (MS_REC bind cloning).
+    pub fn get_mountpoint_back(&self) -> Option<Arc<Dentry>> {
+        self.mountpoint.lock().as_ref().and_then(|w| w.upgrade())
+    }
+
     /// Forget the mountpoint back-pointer (mount detached/moved away).
     pub fn clear_mountpoint_back(&self) {
         *self.mountpoint.lock() = None;
