@@ -1693,11 +1693,44 @@ pub fn wake_up_process(task: *mut Task) -> bool {
 
 #[inline(never)]
 pub fn schedule() {
+    // PREEMPT_ACTIVE recursion guard (kernel-preemption re-landing,
+    // launcher round 4, 2026-10-20). Every schedule() call now runs with
+    // the PREEMPT_ACTIVE bit set in the caller's preempt_count and clears
+    // it when __schedule returns to THIS frame. Two properties follow:
+    //
+    // 1. No re-entrant schedule on the same stack. __schedule's tail
+    //    (after context_switch) restores the incoming task's saved IRQ
+    //    state; with IF re-enabled there, a timer tick can land inside
+    //    the unwinding frame. Every preemption gate that could re-enter
+    //    (the IRQ-exit hook, the trap-exit asm loop, cond_resched,
+    //    lock_fair's retry) tests preempt_count()==0 and therefore
+    //    REFUSES while PREEMPT_ACTIVE is set. Without this bit (the
+    //    reverted 2cf4bdc9), the re-entry stacked nested __schedule
+    //    frames on one kernel stack and let the pick/heal machinery
+    //    operate on half-unwound frames — the double-run whose unpaired
+    //    guard drops poisoned a task's preempt_count to -1, which made
+    //    in_interrupt() read true for a USER page fault (KERNPANIC) and
+    //    parked cpu0 for minutes.
+    // 2. Per-task balance: the bit is added in the outgoing task's frame
+    //    and subtracted in the same frame when the task is resumed and
+    //    unwinds — the coroutine semantics __schedule already keeps for
+    //    the saved IRQ flags (R54). The discipline check in __schedule
+    //    masks the bit out so it never blocks the switch it guards.
+    //
+    // A task switched out inside schedule() and later destroyed (the
+    // do_exit final schedule never returns) carries the bit to the grave
+    // — the count dies with the Task, no leak.
+    crate::interrupt::preempt::preempt_count_add(
+        crate::interrupt::preempt::PREEMPT_ACTIVE,
+    );
     // SAFETY: __schedule() manipulates raw task pointers and calls context_switch;
     // must be called from kernel context with valid current task pointer.
     unsafe {
         __schedule();
     }
+    crate::interrupt::preempt::preempt_count_sub(
+        crate::interrupt::preempt::PREEMPT_ACTIVE,
+    );
 }
 
 #[no_mangle]
@@ -1951,9 +1984,17 @@ unsafe fn __schedule() {
     // it degenerates into a poll loop, which is the correct behavior for a
     // lock holder. Terminal states (ZOMBIE/DEAD) are exempt: the exit
     // path's final schedule() must always switch away.
+    //
+    // PREEMPT_ACTIVE (set by schedule() around this call) is masked out:
+    // it is not a lock/bh/RCU state, it is the recursion guard itself, and
+    // refusing on it would make every schedule() a no-op.
     {
         let prev_state = (*prev).state();
-        if !prev_state.is_dead() && (*prev).preempt_count() != 0 {
+        if !prev_state.is_dead()
+            && ((*prev).preempt_count()
+                & !crate::interrupt::preempt::PREEMPT_ACTIVE)
+                != 0
+        {
             (*prev).set_state(TaskState::new(TaskState::RUNNING));
             crate::sched::dequeue_if_enqueued(&*prev);
             return;

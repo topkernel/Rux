@@ -978,6 +978,7 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize, vector: u64) {
                     crate::drivers::intc::apic::eoi();
                     handle_timer_tick(regs_ref, cpu_id);
                     crate::interrupt::preempt::irq_exit();
+                    irq_exit_maybe_preempt_kernel(regs_ref);
                 }
 
                 v if (crate::arch::ipi::IPI_FIRST..=crate::arch::ipi::IPI_LAST)
@@ -987,12 +988,14 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize, vector: u64) {
                     crate::drivers::intc::apic::eoi();
                     crate::arch::ipi::handle_ipi_vector(v);
                     crate::interrupt::preempt::irq_exit();
+                    irq_exit_maybe_preempt_kernel(regs_ref);
                 }
 
                 vec::IRQ0 => {
                     crate::interrupt::preempt::irq_enter();
                     handle_timer_interrupt(regs_ref, cpu_id);
                     crate::interrupt::preempt::irq_exit();
+                    irq_exit_maybe_preempt_kernel(regs_ref);
                 }
 
                 v if v > vec::IRQ0 && v <= vec::IRQ_LAST => {
@@ -1021,6 +1024,67 @@ fn ww_irqwin_budget_ok() -> bool {
     }
     LAST.compare_exchange(last, now, core::sync::atomic::Ordering::AcqRel, core::sync::atomic::Ordering::Acquire)
         .is_ok()
+}
+
+/// Kernel-mode preemption at IRQ exit (CONFIG_PREEMPT equivalent).
+///
+/// First landed as 2cf4bdc9 and reverted in 0ced11da after it poisoned a
+/// task's preempt_count to -1 (user page faults then read
+/// in_interrupt()==true → KERNPANIC, cpu0 parked, softirq starved for
+/// minutes). Root cause of that failure: the hook called schedule() with
+/// NO re-entry guard, so a timer tick landing inside __schedule's own
+/// tail — after the incoming task's saved IF was restored — re-entered
+/// schedule() on the same, half-unwound kernel stack. The nested entry
+/// ran the prev-resolution/pick/heal machinery on frames that were still
+/// unwinding, producing double-run shapes whose unpaired guard drops
+/// underflowed the count.
+///
+/// This re-landing closes that hole by construction:
+/// - schedule() itself now sets PREEMPT_ACTIVE around __schedule (every
+///   caller — this hook, the trap-exit asm loop, cond_resched, lock_fair,
+///   every sleeper). preemptible() is count==0, so while any schedule()
+///   is in progress on this task no preemption gate can re-enter it.
+/// - sub_preempt_count clamps and reports underflow, so a residual
+///   unpaired decrement is one attributable log line, not a silent -1
+///   that fakes in_interrupt() for a user task.
+///
+/// Call contract (unchanged from 2cf4bdc9's analysis, still true):
+/// - Called from the timer/IPI vector paths AFTER irq_exit(), with IF=0
+///   (interrupt gate) and the hardirq count already subtracted.
+/// - User-mode frames are skipped — trap_exit's asm loop owns those.
+/// - preempt_count()==0 (INCLUDING PREEMPT_ACTIVE) means the interrupted
+///   kernel context holds no spinlock (all guards add PREEMPT_OFFSET),
+///   no bh section, no RCU read side (rcu_read_lock = preempt_disable),
+///   and is not already inside a schedule().
+/// - The switch is the same one sleeping syscalls take; mid-syscall
+///   migration already happens via blocking paths, and the per-caller
+///   IRQ-flag discipline (R54) returns each side to its own IF state.
+/// - After schedule() returns, the frame unwinds normally through
+///   trap_handler's tail and trap_exit's kernel restore.
+fn irq_exit_maybe_preempt_kernel(regs: &PtRegs) {
+    // Early-boot / WFI secondaries have no current task: __schedule
+    // handles a null prev, but there is nothing to preempt either way.
+    if crate::sched::current().is_none() {
+        return;
+    }
+    if regs.user_mode() {
+        return; // user path: trap_exit asm owns preemption
+    }
+    if !crate::sched::need_resched() {
+        return;
+    }
+    if !crate::interrupt::preempt::preemptible() {
+        return; // holds a lock / bh / RCU / nested IRQ / inside schedule()
+    }
+    static FIRED: core::sync::atomic::AtomicBool =
+        core::sync::atomic::AtomicBool::new(false);
+    if !FIRED.swap(true, core::sync::atomic::Ordering::AcqRel) {
+        crate::pr_info!(
+            "sched: kernel-preempt enabled (first IRQ-exit switch, cpu={})",
+            crate::arch::cpu_id()
+        );
+    }
+    crate::sched::schedule();
 }
 
 /// Shared timer-tick body (used by both the LAPIC-timer vector and the
