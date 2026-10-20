@@ -289,6 +289,12 @@ Consequences for the hunt:
   ALLOCTHROW (heap region sits at 0x40000000, needs >=2G) — keep 2G+
   for any ad-hoc x86_64 boot of this kernel.
 
+- ww-s2-r3 (45 min, session-3, watchpoints armed): full budget survived,
+  82828 serial lines, full storm (wakes=13.3M, ticks=[101,100]), 0
+  KERNPANIC / 0 ALLOCTHROW / 0 WW-HIT / 0 heals. Second full clean
+  boot-hour on the F1b-fixed kernel. USEGV-F: 5 distinct pids x 3
+  attempts each — same shape and rate as r1. Chain auto-advanced to r4.
+
 ## Where this leaves the hunt (handoff)
 
 The attribution machinery now exists and is proven end-to-end; the
