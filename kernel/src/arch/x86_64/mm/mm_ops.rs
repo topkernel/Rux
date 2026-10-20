@@ -1011,46 +1011,62 @@ impl MmStruct {
 
     /// Copy address space using Copy-on-Write mechanism
     pub fn fork(&self) -> Result<MmStruct, MapError> {
-        // R-WRITESTORM-3 (fork/VMA atomicity): hold ONE vma_read guard
-        // across the cow_exempt scan, the COW page-table copy, AND the
-        // VMA snapshot. The old shape took and dropped vma_read twice
-        // with the PTE copy between the two acquisitions — a same-mm
-        // mprotect (which holds vma_write across BOTH its PTE rewrite
-        // and its VMA surgery) could interleave exactly there: the child
-        // then received the OLD PTEs (a PROT_NONE marker) with the NEW
-        // (upgraded) VMA flags. A later touch of that page tripped the
-        // marker as "already mapped + no perms" and killed the child
-        // with SIGSEGV/EACCES (the OH service Permission-denied family).
-        // Every mm mutator takes vma_write, so one read guard gives fork
-        // a consistent PTE+VMA view; faults (vma_read) still proceed
-        // concurrently, and their installs serialize on the PTE lock
-        // taken below.
-        let parent_vma_guard = self.vma_read();
+        // R-WRITESTORM-3 (fork/VMA atomicity), phase-2 shape: SNAPSHOT
+        // FIRST. The original protocol held ONE vma_read guard across the
+        // cow_exempt scan, the COW page-table copy, AND the VMA snapshot so
+        // the child could never pair OLD PTEs with NEW (mprotect-upgraded)
+        // VMA flags — the SIGSEGV/EACCES "Permission denied" family. But a
+        // vma_read guard is preempt-disabling, so that shape also pinned the
+        // whole (multi-second, large-mm) COW walk to one CPU — the launcher
+        // line's structural wall (session-G sc62/64 strand monsters).
+        //
+        // Snapshot-first keeps the consistency and drops the long hold:
+        // exempt scan AND VMA snapshot come from the SAME read-guard era,
+        // so the child pairs PTEs and VMAs of one coherent pre-fork
+        // generation. The walk then runs with NO vma lock and only
+        // per-leaf-table PTE-lock chunks (see copy_page_table_cow); a
+        // concurrent mprotect/munmap/mmap on the parent interleaves at
+        // per-PTE granularity and simply stays out of the child's
+        // snapshot — the race-equivalent outcome POSIX already assigns to
+        // mm writers concurrent with fork.
+        let (cow_exempt, vma_snapshot): (Vec<(u64, u64)>, Vec<(PageVirtAddr, PageVirtAddr, VmaFlags, VmaType, i32, u64, usize)>) = {
+            let parent_vma_guard = self.vma_read();
 
-        // COW-exempt VMA regions (MAP_SHARED / device mappings). fork's COW
-        // walk historically write-protected EVERY user-writable PTE — in the
-        // PARENT too. A MAP_SHARED mapping then COW-faulted on the first
-        // post-fork store: the fault handler allocated a private copy and
-        // every subsequent store landed there, never in the shared backing
-        // (the fbterm framebuffer-freeze root cause on riscv64). Shared and
-        // device VMAs must be inherited as-is: bump the refcount, keep the
-        // write permission.
-        let cow_exempt: Vec<(u64, u64)> = parent_vma_guard
-            .iter()
-            .filter(|vma| {
-                vma.flags().contains(crate::mm::vma::VmaFlags::SHARED)
-                    || vma.vma_type() == crate::mm::vma::VmaType::Device
-            })
-            .map(|vma| (vma.start().0 as u64, vma.end().0 as u64))
-            .collect();
+            // COW-exempt VMA regions (MAP_SHARED / device mappings). fork's COW
+            // walk historically write-protected EVERY user-writable PTE — in the
+            // PARENT too. A MAP_SHARED mapping then COW-faulted on the first
+            // post-fork store: the fault handler allocated a private copy and
+            // every subsequent store landed there, never in the shared backing
+            // (the fbterm framebuffer-freeze root cause on riscv64). Shared and
+            // device VMAs must be inherited as-is: bump the refcount, keep the
+            // write permission.
+            let exempt: Vec<(u64, u64)> = parent_vma_guard
+                .iter()
+                .filter(|vma| {
+                    vma.flags().contains(crate::mm::vma::VmaFlags::SHARED)
+                        || vma.vma_type() == crate::mm::vma::VmaType::Device
+                })
+                .map(|vma| (vma.start().0 as u64, vma.end().0 as u64))
+                .collect();
+
+            // Snapshot VMA data under the SAME parent read-guard (R-WRITESTORM-3
+            // consistency era — see the comment above).
+            let snapshot: Vec<(PageVirtAddr, PageVirtAddr, VmaFlags, VmaType, i32, u64, usize)> =
+                parent_vma_guard.iter().map(|vma| {
+                    (vma.start(), vma.end(), vma.flags(), vma.vma_type(), vma.file_fd(), vma.file_size(), vma.offset())
+                }).collect();
+
+            (exempt, snapshot)
+        };
 
         // SAFETY: self.pgd is a valid root PPN for the current address space. The caller
         // (fork) guarantees the parent address space is fully initialized and consistent.
-        let _pte_guard = PTE_MODIFY_LOCK.lock();
+        // The walk takes PTE_MODIFY_LOCK internally per leaf table and may
+        // cond_resched between chunks (launcher wall fix — see the function's
+        // own comment for the exclusion argument).
         let new_root_ppn = unsafe {
             copy_page_table_cow(self.pgd, &cow_exempt).ok_or(MapError::OutOfMemory)?
         };
-        drop(_pte_guard);
 
         // SAFETY: new_root_ppn was just returned from copy_page_table_cow, so it points to
         // a valid, freshly allocated root page table. space_type and brk are valid by
@@ -1062,19 +1078,8 @@ impl MmStruct {
         ) };
 
         {
-            // Snapshot VMA data under the SAME parent read-guard held
-            // since before the PTE copy (R-WRITESTORM-3) — no same-mm
-            // mutator can interleave between the two views. The child
-            // write-lock below is a DIFFERENT lock (the child's manager),
-            // so no read-then-write deadlock.
-            let vma_snapshot: Vec<(PageVirtAddr, PageVirtAddr, VmaFlags, VmaType, i32, u64, usize)> =
-                parent_vma_guard.iter().map(|vma| {
-                    (vma.start(), vma.end(), vma.flags(), vma.vma_type(), vma.file_fd(), vma.file_size(), vma.offset())
-                }).collect();
-            // Parent read-lock released here (R-WRITESTORM-3): everything
-            // after this point only touches the CHILD's manager.
-            drop(parent_vma_guard);
-
+            // Everything after this point only touches the CHILD's manager
+            // (the snapshot was taken before the walk — no parent lock held).
             if !vma_snapshot.is_empty() {
                 let mut new_vma_mgr = new_space.vma_write();
                 for (start, end, flags, vma_type, file_fd, file_size, offset) in vma_snapshot {
@@ -1691,10 +1696,14 @@ pub unsafe fn copy_page_table_cow(
     parent_root_ppn: u64,
     cow_exempt: &[(u64, u64)],
 ) -> Option<u64> {
-    // NOTE: the whole walk runs under the caller's (AddressSpace::fork)
-    // PTE_MODIFY_LOCK, serializing it against demand faults, COW faults,
-    // and exec/unmap teardown. Per-leaf PTL granularity (Linux-style) is
-    // still a TODO for SMP scalability.
+    // NOTE (launcher wall fix, session-3): the walk runs CHUNKED — one
+    // PTE_MODIFY_LOCK section per leaf table (vpn2 iteration), with
+    // cond_resched() at every chunk boundary. Per-PTE atomicity vs demand
+    // faults, COW faults, mprotect/munmap and teardown is preserved (every
+    // leaf writer takes the same lock); structural safety comes from the
+    // parent mm being Arc-pinned by the forking task (teardown cannot run)
+    // and intermediate tables never being unlinked mid-life. The caller
+    // (AddressSpace::fork) holds NO lock across the walk.
     use crate::mm::page_desc::pfn_to_page_mut;
 
     // Framebuffer frames (virtio-gpu scanout backing store) are
@@ -1789,40 +1798,58 @@ pub unsafe fn copy_page_table_cow(
                     continue;
                 }
 
-                // 2MB leaf: share (device/identity leaves, or user huge
-                // pages with a refcount bump).
-                if pte2.is_leaf() {
-                    if pte2.is_user() {
-                        let page = pfn_to_page_mut(pte2.ppn() as usize);
-                        if !page.is_null() {
-                            (*page).get_page();
-                            (*page).inc_mapcount();
+                // ONE-LEAF-TABLE CHUNK under the PTE lock (launcher wall
+                // fix, session-3): the walk no longer holds one global
+                // section for the whole parent tree — that monopolized a
+                // CPU (preempt disabled) for the multi-second walk of a
+                // large mm and blocked every other mm's faults behind it.
+                // Exclusion still holds where it must:
+                // - leaf-PTE atomicity (this table's reads/writes vs
+                //   demand faults, COW faults, mprotect/munmap on the
+                //   parent): the per-chunk PTE_MODIFY_LOCK, which every
+                //   other leaf writer also takes;
+                // - structure: intermediate tables are never unlinked
+                //   mid-life (only free_user_page_tables frees them, and
+                //   the parent mm is Arc-pinned by the forking task, so
+                //   its Drop cannot run during the walk); faults only
+                //   ADD tables, and an index-ordered traversal reads
+                //   additions either before or after the chunk that
+                //   covers them — both consistent.
+                {
+                    let _pte_guard = PTE_MODIFY_LOCK.lock();
+
+                    // 2MB leaf: share (device/identity leaves, or user huge
+                    // pages with a refcount bump).
+                    if pte2.is_leaf() {
+                        if pte2.is_user() {
+                            let page = pfn_to_page_mut(pte2.ppn() as usize);
+                            if !page.is_null() {
+                                (*page).get_page();
+                                (*page).inc_mapcount();
+                            }
                         }
-                    }
-                    (*child_pmd_ref).set(vpn2, pte2);
-                    continue;
-                }
+                        (*child_pmd_ref).set(vpn2, pte2);
+                    } else {
+                        let ppn1 = pte2.ppn();
 
-                let ppn1 = pte2.ppn();
+                        let child_pt_phys = alloc_page_table()?;
+                        let child_ppn1 = child_pt_phys >> PAGE_SHIFT;
+                        (*child_pmd_ref).set(
+                            vpn2,
+                            PageTableEntry::from_bits(
+                                PageTableEntry::new_table(child_ppn1).bits() | (pte2.bits() & PageTableEntry::US),
+                            ),
+                        );
 
-                let child_pt_phys = alloc_page_table()?;
-                let child_ppn1 = child_pt_phys >> PAGE_SHIFT;
-                (*child_pmd_ref).set(
-                    vpn2,
-                    PageTableEntry::from_bits(
-                        PageTableEntry::new_table(child_ppn1).bits() | (pte2.bits() & PageTableEntry::US),
-                    ),
-                );
+                        let parent_pt = get_page_table_virt(ppn1 << PAGE_SHIFT);
+                        let child_pt_ref = &mut *get_page_table_virt(child_pt_phys);
 
-                let parent_pt = get_page_table_virt(ppn1 << PAGE_SHIFT);
-                let child_pt_ref = &mut *get_page_table_virt(child_pt_phys);
-
-                for vpn1 in 0..512usize {
-                    // The whole walk runs under AddressSpace::fork()'s
-                    // PTE_MODIFY_LOCK, which serializes it against demand
-                    // faults, COW faults, and teardown — no per-leaf
-                    // locking here (the lock is not reentrant).
-                    let pte1 = (*parent_pt).get(vpn1);
+                        for vpn1 in 0..512usize {
+                            // Per-PTE atomicity vs demand/COW faults and
+                            // mprotect/munmap: every access to this leaf
+                            // table happens under the chunk's
+                            // PTE_MODIFY_LOCK above.
+                            let pte1 = (*parent_pt).get(vpn1);
 
                     if !pte1.is_valid() {
                         continue;
@@ -1882,7 +1909,17 @@ pub unsafe fn copy_page_table_cow(
                         leaf_va,
                         new_pte.ppn(),
                     );
-                }
+                        }
+                    } // else (non-leaf) — end of leaf-table processing
+                } // end one-leaf-table chunk (PTE lock released)
+
+                // Chunk boundary: no lock is held and the parent mm stays
+                // Arc-pinned by the caller, so the walk state is stable.
+                // cond_resched() yields ONLY when task context + fully
+                // preemptible (it no-ops under any lock/bh/rcu section) —
+                // with need_resched set this is what breaks the CPU
+                // monopoly of a large-mm fork walk.
+                crate::sched::cond_resched();
             }
         }
     }

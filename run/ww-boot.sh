@@ -11,7 +11,10 @@
 #   GDBPORT  gdbstub port (default 12371)
 #   SMP      CPU count (default 2)
 #   SECS     wall-clock budget (default 2700) — enforced by ww-hunt.py
-#   KERNEL   bzImage path (default this worktree's debug build)
+#   KERNEL   bzImage path (default: FROZEN copy of the hunt kernel — the
+#            worktree may rebuild for unrelated mm work, and a mid-chain
+#            kernel change would silently invalidate the hunt; the frozen
+#            pair must stay in sync with ww-gdbscript.py's ELF)
 set -euo pipefail
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
@@ -19,7 +22,7 @@ IMGDIR="/home/william/rux-agents/oh-display/run/oh-img"
 TAG="${TAG:-ww}"
 GDBPORT="${GDBPORT:-12374}"
 SMPN="${SMP:-2}"
-KERNEL="${KERNEL:-$ROOT/target/x86_64-unknown-none/debug/bzImage}"
+KERNEL="${KERNEL:-$ROOT/run/ww-hunt-frozen-bzImage}"
 RUN="$ROOT/run"
 SERIAL="$RUN/${TAG}-serial.log"
 
