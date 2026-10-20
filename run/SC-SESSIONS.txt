@@ -338,3 +338,42 @@ Session E update (14:2x, sc46/sc47 — successor window):
   have not run yet; foundation SA init at 103s and still going, slow
   boot). GetBundleInfo settingsdata -> "failed" pending scan. Bootanimation
   static at OH logo waiting for launcher. Watching.
+
+Session F update (2026-10-20 22:5x, sc49/sc50 — 0xd000008 ROOT-CAUSED AND FIXED):
+- sc46-48 forensics verdict: the v2 injection was never tested — sc47/48
+  stalled BEFORE any spawn because BMS never initialized (0 apptap bms/
+  mkdirs; the "installs" service never started: samgr's ohos.ctl.start
+  for it never reached init — that stall correlates with sc44-lineage
+  images, NOT with the injection; fresh-image boots sc43/45/49 all start
+  installs fine, SA:511 in 321ms on sc49). sc48 also wiped the injected
+  el1/100/database leaves via DestroyUserDirs(100, flags 31) at the
+  PrepareAddUser step (sc45's kernel/build did not enumerate them — do
+  not inject el1 leaves offline, the add-user wipe can remove them).
+- ROOT CAUSE of the missing database leaves (the second vector):
+  InstalldHostImpl::CreateBundleDataDir (bf-src installd_host_impl.cpp)
+  creates base/<b>, then calls SetDirApl -> HapContext::HapFileRestorecon
+  (libhap_restorecon.z.so), and ONLY THEN mkdirs database/<b> (and the
+  el2 leaves). HapFileRestorecon's GetSecontext starts with
+  lgetfilecon(path) = lgetxattr(security.selinux); libselinux maps
+  ENODATA to -1 (getfilecon.c), so on Rux — where freshly mkdir'ed dirs
+  carry no label — the whole call aborts with zero xattr syscalls issued
+  (sc43 proof: mkdir+chown of el1/100/base/com.ohos.launcher, then
+  nothing; sys_lgetxattr has no datatap hook so the failing read was
+  invisible). On Linux with SELinux enabled the kernel OWNS inode labels
+  and getxattr(security.selinux) never returns ENODATA.
+- FIX (95dbe15c, this branch): xattr::get reports
+  "u:object_r:unlabeled:s0" for security.selinux when no label is
+  stored. installd holds CAP_SYS_ADMIN (installs.cfg caps), so its
+  lsetfilecon passes the security.* write gate.
+- sc49 VERIFIED: installd now creates el1/<uid>/database/<b> (12 for
+  uid-100 + the uid-0 family) AND 170 el2 leaves; 24 "bundle added";
+  spawn responses 0xd000008 -> GONE (0 occurrences). Spawn children EXEC
+  inside the sandbox (childexit root=/mnt/sandbox/.../com.ohos.systemui),
+  LAUNCHER PROCESSES RUN for the first time ("m.ohos.launcher" SIGDEATH
+  x8). NEW GATE: the app runtime dies with SIGSEGV (systemui x10,
+  launcher/settingsdata follow; two hot rips, e.g. +0x14e1c and +0x10bac
+  into the same FileBacked .so; rbp=-6, rsi=-4 hint at errno values used
+  as pointers). sc50 BOOTING with f72a8705 (ripfile+voff in the segv
+  report) to symbolize.
+- Screen still the static OH logo (4281 colors) — bootanimation waiting
+  for a real launcher surface.
