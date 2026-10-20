@@ -666,3 +666,61 @@ discipline-refusal bypass), or join the wildwrite agent's GDB-freeze
 evidence (its ww-v1/ww-s2-r7 boots are chasing the same double-run
 engine). Once the producer is fixed, flip PREEMPT_HOOK_ENABLED=true and
 re-run the A/B — the hook itself is exonerated (sc69).
+
+Session J update (2026-10-21 06:2x, sc75/sc76 — IPC death loop root
+structure identified; samgr-internal freeze behind the launcher wedge):
+
+EVIDENCE CHAIN (sc74 read + sc75/sc76 live captures with the new
+instrumentation):
+- sc74's terminal shape re-read: binder-stall "waiting for reply" lines
+  CONFLATED two shapes. New stall report tags them: CLIENT-WAIT (top txn
+  SENT by the thread) vs SERVER-OWING (top txn SERVICED by the thread,
+  to_tid == self).
+- sc75/sc76 SERVER-OWING holders are parked in FUTEX_WAIT_PRIVATE
+  (sys=202) INSIDE their txn handlers — NOT in binder reads. The kernel
+  txn sits on the stack; the reply can't come until a userspace lock
+  releases.
+- sc76 decisive: pid 334 = samgr (code 3 = ADD_SYSTEM_ABILITY_TRANSACTION
+  per SamgrInterfaceCode). ALL 7 samgr threads blocked: 6 on futex word
+  0x7ff0009f5a64 reading 0x80000010 (musl rwlock: WAITERS + 16 READERS
+  — abilityMapLock_), main thread on 0x7ff0009f59d0 (0x94 away).
+  With only 7 live threads, 16 held read locks require holders that are
+  gone or stuck inside read scopes. Every AddSystemAbility/Subscribe
+  then freezes; every client chain (launcher included) waits on samgr.
+- OH source audit (oh-robot tree): samgr's notify is TF_ASYNC (oneway,
+  sender never blocks — our oneway path also never blocks the sender);
+  FindSystemAbilityNotify holds listenerMapLock_ across notifies but the
+  PostTask-based design keeps the IPC threads out of that path. The
+  abilityMapLock_ read scopes audited are all short map lookups — so
+  16 stuck readers are NOT explainable by in-scope blocking; the leading
+  theories: (a) threads died holding read locks (leak), (b) readers
+  parked in-kernel mid-scope and never scheduled (wake→run leak).
+
+KERNEL-SIDE LEAKS FOUND AND FIXED/INSTRUMENTED (my lane):
+- W1 (wait.rs): wake_up marked entries woken BEFORE wake_up_process and
+  skipped them later; a refused transition consumed the one-shot token
+  permanently (the sticky-skip lost wake). Now clears the flag on a
+  refused wake so later wakes retry (idempotent).
+- REKICK heal: khungtaskd's binder stall scan re-kicks any reader parked
+  >15s (wake_thread) and re-runs wake_proc_one for procs with pending
+  todo. Converts permanent lost-wake strands into bounded hiccups.
+- sc76 caught a rekick wake FAILING: tid 563 REKICK@6007 ignored for
+  230s (WAKE_RET@29268 only when real work arrived) — a wake→run leak
+  on a healthy idle worker; W1 made the later natural wake land (pre-W1
+  the delivery wake would have seen woken=true and skipped). sc77 adds
+  WAKE-RUN-LEAK verification: kick count >= 2 dumps the task's sched
+  view (cfs_linked/on_cpu/pick_state).
+- THREAD-DIED-SERVICING detector: pr_warn when a binder thread dies with
+  a stacked txn or pending todo while its proc lives — names every
+  leaked-userspace-lock victim at death time (the phantom-reader hunt).
+- Transition ring (24 events/thread: TXN_SENT/PQUEUED/TQUEUED/RECV,
+  REPLY_POP/PUSHED/GONE, PARK/WAKE_RET, BWR first-cmd, REKICK, ...) +
+  woken-census + outstanding-txn world search + futex word + neighbor
+  words through the HOLDER's page tables + per-tgid futex waiter graph.
+- comm naming for stall holders and owing procs (sc77).
+
+NEXT: sc77 boots with comm + death detector + WAKE-RUN-LEAK. Decisions
+pending on its data: phantom readers = dead threads (→ chase the killer,
+likely overlaps wildwrite/OOM lines) vs unschedulable readers (→ sched
+pick-side, WAKE-STRANDED family). Either way the launcher milestone
+needs samgr unfrozen; the heals keep client chains breathing meanwhile.
