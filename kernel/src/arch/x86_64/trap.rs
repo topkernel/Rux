@@ -978,7 +978,6 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize, vector: u64) {
                     crate::drivers::intc::apic::eoi();
                     handle_timer_tick(regs_ref, cpu_id);
                     crate::interrupt::preempt::irq_exit();
-                    irq_exit_maybe_preempt_kernel(regs_ref);
                 }
 
                 v if (crate::arch::ipi::IPI_FIRST..=crate::arch::ipi::IPI_LAST)
@@ -988,7 +987,6 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize, vector: u64) {
                     crate::drivers::intc::apic::eoi();
                     crate::arch::ipi::handle_ipi_vector(v);
                     crate::interrupt::preempt::irq_exit();
-                    irq_exit_maybe_preempt_kernel(regs_ref);
                 }
 
                 vec::IRQ0 => {
@@ -1023,43 +1021,6 @@ fn ww_irqwin_budget_ok() -> bool {
     }
     LAST.compare_exchange(last, now, core::sync::atomic::Ordering::AcqRel, core::sync::atomic::Ordering::Acquire)
         .is_ok()
-}
-
-/// Kernel-mode preemption at IRQ exit (CONFIG_PREEMPT equivalent,
-/// launcher perf gate round 2, 2026-10-20).
-///
-/// Before this, the ONLY preemption points were the user-return path
-/// (trap_exit asm) and explicit sleeps: a task inside a long kernel
-/// syscall (fork COW copies, munmap/mprotect page-table storms, buffer
-/// copies) monopolized its CPU until syscall return even with
-/// need_resched set every 10 ms tick — the steady WAKE-STRANDED
-/// 50-300 ms family and the multi-second outliers behind the OH
-/// launcher line's IPC SendRequest blowups (102 s worst measured).
-///
-/// Safety contract (verified against this tree):
-/// - preemptible() == preempt_count()==0, and EVERY discipline that must
-///   not be interrupted bumps that count: all Spinlock guards
-///   (plain/irqsave/bh), the GRQ guards, seqlock writers, RCU read side
-///   (rcu_read_lock = preempt_disable). So count==0 means the
-///   interrupted kernel context holds no lock, no bh, no RCU state.
-/// - The switch is the same one sleeping syscalls take; migration and
-///   ti_cpu re-stamping are handled by context_switch (mid-syscall
-///   migration already happens via blocking paths).
-/// - Runs with IF=0 (interrupt gate) — schedule() and __switch_to are
-///   IRQ-safe under the irqsave guards; when the switched-out task
-///   resumes it returns here and the iretq restores its saved IF.
-/// - User-mode frames are left to the trap_exit asm loop (unchanged).
-fn irq_exit_maybe_preempt_kernel(regs: &PtRegs) {
-    if regs.user_mode() {
-        return; // user path: trap_exit asm owns preemption
-    }
-    if !crate::sched::need_resched() {
-        return;
-    }
-    if !crate::interrupt::preempt::preemptible() {
-        return; // holds a lock / bh / nested IRQ — not interruptible here
-    }
-    crate::sched::schedule();
 }
 
 /// Shared timer-tick body (used by both the LAPIC-timer vector and the
