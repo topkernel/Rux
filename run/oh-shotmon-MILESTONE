@@ -7438,3 +7438,863 @@ non-black: 921600 (100.00%)
   band 5 (rows 800-960): 115200 nonblack
   band 6 (rows 960-1120): 115200 nonblack
   band 7 (rows 1120-1280): 115200 nonblack
+MILESTONE 06:03:09 /home/william/rux-agents/samgr-callback/run/oh-sc75-auto0.ppm
+/home/william/rux-agents/samgr-callback/run/oh-sc75-auto0.ppm: 720x1280 pixels=921600
+distinct colors: 8
+non-black: 921600 (100.00%)
+  d03030 x201984
+  3030d0 x201984
+  30d030 x201216
+  f0f0f0 x201216
+  cf2fcf x29184
+  0f0f0f x29184
+  2fcfcf x28416
+  cfcf2f x28416
+  band 0 (rows 0-160): 115200 nonblack
+  band 1 (rows 160-320): 115200 nonblack
+  band 2 (rows 320-480): 115200 nonblack
+  band 3 (rows 480-640): 115200 nonblack
+  band 4 (rows 640-800): 115200 nonblack
+  band 5 (rows 800-960): 115200 nonblack
+  band 6 (rows 960-1120): 115200 nonblack
+  band 7 (rows 1120-1280): 115200 nonblack
+MILESTONE 06:03:19 /home/william/rux-agents/samgr-callback/run/oh-sc76-auto0.ppm
+/home/william/rux-agents/samgr-callback/run/oh-sc76-auto0.ppm: 720x1280 pixels=921600
+distinct colors: 8
+non-black: 921600 (100.00%)
+  30d030 x201728
+  f0f0f0 x201728
+  d03030 x201472
+  3030d0 x201472
+  2fcfcf x28928
+  cfcf2f x28928
+  cf2fcf x28672
+  0f0f0f x28672
+  band 0 (rows 0-160): 115200 nonblack
+  band 1 (rows 160-320): 115200 nonblack
+  band 2 (rows 320-480): 115200 nonblack
+  band 3 (rows 480-640): 115200 nonblack
+  band 4 (rows 640-800): 115200 nonblack
+  band 5 (rows 800-960): 115200 nonblack
+  band 6 (rows 960-1120): 115200 nonblack
+  band 7 (rows 1120-1280): 115200 nonblack
+MILESTONE 06:03:40 /home/william/rux-agents/samgr-callback/run/oh-sc75-auto0.ppm
+/home/william/rux-agents/samgr-callback/run/oh-sc75-auto0.ppm: 720x1280 pixels=921600
+distinct colors: 8
+non-black: 921600 (100.00%)
+  d03030 x201984
+  3030d0 x201984
+  30d030 x201216
+  f0f0f0 x201216
+  cf2fcf x29184
+  0f0f0f x29184
+  2fcfcf x28416
+  cfcf2f x28416
+  band 0 (rows 0-160): 115200 nonblack
+  band 1 (rows 160-320): 115200 nonblack
+  band 2 (rows 320-480): 115200 nonblack
+  band 3 (rows 480-640): 115200 nonblack
+  band 4 (rows 640-800): 115200 nonblack
+  band 5 (rows 800-960): 115200 nonblack
+  band 6 (rows 960-1120): 115200 nonblack
+  band 7 (rows 1120-1280): 115200 nonblack
+MILESTONE 06:03:49 /home/william/rux-agents/samgr-callback/run/oh-sc76-auto0.ppm
+/home/william/rux-agents/samgr-callback/run/oh-sc76-auto0.ppm: 720x1280 pixels=921600
+distinct colors: 8
+non-black: 921600 (100.00%)
+  30d030 x201728
+  f0f0f0 x201728
+  d03030 x201472
+  3030d0 x201472
+  2fcfcf x28928
+  cfcf2f x28928
+  cf2fcf x28672
+  0f0f0f x28672
+  band 0 (rows 0-160): 115200 nonblack
+  band 1 (rows 160-320): 115200 nonblack
+  band 2 (rows 320-480): 115200 nonblack
+  band 3 (rows 480-640): 115200 nonblack
+  band 4 (rows 640-800): 115200 nonblack
+  band 5 (rows 800-960): 115200 nonblack
+  band 6 (rows 960-1120): 115200 nonblack
+  band 7 (rows 1120-1280): 115200 nonblack
+MILESTONE 06:04:10 /home/william/rux-agents/samgr-callback/run/oh-sc75-auto0.ppm
+/home/william/rux-agents/samgr-callback/run/oh-sc75-auto0.ppm: 720x1280 pixels=921600
+distinct colors: 8
+non-black: 921600 (100.00%)
+  d03030 x201984
+  3030d0 x201984
+  30d030 x201216
+  f0f0f0 x201216
+  cf2fcf x29184
+  0f0f0f x29184
+  2fcfcf x28416
+  cfcf2f x28416
+  band 0 (rows 0-160): 115200 nonblack
+  band 1 (rows 160-320): 115200 nonblack
+  band 2 (rows 320-480): 115200 nonblack
+  band 3 (rows 480-640): 115200 nonblack
+  band 4 (rows 640-800): 115200 nonblack
+  band 5 (rows 800-960): 115200 nonblack
+  band 6 (rows 960-1120): 115200 nonblack
+  band 7 (rows 1120-1280): 115200 nonblack
+MILESTONE 06:04:19 /home/william/rux-agents/samgr-callback/run/oh-sc76-auto0.ppm
+/home/william/rux-agents/samgr-callback/run/oh-sc76-auto0.ppm: 720x1280 pixels=921600
+distinct colors: 8
+non-black: 921600 (100.00%)
+  30d030 x201728
+  f0f0f0 x201728
+  d03030 x201472
+  3030d0 x201472
+  2fcfcf x28928
+  cfcf2f x28928
+  cf2fcf x28672
+  0f0f0f x28672
+  band 0 (rows 0-160): 115200 nonblack
+  band 1 (rows 160-320): 115200 nonblack
+  band 2 (rows 320-480): 115200 nonblack
+  band 3 (rows 480-640): 115200 nonblack
+  band 4 (rows 640-800): 115200 nonblack
+  band 5 (rows 800-960): 115200 nonblack
+  band 6 (rows 960-1120): 115200 nonblack
+  band 7 (rows 1120-1280): 115200 nonblack
+MILESTONE 06:04:40 /home/william/rux-agents/samgr-callback/run/oh-sc75-auto0.ppm
+/home/william/rux-agents/samgr-callback/run/oh-sc75-auto0.ppm: 720x1280 pixels=921600
+distinct colors: 8
+non-black: 921600 (100.00%)
+  d03030 x201984
+  3030d0 x201984
+  30d030 x201216
+  f0f0f0 x201216
+  cf2fcf x29184
+  0f0f0f x29184
+  2fcfcf x28416
+  cfcf2f x28416
+  band 0 (rows 0-160): 115200 nonblack
+  band 1 (rows 160-320): 115200 nonblack
+  band 2 (rows 320-480): 115200 nonblack
+  band 3 (rows 480-640): 115200 nonblack
+  band 4 (rows 640-800): 115200 nonblack
+  band 5 (rows 800-960): 115200 nonblack
+  band 6 (rows 960-1120): 115200 nonblack
+  band 7 (rows 1120-1280): 115200 nonblack
+MILESTONE 06:04:50 /home/william/rux-agents/samgr-callback/run/oh-sc76-auto0.ppm
+/home/william/rux-agents/samgr-callback/run/oh-sc76-auto0.ppm: 720x1280 pixels=921600
+distinct colors: 8
+non-black: 921600 (100.00%)
+  30d030 x201728
+  f0f0f0 x201728
+  d03030 x201472
+  3030d0 x201472
+  2fcfcf x28928
+  cfcf2f x28928
+  cf2fcf x28672
+  0f0f0f x28672
+  band 0 (rows 0-160): 115200 nonblack
+  band 1 (rows 160-320): 115200 nonblack
+  band 2 (rows 320-480): 115200 nonblack
+  band 3 (rows 480-640): 115200 nonblack
+  band 4 (rows 640-800): 115200 nonblack
+  band 5 (rows 800-960): 115200 nonblack
+  band 6 (rows 960-1120): 115200 nonblack
+  band 7 (rows 1120-1280): 115200 nonblack
+MILESTONE 06:05:11 /home/william/rux-agents/samgr-callback/run/oh-sc75-auto0.ppm
+/home/william/rux-agents/samgr-callback/run/oh-sc75-auto0.ppm: 720x1280 pixels=921600
+distinct colors: 8
+non-black: 921600 (100.00%)
+  d03030 x201984
+  3030d0 x201984
+  30d030 x201216
+  f0f0f0 x201216
+  cf2fcf x29184
+  0f0f0f x29184
+  2fcfcf x28416
+  cfcf2f x28416
+  band 0 (rows 0-160): 115200 nonblack
+  band 1 (rows 160-320): 115200 nonblack
+  band 2 (rows 320-480): 115200 nonblack
+  band 3 (rows 480-640): 115200 nonblack
+  band 4 (rows 640-800): 115200 nonblack
+  band 5 (rows 800-960): 115200 nonblack
+  band 6 (rows 960-1120): 115200 nonblack
+  band 7 (rows 1120-1280): 115200 nonblack
+MILESTONE 06:05:20 /home/william/rux-agents/samgr-callback/run/oh-sc76-auto0.ppm
+/home/william/rux-agents/samgr-callback/run/oh-sc76-auto0.ppm: 720x1280 pixels=921600
+distinct colors: 8
+non-black: 921600 (100.00%)
+  30d030 x201728
+  f0f0f0 x201728
+  d03030 x201472
+  3030d0 x201472
+  2fcfcf x28928
+  cfcf2f x28928
+  cf2fcf x28672
+  0f0f0f x28672
+  band 0 (rows 0-160): 115200 nonblack
+  band 1 (rows 160-320): 115200 nonblack
+  band 2 (rows 320-480): 115200 nonblack
+  band 3 (rows 480-640): 115200 nonblack
+  band 4 (rows 640-800): 115200 nonblack
+  band 5 (rows 800-960): 115200 nonblack
+  band 6 (rows 960-1120): 115200 nonblack
+  band 7 (rows 1120-1280): 115200 nonblack
+MILESTONE 06:05:41 /home/william/rux-agents/samgr-callback/run/oh-sc75-auto0.ppm
+/home/william/rux-agents/samgr-callback/run/oh-sc75-auto0.ppm: 720x1280 pixels=921600
+distinct colors: 8
+non-black: 921600 (100.00%)
+  d03030 x201984
+  3030d0 x201984
+  30d030 x201216
+  f0f0f0 x201216
+  cf2fcf x29184
+  0f0f0f x29184
+  2fcfcf x28416
+  cfcf2f x28416
+  band 0 (rows 0-160): 115200 nonblack
+  band 1 (rows 160-320): 115200 nonblack
+  band 2 (rows 320-480): 115200 nonblack
+  band 3 (rows 480-640): 115200 nonblack
+  band 4 (rows 640-800): 115200 nonblack
+  band 5 (rows 800-960): 115200 nonblack
+  band 6 (rows 960-1120): 115200 nonblack
+  band 7 (rows 1120-1280): 115200 nonblack
+MILESTONE 06:05:51 /home/william/rux-agents/samgr-callback/run/oh-sc76-auto0.ppm
+/home/william/rux-agents/samgr-callback/run/oh-sc76-auto0.ppm: 720x1280 pixels=921600
+distinct colors: 8
+non-black: 921600 (100.00%)
+  30d030 x201728
+  f0f0f0 x201728
+  d03030 x201472
+  3030d0 x201472
+  2fcfcf x28928
+  cfcf2f x28928
+  cf2fcf x28672
+  0f0f0f x28672
+  band 0 (rows 0-160): 115200 nonblack
+  band 1 (rows 160-320): 115200 nonblack
+  band 2 (rows 320-480): 115200 nonblack
+  band 3 (rows 480-640): 115200 nonblack
+  band 4 (rows 640-800): 115200 nonblack
+  band 5 (rows 800-960): 115200 nonblack
+  band 6 (rows 960-1120): 115200 nonblack
+  band 7 (rows 1120-1280): 115200 nonblack
+MILESTONE 06:06:11 /home/william/rux-agents/samgr-callback/run/oh-sc75-auto0.ppm
+/home/william/rux-agents/samgr-callback/run/oh-sc75-auto0.ppm: 720x1280 pixels=921600
+distinct colors: 8
+non-black: 921600 (100.00%)
+  d03030 x201984
+  3030d0 x201984
+  30d030 x201216
+  f0f0f0 x201216
+  cf2fcf x29184
+  0f0f0f x29184
+  2fcfcf x28416
+  cfcf2f x28416
+  band 0 (rows 0-160): 115200 nonblack
+  band 1 (rows 160-320): 115200 nonblack
+  band 2 (rows 320-480): 115200 nonblack
+  band 3 (rows 480-640): 115200 nonblack
+  band 4 (rows 640-800): 115200 nonblack
+  band 5 (rows 800-960): 115200 nonblack
+  band 6 (rows 960-1120): 115200 nonblack
+  band 7 (rows 1120-1280): 115200 nonblack
+MILESTONE 06:06:21 /home/william/rux-agents/samgr-callback/run/oh-sc76-auto0.ppm
+/home/william/rux-agents/samgr-callback/run/oh-sc76-auto0.ppm: 720x1280 pixels=921600
+distinct colors: 8
+non-black: 921600 (100.00%)
+  30d030 x201728
+  f0f0f0 x201728
+  d03030 x201472
+  3030d0 x201472
+  2fcfcf x28928
+  cfcf2f x28928
+  cf2fcf x28672
+  0f0f0f x28672
+  band 0 (rows 0-160): 115200 nonblack
+  band 1 (rows 160-320): 115200 nonblack
+  band 2 (rows 320-480): 115200 nonblack
+  band 3 (rows 480-640): 115200 nonblack
+  band 4 (rows 640-800): 115200 nonblack
+  band 5 (rows 800-960): 115200 nonblack
+  band 6 (rows 960-1120): 115200 nonblack
+  band 7 (rows 1120-1280): 115200 nonblack
+MILESTONE 06:06:42 /home/william/rux-agents/samgr-callback/run/oh-sc75-auto0.ppm
+/home/william/rux-agents/samgr-callback/run/oh-sc75-auto0.ppm: 720x1280 pixels=921600
+distinct colors: 8
+non-black: 921600 (100.00%)
+  d03030 x201984
+  3030d0 x201984
+  30d030 x201216
+  f0f0f0 x201216
+  cf2fcf x29184
+  0f0f0f x29184
+  2fcfcf x28416
+  cfcf2f x28416
+  band 0 (rows 0-160): 115200 nonblack
+  band 1 (rows 160-320): 115200 nonblack
+  band 2 (rows 320-480): 115200 nonblack
+  band 3 (rows 480-640): 115200 nonblack
+  band 4 (rows 640-800): 115200 nonblack
+  band 5 (rows 800-960): 115200 nonblack
+  band 6 (rows 960-1120): 115200 nonblack
+  band 7 (rows 1120-1280): 115200 nonblack
+MILESTONE 06:06:51 /home/william/rux-agents/samgr-callback/run/oh-sc76-auto0.ppm
+/home/william/rux-agents/samgr-callback/run/oh-sc76-auto0.ppm: 720x1280 pixels=921600
+distinct colors: 8
+non-black: 921600 (100.00%)
+  30d030 x201728
+  f0f0f0 x201728
+  d03030 x201472
+  3030d0 x201472
+  2fcfcf x28928
+  cfcf2f x28928
+  cf2fcf x28672
+  0f0f0f x28672
+  band 0 (rows 0-160): 115200 nonblack
+  band 1 (rows 160-320): 115200 nonblack
+  band 2 (rows 320-480): 115200 nonblack
+  band 3 (rows 480-640): 115200 nonblack
+  band 4 (rows 640-800): 115200 nonblack
+  band 5 (rows 800-960): 115200 nonblack
+  band 6 (rows 960-1120): 115200 nonblack
+  band 7 (rows 1120-1280): 115200 nonblack
+MILESTONE 06:07:12 /home/william/rux-agents/samgr-callback/run/oh-sc75-auto0.ppm
+/home/william/rux-agents/samgr-callback/run/oh-sc75-auto0.ppm: 720x1280 pixels=921600
+distinct colors: 8
+non-black: 921600 (100.00%)
+  d03030 x201984
+  3030d0 x201984
+  30d030 x201216
+  f0f0f0 x201216
+  cf2fcf x29184
+  0f0f0f x29184
+  2fcfcf x28416
+  cfcf2f x28416
+  band 0 (rows 0-160): 115200 nonblack
+  band 1 (rows 160-320): 115200 nonblack
+  band 2 (rows 320-480): 115200 nonblack
+  band 3 (rows 480-640): 115200 nonblack
+  band 4 (rows 640-800): 115200 nonblack
+  band 5 (rows 800-960): 115200 nonblack
+  band 6 (rows 960-1120): 115200 nonblack
+  band 7 (rows 1120-1280): 115200 nonblack
+MILESTONE 06:07:22 /home/william/rux-agents/samgr-callback/run/oh-sc76-auto0.ppm
+/home/william/rux-agents/samgr-callback/run/oh-sc76-auto0.ppm: 720x1280 pixels=921600
+distinct colors: 8
+non-black: 921600 (100.00%)
+  30d030 x201728
+  f0f0f0 x201728
+  d03030 x201472
+  3030d0 x201472
+  2fcfcf x28928
+  cfcf2f x28928
+  cf2fcf x28672
+  0f0f0f x28672
+  band 0 (rows 0-160): 115200 nonblack
+  band 1 (rows 160-320): 115200 nonblack
+  band 2 (rows 320-480): 115200 nonblack
+  band 3 (rows 480-640): 115200 nonblack
+  band 4 (rows 640-800): 115200 nonblack
+  band 5 (rows 800-960): 115200 nonblack
+  band 6 (rows 960-1120): 115200 nonblack
+  band 7 (rows 1120-1280): 115200 nonblack
+MILESTONE 06:07:42 /home/william/rux-agents/samgr-callback/run/oh-sc75-auto0.ppm
+/home/william/rux-agents/samgr-callback/run/oh-sc75-auto0.ppm: 720x1280 pixels=921600
+distinct colors: 8
+non-black: 921600 (100.00%)
+  d03030 x201984
+  3030d0 x201984
+  30d030 x201216
+  f0f0f0 x201216
+  cf2fcf x29184
+  0f0f0f x29184
+  2fcfcf x28416
+  cfcf2f x28416
+  band 0 (rows 0-160): 115200 nonblack
+  band 1 (rows 160-320): 115200 nonblack
+  band 2 (rows 320-480): 115200 nonblack
+  band 3 (rows 480-640): 115200 nonblack
+  band 4 (rows 640-800): 115200 nonblack
+  band 5 (rows 800-960): 115200 nonblack
+  band 6 (rows 960-1120): 115200 nonblack
+  band 7 (rows 1120-1280): 115200 nonblack
+MILESTONE 06:07:52 /home/william/rux-agents/samgr-callback/run/oh-sc76-auto0.ppm
+/home/william/rux-agents/samgr-callback/run/oh-sc76-auto0.ppm: 720x1280 pixels=921600
+distinct colors: 8
+non-black: 921600 (100.00%)
+  30d030 x201728
+  f0f0f0 x201728
+  d03030 x201472
+  3030d0 x201472
+  2fcfcf x28928
+  cfcf2f x28928
+  cf2fcf x28672
+  0f0f0f x28672
+  band 0 (rows 0-160): 115200 nonblack
+  band 1 (rows 160-320): 115200 nonblack
+  band 2 (rows 320-480): 115200 nonblack
+  band 3 (rows 480-640): 115200 nonblack
+  band 4 (rows 640-800): 115200 nonblack
+  band 5 (rows 800-960): 115200 nonblack
+  band 6 (rows 960-1120): 115200 nonblack
+  band 7 (rows 1120-1280): 115200 nonblack
+MILESTONE 06:08:13 /home/william/rux-agents/samgr-callback/run/oh-sc75-auto0.ppm
+/home/william/rux-agents/samgr-callback/run/oh-sc75-auto0.ppm: 720x1280 pixels=921600
+distinct colors: 8
+non-black: 921600 (100.00%)
+  d03030 x201984
+  3030d0 x201984
+  30d030 x201216
+  f0f0f0 x201216
+  cf2fcf x29184
+  0f0f0f x29184
+  2fcfcf x28416
+  cfcf2f x28416
+  band 0 (rows 0-160): 115200 nonblack
+  band 1 (rows 160-320): 115200 nonblack
+  band 2 (rows 320-480): 115200 nonblack
+  band 3 (rows 480-640): 115200 nonblack
+  band 4 (rows 640-800): 115200 nonblack
+  band 5 (rows 800-960): 115200 nonblack
+  band 6 (rows 960-1120): 115200 nonblack
+  band 7 (rows 1120-1280): 115200 nonblack
+MILESTONE 06:08:22 /home/william/rux-agents/samgr-callback/run/oh-sc76-auto0.ppm
+/home/william/rux-agents/samgr-callback/run/oh-sc76-auto0.ppm: 720x1280 pixels=921600
+distinct colors: 8
+non-black: 921600 (100.00%)
+  30d030 x201728
+  f0f0f0 x201728
+  d03030 x201472
+  3030d0 x201472
+  2fcfcf x28928
+  cfcf2f x28928
+  cf2fcf x28672
+  0f0f0f x28672
+  band 0 (rows 0-160): 115200 nonblack
+  band 1 (rows 160-320): 115200 nonblack
+  band 2 (rows 320-480): 115200 nonblack
+  band 3 (rows 480-640): 115200 nonblack
+  band 4 (rows 640-800): 115200 nonblack
+  band 5 (rows 800-960): 115200 nonblack
+  band 6 (rows 960-1120): 115200 nonblack
+  band 7 (rows 1120-1280): 115200 nonblack
+MILESTONE 06:08:43 /home/william/rux-agents/samgr-callback/run/oh-sc75-auto0.ppm
+/home/william/rux-agents/samgr-callback/run/oh-sc75-auto0.ppm: 720x1280 pixels=921600
+distinct colors: 8
+non-black: 921600 (100.00%)
+  d03030 x201984
+  3030d0 x201984
+  30d030 x201216
+  f0f0f0 x201216
+  cf2fcf x29184
+  0f0f0f x29184
+  2fcfcf x28416
+  cfcf2f x28416
+  band 0 (rows 0-160): 115200 nonblack
+  band 1 (rows 160-320): 115200 nonblack
+  band 2 (rows 320-480): 115200 nonblack
+  band 3 (rows 480-640): 115200 nonblack
+  band 4 (rows 640-800): 115200 nonblack
+  band 5 (rows 800-960): 115200 nonblack
+  band 6 (rows 960-1120): 115200 nonblack
+  band 7 (rows 1120-1280): 115200 nonblack
+MILESTONE 06:08:53 /home/william/rux-agents/samgr-callback/run/oh-sc76-auto0.ppm
+/home/william/rux-agents/samgr-callback/run/oh-sc76-auto0.ppm: 720x1280 pixels=921600
+distinct colors: 8
+non-black: 921600 (100.00%)
+  30d030 x201728
+  f0f0f0 x201728
+  d03030 x201472
+  3030d0 x201472
+  2fcfcf x28928
+  cfcf2f x28928
+  cf2fcf x28672
+  0f0f0f x28672
+  band 0 (rows 0-160): 115200 nonblack
+  band 1 (rows 160-320): 115200 nonblack
+  band 2 (rows 320-480): 115200 nonblack
+  band 3 (rows 480-640): 115200 nonblack
+  band 4 (rows 640-800): 115200 nonblack
+  band 5 (rows 800-960): 115200 nonblack
+  band 6 (rows 960-1120): 115200 nonblack
+  band 7 (rows 1120-1280): 115200 nonblack
+MILESTONE 06:09:14 /home/william/rux-agents/samgr-callback/run/oh-sc75-auto0.ppm
+/home/william/rux-agents/samgr-callback/run/oh-sc75-auto0.ppm: 720x1280 pixels=921600
+distinct colors: 8
+non-black: 921600 (100.00%)
+  d03030 x201984
+  3030d0 x201984
+  30d030 x201216
+  f0f0f0 x201216
+  cf2fcf x29184
+  0f0f0f x29184
+  2fcfcf x28416
+  cfcf2f x28416
+  band 0 (rows 0-160): 115200 nonblack
+  band 1 (rows 160-320): 115200 nonblack
+  band 2 (rows 320-480): 115200 nonblack
+  band 3 (rows 480-640): 115200 nonblack
+  band 4 (rows 640-800): 115200 nonblack
+  band 5 (rows 800-960): 115200 nonblack
+  band 6 (rows 960-1120): 115200 nonblack
+  band 7 (rows 1120-1280): 115200 nonblack
+MILESTONE 06:09:23 /home/william/rux-agents/samgr-callback/run/oh-sc76-auto0.ppm
+/home/william/rux-agents/samgr-callback/run/oh-sc76-auto0.ppm: 720x1280 pixels=921600
+distinct colors: 8
+non-black: 921600 (100.00%)
+  30d030 x201728
+  f0f0f0 x201728
+  d03030 x201472
+  3030d0 x201472
+  2fcfcf x28928
+  cfcf2f x28928
+  cf2fcf x28672
+  0f0f0f x28672
+  band 0 (rows 0-160): 115200 nonblack
+  band 1 (rows 160-320): 115200 nonblack
+  band 2 (rows 320-480): 115200 nonblack
+  band 3 (rows 480-640): 115200 nonblack
+  band 4 (rows 640-800): 115200 nonblack
+  band 5 (rows 800-960): 115200 nonblack
+  band 6 (rows 960-1120): 115200 nonblack
+  band 7 (rows 1120-1280): 115200 nonblack
+MILESTONE 06:09:44 /home/william/rux-agents/samgr-callback/run/oh-sc75-auto0.ppm
+/home/william/rux-agents/samgr-callback/run/oh-sc75-auto0.ppm: 720x1280 pixels=921600
+distinct colors: 8
+non-black: 921600 (100.00%)
+  d03030 x201984
+  3030d0 x201984
+  30d030 x201216
+  f0f0f0 x201216
+  cf2fcf x29184
+  0f0f0f x29184
+  2fcfcf x28416
+  cfcf2f x28416
+  band 0 (rows 0-160): 115200 nonblack
+  band 1 (rows 160-320): 115200 nonblack
+  band 2 (rows 320-480): 115200 nonblack
+  band 3 (rows 480-640): 115200 nonblack
+  band 4 (rows 640-800): 115200 nonblack
+  band 5 (rows 800-960): 115200 nonblack
+  band 6 (rows 960-1120): 115200 nonblack
+  band 7 (rows 1120-1280): 115200 nonblack
+MILESTONE 06:09:53 /home/william/rux-agents/samgr-callback/run/oh-sc76-auto0.ppm
+/home/william/rux-agents/samgr-callback/run/oh-sc76-auto0.ppm: 720x1280 pixels=921600
+distinct colors: 8
+non-black: 921600 (100.00%)
+  30d030 x201728
+  f0f0f0 x201728
+  d03030 x201472
+  3030d0 x201472
+  2fcfcf x28928
+  cfcf2f x28928
+  cf2fcf x28672
+  0f0f0f x28672
+  band 0 (rows 0-160): 115200 nonblack
+  band 1 (rows 160-320): 115200 nonblack
+  band 2 (rows 320-480): 115200 nonblack
+  band 3 (rows 480-640): 115200 nonblack
+  band 4 (rows 640-800): 115200 nonblack
+  band 5 (rows 800-960): 115200 nonblack
+  band 6 (rows 960-1120): 115200 nonblack
+  band 7 (rows 1120-1280): 115200 nonblack
+MILESTONE 06:10:24 /home/william/rux-agents/samgr-callback/run/oh-sc76-auto0.ppm
+/home/william/rux-agents/samgr-callback/run/oh-sc76-auto0.ppm: 720x1280 pixels=921600
+distinct colors: 8
+non-black: 921600 (100.00%)
+  30d030 x201728
+  f0f0f0 x201728
+  d03030 x201472
+  3030d0 x201472
+  2fcfcf x28928
+  cfcf2f x28928
+  cf2fcf x28672
+  0f0f0f x28672
+  band 0 (rows 0-160): 115200 nonblack
+  band 1 (rows 160-320): 115200 nonblack
+  band 2 (rows 320-480): 115200 nonblack
+  band 3 (rows 480-640): 115200 nonblack
+  band 4 (rows 640-800): 115200 nonblack
+  band 5 (rows 800-960): 115200 nonblack
+  band 6 (rows 960-1120): 115200 nonblack
+  band 7 (rows 1120-1280): 115200 nonblack
+MILESTONE 06:10:54 /home/william/rux-agents/samgr-callback/run/oh-sc76-auto0.ppm
+/home/william/rux-agents/samgr-callback/run/oh-sc76-auto0.ppm: 720x1280 pixels=921600
+distinct colors: 8
+non-black: 921600 (100.00%)
+  30d030 x201728
+  f0f0f0 x201728
+  d03030 x201472
+  3030d0 x201472
+  2fcfcf x28928
+  cfcf2f x28928
+  cf2fcf x28672
+  0f0f0f x28672
+  band 0 (rows 0-160): 115200 nonblack
+  band 1 (rows 160-320): 115200 nonblack
+  band 2 (rows 320-480): 115200 nonblack
+  band 3 (rows 480-640): 115200 nonblack
+  band 4 (rows 640-800): 115200 nonblack
+  band 5 (rows 800-960): 115200 nonblack
+  band 6 (rows 960-1120): 115200 nonblack
+  band 7 (rows 1120-1280): 115200 nonblack
+MILESTONE 06:11:24 /home/william/rux-agents/samgr-callback/run/oh-sc76-auto0.ppm
+/home/william/rux-agents/samgr-callback/run/oh-sc76-auto0.ppm: 720x1280 pixels=921600
+distinct colors: 8
+non-black: 921600 (100.00%)
+  30d030 x201728
+  f0f0f0 x201728
+  d03030 x201472
+  3030d0 x201472
+  2fcfcf x28928
+  cfcf2f x28928
+  cf2fcf x28672
+  0f0f0f x28672
+  band 0 (rows 0-160): 115200 nonblack
+  band 1 (rows 160-320): 115200 nonblack
+  band 2 (rows 320-480): 115200 nonblack
+  band 3 (rows 480-640): 115200 nonblack
+  band 4 (rows 640-800): 115200 nonblack
+  band 5 (rows 800-960): 115200 nonblack
+  band 6 (rows 960-1120): 115200 nonblack
+  band 7 (rows 1120-1280): 115200 nonblack
+MILESTONE 06:11:55 /home/william/rux-agents/samgr-callback/run/oh-sc76-auto0.ppm
+/home/william/rux-agents/samgr-callback/run/oh-sc76-auto0.ppm: 720x1280 pixels=921600
+distinct colors: 8
+non-black: 921600 (100.00%)
+  30d030 x201728
+  f0f0f0 x201728
+  d03030 x201472
+  3030d0 x201472
+  2fcfcf x28928
+  cfcf2f x28928
+  cf2fcf x28672
+  0f0f0f x28672
+  band 0 (rows 0-160): 115200 nonblack
+  band 1 (rows 160-320): 115200 nonblack
+  band 2 (rows 320-480): 115200 nonblack
+  band 3 (rows 480-640): 115200 nonblack
+  band 4 (rows 640-800): 115200 nonblack
+  band 5 (rows 800-960): 115200 nonblack
+  band 6 (rows 960-1120): 115200 nonblack
+  band 7 (rows 1120-1280): 115200 nonblack
+MILESTONE 06:12:25 /home/william/rux-agents/samgr-callback/run/oh-sc76-auto0.ppm
+/home/william/rux-agents/samgr-callback/run/oh-sc76-auto0.ppm: 720x1280 pixels=921600
+distinct colors: 8
+non-black: 921600 (100.00%)
+  30d030 x201728
+  f0f0f0 x201728
+  d03030 x201472
+  3030d0 x201472
+  2fcfcf x28928
+  cfcf2f x28928
+  cf2fcf x28672
+  0f0f0f x28672
+  band 0 (rows 0-160): 115200 nonblack
+  band 1 (rows 160-320): 115200 nonblack
+  band 2 (rows 320-480): 115200 nonblack
+  band 3 (rows 480-640): 115200 nonblack
+  band 4 (rows 640-800): 115200 nonblack
+  band 5 (rows 800-960): 115200 nonblack
+  band 6 (rows 960-1120): 115200 nonblack
+  band 7 (rows 1120-1280): 115200 nonblack
+MILESTONE 06:12:56 /home/william/rux-agents/samgr-callback/run/oh-sc76-auto0.ppm
+/home/william/rux-agents/samgr-callback/run/oh-sc76-auto0.ppm: 720x1280 pixels=921600
+distinct colors: 8
+non-black: 921600 (100.00%)
+  30d030 x201728
+  f0f0f0 x201728
+  d03030 x201472
+  3030d0 x201472
+  2fcfcf x28928
+  cfcf2f x28928
+  cf2fcf x28672
+  0f0f0f x28672
+  band 0 (rows 0-160): 115200 nonblack
+  band 1 (rows 160-320): 115200 nonblack
+  band 2 (rows 320-480): 115200 nonblack
+  band 3 (rows 480-640): 115200 nonblack
+  band 4 (rows 640-800): 115200 nonblack
+  band 5 (rows 800-960): 115200 nonblack
+  band 6 (rows 960-1120): 115200 nonblack
+  band 7 (rows 1120-1280): 115200 nonblack
+MILESTONE 06:13:26 /home/william/rux-agents/samgr-callback/run/oh-sc76-auto0.ppm
+/home/william/rux-agents/samgr-callback/run/oh-sc76-auto0.ppm: 720x1280 pixels=921600
+distinct colors: 8
+non-black: 921600 (100.00%)
+  30d030 x201728
+  f0f0f0 x201728
+  d03030 x201472
+  3030d0 x201472
+  2fcfcf x28928
+  cfcf2f x28928
+  cf2fcf x28672
+  0f0f0f x28672
+  band 0 (rows 0-160): 115200 nonblack
+  band 1 (rows 160-320): 115200 nonblack
+  band 2 (rows 320-480): 115200 nonblack
+  band 3 (rows 480-640): 115200 nonblack
+  band 4 (rows 640-800): 115200 nonblack
+  band 5 (rows 800-960): 115200 nonblack
+  band 6 (rows 960-1120): 115200 nonblack
+  band 7 (rows 1120-1280): 115200 nonblack
+MILESTONE 06:13:56 /home/william/rux-agents/samgr-callback/run/oh-sc76-auto0.ppm
+/home/william/rux-agents/samgr-callback/run/oh-sc76-auto0.ppm: 720x1280 pixels=921600
+distinct colors: 8
+non-black: 921600 (100.00%)
+  30d030 x201728
+  f0f0f0 x201728
+  d03030 x201472
+  3030d0 x201472
+  2fcfcf x28928
+  cfcf2f x28928
+  cf2fcf x28672
+  0f0f0f x28672
+  band 0 (rows 0-160): 115200 nonblack
+  band 1 (rows 160-320): 115200 nonblack
+  band 2 (rows 320-480): 115200 nonblack
+  band 3 (rows 480-640): 115200 nonblack
+  band 4 (rows 640-800): 115200 nonblack
+  band 5 (rows 800-960): 115200 nonblack
+  band 6 (rows 960-1120): 115200 nonblack
+  band 7 (rows 1120-1280): 115200 nonblack
+MILESTONE 06:14:27 /home/william/rux-agents/samgr-callback/run/oh-sc76-auto0.ppm
+/home/william/rux-agents/samgr-callback/run/oh-sc76-auto0.ppm: 720x1280 pixels=921600
+distinct colors: 8
+non-black: 921600 (100.00%)
+  30d030 x201728
+  f0f0f0 x201728
+  d03030 x201472
+  3030d0 x201472
+  2fcfcf x28928
+  cfcf2f x28928
+  cf2fcf x28672
+  0f0f0f x28672
+  band 0 (rows 0-160): 115200 nonblack
+  band 1 (rows 160-320): 115200 nonblack
+  band 2 (rows 320-480): 115200 nonblack
+  band 3 (rows 480-640): 115200 nonblack
+  band 4 (rows 640-800): 115200 nonblack
+  band 5 (rows 800-960): 115200 nonblack
+  band 6 (rows 960-1120): 115200 nonblack
+  band 7 (rows 1120-1280): 115200 nonblack
+MILESTONE 06:14:57 /home/william/rux-agents/samgr-callback/run/oh-sc76-auto0.ppm
+/home/william/rux-agents/samgr-callback/run/oh-sc76-auto0.ppm: 720x1280 pixels=921600
+distinct colors: 8
+non-black: 921600 (100.00%)
+  30d030 x201728
+  f0f0f0 x201728
+  d03030 x201472
+  3030d0 x201472
+  2fcfcf x28928
+  cfcf2f x28928
+  cf2fcf x28672
+  0f0f0f x28672
+  band 0 (rows 0-160): 115200 nonblack
+  band 1 (rows 160-320): 115200 nonblack
+  band 2 (rows 320-480): 115200 nonblack
+  band 3 (rows 480-640): 115200 nonblack
+  band 4 (rows 640-800): 115200 nonblack
+  band 5 (rows 800-960): 115200 nonblack
+  band 6 (rows 960-1120): 115200 nonblack
+  band 7 (rows 1120-1280): 115200 nonblack
+MILESTONE 06:15:27 /home/william/rux-agents/samgr-callback/run/oh-sc76-auto0.ppm
+/home/william/rux-agents/samgr-callback/run/oh-sc76-auto0.ppm: 720x1280 pixels=921600
+distinct colors: 8
+non-black: 921600 (100.00%)
+  30d030 x201728
+  f0f0f0 x201728
+  d03030 x201472
+  3030d0 x201472
+  2fcfcf x28928
+  cfcf2f x28928
+  cf2fcf x28672
+  0f0f0f x28672
+  band 0 (rows 0-160): 115200 nonblack
+  band 1 (rows 160-320): 115200 nonblack
+  band 2 (rows 320-480): 115200 nonblack
+  band 3 (rows 480-640): 115200 nonblack
+  band 4 (rows 640-800): 115200 nonblack
+  band 5 (rows 800-960): 115200 nonblack
+  band 6 (rows 960-1120): 115200 nonblack
+  band 7 (rows 1120-1280): 115200 nonblack
+MILESTONE 06:15:58 /home/william/rux-agents/samgr-callback/run/oh-sc76-auto0.ppm
+/home/william/rux-agents/samgr-callback/run/oh-sc76-auto0.ppm: 720x1280 pixels=921600
+distinct colors: 8
+non-black: 921600 (100.00%)
+  30d030 x201728
+  f0f0f0 x201728
+  d03030 x201472
+  3030d0 x201472
+  2fcfcf x28928
+  cfcf2f x28928
+  cf2fcf x28672
+  0f0f0f x28672
+  band 0 (rows 0-160): 115200 nonblack
+  band 1 (rows 160-320): 115200 nonblack
+  band 2 (rows 320-480): 115200 nonblack
+  band 3 (rows 480-640): 115200 nonblack
+  band 4 (rows 640-800): 115200 nonblack
+  band 5 (rows 800-960): 115200 nonblack
+  band 6 (rows 960-1120): 115200 nonblack
+  band 7 (rows 1120-1280): 115200 nonblack
+MILESTONE 06:16:28 /home/william/rux-agents/samgr-callback/run/oh-sc76-auto0.ppm
+/home/william/rux-agents/samgr-callback/run/oh-sc76-auto0.ppm: 720x1280 pixels=921600
+distinct colors: 8
+non-black: 921600 (100.00%)
+  30d030 x201728
+  f0f0f0 x201728
+  d03030 x201472
+  3030d0 x201472
+  2fcfcf x28928
+  cfcf2f x28928
+  cf2fcf x28672
+  0f0f0f x28672
+  band 0 (rows 0-160): 115200 nonblack
+  band 1 (rows 160-320): 115200 nonblack
+  band 2 (rows 320-480): 115200 nonblack
+  band 3 (rows 480-640): 115200 nonblack
+  band 4 (rows 640-800): 115200 nonblack
+  band 5 (rows 800-960): 115200 nonblack
+  band 6 (rows 960-1120): 115200 nonblack
+  band 7 (rows 1120-1280): 115200 nonblack
+MILESTONE 06:16:59 /home/william/rux-agents/samgr-callback/run/oh-sc76-auto0.ppm
+/home/william/rux-agents/samgr-callback/run/oh-sc76-auto0.ppm: 720x1280 pixels=921600
+distinct colors: 8
+non-black: 921600 (100.00%)
+  30d030 x201728
+  f0f0f0 x201728
+  d03030 x201472
+  3030d0 x201472
+  2fcfcf x28928
+  cfcf2f x28928
+  cf2fcf x28672
+  0f0f0f x28672
+  band 0 (rows 0-160): 115200 nonblack
+  band 1 (rows 160-320): 115200 nonblack
+  band 2 (rows 320-480): 115200 nonblack
+  band 3 (rows 480-640): 115200 nonblack
+  band 4 (rows 640-800): 115200 nonblack
+  band 5 (rows 800-960): 115200 nonblack
+  band 6 (rows 960-1120): 115200 nonblack
+  band 7 (rows 1120-1280): 115200 nonblack
+MILESTONE 06:17:29 /home/william/rux-agents/samgr-callback/run/oh-sc76-auto0.ppm
+/home/william/rux-agents/samgr-callback/run/oh-sc76-auto0.ppm: 720x1280 pixels=921600
+distinct colors: 8
+non-black: 921600 (100.00%)
+  30d030 x201728
+  f0f0f0 x201728
+  d03030 x201472
+  3030d0 x201472
+  2fcfcf x28928
+  cfcf2f x28928
+  cf2fcf x28672
+  0f0f0f x28672
+  band 0 (rows 0-160): 115200 nonblack
+  band 1 (rows 160-320): 115200 nonblack
+  band 2 (rows 320-480): 115200 nonblack
+  band 3 (rows 480-640): 115200 nonblack
+  band 4 (rows 640-800): 115200 nonblack
+  band 5 (rows 800-960): 115200 nonblack
+  band 6 (rows 960-1120): 115200 nonblack
+  band 7 (rows 1120-1280): 115200 nonblack

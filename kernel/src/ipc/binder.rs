@@ -745,6 +745,10 @@ struct BinderThread {
     /// runs every scan; only the ring entry is gated so the forensics
     /// history is not flooded by heal noise).
     rekicked: core::sync::atomic::AtomicBool,
+    /// Kicks issued in the current wait episode — >= 2 means a previous
+    /// kick failed to run the task (wake→run leak); the scheduler view is
+    /// dumped then (WAKE-RUN-LEAK line).
+    rekick_count: core::sync::atomic::AtomicU32,
 }
 
 impl BinderThread {
@@ -755,6 +759,7 @@ impl BinderThread {
             read_wait_since: core::sync::atomic::AtomicU64::new(0),
             stall_reported: core::sync::atomic::AtomicBool::new(false),
             rekicked: core::sync::atomic::AtomicBool::new(false),
+            rekick_count: core::sync::atomic::AtomicU32::new(0),
             st: core::cell::UnsafeCell::new(ThreadState {
                 looper: 0,
                 todo: VecDeque::new(),
@@ -1468,6 +1473,27 @@ pub fn binder_task_died(dying_pid: u32, dying_tgid: u32, dying_tid: u32) {
             if proc.im().is_dead {
                 return;
             }
+            // sc76: samgr died thread-in-place — every worker futex-blocked
+            // behind lock words whose owners are gone (16 phantom rwlock
+            // readers with only 7 live threads). A worker that dies while
+            // SERVICING (txn stacked) or with undrained work leaks its
+            // userspace locks permanently (pthread mutexes are not robust).
+            // This detector names every such victim at death time.
+            if let Some(t) = proc.im().threads.iter().find(|t| t.tid == dying_tid) {
+                let th = t.st();
+                if !th.txn_stack.is_empty() || !th.todo.is_empty() {
+                    crate::pr_warn!(
+                        "binder: THREAD-DIED-SERVICING pid {} tid {} stack={} todo={} top=txn{} from pid {} tid {}",
+                        proc.pid,
+                        dying_tid,
+                        th.txn_stack.len(),
+                        th.todo.len(),
+                        th.txn_stack.last().map(|x| x.id).unwrap_or(0),
+                        th.txn_stack.last().and_then(|x| x.from_proc.as_ref()).map(|p| p.pid).unwrap_or(0),
+                        th.txn_stack.last().and_then(|x| x.from_tid).unwrap_or(0)
+                    );
+                }
+            }
             wakes = binder_reap_thread(world, &proc, dying_tid);
         }
     }
@@ -1904,10 +1930,44 @@ unsafe fn stall_thread_line(proc: &Arc<BinderProc>, t: &Arc<BinderThread>) {
                         });
                     match word {
                         Some(v) => {
+                            // Dump the neighbor words too (libc lock structs
+                            // pack owner/counts beside the futex word — musl
+                            // recursive/rwlock layouts need them to decode).
+                            let mut nb = [0u32; 4];
+                            let mut got = 0;
+                            for (k, slot) in nb.iter_mut().enumerate() {
+                                let addr = uaddr + 4 + 4 * k;
+                                if let Some(x) = tk.address_space().and_then(|aspace| {
+                                    let root = aspace.root_ppn();
+                                    // SAFETY: read-only diagnostic walk.
+                                    unsafe {
+                                        crate::arch::mm::mm_ops::PageTableWalker::walk(
+                                            root,
+                                            addr as u64,
+                                        )
+                                    }
+                                    .map(|(ppn, _)| {
+                                        let pa = (ppn as usize) << 12;
+                                        let kv = crate::arch::mm::phys_to_virt(
+                                            crate::arch::mm::PhysAddr::new(pa as u64),
+                                        )
+                                        .bits() as usize
+                                            + (addr & 0xfff);
+                                        // SAFETY: one volatile u32 in the
+                                        // holder's mapped user page.
+                                        unsafe { core::ptr::read_volatile(kv as *const u32) }
+                                    })
+                                }) {
+                                    *slot = x;
+                                    got += 1;
+                                }
+                            }
                             crate::pr_warn!(
-                                "binder-stall:    futex word = {:#x} (owner tid {})",
+                                "binder-stall:    futex word = {:#x} (owner tid {}) next[{}]={:08x?}",
                                 v,
-                                v
+                                v,
+                                got,
+                                nb
                             );
                             // Chase a plausible owner tid (glibc stores the
                             // owner TID in the mutex word for
@@ -2201,6 +2261,36 @@ pub fn stall_report() {
                     if age >= REKICK_SECS * hz {
                         if !t.rekicked.swap(true, core::sync::atomic::Ordering::AcqRel) {
                             t.hist(EV_REKICK, (age / hz) as u32, 0);
+                        }
+                        let kicks = t.rekick_count.fetch_add(1, core::sync::atomic::Ordering::AcqRel);
+                        if kicks >= 1 {
+                            // A previous kick failed to run this task within
+                            // a full scan interval — wake→run leak (sc76:
+                            // REKICK@6007 ignored for 230 s on a healthy
+                            // idle worker; the WAKE-STRANDED family). Dump
+                            // the task's scheduler view: linked? on_cpu?
+                            // pick_state? — names which stage ate the wake.
+                            let task = unsafe { crate::sched::find_task_by_pid(t.tid) };
+                            if !task.is_null() {
+                                let tk = unsafe { &*task };
+                                let linked = match crate::sched::sched::grq_diag_cfs_linked(task) {
+                                    Some(b) => {
+                                        if b { "1" } else { "0" }
+                                    }
+                                    None => "n/a",
+                                };
+                                crate::pr_warn!(
+                                    "binder-stall: WAKE-RUN-LEAK tid {} kicked {}x age {}s state={:#x} cfs_linked={} on_cpu={} pick_state={} cpu={}",
+                                    t.tid,
+                                    kicks + 1,
+                                    age / hz,
+                                    tk.state().bits(),
+                                    linked,
+                                    tk.on_cpu(),
+                                    tk.pick_state(),
+                                    tk.ti_cpu()
+                                );
+                            }
                         }
                         rekick.push(t.clone());
                     }
@@ -4420,6 +4510,7 @@ fn binder_thread_read(
                 .store(crate::drivers::timer::get_jiffies(), core::sync::atomic::Ordering::Release);
             thread.stall_reported.store(false, core::sync::atomic::Ordering::Release);
             thread.rekicked.store(false, core::sync::atomic::Ordering::Release);
+            thread.rekick_count.store(0, core::sync::atomic::Ordering::Release);
             let r = crate::wait_event_interruptible!(&thread.wait, {
                 let w = world_lock();
                 // SAFETY: under WORLD.
