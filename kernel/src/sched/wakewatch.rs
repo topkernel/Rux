@@ -186,6 +186,20 @@ pub fn check_picked(task: *mut crate::process::Task, cpu: usize) {
                 ww_msg(b"ms)");
             }
         }
+        // vruntime geometry (round 4): the victim's lead/lag against
+        // min_vruntime and the queue's leftmost. A lead of ~strand_ms
+        // says "former CPU hog waiting for the pack" (fair, if blunt);
+        // a small lead with a big strand says the pick walk kept
+        // skipping it (ownership/affinity/throttle) or charging is
+        // inflated (runaway).
+        {
+            let (vr, minv, leftv) = crate::sched::sched::ww_cfs_geometry(task);
+            ww_msg(b" vr=");
+            ww_u64(vr.saturating_sub(minv) / 1_000_000);
+            ww_msg(b"ms lead-lag=");
+            ww_u64(leftv.saturating_sub(vr) / 1_000_000);
+            ww_msg(b"ms");
+        }
         ww_msg(b"\n");
     }
 }

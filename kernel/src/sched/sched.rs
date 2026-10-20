@@ -1133,6 +1133,25 @@ pub fn idle_task_ptr(cpu: usize) -> usize {
     }
 }
 
+/// Wakewatch: CFS timeline geometry for the strand report — the victim's
+/// vruntime, the queue's min_vruntime, and the leftmost queued vruntime
+/// (all raw ns; caller computes deltas). Diagnostic reads under the GRQ
+/// lock (check_picked holds it).
+pub fn ww_cfs_geometry(task: *mut Task) -> (u64, u64, u64) {
+    let g = grq();
+    // SAFETY: scalar sched-entity read of the task being picked (GRQ
+    // held); queue walk of the leftmost key only.
+    unsafe {
+        let vr = (*task).sched_entity().get_vruntime();
+        let minv = g.cfs_rq.get_min_vruntime();
+        let leftv = g
+            .cfs_rq
+            .leftmost_vruntime()
+            .unwrap_or(minv);
+        (vr, minv, leftv)
+    }
+}
+
 /// Wakewatch: diagnostic state of a possibly-stalled CPU for the
 /// TIMER-SOFTIRQ-STALL report — its current task's pid and preempt_count
 /// plus the RIP of its most recent trap frame. Values race live
