@@ -648,16 +648,21 @@ pub fn vfs_bind_mount(
     // sc31 hunt: what did the sandbox's own mounts actually capture? The
     // '/'-bind at the sandbox's /mnt decides what /mnt/sandbox means for
     // every pivoted process — print the resolved source dentry's GLOBAL
-    // path so the captured tree is unambiguous.
+    // path so the captured tree is unambiguous. Rate-limited alongside
+    // bindrec (sc37: per-spawn prints x retry storms flooded the UART).
     if sbx_want(target) {
         if let Some(ref sd) = src.dentry {
-            crate::pr_info!(
-                "sbxbind '{}' -> '{}': src dentry global='{}' ino={:#x}",
-                source,
-                target,
-                sd.build_path(),
-                inode.ino
-            );
+            static SBXBIND_N: core::sync::atomic::AtomicUsize =
+                core::sync::atomic::AtomicUsize::new(0);
+            if SBXBIND_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 200 {
+                crate::pr_info!(
+                    "sbxbind '{}' -> '{}': src dentry global='{}' ino={:#x}",
+                    source,
+                    target,
+                    sd.build_path(),
+                    inode.ino
+                );
+            }
         }
     }
     let fresh_root = vfs_mount(target, inode.clone(), mnt_flags);
@@ -718,12 +723,21 @@ pub fn vfs_bind_mount(
                 .collect()
         };
         for (rel, root, flags) in clones {
-            crate::pr_info!(
-                "bindrec: cloned '/{}' under '{}' (flags {:#x})",
-                rel.join("/"),
-                target,
-                flags.bits()
-            );
+            // Rate-limited (sc37 lesson): one boot printed 1,012,926 of
+            // these — ~50 clones per spawn x the appspawn retry storm —
+            // and the synchronous UART writes alone pushed every spawn
+            // past appspawn's 3s child watchdog (exit -9 mid-prep,
+            // forever). The clone list is visible in the first 200.
+            static BINDREC_N: core::sync::atomic::AtomicUsize =
+                core::sync::atomic::AtomicUsize::new(0);
+            if BINDREC_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 200 {
+                crate::pr_info!(
+                    "bindrec: cloned '/{}' under '{}' (flags {:#x})",
+                    rel.join("/"),
+                    target,
+                    flags.bits()
+                );
+            }
             bind_clone_attach(&fresh_root, &rel, &root, flags);
         }
     }

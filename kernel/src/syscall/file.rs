@@ -312,14 +312,20 @@ pub fn sys_openat(args: SyscallArgs) -> i64 {
                     detail.push_str(&alloc::format!("lookup ERR {}", e));
                 }
             }
-            crate::pr_warn!(
-                "devopen-probe '{}' flags {:#x} root='{}' {} (pid {})",
-                full_path,
-                flags,
-                root_str,
-                detail,
-                unsafe { crate::process::current_pid() }
-            );
+            // sc37 lesson: per-spawn probes x appspawn retry storms
+            // flooded the UART; 400 lines name every distinct gate.
+            static PROBE_N: core::sync::atomic::AtomicUsize =
+                core::sync::atomic::AtomicUsize::new(0);
+            if PROBE_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 400 {
+                crate::pr_warn!(
+                    "devopen-probe '{}' flags {:#x} root='{}' {} (pid {})",
+                    full_path,
+                    flags,
+                    root_str,
+                    detail,
+                    unsafe { crate::process::current_pid() }
+                );
+            }
             if let Err(e) = &result {
                 static DEVOPEN_FAIL_N: core::sync::atomic::AtomicUsize =
                     core::sync::atomic::AtomicUsize::new(0);
