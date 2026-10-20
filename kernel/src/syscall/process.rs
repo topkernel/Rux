@@ -695,7 +695,35 @@ pub fn sys_execve(args: SyscallArgs) -> i64 {
         Err(e) => return e,
     };
 
-    do_execve(pathname_str, &argv, &envp, 0) as i64
+    let rc = do_execve(pathname_str, &argv, &envp, 0) as i64;
+    // sc39 gate: the launcher spawn child completes every sandbox hook
+    // ('Child process:com.ohos.launcher success') then exits 0 WITHOUT
+    // exec'ing — name any failed exec of an app-shaped path (a bare
+    // execve ENOENT is otherwise invisible on the serial).
+    if rc < 0
+        && (pathname_str.starts_with("/data/")
+            || pathname_str.starts_with("/mnt/sandbox/"))
+    {
+        static EXEC_FAIL_N: core::sync::atomic::AtomicUsize =
+            core::sync::atomic::AtomicUsize::new(0);
+        let n = EXEC_FAIL_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        if n < 120 {
+            let root = crate::sched::current()
+                .and_then(|t| unsafe { (*t).fs_arc() })
+                .map(|fs| fs.get_root())
+                .unwrap_or_default();
+            let root_str = core::str::from_utf8(&root).unwrap_or("?");
+            crate::pr_warn!(
+                "execfail[{}] '{}' -> {} root='{}' (pid {})",
+                n,
+                pathname_str,
+                rc,
+                root_str,
+                unsafe { crate::process::current_pid() }
+            );
+        }
+    }
+    rc
 }
 
 /// sys_exit - Exit the CALLING THREAD only (Linux exit(2) semantics)
