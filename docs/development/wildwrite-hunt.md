@@ -275,6 +275,19 @@ Consequences for the hunt:
   archived errno-as-pointer reading; unaffected by the F1b kernel-side
   discipline, as expected for a service-side bug. Rate: ~5 victims /
   boot-hour, stable vs session-2 notes.
+- Capture-protocol validation (the one leg never exercised before — no
+  WW-HIT had ever fired anywhere): (a) gdb -batch `commands` blocks print
+  rip/regs/symbol/stack and continue correctly on every hit (local
+  inferior: 5/5; 8/8 lines survive a SIGTERM kill — ww-hunt.py's budget
+  teardown cannot lose buffered hits); (b) REMOTE hit path on TCG: bare
+  2G/2cpu q35 boot (kernel+ramdisk only, own PID, killed after), gdb
+  attached +6s watching `rux::timer::LAST_TICK` — 1448 WW-HIT lines in
+  15 s at the 100 Hz tick cadence, `info symbol` resolving the writer
+  (atomic_store in the timer path), target resumed cleanly through every
+  hit. A real engine hit on the chain WILL be recorded with full
+  attribution. Side note from the bare-boot attempts: -m 1G boots die at
+  ALLOCTHROW (heap region sits at 0x40000000, needs >=2G) — keep 2G+
+  for any ad-hoc x86_64 boot of this kernel.
 
 ## Where this leaves the hunt (handoff)
 
