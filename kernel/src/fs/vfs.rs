@@ -699,6 +699,24 @@ pub fn vfs_bind_mount(
             Some(r) => r,
             None => return Ok(()),
         };
+        // SELF-BINDS (source == target, OH's sandbox re-flag idiom):
+        // skip the clone phase. Since vfs_mount attaches at the
+        // CALLER-visible mountpoint (a9595213), every LATER bind's
+        // target walk crosses this self-bind and lands INSIDE the copy
+        // naturally — cloning the subtree again only stacks duplicate
+        // mounts, ~50 per appspawn spawn, each registered forever (the
+        // registry is never pruned), which made every later clone
+        // enumeration slower until spawns blew appspawn's 3s watchdog
+        // (sc37/sc38: 'wait child timeout', no app exec). The sc27
+        // reason for cloning self-binds (post-pivot /dev/null shadowed
+        // by a bare copy) is superseded by that attach-side fix.
+        {
+            let src_norm = source.trim_end_matches('/');
+            let tgt_norm = target.trim_end_matches('/');
+            if src_norm == tgt_norm {
+                return Ok(());
+            }
+        }
         let anc = match src.dentry.clone() {
             Some(d) => d.get_mountpoint_back().unwrap_or(d),
             None => return Ok(()),
