@@ -1073,6 +1073,15 @@ fn ww_irqwin_budget_ok() -> bool {
 ///   trap_handler's tail and trap_exit's kernel restore.
 fn irq_exit_maybe_preempt_kernel(regs: &PtRegs) {
     use crate::process::task::task_flags::TaskFlags;
+    // Experiment gate (kernel-preemption hunt, sc69): when false the hook
+    // is a no-op and the boot behaves exactly like sc64 baseline while
+    // ALL instrumentation (PREEMPT-LEAK / PREEMPT-UNDERFLOW tripwires)
+    // stays live — separating "the leak producer is pre-existing" from
+    // "the leak producer needs the new switch cadence".
+    const PREEMPT_HOOK_ENABLED: bool = false;
+    if !PREEMPT_HOOK_ENABLED {
+        return;
+    }
     // Early-boot / WFI secondaries have no current task: __schedule
     // handles a null prev, but there is nothing to preempt either way.
     let cur = match crate::sched::current() {

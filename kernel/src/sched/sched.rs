@@ -3673,10 +3673,25 @@ pub fn scheduler_tick() {
                                     putchar(b);
                                 }
                                 ph(now.wrapping_sub(t0));
-                                const M5: &[u8] = b"jiffies\n";
+                                const M5: &[u8] = b"jiffies rip=";
                                 for &b in M5 {
                                     putchar(b);
                                 }
+                                // The interrupted kernel instruction at
+                                // tick time: a leaked-count task poll-
+                                // loops in the wait whose schedule()
+                                // keeps being refused — this RIP names
+                                // that loop directly (symbolize with
+                                // addr2line).
+                                {
+                                    use crate::arch::pt_regs::PtRegs;
+                                    let pr = crate::arch::trap::current_pt_regs()
+                                        as *const PtRegs;
+                                    if !pr.is_null() {
+                                        ph(unsafe { (*pr).instruction_pointer() });
+                                    }
+                                }
+                                putchar(b'\n');
                             }
                         }
                     } else {
