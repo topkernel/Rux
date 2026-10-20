@@ -2168,8 +2168,8 @@ unsafe fn outstanding_from_tid(world: &World, pid: u32, tid: u32) -> alloc::stri
 unsafe fn hist_line(t: &Arc<BinderThread>) {
     let th = t.st();
     use core::fmt::Write;
-    // Newline every 8 entries — the console's printk buffer splits longer
-    // lines mid-entry (sc75: "PARK(0,0)binder-stall:" splices).
+    // Newline every 4 entries — console interleaving ate longer runs
+    // (sc77: the decisive ring tail was spliced away at ~8 events).
     let mut s = alloc::string::String::new();
     let mut n = 0;
     for k in 0..BHIST {
@@ -2180,11 +2180,86 @@ unsafe fn hist_line(t: &Arc<BinderThread>) {
         }
         let _ = write!(s, " {}({},{})@{}", ev_name(e.ev), e.a, e.b, e.j);
         n += 1;
-        if n % 8 == 0 {
+        if n % 4 == 0 {
             let _ = writeln!(s);
         }
     }
     crate::pr_warn!("binder-stall:   hist tid {} ({} events):{}", t.tid, n, s);
+}
+
+/// sc77: for a SERVER-OWING holder parked in the binder read with NO
+/// outstanding nested txn (the "impossible shape" — OH libipc cannot
+/// legally park there), snapshot the USER stack at the park: the entry
+/// frame's rsp/rip plus candidate return addresses, each resolved to its
+/// covering VMA (fd + file offset) so the frames symbolize offline
+/// against the image's libraries.
+/// SAFETY: caller holds WORLD (VMA walk is on the holder's mm).
+unsafe fn user_park_stack_dump(t: &Arc<BinderThread>) {
+    let task = crate::sched::find_task_by_pid(t.tid);
+    if task.is_null() {
+        return;
+    }
+    let tk = &*task;
+    let Some(aspace) = tk.address_space() else { return };
+    let root = aspace.root_ppn();
+    let read_u64_at = |va: u64| -> Option<u64> {
+        // SAFETY: read-only diagnostic walk of the holder's tables.
+        let (ppn, _) = crate::arch::mm::mm_ops::PageTableWalker::walk(root, va & !0xfff)?;
+        let pa = (ppn as usize) << 12;
+        let kv = crate::arch::mm::phys_to_virt(crate::arch::mm::PhysAddr::new(pa as u64))
+            .bits() as usize
+            + (va & 0xfff);
+        if va & 0xfff > 0xff8 {
+            return None; // crosses a page — skip rather than split
+        }
+        // SAFETY: one volatile u64 in the holder's mapped user page.
+        Some(core::ptr::read_volatile(kv as *const u64))
+    };
+    let top = tk.kernel_stack_top();
+    #[cfg(feature = "x86_64")]
+    let (rsp, rip) = {
+        let regs = (top.wrapping_sub(crate::arch::x86_64::pt_regs::PT_REGS_SIZE))
+            as *const crate::arch::x86_64::pt_regs::PtRegs;
+        // SAFETY: diagnostic read of the holder's entry frame.
+        unsafe { ((*regs).rsp, (*regs).rip) }
+    };
+    #[cfg(feature = "riscv64")]
+    let (rsp, rip) = {
+        let regs = (top.wrapping_sub(crate::arch::riscv64::pt_regs::PT_REGS_SIZE))
+            as *const crate::arch::riscv64::pt_regs::PtRegs;
+        // SAFETY: same contract, riscv64.
+        unsafe { ((*regs).sp, (*regs).epc) }
+    };
+    #[cfg(not(any(feature = "x86_64", feature = "riscv64")))]
+    let (rsp, rip) = (0u64, 0u64);
+    crate::pr_warn!(
+        "binder-stall:   PARK-STACK tid {} rip={:#x} rsp={:#x}",
+        t.tid,
+        rip,
+        rsp
+    );
+    // 16 candidate frame words above rsp; each that lands in a mapped
+    // exec-looking VMA prints with the file offset for offline symbolize.
+    let vmas = aspace.vma_read();
+    for i in 0..16u64 {
+        let Some(v) = read_u64_at(rsp + 8 * i) else { continue };
+        // Skip obvious non-pointers (small ints, non-canonical).
+        if v < 0x1000 || v > 0x7fff_ffff_ffff {
+            continue;
+        }
+        if let Some(vm) = vmas.find(crate::mm::page::VirtAddr::new(v as usize)) {
+            let off = vm.offset() + (v as usize - vm.start().as_usize());
+            crate::pr_warn!(
+                "binder-stall:   ustack[{}]={:#x} vma={:#x}-{:#x} fd={} fileoff={:#x}",
+                i,
+                v,
+                vm.start().as_usize(),
+                vm.end().as_usize(),
+                vm.file_fd(),
+                off
+            );
+        }
+    }
 }
 
 /// Wait-queue census + task state for a stalled reader — the live-wake
@@ -2347,6 +2422,9 @@ pub fn stall_report() {
                                         "binder-stall:   NO outstanding txn from tid {} — nested call vanished or never sent",
                                         t.tid
                                     );
+                                    // sc77: the impossible shape gets a user-stack
+                                    // snapshot — names the OH path that parked.
+                                    user_park_stack_dump(t);
                                 } else {
                                     crate::pr_warn!(
                                         "binder-stall:   outstanding from tid {}:{}",
