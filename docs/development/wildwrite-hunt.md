@@ -153,6 +153,60 @@ smashes into pointer-bearing statics.
   b150-b155 history) — its rate under this driver is below 1 per
   boot-hour.
 
+## Session 2 (continuation agent)
+
+- Merged origin/main 3ab8f09a (no conflicts; main's kernel-side changes
+  — build.rs, trap.rs, xattr, procfs/pid, unix — do not overlap my files).
+  1326066f confirmed: the r4 kernel was built with the stale build.rs that
+  resolved platform from Kernel.toml (riscv64) even for x86_64 feature
+  builds, baking in the 128 MiB heap clamp. **r4's "kernel-heap exhaustion
+  at 128 MiB" was a build artifact, not a real leak.** Post-merge rebuild:
+  config.rs TARGET_PLATFORM=x86_64, KERNEL_HEAP_SIZE=1073741824,
+  bzImage 10.79 MB (matches pre-clamp working kernels). The committed
+  config.rs on main still carried the stale 128 MiB value; regenerated and
+  committed on this branch (e432831e). OH boots on this branch now run
+  with 1 GiB kernel heap — r4's 35-min death should not recur, and heap
+  observations from r4 should be discarded.
+
+### F1b FIXED (12f82297) — CR0.WP permanently on + kernel-mode COW resolved
+
+Root cause of the F4 collapse, and the root-cause fix for the F1b
+supervisor-COW-piercing family:
+
+- The x86_64 `kernel_data_fill` branch in mm/exception.rs only accepted
+  `Handled | Fixed` from handle_mm_fault; `CowPending` fell through to
+  the exception-table fixup → short copy → EFAULT. With WP armed, every
+  read()/write() into a post-fork COW buffer returned EFAULT, init's
+  param reads failed, and the boot collapsed into the LoopEvent spin —
+  the exact ww-long2/long3 signature. The riscv64 twin has had the
+  inline `handle_cow_fault` resolution since R82; x86_64 now mirrors it.
+- CR0.WP set permanently: BSP at early_boot_init (cpu::
+  enable_write_protect), every AP in the smp CD/NW-clear RMW. Safe
+  because the kernel image, linear map, and device windows are all P|RW
+  — WP only bites user-side COW/RO pages and wildwatch guards.
+- uaccess.rs: fault_in_write ported from riscv64 (Linux
+  fault_in_pages_writeable parity) — copy_to_user/clear_user retry once
+  after resolving the range.
+
+Validation (ww-f1b-a, 10-min OH boot, q35/smp2/4G, snapshot):
+- 803 "fork: parent" lines vs 18 in the collapsed WP=1 boots (ww-long2)
+  and 422 in the WP=0 control — no collapse, boot reaches further than
+  the old control (main's xattr fixes contribute).
+- Full service storm (474 appspawn/media_service lines), healthy timer
+  heartbeats (WW: wakes=1.84M).
+- 0 KERNPANIC, 0 kernel faults, 0 Permission-denied victims (r4 had 5
+  at rip=0x3fbf08ad30 — the predicted EFAULT-driven family; gone).
+- cow lines 8071/10min ≈ control baseline 7487 — no COW flood.
+
+Consequences for the hunt:
+- F4 is resolved: WP=1 boots OH without collapse. Every future boot on
+  this branch carries the COW/uaccess discipline; a wild supervisor
+  write to any RO user page now takes a loud #PF with attribution
+  instead of silently piercing protection.
+- The r4-era note "OH long runs must not enable WP" is obsolete.
+- wildwatch's per-CPU enable_write_protect stays (idempotent, harmless
+  belt-and-suspenders if a future path clears WP).
+
 ## Where this leaves the hunt (handoff)
 
 The attribution machinery now exists and is proven end-to-end; the
