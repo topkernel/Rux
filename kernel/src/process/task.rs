@@ -2531,6 +2531,24 @@ impl Task {
                 // trap-with-sp-on-heap-address full-system wedge. The locked
                 // re-check refuses ZOMBIE/DEAD/RUNNING.
                 if !crate::sched::wake_up_enqueue(task) {
+                    // W2 (sc78): a SLEEPING target's enqueue+heal both
+                    // refused — per the R39/R41/R42 design this is
+                    // unreachable, yet the binder ring proves replies sit
+                    // unconsumed on parked readers' todos for minutes.
+                    // Rate-limited branch report so the refusing guard
+                    // names itself live.
+                    static W2_N: core::sync::atomic::AtomicU32 =
+                        core::sync::atomic::AtomicU32::new(0);
+                    if W2_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 16 {
+                        crate::pr_warn!(
+                            "W2-WAKE-REFUSED-SLEEPING pid={} state={:#x} on_cpu={} pk={} cpu={}",
+                            pid,
+                            (*task).state().bits(),
+                            (*task).on_cpu(),
+                            (*task).pick_state(),
+                            (*task).ti_cpu()
+                        );
+                    }
                     return false;
                 }
 
