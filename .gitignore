@@ -114,3 +114,6 @@ userspace/soft-fp/gcc-pin/
 runs/
 test/tokwrap
 test/futex_lost
+test/permcheck
+test/tokprobe
+test/unixwake
