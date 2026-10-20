@@ -273,6 +273,72 @@ pub fn sys_openat(args: SyscallArgs) -> i64 {
         crate::fs::file_open(&full_path, flags, mode)
     };
 
+    // sc33/sc34 hunt: the pivoted appspawn child dies at
+    // appspawn_common.c:350 'open dev_null error: 2'. The first 60-line
+    // budget was eaten by boot noise (param-service, cpuset/memcg
+    // walkers — all with the 3-segment SYSTEM sandbox root); gate to
+    // processes rooted in a 4+-segment APP sandbox root
+    // ('/mnt/sandbox/<uid>/<pkg>') so only appspawn children print.
+    // sc36: also resolve the path OURSELVES and print the inode — the
+    // walk trails were silent for the failing opens, so the ENOENT is
+    // post-lookup; name what the lookup found.
+    if full_path.starts_with("/dev/") {
+        let root = crate::sched::current()
+            .and_then(|t| unsafe { (*t).fs_arc() })
+            .map(|fs| fs.get_root())
+            .unwrap_or_default();
+        let root_str = core::str::from_utf8(&root).unwrap_or("?");
+        let deep_root = root_str
+            .split('/')
+            .filter(|s| !s.is_empty())
+            .count() >= 4;
+        if deep_root {
+            let mut detail = alloc::string::String::new();
+            match crate::fs::vfs::path_lookup(&full_path, 0) {
+                Ok(vp) => {
+                    if let Some(i) = vp.inode.as_ref() {
+                        detail.push_str(&alloc::format!(
+                            "lookup OK ino={:#x} mode={:#o} fs_id={} ops={}",
+                            i.ino,
+                            i.mode.bits(),
+                            i.fs_id,
+                            i.ops.is_some()
+                        ));
+                    } else {
+                        detail.push_str("lookup OK but NO inode");
+                    }
+                }
+                Err(e) => {
+                    detail.push_str(&alloc::format!("lookup ERR {}", e));
+                }
+            }
+            crate::pr_warn!(
+                "devopen-probe '{}' flags {:#x} root='{}' {} (pid {})",
+                full_path,
+                flags,
+                root_str,
+                detail,
+                unsafe { crate::process::current_pid() }
+            );
+            if let Err(e) = &result {
+                static DEVOPEN_FAIL_N: core::sync::atomic::AtomicUsize =
+                    core::sync::atomic::AtomicUsize::new(0);
+                let n = DEVOPEN_FAIL_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                if n < 200 {
+                    crate::pr_warn!(
+                        "devopen-fail[{}] '{}' flags {:#x} -> errno {} root='{}' (pid {})",
+                        n,
+                        full_path,
+                        flags,
+                        -e,
+                        root_str,
+                        unsafe { crate::process::current_pid() }
+                    );
+                }
+            }
+        }
+    }
+
     // OH DRM bring-up (rs-egl): the composer HDI's DrmDevice::Create
     // (drm_device.cpp:90, passthrough-loaded into render_service) logs
     // "can't open drm card device" — but its message carries no errno,

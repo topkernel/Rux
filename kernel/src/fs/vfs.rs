@@ -1209,7 +1209,19 @@ pub const LOOKUP_NOFOLLOW: u32 = 0x02;  // Don't follow final symlink
 // 'sandbox' flips fail->ok between consecutive lookups during setup.
 // ---------------------------------------------------------------------------
 fn sbx_want(path: &str) -> bool {
-    path.contains("/mnt/sandbox")
+    // App-sandbox paths only ('/mnt/sandbox/<uid>/<pkg>/...'): the
+    // system-sandbox hunt is closed (sc31), and the usage_report /
+    // hiview churn under /mnt/sandbox/system/... burned the trace
+    // tables (600 distinct paths -> silent dropouts, sc35).
+    let rest = match path.find("/mnt/sandbox/") {
+        Some(i) => &path[i + "/mnt/sandbox/".len()..],
+        None => return false,
+    };
+    let mut it = rest.split('/');
+    match it.next() {
+        Some(uid) => !uid.is_empty() && uid.bytes().all(|b| b.is_ascii_digit()),
+        None => false,
+    }
 }
 
 /// Budget-burn filter (sc30 lesson: the dynamic linker's library scan
@@ -1224,10 +1236,11 @@ fn sbx_trace(kind: &str, key: &str, detail: &str) {
     static SBX_BUDGETS: Spinlock<Vec<(String, usize)>> = Spinlock::new(Vec::new());
     static SBX_TOTAL: core::sync::atomic::AtomicUsize =
         core::sync::atomic::AtomicUsize::new(0);
-    let total = SBX_TOTAL.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-    if total > 30000 {
-        return;
-    }
+    // sc33 lesson: counting ATTEMPTS against the global cap let the
+    // usage_report/hiview retry churn (five failed lookups per cycle,
+    // thousands of cycles) exhaust 30000 before the appspawn stage —
+    // while printing only ~1000 lines. Count PRINTS instead; the
+    // per-path cap (4) already bounds any single path.
     let mut budgets = SBX_BUDGETS.lock();
     let mut slot: Option<&mut usize> = None;
     for (p, n) in budgets.iter_mut() {
@@ -1253,6 +1266,10 @@ fn sbx_trace(kind: &str, key: &str, detail: &str) {
         return;
     }
     *n += 1;
+    let total = SBX_TOTAL.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    if total > 30000 {
+        return;
+    }
     crate::pr_info!(
         "sbx{}[{},p{}] {} (pid {})",
         kind,
