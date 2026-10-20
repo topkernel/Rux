@@ -3720,15 +3720,38 @@ pub fn scheduler_tick() {
     // violate ONE invariant: with no kernel preemption, a task that is
     // parked (current on NO CPU) can never legally hold a nonzero
     // preempt_count — guards exist only on the executing task, and the
-    // do_exit R9-3 windows are dead/exiting by the time they park. This
-    // walk reports every such task the moment it is seen parked, which
-    // brackets the producer event to the interval since the victim last
-    // ran (cross-check with WAKE-STRANDED / PREEMPT-LEAK timestamps).
+    // do_exit R9-3 windows are dead/exiting by the time they park.
+    //
+    // Round 3b: keep per-task last-walk snapshots (count, parked) in a
+    // side table. A task parked for TWO consecutive walks whose count
+    // went 0 -> nonzero in between is the unambiguous wild-write proof
+    // (no code path can add to a parked task); a task that acquired its
+    // count while running narrows the producer to a replayed acquire in
+    // that 40 ms window. PARKED-LEAK reports every parked-nonzero task
+    // as before; the walk also stamps PARKWALK-ARMED once at boot so a
+    // silent logic failure cannot masquerade as "no hits".
     {
+        struct ParkSnap {
+            task: core::sync::atomic::AtomicUsize,
+            count: core::sync::atomic::AtomicI32,
+            parked: core::sync::atomic::AtomicBool,
+            seen: core::sync::atomic::AtomicU64,
+        }
+        static SNAPS: [ParkSnap; 1024] = {
+            const FN: ParkSnap = ParkSnap {
+                task: core::sync::atomic::AtomicUsize::new(0),
+                count: core::sync::atomic::AtomicI32::new(0),
+                parked: core::sync::atomic::AtomicBool::new(false),
+                seen: core::sync::atomic::AtomicU64::new(0),
+            };
+            [FN; 1024]
+        };
         static PARKWALK_LAST: core::sync::atomic::AtomicU64 =
             core::sync::atomic::AtomicU64::new(0);
         static PARKWALK_PRINT: core::sync::atomic::AtomicU64 =
             core::sync::atomic::AtomicU64::new(0);
+        static PARKWALK_ARMED: core::sync::atomic::AtomicBool =
+            core::sync::atomic::AtomicBool::new(false);
         let now = crate::drivers::timer::get_jiffies();
         let last = PARKWALK_LAST.load(core::sync::atomic::Ordering::Acquire);
         if now.wrapping_sub(last) >= 4
@@ -3741,14 +3764,31 @@ pub fn scheduler_tick() {
                 )
                 .is_ok()
         {
+            if !PARKWALK_ARMED.swap(true, core::sync::atomic::Ordering::AcqRel) {
+                const MSG: &[u8] = b"PARKWALK-ARMED\n";
+                for &b in MSG {
+                    crate::console::putchar_no_lock(b);
+                }
+            }
+            // Walk epoch: a slot not refreshed for 2+ walks belongs to a
+            // dead/exited task and may be reclaimed for new tasks.
+            static WALK_EPOCH: core::sync::atomic::AtomicU64 =
+                core::sync::atomic::AtomicU64::new(0);
+            let epoch = WALK_EPOCH.fetch_add(1, core::sync::atomic::Ordering::AcqRel) + 1;
+            struct Visit {
+                task: *mut crate::process::Task,
+                pc: i32,
+                running: bool,
+            }
+            // The pid-hash walk holds bucket locks; do the side-table
+            // bookkeeping after collecting the snapshot (no locks held
+            // while touching SNAPS beyond atomics).
+            let mut visited: [Option<Visit>; 128] = [const { None }; 128];
+            let mut nvisited = 0usize;
             crate::process::pid_hash::pid_hash_for_each_task_try(|task| {
                 unsafe {
                     let pid = (*task).pid();
                     if pid == 0 || pid == TASK_POISON {
-                        return;
-                    }
-                    let pc = (*task).preempt_count();
-                    if pc == 0 {
                         return;
                     }
                     // Skip the do_exit R9-3 windows: DEAD/ZOMBIE (and
@@ -3762,10 +3802,7 @@ pub fn scheduler_tick() {
                     {
                         return;
                     }
-                    // Running on any CPU? The slot mirror may diverge from
-                    // physical execution (R55/R85 family) — reporting a
-                    // slot-current task here would be noise, so skip the
-                    // ones the slots still book.
+                    let pc = (*task).preempt_count();
                     let mut running = false;
                     for c in 0..crate::config::MAX_CPUS {
                         if cpu_state(c).current == task {
@@ -3773,58 +3810,164 @@ pub fn scheduler_tick() {
                             break;
                         }
                     }
-                    if running {
-                        return;
-                    }
-                    // Parked with a live count: report, rate-gated to one
-                    // line per 2 s (direct console — IRQ context).
-                    let lp = PARKWALK_PRINT.load(core::sync::atomic::Ordering::Acquire);
-                    if now.wrapping_sub(lp) >= 20
-                        && PARKWALK_PRINT
-                            .compare_exchange(
-                                lp,
-                                now,
-                                core::sync::atomic::Ordering::AcqRel,
-                                core::sync::atomic::Ordering::Acquire,
-                            )
-                            .is_ok()
-                    {
-                        use crate::console::putchar_no_lock as putchar;
-                        fn ph(v: u64) {
-                            use crate::console::putchar_no_lock as putchar;
-                            for sh in (0..16).rev() {
-                                let n = ((v >> (sh * 4)) & 0xF) as u8;
-                                putchar(if n < 10 {
-                                    b'0' + n
-                                } else {
-                                    b'a' + n - 10
-                                });
-                            }
+                    // Sample up to 128 tasks per walk, biased to the
+                    // interesting ones (nonzero count) so the table sees
+                    // leak transitions even under heavy task churn.
+                    if nvisited < 128 {
+                        let interesting = pc != 0;
+                        if interesting || (nvisited < 32) {
+                            visited[nvisited] = Some(Visit { task, pc, running });
+                            nvisited += 1;
                         }
-                        const M: &[u8] = b"\nPARKED-LEAK pid=";
-                        for &b in M {
-                            putchar(b);
-                        }
-                        ph(pid as u64);
-                        const M2: &[u8] = b" pc=";
-                        for &b in M2 {
-                            putchar(b);
-                        }
-                        ph(pc as u32 as u64);
-                        const M3: &[u8] = b" state=";
-                        for &b in M3 {
-                            putchar(b);
-                        }
-                        ph((*task).state().bits() as u64);
-                        const M4: &[u8] = b" tcpu=";
-                        for &b in M4 {
-                            putchar(b);
-                        }
-                        ph((*task).ti_cpu() as u32 as u64);
-                        putchar(b'\n');
                     }
                 }
             });
+            for v in visited.iter().take(nvisited) {
+                let Visit { task, pc, running } = match v {
+                    Some(x) => x,
+                    None => continue,
+                };
+                // Find or (re)claim a slot.
+                let mut mine: Option<&ParkSnap> = None;
+                let mut free: Option<&ParkSnap> = None;
+                for s in SNAPS.iter() {
+                    let key = s.task.load(core::sync::atomic::Ordering::Relaxed);
+                    if key == *task as usize {
+                        mine = Some(s);
+                        break;
+                    }
+                    if key == 0 && free.is_none() {
+                        free = Some(s);
+                    }
+                }
+                let slot = match mine {
+                    Some(s) => Some(s),
+                    None => free,
+                };
+                let mut wildwrite_shape = false;
+                if let Some(s) = slot {
+                    let key = s.task.load(core::sync::atomic::Ordering::Relaxed);
+                    if key == *task as usize {
+                        let prev_pc =
+                            s.count.load(core::sync::atomic::Ordering::Relaxed);
+                        let prev_parked =
+                            s.parked.load(core::sync::atomic::Ordering::Relaxed);
+                        // Parked for two consecutive walks with a
+                        // 0 -> nonzero count transition in between: no
+                        // in-tree code path can do this. Wild write.
+                        wildwrite_shape =
+                            prev_parked && !*running && prev_pc == 0 && *pc != 0;
+                    } else if s.task
+                        .compare_exchange(
+                            0,
+                            *task as usize,
+                            core::sync::atomic::Ordering::AcqRel,
+                            core::sync::atomic::Ordering::Acquire,
+                        )
+                        .is_ok()
+                    {
+                        s.seen.store(epoch, core::sync::atomic::Ordering::Relaxed);
+                    }
+                    // Reclaim check happens lazily at claim time below.
+                }
+                if let Some(s) = slot {
+                    s.count.store(*pc, core::sync::atomic::Ordering::Relaxed);
+                    s.parked.store(!*running, core::sync::atomic::Ordering::Relaxed);
+                    s.seen.store(epoch, core::sync::atomic::Ordering::Relaxed);
+                }
+                if wildwrite_shape {
+                    // Report immediately, not rate-gated: this is the
+                    // proof event.
+                    use crate::console::putchar_no_lock as putchar;
+                    fn ph(v: u64) {
+                        use crate::console::putchar_no_lock as putchar;
+                        for sh in (0..16).rev() {
+                            let n = ((v >> (sh * 4)) & 0xF) as u8;
+                            putchar(if n < 10 {
+                                b'0' + n
+                            } else {
+                                b'a' + n - 10
+                            });
+                        }
+                    }
+                    const M: &[u8] = b"\nPARKED-WILDWRITE pid=";
+                    for &b in M {
+                        putchar(b);
+                    }
+                    ph(unsafe { (**task).pid() } as u64);
+                    const M2: &[u8] = b" pc=";
+                    for &b in M2 {
+                        putchar(b);
+                    }
+                    ph(*pc as u32 as u64);
+                    putchar(b'\n');
+                }
+                if *running || *pc == 0 {
+                    continue;
+                }
+                // Parked with a live count: report, rate-gated to one
+                // line per 2 s (direct console — IRQ context).
+                let lp = PARKWALK_PRINT.load(core::sync::atomic::Ordering::Acquire);
+                if now.wrapping_sub(lp) >= 20
+                    && PARKWALK_PRINT
+                        .compare_exchange(
+                            lp,
+                            now,
+                            core::sync::atomic::Ordering::AcqRel,
+                            core::sync::atomic::Ordering::Acquire,
+                        )
+                        .is_ok()
+                {
+                    use crate::console::putchar_no_lock as putchar;
+                    fn ph(v: u64) {
+                        use crate::console::putchar_no_lock as putchar;
+                        for sh in (0..16).rev() {
+                            let n = ((v >> (sh * 4)) & 0xF) as u8;
+                            putchar(if n < 10 {
+                                b'0' + n
+                            } else {
+                                b'a' + n - 10
+                            });
+                        }
+                    }
+                    const M: &[u8] = b"\nPARKED-LEAK pid=";
+                    for &b in M {
+                        putchar(b);
+                    }
+                    ph(unsafe { (**task).pid() } as u64);
+                    const M2: &[u8] = b" pc=";
+                    for &b in M2 {
+                        putchar(b);
+                    }
+                    ph(*pc as u32 as u64);
+                    const M3: &[u8] = b" state=";
+                    for &b in M3 {
+                        putchar(b);
+                    }
+                    ph(unsafe { (**task).state().bits() } as u64);
+                    const M4: &[u8] = b" tcpu=";
+                    for &b in M4 {
+                        putchar(b);
+                    }
+                    ph(unsafe { (**task).ti_cpu() } as u32 as u64);
+                    putchar(b'\n');
+                }
+            }
+            // Lazily reclaim slots whose tasks missed 2+ walks.
+            for s in SNAPS.iter() {
+                let key = s.task.load(core::sync::atomic::Ordering::Relaxed);
+                if key != 0 {
+                    let seen = s.seen.load(core::sync::atomic::Ordering::Relaxed);
+                    if epoch.wrapping_sub(seen) > 2 {
+                        let _ = s.task.compare_exchange(
+                            key,
+                            0,
+                            core::sync::atomic::Ordering::AcqRel,
+                            core::sync::atomic::Ordering::Acquire,
+                        );
+                    }
+                }
+            }
         }
     }
 

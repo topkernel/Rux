@@ -548,6 +548,7 @@ impl<T: ?Sized> Drop for SpinlockBhGuard<'_, T> {
 // ==================== Inline helpers ====================
 
 #[inline]
+#[track_caller]
 fn preempt_disable() {
     crate::interrupt::preempt::preempt_count_add(
         crate::interrupt::preempt::PREEMPT_OFFSET,
@@ -555,9 +556,11 @@ fn preempt_disable() {
 }
 
 #[inline]
+#[track_caller]
 fn preempt_enable() {
-    crate::interrupt::preempt::preempt_count_sub(
+    crate::interrupt::preempt::preempt_count_sub_at(
         crate::interrupt::preempt::PREEMPT_OFFSET,
+        core::panic::Location::caller(),
     );
 }
 
@@ -572,6 +575,7 @@ fn irq_restore(flags: bool) {
 }
 
 #[inline]
+#[track_caller]
 fn bh_disable() {
     crate::interrupt::preempt::preempt_count_add(
         crate::interrupt::preempt::SOFTIRQ_OFFSET,
@@ -579,9 +583,11 @@ fn bh_disable() {
 }
 
 #[inline]
+#[track_caller]
 fn bh_enable() {
-    crate::interrupt::preempt::preempt_count_sub(
+    crate::interrupt::preempt::preempt_count_sub_at(
         crate::interrupt::preempt::SOFTIRQ_OFFSET,
+        core::panic::Location::caller(),
     );
 }
 

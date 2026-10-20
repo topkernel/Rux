@@ -1073,12 +1073,14 @@ fn ww_irqwin_budget_ok() -> bool {
 ///   trap_handler's tail and trap_exit's kernel restore.
 fn irq_exit_maybe_preempt_kernel(regs: &PtRegs) {
     use crate::process::task::task_flags::TaskFlags;
-    // Experiment gate (kernel-preemption hunt): sc69 proved the preempt-
-    // count leak producer is PRE-EXISTING (leak present with this gate
-    // false), so the hook is not the leak's cause. sc70 runs the A/B arm
-    // with the hook live to measure whether IRQ-exit kernel preemption
-    // adds monopolies on top of the pre-existing leak or not.
-    const PREEMPT_HOOK_ENABLED: bool = true;
+    // Experiment gate (kernel-preemption hunt): sc69 (hook off) vs sc70
+    // (hook on) settled the A/B — the preempt-count leak is pre-existing
+    // in BOTH arms, but with the hook ON every leaked task becomes a
+    // multi-minute kernel-mode monopolist (sc70: pid 320 held cpu1 for
+    // 309+ s; sc69 hook-off: 2.6 s, bounded by the count-blind user-mode
+    // boundary switch). Keep OFF until the leak producer is fixed; the
+    // sc71 build hunts the producer with caller-site fingerprinting.
+    const PREEMPT_HOOK_ENABLED: bool = false;
     if !PREEMPT_HOOK_ENABLED {
         return;
     }

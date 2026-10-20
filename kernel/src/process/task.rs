@@ -3127,7 +3127,12 @@ pub unsafe fn vfork_wake_parent(task: *mut Task) {
 /// second of jiffies. Raw console only (putchar_no_lock) — the tripwire
 /// can fire from any context, including inside printk's own lock guards,
 /// so the report path must itself be lock-free and non-recursive.
-fn preempt_underflow_report(pid: u32, prev: i32, sub: i32) {
+fn preempt_underflow_report(
+    pid: u32,
+    prev: i32,
+    sub: i32,
+    loc: &'static core::panic::Location<'static>,
+) {
     static LAST: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
     let now = crate::drivers::timer::get_jiffies();
     let last = LAST.load(core::sync::atomic::Ordering::Acquire);
@@ -3163,10 +3168,20 @@ fn preempt_underflow_report(pid: u32, prev: i32, sub: i32) {
         putchar(b);
     }
     ph(sub as u32);
-    const MSG4: &[u8] = b" (unpaired decrement clamped to 0)\n";
+    const MSG4: &[u8] = b" (unpaired decrement clamped to 0) at ";
     for &b in MSG4 {
         putchar(b);
     }
+    // Drop site: file:line of the guard whose decrement underflowed.
+    for &b in loc.file().as_bytes() {
+        putchar(b);
+    }
+    const COLON: &[u8] = b":";
+    for &b in COLON {
+        putchar(b);
+    }
+    ph(loc.line());
+    putchar(b'\n');
 }
 
 impl Task {
@@ -3288,11 +3303,22 @@ impl Task {
     /// storm cannot flood the UART).
     #[inline]
     pub fn sub_preempt_count(&self, val: i32) {
+        self.sub_preempt_count_at(val, core::panic::Location::caller());
+    }
+
+    /// Sub with the drop site's source location for the underflow report
+    /// (leak-hunt round 3b: name WHICH guard family double-drops).
+    #[inline]
+    pub fn sub_preempt_count_at(
+        &self,
+        val: i32,
+        loc: &'static core::panic::Location<'static>,
+    ) {
         let prev = self.ti_preempt_count.fetch_sub(val, core::sync::atomic::Ordering::Release);
         let after = prev.wrapping_sub(val);
         if after < 0 {
             self.ti_preempt_count.store(0, core::sync::atomic::Ordering::Release);
-            preempt_underflow_report(self.pid(), prev, val);
+            preempt_underflow_report(self.pid(), prev, val, loc);
         }
     }
 
