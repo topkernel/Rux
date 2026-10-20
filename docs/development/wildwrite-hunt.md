@@ -138,4 +138,39 @@ smashes into pointer-bearing statics.
 - ww-long3 (WP=1 + 81dfcb42 rate-limit, 45 min): cow flood fixed
   (1.1k lines) but the LoopEvent spin persists — 5 init forks, no
   storm. WP stays off for OH hunts.
-- ww-r4 (2700 s, watchpoints, GUARD-relocated build): see below.
+- ww-r4 (2700 s budget, watchpoints on the GUARD cluster, current
+  build): full OH storm reached (107 init forks, media_service +
+  appspawn churn, wakewatch heartbeats healthy). Boot died at ~35 min
+  from the KNOWN kernel-heap exhaustion family (ALLOCTHROW 256 KiB with
+  248 KiB free of the 128 MiB kernel heap, appspawn context — separate
+  line, not a wild write). Watchpoints: ZERO hits, zero heals. Bonus
+  observation for the heap-forensics line: the USER-half
+  Permission-denied family was ACTIVE in the same boot — 5 victims
+  (pids 387/500/605/612/652/705 family) all at rip=0x3fbf08ad30
+  (ld-musl, the memcpy/validation site from the corruption timeline),
+  minutes before the heap exhaustion. The kernel-static engine did not
+  fire in any of this session's four storm windows (r1, r4, plus the
+  b150-b155 history) — its rate under this driver is below 1 per
+  boot-hour.
+
+## Where this leaves the hunt (handoff)
+
+The attribution machinery now exists and is proven end-to-end; the
+remaining variable is the engine's firing rate under the reachable load
+profiles. Next captures should:
+
+1. Ride ww-hunt.py boots (Mode B) on long soaks — e.g. overnight chains
+   of 45-min OH boots; any WW-HIT line in the gdb log is the capture
+   (rip + regs + stack in the same log, symbolize with addr2line).
+   Consider also chaining via fire6.py-style load (sdc cycles were the
+   b77-era trigger context).
+2. Extend the watch set to OTHER quiet statics if hits stay at zero —
+   the same GUARD-cluster trick (page-exclusive region + watchpoints)
+   applies to any never-written-after-init globals; PER_CPU slots stay
+   unwatchable (legit writer every schedule) — for those, complement
+   shadow + heal-report correlation remains the only signal.
+3. F1b is the highest-value lead surfaced: supervisor uaccess writes
+   bypassing COW/share protection (needs WP=1 to even observe). Whoever
+   takes the user-half corruption line should own it.
+4. b77/wt1's raw captures deserve re-reading against F2 before more
+    effort goes into the "hpet BASE smash" framing.
