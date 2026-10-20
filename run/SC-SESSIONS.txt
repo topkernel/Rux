@@ -244,3 +244,16 @@ Session A update (11:5x, sc40 — T+4h snapshot):
   BEGETCTL_BOOT flag set').
 - test/bindmkdir.c = fast minimal-rootfs repro for the whole sandbox
   mount idiom (<2min per cycle; passes on current HEAD).
+
+Session A addendum (12:0x, sc41):
+- childexit ring dumps captured: the launcher/systemui children's last
+  syscalls before exit_group(0) are SysV-IPC-ish retry loops (semctl/
+  setreuid-shaped pairs alternating -1/success), NO failing execve, no
+  open of the ability runtime .so chain. The exit-0 decision is made
+  in OH userspace at appspawn_server.c:49 right after hook stage 34
+  prio 5000 (the begetctl hook prints 'Enter begetctl boot without
+  BEGETCTL_BOOT flag set'). Next session should chase the OH side:
+  what makes the child take the terminal path instead of running the
+  preloaded ACE runtime (result code 0xd000008 remains suspicious).
+- sc40 ohgpu: bootanimation ANIMATING fullscreen (8-color gradient,
+  100% non-black, per-frame variation) - graphics path healthy.
