@@ -3694,6 +3694,66 @@ pub fn scheduler_tick() {
                                 putchar(b'\n');
                             }
                         }
+                        // PREEMPT-HEAL (round 3c): a TASK-context base
+                        // count held for 10 s continuously is a phantom
+                        // — every real guard section is microseconds, and
+                        // the only 10 s holds in task context are the
+                        // unsleepable-monopoly wedges themselves. Zero it
+                        // (this runs in the tick IRQ on the task's own
+                        // CPU, so the task cannot be concurrently inside
+                        // a count mutation; other CPUs only ever add via
+                        // current()). The leaked task immediately becomes
+                        // sleepable/preemptible again. A legit 10 s-held
+                        // section (if one ever exists) is already a
+                        // wedge; its later unpairing sub will underflow,
+                        // clamp and REPORT rather than poison. This is
+                        // the safety net that lets IRQ-exit kernel
+                        // preemption stay enabled while the leak's
+                        // producer is still being hunted.
+                        let base = pc & !crate::interrupt::preempt::HARDIRQ_MASK;
+                        if base != 0 && now.wrapping_sub(t0) >= 1000 {
+                            unsafe {
+                                (*cur).ti_preempt_count_zero();
+                            }
+                            // Re-arm: next nonzero observation starts a
+                            // fresh window instead of re-healing each
+                            // tick.
+                            slot.store(0, core::sync::atomic::Ordering::Relaxed);
+                            since.store(0, core::sync::atomic::Ordering::Relaxed);
+                            use crate::console::putchar_no_lock as putchar;
+                            fn ph(v: u64) {
+                                use crate::console::putchar_no_lock as putchar;
+                                for sh in (0..16).rev() {
+                                    let n = ((v >> (sh * 4)) & 0xF) as u8;
+                                    putchar(if n < 10 {
+                                        b'0' + n
+                                    } else {
+                                        b'a' + n - 10
+                                    });
+                                }
+                            }
+                            const M: &[u8] = b"\nPREEMPT-HEAL cpu=";
+                            for &b in M {
+                                putchar(b);
+                            }
+                            ph(cpu_id as u64);
+                            const M2: &[u8] = b" pid=";
+                            for &b in M2 {
+                                putchar(b);
+                            }
+                            ph(unsafe { (*cur).pid() } as u64);
+                            const M3: &[u8] = b" was=";
+                            for &b in M3 {
+                                putchar(b);
+                            }
+                            ph(pc as u32 as u64);
+                            const M4: &[u8] = b" held_jiffies=";
+                            for &b in M4 {
+                                putchar(b);
+                            }
+                            ph(now.wrapping_sub(t0));
+                            putchar(b'\n');
+                        }
                     } else {
                         slot.store(
                             cur as usize as u64,
