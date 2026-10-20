@@ -59,6 +59,26 @@ impl WaitQueueEntry {
         self.woken.store(true, Ordering::Release);
     }
 
+    /// Clear the woken flag (lost-wake retry window).
+    ///
+    /// W1 (sticky-skip lost wake): `wake_up` marks the entry woken BEFORE
+    /// calling `wake_up_process`, and refuses later wakes for an entry that
+    /// is already flagged. When the underlying `wake_up_process` REFUSES the
+    /// transition (target between its prepare_to_wait and its own
+    /// `__schedule` link-drop — the R42 window — or a guard divergence),
+    /// the waker's one-shot token is consumed while the task may still end
+    /// up asleep: its `__schedule` reads the still-sleeping state, dequeues
+    /// it, and no future wake retries this entry. Clearing the flag on a
+    /// refused wake keeps the entry eligible so the NEXT event re-attempts
+    /// the wake (idempotent: a genuinely running task is refused again
+    /// harmlessly). The sc74 launcher IPC wedge — binder server threads
+    /// parked >240 s owing replies with empty todos — has exactly this
+    /// signature shape, so this closes the retry path; the stall-scan
+    /// census in ipc/binder.rs still names any residual live occurrence.
+    pub fn clear_woken(&self) {
+        self.woken.store(false, Ordering::Release);
+    }
+
     /// Get associated task
     pub fn task(&self) -> *mut Task {
         self.task
@@ -171,7 +191,17 @@ impl WaitQueueHead {
 
                 let task = entry.task();
                 if !task.is_null() {
-                    crate::sched::wake_up_process(task);
+                    // W1: a refused wake must not consume the entry's
+                    // one-shot token — clear the flag so a later wake can
+                    // retry (the task may still be heading into
+                    // __schedule with a sleeping state).
+                    if !crate::sched::wake_up_process(task) {
+                        entry.clear_woken();
+                        // Do not count a refused wake as awakened: no task
+                        // transition happened. Continue scanning so other
+                        // entries on this queue still get their chance.
+                        continue;
+                    }
                 }
 
                 awakened += 1;
