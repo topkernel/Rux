@@ -1492,6 +1492,26 @@ fn user_segv_forensics(regs: &PtRegs, fault_addr: u64) {
                 None => crate::pr_err!("USEGV-FOR: vma({:#x}) = NONE", probe),
             }
         }
+        // File path + module-relative fault offset for the rip VMA, so a
+        // crash inside a mapped .so names the library and gives the
+        // addr2line offset directly (sc49: appspawn children die inside a
+        // FileBacked VMA and fd/offset alone leaves the crash site
+        // anonymous).
+        if let Some(v) = vmas.find(crate::mm::page::VirtAddr::new(regs.rip as usize)) {
+            let fd = v.file_fd();
+            if fd >= 0 {
+                // SAFETY: current task's fd table is alive for the
+                // duration of the fault report.
+                let path = unsafe { crate::fs::file::get_file_fd(fd as usize) }
+                    .map(|f| f.path())
+                    .unwrap_or_else(|| alloc::string::String::from("?"));
+                crate::pr_err!(
+                    "USEGV-FOR: ripfile {} voff {:#x}",
+                    path,
+                    v.offset() + (regs.rip as usize - v.start().as_usize())
+                );
+            }
+        }
     }
 
     // Stack words (return-address chain): read through the page-table
