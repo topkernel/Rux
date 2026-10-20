@@ -153,6 +153,39 @@ pub fn check_picked(task: *mut crate::process::Task, cpu: usize) {
         ww_u64(ms);
         ww_msg(b"ms policy=");
         ww_u64(unsafe { (*task).policy() as u64 });
+        // Monster-strand forensics (launcher perf gate round 3): name
+        // each CPU's incumbent and its CURRENT-activation run length so
+        // the report answers "what was the CPU doing instead" directly —
+        // a kernel-loop hog shows a huge activation length; a healthy
+        // rotation shows small ones.
+        for c in 0..crate::config::MAX_CPUS {
+            let cur = crate::sched::sched::cpu_state(c).current;
+            ww_msg(b" h");
+            ww_u64(c as u64);
+            ww_msg(b"=(");
+            if cur.is_null() {
+                ww_msg(b"nil)");
+                continue;
+            }
+            // SAFETY: init-time valid slot pointer; scalar field reads
+            // tolerate a concurrent switch (diagnostic only).
+            unsafe {
+                ww_u64((*cur).pid() as u64);
+                ww_msg(b"/p");
+                ww_u64((*cur).policy() as u64);
+                let se = (*cur).sched_entity();
+                let act_ns = se
+                    .sum_exec_runtime
+                    .load(core::sync::atomic::Ordering::Relaxed)
+                    .saturating_sub(
+                        se.prev_sum_exec_runtime
+                            .load(core::sync::atomic::Ordering::Relaxed),
+                    );
+                ww_msg(b"/");
+                ww_u64(act_ns / 1_000_000);
+                ww_msg(b"ms)");
+            }
+        }
         ww_msg(b"\n");
     }
 }
