@@ -724,3 +724,34 @@ pending on its data: phantom readers = dead threads (→ chase the killer,
 likely overlaps wildwrite/OOM lines) vs unschedulable readers (→ sched
 pick-side, WAKE-STRANDED family). Either way the launcher milestone
 needs samgr unfrozen; the heals keep client chains breathing meanwhile.
+
+Session J update 2 (07:1x, sc77/sc78 — WAKE-RUN-LEAK family quantified,
+impossible-shape ring evidence, known-crash filter):
+
+- sc77 wedge: 'foundation' (pid 815, 30 threads) — 8 futex waiters on
+  PER-THREAD-STACK addresses (page offset 0x7d4 pattern: per-call
+  condvar waits in SA handlers) + OS_IPC workers + one 'powermgr' thread
+  parked in binder reads. SERVER-OWING impossible shape (scan-gated)
+  hit tid 817/1049: parked in read owing replies, world-search says NO
+  outstanding nested txn ("nested call vanished or never sent").
+- tid 815 ring (sc77, splice-limited): PARK(1,0)@11011 ->
+  REPLY_PUSHED(19627,815)@11012 -> [splice] — the reply landed right
+  after the park; whether the wake returned is the spliced bytes. sc79
+  carries atomic single-printk rings to close this hole.
+- sc78: 230 WAKE-RUN-LEAK probe hits, ALL {sleeping, cfs_linked=0,
+  on_cpu=false, pick_state=1}. pick_state=PICK_LIVE turned out to be a
+  red herring (it persists on every sleeper after its last run — not
+  cleared on normal sleep). Most hits are healthy idle workers that
+  wake+repark (the probe cannot distinguish without the ring); the REAL
+  leak signature is PARK -> REPLY_PUSHED -> no WAKE_RET with todo>0.
+- sc77's 5 THREAD-DIED-SERVICING hits = the KNOWN
+  libusb_pnp_manager.z.so+0x15bac NULL list-walk crash-loop (verified
+  by byte-match on the debugfs-extracted vendor lib: 0x15bac =
+  "48 8b 03" mov rax,[rbx] with rbx=0 in the walk loop). devhost_usb
+  processes, unrelated to the IPC wedge; do not chase.
+- sc79 (booting): W2 reporters at both wake-refusal points
+  (Task::wake_up sleeping branch + wake_up_enqueue tail, rate-limit 16)
+  — the refusing guard will name itself. Also atomic hist records.
+- Offline symbolization kit ready: /tmp/oh-libs/{syslib64(1073),
+  vendorlib64(228)} extracted from the images; method verified against
+  the known crash site. PARK-STACK frames print fd+fileoff+bytes.
