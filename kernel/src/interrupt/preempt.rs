@@ -122,6 +122,19 @@ pub fn preempt_count_sub_at(
     }
 }
 
+/// As `preempt_count_sub_at`, plus the guard's lock instance address for
+/// the underflow report (leak-hunt round 3e: name WHICH lock).
+#[inline]
+pub fn preempt_count_sub2_at(
+    val: i32,
+    loc: &'static core::panic::Location<'static>,
+    site: usize,
+) {
+    if let Some(task) = crate::sched::current() {
+        task.sub_preempt_count2_at(val, loc, site);
+    }
+}
+
 /// R74: reset a corrupted (negative) preempt_count to zero. A negative
 /// count is never legal — it is the fingerprint of an unpaired decrement
 /// (double-executed guard drop during a double-run). Called only from

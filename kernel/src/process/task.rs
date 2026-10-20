@@ -3132,6 +3132,7 @@ fn preempt_underflow_report(
     prev: i32,
     sub: i32,
     loc: &'static core::panic::Location<'static>,
+    site: usize,
 ) {
     static LAST: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
     let now = crate::drivers::timer::get_jiffies();
@@ -3181,6 +3182,16 @@ fn preempt_underflow_report(
         putchar(b);
     }
     ph(loc.line());
+    if site != 0 {
+        const M5: &[u8] = b" lock=0x";
+        for &b in M5 {
+            putchar(b);
+        }
+        // 16-hex lock instance address (ph is 8-hex only; print two
+        // halves).
+        ph((site >> 32) as u32);
+        ph(site as u32);
+    }
     putchar(b'\n');
 }
 
@@ -3318,7 +3329,24 @@ impl Task {
         let after = prev.wrapping_sub(val);
         if after < 0 {
             self.ti_preempt_count.store(0, core::sync::atomic::Ordering::Release);
-            preempt_underflow_report(self.pid(), prev, val, loc);
+            preempt_underflow_report(self.pid(), prev, val, loc, 0);
+        }
+    }
+
+    /// As `sub_preempt_count_at` with the guard's lock instance for the
+    /// underflow report (0 = caller had no lock to name).
+    #[inline]
+    pub fn sub_preempt_count2_at(
+        &self,
+        val: i32,
+        loc: &'static core::panic::Location<'static>,
+        site: usize,
+    ) {
+        let prev = self.ti_preempt_count.fetch_sub(val, core::sync::atomic::Ordering::Release);
+        let after = prev.wrapping_sub(val);
+        if after < 0 {
+            self.ti_preempt_count.store(0, core::sync::atomic::Ordering::Release);
+            preempt_underflow_report(self.pid(), prev, val, loc, site);
         }
     }
 

@@ -450,7 +450,18 @@ impl<T: ?Sized> Drop for SpinlockGuard<'_, T> {
     #[inline]
     fn drop(&mut self) {
         self.lock.raw.unlock();
-        preempt_enable();
+        // Leak-hunt: pass the lock instance so the underflow report can
+        // name WHICH Spinlock double-dropped (static locks symbolize
+        // against the ELF; heap locks identify the owning object).
+            crate::interrupt::preempt::preempt_count_sub2_at(
+                crate::interrupt::preempt::PREEMPT_OFFSET,
+                core::panic::Location::caller(),
+                // RawSpinlock is Spinlock's first field, so its address
+                // IS the Spinlock instance's address (T may be ?Sized,
+                // making &Spinlock<T> a fat reference — go through the
+                // thin raw field pointer).
+                &self.lock.raw as *const RawSpinlock as usize,
+            );
     }
 }
 
