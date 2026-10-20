@@ -690,6 +690,7 @@ pub const EV_BWR: u8 = 14;
 pub const EV_REAP: u8 = 15;
 pub const EV_DEAD_REPLY: u8 = 16;
 pub const EV_REKICK: u8 = 17;
+pub const EV_TXN_RECV_END: u8 = 18;
 
 pub fn ev_name(ev: u8) -> &'static str {
     match ev {
@@ -710,6 +711,7 @@ pub fn ev_name(ev: u8) -> &'static str {
         EV_REAP => "REAP",
         EV_DEAD_REPLY => "DEAD_REPLY",
         EV_REKICK => "REKICK",
+        EV_TXN_RECV_END => "TXN_RECV_END",
         _ => "?",
     }
 }
@@ -4795,7 +4797,31 @@ fn binder_thread_read(
                             if !is_reply && t.flags & TF_ONE_WAY == 0 {
                                 // The receiver stacks it for its BC_REPLY.
                                 t.set_to_tid(thread.tid);
+                                let recv_id = t.id as u32;
                                 thread.st().txn_stack.push(t);
+                                // sc79 ROOT CAUSE (the impossible shape):
+                                // END the read after delivering ONE sync
+                                // transaction. OH libipc consumes ONE
+                                // command per TransactWithDriver loop
+                                // iteration; if a second BR_TRANSACTION
+                                // (typically a from-walk redirect already
+                                // sitting on this thread's todo) is staged
+                                // in the SAME read, the kernel stacks both
+                                // while userspace has dispatched only the
+                                // first — the first handler's nested calls
+                                // then make its BC_REPLY pop the WRONG
+                                // stack top (the undelivered-to-userspace
+                                // txn): replies cross, counters desync,
+                                // and the thread strands in a read owing a
+                                // reply with no outstanding nested txn
+                                // (sc79 ring: TXN_RECV(12919)@11372
+                                // TXN_RECV(12932)@11372 same jiffy, then
+                                // the SERVER-OWING park; sc74/77/78/79
+                                // binder-stall wedge family). Linux
+                                // binder_thread_read returns after one
+                                // transaction delivery — mirror it.
+                                thread.hist(EV_TXN_RECV_END, recv_id, 1);
+                                break;
                             }
                         }
                     }
