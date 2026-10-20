@@ -260,9 +260,23 @@ fn generate_config_code(config: &toml::Value) {
         .and_then(|g| g["version"].as_str())
         .unwrap_or("0.1.0");
 
-    let target_platform = config.get("platform")
+    // Feature-aware platform (same precedence as main() at line ~175): the
+    // active cargo feature wins over Kernel.toml's default_platform.
+    // Without this, an x86_64 feature build inherits the config-file
+    // platform (riscv64) and the riscv64-only 128 MiB heap clamp silently
+    // bakes into the x86 kernel - sc46 died with init "failed to fork"
+    // because of exactly that (config.rs TARGET_PLATFORM=riscv64,
+    // KERNEL_HEAP_SIZE=128MiB, booted on q35).
+    let config_platform = config.get("platform")
         .and_then(|p| p["target"].as_str().or_else(|| p["default_platform"].as_str()))
         .unwrap_or("riscv64");
+    let target_platform = if env::var_os("CARGO_FEATURE_X86_64").is_some() {
+        "x86_64"
+    } else if env::var_os("CARGO_FEATURE_RISCV64").is_some() && config_platform != "x86_64" {
+        "riscv64"
+    } else {
+        config_platform
+    };
 
     // Helper functions to get config values with defaults
     let get_usize = |section: &str, key: &str, default: i64| -> usize {

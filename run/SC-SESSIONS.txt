@@ -257,3 +257,182 @@ Session A addendum (12:0x, sc41):
   preloaded ACE runtime (result code 0xd000008 remains suspicious).
 - sc40 ohgpu: bootanimation ANIMATING fullscreen (8-color gradient,
   100% non-black, per-frame variation) - graphics path healthy.
+
+Session D update (12:3x, sc42 launched — new window, launcher endgame):
+- 0xd000008 DECODED: appspawn_utils.h enum — 0xD000008 = APPSPAWN_SANDBOX_MOUNT_FAIL.
+  The sc41 chain: sandbox_common bind /data/app/el1/100/database/com.ohos.launcher
+  ENOENT (fatal: check-action-status true in appdata-sandbox.json) -> hook stage 31
+  (prio 3000) fails -> NotifyResToParent(0xd000008) -> AppSpawnEnvClear (begetctl
+  hook prints) -> ProcessExit(0) = appspawn_server.c:49 'ExitCode:0' + quick_exit.
+  NOT a wrong terminal branch: OH userspace behaves correctly given missing dirs.
+- REFERENCE GROUND TRUTH (refw1 boot: oh-robot Linux bzImage + WRITABLE blank
+  userdata copy, launcher.ready at 16s): after boot /data/app/el1/100/database
+  contains per-bundle leaves (com.ohos.launcher uid 20010011 etc.). Linux creates
+  them; Rux does not. Artifacts: run/oh-img/userdata-refw.img (fsck'd), log
+  oh-refw1-serial.log.
+- IMAGE FORENSICS: userdata-lr.img (used by sc40/sc41; bindwalk ino 46 = baked
+  el1/100/database) carries a BAKED BMS DB (/service/el1/public/bms uid 3060)
+  claiming bundles installed, but ZERO per-bundle leaves under el1/100|el2/100.
+  Result: BMS restores 'installed' state, never reinstalls, spawn fails forever.
+  userdata-tok.img: only /service/el0 (access tokens), no /app, no BMS DB.
+- dt01 (datatap) reading: storage_daemon PrepareUserDirs(100) created
+  el1/100/{base,aot_compiler/*,shader_cache} but el1/100/database mkdir never
+  issued; uid-0 system bundles DID get bundle/public + el1/0/base leaves; NO
+  user-100 per-bundle leaves ever. Early init getxattr taps show -61 (ENODATA)
+  for /data/app/el1/100/database/com.ohos.launcher BEFORE any mkdirs — either
+  image-bake artifacts (dt01's userdata unverified) or phantom resolves.
+- sc42 BOOTING NOW: oh-boot-persist.sh, FRESH blank userdata copy
+  (userdata-blank-sc.img), dfx=datatap, 25min. Decides: (a) storage_daemon
+  creates el1/100/database on a truly blank image? (b) user-100 install pass
+  creates leaves? (c) spawn result flips to 0? shotmon watching for launcher UI.
+
+Session D update (13:0x, sc43/sc44 running):
+- sc43 (tok + datatap) CLEAN FIRST-BOOT story: /data mounts, storage_daemon
+  PrepareUserDirs(100, flags 31) creates the FULL skeleton incl el1/100/database
+  (so no phantom-lookup bug — earlier 'skips' were baked-image artifacts: dt01
+  ran the SEEDED image, sc41 the lr image).
+- Launcher INSTALL RUNS AND 'bundle added' fires (uid 20010009): installd-in-BMS
+  (sa_main pid 1066 + tid 1067, libbms.z.so carries InstalldHostImpl in-process)
+  creates {el1/bundle/public/<b>, el1/100/base/<b> (chown app-uid), shader_cache,
+  system_optimize, ark_profile, local shader_cache} — but NEVER el1/100/database/<b>
+  nor any el2/100/<sub>/<b> leaves. Same on every bundle (uid-0 too: el1/0 leaves
+  yes, el1/0/database/<b> never). Reference Linux creates them all (refw1 image
+  proof). ActiveUserKey/unlock flow matches the reference line-for-line; neither
+  side logs CreateElxBundleDataDir. => the database/el2 leaf creation is a SECOND
+  vector (libbms: CreateBundleDataDirWithVector/WithEl, GetCreateDirParamByBundleOption)
+  whose trigger never fires on Rux.
+- sc44 BOOTING (writable tok copy + datatap): plan = let BMS save its DB, kill,
+  offline-inject el1/100/database/<bundle> for every bundle under el1/100/base/,
+  boot sc45 on it and watch the spawn chain + shotmon for launcher UI.
+- hdc tconn fails both sides (auth); port 10178 is open but not a usable hdcd.
+- sc42 lesson: userdata-blank (mkfs defaults: journal+metadata_csum+csum_seed+
+  orphan_file) is REFUSED by our ext4 (correct per feature gate) -> /data never
+  mounted; use tok-family images (no-journal/no-csum) for experiments.
+
+Session E update (14:2x, sc46/sc47 — successor window):
+- sc45 forensics finished: first failing spawn is systemui at userId 0 —
+  its FATAL bind is /data/app/el1/0/database/<b>, which v1 injection never
+  covered (uid-100 family only). Fatal list from appdata-sandbox.json:
+  el1/bundle/public, el1/<uid>/base, el1/<uid>/database (+/storage/cloud,
+  /mnt/data). el2 binds are NOT fatal, and the el2 wipe (DestroyUserDirs
+  flags 31) runs on the LINUX REFERENCE TOO (refw1 11.699s) — not a Rux
+  divergence. On the reference CreateElxBundleDataDir never runs (crypto
+  disabled path) — ALL leaves come from the INSTALL path
+  (CreateBundleDataDir loop over el1+el2).
+- BUILD TRAP fixed (1326066f): generate_config_code resolved the platform
+  from Kernel.toml default_platform (riscv64), so after clamp 232ad684
+  every x86_64 build silently got TARGET_PLATFORM=riscv64 + 128MiB heap.
+  sc46 booted that kernel and died on init "failed to fork" x39. Fix:
+  feature-aware platform in build.rs; sc47 boots 1024MiB heap OK.
+  NOTE: cargo does not rerun build.rs on Kernel.toml mtime alone here —
+  touch kernel/build.rs when config must regenerate.
+- New ilog cohort (BMSInstalld tag, cd348369) — first capture ever:
+  "Load system ability 511 failed" x10 (standalone installd SA load
+  fails; in-process InstalldHostImpl in sa_main is what actually works).
+- sc47 (fixed kernel + tok copy + injection v2 + datatap): USER_UNLOCKED
+  PUBLISHED AND DELIVERED (Ces publish -> AVSession/RSS/DEVAUTH/BMS all
+  OnReceiveEvent) — the predecessor's "event never fires" was wrong (or
+  an artifact of the 128MiB-heap builds after 13:12). BMS
+  user_unlocked_event_subscriber runs, UpdateAppDataDirSelinuxLabel
+  userId:100 start -> "GetAllBundleInfos failed" (DB empty — installs
+  have not run yet; foundation SA init at 103s and still going, slow
+  boot). GetBundleInfo settingsdata -> "failed" pending scan. Bootanimation
+  static at OH logo waiting for launcher. Watching.
+
+Session F update (2026-10-20 22:5x, sc49/sc50 — 0xd000008 ROOT-CAUSED AND FIXED):
+- sc46-48 forensics verdict: the v2 injection was never tested — sc47/48
+  stalled BEFORE any spawn because BMS never initialized (0 apptap bms/
+  mkdirs; the "installs" service never started: samgr's ohos.ctl.start
+  for it never reached init — that stall correlates with sc44-lineage
+  images, NOT with the injection; fresh-image boots sc43/45/49 all start
+  installs fine, SA:511 in 321ms on sc49). sc48 also wiped the injected
+  el1/100/database leaves via DestroyUserDirs(100, flags 31) at the
+  PrepareAddUser step (sc45's kernel/build did not enumerate them — do
+  not inject el1 leaves offline, the add-user wipe can remove them).
+- ROOT CAUSE of the missing database leaves (the second vector):
+  InstalldHostImpl::CreateBundleDataDir (bf-src installd_host_impl.cpp)
+  creates base/<b>, then calls SetDirApl -> HapContext::HapFileRestorecon
+  (libhap_restorecon.z.so), and ONLY THEN mkdirs database/<b> (and the
+  el2 leaves). HapFileRestorecon's GetSecontext starts with
+  lgetfilecon(path) = lgetxattr(security.selinux); libselinux maps
+  ENODATA to -1 (getfilecon.c), so on Rux — where freshly mkdir'ed dirs
+  carry no label — the whole call aborts with zero xattr syscalls issued
+  (sc43 proof: mkdir+chown of el1/100/base/com.ohos.launcher, then
+  nothing; sys_lgetxattr has no datatap hook so the failing read was
+  invisible). On Linux with SELinux enabled the kernel OWNS inode labels
+  and getxattr(security.selinux) never returns ENODATA.
+- FIX (95dbe15c, this branch): xattr::get reports
+  "u:object_r:unlabeled:s0" for security.selinux when no label is
+  stored. installd holds CAP_SYS_ADMIN (installs.cfg caps), so its
+  lsetfilecon passes the security.* write gate.
+- sc49 VERIFIED: installd now creates el1/<uid>/database/<b> (12 for
+  uid-100 + the uid-0 family) AND 170 el2 leaves; 24 "bundle added";
+  spawn responses 0xd000008 -> GONE (0 occurrences). Spawn children EXEC
+  inside the sandbox (childexit root=/mnt/sandbox/.../com.ohos.systemui),
+  LAUNCHER PROCESSES RUN for the first time ("m.ohos.launcher" SIGDEATH
+  x8). NEW GATE: the app runtime dies with SIGSEGV (systemui x10,
+  launcher/settingsdata follow; two hot rips, e.g. +0x14e1c and +0x10bac
+  into the same FileBacked .so; rbp=-6, rsi=-4 hint at errno values used
+  as pointers). sc50 BOOTING with f72a8705 (ripfile+voff in the segv
+  report) to symbolize.
+- Screen still the static OH logo (4281 colors) — bootanimation waiting
+  for a real launcher surface.
+
+Session F FINAL (2026-10-21 00:0x — two kernel fixes landed, launcher reaches runtime):
+
+FIX 1 (95dbe15c) — the 0xd000008 root cause, CLOSED:
+  xattr::get(security.selinux) on an unstored label now returns
+  "u:object_r:unlabeled:s0" (SELinux-enabled Linux ABI: the kernel owns
+  inode labels, ENODATA is impossible). Chain was: lgetfilecon -1 ->
+  libhap_restorecon GetSecontext abort -> installd CreateBundleDataDir
+  returns after base/<b> but before database/<b> + el2 leaves ->
+  sandbox bind fatal -> APPSPAWN_SANDBOX_MOUNT_FAIL. sc49 VERIFIED:
+  database leaves + 170 el2 leaves created by real installd, 24
+  bundles installed, 0xd000008 count ZERO, launcher processes ran.
+
+FIX 2 (cba465d1) — appspawn-child SIGSEGV, CLOSED:
+  /proc/self/attr/current never reads empty (default "u:r:unlabeled:s0").
+  libselinux getprocattrcon_raw maps an empty read to *context=NULL
+  with SUCCESS return; HapDomainSetcontext feeds that NULL to
+  context_new() -> every appspawn child died right after the
+  "SetSelinuxCon IsDeveloperModeOn" log. sc56 VERIFIED: "SetSelinuxCon
+  success for com.ohos.launcher", full hook chain 31/33/34 completes,
+  spawn responses "result: 0x0 pid: 1435..." — first ever COMPLETE
+  spawns; launcher MainAbility loads (LIFECYCLE_HALF_TIMEOUT fires
+  mid-lifecycle, i.e. the ability is created).
+
+FORENSICS added (f72a8705 + in 2d01a669): USEGV-FOR ripfile/voff +
+ripbytes (instruction bytes at rip) — symbolized crashes offline by
+byte-matching .so files extracted from the images (script-free method:
+extract /system/lib64/**.so + /vendor/lib64/*.so via debugfs, search
+the ripbytes at the reported voff). Known crash sites:
+  - libusb_pnp_manager.z.so+0x15bac list walk NULL node (hdf usb_host
+    crash-loop, pre-existing, launcher-unrelated)
+  - chipset-sdk-sp/libselinux.z.so context_new+0x5c (fixed by FIX 2)
+NOTE: grep -c on the bzImage gives false negatives for strings — use
+`strings -a bzImage | grep` to verify build content; and `git stash`
+ate an uncommitted trap.rs edit once (always commit before building).
+
+NEW GATE (the next session's target): SYSTEM PERF. App lifecycles time
+out because IPC SendRequest costs grow from ~1s (early) to 102s (late)
+— with a QUIET kernel (loglevel=4, oh-boot-q.sh, no datatap) it is just
+as bad, so it is NOT logging load. The dfx watchdog prints (when on)
+show the smoking gun: hrtimers firing seconds late (late_max 4387ms)
+and WAKE-STRANDED runnable threads stranded up to 16s on a CPU. Looks
+like an SMP wakeup/idle-balance bug (sched/timer lane). Spawn+mounts
+all work; the boot just crawls. A perf fix here plausibly drops the
+whole desktop chain (OnForeground -> ArkUI -> ohgpu launcher UI) in one
+go — sc56/sc58 boots got 45+ successful spawns each.
+
+BOOT-VARIANTS kit (all on run/):
+  - oh-boot-q.sh       = oh-boot-w.sh with loglevel=4 (quiet milestones)
+  - userdata-sc49.img  = GOLD: full install state (bmsdb + database
+    leaves on disk). Boot a COPY of it to skip installs entirely (BMS
+    DB-restore path, no installd needed) — sc55/56/58 all used it and
+    none hit the installs-start stall.
+  - The installs-start stall (sc47/48/50-52/54: samgr dynamic-proc
+    ctl.start never reaches init, SA:511 15s timeouts, account-kv
+    InnerInit fails, 22x IPC EPIPEs) reproduces ~4-in-5 on FRESH
+    images but 0-in-3 on sc49-image boots; EPIPE signature =
+    "IPCObjectProxy PrintErrorDetailedInfo error:32" burst during the
+    os-account subscribe storm. IPC-lane bug, separate from perf.

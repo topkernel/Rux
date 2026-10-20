@@ -1008,6 +1008,22 @@ fn trim_label(buf: &[u8]) -> alloc::vec::Vec<u8> {
 /// still fail closed (the SAMGR side cannot recover a SID it never
 /// sees). Explicit writes to current (Some(empty) after a clear) win
 /// over the fallback — only the unset slot triggers it.
+/// The label reported for a task that never stored one. An
+/// SELinux-enabled Linux owns every task's label — reading
+/// /proc/self/attr/current NEVER returns empty there. libselinux's
+/// getprocattrcon_raw maps an empty read to `*context = NULL` while
+/// still returning SUCCESS (procattr.c: `if (ret == 0) { *context =
+/// NULL; goto out2; }`), and OH's HapDomainSetcontext (appspawn's
+/// pre-exec SetSelinuxCon) passes that NULL straight into
+/// context_new(), which segfaults — this took down every appspawn
+/// child (systemui/launcher/settingsdata) right after the
+/// "SetSelinuxCon IsDeveloperModeOn" log in sc49/sc55. appspawn's
+/// forked children inherit no slot (their ATTR_EXEC fallback is unset
+/// too), so they hit exactly this path. A well-formed unlabeled
+/// context keeps the parser alive; HapDomainSetcontext then rewrites
+/// the type from sehap_contexts and setcon()s it.
+const DEFAULT_CURRENT_LABEL: &[u8] = b"u:r:unlabeled:s0";
+
 pub fn attr_get(pid: u64, kind: usize) -> Vec<u8> {
     if kind == ATTR_PREV {
         return Vec::new();
@@ -1015,13 +1031,29 @@ pub fn attr_get(pid: u64, kind: usize) -> Vec<u8> {
     let map = ATTR_LABELS.lock_irqsave();
     let slots = match map.get(&(pid as u32)) {
         Some(s) => s,
-        None => return Vec::new(),
+        None => {
+            // Only `current` must never read empty; the other slots keep
+            // the unset->empty semantics libselinux probes rely on
+            // (getexeccon/getsockcreatecon treat an empty slot as "no
+            // label set", a valid state).
+            if kind == ATTR_CURRENT {
+                return DEFAULT_CURRENT_LABEL.to_vec();
+            }
+            return Vec::new();
+        }
     };
     let primary = slots.get(kind).cloned().flatten();
     if kind == ATTR_CURRENT {
         match primary {
             Some(v) => v, // explicit current write (incl. empty) wins
-            None => slots.get(ATTR_EXEC).cloned().flatten().unwrap_or_default(),
+            None => {
+                let exec = slots.get(ATTR_EXEC).cloned().flatten().unwrap_or_default();
+                if exec.is_empty() {
+                    DEFAULT_CURRENT_LABEL.to_vec()
+                } else {
+                    exec
+                }
+            }
         }
     } else {
         primary.unwrap_or_default()
