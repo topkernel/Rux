@@ -2208,7 +2208,7 @@ unsafe fn user_park_stack_dump(t: &Arc<BinderThread>) {
         let pa = (ppn as usize) << 12;
         let kv = crate::arch::mm::phys_to_virt(crate::arch::mm::PhysAddr::new(pa as u64))
             .bits() as usize
-            + (va & 0xfff);
+            + (va & 0xfff) as usize;
         if va & 0xfff > 0xff8 {
             return None; // crosses a page — skip rather than split
         }
