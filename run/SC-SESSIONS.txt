@@ -308,3 +308,33 @@ Session D update (13:0x, sc43/sc44 running):
 - sc42 lesson: userdata-blank (mkfs defaults: journal+metadata_csum+csum_seed+
   orphan_file) is REFUSED by our ext4 (correct per feature gate) -> /data never
   mounted; use tok-family images (no-journal/no-csum) for experiments.
+
+Session E update (14:2x, sc46/sc47 — successor window):
+- sc45 forensics finished: first failing spawn is systemui at userId 0 —
+  its FATAL bind is /data/app/el1/0/database/<b>, which v1 injection never
+  covered (uid-100 family only). Fatal list from appdata-sandbox.json:
+  el1/bundle/public, el1/<uid>/base, el1/<uid>/database (+/storage/cloud,
+  /mnt/data). el2 binds are NOT fatal, and the el2 wipe (DestroyUserDirs
+  flags 31) runs on the LINUX REFERENCE TOO (refw1 11.699s) — not a Rux
+  divergence. On the reference CreateElxBundleDataDir never runs (crypto
+  disabled path) — ALL leaves come from the INSTALL path
+  (CreateBundleDataDir loop over el1+el2).
+- BUILD TRAP fixed (1326066f): generate_config_code resolved the platform
+  from Kernel.toml default_platform (riscv64), so after clamp 232ad684
+  every x86_64 build silently got TARGET_PLATFORM=riscv64 + 128MiB heap.
+  sc46 booted that kernel and died on init "failed to fork" x39. Fix:
+  feature-aware platform in build.rs; sc47 boots 1024MiB heap OK.
+  NOTE: cargo does not rerun build.rs on Kernel.toml mtime alone here —
+  touch kernel/build.rs when config must regenerate.
+- New ilog cohort (BMSInstalld tag, cd348369) — first capture ever:
+  "Load system ability 511 failed" x10 (standalone installd SA load
+  fails; in-process InstalldHostImpl in sa_main is what actually works).
+- sc47 (fixed kernel + tok copy + injection v2 + datatap): USER_UNLOCKED
+  PUBLISHED AND DELIVERED (Ces publish -> AVSession/RSS/DEVAUTH/BMS all
+  OnReceiveEvent) — the predecessor's "event never fires" was wrong (or
+  an artifact of the 128MiB-heap builds after 13:12). BMS
+  user_unlocked_event_subscriber runs, UpdateAppDataDirSelinuxLabel
+  userId:100 start -> "GetAllBundleInfos failed" (DB empty — installs
+  have not run yet; foundation SA init at 103s and still going, slow
+  boot). GetBundleInfo settingsdata -> "failed" pending scan. Bootanimation
+  static at OH logo waiting for launcher. Watching.
