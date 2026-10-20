@@ -230,6 +230,24 @@ Consequences for the hunt:
   binder/mmap storm) hitting the same victim neighborhood. The
   GUARD-cluster watch set covers it either way; the chain's Mode B
   boots traverse both phases (45-min budget spans the storm).
+- User-side families in the WP=1 boots: the r4-era "Permission denied
+  at rip=0x3fbf08ad30 (ld-musl)" family is GONE (0 occurrences).
+  main's new USEGV-FOR forensics show a different, non-corruption
+  family: pid-restart loops dying at cr2=0x0 with rax=-16 (EBUSY
+  consumed as a pointer by a strlen-class call) — a service-side
+  errno-as-pointer bug, not heap corruption; noted for the OH
+  bring-up line, not this hunt.
+
+### Session 2 chain (ww-s2): overnight Mode B boots on the F1b-fixed kernel
+
+- ww-s2-r1 (45 min, watchpoints armed): full budget survived, 84752
+  serial lines, full storm, 0 KERNPANIC / 0 ALLOCTHROW / 0 kernel faults
+  (r4 died at ~35 min from the 128 MiB heap artifact; with 1 GiB the
+  boot-hour is clean), 0 WW-HIT, 0 heals. Chain continues (run/ww-chain.sh
+  ww-s2, stop with run/ww-s2.stop; any WW-HIT auto-stops the chain and
+  keeps run/ww-s2-rN-gdb.log for addr2line symbolization).
+- WP arming verified live via gdbstub probe (ww-cr0probe): cr0=0x80010013
+  [PG WP ET MP PE] on BOTH the BSP and the AP (was 0x80000013 pre-fix).
 
 ## Where this leaves the hunt (handoff)
 
