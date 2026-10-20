@@ -2168,8 +2168,9 @@ unsafe fn outstanding_from_tid(world: &World, pid: u32, tid: u32) -> alloc::stri
 unsafe fn hist_line(t: &Arc<BinderThread>) {
     let th = t.st();
     use core::fmt::Write;
-    // Newline every 4 entries — console interleaving ate longer runs
-    // (sc77: the decisive ring tail was spliced away at ~8 events).
+    // ONE printk call with embedded newlines every 4 entries — separate
+    // continuation prints were spliced by concurrent console traffic at
+    // exactly the decisive ring tail (sc77: "REPLY_P|binder-stall:").
     let mut s = alloc::string::String::new();
     let mut n = 0;
     for k in 0..BHIST {
