@@ -1512,6 +1512,29 @@ fn user_segv_forensics(regs: &PtRegs, fault_addr: u64) {
                 );
             }
         }
+        // Instruction bytes at rip: the dynamic linker CLOSES the mmap fd
+        // after mapping, so the path is often unrecoverable from the VMA —
+        // the bytes identify the exact function offline (match against the
+        // .so files extracted from the system/vendor images).
+        {
+            let mut bytes = [0u8; 16];
+            let mut ok = true;
+            for (i, b) in bytes.iter_mut().enumerate() {
+                match fore_read_u64(aspace.root_ppn(), regs.rip + i as u64) {
+                    Some(w) => *b = (w & 0xff) as u8,
+                    None => {
+                        ok = false;
+                        break;
+                    }
+                }
+            }
+            if ok {
+                crate::pr_err!(
+                    "USEGV-FOR: ripbytes {:02x?}",
+                    bytes
+                );
+            }
+        }
     }
 
     // Stack words (return-address chain): read through the page-table
