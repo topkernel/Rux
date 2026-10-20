@@ -1026,6 +1026,24 @@ pub fn need_resched() -> bool {
     }
 }
 
+/// Voluntary preemption point (launcher perf gate round 3, 2026-10-20).
+///
+/// With no kernel preemption, a task inside a long kernel-side loop
+/// (task-teardown sweeps, resource drops) monopolizes its CPU until the
+/// loop ends even with need_resched set by every tick — the steady
+/// WAKE-STRANDED family under the OH thread-churn load. Unlike
+/// IRQ-exit preemption (tried in 2cf4bdc9, reverted in 0ced11da: it
+/// poisoned preempt_counts by interrupting code that was never written
+/// to be switched mid-flight), this yields ONLY at points the caller
+/// KNOWS are switch-safe: task context, no locks, no bh, no RCU read
+/// side (all enforced by the preemptible() check), no per-CPU state
+/// straddling the call.
+pub fn cond_resched() {
+    if need_resched() && crate::interrupt::preempt::preemptible() {
+        schedule();
+    }
+}
+
 #[no_mangle]
 pub extern "C" fn asm_need_resched() -> i64 {
     if need_resched() { 1 } else { 0 }
