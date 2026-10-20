@@ -179,7 +179,7 @@ fn try_expand_stack(
     // setup: a concurrent fork's copy_page_table_cow walk landing between
     // the map and the rmap/refcount update takes a reference the rmap
     // never sees (round 6 MED — demand-fault PTE lock).
-    let _pte_guard = crate::arch::mm::mm_ops::PTE_MODIFY_LOCK.lock_irqsave();
+    let _pte_guard = crate::arch::mm::mm_ops::PTE_MODIFY_LOCK.lock();
     // Re-check under the lock. The already_mapped walk at entry was
     // lock-free; two threads sharing this mm (CLONE_VM) can both see "not
     // mapped", both allocate+zero, and the second map_page would orphan
@@ -440,7 +440,7 @@ pub fn handle_mm_fault(
                     flags &= !PageTableEntry::W;
                 }
                 let _pte_guard =
-                    crate::arch::mm::mm_ops::PTE_MODIFY_LOCK.lock_irqsave();
+                    crate::arch::mm::mm_ops::PTE_MODIFY_LOCK.lock();
                 // Re-read under the lock: a racing mprotect / COW fault /
                 // swap-in may have replaced the leaf since the lock-free
                 // read above; only rewrite a still-marker leaf.
@@ -555,7 +555,7 @@ pub fn handle_mm_fault(
                             sp_flags &= !PageTableEntry::NX;
                         }
                         let _sp_guard =
-                            crate::arch::mm::mm_ops::PTE_MODIFY_LOCK.lock_irqsave();
+                            crate::arch::mm::mm_ops::PTE_MODIFY_LOCK.lock();
                         if unsafe {
                             PageTableWalker::walk(root_ppn, fault_addr.bits() as u64)
                         }
@@ -744,7 +744,7 @@ pub fn handle_mm_fault(
     // setup: a concurrent fork's copy_page_table_cow walk landing between
     // the map and the rmap/refcount update takes a reference the rmap
     // never sees (round 6 MED — demand-fault PTE lock).
-    let _pte_guard = crate::arch::mm::mm_ops::PTE_MODIFY_LOCK.lock_irqsave();
+    let _pte_guard = crate::arch::mm::mm_ops::PTE_MODIFY_LOCK.lock();
     // Re-check under the lock (same double-fault race as above; E8-MM
     // device-window-hole rule applies).
     if unsafe { PageTableWalker::walk(root_ppn, fault_addr.bits() as u64) }
@@ -1020,7 +1020,7 @@ fn handle_swap_fault(
     // Map the page
     // Swap-in map under the PTE-modify lock (round 6 MED). The swap read
     // finished above, so no I/O happens inside the irqsave section.
-    let _pte_guard = crate::arch::mm::mm_ops::PTE_MODIFY_LOCK.lock_irqsave();
+    let _pte_guard = crate::arch::mm::mm_ops::PTE_MODIFY_LOCK.lock();
     // Re-check under the lock (same double-fault race as the demand
     // paths). The swap-in page is exclusively owned, so freeing on loss is
     // safe; the swap slot is freed by the winner. E8-MM: device-window-

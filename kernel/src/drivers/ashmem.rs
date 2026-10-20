@@ -724,7 +724,10 @@ pub fn ashmem_mmap(
         // caller's page-table root. Map + per-mapping reference under the
         // PTE lock (shmat discipline).
         unsafe {
-            let _pte_guard = crate::arch::mm::mm_ops::PTE_MODIFY_LOCK.lock_irqsave();
+        #[cfg(feature = "x86_64")]
+        let _pte_guard = crate::arch::mm::mm_ops::PTE_MODIFY_LOCK.lock();
+        #[cfg(not(feature = "x86_64"))]
+        let _pte_guard = crate::arch::mm::mm_ops::PTE_MODIFY_LOCK.lock_irqsave();
             map_user_page(
                 root_ppn,
                 MmVirtAddr::new((placement + i * PAGE_SIZE) as u64),
