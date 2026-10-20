@@ -75,25 +75,55 @@ smashes into pointer-bearing statics.
   arms WP per-CPU when enabled (arm() on the BSP, the verify cadence on
   the others). Candidate mainline follow-up: set WP=1 permanently in
   boot (needs its own soak — any latent legit RO-write would surface).
+- **F1b (handoff, user-half corruption line): with WP=0, supervisor
+  uaccess writes go THROUGH COW/share protections.** A `read(fd, buf)`
+  into a post-fork COW page or a file-backed shared page writes the
+  FORK-SHARED / PAGE-CACHE page directly instead of breaking COW —
+  parent/child divergence and cross-mapper content bleed, with zero
+  kernel-side trace. This is a first-class suspect for the OH
+  heap-corruption timeline's user-victim families ("kernel-side smoking
+  gun", PTE-OVERWRITE-LIVE, foreign-content meta). Suggested probe for
+  that line: boot with WP=1 + `dfx=wildwatch` arming only WP (or a
+  dedicated wp=1 boot flag) and a supervisor-COW tripwire print.
 - **F2: the b77 "smash" value is the CORRECT device-alias VA.**
   `device_alias(0xFED00000)` = 0xffff8900_4ed00000 (alias window base
   0xffff8900_00000000 + (0xfed00000 − 0xb0000000)). The b77 narrative's
   "0xffff8900fed00000 → 0xffff89004ed00000" byte-smash reading compares
   against a WRONG baseline; 0xffff8900_4ed00000 is the value hpet::init
-  legitimately stores. What the wild-write engine did in b77/wt1 needs
-  re-reading against this correction (the wt1 GDB wedge showed
-  RDI=0xffff89004ed000f4 = the normal counter-HI offset — the reader
-  was at the RIGHT address; the "smash" may have been in a different
-  static, or the whole b77 attribution chain deserves a re-look from the
-  oh-display worktree's raw logs). Read-side immunity stands regardless.
-- **F3: gdbstub watchpoints work cleanly on this QEMU/TCG** (7-point set
-  armed through a 45 min OH boot, zero overhead visible in serial rate).
+  legitimately stores (verified live via gdb on the running kernel).
+  The wt1 GDB wedge showed RDI=0xffff89004ed000f4 = the normal
+  counter-HI offset — that reader was at the RIGHT address. What the
+  engine actually did in b77/wt1 needs re-reading against this
+  correction from the oh-display raw captures. Read-side immunity
+  stands regardless.
+- **F3: gdbstub hardware watchpoints work cleanly on this QEMU/TCG**
+  (8-point set armed through 45+ min OH boots, storm-rate serial
+  unaffected). This is the cheapest attribution surface for the NEXT
+  captures: any store to the watched statics logs rip + regs + stack.
+- **F4: WP=1 is not bootable on the OH image today.** Arming WP
+  (dfx=wildwatch) collapses the OH boot into init's LoopEvent timeout
+  loop before any service starts (ww-long2/long3: 21/5 init-forks vs
+  103 in a control boot; serial becomes a 987k-line cow-flood until the
+  81dfcb42 rate-limit, then a pure LoopEvent spin). The COW faults
+  themselves are user-mode; the collapse is a mix of extra supervisor
+  COW work (F1b) and UART pressure. Minimal-rootfs boots with WP=1 are
+  fine (selftest boots ran to the trap). The in-kernel RO trap is
+  therefore validated but NOT usable as the long-run rider on OH boots;
+  use it on minimal-rootfs load generators, or fix F1b first.
+
+## Exclusions narrowed this session
+
+- The gdb watchpoint set (7 statics, 45 min, full OH storm in r1/r4)
+  observed ZERO writes — the engine did not fire in these windows
+  (consistent with the b150-b155 clean runs; the engine is intermittent
+  at a rate lower than 1/boot-hour under this driver's load profile).
+- No false positives from the trap on the HPET read path (300 s runs).
 
 ## Run log
 
 - ww-smoke (240 s, watchpoints pre-relocation): armed, no hits, clean boot.
 - ww-r1 (2700 s, watchpoints, pre-relocation build): 0 hits, 0 heals,
-  1.7 MB serial — engine did not fire this window.
+  full storm reached — engine did not fire this window.
 - ww-armtest2..11 (wildwatch bring-up): walk bug (missing PDPT level)
   found via gdb cross-check; arming then clean (2 pages RO + 4 alias
   PTEs), 300 s boots healthy, zero false positives on the HPET read path.
@@ -102,4 +132,10 @@ smashes into pointer-bearing statics.
   rip=0xffffffff8056e42b` → 24 stack words + 3 rbp frames →
   addr2line: `rux::dfx::wildwatch::x86::arm` ← `rux::dfx::init` ←
   `rux::rust_main_tail` ← `boot_stack_continuation`.
-- ww-long2 (2700 s, dfx=wildwatch live hunt): running.
+- ww-long2 (WP=1, 10 min): cow-flood wedge (987k cow lines), 21 init
+  forks — F4. ww-ctrl (same binary, no wildwatch): healthy storm, 7.5k
+  cow lines (baseline), 103 init forks.
+- ww-long3 (WP=1 + 81dfcb42 rate-limit, 45 min): cow flood fixed
+  (1.1k lines) but the LoopEvent spin persists — 5 init forks, no
+  storm. WP stays off for OH hunts.
+- ww-r4 (2700 s, watchpoints, GUARD-relocated build): see below.

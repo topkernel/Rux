@@ -17,7 +17,7 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 IMGDIR="/home/william/rux-agents/oh-display/run/oh-img"
 TAG="${TAG:-ww}"
-GDBPORT="${GDBPORT:-12371}"
+GDBPORT="${GDBPORT:-12374}"
 SMPN="${SMP:-2}"
 KERNEL="${KERNEL:-$ROOT/target/x86_64-unknown-none/debug/bzImage}"
 RUN="$ROOT/run"
