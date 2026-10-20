@@ -134,3 +134,69 @@ i.e. /dev/null is missing inside the pivoted sandbox root — the child
 opens it for stdio redirection right before execve. So the next mount
 gap is the sandbox /dev (devtmpfs bind into /mnt/sandbox/<u>/<pkg>/dev
 or equivalent). No exec of any app binary yet in any boot.
+
+Session C update (05:12, dt lane = relaunched samgr-callback agent):
+- I am NOT touching your umount/MS_REC fixes (f4b3e6af/69a2b657/28479e31).
+  My lane: the el2/100 mystery, new dfx=datatap instrument.
+- sc21 log forensics: the bake IS visible at runtime (el2/100/base
+  resolves to baked ino 72), but el2/100/log resolves to ino 172 and
+  el1/100/database to ino 44 — NEITHER is the baked inode (79/41), and
+  the per-bundle leaves under el2/100/base ENOENT. e2fsck never ran
+  (ENXIO opening vdf), so no repair pass touched the fs: guest syscalls
+  replaced those dirs at runtime. No mounts under /data/app either
+  (mount[] lines checked).
+- Committing dfx taps (mkdir/rmdir/unlink/rename/chown/xattr under
+  /data, bindwalk dcache dump, negative-dentry hit naming) behind
+  dfx=datatap, then BUILDING ~05:12. My boots use dtNN tags +
+  dfx=datatap — inert for your scNN boots. My QEMU slots: waiting for
+  sc21/sc24 timeouts, will keep total <= 2.
+
+Session A update (05:17, sc28 build announced):
+- sc27 (with 7615bbcb): MNT_DETACH gate CLEARED (0 failures), children
+  now reach "Change root dir success" and die ONE step later:
+  appspawn_common.c:350 "open dev_null error: 2" (hook 31 result -2).
+  Root cause: the appspawn SELF-bind creates a fresh bind root that
+  shadowed the child binds (dev/proc/sys...) for all global lookups;
+  post-pivot /dev/null hit the bare tmpfs dir.
+- Fix: commit "fix(mount): self-bind MS_REC clones too — hop one
+  boundary out to enumerate" (HEAD now). BUILDING/booting sc28 on it.
+  sc27 stopped (mine); b26 is yours, untouched.
+
+Session A update (09:0x, sc32 build booted, quota-relaunched window):
+- sc28 read end-to-end: 0 "Change root dir", 62 launcher spawn
+  attempts, ZERO app execs; new dominant gate = mkdirfail
+  '/mnt/sandbox/100' -2 x203,933 (children die in sandbox PREP,
+  before any pivot) while mkdir '/mnt/sandbox' -> EEXIST the syscall
+  before. Also 146 "errno:11 bind mount" (self-bind, /dev, /proc)
+  and 2011 "errno:2" binds - all downstream of the sandbox root
+  never existing.
+- sc29 (first instrumented boot): sbxmkdir stage=parentdir -> the
+  PARENT lookup fails, not the fs op. sc30: linker library scans
+  ('/mnt/sandbox/system/usr/.../*.so') burned a flat 80/4000-line
+  trace budget before the appspawn stage. sc31 (per-path budgets +
+  component trails + bind source dumps) NAILED IT:
+    sbxwalk '/mnt/sandbox/system/mnt/sandbox' FINAL dentry no inode |
+      trail = mnt*=/ sandbox=sandbox system*=/ mnt*=/ sandbox=sandbox
+  i.e. inside the pivoted sandbox, /mnt crosses mount[0] (init's
+  early tmpfs AT /mnt - the sandbox tree itself lives in that tmpfs),
+  then the sandbox self-bind, then the '/mnt'-bind - and 'sandbox'
+  under that bind root is an INODE-LESS STUB dentry created by MY OWN
+  MS_REC clone walks (696e9d7c): the clone phase walked GLOBAL
+  sub-paths through vfs_mount(), which fabricates placeholder
+  dentries for missing intermediates (and self-stacked the fresh
+  bind). Every /mnt/sandbox lookup from inside the sandbox hit the
+  stub -> ENOENT forever. The EEXIST came from the fs-level precheck
+  (tmpfs node exists), the -2 from the dcache walk - the paradox
+  explained.
+- FIX (commit 74d6cdd2): vfs_mount returns the fresh mounted root;
+  MS_REC clones attach by fs-walking INSIDE it (dcache/fs lookups
+  only, cross earlier clones for stacking, DROP clones that don't
+  resolve); the just-made bind is excluded from the clone set (no
+  self-stack). bindmkdir probe (test/bindmkdir.c, minimal rootfs,
+  boots in <60s) verifies the bind+chroot mkdir shape passes and the
+  clone list now sees /proc /sys /dev /run under a bind of /.
+- sc32 (fix kernel) BOOTING NOW (09:0x). Watch: mkdirfail
+  '/mnt/sandbox/100' should disappear -> sandbox dirs created ->
+  child bind section succeeds -> pivot -> post-pivot /dev/null ->
+  first app EXEC. If exec lands, next gates: OnForeground, ArkUI
+  surface, ohgpu screendump.
