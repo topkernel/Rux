@@ -1034,39 +1034,51 @@ fn ww_irqwin_budget_ok() -> bool {
 /// minutes). Root cause of that failure: the hook called schedule() with
 /// NO re-entry guard, so a timer tick landing inside __schedule's own
 /// tail — after the incoming task's saved IF was restored — re-entered
-/// schedule() on the same, half-unwound kernel stack. The nested entry
-/// ran the prev-resolution/pick/heal machinery on frames that were still
-/// unwinding, producing double-run shapes whose unpaired guard drops
-/// underflowed the count.
+/// schedule() on the same, half-unwound kernel stack, and the nested
+/// entry ran the prev-resolution/pick/heal machinery on frames that were
+/// still unwinding (double-run shapes; unpaired guard drops).
 ///
-/// This re-landing closes that hole by construction:
-/// - schedule() itself now sets PREEMPT_ACTIVE around __schedule (every
-///   caller — this hook, the trap-exit asm loop, cond_resched, lock_fair,
-///   every sleeper). preemptible() is count==0, so while any schedule()
-///   is in progress on this task no preemption gate can re-enter it.
+/// Re-landing round 1 (sc65/sc66) used a PREEMPT_ACTIVE bit inside
+/// preempt_count as the guard, Linux-style. That was falsified for this
+/// tree: residual cross-task count imbalances exist in the pick/heal
+/// machinery (sc66 strand incumbents showed init carrying 0x04000001 and
+/// 0x08000001 — leaked ACT bits plus a leaked PREEMPT_OFFSET), and every
+/// leaked count bit now has teeth: preemptible() stays false forever, so
+/// the task cannot be preempted, AND __schedule's switch-out discipline
+/// refuses to sleep it — the observed 160-291 s one-activation
+/// monopolies. Round 2 therefore keeps the count EXACTLY as it was
+/// before this work:
+///
+/// - schedule() sets the TIF_IN_SCHED ti_flags bit around __schedule.
+///   This hook refuses while the bit is set — the only re-entry point is
+///   this hook (the trap-exit asm loop, cond_resched and lock_fair all
+///   call schedule() sequentially, never from inside another one). A
+///   leaked flag, should one ever happen, only disables preemption for
+///   that task; count semantics and the sleep discipline stay exact.
 /// - sub_preempt_count clamps and reports underflow, so a residual
-///   unpaired decrement is one attributable log line, not a silent -1
-///   that fakes in_interrupt() for a user task.
+///   unpaired decrement is one attributable log line, never a silent -1
+///   faking in_interrupt() for a user task.
 ///
 /// Call contract (unchanged from 2cf4bdc9's analysis, still true):
 /// - Called from the timer/IPI vector paths AFTER irq_exit(), with IF=0
 ///   (interrupt gate) and the hardirq count already subtracted.
 /// - User-mode frames are skipped — trap_exit's asm loop owns those.
-/// - preempt_count()==0 (INCLUDING PREEMPT_ACTIVE) means the interrupted
-///   kernel context holds no spinlock (all guards add PREEMPT_OFFSET),
-///   no bh section, no RCU read side (rcu_read_lock = preempt_disable),
-///   and is not already inside a schedule().
+/// - preempt_count()==0 means the interrupted kernel context holds no
+///   spinlock (all guards add PREEMPT_OFFSET), no bh section, no RCU
+///   read side (rcu_read_lock = preempt_disable).
 /// - The switch is the same one sleeping syscalls take; mid-syscall
 ///   migration already happens via blocking paths, and the per-caller
 ///   IRQ-flag discipline (R54) returns each side to its own IF state.
 /// - After schedule() returns, the frame unwinds normally through
 ///   trap_handler's tail and trap_exit's kernel restore.
 fn irq_exit_maybe_preempt_kernel(regs: &PtRegs) {
+    use crate::process::task::task_flags::TaskFlags;
     // Early-boot / WFI secondaries have no current task: __schedule
     // handles a null prev, but there is nothing to preempt either way.
-    if crate::sched::current().is_none() {
-        return;
-    }
+    let cur = match crate::sched::current() {
+        Some(t) => t,
+        None => return,
+    };
     if regs.user_mode() {
         return; // user path: trap_exit asm owns preemption
     }
@@ -1074,7 +1086,14 @@ fn irq_exit_maybe_preempt_kernel(regs: &PtRegs) {
         return;
     }
     if !crate::interrupt::preempt::preemptible() {
-        return; // holds a lock / bh / RCU / nested IRQ / inside schedule()
+        return; // holds a lock / bh / RCU / nested IRQ
+    }
+    // Recursion guard: never re-enter a schedule() already in progress on
+    // this task (a tick can land in __schedule's tail after the incoming
+    // task's saved IF was restored). TIF_IN_SCHED is a task flag, not a
+    // count bit — a stale set only disables preemption for this task.
+    if cur.test_ti_flag(TaskFlags::TIF_IN_SCHED.bits()) {
+        return;
     }
     static FIRED: core::sync::atomic::AtomicBool =
         core::sync::atomic::AtomicBool::new(false);

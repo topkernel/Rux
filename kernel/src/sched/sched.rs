@@ -1693,44 +1693,43 @@ pub fn wake_up_process(task: *mut Task) -> bool {
 
 #[inline(never)]
 pub fn schedule() {
-    // PREEMPT_ACTIVE recursion guard (kernel-preemption re-landing,
-    // launcher round 4, 2026-10-20). Every schedule() call now runs with
-    // the PREEMPT_ACTIVE bit set in the caller's preempt_count and clears
-    // it when __schedule returns to THIS frame. Two properties follow:
+    // Recursion guard (kernel-preemption round 2, 2026-10-20). While a
+    // schedule() call is in progress on this task, the IRQ-exit preemption
+    // hook must not re-enter it: __schedule's tail restores the incoming
+    // task's saved IRQ state, and with IF re-enabled a timer tick can land
+    // inside the unwinding frame — re-entering schedule() on the same
+    // half-unwound stack (the reverted 2cf4bdc9 failure mode).
     //
-    // 1. No re-entrant schedule on the same stack. __schedule's tail
-    //    (after context_switch) restores the incoming task's saved IRQ
-    //    state; with IF re-enabled there, a timer tick can land inside
-    //    the unwinding frame. Every preemption gate that could re-enter
-    //    (the IRQ-exit hook, the trap-exit asm loop, cond_resched,
-    //    lock_fair's retry) tests preempt_count()==0 and therefore
-    //    REFUSES while PREEMPT_ACTIVE is set. Without this bit (the
-    //    reverted 2cf4bdc9), the re-entry stacked nested __schedule
-    //    frames on one kernel stack and let the pick/heal machinery
-    //    operate on half-unwound frames — the double-run whose unpaired
-    //    guard drops poisoned a task's preempt_count to -1, which made
-    //    in_interrupt() read true for a USER page fault (KERNPANIC) and
-    //    parked cpu0 for minutes.
-    // 2. Per-task balance: the bit is added in the outgoing task's frame
-    //    and subtracted in the same frame when the task is resumed and
-    //    unwinds — the coroutine semantics __schedule already keeps for
-    //    the saved IRQ flags (R54). The discipline check in __schedule
-    //    masks the bit out so it never blocks the switch it guards.
+    // Round 1 used a PREEMPT_ACTIVE bit inside preempt_count (the Linux
+    // CONFIG_PREEMPT design). sc65/sc66 falsified it for THIS tree: the
+    // count is per-task and there are residual cross-task imbalance
+    // producers in the pick/heal machinery (sc66 strand incumbents showed
+    // init carrying 0x04000001 and even 0x08000001 — leaked ACT bits plus
+    // a leaked PREEMPT_OFFSET), and every leaked count bit now has teeth:
+    // it makes the task permanently unpreemptable AND un-sleepable (the
+    // __schedule discipline refuses to switch out a task whose count is
+    // nonzero — the 160-291 s one-activation monopolies). A leaked TIF
+    // bit instead only disables preemption for that task; sleeping and
+    // the discipline semantics stay exact.
     //
-    // A task switched out inside schedule() and later destroyed (the
-    // do_exit final schedule never returns) carries the bit to the grave
-    // — the count dies with the Task, no leak.
-    crate::interrupt::preempt::preempt_count_add(
-        crate::interrupt::preempt::PREEMPT_ACTIVE,
-    );
+    // TIF_IN_SCHED is a bit in the existing ti_flags word (no Task layout
+    // change — the scribble machinery is offset-sensitive). Set on entry,
+    // cleared on return from __schedule in the same frame (per-task, so
+    // coroutine resume/migration pair it correctly, unlike a per-CPU
+    // flag).
+    use crate::process::task::task_flags::TaskFlags;
+    const IN_SCHED: u32 = TaskFlags::TIF_IN_SCHED.bits();
+    if let Some(cur) = current() {
+        cur.set_ti_flag(IN_SCHED);
+    }
     // SAFETY: __schedule() manipulates raw task pointers and calls context_switch;
     // must be called from kernel context with valid current task pointer.
     unsafe {
         __schedule();
     }
-    crate::interrupt::preempt::preempt_count_sub(
-        crate::interrupt::preempt::PREEMPT_ACTIVE,
-    );
+    if let Some(cur) = current() {
+        cur.clear_ti_flag(IN_SCHED);
+    }
 }
 
 #[no_mangle]
@@ -1985,16 +1984,14 @@ unsafe fn __schedule() {
     // lock holder. Terminal states (ZOMBIE/DEAD) are exempt: the exit
     // path's final schedule() must always switch away.
     //
-    // PREEMPT_ACTIVE (set by schedule() around this call) is masked out:
-    // it is not a lock/bh/RCU state, it is the recursion guard itself, and
-    // refusing on it would make every schedule() a no-op.
+    // NOTE (kernel-preemption round 2): the schedule() recursion guard is
+    // TIF_IN_SCHED, a ti_flags bit — NOT a preempt_count bit — so this
+    // check needs no masking. (Round 1 used a PREEMPT_ACTIVE count bit;
+    // leaked count bits here would make sleepers unswitchable — see the
+    // sc65/sc66 one-activation monopolies.)
     {
         let prev_state = (*prev).state();
-        if !prev_state.is_dead()
-            && ((*prev).preempt_count()
-                & !crate::interrupt::preempt::PREEMPT_ACTIVE)
-                != 0
-        {
+        if !prev_state.is_dead() && (*prev).preempt_count() != 0 {
             (*prev).set_state(TaskState::new(TaskState::RUNNING));
             crate::sched::dequeue_if_enqueued(&*prev);
             return;
@@ -3594,6 +3591,109 @@ pub fn dequeue_if_enqueued(task: &Task) {
 pub fn scheduler_tick() {
     let cpu_id = crate::arch::cpu_id() as u64 as usize;
     crate::dfx::softlockup::touch(cpu_id);
+
+    // Kernel-preemption round 2 (2026-10-20): LEAK tripwire. A task whose
+    // preempt_count stays nonzero for seconds while it keeps RUNNING in
+    // task context is carrying a leaked count bit — with IRQ-exit kernel
+    // preemption such a leak means the task can never be preempted again,
+    // and (worse) __schedule's switch-out discipline refuses to ever put
+    // it to sleep: the 160-291 s one-activation monopolies of sc65/sc66
+    // (strand incumbents showed pid 1 at pc=0x04000001/0x08000001).
+    // Side-table keyed by Task pointer (wakewatch pattern; no Task layout
+    // change): record when a nonzero count is first seen, report the
+    // task + count after 2 s, clear when the count drains. Direct
+    // console, rate-gated — this runs from the timer tick.
+    {
+        static LEAK_TASK: [core::sync::atomic::AtomicU64;
+            crate::config::MAX_CPUS] =
+            [const { core::sync::atomic::AtomicU64::new(0) };
+                crate::config::MAX_CPUS];
+        static LEAK_SINCE: [core::sync::atomic::AtomicU64;
+            crate::config::MAX_CPUS] =
+            [const { core::sync::atomic::AtomicU64::new(0) };
+                crate::config::MAX_CPUS];
+        static LEAK_LAST_PRINT: core::sync::atomic::AtomicU64 =
+            core::sync::atomic::AtomicU64::new(0);
+        if cpu_id < crate::config::MAX_CPUS {
+            let cur = crate::sched::sched::cpu_state(cpu_id).current;
+            if !cur.is_null() {
+                let pc =
+                    unsafe { (*cur).preempt_count() };
+                let slot = &LEAK_TASK[cpu_id];
+                let since = &LEAK_SINCE[cpu_id];
+                if pc != 0 {
+                    let now = crate::drivers::timer::get_jiffies();
+                    let task_word = slot.load(core::sync::atomic::Ordering::Relaxed);
+                    if task_word == cur as usize as u64 {
+                        let t0 = since.load(core::sync::atomic::Ordering::Relaxed);
+                        if t0 != 0
+                            && now.wrapping_sub(t0) >= 200
+                        {
+                            let lp = LEAK_LAST_PRINT.load(
+                                core::sync::atomic::Ordering::Acquire);
+                            if now.wrapping_sub(lp) >= 20
+                                && LEAK_LAST_PRINT
+                                    .compare_exchange(
+                                        lp,
+                                        now,
+                                        core::sync::atomic::Ordering::AcqRel,
+                                        core::sync::atomic::Ordering::Acquire)
+                                    .is_ok()
+                            {
+                                use crate::console::putchar_no_lock as putchar;
+                                fn ph(v: u64) {
+                                    use crate::console::putchar_no_lock as putchar;
+                                    for sh in (0..16).rev() {
+                                        let n = ((v >> (sh * 4)) & 0xF) as u8;
+                                        putchar(if n < 10 {
+                                            b'0' + n
+                                        } else {
+                                            b'a' + n - 10
+                                        });
+                                    }
+                                }
+                                const M: &[u8] = b"\nPREEMPT-LEAK cpu=";
+                                for &b in M {
+                                    putchar(b);
+                                }
+                                ph(cpu_id as u64);
+                                const M2: &[u8] = b" pid=";
+                                for &b in M2 {
+                                    putchar(b);
+                                }
+                                ph(unsafe { (*cur).pid() } as u64);
+                                const M3: &[u8] = b" pc=";
+                                for &b in M3 {
+                                    putchar(b);
+                                }
+                                ph(pc as u32 as u64);
+                                const M4: &[u8] =
+                                    b" held_nonzero_for=";
+                                for &b in M4 {
+                                    putchar(b);
+                                }
+                                ph(now.wrapping_sub(t0));
+                                const M5: &[u8] = b"jiffies\n";
+                                for &b in M5 {
+                                    putchar(b);
+                                }
+                            }
+                        }
+                    } else {
+                        slot.store(
+                            cur as usize as u64,
+                            core::sync::atomic::Ordering::Relaxed);
+                        since.store(
+                            crate::drivers::timer::get_jiffies(),
+                            core::sync::atomic::Ordering::Relaxed);
+                    }
+                } else {
+                    slot.store(0, core::sync::atomic::Ordering::Relaxed);
+                    since.store(0, core::sync::atomic::Ordering::Relaxed);
+                }
+            }
+        }
+    }
 
     // R84 (R74 producer-#2 hunt): the R83 idle-loop audit never ran
     // under the dbus storm (all harts busy) — validate headers from the

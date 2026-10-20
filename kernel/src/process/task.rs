@@ -346,6 +346,14 @@ pub mod task_flags {
             const PF_EXITING     = 0x00000004; /* Getting shut down */
             const PF_VCPU        = 0x00000010; /* I'm a virtual CPU */
             const PF_WQ_WORKER   = 0x00000020; /* I'm a workqueue worker */
+            /* Kernel-preemption recursion guard (sched::schedule sets it
+             * around __schedule; the IRQ-exit hook refuses to re-enter a
+             * task that is already inside its own schedule). A task-flag,
+             * deliberately NOT a preempt_count bit: leaked count bits
+             * block both preemption AND the __schedule switch-out
+             * discipline, while a leaked flag here only disables
+             * preemption for the task. */
+            const TIF_IN_SCHED   = 0x00400000;
         }
     }
 }
