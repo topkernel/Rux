@@ -344,7 +344,33 @@ pub fn handle_mm_fault(
         // Check COW
         // SAFETY: root_ppn is a valid page table root. is_cow_page only reads the PTE.
         if is_write && unsafe { is_cow_page(root_ppn, fault_addr) } {
-            crate::pr_debug!("pagefault: cow at {:#x}", fault_addr.bits());
+            // wildwrite-hunt note: arming CR0.WP makes supervisor uaccess
+            // writes take this path too (previously they silently wrote
+            // through the COW protection). OH boots then COW-fault the
+            // same buffer address once per loop iteration — an unbounded
+            // pr_debug flood that alone starves the boot (the b128
+            // lesson). Rate-limit repeats of the same page to one line
+            // per 25 jiffies while keeping the first occurrence with the
+            // access mode, so the anomaly stays visible without killing
+            // the machine.
+            static LAST_COW_PAGE: core::sync::atomic::AtomicU64 =
+                core::sync::atomic::AtomicU64::new(u64::MAX);
+            static LAST_COW_JIFFY: core::sync::atomic::AtomicU64 =
+                core::sync::atomic::AtomicU64::new(0);
+            let page = fault_addr.bits() & !0xFFF;
+            let now = crate::drivers::timer::get_jiffies();
+            let last_page = LAST_COW_PAGE.load(core::sync::atomic::Ordering::Relaxed);
+            let last_j = LAST_COW_JIFFY.load(core::sync::atomic::Ordering::Relaxed);
+            let repeat = last_page == page && now.saturating_sub(last_j) < 25;
+            if !repeat {
+                LAST_COW_PAGE.store(page, core::sync::atomic::Ordering::Relaxed);
+                LAST_COW_JIFFY.store(now, core::sync::atomic::Ordering::Relaxed);
+                crate::pr_debug!(
+                    "pagefault: cow at {:#x} ({}-mode)",
+                    fault_addr.bits(),
+                    if is_user { "user" } else { "KERNEL" }
+                );
+            }
             return MmFaultResult::CowPending;
         }
 
