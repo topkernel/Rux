@@ -1353,6 +1353,35 @@ pub fn unix_send(
                         crate::pr_warn!("slog[{}] {}{}", n, p, s);
                     }
                 }
+                // ACCOUNT cohort (sc43 hunt): the USER_UNLOCKED publish chain
+                // — osaccount SendToStorageAccountStart -> UnlockUser ->
+                // ActiveUserKey/PrepareStartUser -> SetIsVerified ->
+                // PublishCommonEvent(USER_UNLOCKED) -> BMS
+                // user_unlocked_event_subscriber creating the per-bundle
+                // el1/100/database dirs — is the one link that never fires on
+                // Rux. accountmgr's hilog (domain 0xd001b00, tags OsAccount/
+                // AccountMgr/AccountFwk) was invisible to both cohorts above.
+                const ACCT_TAGS: [&str; 7] = [
+                    "OsAccount", "AccountMgr", "AccountFwk", "ACCOUNT",
+                    "AccountSA", "StorageManager", "StorageDaemon",
+                ];
+                const ACCT_KEYS: [&str; 8] = [
+                    "USER_UNLOCKED", "UnlockUser", "PrepareStartUser",
+                    "ActiveUserKey", "is unlocked", "user_unlocked",
+                    "need CreateBundleDataDir", "OsAccount",
+                ];
+                let acct_hit = ACCT_TAGS.iter().any(|t| {
+                    s.starts_with(t) && s.as_bytes().get(t.len()) == Some(&b':')
+                }) || ACCT_KEYS.iter().any(|key| s.contains(key));
+                if acct_hit {
+                    static ACCT_TAPS: core::sync::atomic::AtomicU32 =
+                        core::sync::atomic::AtomicU32::new(0);
+                    let n = ACCT_TAPS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                    if n < 6000 {
+                        let p = core::str::from_utf8(&prefix[..plen]).unwrap_or("");
+                        crate::pr_warn!("alog[{}] {}{}", n, p, s);
+                    }
+                }
             }
         }
 
