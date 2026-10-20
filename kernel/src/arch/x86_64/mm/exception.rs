@@ -224,14 +224,37 @@ pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
                     fault_addr,
                     access_type | FaultFlags::USER,
                 );
-                if matches!(result, MmFaultResult::Handled)
-                    || matches!(result, MmFaultResult::Fixed)
-                {
-                    // Re-execute the faulting kernel load/store.
-                    return MmFaultResult::Handled;
+                match result {
+                    MmFaultResult::Handled | MmFaultResult::Fixed => {
+                        // Re-execute the faulting kernel load/store.
+                        return MmFaultResult::Handled;
+                    }
+                    MmFaultResult::CowPending => {
+                        // Kernel WRITE uaccess onto a COW page: resolve it
+                        // like the user-mode path below (retry counts as
+                        // progress — the re-executed store either succeeds
+                        // or re-faults into the right path). Mirrors the
+                        // riscv64 twin (R82 block). Without this, CR0.WP
+                        // (now permanently set — F1b fix) turns every
+                        // read()/write() into a post-fork COW buffer into
+                        // an EFAULT short-copy: the trap falls through to
+                        // the exception-table fixup, init's param reads
+                        // all fail, and the boot collapses into the
+                        // LoopEvent spin (the ww-long2/long3 F4 collapse).
+                        match unsafe {
+                            handle_cow_fault(addr_space.root_ppn(), fault_addr)
+                        } {
+                            crate::arch::mm::CowFaultResult::Resolved
+                            | crate::arch::mm::CowFaultResult::Retry => {
+                                return MmFaultResult::Handled;
+                            }
+                            crate::arch::mm::CowFaultResult::OutOfMemory => {}
+                        }
+                    }
+                    // Unresolvable (bad perms etc.): fall through to the
+                    // exception-table fixup so the copy reports a short copy.
+                    _ => {}
                 }
-                // Unresolvable (bad perms etc.): fall through to the
-                // exception-table fixup so the copy reports a short copy.
             }
         }
 
@@ -248,6 +271,21 @@ pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
             regs.rip,
             crate::sched::get_current_pid()
         );
+        // dfx=wildwatch (wildwrite-hunt): a write fault inside a guarded
+        // region IS the wild writer caught in the act — banner it so the
+        // serial line is unmissable, then let the normal printer below
+        // carry rip + the rbp walk into the KERNPANIC dump.
+        #[cfg(feature = "x86_64")]
+        if (access_type & FaultFlags::WRITE) != 0
+            && crate::dfx::wildwatch::is_armed(fault_addr.bits() as usize)
+        {
+            println!(
+                "WILDWRITE-CAUGHT addr={:#x} rip={:#x} pid={} — guarded region store, writer below:",
+                fault_addr.bits(),
+                regs.rip,
+                crate::sched::get_current_pid()
+            );
+        }
         // OH bring-up forensics: walk the frame-pointer chain so the
         // faulting CALLER is visible (write_volatile-style leaf frames
         // otherwise hide the driver that computed the bad address).

@@ -51,6 +51,10 @@ pub mod r83hunt;
 /// timebase ~1 Hz and reports backward motion or multi-second spikes
 /// with the active clocksource named.
 pub mod monowatch;
+/// Wild-write attribution tripwire (dfx=wildwatch, x86_64): RO-guards
+/// the hpet quiet-statics cluster in every page-table alias; see
+/// dfx/wildwatch.rs (wildwrite-hunt line).
+pub mod wildwatch;
 
 /// Initialize the DFX subsystem.
 ///
@@ -58,6 +62,9 @@ pub mod monowatch;
 /// Starts the softlockup detector and hung task detector.
 pub fn init() {
     switches::init_from_cmdline();
+    // Wild-write tripwire arms between the timekeeper's init and
+    // start_secondaries (no TLB shootdown needed; see wildwatch.rs).
+    wildwatch::arm();
     softlockup::init();
     // hung_task detector is deferred — it requires kthread infrastructure
     // that may not be fully ready during early boot. Enable after testing.

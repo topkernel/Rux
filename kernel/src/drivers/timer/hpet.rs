@@ -54,39 +54,86 @@ const CFG_ENABLE: u32 = 1;
 
 /// MMIO base (identity-mapped VA) once initialized; 0 = not present.
 static BASE: AtomicU64 = AtomicU64::new(0);
+/// wildwrite-hunt guard cluster: the QUIET-after-init timekeeper
+/// statics live in a page-exclusive 2-page region (page 0 = canary
+/// fill, page 1 = the members) so dfx=wildwatch can clear RW on their
+/// PTEs after init — a wild store then page-faults at the writer's RIP
+/// instead of silently landing (b77/wt1 smashed BASE/BASE_LOCKED here;
+/// read-side healing survives, attribution did not exist). The hot
+/// per-read statics (BASE ready flag, LAST_GOOD) stay OUTSIDE the
+/// cluster: they are legitimately written on every clock read.
+#[repr(C, align(4096))]
+struct WildGuardCluster {
+    /// Pattern-filled by wildwatch::arm, verified from the timer cadence
+    /// (catches PTE-invisible, DMA-class writers). No legitimate access.
+    canary: [u64; 512],
+    base_locked: AtomicU64,
+    base_locked_inv: AtomicU64,
+    div: AtomicU64,
+    div_inv: AtomicU64,
+    boot_offset: AtomicU64,
+    boot_offset_inv: AtomicU64,
+    _pad: [u64; 512 - 6],
+}
+static GUARD: WildGuardCluster = WildGuardCluster {
+    canary: [0; 512],
+    base_locked: AtomicU64::new(0),
+    base_locked_inv: AtomicU64::new(u64::MAX),
+    div: AtomicU64::new(0),
+    div_inv: AtomicU64::new(u64::MAX),
+    boot_offset: AtomicU64::new(0),
+    boot_offset_inv: AtomicU64::new(u64::MAX),
+    _pad: [0; 512 - 6],
+};
+
+/// The guard cluster's VA range (for wildwatch arming/registration).
+pub fn wild_guard_range() -> (usize, usize) {
+    let s = &GUARD as *const WildGuardCluster as usize;
+    (s, core::mem::size_of::<WildGuardCluster>())
+}
+
 /// The value BASE held at successful init. The HPET is a FIXED MMIO
 /// block — this value can never legitimately change after init. b77
 /// capture: a wild kernel write changed BASE 0xffff8900fed00000 →
 /// 0xffff89004ed00000 mid-boot (one byte of the physical address); every
 /// subsequent clock read dereferenced an unmapped physmap address and
 /// the whole boot graph froze (all tasks crawling, serial silent).
-static BASE_LOCKED: AtomicU64 = AtomicU64::new(0);
-/// Redundant encoding of BASE_LOCKED (bitwise complement). The wt1
-/// capture (vsync-starvation hunt, 2026-10-19) showed the wild-write
-/// engine can take BASE AND the adjacent BASE_LOCKED in one smash:
-/// every read_time() then returned boot-epoch garbage, nanosleep
-/// deadlines landed minutes off (compose-content's 41.5 s dead stop and
-/// 0.5-0.7 s usleep blowouts), and the CPU finally wedged inside
-/// r32 with the smashed address (RIP=hpet::r32, RDI=0xffff89004ed000f4,
-/// IF=0). Linux parity for that family: the fixmap clocksource address
-/// is derived, never read back from scribbleable memory. Here the READ
-/// PATH derives its address from this validated pair (and falls back to
-/// the fixed q35 alias on any mismatch) — BASE itself is only the
-/// ready flag.
-static BASE_LOCKED_INV: AtomicU64 = AtomicU64::new(u64::MAX);
+/// wt1: BASE and BASE_LOCKED taken together in one smash — see the
+/// GUARD cluster doc above (wildwrite-hunt attribution trap).
+#[allow(non_snake_case)]
+fn BASE_LOCKED() -> &'static AtomicU64 {
+    &GUARD.base_locked
+}
+/// Redundant encoding of BASE_LOCKED (bitwise complement) — see GUARD.
+#[allow(non_snake_case)]
+fn BASE_LOCKED_INV() -> &'static AtomicU64 {
+    &GUARD.base_locked_inv
+}
 /// HPET ticks per nominal-domain tick (CLOCK_FREQ units). QEMU: 100 MHz
 /// HPET / 10 MHz nominal = 10. 0 until `init` validated the period.
-static DIV: AtomicU64 = AtomicU64::new(0);
+#[allow(non_snake_case)]
+fn DIV() -> &'static AtomicU64 {
+    &GUARD.div
+}
 /// Redundant encoding of DIV (bitwise complement). A zeroed DIV would
 /// panic the divide in read_time_nominal; validation heals it back (or
 /// falls back to the q35 constant 10).
-static DIV_INV: AtomicU64 = AtomicU64::new(u64::MAX);
+#[allow(non_snake_case)]
+fn DIV_INV() -> &'static AtomicU64 {
+    &GUARD.div_inv
+}
 /// Value added to the HPET-derived reading so switching the timebase
 /// onto it cannot move the clock backward (same discipline as the TSC
 /// switch in x86_64.rs).
-static BOOT_OFFSET: AtomicU64 = AtomicU64::new(0);
+#[allow(non_snake_case)]
+fn BOOT_OFFSET() -> &'static AtomicU64 {
+    &GUARD.boot_offset
+}
 /// Redundant encoding of BOOT_OFFSET (bitwise complement).
-static BOOT_OFFSET_INV: AtomicU64 = AtomicU64::new(u64::MAX);
+#[allow(non_snake_case)]
+fn BOOT_OFFSET_INV() -> &'static AtomicU64 {
+    &GUARD.boot_offset_inv
+}
 /// Per-CPU last accepted reading (monotonic clamp — the clocksource
 /// watchdog analogue). A garbage read that lands below this CPU's last
 /// good time is re-read once and then FROZEN at the last good value
@@ -143,8 +190,8 @@ fn heal_report(prefix: &[u8], bad: u64, good: u64) {
 /// alias VA to read, healing the pair (or falling back to the fixed q35
 /// alias) when a wild write has touched either half.
 fn validated_read_base() -> usize {
-    let locked = BASE_LOCKED.load(Ordering::Acquire);
-    let inv = BASE_LOCKED_INV.load(Ordering::Acquire);
+    let locked = BASE_LOCKED().load(Ordering::Acquire);
+    let inv = BASE_LOCKED_INV().load(Ordering::Acquire);
     if locked != 0 && locked == !inv {
         return locked as usize;
     }
@@ -164,10 +211,31 @@ fn validated_read_base() -> usize {
         fallback as u64
     };
     heal_report(b"hpet: clock base healed ", locked, good);
-    BASE_LOCKED.store(good, Ordering::Release);
-    BASE_LOCKED_INV.store(!good, Ordering::Release);
+    // wildwatch: the guard cluster is RO while the tripwire is armed.
+    // Under RO the pair cannot have been scribbled through any
+    // PTE-visible path, so this branch means a PTE-invisible writer
+    // (see WILDWATCH-CANARY) — re-writing the pair would fault on the
+    // RO page and masquerade as the wild writer. Skip the stores; the
+    // fast path re-validates every read and the fallback above already
+    // returns a good address.
+    if !guard_armed() {
+        BASE_LOCKED().store(good, Ordering::Release);
+        BASE_LOCKED_INV().store(!good, Ordering::Release);
+    }
     BASE.store(good, Ordering::Release);
     good as usize
+}
+
+/// True while dfx=wildwatch holds the guard cluster read-only.
+fn guard_armed() -> bool {
+    #[cfg(feature = "x86_64")]
+    {
+        crate::dfx::wildwatch::is_armed(&GUARD.base_locked as *const AtomicU64 as usize)
+    }
+    #[cfg(not(feature = "x86_64"))]
+    {
+        false
+    }
 }
 
 /// True once the HPET is the active timekeeper.
@@ -236,8 +304,8 @@ pub fn read_counter() -> u64 {
 #[inline]
 pub fn read_time_nominal() -> u64 {
     let div = {
-        let d = DIV.load(Ordering::Acquire);
-        let dinv = DIV_INV.load(Ordering::Acquire);
+        let d = DIV().load(Ordering::Acquire);
+        let dinv = DIV_INV().load(Ordering::Acquire);
         if d != 0 && d == !dinv {
             d
         } else {
@@ -247,14 +315,17 @@ pub fn read_time_nominal() -> u64 {
             // domain, and this kernel targets QEMU q35/virt).
             const QEMU_DIV: u64 = 10; // 100 MHz HPET / 10 MHz nominal
             heal_report(b"hpet: clock div healed ", d, QEMU_DIV);
-            DIV.store(QEMU_DIV, Ordering::Release);
-            DIV_INV.store(!QEMU_DIV, Ordering::Release);
+            if !guard_armed() {
+                // (see validated_read_base: no stores onto the RO guard)
+                DIV().store(QEMU_DIV, Ordering::Release);
+                DIV_INV().store(!QEMU_DIV, Ordering::Release);
+            }
             QEMU_DIV
         }
     };
     let offset = {
-        let o = BOOT_OFFSET.load(Ordering::Acquire);
-        let oinv = BOOT_OFFSET_INV.load(Ordering::Acquire);
+        let o = BOOT_OFFSET().load(Ordering::Acquire);
+        let oinv = BOOT_OFFSET_INV().load(Ordering::Acquire);
         if o == !oinv {
             o
         } else {
@@ -263,7 +334,9 @@ pub fn read_time_nominal() -> u64 {
             // early-boot offset; the monotonic clamp below catches any
             // residual poison anyway). Heal the pair.
             heal_report(b"hpet: clock offset healed ", oinv, o);
-            BOOT_OFFSET_INV.store(!o, Ordering::Release);
+            if !guard_armed() {
+                BOOT_OFFSET_INV().store(!o, Ordering::Release);
+            }
             o
         }
     };
@@ -411,13 +484,13 @@ pub fn init() -> bool {
     // statics — and poisoned every clock read; the pair + fixed-alias
     // fallback make the read path derive a good address regardless).
     let continuity = crate::drivers::timer::x86_64::pre_hpet_time();
-    DIV.store(div, Ordering::Release);
-    DIV_INV.store(!div, Ordering::Release);
-    BOOT_OFFSET.store(continuity, Ordering::Release);
-    BOOT_OFFSET_INV.store(!continuity, Ordering::Release);
+    DIV().store(div, Ordering::Release);
+    DIV_INV().store(!div, Ordering::Release);
+    BOOT_OFFSET().store(continuity, Ordering::Release);
+    BOOT_OFFSET_INV().store(!continuity, Ordering::Release);
     BASE.store(base as u64, Ordering::Release);
-    BASE_LOCKED.store(base as u64, Ordering::Release);
-    BASE_LOCKED_INV.store(!(base as u64), Ordering::Release);
+    BASE_LOCKED().store(base as u64, Ordering::Release);
+    BASE_LOCKED_INV().store(!(base as u64), Ordering::Release);
     true
 }
 

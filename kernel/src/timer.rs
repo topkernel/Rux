@@ -698,6 +698,15 @@ pub fn timer_softirq_handler(_nr: usize) {
         crate::dfx::monowatch::tick(current);
     }
 
+    // dfx=wildwatch: canary re-verify on a 1 s cadence (DMA-class
+    // writers bypass PTEs; the RO trap cannot see them).
+    if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::WildWatch)
+        && current.saturating_sub(LAST_WILDWATCH_VERIFY.load(Ordering::Relaxed)) >= 100
+    {
+        LAST_WILDWATCH_VERIFY.store(current, Ordering::Relaxed);
+        crate::dfx::wildwatch::verify();
+    }
+
     // dfx=ledger: run a pending on-demand accounting census latched by the
     // "LEDGER!" UART magic. The RX IRQ itself only sets the flag (printk
     // from IRQ context is the classic self-wedge); this softirq already
@@ -707,6 +716,9 @@ pub fn timer_softirq_handler(_nr: usize) {
 
 /// Jiffies of the last periodic DFX snapshot (dfx=periodic).
 static LAST_PERIODIC_DUMP: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// Jiffies of the last wildwatch canary verify (dfx=wildwatch).
+static LAST_WILDWATCH_VERIFY: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
 // ==================== Wakewatch forensics (vsync-starvation hunt) ====
 //

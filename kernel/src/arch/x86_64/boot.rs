@@ -87,6 +87,13 @@ pub fn get_dtb_pointer() -> u64 {
 /// MUST run while the bootstrap identity mapping is still active
 /// (before `mm::init()` switches CR3).
 pub fn early_boot_init() {
+    // CR0.WP, permanently, from the earliest Rust BSP code (F1b fix —
+    // see cpu::enable_write_protect). Everything reachable here is
+    // mapped RW, so arming WP this early is inert for boot itself; it
+    // only starts biting once RO mappings appear (user COW pages,
+    // wildwatch guards). CR0 survives the later CR3 switch.
+    crate::arch::cpu::enable_write_protect();
+
     let mbi: &MultibootInfo = unsafe {
         let ptr = core::ptr::read_volatile(&raw const boot_mb_info) as usize as *const MultibootInfo;
         if ptr as usize == 0 {
