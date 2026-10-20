@@ -3209,6 +3209,27 @@ pub fn wake_up_enqueue(task: *mut Task) -> bool {
             (*task).set_state(TaskState::new(TaskState::RUNNING));
             true
         } else {
+            // W2 twin: both the insert and the heal refused — name the
+            // shape (sc78: the reply-delivery lost-wake hunt). R34
+            // discipline: GRQ is held, so the report uses the direct
+            // console path (no printk/console lock under GRQ).
+            static W2B_N: core::sync::atomic::AtomicU32 =
+                core::sync::atomic::AtomicU32::new(0);
+            if W2B_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 16 {
+                use crate::console::putchar_no_lock as putchar;
+                const MSG: &[u8] = b"W2-ENQUEUE-HEAL-REFUSED pid=";
+                for &b in MSG {
+                    putchar(b);
+                }
+                let v = (*task).pid() as u64;
+                let mut sh = 64;
+                while sh > 0 {
+                    sh -= 4;
+                    let nb = ((v >> sh) & 0xF) as u8;
+                    putchar(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 });
+                }
+                putchar(b'\n');
+            }
             false
         }
     }

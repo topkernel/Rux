@@ -656,6 +656,66 @@ impl BinderTxn {
     }
 }
 
+/// Per-thread transition history (sc74 wedge forensics): the observed death
+/// loop ends in a state — server thread parked in the blocking read owing a
+/// reply, own todo empty, no nested txn anywhere in the world — that no
+/// single-threaded execution of this driver plus OH libipc can produce. The
+/// ring records the last BHIST state transitions under WORLD so the next
+/// stall dump names the exact step that never happened (or shows a
+/// transition sequence only corruption can produce).
+#[derive(Clone, Copy)]
+pub struct BinderEv {
+    pub j: u32,
+    pub ev: u8,
+    pub a: u32,
+    pub b: u32,
+}
+
+pub const BHIST: usize = 24;
+
+pub const EV_TXN_SENT: u8 = 1;
+pub const EV_TXN_TQUEUED: u8 = 2;
+pub const EV_TXN_PQUEUED: u8 = 3;
+pub const EV_TXN_PARKED_ASYNC: u8 = 4;
+pub const EV_REPLY_POP: u8 = 5;
+pub const EV_REPLY_PUSHED: u8 = 6;
+pub const EV_REPLY_GONE: u8 = 7;
+pub const EV_TXN_RECV: u8 = 8;
+pub const EV_REPLY_RECV: u8 = 9;
+pub const EV_TC_RECV: u8 = 10;
+pub const EV_ERR_RECV: u8 = 11;
+pub const EV_PARK: u8 = 12;
+pub const EV_WAKE_RET: u8 = 13;
+pub const EV_BWR: u8 = 14;
+pub const EV_REAP: u8 = 15;
+pub const EV_DEAD_REPLY: u8 = 16;
+pub const EV_REKICK: u8 = 17;
+pub const EV_TXN_RECV_END: u8 = 18;
+
+pub fn ev_name(ev: u8) -> &'static str {
+    match ev {
+        EV_TXN_SENT => "TXN_SENT",
+        EV_TXN_TQUEUED => "TXN_TQUEUED",
+        EV_TXN_PQUEUED => "TXN_PQUEUED",
+        EV_TXN_PARKED_ASYNC => "PARKED_ASYNC",
+        EV_REPLY_POP => "REPLY_POP",
+        EV_REPLY_PUSHED => "REPLY_PUSHED",
+        EV_REPLY_GONE => "REPLY_GONE",
+        EV_TXN_RECV => "TXN_RECV",
+        EV_REPLY_RECV => "REPLY_RECV",
+        EV_TC_RECV => "TC_RECV",
+        EV_ERR_RECV => "ERR_RECV",
+        EV_PARK => "PARK",
+        EV_WAKE_RET => "WAKE_RET",
+        EV_BWR => "BWR",
+        EV_REAP => "REAP",
+        EV_DEAD_REPLY => "DEAD_REPLY",
+        EV_REKICK => "REKICK",
+        EV_TXN_RECV_END => "TXN_RECV_END",
+        _ => "?",
+    }
+}
+
 struct ThreadState {
     looper: u32,
     todo: VecDeque<Work>,
@@ -666,6 +726,9 @@ struct ThreadState {
     /// (Linux waiting_threads list, drives BR_SPAWN_LOOPER).
     waiting_for_proc_work: bool,
     txn_stack: Vec<Arc<BinderTxn>>,
+    /// Transition ring (sc74 forensics); written under WORLD only.
+    hist: [BinderEv; BHIST],
+    hcur: usize,
 }
 
 struct BinderThread {
@@ -680,6 +743,14 @@ struct BinderThread {
     read_wait_since: core::sync::atomic::AtomicU64,
     /// One stall report per wait episode (avoids per-scan spam).
     stall_reported: core::sync::atomic::AtomicBool,
+    /// One REKICK hist record per wait episode (the re-kick itself still
+    /// runs every scan; only the ring entry is gated so the forensics
+    /// history is not flooded by heal noise).
+    rekicked: core::sync::atomic::AtomicBool,
+    /// Kicks issued in the current wait episode — >= 2 means a previous
+    /// kick failed to run the task (wake→run leak); the scheduler view is
+    /// dumped then (WAKE-RUN-LEAK line).
+    rekick_count: core::sync::atomic::AtomicU32,
 }
 
 impl BinderThread {
@@ -689,12 +760,16 @@ impl BinderThread {
             wait: WaitQueueHead::new(),
             read_wait_since: core::sync::atomic::AtomicU64::new(0),
             stall_reported: core::sync::atomic::AtomicBool::new(false),
+            rekicked: core::sync::atomic::AtomicBool::new(false),
+            rekick_count: core::sync::atomic::AtomicU32::new(0),
             st: core::cell::UnsafeCell::new(ThreadState {
                 looper: 0,
                 todo: VecDeque::new(),
                 process_todo: false,
                 waiting_for_proc_work: false,
                 txn_stack: Vec::new(),
+                hist: [BinderEv { j: 0, ev: 0, a: 0, b: 0 }; BHIST],
+                hcur: 0,
             }),
         }
     }
@@ -703,6 +778,14 @@ impl BinderThread {
     #[allow(clippy::mut_from_ref)]
     unsafe fn st(&self) -> &mut ThreadState {
         &mut *self.st.get()
+    }
+
+    /// Append one transition to the ring. SAFETY: caller must hold WORLD.
+    unsafe fn hist(&self, ev: u8, a: u32, b: u32) {
+        let th = self.st();
+        let j = crate::drivers::timer::get_jiffies() as u32;
+        th.hist[th.hcur] = BinderEv { j, ev, a, b };
+        th.hcur = (th.hcur + 1) % BHIST;
     }
 }
 
@@ -1279,6 +1362,7 @@ unsafe fn dead_reply_to_sender(
             fth.txn_stack.retain(|t| !Arc::ptr_eq(t, txn));
             fth.todo.push_back(Work::ReturnError(BR_DEAD_REPLY, 0));
             fth.process_todo = true;
+            ft.hist(EV_DEAD_REPLY, txn.id as u32, ftid);
             // Exact-thread wake, same as the BC_REPLY path: the proc-wide
             // pick-one wake (wake_proc_one) only selects threads with an
             // EMPTY todo, so a thread carrying this ReturnError would
@@ -1390,6 +1474,27 @@ pub fn binder_task_died(dying_pid: u32, dying_tgid: u32, dying_tid: u32) {
             let Some(proc) = proc else { return };
             if proc.im().is_dead {
                 return;
+            }
+            // sc76: samgr died thread-in-place — every worker futex-blocked
+            // behind lock words whose owners are gone (16 phantom rwlock
+            // readers with only 7 live threads). A worker that dies while
+            // SERVICING (txn stacked) or with undrained work leaks its
+            // userspace locks permanently (pthread mutexes are not robust).
+            // This detector names every such victim at death time.
+            if let Some(t) = proc.im().threads.iter().find(|t| t.tid == dying_tid) {
+                let th = t.st();
+                if !th.txn_stack.is_empty() || !th.todo.is_empty() {
+                    crate::pr_warn!(
+                        "binder: THREAD-DIED-SERVICING pid {} tid {} stack={} todo={} top=txn{} from pid {} tid {}",
+                        proc.pid,
+                        dying_tid,
+                        th.txn_stack.len(),
+                        th.todo.len(),
+                        th.txn_stack.last().map(|x| x.id).unwrap_or(0),
+                        th.txn_stack.last().and_then(|x| x.from_proc.as_ref()).map(|p| p.pid).unwrap_or(0),
+                        th.txn_stack.last().and_then(|x| x.from_tid).unwrap_or(0)
+                    );
+                }
             }
             wakes = binder_reap_thread(world, &proc, dying_tid);
         }
@@ -1711,14 +1816,22 @@ unsafe fn stall_thread_line(proc: &Arc<BinderProc>, t: &Arc<BinderThread>) {
     let loop_str = core::str::from_utf8(&lstr).unwrap_or("-=-");
     match th.txn_stack.last() {
         Some(txn) => {
+            let shape = if txn.to_tid() == Some(t.tid) {
+                "SERVER-OWING"
+            } else if txn.from_tid == Some(t.tid) {
+                "CLIENT-WAIT"
+            } else {
+                "AMBIGUOUS"
+            };
             crate::pr_warn!(
-                "binder-stall:   pid {} tid {} loop={} wait={} todo={} stack={} top=txn{} code {} oneway={} from pid {} tid {} to_tid {}",
+                "binder-stall:   pid {} tid {} loop={} wait={} todo={} stack={} [{}] top=txn{} code {} oneway={} from pid {} tid {} to_tid {}",
                 proc.pid,
                 t.tid,
                 loop_str,
                 th.waiting_for_proc_work,
                 th.todo.len(),
                 th.txn_stack.len(),
+                shape,
                 txn.id,
                 txn.code,
                 txn.flags & TF_ONE_WAY != 0,
@@ -1736,6 +1849,12 @@ unsafe fn stall_thread_line(proc: &Arc<BinderProc>, t: &Arc<BinderThread>) {
             let task = unsafe { crate::sched::find_task_by_pid(t.tid) };
             if !task.is_null() {
                 let tk = unsafe { &*task };
+                let comm = {
+                    let c = tk.comm();
+                    core::str::from_utf8(&c[..])
+                        .unwrap_or("")
+                        .trim_end_matches('\0')
+                };
                 let top = tk.kernel_stack_top();
                 #[cfg(feature = "x86_64")]
                 let (rip, sys, a0, a1) = {
@@ -1758,7 +1877,8 @@ unsafe fn stall_thread_line(proc: &Arc<BinderProc>, t: &Arc<BinderThread>) {
                 #[cfg(not(any(feature = "x86_64", feature = "riscv64")))]
                 let (rip, sys, a0, a1) = (0u64, 0u64, 0u64, 0u64);
                 crate::pr_warn!(
-                    "binder-stall:    holder task state={:#x} rip={:#x} sys={:#x} a0={:#x} a1={:#x}",
+                    "binder-stall:    holder task comm='{}' state={:#x} rip={:#x} sys={:#x} a0={:#x} a1={:#x}",
+                    comm,
                     tk.state().bits(),
                     rip,
                     sys,
@@ -1779,6 +1899,125 @@ unsafe fn stall_thread_line(proc: &Arc<BinderProc>, t: &Arc<BinderThread>) {
                         crate::sync::futex::task_futex_mm_id(task),
                         woken
                     );
+                    // sc75: read the futex WORD through the HOLDER's own
+                    // page tables (khungtaskd's get_user would use the
+                    // wrong mm). The word says whether the lock is still
+                    // owned (pthread mutexes store the owner tid) or
+                    // already released — a released word plus a sleeping
+                    // waiter is a lost futex wake; an owned word names the
+                    // owner to chase.
+                    let word = tk
+                        .address_space()
+                        .and_then(|aspace| {
+                            let root = aspace.root_ppn();
+                            // SAFETY: read-only diagnostic walk of the
+                            // holder's live user page tables.
+                            unsafe {
+                                crate::arch::mm::mm_ops::PageTableWalker::walk(
+                                    root,
+                                    uaddr as u64,
+                                )
+                            }
+                            .map(|(ppn, _)| {
+                                let pa = (ppn as usize) << 12;
+                                let kv = crate::arch::mm::phys_to_virt(
+                                    crate::arch::mm::PhysAddr::new(pa as u64),
+                                )
+                                .bits() as usize
+                                    + (uaddr & 0xfff);
+                                // SAFETY: the walked leaf maps the holder's
+                                // own futex word; one volatile u32 read.
+                                unsafe { core::ptr::read_volatile(kv as *const u32) }
+                            })
+                        });
+                    match word {
+                        Some(v) => {
+                            // Dump the neighbor words too (libc lock structs
+                            // pack owner/counts beside the futex word — musl
+                            // recursive/rwlock layouts need them to decode).
+                            let mut nb = [0u32; 4];
+                            let mut got = 0;
+                            for (k, slot) in nb.iter_mut().enumerate() {
+                                let addr = uaddr + 4 + 4 * k;
+                                if let Some(x) = tk.address_space().and_then(|aspace| {
+                                    let root = aspace.root_ppn();
+                                    // SAFETY: read-only diagnostic walk.
+                                    unsafe {
+                                        crate::arch::mm::mm_ops::PageTableWalker::walk(
+                                            root,
+                                            addr as u64,
+                                        )
+                                    }
+                                    .map(|(ppn, _)| {
+                                        let pa = (ppn as usize) << 12;
+                                        let kv = crate::arch::mm::phys_to_virt(
+                                            crate::arch::mm::PhysAddr::new(pa as u64),
+                                        )
+                                        .bits() as usize
+                                            + (addr & 0xfff);
+                                        // SAFETY: one volatile u32 in the
+                                        // holder's mapped user page.
+                                        unsafe { core::ptr::read_volatile(kv as *const u32) }
+                                    })
+                                }) {
+                                    *slot = x;
+                                    got += 1;
+                                }
+                            }
+                            crate::pr_warn!(
+                                "binder-stall:    futex word = {:#x} (owner tid {}) next[{}]={:08x?}",
+                                v,
+                                v,
+                                got,
+                                nb
+                            );
+                            // Chase a plausible owner tid (glibc stores the
+                            // owner TID in the mutex word for
+                            // error-checking/recursive mutexes).
+                            if v > 0 && v < 0x00ff_ffff {
+                                let owner =
+                                    unsafe { crate::sched::find_task_by_pid(v) };
+                                if !owner.is_null() {
+                                    let ot = unsafe { &*owner };
+                                    let otop = ot.kernel_stack_top();
+                                    #[cfg(feature = "x86_64")]
+                                    let (osys, orip) = {
+                                        let regs = (otop.wrapping_sub(
+                                            crate::arch::x86_64::pt_regs::PT_REGS_SIZE,
+                                        )) as *const crate::arch::x86_64::pt_regs::PtRegs;
+                                        // SAFETY: diagnostic read of the
+                                        // owner's entry frame.
+                                        unsafe { ((*regs).orig_rax, (*regs).rip) }
+                                    };
+                                    #[cfg(feature = "riscv64")]
+                                    let (osys, orip) = {
+                                        let regs = (otop.wrapping_sub(
+                                            crate::arch::riscv64::pt_regs::PT_REGS_SIZE,
+                                        )) as *const crate::arch::riscv64::pt_regs::PtRegs;
+                                        // SAFETY: same contract, riscv64.
+                                        unsafe { ((*regs).a7, (*regs).epc) }
+                                    };
+                                    #[cfg(not(any(feature = "x86_64", feature = "riscv64")))]
+                                    let (osys, orip) = (0u64, 0u64);
+                                    crate::pr_warn!(
+                                        "binder-stall:    owner tid {} state={:#x} sys={:#x} rip={:#x}",
+                                        v,
+                                        ot.state().bits(),
+                                        osys,
+                                        orip
+                                    );
+                                } else {
+                                    crate::pr_warn!(
+                                        "binder-stall:    owner tid {} NOT FOUND (exited while holding?)",
+                                        v
+                                    );
+                                }
+                            }
+                        }
+                        None => crate::pr_warn!(
+                            "binder-stall:    futex word unreadable (page absent)"
+                        ),
+                    }
                 }
             }
         }
@@ -1866,14 +2105,221 @@ pub fn sleep_snapshot() {
     });
 }
 
+/// World-wide search for queued/stacked transactions SENT by (pid, tid) —
+/// the sc74 discriminator: a SERVER-OWING thread (parked owing a reply,
+/// top txn to_tid == self) either has a nested sync txn outstanding
+/// somewhere (legitimate wait) or has nothing (kernel lost it / userspace
+/// never sent it / state corruption). Returns a short human-readable
+/// location list, empty when nothing is outstanding.
+/// SAFETY: caller holds WORLD.
+unsafe fn outstanding_from_tid(world: &World, pid: u32, tid: u32) -> alloc::string::String {
+    let mut found = alloc::string::String::new();
+    for p in &world.procs {
+        let pim = p.im();
+        for (i, wk) in pim.todo.iter().enumerate() {
+            if let Work::Transaction(t) = wk {
+                if t.from_tid == Some(tid) && t.from_proc.as_ref().map(|f| f.pid) == Some(pid) {
+                    use core::fmt::Write;
+                    let _ = write!(
+                        found,
+                        " [p{}todo{} txn{} code{}]",
+                        p.pid, i, t.id, t.code
+                    );
+                }
+            }
+        }
+        for ct in &pim.threads {
+            let cth = ct.st();
+            for (i, wk) in cth.todo.iter().enumerate() {
+                if let Work::Transaction(t) = wk {
+                    if t.from_tid == Some(tid) && t.from_proc.as_ref().map(|f| f.pid) == Some(pid) {
+                        use core::fmt::Write;
+                        let _ = write!(
+                            found,
+                            " [p{}t{}todo{} txn{} code{}]",
+                            p.pid, ct.tid, i, t.id, t.code
+                        );
+                    }
+                }
+            }
+            for (i, st) in cth.txn_stack.iter().enumerate() {
+                if st.from_tid == Some(tid) && st.from_proc.as_ref().map(|f| f.pid) == Some(pid) {
+                    use core::fmt::Write;
+                    let _ = write!(
+                        found,
+                        " [p{}t{}stack{} txn{} code{}]",
+                        p.pid, ct.tid, i, st.id, st.code
+                    );
+                }
+            }
+        }
+        for node in &pim.nodes {
+            for t in node.st().async_todo.iter() {
+                if t.from_tid == Some(tid) && t.from_proc.as_ref().map(|f| f.pid) == Some(pid) {
+                    use core::fmt::Write;
+                    let _ = write!(found, " [p{}node{} async txn{}]", p.pid, node.id, t.id);
+                }
+            }
+        }
+    }
+    found
+}
+
+/// One line of the transition ring (sc74 forensics).
+/// SAFETY: caller holds WORLD.
+unsafe fn hist_line(t: &Arc<BinderThread>) {
+    let th = t.st();
+    use core::fmt::Write;
+    // ONE printk call with embedded newlines every 4 entries — separate
+    // continuation prints were spliced by concurrent console traffic at
+    // exactly the decisive ring tail (sc77: "REPLY_P|binder-stall:").
+    let mut s = alloc::string::String::new();
+    let mut n = 0;
+    for k in 0..BHIST {
+        let idx = (th.hcur + k) % BHIST;
+        let e = &th.hist[idx];
+        if e.ev == 0 {
+            continue;
+        }
+        let _ = write!(s, " {}({},{})@{}", ev_name(e.ev), e.a, e.b, e.j);
+        n += 1;
+        if n % 4 == 0 {
+            let _ = writeln!(s);
+        }
+    }
+    crate::pr_warn!("binder-stall:   hist tid {} ({} events):{}", t.tid, n, s);
+}
+
+/// sc77: for a SERVER-OWING holder parked in the binder read with NO
+/// outstanding nested txn (the "impossible shape" — OH libipc cannot
+/// legally park there), snapshot the USER stack at the park: the entry
+/// frame's rsp/rip plus candidate return addresses, each resolved to its
+/// covering VMA (fd + file offset) so the frames symbolize offline
+/// against the image's libraries.
+/// SAFETY: caller holds WORLD (VMA walk is on the holder's mm).
+unsafe fn user_park_stack_dump(t: &Arc<BinderThread>) {
+    let task = crate::sched::find_task_by_pid(t.tid);
+    if task.is_null() {
+        return;
+    }
+    let tk = &*task;
+    let Some(aspace) = tk.address_space() else { return };
+    let root = aspace.root_ppn();
+    let read_u64_at = |va: u64| -> Option<u64> {
+        // SAFETY: read-only diagnostic walk of the holder's tables.
+        let (ppn, _) = crate::arch::mm::mm_ops::PageTableWalker::walk(root, va & !0xfff)?;
+        let pa = (ppn as usize) << 12;
+        let kv = crate::arch::mm::phys_to_virt(crate::arch::mm::PhysAddr::new(pa as u64))
+            .bits() as usize
+            + (va & 0xfff) as usize;
+        if va & 0xfff > 0xff8 {
+            return None; // crosses a page — skip rather than split
+        }
+        // SAFETY: one volatile u64 in the holder's mapped user page.
+        Some(core::ptr::read_volatile(kv as *const u64))
+    };
+    let top = tk.kernel_stack_top();
+    #[cfg(feature = "x86_64")]
+    let (rsp, rip) = {
+        let regs = (top.wrapping_sub(crate::arch::x86_64::pt_regs::PT_REGS_SIZE))
+            as *const crate::arch::x86_64::pt_regs::PtRegs;
+        // SAFETY: diagnostic read of the holder's entry frame.
+        unsafe { ((*regs).rsp, (*regs).rip) }
+    };
+    #[cfg(feature = "riscv64")]
+    let (rsp, rip) = {
+        let regs = (top.wrapping_sub(crate::arch::riscv64::pt_regs::PT_REGS_SIZE))
+            as *const crate::arch::riscv64::pt_regs::PtRegs;
+        // SAFETY: same contract, riscv64.
+        unsafe { ((*regs).sp, (*regs).epc) }
+    };
+    #[cfg(not(any(feature = "x86_64", feature = "riscv64")))]
+    let (rsp, rip) = (0u64, 0u64);
+    crate::pr_warn!(
+        "binder-stall:   PARK-STACK tid {} rip={:#x} rsp={:#x}",
+        t.tid,
+        rip,
+        rsp
+    );
+    // 16 candidate frame words above rsp; each that lands in a mapped
+    // exec-looking VMA prints with the file offset for offline symbolize.
+    let vmas = aspace.vma_read();
+    for i in 0..16u64 {
+        let Some(v) = read_u64_at(rsp + 8 * i) else { continue };
+        // Skip obvious non-pointers (small ints, non-canonical).
+        if v < 0x1000 || v > 0x7fff_ffff_ffff {
+            continue;
+        }
+        if let Some(vm) = vmas.find(crate::mm::page::VirtAddr::new(v as usize)) {
+            let off = vm.offset() + (v as usize - vm.start().as_usize());
+            // Instruction bytes at the frame (Session F's byte-match method:
+            // search these bytes at fileoff in the debugfs-extracted .so).
+            let bytes = read_u64_at(v).unwrap_or(0);
+            crate::pr_warn!(
+                "binder-stall:   ustack[{}]={:#x} vma={:#x}-{:#x} fd={} fileoff={:#x} bytes={:#018x}",
+                i,
+                v,
+                vm.start().as_usize(),
+                vm.end().as_usize(),
+                vm.file_fd(),
+                off,
+                bytes
+            );
+        }
+    }
+}
+
+/// Wait-queue census + task state for a stalled reader — the live-wake
+/// discriminator: an entry flagged woken while its task still sleeps is the
+/// sticky-skip lost wake (W1); woken=0 means nobody ever issued the wake.
+fn thread_census_line(t: &Arc<BinderThread>) {
+    let (total, woken) = t.wait.vw_queue_census();
+    let task = unsafe { crate::sched::find_task_by_pid(t.tid) };
+    let state = if task.is_null() {
+        0xFF
+    } else {
+        unsafe { (*task).state().bits() }
+    };
+    let verdict = if task.is_null() {
+        "TASK-GONE"
+    } else if woken > 0 && (state & 0x3) != 0 {
+        // sleeping (INTERRUPTIBLE=1/UNINTERRUPTIBLE=2) with a woken entry
+        "LOST-WAKE-SHAPE"
+    } else if woken > 0 {
+        "woken+runnable"
+    } else {
+        "never-woken"
+    };
+    crate::pr_warn!(
+        "binder-stall:   census tid {} q={} woken={} task_state={:#x} {}",
+        t.tid,
+        total,
+        woken,
+        state,
+        verdict
+    );
+}
+
 pub fn stall_report() {
     const STALL_SECS: u64 = 120;
+    /// Re-kick threshold (heal): any binder reader parked longer than this
+    /// gets an idempotent wake — if the wedge is a lost wake anywhere in
+    /// the chain, the re-kick unwedges it; a legitimately-parked thread
+    /// just re-checks its condition and re-parks. OH's own retry ladder
+    /// runs 40 s timeouts, so a 15 s re-kick keeps chains alive without
+    /// spamming healthy 1-3 s waits.
+    const REKICK_SECS: u64 = 15;
     let now = crate::drivers::timer::get_jiffies();
     let hz = crate::config::KERNEL_HZ as u64;
     if hz == 0 {
         return;
     }
-    let mut dump_owner: Option<Arc<BinderProc>> = None;
+    let mut dump_owners: Vec<Arc<BinderProc>> = Vec::new();
+    // Threads to re-kick after WORLD is released (heal + forensics event).
+    let mut rekick: Vec<Arc<BinderThread>> = Vec::new();
+    // Procs with pending todo: re-run the pick-one wake (heals a txn that
+    // sits on a proc todo because its wake was consumed in vain).
+    let mut retodo: Vec<Arc<BinderProc>> = Vec::new();
     {
         let w = world_lock();
         // SAFETY: read-only traversal under WORLD (pm() casts are only used
@@ -1885,15 +2331,58 @@ pub fn stall_report() {
             };
             for p in &world.procs {
                 let proc = pm(world, p);
+                if !proc.im().todo.is_empty() {
+                    retodo.push(p.clone());
+                }
                 for t in &proc.im().threads {
                     let since = t.read_wait_since.load(core::sync::atomic::Ordering::Acquire);
-                    if since == 0 || now.saturating_sub(since) < STALL_SECS * hz {
+                    if since == 0 {
+                        continue;
+                    }
+                    let age = now.saturating_sub(since);
+                    if age >= REKICK_SECS * hz {
+                        if !t.rekicked.swap(true, core::sync::atomic::Ordering::AcqRel) {
+                            t.hist(EV_REKICK, (age / hz) as u32, 0);
+                        }
+                        let kicks = t.rekick_count.fetch_add(1, core::sync::atomic::Ordering::AcqRel);
+                        if kicks >= 1 {
+                            // A previous kick failed to run this task within
+                            // a full scan interval — wake→run leak (sc76:
+                            // REKICK@6007 ignored for 230 s on a healthy
+                            // idle worker; the WAKE-STRANDED family). Dump
+                            // the task's scheduler view: linked? on_cpu?
+                            // pick_state? — names which stage ate the wake.
+                            let task = unsafe { crate::sched::find_task_by_pid(t.tid) };
+                            if !task.is_null() {
+                                let tk = unsafe { &*task };
+                                let linked = match crate::sched::sched::grq_diag_cfs_linked(task) {
+                                    Some(b) => {
+                                        if b { "1" } else { "0" }
+                                    }
+                                    None => "n/a",
+                                };
+                                crate::pr_warn!(
+                                    "binder-stall: WAKE-RUN-LEAK tid {} kicked {}x age {}s state={:#x} cfs_linked={} on_cpu={} pick_state={} cpu={}",
+                                    t.tid,
+                                    kicks + 1,
+                                    age / hz,
+                                    tk.state().bits(),
+                                    linked,
+                                    tk.on_cpu(),
+                                    tk.pick_state(),
+                                    tk.ti_cpu()
+                                );
+                            }
+                        }
+                        rekick.push(t.clone());
+                    }
+                    if age < STALL_SECS * hz {
                         continue;
                     }
                     if t.stall_reported.swap(true, core::sync::atomic::Ordering::AcqRel) {
                         continue;
                     }
-                    let secs = (now.saturating_sub(since) / hz).max(1);
+                    let secs = (age / hz).max(1);
                     let th = t.st();
                     let pending = th.txn_stack.len();
                     let owed_by = th.txn_stack.last().map(|txn| txn.to_proc.clone());
@@ -1904,9 +2393,21 @@ pub fn stall_report() {
                             proc.pid, t.tid, secs
                         ),
                         (n, Some(owner)) => {
+                            // sc74 discriminator: the top txn is either one
+                            // this thread SENT (from_tid == self — classic
+                            // client waiting for its reply) or one it is
+                            // SERVICING (to_tid == self — a server parked in
+                            // read owing a reply, the death-loop terminal
+                            // shape; to_proc == own pid is NOT sufficient to
+                            // tell them apart with same-process IPC).
+                            let shape = match &top_txn {
+                                Some(txn) if txn.to_tid() == Some(t.tid) => "SERVER-OWING",
+                                Some(txn) if txn.from_tid == Some(t.tid) => "CLIENT-WAIT",
+                                _ => "CLIENT-WAIT?",
+                            };
                             crate::pr_warn!(
-                                "binder-stall: pid {} tid {} waiting {}s for reply from pid {} ({} txn(s) stacked)",
-                                proc.pid, t.tid, secs, owner.pid, n
+                                "binder-stall: pid {} tid {} waiting {}s for reply from pid {} ({} txn(s) stacked) {}",
+                                proc.pid, t.tid, secs, owner.pid, n, shape
                             );
                             if let Some(txn) = top_txn {
                                 crate::pr_warn!(
@@ -1919,8 +2420,30 @@ pub fn stall_report() {
                                     txn.to_tid().unwrap_or(0)
                                 );
                             }
-                            if dump_owner.is_none() {
-                                dump_owner = Some(owner.clone());
+                            // SERVER-OWING: does a nested txn from this
+                            // thread exist anywhere in the world?
+                            if shape == "SERVER-OWING" {
+                                let out = outstanding_from_tid(world, proc.pid, t.tid);
+                                if out.is_empty() {
+                                    crate::pr_warn!(
+                                        "binder-stall:   NO outstanding txn from tid {} — nested call vanished or never sent",
+                                        t.tid
+                                    );
+                                    // sc77: the impossible shape gets a user-stack
+                                    // snapshot — names the OH path that parked.
+                                    user_park_stack_dump(t);
+                                } else {
+                                    crate::pr_warn!(
+                                        "binder-stall:   outstanding from tid {}:{}",
+                                        t.tid,
+                                        out
+                                    );
+                                }
+                            }
+                            thread_census_line(t);
+                            hist_line(t);
+                            if dump_owners.len() < 2 && !dump_owners.iter().any(|o| Arc::ptr_eq(o, owner)) {
+                                dump_owners.push(owner.clone());
                             }
                         }
                         (n, None) => crate::pr_warn!(
@@ -1930,23 +2453,61 @@ pub fn stall_report() {
                     }
                 }
             }
-            // Full dump of the first owing proc: proc todo depth + every
+            // Full dump of up to two owing procs: proc todo depth + every
             // thread's looper/wait/stack/todo state.
-            if let Some(owner) = &dump_owner {
+            for owner in &dump_owners {
                 if let Some(op) = world.procs.iter().find(|p| Arc::ptr_eq(p, owner)) {
                     let opm = pm(world, op);
+                    // Name the owing process via its main thread's comm.
+                    let pname = unsafe {
+                        let mt = crate::sched::find_task_by_pid(op.pid);
+                        if mt.is_null() {
+                            "?"
+                        } else {
+                            let c = (*mt).comm();
+                            core::str::from_utf8(&c[..])
+                                .unwrap_or("?")
+                                .trim_end_matches('\0')
+                        }
+                    };
                     crate::pr_warn!(
-                        "binder-stall: owing pid {} proc todo depth {} threads {}",
+                        "binder-stall: owing pid {} ('{}') proc todo depth {} threads {}",
                         op.pid,
+                        pname,
                         opm.im().todo.len(),
                         opm.im().threads.len()
                     );
                     for t in &opm.im().threads {
                         stall_thread_line(op, t);
+                        if !t.st().txn_stack.is_empty() {
+                            thread_census_line(t);
+                            hist_line(t);
+                        }
+                    }
+                    // sc75: the owing proc's full futex-waiter graph — the
+                    // intra-process contention set (each entry: waiting tid,
+                    // uaddr, woken). The wedge terminal so far is handlers
+                    // blocked on per-thread-stack condvar/mutex words.
+                    let fw = crate::sync::futex::waiters_of_tgid(op.pid);
+                    if !fw.is_empty() {
+                        let mut s = alloc::string::String::new();
+                        use core::fmt::Write;
+                        for (pid, uaddr, woken) in fw {
+                            let _ = write!(s, " [{}:{:#x} w={}]", pid, uaddr, woken);
+                        }
+                        crate::pr_warn!("binder-stall: futex waiters of pid {}:", op.pid);
+                        crate::pr_warn!("binder-stall:{}", s);
                     }
                 }
             }
         }
+    }
+    // Heals, outside WORLD (wake_proc_one takes the world lock itself).
+    for t in rekick {
+        wake_thread(&t);
+    }
+    for p in retodo {
+        wake_proc_one(&p);
     }
 }
 
@@ -2210,6 +2771,16 @@ fn binder_ioctl_write_read(
     }
 
     if bwr.write_size > 0 {
+        // sc74 forensics: the first write command of every BWR — the wedged
+        // server threads owed replies yet parked in a read, so their LAST
+        // BWR's write side is the discriminator (empty / ref-commands /
+        // a BC_REPLY or BC_TRANSACTION that never reached the kernel).
+        {
+            let first = get_user_at::<u32>(bwr.write_buffer, 0).unwrap_or(0xFFFF_FFFF);
+            let w = world_lock();
+            // SAFETY: under WORLD.
+            unsafe { thread.hist(EV_BWR, first, bwr.write_size as u32) };
+        }
         let ret = binder_thread_write(
             proc,
             thread,
@@ -3089,6 +3660,9 @@ fn binder_transaction(
                     crate::pr_info!("binder: BC_REPLY on oneway");
                     return;
                 };
+                // sc74 forensics: the pop is the point of no return — after
+                // it, a failed reply leaves the original sender unwakeable.
+                thread.hist(EV_REPLY_POP, t.id as u32, from_proc.pid);
                 if from_proc.im().is_dead {
                     *err_cmd = BR_DEAD_REPLY;
                     crate::pr_info!("binder: BC_REPLY requester dead");
@@ -3541,6 +4115,7 @@ fn binder_transaction(
                     // exact-thread wake (wake_up_interruptible_sync on
                     // target_thread->wait in Linux)
                     wake_thread(&rthread);
+                    rthread.hist(EV_REPLY_PUSHED, txn.id as u32, *rtid);
                     // The original transaction is finished: unpin its node.
                     if let Some(orig) = &in_reply_to {
                         unpin_txn_node(world, orig);
@@ -3550,6 +4125,11 @@ fn binder_transaction(
                 } else {
                     *err_cmd = BR_DEAD_REPLY;
                     reply_target_gone = true;
+                    thread.hist(
+                        EV_REPLY_GONE,
+                        in_reply_to.as_ref().map(|x| x.id as u32).unwrap_or(0),
+                        *rtid,
+                    );
                     // Unpin the original transaction's node while we still
                     // hold WORLD (unpin_txn_node expects it); the buffer
                     // and any installed fds are freed after the lock.
@@ -3575,6 +4155,7 @@ fn binder_transaction(
                     if ns.has_async_transaction {
                         ns.async_todo.push_back(txn.clone());
                         parked = true;
+                        thread.hist(EV_TXN_PARKED_ASYNC, txn.id as u32, ns.async_todo.len() as u32);
                         crate::pr_info!(
                             "binder: oneway txn {} parked on node {} (queue len {})",
                             txn.id,
@@ -3589,6 +4170,7 @@ fn binder_transaction(
                     // SAFETY: under WORLD.
                     unsafe { txn.set_holds_async_slot(true) };
                     pm(world, &target).im().todo.push_back(Work::Transaction(txn.clone()));
+                    thread.hist(EV_TXN_PQUEUED, txn.id as u32, target.pid);
                     wakes.push(target.clone());
                 }
                 // The async buffer keeps its txn alive for the node-slot
@@ -3629,13 +4211,16 @@ fn binder_transaction(
                     }
                 }
                 th.txn_stack.push(txn.clone());
+                thread.hist(EV_TXN_SENT, txn.id as u32, target.pid);
                 if let Some(tt) = t_thread {
                     let tth = tt.st();
                     tth.todo.push_back(Work::Transaction(txn.clone()));
                     tth.process_todo = true;
+                    tt.hist(EV_TXN_TQUEUED, txn.id as u32, tt.tid);
                     wake_ths.push(tt);
                 } else {
                     pm(world, &target).im().todo.push_back(Work::Transaction(txn.clone()));
+                    thread.hist(EV_TXN_PQUEUED, txn.id as u32, target.pid);
                     wakes.push(target.clone());
                 }
             }
@@ -4002,12 +4587,15 @@ fn binder_thread_read(
                     th.waiting_for_proc_work = th.todo.is_empty()
                         && th.txn_stack.is_empty()
                         && (th.looper & (LOOPER_ENTERED | LOOPER_REGISTERED)) != 0;
+                    thread.hist(EV_PARK, th.txn_stack.len() as u32, 0);
                 }
             }
             thread
                 .read_wait_since
                 .store(crate::drivers::timer::get_jiffies(), core::sync::atomic::Ordering::Release);
             thread.stall_reported.store(false, core::sync::atomic::Ordering::Release);
+            thread.rekicked.store(false, core::sync::atomic::Ordering::Release);
+            thread.rekick_count.store(0, core::sync::atomic::Ordering::Release);
             let r = crate::wait_event_interruptible!(&thread.wait, {
                 let w = world_lock();
                 // SAFETY: under WORLD.
@@ -4019,6 +4607,7 @@ fn binder_thread_read(
                 // SAFETY: under WORLD.
                 unsafe {
                     thread.st().waiting_for_proc_work = false;
+                    thread.hist(EV_WAKE_RET, r as u32, 0);
                 }
             }
             if r != 0 {
@@ -4059,12 +4648,14 @@ fn binder_thread_read(
                     match work {
                         Work::TransactionComplete => {
                             stage_cmd!(BR_TRANSACTION_COMPLETE);
+                            thread.hist(EV_TC_RECV, 0, 0);
                         }
                         Work::ReturnError(cmd, param) => {
                             stage_cmd!(cmd);
                             if cmd == BR_ERROR {
                                 staged.extend_from_slice(&(param as u32).to_ne_bytes());
                             }
+                            thread.hist(EV_ERR_RECV, cmd, param as u32);
                         }
                         Work::Node(node) => {
                             // BINDER_WORK_NODE: derive the BR_*_REFS
@@ -4138,6 +4729,15 @@ fn binder_thread_read(
                         Work::Transaction(t) => {
                             got_transaction = true;
                             let is_reply = t.target_node.is_none();
+                            if is_reply {
+                                thread.hist(EV_REPLY_RECV, t.id as u32, 0);
+                            } else {
+                                thread.hist(
+                                    EV_TXN_RECV,
+                                    t.id as u32,
+                                    t.from_proc.as_ref().map(|p| p.pid).unwrap_or(0),
+                                );
+                            }
                             let (tptr, tcookie) = match &t.target_node {
                                 Some(n) => (n.ptr, n.cookie),
                                 None => (0, 0),
@@ -4197,7 +4797,31 @@ fn binder_thread_read(
                             if !is_reply && t.flags & TF_ONE_WAY == 0 {
                                 // The receiver stacks it for its BC_REPLY.
                                 t.set_to_tid(thread.tid);
+                                let recv_id = t.id as u32;
                                 thread.st().txn_stack.push(t);
+                                // sc79 ROOT CAUSE (the impossible shape):
+                                // END the read after delivering ONE sync
+                                // transaction. OH libipc consumes ONE
+                                // command per TransactWithDriver loop
+                                // iteration; if a second BR_TRANSACTION
+                                // (typically a from-walk redirect already
+                                // sitting on this thread's todo) is staged
+                                // in the SAME read, the kernel stacks both
+                                // while userspace has dispatched only the
+                                // first — the first handler's nested calls
+                                // then make its BC_REPLY pop the WRONG
+                                // stack top (the undelivered-to-userspace
+                                // txn): replies cross, counters desync,
+                                // and the thread strands in a read owing a
+                                // reply with no outstanding nested txn
+                                // (sc79 ring: TXN_RECV(12919)@11372
+                                // TXN_RECV(12932)@11372 same jiffy, then
+                                // the SERVER-OWING park; sc74/77/78/79
+                                // binder-stall wedge family). Linux
+                                // binder_thread_read returns after one
+                                // transaction delivery — mirror it.
+                                thread.hist(EV_TXN_RECV_END, recv_id, 1);
+                                break;
                             }
                         }
                     }

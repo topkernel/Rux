@@ -666,3 +666,169 @@ discipline-refusal bypass), or join the wildwrite agent's GDB-freeze
 evidence (its ww-v1/ww-s2-r7 boots are chasing the same double-run
 engine). Once the producer is fixed, flip PREEMPT_HOOK_ENABLED=true and
 re-run the A/B — the hook itself is exonerated (sc69).
+
+Session J update (2026-10-21 06:2x, sc75/sc76 — IPC death loop root
+structure identified; samgr-internal freeze behind the launcher wedge):
+
+EVIDENCE CHAIN (sc74 read + sc75/sc76 live captures with the new
+instrumentation):
+- sc74's terminal shape re-read: binder-stall "waiting for reply" lines
+  CONFLATED two shapes. New stall report tags them: CLIENT-WAIT (top txn
+  SENT by the thread) vs SERVER-OWING (top txn SERVICED by the thread,
+  to_tid == self).
+- sc75/sc76 SERVER-OWING holders are parked in FUTEX_WAIT_PRIVATE
+  (sys=202) INSIDE their txn handlers — NOT in binder reads. The kernel
+  txn sits on the stack; the reply can't come until a userspace lock
+  releases.
+- sc76 decisive: pid 334 = samgr (code 3 = ADD_SYSTEM_ABILITY_TRANSACTION
+  per SamgrInterfaceCode). ALL 7 samgr threads blocked: 6 on futex word
+  0x7ff0009f5a64 reading 0x80000010 (musl rwlock: WAITERS + 16 READERS
+  — abilityMapLock_), main thread on 0x7ff0009f59d0 (0x94 away).
+  With only 7 live threads, 16 held read locks require holders that are
+  gone or stuck inside read scopes. Every AddSystemAbility/Subscribe
+  then freezes; every client chain (launcher included) waits on samgr.
+- OH source audit (oh-robot tree): samgr's notify is TF_ASYNC (oneway,
+  sender never blocks — our oneway path also never blocks the sender);
+  FindSystemAbilityNotify holds listenerMapLock_ across notifies but the
+  PostTask-based design keeps the IPC threads out of that path. The
+  abilityMapLock_ read scopes audited are all short map lookups — so
+  16 stuck readers are NOT explainable by in-scope blocking; the leading
+  theories: (a) threads died holding read locks (leak), (b) readers
+  parked in-kernel mid-scope and never scheduled (wake→run leak).
+
+KERNEL-SIDE LEAKS FOUND AND FIXED/INSTRUMENTED (my lane):
+- W1 (wait.rs): wake_up marked entries woken BEFORE wake_up_process and
+  skipped them later; a refused transition consumed the one-shot token
+  permanently (the sticky-skip lost wake). Now clears the flag on a
+  refused wake so later wakes retry (idempotent).
+- REKICK heal: khungtaskd's binder stall scan re-kicks any reader parked
+  >15s (wake_thread) and re-runs wake_proc_one for procs with pending
+  todo. Converts permanent lost-wake strands into bounded hiccups.
+- sc76 caught a rekick wake FAILING: tid 563 REKICK@6007 ignored for
+  230s (WAKE_RET@29268 only when real work arrived) — a wake→run leak
+  on a healthy idle worker; W1 made the later natural wake land (pre-W1
+  the delivery wake would have seen woken=true and skipped). sc77 adds
+  WAKE-RUN-LEAK verification: kick count >= 2 dumps the task's sched
+  view (cfs_linked/on_cpu/pick_state).
+- THREAD-DIED-SERVICING detector: pr_warn when a binder thread dies with
+  a stacked txn or pending todo while its proc lives — names every
+  leaked-userspace-lock victim at death time (the phantom-reader hunt).
+- Transition ring (24 events/thread: TXN_SENT/PQUEUED/TQUEUED/RECV,
+  REPLY_POP/PUSHED/GONE, PARK/WAKE_RET, BWR first-cmd, REKICK, ...) +
+  woken-census + outstanding-txn world search + futex word + neighbor
+  words through the HOLDER's page tables + per-tgid futex waiter graph.
+- comm naming for stall holders and owing procs (sc77).
+
+NEXT: sc77 boots with comm + death detector + WAKE-RUN-LEAK. Decisions
+pending on its data: phantom readers = dead threads (→ chase the killer,
+likely overlaps wildwrite/OOM lines) vs unschedulable readers (→ sched
+pick-side, WAKE-STRANDED family). Either way the launcher milestone
+needs samgr unfrozen; the heals keep client chains breathing meanwhile.
+
+Session J update 2 (07:1x, sc77/sc78 — WAKE-RUN-LEAK family quantified,
+impossible-shape ring evidence, known-crash filter):
+
+- sc77 wedge: 'foundation' (pid 815, 30 threads) — 8 futex waiters on
+  PER-THREAD-STACK addresses (page offset 0x7d4 pattern: per-call
+  condvar waits in SA handlers) + OS_IPC workers + one 'powermgr' thread
+  parked in binder reads. SERVER-OWING impossible shape (scan-gated)
+  hit tid 817/1049: parked in read owing replies, world-search says NO
+  outstanding nested txn ("nested call vanished or never sent").
+- tid 815 ring (sc77, splice-limited): PARK(1,0)@11011 ->
+  REPLY_PUSHED(19627,815)@11012 -> [splice] — the reply landed right
+  after the park; whether the wake returned is the spliced bytes. sc79
+  carries atomic single-printk rings to close this hole.
+- sc78: 230 WAKE-RUN-LEAK probe hits, ALL {sleeping, cfs_linked=0,
+  on_cpu=false, pick_state=1}. pick_state=PICK_LIVE turned out to be a
+  red herring (it persists on every sleeper after its last run — not
+  cleared on normal sleep). Most hits are healthy idle workers that
+  wake+repark (the probe cannot distinguish without the ring); the REAL
+  leak signature is PARK -> REPLY_PUSHED -> no WAKE_RET with todo>0.
+- sc77's 5 THREAD-DIED-SERVICING hits = the KNOWN
+  libusb_pnp_manager.z.so+0x15bac NULL list-walk crash-loop (verified
+  by byte-match on the debugfs-extracted vendor lib: 0x15bac =
+  "48 8b 03" mov rax,[rbx] with rbx=0 in the walk loop). devhost_usb
+  processes, unrelated to the IPC wedge; do not chase.
+- sc79 (booting): W2 reporters at both wake-refusal points
+  (Task::wake_up sleeping branch + wake_up_enqueue tail, rate-limit 16)
+  — the refusing guard will name itself. Also atomic hist records.
+- Offline symbolization kit ready: /tmp/oh-libs/{syslib64(1073),
+  vendorlib64(228)} extracted from the images; method verified against
+  the known crash site. PARK-STACK frames print fd+fileoff+bytes.
+
+Session J update 3 (07:4x — ROOT CAUSE FOUND AND FIXED: one sync txn
+per read):
+
+sc79's park-stack + ring closed the impossible shape:
+- tid 796 (distributeddata service, caller frames byte-matched to
+  libdistributeddataservice.z.so): ring shows TXN_RECV(12919)@11372
+  TXN_RECV(12932)@11372 — TWO sync txns delivered in ONE read (the
+  second was a from-walk redirect already sitting on the thread's own
+  todo). Kernel stacked both; OH libipc dispatches one command per
+  TransactWithDriver iteration. The first handler's nested call made
+  its BC_REPLY pop the WRONG stack top (the undispatched second txn):
+  replies crossed, accounting desynced, thread strands in a read owing
+  a reply with NO outstanding nested txn (the SERVER-OWING shape
+  reproduced across sc74/77/78/79).
+- CASCADE: crossed/never-delivered replies -> client chains wait
+  forever -> samgr AddSystemAbility pile-ups (the 16-reader rwlock
+  freeze) -> os-account proxy fetch failures ("Get proxy failed") ->
+  SA hosts restart-loop -> launcher chain freezes.
+- FIX (landed): binder_thread_read breaks the drain loop after staging
+  ONE sync (non-reply) transaction — Linux parity. Ring event
+  TXN_RECV_END added. sc80 validates.
+- W2 verdict: the 2 wake-refusal hits were the benign R42 double-wake
+  race (state flipped RUNNING by a concurrent wake) — the wake path is
+  clean; the earlier "WAKE-RUN-LEAK" 230 hits were mostly healthy
+  idle workers waking+reparking (cfs_linked=0 is correct for parked
+  tasks; pick_state=PICK_LIVE persists on every sleeper — red herring).
+- Remaining known-issues (not kernel): libusb_pnp_manager.z.so+0x15bac
+  NULL list-walk crash-loop (devhost_usb, byte-verified vs vendor lib);
+  OH per-call condvar waits in SA handlers are load-bearing on reply
+  latency, so residual slowness still hurts.
+
+Session J FINAL (2026-10-21 08:0x — one-txn-per-read landed and validated;
+samgr rwlock freeze isolated as the remaining blocker):
+
+VALIDATION (sc80, fix in, 25-min quiet boot on scgold copy):
+- impossible shape (SERVER-OWING + NO outstanding txn): sc77=2, sc79=2,
+  sc80=0 — GONE. Rings now show TXN_RECV immediately followed by
+  TXN_RECV_END (exactly one sync delivery per read).
+- binder reply-stalls per boot: sc74=9 -> sc77=7 -> sc79=7 -> sc80=4.
+- KERNPANIC 0 everywhere; bindmkdir/ltp paths untouched.
+- worst strand still 26-270s family across boots — that is the CPU
+  contention storm (BMS scan + OH polling + incumbent pid 316 with the
+  leaked preempt_count), NOT the reply bug; it fluctuates with host load.
+- MILESTONE: not reached (OnForeground 0; screen still the 8-color
+  oracle checker). Remaining blocker chain: samgr (pid 334) still
+  freezes on the abilityMapLock_ rwlock word 0x80000010 (WAITERS + 16
+  readers) — all samgr threads futex-blocked; no samgr thread dies
+  mid-service (THREAD-DIED-SERVICING never fired for samgr), so the
+  16 readers are live threads stuck inside read-lock scopes or a stale
+  count. NEXT SESSION: dump which samgr threads hold the read lock
+  (walk each thread's user stack for the CheckSystemAbility/
+  GetSystemAbility frame + rip; or instrument musl rdlock via the
+  futex-word deltas), and check the event-runner (workHandler_) state
+  — it is invisible to the binder dump (not a binder thread).
+
+COMMITS this session (all English, feature/samgr-callback):
+- W1: wait.rs clear_woken on refused wake (sticky-skip lost-wake retry)
+- binder forensics: 24-event transition ring + atomic single-printk
+  record, SERVER-OWING/CLIENT-WAIT discriminator, world-wide
+  outstanding-txn search, woken census, futex word + neighbors via
+  holder page tables, per-tgid futex waiter graph, comm naming,
+  user park-stack dump with fd/fileoff/instruction bytes
+- heals: stall-scan rekick (15s) + retodo wake_proc_one re-run
+- detectors: THREAD-DIED-SERVICING, WAKE-RUN-LEAK kick verification,
+  W2 wake-refusal branch reports
+- ROOT-CAUSE FIX: one sync transaction per read (Linux parity)
+- notes: three SC-SESSIONS updates with the full evidence chain
+
+TOOLING for the tree: /tmp/oh-libs/{syslib64,vendorlib64} extracted
+libs (byte-match symbolization method verified twice); reproduce with
+debugfs dump from run/oh-img/{system,vendor}.img.
+
+Session I constraints honored: no mm/** or dfx/switches.rs edits;
+only own QEMU PIDs killed (sc78 restart); max 2 own QEMUs at a time;
+shared images snapshot+file.locking=off, userdata private reflink
+copies; English commits; early wip snapshots.
