@@ -40,23 +40,66 @@ smashes into pointer-bearing statics.
    statics — zero kernel change.** Boot my x86_64 build on the OH image
    (read-only: -snapshot + file.locking=off, TCG thread=multi, smp2, 4G)
    with `-gdb tcp:127.0.0.1:<private port>`. gdb batch script arms
-   `watch` on hpet::BASE / BASE_LOCKED / BASE_LOCKED_INV / DIV / DIV_INV
-   / BOOT_OFFSET / BOOT_OFFSET_INV (all quiet after hpet::init; LAST_GOOD
-   is hot and excluded). Every watchpoint hit logs rip + regs + stack to
-   the gdb log and continues; legit writers (init, heal paths) are a
-   known small rip set — anything else IS the wild writer.
+   `watch` on the hpet quiet statics + canary page (addresses
+   nm-derived; see run/ww-gdbscript.py). Every watchpoint hit logs rip +
+   symbol + regs + stack to the gdb log and continues; legit writers
+   (hpet::init pre-attach, heal paths) are a known small rip set —
+   anything else IS the wild writer.
 2. **Kernel-side always-on tripwire (my territory): dfx=wildwatch
-   (switch bit 26).** Relocate the locked-pair cluster into a
-   page-exclusive aligned region, clear RW on that page's kernel PTEs
-   after init (+TLB flush). A store to the page takes the existing
-   kernel-mode #PF path, which already prints rip + an rbp frame walk
-   and then KERNPANIC with full regs + 24 stack words. One-shot per
-   boot, zero UART traffic until the hit (no timing perturbation).
+   (switch bit 26) — LANDED and end-to-end validated (commit 42eb2006).**
+   - The quiet-after-init timekeeper statics moved into a page-exclusive
+     2-page `WildGuardCluster` (canary page + members page) in hpet.rs;
+     hot statics (BASE, LAST_GOOD) stay outside.
+   - After init the guard pages go read-only in every reachable alias
+     (kernel-half link VAs, linear map, low identity), splitting the 2MiB
+     image leaf. A store to the frames page-faults at the writer's RIP
+     and the existing kernel-#PF printer carries rip + rbp walk +
+     KERNPANIC dump → addr2line names the writer.
+   - Canary page verified from the 1 s timer cadence (DMA-class writers
+     bypass PTEs).
+   - Self-test (`wildwatch-selftest=1`): deliberate smash → trap fires →
+     dump symbolizes to `rux::dfx::wildwatch::x86::arm` ← `dfx::init` ←
+     `rust_main_tail` — attribution chain proven.
 3. **If neither fires across a boot series:** broaden with a shadow
    checksum scan of the hpet/PER_CPU neighborhoods from the timer tick
    (correlation-only; attribution then needs the watchpoint boot to
    repeat on the same seed).
 
+## Findings so far
+
+- **F1 (significant side-finding): the kernel has never set CR0.WP**
+  (verified live: `cr0=0x80000013`, WP clear). With WP=0, ring-0 stores
+  IGNORE page-table RW bits — every "read-only" supervisor mapping is
+  decorative (COW-on-kernel-side, .rodata hardening, my RO trap alike).
+  Linux sets WP early in boot for exactly this discipline. wildwatch
+  arms WP per-CPU when enabled (arm() on the BSP, the verify cadence on
+  the others). Candidate mainline follow-up: set WP=1 permanently in
+  boot (needs its own soak — any latent legit RO-write would surface).
+- **F2: the b77 "smash" value is the CORRECT device-alias VA.**
+  `device_alias(0xFED00000)` = 0xffff8900_4ed00000 (alias window base
+  0xffff8900_00000000 + (0xfed00000 − 0xb0000000)). The b77 narrative's
+  "0xffff8900fed00000 → 0xffff89004ed00000" byte-smash reading compares
+  against a WRONG baseline; 0xffff8900_4ed00000 is the value hpet::init
+  legitimately stores. What the wild-write engine did in b77/wt1 needs
+  re-reading against this correction (the wt1 GDB wedge showed
+  RDI=0xffff89004ed000f4 = the normal counter-HI offset — the reader
+  was at the RIGHT address; the "smash" may have been in a different
+  static, or the whole b77 attribution chain deserves a re-look from the
+  oh-display worktree's raw logs). Read-side immunity stands regardless.
+- **F3: gdbstub watchpoints work cleanly on this QEMU/TCG** (7-point set
+  armed through a 45 min OH boot, zero overhead visible in serial rate).
+
 ## Run log
 
-(filled as boots complete)
+- ww-smoke (240 s, watchpoints pre-relocation): armed, no hits, clean boot.
+- ww-r1 (2700 s, watchpoints, pre-relocation build): 0 hits, 0 heals,
+  1.7 MB serial — engine did not fire this window.
+- ww-armtest2..11 (wildwatch bring-up): walk bug (missing PDPT level)
+  found via gdb cross-check; arming then clean (2 pages RO + 4 alias
+  PTEs), 300 s boots healthy, zero false positives on the HPET read path.
+- ww-selftest4 (wildwatch-selftest=1): TRAP VALIDATED —
+  `WILDWATCH-SELFTEST firing` → `KERNPANIC pfault badaddr=0xffffffff807c2000
+  rip=0xffffffff8056e42b` → 24 stack words + 3 rbp frames →
+  addr2line: `rux::dfx::wildwatch::x86::arm` ← `rux::dfx::init` ←
+  `rux::rust_main_tail` ← `boot_stack_continuation`.
+- ww-long2 (2700 s, dfx=wildwatch live hunt): running.
