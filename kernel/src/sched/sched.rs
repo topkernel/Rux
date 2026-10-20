@@ -4408,6 +4408,61 @@ pub fn scheduler_tick() {
 unsafe fn context_switch(prev: &mut Task, next: &mut Task) {
     let cpu_id = crate::arch::cpu_id() as u64 as usize;
 
+    // Leak-hunt round 3f: __schedule's discipline refuses to switch out
+    // any non-dead task with a nonzero preempt_count, so a prev reaching
+    // here with a live count means a DISCIPLINE-BYPASSING switch just
+    // happened — the exact event whose guard then drops in another task's
+    // context (the leak producer's other half). One compare + rare print;
+    // rate-gated direct console.
+    {
+        let pc = (*prev).preempt_count();
+        if pc != 0 && !(*prev).state().is_dead() {
+            static LAST: core::sync::atomic::AtomicU64 =
+                core::sync::atomic::AtomicU64::new(0);
+            let now = crate::drivers::timer::get_jiffies();
+            let last = LAST.load(core::sync::atomic::Ordering::Acquire);
+            if now.wrapping_sub(last) >= 20
+                && LAST
+                    .compare_exchange(
+                        last,
+                        now,
+                        core::sync::atomic::Ordering::AcqRel,
+                        core::sync::atomic::Ordering::Acquire,
+                    )
+                    .is_ok()
+            {
+                use crate::console::putchar_no_lock as putchar;
+                fn ph(v: u64) {
+                    use crate::console::putchar_no_lock as putchar;
+                    for sh in (0..16).rev() {
+                        let n = ((v >> (sh * 4)) & 0xF) as u8;
+                        putchar(if n < 10 {
+                            b'0' + n
+                        } else {
+                            b'a' + n - 10
+                        });
+                    }
+                }
+                const M: &[u8] = b"\nSWITCH-COUNT-LEAK prev_pid=";
+                for &b in M {
+                    putchar(b);
+                }
+                ph((*prev).pid() as u64);
+                const M2: &[u8] = b" pc=";
+                for &b in M2 {
+                    putchar(b);
+                }
+                ph(pc as u32 as u64);
+                const M3: &[u8] = b" next_pid=";
+                for &b in M3 {
+                    putchar(b);
+                }
+                ph((*next).pid() as u64);
+                putchar(b'\n');
+            }
+        }
+    }
+
     // R65 hunt (garbage-next guard): __switch_to saves callee registers
     // through `prev` and resumes through `next` (thread.sp/ret_addr are
     // read from it), so a non-Task pointer here IS the self-propagating
