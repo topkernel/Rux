@@ -21,10 +21,29 @@
 //!
 //! - **INV-HEAP-2**: `free_lists[order]` is either `EMPTY_LIST` or a valid
 //!   page index within `[0, MAX_PAGES)`.
+//!
+//! - **INV-HEAP-3** (session 5, wedge fix): the per-page FREE bit lives in
+//!   `free_bits`, a word-strided bitmap; `BlockMeta.free` is authoritative
+//!   for LIST LEADERS only (interior pages' byte stays stale). The bitmap
+//!   is the exact per-page free state and is what the R9-14 double-free
+//!   check consults. Interior pages' `order` bytes are maintained by a
+//!   tight raw-pointer fill (report fidelity for the ORDER_MISMATCH arm);
+//!   they carry the order of the block they currently belong to.
+//!
+//!   Why: the old mark-every-page loops ran `meta.get_mut()` (bounds
+//!   assert + UnsafeCell call) per page inside `add_to_free_list` /
+//!   `remove_from_free_list` / `init_block`, all under the single
+//!   irqsave heap lock. On a 1 GiB heap (2^18 pages, seeded as one
+//!   order-18 block) an order-scale add/remove walked 262144 heavy
+//!   iterations per level; gdb on the ww-v2 wedge caught cpu1 grinding
+//!   exactly that loop under tcp_timer softirq while cpu0 spun on the
+//!   same lock in the alloc path (terminal 15+ min system freeze,
+//!   session-4 record). The bitmap fill is 4096 word ops for the same
+//!   block; the order fill is a call-free byte loop.
 
 use core::alloc::{GlobalAlloc, Layout};
 use core::cell::UnsafeCell;
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use crate::sync::spinlock::Spinlock;
 
 const PAGE_SIZE: usize = 4096;
@@ -54,6 +73,9 @@ const HEAP_SIZE: usize = crate::config::KERNEL_HEAP_SIZE;
 
 /// Maximum number of pages (for metadata array size)
 const MAX_PAGES: usize = HEAP_SIZE / PAGE_SIZE;
+
+/// Words in the per-page free bitmap (INV-HEAP-3).
+const FREE_BITMAP_WORDS: usize = (MAX_PAGES + 63) / 64;
 
 /// Empty list marker (use out-of-range value)
 const EMPTY_LIST: usize = MAX_PAGES + 1;
@@ -175,6 +197,12 @@ pub struct BuddyAllocator {
     initialized: AtomicUsize,
     /// Metadata area (stores metadata for each page)
     meta: MetaArray,
+    /// Per-page free bitmap (INV-HEAP-3): bit (page_idx % 64) of word
+    /// (page_idx / 64). Maintained by the same locked paths that used to
+    /// fill the per-page `BlockMeta.free` bytes; word-strided so an
+    /// order-scale fill costs 2^order/64 word RMWs instead of 2^order
+    /// per-page `get_mut` iterations under the irqsave lock.
+    free_bits: [AtomicU64; FREE_BITMAP_WORDS],
     /// Lock for buddy operations
     lock: Spinlock<()>,
 }
@@ -198,6 +226,7 @@ impl BuddyAllocator {
             free_lists: [const { AtomicUsize::new(0) }; MAX_ORDER + 1],
             initialized: AtomicUsize::new(0),
             meta: MetaArray::new(),
+            free_bits: [const { AtomicU64::new(0) }; FREE_BITMAP_WORDS],
             lock: Spinlock::new(()),
         }
     }
@@ -267,6 +296,83 @@ impl BuddyAllocator {
         }
     }
 
+    /// Read the per-page free bit (INV-HEAP-3). Exact for every page of
+    /// the heap window. Callers either hold the allocator lock or tolerate
+    /// a torn watermark (same discipline as the lock-free census).
+    fn page_is_free(&self, page_idx: usize) -> bool {
+        debug_assert!(page_idx < MAX_PAGES);
+        (self.free_bits[page_idx / 64].load(Ordering::Relaxed) >> (page_idx % 64)) & 1 == 1
+    }
+
+    /// Set/clear the free bits of `npages` pages starting at `page_idx`
+    /// (INV-HEAP-3). Word-strided masked RMW: whole words take the
+    /// full-mask fast path, at most two partial edge words per call.
+    /// Order-18 (whole-heap) fill = 4096 word ops.
+    fn fill_free_bits(&self, page_idx: usize, npages: usize, free: bool) {
+        if npages == 0 {
+            return;
+        }
+        assert!(
+            page_idx + npages <= MAX_PAGES,
+            "buddy fill_free_bits out of range ({}+{} > MAX_PAGES={})",
+            page_idx,
+            npages,
+            MAX_PAGES
+        );
+        let last = page_idx + npages; // exclusive
+        let mut w = page_idx / 64;
+        let end_word = (last + 63) / 64;
+        while w < end_word {
+            let base = w * 64;
+            let lo = if page_idx > base { page_idx - base } else { 0 };
+            let hi = (last - base).min(64);
+            let mask: u64 = if hi - lo == 64 {
+                !0u64
+            } else {
+                ((1u64 << (hi - lo)) - 1) << lo
+            };
+            if free {
+                self.free_bits[w].fetch_or(mask, Ordering::Relaxed);
+            } else {
+                self.free_bits[w].fetch_and(!mask, Ordering::Relaxed);
+            }
+            w += 1;
+        }
+    }
+
+    /// Fill the INTERIOR pages' `order` bytes for a block (leader is
+    /// written by the caller). Tight raw-pointer byte loop, no per-page
+    /// bounds call — this replaces the per-page `get_mut` interior marking
+    /// that made order-scale add/remove the ww-v2 wedge grind. The order
+    /// bytes keep the R9-14 ORDER_MISMATCH arm and report fidelity for
+    /// aliased interior frees; the load-bearing free bit is the bitmap.
+    fn fill_interior_order(&self, page_idx: usize, order: usize) {
+        if order == 0 {
+            return;
+        }
+        let last = page_idx + (1usize << order); // exclusive
+        assert!(
+            last <= MAX_PAGES,
+            "buddy fill_interior_order out of range ({}+2^{} > MAX_PAGES={})",
+            page_idx,
+            order,
+            MAX_PAGES
+        );
+        // SAFETY: indices bounds-checked above; callers hold the allocator
+        // lock (or are the single-threaded init_sized seeder); only the
+        // `order` byte of each BlockMeta is written.
+        unsafe {
+            let base = self.meta.data.get() as *mut BlockMeta;
+            let mut p = base.add(page_idx + 1);
+            let end = base.add(last);
+            let o = order as u8;
+            while p < end {
+                (*p).order = o;
+                p = p.add(1);
+            }
+        }
+    }
+
     /// Initialize block metadata
     fn init_block(&self, page_idx: usize, order: usize, free: bool) {
         let meta = self.meta.get_mut(page_idx);
@@ -275,16 +381,14 @@ impl BuddyAllocator {
         meta.prev = 0;
         meta.next = 0;
         // R17-A2: keep EVERY page of the block consistent — the split path
-        // calls init_block(.., false) on the retained half; leaving its
-        // interior pages at the previous add's free=1 made the R9-14
-        // tripwire swallow legitimate frees (leak → alloc failures under
-        // fork pressure: create/P2b/rename flakiness).
-        let mark: u8 = if free { 1 } else { 0 };
-        for i in 1..(1usize << order) {
-            let m2 = self.meta.get_mut(page_idx + i);
-            m2.order = order as u8;
-            m2.free = mark;
-        }
+        // calls init_block(.., false) on the retained half; stale interior
+        // marks let the R9-14 tripwire swallow legitimate frees (leak →
+        // alloc failures under fork pressure: create/P2b/rename flakiness).
+        // R17-A3 (session 5): the marking itself is now the bitmap + tight
+        // order fill (see INV-HEAP-3) — same coverage, 2^order/64 words
+        // plus a call-free byte loop instead of 2^order `get_mut` calls.
+        self.fill_interior_order(page_idx, order);
+        self.fill_free_bits(page_idx, 1usize << order, free);
     }
 
     /// Add block to free list
@@ -299,14 +403,13 @@ impl BuddyAllocator {
             meta.order = order as u8;
             meta.free = 1;
         }
-        // R17-A: mark EVERY page of the block — interior pages kept stale
-        // free=0 after merges/splits, letting second frees pass silently
-        // (heap analog of the zone OnFreelist bug).
-        for i in 1..(1usize << order) {
-            let m2 = self.meta.get_mut(page_idx + i);
-            m2.order = order as u8;
-            m2.free = 1;
-        }
+        // R17-A: mark EVERY page of the block free — interior pages kept
+        // stale free=0 after merges/splits, letting second frees pass
+        // silently (heap analog of the zone OnFreelist bug). R17-A3: the
+        // mark is the word-strided bitmap + tight order fill (INV-HEAP-3),
+        // not the per-page `get_mut` loop that ground order-scale adds.
+        self.fill_interior_order(page_idx, order);
+        self.fill_free_bits(page_idx, 1usize << order, true);
 
         // Get current free list head
         let list_head = self.free_lists[order].load(Ordering::Acquire);
@@ -332,14 +435,13 @@ impl BuddyAllocator {
             return;  // Cannot handle blocks exceeding maximum order
         }
 
-        // R17-A: clear the free mark on EVERY page of the block.
+        // R17-A: clear the free mark on EVERY page of the block
+        // (R17-A3: via the bitmap — INV-HEAP-3).
         {
             let meta = self.meta.get_mut(page_idx);
             meta.free = 0;
         }
-        for i in 1..(1usize << order) {
-            self.meta.get_mut(page_idx + i).free = 0;
-        }
+        self.fill_free_bits(page_idx, 1usize << order, false);
 
         let prev_idx = self.meta.get(page_idx).prev as usize;
         let next_idx = self.meta.get(page_idx).next as usize;
@@ -501,9 +603,12 @@ impl BuddyAllocator {
         // on a free list and the next two allocations shared it (the
         // "linked Task page wiped by a zeroing allocation" corruption).
         // Refuse the free and report instead of corrupting the heap.
+        // R17-A3: the free arm consults the per-page bitmap (exact for
+        // aliased interior pages too), the order arm the `order` byte
+        // (leaders exact, interiors filled by fill_interior_order).
         {
             let meta = self.meta.get(page_idx);
-            if meta.free != 0 || meta.order != order as u8 {
+            if self.page_is_free(page_idx) || meta.order != order as u8 {
                 // R43: taint-only (SBI ecall under the heap lock was an
                 // A-form wedge ingredient — see the R18-1 note above).
                 // R69: also record the event with a caller backtrace for
@@ -519,7 +624,9 @@ impl BuddyAllocator {
                     );
                 }
                 crate::dfx::taint::add_taint(crate::dfx::taint::TaintFlags::BAD_PAGE); // R9-14 double-free/hoard
-                let kind = if meta.free != 0 { FR_DOUBLE_FREE } else { FR_ORDER_MISMATCH };
+                // R17-A3: kind follows the bitmap (the authoritative free
+                // state), not the leader-only `free` byte.
+                let kind = if self.page_is_free(page_idx) { FR_DOUBLE_FREE } else { FR_ORDER_MISMATCH };
                 refused_free_note(kind, addr, order, meta.order, meta.free);
                 return;
             }
