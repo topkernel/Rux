@@ -1075,12 +1075,17 @@ fn irq_exit_maybe_preempt_kernel(regs: &PtRegs) {
     use crate::process::task::task_flags::TaskFlags;
     // Experiment gate (kernel-preemption hunt): sc69 (hook off) vs sc70
     // (hook on) settled the A/B — the preempt-count leak is pre-existing
-    // in BOTH arms, but with the hook ON every leaked task becomes a
-    // multi-minute kernel-mode monopolist (sc70: pid 320 held cpu1 for
-    // 309+ s; sc69 hook-off: 2.6 s, bounded by the count-blind user-mode
-    // boundary switch). Keep OFF until the leak producer is fixed; the
-    // sc71 build hunts the producer with caller-site fingerprinting.
-    const PREEMPT_HOOK_ENABLED: bool = false;
+    // in BOTH arms, but with the hook ON every leaked task became a
+    // multi-minute kernel-mode monopolist (sc70: 309+ s; hook-off sc69:
+    // 2.6 s, bounded by the count-blind user-mode boundary switch).
+    // sc72 re-enables the hook TOGETHER with PREEMPT-HEAL (scheduler_tick
+    // zeroes phantom task-context counts held >10 s): a leaked task is
+    // then bounded to a 10 s monopoly instead of minutes, which is the
+    // condition under which IRQ-exit kernel preemption can stay enabled
+    // while the leak's producer (a guard whose add and drop execute in
+    // two task contexts while the victim runs — sc71 showed the count is
+    // acquired while running, not a parked wild write) is still hunted.
+    const PREEMPT_HOOK_ENABLED: bool = true;
     if !PREEMPT_HOOK_ENABLED {
         return;
     }

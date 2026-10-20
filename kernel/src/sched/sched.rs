@@ -3796,6 +3796,10 @@ pub fn scheduler_tick() {
             count: core::sync::atomic::AtomicI32,
             parked: core::sync::atomic::AtomicBool,
             seen: core::sync::atomic::AtomicU64,
+            /// When this task was first seen parked with a nonzero
+            /// count (0 = not currently in that state) — drives the
+            /// parked-victim side of PREEMPT-HEAL.
+            bad_since: core::sync::atomic::AtomicU64,
         }
         static SNAPS: [ParkSnap; 1024] = {
             const FN: ParkSnap = ParkSnap {
@@ -3803,6 +3807,7 @@ pub fn scheduler_tick() {
                 count: core::sync::atomic::AtomicI32::new(0),
                 parked: core::sync::atomic::AtomicBool::new(false),
                 seen: core::sync::atomic::AtomicU64::new(0),
+                bad_since: core::sync::atomic::AtomicU64::new(0),
             };
             [FN; 1024]
         };
@@ -3934,6 +3939,58 @@ pub fn scheduler_tick() {
                     s.count.store(*pc, core::sync::atomic::Ordering::Relaxed);
                     s.parked.store(!*running, core::sync::atomic::Ordering::Relaxed);
                     s.seen.store(epoch, core::sync::atomic::Ordering::Relaxed);
+                }
+                // Parked-victim PREEMPT-HEAL (round 3d): the tick-side
+                // heal keys on the per-CPU LEAK slot, which resets every
+                // time the victim migrates or parks at a user boundary —
+                // sc71 showed exactly that (pid 0x13c parked with count 1
+                // for minutes, migrating between CPUs, never reaching the
+                // 10 s same-CPU window). This side keys on the TASK: a
+                // task seen parked (current on NO cpu) with a nonzero
+                // base count for 4 s of consecutive walks gets its count
+                // zeroed. A parked task holds no legal guard (guards live
+                // on the executing task), so the count is phantom by
+                // definition; zeroing lets the sleeper actually sleep.
+                if let Some(s) = slot {
+                    if !*running && *pc != 0 {
+                        let bad0 = s.bad_since.load(core::sync::atomic::Ordering::Relaxed);
+                        if bad0 == 0 {
+                            s.bad_since.store(now, core::sync::atomic::Ordering::Relaxed);
+                        } else if now.wrapping_sub(bad0) >= 400 {
+                            unsafe { (**task).ti_preempt_count_zero(); }
+                            s.bad_since.store(0, core::sync::atomic::Ordering::Relaxed);
+                            use crate::console::putchar_no_lock as putchar;
+                            fn ph(v: u64) {
+                                use crate::console::putchar_no_lock as putchar;
+                                for sh in (0..16).rev() {
+                                    let n = ((v >> (sh * 4)) & 0xF) as u8;
+                                    putchar(if n < 10 {
+                                        b'0' + n
+                                    } else {
+                                        b'a' + n - 10
+                                    });
+                                }
+                            }
+                            const M: &[u8] = b"\nPARKED-HEAL pid=";
+                            for &b in M {
+                                putchar(b);
+                            }
+                            ph(unsafe { (**task).pid() } as u64);
+                            const M2: &[u8] = b" was=";
+                            for &b in M2 {
+                                putchar(b);
+                            }
+                            ph(*pc as u32 as u64);
+                            const M3: &[u8] = b" held_jiffies=";
+                            for &b in M3 {
+                                putchar(b);
+                            }
+                            ph(now.wrapping_sub(bad0));
+                            putchar(b'\n');
+                        }
+                    } else {
+                        s.bad_since.store(0, core::sync::atomic::Ordering::Relaxed);
+                    }
                 }
                 if wildwrite_shape {
                     // Report immediately, not rate-gated: this is the
