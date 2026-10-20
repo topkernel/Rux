@@ -1073,12 +1073,12 @@ fn ww_irqwin_budget_ok() -> bool {
 ///   trap_handler's tail and trap_exit's kernel restore.
 fn irq_exit_maybe_preempt_kernel(regs: &PtRegs) {
     use crate::process::task::task_flags::TaskFlags;
-    // Experiment gate (kernel-preemption hunt, sc69): when false the hook
-    // is a no-op and the boot behaves exactly like sc64 baseline while
-    // ALL instrumentation (PREEMPT-LEAK / PREEMPT-UNDERFLOW tripwires)
-    // stays live — separating "the leak producer is pre-existing" from
-    // "the leak producer needs the new switch cadence".
-    const PREEMPT_HOOK_ENABLED: bool = false;
+    // Experiment gate (kernel-preemption hunt): sc69 proved the preempt-
+    // count leak producer is PRE-EXISTING (leak present with this gate
+    // false), so the hook is not the leak's cause. sc70 runs the A/B arm
+    // with the hook live to measure whether IRQ-exit kernel preemption
+    // adds monopolies on top of the pre-existing leak or not.
+    const PREEMPT_HOOK_ENABLED: bool = true;
     if !PREEMPT_HOOK_ENABLED {
         return;
     }

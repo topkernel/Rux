@@ -3710,6 +3710,124 @@ pub fn scheduler_tick() {
         }
     }
 
+    // Kernel-preemption hunt round 3 (2026-10-21, sc69+): sc69 falsified
+    // the "hook causes the leak" hypothesis — the leak reproduces with
+    // the IRQ-exit hook compiled out, so the producer is pre-existing.
+    // The static audit of every preempt_count add/sub site finds no
+    // unpaired path, so the remaining producers are runtime shapes: a
+    // replayed acquire (a task resumed at a stale point re-running a
+    // guard's fetch_add) or a direct wild write into thread_info. Both
+    // violate ONE invariant: with no kernel preemption, a task that is
+    // parked (current on NO CPU) can never legally hold a nonzero
+    // preempt_count — guards exist only on the executing task, and the
+    // do_exit R9-3 windows are dead/exiting by the time they park. This
+    // walk reports every such task the moment it is seen parked, which
+    // brackets the producer event to the interval since the victim last
+    // ran (cross-check with WAKE-STRANDED / PREEMPT-LEAK timestamps).
+    {
+        static PARKWALK_LAST: core::sync::atomic::AtomicU64 =
+            core::sync::atomic::AtomicU64::new(0);
+        static PARKWALK_PRINT: core::sync::atomic::AtomicU64 =
+            core::sync::atomic::AtomicU64::new(0);
+        let now = crate::drivers::timer::get_jiffies();
+        let last = PARKWALK_LAST.load(core::sync::atomic::Ordering::Acquire);
+        if now.wrapping_sub(last) >= 4
+            && PARKWALK_LAST
+                .compare_exchange(
+                    last,
+                    now,
+                    core::sync::atomic::Ordering::AcqRel,
+                    core::sync::atomic::Ordering::Acquire,
+                )
+                .is_ok()
+        {
+            crate::process::pid_hash::pid_hash_for_each_task_try(|task| {
+                unsafe {
+                    let pid = (*task).pid();
+                    if pid == 0 || pid == TASK_POISON {
+                        return;
+                    }
+                    let pc = (*task).preempt_count();
+                    if pc == 0 {
+                        return;
+                    }
+                    // Skip the do_exit R9-3 windows: DEAD/ZOMBIE (and
+                    // anything PF_EXITING) may park with a transient
+                    // count while the exit path unwinds.
+                    if (*task).state().is_dead()
+                        || ((*task).ti_flags()
+                            & crate::process::task::task_flags::TaskFlags::PF_EXITING
+                                .bits()
+                            != 0)
+                    {
+                        return;
+                    }
+                    // Running on any CPU? The slot mirror may diverge from
+                    // physical execution (R55/R85 family) — reporting a
+                    // slot-current task here would be noise, so skip the
+                    // ones the slots still book.
+                    let mut running = false;
+                    for c in 0..crate::config::MAX_CPUS {
+                        if cpu_state(c).current == task {
+                            running = true;
+                            break;
+                        }
+                    }
+                    if running {
+                        return;
+                    }
+                    // Parked with a live count: report, rate-gated to one
+                    // line per 2 s (direct console — IRQ context).
+                    let lp = PARKWALK_PRINT.load(core::sync::atomic::Ordering::Acquire);
+                    if now.wrapping_sub(lp) >= 20
+                        && PARKWALK_PRINT
+                            .compare_exchange(
+                                lp,
+                                now,
+                                core::sync::atomic::Ordering::AcqRel,
+                                core::sync::atomic::Ordering::Acquire,
+                            )
+                            .is_ok()
+                    {
+                        use crate::console::putchar_no_lock as putchar;
+                        fn ph(v: u64) {
+                            use crate::console::putchar_no_lock as putchar;
+                            for sh in (0..16).rev() {
+                                let n = ((v >> (sh * 4)) & 0xF) as u8;
+                                putchar(if n < 10 {
+                                    b'0' + n
+                                } else {
+                                    b'a' + n - 10
+                                });
+                            }
+                        }
+                        const M: &[u8] = b"\nPARKED-LEAK pid=";
+                        for &b in M {
+                            putchar(b);
+                        }
+                        ph(pid as u64);
+                        const M2: &[u8] = b" pc=";
+                        for &b in M2 {
+                            putchar(b);
+                        }
+                        ph(pc as u32 as u64);
+                        const M3: &[u8] = b" state=";
+                        for &b in M3 {
+                            putchar(b);
+                        }
+                        ph((*task).state().bits() as u64);
+                        const M4: &[u8] = b" tcpu=";
+                        for &b in M4 {
+                            putchar(b);
+                        }
+                        ph((*task).ti_cpu() as u32 as u64);
+                        putchar(b'\n');
+                    }
+                }
+            });
+        }
+    }
+
     // R84 (R74 producer-#2 hunt): the R83 idle-loop audit never ran
     // under the dbus storm (all harts busy) — validate headers from the
     // tick itself: current task every tick, full pid-hash walk every 4
