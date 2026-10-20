@@ -346,6 +346,14 @@ pub mod task_flags {
             const PF_EXITING     = 0x00000004; /* Getting shut down */
             const PF_VCPU        = 0x00000010; /* I'm a virtual CPU */
             const PF_WQ_WORKER   = 0x00000020; /* I'm a workqueue worker */
+            /* Kernel-preemption recursion guard (sched::schedule sets it
+             * around __schedule; the IRQ-exit hook refuses to re-enter a
+             * task that is already inside its own schedule). A task-flag,
+             * deliberately NOT a preempt_count bit: leaked count bits
+             * block both preemption AND the __schedule switch-out
+             * discipline, while a leaked flag here only disables
+             * preemption for the task. */
+            const TIF_IN_SCHED   = 0x00400000;
         }
     }
 }
@@ -3115,6 +3123,78 @@ pub unsafe fn vfork_wake_parent(task: *mut Task) {
     }
 }
 
+/// Rate gate for the preempt_count underflow tripwire: one report per
+/// second of jiffies. Raw console only (putchar_no_lock) — the tripwire
+/// can fire from any context, including inside printk's own lock guards,
+/// so the report path must itself be lock-free and non-recursive.
+fn preempt_underflow_report(
+    pid: u32,
+    prev: i32,
+    sub: i32,
+    loc: &'static core::panic::Location<'static>,
+    site: usize,
+) {
+    static LAST: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+    let now = crate::drivers::timer::get_jiffies();
+    let last = LAST.load(core::sync::atomic::Ordering::Acquire);
+    if now.wrapping_sub(last) < crate::config::KERNEL_HZ as u64 {
+        return;
+    }
+    if LAST
+        .compare_exchange(last, now, core::sync::atomic::Ordering::AcqRel, core::sync::atomic::Ordering::Acquire)
+        .is_err()
+    {
+        return;
+    }
+    use crate::console::putchar_no_lock as putchar;
+    fn ph(v: u32) {
+        use crate::console::putchar_no_lock as putchar;
+        for sh in (0..8).rev() {
+            let n = ((v >> (sh * 4)) & 0xF) as u8;
+            putchar(if n < 10 { b'0' + n } else { b'a' + n - 10 });
+        }
+    }
+    const MSG: &[u8] = b"\nPREEMPT-UNDERFLOW pid=";
+    for &b in MSG {
+        putchar(b);
+    }
+    ph(pid);
+    const MSG2: &[u8] = b" count_was=";
+    for &b in MSG2 {
+        putchar(b);
+    }
+    ph(prev as u32);
+    const MSG3: &[u8] = b" sub=";
+    for &b in MSG3 {
+        putchar(b);
+    }
+    ph(sub as u32);
+    const MSG4: &[u8] = b" (unpaired decrement clamped to 0) at ";
+    for &b in MSG4 {
+        putchar(b);
+    }
+    // Drop site: file:line of the guard whose decrement underflowed.
+    for &b in loc.file().as_bytes() {
+        putchar(b);
+    }
+    const COLON: &[u8] = b":";
+    for &b in COLON {
+        putchar(b);
+    }
+    ph(loc.line());
+    if site != 0 {
+        const M5: &[u8] = b" lock=0x";
+        for &b in M5 {
+            putchar(b);
+        }
+        // 16-hex lock instance address (ph is 8-hex only; print two
+        // halves).
+        ph((site >> 32) as u32);
+        ph(site as u32);
+    }
+    putchar(b'\n');
+}
+
 impl Task {
     /// Get architecture-specific thread state
     pub fn thread(&self) -> &crate::arch::thread::ThreadStruct {
@@ -3218,10 +3298,56 @@ impl Task {
         self.ti_preempt_count.fetch_add(val, core::sync::atomic::Ordering::Release);
     }
 
-    /// Sub value from preempt_count (atomic fetch-sub)
+    /// Subtract value from preempt_count (atomic fetch-sub).
+    ///
+    /// Underflow tripwire (kernel-preemption re-landing, 2026-10-20): a
+    /// preempt_count below zero is never legal — every field is a nesting
+    /// counter — but a value of, say, -1 sets EVERY mask bit
+    /// (`count & (HARDIRQ|SOFTIRQ|NMI)`), so `in_interrupt()` reads true
+    /// for a task running in USER mode: the next user page fault is
+    /// routed to no_context → KERNPANIC and parks the CPU (the sc60
+    /// shape under the reverted 2cf4bdc9, where an unpaired guard drop
+    /// poisoned pid 327 to -1). Instead of letting the poison persist,
+    /// clamp to zero at the violating sub and report the event raw
+    /// (this can fire from any context, including inside printk's own
+    /// guards — no locks, direct console, rate-gated to 1/s so a
+    /// storm cannot flood the UART).
     #[inline]
     pub fn sub_preempt_count(&self, val: i32) {
-        self.ti_preempt_count.fetch_sub(val, core::sync::atomic::Ordering::Release);
+        self.sub_preempt_count_at(val, core::panic::Location::caller());
+    }
+
+    /// Sub with the drop site's source location for the underflow report
+    /// (leak-hunt round 3b: name WHICH guard family double-drops).
+    #[inline]
+    pub fn sub_preempt_count_at(
+        &self,
+        val: i32,
+        loc: &'static core::panic::Location<'static>,
+    ) {
+        let prev = self.ti_preempt_count.fetch_sub(val, core::sync::atomic::Ordering::Release);
+        let after = prev.wrapping_sub(val);
+        if after < 0 {
+            self.ti_preempt_count.store(0, core::sync::atomic::Ordering::Release);
+            preempt_underflow_report(self.pid(), prev, val, loc, 0);
+        }
+    }
+
+    /// As `sub_preempt_count_at` with the guard's lock instance for the
+    /// underflow report (0 = caller had no lock to name).
+    #[inline]
+    pub fn sub_preempt_count2_at(
+        &self,
+        val: i32,
+        loc: &'static core::panic::Location<'static>,
+        site: usize,
+    ) {
+        let prev = self.ti_preempt_count.fetch_sub(val, core::sync::atomic::Ordering::Release);
+        let after = prev.wrapping_sub(val);
+        if after < 0 {
+            self.ti_preempt_count.store(0, core::sync::atomic::Ordering::Release);
+            preempt_underflow_report(self.pid(), prev, val, loc, site);
+        }
     }
 
     /// R74: zero a corrupted (negative) preempt_count — the self-heal for

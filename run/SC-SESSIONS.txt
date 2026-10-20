@@ -576,3 +576,93 @@ Session G addendum — sc64 FINAL (IPI yield in):
   lifecycle can complete. All commits are on feature/samgr-callback
   ready for main-session review; test/bindmkdir.c unaffected (riscv64
   paths untouched behaviorally).
+
+Session I (2026-10-21 04:3x-05:4x, successor to Session H quota death —
+preempt_count audit finished, leak producer fingerprinted, hook parked
+OFF with heal safety net):
+
+STARTING STATE REVIEW (first-step mandate): d15ab325 was the quota-death
+wip snapshot. Its trap.rs part (PREEMPT_HOOK_ENABLED=false gate) was
+NEVER BUILT (mtime 03:01:16 > bzImage 02:57:16) — sc67/sc68 both ran
+with the Round-2 hook ON. Its sched.rs part (rip= in PREEMPT-LEAK) WAS
+in sc68's kernel. Both kept; the gate experiment (sc69) was executed
+this session as designed.
+
+AUDIT VERDICT (the preempt_count audit Session H died mid-way):
+  - Every add/sub site is per-task symmetric in the code: spinlock/
+    rwlock/seqlock guards, GRQ guards, rcu, __do_softirq, irq_enter/
+    exit, do_exit R9-3 windows, lock_fair (disable->spin->enable->
+    schedule with count 0). No static unpaired path exists.
+  - sc69 (hook compiled out, verified by disassembling the hook to a
+    bare ret): leak STILL reproduces (pid 0x315, tick-time base 2).
+    THE PRODUCER IS PRE-EXISTING, NOT THE HOOK.
+  - The producer is a runtime shape: a plain SpinlockGuard whose add
+    and drop execute in two different task contexts while the victim
+    runs (sc71: counts acquired while RUNNING, never while parked —
+    PARKED-WILDWRITE never fired; underflow sub=1 lands on bystanders:
+    init in sc67/68/70 first seconds, 42 events in sc73).
+  - sc73 lock fingerprints (underflow report now carries file:line +
+    lock instance): fs::inode::ICACHE and fs::locks::RECORD_LOCK_TABLE
+    (statics) + heap Spinlocks — the VFS hot path. This is the
+    double-run/stack-confusion engine (same family as R74/R85/scribble)
+    — overlaps the wildwrite agent's active hunt; NOT fixed this
+    session.
+
+A/B LADDER (all 8-min quiet boots on reflink copies of userdata-scgold,
+which is userdata-sc59.img — the sc49 golden image itself was deleted
+before this session; sc59's once-used copy is the surviving base):
+  sc69 hook OFF:           avg 277ms, max 82s (OH IPC spiral), leak
+                           self-bounds ~2.6s at user boundaries
+  sc70 hook ON:            avg 268ms, max 187s — pid 320 held cpu1 for
+                           309+s = the leak amplified by the hook
+  sc71 hook OFF + instr:   avg 207ms, max 18.8s (best)
+  sc72 hook ON + tick heal: max 4.7s (heal works; holds capped at
+                           exactly 1000 jiffies), avg 238ms
+  sc73 hook ON + 2x heal:  avg 595ms, max 86s, 29 heals, 42 underflows —
+                           hook+heal still NET WORSE than hook-off
+  -> LANDING: hook OFF (const gate in irq_exit_maybe_preempt_kernel),
+     PREEMPT-HEAL (tick, 10s) + PARKED-HEAL (parkwalk, 4s) stay as the
+     safety net. Hook re-landing stays blocked on the producer fix.
+
+MILESTONE: not reached — sc73 screen stayed the 8-color oracle checker
+(shotmon oh-shotmon-MILESTONE has 186 historical real-UI frames from
+22:0x-02:30 era boots, all on the OLD kernels; none this session).
+
+TOOLCHAIN DRIFT FOUND (affects the whole riscv64 probe fleet): host
+distro gcc 15.2's static glibc ships ifunc memset/memcpy with RVV
+(vsetivli) — every test/*_probe compiled the old way now SIGILLs at
+the first memset on our QEMU cpu (no V). NOT a kernel regression
+(verified: d15ab325 AND acf198b2 kernels fault identically). Fix:
+toolchain/riscv64-rux-linux-musl SDK built (make sdk) and
+test/bindmkdir_boot.py (new driver) links probes against musl libc —
+no vector paths. NOTE: musl SDK build does not install a musl-gcc
+wrapper for cross builds; the driver links crt1.o/crti.o/libc.a
+explicitly through the distro gcc driver.
+
+BINDMKDIR REGRESSION: PASSES on this tree (riscv64, SMP2 TCG): root-
+bind/DIRECT-through-bind, negative-dentry prime+create, appspawn
+self-bind + /dev bind + chroot + open /dev/null in jail all rc=0
+(BMD[01]-[BMD20]); tail steps (BMD[21+] chroot /a from inside the a2
+jail) fail ENOENT deterministically on any correct kernel (jail
+geometry — /a not visible inside /a2), same as the original runs.
+Driver: test/bindmkdir_boot.py (self-contained: builds image, boots,
+verdicts). NOTE the old "bindmkdir unaffected" claims from Session G
+could not have been run on this host with current gcc — treat old
+probe-pass claims on riscv64 as suspect unless re-run.
+
+Commits this session (all English, on feature/samgr-callback):
+  f5fe2ea0 parked-leak tripwire + sc70 A/B gate
+  74befe06 underflow caller-site fingerprinting + parkwalk 3b + hook OFF
+  e0902a27 PREEMPT-HEAL (tick-side, 10s)
+  cdee39c2 PARKED-HEAL (task-keyed, 4s) + hook re-enable experiment
+  8297f4cb underflow report names the double-dropped lock instance
+  + final: hook landing OFF + bindmkdir_boot.py driver
+
+NEXT SESSION (scheduler lane): the leak producer = a plain SpinlockGuard
+whose drop executes in another task's context on the VFS hot path
+(ICACHE / RECORD_LOCK_TABLE / heap locks). Hunt shape: instrument
+context_switch to trap the outgoing-prev-count!=0 && !dead case (the
+discipline-refusal bypass), or join the wildwrite agent's GDB-freeze
+evidence (its ww-v1/ww-s2-r7 boots are chasing the same double-run
+engine). Once the producer is fixed, flip PREEMPT_HOOK_ENABLED=true and
+re-run the A/B — the hook itself is exonerated (sc69).
