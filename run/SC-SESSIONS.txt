@@ -1056,3 +1056,73 @@ Boots: sc89 (WIP kernel, 25min quiet, neighbor dump landed), sc90
 sc91 booting (raw-slot capture). Screen still the 8-color oracle
 checker in all three; launcher process spawns (sandbox mounts visible)
 but the chain stays frozen upstream.
+
+Session L FINAL (16:0x — freeze terminal state decoded as a userspace
+ABBA deadlock in ONE heap object; kernel held innocent; milestone not
+reached; three boots sc89/90/91 all stable, scanner alive end-to-end):
+
+FREEZE TERMINAL STATE (sc91 NBR-WORD, the decisive capture):
+- Sibling lock (frozen-0x94) word = 0x80000000 = libc++ shared_mutex
+  WRITER_ENTERED | 0 readers: A WRITER OWNS the sibling.
+- Frozen word = 0x80000010 = WRITER_ENTERED | 16 readers: a writer
+  PENDING (bit31 set by its lock()) + 16 recursive read acquisitions
+  (one thread; libc++ lock_shared just increments the count even while
+  a writer pends).
+- The cycle: hdf_devmgr MAIN holds frozen.Rx16 and parks acquiring the
+  SIBLING (expected 0x80000000); a DFX-path thread (writers' caller
+  frame byte-identified: libdfx_procinfo.z.so chipset-sdk-sp build,
+  size 0xce38) owns sibling.W and parks acquiring frozen (it set bit31,
+  waits for readers to drain). Neither side can progress -> both locks
+  stay parked forever. PURE USERSPACE ABBA deadlock between two
+  shared_mutexes 0x94 apart inside one heap-allocated object.
+- The frozen word's ADDRESS varies per boot (+0xc04/+0xa64/+0xe4 page
+  offsets) -> HEAP object, NOT the libhicollie bss static Session K
+  hypothesized (doubted: cssp/libhicollie has zero code refs to
+  0x3c0e4; its 0x3bff0 static is the WatchdogInner singleton IpcFull
+  uses).
+- Kernel futex accounting: INNOCENT (confirmed again — counts are
+  exactly what userspace wrote; no spurious wakes involved; the park
+  expected-values match libc++ protocol).
+- Holder chain symbolization BLOCKED by an mm-lane gap: loader-mapped
+  code VMAs lose both fd and offset (the 0x3fbf000000-0x3fbf138000
+  span prints baseoff=0 fd=-1 as ONE VMA although it contains multiple
+  libs' LOADs — the loader's anon reservation is not overlay-split by
+  the file LOAD mappings). Linux ALWAYS shows the innermost file VMA
+  in /proc/<pid>/maps; Rux's merged view is a real ABI/forensics
+  divergence. HANDOFF to mm lane: preserve fd/offset bookkeeping when
+  file mappings overlay an existing reservation. Raw-slot method
+  (NBR-RAW + nbrraw.py) works around it but the fixed-base region
+  could not be inverted with the libs available (park-site ripbytes
+  0x00cab80c75daf883 exist in NO image lib; libhilog was identified
+  via an fd-open anon_inode copy — some libs load from memfd paths we
+  cannot enumerate offline).
+
+REPLY-STALL TREND (whole lane): sc74=9 -> sc77=7 -> sc80=4 -> sc89=1
+-> sc90=1 -> sc91=0. The one-txn-per-read fix + heals hold. KERNPANIC 0
+in all three boots. khungtaskd scanner ALIVE the whole boot in sc89
+(1183s), sc90, sc91 — the binder.rs stall-window fix (WORLD-guard
+split, chunked flush) from the quota-death WIP is VALIDATED and landed.
+
+COMMITS this session (feature/samgr-callback, all English):
+- 7273d175 review(sc89): drop stale generated config.rs from the WIP
+- ec7ea948 fix(sysfs): /sys/bus/usb/{devices,drivers} Linux parity
+- 0b3366e2 dfx(futex): sc90 park-stack filter + window fixes
+- 4b1cc74d dfx(futex): sc91 raw stack-slot capture + NBR-WORD
+- 6e4f00b7 run+notes: session L update 1 + nbrraw.py
+- (binder.rs + futex.rs WIP content from bccf87b2 itself)
+
+NEXT SESSION:
+  a. The launcher chain is blocked by a USERSPACE deadlock the kernel
+     cannot fix legitimately. The productive lever is starving its
+     trigger: the devhost_usb/usb_manager crash loop (image defect:
+     DdkListenerMgrInit exported but never imported anywhere; the
+     first UsbDdkService::Init DdkListenerMgrAdd always walks a NULL
+     list, on Linux too). Options: (1) disable the usb services in the
+     IMAGE's init configs (precedent: run/oh-x appspawn-src overlay),
+     (2) accept the loop but cut its DFX reentry amplification.
+  b. mm lane (NOT samgr lane): file-LOAD mappings over loader
+     reservations lose fd/offset — affects /proc/maps parity and all
+     forensic symbolization; small fix, big payoff.
+  c. If the deadlock drains (a works), expect launcher -> OnForeground
+     -> ArkUI; watch oh-shotmon for >8 colors and grab the ohgpu
+     screendump as the milestone artifact.
