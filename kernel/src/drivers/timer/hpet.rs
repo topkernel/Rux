@@ -510,9 +510,9 @@ pub fn calibrate_tsc() -> bool {
     }
     // Validated DIV/offset (same discipline as read_time_nominal).
     let (div, offset) = {
-        let d = DIV.load(Ordering::Acquire);
-        let dinv = DIV_INV.load(Ordering::Acquire);
-        let o = BOOT_OFFSET.load(Ordering::Acquire);
+        let d = DIV().load(Ordering::Acquire);
+        let dinv = DIV_INV().load(Ordering::Acquire);
+        let o = BOOT_OFFSET().load(Ordering::Acquire);
         if d == 0 || d != !dinv {
             return false; // unhealed clock — keep the MMIO path
         }
