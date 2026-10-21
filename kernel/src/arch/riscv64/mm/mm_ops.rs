@@ -711,15 +711,19 @@ impl MmStruct {
                     addr += PAGE_SIZE_USIZE;
                     continue;
                 }
-                // Device frames (virtio-gpu framebuffer) are not RAM pages —
-                // never put_page/free them (accounting corruption otherwise).
+                // Device frames (virtio-gpu framebuffer) are not RAM pages,
+                // and neither is any other boot-reserved (kernel-heap)
+                // frame — the drm GEM dumb-buffer backing. Never
+                // put_page/free them (accounting corruption otherwise).
                 {
                     let phys = (ppn_val as u64) << 12;
-                    if let Some(info) = crate::drivers::gpu::get_framebuffer_info() {
-                        if phys >= info.addr && phys < info.addr + info.size as u64 {
-                            unsafe { self.clear_pte(addr as u64); }
-                            continue;
-                        }
+                    let fb = crate::drivers::gpu::get_framebuffer_info()
+                        .map_or(false, |i| phys >= i.addr && phys < i.addr + i.size as u64);
+                    if fb || crate::mm::page_alloc::is_foreign_user_frame(phys as usize) {
+                        // SAFETY: addr is a page-aligned user address whose
+                        // leaf was verified above.
+                        unsafe { self.clear_pte(addr as u64); }
+                        continue;
                     }
                 }
                 // Remove reverse mapping before clearing PTE, then drop this
@@ -797,14 +801,16 @@ impl MmStruct {
         if pte_bits & PageTableEntry::U == 0 {
             return false; // kernel translation overlapped in the walk
         }
-        // Device frames (virtio-gpu framebuffer) are not RAM pages.
+        // Device frames (virtio-gpu framebuffer) are not RAM pages, and
+        // neither is any other boot-reserved (kernel-heap) frame — the
+        // drm GEM dumb-buffer backing. Clear the PTE only.
         {
             let phys = (ppn_val as u64) << 12;
-            if let Some(info) = crate::drivers::gpu::get_framebuffer_info() {
-                if phys >= info.addr && phys < info.addr + info.size as u64 {
-                    self.clear_pte(va as u64);
-                    return true;
-                }
+            let fb = crate::drivers::gpu::get_framebuffer_info()
+                .map_or(false, |i| phys >= i.addr && phys < i.addr + i.size as u64);
+            if fb || crate::mm::page_alloc::is_foreign_user_frame(phys as usize) {
+                self.clear_pte(va as u64);
+                return true;
             }
         }
         use crate::mm::page_desc::pfn_to_page_mut;
@@ -1770,8 +1776,14 @@ pub unsafe fn copy_page_table_cow(
         let ppn1 = pte2.ppn();
 
         if is_l2_leaf {
-            // Gigapage - increment refcount for shared user pages
-            if pte2.is_user() {
+            // Gigapage - increment refcount for shared user pages.
+            // Foreign (boot-reserved, kernel-heap GEM/fb) frames are
+            // copied as-is with NO refcount — see is_foreign_user_frame.
+            if pte2.is_user()
+                && !crate::mm::page_alloc::is_foreign_user_frame(
+                    (pte2.ppn() as usize) << PAGE_SHIFT,
+                )
+            {
                 let phys_ppn = pte2.ppn() as usize;
                 let page = pfn_to_page_mut(phys_ppn);
                 if !page.is_null() {
@@ -1799,8 +1811,14 @@ pub unsafe fn copy_page_table_cow(
 
             let is_l1_leaf = pte1.is_readable() || pte1.is_writable() || pte1.is_executable();
             if is_l1_leaf {
-                // Increment refcount for shared user pages (including read-only)
-                if pte1.is_user() {
+                // Increment refcount for shared user pages (including read-only).
+                // Foreign (boot-reserved, kernel-heap GEM/fb) frames are
+                // copied as-is with NO refcount — see is_foreign_user_frame.
+                if pte1.is_user()
+                    && !crate::mm::page_alloc::is_foreign_user_frame(
+                        (pte1.ppn() as usize) << PAGE_SHIFT,
+                    )
+                {
                     let phys_ppn = pte1.ppn() as usize;
                     let page = pfn_to_page_mut(phys_ppn);
                     if !page.is_null() {
@@ -1854,7 +1872,16 @@ pub unsafe fn copy_page_table_cow(
                         leaf_ppn >= lo && leaf_ppn < hi
                     });
 
-                let new_pte = if is_user {
+                let new_pte = if is_user
+                    && !crate::mm::page_alloc::is_foreign_user_frame(
+                        (pte0.ppn() as usize) << PAGE_SHIFT,
+                    )
+                {
+                    // Foreign (boot-reserved, kernel-heap GEM/fb) frames
+                    // take no refcount and never COW-mark — the else
+                    // branch copies the PTE as-is (the mapping is
+                    // inherited unchanged; the owning subsystem frees the
+                    // memory).
                     let phys_ppn = pte0.ppn() as usize;
                     let page = pfn_to_page_mut(phys_ppn);
 
