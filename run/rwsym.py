@@ -17,7 +17,7 @@ import struct
 import sys
 from pathlib import Path
 
-LIBDIRS = ["/tmp/oh-libs/syslib64", "/tmp/oh-libs/vendorlib64"]
+LIBDIRS = ["/tmp/oh-libs/syslib64", "/tmp/oh-libs/vendorlib64", "/tmp/oh-libs/samgr-bin", "/tmp/oh-libs/subdirs", "/tmp/oh-libs/platformsdk"]
 
 
 class Lib:
@@ -115,7 +115,7 @@ def load_libs():
 
 
 FRAME_RE = re.compile(
-    r"(?:ustack\[(\d+)\]|task) (?:rip=)?0x([0-9a-f]+) vma=0x([0-9a-f]+)-0x([0-9a-f]+)"
+    r"(?:ustack\[(\d+)\]|task)=?(?:rip=)?0x([0-9a-f]+) vma=0x([0-9a-f]+)-0x([0-9a-f]+)"
     r" fd=(-?\d+) fileoff=0x([0-9a-f]+)(?: bytes=0x([0-9a-f]+))?")
 
 
