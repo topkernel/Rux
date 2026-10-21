@@ -10,7 +10,9 @@
 #   TAG      log basename under run/ (default ww)
 #   GDBPORT  gdbstub port (default 12371)
 #   SMP      CPU count (default 2)
-#   SECS     wall-clock budget (default 2700) — enforced by ww-hunt.py
+#   SECS     wall-clock budget (default 2700) — enforced by a timeout
+#            wrapper (the old exec'd QEMU unbounded and ignored SECS;
+#            ww-lvma1 overran its budget until killed by hand)
 #   KERNEL   bzImage path (default: FROZEN copy of the hunt kernel — the
 #            worktree may rebuild for unrelated mm work, and a mid-chain
 #            kernel change would silently invalidate the hunt; the frozen
@@ -22,6 +24,7 @@ IMGDIR="/home/william/rux-agents/oh-display/run/oh-img"
 TAG="${TAG:-ww}"
 GDBPORT="${GDBPORT:-12374}"
 SMPN="${SMP:-2}"
+SECSN="${SECS:-2700}"
 KERNEL="${KERNEL:-$ROOT/run/ww-hunt-frozen-bzImage}"
 RUN="$ROOT/run"
 SERIAL="$RUN/${TAG}-serial.log"
@@ -52,7 +55,7 @@ DISKS="$(qemu_drive 0 "$IMGDIR/updater.img")$(qemu_drive 1 "$IMGDIR/system.img")
 RAMDISK="$IMGDIR/ramdisk-x64.img"
 [ -f "$RAMDISK" ] || RAMDISK="$IMGDIR/ramdisk.img"
 
-exec qemu-system-x86_64 \
+exec timeout --signal=TERM --kill-after=10 "${SECSN}s" qemu-system-x86_64 \
     -M q35 -accel tcg,thread=multi -cpu max -m 4G -smp "$SMPN" -snapshot \
     -gdb tcp:127.0.0.1:"$GDBPORT" \
     -display none \
