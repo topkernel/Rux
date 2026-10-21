@@ -122,6 +122,8 @@ pub(crate) fn do_execve_elf(
     pathname: &str,
     interp_data: Option<&[u8]>,
     secure_exec: bool,
+    exe_file: Option<&alloc::sync::Arc<crate::fs::file::File>>,
+    interp_file: Option<&alloc::sync::Arc<crate::fs::file::File>>,
 ) -> Result<(), i32> {
     use crate::arch::mm::{
         create_user_address_space,
@@ -1118,11 +1120,33 @@ pub(crate) fn do_execve_elf(
                         first_exec_set = true;
                     }
 
-                    let vma = Vma::new(
+                    // Linux binfmt_elf parity: the executable's LOADs are
+                    // FILE VMAs (vm_file = the exe, vm_pgoff = ELF_PAGESTART
+                    // file offset) — /proc/<pid>/maps prints the path and a
+                    // per-segment offset, and forensic symbolization of
+                    // in-image rips can compute file positions
+                    // (file_off = vma_off + (rip - vma_start)). The image is
+                    // still copied into private anon frames at exec (the
+                    // mapping model is unchanged); fd stays -1 so no
+                    // fd-gated fault path is activated, and the identity
+                    // lives on the pinned vm_file instead of an fd number
+                    // (which exec closes and userspace could reuse).
+                    let mut vma = Vma::new(
                         crate::mm::page::VirtAddr::new(vma_start as usize),
                         crate::mm::page::VirtAddr::new(vma_end as usize),
                         vma_flags,
                     );
+                    vma.set_type(VmaType::FileBacked);
+                    vma.set_file_fd(-1);
+                    vma.set_file_size(program_data.len() as u64);
+                    // File page mapped at vma_start (elf_map:
+                    // off = p_offset - ELF_PAGEOFFSET(p_vaddr)).
+                    vma.set_offset(
+                        (phdr.p_offset - (phdr.p_vaddr & (PAGE_SIZE as u64 - 1))) as usize,
+                    );
+                    if let Some(f) = exe_file {
+                        new_addr_space.pin_vma_file(vma_start as usize, f.clone());
+                    }
                     let _ = vma_mgr.add(vma);
                 }
             }
@@ -1153,13 +1177,93 @@ pub(crate) fn do_execve_elf(
                 // Page-align the size
                 let raw_size = interp_max - interp_min;
                 let interp_size = (raw_size + PAGE_SIZE as u64 - 1) & !(PAGE_SIZE as u64 - 1);
-                let mut interp_flags = VmaFlags::from_bits(VmaFlags::READ | VmaFlags::EXEC | VmaFlags::PRIVATE);
-                let interp_vma = Vma::new(
-                    crate::mm::page::VirtAddr::new(interp_base as usize),
-                    crate::mm::page::VirtAddr::new((interp_base + interp_size) as usize),
-                    interp_flags,
-                );
-                let _ = vma_mgr.add(interp_vma);
+                // Linux load_elf_interp parity: the interpreter's LOAD
+                // segments are FILE VMAs (vm_file = the interp file) with
+                // per-segment permissions and pgoff. The old single flat
+                // R-X anonymous VMA over [INTERP_BASE, INTERP_BASE+size)
+                // lost fd/offset/path entirely — /proc/<pid>/maps never
+                // showed the interp, and rip-level forensics inside the
+                // ld.so span (the 0x3fbf08ad30/0x3fbf116dea families)
+                // could not convert a rip into a file offset. The image is
+                // still eagerly copied into private anon frames at exec;
+                // fd stays -1 (no fd-gated fault path activates) and the
+                // file identity lives on the pinned vm_file.
+                let mut prev_end = interp_base;
+                let mut added_any = false;
+                for i in 0..interp_ehdr.e_phnum as usize {
+                    // SAFETY: i < e_phnum and interp_bytes is a valid ELF file.
+                    if let Some(phdr) = unsafe { interp_ehdr.get_program_header(interp_bytes, i) } {
+                        if !phdr.is_load() || phdr.p_memsz == 0 {
+                            continue;
+                        }
+                        let seg_vaddr = interp_base + phdr.p_vaddr - interp_min;
+                        let seg_start = seg_vaddr & !(PAGE_SIZE as u64 - 1);
+                        let seg_end = (seg_vaddr + phdr.p_memsz + PAGE_SIZE as u64 - 1)
+                            & !(PAGE_SIZE as u64 - 1);
+                        if seg_end <= seg_start {
+                            continue;
+                        }
+                        // Keep the whole span VMA-covered like the old flat
+                        // mapping: inter-segment gaps become PROT_NONE
+                        // anonymous fillers (Linux leaves holes; PROT_NONE
+                        // faults identically for an access while preserving
+                        // mprotect's whole-range coverage checks).
+                        if seg_start > prev_end {
+                            let filler = Vma::new(
+                                crate::mm::page::VirtAddr::new(prev_end as usize),
+                                crate::mm::page::VirtAddr::new(seg_start as usize),
+                                VmaFlags::from_bits(VmaFlags::PRIVATE),
+                            );
+                            let _ = vma_mgr.add(filler);
+                        }
+                        let mut seg_flags = VmaFlags::new();
+                        if phdr.is_readable() { seg_flags.insert(VmaFlags::READ); }
+                        if phdr.is_writable() { seg_flags.insert(VmaFlags::WRITE); }
+                        if phdr.is_executable() { seg_flags.insert(VmaFlags::EXEC); }
+                        seg_flags.insert(VmaFlags::PRIVATE);
+                        let mut vma = Vma::new(
+                            crate::mm::page::VirtAddr::new(seg_start as usize),
+                            crate::mm::page::VirtAddr::new(seg_end as usize),
+                            seg_flags,
+                        );
+                        vma.set_type(VmaType::FileBacked);
+                        vma.set_file_fd(-1);
+                        vma.set_file_size(interp_bytes.len() as u64);
+                        // elf_map: file page mapped at seg_start is
+                        // p_offset - ELF_PAGEOFFSET(p_vaddr) — exact
+                        // rip->file_off arithmetic for forensics.
+                        vma.set_offset(
+                            (phdr.p_offset - (phdr.p_vaddr & (PAGE_SIZE as u64 - 1))) as usize,
+                        );
+                        if let Some(f) = interp_file {
+                            new_addr_space.pin_vma_file(seg_start as usize, f.clone());
+                        }
+                        let _ = vma_mgr.add(vma);
+                        added_any = true;
+                        prev_end = seg_end;
+                    }
+                }
+                // Tail filler to the page-rounded image end (BSS tail).
+                let span_end = interp_base + interp_size;
+                if added_any && span_end > prev_end {
+                    let filler = Vma::new(
+                        crate::mm::page::VirtAddr::new(prev_end as usize),
+                        crate::mm::page::VirtAddr::new(span_end as usize),
+                        VmaFlags::from_bits(VmaFlags::PRIVATE),
+                    );
+                    let _ = vma_mgr.add(filler);
+                }
+                // Degenerate case (no loadable segments parsed here but
+                // interp_max > interp_min): keep the old flat coverage.
+                if !added_any {
+                    let interp_flags = VmaFlags::from_bits(VmaFlags::READ | VmaFlags::EXEC | VmaFlags::PRIVATE);
+                    let interp_vma = Vma::new(
+                        crate::mm::page::VirtAddr::new(interp_base as usize),
+                        crate::mm::page::VirtAddr::new(span_end as usize),
+                        interp_flags,
+                    );
+                    let _ = vma_mgr.add(interp_vma);
+                }
             }
         }
     }

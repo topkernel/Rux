@@ -8,3 +8,6 @@ Hardware watchpoint 6: *(unsigned long long*)0xffffffff80a66018
 Hardware watchpoint 7: *(unsigned long long*)0xffffffff80a66020
 Hardware watchpoint 8: *(unsigned long long*)0xffffffff80a66028
 WW-ARMED 8 watchpoints, GUARD=0xffffffff80a65000
+Cannot execute this command while the target is running.
+Use the "interrupt" command to stop the target
+and then try again.

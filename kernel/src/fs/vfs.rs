@@ -3561,6 +3561,49 @@ pub fn file_open(filename: &str, flags: u32, mode: u32) -> Result<usize, i32> {
     }
 }
 
+/// Open `path` read-only through the VFS and return the File WITHOUT
+/// installing a descriptor (Linux vm_file semantics for kernel-held
+/// references: the Arc outlives any fd number). Unlike `file_open`, this
+/// never touches the current task's fdtable, so it also works in early-boot
+/// contexts where no fdtable exists yet — the PID-1 exec pins the init and
+/// interpreter identities on the exec-time segment VMAs this way, giving
+/// /proc/1/maps its path column. A kernel-internal open is also invisible to
+/// inotify (no IN_OPEN), matching get_empty_filp-based kernel opens. Dentry
+/// and file ops are wired exactly like the fd-installing path so reads
+/// through the returned Arc behave as a normal O_RDONLY descriptor.
+/// Best-effort: None on lookup failure, a missing inode, or a directory.
+pub fn open_file_arc_nofd(path: &str) -> Option<alloc::sync::Arc<File>> {
+    // SAFETY: path_lookup resolves through the dentry tree (root falls back
+    // to "/" with no current task); File construction mirrors file_open's.
+    unsafe {
+        let vpath = path_lookup(path, 0).ok()?;
+        let inode = vpath.inode?;
+        if inode.mode.is_directory() {
+            return None;
+        }
+        let file = alloc::sync::Arc::new(File::new(FileFlags::new(
+            FileFlags::O_RDONLY,
+        )));
+        file.set_inode(alloc::sync::Arc::clone(&inode));
+        if let Some(d) = vpath.dentry.clone() {
+            file.set_dentry(d);
+        }
+        if let Some(ops) = inode.ops {
+            if let Some(get_file_ops_fn) = ops.get_file_ops {
+                if let Some(file_ops) = get_file_ops_fn(&*inode) {
+                    file.set_ops(file_ops);
+                }
+            }
+            if let Some(open_fn) = ops.open {
+                if open_fn(&*inode, &*file) != 0 {
+                    return None;
+                }
+            }
+        }
+        Some(file)
+    }
+}
+
 ///
 ///
 /// # Arguments

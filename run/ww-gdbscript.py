@@ -47,6 +47,17 @@ WATCHES = {
     "DIV_INV": guard + 0x1018,
     "BOOT_OFFSET": guard + 0x1020,
     "BOOT_OFFSET_INV": guard + 0x1028,
+    # Session-10 expansion (capacity proven >= 10 by run/ww-cap1): the
+    # static the engine actually smashed twice (b77/wt1) was OUTSIDE the
+    # cluster and unwatched; TSC_MULT is the timekeeper-class middle
+    # qword of the TSC trio (OFFSET/BASE/MULT at +0x90/+0xa0/+0xa8 of
+    # 0xffffffff80be8f90). Both are storm-quiet: hpet::BASE's only
+    # post-attach writers are the heal paths (a hit IS a corruption
+    # event — the rip classifies writer vs heal); TSC_MULT's only store
+    # is the HPET-gated TSC-fallback calibration, which returns early
+    # forever once hpet::ready() and never runs on these boots.
+    "HPET_BASE": addr("4hpet4BASE"),
+    "TSC_MULT": addr("8TSC_MULT"),
 }
 
 out = []

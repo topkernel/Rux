@@ -1,0 +1,11 @@
+[chain] 23:50:30 run 22/100 starting (port 12371)
+[ww] qemu pid=2023077 tag=ww-s2-r22 port=12371 budget=2700s
+[ww] gdb pid=2023231 armed from /home/william/rux-agents/wildwrite-hunt/run/ww-s2-r22-gdb.cmd
+[ww] budget spent, terminating qemu
+[ww] serial lines: 74588
+[ww] WW-HIT count: 0
+[ww] no watchpoint hits this run
+[ww] heal-line count in serial: 0
+[chain] 00:35:30 run 23/100 starting (port 12371)
+[ww] qemu pid=2034839 tag=ww-s2-r23 port=12371 budget=2700s
+[ww] gdb pid=2034916 armed from /home/william/rux-agents/wildwrite-hunt/run/ww-s2-r23-gdb.cmd
