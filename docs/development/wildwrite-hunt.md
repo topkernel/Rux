@@ -1204,3 +1204,128 @@ cheap pure-win subset LANDED (see commit; validated):
 - Health baseline confirmations this session: the 9.5-9.7s strand_max
   class reproduces on clean windows (qs1, r24); LVMAP-exec-path boots
   fork at control rates (864/15min, 830/15min).
+
+## Session 14 (continuation agent — mm-side fault-around landed)
+
+### Chain stewardship
+
+- The handoff's "r25 died with session 13" was STALE AGAIN (third
+  occurrence of the pattern): at claim the whole tree was alive
+  (wrapper 2053720 → chain → hunt → qemu 2361211), r25 armed with the
+  15-point set and storming 4.5 min into its budget. Claimed as-is, no
+  restart.
+- r24 verdict (closed mid-flight by session 13): FULL budget clean —
+  77660 lines, wakes 12.39M, ticks [100,100], strand_max 9705 ms (the
+  9.5-9.7 s new-baseline class), 0 WW-HIT / 0 heals / 0 panics. Driver
+  self-advanced to r25 at 02:04.
+- r25: EXTERNALLY KILLED clean partial at ~15/45 min — serial froze
+  02:19 mid-storm, no teardown lines, whole tree gone in one sweep
+  (the s10 15:50 / s13 00:50 infra-sweep class; it also reaped
+  session-13's wrapper). Guest healthy to the last line (ticks
+  [100,100], wakes 3.46M, strand_max 9.7 s), 0 WW-HIT, 0 panics.
+  Relaunched from r26 at 02:40 (run/ww-chain-s14.log); r26 armed
+  (WW-ARMED 15, GUARD=0xffffffff80a7a000) and storming. Cumulative:
+  **0 WW-HIT across r1-r25** partials.
+
+### mm-side fault-around LANDED (6782020e) — the session-13 16x item
+
+The session-13 archive left fault-around as "documented for the
+implementing session, the 16x-class win"; the handoff greenlit the mm
+side while the launcher line owns the fs side. Implementation
+(x86_64 page_fault.rs only, riscv64 twin untouched):
+
+- Read/exec demand faults into FileBacked VMAs fill and map up to 16
+  pages (64 KiB, Linux fault_around_bytes default) from the faulting
+  page: one VMA find, one fill pass, one PTE-lock section. ~25600
+  faults per 100 MB lib load collapse to ~1600 events. The per-page
+  sequential read_at stream feeds the ext4 readahead detector, so the
+  fs side classifies and prefetches the window — composition, not
+  duplication.
+- Semantics held to the single-page arm: past-EOF pages stay unmapped
+  (SIGBUS gate re-faults them — mmap13 parity), window clipped at VMA
+  end, write faults opt out (do_fault_around parity), SHARED-devfs /
+  anon / device / shmem excluded, per-page walk re-checks free race
+  losers.
+- Safety: the batch re-verifies the VMA snapshot (start/end/offset/
+  fd/flags) under a RE-TAKEN vma read guard held across the single
+  PTE-lock map section (INV-LOCK-7 vma→pte nesting, same as the
+  marker path) — munmap/mprotect/MAP_FIXED all need the vma write
+  lock, so the stale-capture race (mapping file content into a
+  concurrently replaced region) is closed for the whole window at
+  once, strictly stronger than the single-page arm.
+- Bonus fix inside the extracted fill helper: a NEGATIVE errno from
+  read_at on a pre-zero-skipped page fell through the old
+  `bytes_read == 0` check — recycled-buddy content could reach a user
+  page on a failed read. Now any read not verifiably covering the page
+  zeroes the tail.
+
+### Validation
+
+- test/faultaround_boot.py (new, loader_vma shape): **FAW-PASS x6** —
+  FA1 64-page sequential content (4 full windows), FA2 EOF clip →
+  SIGBUS in a forked child, FA3 write-fault opt-out + COW privacy +
+  writable around pages, FA4 partial-tail zero fill, FA5 adjacent-VMA
+  boundary clip (two files at neighboring MAP_FIXED addresses, no
+  cross-contamination), FA6 fork COW over an around-mapped window.
+- test/loader_vma_boot.py LVMAP-PASS (regression: boot-exec interp/exe
+  segments, mremap file-attr carry, loader overlay — all through the
+  batch path).
+- ww-fa1 (fault-around kernel, 15-min OH soak, TCG smp2/4G,
+  dfx=taskdump,watchdog,periodic,metawatch): full budget, 822 forks
+  (fd1 control class), wakes 4.40M advancing to the end, avg_run 4ms,
+  ticks [100,100], **0 KERNPANIC / ALLOCTHROW / META-SMASH / SIGBUS
+  forensics / Permission-denied / MM-DROP-CTX**. strand_max 144 s with
+  wakes never stalling — classified against the A/B control below.
+- ww-fa2ctl (control, HEAD~ kernel = identical except no
+  fault-around, same script/flags/budget, same concurrent-host
+  conditions — hunt chain r26 + samgr-line sc110/sc111 ≈ 3 QEMUs
+  throughout both soaks):
+
+  | metric (15 min) | ww-fa1 (fault-around) | ww-fa2ctl (control) |
+  |---|---|---|
+  | serial lines | 142,760 | 138,496 |
+  | forks | 822 | 853 |
+  | final wakes | 4.40M | 2.85M |
+  | avg_run | 4 ms | 6 ms |
+  | strand_max | 144 s | 69 s |
+  | stranded events | 55,834 | 52,464 |
+  | si_busy > 500 ms samples | many (max 1064 ms) | 181 |
+  | KERNPANIC/ALLOCTHROW/SIGBUS/PermDenied/MM-DROP-CTX/META-SMASH | 0 | 0 |
+
+  Classification: strand_max 144 s vs 69 s is within the
+  host-contention family's spread (the 15-min controlled-boot class
+  itself ranged 44-81 s at 3 QEMUs in session 13; bf-v1/v2 spread
+  470-615 s on IDENTICAL kernels) — both soaks ran against ~3
+  concurrent QEMUs, both show hundreds of >500 ms si_busy samples,
+  both never stalled wakes. The throughput signal points the right
+  way: the fault-around boot completed 1.54x the wakes at LOWER
+  avg_run (4 vs 6 ms). The definitive quantification (spawn-to-spawn
+  stime on the launcher workload) belongs to the launcher-line relay
+  once Session N's readahead rides main.
+
+Two probe-development lessons recorded for the line: (a) a forked
+child must judge only its own checks — the FA6 child inherited the
+parent's global failure counter and "failed" while every child-side
+check passed, which cost a false-alarm reproduction chase; (b) printf
+from short-lived forked children is lossy on this console — raw
+write(1, ...) diagnostics are reliable (FA2/FA6 shape).
+
+### Probe side-observation (pre-existing, not touched)
+
+MAP_FIXED at mid-low addresses (e.g. 0x50000000) fails EINVAL from
+the x86_64 arch mmap brk-conflict guard (`addr < MMAP_START && end >
+BRK_DEFAULT` = 0x20000000): any fixed mapping ending above 512 MB and
+below MMAP_START is refused, far beyond the actual brk region. Linux
+allows these placements. Divergence noted; the guard is deliberate
+brk-heap protection (mm_ops.rs MAP_FIXED branch), left alone.
+
+### Session 14 close-out
+
+- Commits: 6782020e (fault-around + probe), archive update (this
+  section) + chain artifacts.
+- Chain at close: r26 in flight (15-point set); 0 WW-HIT cumulative.
+- Next: (1) chain continues — watchset 15 + metawatch both live;
+  (2) if the launcher line's Session N readahead lands on main, an
+  OH A/B of spawn-to-spawn stime would quantify the composed win
+  (16x fewer faults x batched reads); (3) watchset room remains
+  (capacity proven >= 15; next quiet candidates listed session 10).
