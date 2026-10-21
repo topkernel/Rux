@@ -53,7 +53,22 @@ const PIT_CH0_MODE3_BIN: u8 = 0x36;
 
 /// Fractional shift used by the TSC -> nominal-domain mapping (pub for
 /// hpet::calibrate_tsc — keep in sync with the promotion math).
-pub const TSC_MULSHIFT: u32 = 12;
+///
+/// sc110-114 ROOT CAUSE NOTE: this was 12 for the whole sc-series, where
+/// mult = ceil(CLOCK_FREQ << 12 / tsc_hz) = ceil(9.5434) = 10 — a 10.5%
+/// resolution grid — so the mapping ran 10/9.5434 = 4.796% FAST against
+/// the HPET on every boot (sc114: "TSC 4292 MHz" -> 4,292.4 MHz measured,
+/// ceil still 10). The "one-time ~25 s TSC-vs-HPET step" that parked the
+/// timekeeper behind `tscclk` (and inspired the per-CPU vCPU-offset skew
+/// theory) was exactly this: 4.796% x uptime crosses the resync's 25 s
+/// hard-rebase threshold at uptime 522.17 s — deterministic, and the
+/// sc113/sc114 rebases both fired at 522.17 s with lead 250.41M ticks to
+/// within 0.6 ms, matching the rounding error to 4 significant digits.
+/// (The per-CPU corrections measured ~-21.9 ms on the AP = the same
+/// 4.796% x 0.456 s AP-bringup instant, not vCPU skew.) At shift 32 the
+/// mult grid is ~100 ppm and round-to-nearest halves the residual, so
+/// the 1 Hz bounded resync absorbs what is left.
+pub const TSC_MULSHIFT: u32 = 32;
 
 /// TSC timekeeping state (written once by `lapic_time_calibrated`):
 /// nominal = ((tsc - base_tsc) >> SHIFT) * MULT, where
@@ -66,22 +81,28 @@ static TSC_CONTINUITY_OFFSET: AtomicU64 = AtomicU64::new(0);
 
 /// Per-CPU additive correction to the TSC-derived nominal clock.
 ///
-/// KVM gives every vCPU its own TSC offset; the rates are identical but
-/// the offsets are not (sc110: a one-time ~25 s forward step vs the HPET
-/// right around secondary-CPU online, with no rate drift afterwards).
-/// Each AP measures its own (HPET - TSC-derived) delta once, right
+/// KVM can give every vCPU its own TSC offset (rates identical, offsets
+/// not). Each AP measures its own (HPET - TSC-derived) delta once, right
 /// before its first tick, and `read_time()` applies the current CPU's
 /// correction — the same shape as Linux's per-CPU cyc2ns offsets.
 /// 0 = not yet calibrated (index 0 stays 0: the BSP's correction is
 /// folded into TSC_CONTINUITY_OFFSET at promote time).
 ///
-/// Residual calibration noise between CPUs makes tiny BACKWARD steps
-/// possible on thread migration; sc113 measured exactly that (samgr
-/// printed `cost:4294946ms` — a 21 ms backward step wrapping a u32
-/// microsecond diff, which aborted SA loads and killed the OsAccount
-/// host's clients). Two guards: the calibration takes the MIN of three
-/// bracketed samples (noise floor), and read_time ratchets through
-/// TSC_LAST (published time never goes backward).
+/// HISTORY NOTE: sc110-114's "one-time ~25 s TSC-vs-HPET step" was NOT
+/// vCPU skew — it was the shift-12 ceil rounding running the mapping
+/// 4.796% fast (see the TSC_MULSHIFT note; the sc114 AP "skew" of
+/// -21.9 ms was 4.796% x the 0.456 s AP-bringup instant). The per-CPU
+/// discipline stays: it is correct in principle and costs one acquire
+/// load on the read path.
+///
+/// Residual calibration noise between CPUs still makes tiny BACKWARD
+/// steps possible on thread migration; sc113 measured one such step
+/// under the OLD 4.8% mapping error (samgr printed `cost:4294946ms` —
+/// a 21 ms backward step wrapping a u32 microsecond diff, which aborted
+/// SA loads and killed the OsAccount host's clients). Two guards: the
+/// calibration takes the MIN of three bracketed samples (noise floor),
+/// and read_time ratchets through TSC_LAST (published time never goes
+/// backward).
 static TSC_CPU_OFF: [AtomicI64; crate::config::MAX_CPUS] =
     [const { AtomicI64::new(0) }; crate::config::MAX_CPUS];
 
@@ -197,10 +218,11 @@ pub fn promote_tsc_timekeeper(mult: u64, base_tsc: u64, nominal_at_base: u64) {
 /// vCPU TSC offsets differ, so a single global step would yo-yo the
 /// clock as the tick migrates CPUs. A TSC that fell behind (or a KVM
 /// TSC resync) is stepped forward, clamped to 10 ms per resync so a
-/// poisoned HPET read cannot jump the clock; a TSC that runs fast is
-/// only logged unless the lead exceeds 250 ms (then that CPU's offset
-/// is pulled back — a mult miscalibration would otherwise widen
-/// forever, and a rate error shows up on EVERY cpu, not one).
+/// poisoned HPET read cannot jump the clock; a TSC ahead by >250 ms is
+/// REPORTED (post shift-32 this should be silent forever — the marker
+/// proves the mapping error stays under a quarter second), and a lead
+/// >25 s is pulled back as a last resort (with the shift-12 rounding
+/// error fixed that means a real vCPU TSC smash, not calibration).
 pub fn resync_tsc_against_hpet() {
     if TSC_FROM_HPET.load(Ordering::Acquire) == 0 {
         return;
@@ -228,6 +250,12 @@ pub fn resync_tsc_against_hpet() {
             resync_report(b"tsc-clock: fell behind ", behind);
         }
         TSC_CPU_OFF[cpu].fetch_add(step as i64, Ordering::AcqRel);
+    } else if tsc_nom > hpet_nom && tsc_nom - hpet_nom > 2_500_000 {
+        // 250 ms..25 s lead: REPORT ONLY. Proof-of-fix marker for the
+        // shift-32 correction — at ~3 ppm residual mapping error this
+        // needs ~23 h of uptime to fire, so any print here means a NEW
+        // divergence (or an HPET read stall), worth reading.
+        resync_report(b"tsc-clock: lead ", tsc_nom - hpet_nom);
     } else if tsc_nom - hpet_nom > 250_000_000 {
         // >25 s lead on THIS cpu: either a vCPU TSC-offset jump (skew)
         // or a smashed mapping. Pull this CPU's offset back into sync
@@ -340,9 +368,11 @@ pub fn lapic_time_calibrated(_lapic_freq: u64, tsc_freq: u64) {
     if crate::drivers::timer::hpet::ready() {
         return;
     }
-    // nominal = (tsc >> S) * (CLOCK_FREQ << S / tsc_freq) — pick the
-    // multiplier so the mapping stays exact within one shift quantum.
-    let mult = (CLOCK_FREQ << TSC_MULSHIFT).div_ceil(tsc_freq);
+    // nominal = (tsc >> S) * round(CLOCK_FREQ << S / tsc_freq) — nearest
+    // rounding, NOT ceil: at a coarse shift a ceiled mult runs the whole
+    // mapping fast by up to one mult quantum (sc110-114: 4.796% fast at
+    // shift 12; see the TSC_MULSHIFT note).
+    let mult = ((CLOCK_FREQ << TSC_MULSHIFT) + tsc_freq / 2) / tsc_freq;
     let now = crate::arch::cpu::read_counter();
     let continuity = get_jiffies() * TIME_SLICE_TICKS;
     TSC_MULT.store(mult, Ordering::Release);
