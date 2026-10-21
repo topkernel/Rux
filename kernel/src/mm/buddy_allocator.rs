@@ -1068,6 +1068,424 @@ pub fn buddy_stats() -> BuddyStats {    let mut stats = BuddyStats::default();
     stats
 }
 
+// ============================================================================
+// Meta shadow audit (dfx=metawatch, wildwrite-hunt line session 13)
+//
+// The unified-engine hypothesis says the wild writer's second downstream
+// face is buddy-meta corruption (the ww-v2 order-18 grind: an impossible
+// coalescing scale with only ~229 MB in use). The gdb watchpoint chain
+// can only cover kernel STATIC victims; the buddy metadata (free-list
+// links, per-page free bitmap) is megabytes of heap-adjacent BSS and
+// cannot be watchpointed. This audit derives a shadow free bitmap from
+// the free lists and cross-checks the linkage invariants:
+//   - free_lists[order] heads are EMPTY_LIST or a valid, 2^order-aligned
+//     page index whose leader meta says (order, free=1)     (INV-HEAP-1/2)
+//   - prev/next links mirror each other along each list
+//   - the derived per-page free set equals `free_bits` exactly
+//     (INV-HEAP-3), with no page listed twice.
+//
+// Pass 1 runs LOCK-FREE from the timer cadence (racy per-field reads are
+// tolerated, same discipline as buddy_free_census_lockfree), so it can
+// observe transient mid-mutation states; any dirty pass 1 is re-audited
+// UNDER the heap irqsave lock before being reported — only a persistent
+// mismatch is corruption. Callers never print on pass-1 evidence alone.
+// ============================================================================
+
+/// One shadow-audit mismatch. `kind` classifies it; `idx`/`prev`/`next`
+/// carry the offending block's leader meta, `word`/`bits`/`derived` the
+/// offending free_bits word and the audit-derived shadow value for the
+/// bitmap kinds.
+#[derive(Clone, Copy, PartialEq)]
+pub struct MetaFinding {
+    pub kind: MetaFindKind,
+    pub order: usize,
+    pub idx: usize,
+    pub prev: u32,
+    pub next: u32,
+    pub word: usize,
+    pub bits: u64,
+    pub derived: u64,
+}
+
+/// The audit's empty finding (const constructor for stack buffers).
+pub const EMPTY_FINDING: MetaFinding = MetaFinding {
+    kind: MetaFindKind::LinkOob,
+    order: 0,
+    idx: 0,
+    prev: 0,
+    next: 0,
+    word: 0,
+    bits: 0,
+    derived: 0,
+};
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum MetaFindKind {
+    /// A list head or next-link escaped [0, MAX_PAGES), or a block's
+    /// span ran past the end of the page array.
+    LinkOob,
+    /// Listed block's leader order byte disagrees with the list order.
+    OrderMismatch,
+    /// Listed block's leader free byte is not 1.
+    FreeByteClear,
+    /// Listed block leader is not 2^order-aligned.
+    Unaligned,
+    /// prev link does not mirror the walk position.
+    PrevBroken,
+    /// free_bits has set bits where the lists say nothing is free.
+    BitmapSetUnlisted,
+    /// A listed free block's span has clear bits in free_bits.
+    BitmapClearListed,
+    /// The same page is reachable from two list positions.
+    DoubleListed,
+    /// Walk exceeded the page-count budget (list cycle / mega-list).
+    HopOverflow,
+}
+
+/// Scratch shadow bitmap for the audit, plus the single-CPU claim that
+/// makes it safe: pass 1 and its under-lock confirmation run inside one
+/// claim, so the scratch is never shared by two concurrent audits.
+static META_AUDIT_BUSY: AtomicU64 = AtomicU64::new(0);
+
+/// MetaArray-style interior-mutable scratch (see MetaArray's SAFETY
+/// comments): only touched by `meta_audit_inner`, which every caller
+/// reaches while holding the META_AUDIT_BUSY claim.
+struct AuditScratch {
+    data: UnsafeCell<[u64; FREE_BITMAP_WORDS]>,
+}
+
+// SAFETY: see `AuditScratch` doc — all access is claim-serialized.
+unsafe impl Send for AuditScratch {}
+unsafe impl Sync for AuditScratch {}
+
+static META_AUDIT_SCRATCH: AuditScratch = AuditScratch {
+    data: UnsafeCell::new([0; FREE_BITMAP_WORDS]),
+};
+
+fn record(
+    findings: &mut [MetaFinding],
+    total: &mut usize,
+    f: MetaFinding,
+) {
+    if *total < findings.len() {
+        findings[*total] = f;
+    }
+    *total = (*total).saturating_add(1);
+}
+
+/// The audit walk itself. Caller provides exclusivity over the scratch
+/// (the META_AUDIT_BUSY claim) — see buddy_meta_shadow_scan.
+///
+/// SAFETY-of-use note: reads `meta` fields without the allocator lock
+/// (census precedent — aligned u8/u32 field loads; a torn combination
+/// surfaces as a transient pass-1 finding that the under-lock pass
+/// clears). Returns the TOTAL number of findings; at most
+/// `findings.len()` are stored.
+fn meta_audit_inner(findings: &mut [MetaFinding]) -> usize {
+    let mut total = 0usize;
+    // SAFETY: caller holds the META_AUDIT_BUSY claim (single audit at a
+    // time across CPUs); the borrow lives only inside this function.
+    let scratch = unsafe { &mut (*META_AUDIT_SCRATCH.data.get()) };
+    for w in scratch.iter_mut() {
+        *w = 0;
+    }
+
+    let mut hop_budget = MAX_PAGES + MAX_ORDER + 1;
+    'orders: for order in 0..=MAX_ORDER {
+        let npages = 1usize << order;
+        let mut idx = HEAP_ALLOCATOR.free_lists[order].load(Ordering::Acquire);
+        let mut prev_link = u32::MAX as usize; // head's prev must be null
+        loop {
+            if idx == EMPTY_LIST {
+                break;
+            }
+            if idx >= MAX_PAGES || idx + npages > MAX_PAGES {
+                record(
+                    findings,
+                    &mut total,
+                    MetaFinding {
+                        kind: MetaFindKind::LinkOob,
+                        order,
+                        idx,
+                        prev: 0,
+                        next: 0,
+                        word: 0,
+                        bits: 0,
+                        derived: 0,
+                    },
+                );
+                break;
+            }
+            if hop_budget == 0 {
+                record(
+                    findings,
+                    &mut total,
+                    MetaFinding {
+                        kind: MetaFindKind::HopOverflow,
+                        order,
+                        idx,
+                        prev: 0,
+                        next: 0,
+                        word: 0,
+                        bits: 0,
+                        derived: 0,
+                    },
+                );
+                break 'orders;
+            }
+            hop_budget -= 1;
+
+            // Racy leader-meta snapshot (tolerated; see function doc).
+            let m = HEAP_ALLOCATOR.meta.get(idx);
+            let (m_order, m_free, m_prev, m_next) = (m.order, m.free, m.prev, m.next);
+
+            if m_order as usize != order {
+                record(
+                    findings,
+                    &mut total,
+                    MetaFinding {
+                        kind: MetaFindKind::OrderMismatch,
+                        order,
+                        idx,
+                        prev: m_prev,
+                        next: m_next,
+                        word: 0,
+                        bits: m_order as u64,
+                        derived: order as u64,
+                    },
+                );
+            }
+            if m_free != 1 {
+                record(
+                    findings,
+                    &mut total,
+                    MetaFinding {
+                        kind: MetaFindKind::FreeByteClear,
+                        order,
+                        idx,
+                        prev: m_prev,
+                        next: m_next,
+                        word: 0,
+                        bits: m_free as u64,
+                        derived: 1,
+                    },
+                );
+            }
+            if idx & (npages - 1) != 0 {
+                record(
+                    findings,
+                    &mut total,
+                    MetaFinding {
+                        kind: MetaFindKind::Unaligned,
+                        order,
+                        idx,
+                        prev: m_prev,
+                        next: m_next,
+                        word: 0,
+                        bits: 0,
+                        derived: 0,
+                    },
+                );
+            }
+            if m_prev as usize != prev_link {
+                record(
+                    findings,
+                    &mut total,
+                    MetaFinding {
+                        kind: MetaFindKind::PrevBroken,
+                        order,
+                        idx,
+                        prev: m_prev,
+                        next: m_next,
+                        word: 0,
+                        bits: m_prev as u64,
+                        derived: prev_link as u64,
+                    },
+                );
+            }
+
+            // Set the span's shadow bits; overlap = double listing.
+            let w0 = idx / 64;
+            let w1 = (idx + npages - 1) / 64;
+            let mut double = false;
+            for w in w0..=w1 {
+                let lo = if w == w0 { idx % 64 } else { 0 };
+                let hi = if w == w1 { (idx + npages - 1) % 64 } else { 63 };
+                let mask = if lo == 0 && hi == 63 {
+                    !0u64
+                } else {
+                    ((1u64 << (hi - lo + 1)) - 1) << lo
+                };
+                let old = scratch[w];
+                if old & mask != 0 {
+                    double = true;
+                }
+                scratch[w] = old | mask;
+            }
+            if double {
+                record(
+                    findings,
+                    &mut total,
+                    MetaFinding {
+                        kind: MetaFindKind::DoubleListed,
+                        order,
+                        idx,
+                        prev: m_prev,
+                        next: m_next,
+                        word: 0,
+                        bits: 0,
+                        derived: 0,
+                    },
+                );
+            }
+
+            prev_link = idx;
+            let next = m_next as usize;
+            if next == u32::MAX as usize {
+                break;
+            }
+            idx = next;
+        }
+    }
+
+    // Cross-check the shadow against the per-page bitmap (INV-HEAP-3).
+    for w in 0..FREE_BITMAP_WORDS {
+        let d = scratch[w];
+        let b = HEAP_ALLOCATOR.free_bits[w].load(Ordering::Relaxed);
+        if b & !d != 0 {
+            record(
+                findings,
+                &mut total,
+                MetaFinding {
+                    kind: MetaFindKind::BitmapSetUnlisted,
+                    order: MAX_ORDER + 1,
+                    idx: 0,
+                    prev: 0,
+                    next: 0,
+                    word: w,
+                    bits: b,
+                    derived: d,
+                },
+            );
+        }
+        if d & !b != 0 {
+            record(
+                findings,
+                &mut total,
+                MetaFinding {
+                    kind: MetaFindKind::BitmapClearListed,
+                    order: MAX_ORDER + 1,
+                    idx: 0,
+                    prev: 0,
+                    next: 0,
+                    word: w,
+                    bits: b,
+                    derived: d,
+                },
+            );
+        }
+    }
+
+    total
+}
+
+/// Outcome of one shadow scan: what pass 1 (lock-free) saw and what the
+/// under-lock confirmation made of it. `confirmed > 0` is corruption.
+#[derive(Clone, Copy)]
+pub struct MetaScanOutcome {
+    pub lockfree_findings: usize,
+    pub confirmed_findings: usize,
+}
+
+/// One shadow scan: lock-free pass, then — only if pass 1 was dirty —
+/// an under-lock re-audit. Returns None if another CPU's scan is in
+/// flight (the claim serializes audits; the next cadence will run).
+pub fn buddy_meta_shadow_scan(findings: &mut [MetaFinding]) -> Option<MetaScanOutcome> {
+    if HEAP_ALLOCATOR.initialized.load(Ordering::Acquire) == 0 {
+        return Some(MetaScanOutcome { lockfree_findings: 0, confirmed_findings: 0 });
+    }
+    if META_AUDIT_BUSY
+        .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return None;
+    }
+    let n_free = meta_audit_inner(findings);
+    let n_conf = if n_free > 0 {
+        // Re-audit under the heap lock, overwriting the findings buffer
+        // with the authoritative (persistent) set.
+        let _g = HEAP_ALLOCATOR.lock.lock_irqsave();
+        meta_audit_inner(findings)
+    } else {
+        0
+    };
+    META_AUDIT_BUSY.store(0, Ordering::Release);
+    Some(MetaScanOutcome {
+        lockfree_findings: n_free,
+        confirmed_findings: n_conf,
+    })
+}
+
+/// Selftest (`metawatch-selftest=1`): under claim + heap lock, clear one
+/// free_bits bit of a listed block, expect the audit to flag it, restore,
+/// and expect a clean re-audit. Proves the detector end-to-end without
+/// leaving damage (all under one irqsave section — no allocator traffic
+/// can interleave).
+pub fn buddy_meta_selftest() -> bool {
+    if HEAP_ALLOCATOR.initialized.load(Ordering::Acquire) == 0 {
+        return false;
+    }
+    if META_AUDIT_BUSY
+        .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return false;
+    }
+    let mut findings = [EMPTY_FINDING; 4];
+    let _g = HEAP_ALLOCATOR.lock.lock_irqsave();
+
+    // Pre-audit must be clean.
+    if meta_audit_inner(&mut findings) != 0 {
+        META_AUDIT_BUSY.store(0, Ordering::Release);
+        return false;
+    }
+
+    // Find any listed block to corrupt.
+    let mut victim: Option<(usize, usize)> = None; // (order, idx)
+    for order in 0..=MAX_ORDER {
+        let head = HEAP_ALLOCATOR.free_lists[order].load(Ordering::Acquire);
+        if head != EMPTY_LIST && head < MAX_PAGES {
+            victim = Some((order, head));
+            break;
+        }
+    }
+    let (order, idx) = match victim {
+        Some(v) => v,
+        None => {
+            META_AUDIT_BUSY.store(0, Ordering::Release);
+            return false;
+        }
+    };
+
+    let w = idx / 64;
+    let mask = 1u64 << (idx % 64);
+    let saved = HEAP_ALLOCATOR.free_bits[w].load(Ordering::Relaxed);
+    HEAP_ALLOCATOR.free_bits[w].fetch_and(!mask, Ordering::Relaxed);
+
+    let flagged = meta_audit_inner(&mut findings);
+    let saw_kind = flagged > 0
+        && findings[..flagged.min(findings.len())]
+            .iter()
+            .any(|f| f.kind == MetaFindKind::BitmapClearListed && f.word == w);
+
+    // Restore and require a clean re-audit.
+    HEAP_ALLOCATOR.free_bits[w].fetch_or(mask, Ordering::Relaxed);
+    let clean = meta_audit_inner(&mut findings) == 0;
+
+    META_AUDIT_BUSY.store(0, Ordering::Release);
+    saw_kind && clean
+}
+
 /// Combined allocator - prioritizes Slab for small objects, falls back to Buddy for large objects
 ///
 /// This design can reduce memory fragmentation and improve small object allocation efficiency
