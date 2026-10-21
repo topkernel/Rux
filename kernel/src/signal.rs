@@ -2095,6 +2095,24 @@ unsafe fn send_signal_locked_info(
 
     let task = &*task_ptr;
 
+    // sc93 launcher gate: a cross-process SIGKILL to a wedged launcher
+    // means the AMS lifecycle timeout fired AND the userspace DFX dumper
+    // already failed on this process (every LIFECYCLE_TIMEOUT freeze
+    // artifact reports "failed to fully dump due to timeout"). The
+    // kernel dumps the wedged threads itself before they die — park
+    // futex word + value, rip/rsp, file-backed frames. Runs before
+    // anything is queued or the target is woken, so the park state is
+    // still intact.
+    if sig == Signal::SIGKILL as i32 {
+        let t_comm = task.comm();
+        let t_len = t_comm.iter().position(|&b| b == 0).unwrap_or(t_comm.len());
+        if let Ok(t_str) = core::str::from_utf8(&t_comm[..t_len]) {
+            if t_str.contains("launcher") {
+                crate::sync::futex::kill_dump_tgid(task.tgid() as u32);
+            }
+        }
+    }
+
     // KILLTRACE (sigterm hunt): name the sender of fatal signals.
     // Coverage: every SIGTERM (rare in practice), cross-group SIGKILLs, and
     // SIGSEGV/SIGKILL to watched comms (gnome-session*/ls — the session

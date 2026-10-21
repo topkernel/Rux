@@ -1666,6 +1666,83 @@ fn exit_ring_dump_tgid(tgid: u32) {
     }
 }
 
+/// sc93 launcher gate: AMS SIGKILLs a lifecycle-timed-out app while the
+/// DFX userspace dumper itself fails on that app (every LIFECYCLE_TIMEOUT
+/// freeze artifact says "normal stack:failed to fully dump due to
+/// timeout") — the kernel is the only observer that can still read the
+/// wedged process. Called at SIGKILL send time (signal.rs), when the app
+/// is by definition terminally wedged: prints every thread of the tgid,
+/// each thread's futex park word + its CURRENT value (binder reply waits,
+/// condvars, mutexes — the park value names the primitive and protocol),
+/// and rip/rsp + file-backed stack frames via the sc90 exec-VMA filter.
+/// pr_warn so the quiet boot (loglevel=4) keeps it; 8 dumps/boot cap
+/// against restart-loop flooding.
+pub fn kill_dump_tgid(tgid: u32) {
+    use core::fmt::Write;
+    static N: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+    if N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) >= 8 {
+        return;
+    }
+    // Collect thread pointers only under the pid-hash walk (its bucket
+    // locks forbid heavy work); the page-table reads happen after.
+    // for_each_task takes an Fn closure, so the list goes through a
+    // RefCell.
+    let threads_cell = core::cell::RefCell::new(alloc::vec::Vec::<*mut Task>::new());
+    crate::sched::for_each_task(|t| {
+        if unsafe { (*t).tgid() as u32 } == tgid {
+            threads_cell.borrow_mut().push(t);
+        }
+    });
+    let threads = threads_cell.into_inner();
+    let mut hdr = alloc::string::String::new();
+    let _ = write!(hdr, "KILLDUMP: tgid {} threads={}", tgid, threads.len());
+    for &t in threads.iter() {
+        let tk = unsafe { &*t };
+        let comm = core::str::from_utf8(tk.comm()).unwrap_or("").trim_end_matches('\0');
+        let _ = write!(hdr, " [{}:{}]", tk.pid(), comm);
+    }
+    crate::pr_warn!("{}", hdr);
+    for &t in threads.iter() {
+        // Park word: this task's live (unwoken) entry in the waiter pool.
+        let mut parked = None;
+        for slot in WAITER_POOL.iter() {
+            let s = slot.lock_irqsave();
+            if let Some(w) = s.as_ref() {
+                if core::ptr::eq(w.task, t) && !w.woken {
+                    parked = Some((w.key.uaddr, w.bitset));
+                }
+            }
+            drop(s);
+            if parked.is_some() {
+                break;
+            }
+        }
+        let tk = unsafe { &*t };
+        let comm = core::str::from_utf8(tk.comm()).unwrap_or("").trim_end_matches('\0');
+        match parked {
+            Some((uaddr, bitset)) => {
+                let word = unsafe { read_u32_via_task(t, uaddr) };
+                crate::pr_warn!(
+                    "KILLDUMP: tid {} comm='{}' parked uaddr={:#x} bitset={:#x} word={:#x}",
+                    tk.pid(),
+                    comm,
+                    uaddr,
+                    bitset,
+                    word.unwrap_or(0xdead_bee1)
+                );
+            }
+            None => {
+                crate::pr_warn!(
+                    "KILLDUMP: tid {} comm='{}' NOT on a futex (blocked in another syscall or runnable)",
+                    tk.pid(),
+                    comm
+                );
+            }
+        }
+        unsafe { rwfz_stack_frames(t, "KILLDUMP", 10, 96) };
+    }
+}
+
 /// Log futex ops on the watched word: every park (with the userspace
 /// expected value), every wake (with how many were woken), every wait
 /// return. This is the word's entire syscall-visible traffic. Bursts are
