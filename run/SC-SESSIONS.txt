@@ -1211,3 +1211,94 @@ burn confirmed unchanged), sc103 (unix_send cleared), sc104 (OsAccount
 early wedge variant). Screen: 8-color checker at 100% coverage
 throughout (display pipeline alive, launcher UI not reached). MILESTONE
 NOT reached this session; three concrete gates retired.
+
+SESSION N (2026-10-22 02:0x-0x; sc105-sc109; launcher stime burn DECODED,
+fs fault-around landed, OsAccount root cause named):
+
+GATE 1 (launcher stime burn) — DECODED, not where anyone guessed:
+- sc105/sc106 A/B: the fs fault-around fix (below) did NOT move stime
+  (177-191t every kill) => the burn was NOT the demand-fault ext4 path.
+  Demand-fault counters: ~2.6k page-shaped misses per kill window, avg
+  1.4ms/read but mostly SLEEP (rdtsc spans deschedule), too few misses.
+- Built a tick-sampled kernel-rip histogram (arch/x86_64/trap.rs, keyed
+  by comm so tasks separate; sc106 lesson: global steal-smallest table
+  STARVES the target — launcher entries start at count=1 and get stolen
+  by the next new page; sc108 added a *launcher*-gated FOCUS table).
+- FOCUS histogram answer (sc108, 6 kills): 68-143 ticks/life in the
+  kernel log-crate + CString formatting page, 12-28t in the core::fmt
+  numbers + memmove/memset page. The launcher burns its 3s appspawn
+  budget PRINTING KERNEL DIAGNOSTICS: mtprobe prints one ~150B line per
+  sandbox bind (61 binds/spawn, in the CHILD's context) and WAKE-STRANDED
+  prints at pick time (in the PICKED task's context — the launcher is
+  picked thousands of times). UART TX is a busy LSR.THRE poll at 115200
+  ≈ 87us/byte: a 150B line = ~13ms of pure stime. This is the sc37
+  bindrec lesson replayed on Session M's probes.
+- FIX 1: `sprobe=0` boot param silences mtprobe + WAKE-STRANDED prints
+  (detectors/counters keep running; default unchanged so concurrent
+  hunts keep output).
+- sc109 A/B (sprobe=0): stime STILL 185-202t — the probe prints were
+  real cost but NOT the dominant burner. CORRECTION of the sprobe
+  commit message's claim. The sc109 focus histogram named the true
+  dominator: the HPET driver page (hpet::read_counter/read_time_nominal,
+  1690-1766 cumulative ticks across launcher lives) — the launcher has
+  NO vDSO (AT_SYSINFO_EHDR disabled by the P2 fix until the vdso data
+  page moves to linear-mapped memory, exec.rs:964), so every
+  clock_gettime pays a syscall AND an HPET MMIO read = a KVM VM exit.
+  ArkUI's event/timestamp churn at ~35k calls/s burns the whole budget.
+- FIX 2 (the real one, timer lane): HPET-calibrated TSC timekeeper —
+  hpet::calibrate_tsc() measures TSC-vs-HPET over a 20 ms window right
+  after HPET init (both derive from QEMU's virtual clock; error <1 ppm),
+  read_time() now serves from RDTSC (no VM exit), and a 1 Hz resync
+  (x86_64::resync_tsc_against_hpet, offset-only forward steps clamped to
+  10 ms, hard rebase past 25 s) bounds drift. vDSO re-enable remains the
+  mm lane's item (linear-mapped vdso data page).
+- ALSO landed fs fault-around (KEEP — Linux parity, compounding win):
+  single page-aligned one-page preads (the mmap demand-fault signature)
+  now fill a 16-page cluster (fault_around_bytes parity) instead of 1
+  page when the per-fd sequential detector says "random" (dynamic
+  linker fault order interleaves .text/.rodata/.got segments).
+- mm-lane coordination (main-session relay): their de150335 (per-fault
+  constant-factor fixes: 1 VMA find, fewer vm_file pins, no double
+  zeroing) + this fault-around are complementary halves; clean-host A/B
+  (baseline / readahead / fault-path / both) runs once branches unify.
+
+GATE 2 (OsAccount SA proxy death) — ROOT CAUSE NAMED (image defect):
+- The kernel-only binder transitions are clean: binder_close is the ONLY
+  path that removes a proc (world.procs) — a dead proxy always means the
+  owner's binder fd closed. New CLOSE probe prints owner pid + nodes +
+  foreign refs at every node-owning close (rate-budgeted).
+- sc105/sc106/sc108 serial forensics: SA host processes (sc105: pids
+  628/649/677/702, 3 crashes each — init restart loop; sc108: 628/707/
+  728/787) SEGFAULT at the SAME user rip 0x7ff082996bac, cr2=0, rbx=0
+  (NULL list walk: mov rax,[rbx]; cmp rbx,r13; jne loop), while
+  servicing a binder txn from samgr. USEGV probe extension now dumps
+  printable strings below an anon/memfd rip mapping: the library is the
+  USB DDK PnP manager (UsbPnpManagerRegisterOrUnregisterDevice,
+  UsbDdkPnpLoaderEventReceived/Handle, ubsan handlers) — Session L's
+  DdkListenerMgr NULL-list family, on a memfd not present in ANY image
+  .so (offline signature search of system/vendor/sys_prod/chip_prod:
+  925 candidates, 0 matches at voff 0x15bac).
+- Chain: usb DDK lib NULL-walk crash kills the SA host process =>
+  binder_close removes its proc => clients' proxies get BR_DEAD_REPLY
+  (userspace error 32, "proxy is already dead") => if the victim hosted
+  OsAccount (or the boot order left BMS wedged on responseUserId:-1),
+  launcher spawn gate. sc104/sc105 wedged this way; sc106/sc108 boots
+  passed (victims were other hosts). IMAGE-side fix belongs to the main
+  session: extend the usb disable overlay to whatever host loads the
+  USB DDK PnP manager (the scgold userdata overlay did not cover it).
+
+GATE 3 (wake-loss residue): sc107 wedged EARLY (W3-RUNWAKE-REFUSED
+lines 172-179, pid 1/307-310 all curr_on=true on_cpu=true; PARKED-LEAK
+pid 315; kickdog stall) — the wake-stranding producer remains real and
+boot-order dependent. Not chased this session (gate 1 had priority).
+
+Boots: sc105 (fault-around verify; BMS-wedge variant), sc106 (binder
+CLOSE probe; launcher kills stime unchanged, first FOCUS attempt),
+sc107 (early wake wedge, killed), sc108 (FOCUS table + memfd-strs;
+burn decoded, 16 spawns, 6 kills), sc109 (sprobe=0 A/B + shotmon,
+RUNNING at time of this entry).
+
+COMMITS this session (English, on feature/samgr-callback):
+- facb8f3a wip(snapshot): fault-around + probes
+- 8ebbf25b dfx(stime): focus histogram + memfd-strs forensics
+- 6ecb3478 dfx(uart): sprobe=0 gate for launcher-context probe prints

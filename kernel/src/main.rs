@@ -565,10 +565,19 @@ pub fn rust_main_tail() -> ! {
         #[cfg(feature = "x86_64")]
         {
             let ok = drivers::timer::hpet::init();
+            // sc109: promote the calibrated TSC over the MMIO HPET for
+            // read_time — the launcher's vDSO-less clock_gettime path was
+            // paying an HPET VM exit per call and burned its whole 3 s
+            // appspawn watchdog (stime focus histogram: hpet page).
+            let tsc_clk = ok && drivers::timer::hpet::calibrate_tsc();
             print_status(
                 "timer",
                 if ok {
-                    "HPET clocksource (virtual-clock exact)"
+                    if tsc_clk {
+                        "HPET-calibrated TSC timekeeper (no MMIO per read)"
+                    } else {
+                        "HPET clocksource (virtual-clock exact)"
+                    }
                 } else {
                     "HPET absent — calibrated-TSC timebase"
                 },

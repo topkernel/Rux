@@ -1238,6 +1238,16 @@ fn handle_timer_tick(regs: &mut PtRegs, cpu: usize) {
     // 1. Update jiffies
     crate::drivers::timer::timer_interrupt_handler();
 
+    // 1.2 sc109: 1 Hz drift discipline for the HPET-calibrated TSC
+    // timekeeper (offset-only forward steps, clamped; see
+    // x86_64::resync_tsc_against_hpet).
+    {
+        let j = crate::drivers::timer::x86_64::get_jiffies();
+        if j % crate::config::KERNEL_HZ as u64 == 0 {
+            crate::drivers::timer::x86_64::resync_tsc_against_hpet();
+        }
+    }
+
     // 1.5 Scribble hunter (dfx=scribble): GS-pairing tripwire + verify
     // quiescent tasks' tracked scheduling fields against their shadows +
     // scheduler-consistency scan (double-run seed detection).

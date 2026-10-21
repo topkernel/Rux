@@ -421,6 +421,60 @@ pub fn init() -> bool {
     true
 }
 
+/// Calibrate the TSC against the initialized HPET and promote the TSC to
+/// timekeeper (sc109: the OH launcher has no vDSO clock_gettime — every
+/// call paid a syscall AND an HPET MMIO read, a VM exit under KVM, and
+/// the launcher burned its whole 3 s appspawn watchdog in that path).
+///
+/// KVM's TSC is invariant and vCPU-synchronized; both clocks derive from
+/// QEMU's virtual clock, so the only error is measurement skew (~us)
+/// across a 20 ms window (≪ 1 ppm). A 1 Hz resync
+/// (x86_64::resync_tsc_against_hpet) bounds residual drift.
+pub fn calibrate_tsc() -> bool {
+    use crate::drivers::timer::x86_64::{promote_tsc_timekeeper, CLOCK_FREQ, TSC_MULSHIFT};
+    if !ready() {
+        return false;
+    }
+    // Validated DIV/offset (same discipline as read_time_nominal).
+    let (div, offset) = {
+        let d = DIV.load(Ordering::Acquire);
+        let dinv = DIV_INV.load(Ordering::Acquire);
+        let o = BOOT_OFFSET.load(Ordering::Acquire);
+        if d == 0 || d != !dinv {
+            return false; // unhealed clock — keep the MMIO path
+        }
+        (d, o)
+    };
+    // 20 ms calibration window at 100 MHz HPET counts.
+    const WINDOW: u64 = 2_000_000;
+    let h0 = read_counter();
+    let t0 = crate::arch::cpu::read_counter();
+    let mut h1 = read_counter();
+    while h1.saturating_sub(h0) < WINDOW {
+        h1 = read_counter();
+    }
+    let t1 = crate::arch::cpu::read_counter();
+    let dh = h1.saturating_sub(h0);
+    let dt = t1.saturating_sub(t0);
+    let nom_delta = dh / div;
+    if nom_delta < WINDOW / div / 2 || dt == 0 {
+        return false;
+    }
+    let tsc_hz = (dt as u128) * (CLOCK_FREQ as u128) / (nom_delta as u128);
+    if tsc_hz == 0 || tsc_hz > 16_000_000_000u128 {
+        return false;
+    }
+    let mult = (((CLOCK_FREQ as u128) << TSC_MULSHIFT).div_ceil(tsc_hz)) as u64;
+    let nominal_at_t1 = h1 / div + offset;
+    promote_tsc_timekeeper(mult, t1, nominal_at_t1);
+    crate::pr_info!(
+        "hpet: TSC timekeeper promoted (tsc {} Hz, mult {}, 20ms window)",
+        tsc_hz,
+        mult
+    );
+    true
+}
+
 /// One 64-bit counter read against an explicit base (init-time verify).
 /// Same high-half discipline as [`read_counter`]; at most one re-read
 /// when the 429 s high-half boundary lands mid-read.
