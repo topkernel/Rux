@@ -822,7 +822,15 @@ pub fn vfs_bind_mount(
             let t4 = crate::arch::x86_64::cpu::read_counter();
             static MTPROBE_N: core::sync::atomic::AtomicUsize =
                 core::sync::atomic::AtomicUsize::new(0);
-            if MTPROBE_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 400 {
+            // sc108: the print itself was the launcher killer — UART TX
+            // is a busy THRE poll (115200 baud ≈ 87us/byte), so each
+            // ~150-byte line burns ~13ms of stime in the MOUNTING task's
+            // context; the post-exec launcher child mounts its sandbox
+            // and paid its whole 3s appspawn watchdog to this probe (the
+            // sc37 bindrec lesson, replayed). `sprobe=0` silences.
+            if crate::cmdline::get_param("sprobe").map(|v| v != "0").unwrap_or(true)
+                && MTPROBE_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 400
+            {
                 crate::pr_warn!(
                     "mtprobe: bind '{}' -> '{}': lookup+attach={}cyc clone-scan={}cyc clone-attach={}cyc nmounts={} nclones={}",
                     source,
