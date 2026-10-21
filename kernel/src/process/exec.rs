@@ -288,8 +288,15 @@ pub(crate) fn do_execve_elf(
     impl Drop for UserAddrSpaceGuard {
         fn drop(&mut self) {
             // SAFETY: user_ppn was allocated by create_user_address_space;
-            // on error path, free all page tables to avoid physical page leaks.
-            unsafe { crate::arch::mm::mmu_init::free_user_page_tables(self.0); }
+            // on error path, free all page tables to avoid physical page
+            // leaks. FRESH_TREE_PTE_LOCK: this tree is unpublished (no
+            // MmStruct owns it yet), no mm-side writers exist (INV-LOCK-7).
+            unsafe {
+                crate::arch::mm::mmu_init::free_user_page_tables(
+                    &crate::mm::mm_struct::FRESH_TREE_PTE_LOCK,
+                    self.0,
+                );
+            }
         }
     }
     let _guard = UserAddrSpaceGuard(user_ppn);

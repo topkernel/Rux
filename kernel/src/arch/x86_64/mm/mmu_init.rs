@@ -803,7 +803,15 @@ pub fn pte_install_log(root_ppn: u64, va: u64, ppn: u64) {
 ///
 /// For non-leaf entries the U bit is not meaningful — we must walk all
 /// valid user-space upper entries, not skip them based on U bit.
-pub unsafe fn free_user_page_tables(root_ppn: u64) {
+///
+/// `pte` is the PTE section the teardown chunks take (INV-LOCK-7): the
+/// DYING mm's own PteLock from MmStruct::drop (uncontended by
+/// construction — last-Arc + synchronize_rcu drain), or
+/// FRESH_TREE_PTE_LOCK for unpublished trees (exec error path, tests).
+pub unsafe fn free_user_page_tables(
+    pte: &crate::mm::mm_struct::PteLock,
+    root_ppn: u64,
+) {
     use crate::mm::{pfn_to_page, phys_to_pfn, phys_valid, free_pages};
     crate::dfx::memwatch::FUT_CALLS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     // Double-teardown detector: the same root walked twice means two
@@ -841,23 +849,26 @@ pub unsafe fn free_user_page_tables(root_ppn: u64) {
     // printed once per offending teardown.
     let mut stale_tables: [(u8, usize, usize, u64); 16] = [(0, 0, 0, 0); 16];
     let mut stale_count = 0usize;
-    // CHUNKED teardown (launcher wall fix, session-3): the walk no longer
-    // holds one global PTE_MODIFY_LOCK section for the whole tree — that
-    // monopolized a CPU (preempt disabled) for the multi-second free walk
-    // of a large mm. Each leaf table (and each huge-leaf entry, and each
-    // upper-table free) is processed in its own short locked chunk with a
-    // cond_resched() boundary between chunks. Exclusion is unchanged
-    // where it matters:
+    // CHUNKED teardown (launcher wall fix, session-3; per-mm sections,
+    // INV-LOCK-7): the walk no longer holds one global section for the
+    // whole tree — that monopolized a CPU (preempt disabled) for the
+    // multi-second free walk of a large mm. Each leaf table (and each
+    // huge-leaf entry, and each upper-table free) is processed in its own
+    // short section chunk (`pte`, the dying mm's own PteLock) with a
+    // cond_resched() boundary between chunks. Exclusion:
     // - this tree has no other users: Drop runs at the LAST Arc, every
     //   fork/rmap/compact walker pins the mm by reference, and raw
     //   borrowers were drained by the synchronize_rcu in MmStruct::drop;
     // - the NEW2 reuse race (a freed data/table frame immediately
     //   reallocated as a page table or COW copy by another CPU) is a
     //   per-frame race: each frame's put_page/free happens entirely
-    //   inside the chunk that processes its PTE, and every allocator-
-    //   side taker (fork walk chunks, COW faults, eager maps) takes the
-    //   same PTE_MODIFY_LOCK — so per-chunk locking closes it exactly as
-    //   the old whole-walk hold did.
+    //   inside the chunk that processes its PTE — after the free the
+    //   teardown never touches the frame again, and the buddy heap lock
+    //   serializes free vs alloc. (Pre-split, the closure also leaned on
+    //   every allocator-side taker taking the same GLOBAL lock; with
+    //   per-mm sections a fault of ANOTHER mm may allocate the freed
+    //   frame concurrently — safe because the frame's last teardown
+    //   access is the free itself.)
 
     let root_phys = root_ppn << PAGE_SHIFT;
     let root_table = get_page_table_virt(root_phys);
@@ -910,7 +921,7 @@ pub unsafe fn free_user_page_tables(root_ppn: u64) {
                 // Chunk: 1GB-leaf frame return under the PTE lock (NEW2
                 // reuse race — see the chunked-teardown comment above).
                 {
-                    let _pte_guard = super::mm_ops::PTE_MODIFY_LOCK.lock();
+                    let _pte_guard = pte.lock();
                     let pfn = phys_to_pfn(phys_addr as usize);
                     let page = pfn_to_page(pfn);
                     if !page.is_null() {
@@ -948,7 +959,7 @@ pub unsafe fn free_user_page_tables(root_ppn: u64) {
                 // bottom yields the CPU between chunks when need_resched is
                 // set — the whole-teardown CPU monopoly is gone.
                 {
-                let _pte_guard = super::mm_ops::PTE_MODIFY_LOCK.lock();
+                let _pte_guard = pte.lock();
 
                 // 2MB leaf (PMD leaf with PS)
                 if pte2.is_leaf() {
@@ -1079,7 +1090,7 @@ pub unsafe fn free_user_page_tables(root_ppn: u64) {
             }
             // Chunk: PMD (l1) frame return under the PTE lock.
             {
-                let _pte_guard = super::mm_ops::PTE_MODIFY_LOCK.lock();
+                let _pte_guard = pte.lock();
                 free_page_table_checked_rooted(table2_phys, "l1", root_ppn);
             }
             crate::sched::cond_resched();
@@ -1096,7 +1107,7 @@ pub unsafe fn free_user_page_tables(root_ppn: u64) {
         }
         // Chunk: PUD (l2) frame return under the PTE lock.
         {
-            let _pte_guard = super::mm_ops::PTE_MODIFY_LOCK.lock();
+            let _pte_guard = pte.lock();
             free_page_table_checked_rooted(table3_phys, "l2", root_ppn);
         }
         crate::sched::cond_resched();

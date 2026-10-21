@@ -504,7 +504,7 @@ unsafe fn remap_page(dst: &Page, old_vaddr: usize, saved_flags: u64) {
         );
 
         // Rebuild the leaf PTE under the PTE lock (R22-3 — §17.4 close).
-        let _pte_g = crate::arch::mm::mm_ops::PTE_MODIFY_LOCK.lock_irqsave();
+        let _pte_g = crate::arch::mm::mm_ops::pte_lock_for(mm).lock_irqsave();
         let new_pte_bits = (new_ppn << 10) | (saved_flags & 0x3FF) | 0x1 /* V */;
         (*table0).set(
             vpn0,

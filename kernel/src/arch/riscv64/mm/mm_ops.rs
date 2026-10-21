@@ -984,7 +984,7 @@ impl MmStruct {
         // (fork) guarantees the parent address space is fully initialized and consistent.
         let _pte_guard = PTE_MODIFY_LOCK.lock_irqsave();
         let new_root_ppn = unsafe {
-            copy_page_table_cow(self.pgd, &cow_exempt).ok_or(MapError::OutOfMemory)?
+            copy_page_table_cow(self, &cow_exempt).ok_or(MapError::OutOfMemory)?
         };
         drop(_pte_guard);
 
@@ -1377,17 +1377,34 @@ pub unsafe fn map_user_page(user_root_ppn: u64, user_virt: VirtAddr, phys: PhysA
 }
 
 /// Map user region
-/// Coarse leaf-PTE serialization: copy_page_table_cow (fork) mutates the
-/// PARENT's PTEs while walking them; handle_cow_fault atomically swaps a
-/// parent PTE; exec/exit teardown frees them. With no per-PTE locks, any
-/// two of these racing on the same page produce stale refcounts and
-/// dangling child PTEs — the NEW2 class. One writer at a time.
+///
+/// Leaf-PTE exclusion epoch (INV-LOCK-7; type `GlobalPteLock`, see
+/// mm/mm_struct.rs and docs/architecture/lock-ordering.md).
+///
+/// riscv64 runs in GLOBAL mode for now: every PTE section — the direct
+/// `PTE_MODIFY_LOCK` users below AND `pte_lock_for(mm)` from the
+/// arch-neutral files — maps to the SAME exclusive epoch section, i.e.
+/// exactly the former single-Spinlock whole-domain serialization. The
+/// split-mode (per-mm) migration is an x86_64 change for now; riscv64
+/// follows once its own site audit is done.
+///
 /// Shared mmap-context generation counter (interface parity with x86_64's
 /// MM_CTX — the mremap/IPC paths reference it generically).
 pub static MM_CTX: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
-pub static PTE_MODIFY_LOCK: crate::sync::spinlock::Spinlock<()> =
-    crate::sync::spinlock::Spinlock::new(());
+pub static PTE_MODIFY_LOCK: crate::mm::mm_struct::GlobalPteLock =
+    crate::mm::mm_struct::GlobalPteLock::new();
+
+/// Per-mm leaf-PTE section hook (INV-LOCK-7), GLOBAL mode on riscv64:
+/// every mm maps to the same global epoch section, so arch-neutral
+/// callers compile unchanged against the x86_64 shape.
+#[inline]
+pub fn pte_lock_for(_mm: &crate::mm::mm_struct::MmStruct) -> &'static crate::mm::mm_struct::PteLock {
+    &PTE_GLOBAL_HANDLE
+}
+
+static PTE_GLOBAL_HANDLE: crate::mm::mm_struct::PteLock =
+    crate::mm::mm_struct::PteLock::new();
 
 
 pub unsafe fn map_user_region(
@@ -1691,12 +1708,16 @@ pub mod cow_flags {
 ///
 /// Kernel mappings (VPN2 >= KERNEL_PGD_START or U=0 entries) are shared by copying PGD entries.
 /// User space mappings are copied with COW marking for writable pages.
+///
+/// `parent` supplies the walk's root (and, on split-mode arches, the
+/// per-mm PTE section; riscv64 is GLOBAL mode — INV-LOCK-7).
 pub unsafe fn copy_page_table_cow(
-    parent_root_ppn: u64,
+    parent: &crate::mm::mm_struct::MmStruct,
     cow_exempt: &[(u64, u64)],
 ) -> Option<u64> {
+    let parent_root_ppn = parent.root_ppn();
     // NOTE: the whole walk runs under the caller's (AddressSpace::fork)
-    // PTE_MODIFY_LOCK, serializing it against demand faults, COW faults,
+    // PTE section, serializing it against demand faults, COW faults,
     // and exec/unmap teardown. Per-leaf PTL granularity (Linux-style) is
     // still a TODO for SMP scalability.
     use crate::mm::page_desc::pfn_to_page_mut;
@@ -1929,9 +1950,14 @@ pub enum CowFaultResult {
     OutOfMemory,
 }
 
-/// Handle copy-on-write page fault
-pub unsafe fn handle_cow_fault(root_ppn: u64, fault_addr: VirtAddr) -> CowFaultResult {
-    let _pte_guard = PTE_MODIFY_LOCK.lock_irqsave();
+/// Handle copy-on-write page fault (GLOBAL-mode PTE section on riscv64,
+/// INV-LOCK-7; `mm` is the owning address space of `root_ppn`).
+pub unsafe fn handle_cow_fault(
+    mm: &crate::mm::mm_struct::MmStruct,
+    root_ppn: u64,
+    fault_addr: VirtAddr,
+) -> CowFaultResult {
+    let _pte_guard = pte_lock_for(mm).lock_irqsave();
     use crate::mm::page_desc::pfn_to_page_mut;
 
     let virt_addr = fault_addr.bits();

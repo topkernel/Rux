@@ -34,6 +34,10 @@ extern crate alloc;
 
 use core::sync::atomic::{AtomicI32, AtomicU64, AtomicUsize, AtomicU16, Ordering};
 use crate::sync::rwlock::RwSpinlock;
+#[cfg(feature = "x86_64")]
+use crate::sync::spinlock::{Spinlock, SpinlockGuard, SpinlockIrqGuard};
+#[cfg(not(feature = "x86_64"))]
+use crate::sync::spinlock::Spinlock;
 
 use crate::mm::vma::{VmaManager, Vma, VmaFlags, VmaType};
 use crate::mm::page::VirtAddr;
@@ -42,6 +46,124 @@ use crate::mm::pagemap::{MapError, Perm, PageTableType};
 /// Capacity of the saved auxv, in u64 words (Linux AT_VECTOR_SIZE = 22
 /// (type, value) pairs = 44 words).
 pub const AT_VECTOR_SIZE: usize = 44;
+
+// ============================================================================
+// Leaf-PTE exclusion (INV-LOCK-7 — see docs/architecture/lock-ordering.md)
+// ============================================================================
+
+/// The global PTE epoch — the type of each arch's `PTE_MODIFY_LOCK`
+/// static (arch/*/mm/mm_ops.rs).
+///
+/// * Exclusive holders (`lock` / `lock_irqsave`) get the OLD single-lock
+///   semantics: they exclude against every leaf-PTE writer on the system.
+///   On riscv64 (global mode) ALL PTE sections go through here; on x86_64
+///   the remaining direct users are the ipc install paths (binder /
+///   sysv_shm — IPC line's files), `map_user_region` and kernel-root /
+///   unpublished-tree maps, none of which can reach the owning mm.
+/// * Shared holders are per-mm PTE sections (x86_64 split mode, `PteLock`)
+///   — they exclude against exclusive holders and against each other only
+///   through the per-mm spinlock, so PTE writers on DIFFERENT mms run
+///   concurrently.
+pub struct GlobalPteLock {
+    pub(crate) raw: RwSpinlock<()>,
+}
+
+impl GlobalPteLock {
+    pub const fn new() -> Self {
+        Self { raw: RwSpinlock::new(()) }
+    }
+
+    /// Whole-domain exclusive PTE section (the old global lock).
+    #[inline]
+    pub fn lock(&self) -> crate::sync::rwlock::RwSpinlockWriteGuard<'_, ()> {
+        self.raw.write()
+    }
+
+    /// Whole-domain exclusive PTE section, IRQs saved.
+    #[inline]
+    pub fn lock_irqsave(&self) -> crate::sync::rwlock::RwSpinlockIrqWriteGuard<'_, ()> {
+        self.raw.write_irqsave()
+    }
+}
+
+/// Per-mm leaf-PTE exclusion lock (x86_64 split mode; see `GlobalPteLock`).
+///
+/// On non-x86_64 builds (`pte_lock_for` global mode) `lock*()` degrade to
+/// the global exclusive section — the per-mm spin field is unused there.
+pub struct PteLock {
+    spin: Spinlock<()>,
+}
+
+impl PteLock {
+    pub const fn new() -> Self {
+        Self { spin: Spinlock::new(()) }
+    }
+
+    /// Per-mm PTE section: global epoch SHARED + this mm's spin.
+    /// Writers of this mm serialize on the spin; writers of other mms
+    /// run concurrently (shared epoch); global-mode writers still
+    /// exclude (they need the epoch exclusive).
+    #[inline]
+    pub fn lock(&self) -> PteGuard<'_> {
+        #[cfg(feature = "x86_64")]
+        {
+            let read = crate::arch::mm::mm_ops::PTE_MODIFY_LOCK.raw.read();
+            let spin = self.spin.lock();
+            PteGuard { _spin: spin, _epoch: read }
+        }
+        #[cfg(not(feature = "x86_64"))]
+        {
+            PteGuard { _epoch: crate::arch::mm::mm_ops::PTE_MODIFY_LOCK.lock() }
+        }
+    }
+
+    /// `lock()` with IRQs saved for the whole section.
+    #[inline]
+    pub fn lock_irqsave(&self) -> PteIrqGuard<'_> {
+        #[cfg(feature = "x86_64")]
+        {
+            let read = crate::arch::mm::mm_ops::PTE_MODIFY_LOCK.raw.read_irqsave();
+            let spin = self.spin.lock_irqsave();
+            PteIrqGuard { _spin: spin, _epoch: read }
+        }
+        #[cfg(not(feature = "x86_64"))]
+        {
+            PteIrqGuard { _epoch: crate::arch::mm::mm_ops::PTE_MODIFY_LOCK.lock_irqsave() }
+        }
+    }
+}
+
+/// Guard of a `PteLock::lock()` section. Fields drop innermost-first
+/// (declaration order): the mm spin releases before the epoch.
+#[cfg(feature = "x86_64")]
+pub struct PteGuard<'a> {
+    _spin: SpinlockGuard<'a, ()>,
+    _epoch: crate::sync::rwlock::RwSpinlockReadGuard<'a, ()>,
+}
+
+#[cfg(not(feature = "x86_64"))]
+pub struct PteGuard<'a> {
+    _epoch: crate::sync::rwlock::RwSpinlockWriteGuard<'a, ()>,
+}
+
+/// Guard of a `PteLock::lock_irqsave()` section.
+#[cfg(feature = "x86_64")]
+pub struct PteIrqGuard<'a> {
+    _spin: SpinlockIrqGuard<'a, ()>,
+    _epoch: crate::sync::rwlock::RwSpinlockIrqReadGuard<'a, ()>,
+}
+
+#[cfg(not(feature = "x86_64"))]
+pub struct PteIrqGuard<'a> {
+    _epoch: crate::sync::rwlock::RwSpinlockIrqWriteGuard<'a, ()>,
+}
+
+/// PTE-section handle for page-table trees that have NO owning MmStruct:
+/// exec's not-yet-published error-path guard tree and the synthetic test
+/// trees. Those trees have no concurrent mm-side writers by construction;
+/// the handle still gives the teardown chunks a real section (and on
+/// non-x86_64, the full global exclusion).
+pub static FRESH_TREE_PTE_LOCK: PteLock = PteLock::new();
 
 /// Memory Descriptor
 ///
@@ -55,9 +177,11 @@ pub struct MmStruct {
     /// 0 means not allocated or kernel ASID
     asid: AtomicU16,
 
-    /// Page table lock (for modifications to the page table)
-    /// This lock protects pgd modifications and page table walks
-    pgd_lock: RwSpinlock<()>,
+    /// Leaf-PTE exclusion lock for THIS address space (INV-LOCK-7; the
+    /// vestigial RwSpinlock `pgd_lock` that never had a caller, replaced
+    /// by the per-mm PTE lock). Acquired only through `pte_lock()` /
+    /// the arch hook `arch::mm::mm_ops::pte_lock_for(&mm)`.
+    pte_lock: PteLock,
 
     /// VMA manager (protected by RwLock for interior mutability)
     vma_manager: RwSpinlock<VmaManager>,
@@ -238,7 +362,7 @@ impl MmStruct {
         Self {
             pgd,
             asid: AtomicU16::new(0),  // Will be allocated on first use
-            pgd_lock: RwSpinlock::new(()),
+            pte_lock: PteLock::new(),
             vma_manager: RwSpinlock::new(vma_manager),
             vma_files: RwSpinlock::new(alloc::collections::BTreeMap::new()),
             space_type,
@@ -371,18 +495,19 @@ impl MmStruct {
         }
     }
 
-    // ==================== Page Table Lock ====================
+    // ==================== Per-mm PTE Lock ====================
 
-    /// Acquire page table read lock
+    /// The mm's leaf-PTE exclusion lock (INV-LOCK-7).
+    ///
+    /// A PTE section = global epoch SHARED + this spinlock (x86_64 split
+    /// mode): two writers of the SAME mm serialize here, writers of
+    /// DIFFERENT mms run concurrently, and the remaining global-mode
+    /// users (ipc installs, kernel-root/unpublished-tree maps, every
+    /// riscv64 site) hold the epoch EXCLUSIVE so they still exclude
+    /// against everyone. See docs/architecture/lock-ordering.md.
     #[inline]
-    pub fn pgd_read(&self) -> crate::sync::rwlock::RwSpinlockReadGuard<'_, ()> {
-        self.pgd_lock.read()
-    }
-
-    /// Acquire page table write lock
-    #[inline]
-    pub fn pgd_write(&self) -> crate::sync::rwlock::RwSpinlockWriteGuard<'_, ()> {
-        self.pgd_lock.write()
+    pub fn pte_lock(&self) -> &PteLock {
+        &self.pte_lock
     }
 
     /// Get address space type
@@ -1044,7 +1169,11 @@ impl Drop for MmStruct {
             }
 
             unsafe {
-                crate::arch::mm::free_user_page_tables(self.pgd);
+                // The dying mm's OWN PteLock (INV-LOCK-7): uncontended by
+                // construction here (last-Arc + synchronize_rcu drain), so
+                // the teardown chunks never queue behind a live mm's
+                // sections.
+                crate::arch::mm::free_user_page_tables(self.pte_lock(), self.pgd);
             }
         }
     }

@@ -409,7 +409,7 @@ fn try_to_unmap_inner(page: &Page, swap_entry: u64) -> i32 {
                         // R22-3 (§17.4 close): leaf-PTE mutation under the
                         // PTE lock like every other writer (fork-COW/munmap/
                         // mprotect/fault-map) — was racing them.
-                        let _pte_g = crate::arch::mm::mm_ops::PTE_MODIFY_LOCK.lock_irqsave();
+                        let _pte_g = crate::arch::mm::mm_ops::pte_lock_for(mm).lock_irqsave();
 
                         // Re-validate the leaf under the lock (R7-C3 pattern):
                         // the walk above ran OUTSIDE it, and a concurrent leaf
