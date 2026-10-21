@@ -25,7 +25,7 @@
 //! handler derives jiffies from the timebase (`floor(elapsed/period)`),
 //! which is idempotent under concurrent tick handlers on any CPU.
 
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicI64, AtomicU64, Ordering};
 
 use crate::arch::cpu::{inb, io_wait, outb};
 
@@ -63,6 +63,19 @@ static TSC_BASE: AtomicU64 = AtomicU64::new(0);
 /// Offset added to the TSC-derived value so the switch from the
 /// jiffies-derived clock cannot run time backward.
 static TSC_CONTINUITY_OFFSET: AtomicU64 = AtomicU64::new(0);
+
+/// Per-CPU additive correction to the TSC-derived nominal clock.
+///
+/// KVM gives every vCPU its own TSC offset; the rates are identical but
+/// the offsets are not (sc110: a one-time ~25 s forward step vs the HPET
+/// right around secondary-CPU online, with no rate drift afterwards).
+/// Each AP measures its own (HPET - TSC-derived) delta once, right
+/// before its first tick, and `read_time()` applies the current CPU's
+/// correction — the same shape as Linux's per-CPU cyc2ns offsets.
+/// 0 = not yet calibrated (index 0 stays 0: the BSP's correction is
+/// folded into TSC_CONTINUITY_OFFSET at promote time).
+static TSC_CPU_OFF: [AtomicI64; crate::config::MAX_CPUS] =
+    [const { AtomicI64::new(0) }; crate::config::MAX_CPUS];
 
 /// True once the TSC became the timekeeper.
 static TSC_ACTIVE: AtomicU64 = AtomicU64::new(0);
@@ -124,8 +137,17 @@ pub fn read_time() -> u64 {
         let now = crate::arch::cpu::read_counter();
         let base = TSC_BASE.load(Ordering::Acquire);
         let delta = now.wrapping_sub(base);
-        (delta >> TSC_MULSHIFT).wrapping_mul(mult)
-            + TSC_CONTINUITY_OFFSET.load(Ordering::Acquire)
+        let v = (delta >> TSC_MULSHIFT).wrapping_mul(mult)
+            + TSC_CONTINUITY_OFFSET.load(Ordering::Acquire);
+        // Per-CPU vCPU TSC-offset correction (TSC_CPU_OFF doc). Signed
+        // add keeps cross-CPU monotonicity inside the i64 nominal range;
+        // an uncalibrated CPU (0) reads the uncorrected value.
+        let cpu = crate::arch::cpu_id() as usize;
+        if cpu < crate::config::MAX_CPUS {
+            v.wrapping_add(TSC_CPU_OFF[cpu].load(Ordering::Acquire) as u64)
+        } else {
+            v
+        }
     } else if crate::drivers::timer::hpet::ready() {
         crate::drivers::timer::hpet::read_time_nominal()
     } else {
@@ -148,14 +170,20 @@ pub fn promote_tsc_timekeeper(mult: u64, base_tsc: u64, nominal_at_base: u64) {
 }
 
 /// 1 Hz drift discipline for the HPET-calibrated TSC (timer tick calls
-/// this; see TSC_FROM_HPET). The offset only ever GROWS: a TSC that fell
-/// behind (or a KVM TSC resync) is stepped forward, clamped to 10 ms per
-/// resync so a poisoned HPET read cannot jump the clock; a TSC that runs
-/// fast is only logged unless the lead exceeds 250 ms (then the whole
-/// mapping is re-derived — a mult miscalibration would otherwise widen
-/// forever).
+/// this; see TSC_FROM_HPET). Corrections are PER-CPU (TSC_CPU_OFF):
+/// vCPU TSC offsets differ, so a single global step would yo-yo the
+/// clock as the tick migrates CPUs. A TSC that fell behind (or a KVM
+/// TSC resync) is stepped forward, clamped to 10 ms per resync so a
+/// poisoned HPET read cannot jump the clock; a TSC that runs fast is
+/// only logged unless the lead exceeds 250 ms (then that CPU's offset
+/// is pulled back — a mult miscalibration would otherwise widen
+/// forever, and a rate error shows up on EVERY cpu, not one).
 pub fn resync_tsc_against_hpet() {
     if TSC_FROM_HPET.load(Ordering::Acquire) == 0 {
+        return;
+    }
+    let cpu = crate::arch::cpu_id() as usize;
+    if cpu >= crate::config::MAX_CPUS {
         return;
     }
     let mult = TSC_MULT.load(Ordering::Acquire);
@@ -164,10 +192,11 @@ pub fn resync_tsc_against_hpet() {
     if mult == 0 {
         return;
     }
-    let tsc_nom = ((crate::arch::cpu::read_counter().wrapping_sub(base) >> TSC_MULSHIFT)
-        .wrapping_mul(mult))
-    .wrapping_add(off);
+    let raw = crate::arch::cpu::read_counter();
+    let tsc_nom_uncorr =
+        ((raw.wrapping_sub(base) >> TSC_MULSHIFT).wrapping_mul(mult)).wrapping_add(off);
     let hpet_nom = crate::drivers::timer::hpet::read_time_nominal();
+    let tsc_nom = tsc_nom_uncorr.wrapping_add(TSC_CPU_OFF[cpu].load(Ordering::Acquire) as u64);
     if hpet_nom > tsc_nom {
         let behind = hpet_nom - tsc_nom;
         // 10 ms nominal-domain clamp (CLOCK_FREQ=10 MHz → 100_000 ticks).
@@ -175,25 +204,60 @@ pub fn resync_tsc_against_hpet() {
         if behind > 100_000 {
             resync_report(b"tsc-clock: fell behind ", behind);
         }
-        TSC_CONTINUITY_OFFSET.fetch_add(step, Ordering::AcqRel);
+        TSC_CPU_OFF[cpu].fetch_add(step as i64, Ordering::AcqRel);
     } else if tsc_nom - hpet_nom > 250_000_000 {
-        // >25 s lead: mapping is broken — rebase hard.
-        resync_report(b"tsc-clock: rebase, lead ", tsc_nom - hpet_nom);
-        // sc110 forensics: the single observed step was ~25 s, once, with
-        // no rate drift after — name the CPU and raw pair so the next
-        // capture can tell vCPU TSC-offset skew (per-cpu step) from a
-        // smashed mapping (global).
+        // >25 s lead on THIS cpu: either a vCPU TSC-offset jump (skew)
+        // or a smashed mapping. Pull this CPU's offset back into sync
+        // and print the raw pair for offline skew-vs-smash triage.
+        let lead = tsc_nom - hpet_nom;
+        resync_report(b"tsc-clock: rebase, lead ", lead);
         crate::pr_warn!(
-            "tsc-clock: rebase cpu={} tsc_nom={:#x} hpet_nom={:#x} base={:#x} mult={:#x}",
-            crate::arch::cpu_id(),
+            "tsc-clock: rebase cpu={} raw_tsc={:#x} tsc_nom={:#x} hpet_nom={:#x} base={:#x} mult={:#x} cpu_off={:#x}",
+            cpu,
+            raw,
             tsc_nom,
             hpet_nom,
             base,
-            mult
+            mult,
+            TSC_CPU_OFF[cpu].load(Ordering::Acquire)
         );
-        TSC_BASE.store(crate::arch::cpu::read_counter(), Ordering::Release);
-        TSC_CONTINUITY_OFFSET.store(hpet_nom, Ordering::Release);
+        TSC_CPU_OFF[cpu].fetch_sub(lead as i64, Ordering::AcqRel);
     }
+}
+
+/// One-shot per-CPU calibration of TSC_CPU_OFF (TSC_CPU_OFF doc): each
+/// AP measures its own (HPET - TSC-derived) delta right after its LAPIC
+/// timer is programmed and before its first tick, closing the vCPU
+/// TSC-offset skew window (sc110's one-time ~25 s step). Runs on the AP
+/// itself with IRQs off; safe to call multiple times.
+pub fn calibrate_cpu_tsc_offset(cpu: usize) {
+    if TSC_FROM_HPET.load(Ordering::Acquire) == 0 {
+        return; // TSC not the HPET-calibrated timekeeper
+    }
+    if cpu >= crate::config::MAX_CPUS || cpu == 0 {
+        return; // index 0 is folded into TSC_CONTINUITY_OFFSET at promote
+    }
+    let mult = TSC_MULT.load(Ordering::Acquire);
+    let base = TSC_BASE.load(Ordering::Acquire);
+    let off = TSC_CONTINUITY_OFFSET.load(Ordering::Acquire);
+    if mult == 0 {
+        return;
+    }
+    let raw = crate::arch::cpu::read_counter();
+    let tsc_nom = ((raw.wrapping_sub(base) >> TSC_MULSHIFT).wrapping_mul(mult)).wrapping_add(off);
+    let hpet_nom = crate::drivers::timer::hpet::read_time_nominal();
+    let delta = hpet_nom as i64 - tsc_nom as i64;
+    // Residual is the vCPU TSC-offset skew — apply it whatever the size
+    // (25 s is the observed magnitude), but say so beyond 1 ms so the
+    // boot log documents each vCPU's skew once.
+    if delta.abs() > 10_000 {
+        crate::pr_info!(
+            "tsc-clock: cpu {} vCPU TSC offset skew {:+} us vs HPET (corrected)",
+            cpu,
+            delta / 10
+        );
+    }
+    TSC_CPU_OFF[cpu].store(delta, Ordering::Release);
 }
 
 /// Rate-limited one-line report for resync events (max 8 per boot).

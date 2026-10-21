@@ -563,6 +563,12 @@ pub extern "C" fn ap_entry64() -> ! {
     // waits for STI below).
     crate::drivers::intc::apic::init_secondary();
 
+    // Per-CPU vCPU TSC-offset calibration while IRQs are still off and
+    // before this CPU's first tick can serve read_time() (sc110: the
+    // one-time ~25 s TSC-vs-HPET step tracked secondary online). No-op
+    // unless the HPET-calibrated TSC timekeeper is active (tscclk).
+    crate::drivers::timer::x86_64::calibrate_cpu_tsc_offset(cpu);
+
     // Publish the idle task as `current` so the first timer tick (which
     // can arrive right after STI) finds a valid task on this CPU, and
     // touch this CPU's watchdog so the boot-time gap (idle task created
