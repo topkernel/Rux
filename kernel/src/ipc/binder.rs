@@ -1797,7 +1797,12 @@ pub fn binder_file_ioctl(file: &crate::fs::File, request: u32, arg: usize) -> Op
 /// wedge state was invisible — "1 txn(s) stacked" said nothing about
 /// what the txn was or why nobody took the proc todo).
 /// SAFETY: caller holds WORLD.
-unsafe fn stall_thread_line(proc: &Arc<BinderProc>, t: &Arc<BinderThread>) {
+unsafe fn stall_thread_line(
+    proc: &Arc<BinderProc>,
+    t: &Arc<BinderThread>,
+    out: &mut alloc::string::String,
+) {
+    use core::fmt::Write;
     let th = t.st();
     let looper = |l: u32| {
         let mut s = [b'-'; 3];
@@ -1814,6 +1819,11 @@ unsafe fn stall_thread_line(proc: &Arc<BinderProc>, t: &Arc<BinderThread>) {
     };
     let lstr = looper(th.looper);
     let loop_str = core::str::from_utf8(&lstr).unwrap_or("-=-");
+    // sc89: formatting (this fn) stays under WORLD; the slow parts —
+    // console output and the holder-task page-table walks — run after
+    // the guard drops (see holder_forensics + the flush at the end of
+    // stall_report). sc82: the whole dump under the IRQ-saving guard
+    // ran ~500 ms with irqs off and killed khungtaskd.
     match th.txn_stack.last() {
         Some(txn) => {
             let shape = if txn.to_tid() == Some(t.tid) {
@@ -1823,8 +1833,9 @@ unsafe fn stall_thread_line(proc: &Arc<BinderProc>, t: &Arc<BinderThread>) {
             } else {
                 "AMBIGUOUS"
             };
-            crate::pr_warn!(
-                "binder-stall:   pid {} tid {} loop={} wait={} todo={} stack={} [{}] top=txn{} code {} oneway={} from pid {} tid {} to_tid {}",
+            let _ = writeln!(
+                out,
+                "  pid {} tid {} loop={} wait={} todo={} stack={} [{}] top=txn{} code {} oneway={} from pid {} tid {} to_tid {}",
                 proc.pid,
                 t.tid,
                 loop_str,
@@ -1839,196 +1850,200 @@ unsafe fn stall_thread_line(proc: &Arc<BinderProc>, t: &Arc<BinderThread>) {
                 txn.from_tid.unwrap_or(0),
                 txn.to_tid().unwrap_or(0),
             );
-            // Holder-task forensics (b128-b135: a samgr thread parks
-            // 120s+ INSIDE a txn and every display-chain client queues
-            // behind it). The binder view can't say where the thread
-            // actually is, so read its Task: scheduling state plus the
-            // user entry frame at kernel_stack_top - PT_REGS_SIZE (both
-            // arches place the user entry frame at that fixed offset —
-            // see the pt_regs module docs).
-            let task = unsafe { crate::sched::find_task_by_pid(t.tid) };
-            if !task.is_null() {
-                let tk = unsafe { &*task };
-                let comm = {
-                    let c = tk.comm();
-                    core::str::from_utf8(&c[..])
-                        .unwrap_or("")
-                        .trim_end_matches('\0')
-                };
-                let top = tk.kernel_stack_top();
-                #[cfg(feature = "x86_64")]
-                let (rip, sys, a0, a1) = {
-                    let regs = (top.wrapping_sub(
-                        crate::arch::x86_64::pt_regs::PT_REGS_SIZE,
-                    )) as *const crate::arch::x86_64::pt_regs::PtRegs;
-                    // SAFETY: diagnostic read of this task's own entry
-                    // frame; the kernel stack stays mapped while the Task
-                    // lives, and the frame slot is written on every entry.
-                    unsafe { ((*regs).rip, (*regs).orig_rax, (*regs).rdi, (*regs).rsi) }
-                };
-                #[cfg(feature = "riscv64")]
-                let (rip, sys, a0, a1) = {
-                    let regs = (top.wrapping_sub(
-                        crate::arch::riscv64::pt_regs::PT_REGS_SIZE,
-                    )) as *const crate::arch::riscv64::pt_regs::PtRegs;
-                    // SAFETY: same contract as the x86_64 twin above.
-                    unsafe { ((*regs).epc, (*regs).a7, (*regs).a0, (*regs).a1) }
-                };
-                #[cfg(not(any(feature = "x86_64", feature = "riscv64")))]
-                let (rip, sys, a0, a1) = (0u64, 0u64, 0u64, 0u64);
-                crate::pr_warn!(
-                    "binder-stall:    holder task comm='{}' state={:#x} rip={:#x} sys={:#x} a0={:#x} a1={:#x}",
-                    comm,
-                    tk.state().bits(),
-                    rip,
-                    sys,
-                    a0,
-                    a1
-                );
-                // If the holder is parked in futex_wait, correlate its
-                // waiter entry: woken=true-but-still-asleep indicts the
-                // wake→run path; woken=false indicts the key match (key_mm
-                // vs the task's own current identity) or the releaser.
-                if let Some((uaddr, key_mm, woken)) =
-                    crate::sync::futex::waiter_of(task)
-                {
-                    crate::pr_warn!(
-                        "binder-stall:    futex waiter uaddr={:#x} key_mm={:#x} own_mm={:#x} woken={}",
-                        uaddr,
-                        key_mm,
-                        crate::sync::futex::task_futex_mm_id(task),
-                        woken
-                    );
-                    // sc75: read the futex WORD through the HOLDER's own
-                    // page tables (khungtaskd's get_user would use the
-                    // wrong mm). The word says whether the lock is still
-                    // owned (pthread mutexes store the owner tid) or
-                    // already released — a released word plus a sleeping
-                    // waiter is a lost futex wake; an owned word names the
-                    // owner to chase.
-                    let word = tk
-                        .address_space()
-                        .and_then(|aspace| {
-                            let root = aspace.root_ppn();
-                            // SAFETY: read-only diagnostic walk of the
-                            // holder's live user page tables.
-                            unsafe {
-                                crate::arch::mm::mm_ops::PageTableWalker::walk(
-                                    root,
-                                    uaddr as u64,
-                                )
-                            }
-                            .map(|(ppn, _)| {
-                                let pa = (ppn as usize) << 12;
-                                let kv = crate::arch::mm::phys_to_virt(
-                                    crate::arch::mm::PhysAddr::new(pa as u64),
-                                )
-                                .bits() as usize
-                                    + (uaddr & 0xfff);
-                                // SAFETY: the walked leaf maps the holder's
-                                // own futex word; one volatile u32 read.
-                                unsafe { core::ptr::read_volatile(kv as *const u32) }
-                            })
-                        });
-                    match word {
-                        Some(v) => {
-                            // Dump the neighbor words too (libc lock structs
-                            // pack owner/counts beside the futex word — musl
-                            // recursive/rwlock layouts need them to decode).
-                            let mut nb = [0u32; 4];
-                            let mut got = 0;
-                            for (k, slot) in nb.iter_mut().enumerate() {
-                                let addr = uaddr + 4 + 4 * k;
-                                if let Some(x) = tk.address_space().and_then(|aspace| {
-                                    let root = aspace.root_ppn();
-                                    // SAFETY: read-only diagnostic walk.
-                                    unsafe {
-                                        crate::arch::mm::mm_ops::PageTableWalker::walk(
-                                            root,
-                                            addr as u64,
-                                        )
-                                    }
-                                    .map(|(ppn, _)| {
-                                        let pa = (ppn as usize) << 12;
-                                        let kv = crate::arch::mm::phys_to_virt(
-                                            crate::arch::mm::PhysAddr::new(pa as u64),
-                                        )
-                                        .bits() as usize
-                                            + (addr & 0xfff);
-                                        // SAFETY: one volatile u32 in the
-                                        // holder's mapped user page.
-                                        unsafe { core::ptr::read_volatile(kv as *const u32) }
-                                    })
-                                }) {
-                                    *slot = x;
-                                    got += 1;
-                                }
-                            }
-                            crate::pr_warn!(
-                                "binder-stall:    futex word = {:#x} (owner tid {}) next[{}]={:08x?}",
-                                v,
-                                v,
-                                got,
-                                nb
-                            );
-                            // Chase a plausible owner tid (glibc stores the
-                            // owner TID in the mutex word for
-                            // error-checking/recursive mutexes).
-                            if v > 0 && v < 0x00ff_ffff {
-                                let owner =
-                                    unsafe { crate::sched::find_task_by_pid(v) };
-                                if !owner.is_null() {
-                                    let ot = unsafe { &*owner };
-                                    let otop = ot.kernel_stack_top();
-                                    #[cfg(feature = "x86_64")]
-                                    let (osys, orip) = {
-                                        let regs = (otop.wrapping_sub(
-                                            crate::arch::x86_64::pt_regs::PT_REGS_SIZE,
-                                        )) as *const crate::arch::x86_64::pt_regs::PtRegs;
-                                        // SAFETY: diagnostic read of the
-                                        // owner's entry frame.
-                                        unsafe { ((*regs).orig_rax, (*regs).rip) }
-                                    };
-                                    #[cfg(feature = "riscv64")]
-                                    let (osys, orip) = {
-                                        let regs = (otop.wrapping_sub(
-                                            crate::arch::riscv64::pt_regs::PT_REGS_SIZE,
-                                        )) as *const crate::arch::riscv64::pt_regs::PtRegs;
-                                        // SAFETY: same contract, riscv64.
-                                        unsafe { ((*regs).a7, (*regs).epc) }
-                                    };
-                                    #[cfg(not(any(feature = "x86_64", feature = "riscv64")))]
-                                    let (osys, orip) = (0u64, 0u64);
-                                    crate::pr_warn!(
-                                        "binder-stall:    owner tid {} state={:#x} sys={:#x} rip={:#x}",
-                                        v,
-                                        ot.state().bits(),
-                                        osys,
-                                        orip
-                                    );
-                                } else {
-                                    crate::pr_warn!(
-                                        "binder-stall:    owner tid {} NOT FOUND (exited while holding?)",
-                                        v
-                                    );
-                                }
-                            }
+        }
+        None => {
+            let _ = writeln!(
+                out,
+                "  pid {} tid {} loop={} wait={} todo={} stack=0",
+                proc.pid,
+                t.tid,
+                loop_str,
+                th.waiting_for_proc_work,
+                th.todo.len(),
+            );
+        }
+    }
+}
+
+/// Holder-task forensics (b128-b135: a samgr thread parks 120s+ INSIDE
+/// a txn and every display-chain client queues behind it). The binder
+/// view can't say where the thread actually is, so read its Task:
+/// scheduling state plus the user entry frame at kernel_stack_top -
+/// PT_REGS_SIZE (both arches place the user entry frame at that fixed
+/// offset — see the pt_regs module docs). Reads ONLY scheduler/futex
+/// state and the holder's own page tables — sc89: safe (and required)
+/// to run OUTSIDE the WORLD guard; `t.tid` is immutable.
+/// SAFETY: `t` must point at a live BinderThread.
+unsafe fn holder_forensics(t: &Arc<BinderThread>, out: &mut alloc::string::String) {
+    use core::fmt::Write;
+    let task = unsafe { crate::sched::find_task_by_pid(t.tid) };
+    if task.is_null() {
+        return;
+    }
+    let tk = unsafe { &*task };
+    let comm = {
+        let c = tk.comm();
+        core::str::from_utf8(&c[..])
+            .unwrap_or("")
+            .trim_end_matches('\0')
+    };
+    let top = tk.kernel_stack_top();
+    #[cfg(feature = "x86_64")]
+    let (rip, sys, a0, a1) = {
+        let regs = (top.wrapping_sub(
+            crate::arch::x86_64::pt_regs::PT_REGS_SIZE,
+        )) as *const crate::arch::x86_64::pt_regs::PtRegs;
+        // SAFETY: diagnostic read of this task's own entry
+        // frame; the kernel stack stays mapped while the Task
+        // lives, and the frame slot is written on every entry.
+        unsafe { ((*regs).rip, (*regs).orig_rax, (*regs).rdi, (*regs).rsi) }
+    };
+    #[cfg(feature = "riscv64")]
+    let (rip, sys, a0, a1) = {
+        let regs = (top.wrapping_sub(
+            crate::arch::riscv64::pt_regs::PT_REGS_SIZE,
+        )) as *const crate::arch::riscv64::pt_regs::PtRegs;
+        // SAFETY: same contract as the x86_64 twin above.
+        unsafe { ((*regs).epc, (*regs).a7, (*regs).a0, (*regs).a1) }
+    };
+    #[cfg(not(any(feature = "x86_64", feature = "riscv64")))]
+    let (rip, sys, a0, a1) = (0u64, 0u64, 0u64, 0u64);
+    let _ = writeln!(
+        out,
+        "   holder task comm='{}' state={:#x} rip={:#x} sys={:#x} a0={:#x} a1={:#x}",
+        comm,
+        tk.state().bits(),
+        rip,
+        sys,
+        a0,
+        a1
+    );
+    // If the holder is parked in futex_wait, correlate its
+    // waiter entry: woken=true-but-still-asleep indicts the
+    // wake→run path; woken=false indicts the key match (key_mm
+    // vs the task's own current identity) or the releaser.
+    if let Some((uaddr, key_mm, woken)) = crate::sync::futex::waiter_of(task) {
+        let _ = writeln!(
+            out,
+            "   futex waiter uaddr={:#x} key_mm={:#x} own_mm={:#x} woken={}",
+            uaddr,
+            key_mm,
+            crate::sync::futex::task_futex_mm_id(task),
+            woken
+        );
+        // sc75: read the futex WORD through the HOLDER's own
+        // page tables (khungtaskd's get_user would use the
+        // wrong mm). The word says whether the lock is still
+        // owned (pthread mutexes store the owner tid) or
+        // already released — a released word plus a sleeping
+        // waiter is a lost futex wake; an owned word names the
+        // owner to chase.
+        let word = tk.address_space().and_then(|aspace| {
+            let root = aspace.root_ppn();
+            // SAFETY: read-only diagnostic walk of the
+            // holder's live user page tables.
+            unsafe {
+                crate::arch::mm::mm_ops::PageTableWalker::walk(root, uaddr as u64)
+            }
+            .map(|(ppn, _)| {
+                let pa = (ppn as usize) << 12;
+                let kv = crate::arch::mm::phys_to_virt(
+                    crate::arch::mm::PhysAddr::new(pa as u64),
+                )
+                .bits() as usize
+                    + (uaddr & 0xfff);
+                // SAFETY: the walked leaf maps the holder's
+                // own futex word; one volatile u32 read.
+                unsafe { core::ptr::read_volatile(kv as *const u32) }
+            })
+        });
+        match word {
+            Some(v) => {
+                // Dump the neighbor words too (libc lock structs
+                // pack owner/counts beside the futex word — musl
+                // recursive/rwlock layouts need them to decode).
+                let mut nb = [0u32; 4];
+                let mut got = 0;
+                for (k, slot) in nb.iter_mut().enumerate() {
+                    let addr = uaddr + 4 + 4 * k;
+                    if let Some(x) = tk.address_space().and_then(|aspace| {
+                        let root = aspace.root_ppn();
+                        // SAFETY: read-only diagnostic walk.
+                        unsafe {
+                            crate::arch::mm::mm_ops::PageTableWalker::walk(
+                                root,
+                                addr as u64,
+                            )
                         }
-                        None => crate::pr_warn!(
-                            "binder-stall:    futex word unreadable (page absent)"
-                        ),
+                        .map(|(ppn, _)| {
+                            let pa = (ppn as usize) << 12;
+                            let kv = crate::arch::mm::phys_to_virt(
+                                crate::arch::mm::PhysAddr::new(pa as u64),
+                            )
+                            .bits() as usize
+                                + (addr & 0xfff);
+                            // SAFETY: one volatile u32 in the
+                            // holder's mapped user page.
+                            unsafe { core::ptr::read_volatile(kv as *const u32) }
+                        })
+                    }) {
+                        *slot = x;
+                        got += 1;
+                    }
+                }
+                let _ = writeln!(
+                    out,
+                    "   futex word = {:#x} (owner tid {}) next[{}]={:08x?}",
+                    v, v, got, nb
+                );
+                // Chase a plausible owner tid (glibc stores the
+                // owner TID in the mutex word for
+                // error-checking/recursive mutexes).
+                if v > 0 && v < 0x00ff_ffff {
+                    let owner = unsafe { crate::sched::find_task_by_pid(v) };
+                    if !owner.is_null() {
+                        let ot = unsafe { &*owner };
+                        let otop = ot.kernel_stack_top();
+                        #[cfg(feature = "x86_64")]
+                        let (osys, orip) = {
+                            let regs = (otop.wrapping_sub(
+                                crate::arch::x86_64::pt_regs::PT_REGS_SIZE,
+                            )) as *const crate::arch::x86_64::pt_regs::PtRegs;
+                            // SAFETY: diagnostic read of the
+                            // owner's entry frame.
+                            unsafe { ((*regs).orig_rax, (*regs).rip) }
+                        };
+                        #[cfg(feature = "riscv64")]
+                        let (osys, orip) = {
+                            let regs = (otop.wrapping_sub(
+                                crate::arch::riscv64::pt_regs::PT_REGS_SIZE,
+                            )) as *const crate::arch::riscv64::pt_regs::PtRegs;
+                            // SAFETY: same contract, riscv64.
+                            unsafe { ((*regs).a7, (*regs).epc) }
+                        };
+                        #[cfg(not(any(feature = "x86_64", feature = "riscv64")))]
+                        let (osys, orip) = (0u64, 0u64);
+                        let _ = writeln!(
+                            out,
+                            "   owner tid {} state={:#x} sys={:#x} rip={:#x}",
+                            v,
+                            ot.state().bits(),
+                            osys,
+                            orip
+                        );
+                    } else {
+                        let _ = writeln!(
+                            out,
+                            "   owner tid {} NOT FOUND (exited while holding?)",
+                            v
+                        );
                     }
                 }
             }
+            None => {
+                let _ = writeln!(out, "   futex word unreadable (page absent)");
+            }
         }
-        None => crate::pr_warn!(
-            "binder-stall:   pid {} tid {} loop={} wait={} todo={} stack=0",
-            proc.pid,
-            t.tid,
-            loop_str,
-            th.waiting_for_proc_work,
-            th.todo.len(),
-        ),
     }
 }
 
@@ -2165,29 +2180,43 @@ unsafe fn outstanding_from_tid(world: &World, pid: u32, tid: u32) -> alloc::stri
     found
 }
 
-/// One line of the transition ring (sc74 forensics).
+/// One line of the transition ring (sc74 forensics). sc89: the ring is
+/// SNAPSHOTTED under WORLD into a fixed array; formatting + printing
+/// happen after the guard drops.
 /// SAFETY: caller holds WORLD.
-unsafe fn hist_line(t: &Arc<BinderThread>) {
+unsafe fn hist_snapshot(
+    t: &Arc<BinderThread>,
+) -> [(u8, u32, u32, u32); BHIST] {
     let th = t.st();
+    let mut ring = [(0u8, 0u32, 0u32, 0u32); BHIST];
+    for k in 0..BHIST {
+        let idx = (th.hcur + k) % BHIST;
+        let e = &th.hist[idx];
+        ring[k] = (e.ev, e.a, e.b, e.j);
+    }
+    ring
+}
+
+/// Format a snapshot taken by hist_snapshot. No binder state touched.
+fn hist_line_of(tid: u32, ring: &[(u8, u32, u32, u32); BHIST]) -> alloc::string::String {
     use core::fmt::Write;
     // ONE printk call with embedded newlines every 4 entries — separate
     // continuation prints were spliced by concurrent console traffic at
     // exactly the decisive ring tail (sc77: "REPLY_P|binder-stall:").
     let mut s = alloc::string::String::new();
+    let _ = write!(s, "  hist tid {} ({} events):", tid, ring.iter().filter(|e| e.0 != 0).count());
     let mut n = 0;
-    for k in 0..BHIST {
-        let idx = (th.hcur + k) % BHIST;
-        let e = &th.hist[idx];
-        if e.ev == 0 {
+    for &(ev, a, b, j) in ring.iter() {
+        if ev == 0 {
             continue;
         }
-        let _ = write!(s, " {}({},{})@{}", ev_name(e.ev), e.a, e.b, e.j);
+        let _ = write!(s, " {}({},{})@{}", ev_name(ev), a, b, j);
         n += 1;
         if n % 4 == 0 {
             let _ = writeln!(s);
         }
     }
-    crate::pr_warn!("binder-stall:   hist tid {} ({} events):{}", t.tid, n, s);
+    s
 }
 
 /// sc77: for a SERVER-OWING holder parked in the binder read with NO
@@ -2196,7 +2225,11 @@ unsafe fn hist_line(t: &Arc<BinderThread>) {
 /// frame's rsp/rip plus candidate return addresses, each resolved to its
 /// covering VMA (fd + file offset) so the frames symbolize offline
 /// against the image's libraries.
-/// SAFETY: caller holds WORLD (VMA walk is on the holder's mm).
+/// SAFETY: sc89 — reads only the holder TASK's own page tables (found
+/// by t.tid, which is immutable; the Arc pins the BinderThread). Safe
+/// OUTSIDE the WORLD guard and must run there: this is one of the slow
+/// page-walk dumps that made the old WORLD-held stall_report a ~500 ms
+/// IRQ-off window (sc82, khungtaskd death).
 unsafe fn user_park_stack_dump(t: &Arc<BinderThread>) {
     let task = crate::sched::find_task_by_pid(t.tid);
     if task.is_null() {
@@ -2272,7 +2305,10 @@ unsafe fn user_park_stack_dump(t: &Arc<BinderThread>) {
 /// Wait-queue census + task state for a stalled reader — the live-wake
 /// discriminator: an entry flagged woken while its task still sleeps is the
 /// sticky-skip lost wake (W1); woken=0 means nobody ever issued the wake.
-fn thread_census_line(t: &Arc<BinderThread>) {
+/// sc89: pure wait-queue + scheduler reads (no binder state) — safe
+/// outside the WORLD guard; returns the formatted line.
+fn thread_census_of(t: &Arc<BinderThread>) -> alloc::string::String {
+    use core::fmt::Write;
     let (total, woken) = t.wait.vw_queue_census();
     let task = unsafe { crate::sched::find_task_by_pid(t.tid) };
     let state = if task.is_null() {
@@ -2290,14 +2326,13 @@ fn thread_census_line(t: &Arc<BinderThread>) {
     } else {
         "never-woken"
     };
-    crate::pr_warn!(
-        "binder-stall:   census tid {} q={} woken={} task_state={:#x} {}",
-        t.tid,
-        total,
-        woken,
-        state,
-        verdict
+    let mut s = alloc::string::String::new();
+    let _ = write!(
+        s,
+        "  census tid {} q={} woken={} task_state={:#x} {}",
+        t.tid, total, woken, state, verdict
     );
+    s
 }
 
 pub fn stall_report() {
@@ -2323,6 +2358,31 @@ pub fn stall_report() {
     // Procs with pending todo: re-run the pick-one wake (heals a txn that
     // sits on a proc todo because its wake was consumed in vain).
     let mut retodo: Vec<Arc<BinderProc>> = Vec::new();
+    // sc89: EVERYTHING slow — console output, page-table walks (user park
+    // stacks, holder forensics), futex-graph walks — moved OUT of the
+    // WORLD guard. sc82 measured the old WORLD-held dump at ~500 ms with
+    // irqs off (SpinlockIrqGuard<World> drop); khungtaskd died to the
+    // watchdog/softlockup side effects and the freeze scanner stopped
+    // scanning. Under the guard we now only FORMAT text (fast, no I/O)
+    // and snapshot POD; the one pr_warn at the end flushes it all with
+    // interrupts on.
+    let mut out = alloc::string::String::new();
+    // Impossible-shape threads: user-stack dumps AFTER the guard.
+    let mut late_parkdumps: Vec<Arc<BinderThread>> = Vec::new();
+    // Owner pids for the deferred futex-waiter graph walk.
+    let mut late_futex_graph: Vec<u32> = Vec::new();
+    // Per-owner thread list with pre-formatted lines + hist snapshots,
+    // built under the guard, printed after.
+    struct OwnerDump {
+        pid: u32,
+        name: alloc::string::String,
+        todo_depth: usize,
+        lines: Vec<(alloc::string::String, bool)>, // (stall line, stack non-empty)
+        hists: Vec<Option<[(u8, u32, u32, u32); BHIST]>>,
+        futex_line: alloc::string::String,
+        threads: Vec<Arc<BinderThread>>, // for deferred holder forensics
+    }
+    let mut owner_dumps: Vec<OwnerDump> = Vec::new();
     {
         let w = world_lock();
         // SAFETY: read-only traversal under WORLD (pm() casts are only used
@@ -2364,7 +2424,9 @@ pub fn stall_report() {
                                     }
                                     None => "n/a",
                                 };
-                                crate::pr_warn!(
+                                use core::fmt::Write;
+                                let _ = writeln!(
+                                    out,
                                     "binder-stall: WAKE-RUN-LEAK tid {} kicked {}x age {}s state={:#x} cfs_linked={} on_cpu={} pick_state={} cpu={}",
                                     t.tid,
                                     kicks + 1,
@@ -2390,11 +2452,15 @@ pub fn stall_report() {
                     let pending = th.txn_stack.len();
                     let owed_by = th.txn_stack.last().map(|txn| txn.to_proc.clone());
                     let top_txn = th.txn_stack.last().cloned();
+                    use core::fmt::Write;
                     match (pending, &owed_by) {
-                        (0, _) => crate::pr_warn!(
-                            "binder-stall: pid {} tid {} waiting {}s for work (no pending txn)",
-                            proc.pid, t.tid, secs
-                        ),
+                        (0, _) => {
+                            let _ = writeln!(
+                                out,
+                                "binder-stall: pid {} tid {} waiting {}s for work (no pending txn)",
+                                proc.pid, t.tid, secs
+                            );
+                        }
                         (n, Some(owner)) => {
                             // sc74 discriminator: the top txn is either one
                             // this thread SENT (from_tid == self — classic
@@ -2408,12 +2474,14 @@ pub fn stall_report() {
                                 Some(txn) if txn.from_tid == Some(t.tid) => "CLIENT-WAIT",
                                 _ => "CLIENT-WAIT?",
                             };
-                            crate::pr_warn!(
+                            let _ = writeln!(
+                                out,
                                 "binder-stall: pid {} tid {} waiting {}s for reply from pid {} ({} txn(s) stacked) {}",
                                 proc.pid, t.tid, secs, owner.pid, n, shape
                             );
                             if let Some(txn) = top_txn {
-                                crate::pr_warn!(
+                                let _ = writeln!(
+                                    out,
                                     "binder-stall:   top txn{} code {} oneway={} from pid {} tid {} to_tid {}",
                                     txn.id,
                                     txn.code,
@@ -2426,38 +2494,46 @@ pub fn stall_report() {
                             // SERVER-OWING: does a nested txn from this
                             // thread exist anywhere in the world?
                             if shape == "SERVER-OWING" {
-                                let out = outstanding_from_tid(world, proc.pid, t.tid);
-                                if out.is_empty() {
-                                    crate::pr_warn!(
+                                let from = outstanding_from_tid(world, proc.pid, t.tid);
+                                if from.is_empty() {
+                                    let _ = writeln!(
+                                        out,
                                         "binder-stall:   NO outstanding txn from tid {} — nested call vanished or never sent",
                                         t.tid
                                     );
                                     // sc77: the impossible shape gets a user-stack
                                     // snapshot — names the OH path that parked.
-                                    user_park_stack_dump(t);
+                                    // sc89: deferred past the guard (page-walk).
+                                    late_parkdumps.push(t.clone());
                                 } else {
-                                    crate::pr_warn!(
+                                    let _ = writeln!(
+                                        out,
                                         "binder-stall:   outstanding from tid {}:{}",
                                         t.tid,
-                                        out
+                                        from
                                     );
                                 }
                             }
-                            thread_census_line(t);
-                            hist_line(t);
+                            let _ = writeln!(out, "binder-stall:{}", thread_census_of(t));
+                            let _ = writeln!(out, "binder-stall:{}", hist_line_of(t.tid, &unsafe { hist_snapshot(t) }));
                             if dump_owners.len() < 2 && !dump_owners.iter().any(|o| Arc::ptr_eq(o, owner)) {
                                 dump_owners.push(owner.clone());
                             }
                         }
-                        (n, None) => crate::pr_warn!(
-                            "binder-stall: pid {} tid {} waiting {}s for reply ({} txn(s) stacked)",
-                            proc.pid, t.tid, secs, n
-                        ),
+                        (n, None) => {
+                            let _ = writeln!(
+                                out,
+                                "binder-stall: pid {} tid {} waiting {}s for reply ({} txn(s) stacked)",
+                                proc.pid, t.tid, secs, n
+                            );
+                        }
                     }
                 }
             }
             // Full dump of up to two owing procs: proc todo depth + every
-            // thread's looper/wait/stack/todo state.
+            // thread's looper/wait/stack/todo state. sc89: lines formatted
+            // and hist rings snapshotted under the guard; census lines,
+            // holder forensics, futex graphs and all printing are deferred.
             for owner in &dump_owners {
                 if let Some(op) = world.procs.iter().find(|p| Arc::ptr_eq(p, owner)) {
                     let opm = pm(world, op);
@@ -2473,34 +2549,31 @@ pub fn stall_report() {
                                 .trim_end_matches('\0')
                         }
                     };
-                    crate::pr_warn!(
-                        "binder-stall: owing pid {} ('{}') proc todo depth {} threads {}",
-                        op.pid,
-                        pname,
-                        opm.im().todo.len(),
-                        opm.im().threads.len()
-                    );
+                    let mut od = OwnerDump {
+                        pid: op.pid,
+                        name: alloc::string::String::from(pname),
+                        todo_depth: opm.im().todo.len(),
+                        lines: Vec::new(),
+                        hists: Vec::new(),
+                        futex_line: alloc::string::String::new(),
+                        threads: Vec::new(),
+                    };
                     for t in &opm.im().threads {
-                        stall_thread_line(op, t);
-                        if !t.st().txn_stack.is_empty() {
-                            thread_census_line(t);
-                            hist_line(t);
-                        }
+                        let mut line = alloc::string::String::new();
+                        // SAFETY: WORLD held (thread-state read).
+                        unsafe { stall_thread_line(op, t, &mut line) };
+                        let has_stack = !t.st().txn_stack.is_empty();
+                        od.hists.push(if has_stack {
+                            // SAFETY: WORLD held.
+                            Some(unsafe { hist_snapshot(t) })
+                        } else {
+                            None
+                        });
+                        od.threads.push(t.clone());
+                        od.lines.push((line, has_stack));
                     }
-                    // sc75: the owing proc's full futex-waiter graph — the
-                    // intra-process contention set (each entry: waiting tid,
-                    // uaddr, woken). The wedge terminal so far is handlers
-                    // blocked on per-thread-stack condvar/mutex words.
-                    let fw = crate::sync::futex::waiters_of_tgid(op.pid);
-                    if !fw.is_empty() {
-                        let mut s = alloc::string::String::new();
-                        use core::fmt::Write;
-                        for (pid, uaddr, woken) in fw {
-                            let _ = write!(s, " [{}:{:#x} w={}]", pid, uaddr, woken);
-                        }
-                        crate::pr_warn!("binder-stall: futex waiters of pid {}:", op.pid);
-                        crate::pr_warn!("binder-stall:{}", s);
-                    }
+                    late_futex_graph.push(op.pid);
+                    owner_dumps.push(od);
                 }
             }
         }
@@ -2511,6 +2584,78 @@ pub fn stall_report() {
     }
     for p in retodo {
         wake_proc_one(&p);
+    }
+    // ---- sc89: slow forensics + output, all with irqs on, WORLD free ----
+    use core::fmt::Write;
+    for od in &owner_dumps {
+        let _ = writeln!(
+            out,
+            "binder-stall: owing pid {} ('{}') proc todo depth {} threads {}",
+            od.pid,
+            od.name,
+            od.todo_depth,
+            od.lines.len()
+        );
+        for (((line, has_stack), hist), thr) in od
+            .lines
+            .iter()
+            .zip(od.hists.iter())
+            .zip(od.threads.iter())
+        {
+            let _ = writeln!(out, "binder-stall:{}", line);
+            if *has_stack {
+                let _ = writeln!(out, "binder-stall:{}", thread_census_of(thr));
+                if let Some(ring) = hist {
+                    let _ = writeln!(out, "binder-stall:{}", hist_line_of(thr.tid, ring));
+                }
+                // SAFETY: no binder state touched (sched/futex/page tables).
+                unsafe { holder_forensics(thr, &mut out) };
+            }
+        }
+    }
+    // sc75: the owing proc's full futex-waiter graph — the
+    // intra-process contention set (each entry: waiting tid,
+    // uaddr, woken). The wedge terminal so far is handlers
+    // blocked on per-thread-stack condvar/mutex words.
+    for pid in late_futex_graph {
+        let fw = crate::sync::futex::waiters_of_tgid(pid);
+        if !fw.is_empty() {
+            let mut s = alloc::string::String::new();
+            for (wpid, uaddr, woken) in fw {
+                let _ = write!(s, " [{}:{:#x} w={}]", wpid, uaddr, woken);
+            }
+            let _ = writeln!(out, "binder-stall: futex waiters of pid {}:", pid);
+            let _ = writeln!(out, "binder-stall:{}", s);
+        }
+    }
+    // Impossible-shape user-stack snapshots: the page-table walks.
+    for t in &late_parkdumps {
+        // SAFETY: no binder state touched (task lookup + mm walk).
+        unsafe { user_park_stack_dump(t) };
+    }
+    // One flush, interrupts on. Chunked: split on the last newline below
+    // ~950 bytes so no single console write stalls the console lock.
+    if !out.is_empty() {
+        let bytes = out.as_bytes();
+        let mut start = 0usize;
+        while start < bytes.len() {
+            let mut end = (start + 950).min(bytes.len());
+            if end < bytes.len() {
+                // extend/cut to a line boundary
+                match bytes[start..end].iter().rposition(|&b| b == b'\n') {
+                    Some(rel) if rel > 200 => end = start + rel + 1,
+                    _ => {
+                        match bytes[start..].iter().position(|&b| b == b'\n') {
+                            Some(rel) if rel < 1600 => end = start + rel + 1,
+                            _ => {}
+                        }
+                    }
+                }
+            }
+            let chunk = core::str::from_utf8(&bytes[start..end]).unwrap_or("");
+            crate::pr_warn!("binder-stall:{}", chunk);
+            start = end;
+        }
     }
 }
 

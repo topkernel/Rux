@@ -2160,6 +2160,7 @@ pub fn freeze_scan(now: u64, hz: u64) {
         exit_ring_dump_tgid(tgid);
         let n = rwfz_dump_tgid(tgid, 32);
         crate::pr_warn!("RWFRZ: tgid {} enumerated {} tasks", tgid, n);
+        rwfz_neighbor_dump(tgid, uaddr);
         // sc82: the freeze correlates with OTHER processes showing the
         // same 16-reader shape (sc81: tgid 716 & 791). Dump up to 2 more
         // of those tgid's in the same pass — one common holder pattern
@@ -2190,10 +2191,76 @@ pub fn freeze_scan(now: u64, hz: u64) {
                 exit_ring_dump_tgid(c.tgid);
                 let en = rwfz_dump_tgid(c.tgid, 16);
                 crate::pr_warn!("RWFRZ: EXTRA tgid {} enumerated {} tasks", c.tgid, en);
+                rwfz_neighbor_dump(c.tgid, c.uaddr);
                 extra += 1;
             }
         }
     }
+}
+
+/// sc89: dump the recursion-holder candidate. Session K (sc86): every
+/// FROZEN dump's main thread parks on the SIBLING lock 0x94 below the
+/// frozen word (same static object) while the frozen word claims 16
+/// readers that exceed the process's live-thread count — a single
+/// thread holding 16 recursive lock_shared scopes and then parking on
+/// the second lock. This walks `tgid`'s tasks for a blocked futex whose
+/// arg0 sits in [frozen-0x98, frozen-0x90] and dumps it with the
+/// 64-slot exec-filtered window at a 24-frame budget — enough to carry
+/// a 16-deep recursive chain plus its entry frames.
+fn rwfz_neighbor_dump(tgid: u32, frozen_uaddr: usize) {
+    #[cfg(feature = "x86_64")]
+    const FUTEX_SYSNO: u64 = 202;
+    #[cfg(feature = "riscv64")]
+    const FUTEX_SYSNO: u64 = 98;
+    #[cfg(not(any(feature = "x86_64", feature = "riscv64")))]
+    const FUTEX_SYSNO: u64 = 0;
+    crate::sched::for_each_task(|t| {
+        // SAFETY: same contract as rwfz_dump_tgid (pid-hash walk, reads
+        // confined to the pt-regs entry frame).
+        let tk = unsafe { &*t };
+        if tk.tgid() as u32 != tgid {
+            return;
+        }
+        let top = tk.kernel_stack_top();
+        #[cfg(feature = "x86_64")]
+        let (sys, a0) = {
+            let regs = (top.wrapping_sub(
+                crate::arch::x86_64::pt_regs::PT_REGS_SIZE,
+            )) as *const crate::arch::x86_64::pt_regs::PtRegs;
+            // SAFETY: diagnostic read of this task's entry frame.
+            unsafe { ((*regs).orig_rax, (*regs).rdi) }
+        };
+        #[cfg(feature = "riscv64")]
+        let (sys, a0) = {
+            let regs = (top.wrapping_sub(
+                crate::arch::riscv64::pt_regs::PT_REGS_SIZE,
+            )) as *const crate::arch::riscv64::pt_regs::PtRegs;
+            // SAFETY: same contract, riscv64.
+            unsafe { ((*regs).a7, (*regs).a0) }
+        };
+        #[cfg(not(any(feature = "x86_64", feature = "riscv64")))]
+        let (sys, a0) = (0u64, 0u64);
+        if sys != FUTEX_SYSNO || a0 == 0 || a0 > frozen_uaddr as u64 {
+            return;
+        }
+        let delta = frozen_uaddr - a0 as usize;
+        if (0x90..=0x98).contains(&delta) {
+            let comm = tk.comm();
+            let name = core::str::from_utf8(&comm[..])
+                .unwrap_or("")
+                .trim_end_matches('\0');
+            crate::pr_warn!(
+                "RWFRZ: NBR-PARK tgid {} tid {} comm='{}' parked on frozen-{:#x} (a0={:#x}) — recursion-holder candidate, deep stack",
+                tgid,
+                tk.pid(),
+                name,
+                delta,
+                a0
+            );
+            // SAFETY: t is a live Task from the pid-hash walk.
+            unsafe { rwfz_stack_frames(t, "nbr", 24) };
+        }
+    });
 }
 
 /// sc82: one tgid's full park-stack dump (comm/state/syscall/rip + 8
