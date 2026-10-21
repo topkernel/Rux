@@ -1530,24 +1530,49 @@ static RWFRZ_FIRST: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU6
 static RWFRZ_LASTVAL: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 static RWFRZ_LASTVAL_AT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 static RWFRZ_DUMPED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
-static RWFRZ_HIGH_AT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+/// sc82: per-word inflation-curve table. Each contended rwlock-shaped
+/// word with readers >= 2 is tracked (last value + last print); one
+/// line per word per minute carries the delta — a gradual +1 pile-up
+/// (real readers parking in scopes) vs a single jump (count corruption
+/// or a fork-inherited copy) is decided by this curve, not by the
+/// terminal value alone.
+struct HighWord {
+    uaddr: usize,
+    tgid: u32,
+    lastv: u32,
+    at: u64,
+}
+static RWFRZ_HIGHTAB: Spinlock<(usize, [HighWord; 8])> = Spinlock::new((
+    0,
+    [const {
+        HighWord {
+            uaddr: 0,
+            tgid: 0,
+            lastv: 0,
+            at: 0,
+        }
+    }; 8],
+));
 static RWFRZ_BEAT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 static RWFRZ_OPLOG: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 /// Last tid census of the watched tgid + its size (leak forensics: a tid
 /// that vanishes while the word never drains is a reader that exited).
 static RWFRZ_TIDS: Spinlock<(usize, [u32; 64])> = Spinlock::new((0, [0; 64]));
+/// Which tgid RWFRZ_TIDS currently censuses (sc82 early-watch support).
+static RWFRZ_TIDS_CENSUS_TGID: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
 
 /// Global thread-exit ring (sc82): every task unlink (thread OR process
 /// leader) records (jiffies, pid, tgid). The freeze dump replays the
 /// watched tgid's exits — readers that died BEFORE the watch adopted the
 /// word (leak evidence with timestamps) instead of only post-adoption
 /// vanishings. Forensics only; no behavior.
+#[derive(Clone, Copy)]
 struct ExitRec {
     j: u64,
     pid: u32,
     tgid: u32,
 }
-static EXIT_RING: Spinlock<(usize, [ExitRec; 128])> = Spinlock::new((0, [const { ExitRec { j: 0, pid: 0, tgid: 0 } }; 128]));
+static EXIT_RING: Spinlock<(usize, [ExitRec; 256])> = Spinlock::new((0, [const { ExitRec { j: 0, pid: 0, tgid: 0 } }; 256]));
 
 /// Called from pid_hash_remove under the bucket lock — keep it to two
 /// atomic-ish stores (one short critical section on the ring lock).
@@ -1555,7 +1580,7 @@ pub fn note_task_unlink(pid: u32, tgid: u32) {
     let j = crate::drivers::timer::get_jiffies() as u64;
     let mut g = EXIT_RING.lock_irqsave();
     let (ref mut head, ref mut ring) = *g;
-    ring[*head % 128] = ExitRec { j, pid, tgid };
+    ring[*head % 256] = ExitRec { j, pid, tgid };
     *head += 1;
     drop(g);
 }
@@ -1565,9 +1590,9 @@ fn exit_ring_dump_tgid(tgid: u32) {
     let mut s = alloc::string::String::new();
     let g = EXIT_RING.lock_irqsave();
     let head = g.0;
-    let start = head.saturating_sub(128);
+    let start = head.saturating_sub(256);
     for i in start..head {
-        let r = g.1[i % 128];
+        let r = g.1[i % 256];
         if r.tgid == tgid && r.pid != 0 {
             let _ = write!(s, " [pid {} @{}s]", r.pid, r.j / 100);
         }
@@ -1785,23 +1810,55 @@ pub fn freeze_scan(now: u64, hz: u64) {
             None => continue,
         };
         let readers = v & 0x7fffffff;
-        // Formation watch: any contended rwlock word whose reader count is
-        // abnormally high logs once per minute — the inflation curve (a
-        // gradual pile-up vs a single jump) discriminates leak vs
-        // corruption before the freeze matures.
-        if readers >= 6 && readers < 0x40000000 {
-            let last = RWFRZ_HIGH_AT.load(core::sync::atomic::Ordering::Relaxed);
-            if now.saturating_sub(last) >= 60 * hz {
-                RWFRZ_HIGH_AT.store(now, core::sync::atomic::Ordering::Relaxed);
-                crate::pr_warn!(
-                    "RWFRZ-HIGH uaddr={:#x} tgid {} waiters={} word={:#x} readers={}",
-                    c.uaddr,
-                    c.tgid,
-                    c.n,
-                    v,
-                    readers
-                );
+        // Formation watch (sc82: threshold lowered 6 -> 2, per-word table
+        // with delta): the inflation curve decides leak vs corruption.
+        if readers >= 2
+            && readers < 0x40000000
+            && c.uaddr != RWFRZ_UADDR.load(core::sync::atomic::Ordering::Relaxed)
+        {
+            let mut hl = RWFRZ_HIGHTAB.lock_irqsave();
+            let (ref mut hn, ref mut htab) = *hl;
+            let slot = (0..*hn).find(|&i| htab[i].uaddr == c.uaddr);
+            match slot {
+                Some(i) => {
+                    if now.saturating_sub(htab[i].at) >= 60 * hz {
+                        let prev_r = htab[i].lastv & 0x7fffffff;
+                        let cur_r = v & 0x7fffffff;
+                        htab[i].lastv = v;
+                        htab[i].at = now;
+                        crate::pr_warn!(
+                            "RWFRZ-HIGH uaddr={:#x} tgid {} waiters={} word={:#x} readers={} (was {}, d{:+})",
+                            c.uaddr,
+                            c.tgid,
+                            c.n,
+                            v,
+                            cur_r,
+                            prev_r,
+                            cur_r as i64 - prev_r as i64
+                        );
+                    }
+                }
+                None => {
+                    if *hn < 8 {
+                        htab[*hn] = HighWord {
+                            uaddr: c.uaddr,
+                            tgid: c.tgid,
+                            lastv: v,
+                            at: now,
+                        };
+                        *hn += 1;
+                        crate::pr_warn!(
+                            "RWFRZ-HIGH uaddr={:#x} tgid {} waiters={} word={:#x} readers={} (first seen)",
+                            c.uaddr,
+                            c.tgid,
+                            c.n,
+                            v,
+                            readers
+                        );
+                    }
+                }
             }
+            drop(hl);
         }
         if adopted || c.n < 3 || !rwlock_frozen_shape(v) {
             continue;
@@ -1830,19 +1887,13 @@ pub fn freeze_scan(now: u64, hz: u64) {
         );
     }
     let uaddr = RWFRZ_UADDR.load(core::sync::atomic::Ordering::Relaxed);
-    if uaddr == 0 {
-        return;
-    }
     let tgid = RWFRZ_TGID.load(core::sync::atomic::Ordering::Relaxed);
-    // Re-read through any live waiter of the tgid (sample may have exited).
-    let mut word_now: Option<u32> = None;
-    for c in waiter_clusters(1) {
-        if c.uaddr == uaddr && c.mm == RWFRZ_MM.load(core::sync::atomic::Ordering::Relaxed) {
-            word_now = unsafe { read_u32_via_task(c.sample, c.uaddr) };
-            break;
-        }
-    }
     // ---- tid census diff (leak forensics) ----
+    // sc82: run from boot start on the samgr tgid (334 on the scgold
+    // image, stable across sc74..sc81) so pre-adoption reader exits are
+    // timestamped too; switches to the adopted tgid once a word is taken.
+    const EARLY_SAMGR_TGID: u32 = 334;
+    let census_tgid = if uaddr != 0 { tgid } else { EARLY_SAMGR_TGID };
     {
         let seen_cell: core::cell::RefCell<(usize, [u32; 64])> =
             core::cell::RefCell::new((0, [0; 64]));
@@ -1852,7 +1903,7 @@ pub fn freeze_scan(now: u64, hz: u64) {
             let tk = unsafe { &*t };
             let idx = {
                 let mut b = seen_cell.borrow_mut();
-                if tk.tgid() as u32 == tgid && b.0 < 64 {
+                if tk.tgid() as u32 == census_tgid && b.0 < 64 {
                     let i = b.0;
                     b.0 += 1;
                     Some(i)
@@ -1867,12 +1918,17 @@ pub fn freeze_scan(now: u64, hz: u64) {
         let (k, seen) = seen_cell.into_inner();
         let mut g = RWFRZ_TIDS.lock_irqsave();
         let (ref mut prev_n, ref mut prev) = *g;
+        let prev_tgid = RWFRZ_TIDS_CENSUS_TGID.swap(census_tgid, core::sync::atomic::Ordering::Relaxed);
+        if prev_tgid != census_tgid {
+            // Baseline switch (early-watch -> adopted word): reset silently.
+            *prev_n = 0;
+        }
         for i in 0..*prev_n {
             let tid = prev[i];
             if tid != 0 && !seen[..k].contains(&tid) {
                 crate::pr_warn!(
                     "RWFRZ: TID-VANISHED tgid {} tid {} (reader-exit window; word={:#x})",
-                    tgid,
+                    census_tgid,
                     tid,
                     RWFRZ_LASTVAL.load(core::sync::atomic::Ordering::Relaxed)
                 );
@@ -1880,12 +1936,23 @@ pub fn freeze_scan(now: u64, hz: u64) {
         }
         for s in seen[..k].iter() {
             if !prev[..*prev_n].contains(s) {
-                crate::pr_warn!("RWFRZ: TID-NEW tgid {} tid {}", tgid, s);
+                crate::pr_warn!("RWFRZ: TID-NEW tgid {} tid {}", census_tgid, s);
             }
         }
         prev[..k.min(64)].copy_from_slice(&seen[..k.min(64)]);
         *prev_n = k;
         drop(g);
+    }
+    if uaddr == 0 {
+        return;
+    }
+    // Re-read through any live waiter of the tgid (sample may have exited).
+    let mut word_now: Option<u32> = None;
+    for c in waiter_clusters(1) {
+        if c.uaddr == uaddr && c.mm == RWFRZ_MM.load(core::sync::atomic::Ordering::Relaxed) {
+            word_now = unsafe { read_u32_via_task(c.sample, c.uaddr) };
+            break;
+        }
     }
     // ---- word delta ----
     if let Some(v) = word_now {
@@ -1958,49 +2025,89 @@ pub fn freeze_scan(now: u64, hz: u64) {
             now.saturating_sub(first) / hz
         );
         exit_ring_dump_tgid(tgid);
-        let count_cell: core::cell::Cell<usize> = core::cell::Cell::new(0);
-        crate::sched::for_each_task(|t| {
-            // SAFETY: same contract as sleep_snapshot.
-            let tk = unsafe { &*t };
-            if tk.tgid() as u32 != tgid || count_cell.get() >= 32 {
-                return;
+        let n = rwfz_dump_tgid(tgid, 32);
+        crate::pr_warn!("RWFRZ: tgid {} enumerated {} tasks", tgid, n);
+        // sc82: the freeze correlates with OTHER processes showing the
+        // same 16-reader shape (sc81: tgid 716 & 791). Dump up to 2 more
+        // of those tgid's in the same pass — one common holder pattern
+        // would explain all of them; distinct stacks point at a shared
+        // library-level bug instead.
+        let mut extra = 0;
+        for c in waiter_clusters(1) {
+            if extra >= 2 {
+                break;
             }
-            count_cell.set(count_cell.get() + 1);
-            let top = tk.kernel_stack_top();
-            #[cfg(feature = "x86_64")]
-            let (rip, sys, a0) = {
-                let regs = (top.wrapping_sub(
-                    crate::arch::x86_64::pt_regs::PT_REGS_SIZE,
-                )) as *const crate::arch::x86_64::pt_regs::PtRegs;
-                // SAFETY: diagnostic read of this task's entry frame.
-                unsafe { ((*regs).rip, (*regs).orig_rax, (*regs).rdi) }
+            if c.tgid == tgid || c.n < 1 {
+                continue;
+            }
+            let v = match unsafe { read_u32_via_task(c.sample, c.uaddr) } {
+                Some(v) => v,
+                None => continue,
             };
-            #[cfg(feature = "riscv64")]
-            let (rip, sys, a0) = {
-                let regs = (top.wrapping_sub(
-                    crate::arch::riscv64::pt_regs::PT_REGS_SIZE,
-                )) as *const crate::arch::riscv64::pt_regs::PtRegs;
-                // SAFETY: same contract, riscv64.
-                unsafe { ((*regs).epc, (*regs).a7, (*regs).a0) }
-            };
-            #[cfg(not(any(feature = "x86_64", feature = "riscv64")))]
-            let (rip, sys, a0) = (0u64, 0u64, 0u64);
-            let comm = tk.comm();
-            let name = core::str::from_utf8(&comm[..])
-                .unwrap_or("")
-                .trim_end_matches('\0');
-            crate::pr_warn!(
-                "RWFRZ: tid {} comm='{}' state={:#x} sys={:#x} rip={:#x} a0={:#x}",
-                tk.pid(),
-                name,
-                tk.state().bits(),
-                sys,
-                rip,
-                a0
-            );
-            // SAFETY: t is a live Task from the pid-hash walk.
-            unsafe { rwfz_stack_frames(t, "task", 8) };
-        });
-        crate::pr_warn!("RWFRZ: tgid {} enumerated {} tasks", tgid, count_cell.get());
+            let r = v & 0x7fffffff;
+            if v & 0x80000000 != 0 && r >= 8 && r < 0x40000000 {
+                crate::pr_warn!(
+                    "RWFRZ: EXTRA-FROZEN tgid {} uaddr={:#x} word={:#x} readers={} waiters={} — same-shape dump",
+                    c.tgid,
+                    c.uaddr,
+                    v,
+                    r,
+                    c.n
+                );
+                exit_ring_dump_tgid(c.tgid);
+                let en = rwfz_dump_tgid(c.tgid, 16);
+                crate::pr_warn!("RWFRZ: EXTRA tgid {} enumerated {} tasks", c.tgid, en);
+                extra += 1;
+            }
+        }
     }
+}
+
+/// sc82: one tgid's full park-stack dump (comm/state/syscall/rip + 8
+/// byte-verified user-stack frames per thread). Pure diagnostics.
+fn rwfz_dump_tgid(tgid: u32, max_tasks: usize) -> usize {
+    let count_cell: core::cell::Cell<usize> = core::cell::Cell::new(0);
+    crate::sched::for_each_task(|t| {
+        // SAFETY: same contract as sleep_snapshot.
+        let tk = unsafe { &*t };
+        if tk.tgid() as u32 != tgid || count_cell.get() >= max_tasks {
+            return;
+        }
+        count_cell.set(count_cell.get() + 1);
+        let top = tk.kernel_stack_top();
+        #[cfg(feature = "x86_64")]
+        let (rip, sys, a0) = {
+            let regs = (top.wrapping_sub(
+                crate::arch::x86_64::pt_regs::PT_REGS_SIZE,
+            )) as *const crate::arch::x86_64::pt_regs::PtRegs;
+            // SAFETY: diagnostic read of this task's entry frame.
+            unsafe { ((*regs).rip, (*regs).orig_rax, (*regs).rdi) }
+        };
+        #[cfg(feature = "riscv64")]
+        let (rip, sys, a0) = {
+            let regs = (top.wrapping_sub(
+                crate::arch::riscv64::pt_regs::PT_REGS_SIZE,
+            )) as *const crate::arch::riscv64::pt_regs::PtRegs;
+            // SAFETY: same contract, riscv64.
+            unsafe { ((*regs).epc, (*regs).a7, (*regs).a0) }
+        };
+        #[cfg(not(any(feature = "x86_64", feature = "riscv64")))]
+        let (rip, sys, a0) = (0u64, 0u64, 0u64);
+        let comm = tk.comm();
+        let name = core::str::from_utf8(&comm[..])
+            .unwrap_or("")
+            .trim_end_matches('\0');
+        crate::pr_warn!(
+            "RWFRZ: tid {} comm='{}' state={:#x} sys={:#x} rip={:#x} a0={:#x}",
+            tk.pid(),
+            name,
+            tk.state().bits(),
+            sys,
+            rip,
+            a0
+        );
+        // SAFETY: t is a live Task from the pid-hash walk.
+        unsafe { rwfz_stack_frames(t, "task", 8) };
+    });
+    count_cell.get()
 }
