@@ -1436,10 +1436,20 @@ MUST use raw SYS_brk calls (MF4/MF5 do).
 
 ### Session 15 close-out
 
-- Commits: cc091b57 (mm parity fix + probes), archive update (this
-  section) + chain artifacts + the riscv64 SDK symlink repoint.
-- Chain at close: r27 in flight (15-point set); 0 WW-HIT cumulative.
+- Commits: cc091b57 (mm parity fix + probes), d86c0ea3 + this
+  addendum (archive + chain artifacts + the riscv64 SDK symlink
+  repoint). Pushed via ssh.github.com:443.
+- Chain: r27 was killed EXTERNALLY at ~15/45 min (03:40, mid-storm,
+  no teardown lines, whole tree gone in one sweep — the s10/s13/s14
+  infra-sweep class; guest healthy to the last line: ticks [100,100],
+  strand_max 10.5s healthy class, wakes 3.41M advancing; 0 WW-HIT,
+  0 kernel panics — the 3 'panic' grep hits are OH userspace service
+  stderr). Relaunched from r28 at 03:54 as this session's background
+  task (run/ww-chain-s15.log; wrapper 2399284 → chain → hunt → qemu
+  2399301, WW-ARMED 15 verified, process tree in run/ww-s15-proctree.txt).
+  Cumulative: **0 WW-HIT across r1-r27** partials.
 - Next: (1) chain continues toward the capture; (2) the narrowed guard
   + brk mirror ride to main with this branch's next merge; (3) low-hint
   honoring is the remaining known placement divergence needing its own
-  validation window.
+  validation window; (4) main repo's toolchain/riscv64-rux-linux-musl
+  symlink is still a self-loop — fix before any riscv64 probe build.
