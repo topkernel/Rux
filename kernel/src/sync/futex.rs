@@ -1576,6 +1576,11 @@ static EXIT_RING: Spinlock<(usize, [ExitRec; 256])> = Spinlock::new((0, [const {
 
 /// Called from pid_hash_remove under the bucket lock — keep it to two
 /// atomic-ish stores (one short critical section on the ring lock).
+/// sc86: when a word is adopted and the dying task belongs to the watched
+/// tgid, ALSO snapshot the word through the dying task's page tables
+/// (if its mm is still alive at unlink time) and print comm + value —
+/// a reader that exits without the count decrementing is caught in the
+/// act. The page-table read is skipped under the ring lock.
 pub fn note_task_unlink(pid: u32, tgid: u32) {
     let j = crate::drivers::timer::get_jiffies() as u64;
     let mut g = EXIT_RING.lock_irqsave();
@@ -1583,6 +1588,27 @@ pub fn note_task_unlink(pid: u32, tgid: u32) {
     ring[*head % 256] = ExitRec { j, pid, tgid };
     *head += 1;
     drop(g);
+    // Post-adoption exit snapshot (diagnostics only; no locks held here —
+    // pid_hash_remove's bucket lock IS still held by the caller, so the
+    // page walk must not take pid-hash locks; PageTableWalker does not).
+    let uaddr = RWFRZ_UADDR.load(core::sync::atomic::Ordering::Relaxed);
+    if uaddr != 0 && tgid == RWFRZ_TGID.load(core::sync::atomic::Ordering::Relaxed) {
+        let t = unsafe { crate::sched::find_task_by_pid(pid) };
+        if !t.is_null() {
+            let tk = unsafe { &*t };
+            let comm = tk.comm();
+            let name = core::str::from_utf8(&comm[..])
+                .unwrap_or("")
+                .trim_end_matches('\0');
+            let word = unsafe { read_u32_via_task(t, uaddr) };
+            crate::pr_warn!(
+                "RWFRZ: EXIT-WORD tid {} comm='{}' word={:#x}",
+                pid,
+                name,
+                word.unwrap_or(0xdeadbeef)
+            );
+        }
+    }
 }
 
 fn exit_ring_dump_tgid(tgid: u32) {
@@ -1706,6 +1732,24 @@ unsafe fn rwfz_stack_frames(task: *const Task, label: &str, max_frames: u64) {
         let hi = unsafe { read_u32_via_task(task, (va + 4) as usize)? };
         Some(lo as u64 | ((hi as u64) << 32))
     };
+    // sc86: resolve fd -> file PATH for file-backed frames (offline
+    // fileoff/byte matching hit missing-lib walls; the path names the
+    // library outright). Cached per-fd for the whole dump of this task.
+    let mut path_cache: alloc::vec::Vec<(i32, alloc::string::String)> = alloc::vec::Vec::new();
+    let path_of = |fd: i32,
+                   cache: &mut alloc::vec::Vec<(i32, alloc::string::String)>|
+     -> alloc::string::String {
+        if let Some((_, p)) = cache.iter().find(|(f, _)| *f == fd) {
+            return p.clone();
+        }
+        let p = tk
+            .fdtable()
+            .get_file(fd as usize)
+            .map(|file| file.path())
+            .unwrap_or_else(|| alloc::string::String::from("?"));
+        cache.push((fd, p.clone()));
+        p
+    };
     use core::fmt::Write;
     let mut s = alloc::string::String::new();
     let mut printed = 0u64;
@@ -1719,10 +1763,15 @@ unsafe fn rwfz_stack_frames(task: *const Task, label: &str, max_frames: u64) {
         }
         if let Some((s0, e0, fd, off)) = vma_of(v) {
             let bytes = read_u64_at(v).unwrap_or(0);
+            let path = if fd >= 0 {
+                path_of(fd, &mut path_cache)
+            } else {
+                alloc::string::String::new()
+            };
             let _ = write!(
                 s,
-                "\nRWFRZ:   frame ustack[{}]={:#x} vma={:#x}-{:#x} fd={} fileoff={:#x} bytes={:#018x}",
-                i, v, s0, e0, fd, off, bytes
+                "\nRWFRZ:   frame ustack[{}]={:#x} vma={:#x}-{:#x} fd={} fileoff={:#x} bytes={:#018x} path={}",
+                i, v, s0, e0, fd, off, bytes, path
             );
             printed += 1;
         }
