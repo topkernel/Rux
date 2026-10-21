@@ -1126,3 +1126,88 @@ NEXT SESSION:
   c. If the deadlock drains (a works), expect launcher -> OnForeground
      -> ArkUI; watch oh-shotmon for >8 colors and grab the ohgpu
      screendump as the milestone artifact.
+
+Session M FINAL (2026-10-22 01:4x; sc96-sc104; THREE kernel fixes landed,
+the launcher SPAWNS SUCCESSFULLY for the first time; MainAbility lifecycle
+reached; milestone screen not yet — remaining gates decoded below):
+
+ROOT CAUSE OF THE "PARKED SYSCALL" (sc96/sc97): THERE WAS NO PARK. The
+KILLDUMP probe extension (fd-type naming, pipe holder scan, unix dgram
+peer/queue stats, iovec payload, mount path strings, task state) shows
+every killed launcher child at state=RUNNING — the writev(fd3)/mount(2)
+"parks" were STALE last-syscall frames of a task that was RUNNING and
+slow, killed mid-progress by appspawn's 3s child watchdog:
+- fd3 = unix DGRAM socket to hilogd (3-iovec writev = libhilog
+  header28/tag/content; tag 'APPSPAWN' = the child's own pre-exec logs).
+- mount(2) frames = sandbox bind mounts that HAD RETURNED (appspawn
+  logged "mount X time 10-25ms" right at the kills).
+
+FIX 1 (mount leak — THE spawn killer, 77adb795 + 9842a6e2): killed
+appspawn children leaked every sandbox bind into the shared dentry tree
+and VFS_STATE.mounts forever (no namespace-exit unmount). Registry grew
+into the thousands across the launcher restart loop; every MS_REC bind
+cloned by scanning the whole registry -> 5-25ms per mount, 45-61 mounts
+per spawn, no spawn fit the 3s watchdog. MountNamespace now tracks its
+VfsMountInternal objects (ns_track_vfsmount at both attach sites) and
+Drop unmounts them (Linux nsput semantics); private-ns mounts no longer
+touch the global MOUNT_TABLE. VERIFY (sc99): registry bounded at 190,
+kernel-side bind cost ~40-80us (mtprobe TSC breakdown in vfs_bind_mount),
+systemui spawn result:0, then 18x "Child process:com.ohos.launcher
+success". sc98 lesson: ns_track under VFS_STATE self-deadlocks via lazy
+init_mnt_ns -> get_vff_root -> VFS_STATE; track AFTER dropping the guard.
+
+FIX 2 (sticky one-shot wake token — 385c9793): binder-stall census
+captured q=1 woken=1 with the task INTERRUPTIBLE+unlinked+owned by no
+cpu slot for minutes; every REKICK skipped the wait-queue entry because
+its one-shot token was already consumed and no other wake path exists.
+wait.rs wake_up now RE-ISSUES wake_up_process for sleeping targets on
+already-woken entries. VERIFY (sc101 vs sc99): foundation's frozen
+SERVER-OWING workers resumed; boot progressed from OsAccount-wedge-at-
+slog-11k to slog-29k with MainAbility lifecycle running.
+
+FIX 3 (unix dgram truesize overcharge — 5157c305): seg_charge added
+PAGE_SIZE per segment but the CombinedAllocator routes <=4096B to SLAB —
+a 200-byte hilog message really costs a slab object, not 4KiB. The
+overcharge throttled SO_SNDBUF 212992 to ~50 queued records, parking
+chatty clients on hilogd's serial drain rate. Now len+sizeof+512 (Linux
+skb-truesize parity); queued_truesize kept in lockstep.
+
+DIAGNOSTICS landed: KILLDUMP wedge forensics (futex.rs kill_dump_wedge:
+state/on_cpu/cfs_linked/pick_state/utime/stime, fdtab dump, pipe fill +
+holder scan, unix kind/peer/queue, iovec payload head, mount strings);
+WAKE-RUN-LEAK now prints per-cpu current slots + idle bits; W3-RUNWAKE-
+REFUSED names the refusing guard in wake_up_enqueue; unixsend-loop round
+detector (net/unix.rs); epollnotify registry probe; mtprobe bind TSC
+breakdown.
+
+REMAINING GATES (for the next session), in order:
+1. LAUNCHER STIME BURN: post-exec launcher child spends its whole 3s
+   life in KERNEL time (utime=0-2t, stime=180-190t, on_cpu=true, rip
+   parked at the writev wrapper). NOT unix_send (loop detector silent),
+   NOT epoll registry (size 10-14). Prime suspect: the file-map page
+   fault path (the app maps ~100MB of ArkUI libs; if each fault does a
+   synchronous ext4/bio read without working readahead, 25k faults x
+   70us = 1.75s). NOTE: arch/x86_64/mm/page_fault.rs + mm/** are the MM
+   LANE's territory (they are restoring VMA fd/offset bookkeeping there
+   RIGHT NOW) — coordinate before touching; the fs-side levers (page
+   cache/readahead policy, bio batching) are fair game.
+2. OsAccount SA proxy death (present since sc94): "proxy is already
+   dead, handle:7 desc:*.IOsAccount" spam; BMS queries fail with
+   responseUserId:-1; boot bootevents stall after appspawn.started
+   (only composer_host + appspawn fire). Whether this gates the
+   launcher's AMS start needs a check with gate 1 fixed (sc101 reached
+   MainAbility restarts DESPITE it, sc104 wedged earlier BECAUSE of it
+   — boot-order variance).
+3. WAKE-STRANDED / WAKE-RUN-LEAK residue still prints under load (wake
+   -> pick latency); sticky-token fix drains the terminal wedges but the
+   producers remain unlocalized. The slots= print (sc100+) names lying
+   cpu slots when they recur.
+
+Boots this session: sc96 (syscall data), sc97 (wedge forensics), sc98
+(first-boot DEADLOCK from fix 1's first version, killed), sc99 (mount
+fix verify; systemui success), sc100 (wake diagnostics), sc101 (sticky-
+token verify; launcher spawns 18x, MainAbility restarts), sc102 (stime
+burn confirmed unchanged), sc103 (unix_send cleared), sc104 (OsAccount
+early wedge variant). Screen: 8-color checker at 100% coverage
+throughout (display pipeline alive, launcher UI not reached). MILESTONE
+NOT reached this session; three concrete gates retired.
