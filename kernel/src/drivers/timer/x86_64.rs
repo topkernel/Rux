@@ -74,8 +74,21 @@ static TSC_CONTINUITY_OFFSET: AtomicU64 = AtomicU64::new(0);
 /// correction — the same shape as Linux's per-CPU cyc2ns offsets.
 /// 0 = not yet calibrated (index 0 stays 0: the BSP's correction is
 /// folded into TSC_CONTINUITY_OFFSET at promote time).
+///
+/// Residual calibration noise between CPUs makes tiny BACKWARD steps
+/// possible on thread migration; sc113 measured exactly that (samgr
+/// printed `cost:4294946ms` — a 21 ms backward step wrapping a u32
+/// microsecond diff, which aborted SA loads and killed the OsAccount
+/// host's clients). Two guards: the calibration takes the MIN of three
+/// bracketed samples (noise floor), and read_time ratchets through
+/// TSC_LAST (published time never goes backward).
 static TSC_CPU_OFF: [AtomicI64; crate::config::MAX_CPUS] =
     [const { AtomicI64::new(0) }; crate::config::MAX_CPUS];
+
+/// Monotonic ratchet: the largest value ever returned by read_time().
+/// Plain unsynchronized max-store — a lost race only leaves the ratchet
+/// one store behind, never lets it decrease.
+static TSC_LAST: AtomicU64 = AtomicU64::new(0);
 
 /// True once the TSC became the timekeeper.
 static TSC_ACTIVE: AtomicU64 = AtomicU64::new(0);
@@ -137,17 +150,27 @@ pub fn read_time() -> u64 {
         let now = crate::arch::cpu::read_counter();
         let base = TSC_BASE.load(Ordering::Acquire);
         let delta = now.wrapping_sub(base);
-        let v = (delta >> TSC_MULSHIFT).wrapping_mul(mult)
+        let mut v = (delta >> TSC_MULSHIFT).wrapping_mul(mult)
             + TSC_CONTINUITY_OFFSET.load(Ordering::Acquire);
         // Per-CPU vCPU TSC-offset correction (TSC_CPU_OFF doc). Signed
         // add keeps cross-CPU monotonicity inside the i64 nominal range;
         // an uncalibrated CPU (0) reads the uncorrected value.
         let cpu = crate::arch::cpu_id() as usize;
         if cpu < crate::config::MAX_CPUS {
-            v.wrapping_add(TSC_CPU_OFF[cpu].load(Ordering::Acquire) as u64)
-        } else {
-            v
+            v = v.wrapping_add(TSC_CPU_OFF[cpu].load(Ordering::Acquire) as u64);
         }
+        // Monotonic ratchet (sc113: per-CPU calibration noise stepped
+        // the clock ~21 ms backward once, samgr's u32-us duration math
+        // wrapped to 4294967ms and aborted SA loads). A value behind the
+        // last published time is clamped up to it — time briefly freezes
+        // (never more than the residual noise) instead of stepping back.
+        let last = TSC_LAST.load(Ordering::Relaxed);
+        if v > last {
+            TSC_LAST.store(v, Ordering::Relaxed);
+        } else if v < last {
+            v = last;
+        }
+        v
     } else if crate::drivers::timer::hpet::ready() {
         crate::drivers::timer::hpet::read_time_nominal()
     } else {
@@ -244,15 +267,36 @@ pub fn calibrate_cpu_tsc_offset(cpu: usize) {
         return;
     }
     let raw = crate::arch::cpu::read_counter();
-    let tsc_nom = ((raw.wrapping_sub(base) >> TSC_MULSHIFT).wrapping_mul(mult)).wrapping_add(off);
-    let hpet_nom = crate::drivers::timer::hpet::read_time_nominal();
-    let mut delta = hpet_nom as i64 - tsc_nom as i64;
+    let mut delta = i64::MAX;
+    // Three bracketed samples, take the MINIMUM (hpet - tsc_nom): the
+    // HPET MMIO read can stall (sc113 measured ~21 ms of read skew right
+    // after AP startup), and a too-LARGE correction is what steps the
+    // clock backward on migration; a slightly-small one is absorbed by
+    // the 1 Hz forward-only resync and the read_time ratchet.
+    for _ in 0..3 {
+        let hpet_nom = crate::drivers::timer::hpet::read_time_nominal();
+        let t_after = crate::arch::cpu::read_counter();
+        // Same base/mult math for each bracket's TSC stamps.
+        let nom = |raw_t: u64| -> i64 {
+            (((raw_t.wrapping_sub(base)) >> TSC_MULSHIFT).wrapping_mul(mult) as i64)
+                .wrapping_add(off as i64)
+        };
+        // Lower bound of the true offset: the HPET read happened at or
+        // before the t_after stamp, so hpet_nom - nom(t_after) can only
+        // underestimate the correction.
+        let d = hpet_nom as i64 - nom(t_after);
+        if d < delta {
+            delta = d;
+        }
+    }
+    let tsc_nom_now = (((raw.wrapping_sub(base)) >> TSC_MULSHIFT).wrapping_mul(mult) as i64)
+        .wrapping_add(off as i64);
     // Negative-sum guard: a vCPU that reads BEHIND by more than the
     // current uptime would wrap the u64 clock forward by ~2^64. Clamp
     // the correction so corrected >= 0 (the CPU then reads a hair fast
     // until uptime outgrows the skew — never wraps).
-    if tsc_nom as i64 + delta < 0 {
-        delta = -(tsc_nom as i64);
+    if tsc_nom_now + delta < 0 {
+        delta = -tsc_nom_now;
     }
     // Residual is the vCPU TSC-offset skew — apply it whatever the size
     // (25 s is the observed magnitude), but say so beyond 1 ms so the
