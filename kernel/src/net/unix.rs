@@ -234,6 +234,21 @@ impl UnixSocket {
         q.iter().map(|s| s.data.len()).sum()
     }
 
+    /// sc97 KILLDUMP support: flow-control snapshot for the
+    /// wedged-writer forensics — (queued_bytes, queued_truesize,
+    /// sndbuf_cap, recv_queue_len).
+    pub fn diag_snapshot(&self) -> (usize, usize, usize, usize) {
+        let (qb, ql) = {
+            let q = self.recv_queue.lock();
+            (
+                q.iter().map(|s| s.data.len()).sum(),
+                q.len(),
+            )
+        };
+        let cap = self.options.lock().sndbuf as usize;
+        (qb, self.queued_truesize(), cap, ql)
+    }
+
     /// Kernel-heap cost of the receive queue (Linux `sk_wmem_alloc` /
     /// skb-truesize semantics).
     ///
@@ -1784,6 +1799,18 @@ unsafe fn unix_of_file(file: &File) -> Option<Arc<UnixSocket>> {
     let socket_ptr = ptr as *const UnixSocket;
     Arc::increment_strong_count(socket_ptr);
     Some(Arc::from_raw(socket_ptr))
+}
+
+/// sc97 KILLDUMP support: identity-checked reconstruction for a File
+/// from ANOTHER task's fdtable (unix_file_of only sees current's).
+/// Returns None for non-unix files.
+pub fn unix_of_file_diag(file: &File) -> Option<Arc<UnixSocket>> {
+    let ops = file.get_ops()?;
+    if !core::ptr::eq(ops as *const _, &UNIX_SOCKET_OPS as *const _) {
+        return None;
+    }
+    // SAFETY: ops identity checked above.
+    unsafe { unix_of_file(file) }
 }
 
 fn unix_file_nonblock(file: &File) -> bool {
