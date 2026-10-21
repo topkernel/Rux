@@ -722,6 +722,13 @@ pub fn timer_softirq_handler(_nr: usize) {
         crate::dfx::wildwatch::verify();
     }
 
+    // dfx=metawatch: buddy-meta shadow audit on a 10 s cadence (the
+    // buddy face of the wild writer — see dfx/metawatch.rs). Throttle
+    // is internal to the module.
+    if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::MetaWatch) {
+        crate::dfx::metawatch::tick(current);
+    }
+
     // dfx=ledger: run a pending on-demand accounting census latched by the
     // "LEDGER!" UART magic. The RX IRQ itself only sets the flag (printk
     // from IRQ context is the classic self-wedge); this softirq already

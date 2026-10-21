@@ -55,6 +55,10 @@ pub mod monowatch;
 /// the hpet quiet-statics cluster in every page-table alias; see
 /// dfx/wildwatch.rs (wildwrite-hunt line).
 pub mod wildwatch;
+/// Buddy-meta shadow scan (dfx=metawatch): periodic lock-confirmed
+/// INV-HEAP-* audit of the buddy free lists + per-page bitmap; see
+/// dfx/metawatch.rs (wildwrite-hunt line).
+pub mod metawatch;
 
 /// Initialize the DFX subsystem.
 ///

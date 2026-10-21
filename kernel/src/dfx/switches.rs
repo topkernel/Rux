@@ -196,9 +196,17 @@ pub enum DfxSwitch {
     /// (DMA-class writers bypass PTEs). One arming print per boot; zero
     /// traffic until a hit. See dfx/wildwatch.rs.
     WildWatch,
+    /// Buddy-meta shadow scan (wildwrite-hunt line): every 10 s the
+    /// timer cadence derives a shadow free set from the buddy free lists
+    /// and cross-checks INV-HEAP-1/2/3 against the per-page bitmap and
+    /// linkage; a lock-CONFIRMED persistent mismatch prints META-SMASH
+    /// with the finding details (the buddy face of the wild writer —
+    /// the ww-v2 order-18 grind). One arming print per boot; zero
+    /// traffic until a hit. See dfx/metawatch.rs.
+    MetaWatch,
 }
 
-const SWITCH_COUNT: usize = 27;
+const SWITCH_COUNT: usize = 28;
 
 static SWITCHES: [AtomicBool; SWITCH_COUNT] = [const { AtomicBool::new(false) }; SWITCH_COUNT];
 
@@ -236,6 +244,7 @@ impl DfxSwitch {
             DfxSwitch::SockSnap => 24,
             DfxSwitch::DataTap => 25,
             DfxSwitch::WildWatch => 26,
+            DfxSwitch::MetaWatch => 27,
         }
     }
 
@@ -268,6 +277,7 @@ impl DfxSwitch {
             "socksnap" => Some(DfxSwitch::SockSnap),
             "datatap" => Some(DfxSwitch::DataTap),
             "wildwatch" => Some(DfxSwitch::WildWatch),
+            "metawatch" => Some(DfxSwitch::MetaWatch),
             _ => None,
         }
     }

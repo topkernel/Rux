@@ -1080,3 +1080,127 @@ position: file_off = vma_off + (rip - vma_start) into
 symbolization and this hunt's park-site decoding both stop being
 blind there. The maps path column survives fd close (pin) on all
 three paths: boot-exec (PID 1), execve, and loader overlays.
+
+## Session 13 (continuation agent — watchset to 15, metawatch landed, file-fault path dedup)
+
+### Chain stewardship
+
+- Claimed with the s12 chain tree ALIVE (r23 armed, 10-point set,
+  storming — the handoff's "may have died" was again stale; ps first).
+- r23 verdict: EXTERNALLY KILLED clean partial at 15/45 min. The whole
+  tree (wrapper/chain/hunt/qemu/gdb) died in the s10-pattern silent
+  sweep at ~00:50 (serial last write 00:50:xx, no teardown lines, no
+  budget-spent line). The guest was HEALTHY to the last line (ticks
+  [100,100], si_busy 112ms, wakes advancing, strand_max 3.6s); the final
+  `STALE-CLAIM-RESET` line is healthy-boot noise (the qs1 probe boot
+  prints the same mid-storm). 0 WW-HIT, 0 panics. Cumulative: 0 WW-HIT
+  across r1-r23 partials.
+- Relaunched from r24 at 01:19 as this session's background task
+  (run/ww-chain-s13.log; pids in run/ww-s13-proctree.txt).
+
+### Watchset expanded to 15 points (archive next-step #2, done)
+
+- ww-qs1 (storm-quietness probe, full OH disk boot, own port 12398,
+  15.5 min): the five candidates that run/ww-cap1 had only
+  idle-verified — console::UART, PHYS_RAM_BASE, CMDLINE_PTR,
+  GDT_PER_CPU (arch::x86_64::trap), virtio-pci MMIO_OFFSET — stayed
+  silent through a full storm (864 forks, wakes 3.57M, strand_max
+  9.48s, 0 panics, 0 hits). All five are chain-safe.
+- ww-cap2: 15 SIMULTANEOUS hardware watchpoints arm completely on this
+  gdbstub (15/15 confirmations, WW-ARMED 15, no insertion errors) —
+  verified against a fresh guest before riding the chain.
+- r24+ rides the 15-point set (ww-gdbscript.py regenerates per-run cmd
+  files; r23 kept its already-generated 10-point cmd by design).
+- Ops lesson (recorded for every future session): a `rm && qemu ... &`
+  compound backgrounds the WHOLE list — the captured $! is a subshell,
+  `kill $!` orphans the QEMU (one held port 12398 for 20 min and served
+  a stale guest to a later probe's gdb). Start experiment QEMUs from a
+  script file as a background task, kill only verified own PIDs.
+
+### buddy-meta shadow scan landed (dfx=metawatch, commit 434c2e69)
+
+The unified-engine hypothesis's buddy face (the ww-v2 order-18 grind)
+now has an in-kernel witness, per the session-4 next-step list:
+
+- mm/buddy_allocator.rs grows `buddy_meta_shadow_scan`: derive the free
+  set from the free lists into a claim-guarded scratch bitmap and
+  cross-check INV-HEAP-1/2/3 (link bounds, leader order/free bytes,
+  2^order alignment, prev-mirror links, exact free_bits equivalence, no
+  double listing). Pass 1 lock-free from the timer cadence (racy field
+  reads tolerated, census precedent); any dirty pass 1 re-audits UNDER
+  the heap irqsave lock; only a PERSISTENT mismatch reports. Findings
+  classify into 9 kinds (LinkOob / OrderMismatch / FreeByteClear /
+  Unaligned / PrevBroken / BitmapSetUnlisted / BitmapClearListed /
+  DoubleListed / HopOverflow).
+- dfx/metawatch.rs (switch bit 27) drives it every 10 s from the timer
+  softirq: one METAWATCH-ARMED line per boot, ZERO traffic until a hit;
+  transients counted silently. A confirmed hit prints META-SMASH with
+  finding details — the buddy-face capture. NOTE: hunt boots that want
+  it must add it to EXTRA_APPEND explicitly; the ww-s2 chain boots do
+  NOT ride it (frozen-kernel purity).
+- Validation: metawatch-selftest=1 PASS on first bare boot (injected
+  free_bits bit flagged as BitmapClearListed under the heap lock,
+  restored, re-audit clean; METAWATCH-SELFTEST chain
+  buddy_meta_selftest <- metawatch::tick <- timer softirq). OH soak
+  (ww-mwoh1, 15 min full storm): **0 META-SMASH — zero false
+  positives**; the under-lock confirm gate absorbed every mid-mutation
+  race under millions of allocs/frees. A/B control (ww-mwctl, same
+  kernel/flags/contention, metawatch OFF): si_busy tops 2279 ms vs
+  mwoh1's 3916 ms, strand_max 45.5s vs 44.3s — same class, i.e. the
+  scan cost is invisible at boot granularity. Incidental finding:
+  si_busy 1-2s classes appear whenever >=3 QEMUs share the host
+  (bf-v1's 2422ms historical value had the same shape with the chain
+  concurrent) — treat softirq-busy readings as host-load-sensitive.
+
+### Launcher-relay item: file-fault path audit + lookup dedup
+
+Coordinator relayed launcher Session M's finding: post-exec launcher
+burns its whole 3s watchdog in KERNEL time loading ~100MB of ArkUI libs
+(their side: readahead/fault-around/page-cache policy in bio.rs/ext4;
+Session N). This line's side — per-fault mm work — audited and the
+cheap pure-win subset LANDED (see commit; validated):
+
+- Audit of the x86_64 file-fault path (page_fault.rs demand fault):
+  per fault it did THREE full VMA-tree finds (entry, EOF/SIGBUS gate,
+  fill arm), up to FOUR vm_file pin-table resolutions, TWO
+  sched::current() round trips, and an unconditional 4KiB pre-zero
+  before the read. x25600 faults per 100MB lib load, multiplied by
+  every spawn.
+- The dedup (mm territory, riscv64 twin untouched): capture vma_start /
+  vm_file Arc / file_offset / effective_size ONCE under the entry guard
+  (dropped before any read_at — R73 rule intact); the SIGBUS gate, the
+  SHARED-devfs path, and the fill arm all use the captures. Pre-zero is
+  skipped only when a full-page read is planned; short/failed reads
+  re-zero (no stale kernel data can reach a user page). The fill arm's
+  bounds now use the devfs-aware effective size (devfs files grown
+  after mmap serve their new pages; regular files identical to before).
+- Validation: test/loader_vma_boot.py LVMAP-PASS (P1-P5: boot-exec
+  interp/exe per-segment faults, mremap file-attr carry, loader overlay
+  — all through the new path); OH boot ww-fd1 (below).
+- NOT done (documented for the implementing session, the 16x-class
+  win): fault-around — map up to 16 pages per fault from the page
+  cache in one PTE-lock section (Linux filemap_fault/do_fault_around
+  shape; MAP_PRIVATE around-pages map without write). Compounds
+  directly with Session N's readahead: 25,600 faults per 100MB lib
+  collapse to ~1,600. Needs its own LTP mmap-family + OH validation.
+- ww-fd1 (OH boot, dedup kernel + metawatch rider, 15 min): full storm
+  (830 forks, wakes 2.67M, 136k serial lines), 0 KERNPANIC /
+  ALLOCTHROW, **0 SIGBUS forensics prints** (the relocated gate fires
+  nothing false), 0 Permission-denied victims, 0 META-SMASH (second
+  clean metawatch soak). strand_max 81s is the >=3-QEMU host-contention
+  class again (see the si_busy note above); wake rate and fork count
+  match the mwoh1/mwctl controls. A clean-host stime A/B for the
+  launcher relay's 3s-burn question belongs to a dedicated window —
+  the dedup is a per-fault constant-factor win (3 finds + 4 pin
+  lookups + 2 current() trips + 1 memset removed per fault), the 16x
+  class win is fault-around + readahead, still open.
+
+### Session 13 close-out
+
+- Commits: 434c2e69 (metawatch), 1bbc3fbe (watchset 15 + probe
+  scripts), fault-path dedup + this archive (see git log).
+- Chain at close: r24 (first full 15-point run) in flight; 0 WW-HIT
+  cumulative r1-r24.
+- Health baseline confirmations this session: the 9.5-9.7s strand_max
+  class reproduces on clean windows (qs1, r24); LVMAP-exec-path boots
+  fork at control rates (864/15min, 830/15min).
