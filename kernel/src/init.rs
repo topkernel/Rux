@@ -376,6 +376,14 @@ fn load_and_setup_elf(
     // SAFETY: reads the boot-time root PPN, no invariants to uphold.
     let kernel_root_ppn = unsafe { crate::arch::mm::mmu_init::root_page_table_ppn() };
 
+    // Pinned vm_file identities for the PID-1 segment VMAs (vm_file
+    // semantics — same as sys_execve): best-effort VFS opens; a None
+    // only drops the /proc/<pid>/maps path column.
+    let init_file_arc = crate::syscall::process::open_file_arc(init_path);
+    let interp_file_arc = ElfLoader::get_interpreter(program_data)
+        .and_then(|p| core::str::from_utf8(p).ok())
+        .and_then(crate::syscall::process::open_file_arc);
+
     // SAFETY: task_ptr points to the freshly built PID 1 task (static
     // INIT_TASK_STORAGE); do_execve_elf only needs it to carry a valid
     // kernel stack + pt_regs, both allocated by Task::new_task_at.
@@ -391,6 +399,8 @@ fn load_and_setup_elf(
             init_path,
             interp_data.as_deref(),
             false,
+            init_file_arc.as_ref(),
+            interp_file_arc.as_ref(),
         )
     };
     match result {

@@ -747,37 +747,65 @@ pub fn generate_maps(pid: u64) -> Vec<u8> {
         } else if start == heap_start {
             ("[heap]".into(), 0)
         } else if vma.vma_type() == VmaType::FileBacked {
-            let fd = vma.file_fd();
-            if fd >= 0 {
-                // Look up file from fdtable to get path and inode
-                // A pinned-but-exiting task may have torn its fdtable
-                // down already; maps paths then show no path (Linux
-                // shows the empty path for such VMAs too).
-                let file = match task.try_fdtable() {
-                    Some(ft) => unsafe { ft.get_file(fd as usize) },
-                    None => None,
-                };
-                match file {
-                    Some(file) => {
+            // Linux resolves the maps path through vm_file — the file
+            // pinned on the VMA, which follows it across fd close, fork
+            // and MAP_FIXED splits. Try the pin first (exec-time segment
+            // VMAs carry fd=-1 with the identity on the pin; loader
+            // mappings outlive their fd once ld.so closes it), then fall
+            // back to the caller's fdtable for VMAs that only know the
+            // fd number.
+            let mut resolved: Option<(String, u64)> = None;
+            if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SyscallTrace)
+                && addr_space.get_vma_file(start).is_none()
+            {
+                crate::pr_info!(
+                    "LVMA-DBG maps pin-miss start={:#x} fd={} off={:#x}",
+                    start, vma.file_fd(), vma.offset()
+                );
+            }
+            if let Some(file) = addr_space.get_vma_file(start) {
+                // SAFETY: read-only dentry access on the pinned file.
+                let dentry_opt = unsafe { &*file.dentry.get() };
+                if let Some(dentry) = dentry_opt {
+                    // d_path()-style: relative to the READING task's root.
+                    let path = crate::fs::vfs::dentry_user_path(dentry);
+                    let ino = dentry
+                        .get_inode()
+                        .map(|inode| inode.ino)
+                        .unwrap_or(0);
+                    resolved = Some((path, ino));
+                }
+            }
+            if resolved.is_none() {
+                let fd = vma.file_fd();
+                if fd >= 0 {
+                    // Look up file from fdtable to get path and inode
+                    // A pinned-but-exiting task may have torn its fdtable
+                    // down already; maps paths then show no path (Linux
+                    // shows the empty path for such VMAs too).
+                    let file = match task.try_fdtable() {
+                        Some(ft) => unsafe { ft.get_file(fd as usize) },
+                        None => None,
+                    };
+                    if let Some(file) = file {
+                        // SAFETY: read-only dentry access on the fdtable file.
                         let dentry_opt = unsafe { &*file.dentry.get() };
-                        match dentry_opt {
-                            Some(dentry) => {
-                                // /proc/<pid>/maps paths are d_path()-style:
-                                // relative to the READING task's root.
-                                let path =
-                                    crate::fs::vfs::dentry_user_path(dentry);
-                                let ino = dentry.get_inode()
-                                    .map(|inode| inode.ino)
-                                    .unwrap_or(0);
-                                (path, ino)
-                            }
-                            None => (String::new(), 0),
+                        if let Some(dentry) = dentry_opt {
+                            // /proc/<pid>/maps paths are d_path()-style:
+                            // relative to the READING task's root.
+                            let path =
+                                crate::fs::vfs::dentry_user_path(dentry);
+                            let ino = dentry.get_inode()
+                                .map(|inode| inode.ino)
+                                .unwrap_or(0);
+                            resolved = Some((path, ino));
                         }
                     }
-                    None => (String::new(), 0),
                 }
-            } else {
-                (String::new(), 0)
+            }
+            match resolved {
+                Some(r) => r,
+                None => (String::new(), 0),
             }
         } else {
             (String::new(), 0)

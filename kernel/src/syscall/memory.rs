@@ -2035,6 +2035,41 @@ unsafe fn copy_old_to_new_pages(
 /// one boot ties any mystery VMA surgery to its caller.
 /// dfx=syscalltrace only: ungated this is two lines per mremap, and
 /// hilogd.rd_kmsg eats a vCPU copying them (b128/b129).
+/// Re-apply a remapped mapping's original file identity onto the VMA at
+/// `piece_start`. The remap paths in `sys_mremap_inner` reinstall the
+/// mapping through `AddressSpace::mmap`, whose fresh VMA carries the old
+/// TYPE but default fd (-1)/offset 0 — without this, a moved or grown
+/// FILE mapping loses its vm_file bookkeeping (offset shown as 0, no
+/// path in /proc/<pid>/maps, forensics unable to map a rip to a file
+/// position). fd intentionally stays -1: the identity lives on the pin
+/// (the original fd number may have been closed or reused since mmap).
+/// No-op when no VMA starts exactly at `piece_start` (an in-place
+/// anonymous extension merged into its predecessor).
+fn mremap_carry_file_attrs(
+    address_space: &crate::mm::mm_struct::MmStruct,
+    piece_start: usize,
+    piece_offset: usize,
+    fd: i32,
+    file_size: u64,
+    pinned: Option<&alloc::sync::Arc<crate::fs::file::File>>,
+) {
+    let found = {
+        let mut mgr = address_space.vma_write();
+        mgr.get_mut(crate::mm::page::VirtAddr::new(piece_start))
+            .map(|vma| {
+                vma.set_file_fd(fd);
+                vma.set_file_size(file_size);
+                vma.set_offset(piece_offset);
+            })
+            .is_some()
+    };
+    if found {
+        if let Some(f) = pinned {
+            address_space.pin_vma_file(piece_start, f.clone());
+        }
+    }
+}
+
 pub fn sys_mremap(args: [u64; 6]) -> i64 {
     let ret = sys_mremap_inner(args);
     // Failure returns are rare and always interesting (CFI-shadow hunt):
@@ -2137,18 +2172,36 @@ fn sys_mremap_inner(args: [u64; 6]) -> i64 {
         );
     }
 
-    // 1. Find VMA covering old_addr
+    // 1. Find VMA covering old_addr (full attributes: the remap paths
+    // below reinstall the mapping through AddressSpace::mmap, which
+    // builds a fresh VMA carrying only range/flags/type — fd, file size
+    // and offset must be re-applied or a moved FILE mapping silently
+    // loses its vm_file bookkeeping, exactly like the exec-time segment
+    // flattening did).
     let vma_info = {
         let vma_mgr = address_space.vma_read();
         vma_mgr.find(VirtAddr::new(old_addr)).map(|vma| {
-            (vma.start(), vma.end(), vma.flags(), vma.vma_type())
+            (
+                vma.start(),
+                vma.end(),
+                vma.flags(),
+                vma.vma_type(),
+                vma.file_fd(),
+                vma.file_size(),
+                vma.offset(),
+            )
         })
     };
 
-    let (vma_start, vma_end, vma_flags, vma_type) = match vma_info {
+    let (vma_start, vma_end, vma_flags, vma_type, vma_fd, vma_fsz, vma_off) = match vma_info {
         Some(info) => info,
         None => return mmap_error::EFAULT,  // Address not mapped
     };
+
+    // Pinned vm_file of the ORIGINAL mapping (None for anonymous): moved
+    // or grown file mappings re-pin it at the new piece's start so
+    // demand faults and /proc/maps path resolution survive the move.
+    let vma_pin = address_space.get_vma_file(vma_start.as_usize());
 
     // Linux mremap semantics: old_addr may sit ANYWHERE inside a VMA
     // (VmaManager::add merges adjacent compatible VMAs, so glibc's run of
@@ -2197,6 +2250,16 @@ fn sys_mremap_inner(args: [u64; 6]) -> i64 {
             );
             match mmap_result {
                 Ok(new_addr) => {
+                    // Carry the original mapping's file identity onto the
+                    // moved VMA (Linux move_vma: vm_file/vm_pgoff follow).
+                    mremap_carry_file_attrs(
+                        address_space,
+                        new_addr_arg,
+                        vma_off + (old_addr - vma_start.as_usize()),
+                        vma_fd,
+                        vma_fsz,
+                        vma_pin.as_ref(),
+                    );
                     // Copy pages from old to new
                     let copy_size = old_size_aligned.min(new_size_aligned);
                     unsafe {
@@ -2268,7 +2331,23 @@ fn sys_mremap_inner(args: [u64; 6]) -> i64 {
                 perm,
                 map::MAP_FIXED,  // Force at this address
             ) {
-                Ok(_) => old_addr as i64,
+                Ok(_) => {
+                    // The extension piece is a fresh VMA at vma_end when
+                    // it did not merge (file VMAs never merge here:
+                    // fd=-1 vs the incumbent's real fd); carry the file
+                    // identity onto it with a continuation offset. For a
+                    // merged (anonymous) extension there is no VMA at
+                    // vma_end and nothing to fix.
+                    mremap_carry_file_attrs(
+                        address_space,
+                        vma_end.as_usize(),
+                        vma_off + (vma_end.as_usize() - vma_start.as_usize()),
+                        vma_fd,
+                        vma_fsz,
+                        vma_pin.as_ref(),
+                    );
+                    old_addr as i64
+                }
                 Err(_) => mmap_error::ENOMEM,
             }
         } else if (flags & MREMAP_MAYMOVE) != 0 {
@@ -2283,9 +2362,19 @@ fn sys_mremap_inner(args: [u64; 6]) -> i64 {
                 0,  // Don't force address
             ) {
                 Ok(new_mapping_addr) => {
+                    let new_addr_val = new_mapping_addr.as_usize();
+                    // Carry file identity onto the moved mapping (see the
+                    // MREMAP_FIXED twin above).
+                    mremap_carry_file_attrs(
+                        address_space,
+                        new_addr_val,
+                        vma_off + (old_addr - vma_start.as_usize()),
+                        vma_fd,
+                        vma_fsz,
+                        vma_pin.as_ref(),
+                    );
                     // Copy pages from old mapping to new mapping before unmapping
                     let copy_size = old_size_aligned.min(new_size_aligned);
-                    let new_addr_val = new_mapping_addr.as_usize();
                     // SAFETY: both old_addr and new_addr_val are page-aligned user addresses.
                     // copy_old_to_new_pages copies PTE contents (physical page data).
                     unsafe {

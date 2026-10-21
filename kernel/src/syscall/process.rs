@@ -177,6 +177,20 @@ fn read_exec_file(path: &str) -> Option<alloc::vec::Vec<u8>> {
     }
 }
 
+/// Open `path` through the VFS and return the file as an Arc WITHOUT
+/// keeping an fd (Linux vm_file semantics): the Arc outlives the closed
+/// fd number, so pinning it on the exec-time segment VMAs gives
+/// /proc/<pid>/maps a stable path identity even though exec holds no
+/// descriptor for the exe or the interpreter. Best-effort: None simply
+/// leaves the VMAs without a pinned file (offset bookkeeping stands).
+pub(crate) fn open_file_arc(path: &str) -> Option<alloc::sync::Arc<crate::fs::file::File>> {
+    let fd = crate::fs::vfs::file_open(path, 0 /* O_RDONLY */, 0).ok()?;
+    let file = unsafe { crate::fs::file::get_file_fd(fd) };
+    // SAFETY: fd came from file_open on the current task's table.
+    unsafe { crate::fs::file::close_file_fd(fd) };
+    file
+}
+
 /// ARG_MAX approximation for execve argument limits (Linux uses a 2MB-ish
 /// total with per-string 32-page caps; we take a middle road so real
 /// shells/python do not get silently truncated — the old 65-entry/1KB caps
@@ -432,6 +446,7 @@ fn do_execve(pathname: &str, argv: &[alloc::string::String], envp: &[alloc::stri
     };
 
     // Check for PT_INTERP (dynamic executable)
+    let mut interp_path_str: Option<&str> = None;
     let interp_data: Option<alloc::vec::Vec<u8>> = if let Some(interp_path) = ElfLoader::get_interpreter(&program_data) {
         let interp_str = match core::str::from_utf8(interp_path) {
             Ok(s) => s,
@@ -451,7 +466,10 @@ fn do_execve(pathname: &str, argv: &[alloc::string::String], envp: &[alloc::stri
             attempt += 1;
         }
         match data {
-            Some(d) => Some(d),
+            Some(d) => {
+                interp_path_str = Some(interp_str);
+                Some(d)
+            }
             None => {
                 crate::pr_err!(
                     "exec: interpreter read failed for {} (pid {}) — ENOENT",
@@ -618,7 +636,18 @@ fn do_execve(pathname: &str, argv: &[alloc::string::String], envp: &[alloc::stri
         crate::process::exit::de_thread(current);
     }
 
-    match do_execve_elf(current, &program_data, &final_argv, &final_envp, entry, phdr_count_usize, &ehdr, full_path.as_ref(), interp_data.as_deref(), secure_exec) {
+    // Pinned file identities for the exec-time segment VMAs (vm_file
+    // semantics — see open_file_arc). Best-effort: a failure only drops
+    // the /proc/<pid>/maps path column, never the exec.
+    let exe_file_arc = open_file_arc(full_path.as_ref());
+    let interp_file_arc = interp_path_str.and_then(open_file_arc);
+    if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SyscallTrace) {
+        crate::pr_info!("LVMA-DBG pid {} exe_pin={} interp_pin={} path {}",
+            crate::process::current_pid(),
+            exe_file_arc.is_some(), interp_file_arc.is_some(), full_path.as_ref());
+    }
+
+    match do_execve_elf(current, &program_data, &final_argv, &final_envp, entry, phdr_count_usize, &ehdr, full_path.as_ref(), interp_data.as_deref(), secure_exec, exe_file_arc.as_ref(), interp_file_arc.as_ref()) {
         Ok(()) => {
             if xt_on {
                 crate::pr_info!(
