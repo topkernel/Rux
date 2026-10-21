@@ -56,6 +56,19 @@ pub fn sys_brk(args: [u64; 6]) -> i64 {
                 }
             }
 
+            // Keep the ADDRESS-SPACE brk mirror in sync with the task's
+            // authoritative break at every mutation below. The mm-side
+            // value is what MmStruct::mmap's brk-conflict guard and
+            // procfs read; without the sync it stays at the exec-time
+            // image end forever and the live heap looks empty (the
+            // MAP_FIXED live-heap guard then lets mappings land on
+            // malloc's storage — session-15 probe MF6).
+            let sync_mm_brk = |v: u64| {
+                if let Some(addr_space) = current_task.address_space() {
+                    addr_space.set_brk_val(v as usize);
+                }
+            };
+
             // Re-get current brk (may have been updated)
             let current_brk = current_task.get_brk();
 
@@ -86,6 +99,7 @@ pub fn sys_brk(args: [u64; 6]) -> i64 {
                 }
 
                 current_task.set_brk(new_brk);
+                sync_mm_brk(new_brk);
                 return new_brk as i64;
             }
 
@@ -150,6 +164,7 @@ pub fn sys_brk(args: [u64; 6]) -> i64 {
                 }
 
                 current_task.set_brk(new_brk);
+                sync_mm_brk(new_brk);
                 new_brk as i64
             } else {
                 current_brk as i64
