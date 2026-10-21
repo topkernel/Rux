@@ -1802,6 +1802,17 @@ pub fn freeze_scan(now: u64, hz: u64) {
     if hz == 0 {
         return;
     }
+    // sc83: scanner liveness heartbeat — one line per minute. sc82 lost
+    // khungtaskd silently ~2 min after adoption (stall_report's 500 ms
+    // irq-off WORLD window); without this line that death is invisible.
+    {
+        static BEAT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+        let last = BEAT.load(core::sync::atomic::Ordering::Relaxed);
+        if now.saturating_sub(last) >= 60 * hz {
+            BEAT.store(now, core::sync::atomic::Ordering::Relaxed);
+            crate::pr_warn!("RWFRZ: scan alive at {}s", now / hz);
+        }
+    }
     // ---- adopt / refresh the watched word ----
     let mut adopted = false;
     for c in waiter_clusters(1) {
@@ -1839,14 +1850,33 @@ pub fn freeze_scan(now: u64, hz: u64) {
                     }
                 }
                 None => {
-                    if *hn < 8 {
-                        htab[*hn] = HighWord {
+                    // sc83: evict-by-readers when full — sc82 filled all 8
+                    // slots with transient readers=2 words at boot and the
+                    // real frozen word could never enter the table.
+                    let mut slot = if *hn < 8 { *hn } else { 0 };
+                    if *hn >= 8 {
+                        let mut min_r = u32::MAX;
+                        for i in 0..8 {
+                            let r = htab[i].lastv & 0x7fffffff;
+                            if r < min_r {
+                                min_r = r;
+                                slot = i;
+                            }
+                        }
+                        if readers <= min_r {
+                            slot = usize::MAX; // nothing worth evicting
+                        }
+                    }
+                    if slot != usize::MAX {
+                        htab[slot] = HighWord {
                             uaddr: c.uaddr,
                             tgid: c.tgid,
                             lastv: v,
                             at: now,
                         };
-                        *hn += 1;
+                        if *hn < 8 {
+                            *hn += 1;
+                        }
                         crate::pr_warn!(
                             "RWFRZ-HIGH uaddr={:#x} tgid {} waiters={} word={:#x} readers={} (first seen)",
                             c.uaddr,
@@ -1993,28 +2023,34 @@ pub fn freeze_scan(now: u64, hz: u64) {
         }
     }
     // ---- one-shot full-tgid dump ----
-    let first = RWFRZ_FIRST.load(core::sync::atomic::Ordering::Relaxed);
-    let stable_since = RWFRZ_LASTVAL_AT.load(core::sync::atomic::Ordering::Relaxed);
-    if !RWFRZ_DUMPED.load(core::sync::atomic::Ordering::Relaxed)
-        && now.saturating_sub(first) >= 120 * hz
-        && now.saturating_sub(stable_since) >= 120 * hz
-    {
+    // sc83: fire AT ADOPTION (gate removed). sc82 showed the scanner can
+    // die on the NEXT scan (stall_report's own WORLD-guarded dump runs
+    // ~500 ms with irqs off under load; khungtaskd never scanned again)
+    // — waiting 120 s for stability loses the dump entirely. The frozen
+    // shape (waiters>=3 + WAITERS|N-readers word) is already
+    // cross-boot-stable; stability-waiting buys nothing.
+    if !RWFRZ_DUMPED.load(core::sync::atomic::Ordering::Relaxed) {
         RWFRZ_DUMPED.store(true, core::sync::atomic::Ordering::Relaxed);
         let v = RWFRZ_LASTVAL.load(core::sync::atomic::Ordering::Relaxed);
-        // neighbors through the first waiter we can find
+        // neighbors through the first waiter we can find: +4/+8 disambiguate
+        // the primitive (musl rwlock: waiter-count/shared-flag; musl mutex:
+        // __m_type/__m_count — a type constant at +4 means this is NOT an
+        // rwlock and the "readers" decode changes meaning entirely).
         let mm = RWFRZ_MM.load(core::sync::atomic::Ordering::Relaxed);
-        let mut nb = (0u32, 0u32);
+        let mut nb = (0u32, 0u32, 0u32, 0u32);
         for c in waiter_clusters(1) {
             if c.uaddr == uaddr && c.mm == mm {
                 nb = (
                     unsafe { read_u32_via_task(c.sample, uaddr + 4) }.unwrap_or(0),
                     unsafe { read_u32_via_task(c.sample, uaddr + 8) }.unwrap_or(0),
+                    unsafe { read_u32_via_task(c.sample, uaddr + 12) }.unwrap_or(0),
+                    unsafe { read_u32_via_task(c.sample, uaddr + 16) }.unwrap_or(0),
                 );
                 break;
             }
         }
         crate::pr_warn!(
-            "RWFRZ: FROZEN tgid {} uaddr={:#x} word={:#x} readers={} waiters_bit={} _rw_waiters={} _rw_shared={} held {}s stable — full tgid dump",
+            "RWFRZ: FROZEN tgid {} uaddr={:#x} word={:#x} readers={} waiters_bit={} nb+4={:#x} nb+8={:#x} nb+12={:#x} nb+16={:#x} age {}s — full tgid dump",
             tgid,
             uaddr,
             v,
@@ -2022,7 +2058,9 @@ pub fn freeze_scan(now: u64, hz: u64) {
             v >> 31,
             nb.0,
             nb.1,
-            now.saturating_sub(first) / hz
+            nb.2,
+            nb.3,
+            now.saturating_sub(RWFRZ_FIRST.load(core::sync::atomic::Ordering::Relaxed)) / hz
         );
         exit_ring_dump_tgid(tgid);
         let n = rwfz_dump_tgid(tgid, 32);
