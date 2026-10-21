@@ -852,6 +852,17 @@ death marker lives in this record instead).
   kernel change would silently invalidate the hunt. mm fixes landing
   on the branch do NOT ride the chain; they soak via controlled boots
   and main.
+- Hunt-kernel REFREEZE at 15:10 (after 17 armed zero-hit runs, per the
+  escalation plan): old pair archived as `run/ww-hunt-frozen-*.{s2a}`
+  (the r1-r17 logs' addresses symbolize against those), new pair =
+  the 28630426 build (bf779126 — mm three-piece + 0c29a23d + fold).
+  ww-gdbscript.py re-derives the 8-point set from the new ELF
+  (GUARD_CANARY_LO moved 0xffffffff80a65000 → 0xffffffff80a7a000);
+  r18+ arm against the current kernel. Hardware watchpoints fire on
+  the wild STORE itself, so the mm fixes do not mask captures — they
+  only make the boots healthier (longer storm windows per 45-min
+  budget). r17 (running on the old kernel, already loaded in memory)
+  is unaffected by the file swap.
 - Cumulative: **0 WW-HIT across r1-r17** (r12 pause-kill, r16 slot-
   free kill partials). The engine did not fire in any armed window.
 
