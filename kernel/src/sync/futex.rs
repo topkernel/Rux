@@ -1739,6 +1739,41 @@ pub fn kill_dump_tgid(tgid: u32) {
                 );
             }
         }
+        // sc93: the saved entry frame carries the blocked syscall itself
+        // — orig_rax (syscall nr) + args. For a task parked mid-syscall
+        // this names the wait primitive outright (read/epoll/ioctl and
+        // WHICH fd). Fd-like args (< 64) are resolved to paths.
+        {
+            let top = tk.kernel_stack_top();
+            #[cfg(feature = "x86_64")]
+            {
+                let regs = (top.wrapping_sub(crate::arch::x86_64::pt_regs::PT_REGS_SIZE))
+                    as *const crate::arch::x86_64::pt_regs::PtRegs;
+                // SAFETY: diagnostic read of this task's entry frame.
+                let r = unsafe { &*regs };
+                crate::pr_warn!(
+                    "KILLDUMP: tid {} syscall nr={:#x} rdi={:#x} rsi={:#x} rdx={:#x} r10={:#x}",
+                    tk.pid(),
+                    r.orig_rax,
+                    r.rdi,
+                    r.rsi,
+                    r.rdx,
+                    r.r10
+                );
+                let mut fdnote = alloc::string::String::new();
+                for arg in [r.rdi, r.rsi, r.rdx] {
+                    if arg < 64 {
+                        if let Some(f) = tk.fdtable().get_file(arg as usize) {
+                            use core::fmt::Write;
+                            let _ = write!(fdnote, " fd{}={}", arg, f.path());
+                        }
+                    }
+                }
+                if !fdnote.is_empty() {
+                    crate::pr_warn!("KILLDUMP: tid {} {}", tk.pid(), fdnote);
+                }
+            }
+        }
         unsafe { rwfz_stack_frames(t, "KILLDUMP", 10, 96) };
     }
 }
