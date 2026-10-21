@@ -1465,3 +1465,31 @@ COMMITS this session (English, on feature/samgr-callback):
 - 9e5f0147 fix(timer): TSC_MULSHIFT 12->32 + nearest rounding (root cause)
 - 7a9f38ba dfx(taskdump): periodic dump interval 5 s -> 30 s
 - 2ce75d20 wip(snapshot): sc115 artifacts
+
+SESSION O ADDENDUM (sc117 + two fixes + one probe, 06:3x-06:5x):
+- fix(mount) 502ea7a7: MOUNT_TABLE irqsave -> plain preempt-off lock
+  (register_mount's guard ran an O(rows) string retain + 4 heap allocs
+  with IRQs off; every user is syscall context; ns.rs tables already
+  plain). Built into sc117.
+- dfx(clone) bfc35fd2: both clone refusal paths now print errno +
+  free_bytes + comm (40-line budgets) — settles whether the app
+  children's missing worker threads are the F12 heap-reserve gate
+  (buddy free < 8 MiB -> silent ENOMEM) or another clone error.
+- sc117 (smoke, sprobe=0 dfx=periodic,monowatch, 10 min): WEDGED
+  variant — 78 'proxy is already dead' lines, 0 launcher spawns, so
+  the clone probes got no app-child window to test (no gate fires in
+  the wedged shape). IMPORTANT FOR THE NEXT SESSION: the OsAccount-
+  wedge coin flip is NOT fully cleared by the DDK fix — the zeroed
+  libusb_pnp_manager removed ONE trigger (the DDK NULL-walk crash
+  loop); other proxy-death producers remain (present since sc94).
+  TSC stayed clean (one 'fell behind 100181' at the 10 ms print
+  threshold — transient; no rebase, no wraps, no USEGV).
+- NEXT SESSION FIRST BOOT: the sc117 kernel already carries the clone
+  probes — boot the GOOD variant (reroll until spawns appear) and read
+  clone-gate/clone-fail lines around the first app children. If the
+  gate fires with sane free_bytes, the fix is policy (the 8 MiB
+  reserve dates from the 128 MB heap era; the OH lane runs 1 GiB).
+  If no clone line fires while children STILL park single-threaded,
+  the park is a lost futex wake (kernel futex lane) or a never-sent
+  wake (userspace) — then wire dfx=sleepsnap + a wake census on
+  uaddr 0x7fffffffc754.
