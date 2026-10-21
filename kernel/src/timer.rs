@@ -700,8 +700,14 @@ pub fn timer_softirq_handler(_nr: usize) {
     // hangs (form-B) trip no watchdog and swallow the UART magic (a wedged
     // shell stops draining the RX path) — a timed snapshot from the timer
     // softirq always lands. SBI-direct, no locks held here.
+    // sc115: the 500-jiffy (5 s) interval x ~500 tasks floods the
+    // busy-poll UART (~87 us/byte charged to whoever is current); 3000
+    // jiffies (30 s) still catches a hung launcher child's parked
+    // syscall — the children live ~10 s between LIFECYCLE_TIMEOUT and
+    // the AMS restart, so every other dump sees one — without
+    // distorting the boot it is diagnosing.
     if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::PeriodicDump)
-        && current.saturating_sub(LAST_PERIODIC_DUMP.load(Ordering::Relaxed)) >= 500
+        && current.saturating_sub(LAST_PERIODIC_DUMP.load(Ordering::Relaxed)) >= 3000
     {
         LAST_PERIODIC_DUMP.store(current, Ordering::Relaxed);
         crate::dfx::taskdump::dump_all_tasks("periodic");    }
