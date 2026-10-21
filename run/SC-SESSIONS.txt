@@ -832,3 +832,41 @@ Session I constraints honored: no mm/** or dfx/switches.rs edits;
 only own QEMU PIDs killed (sc78 restart); max 2 own QEMUs at a time;
 shared images snapshot+file.locking=off, userdata private reflink
 copies; English commits; early wip snapshots.
+
+Session K update 1 (12:4x — sc82/sc83 forensics, musl+ffrt decoded,
+scanner fragility, mm-race flake):
+
+- OH musl rwlock protocol VERIFIED from ld-musl-x86_64.so.1 disassembly:
+  word = low31 reader count | bit31 WAITERS; writer holds at 0x7fffffff;
+  readers BARGE (CAS val+1) regardless of WAITERS; readers park only at
+  writer-held (expect 0xffffffff); WRITERS park expecting word|WAITERS —
+  so the frozen 0x80000010 parkers are writers, and reader-unlock emits
+  NO kernel traffic except the last-out wake(1). The kernel futex layer
+  cannot leak the count; only dead/parked holders can.
+- abilityMapLock_ is NOT a musl rwlock: samgr binary imports
+  ffrt_rwlock_* (SAMGR_USE_FFRT); ffrt SharedMutexPrivate = fast_mutex +
+  2 waiter lists + state (writeEntered bit31 | readers). Its waits park
+  on PER-THREAD condvars, never on the shared word. So the frozen word
+  belongs to some OTHER musl pthread_rwlock in the samgr process.
+  DEFAULT_WORK_THREAD_NUM = 16 in ipc_process_skeleton.h — the "16
+  readers" matches the libipc worker pool cap; park stacks will name the
+  exact lock (sc84/sc85 boots carry the adoption-time dump).
+- sc82 (25 min): wedge reproduced exactly (samgr tgid 334, waiters=6,
+  word 0x80000010). Census over the WHOLE boot: samgr had 10 threads
+  ever, ZERO exits while the scanner lived, yet the word claims 16
+  readers → the counts are NOT live-thread holdings. Three processes
+  (334/716/791 across boots) show the IDENTICAL word value.
+- sc82 failure mode: khungtaskd STOPPED scanning ~2 min after adoption
+  (WW: IRQ-OFF-WINDOW age=519ms in SpinlockIrqGuard<World>::drop —
+  stall_report's WORLD-guarded dump runs ~0.5s with irqs off) and the
+  FROZEN dump (gated +120s then) never fired. sc83 kernel: dump fires
+  AT adoption; +12/+16 neighbor words (primitive discriminator);
+  per-minute scan heartbeat; HIGH-table eviction.
+- sc83 died at ~6 min to a both-CPU spin on PTE_MODIFY_LOCK
+  (arch/x86_64/mm/mm_ops, global) — mm-domain incumbent race (the
+  wildwrite line's per-mm PTE lock work), not this lane. sc84+sc85
+  run in parallel to outrun the flake.
+- 5x THREAD-DIED-SERVICING in sc82: SAs (626, 764, 773, 800, 1315)
+  died servicing samgr nested calls (from tids 548/350/335) —
+  consistent with samgr death-cleanup writers piling onto the frozen
+  lock (each dead SA spawns a DetachObject-style writer).
