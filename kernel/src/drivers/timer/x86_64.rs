@@ -179,6 +179,18 @@ pub fn resync_tsc_against_hpet() {
     } else if tsc_nom - hpet_nom > 250_000_000 {
         // >25 s lead: mapping is broken — rebase hard.
         resync_report(b"tsc-clock: rebase, lead ", tsc_nom - hpet_nom);
+        // sc110 forensics: the single observed step was ~25 s, once, with
+        // no rate drift after — name the CPU and raw pair so the next
+        // capture can tell vCPU TSC-offset skew (per-cpu step) from a
+        // smashed mapping (global).
+        crate::pr_warn!(
+            "tsc-clock: rebase cpu={} tsc_nom={:#x} hpet_nom={:#x} base={:#x} mult={:#x}",
+            crate::arch::cpu_id(),
+            tsc_nom,
+            hpet_nom,
+            base,
+            mult
+        );
         TSC_BASE.store(crate::arch::cpu::read_counter(), Ordering::Release);
         TSC_CONTINUITY_OFFSET.store(hpet_nom, Ordering::Release);
     }
