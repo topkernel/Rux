@@ -10,13 +10,23 @@
 
 /// Maximum number of blocks to read ahead per trigger.
 ///
-/// 128 blocks = 512 KiB per batch: one sleep/wake cycle under TCG covers a
-/// whole window, so sequential read throughput is (window / cycle-latency)
+/// 512 blocks = 2 MiB per batch: one sleep/wake cycle covers a whole
+/// window, so sequential read throughput is (window / cycle-latency)
 /// instead of (4 KiB / cycle-latency). The ext4 read path batches the demand
 /// range and this window together through the async block layer; the
 /// virtqueue in-flight limit (queue_size/3 chains) naturally pipelines
 /// larger windows in sub-batches.
 pub const MAX_READAHEAD_BLOCKS: u32 = 512;
+
+/// Fault-around cluster for mmap demand-fault misses (Linux parity:
+/// fault_around_bytes = 64 KiB / 4 KiB = 16 pages).
+///
+/// The fault path issues single page-aligned one-page preads; dynamic
+/// linker fault order interleaves segments, which defeats the sequential
+/// detector. A miss fills this cluster around the faulting page so
+/// interleaved and ascending faults hit the page cache instead of paying
+/// one synchronous fill each (sc105 launcher stime burn).
+pub const FAULT_AROUND_BLOCKS: u32 = 16;
 
 /// Number of consecutive sequential reads before activating read-ahead.
 const ACTIVATION_THRESHOLD: u32 = 2;

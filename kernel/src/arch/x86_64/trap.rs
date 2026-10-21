@@ -1225,6 +1225,11 @@ fn handle_timer_tick(regs: &mut PtRegs, cpu: usize) {
                     (*task).utime_ticks.fetch_add(1, Relaxed);
                 } else {
                     (*task).stime_ticks.fetch_add(1, Relaxed);
+                    // sc105 stime-burn attribution: sample WHERE the
+                    // kernel-mode tick landed (4 KiB page bucket keyed by
+                    // task comm, so one task's burn is separable from the
+                    // boot crowd). KILLDUMP prints the table.
+                    stime_sample_rip(regs.rip, (*task).comm());
                 }
             }
         }
@@ -2091,4 +2096,117 @@ pub extern "C" fn ret_from_fork_kernel_helper(
 ) {
     let ret = fn_ptr(fn_arg);
     crate::process::exit::do_exit(ret);
+}
+
+// ============================================================================
+// sc105: stime-burn attribution histogram
+// ============================================================================
+//
+// The OH launcher child spends its whole 3 s appspawn watchdog life in
+// kernel time (utime 0-2t, stime 183-190t, on_cpu). stime is tick-sampled
+// accounting — so sample WHERE each kernel-mode tick lands. Each slot keys
+// on (task comm, 4 KiB kernel-text page) so one task's burn is separable
+// from the ~580-task boot crowd; KILLDUMP (kill_dump_wedge) prints the
+// table when appspawn's watchdog kill fires.
+//
+// Fixed-size, no allocation, IRQ-context safe; lost updates on the
+// steal-smallest path are fine (a probe, not an accounting device).
+
+const STIME_SLOTS: usize = 24;
+
+struct StimeSample {
+    comm: [core::sync::atomic::AtomicU8; 16],
+    page: core::sync::atomic::AtomicU64,
+    count: core::sync::atomic::AtomicU64,
+}
+
+static STIME_HIST: [StimeSample; STIME_SLOTS] = {
+    const EMPTY: StimeSample = StimeSample {
+        comm: [const { core::sync::atomic::AtomicU8::new(0) }; 16],
+        page: core::sync::atomic::AtomicU64::new(0),
+        count: core::sync::atomic::AtomicU64::new(0),
+    };
+    [EMPTY; STIME_SLOTS]
+};
+
+/// Record one kernel-mode tick at `rip` for `comm`.
+fn stime_sample_rip(rip: u64, comm: &[u8; 16]) {
+    use core::sync::atomic::Ordering::{Acquire, Relaxed};
+    // Only kernel text addresses (user rip cannot be a stime sample, but
+    // vmalloc/modules would bucket misleadingly).
+    let (lo, hi) = crate::sched::sched::kernel_text_window();
+    if rip < lo || rip >= hi {
+        return;
+    }
+    let page = rip & !0xFFFu64;
+
+    let mut min_idx = 0usize;
+    let mut min_count = u64::MAX;
+    for i in 0..STIME_SLOTS {
+        let p = STIME_HIST[i].page.load(Relaxed);
+        if p == 0 {
+            // Claim the empty slot (page first — count follows only after
+            // the page store, so readers never see a stale count against
+            // a new page unless they load between the two, which the
+            // count reset below makes benign for a probe).
+            if STIME_HIST[i]
+                .page
+                .compare_exchange(0, page, core::sync::atomic::Ordering::AcqRel, Acquire)
+                .is_ok()
+            {
+                for j in 0..16 {
+                    STIME_HIST[i].comm[j].store(comm[j], Relaxed);
+                }
+                STIME_HIST[i].count.store(1, Relaxed);
+                return;
+            }
+            continue;
+        }
+        if p == page {
+            // Same page; compare comm to keep tasks separable.
+            let same = (0..16).all(|j| STIME_HIST[i].comm[j].load(Relaxed) == comm[j]);
+            if same {
+                STIME_HIST[i].count.fetch_add(1, Relaxed);
+                return;
+            }
+        }
+        let c = STIME_HIST[i].count.load(Relaxed);
+        if c < min_count {
+            min_count = c;
+            min_idx = i;
+        }
+    }
+    // Table full and this (comm, page) has no slot: replace the least
+    // sampled one. Single writer wins via a count swap; the loser's
+    // sample is dropped.
+    if STIME_HIST[min_idx]
+        .count
+        .compare_exchange(min_count, 1, core::sync::atomic::Ordering::AcqRel, Acquire)
+        .is_ok()
+    {
+        STIME_HIST[min_idx].page.store(page, Relaxed);
+        for j in 0..16 {
+            STIME_HIST[min_idx].comm[j].store(comm[j], Relaxed);
+        }
+    }
+}
+
+/// Snapshot the stime histogram for KILLDUMP: (comm, page, ticks) rows,
+/// highest count first, empty slots omitted.
+pub fn stime_profile_top() -> alloc::vec::Vec<([u8; 16], u64, u64)> {
+    use core::sync::atomic::Ordering::Relaxed;
+    let mut v = alloc::vec::Vec::new();
+    for i in 0..STIME_SLOTS {
+        let page = STIME_HIST[i].page.load(Relaxed);
+        if page == 0 {
+            continue;
+        }
+        let mut comm = [0u8; 16];
+        for j in 0..16 {
+            comm[j] = STIME_HIST[i].comm[j].load(Relaxed);
+        }
+        v.push((comm, page, STIME_HIST[i].count.load(Relaxed)));
+    }
+    v.sort_by(|a, b| b.2.cmp(&a.2));
+    v
 }
