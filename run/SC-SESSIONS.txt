@@ -987,3 +987,72 @@ exec-VMA filter. Offline: rwsym.py (= tolerant regex, LIBDIRS now
 syslib64+vendorlib64+samgr-bin+subdirs+platformsdk; add cssp/ from
 chipset-sdk-sp). Commits: 87be7195, 2b311ff9(+artifacts), 48def2d4,
 db709ac8, and this note.
+
+Session L update 1 (15:4x — WIP reviewed+landed, devhost_usb decoded to
+the image's own init-less listener list, sysfs usb parity landed, dump
+tooling iterated sc89->sc91):
+
+WIP REVIEW (bccf87b2, quota-death snapshot):
+- config.rs hunk DROPPED (commit 7273d175): it was stale riscv64/128MiB
+  build state, exactly the sc46 hazard documented in kernel/build.rs
+  (x86_64 feature build picks up a poisoned generated config.rs ->
+  init 'failed to fork'). Restored x86_64/1GiB.
+- binder.rs stall_report split KEPT: formatting under WORLD, all slow
+  forensics (holder page-table walks, park dumps, futex graphs) and the
+  chunked console flush moved AFTER the guard drops. VALIDATED in
+  sc89/sc90: the scan heartbeat runs the whole boot (sc89 alive at
+  1183s; sc82 died at ~120s) — khungtaskd survives, KERNPANIC 0.
+- futex.rs rwfz_neighbor_dump KEPT: fired in sc89 AND sc90 — hdf_devmgr
+  main (tgid 336/347) parks on frozen-0x94 exactly as Session K
+  predicted (recursion holder).
+
+devhost_usb crash loop — FULLY DECODED (sc87/sc89/sc90 same signature,
+rip libusb_pnp_manager vaddr 0x16bac = DdkListenerMgrAdd's inlined
+DdkListenerMgrIsExists walking head.next==NULL):
+- The image's libusb_pnp_manager build predates master: its
+  DdkDevMgrInit BINDS the HDF service 'hdf_usb_pnp_notify_service'
+  (no sysfs opendir; master's opendir(/sys/bus/usb/devices) flow is
+  newer). /sys/bus/usb/devices fix (ec7ea948) is still correct Linux
+  parity (bus_register creates it empty) but is NOT this crash's fix.
+- THE DEFECT IS IN THE IMAGE: DdkListenerMgrInit is EXPORTED and
+  imported by NOBODY in the whole userspace (checked .dynstr of every
+  lib + dlsym strings). g_usbPnpSrv's listener list is never
+  initialized in any process, on ANY kernel. The crash is reached via
+  libusb_ddk_service_1.1's UsbDdkService::Init: UsbInitHostSdk() ->
+  AdapterInit (linux_adapter) is a NO-OP SUCCESS -> allocates listener
+  -> DdkListenerMgrAdd -> walks zeroed list -> SIGSEGV. Deterministic
+  first-call crash of usb_manager's SA on any kernel incl. Linux.
+- Rux-side amplifier: the restart loop never gives up (each respawn
+  re-crashes, feeding THREAD-DIED-SERVICING + DFX retry storm -> the
+  shared_mutex freeze trigger family). Not separately fixed this
+  session (init-side restart limiter is OH userspace).
+
+FREEZE FAMILY (sc89+sc90 dumps):
+- The frozen word is NOT a fixed bss static: page offset differs across
+  boots (sc89 hdf_devmgr +0xc04, sc90 +0xa64, formation +0xe4) — the
+  shared_mutex lives on the HEAP at 0x7ff0006-0x7ff0009xxxxxxxx. Word
+  always 0x80000010 (16 readers + WAITERS). Writers park at ONE shared
+  code site 0x3fbf116dea (fixed-base shared-lib region 0x3fbf000000,
+  merged LOAD mappings -> VMA offset bookkeeping zeroed, fd closed).
+- Holder = hdf_devmgr MAIN thread, parked on frozen-0x94 (sibling lock
+  in the same heap object).
+- sc90's exec-frame filter fix (baseoff!=0 || fd>=0) still recovered
+  only DATA-segment pointers for the holder: loader-mapped code VMAs
+  lose offset entirely in Rux's merged mappings. ripbytes captured
+  (0x00cab80c75daf883 = 'cmp eax,-0x26; jne; mov eax,0xca' style code)
+  but byte-search across ALL image libs (system+vendor+subdirs+ndk+
+  module+chipset*, extracted to /tmp/oh-libs/full-*) finds NO match —
+  the park-site lib is not in the images' .so set (memfd/anon-mapped
+  or runtime-generated). Session K's 'static in libhicollie bss
+  0x3c0e4' identification is DOUBTED (heap + offset-variance + the
+  cssp libhicollie has no code refs to 0x3c0e4; its referenced static
+  0x3bff0 is the WatchdogInner singleton used by IpcFull).
+- sc91 kernel (4b1cc74d) captures: NBR-WORD (the sibling lock's own
+  value — owner tid if mutex), NBR-RAW (256 raw stack slots, values
+  only, offline-matchable against any file), 2x redundancy.
+
+Boots: sc89 (WIP kernel, 25min quiet, neighbor dump landed), sc90
+(sysfs usb fix + filter fix — crash loop persists as decoded above),
+sc91 booting (raw-slot capture). Screen still the 8-color oracle
+checker in all three; launcher process spawns (sandbox mounts visible)
+but the chain stays frozen upstream.
