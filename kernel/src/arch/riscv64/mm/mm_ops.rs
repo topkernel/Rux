@@ -154,6 +154,11 @@ impl MmStruct {
     }
 
     /// Adjust heap pointer (brk system call)
+    /// LEGACY/UNUSED: the live brk path is sys_brk (syscall/memory.rs,
+    /// task.brk + VMA surgery + demand-fault pages); this eager-map
+    /// variant has no callers (do_brk below is its only wrapper, also
+    /// uncalled). Kept in sync with the mm.brk mirror for when an
+    /// in-kernel caller reappears.
     pub fn set_brk(&self, new_brk: PageVirtAddr) -> Result<PageVirtAddr, MapError> {
         use user_addr::{HEAP_START, HEAP_MAX_SIZE, BRK_DEFAULT, MMAP_START};
 
@@ -284,10 +289,31 @@ impl MmStruct {
             & (map::MAP_FIXED | map::MAP_FIXED_NOREPLACE)
             != 0;
 
-        use user_addr::BRK_DEFAULT;
         use user_addr::MMAP_START;
         let end_addr = addr.as_usize() + aligned_size;
-        let has_brk_conflict = addr.as_usize() < MMAP_START && end_addr > BRK_DEFAULT;
+        // Linux places MAP_FIXED anywhere in the user range, unmapping
+        // whatever is covered. The historical blanket refusal
+        // (addr < MMAP_START && end > BRK_DEFAULT) rejected EVERY fixed
+        // mapping between 512MB and MMAP_START — mid-low placements
+        // Linux allows (0x50000000-class: JVM compressed oops, wine,
+        // LTP shapes) all returned EINVAL (session-14/15 probe, x86_64
+        // twin MF1-3). Refuse only the LIVE brk heap span
+        // [align_down(start_brk), align(brk)): mapping over malloc's
+        // own storage stays EINVAL (deliberate divergence — Linux would
+        // unmap the heap; we never silently free brk-managed pages).
+        // Everything above the live heap is safe: the fixed-path surgery
+        // splits/zaps/replaces whatever VMA+PTE state exists, brk growth
+        // into foreign VMAs is refused by sys_brk's VmaManager overlap
+        // check, and the mm.brk mirror is synced by sys_brk so this
+        // span tracks the real break.
+        let brk_cur = self.brk().as_usize();
+        let heap_lo = self.start_brk() & !(PAGE_SIZE_USIZE - 1);
+        let heap_hi = if brk_cur > self.start_brk() {
+            (brk_cur + PAGE_SIZE_USIZE - 1) & !(PAGE_SIZE_USIZE - 1)
+        } else {
+            heap_lo
+        };
+        let has_brk_conflict = addr.as_usize() < heap_hi && end_addr > heap_lo;
 
         // See the non-fixed branch below: placement + VMA insert share one
         // write-lock section (atomic pick-and-insert).

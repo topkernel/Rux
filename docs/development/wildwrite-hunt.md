@@ -1329,3 +1329,127 @@ brk-heap protection (mm_ops.rs MAP_FIXED branch), left alone.
   OH A/B of spawn-to-spawn stime would quantify the composed win
   (16x fewer faults x batched reads); (3) watchset room remains
   (capacity proven >= 15; next quiet candidates listed session 10).
+
+## Session 15 (continuation agent — MAP_FIXED/brk placement parity)
+
+### Chain stewardship
+
+- The handoff's "r26 died with session 14" was STALE for the FOURTH
+  time: the whole tree was alive at claim (wrapper 2371420 → chain →
+  hunt → qemu 2371447), r26 armed with the 15-point set and storming
+  19 min into its budget. Claimed as-is; no restart.
+- r26 verdict: FULL budget clean — 82262 serial lines, wakes 12.55M,
+  avg_run 2ms, ticks healthy, strand_max 13.1s (the >=3-QEMU
+  host-contention class: the main session's regression gate + riscv64
+  boots ran concurrently), 0 WW-HIT / 0 heals / 0 KERNPANIC /
+  0 ALLOCTHROW. Driver self-advanced to r27 at 03:25 (WW-ARMED 15,
+  storming). Cumulative: **0 WW-HIT across r1-r26** partials.
+- Cross-line context: the main session merged feature/wildwrite-hunt
+  into main during this window (the mm three-piece + fault-around).
+- Infra find: toolchain/riscv64-rux-linux-musl was a SELF-REFERENCING
+  symlink loop (the main repo's own copy, created Oct 22 00:40),
+  breaking the SDK for both trees. Repointed THIS worktree's symlink
+  to devfs-grow's real SDK (read-only use, session-7 precedent). The
+  main repo's broken symlink is still there — main session should
+  repoint it before any riscv64 probe build.
+
+### MAP_FIXED low-placement + brk-mirror parity (session-14 next-step item, LANDED)
+
+Probe: test/mmapfix.c + test/mmapfix_boot.py (dual-platform dynamic
+musl, faultaround_boot.py shape). Pre-fix x86_64 run documented the
+divergence live: MAP_FIXED EINVAL at 0x50000000 / 0x30000000 /
+0x1fff0000-straddle (MF1-3) — the blanket guard
+`addr < MMAP_START && end > BRK_DEFAULT` rejected every fixed mapping
+between 512MB and MMAP_START.
+
+Changes (both arches + syscall layer, commit cc091b57):
+
+1. **Guard narrowing (arch/*/mm/mm_ops.rs mmap fixed path)**: refuse
+   only the LIVE heap span [align_down(start_brk), align(brk)).
+   MAP_FIXED over malloc's own storage stays EINVAL — deliberate,
+   documented divergence (Linux unmaps whatever is covered; we never
+   silently free brk-managed pages). Everything else below MMAP_START
+   now places like Linux: the fixed-path surgery (split/keep/zap/
+   replace) is VMA+PTE complete, and brk growth into foreign VMAs is
+   refused by sys_brk's existing VmaManager overlap check.
+2. **sys_brk mm.brk mirror sync (syscall/memory.rs)**: sys_brk is the
+   ONLY live brk writer and it updated only task.brk — mm.brk stayed
+   at the exec-time image end forever, so the guard read an EMPTY
+   heap and the live-heap protection was decorative for any process
+   that grew its heap (the probe's MF6 caught this: a fixed mapping
+   landed ON the live heap after growth). mm.brk is now synced at all
+   three sys_brk mutation sites; exec/fork already kept both
+   consistent.
+
+Two falsified theories worth recording (both killed by the probe):
+
+- "PIE brk is dead": the arch MmStruct::set_brk/do_brk range check
+  (ceiling TASK_SIZE/3 < PIE base TASK_SIZE*2/3) looked like it killed
+  every PIE's brk — but that function is DEAD CODE (zero callers; the
+  live path is sys_brk's VMA-surgery + demand-fault pages with only
+  user_end/RLIMIT_DATA checks). sys_brk always allowed PIE brk growth;
+  glibc malloc's brk works. The dead set_brk now carries a
+  LEGACY/UNUSED banner.
+- "riscv64 fork-child cold-page corruption": the riscv64 probe run's
+  MF8 child died of SIGILL with the child PC inside the ELF-header
+  page — looked like a fill/return-address bug. objdump exonerated the
+  kernel: the death instructions were the probe's OWN code — the
+  distro riscv64-linux-gnu-gcc emits Zce code-size insns (C.SB et al.)
+  by default and QEMU's rv64,zbb,zba,zbs cpu SIGILLs on them. Same
+  class as session 7's RVV lesson; mmapfix_boot.py now pins
+  -march=rv64gc (bindmkdir precedent), after which MF8 passes. A
+  standalone no-mmap variant (test/forkcold.c) reproduced the same
+  SIGILL shape, ruling out the probe's mmap legs as the trigger; the
+  objdump + march-pin pair settled it — no kernel bug, no regression.
+
+Probe lessons: musl's sbrk is a STUB (src/linux/sbrk.c returns ENOMEM
+for any nonzero increment — musl malloc is mmap-only); any brk probe
+MUST use raw SYS_brk calls (MF4/MF5 do).
+
+### Validation
+
+- test/mmapfix_boot.py: **MMF-PASS x9 on BOTH x86_64 and riscv64** —
+  MF1-3 fixed placements + content, MF4 baseline brk growth + refused
+  growth into a fixed mapping above the heap (returns old break,
+  Linux shape), MF5 growth to one page below the mapping + writable
+  top, MF6 live-heap MAP_FIXED EINVAL, MF7 MAP_FIXED_NOREPLACE EEXIST,
+  MF8 fork COW isolation over a fixed mapping, MF9 NULL-hint mmap.
+- riscv64 in-kernel unit tests: **1085/1088**, byte-identical failure
+  set to the session 6/7/9/12/13 baseline (the 3 pre-existing
+  config_test.rs size asserts).
+- ww-mmf1 (OH soak, 15 min, worktree kernel, dfx=taskdump,watchdog,
+  periodic,metawatch): full budget, 127289 serial lines, wakes 2.59M
+  advancing to the end, avg_run 5ms, 801 forks (fa1/fd1 control
+  class), strand_max 262s single-task monster with wakes never
+  stalling — the >=3-QEMU host-contention class (chain r27 + main
+  session QEMUs concurrent; fa1's own A/B spread was 69-144s on
+  identical kernels), **0 KERNPANIC / 0 ALLOCTHROW / 0 META-SMASH /
+  0 SIGBUS forensics / 0 Permission-denied / 0 MM-DROP-CTX**,
+  METAWATCH-ARMED (third clean metawatch soak on this branch).
+- Residual divergences (documented in code comments): non-fixed hints
+  below MMAP_START still not honored (falls back to find_free_area —
+  Linux honors free hints anywhere); brk may grow to exactly TOUCH an
+  adjacent foreign VMA (Linux's sys_brk leaves one page via
+  vm_start_gap); live-heap MAP_FIXED is EINVAL where Linux unmaps;
+  brk SHRINK unmaps pages (sys_brk munmap path) but the arch legacy
+  set_brk does not — irrelevant while it stays uncalled.
+
+### Session 15 close-out
+
+- Commits: cc091b57 (mm parity fix + probes), d86c0ea3 + this
+  addendum (archive + chain artifacts + the riscv64 SDK symlink
+  repoint). Pushed via ssh.github.com:443.
+- Chain: r27 was killed EXTERNALLY at ~15/45 min (03:40, mid-storm,
+  no teardown lines, whole tree gone in one sweep — the s10/s13/s14
+  infra-sweep class; guest healthy to the last line: ticks [100,100],
+  strand_max 10.5s healthy class, wakes 3.41M advancing; 0 WW-HIT,
+  0 kernel panics — the 3 'panic' grep hits are OH userspace service
+  stderr). Relaunched from r28 at 03:54 as this session's background
+  task (run/ww-chain-s15.log; wrapper 2399284 → chain → hunt → qemu
+  2399301, WW-ARMED 15 verified, process tree in run/ww-s15-proctree.txt).
+  Cumulative: **0 WW-HIT across r1-r27** partials.
+- Next: (1) chain continues toward the capture; (2) the narrowed guard
+  + brk mirror ride to main with this branch's next merge; (3) low-hint
+  honoring is the remaining known placement divergence needing its own
+  validation window; (4) main repo's toolchain/riscv64-rux-linux-musl
+  symlink is still a self-loop — fix before any riscv64 probe build.
