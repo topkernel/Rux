@@ -2425,6 +2425,29 @@ pub fn stall_report() {
                                     None => "n/a",
                                 };
                                 use core::fmt::Write;
+                                // sc99: the leak persists through kicks —
+                                // name WHICH cpu slot (if any) still owns the
+                                // task (the wake_up_enqueue curr_on scan) and
+                                // each CPU's idle bit: a LYING BUSY slot
+                                // refuses every wake silently (R56c heals
+                                // only idle-marked slots) and only the idle
+                                // loop's harvester could steal it — a CPU
+                                // that never idles strands the task forever.
+                                let mut slots = alloc::string::String::from(" slots=");
+                                for (pid, idle, cur) in
+                                    crate::sched::sched::grq_diag_cpu_currents().iter()
+                                {
+                                    if *pid == u32::MAX {
+                                        continue;
+                                    }
+                                    let _ = write!(
+                                        slots,
+                                        "[pid{}{}{}]",
+                                        pid,
+                                        if *idle { "/idle" } else { "" },
+                                        if *cur == task { "/OWNER" } else { "" },
+                                    );
+                                }
                                 let _ = writeln!(
                                     out,
                                     "binder-stall: WAKE-RUN-LEAK tid {} kicked {}x age {}s state={:#x} cfs_linked={} on_cpu={} pick_state={} cpu={}",
@@ -2437,6 +2460,7 @@ pub fn stall_report() {
                                     tk.pick_state(),
                                     tk.ti_cpu()
                                 );
+                                let _ = writeln!(out, "binder-stall:{}", slots);
                             }
                         }
                         rekick.push(t.clone());
