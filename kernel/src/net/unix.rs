@@ -262,8 +262,10 @@ impl UnixSocket {
     /// whole sweep chunk down (the r8 sendfile/sendmsg/sendmmsg CRASH
     /// family). Linux charges skb->truesize for exactly this reason.
     fn queued_truesize(&self) -> usize {
-        const SEG_OVERHEAD: usize = core::mem::size_of::<UnixSeg>()
-            + crate::arch::mm::PAGE_SIZE as usize;
+        // sc101: keep this in lockstep with seg_charge (proportional slab
+        // cost — see its comment); divergent formulas made the enqueue
+        // gate and target_has_room disagree.
+        const SEG_OVERHEAD: usize = core::mem::size_of::<UnixSeg>() + 512;
         let q = self.recv_queue.lock();
         q.iter()
             .map(|s| s.data.len() + SEG_OVERHEAD)
@@ -1028,11 +1030,24 @@ pub fn unix_peer_bound_name(sock: &Arc<UnixSocket>) -> Option<String> {
 }
 
 /// Flow-control charge of one segment of `len` payload bytes: payload plus
-/// the per-segment heap cost (see UnixSocket::queued_truesize — the buddy
-/// heap allocates whole pages).
+/// the per-segment heap cost. Linux charges skb->truesize ≈ len + ~512
+/// (slab-object overhead), NOT a page per skb.
+///
+/// sc101: the old charge added PAGE_SIZE per segment (the r8 buddy-heap
+/// discipline, written when the heap looked page-granular), but the
+/// CombinedAllocator routes ≤4096-byte allocations to the SLAB — a
+/// 200-byte hilog message really costs ~a slab object, not 4 KiB. The
+/// overcharge throttled a default 212992-byte SO_SNDBUF to ~50 queued
+/// messages, so every chatty client (OH developer-mode apps emit
+/// thousands of libhilog writev's at startup) blocked on the receiver's
+/// drain rate — hilogd writes each record to the serial console, and
+/// the launcher burned its whole 3 s spawn budget parked in writev
+/// (stime 183 ticks, utime 2). Proportional charge: sndbuf now bounds
+/// ~hundreds of messages, absorbing bursts while still capping total
+/// queued bytes ≈ real heap cost (the r8 1-byte-storm hole stays closed
+/// — the charge still exceeds the true per-segment allocation).
 fn seg_charge(len: usize) -> usize {
-    const SEG_OVERHEAD: usize = core::mem::size_of::<UnixSeg>()
-        + crate::arch::mm::PAGE_SIZE as usize;
+    const SEG_OVERHEAD: usize = core::mem::size_of::<UnixSeg>() + 512;
     len + SEG_OVERHEAD
 }
 
