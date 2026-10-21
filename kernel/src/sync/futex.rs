@@ -1495,6 +1495,41 @@ pub fn sys_futex_handler(args: &[u64; 6]) -> i64 {
     let uaddr2 = args[4] as usize;
     let val3 = args[5] as u32;
 
+    // sc87: first-writer-park forensics. A FUTEX_WAIT whose expected value
+    // is WAITERS|N-readers with N>=4 is a musl-rwlock WRITER parking on a
+    // word that ALREADY claims many readers — the freeze's birth moment.
+    // The freeze scan (60 s cadence) always arrives after the fact; this
+    // catches the very first park, in the parking thread's own syscall
+    // context, where the user stack still carries the full write-lock
+    // caller chain. Capped at 16 dumps per boot.
+    if matches!(op & FUTEX_CMD_MASK, FUTEX_WAIT | FUTEX_WAIT_BITSET) {
+        let readers = val & 0x7fffffff;
+        if val & 0x80000000 != 0 && readers >= 4 && readers < 0x40000000 {
+            static PARKED_DUMPS: core::sync::atomic::AtomicU32 =
+                core::sync::atomic::AtomicU32::new(0);
+            let n = PARKED_DUMPS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            if n < 16 {
+                if let Some(t) = crate::sched::current() {
+                    let tk = unsafe { &*t };
+                    let comm = tk.comm();
+                    let name = core::str::from_utf8(&comm[..])
+                        .unwrap_or("")
+                        .trim_end_matches('\0');
+                    crate::pr_warn!(
+                        "RWFRZ-PARK #{} tid {} comm='{}' uaddr={:#x} val={:#x} (writer parking on {} readers)",
+                        n,
+                        tk.pid(),
+                        name,
+                        uaddr,
+                        val,
+                        readers
+                    );
+                    // SAFETY: t is the current task, in its own syscall.
+                    unsafe { rwfz_stack_frames(t, "park", 12) };
+                }
+            }
+        }
+    }
     let r = do_futex(uaddr, op, val, timeout, uaddr2, 0, val3);
     rwfz_op_log(uaddr, op, val, r);
     r
