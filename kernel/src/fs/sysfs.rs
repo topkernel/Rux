@@ -1417,6 +1417,27 @@ fn build_tree() -> Arc<KObject> {
     // libdrm.so string table).
     let _pci_bus_devices = mk_dir(&pci_bus, "devices", KType::Generic);
 
+    // ---------------- /sys/bus/usb ----------------
+    // Rux has no USB host-controller driver, but Linux's usb core
+    // registers the "usb" bus type unconditionally at init
+    // (bus_register creates bus/<name>/{devices,drivers} for every
+    // bus), so /sys/bus/usb/devices exists — EMPTY — even on hosts
+    // with zero USB controllers. OH's usb DDK PnP manager depends on
+    // that shape: DdkDevMgrInit -> DdkDevMgrScanSysfs opendir()s
+    // SYSFS_DEVICES_DIR ("/sys/bus/usb/devices") and treats ENOENT as
+    // HDF_FAILURE, which aborts UsbPnpManagerInit BEFORE
+    // DdkListenerMgrInit runs; the listener list head then stays
+    // NULL-zeroed and the next DdkListenerMgrAdd (usb_manager
+    // registering its event listener) walks NULL -> SIGSEGV ->
+    // devhost_usb crash loop (sc87: rip libusb_pnp_manager+0x15bac,
+    // 'mov rax,[rbx]' with rbx=0). An empty dir is exact parity for
+    // a controller-less host: the scan skips 'usb1' (non-digit
+    // prefix) and '1-0:1.0' (':' entries), so Linux also enumerates
+    // zero devices and init succeeds.
+    let usb_bus = mk_dir(&bus, "usb", KType::Generic);
+    let _usb_bus_devices = mk_dir(&usb_bus, "devices", KType::Generic);
+    let _usb_bus_drivers = mk_dir(&usb_bus, "drivers", KType::Generic);
+
     root
 }
 
