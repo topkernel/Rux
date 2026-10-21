@@ -147,6 +147,38 @@ pub fn sys_brk(args: [u64; 6]) -> i64 {
                 if let Some(addr_space) = current_task.address_space() {
                     if new_page_end > vma_start {
                         use crate::mm::vma::{Vma, VmaFlags, VmaType};
+                        // Linux sys_brk refuses growth when any VMA
+                        // overlaps [oldbrk_page, newbrk_page + PAGE)
+                        // (find_vma_intersection(mm, oldbrk,
+                        // newbrk + PAGE_SIZE)): the break keeps a
+                        // ONE-PAGE GAP below the next mapping — brk()
+                        // to EXACTLY the neighbor's start returns the
+                        // old break. Previously the heap VMA could grow
+                        // to touch — and with compatible flags MERGE
+                        // with — a foreign neighbor, so a write past
+                        // the break's last byte could fault straight
+                        // into the neighbor's first page. The probe
+                        // only needs the first VMA starting at/after
+                        // the heap's new first page; a VMA straddling
+                        // that boundary is caught by add()'s overlap
+                        // refusal below (same keep-old-brk outcome).
+                        // Residual divergence, documented: Linux's
+                        // vm_start_gap also subtracts the 1MB stack
+                        // guard below VM_GROWSDOWN stacks; this VMA has
+                        // no guard-gap model, so the gap is exactly one
+                        // page for every neighbor. Sub-page growth
+                        // (new_page_end == vma_start) skips all VMA
+                        // work, like Linux's oldbrk == newbrk fast path.
+                        let guard_end = new_page_end + page;
+                        let mut vma_mgr = addr_space.vma_write();
+                        let next = vma_mgr.find_vma_after(
+                            crate::mm::page::VirtAddr::new(vma_start as usize),
+                        );
+                        if next.is_some_and(|v| (v.start().as_usize() as u64) < guard_end) {
+                            // Keep the old brk on failure (Linux parity:
+                            // sys_brk returns mm->brk, not an error).
+                            return current_brk as i64;
+                        }
                         let heap_vma = Vma::new(
                             crate::mm::page::VirtAddr::new(vma_start as usize),
                             crate::mm::page::VirtAddr::new(new_page_end as usize),
@@ -156,7 +188,7 @@ pub fn sys_brk(args: [u64; 6]) -> i64 {
                         );
                         let mut heap_vma = heap_vma;
                         heap_vma.set_type(VmaType::Anonymous);
-                        if addr_space.vma_write().add(heap_vma).is_err() {
+                        if vma_mgr.add(heap_vma).is_err() {
                             // Keep the old brk on failure (Linux parity).
                             return current_brk as i64;
                         }

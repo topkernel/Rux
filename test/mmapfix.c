@@ -21,12 +21,27 @@
 //        unchanged (Linux parity; was: silent growth underneath).
 //   MF5  brk still grows UP TO one page below the fixed mapping
 //        (leave-one-page rule), data writable at the new top.
+//   MF5b brk to EXACTLY the neighbor's start — and to 16 bytes shy of
+//        it — returns the OLD break (Linux sys_brk
+//        find_vma_intersection(oldbrk, newbrk + PAGE); was: growth to
+//        exact touch silently succeeded).
 //   MF6  MAP_FIXED over the LIVE heap still fails EINVAL (deliberate
 //        divergence: never unmap malloc's own storage).
 //   MF7  MAP_FIXED_NOREPLACE over an existing mapping fails EEXIST.
 //   MF8  fork COW over the MF1 fixed mapping: child's write is not
 //        visible in the parent.
 //   MF9  kernel-chosen mmap unaffected (NULL hint).
+//   MF10 NON-FIXED low hint is HONORED: mmap(0x60000000) (no
+//        MAP_FIXED) places exactly there (Linux arch_get_unmapped_area;
+//        was: every hint below MMAP_START discarded to the high search
+//        area).
+//   MF11 unaligned non-fixed hint rounds DOWN (Linux addr &= PAGE_MASK;
+//        was: unaligned hints reached the kernel VMA builder and hit
+//        its page-alignment assert — a kernel panic vector).
+//   MF12 hint below MIN_MAP_ADDR is IGNORED (kernel-chosen placement,
+//        not an error — Linux mmap_min_addr behavior).
+//   MF13 non-fixed hint onto the LIVE heap is IGNORED (kernel-chosen
+//        placement; heap stays writable).
 //
 // PASS: prints MMF-PASS. Any failure prints MMF-FAIL with the leg name.
 #define _GNU_SOURCE
@@ -180,6 +195,29 @@ int main(void)
                     printf("MF5 ok: brk grew to one page below mapping\n");
             }
         }
+
+        /* MF5b: the one-page gap is enforced at the BREAK level too —
+         * growth to EXACTLY the neighbor's start, and to 16 bytes shy
+         * of it (which still claims the touching page), both return
+         * the OLD break (Linux sys_brk: any VMA overlapping
+         * [oldbrk, newbrk + PAGE) refuses the growth). */
+        {
+            unsigned long prev = raw_brk(fixed4);
+            if (prev != target || raw_brk(0) != target)
+                fail("MF5b", "brk to exact neighbor start not refused: "
+                            "ret=%lx now=%lx (want %lx)", prev, raw_brk(0),
+                     target);
+            else {
+                prev = raw_brk(fixed4 - PAGE + 16);
+                if (prev != target || raw_brk(0) != target)
+                    fail("MF5b", "brk to 16-bytes-shy not refused: ret=%lx "
+                                "now=%lx (want %lx)", prev, raw_brk(0),
+                         target);
+                else
+                    printf("MF5b ok: exact-touch and 16-bytes-shy brk "
+                           "refused, brk=%lx\n", target);
+            }
+        }
     }
 
     /* MF6: MAP_FIXED over the LIVE heap stays EINVAL (deliberate
@@ -238,6 +276,73 @@ int main(void)
     else {
         memset(r9, 1, 0x20000);
         printf("MF9 ok: NULL-hint mmap at %p\n", r9);
+    }
+
+    /* MF10: a NON-FIXED low hint in a free gap is honored verbatim
+     * (Linux arch_get_unmapped_area honors free hints anywhere in the
+     * user range; was: hints below MMAP_START were discarded to the
+     * high kernel-chosen area). 0x60000000 is clear of MF1-MF4's
+     * placements on both arches. */
+    void *r10 = mmap((void *)0x60000000UL, 0x8000, PROT_READ | PROT_WRITE,
+                     MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (r10 == MAP_FAILED)
+        fail("MF10", "low-hint mmap errno=%d", errno);
+    else if ((unsigned long)r10 != 0x60000000UL)
+        fail("MF10", "low hint not honored: got %p (want 0x60000000)", r10);
+    else {
+        memset(r10, 0x33, 0x8000);
+        if (((unsigned char *)r10)[0x7ff0] != 0x33)
+            fail("MF10", "hinted mapping content wrong");
+        else
+            printf("MF10 ok: low hint honored at %p\n", r10);
+    }
+
+    /* MF11: unaligned non-fixed hint rounds DOWN (Linux
+     * `addr &= PAGE_MASK`). Was: the raw hint reached the kernel VMA
+     * builder and hit its page-alignment assert — kernel panic. */
+    void *r11 = mmap((void *)0x60010001UL, 0x4000, PROT_READ | PROT_WRITE,
+                     MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (r11 == MAP_FAILED)
+        fail("MF11", "unaligned-hint mmap errno=%d", errno);
+    else if ((unsigned long)r11 != 0x60010000UL)
+        fail("MF11", "unaligned hint not rounded down: got %p "
+                     "(want 0x60010000)", r11);
+    else
+        printf("MF11 ok: unaligned hint rounded down to %p\n", r11);
+
+    /* MF12: hint below MIN_MAP_ADDR (4KB null-page guard) is IGNORED —
+     * success at a kernel-chosen address, never the hint itself. */
+    void *r12 = mmap((void *)0x800UL, PAGE, PROT_READ | PROT_WRITE,
+                     MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (r12 == MAP_FAILED)
+        fail("MF12", "sub-MIN_MAP_ADDR hint mmap errno=%d (must succeed "
+                     "with kernel placement)", errno);
+    else if ((unsigned long)r12 == 0x800UL)
+        fail("MF12", "sub-MIN_MAP_ADDR hint must be ignored, got 0x800");
+    else
+        printf("MF12 ok: sub-MIN_MAP_ADDR hint ignored, placed at %p\n",
+               r12);
+
+    /* MF13: non-fixed hint onto the LIVE heap is IGNORED (kernel
+     * placement; the heap keeps working). Live heap's last full page. */
+    {
+        unsigned long bcur13 = raw_brk(0);
+        unsigned long heap_last = ((bcur13 + PAGE - 1) & ~(PAGE - 1)) - PAGE;
+        void *r13 = mmap((void *)heap_last, PAGE, PROT_READ | PROT_WRITE,
+                         MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+        if (r13 == MAP_FAILED)
+            fail("MF13", "live-heap hint mmap errno=%d (must succeed with "
+                         "kernel placement)", errno);
+        else if ((unsigned long)r13 == heap_last)
+            fail("MF13", "hint onto live heap must be ignored");
+        else {
+            *(volatile unsigned char *)(bcur13 - 8) = 0x31;
+            if (*(volatile unsigned char *)(bcur13 - 8) != 0x31)
+                fail("MF13", "heap top not writable after hint fallback");
+            else
+                printf("MF13 ok: live-heap hint ignored, placed at %p, "
+                       "heap intact\n", r13);
+        }
     }
 
     if (failures) {

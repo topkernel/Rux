@@ -286,7 +286,6 @@ impl MmStruct {
             & (map::MAP_FIXED | map::MAP_FIXED_NOREPLACE)
             != 0;
 
-        use user_addr::MMAP_START;
         let end_addr = addr.as_usize() + aligned_size;
         // Linux places MAP_FIXED anywhere in the user range, unmapping
         // whatever is covered. The historical blanket refusal
@@ -386,20 +385,49 @@ impl MmStruct {
             chosen
         } else {
             // Non-fixed placement: reserve atomically (see the comment at
-            // vma_installed above). A hint below MMAP_START is still not
-            // honored (falls back to find_free_area): low-hint placement
-            // changes where every hinted mapping lands — left as a
-            // documented divergence from Linux (which honors free hints
-            // anywhere) until it earns its own validation.
+            // vma_installed above). Linux honors a free hint ANYWHERE in
+            // the user range (arch_get_unmapped_area): the hint is
+            // rounded DOWN and used when its gap is free, otherwise the
+            // kernel-chosen search runs. The historical blanket discard
+            // of hints below MMAP_START is gone (session-17 parity):
+            // low hints (arena-class placement requests, LTP shapes)
+            // now land where Linux would place them. Like Linux the
+            // hint is IGNORED (never an error) when it is below
+            // MIN_MAP_ADDR (mmap_min_addr analog), lands on the LIVE
+            // brk heap span (Linux's heap is a VMA from exec time; ours
+            // below MMAP_START can be mirror-only before the first
+            // growth, so the same span check as the fixed path applies),
+            // or ends past USER_END (the syscall layer pre-checked the
+            // raw length; rounding the length UP can still push the
+            // last page over). Residual divergence, documented: no
+            // stack-guard-gap reservation below GROWSDOWN VMAs (Linux
+            // vm_start_gap reserves 1MB) — this VMA has no guard-gap
+            // model. The round-down also closes a kernel panic vector:
+            // an unaligned hint used to reach Vma::new and trip its
+            // page-alignment assert (Vma::new asserts; Linux masks the
+            // hint instead).
             let mut vma_mgr = self.vma_write();
             let chosen = if addr.as_usize() != 0 {
-                let end = PageVirtAddr::new(addr.as_usize() + aligned_size);
-                let test_vma = Vma::new(addr, end, flags);
-                let has_vma_conflict =
-                    vma_mgr.iter().any(|v| v.overlaps(&test_vma));
-                let hint_brk_conflict = addr.as_usize() < MMAP_START;
-                if !has_vma_conflict && !hint_brk_conflict {
-                    addr
+                let hint = addr.as_usize() & !(PAGE_SIZE_USIZE - 1);
+                let hint_end = hint.checked_add(aligned_size);
+                let hint_heap_conflict =
+                    hint < heap_hi && hint_end.map_or(true, |e| e > heap_lo);
+                let hint_ok = hint >= user_addr::MIN_MAP_ADDR
+                    && hint_end.map_or(false, |e| e <= user_addr::USER_END)
+                    && !hint_heap_conflict;
+                let mut use_hint = false;
+                if hint_ok {
+                    let test_vma = Vma::new(
+                        PageVirtAddr::new(hint),
+                        PageVirtAddr::new(hint + aligned_size),
+                        flags,
+                    );
+                    let has_vma_conflict =
+                        vma_mgr.iter().any(|v| v.overlaps(&test_vma));
+                    use_hint = !has_vma_conflict;
+                }
+                if use_hint {
+                    PageVirtAddr::new(hint)
                 } else {
                     self.find_free_area_locked(&vma_mgr, aligned_size)?
                 }
