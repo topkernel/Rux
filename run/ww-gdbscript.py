@@ -58,6 +58,16 @@ WATCHES = {
     # forever once hpet::ready() and never runs on these boots.
     "HPET_BASE": addr("4hpet4BASE"),
     "TSC_MULT": addr("8TSC_MULT"),
+    # Session-13 expansion (storm-quietness proven by run/ww-qs1: 15.5
+    # min full OH storm, 864 forks, wakes 3.57M, ZERO hits on all five;
+    # idle-quietness already proven by run/ww-cap1). Boot-set-once
+    # statics: console UART base, physmap base, cmdline pointer,
+    # per-CPU GDT array, virtio-pci MMIO window offset.
+    "CONSOLE_UART": addr("3rux7console4UART"),
+    "PHYS_RAM_BASE": addr("13PHYS_RAM_BASE"),
+    "CMDLINE_PTR": addr("7cmdline11CMDLINE_PTR"),
+    "GDT_PER_CPU": addr("4trap11GDT_PER_CPU"),
+    "VIRTIO_MMIO_OFF": addr("11MMIO_OFFSET"),
 }
 
 out = []
