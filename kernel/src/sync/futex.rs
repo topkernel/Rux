@@ -1739,22 +1739,29 @@ unsafe fn rwfz_stack_frames(task: *const Task, label: &str, max_frames: u64) {
     let (rsp, rip) = (0u64, 0u64);
     let Some(aspace) = tk.address_space() else { return };
     let vmas = aspace.vma_read();
-    let vma_of = |v: u64| -> Option<(usize, usize, i32, usize)> {
+    let vma_of = |v: u64| -> Option<(usize, usize, i32, usize, u64)> {
         let vm = vmas.find(crate::mm::page::VirtAddr::new(v as usize))?;
         let off = vm.offset() + (v as usize - vm.start().as_usize());
-        Some((vm.start().as_usize(), vm.end().as_usize(), vm.file_fd(), off))
+        Some((
+            vm.start().as_usize(),
+            vm.end().as_usize(),
+            vm.file_fd(),
+            off,
+            vm.file_size(),
+        ))
     };
     // The RIP itself first — the futex park site names the primitive
     // (musl __timedwait caller: rdlock/wrlock/condvar).
-    if let Some((s, e, fd, off)) = vma_of(rip) {
+    if let Some((s, e, fd, off, fsz)) = vma_of(rip) {
         crate::pr_warn!(
-            "RWFRZ:   {} rip={:#x} vma={:#x}-{:#x} fd={} fileoff={:#x}",
+            "RWFRZ:   {} rip={:#x} vma={:#x}-{:#x} fd={} fileoff={:#x} filesz={:#x}",
             label,
             rip,
             s,
             e,
             fd,
-            off
+            off,
+            fsz as usize
         );
     } else {
         crate::pr_warn!("RWFRZ:   {} rip={:#x} (no vma)", label, rip);
@@ -1796,7 +1803,7 @@ unsafe fn rwfz_stack_frames(task: *const Task, label: &str, max_frames: u64) {
         if v < 0x1000 || v > 0x7fff_ffff_ffff {
             continue;
         }
-        if let Some((s0, e0, fd, off)) = vma_of(v) {
+        if let Some((s0, e0, fd, off, fsz)) = vma_of(v) {
             let bytes = read_u64_at(v).unwrap_or(0);
             let path = if fd >= 0 {
                 path_of(fd, &mut path_cache)
@@ -1805,8 +1812,8 @@ unsafe fn rwfz_stack_frames(task: *const Task, label: &str, max_frames: u64) {
             };
             let _ = write!(
                 s,
-                "\nRWFRZ:   frame ustack[{}]={:#x} vma={:#x}-{:#x} fd={} fileoff={:#x} bytes={:#018x} path={}",
-                i, v, s0, e0, fd, off, bytes, path
+                "\nRWFRZ:   frame ustack[{}]={:#x} vma={:#x}-{:#x} fd={} fileoff={:#x} filesz={:#x} bytes={:#018x} path={}",
+                i, v, s0, e0, fd, off, fsz as usize, bytes, path
             );
             printed += 1;
         }
