@@ -1,17 +1,26 @@
 // loader_vma.c — /proc/self/maps file-VMA parity probe (mm lane).
 //
-// Exercises the three paths that must keep per-segment file identity:
+// Exercises the paths that must keep per-segment file identity:
 //   P1  the ELF interpreter mapped by the KERNEL exec path: every PT_LOAD
 //       of ld-musl must appear as its own VMA with the interpreter PATH
 //       and Linux-parity pgoff (file_off = maps_off + (rip - vma_start)
 //       must locate the on-disk bytes). Before the fix the whole span
 //       printed as ONE anonymous R-X VMA with fd=-1 off=0 — no path, no
-//       per-segment offsets, forensics blind inside the loader.
+//       per-segment offsets, forensics blind inside the loader. This is
+//       the PID-1 boot-exec instance (init=), which also exercises the
+//       fdtable-free pin (no fdtable exists at boot-exec time).
 //   P2  the main executable's PT_LOADs: file VMAs with the exe path
 //       (Linux prints the path; Rux additionally keeps "[exe]" on the
 //       first executable segment — accepted).
 //   P3  mremap(MAYMOVE) of a file mapping: the moved VMA must keep the
 //       path and a continuation offset.
+//   P4  fork+execve child (sys_execve path): interp + exe paths and
+//       per-segment offsets in the child's own maps.
+//   P5  the USERSPACE loader overlay sequence (musl ld.so shape): an
+//       anonymous PROT_NONE MAP_FIXED reservation, then file PT_LOAD
+//       overlays MAP_FIXED inside it with per-segment offsets, then the
+//       fd CLOSED — each LOAD must keep its path + exact offset and the
+//       reservation holes must survive as PROT_NONE lines.
 //
 // PASS: prints LVMAP-PASS. Any failure prints LVMAP-FAIL with the
 // offending maps lines.
@@ -48,9 +57,9 @@ static void dump_maps(const char *tag)
     printf("--- MAPS %s ---\n%s--- END %s ---\n", tag, buf, tag);
 }
 
-/* Count maps lines in [lo, hi) whose pathname contains `need`,
- * and check their offset column is a plausible file offset (multiple
- * of PAGE, not always 0). Returns count of matching lines.
+/* Count maps lines in [lo, hi) whose pathname contains `need`.
+ * want_off semantics: 0 = only require SOME line with a non-zero offset;
+ * non-zero = require every matched line to carry exactly want_off.
  * file==NULL reads /proc/self/maps. */
 static int count_lines_path(const char *file, unsigned long lo, unsigned long hi,
                             const char *need, unsigned long want_off, int *off_ok)
@@ -67,8 +76,8 @@ static int count_lines_path(const char *file, unsigned long lo, unsigned long hi
         unsigned long ino;
         char path[256] = "";
         int k = sscanf(line, "%lx-%lx %7s %lx %31s %lu %255[^\n]",
-                       &s, &e, perms, &off, dev, &ino, path);
-        if (k < 7) continue;
+                       &s, &e, &perms, &off, &dev, &ino, &path);
+        if (k < 6) continue;   // path column may be absent (anon, PROT_NONE holes)
         if (s < lo || s >= hi) continue;
         if (!strstr(path, need)) continue;
         cnt++;
@@ -79,14 +88,13 @@ static int count_lines_path(const char *file, unsigned long lo, unsigned long hi
     return cnt;
 }
 
-static int count_region_with_path(unsigned long lo, unsigned long hi,
-                                  const char *need, int *all_zero_off)
+/* Count PROT_NONE (---p) maps lines in [lo, hi). */
+static int count_none_lines(unsigned long lo, unsigned long hi)
 {
     FILE *f = fopen("/proc/self/maps", "r");
     if (!f) return -1;
     char line[512];
     int cnt = 0;
-    *all_zero_off = 1;
     while (fgets(line, sizeof(line), f)) {
         unsigned long s, e, off;
         char perms[8];
@@ -94,12 +102,60 @@ static int count_region_with_path(unsigned long lo, unsigned long hi,
         unsigned long ino;
         char path[256] = "";
         int k = sscanf(line, "%lx-%lx %7s %lx %31s %lu %255[^\n]",
-                       &s, &e, perms, &off, dev, &ino, path);
-        if (k < 7) continue;
+                       &s, &e, &perms, &off, &dev, &ino, &path);
+        if (k < 6) continue;   // path column may be absent (anon, PROT_NONE holes)
+        if (s < lo || s >= hi) continue;
+        if (!strcmp(perms, "---p")) cnt++;
+    }
+    fclose(f);
+    return cnt;
+}
+
+/* Match one specific line: start==want_start, path contains need,
+ * off==want_off. Returns 1 when found. */
+static int has_line(unsigned long want_start, const char *need, unsigned long want_off)
+{
+    FILE *f = fopen("/proc/self/maps", "r");
+    if (!f) return 0;
+    char line[512];
+    int found = 0;
+    while (fgets(line, sizeof(line), f)) {
+        unsigned long s, e, off;
+        char perms[8];
+        char dev[32];
+        unsigned long ino;
+        char path[256] = "";
+        int k = sscanf(line, "%lx-%lx %7s %lx %31s %lu %255[^\n]",
+                       &s, &e, &perms, &off, &dev, &ino, &path);
+        if (k < 6) continue;   // path column may be absent (anon, PROT_NONE holes)
+        if (s != want_start) continue;
+        if (!strstr(path, need)) continue;
+        if (off == want_off) found = 1;
+    }
+    fclose(f);
+    return found;
+}
+
+/* Count matched lines in [lo, hi) whose offset is non-zero (per-segment
+ * offset fidelity: a flat baseoff=0 VMA scores 0 here). */
+static int count_lines_path_nonzero(unsigned long lo, unsigned long hi, const char *need)
+{
+    FILE *f = fopen("/proc/self/maps", "r");
+    if (!f) return -1;
+    char line[512];
+    int cnt = 0;
+    while (fgets(line, sizeof(line), f)) {
+        unsigned long s, e, off;
+        char perms[8];
+        char dev[32];
+        unsigned long ino;
+        char path[256] = "";
+        int k = sscanf(line, "%lx-%lx %7s %lx %31s %lu %255[^\n]",
+                       &s, &e, &perms, &off, &dev, &ino, &path);
+        if (k < 6) continue;   // path column may be absent (anon, PROT_NONE holes)
         if (s < lo || s >= hi) continue;
         if (!strstr(path, need)) continue;
-        cnt++;
-        if (off != 0) *all_zero_off = 0;
+        if (off != 0) cnt++;
     }
     fclose(f);
     return cnt;
@@ -109,22 +165,26 @@ int main(int argc, char **argv)
 {
     printf("LVMAP-START\n");
 
-    /* ---- P1: interpreter segments ----
+    /* ---- P1: interpreter segments (boot-exec instance) ----
      * Rux maps the interp at INTERP_BASE = 0x3FBF000000 (x86_64). Each
-     * PT_LOAD should print with the ld-musl path and real offsets. */
+     * PT_LOAD must print with the ld-musl path and real per-segment
+     * offsets (>=3 lines; >=2 carry non-zero offsets — the exec/data
+     * LOADs — the first LOAD's 0 offset is legitimate). */
     {
-        int zero = 0;
-        int n = count_region_with_path(0x3fbf000000UL, 0x3fbf000000UL + 0x400000UL,
-                                       "ld-musl", &zero);
-        /* Boot-exec (init=) instance: no fdtable in the exec context, so
-         * the pin is absent and the path column stays empty BY DESIGN
-         * (offsets are still per-segment — visible in the FINAL dump).
-         * The authoritative path checks run in the CHILD instance
-         * (fork+execve -> sys_execve) and in P4a/P4b. */
-        printf("LVMAP-P1 INFO(boot-exec): interp lines with path=%d\n", n);
+        int n = count_lines_path(NULL, 0x3fbf000000UL, 0x3fbf000000UL + 0x400000UL,
+                                 "ld-musl", 0xdeadbeefUL, &(int){0});
+        int nz = count_lines_path_nonzero(0x3fbf000000UL, 0x3fbf000000UL + 0x400000UL,
+                                          "ld-musl");
+        if (n >= 3 && nz >= 2)
+            printf("LVMAP-P1 OK: %d interp lines with path, %d non-zero offs\n", n, nz);
+        else {
+            printf("LVMAP-FAIL P1: interp lines=%d non-zero-off=%d (want >=3, >=2)\n",
+                   n, nz);
+            failures++;
+        }
     }
 
-    /* ---- P2: main executable segments ----
+    /* ---- P2: main executable segments (boot-exec instance) ----
      * The probe itself: ET_DYN/ET_EXEC LOADs must carry the exe path
      * ("loader_vma"); "[exe]" on the first executable line is accepted
      * (Rux keeps it; Linux prints the path there). */
@@ -133,8 +193,13 @@ int main(int argc, char **argv)
         /* Search the whole user space below the mmap region: on Rux the
          * PIE base (0x555555554000) sits ABOVE INTERP_BASE
          * (0x3fbf000000) — do not bound by the interp base. */
-        int n = count_region_with_path(0x10000UL, 0x7f0000000000UL, "loader_vma", &zero);
-        printf("LVMAP-P2 INFO(boot-exec): exe lines with path=%d\n", n);
+        int n = count_lines_path(NULL, 0x10000UL, 0x7f0000000000UL, "loader_vma", 0, &zero);
+        if (n >= 2)
+            printf("LVMAP-P2 OK: %d exe lines with path\n", n);
+        else {
+            printf("LVMAP-FAIL P2: exe lines with path=%d (want >=2)\n", n);
+            failures++;
+        }
     }
 
     /* ---- P3: mremap keeps file identity ---- */
@@ -179,6 +244,51 @@ int main(int argc, char **argv)
                 }
             }
             close(fd);
+        }
+    }
+
+    /* ---- P5: userspace loader overlay sequence (musl ld.so shape) ----
+     * Reserve 4 pages PROT_NONE MAP_FIXED, overlay two file LOADs inside
+     * it (adjacent, same flags, DISCONTINUOUS file offsets so they must
+     * stay separate lines), then close the fd — the identity must live
+     * on the pinned vm_file. Layout:
+     *   BASE+0x0000  PROT_NONE reservation hole (survives as ---p)
+     *   BASE+0x1000  LOAD1 R  file off 0x0000 (V-page)
+     *   BASE+0x2000  LOAD2 R  file off 0x2000 (W-page)
+     *   BASE+0x3000  PROT_NONE reservation tail (survives as ---p)   */
+    {
+        const unsigned long base = 0x7ff200000000UL;
+        void *r = mmap((void *)base, 4 * PAGE, PROT_NONE,
+                       MAP_PRIVATE | MAP_ANONYMOUS | MAP_FIXED, -1, 0);
+        if (r != (void *)base) {
+            printf("LVMAP-FAIL P5: reservation mmap returned %p\n", r);
+            failures++;
+        } else {
+            int fd = open("/test/vmadata.bin", O_RDONLY);
+            char *l1 = mmap((void *)(base + PAGE), PAGE, PROT_READ,
+                            MAP_PRIVATE | MAP_FIXED, fd, 0x0000);
+            char *l2 = mmap((void *)(base + 2 * PAGE), PAGE, PROT_READ,
+                            MAP_PRIVATE | MAP_FIXED, fd, 0x2000);
+            close(fd); /* loader semantics: identity must survive the fd */
+            if (l1 == MAP_FAILED || l2 == MAP_FAILED) {
+                printf("LVMAP-FAIL P5: LOAD overlay mmap failed\n");
+                failures++;
+            } else if (l1[0] != 'V' || l2[0] != 'W') {
+                printf("LVMAP-FAIL P5: content V=%c W=%c\n", l1[0], l2[0]);
+                failures++;
+            } else {
+                int ok1 = has_line(base + PAGE, "vmadata.bin", 0x0000);
+                int ok2 = has_line(base + 2 * PAGE, "vmadata.bin", 0x2000);
+                int holes = count_none_lines(base, base + 4 * PAGE);
+                if (ok1 && ok2 && holes == 2)
+                    printf("LVMAP-P5 OK: overlay LOADs keep path+exact off, "
+                           "reservation holes survive\n");
+                else {
+                    printf("LVMAP-FAIL P5: l1_off0=%d l2_off2000=%d holes=%d "
+                           "(want 1,1,2)\n", ok1, ok2, holes);
+                    failures++;
+                }
+            }
         }
     }
 

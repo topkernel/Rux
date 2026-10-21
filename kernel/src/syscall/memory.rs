@@ -2009,32 +2009,6 @@ unsafe fn copy_old_to_new_pages(
     drop(_pte_guard);
 }
 
-/// sys_mremap - Remap memory
-///
-///
-/// # Arguments
-/// - args[0] (old_addr): old address
-/// - args[1] (old_size): old size
-/// - args[2] (new_size): new size
-/// - args[3] (flags): flags (MREMAP_MAYMOVE/MREMAP_FIXED)
-/// - args[4] (new_addr): new address (only used when MREMAP_FIXED)
-///
-/// # Returns
-/// Returns new address on success (may be same as old), negative error code on failure
-///
-/// - RISC-V: 216
-///
-/// # Description
-/// mremap expands or shrinks existing memory mapping
-///
-/// b93 heap-corruption attribution: mremap was the only VMA-mutating
-/// syscall with no serial trace, so the split of hilogd's 2GB PROT_NONE
-/// reserve at +0x1fd000 could not be pinned on any logged operation
-/// (MPROTECT/FIXED-MAP/BIGMUNMAP were all ruled out). Every mremap now
-/// logs its identity and arguments on entry and its result on exit —
-/// one boot ties any mystery VMA surgery to its caller.
-/// dfx=syscalltrace only: ungated this is two lines per mremap, and
-/// hilogd.rd_kmsg eats a vCPU copying them (b128/b129).
 /// Re-apply a remapped mapping's original file identity onto the VMA at
 /// `piece_start`. The remap paths in `sys_mremap_inner` reinstall the
 /// mapping through `AddressSpace::mmap`, whose fresh VMA carries the old
@@ -2070,6 +2044,32 @@ fn mremap_carry_file_attrs(
     }
 }
 
+/// sys_mremap - Remap memory
+///
+///
+/// # Arguments
+/// - args[0] (old_addr): old address
+/// - args[1] (old_size): old size
+/// - args[2] (new_size): new size
+/// - args[3] (flags): flags (MREMAP_MAYMOVE/MREMAP_FIXED)
+/// - args[4] (new_addr): new address (only used when MREMAP_FIXED)
+///
+/// # Returns
+/// Returns new address on success (may be same as old), negative error code on failure
+///
+/// - RISC-V: 216
+///
+/// # Description
+/// mremap expands or shrinks existing memory mapping
+///
+/// b93 heap-corruption attribution: mremap was the only VMA-mutating
+/// syscall with no serial trace, so the split of hilogd's 2GB PROT_NONE
+/// reserve at +0x1fd000 could not be pinned on any logged operation
+/// (MPROTECT/FIXED-MAP/BIGMUNMAP were all ruled out). Every mremap now
+/// logs its identity and arguments on entry and its result on exit —
+/// one boot ties any mystery VMA surgery to its caller.
+/// dfx=syscalltrace only: ungated this is two lines per mremap, and
+/// hilogd.rd_kmsg eats a vCPU copying them (b128/b129).
 pub fn sys_mremap(args: [u64; 6]) -> i64 {
     let ret = sys_mremap_inner(args);
     // Failure returns are rare and always interesting (CFI-shadow hunt):

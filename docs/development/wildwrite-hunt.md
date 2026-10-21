@@ -997,3 +997,86 @@ profiles. Next captures should:
    takes the user-half corruption line should own it.
 4. b77/wt1's raw captures deserve re-reading against F2 before more
     effort goes into the "hpet BASE smash" framing.
+
+## Session 12 (continuation agent — mm handoff landed: VMA fd/offset bookkeeping)
+
+### Inheritance reconstruction
+
+- Pause snapshot 5d5a621e carried the mm-lane handoff item (file-LOAD
+  VMA fd/offset, from launcher Session L) mid-flight: exec-time
+  per-segment interp/exe VMAs + procfs pin-first path resolution +
+  mremap file-attr carry + a loader_vma probe, all built but only
+  partially validated (the 20:07 probe run predates the probe's final
+  check fixes).
+- Chain: r20 died externally at 15/45 min, r21 died with the user
+  pause at ~26 min — both clean partials (armed 10-point, 0 WW-HIT,
+  0 panics). Relaunched from r22 at 23:50 (run/ww-chain-s12.log;
+  process tree in run/ww-s12-proctree.txt). r22 ran its full 2700 s
+  clean (0 WW-HIT, 0 heals, 0 panics) and the driver self-advanced.
+
+### Ground truth before touching the mmap overlay path
+
+Re-read the samgr-lane forensics (oh-sc96-serial.log RWFRZ dumps):
+EVERY unstamped-VMA sighting (66 park frames across 10 distinct rips)
+is the SAME VMA — the kernel-exec-mapped flat interpreter span
+0x3fbf000000-0x3fbf138000 fd=-1 baseoff=0x0 filesz=0x0. The park rips
+(0x116dea/0x12143d/0xd3466/...) are ld-musl's own code (the ripbytes
+0x00cab80c75daf883 = futex-park sequence; sys=0xca is futex on
+x86_64) — Session L's "park-site lib not in the images' .so set"
+mystery was the INTERPRETER all along, invisible because the old exec
+path mapped it as one flat anonymous VMA. Userspace-loader-mapped libs
+were NOT broken (their data-segment pointers resolved — the MAP_FIXED
+overlay surgery in MmStruct::mmap preserves fd/offset, and the
+merge/stamp window is closed by the fd comparison in can_merge). So
+the fix is the exec path — exactly what the snapshot WIP implements.
+
+### What landed this session (on top of the snapshot WIP)
+
+- vfs.rs `open_file_arc_nofd`: the WIP's boot-exec pins (PID-1 exe +
+  interp path identity) never took because open_file_arc went through
+  file_open, whose fd install needs a current-task fdtable — at the
+  init= exec none exists. The new resolver builds the File Arc via
+  path_lookup + the same inode/dentry/ops wiring as file_open, with no
+  fdtable interaction (and no inotify noise — kernel-internal open
+  semantics). open_file_arc (execve path) now delegates to it, one
+  code path for boot and post-boot exec.
+- Loader-overlay sequence locked in by probe P5 (musl ld.so shape:
+  anon PROT_NONE MAP_FIXED reservation + adjacent same-flags file LOAD
+  overlays with discontinuous offsets + fd closed): both LOADs keep
+  path + exact offset, the reservation holes survive as ---p lines.
+  This is the regression guard for the "loader reservation overlay"
+  half of the handoff.
+- mremap_carry_file_attrs doc-block reattachment (the b93 sys_mremap
+  trace note had been swallowed into the helper's doc comment).
+
+### Validation
+
+- test/loader_vma_boot.py (x86_64, dynamic probe as init):
+  LVMAP-PASS — P1 boot-exec interp 4 lines with path + 3 non-zero
+  offsets, P2 boot-exec exe 4 lines with path, P3 mremap keeps
+  path+offset+content, P5 loader overlay fidelity, P4a/P4b execve'd
+  child interp+exe with paths (child maps: per-segment offs
+  0/0x76000/0x136000/0x138000 with /lib/ld-musl-x86_64.so.1).
+  Before open_file_arc_nofd the boot instance printed empty paths for
+  both exe and interp (LVMA-DBG pin-miss on every segment).
+- riscv64: in-kernel unit tests 3 FAIL — the pre-existing config size
+  asserts (KERNEL_HEAP_SIZE/FUTEX_*), byte-identical to the session
+  6/7/9 baseline; minimal-rootfs boot to /bin/sh 0 KERNPANIC (the
+  first smoke attempt accidentally booted the make-test feature
+  kernel, whose post-test PANIC is the test harness itself).
+- OH verification boot (ww-lvma1, worktree bzImage, 17 min, killed at
+  budget by own PID — note: ww-boot.sh's SECS env is stale, it execs
+  QEMU unbounded): 57403 lines, 861 forks through the modified exec
+  path, full storm (wakes 3.79M, avg_run 4ms, strand_max 9.6s —
+  healthy new-kernel shape), 0 KERNPANIC/ALLOCTHROW, 0
+  Permission-denied victims, 0 MM-DROP-CTX.
+
+### Forensic payoff (for both lines)
+
+With the interp now a set of FileBacked VMAs carrying a pinned file
+and Linux-parity pgoff, every 0x3fbf-region rip converts to a file
+position: file_off = vma_off + (rip - vma_start) into
+/lib/ld-musl-x86_64.so.1 (or the exe) — the samgr line's holder-chain
+symbolization and this hunt's park-site decoding both stop being
+blind there. The maps path column survives fd close (pin) on all
+three paths: boot-exec (PID 1), execve, and loader overlays.

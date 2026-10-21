@@ -178,17 +178,16 @@ fn read_exec_file(path: &str) -> Option<alloc::vec::Vec<u8>> {
 }
 
 /// Open `path` through the VFS and return the file as an Arc WITHOUT
-/// keeping an fd (Linux vm_file semantics): the Arc outlives the closed
-/// fd number, so pinning it on the exec-time segment VMAs gives
+/// keeping an fd (Linux vm_file semantics): the Arc outlives any closed fd
+/// number, so pinning it on the exec-time segment VMAs gives
 /// /proc/<pid>/maps a stable path identity even though exec holds no
-/// descriptor for the exe or the interpreter. Best-effort: None simply
+/// descriptor for the exe or the interpreter. Delegates to the fd-free VFS
+/// resolver, which also works in the PID-1 boot exec where no fdtable
+/// exists yet (the old file_open-based body returned None there — PID 1's
+/// maps lost the path column on every boot). Best-effort: None simply
 /// leaves the VMAs without a pinned file (offset bookkeeping stands).
 pub(crate) fn open_file_arc(path: &str) -> Option<alloc::sync::Arc<crate::fs::file::File>> {
-    let fd = crate::fs::vfs::file_open(path, 0 /* O_RDONLY */, 0).ok()?;
-    let file = unsafe { crate::fs::file::get_file_fd(fd) };
-    // SAFETY: fd came from file_open on the current task's table.
-    unsafe { crate::fs::file::close_file_fd(fd) };
-    file
+    crate::fs::vfs::open_file_arc_nofd(path)
 }
 
 /// ARG_MAX approximation for execve argument limits (Linux uses a 2MB-ish
