@@ -596,6 +596,88 @@ coordination with that line, not unilaterally.
   07:07 (`./run/ww-chain.sh ww-s2 100 12371 11`, session-5 log).
   0 WW-HIT in every armed run to date (r1-r10 + all manual boots).
 
+## Session 6 (continuation agent — per-mm PTE locks implemented per the session-5 design)
+
+Inherited: chain mid-r11 (driver alive, self-continuing). Claimed as-is;
+r11 completed its full 2700 s (0 hits, 0 heals) and the driver
+self-advanced to r12 at 07:52. Merged origin/main (10499dd0 — the
+launcher line's binder/sched-preempt work; the handoff's pair-merge of
+7b7a82b5+a80974df into main had not landed yet at merge time).
+
+### The per-mm PTE lock (681da2da, on top of the merge)
+
+The session-5 spec, executed with one design extension the spec left
+open: what to do about the IPC sites (ipc/binder.rs, ipc/sysv_shm.rs)
+that must keep excluding against everything but live in ANOTHER line's
+forbidden territory. Solution: make the lock two-level.
+
+- `GlobalPteLock` (RwSpinlock<()>) replaces the `PTE_MODIFY_LOCK`
+  Spinlock static in BOTH arches' mm_ops.rs. An EXCLUSIVE holder
+  (`.lock()/.lock_irqsave()`) gets exactly the old whole-domain
+  semantics. The IPC sites' code is untouched — they still call
+  `PTE_MODIFY_LOCK.lock()` — and now exclude against every per-mm
+  section through the epoch.
+- `PteLock` per MmStruct (the vestigial `pgd_lock` RwSpinlock, zero
+  callers, repurposed as the spec prescribed). On x86_64 its section =
+  epoch SHARED + the mm's spin: same-mm writers serialize, different-mm
+  writers run CONCURRENTLY — the fork-walk monopoly breaker.
+- Arch hook `pte_lock_for(mm)` in both arches: x86_64 returns the mm's
+  PteLock; riscv64 returns ONE global-mode handle (every section
+  degrades to the exclusive epoch — behavior identical to the old
+  single lock, as the spec's constraint 1 required).
+
+Switched to per-mm sections (x86_64 + arch-neutral, all in one change
+per the all-or-nothing constraint): page_fault x5 (demand/COW/swap +
+stack growth), brk, unmap/zap, set_range_permissions, the fork walk's
+parent chunks (copy_page_table_cow now takes the parent MmStruct),
+handle_cow_fault (takes the owning mm; child-settid path uses the
+child mm from the task), mmap/mprotect/mremap/mlock eager sections,
+rmap unmap + compact migration (per-mm, one section at a time, mm
+Arc-pinned — the loop structure already existed), ashremap, and mm
+teardown via the DYING mm's own lock from MmStruct::drop (per the
+spec's constraint 4). `free_user_page_tables` grew a `pte` param;
+exec's unpublished error-path tree and the synthetic test trees use
+`FRESH_TREE_PTE_LOCK` (arch-neutral static).
+
+Kept GLOBAL deliberately: `map_user_region` + kernel-root maps (root-
+PPN-only interface, callers are exec/fresh-table/device cold paths) and
+the IPC sites (territory). Documented as follow-ups.
+
+Deadlock-freedom transfer argument (in lock-ordering.md, INV-LOCK-7):
+every nesting edge that the new scheme forbids (write-inside-read,
+same-mm self-nesting) would ALSO have self-deadlocked on the former
+global Spinlock, so no live path can regress; vma_manager -> PTE
+section -> page_desc ordering is unchanged at every site. The one
+deliberate semantic narrowing, argued in the code comment: teardown
+chunks no longer globally exclude OTHER mms' faults from reallocating
+just-freed frames — safe because a frame's last teardown access is the
+free itself and the buddy heap lock serializes free vs alloc.
+
+Builds: x86_64 and riscv64 both clean (no new warnings; the codebase
+carries ~2300 pre-existing).
+
+### Verification
+
+- riscv64 (global-mode PteLock paths — the neutral files'
+  pte_lock_for): minimal-rootfs boot to mrsh shell, 0 panics; in-kernel
+  unit tests 1085/1088 — the 3 failures are pre-existing
+  config_test.rs size asserts (expect heap 512 MB; Kernel.toml carries
+  1024 from main's merge; unrelated). PREEMPT-LEAK prints at idle
+  symbolize to `cpu::wfi` — the launcher line's tripwire noise from
+  the merged main, not the PTE path.
+- x86_64 sanity (5.5 min, ww-boot.sh conditions + dfx=taskdump,
+  watchdog,periodic): 0 panics, wakes 525k, storm healthy.
+- x86_64 v1 (45 min): <!-- V1_RESULT -->
+- x86_64 v2 (45 min): <!-- V2_RESULT -->
+
+### Chain status this session
+
+r11 full budget clean (self-advanced); r12 started 07:52, armed,
+storming. 0 WW-HIT cumulative (r1-r12 + all manual boots). Process
+tree recorded for the external-kill watch: wrapper 1542328 ->
+ww-chain.sh 1542339 -> ww-hunt.py -> qemu (per-run pid in
+run/ww-chain-s5.log).
+
 ## Where this leaves the hunt (handoff)
 
 The attribution machinery now exists and is proven end-to-end; the
