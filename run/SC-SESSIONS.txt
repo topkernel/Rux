@@ -911,3 +911,79 @@ SYSTEM-WIDE family, not samgr-specific):
   caller chain at the freeze's birth moment, 12 frames + fd paths +
   VMA file sizes — sizes identify libs despite closed fds), plus
   post-adoption EXIT-WORD snapshots.
+
+Session K FINAL (13:4x — freeze family root-caused to a userspace
+std::shared_mutex recursion; NOT the kernel's rwlock/futex accounting):
+
+IDENTITY SOLVED (byte-verified offline against extracted libs; libs live
+in /system/lib64/chipset-sdk-sp/ + /system/lib64/{platformsdk,module,ndk}
+— extract with the fixed debugfs walker, see /tmp/oh-libs):
+- The frozen word is std::shared_mutex::__state_ of THIS libc++ build
+  (libc++.so, 0x141d20 bytes): WRITER_ENTERED(bit31) | reader-count.
+  Writers park via libc++'s own futex path ON __state_ with expected =
+  current state (0x80000010); park-site frames byte-match libc++'s
+  condition_variable::wait / the atomic-wait path (fileoff 0xc7e02).
+- The freezing instances are STATIC shared_mutex objects in DFX libs'
+  bss: libhicollie.z.so vaddr 0x3c0e4 (the 4th LOAD's anon bss tail),
+  plus analogous statics in libbegetutil.z.so and libfaultloggerd.z.so.
+  fd->path prints are USELESS for loader mappings (musl closes the fd
+  after mmap; fd numbers get reused) — identify by VMA filesz +
+  fileoff + bytes instead.
+- Family (per boot, ALL exactly 0x80000010): samgr, hdf_devmgr,
+  device_manager, foundation(x2), resource_schedule_service, mmi/msdp
+  host, sms-persist host, +2 anonymous SAs.
+
+MECHANISM (by elimination + arithmetic):
+- hdf_devmgr cases: 7 threads EVER, ZERO exits, yet 16 readers. The
+  count exceeds every thread that ever existed -> the reads are
+  RECURSIVE lock_shared calls by ONE thread (libc++ shared_mutex just
+  counts recursion). 16 = the recursion/retry bound (same value in
+  every process — an algorithmic constant; 16 is also libipc's
+  DEFAULT_WORK_THREAD_NUM, but pool size is coincidental: hdf's pool
+  was at 15 when only 5 were live).
+- The recursing holder is parked on a SECOND lock 0x94 below the
+  frozen word (same static object: shared_mutex's sibling mutex/gate) —
+  the main thread in every dump sits there. RWFRZ-PARK captured the
+  first writer at park time (16 dumps/boot, syscall context, exec-VMA
+  filtered, 64-slot window): callers include hicollie's DfxWatchdog,
+  FFRT workers, IPC workers, samgr/storage_manager/huks/param_watcher
+  mains — i.e., everything eventually funnels into the DFX report path
+  that owns the lock.
+- TRIGGER: the devhost_usb crash-loop (libusb_pnp_manager.z.so+0x15bac
+  NULL list walk, byte-verified again in sc87) kills server threads
+  mid-txn; every THREAD-DIED-SERVICING event feeds a client whose
+  error-recovery/reporting path re-enters the DFX lock chain.
+
+KERNEL VERDICT: the rwlock/futex accounting is INNOCENT (musl/libc++
+protocols decoded from binaries; reader-unlock emits no kernel traffic;
+the kernel cannot leak these counts). The freeze is a userspace
+recursion triggered by IPC failures we already partly fixed
+(one-txn-per-read). Remaining kernel work that would unblock the
+launcher chain:
+  1. The residual binder reply-stalls (4/boot in sc80) — same family
+     as the fixed SERVER-OWING bug; likely feeds the DFX retry storm.
+  2. stall_report's WORLD-guarded dump runs ~500ms with irqs off and
+     killed khungtaskd in sc82 (scanner never scanned again) — needs
+     sectioning (ipc/binder.rs, my lane, NOT yet fixed).
+  3. PTE_MODIFY_LOCK global-spinlock both-CPU deadlock (sc83, mm lane
+     — wildwrite line's per-mm PTE lock work 681da2da).
+NEXT SESSION concrete steps:
+  a. Find the 16-bounded recursion in OH source (hicollie/hisysevent/
+     begetutil retry loops around a shared_lock) or disassemble
+     libhicollie's bss+0xe4-referencing code (indirect via .data ptr).
+  b. Extend EXTRA-FROZEN to dump the thread parked on frozen-word
+     MINUS 0x94 (the recursing holder) with the 64-slot exec filter —
+     its stack shows the 16-deep chain directly.
+  c. Fix (2) above so scanners survive; consider gating park dumps
+     smarter (16/boot budget burns in the first minutes).
+MILESTONE: not reached (screen stays the 8-color oracle checkerboard);
+the freeze family blocks the launcher chain upstream of ArkUI.
+
+TOOLING LANDED: adoption-time FROZEN dump + EXTRA-FROZEN same-shape
+dumps + first-writer-park capture (syscall context) + per-word HIGH
+table with eviction + early-tgid census + 256-entry exit ring +
+EXIT-WORD snapshots + scan heartbeat + fd-path/filesz/bytes frames +
+exec-VMA filter. Offline: rwsym.py (= tolerant regex, LIBDIRS now
+syslib64+vendorlib64+samgr-bin+subdirs+platformsdk; add cssp/ from
+chipset-sdk-sp). Commits: 87be7195, 2b311ff9(+artifacts), 48def2d4,
+db709ac8, and this note.
