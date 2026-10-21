@@ -870,3 +870,44 @@ scanner fragility, mm-race flake):
   died servicing samgr nested calls (from tids 548/350/335) —
   consistent with samgr death-cleanup writers piling onto the frozen
   lock (each dead SA spawns a DetachObject-style writer).
+
+Session K update 2 (13:2x — sc84/sc85/sc86 dumps land; the freeze is a
+SYSTEM-WIDE family, not samgr-specific):
+
+- sc84 (adoption-time dump kernel): tgid 444 resource_schedule_service
+  FROZEN word 0x80000010, nb+4=3 == kernel waiter count (musl rwlock
+  layout confirmed: +4 is parked-waiter count). Writers parked: a
+  BgtaskMgr stub thread, an FFRT worker, an IPC worker. EXTRA-FROZEN
+  tgid 814 'foundation': SIXTEEN thread exits in the 52-75s window and
+  a second frozen 0x80000010 word (two frozen locks in one process).
+- sc85: tgid 336 hdf_devmgr — word 0x80000010, nb+4=5, FIVE of 7
+  threads parked on the word as writers (all OS_IPC workers sharing ONE
+  identical return address, fd=25 fileoff 0x2dfb8), exit ring: ZERO
+  exits ever. 7 threads total vs 16 claimed readers.
+- sc86 (fd->path instrument; paths come out "?" — musl's loader closes
+  the fd after mmap, so fdtable lookups fail for lib mappings): tgid
+  334 = hdf_devmgr THIS boot (pid assignment varies; the early-census
+  assumption "334 == samgr" is boot-specific). 17 tasks: 6 writers on
+  the frozen word, NINE workers parked in binder reads — stall-report
+  shows all nine "waiting 320+s for work (no pending txn)" = healthy
+  idle, so idle workers do NOT hold read counts. main parked on the
+  NEIGHBOR word 0x...2b70 (0x94 below the frozen one — same heap
+  struct, second lock). EXTRA tgid 556 'device_manager': 5 threads,
+  0 exits, 16 readers, 1 writer.
+- Family table so far (word always EXACTLY 0x80000010 = WAITERS + 16
+  readers = libipc DEFAULT_WORK_THREAD_NUM): samgr, rss,
+  foundation(x2), hdf_devmgr(x2 boots), device_manager, sc81's 716/791.
+  hdf_devmgr + device_manager rule OUT dead-thread leaks (zero exits)
+  and pool-idle holders (stall-report clears the idle workers).
+  Remaining candidates: recursive read acquisition by ONE parked
+  thread (main parked on the neighbor lock), or a fabricated value
+  (mm-domain wild write — the wildwrite line's per-mm PTE bug would
+  fit the identical-value-across-processes signature).
+- hdf_devmgr's writer threads 335/348 had made nested calls into
+  pids 795/827/1299 that DIED servicing them (THREAD-DIED-SERVICING):
+  the writers look like death-cleanup paths (DetachObject-style)
+  piling onto the poisoned lock after BR_DEAD_REPLY.
+- sc87 booting: first-writer-park capture IN SYSCALL CONTEXT (full
+  caller chain at the freeze's birth moment, 12 frames + fd paths +
+  VMA file sizes — sizes identify libs despite closed fds), plus
+  post-adoption EXIT-WORD snapshots.
