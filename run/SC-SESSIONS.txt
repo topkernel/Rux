@@ -1337,3 +1337,159 @@ SESSION N UPDATE 2 (sc110/sc111 + TSC parked):
      (NULL list walk, rip voff 0x15bac) kills SA hosts and gates ~50% of
      boots at the BMS/OsAccount wedge. Extend the usb disable overlay to
      its host process.
+
+SESSION O (2026-10-22 05:5x-0x; sc115-sc116; third leg; TSC root-caused +
+default landed, launcher children decoded to a single-thread futex park,
+render_service deterministic mm crash named for the mm lane):
+
+IN-FLIGHT REVIEW (86d923ee, quota-death wip):
+- main.rs tscclk default-ON flip: KEPT but its "sc114 verified: 0
+  rebases" claim was FALSE — sc114's log has TWO rebases (cpu0+cpu1,
+  lead 250416629/250201181) at uptime 522.17 s. The ratchet+min-of-3
+  fixes WERE verified (sc114: 0 u32 wraps vs sc113's 281, 0 KILLDUMP,
+  first-ever launcher spawn successes 3x). config.rs hunk reverted to
+  the parent state (stale riscv64/128MiB generated artifact).
+- ROOT CAUSE of the sc110-114 "~25 s TSC-vs-HPET step" DECODED — it
+  was never vCPU TSC-offset skew: TSC_MULSHIFT was 12, so
+  mult = ceil(10MHz<<12 / 4292.4MHz) = ceil(9.5434) = 10 — a 10.5%
+  resolution grid — and the mapping ran 10/9.5434 = 4.796% FAST on
+  every boot. sc113 AND sc114 both rebased at uptime 522.17 s with
+  lead 250.41M ticks (4.796% x 522.17 s, matching to 4 significant
+  digits; sc110/111's leads agree). The sc114 AP's measured -21.9 ms
+  "skew" was 4.796% x the 0.456 s AP-bringup instant. FIX (9e5f0147):
+  TSC_MULSHIFT 12 -> 32 (~100 ppm grid) + round-to-nearest instead of
+  ceil in BOTH mult computations; resync gained a "tsc-clock: lead"
+  report at 250 ms (proof marker: ~23 h of uptime needed to fire at
+  3 ppm residual).
+- sc115 VERIFY (default TSC, sprobe=0, private images, 20 min):
+  0 rebases past the old 522.17 s point, 0 u32 wraps, 0 lead lines,
+  38 launcher spawn successes (vs 3 in sc114), 0 KILLDUMP. TSC GATE
+  CLOSED. (One early "fell behind ~7201280" print in sc115, sc116
+  clean — early-boot noise, self-heals; the lapic tick check prints
+  [fail] 0-jiffies on both new-kernel boots: the 150 ms delay_ms
+  window lands in a tick-gap/IRQ-off stretch — cosmetic.)
+- IMAGE SIDE: the USB DDK PnP bad host is ALREADY disabled — the
+  second-leg predecessor did it at 03:19 (unrecorded):
+  oh-img-p/vendor.img has libusb_pnp_manager.z.so ZEROED (0 bytes,
+  was 179560) ON TOP of Session L's hdf_devhost.cfg usb_host removal.
+  sc113-116: zero DDK-signature crashes (sc105-111: every boot).
+  Nothing left to do here; boots must use run/oh-boot-usbless.sh
+  (oh-img-p private copies).
+
+NEW GATE DECODE 1 — the launcher child's hang (dfx=periodic
+taskdumps, sc116): every launcher child (pids 1368/1380/1404/1413/
+1419, same site every time) is SINGLE-THREADED — no OS_FFRT/OS_IPC
+workers ever created — with the main thread parked in
+futex(uaddr=0x7fffffffc754 ON ITS OWN STACK, FUTEX_WAIT_PRIVATE|
+0x80), and it STAYS there across multiple 30 s dumps (children live
+for minutes; the AMS restart loop is what recycles them). Before the
+park the child: sandbox binds OK, /dev/{dec,xpm} ENOENT (normal),
+/dev/null, __parameters__ x2, display_buffer_vdi GetMetadata ("not
+supported" stub), BMS queries — then silence. So the ability LOAD
+hangs between display-VDI init and worker-thread creation, waiting
+on a stack condvar that no counterparty will ever signal. sc115
+(render_service alive) parks identically → not gated by render alone.
+
+NEW GATE DECODE 2 — render_service DETERMINISTIC CRASH (sc114 pid 731
++ sc116 pid 582, BYTE-IDENTICAL): rip 0x3fbf08ad30 ripbytes
+[f3 48 a5 83 e2 07 74 05 a4 ff ca 75 fb c3 cc cc] = the rep movsq
+memcpy tail sequence; copying rdx=0x3a8 bytes to dst=rsi=cr2
+(rsp+0x478, i.e. writing a ~1 KB STACK FRAME above rsp); the fault
+page's VMA EXISTS (0x7ff000xxx000-xxx000+8K, type=Anonymous,
+flags=0x10, **off=0x19000** — an offset on an ANON vma = the mm
+lane's merged-mapping/offset bookkeeping family) but the page is not
+handed out / mapping not writable. MM LANE ITEM (do not chase in the
+launcher lane): render_service dies on a stack write its own VMA
+should satisfy; with it dead the display chain loses the compositor
+(sc116 also lost OS_IPC_0_372).
+
+NEW GATE DECODE 3 — chronic IRQ-off / tick-gap stalls (sc115):
+637 WW IRQ-OFF-WINDOW (>=100 ms inter-tick gaps; age field reads
+1000 ms — quantized) — a boot-full of second-scale stalls. Symbolized
+recovery rips: idle-halt path (wfi/enable_irq/restore_irq, pid 0/1 —
+benign-ish accounting), AND genuine cli windows: Spinlock<VfsState>
+spinners with LAUNCHER-CHILD pids (1227/1115/938: RawSpinlock::lock
+<- Spinlock<VfsState>::lock), printk/log-crate drain (UART irqsave
+87 us/byte busy-poll; ~11 KB of census text = 1 s), Vec<u8> drop
+glue, preempt_count paths. The RWFRZ freeze storm feeds it: sc115
+printed 2472 RWFRZ lines (sc113/114: ~180) — wedge->census->console
+stall->more timeouts loop.
+
+MNTSLOW (sc116, sprobe=1, task 4 of the execution order): whole-
+syscall mounts are 3.5-9.2 ms for EVERY caller (os.settingsdata 56x
+avg 5.5 ms; m.ohos.systemui 39x avg 5.5 ms; init 23x avg 3.7 ms;
+storage_daemon 1x 4.9 ms) while mtprobe's phase breakdown of the
+SAME binds shows the vfs_bind_mount core at 45-70 us (lookup+attach
+17-29 us, clone-scan 28-41 us, clone-attach <1 us) — the appspawn
+"13-15 ms" userspace figure was the same ~5 ms wrapper cost plus its
+own bookkeeping. The ~5 ms sits in the sys_mount WRAPPER (read_user_
+path x2, security::capable -> LSM hook chain, target path_lookup,
+registry update) or in preemption inside it — FIRST suspect is the
+LSM capable hook (security_capable -> hook chain; if any registered
+LSM walks selinux state or worse, that is the fixed cost). NEXT
+PROBE: per-phase timers inside the sys_mount shell (one boot).
+
+EXECUTION ORDER for the next session, in order:
+1. mntslow phase timers (wrapper attribution) -> fix the ~5 ms mount
+   wrapper (61 binds x 5 ms = 0.3 s of each child's budget).
+2. The single-thread futex park: enable dfx=sleepsnap + a futex
+   wait/wake census for uaddr 0x7fffffffc754 (is the wake LOST —
+   kernel futex lane — or NEVER SENT because the counterpart never
+   spawns? A pre-park clone() failure would be invisible in
+   taskdumps; instrument clone failures by comm).
+3. MM LANE (relay): render_service byte-identical memcpy-into-stack
+   crash (rip 0x3fbf08ad30, anon VMA off=0x19000 anomaly) — likely
+   their merged-mapping offset bookkeeping; and the vDSO data page
+   (removes clock_gettime syscalls entirely).
+4. UART discipline (console lane): printk's irqsave UART drain is
+   the second-scale-stall amplifier; a printk ring + irq-on drainer
+   (Linux console_unlock shape) or hard byte budgets on the census
+   floods (RWFRZ 2472 lines/boot) would take the IRQ-OFF-WINDOW
+   count down an order of magnitude. putchar CANNOT simply sti in
+   the THRE wait: an IRQ-context printk would self-deadlock on the
+   same cpu's UART lock.
+5. VFS_STATE: launcher-child pids were CAUGHT spinning on it >=1 s
+   (WW samples). With the registry bounded at ~190 the holders must
+   be doing slow work under it — candidate: the MS_REC clone-scan's
+   dentry_relpath_below parent walks under the guard. Not yet fixed.
+
+Boots this session: sc115 (TSC verify, 20 min, checker), sc116
+(dfx=periodic,monowatch + sprobe=1 decode boot, 20 min, checker —
+taskdumps + mntslow + mtprobe data captured). MILESTONE not reached:
+screen is still the 8-color oracle checker; the chain now spawns
+cleanly (38 successes/boot, SPAWNCHILD 1.0 s of the 3 s watchdog)
+and dies between display-VDI init and thread creation.
+
+COMMITS this session (English, on feature/samgr-callback):
+- 6529f06a fix(timer): TSC timekeeper default ON (wip review)
+- 9e5f0147 fix(timer): TSC_MULSHIFT 12->32 + nearest rounding (root cause)
+- 7a9f38ba dfx(taskdump): periodic dump interval 5 s -> 30 s
+- 2ce75d20 wip(snapshot): sc115 artifacts
+
+SESSION O ADDENDUM (sc117 + two fixes + one probe, 06:3x-06:5x):
+- fix(mount) 502ea7a7: MOUNT_TABLE irqsave -> plain preempt-off lock
+  (register_mount's guard ran an O(rows) string retain + 4 heap allocs
+  with IRQs off; every user is syscall context; ns.rs tables already
+  plain). Built into sc117.
+- dfx(clone) bfc35fd2: both clone refusal paths now print errno +
+  free_bytes + comm (40-line budgets) — settles whether the app
+  children's missing worker threads are the F12 heap-reserve gate
+  (buddy free < 8 MiB -> silent ENOMEM) or another clone error.
+- sc117 (smoke, sprobe=0 dfx=periodic,monowatch, 10 min): WEDGED
+  variant — 78 'proxy is already dead' lines, 0 launcher spawns, so
+  the clone probes got no app-child window to test (no gate fires in
+  the wedged shape). IMPORTANT FOR THE NEXT SESSION: the OsAccount-
+  wedge coin flip is NOT fully cleared by the DDK fix — the zeroed
+  libusb_pnp_manager removed ONE trigger (the DDK NULL-walk crash
+  loop); other proxy-death producers remain (present since sc94).
+  TSC stayed clean (one 'fell behind 100181' at the 10 ms print
+  threshold — transient; no rebase, no wraps, no USEGV).
+- NEXT SESSION FIRST BOOT: the sc117 kernel already carries the clone
+  probes — boot the GOOD variant (reroll until spawns appear) and read
+  clone-gate/clone-fail lines around the first app children. If the
+  gate fires with sane free_bytes, the fix is policy (the 8 MiB
+  reserve dates from the 128 MB heap era; the OH lane runs 1 GiB).
+  If no clone line fires while children STILL park single-threaded,
+  the park is a lost futex wake (kernel futex lane) or a never-sent
+  wake (userspace) — then wire dfx=sleepsnap + a wake census on
+  uaddr 0x7fffffffc754.

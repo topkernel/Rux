@@ -1685,9 +1685,16 @@ fn sigfpe_has_handler() -> bool {
 /// Diagnostic only: every read is checked through the page-table walk.
 fn user_segv_forensics(regs: &PtRegs, fault_addr: u64) {
     let pid = crate::sched::get_current_pid();
+    // sc112: name the crashing process — the memfd USB DDK PnP NULL-walk
+    // kills an unnamed samgr SA host; comm decides which image cfg to cut.
+    let comm = crate::sched::current()
+        .map(|t| unsafe { (*t).comm() })
+        .map(|c| core::str::from_utf8(c).unwrap_or(""))
+        .unwrap_or("")
+        .trim_end_matches('\0');
     crate::pr_err!(
-        "USEGV-FOR: pid={} rip={:#x} cr2={:#x} rsp={:#x} rbp={:#x}",
-        pid, regs.rip, fault_addr, regs.rsp, regs.rbp
+        "USEGV-FOR: pid={} comm='{}' rip={:#x} cr2={:#x} rsp={:#x} rbp={:#x}",
+        pid, comm, regs.rip, fault_addr, regs.rsp, regs.rbp
     );
     crate::pr_err!(
         "USEGV-FOR: rax={:#x} rbx={:#x} rcx={:#x} rdx={:#x} rsi={:#x} rdi={:#x}",

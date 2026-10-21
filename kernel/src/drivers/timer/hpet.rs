@@ -537,7 +537,12 @@ pub fn calibrate_tsc() -> bool {
     if tsc_hz == 0 || tsc_hz > 16_000_000_000u128 {
         return false;
     }
-    let mult = (((CLOCK_FREQ as u128) << TSC_MULSHIFT).div_ceil(tsc_hz)) as u64;
+    // Nearest rounding, NOT ceil (sc110-114: a ceiled mult at shift 12
+    // ran the mapping 4.796% fast — see the TSC_MULSHIFT note in
+    // x86_64.rs). u128 math: CLOCK_FREQ << 32 = 4.3e16 fits, but the
+    // u128 path keeps the tsc_hz divide exact.
+    let mult = ((((CLOCK_FREQ as u128) << TSC_MULSHIFT) + (tsc_hz as u128) / 2)
+        / (tsc_hz as u128)) as u64;
     let nominal_at_t1 = h1 / div + offset;
     promote_tsc_timekeeper(mult, t1, nominal_at_t1);
     crate::pr_info!(
