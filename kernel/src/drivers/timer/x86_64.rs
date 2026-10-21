@@ -246,7 +246,14 @@ pub fn calibrate_cpu_tsc_offset(cpu: usize) {
     let raw = crate::arch::cpu::read_counter();
     let tsc_nom = ((raw.wrapping_sub(base) >> TSC_MULSHIFT).wrapping_mul(mult)).wrapping_add(off);
     let hpet_nom = crate::drivers::timer::hpet::read_time_nominal();
-    let delta = hpet_nom as i64 - tsc_nom as i64;
+    let mut delta = hpet_nom as i64 - tsc_nom as i64;
+    // Negative-sum guard: a vCPU that reads BEHIND by more than the
+    // current uptime would wrap the u64 clock forward by ~2^64. Clamp
+    // the correction so corrected >= 0 (the CPU then reads a hair fast
+    // until uptime outgrows the skew — never wraps).
+    if tsc_nom as i64 + delta < 0 {
+        delta = -(tsc_nom as i64);
+    }
     // Residual is the vCPU TSC-offset skew — apply it whatever the size
     // (25 s is the observed magnitude), but say so beyond 1 ms so the
     // boot log documents each vCPU's skew once.
