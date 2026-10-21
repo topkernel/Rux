@@ -1,0 +1,3 @@
+[chain] 02:40:32 run 26/100 starting (port 12371)
+[ww] qemu pid=2371437 tag=ww-s2-r26 port=12371 budget=2700s
+[ww] gdb pid=2371948 armed from /home/william/rux-agents/wildwrite-hunt/run/ww-s2-r26-gdb.cmd

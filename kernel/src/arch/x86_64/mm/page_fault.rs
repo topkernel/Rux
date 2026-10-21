@@ -249,6 +249,57 @@ fn try_expand_stack(
     MmFaultResult::Handled
 }
 
+// ==================== Fault-Around ====================
+
+/// Fault-around window in pages for read/exec demand faults on file
+/// VMAs — Linux's fault_around_bytes default shape (64 KiB / 4 KiB = 16).
+/// One fault fills and maps up to this many pages starting at the faulting
+/// page (session 14, the mm-side half of the 16x lib-load win; the fs-side
+/// readahead detector sees the sequential read_at stream and prefetches
+/// the window through the batch block layer).
+///
+/// Around pages are held to SINGLE-page semantics, only amortized: each
+/// page is an exclusive private copy filled from the pinned vm_file at
+/// its own file offset, mapped with the VMA's flags, past-EOF pages stay
+/// unmapped (a later touch re-faults into the SIGBUS gate), and write
+/// faults opt out (Linux do_fault_around parity).
+const FAULT_AROUND_PAGES: usize = 16;
+
+/// Fill one freshly allocated (exclusively owned) user page from `file`
+/// at `file_offset` — the single-page demand-fault fill semantics,
+/// extracted so the fault-around batch shares it byte-for-byte.
+///
+/// Pre-zero only when a full-page read is not guaranteed; any read that
+/// does not verifiably cover the whole page (short tail, 0, or a NEGATIVE
+/// errno return from read_at — the old inline `bytes_read == 0` check
+/// missed negative returns and could leak recycled-buddy content) leaves
+/// the uncovered tail zeroed.
+///
+/// # SAFETY
+/// `page_ptr` must be a PAGE_SIZE-byte kernel VA of an exclusively owned
+/// fresh physical page (phys_to_virt of an alloc_user_phys_page result).
+unsafe fn fill_file_page(
+    file: &crate::fs::file::File,
+    file_offset: usize,
+    page_ptr: *mut u8,
+    effective_size: usize,
+) {
+    let will_full_read =
+        file_offset < effective_size && effective_size - file_offset >= PAGE_SIZE_USIZE;
+    if !will_full_read {
+        core::ptr::write_bytes(page_ptr, 0, PAGE_SIZE_USIZE);
+    }
+    if file_offset >= effective_size {
+        return; // within VMA but past EOF: stays zero (sparse/hole)
+    }
+    let bytes_to_read = core::cmp::min(PAGE_SIZE_USIZE, effective_size - file_offset);
+    let bytes_read = file.read_at(file_offset as u64, page_ptr, bytes_to_read);
+    let good = if bytes_read > 0 { bytes_read as usize } else { 0 };
+    if good < PAGE_SIZE_USIZE {
+        core::ptr::write_bytes(page_ptr.add(good), 0, PAGE_SIZE_USIZE - good);
+    }
+}
+
 // ==================== Main Fault Handler ====================
 
 /// E8-MM port: does a leaf PTE (raw bits) at `va` count as "mapped" for a
@@ -425,6 +476,10 @@ pub fn handle_mm_fault(
     // preemption/EXT4_BIG_LOCK pinch rule is about holding it across
     // I/O, not about cloning an Arc under it).
     let vma_start = vma.start().as_usize();
+    // Fault-around (session 14): the batch below also needs the VMA's
+    // end to bound its window; captured under the same entry guard
+    // snapshot.
+    let vma_end = vma.end().as_usize();
     let vm_file = if vma_type == VmaType::FileBacked && vma_file_fd >= 0 {
         addr_space.get_vma_file(vma_start)
     } else {
@@ -652,6 +707,152 @@ pub fn handle_mm_fault(
                     }
                 }
             }
+    }
+
+    // Fault-around (session 14): on read/exec faults into FileBacked
+    // VMAs, fill and map up to FAULT_AROUND_PAGES pages starting at the
+    // faulting page — one VMA find, one PTE-lock section, and (via the
+    // ext4 readahead detector watching the sequential read_at stream)
+    // one batched block-layer window instead of 16 separate faults. A
+    // 100 MB lib load collapses from ~25600 demand faults to ~1600
+    // fault-around events; composes with the fs-side readahead rather
+    // than duplicating it. Excluded, deliberately: write faults (Linux
+    // do_fault_around parity — a writer faults its own pages), the
+    // SHARED-devfs coherent path (returned above), and everything
+    // non-file (anon/device/shmem keep the single-page arms below).
+    if vma_type == VmaType::FileBacked && vma_file_fd >= 0 && !is_write {
+        let file = vm_file.clone().or_else(|| {
+            // SAFETY: fd-table lookup by number for the CURRENT task,
+            // same as the single-page fill arm; we are in that task's
+            // fault context.
+            unsafe { crate::fs::get_file_fd(vma_file_fd as usize) }
+        });
+        if let Some(file) = file {
+            let fault_page = page_virt_addr.as_usize() & !(PAGE_SIZE_USIZE - 1);
+            // Window bounds: the VMA end (INV-VMA-4 page-aligned), then
+            // EOF — a page whose file offset is >= effective_size stays
+            // UNMAPPED so a later touch re-faults into the SIGBUS gate
+            // above (LTP mmap13 truncate semantics unchanged).
+            let eof_limit = vma_start + effective_size.saturating_sub(vma_offset);
+            let win_end = (fault_page + FAULT_AROUND_PAGES * PAGE_SIZE_USIZE)
+                .min(vma_end)
+                .min(eof_limit);
+            // fault_page < win_end always: the SIGBUS gate above passed
+            // for the faulting page. Ceil so a partial final page at the
+            // window edge is included (its offset is still < effective_size).
+            let n_pages =
+                (win_end - fault_page + PAGE_SIZE_USIZE - 1) / PAGE_SIZE_USIZE;
+
+            // Fill phase — NO locks held (R73: read_at may block on I/O;
+            // the vma guard was dropped above and the pte lock must not
+            // serialize I/O across mms).
+            let mut phys: [u64; FAULT_AROUND_PAGES] = [0; FAULT_AROUND_PAGES];
+            let mut filled = 0usize;
+            for i in 0..n_pages {
+                // Partial window on allocator failure is fine (Linux
+                // behaves the same); zero filled pages means the single
+                // page path below reports OutOfMemory.
+                let Some(pa) = alloc_user_phys_page() else { break };
+                let off_i = vma_offset + (fault_page - vma_start) + i * PAGE_SIZE_USIZE;
+                let page_ptr = phys_to_virt(PhysAddr::new(pa)).bits() as *mut u8;
+                // SAFETY: page_ptr is phys_to_virt of a freshly
+                // allocated, exclusively owned page; fill_file_page only
+                // writes within its PAGE_SIZE bounds.
+                unsafe { fill_file_page(file.as_ref(), off_i, page_ptr, effective_size) };
+                phys[filled] = pa;
+                filled += 1;
+            }
+
+            if filled > 0 {
+                // Same PTE flag construction as the single-page arm —
+                // flags are uniform across the VMA (mprotect splits, it
+                // never reflags a range in place).
+                let mut pte_flags = PageTableEntry::P | PageTableEntry::A
+                    | PageTableEntry::D | PageTableEntry::NX | PageTableEntry::U;
+                if vma_flags.is_writable() {
+                    // MAP_PRIVATE file pages map writable directly: each
+                    // around page is an exclusive fresh copy (same rule
+                    // as the single-page arm below).
+                    pte_flags |= PageTableEntry::W;
+                }
+                if vma_flags.is_executable() {
+                    pte_flags &= !PageTableEntry::NX;
+                }
+
+                // Re-verify the VMA snapshot under a RE-TAKEN read guard
+                // and hold it across the whole map section (INV-LOCK-7
+                // order vma -> pte; the PROT_NONE marker path above
+                // already nests this way). Every mm-side mutator of this
+                // range — munmap, mprotect split, MAP_FIXED replace —
+                // needs the vma WRITE lock, so it cannot interleave
+                // between the verify and the maps: the stale-capture
+                // race (filling against a VMA that got replaced by a
+                // different mapping, then installing file content into
+                // it) is closed for the whole batch at once.
+                let vma_mgr2 = addr_space.vma_read();
+                let snapshot_ok = vma_mgr2
+                    .find(PageVirtAddr::new(fault_page))
+                    .is_some_and(|v| {
+                        v.start().as_usize() == vma_start
+                            && v.end().as_usize() >= win_end
+                            && v.offset() == vma_offset
+                            && v.file_fd() == vma_file_fd
+                            && v.flags() == vma_flags
+                    });
+                if !snapshot_ok {
+                    drop(vma_mgr2);
+                    for pa in phys.iter().take(filled) {
+                        crate::mm::page_alloc::free_page(*pa as usize);
+                    }
+                    // VMA changed under us: retry, the fresh fault takes
+                    // current VMA state (a now-dead range Segfaults, a
+                    // re-flagged one re-faults through its own perms).
+                    return MmFaultResult::Handled;
+                }
+
+                // One PTE-lock section for the whole batch: a concurrent
+                // fork COW walk cannot observe a half-mapped window, and
+                // per-mm faults serialize against it once (not 16 times).
+                let _pte_guard = crate::arch::mm::mm_ops::pte_lock_for(addr_space).lock();
+                let mut mapped = 0u64;
+                for i in 0..filled {
+                    let va_i = VirtAddr::new((fault_page + i * PAGE_SIZE_USIZE) as u64);
+                    // Re-check per page (E8-MM device-window-hole rule).
+                    // A page that lost a race (concurrent CLONE_VM fault
+                    // or a racing mprotect marker) is freed and skipped.
+                    if unsafe { PageTableWalker::walk(root_ppn, va_i.bits() as u64) }
+                        .map_or(false, |(_ppn, bits)| {
+                            pte_counts_as_mapped(bits, va_i.bits() as u64)
+                        })
+                    {
+                        crate::mm::page_alloc::free_page(phys[i] as usize);
+                        continue;
+                    }
+                    // SAFETY: root_ppn is a valid root, va_i is
+                    // page-aligned and VMA-verified, phys[i] is a freshly
+                    // filled exclusively owned page, pte_flags built from
+                    // the verified VMA's permissions.
+                    unsafe {
+                        map_page(root_ppn, va_i, PhysAddr::new(phys[i]), pte_flags);
+                        crate::arch::cpu::invlpg(va_i.bits());
+                    }
+                    mapped += 1;
+                }
+                drop(_pte_guard);
+                drop(vma_mgr2);
+
+                if mapped > 0 {
+                    addr_space.add_rss(mapped);
+                }
+                // The faulting page is either mapped here or lost a race
+                // to an identical mapping — retry the instruction either
+                // way (R8-4: Handled, never AlreadyMapped, so the loser
+                // is not killed).
+                return MmFaultResult::Handled;
+            }
+            // filled == 0: the allocator failed on the first page; fall
+            // through so the single-page path returns OutOfMemory.
+        }
     }
 
     // Allocate new page
