@@ -425,14 +425,19 @@ pub fn vfs_mount(
                 flags: Spinlock::new(mnt_flags),
             });
             child.set_mount(mnt_desc.clone());
-            state.mounts.push(mnt_desc);
+            state.mounts.push(mnt_desc.clone());
+            // sc98: remember the mount in the CALLER's namespace so a dying
+            // private namespace (killed appspawn children) unmounts it
+            // instead of leaking it into the shared tree forever — see
+            // MountNamespace::vfs_mounts.
+            crate::process::ns::ns_track_vfsmount(mnt_desc);
             // Mountpoint back-reference: dentries inside the mount climb
             // parent==None at the mount root and must hop to THIS
             // mountpoint dentry to carry the prefix (build_path_rooted).
             // The hop existed but was never wired here — every path
             // built from a dentry inside a mount was mount-relative
             // (/dev/dri reported "/dri"), so dirfd-relative openat
-            // resolved "/dri/card0" → ENOENT: OH's composer VDI
+            // resolved "/dri" → ENOENT: OH's composer VDI
             // (FindAndOpenKmsCard) readdir'd /dev/dri fine but its
             // openat(dirfd, "card0") failed silently, the DRM chain saw
             // "can't open drm card device", zero displays, and the whole
@@ -497,6 +502,39 @@ pub fn vfs_umount(mountpoint: &str) -> Result<(), i32> {
     Ok(())
 }
 
+/// sc98: detach one known mount OBJECT (namespace-teardown path —
+/// MountNamespace::Drop). Unlike vfs_umount this takes no path: the
+/// mountpoint dentry is recovered from the mount's own back-reference.
+/// The mount is only detached when it is STILL the live mount at its
+/// mountpoint — a newer mount stacked on the same dentry replaced it and
+/// owns the slot (the shadowed mount just leaves the registry).
+pub fn vfs_umount_object(mnt: &Arc<VfsMountInternal>) {
+    let Some(mp) = mnt.root.get_mountpoint_back() else {
+        // Never attached via vfs_mount (mount-at-"/" overlays the root
+        // inode instead) or already torn down: just drop the registry row.
+        let mut state = VFS_STATE.lock();
+        state.mounts.retain(|m| !Arc::ptr_eq(m, mnt));
+        return;
+    };
+    {
+        let mut cur = mp.vfsmount.lock();
+        if let Some(top) = cur.as_ref() {
+            if !Arc::ptr_eq(top, mnt) {
+                // Shadowed by a newer mount at the same mountpoint: detach
+                // from the registry only.
+                drop(cur);
+                let mut state = VFS_STATE.lock();
+                state.mounts.retain(|m| !Arc::ptr_eq(m, mnt));
+                return;
+            }
+            *cur = None;
+        }
+    }
+    let mut state = VFS_STATE.lock();
+    state.mounts.retain(|m| !Arc::ptr_eq(m, mnt));
+    mnt.root.clear_mountpoint_back();
+}
+
 /// Relative component names from `anc` down to `d` (exclusive of `anc`),
 /// walking the dentry tree upward and hopping mount boundaries via the
 /// fs-root mountpoint back-references. None when `d` is not a strict
@@ -558,6 +596,13 @@ pub fn vfs_bind_mount(
     mnt_flags: MntFlags,
     recursive: bool,
 ) -> Result<(), i32> {
+    // sc98 mount-latency probe: phase breakdown of every bind (rate
+    // limited). TSC cycles — relative attribution only; the appspawn
+    // slog already showed per-mount wall time at 5-25 ms and growing
+    // over the boot, and the growth curve tracks the registry size
+    // printed here.
+    #[cfg(feature = "x86_64")]
+    let t0 = crate::arch::x86_64::cpu::read_counter();
     let src = match path_lookup(source, 0) {
         Ok(p) => p,
         Err(e) => {
@@ -666,6 +711,8 @@ pub fn vfs_bind_mount(
         }
     }
     let fresh_root = vfs_mount(target, inode.clone(), mnt_flags);
+    #[cfg(feature = "x86_64")]
+    let t2 = crate::arch::x86_64::cpu::read_counter();
 
     // MS_REC: clone the mounts nested under the source subtree to the
     // same relative paths under the target (see the doc comment). The
@@ -740,6 +787,14 @@ pub fn vfs_bind_mount(
                 })
                 .collect()
         };
+        #[cfg(feature = "x86_64")]
+        let (t3, n_mounts) = {
+            (
+                crate::arch::x86_64::cpu::read_counter(),
+                VFS_STATE.lock().mounts.len(),
+            )
+        };
+        let nclones = clones.len();
         for (rel, root, flags) in clones {
             // Rate-limited (sc37 lesson): one boot printed 1,012,926 of
             // these — ~50 clones per spawn x the appspawn retry storm —
@@ -757,6 +812,24 @@ pub fn vfs_bind_mount(
                 );
             }
             bind_clone_attach(&fresh_root, &rel, &root, flags);
+        }
+        #[cfg(feature = "x86_64")]
+        {
+            let t4 = crate::arch::x86_64::cpu::read_counter();
+            static MTPROBE_N: core::sync::atomic::AtomicUsize =
+                core::sync::atomic::AtomicUsize::new(0);
+            if MTPROBE_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 400 {
+                crate::pr_warn!(
+                    "mtprobe: bind '{}' -> '{}': lookup+attach={}cyc clone-scan={}cyc clone-attach={}cyc nmounts={} nclones={}",
+                    source,
+                    target,
+                    t2 - t0,
+                    t3 - t2,
+                    t4 - t3,
+                    n_mounts,
+                    nclones
+                );
+            }
         }
     }
     Ok(())
@@ -830,7 +903,11 @@ fn bind_clone_attach(
             child.set_mount(mnt_desc.clone());
             mounted_root.set_mountpoint_back(child.clone());
             let mut state = VFS_STATE.lock();
-            state.mounts.push(mnt_desc);
+            state.mounts.push(mnt_desc.clone());
+            drop(state);
+            // sc98: MS_REC clones belong to the caller's namespace too —
+            // a dying private ns must unmount them with the rest.
+            crate::process::ns::ns_track_vfsmount(mnt_desc);
             return;
         }
         // Intermediate component — dcache hit or fs lookup; never fabricate.

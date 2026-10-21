@@ -25,8 +25,13 @@ static MOUNT_TABLE: Spinlock<Vec<(String, String, String, String)>> = Spinlock::
 /// Register a mount in the current mount namespace AND the global registry.
 /// U1c: callers in a private (CLONE_NEWNS) namespace only mutate their own
 /// table; the global registry stays the init-namespace baseline.
+/// sc98: that contract is now ENFORCED — private-namespace mounts (OH
+/// appspawn children's ~50 sandbox binds per spawn) used to push a row
+/// into the global table too, where the O(rows) retain() per register
+/// made every later mount slower while the launcher restart loop pumped
+/// thousands of dead rows in.
 pub fn register_mount(device: &str, mount_point: &str, fs_type: &str, flags: &str) {
-    {
+    if crate::process::ns::in_init_mnt_ns() {
         let mut table = MOUNT_TABLE.lock_irqsave();
         table.retain(|(_, mp, _, _)| mp != mount_point);
         table.push((

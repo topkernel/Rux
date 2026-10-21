@@ -1823,10 +1823,27 @@ fn kd_fd_type(file: &crate::fs::File) -> &'static str {
 /// SAFETY: `t` is the live Task whose entry frame the args came from.
 unsafe fn kill_dump_wedge(tk: &Task, t: *mut Task, nr: u64, args: [u64; 3]) {
     use core::fmt::Write;
+    // sc97 discriminator: RUNNING-state at SIGKILL time means the entry
+    // frame's syscall may be STALE (task is executing userspace — e.g. a
+    // busy loop) or the task burns kernel time in a non-sleeping loop, or
+    // it was set runnable but never linked/scheduled (wake-loss family).
+    // utime vs stime names the burn mode; tiny both = never scheduled.
+    let linked = match crate::sched::sched::grq_diag_cfs_linked(t) {
+        Some(b) => {
+            if b { "1" } else { "0" }
+        }
+        None => "n/a",
+    };
     crate::pr_warn!(
-        "KILLDUMP: tid {} state={:#x}",
+        "KILLDUMP: tid {} state={:#x} on_cpu={} cfs_linked={} pick_state={} cpu={} utime={}t stime={}t",
         tk.pid(),
-        tk.state().bits()
+        tk.state().bits(),
+        tk.on_cpu(),
+        linked,
+        tk.pick_state(),
+        tk.ti_cpu(),
+        tk.utime_ticks.load(core::sync::atomic::Ordering::Relaxed),
+        tk.stime_ticks.load(core::sync::atomic::Ordering::Relaxed)
     );
     // Whole low fdtable: fd/type/path one line — where fd3 came from and
     // what the process holds overall.
