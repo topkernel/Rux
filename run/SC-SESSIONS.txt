@@ -1302,3 +1302,38 @@ COMMITS this session (English, on feature/samgr-callback):
 - facb8f3a wip(snapshot): fault-around + probes
 - 8ebbf25b dfx(stime): focus histogram + memfd-strs forensics
 - 6ecb3478 dfx(uart): sprobe=0 gate for launcher-context probe prints
+
+SESSION N UPDATE 2 (sc110/sc111 + TSC parked):
+- sc110/sc111 (TSC timekeeper ON + sprobe=0): both landed the WEDGED
+  boot variant (OsAccount dead-proxy + BMS responseUserId:-1 loop, no
+  launcher spawns before the boots' end) — no good-variant A/B for the
+  stime question this session. sc109's focus histogram stands as the
+  attribution evidence.
+- sc110 ANOMALY: "tsc-clock: rebase, lead 250413052" — ONE ~25 s forward
+  step of the TSC clock vs the HPET, once, early; NO rate drift after
+  the rebase (no second event). Signature = per-vCPU TSC-offset skew
+  (KVM catch-up offset when the second CPU onlines is the prime
+  suspect), not a calibration-rate error. PARKED: calibrate_tsc is now
+  opt-in via `tscclk`; HPET is the default timekeeper again (commit
+  d8d7c50f). The rebase path prints cpu + raw tsc/hpet/base/mult for the
+  next capture; with that, one tscclk boot decides skew-vs-smash.
+- NEXT SESSION (ordered):
+  1. Good-variant boot (coin flip; sc106/sc108 shapes) with sprobe=0:
+     read KILLDUMP stime + FOCUS table. Expected: hpet page still top
+     (TSC parked) — then fix the skew (probe above) and re-land tscclk,
+     or land the vDSO data-page fix (mm lane) which removes the syscall
+     entirely — the two fixes are alternatives for the same burn.
+  2. The launcher-context print inventory is not empty: devopen-probe
+     prints fire per /dev open in the launcher's context (log/fmt page
+     residue in sc109's focus table). Same UART busy-poll economics —
+     consider gating or budgeting them.
+  3. Appspawn's userspace "mount X time ~13-15ms avg" (all variants,
+     kernel bind measured 40-80us in sc99 — 160x gap): instrument
+     sys_mount entry->exit with TSC + comm for one boot; suspects are
+     deep sandbox path resolution (20+ component dentry walks) and
+     VFS_STATE contention at 1800-3300 mounts/boot. 61 binds x 13ms
+     ~= 0.8s of the 3s child budget.
+  4. IMAGE SIDE (main session): the usb DDK PnP manager memfd lib crash
+     (NULL list walk, rip voff 0x15bac) kills SA hosts and gates ~50% of
+     boots at the BMS/OsAccount wedge. Extend the usb disable overlay to
+     its host process.
