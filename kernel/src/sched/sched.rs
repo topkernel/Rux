@@ -2941,6 +2941,25 @@ pub fn wake_up_enqueue(task: *mut Task) -> bool {
             // Not RUNNING-and-unowned: ZOMBIE/DEAD/TASK_NEW, already linked,
             // or some (live) CPU's current — refuse exactly as before.
             if st != TaskState::new(TaskState::RUNNING) || linked || curr_on {
+                // sc99: this refusal was silent, and the binder-stall
+                // WAKE-RUN-LEAK family shows tasks parked in exactly the
+                // refused shapes for minutes while REKICKs keep arriving —
+                // name the refusing guard so the next capture says which
+                // condition ate the wake (curr_on = a lying busy slot).
+                static W3_N: core::sync::atomic::AtomicU32 =
+                    core::sync::atomic::AtomicU32::new(0);
+                if W3_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 32 {
+                    crate::pr_warn!(
+                        "W3-RUNWAKE-REFUSED pid={} state={:#x} linked={} curr_on={} on_cpu={} pk={} cpu={}",
+                        (*task).pid(),
+                        st.bits(),
+                        linked,
+                        curr_on,
+                        (*task).on_cpu(),
+                        (*task).pick_state(),
+                        (*task).ti_cpu()
+                    );
+                }
                 return false;
             }
             // R63: RUNNING ∧ unlinked ∧ owned by no current slot still has

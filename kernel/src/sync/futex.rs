@@ -1666,6 +1666,357 @@ fn exit_ring_dump_tgid(tgid: u32) {
     }
 }
 
+/// sc93 launcher gate: AMS SIGKILLs a lifecycle-timed-out app while the
+/// DFX userspace dumper itself fails on that app (every LIFECYCLE_TIMEOUT
+/// freeze artifact says "normal stack:failed to fully dump due to
+/// timeout") — the kernel is the only observer that can still read the
+/// wedged process. Called at SIGKILL send time (signal.rs), when the app
+/// is by definition terminally wedged: prints every thread of the tgid,
+/// each thread's futex park word + its CURRENT value (binder reply waits,
+/// condvars, mutexes — the park value names the primitive and protocol),
+/// and rip/rsp + file-backed stack frames via the sc90 exec-VMA filter.
+/// pr_warn so the quiet boot (loglevel=4) keeps it; 8 dumps/boot cap
+/// against restart-loop flooding.
+pub fn kill_dump_tgid(tgid: u32) {
+    use core::fmt::Write;
+    static N: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+    if N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) >= 8 {
+        return;
+    }
+    // Collect thread pointers only under the pid-hash walk (its bucket
+    // locks forbid heavy work); the page-table reads happen after.
+    // for_each_task takes an Fn closure, so the list goes through a
+    // RefCell.
+    let threads_cell = core::cell::RefCell::new(alloc::vec::Vec::<*mut Task>::new());
+    crate::sched::for_each_task(|t| {
+        if unsafe { (*t).tgid() as u32 } == tgid {
+            threads_cell.borrow_mut().push(t);
+        }
+    });
+    let threads = threads_cell.into_inner();
+    let mut hdr = alloc::string::String::new();
+    let _ = write!(hdr, "KILLDUMP: tgid {} threads={}", tgid, threads.len());
+    for &t in threads.iter() {
+        let tk = unsafe { &*t };
+        let comm = core::str::from_utf8(tk.comm()).unwrap_or("").trim_end_matches('\0');
+        let _ = write!(hdr, " [{}:{}]", tk.pid(), comm);
+    }
+    crate::pr_warn!("{}", hdr);
+    for &t in threads.iter() {
+        // Park word: this task's live (unwoken) entry in the waiter pool.
+        let mut parked = None;
+        for slot in WAITER_POOL.iter() {
+            let s = slot.lock_irqsave();
+            if let Some(w) = s.as_ref() {
+                if core::ptr::eq(w.task, t) && !w.woken {
+                    parked = Some((w.key.uaddr, w.bitset));
+                }
+            }
+            drop(s);
+            if parked.is_some() {
+                break;
+            }
+        }
+        let tk = unsafe { &*t };
+        let comm = core::str::from_utf8(tk.comm()).unwrap_or("").trim_end_matches('\0');
+        match parked {
+            Some((uaddr, bitset)) => {
+                let word = unsafe { read_u32_via_task(t, uaddr) };
+                crate::pr_warn!(
+                    "KILLDUMP: tid {} comm='{}' parked uaddr={:#x} bitset={:#x} word={:#x}",
+                    tk.pid(),
+                    comm,
+                    uaddr,
+                    bitset,
+                    word.unwrap_or(0xdead_bee1)
+                );
+            }
+            None => {
+                crate::pr_warn!(
+                    "KILLDUMP: tid {} comm='{}' NOT on a futex (blocked in another syscall or runnable)",
+                    tk.pid(),
+                    comm
+                );
+            }
+        }
+        // sc93: the saved entry frame carries the blocked syscall itself
+        // — orig_rax (syscall nr) + args. For a task parked mid-syscall
+        // this names the wait primitive outright (read/epoll/ioctl and
+        // WHICH fd). Fd-like args (< 64) are resolved to paths.
+        {
+            let top = tk.kernel_stack_top();
+            #[cfg(feature = "x86_64")]
+            {
+                let regs = (top.wrapping_sub(crate::arch::x86_64::pt_regs::PT_REGS_SIZE))
+                    as *const crate::arch::x86_64::pt_regs::PtRegs;
+                // SAFETY: diagnostic read of this task's entry frame.
+                let r = unsafe { &*regs };
+                crate::pr_warn!(
+                    "KILLDUMP: tid {} syscall nr={:#x} rdi={:#x} rsi={:#x} rdx={:#x} r10={:#x}",
+                    tk.pid(),
+                    r.orig_rax,
+                    r.rdi,
+                    r.rsi,
+                    r.rdx,
+                    r.r10
+                );
+                let mut fdnote = alloc::string::String::new();
+                for arg in [r.rdi, r.rsi, r.rdx] {
+                    if arg < 64 {
+                        if let Some(f) = tk.fdtable().get_file(arg as usize) {
+                            use core::fmt::Write;
+                            let _ = write!(fdnote, " fd{}={}", arg, f.path());
+                        }
+                    }
+                }
+                if !fdnote.is_empty() {
+                    crate::pr_warn!("KILLDUMP: tid {} {}", tk.pid(), fdnote);
+                }
+                // sc97 wedge forensics: the sc96 kills put the launcher
+                // main thread in writev(fd=3) on an inode-less file 6/8
+                // times (plus one mount(2) and one open(2) park). Name
+                // the fd TYPE by ops identity and dump the state that
+                // decides the wedge; read the syscall's user arguments
+                // (iovec layout + payload head, path/fstype strings); and
+                // print the task run state so "parked" vs "runnable"
+                // (slow exit path) can be told apart.
+                unsafe { kill_dump_wedge(tk, t, r.orig_rax, [r.rdi, r.rsi, r.rdx]) };
+            }
+        }
+        unsafe { rwfz_stack_frames(t, "KILLDUMP", 10, 96) };
+    }
+}
+
+/// sc97: type name for a File by fops identity (the kernel-image symbol
+/// at the ops address names any not listed here, offline via nm).
+fn kd_fd_type(file: &crate::fs::File) -> &'static str {
+    let ops = match file.get_ops() {
+        Some(o) => o as *const crate::fs::FileOps as *const (),
+        None => return "no-ops",
+    };
+    let is = |p: &crate::fs::FileOps| ops == (p as *const _ as *const ());
+    if is(&crate::fs::pipe::PIPE_OPS) {
+        return "pipe";
+    }
+    if is(&crate::fs::fifo::FIFO_OPS) {
+        return "fifo";
+    }
+    if is(&crate::net::unix::UNIX_SOCKET_OPS) {
+        return "unix-sock";
+    }
+    if is(&crate::net::socket::SOCKET_OPS) {
+        return "inet-sock";
+    }
+    if is(&crate::ipc::binder::BINDER_OPS) {
+        return "binder";
+    }
+    if is(&crate::fs::inotify::INOTIFY_OPS) {
+        return "inotify";
+    }
+    if is(&crate::syscall::misc::EVENTFD_OPS) {
+        return "eventfd";
+    }
+    "other"
+}
+
+/// sc97: deep dump of the wedged syscall's fd and user arguments.
+/// SAFETY: `t` is the live Task whose entry frame the args came from.
+unsafe fn kill_dump_wedge(tk: &Task, t: *mut Task, nr: u64, args: [u64; 3]) {
+    use core::fmt::Write;
+    // sc97 discriminator: RUNNING-state at SIGKILL time means the entry
+    // frame's syscall may be STALE (task is executing userspace — e.g. a
+    // busy loop) or the task burns kernel time in a non-sleeping loop, or
+    // it was set runnable but never linked/scheduled (wake-loss family).
+    // utime vs stime names the burn mode; tiny both = never scheduled.
+    let linked = match crate::sched::sched::grq_diag_cfs_linked(t) {
+        Some(b) => {
+            if b { "1" } else { "0" }
+        }
+        None => "n/a",
+    };
+    crate::pr_warn!(
+        "KILLDUMP: tid {} state={:#x} on_cpu={} cfs_linked={} pick_state={} cpu={} utime={}t stime={}t",
+        tk.pid(),
+        tk.state().bits(),
+        tk.on_cpu(),
+        linked,
+        tk.pick_state(),
+        tk.ti_cpu(),
+        tk.utime_ticks.load(core::sync::atomic::Ordering::Relaxed),
+        tk.stime_ticks.load(core::sync::atomic::Ordering::Relaxed)
+    );
+    // Whole low fdtable: fd/type/path one line — where fd3 came from and
+    // what the process holds overall.
+    {
+        let mut line = alloc::string::String::new();
+        let _ = write!(line, "KILLDUMP: tid {} fdtab:", tk.pid());
+        for fd in 0..16usize {
+            if let Some(f) = tk.fdtable().get_file(fd) {
+                let _ = write!(line, " [{}:{}:{}]", fd, kd_fd_type(&f), f.path());
+            }
+        }
+        crate::pr_warn!("{}", line);
+    }
+    // The syscall's primary fd (rdi for read/write/writev/ioctl-family).
+    if let Some(&fd) = args.first() {
+        if fd < 64 && tk.fdtable().get_file(fd as usize).is_some() {
+            if let Some(f) = tk.fdtable().get_file(fd as usize) {
+                let ty = kd_fd_type(&f);
+                crate::pr_warn!(
+                    "KILLDUMP: tid {} fd{} type={} flags={:#x}",
+                    tk.pid(),
+                    fd,
+                    ty,
+                    f.flags_bits()
+                );
+                match ty {
+                    "pipe" => {
+                        if let Some(pipe) = crate::fs::pipe::pipe_of_file(&f) {
+                            let (fill, cap, rc, wc) = pipe.diag_snapshot();
+                            let pipe_ptr = unsafe { *f.private_data.get() }
+                                .map(|p| p as usize)
+                                .unwrap_or(0);
+                            crate::pr_warn!(
+                                "KILLDUMP: tid {} pipe fill={}/{} rclosed={} wclosed={} ptr={:#x}",
+                                tk.pid(),
+                                fill,
+                                cap,
+                                rc,
+                                wc,
+                                pipe_ptr
+                            );
+                            // Who else holds an end? create_pipe installs the
+                            // same Arc<Pipe> raw pointer in BOTH files, so a
+                            // private_data match names every holder task and
+                            // which end (O_RDONLY = reader) it owns.
+                            if pipe_ptr != 0 {
+                                let holders_cell =
+                                    core::cell::RefCell::new(alloc::string::String::new());
+                                crate::sched::for_each_task(|ht| {
+                                    let hk = unsafe { &*ht };
+                                    if hk.pid() == 0 {
+                                        return;
+                                    }
+                                    for hfd in 0..32usize {
+                                        if let Some(hf) = hk.fdtable().get_file(hfd) {
+                                            let hty = kd_fd_type(&hf);
+                                            if hty == "pipe"
+                                                && unsafe { *hf.private_data.get() }
+                                                    == Some(pipe_ptr as *mut u8)
+                                            {
+                                                let hcomm = core::str::from_utf8(hk.comm())
+                                                    .unwrap_or("")
+                                                    .trim_end_matches('\0');
+                                                let _ = write!(
+                                                    holders_cell.borrow_mut(),
+                                                    " [{}:{} fd{} {}]",
+                                                    hk.pid(),
+                                                    hcomm,
+                                                    hfd,
+                                                    if hf.flags_bits() & 0o3 == 0 {
+                                                        "READ"
+                                                    } else {
+                                                        "WRITE"
+                                                    }
+                                                );
+                                            }
+                                        }
+                                    }
+                                });
+                                let holders = holders_cell.into_inner();
+                                crate::pr_warn!(
+                                    "KILLDUMP: tid {} pipe holders:{}",
+                                    tk.pid(),
+                                    if holders.is_empty() { " NONE" } else { &holders }
+                                );
+                            }
+                        }
+                    }
+                    "unix-sock" => {
+                        if let Some(us) = crate::net::unix::unix_of_file_diag(&f) {
+                            let (qb, qt, cap, ql) = us.diag_snapshot();
+                            let peer = us.dgram_peer.lock().clone();
+                            let bound = us.bound_name.lock().clone();
+                            crate::pr_warn!(
+                                "KILLDUMP: tid {} unix kind={:?} bound={:?} dgram_peer={:?} queued={}B truesize={} sndbuf={} qlen={}",
+                                tk.pid(),
+                                us.kind,
+                                bound,
+                                peer,
+                                qb,
+                                qt,
+                                cap,
+                                ql
+                            );
+                        }
+                    }
+                    _ => {}
+                }
+            }
+        }
+    }
+    // User-argument payloads: writev/write iovec heads (libhilog writes
+    // header28/tag/content — the payload names the producer), open/mount
+    // path strings.
+    match nr {
+        20 | 1 | 19 => {
+            // writev / write / readv — iovec array at args[1] (writev) or
+            // raw buffer for write.
+            if nr == 20 {
+                let mut iovs = alloc::vec![0u8; 3 * 16];
+                let n = unsafe { read_bytes_via_task(t, args[1] as usize, &mut iovs) };
+                for i in 0..3 {
+                    if n < (i + 1) * 16 {
+                        break;
+                    }
+                    let base = u64::from_le_bytes(iovs[i * 16..i * 16 + 8].try_into().unwrap());
+                    let len = u64::from_le_bytes(iovs[i * 16 + 8..i * 16 + 16].try_into().unwrap());
+                    let mut head = alloc::vec![0u8; 48];
+                    let hn = unsafe { read_bytes_via_task(t, base as usize, &mut head) };
+                    let mut txt = alloc::string::String::new();
+                    for &b in &head[..hn] {
+                        if b == 0 {
+                            break;
+                        }
+                        if (0x20..0x7f).contains(&b) {
+                            txt.push(b as char);
+                        } else {
+                            txt.push('.');
+                        }
+                    }
+                    crate::pr_warn!(
+                        "KILLDUMP: tid {} iov{} base={:#x} len={} head='{}'",
+                        tk.pid(),
+                        i,
+                        base,
+                        len,
+                        txt
+                    );
+                }
+            }
+        }
+        2 => {
+            // open(2): pathname at args[0]
+            let p = unsafe { read_cstr_via_task(t, args[0] as usize, 96) };
+            crate::pr_warn!("KILLDUMP: tid {} open path='{}'", tk.pid(), p);
+        }
+        165 => {
+            // mount(2): source/target/fstype at args[0..2]
+            let s = unsafe { read_cstr_via_task(t, args[0] as usize, 96) };
+            let tg = unsafe { read_cstr_via_task(t, args[1] as usize, 96) };
+            let ft = unsafe { read_cstr_via_task(t, args[2] as usize, 32) };
+            crate::pr_warn!(
+                "KILLDUMP: tid {} mount src='{}' tgt='{}' fstype='{}'",
+                tk.pid(),
+                s,
+                tg,
+                ft
+            );
+        }
+        _ => {}
+    }
+}
+
 /// Log futex ops on the watched word: every park (with the userspace
 /// expected value), every wake (with how many were woken), every wait
 /// return. This is the word's entire syscall-visible traffic. Bursts are
@@ -1697,6 +2048,60 @@ fn rwfz_op_log(uaddr: usize, op: i32, val: u32, result: i64) {
         val,
         result
     );
+}
+
+/// Read up to `buf.len()` bytes in `task`'s user address space via its
+/// page tables, stopping at the first unmapped page (KILLDUMP sc97:
+/// iovec arrays, path strings, log payload heads of the wedged task).
+/// Returns how many bytes were actually read.
+/// SAFETY: `task` must be a live Task; read-only diagnostic walk.
+unsafe fn read_bytes_via_task(task: *const Task, va: usize, buf: &mut [u8]) -> usize {
+    let tk = unsafe { &*task };
+    let aspace = match tk.address_space() {
+        Some(a) => a,
+        None => return 0,
+    };
+    let root = aspace.root_ppn();
+    let mut done = 0usize;
+    while done < buf.len() {
+        let cur = va + done;
+        let (ppn, _) = match unsafe {
+            crate::arch::mm::mm_ops::PageTableWalker::walk(root, cur as u64)
+        } {
+            Some(p) => p,
+            None => break,
+        };
+        let pa = (ppn as usize) << 12;
+        let kv = crate::arch::mm::phys_to_virt(crate::arch::mm::PhysAddr::new(pa as u64))
+            .bits() as usize
+            + (cur & 0xfff);
+        let chunk = core::cmp::min(buf.len() - done, 0x1000 - (cur & 0xfff));
+        for i in 0..chunk {
+            buf[done + i] = unsafe { core::ptr::read_volatile((kv + i) as *const u8) };
+        }
+        done += chunk;
+    }
+    done
+}
+
+/// Printable snapshot of a NUL-terminated user string in `task`'s space.
+/// SAFETY: same contract as read_bytes_via_task.
+unsafe fn read_cstr_via_task(task: *const Task, va: usize, max: usize) -> alloc::string::String {
+    if va == 0 {
+        return alloc::string::String::from("(null)");
+    }
+    let mut raw = alloc::vec![0u8; max];
+    let n = unsafe { read_bytes_via_task(task, va, &mut raw) };
+    let end = raw[..n].iter().position(|&b| b == 0).unwrap_or(n);
+    let mut s = alloc::string::String::new();
+    for &b in &raw[..end] {
+        if (0x20..0x7f).contains(&b) {
+            s.push(b as char);
+        } else {
+            s.push('.');
+        }
+    }
+    s
 }
 
 /// Read one u32 in `task`'s user address space via its page tables

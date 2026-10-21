@@ -234,6 +234,21 @@ impl UnixSocket {
         q.iter().map(|s| s.data.len()).sum()
     }
 
+    /// sc97 KILLDUMP support: flow-control snapshot for the
+    /// wedged-writer forensics — (queued_bytes, queued_truesize,
+    /// sndbuf_cap, recv_queue_len).
+    pub fn diag_snapshot(&self) -> (usize, usize, usize, usize) {
+        let (qb, ql) = {
+            let q = self.recv_queue.lock();
+            (
+                q.iter().map(|s| s.data.len()).sum(),
+                q.len(),
+            )
+        };
+        let cap = self.options.lock().sndbuf as usize;
+        (qb, self.queued_truesize(), cap, ql)
+    }
+
     /// Kernel-heap cost of the receive queue (Linux `sk_wmem_alloc` /
     /// skb-truesize semantics).
     ///
@@ -247,8 +262,10 @@ impl UnixSocket {
     /// whole sweep chunk down (the r8 sendfile/sendmsg/sendmmsg CRASH
     /// family). Linux charges skb->truesize for exactly this reason.
     fn queued_truesize(&self) -> usize {
-        const SEG_OVERHEAD: usize = core::mem::size_of::<UnixSeg>()
-            + crate::arch::mm::PAGE_SIZE as usize;
+        // sc101: keep this in lockstep with seg_charge (proportional slab
+        // cost — see its comment); divergent formulas made the enqueue
+        // gate and target_has_room disagree.
+        const SEG_OVERHEAD: usize = core::mem::size_of::<UnixSeg>() + 512;
         let q = self.recv_queue.lock();
         q.iter()
             .map(|s| s.data.len() + SEG_OVERHEAD)
@@ -1013,11 +1030,24 @@ pub fn unix_peer_bound_name(sock: &Arc<UnixSocket>) -> Option<String> {
 }
 
 /// Flow-control charge of one segment of `len` payload bytes: payload plus
-/// the per-segment heap cost (see UnixSocket::queued_truesize — the buddy
-/// heap allocates whole pages).
+/// the per-segment heap cost. Linux charges skb->truesize ≈ len + ~512
+/// (slab-object overhead), NOT a page per skb.
+///
+/// sc101: the old charge added PAGE_SIZE per segment (the r8 buddy-heap
+/// discipline, written when the heap looked page-granular), but the
+/// CombinedAllocator routes ≤4096-byte allocations to the SLAB — a
+/// 200-byte hilog message really costs ~a slab object, not 4 KiB. The
+/// overcharge throttled a default 212992-byte SO_SNDBUF to ~50 queued
+/// messages, so every chatty client (OH developer-mode apps emit
+/// thousands of libhilog writev's at startup) blocked on the receiver's
+/// drain rate — hilogd writes each record to the serial console, and
+/// the launcher burned its whole 3 s spawn budget parked in writev
+/// (stime 183 ticks, utime 2). Proportional charge: sndbuf now bounds
+/// ~hundreds of messages, absorbing bursts while still capping total
+/// queued bytes ≈ real heap cost (the r8 1-byte-storm hole stays closed
+/// — the charge still exceeds the true per-segment allocation).
 fn seg_charge(len: usize) -> usize {
-    const SEG_OVERHEAD: usize = core::mem::size_of::<UnixSeg>()
-        + crate::arch::mm::PAGE_SIZE as usize;
+    const SEG_OVERHEAD: usize = core::mem::size_of::<UnixSeg>() + 512;
     len + SEG_OVERHEAD
 }
 
@@ -1056,7 +1086,35 @@ pub fn unix_send(
     }
     let cap = sock.options.lock().sndbuf as usize;
 
+    // sc102 spin detector: a sender whose rip parks in the writev wrapper
+    // while stime runs away (183-190 ticks, utime ~0) is LOOPING here —
+    // either the enqueue gate and target_has_room disagree (busy retry) or
+    // each round enqueues into a queue that never effectively drains.
+    // Rate-limited: one print per socket per 1000 rounds names the gate
+    // values at the moment of suspicion.
+    let mut rounds: u32 = 0;
+
     loop {
+        rounds = rounds.wrapping_add(1);
+        if rounds % 1000 == 0 {
+            let tqp = {
+                let tk = sock.dgram_peer.lock().clone();
+                tk.unwrap_or_default()
+            };
+            let (qb, qt, _c, ql) = sock.diag_snapshot();
+            crate::pr_warn!(
+                "unixsend-loop: pid {} rounds={} dgram_peer={} self(q={}B true={} qlen={}) len={} cap={} nonblock={}",
+                crate::process::current_pid(),
+                rounds,
+                tqp,
+                qb,
+                qt,
+                ql,
+                data.len(),
+                cap,
+                nonblock
+            );
+        }
         // Resolve the receiving end fresh each round (the peer may have
         // closed while we were blocked).
         let target: Arc<UnixSocket> = match sock.kind {
@@ -1784,6 +1842,18 @@ unsafe fn unix_of_file(file: &File) -> Option<Arc<UnixSocket>> {
     let socket_ptr = ptr as *const UnixSocket;
     Arc::increment_strong_count(socket_ptr);
     Some(Arc::from_raw(socket_ptr))
+}
+
+/// sc97 KILLDUMP support: identity-checked reconstruction for a File
+/// from ANOTHER task's fdtable (unix_file_of only sees current's).
+/// Returns None for non-unix files.
+pub fn unix_of_file_diag(file: &File) -> Option<Arc<UnixSocket>> {
+    let ops = file.get_ops()?;
+    if !core::ptr::eq(ops as *const _, &UNIX_SOCKET_OPS as *const _) {
+        return None;
+    }
+    // SAFETY: ops identity checked above.
+    unsafe { unix_of_file(file) }
 }
 
 fn unix_file_nonblock(file: &File) -> bool {

@@ -168,6 +168,25 @@ static EPOLL_WAKE_REGISTRY: crate::sync::spinlock::Spinlock<EpollWakeRegistry> =
 /// in its close op, which only runs on the last Arc reference — no
 /// epoll_wait can still be blocked on the instance at that point.
 pub fn epoll_notify_file(file_id: u64) {
+    // sc103: every unix-socket enqueue runs this GLOBAL IRQ-save scan —
+    // if the registry leaks bindings (dead processes' epolls), each hilog
+    // writev pays O(registry) under one contended lock. Name the size
+    // BEFORE taking the lock (printk discipline).
+    {
+        static EPN_N: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+        let n = EPN_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        if n < 400 && (n < 40 || n % 10 == 0) {
+            // One lock pass to read the length (temporary guard drops at
+            // the statement's end), then printk lock-free.
+            let size = EPOLL_WAKE_REGISTRY.lock_irqsave().bindings.len();
+            crate::pr_warn!(
+                "epollnotify#{}: registry_size={} this_fid={:#x}",
+                n,
+                size,
+                file_id
+            );
+        }
+    }
     let registry = EPOLL_WAKE_REGISTRY.lock_irqsave();
     for (id, ep) in registry.bindings.iter() {
         if *id != file_id {
