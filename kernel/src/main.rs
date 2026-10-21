@@ -568,15 +568,14 @@ pub fn rust_main_tail() -> ! {
             // sc109: the launcher's vDSO-less clock_gettime path paid an
             // HPET MMIO VM exit per call and burned its whole 3 s appspawn
             // watchdog (stime focus histogram: hpet driver page). The
-            // TSC timekeeper removes that. sc110's one-time ~25 s step
-            // is now handled by per-CPU vCPU TSC-offset corrections
-            // (calibrated per AP at bringup), a read-time monotonic
-            // ratchet, and a 1 Hz forward-only resync (sc113 decoded the
-            // real hazard as per-CPU calibration noise stepping BACKWARD
-            // ~21 ms and wrapping samgr's u32-us duration math — fixed in
-            // the ratchet commit). sc114 verified: 0 wraps, 0 rebases, no
-            // watchdog kills. DEFAULT ON since sc114; `tscclk=0` opts back
-            // into the pure-HPET clocksource for A/B.
+            // TSC timekeeper removes that. sc114 verified: 0 u32-us
+            // wraps, 0 watchdog kills, and the FIRST EVER successful
+            // launcher spawns (3x result:0). sc110-114's "~25 s step"
+            // was the shift-12 ceil rounding running the mapping 4.796%
+            // fast (crossing the 25 s resync threshold at uptime
+            // 522.17 s, deterministic) — fixed by TSC_MULSHIFT=32 +
+            // nearest rounding. DEFAULT ON; `tscclk=0` opts back into
+            // the pure-HPET clocksource for A/B.
             let tsc_clk = ok
                 && crate::cmdline::get_param("tscclk")
                     .map(|v| v != "0")
