@@ -1525,7 +1525,7 @@ pub fn sys_futex_handler(args: &[u64; 6]) -> i64 {
                         readers
                     );
                     // SAFETY: t is the current task, in its own syscall.
-                    unsafe { rwfz_stack_frames(t, "park", 12) };
+                    unsafe { rwfz_stack_frames(t, "park", 12, 64) };
                 }
             }
         }
@@ -1716,9 +1716,16 @@ unsafe fn read_u32_via_task(task: *const Task, va: usize) -> Option<u32> {
 }
 
 /// One user-stack frame line resolved to its covering VMA (Session F's
-/// byte-match symbolization method). SAFETY: diagnostic walk of `task`'s
-/// tables; `task` live.
-unsafe fn rwfz_stack_frames(task: *const Task, label: &str, max_frames: u64) {
+/// byte-match symbolization method). sc90: `scan_slots` parametrizes the
+/// stack window (64 for per-task dumps; the recursion holder needs 256 —
+/// its 16-deep chain with OH frame sizes sits ~1-2 KiB above rsp).
+/// SAFETY: diagnostic walk of `task`'s tables; `task` live.
+unsafe fn rwfz_stack_frames(
+    task: *const Task,
+    label: &str,
+    max_frames: u64,
+    scan_slots: u64,
+) {
     let tk = unsafe { &*task };
     let top = tk.kernel_stack_top();
     #[cfg(feature = "x86_64")]
@@ -1739,33 +1746,24 @@ unsafe fn rwfz_stack_frames(task: *const Task, label: &str, max_frames: u64) {
     let (rsp, rip) = (0u64, 0u64);
     let Some(aspace) = tk.address_space() else { return };
     let vmas = aspace.vma_read();
-    let vma_of = |v: u64| -> Option<(usize, usize, i32, usize, u64)> {
+    // sc90: return the VMA's BASE file offset separately — the loader
+    // closes the fd after mmap, leaving fd=-1 on code VMAs that still
+    // carry a real mapping offset (sc89: every park rip printed
+    // fd=-1 fileoff=0x116dea). Anonymous VMAs have offset 0 AND fd -1,
+    // so "offset != 0 || fd >= 0" separates file-backed code frames
+    // from heap/stack data pointers.
+    let vma_of = |v: u64| -> Option<(usize, usize, i32, usize, usize, u64)> {
         let vm = vmas.find(crate::mm::page::VirtAddr::new(v as usize))?;
-        let off = vm.offset() + (v as usize - vm.start().as_usize());
+        let base_off = vm.offset();
         Some((
             vm.start().as_usize(),
             vm.end().as_usize(),
             vm.file_fd(),
-            off,
+            base_off,
+            base_off + (v as usize - vm.start().as_usize()),
             vm.file_size(),
         ))
     };
-    // The RIP itself first — the futex park site names the primitive
-    // (musl __timedwait caller: rdlock/wrlock/condvar).
-    if let Some((s, e, fd, off, fsz)) = vma_of(rip) {
-        crate::pr_warn!(
-            "RWFRZ:   {} rip={:#x} vma={:#x}-{:#x} fd={} fileoff={:#x} filesz={:#x}",
-            label,
-            rip,
-            s,
-            e,
-            fd,
-            off,
-            fsz as usize
-        );
-    } else {
-        crate::pr_warn!("RWFRZ:   {} rip={:#x} (no vma)", label, rip);
-    }
     let read_u64_at = |va: u64| -> Option<u64> {
         if va & 0xfff > 0xff8 {
             return None;
@@ -1774,6 +1772,32 @@ unsafe fn rwfz_stack_frames(task: *const Task, label: &str, max_frames: u64) {
         let hi = unsafe { read_u32_via_task(task, (va + 4) as usize)? };
         Some(lo as u64 | ((hi as u64) << 32))
     };
+    // The RIP itself first — the futex park site names the primitive
+    // (musl __timedwait caller: rdlock/wrlock/condvar). sc90: ripbytes
+    // byte-identify the park-site lib offline (the mapping's fd is gone;
+    // filesz prints 0 — offset+bytes are the surviving fingerprints).
+    if let Some((s, e, fd, base, off, fsz)) = vma_of(rip) {
+        crate::pr_warn!(
+            "RWFRZ:   {} rsp={:#x} rip={:#x} vma={:#x}-{:#x} fd={} fileoff={:#x} baseoff={:#x} filesz={:#x} ripbytes={:#018x}",
+            label,
+            rsp,
+            rip,
+            s,
+            e,
+            fd,
+            off,
+            base,
+            fsz as usize,
+            read_u64_at(rip).unwrap_or(0)
+        );
+    } else {
+        crate::pr_warn!(
+            "RWFRZ:   {} rsp={:#x} rip={:#x} (no vma)",
+            label,
+            rsp,
+            rip
+        );
+    }
     // sc86: resolve fd -> file PATH for file-backed frames (offline
     // fileoff/byte matching hit missing-lib walls; the path names the
     // library outright). Cached per-fd for the whole dump of this task.
@@ -1795,12 +1819,15 @@ unsafe fn rwfz_stack_frames(task: *const Task, label: &str, max_frames: u64) {
     use core::fmt::Write;
     let mut s = alloc::string::String::new();
     let mut printed = 0u64;
-    // sc88: scan 64 slots deep (callers sat below the 24-slot window in
-    // sc84-87) and keep ONLY executable-file-backed candidates — heap and
-    // stack VMA pointers drowned the signal (every dump showed data
-    // pointers, never the code chain). Return addresses live in exec
-    // segments; musl's rodata data pointers drop out.
-    for i in 0..64u64 {
+    // sc88: scan deep (callers sat below the 24-slot window in sc84-87)
+    // and keep ONLY file-backed candidates — pure heap/stack pointers
+    // drowned the signal (every dump showed data pointers, never the
+    // code chain). sc90: the filter is `base offset != 0 || fd >= 0`:
+    // musl's loader CLOSES the mapping fd after mmap, so loader-mapped
+    // code VMAs carry fd=-1 with a real offset (sc89 nbr dump: the
+    // holder's only survivors were two fd>=0 DATA-segment pointers —
+    // the fd<0 drop had removed the entire code chain).
+    for i in 0..scan_slots {
         if printed >= max_frames {
             break;
         }
@@ -1808,16 +1835,20 @@ unsafe fn rwfz_stack_frames(task: *const Task, label: &str, max_frames: u64) {
         if v < 0x1000 || v > 0x7fff_ffff_ffff {
             continue;
         }
-        if let Some((s0, e0, fd, off, fsz)) = vma_of(v) {
-            if fd < 0 {
-                continue; // anon (heap/stack): data pointers only
+        if let Some((s0, e0, fd, base, off, fsz)) = vma_of(v) {
+            if fd < 0 && base == 0 {
+                continue; // anonymous (heap/stack): data pointers only
             }
             let bytes = read_u64_at(v).unwrap_or(0);
-            let path = path_of(fd, &mut path_cache);
+            let path = if fd >= 0 {
+                path_of(fd, &mut path_cache)
+            } else {
+                alloc::string::String::from("-")
+            };
             let _ = write!(
                 s,
-                "\nRWFRZ:   frame ustack[{}]={:#x} vma={:#x}-{:#x} fd={} fileoff={:#x} filesz={:#x} bytes={:#018x} path={}",
-                i, v, s0, e0, fd, off, fsz as usize, bytes, path
+                "\nRWFRZ:   frame ustack[{}]={:#x} vma={:#x}-{:#x} fd={} fileoff={:#x} baseoff={:#x} filesz={:#x} bytes={:#018x} path={}",
+                i, v, s0, e0, fd, off, base, fsz as usize, bytes, path
             );
             printed += 1;
         }
@@ -2258,7 +2289,15 @@ fn rwfz_neighbor_dump(tgid: u32, frozen_uaddr: usize) {
                 a0
             );
             // SAFETY: t is a live Task from the pid-hash walk.
-            unsafe { rwfz_stack_frames(t, "nbr", 24) };
+            // sc90: 256-slot window (2 KiB) — the 16-deep recursive
+            // chain sits ~1-2 KiB above rsp; 24 exec-file frames catch
+            // repeated fileoffs at fixed deltas (the recursion cycle).
+            // Emitted twice (nbr/nbr2): concurrent console traffic
+            // splices long multi-line dumps mid-line (sc89 lost the
+            // holder's chain between frame[2] and frame[17]); two
+            // passes rarely lose the same line twice.
+            unsafe { rwfz_stack_frames(t, "nbr", 24, 256) };
+            unsafe { rwfz_stack_frames(t, "nbr2", 24, 256) };
         }
     });
 }
@@ -2307,7 +2346,7 @@ fn rwfz_dump_tgid(tgid: u32, max_tasks: usize) -> usize {
             a0
         );
         // SAFETY: t is a live Task from the pid-hash walk.
-        unsafe { rwfz_stack_frames(t, "task", 8) };
+        unsafe { rwfz_stack_frames(t, "task", 8, 64) };
     });
     count_cell.get()
 }
