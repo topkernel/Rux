@@ -1725,6 +1725,56 @@ fn user_segv_forensics(regs: &PtRegs, fault_addr: u64) {
                     path,
                     v.offset() + (regs.rip as usize - v.start().as_usize())
                 );
+                // sc106 OsAccount hunt: the recurring SA-host crash
+                // (identical rip, NULL list walk) runs inside a memfd-
+                // hosted library the offline tooling cannot name. Its
+                // .dynstr/.rodata usually sits in the read-only segment
+                // mapped directly below the r-x segment — scan up to
+                // 64 KiB below the mapping for printable runs so the
+                // crash site names its library (unmapped gaps stop the
+                // scan safely; page-table walks never fault).
+                if path.contains("anon") {
+                    let mut line = alloc::string::String::from("USEGV-FOR: memfd-strs");
+                    use core::fmt::Write;
+                    let mut hits = 0usize;
+                    let mut run = alloc::vec::Vec::new();
+                    let start_va = (v.start().as_usize() as u64).saturating_sub(0x1_0000);
+                    let end_va = v.start().as_usize() as u64;
+                    let mut va = start_va;
+                    'scan: while va < end_va {
+                        match fore_read_u64(aspace.root_ppn(), va) {
+                            Some(w) => {
+                                for k in 0..8usize {
+                                    let b = (w >> (k * 8)) & 0xff;
+                                    if (0x20..0x7f).contains(&b) {
+                                        run.push(b as u8);
+                                    } else {
+                                        if run.len() >= 10 && hits < 8 {
+                                            let _ = write!(
+                                                line,
+                                                " [{}]",
+                                                core::str::from_utf8(&run)
+                                                    .unwrap_or("?")
+                                            );
+                                            hits += 1;
+                                        }
+                                        run.clear();
+                                        if hits >= 8 {
+                                            break 'scan;
+                                        }
+                                    }
+                                }
+                            }
+                            None => {
+                                // Unmapped gap — skip 4 KiB ahead.
+                                va = (va & !0xfff) + 0x1000;
+                                continue;
+                            }
+                        }
+                        va += 8;
+                    }
+                    crate::pr_err!("{}", line);
+                }
             }
         }
         // Instruction bytes at rip: the dynamic linker CLOSES the mmap fd
@@ -2129,6 +2179,16 @@ static STIME_HIST: [StimeSample; STIME_SLOTS] = {
     [EMPTY; STIME_SLOTS]
 };
 
+/// Focus table (sc106): launcher-comm samples only — see stime_sample_rip.
+static STIME_FOCUS: [StimeSample; STIME_SLOTS] = {
+    const EMPTY: StimeSample = StimeSample {
+        comm: [const { core::sync::atomic::AtomicU8::new(0) }; 16],
+        page: core::sync::atomic::AtomicU64::new(0),
+        count: core::sync::atomic::AtomicU64::new(0),
+    };
+    [EMPTY; STIME_SLOTS]
+};
+
 /// Record one kernel-mode tick at `rip` for `comm`.
 fn stime_sample_rip(rip: u64, comm: &[u8; 16]) {
     use core::sync::atomic::Ordering::{Acquire, Relaxed};
@@ -2140,37 +2200,71 @@ fn stime_sample_rip(rip: u64, comm: &[u8; 16]) {
     }
     let page = rip & !0xFFFu64;
 
+    // sc106 lesson: the global steal-smallest table starves the very task
+    // under investigation — the launcher child burns ~180 ticks in 3 s
+    // bursts, but every fresh (comm,page) entry starts at 1 and is stolen
+    // away by the next new page before it accumulates. Focus table: comm
+    // containing "launcher" (the killed children run comm='m.ohos.
+    // launcher', set post-exec by appspawn) never competes with the boot
+    // crowd.
+    let focus = {
+        let mut hit = false;
+        let mut run = 0u8;
+        for &b in comm.iter() {
+            if b == 0 {
+                break;
+            }
+            run = if b == b"launcher"[run as usize] {
+                run + 1
+            } else if b == b"launcher"[0] {
+                1
+            } else {
+                0
+            };
+            if run as usize == b"launcher".len() {
+                hit = true;
+                break;
+            }
+        }
+        hit
+    };
+    let hist: &[StimeSample; STIME_SLOTS] = if focus {
+        &STIME_FOCUS
+    } else {
+        &STIME_HIST
+    };
+
     let mut min_idx = 0usize;
     let mut min_count = u64::MAX;
     for i in 0..STIME_SLOTS {
-        let p = STIME_HIST[i].page.load(Relaxed);
+        let p = hist[i].page.load(Relaxed);
         if p == 0 {
             // Claim the empty slot (page first — count follows only after
             // the page store, so readers never see a stale count against
             // a new page unless they load between the two, which the
             // count reset below makes benign for a probe).
-            if STIME_HIST[i]
+            if hist[i]
                 .page
                 .compare_exchange(0, page, core::sync::atomic::Ordering::AcqRel, Acquire)
                 .is_ok()
             {
                 for j in 0..16 {
-                    STIME_HIST[i].comm[j].store(comm[j], Relaxed);
+                    hist[i].comm[j].store(comm[j], Relaxed);
                 }
-                STIME_HIST[i].count.store(1, Relaxed);
+                hist[i].count.store(1, Relaxed);
                 return;
             }
             continue;
         }
         if p == page {
             // Same page; compare comm to keep tasks separable.
-            let same = (0..16).all(|j| STIME_HIST[i].comm[j].load(Relaxed) == comm[j]);
+            let same = (0..16).all(|j| hist[i].comm[j].load(Relaxed) == comm[j]);
             if same {
-                STIME_HIST[i].count.fetch_add(1, Relaxed);
+                hist[i].count.fetch_add(1, Relaxed);
                 return;
             }
         }
-        let c = STIME_HIST[i].count.load(Relaxed);
+        let c = hist[i].count.load(Relaxed);
         if c < min_count {
             min_count = c;
             min_idx = i;
@@ -2179,33 +2273,39 @@ fn stime_sample_rip(rip: u64, comm: &[u8; 16]) {
     // Table full and this (comm, page) has no slot: replace the least
     // sampled one. Single writer wins via a count swap; the loser's
     // sample is dropped.
-    if STIME_HIST[min_idx]
+    if hist[min_idx]
         .count
         .compare_exchange(min_count, 1, core::sync::atomic::Ordering::AcqRel, Acquire)
         .is_ok()
     {
-        STIME_HIST[min_idx].page.store(page, Relaxed);
+        hist[min_idx].page.store(page, Relaxed);
         for j in 0..16 {
-            STIME_HIST[min_idx].comm[j].store(comm[j], Relaxed);
+            hist[min_idx].comm[j].store(comm[j], Relaxed);
         }
     }
 }
 
 /// Snapshot the stime histogram for KILLDUMP: (comm, page, ticks) rows,
-/// highest count first, empty slots omitted.
-pub fn stime_profile_top() -> alloc::vec::Vec<([u8; 16], u64, u64)> {
+/// highest count first, empty slots omitted. `focus=true` returns the
+/// launcher-gated table instead of the global one.
+pub fn stime_profile_top(focus: bool) -> alloc::vec::Vec<([u8; 16], u64, u64)> {
     use core::sync::atomic::Ordering::Relaxed;
+    let hist: &[StimeSample; STIME_SLOTS] = if focus {
+        &STIME_FOCUS
+    } else {
+        &STIME_HIST
+    };
     let mut v = alloc::vec::Vec::new();
     for i in 0..STIME_SLOTS {
-        let page = STIME_HIST[i].page.load(Relaxed);
+        let page = hist[i].page.load(Relaxed);
         if page == 0 {
             continue;
         }
         let mut comm = [0u8; 16];
         for j in 0..16 {
-            comm[j] = STIME_HIST[i].comm[j].load(Relaxed);
+            comm[j] = hist[i].comm[j].load(Relaxed);
         }
-        v.push((comm, page, STIME_HIST[i].count.load(Relaxed)));
+        v.push((comm, page, hist[i].count.load(Relaxed)));
     }
     v.sort_by(|a, b| b.2.cmp(&a.2));
     v

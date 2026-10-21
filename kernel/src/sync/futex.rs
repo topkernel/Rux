@@ -1873,19 +1873,31 @@ unsafe fn kill_dump_wedge(tk: &Task, t: *mut Task, nr: u64, args: [u64; 3]) {
             if reads > 0 { us / reads } else { 0 }
         );
         #[cfg(feature = "x86_64")]
-        for (comm, page, ticks) in crate::arch::x86_64::trap::stime_profile_top()
-            .iter()
-            .take(8)
         {
-            let comm_str = core::str::from_utf8(comm)
-                .unwrap_or("")
-                .trim_end_matches('\0');
-            crate::pr_warn!(
-                "KILLDUMP: stime-page comm='{}' rip_page={:#x} ticks={}",
-                comm_str,
-                page,
-                ticks
-            );
+            let rows = crate::arch::x86_64::trap::stime_profile_top(true);
+            for (comm, page, ticks) in rows.iter().take(8) {
+                let comm_str = core::str::from_utf8(comm)
+                    .unwrap_or("")
+                    .trim_end_matches('\0');
+                crate::pr_warn!(
+                    "KILLDUMP: stime-page(FOCUS) comm='{}' rip_page={:#x} ticks={}",
+                    comm_str,
+                    page,
+                    ticks
+                );
+            }
+            let rows = crate::arch::x86_64::trap::stime_profile_top(false);
+            for (comm, page, ticks) in rows.iter().take(8) {
+                let comm_str = core::str::from_utf8(comm)
+                    .unwrap_or("")
+                    .trim_end_matches('\0');
+                crate::pr_warn!(
+                    "KILLDUMP: stime-page comm='{}' rip_page={:#x} ticks={}",
+                    comm_str,
+                    page,
+                    ticks
+                );
+            }
         }
     }
     // Whole low fdtable: fd/type/path one line — where fd3 came from and
