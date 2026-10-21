@@ -1795,7 +1795,12 @@ unsafe fn rwfz_stack_frames(task: *const Task, label: &str, max_frames: u64) {
     use core::fmt::Write;
     let mut s = alloc::string::String::new();
     let mut printed = 0u64;
-    for i in 0..24u64 {
+    // sc88: scan 64 slots deep (callers sat below the 24-slot window in
+    // sc84-87) and keep ONLY executable-file-backed candidates — heap and
+    // stack VMA pointers drowned the signal (every dump showed data
+    // pointers, never the code chain). Return addresses live in exec
+    // segments; musl's rodata data pointers drop out.
+    for i in 0..64u64 {
         if printed >= max_frames {
             break;
         }
@@ -1804,12 +1809,11 @@ unsafe fn rwfz_stack_frames(task: *const Task, label: &str, max_frames: u64) {
             continue;
         }
         if let Some((s0, e0, fd, off, fsz)) = vma_of(v) {
+            if fd < 0 {
+                continue; // anon (heap/stack): data pointers only
+            }
             let bytes = read_u64_at(v).unwrap_or(0);
-            let path = if fd >= 0 {
-                path_of(fd, &mut path_cache)
-            } else {
-                alloc::string::String::new()
-            };
+            let path = path_of(fd, &mut path_cache);
             let _ = write!(
                 s,
                 "\nRWFRZ:   frame ustack[{}]={:#x} vma={:#x}-{:#x} fd={} fileoff={:#x} filesz={:#x} bytes={:#018x} path={}",
