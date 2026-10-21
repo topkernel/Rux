@@ -2314,6 +2314,9 @@ pub fn stall_report() {
     if hz == 0 {
         return;
     }
+    // sc81: rwlock-freeze watch (samgr abilityMapLock_ terminal shape) —
+    // word-delta + futex-traffic + tid-census + full-tgid park-stack dump.
+    crate::sync::futex::freeze_scan(now, hz);
     let mut dump_owners: Vec<Arc<BinderProc>> = Vec::new();
     // Threads to re-kick after WORLD is released (heal + forensics event).
     let mut rekick: Vec<Arc<BinderThread>> = Vec::new();
