@@ -1537,6 +1537,49 @@ static RWFRZ_OPLOG: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU3
 /// that vanishes while the word never drains is a reader that exited).
 static RWFRZ_TIDS: Spinlock<(usize, [u32; 64])> = Spinlock::new((0, [0; 64]));
 
+/// Global thread-exit ring (sc82): every task unlink (thread OR process
+/// leader) records (jiffies, pid, tgid). The freeze dump replays the
+/// watched tgid's exits — readers that died BEFORE the watch adopted the
+/// word (leak evidence with timestamps) instead of only post-adoption
+/// vanishings. Forensics only; no behavior.
+struct ExitRec {
+    j: u64,
+    pid: u32,
+    tgid: u32,
+}
+static EXIT_RING: Spinlock<(usize, [ExitRec; 128])> = Spinlock::new((0, [const { ExitRec { j: 0, pid: 0, tgid: 0 } }; 128]));
+
+/// Called from pid_hash_remove under the bucket lock — keep it to two
+/// atomic-ish stores (one short critical section on the ring lock).
+pub fn note_task_unlink(pid: u32, tgid: u32) {
+    let j = crate::drivers::timer::get_jiffies() as u64;
+    let mut g = EXIT_RING.lock_irqsave();
+    let (ref mut head, ref mut ring) = *g;
+    ring[*head % 128] = ExitRec { j, pid, tgid };
+    *head += 1;
+    drop(g);
+}
+
+fn exit_ring_dump_tgid(tgid: u32) {
+    use core::fmt::Write;
+    let mut s = alloc::string::String::new();
+    let g = EXIT_RING.lock_irqsave();
+    let head = g.0;
+    let start = head.saturating_sub(128);
+    for i in start..head {
+        let r = g.1[i % 128];
+        if r.tgid == tgid && r.pid != 0 {
+            let _ = write!(s, " [pid {} @{}s]", r.pid, r.j / 100);
+        }
+    }
+    drop(g);
+    if s.is_empty() {
+        crate::pr_warn!("RWFRZ: exit ring has NO exits for tgid {} — readers did not die by task unlink", tgid);
+    } else {
+        crate::pr_warn!("RWFRZ: exit ring for tgid {}:{}", tgid, s);
+    }
+}
+
 /// Log futex ops on the watched word: every park (with the userspace
 /// expected value), every wake (with how many were woken), every wait
 /// return. This is the word's entire syscall-visible traffic. Bursts are
@@ -1914,6 +1957,7 @@ pub fn freeze_scan(now: u64, hz: u64) {
             nb.1,
             now.saturating_sub(first) / hz
         );
+        exit_ring_dump_tgid(tgid);
         let count_cell: core::cell::Cell<usize> = core::cell::Cell::new(0);
         crate::sched::for_each_task(|t| {
             // SAFETY: same contract as sleep_snapshot.
