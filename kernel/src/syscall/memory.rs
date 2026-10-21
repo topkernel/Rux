@@ -974,7 +974,9 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                                     // demand-fault discipline.
                                     unsafe {
                                         let _pte_guard =
-                                            crate::arch::mm::mm_ops::PTE_MODIFY_LOCK
+                                            crate::arch::mm::mm_ops::pte_lock_for(
+                                                address_space,
+                                            )
                                                 .lock_irqsave();
                                         crate::arch::mm::mm_ops::MM_CTX.store(
                                             3,
@@ -1443,7 +1445,8 @@ fn sys_mprotect_inner(args: [u64; 6]) -> i64 {
             // rewrite (stale PPN could resurrect a freed page) — regression
             // round 6 HIGH. The loop never sleeps, so one irqsave section
             // for the whole range is safe (fork holds it likewise).
-            let _pte_guard = crate::arch::mm::mm_ops::PTE_MODIFY_LOCK.lock_irqsave();
+            let _pte_guard = crate::arch::mm::mm_ops::pte_lock_for(addr_space)
+                .lock_irqsave();
 
             #[cfg(target_arch = "x86_64")]
             {
@@ -1924,7 +1927,7 @@ unsafe fn copy_old_to_new_pages(
 
     // R7-A5: serialize leaf-PTE mutations against fork's table walk and COW
     // faults — the same discipline as the demand-fault paths.
-    let _pte_guard = crate::arch::mm::mm_ops::PTE_MODIFY_LOCK.lock_irqsave();
+    let _pte_guard = crate::arch::mm::mm_ops::pte_lock_for(mm).lock_irqsave();
     let mut offset = 0usize;
     while offset < size {
         let old_virt = (old_addr + offset) as u64;
@@ -2880,7 +2883,8 @@ fn mlock_impl(raw_addr: usize, length: usize, onfault: bool) -> i64 {
                     // sysv shm attach path; p is page-aligned user memory.
                     unsafe {
                         let _pte_guard =
-                            crate::arch::mm::mm_ops::PTE_MODIFY_LOCK.lock_irqsave();
+                            crate::arch::mm::mm_ops::pte_lock_for(address_space)
+                                .lock_irqsave();
                         if let Some(phys) =
                             crate::arch::mm::mm_ops::alloc_user_phys_page()
                         {

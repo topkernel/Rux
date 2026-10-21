@@ -191,10 +191,10 @@ impl MmStruct {
                     let flags = perm_to_flags(Perm::ReadWrite, self.space_type());
                     // Serialize the leaf-PTE write + rmap setup against a
                     // concurrent fork()/COW walk on this mm — brk was the
-                    // one leaf-PTE writer left outside PTE_MODIFY_LOCK
+                    // one leaf-PTE writer left outside the PTE section
                     // (same protocol as the demand-fault paths in
-                    // page_fault.rs).
-                    let _pte_guard = PTE_MODIFY_LOCK.lock();
+                    // page_fault.rs). Per-mm section (INV-LOCK-7).
+                    let _pte_guard = pte_lock_for(self).lock();
                     // Re-check under the lock: a racing thread of this mm
                     // (CLONE_VM) may have mapped this address between the
                     // walk above and here; mapping again would orphan the
@@ -702,8 +702,8 @@ impl MmStruct {
 
     /// Zap the mapped pages in [start, start+size) WITHOUT touching the
     /// VMAs — madvise(MADV_DONTNEED) semantics. Reuses unmap_pages so the
-    /// walk/rmap/refcount/clear_pte/TLB teardown happens under
-    /// PTE_MODIFY_LOCK.
+    /// walk/rmap/refcount/clear_pte/TLB teardown happens under this mm's
+    /// PTE section.
     pub fn zap_page_range(&self, start: PageVirtAddr, size: usize) -> Result<(), MapError> {
         let aligned_size = (size + PAGE_SIZE_USIZE - 1) & !(PAGE_SIZE_USIZE - 1);
         if start.as_usize() % PAGE_SIZE_USIZE != 0 {
@@ -717,8 +717,9 @@ impl MmStruct {
 
     /// Unmap physical pages in specified range
     fn unmap_pages(&self, start: PageVirtAddr, size: usize) -> Result<(), MapError> {
-        // Serialize against fork's table walk and COW faults (PTE lock).
-        let _pte_guard = PTE_MODIFY_LOCK.lock();
+        // Serialize against fork's table walk and COW faults (this mm's
+        // PTE section, INV-LOCK-7).
+        let _pte_guard = pte_lock_for(self).lock();
         let mut addr = start.as_usize();
         let end = addr.saturating_add(size);
 
@@ -940,7 +941,7 @@ impl MmStruct {
             return; // refuse kernel-range rewrites
         }
 
-        let _pte_guard = PTE_MODIFY_LOCK.lock();
+        let _pte_guard = pte_lock_for(self).lock();
         let mut va = aligned_start;
         while va < end {
             let a = VirtAddr::new(va);
@@ -1061,11 +1062,11 @@ impl MmStruct {
 
         // SAFETY: self.pgd is a valid root PPN for the current address space. The caller
         // (fork) guarantees the parent address space is fully initialized and consistent.
-        // The walk takes PTE_MODIFY_LOCK internally per leaf table and may
-        // cond_resched between chunks (launcher wall fix — see the function's
-        // own comment for the exclusion argument).
+        // The walk takes the PARENT's per-mm PTE section internally per leaf
+        // table and may cond_resched between chunks (launcher wall fix — see
+        // the function's own comment for the exclusion argument).
         let new_root_ppn = unsafe {
-            copy_page_table_cow(self.pgd, &cow_exempt).ok_or(MapError::OutOfMemory)?
+            copy_page_table_cow(self, &cow_exempt).ok_or(MapError::OutOfMemory)?
         };
 
         // SAFETY: new_root_ppn was just returned from copy_page_table_cow, so it points to
@@ -1377,13 +1378,30 @@ pub unsafe fn map_user_page(user_root_ppn: u64, user_virt: VirtAddr, phys: PhysA
 
 /// Global PTE-modification lock (interface parity with riscv64)
 ///
-/// Coarse leaf-PTE serialization: copy_page_table_cow (fork) mutates the
-/// PARENT's PTEs while walking them; handle_cow_fault atomically swaps a
-/// parent PTE; exec/exit teardown frees them. With no per-PTE locks, any
-/// two of these racing on the same page produce stale refcounts and
-/// dangling child PTEs — the NEW2 class. One writer at a time.
-pub static PTE_MODIFY_LOCK: crate::sync::spinlock::Spinlock<()> =
-    crate::sync::spinlock::Spinlock::new(());
+/// Leaf-PTE exclusion epoch (INV-LOCK-7; type `GlobalPteLock`, see
+/// mm/mm_struct.rs and docs/architecture/lock-ordering.md).
+///
+/// x86_64 runs in SPLIT mode: leaf-PTE writers that can reach the owning
+/// mm take that mm's `PteLock` (epoch SHARED + per-mm spin) via
+/// `pte_lock_for(mm)` — writers of different mms run concurrently, which
+/// is what breaks the fork-walk CPU monopoly. Holders of THIS static
+/// (epoch EXCLUSIVE) keep the old whole-domain one-writer-at-a-time
+/// semantics: the ipc install paths (binder / sysv_shm), `map_user_region`
+/// (exec/fresh-table/device cold paths), and kernel-root maps.
+///
+/// Direct users must NOT be reachable while any per-mm PTE section is
+/// held by the same CPU (write-inside-read self-deadlocks) — the old
+/// global-Spinlock discipline forbade the same nestings, so no live path
+/// regresses.
+pub static PTE_MODIFY_LOCK: crate::mm::mm_struct::GlobalPteLock =
+    crate::mm::mm_struct::GlobalPteLock::new();
+
+/// Per-mm leaf-PTE section hook (INV-LOCK-7): every site that can reach
+/// the owning mm locks through here instead of PTE_MODIFY_LOCK.
+#[inline]
+pub fn pte_lock_for(mm: &crate::mm::mm_struct::MmStruct) -> &crate::mm::mm_struct::PteLock {
+    mm.pte_lock()
+}
 
 /// map_page caller-context marker (corruption hunt, advisory): set right
 /// before the unchecked map helpers run so the PTE-OVERWRITE-LIVE
@@ -1408,7 +1426,11 @@ pub unsafe fn map_user_region(
     size: u64,
     flags: u64,
 ) {
-    // Serialize against fork's table walk (PTE lock coverage).
+    // GLOBAL-mode section (INV-LOCK-7): this helper only receives the
+    // root PPN, so it cannot reach the owning mm's PteLock. Its callers
+    // are cold paths (exec building a fresh unpublished tree, kernel-root
+    // windows, one-shot device maps), so whole-domain exclusion is the
+    // right trade here.
     let _pte_guard = PTE_MODIFY_LOCK.lock();
     let virt_end_checked = virt_start.checked_add(size);
     let virt_end_val = match virt_end_checked {
@@ -1693,17 +1715,22 @@ pub mod cow_flags {
 /// (derived, fragile) VMA flags, so no fork can ever COW the scanout away
 /// (see the twin's comment for the fb0 read-regression history).
 pub unsafe fn copy_page_table_cow(
-    parent_root_ppn: u64,
+    parent: &crate::mm::mm_struct::MmStruct,
     cow_exempt: &[(u64, u64)],
 ) -> Option<u64> {
-    // NOTE (launcher wall fix, session-3): the walk runs CHUNKED — one
-    // PTE_MODIFY_LOCK section per leaf table (vpn2 iteration), with
-    // cond_resched() at every chunk boundary. Per-PTE atomicity vs demand
-    // faults, COW faults, mprotect/munmap and teardown is preserved (every
-    // leaf writer takes the same lock); structural safety comes from the
-    // parent mm being Arc-pinned by the forking task (teardown cannot run)
-    // and intermediate tables never being unlinked mid-life. The caller
-    // (AddressSpace::fork) holds NO lock across the walk.
+    let parent_root_ppn = parent.root_ppn();
+    // NOTE (launcher wall fix, session-3, updated for per-mm sections):
+    // the walk runs CHUNKED — one PTE section per leaf table (vpn2
+    // iteration), with cond_resched() at every chunk boundary. The parent
+    // chunk takes the PARENT mm's PteLock (INV-LOCK-7): per-PTE atomicity
+    // vs demand faults, COW faults, mprotect/munmap of THIS mm is
+    // preserved (every same-mm leaf writer takes the same per-mm spin);
+    // faults of OTHER mms no longer queue behind the walk — that
+    // cross-mm serialization was the fork-walk CPU monopoly. Structural
+    // safety is unchanged: the parent mm is Arc-pinned by the forking
+    // task (teardown cannot run) and intermediate tables are never
+    // unlinked mid-life. The caller (AddressSpace::fork) holds NO lock
+    // across the walk.
     use crate::mm::page_desc::pfn_to_page_mut;
 
     // Framebuffer frames (virtio-gpu scanout backing store) are
@@ -1798,16 +1825,17 @@ pub unsafe fn copy_page_table_cow(
                     continue;
                 }
 
-                // ONE-LEAF-TABLE CHUNK under the PTE lock (launcher wall
-                // fix, session-3): the walk no longer holds one global
+                // ONE-LEAF-TABLE CHUNK under the PARENT's per-mm PTE
+                // section (launcher wall fix, session-3; per-mm split,
+                // INV-LOCK-7): the walk no longer holds one global
                 // section for the whole parent tree — that monopolized a
                 // CPU (preempt disabled) for the multi-second walk of a
                 // large mm and blocked every other mm's faults behind it.
                 // Exclusion still holds where it must:
                 // - leaf-PTE atomicity (this table's reads/writes vs
                 //   demand faults, COW faults, mprotect/munmap on the
-                //   parent): the per-chunk PTE_MODIFY_LOCK, which every
-                //   other leaf writer also takes;
+                //   parent): the per-chunk parent PteLock, which every
+                //   same-mm leaf writer also takes;
                 // - structure: intermediate tables are never unlinked
                 //   mid-life (only free_user_page_tables frees them, and
                 //   the parent mm is Arc-pinned by the forking task, so
@@ -1816,7 +1844,9 @@ pub unsafe fn copy_page_table_cow(
                 //   additions either before or after the chunk that
                 //   covers them — both consistent.
                 {
-                    let _pte_guard = PTE_MODIFY_LOCK.lock();
+                    // ONE-LEAF-TABLE CHUNK under the PARENT mm's PTE
+                    // section (INV-LOCK-7) — see the walk-head comment.
+                    let _pte_guard = pte_lock_for(parent).lock();
 
                     // 2MB leaf: share (device/identity leaves, or user huge
                     // pages with a refcount bump).
@@ -1955,9 +1985,15 @@ pub enum CowFaultResult {
     OutOfMemory,
 }
 
-/// Handle copy-on-write page fault (4-level walk under PTE_MODIFY_LOCK)
-pub unsafe fn handle_cow_fault(root_ppn: u64, fault_addr: VirtAddr) -> CowFaultResult {
-    let _pte_guard = PTE_MODIFY_LOCK.lock();
+/// Handle copy-on-write page fault (4-level walk under the faulting mm's
+/// PTE section, INV-LOCK-7). `mm` must be the address space that owns
+/// `root_ppn`.
+pub unsafe fn handle_cow_fault(
+    mm: &crate::mm::mm_struct::MmStruct,
+    root_ppn: u64,
+    fault_addr: VirtAddr,
+) -> CowFaultResult {
+    let _pte_guard = pte_lock_for(mm).lock();
     use crate::mm::page_desc::pfn_to_page_mut;
 
     let virt_addr = fault_addr.bits();

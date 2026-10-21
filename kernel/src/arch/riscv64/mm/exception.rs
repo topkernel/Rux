@@ -291,7 +291,7 @@ pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
                             // as progress — the re-executed store either
                             // succeeds or re-faults into the right path).
                             match unsafe {
-                                handle_cow_fault(addr_space.root_ppn(), fault_addr)
+                                handle_cow_fault(addr_space, addr_space.root_ppn(), fault_addr)
                             } {
                                 crate::arch::mm::CowFaultResult::Resolved
                                 | crate::arch::mm::CowFaultResult::Retry => {
@@ -403,7 +403,7 @@ pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
         }
         crate::arch::mm::MmFaultResult::CowPending => {
             // COW page, try copy-on-write
-            match unsafe { handle_cow_fault(addr_space.root_ppn(), fault_addr) } {
+            match unsafe { handle_cow_fault(addr_space, addr_space.root_ppn(), fault_addr) } {
                 crate::arch::mm::CowFaultResult::Resolved => {
                     return MmFaultResult::Handled;
                 }

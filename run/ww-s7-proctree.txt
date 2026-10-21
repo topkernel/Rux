@@ -1,0 +1,7 @@
+# session-7 process tree 2026-10-21 11:58:55
+# chain: 1589170(wrapper,ppid 1572958=zcode-cli shell) -> 1589181(ww-chain.sh) -> 1589186(ww-hunt.py) -> 1589187(qemu r13 frozen 12371) + 1589244(gdb)
+# verify-v1: 1589197(wrapper,ppid 1572958) -> 1589208(timeout 2730) -> 1589209(qemu per-mm bzImage f9a733cd 12374)
+# KILL EVENT 2026-10-21 13:05:00
+# chain task exec_74f4aca5 'stopped' by task infra ~13:04 (no kernel event; v2 task exec_f6315c4a survived)
+# dead pids: wrapper 1589170, ww-chain.sh 1589181, hunt(r14) 1598983, qemu(r14) 1598984, gdb 1599073 — r14 partial ~22min, 0 WW-HIT, 0 panics
+# RELAUNCH 2026-10-21 13:05:50 from r15: task exec_af19c288 (see ww-chain-s7b.log)

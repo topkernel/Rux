@@ -1030,7 +1030,13 @@ pub(crate) unsafe fn release_user_leaf(
     true
 }
 
-pub unsafe fn free_user_page_tables(root_ppn: u64) {
+/// `pte` is the PTE section for the teardown chunks (INV-LOCK-7; the
+/// dying mm's own PteLock, or FRESH_TREE_PTE_LOCK for unpublished trees).
+/// riscv64 is GLOBAL mode, so every handle maps to the same global epoch.
+pub unsafe fn free_user_page_tables(
+    pte: &crate::mm::mm_struct::PteLock,
+    root_ppn: u64,
+) {
     use crate::mm::{pfn_to_page, pfn_to_page_mut, phys_to_pfn, phys_valid, page_desc::PageFlag, free_pages};
     crate::dfx::memwatch::FUT_CALLS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
     // Double-teardown detector: the same root walked twice means two
@@ -1074,7 +1080,7 @@ pub unsafe fn free_user_page_tables(root_ppn: u64) {
     // Serialize against concurrent fork copies / COW faults on ANY mm: the
     // pages freed here can be immediately reallocated as page tables or
     // COW copies by another CPU (PTE_MODIFY_LOCK, NEW2 class).
-    let _pte_guard = super::mm_ops::PTE_MODIFY_LOCK.lock_irqsave();
+    let _pte_guard = pte.lock_irqsave();
 
     let root_phys = root_ppn << PAGE_SHIFT;
     let root_table = get_page_table_virt(root_phys);

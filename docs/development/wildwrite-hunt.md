@@ -596,6 +596,168 @@ coordination with that line, not unilaterally.
   07:07 (`./run/ww-chain.sh ww-s2 100 12371 11`, session-5 log).
   0 WW-HIT in every armed run to date (r1-r10 + all manual boots).
 
+## Session 6 (continuation agent — per-mm PTE locks implemented per the session-5 design)
+
+Inherited: chain mid-r11 (driver alive, self-continuing). Claimed as-is;
+r11 completed its full 2700 s (0 hits, 0 heals) and the driver
+self-advanced to r12 at 07:52. Merged origin/main (10499dd0 — the
+launcher line's binder/sched-preempt work; the handoff's pair-merge of
+7b7a82b5+a80974df into main had not landed yet at merge time).
+
+### The per-mm PTE lock (681da2da, on top of the merge)
+
+The session-5 spec, executed with one design extension the spec left
+open: what to do about the IPC sites (ipc/binder.rs, ipc/sysv_shm.rs)
+that must keep excluding against everything but live in ANOTHER line's
+forbidden territory. Solution: make the lock two-level.
+
+- `GlobalPteLock` (RwSpinlock<()>) replaces the `PTE_MODIFY_LOCK`
+  Spinlock static in BOTH arches' mm_ops.rs. An EXCLUSIVE holder
+  (`.lock()/.lock_irqsave()`) gets exactly the old whole-domain
+  semantics. The IPC sites' code is untouched — they still call
+  `PTE_MODIFY_LOCK.lock()` — and now exclude against every per-mm
+  section through the epoch.
+- `PteLock` per MmStruct (the vestigial `pgd_lock` RwSpinlock, zero
+  callers, repurposed as the spec prescribed). On x86_64 its section =
+  epoch SHARED + the mm's spin: same-mm writers serialize, different-mm
+  writers run CONCURRENTLY — the fork-walk monopoly breaker.
+- Arch hook `pte_lock_for(mm)` in both arches: x86_64 returns the mm's
+  PteLock; riscv64 returns ONE global-mode handle (every section
+  degrades to the exclusive epoch — behavior identical to the old
+  single lock, as the spec's constraint 1 required).
+
+Switched to per-mm sections (x86_64 + arch-neutral, all in one change
+per the all-or-nothing constraint): page_fault x5 (demand/COW/swap +
+stack growth), brk, unmap/zap, set_range_permissions, the fork walk's
+parent chunks (copy_page_table_cow now takes the parent MmStruct),
+handle_cow_fault (takes the owning mm; child-settid path uses the
+child mm from the task), mmap/mprotect/mremap/mlock eager sections,
+rmap unmap + compact migration (per-mm, one section at a time, mm
+Arc-pinned — the loop structure already existed), ashremap, and mm
+teardown via the DYING mm's own lock from MmStruct::drop (per the
+spec's constraint 4). `free_user_page_tables` grew a `pte` param;
+exec's unpublished error-path tree and the synthetic test trees use
+`FRESH_TREE_PTE_LOCK` (arch-neutral static).
+
+Kept GLOBAL deliberately: `map_user_region` + kernel-root maps (root-
+PPN-only interface, callers are exec/fresh-table/device cold paths) and
+the IPC sites (territory). Documented as follow-ups.
+
+Deadlock-freedom transfer argument (in lock-ordering.md, INV-LOCK-7):
+every nesting edge that the new scheme forbids (write-inside-read,
+same-mm self-nesting) would ALSO have self-deadlocked on the former
+global Spinlock, so no live path can regress; vma_manager -> PTE
+section -> page_desc ordering is unchanged at every site. The one
+deliberate semantic narrowing, argued in the code comment: teardown
+chunks no longer globally exclude OTHER mms' faults from reallocating
+just-freed frames — safe because a frame's last teardown access is the
+free itself and the buddy heap lock serializes free vs alloc.
+
+Builds: x86_64 and riscv64 both clean (no new warnings; the codebase
+carries ~2300 pre-existing).
+
+### Verification
+
+- riscv64 (global-mode PteLock paths — the neutral files'
+  pte_lock_for): minimal-rootfs boot to mrsh shell, 0 panics; in-kernel
+  unit tests 1085/1088 — the 3 failures are pre-existing
+  config_test.rs size asserts (expect heap 512 MB; Kernel.toml carries
+  1024 from main's merge; unrelated). PREEMPT-LEAK prints at idle
+  symbolize to `cpu::wfi` — the launcher line's tripwire noise from
+  the merged main, not the PTE path.
+- x86_64 sanity (5.5 min, ww-boot.sh conditions + dfx=taskdump,
+  watchdog,periodic): 0 panics, wakes 525k, storm healthy.
+- x86_64 v1 (45 min): run by session 7 (session 6's attempt was killed
+  ~10 min in by the user pause) — see Session 7.
+- x86_64 v2 (45 min): run by session 7 — see Session 7.
+
+### Chain status this session
+
+r11 full budget clean (self-advanced); r12 started 07:52, armed,
+storming. 0 WW-HIT cumulative (r1-r12 + all manual boots). Process
+tree recorded for the external-kill watch: wrapper 1542328 ->
+ww-chain.sh 1542339 -> ww-hunt.py -> qemu (per-run pid in
+run/ww-chain-s5.log).
+
+## Session 7 (continuation agent — per-mm PTE lock validation completed)
+
+Inherited: pause snapshot 9ed98546 (session-6's v1 attempt killed ~10 min
+in by the user pause — healthy partial: wakes 1.5M, 0 panics, strand_max
+46s at kill time; chain driver stopped mid-r12). Nothing was running at
+claim time; working tree clean.
+
+### Build verification at HEAD
+
+- x86_64: `PLATFORM=x86_64 make build` is a cargo no-op reproducing the
+  byte-identical bzImage (md5 f9a733cd...), so the session-6 sanity boot
+  and this session's v1/v2 all ran the committed 681da2da code.
+- riscv64: clean rebuild (1 pre-existing manifest warning). riscv
+  `pte_lock_for` re-inspected: returns the single `PTE_GLOBAL_HANDLE`
+  (global-mode degradation) as designed.
+
+### The 45-min OH boots (ww-boot.sh conditions + dfx=taskdump,watchdog,
+### periodic, KERNEL = worktree bzImage, no gdb)
+
+| boot | budget | wakes | panics | strand events | >5s | >60s | strand_max |
+|------|--------|-------|--------|---------------|-----|------|------------|
+| bf-v1 (global lock baseline) | full | 11.35M | 0 | 26584 | 230 | 5 | 470s |
+| bf-v2 (global lock baseline) | full | 11.64M | 0 | 25359 | 447 | 3 | 615s |
+| ww-pml-v1 (per-mm) | full | 10.67M | 0 | 21781 | 191 | 2 | 66s |
+| ww-pml-v2 (per-mm) | full | 9.23M | 0 | 25681 | 364 | 1 | 202s |
+
+- v1: strand_max ratcheted to 43s by minute 7 and stayed flat for 27+
+  minutes (the 66s max landed late); wakes never stalled, avg_run 3-5ms,
+  0 KERNPANIC/ALLOCTHROW, 1059 forks.
+- v2: one early-boot single-task monster (pid 303, 202s; holder chain
+  pc=0/pc=1 — no preempt-count leak, no lock parking; wakes advanced
+  continuously through it, avg_run 4ms), then flat. 1017 forks,
+  0 panics.
+- Forensics: USEGV-F victims 0 in both boots, MM-DROP-CTX 0,
+  PREEMPT-LEAK 3 (v1, wfi-class launcher-line noise) / 0 (v2).
+- Verdict vs the gate: both boots ran the full budget with wakes
+  advancing and 0 panics; strand_max 66s/202s is 2.3-9x below the
+  470-615s residual baseline. The fork-walk cross-mm monopoly is
+  broken — no 400-600s class monster in either boot, no system-wide
+  stalls. 681da2da is VALIDATED for merge (on top of the already
+  merge-ready 7b7a82b5 + a80974df pair).
+
+### riscv64 side
+
+- Session-6's records verified against the raw logs: smoke boot to
+  mrsh, 0 panics; in-kernel unit tests 1085/1088 (3 failures are the
+  pre-existing config_test.rs size asserts).
+- bindmkdir musl driver (test/bindmkdir_boot.py, launcher-line sc28
+  probe): first run SIGILL'd at a `vsetivli` (0x1c01a) — HOST TOOLCHAIN
+  issue, not kernel: the worktree lacks toolchain/riscv64-rux-linux-musl
+  (built artifact, gitignored) so the probe fell back to distro glibc
+  static with RVV ifuncs on a V-less QEMU cpu. Fixed by symlinking the
+  main checkout's SDK (read-only).
+- With the musl probe: BMD-DONE reached, 22/32 steps rc=0, 0 panics,
+  deterministic across runs. The 10 non-rc0 steps are all in the
+  chroot/string-prefix-jail block (BMD 21+ cascade from
+  `chroot("/a")` inside the /a2 jail) plus the two negative-test
+  primes (which return the CORRECT ENOENT but the driver's crude
+  rc-filter counts them). A/B against a merge-base build (49f015f8,
+  no per-mm locks; temp worktree, same SDK): failure set
+  byte-identical. 681da2da touches no VFS/path code, so this is the
+  pre-existing mount-family semantics state (Session K territory), NOT
+  a regression. All mm-exercising steps (bind mounts, negative-dentry
+  creates, self-bind, /dev bind, chroot /a2 jail, open /dev/null in
+  jail) pass.
+
+### Chain status this session
+
+- r13 (relaunched at claim, frozen kernel, armed): full 2700 s, 0
+  WW-HIT, 0 heals; driver self-advanced to r14.
+- r14 (armed, storming): killed externally at ~22 min (~13:04, task
+  infra stopped the background chain task; my v2 boot task survived
+  the same window). Clean partial: 0 WW-HIT, 0 panics. Kill event +
+  pid tree recorded in run/ww-s7-proctree.txt (same class as the
+  session-4/5 kills; parents are the zcode-cli shell, so
+  session-infra cleanup remains the killer).
+- Relaunched from r15 at 13:06 (run/ww-chain-s7b.log); r15 storming.
+  Cumulative: 0 WW-HIT across r1-r14 (r12 was a pause-kill partial).
+
 ## Where this leaves the hunt (handoff)
 
 The attribution machinery now exists and is proven end-to-end; the

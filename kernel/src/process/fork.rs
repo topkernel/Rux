@@ -563,7 +563,7 @@ pub fn do_clone(args: CloneArgs) -> Result<Pid, i32> {
             child_root: u64,
             child_tid: *mut i32,
             tid: i32,
-            _child_task: *mut Task,
+            child_task: *mut Task,
         ) -> bool {
             use crate::arch::mm::memory_layout::{phys_to_virt, PhysAddr};
             use crate::arch::mm::mm_ops::PageTableWalker;
@@ -571,9 +571,18 @@ pub fn do_clone(args: CloneArgs) -> Result<Pid, i32> {
 
             let va = child_tid as u64;
 
+            // The child mm for the COW walk's PTE section (INV-LOCK-7).
+            // set_address_space already ran, and the child has not been
+            // scheduled — this Arc clone is the only other reference.
+            let child_mm = match (*child_task).address_space_arc() {
+                Some(mm) => mm,
+                None => return false,
+            };
+
             // Break COW (if the leaf is still RO+COW) through the arch's
             // own walker. Retry is fine: a sibling already resolved it.
             match crate::arch::mm::mm_ops::handle_cow_fault(
+                &child_mm,
                 child_root,
                 ArchVirtAddr::new(va),
             ) {

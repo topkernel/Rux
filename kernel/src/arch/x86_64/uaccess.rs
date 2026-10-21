@@ -218,6 +218,7 @@ unsafe fn fault_in_write(start: *mut u8, len: usize) -> bool {
             if bits & (1 << 9) != 0 {
                 match unsafe {
                     crate::arch::mm::mm_ops::handle_cow_fault(
+                        addr_space,
                         root_ppn,
                         crate::arch::mm::VirtAddr::new(page as u64),
                     )
@@ -250,6 +251,7 @@ unsafe fn fault_in_write(start: *mut u8, len: usize) -> bool {
                 // handle_cow_fault resolves it
                 match unsafe {
                     crate::arch::mm::mm_ops::handle_cow_fault(
+                        addr_space,
                         root_ppn,
                         crate::arch::mm::VirtAddr::new(page as u64),
                     )

@@ -116,6 +116,61 @@ block-scoped to the two counter updates.
 | INV-LOCK-4 | No lock acquisition cycles (deadlock-free) | Hierarchy documented here, verified by SPIN |
 | INV-LOCK-5 | GRQ nests inside bucket lock, never reverse | futex_wake path, verified by SPIN |
 | INV-LOCK-6 | stats nests inside virtio-net queue locks, never reverse | virtio_net poll/xmit (drivers/net) |
+| INV-LOCK-7 | leaf-PTE exclusion: vma_manager -> PTE section (global epoch + per-mm pte_lock) -> page_desc; global-epoch WRITE sections never nest inside ANY PTE section; per-mm PTE sections of the same mm never nest | mm/mm_struct.rs PteLock, arch mm_ops PTE_MODIFY_LOCK |
+
+## Per-mm PTE lock (leaf-PTE exclusion, 2026-10)
+
+User-half leaf-PTE writers exclude through a two-level scheme that
+replaces the former single global `PTE_MODIFY_LOCK` Spinlock (which
+serialized every leaf-PTE write across ALL mms — the fork-walk CPU
+monopoly of the SC-SESSIONS wall):
+
+```
+                    GlobalPteLock (arch mm_ops::PTE_MODIFY_LOCK,
+                    RwSpinlock<()> — one static per build)
+                   /                                       \
+      SHARED (read): per-mm PTE sections        EXCLUSIVE (write): global
+      = PteLock::lock() =                        = PTE_MODIFY_LOCK.lock()
+        PTE_GLOBAL.read() + mm.pte_lock spin       the old single-lock
+        (x86_64 split mode; cross-mm sections       semantics, whole-domain
+        on different mms run CONCURRENTLY)          exclusion
+```
+
+Rules (INV-LOCK-7):
+
+1. **x86_64 split mode**: every leaf-PTE writer that can reach the
+   owning `MmStruct` takes `pte_lock_for(mm)` = the mm's `PteLock`
+   (global epoch read + per-mm spin). Sites: demand/COW/swap faults,
+   fork-walk parent chunks, brk/mmap/mprotect/mremap/mlock,
+   rmap/compact (per-mm, one mm section at a time, mm Arc-pinned),
+   ashmem, and mm teardown via the dying mm's own lock
+   (uncontended by construction: last-Arc + synchronize_rcu drain).
+2. **Global mode (riscv64, and x86_64 users without an mm)**:
+   `PTE_MODIFY_LOCK` (GlobalPteLock) held exclusive. On riscv64 ALL
+   PTE sites (arch files and `pte_lock_for` handles alike) map to the
+   same global write — riscv64 keeps today's exact whole-domain
+   serialization until its own split-mode migration.
+   On x86_64 the remaining global users are: ipc/binder.rs +
+   ipc/sysv_shm.rs installs (IPC line's files — excluded against
+   per-mm readers by the epoch, no code change needed there),
+   `map_user_region`/kernel-root maps (exec/fresh-table/device
+   cold paths), and the unpublished-tree teardown handle
+   (`FRESH_TREE_PTE_LOCK`).
+3. **Nesting**: global-epoch WRITE never nests inside any PTE
+   section (write-inside-read is a self-deadlock; write-inside-write
+   likewise). Two per-mm sections may only overlap when they hold
+   DIFFERENT mms' spinlocks (both hold the epoch shared). A path may
+   never hold two sections of the SAME mm. These rules transfer the
+   old single-lock deadlock-freedom: any nesting edge forbidden above
+   would also have self-deadlocked on the former global Spinlock.
+4. **Ordering position unchanged**: the PTE section sits where the old
+   `PTE_MODIFY_LOCK` sat — after `vma_manager` (RwSpinlock, read or
+   write), before `page_desc` locks. No site may take a vma lock
+   while holding a PTE section.
+5. Kernel-half table writes (copy_kernel_mappings at mm creation,
+   boot-time alias installs) touch only fresh/unpublished tables and
+   take no PTE section; they must never be moved under a PTE section
+   held by the same task (rule 3).
 
 ## preempt_count Bitfield
 
