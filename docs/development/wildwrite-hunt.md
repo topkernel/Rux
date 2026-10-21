@@ -866,6 +866,112 @@ death marker lives in this record instead).
 - Cumulative: **0 WW-HIT across r1-r17** (r12 pause-kill, r16 slot-
   free kill partials). The engine did not fire in any armed window.
 
+## Session 10 (continuation agent — chain reclaimed alive, watchset expanded to 10)
+
+### Inheritance reconstruction — the handoff's "driver died" was stale
+
+At claim (15:38) the session-9 chain tree was STILL ALIVE under the
+main session's zcode-cli (wrapper 1635836 → ww-chain.sh 1635847 →
+ww-hunt.py → qemu): r17 had self-completed its full 2700 s (15:35) and
+the driver had self-advanced to r18, which armed correctly against the
+REFREEZEN pair (WW-ARMED 8, GUARD=0xffffffff80a7a000 — the swap landed
+as designed) and was storming. No restart was needed at claim; the
+handoff's "relaunch from r19" was only executed later, after the tree
+died (below). Lesson for handoffs: check `ps` before trusting the
+driver-dead assumption — the chain has now survived its owning
+session's death once (the bash wrapper under a subagent-shell snapshot
+outlived session 9's window by 15+ min).
+
+- r17 (LAST run on the .s2a pair, full 2700 s): 73062 lines, wakes
+  11.32M, strand_max 30.9 s, 0 KERNPANIC/ALLOCTHROW, 0 WW-HIT, 0 heals,
+  120 USEGV-F lines (known errno-as-pointer family), 0 MM-DROP-CTX,
+  0 PREEMPT-LEAK. Clean.
+- r18 (FIRST run on the refrozen 28630426 pair, killed externally at
+  15:50:00 = 15/45 min): 53029 lines, wakes 3.60M, full storm, strand
+  profile = the healthy new-kernel shape (one 9.2 s single-task
+  outlier pid 765, everything else <= 2 s — consistent with ww-ff1's
+  2.98 s baseline, no 400 s-class signal), 0 panics, 0 WW-HIT, 0 heals.
+- The 15:50:00 kill: whole-tree (wrapper/chain/hunt/qemu/gdb all gone
+  in the same second, logs truncated mid-storm, no teardown lines) —
+  the known session-infra cleanup form, this time reaping session-9's
+  leftover tree 12 min into this session. My capacity-probe experiment
+  overlapped the window (15:48-15:50) but killed only its own PIDs
+  (verified: the signal-15 attribution line names my script's bash as
+  the killer of my own QEMU). Kill datum recorded in
+  run/ww-s10-proctree.txt.
+- Chain relaunched from r19 at 15:52 as THIS session's background task
+  (run/ww-chain-s10.log).
+
+### Watchset expansion to 10 points (the archive's next-step #2, done)
+
+Gap found by re-reading the victim history: the static the engine
+smashed TWICE (b77/wt1 — hpet::BASE at 0xffffffff80fc8888) sat OUTSIDE
+the GUARD cluster and was watched by NOTHING; all 8 hardware points
+were on cluster members/canary spots. r1-r18 therefore ran with the
+one twice-confirmed victim unwatched.
+
+Capacity probe (run/ww-cap1: bare boot of the frozen kernel + OH
+ramdisk, own QEMU port 12399, 10 hw watchpoints for 30 s):
+
+- All 10 arm cleanly on this QEMU 10.2.1 gdbstub — no insertion errors.
+- Positions 9-10 (JIFFIES, timer::LAST_TICK — both 100 Hz hot) each
+  fired 2687x in 30 s: firing works at every armed position. This
+  RETROACTIVELY validates the 8-point chain set (armed since r1, but
+  firing at positions 5-8 had never been observed).
+- 0 hits on the 8 quiet candidates during the idle bare boot — no
+  post-init writers on hpet::BASE, console::UART, TSC_MULT,
+  PHYS_RAM_BASE, CMDLINE_PTR, GDT_PER_CPU, virtio MMIO_OFFSET,
+  JIFFIES_BASE.
+
+New points (deployed from r19; per-run cmd files regenerate from
+ww-gdbscript.py):
+
+- Point 9 HPET_BASE: only post-attach writers are the heal paths
+  (validated_read_base / read_time_nominal — recognizable rips). A hit
+  is a corruption event either way; the rip classifies engine vs heal.
+- Point 10 TSC_MULT (0xffffffff80be8fa8): timekeeper-class middle
+  qword of the TSC trio (OFFSET/BASE/MULT at 0xffffffff80be8f90/8fa0/
+  8fa8) — the wt1 fingerprint was a WIDE smash into a timekeeper
+  neighborhood, so the trio is the highest-affinity victim geometry.
+  Only store is the HPET-gated TSC-fallback calibration, which returns
+  early forever once hpet::ready() — zero legit writers on these boots.
+
+r19 verified armed with the 10-point set (points 9/10 at 0x...fc8888 /
+0x...be8fa8). PER_CPU slots stay unwatchable as always (legit writer
+every schedule).
+
+### Cross-line incident (main-session coordinator): shared-rootfs lock
+
+Session 9's riscv64 unit-test QEMU (1625109-class leftover, PID
+1636556, started 14:51) outlived its session with stdout already fully
+written (TEST SUMMARY 1085/1088 at log line 20491 — results long since
+recorded). Because THIS worktree's test/rootfs.img was a SYMLINK to
+/home/william/workspace/Rux/test/rootfs.img (created by session 7
+alongside the toolchain symlink) and that boot had no -snapshot and
+default locking, it write-locked the MAIN repo's shared rootfs and
+blocked the main-session regression gate twice — the coordinator
+initially misread the lock refusal as a kernel regression and reverted
+a good merge (since re-landed on main as 9dc61140 via revert-of-revert;
+the mm three-piece PASSED their full gate on an image copy).
+
+- Machine reaped at 15:39 after cmdline+cwd verification.
+- Durable fix at 15:42: the worktree's test/rootfs.img symlink is now
+  a PRIVATE 1.3 GiB copy (own inode) — no path from this worktree
+  touches main-repo mutable images anymore. Discipline rule for this
+  line: worktree-local symlinks into main's MUTABLE images are
+  forbidden (read-only SDK symlinks are fine).
+- The only other machine this line runs (the ww-s2 chain) boots only
+  its own frozen bzImage + oh-display images, all -snapshot +
+  file.locking=off.
+
+### Commits this session
+
+- cf775210: land the refrozen kernel pair binaries (session 9's
+  e8e742d4 recorded them but the swap itself was uncommitted at quota
+  death) + r17/r18 artifacts.
+- 223c76e5: watchset expansion + capacity probe scripts/artifacts.
+- Both pushed via ssh.github.com:443 (e8e742d4..223c76e5).
+
 ## Where this leaves the hunt (handoff)
 
 The attribution machinery now exists and is proven end-to-end; the
@@ -875,13 +981,17 @@ profiles. Next captures should:
 1. Ride ww-hunt.py boots (Mode B) on long soaks — e.g. overnight chains
    of 45-min OH boots; any WW-HIT line in the gdb log is the capture
    (rip + regs + stack in the same log, symbolize with addr2line).
-   Consider also chaining via fire6.py-style load (sdc cycles were the
-   b77-era trigger context).
-2. Extend the watch set to OTHER quiet statics if hits stay at zero —
-   the same GUARD-cluster trick (page-exclusive region + watchpoints)
-   applies to any never-written-after-init globals; PER_CPU slots stay
-   unwatchable (legit writer every schedule) — for those, complement
-   shadow + heal-report correlation remains the only signal.
+   Since r19 the set is 10 points (cluster 8 + hpet::BASE +
+   TSC_MULT). Consider also chaining via fire6.py-style load (sdc
+   cycles were the b77-era trigger context).
+2. Watchset room remains: capacity is proven >= 10 (ww-cap1); if hits
+   stay at zero, next candidates from the quiet probe are
+   console::UART, PHYS_RAM_BASE, CMDLINE_PTR, GDT_PER_CPU,
+   virtio MMIO_OFFSET (all verified 0 post-init writers at idle —
+   re-verify storm-quietness before arming, a flood auto-stops the
+   chain). PER_CPU slots stay unwatchable (legit writer every
+   schedule) — for those, complement shadow + heal-report
+   correlation remains the only signal.
 3. F1b is the highest-value lead surfaced: supervisor uaccess writes
    bypassing COW/share protection (needs WP=1 to even observe). Whoever
    takes the user-half corruption line should own it.
