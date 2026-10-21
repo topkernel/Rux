@@ -426,11 +426,6 @@ pub fn vfs_mount(
             });
             child.set_mount(mnt_desc.clone());
             state.mounts.push(mnt_desc.clone());
-            // sc98: remember the mount in the CALLER's namespace so a dying
-            // private namespace (killed appspawn children) unmounts it
-            // instead of leaking it into the shared tree forever — see
-            // MountNamespace::vfs_mounts.
-            crate::process::ns::ns_track_vfsmount(mnt_desc);
             // Mountpoint back-reference: dentries inside the mount climb
             // parent==None at the mount root and must hop to THIS
             // mountpoint dentry to carry the prefix (build_path_rooted).
@@ -443,6 +438,15 @@ pub fn vfs_mount(
             // "can't open drm card device", zero displays, and the whole
             // graphics stack ran screen-less (rs-egl r3-r8).
             mounted_root.set_mountpoint_back(child.clone());
+            // sc98: remember the mount in the CALLER's namespace so a dying
+            // private namespace (killed appspawn children) unmounts it
+            // instead of leaking it into the shared tree forever — see
+            // MountNamespace::vfs_mounts. MUST run AFTER dropping VFS_STATE:
+            // the lazy init_mnt_ns() inside current_mnt_ns() reaches
+            // get_vfs_root() → VFS_STATE.lock() — self-deadlock under the
+            // guard held here (sc98 first-boot DEADLOCK).
+            drop(state);
+            crate::process::ns::ns_track_vfsmount(mnt_desc);
             return Some(mounted_root);
         } else {
             // Intermediate component — create if not exists
