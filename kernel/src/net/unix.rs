@@ -1086,7 +1086,35 @@ pub fn unix_send(
     }
     let cap = sock.options.lock().sndbuf as usize;
 
+    // sc102 spin detector: a sender whose rip parks in the writev wrapper
+    // while stime runs away (183-190 ticks, utime ~0) is LOOPING here —
+    // either the enqueue gate and target_has_room disagree (busy retry) or
+    // each round enqueues into a queue that never effectively drains.
+    // Rate-limited: one print per socket per 1000 rounds names the gate
+    // values at the moment of suspicion.
+    let mut rounds: u32 = 0;
+
     loop {
+        rounds = rounds.wrapping_add(1);
+        if rounds % 1000 == 0 {
+            let tqp = {
+                let tk = sock.dgram_peer.lock().clone();
+                tk.unwrap_or_default()
+            };
+            let (qb, qt, _c, ql) = sock.diag_snapshot();
+            crate::pr_warn!(
+                "unixsend-loop: pid {} rounds={} dgram_peer={} self(q={}B true={} qlen={}) len={} cap={} nonblock={}",
+                crate::process::current_pid(),
+                rounds,
+                tqp,
+                qb,
+                qt,
+                ql,
+                data.len(),
+                cap,
+                nonblock
+            );
+        }
         // Resolve the receiving end fresh each round (the peer may have
         // closed while we were blocked).
         let target: Arc<UnixSocket> = match sock.kind {
