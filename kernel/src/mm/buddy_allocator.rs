@@ -539,20 +539,12 @@ impl BuddyAllocator {
                         break;
                     }
 
-                    // Publish the buddy half at the smaller order.
-                    // add_to_free_list performs the FULL marking (leader
-                    // meta, interior order bytes, free bitmap) — the old
-                    // init_block(.., true) in front of it repeated that
-                    // marking byte-for-byte, and the retained half's
-                    // init_block(.., false) re-marked 2^(co-1) pages that
-                    // the NEXT iteration's add_to_free_list (split-off
-                    // suffixes) and the loop's final init_block (kept
-                    // prefix) fully rewrote anyway. The split loop runs
-                    // under the heap irqsave lock, so the transient stale
-                    // larger-order marks on the retained half are
-                    // unobservable (session-5 follow-up: both dead-write
-                    // fills folded out).
+                    // Initialize buddy block and add to free list
+                    self.init_block(buddy_idx, current_order - 1, true);
                     self.add_to_free_list(buddy_idx, current_order - 1);
+
+                    // Update current block to first half
+                    self.init_block(page_idx, current_order - 1, false);
                     current_order -= 1;
                 }
 

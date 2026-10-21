@@ -764,18 +764,6 @@ impl MmStruct {
                     addr += PAGE_SIZE_USIZE;
                     continue;
                 }
-                // Foreign frame (kernel-heap GEM/fb backing): not this
-                // mm's to put/free — clear the PTE only. Same discipline
-                // as the framebuffer case in unmap_one_user_leaf_locked.
-                if crate::mm::page_alloc::is_foreign_user_frame(
-                    (ppn_val as usize) << PAGE_SHIFT,
-                ) {
-                    // SAFETY: addr is a page-aligned user address whose
-                    // leaf we just verified above.
-                    unsafe { self.clear_pte(addr as u64); }
-                    addr += PAGE_SIZE_USIZE;
-                    continue;
-                }
                 // Remove reverse mapping before clearing PTE, then drop this
                 // mapping's reference; the last reference frees the page.
                 use crate::mm::page_desc::pfn_to_page_mut;
@@ -850,16 +838,14 @@ impl MmStruct {
         if pte_bits & PageTableEntry::U == 0 {
             return false; // kernel translation overlapped in the walk
         }
-        // Device frames (virtio-gpu framebuffer) are not RAM pages, and
-        // neither is any other boot-reserved (kernel-heap) frame — the
-        // drm GEM dumb-buffer backing. Clear the PTE only.
+        // Device frames (virtio-gpu framebuffer) are not RAM pages.
         {
             let phys = (ppn_val as u64) << 12;
-            let fb = crate::drivers::gpu::get_framebuffer_info()
-                .map_or(false, |i| phys >= i.addr && phys < i.addr + i.size as u64);
-            if fb || crate::mm::page_alloc::is_foreign_user_frame(phys as usize) {
-                self.clear_pte(va as u64);
-                return true;
+            if let Some(info) = crate::drivers::gpu::get_framebuffer_info() {
+                if phys >= info.addr && phys < info.addr + info.size as u64 {
+                    self.clear_pte(va as u64);
+                    return true;
+                }
             }
         }
         use crate::mm::page_desc::pfn_to_page_mut;
@@ -1805,15 +1791,9 @@ pub unsafe fn copy_page_table_cow(
 
             // 1GB leaf: kernel device/identity leaves (U=0) are shared
             // as-is; user 1GB leaves (never created by this port) bump
-            // the refcount like any shared user page. Foreign
-            // (boot-reserved, kernel-heap GEM/fb) frames are copied
-            // as-is with NO refcount — see is_foreign_user_frame.
+            // the refcount like any shared user page.
             if pte3.is_leaf() {
-                if pte3.is_user()
-                    && !crate::mm::page_alloc::is_foreign_user_frame(
-                        (pte3.ppn() as usize) << PAGE_SHIFT,
-                    )
-                {
+                if pte3.is_user() {
                     let page = pfn_to_page_mut(pte3.ppn() as usize);
                     if !page.is_null() {
                         (*page).get_page();
@@ -1869,15 +1849,9 @@ pub unsafe fn copy_page_table_cow(
                     let _pte_guard = pte_lock_for(parent).lock();
 
                     // 2MB leaf: share (device/identity leaves, or user huge
-                    // pages with a refcount bump). Foreign (boot-reserved,
-                    // kernel-heap GEM/fb) frames are copied as-is with NO
-                    // refcount — see is_foreign_user_frame.
+                    // pages with a refcount bump).
                     if pte2.is_leaf() {
-                        if pte2.is_user()
-                            && !crate::mm::page_alloc::is_foreign_user_frame(
-                                (pte2.ppn() as usize) << PAGE_SHIFT,
-                            )
-                        {
+                        if pte2.is_user() {
                             let page = pfn_to_page_mut(pte2.ppn() as usize);
                             if !page.is_null() {
                                 (*page).get_page();
@@ -1930,16 +1904,7 @@ pub unsafe fn copy_page_table_cow(
                             pte1.ppn() >= lo && pte1.ppn() < hi
                         });
 
-                    let new_pte = if is_user
-                        && !crate::mm::page_alloc::is_foreign_user_frame(
-                            (pte1.ppn() as usize) << PAGE_SHIFT,
-                        )
-                    {
-                        // Foreign (boot-reserved, kernel-heap GEM/fb) frames
-                        // take no refcount and never COW-mark — the else
-                        // branch copies the PTE as-is (the mapping is
-                        // inherited unchanged; the owning subsystem frees
-                        // the memory).
+                    let new_pte = if is_user {
                         let phys_ppn = pte1.ppn() as usize;
                         let page = pfn_to_page_mut(phys_ppn);
 

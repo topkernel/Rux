@@ -388,61 +388,6 @@ pub fn get_zeroed_page(gfp_flags: GfpFlags) -> usize {
     addr
 }
 
-/// Count of user leaf PTEs skipped by PTE walkers because the mapped
-/// frame is foreign (boot-reserved). Readable from memwatch-style dumps;
-/// nonzero after drm GEM activity is expected and healthy.
-pub static FOREIGN_LEAF_SKIPS: core::sync::atomic::AtomicUsize =
-    core::sync::atomic::AtomicUsize::new(0);
-
-/// True when `phys` is a boot-reserved frame (kernel image, kernel heap,
-/// slab, vmemmap, dtb). A USER leaf PTE mapping such a frame points at
-/// FOREIGN memory: drm GEM dumb buffers and the virtio-gpu framebuffer
-/// backing are kernel-heap allocations that get mmap(2)'d into userspace
-/// (see drm::create_dumb + gem_mmap_resolve). No mapping-side refcount
-/// was ever taken and the page_desc belongs to whichever subsystem owns
-/// the frame, so every PTE walk (fork copy, unmap/zap, full teardown)
-/// must SKIP these frames entirely: no get_page, no rmap, no put_page,
-/// no free — the owner releases the frame through its own path
-/// (GemObject::drop -> heap dealloc).
-///
-/// History: before this discriminator, fork's COW copy get_page()'d the
-/// foreign GEM frames and the LAST teardown's put hit 0 and called
-/// free_pages on kernel-heap phys — one loud pr_err PER FRAME from a
-/// free context (sc83: a 7442-line REFUSED flood sweeping ~24 MB of
-/// heap phys while the walk monopolized its locks; the printk storm
-/// itself wedged the box). Generalizes the older framebuffer-range
-/// special cases in both arches' walkers.
-#[inline]
-pub fn is_foreign_user_frame(phys: usize) -> bool {
-    let foreign = crate::mm::memblock::memblock().is_reserved(phys);
-    if foreign {
-        FOREIGN_LEAF_SKIPS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-    }
-    foreign
-}
-
-/// Rate-limited evidence printer for free_pages refusals/drops: the
-/// first `DETAIL_BUDGET` events print in full, afterwards only one line
-/// per `SUMMARY_EVERY` events. A single corrupted PTE tree can sweep
-/// thousands of frames through here — per-frame printk from a free
-/// context (console locks + UART at 115200) is itself a wedge vector
-/// (sc83), so the flood is capped while the evidence survives.
-fn report_free_refusal(detail_msg: &core::fmt::Arguments) {
-    use core::sync::atomic::Ordering::Relaxed;
-    const DETAIL_BUDGET: usize = 8;
-    const SUMMARY_EVERY: usize = 4096;
-    static COUNT: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
-    let n = COUNT.fetch_add(1, Relaxed);
-    if n < DETAIL_BUDGET {
-        crate::pr_err!("{}", detail_msg);
-    } else if (n + 1) % SUMMARY_EVERY == 0 {
-        crate::pr_err!(
-            "free_pages: refused/dropped {} frames so far (per-frame prints suppressed)",
-            n + 1
-        );
-    }
-}
-
 /// Free contiguous physical pages
 ///
 /// # Arguments
@@ -503,24 +448,16 @@ pub fn free_pages(addr: usize, order: usize) {
         dw::FREE_DROPPED_WILD.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         // Caller diagnostic is x86-only (frame-pointer walk via att_syntax
         // asm); the riscv64 build has no equivalent and just drops it.
-        // Rate-limited (see report_free_refusal): a wild sweep hits this
-        // per frame.
         #[cfg(feature = "x86_64")]
         {
             let ret: u64;
             // SAFETY: frame pointers forced on; diagnostic return-address read.
             unsafe { core::arch::asm!("movq 8(%rbp), {}", out(reg) ret, options(att_syntax)); }
-            report_free_refusal(&format_args!(
-                "free_pages: WILD addr={:#x} order={} caller={:#x}",
-                addr, order, ret
-            ));
+            crate::println!("free_pages: WILD addr={:#x} order={} caller={:#x}", addr, order, ret);
         }
         #[cfg(not(feature = "x86_64"))]
         {
-            report_free_refusal(&format_args!(
-                "free_pages: WILD addr={:#x} order={}",
-                addr, order
-            ));
+            crate::println!("free_pages: WILD addr={:#x} order={}", addr, order);
         }
 
         return;
@@ -537,16 +474,10 @@ pub fn free_pages(addr: usize, order: usize) {
     if crate::mm::memblock::memblock().is_reserved(addr) {
         dw::FREE_REFUSED_RESERVED
             .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-        // Rate-limited (see report_free_refusal): sc83 showed a 7442-line
-        // flood of this exact line from one teardown walk of drm-GEM-mapped
-        // kernel-heap frames; the printk storm from the free context was
-        // itself a wedge vector. The walker-side is_foreign_user_frame skip
-        // now prevents the GEM case from reaching here at all — this
-        // refusal remains the last-line defense for genuinely forged frees.
-        report_free_refusal(&format_args!(
+        crate::pr_err!(
             "free_pages: REFUSED boot-reserved frame {:#x} order {} — not returned to zone",
             addr, order
-        ));
+        );
         return;
     }
 

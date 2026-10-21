@@ -758,19 +758,9 @@ fn is_framebuffer_frame(phys: u64) -> bool {
     // accounting (mapcount/refcount of an unrelated descriptor) — the
     // recycled-frame family's amplifier.
     if let Some(info) = crate::drivers::gpu::get_framebuffer_info() {
-        if phys >= info.addr && phys < info.addr + info.size as u64 {
-            return true;
-        }
+        return phys >= info.addr && phys < info.addr + info.size as u64;
     }
-    // Any other boot-reserved frame is equally foreign to the user mm:
-    // drm GEM dumb-buffer backing is kernel-heap memory mmap(2)'d into
-    // userspace (drm::create_dumb + gem_mmap_resolve). The owner frees
-    // it through its own path (GemObject::drop -> heap dealloc), so the
-    // teardown walk must skip it — no rmap, no put_page, no free.
-    // Without this, fork's COW copy refcounted the foreign frames and
-    // the last teardown's put_page(0) called free_pages on kernel-heap
-    // phys (sc83: 7442-line REFUSED printk flood + lock wedge).
-    crate::mm::page_alloc::is_foreign_user_frame(phys as usize)
+    false
 }
 
 // FORENSIC: PTE-install ledger — every user PTE installation records

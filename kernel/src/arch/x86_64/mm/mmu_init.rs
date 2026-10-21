@@ -918,12 +918,6 @@ pub unsafe fn free_user_page_tables(
                 if !phys_valid(phys_addr as usize) {
                     continue;
                 }
-                // Foreign frame (kernel-heap GEM/fb backing mapped into
-                // userspace): not this mm's to put/free — see
-                // page_alloc::is_foreign_user_frame. Skip rmap/put/free.
-                if crate::mm::page_alloc::is_foreign_user_frame(phys_addr as usize) {
-                    continue;
-                }
                 // Chunk: 1GB-leaf frame return under the PTE lock (NEW2
                 // reuse race — see the chunked-teardown comment above).
                 {
@@ -978,12 +972,6 @@ pub unsafe fn free_user_page_tables(
                     if !phys_valid(phys_addr as usize) {
                         continue;
                     }
-                    // Foreign frame (kernel-heap GEM/fb backing mapped into
-                    // userspace): not this mm's to put/free — see
-                    // page_alloc::is_foreign_user_frame. Skip rmap/put/free.
-                    if crate::mm::page_alloc::is_foreign_user_frame(phys_addr as usize) {
-                        continue;
-                    }
                     let pfn = phys_to_pfn(phys_addr as usize);
                     let page = pfn_to_page(pfn);
                     if !page.is_null() {
@@ -1034,15 +1022,6 @@ pub unsafe fn free_user_page_tables(
                     let page = pfn_to_page(pfn);
 
                     if page.is_null() || !phys_valid(phys_addr as usize) {
-                        continue;
-                    }
-
-                    // Foreign frame (kernel-heap GEM/fb backing mapped into
-                    // userspace): not this mm's to put/free — see
-                    // page_alloc::is_foreign_user_frame. Skip rmap/put/free
-                    // and let the owning subsystem (GemObject::drop ->
-                    // heap dealloc) release the memory.
-                    if crate::mm::page_alloc::is_foreign_user_frame(phys_addr as usize) {
                         continue;
                     }
 
