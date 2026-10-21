@@ -1845,6 +1845,61 @@ unsafe fn kill_dump_wedge(tk: &Task, t: *mut Task, nr: u64, args: [u64; 3]) {
         tk.utime_ticks.load(core::sync::atomic::Ordering::Relaxed),
         tk.stime_ticks.load(core::sync::atomic::Ordering::Relaxed)
     );
+    // sc105 stime-burn attribution: page-shaped positional reads (the mmap
+    // demand-fault signature) with service time, cache-miss fills, and the
+    // timer-tick kernel-rip histogram (per comm, 4 KiB pages). Global
+    // counters — deltas across consecutive launcher kills isolate this
+    // child's share; rip pages symbolize via nm/addr2line.
+    {
+        let (reads, misses, cycles, fills) = crate::fs::ext4::file::demand_read_stats();
+        let mhz = {
+            #[cfg(feature = "x86_64")]
+            {
+                crate::arch::x86_64::cpu::get_counter_freq() / 1_000_000
+            }
+            #[cfg(not(feature = "x86_64"))]
+            {
+                0
+            }
+        };
+        let us = if mhz > 0 { cycles / mhz } else { 0 };
+        crate::pr_warn!(
+            "KILLDUMP: demand-fault reads={} misses={} fillmisses={} cyc={} (~{}us avg={}us)",
+            reads,
+            misses,
+            fills,
+            cycles,
+            us,
+            if reads > 0 { us / reads } else { 0 }
+        );
+        #[cfg(feature = "x86_64")]
+        {
+            let rows = crate::arch::x86_64::trap::stime_profile_top(true);
+            for (comm, page, ticks) in rows.iter().take(8) {
+                let comm_str = core::str::from_utf8(comm)
+                    .unwrap_or("")
+                    .trim_end_matches('\0');
+                crate::pr_warn!(
+                    "KILLDUMP: stime-page(FOCUS) comm='{}' rip_page={:#x} ticks={}",
+                    comm_str,
+                    page,
+                    ticks
+                );
+            }
+            let rows = crate::arch::x86_64::trap::stime_profile_top(false);
+            for (comm, page, ticks) in rows.iter().take(8) {
+                let comm_str = core::str::from_utf8(comm)
+                    .unwrap_or("")
+                    .trim_end_matches('\0');
+                crate::pr_warn!(
+                    "KILLDUMP: stime-page comm='{}' rip_page={:#x} ticks={}",
+                    comm_str,
+                    page,
+                    ticks
+                );
+            }
+        }
+    }
     // Whole low fdtable: fd/type/path one line — where fd3 came from and
     // what the process holds overall.
     {

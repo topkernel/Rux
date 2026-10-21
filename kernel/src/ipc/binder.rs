@@ -1134,6 +1134,47 @@ pub fn binder_close(file: &crate::fs::File) -> i32 {
         unsafe {
             proc.im().is_dead = true;
 
+            // sc105 OsAccount probe: a service's binder fd closing is the
+            // ONLY transition that removes a proc (and its nodes) from the
+            // world — clients then get BR_DEAD_REPLY (userspace error 32,
+            // "proxy is already dead") forever after. The OH accountmgr
+            // service shows that signature while its process is still
+            // serving (UnlockUser logs minutes later), so the close is the
+            // event to localize: who closed, what died with it. Rate-
+            // limited budget so a chatty boot cannot flood the UART.
+            {
+                use core::sync::atomic::Ordering::Relaxed;
+                static CLOSE_PROBE_BUDGET: core::sync::atomic::AtomicU32 =
+                    core::sync::atomic::AtomicU32::new(24);
+                let owned = proc.im().nodes.len();
+                if owned > 0
+                    && CLOSE_PROBE_BUDGET.fetch_sub(1, Relaxed) > 0
+                {
+                    let mut victims = alloc::vec::Vec::new();
+                    for q in world.procs.iter() {
+                        if q.id == proc.id {
+                            continue;
+                        }
+                        let n = pm(world, q)
+                            .im()
+                            .refs
+                            .iter()
+                            .filter(|r| r.node.proc_id == proc.id)
+                            .count();
+                        if n > 0 {
+                            victims.push((q.pid, n));
+                        }
+                    }
+                    crate::pr_warn!(
+                        "binder: CLOSE proc {} pid {} owned_nodes={} foreign_refs={:?}",
+                        proc.id,
+                        proc.pid,
+                        owned,
+                        victims
+                    );
+                }
+            }
+
             // Deliver death notifications: every ref in a surviving proc
             // that points at one of our nodes and carries an Armed death
             // request fires now (Linux binder_node_release walking

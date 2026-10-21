@@ -51,8 +51,9 @@ const PIT_MODE_CMD: u16 = 0x43;
 /// binary count.
 const PIT_CH0_MODE3_BIN: u8 = 0x36;
 
-/// Fractional shift used by the TSC -> nominal-domain mapping.
-const TSC_MULSHIFT: u32 = 12;
+/// Fractional shift used by the TSC -> nominal-domain mapping (pub for
+/// hpet::calibrate_tsc — keep in sync with the promotion math).
+pub const TSC_MULSHIFT: u32 = 12;
 
 /// TSC timekeeping state (written once by `lapic_time_calibrated`):
 /// nominal = ((tsc - base_tsc) >> SHIFT) * MULT, where
@@ -65,6 +66,14 @@ static TSC_CONTINUITY_OFFSET: AtomicU64 = AtomicU64::new(0);
 
 /// True once the TSC became the timekeeper.
 static TSC_ACTIVE: AtomicU64 = AtomicU64::new(0);
+
+/// True when the active TSC timekeeper was calibrated against the HPET
+/// (sc109: the OH launcher child burned its whole 3 s appspawn watchdog
+/// in clock_gettime — no vDSO, so every call paid the syscall AND an
+/// HPET MMIO read, which under KVM is a VM exit. KVM's TSC is invariant
+/// and vCPU-synchronized, so after calibration RDTSC serves the nominal
+/// clock with no exits; a 1 Hz resync against the HPET bounds drift).
+static TSC_FROM_HPET: AtomicU64 = AtomicU64::new(0);
 
 /// jiffies — global tick counter (advanced from the timer IRQ)
 static JIFFIES: AtomicU64 = AtomicU64::new(0);
@@ -104,14 +113,12 @@ pub fn monotonic_ns_since_boot() -> u64 {
 
 /// Read current time in the nominal CLOCK_FREQ clock domain.
 ///
-/// HPET-derived (exact) once the HPET clocksource initialized;
-/// TSC-derived (with a continuity offset) if only the APIC calibration
-/// ran; jiffies-derived before either.
+/// TSC-derived first (fast: RDTSC, no VM exit) once calibrated — against
+/// the LAPIC tick when there is no HPET, against the HPET itself when
+/// there is (hpet::calibrate_tsc); HPET-derived (one MMIO read per call)
+/// only in the pre-calibration window; jiffies-derived before either.
 #[inline]
 pub fn read_time() -> u64 {
-    if crate::drivers::timer::hpet::ready() {
-        return crate::drivers::timer::hpet::read_time_nominal();
-    }
     if TSC_ACTIVE.load(Ordering::Acquire) != 0 {
         let mult = TSC_MULT.load(Ordering::Acquire);
         let now = crate::arch::cpu::read_counter();
@@ -119,9 +126,86 @@ pub fn read_time() -> u64 {
         let delta = now.wrapping_sub(base);
         (delta >> TSC_MULSHIFT).wrapping_mul(mult)
             + TSC_CONTINUITY_OFFSET.load(Ordering::Acquire)
+    } else if crate::drivers::timer::hpet::ready() {
+        crate::drivers::timer::hpet::read_time_nominal()
     } else {
         get_jiffies() * TIME_SLICE_TICKS
     }
+}
+
+/// Promote the calibrated TSC to timekeeper (hpet::calibrate_tsc).
+///
+/// `mult` maps (tsc >> TSC_MULSHIFT) deltas to the nominal domain,
+/// `base_tsc` is the TSC stamp captured with `nominal_at_base`, and the
+/// continuity offset makes tsc_nominal(base) == nominal_at_base so the
+/// switch from the HPET clock cannot run time backward.
+pub fn promote_tsc_timekeeper(mult: u64, base_tsc: u64, nominal_at_base: u64) {
+    TSC_MULT.store(mult, Ordering::Release);
+    TSC_BASE.store(base_tsc, Ordering::Release);
+    TSC_CONTINUITY_OFFSET.store(nominal_at_base, Ordering::Release);
+    TSC_ACTIVE.store(1, Ordering::Release);
+    TSC_FROM_HPET.store(1, Ordering::Release);
+}
+
+/// 1 Hz drift discipline for the HPET-calibrated TSC (timer tick calls
+/// this; see TSC_FROM_HPET). The offset only ever GROWS: a TSC that fell
+/// behind (or a KVM TSC resync) is stepped forward, clamped to 10 ms per
+/// resync so a poisoned HPET read cannot jump the clock; a TSC that runs
+/// fast is only logged unless the lead exceeds 250 ms (then the whole
+/// mapping is re-derived — a mult miscalibration would otherwise widen
+/// forever).
+pub fn resync_tsc_against_hpet() {
+    if TSC_FROM_HPET.load(Ordering::Acquire) == 0 {
+        return;
+    }
+    let mult = TSC_MULT.load(Ordering::Acquire);
+    let base = TSC_BASE.load(Ordering::Acquire);
+    let off = TSC_CONTINUITY_OFFSET.load(Ordering::Acquire);
+    if mult == 0 {
+        return;
+    }
+    let tsc_nom = ((crate::arch::cpu::read_counter().wrapping_sub(base) >> TSC_MULSHIFT)
+        .wrapping_mul(mult))
+    .wrapping_add(off);
+    let hpet_nom = crate::drivers::timer::hpet::read_time_nominal();
+    if hpet_nom > tsc_nom {
+        let behind = hpet_nom - tsc_nom;
+        // 10 ms nominal-domain clamp (CLOCK_FREQ=10 MHz → 100_000 ticks).
+        let step = behind.min(100_000);
+        if behind > 100_000 {
+            resync_report(b"tsc-clock: fell behind ", behind);
+        }
+        TSC_CONTINUITY_OFFSET.fetch_add(step, Ordering::AcqRel);
+    } else if tsc_nom - hpet_nom > 250_000_000 {
+        // >25 s lead: mapping is broken — rebase hard.
+        resync_report(b"tsc-clock: rebase, lead ", tsc_nom - hpet_nom);
+        // sc110 forensics: the single observed step was ~25 s, once, with
+        // no rate drift after — name the CPU and raw pair so the next
+        // capture can tell vCPU TSC-offset skew (per-cpu step) from a
+        // smashed mapping (global).
+        crate::pr_warn!(
+            "tsc-clock: rebase cpu={} tsc_nom={:#x} hpet_nom={:#x} base={:#x} mult={:#x}",
+            crate::arch::cpu_id(),
+            tsc_nom,
+            hpet_nom,
+            base,
+            mult
+        );
+        TSC_BASE.store(crate::arch::cpu::read_counter(), Ordering::Release);
+        TSC_CONTINUITY_OFFSET.store(hpet_nom, Ordering::Release);
+    }
+}
+
+/// Rate-limited one-line report for resync events (max 8 per boot).
+fn resync_report(msg: &[u8], v: u64) {
+    static N: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+    if N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) >= 8 {
+        return;
+    }
+    let mut line = alloc::string::String::new();
+    use core::fmt::Write;
+    let _ = write!(line, "{}{v}", core::str::from_utf8(msg).unwrap_or(""));
+    crate::pr_warn!("{}", line);
 }
 
 /// True when the calibrated TSC is the active timekeeper (no HPET).
