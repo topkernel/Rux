@@ -832,3 +832,297 @@ Session I constraints honored: no mm/** or dfx/switches.rs edits;
 only own QEMU PIDs killed (sc78 restart); max 2 own QEMUs at a time;
 shared images snapshot+file.locking=off, userdata private reflink
 copies; English commits; early wip snapshots.
+
+Session K update 1 (12:4x — sc82/sc83 forensics, musl+ffrt decoded,
+scanner fragility, mm-race flake):
+
+- OH musl rwlock protocol VERIFIED from ld-musl-x86_64.so.1 disassembly:
+  word = low31 reader count | bit31 WAITERS; writer holds at 0x7fffffff;
+  readers BARGE (CAS val+1) regardless of WAITERS; readers park only at
+  writer-held (expect 0xffffffff); WRITERS park expecting word|WAITERS —
+  so the frozen 0x80000010 parkers are writers, and reader-unlock emits
+  NO kernel traffic except the last-out wake(1). The kernel futex layer
+  cannot leak the count; only dead/parked holders can.
+- abilityMapLock_ is NOT a musl rwlock: samgr binary imports
+  ffrt_rwlock_* (SAMGR_USE_FFRT); ffrt SharedMutexPrivate = fast_mutex +
+  2 waiter lists + state (writeEntered bit31 | readers). Its waits park
+  on PER-THREAD condvars, never on the shared word. So the frozen word
+  belongs to some OTHER musl pthread_rwlock in the samgr process.
+  DEFAULT_WORK_THREAD_NUM = 16 in ipc_process_skeleton.h — the "16
+  readers" matches the libipc worker pool cap; park stacks will name the
+  exact lock (sc84/sc85 boots carry the adoption-time dump).
+- sc82 (25 min): wedge reproduced exactly (samgr tgid 334, waiters=6,
+  word 0x80000010). Census over the WHOLE boot: samgr had 10 threads
+  ever, ZERO exits while the scanner lived, yet the word claims 16
+  readers → the counts are NOT live-thread holdings. Three processes
+  (334/716/791 across boots) show the IDENTICAL word value.
+- sc82 failure mode: khungtaskd STOPPED scanning ~2 min after adoption
+  (WW: IRQ-OFF-WINDOW age=519ms in SpinlockIrqGuard<World>::drop —
+  stall_report's WORLD-guarded dump runs ~0.5s with irqs off) and the
+  FROZEN dump (gated +120s then) never fired. sc83 kernel: dump fires
+  AT adoption; +12/+16 neighbor words (primitive discriminator);
+  per-minute scan heartbeat; HIGH-table eviction.
+- sc83 died at ~6 min to a both-CPU spin on PTE_MODIFY_LOCK
+  (arch/x86_64/mm/mm_ops, global) — mm-domain incumbent race (the
+  wildwrite line's per-mm PTE lock work), not this lane. sc84+sc85
+  run in parallel to outrun the flake.
+- 5x THREAD-DIED-SERVICING in sc82: SAs (626, 764, 773, 800, 1315)
+  died servicing samgr nested calls (from tids 548/350/335) —
+  consistent with samgr death-cleanup writers piling onto the frozen
+  lock (each dead SA spawns a DetachObject-style writer).
+
+Session K update 2 (13:2x — sc84/sc85/sc86 dumps land; the freeze is a
+SYSTEM-WIDE family, not samgr-specific):
+
+- sc84 (adoption-time dump kernel): tgid 444 resource_schedule_service
+  FROZEN word 0x80000010, nb+4=3 == kernel waiter count (musl rwlock
+  layout confirmed: +4 is parked-waiter count). Writers parked: a
+  BgtaskMgr stub thread, an FFRT worker, an IPC worker. EXTRA-FROZEN
+  tgid 814 'foundation': SIXTEEN thread exits in the 52-75s window and
+  a second frozen 0x80000010 word (two frozen locks in one process).
+- sc85: tgid 336 hdf_devmgr — word 0x80000010, nb+4=5, FIVE of 7
+  threads parked on the word as writers (all OS_IPC workers sharing ONE
+  identical return address, fd=25 fileoff 0x2dfb8), exit ring: ZERO
+  exits ever. 7 threads total vs 16 claimed readers.
+- sc86 (fd->path instrument; paths come out "?" — musl's loader closes
+  the fd after mmap, so fdtable lookups fail for lib mappings): tgid
+  334 = hdf_devmgr THIS boot (pid assignment varies; the early-census
+  assumption "334 == samgr" is boot-specific). 17 tasks: 6 writers on
+  the frozen word, NINE workers parked in binder reads — stall-report
+  shows all nine "waiting 320+s for work (no pending txn)" = healthy
+  idle, so idle workers do NOT hold read counts. main parked on the
+  NEIGHBOR word 0x...2b70 (0x94 below the frozen one — same heap
+  struct, second lock). EXTRA tgid 556 'device_manager': 5 threads,
+  0 exits, 16 readers, 1 writer.
+- Family table so far (word always EXACTLY 0x80000010 = WAITERS + 16
+  readers = libipc DEFAULT_WORK_THREAD_NUM): samgr, rss,
+  foundation(x2), hdf_devmgr(x2 boots), device_manager, sc81's 716/791.
+  hdf_devmgr + device_manager rule OUT dead-thread leaks (zero exits)
+  and pool-idle holders (stall-report clears the idle workers).
+  Remaining candidates: recursive read acquisition by ONE parked
+  thread (main parked on the neighbor lock), or a fabricated value
+  (mm-domain wild write — the wildwrite line's per-mm PTE bug would
+  fit the identical-value-across-processes signature).
+- hdf_devmgr's writer threads 335/348 had made nested calls into
+  pids 795/827/1299 that DIED servicing them (THREAD-DIED-SERVICING):
+  the writers look like death-cleanup paths (DetachObject-style)
+  piling onto the poisoned lock after BR_DEAD_REPLY.
+- sc87 booting: first-writer-park capture IN SYSCALL CONTEXT (full
+  caller chain at the freeze's birth moment, 12 frames + fd paths +
+  VMA file sizes — sizes identify libs despite closed fds), plus
+  post-adoption EXIT-WORD snapshots.
+
+Session K FINAL (13:4x — freeze family root-caused to a userspace
+std::shared_mutex recursion; NOT the kernel's rwlock/futex accounting):
+
+IDENTITY SOLVED (byte-verified offline against extracted libs; libs live
+in /system/lib64/chipset-sdk-sp/ + /system/lib64/{platformsdk,module,ndk}
+— extract with the fixed debugfs walker, see /tmp/oh-libs):
+- The frozen word is std::shared_mutex::__state_ of THIS libc++ build
+  (libc++.so, 0x141d20 bytes): WRITER_ENTERED(bit31) | reader-count.
+  Writers park via libc++'s own futex path ON __state_ with expected =
+  current state (0x80000010); park-site frames byte-match libc++'s
+  condition_variable::wait / the atomic-wait path (fileoff 0xc7e02).
+- The freezing instances are STATIC shared_mutex objects in DFX libs'
+  bss: libhicollie.z.so vaddr 0x3c0e4 (the 4th LOAD's anon bss tail),
+  plus analogous statics in libbegetutil.z.so and libfaultloggerd.z.so.
+  fd->path prints are USELESS for loader mappings (musl closes the fd
+  after mmap; fd numbers get reused) — identify by VMA filesz +
+  fileoff + bytes instead.
+- Family (per boot, ALL exactly 0x80000010): samgr, hdf_devmgr,
+  device_manager, foundation(x2), resource_schedule_service, mmi/msdp
+  host, sms-persist host, +2 anonymous SAs.
+
+MECHANISM (by elimination + arithmetic):
+- hdf_devmgr cases: 7 threads EVER, ZERO exits, yet 16 readers. The
+  count exceeds every thread that ever existed -> the reads are
+  RECURSIVE lock_shared calls by ONE thread (libc++ shared_mutex just
+  counts recursion). 16 = the recursion/retry bound (same value in
+  every process — an algorithmic constant; 16 is also libipc's
+  DEFAULT_WORK_THREAD_NUM, but pool size is coincidental: hdf's pool
+  was at 15 when only 5 were live).
+- The recursing holder is parked on a SECOND lock 0x94 below the
+  frozen word (same static object: shared_mutex's sibling mutex/gate) —
+  the main thread in every dump sits there. RWFRZ-PARK captured the
+  first writer at park time (16 dumps/boot, syscall context, exec-VMA
+  filtered, 64-slot window): callers include hicollie's DfxWatchdog,
+  FFRT workers, IPC workers, samgr/storage_manager/huks/param_watcher
+  mains — i.e., everything eventually funnels into the DFX report path
+  that owns the lock.
+- TRIGGER: the devhost_usb crash-loop (libusb_pnp_manager.z.so+0x15bac
+  NULL list walk, byte-verified again in sc87) kills server threads
+  mid-txn; every THREAD-DIED-SERVICING event feeds a client whose
+  error-recovery/reporting path re-enters the DFX lock chain.
+
+KERNEL VERDICT: the rwlock/futex accounting is INNOCENT (musl/libc++
+protocols decoded from binaries; reader-unlock emits no kernel traffic;
+the kernel cannot leak these counts). The freeze is a userspace
+recursion triggered by IPC failures we already partly fixed
+(one-txn-per-read). Remaining kernel work that would unblock the
+launcher chain:
+  1. The residual binder reply-stalls (4/boot in sc80) — same family
+     as the fixed SERVER-OWING bug; likely feeds the DFX retry storm.
+  2. stall_report's WORLD-guarded dump runs ~500ms with irqs off and
+     killed khungtaskd in sc82 (scanner never scanned again) — needs
+     sectioning (ipc/binder.rs, my lane, NOT yet fixed).
+  3. PTE_MODIFY_LOCK global-spinlock both-CPU deadlock (sc83, mm lane
+     — wildwrite line's per-mm PTE lock work 681da2da).
+NEXT SESSION concrete steps:
+  a. Find the 16-bounded recursion in OH source (hicollie/hisysevent/
+     begetutil retry loops around a shared_lock) or disassemble
+     libhicollie's bss+0xe4-referencing code (indirect via .data ptr).
+  b. Extend EXTRA-FROZEN to dump the thread parked on frozen-word
+     MINUS 0x94 (the recursing holder) with the 64-slot exec filter —
+     its stack shows the 16-deep chain directly.
+  c. Fix (2) above so scanners survive; consider gating park dumps
+     smarter (16/boot budget burns in the first minutes).
+MILESTONE: not reached (screen stays the 8-color oracle checkerboard);
+the freeze family blocks the launcher chain upstream of ArkUI.
+
+TOOLING LANDED: adoption-time FROZEN dump + EXTRA-FROZEN same-shape
+dumps + first-writer-park capture (syscall context) + per-word HIGH
+table with eviction + early-tgid census + 256-entry exit ring +
+EXIT-WORD snapshots + scan heartbeat + fd-path/filesz/bytes frames +
+exec-VMA filter. Offline: rwsym.py (= tolerant regex, LIBDIRS now
+syslib64+vendorlib64+samgr-bin+subdirs+platformsdk; add cssp/ from
+chipset-sdk-sp). Commits: 87be7195, 2b311ff9(+artifacts), 48def2d4,
+db709ac8, and this note.
+
+Session L update 1 (15:4x — WIP reviewed+landed, devhost_usb decoded to
+the image's own init-less listener list, sysfs usb parity landed, dump
+tooling iterated sc89->sc91):
+
+WIP REVIEW (bccf87b2, quota-death snapshot):
+- config.rs hunk DROPPED (commit 7273d175): it was stale riscv64/128MiB
+  build state, exactly the sc46 hazard documented in kernel/build.rs
+  (x86_64 feature build picks up a poisoned generated config.rs ->
+  init 'failed to fork'). Restored x86_64/1GiB.
+- binder.rs stall_report split KEPT: formatting under WORLD, all slow
+  forensics (holder page-table walks, park dumps, futex graphs) and the
+  chunked console flush moved AFTER the guard drops. VALIDATED in
+  sc89/sc90: the scan heartbeat runs the whole boot (sc89 alive at
+  1183s; sc82 died at ~120s) — khungtaskd survives, KERNPANIC 0.
+- futex.rs rwfz_neighbor_dump KEPT: fired in sc89 AND sc90 — hdf_devmgr
+  main (tgid 336/347) parks on frozen-0x94 exactly as Session K
+  predicted (recursion holder).
+
+devhost_usb crash loop — FULLY DECODED (sc87/sc89/sc90 same signature,
+rip libusb_pnp_manager vaddr 0x16bac = DdkListenerMgrAdd's inlined
+DdkListenerMgrIsExists walking head.next==NULL):
+- The image's libusb_pnp_manager build predates master: its
+  DdkDevMgrInit BINDS the HDF service 'hdf_usb_pnp_notify_service'
+  (no sysfs opendir; master's opendir(/sys/bus/usb/devices) flow is
+  newer). /sys/bus/usb/devices fix (ec7ea948) is still correct Linux
+  parity (bus_register creates it empty) but is NOT this crash's fix.
+- THE DEFECT IS IN THE IMAGE: DdkListenerMgrInit is EXPORTED and
+  imported by NOBODY in the whole userspace (checked .dynstr of every
+  lib + dlsym strings). g_usbPnpSrv's listener list is never
+  initialized in any process, on ANY kernel. The crash is reached via
+  libusb_ddk_service_1.1's UsbDdkService::Init: UsbInitHostSdk() ->
+  AdapterInit (linux_adapter) is a NO-OP SUCCESS -> allocates listener
+  -> DdkListenerMgrAdd -> walks zeroed list -> SIGSEGV. Deterministic
+  first-call crash of usb_manager's SA on any kernel incl. Linux.
+- Rux-side amplifier: the restart loop never gives up (each respawn
+  re-crashes, feeding THREAD-DIED-SERVICING + DFX retry storm -> the
+  shared_mutex freeze trigger family). Not separately fixed this
+  session (init-side restart limiter is OH userspace).
+
+FREEZE FAMILY (sc89+sc90 dumps):
+- The frozen word is NOT a fixed bss static: page offset differs across
+  boots (sc89 hdf_devmgr +0xc04, sc90 +0xa64, formation +0xe4) — the
+  shared_mutex lives on the HEAP at 0x7ff0006-0x7ff0009xxxxxxxx. Word
+  always 0x80000010 (16 readers + WAITERS). Writers park at ONE shared
+  code site 0x3fbf116dea (fixed-base shared-lib region 0x3fbf000000,
+  merged LOAD mappings -> VMA offset bookkeeping zeroed, fd closed).
+- Holder = hdf_devmgr MAIN thread, parked on frozen-0x94 (sibling lock
+  in the same heap object).
+- sc90's exec-frame filter fix (baseoff!=0 || fd>=0) still recovered
+  only DATA-segment pointers for the holder: loader-mapped code VMAs
+  lose offset entirely in Rux's merged mappings. ripbytes captured
+  (0x00cab80c75daf883 = 'cmp eax,-0x26; jne; mov eax,0xca' style code)
+  but byte-search across ALL image libs (system+vendor+subdirs+ndk+
+  module+chipset*, extracted to /tmp/oh-libs/full-*) finds NO match —
+  the park-site lib is not in the images' .so set (memfd/anon-mapped
+  or runtime-generated). Session K's 'static in libhicollie bss
+  0x3c0e4' identification is DOUBTED (heap + offset-variance + the
+  cssp libhicollie has no code refs to 0x3c0e4; its referenced static
+  0x3bff0 is the WatchdogInner singleton used by IpcFull).
+- sc91 kernel (4b1cc74d) captures: NBR-WORD (the sibling lock's own
+  value — owner tid if mutex), NBR-RAW (256 raw stack slots, values
+  only, offline-matchable against any file), 2x redundancy.
+
+Boots: sc89 (WIP kernel, 25min quiet, neighbor dump landed), sc90
+(sysfs usb fix + filter fix — crash loop persists as decoded above),
+sc91 booting (raw-slot capture). Screen still the 8-color oracle
+checker in all three; launcher process spawns (sandbox mounts visible)
+but the chain stays frozen upstream.
+
+Session L FINAL (16:0x — freeze terminal state decoded as a userspace
+ABBA deadlock in ONE heap object; kernel held innocent; milestone not
+reached; three boots sc89/90/91 all stable, scanner alive end-to-end):
+
+FREEZE TERMINAL STATE (sc91 NBR-WORD, the decisive capture):
+- Sibling lock (frozen-0x94) word = 0x80000000 = libc++ shared_mutex
+  WRITER_ENTERED | 0 readers: A WRITER OWNS the sibling.
+- Frozen word = 0x80000010 = WRITER_ENTERED | 16 readers: a writer
+  PENDING (bit31 set by its lock()) + 16 recursive read acquisitions
+  (one thread; libc++ lock_shared just increments the count even while
+  a writer pends).
+- The cycle: hdf_devmgr MAIN holds frozen.Rx16 and parks acquiring the
+  SIBLING (expected 0x80000000); a DFX-path thread (writers' caller
+  frame byte-identified: libdfx_procinfo.z.so chipset-sdk-sp build,
+  size 0xce38) owns sibling.W and parks acquiring frozen (it set bit31,
+  waits for readers to drain). Neither side can progress -> both locks
+  stay parked forever. PURE USERSPACE ABBA deadlock between two
+  shared_mutexes 0x94 apart inside one heap-allocated object.
+- The frozen word's ADDRESS varies per boot (+0xc04/+0xa64/+0xe4 page
+  offsets) -> HEAP object, NOT the libhicollie bss static Session K
+  hypothesized (doubted: cssp/libhicollie has zero code refs to
+  0x3c0e4; its 0x3bff0 static is the WatchdogInner singleton IpcFull
+  uses).
+- Kernel futex accounting: INNOCENT (confirmed again — counts are
+  exactly what userspace wrote; no spurious wakes involved; the park
+  expected-values match libc++ protocol).
+- Holder chain symbolization BLOCKED by an mm-lane gap: loader-mapped
+  code VMAs lose both fd and offset (the 0x3fbf000000-0x3fbf138000
+  span prints baseoff=0 fd=-1 as ONE VMA although it contains multiple
+  libs' LOADs — the loader's anon reservation is not overlay-split by
+  the file LOAD mappings). Linux ALWAYS shows the innermost file VMA
+  in /proc/<pid>/maps; Rux's merged view is a real ABI/forensics
+  divergence. HANDOFF to mm lane: preserve fd/offset bookkeeping when
+  file mappings overlay an existing reservation. Raw-slot method
+  (NBR-RAW + nbrraw.py) works around it but the fixed-base region
+  could not be inverted with the libs available (park-site ripbytes
+  0x00cab80c75daf883 exist in NO image lib; libhilog was identified
+  via an fd-open anon_inode copy — some libs load from memfd paths we
+  cannot enumerate offline).
+
+REPLY-STALL TREND (whole lane): sc74=9 -> sc77=7 -> sc80=4 -> sc89=1
+-> sc90=1 -> sc91=0. The one-txn-per-read fix + heals hold. KERNPANIC 0
+in all three boots. khungtaskd scanner ALIVE the whole boot in sc89
+(1183s), sc90, sc91 — the binder.rs stall-window fix (WORLD-guard
+split, chunked flush) from the quota-death WIP is VALIDATED and landed.
+
+COMMITS this session (feature/samgr-callback, all English):
+- 7273d175 review(sc89): drop stale generated config.rs from the WIP
+- ec7ea948 fix(sysfs): /sys/bus/usb/{devices,drivers} Linux parity
+- 0b3366e2 dfx(futex): sc90 park-stack filter + window fixes
+- 4b1cc74d dfx(futex): sc91 raw stack-slot capture + NBR-WORD
+- 6e4f00b7 run+notes: session L update 1 + nbrraw.py
+- (binder.rs + futex.rs WIP content from bccf87b2 itself)
+
+NEXT SESSION:
+  a. The launcher chain is blocked by a USERSPACE deadlock the kernel
+     cannot fix legitimately. The productive lever is starving its
+     trigger: the devhost_usb/usb_manager crash loop (image defect:
+     DdkListenerMgrInit exported but never imported anywhere; the
+     first UsbDdkService::Init DdkListenerMgrAdd always walks a NULL
+     list, on Linux too). Options: (1) disable the usb services in the
+     IMAGE's init configs (precedent: run/oh-x appspawn-src overlay),
+     (2) accept the loop but cut its DFX reentry amplification.
+  b. mm lane (NOT samgr lane): file-LOAD mappings over loader
+     reservations lose fd/offset — affects /proc/maps parity and all
+     forensic symbolization; small fix, big payoff.
+  c. If the deadlock drains (a works), expect launcher -> OnForeground
+     -> ArkUI; watch oh-shotmon for >8 colors and grab the ohgpu
+     screendump as the milestone artifact.

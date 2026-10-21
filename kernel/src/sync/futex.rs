@@ -1495,5 +1495,932 @@ pub fn sys_futex_handler(args: &[u64; 6]) -> i64 {
     let uaddr2 = args[4] as usize;
     let val3 = args[5] as u32;
 
-    do_futex(uaddr, op, val, timeout, uaddr2, 0, val3)
+    // sc87: first-writer-park forensics. A FUTEX_WAIT whose expected value
+    // is WAITERS|N-readers with N>=4 is a musl-rwlock WRITER parking on a
+    // word that ALREADY claims many readers — the freeze's birth moment.
+    // The freeze scan (60 s cadence) always arrives after the fact; this
+    // catches the very first park, in the parking thread's own syscall
+    // context, where the user stack still carries the full write-lock
+    // caller chain. Capped at 16 dumps per boot.
+    if matches!(op & FUTEX_CMD_MASK, FUTEX_WAIT | FUTEX_WAIT_BITSET) {
+        let readers = val & 0x7fffffff;
+        if val & 0x80000000 != 0 && readers >= 4 && readers < 0x40000000 {
+            static PARKED_DUMPS: core::sync::atomic::AtomicU32 =
+                core::sync::atomic::AtomicU32::new(0);
+            let n = PARKED_DUMPS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            if n < 16 {
+                if let Some(t) = crate::sched::current() {
+                    let tk = unsafe { &*t };
+                    let comm = tk.comm();
+                    let name = core::str::from_utf8(&comm[..])
+                        .unwrap_or("")
+                        .trim_end_matches('\0');
+                    crate::pr_warn!(
+                        "RWFRZ-PARK #{} tid {} comm='{}' uaddr={:#x} val={:#x} (writer parking on {} readers)",
+                        n,
+                        tk.pid(),
+                        name,
+                        uaddr,
+                        val,
+                        readers
+                    );
+                    // SAFETY: t is the current task, in its own syscall.
+                    unsafe { rwfz_stack_frames(t, "park", 12, 64) };
+                }
+            }
+        }
+    }
+    let r = do_futex(uaddr, op, val, timeout, uaddr2, 0, val3);
+    rwfz_op_log(uaddr, op, val, r);
+    r
+}
+
+// ==================== rwlock freeze watch (sc81) ====================
+//
+// sc76/sc80 terminal shape: samgr's abilityMapLock_ (musl rwlock) shows
+// word 0x80000010 — waiters bit + 16 held READ counts — while the tgid
+// has 7 live threads, ALL parked on that word in FUTEX_WAIT. Decoded OH
+// musl protocol (from /system/lib/ld-musl-x86_64.so.1):
+//   word==0            free
+//   0 < count < 0x7fffffff   N readers hold the lock
+//   word==0x7fffffff  writer holds (bit31 ORed while parked waiters exist)
+// Readers NEVER park at a positive count (tryrdlock CASes unconditionally
+// unless overflow) — so every thread parked on this word is a WRITER, and
+// new read acquisitions still succeed. The wedge is writer starvation:
+// the 16 read counts must drain to 0 for any writer to proceed, and with
+// only 7 live threads none of them can hold more than a non-recursive
+// scope's worth. Either threads exited holding read scopes (leak), the
+// count was inflated by corruption, or threads exist that the futex
+// waiter graph does not show (parked in non-futex sleeps). This watch
+// decides: word deltas (any unlock traffic), futex op traffic on the
+// word, per-scan tid-liveness of the tgid (reader exits), and a one-shot
+// full-tgid park-stack dump when the freeze holds.
+
+/// Watched word (uaddr); 0 = inactive. The freeze scan publishes it when
+/// a cluster of >=3 waiters sits on an rwlock-shaped word.
+static RWFRZ_UADDR: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+static RWFRZ_MM: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+static RWFRZ_TGID: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+static RWFRZ_FIRST: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static RWFRZ_LASTVAL: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+static RWFRZ_LASTVAL_AT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static RWFRZ_DUMPED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+/// sc82: per-word inflation-curve table. Each contended rwlock-shaped
+/// word with readers >= 2 is tracked (last value + last print); one
+/// line per word per minute carries the delta — a gradual +1 pile-up
+/// (real readers parking in scopes) vs a single jump (count corruption
+/// or a fork-inherited copy) is decided by this curve, not by the
+/// terminal value alone.
+struct HighWord {
+    uaddr: usize,
+    tgid: u32,
+    lastv: u32,
+    at: u64,
+}
+static RWFRZ_HIGHTAB: Spinlock<(usize, [HighWord; 8])> = Spinlock::new((
+    0,
+    [const {
+        HighWord {
+            uaddr: 0,
+            tgid: 0,
+            lastv: 0,
+            at: 0,
+        }
+    }; 8],
+));
+static RWFRZ_BEAT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static RWFRZ_OPLOG: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+/// Last tid census of the watched tgid + its size (leak forensics: a tid
+/// that vanishes while the word never drains is a reader that exited).
+static RWFRZ_TIDS: Spinlock<(usize, [u32; 64])> = Spinlock::new((0, [0; 64]));
+/// Which tgid RWFRZ_TIDS currently censuses (sc82 early-watch support).
+static RWFRZ_TIDS_CENSUS_TGID: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+
+/// Global thread-exit ring (sc82): every task unlink (thread OR process
+/// leader) records (jiffies, pid, tgid). The freeze dump replays the
+/// watched tgid's exits — readers that died BEFORE the watch adopted the
+/// word (leak evidence with timestamps) instead of only post-adoption
+/// vanishings. Forensics only; no behavior.
+#[derive(Clone, Copy)]
+struct ExitRec {
+    j: u64,
+    pid: u32,
+    tgid: u32,
+}
+static EXIT_RING: Spinlock<(usize, [ExitRec; 256])> = Spinlock::new((0, [const { ExitRec { j: 0, pid: 0, tgid: 0 } }; 256]));
+
+/// Called from pid_hash_remove under the bucket lock — keep it to two
+/// atomic-ish stores (one short critical section on the ring lock).
+/// sc86: when a word is adopted and the dying task belongs to the watched
+/// tgid, ALSO snapshot the word through the dying task's page tables
+/// (if its mm is still alive at unlink time) and print comm + value —
+/// a reader that exits without the count decrementing is caught in the
+/// act. The page-table read is skipped under the ring lock.
+pub fn note_task_unlink(pid: u32, tgid: u32) {
+    let j = crate::drivers::timer::get_jiffies() as u64;
+    let mut g = EXIT_RING.lock_irqsave();
+    let (ref mut head, ref mut ring) = *g;
+    ring[*head % 256] = ExitRec { j, pid, tgid };
+    *head += 1;
+    drop(g);
+    // Post-adoption exit snapshot (diagnostics only; no locks held here —
+    // pid_hash_remove's bucket lock IS still held by the caller, so the
+    // page walk must not take pid-hash locks; PageTableWalker does not).
+    let uaddr = RWFRZ_UADDR.load(core::sync::atomic::Ordering::Relaxed);
+    if uaddr != 0 && tgid == RWFRZ_TGID.load(core::sync::atomic::Ordering::Relaxed) {
+        let t = unsafe { crate::sched::find_task_by_pid(pid) };
+        if !t.is_null() {
+            let tk = unsafe { &*t };
+            let comm = tk.comm();
+            let name = core::str::from_utf8(&comm[..])
+                .unwrap_or("")
+                .trim_end_matches('\0');
+            let word = unsafe { read_u32_via_task(t, uaddr) };
+            crate::pr_warn!(
+                "RWFRZ: EXIT-WORD tid {} comm='{}' word={:#x}",
+                pid,
+                name,
+                word.unwrap_or(0xdeadbeef)
+            );
+        }
+    }
+}
+
+fn exit_ring_dump_tgid(tgid: u32) {
+    use core::fmt::Write;
+    let mut s = alloc::string::String::new();
+    let g = EXIT_RING.lock_irqsave();
+    let head = g.0;
+    let start = head.saturating_sub(256);
+    for i in start..head {
+        let r = g.1[i % 256];
+        if r.tgid == tgid && r.pid != 0 {
+            let _ = write!(s, " [pid {} @{}s]", r.pid, r.j / 100);
+        }
+    }
+    drop(g);
+    if s.is_empty() {
+        crate::pr_warn!("RWFRZ: exit ring has NO exits for tgid {} — readers did not die by task unlink", tgid);
+    } else {
+        crate::pr_warn!("RWFRZ: exit ring for tgid {}:{}", tgid, s);
+    }
+}
+
+/// Log futex ops on the watched word: every park (with the userspace
+/// expected value), every wake (with how many were woken), every wait
+/// return. This is the word's entire syscall-visible traffic. Bursts are
+/// capped so a pathological loop cannot flood the console.
+fn rwfz_op_log(uaddr: usize, op: i32, val: u32, result: i64) {
+    if uaddr == 0 || uaddr != RWFRZ_UADDR.load(core::sync::atomic::Ordering::Relaxed) {
+        return;
+    }
+    let n = RWFRZ_OPLOG.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    if n > 128 && n % 16 != 0 {
+        return;
+    }
+    let cmd = match op & FUTEX_CMD_MASK {
+        FUTEX_WAIT => "WAIT",
+        FUTEX_WAKE => "WAKE",
+        FUTEX_WAIT_BITSET => "WAIT-bs",
+        FUTEX_WAKE_BITSET => "WAKE-bs",
+        FUTEX_CMP_REQUEUE => "CMP-REQ",
+        _ => "other",
+    };
+    let tid = crate::sched::current()
+        .map(|t| t.pid() as u64)
+        .unwrap_or(0);
+    crate::pr_warn!(
+        "RWFRZ-OP #{} {} tid {} val={:#x} ret={}",
+        n,
+        cmd,
+        tid,
+        val,
+        result
+    );
+}
+
+/// Read one u32 in `task`'s user address space via its page tables
+/// (khungtaskd's get_user would read through the wrong mm).
+/// SAFETY: `task` must be a live Task; read-only diagnostic walk.
+unsafe fn read_u32_via_task(task: *const Task, va: usize) -> Option<u32> {
+    let tk = unsafe { &*task };
+    let aspace = tk.address_space()?;
+    let root = aspace.root_ppn();
+    let (ppn, _) =
+        unsafe { crate::arch::mm::mm_ops::PageTableWalker::walk(root, va as u64)? };
+    let pa = (ppn as usize) << 12;
+    let kv = crate::arch::mm::phys_to_virt(crate::arch::mm::PhysAddr::new(pa as u64)).bits()
+        as usize
+        + (va & 0xfff);
+    Some(unsafe { core::ptr::read_volatile(kv as *const u32) })
+}
+
+/// One user-stack frame line resolved to its covering VMA (Session F's
+/// byte-match symbolization method). sc90: `scan_slots` parametrizes the
+/// stack window (64 for per-task dumps; the recursion holder needs 256 —
+/// its 16-deep chain with OH frame sizes sits ~1-2 KiB above rsp).
+/// SAFETY: diagnostic walk of `task`'s tables; `task` live.
+unsafe fn rwfz_stack_frames(
+    task: *const Task,
+    label: &str,
+    max_frames: u64,
+    scan_slots: u64,
+) {
+    let tk = unsafe { &*task };
+    let top = tk.kernel_stack_top();
+    #[cfg(feature = "x86_64")]
+    let (rsp, rip) = {
+        let regs = (top.wrapping_sub(crate::arch::x86_64::pt_regs::PT_REGS_SIZE))
+            as *const crate::arch::x86_64::pt_regs::PtRegs;
+        // SAFETY: diagnostic read of this task's entry frame.
+        unsafe { ((*regs).rsp, (*regs).rip) }
+    };
+    #[cfg(feature = "riscv64")]
+    let (rsp, rip) = {
+        let regs = (top.wrapping_sub(crate::arch::riscv64::pt_regs::PT_REGS_SIZE))
+            as *const crate::arch::riscv64::pt_regs::PtRegs;
+        // SAFETY: same contract, riscv64.
+        unsafe { ((*regs).sp, (*regs).epc) }
+    };
+    #[cfg(not(any(feature = "x86_64", feature = "riscv64")))]
+    let (rsp, rip) = (0u64, 0u64);
+    let Some(aspace) = tk.address_space() else { return };
+    let vmas = aspace.vma_read();
+    // sc90: return the VMA's BASE file offset separately — the loader
+    // closes the fd after mmap, leaving fd=-1 on code VMAs that still
+    // carry a real mapping offset (sc89: every park rip printed
+    // fd=-1 fileoff=0x116dea). Anonymous VMAs have offset 0 AND fd -1,
+    // so "offset != 0 || fd >= 0" separates file-backed code frames
+    // from heap/stack data pointers.
+    let vma_of = |v: u64| -> Option<(usize, usize, i32, usize, usize, u64)> {
+        let vm = vmas.find(crate::mm::page::VirtAddr::new(v as usize))?;
+        let base_off = vm.offset();
+        Some((
+            vm.start().as_usize(),
+            vm.end().as_usize(),
+            vm.file_fd(),
+            base_off,
+            base_off + (v as usize - vm.start().as_usize()),
+            vm.file_size(),
+        ))
+    };
+    let read_u64_at = |va: u64| -> Option<u64> {
+        if va & 0xfff > 0xff8 {
+            return None;
+        }
+        let lo = unsafe { read_u32_via_task(task, va as usize)? };
+        let hi = unsafe { read_u32_via_task(task, (va + 4) as usize)? };
+        Some(lo as u64 | ((hi as u64) << 32))
+    };
+    // The RIP itself first — the futex park site names the primitive
+    // (musl __timedwait caller: rdlock/wrlock/condvar). sc90: ripbytes
+    // byte-identify the park-site lib offline (the mapping's fd is gone;
+    // filesz prints 0 — offset+bytes are the surviving fingerprints).
+    if let Some((s, e, fd, base, off, fsz)) = vma_of(rip) {
+        crate::pr_warn!(
+            "RWFRZ:   {} rsp={:#x} rip={:#x} vma={:#x}-{:#x} fd={} fileoff={:#x} baseoff={:#x} filesz={:#x} ripbytes={:#018x}",
+            label,
+            rsp,
+            rip,
+            s,
+            e,
+            fd,
+            off,
+            base,
+            fsz as usize,
+            read_u64_at(rip).unwrap_or(0)
+        );
+    } else {
+        crate::pr_warn!(
+            "RWFRZ:   {} rsp={:#x} rip={:#x} (no vma)",
+            label,
+            rsp,
+            rip
+        );
+    }
+    // sc86: resolve fd -> file PATH for file-backed frames (offline
+    // fileoff/byte matching hit missing-lib walls; the path names the
+    // library outright). Cached per-fd for the whole dump of this task.
+    let mut path_cache: alloc::vec::Vec<(i32, alloc::string::String)> = alloc::vec::Vec::new();
+    let path_of = |fd: i32,
+                   cache: &mut alloc::vec::Vec<(i32, alloc::string::String)>|
+     -> alloc::string::String {
+        if let Some((_, p)) = cache.iter().find(|(f, _)| *f == fd) {
+            return p.clone();
+        }
+        let p = tk
+            .fdtable()
+            .get_file(fd as usize)
+            .map(|file| file.path())
+            .unwrap_or_else(|| alloc::string::String::from("?"));
+        cache.push((fd, p.clone()));
+        p
+    };
+    use core::fmt::Write;
+    let mut s = alloc::string::String::new();
+    let mut printed = 0u64;
+    // sc88: scan deep (callers sat below the 24-slot window in sc84-87)
+    // and keep ONLY file-backed candidates — pure heap/stack pointers
+    // drowned the signal (every dump showed data pointers, never the
+    // code chain). sc90: the filter is `base offset != 0 || fd >= 0`:
+    // musl's loader CLOSES the mapping fd after mmap, so loader-mapped
+    // code VMAs carry fd=-1 with a real offset (sc89 nbr dump: the
+    // holder's only survivors were two fd>=0 DATA-segment pointers —
+    // the fd<0 drop had removed the entire code chain).
+    for i in 0..scan_slots {
+        if printed >= max_frames {
+            break;
+        }
+        let Some(v) = read_u64_at(rsp + 8 * i) else { continue };
+        if v < 0x1000 || v > 0x7fff_ffff_ffff {
+            continue;
+        }
+        if let Some((s0, e0, fd, base, off, fsz)) = vma_of(v) {
+            if fd < 0 && base == 0 {
+                continue; // anonymous (heap/stack): data pointers only
+            }
+            let bytes = read_u64_at(v).unwrap_or(0);
+            let path = if fd >= 0 {
+                path_of(fd, &mut path_cache)
+            } else {
+                alloc::string::String::from("-")
+            };
+            let _ = write!(
+                s,
+                "\nRWFRZ:   frame ustack[{}]={:#x} vma={:#x}-{:#x} fd={} fileoff={:#x} baseoff={:#x} filesz={:#x} bytes={:#018x} path={}",
+                i, v, s0, e0, fd, off, base, fsz as usize, bytes, path
+            );
+            printed += 1;
+        }
+    }
+    crate::pr_warn!("RWFRZ:   {} frames:{}", label, s);
+}
+
+/// Cluster of futex waiters on one (uaddr, mm): how many, which tgid and
+/// one sample task (for the page-table read).
+struct WordCluster {
+    uaddr: usize,
+    mm: usize,
+    tgid: u32,
+    n: usize,
+    sample: *mut Task,
+}
+
+fn waiter_clusters(min: usize) -> alloc::vec::Vec<WordCluster> {
+    let mut out: alloc::vec::Vec<WordCluster> = alloc::vec::Vec::new();
+    for b in HASH_HEADS.iter() {
+        let h = b.lock_irqsave();
+        let mut idx = *h;
+        'chain: while let Some(i) = idx {
+            let (entry, next) = {
+                let slot = WAITER_POOL[i].lock_irqsave();
+                match slot.as_ref() {
+                    Some(w) if !w.task.is_null() => {
+                        let t = w.task;
+                        let pid = unsafe { (*t).pid() };
+                        let live = core::ptr::eq(
+                            unsafe { crate::sched::find_task_by_pid(pid) },
+                            t,
+                        );
+                        if live {
+                            (
+                                Some((w.key.uaddr, w.key.mm, unsafe { (*t).tgid() as u32 }, t)),
+                                w.next,
+                            )
+                        } else {
+                            (None, w.next)
+                        }
+                    }
+                    Some(w2) => (None, w2.next),
+                    None => (None, None),
+                }
+            };
+            if let Some((uaddr, mm, tgid, t)) = entry {
+                if let Some(c) = out.iter_mut().find(|c| c.uaddr == uaddr && c.mm == mm) {
+                    c.n += 1;
+                } else {
+                    out.push(WordCluster { uaddr, mm, tgid, n: 1, sample: t });
+                }
+            }
+            match next {
+                Some(nx) => idx = Some(nx),
+                None => break 'chain,
+            }
+        }
+        drop(h);
+    }
+    out.retain(|c| c.n >= min);
+    out
+}
+
+/// musl-rwlock-shaped word: waiters bit set and a sane holder count
+/// (writer-held 0x7fffffff excluded — that shape drains normally).
+fn rwlock_frozen_shape(v: u32) -> bool {
+    let readers = v & 0x7fffffff;
+    v & 0x80000000 != 0 && readers >= 1 && readers < 0x40000000
+}
+
+/// Called from the binder stall scan at khungtaskd cadence (process
+/// context, no locks held). Tracks reader-count evolution on contended
+/// rwlock words, watches the frozen one's futex traffic, diffs the tgid's
+/// live tids, and fires a one-shot full-tgid park-stack dump.
+pub fn freeze_scan(now: u64, hz: u64) {
+    if hz == 0 {
+        return;
+    }
+    // sc83: scanner liveness heartbeat — one line per minute. sc82 lost
+    // khungtaskd silently ~2 min after adoption (stall_report's 500 ms
+    // irq-off WORLD window); without this line that death is invisible.
+    {
+        static BEAT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+        let last = BEAT.load(core::sync::atomic::Ordering::Relaxed);
+        if now.saturating_sub(last) >= 60 * hz {
+            BEAT.store(now, core::sync::atomic::Ordering::Relaxed);
+            crate::pr_warn!("RWFRZ: scan alive at {}s", now / hz);
+        }
+    }
+    // ---- adopt / refresh the watched word ----
+    let mut adopted = false;
+    for c in waiter_clusters(1) {
+        let v = match unsafe { read_u32_via_task(c.sample, c.uaddr) } {
+            Some(v) => v,
+            None => continue,
+        };
+        let readers = v & 0x7fffffff;
+        // Formation watch (sc82: threshold lowered 6 -> 2, per-word table
+        // with delta): the inflation curve decides leak vs corruption.
+        if readers >= 2
+            && readers < 0x40000000
+            && c.uaddr != RWFRZ_UADDR.load(core::sync::atomic::Ordering::Relaxed)
+        {
+            let mut hl = RWFRZ_HIGHTAB.lock_irqsave();
+            let (ref mut hn, ref mut htab) = *hl;
+            let slot = (0..*hn).find(|&i| htab[i].uaddr == c.uaddr);
+            match slot {
+                Some(i) => {
+                    if now.saturating_sub(htab[i].at) >= 60 * hz {
+                        let prev_r = htab[i].lastv & 0x7fffffff;
+                        let cur_r = v & 0x7fffffff;
+                        htab[i].lastv = v;
+                        htab[i].at = now;
+                        crate::pr_warn!(
+                            "RWFRZ-HIGH uaddr={:#x} tgid {} waiters={} word={:#x} readers={} (was {}, d{:+})",
+                            c.uaddr,
+                            c.tgid,
+                            c.n,
+                            v,
+                            cur_r,
+                            prev_r,
+                            cur_r as i64 - prev_r as i64
+                        );
+                    }
+                }
+                None => {
+                    // sc83: evict-by-readers when full — sc82 filled all 8
+                    // slots with transient readers=2 words at boot and the
+                    // real frozen word could never enter the table.
+                    let mut slot = if *hn < 8 { *hn } else { 0 };
+                    if *hn >= 8 {
+                        let mut min_r = u32::MAX;
+                        for i in 0..8 {
+                            let r = htab[i].lastv & 0x7fffffff;
+                            if r < min_r {
+                                min_r = r;
+                                slot = i;
+                            }
+                        }
+                        if readers <= min_r {
+                            slot = usize::MAX; // nothing worth evicting
+                        }
+                    }
+                    if slot != usize::MAX {
+                        htab[slot] = HighWord {
+                            uaddr: c.uaddr,
+                            tgid: c.tgid,
+                            lastv: v,
+                            at: now,
+                        };
+                        if *hn < 8 {
+                            *hn += 1;
+                        }
+                        crate::pr_warn!(
+                            "RWFRZ-HIGH uaddr={:#x} tgid {} waiters={} word={:#x} readers={} (first seen)",
+                            c.uaddr,
+                            c.tgid,
+                            c.n,
+                            v,
+                            readers
+                        );
+                    }
+                }
+            }
+            drop(hl);
+        }
+        if adopted || c.n < 3 || !rwlock_frozen_shape(v) {
+            continue;
+        }
+        let cur_u = RWFRZ_UADDR.load(core::sync::atomic::Ordering::Relaxed);
+        if cur_u == c.uaddr {
+            continue; // already watched (delta path below)
+        }
+        RWFRZ_UADDR.store(c.uaddr, core::sync::atomic::Ordering::Relaxed);
+        RWFRZ_MM.store(c.mm, core::sync::atomic::Ordering::Relaxed);
+        RWFRZ_TGID.store(c.tgid, core::sync::atomic::Ordering::Relaxed);
+        RWFRZ_FIRST.store(now, core::sync::atomic::Ordering::Relaxed);
+        RWFRZ_LASTVAL.store(v, core::sync::atomic::Ordering::Relaxed);
+        RWFRZ_LASTVAL_AT.store(now, core::sync::atomic::Ordering::Relaxed);
+        RWFRZ_DUMPED.store(false, core::sync::atomic::Ordering::Relaxed);
+        RWFRZ_OPLOG.store(0, core::sync::atomic::Ordering::Relaxed);
+        adopted = true;
+        crate::pr_warn!(
+            "RWFRZ: watching uaddr={:#x} mm={:#x} tgid {} waiters={} word={:#x} readers={}",
+            c.uaddr,
+            c.mm,
+            c.tgid,
+            c.n,
+            v,
+            readers
+        );
+    }
+    let uaddr = RWFRZ_UADDR.load(core::sync::atomic::Ordering::Relaxed);
+    let tgid = RWFRZ_TGID.load(core::sync::atomic::Ordering::Relaxed);
+    // ---- tid census diff (leak forensics) ----
+    // sc82: run from boot start on the samgr tgid (334 on the scgold
+    // image, stable across sc74..sc81) so pre-adoption reader exits are
+    // timestamped too; switches to the adopted tgid once a word is taken.
+    const EARLY_SAMGR_TGID: u32 = 334;
+    let census_tgid = if uaddr != 0 { tgid } else { EARLY_SAMGR_TGID };
+    {
+        let seen_cell: core::cell::RefCell<(usize, [u32; 64])> =
+            core::cell::RefCell::new((0, [0; 64]));
+        crate::sched::for_each_task(|t| {
+            // SAFETY: callback runs under the pid-hash bucket lock (same
+            // contract as sleep_snapshot); reads confined to pid fields.
+            let tk = unsafe { &*t };
+            let idx = {
+                let mut b = seen_cell.borrow_mut();
+                if tk.tgid() as u32 == census_tgid && b.0 < 64 {
+                    let i = b.0;
+                    b.0 += 1;
+                    Some(i)
+                } else {
+                    None
+                }
+            };
+            if let Some(i) = idx {
+                seen_cell.borrow_mut().1[i] = tk.pid();
+            }
+        });
+        let (k, seen) = seen_cell.into_inner();
+        let mut g = RWFRZ_TIDS.lock_irqsave();
+        let (ref mut prev_n, ref mut prev) = *g;
+        let prev_tgid = RWFRZ_TIDS_CENSUS_TGID.swap(census_tgid, core::sync::atomic::Ordering::Relaxed);
+        if prev_tgid != census_tgid {
+            // Baseline switch (early-watch -> adopted word): reset silently.
+            *prev_n = 0;
+        }
+        for i in 0..*prev_n {
+            let tid = prev[i];
+            if tid != 0 && !seen[..k].contains(&tid) {
+                crate::pr_warn!(
+                    "RWFRZ: TID-VANISHED tgid {} tid {} (reader-exit window; word={:#x})",
+                    census_tgid,
+                    tid,
+                    RWFRZ_LASTVAL.load(core::sync::atomic::Ordering::Relaxed)
+                );
+            }
+        }
+        for s in seen[..k].iter() {
+            if !prev[..*prev_n].contains(s) {
+                crate::pr_warn!("RWFRZ: TID-NEW tgid {} tid {}", census_tgid, s);
+            }
+        }
+        prev[..k.min(64)].copy_from_slice(&seen[..k.min(64)]);
+        *prev_n = k;
+        drop(g);
+    }
+    if uaddr == 0 {
+        return;
+    }
+    // Re-read through any live waiter of the tgid (sample may have exited).
+    let mut word_now: Option<u32> = None;
+    for c in waiter_clusters(1) {
+        if c.uaddr == uaddr && c.mm == RWFRZ_MM.load(core::sync::atomic::Ordering::Relaxed) {
+            word_now = unsafe { read_u32_via_task(c.sample, c.uaddr) };
+            break;
+        }
+    }
+    // ---- word delta ----
+    if let Some(v) = word_now {
+        let prev = RWFRZ_LASTVAL.load(core::sync::atomic::Ordering::Relaxed);
+        if v != prev {
+            RWFRZ_LASTVAL.store(v, core::sync::atomic::Ordering::Relaxed);
+            RWFRZ_LASTVAL_AT.store(now, core::sync::atomic::Ordering::Relaxed);
+            crate::pr_warn!(
+                "RWFRZ: word delta {:#x} -> {:#x} (readers {} -> {}) at {}s",
+                prev,
+                v,
+                prev & 0x7fffffff,
+                v & 0x7fffffff,
+                now / hz
+            );
+        } else {
+            // Heartbeat once a minute on the frozen word: proves the count
+            // is stuck, not merely unobserved. Does NOT touch LASTVAL_AT —
+            // that stamp is the freeze-stability clock for the dump gate.
+            let at = RWFRZ_BEAT.load(core::sync::atomic::Ordering::Relaxed);
+            if now.saturating_sub(at) >= 60 * hz {
+                RWFRZ_BEAT.store(now, core::sync::atomic::Ordering::Relaxed);
+                let mm = RWFRZ_MM.load(core::sync::atomic::Ordering::Relaxed);
+                let wcount = waiter_clusters(1)
+                    .iter()
+                    .find(|c| c.uaddr == uaddr && c.mm == mm)
+                    .map(|c| c.n)
+                    .unwrap_or(0);
+                crate::pr_warn!(
+                    "RWFRZ: word stuck {:#x} readers={} kernel_waiters={} tgid {} age {}s",
+                    v,
+                    v & 0x7fffffff,
+                    wcount,
+                    tgid,
+                    now.saturating_sub(RWFRZ_FIRST.load(core::sync::atomic::Ordering::Relaxed)) / hz
+                );
+            }
+        }
+    }
+    // ---- one-shot full-tgid dump ----
+    // sc83: fire AT ADOPTION (gate removed). sc82 showed the scanner can
+    // die on the NEXT scan (stall_report's own WORLD-guarded dump runs
+    // ~500 ms with irqs off under load; khungtaskd never scanned again)
+    // — waiting 120 s for stability loses the dump entirely. The frozen
+    // shape (waiters>=3 + WAITERS|N-readers word) is already
+    // cross-boot-stable; stability-waiting buys nothing.
+    if !RWFRZ_DUMPED.load(core::sync::atomic::Ordering::Relaxed) {
+        RWFRZ_DUMPED.store(true, core::sync::atomic::Ordering::Relaxed);
+        let v = RWFRZ_LASTVAL.load(core::sync::atomic::Ordering::Relaxed);
+        // neighbors through the first waiter we can find: +4/+8 disambiguate
+        // the primitive (musl rwlock: waiter-count/shared-flag; musl mutex:
+        // __m_type/__m_count — a type constant at +4 means this is NOT an
+        // rwlock and the "readers" decode changes meaning entirely).
+        let mm = RWFRZ_MM.load(core::sync::atomic::Ordering::Relaxed);
+        let mut nb = (0u32, 0u32, 0u32, 0u32);
+        for c in waiter_clusters(1) {
+            if c.uaddr == uaddr && c.mm == mm {
+                nb = (
+                    unsafe { read_u32_via_task(c.sample, uaddr + 4) }.unwrap_or(0),
+                    unsafe { read_u32_via_task(c.sample, uaddr + 8) }.unwrap_or(0),
+                    unsafe { read_u32_via_task(c.sample, uaddr + 12) }.unwrap_or(0),
+                    unsafe { read_u32_via_task(c.sample, uaddr + 16) }.unwrap_or(0),
+                );
+                break;
+            }
+        }
+        crate::pr_warn!(
+            "RWFRZ: FROZEN tgid {} uaddr={:#x} word={:#x} readers={} waiters_bit={} nb+4={:#x} nb+8={:#x} nb+12={:#x} nb+16={:#x} age {}s — full tgid dump",
+            tgid,
+            uaddr,
+            v,
+            v & 0x7fffffff,
+            v >> 31,
+            nb.0,
+            nb.1,
+            nb.2,
+            nb.3,
+            now.saturating_sub(RWFRZ_FIRST.load(core::sync::atomic::Ordering::Relaxed)) / hz
+        );
+        exit_ring_dump_tgid(tgid);
+        let n = rwfz_dump_tgid(tgid, 32);
+        crate::pr_warn!("RWFRZ: tgid {} enumerated {} tasks", tgid, n);
+        rwfz_neighbor_dump(tgid, uaddr);
+        // sc82: the freeze correlates with OTHER processes showing the
+        // same 16-reader shape (sc81: tgid 716 & 791). Dump up to 2 more
+        // of those tgid's in the same pass — one common holder pattern
+        // would explain all of them; distinct stacks point at a shared
+        // library-level bug instead.
+        let mut extra = 0;
+        for c in waiter_clusters(1) {
+            if extra >= 2 {
+                break;
+            }
+            if c.tgid == tgid || c.n < 1 {
+                continue;
+            }
+            let v = match unsafe { read_u32_via_task(c.sample, c.uaddr) } {
+                Some(v) => v,
+                None => continue,
+            };
+            let r = v & 0x7fffffff;
+            if v & 0x80000000 != 0 && r >= 8 && r < 0x40000000 {
+                crate::pr_warn!(
+                    "RWFRZ: EXTRA-FROZEN tgid {} uaddr={:#x} word={:#x} readers={} waiters={} — same-shape dump",
+                    c.tgid,
+                    c.uaddr,
+                    v,
+                    r,
+                    c.n
+                );
+                exit_ring_dump_tgid(c.tgid);
+                let en = rwfz_dump_tgid(c.tgid, 16);
+                crate::pr_warn!("RWFRZ: EXTRA tgid {} enumerated {} tasks", c.tgid, en);
+                rwfz_neighbor_dump(c.tgid, c.uaddr);
+                extra += 1;
+            }
+        }
+    }
+}
+
+/// sc89: dump the recursion-holder candidate. Session K (sc86): every
+/// FROZEN dump's main thread parks on the SIBLING lock 0x94 below the
+/// frozen word (same static object) while the frozen word claims 16
+/// readers that exceed the process's live-thread count — a single
+/// thread holding 16 recursive lock_shared scopes and then parking on
+/// the second lock. This walks `tgid`'s tasks for a blocked futex whose
+/// arg0 sits in [frozen-0x98, frozen-0x90] and dumps it with the
+/// 64-slot exec-filtered window at a 24-frame budget — enough to carry
+/// a 16-deep recursive chain plus its entry frames.
+fn rwfz_neighbor_dump(tgid: u32, frozen_uaddr: usize) {
+    #[cfg(feature = "x86_64")]
+    const FUTEX_SYSNO: u64 = 202;
+    #[cfg(feature = "riscv64")]
+    const FUTEX_SYSNO: u64 = 98;
+    #[cfg(not(any(feature = "x86_64", feature = "riscv64")))]
+    const FUTEX_SYSNO: u64 = 0;
+    crate::sched::for_each_task(|t| {
+        // SAFETY: same contract as rwfz_dump_tgid (pid-hash walk, reads
+        // confined to the pt-regs entry frame).
+        let tk = unsafe { &*t };
+        if tk.tgid() as u32 != tgid {
+            return;
+        }
+        let top = tk.kernel_stack_top();
+        #[cfg(feature = "x86_64")]
+        let (sys, a0) = {
+            let regs = (top.wrapping_sub(
+                crate::arch::x86_64::pt_regs::PT_REGS_SIZE,
+            )) as *const crate::arch::x86_64::pt_regs::PtRegs;
+            // SAFETY: diagnostic read of this task's entry frame.
+            unsafe { ((*regs).orig_rax, (*regs).rdi) }
+        };
+        #[cfg(feature = "riscv64")]
+        let (sys, a0) = {
+            let regs = (top.wrapping_sub(
+                crate::arch::riscv64::pt_regs::PT_REGS_SIZE,
+            )) as *const crate::arch::riscv64::pt_regs::PtRegs;
+            // SAFETY: same contract, riscv64.
+            unsafe { ((*regs).a7, (*regs).a0) }
+        };
+        #[cfg(not(any(feature = "x86_64", feature = "riscv64")))]
+        let (sys, a0) = (0u64, 0u64);
+        if sys != FUTEX_SYSNO || a0 == 0 || a0 > frozen_uaddr as u64 {
+            return;
+        }
+        let delta = frozen_uaddr - a0 as usize;
+        if (0x90..=0x98).contains(&delta) {
+            let comm = tk.comm();
+            let name = core::str::from_utf8(&comm[..])
+                .unwrap_or("")
+                .trim_end_matches('\0');
+            crate::pr_warn!(
+                "RWFRZ: NBR-PARK tgid {} tid {} comm='{}' parked on frozen-{:#x} (a0={:#x}) — recursion-holder candidate, deep stack",
+                tgid,
+                tk.pid(),
+                name,
+                delta,
+                a0
+            );
+            // sc91: read the WORD the holder parks on (plus neighbors).
+            // If it is a held pthread mutex the word IS the owner tid —
+            // naming the true terminal blocker. If it is a shared_mutex
+            // __state_ we see the writer bit. The frozen word itself is
+            // 0x80000010-shaped, but this sibling lock's shape was never
+            // captured (sc89/sc90 dumps only read the frozen word).
+            let w0 = unsafe { read_u32_via_task(t, a0 as usize) }.unwrap_or(0);
+            let wp4 = unsafe { read_u32_via_task(t, a0 as usize + 4) }.unwrap_or(0);
+            let wm4 = unsafe { read_u32_via_task(t, a0 as usize - 4) }.unwrap_or(0);
+            let wp8 = unsafe { read_u32_via_task(t, a0 as usize + 8) }.unwrap_or(0);
+            crate::pr_warn!(
+                "RWFRZ: NBR-WORD a0={:#x} word={:#x} +4={:#x} +8={:#x} -4={:#x}",
+                a0,
+                w0,
+                wp4,
+                wp8,
+                wm4
+            );
+            // sc91: RAW stack-slot window — VMA metadata cannot identify
+            // loader-mapped code frames (musl closes the fd AND the
+            // offset bookkeeping is zeroed for merged LOAD mappings —
+            // sc90 nbr dumps recovered only data-segment pointers).
+            // Print the slot VALUES themselves, compactly; offline
+            // analysis matches them against lib files (return addresses
+            // sit right after `call` opcodes in exec LOADs).
+            use core::fmt::Write;
+            let sp = {
+                #[cfg(feature = "x86_64")]
+                let regs = (tk.kernel_stack_top().wrapping_sub(
+                    crate::arch::x86_64::pt_regs::PT_REGS_SIZE,
+                )) as *const crate::arch::x86_64::pt_regs::PtRegs;
+                #[cfg(feature = "riscv64")]
+                let regs = (tk.kernel_stack_top().wrapping_sub(
+                    crate::arch::riscv64::pt_regs::PT_REGS_SIZE,
+                )) as *const crate::arch::riscv64::pt_regs::PtRegs;
+                // SAFETY: diagnostic read of this task's entry frame.
+                #[cfg(feature = "x86_64")]
+                {
+                    unsafe { (*regs).rsp }
+                }
+                // SAFETY: same contract, riscv64.
+                #[cfg(feature = "riscv64")]
+                {
+                    unsafe { (*regs).sp }
+                }
+                #[cfg(not(any(feature = "x86_64", feature = "riscv64")))]
+                {
+                    0u64
+                }
+            };
+            let mut line = alloc::string::String::new();
+            let mut n = 0u32;
+            for i in 0..256u64 {
+                let Some(v) = (unsafe { read_u32_via_task(t, (sp + 8 * i) as usize) })
+                    .map(|lo| lo as u64)
+                    .and_then(|lo| {
+                        (unsafe { read_u32_via_task(t, (sp + 8 * i + 4) as usize) })
+                            .map(|hi| lo | ((hi as u64) << 32))
+                    })
+                else {
+                    continue;
+                };
+                if v >= 0x1000 && v <= 0x7fff_ffff_ffff {
+                    let _ = write!(line, " {}:{}", i, v);
+                    n += 1;
+                    if n % 8 == 0 {
+                        crate::pr_warn!("RWFRZ: NBR-RAW{}", line);
+                        line.clear();
+                    }
+                }
+            }
+            if !line.is_empty() {
+                crate::pr_warn!("RWFRZ: NBR-RAW{}", line);
+            }
+            // SAFETY: t is a live Task from the pid-hash walk.
+            // sc90: 256-slot window (2 KiB) — the 16-deep recursive
+            // chain sits ~1-2 KiB above rsp; 24 exec-file frames catch
+            // repeated fileoffs at fixed deltas (the recursion cycle).
+            // Emitted twice (nbr/nbr2): concurrent console traffic
+            // splices long multi-line dumps mid-line (sc89 lost the
+            // holder's chain between frame[2] and frame[17]); two
+            // passes rarely lose the same line twice.
+            unsafe { rwfz_stack_frames(t, "nbr", 24, 256) };
+            unsafe { rwfz_stack_frames(t, "nbr2", 24, 256) };
+        }
+    });
+}
+
+/// sc82: one tgid's full park-stack dump (comm/state/syscall/rip + 8
+/// byte-verified user-stack frames per thread). Pure diagnostics.
+fn rwfz_dump_tgid(tgid: u32, max_tasks: usize) -> usize {
+    let count_cell: core::cell::Cell<usize> = core::cell::Cell::new(0);
+    crate::sched::for_each_task(|t| {
+        // SAFETY: same contract as sleep_snapshot.
+        let tk = unsafe { &*t };
+        if tk.tgid() as u32 != tgid || count_cell.get() >= max_tasks {
+            return;
+        }
+        count_cell.set(count_cell.get() + 1);
+        let top = tk.kernel_stack_top();
+        #[cfg(feature = "x86_64")]
+        let (rip, sys, a0) = {
+            let regs = (top.wrapping_sub(
+                crate::arch::x86_64::pt_regs::PT_REGS_SIZE,
+            )) as *const crate::arch::x86_64::pt_regs::PtRegs;
+            // SAFETY: diagnostic read of this task's entry frame.
+            unsafe { ((*regs).rip, (*regs).orig_rax, (*regs).rdi) }
+        };
+        #[cfg(feature = "riscv64")]
+        let (rip, sys, a0) = {
+            let regs = (top.wrapping_sub(
+                crate::arch::riscv64::pt_regs::PT_REGS_SIZE,
+            )) as *const crate::arch::riscv64::pt_regs::PtRegs;
+            // SAFETY: same contract, riscv64.
+            unsafe { ((*regs).epc, (*regs).a7, (*regs).a0) }
+        };
+        #[cfg(not(any(feature = "x86_64", feature = "riscv64")))]
+        let (rip, sys, a0) = (0u64, 0u64, 0u64);
+        let comm = tk.comm();
+        let name = core::str::from_utf8(&comm[..])
+            .unwrap_or("")
+            .trim_end_matches('\0');
+        crate::pr_warn!(
+            "RWFRZ: tid {} comm='{}' state={:#x} sys={:#x} rip={:#x} a0={:#x}",
+            tk.pid(),
+            name,
+            tk.state().bits(),
+            sys,
+            rip,
+            a0
+        );
+        // SAFETY: t is a live Task from the pid-hash walk.
+        unsafe { rwfz_stack_frames(t, "task", 8, 64) };
+    });
+    count_cell.get()
 }
