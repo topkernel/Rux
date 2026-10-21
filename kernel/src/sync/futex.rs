@@ -2288,6 +2288,80 @@ fn rwfz_neighbor_dump(tgid: u32, frozen_uaddr: usize) {
                 delta,
                 a0
             );
+            // sc91: read the WORD the holder parks on (plus neighbors).
+            // If it is a held pthread mutex the word IS the owner tid —
+            // naming the true terminal blocker. If it is a shared_mutex
+            // __state_ we see the writer bit. The frozen word itself is
+            // 0x80000010-shaped, but this sibling lock's shape was never
+            // captured (sc89/sc90 dumps only read the frozen word).
+            let w0 = unsafe { read_u32_via_task(t, a0 as usize) }.unwrap_or(0);
+            let wp4 = unsafe { read_u32_via_task(t, a0 as usize + 4) }.unwrap_or(0);
+            let wm4 = unsafe { read_u32_via_task(t, a0 as usize - 4) }.unwrap_or(0);
+            let wp8 = unsafe { read_u32_via_task(t, a0 as usize + 8) }.unwrap_or(0);
+            crate::pr_warn!(
+                "RWFRZ: NBR-WORD a0={:#x} word={:#x} +4={:#x} +8={:#x} -4={:#x}",
+                a0,
+                w0,
+                wp4,
+                wp8,
+                wm4
+            );
+            // sc91: RAW stack-slot window — VMA metadata cannot identify
+            // loader-mapped code frames (musl closes the fd AND the
+            // offset bookkeeping is zeroed for merged LOAD mappings —
+            // sc90 nbr dumps recovered only data-segment pointers).
+            // Print the slot VALUES themselves, compactly; offline
+            // analysis matches them against lib files (return addresses
+            // sit right after `call` opcodes in exec LOADs).
+            use core::fmt::Write;
+            let sp = {
+                #[cfg(feature = "x86_64")]
+                let regs = (tk.kernel_stack_top().wrapping_sub(
+                    crate::arch::x86_64::pt_regs::PT_REGS_SIZE,
+                )) as *const crate::arch::x86_64::pt_regs::PtRegs;
+                #[cfg(feature = "riscv64")]
+                let regs = (tk.kernel_stack_top().wrapping_sub(
+                    crate::arch::riscv64::pt_regs::PT_REGS_SIZE,
+                )) as *const crate::arch::riscv64::pt_regs::PtRegs;
+                // SAFETY: diagnostic read of this task's entry frame.
+                #[cfg(feature = "x86_64")]
+                {
+                    unsafe { (*regs).rsp }
+                }
+                // SAFETY: same contract, riscv64.
+                #[cfg(feature = "riscv64")]
+                {
+                    unsafe { (*regs).sp }
+                }
+                #[cfg(not(any(feature = "x86_64", feature = "riscv64")))]
+                {
+                    0u64
+                }
+            };
+            let mut line = alloc::string::String::new();
+            let mut n = 0u32;
+            for i in 0..256u64 {
+                let Some(v) = (unsafe { read_u32_via_task(t, (sp + 8 * i) as usize) })
+                    .map(|lo| lo as u64)
+                    .and_then(|lo| {
+                        (unsafe { read_u32_via_task(t, (sp + 8 * i + 4) as usize) })
+                            .map(|hi| lo | ((hi as u64) << 32))
+                    })
+                else {
+                    continue;
+                };
+                if v >= 0x1000 && v <= 0x7fff_ffff_ffff {
+                    let _ = write!(line, " {}:{}", i, v);
+                    n += 1;
+                    if n % 8 == 0 {
+                        crate::pr_warn!("RWFRZ: NBR-RAW{}", line);
+                        line.clear();
+                    }
+                }
+            }
+            if !line.is_empty() {
+                crate::pr_warn!("RWFRZ: NBR-RAW{}", line);
+            }
             // SAFETY: t is a live Task from the pid-hash walk.
             // sc90: 256-slot window (2 KiB) — the 16-deep recursive
             // chain sits ~1-2 KiB above rsp; 24 exec-file frames catch
