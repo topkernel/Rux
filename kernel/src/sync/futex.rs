@@ -1530,6 +1530,53 @@ pub fn sys_futex_handler(args: &[u64; 6]) -> i64 {
             }
         }
     }
+    // sc118 decode (Session P): every OH app child parks single-threaded
+    // in FUTEX_WAIT on its own main-thread stack at the SAME site
+    // (uaddr 0x7fffffffc754 / 0x7fffffffc7f4 — page 0x7fffffffc000; the
+    // site is shared across launcher/settingsdata/systemui binaries, so
+    // it lives in the common musl/early-runtime startup). The sc117
+    // clone-refusal probes never fired, so no clone failed. Remaining
+    // hypotheses: (a) the runtime never attempts the worker clone,
+    // (b) the worker clone succeeds but the thread dies before signaling,
+    // (c) the worker DOES send FUTEX_WAKE on this page and the wake is
+    // lost or mismatches. This census logs every futex op on that page
+    // from ANY comm (workers rename themselves — OS_FFRT_* etc. — so a
+    // comm filter would miss the very wake we hunt). Two lines per op:
+    // the entry BEFORE do_futex (a WAIT that parks for minutes must
+    // still have printed its arrival) and the result after. A WAKE line
+    // printing ->0 while a waiter sits parked is a lost wake; no WAKE
+    // at all after a WAIT is never-sent ((a) or (b) — the paired
+    // appclone census in sys_clone separates those). Budget 150 lines.
+    {
+        const STK_PAGE: usize = 0x7fffffffc000;
+        if uaddr & !0xfff == STK_PAGE {
+            static NS: core::sync::atomic::AtomicUsize =
+                core::sync::atomic::AtomicUsize::new(0);
+            if NS.load(core::sync::atomic::Ordering::Relaxed) < 150 {
+                NS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                let comm = crate::sched::current()
+                    .map(|t| unsafe { (*t).comm() })
+                    .map(|c| core::str::from_utf8(c).unwrap_or(""))
+                    .unwrap_or("")
+                    .trim_end_matches('\0');
+                let tid = crate::sched::current()
+                    .map(|t| unsafe { (*t).pid() })
+                    .unwrap_or(0);
+                crate::pr_warn!(
+                    "stkfutex: tid {} op={:#x} uaddr={:#x} val={:#x} comm='{}'",
+                    tid,
+                    op,
+                    uaddr,
+                    val,
+                    comm
+                );
+                let r = do_futex(uaddr, op, val, timeout, uaddr2, 0, val3);
+                rwfz_op_log(uaddr, op, val, r);
+                crate::pr_warn!("stkfutex: tid {} -> {}", tid, r);
+                return r;
+            }
+        }
+    }
     let r = do_futex(uaddr, op, val, timeout, uaddr2, 0, val3);
     rwfz_op_log(uaddr, op, val, r);
     r

@@ -113,6 +113,54 @@ pub fn sys_clone(args: SyscallArgs) -> i64 {
         exit_signal,
     };
 
+    // sc118 decode (Session P): the sc117-kernel boot with the refusal
+    // probes produced ZERO clone-gate / clone-fail lines while app
+    // children (os.settingsdata, telephonydataability) STILL parked
+    // single-threaded on the stack futex 0x7fffffffc754 — no clone
+    // FAILED, so either no clone was ever ATTEMPTED by these runtimes,
+    // or the worker clone SUCCEEDED and the thread died before doing
+    // its work. This census names every clone attempt (success or
+    // failure) from the app-child binaries, budgeted 80 lines: with it,
+    // "no attempt" (userspace never reaches pthread_create) separates
+    // from "success then instant death" (worker fault/exit).
+    {
+        let comm = crate::sched::current()
+            .map(|t| unsafe { (*t).comm() })
+            .map(|c| core::str::from_utf8(c).unwrap_or(""))
+            .unwrap_or("")
+            .trim_end_matches('\0');
+        let is_app = comm.contains("launcher")
+            || comm.contains("settingsdata")
+            || comm.contains("systemui")
+            || comm.contains("dataability");
+        if is_app {
+            static N3: core::sync::atomic::AtomicUsize =
+                core::sync::atomic::AtomicUsize::new(0);
+            if N3.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 80 {
+                return match do_clone(clone_args) {
+                    Ok(pid) => {
+                        crate::pr_warn!(
+                            "appclone: comm='{}' flags={:#x} -> pid {}",
+                            comm,
+                            flags,
+                            pid
+                        );
+                        pid as i64
+                    }
+                    Err(e) => {
+                        crate::pr_warn!(
+                            "appclone: comm='{}' flags={:#x} -> errno {}",
+                            comm,
+                            flags,
+                            -(e as i32)
+                        );
+                        e as i64
+                    }
+                };
+            }
+        }
+    }
+
     match do_clone(clone_args) {
         Ok(pid) => pid as i64,
         Err(e) => {

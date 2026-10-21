@@ -1782,9 +1782,43 @@ pub fn sys_umask(args: SyscallArgs) -> i64 {
 /// bind/clone, registry update) with RDTSC and prints one line per call
 /// over 2 ms so the missing time gets attributed. `sprobe=0` silences
 /// (the print lands on the busy-poll UART in the child's stime).
+/// Per-phase wall-clock (TSC) accumulator for the sys_mount shell —
+/// mntslow attribution probe (sc116 follow-up, execution item 1).
+/// sc116 measured the whole syscall at 3.5-9.2 ms for every caller
+/// while mtprobe's breakdown of the SAME binds puts the vfs_bind_mount
+/// core at 45-70 us: ~5 ms hides in the wrapper (string copies, the
+/// capable() LSM call, cwd join, path_lookup, registry update) or in
+/// preemption inside it. TSC deltas INCLUDE preemption/deschedule time
+/// inside a phase — that is deliberate: the question is which phase
+/// absorbs the wall time, not who burns cpu.
+///
+/// Index map (printed as named fields in the mntslow line):
+/// [0]=src copy, [1]=capable, [2]=tgt copy, [3]=cwd join,
+/// [4]=fstype copy, [5]=target path_lookup, [6]=core op
+/// (move/remount/bind/do_mount), [7]=register_mount.
+struct MntPhases([u64; 8]);
+
+impl MntPhases {
+    #[inline]
+    fn new() -> Self {
+        MntPhases([0; 8])
+    }
+
+    /// Time one phase of the mount shell. Zero overhead when the
+    /// probes are off (two RDTSCs, ~50 cycles).
+    #[inline]
+    fn t<T>(&mut self, i: usize, f: impl FnOnce() -> T) -> T {
+        let t0 = crate::arch::cpu::read_counter();
+        let r = f();
+        self.0[i] += crate::arch::cpu::read_counter().saturating_sub(t0);
+        r
+    }
+}
+
 pub fn sys_mount(args: SyscallArgs) -> i64 {
     let t0 = crate::arch::cpu::read_counter();
-    let r = sys_mount_inner(args);
+    let mut ph = MntPhases::new();
+    let r = sys_mount_inner(args, &mut ph);
     if crate::cmdline::get_param("sprobe").map(|v| v != "0").unwrap_or(true) {
         let dt = crate::arch::cpu::read_counter().saturating_sub(t0);
         // >2 ms at a ~2.5 GHz TSC. TSC_CYCLES_PER_MS would be nicer but
@@ -1799,12 +1833,24 @@ pub fn sys_mount(args: SyscallArgs) -> i64 {
                     .map(|c| core::str::from_utf8(c).unwrap_or(""))
                     .unwrap_or("")
                     .trim_end_matches('\0');
+                // Phase breakdown in us (cyc/2500): names match the
+                // MntPhases index map above; unread phases stay 0 for
+                // early-return paths (EFAULT before capable, ...).
+                let p = ph.0;
                 crate::pr_warn!(
-                    "mntslow: {} cyc (~{} us) comm='{}' -> {}",
+                    "mntslow: {} cyc (~{} us) comm='{}' -> {} | us: src={} cap={} tgt={} cwd={} fst={} lkp={} op={} reg={}",
                     dt,
                     dt / 2500,
                     comm,
-                    r
+                    r,
+                    p[0] / 2500,
+                    p[1] / 2500,
+                    p[2] / 2500,
+                    p[3] / 2500,
+                    p[4] / 2500,
+                    p[5] / 2500,
+                    p[6] / 2500,
+                    p[7] / 2500
                 );
             }
         }
@@ -1812,7 +1858,7 @@ pub fn sys_mount(args: SyscallArgs) -> i64 {
     r
 }
 
-fn sys_mount_inner(args: SyscallArgs) -> i64 {
+fn sys_mount_inner(args: SyscallArgs, ph: &mut MntPhases) -> i64 {
     // Linux order: copy source (EFAULT on a bad pointer — LTP mount03
     // "EFAULT for filesystemtype/source" cases) BEFORE capability checks
     // on the strings; CAP_SYS_ADMIN gates the actual mount.
@@ -1827,7 +1873,7 @@ fn sys_mount_inner(args: SyscallArgs) -> i64 {
     let source = if args[0] == 0 {
         "none"
     } else {
-        match read_user_path(args[0] as *const u8, &mut source_buf) {
+        match ph.t(0, || read_user_path(args[0] as *const u8, &mut source_buf)) {
             Ok(s) => s,
             Err(e) => return e as i64,
         }
@@ -1835,12 +1881,12 @@ fn sys_mount_inner(args: SyscallArgs) -> i64 {
     let source = if source.is_empty() { "none" } else { source };
 
     // CAP_SYS_ADMIN required to mount
-    if !crate::security::capable(crate::security::CAP_SYS_ADMIN) {
+    if !ph.t(1, || crate::security::capable(crate::security::CAP_SYS_ADMIN)) {
         return crate::errno::Errno::OperationNotPermitted.as_neg_i32() as i64;
     }
 
     let mut target_buf = [0u8; PATH_MAX];
-    let target = match read_user_path(args[1] as *const u8, &mut target_buf) {
+    let target = match ph.t(2, || read_user_path(args[1] as *const u8, &mut target_buf)) {
         Ok(s) => s,
         Err(e) => return e as i64,
     };
@@ -1852,26 +1898,34 @@ fn sys_mount_inner(args: SyscallArgs) -> i64 {
     // which walks from the VFS ROOT — the mount landed on a phantom
     // /tmp_madvise dentry and every later lookup crossed into the
     // unmounted ext4 dir instead.
-    let target_owned = if !target.starts_with('/') {
-        match crate::sched::current() {
-            Some(t) => {
-                let cwd = unsafe { (*t).get_cwd() };
-                let mut abs = alloc::vec::Vec::with_capacity(cwd.len() + 1 + target.len());
-                abs.extend_from_slice(&cwd);
-                if !cwd.ends_with(&[b'/']) {
-                    abs.push(b'/');
+    let target_owned = ph.t(3, || {
+        if !target.starts_with('/') {
+            match crate::sched::current() {
+                Some(t) => {
+                    let cwd = unsafe { (*t).get_cwd() };
+                    let mut abs = alloc::vec::Vec::with_capacity(cwd.len() + 1 + target.len());
+                    abs.extend_from_slice(&cwd);
+                    if !cwd.ends_with(&[b'/']) {
+                        abs.push(b'/');
+                    }
+                    abs.extend_from_slice(target.as_bytes());
+                    match alloc::string::String::from_utf8(abs) {
+                        Ok(s) => s,
+                        Err(_) => alloc::string::String::new(), // EINVAL below
+                    }
                 }
-                abs.extend_from_slice(target.as_bytes());
-                match alloc::string::String::from_utf8(abs) {
-                    Ok(s) => s,
-                    Err(_) => return -(errno::EINVAL as i64),
-                }
+                None => alloc::string::String::from(target),
             }
-            None => alloc::string::String::from(target),
+        } else {
+            alloc::string::String::from(target)
         }
-    } else {
-        alloc::string::String::from(target)
-    };
+    });
+    // The from_utf8 failure path must still return EINVAL (it computed
+    // inside the phase closure); an empty joined string for a non-empty
+    // relative target only arises there.
+    if target_owned.is_empty() && !target.is_empty() {
+        return -(errno::EINVAL as i64);
+    }
     let target = target_owned.as_str();
 
     // fstype is OPTIONAL for MS_MOVE/MS_REMOUNT-style calls (Linux
@@ -1882,7 +1936,7 @@ fn sys_mount_inner(args: SyscallArgs) -> i64 {
     let fs_type_str = if args[2] == 0 {
         ""
     } else {
-        match read_user_str(args[2] as *const u8, &mut fstype_buf) {
+        match ph.t(4, || read_user_str(args[2] as *const u8, &mut fstype_buf)) {
             Ok(s) => s,
             Err(e) => return e as i64,
         }
@@ -1891,7 +1945,7 @@ fn sys_mount_inner(args: SyscallArgs) -> i64 {
     // The mount target must exist (Linux path_mount resolves it before the
     // filesystem-specific helper runs — the old code fabricated success for
     // any path string).
-    if let Err(e) = crate::fs::vfs::path_lookup(target, 0) {
+    if let Err(e) = ph.t(5, || crate::fs::vfs::path_lookup(target, 0)) {
         return e as i64;
     }
 
@@ -1907,14 +1961,20 @@ fn sys_mount_inner(args: SyscallArgs) -> i64 {
     // fresh instance: the VfsMountInternal (flags included) moves.
     const MS_MOVE: u64 = 8192;
     if args[3] & MS_MOVE != 0 {
-        return match crate::fs::vfs::vfs_move_mount(source, target) {
+        return match ph.t(6, || crate::fs::vfs::vfs_move_mount(source, target)) {
             Ok(()) => {
                 // Keep the /proc/mounts row pointed at the new target.
-                let existing = crate::fs::mount::get_mounts()
-                    .into_iter()
-                    .find(|(_, mp, _, _)| mp == source);
-                if let Some((device, _, fs_type, flags)) = existing {
-                    crate::fs::mount::register_mount(&device, target, &fs_type, &flags);
+                let existing = ph
+                    .t(7, || {
+                        crate::fs::mount::get_mounts()
+                            .into_iter()
+                            .find(|(_, mp, _, _)| mp == source)
+                    })
+                    .map(|(device, _, fs_type, flags)| (device, fs_type, flags));
+                if let Some((device, fs_type, flags)) = existing {
+                    ph.t(7, || {
+                        crate::fs::mount::register_mount(&device, target, &fs_type, &flags)
+                    });
                 }
                 0
             }
@@ -1923,20 +1983,28 @@ fn sys_mount_inner(args: SyscallArgs) -> i64 {
     }
 
     const MS_REMOUNT: u64 = 32;
-    if args[3] & MS_REMOUNT != 0 {        let new_flags = crate::fs::mount::translate_mnt_flags_public(args[3] & !MS_REMOUNT);
-        match crate::fs::vfs::vfs_remount(target, new_flags) {
+    if args[3] & MS_REMOUNT != 0 {
+        let new_flags =
+            crate::fs::mount::translate_mnt_flags_public(args[3] & !MS_REMOUNT);
+        match ph.t(6, || crate::fs::vfs::vfs_remount(target, new_flags)) {
             Ok(()) => {
                 // Keep the /proc/mounts row in sync (ro/rw string).
-                let existing = crate::fs::mount::get_mounts()
-                    .into_iter()
-                    .find(|(_, mp, _, _)| mp == target);
-                if let Some((device, _, fs_type, _)) = existing {
-                    crate::fs::mount::register_mount(
-                        &device,
-                        target,
-                        &fs_type,
-                        if new_flags.is_readonly() { "ro" } else { "rw" },
-                    );
+                let existing = ph
+                    .t(7, || {
+                        crate::fs::mount::get_mounts()
+                            .into_iter()
+                            .find(|(_, mp, _, _)| mp == target)
+                    })
+                    .map(|(device, _, fs_type, _)| (device, fs_type));
+                if let Some((device, fs_type)) = existing {
+                    ph.t(7, || {
+                        crate::fs::mount::register_mount(
+                            &device,
+                            target,
+                            &fs_type,
+                            if new_flags.is_readonly() { "ro" } else { "rw" },
+                        )
+                    });
                 }
                 return 0;
             }
@@ -1955,11 +2023,16 @@ fn sys_mount_inner(args: SyscallArgs) -> i64 {
     const BIND_MS_REC: u64 = 16384;
     if args[3] & BIND_MS_BIND != 0 {
         let mnt_flags = crate::fs::mount::translate_mnt_flags_public(args[3]);
-        let ret = match crate::fs::vfs::vfs_bind_mount(
-            source,
-            target,
-            mnt_flags,
-            args[3] & BIND_MS_REC != 0,
+        let ret = match ph.t(
+            6,
+            || {
+                crate::fs::vfs::vfs_bind_mount(
+                    source,
+                    target,
+                    mnt_flags,
+                    args[3] & BIND_MS_REC != 0,
+                )
+            },
         ) {
             Ok(()) => {
                 // Register in /proc/mounts AND the caller's mount namespace:
@@ -1967,12 +2040,14 @@ fn sys_mount_inner(args: SyscallArgs) -> i64 {
                 // so pivot_root's is-mountpoint check passes (b22: sandbox
                 // setup completed, then `pivot /mnt/sandbox/0/<pkg> failed,
                 // err 22` because the bind was never registered anywhere).
-                crate::fs::mount::register_mount(
-                    source,
-                    target,
-                    "bind",
-                    if mnt_flags.is_readonly() { "ro" } else { "rw" },
-                );
+                ph.t(7, || {
+                    crate::fs::mount::register_mount(
+                        source,
+                        target,
+                        "bind",
+                        if mnt_flags.is_readonly() { "ro" } else { "rw" },
+                    )
+                });
                 0
             }
             Err(e) => e,
@@ -2047,7 +2122,18 @@ fn sys_mount_inner(args: SyscallArgs) -> i64 {
         // mounts per boot, not per-transaction).
         let always = fs_type_str == "hmdfs" || fs_type_str == "sharefs";
         {
-            let ret = match crate::fs::mount::do_mount(source, target, fs_type_str, args[3], mount_data) {
+            let ret = match ph.t(
+                6,
+                || {
+                    crate::fs::mount::do_mount(
+                        source,
+                        target,
+                        fs_type_str,
+                        args[3],
+                        mount_data,
+                    )
+                },
+            ) {
                 Ok(()) => 0,
                 Err(e) => e,
             };
