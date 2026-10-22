@@ -282,3 +282,119 @@ fn ww_u64(mut v: u64) {
         unsafe { crate::console::putchar_no_lock(buf[i]) };
     }
 }
+
+// ============================================================================
+// sc158 STALLWATCH (Session R): one-shot park dump for the foundation/
+// sa_main registrar threads.
+//
+// sc155-158 closed the SA-501 question to "foundation's safwk loader dies
+// or wedges mid-boot"; the wedge shape is the loader main thread parked
+// with NO timed futex outstanding (FTWAIT shows no entry), so its park is
+// an UNTIMED futex (mutex/cond event wait) or a binder read. This scan
+// walks the task table every ~5 s of jiffies; any foundation/sa_main
+// task continuously INTERRUPTIBLE for > 90 s gets ONE dump of its last
+// syscall ring + failing-syscall tail, naming the park call-site family.
+// Side-table keyed by Task address (same recycling contract as TABLE
+// above; wake clears the entry so a task parks twice prints twice only
+// if both parks exceed the window).
+// ============================================================================
+struct StallSlot {
+    task: AtomicU64,
+    since: AtomicU64,
+    printed: AtomicU64,
+}
+
+static STALL_TABLE: [StallSlot; 128] = {
+    const ZERO: StallSlot = StallSlot {
+        task: AtomicU64::new(0),
+        since: AtomicU64::new(0),
+        printed: AtomicU64::new(0),
+    };
+    [ZERO; 128]
+};
+
+fn stall_slot_of(task: *mut crate::process::Task) -> &'static StallSlot {
+    let a = task as usize;
+    &STALL_TABLE[(a >> 6 ^ a >> 12) & 127]
+}
+
+/// Called from the timer tick path (softirq context): cheap jiffies gate,
+/// then the scan. Prints via pr_warn (rate is inherently tiny: one line
+/// per 90+s stall).
+pub fn stallwatch_tick() {
+    let now = crate::drivers::timer::get_jiffies();
+    static LAST_SCAN: AtomicU64 = AtomicU64::new(0);
+    let last = LAST_SCAN.load(Ordering::Relaxed);
+    // Every ~5 s (assume HZ >= 50; a smaller HZ just scans more often).
+    if now.wrapping_sub(last) < 250 {
+        return;
+    }
+    if LAST_SCAN
+        .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
+        .is_err()
+    {
+        return;
+    }
+    crate::sched::for_each_task(|t| {
+        // SAFETY: for_each_task pins the task (per-bucket lock); reads
+        // are of stable fields.
+        let tk = unsafe { &*t };
+        let comm = core::str::from_utf8(&tk.comm()[..]).unwrap_or("");
+        let comm = comm.trim_end_matches('\0');
+        if !comm.contains("foundation") && !comm.contains("sa_main") {
+            return;
+        }
+        if !tk.state().is_interruptible() {
+            // Awake or dead: clear any side-table entry.
+            let slot = stall_slot_of(t);
+            slot.task.store(0, Ordering::Release);
+            slot.printed.store(0, Ordering::Release);
+            return;
+        }
+        let slot = stall_slot_of(t);
+        if slot.task.load(Ordering::Acquire) != t as usize as u64 {
+            slot.task.store(t as usize as u64, Ordering::Release);
+            slot.since.store(now, Ordering::Release);
+            slot.printed.store(0, Ordering::Release);
+            return;
+        }
+        if slot.printed.load(Ordering::Acquire) != 0 {
+            return;
+        }
+        let since = slot.since.load(Ordering::Acquire);
+        if now.wrapping_sub(since) < 90 * 100 {
+            return;
+        }
+        slot.printed.store(1, Ordering::Release);
+        let mut s = alloc::string::String::new();
+        use core::fmt::Write;
+        let _ = write!(
+            s,
+            "STALLWATCH tid {} comm='{}' parked >90s calls:",
+            tk.pid(),
+            comm
+        );
+        const RL: usize = crate::process::task::LAST_CALLS_LEN;
+        let cur = tk.last_calls_cur.load(Ordering::Relaxed);
+        for k in 0..RL {
+            let i = (cur + RL - k) % RL;
+            let v = tk.last_calls[i].load(Ordering::Relaxed);
+            if v != 0 {
+                let _ = write!(s, " {}", v);
+            }
+        }
+        crate::pr_warn!("{}", s);
+        let fcur = tk.last_fails_cur.load(Ordering::Relaxed);
+        let mut s2 = alloc::string::String::new();
+        let _ = write!(s2, "STALLWATCH tid {} fails:", tk.pid());
+        for k in 0..8 {
+            let i = (fcur + 8 - 1 - k) % 8;
+            let v = tk.last_fails[i].load(Ordering::Relaxed);
+            if v != 0 {
+                let a0 = tk.last_fails_a0[i].load(Ordering::Relaxed);
+                let _ = write!(s2, " nr{}=-{} a0={:#x}", v & 0xffff, v >> 16, a0);
+            }
+        }
+        crate::pr_warn!("{}", s2);
+    });
+}

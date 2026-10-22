@@ -914,6 +914,9 @@ fn ww_heartbeat(now_time: u64) {
         sched[7], sched[8], sched[9]
     );
     crate::sched::wakewatch::heartbeat();
+    // sc158 (Session R): one-shot park dump for wedged foundation/sa_main
+    // registrar threads - see wakewatch::stallwatch_tick.
+    crate::sched::wakewatch::stallwatch_tick();
 }
 
 /// Rate-gated direct-console print for fire-lateness outliers (no GRQ
