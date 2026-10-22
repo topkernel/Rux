@@ -1569,6 +1569,30 @@ pub fn sys_futex_handler(args: &[u64; 6]) -> i64 {
                             val,
                             op
                         );
+                        // sc125 (Session P): the pre-park FAILING-syscall
+                        // tail — musl pthread_create mmaps the thread stack
+                        // BEFORE clone, so an ENOMEM mmap means no clone
+                        // ever reaches the census. Latched per task.
+                        {
+                            use core::sync::atomic::Ordering::Relaxed;
+                            let cur = tk.last_fails_cur.load(Relaxed);
+                            let mut s = alloc::string::String::new();
+                            use core::fmt::Write;
+                            let _ = write!(s, "APP-PARK fails:");
+                            for k in 0..8 {
+                                let i = (cur + 8 - 1 - k) % 8; // newest first
+                                let v = tk.last_fails[i].load(Relaxed);
+                                if v != 0 {
+                                    let _ = write!(
+                                        s,
+                                        " nr{}=-{}",
+                                        v & 0xffff,
+                                        v >> 16
+                                    );
+                                }
+                            }
+                            crate::pr_warn!("{}", s);
+                        }
                         // SAFETY: t is the current task, in its own syscall.
                         unsafe { rwfz_stack_frames(t, "apppark", 12, 96) };
                     }

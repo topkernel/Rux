@@ -614,6 +614,16 @@ pub struct Task {
     pub last_syscall_a0: AtomicU64,
     pub last_syscall_a1: AtomicU64,
 
+    /// sc125 (Session P): ring of the last 8 FAILING syscalls (nr packed
+    /// low-16, errno high-16) for this task. The park decode needs the
+    /// pre-park failure tail — musl pthread_create maps the thread stack
+    /// BEFORE clone, so a failed mmap (ENOMEM/EAGAIN) means NO clone ever
+    /// reaches the kernel census; this latch is the only per-task record
+    /// that survives the system-wide ring's millisecond overwrite window.
+    /// Stored at dispatch EXIT when 0 > ret > -4096.
+    pub last_fails: [AtomicU32; 8],
+    pub last_fails_cur: core::sync::atomic::AtomicUsize,
+
     // ==================== task_struct fields ====================
 
     /// Process state (volatile, visible across cores)
@@ -1164,6 +1174,8 @@ impl Task {
             ti_a1: core::sync::atomic::AtomicU64::new(0),
             ti_a2: core::sync::atomic::AtomicU64::new(0),
             last_syscall_nr: core::sync::atomic::AtomicU32::new(0),
+            last_fails: core::array::from_fn(|_| AtomicU32::new(0)),
+            last_fails_cur: core::sync::atomic::AtomicUsize::new(0),
             last_syscall_a0: AtomicU64::new(0),
             last_syscall_a1: AtomicU64::new(0),
 

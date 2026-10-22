@@ -691,6 +691,18 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
     SYSCALL_RING[SYSCALL_CURSOR.fetch_add(1, core::sync::atomic::Ordering::Relaxed) % SYSCALL_RING.len()]
         .record(crate::process::current_pid(), syscall_no as u32, args[0], args[1], result as u64);
 
+    // sc125 (Session P): per-task ring of the last 8 FAILING syscalls —
+    // the park decode needs the pre-park failure tail (musl pthread_create
+    // mmaps the thread stack BEFORE clone; a failed mmap means no clone
+    // ever reaches the kernel census and nothing else records it).
+    if result < 0 && result > -4096 {
+        if let Some(cur) = crate::sched::current() {
+            let packed = ((-(result) as u32) << 16) | ((syscall_no as u32) & 0xffff);
+            let idx = unsafe { (*cur).last_fails_cur.fetch_add(1, core::sync::atomic::Ordering::Relaxed) } % 8;
+            unsafe { (*cur).last_fails[idx].store(packed, core::sync::atomic::Ordering::Relaxed) };
+        }
+    }
+
     // OH bring-up: name the call behind any ENOTDIR — the hilogd
     // service-socket chmod fails with errno 20 and no in-handler trace
     // sees it, so decode it here (pathname arg for the *at family).
