@@ -847,7 +847,12 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
                                         // abstract socket: the name is the
                                         // raw bytes after the leading NUL
                                         let _ = write!(desc, "abstract:");
-                                        for b in sa.iter().take(18) {
+                                        // sc140: 40 bytes + the caller's
+                                        // addrlen — the name may be longer
+                                        // than the old 18-byte window and
+                                        // NUL bytes are legal in abstract
+                                        // names (length IS the name).
+                                        for b in sa.iter().take(40) {
                                             let _ = write!(desc, "{:02x}", b);
                                         }
                                     } else {
@@ -869,11 +874,12 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
                         let _ = write!(desc, "<null>");
                     }
                     crate::pr_warn!(
-                        "appconn: pid {} comm='{}' fd={} -> {} ret={}",
+                        "appconn: pid {} comm='{}' fd={} -> {} addrlen={} ret={}",
                         my_pid,
                         comm,
                         args[0],
                         desc,
+                        args[2],
                         result
                     );
                 }

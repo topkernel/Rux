@@ -242,6 +242,11 @@ pub fn sys_clone(args: SyscallArgs) -> i64 {
                             flags,
                             pid
                         );
+                        // sc140: let the binder tracer see transactions
+                        // targeting forked appspawn children.
+                        if flags & 0x00000100 == 0 && flags & 0x00010000 == 0 {
+                            crate::ipc::binder::register_app_child_pid(pid as u32);
+                        }
                         // sc139 (Session Q): the WORKING reference — the
                         // appspawn daemon's own filtered init ring, dumped
                         // in the forking thread's context at a real fork
