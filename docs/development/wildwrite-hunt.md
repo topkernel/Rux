@@ -1577,10 +1577,10 @@ SEED-ALLOC-BAD-POP detector in zone.rs is the in-place tripwire).
   **MMF-PASS x14 on BOTH x86_64 and riscv64** (MF1-9 + MF5b + MF10-13;
   re-run on the final landing binary after the experiment prints were
   reverted), **LVMAP-PASS** (exec/loader VMA regression), riscv64
-  in-kernel unit tests 1085/1088 (the 3 pre-existing config size
-  asserts, byte-identical to the session 6/7/9/12/13/15 baseline).
-  OH exposure: repro8/repro10 (~50 min) ran the hint path live with no
-  VMA-geometry regression.
+  in-kernel unit tests **1085/1088** (run/ww-s18-maketest.log; the 3
+  pre-existing config size asserts, byte-identical to the session
+  6/7/9/12/13/15 baseline). OH exposure: repro8/repro10 (~50 min) ran
+  the hint path live with no VMA-geometry regression.
 - The render_service trace recipe lives in commit 2f54454b (surgical
   pr_err prints); revert to landing form done in the landing commit.
 
@@ -1589,6 +1589,34 @@ SEED-ALLOC-BAD-POP detector in zone.rs is the in-place tripwire).
 - r31 (relaunched at claim after the pause): FULL budget clean —
   0 WW-HIT / 0 heals. r32: killed at 15/45 by the ~11:30 infra sweep
   (whole tree, clean partial); relaunched from r32 at 11:40 — that
-  full run clean too, driver self-advanced to r33. Cumulative:
+  full run clean too, driver self-advanced to r33. r33: FULL budget
+  clean (survived to completion before the next sweep), driver
+  self-advanced to r34; the ~13:3x sweep killed the wrapper and r34's
+  first minutes, relaunched from r34 at 13:40 (WW-ARMED 15 verified).
+  Three infra sweeps this session (~11:30, ~12:44, ~13:3x), each
+  taking the whole background-task set; the r31-r33 artifacts show the
+  claim-then-watch protocol keeps working across them. Cumulative:
   **0 WW-HIT across r1-r33**, 0 META-SMASH.
+- The riscv64 unit-test run was also swept once at ~60 min (results
+  lost with the task's pipe); the rerun with file-captured output
+  completed: 1085/1088 baseline confirmed (above). Ops note: pipe a
+  long make test to a FILE, not a task pipe — a sweep kill loses the
+  pipe buffer but the file survives.
+
+### Session 18 close-out
+
+- Commits: 2f54454b (experiment traces — the capture recipe),
+  05119912 (origin/main merge), 8a1b8020 (landing: hint/brk/nearvma +
+  archive). Pushed via ssh.github.com:443 (2e2dd3bb..8a1b8020).
+- Open for the next session, in order: (1) the PT-alloc panic
+  (map_page .expect at mmu_init.rs:1419) is the loudest blocker on the
+  OH image family — recoverable-failure policy + the zone-drain
+  (fake-OOM accounting) audit; coordinate with the main session's
+  fake-OOM effort and the launcher line's F12 gate probe. (2) If the
+  render_service memcpy crash resurfaces, cherry-pick 2f54454b's
+  prints + nearvma dump and boot once — the decode in this session
+  pins the geometry; the remaining unknown is which syscall (carve
+  short vs top-guard mprotect vs hinted placement) produced it.
+  (3) Chain continues; watchset 15 + the hunt for the wild writer
+  stays the line's ultimate milestone.
 
