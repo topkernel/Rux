@@ -1816,3 +1816,48 @@ Consequences, in order of size:
   truncated cleanly where those boots panicked.
 - Remaining legs: riscv64 unit tests + minimal-rootfs boot; the 45-min
   OH 0-panic gate boot.
+
+### Task-1 legs completed (session 22 close-out)
+
+- pt7 (30-min audit boot): FULL budget, 29270 lines, **0
+  KERNPANIC/ALLOCTHROW**, 2 oom-killer rounds survived (ueventd 556,
+  watchdog_servicene 436), storm to the end.
+- pt8 (45-min OH 0-panic GATE): FULL budget (timeout kill as designed),
+  38090 lines, **0 panics**, same 2 oom-kills survived, WW heartbeats to
+  the last line. **GATE PASSED.**
+- riscv64 in-kernel unit tests (make test, file-captured per the s18
+  lesson): **1085/1088** — byte-identical failure set to the s6/7/9/12/
+  13/15/18 baseline (the 3 pre-existing config_test.rs size asserts);
+  no regression from 998e1c01's riscv OOM arms or this session's dfx
+  changes. The post-summary PANIC is the test harness itself (main.rs:984).
+- riscv64 minimal-rootfs smoke (150 s console boot): /bin/sh loaded,
+  mrsh prompt reached, **0 panics** (PREEMPT-LEAK lines = the known wfi
+  idle noise from main's launcher-line tripwire).
+- Ops: the make-test QEMU outlives the harness after the post-summary
+  panic and holds test/rootfs.img's write lock (session-10 incident
+  class) — reaped after cwd+cmdline verification (it was my own), then
+  the smoke ran clean. Sweeps: one infra sweep at ~01:08 killed the
+  chain task mid-r38 (clean partial: 57593 lines, 0 WW-HIT, 0 panics;
+  pt8's task survived the same window); relaunched from r39 at 01:15
+  (run/ww-chain-s22b.log, armed verified). config.rs restored to the
+  committed x86_64 flavor after the riscv legs (generated-artifact
+  quirk, s2/s4 precedent).
+
+### Where this leaves the line (handoff)
+
+1. **The fake-OOM hunt is ANSWERED on the attribution level**: the
+   drainer is the file-backed demand-fault copy semantics (both x86_64
+   arms; the riscv64 twin has the same shape and needs the same audit
+   run — its psite sanitizer is the one dfx gap). The fix decision
+   (filemap_fault parity vs interim flag hygiene) belongs to the next
+   mm session + the main-session fake-OOM effort — the archive above
+   carries the full evidence chain (psites, OWRS, census, code lines).
+2. Open vmscan question (second-order): lru_file stays ~150k at the OOM
+   moment — evict_one's cache-entry ref_count pinning under the
+   concurrent-read storm, or Referenced activation churn, or the
+   balance_pgdat loop shape; worth one probe boot with eviction
+   counters before anyone touches vmscan.
+3. Chain continues at r39 (15-point set, frozen pair from 28630426).
+   Cumulative **0 WW-HIT across r1-r38** partials, 0 META-SMASH.
+4. The wild-write engine itself remains uncaptured; the hunt's
+   machinery (watchpoints + metawatch + WP/COW discipline) is all live.
