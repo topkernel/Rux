@@ -1493,3 +1493,65 @@ SESSION O ADDENDUM (sc117 + two fixes + one probe, 06:3x-06:5x):
   the park is a lost futex wake (kernel futex lane) or a never-sent
   wake (userspace) — then wire dfx=sleepsnap + a wake census on
   uaddr 0x7fffffffc754.
+
+SESSION P (second leg, 10:2x-): F12 gate exonerated; the park DECODED
+to a pthread_cond_timedwait on a stack cond; holder-hunt in flight.
+- sc118 (pred.) re-read: good variant, 63 spawns, 0 clone-gate/fail
+  lines -> F12 heap-reserve gate EXONERATED (refusal probes only
+  printed on failure; sc119's census made this definitive).
+- sc119 (good variant, 48->63 spawns, sprobe=1): appclone census 0
+  lines (budget intact) = ZERO clone attempts from the RENAMED app
+  comms; stkfutex census (budget raised 150->400 first, commit
+  34e6fc16): 13 app-child WAIT entries at 0x7fffffffc7f4 val=2 with
+  ZERO result lines (eternal), while healthy processes (samgr,
+  multimodalinput, render_service) pass through the SAME musl wait
+  site and get woken by their own OS_IPC workers. mntslow phase
+  attribution DONE: op phase avg 4950us max 8859us vs same-boot
+  mtprobe sub-phases ~75us total (lookup+attach 26 + clone-scan 49 +
+  clone-attach 0.5) - the ~5ms is DESCHEDULE/lock-wait inside the
+  core op (mount-namespace contention across 61+ concurrent binders),
+  NOT string copies/capable()/lookup/registry (all ~0).
+- sc120 (dfx-taskdump-bt+dfx-futex-trace): FLOODS the UART (per-task
+  bt + stack words x ~500 tasks x 30s dumps) - killed. Learned: the
+  bt block exists and works; features stay OFF for full boots.
+- sc121 (same features, no periodic): FTX ENTER tracer is UNBUDGETED
+  under dfx-futex-trace (every futex op prints) - drowned; killed.
+  Raw-chain probe landed first (9e2e1f32).
+- sc122 (plain kernel + raw chain, good variant): KILLDUMP NEVER
+  samples the park - SIGKILL lands after the userspace DFX freeze
+  handshake, so kills catch the child in getrusage (generic 0xa5)
+  /open of the handshake. -> APP-PARK hook (1fef9f6e): dump at WAIT
+  ENTRY in the parking thread's own context.
+- sc123 (good variant): APP-PARK x6, ALL BYTE-IDENTICAL across
+  systemui/settingsdata/launcher/dataability (same rsp
+  0x7fffffffc6c0, same uaddr 0x7fffffffc754, same chain) =
+  appspawn's fork-without-exec child branch (children keep the
+  appspawn image + run its child path; comm set late via prctl).
+  CHAIN DECODED: rip 0x3fbf116dea = musl __timedwait syscall insn
+  (fixed INTERP_BASE 0x3fbf000000 = musl); slot[2] = 31536000 =
+  ONE YEAR = the OH wait-forever timeout (correctly passed - not a
+  timeout bug); slot[11] = musl+0x118374 = pthread_cond_timedwait+0x1d2
+  right after 'call __timedwait' -> THE PARK IS THE COND WAIT ITSELF
+  (seq==2, waiting for the 3rd notify); slot[5] spill = the uaddr.
+  Early misreads corrected: NOT the mutex relock (that was sc121's
+  storage_manager rwlock park chain at musl+0x11849d), NOT libc++
+  string code (slot[1] = stale decoy; the libc++ VMA match was
+  right but the slot is dead data).
+- sc124 (forkgate probe fc63a720; wedged-ish boot, 819 proxydead, 0
+  launcher spawns but settingsdata/systemui children forked+parked):
+  fork flags=0x11 (plain fork), word@c754=0 word@c7f4=0 AT FORK ->
+  NOT fork-inherited held locks; siblings idle (OS_IPC recvmsg,
+  OS_DfxWatchdog RUNNING). The child constructs the cond itself;
+  seq reaches 2 during the child's own run, then waits for a
+  same-process signaler that never comes.
+- CENSUS GAP found (fixed 1eb18856): the appclone comm filter was
+  blind while children run under comm 'appspawn' (dlopen +
+  .init_array constructors rename LATE - sc118 pid 1200 comm=appspawn
+  was a live child). sc125 boots the fixed census: whether engine
+  constructor threads (CLONE_THREAD from the child) are created is
+  the now-decisive datum. If created->then died silently, next probe
+  is child-tgid thread-exit logging; if never created, hunt what
+  blocks pre-create.
+Boots this session: sc119 (good, census+mntslow), sc120/121 (flooded,
+killed early), sc122 (good, KILLDUMP handshake decode), sc123 (good,
+APP-PARK chain), sc124 (wedged-ish, forkgate), sc125 (in flight).
