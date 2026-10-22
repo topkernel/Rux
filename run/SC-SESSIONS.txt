@@ -1647,3 +1647,55 @@ REFUTED by stub test; session handoff state.
   shows zero ATTEMPTS from the parked children - the gate never
   fires; the 8MiB/128MB-era threshold question is moot for THIS
   symptom).
+
+SESSION Q (third leg, 13:0x-): prctl-EINVAL DECODED (OH 'prot' VMA-tag
+magic, tolerated); pre-park loop = clock+writev+connect; /dev/dec+/dev/xpm
+ENOENT named as the first engine-init failure; xpm/dec stubs landed;
+APPMAP/APPFD/appconn probes added; sc136 reroll (slow-boot variance).
+- sc135 (good variant, 6 APP-PARK dumps + a0-latch): the children's
+  nr167=-22 IS prctl(option=0x70726f74='prot', 0, addr, size, 0) - an
+  OH-kernel PR_SET_VMA-shaped extension (OH musl + OH kernel_linux use
+  the STANDARD 0x53564d41, so the caller computes its own magic - not
+  identified upstream, does not matter: the appspawn PARENT makes 38
+  of these EINVAL calls and thrives => TOLERATED, park cause is NOT
+  prctl). Two sub-shapes: children with hilog writev EAGAIN fd3
+  (settingsdata/systemui) and children with clean writev (launcher) -
+  both park identically => hilog backpressure also not the cause.
+- 96-deep all-calls ring (sc135): pre-park = clock_gettime runs +
+  writev+connect+writev triplets (fd3), ZERO futex/clone/mmap
+  completions in the last 96 calls, then ONE eternal cond wait. The
+  child NEVER attempts its first pthread_create (no mmap for stack,
+  no clone) - engine init aborts silently before thread creation.
+- WORKING child identified (sc125 log reread): tgid 1146 = the
+  OsAccount service child ('ActivateDefaultOsAccount', sets
+  bootevent.appspawn.started) - a NATIVE service child, no ark engine.
+  Native-service children create threads fine; ark-app children park.
+  => divergence lives in the ark-engine path.
+- sc135 APPSPAWN window decode: parent opens /dev/dec then /dev/xpm
+  (O_RDWR|O_CLOEXEC) ENOENT in EVERY app child's engine init (first
+  failures in the tail, before the enhance-lib cascade); XPM = OH
+  code-protection manager (Huawei kernel driver, absent here). The
+  parent then reports spawn SUCCESS, AMS OnAppStarted fires, child
+  parks, AMS watchdog kills it ('RemoveProcessRecord process died'),
+  AMS retries forever (87 appclone lines in sc135).
+- landed probes/fixes: dispatch prctl-einval print (all args);
+  last_fails a0/a1 rings (printed at APP-PARK/thread-exit/APP-THR);
+  LAST_CALLS_LEN=96; APP-THR (ring dump at a FORKED child's first
+  CLONE_THREAD, parent excluded via APPSPAWN_TGID recorded at the
+  parent's first fork); APPMAP (parking child's lib-region VMA table,
+  compact lines - sc135's slot-27 frame line was cut at every UART
+  flush boundary by hilog interleaving, all 6 dumps truncated at the
+  SAME point); APPFD (open fd paths); appconn (connect sockaddr;
+  sc136 run1 burned its budget on the parent's connect storm + fd3 is
+  an ABSTRACT unix socket - fixed: parent-skip + hex-dump).
+- devfs: /dev/xpm (10,240) + /dev/dec (10,241) null-semantics stub
+  nodes - causality test per sc134 empty-DSO methodology.
+- raw park chain decode (sc135, all 6 byte-identical): waiter return
+  addr slot[12]=0x7ff0816ff8a8 in an UNSEEN VMA below 0x7ff081a09000;
+  slot[14]/[15] point into the 0x7ff081b49000-0x7ff08234a000 8MB arena
+  (heap). APPMAP will name slot[12]'s VMA; offline PT_LOAD table
+  (/tmp/ohlibs-loads.txt, 3335 libs) ready for matching.
+- sc136: kernel with stubs+probes booted but ran 3x slow (12.8k lines
+  in 25 min, child phase unreached; not wedged - composer_host.ready +
+  appspawn.started both fired; boot-speed variance). sc137 reroll
+  running with the appconn-fixed kernel, 35 min budget.
