@@ -104,6 +104,71 @@ pub fn sys_clone(args: SyscallArgs) -> i64 {
     // copy_process: p->exit_signal = args->exit_signal == CSIGNAL mask).
     let exit_signal = (flags & 0xff) as u8;
 
+    // sc123 (Session P): APP-PARK decoded the children's eternal wait as
+    // pthread_cond_timedwait's MUTEX RELOCK (return chain: wait wrapper <-
+    // pthread_mutex_lock <- pthread_cond_timedwait at musl+0x11849d) on
+    // a stack-local mutex at 0x7fffffffc754 whose word reads 2 (locked +
+    // waiters) in a SINGLE-THREADED child. Two theories: (A) fork-inherited
+    // held lock — an appspawn parent-side task held this mutex when fork()
+    // copied the main stack, and no child thread can ever unlock it; (B)
+    // the child locked it itself and re-locks on an error path Rux takes
+    // but Linux does not. This probe fires AT FORK (clone without
+    // CLONE_VM/CLONE_THREAD from comm appspawn) in the forking thread's
+    // own context: it reads BOTH candidate words on the forking stack and
+    // lists every sibling thread of the tgid (comm + state + last syscall
+    // nr) — the siblings awake at fork instant are the theory-A holder
+    // candidates. word==1/2 at fork settles A outright.
+    if flags & 0x00000100 == 0 /* !CLONE_VM: real fork, stack copied */
+        && flags & 0x00010000 == 0 /* !CLONE_THREAD */
+    {
+        let comm = crate::sched::current()
+            .map(|t| unsafe { (*t).comm() })
+            .map(|c| core::str::from_utf8(c).unwrap_or(""))
+            .unwrap_or("")
+            .trim_end_matches('\0');
+        if comm == "appspawn" {
+            static NF: core::sync::atomic::AtomicUsize =
+                core::sync::atomic::AtomicUsize::new(0);
+            if NF.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 10 {
+                use crate::arch::uaccess::get_user;
+                let w1 = unsafe { get_user(0x7fffffffc754 as *const u32) };
+                let w2 = unsafe { get_user(0x7fffffffc7f4 as *const u32) };
+                crate::pr_warn!(
+                    "forkgate: appspawn fork flags={:#x} word@c754={:?} word@c7f4={:?}",
+                    flags,
+                    w1,
+                    w2
+                );
+                // Sibling snapshot: who else of this tgid is alive at
+                // fork, and what are they doing (holder candidates).
+                let my_pid = crate::process::current_pid();
+                let listed_cell = core::cell::Cell::new(0usize);
+                crate::sched::for_each_task(|t| {
+                    if listed_cell.get() >= 12 {
+                        return;
+                    }
+                    let tk = unsafe { &*t };
+                    if tk.tgid() != my_pid || tk.pid() == my_pid {
+                        return;
+                    }
+                    let nc = core::str::from_utf8(tk.comm())
+                        .unwrap_or("")
+                        .trim_end_matches('\0');
+                    let nr = tk.last_syscall_nr.load(core::sync::atomic::Ordering::Relaxed);
+                    let running = tk.state().is_running();
+                    crate::pr_warn!(
+                        "forkgate:  sib tid {} comm='{}' lastsys={} {}",
+                        tk.pid(),
+                        nc,
+                        nr,
+                        if running { "RUNNING" } else { "sleep" }
+                    );
+                    listed_cell.set(listed_cell.get() + 1);
+                });
+            }
+        }
+    }
+
     let clone_args = CloneArgs {
         flags,
         stack,
