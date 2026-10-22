@@ -108,7 +108,11 @@ __switch_to:
     # be resumed — one task must never run on two harts (the gnome-boot
     # pfault family). The idle task is never pick-marked — always switch
     # to it.
-    lw    t5, {task_pid}(a1)        # next->pid
+    # pid sits past the 2047-byte immediate window once the Task struct
+    # grew (init-ring/latch fields) — materialize the offset in a register
+    li    t2, {task_pid}
+    add   t2, a1, t2
+    lw    t5, (t2)                 # next->pid
     beqz  t5, .Lswitch_go           # idle target: never marked, go
     li    t2, {task_pick_state}
     add   t2, a1, t2                # &next->ti_pick_state
