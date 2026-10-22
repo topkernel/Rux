@@ -731,11 +731,20 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
         if !skip {
             if let Some(cur) = crate::sched::current() {
                 use core::sync::atomic::Ordering::Relaxed;
-                let idx = unsafe { (*cur).init_calls_cur.fetch_add(1, Relaxed) }
-                    % crate::process::task::INIT_CALLS_LEN;
+                let n = unsafe { (*cur).init_calls_cur.fetch_add(1, Relaxed) };
+                let idx = n % crate::process::task::INIT_CALLS_LEN;
                 unsafe {
                     (*cur).init_calls[idx].store((syscall_no as u32) & 0xffff, Relaxed);
                     (*cur).init_a0[idx].store(args[0], Relaxed);
+                }
+                // sc143: latch the birth window once (first 64 filtered
+                // calls of this task's life) — the deep ring's tail gets
+                // churned by retry loops, the birth window cannot.
+                if n < crate::process::task::BIRTH_CALLS_LEN as usize {
+                    unsafe {
+                        (*cur).birth_calls[n].store((syscall_no as u32) & 0xffff, Relaxed);
+                        (*cur).birth_a0[n].store(args[0], Relaxed);
+                    }
                 }
             }
         }

@@ -501,7 +501,12 @@ pub const LAST_CALLS_LEN: usize = 96;
 /// openat/read/mmap cascades — the byte-diff substrate for working-vs-
 /// parked children. init_a0 keeps the first argument of each entry
 /// (prctl option / mmap addr / futex uaddr).
-pub const INIT_CALLS_LEN: usize = 96;
+pub const INIT_CALLS_LEN: usize = 512;
+
+/// sc143 (Session Q): one-shot latch of the task's FIRST 64 filtered
+/// calls (the birth window: fork-exit -> hooks -> first dlopens) that
+/// survives later loop-churn overwriting the deep ring.
+pub const BIRTH_CALLS_LEN: usize = 64;
 
 /// R56-heal pick-state machine values (Task::ti_pick_state).
 /// PICKED: published by mark_picked_on_cpu under the GRQ.
@@ -666,6 +671,10 @@ pub struct Task {
     pub init_calls: [AtomicU32; INIT_CALLS_LEN],
     pub init_a0: [AtomicU64; INIT_CALLS_LEN],
     pub init_calls_cur: core::sync::atomic::AtomicUsize,
+    /// sc143: birth-window latch (see BIRTH_CALLS_LEN).
+    pub birth_calls: [AtomicU32; BIRTH_CALLS_LEN],
+    pub birth_a0: [AtomicU64; BIRTH_CALLS_LEN],
+    pub birth_done: core::sync::atomic::AtomicBool,
 
     // ==================== task_struct fields ====================
 
@@ -1226,6 +1235,9 @@ impl Task {
             init_calls: core::array::from_fn(|_| AtomicU32::new(0)),
             init_a0: core::array::from_fn(|_| AtomicU64::new(0)),
             init_calls_cur: core::sync::atomic::AtomicUsize::new(0),
+            birth_calls: core::array::from_fn(|_| AtomicU32::new(0)),
+            birth_a0: core::array::from_fn(|_| AtomicU64::new(0)),
+            birth_done: core::sync::atomic::AtomicBool::new(false),
             last_syscall_a0: AtomicU64::new(0),
             last_syscall_a1: AtomicU64::new(0),
 
@@ -1908,6 +1920,21 @@ impl Task {
             (ptr as usize + offset_of!(Task, init_calls_cur))
                 as *mut core::sync::atomic::AtomicUsize,
             core::sync::atomic::AtomicUsize::new(0),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, birth_calls))
+                as *mut [AtomicU32; BIRTH_CALLS_LEN],
+            core::array::from_fn(|_| AtomicU32::new(0)),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, birth_a0))
+                as *mut [AtomicU64; BIRTH_CALLS_LEN],
+            core::array::from_fn(|_| AtomicU64::new(0)),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, birth_done))
+                as *mut core::sync::atomic::AtomicBool,
+            core::sync::atomic::AtomicBool::new(false),
         );
 
         // Initialize thread_info style fields (must be at beginning)

@@ -1601,21 +1601,35 @@ pub fn sys_futex_handler(args: &[u64; 6]) -> i64 {
                             use core::fmt::Write;
                             use core::sync::atomic::Ordering::Relaxed;
                             const RL: usize = crate::process::task::INIT_CALLS_LEN;
+                            const BL: usize = crate::process::task::BIRTH_CALLS_LEN;
                             let cur = tk.init_calls_cur.load(Relaxed);
-                            let mut s2 = alloc::string::String::new();
-                            let _ = write!(s2, "APP-PARK init:");
+                            // sc143: 512 entries in chunks of 128 so a
+                            // single UART flush cannot gut the whole line.
+                            let mut chunk = alloc::string::String::new();
+                            let mut shown = 0usize;
                             for k in 0..RL {
                                 let i = (cur + RL - k) % RL; // newest first
                                 let v = tk.init_calls[i].load(Relaxed);
                                 if v != 0 {
-                                    let _ = write!(s2, " {}", v);
+                                    if shown % 128 == 0 {
+                                        if !chunk.is_empty() {
+                                            crate::pr_warn!("{}", chunk);
+                                        }
+                                        chunk = alloc::string::String::new();
+                                        let _ = write!(chunk, "APP-PARK init[{}-]:", shown);
+                                    }
+                                    let _ = write!(chunk, " {}", v);
+                                    shown += 1;
                                 }
                             }
-                            crate::pr_warn!("{}", s2);
+                            if !chunk.is_empty() {
+                                crate::pr_warn!("{}", chunk);
+                            }
+                            // newest 96 with a0
                             let mut s3 = alloc::string::String::new();
                             let _ = write!(s3, "APP-PARK initA:");
-                            for k in 0..RL {
-                                let i = (cur + RL - k) % RL; // newest first
+                            for k in 0..96.min(RL) {
+                                let i = (cur + RL - k) % RL;
                                 let v = tk.init_calls[i].load(Relaxed);
                                 if v != 0 {
                                     let a0 = tk.init_a0[i].load(Relaxed);
@@ -1623,6 +1637,18 @@ pub fn sys_futex_handler(args: &[u64; 6]) -> i64 {
                                 }
                             }
                             crate::pr_warn!("{}", s3);
+                            // sc143: the birth window (fork-exit onward),
+                            // immune to loop churn.
+                            let mut s4 = alloc::string::String::new();
+                            let _ = write!(s4, "APP-PARK birth:");
+                            for k in 0..BL {
+                                let v = tk.birth_calls[k].load(Relaxed);
+                                if v != 0 {
+                                    let a0 = tk.birth_a0[k].load(Relaxed);
+                                    let _ = write!(s4, " {}@{:#x}", v, a0);
+                                }
+                            }
+                            crate::pr_warn!("{}", s4);
                         }
                         // sc125 (Session P): the pre-park FAILING-syscall
                         // tail — musl pthread_create mmaps the thread stack
