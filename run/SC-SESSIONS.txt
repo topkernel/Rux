@@ -1954,3 +1954,63 @@ and re-aims the storm hunt. sc158 was a storm boot (1268 IRQ-OFF windows,
   bindwalk ENOENT capped at 300. Dual-arch builds pass (riscv64gc
   07:21, x86_64 bzImage 07:22). Boot: oh-boot-q.sh sc160, fresh scgold
   userdata reflink, SECS=2700 SMP=2, shotmon armed.
+
+SESSION R SECOND LEG ADDENDUM (sc160 readback + sc161 fix, 07:3x-07:4x):
+sc160 CLOSED THE CRASH QUESTION and sc161 carries the fix pair.
+- sc160 probe results (all three new probes worked first boot):
+  * binder-mmap ranges printed (58 buffers; every service maps 256 pages
+    at its own mmap_base - the shared 0x7ff081a47000 across pids is
+    per-mm placement, not aliasing).
+  * USEGV-L verdict lines: EVERY launcher/settingsdata child crash
+    (sc160 comm='os.settingsdata' AND 'm.ohos.launcher', pids 1268/1276,
+    3x each per OH's crash-handler re-raise) lands cr2 INSIDE the
+    DAEMON's binder buffer: "BINDERBUF proc=11 owner_pid=337
+    base=0x7ff099f1c000 size=0x100000". The sc157 interpretation grid
+    resolves to (a): children deref the stale (DONTFORK-dropped) daemon
+    buffer VA.
+  * Crash mechanism end-to-end: OH's BinderConnector::MapMemory maps the
+    daemon fd MAP_PRIVATE; Rux binder (like Linux) delivers BR_REPLY
+    with data_buffer = alloc.user_base + offset (kernel/src/ipc/binder.rs
+    ~5307); OH's BinderInvoker::HandleReply does
+    reply->ParseFrom(tr->data.ptr.buffer,...) - a LAZY WRAP, no deref -
+    so "GetOnDemandIds SendRequest succeed" prints without touching the
+    buffer; the NEXT call whose reply is actually READ (CheckSystemAbility
+    -> parcel read) faults at the getter (mov eax,[r8+r9] in the
+    memfd-preloaded libipc engine). The memfd explains ripfile '?' and
+    why the offline byte-match found nothing in /system/lib64.
+  * WHO poisoned the children: OH source (oh-robot tree) - appspawn's
+    ace_adapter PreloadModule creates AbilityRuntime with loadAce in the
+    DAEMON ("appspawn_preload.json" engine preload); the Rosen
+    DisplayManagerAdapter/ScreenManagerAdapter singletons it constructs
+    do IPC -> BinderConnector::GetInstance() opens /dev/binder pre-fork
+    (sc160: IPCThreadSkeleton slog + binder-open pid 337 at line 1538,
+    first AppSpawnChild at 7073). NO pid-guard/afterfork re-init exists
+    anywhere in foundation/communication/ipc (singletons are plain
+    double-checked; children inherit instance_ and NEVER re-open - zero
+    child binder-opens in every boot). On Linux the same inheritance
+    would fault the same way; this image's children simply cannot use
+    VM_DONTCOPY. Kernel-side conclusion: restore shared inheritance
+    (internal choice, binder ABI unchanged) + route child-node txns.
+- sc161 fixes (commit after a1303539):
+  (A) binder_mmap no longer stamps VmaFlags::DONTFORK - children inherit
+      the buffer VMA as shared pages again (pre-sc157 behavior); the mm
+      DONTFORK machinery stays for future use.
+  (B) child-tgid routing: BinderThread.tgid stamped at get_thread;
+      work_readable_by() gates proc-todo consumption (a txn aimed at a
+      child-registered node - reg_tgid set and != owner pid - is only
+      readable by that child's threads; daemon readers skip it instead
+      of stealing it into their ProcessSkeleton dead-end - the sc156
+      AMS->child black hole); thread_has_work honors the gate (no
+      spin-wait); the proc-todo pull takes the first OWNED item;
+      wake_proc_one(pref) prefers the child's threads for child-node
+      txns (both oneway and sync posting paths).
+- Storm/task-2 addendum: sc160 (USEGV capped 6+one-liners, bindwalk
+  capped 300) vs sc159: USEGV print volume -85% (903->139 lines in equal
+  byte windows) but TIMER-SOFTIRQ-STALL went 15->202. The stall lines'
+  rip values are USER-SPACE (0x3fbf...) with tick_age==age=1000ms on
+  cpu=1 - the LAPIC tick STOPPED ARRIVING while the CPU ran user code:
+  that is KVM hrtimer delay under host load (sibling agents' TCG QEMUs
+  burn host cores), not a Rux IF=0 window (user mode has IRQs on). The
+  kernel-rip stall samples (inb/print path) remain the real Rux-side
+  IRQ-off family - print caps reduce them; the user-rip family is
+  weather. Foundation XCollie fragility under 1s tick loss is OH-side.
