@@ -828,10 +828,18 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
                 APPLOG_MAIN_PID.store(my_pid, core::sync::atomic::Ordering::Relaxed);
             }
             let is_daemon = main_pid != 0 && main_pid == my_pid;
-            if !is_daemon {
+            // sc152 (Session Q): for the DAEMON itself, print only the
+            // SA-registration lines — the SA 501 (AppMgrService,
+            // libappms loaded into the daemon) never registers with
+            // samgr, and the daemon's own narration says whether the
+            // registration was attempted and how it failed.
+            // sc152: collection runs for the whole family; the PRINT
+            // below filters daemon lines to registration keywords
+            // (AddSystemAbility / RegisterSystemAbility / SA ids / samgr)
+            // so the daemon's preload storm cannot eat the budget.
             static HI_N: core::sync::atomic::AtomicUsize =
                 core::sync::atomic::AtomicUsize::new(0);
-            if HI_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 700 {
+            if HI_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 1200 {
                 // iovec { void* base; size_t len }
                 let base = args[1];
                 if base != 0 {
@@ -873,17 +881,34 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
                         }
                     }
                     if !parts.is_empty() {
-                        crate::pr_warn!(
-                            "applog pid={} comm='{}' ret={} |{}",
-                            crate::process::current_pid(),
-                            comm,
-                            result,
-                            parts.join("|")
-                        );
+                        let joined = parts.join("|");
+                        let daemon_regn = is_daemon
+                            && (joined.contains("egister")
+                                || joined.contains("SystemAbility")
+                                || joined.contains("501")
+                                || joined.contains("amgr")
+                                || joined.contains("bility"));
+                        if !is_daemon || daemon_regn {
+                            static DREG_N: core::sync::atomic::AtomicUsize =
+                                core::sync::atomic::AtomicUsize::new(0);
+                            if !is_daemon
+                                || DREG_N.fetch_add(
+                                    1,
+                                    core::sync::atomic::Ordering::Relaxed,
+                                ) < 60
+                            {
+                                crate::pr_warn!(
+                                    "applog pid={} comm='{}' ret={} |{}",
+                                    crate::process::current_pid(),
+                                    comm,
+                                    result,
+                                    joined
+                                );
+                            }
+                        }
                     }
                 }
             }
-            } // !is_daemon
         }
     }
 
