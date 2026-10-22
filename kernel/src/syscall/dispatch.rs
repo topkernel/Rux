@@ -691,6 +691,15 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
     SYSCALL_RING[SYSCALL_CURSOR.fetch_add(1, core::sync::atomic::Ordering::Relaxed) % SYSCALL_RING.len()]
         .record(crate::process::current_pid(), syscall_no as u32, args[0], args[1], result as u64);
 
+    // sc128 (Session P): per-task nr-only ring of the last 12 syscalls
+    // (successes included) — read at APP-PARK to see the child's final
+    // action sequence, not just its failures.
+    if let Some(cur) = crate::sched::current() {
+        use core::sync::atomic::Ordering::Relaxed;
+        let idx = unsafe { (*cur).last_calls_cur.fetch_add(1, Relaxed) } % 12;
+        unsafe { (*cur).last_calls[idx].store((syscall_no as u32) & 0xffff, Relaxed) };
+    }
+
     // sc125 (Session P): per-task ring of the last 8 FAILING syscalls —
     // the park decode needs the pre-park failure tail (musl pthread_create
     // mmaps the thread stack BEFORE clone; a failed mmap means no clone

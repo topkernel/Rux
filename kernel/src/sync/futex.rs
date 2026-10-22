@@ -1569,6 +1569,25 @@ pub fn sys_futex_handler(args: &[u64; 6]) -> i64 {
                             val,
                             op
                         );
+                        // sc128 (Session P): the nr-only ALL-syscall ring
+                        // (last 12, successes included, oldest first) —
+                        // the final action sequence between the dlopen
+                        // cascade and the park.
+                        {
+                            use core::sync::atomic::Ordering::Relaxed;
+                            let cur = tk.last_calls_cur.load(Relaxed);
+                            let mut s2 = alloc::string::String::new();
+                            use core::fmt::Write;
+                            let _ = write!(s2, "APP-PARK calls:");
+                            for k in 0..12 {
+                                let i = (cur + 12 - k) % 12; // newest first
+                                let v = tk.last_calls[i].load(Relaxed);
+                                if v != 0 {
+                                    let _ = write!(s2, " {}", v);
+                                }
+                            }
+                            crate::pr_warn!("{}", s2);
+                        }
                         // sc125 (Session P): the pre-park FAILING-syscall
                         // tail — musl pthread_create mmaps the thread stack
                         // BEFORE clone, so an ENOMEM mmap means no clone

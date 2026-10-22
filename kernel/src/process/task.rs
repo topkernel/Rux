@@ -624,6 +624,14 @@ pub struct Task {
     pub last_fails: [AtomicU32; 8],
     pub last_fails_cur: core::sync::atomic::AtomicUsize,
 
+    /// sc128 (Session P): ring of the last 12 syscalls (nr only) for
+    /// this task — the park decode needs the final SUCCESS sequence too
+    /// (what the child does between the failed dlopen cascade and the
+    /// cond park: more mmaps? clone attempts? closes?). Stored at every
+    /// dispatch exit.
+    pub last_calls: [AtomicU32; 12],
+    pub last_calls_cur: core::sync::atomic::AtomicUsize,
+
     // ==================== task_struct fields ====================
 
     /// Process state (volatile, visible across cores)
@@ -1176,6 +1184,8 @@ impl Task {
             last_syscall_nr: core::sync::atomic::AtomicU32::new(0),
             last_fails: core::array::from_fn(|_| AtomicU32::new(0)),
             last_fails_cur: core::sync::atomic::AtomicUsize::new(0),
+            last_calls: core::array::from_fn(|_| AtomicU32::new(0)),
+            last_calls_cur: core::sync::atomic::AtomicUsize::new(0),
             last_syscall_a0: AtomicU64::new(0),
             last_syscall_a1: AtomicU64::new(0),
 
