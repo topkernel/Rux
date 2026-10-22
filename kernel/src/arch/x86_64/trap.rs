@@ -1745,6 +1745,37 @@ fn user_segv_forensics(regs: &PtRegs, fault_addr: u64) {
                 );
             }
         }
+        // VMA neighborhood around the fault address (render_service
+        // offset-anomaly family, session 18): the single vma(cr2) line
+        // cannot show what borders the faulting region — whether a
+        // writable stack sits directly below a mis-flagged PROT_NONE
+        // tail, a guard page, or a hole. Dump every VMA overlapping a
+        // +/-16MB window around cr2, capped at 12 entries (fatal path,
+        // rare; bounded by construction).
+        {
+            let lo = (fault_addr as usize).saturating_sub(0x100_0000);
+            let hi = (fault_addr as usize).saturating_add(0x100_0000);
+            let mut shown = 0usize;
+            for v in vmas.iter() {
+                if v.end().as_usize() <= lo || v.start().as_usize() >= hi {
+                    continue;
+                }
+                if shown >= 12 {
+                    crate::pr_err!("USEGV-FOR: nearvma ... (capped)");
+                    break;
+                }
+                crate::pr_err!(
+                    "USEGV-FOR: nearvma {:#x}-{:#x} flags={:#x} type={:?} fd={} off={:#x}",
+                    v.start().as_usize(),
+                    v.end().as_usize(),
+                    v.flags().bits(),
+                    v.vma_type(),
+                    v.file_fd(),
+                    v.offset()
+                );
+                shown += 1;
+            }
+        }
     }
 
     // Stack words (return-address chain): read through the page-table

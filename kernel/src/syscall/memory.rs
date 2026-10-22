@@ -1103,11 +1103,15 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                             // CFI/GWP-Asan shadow reservations, a handful
                             // per boot, and the CFI hunt needs them
                             // visible by default.
+                            // EXPERIMENT (session 18, render_service offset
+                            // hunt): threshold dropped 1GB -> 64KB and raised
+                            // to pr_err so anon PROT_NONE stack reserves are
+                            // visible at loglevel=4. REVERT after the capture.
                             let big_reserve = prot_flags == 0
                                 && map_flags & map::MAP_ANONYMOUS != 0
-                                && actual_length >= 0x4000_0000;
+                                && actual_length >= 0x1_0000;
                             if big_reserve {
-                                crate::pr_info!(
+                                crate::pr_err!(
                                     "PROTNONE-MAP pid {} addr {:#x} len {:#x}",
                                     crate::process::current_pid(),
                                     mapped_addr.as_usize(),
@@ -1139,6 +1143,29 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                                         fd
                                     );
                                 }
+                            }
+                            // EXPERIMENT (session 18, render_service offset
+                            // hunt): anon MAP_FIXED carves are the FFRT
+                            // stack allocator's RW-ification of the PROT_NONE
+                            // reserves — visible at loglevel=4 so the carve
+                            // sequence reconstructs against the crash VMA.
+                            // >=16KB or any PROT_NONE fixed map: RW fills of
+                            // 1-3 pages are the CFI/GWP-Asan shadow carve
+                            // flood (1300+ lines in minutes), but a 2-page
+                            // PROT_NONE fixed map is a top-guard install —
+                            // the exact event under investigation. REVERT
+                            // after the capture.
+                            if map_flags & map::MAP_FIXED != 0
+                                && map_flags & map::MAP_ANONYMOUS != 0
+                                && (actual_length >= 0x4000 || prot_flags == 0)
+                            {
+                                crate::pr_err!(
+                                    "ANONFIXED-MAP pid {} addr {:#x} len {:#x} prot {:#x}",
+                                    crate::process::current_pid(),
+                                    mapped_addr.as_usize(),
+                                    actual_length,
+                                    prot_flags
+                                );
                             }
                             mapped_addr.as_usize() as i64
                         },
@@ -1191,7 +1218,8 @@ pub fn sys_munmap(args: [u64; 6]) -> i64 {
     // __unmapself) or mallocng group frees — the counterparts of
     // PROTNONE-MAP/MPROTECT-RW above.
     if length >= 0x8_0000 {
-        crate::pr_info!(
+        // EXPERIMENT (session 18): pr_err so it survives loglevel=4. REVERT.
+        crate::pr_err!(
             "BIGMUNMAP pid {} addr {:#x} len {:#x}",
             crate::process::current_pid(),
             addr,
@@ -1265,7 +1293,7 @@ pub fn sys_mprotect(args: [u64; 6]) -> i64 {
     // the shadow's tmp before mremap) are entry/exit traced only under
     // dfx=syscalltrace (two lines per call, same gating as MREMAP).
     if ret != 0 {
-        crate::pr_info!(
+        crate::pr_err!(
             "MPROTECT-FAIL pid {} addr {:#x} len {:#x} prot {:#x} -> {}",
             crate::process::current_pid(),
             args[0],
@@ -1303,8 +1331,20 @@ fn sys_mprotect_inner(args: [u64; 6]) -> i64 {
     // by RW mprotects — the crash memset targets the reserve base). Log
     // ALL of them: RELRO downgrades are PROT_READ and stay quiet.
     if prot & 0x2 != 0 {
-        crate::pr_info!(
+        crate::pr_err!(
             "MPROTECT-RW pid {} addr {:#x} len {:#x}",
+            crate::process::current_pid(),
+            addr,
+            length
+        );
+    }
+    // EXPERIMENT (session 18, render_service offset hunt): PROT_NONE
+    // mprotects are guard toggles (RELRO downgrades are PROT_READ and stay
+    // quiet) — the other half of the stack-reserve surgery. REVERT after
+    // the capture.
+    if prot & 0x7 == 0 {
+        crate::pr_err!(
+            "MPROTECT-NONE pid {} addr {:#x} len {:#x}",
             crate::process::current_pid(),
             addr,
             length
