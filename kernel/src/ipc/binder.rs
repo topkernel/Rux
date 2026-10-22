@@ -810,6 +810,13 @@ struct ThreadState {
 
 struct BinderThread {
     tid: u32,
+    /// Owning task's TGID (sc161 child-tgid routing): several appspawn
+    /// children share ONE binder proc (the daemon's inherited fd), so the
+    /// proc's thread list mixes daemon-tgid and child-tgid threads. The
+    /// tgid decides which threads may consume a transaction aimed at a
+    /// child-registered node (reg_tgid) — without it the daemon's OS_IPC
+    /// reader threads steal the AMS→child deliveries.
+    tgid: u32,
     /// Per-thread wait queue (Linux thread->wait): replies and tcomplete
     /// wake the exact thread; proc work wakes one selected waiter.
     wait: WaitQueueHead,
@@ -831,9 +838,10 @@ struct BinderThread {
 }
 
 impl BinderThread {
-    fn new(tid: u32) -> Self {
+    fn new(tid: u32, tgid: u32) -> Self {
         Self {
             tid,
+            tgid,
             wait: WaitQueueHead::new(),
             read_wait_since: core::sync::atomic::AtomicU64::new(0),
             stall_reported: core::sync::atomic::AtomicBool::new(false),
@@ -1117,15 +1125,23 @@ fn wake_thread(t: &BinderThread) {
 /// eaten by a parked reader without looper flags, which re-checked
 /// thread_has_work, found itself ineligible and went back to sleep — the
 /// queued txn then sat on the proc todo while eligible workers slept on.
-fn wake_proc_one(p: &Arc<BinderProc>) {
+///
+/// sc161: `prefer_tgid` (0 = any) — when the posted work aims at a node
+/// registered by a forked appspawn child (reg_tgid), prefer waking a
+/// thread of THAT child: the proc mixes the daemon's OS_IPC readers with
+/// all children's threads, and a daemon reader that wins the wake cannot
+/// dispatch a child stub (its ProcessSkeleton has no such object — the
+/// sc156 AMS→child black hole). The read-side ownership gate
+/// (work_readable_by) is the backstop; this is the routing hint.
+fn wake_proc_one(p: &Arc<BinderProc>, prefer_tgid: u32) {
     let w = world_lock();
     // SAFETY: read-only scan under WORLD.
-    let pick = unsafe {
+    let mut pick = unsafe {
         pm(w.as_ref().unwrap(), p)
             .im()
             .threads
             .iter()
-            .find(|t| {
+            .filter(|t| {
                 let th = t.st();
                 th.waiting_for_proc_work
                     && th.todo.is_empty()
@@ -1133,9 +1149,14 @@ fn wake_proc_one(p: &Arc<BinderProc>) {
                     && (th.looper & (LOOPER_ENTERED | LOOPER_REGISTERED)) != 0
             })
             .cloned()
+            .collect::<Vec<_>>()
     };
     drop(w);
-    if let Some(t) = pick {
+    if let Some(t) = if prefer_tgid != 0 {
+        pick.iter().position(|t| t.tgid == prefer_tgid).map(|i| pick.remove(i))
+    } else {
+        if !pick.is_empty() { Some(pick.remove(0)) } else { None }
+    } {
         wake_thread(&t);
     }
 }
@@ -1395,7 +1416,7 @@ pub fn binder_close(file: &crate::fs::File) -> i32 {
     }
     drop(proc);
     for p in wake_targets {
-        wake_proc_one(&p);
+        wake_proc_one(&p, 0);
     }
     0
 }
@@ -1644,7 +1665,7 @@ pub fn binder_task_died(dying_pid: u32, dying_tgid: u32, dying_tid: u32) {
         }
     }
     for p in wakes {
-        wake_proc_one(&p);
+        wake_proc_one(&p, 0);
     }
 }
 
@@ -1705,19 +1726,25 @@ pub fn binder_mmap_handler(
     vma_flags.insert(VmaFlags::READ);
     vma_flags.insert(VmaFlags::WRITE);
     vma_flags.insert(VmaFlags::SHARED);
-    // sc157 (Session R): Linux binder_mmap sets VM_DONTCOPY on the VMA —
-    // forked children never inherit the binder buffer mapping. Rux copied
-    // the SHARED VMA (same physical pages) into every appspawn child, so
-    // the children happily reused the DAEMON's binder fd + buffers: every
-    // child transaction was stamped from the daemon's proc (APPTXN "from
-    // pid=330 comm='m.ohos.systemui'"), and binder NODES the children
-    // registered (their IAppScheduler) were owned by the daemon's proc —
-    // AMS's ScheduleStartAbility calls to a child land on the shared
-    // proc's todo where the daemon's reader threads compete with the
-    // child's. On Linux the child faults on the stale VA and re-opens
-    // /dev/binder (per-open proc, own pid). Replicating VM_DONTCOPY
-    // forces the same path here.
-    vma_flags.insert(VmaFlags::DONTFORK);
+    // sc157 stamped VM_DONTCOPY here (Linux binder_mmap parity) so forked
+    // children lose the buffer mapping and "must open the device
+    // themselves". sc159/sc160 falsified the premise for THIS userspace:
+    // OH's appspawn DAEMON initializes the binder singleton pre-fork (the
+    // ace_adapter PreloadModule -> Rosen DisplayManagerAdapter -> IPC
+    // chain), and the forked children inherit BinderConnector::instance_
+    // (a plain C++ singleton, no fork/pid guard anywhere in
+    // foundation/communication/ipc) — they NEVER re-open /dev/binder.
+    // With the mapping dropped, every child's first reply-parcel read
+    // derefs the stale daemon buffer VA (BR_REPLY carries
+    // alloc.user_base + offset; sc160: cr2 0x7ff099f1d110 inside the
+    // daemon proc-11 buffer) and the whole launcher cohort dies in a
+    // crash-retry loop (681 SIGSEGV reports in sc159). Internal choice
+    // (external binder ABI unchanged): inherit the buffer as SHARED
+    // pages at fork — pre-sc157 behavior — while the sc157 reg_tgid
+    // stamp plus child-tgid transaction routing (sc161) keep AMS->child
+    // deliveries out of the daemon's reader threads. The DONTFORK
+    // machinery in mm fork stays (unused by binder now) for future
+    // Linux-parity work if OH ever grows a fork-safe IPC layer.
 
     // ATOMIC pick + reserve (b91 heap-corruption fix): the old shape ran
     // find_free_area on a READ lock, then spent the 4 MiB memset + eager
@@ -2808,7 +2835,7 @@ pub fn stall_report() {
         wake_thread(&t);
     }
     for p in retodo {
-        wake_proc_one(&p);
+        wake_proc_one(&p, 0);
     }
     // ---- sc89: slow forensics + output, all with irqs on, WORLD free ----
     use core::fmt::Write;
@@ -2953,7 +2980,7 @@ fn binder_ioctl(file: &crate::fs::File, request: u32, arg: usize) -> i64 {
             match existing {
                 Some(t) => t,
                 None => {
-                    let t = Arc::new(BinderThread::new(tid));
+                    let t = Arc::new(BinderThread::new(tid, crate::process::current_pid() as u32));
                     pm(world, &proc).im().threads.push(t.clone());
                     t
                 }
@@ -3091,7 +3118,7 @@ fn binder_ioctl(file: &crate::fs::File, request: u32, arg: usize) -> i64 {
                 // Wake outside WORLD (lock discipline; see binder_close).
                 drop(w);
                 for p in wakes {
-                    wake_proc_one(&p);
+                    wake_proc_one(&p, 0);
                 }
             }
             0
@@ -3578,7 +3605,7 @@ fn binder_thread_write(
                         }
                     }
                     if let Some(tp) = drain_wake {
-                        wake_proc_one(&tp);
+                        wake_proc_one(&tp, 0);
                     }
                 }
             }
@@ -3722,7 +3749,7 @@ fn binder_thread_write(
                     }
                 }
                 if let Some(owner) = wake_owner {
-                    wake_proc_one(&owner);
+                    wake_proc_one(&owner, 0);
                 }
             }
             BC_INCREFS_DONE | BC_ACQUIRE_DONE => {
@@ -4561,6 +4588,10 @@ fn binder_transaction(
     }
 
     let mut wakes: Vec<Arc<BinderProc>> = Vec::new();
+    // sc161: child-routed wakes — (proc, child tgid) for transactions
+    // aimed at forked-child nodes; wake_proc_one prefers that child's
+    // threads so the delivery is not eaten by the daemon's readers.
+    let mut wakes_child: Vec<(Arc<BinderProc>, u32)> = Vec::new();
     // Threads to wake directly (thread-targeted delivery).
     let mut wake_ths: Vec<Arc<BinderThread>> = Vec::new();
     // BC_REPLY whose originating thread vanished: fail after WORLD is
@@ -4686,7 +4717,18 @@ fn binder_transaction(
                             }
                         }
                     }
-                    wakes.push(target.clone());
+                    // sc161: oneway to a child-registered node — route the
+                    // wake to the child's own threads.
+                    let pref = target_node
+                        .as_ref()
+                        .map(|n| n.reg_tgid)
+                        .filter(|&g| g != 0 && g != target.pid)
+                        .unwrap_or(0);
+                    if pref != 0 {
+                        wakes_child.push((target.clone(), pref));
+                    } else {
+                        wakes.push(target.clone());
+                    }
                 }
                 // The async buffer keeps its txn alive for the node-slot
                 // release at BC_FREE_BUFFER (parked ones for close cleanup).
@@ -4780,7 +4822,19 @@ fn binder_transaction(
                 } else {
                     pm(world, &target).im().todo.push_back(Work::Transaction(txn.clone()));
                     thread.hist(EV_TXN_PQUEUED, txn.id as u32, target.pid);
-                    wakes.push(target.clone());
+                    // sc161: sync txn queued on the proc todo — if the
+                    // target node belongs to a forked child, prefer that
+                    // child's threads for the wake.
+                    let pref = target_node
+                        .as_ref()
+                        .map(|n| n.reg_tgid)
+                        .filter(|&g| g != 0 && g != target.pid)
+                        .unwrap_or(0);
+                    if pref != 0 {
+                        wakes_child.push((target.clone(), pref));
+                    } else {
+                        wakes.push(target.clone());
+                    }
                 }
             }
         }
@@ -4794,7 +4848,10 @@ fn binder_transaction(
         wake_thread(&t);
     }
     for p in wakes {
-        wake_proc_one(&p);
+        wake_proc_one(&p, 0);
+    }
+    for (p, g) in wakes_child {
+        wake_proc_one(&p, g);
     }
 }
 
@@ -5027,7 +5084,7 @@ fn translate_object(sender: &Arc<BinderProc>, obj: &mut FlatBinderObject, target
         }
     };
     if let Some(owner) = wake_owner {
-        wake_proc_one(&owner);
+        wake_proc_one(&owner, 0);
     }
     result
 }
@@ -5080,6 +5137,25 @@ unsafe fn get_or_create_ref(
 
 /// has_work under WORLD (the wait_event condition).
 /// SAFETY: caller holds WORLD.
+/// sc161 child-tgid ownership: may THIS thread (of `tgid`) consume the
+/// given proc-todo work item? A transaction aimed at a node registered by
+/// a forked child (reg_tgid set and != owner pid) belongs to that child's
+/// threads only — the daemon's own reader threads must leave it queued or
+/// every AMS→child delivery is stolen and dies in the daemon's
+/// ProcessSkeleton lookup (the sc156 park).
+/// SAFETY: caller must hold WORLD (reads txn target nodes).
+unsafe fn work_readable_by(w: &Work, tgid: u32, proc: &BinderProc) -> bool {
+    match w {
+        Work::Transaction(t) => match t.target_node.as_ref() {
+            Some(n) => n.reg_tgid == 0 || n.reg_tgid == proc.pid || n.reg_tgid == tgid,
+            // Replies never sit on the proc todo (thread-targeted), but
+            // treat any such item as unowned rather than blocking it.
+            None => true,
+        },
+        _ => true,
+    }
+}
+
 unsafe fn thread_has_work(world: &World, proc: &Arc<BinderProc>, thread: &Arc<BinderThread>) -> bool {
     let th = thread.st();
     // Own todo non-empty = binder_has_thread_work (Linux): covers work
@@ -5091,7 +5167,13 @@ unsafe fn thread_has_work(world: &World, proc: &Arc<BinderProc>, thread: &Arc<Bi
     }
     let avail_for_proc = th.txn_stack.is_empty()
         && (th.looper & (LOOPER_ENTERED | LOOPER_REGISTERED)) != 0;
-    avail_for_proc && !pm(world, proc).im().todo.is_empty()
+    // sc161: only items this thread OWNS count as work for it (child-tgid
+    // routing) — otherwise a daemon reader sees "work available", pops,
+    // and would steal a child's transaction (or spin on requeue).
+    avail_for_proc && {
+        let pim = pm(world, proc);
+        pim.im().todo.iter().any(|w| work_readable_by(w, thread.tgid, pim))
+    }
 }
 
 fn binder_thread_read(
@@ -5197,7 +5279,21 @@ fn binder_thread_read(
                     let work = if from_thread {
                         thread.st().todo.pop_front()
                     } else if avail_for_proc && !pm(world, proc).im().todo.is_empty() {
-                        pm(world, proc).im().todo.pop_front()
+                        // sc161 child-tgid routing: take the FIRST item
+                        // this thread owns; leave child-aimed transactions
+                        // (reg_tgid != this tgid) queued for their child
+                        // instead of stealing them into the daemon's
+                        // ProcessSkeleton dead-end.
+                        let pim = pm(world, proc);
+                        match pim
+                            .im()
+                            .todo
+                            .iter()
+                            .position(|w| work_readable_by(w, thread.tgid, pim))
+                        {
+                            Some(i) => pim.im().todo.remove(i),
+                            None => None,
+                        }
                     } else {
                         None
                     };
