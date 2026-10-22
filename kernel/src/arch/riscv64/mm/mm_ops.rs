@@ -826,6 +826,14 @@ impl MmStruct {
                             addr,
                         );
                     }
+                    // PCACHE mapping (filemap_fault, riscv64 port): drop
+                    // this mapping's page-cache pin AFTER the descriptor
+                    // put inside release_user_leaf — the pin's release may
+                    // free an invalidated frame, so every reference must
+                    // be gone by then (x86_64 twin ordering).
+                    if pte_bits & cow_flags::PCACHE != 0 {
+                        release_cache_mapping_pin(ppn_val as usize);
+                    }
                 }
                 // SAFETY: addr is a valid, page-aligned virtual address in this address space,
                 // and its reverse mapping has just been removed above.
@@ -908,6 +916,11 @@ impl MmStruct {
                     ppn_val as usize,
                     va,
                 );
+            }
+            // PCACHE mapping: drop the pin after the descriptor put (same
+            // ordering as unmap_pages; x86_64 twin).
+            if pte_bits & cow_flags::PCACHE != 0 {
+                release_cache_mapping_pin(ppn_val as usize);
             }
         }
         // SAFETY: `va` was just verified as a mapped user leaf.
@@ -1786,6 +1799,44 @@ pub unsafe fn alloc_and_map_to_user_table(
 pub mod cow_flags {
     /// COW flag - page is marked as copy-on-write
     pub const COW: u64 = 1 << 8;  // Use bit 8 (after A and D)
+
+    /// This PTE maps a PAGE-CACHE frame directly (mm filemap_fault, riscv64
+    /// port of the x86_64 session-23 fix) and OWNS one page-cache pin
+    /// (`CachedPage.ref_count`) plus one page-descriptor reference for its
+    /// mapping lifetime. Sv39 RSW bit 1, beside the COW bit (RSW bit 0).
+    /// Carried through mprotect rewrites and PROT_NONE markers like COW;
+    /// dropped (with the matching `page_cache::put_by_key`) at unmap, mm
+    /// teardown, and the COW break; duplicated (with `pin_by_key` +
+    /// get_page) by the fork walk. Distinguishes pin-owning PRIVATE
+    /// mappings from MAP_SHARED cache aliases, whose fault-time pin is
+    /// deliberately permanent.
+    pub const PCACHE: u64 = 1 << 9; // RSW bit 1
+}
+
+/// Drop the page-cache pin owned by ONE mapping of a cache-backed frame
+/// (the PTE carried `cow_flags::PCACHE`; x86_64 twin in the x86 mm_ops).
+/// The descriptor's mapping/index fields carry the page-cache eviction
+/// keys (set by cache insert); this must run AFTER the descriptor's
+/// `put_page_site` so the frame's refcount is already back at the cache's
+/// base reference before the pin drop — which may release and free an
+/// invalidated entry — decides the frame's fate. No-op when the cache
+/// entry is already gone (floored put discipline, R14-16).
+pub(super) fn release_cache_mapping_pin(ppn: usize) {
+    use crate::mm::page_desc::pfn_to_page_mut;
+    let page = pfn_to_page_mut(ppn);
+    if page.is_null() {
+        return;
+    }
+    // SAFETY: descriptor of a live frame that was mapped until this unmap;
+    // mapping/index are only cleared by the cache's own release path, which
+    // cannot run while a pin (held until this call) exists.
+    unsafe {
+        let key = (*page).mapping() as u64;
+        let index = (*page).index() as u64;
+        if key != 0 {
+            crate::fs::page_cache::get_page_cache().put_by_key(key, index);
+        }
+    }
 }
 
 /// Copy page table with COW marking
@@ -1964,6 +2015,25 @@ pub unsafe fn copy_page_table_cow(
                     let page = pfn_to_page_mut(phys_ppn);
 
                     if !page.is_null() {
+                        // PCACHE leaf (filemap_fault, riscv64 port): the
+                        // child's copy owns its own pin — without this, the
+                        // parent's unmap would drop the LAST pin and
+                        // eviction could free a frame the child still maps
+                        // (x86_64 twin).
+                        if pte0.bits() & cow_flags::PCACHE != 0 {
+                            let key = (*page).mapping() as u64;
+                            let index = (*page).index() as u64;
+                            if !crate::fs::page_cache::get_page_cache()
+                                .pin_by_key(key, index)
+                            {
+                                // Entry vanished while a pin existed —
+                                // cache/frame bookkeeping drift. The
+                                // mapping still works (frame is pinned by
+                                // the parent's not-yet-dropped pin); the
+                                // child's write takes the normal COW copy
+                                // path either way (the leaf carries COW).
+                            }
+                        }
                         // Increment refcount for shared user pages (one ref per sharer)
                         let after = (*page).get_page();
                         (*page).inc_mapcount();
@@ -2121,9 +2191,20 @@ pub unsafe fn handle_cow_fault(
     // leaf produces SV39's reserved encoding (V=1,R=0,W=1): every retry
     // faults forever instead of raising SIGSEGV (fault-path livelock).
     if refcount <= 1 {
+        // PCACHE leaf reaching the exclusive arm means the cache entry is
+        // gone (frames mapped by the cache always carry the cache's base
+        // refcount, so a live entry keeps refcount >= 2 — x86 twin). The
+        // leaf must NOT keep the PCACHE bit while gaining W in place; the
+        // pin drop is a no-op when the entry already vanished.
+        let pcache = old_bits & cow_flags::PCACHE;
         let new_pte = PageTableEntry::from_bits(
-            (old_bits & !cow_flags::COW) | PageTableEntry::W | PageTableEntry::R
+            (old_bits & !(cow_flags::COW | cow_flags::PCACHE))
+                | PageTableEntry::W
+                | PageTableEntry::R,
         );
+        if pcache != 0 {
+            release_cache_mapping_pin(old_ppn as usize);
+        }
 
         // R7-C9: the page is exclusively owned now — clear the descriptor
         // flag too, or stats/invariants see "COW set with refcount 1".
@@ -2218,6 +2299,15 @@ pub unsafe fn handle_cow_fault(
             old_ppn as usize,
             crate::process::current_pid() as u32,
         );
+    }
+
+    // PCACHE old leaf (filemap_fault private mapping, riscv64 port): the
+    // mapping moved to the private copy — this mapping's cache pin goes
+    // with it. Same put-after-descriptor-put ordering as unmap_pages
+    // (x86_64 twin). The new PTE above deliberately rebuilds from the
+    // protection bits only, so it carries no PCACHE bit.
+    if old_bits & cow_flags::PCACHE != 0 {
+        release_cache_mapping_pin(old_ppn as usize);
     }
 
     // Set up reverse mapping for the new COW page
