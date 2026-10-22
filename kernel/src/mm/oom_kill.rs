@@ -353,17 +353,31 @@ pub fn out_of_memory(oc: &mut OomControl) -> bool {
 
 // ==================== pagefault OOM policy ====================
 
-/// Per-task OOM-fault strike table (fake-OOM family). A task that keeps
-/// page-faulting into an empty zone gets a strike per event; 3 strikes
-/// without recovery = the task itself dies (the global killer had its
-/// chances). Fixed table keyed by pid — pid reuse can inherit stale
-/// strikes, acceptable at this diagnostic granularity (a fresh task gets
-/// 3 OOM faults of grace at worst).
+/// Per-task OOM-fault strike table (fake-OOM family). A strike is burned
+/// only when the task CONSUMES a global kill attempt (a kill window it
+/// won) and the zone still drains its faults afterwards; 3 strikes = the
+/// task itself dies (the global killer had its chances). Retries inside
+/// another kill's 1 s window are free — that window exists exactly so a
+/// killed victim's asynchronous exit can free pages while the faulting
+/// task re-executes. Fixed table keyed by pid — pid reuse can inherit
+/// stale strikes; bounded by the episode reset (a quiet stretch of
+/// EPISODE_RESET_JIFFIES clears them, so grace is per-OOM-episode, not
+/// per-process-lifetime).
 static STRIKES: Spinlock<[(u32, u32); 16]> = Spinlock::new([(0, 0); 16]);
 
-/// Rate limit for global kills from the fault path: one per 100 jiffies
-/// (1 s at 100 Hz) — a fault storm must not kill every hog at once while
-/// the first victim's memory has not even freed yet.
+/// Strike-out threshold: kills consumed on the task's behalf without the
+/// zone recovering.
+const MAX_FAULT_STRIKES: u32 = 3;
+
+/// One global kill per this many jiffies (1 s at 100 Hz) — a fault storm
+/// must not kill every hog at once while the first victim's memory has
+/// not even freed yet.
+const KILL_WINDOW_JIFFIES: u64 = 100;
+
+/// Quiet stretch that ends an OOM episode: strikes from a previous
+/// episode no longer count (10 s at 100 Hz).
+const EPISODE_RESET_JIFFIES: u64 = 1000;
+
 static LAST_FAULT_KILL: core::sync::atomic::AtomicU64 =
     core::sync::atomic::AtomicU64::new(0);
 
@@ -376,13 +390,41 @@ static LAST_FAULT_KILL: core::sync::atomic::AtomicU64 =
 /// victim's memory frees asynchronously and the retry usually succeeds.
 ///
 /// Returns FALSE when the faulting task itself must die:
-/// - it already struck out (3 OOM faults without recovery), or
+/// - it struck out (3 consumed kills without recovery), or
 /// - no victim was killable (nothing to wait for).
-/// Returns TRUE when the task should retry (a victim was killed, or a
-/// recent global kill is still in flight and worth retrying against).
+/// Returns TRUE when the task should retry (it consumed a kill, a recent
+/// global kill is still in flight, or another CPU just won a kill window).
 pub fn fault_oom_kill_or_retry(pid: u32) -> bool {
-    // Strike accounting (short critical section; OOM_LOCK is NOT held —
-    // out_of_memory below takes it after this releases).
+    let now = crate::drivers::timer::get_jiffies();
+    let last = LAST_FAULT_KILL.load(core::sync::atomic::Ordering::Relaxed);
+
+    // Retry window: a recent kill's victim is still exiting — retry for
+    // free (no strike: the whole point of the window is to let its pages
+    // come back while this task re-executes).
+    if now.saturating_sub(last) < KILL_WINDOW_JIFFIES {
+        return true;
+    }
+
+    // Claim the next kill window (one global kill per window across all
+    // CPUs). Losing the race means somebody else's kill is now in flight
+    // — retry for free.
+    if LAST_FAULT_KILL
+        .compare_exchange(
+            last,
+            now,
+            core::sync::atomic::Ordering::AcqRel,
+            core::sync::atomic::Ordering::Relaxed,
+        )
+        .is_err()
+    {
+        return true;
+    }
+
+    // We own a kill attempt — THIS is what burns a strike (short critical
+    // section; OOM_LOCK is NOT held — out_of_memory below takes it after
+    // this releases). A quiet stretch since the last kill marks a new
+    // episode: stale strikes from an earlier one no longer count.
+    let fresh_episode = now.saturating_sub(last) > EPISODE_RESET_JIFFIES;
     let struck_out = {
         let mut table = STRIKES.lock();
         let mut slot = table.iter_mut().find(|(p, _)| *p == pid);
@@ -391,9 +433,12 @@ pub fn fault_oom_kill_or_retry(pid: u32) -> bool {
         }
         match slot {
             Some(entry) => {
+                if fresh_episode {
+                    *entry = (pid, 0);
+                }
                 entry.0 = pid;
                 entry.1 += 1;
-                if entry.1 >= 3 {
+                if entry.1 >= MAX_FAULT_STRIKES {
                     // Strike out. Clear so a recycled pid starts fresh.
                     *entry = (0, 0);
                     true
@@ -408,12 +453,38 @@ pub fn fault_oom_kill_or_retry(pid: u32) -> bool {
         return false;
     }
 
-    // Rate-limited global kill attempt.
+    let mut totalpages = 0u64;
+    // SAFETY: diagnostic read-only node access.
+    if let Some(node) = unsafe { crate::mm::pglist::first_online_node() } {
+        for zt in [
+            crate::mm::zone::ZoneType::ZoneNormal,
+            crate::mm::zone::ZoneType::ZoneDma32,
+            crate::mm::zone::ZoneType::ZoneDma,
+        ] {
+            if let Some(zone) = node.zone(zt) {
+                if zone.is_initialized() {
+                    totalpages += zone.managed_pages() as u64;
+                }
+            }
+        }
+    }
+    if totalpages == 0 {
+        return false;
+    }
+    let mut oc = OomControl::new(totalpages, 0, 0);
+    out_of_memory(&mut oc)
+}
+
+/// Kernel-mode pagefault OOM (riscv64 twin of the x86_64 panic arm): the
+/// faulting context cannot do_exit, and silently re-executing would
+/// livelock. Rate-limited global kill attempt so the retry loop has a
+/// memory source; returns false when NOTHING is killable (the caller
+/// panics loudly — matching the x86_64 kernel-mode policy).
+pub fn kernel_fault_oom_kill() -> bool {
     let now = crate::drivers::timer::get_jiffies();
     let last = LAST_FAULT_KILL.load(core::sync::atomic::Ordering::Relaxed);
-    if now.saturating_sub(last) < 100 {
-        // A recent kill is still freeing memory — retry against it.
-        return true;
+    if now.saturating_sub(last) < KILL_WINDOW_JIFFIES {
+        return true; // a kill is in flight; its pages may serve the retry
     }
     if LAST_FAULT_KILL
         .compare_exchange(
@@ -424,9 +495,8 @@ pub fn fault_oom_kill_or_retry(pid: u32) -> bool {
         )
         .is_err()
     {
-        return true; // another CPU just killed; retry
+        return true;
     }
-
     let mut totalpages = 0u64;
     // SAFETY: diagnostic read-only node access.
     if let Some(node) = unsafe { crate::mm::pglist::first_online_node() } {

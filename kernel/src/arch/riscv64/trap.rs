@@ -1104,6 +1104,18 @@ fn handle_page_fault(regs: &mut PtRegs, access_type: u32) {    use crate::arch::
                 // true: fall through — returning to userspace re-executes
                 // the faulting instruction; the victim's freed pages serve
                 // the retry.
+            } else {
+                // Kernel mode cannot do_exit, and silently re-executing
+                // would livelock. Give the rate-limited global killer the
+                // chance to free memory for the retry; if nothing is
+                // killable there is no memory source left — die loudly
+                // (the x86_64 twin's kernel-mode policy).
+                if !crate::mm::oom_kill::kernel_fault_oom_kill() {
+                    panic!(
+                        "pagefault: OOM in kernel mode at {:#x}, epc={:#x}",
+                        fault_addr, regs.epc
+                    );
+                }
             }
         }
         MmFaultResult::KernelPanic => {
