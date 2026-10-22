@@ -565,10 +565,30 @@ pub fn rust_main_tail() -> ! {
         #[cfg(feature = "x86_64")]
         {
             let ok = drivers::timer::hpet::init();
+            // sc109: the launcher's vDSO-less clock_gettime path paid an
+            // HPET MMIO VM exit per call and burned its whole 3 s appspawn
+            // watchdog (stime focus histogram: hpet driver page). The
+            // TSC timekeeper removes that. sc114 verified: 0 u32-us
+            // wraps, 0 watchdog kills, and the FIRST EVER successful
+            // launcher spawns (3x result:0). sc110-114's "~25 s step"
+            // was the shift-12 ceil rounding running the mapping 4.796%
+            // fast (crossing the 25 s resync threshold at uptime
+            // 522.17 s, deterministic) — fixed by TSC_MULSHIFT=32 +
+            // nearest rounding. DEFAULT ON; `tscclk=0` opts back into
+            // the pure-HPET clocksource for A/B.
+            let tsc_clk = ok
+                && crate::cmdline::get_param("tscclk")
+                    .map(|v| v != "0")
+                    .unwrap_or(true)
+                && drivers::timer::hpet::calibrate_tsc();
             print_status(
                 "timer",
                 if ok {
-                    "HPET clocksource (virtual-clock exact)"
+                    if tsc_clk {
+                        "HPET-calibrated TSC timekeeper (no MMIO per read)"
+                    } else {
+                        "HPET clocksource (virtual-clock exact)"
+                    }
                 } else {
                     "HPET absent — calibrated-TSC timebase"
                 },

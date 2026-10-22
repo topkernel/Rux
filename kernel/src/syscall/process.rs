@@ -49,7 +49,32 @@ pub fn sys_clone(args: SyscallArgs) -> i64 {
     // Linux refuses clone with ENOMEM before exhausting the last of its
     // allocator (musl maps that to EAGAIN for pthread_create callers —
     // the graceful "unable to create more threads" path).
+    //
+    // sc116 probe: every OH app child (launcher/settingsdata/systemui)
+    // ends up SINGLE-THREADED with the main thread parked in a private
+    // stack futex — the shape of a runtime whose FIRST pthread_create
+    // failed silently and now waits forever for a worker that was never
+    // born. If the 1 GiB OH boot drains the buddy heap under the 8 MiB
+    // reserve mid-boot (the fake-OOM family), this gate refuses EVERY
+    // thread from then on with no trace. Name each refusal (budgeted):
+    // errno + free_bytes + comm is one line and settles gate-vs-other.
     if clone_heap_reserve_low() {
+        static N: core::sync::atomic::AtomicUsize =
+            core::sync::atomic::AtomicUsize::new(0);
+        if N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 40 {
+            let st = crate::mm::buddy_allocator::buddy_stats();
+            let comm = crate::sched::current()
+                .map(|t| unsafe { (*t).comm() })
+                .map(|c| core::str::from_utf8(c).unwrap_or(""))
+                .unwrap_or("")
+                .trim_end_matches('\0');
+            crate::pr_warn!(
+                "clone-gate: ENOMEM comm='{}' free={}/{} bytes",
+                comm,
+                st.free_bytes,
+                st.heap_size
+            );
+        }
         return -(errno::ENOMEM as i64);
     }
 
@@ -90,7 +115,23 @@ pub fn sys_clone(args: SyscallArgs) -> i64 {
 
     match do_clone(clone_args) {
         Ok(pid) => pid as i64,
-        Err(e) => e as i64,
+        Err(e) => {
+            // sc116 probe (see the reserve-gate comment): any other
+            // clone failure is equally invisible to the taskdump — the
+            // caller's runtime often ignores pthread_create errors and
+            // parks on a rendezvous that never completes.
+            static N2: core::sync::atomic::AtomicUsize =
+                core::sync::atomic::AtomicUsize::new(0);
+            if N2.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 40 {
+                let comm = crate::sched::current()
+                    .map(|t| unsafe { (*t).comm() })
+                    .map(|c| core::str::from_utf8(c).unwrap_or(""))
+                    .unwrap_or("")
+                    .trim_end_matches('\0');
+                crate::pr_warn!("clone-fail: errno {} comm='{}'", -(e as i32), comm);
+            }
+            e as i64
+        }
     }
 }
 

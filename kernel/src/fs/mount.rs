@@ -25,9 +25,22 @@ static MOUNT_TABLE: Spinlock<Vec<(String, String, String, String)>> = Spinlock::
 /// Register a mount in the current mount namespace AND the global registry.
 /// U1c: callers in a private (CLONE_NEWNS) namespace only mutate their own
 /// table; the global registry stays the init-namespace baseline.
+/// sc98: that contract is now ENFORCED — private-namespace mounts (OH
+/// appspawn children's ~50 sandbox binds per spawn) used to push a row
+/// into the global table too, where the O(rows) retain() per register
+/// made every later mount slower while the launcher restart loop pumped
+/// thousands of dead rows in.
+/// sc115/sc116: the irqsave discipline is dropped for a plain preempt-off
+/// lock. Every user is syscall context (mount/umount/procfs reads) — no
+/// IRQ-context consumer exists — but the guarded section runs an O(rows)
+/// STRING retain (per-byte compare loop) plus four heap allocations, and
+/// under allocator contention that section was measured as a >=1 s cli
+/// window (WW IRQ-OFF-WINDOW samples landing in atomic_load<u8> string
+/// compares; one boot printed 637 >=100 ms inter-tick gaps). The ns.rs
+/// namespace tables already use plain .lock(); MOUNT_TABLE now matches.
 pub fn register_mount(device: &str, mount_point: &str, fs_type: &str, flags: &str) {
-    {
-        let mut table = MOUNT_TABLE.lock_irqsave();
+    if crate::process::ns::in_init_mnt_ns() {
+        let mut table = MOUNT_TABLE.lock();
         table.retain(|(_, mp, _, _)| mp != mount_point);
         table.push((
             String::from(device),
@@ -46,7 +59,7 @@ pub fn get_global_mounts() -> Vec<(String, String, String, String)> {
     // Always include rootfs (registered before allocator is fully stable)
     result.push((String::from("rootfs"), String::from("/"), String::from("rootfs"), String::from("rw")));
     // Add dynamically registered mounts
-    let table = MOUNT_TABLE.lock_irqsave();
+    let table = MOUNT_TABLE.lock();
     for (d, m, f, fl) in table.iter() {
         result.push((d.clone(), m.clone(), f.clone(), fl.clone()));
     }

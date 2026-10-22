@@ -282,7 +282,12 @@ pub fn sys_openat(args: SyscallArgs) -> i64 {
     // sc36: also resolve the path OURSELVES and print the inode — the
     // walk trails were silent for the failing opens, so the ENOENT is
     // post-lookup; name what the lookup found.
-    if full_path.starts_with("/dev/") {
+    // sc109/sc112: these lines fire in the LAUNCHER's own context and
+    // drain to the busy-poll UART (~87us/byte charged as launcher
+    // stime) — `sprobe=0` silences both prints, counters stay.
+    if full_path.starts_with("/dev/")
+        && crate::cmdline::get_param("sprobe").map(|v| v != "0").unwrap_or(true)
+    {
         let root = crate::sched::current()
             .and_then(|t| unsafe { (*t).fs_arc() })
             .map(|fs| fs.get_root())
@@ -1770,7 +1775,44 @@ pub fn sys_umask(args: SyscallArgs) -> i64 {
 /// sys_mount - Mount a filesystem (syscall 40)
 ///
 /// mount(source, target, filesystemtype, mountflags, data)
+/// sys_mount(2) — instrumented shell (sc112 execution item 3): appspawn
+/// logs "mount X time ~13-15ms avg" per sandbox bind while sc99's kernel
+/// breakdown measured vfs_bind_mount at 40-80us — a 160x gap. This
+/// wrapper times the WHOLE syscall (string copies, target path_lookup,
+/// bind/clone, registry update) with RDTSC and prints one line per call
+/// over 2 ms so the missing time gets attributed. `sprobe=0` silences
+/// (the print lands on the busy-poll UART in the child's stime).
 pub fn sys_mount(args: SyscallArgs) -> i64 {
+    let t0 = crate::arch::cpu::read_counter();
+    let r = sys_mount_inner(args);
+    if crate::cmdline::get_param("sprobe").map(|v| v != "0").unwrap_or(true) {
+        let dt = crate::arch::cpu::read_counter().saturating_sub(t0);
+        // >2 ms at a ~2.5 GHz TSC. TSC_CYCLES_PER_MS would be nicer but
+        // the timer lane owns the calibration; 5M cycles is a floor that
+        // only real stalls cross (normal mounts are 40-100us).
+        if dt > 5_000_000 {
+            static N: core::sync::atomic::AtomicUsize =
+                core::sync::atomic::AtomicUsize::new(0);
+            if N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 120 {
+                let comm = crate::sched::current()
+                    .map(|t| unsafe { (*t).comm() })
+                    .map(|c| core::str::from_utf8(c).unwrap_or(""))
+                    .unwrap_or("")
+                    .trim_end_matches('\0');
+                crate::pr_warn!(
+                    "mntslow: {} cyc (~{} us) comm='{}' -> {}",
+                    dt,
+                    dt / 2500,
+                    comm,
+                    r
+                );
+            }
+        }
+    }
+    r
+}
+
+fn sys_mount_inner(args: SyscallArgs) -> i64 {
     // Linux order: copy source (EFAULT on a bad pointer — LTP mount03
     // "EFAULT for filesystemtype/source" cases) BEFORE capability checks
     // on the strings; CAP_SYS_ADMIN gates the actual mount.

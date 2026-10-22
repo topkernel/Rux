@@ -14,6 +14,34 @@ use crate::fs::io_completion::IoCompletion;
 use crate::fs::page_cache;
 use crate::fs::readahead::ReadAheadState;
 
+// ============================================================================
+// sc105: demand-fault read attribution counters
+// ============================================================================
+//
+// The OH launcher child burns its whole 3 s life in kernel time with the
+// prime suspect being per-fault synchronous ext4 fills (no fault-around).
+// Count page-shaped positional reads (the mmap demand-fault signature),
+// their total service time, and cache-miss fills — KILLDUMP prints these
+// alongside utime/stime so the burn is attributed, not guessed.
+
+static FAULT_READS: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static FAULT_MISSES: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static FAULT_CYCLES: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+/// Incremented in the miss branch of ext4_file_read_cached_dst (all fills).
+pub(crate) static FAULT_FILL_MISSES: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+
+/// Snapshot (reads, misses, cycles) for KILLDUMP.
+pub fn demand_read_stats() -> (u64, u64, u64, u64) {
+    use core::sync::atomic::Ordering::Relaxed;
+    (
+        FAULT_READS.load(Relaxed),
+        FAULT_MISSES.load(Relaxed),
+        FAULT_CYCLES.load(Relaxed),
+        FAULT_FILL_MISSES.load(Relaxed),
+    )
+}
+
 pub fn ext4_file_read(
     fs: &crate::fs::ext4::Ext4FileSystem,
     inode: &crate::fs::ext4::inode::Ext4Inode,
@@ -270,9 +298,31 @@ fn ext4_file_read_cached_dst(
         // write path's invalidate already fences stale entries.
         let _ext4_guard = crate::fs::ext4::EXT4_BIG_LOCK.lock_fair();
         let seq_contd = offset == ra_state.last_read_end || ra_state.active;
+        if demand_pages == 1 && offset % block_size == 0 {
+            // Page-shaped miss (mmap demand-fault signature) — see the
+            // fault-around window below; counted for KILLDUMP attribution.
+            FAULT_MISSES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        }
         let window = if seq_contd || offset == 0 {
             core::cmp::max(demand_pages, crate::fs::readahead::MAX_READAHEAD_BLOCKS as u64)
+        } else if demand_pages == 1 && offset % block_size == 0 {
+            // sc105 fault-around: a single page-aligned one-page read is
+            // the mmap demand-fault signature (the fault path preads
+            // exactly PAGE_SIZE at a page boundary). Dynamic-linker fault
+            // order interleaves segments (.text/.rodata/.got/.data), which
+            // reads as random to the sequential detector above — every
+            // miss then filled ONE page synchronously (sleep/wake + big
+            // lock + run of ~25k faults on ~100 MB of ArkUI libs burned
+            // the launcher's whole 3 s appspawn watchdog budget in kernel
+            // time). Linux clusters mmap faults: fault-around maps 16
+            // pages around the faulting address. Fill the same 16-page
+            // cluster here — subsequent faults (interleaved or ascending)
+            // hit the cache; plain random preads only pay one extra merged
+            // device request.
+            FAULT_FILL_MISSES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            core::cmp::max(demand_pages, crate::fs::readahead::FAULT_AROUND_BLOCKS as u64)
         } else {
+            FAULT_FILL_MISSES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
             // Random seek: read only what the request needs.
             demand_pages
         };
@@ -1508,6 +1558,46 @@ pub static EXT4_FILE_OPS: FileOps = FileOps {
 /// when Some, the Arc and its contents (private_data, sb) are valid for
 /// the lifetime of the file — identical setup to ext4_file_read_vfs.
 fn ext4_file_read_at_vfs(file: &File, offset: u64, buf: &mut [u8]) -> isize {
+    // sc105 attribution: page-shaped positional reads (<= 1 page at a
+    // block boundary) are the mmap demand-fault signature. Time them so
+    // KILLDUMP can state the fault path's share of the launcher burn.
+    let fault_like = buf.len() <= crate::mm::PAGE_SIZE && offset % fs_block_size_of(file) == 0;
+    let t0 = if fault_like { fault_tsc_now() } else { 0 };
+    let ret = ext4_file_read_at_vfs_inner(file, offset, buf);
+    if fault_like {
+        use core::sync::atomic::Ordering::Relaxed;
+        FAULT_READS.fetch_add(1, Relaxed);
+        FAULT_CYCLES.fetch_add(fault_tsc_now().saturating_sub(t0), Relaxed);
+    }
+    ret
+}
+
+/// Cycle stamp for the fault-attribution timer (0 where no counter).
+#[inline]
+fn fault_tsc_now() -> u64 {
+    #[cfg(feature = "x86_64")]
+    {
+        crate::arch::x86_64::cpu::read_counter()
+    }
+    #[cfg(not(feature = "x86_64"))]
+    {
+        0
+    }
+}
+
+/// Block size of `file`'s filesystem (attribution helper above).
+fn fs_block_size_of(file: &File) -> u64 {
+    unsafe {
+        if let Some(inode) = (&*file.inode.get()).as_ref() {
+            if let Some(ptr) = inode.private_data {
+                return (*(ptr as *const crate::fs::ext4::Ext4FileSystem)).block_size as u64;
+            }
+        }
+    }
+    crate::mm::PAGE_SIZE as u64
+}
+
+fn ext4_file_read_at_vfs_inner(file: &File, offset: u64, buf: &mut [u8]) -> isize {
     unsafe {
         let inode_opt = &*file.inode.get();
         let inode = match inode_opt {
