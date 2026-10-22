@@ -833,42 +833,45 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
                     use core::fmt::Write;
                     let mut desc = alloc::string::String::new();
                     if args[1] != 0 {
-                        match crate::arch::uaccess::strncpy_from_user(
-                            args[1] as *const u8,
-                            sa.len(),
-                            &mut sa,
-                        ) {
-                            Ok(_) => {
-                                let fam = u16::from_ne_bytes([sa[0], sa[1]]);
-                                if fam == 1 {
-                                    let p = &sa[2..];
-                                    let end = p.iter().position(|c| *c == 0).unwrap_or(p.len());
-                                    if end == 0 {
-                                        // abstract socket: the name is the
-                                        // raw bytes after the leading NUL
-                                        let _ = write!(desc, "abstract:");
-                                        // sc140: 40 bytes + the caller's
-                                        // addrlen — the name may be longer
-                                        // than the old 18-byte window and
-                                        // NUL bytes are legal in abstract
-                                        // names (length IS the name).
-                                        for b in sa.iter().take(40) {
-                                            let _ = write!(desc, "{:02x}", b);
-                                        }
-                                    } else {
-                                        let _ = write!(
-                                            desc,
-                                            "{}",
-                                            core::str::from_utf8(&p[..end]).unwrap_or("<utf8>")
-                                        );
+                        // sc141: RAW copy — strncpy_from_user stops at the
+                        // first NUL, so an abstract sockaddr printed as
+                        // "all zeros" when its real name started later.
+                        let raw_ok = unsafe {
+                            crate::arch::uaccess::copy_from_user(
+                                sa.as_mut_ptr(),
+                                args[1] as *const u8,
+                                sa.len(),
+                            ) == 0
+                        };
+                        if raw_ok {
+                            let fam = u16::from_ne_bytes([sa[0], sa[1]]);
+                            if fam == 1 {
+                                let p = &sa[2..];
+                                let end = p.iter().position(|c| *c == 0).unwrap_or(p.len());
+                                if end == 0 {
+                                    // abstract socket: the name is the
+                                    // raw bytes after the leading NUL
+                                    let _ = write!(desc, "abstract:");
+                                    // sc140: 40 bytes + the caller's
+                                    // addrlen — the name may be longer
+                                    // than the old 18-byte window and
+                                    // NUL bytes are legal in abstract
+                                    // names (length IS the name).
+                                    for b in sa.iter().take(40) {
+                                        let _ = write!(desc, "{:02x}", b);
                                     }
                                 } else {
-                                    let _ = write!(desc, "fam{}", fam);
+                                    let _ = write!(
+                                        desc,
+                                        "{}",
+                                        core::str::from_utf8(&p[..end]).unwrap_or("<utf8>")
+                                    );
                                 }
+                            } else {
+                                let _ = write!(desc, "fam{}", fam);
                             }
-                            Err(_) => {
-                                let _ = write!(desc, "<efault>");
-                            }
+                        } else {
+                            let _ = write!(desc, "<efault>");
                         }
                     } else {
                         let _ = write!(desc, "<null>");

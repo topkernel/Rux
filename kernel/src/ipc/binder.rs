@@ -651,6 +651,37 @@ fn app_child_pids_contains(pid: u32) -> bool {
     false
 }
 
+/// sc141 (Session Q): the parked children send zero successful binder
+/// transactions — print their FAILED sends (invalid handle, dead
+/// context-manager target, dead target proc) so "never tried" separates
+/// from "tried and failed silently".
+fn app_txn_fail_print(proc: &BinderProc, why: &str, handle: u64, code: u64) {
+    let comm = crate::sched::current()
+        .map(|t| unsafe { (*t).comm() })
+        .map(|c| core::str::from_utf8(c).unwrap_or(""))
+        .unwrap_or("")
+        .trim_end_matches('\0');
+    let fam = comm.contains("launcher")
+        || comm.contains("settingsdata")
+        || comm.contains("systemui")
+        || comm.contains("dataability")
+        || comm == "appspawn";
+    if !fam && !app_child_pids_contains(proc.pid) {
+        return;
+    }
+    static FAIL_N: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+    if FAIL_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 60 {
+        crate::pr_warn!(
+            "APPTXN-FAIL pid={} comm='{}' why={} handle={:#x} code={:#x}",
+            proc.pid,
+            comm,
+            why,
+            handle,
+            code
+        );
+    }
+}
+
 struct BinderTxn {
     id: u64,
     from_proc: Option<Arc<BinderProc>>,
@@ -3934,6 +3965,10 @@ fn binder_transaction(
                 let Some(node) = node else {
                     *err_cmd = BR_FAILED_REPLY;
                     crate::pr_info!("binder: transaction to invalid handle {}", tr.target_handle);
+                    // sc141: failed-send visibility for the launcher lane —
+                    // parked children send ZERO successful transactions;
+                    // whether they TRY and fail here decides the next probe.
+                    app_txn_fail_print(proc, "invalid-handle", tr.target_handle as u64, tr.code as u64);
                     return;
                 };
                 target_node = Some(node);
@@ -3942,6 +3977,7 @@ fn binder_transaction(
                 let Some(mgr) = mgr else {
                     *err_cmd = BR_DEAD_REPLY;
                     crate::pr_info!("binder: no context manager installed (ctx {})", proc.ctx as u8);
+                    app_txn_fail_print(proc, "no-ctxmgr", 0, tr.code as u64);
                     return;
                 };
                 if mgr.proc_id == proc.id {
