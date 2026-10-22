@@ -584,6 +584,73 @@ impl PageCache {
         }
     }
 
+    /// mm-side release for a mapping-owned pin (x86_64 filemap_fault).
+    ///
+    /// The combined key and page_index come from the page DESCRIPTOR's
+    /// mapping/index fields, which insert/insert_batch maintain as the
+    /// eviction keys — the unmap/COW/fork paths only have the frame. Same
+    /// release discipline as `put()` (R14-16: only a put that actually
+    /// decremented may release an invalidated entry's frame).
+    pub fn put_by_key(&self, key: u64, page_index: u64) {
+        let mut cache = self.inodes.lock();
+        if let Some(inode_cache) = cache.get_mut(&key) {
+            if let Some(page) = inode_cache.pages.get_mut(&page_index) {
+                let decremented = page
+                    .ref_count
+                    .fetch_update(Ordering::AcqRel, Ordering::Acquire, |v| {
+                        v.checked_sub(1)
+                    })
+                    .is_ok();
+                if decremented
+                    && page.ref_count.load(Ordering::Acquire) == 0
+                    && page.invalidated
+                    && !page.released.swap(true, Ordering::AcqRel)
+                {
+                    let pfn = page.pfn;
+                    inode_cache.pages.remove(&page_index);
+                    let page_desc = pfn_to_page_mut(pfn);
+                    if !page_desc.is_null() {
+                        unsafe { lru::page_remove_lru(&*page_desc); }
+                    }
+                    release_page_frame(pfn);
+                    self.total_pages.fetch_sub(1, Ordering::Relaxed);
+                }
+            }
+            if inode_cache.pages.is_empty() {
+                cache.remove(&key);
+            }
+        }
+    }
+
+    /// mm-side pin acquisition for a frame the page tables are about to
+    /// share (fork's COW walk copying a cache-mapped PTE into the child).
+    ///
+    /// Private cache mappings own exactly one pin per PTE (taken by
+    /// `get_phys` at fault time, released by `put_by_key` at unmap/COW);
+    /// the fork walk copies the PTE, so it must copy the pin ownership
+    /// too — otherwise the parent's unmap would drop the last pin and
+    /// eviction could free a frame the child still maps. Pins are also
+    /// taken on `invalidated` entries (the R7-C2/R8-3 release accounting
+    /// counts every holder; a refused pin would let a later put release
+    /// another mapping's frame). Returns false when the entry is gone
+    /// entirely (no pin possible; the frame is no longer cache-owned).
+    pub fn pin_by_key(&self, key: u64, page_index: u64) -> bool {
+        let cache = self.inodes.lock();
+        if let Some(inode_cache) = cache.get(&key) {
+            if let Some(page) = inode_cache.pages.get(&page_index) {
+                page.ref_count.fetch_add(1, Ordering::AcqRel);
+                let page_desc = pfn_to_page_mut(page.pfn);
+                if !page_desc.is_null() {
+                    unsafe {
+                        (*page_desc).set_flag(PageFlag::Referenced);
+                    }
+                }
+                return true;
+            }
+        }
+        false
+    }
+
     /// Invalidate all cached pages for a given inode.
     /// Called after writes or truncates to prevent stale data.
     ///
