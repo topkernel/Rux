@@ -366,6 +366,12 @@ struct BinderNode {
     /// flat_binder_object.flags at registration (accept_fds and
     /// txn_security_ctx bits).
     flags: u32,
+    /// sc161: the registering task group exited while the OWNER proc
+    /// lives on (forked appspawn children share the daemon's proc). Set
+    /// by binder_on_tgid_exit; makes node_is_dead true and fail-fasts
+    /// new transactions through stale refs (BR_DEAD_REPLY), mirroring
+    /// what proc teardown does for whole-process death.
+    dead: core::sync::atomic::AtomicBool,
     st: core::cell::UnsafeCell<NodeState>,
 }
 
@@ -378,6 +384,7 @@ impl BinderNode {
             proc_id,
             reg_tgid,
             flags,
+            dead: core::sync::atomic::AtomicBool::new(false),
             st: core::cell::UnsafeCell::new(NodeState {
                 internal_strong_refs: 0,
                 local_strong_refs: 0,
@@ -1178,7 +1185,8 @@ fn node_external_refs(world: &World, node: &Arc<BinderNode>) -> usize {
 /// death notifications; here the owner is removed from world.procs
 /// first, under the same WORLD hold).
 fn node_is_dead(world: &World, node: &Arc<BinderNode>) -> bool {
-    !world.procs.iter().any(|p| p.id == node.proc_id)
+    node.dead.load(core::sync::atomic::Ordering::Acquire)
+        || !world.procs.iter().any(|p| p.id == node.proc_id)
 }
 
 // ============================================================================
@@ -1622,6 +1630,15 @@ unsafe fn binder_reap_thread(
 /// the process stalls (b92: samgr todo depth 13 with 16 registered
 /// threads — all dead — and hdf_devhost waiters parked 162s).
 pub fn binder_task_died(dying_pid: u32, dying_tgid: u32, dying_tid: u32) {
+    // sc161: group-leader death first — a forked appspawn child's NODES
+    // live inside the DAEMON's shared proc, so the membership lookup
+    // below misses them entirely and they would keep accepting
+    // transactions no thread can ever read. Scoped Linux-style death for
+    // reg_tgid nodes (fail queued txns, queue DeadBinder for armed
+    // recipients, mark + unlist the nodes).
+    if dying_pid == dying_tgid {
+        binder_on_tgid_exit(dying_tgid);
+    }
     let mut wakes: Vec<Arc<BinderProc>> = Vec::new();
     {
         let mut w = world_lock();
@@ -1630,12 +1647,19 @@ pub fn binder_task_died(dying_pid: u32, dying_tgid: u32, dying_tid: u32) {
         unsafe {
             // Membership: OH opens /dev/binder on the group leader
             // (proc.pid == tgid); a non-leader opener is matched by its
-            // own pid so its personal pool entry is still reaped.
+            // own pid so its personal pool entry is still reaped. sc161:
+            // a forked CHILD's threads share the daemon's proc — match
+            // by the dying tid's pool entry so their reap runs too.
             let proc = world
                 .procs
                 .iter()
                 .find(|p| p.pid == dying_tgid || p.pid == dying_pid)
-                .cloned();
+                .cloned()
+                .or_else(|| {
+                    world.procs.iter().find(|p| {
+                        pm(world, p).im().threads.iter().any(|t| t.tid == dying_tid)
+                    }).cloned()
+                });
             let Some(proc) = proc else { return };
             if proc.im().is_dead {
                 return;
@@ -1971,6 +1995,117 @@ pub fn binder_mmap_owner_of(va: u64) -> Option<(u64, u64, u64, u64)> {
         }
     }
     None
+}
+
+/// sc161: a task group exited. Forked appspawn children register binder
+/// NODES inside the DAEMON's shared proc (reg_tgid = child); when the
+/// child dies those nodes outlive it — the daemon's proc lives on, so
+/// node_is_dead stays false, AMS's stale refs keep resolving, and every
+/// new transaction to such a node queues forever on proc work only the
+/// (gone) child's tgid may read (work_readable_by gate). A sync caller
+/// of a dead child would then park in WaitForReply forever. Linux gets
+/// this for free from per-process binder teardown; replicate the death
+/// semantics scoped to the child's nodes:
+/// - queued proc-todo / node async-todo transactions aimed at a victim
+///   node get BR_DEAD_REPLY to their senders (dead_reply_to_sender),
+/// - the node is marked dead (node_is_dead now true → armed death
+///   recipients in every holder proc are queued DeadBinder work; new
+///   transactions through stale refs fail fast),
+/// - the node leaves the owner's list.
+pub fn binder_on_tgid_exit(tgid: u32) {
+    let mut wakes: Vec<Arc<BinderProc>> = Vec::new();
+    {
+        let mut w = world_lock();
+        let Some(world) = w.as_mut() else { return };
+        // Collect (owner, node) pairs registered by the dying tgid.
+        // SAFETY: all access below is under WORLD.
+        let mut victims: Vec<(Arc<BinderProc>, Arc<BinderNode>)> = Vec::new();
+        for p in world.procs.clone() {
+            // SAFETY: under WORLD.
+            for n in unsafe { pm(world, &p).im().nodes.clone() } {
+                if n.reg_tgid == tgid && n.reg_tgid != p.pid as u32 {
+                    victims.push((p.clone(), n));
+                }
+            }
+        }
+        if victims.is_empty() {
+            return;
+        }
+        static EXIT_PROBE_N: core::sync::atomic::AtomicU32 =
+            core::sync::atomic::AtomicU32::new(0);
+        if EXIT_PROBE_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 40 {
+            crate::pr_warn!(
+                "binder: tgid {} exit reaped {} child-registered nodes",
+                tgid,
+                victims.len()
+            );
+        }
+        // SAFETY: WORLD held for the rest of the block.
+        unsafe {
+            for (owner, node) in &victims {
+                // 1. Fail proc-todo transactions aimed at this node.
+                let queued: Vec<Work> = pm(world, owner).im().todo.drain(..).collect();
+                for wk in queued {
+                    let hit = match &wk {
+                        Work::Transaction(t)
+                            if t
+                                .target_node
+                                .as_ref()
+                                .map(|n| Arc::ptr_eq(n, node))
+                                .unwrap_or(false) =>
+                        {
+                            wakes.extend(dead_reply_to_sender(world, owner, t));
+                            true
+                        }
+                        _ => false,
+                    };
+                    if hit {
+                        finish_work(world, owner, wk);
+                    } else {
+                        pm(world, owner).im().todo.push_back(wk);
+                    }
+                }
+                // 2. Fail the node's parked async transactions.
+                let parked: Vec<Arc<BinderTxn>> = node.st().async_todo.drain(..).collect();
+                for t in parked {
+                    t.set_holds_async_slot(false);
+                    wakes.extend(dead_reply_to_sender(world, owner, &t));
+                    finish_work(world, owner, Work::Transaction(t));
+                }
+                // 3. Mark dead + queue DeadBinder for armed death
+                //    recipients across every holder proc.
+                node.dead.store(true, core::sync::atomic::Ordering::Release);
+                for q in world.procs.clone() {
+                    if Arc::ptr_eq(&q, owner) {
+                        continue;
+                    }
+                    let qim = pm(world, &q);
+                    for r in qim.im().refs.iter_mut() {
+                        if Arc::ptr_eq(&r.node, node) {
+                            if let Some(d) = r.death.as_mut() {
+                                if matches!(d.phase, DeathPhase::Armed) {
+                                    d.phase = DeathPhase::Queued;
+                                    qim.im().todo.push_back(Work::DeadBinder {
+                                        desc: r.desc,
+                                        cookie: d.cookie,
+                                    });
+                                    wakes.push(q.clone());
+                                }
+                            }
+                        }
+                    }
+                }
+                // 4. Drop the node from the owner's list.
+                pm(world, owner)
+                    .im()
+                    .nodes
+                    .retain(|n| !Arc::ptr_eq(n, node));
+            }
+        }
+    }
+    for p in wakes {
+        wake_proc_one(&p, 0);
+    }
 }
 
 /// FileOps.poll: readable while work is pending for this open.
@@ -4108,6 +4243,15 @@ fn binder_transaction(
 
             if target_proc.is_none() {
                 let node = target_node.as_ref().unwrap();
+                // sc161: child-registered node whose task group died —
+                // the ref still resolves, but no thread can ever read a
+                // delivery (work_readable_by gate); fail fast like a
+                // dead-owner node instead of queueing forever.
+                if node.dead.load(core::sync::atomic::Ordering::Acquire) {
+                    *err_cmd = BR_DEAD_REPLY;
+                    app_txn_fail_print(proc, "child-node-dead", tr.target_handle as u64, tr.code as u64);
+                    return;
+                }
                 match world.procs.iter().find(|p| p.id == node.proc_id) {
                     Some(p) if !p.im().is_dead => target_proc = Some(p.clone()),
                     _ => {
