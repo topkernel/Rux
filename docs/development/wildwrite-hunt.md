@@ -1976,3 +1976,222 @@ decisive numbers; the cadence question belongs to the dfx line.
    by design (no file rmap yet — the deliberate minimal choice; mapped
    cache pages are unevictable until unmapped, exactly like the
    MAP_SHARED aliases).
+
+## Session 24 (continuation agent — riscv64 filemap_fault twin port)
+
+### Base + stewardship at claim
+
+- Merged origin/main = e486c3c3 (fast-forward; main had merged the
+  session-23 branch). Chain tree ALIVE at claim (fifth occurrence of
+  the stale-driver-dead handoff): r41 armed (15-point set) and
+  storming, driver self-continuing.
+- Kernel implementation located: dc096f14 carried only docs/run
+  scripts; the x86_64 kernel changes live in the wip snapshot ed444e08
+  beneath it (page_cache put_by_key/pin_by_key, ext4 ReadDst::Discard +
+  ext4_fault_populate_cache, rmap PageCache skip — all arch-neutral,
+  reusable by the twin as-is).
+
+### The riscv64 port (6e76430b)
+
+Mirror of the x86_64 session-23 fix, both directions of the protocol:
+
+- **cow_flags::PCACHE = RSW bit 9** (beside COW bit 8). A PTE carrying
+  it owns one CachedPage pin + one descriptor get_page for its mapping
+  lifetime.
+- **Fault arm** (page_fault.rs): MAP_PRIVATE read/exec faults on
+  FileBacked VMAs pin the page-cache frame via `filemap_pin_cache_page`
+  (is_ext4_file gate; get_phys hit, else Discard-warm + pin) and map it
+  R-only — writable VMAs get COW instead of W (writenotify parity; the
+  first write COWs in handle_cow_fault). Write faults, non-ext4 files,
+  and holes keep the private-copy fill, now flagged
+  Anonymous+SwapBacked+mapcount+rmap+anon-LRU (the "rmap not wired
+  yet" census-invisible copy — the drainer's accounting face). The
+  gnome-sigill text-stamp forensics on the fill arm are PRESERVED.
+  Cache-mapped frames take NO rmap/set_index/LRU state (the
+  descriptor's mapping/index are the cache's eviction keys;
+  page_record_mapping's slot-0 set_index would clobber them — the
+  MAP_SHARED alias arm's unconditional page_record_mapping on a
+  page_index-0 frame remains the known pre-existing hazard).
+- **Release sites**: release_cache_mapping_pin (put_by_key via the
+  descriptor's eviction keys) after the descriptor put at unmap_pages,
+  unmap_one_user_leaf_locked, mm teardown (free_user_page_tables L0
+  walk), and handle_cow_fault's copy path. The COW exclusive fast path
+  defensively strips PCACHE (a cache frame's descriptor refcount can
+  never hit the exclusive window — the cache base ref keeps it >= 2).
+- **Fork**: copy_page_table_cow's L0 leaf arm takes pin_by_key for
+  PCACHE leaves before its get_page (the child's copy owns its own
+  pin — the parent's unmap must not strand the child's frame).
+- **PTE rewrites**: sys_mprotect's riscv walk and the fault path's
+  PROT_NONE re-present carry PCACHE like COW and force the COW bit on
+  any W-upgrade (a cache-backed leaf never gains W in place).
+- **Bonus fix** inside the demand arm: the map_page OOM path used to
+  free_page() the MAP_SHARED alias frame (cache-owned, pinned) — now
+  gated like the lost-race path. set_range_permissions (which drops
+  software bits wholesale) confirmed DEAD (zero callers) — no pin-leak
+  path.
+- Lock order inherited: pin in the fill phase (no PTE lock), releases
+  under the PTE lock — pte -> inodes everywhere, no cycle.
+
+### Validation (riscv64, all on 6e76430b)
+
+- In-kernel unit tests **1085/1088** (run/ww-s24-rv-test.log;
+  byte-identical failure set: the 3 pre-existing config size asserts).
+  The post-summary make-test QEMU outlived the harness again — reaped
+  after cwd+cmdline verification (own process; s22/s23 class).
+- **MMF-PASS x14** (mmapfix, riscv64) — first run accidentally booted
+  the make-test feature kernel (s12 lesson relived: `make test`
+  overwrites the target binary; rebuild before probes).
+- **FMAP-PASS x7** — NEW probe (test/filemap.c + filemap_boot.py,
+  mmapfix mechanics): FC1 cache content, FC2 write-after-read COW
+  privacy + fresh-mapping coherence (the cache frame is never
+  scribbled), FC3 fork isolation + shared-page coherence over cache
+  windows, FC4a partial-tail zero fill, FC4b past-EOF SIGBUS (probe
+  bug fixed en route: the touch must be INSIDE the mapping but past
+  EOF — outside-VMA touches SIGSEGV), FC5 mprotect W-upgrade COW
+  divert, FC6 PROT_NONE round trip, FC7 write(2) invalidation
+  freshness. Also the regression guard for the port's mprotect/
+  marker handling.
+- Minimal-rootfs smoke (run/fm24-rv-smoke.sh, 150 s): /bin/sh reached,
+  **0 panics** (PREEMPT-LEAK lines = known wfi idle noise).
+- x86_64 build clean (shared-file edits are cfg-gated); config.rs
+  restored to the committed x86_64 flavor at commit (generated-artifact
+  quirk, s23 precedent).
+
+### The GNOME-image dead end (asset, not kernel)
+
+The handoff's fake-OOM validation path (/home/william/rux-agents/
+gnome-img/gnome.img + fire6.py) DOES NOT EXIST on disk anymore — the
+directory is gone, and every fire-r* cold copy was reclaimed per-run
+(fire-r84/r85 summaries name the dead path as their image). The
+candidates on disk are NOT the GNOME image: oom-accounting's work/
+gnome-riscv.img is a plain Ubuntu server rootfs (no Xorg, no
+gnome-session, no /root/start-gnome.sh — its /usr/sbin/init is a
+symlink into the udesk family), and riscv-gnome's work/ubuntu-gui.img
+is the udesk desktop image (no /root chain either). fm24-gnome
+(45-min budget, repro-full shape, dfx=...,ledger) booted the fresh
+Ubuntu rootfs: kernel reached /sbin/init load, then wedged in early
+userspace behind a PREEMPT-LEAK idle flood (1857 lines) — 0 panics,
+0 OOM events, no GNOME signal. Boot killed at ~11 min (own pid). The
+GNOME-image 342MB/2G verdict needs the image REBUILT (the gnome-int
+line's preparation scripts, or main-session restore) — noted for the
+main session.
+
+### The filedrain A/B (fake-OOM, minimal-rootfs reproducer)
+
+With the GNOME image unavailable, the drain is reproduced directly:
+test/filedrain.c + filedrain_boot.py — N rounds of mmap(160MB data
+file, MAP_PRIVATE) + full read-touch + checksum, every mapping KEPT
+ALIVE (the GNOME shape: every spawn's libs stay mapped), then fork
+children reading mapping 0 (pin duplication + teardown under load),
+-m 2G smp2 MTTCG, dfx=taskdump,watchdog,periodic,memwatch,ledger.
+Pre-port expectation: N x 160MB of unreclaimable unflagged private
+copies + 160MB cache → fake OOM near N=10. Post-port: all rounds
+share ONE 160MB pinned cache set (PTE tables only) → clean pass.
+
+- 5-round shakeout (800MB): BOTH kernels pass, 0 OOM markers — the
+  2G zone absorbs 960MB; not decisive (both serials also overwritten
+  by the shared tag — fixed with --tag).
+- **10-round A/B verdict** (run/fm24-fdr-ab.log + /tmp/fdr-work/
+  fdr-{pre,post}-serial.log; control = main's e486c3c3 riscv build,
+  post = 6e76430b): both complete FDR-PASS (checksums intact, fork
+  children fine) — but the memory ledger tells the real story.
+  - CONTROL (old private-copy semantics): `used=505848 free=18410` of
+    524288 pages — **72 MB from the fake OOM** at 10 live mappings,
+    with the copies sitting census-visible as mapped=200017 and the
+    evictable 160MB pagecache already squeezed out.
+  - PORT (cache-frame mapping): `used=95706 free=428582` — **1.67 GB
+    free**, pagecache_pages=40960 and mapped=40961: exactly ONE shared
+    160MB set serving all ten mappings, no per-fault copies. 23x the
+    headroom under identical load; the same shape as the x86 fm1
+    result (365037 free vs pt7's 0-at-OOM). (Both script rc=1s are the
+    poller missing the FDR-PASS before QEMU powers off — the serial
+    tails carry the marker.)
+  - The control surviving at all shows the 2G minimal-rootfs zone
+    absorbs ~1.8GB of drain before the edge; the GNOME image's
+    342MB/2G OOM fires earlier because the desktop's steady stream of
+    NEW mapped libs (never munmapped) compounds the copies with real
+    anon+heap. The drain mechanism itself is the one measured here.
+
+### x86_64 MAP_SHARED ext4: writeback-coherence design (task 2, design-first)
+
+Ground truth in main today: x86_64 MAP_SHARED on ext4 falls to the
+private-copy path (mappers do NOT see each other's stores; nothing
+persists). The riscv64 twin aliases the cache frame (mappers coherent,
+PERMANENT pin — never dropped — stores never reach disk; write(2) on
+the file invalidates the inode cache and diverges disk vs mapped
+frame). Neither is Linux: Linux maps the cache page W, tracks it
+dirty, and writes it back through the page cache (msync/fsync/
+reclaim), with write(2) going THROUGH the same cache pages.
+
+Design (staged; implement behind probes, mm territory only):
+
+1. **Reuse the PCACHE protocol for SHARED leaves** (the port's second
+   payoff): the x86_64 SHARED ext4 fault pins exactly like the private
+   arm (get_phys/Discard-warm) and maps the frame with W (NO COW bit),
+   PCACHE set. Fork: the existing COW-exemption branch copies the PTE
+   and get_pages — add the same bit-keyed pin_by_key the riscv walk
+   gained. Unmap/teardown/mprotect: the PCACHE release/carry sites
+   from session 23 already handle it. This alone fixes mapper-vs-mapper
+   coherence AND retires the riscv alias's PERMANENT pin (riscv can
+   then migrate shared_file_fault_page to the same protocol, bounding
+   alias memory by live mappings instead of forever).
+2. **Dirty tracking, conservative v1**: mark the CachedPage dirty at
+   MAP-install time when the mapping is W (a writable shared mapping
+   may write; flushing an unwritten page is harmless I/O). Add
+   `CachedPage.dirty: AtomicBool`. Precise write-fault-time dirtying
+   (write-protect + dirty-on-fault, Linux page_mkwrite shape) is the
+   v2 optimization.
+3. **Writeback paths (v1)**:
+   - msync(MS_SYNC) over a shared file VMA: flush dirty entries of the
+     inode in [pgoff, pgoff+len) — pin the entry (ref++), drop the
+     inodes lock (NEVER hold it across block I/O — R-WRITESTORM-1),
+     write the frame's PAGE bytes through the ext4 write machinery at
+     the page's offset, re-take, clear dirty only if not re-dirtied.
+   - fsync(fd): flush all dirty entries of the inode.
+   - eviction: dirty entries skip eviction (like pinned) — bounded by
+     live shared mappings + unflushed dirty pages; a reclaim-time
+     writeback is v2 (needs a sleepable flush context).
+   - unmap: leave the entry dirty in cache (POSIX allows deferred
+     writeback); the pin drops normally.
+4. **write(2) coherence**: ext4_file_write detects pinned in-range
+   cache entries (under the inodes lock): write-through INTO the frame
+   (update the cache page bytes), mark dirty, and DO NOT invalidate
+   pinned entries (invalidating a pinned entry would make later faults
+   allocate a divergent second frame — breaking mapper coherence).
+   Unpinned entries invalidate as today. Page-granular last-writer-wins
+   matches Linux for non-concurrent workloads.
+5. **The flush primitive**: an ext4 write variant taking the source as
+   a cache FRAME (linear-map read, no bounce), reusing block
+   allocation for appends/holes; must not invalidate its own range.
+6. **Hazards documented**: truncate vs dirty mapped pages (must
+   flush/discard in-range dirty entries — today's invalidate_inode
+   leaves pinned entries alive and diverging); concurrent msync vs
+   store races (last-wins + re-dirty recheck); close(2) does not flush
+   (deferred, documented divergence).
+7. **Validation plan**: FMAP-shared legs (two mappers see stores
+   immediately; write(2)-then-read-back through a second mapping;
+   msync persists — verify by reading the file in a SECOND boot of the
+   same image; fork children coherent); LTP execl01..execveat02 family
+   (the riscv alias's original motivation); OH/GNOME soak for pin
+   accounting.
+
+### Session 24 close-out
+
+- Commits: 6e76430b (the port + FMAP/filedrain probes + drivers),
+  this archive (+ chain artifacts). Pushed via ssh.github.com:443.
+- Chain: r41 FULL budget clean (77659 lines, 0 KERNPANIC/ALLOCTHROW,
+  0 WW-HIT, 0 heals), driver self-advanced to r42 at 04:09 (WW-ARMED
+  verified in run/ww-chain-s23.log). **Cumulative: 0 WW-HIT across
+  r1-r41**, 0 META-SMASH.
+- Handoff: (1) the GNOME-image fake-OOM verdict still wants a real
+  GNOME boot once the image is rebuilt/restored — the filedrain A/B is
+  the mechanism-level evidence (23x headroom); relay the dead-asset
+  finding (gnome-img/ + fire6.py gone; gnome-riscv.img and
+  ubuntu-gui.img are NOT it) to the main session. (2) The MAP_SHARED
+  design above is the next mm implementation item, x86_64 first, then
+  the riscv alias migration onto PCACHE. (3) The dfx MEMLEDGER series
+  interleaving/garbling note from session 23 reproduces on riscv64
+  serials (only 3 MEMLEDGER lines per boot survived legible in the
+  control run) — the dfx line's item.
+
+
