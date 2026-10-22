@@ -121,6 +121,11 @@ pub enum ReadDst {
     Kernel(*mut u8, usize),
     /// access_ok-validated user pointer + length.
     User(*mut u8, usize),
+    /// Throw-away destination (mm filemap_fault cache warm-up): the read
+    /// runs for its SIDE EFFECT — populating the page cache through the
+    /// readahead/fault-around machinery — and the bytes are never copied.
+    /// The caller pins the frames with `page_cache::get_phys` afterwards.
+    Discard(usize),
 }
 
 impl ReadDst {
@@ -128,6 +133,7 @@ impl ReadDst {
     fn len(&self) -> usize {
         match self {
             ReadDst::Kernel(_, n) | ReadDst::User(_, n) => *n,
+            ReadDst::Discard(n) => *n,
         }
     }
 
@@ -147,6 +153,7 @@ impl ReadDst {
                 unsafe { core::ptr::copy_nonoverlapping(src, dst.add(off), bytes) };
                 Ok(bytes)
             }
+            ReadDst::Discard(_) => Ok(bytes), // warm-up read: data lands in the page cache
             ReadDst::User(dst, _) => {
                 // SAFETY: exception-table copy; uncopied bytes truncate.
                 let uncopied = unsafe {
@@ -1384,6 +1391,50 @@ pub fn ext4_file_read_user_vfs(file: &File, dst: *mut u8, count: usize) -> isize
 pub fn is_ext4_file(file: &File) -> bool {
     file.get_ops()
         .is_some_and(|ops| core::ptr::eq(ops as *const _, &EXT4_FILE_OPS as *const _))
+}
+
+/// mm filemap_fault cache warm-up (x86_64 demand faults): run ONE
+/// page-shaped read through the cached read machinery with a DISCARD
+/// destination — no bytes are copied to a bounce buffer; the point is the
+/// side effect, `fill_page_cache_batch` populating the page cache (and the
+/// fault-around detector warming the surrounding window, exactly as a
+/// read_at from the old private-copy fault path did).
+///
+/// The caller then pins frames with `page_cache::get_phys` and maps them
+/// directly (Linux filemap_fault shape). Returns false when the file is
+/// not resolvable through the ext4 read path (treated as "not cacheable"
+/// by the fault arm, which falls back to a private copy).
+pub fn ext4_fault_populate_cache(file: &File, offset: u64) -> bool {
+    // SAFETY: same inode/fs/sb resolution discipline as
+    // ext4_file_read_at_vfs_inner (fields written at open time, read-only
+    // afterwards; io_lock serializes readahead state with plain reads).
+    unsafe {
+        let inode = match (&*file.inode.get()).as_ref() {
+            Some(i) => i,
+            None => return false,
+        };
+        let fs_ptr = match inode.private_data {
+            Some(ptr) => ptr as *const crate::fs::ext4::Ext4FileSystem,
+            None => return false,
+        };
+        let fs = &*fs_ptr;
+        let ext4_inode = match inode.sb {
+            Some(ptr) => &*(ptr as *const super::inode::Ext4Inode),
+            None => return false,
+        };
+        let _io_guard = file.io_lock.guard();
+        let ra_state = get_or_create_ra_state(file, fs.block_size as u64);
+        matches!(
+            ext4_file_read_cached_dst(
+                fs,
+                ext4_inode,
+                offset,
+                ReadDst::Discard(crate::mm::PAGE_SIZE),
+                ra_state
+            ),
+            Ok(n) if n > 0
+        )
+    }
 }
 
 /// VFS write wrapper - calls ext4_file_write
