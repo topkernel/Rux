@@ -883,11 +883,9 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
                     if !parts.is_empty() {
                         let joined = parts.join("|");
                         let daemon_regn = is_daemon
-                            && (joined.contains("egister")
-                                || joined.contains("SystemAbility")
+                            && (joined.contains("SystemAbility")
                                 || joined.contains("501")
-                                || joined.contains("amgr")
-                                || joined.contains("bility"));
+                                || joined.contains("amgr"));
                         if !is_daemon || daemon_regn {
                             static DREG_N: core::sync::atomic::AtomicUsize =
                                 core::sync::atomic::AtomicUsize::new(0);
