@@ -227,8 +227,11 @@ fn dfx_dump_user_stack(t: &crate::process::Task, usp: u64) {
             };
             // User code pointers: Xorg image (< 0x1d0000) or shared libs
             // (0x0000_3000_xxxx_xxxx) or any canonical user text pointer.
+            // sc119: OH app children park with library frames at
+            // 0x0000_7ff0_xxxx_xxxx (sc118 USEGV rip 0x7ff000fe1b07 family)
+            // — same 4-GB-prefix test as the other two families.
             let is_user_ptr = (v > 0x1000 && v < 0x4000_0000_0000)
-                && (v < 0x00d0_0000 || (v >> 32) == 0x3000 || (v >> 32) == 0x3fff);
+                && (v < 0x00d0_0000 || (v >> 32) == 0x3000 || (v >> 32) == 0x3fff || (v >> 32) == 0x7ff0);
             if is_user_ptr {
                 taskdump_raw_line(b"FTX-US +");
                 taskdump_dec(addr.wrapping_sub(usp) as i64 as u64);
@@ -619,8 +622,24 @@ pub fn dump_all_tasks(reason: &str) {
                             const FUTEX_NR: u64 = 0;
                             if a7 == FUTEX_NR && a0 > 0x1000 && (a0 & 0x3) == 0 {
                                 if t.state().is_sleeping() {
-                                    crate::sync::futex::dfx_dump_futex_state(a0 as usize, t.pid());
-                                    dfx_dump_user_stack(&t, usp);
+                                    // sc119: the OH app-child hunt. Hundreds of
+                                    // futex sleepers exist per dump; the word
+                                    // read inside FTX-STATE lands in the
+                                    // DUMPER's mm anyway (wrong address space)
+                                    // and a full ustack per sleeper floods the
+                                    // UART. Gate the expensive dumps to the
+                                    // hunt page 0x7fffffffc000 (every process's
+                                    // stack-top-minus-3rd page, where all 13
+                                    // app children parked); the bucket-chain
+                                    // walk inside FTX-STATE is kernel-global
+                                    // and stays valid there.
+                                    if (a0 & !0xfffu64) == 0x7fffffffc000 {
+                                        crate::sync::futex::dfx_dump_futex_state(
+                                            a0 as usize,
+                                            t.pid(),
+                                        );
+                                        dfx_dump_user_stack(&t, usp);
+                                    }
                                 }
                             }
                         }
