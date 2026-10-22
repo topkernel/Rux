@@ -58,8 +58,12 @@ fn dec_buf(n: u64, buf: &mut [u8; 20]) -> &[u8] {
     &buf[i..]
 }
 
-/// Append a decimal to a stack line buffer (silently truncated at the
-/// cap — every field below is far shorter than the budget).
+/// Append a decimal to a stack line buffer. The cap always leaves one
+/// byte for the terminator: `emit` writes buf[len] = '\n', and a push
+/// that consumed the whole buffer would push that store out of bounds —
+/// the exact shape of the pt3/pt4 audit-boot panics ("index out of
+/// bounds: the len is 160 but the index is 160", ledger.rs emit). pt5
+/// survived only because its census digit widths happened to sum to 159.
 struct Line {
     buf: [u8; 160],
     len: usize,
@@ -72,7 +76,12 @@ impl Line {
         l
     }
     fn push(&mut self, s: &[u8]) {
-        let room = self.buf.len() - self.len;
+        // len is capped at buf.len()-1, so `room` never underflows and
+        // buf[len] stays in bounds for emit's newline store.
+        if self.len >= self.buf.len() - 1 {
+            return;
+        }
+        let room = self.buf.len() - 1 - self.len;
         let n = s.len().min(room);
         self.buf[self.len..self.len + n].copy_from_slice(&s[..n]);
         self.len += n;
@@ -117,6 +126,62 @@ pub fn compact_line() {
     l.emit();
 }
 
+/// Raw-UART census line (printk-free): the page-descriptor class counts
+/// the compact line lacks. One extra O(nr_descs) walk — the dump path
+/// already does one; this is the printk-wedge-proof copy of the numbers
+/// the fake-OOM audit needs (anon vs pinned cache vs reserved). Emitted
+/// by dump() next to compact_line(), and safe to call standalone.
+pub fn census_line() {
+    let st = crate::mm::page_desc::page_desc_stats();
+    let mut l = Line::new(b"MEMLEDGER-CENSUS");
+    l.push(b" total=");
+    l.dec(st.total_pages as u64);
+    l.push(b" used=");
+    l.dec(st.used_pages as u64);
+    l.push(b" free=");
+    l.dec(st.free_pages as u64);
+    l.push(b" reserved=");
+    l.dec(st.reserved_pages as u64);
+    l.push(b" anon=");
+    l.dec(st.anonymous_pages as u64);
+    l.push(b" cow=");
+    l.dec(st.cow_pages as u64);
+    l.push(b" mapped=");
+    l.dec(st.mapped_pages as u64);
+    l.push(b" dirty=");
+    l.dec(st.dirty_pages as u64);
+    l.emit();
+}
+
+/// Raw-UART one-liner for the page-allocator OOM forensic summary (the
+/// printk copies above can be lost to a printk wedge — see oom_forensic_dump).
+pub fn oomfx_line(
+    zone_free: u64,
+    zone_walkable: u64,
+    zone_managed: u64,
+    orphan: u64,
+    inverse: u64,
+    seed_alarms: u64,
+    double_free: u64,
+) {
+    let mut l = Line::new(b"OOMFX-RAW");
+    l.push(b" zone_free=");
+    l.dec(zone_free);
+    l.push(b" zone_walkable=");
+    l.dec(zone_walkable);
+    l.push(b" zone_managed=");
+    l.dec(zone_managed);
+    l.push(b" orphan=");
+    l.dec(orphan);
+    l.push(b" inverse=");
+    l.dec(inverse);
+    l.push(b" seed_alarms=");
+    l.dec(seed_alarms);
+    l.push(b" dblfree=");
+    l.dec(double_free);
+    l.emit();
+}
+
 /// One bucket row of the census.
 #[derive(Default)]
 struct Census {
@@ -154,6 +219,7 @@ pub fn dump(site: &str) {
 
     crate::println!("==== MEMLEDGER @ {} ====", site);
     compact_line();
+    census_line();
 
     // Zone counters (what the allocator believes).
     let mut zone_free: u64 = 0;
@@ -201,6 +267,14 @@ pub fn dump(site: &str) {
     let pt_count = 0u64;
 
     let mut c = Census::default();
+    // other_used physical-range histogram (fake-OOM audit, session 22):
+    // the OOM-moment dumps show other_used at 558600/736006 managed pages
+    // (pt5, ~76% of the zone) while the psite table attributes under 100k
+    // — WHERE the unflagged pages physically sit (low RAM vs the above-4G
+    // half vs the kernel-heap neighborhood) discriminates funnel families
+    // before the psite widening lands. 12 buckets x 512 MiB over 0..6G.
+    const OW_BUCKETS: usize = 12;
+    let mut ow_ranges = [0u64; OW_BUCKETS];
     for i in 0..scan {
         let page = pfn_to_page(MIN_PFN + i);
         if page.is_null() {
@@ -262,6 +336,11 @@ pub fn dump(site: &str) {
             c.lru_file += 1;
         } else {
             c.other_used += 1;
+            let phys = (MIN_PFN + i) as u64 * 4096;
+            let b = (phys / (512 * 1024 * 1024)) as usize;
+            if b < OW_BUCKETS {
+                ow_ranges[b] += 1;
+            }
         }
     }
 
@@ -284,6 +363,10 @@ pub fn dump(site: &str) {
     crate::println!(
         "MEMLEDGER   refcounts(rc>0): ==1:{} 2..8:{} >8:{}",
         c.rc_eq1, c.rc_2_8, c.rc_gt8
+    );
+    crate::println!(
+        "MEMLEDGER   other_used phys ranges (512MiB buckets 0..6G): {:?}",
+        ow_ranges
     );
 
     // Reconciliation: every descriptor is in exactly one bucket.
@@ -323,6 +406,54 @@ pub fn dump(site: &str) {
     super::driftwatch::report();
     crate::println!("==== MEMLEDGER end ====");
 
+    // Raw-UART copy of the census buckets (the printk lines above are
+    // lost when printk wedges — the exact storms this dump targets; the
+    // pt1/pt2 fake-OOM audits recovered ONLY the raw lines). Same
+    // numbers, one line, always survives.
+    {
+        let mut l = Line::new(b"MEMLEDGER-BUCKETS");
+        l.push(b" freeL=");
+        l.dec(c.free_leader);
+        l.push(b" freeM=");
+        l.dec(c.free_member);
+        l.push(b" reserved=");
+        l.dec(c.reserved);
+        l.push(b" pt=");
+        l.dec(c.page_tables);
+        l.push(b" anon=");
+        l.dec(c.anon);
+        l.push(b" cow=");
+        l.dec(c.cow);
+        l.push(b" mapped_file=");
+        l.dec(c.mapped_file);
+        l.push(b" lru_file=");
+        l.dec(c.lru_file);
+        l.push(b" other_used=");
+        l.dec(c.other_used);
+        l.push(b" rc1=");
+        l.dec(c.rc_eq1);
+        l.push(b" rc2_8=");
+        l.dec(c.rc_2_8);
+        l.push(b" rc>8=");
+        l.dec(c.rc_gt8);
+        l.emit();
+        let mut l = Line::new(b"MEMLEDGER-OWRS");
+        // Descending bucket order: the above-4G half (r8..r11) is the
+        // funnel discriminator this line exists for — print it first so a
+        // pathological spread truncates the LOW tail, never the high one.
+        for bi in (0..OW_BUCKETS).rev() {
+            let v = ow_ranges[bi];
+            if v == 0 {
+                continue;
+            }
+            l.push(b" r");
+            l.dec(bi as u64);
+            l.push(b"=");
+            l.dec(v);
+        }
+        l.emit();
+    }
+
     BUSY.store(false, Ordering::Release);
 }
 
@@ -332,4 +463,29 @@ pub fn run_pending() {
     if PENDING.swap(false, Ordering::AcqRel) {
         dump("uart-magic");
     }
+    series_tick();
+}
+
+/// Periodic raw time series (fake-OOM audit): one compact + one census
+/// line every SERIES_PERIOD while dfx=ledger is armed — the anon-growth
+/// curve that discriminates a leak (monotone growth after service
+/// steady-state) from genuine consumption. Raw UART on purpose: the
+/// printk path can wedge during exactly the storms this instruments.
+/// Called from run_pending (timer softirq cadence; timer.rs stays
+/// untouched — territory), throttled internally.
+static LAST_SERIES: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+const SERIES_PERIOD: u64 = 30 * 100; // 30 s at 100 Hz
+
+pub fn series_tick() {
+    if !crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::Ledger) {
+        return;
+    }
+    let current = crate::drivers::timer::get_jiffies();
+    if current.saturating_sub(LAST_SERIES.load(Ordering::Relaxed)) < SERIES_PERIOD {
+        return;
+    }
+    LAST_SERIES.store(current, Ordering::Relaxed);
+    compact_line();
+    census_line();
 }

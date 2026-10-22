@@ -125,6 +125,7 @@ pub fn plausible_fp(fp: u64) -> bool {
 }
 
 #[inline(never)]
+#[cfg(feature = "riscv64")]
 pub unsafe fn walk_fp_chain(mut fp: u64, out: &mut [u64]) {
     for slot in out.iter_mut() {
         *slot = 0;
@@ -141,13 +142,76 @@ pub unsafe fn walk_fp_chain(mut fp: u64, out: &mut [u64]) {
     }
 }
 
+/// x86_64 twin. The riscv64 walk above reads the RISC-V frame layout
+/// (s0 at the TOP of the frame: saved ra at [fp-8], saved s0 at
+/// [fp-0x10]); SysV x86_64 stores the saved rbp AT [rbp] with the return
+/// address at [rbp+8]. Running the riscv64 layout on x86_64 dereferenced
+/// the frame's LOCAL VARIABLES — locals that happened to hold kernel
+/// pointers passed the plausibility gate, so nearly every allocation
+/// interned a UNIQUE garbage chain, exhausting PSITE_SLOTS within the
+/// first minutes of a boot and dropping every real call site from the
+/// MEMPSITES attribution (observed live on the pt4 audit boot: f2 slots
+/// full of ASCII data like 0x49657069505d737d, top net=198 against
+/// 442k page frees).
+#[inline(never)]
+#[cfg(feature = "x86_64")]
+pub unsafe fn walk_fp_chain(mut fp: u64, out: &mut [u64]) {
+    for slot in out.iter_mut() {
+        *slot = 0;
+        if !(fp >= 0x8000_0000_0000_0000 && fp & 7 == 0 && plausible_fp(fp)) {
+            return;
+        }
+        // SysV: [fp] = caller's saved rbp, [fp+8] = this frame's return
+        // address. Stacks grow down, so the caller's rbp is strictly
+        // greater than the current one (same ascending check as riscv64).
+        let next = core::ptr::read_volatile(fp as *const u64);
+        let ra = core::ptr::read_volatile((fp + 8) as *const u64);
+        *slot = ra;
+        if !(next >= 0x8000_0000_0000_0000 && next & 7 == 0 && next > fp && plausible_fp(next)) {
+            return;
+        }
+        fp = next;
+    }
+}
+
 fn chain_key(bucket: usize, frames: &[u64; SITE_FRAMES]) -> usize {
     // keep 0 as the "empty slot" sentinel
     let mut key = bucket.wrapping_mul(0x9e37_79b9_7f4a_7c15) | 1;
     for (i, &f) in frames.iter().enumerate() {
-        key ^= (f as usize).rotate_left((i as u32) * 13 + 3);
+        key ^= (sanitized_ra(f) as usize).rotate_left((i as u32) * 13 + 3);
     }
     key
+}
+
+/// Kernel-image return-address window for chain keying (x86_64).
+///
+/// The fp walk stores the ra of every frame UNCHECKED — only the frame
+/// pointer chain is validated (plausible_fp). The LAST ra of a chain
+/// routinely reads the entry frame's saved junk (interrupt entry, syscall
+/// entry, or simply the frame above the last real one), and that junk
+/// VALUE varies call to call at the same site: pt6's dump showed one
+/// caller (the anon-demand-fault family) interned as FOUR distinct psite
+/// slots whose f1..f7 were byte-identical and only f8 differed
+/// (0x00000011f63d4e2e / 0x00000023901eae73 / ...). At 64 slots this
+/// fragmentation saturated the psite table with boot-time chains, so the
+/// runtime allocators (the fake-OOM drainer among them) never got a slot
+/// and MEMPSITES showed nothing for them. Keying on the sanitized chain
+/// (non-kernel-text ras -> 0) makes a site's key stable across calls.
+#[cfg(feature = "x86_64")]
+fn sanitized_ra(ra: u64) -> u64 {
+    if (0xffff_ffff_8000_0000..0xffff_ffff_8200_0000).contains(&ra) {
+        ra
+    } else {
+        0
+    }
+}
+
+/// riscv64: no sanitizer yet (kernel text lives inside the linear map, so
+/// the x86_64 image-window test does not transfer). The audit boots that
+/// need this are x86_64; keep the riscv64 twin's keying unchanged.
+#[cfg(feature = "riscv64")]
+fn sanitized_ra(ra: u64) -> u64 {
+    ra
 }
 
 /// Record one realloc observation. `frames[0]` is the return address out
@@ -423,8 +487,13 @@ pub fn note_free(ptr: *mut u8, heap_start: usize, size: usize) {
 // use instead.
 // ---------------------------------------------------------------------------
 
-/// 2GB / 4KB pages. PFNs outside are untracked.
-pub const PPAGE_TABLE_ENTRIES: usize = 524288;
+/// 6GB / 4KB pages (x86_64 q35 DRAM spans 0x0-0x7ffcd000 plus the
+/// above-4G half 0x100000000-0x180000000; a 2 GiB window left every
+/// high-RAM free unattributed — leaks measured right, churn sites'
+/// nets inflated by exactly their high-RAM half). PFNs outside are
+/// untracked. On riscv64 (qemu virt, DRAM at 0x80000000, 2 GiB max)
+/// the extra tail is simply never indexed.
+pub const PPAGE_TABLE_ENTRIES: usize = 786432;
 
 static PPAGE_SITE_PTR: AtomicUsize = AtomicUsize::new(0); // 0=none, 1=failed, else ptr
 
@@ -455,7 +524,13 @@ fn ppage_site_table() -> *mut [AtomicU8; PPAGE_TABLE_ENTRIES] {
     }
 }
 
-pub const PSITE_SLOTS: usize = 64;
+/// 256 slots (fake-OOM audit, session 22): at 64 slots the table
+/// saturated with boot-time chains before the runtime allocators — the
+/// services that drain the zone never interned, and MEMPSITES showed
+/// nothing for them (pt6: top-10 nets summed to ~96k against a 558k-page
+/// other_used census). Combined with chain sanitization (see
+/// sanitized_ra) 256 covers the real site population of an OH boot.
+pub const PSITE_SLOTS: usize = 256;
 
 /// Raw free_pages() funnel count while armed — 0 means the page free side
 /// is entirely dead (no page ever returns to the zone allocator).
@@ -951,7 +1026,7 @@ fn dump_page_ledger() {
     // counters is the exec-leak amplifier.
     kroot_pollution();
     let mut ptaken = [false; PSITE_SLOTS];
-    for _ in 0..10 {
+    for _ in 0..16 {
         let mut best: isize = -1;
         let mut best_net: i64 = -1;
         for i in 0..PSITE_SLOTS {

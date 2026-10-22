@@ -1089,9 +1089,33 @@ fn handle_page_fault(regs: &mut PtRegs, access_type: u32) {    use crate::arch::
             }
             // FORENSIC (fake-OOM family): allocator state at the kill moment.
             crate::mm::page_alloc::oom_forensic_dump("pagefault OOM");
-            // Terminate user process via do_exit (properly notifies parent)
+            // fake-OOM family: Linux pagefault_out_of_memory parity — the
+            // global OOM killer (badness-based victim selection,
+            // rate-limited) gets the chance to free the real hog before
+            // this task dies. Retry on true, die on false (struck out or
+            // nothing killable).
             if regs.user_mode() {
-                crate::process::exit::do_exit(-(crate::signal::Signal::SIGKILL as i32));
+                if !crate::mm::oom_kill::fault_oom_kill_or_retry(
+                    crate::process::current_pid(),
+                ) {
+                    // Terminate user process via do_exit (properly notifies parent)
+                    crate::process::exit::do_exit(-(crate::signal::Signal::SIGKILL as i32));
+                }
+                // true: fall through — returning to userspace re-executes
+                // the faulting instruction; the victim's freed pages serve
+                // the retry.
+            } else {
+                // Kernel mode cannot do_exit, and silently re-executing
+                // would livelock. Give the rate-limited global killer the
+                // chance to free memory for the retry; if nothing is
+                // killable there is no memory source left — die loudly
+                // (the x86_64 twin's kernel-mode policy).
+                if !crate::mm::oom_kill::kernel_fault_oom_kill() {
+                    panic!(
+                        "pagefault: OOM in kernel mode at {:#x}, epc={:#x}",
+                        fault_addr, regs.epc
+                    );
+                }
             }
         }
         MmFaultResult::KernelPanic => {

@@ -2009,7 +2009,19 @@ fn handle_page_fault(regs: &mut PtRegs) {
             crate::pr_err!("pagefault: Out of memory at {:#x}", fault_addr);
             crate::mm::page_alloc::oom_forensic_dump("pagefault OOM");
             if regs.user_mode() {
-                crate::process::exit::do_exit(-(crate::signal::Signal::SIGKILL as i32));
+                // fake-OOM family: Linux pagefault_out_of_memory parity —
+                // give the global OOM killer (badness-based victim
+                // selection, rate-limited) the chance to free the real
+                // hog before this task dies. Retry on true, die on false
+                // (struck out or nothing killable).
+                if !crate::mm::oom_kill::fault_oom_kill_or_retry(
+                    crate::process::current_pid(),
+                ) {
+                    crate::process::exit::do_exit(-(crate::signal::Signal::SIGKILL as i32));
+                }
+                // true: fall through — returning to userspace re-executes
+                // the faulting instruction; the victim's freed pages serve
+                // the retry.
             } else {
                 panic!(
                     "pagefault: OOM in kernel mode at {:#x}, rip={:#x}",
