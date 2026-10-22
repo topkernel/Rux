@@ -58,8 +58,12 @@ fn dec_buf(n: u64, buf: &mut [u8; 20]) -> &[u8] {
     &buf[i..]
 }
 
-/// Append a decimal to a stack line buffer (silently truncated at the
-/// cap — every field below is far shorter than the budget).
+/// Append a decimal to a stack line buffer. The cap always leaves one
+/// byte for the terminator: `emit` writes buf[len] = '\n', and a push
+/// that consumed the whole buffer would push that store out of bounds —
+/// the exact shape of the pt3/pt4 audit-boot panics ("index out of
+/// bounds: the len is 160 but the index is 160", ledger.rs emit). pt5
+/// survived only because its census digit widths happened to sum to 159.
 struct Line {
     buf: [u8; 160],
     len: usize,
@@ -72,7 +76,12 @@ impl Line {
         l
     }
     fn push(&mut self, s: &[u8]) {
-        let room = self.buf.len() - self.len;
+        // len is capped at buf.len()-1, so `room` never underflows and
+        // buf[len] stays in bounds for emit's newline store.
+        if self.len >= self.buf.len() - 1 {
+            return;
+        }
+        let room = self.buf.len() - 1 - self.len;
         let n = s.len().min(room);
         self.buf[self.len..self.len + n].copy_from_slice(&s[..n]);
         self.len += n;
@@ -258,6 +267,14 @@ pub fn dump(site: &str) {
     let pt_count = 0u64;
 
     let mut c = Census::default();
+    // other_used physical-range histogram (fake-OOM audit, session 22):
+    // the OOM-moment dumps show other_used at 558600/736006 managed pages
+    // (pt5, ~76% of the zone) while the psite table attributes under 100k
+    // — WHERE the unflagged pages physically sit (low RAM vs the above-4G
+    // half vs the kernel-heap neighborhood) discriminates funnel families
+    // before the psite widening lands. 12 buckets x 512 MiB over 0..6G.
+    const OW_BUCKETS: usize = 12;
+    let mut ow_ranges = [0u64; OW_BUCKETS];
     for i in 0..scan {
         let page = pfn_to_page(MIN_PFN + i);
         if page.is_null() {
@@ -319,6 +336,11 @@ pub fn dump(site: &str) {
             c.lru_file += 1;
         } else {
             c.other_used += 1;
+            let phys = (MIN_PFN + i) as u64 * 4096;
+            let b = (phys / (512 * 1024 * 1024)) as usize;
+            if b < OW_BUCKETS {
+                ow_ranges[b] += 1;
+            }
         }
     }
 
@@ -341,6 +363,10 @@ pub fn dump(site: &str) {
     crate::println!(
         "MEMLEDGER   refcounts(rc>0): ==1:{} 2..8:{} >8:{}",
         c.rc_eq1, c.rc_2_8, c.rc_gt8
+    );
+    crate::println!(
+        "MEMLEDGER   other_used phys ranges (512MiB buckets 0..6G): {:?}",
+        ow_ranges
     );
 
     // Reconciliation: every descriptor is in exactly one bucket.
@@ -410,6 +436,21 @@ pub fn dump(site: &str) {
         l.dec(c.rc_2_8);
         l.push(b" rc>8=");
         l.dec(c.rc_gt8);
+        l.emit();
+        let mut l = Line::new(b"MEMLEDGER-OWRS");
+        // Descending bucket order: the above-4G half (r8..r11) is the
+        // funnel discriminator this line exists for — print it first so a
+        // pathological spread truncates the LOW tail, never the high one.
+        for bi in (0..OW_BUCKETS).rev() {
+            let v = ow_ranges[bi];
+            if v == 0 {
+                continue;
+            }
+            l.push(b" r");
+            l.dec(bi as u64);
+            l.push(b"=");
+            l.dec(v);
+        }
         l.emit();
     }
 
