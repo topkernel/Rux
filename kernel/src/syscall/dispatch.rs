@@ -820,41 +820,51 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
                 // iovec { void* base; size_t len }
                 let base = args[1];
                 if base != 0 {
-                    let iobase =
-                        unsafe { crate::arch::uaccess::get_user(base as *const u64) };
-                    let iolen =
-                        unsafe { crate::arch::uaccess::get_user((base + 8) as *const u64) };
-                    if let (Some(b), Some(l)) = (iobase, iolen) {
-                        if l > 0 && l < 0x10000 {
-                            let n = (l as usize).min(96);
-                            let mut buf = [0u8; 96];
-                            let ok = unsafe {
-                                crate::arch::uaccess::copy_from_user(
-                                    buf.as_mut_ptr(),
-                                    b as *const u8,
-                                    n,
-                                ) == 0
-                            };
-                            if ok {
-                                let text: alloc::string::String = buf[..n]
-                                    .iter()
-                                    .map(|c| {
-                                        if (0x20..0x7f).contains(c) || *c == b'\n' {
-                                            *c as char
-                                        } else {
-                                            '.'
-                                        }
-                                    })
-                                    .collect();
-                                crate::pr_warn!(
-                                    "applog pid={} comm='{}' ret={} |{}",
-                                    crate::process::current_pid(),
-                                    comm,
-                                    result,
-                                    text
-                                );
+                    // sc145: OH's hilog writev carries [header(bin), tag,
+                    // text] as SEPARATE iovecs — walk the first 3.
+                    let mut parts: alloc::vec::Vec<alloc::string::String> =
+                        alloc::vec::Vec::new();
+                    for vi in 0..3u64 {
+                        let vp = base + vi * 16;
+                        let iobase =
+                            unsafe { crate::arch::uaccess::get_user(vp as *const u64) };
+                        let iolen =
+                            unsafe { crate::arch::uaccess::get_user((vp + 8) as *const u64) };
+                        if let (Some(b), Some(l)) = (iobase, iolen) {
+                            if l > 0 && l < 0x10000 {
+                                let n = (l as usize).min(110);
+                                let mut buf = [0u8; 110];
+                                let ok = unsafe {
+                                    crate::arch::uaccess::copy_from_user(
+                                        buf.as_mut_ptr(),
+                                        b as *const u8,
+                                        n,
+                                    ) == 0
+                                };
+                                if ok {
+                                    let text: alloc::string::String = buf[..n]
+                                        .iter()
+                                        .map(|c| {
+                                            if (0x20..0x7f).contains(c) || *c == b'\n' {
+                                                *c as char
+                                            } else {
+                                                '.'
+                                            }
+                                        })
+                                        .collect();
+                                    parts.push(text);
+                                }
                             }
                         }
+                    }
+                    if !parts.is_empty() {
+                        crate::pr_warn!(
+                            "applog pid={} comm='{}' ret={} |{}",
+                            crate::process::current_pid(),
+                            comm,
+                            result,
+                            parts.join("|")
+                        );
                     }
                 }
             }
