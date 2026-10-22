@@ -485,6 +485,12 @@ pub const TIF_UPROBE: u32 = 3;
 /// TIF_MEMDIE - exiting (out of memory)
 pub const TIF_MEMDIE: u32 = 4;
 
+/// sc135 (Session Q): length of the per-task all-syscalls nr ring
+/// (Task::last_calls). Shared by the dispatch-side writer and the
+/// APP-PARK / thread-exit / APP-THR dump readers so the ring length
+/// lives in exactly one place.
+pub const LAST_CALLS_LEN: usize = 96;
+
 /// R56-heal pick-state machine values (Task::ti_pick_state).
 /// PICKED: published by mark_picked_on_cpu under the GRQ.
 /// LIVE: affirmed by __switch_to's CAS(0 -> 1) right before the register
@@ -623,13 +629,24 @@ pub struct Task {
     /// Stored at dispatch EXIT when 0 > ret > -4096.
     pub last_fails: [AtomicU32; 8],
     pub last_fails_cur: core::sync::atomic::AtomicUsize,
+    /// sc135 (Session Q): a0/a1 companions for the fail ring, same index.
+    /// The park decode named the pre-park tail as nr167=-22 (prctl EINVAL)
+    /// x1-2 per child, but nr+errno alone cannot say WHICH option — and
+    /// OH may exercise a prctl option this kernel rejects but Linux
+    /// accepts. a0 = the option, a1 = the sub-op/arg.
+    pub last_fails_a0: [AtomicU64; 8],
+    pub last_fails_a1: [AtomicU64; 8],
 
-    /// sc128 (Session P): ring of the last 12 syscalls (nr only) for
-    /// this task — the park decode needs the final SUCCESS sequence too
-    /// (what the child does between the failed dlopen cascade and the
-    /// cond park: more mmaps? clone attempts? closes?). Stored at every
-    /// dispatch exit.
-    pub last_calls: [AtomicU32; 12],
+    /// sc128 (Session P): ring of the last syscalls (nr only) for this
+    /// task — the park decode needs the final SUCCESS sequence too (what
+    /// the child does between the failed dlopen cascade and the cond
+    /// park: more mmaps? clone attempts? closes?). Stored at every
+    /// dispatch exit. sc135 (Session Q): deepened 12 -> 96 — sc129's
+    /// 12-deep ring showed only the clock_gettime retry loop, masking
+    /// everything the child did between the dlopen cascade and the park;
+    /// 96 covers the full pre-park tail unless the retry loop spins
+    /// >96 calls before the eternal WAIT entry.
+    pub last_calls: [AtomicU32; LAST_CALLS_LEN],
     pub last_calls_cur: core::sync::atomic::AtomicUsize,
 
     // ==================== task_struct fields ====================
@@ -1184,6 +1201,8 @@ impl Task {
             last_syscall_nr: core::sync::atomic::AtomicU32::new(0),
             last_fails: core::array::from_fn(|_| AtomicU32::new(0)),
             last_fails_cur: core::sync::atomic::AtomicUsize::new(0),
+            last_fails_a0: core::array::from_fn(|_| AtomicU64::new(0)),
+            last_fails_a1: core::array::from_fn(|_| AtomicU64::new(0)),
             last_calls: core::array::from_fn(|_| AtomicU32::new(0)),
             last_calls_cur: core::sync::atomic::AtomicUsize::new(0),
             last_syscall_a0: AtomicU64::new(0),
@@ -1837,7 +1856,15 @@ impl Task {
             core::sync::atomic::AtomicUsize::new(0),
         );
         ptr::write(
-            (ptr as usize + offset_of!(Task, last_calls)) as *mut [AtomicU32; 12],
+            (ptr as usize + offset_of!(Task, last_fails_a0)) as *mut [AtomicU64; 8],
+            core::array::from_fn(|_| AtomicU64::new(0)),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, last_fails_a1)) as *mut [AtomicU64; 8],
+            core::array::from_fn(|_| AtomicU64::new(0)),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, last_calls)) as *mut [AtomicU32; LAST_CALLS_LEN],
             core::array::from_fn(|_| AtomicU32::new(0)),
         );
         ptr::write(

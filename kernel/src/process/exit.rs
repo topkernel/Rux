@@ -527,21 +527,35 @@ pub fn do_exit(exit_code: i32) -> ! {
                     let i = (cur8 + 8 - 1 - k) % 8; // newest first
                     let v = (*current).last_fails[i].load(core::sync::atomic::Ordering::Relaxed);
                     if v != 0 {
-                        let _ = write!(s, " nr{}=-{}", v & 0xffff, v >> 16);
+                        // sc135 (Session Q): a0/a1 name the failing call's
+                        // leading args (prctl option et al).
+                        let a0 = (*current).last_fails_a0[i]
+                            .load(core::sync::atomic::Ordering::Relaxed);
+                        let a1 = (*current).last_fails_a1[i]
+                            .load(core::sync::atomic::Ordering::Relaxed);
+                        let _ = write!(
+                            s,
+                            " nr{}=-{} a0={:#x} a1={:#x}",
+                            v & 0xffff,
+                            v >> 16,
+                            a0,
+                            a1
+                        );
                     }
                 }
             }
             // sc131 (Session P): the FFRT worker batch exits CLEANLY with
             // ZERO failing syscalls — the fails-only print was silent for
             // exactly the threads we hunt. Always print (threads only),
-            // now with the ALL-calls ring (12, newest first) so the
-            // worker's whole short life is visible.
+            // now with the ALL-calls ring (96 since sc135, newest first)
+            // so the worker's whole short life is visible.
             let mut c = alloc::string::String::new();
             {
+                const RL: usize = crate::process::task::LAST_CALLS_LEN;
                 let cur12 =
                     (*current).last_calls_cur.load(core::sync::atomic::Ordering::Relaxed);
-                for k in 0..12 {
-                    let i = (cur12 + 12 - 1 - k) % 12; // newest first
+                for k in 0..RL {
+                    let i = (cur12 + RL - 1 - k) % RL; // newest first
                     let v = (*current).last_calls[i].load(core::sync::atomic::Ordering::Relaxed);
                     if v != 0 {
                         let _ = write!(c, " {}", v);

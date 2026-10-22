@@ -691,12 +691,15 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
     SYSCALL_RING[SYSCALL_CURSOR.fetch_add(1, core::sync::atomic::Ordering::Relaxed) % SYSCALL_RING.len()]
         .record(crate::process::current_pid(), syscall_no as u32, args[0], args[1], result as u64);
 
-    // sc128 (Session P): per-task nr-only ring of the last 12 syscalls
+    // sc128 (Session P): per-task nr-only ring of the last syscalls
     // (successes included) — read at APP-PARK to see the child's final
-    // action sequence, not just its failures.
+    // action sequence, not just its failures. sc135 (Session Q): ring
+    // deepened 12 -> LAST_CALLS_LEN (96) — sc129's 12-deep ring saw only
+    // the clock_gettime retry loop masking the real pre-park sequence.
     if let Some(cur) = crate::sched::current() {
         use core::sync::atomic::Ordering::Relaxed;
-        let idx = unsafe { (*cur).last_calls_cur.fetch_add(1, Relaxed) } % 12;
+        let idx = unsafe { (*cur).last_calls_cur.fetch_add(1, Relaxed) }
+            % crate::process::task::LAST_CALLS_LEN;
         unsafe { (*cur).last_calls[idx].store((syscall_no as u32) & 0xffff, Relaxed) };
     }
 
@@ -704,11 +707,52 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
     // the park decode needs the pre-park failure tail (musl pthread_create
     // mmaps the thread stack BEFORE clone; a failed mmap means no clone
     // ever reaches the kernel census and nothing else records it).
+    // sc135 (Session Q): a0/a1 stored alongside — the nr167=-22 entries
+    // need the prctl OPTION named.
     if result < 0 && result > -4096 {
         if let Some(cur) = crate::sched::current() {
             let packed = ((-(result) as u32) << 16) | ((syscall_no as u32) & 0xffff);
             let idx = unsafe { (*cur).last_fails_cur.fetch_add(1, core::sync::atomic::Ordering::Relaxed) } % 8;
             unsafe { (*cur).last_fails[idx].store(packed, core::sync::atomic::Ordering::Relaxed) };
+            unsafe { (*cur).last_fails_a0[idx].store(args[0], core::sync::atomic::Ordering::Relaxed) };
+            unsafe { (*cur).last_fails_a1[idx].store(args[1], core::sync::atomic::Ordering::Relaxed) };
+        }
+    }
+
+    // sc135 (Session Q): name the prctl OPTION behind the parked app
+    // children's nr167=-22 fail-tail entries (1-2 per child). The
+    // unimplemented-option warning inside sys_prctl has a 32-line budget
+    // that hdf_devhost retry loops eat long before the app window, and
+    // EINVAL also leaves IMPLEMENTED arms (PR_SET_VMA sub-op, securebits
+    // mask > 0xff, capbset > CAP_LAST_CAP, PR_CAP_AMBIENT sub-op) which
+    // print nothing. Catch every prctl-EINVAL at dispatch exit with all
+    // five args, scoped to the app family, budget 40.
+    if syscall_no == 167 && result == -22 {
+        let comm = crate::sched::current()
+            .map(|t| unsafe { (*t).comm() })
+            .map(|c| core::str::from_utf8(c).unwrap_or(""))
+            .unwrap_or("")
+            .trim_end_matches('\0');
+        let is_app = comm.contains("launcher")
+            || comm.contains("settingsdata")
+            || comm.contains("systemui")
+            || comm.contains("dataability")
+            || comm == "appspawn";
+        if is_app {
+            static PRCTL_EI_N: core::sync::atomic::AtomicUsize =
+                core::sync::atomic::AtomicUsize::new(0);
+            if PRCTL_EI_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 40 {
+                crate::pr_warn!(
+                    "prctl-einval: pid {} comm='{}' option={} a1={:#x} a2={:#x} a3={:#x} a4={:#x}",
+                    crate::process::current_pid(),
+                    comm,
+                    args[0],
+                    args[1],
+                    args[2],
+                    args[3],
+                    args[4]
+                );
+            }
         }
     }
 

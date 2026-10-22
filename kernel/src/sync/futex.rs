@@ -1570,17 +1570,18 @@ pub fn sys_futex_handler(args: &[u64; 6]) -> i64 {
                             op
                         );
                         // sc128 (Session P): the nr-only ALL-syscall ring
-                        // (last 12, successes included, oldest first) —
-                        // the final action sequence between the dlopen
-                        // cascade and the park.
+                        // (last 96 since sc135, successes included,
+                        // newest first) — the final action sequence
+                        // between the dlopen cascade and the park.
                         {
                             use core::sync::atomic::Ordering::Relaxed;
+                            const RL: usize = crate::process::task::LAST_CALLS_LEN;
                             let cur = tk.last_calls_cur.load(Relaxed);
                             let mut s2 = alloc::string::String::new();
                             use core::fmt::Write;
                             let _ = write!(s2, "APP-PARK calls:");
-                            for k in 0..12 {
-                                let i = (cur + 12 - k) % 12; // newest first
+                            for k in 0..RL {
+                                let i = (cur + RL - k) % RL; // newest first
                                 let v = tk.last_calls[i].load(Relaxed);
                                 if v != 0 {
                                     let _ = write!(s2, " {}", v);
@@ -1602,11 +1603,17 @@ pub fn sys_futex_handler(args: &[u64; 6]) -> i64 {
                                 let i = (cur + 8 - 1 - k) % 8; // newest first
                                 let v = tk.last_fails[i].load(Relaxed);
                                 if v != 0 {
+                                    // sc135 (Session Q): a0/a1 name the
+                                    // prctl option (nr167) and friends.
+                                    let a0 = tk.last_fails_a0[i].load(Relaxed);
+                                    let a1 = tk.last_fails_a1[i].load(Relaxed);
                                     let _ = write!(
                                         s,
-                                        " nr{}=-{}",
+                                        " nr{}=-{} a0={:#x} a1={:#x}",
                                         v & 0xffff,
-                                        v >> 16
+                                        v >> 16,
+                                        a0,
+                                        a1
                                     );
                                 }
                             }
