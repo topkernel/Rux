@@ -1833,3 +1833,68 @@ cannot find AMS; the park is the downstream symptom.
   153-partial). MILESTONE (ohgpu launcher screenshot) NOT reached —
   the park is now understood end-to-end at the OH level; the fix
   belongs to whichever side the SA-501 registration dies on.
+
+SESSION R (sc155-157, 03:1x-): SC155/156 CLOSED THE REGISTRATION QUESTION
+AND NAMED THE NEXT WALL. SA 501 registers when foundation's safwk loader
+completes; the loader is WEDGE-PRONE (sc155) but not hard-stuck (sc156
+got through). The standing park cause moved one hop DOWN: children now
+reach AMS, but AMS->child ScheduleStartAbility rides a fork-shared
+binder proc (Linux VM_DONTCOPY parity missing). Fix landed sc157.
+- sc155 (SAREG v1, global code 3/4/10/21 match): 161 code-3 sends seen
+  before the 400-line budget died on HDI-interface noise (codes are
+  PER-INTERFACE: powermgr->hdf_devmgr code=4 is an HDI method, not
+  samgr REMOVE; "ohos.appexecfwk.Installd" code 10/21 noise too).
+  Foundation (pid 580) sent ONLY 2 ADDs + 3 ADD_ONDEMANDs; OpenSo
+  narration: 401(7005ms) 4606(4003ms) 4607(0ms) 3299(1000ms)
+  3203(3002ms) 3704(0ms) then NO OpenSo(180) ever - the loader main
+  thread wedged after phase-1 OpenSo. safwk (LocalAbilityManager):
+  FindAndStartPhaseTasks = StartPhaseTasks(phase) async pool tasks,
+  InitializeRunOnCreateSaProfiles(phase+1) OpenSo, WaitForTasks =
+  cond wait_for(100s, MAX_SA_STARTUP_TIME). Phase-1 SAs never started,
+  so the wedge was WaitForTasks-adjacent (a 100s timed wait that never
+  fired, or an earlier untimed park).
+- sc156 (FTWAIT census + SAREG v2 samgr-token filter + applog budget
+  fix): foundation main thread tid 553 did TWO 100s rel-timeout waits
+  (uaddr main-stack, op=0x80 = WAIT|PRIVATE) and BOTH RETURNED 0
+  (woken, phase tasks completed) - the sc155 wedge is NOT
+  deterministic; sc156 loader went through. SA-501's
+  AddSystemAbility WAS SENT (parcel f5010000 at offset 56; token
+  "ohos.samgr.accessToken" = 22 chars) and the reply's first u32 = 0
+  (SUCCESS). Full samgr ADD census now decodable: 401,4606,4607,501,
+  3299,3302,3303,3308,511,5100,6105,200,3013... (vs reference Linux's
+  102 inserts). sc154's "zero AddSystemAbility narration" was hilog
+  loss, NOT absence.
+- sc156 NEXT WALL: children spawned AFTER 501 registered still park
+  (LIFECYCLE_TIMEOUT, AMSI1640 retry loop), but their txn pattern
+  ADVANCED: PING + GetOnDemandIds(30) + CheckImmediately(12) +
+  TRANS_SYNC(code 0, ipc_types TRANS_SYNC=0) -> pid 553 foundation +
+  CheckImmediately(12). The child GOT the AMS proxy (isExist=1 path)
+  and initiated the dbinder-style session call. Then park - waiting
+  for AMS's ScheduleStartAbility callback (event #3).
+- ROOT SHAPE (sc156/157): the children's APPTXN lines are stamped
+  "from pid=<DAEMON proc>" with comm='m.ohos.systemui' - forked
+  appspawn children REUSE the daemon's binder fd AND (on Rux) its
+  inherited SHARED mapping, so ALL children share ONE binder_proc:
+  transactions attributed to the daemon's pid, and binder NODES the
+  children register (their IAppScheduler) are OWNED BY THE DAEMON'S
+  PROC - AMS's calls to a child land on the SHARED proc todo where the
+  daemon's OS_IPC reader threads compete with the child. On Linux this
+  cannot happen: binder_mmap sets VM_DONTCOPY, the child loses the
+  mapping at fork and must open /dev/binder itself.
+- sc157 (fe6a7554): VmaFlags::DONTFORK (0x04000000) + binder mmap
+  stamps it + MmStruct::fork skips DONTFORK VMAs (exempt list, VMA
+  snapshot, COW PTE walk) = Linux VM_DONTCOPY parity. Plus:
+  BinderNode.reg_tgid stamp + APPTXN prints txns to child-registered
+  nodes from ANY sender (the AMS->child hop); binder-open visibility
+  probe (warn level, budget 220 - did any child ever open /dev/binder
+  itself?); applog comm-based gate (the sc155 pid latch mis-latched in
+  sc156 and the daemon's ImplClass storm ate 1062/1200 lines);
+  ArkCompiler [gc] noise filter; applog budget 2400.
+- Interpretation grid for sc157: (a) children CRASH on the stale VA =>
+  OH's reopen logic keys off something we can then replicate;
+  (b) binder-open shows child pids opening /dev/binder => children get
+  own procs, AMS->child deliveries routable, APPTXN "child=" field
+  shows the ScheduleStartAbility hop => watch for UI; (c) no child
+  opens and no crash => OH children really use the inherited fd, and
+  the fix direction flips to kernel-side per-tgid isolation inside a
+  shared proc.
