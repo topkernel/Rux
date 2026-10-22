@@ -1555,3 +1555,45 @@ to a pthread_cond_timedwait on a stack cond; holder-hunt in flight.
 Boots this session: sc119 (good, census+mntslow), sc120/121 (flooded,
 killed early), sc122 (good, KILLDUMP handshake decode), sc123 (good,
 APP-PARK chain), sc124 (wedged-ish, forkgate), sc125 (in flight).
+
+SESSION P continued (12:0x-12:4x): the causal chain narrowed to the
+WORKER THREADS' instant death; exit forensics boot sc130 in flight.
+- sc125 (fixed census): CLONE_THREAD creations DO happen under comm
+  'appspawn' (the pre-rename window the old filter was blind to):
+  appspawn tgid 362 (OS_IPC_0, OS_DfxWatchdog, 4x OS_GC_Thread), one
+  early child tgid 1146 (OS_IPC_0_1262 + OS_DfxWatchdog_1263, alive),
+  and a 4-thread batch 1289-1292 that NEVER appears in any taskdump =
+  created and exited instantly. The later 'spawns' are AMS retries of
+  the same parked app family - creation never stopped globally; the
+  parked apps just never get to their own pthread_create.
+- sc126 (fail-latch, Task::last_fails 8x (nr|errno<<16)): parked
+  children's pre-park failure tails: launcher/systemui = openat ENOENT
+  x6-7 + one prctl EINVAL; dataability = writev EAGAIN x8 (hilog
+  socket full - log spam starving their latch).
+- sc127 (openmiss fixed: was testing RAW x86 nr 257 at the translated
+  exit side - openat=generic 56 never matched; was pr_info, filtered
+  at loglevel=4): first paths = ld-musl namespace cascades (benign
+  probing noise, ate the budget).
+- sc128 (openmiss rescoped to renamed comms): THE park-adjacent miss
+  named: libsecurity_component_client_enhance.z.so - probed in ~16
+  namespace dirs by 5 children immediately before parking; absent from
+  EVERY system image on the host (common/sdk/service variants exist).
+  BUT no image lib lists it in DT_NEEDED - it is a pure dlopen probe,
+  likely optional; on real Linux this same image misses it too. NOT
+  yet proven causal.
+- sc129 (all-calls nr ring, 12 deep): every parked child's last 12
+  COMPLETED syscalls are ALL clock_gettime - the child is alive and
+  looping {clock_gettime, cond wait_for} - a retry loop waiting for a
+  readiness flag no thread will set. And the census caught 4 more
+  worker creations (pids 1458-1461, comm='appspawn') right after the
+  parked window - the FFRT workers ARE created, then exit instantly
+  and CLEANLY (process survives; a fault would kill the process).
+  => the remaining question is exactly WHAT fails inside the workers.
+- sc130 (booting): do_exit prints the exiting thread's fail tail
+  (budget 12) - the workers' fatal syscall error gets named.
+ALSO this leg: generic-nr reference for reading latches: 56=openat
+57=close 63=read 64=write 66=writev 98=futex 101=nanosleep
+113=clock_gettime 137=rt_sigtimedwait 167=prctl 214=brk 215=munmap
+220=clone 222=mmap 226=mprotect 291=statx (435=clone3); the raw
+x86_64 orig_rax numbers differ (e.g. 202=futex, 9=mmap) - KILLDUMP
+prints raw, the latches print translated.
