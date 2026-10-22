@@ -198,10 +198,23 @@ pub fn sys_clone(args: SyscallArgs) -> i64 {
             || comm.contains("settingsdata")
             || comm.contains("systemui")
             || comm.contains("dataability");
-        if is_app {
+        // sc124 (Session P): the comm filter was BLIND for the pre-rename
+        // window — an appspawn child keeps comm 'appspawn' until late
+        // (dlopen of the engine + its .init_array constructors run under
+        // the OLD name; sc118 caught pid 1200 comm=appspawn RUNNING as a
+        // fresh child). The park decode (pthread_cond_timedwait on a
+        // stack cond, PRIVATE futex — same-process signaler required)
+        // makes the constructor-phase thread creation the prime suspect:
+        // on Linux engine constructors create the worker that later
+        // signals this cond; whether that clone HAPPENS on Rux was never
+        // measured. Log clones from comm 'appspawn' too — the flags
+        // field separates the parent's fork (SIGCHLD, no CLONE_VM) from
+        // the child's engine thread creation (CLONE_VM|CLONE_THREAD).
+        let is_spawn = comm == "appspawn";
+        if is_app || is_spawn {
             static N3: core::sync::atomic::AtomicUsize =
                 core::sync::atomic::AtomicUsize::new(0);
-            if N3.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 80 {
+            if N3.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 120 {
                 return match do_clone(clone_args) {
                     Ok(pid) => {
                         crate::pr_warn!(
@@ -5152,7 +5165,8 @@ pub fn sys_clone3(args: SyscallArgs) -> i64 {
             || comm.contains("settingsdata")
             || comm.contains("systemui")
             || comm.contains("dataability");
-        if is_app {
+        let is_spawn = comm == "appspawn";
+        if is_app || is_spawn {
             static N4: core::sync::atomic::AtomicUsize =
                 core::sync::atomic::AtomicUsize::new(0);
             if N4.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 20 {
