@@ -242,6 +242,56 @@ pub fn sys_clone(args: SyscallArgs) -> i64 {
                             flags,
                             pid
                         );
+                        // sc139 (Session Q): the WORKING reference — the
+                        // appspawn daemon's own filtered init ring, dumped
+                        // in the forking thread's context at a real fork
+                        // (no CLONE_VM). The daemon reaches pthread_create
+                        // and runs its whole loader cascade; APP-PARK shows
+                        // the parked child's ring. The diff of the two is
+                        // the divergence hunt. Budget 2 (first two forks).
+                        if flags & 0x00000100 == 0 {
+                            use core::fmt::Write;
+                            use core::sync::atomic::Ordering::Relaxed;
+                            static NPAR: core::sync::atomic::AtomicUsize =
+                                core::sync::atomic::AtomicUsize::new(0);
+                            if NPAR.fetch_add(1, Relaxed) < 2 {
+                                if let Some(t) = crate::sched::current() {
+                                    unsafe {
+                                        const RL: usize =
+                                            crate::process::task::INIT_CALLS_LEN;
+                                        let cur = (*t).init_calls_cur.load(Relaxed);
+                                        let mut s2 = alloc::string::String::new();
+                                        let _ = write!(
+                                            s2,
+                                            "APP-PAR: tgid {} comm='{}' init:",
+                                            (*t).tgid(),
+                                            core::str::from_utf8((*t).comm())
+                                                .unwrap_or("")
+                                                .trim_end_matches('\0')
+                                        );
+                                        for k in 0..RL {
+                                            let i = (cur + RL - k) % RL;
+                                            let v = (*t).init_calls[i].load(Relaxed);
+                                            if v != 0 {
+                                                let _ = write!(s2, " {}", v);
+                                            }
+                                        }
+                                        crate::pr_warn!("{}", s2);
+                                        let mut s3 = alloc::string::String::new();
+                                        let _ = write!(s3, "APP-PAR: initA:");
+                                        for k in 0..RL {
+                                            let i = (cur + RL - k) % RL;
+                                            let v = (*t).init_calls[i].load(Relaxed);
+                                            if v != 0 {
+                                                let a0 = (*t).init_a0[i].load(Relaxed);
+                                                let _ = write!(s3, " {}@{:#x}", v, a0);
+                                            }
+                                        }
+                                        crate::pr_warn!("{}", s3);
+                                    }
+                                }
+                            }
+                        }
                         // sc135 (Session Q): a forked appspawn child that
                         // CREATES a thread is the WORKING shape (sc125:
                         // tgid 1146 -> OS_IPC_0 + OS_DfxWatchdog, alive)

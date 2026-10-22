@@ -1614,7 +1614,7 @@ pub fn sys_futex_handler(args: &[u64; 6]) -> i64 {
                             crate::pr_warn!("{}", s2);
                             let mut s3 = alloc::string::String::new();
                             let _ = write!(s3, "APP-PARK initA:");
-                            for k in 0..32.min(RL) {
+                            for k in 0..RL {
                                 let i = (cur + RL - k) % RL; // newest first
                                 let v = tk.init_calls[i].load(Relaxed);
                                 if v != 0 {
@@ -1656,6 +1656,8 @@ pub fn sys_futex_handler(args: &[u64; 6]) -> i64 {
                         }
                         // SAFETY: t is the current task, in its own syscall.
                         unsafe { rwfz_stack_frames(t, "apppark", 12, 96) };
+                        // sc139: the call-site-validated caller chain.
+                        unsafe { apppark_rets(t) };
                         // sc136 (Session Q): the park chain's caller frame
                         // (raw ustack slot[12] 0x7ff0816ff8a8 family) sits
                         // in a lib VMA never printed by the frames scan
@@ -2631,6 +2633,87 @@ fn probe_file_path(f: &crate::fs::file::File) -> alloc::string::String {
         }
     }
     p
+}
+
+/// sc139 (Session Q): call-site-validated stack scan for the parked
+/// child. sc138 killed BOTH candidate "caller" slots as stale decoys
+/// (slot[1] resolved into libc++ string::assign — data, not code flow;
+/// slot[12] points into a zero page), so the cond's true caller chain
+/// is still unnamed. This pass keeps a stack qword only when the bytes
+/// IMMEDIATELY BEFORE it decode as a call instruction — `E8 rel32`
+/// (v-5) or `FF D0-D7` call-reg (v-2) — the cheap x86-64 signature of
+/// a real return address. Slots surviving that check are the real
+/// frames. SAFETY: `task` live; diagnostic reads through its tables.
+unsafe fn apppark_rets(task: *const Task) {
+    let tk = unsafe { &*task };
+    let top = tk.kernel_stack_top();
+    #[cfg(feature = "x86_64")]
+    let rsp = unsafe {
+        let regs = (top.wrapping_sub(crate::arch::x86_64::pt_regs::PT_REGS_SIZE))
+            as *const crate::arch::x86_64::pt_regs::PtRegs;
+        (*regs).rsp as usize
+    };
+    #[cfg(not(feature = "x86_64"))]
+    let rsp = 0usize;
+    if rsp == 0 {
+        return;
+    }
+    let Some(aspace) = tk.address_space() else { return };
+    let vmas = aspace.vma_read();
+    let read_u64_at = |va: usize| -> Option<u64> {
+        if va & 0xfff > 0xff8 {
+            return None;
+        }
+        let lo = unsafe { read_u32_via_task(task, va)? };
+        let hi = unsafe { read_u32_via_task(task, va + 4)? };
+        Some(lo as u64 | ((hi as u64) << 32))
+    };
+    use core::fmt::Write;
+    let mut out = alloc::string::String::new();
+    let _ = write!(out, "APPPARK-RETS:");
+    let mut found = 0u32;
+    for i in 0..128u32 {
+        if found >= 12 {
+            break;
+        }
+        let Some(v) = read_u64_at(rsp + 8 * i as usize) else {
+            continue;
+        };
+        if v < 0x1000 || v > 0x7fff_ffff_ffff {
+            continue;
+        }
+        // Must land in some VMA (code or JIT — anon allowed here, the
+        // call-site check filters garbage).
+        let Some(vm) = vmas.find(crate::mm::page::VirtAddr::new(v as usize)) else {
+            continue;
+        };
+        // 8 bytes ending at v: b[7] is the byte at v-1.
+        let Some(w) = read_u64_at(v as usize - 8) else {
+            continue;
+        };
+        let b = w.to_le_bytes();
+        let is_call = b[3] == 0xE8 /* call rel32 ends at v */
+            || (b[6] == 0xFF && (b[7] & 0xF8) == 0xD0) /* call reg */
+            || (b[4] == 0xFF && (b[5] & 0xC7) == 0x05); /* call [rip+disp32]-ish */
+        if !is_call {
+            continue;
+        }
+        let _ = write!(
+            out,
+            " [{}]@{:#x}({:#x}-{:#x},off={:#x},b={:#018x})",
+            i,
+            v,
+            vm.start().as_usize(),
+            vm.end().as_usize(),
+            vm.offset() + (v as usize - vm.start().as_usize()),
+            read_u64_at(v as usize).unwrap_or(0)
+        );
+        found += 1;
+    }
+    if found == 0 {
+        let _ = write!(out, " none");
+    }
+    crate::pr_warn!("{}", out);
 }
 
 /// One user-stack frame line resolved to its covering VMA (Session F's

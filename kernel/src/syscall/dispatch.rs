@@ -713,10 +713,19 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
     {
         let skip = match syscall_no {
             113 | 66 | 203 => true,
-            // futex: skip only the main-stack-top cond retry sites (same
-            // range as the APP-PARK gate); worker-startup futexes on heap
-            // words stay recorded.
-            98 => args[0] >= 0x7ffffffd0000 && args[0] < 0x7ffffffff000,
+            // futex: sc138 showed the park loop also spins FUTEX WAITS on
+            // the runtime-arena words (0x7ff00002aec0 family, short
+            // timeouts) — those flooded the init ring as badly as the
+            // clocks. sc139: skip ALL futex WAITs (op FUTEX_WAIT(0) /
+            // FUTEX_WAIT_BITSET(9), with or without PRIVATE(0x80)) in the
+            // init ring; WAKEs and requeues stay recorded — a wake is a
+            // worker-handshake event, exactly what the diff needs. The
+            // final park wait is named by the APP-PARK header itself.
+            98 => {
+                let op = (args[1] & 0x7f) as u32;
+                op == 0 /* FUTEX_WAIT */ || op == 9 /* FUTEX_WAIT_BITSET */
+                    || args[0] >= 0x7ffffffd0000 && args[0] < 0x7ffffffff000
+            }
             _ => false,
         };
         if !skip {
@@ -745,6 +754,37 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
             unsafe { (*cur).last_fails[idx].store(packed, core::sync::atomic::Ordering::Relaxed) };
             unsafe { (*cur).last_fails_a0[idx].store(args[0], core::sync::atomic::Ordering::Relaxed) };
             unsafe { (*cur).last_fails_a1[idx].store(args[1], core::sync::atomic::Ordering::Relaxed) };
+        }
+    }
+
+    // sc140 (Session Q): the parked child's retry loop runs ioctl x3-5
+    // between dlopen attempts — name the FD and COMMAND (binder
+    // BINDER_WRITE_READ? /dev/xpm? a param-area ioctl?). The fd set at
+    // park time has no xpm/dec fd, so the loop polls an open service fd.
+    if syscall_no == 29 {
+        let comm = crate::sched::current()
+            .map(|t| unsafe { (*t).comm() })
+            .map(|c| core::str::from_utf8(c).unwrap_or(""))
+            .unwrap_or("")
+            .trim_end_matches('\0');
+        let family = comm.contains("launcher")
+            || comm.contains("settingsdata")
+            || comm.contains("systemui")
+            || comm.contains("dataability")
+            || comm == "appspawn";
+        if family {
+            static IO_N: core::sync::atomic::AtomicUsize =
+                core::sync::atomic::AtomicUsize::new(0);
+            if IO_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 80 {
+                crate::pr_warn!(
+                    "appioctl: pid={} comm='{}' fd={} cmd={:#x} ret={}",
+                    crate::process::current_pid(),
+                    comm,
+                    args[0],
+                    args[1],
+                    result
+                );
+            }
         }
     }
 
