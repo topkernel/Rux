@@ -1939,6 +1939,23 @@ min; grep on clean "MEMLEDGER" text finds nothing, search
 often than its 30-s period. The single legible line carried the
 decisive numbers; the cadence question belongs to the dfx line.
 
+### Session 23 close-out (chain stewardship + landing)
+
+- r39: FULL budget clean (78,267 lines, 0 WW-HIT, 0 panics), driver
+  self-advanced. r40: FULL budget clean (54,035 lines, 0 WW-HIT,
+  0 panics) — then the chain DRIVER died in an infra sweep (log frozen
+  02:00, no r41 start); relaunched from r41 at 03:24
+  (run/ww-chain-s23.log, WW-ARMED verified). Cumulative: **0 WW-HIT
+  across r1-r40** partials.
+- The make-test riscv QEMU outlived its harness again (post-summary
+  panic) holding test/rootfs.img's write lock — reaped after
+  cwd+cmdline verification (own process), then the smoke ran clean.
+- config.rs restored to the committed x86_64 flavor after the riscv
+  legs (generated-artifact quirk).
+- Landed as dc096f14 (wip snapshot ed444e08 beneath it); pushed via
+  ssh.github.com:443. MERGE-READY for main with its gates: probes x3,
+  fm1 no-OOM audit, fm2 45-min 0-panic, riscv 1085/1088 + smoke.
+
 ### Handoff notes
 
 1. **riscv64 twin port** (next mm session, GNOME fake-OOM is the same
