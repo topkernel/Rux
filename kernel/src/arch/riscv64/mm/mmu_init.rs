@@ -1268,6 +1268,15 @@ pub unsafe fn free_user_page_tables(
                     pfn,
                     (vpn2 << 30) | (vpn1 << 21) | (vpn0 << 12),
                 );
+                // PCACHE leaf (filemap_fault, riscv64 port): drop the
+                // mapping's page-cache pin after the descriptor put inside
+                // release_user_leaf (same ordering as unmap_pages; the
+                // pin's release may free an invalidated frame). PCACHE only
+                // ever sits on 4K user leaves — the L1/L2 leaf arms above
+                // never fault through the file path.
+                if pte0.bits() & super::mm_ops::cow_flags::PCACHE != 0 {
+                    super::mm_ops::release_cache_mapping_pin(pfn);
+                }
             }
             // FORENSIC: census the L0 table before freeing it.
             if get_alloc_stage() == AllocStage::Late && !PT_LEDGER.is_boot(ppn0) {

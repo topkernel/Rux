@@ -1650,12 +1650,31 @@ fn sys_mprotect_inner(args: [u64; 6]) -> i64 {
                         // (review MM-H7). Also never raise W on a page
                         // whose COW bit is set — the write fault path owns
                         // the copy.
+                        //
+                        // PCACHE (RSW bit 9, riscv64 filemap_fault port):
+                        // a mapping-ownership bit, preserved like COW —
+                        // dropping it would leak the page-cache pin
+                        // forever (frame unevictable). A cache-backed leaf
+                        // NEVER gains W in place: the frame is shared with
+                        // the page cache, so a W-upgrade diverts the first
+                        // write through COW (Linux writenotify; x86_64
+                        // mprotect_pte_range twin).
                         let ppn = pte0.ppn();
-                        let cow_bit = pte0.bits() & (1 << 8);
+                        let cow_bit =
+                            pte0.bits() & crate::arch::mm::mm_ops::cow_flags::COW;
+                        let pcache_bit =
+                            pte0.bits() & crate::arch::mm::mm_ops::cow_flags::PCACHE;
                         let mut flags = new_flags;
                         if cow_bit != 0 {
                             flags |= cow_bit;
                             flags &= !PageTableEntry::W; // defer W to COW fault
+                        }
+                        if pcache_bit != 0 {
+                            flags |= pcache_bit;
+                            if flags & PageTableEntry::W != 0 {
+                                flags |= crate::arch::mm::mm_ops::cow_flags::COW;
+                                flags &= !PageTableEntry::W;
+                            }
                         }
                         let new_pte = PageTableEntry::from_bits((ppn << 10) | flags);
                         (*table0).set(vpn0, new_pte);
