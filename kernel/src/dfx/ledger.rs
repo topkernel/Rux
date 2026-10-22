@@ -117,6 +117,62 @@ pub fn compact_line() {
     l.emit();
 }
 
+/// Raw-UART census line (printk-free): the page-descriptor class counts
+/// the compact line lacks. One extra O(nr_descs) walk — the dump path
+/// already does one; this is the printk-wedge-proof copy of the numbers
+/// the fake-OOM audit needs (anon vs pinned cache vs reserved). Emitted
+/// by dump() next to compact_line(), and safe to call standalone.
+pub fn census_line() {
+    let st = crate::mm::page_desc::page_desc_stats();
+    let mut l = Line::new(b"MEMLEDGER-CENSUS");
+    l.push(b" total=");
+    l.dec(st.total_pages as u64);
+    l.push(b" used=");
+    l.dec(st.used_pages as u64);
+    l.push(b" free=");
+    l.dec(st.free_pages as u64);
+    l.push(b" reserved=");
+    l.dec(st.reserved_pages as u64);
+    l.push(b" anon=");
+    l.dec(st.anonymous_pages as u64);
+    l.push(b" cow=");
+    l.dec(st.cow_pages as u64);
+    l.push(b" mapped=");
+    l.dec(st.mapped_pages as u64);
+    l.push(b" dirty=");
+    l.dec(st.dirty_pages as u64);
+    l.emit();
+}
+
+/// Raw-UART one-liner for the page-allocator OOM forensic summary (the
+/// printk copies above can be lost to a printk wedge — see oom_forensic_dump).
+pub fn oomfx_line(
+    zone_free: u64,
+    zone_walkable: u64,
+    zone_managed: u64,
+    orphan: u64,
+    inverse: u64,
+    seed_alarms: u64,
+    double_free: u64,
+) {
+    let mut l = Line::new(b"OOMFX-RAW");
+    l.push(b" zone_free=");
+    l.dec(zone_free);
+    l.push(b" zone_walkable=");
+    l.dec(zone_walkable);
+    l.push(b" zone_managed=");
+    l.dec(zone_managed);
+    l.push(b" orphan=");
+    l.dec(orphan);
+    l.push(b" inverse=");
+    l.dec(inverse);
+    l.push(b" seed_alarms=");
+    l.dec(seed_alarms);
+    l.push(b" dblfree=");
+    l.dec(double_free);
+    l.emit();
+}
+
 /// One bucket row of the census.
 #[derive(Default)]
 struct Census {
@@ -154,6 +210,7 @@ pub fn dump(site: &str) {
 
     crate::println!("==== MEMLEDGER @ {} ====", site);
     compact_line();
+    census_line();
 
     // Zone counters (what the allocator believes).
     let mut zone_free: u64 = 0;
@@ -323,6 +380,39 @@ pub fn dump(site: &str) {
     super::driftwatch::report();
     crate::println!("==== MEMLEDGER end ====");
 
+    // Raw-UART copy of the census buckets (the printk lines above are
+    // lost when printk wedges — the exact storms this dump targets; the
+    // pt1/pt2 fake-OOM audits recovered ONLY the raw lines). Same
+    // numbers, one line, always survives.
+    {
+        let mut l = Line::new(b"MEMLEDGER-BUCKETS");
+        l.push(b" freeL=");
+        l.dec(c.free_leader);
+        l.push(b" freeM=");
+        l.dec(c.free_member);
+        l.push(b" reserved=");
+        l.dec(c.reserved);
+        l.push(b" pt=");
+        l.dec(c.page_tables);
+        l.push(b" anon=");
+        l.dec(c.anon);
+        l.push(b" cow=");
+        l.dec(c.cow);
+        l.push(b" mapped_file=");
+        l.dec(c.mapped_file);
+        l.push(b" lru_file=");
+        l.dec(c.lru_file);
+        l.push(b" other_used=");
+        l.dec(c.other_used);
+        l.push(b" rc1=");
+        l.dec(c.rc_eq1);
+        l.push(b" rc2_8=");
+        l.dec(c.rc_2_8);
+        l.push(b" rc>8=");
+        l.dec(c.rc_gt8);
+        l.emit();
+    }
+
     BUSY.store(false, Ordering::Release);
 }
 
@@ -332,4 +422,29 @@ pub fn run_pending() {
     if PENDING.swap(false, Ordering::AcqRel) {
         dump("uart-magic");
     }
+    series_tick();
+}
+
+/// Periodic raw time series (fake-OOM audit): one compact + one census
+/// line every SERIES_PERIOD while dfx=ledger is armed — the anon-growth
+/// curve that discriminates a leak (monotone growth after service
+/// steady-state) from genuine consumption. Raw UART on purpose: the
+/// printk path can wedge during exactly the storms this instruments.
+/// Called from run_pending (timer softirq cadence; timer.rs stays
+/// untouched — territory), throttled internally.
+static LAST_SERIES: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+const SERIES_PERIOD: u64 = 30 * 100; // 30 s at 100 Hz
+
+pub fn series_tick() {
+    if !crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::Ledger) {
+        return;
+    }
+    let current = crate::drivers::timer::get_jiffies();
+    if current.saturating_sub(LAST_SERIES.load(Ordering::Relaxed)) < SERIES_PERIOD {
+        return;
+    }
+    LAST_SERIES.store(current, Ordering::Relaxed);
+    compact_line();
+    census_line();
 }

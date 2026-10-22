@@ -334,6 +334,37 @@ pub fn oom_forensic_dump(site: &str) {
             "OOM-FORENSIC: inverse(linked,ref>0)={} first={:?}",
             inverse, inverse_first
         );
+
+        // Raw-UART copy of the decisive numbers. printk may be wedged
+        // during the very storms this dump targets (the pt1 audit lost
+        // every println line of this dump while the raw MEMLEDGER-COMPACT
+        // line survived): zone counter-vs-walk mismatch for ZoneNormal
+        // plus the corruption indices, one raw line.
+        let mut zf = 0usize;
+        let mut zm = 0usize;
+        let mut zw = 0usize;
+        // SAFETY: diagnostic read-only node access.
+        if let Some(node) = unsafe { crate::mm::pglist::first_online_node() } {
+            if let Some(zone) = node.zone(super::zone::ZoneType::ZoneNormal) {
+                if zone.is_initialized() {
+                    zf = zone.nr_free();
+                    zm = zone.managed_pages();
+                    let report = zone.forensic_free_report();
+                    for order in 0..=super::zone::MAX_ORDER {
+                        zw += report[order].1 << order;
+                    }
+                }
+            }
+        }
+        crate::dfx::ledger::oomfx_line(
+            zf as u64,
+            zw as u64,
+            zm as u64,
+            orphan as u64,
+            inverse as u64,
+            super::zone::SEED_ALARMS.load(Ordering::Relaxed) as u64,
+            super::zone::DOUBLE_FREE_COUNT.load(Ordering::Relaxed) as u64,
+        );
     }
     crate::println!("==== OOM-FORENSIC end ====");
 }
