@@ -802,7 +802,7 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
     // narration of exactly where the runtime init stalls. Dump the first
     // 96 bytes of the first iovec of every writev to fd 3 from the app
     // family: the OH log lines arrive straight from the kernel.
-    if syscall_no == 66 && args[0] == 3 && result != 0 {
+    if syscall_no == 66 && args[0] == 3 && result < 0 {
         let comm = crate::sched::current()
             .map(|t| unsafe { (*t).comm() })
             .map(|c| core::str::from_utf8(c).unwrap_or(""))
