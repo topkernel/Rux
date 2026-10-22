@@ -104,6 +104,71 @@ pub fn sys_clone(args: SyscallArgs) -> i64 {
     // copy_process: p->exit_signal = args->exit_signal == CSIGNAL mask).
     let exit_signal = (flags & 0xff) as u8;
 
+    // sc123 (Session P): APP-PARK decoded the children's eternal wait as
+    // pthread_cond_timedwait's MUTEX RELOCK (return chain: wait wrapper <-
+    // pthread_mutex_lock <- pthread_cond_timedwait at musl+0x11849d) on
+    // a stack-local mutex at 0x7fffffffc754 whose word reads 2 (locked +
+    // waiters) in a SINGLE-THREADED child. Two theories: (A) fork-inherited
+    // held lock — an appspawn parent-side task held this mutex when fork()
+    // copied the main stack, and no child thread can ever unlock it; (B)
+    // the child locked it itself and re-locks on an error path Rux takes
+    // but Linux does not. This probe fires AT FORK (clone without
+    // CLONE_VM/CLONE_THREAD from comm appspawn) in the forking thread's
+    // own context: it reads BOTH candidate words on the forking stack and
+    // lists every sibling thread of the tgid (comm + state + last syscall
+    // nr) — the siblings awake at fork instant are the theory-A holder
+    // candidates. word==1/2 at fork settles A outright.
+    if flags & 0x00000100 == 0 /* !CLONE_VM: real fork, stack copied */
+        && flags & 0x00010000 == 0 /* !CLONE_THREAD */
+    {
+        let comm = crate::sched::current()
+            .map(|t| unsafe { (*t).comm() })
+            .map(|c| core::str::from_utf8(c).unwrap_or(""))
+            .unwrap_or("")
+            .trim_end_matches('\0');
+        if comm == "appspawn" {
+            static NF: core::sync::atomic::AtomicUsize =
+                core::sync::atomic::AtomicUsize::new(0);
+            if NF.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 10 {
+                use crate::arch::uaccess::get_user;
+                let w1 = unsafe { get_user(0x7fffffffc754 as *const u32) };
+                let w2 = unsafe { get_user(0x7fffffffc7f4 as *const u32) };
+                crate::pr_warn!(
+                    "forkgate: appspawn fork flags={:#x} word@c754={:?} word@c7f4={:?}",
+                    flags,
+                    w1,
+                    w2
+                );
+                // Sibling snapshot: who else of this tgid is alive at
+                // fork, and what are they doing (holder candidates).
+                let my_pid = crate::process::current_pid();
+                let listed_cell = core::cell::Cell::new(0usize);
+                crate::sched::for_each_task(|t| {
+                    if listed_cell.get() >= 12 {
+                        return;
+                    }
+                    let tk = unsafe { &*t };
+                    if tk.tgid() != my_pid || tk.pid() == my_pid {
+                        return;
+                    }
+                    let nc = core::str::from_utf8(tk.comm())
+                        .unwrap_or("")
+                        .trim_end_matches('\0');
+                    let nr = tk.last_syscall_nr.load(core::sync::atomic::Ordering::Relaxed);
+                    let running = tk.state().is_running();
+                    crate::pr_warn!(
+                        "forkgate:  sib tid {} comm='{}' lastsys={} {}",
+                        tk.pid(),
+                        nc,
+                        nr,
+                        if running { "RUNNING" } else { "sleep" }
+                    );
+                    listed_cell.set(listed_cell.get() + 1);
+                });
+            }
+        }
+    }
+
     let clone_args = CloneArgs {
         flags,
         stack,
@@ -112,6 +177,67 @@ pub fn sys_clone(args: SyscallArgs) -> i64 {
         tls,
         exit_signal,
     };
+
+    // sc118 decode (Session P): the sc117-kernel boot with the refusal
+    // probes produced ZERO clone-gate / clone-fail lines while app
+    // children (os.settingsdata, telephonydataability) STILL parked
+    // single-threaded on the stack futex 0x7fffffffc754 — no clone
+    // FAILED, so either no clone was ever ATTEMPTED by these runtimes,
+    // or the worker clone SUCCEEDED and the thread died before doing
+    // its work. This census names every clone attempt (success or
+    // failure) from the app-child binaries, budgeted 80 lines: with it,
+    // "no attempt" (userspace never reaches pthread_create) separates
+    // from "success then instant death" (worker fault/exit).
+    {
+        let comm = crate::sched::current()
+            .map(|t| unsafe { (*t).comm() })
+            .map(|c| core::str::from_utf8(c).unwrap_or(""))
+            .unwrap_or("")
+            .trim_end_matches('\0');
+        let is_app = comm.contains("launcher")
+            || comm.contains("settingsdata")
+            || comm.contains("systemui")
+            || comm.contains("dataability");
+        // sc124 (Session P): the comm filter was BLIND for the pre-rename
+        // window — an appspawn child keeps comm 'appspawn' until late
+        // (dlopen of the engine + its .init_array constructors run under
+        // the OLD name; sc118 caught pid 1200 comm=appspawn RUNNING as a
+        // fresh child). The park decode (pthread_cond_timedwait on a
+        // stack cond, PRIVATE futex — same-process signaler required)
+        // makes the constructor-phase thread creation the prime suspect:
+        // on Linux engine constructors create the worker that later
+        // signals this cond; whether that clone HAPPENS on Rux was never
+        // measured. Log clones from comm 'appspawn' too — the flags
+        // field separates the parent's fork (SIGCHLD, no CLONE_VM) from
+        // the child's engine thread creation (CLONE_VM|CLONE_THREAD).
+        let is_spawn = comm == "appspawn";
+        if is_app || is_spawn {
+            static N3: core::sync::atomic::AtomicUsize =
+                core::sync::atomic::AtomicUsize::new(0);
+            if N3.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 120 {
+                return match do_clone(clone_args) {
+                    Ok(pid) => {
+                        crate::pr_warn!(
+                            "appclone: comm='{}' flags={:#x} -> pid {}",
+                            comm,
+                            flags,
+                            pid
+                        );
+                        pid as i64
+                    }
+                    Err(e) => {
+                        crate::pr_warn!(
+                            "appclone: comm='{}' flags={:#x} -> errno {}",
+                            comm,
+                            flags,
+                            -(e as i32)
+                        );
+                        e as i64
+                    }
+                };
+            }
+        }
+    }
 
     match do_clone(clone_args) {
         Ok(pid) => pid as i64,
@@ -5051,6 +5177,31 @@ pub fn sys_clone3(args: SyscallArgs) -> i64 {
         tls,
         exit_signal: exit_signal as u8,
     };
+
+    // sc119 insurance: the appclone census lives in sys_clone; a caller
+    // using clone3 (this path) would bypass it, muddying the "no clone
+    // ever attempted" decode. Same filter, same 80-line budget counter
+    // is NOT shared (this one has its own — clone3 use by OH runtimes
+    // is unlikely, the budget here is small and separate).
+    {
+        let comm = crate::sched::current()
+            .map(|t| unsafe { (*t).comm() })
+            .map(|c| core::str::from_utf8(c).unwrap_or(""))
+            .unwrap_or("")
+            .trim_end_matches('\0');
+        let is_app = comm.contains("launcher")
+            || comm.contains("settingsdata")
+            || comm.contains("systemui")
+            || comm.contains("dataability");
+        let is_spawn = comm == "appspawn";
+        if is_app || is_spawn {
+            static N4: core::sync::atomic::AtomicUsize =
+                core::sync::atomic::AtomicUsize::new(0);
+            if N4.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 20 {
+                crate::pr_warn!("appclone3: comm='{}' flags={:#x}", comm, flags);
+            }
+        }
+    }
 
     match do_clone(clone_args) {
         Ok(pid) => pid as i64,

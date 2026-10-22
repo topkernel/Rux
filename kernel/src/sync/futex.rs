@@ -1530,6 +1530,149 @@ pub fn sys_futex_handler(args: &[u64; 6]) -> i64 {
             }
         }
     }
+    // sc122 (Session P): the app-child park dump. The KILLDUMP path can
+    // never sample the park — SIGKILL lands right after the userspace DFX
+    // freeze-dump handshake, so every kill catches the child inside that
+    // handshake (getrusage loop / open), never the eternal wait. This
+    // hook dumps AT WAIT ENTRY, in the parking thread's own syscall
+    // context, for exactly the app-child shape: uaddr on the main-stack
+    // top pages (0x7ffffffd0000-0x7ffffffff000 — covers the observed
+    // c754/c7f4/cc54/cff4 sites with margin for frame variance) from an
+    // app comm, any val (2 seen so far, but do not re-filter on it).
+    // rwfz_stack_frames then prints rip/rsp/VMA + the RAW 24-word chain
+    // (musl callers + the runtime caller + the timespec at rsp+0x10)
+    // + file-backed frames. Budget 6 — the park repeats per child; the
+    // first dump already carries the chain.
+    if matches!(op & FUTEX_CMD_MASK, FUTEX_WAIT | FUTEX_WAIT_BITSET) {
+        if uaddr >= 0x7ffffffd0000 && uaddr < 0x7ffffffff000 {
+            if let Some(t) = crate::sched::current() {
+                let tk = unsafe { &*t };
+                let comm = core::str::from_utf8(&tk.comm()[..])
+                    .unwrap_or("")
+                    .trim_end_matches('\0');
+                let is_app = comm.contains("launcher")
+                    || comm.contains("settingsdata")
+                    || comm.contains("systemui")
+                    || comm.contains("dataability");
+                if is_app {
+                    static APPPARK_DUMPS: core::sync::atomic::AtomicU32 =
+                        core::sync::atomic::AtomicU32::new(0);
+                    let n =
+                        APPPARK_DUMPS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                    if n < 6 {
+                        crate::pr_warn!(
+                            "APP-PARK #{} tid {} comm='{}' uaddr={:#x} val={:#x} op={:#x}",
+                            n,
+                            tk.pid(),
+                            comm,
+                            uaddr,
+                            val,
+                            op
+                        );
+                        // sc128 (Session P): the nr-only ALL-syscall ring
+                        // (last 12, successes included, oldest first) —
+                        // the final action sequence between the dlopen
+                        // cascade and the park.
+                        {
+                            use core::sync::atomic::Ordering::Relaxed;
+                            let cur = tk.last_calls_cur.load(Relaxed);
+                            let mut s2 = alloc::string::String::new();
+                            use core::fmt::Write;
+                            let _ = write!(s2, "APP-PARK calls:");
+                            for k in 0..12 {
+                                let i = (cur + 12 - k) % 12; // newest first
+                                let v = tk.last_calls[i].load(Relaxed);
+                                if v != 0 {
+                                    let _ = write!(s2, " {}", v);
+                                }
+                            }
+                            crate::pr_warn!("{}", s2);
+                        }
+                        // sc125 (Session P): the pre-park FAILING-syscall
+                        // tail — musl pthread_create mmaps the thread stack
+                        // BEFORE clone, so an ENOMEM mmap means no clone
+                        // ever reaches the census. Latched per task.
+                        {
+                            use core::sync::atomic::Ordering::Relaxed;
+                            let cur = tk.last_fails_cur.load(Relaxed);
+                            let mut s = alloc::string::String::new();
+                            use core::fmt::Write;
+                            let _ = write!(s, "APP-PARK fails:");
+                            for k in 0..8 {
+                                let i = (cur + 8 - 1 - k) % 8; // newest first
+                                let v = tk.last_fails[i].load(Relaxed);
+                                if v != 0 {
+                                    let _ = write!(
+                                        s,
+                                        " nr{}=-{}",
+                                        v & 0xffff,
+                                        v >> 16
+                                    );
+                                }
+                            }
+                            crate::pr_warn!("{}", s);
+                        }
+                        // SAFETY: t is the current task, in its own syscall.
+                        unsafe { rwfz_stack_frames(t, "apppark", 12, 96) };
+                    }
+                }
+            }
+        }
+    }
+    // sc118 decode (Session P): every OH app child parks single-threaded
+    // in FUTEX_WAIT on its own main-thread stack at the SAME site
+    // (uaddr 0x7fffffffc754 / 0x7fffffffc7f4 — page 0x7fffffffc000; the
+    // site is shared across launcher/settingsdata/systemui binaries, so
+    // it lives in the common musl/early-runtime startup). The sc117
+    // clone-refusal probes never fired, so no clone failed. Remaining
+    // hypotheses: (a) the runtime never attempts the worker clone,
+    // (b) the worker clone succeeds but the thread dies before signaling,
+    // (c) the worker DOES send FUTEX_WAKE on this page and the wake is
+    // lost or mismatches. This census logs every futex op on that page
+    // from ANY comm (workers rename themselves — OS_FFRT_* etc. — so a
+    // comm filter would miss the very wake we hunt). Two lines per op:
+    // the entry BEFORE do_futex (a WAIT that parks for minutes must
+    // still have printed its arrival) and the result after. A WAKE line
+    // printing ->0 while a waiter sits parked is a lost wake; no WAKE
+    // at all after a WAIT is never-sent ((a) or (b) — the paired
+    // appclone census in sys_clone separates those). Budget 150 lines.
+    {
+        const STK_PAGE: usize = 0x7fffffffc000;
+        if uaddr & !0xfff == STK_PAGE {
+            // Budget raised 150 -> 400 for sc119: the page is 3 pages below
+            // the stack top of EVERY x86_64 process, so ANY main-thread
+            // futex on a shallow frame burns it — appspawn's own main-loop
+            // wait would exhaust 150 before the first app child parks.
+            // 400 ops = <=800 lines ~= 7 s of UART across a 15 min boot
+            // (vs sc115's 2472-line RWFRZ storm at ~1 s) — affordable to
+            // guarantee the census still has budget when children park.
+            static NS: core::sync::atomic::AtomicUsize =
+                core::sync::atomic::AtomicUsize::new(0);
+            if NS.load(core::sync::atomic::Ordering::Relaxed) < 400 {
+                NS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                let comm = crate::sched::current()
+                    .map(|t| unsafe { (*t).comm() })
+                    .map(|c| core::str::from_utf8(c).unwrap_or(""))
+                    .unwrap_or("")
+                    .trim_end_matches('\0');
+                let tid = crate::sched::current()
+                    .map(|t| unsafe { (*t).pid() })
+                    .unwrap_or(0);
+                crate::pr_warn!(
+                    "stkfutex: tid {} op={:#x} uaddr={:#x} val={:#x} comm='{}'",
+                    tid,
+                    op,
+                    uaddr,
+                    val,
+                    comm
+                );
+                let r = do_futex(uaddr, op, val, timeout, uaddr2, 0, val3);
+                rwfz_op_log(uaddr, op, val, r);
+                crate::pr_warn!("stkfutex: tid {} -> {}", tid, r);
+                return r;
+            }
+        }
+    }
     let r = do_futex(uaddr, op, val, timeout, uaddr2, 0, val3);
     rwfz_op_log(uaddr, op, val, r);
     r
@@ -2312,6 +2455,27 @@ unsafe fn rwfz_stack_frames(
             );
             printed += 1;
         }
+    }
+    // sc120 (Session P): the app-child park hunt needs the RAW frame
+    // chain — the file-backed-only scan below DROPS return addresses
+    // into the loader-mapped musl VMA at 0x3fbf000000 (fd=-1 AND
+    // baseoff==0 for the merged first segment: filtered on both
+    // clauses), so the musl syscall -> __timedwait -> pthread_primitive
+    // -> RUNTIME-caller chain never printed and the only survivors were
+    // stale decoys (a libc++ string-assign return at slot 1). 24 raw
+    // words = 3 lines: enough to see the whole chain unfiltered.
+    {
+        use core::fmt::Write;
+        let mut raw = alloc::string::String::new();
+        let _ = write!(raw, "\nRWFRZ:   {} raw ustack:", label);
+        for i in 0..24 {
+            if let Some(v) = read_u64_at(rsp + 8 * i) {
+                let _ = write!(raw, " {}", v);
+            } else {
+                break;
+            }
+        }
+        crate::pr_warn!("{}", raw);
     }
     crate::pr_warn!("RWFRZ:   {} frames:{}", label, s);
 }

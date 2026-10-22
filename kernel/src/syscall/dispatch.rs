@@ -691,6 +691,27 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
     SYSCALL_RING[SYSCALL_CURSOR.fetch_add(1, core::sync::atomic::Ordering::Relaxed) % SYSCALL_RING.len()]
         .record(crate::process::current_pid(), syscall_no as u32, args[0], args[1], result as u64);
 
+    // sc128 (Session P): per-task nr-only ring of the last 12 syscalls
+    // (successes included) — read at APP-PARK to see the child's final
+    // action sequence, not just its failures.
+    if let Some(cur) = crate::sched::current() {
+        use core::sync::atomic::Ordering::Relaxed;
+        let idx = unsafe { (*cur).last_calls_cur.fetch_add(1, Relaxed) } % 12;
+        unsafe { (*cur).last_calls[idx].store((syscall_no as u32) & 0xffff, Relaxed) };
+    }
+
+    // sc125 (Session P): per-task ring of the last 8 FAILING syscalls —
+    // the park decode needs the pre-park failure tail (musl pthread_create
+    // mmaps the thread stack BEFORE clone; a failed mmap means no clone
+    // ever reaches the kernel census and nothing else records it).
+    if result < 0 && result > -4096 {
+        if let Some(cur) = crate::sched::current() {
+            let packed = ((-(result) as u32) << 16) | ((syscall_no as u32) & 0xffff);
+            let idx = unsafe { (*cur).last_fails_cur.fetch_add(1, core::sync::atomic::Ordering::Relaxed) } % 8;
+            unsafe { (*cur).last_fails[idx].store(packed, core::sync::atomic::Ordering::Relaxed) };
+        }
+    }
+
     // OH bring-up: name the call behind any ENOTDIR — the hilogd
     // service-socket chmod fails with errno 20 and no in-handler trace
     // sees it, so decode it here (pathname arg for the *at family).
@@ -733,30 +754,51 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
     // sandbox-side "/dev/null" ENOENT (appspawn_common.c:350 'open
     // dev_null error: 2') needs the failing path + the task's root
     // context to diagnose the in-sandbox walk.
-    if result == -2 && (syscall_no as u64 == 2 || syscall_no as u64 == 257) {
-        static OPEN_ENOENT_N: core::sync::atomic::AtomicUsize =
-            core::sync::atomic::AtomicUsize::new(0);
-        if OPEN_ENOENT_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 200 {
-            let mut pb = [0u8; 96];
-            let parg = if syscall_no as u64 == 257 { args[1] } else { args[0] };
-            let path = if parg != 0 {
-                crate::arch::uaccess::strncpy_from_user(
-                    parg as *const u8, pb.len(), &mut pb)
-                    .map(|s| core::str::from_utf8(s).unwrap_or("?"))
-                    .unwrap_or("<efault>")
-            } else { "-" };
-            // Root context: a pivoted child resolves against its jail.
-            let root = crate::sched::current()
-                .and_then(|t| unsafe { (*t).fs_arc() })
-                .map(|fs| fs.get_root())
-                .unwrap_or_default();
-            let root_str = core::str::from_utf8(&root).unwrap_or("?");
-            crate::pr_info!(
-                "openmiss: path='{}' root='{}' pid={}",
-                path,
-                root_str,
-                crate::process::current_pid()
-            );
+    // sc126 (Session P): THREE fixes — (1) the nr test checked the RAW
+    // x86_64 257, but this exit-side hook sees the TRANSLATED generic
+    // number (openat=56), so openat misses never printed; (2) pr_info
+    // was filtered at boot loglevel=4 — now pr_warn; (3) scoped to
+    // app/appspawn comms with a 120 budget — the children's pre-park
+    // fail tail (APP-PARK fails:) is 6x openat ENOENT, and the paths
+    // name exactly which sandbox files the runtime needs and misses.
+    if result == -2
+        && (syscall_no as u64 == 2 || syscall_no as u64 == 56 || syscall_no as u64 == 257)
+    {
+        let comm_ok = crate::sched::current()
+            .map(|t| unsafe { (*t).comm() })
+            .map(|c| {
+                let s = core::str::from_utf8(&c[..]).unwrap_or("").trim_end_matches('\0');
+                s.contains("launcher")
+                    || s.contains("settingsdata")
+                    || s.contains("systemui")
+                    || s.contains("dataability")
+            })
+            .unwrap_or(false);
+        if comm_ok {
+            static OPEN_ENOENT_N: core::sync::atomic::AtomicUsize =
+                core::sync::atomic::AtomicUsize::new(0);
+            if OPEN_ENOENT_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 200 {
+                let mut pb = [0u8; 96];
+                let parg = if syscall_no as u64 != 2 { args[1] } else { args[0] };
+                let path = if parg != 0 {
+                    crate::arch::uaccess::strncpy_from_user(
+                        parg as *const u8, pb.len(), &mut pb)
+                        .map(|s| core::str::from_utf8(s).unwrap_or("?"))
+                        .unwrap_or("<efault>")
+                } else { "-" };
+                // Root context: a pivoted child resolves against its jail.
+                let root = crate::sched::current()
+                    .and_then(|t| unsafe { (*t).fs_arc() })
+                    .map(|fs| fs.get_root())
+                    .unwrap_or_default();
+                let root_str = core::str::from_utf8(&root).unwrap_or("?");
+                crate::pr_warn!(
+                    "openmiss: path='{}' root='{}' pid={}",
+                    path,
+                    root_str,
+                    crate::process::current_pid()
+                );
+            }
         }
     }
 

@@ -614,6 +614,24 @@ pub struct Task {
     pub last_syscall_a0: AtomicU64,
     pub last_syscall_a1: AtomicU64,
 
+    /// sc125 (Session P): ring of the last 8 FAILING syscalls (nr packed
+    /// low-16, errno high-16) for this task. The park decode needs the
+    /// pre-park failure tail — musl pthread_create maps the thread stack
+    /// BEFORE clone, so a failed mmap (ENOMEM/EAGAIN) means NO clone ever
+    /// reaches the kernel census; this latch is the only per-task record
+    /// that survives the system-wide ring's millisecond overwrite window.
+    /// Stored at dispatch EXIT when 0 > ret > -4096.
+    pub last_fails: [AtomicU32; 8],
+    pub last_fails_cur: core::sync::atomic::AtomicUsize,
+
+    /// sc128 (Session P): ring of the last 12 syscalls (nr only) for
+    /// this task — the park decode needs the final SUCCESS sequence too
+    /// (what the child does between the failed dlopen cascade and the
+    /// cond park: more mmaps? clone attempts? closes?). Stored at every
+    /// dispatch exit.
+    pub last_calls: [AtomicU32; 12],
+    pub last_calls_cur: core::sync::atomic::AtomicUsize,
+
     // ==================== task_struct fields ====================
 
     /// Process state (volatile, visible across cores)
@@ -1164,6 +1182,10 @@ impl Task {
             ti_a1: core::sync::atomic::AtomicU64::new(0),
             ti_a2: core::sync::atomic::AtomicU64::new(0),
             last_syscall_nr: core::sync::atomic::AtomicU32::new(0),
+            last_fails: core::array::from_fn(|_| AtomicU32::new(0)),
+            last_fails_cur: core::sync::atomic::AtomicUsize::new(0),
+            last_calls: core::array::from_fn(|_| AtomicU32::new(0)),
+            last_calls_cur: core::sync::atomic::AtomicUsize::new(0),
             last_syscall_a0: AtomicU64::new(0),
             last_syscall_a1: AtomicU64::new(0),
 
@@ -1799,6 +1821,30 @@ impl Task {
         let static_prio = 120; // DEFAULT_PRIO
         let normal_prio = static_prio;
         let prio = normal_prio;
+
+        // sc130 (Session P): the sc125/128 latch fields MUST also be
+        // initialized on the clone path (new_task_at) — the struct-init
+        // in Task::new covers only the first construction; a cloned
+        // thread's Task was reading uninitialized memory (first
+        // thread-exit forensics printed garbage nrs).
+        ptr::write(
+            (ptr as usize + offset_of!(Task, last_fails)) as *mut [AtomicU32; 8],
+            core::array::from_fn(|_| AtomicU32::new(0)),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, last_fails_cur))
+                as *mut core::sync::atomic::AtomicUsize,
+            core::sync::atomic::AtomicUsize::new(0),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, last_calls)) as *mut [AtomicU32; 12],
+            core::array::from_fn(|_| AtomicU32::new(0)),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, last_calls_cur))
+                as *mut core::sync::atomic::AtomicUsize,
+            core::sync::atomic::AtomicUsize::new(0),
+        );
 
         // Initialize thread_info style fields (must be at beginning)
         ptr::write(

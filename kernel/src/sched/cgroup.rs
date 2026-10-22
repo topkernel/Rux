@@ -785,6 +785,43 @@ pub fn cgroup_memory_uncharge(bytes: usize) {
     }
 }
 
+/// sc126 (Session P): one-line attribution when cgroup memory.max refuses
+/// an mmap charge — names the limiting level's usage vs max so the
+/// virtual-vs-RSS charge semantics question is decidable from the log.
+pub fn dfx_report_memory_refusal(comm: &str, len: usize) {
+    let current = match crate::sched::current() {
+        Some(c) => c as *mut Task,
+        None => return,
+    };
+    let node = match task_cgroup(current) {
+        Some(n) => n,
+        None => return,
+    };
+    let mut levels = alloc::string::String::new();
+    use core::fmt::Write;
+    let mut first = true;
+    node.for_each_ancestor(|n| {
+        let controllers = n.controllers.lock_irqsave();
+        let max = controllers.memory_max_bytes.load(Ordering::Acquire);
+        drop(controllers);
+        let usage = n.memory_usage_bytes.load(Ordering::Acquire);
+        let _ = write!(
+            levels,
+            "{}usage={:#x}max={:#x}",
+            if first { "" } else { " | " },
+            usage,
+            max
+        );
+        first = false;
+    });
+    crate::pr_warn!(
+        "mmap-enomem: CGROUP comm='{}' len={:#x} chain: {}",
+        comm,
+        len,
+        levels
+    );
+}
+
 /// Snapshot helpers for the cgroupfs presentation layer.
 pub fn node_memory_current(node: &CgroupNode) -> u64 {
     node.memory_usage_bytes.load(Ordering::Acquire)
