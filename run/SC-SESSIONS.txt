@@ -1597,3 +1597,53 @@ ALSO this leg: generic-nr reference for reading latches: 56=openat
 220=clone 222=mmap 226=mprotect 291=statx (435=clone3); the raw
 x86_64 orig_rax numbers differ (e.g. 202=futex, 9=mmap) - KILLDUMP
 prints raw, the latches print translated.
+
+SESSION P final addendum (sc130-134): worker-death theory REFUTED;
+park cause narrowed to pre-pthread_create init; enhance-lib CAUSALITY
+REFUTED by stub test; session handoff state.
+- sc130/131 (thread-exit fail tails; init fix 0f-era commit): the
+  clone-path Task init bug FOUND+FIXED (alloc_task_slot raw-allocs,
+  new_task_at initializes field-by-field - the new latch fields were
+  uninitialized on every cloned thread; now ptr::write-initialized).
+  Early-boot service thread exits print clean tails (nr56=-2 openat
+  misses, nr78=-22 readlinkat EINVAL, nr206=-2 sendto ENOENT - the
+  hilog socket path, nr98=-11/-4 futex EAGAIN/EINTR).
+- sc131/132/133: the FFRT/GC worker batches (4-6 threads, comm
+  'appspawn' window) are the APPSPAWN PARENT's OS_GC_Thread pool:
+  ALIVE and working (stkfutex census caught tid 458/459 doing
+  FUTEX_WAKE on hunt-page words 0x7fffffffc0c4 -> 1, i.e. they even
+  WAKE a waiter each). The parked children themselves NEVER create a
+  thread: every 0x7d0f00 census line belongs to the parent or to
+  early one-shot children (e.g. sc125 tgid 1146: OS_IPC_0 +
+  OS_DfxWatchdog, alive).
+- sc134 (stub test): empty-DSO libsecurity_component_client_enhance.z.so
+  injected into oh-img-p/system.img /system/lib64 -> children STILL
+  park identically (6 APP-PARK, tails now nr167=-22 x2 + nr56=-2 x6):
+  the enhance-lib miss is NOT the park cause (or an empty stub fails
+  equivalently on symbol resolution). Stub REVERTED from the image.
+- WHERE THE PARK CAUSE NOW LIVES: the launcher-family child's runtime
+  init runs (openat probes cascade, clock_gettime retry loop - last
+  12 completed calls ALL clock_gettime), never reaches its first
+  pthread_create, and waits in pthread_cond_timedwait (stack cond at
+  0x7fffffffc754, seq==2, one-year or short timeout retry) for a
+  flag no thread will set. The dlopen cascade + double prctl EINVAL
+  (nr167=-22, arg unknown - latch stores nr+errno only) are the only
+  pre-park errors. NEXT SESSION: (1) latch fail ARGS (a0) too and
+  identify the prctl option (PR_SET_VMA? PR_SET_TIMERSLACK?) - if
+  Linux-accepted prctl EINVALs here, fix sys_prctl - that is a REAL
+  kernel-side suspect: OH's mem-scene/hitrace init checks prctl
+  results in SOME paths; (2) strace-class the whole child life once
+  (the syscall ring under dfx-futex-trace + one-shot dump at
+  APP-PARK works - budget it properly this time: dump ONLY the
+  parking child's tail, not first-come); (3) compare a WORKING
+  child's init sequence (e.g. the early child that created OS_IPC_0
+  + watchdog - which app is it? its fork pid window tells) against
+  the parked child's - the divergence point is the abort.
+- REAL fixes landed this session: MOUNT attribution (sc119: ~5ms =
+  core-op deschedule, wrapper phases ~0 - closes execution item 1
+  with data); Task latch-init-on-clone (uninitialized-memory bug);
+  openmiss hook (raw-vs-translated nr bug + loglevel filter bug).
+- F12 GATE: EXONERATED with data (sc118/119: zero refusals, census
+  shows zero ATTEMPTS from the parked children - the gate never
+  fires; the 8MiB/128MB-era threshold question is moot for THIS
+  symptom).
