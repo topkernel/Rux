@@ -518,37 +518,54 @@ pub fn do_exit(exit_code: i32) -> ! {
         // here (leader exits excluded — those are whole-process exits with
         // their own forensics). Budget 12.
         if !((*current).pid() == (*current).tgid()) {
-            let cur8 = (*current).last_fails_cur.load(core::sync::atomic::Ordering::Relaxed);
-            let mut any = false;
-            let mut s = alloc::string::String::new();
             use core::fmt::Write;
-            for k in 0..8 {
-                let i = (cur8 + 8 - 1 - k) % 8; // newest first
-                let v = (*current).last_fails[i].load(core::sync::atomic::Ordering::Relaxed);
-                if v != 0 {
-                    let _ = write!(s, " nr{}=-{}", v & 0xffff, v >> 16);
-                    any = true;
+            let mut s = alloc::string::String::new();
+            {
+                let cur8 =
+                    (*current).last_fails_cur.load(core::sync::atomic::Ordering::Relaxed);
+                for k in 0..8 {
+                    let i = (cur8 + 8 - 1 - k) % 8; // newest first
+                    let v = (*current).last_fails[i].load(core::sync::atomic::Ordering::Relaxed);
+                    if v != 0 {
+                        let _ = write!(s, " nr{}=-{}", v & 0xffff, v >> 16);
+                    }
                 }
             }
-            if any {
-                static NW: core::sync::atomic::AtomicUsize =
-                    core::sync::atomic::AtomicUsize::new(0);
-                if NW.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 12 {
-                    let nc = core::str::from_utf8((*current).comm())
-                        .unwrap_or("")
-                        .trim_end_matches('\0');
-                    let lc = core::str::from_utf8((*(*current).group_leader_ptr()).comm())
-                        .unwrap_or("")
-                        .trim_end_matches('\0');
-                    crate::pr_warn!(
-                        "thead-exit: tid {} comm='{}' leader='{}' code={} fails:{}",
-                        (*current).pid(),
-                        nc,
-                        lc,
-                        exit_code,
-                        s
-                    );
+            // sc131 (Session P): the FFRT worker batch exits CLEANLY with
+            // ZERO failing syscalls — the fails-only print was silent for
+            // exactly the threads we hunt. Always print (threads only),
+            // now with the ALL-calls ring (12, newest first) so the
+            // worker's whole short life is visible.
+            let mut c = alloc::string::String::new();
+            {
+                let cur12 =
+                    (*current).last_calls_cur.load(core::sync::atomic::Ordering::Relaxed);
+                for k in 0..12 {
+                    let i = (cur12 + 12 - 1 - k) % 12; // newest first
+                    let v = (*current).last_calls[i].load(core::sync::atomic::Ordering::Relaxed);
+                    if v != 0 {
+                        let _ = write!(c, " {}", v);
+                    }
                 }
+            }
+            static NW: core::sync::atomic::AtomicUsize =
+                core::sync::atomic::AtomicUsize::new(0);
+            if NW.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 24 {
+                let nc = core::str::from_utf8((*current).comm())
+                    .unwrap_or("")
+                    .trim_end_matches('\0');
+                let lc = core::str::from_utf8((*(*current).group_leader_ptr()).comm())
+                    .unwrap_or("")
+                    .trim_end_matches('\0');
+                crate::pr_warn!(
+                    "thead-exit: tid {} comm='{}' leader='{}' code={} calls:{} fails:{}",
+                    (*current).pid(),
+                    nc,
+                    lc,
+                    exit_code,
+                    c,
+                    s
+                );
             }
         }
         // Linux discipline: PF_EXITING is do_exit's FIRST store, so every
