@@ -214,12 +214,31 @@ impl MmStruct {
                         // SAFETY: self.pgd is a valid root PPN, addr is page-aligned in the heap
                         // region, and phys_addr is a freshly allocated exclusive page.
                         unsafe {
-                            map_page(
+                            if !map_page(
                                 self.pgd,
                                 VirtAddr::new(addr as u64),
                                 PhysAddr::new(phys_addr as u64),
                                 flags,
-                            );
+                            ) {
+                                // PT allocation failure (fake-OOM family):
+                                // free the data page (anti-leak) and leave
+                                // the address unmapped — the access faults
+                                // later and the demand-fault path delivers
+                                // the OOM kill instead of the old panic.
+                                static HEAPMAP_N: core::sync::atomic::AtomicUsize =
+                                    core::sync::atomic::AtomicUsize::new(0);
+                                if HEAPMAP_N
+                                    .fetch_add(1, core::sync::atomic::Ordering::Relaxed)
+                                    < 8
+                                {
+                                    crate::pr_err!(
+                                        "brk eager map: PT alloc failed at {:#x} — page left for demand fault",
+                                        addr
+                                    );
+                                }
+                                drop(_pte_guard);
+                                continue;
+                            }
                         }
                         // Set up reverse mapping for heap page
                         {
@@ -1434,8 +1453,11 @@ unsafe fn copy_kernel_mappings(user_root_ppn: u64, kernel_root_ppn: u64) {
 }
 
 /// Map user page
-pub unsafe fn map_user_page(user_root_ppn: u64, user_virt: VirtAddr, phys: PhysAddr, flags: u64) {
-    map_page(user_root_ppn, user_virt, phys, flags);
+///
+/// Returns false when the mapping could not be installed (page-table
+/// allocation failure — failible map_page, fake-OOM family).
+pub unsafe fn map_user_page(user_root_ppn: u64, user_virt: VirtAddr, phys: PhysAddr, flags: u64) -> bool {
+    map_page(user_root_ppn, user_virt, phys, flags)
 }
 
 /// Map user region

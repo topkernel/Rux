@@ -207,7 +207,14 @@ fn try_expand_stack(
     // SAFETY: root_ppn is a valid page table root, fault_addr is page-aligned,
     // phys_addr is a freshly allocated physical page, and pte_flags are well-formed.
     unsafe {
-        map_page(root_ppn, fault_addr, phys_addr, pte_flags);
+        if !map_page(root_ppn, fault_addr, phys_addr, pte_flags) {
+            // Page-table allocation failure (fake-OOM family): free the
+            // data page and deliver OOM — the trap layer SIGKILLs the
+            // user task (Linux pagefault-OOM semantics; the old path
+            // panicked the kernel here).
+            crate::mm::page_alloc::free_page(phys_addr.bits() as usize);
+            return MmFaultResult::OutOfMemory;
+        }
 
         // Address-specific TLB flush
         crate::arch::cpu::invlpg(fault_addr.bits());
@@ -661,7 +668,12 @@ pub fn handle_mm_fault(
                         // SAFETY: root_ppn valid; fault_addr page-aligned;
                         // sp_phys is the shared file page; flags built above.
                         unsafe {
-                            map_page(root_ppn, fault_addr, sp_phys, sp_flags);
+                            if !map_page(root_ppn, fault_addr, sp_phys, sp_flags) {
+                                // PT allocation failure: the mapping's
+                                // reference was NOT yet taken (bookkeeping
+                                // follows the map) — plain OOM return.
+                                return MmFaultResult::OutOfMemory;
+                            }
                             crate::arch::cpu::invlpg(fault_addr.bits());
                         }
                         // Refcount/mapcount bookkeeping for the shared
@@ -815,6 +827,7 @@ pub fn handle_mm_fault(
                 // per-mm faults serialize against it once (not 16 times).
                 let _pte_guard = crate::arch::mm::mm_ops::pte_lock_for(addr_space).lock();
                 let mut mapped = 0u64;
+                let mut fault_pg_failed = false;
                 for i in 0..filled {
                     let va_i = VirtAddr::new((fault_page + i * PAGE_SIZE_USIZE) as u64);
                     // Re-check per page (E8-MM device-window-hole rule).
@@ -833,7 +846,17 @@ pub fn handle_mm_fault(
                     // filled exclusively owned page, pte_flags built from
                     // the verified VMA's permissions.
                     unsafe {
-                        map_page(root_ppn, va_i, PhysAddr::new(phys[i]), pte_flags);
+                        if !map_page(root_ppn, va_i, PhysAddr::new(phys[i]), pte_flags) {
+                            // PT allocation failure (fake-OOM family):
+                            // free the data page (anti-leak). Around-pages
+                            // just shrink the window (Linux parity); the
+                            // FAULTING page failing means OOM.
+                            crate::mm::page_alloc::free_page(phys[i] as usize);
+                            if i == 0 {
+                                fault_pg_failed = true;
+                            }
+                            continue;
+                        }
                         crate::arch::cpu::invlpg(va_i.bits());
                     }
                     mapped += 1;
@@ -843,6 +866,9 @@ pub fn handle_mm_fault(
 
                 if mapped > 0 {
                     addr_space.add_rss(mapped);
+                }
+                if fault_pg_failed {
+                    return MmFaultResult::OutOfMemory;
                 }
                 // The faulting page is either mapped here or lost a race
                 // to an identical mapping — retry the instruction either
@@ -993,7 +1019,12 @@ pub fn handle_mm_fault(
     // SAFETY: root_ppn is a valid page table root, fault_addr is page-aligned,
     // phys_addr is a freshly allocated physical page, and pte_flags are well-formed.
     unsafe {
-        map_page(root_ppn, fault_addr, phys_addr, pte_flags);
+        if !map_page(root_ppn, fault_addr, phys_addr, pte_flags) {
+            // PT allocation failure (fake-OOM family): free the data
+            // page, deliver OOM (trap layer SIGKILLs the user task).
+            crate::mm::page_alloc::free_page(phys_addr.bits() as usize);
+            return MmFaultResult::OutOfMemory;
+        }
 
         // Address-specific TLB flush
         crate::arch::cpu::invlpg(fault_addr.bits());
@@ -1269,7 +1300,12 @@ fn handle_swap_fault(
     // allocated, and pte_flags are built from valid VMA permissions. The
     // page is exclusively owned.
     unsafe {
-        map_page(root_ppn, fault_addr, PhysAddr::new(phys_addr), pte_flags);
+        if !map_page(root_ppn, fault_addr, PhysAddr::new(phys_addr), pte_flags) {
+            // PT allocation failure (fake-OOM family): free the swap-in
+            // page, deliver OOM.
+            crate::mm::page_alloc::free_page(phys_addr as usize);
+            return MmFaultResult::OutOfMemory;
+        }
 
         // TLB flush
         crate::arch::cpu::invlpg(fault_addr.bits());

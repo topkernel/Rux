@@ -216,26 +216,67 @@ pub unsafe fn alloc_page_table() -> Option<u64> {
             let phys_addr = if let Some(node) = crate::mm::pglist::first_online_node_mut() {
                 if let Some(zone) = node.zone_mut(ZoneType::ZoneNormal) {
                     if zone.is_initialized() {
-                        if let Some(pfn) = zone.alloc_pages(0) {
-                            // SCRIBBLE HUNT: zone starts above the image; a
-                            // low PFN here means the zone was mis-seeded.
-                            if (pfn << 12) < 0x1E0_0000 {
-                                crate::pr_err!(
-                                    "PTALLOC-LOW-HIT ppn={:#x} — below zone floor!",
-                                    pfn
-                                );
-                            }
-                            let page = crate::mm::page_desc::pfn_to_page_mut(pfn);
-                            if !page.is_null() {
-                                unsafe {
-                                    (*page).set_refcount(1);
-                                    (*page).set_order(0);
-                                    (*page).set_flag(crate::mm::page_desc::PageFlag::Referenced);
+                        let mut pfn_opt = zone.alloc_pages(0);
+                        if pfn_opt.is_none() {
+                            // PT-alloc slowpath (fake-OOM family): the
+                            // demand-fault path allocates its DATA page
+                            // through page_alloc::alloc_pages (watermark
+                            // wakeup + direct reclaim) and then calls
+                            // map_page for the TABLE page — the old raw
+                            // zone.alloc_pages here bypassed reclaim, so
+                            // a zone at its reclaim edge failed the TABLE
+                            // alloc right after succeeding the data alloc,
+                            // and map_page's .expect turned a recoverable
+                            // failure into a kernel panic. Reclaim only
+                            // the subset that is safe from this context:
+                            // we may run under the caller's per-mm PteLock,
+                            // and page-cache eviction of CLEAN pages takes
+                            // no mm PTE locks and performs no I/O.
+                            // Swap-out reclaim (rmap unmap) is deliberately
+                            // NOT attempted — unmapping a page of the SAME
+                            // mm would self-deadlock on the PteLock we hold.
+                            for _ in 0..4 {
+                                let freed =
+                                    crate::fs::page_cache::get_page_cache().shrink(32);
+                                if freed == 0 {
+                                    break;
+                                }
+                                pfn_opt = zone.alloc_pages(0);
+                                if pfn_opt.is_some() {
+                                    break;
                                 }
                             }
-                            crate::mm::zone::pfn_to_phys(pfn) as u64
-                        } else {
-                            0
+                            if pfn_opt.is_none() {
+                                // One-shot ledger + zone + census dump
+                                // (internally rate-limited): attributes
+                                // the drain (genuine exhaustion vs broken
+                                // free lists vs leak) on the serial log.
+                                crate::mm::page_alloc::oom_forensic_dump(
+                                    "alloc_page_table order-0",
+                                );
+                            }
+                        }
+                        match pfn_opt {
+                            Some(pfn) => {
+                                // SCRIBBLE HUNT: zone starts above the image; a
+                                // low PFN here means the zone was mis-seeded.
+                                if (pfn << 12) < 0x1E0_0000 {
+                                    crate::pr_err!(
+                                        "PTALLOC-LOW-HIT ppn={:#x} — below zone floor!",
+                                        pfn
+                                    );
+                                }
+                                let page = crate::mm::page_desc::pfn_to_page_mut(pfn);
+                                if !page.is_null() {
+                                    unsafe {
+                                        (*page).set_refcount(1);
+                                        (*page).set_order(0);
+                                        (*page).set_flag(crate::mm::page_desc::PageFlag::Referenced);
+                                    }
+                                }
+                                crate::mm::zone::pfn_to_phys(pfn) as u64
+                            }
+                            None => 0,
                         }
                     } else {
                         0
@@ -1264,7 +1305,28 @@ fn valid_table_link_ppn(ppn: u64, root_ppn: u64) -> bool {
     root_ppn == unsafe { root_page_table_ppn() } || phys >= 0x1E0_0000
 }
 
-unsafe fn map_page_noflush(root_ppn: u64, virt: VirtAddr, phys: PhysAddr, flags: u64) {
+/// Rate-limited one-liner naming the walk level whose page-table
+/// allocation failed (fake-OOM family). The loud allocator-state dump
+/// lives in alloc_page_table (oom_forensic_dump, itself rate-limited);
+/// this only marks the failure depth in the serial log.
+fn pt_alloc_fail(level: &str, va: u64) {
+    static N: core::sync::atomic::AtomicUsize =
+        core::sync::atomic::AtomicUsize::new(0);
+    if N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 8 {
+        crate::pr_err!(
+            "map_page: PT alloc failed ({} level) at va {:#x}",
+            level,
+            va
+        );
+    }
+}
+
+/// Map one 4K page; returns false when the mapping could NOT be installed
+/// (page-table allocation failure — the caller decides the failure
+/// policy: user demand faults convert this to MmFaultResult::OutOfMemory,
+/// i.e. SIGKILL/OOM-kill, instead of the old kernel panic; see the
+/// fake-OOM family notes in alloc_page_table).
+unsafe fn map_page_noflush(root_ppn: u64, virt: VirtAddr, phys: PhysAddr, flags: u64) -> bool {
     let virt_addr = virt.bits();
     let phys_addr = phys.bits();
 
@@ -1298,7 +1360,10 @@ unsafe fn map_page_noflush(root_ppn: u64, virt: VirtAddr, phys: PhysAddr, flags:
         }
         pte4.ppn()
     } else {
-        let table_phys = alloc_page_table().expect("map_page: failed to allocate PUD table");
+        let Some(table_phys) = alloc_page_table() else {
+            pt_alloc_fail("PUD", virt_addr);
+            return false;
+        };
         let ppn = table_phys >> PAGE_SHIFT;
         root.set(
             vpn4,
@@ -1313,7 +1378,7 @@ unsafe fn map_page_noflush(root_ppn: u64, virt: VirtAddr, phys: PhysAddr, flags:
             "SCRIBBLE-GUARD map_page: PUD link ppn={:#x} bad at va {:#x} — refusing",
             ppn3, virt_addr
         );
-        return;
+        return false;
     }
     let table3_phys = ppn3 << PAGE_SHIFT;
     let table3 = get_page_table_virt(table3_phys);
@@ -1347,7 +1412,7 @@ unsafe fn map_page_noflush(root_ppn: u64, virt: VirtAddr, phys: PhysAddr, flags:
                 "map_page: PMD table alloc failed demoting 1GB leaf at {:#x}",
                 virt_addr
             );
-            return;
+            return false;
         }
     }
     let ppn2 = if pte3.is_valid() {
@@ -1359,7 +1424,10 @@ unsafe fn map_page_noflush(root_ppn: u64, virt: VirtAddr, phys: PhysAddr, flags:
         }
         pte3.ppn()
     } else {
-        let table_phys = alloc_page_table().expect("map_page: failed to allocate PMD table");
+        let Some(table_phys) = alloc_page_table() else {
+            pt_alloc_fail("PMD", virt_addr);
+            return false;
+        };
         let ppn = table_phys >> PAGE_SHIFT;
         table3_ref.set(
             vpn3,
@@ -1374,7 +1442,7 @@ unsafe fn map_page_noflush(root_ppn: u64, virt: VirtAddr, phys: PhysAddr, flags:
             "SCRIBBLE-GUARD map_page: PMD link ppn={:#x} out of RAM at va {:#x} — refusing",
             ppn2, virt_addr
         );
-        return;
+        return false;
     }
     let table2_phys = ppn2 << PAGE_SHIFT;
     let table2 = get_page_table_virt(table2_phys);
@@ -1404,7 +1472,7 @@ unsafe fn map_page_noflush(root_ppn: u64, virt: VirtAddr, phys: PhysAddr, flags:
                 "map_page: PT table alloc failed demoting 2MB leaf at {:#x}",
                 virt_addr
             );
-            return;
+            return false;
         }
     }
     let ppn1 = if pte2.is_valid() {
@@ -1416,7 +1484,10 @@ unsafe fn map_page_noflush(root_ppn: u64, virt: VirtAddr, phys: PhysAddr, flags:
         }
         pte2.ppn()
     } else {
-        let table_phys = alloc_page_table().expect("map_page: failed to allocate PT table");
+        let Some(table_phys) = alloc_page_table() else {
+            pt_alloc_fail("PT", virt_addr);
+            return false;
+        };
         let ppn = table_phys >> PAGE_SHIFT;
         table2_ref.set(
             vpn2,
@@ -1431,7 +1502,7 @@ unsafe fn map_page_noflush(root_ppn: u64, virt: VirtAddr, phys: PhysAddr, flags:
             "SCRIBBLE-GUARD map_page: PT link ppn={:#x} out of RAM at va {:#x} — refusing",
             ppn1, virt_addr
         );
-        return;
+        return false;
     }
     let table1_phys = ppn1 << PAGE_SHIFT;
     let table1 = get_page_table_virt(table1_phys);
@@ -1508,15 +1579,24 @@ unsafe fn map_page_noflush(root_ppn: u64, virt: VirtAddr, phys: PhysAddr, flags:
     }
     table1_ref.set(vpn1, PageTableEntry::from_bits(pte_bits));
     pte_install_log(root_ppn, virt_addr, ppn);
+    true
 }
 
 /// Map a single 4K page in a page table (with TLB flush of the page).
-pub unsafe fn map_page(root_ppn: u64, virt: VirtAddr, phys: PhysAddr, flags: u64) {
-    map_page_noflush(root_ppn, virt, phys, flags);
+///
+/// Returns false when the mapping could not be installed (page-table
+/// allocation failure). User demand-fault callers convert this to
+/// MmFaultResult::OutOfMemory (SIGKILL of the faulting task — Linux
+/// pagefault-OOM semantics) instead of the former kernel panic.
+pub unsafe fn map_page(root_ppn: u64, virt: VirtAddr, phys: PhysAddr, flags: u64) -> bool {
+    let ok = map_page_noflush(root_ppn, virt, phys, flags);
 
     // Flush TLB (single-page callers — page faults, mremap, io_uring —
     // need the new translation visible before the retrying access).
+    // Unconditional, failure paths included (matching the pre-failible
+    // behavior where the flush always ran).
     crate::arch::cpu::invlpg(virt.bits());
+    ok
 }
 
 /// Install a 2MB PMD leaf mapping into the static kernel root.
@@ -1526,6 +1606,11 @@ pub unsafe fn map_page(root_ppn: u64, virt: VirtAddr, phys: PhysAddr, flags: u64
 /// one). Must only be used for windows mapped once at boot and never
 /// re-mapped at 4K granularity later... except map_page CAN demote these
 /// leaves per-address-space after the clone (E8-MM).
+///
+/// Boot-time kernel windows only: a table-allocation failure here leaves
+/// the window UNMAPPED with no recovery path, so the .expect panics below
+/// are deliberate (unlike map_page, which is failible for the fake-OOM
+/// family — user demand faults must OOM-kill, not panic).
 unsafe fn map_pmd_huge_page(virt: usize, phys: usize, flags: u64) {
     let a = VirtAddr::new(virt as u64);
     let vpn4 = a.pgd_index() as usize;
@@ -1608,17 +1693,21 @@ unsafe fn map_pud_huge_page(virt: usize, phys: usize, flags: u64) {
 /// Internal batch primitive — region callers flush once via
 /// map_kernel_region. Walks from the CURRENTLY ACTIVE root (CR3): kernel
 /// VAs resolve through the shared kernel-half links in any root.
-unsafe fn map_kernel_page_noflush(virt: u64, phys: u64, flags: u64) {
+unsafe fn map_kernel_page_noflush(virt: u64, phys: u64, flags: u64) -> bool {
     let root_ppn = root_page_table_ppn();
-    map_page_noflush(root_ppn, VirtAddr::new(virt), PhysAddr::new(phys), flags);
+    map_page_noflush(root_ppn, VirtAddr::new(virt), PhysAddr::new(phys), flags)
 }
 
 /// Map a kernel virtual page to a physical page.
 ///
 /// Used for vmemmap and other kernel mappings that need 4KB granularity.
-pub unsafe fn map_kernel_page(virt: u64, phys: u64, flags: u64) {
-    map_kernel_page_noflush(virt, phys, flags);
+/// Returns false when the mapping could not be installed; boot-time
+/// callers treat that as fatal (a kernel window that failed to map is
+/// unusable), runtime ioremap-class callers should fail their request.
+pub unsafe fn map_kernel_page(virt: u64, phys: u64, flags: u64) -> bool {
+    let ok = map_kernel_page_noflush(virt, phys, flags);
     crate::arch::cpu::invlpg(virt);
+    ok
 }
 
 /// Map a region of kernel virtual pages to physical pages (VA and PA in

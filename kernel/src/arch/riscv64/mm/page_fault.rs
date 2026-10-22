@@ -215,7 +215,14 @@ fn try_expand_stack(
     // SAFETY: root_ppn is a valid page table root, fault_addr is page-aligned,
     // phys_addr is a freshly allocated physical page, and pte_flags are well-formed.
     unsafe {
-        map_page(root_ppn, fault_addr, phys_addr, pte_flags);
+        if !map_page(root_ppn, fault_addr, phys_addr, pte_flags) {
+            // PT allocation failure (fake-OOM family): free the data
+            // page, deliver OOM — the trap layer SIGKILLs the user task
+            // (Linux pagefault-OOM semantics; the old path panicked the
+            // kernel here).
+            crate::mm::page_alloc::free_page(phys_addr.bits() as usize);
+            return MmFaultResult::OutOfMemory;
+        }
 
         // Address-specific TLB flush
         let vaddr = fault_addr.bits();
@@ -754,7 +761,12 @@ pub fn handle_mm_fault(
     // SAFETY: root_ppn is a valid page table root, fault_addr is page-aligned,
     // phys_addr is a freshly allocated physical page, and pte_flags are well-formed.
     unsafe {
-        map_page(root_ppn, fault_addr, phys_addr, pte_flags);
+        if !map_page(root_ppn, fault_addr, phys_addr, pte_flags) {
+            // PT allocation failure (fake-OOM family): free the data
+            // page, deliver OOM (trap layer SIGKILLs the user task).
+            crate::mm::page_alloc::free_page(phys_addr.bits() as usize);
+            return MmFaultResult::OutOfMemory;
+        }
 
         // Address-specific TLB flush
         let vaddr = fault_addr.bits();
@@ -1125,7 +1137,12 @@ fn handle_swap_fault(
         return MmFaultResult::Handled;
     }
     unsafe {
-        map_page(root_ppn, fault_addr, PhysAddr::new(phys_addr), pte_flags);
+        if !map_page(root_ppn, fault_addr, PhysAddr::new(phys_addr), pte_flags) {
+            // PT allocation failure (fake-OOM family): free the swap-in
+            // page, deliver OOM.
+            crate::mm::page_alloc::free_page(phys_addr as usize);
+            return MmFaultResult::OutOfMemory;
+        }
 
         // TLB flush
         let vaddr = fault_addr.bits();
