@@ -1898,3 +1898,59 @@ binder proc (Linux VM_DONTCOPY parity missing). Fix landed sc157.
   opens and no crash => OH children really use the inherited fd, and
   the fix direction flips to kernel-side per-tgid isolation inside a
   shared proc.
+
+SESSION R SECOND LEG (sc159 readback + sc160 armed, 07:2x): sc159 (the
+predecessor's last boot, finished 05:22) ANSWERS the sc157 grid question
+and re-aims the storm hunt. sc158 was a storm boot (1268 IRQ-OFF windows,
+116 softirq stalls) with NO child narration (no AppSpawnChild at all).
+- sc159 = interpretation (c) PLUS a late (a): NO appspawn child EVER
+  opened /dev/binder (73 binder-open lines, none with a child pid; the
+  daemon is pid 337 proc 68). Children ride the inherited fd on the
+  daemon's shared proc exactly as pre-DONTFORK — BUT the park MOVED:
+  child 1203/1205 narration now reaches IPCObjectStub *.AppScheduler
+  registered -> MAINTHD443 Attach -> MAINTHD407 ConnectToAppMgr ->
+  GetOnDemandSystemAbilityIds SendRequest SUCCEED (a full round trip
+  over the shared proc) -> then SILENCE (no CheckSystemAbility/
+  GetSaWrap line, no AMSI attach). sc156's park point is passed; the
+  new park sits between the GetOnDemandIds reply and the next samgr
+  call. No APPTXN child=12xx ever: AMS never delivered
+  ScheduleStartAbility to any launcher child.
+- sc159 LATE PHASE: the launcher crash-retry loop. Children 2233-2272
+  (pids climbing) ALL segfault at the SAME rip=0x7ff0007e5364 (FileBacked
+  fd=23 lib, file offset 0x24364, bytes 43 8b 04 08 / 89 06 / b0 01 /
+  48 83 c4 10 / 5b c3 = mov eax,[r8+r9]; mov [rsi],eax; mov al,1; ret-
+  shape getter) reading r8=0x7ff099f3e370 which sits in an UNMAPPED hole
+  above the child's mapped libs (neighbors end 0x7ff0990d4000). Each
+  child faults 3x (OH's crash handler re-raise), 681 reports total, each
+  with ~21 USEGV-FOR detail lines = 14243 serial lines. fd=23 ripfile
+  lookup printed '?' (get_file_fd failed at fault time); offline byte
+  match of the pattern at 0x24364 found NOTHING in the 498 big /system/
+  lib64 libs — the lib is hap/memfd-hosted; kernel-side attribution is
+  the way (sc160 probes below).
+- THE STORM RE-READ (task-2 correction): sc159 had 354 IRQ-OFF windows,
+  29 softirq stalls. Sampling symbolized (current build): dominant rip
+  = enable_irq region + outb return + inb (0x805cd9ee/cdb96/cdb50 =
+  rux::arch::x86_64::cpu::{enable_irq,outb,inb}); stack words =
+  irq_restore(34x), __schedule(22x), SpinlockIrqGuard<binder::World>
+  drop, Atomic<usize>::load(13x), Atomic<u64>::load(8x),
+  timer_softirq_handler. TIMER-SOFTIRQ-STALL samples: pid=337 (the
+  appspawn DAEMON) and pid=329 (samgr) with rip=inb. VERDICT: the
+  1000ms "atomic string compare table" of the sc157 readback IS the
+  UART TX THRE wait loop's own atomic loads (console.rs UART_THRE_WAIT_
+  TICKS discipline) — every printk holds the UART irqsave lock while
+  polling LSR, and under KVM+host contention each inb is a VM exit; the
+  crash-retry loop's 14k USEGV lines + 4153 bindwalk + 29800 slog lines
+  ARE the storm. Two CPUs also interleave mid-line (garbled WW/USEGV
+  text) — concurrent direct-console writers, log corruption but benign.
+  The __schedule 453ms IF=0 window (pid 316) is the rq-lock critical
+  section containing a printk (or contending on a lock held by a
+  printker); follow-up after sc160.
+- sc160 probes committed (a1303539): binder-mmap range visibility
+  (pid/proc/base/pages per buffer, budget 60); USEGV-FOR verdict line —
+  does cr2 fall inside a LIVE binder buffer mapping (binder_mmap_owner_
+  of, try-locked to survive fault-context re-entry)? full detail for the
+  first 6 segfaults then one-liners; STALLWATCH comm filter widened to
+  launcher/systemui/appspawn/samgr (sc159 children parked with no dump);
+  bindwalk ENOENT capped at 300. Dual-arch builds pass (riscv64gc
+  07:21, x86_64 bzImage 07:22). Boot: oh-boot-q.sh sc160, fresh scgold
+  userdata reflink, SECS=2700 SMP=2, shotmon armed.
