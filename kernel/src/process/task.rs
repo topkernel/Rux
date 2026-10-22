@@ -491,6 +491,18 @@ pub const TIF_MEMDIE: u32 = 4;
 /// lives in exactly one place.
 pub const LAST_CALLS_LEN: usize = 96;
 
+/// sc138 (Session Q): length of the per-task FILTERED init ring
+/// (Task::init_calls). The unfiltered last_calls ring drowns in the
+/// parked child's {clock_gettime, writev, connect} retry loop — 96 raw
+/// entries see only loop. init_calls SKIPS nr 113 (clock_gettime), 66
+/// (writev), 203 (connect) always, and 98 (futex) when a0 is a
+/// main-stack-top uaddr (the cond retry sites), so the ring retains the
+/// init sequence proper: loader mmaps, prctls, mprotects, dlopen
+/// openat/read/mmap cascades — the byte-diff substrate for working-vs-
+/// parked children. init_a0 keeps the first argument of each entry
+/// (prctl option / mmap addr / futex uaddr).
+pub const INIT_CALLS_LEN: usize = 96;
+
 /// R56-heal pick-state machine values (Task::ti_pick_state).
 /// PICKED: published by mark_picked_on_cpu under the GRQ.
 /// LIVE: affirmed by __switch_to's CAS(0 -> 1) right before the register
@@ -648,6 +660,12 @@ pub struct Task {
     /// >96 calls before the eternal WAIT entry.
     pub last_calls: [AtomicU32; LAST_CALLS_LEN],
     pub last_calls_cur: core::sync::atomic::AtomicUsize,
+
+    /// sc138 (Session Q): FILTERED ring (see INIT_CALLS_LEN) — the retry
+    /// loop noise skipped so the init sequence survives to the dump.
+    pub init_calls: [AtomicU32; INIT_CALLS_LEN],
+    pub init_a0: [AtomicU64; INIT_CALLS_LEN],
+    pub init_calls_cur: core::sync::atomic::AtomicUsize,
 
     // ==================== task_struct fields ====================
 
@@ -1205,6 +1223,9 @@ impl Task {
             last_fails_a1: core::array::from_fn(|_| AtomicU64::new(0)),
             last_calls: core::array::from_fn(|_| AtomicU32::new(0)),
             last_calls_cur: core::sync::atomic::AtomicUsize::new(0),
+            init_calls: core::array::from_fn(|_| AtomicU32::new(0)),
+            init_a0: core::array::from_fn(|_| AtomicU64::new(0)),
+            init_calls_cur: core::sync::atomic::AtomicUsize::new(0),
             last_syscall_a0: AtomicU64::new(0),
             last_syscall_a1: AtomicU64::new(0),
 
@@ -1869,6 +1890,22 @@ impl Task {
         );
         ptr::write(
             (ptr as usize + offset_of!(Task, last_calls_cur))
+                as *mut core::sync::atomic::AtomicUsize,
+            core::sync::atomic::AtomicUsize::new(0),
+        );
+        // sc138 (Session Q): init ring likewise needs the clone-path init
+        // (see the sc130 fix above for why new_task_at must cover these).
+        ptr::write(
+            (ptr as usize + offset_of!(Task, init_calls))
+                as *mut [AtomicU32; INIT_CALLS_LEN],
+            core::array::from_fn(|_| AtomicU32::new(0)),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, init_a0)) as *mut [AtomicU64; INIT_CALLS_LEN],
+            core::array::from_fn(|_| AtomicU64::new(0)),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, init_calls_cur))
                 as *mut core::sync::atomic::AtomicUsize,
             core::sync::atomic::AtomicUsize::new(0),
         );

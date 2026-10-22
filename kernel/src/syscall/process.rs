@@ -321,6 +321,54 @@ pub fn sys_clone(args: SyscallArgs) -> i64 {
                                                 }
                                             }
                                             crate::pr_warn!("{}", s);
+                                            // sc138 (Session Q): the FILTERED
+                                            // init ring for the WORKING side —
+                                            // this creator reached
+                                            // pthread_create; APP-PARK dumps
+                                            // the parked side. The diff
+                                            // between the two sequences is
+                                            // the abort point.
+                                            {
+                                                use core::sync::atomic::Ordering::Relaxed;
+                                                const RL: usize =
+                                                    crate::process::task::INIT_CALLS_LEN;
+                                                let icur = (*t)
+                                                    .init_calls_cur
+                                                    .load(Relaxed);
+                                                let mut s4 = alloc::string::String::new();
+                                                let _ = write!(
+                                                    s4,
+                                                    "APP-THR: tgid {} init:",
+                                                    (*t).tgid()
+                                                );
+                                                for k in 0..RL {
+                                                    let i = (icur + RL - k) % RL;
+                                                    let v = (*t).init_calls[i]
+                                                        .load(Relaxed);
+                                                    if v != 0 {
+                                                        let _ = write!(s4, " {}", v);
+                                                    }
+                                                }
+                                                crate::pr_warn!("{}", s4);
+                                                let mut s5 = alloc::string::String::new();
+                                                let _ = write!(
+                                                    s5,
+                                                    "APP-THR: tgid {} initA:",
+                                                    (*t).tgid()
+                                                );
+                                                for k in 0..32.min(RL) {
+                                                    let i = (icur + RL - k) % RL;
+                                                    let v = (*t).init_calls[i]
+                                                        .load(Relaxed);
+                                                    if v != 0 {
+                                                        let a0 = (*t).init_a0[i]
+                                                            .load(Relaxed);
+                                                        let _ =
+                                                            write!(s5, " {}@{:#x}", v, a0);
+                                                    }
+                                                }
+                                                crate::pr_warn!("{}", s5);
+                                            }
                                         }
                                     }
                                 }

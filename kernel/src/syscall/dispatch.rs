@@ -703,6 +703,35 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
         unsafe { (*cur).last_calls[idx].store((syscall_no as u32) & 0xffff, Relaxed) };
     }
 
+    // sc138 (Session Q): FILTERED init ring — skips the parked child's
+    // retry-loop noise ({113 clock_gettime, 66 writev, 203 connect} and
+    // main-stack-top futex waits) so APP-PARK / APP-THR dumps carry the
+    // init sequence itself (loader/prctl/mprotect/clone cascade) instead
+    // of a clock_gettime wall. This is the working-vs-parked byte-diff
+    // substrate: park dumps show the aborted init; APP-THR dumps show a
+    // full one that reached pthread_create.
+    {
+        let skip = match syscall_no {
+            113 | 66 | 203 => true,
+            // futex: skip only the main-stack-top cond retry sites (same
+            // range as the APP-PARK gate); worker-startup futexes on heap
+            // words stay recorded.
+            98 => args[0] >= 0x7ffffffd0000 && args[0] < 0x7ffffffff000,
+            _ => false,
+        };
+        if !skip {
+            if let Some(cur) = crate::sched::current() {
+                use core::sync::atomic::Ordering::Relaxed;
+                let idx = unsafe { (*cur).init_calls_cur.fetch_add(1, Relaxed) }
+                    % crate::process::task::INIT_CALLS_LEN;
+                unsafe {
+                    (*cur).init_calls[idx].store((syscall_no as u32) & 0xffff, Relaxed);
+                    (*cur).init_a0[idx].store(args[0], Relaxed);
+                }
+            }
+        }
+    }
+
     // sc125 (Session P): per-task ring of the last 8 FAILING syscalls —
     // the park decode needs the pre-park failure tail (musl pthread_create
     // mmaps the thread stack BEFORE clone; a failed mmap means no clone

@@ -1589,6 +1589,41 @@ pub fn sys_futex_handler(args: &[u64; 6]) -> i64 {
                             }
                             crate::pr_warn!("{}", s2);
                         }
+                        // sc138 (Session Q): the FILTERED init ring — the
+                        // 96-entry unfiltered ring above drowns in the
+                        // retry loop; this one skips {clock, writev,
+                        // connect, main-stack futex} so the child's whole
+                        // init since fork fits. initA carries a0 for the
+                        // newest 32 (prctl option / mmap addr / futex
+                        // uaddr). This is the parked side of the diff;
+                        // APP-THR prints the working side.
+                        {
+                            use core::fmt::Write;
+                            use core::sync::atomic::Ordering::Relaxed;
+                            const RL: usize = crate::process::task::INIT_CALLS_LEN;
+                            let cur = tk.init_calls_cur.load(Relaxed);
+                            let mut s2 = alloc::string::String::new();
+                            let _ = write!(s2, "APP-PARK init:");
+                            for k in 0..RL {
+                                let i = (cur + RL - k) % RL; // newest first
+                                let v = tk.init_calls[i].load(Relaxed);
+                                if v != 0 {
+                                    let _ = write!(s2, " {}", v);
+                                }
+                            }
+                            crate::pr_warn!("{}", s2);
+                            let mut s3 = alloc::string::String::new();
+                            let _ = write!(s3, "APP-PARK initA:");
+                            for k in 0..32.min(RL) {
+                                let i = (cur + RL - k) % RL; // newest first
+                                let v = tk.init_calls[i].load(Relaxed);
+                                if v != 0 {
+                                    let a0 = tk.init_a0[i].load(Relaxed);
+                                    let _ = write!(s3, " {}@{:#x}", v, a0);
+                                }
+                            }
+                            crate::pr_warn!("{}", s3);
+                        }
                         // sc125 (Session P): the pre-park FAILING-syscall
                         // tail — musl pthread_create mmaps the thread stack
                         // BEFORE clone, so an ENOMEM mmap means no clone
@@ -1651,7 +1686,7 @@ pub fn sys_futex_handler(args: &[u64; 6]) -> i64 {
                                     let path = if fd >= 0 {
                                         tk.fdtable()
                                             .get_file(fd as usize)
-                                            .map(|f| f.path())
+                                            .map(|f| probe_file_path(&f))
                                             .unwrap_or_else(|| alloc::string::String::from("?"))
                                     } else {
                                         alloc::string::String::from("-")
@@ -1703,14 +1738,10 @@ pub fn sys_futex_handler(args: &[u64; 6]) -> i64 {
                                                                     "unbound",
                                                                 )
                                                             });
-                                                        let peer = sock
-                                                            .peer
-                                                            .lock()
-                                                            .as_ref()
-                                                            .and_then(|w| w.upgrade())
-                                                            .and_then(|p2| {
-                                                                p2.bound_name.lock().clone()
-                                                            })
+                                                        let peer =
+                                                            crate::net::unix::unix_peer_bound_name(
+                                                                &sock,
+                                                            )
                                                             .unwrap_or_else(|| {
                                                                 alloc::string::String::from("-")
                                                             });
@@ -1746,6 +1777,11 @@ pub fn sys_futex_handler(args: &[u64; 6]) -> i64 {
                                                 "pipe".into()
                                             } else if core::ptr::eq(
                                                 p,
+                                                &crate::fs::memfd::MEMFD_FILE_OPS,
+                                            ) {
+                                                "memfd".into()
+                                            } else if core::ptr::eq(
+                                                p,
                                                 &crate::io_uring::IO_URING_OPS,
                                             ) {
                                                 "io_uring".into()
@@ -1761,7 +1797,7 @@ pub fn sys_futex_handler(args: &[u64; 6]) -> i64 {
                                         "APPFD {:?} fd={} {} kind={}",
                                         comm,
                                         fd,
-                                        f.path(),
+                                        probe_file_path(&f),
                                         kind
                                     );
                                     crate::pr_warn!("{}", v);
@@ -1819,12 +1855,12 @@ pub fn sys_futex_handler(args: &[u64; 6]) -> i64 {
                                             comm, slot12
                                         );
                                         for k in 0..3 {
-                                            match rd64(slot12.wrapping_sub(24) + 8 * k) {
+                                            match rd64((slot12.wrapping_sub(24) + 8 * k) as usize) {
                                                 Some(b) => {
-                                                    let _ = write!(v, " b{}={:#018x}", 24 - 8 * k, b)
+                                                    let _ = write!(v, " b{}={:#018x}", 24 - 8 * k, b);
                                                 }
                                                 None => {
-                                                    let _ = write!(v, " b{}=?", 24 - 8 * k)
+                                                    let _ = write!(v, " b{}=?", 24 - 8 * k);
                                                 }
                                             }
                                         }
@@ -1843,15 +1879,16 @@ pub fn sys_futex_handler(args: &[u64; 6]) -> i64 {
                                                     start,
                                                     vm.end().as_usize()
                                                 );
-                                                match rd64(start) {
+                                                let first = rd64(start);
+                                                match first {
                                                     Some(b) => {
-                                                        let _ = write!(v, "{:#018x}", b)
+                                                        let _ = write!(v, "{:#018x}", b);
                                                     }
                                                     None => {
-                                                        let _ = write!(v, "?")
+                                                        let _ = write!(v, "?");
                                                     }
                                                 }
-                                                let elf = (b & 0xffff) == 0x457f;
+                                                let elf = first.map_or(false, |w| (w & 0xffff) == 0x457f);
                                                 let _ = write!(
                                                     v,
                                                     " {}",
@@ -2575,6 +2612,25 @@ unsafe fn read_u32_via_task(task: *const Task, va: usize) -> Option<u32> {
         as usize
         + (va & 0xfff);
     Some(unsafe { core::ptr::read_volatile(kv as *const u32) })
+}
+
+/// sc138 (Session Q): display path for a File that may be a memfd —
+/// `File::path()` prints "anon_inode:[<ino>]" for the pathless files;
+/// resolve <ino> through the memfd name registry (recorded at
+/// memfd_create) so APPFD/APPMAP can name the engine libs the children
+/// map through memfds ("anon_inode:[17] memfd:libXXX").
+fn probe_file_path(f: &crate::fs::file::File) -> alloc::string::String {
+    let p = f.path();
+    if let Some(rest) = p.strip_prefix("anon_inode:[") {
+        if let Some(num) = rest.strip_suffix(']') {
+            if let Ok(ino) = num.parse::<u64>() {
+                if let Some(name) = crate::fs::memfd::memfd_name_by_ino(ino) {
+                    return alloc::format!("{} memfd:{}", p, name);
+                }
+            }
+        }
+    }
+    p
 }
 
 /// One user-stack frame line resolved to its covering VMA (Session F's
