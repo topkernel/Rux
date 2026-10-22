@@ -797,6 +797,70 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
         }
     }
 
+    // sc144 (Session Q): the parked children's OWN hilog lines never
+    // reach hilogd (socket EAGAIN backpressure) — yet they are the
+    // narration of exactly where the runtime init stalls. Dump the first
+    // 96 bytes of the first iovec of every writev to fd 3 from the app
+    // family: the OH log lines arrive straight from the kernel.
+    if syscall_no == 66 && args[0] == 3 && result != 0 {
+        let comm = crate::sched::current()
+            .map(|t| unsafe { (*t).comm() })
+            .map(|c| core::str::from_utf8(c).unwrap_or(""))
+            .unwrap_or("")
+            .trim_end_matches('\0');
+        let family = comm.contains("launcher")
+            || comm.contains("settingsdata")
+            || comm.contains("systemui")
+            || comm.contains("dataability")
+            || comm == "appspawn";
+        if family {
+            static HI_N: core::sync::atomic::AtomicUsize =
+                core::sync::atomic::AtomicUsize::new(0);
+            if HI_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 240 {
+                // iovec { void* base; size_t len }
+                let base = args[1];
+                if base != 0 {
+                    let iobase =
+                        unsafe { crate::arch::uaccess::get_user(base as *const u64) };
+                    let iolen =
+                        unsafe { crate::arch::uaccess::get_user((base + 8) as *const u64) };
+                    if let (Some(b), Some(l)) = (iobase, iolen) {
+                        if l > 0 && l < 0x10000 {
+                            let n = (l as usize).min(96);
+                            let mut buf = [0u8; 96];
+                            let ok = unsafe {
+                                crate::arch::uaccess::copy_from_user(
+                                    buf.as_mut_ptr(),
+                                    b as *const u8,
+                                    n,
+                                ) == 0
+                            };
+                            if ok {
+                                let text: alloc::string::String = buf[..n]
+                                    .iter()
+                                    .map(|c| {
+                                        if (0x20..0x7f).contains(c) || *c == b'\n' {
+                                            *c as char
+                                        } else {
+                                            '.'
+                                        }
+                                    })
+                                    .collect();
+                                crate::pr_warn!(
+                                    "applog pid={} comm='{}' ret={} |{}",
+                                    crate::process::current_pid(),
+                                    comm,
+                                    result,
+                                    text
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
     // sc136 (Session Q): the parked children's pre-park loop is
     // {clock_gettime xN, writev, connect, writev} — the connect TARGET
     // names the service the child talks to right before parking (hilog?
