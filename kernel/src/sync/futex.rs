@@ -1550,9 +1550,16 @@ pub fn sys_futex_handler(args: &[u64; 6]) -> i64 {
     {
         const STK_PAGE: usize = 0x7fffffffc000;
         if uaddr & !0xfff == STK_PAGE {
+            // Budget raised 150 -> 400 for sc119: the page is 3 pages below
+            // the stack top of EVERY x86_64 process, so ANY main-thread
+            // futex on a shallow frame burns it — appspawn's own main-loop
+            // wait would exhaust 150 before the first app child parks.
+            // 400 ops = <=800 lines ~= 7 s of UART across a 15 min boot
+            // (vs sc115's 2472-line RWFRZ storm at ~1 s) — affordable to
+            // guarantee the census still has budget when children park.
             static NS: core::sync::atomic::AtomicUsize =
                 core::sync::atomic::AtomicUsize::new(0);
-            if NS.load(core::sync::atomic::Ordering::Relaxed) < 150 {
+            if NS.load(core::sync::atomic::Ordering::Relaxed) < 400 {
                 NS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                 let comm = crate::sched::current()
                     .map(|t| unsafe { (*t).comm() })
