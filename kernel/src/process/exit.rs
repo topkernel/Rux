@@ -511,6 +511,46 @@ pub fn do_exit(exit_code: i32) -> ! {
     // SAFETY: current is the raw pointer to the calling task, guaranteed valid since
     // we are the currently executing task and will never return from this function.
     unsafe {
+        // sc129 (Session P): the OH app children's FFRT worker threads are
+        // CREATED (clone CLONE_THREAD succeeds, census pid logged) and then
+        // exit instantly and CLEANLY (process survives) — the worker's own
+        // fail-latch dies with it. Print the exiting THREAD's fail tail
+        // here (leader exits excluded — those are whole-process exits with
+        // their own forensics). Budget 12.
+        if !((*current).pid() == (*current).tgid()) {
+            let cur8 = (*current).last_fails_cur.load(core::sync::atomic::Ordering::Relaxed);
+            let mut any = false;
+            let mut s = alloc::string::String::new();
+            use core::fmt::Write;
+            for k in 0..8 {
+                let i = (cur8 + 8 - 1 - k) % 8; // newest first
+                let v = (*current).last_fails[i].load(core::sync::atomic::Ordering::Relaxed);
+                if v != 0 {
+                    let _ = write!(s, " nr{}=-{}", v & 0xffff, v >> 16);
+                    any = true;
+                }
+            }
+            if any {
+                static NW: core::sync::atomic::AtomicUsize =
+                    core::sync::atomic::AtomicUsize::new(0);
+                if NW.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 12 {
+                    let nc = core::str::from_utf8((*current).comm())
+                        .unwrap_or("")
+                        .trim_end_matches('\0');
+                    let lc = core::str::from_utf8((*(*current).group_leader_ptr()).comm())
+                        .unwrap_or("")
+                        .trim_end_matches('\0');
+                    crate::pr_warn!(
+                        "thead-exit: tid {} comm='{}' leader='{}' code={} fails:{}",
+                        (*current).pid(),
+                        nc,
+                        lc,
+                        exit_code,
+                        s
+                    );
+                }
+            }
+        }
         // Linux discipline: PF_EXITING is do_exit's FIRST store, so every
         // other subsystem (the scheduler's R56/R57 harvest-steal machinery
         // in particular) can refuse to "rescue" a task whose kernel stack
