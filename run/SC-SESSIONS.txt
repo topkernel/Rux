@@ -1699,3 +1699,79 @@ APPMAP/APPFD/appconn probes added; sc136 reroll (slow-boot variance).
   in 25 min, child phase unreached; not wedged - composer_host.ready +
   appspawn.started both fired; boot-speed variance). sc137 reroll
   running with the appconn-fixed kernel, 35 min budget.
+
+SESSION Q FOURTH LEG (sc138-sc146, 23:5x-): init-sequence diff DONE at
+the syscall level; park identity SOLVED (libeventhandler NoneIoWaiter);
+children send/receive ZERO binder; own-log narration probe landed.
+- Probes landed (all English commits on feature/samgr-callback):
+  3443bbb0 filtered INIT ring (skip 113/66/203 + main-stack futex) with
+  a0, dumps at APP-PARK/APP-THR; memfd name registry + APPFD/APPMAP
+  memfd naming; finished the paused round-3 APPPK12 block (4 missing
+  semicolons + b-scope bug in e2a53880).
+  a5b6e5d3 rev3: APPMAPSRC (exec-segment mmap naming at mmap time),
+  appioctl fd/cmd tracer, APPPARK-RETS call-site-validated return addrs.
+  8d6cf997 rev4: APPTXN binder tracer (app-family sends + anything
+  targeting registered appspawn children), APPTXN-FAIL, appconn raw
+  copy (the old strncpy_from_user stopped at NUL — the "abstract \x01"
+  socket was a PROBE ARTIFACT; real target = /dev/unix/socket/hilogInput,
+  addrlen 110).
+  (rev5) init ring 512-deep + chunked dump + BIRTH window latch (first
+  64 filtered calls per task, immune to loop churn).
+  (rev6/7) applog: dump first 110 bytes of first 3 iovecs of fd3 writev
+  from app family — the children's OWN hilog lines straight from the
+  kernel (hilogd backpressure no longer hides them).
+- PARK IDENTITY SOLVED (sc139/140): APPPARK-RETS validates return addrs
+  by call-site bytes; both real frames [27]/[35] land in
+  /system/lib64/chipset-sdk-sp/libeventhandler.z.so at file offsets
+  0x3e502/0x3e32f — inside/next to NoneIoWaiter (nearest symbol
+  NoneIoWaiterD2 at 0x3f180, local WaitForEvent between). THE PARK IS
+  THE MAIN EVENT RUNNER (current-thread mode, NoneIoWaiter — no epoll)
+  IN pthread_cond_timedwait(seq cond, ~1 year) WAITING FOR EVENT #3
+  (seq==2: two events processed). slot[1] (libc++) and slot[12] were
+  stale decoys — slot[1] resolved into std::string::assign, slot[12]
+  points into a zero page.
+- THE LOOP (sc140 appioctl): {ioctl fd6 /dev/binder WRITE_READ
+  (0xc0306201) ret=0 EMPTY poll, openat namespace cascade (the enhance
+  lib + THP node + /etc/sceneboard.config misses), short timedwait,
+  hilog writev/reconnect}. Children NEVER block in binder — they poll
+  it inline from the runner loop.
+- APPTXN (sc141/142): parked children send ZERO binder transactions
+  (successful OR failed — APPTXN-FAIL stays 0) and NOTHING targets
+  them. The only app-family txns are the appspawn daemon's own (to
+  samgr). So the child never reaches ANY IPC step: not the samgr
+  lookup, not ScheduleAttachApplication. The AMS->child schedule
+  transaction does not exist because the child never announced itself.
+- CHILD LIFE (sc144 512-ring + birth): ALL children byte-identical.
+  Oldest: sandbox setup (mkdirat/mount/fchmodat storms + 58 openats),
+  then own-lib dlopens (57/62/63/80/56 cycles), then a `226 226 222`
+  (mprotect x2 + mmap) stack-shaping cluster, then the retry loop, then
+  the park. BIRTH window (first 64 filtered calls): gettimeofday,
+  sigprocmask x2, closes, pipe2, write fd11, PR_SET_NAME, sigprocmask,
+  closes, arena futexes (0x7ff00002aec0/2a7d0 = the OH param-service
+  shared area cluster, mmap-time naming proved 0x7ff000000000 base =
+  /dev/__parameters__/* + fixed-address anon pages), openat, ioctl
+  fd16 (the /dev/xpm stub, ENOTTY), close. NO thread-stack mmap, NO
+  clone, NO sigprocmask-for-pthread ever.
+- Engine libs are PRELOADED by the daemon pre-fork (APPMAPSRC shows
+  libeventhandler/libc++(memfd 0x141d20)/libcesfwk/libappspawn_sandbox
+  mapped under comm='appspawn' BEFORE the first fork) — children
+  inherit them; that is why children never dlopen the engine.
+- hiview: its OS_IPC thread is SIGKILLed (code=-9, mid-pthread_create,
+  same tail every boot, sc137/139/140) surrounded by W3-RUNWAKE-REFUSED
+  + TIMER-SOFTIRQ-STALL lines; in sc142 it lived longer (TaskExecutorRDB
+  exited code=0). Timing varies; children park regardless, so hiview
+  death is NOT the park cause but shares the same slow-boot/wake
+  pathology. WHO sends the kill is still unnamed (suspect beget
+  service-watchdog on a starved heartbeat).
+- sc143/145/146: slow-boot variants (713+ TIMER-SOFTIRQ-STALL, 795+
+  IRQ-OFF windows) starved the child phase; sc146 carries the applog
+  probe — the child's own hilog narration is the NEXT decisive datum
+  (daemon lines already readable through the interposer).
+- CURRENT PICTURE: the child forks, sets up its sandbox, waits on the
+  param-arena words, pokes the xpm stub, loads its own libs, then its
+  MAIN runner processes 2 events and idles forever inside
+  NoneIoWaiter::WaitForEvent — the OH task that should post event #3
+  never runs, and it is NOT any IPC (zero binder), NOT a thread (zero
+  clone attempts). Next: read the child's own logs (sc146+ applog),
+  then ChildMainThread::Start/MainThread::Init in
+  libappkit_native.z.so (0x180572/0x132628) against that narration.
