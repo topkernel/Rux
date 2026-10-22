@@ -341,7 +341,17 @@ pub fn stallwatch_tick() {
         let tk = unsafe { &*t };
         let comm = core::str::from_utf8(&tk.comm()[..]).unwrap_or("");
         let comm = comm.trim_end_matches('\0');
-        if !comm.contains("foundation") && !comm.contains("sa_main") {
+        // sc160: widen to the launcher cohort — sc159's appspawn children
+        // park right after "GetOnDemandSystemAbilityIds succeed" with no
+        // further narration and no dump (the filter missed them); their
+        // syscall ring names the park call-site family directly.
+        if !comm.contains("foundation")
+            && !comm.contains("sa_main")
+            && !comm.contains("launcher")
+            && !comm.contains("systemui")
+            && !comm.contains("appspawn")
+            && !comm.contains("samgr")
+        {
             return;
         }
         if !tk.state().is_interruptible() {

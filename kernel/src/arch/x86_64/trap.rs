@@ -1692,6 +1692,46 @@ fn user_segv_forensics(regs: &PtRegs, fault_addr: u64) {
         .map(|c| core::str::from_utf8(c).unwrap_or(""))
         .unwrap_or("")
         .trim_end_matches('\0');
+    // sc160: the crash-retry loop (AMS respawns the launcher, every child
+    // dies at the same stale VA) turned this ~21-line report into a 14
+    // k-line serial storm — and each printk holds the UART irqsave lock,
+    // so the storm itself manufactured the 453-1000 ms IRQ-OFF windows
+    // that kill foundation via its XCollie watchdog (681 reports in
+    // sc159). Full forensics for the first 6 faults; after that a
+    // one-liner that keeps the census and adds the one attribution that
+    // matters: whether cr2 falls inside a live binder buffer mapping
+    // (the range forked children lost with VmaFlags DONTFORK in sc157).
+    let binder_hit = crate::ipc::binder::binder_mmap_owner_of(fault_addr);
+    {
+        static SEGVD_N: core::sync::atomic::AtomicUsize =
+            core::sync::atomic::AtomicUsize::new(0);
+        if SEGVD_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) >= 6 {
+            crate::pr_err!(
+                "USEGV-L pid={} comm='{}' rip={:#x} cr2={:#x} {}",
+                pid,
+                comm,
+                regs.rip,
+                fault_addr,
+                match binder_hit.as_ref() {
+                    Some((proc_id, owner_pid, base, size)) => alloc::format!(
+                        "BINDERBUF proc={} owner_pid={} base={:#x} size={:#x}",
+                        proc_id,
+                        owner_pid,
+                        base,
+                        size
+                    ),
+                    None => alloc::string::String::new(),
+                }
+            );
+            return;
+        }
+    }
+    if let Some((proc_id, owner_pid, base, size)) = binder_hit.as_ref() {
+        crate::pr_err!(
+            "USEGV-FOR: cr2 {:#x} INSIDE BINDER BUFFER of proc {} (owner pid {}) base {:#x} size {:#x} — stale daemon mapping dropped at fork (DONTFORK)",
+            fault_addr, proc_id, owner_pid, base, size
+        );
+    }
     crate::pr_err!(
         "USEGV-FOR: pid={} comm='{}' rip={:#x} cr2={:#x} rsp={:#x} rbp={:#x}",
         pid, comm, regs.rip, fault_addr, regs.rsp, regs.rbp

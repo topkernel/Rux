@@ -1059,6 +1059,20 @@ fn world_lock() -> crate::sync::spinlock::SpinlockIrqGuard<'static, Option<World
     g
 }
 
+/// sc160: non-blocking WORLD acquire for diagnostic readers that may be
+/// called re-entrantly from fault handlers (see binder_mmap_owner_of).
+/// Returns None when the lock is contended OR the world is not
+/// initialized yet — both mean "no attribution available".
+fn world_lock_try() -> Option<crate::sync::spinlock::SpinlockIrqGuard<'static, Option<World>>> {
+    let mut g = WORLD.try_lock_irqsave()?;
+    if g.is_none() {
+        // Initializing the world from a diagnostic path is harmless but
+        // pointless (no procs exist yet); just report empty.
+        return None;
+    }
+    Some(g)
+}
+
 /// &mut BinderProc for an Arc, without borrowing the World. The Arc keeps
 /// the object alive (callers hold clones) and every mutation is
 /// serialized by WORLD — that is the access contract, NOT membership in
@@ -1884,8 +1898,52 @@ pub fn binder_mmap_handler(
             pm(w.as_mut().unwrap(), &proc).im().alloc = Some(alloc);
         }
     }
+    // sc160 (Session R leg 2): every binder buffer range at warn level —
+    // the sc159 launcher children crash on a stale pointer at
+    // 0x7ff099f3e370 (an unmapped hole above their mapped libs) and the
+    // DONTFORK drop of the daemon's binder VMA is the prime suspect;
+    // the daemon's [base, base+size) vs the crash VA decides it in one
+    // boot without a guest-side maps dump.
+    {
+        static MMAP_PROBE_N: core::sync::atomic::AtomicUsize =
+            core::sync::atomic::AtomicUsize::new(0);
+        if MMAP_PROBE_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 60 {
+            crate::pr_warn!(
+                "binder-mmap: pid {} proc {} base {:#x} pages {}",
+                task.pid(),
+                proc.id,
+                vaddr,
+                size / PAGE_SIZE
+            );
+        }
+    }
     crate::pr_info!("binder: proc {} mapped {:#x} bytes at {:#x}", proc.id, size, vaddr);
     Ok(vaddr)
+}
+
+/// sc160: does this user VA fall inside any live binder buffer mapping?
+/// Forked appspawn children lost exactly those mappings (VmaFlags
+/// DONTFORK, sc157) while keeping the daemon's pointers in their
+/// ProcessSkeleton tables — a child SIGSEGV whose cr2 lands in one of
+/// these ranges is the stale-binder-buffer crash, attributed to the
+/// owning proc here. Returns (proc_id, owner_pid, base, size).
+pub fn binder_mmap_owner_of(va: u64) -> Option<(u64, u64, u64, u64)> {
+    // try_lock: this is called from the SIGSEGV forensics path, which can
+    // fire while a binder thread already holds WORLD on this CPU (a
+    // copy_from_user fault under the lock) — a blocking acquire there
+    // would self-deadlock; skipping attribution in that corner is fine.
+    let w = world_lock_try()?;
+    let world = w.as_ref()?;
+    for p in &world.procs {
+        // SAFETY: WORLD held for the whole scan; only reading alloc.
+        if let Some(a) = unsafe { pm(world, p).im().alloc.as_ref() } {
+            let size = (a.npages * PAGE_SIZE) as u64;
+            if va >= a.user_base && va < a.user_base + size {
+                return Some((p.id, p.pid as u64, a.user_base, size));
+            }
+        }
+    }
+    None
 }
 
 /// FileOps.poll: readable while work is pending for this open.
