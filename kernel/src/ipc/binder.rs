@@ -357,6 +357,12 @@ struct BinderNode {
     ptr: u64,
     cookie: u64,
     proc_id: u64,
+    /// sc157: tgid of the task that REGISTERED the node. When it differs
+    /// from the owner proc's pid, the node belongs to a forked child
+    /// sharing the parent's binder_proc — deliveries to such nodes must
+    /// be visible to the APPTXN tracer (the AMS→child ScheduleStartAbility
+    /// hop rides exactly this shape).
+    reg_tgid: u32,
     /// flat_binder_object.flags at registration (accept_fds and
     /// txn_security_ctx bits).
     flags: u32,
@@ -364,12 +370,13 @@ struct BinderNode {
 }
 
 impl BinderNode {
-    const fn new(id: u64, ptr: u64, cookie: u64, proc_id: u64, flags: u32) -> Self {
+    const fn new(id: u64, ptr: u64, cookie: u64, proc_id: u64, reg_tgid: u32, flags: u32) -> Self {
         Self {
             id,
             ptr,
             cookie,
             proc_id,
+            reg_tgid,
             flags,
             st: core::cell::UnsafeCell::new(NodeState {
                 internal_strong_refs: 0,
@@ -1171,6 +1178,18 @@ pub fn binder_open(file: &crate::fs::File, ctx: BinderCtx) -> i32 {
         w.as_mut().unwrap().procs.push(proc.clone());
     }
     crate::pr_info!("binder: pid {} opened the device (proc {})", pid, id);
+    // sc157: device-open visibility at warn level (boot loglevel drops
+    // the info line). Decides in one boot whether forked appspawn
+    // children EVER open /dev/binder themselves (own proc, own pid) or
+    // reuse the daemon's inherited fd (shared proc — the sc156 APPTXN
+    // "from pid=330 comm='m.ohos.systemui'" shape).
+    {
+        static OPEN_PROBE_N: core::sync::atomic::AtomicUsize =
+            core::sync::atomic::AtomicUsize::new(0);
+        if OPEN_PROBE_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 220 {
+            crate::pr_warn!("binder-open: pid {} proc {}", pid, id);
+        }
+    }
     // SAFETY: private_data slot written once at open; reclaimed in
     // binder_close (the only other accessor).
     file.set_private_data(Arc::into_raw(proc) as *mut u8);
@@ -1672,6 +1691,19 @@ pub fn binder_mmap_handler(
     vma_flags.insert(VmaFlags::READ);
     vma_flags.insert(VmaFlags::WRITE);
     vma_flags.insert(VmaFlags::SHARED);
+    // sc157 (Session R): Linux binder_mmap sets VM_DONTCOPY on the VMA —
+    // forked children never inherit the binder buffer mapping. Rux copied
+    // the SHARED VMA (same physical pages) into every appspawn child, so
+    // the children happily reused the DAEMON's binder fd + buffers: every
+    // child transaction was stamped from the daemon's proc (APPTXN "from
+    // pid=330 comm='m.ohos.systemui'"), and binder NODES the children
+    // registered (their IAppScheduler) were owned by the daemon's proc —
+    // AMS's ScheduleStartAbility calls to a child land on the shared
+    // proc's todo where the daemon's reader threads compete with the
+    // child's. On Linux the child faults on the stale VA and re-opens
+    // /dev/binder (per-open proc, own pid). Replicating VM_DONTCOPY
+    // forces the same path here.
+    vma_flags.insert(VmaFlags::DONTFORK);
 
     // ATOMIC pick + reserve (b91 heap-corruption fix): the old shape ran
     // find_free_area on a READ lock, then spent the 4 MiB memset + eager
@@ -2817,7 +2849,7 @@ fn set_context_mgr(proc: &Arc<BinderProc>, ptr: u64, cookie: u64, flags: u32) ->
     // earlier wedge workaround masked the flag). The b45 wedge itself was
     // the garbage binary secctx record plus the broken selinuxfs status
     // mmap, both fixed alongside this.
-    let node = Arc::new(BinderNode::new(world.next_id, ptr, cookie, proc.id, flags));
+    let node = Arc::new(BinderNode::new(world.next_id, ptr, cookie, proc.id, proc.pid, flags));
     world.next_id += 1;
     // SAFETY: under WORLD.
     unsafe {
@@ -4574,17 +4606,24 @@ fn binder_transaction(
                             || comm.contains("systemui")
                             || comm.contains("dataability")
                             || comm == "appspawn";
-                        if fam || app_child_pids_contains(target.pid) {
+                        // sc157: see the sync branch — child-registered
+                        // nodes print from any sender.
+                        let to_child_node = target_node
+                            .as_ref()
+                            .map(|n| n.reg_tgid != 0 && n.reg_tgid != target.pid)
+                            .unwrap_or(false);
+                        if fam || app_child_pids_contains(target.pid) || to_child_node {
                             static TXN_NO: core::sync::atomic::AtomicUsize =
                                 core::sync::atomic::AtomicUsize::new(0);
                             if TXN_NO.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 160 {
                                 crate::pr_warn!(
-                                    "APPTXN id={} from pid={} comm='{}' -> pid={} code={:#x} oneway=1 proc",
+                                    "APPTXN id={} from pid={} comm='{}' -> pid={} code={:#x} oneway=1 proc child={}",
                                     txn.id,
                                     proc.pid,
                                     comm,
                                     target.pid,
-                                    txn.code
+                                    txn.code,
+                                    target_node.as_ref().map(|n| n.reg_tgid).unwrap_or(0)
                                 );
                             }
                         }
@@ -4648,19 +4687,28 @@ fn binder_transaction(
                         || comm.contains("systemui")
                         || comm.contains("dataability")
                         || comm == "appspawn";
-                    if fam || app_child_pids_contains(target.pid) {
+                    // sc157: deliveries to a node registered by a FORKED
+                    // CHILD (reg_tgid != owner proc pid) print from ANY
+                    // sender — the AMS→child ScheduleStartAbility hop. The
+                    // per-node flag says which child the txn is for.
+                    let to_child_node = target_node
+                        .as_ref()
+                        .map(|n| n.reg_tgid != 0 && n.reg_tgid != target.pid)
+                        .unwrap_or(false);
+                    if fam || app_child_pids_contains(target.pid) || to_child_node {
                         static TXN_N: core::sync::atomic::AtomicUsize =
                             core::sync::atomic::AtomicUsize::new(0);
                         if TXN_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 160 {
                             crate::pr_warn!(
-                                "APPTXN id={} from pid={} comm='{}' -> pid={} code={:#x} oneway={} {}",
+                                "APPTXN id={} from pid={} comm='{}' -> pid={} code={:#x} oneway={} {} child={}",
                                 txn.id,
                                 proc.pid,
                                 comm,
                                 target.pid,
                                 txn.code,
                                 oneway as u8,
-                                if t_thread.is_some() { "thr" } else { "proc" }
+                                if t_thread.is_some() { "thr" } else { "proc" },
+                                target_node.as_ref().map(|n| n.reg_tgid).unwrap_or(0)
                             );
                         }
                     }
@@ -4865,6 +4913,7 @@ fn translate_object(sender: &Arc<BinderProc>, obj: &mut FlatBinderObject, target
                                     ptr,
                                     obj.cookie,
                                     sender.id,
+                                    crate::process::current_pid() as u32,
                                     obj.flags,
                                 ));
                                 world.next_id += 1;

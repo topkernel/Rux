@@ -818,35 +818,29 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
             || comm.contains("foundation")
             || comm.contains("sa_main");
         if family {
-            // sc148: the DAEMON's own preload log storm (extension libs)
-            // ate the budget before any child forked. Skip the boot's
-            // original appspawn pid; forked children keep comm 'appspawn'
-            // pre-rename but carry different pids, so they still print.
-            static APPLOG_MAIN_PID: core::sync::atomic::AtomicU32 =
-                core::sync::atomic::AtomicU32::new(0);
-            let my_pid = crate::process::current_pid() as u32;
-            let main_pid = APPLOG_MAIN_PID.load(core::sync::atomic::Ordering::Relaxed);
-            if main_pid == 0 {
-                APPLOG_MAIN_PID.store(my_pid, core::sync::atomic::Ordering::Relaxed);
-            }
-            let is_daemon = main_pid != 0 && main_pid == my_pid;
+            // sc157: comm-based gating. The sc155/156 pid latch (first
+            // family task to write fd3 = "the daemon") was fragile — in
+            // sc156 an earlier appspawn-family writer latched a
+            // non-daemon pid and the daemon's preload storm (ImplClass/
+            // APPSPAWN/MMG/...) printed UNFILTERED, eating 1062 of the
+            // 1200 budget before the launcher phase. Gate by comm
+            // instead: 'appspawn' (daemon AND pre-rename children — the
+            // sandbox-phase narration was decoded in Session Q already),
+            // foundation and sa_main are keyword-gated; renamed children
+            // print everything.
+            let keyword_daemon = comm == "appspawn"
+                || comm.contains("foundation")
+                || comm.contains("sa_main");
             // sc152 (Session Q): for the DAEMON itself, print only the
             // SA-registration lines — the SA 501 (AppMgrService,
             // libappms loaded into the daemon) never registers with
             // samgr, and the daemon's own narration says whether the
             // registration was attempted and how it failed.
-            // sc155 (Session R): BUDGET FIX — the collection loop below
-            // used to consume the 1200-line budget for EVERY family fd3
-            // writev (the daemon's preload storm ate it before any child
-            // forked; sc154 printed 7 lines total and zero child
-            // narration). Now only lines that PASS the print filter
-            // consume budget. foundation/sa_main (the SA-501 registrar
-            // per /system/profile/foundation.json) join the family under
-            // the same keyword gate as the daemon.
-            let keyword_daemon = comm.contains("foundation") || comm.contains("sa_main");
+            // sc155 (Session R): BUDGET FIX — only lines that PASS the
+            // print filter consume budget.
             static HI_N: core::sync::atomic::AtomicUsize =
                 core::sync::atomic::AtomicUsize::new(0);
-            if HI_N.load(core::sync::atomic::Ordering::Relaxed) < 1200 {
+            if HI_N.load(core::sync::atomic::Ordering::Relaxed) < 2400 {
                 // iovec { void* base; size_t len }
                 let base = args[1];
                 if base != 0 {
@@ -898,15 +892,13 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
                         // passing lines consume the budget (children
                         // always pass; daemon/foundation/sa_main need a
                         // registration keyword).
-                        let daemon_regn = (is_daemon || keyword_daemon)
+                        let daemon_regn = keyword_daemon
                             && (joined.contains("SystemAbility")
                                 || joined.contains("501")
                                 || joined.contains("amgr")
                                 || joined.contains("SAM"));
-                        if !gc_noise
-                            && ((!(is_daemon || keyword_daemon)) || daemon_regn)
-                        {
-                            if HI_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 1200 {
+                        if !gc_noise && (!keyword_daemon || daemon_regn) {
+                            if HI_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 2400 {
                                 crate::pr_warn!(
                                     "applog pid={} comm='{}' ret={} |{}",
                                     crate::process::current_pid(),

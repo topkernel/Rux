@@ -58,6 +58,13 @@ impl VmaFlags {
     pub const LOCKED: u32 = 0x00002000;
     /// I/O mapping (VM_IO)
     pub const IO: u32 = 0x00004000;
+    /// Do not copy this VMA across fork (Linux VM_DONTCOPY,
+    /// 0x04000000). The binder driver stamps this on its mmap so a
+    /// forked child never inherits the parent's transaction buffers —
+    /// the child must open /dev/binder itself (Linux binder_mmap sets
+    /// VM_DONTCOPY unconditionally, which is what keeps forked OH
+    /// appspawn children from sharing the daemon's binder_proc).
+    pub const DONTFORK: u32 = 0x04000000;
 
     #[inline]
     pub const fn new() -> Self {

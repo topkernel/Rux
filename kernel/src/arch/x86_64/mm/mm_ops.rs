@@ -1125,34 +1125,53 @@ impl MmStruct {
         // per-PTE granularity and simply stays out of the child's
         // snapshot — the race-equivalent outcome POSIX already assigns to
         // mm writers concurrent with fork.
-        let (cow_exempt, vma_snapshot): (Vec<(u64, u64)>, Vec<(PageVirtAddr, PageVirtAddr, VmaFlags, VmaType, i32, u64, usize)>) = {
+        let (cow_exempt, fork_skip, vma_snapshot): (
+            Vec<(u64, u64)>,
+            Vec<(u64, u64)>,
+            Vec<(PageVirtAddr, PageVirtAddr, VmaFlags, VmaType, i32, u64, usize)>,
+        ) = {
             let parent_vma_guard = self.vma_read();
 
             // COW-exempt VMA regions (MAP_SHARED / device mappings). fork's COW
-            // walk historically write-protected EVERY user-writable PTE — in the
-            // PARENT too. A MAP_SHARED mapping then COW-faulted on the first
-            // post-fork store: the fault handler allocated a private copy and
+            // walk historically write-protected EVERY user-writable PTE — in
+            // the PARENT too. A MAP_SHARED mapping then COW-faulted on the
+            // first post-fork store: the fault handler allocated a private copy and
             // every subsequent store landed there, never in the shared backing
             // (the fbterm framebuffer-freeze root cause on riscv64). Shared and
             // device VMAs must be inherited as-is: bump the refcount, keep the
             // write permission.
-            let exempt: Vec<(u64, u64)> = parent_vma_guard
-                .iter()
-                .filter(|vma| {
-                    vma.flags().contains(crate::mm::vma::VmaFlags::SHARED)
-                        || vma.vma_type() == crate::mm::vma::VmaType::Device
-                })
-                .map(|vma| (vma.start().0 as u64, vma.end().0 as u64))
-                .collect();
+            //
+            // sc157: DONTFORK VMAs (VM_DONTCOPY — Linux binder_mmap) are the
+            // exception: neither COW-exempt NOR snapshotted NOR PTE-copied.
+            // The child must not inherit the mapping at all (Linux drops the
+            // VMA in dup_mmap and the pages in copy_page_range), so a forked
+            // binder user cannot touch the parent's transaction buffers and
+            // must open the device itself.
+            let mut exempt: Vec<(u64, u64)> = Vec::new();
+            let mut skip: Vec<(u64, u64)> = Vec::new();
+            for vma in parent_vma_guard.iter() {
+                if vma.flags().contains(crate::mm::vma::VmaFlags::DONTFORK) {
+                    skip.push((vma.start().0 as u64, vma.end().0 as u64));
+                } else if vma.flags().contains(crate::mm::vma::VmaFlags::SHARED)
+                    || vma.vma_type() == crate::mm::vma::VmaType::Device
+                {
+                    exempt.push((vma.start().0 as u64, vma.end().0 as u64));
+                }
+            }
 
             // Snapshot VMA data under the SAME parent read-guard (R-WRITESTORM-3
-            // consistency era — see the comment above).
+            // consistency era — see the comment above). DONTFORK VMAs are
+            // dropped from the snapshot.
             let snapshot: Vec<(PageVirtAddr, PageVirtAddr, VmaFlags, VmaType, i32, u64, usize)> =
-                parent_vma_guard.iter().map(|vma| {
-                    (vma.start(), vma.end(), vma.flags(), vma.vma_type(), vma.file_fd(), vma.file_size(), vma.offset())
-                }).collect();
+                parent_vma_guard
+                    .iter()
+                    .filter(|vma| !vma.flags().contains(crate::mm::vma::VmaFlags::DONTFORK))
+                    .map(|vma| {
+                        (vma.start(), vma.end(), vma.flags(), vma.vma_type(), vma.file_fd(), vma.file_size(), vma.offset())
+                    })
+                    .collect();
 
-            (exempt, snapshot)
+            (exempt, skip, snapshot)
         };
 
         // SAFETY: self.pgd is a valid root PPN for the current address space. The caller
@@ -1161,7 +1180,7 @@ impl MmStruct {
         // table and may cond_resched between chunks (launcher wall fix — see
         // the function's own comment for the exclusion argument).
         let new_root_ppn = unsafe {
-            copy_page_table_cow(self, &cow_exempt).ok_or(MapError::OutOfMemory)?
+            copy_page_table_cow(self, &cow_exempt, &fork_skip).ok_or(MapError::OutOfMemory)?
         };
 
         // SAFETY: new_root_ppn was just returned from copy_page_table_cow, so it points to
@@ -1815,6 +1834,7 @@ pub mod cow_flags {
 pub unsafe fn copy_page_table_cow(
     parent: &crate::mm::mm_struct::MmStruct,
     cow_exempt: &[(u64, u64)],
+    fork_skip: &[(u64, u64)],
 ) -> Option<u64> {
     let parent_root_ppn = parent.root_ppn();
     // NOTE (launcher wall fix, session-3, updated for per-mm sections):
@@ -2007,6 +2027,12 @@ pub unsafe fn copy_page_table_cow(
                         | ((vpn3 as u64) << 30)
                         | ((vpn2 as u64) << 21)
                         | ((vpn1 as u64) << 12);
+                    // sc157: DONTFORK (VM_DONTCOPY) ranges are not
+                    // inherited at all — no PTE in the child, no
+                    // refcount bump, no COW marking of the parent.
+                    if fork_skip.iter().any(|(s, e)| leaf_va >= *s && leaf_va < *e) {
+                        continue;
+                    }
                     let cow_exempt_leaf = cow_exempt
                         .iter()
                         .any(|(s, e)| leaf_va >= *s && leaf_va < *e)
