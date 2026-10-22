@@ -125,6 +125,7 @@ pub fn plausible_fp(fp: u64) -> bool {
 }
 
 #[inline(never)]
+#[cfg(feature = "riscv64")]
 pub unsafe fn walk_fp_chain(mut fp: u64, out: &mut [u64]) {
     for slot in out.iter_mut() {
         *slot = 0;
@@ -133,6 +134,38 @@ pub unsafe fn walk_fp_chain(mut fp: u64, out: &mut [u64]) {
         }
         let ra = core::ptr::read_volatile((fp - 8) as *const u64);
         let next = core::ptr::read_volatile((fp - 0x10) as *const u64);
+        *slot = ra;
+        if !(next >= 0x8000_0000_0000_0000 && next & 7 == 0 && next > fp && plausible_fp(next)) {
+            return;
+        }
+        fp = next;
+    }
+}
+
+/// x86_64 twin. The riscv64 walk above reads the RISC-V frame layout
+/// (s0 at the TOP of the frame: saved ra at [fp-8], saved s0 at
+/// [fp-0x10]); SysV x86_64 stores the saved rbp AT [rbp] with the return
+/// address at [rbp+8]. Running the riscv64 layout on x86_64 dereferenced
+/// the frame's LOCAL VARIABLES — locals that happened to hold kernel
+/// pointers passed the plausibility gate, so nearly every allocation
+/// interned a UNIQUE garbage chain, exhausting PSITE_SLOTS within the
+/// first minutes of a boot and dropping every real call site from the
+/// MEMPSITES attribution (observed live on the pt4 audit boot: f2 slots
+/// full of ASCII data like 0x49657069505d737d, top net=198 against
+/// 442k page frees).
+#[inline(never)]
+#[cfg(feature = "x86_64")]
+pub unsafe fn walk_fp_chain(mut fp: u64, out: &mut [u64]) {
+    for slot in out.iter_mut() {
+        *slot = 0;
+        if !(fp >= 0x8000_0000_0000_0000 && fp & 7 == 0 && plausible_fp(fp)) {
+            return;
+        }
+        // SysV: [fp] = caller's saved rbp, [fp+8] = this frame's return
+        // address. Stacks grow down, so the caller's rbp is strictly
+        // greater than the current one (same ascending check as riscv64).
+        let next = core::ptr::read_volatile(fp as *const u64);
+        let ra = core::ptr::read_volatile((fp + 8) as *const u64);
         *slot = ra;
         if !(next >= 0x8000_0000_0000_0000 && next & 7 == 0 && next > fp && plausible_fp(next)) {
             return;
