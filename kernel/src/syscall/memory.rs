@@ -516,6 +516,26 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                         .checked_mul(page)
                         .map_or(true, |bytes| bytes > as_cur);
                     if exceeds {
+                        // sc126 (Session P): attribution — which ENOMEM
+                        // source refuses the late app children's mmaps
+                        // (the APP-PARK fail tail shows nr=9 ret=-12 but
+                        // not WHY; one line per source, budget 20).
+                        static NR: core::sync::atomic::AtomicUsize =
+                            core::sync::atomic::AtomicUsize::new(0);
+                        if NR.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 20 {
+                            let comm = crate::sched::current()
+                                .map(|t| unsafe { (*t).comm() })
+                                .map(|c| core::str::from_utf8(c).unwrap_or(""))
+                                .unwrap_or("")
+                                .trim_end_matches('\0');
+                            crate::pr_warn!(
+                                "mmap-enomem: RLIMIT_AS comm='{}' len={:#x} total_vm={:#x} limit={:#x}",
+                                comm,
+                                actual_length,
+                                total * page,
+                                as_cur
+                            );
+                        }
                         return mmap_error::ENOMEM;
                     }
                 }
@@ -528,6 +548,16 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
             // Simplification: virtual mapping length is the charge unit
             // (an RSS approximation); uncharge happens at munmap/exit.
             if !crate::sched::cgroup::cgroup_memory_charge(actual_length) {
+                static NC: core::sync::atomic::AtomicUsize =
+                    core::sync::atomic::AtomicUsize::new(0);
+                if NC.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 20 {
+                    let comm = crate::sched::current()
+                        .map(|t| unsafe { (*t).comm() })
+                        .map(|c| core::str::from_utf8(c).unwrap_or(""))
+                        .unwrap_or("")
+                        .trim_end_matches('\0');
+                    crate::sched::cgroup::dfx_report_memory_refusal(comm, actual_length);
+                }
                 return mmap_error::ENOMEM;
             }
 
