@@ -1620,3 +1620,199 @@ SEED-ALLOC-BAD-POP detector in zone.rs is the in-place tripwire).
   (3) Chain continues; watchset 15 + the hunt for the wild writer
   stays the line's ultimate milestone.
 
+
+## Sessions 19-21 (reconstructed from artifacts + commit messages — quota deaths and user pauses, no archive written at the time)
+
+### Session 19 (13:52-14:30): PT-alloc survivable + first fake-OOM audits
+
+- 40920349 (14:11) landed the map_page panic fix (session 18's loudest
+  item): alloc_page_table's Late stage gets a bounded reclaim retry
+  (clean page-cache eviction only — swap-out would self-deadlock on the
+  held per-mm PteLock), map_page* return bool, demand-fault sites convert
+  failure to MmFaultResult::OutOfMemory (SIGKILL, Linux pagefault-OOM
+  semantics), data pages freed on the failure path.
+- 7fea5944 (14:24) added the raw-UART forensics after pt1/pt2 lost every
+  printk line of the OOM dumps (printk wedges during exactly these
+  storms): MEMLEDGER-CENSUS/BUCKETS/OOMFX-RAW lines ride the raw path.
+- pt1 (14:17): 0 panics but NO OOM either (UART-slowdown timing shift).
+  pt2 (14:24): fake-OOM captured with full forensics — memfree_pages=0,
+  zone_free=0, zone_managed=736006, pagecache 126k, heap 206MB of 992MB —
+  the drain is REAL, not accounting drift (census sums reconcile exactly:
+  reserved 836858 + managed 736006 = total descriptors 1572864).
+  pt3: PANICKED at ledger.rs:86 (see session 22 — the Line OOB bomb).
+
+### Session 20 (14:30-16:38, quota death at ~16:00 mid oom_kill work)
+
+- b663c6f8 snapshot carried unreviewed oom_kill.rs + trap.rs changes;
+  998e1c01 (16:12) reviewed and corrected them: pagefault-OOM retry
+  policy — strike burned only when a kill window is WON (the snapshot
+  burned one per fault and killed the faulting task alongside the
+  victim), 10s quiet episode reset, riscv64 kernel-mode arm gets the
+  global killer a chance before panicking (livelock fix).
+- pt4 (16:20, pre-walk-fix): walk_fp_chain read the RISC-V frame layout
+  on x86_64 — every allocation interned a UNIQUE garbage chain, PSITE
+  slots filled with ASCII junk (0x49657069505d737d), and the boot
+  PANICKED at the same ledger.rs:86 OOB.
+- a2a7e91f (16:30) fixed walk_fp_chain to the SysV layout ([rbp]=caller
+  rbp, [rbp+8]=ra). pt5 (16:31-16:37, killed by the user pause): fake-OOM
+  at ~3 min (pagefault OOM x2 → oom-killer Killed process 305 (ueventd)
+  score 556 → zone refilled to 1042 pages) and the boot SURVIVED ~5 more
+  minutes of full storm to the pause kill, 0 panics. The survivable path
+  works end-to-end on the first clean test.
+- 39fc7619 (16:38) pause snapshot.
+
+### Session 21 (22:13-22:15)
+
+- Relaunched the chain from r36 (ww-chain-s21.log); the user pause at
+  22:15 killed it ~2 min in (0 WW-HIT, clean partial). 6553ae01 snapshot.
+
+## Session 22 (continuation agent — fake-OOM survivable-path validation + the zone-drain audit)
+
+### Inheritance reconstruction
+
+- Nothing running at claim (chain dead with the pause, r36 partial).
+  Relaunched the chain from r37 at 00:08 (run/ww-chain-s22.log; proctree
+  in run/ww-s22-proctree.txt; WW-ARMED 15 verified, frozen pair
+  unchanged). Cumulative 0 WW-HIT r1-r36.
+- Build verified: PLATFORM=x86_64 make build at the pause snapshot HEAD
+  is a cargo no-op reproducing the pt5 bzImage byte-identical (md5
+  96fc5282) — pt5's verdict rode the committed code.
+
+### The fake-OOM numbers (pt2/pt5 re-read — the audit's ground truth)
+
+At the OOM moment (both boots, same shape):
+
+- Machine: 4 GiB usable (e820 low 2 GiB + above-4G 2 GiB), 1572864
+  descriptors over the 6 GiB physical span; the ~2 GiB PCI hole
+  descriptors report reserved → reserved=836858 (hole 524355 + kernel
+  heap 253952 + slab/image/etc.), zone_managed=736006, census sums
+  reconcile EXACTLY (no accounting drift, orphan~0, inverse=0).
+- zone_free=0 walkable=0 — the drain is genuine: managed pages are all
+  held. Decomposition: other_used=558600 (76%!), lru_file=125947 (17%,
+  CLEAN page cache, dirty=0), anon=45713, pt=4586, cow/mapped small.
+- The two headline questions this session: (a) the survivable path holds
+  under repeated fake-OOM (pt5 says yes once; needs longer exposure);
+  (b) WHO holds the 558600 unflagged pages, and why the slowpath's
+  direct reclaim does not evict the 126k CLEAN page-cache pages first.
+
+### Instrumentation fixes found necessary and landed (8127f1cf)
+
+1. ledger Line::emit OOB — the pt3/pt4 boot killer, STILL LIVE at HEAD:
+   push() filled the [u8;160] and emit() stored buf[160]. pt5's BUCKETS
+   line summed to 159 — one byte of luck. Fixed (newline byte reserved).
+2. psite attribution unusable: the fp walk stores trailing ras
+   UNCHECKED, so one caller interned as 4 slots (identical f1..f7,
+   junk-divergent f8); 64 slots saturated at boot; the runtime
+   allocators never interned — MEMPSITES top-10 nets summed to ~96k
+   against the 558600 other_used census. chain_key sanitizes
+   non-kernel-text ras (x86_64 image window), PSITE_SLOTS 64→256, dump
+   top-16.
+3. High-RAM blind spot: the PFN→site table covered 2 GiB; q35's
+   above-4G half (2 GiB of 4) was untracked — high-RAM frees never
+   attributed (churn nets inflated by their high half; leaks correct).
+   Widened to 6 GiB/786432 entries.
+4. MEMLEDGER-OWRS: other_use(d) census by physical range (12×512 MiB,
+   descending so above-4G buckets survive truncation).
+
+Kernel md5 after: fd6a9a37 (bzImage). Chain r37 unaffected (frozen pair
+by design).
+
+### Early psite read (pt6 partial, ~4 min, pre-fix kernel)
+
+Top family net=69154+6421+2247+1841+848+821+658 ≈ 82k through
+alloc_pages ← alloc_user_phys_page ← handle_mm_fault ← do_page_fault —
+the anonymous-demand-fault arm (ledger anon=45713 at OOM + the
+high-RAM-frees inflation explains the gap). Side sites: mremap
+copy_old_to_new_pages (1.8k), devfs shared_grow (0.5k). NO site for the
+ext4 page cache (should be ~126k net) and nothing near 558k — both
+expected consequences of the saturation/blind-spot bugs above; pt7 (the
+fixed-kernel audit boot) is the decisive run.
+
+### The zone-drain audit: ROOT CAUSE ATTRIBUTED (pt7, fixed instrumentation)
+
+pt7 (30-min rs-repro audit boot, kernel 8127f1cf, dfx=taskdump,watchdog,
+periodic,memwatch,ledger) survived TWO fake-OOM rounds (oom-killer killed
+ueventd score 556, then watchdog_servicene score 436) with zero panics —
+and the widened psite table + OWRS histogram named the drainer:
+
+- **psite #1: net=639009 pages (a=713290 f=74281) through alloc_pages ←
+  alloc_user_phys_page ← handle_mm_fault+0x311d (call at 0x...cdebd) ←
+  do_page_fault ← trap_handler** — the MAIN single-page demand-fault arm
+  (page_fault.rs:885). Contains both the properly-flagged anon sub-arm
+  and the unflagged FileBacked sub-arm.
+- **psite #2: net=125716 (a=138615 f=12899) — handle_mm_fault+0x2dfa
+  (call at 0x...cdb96, the loop shape)** — the fault-around batch arm
+  (page_fault.rs:767).
+- OWRS histogram at OOM #1: other_used=539290 spread r0=64808 r1=109711
+  r3=5217 r8=110842 r9=99434 r10=84068 r11=65210 — uniform across the
+  zone's two DRAM halves (no phys-range funnel; the high half carries
+  359k, the low 174k).
+- Census at OOM #1: other_used=539290 lru_file=149632 anon=41469
+  pt=4446 mapped_file=1022 cow=132 — sums reconcile exactly. Pages in
+  other_used have rc=1, mapcount=0, NO flags (census precedence:
+  mapped_file would have caught mapcount>0).
+
+**Root cause (code-level, both arms verified):**
+
+1. page_fault.rs:1074 — the main arm's FileBacked sub-arm tail is
+   literally `_ => { // File-backed: rmap not wired yet }`: after
+   allocating a FRESH page, read_at()-ing the file content into it, and
+   mapping it into the user PTE, it sets NO page-descriptor state — no
+   Anonymous/SwapBacked, no mapcount, no rmap record, no LRU add.
+2. The fault-around arm (731-880) does the same for every page of its
+   16-page window — no descriptor state anywhere on the path.
+
+Consequences, in order of size:
+
+- **Unreclaimable by construction**: vmscan only sees Lru members.
+  Every file-backed demand fault pins its private copy FOREVER (freed
+  only by process-exit PTE teardown). The OH workload's file mappings
+  (ArkUI libs etc.) accumulate 539-558k such pages = 2.1-2.18 GiB of
+  the 2.87 GiB zone — the drain.
+- **Double memory**: the same file data ALSO lives in the page cache
+  (lru_file 126-150k pages): read_at fills the fresh page THROUGH the
+  cache. Linux maps the CACHE page directly (filemap_fault) — one copy,
+  shared, reclaimable; MAP_PRIVATE goes RO+COW. Rux copies per fault.
+- **The "fake" in fake-OOM**: the ledger census shows 76% of the zone
+  as "other_used" (nobody's pages) — accounting-side invisibility of
+  the same bug. The GNOME image's main-session "OOM at ~342MB/2G" is
+  almost surely the same family (their used-counter also cannot see
+  these pages).
+- The anon arm is correctly flagged (SwapBacked+LRU per the
+  page_fault.rs:233 comment family) but swap_active=0 on these boots,
+  so anon (41k) is de-facto unreclaimable too — minor next to the file
+  copies.
+- The clean page cache is the only reclaimable pool at OOM time and it
+  did NOT shrink across the two OOM dumps (149632 → later dump same
+  class) — whether vmscan's shrink_inactive_list actually evicts under
+  this pressure is a separate open question (pages ARE on
+  LRU_INACTIVE_FILE; all file lru_add variants land there).
+
+**Fix directions (next session's mm item, needs design + probes):**
+
+- Real fix (Linux parity, the big one): filemap_fault shape — read/exec
+  faults on FileBacked VMAs map the PAGE-CACHE page directly (refcount
+  +1, rmap), RO even on writable VMAs; write faults COW (alloc, copy,
+  flag anon+SwapBacked, map RW). Kills the double-copy AND makes the
+  pool reclaimable (unmap → refault). Touches both arms, the fork COW
+  walk's file-page handling, mprotect downgrades, and unmap/teardown
+  (put the cache ref). Must ride with loader_vma/faultaround/mmapfix
+  probes + OH soak.
+- Interim accounting fix (small): set Anonymous+SwapBacked+mapcount+
+  rmap+anon-LRU on both file arms' copies (Linux marks private file
+  pages SwapBacked after COW). Makes them census-visible and
+  swap-eligible, does NOT fix the double-copy or non-swap reclaim.
+  NOTE: this moves them into the `anon` census bucket and changes
+  oom-killer badness inputs — coordinate with the main-session
+  fake-OOM effort either way.
+
+### Survivable-path validation state (task 1)
+
+- pt5 (HEAD@pause kernel): 1 fake-OOM survived (ueventd killed, zone
+  refilled 0→1042, storm continued to the pause kill). 
+- pt7 (8127f1cf): 2 fake-OOMs survived in the first ~20 min (two
+  distinct victims), 0 panics — and the Line-emit fix is PROVEN LIVE:
+  pt7's first BUCKETS line is WIDER than pt3/pt4's (extra digits) and
+  truncated cleanly where those boots panicked.
+- Remaining legs: riscv64 unit tests + minimal-rootfs boot; the 45-min
+  OH 0-panic gate boot.
