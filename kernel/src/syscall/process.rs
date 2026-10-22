@@ -5072,6 +5072,30 @@ pub fn sys_clone3(args: SyscallArgs) -> i64 {
         exit_signal: exit_signal as u8,
     };
 
+    // sc119 insurance: the appclone census lives in sys_clone; a caller
+    // using clone3 (this path) would bypass it, muddying the "no clone
+    // ever attempted" decode. Same filter, same 80-line budget counter
+    // is NOT shared (this one has its own — clone3 use by OH runtimes
+    // is unlikely, the budget here is small and separate).
+    {
+        let comm = crate::sched::current()
+            .map(|t| unsafe { (*t).comm() })
+            .map(|c| core::str::from_utf8(c).unwrap_or(""))
+            .unwrap_or("")
+            .trim_end_matches('\0');
+        let is_app = comm.contains("launcher")
+            || comm.contains("settingsdata")
+            || comm.contains("systemui")
+            || comm.contains("dataability");
+        if is_app {
+            static N4: core::sync::atomic::AtomicUsize =
+                core::sync::atomic::AtomicUsize::new(0);
+            if N4.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 20 {
+                crate::pr_warn!("appclone3: comm='{}' flags={:#x}", comm, flags);
+            }
+        }
+    }
+
     match do_clone(clone_args) {
         Ok(pid) => pid as i64,
         Err(e) => e as i64,

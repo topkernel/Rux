@@ -2367,6 +2367,27 @@ unsafe fn rwfz_stack_frames(
             printed += 1;
         }
     }
+    // sc120 (Session P): the app-child park hunt needs the RAW frame
+    // chain — the file-backed-only scan below DROPS return addresses
+    // into the loader-mapped musl VMA at 0x3fbf000000 (fd=-1 AND
+    // baseoff==0 for the merged first segment: filtered on both
+    // clauses), so the musl syscall -> __timedwait -> pthread_primitive
+    // -> RUNTIME-caller chain never printed and the only survivors were
+    // stale decoys (a libc++ string-assign return at slot 1). 24 raw
+    // words = 3 lines: enough to see the whole chain unfiltered.
+    {
+        use core::fmt::Write;
+        let mut raw = alloc::string::String::new();
+        let _ = write!(raw, "\nRWFRZ:   {} raw ustack:", label);
+        for i in 0..24 {
+            if let Some(v) = read_u64_at(rsp + 8 * i) {
+                let _ = write!(raw, " {}", v);
+            } else {
+                break;
+            }
+        }
+        crate::pr_warn!("{}", raw);
+    }
     crate::pr_warn!("RWFRZ:   {} frames:{}", label, s);
 }
 
