@@ -1997,6 +1997,100 @@ pub fn sys_futex_handler(args: &[u64; 6]) -> i64 {
             }
         }
     }
+    // sc156 (Session R): the SA-501 wedge tracer. sc155 closed the
+    // registration question to the registrar side: foundation's safwk
+    // loader main thread opens libs 401/4606/4607/3299/3203/3704 then
+    // NEVER reaches OpenSo(180) — and safwk's FindAndStartPhaseTasks
+    // escapes any hung OnStart through WaitForTasks'
+    // condition_variable::wait_for(100s), so the loader can only be
+    // permanently stuck if a TIMED futex wait never returns. This census
+    // prints every timed WAIT/WAIT_BITSET from foundation/sa_main
+    // threads (entry line BEFORE the wait + result line after): a
+    // missing "->" line names a never-firing timeout as the wedge. The
+    // first two waits also dump the caller's syscall rings. The timespec
+    // is decoded so relative(100s)/absolute(now+100s) deadlines are
+    // distinguishable offline.
+    if matches!(op & FUTEX_CMD_MASK, FUTEX_WAIT | FUTEX_WAIT_BITSET) && timeout != 0 {
+        if let Some(t) = crate::sched::current() {
+            let tk = unsafe { &*t };
+            let comm = core::str::from_utf8(&tk.comm()[..])
+                .unwrap_or("")
+                .trim_end_matches('\0');
+            if comm.contains("foundation") || comm.contains("sa_main") {
+                static FTW_N: core::sync::atomic::AtomicUsize =
+                    core::sync::atomic::AtomicUsize::new(0);
+                let n = FTW_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                if n < 240 {
+                    let mut ts = [0u8; 16];
+                    let ts_ok = unsafe {
+                        crate::arch::uaccess::copy_from_user(
+                            ts.as_mut_ptr(),
+                            timeout as *const u8,
+                            ts.len(),
+                        ) == 0
+                    };
+                    let (sec, nsec) = if ts_ok {
+                        (
+                            u64::from(ts[0]) | (u64::from(ts[1]) << 8) | (u64::from(ts[2]) << 16)
+                                | (u64::from(ts[3]) << 24),
+                            u32::from(ts[8]) | (u32::from(ts[9]) << 8)
+                                | (u32::from(ts[10]) << 16)
+                                | (u32::from(ts[11]) << 24),
+                        )
+                    } else {
+                        (0, 0)
+                    };
+                    crate::pr_warn!(
+                        "FTWAIT #{} tid {} comm='{}' uaddr={:#x} val={:#x} op={:#x} ts={}{}.{:09}s",
+                        n,
+                        tk.pid(),
+                        comm,
+                        uaddr,
+                        val,
+                        op,
+                        if ts_ok { "" } else { "?" },
+                        sec,
+                        nsec
+                    );
+                    // sc156: ring dump on the first two timed waits only —
+                    // the wait that never returns carries its caller
+                    // context in the rings.
+                    if n < 2 {
+                        use core::fmt::Write;
+                        use core::sync::atomic::Ordering::Relaxed;
+                        const RL: usize = crate::process::task::LAST_CALLS_LEN;
+                        let cur = tk.last_calls_cur.load(Relaxed);
+                        let mut s2 = alloc::string::String::new();
+                        let _ = write!(s2, "FTWAIT calls:");
+                        for k in 0..RL {
+                            let i = (cur + RL - k) % RL; // newest first
+                            let v = tk.last_calls[i].load(Relaxed);
+                            if v != 0 {
+                                let _ = write!(s2, " {}", v);
+                            }
+                        }
+                        crate::pr_warn!("{}", s2);
+                        let fcur = tk.last_fails_cur.load(Relaxed);
+                        let mut s3 = alloc::string::String::new();
+                        let _ = write!(s3, "FTWAIT fails:");
+                        for k in 0..8 {
+                            let i = (fcur + 8 - 1 - k) % 8;
+                            let v = tk.last_fails[i].load(Relaxed);
+                            if v != 0 {
+                                let a0 = tk.last_fails_a0[i].load(Relaxed);
+                                let _ = write!(s3, " nr{}=-{} a0={:#x}", v & 0xffff, v >> 16, a0);
+                            }
+                        }
+                        crate::pr_warn!("{}", s3);
+                    }
+                    let r = do_futex(uaddr, op, val, timeout, uaddr2, 0, val3);
+                    rwfz_op_log(uaddr, op, val, r);
+                    crate::pr_warn!("FTWAIT #{} -> ret={}", n, r);
+                    return r;
+                }
+            }
+        }
+    }
     let r = do_futex(uaddr, op, val, timeout, uaddr2, 0, val3);
     rwfz_op_log(uaddr, op, val, r);
     r

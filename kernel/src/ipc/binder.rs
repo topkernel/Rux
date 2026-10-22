@@ -4368,6 +4368,108 @@ fn binder_transaction(
         security_ctx,
     });
 
+    // sc155/156 (Session R): SA-table mutation tracer. Session Q closed
+    // the park cause to "SA 501 (AppMgrService) never lands in samgr's
+    // table" but could not see WHO fails to register it: APPTXN covers
+    // only the app family, and samgr's own insert/not-found hilog lines
+    // (I0/D0) are dropped by hilogd flow control long before the
+    // console. This hook is binder-level and sender-agnostic: requests
+    // carrying a samgr table-mutation code (3 ADD, 4 REMOVE, 10
+    // ADD_ONDEMAND, 21 UNLOAD) whose parcel carries the samgr interface
+    // token (decodes "oh..." UTF-16 — HDI interfaces use "OH"/"HDI"
+    // prefixes, which burned the sc155 budget via powermgr/netmanager
+    // noise) print with the first 64 parcel bytes (offline decode:
+    // 8-byte OH parcel header, then string16 [u32 len][u16 chars], then
+    // u32 saId). Replies from the latched samgr pid print the reply's
+    // first u32 (the int32 result). Comparing the send count/content
+    // with the reference Linux run's 102 "insert SA" lines decides
+    // "registrar never sent" vs "samgr rejected/lost" for SA 501.
+    {
+        const SAMGR_ADD: u32 = 3;
+        const SAMGR_REMOVE: u32 = 4;
+        const SAMGR_ADD_ONDEMAND: u32 = 10;
+        const SAMGR_UNLOAD: u32 = 21;
+        // The samgr interface token starts UTF-16 "oh" at parcel offset
+        // 12 (after the 8-byte OH parcel header + u32 string length).
+        static SAREG_SAMGR_PID: core::sync::atomic::AtomicU32 =
+            core::sync::atomic::AtomicU32::new(0);
+        static SAREG_N: core::sync::atomic::AtomicUsize =
+            core::sync::atomic::AtomicUsize::new(0);
+        let mut is_samgr_req = false;
+        if !reply
+            && matches!(tr.code, SAMGR_ADD | SAMGR_REMOVE | SAMGR_ADD_ONDEMAND | SAMGR_UNLOAD)
+        {
+            let mut hdr = [0u8; 16];
+            let ok = tr.data_buffer != 0
+                && unsafe {
+                    crate::arch::uaccess::copy_from_user(
+                        hdr.as_mut_ptr(),
+                        tr.data_buffer as *const u8,
+                        hdr.len(),
+                    ) == 0
+                };
+            // "oh" in UTF-16LE at offsets 12..16.
+            if ok && &hdr[12..16] == &[0x6f, 0x00, 0x68, 0x00] {
+                is_samgr_req = true;
+                SAREG_SAMGR_PID.store(target.pid as u32, core::sync::atomic::Ordering::Relaxed);
+            }
+        }
+        let reply_to_mutation = reply
+            && in_reply_to
+                .as_ref()
+                .map(|t| {
+                    matches!(
+                        t.code,
+                        SAMGR_ADD | SAMGR_REMOVE | SAMGR_ADD_ONDEMAND | SAMGR_UNLOAD
+                    )
+                })
+                .unwrap_or(false)
+            && proc.pid as u32
+                == SAREG_SAMGR_PID.load(core::sync::atomic::Ordering::Relaxed);
+        if is_samgr_req || reply_to_mutation {
+            if SAREG_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 600 {
+                let comm = crate::sched::current()
+                    .map(|t| unsafe { (*t).comm() })
+                    .map(|c| core::str::from_utf8(c).unwrap_or(""))
+                    .unwrap_or("")
+                    .trim_end_matches('\0');
+                let mut pb = [0u8; 64];
+                let mut pb_ok = false;
+                if tr.data_buffer != 0 {
+                    pb_ok = unsafe {
+                        crate::arch::uaccess::copy_from_user(
+                            pb.as_mut_ptr(),
+                            tr.data_buffer as *const u8,
+                            pb.len(),
+                        ) == 0
+                    };
+                }
+                let hex: alloc::string::String = if pb_ok {
+                        pb.iter()
+                            .map(|b| alloc::format!("{:02x}", b))
+                            .collect()
+                    } else {
+                        alloc::string::String::from("unmapped")
+                    };
+                crate::pr_warn!(
+                    "SAREG {} code={} from pid={} tgid={} comm='{}' -> pid={} dlen={} parcel={}",
+                    if reply { "reply" } else { "send " },
+                    if reply {
+                        in_reply_to.as_ref().map(|t| t.code).unwrap_or(0)
+                    } else {
+                        tr.code
+                    },
+                    proc.pid,
+                    crate::process::current_pid(),
+                    comm,
+                    target.pid,
+                    data_size,
+                    hex
+                );
+            }
+        }
+    }
+
     let mut wakes: Vec<Arc<BinderProc>> = Vec::new();
     // Threads to wake directly (thread-targeted delivery).
     let mut wake_ths: Vec<Arc<BinderThread>> = Vec::new();

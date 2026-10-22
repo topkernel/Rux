@@ -814,7 +814,9 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
             || comm.contains("settingsdata")
             || comm.contains("systemui")
             || comm.contains("dataability")
-            || comm == "appspawn";
+            || comm == "appspawn"
+            || comm.contains("foundation")
+            || comm.contains("sa_main");
         if family {
             // sc148: the DAEMON's own preload log storm (extension libs)
             // ate the budget before any child forked. Skip the boot's
@@ -833,13 +835,18 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
             // libappms loaded into the daemon) never registers with
             // samgr, and the daemon's own narration says whether the
             // registration was attempted and how it failed.
-            // sc152: collection runs for the whole family; the PRINT
-            // below filters daemon lines to registration keywords
-            // (AddSystemAbility / RegisterSystemAbility / SA ids / samgr)
-            // so the daemon's preload storm cannot eat the budget.
+            // sc155 (Session R): BUDGET FIX — the collection loop below
+            // used to consume the 1200-line budget for EVERY family fd3
+            // writev (the daemon's preload storm ate it before any child
+            // forked; sc154 printed 7 lines total and zero child
+            // narration). Now only lines that PASS the print filter
+            // consume budget. foundation/sa_main (the SA-501 registrar
+            // per /system/profile/foundation.json) join the family under
+            // the same keyword gate as the daemon.
+            let keyword_daemon = comm.contains("foundation") || comm.contains("sa_main");
             static HI_N: core::sync::atomic::AtomicUsize =
                 core::sync::atomic::AtomicUsize::new(0);
-            if HI_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 1200 {
+            if HI_N.load(core::sync::atomic::Ordering::Relaxed) < 1200 {
                 // iovec { void* base; size_t len }
                 let base = args[1];
                 if base != 0 {
@@ -868,7 +875,7 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
                                     let text: alloc::string::String = buf[..n]
                                         .iter()
                                         .map(|c| {
-                                            if (0x20..0x7f).contains(c) || *c == b'\n' {
+                                            if (0x20..=0x7f).contains(c) || *c == b'\n' {
                                                 *c as char
                                             } else {
                                                 '.'
@@ -882,19 +889,24 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
                     }
                     if !parts.is_empty() {
                         let joined = parts.join("|");
-                        let daemon_regn = is_daemon
+                        // sc156: the forked children's ArkCompiler GC
+                        // chatter ("[gc] AddRegion/RemoveRegion/...")
+                        // burned ~700 of the 1200 budget lines in sc155
+                        // before the launcher phase — engine noise, drop.
+                        let gc_noise = joined.contains("ArkCompiler.|[gc]");
+                        // sc155: the print filter decides FIRST; only
+                        // passing lines consume the budget (children
+                        // always pass; daemon/foundation/sa_main need a
+                        // registration keyword).
+                        let daemon_regn = (is_daemon || keyword_daemon)
                             && (joined.contains("SystemAbility")
                                 || joined.contains("501")
-                                || joined.contains("amgr"));
-                        if !is_daemon || daemon_regn {
-                            static DREG_N: core::sync::atomic::AtomicUsize =
-                                core::sync::atomic::AtomicUsize::new(0);
-                            if !is_daemon
-                                || DREG_N.fetch_add(
-                                    1,
-                                    core::sync::atomic::Ordering::Relaxed,
-                                ) < 60
-                            {
+                                || joined.contains("amgr")
+                                || joined.contains("SAM"));
+                        if !gc_noise
+                            && ((!(is_daemon || keyword_daemon)) || daemon_regn)
+                        {
+                            if HI_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 1200 {
                                 crate::pr_warn!(
                                     "applog pid={} comm='{}' ret={} |{}",
                                     crate::process::current_pid(),
