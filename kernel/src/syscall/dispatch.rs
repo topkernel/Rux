@@ -763,13 +763,12 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
                     || s.contains("settingsdata")
                     || s.contains("systemui")
                     || s.contains("dataability")
-                    || s.contains("appspawn")
             })
             .unwrap_or(false);
         if comm_ok {
             static OPEN_ENOENT_N: core::sync::atomic::AtomicUsize =
                 core::sync::atomic::AtomicUsize::new(0);
-            if OPEN_ENOENT_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 120 {
+            if OPEN_ENOENT_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 200 {
                 let mut pb = [0u8; 96];
                 let parg = if syscall_no as u64 != 2 { args[1] } else { args[0] };
                 let path = if parg != 0 {
