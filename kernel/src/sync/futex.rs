@@ -1673,24 +1673,203 @@ pub fn sys_futex_handler(args: &[u64; 6]) -> i64 {
                             }
                             // Open fd table: names the connect/writev
                             // socket (hilog? samgr session?) and any lib
-                            // fds still alive.
+                            // fds still alive. sc138: classify each fd by
+                            // its FileOps identity (unix/tcp/netlink/
+                            // binder/pipe/io_uring/file) — fd3's 10MB
+                            // anon_inode mapping in sc137 needs the true
+                            // object type named, and unix sockets also
+                            // print their bound+peer names.
                             let fdt = tk.fdtable();
                             let mut shown = 0u32;
                             for fd in 0..32u32 {
                                 if let Some(f) = fdt.get_file(fd as usize) {
+                                    let kind = match f.get_ops() {
+                                        Some(ops) => {
+                                            let p = ops as *const crate::fs::FileOps;
+                                            if core::ptr::eq(
+                                                p,
+                                                &crate::net::unix::UNIX_SOCKET_OPS,
+                                            ) {
+                                                match crate::net::unix::unix_file_of(
+                                                    fd as usize,
+                                                ) {
+                                                    Some((sock, _)) => {
+                                                        let bn = sock
+                                                            .bound_name
+                                                            .lock()
+                                                            .clone()
+                                                            .unwrap_or_else(|| {
+                                                                alloc::string::String::from(
+                                                                    "unbound",
+                                                                )
+                                                            });
+                                                        let peer = sock
+                                                            .peer
+                                                            .lock()
+                                                            .as_ref()
+                                                            .and_then(|w| w.upgrade())
+                                                            .and_then(|p2| {
+                                                                p2.bound_name.lock().clone()
+                                                            })
+                                                            .unwrap_or_else(|| {
+                                                                alloc::string::String::from("-")
+                                                            });
+                                                        alloc::format!(
+                                                            "unix bound={} peer={}",
+                                                            bn, peer
+                                                        )
+                                                    }
+                                                    None => "unix".into(),
+                                                }
+                                            } else if core::ptr::eq(
+                                                p,
+                                                &crate::net::socket::SOCKET_OPS,
+                                            ) {
+                                                "inet-socket".into()
+                                            } else if core::ptr::eq(
+                                                p,
+                                                &crate::net::netlink::NETLINK_OPS,
+                                            ) {
+                                                "netlink".into()
+                                            } else if core::ptr::eq(p, &crate::net::raw::RAW_OPS)
+                                            {
+                                                "raw-socket".into()
+                                            } else if core::ptr::eq(
+                                                p,
+                                                &crate::ipc::binder::BINDER_OPS,
+                                            ) {
+                                                "binder".into()
+                                            } else if core::ptr::eq(
+                                                p,
+                                                &crate::fs::pipe::PIPE_OPS,
+                                            ) {
+                                                "pipe".into()
+                                            } else if core::ptr::eq(
+                                                p,
+                                                &crate::io_uring::IO_URING_OPS,
+                                            ) {
+                                                "io_uring".into()
+                                            } else {
+                                                "file".into()
+                                            }
+                                        }
+                                        None => "anon".into(),
+                                    };
                                     let mut v = alloc::string::String::new();
                                     let _ = write!(
                                         v,
-                                        "APPFD {:?} fd={} {}",
+                                        "APPFD {:?} fd={} {} kind={}",
                                         comm,
                                         fd,
-                                        f.path()
+                                        f.path(),
+                                        kind
                                     );
                                     crate::pr_warn!("{}", v);
                                     shown += 1;
                                     if shown >= 16 {
                                         break;
                                     }
+                                }
+                            }
+                            // sc138 (Session Q): decode round 3.
+                            // (a) The park caller's code bytes: raw
+                            // ustack slot[12] is the return address into
+                            // the caller frame — sc137 resolved it to an
+                            // ANONYMOUS exec VMA (JIT stub arena or a
+                            // memfd-loaded lib). 24 bytes ending at
+                            // slot[12] identify the call instruction
+                            // offline; the first 8 bytes of the
+                            // containing VMA separate memfd-lib (ELF
+                            // magic) from a JIT arena.
+                            {
+                                let top = tk.kernel_stack_top();
+                                #[cfg(feature = "x86_64")]
+                                let rsp = unsafe {
+                                    let regs = (top.wrapping_sub(
+                                        crate::arch::x86_64::pt_regs::PT_REGS_SIZE,
+                                    ))
+                                        as *const crate::arch::x86_64::pt_regs::PtRegs;
+                                    (*regs).rsp as usize
+                                };
+                                #[cfg(feature = "riscv64")]
+                                let rsp = unsafe {
+                                    let regs = (top.wrapping_sub(
+                                        crate::arch::riscv64::pt_regs::PT_REGS_SIZE,
+                                    ))
+                                        as *const crate::arch::riscv64::pt_regs::PtRegs;
+                                    (*regs).sp as usize
+                                };
+                                #[cfg(not(any(feature = "x86_64", feature = "riscv64")))]
+                                let rsp = 0usize;
+                                if rsp != 0 {
+                                    let rd64 = |va: usize| -> Option<u64> {
+                                        let lo = unsafe {
+                                            read_u32_via_task(t, va)
+                                        }?;
+                                        let hi = unsafe {
+                                            read_u32_via_task(t, va + 4)
+                                        }?;
+                                        Some(lo as u64 | ((hi as u64) << 32))
+                                    };
+                                    if let Some(slot12) = rd64(rsp + 8 * 12) {
+                                        let mut v = alloc::string::String::new();
+                                        let _ = write!(
+                                            v,
+                                            "APPPK12 {:?} slot12={:#x}",
+                                            comm, slot12
+                                        );
+                                        for k in 0..3 {
+                                            match rd64(slot12.wrapping_sub(24) + 8 * k) {
+                                                Some(b) => {
+                                                    let _ = write!(v, " b{}={:#018x}", 24 - 8 * k, b)
+                                                }
+                                                None => {
+                                                    let _ = write!(v, " b{}=?", 24 - 8 * k)
+                                                }
+                                            }
+                                        }
+                                        // VMA start bytes (ELF check)
+                                        if let Some(aspace2) = tk.address_space() {
+                                            let vmas2 = aspace2.vma_read();
+                                            if let Some(vm) = vmas2.find(
+                                                crate::mm::page::VirtAddr::new(
+                                                    slot12 as usize,
+                                                ),
+                                            ) {
+                                                let start = vm.start().as_usize();
+                                                let _ = write!(
+                                                    v,
+                                                    " vma={:#x}-{:#x} vmab0=",
+                                                    start,
+                                                    vm.end().as_usize()
+                                                );
+                                                match rd64(start) {
+                                                    Some(b) => {
+                                                        let _ = write!(v, "{:#018x}", b)
+                                                    }
+                                                    None => {
+                                                        let _ = write!(v, "?")
+                                                    }
+                                                }
+                                                let elf = (b & 0xffff) == 0x457f;
+                                                let _ = write!(
+                                                    v,
+                                                    " {}",
+                                                    if elf { "MEMFD-LIB(ELF)" } else { "JIT/anon" }
+                                                );
+                                            }
+                                        }
+                                        crate::pr_warn!("{}", v);
+                                    }
+                                }
+                            }
+                            // (b) The global unix-socket registry once:
+                            // which abstract/filesystem listeners exist at
+                            // park time (the appconn hex was unreadable —
+                            // strncpy stopped at the abstract NUL).
+                            if n == 0 {
+                                for line in crate::net::unix::registry_snapshot() {
+                                    crate::pr_warn!("{}", line);
                                 }
                             }
                         }
