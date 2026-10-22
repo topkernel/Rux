@@ -722,10 +722,16 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
     // sc136 (Session Q): the parked children's pre-park loop is
     // {clock_gettime xN, writev, connect, writev} — the connect TARGET
     // names the service the child talks to right before parking (hilog?
-    // samgr? the appspawn engine?). Every connect from the app family
-    // prints its sockaddr (AF_UNIX path / inet addr), budget 30.
+    // samgr? the appspawn engine?). sc136 run 1: the appspawn PARENT's
+    // own connect storm ate the whole budget before the first child
+    // forked, and fd 3's sockaddr is an ABSTRACT unix socket (sun_path
+    // starts NUL — the empty-string parse printed nothing). Fix: skip
+    // the boot's original appspawn pid (first comm='appspawn' task seen;
+    // forked children carry the same comm but a different pid), and
+    // hex-dump the first 16 sockaddr bytes for abstract sockets.
     if syscall_no == 203 {
-        let comm = crate::sched::current()
+        let cur_task = crate::sched::current();
+        let comm = cur_task
             .map(|t| unsafe { (*t).comm() })
             .map(|c| core::str::from_utf8(c).unwrap_or(""))
             .unwrap_or("")
@@ -736,47 +742,72 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
             || comm.contains("dataability")
             || comm == "appspawn";
         if is_app {
-            static CONN_N: core::sync::atomic::AtomicUsize =
-                core::sync::atomic::AtomicUsize::new(0);
-            if CONN_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 30 {
-                let mut sa = [0u8; 48];
-                use core::fmt::Write;
-                let mut desc = alloc::string::String::new();
-                if args[1] != 0 {
-                    match crate::arch::uaccess::strncpy_from_user(
-                        args[1] as *const u8,
-                        sa.len(),
-                        &mut sa,
-                    ) {
-                        Ok(_) => {
-                            let fam = u16::from_ne_bytes([sa[0], sa[1]]);
-                            if fam == 1 {
-                                let p = &sa[2..];
-                                let end = p.iter().position(|c| *c == 0).unwrap_or(p.len());
-                                let _ = write!(
-                                    desc,
-                                    "{}",
-                                    core::str::from_utf8(&p[..end]).unwrap_or("<utf8>")
-                                );
-                            } else {
-                                let _ = write!(desc, "fam{}", fam);
+            static APPSPAWN_MAIN_PID: core::sync::atomic::AtomicU32 =
+                core::sync::atomic::AtomicU32::new(0);
+            let my_pid = crate::process::current_pid() as u32;
+            let parent_pid = APPSPAWN_MAIN_PID.load(core::sync::atomic::Ordering::Relaxed);
+            let skip = if comm == "appspawn" {
+                if parent_pid == 0 {
+                    APPSPAWN_MAIN_PID.store(my_pid, core::sync::atomic::Ordering::Relaxed);
+                    true // this first one IS the parent — skip but remember it
+                } else {
+                    parent_pid == my_pid
+                }
+            } else {
+                false
+            };
+            if !skip {
+                static CONN_N: core::sync::atomic::AtomicUsize =
+                    core::sync::atomic::AtomicUsize::new(0);
+                if CONN_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 60 {
+                    let mut sa = [0u8; 48];
+                    use core::fmt::Write;
+                    let mut desc = alloc::string::String::new();
+                    if args[1] != 0 {
+                        match crate::arch::uaccess::strncpy_from_user(
+                            args[1] as *const u8,
+                            sa.len(),
+                            &mut sa,
+                        ) {
+                            Ok(_) => {
+                                let fam = u16::from_ne_bytes([sa[0], sa[1]]);
+                                if fam == 1 {
+                                    let p = &sa[2..];
+                                    let end = p.iter().position(|c| *c == 0).unwrap_or(p.len());
+                                    if end == 0 {
+                                        // abstract socket: the name is the
+                                        // raw bytes after the leading NUL
+                                        let _ = write!(desc, "abstract:");
+                                        for b in sa.iter().take(18) {
+                                            let _ = write!(desc, "{:02x}", b);
+                                        }
+                                    } else {
+                                        let _ = write!(
+                                            desc,
+                                            "{}",
+                                            core::str::from_utf8(&p[..end]).unwrap_or("<utf8>")
+                                        );
+                                    }
+                                } else {
+                                    let _ = write!(desc, "fam{}", fam);
+                                }
+                            }
+                            Err(_) => {
+                                let _ = write!(desc, "<efault>");
                             }
                         }
-                        Err(_) => {
-                            let _ = write!(desc, "<efault>");
-                        }
+                    } else {
+                        let _ = write!(desc, "<null>");
                     }
-                } else {
-                    let _ = write!(desc, "<null>");
+                    crate::pr_warn!(
+                        "appconn: pid {} comm='{}' fd={} -> {} ret={}",
+                        my_pid,
+                        comm,
+                        args[0],
+                        desc,
+                        result
+                    );
                 }
-                crate::pr_warn!(
-                    "appconn: pid {} comm='{}' fd={} -> {} ret={}",
-                    crate::process::current_pid(),
-                    comm,
-                    args[0],
-                    desc,
-                    result
-                );
             }
         }
     }
