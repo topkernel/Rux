@@ -307,6 +307,72 @@ unsafe fn fill_file_page(
     }
 }
 
+// ==================== filemap_fault (page-cache mapping) ====================
+
+/// Pin the page-cache frame for one page-shaped file offset, populating
+/// the cache on a miss through the ext4 read machinery (the fs-side
+/// fault-around detector warms the surrounding window in the same device
+/// round trips a read_at would have used).
+///
+/// Returns the PINNED physical address for direct mapping. The pin (plus
+/// the descriptor `get_page` the map path takes) is owned by the PTE for
+/// its mapping lifetime — see `cow_flags::PCACHE`.
+fn filemap_pin_cache_page(
+    file: &crate::fs::file::File,
+    file_offset: usize,
+    effective_size: usize,
+) -> Option<u64> {
+    if file_offset >= effective_size {
+        return None;
+    }
+    // SAFETY: inode cell written at open time, read-only afterwards.
+    let inode = unsafe { &*file.inode.get() }.as_ref()?;
+    let (fs_id, ino) = (inode.fs_id, inode.ino as u64);
+    let page_index = (file_offset / PAGE_SIZE_USIZE) as u64;
+    let cache = crate::fs::page_cache::get_page_cache();
+    if let Some(phys) = cache.get_phys(fs_id, ino, page_index) {
+        return Some(phys);
+    }
+    // Miss: warm the cache (ReadDst::Discard — no bounce copy), then pin.
+    if !crate::fs::ext4::file::ext4_fault_populate_cache(file, file_offset as u64) {
+        return None;
+    }
+    cache.get_phys(fs_id, ino, page_index)
+}
+
+/// Bookkeeping for a successfully mapped page-cache frame: one descriptor
+/// reference (dropped by unmap/COW's put_page) and mapcount visibility.
+/// Deliberately NO set_index / page_record_mapping / LRU add — the
+/// descriptor's mapping/index are the page cache's eviction keys and the
+/// file-LRU membership belongs to the cache (the fake-OOM-era clobber of
+/// either would corrupt eviction: wrong-key lookup or an unlisted frame).
+///
+/// # SAFETY
+/// `phys` is a page-cache frame pinned for THIS mapping (pin taken by
+/// `filemap_pin_cache_page`), being mapped right now under the PTE lock.
+unsafe fn filemap_bookkeep_mapped_cache_page(phys: u64) {
+    use crate::mm::page_desc::pfn_to_page_mut;
+    let page = pfn_to_page_mut((phys >> PAGE_SHIFT) as usize);
+    if page.is_null() {
+        return;
+    }
+    // SAFETY: descriptor of a live, pinned cache frame.
+    unsafe {
+        (*page).get_page();
+        (*page).inc_mapcount();
+    }
+}
+
+/// Release a fill-phase page that lost the map race (or whose map failed):
+/// a pinned cache frame returns its pin; a private fill copy is freed.
+fn release_fill_page(phys: u64, from_cache: bool) {
+    if from_cache {
+        super::mm_ops::release_cache_mapping_pin((phys >> PAGE_SHIFT) as usize);
+    } else {
+        crate::mm::page_alloc::free_page(phys as usize);
+    }
+}
+
 // ==================== Main Fault Handler ====================
 
 /// E8-MM port: does a leaf PTE (raw bits) at `va` count as "mapped" for a
@@ -555,9 +621,19 @@ pub fn handle_mm_fault(
                 }
                 let cow_bit =
                     raw & super::mm_ops::cow_flags::COW;
+                let pcache_bit = raw & super::mm_ops::cow_flags::PCACHE;
                 if cow_bit != 0 {
                     flags |= cow_bit;
                     flags &= !PageTableEntry::W;
+                }
+                if pcache_bit != 0 {
+                    flags |= pcache_bit;
+                    if flags & PageTableEntry::W != 0 {
+                        // Cache-backed leaf: never W in place — divert the
+                        // first write through COW (see mprotect_pte_range).
+                        flags |= super::mm_ops::cow_flags::COW;
+                        flags &= !PageTableEntry::W;
+                    }
                 }
                 let _pte_guard =
                     crate::arch::mm::mm_ops::pte_lock_for(addr_space).lock();
@@ -721,17 +797,23 @@ pub fn handle_mm_fault(
             }
     }
 
-    // Fault-around (session 14): on read/exec faults into FileBacked
-    // VMAs, fill and map up to FAULT_AROUND_PAGES pages starting at the
-    // faulting page — one VMA find, one PTE-lock section, and (via the
-    // ext4 readahead detector watching the sequential read_at stream)
-    // one batched block-layer window instead of 16 separate faults. A
-    // 100 MB lib load collapses from ~25600 demand faults to ~1600
-    // fault-around events; composes with the fs-side readahead rather
-    // than duplicating it. Excluded, deliberately: write faults (Linux
-    // do_fault_around parity — a writer faults its own pages), the
-    // SHARED-devfs coherent path (returned above), and everything
-    // non-file (anon/device/shmem keep the single-page arms below).
+    // Fault-around (session 14; filemap_fault rework, session 23): on
+    // read/exec faults into FileBacked VMAs, fill and map up to
+    // FAULT_AROUND_PAGES pages starting at the faulting page — one VMA
+    // find, one PTE-lock section. For page-cache-coherent files (ext4)
+    // the window pages are the CACHE frames themselves: pinned per
+    // mapping, mapped read-only (writable private VMAs get the COW bit —
+    // Linux writenotify/do_read_fault semantics). One resident copy per
+    // file page, shared by every mapper and every refault, reclaimable
+    // the moment the last mapping drops its pin. This replaces the old
+    // private-copy fill, which allocated an EXCLUSIVE unreclaimable copy
+    // per fault with no page-descriptor state — the fake-OOM drainer
+    // (session 22 attribution: 539-558k pages, 74-76% of the zone at
+    // OOM, while the same data also lived in the page cache).
+    // Non-ext4 files and holes keep the private-copy fill (now with
+    // proper page bookkeeping). Write faults opt out (Linux
+    // do_fault_around parity — the single-page arm below COW-fills
+    // them), and the SHARED-devfs path above has already returned.
     if vma_type == VmaType::FileBacked && vma_file_fd >= 0 && !is_write {
         let file = vm_file.clone().or_else(|| {
             // SAFETY: fd-table lookup by number for the CURRENT task,
@@ -757,15 +839,29 @@ pub fn handle_mm_fault(
 
             // Fill phase — NO locks held (R73: read_at may block on I/O;
             // the vma guard was dropped above and the pte lock must not
-            // serialize I/O across mms).
+            // serialize I/O across mms). Cache pages are PINNED here
+            // (pin released by the map-phase losers below, or owned by
+            // the PTE via the PCACHE bit on success).
             let mut phys: [u64; FAULT_AROUND_PAGES] = [0; FAULT_AROUND_PAGES];
+            let mut from_cache = [false; FAULT_AROUND_PAGES];
             let mut filled = 0usize;
+            let cacheable = crate::fs::ext4::file::is_ext4_file(file.as_ref());
             for i in 0..n_pages {
+                let off_i = vma_offset + (fault_page - vma_start) + i * PAGE_SIZE_USIZE;
+                if cacheable {
+                    if let Some(p) = filemap_pin_cache_page(file.as_ref(), off_i, effective_size) {
+                        phys[filled] = p;
+                        from_cache[filled] = true;
+                        filled += 1;
+                        continue;
+                    }
+                    // Hole or populate failure — the private zero-filled
+                    // copy below (holes never enter the page cache).
+                }
                 // Partial window on allocator failure is fine (Linux
                 // behaves the same); zero filled pages means the single
                 // page path below reports OutOfMemory.
                 let Some(pa) = alloc_user_phys_page() else { break };
-                let off_i = vma_offset + (fault_page - vma_start) + i * PAGE_SIZE_USIZE;
                 let page_ptr = phys_to_virt(PhysAddr::new(pa)).bits() as *mut u8;
                 // SAFETY: page_ptr is phys_to_virt of a freshly
                 // allocated, exclusively owned page; fill_file_page only
@@ -776,20 +872,22 @@ pub fn handle_mm_fault(
             }
 
             if filled > 0 {
-                // Same PTE flag construction as the single-page arm —
-                // flags are uniform across the VMA (mprotect splits, it
-                // never reflags a range in place).
+                // Base flags: NEVER W for cache-backed leaves — the frame
+                // is shared with the page cache; a writable private VMA
+                // gets the COW bit and the first write copies
+                // (do_cow_fault parity). Private fill copies (holes,
+                // non-ext4) keep the old writable-direct rule: they are
+                // exclusive fresh pages.
                 let mut pte_flags = PageTableEntry::P | PageTableEntry::A
                     | PageTableEntry::D | PageTableEntry::NX | PageTableEntry::U;
-                if vma_flags.is_writable() {
-                    // MAP_PRIVATE file pages map writable directly: each
-                    // around page is an exclusive fresh copy (same rule
-                    // as the single-page arm below).
-                    pte_flags |= PageTableEntry::W;
-                }
                 if vma_flags.is_executable() {
                     pte_flags &= !PageTableEntry::NX;
                 }
+                let cow_bit = if vma_flags.is_writable() {
+                    super::mm_ops::cow_flags::COW
+                } else {
+                    0
+                };
 
                 // Re-verify the VMA snapshot under a RE-TAKEN read guard
                 // and hold it across the whole map section (INV-LOCK-7
@@ -813,8 +911,8 @@ pub fn handle_mm_fault(
                     });
                 if !snapshot_ok {
                     drop(vma_mgr2);
-                    for pa in phys.iter().take(filled) {
-                        crate::mm::page_alloc::free_page(*pa as usize);
+                    for i in 0..filled {
+                        release_fill_page(phys[i], from_cache[i]);
                     }
                     // VMA changed under us: retry, the fresh fault takes
                     // current VMA state (a now-dead range Segfaults, a
@@ -832,32 +930,69 @@ pub fn handle_mm_fault(
                     let va_i = VirtAddr::new((fault_page + i * PAGE_SIZE_USIZE) as u64);
                     // Re-check per page (E8-MM device-window-hole rule).
                     // A page that lost a race (concurrent CLONE_VM fault
-                    // or a racing mprotect marker) is freed and skipped.
+                    // or a racing mprotect marker) releases its pin/copy
+                    // and is skipped.
                     if unsafe { PageTableWalker::walk(root_ppn, va_i.bits() as u64) }
                         .map_or(false, |(_ppn, bits)| {
                             pte_counts_as_mapped(bits, va_i.bits() as u64)
                         })
                     {
-                        crate::mm::page_alloc::free_page(phys[i] as usize);
+                        release_fill_page(phys[i], from_cache[i]);
                         continue;
                     }
+                    let flags_i = if from_cache[i] {
+                        pte_flags | cow_bit | super::mm_ops::cow_flags::PCACHE
+                    } else if vma_flags.is_writable() {
+                        pte_flags | PageTableEntry::W
+                    } else {
+                        pte_flags
+                    };
                     // SAFETY: root_ppn is a valid root, va_i is
                     // page-aligned and VMA-verified, phys[i] is a freshly
-                    // filled exclusively owned page, pte_flags built from
-                    // the verified VMA's permissions.
+                    // filled private page or a pinned cache frame, flags_i
+                    // built from the verified VMA's permissions.
                     unsafe {
-                        if !map_page(root_ppn, va_i, PhysAddr::new(phys[i]), pte_flags) {
+                        if !map_page(root_ppn, va_i, PhysAddr::new(phys[i]), flags_i) {
                             // PT allocation failure (fake-OOM family):
-                            // free the data page (anti-leak). Around-pages
+                            // release the data page (anti-leak). Around-pages
                             // just shrink the window (Linux parity); the
                             // FAULTING page failing means OOM.
-                            crate::mm::page_alloc::free_page(phys[i] as usize);
+                            release_fill_page(phys[i], from_cache[i]);
                             if i == 0 {
                                 fault_pg_failed = true;
                             }
                             continue;
                         }
                         crate::arch::cpu::invlpg(va_i.bits());
+                    }
+                    // Bookkeeping INSIDE the lock (a concurrent fork walk
+                    // must not observe the map before the refcounts).
+                    if from_cache[i] {
+                        // SAFETY: phys[i] is a cache frame pinned for THIS
+                        // mapping, just mapped under the PTE lock.
+                        unsafe { filemap_bookkeep_mapped_cache_page(phys[i]) };
+                    } else {
+                        // Private fill copy: an exclusive anonymous page
+                        // (the session-22 "rmap not wired yet" gap —
+                        // without flags these were the census-invisible
+                        // unreclaimable copies).
+                        use crate::mm::page_desc::{pfn_to_page_mut, PageFlag};
+                        let page = pfn_to_page_mut((phys[i] >> PAGE_SHIFT) as usize);
+                        if !page.is_null() {
+                            // SAFETY: freshly allocated, exclusively owned.
+                            unsafe {
+                                (*page).set_flag(PageFlag::Anonymous);
+                                (*page).set_flag(PageFlag::SwapBacked);
+                                (*page).set_index(va_i.bits() as usize / PAGE_SIZE_USIZE);
+                                (*page).inc_mapcount();
+                                crate::mm::rmap::page_record_mapping(
+                                    &*page,
+                                    addr_space as *const _ as usize,
+                                    va_i.bits() as usize,
+                                );
+                                crate::mm::lru::page_add_anon_lru(&*page);
+                            }
+                        }
                     }
                     mapped += 1;
                 }
@@ -1071,8 +1206,29 @@ pub fn handle_mm_fault(
                             fault_addr.bits() as usize,
                         );
                     }
+                    VmaType::FileBacked => {
+                        // Private file copy (write-fault COW fill on a
+                        // private VMA — do_cow_fault parity; also the
+                        // non-ext4/hole fallbacks). Session 22: this arm
+                        // used to leave the page with NO descriptor state
+                        // ("rmap not wired yet") — census-invisible and
+                        // unreclaimable, the fake-OOM drainer's
+                        // accounting face. An exclusive copy IS an
+                        // anonymous page from reclaim's point of view.
+                        (*page).set_flag(PageFlag::Anonymous);
+                        (*page).set_flag(PageFlag::SwapBacked);
+                        (*page).set_index(fault_addr.bits() as usize / (PAGE_SIZE as usize));
+                        (*page).inc_mapcount();
+                        crate::mm::rmap::page_record_mapping(
+                            &*page,
+                            addr_space as *const _ as usize,
+                            fault_addr.bits() as usize,
+                        );
+                        crate::mm::lru::page_add_anon_lru(&*page);
+                    }
                     _ => {
-                        // File-backed: rmap not wired yet
+                        // Device mappings: no descriptor state (frames
+                        // belong to the device/foreign owners).
                     }
                 }
             }

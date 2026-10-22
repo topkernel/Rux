@@ -158,7 +158,15 @@ pub fn page_remove_rmap(page: &Page) {
 
         // If last mapping, clear flags and remove from LRU.
         // Safe now: LRU uses dedicated lru_next field, not mapping/index
-        if new_count == -1 {
+        //
+        // PageCache frames (mm filemap_fault, x86_64): the file LRU
+        // membership and the mapping/index fields belong to the PAGE
+        // CACHE — the last PTE unmap must NOT unlink the frame from the
+        // cache's LRU (eviction would lose sight of a still-cached page)
+        // and must not clear bookkeeping the cache still needs. The
+        // mapping's own release (descriptor put + cache pin put) happens
+        // in the unmap/teardown callers keyed off the PTE's PCACHE bit.
+        if new_count == -1 && page.page_type() != super::page_desc::PageType::PageCache {
             page.clear_flag(super::page_desc::PageFlag::Anonymous);
             page.clear_flag(super::page_desc::PageFlag::SwapBacked);
             super::lru::page_remove_lru(page);

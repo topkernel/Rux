@@ -1096,6 +1096,13 @@ pub unsafe fn free_user_page_tables(
                         crate::dfx::memwatch::FUT_PAGES.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                         free_pages(phys_addr as usize, 0);
                     }
+                    // PCACHE leaf (filemap_fault private mapping): drop the
+                    // mapping's page-cache pin after the descriptor put
+                    // (same ordering as unmap_pages; the pin's release may
+                    // free an invalidated frame).
+                    if pte1.bits() & super::mm_ops::cow_flags::PCACHE != 0 {
+                        super::mm_ops::release_cache_mapping_pin(pfn);
+                    }
                 }
                 // FORENSIC: census the PT table before freeing it.
                 if get_alloc_stage() == AllocStage::Late && !PT_LEDGER.is_boot(ppn1) {
