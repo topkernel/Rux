@@ -797,12 +797,14 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
         }
     }
 
-    // sc144 (Session Q): the parked children's OWN hilog lines never
-    // reach hilogd (socket EAGAIN backpressure) — yet they are the
-    // narration of exactly where the runtime init stalls. Dump the first
-    // 96 bytes of the first iovec of every writev to fd 3 from the app
-    // family: the OH log lines arrive straight from the kernel.
-    if syscall_no == 66 && args[0] == 3 && result < 0 {
+    // sc144-149: the parked children's OWN hilog lines never reach
+    // hilogd (socket EAGAIN backpressure) — yet they are the narration
+    // of exactly where the runtime init stalls. Dump the first 3 iovecs
+    // of every writev to fd 3 from the app family (daemon excluded):
+    // sc149 showed the child's sandbox-phase narration; the post-sandbox
+    // runtime phase writes SUCCEED and need printing too (print every
+    // result, budget 700).
+    if syscall_no == 66 && args[0] == 3 {
         let comm = crate::sched::current()
             .map(|t| unsafe { (*t).comm() })
             .map(|c| core::str::from_utf8(c).unwrap_or(""))
@@ -829,7 +831,7 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
             if !is_daemon {
             static HI_N: core::sync::atomic::AtomicUsize =
                 core::sync::atomic::AtomicUsize::new(0);
-            if HI_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 240 {
+            if HI_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 700 {
                 // iovec { void* base; size_t len }
                 let base = args[1];
                 if base != 0 {
