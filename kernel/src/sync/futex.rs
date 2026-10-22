@@ -1570,23 +1570,85 @@ pub fn sys_futex_handler(args: &[u64; 6]) -> i64 {
                             op
                         );
                         // sc128 (Session P): the nr-only ALL-syscall ring
-                        // (last 12, successes included, oldest first) —
-                        // the final action sequence between the dlopen
-                        // cascade and the park.
+                        // (last 96 since sc135, successes included,
+                        // newest first) — the final action sequence
+                        // between the dlopen cascade and the park.
                         {
                             use core::sync::atomic::Ordering::Relaxed;
+                            const RL: usize = crate::process::task::LAST_CALLS_LEN;
                             let cur = tk.last_calls_cur.load(Relaxed);
                             let mut s2 = alloc::string::String::new();
                             use core::fmt::Write;
                             let _ = write!(s2, "APP-PARK calls:");
-                            for k in 0..12 {
-                                let i = (cur + 12 - k) % 12; // newest first
+                            for k in 0..RL {
+                                let i = (cur + RL - k) % RL; // newest first
                                 let v = tk.last_calls[i].load(Relaxed);
                                 if v != 0 {
                                     let _ = write!(s2, " {}", v);
                                 }
                             }
                             crate::pr_warn!("{}", s2);
+                        }
+                        // sc138 (Session Q): the FILTERED init ring — the
+                        // 96-entry unfiltered ring above drowns in the
+                        // retry loop; this one skips {clock, writev,
+                        // connect, main-stack futex} so the child's whole
+                        // init since fork fits. initA carries a0 for the
+                        // newest 32 (prctl option / mmap addr / futex
+                        // uaddr). This is the parked side of the diff;
+                        // APP-THR prints the working side.
+                        {
+                            use core::fmt::Write;
+                            use core::sync::atomic::Ordering::Relaxed;
+                            const RL: usize = crate::process::task::INIT_CALLS_LEN;
+                            const BL: usize = crate::process::task::BIRTH_CALLS_LEN;
+                            let cur = tk.init_calls_cur.load(Relaxed);
+                            // sc143: 512 entries in chunks of 128 so a
+                            // single UART flush cannot gut the whole line.
+                            let mut chunk = alloc::string::String::new();
+                            let mut shown = 0usize;
+                            for k in 0..RL {
+                                let i = (cur + RL - k) % RL; // newest first
+                                let v = tk.init_calls[i].load(Relaxed);
+                                if v != 0 {
+                                    if shown % 128 == 0 {
+                                        if !chunk.is_empty() {
+                                            crate::pr_warn!("{}", chunk);
+                                        }
+                                        chunk = alloc::string::String::new();
+                                        let _ = write!(chunk, "APP-PARK init[{}-]:", shown);
+                                    }
+                                    let _ = write!(chunk, " {}", v);
+                                    shown += 1;
+                                }
+                            }
+                            if !chunk.is_empty() {
+                                crate::pr_warn!("{}", chunk);
+                            }
+                            // newest 96 with a0
+                            let mut s3 = alloc::string::String::new();
+                            let _ = write!(s3, "APP-PARK initA:");
+                            for k in 0..96.min(RL) {
+                                let i = (cur + RL - k) % RL;
+                                let v = tk.init_calls[i].load(Relaxed);
+                                if v != 0 {
+                                    let a0 = tk.init_a0[i].load(Relaxed);
+                                    let _ = write!(s3, " {}@{:#x}", v, a0);
+                                }
+                            }
+                            crate::pr_warn!("{}", s3);
+                            // sc143: the birth window (fork-exit onward),
+                            // immune to loop churn.
+                            let mut s4 = alloc::string::String::new();
+                            let _ = write!(s4, "APP-PARK birth:");
+                            for k in 0..BL {
+                                let v = tk.birth_calls[k].load(Relaxed);
+                                if v != 0 {
+                                    let a0 = tk.birth_a0[k].load(Relaxed);
+                                    let _ = write!(s4, " {}@{:#x}", v, a0);
+                                }
+                            }
+                            crate::pr_warn!("{}", s4);
                         }
                         // sc125 (Session P): the pre-park FAILING-syscall
                         // tail — musl pthread_create mmaps the thread stack
@@ -1602,11 +1664,17 @@ pub fn sys_futex_handler(args: &[u64; 6]) -> i64 {
                                 let i = (cur + 8 - 1 - k) % 8; // newest first
                                 let v = tk.last_fails[i].load(Relaxed);
                                 if v != 0 {
+                                    // sc135 (Session Q): a0/a1 name the
+                                    // prctl option (nr167) and friends.
+                                    let a0 = tk.last_fails_a0[i].load(Relaxed);
+                                    let a1 = tk.last_fails_a1[i].load(Relaxed);
                                     let _ = write!(
                                         s,
-                                        " nr{}=-{}",
+                                        " nr{}=-{} a0={:#x} a1={:#x}",
                                         v & 0xffff,
-                                        v >> 16
+                                        v >> 16,
+                                        a0,
+                                        a1
                                     );
                                 }
                             }
@@ -1614,6 +1682,262 @@ pub fn sys_futex_handler(args: &[u64; 6]) -> i64 {
                         }
                         // SAFETY: t is the current task, in its own syscall.
                         unsafe { rwfz_stack_frames(t, "apppark", 12, 96) };
+                        // sc139: the call-site-validated caller chain.
+                        unsafe { apppark_rets(t) };
+                        // sc136 (Session Q): the park chain's caller frame
+                        // (raw ustack slot[12] 0x7ff0816ff8a8 family) sits
+                        // in a lib VMA never printed by the frames scan
+                        // (anon-filtered or fd-closed) — and sc135's only
+                        // slot-27 frame line was cut at every UART flush
+                        // boundary by interleaved hilog output. Dump the
+                        // child's whole lib-region VMA table + open fd
+                        // paths in COMPACT one-line-per-VMA form (short
+                        // lines survive flush boundaries) so every chain
+                        // slot resolves offline against the image libs.
+                        {
+                            use core::fmt::Write;
+                            if let Some(aspace) = tk.address_space() {
+                                let vmas = aspace.vma_read();
+                                for vm in vmas.iter() {
+                                    let s0 = vm.start().as_usize();
+                                    let e0 = vm.end().as_usize();
+                                    // lib region only: musl at 0x3fbf...,
+                                    // engine libs/arenas at 0x7ff0-0x7ffb.
+                                    let in_lib_region = (0x3f00000000..0x400000000)
+                                        .contains(&s0)
+                                        || (0x7ff000000000..0x7ffb00000000)
+                                            .contains(&s0);
+                                    if !in_lib_region {
+                                        continue;
+                                    }
+                                    let fd = vm.file_fd();
+                                    let path = if fd >= 0 {
+                                        tk.fdtable()
+                                            .get_file(fd as usize)
+                                            .map(|f| probe_file_path(&f))
+                                            .unwrap_or_else(|| alloc::string::String::from("?"))
+                                    } else {
+                                        alloc::string::String::from("-")
+                                    };
+                                    let mut v = alloc::string::String::new();
+                                    let _ = write!(
+                                        v,
+                                        "APPMAP {:?} {:#x}-{:#x} off={:#x} fd={} sz={:#x} {}",
+                                        comm,
+                                        s0,
+                                        e0,
+                                        vm.offset(),
+                                        fd,
+                                        vm.file_size() as usize,
+                                        path
+                                    );
+                                    crate::pr_warn!("{}", v);
+                                }
+                            }
+                            // Open fd table: names the connect/writev
+                            // socket (hilog? samgr session?) and any lib
+                            // fds still alive. sc138: classify each fd by
+                            // its FileOps identity (unix/tcp/netlink/
+                            // binder/pipe/io_uring/file) — fd3's 10MB
+                            // anon_inode mapping in sc137 needs the true
+                            // object type named, and unix sockets also
+                            // print their bound+peer names.
+                            let fdt = tk.fdtable();
+                            let mut shown = 0u32;
+                            for fd in 0..32u32 {
+                                if let Some(f) = fdt.get_file(fd as usize) {
+                                    let kind = match f.get_ops() {
+                                        Some(ops) => {
+                                            let p = ops as *const crate::fs::FileOps;
+                                            if core::ptr::eq(
+                                                p,
+                                                &crate::net::unix::UNIX_SOCKET_OPS,
+                                            ) {
+                                                match crate::net::unix::unix_file_of(
+                                                    fd as usize,
+                                                ) {
+                                                    Some((sock, _)) => {
+                                                        let bn = sock
+                                                            .bound_name
+                                                            .lock()
+                                                            .clone()
+                                                            .unwrap_or_else(|| {
+                                                                alloc::string::String::from(
+                                                                    "unbound",
+                                                                )
+                                                            });
+                                                        let peer =
+                                                            crate::net::unix::unix_peer_bound_name(
+                                                                &sock,
+                                                            )
+                                                            .unwrap_or_else(|| {
+                                                                alloc::string::String::from("-")
+                                                            });
+                                                        alloc::format!(
+                                                            "unix bound={} peer={}",
+                                                            bn, peer
+                                                        )
+                                                    }
+                                                    None => "unix".into(),
+                                                }
+                                            } else if core::ptr::eq(
+                                                p,
+                                                &crate::net::socket::SOCKET_OPS,
+                                            ) {
+                                                "inet-socket".into()
+                                            } else if core::ptr::eq(
+                                                p,
+                                                &crate::net::netlink::NETLINK_OPS,
+                                            ) {
+                                                "netlink".into()
+                                            } else if core::ptr::eq(p, &crate::net::raw::RAW_OPS)
+                                            {
+                                                "raw-socket".into()
+                                            } else if core::ptr::eq(
+                                                p,
+                                                &crate::ipc::binder::BINDER_OPS,
+                                            ) {
+                                                "binder".into()
+                                            } else if core::ptr::eq(
+                                                p,
+                                                &crate::fs::pipe::PIPE_OPS,
+                                            ) {
+                                                "pipe".into()
+                                            } else if core::ptr::eq(
+                                                p,
+                                                &crate::fs::memfd::MEMFD_FILE_OPS,
+                                            ) {
+                                                "memfd".into()
+                                            } else if core::ptr::eq(
+                                                p,
+                                                &crate::io_uring::IO_URING_OPS,
+                                            ) {
+                                                "io_uring".into()
+                                            } else {
+                                                "file".into()
+                                            }
+                                        }
+                                        None => "anon".into(),
+                                    };
+                                    let mut v = alloc::string::String::new();
+                                    let _ = write!(
+                                        v,
+                                        "APPFD {:?} fd={} {} kind={}",
+                                        comm,
+                                        fd,
+                                        probe_file_path(&f),
+                                        kind
+                                    );
+                                    crate::pr_warn!("{}", v);
+                                    shown += 1;
+                                    if shown >= 16 {
+                                        break;
+                                    }
+                                }
+                            }
+                            // sc138 (Session Q): decode round 3.
+                            // (a) The park caller's code bytes: raw
+                            // ustack slot[12] is the return address into
+                            // the caller frame — sc137 resolved it to an
+                            // ANONYMOUS exec VMA (JIT stub arena or a
+                            // memfd-loaded lib). 24 bytes ending at
+                            // slot[12] identify the call instruction
+                            // offline; the first 8 bytes of the
+                            // containing VMA separate memfd-lib (ELF
+                            // magic) from a JIT arena.
+                            {
+                                let top = tk.kernel_stack_top();
+                                #[cfg(feature = "x86_64")]
+                                let rsp = unsafe {
+                                    let regs = (top.wrapping_sub(
+                                        crate::arch::x86_64::pt_regs::PT_REGS_SIZE,
+                                    ))
+                                        as *const crate::arch::x86_64::pt_regs::PtRegs;
+                                    (*regs).rsp as usize
+                                };
+                                #[cfg(feature = "riscv64")]
+                                let rsp = unsafe {
+                                    let regs = (top.wrapping_sub(
+                                        crate::arch::riscv64::pt_regs::PT_REGS_SIZE,
+                                    ))
+                                        as *const crate::arch::riscv64::pt_regs::PtRegs;
+                                    (*regs).sp as usize
+                                };
+                                #[cfg(not(any(feature = "x86_64", feature = "riscv64")))]
+                                let rsp = 0usize;
+                                if rsp != 0 {
+                                    let rd64 = |va: usize| -> Option<u64> {
+                                        let lo = unsafe {
+                                            read_u32_via_task(t, va)
+                                        }?;
+                                        let hi = unsafe {
+                                            read_u32_via_task(t, va + 4)
+                                        }?;
+                                        Some(lo as u64 | ((hi as u64) << 32))
+                                    };
+                                    if let Some(slot12) = rd64(rsp + 8 * 12) {
+                                        let mut v = alloc::string::String::new();
+                                        let _ = write!(
+                                            v,
+                                            "APPPK12 {:?} slot12={:#x}",
+                                            comm, slot12
+                                        );
+                                        for k in 0..3 {
+                                            match rd64((slot12.wrapping_sub(24) + 8 * k) as usize) {
+                                                Some(b) => {
+                                                    let _ = write!(v, " b{}={:#018x}", 24 - 8 * k, b);
+                                                }
+                                                None => {
+                                                    let _ = write!(v, " b{}=?", 24 - 8 * k);
+                                                }
+                                            }
+                                        }
+                                        // VMA start bytes (ELF check)
+                                        if let Some(aspace2) = tk.address_space() {
+                                            let vmas2 = aspace2.vma_read();
+                                            if let Some(vm) = vmas2.find(
+                                                crate::mm::page::VirtAddr::new(
+                                                    slot12 as usize,
+                                                ),
+                                            ) {
+                                                let start = vm.start().as_usize();
+                                                let _ = write!(
+                                                    v,
+                                                    " vma={:#x}-{:#x} vmab0=",
+                                                    start,
+                                                    vm.end().as_usize()
+                                                );
+                                                let first = rd64(start);
+                                                match first {
+                                                    Some(b) => {
+                                                        let _ = write!(v, "{:#018x}", b);
+                                                    }
+                                                    None => {
+                                                        let _ = write!(v, "?");
+                                                    }
+                                                }
+                                                let elf = first.map_or(false, |w| (w & 0xffff) == 0x457f);
+                                                let _ = write!(
+                                                    v,
+                                                    " {}",
+                                                    if elf { "MEMFD-LIB(ELF)" } else { "JIT/anon" }
+                                                );
+                                            }
+                                        }
+                                        crate::pr_warn!("{}", v);
+                                    }
+                                }
+                            }
+                            // (b) The global unix-socket registry once:
+                            // which abstract/filesystem listeners exist at
+                            // park time (the appconn hex was unreadable —
+                            // strncpy stopped at the abstract NUL).
+                            if n == 0 {
+                                for line in crate::net::unix::registry_snapshot() {
+                                    crate::pr_warn!("{}", line);
+                                }
+                            }
+                        }
                     }
                 }
             }
@@ -2316,6 +2640,106 @@ unsafe fn read_u32_via_task(task: *const Task, va: usize) -> Option<u32> {
         as usize
         + (va & 0xfff);
     Some(unsafe { core::ptr::read_volatile(kv as *const u32) })
+}
+
+/// sc138 (Session Q): display path for a File that may be a memfd —
+/// `File::path()` prints "anon_inode:[<ino>]" for the pathless files;
+/// resolve <ino> through the memfd name registry (recorded at
+/// memfd_create) so APPFD/APPMAP can name the engine libs the children
+/// map through memfds ("anon_inode:[17] memfd:libXXX").
+fn probe_file_path(f: &crate::fs::file::File) -> alloc::string::String {
+    let p = f.path();
+    if let Some(rest) = p.strip_prefix("anon_inode:[") {
+        if let Some(num) = rest.strip_suffix(']') {
+            if let Ok(ino) = num.parse::<u64>() {
+                if let Some(name) = crate::fs::memfd::memfd_name_by_ino(ino) {
+                    return alloc::format!("{} memfd:{}", p, name);
+                }
+            }
+        }
+    }
+    p
+}
+
+/// sc139 (Session Q): call-site-validated stack scan for the parked
+/// child. sc138 killed BOTH candidate "caller" slots as stale decoys
+/// (slot[1] resolved into libc++ string::assign — data, not code flow;
+/// slot[12] points into a zero page), so the cond's true caller chain
+/// is still unnamed. This pass keeps a stack qword only when the bytes
+/// IMMEDIATELY BEFORE it decode as a call instruction — `E8 rel32`
+/// (v-5) or `FF D0-D7` call-reg (v-2) — the cheap x86-64 signature of
+/// a real return address. Slots surviving that check are the real
+/// frames. SAFETY: `task` live; diagnostic reads through its tables.
+unsafe fn apppark_rets(task: *const Task) {
+    let tk = unsafe { &*task };
+    let top = tk.kernel_stack_top();
+    #[cfg(feature = "x86_64")]
+    let rsp = unsafe {
+        let regs = (top.wrapping_sub(crate::arch::x86_64::pt_regs::PT_REGS_SIZE))
+            as *const crate::arch::x86_64::pt_regs::PtRegs;
+        (*regs).rsp as usize
+    };
+    #[cfg(not(feature = "x86_64"))]
+    let rsp = 0usize;
+    if rsp == 0 {
+        return;
+    }
+    let Some(aspace) = tk.address_space() else { return };
+    let vmas = aspace.vma_read();
+    let read_u64_at = |va: usize| -> Option<u64> {
+        if va & 0xfff > 0xff8 {
+            return None;
+        }
+        let lo = unsafe { read_u32_via_task(task, va)? };
+        let hi = unsafe { read_u32_via_task(task, va + 4)? };
+        Some(lo as u64 | ((hi as u64) << 32))
+    };
+    use core::fmt::Write;
+    let mut out = alloc::string::String::new();
+    let _ = write!(out, "APPPARK-RETS:");
+    let mut found = 0u32;
+    for i in 0..128u32 {
+        if found >= 12 {
+            break;
+        }
+        let Some(v) = read_u64_at(rsp + 8 * i as usize) else {
+            continue;
+        };
+        if v < 0x1000 || v > 0x7fff_ffff_ffff {
+            continue;
+        }
+        // Must land in some VMA (code or JIT — anon allowed here, the
+        // call-site check filters garbage).
+        let Some(vm) = vmas.find(crate::mm::page::VirtAddr::new(v as usize)) else {
+            continue;
+        };
+        // 8 bytes ending at v: b[7] is the byte at v-1.
+        let Some(w) = read_u64_at(v as usize - 8) else {
+            continue;
+        };
+        let b = w.to_le_bytes();
+        let is_call = b[3] == 0xE8 /* call rel32 ends at v */
+            || (b[6] == 0xFF && (b[7] & 0xF8) == 0xD0) /* call reg */
+            || (b[4] == 0xFF && (b[5] & 0xC7) == 0x05); /* call [rip+disp32]-ish */
+        if !is_call {
+            continue;
+        }
+        let _ = write!(
+            out,
+            " [{}]@{:#x}({:#x}-{:#x},off={:#x},b={:#018x})",
+            i,
+            v,
+            vm.start().as_usize(),
+            vm.end().as_usize(),
+            vm.offset() + (v as usize - vm.start().as_usize()),
+            read_u64_at(v as usize).unwrap_or(0)
+        );
+        found += 1;
+    }
+    if found == 0 {
+        let _ = write!(out, " none");
+    }
+    crate::pr_warn!("{}", out);
 }
 
 /// One user-stack frame line resolved to its covering VMA (Session F's

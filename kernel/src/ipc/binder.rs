@@ -612,6 +612,76 @@ enum Work {
     ClearDeathDone { cookie: u64 },
 }
 
+// sc140 (Session Q): registry of forked appspawn child pids (written by
+// the clone census at each appspawn fork, first 128 per boot). The
+// APPTXN tracer prints any binder transaction whose TARGET is one of
+// these — the AMS→child Schedule* delivery is the suspected missing hop
+// behind the launcher-family park.
+static APP_CHILD_PIDS: [core::sync::atomic::AtomicU32; 128] =
+    [const { core::sync::atomic::AtomicU32::new(0) }; 128];
+
+pub fn register_app_child_pid(pid: u32) {
+    for slot in APP_CHILD_PIDS.iter() {
+        let s = slot.load(core::sync::atomic::Ordering::Relaxed);
+        if s == pid {
+            return;
+        }
+        if s == 0 {
+            let _ = slot.compare_exchange(
+                0,
+                pid,
+                core::sync::atomic::Ordering::Relaxed,
+                core::sync::atomic::Ordering::Relaxed,
+            );
+            return;
+        }
+    }
+}
+
+fn app_child_pids_contains(pid: u32) -> bool {
+    for slot in APP_CHILD_PIDS.iter() {
+        let s = slot.load(core::sync::atomic::Ordering::Relaxed);
+        if s == 0 {
+            return false;
+        }
+        if s == pid {
+            return true;
+        }
+    }
+    false
+}
+
+/// sc141 (Session Q): the parked children send zero successful binder
+/// transactions — print their FAILED sends (invalid handle, dead
+/// context-manager target, dead target proc) so "never tried" separates
+/// from "tried and failed silently".
+fn app_txn_fail_print(proc: &BinderProc, why: &str, handle: u64, code: u64) {
+    let comm = crate::sched::current()
+        .map(|t| unsafe { (*t).comm() })
+        .map(|c| core::str::from_utf8(c).unwrap_or(""))
+        .unwrap_or("")
+        .trim_end_matches('\0');
+    let fam = comm.contains("launcher")
+        || comm.contains("settingsdata")
+        || comm.contains("systemui")
+        || comm.contains("dataability")
+        || comm == "appspawn";
+    if !fam && !app_child_pids_contains(proc.pid) {
+        return;
+    }
+    static FAIL_N: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+    if FAIL_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 60 {
+        crate::pr_warn!(
+            "APPTXN-FAIL pid={} comm='{}' why={} handle={:#x} code={:#x}",
+            proc.pid,
+            comm,
+            why,
+            handle,
+            code
+        );
+    }
+}
+
 struct BinderTxn {
     id: u64,
     from_proc: Option<Arc<BinderProc>>,
@@ -3895,6 +3965,10 @@ fn binder_transaction(
                 let Some(node) = node else {
                     *err_cmd = BR_FAILED_REPLY;
                     crate::pr_info!("binder: transaction to invalid handle {}", tr.target_handle);
+                    // sc141: failed-send visibility for the launcher lane —
+                    // parked children send ZERO successful transactions;
+                    // whether they TRY and fail here decides the next probe.
+                    app_txn_fail_print(proc, "invalid-handle", tr.target_handle as u64, tr.code as u64);
                     return;
                 };
                 target_node = Some(node);
@@ -3903,6 +3977,7 @@ fn binder_transaction(
                 let Some(mgr) = mgr else {
                     *err_cmd = BR_DEAD_REPLY;
                     crate::pr_info!("binder: no context manager installed (ctx {})", proc.ctx as u8);
+                    app_txn_fail_print(proc, "no-ctxmgr", 0, tr.code as u64);
                     return;
                 };
                 if mgr.proc_id == proc.id {
@@ -4384,6 +4459,34 @@ fn binder_transaction(
                     unsafe { txn.set_holds_async_slot(true) };
                     pm(world, &target).im().todo.push_back(Work::Transaction(txn.clone()));
                     thread.hist(EV_TXN_PQUEUED, txn.id as u32, target.pid);
+                    // sc140: oneway half of the APPTXN tracer (see the
+                    // sync branch below for the rationale).
+                    {
+                        let comm = crate::sched::current()
+                            .map(|t| unsafe { (*t).comm() })
+                            .map(|c| core::str::from_utf8(c).unwrap_or(""))
+                            .unwrap_or("")
+                            .trim_end_matches('\0');
+                        let fam = comm.contains("launcher")
+                            || comm.contains("settingsdata")
+                            || comm.contains("systemui")
+                            || comm.contains("dataability")
+                            || comm == "appspawn";
+                        if fam || app_child_pids_contains(target.pid) {
+                            static TXN_NO: core::sync::atomic::AtomicUsize =
+                                core::sync::atomic::AtomicUsize::new(0);
+                            if TXN_NO.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 160 {
+                                crate::pr_warn!(
+                                    "APPTXN id={} from pid={} comm='{}' -> pid={} code={:#x} oneway=1 proc",
+                                    txn.id,
+                                    proc.pid,
+                                    comm,
+                                    target.pid,
+                                    txn.code
+                                );
+                            }
+                        }
+                    }
                     wakes.push(target.clone());
                 }
                 // The async buffer keeps its txn alive for the node-slot
@@ -4425,6 +4528,41 @@ fn binder_transaction(
                 }
                 th.txn_stack.push(txn.clone());
                 thread.hist(EV_TXN_SENT, txn.id as u32, target.pid);
+                // sc140 (Session Q, launcher lane): the parked appspawn
+                // children poll WRITE_READ forever with an EMPTY read —
+                // the AMS ScheduleStartAbility transaction never reaches
+                // them (or was never sent). One line per transaction
+                // whose sender is app-family or whose target pid is a
+                // registered forked appspawn child: names the last hop
+                // that ever targeted a parked child.
+                {
+                    let comm = crate::sched::current()
+                        .map(|t| unsafe { (*t).comm() })
+                        .map(|c| core::str::from_utf8(c).unwrap_or(""))
+                        .unwrap_or("")
+                        .trim_end_matches('\0');
+                    let fam = comm.contains("launcher")
+                        || comm.contains("settingsdata")
+                        || comm.contains("systemui")
+                        || comm.contains("dataability")
+                        || comm == "appspawn";
+                    if fam || app_child_pids_contains(target.pid) {
+                        static TXN_N: core::sync::atomic::AtomicUsize =
+                            core::sync::atomic::AtomicUsize::new(0);
+                        if TXN_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 160 {
+                            crate::pr_warn!(
+                                "APPTXN id={} from pid={} comm='{}' -> pid={} code={:#x} oneway={} {}",
+                                txn.id,
+                                proc.pid,
+                                comm,
+                                target.pid,
+                                txn.code,
+                                oneway as u8,
+                                if t_thread.is_some() { "thr" } else { "proc" }
+                            );
+                        }
+                    }
+                }
                 if let Some(tt) = t_thread {
                     let tth = tt.st();
                     tth.todo.push_back(Work::Transaction(txn.clone()));

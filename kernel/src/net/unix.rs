@@ -494,6 +494,87 @@ pub fn proc_net_unix_snapshot() -> Vec<u8> {
     out.into_bytes()
 }
 
+/// sc138 (Session Q): diagnostic registry snapshot for the app-park
+/// decode — one compact line per NAMED unix socket with the state
+/// machine position, queue depths, peer name, and the creator pid.
+/// Unlike proc_net_unix_snapshot this keeps the leading-NUL of
+/// abstract names (escaped) so the appconn hex can be matched exactly.
+pub fn registry_snapshot() -> alloc::vec::Vec<alloc::string::String> {
+    let mut lines = alloc::vec::Vec::new();
+    // Clone Arcs under the table lock, then read per-socket fields
+    // AFTER releasing it (socket locks never nest into the table).
+    let entries: alloc::vec::Vec<(alloc::string::String, Arc<UnixSocket>)> = {
+        let table = UNIX_TABLE.lock();
+        table
+            .iter()
+            .map(|(k, s)| (k.clone(), Arc::clone(s)))
+            .collect()
+    };
+    for (key, sock) in entries.iter().take(48) {
+        let name = sock
+            .bound_name
+            .lock()
+            .clone()
+            .unwrap_or_else(|| alloc::string::String::from("?"));
+        let shown: alloc::string::String = name
+            .bytes()
+            .map(|b| {
+                if (0x20..0x7f).contains(&b) {
+                    alloc::format!("{}", b as char)
+                } else {
+                    alloc::format!("\\x{:02x}", b)
+                }
+            })
+            .collect();
+        let st = match *sock.state.lock() {
+            UnixState::Unconnected => "unconn",
+            UnixState::Connecting => "connecting",
+            UnixState::Connected => "connected",
+            UnixState::Listening => "LISTEN",
+            UnixState::Closed => "closed",
+        };
+        let kind = match sock.kind {
+            UnixKind::Stream => "stream",
+            UnixKind::Seqpacket => "seqpkt",
+            UnixKind::Dgram => "dgram",
+        };
+        let rxq = sock.recv_queue.lock().len();
+        let accq = sock.accept_queue.lock().len();
+        let peer = sock
+            .peer
+            .lock()
+            .as_ref()
+            .and_then(|w| w.upgrade())
+            .and_then(|p| p.bound_name.lock().clone())
+            .unwrap_or_else(|| alloc::string::String::from("-"));
+        let pid = sock.creds.lock().pid;
+        let esc = |s: &str| -> alloc::string::String {
+            s.bytes()
+                .take(56)
+                .map(|b| {
+                    if (0x20..0x7f).contains(&b) {
+                        alloc::format!("{}", b as char)
+                    } else {
+                        alloc::format!("\\x{:02x}", b)
+                    }
+                })
+                .collect()
+        };
+        lines.push(alloc::format!(
+            "unixreg: key='{}' name='{}' {} {} rxq={} accq={} peer='{}' pid={}",
+            esc(key),
+            shown,
+            kind,
+            st,
+            rxq,
+            accq,
+            esc(&peer),
+            pid
+        ));
+    }
+    lines
+}
+
 // ============================================================================
 // sockaddr_un parsing / serialization
 // ============================================================================

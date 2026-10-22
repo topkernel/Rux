@@ -739,6 +739,34 @@ pub fn init() {
         .lock_irqsave()
         .insert(String::from("null"), null_entry);
 
+    // sc136 (Session Q): OH's code-protection devices, absent stubs.
+    // Every forked app child opens /dev/dec then /dev/xpm (O_RDWR|
+    // O_CLOEXEC) during engine init right before the dlopen cascade —
+    // on real OH these are the XPM ("executable protection manager",
+    // code-signature verification) misc devices. Their ENOENT is the
+    // first engine-init failure in the parked children's tails, while
+    // the WORKING appspawn children are native services that never
+    // load the ark engine — so the missing driver is a live suspect
+    // for why app children abort before their first pthread_create.
+    // Null-semantics stub nodes (write swallowed, read EOF) decide
+    // causality the same way the sc134 empty-DSO test did for the
+    // enhance-lib: if children park identically with the nodes
+    // present, XPM is exonerated; if they proceed, the driver needs a
+    // real implementation.
+    for (name, minor) in [("xpm", 240u32), ("dec", 241u32)] {
+        let dev = crate::fs::dev_t::DevNo::new(crate::fs::dev_t::MISC_MAJOR, minor);
+        let _ = registry::register_char_device(dev, &NULLDEV_OPS);
+        let entry = Arc::new(DevfsEntry::new_char_device_with_mode(
+            name,
+            dev,
+            0o666 | 0o020000, // S_IFCHR | rw-rw-rw-
+        ));
+        root_entry
+            .children
+            .lock_irqsave()
+            .insert(String::from(name), entry);
+    }
+
     // /dev/ptmx: every open allocates a new pty pair (fs/pty.rs ptmx_open).
     let ptmx_entry = Arc::new(DevfsEntry::new_char_device_with_mode(
         "ptmx",

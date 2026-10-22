@@ -691,24 +691,361 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
     SYSCALL_RING[SYSCALL_CURSOR.fetch_add(1, core::sync::atomic::Ordering::Relaxed) % SYSCALL_RING.len()]
         .record(crate::process::current_pid(), syscall_no as u32, args[0], args[1], result as u64);
 
-    // sc128 (Session P): per-task nr-only ring of the last 12 syscalls
+    // sc128 (Session P): per-task nr-only ring of the last syscalls
     // (successes included) — read at APP-PARK to see the child's final
-    // action sequence, not just its failures.
+    // action sequence, not just its failures. sc135 (Session Q): ring
+    // deepened 12 -> LAST_CALLS_LEN (96) — sc129's 12-deep ring saw only
+    // the clock_gettime retry loop masking the real pre-park sequence.
     if let Some(cur) = crate::sched::current() {
         use core::sync::atomic::Ordering::Relaxed;
-        let idx = unsafe { (*cur).last_calls_cur.fetch_add(1, Relaxed) } % 12;
+        let idx = unsafe { (*cur).last_calls_cur.fetch_add(1, Relaxed) }
+            % crate::process::task::LAST_CALLS_LEN;
         unsafe { (*cur).last_calls[idx].store((syscall_no as u32) & 0xffff, Relaxed) };
+    }
+
+    // sc138 (Session Q): FILTERED init ring — skips the parked child's
+    // retry-loop noise ({113 clock_gettime, 66 writev, 203 connect} and
+    // main-stack-top futex waits) so APP-PARK / APP-THR dumps carry the
+    // init sequence itself (loader/prctl/mprotect/clone cascade) instead
+    // of a clock_gettime wall. This is the working-vs-parked byte-diff
+    // substrate: park dumps show the aborted init; APP-THR dumps show a
+    // full one that reached pthread_create.
+    {
+        let skip = match syscall_no {
+            113 | 66 | 203 => true,
+            // futex: sc138 showed the park loop also spins FUTEX WAITS on
+            // the runtime-arena words (0x7ff00002aec0 family, short
+            // timeouts) — those flooded the init ring as badly as the
+            // clocks. sc139: skip ALL futex WAITs (op FUTEX_WAIT(0) /
+            // FUTEX_WAIT_BITSET(9), with or without PRIVATE(0x80)) in the
+            // init ring; WAKEs and requeues stay recorded — a wake is a
+            // worker-handshake event, exactly what the diff needs. The
+            // final park wait is named by the APP-PARK header itself.
+            98 => {
+                let op = (args[1] & 0x7f) as u32;
+                op == 0 /* FUTEX_WAIT */ || op == 9 /* FUTEX_WAIT_BITSET */
+                    || args[0] >= 0x7ffffffd0000 && args[0] < 0x7ffffffff000
+            }
+            _ => false,
+        };
+        if !skip {
+            if let Some(cur) = crate::sched::current() {
+                use core::sync::atomic::Ordering::Relaxed;
+                let n = unsafe { (*cur).init_calls_cur.fetch_add(1, Relaxed) };
+                let idx = n % crate::process::task::INIT_CALLS_LEN;
+                unsafe {
+                    (*cur).init_calls[idx].store((syscall_no as u32) & 0xffff, Relaxed);
+                    (*cur).init_a0[idx].store(args[0], Relaxed);
+                }
+                // sc143: latch the birth window once (first 64 filtered
+                // calls of this task's life) — the deep ring's tail gets
+                // churned by retry loops, the birth window cannot.
+                if n < crate::process::task::BIRTH_CALLS_LEN as usize {
+                    unsafe {
+                        (*cur).birth_calls[n].store((syscall_no as u32) & 0xffff, Relaxed);
+                        (*cur).birth_a0[n].store(args[0], Relaxed);
+                    }
+                }
+            }
+        }
     }
 
     // sc125 (Session P): per-task ring of the last 8 FAILING syscalls —
     // the park decode needs the pre-park failure tail (musl pthread_create
     // mmaps the thread stack BEFORE clone; a failed mmap means no clone
     // ever reaches the kernel census and nothing else records it).
+    // sc135 (Session Q): a0/a1 stored alongside — the nr167=-22 entries
+    // need the prctl OPTION named.
     if result < 0 && result > -4096 {
         if let Some(cur) = crate::sched::current() {
             let packed = ((-(result) as u32) << 16) | ((syscall_no as u32) & 0xffff);
             let idx = unsafe { (*cur).last_fails_cur.fetch_add(1, core::sync::atomic::Ordering::Relaxed) } % 8;
             unsafe { (*cur).last_fails[idx].store(packed, core::sync::atomic::Ordering::Relaxed) };
+            unsafe { (*cur).last_fails_a0[idx].store(args[0], core::sync::atomic::Ordering::Relaxed) };
+            unsafe { (*cur).last_fails_a1[idx].store(args[1], core::sync::atomic::Ordering::Relaxed) };
+        }
+    }
+
+    // sc140 (Session Q): the parked child's retry loop runs ioctl x3-5
+    // between dlopen attempts — name the FD and COMMAND (binder
+    // BINDER_WRITE_READ? /dev/xpm? a param-area ioctl?). The fd set at
+    // park time has no xpm/dec fd, so the loop polls an open service fd.
+    if syscall_no == 29 {
+        let comm = crate::sched::current()
+            .map(|t| unsafe { (*t).comm() })
+            .map(|c| core::str::from_utf8(c).unwrap_or(""))
+            .unwrap_or("")
+            .trim_end_matches('\0');
+        let family = comm.contains("launcher")
+            || comm.contains("settingsdata")
+            || comm.contains("systemui")
+            || comm.contains("dataability")
+            || comm == "appspawn";
+        if family {
+            static IO_N: core::sync::atomic::AtomicUsize =
+                core::sync::atomic::AtomicUsize::new(0);
+            if IO_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 80 {
+                crate::pr_warn!(
+                    "appioctl: pid={} comm='{}' fd={} cmd={:#x} ret={}",
+                    crate::process::current_pid(),
+                    comm,
+                    args[0],
+                    args[1],
+                    result
+                );
+            }
+        }
+    }
+
+    // sc144-149: the parked children's OWN hilog lines never reach
+    // hilogd (socket EAGAIN backpressure) — yet they are the narration
+    // of exactly where the runtime init stalls. Dump the first 3 iovecs
+    // of every writev to fd 3 from the app family (daemon excluded):
+    // sc149 showed the child's sandbox-phase narration; the post-sandbox
+    // runtime phase writes SUCCEED and need printing too (print every
+    // result, budget 700).
+    if syscall_no == 66 && args[0] == 3 {
+        let comm = crate::sched::current()
+            .map(|t| unsafe { (*t).comm() })
+            .map(|c| core::str::from_utf8(c).unwrap_or(""))
+            .unwrap_or("")
+            .trim_end_matches('\0');
+        let family = comm.contains("launcher")
+            || comm.contains("settingsdata")
+            || comm.contains("systemui")
+            || comm.contains("dataability")
+            || comm == "appspawn";
+        if family {
+            // sc148: the DAEMON's own preload log storm (extension libs)
+            // ate the budget before any child forked. Skip the boot's
+            // original appspawn pid; forked children keep comm 'appspawn'
+            // pre-rename but carry different pids, so they still print.
+            static APPLOG_MAIN_PID: core::sync::atomic::AtomicU32 =
+                core::sync::atomic::AtomicU32::new(0);
+            let my_pid = crate::process::current_pid() as u32;
+            let main_pid = APPLOG_MAIN_PID.load(core::sync::atomic::Ordering::Relaxed);
+            if main_pid == 0 {
+                APPLOG_MAIN_PID.store(my_pid, core::sync::atomic::Ordering::Relaxed);
+            }
+            let is_daemon = main_pid != 0 && main_pid == my_pid;
+            // sc152 (Session Q): for the DAEMON itself, print only the
+            // SA-registration lines — the SA 501 (AppMgrService,
+            // libappms loaded into the daemon) never registers with
+            // samgr, and the daemon's own narration says whether the
+            // registration was attempted and how it failed.
+            // sc152: collection runs for the whole family; the PRINT
+            // below filters daemon lines to registration keywords
+            // (AddSystemAbility / RegisterSystemAbility / SA ids / samgr)
+            // so the daemon's preload storm cannot eat the budget.
+            static HI_N: core::sync::atomic::AtomicUsize =
+                core::sync::atomic::AtomicUsize::new(0);
+            if HI_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 1200 {
+                // iovec { void* base; size_t len }
+                let base = args[1];
+                if base != 0 {
+                    // sc145: OH's hilog writev carries [header(bin), tag,
+                    // text] as SEPARATE iovecs — walk the first 3.
+                    let mut parts: alloc::vec::Vec<alloc::string::String> =
+                        alloc::vec::Vec::new();
+                    for vi in 0..3u64 {
+                        let vp = base + vi * 16;
+                        let iobase =
+                            unsafe { crate::arch::uaccess::get_user(vp as *const u64) };
+                        let iolen =
+                            unsafe { crate::arch::uaccess::get_user((vp + 8) as *const u64) };
+                        if let (Some(b), Some(l)) = (iobase, iolen) {
+                            if l > 0 && l < 0x10000 {
+                                let n = (l as usize).min(110);
+                                let mut buf = [0u8; 110];
+                                let ok = unsafe {
+                                    crate::arch::uaccess::copy_from_user(
+                                        buf.as_mut_ptr(),
+                                        b as *const u8,
+                                        n,
+                                    ) == 0
+                                };
+                                if ok {
+                                    let text: alloc::string::String = buf[..n]
+                                        .iter()
+                                        .map(|c| {
+                                            if (0x20..0x7f).contains(c) || *c == b'\n' {
+                                                *c as char
+                                            } else {
+                                                '.'
+                                            }
+                                        })
+                                        .collect();
+                                    parts.push(text);
+                                }
+                            }
+                        }
+                    }
+                    if !parts.is_empty() {
+                        let joined = parts.join("|");
+                        let daemon_regn = is_daemon
+                            && (joined.contains("SystemAbility")
+                                || joined.contains("501")
+                                || joined.contains("amgr"));
+                        if !is_daemon || daemon_regn {
+                            static DREG_N: core::sync::atomic::AtomicUsize =
+                                core::sync::atomic::AtomicUsize::new(0);
+                            if !is_daemon
+                                || DREG_N.fetch_add(
+                                    1,
+                                    core::sync::atomic::Ordering::Relaxed,
+                                ) < 60
+                            {
+                                crate::pr_warn!(
+                                    "applog pid={} comm='{}' ret={} |{}",
+                                    crate::process::current_pid(),
+                                    comm,
+                                    result,
+                                    joined
+                                );
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // sc136 (Session Q): the parked children's pre-park loop is
+    // {clock_gettime xN, writev, connect, writev} — the connect TARGET
+    // names the service the child talks to right before parking (hilog?
+    // samgr? the appspawn engine?). sc136 run 1: the appspawn PARENT's
+    // own connect storm ate the whole budget before the first child
+    // forked, and fd 3's sockaddr is an ABSTRACT unix socket (sun_path
+    // starts NUL — the empty-string parse printed nothing). Fix: skip
+    // the boot's original appspawn pid (first comm='appspawn' task seen;
+    // forked children carry the same comm but a different pid), and
+    // hex-dump the first 16 sockaddr bytes for abstract sockets.
+    if syscall_no == 203 {
+        let cur_task = crate::sched::current();
+        let comm = cur_task
+            .map(|t| unsafe { (*t).comm() })
+            .map(|c| core::str::from_utf8(c).unwrap_or(""))
+            .unwrap_or("")
+            .trim_end_matches('\0');
+        let is_app = comm.contains("launcher")
+            || comm.contains("settingsdata")
+            || comm.contains("systemui")
+            || comm.contains("dataability")
+            || comm == "appspawn";
+        if is_app {
+            static APPSPAWN_MAIN_PID: core::sync::atomic::AtomicU32 =
+                core::sync::atomic::AtomicU32::new(0);
+            let my_pid = crate::process::current_pid() as u32;
+            let parent_pid = APPSPAWN_MAIN_PID.load(core::sync::atomic::Ordering::Relaxed);
+            let skip = if comm == "appspawn" {
+                if parent_pid == 0 {
+                    APPSPAWN_MAIN_PID.store(my_pid, core::sync::atomic::Ordering::Relaxed);
+                    true // this first one IS the parent — skip but remember it
+                } else {
+                    parent_pid == my_pid
+                }
+            } else {
+                false
+            };
+            if !skip {
+                static CONN_N: core::sync::atomic::AtomicUsize =
+                    core::sync::atomic::AtomicUsize::new(0);
+                if CONN_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 60 {
+                    let mut sa = [0u8; 48];
+                    use core::fmt::Write;
+                    let mut desc = alloc::string::String::new();
+                    if args[1] != 0 {
+                        // sc141: RAW copy — strncpy_from_user stops at the
+                        // first NUL, so an abstract sockaddr printed as
+                        // "all zeros" when its real name started later.
+                        let raw_ok = unsafe {
+                            crate::arch::uaccess::copy_from_user(
+                                sa.as_mut_ptr(),
+                                args[1] as *const u8,
+                                sa.len(),
+                            ) == 0
+                        };
+                        if raw_ok {
+                            let fam = u16::from_ne_bytes([sa[0], sa[1]]);
+                            if fam == 1 {
+                                let p = &sa[2..];
+                                let end = p.iter().position(|c| *c == 0).unwrap_or(p.len());
+                                if end == 0 {
+                                    // abstract socket: the name is the
+                                    // raw bytes after the leading NUL
+                                    let _ = write!(desc, "abstract:");
+                                    // sc140: 40 bytes + the caller's
+                                    // addrlen — the name may be longer
+                                    // than the old 18-byte window and
+                                    // NUL bytes are legal in abstract
+                                    // names (length IS the name).
+                                    for b in sa.iter().take(40) {
+                                        let _ = write!(desc, "{:02x}", b);
+                                    }
+                                } else {
+                                    let _ = write!(
+                                        desc,
+                                        "{}",
+                                        core::str::from_utf8(&p[..end]).unwrap_or("<utf8>")
+                                    );
+                                }
+                            } else {
+                                let _ = write!(desc, "fam{}", fam);
+                            }
+                        } else {
+                            let _ = write!(desc, "<efault>");
+                        }
+                    } else {
+                        let _ = write!(desc, "<null>");
+                    }
+                    crate::pr_warn!(
+                        "appconn: pid {} comm='{}' fd={} -> {} addrlen={} ret={}",
+                        my_pid,
+                        comm,
+                        args[0],
+                        desc,
+                        args[2],
+                        result
+                    );
+                }
+            }
+        }
+    }
+
+    // sc135 (Session Q): name the prctl OPTION behind the parked app
+    // children's nr167=-22 fail-tail entries (1-2 per child). The
+    // unimplemented-option warning inside sys_prctl has a 32-line budget
+    // that hdf_devhost retry loops eat long before the app window, and
+    // EINVAL also leaves IMPLEMENTED arms (PR_SET_VMA sub-op, securebits
+    // mask > 0xff, capbset > CAP_LAST_CAP, PR_CAP_AMBIENT sub-op) which
+    // print nothing. Catch every prctl-EINVAL at dispatch exit with all
+    // five args, scoped to the app family, budget 40.
+    if syscall_no == 167 && result == -22 {
+        let comm = crate::sched::current()
+            .map(|t| unsafe { (*t).comm() })
+            .map(|c| core::str::from_utf8(c).unwrap_or(""))
+            .unwrap_or("")
+            .trim_end_matches('\0');
+        let is_app = comm.contains("launcher")
+            || comm.contains("settingsdata")
+            || comm.contains("systemui")
+            || comm.contains("dataability")
+            || comm == "appspawn";
+        if is_app {
+            static PRCTL_EI_N: core::sync::atomic::AtomicUsize =
+                core::sync::atomic::AtomicUsize::new(0);
+            if PRCTL_EI_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 40 {
+                crate::pr_warn!(
+                    "prctl-einval: pid {} comm='{}' option={} a1={:#x} a2={:#x} a3={:#x} a4={:#x}",
+                    crate::process::current_pid(),
+                    comm,
+                    args[0],
+                    args[1],
+                    args[2],
+                    args[3],
+                    args[4]
+                );
+            }
         }
     }
 

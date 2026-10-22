@@ -104,6 +104,14 @@ pub fn sys_clone(args: SyscallArgs) -> i64 {
     // copy_process: p->exit_signal = args->exit_signal == CSIGNAL mask).
     let exit_signal = (flags & 0xff) as u8;
 
+    // sc135 (Session Q): the appspawn parent's tgid, recorded at its
+    // first child fork so the census-side APP-THR dump can EXCLUDE the
+    // parent's own thread batches (OS_GC_Thread pool, comm 'appspawn')
+    // and keep only forked-children thread creations — the working-shape
+    // init ring the divergence comparison needs.
+    static APPSPAWN_TGID: core::sync::atomic::AtomicU32 =
+        core::sync::atomic::AtomicU32::new(0);
+
     // sc123 (Session P): APP-PARK decoded the children's eternal wait as
     // pthread_cond_timedwait's MUTEX RELOCK (return chain: wait wrapper <-
     // pthread_mutex_lock <- pthread_cond_timedwait at musl+0x11849d) on
@@ -127,6 +135,17 @@ pub fn sys_clone(args: SyscallArgs) -> i64 {
             .unwrap_or("")
             .trim_end_matches('\0');
         if comm == "appspawn" {
+            if APPSPAWN_TGID.load(core::sync::atomic::Ordering::Relaxed) == 0 {
+                if let Some(t) = crate::sched::current() {
+                    // SAFETY: t is the current task.
+                    unsafe {
+                        APPSPAWN_TGID.store(
+                            (*t).tgid() as u32,
+                            core::sync::atomic::Ordering::Relaxed,
+                        );
+                    }
+                }
+            }
             static NF: core::sync::atomic::AtomicUsize =
                 core::sync::atomic::AtomicUsize::new(0);
             if NF.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 10 {
@@ -223,6 +242,193 @@ pub fn sys_clone(args: SyscallArgs) -> i64 {
                             flags,
                             pid
                         );
+                        // sc140: let the binder tracer see transactions
+                        // targeting forked appspawn children.
+                        if flags & 0x00000100 == 0 && flags & 0x00010000 == 0 {
+                            crate::ipc::binder::register_app_child_pid(pid as u32);
+                        }
+                        // sc139 (Session Q): the WORKING reference — the
+                        // appspawn daemon's own filtered init ring, dumped
+                        // in the forking thread's context at a real fork
+                        // (no CLONE_VM). The daemon reaches pthread_create
+                        // and runs its whole loader cascade; APP-PARK shows
+                        // the parked child's ring. The diff of the two is
+                        // the divergence hunt. Budget 2 (first two forks).
+                        if flags & 0x00000100 == 0 {
+                            use core::fmt::Write;
+                            use core::sync::atomic::Ordering::Relaxed;
+                            static NPAR: core::sync::atomic::AtomicUsize =
+                                core::sync::atomic::AtomicUsize::new(0);
+                            if NPAR.fetch_add(1, Relaxed) < 2 {
+                                if let Some(t) = crate::sched::current() {
+                                    unsafe {
+                                        const RL: usize =
+                                            crate::process::task::INIT_CALLS_LEN;
+                                        let cur = (*t).init_calls_cur.load(Relaxed);
+                                        let mut s2 = alloc::string::String::new();
+                                        let _ = write!(
+                                            s2,
+                                            "APP-PAR: tgid {} comm='{}' init:",
+                                            (*t).tgid(),
+                                            core::str::from_utf8((*t).comm())
+                                                .unwrap_or("")
+                                                .trim_end_matches('\0')
+                                        );
+                                        for k in 0..RL {
+                                            let i = (cur + RL - k) % RL;
+                                            let v = (*t).init_calls[i].load(Relaxed);
+                                            if v != 0 {
+                                                let _ = write!(s2, " {}", v);
+                                            }
+                                        }
+                                        crate::pr_warn!("{}", s2);
+                                        let mut s3 = alloc::string::String::new();
+                                        let _ = write!(s3, "APP-PAR: initA:");
+                                        for k in 0..RL {
+                                            let i = (cur + RL - k) % RL;
+                                            let v = (*t).init_calls[i].load(Relaxed);
+                                            if v != 0 {
+                                                let a0 = (*t).init_a0[i].load(Relaxed);
+                                                let _ = write!(s3, " {}@{:#x}", v, a0);
+                                            }
+                                        }
+                                        crate::pr_warn!("{}", s3);
+                                    }
+                                }
+                            }
+                        }
+                        // sc135 (Session Q): a forked appspawn child that
+                        // CREATES a thread is the WORKING shape (sc125:
+                        // tgid 1146 -> OS_IPC_0 + OS_DfxWatchdog, alive)
+                        // while its siblings park single-threaded before
+                        // their first pthread_create. Dump the CREATING
+                        // thread's full init ring (all-calls + fails, same
+                        // format as APP-PARK) so the two sequences can be
+                        // diffed — the divergence point is the abort.
+                        // Parent's own batches excluded via APPSPAWN_TGID.
+                        if flags & 0x00010000 != 0 /* CLONE_THREAD */
+                            && APPSPAWN_TGID.load(core::sync::atomic::Ordering::Relaxed) != 0
+                        {
+                            if let Some(t) = crate::sched::current() {
+                                // SAFETY: t is the current (forking) task.
+                                unsafe {
+                                    let spawn_tgid = APPSPAWN_TGID
+                                        .load(core::sync::atomic::Ordering::Relaxed);
+                                    if (*t).tgid() as u32 != spawn_tgid {
+                                        static NT: core::sync::atomic::AtomicUsize =
+                                            core::sync::atomic::AtomicUsize::new(0);
+                                        if NT.fetch_add(
+                                            1,
+                                            core::sync::atomic::Ordering::Relaxed,
+                                        ) < 6
+                                        {
+                                            use core::fmt::Write;
+                                            const RL: usize =
+                                                crate::process::task::LAST_CALLS_LEN;
+                                            let cur = (*t)
+                                                .last_calls_cur
+                                                .load(core::sync::atomic::Ordering::Relaxed);
+                                            let mut s2 = alloc::string::String::new();
+                                            let _ = write!(
+                                                s2,
+                                                "APP-THR: tgid {} comm='{}' leader='{}' calls:",
+                                                (*t).tgid(),
+                                                core::str::from_utf8((*t).comm())
+                                                    .unwrap_or("")
+                                                    .trim_end_matches('\0'),
+                                                core::str::from_utf8(
+                                                    (*(*t).group_leader_ptr()).comm()
+                                                )
+                                                .unwrap_or("")
+                                                .trim_end_matches('\0')
+                                            );
+                                            for k in 0..RL {
+                                                let i = (cur + RL - k) % RL; // newest first
+                                                let v = (*t).last_calls[i]
+                                                    .load(core::sync::atomic::Ordering::Relaxed);
+                                                if v != 0 {
+                                                    let _ = write!(s2, " {}", v);
+                                                }
+                                            }
+                                            crate::pr_warn!("{}", s2);
+                                            let cur8 = (*t)
+                                                .last_fails_cur
+                                                .load(core::sync::atomic::Ordering::Relaxed);
+                                            let mut s = alloc::string::String::new();
+                                            let _ = write!(s, "APP-THR: tgid {} fails:", (*t).tgid());
+                                            for k in 0..8 {
+                                                let i = (cur8 + 8 - 1 - k) % 8;
+                                                let v = (*t).last_fails[i]
+                                                    .load(core::sync::atomic::Ordering::Relaxed);
+                                                if v != 0 {
+                                                    let a0 = (*t).last_fails_a0[i]
+                                                        .load(core::sync::atomic::Ordering::Relaxed);
+                                                    let a1 = (*t).last_fails_a1[i]
+                                                        .load(core::sync::atomic::Ordering::Relaxed);
+                                                    let _ = write!(
+                                                        s,
+                                                        " nr{}=-{} a0={:#x} a1={:#x}",
+                                                        v & 0xffff,
+                                                        v >> 16,
+                                                        a0,
+                                                        a1
+                                                    );
+                                                }
+                                            }
+                                            crate::pr_warn!("{}", s);
+                                            // sc138 (Session Q): the FILTERED
+                                            // init ring for the WORKING side —
+                                            // this creator reached
+                                            // pthread_create; APP-PARK dumps
+                                            // the parked side. The diff
+                                            // between the two sequences is
+                                            // the abort point.
+                                            {
+                                                use core::sync::atomic::Ordering::Relaxed;
+                                                const RL: usize =
+                                                    crate::process::task::INIT_CALLS_LEN;
+                                                let icur = (*t)
+                                                    .init_calls_cur
+                                                    .load(Relaxed);
+                                                let mut s4 = alloc::string::String::new();
+                                                let _ = write!(
+                                                    s4,
+                                                    "APP-THR: tgid {} init:",
+                                                    (*t).tgid()
+                                                );
+                                                for k in 0..RL {
+                                                    let i = (icur + RL - k) % RL;
+                                                    let v = (*t).init_calls[i]
+                                                        .load(Relaxed);
+                                                    if v != 0 {
+                                                        let _ = write!(s4, " {}", v);
+                                                    }
+                                                }
+                                                crate::pr_warn!("{}", s4);
+                                                let mut s5 = alloc::string::String::new();
+                                                let _ = write!(
+                                                    s5,
+                                                    "APP-THR: tgid {} initA:",
+                                                    (*t).tgid()
+                                                );
+                                                for k in 0..32.min(RL) {
+                                                    let i = (icur + RL - k) % RL;
+                                                    let v = (*t).init_calls[i]
+                                                        .load(Relaxed);
+                                                    if v != 0 {
+                                                        let a0 = (*t).init_a0[i]
+                                                            .load(Relaxed);
+                                                        let _ =
+                                                            write!(s5, " {}@{:#x}", v, a0);
+                                                    }
+                                                }
+                                                crate::pr_warn!("{}", s5);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
                         pid as i64
                     }
                     Err(e) => {

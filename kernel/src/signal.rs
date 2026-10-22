@@ -1993,6 +1993,28 @@ pub fn send_signal_from_user(pid: u32, sig: i32) -> Result<(), i32> {
         Some(t) => unsafe { ((*t).pid(), (*t).cred().uid) },
         None => (0, 0),
     };
+    // sc150 (Session Q, launcher lane): early-boot service threads are
+    // SIGKILLed mid-pthread_create (hiview/sdc OS_IPC threads, code=-9,
+    // identical tails every boot) and the resulting IPC-session deaths
+    // leave SA 501 (AppMgrService) unregistered — the direct cause of
+    // the app children parking. NAME THE SENDER of every user SIGKILL.
+    if sig == 9 {
+        static K9_N: core::sync::atomic::AtomicUsize =
+            core::sync::atomic::AtomicUsize::new(0);
+        if K9_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 80 {
+            let scomm = crate::sched::current()
+                .map(|t| unsafe { (*t).comm() })
+                .map(|c| core::str::from_utf8(c).unwrap_or(""))
+                .unwrap_or("")
+                .trim_end_matches('\0');
+            crate::pr_warn!(
+                "SIGKILL-SEND from pid={} comm='{}' -> target pid={}",
+                sender_pid,
+                scomm,
+                pid
+            );
+        }
+    }
     send_signal_with_info(pid, SigInfo::new(sig, si_code::SI_USER, sender_pid, sender_uid))
 }
 
@@ -2013,6 +2035,25 @@ pub fn send_signal_from_user_tkill(tid: u32, sig: i32) -> Result<(), i32> {
         Some(t) => unsafe { ((*t).pid(), (*t).cred().uid) },
         None => (0, 0),
     };
+    // sc151: tgkill/raise suicide path of the SIGKILL-SEND tracer (see
+    // send_signal_from_user).
+    if sig == 9 {
+        static K9T_N: core::sync::atomic::AtomicUsize =
+            core::sync::atomic::AtomicUsize::new(0);
+        if K9T_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 80 {
+            let scomm = crate::sched::current()
+                .map(|t| unsafe { (*t).comm() })
+                .map(|c| core::str::from_utf8(c).unwrap_or(""))
+                .unwrap_or("")
+                .trim_end_matches('\0');
+            crate::pr_warn!(
+                "SIGKILL-TKILL from pid={} comm='{}' -> target tid={}",
+                sender_pid,
+                scomm,
+                tid
+            );
+        }
+    }
     send_signal_with_info(tid, SigInfo::new(sig, si_code::SI_TKILL, sender_pid, sender_uid))
 }
 

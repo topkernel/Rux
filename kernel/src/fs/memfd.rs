@@ -71,6 +71,71 @@ const FS_ID_MEMFD: u64 = 0x4D45_4D46_0000_0004;
 /// Monotonic memfd inode number source.
 static MEMFD_INO: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0x1000);
 
+/// sc138 (Session Q): memfd NAME registry. The parked app children map
+/// their engine libraries through memfd fds (APPMAP fd=14 fileoff=0xcf95a
+/// style), and `File::path()` prints only "anon_inode:[<ino>]" for them —
+/// the park chain's caller lib was unnameable. memfd_create receives the
+/// name (OH's loader passes the .so name); record ino -> name here so the
+/// APPFD/APPMAP printers can resolve it. Fixed lock-free table, first 512
+/// memfd slots of the boot, hash-collision overwrite (probe-only aid).
+const MEMFD_NAME_SLOTS: usize = 512;
+const MEMFD_NAME_MAX: usize = 48;
+
+struct MemfdNameSlot {
+    ino: core::sync::atomic::AtomicU64,
+    /// Byte-wise atomic so the static table needs no unsafe mutation.
+    name: [core::sync::atomic::AtomicU8; MEMFD_NAME_MAX],
+}
+
+const MEMFD_SLOT_ZERO: MemfdNameSlot = MemfdNameSlot {
+    ino: core::sync::atomic::AtomicU64::new(0),
+    name: [const { core::sync::atomic::AtomicU8::new(0) }; MEMFD_NAME_MAX],
+};
+
+static MEMFD_NAMES: [MemfdNameSlot; MEMFD_NAME_SLOTS] = [MEMFD_SLOT_ZERO; MEMFD_NAME_SLOTS];
+
+fn memfd_name_record(ino: u64, name: &[u8]) {
+    use core::sync::atomic::Ordering::Relaxed;
+    let n = name.len().min(MEMFD_NAME_MAX - 1);
+    let slot = &MEMFD_NAMES[(ino as usize) % MEMFD_NAME_SLOTS];
+    for i in 0..n {
+        slot.name[i].store(name[i], Relaxed);
+    }
+    for i in n..MEMFD_NAME_MAX {
+        slot.name[i].store(0, Relaxed);
+    }
+    // ino stored LAST: a reader sees either the old entry or a fully
+    // written new one; a torn name is possible only under a same-slot
+    // race, acceptable for a forensic printer.
+    slot.ino.store(ino, core::sync::atomic::Ordering::Release);
+}
+
+/// Resolve a memfd name by inode number (the APPFD/APPMAP printers call
+/// this after `File::path()` returned "anon_inode:[<ino>]").
+pub fn memfd_name_by_ino(ino: u64) -> Option<&'static str> {
+    use core::sync::atomic::Ordering::Relaxed;
+    let slot = &MEMFD_NAMES[(ino as usize) % MEMFD_NAME_SLOTS];
+    if slot.ino.load(core::sync::atomic::Ordering::Acquire) != ino {
+        return None;
+    }
+    // Leak-free static read: build the name in a shared scratch buffer is
+    // racy; instead return a reference into a per-call leaked String via
+    // Box::leak — probe printers run a handful of times per boot.
+    let mut end = 0usize;
+    for i in 0..MEMFD_NAME_MAX {
+        if slot.name[i].load(Relaxed) == 0 {
+            end = i;
+            break;
+        }
+    }
+    if end == 0 {
+        end = MEMFD_NAME_MAX;
+    }
+    let bytes: alloc::vec::Vec<u8> = (0..end).map(|i| slot.name[i].load(Relaxed)).collect();
+    let s = alloc::string::String::from_utf8(bytes).ok()?;
+    Some(alloc::boxed::Box::leak(s.into_boxed_str()))
+}
+
 /// setattr for memfd inodes: the only attribute we implement is ATTR_SIZE
 /// (ftruncate). Resize is grow-with-zeros / shrink — the FileBuffer content
 //  is the single copy of the data.
@@ -198,6 +263,8 @@ pub fn memfd_create(name: &[u8], flags: u32) -> Result<usize, i32> {
     };
 
     let ino = MEMFD_INO.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    // sc138: remember the caller-supplied name for the probe printers.
+    memfd_name_record(ino, name);
     let mut inode = Inode::new(
         ino,
         InodeMode::new(InodeMode::S_IFREG | (0o666 & !umask)),
@@ -268,7 +335,7 @@ fn memfd_file_close(file: &File) -> i32 {
 
 /// File ops for memfd files: identical to REG_FILE_OPS except the write
 /// path enforces F_SEAL_WRITE.
-static MEMFD_FILE_OPS: crate::fs::file::FileOps = crate::fs::file::FileOps {
+pub static MEMFD_FILE_OPS: crate::fs::file::FileOps = crate::fs::file::FileOps {
     read: Some(memfd_file_read),
     write: Some(memfd_file_write),
     lseek: Some(memfd_file_lseek),

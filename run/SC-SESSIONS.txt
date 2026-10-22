@@ -1647,3 +1647,189 @@ REFUTED by stub test; session handoff state.
   shows zero ATTEMPTS from the parked children - the gate never
   fires; the 8MiB/128MB-era threshold question is moot for THIS
   symptom).
+
+SESSION Q (third leg, 13:0x-): prctl-EINVAL DECODED (OH 'prot' VMA-tag
+magic, tolerated); pre-park loop = clock+writev+connect; /dev/dec+/dev/xpm
+ENOENT named as the first engine-init failure; xpm/dec stubs landed;
+APPMAP/APPFD/appconn probes added; sc136 reroll (slow-boot variance).
+- sc135 (good variant, 6 APP-PARK dumps + a0-latch): the children's
+  nr167=-22 IS prctl(option=0x70726f74='prot', 0, addr, size, 0) - an
+  OH-kernel PR_SET_VMA-shaped extension (OH musl + OH kernel_linux use
+  the STANDARD 0x53564d41, so the caller computes its own magic - not
+  identified upstream, does not matter: the appspawn PARENT makes 38
+  of these EINVAL calls and thrives => TOLERATED, park cause is NOT
+  prctl). Two sub-shapes: children with hilog writev EAGAIN fd3
+  (settingsdata/systemui) and children with clean writev (launcher) -
+  both park identically => hilog backpressure also not the cause.
+- 96-deep all-calls ring (sc135): pre-park = clock_gettime runs +
+  writev+connect+writev triplets (fd3), ZERO futex/clone/mmap
+  completions in the last 96 calls, then ONE eternal cond wait. The
+  child NEVER attempts its first pthread_create (no mmap for stack,
+  no clone) - engine init aborts silently before thread creation.
+- WORKING child identified (sc125 log reread): tgid 1146 = the
+  OsAccount service child ('ActivateDefaultOsAccount', sets
+  bootevent.appspawn.started) - a NATIVE service child, no ark engine.
+  Native-service children create threads fine; ark-app children park.
+  => divergence lives in the ark-engine path.
+- sc135 APPSPAWN window decode: parent opens /dev/dec then /dev/xpm
+  (O_RDWR|O_CLOEXEC) ENOENT in EVERY app child's engine init (first
+  failures in the tail, before the enhance-lib cascade); XPM = OH
+  code-protection manager (Huawei kernel driver, absent here). The
+  parent then reports spawn SUCCESS, AMS OnAppStarted fires, child
+  parks, AMS watchdog kills it ('RemoveProcessRecord process died'),
+  AMS retries forever (87 appclone lines in sc135).
+- landed probes/fixes: dispatch prctl-einval print (all args);
+  last_fails a0/a1 rings (printed at APP-PARK/thread-exit/APP-THR);
+  LAST_CALLS_LEN=96; APP-THR (ring dump at a FORKED child's first
+  CLONE_THREAD, parent excluded via APPSPAWN_TGID recorded at the
+  parent's first fork); APPMAP (parking child's lib-region VMA table,
+  compact lines - sc135's slot-27 frame line was cut at every UART
+  flush boundary by hilog interleaving, all 6 dumps truncated at the
+  SAME point); APPFD (open fd paths); appconn (connect sockaddr;
+  sc136 run1 burned its budget on the parent's connect storm + fd3 is
+  an ABSTRACT unix socket - fixed: parent-skip + hex-dump).
+- devfs: /dev/xpm (10,240) + /dev/dec (10,241) null-semantics stub
+  nodes - causality test per sc134 empty-DSO methodology.
+- raw park chain decode (sc135, all 6 byte-identical): waiter return
+  addr slot[12]=0x7ff0816ff8a8 in an UNSEEN VMA below 0x7ff081a09000;
+  slot[14]/[15] point into the 0x7ff081b49000-0x7ff08234a000 8MB arena
+  (heap). APPMAP will name slot[12]'s VMA; offline PT_LOAD table
+  (/tmp/ohlibs-loads.txt, 3335 libs) ready for matching.
+- sc136: kernel with stubs+probes booted but ran 3x slow (12.8k lines
+  in 25 min, child phase unreached; not wedged - composer_host.ready +
+  appspawn.started both fired; boot-speed variance). sc137 reroll
+  running with the appconn-fixed kernel, 35 min budget.
+
+SESSION Q FOURTH LEG (sc138-sc146, 23:5x-): init-sequence diff DONE at
+the syscall level; park identity SOLVED (libeventhandler NoneIoWaiter);
+children send/receive ZERO binder; own-log narration probe landed.
+- Probes landed (all English commits on feature/samgr-callback):
+  3443bbb0 filtered INIT ring (skip 113/66/203 + main-stack futex) with
+  a0, dumps at APP-PARK/APP-THR; memfd name registry + APPFD/APPMAP
+  memfd naming; finished the paused round-3 APPPK12 block (4 missing
+  semicolons + b-scope bug in e2a53880).
+  a5b6e5d3 rev3: APPMAPSRC (exec-segment mmap naming at mmap time),
+  appioctl fd/cmd tracer, APPPARK-RETS call-site-validated return addrs.
+  8d6cf997 rev4: APPTXN binder tracer (app-family sends + anything
+  targeting registered appspawn children), APPTXN-FAIL, appconn raw
+  copy (the old strncpy_from_user stopped at NUL — the "abstract \x01"
+  socket was a PROBE ARTIFACT; real target = /dev/unix/socket/hilogInput,
+  addrlen 110).
+  (rev5) init ring 512-deep + chunked dump + BIRTH window latch (first
+  64 filtered calls per task, immune to loop churn).
+  (rev6/7) applog: dump first 110 bytes of first 3 iovecs of fd3 writev
+  from app family — the children's OWN hilog lines straight from the
+  kernel (hilogd backpressure no longer hides them).
+- PARK IDENTITY SOLVED (sc139/140): APPPARK-RETS validates return addrs
+  by call-site bytes; both real frames [27]/[35] land in
+  /system/lib64/chipset-sdk-sp/libeventhandler.z.so at file offsets
+  0x3e502/0x3e32f — inside/next to NoneIoWaiter (nearest symbol
+  NoneIoWaiterD2 at 0x3f180, local WaitForEvent between). THE PARK IS
+  THE MAIN EVENT RUNNER (current-thread mode, NoneIoWaiter — no epoll)
+  IN pthread_cond_timedwait(seq cond, ~1 year) WAITING FOR EVENT #3
+  (seq==2: two events processed). slot[1] (libc++) and slot[12] were
+  stale decoys — slot[1] resolved into std::string::assign, slot[12]
+  points into a zero page.
+- THE LOOP (sc140 appioctl): {ioctl fd6 /dev/binder WRITE_READ
+  (0xc0306201) ret=0 EMPTY poll, openat namespace cascade (the enhance
+  lib + THP node + /etc/sceneboard.config misses), short timedwait,
+  hilog writev/reconnect}. Children NEVER block in binder — they poll
+  it inline from the runner loop.
+- APPTXN (sc141/142): parked children send ZERO binder transactions
+  (successful OR failed — APPTXN-FAIL stays 0) and NOTHING targets
+  them. The only app-family txns are the appspawn daemon's own (to
+  samgr). So the child never reaches ANY IPC step: not the samgr
+  lookup, not ScheduleAttachApplication. The AMS->child schedule
+  transaction does not exist because the child never announced itself.
+- CHILD LIFE (sc144 512-ring + birth): ALL children byte-identical.
+  Oldest: sandbox setup (mkdirat/mount/fchmodat storms + 58 openats),
+  then own-lib dlopens (57/62/63/80/56 cycles), then a `226 226 222`
+  (mprotect x2 + mmap) stack-shaping cluster, then the retry loop, then
+  the park. BIRTH window (first 64 filtered calls): gettimeofday,
+  sigprocmask x2, closes, pipe2, write fd11, PR_SET_NAME, sigprocmask,
+  closes, arena futexes (0x7ff00002aec0/2a7d0 = the OH param-service
+  shared area cluster, mmap-time naming proved 0x7ff000000000 base =
+  /dev/__parameters__/* + fixed-address anon pages), openat, ioctl
+  fd16 (the /dev/xpm stub, ENOTTY), close. NO thread-stack mmap, NO
+  clone, NO sigprocmask-for-pthread ever.
+- Engine libs are PRELOADED by the daemon pre-fork (APPMAPSRC shows
+  libeventhandler/libc++(memfd 0x141d20)/libcesfwk/libappspawn_sandbox
+  mapped under comm='appspawn' BEFORE the first fork) — children
+  inherit them; that is why children never dlopen the engine.
+- hiview: its OS_IPC thread is SIGKILLed (code=-9, mid-pthread_create,
+  same tail every boot, sc137/139/140) surrounded by W3-RUNWAKE-REFUSED
+  + TIMER-SOFTIRQ-STALL lines; in sc142 it lived longer (TaskExecutorRDB
+  exited code=0). Timing varies; children park regardless, so hiview
+  death is NOT the park cause but shares the same slow-boot/wake
+  pathology. WHO sends the kill is still unnamed (suspect beget
+  service-watchdog on a starved heartbeat).
+- sc143/145/146: slow-boot variants (713+ TIMER-SOFTIRQ-STALL, 795+
+  IRQ-OFF windows) starved the child phase; sc146 carries the applog
+  probe — the child's own hilog narration is the NEXT decisive datum
+  (daemon lines already readable through the interposer).
+- CURRENT PICTURE: the child forks, sets up its sandbox, waits on the
+  param-arena words, pokes the xpm stub, loads its own libs, then its
+  MAIN runner processes 2 events and idles forever inside
+  NoneIoWaiter::WaitForEvent — the OH task that should post event #3
+  never runs, and it is NOT any IPC (zero binder), NOT a thread (zero
+  clone attempts). Next: read the child's own logs (sc146+ applog),
+  then ChildMainThread::Start/MainThread::Init in
+  libappkit_native.z.so (0x180572/0x132628) against that narration.
+
+SESSION Q FOURTH LEG ADDENDUM (sc147-sc153, 02:0x-03:0x): ROOT CAUSE
+CHAIN NAMED — SA 501 (AppMgrService) never registers; children's attach
+cannot find AMS; the park is the downstream symptom.
+- sc147 (slow): "IPCObjectProxy: SendRequestInner: proxy is already
+  dead, handle:3 desc:*.IOsAccount" + PrintErrorDetailedInfo
+  error:32 (EPIPE) at hilog seq 495 — the OsAccount-wedge origin is a
+  DBINDER SESSION SOCKET dying mid-use early in boot (present since
+  sc94, matches the notes' "other proxy-death producers").
+- sc148/sc149/sc150 (applog interposer working, daemon excluded):
+  THE CHILDREN'S OWN NARRATION captured for the first time. Child
+  (systemui 1150) sequence: AppSpawnChild -> sandbox bind mounts ->
+  hooks 30/31 -> IPCThreadSkeleton/BinderConnector fd:6 ->
+  "MAINTHD3183 mainthread start" -> "MAINTHD2994 Start" -> proxies
+  IPCObjectProxy0/2/3 created, death recipients registered ->
+  "SA_CLIENT GetOnDemandSystemAbilityIds SendRequest succeed!" (THE
+  CHILD'S IPC WORKS — send AND reply) -> "GetSaWrap:Waiting for SA:501"
+  -> "CheckSystemAbility SA:501 isExist is 0" (*** SA 501 ABSENT ***)
+  -> "MAINTHD429 attach" -> "BinderInvoker HandleReply status:0" ->
+  "MAINTHD431 end" -> "RemoveDeathRecipient handle:2 desc:*.AppMgr"
+  -> EventRunner enter -> "MainThread:SetRunnerStarted" ->
+  "excute event taskCallback" -> SILENCE -> the NoneIoWaiter 1-year
+  park. AMS never sends ScheduleStartAbility because the child never
+  announced itself to a service IT CANNOT SEE.
+- SA 501 identity: /system/profile/foundation.json "name": 501,
+  "libpath": "libappms.z.so", "run-on-create": true — the
+  AppMgrService. APPMAPSRC PROVES libabilityms.z.so's exec segment is
+  mapped INTO THE APPSPAWN DAEMON at boot line ~829 (before any fork)
+  — the AMS code runs inside appspawn (its AMSI logs appear) — but
+  samgr's table says isExist=0: THE REGISTRATION NEVER LANDS.
+- The early-boot "kills" demystified: thead-exit code=-9 lines
+  (hiview/sdc OS_IPC threads) fire with ZERO SIGKILL-SEND (sys_kill)
+  and ZERO SIGKILL-TKILL (tgkill) prints — they are NOT kills: they
+  are OH IPC WORKER THREADS EXITING VOLUNTARILY with -9 after their
+  binder-wait fails (nr29=-4 EINTR + nr98=-11 EAGAIN in their tails)
+  — libdbinder's IPCWorkThread error exit. The thread churn follows
+  the session deaths; it is not a killer to hunt.
+- W3-RUNWAKE-REFUSED lines around the exits are mostly the BENIGN
+  refusal shapes (already-linked / already-on-cpu double wakes).
+- REMAINING KERNEL-SIDE QUESTION (for the next session, ONE probe
+  boot): does the appspawn daemon ever ISSUE the AddSystemAbility(501)
+  transaction (then samgr loses it — binder routing bug), or does the
+  daemon-side registration call fail before sending (its samgr
+  session/proxy dead — the EPIPE family)? The tightened daemon
+  applog filter (SystemAbility/501/amgr keywords, commit after
+  sc152) answers it directly: read the daemon's registration lines.
+  NOTE the sc153 kernel already carries it; slow boots starved the
+  child phase; reroll until a fast boot.
+- Probe/fix commits this leg (English, feature/samgr-callback):
+  3443bbb0, a5b6e5d3, 8d6cf997 (+rev5 512-ring/birth, rev6/7 applog,
+  SIGKILL-SEND/TKILL tracers, daemon keyword filter — see git log).
+  The paused-commit bugs in e2a53880 (4 missing semicolons + b-scope
+  in the APPPK12 block) were fixed to make the tree build again.
+- Boots: sc138-146 + sc147-153 (good variants: 139, 140, 142, 148,
+  149, 150; slow/wedged: 138, 141, 143, 145, 146, 147, 151, 152,
+  153-partial). MILESTONE (ohgpu launcher screenshot) NOT reached —
+  the park is now understood end-to-end at the OH level; the fix
+  belongs to whichever side the SA-501 registration dies on.
