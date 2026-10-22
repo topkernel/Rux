@@ -1822,6 +1822,30 @@ impl Task {
         let normal_prio = static_prio;
         let prio = normal_prio;
 
+        // sc130 (Session P): the sc125/128 latch fields MUST also be
+        // initialized on the clone path (new_task_at) — the struct-init
+        // in Task::new covers only the first construction; a cloned
+        // thread's Task was reading uninitialized memory (first
+        // thread-exit forensics printed garbage nrs).
+        ptr::write(
+            (ptr as usize + offset_of!(Task, last_fails)) as *mut [AtomicU32; 8],
+            core::array::from_fn(|_| AtomicU32::new(0)),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, last_fails_cur))
+                as *mut core::sync::atomic::AtomicUsize,
+            core::sync::atomic::AtomicUsize::new(0),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, last_calls)) as *mut [AtomicU32; 12],
+            core::array::from_fn(|_| AtomicU32::new(0)),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, last_calls_cur))
+                as *mut core::sync::atomic::AtomicUsize,
+            core::sync::atomic::AtomicUsize::new(0),
+        );
+
         // Initialize thread_info style fields (must be at beginning)
         ptr::write(
             (ptr as usize + offset_of!(Task, ti_flags)) as *mut AtomicU32,
