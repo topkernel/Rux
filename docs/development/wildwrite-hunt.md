@@ -1453,3 +1453,170 @@ MUST use raw SYS_brk calls (MF4/MF5 do).
   honoring is the remaining known placement divergence needing its own
   validation window; (4) main repo's toolchain/riscv64-rux-linux-musl
   symlink is still a self-loop — fix before any riscv64 probe build.
+
+## Sessions 16-17 (reconstructed from snapshot 2e2dd3bb — quota deaths,
+## no archive written at the time)
+
+- Chain stewardship through r30: r28 full-clean, r29 externally killed
+  at 15/45 (clean partial), r30 full-clean. Cumulative 0 WW-HIT r1-r30,
+  0 META-SMASH; r31 was killed with the user pause at ~10 min (armed,
+  0 hits — verdict confirmed by session 18 from the artifacts).
+- Landed on the snapshot (unreviewed at pause, reviewed by s18):
+  low-hint adoption in both arches' non-fixed mmap paths (hint rounded
+  down, honored anywhere in the user range when its gap is free;
+  ignored below MIN_MAP_ADDR / on the live brk span / past USER_END —
+  Linux arch_get_unmapped_area parity; also closes the unaligned-hint
+  Vma::new assert panic vector) and the sys_brk one-page-gap guard
+  (Linux find_vma_intersection(oldbrk, newbrk+PAGE) parity: growth is
+  refused when a VMA starts inside [ceil(oldbrk), newbrk+PAGE); a
+  VMA straddling the boundary is caught by add()'s overlap refusal —
+  same keep-old-brk outcome). Probe: test/mmapfix.c grew MF5b + MF10-13
+  (14 legs, MMF-PASS x14 both platforms per the handoff; re-validated
+  by session 18 after the merge).
+- render_service investigation started (run/rs-repro-boot.sh, KVM q35
+  4G, launcher-line oh-img-p private images + private userdata copy):
+  rs-repro1 captured the deterministic crash on this branch's kernel —
+  pid 690 rip 0x3fbf08ad30 (rep movsq memcpy), rdx=0x3a8, dst=rsp+0x478,
+  cr2=0x7ff00067c000, vma(cr2)=[0x7ff00067c000,0x7ff00067e000) flags=0x10
+  Anonymous off=0x35000 (launcher's sc114/116: off=0x19000 — same shape,
+  different boot layout).
+
+## Session 18 (continuation agent — render_service offset decode, main merge, PT-alloc panic attribution)
+
+### render_service crash decode (mm lane, from launcher Session O handoff)
+
+Ground truth collected across 8 repro boots (rs-repro1..10):
+
+- The fault VMA is a PROT_NONE ANONYMOUS remnant (flags=0x10 = PRIVATE
+  only — no R/W/X) whose nonzero `off` is bookkeeping-consistent: it is
+  EXACTLY the split arithmetic every split site carries (tail off =
+  old_off + (split_end - vma_start)) — the value measures distance from
+  the region's ORIGINAL mmap base, carried through carves. An anon VMA
+  never gets a nonzero offset at creation (mmap-anon path never calls
+  set_offset); the offset anomaly is a SYMPTOM of the region's carve
+  history, not itself a fault-path bug (no path consults offset for
+  Anonymous faults).
+- The OH stack-pool anatomy (decoded from syscall traces): per process,
+  508KB-8MB PROT_NONE anon reserves (PROTNONE-MAP), worker stacks carved
+  as bare RW anon MAP_FIXED mmaps inside them (0x7000-0xa000 class;
+  render_service showed a 0x37000-class carve implied by the crash
+  geometry), 2-page PROT_NONE mprotect guard toggles everywhere
+  (717 len=0x2000 in one 8-min window), and the big stacks (0x803000
+  reserves + 0x801000 RW mprotect at base+0x2000 = guard-below).
+- The crash geometry fully decoded: rsp sits at the top of an RW carve
+  [0x7ff000647000, 0x7ff00067c000); the memcpy (0x3a8 = sizeof(struct
+  pthread)-class context copy at thread start) targets [rsp+0x478,
+  +0x3a8) = exactly the 2-page remnant above the carve — i.e. the
+  runtime believed the stack region extended to 0x7ff00067e000 while
+  the kernel's carve ended 2 pages short (or a 2-page guard-toggle
+  mprotect landed at the live carve's top). Either way the thread dies
+  at its FIRST frame write — deterministic per boot layout.
+- Boots 3/5/6/7 with surgical traces (mprotect/carve prints as pr_err):
+  render_service WEDGED (no visible crash) — its OS_IPC threads park in
+  futex with "owner tid 2 NOT FOUND" (exited-while-holding shape), the
+  same park family launcher Session O decoded for OH app children. The
+  visible crash and the silent wedge are two faces of the same
+  thread-creation failure class.
+
+### The boot-killer: map_page PT-alloc panic (fake-OOM family)
+
+repro2 (loglevel=7), repro5, repro7, repro9 all died early (2-8 min) at
+`PANIC: map_page: failed to allocate PT table` (mmu_init.rs:1419 —
+`alloc_page_table().expect(...)`): the zone allocator returns None for
+an ORDER-0 page. alloc_pages has NO watermark gate — it returns None
+only when every free list is EMPTY, i.e. the zone is genuinely drained
+(or its pages leaked). This is the same family as the GNOME image's
+"page allocator reports OOM at ~342MB/2G" (main-session active goal)
+and the F12 clone heap-reserve drain (launcher line, bfc35fd2 probes,
+now merged). Trace/print volume shifts the timing (UART irqsave
+slowdown changes the allocation interleaving), which is why repro1 and
+repro8/10 survived. ACTION ITEM for the mm side (next session or the
+main fake-OOM effort): the `.expect` panic turns a recoverable
+allocation failure into a kernel panic — at minimum map_page should
+fail the mapping and deliver SIGBUS/OOM-kill the task like Linux, and
+the underlying zone-drain needs the fake-OOM accounting audit (the
+SEED-ALLOC-BAD-POP detector in zone.rs is the in-place tripwire).
+
+### Merge + verdict
+
+- Merged origin/main (e2b3e3a6 — the samgr-callback merge: binder
+  rework, TSC shift-32, mount preempt-off lock, taskdump 30s, clone-gate
+  refusal probes). mm/ untouched by main between 2e2dd3bb and e2b3e3a6.
+- Post-merge: repro8 (20 min) booted render_service with NO crash and
+  NO wedge; repro10 (30 min) reached ~14 min clean, then render_service
+  WEDGED in the OS_IPC futex-park family (binder-stall owing pid 537,
+  "owner tid 2 NOT FOUND") — the crash itself did not reproduce on the
+  merged kernel in ~50 min of exposure (repro9 died of the PT-alloc
+  panic first). The binder rework plausibly changed the trigger
+  context; the geometry decode above stands.
+- VERDICT: handed back to the launcher line with the decode — on
+  merged main the deterministic crash is not reproducing; if it
+  resurfaces, the capture recipe is: surgical pr_err traces (commit
+  2f54454b has them: MPROTECT-NONE all, ANONFIXED-MAP >=16KB or
+  PROT_NONE, PROTNONE-MAP >=64KB, MPROTECT-RW/FAIL, BIGMUNMAP) + the
+  nearvma dump (kept, below) — one crash boot then fully reconstructs
+  the carve sequence. The PT-alloc panic is the louder blocker on this
+  image family now.
+
+### Permanent forensic addition
+
+- USEGV-FOR (fatal-SIGSEGV forensics, arch/x86_64/trap.rs) now dumps
+  the VMA neighborhood around cr2 (+/-16MB window, capped at 12
+  entries) — the single vma(cr2) line could not show what borders a
+  mis-flagged region (the render_service decode needed exactly this).
+
+### Hint adoption + brk one-page gap: landed
+
+- The snapshot's WIP (sessions 16-17) reviewed this session: hint
+  semantics sound (round-down, MIN_MAP_ADDR/heap-span/USER_END
+  rejections, conflict fallback to find_free_area), brk guard sound
+  (find_vma_after(ceil(oldbrk)) can never return the heap VMA itself —
+  vma_start is always the existing heap VMA's END; straddling VMAs are
+  caught by add()'s overlap refusal).
+- Validated on the MERGED kernel (post origin/main e2b3e3a6):
+  **MMF-PASS x14 on BOTH x86_64 and riscv64** (MF1-9 + MF5b + MF10-13;
+  re-run on the final landing binary after the experiment prints were
+  reverted), **LVMAP-PASS** (exec/loader VMA regression), riscv64
+  in-kernel unit tests **1085/1088** (run/ww-s18-maketest.log; the 3
+  pre-existing config size asserts, byte-identical to the session
+  6/7/9/12/13/15 baseline). OH exposure: repro8/repro10 (~50 min) ran
+  the hint path live with no VMA-geometry regression.
+- The render_service trace recipe lives in commit 2f54454b (surgical
+  pr_err prints); revert to landing form done in the landing commit.
+
+### Chain stewardship
+
+- r31 (relaunched at claim after the pause): FULL budget clean —
+  0 WW-HIT / 0 heals. r32: killed at 15/45 by the ~11:30 infra sweep
+  (whole tree, clean partial); relaunched from r32 at 11:40 — that
+  full run clean too, driver self-advanced to r33. r33: FULL budget
+  clean (survived to completion before the next sweep), driver
+  self-advanced to r34; the ~13:3x sweep killed the wrapper and r34's
+  first minutes, relaunched from r34 at 13:40 (WW-ARMED 15 verified).
+  Three infra sweeps this session (~11:30, ~12:44, ~13:3x), each
+  taking the whole background-task set; the r31-r33 artifacts show the
+  claim-then-watch protocol keeps working across them. Cumulative:
+  **0 WW-HIT across r1-r33**, 0 META-SMASH.
+- The riscv64 unit-test run was also swept once at ~60 min (results
+  lost with the task's pipe); the rerun with file-captured output
+  completed: 1085/1088 baseline confirmed (above). Ops note: pipe a
+  long make test to a FILE, not a task pipe — a sweep kill loses the
+  pipe buffer but the file survives.
+
+### Session 18 close-out
+
+- Commits: 2f54454b (experiment traces — the capture recipe),
+  05119912 (origin/main merge), 8a1b8020 (landing: hint/brk/nearvma +
+  archive). Pushed via ssh.github.com:443 (2e2dd3bb..8a1b8020).
+- Open for the next session, in order: (1) the PT-alloc panic
+  (map_page .expect at mmu_init.rs:1419) is the loudest blocker on the
+  OH image family — recoverable-failure policy + the zone-drain
+  (fake-OOM accounting) audit; coordinate with the main session's
+  fake-OOM effort and the launcher line's F12 gate probe. (2) If the
+  render_service memcpy crash resurfaces, cherry-pick 2f54454b's
+  prints + nearvma dump and boot once — the decode in this session
+  pins the geometry; the remaining unknown is which syscall (carve
+  short vs top-guard mprotect vs hinted placement) produced it.
+  (3) Chain continues; watchset 15 + the hunt for the wild writer
+  stays the line's ultimate milestone.
+
