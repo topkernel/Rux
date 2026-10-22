@@ -1621,6 +1621,79 @@ pub fn sys_futex_handler(args: &[u64; 6]) -> i64 {
                         }
                         // SAFETY: t is the current task, in its own syscall.
                         unsafe { rwfz_stack_frames(t, "apppark", 12, 96) };
+                        // sc136 (Session Q): the park chain's caller frame
+                        // (raw ustack slot[12] 0x7ff0816ff8a8 family) sits
+                        // in a lib VMA never printed by the frames scan
+                        // (anon-filtered or fd-closed) — and sc135's only
+                        // slot-27 frame line was cut at every UART flush
+                        // boundary by interleaved hilog output. Dump the
+                        // child's whole lib-region VMA table + open fd
+                        // paths in COMPACT one-line-per-VMA form (short
+                        // lines survive flush boundaries) so every chain
+                        // slot resolves offline against the image libs.
+                        {
+                            use core::fmt::Write;
+                            if let Some(aspace) = tk.address_space() {
+                                let vmas = aspace.vma_read();
+                                for vm in vmas.iter() {
+                                    let s0 = vm.start().as_usize();
+                                    let e0 = vm.end().as_usize();
+                                    // lib region only: musl at 0x3fbf...,
+                                    // engine libs/arenas at 0x7ff0-0x7ffb.
+                                    let in_lib_region = (0x3f00000000..0x400000000)
+                                        .contains(&s0)
+                                        || (0x7ff000000000..0x7ffb00000000)
+                                            .contains(&s0);
+                                    if !in_lib_region {
+                                        continue;
+                                    }
+                                    let fd = vm.file_fd();
+                                    let path = if fd >= 0 {
+                                        tk.fdtable()
+                                            .get_file(fd as usize)
+                                            .map(|f| f.path())
+                                            .unwrap_or_else(|| alloc::string::String::from("?"))
+                                    } else {
+                                        alloc::string::String::from("-")
+                                    };
+                                    let mut v = alloc::string::String::new();
+                                    let _ = write!(
+                                        v,
+                                        "APPMAP {:?} {:#x}-{:#x} off={:#x} fd={} sz={:#x} {}",
+                                        comm,
+                                        s0,
+                                        e0,
+                                        vm.offset(),
+                                        fd,
+                                        vm.file_size() as usize,
+                                        path
+                                    );
+                                    crate::pr_warn!("{}", v);
+                                }
+                            }
+                            // Open fd table: names the connect/writev
+                            // socket (hilog? samgr session?) and any lib
+                            // fds still alive.
+                            let fdt = tk.fdtable();
+                            let mut shown = 0u32;
+                            for fd in 0..32u32 {
+                                if let Some(f) = fdt.get_file(fd as usize) {
+                                    let mut v = alloc::string::String::new();
+                                    let _ = write!(
+                                        v,
+                                        "APPFD {:?} fd={} {}",
+                                        comm,
+                                        fd,
+                                        f.path()
+                                    );
+                                    crate::pr_warn!("{}", v);
+                                    shown += 1;
+                                    if shown >= 16 {
+                                        break;
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }
