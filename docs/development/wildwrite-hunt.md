@@ -1861,3 +1861,101 @@ Consequences, in order of size:
    Cumulative **0 WW-HIT across r1-r38** partials, 0 META-SMASH.
 4. The wild-write engine itself remains uncaptured; the hunt's
    machinery (watchpoints + metawatch + WP/COW discipline) is all live.
+
+## Session 23 (continuation agent — filemap_fault alignment: the fake-OOM fix)
+
+### What landed (the session-22 "real fix" direction, implemented)
+
+Private file demand faults now map PAGE-CACHE pages directly instead of
+allocating a private copy per fault (Linux filemap_fault/do_read_fault/
+do_cow_fault semantics). Both x86_64 arms converted:
+
+- **Read/exec faults** (single-page + the fault-around window): pin the
+  cache frame (`get_phys`, on-miss warm the cache via a new Discard-
+  destination ext4 read that drives the existing readahead/fault-around
+  machinery with no bounce copy), map it RO — writable private VMAs get
+  the COW bit instead of W (Linux writenotify). Holes and non-ext4
+  files fall back to the private-copy fill, now with full page
+  bookkeeping. The frame is shared by every mapper and refault; the pin
+  (plus one descriptor ref) is owned by the PTE.
+- **Write faults** keep the read-into-fresh-copy fill and are now
+  flagged Anonymous+SwapBacked+mapcount+rmap+anon-LRU (the "rmap not
+  wired yet" arm — do_cow_fault parity).
+- **PTE ownership bit** `cow_flags::PCACHE` (bit 10, beside COW bit 9):
+  marks a PTE that owns a cache pin. Carried through mprotect rewrites
+  and PROT_NONE markers; dropped with `put_by_key` at unmap, mm
+  teardown, and the COW break; duplicated with `pin_by_key` by the fork
+  walk's copied leaves. A PCACHE leaf NEVER gets W in place — an
+  mprotect W-upgrade forces the COW bit so the first write copies.
+- **Pin protocol**: every PCACHE PTE owns exactly one CachedPage pin
+  (eviction guard — evict_one skips pinned entries, so a mapped frame
+  can never be freed under a PTE) plus one descriptor get_page
+  (balanced by unmap/teardown/COW put_page). `page_remove_rmap` skips
+  the LRU-unlink for PageType::PageCache frames (the file-LRU
+  membership and mapping/index fields belong to the cache — clobbering
+  either corrupts eviction). No page_record_mapping/set_index on cache
+  frames (index is the cache's BTreeMap key).
+- Lock order: pte -> page-cache inodes lock (fork pin, unmap/COW put);
+  fault fill phase pins BEFORE taking the pte lock (R73 intact). No
+  path nests inodes -> pte, no cycle.
+
+### Validation (x86_64)
+
+- faultaround_boot.py **FAW-PASS x6**, loader_vma_boot.py **LVMAP-PASS**,
+  mmapfix_boot.py **MMF-PASS x14** — through the new cache-mapping path
+  (the probes' rootfs is mkfs.ext4, so `is_ext4_file` gates in).
+- **fm1** (30-min rs-repro audit boot, dfx=taskdump,watchdog,periodic,
+  memwatch,ledger): FULL budget, 97,123 lines, **0 KERNPANIC /
+  0 ALLOCTHROW / 0 OOM events** (pt7 at the same wall-clock: TWO
+  oom-killer rounds; pt5 OOM'd at ~3 min). The ledger series line at
+  ~20 min: `memfree_pages=365037 pt_pages=28112 pagecache_pages=158051`
+  — 1.4 GiB FREE with a 617 MB shared cache, vs pt7's OOM moment
+  `memfree=0, other_used=539290`. **The drain is gone; the fake-OOM
+  does not occur on the reproducer that hit it twice in 30 minutes.**
+  0 REFUSED/SEED/dblfree (all MEMREFUSE counters zero), 0 MM-DROP-CTX,
+  0 META-SMASH, 0 FRAME-DOUBLE-MM; 1 USEGV-FOR victim at the baseline
+  1-per-boot rate (this boot: the render_service thread-creation crash
+  family, session-18 decode; pt7/pt8 each had 1 victim of the
+  errno-as-pointer shape).
+- **fm2** (45-min OH 0-panic gate, pt8 shape): FULL budget (timeout kill
+  as designed), 43,590 lines, **0 KERNPANIC / 0 ALLOCTHROW / 0 OOM /
+  0 kernel faults / 0 MM-DROP-CTX**; 51 legible ledger samples, last
+  memfree_pages=568032 (2.2 GiB free at boot-end). 4 USEGV-FOR victims
+  in 3 families, all documented service-side shapes (accountmgr
+  cr2=0x38 3-attempt restart loop; the render_service thread-creation
+  crash; OS_IPC errno-as-pointer garbage derefs) — no kernel-fault or
+  permission-kill family among them. **GATE PASSED.**
+- riscv64: in-kernel unit tests **1085/1088** (byte-identical failure
+  set — the 3 pre-existing config size asserts); minimal-rootfs smoke
+  to /bin/sh, 0 panics. The riscv64 fault TWIN keeps the old
+  private-copy shape for MAP_PRIVATE — port notes below.
+
+### Instrument note (dfx, not the fix)
+
+The MEMLEDGER 30-s series lines are heavily garbled on these boots (the
+raw-UART writes interleave mid-printk — one line survived legible in 30
+min; grep on clean "MEMLEDGER" text finds nothing, search
+"memfree_pages=" fragments instead), and the series fired far less
+often than its 30-s period. The single legible line carried the
+decisive numbers; the cadence question belongs to the dfx line.
+
+### Handoff notes
+
+1. **riscv64 twin port** (next mm session, GNOME fake-OOM is the same
+   family): mechanical — same helpers (the arch-neutral
+   put_by_key/pin_by_key/Discard-warm are in place), pick an RSW PTE
+   bit for PCACHE beside the riscv COW bit, and convert the twin fault
+   path + its mm_ops unmap/teardown/fork/COW/mprotect sites the same
+   way. The riscv MAP_SHARED ext4 alias (shared_file_fault_page)
+   already pins; MAP_PRIVATE is the gap.
+2. MAP_SHARED ext4 on x86_64 remains private-copy (pre-existing; the
+   riscv twin aliases the cache frame). If taken, map SHARED ext4
+   leaves W WITHOUT the cow bit and with a permanent fault-time pin
+   (riscv64 discipline) — but note there is no writeback for
+   mapped-cache dirty data, so writes through the mapping would be
+   lost on eviction; needs a coherence plan first.
+3. The session-22 open vmscan question stands but shrinks: lru_file
+   now contains the pinned working set; eviction skips pinned entries
+   by design (no file rmap yet — the deliberate minimal choice; mapped
+   cache pages are unevictable until unmapped, exactly like the
+   MAP_SHARED aliases).
