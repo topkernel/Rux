@@ -814,6 +814,19 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
             || comm.contains("dataability")
             || comm == "appspawn";
         if family {
+            // sc148: the DAEMON's own preload log storm (extension libs)
+            // ate the budget before any child forked. Skip the boot's
+            // original appspawn pid; forked children keep comm 'appspawn'
+            // pre-rename but carry different pids, so they still print.
+            static APPLOG_MAIN_PID: core::sync::atomic::AtomicU32 =
+                core::sync::atomic::AtomicU32::new(0);
+            let my_pid = crate::process::current_pid() as u32;
+            let main_pid = APPLOG_MAIN_PID.load(core::sync::atomic::Ordering::Relaxed);
+            if main_pid == 0 {
+                APPLOG_MAIN_PID.store(my_pid, core::sync::atomic::Ordering::Relaxed);
+            }
+            let is_daemon = main_pid != 0 && main_pid == my_pid;
+            if !is_daemon {
             static HI_N: core::sync::atomic::AtomicUsize =
                 core::sync::atomic::AtomicUsize::new(0);
             if HI_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 240 {
@@ -868,6 +881,7 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
                     }
                 }
             }
+            } // !is_daemon
         }
     }
 
