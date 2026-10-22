@@ -1651,19 +1651,23 @@ fn sys_mprotect_inner(args: [u64; 6]) -> i64 {
                         // whose COW bit is set — the write fault path owns
                         // the copy.
                         //
-                        // PCACHE (RSW bit 9, riscv64 filemap_fault port):
-                        // a mapping-ownership bit, preserved like COW —
-                        // dropping it would leak the page-cache pin
-                        // forever (frame unevictable). A cache-backed leaf
-                        // NEVER gains W in place: the frame is shared with
-                        // the page cache, so a W-upgrade diverts the first
-                        // write through COW (Linux writenotify; x86_64
-                        // mprotect_pte_range twin).
+                        // PCACHE/PCACHE_SHARED (RSW bits 9/10, riscv64
+                        // filemap_fault port): mapping-ownership bits,
+                        // preserved like COW — dropping them would leak
+                        // the page-cache pin forever (frame unevictable).
+                        // A PRIVATE cache-backed leaf NEVER gains W in
+                        // place: the frame is shared with the page cache,
+                        // so a W-upgrade diverts the first write through
+                        // COW (Linux writenotify; x86_64
+                        // mprotect_pte_range twin). A SHARED cache leaf
+                        // (PCACHE_SHARED) keeps W in place — its stores
+                        // must land in the cache frame (session 25).
                         let ppn = pte0.ppn();
                         let cow_bit =
                             pte0.bits() & crate::arch::mm::mm_ops::cow_flags::COW;
-                        let pcache_bit =
-                            pte0.bits() & crate::arch::mm::mm_ops::cow_flags::PCACHE;
+                        let pcache_bit = pte0.bits()
+                            & (crate::arch::mm::mm_ops::cow_flags::PCACHE
+                                | crate::arch::mm::mm_ops::cow_flags::PCACHE_SHARED);
                         let mut flags = new_flags;
                         if cow_bit != 0 {
                             flags |= cow_bit;
@@ -1671,7 +1675,11 @@ fn sys_mprotect_inner(args: [u64; 6]) -> i64 {
                         }
                         if pcache_bit != 0 {
                             flags |= pcache_bit;
-                            if flags & PageTableEntry::W != 0 {
+                            if flags & PageTableEntry::W != 0
+                                && pcache_bit
+                                    & crate::arch::mm::mm_ops::cow_flags::PCACHE_SHARED
+                                    == 0
+                            {
                                 flags |= crate::arch::mm::mm_ops::cow_flags::COW;
                                 flags &= !PageTableEntry::W;
                             }
@@ -1941,8 +1949,13 @@ pub fn sys_msync(args: [u64; 6]) -> i64 {
         let root_ppn = address_space.root_ppn();
         let end_addr = addr + length_aligned;
 
-        // Snapshot the overlapping shared file VMAs (start, end, offset).
-        let mut spans: alloc::vec::Vec<(usize, usize, usize)> = alloc::vec::Vec::new();
+        // Snapshot the overlapping shared file VMAs (span_lo, span_hi,
+        // vma_start, vma_off). span_* are clamped to the msync range;
+        // vma_start is the VMA's own base — file offsets must be computed
+        // against it (the old code used the clamped span start as the
+        // offset base, so an msync beginning mid-VMA wrote the WRONG file
+        // offsets in the PTE-walk writeback).
+        let mut spans: alloc::vec::Vec<(usize, usize, usize, usize)> = alloc::vec::Vec::new();
         {
             let vma_mgr = address_space.vma_read();
             for v in vma_mgr.iter() {
@@ -1956,20 +1969,44 @@ pub fn sys_msync(args: [u64; 6]) -> i64 {
                     spans.push((
                         v.start().as_usize().max(addr),
                         v.end().as_usize().min(end_addr),
+                        v.start().as_usize(),
                         v.offset(),
                     ));
                 }
             }
         }
 
-        for (v_start, v_end, v_off) in spans {
+        for (span_lo, span_hi, vma_start, v_off) in spans {
             // The pinned vm_file (Linux vm_file): demand faults keep
             // reading it after the mapping fd is closed.
-            let file = match address_space.get_vma_file(v_start)
-                .or_else(|| vma_file_by_range(&address_space, v_start)) {
+            let file = match address_space.get_vma_file(vma_start)
+                .or_else(|| vma_file_by_range(&address_space, vma_start)) {
                 Some(f) => f,
                 None => continue,
             };
+
+            // Session 25: SHARED ext4 mappings alias PAGE-CACHE frames
+            // (PCACHE PTEs) — their unflushed stores live in DIRTY cache
+            // entries, process-independently. Flush the dirty entries of
+            // the span's file range through the ext4 write machinery
+            // (collect/write/complete — the page-cache lock never crosses
+            // block I/O). The PTE walk below only remains for the
+            // private-copy fallback frames (non-ext4, populate failures).
+            {
+                let off_lo = v_off + (span_lo - vma_start);
+                let off_hi = v_off + (span_hi - vma_start);
+                if off_hi > off_lo {
+                    // SAFETY: inode cell written at open time, read-only.
+                    if let Some(vinode) = unsafe { &*file.inode.get() }.as_ref() {
+                        crate::fs::ext4::file::ext4_flush_dirty_inode(
+                            vinode,
+                            (off_lo / PAGE_SIZE) as u64,
+                            ((off_hi - 1) / PAGE_SIZE) as u64,
+                        );
+                    }
+                }
+            }
+
             // i_size clamp: Linux writeback never extends past EOF — bytes
             // a MAP_SHARED mapping holds beyond the file's end are
             // silently dropped at msync (LTP mmap01 greps for a pattern
@@ -1977,8 +2014,8 @@ pub fn sys_msync(args: [u64; 6]) -> i64 {
             let file_size = unsafe {
                 (*file.inode.get()).as_ref().map(|i| i.get_size()).unwrap_or(0)
             };
-            let mut cursor = v_start;
-            while cursor < v_end {
+            let mut cursor = span_lo;
+            while cursor < span_hi {
                 // SAFETY: root_ppn is a valid page-table root; the walk
                 // only reads PTEs, the write path uses the kernel's
                 // linear map of the physical page.
@@ -1996,6 +2033,17 @@ pub fn sys_msync(args: [u64; 6]) -> i64 {
                         if !pte.is_valid() {
                             break;
                         }
+                        // PCACHE leaves (SHARED ext4, session 25): their
+                        // writeback state is the page cache's dirty bit —
+                        // flushed by ext4_flush_dirty_pages above. Writing
+                        // the frame here as well would be redundant I/O
+                        // through the slow path.
+                        if pte.bits()
+                            & crate::arch::mm::mm_ops::cow_flags::PCACHE
+                            != 0
+                        {
+                            break;
+                        }
                         let is_leaf = pte.is_readable() || pte.is_writable() || pte.is_executable();
                         if level == 0 || is_leaf {
                             if pte.is_writable() {
@@ -2010,7 +2058,7 @@ pub fn sys_msync(args: [u64; 6]) -> i64 {
                         // linear map: nothing past EOF (see i_size clamp
                         // above), full pages otherwise.
                         let page_phys = p;
-                        let file_off = (v_off + (cursor - v_start)) as u64;
+                        let file_off = (v_off + (cursor - vma_start)) as u64;
                         if file_off >= file_size {
                             cursor += PAGE_SIZE as usize;
                             continue;

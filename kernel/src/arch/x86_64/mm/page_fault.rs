@@ -321,6 +321,7 @@ fn filemap_pin_cache_page(
     file: &crate::fs::file::File,
     file_offset: usize,
     effective_size: usize,
+    hole_as_zero: bool,
 ) -> Option<u64> {
     if file_offset >= effective_size {
         return None;
@@ -334,9 +335,29 @@ fn filemap_pin_cache_page(
         return Some(phys);
     }
     // Miss: warm the cache (ReadDst::Discard — no bounce copy), then pin.
-    if !crate::fs::ext4::file::ext4_fault_populate_cache(file, file_offset as u64) {
+    // Holes never enter the page cache through the READ path (the fill
+    // skips unallocated blocks and zero-fills the destination in place),
+    // so populate can "succeed" without the page existing. For the
+    // hole_as_zero arm (SHARED mappings, session 25) that must not fall
+    // back to a private zero copy — it would break mapper coherence (each
+    // mapper gets its own zeros) and nothing would persist. Insert an
+    // explicit ZERO page into the cache and alias THAT: one shared frame
+    // for every mapper, and the flush path allocates the on-disk block at
+    // msync/fsync time. Private arms keep the private-copy fill.
+    let populated =
+        crate::fs::ext4::file::ext4_fault_populate_cache(file, file_offset as u64);
+    if populated {
+        if let Some(phys) = cache.get_phys(fs_id, ino, page_index) {
+            return Some(phys);
+        }
+    }
+    if !hole_as_zero {
         return None;
     }
+    // SAFETY: same read-only inode resolution as above.
+    let inode = unsafe { &*file.inode.get() }.as_ref()?;
+    static ZERO_PAGE: [u8; 4096] = [0; 4096];
+    cache.insert(inode.fs_id, inode.ino as u64, page_index, 0, &ZERO_PAGE);
     cache.get_phys(fs_id, ino, page_index)
 }
 
@@ -621,16 +642,23 @@ pub fn handle_mm_fault(
                 }
                 let cow_bit =
                     raw & super::mm_ops::cow_flags::COW;
-                let pcache_bit = raw & super::mm_ops::cow_flags::PCACHE;
+                let pcache_bit = raw
+                    & (super::mm_ops::cow_flags::PCACHE
+                        | super::mm_ops::cow_flags::PCACHE_SHARED);
                 if cow_bit != 0 {
                     flags |= cow_bit;
                     flags &= !PageTableEntry::W;
                 }
                 if pcache_bit != 0 {
                     flags |= pcache_bit;
-                    if flags & PageTableEntry::W != 0 {
-                        // Cache-backed leaf: never W in place — divert the
-                        // first write through COW (see mprotect_pte_range).
+                    if flags & PageTableEntry::W != 0
+                        && pcache_bit & super::mm_ops::cow_flags::PCACHE_SHARED == 0
+                    {
+                        // Private cache-backed leaf: never W in place —
+                        // divert the first write through COW (see
+                        // mprotect_pte_range). SHARED cache leaves keep W:
+                        // their stores must land in the cache frame
+                        // (session 25).
                         flags |= super::mm_ops::cow_flags::COW;
                         flags &= !PageTableEntry::W;
                     }
@@ -795,6 +823,103 @@ pub fn handle_mm_fault(
                     }
                 }
             }
+
+            // MAP_SHARED ext4 (session 25): coherent write-through alias of
+            // the PAGE-CACHE frame — the PCACHE protocol's shared face. The
+            // frame is pinned exactly like the private arm (get_phys /
+            // Discard-warm) but mapped with W and NO COW bit: stores land
+            // directly in the cache frame, so every mapper of the file —
+            // across fork and across fresh mmaps — observes them (the old
+            // private-copy fallback gave each writer its own frame, mappers
+            // diverged, and nothing ever persisted). The PTE owns the pin
+            // (dropped at unmap like every PCACHE leaf — alias memory is
+            // bounded by live mappings, not forever); a W mapping marks its
+            // page dirty at install (conservative v1) so msync/fsync write
+            // it back through the ext4 machinery. Populate failure (I/O
+            // error) falls through to the private-copy fill below.
+            if vma_flags.contains(crate::mm::vma::VmaFlags::SHARED) {
+                let file = vm_file
+                    .clone()
+                    .or_else(|| unsafe { crate::fs::get_file_fd(vma_file_fd as usize) });
+                if let Some(file) = file
+                    .filter(|f| crate::fs::ext4::file::is_ext4_file(f.as_ref()))
+                {
+                    if let Some(cache_phys) = filemap_pin_cache_page(
+                        file.as_ref(),
+                        file_offset,
+                        effective_size,
+                        true,
+                    ) {
+                        // file_offset < effective_size held (SIGBUS gate).
+                        let mut sp_flags = PageTableEntry::P
+                            | PageTableEntry::A
+                            | PageTableEntry::D
+                            | PageTableEntry::NX
+                            | PageTableEntry::U
+                            | super::mm_ops::cow_flags::PCACHE;
+                        let want_w = vma_flags.is_writable();
+                        if want_w {
+                            sp_flags |=
+                                PageTableEntry::W | super::mm_ops::cow_flags::PCACHE_SHARED;
+                        }
+                        if vma_flags.is_executable() {
+                            sp_flags &= !PageTableEntry::NX;
+                        }
+                        let _sp_guard =
+                            crate::arch::mm::mm_ops::pte_lock_for(addr_space).lock();
+                        if unsafe {
+                            PageTableWalker::walk(root_ppn, fault_addr.bits() as u64)
+                        }
+                        .map_or(false, |(_ppn, bits)| {
+                            pte_counts_as_mapped(bits, fault_addr.bits() as u64)
+                        })
+                        {
+                            // Lost the race to an identical mapping: our
+                            // pin is surplus — release it before retrying.
+                            drop(_sp_guard);
+                            release_fill_page(cache_phys, true);
+                            return MmFaultResult::Handled;
+                        }
+                        // SAFETY: root_ppn valid; fault_addr page-aligned;
+                        // cache_phys is the pinned cache frame; flags built
+                        // from the VMA's permissions plus the PCACHE bits.
+                        unsafe {
+                            if !map_page(root_ppn, fault_addr, PhysAddr::new(cache_phys), sp_flags)
+                            {
+                                // PT allocation failure: the mapping never
+                                // happened — return the pin (anti-leak) and
+                                // deliver OOM (trap layer SIGKILLs).
+                                release_fill_page(cache_phys, true);
+                                return MmFaultResult::OutOfMemory;
+                            }
+                            crate::arch::cpu::invlpg(fault_addr.bits());
+                            // One descriptor ref + mapcount (dropped at
+                            // unmap like every PCACHE mapping); deliberately
+                            // NO rmap/set_index — the frame's eviction keys
+                            // belong to the page cache.
+                            filemap_bookkeep_mapped_cache_page(cache_phys);
+                        }
+                        if want_w {
+                            // Conservative v1 dirty mark, AFTER the mapping
+                            // is installed (a failed/raced attempt leaves no
+                            // phantom dirty): a writable mapping MAY write;
+                            // flushing an unwritten page is harmless I/O.
+                            // Cleared only when no mapping holds a pin
+                            // anymore (flush_done). pte -> inodes order,
+                            // same as the release sites.
+                            if let Some(inode) = unsafe { &*file.inode.get() }.as_ref() {
+                                crate::fs::page_cache::get_page_cache().mark_dirty(
+                                    inode.fs_id,
+                                    inode.ino as u64,
+                                    (file_offset / PAGE_SIZE_USIZE) as u64,
+                                );
+                            }
+                        }
+                        addr_space.add_rss(1);
+                        return MmFaultResult::Handled;
+                    }
+                }
+            }
     }
 
     // Fault-around (session 14; filemap_fault rework, session 23): on
@@ -813,8 +938,14 @@ pub fn handle_mm_fault(
     // Non-ext4 files and holes keep the private-copy fill (now with
     // proper page bookkeeping). Write faults opt out (Linux
     // do_fault_around parity — the single-page arm below COW-fills
-    // them), and the SHARED-devfs path above has already returned.
-    if vma_type == VmaType::FileBacked && vma_file_fd >= 0 && !is_write {
+    // them), the SHARED-devfs path and the SHARED ext4 PCACHE arm above
+    // have already returned, and SHARED VMAs never reach here at all
+    // (their W-in-place semantics belong to the dedicated arm).
+    if vma_type == VmaType::FileBacked
+        && vma_file_fd >= 0
+        && !is_write
+        && !vma_flags.contains(crate::mm::vma::VmaFlags::SHARED)
+    {
         let file = vm_file.clone().or_else(|| {
             // SAFETY: fd-table lookup by number for the CURRENT task,
             // same as the single-page fill arm; we are in that task's
@@ -846,15 +977,17 @@ pub fn handle_mm_fault(
             let mut from_cache = [false; FAULT_AROUND_PAGES];
             let mut filled = 0usize;
             let cacheable = crate::fs::ext4::file::is_ext4_file(file.as_ref());
-            for i in 0..n_pages {
-                let off_i = vma_offset + (fault_page - vma_start) + i * PAGE_SIZE_USIZE;
-                if cacheable {
-                    if let Some(p) = filemap_pin_cache_page(file.as_ref(), off_i, effective_size) {
-                        phys[filled] = p;
-                        from_cache[filled] = true;
-                        filled += 1;
-                        continue;
-                    }
+                for i in 0..n_pages {
+                    let off_i = vma_offset + (fault_page - vma_start) + i * PAGE_SIZE_USIZE;
+                    if cacheable {
+                        if let Some(p) =
+                            filemap_pin_cache_page(file.as_ref(), off_i, effective_size, false)
+                        {
+                            phys[filled] = p;
+                            from_cache[filled] = true;
+                            filled += 1;
+                            continue;
+                        }
                     // Hole or populate failure — the private zero-filled
                     // copy below (holes never enter the page cache).
                 }

@@ -107,6 +107,13 @@ struct CachedPage {
     /// can both reach the release for the same entry; the frame must be
     /// returned to the zone exactly once (the zone dblfree stream).
     released: core::sync::atomic::AtomicBool,
+    /// Session 25 (MAP_SHARED writeback): the frame holds stores from a
+    /// writable shared mapping that have NOT reached the file yet. Set
+    /// conservatively at W-map install time (a writable mapping MAY write;
+    /// flushing an unwritten page is harmless I/O), cleared by the
+    /// msync/fsync flush. Dirty entries skip eviction — their content
+    /// exists nowhere else but the frame.
+    dirty: core::sync::atomic::AtomicBool,
 }
 
 /// Per-inode page cache.
@@ -289,6 +296,7 @@ impl PageCache {
             ref_count: AtomicU32::new(0),
             invalidated: false,
             released: core::sync::atomic::AtomicBool::new(false),
+            dirty: core::sync::atomic::AtomicBool::new(false),
         });
         self.total_pages.fetch_add(1, Ordering::Relaxed);
     }
@@ -426,6 +434,7 @@ impl PageCache {
                         ref_count: AtomicU32::new(0),
                         invalidated: false,
                         released: core::sync::atomic::AtomicBool::new(false),
+                        dirty: core::sync::atomic::AtomicBool::new(false),
                     },
                 );
                 appended += 1;
@@ -651,6 +660,192 @@ impl PageCache {
         false
     }
 
+    // ==================== MAP_SHARED writeback (session 25) ====================
+    //
+    // Writable shared mappings alias the cache frame with W, so their
+    // stores land DIRECTLY in the frame (mapper coherence by construction).
+    // Persistence is then the cache's problem: the frame is marked dirty
+    // at W-map install (conservative v1), write(2) writes THROUGH pinned
+    // frames instead of invalidating them, and msync/fsync flush dirty
+    // frames back to the file. The inodes lock is NEVER held across the
+    // block I/O of a flush (R-WRITESTORM-1): collection and completion are
+    // separate locked passes, the flush itself runs pinned but unlocked.
+
+    /// Mark one cached page dirty (a writable shared mapping was just
+    /// installed on it). Conservative: a writable mapping MAY write, and
+    /// flushing an unwritten page is harmless I/O. Missing/invalidated
+    /// entries are ignored (nothing to persist).
+    pub fn mark_dirty(&self, fs_id: u64, ino: u64, page_index: u64) {
+        let key = cache_key(fs_id, ino);
+        let cache = self.inodes.lock();
+        if let Some(inode_cache) = cache.get(&key) {
+            if let Some(page) = inode_cache.pages.get(&page_index) {
+                if !page.invalidated {
+                    page.dirty.store(true, Ordering::Release);
+                }
+            }
+        }
+    }
+
+    /// Post-write(2) cache update: copy the written bytes INTO every fresh
+    /// cached frame overlapping [file_off, file_off+data.len()) and leave
+    /// the entries in place. This replaces the old whole-inode invalidate
+    /// on the write path:
+    /// - PINNED entries (shared or private mappings alias them) MUST be
+    ///   updated, never invalidated — a pinned-but-invalidated entry serves
+    ///   misses, so the next fault would re-read from disk into a SECOND
+    ///   frame while live mappings keep writing the old one: permanent
+    ///   mapper divergence. Updating the frame keeps every alias coherent
+    ///   (Linux writes into the page cache the same way).
+    /// - Unpinned entries stay cached and clean: the bytes just reached
+    ///   the file, so the frame matches disk — cache stays hot instead of
+    ///   being dropped (the old behavior re-fetched the whole inode on
+    ///   every write).
+    /// The dirty bit is deliberately untouched: a page holding UNFLUSHED
+    /// shared-mapping stores outside the written range stays dirty (its
+    /// data still exists only in the frame); a clean page written by
+    /// write(2) is now on disk, hence clean.
+    ///
+    /// memcpy only — no I/O, safe under the inodes lock.
+    pub fn writeback_update_range(&self, fs_id: u64, ino: u64, file_off: u64, data: &[u8]) {
+        if data.is_empty() {
+            return;
+        }
+        let key = cache_key(fs_id, ino);
+        let first_index = file_off / PAGE_SIZE as u64;
+        let last_index = (file_off + data.len() as u64 - 1) / PAGE_SIZE as u64;
+        let cache = self.inodes.lock();
+        let Some(inode_cache) = cache.get(&key) else {
+            return;
+        };
+        for idx in first_index..=last_index {
+            let Some(page) = inode_cache.pages.get(&idx) else {
+                continue;
+            };
+            if page.invalidated {
+                // Stale-pinned entry: serves misses, dies on its last put —
+                // leave it alone (its frame is invisible to new faults).
+                continue;
+            }
+            let page_off = (idx * PAGE_SIZE as u64).max(file_off);
+            let page_end = ((idx + 1) * PAGE_SIZE as u64).min(file_off + data.len() as u64);
+            if page_off >= page_end {
+                continue;
+            }
+            let src_skip = (page_off - file_off) as usize;
+            let dst = phys_to_virt_ptr(pfn_to_phys(page.pfn));
+            let n = (page_end - page_off) as usize;
+            // SAFETY: dst is the linear map of the entry's frame (PAGE_SIZE
+            // writable bytes); page_off%PAGE + n <= PAGE_SIZE by construction.
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    data.as_ptr().add(src_skip),
+                    dst.add((page_off % PAGE_SIZE as u64) as usize),
+                    n,
+                );
+            }
+        }
+    }
+
+    /// Collect up to `out.len()` dirty pages in [first_index, last_index]
+    /// (inclusive), PINNING each (ref++) so its frame cannot be freed
+    /// while the caller flushes it OUTSIDE the inodes lock. Fills `out`
+    /// with (page_index, pfn) pairs; returns the count collected. Callers
+    /// MUST balance every collected entry with `flush_done`.
+    pub fn collect_dirty_range(
+        &self,
+        fs_id: u64,
+        ino: u64,
+        first_index: u64,
+        last_index: u64,
+        out: &mut [(u64, u64)],
+    ) -> usize {
+        let key = cache_key(fs_id, ino);
+        if out.is_empty() {
+            return 0;
+        }
+        let mut n = 0usize;
+        let cache = self.inodes.lock();
+        let Some(inode_cache) = cache.get(&key) else {
+            return 0;
+        };
+        for (&idx, page) in inode_cache.pages.range(first_index..=last_index) {
+            if n == out.len() {
+                break;
+            }
+            if page.invalidated || !page.dirty.load(Ordering::Acquire) {
+                continue;
+            }
+            page.ref_count.fetch_add(1, Ordering::AcqRel);
+            out[n] = (idx, page.pfn as u64);
+            n += 1;
+        }
+        n
+    }
+
+    /// Complete a flush cycle for entries collected by `collect_dirty_range`:
+    /// drop the flush pin and clear the dirty bit ONLY when the count reached
+    /// zero — no live mapping remains that could store into the frame again
+    /// (every mapping holds a pin). Concurrent mapper stores racing the flush
+    /// are last-writer-wins (POSIX accepted for unsynchronized msync); while
+    /// a mapping is up the bit stays set and the next sync rewrites the
+    /// page — the conservative v1 substitute for hardware dirty tracking.
+    /// An entry invalidated meanwhile (truncate/unlink raced the flush) has
+    /// its data discarded instead.
+    pub fn flush_done(&self, fs_id: u64, ino: u64, entries: &[(u64, u64)]) {
+        if entries.is_empty() {
+            return;
+        }
+        let key = cache_key(fs_id, ino);
+        let mut cache = self.inodes.lock();
+        let Some(inode_cache) = cache.get_mut(&key) else {
+            return;
+        };
+        for &(page_index, _pfn) in entries {
+            if let Some(page) = inode_cache.pages.get_mut(&page_index) {
+                // Clear dirty ONLY when the flush put brought the pin
+                // count to zero — i.e. NO live mapping remains (every
+                // PCACHE mapping holds a pin). While any mapping is up,
+                // the page MAY receive new stores the flush did not see;
+                // keeping the dirty bit makes the next sync rewrite it
+                // (the conservative v1 substitute for hardware dirty
+                // tracking). The same rule keeps the entry dirty after
+                // the LAST unmap of an unsynced page: bounded, unevictable
+                // until the next sync on the file, and coherent for every
+                // reader through the frame (POSIX deferred-writeback
+                // latitude).
+                let mut clear_dirty = false;
+                let decremented = page
+                    .ref_count
+                    .fetch_update(Ordering::AcqRel, Ordering::Acquire, |v| {
+                        v.checked_sub(1)
+                    })
+                    .is_ok();
+                if decremented {
+                    let now = page.ref_count.load(Ordering::Acquire);
+                    clear_dirty = now == 0 && !page.invalidated;
+                }
+                if clear_dirty {
+                    page.dirty.store(false, Ordering::Release);
+                }
+                if decremented
+                    && page.ref_count.load(Ordering::Acquire) == 0
+                    && page.invalidated
+                    && !page.released.swap(true, Ordering::AcqRel)
+                {
+                    let pfn = page.pfn;
+                    inode_cache.pages.remove(&page_index);
+                    let page_desc = pfn_to_page_mut(pfn);
+                    if !page_desc.is_null() {
+                        unsafe { lru::page_remove_lru(&*page_desc); }
+                    }
+                    release_page_frame(pfn);
+                    self.total_pages.fetch_sub(1, Ordering::Relaxed);
+                }
+            }
+        }
+    }
+
     /// Invalidate all cached pages for a given inode.
     /// Called after writes or truncates to prevent stale data.
     ///
@@ -783,6 +978,10 @@ impl PageCache {
                     let evictable = if let Some(inode_cache) = cache.get(&ino) {
                         if let Some(cached) = inode_cache.pages.get(&page_index) {
                             cached.ref_count.load(Ordering::Acquire) == 0
+                                // Session 25: dirty frames hold unflushed
+                                // shared-mapping stores — evicting one
+                                // would lose the only copy of that data.
+                                && !cached.dirty.load(Ordering::Acquire)
                         } else {
                             // Page not in BTreeMap — stale, should clean up
                             true
@@ -831,7 +1030,9 @@ impl PageCache {
         for (_ino, inode_cache) in cache.iter_mut() {
             let mut to_remove = None;
             for (&page_idx, page) in inode_cache.pages.iter() {
-                if page.ref_count.load(Ordering::Acquire) == 0 {
+                if page.ref_count.load(Ordering::Acquire) == 0
+                    && !page.dirty.load(Ordering::Acquire)
+                {
                     // Also check Referenced flag
                     let page_desc = pfn_to_page_mut(page.pfn);
                     let skip = if !page_desc.is_null() {

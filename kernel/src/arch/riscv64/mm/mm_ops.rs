@@ -1807,10 +1807,23 @@ pub mod cow_flags {
     /// Carried through mprotect rewrites and PROT_NONE markers like COW;
     /// dropped (with the matching `page_cache::put_by_key`) at unmap, mm
     /// teardown, and the COW break; duplicated (with `pin_by_key` +
-    /// get_page) by the fork walk. Distinguishes pin-owning PRIVATE
-    /// mappings from MAP_SHARED cache aliases, whose fault-time pin is
-    /// deliberately permanent.
+    /// get_page) by the fork walk. Session 25: MAP_SHARED cache mappings
+    /// carry it TOO (with the PCACHE_SHARED bit below) — the riscv64
+    /// alias's PERMANENT pin is retired; every alias owns its pin, so
+    /// unmap bounds alias memory by live mappings instead of forever.
     pub const PCACHE: u64 = 1 << 9; // RSW bit 1
+
+    /// Session 25 (MAP_SHARED writeback): this PCACHE leaf belongs to a
+    /// MAP_SHARED VMA and maps the cache frame WRITABLE — stores go
+    /// straight into the frame (mapper coherence by construction) and a
+    /// W install marks the page dirty for msync/fsync writeback. Unlike a
+    /// private cache leaf, a W-upgrade (mprotect/marker re-present) must
+    /// grant W IN PLACE instead of forcing the COW bit: a COW copy would
+    /// fork a private frame, splitting the mapping from the cache and
+    /// from every other mapper. RSW bit 2. Carried through PTE rewrites
+    /// like PCACHE itself; fork's cow_exempt (SHARED VMAs) copies it
+    /// as-is.
+    pub const PCACHE_SHARED: u64 = 1 << 10; // RSW bit 2
 }
 
 /// Drop the page-cache pin owned by ONE mapping of a cache-backed frame

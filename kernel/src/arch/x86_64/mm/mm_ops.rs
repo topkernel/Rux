@@ -1818,9 +1818,20 @@ pub mod cow_flags {
     /// mprotect rewrites and PROT_NONE markers like COW; dropped (with the
     /// matching `page_cache::put_by_key`) at unmap, mm teardown, and the
     /// COW break; duplicated (with `pin_by_key` + get_page) by the fork
-    /// walk. Distinguishes pin-owning PRIVATE mappings from MAP_SHARED
-    /// cache aliases, whose fault-time pin is deliberately permanent.
+    /// walk. Session 25: MAP_SHARED cache mappings carry it TOO (with the
+    /// PCACHE_SHARED bit below) — the old riscv-style permanent pin is
+    /// gone; every alias owns its pin, so unmap bounds alias memory by
+    /// live mappings instead of forever.
     pub const PCACHE: u64 = 1 << 10;
+    /// Session 25 (MAP_SHARED writeback): this PCACHE leaf belongs to a
+    /// MAP_SHARED VMA and maps the cache frame WRITABLE — stores go
+    /// straight into the frame (mapper coherence by construction). Unlike
+    /// a private cache leaf, a W-upgrade (mprotect/marker re-present) must
+    /// grant W IN PLACE instead of forcing the COW bit: a COW copy would
+    /// fork a private frame, splitting the mapping from the cache and from
+    /// every other mapper. Carried (preserved) through PTE rewrites like
+    /// PCACHE itself; fork's cow_exempt (SHARED VMAs) copies it as-is.
+    pub const PCACHE_SHARED: u64 = 1 << 11;
 }
 
 /// Drop the page-cache pin owned by ONE mapping of a cache-backed frame
@@ -2542,11 +2553,12 @@ pub unsafe fn mprotect_pte_range(root_ppn: u64, start_virt: u64, num_pages: u64,
         // (restoring P) while preserving its PPN.
 
         let cow_bit = raw & cow_flags::COW;
-        // PCACHE is a mapping-ownership bit (this PTE owns a page-cache
-        // pin), not a protection bit — it must survive protection
-        // rewrites exactly like the COW bit, or a later unmap/COW would
-        // leak the pin (frame unevictable forever).
-        let pcache_bit = raw & cow_flags::PCACHE;
+        // PCACHE/PCACHE_SHARED are mapping-ownership bits (this PTE owns a
+        // page-cache pin; a SHARED leaf maps the frame writable), not
+        // protection bits — they must survive protection rewrites exactly
+        // like the COW bit, or a later unmap/COW would leak the pin (frame
+        // unevictable forever).
+        let pcache_bit = raw & (cow_flags::PCACHE | cow_flags::PCACHE_SHARED);
         let mut new_bits = (raw & PageTableEntry::PHYS_MASK_PUBLIC) | base;
         if cow_bit != 0 {
             new_bits |= cow_bit;
@@ -2554,14 +2566,23 @@ pub unsafe fn mprotect_pte_range(root_ppn: u64, start_virt: u64, num_pages: u64,
         }
         if pcache_bit != 0 {
             new_bits |= pcache_bit;
-            // A cache-backed leaf NEVER gets W in place: the frame is
-            // shared with the page cache (and possibly other mappers). A
-            // W-upgrade on a leaf that faulted under a read-only VMA
-            // (no COW bit yet) must divert the first write through COW
-            // like every other private file page (Linux writenotify).
-            if new_bits & PageTableEntry::W != 0 {
-                new_bits |= cow_flags::COW;
-                new_bits &= !PageTableEntry::W;
+            if pcache_bit & cow_flags::PCACHE_SHARED != 0 {
+                // SHARED cache leaf (session 25): W is granted IN PLACE —
+                // stores must land in the cache frame (every mapper + the
+                // writeback path observe them). A COW copy here would fork
+                // a private frame and silently detach this mapping from
+                // the file's shared state.
+            } else {
+                // A (private) cache-backed leaf NEVER gets W in place: the
+                // frame is shared with the page cache (and possibly other
+                // mappers). A W-upgrade on a leaf that faulted under a
+                // read-only VMA (no COW bit yet) must divert the first
+                // write through COW like every other private file page
+                // (Linux writenotify).
+                if new_bits & PageTableEntry::W != 0 {
+                    new_bits |= cow_flags::COW;
+                    new_bits &= !PageTableEntry::W;
+                }
             }
         }
         (*pt).set(a.pte_index() as usize, PageTableEntry::from_bits(new_bits));

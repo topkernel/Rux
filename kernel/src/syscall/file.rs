@@ -3630,6 +3630,15 @@ pub fn sys_fsync(args: SyscallArgs) -> i64 {
                             Some(p) => unsafe { &*(p as *const crate::fs::ext4::inode::Ext4Inode) },
                             None => return -(errno::EIO as i64),
                         };
+                        // Session 25: MAP_SHARED mappings store into
+                        // page-cache frames that only exist there until
+                        // flushed — ext4_sync_file alone would sync the
+                        // buffer cache while dirty FRAMES never reached
+                        // it. Flush every dirty cache entry of the inode
+                        // first (collect/write/complete; no page-cache
+                        // lock across I/O), then the normal data+journal
+                        // sync persists what the flush wrote.
+                        crate::fs::ext4::file::ext4_flush_dirty_inode(inode, 0, u64::MAX);
                         // SAFETY: both pointers were installed at file open
                         // time and live as long as the inode (Arc).
                         match unsafe { crate::fs::ext4::file::ext4_sync_file(&*fs_ptr, ext4_inode) } {
