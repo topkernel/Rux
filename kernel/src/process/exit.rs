@@ -550,7 +550,7 @@ pub fn do_exit(exit_code: i32) -> ! {
             }
             static NW: core::sync::atomic::AtomicUsize =
                 core::sync::atomic::AtomicUsize::new(0);
-            if NW.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 24 {
+            if NW.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 80 {
                 let nc = core::str::from_utf8((*current).comm())
                     .unwrap_or("")
                     .trim_end_matches('\0');
