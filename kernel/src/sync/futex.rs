@@ -1530,6 +1530,52 @@ pub fn sys_futex_handler(args: &[u64; 6]) -> i64 {
             }
         }
     }
+    // sc122 (Session P): the app-child park dump. The KILLDUMP path can
+    // never sample the park — SIGKILL lands right after the userspace DFX
+    // freeze-dump handshake, so every kill catches the child inside that
+    // handshake (getrusage loop / open), never the eternal wait. This
+    // hook dumps AT WAIT ENTRY, in the parking thread's own syscall
+    // context, for exactly the app-child shape: uaddr on the main-stack
+    // top pages (0x7ffffffd0000-0x7ffffffff000 — covers the observed
+    // c754/c7f4/cc54/cff4 sites with margin for frame variance) from an
+    // app comm, any val (2 seen so far, but do not re-filter on it).
+    // rwfz_stack_frames then prints rip/rsp/VMA + the RAW 24-word chain
+    // (musl callers + the runtime caller + the timespec at rsp+0x10)
+    // + file-backed frames. Budget 6 — the park repeats per child; the
+    // first dump already carries the chain.
+    if matches!(op & FUTEX_CMD_MASK, FUTEX_WAIT | FUTEX_WAIT_BITSET) {
+        if uaddr >= 0x7ffffffd0000 && uaddr < 0x7ffffffff000 {
+            if let Some(t) = crate::sched::current() {
+                let tk = unsafe { &*t };
+                let comm = core::str::from_utf8(&tk.comm()[..])
+                    .unwrap_or("")
+                    .trim_end_matches('\0');
+                let is_app = comm.contains("launcher")
+                    || comm.contains("settingsdata")
+                    || comm.contains("systemui")
+                    || comm.contains("dataability");
+                if is_app {
+                    static APPPARK_DUMPS: core::sync::atomic::AtomicU32 =
+                        core::sync::atomic::AtomicU32::new(0);
+                    let n =
+                        APPPARK_DUMPS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                    if n < 6 {
+                        crate::pr_warn!(
+                            "APP-PARK #{} tid {} comm='{}' uaddr={:#x} val={:#x} op={:#x}",
+                            n,
+                            tk.pid(),
+                            comm,
+                            uaddr,
+                            val,
+                            op
+                        );
+                        // SAFETY: t is the current task, in its own syscall.
+                        unsafe { rwfz_stack_frames(t, "apppark", 12, 96) };
+                    }
+                }
+            }
+        }
+    }
     // sc118 decode (Session P): every OH app child parks single-threaded
     // in FUTEX_WAIT on its own main-thread stack at the SAME site
     // (uaddr 0x7fffffffc754 / 0x7fffffffc7f4 — page 0x7fffffffc000; the
