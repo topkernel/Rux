@@ -68,6 +68,12 @@ pub fn fxdv_latch_devmgr(pid: u32) {
     }
 }
 
+// FXDV2: param-arena futex tracer budget (see the FXDV2 block in
+// do_futex — traces every futex op on the fixed-address /dev/__parameters__
+// window from any process).
+static FXDV2_N: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+
 
 pub const FUTEX_BITSET_MATCH_ANY: u32 = 0xffffffff;
 
@@ -1502,6 +1508,40 @@ pub fn do_futex(uaddr: usize, op: i32, val: u32, _timeout: u64, uaddr2: usize, _
                         );
                     }
                 }
+            }
+        }
+        // FXDV2 (sc184 follow-up): the PARAM-ARENA lock tracer. The OH
+        // parameter service's shared arena is mapped at the fixed base
+        // 0x7ff000000000 (/dev/__parameters__ + fixed-address anon pages —
+        // the ww-line's mmap-time naming). Its rwlock word at 0x7ff00002ec64
+        // froze with 16 readers in sc184 while writers from param_watcher,
+        // el5_filekey_man and storage_manager parked on it — a MAP_SHARED
+        // lock whose readers span processes. Trace EVERY futex op in the
+        // first 64K of the arena window from ANY process: the WAIT/WAKE
+        // lifecycle of the shared lock decides leaked-reader (WAKEs stop
+        // while the count is nonzero) vs lost-wake (WAKE issued, writer
+        // still parked) vs coherence drift (two processes observe
+        // different vals for the same word).
+        if (0x7ff0_0000_0000..0x7ff0_0010_0000).contains(&uaddr) {
+            use core::sync::atomic::Ordering::Relaxed as R2;
+            let n = FXDV2_N.fetch_add(1, R2);
+            if n < 500 {
+                crate::pr_warn!(
+                    "FXDV2 #{} tgid={} tid={} op={} uaddr={:#x} val={:#x} jif={}",
+                    n,
+                    crate::sched::current().map(|t| unsafe { (*t).tgid() }).unwrap_or(0),
+                    crate::sched::current().map(|t| unsafe { (*t).pid() }).unwrap_or(0),
+                    match cmd {
+                        FUTEX_WAIT => "WAIT",
+                        FUTEX_WAIT_BITSET => "WAITB",
+                        FUTEX_WAKE => "WAKE",
+                        FUTEX_REQUEUE | FUTEX_CMP_REQUEUE => "REQUEUE",
+                        _ => "other",
+                    },
+                    uaddr,
+                    val,
+                    crate::drivers::timer::get_jiffies(),
+                );
             }
         }
     }
