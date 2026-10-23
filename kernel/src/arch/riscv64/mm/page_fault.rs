@@ -493,6 +493,10 @@ pub fn handle_mm_fault(
     let vma_file_fd = vma.file_fd();
     let vma_file_size = vma.file_size();
     let vma_offset = vma.offset();
+    // sc181: bounds for the anonymous fault-around window (see the tail
+    // and anon_faultaround_forward).
+    let vma_start = vma.start().as_usize();
+    let vma_end = vma.end().as_usize();
 
     // Verify permissions
     let is_write = flags & FaultFlags::WRITE != 0;
@@ -1166,7 +1170,139 @@ pub fn handle_mm_fault(
     // resident page.
     addr_space.add_rss(1);
 
+    // sc181: forward fault-around for large anonymous VMAs (write faults
+    // only — see anon_faultaround_forward).
+    if vma_type == VmaType::Anonymous
+        && is_write
+        && !vma_flags.is_shared()
+        && vma_end - vma_start >= ANON_FAULTAROUND_MIN_VMA
+    {
+        anon_faultaround_forward(
+            addr_space,
+            root_ppn,
+            (fault_addr.as_usize() | 0xFFF) + 1,
+            vma_end,
+            pte_flags,
+        );
+    }
+
     MmFaultResult::Handled
+}
+
+// ==================== Anonymous Fault-Around (sc181) ====================
+
+/// sc181: forward fault-around window (pages) for anonymous write faults.
+const ANON_FAULTAROUND_PAGES: usize = 32;
+
+/// sc181: minimum VMA size that gets fault-around (small stacks/brk keep
+/// exact one-page semantics).
+const ANON_FAULTAROUND_MIN_VMA: usize = 1024 * 1024;
+
+/// sc181: install a FORWARD window of zero pages after a successful
+/// anonymous write fault.
+///
+/// hilogd's 10MB log ring (and every large arena) touched its pages one
+/// 4KB fault at a time — 2560 full trap/VMA-lookup/alloc/zero/map/rmap/
+/// LRU passes per ring cycle; that is the KILLDUMP stime burn behind the
+/// sc179/sc180 wedge (hilogd.server 91s of kernel time in 16 min, the
+/// VmaManager::find_mut page-by-page attribution). One trap now installs
+/// up to ANON_FAULTAROUND_PAGES pages, cutting the trap count ~32x for
+/// sequential writers.
+///
+/// Gated to stay conservative:
+/// - WRITE faults only (allocation intent; read-first anon patterns keep
+///   exact one-page semantics — mincore03's "untouched mmap reports 0
+///   resident" contract is untouched because NO fault means NO window),
+/// - VMAs >= ANON_FAULTAROUND_MIN_VMA (small stacks/heaps/brk unchanged),
+/// - forward-only, bounded by the VMA end and the window size, and it
+///   STOPS at the first already-mapped page (the sequential-writer model;
+///   a stack fault's forward window hits older frames and exits at once),
+/// - best-effort: an allocation failure or a lost race merely stops the
+///   window — the faulting page itself already succeeded.
+/// Every window page is zero-filled, SwapBacked, rmap/LRU-recorded and
+/// RSS-counted exactly like an individually faulted page (the Anonymous
+/// arm of the single-page path above). `faaround=0` on the kernel
+/// cmdline disables the whole mechanism.
+fn anon_faultaround_forward(
+    addr_space: &AddressSpace,
+    root_ppn: u64,
+    from_page: usize,
+    vma_end: usize,
+    pte_flags: u64,
+) {
+    if crate::cmdline::get_param("faaround").map(|v| v == "0").unwrap_or(false) {
+        return;
+    }
+    let window_end = (from_page + ANON_FAULTAROUND_PAGES * PAGE_SIZE_USIZE).min(vma_end);
+    let mut va = from_page;
+    while va < window_end {
+        // Stop at the first already-mapped page (see the doc comment).
+        if unsafe { PageTableWalker::walk(root_ppn, va as u64) }
+            .map_or(false, |(_p, bits)| pte_counts_as_mapped(bits, va as u64))
+        {
+            return;
+        }
+        let Some(phys) = alloc_user_phys_page() else {
+            return; // pressure: the window is best-effort
+        };
+        // SAFETY: freshly allocated page, exclusively owned here.
+        let page_ptr = phys_to_virt(PhysAddr::new(phys)).bits() as *mut u8;
+        unsafe { core::ptr::write_bytes(page_ptr, 0, PAGE_SIZE_USIZE) };
+
+        let _pte_guard = crate::arch::mm::mm_ops::PTE_MODIFY_LOCK.lock_irqsave();
+        // R7-C3 twin: re-check under the lock — a CLONE_VM sibling may
+        // have installed the page between the lock-free walk and here.
+        if unsafe { PageTableWalker::walk(root_ppn, va as u64) }
+            .map_or(false, |(_p, bits)| pte_counts_as_mapped(bits, va as u64))
+        {
+            drop(_pte_guard);
+            crate::mm::page_alloc::free_page(phys as usize);
+            return;
+        }
+        // SAFETY: root_ppn valid, va page-aligned, phys freshly allocated.
+        if unsafe { !map_page(root_ppn, VirtAddr::new(va as u64), PhysAddr::new(phys), pte_flags) }
+        {
+            drop(_pte_guard);
+            crate::mm::page_alloc::free_page(phys as usize);
+            return; // page-table allocation trouble — stop the window
+        }
+        // Address-specific TLB flush (same discipline as the single-page
+        // path).
+        unsafe {
+            core::arch::asm!(
+                "fence",
+                "sfence.vma {0}, zero",
+                "fence",
+                in(reg) va,
+                options(nostack, preserves_flags)
+            );
+        }
+        // Bookkeeping: the Anonymous arm of the single-page path.
+        {
+            use crate::mm::page_desc::{pfn_to_page_mut, PageFlag};
+            let page_pfn = (phys >> PAGE_SHIFT) as usize;
+            let page = pfn_to_page_mut(page_pfn);
+            if !page.is_null() {
+                // SAFETY: page from pfn_to_page_mut, null-checked; the
+                // frame is exclusively owned until the PTE install above.
+                unsafe {
+                    (*page).set_flag(PageFlag::Anonymous);
+                    (*page).set_flag(PageFlag::SwapBacked);
+                    (*page).set_index(va / PAGE_SIZE_USIZE);
+                    (*page).inc_mapcount();
+                    crate::mm::rmap::page_record_mapping(
+                        unsafe { &*page },
+                        addr_space as *const _ as usize,
+                        va,
+                    );
+                    crate::mm::lru::page_add_anon_lru(unsafe { &*page });
+                }
+            }
+        }
+        drop(_pte_guard);
+        addr_space.add_rss(1);
+        va += PAGE_SIZE_USIZE;
+    }
 }
 
 // ==================== Utility ====================
