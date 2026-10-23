@@ -2014,3 +2014,20 @@ sc160 CLOSED THE CRASH QUESTION and sc161 carries the fix pair.
   kernel-rip stall samples (inb/print path) remain the real Rux-side
   IRQ-off family - print caps reduce them; the user-rip family is
   weather. Foundation XCollie fragility under 1s tick loss is OH-side.
+
+SESSION R SECOND LEG sc161 POST-MORTEM (08:0x): the A+B kernel WEDGED
+the appspawn daemon and the STALLWATCH extension (sc160 probe) caught it
+in one boot — parked >90s right after "BrokerRegistration
+IInputMethodSystemAbility is already Register" (the sc160 sequence
+continues to "EventHandler Create eventHandler"), syscall ring a benign
+clock_gettime/write/writev/clone loop. ROOT CAUSE: my reg_tgid/tgid
+stamps used crate::process::current_pid(), which returns the PER-TASK
+pid (a worker thread's TID, not the tgid) — nodes registered by the
+daemon's WORKER threads were stamped reg_tgid=worker_tid, and the
+work_readable_by gate then rejected every reader (no thread has
+tgid==worker_tid) → the inbound transaction that created the node was
+never readable → the sender parked. FIX: use
+sched::current().tgid() (the form binder_open already uses) at both
+stamps. Committed 08:03 (binder.rs BinderThread::new + the parcel-fixup
+node creation); sc162 boots the corrected kernel (A + B + exit-reap +
+tgid fix).
