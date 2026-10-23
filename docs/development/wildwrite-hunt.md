@@ -2743,3 +2743,39 @@ GUARD-cluster points replaced by the 8 proven-quiet candidates —
 timekeeper, console-UART, and PHYS_RAM_BASE neighborhoods, with the
 whole guard cluster under the kernel RO trap beneath them.
 
+### Session 30 close-out
+
+- r53 (first full wildwatch round): FULL 2700 s clean — 78978 lines,
+  0 WW-HIT, 0 heals, 0 panics, tripwire armed the whole boot. r54
+  verified armed with the REPURPOSED 19-point set (points 1-8 = the
+  qs2 candidates) + wildwatch try 0 — the chain now runs at maximum
+  capture configuration: kernel RO trap over the whole 8 KB guard
+  cluster (rip-attributed KERNPANIC on any CPU store), 1 s canary
+  cadence (DMA-class detection), 19 hardware watchpoints on every
+  outside-cluster victim neighborhood, and the two-log stop check.
+- Cumulative: **0 WW-HIT across r1-r53**, 0 META-SMASH. The engine's
+  rate remains below one fire per 51+ armed boot-hours; the capture
+  surface is now ~128x larger on the cluster + 8 new statics, so the
+  per-boot-hour hit probability rises accordingly from r54 on.
+- Archive follow-ups from the handoff all closed this session: reclaim
+  writeback v2 (gate passed — merge-ready), close deferred flush
+  (folded into v2's reclaim design, documented s28), watchset room
+  (wildwatch + repurpose, above).
+- Chain ownership: driver root = ww-chain2.sh shell (PID tree in
+  run/ww-s30-proctree2.txt; kill the driver root FIRST, then the round
+  QEMU). Ops notes: bash reads scripts incrementally — never edit a
+  script a live driver executes (use the stop-file handoff + successor
+  script); the qs1-style inline probe drivers were saved as durable
+  scripts (ww-qs2.sh) this session.
+- Commits this session (all pushed via ssh.github.com:443): 9004ebc1
+  (wildwatch on chain + serial capture markers), 4097d56f (stop-file
+  fix), 7f8b2a6a (qs2 probe), 3415f54c (r52/v2soak3/r53 archive),
+  f957865f (watchset repurpose deployment), + this close-out.
+- Next for the line: (1) chain continues — any WW-HIT /
+  WILDWATCH-CANARY / scribble-heal / KERNPANIC marker auto-stops it
+  with the evidence in place; (2) 4fb5d480 rides to main at the next
+  merge window (all gates green); (3) if long stretches stay silent,
+  the remaining escalation is load-profile diversity (fire6-style sdc
+  cycles) rather than more statics — every confirmed victim geometry
+  is now instrumented.
+
