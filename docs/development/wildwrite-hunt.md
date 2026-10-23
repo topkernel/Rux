@@ -2422,4 +2422,132 @@ reachable).
   unclaimed follow-ups from the archive: reclaim-time writeback (v2),
   close(2) deferred-flush divergence note, watchset room beyond 15.
 
+## Session 28 (continuation agent — watchset to 19, reclaim-time dirty writeback v2)
+
+### Inheritance reconstruction
+
+- Base: fast-forward merge of main (4496f7fb — main took the session-27
+  close-out via merge; our HEAD was already its parent). Clean tree.
+- The handoff's "r46 died with session 27" was STALE for the SIXTH time:
+  the whole tree was alive at claim (wrapper 2628474 → chain 2628485 →
+  hunt 2628490 → qemu 2628491), r46 armed with the 15-point set,
+  storming 5 min into its budget. Claimed as-is; no restart.
+
+### Watchset 15 → 19: the full timekeeper neighborhood (commit 5b1995f0)
+
+- Writer analysis (source-grounded): TSC_ACTIVE (:212/:381),
+  TSC_CONTINUITY_OFFSET (:211/:380), TSC_BASE (:210/:379) store only
+  inside the SAME HPET-gated calibration blocks that store TSC_MULT
+  (:209/:378) — dead code on these boots (hpet::ready() since second 1;
+  TSC_MULT has zero legit hits across r19-r45). JIFFIES_BASE is written
+  once by the first-tick compare_exchange (x86_64.rs:433-436), long
+  before the +20s gdb attach. The hot JIFFIES qword (0x8f98, CAS/fetch
+  per tick) stays excluded — 8-byte watchpoint granularity separates it
+  cleanly.
+- ww-cap3 (bare boot, port 12403, own PIDs): 20 SIMULTANEOUS hw
+  watchpoints arm with 20/20 confirmations and no insertion errors;
+  position 20 (JIFFIES) FIRED 3629x in 40s with the writer symbolized
+  (atomic_compare_exchange_weak = the increment_jiffies CAS loop) —
+  capacity >= 20 with firing at the deepest position, retroactively
+  validating the 15-point set's positions too. 0 hits on the 19 quiet
+  candidates.
+- Deployed from r47: the full 0xffffffff80be8f80-8fb0 stretch
+  (TSC_ACTIVE, JIFFIES_BASE, TSC_CONT_OFF, JIFFIES, TSC_BASE, TSC_MULT)
+  is now tiled except the hot JIFFIES qword — every confirmed victim
+  geometry (b77/wt1 wide-smash fingerprint included) sits under
+  watchpoints. r47 verified WW-ARMED 19, GUARD unchanged (frozen pair
+  untouched).
+
+### Chain stewardship
+
+- r46 verdict: clean run — 66816 serial lines, wakes 8.32M,
+  strand_max 10308ms (the healthy 9.5-10.5s class), ticks [100,100],
+  0 KERNPANIC/ALLOCTHROW, 0 WW-HIT, 0 heals. Ended at ~32/45 min by an
+  external timeout kill (rc=124 mid-storm, no teardown lines — the
+  sweep class; the driver self-advanced). Cumulative: **0 WW-HIT across
+  r1-r46**, 0 META-SMASH.
+- r47+ rides the 19-point set (verified armed).
+- Ops: the ~12:52 user pause produced the automatic wip snapshot commit
+  (24d43e53) of this session's in-flight v2 work — the established
+  pause-snapshot mechanism; work continued on top.
+
+### Reclaim-time dirty writeback v2 LANDED (the session-24/27 follow-up)
+
+The abandonment shape: a writable MAP_SHARED mapping stored, munmap'ed,
+never msynced leaves every page a DIRTY, unreferenced cache entry that
+evict_one must skip (evicting loses the only copy) — permanently
+unevictable, invisible to reclaim, bounded only by "a later open+fsync
+on the same file". The close(2)-deferred-flush divergence item folds
+into this one: POSIX explicitly permits deferred writeback past close
+(Linux does not flush on close either); the REAL gap was that no path
+ever flushed without an explicit sync. Assessment: document, don't bolt
+blocking I/O onto close(2) (that would diverge from Linux in the other
+direction); fix the gap where Linux fixes it — in reclaim.
+
+Implementation (page_cache.rs + vmscan.rs, arch-neutral):
+
+- `InodePageCache` records its raw `(fs_id, ino)` (cache_key is a
+  non-reversible hash; fs_id IS the Ext4FileSystem pointer, so the raw
+  pair resolves everything).
+- `PageCache::shrink_reclaim(nr)`: clean pass first (plain shrink), then
+  on any SHORTFALL — deliberately not only at the exhausted wall, so the
+  flush's own ext4/bio allocations still have memory to allocate (the
+  Linux dirty-threshold insight; flushing only at the wall would make
+  every journal/buffer alloc fail and the pages stay dirty forever) —
+  collect up to 2 inode windows of 16 dirty unreferenced pages under the
+  inodes lock, DROP the lock, resolve a live VFS Inode via
+  `icache_lookup(ino, fs_id)` (Inode.fs_id == the fs pointer for ext4 —
+  the same liveness contract sys_fsync uses), call the EXISTING
+  ext4_flush_dirty_inode on the window, loop (the next clean pass evicts
+  what the flush cleaned). Bounded: 2 inodes x 16 pages x 4 rounds per
+  call; a WRITEBACK_GUARD AtomicBool degrades nested re-entry (reclaim
+  inside the ext4 write path's own allocations) to clean-only.
+- vmscan shrink_inactive_list switches to shrink_reclaim — direct
+  reclaim only. That path is task context, spinlock-free, globally
+  serialized by IN_DIRECT_RECLAIM, and ALREADY performs blocking swap
+  I/O (reclaim_anonymous_pages), so blocking flush I/O changes no
+  context contract. The mmu_init PT-alloc retry (per-mm PteLock held)
+  KEEPS plain shrink() — the session-19 deadlock argument.
+- An inode missing from icache is skipped (stuck as before, bounded; a
+  future open() re-caches it). A mapper racing the flush keeps the page
+  dirty (flush_done pin rule) — rewritten next round, same POSIX
+  last-writer-wins latitude as concurrent msync.
+
+### reclaimwb A/B (the v2 validation, x86_64, q35/TCG/smp2/2G)
+
+New probe test/reclaimwb.c + reclaimwb_boot.py: ftruncate a 256MB file,
+mmap MAP_SHARED RW, store a pattern every 64 words, munmap, close —
+NO msync/fsync anywhere — then a sacrificial child touches anonymous
+memory until it dies at the wall (survivable pagefault-OOM path),
+reporting progress every 64MB. Discriminator = how far the child got +
+the OOM-moment census (no knife-edge RAM arithmetic).
+
+| kernel | child reached | census at OOM | panics |
+|---|---|---|---|
+| control 1fd06f7b (pre-v2) | 640MB | pagecache_pages=65536 (= the 256MB, dirty-stuck), anon=178755 | 0 |
+| v2 e5038877 | 896MB | pagecache_pages=0, lru_file=0, dirty=0, anon=244164 | 0 |
+
+The sums reconcile exactly: control anon 178755 + pagecache 65536 =
+244291 ≈ v2 anon 244164 = the zone's true ceiling (~959MB managed; 2G
+guest minus the 1GiB kernel-heap reservation). v2 converted the entire
+abandoned dirty region into reclaimable memory; both worlds survived
+the OOM-kill cleanly (0 panics; the v1 shape is the pre-existing
+documented behavior, not a regression). Serial diagnostics during the
+pressure grind (TIMER-SOFTIRQ-STALL ~1-4s, IRQ-OFF-WINDOW) symbolize to
+the known idle/softirq classes (cpu::wfi, enable_irq) — no new
+irq-off pathology from the flush path.
+
+### Regression legs (all green)
+
+- x86_64 (e5038877): FMAP PASS both passes (FS1-FS8 + FSP two-boot
+  persistence through the new shrink_reclaim path).
+- riscv64 (50fc6af5): in-kernel unit tests **1085/1088** (run/
+  ww-s28-rv-test.log — byte-identical failure set: the 3 pre-existing
+  config size asserts); FMAP PASS both passes; MMF-PASS (serial-verified;
+  the driver poller missed the poweroff race, serial has 0 FAILs);
+  reclaimwb PASS — the 128MB dirty region flushed, the 600MB child
+  target COMPLETED (1G guest had room once the dirty pages returned).
+- make-test QEMU reaped after results were file-captured (post-summary
+  panic class, own PID after cwd verification); chain r47 untouched.
+
 

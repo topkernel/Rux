@@ -1,0 +1,88 @@
+[boot] qemu pid=2637877 serial=/tmp/reclaimwb-work/reclaimwb-riscv64-serial.log
+[boot] verdict: PASS
+[boot] child reached: 576MB
+RWB child: 512MB
+
+PREEMPT-LEAK cpu=0000000000000001 pid=0000000000000000 pc=0000000000010000 held_nonzero_for=0000000000003480jiffies rip=ffffffff801ab46c
+
+PREEMPT-LEAK cpu=0000000000000001 pid=0000000000000000 pc=0000000000010000 held_nonzero_for=0000000000003494jiffies rip=ffffffff801ab46c
+
+PREEMPT-LEAK cpu=0000000000000001 pid=0000000000000000 pc=0000000000010000 held_nonzero_for=00000000000034a8jiffies rip=ffffffff801ab46c
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/1 hres_next=1844674407235264ms
+WW2: si_runs=200 si_busy=4ms ticks=[0,0] vec=[0,200,0,0,0,0,0,0,200,0]
+WW3: grq=0 cfs=0 idle=0x2 nr=1 cpu0=(pid=304 st=0x0 pc=256) cpu1=(pid=0 st=0x0 pc=65536)
+WW: wakes=13456 picks=13454 avg_run=0ms stranded=4 strand_max=90ms
+
+PREEMPT-LEAK cpu=0000000000000001 pid=0000000000000000 pc=0000000000010000 held_nonzero_for=00000000000034bcjiffies rip=ffffffff801ab46c
+
+PREEMPT-LEAK cpu=0000000000000000 pid=0000000000000130 pc=0000000000010000 held_nonzero_for=0000000000000386jiffies rip=0000002aaaaaa8d6
+RWB child: 576MB
+
+PREEMPT-LEAK cpu=0000000000000001 pid=0000000000000000 pc=0000000000010000 held_nonzero_for=00000000000034e4jiffies rip=ffffffff801ab46c
+
+PREEMPT-LEAK cpu=0000000000000001 pid=0000000000000000 pc=0000000000010000 held_nonzero_for=00000000000034f8jiffies rip=ffffffff801ab46c
+RWB child: anon target complete
+
+PREEMPT-LEAK cpu=0000000000000001 pid=0000000000000000 pc=0000000000010000 held_nonzero_for=000000000000350cjiffies rip=ffffffff801ab46c
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/1 hres_next=1844674407234264ms
+WW2: si_runs=181 si_busy=4ms ticks=[0,0] vec=[0,181,0,0,0,0,0,0,181,0]
+WW3: grq=0 cfs=0 idle=0x2 nr=2 cpu0=(pid=304 st=0x0 pc=2) cpu1=(pid=0 st=0x0 pc=256)
+WW: wakes=13537 picks=13535 avg_run=0ms stranded=4 strand_max=90ms
+
+PREEMPT-LEAK cpu=0000000000000001 pid=0000000000000000 pc=0000000000010000 held_nonzero_for=0000000000003520jiffies rip=ffffffff801ab46c
+
+PREEMPT-LEAK cpu=0000000000000001 pid=0000000000000000 pc=0000000000010000 held_nonzero_for=0000000000003534jiffies rip=ffffffff801ab46c
+
+PREEMPT-LEAK cpu=0000000000000001 pid=0000000000000000 pc=0000000000010000 held_nonzero_for=0000000000003548jiffies rip=ffffffff801ab46c
+
+PREEMPT-LEAK cpu=0000000000000001 pid=0000000000000000 pc=0000000000010000 held_nonzero_for=000000000000355cjiffies rip=ffffffff801ab46c
+WW: TIMER-SOFTIRQ-STALL cpu=0 age=1000ms tick_age=0ms n=13532 pid=304 pc=0x2 rip=0x3fbf01b878
+
+PREEMPT-LEAK cpu=0000000000000001 pid=0000000000000000 pc=0000000000010000 held_nonzero_for=0000000000003570jiffies rip=ffffffff801ab46c
+WW: TIMER-SOFTIRQ-STALL cpu=0 age=1100ms tick_age=0ms n=13532 pid=304 pc=0x2 rip=0x3fbf01b878
+WW: TIMER-SOFTIRQ-STALL cpu=0 age=1200ms tick_age=0ms n=13532 pid=304 pc=0x1 rip=0x3fbf01b878
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/1 hres_next=1844674407233264ms
+WW2: si_runs=100 si_busy=3ms ticks=[0,0] vec=[0,100,0,0,0,0,0,0,100,0]
+WW3: grq=0 cfs=0 idle=0x2 nr=2 cpu0=(pid=304 st=0x0 pc=2) cpu1=(pid=0 st=0x0 pc=256)
+WW: wakes=13537 picks=13535 avg_run=0ms stranded=4 strand_max=90ms
+
+PREEMPT-LEAK cpu=0000000000000001 pid=0000000000000000 pc=0000000000010000 held_nonzero_for=0000000000003584jiffies rip=ffffffff801ab46c
+WW: TIMER-SOFTIRQ-STALL cpu=0 age=1299ms tick_age=0ms n=13532 pid=304 pc=0x1 rip=0x3fbf01b878
+WW: TIMER-SOFTIRQ-STALL cpu=0 age=1400ms tick_age=0ms n=13532 pid=304 pc=0x1 rip=0x3fbf01b878
+
+PREEMPT-LEAK cpu=0000000000000001 pid=0000000000000000 pc=0000000000010000 held_nonzero_for=0000000000003598jiffies rip=ffffffff801ab46c
+WW: TIMER-SOFTIRQ-STALL cpu=0 age=1500ms tick_age=0ms n=13532 pid=304 pc=0x1 rip=0x3fbf01b878
+WW: TIMER-SOFTIRQ-STALL cpu=0 age=1600ms tick_age=0ms n=13532 pid=304 pc=0x2 rip=0x3fbf01b878
+
+PREEMPT-LEAK cpu=0000000000000001 pid=0000000000000000 pc=0000000000010000 held_nonzero_for=00000000000035acjiffies rip=ffffffff801ab46c
+WW: TIMER-SOFTIRQ-STALL cpu=0 age=1699ms tick_age=0ms n=13532 pid=304 pc=0x2 rip=0x3fbf01b878
+WW: TIMER-SOFTIRQ-STALL cpu=0 age=1800ms tick_age=0ms n=13532 pid=304 pc=0x2 rip=0x3fbf01b878
+
+PREEMPT-LEAK cpu=0000000000000001 pid=0000000000000000 pc=0000000000010000 held_nonzero_for=00000000000035c0jiffies rip=ffffffff801ab46c
+WW: TIMER-SOFTIRQ-STALL cpu=0 age=1899ms tick_age=0ms n=13532 pid=304 pc=0x2 rip=0x3fbf01b878
+WW: TIMER-SOFTIRQ-STALL cpu=0 age=2000ms tick_age=0ms n=13532 pid=304 pc=0x1 rip=0x3fbf01b878
+
+PREEMPT-LEAK cpu=0000000000000001 pid=0000000000000000 pc=0000000000010000 held_nonzero_for=00000000000035d4jiffies rip=ffffffff801ab46c
+WW: TIMER-SOFTIRQ-STALL cpu=0 age=2099ms tick_age=0ms n=13532 pid=304 pc=0x2 rip=0x3fbf01b878
+WW: TIMER-SOFTIRQ-STALL cpu=0 age=2200ms tick_age=0ms n=13532 pid=304 pc=0x1 rip=0x3fbf01b878
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/1 hres_next=1844674407232264ms
+WW2: si_runs=100 si_busy=4ms ticks=[0,0] vec=[0,100,0,0,0,0,0,0,100,0]
+WW3: grq=0 cfs=0 idle=0x2 nr=2 cpu0=(pid=304 st=0x0 pc=2) cpu1=(pid=0 st=0x0 pc=256)
+WW: wakes=13537 picks=13535 avg_run=0ms stranded=4 strand_max=90ms
+
+PREEMPT-LEAK cpu=0000000000000001 pid=0000000000000000 pc=0000000000010000 held_nonzero_for=00000000000035e8jiffies rip=ffffffff801ab46c
+WW: TIMER-SOFTIRQ-STALL cpu=0 age=2299ms tick_age=0ms n=13532 pid=304 pc=0x2 rip=0x3fbf01b878
+WW: TIMER-SOFTIRQ-STALL cpu=0 age=2400ms tick_age=0ms n=13532 pid=304 pc=0x1 rip=0x3fbf01b878
+
+PREEMPT-LEAK cpu=0000000000000001 pid=0000000000000000 pc=0000000000010000 held_nonzero_for=00000000000035fcjiffies rip=ffffffff801ab46c
+WW: TIMER-SOFTIRQ-STALL cpu=0 age=2499ms tick_age=0ms n=13532 pid=304 pc=0x1 rip=0x3fbf01b878
+WW: TIMER-SOFTIRQ-STALL cpu=0 age=2600ms tick_age=0ms n=13532 pid=304 pc=0x1 rip=0x3fbf01b878
+W3-RUNWAKE-REFUSED pid=304 state=0x0 linked=false curr_on=true on_cpu=true pk=1 cpu=0
+SFDDBG: send->pid1 sig=17 disp=IGN blocked=false pending=0x0
+RWB-PRESSURE-COMPLETE
+RWB-DONE
+W3-RUNWAKE-REFUSED pid=1 state=0x0 linked=false curr_on=true on_cpu=true pk=1 cpu=0
+kernel: init exited — powering system down
+reboot: syncing filesystems
+reboot: Power down
+rc=0

@@ -1,0 +1,90 @@
+[boot] qemu pid=2634239 serial=/tmp/reclaimwb-work/reclaimwb-x86_64-serial.log
+[boot] verdict: OOMKILL
+[boot] child reached: 896MB
+44674407083341ms
+WW2: si_runs=1557 si_busy=0ms ticks=[100,100] vec=[0,200,0,0,1357,0,0,0,200,0]
+WW3: grq=0 cfs=0 idle=0x1 nr=0 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=304 st=0x0 pc=256)
+WW: wakes=54180 picks=53634 avg_run=0ms stranded=11 strand_max=1001ms
+
+WW: IRQ-OFF-WINDOW cpu=0000000000000000 age=00000000000003e9ms pid=0000000000000000 pc=0000000000010000 rip=ffffffff804eaa25 rsp=ffff88807c3fec08 . ffffffff80429ee1 . . . . . . . . . .
+W3-RUNWAKE-REFUSED pid=304 state=0x0 linked=false curr_on=true on_cpu=true pk=1 cpu=1
+W3-RUNWAKE-REFUSED pid=304 state=0x0 linked=false curr_on=true on_cpu=true pk=1 cpu=1
+pagefault: Out of memory at 0x7ff03b9bf000
+==== MEMLEDGER @ oom: pagefault OOM ====
+MEMLEDGER-COMPACT memfree_pages=0 pt_pages=640 pagecache_pages=0 heapK=10032/1015808 slab_pages=0 swap_active=0
+MEMLEDGER-CENSUS total=524252 used=524251 free=1 reserved=279073 anon=244164 cow=57 mapped=244537 dirty=0
+MEMLEDGER zone Normal free_cnt=0 managed=245179 wmark=990/1237/1484
+MEMLEDGER lru[0] size=244164
+MEMLEDGER census scan=524252 descs
+MEMLEDGER   free=0L+1M=1 (0 MB) reserved=279073 (1090 MB) page_tables=640 exact=640
+MEMLEDGER   anon=244164 (953 MB) cow=54 mapped_file=320 lru_file=0 other_used=0
+MEMLEDGER   refcounts(rc>0): ==1:523876 2..8:375 >8:0
+MEMLEDGER   other_used phys ranges (512MiB buckets 0..6G): [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0]
+MEMLEDGER sum=524252 vs descs=524252
+MEMLEDGER free_census=1 vs zone_free_cnt=0 drift=1
+MEMLEDGER zone_managed=245179 vs descs-reserved=245179 (heap/image/slab live outside the zone span)
+DRIFTWATCH zero_put[5] cow-x86=1
+DRIFTWATCH zero_put[6] unmap-x86=2
+DRIFTWATCH free_ok=65755
+==== MEMLEDGER end ====
+MEMLEDGER-BUCKETS freeL=0 freeM=1 reserved=279073 pt=640 anon=244164 cow=54 mapped_file=320 lru_file=0 other_used=0 rc1=523876 rc2_8=375 rc>8=0
+MEMLEDGER-OWRS
+==== OOM-FORENSIC #1 @ pagefault OOM ====
+OOM-FORENSIC: in_direct_reclaim=0
+
+WW: IRQ-OFF-WINDOW cpu=0000000000000000 age=000000000000007fms pid=0000000000000000 pc=0000000000010000 rip=ffffffff804eaa25 rsp=ffff88807c3fec08 . ffffffff80429ee1 . . . . . . . . . .
+OOM-FORENSIC: zone Normal free_cnt=0 managed=245179 wmark min/low/high=990/1237/1484
+OOM-FORENSIC:   walkable pages total=0 vs free_cnt=0
+WW: TIMER-SOFTIRQ-STALL cpu=1 age=1001ms tick_age=1001ms n=27567 pid=304 pc=0x0 rip=0x555555555210
+OOM-FORENSIC: lru[0] size=244164
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/1 hres_next=1844674407082339ms
+WW2: si_runs=893 si_busy=0ms ticks=[109,46] vec=[0,155,0,0,738,0,0,0,155,0]
+WW3: grq=0 cfs=0 idle=0x1 nr=1 cpu0=(pid=0 st=0x0 pc=256) cpu1=(pid=304 st=0x0 pc=0)
+WW: wakes=54699 picks=54128 avg_run=0ms stranded=11 strand_max=1001ms
+OOM-FORENSIC: desc used=524251 free=1 reserved=279073 anon=244164 mapped=244537
+OOM-FORENSIC: swap active=false
+OOM-FORENSIC: seed_alarms=0 double_free_tripwires=0
+OOM-FORENSIC: orphan(unlinked,ref0)=1 first=[524192, 0, 0, 0, 0, 0, 0, 0]
+OOM-FORENSIC: inverse(linked,ref>0)=0 first=[0, 0, 0, 0, 0, 0, 0, 0]
+OOMFX-RAW zone_free=0 zone_walkable=0 zone_managed=245179 orphan=1 inverse=0 seed_alarms=0 dblfree=0
+==== OOM-FORENSIC end ====
+oom: out of memory (order=0, gfp=0x0)
+oom-killer: Killed process 304 (reclaimwb) score 244163
+W3-RUNWAKE-REFUSED pid=304 state=0x0 linked=false curr_on=true on_cpu=true pk=1 cpu=1
+SIGDEATH: pid=304 tgid=304 comm=Ok("reclaimwb") sig=9 ppid=1 si_pid=0 si_code=0x0
+WW: TIMER-SOFTIRQ-STALL cpu=1 age=1875ms tick_age=1875ms n=27567 pid=304 pc=0x3 rip=0x555555555210
+
+WW: IRQ-OFF-WINDOW cpu=0000000000000000 age=00000000000003e9ms pid=0000000000000000 pc=0000000000010000 rip=ffffffff804eaa25 rsp=ffff88807c3fec08 . ffffffff80429ee1 . . . . . . . . . .
+
+PREEMPT-LEAK cpu=0000000000000000 pid=0000000000000000 pc=0000000000010000 held_nonzero_for=0000000000000120jiffies rip=ffffffff804eaa25
+WW: TIMER-SOFTIRQ-STALL cpu=1 age=2877ms tick_age=2877ms n=27567 pid=304 pc=0x3 rip=0x555555555210
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/1 hres_next=1844674407080464ms
+WW2: si_runs=192 si_busy=0ms ticks=[192,0] vec=[0,192,0,0,0,0,0,0,192,0]
+WW3: grq=0 cfs=0 idle=0x1 nr=1 cpu0=(pid=0 st=0x0 pc=256) cpu1=(pid=304 st=0x0 pc=3)
+WW: wakes=54699 picks=54128 avg_run=0ms stranded=11 strand_max=1001ms
+
+WW: IRQ-OFF-WINDOW cpu=0000000000000000 age=00000000000003e9ms pid=0000000000000000 pc=0000000000010000 rip=ffffffff804eaa25 rsp=ffff88807c3fec08 . ffffffff80429ee1 . . . . . . . . . .
+
+PREEMPT-LEAK cpu=0000000000000000 pid=0000000000000000 pc=0000000000010000 held_nonzero_for=0000000000000184jiffies rip=ffffffff804eaa25
+WW: TIMER-SOFTIRQ-STALL cpu=1 age=3878ms tick_age=3878ms n=27567 pid=304 pc=0x2 rip=0x555555555210
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/1 hres_next=1844674407079462ms
+WW2: si_runs=100 si_busy=0ms ticks=[100,0] vec=[0,100,0,0,0,0,0,0,100,0]
+WW3: grq=0 cfs=0 idle=0x1 nr=1 cpu0=(pid=0 st=0x0 pc=256) cpu1=(pid=304 st=0x0 pc=3)
+WW: wakes=54699 picks=54128 avg_run=0ms stranded=11 strand_max=1001ms
+W3-RUNWAKE-REFUSED pid=304 state=0x0 linked=false curr_on=true on_cpu=true pk=1 cpu=1
+SFDDBG: send->pid1 sig=17 disp=IGN blocked=false pending=0x0
+
+WW: IRQ-OFF-WINDOW cpu=0000000000000001 age=0000000000000fa6ms pid=0000000000000000 pc=0000000000010000 rip=ffffffff804ea89e rsp=ffffffff80b7ac20 ffffffff804ea8d2 . . . ffffffff8042958d . . ffffffff805ddf8d . . . .
+RWB-PRESSURE-OOMKILL sig=9
+RWB-DONE
+W3-RUNWAKE-REFUSED pid=1 state=0x0 linked=false curr_on=true on_cpu=true pk=1 cpu=0
+kernel: init exited — powering system down
+reboot: syncing filesystems
+reboot: Power down
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/1 hres_next=1844674407078460ms
+WW2: si_runs=1208 si_busy=0ms ticks=[100,82] vec=[0,182,0,0,1026,0,0,0,182,0]
+WW3: grq=0 cfs=0 idle=0x2 nr=1 cpu0=(pid=1 st=0x0 pc=256) cpu1=(pid=0 st=0x0 pc=0)
+WW: wakes=55716 picks=55142 avg_run=0ms stranded=11 strand_max=1001ms
+
+WW: IRQ-OFF-WINDOW cpu=0000000000000001 age=00000000000003e9ms pid=0000000000000000 pc=0000000000010000 rip=ffffffff804eaa25 rsp=ffffffff80b7aec8 . ffffffff80429ee1 . . . . . . . . . .
+rc=3
