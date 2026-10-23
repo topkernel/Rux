@@ -26,7 +26,7 @@ Runs (this worktree, `run/`):
 | `pa-pa11` | + /proc/kmsg stream (WQ block) + kmsg write fix | syscost=1 sprobe=0 | 330 s (wedged) | ABBA WAKE: WQ-held wake vs GRQ-held scheduler prints → both CPUs spin; kmsg write passthrough VERIFIED working ([kmsg] markers live) |
 | `pa-pa12` | + /proc/kmsg stream (timed-poll block) | syscost=1 sprobe=0 | 330 s | verification run for the fix |
 | `pa-pa13` | same kernel as pa12 (= HEAD f94c9f19) | syscost=1 sprobe=0 | 780 s | post-F2 ranking re-measure, pa3 horizon; read rate -113x, hilogd.server now #1 flood; ranking v2 below |
-| `pa-pa14` | pa13 + launcher's softirq v1/v8 empty-raise gates (69310bae timer hunks, applied to a scratch build) | syscost=1 sprobe=0 | 780 s | F1 gate A/B: v1/v8 raise rates and the cli-page tick share |
+| `pa-pa14` | pa13 + launcher's softirq v1/v8 empty-raise gates (69310bae timer hunks, applied to a scratch build) | syscost=1 sprobe=0 | 780 s | F1 gate A/B: NO measurable effect on OH boot — marginal raise rates identical to ungated from t=120 (199.2-199.7/s); latch flips at ~9 s (v8) / ~31 s (v1); host shared with 3 foreign QEMUs (2x oh-display, 1x samgr-callback probe) from mid-run |
 
 Host context for all runs: KVM q35 `-cpu max -m 4G -smp 2`, shared with
 2-3 foreign-lane QEMUs (load avg ~5.5). Absolute numbers carry that
@@ -242,7 +242,7 @@ Contribution model unchanged: 2 vCPUs; kernel mode ~84% of ticks.
 
 | # | cost center | measured (pa13) | was (pa1/pa3) | gap contribution | family |
 |---|---|---|---|---|---|
-| 1 | Interrupt-disabled regions (cli-recovery page: softirq-at-irq-exit dispatch + irqsave sections + UART TX cli) | 26% of kernel ticks; 316 IRQ-OFF-WINDOW prints/780 s; nanosleep avg 1.86 s (max 295 s) | 25-32% | **large** — multiplies everything (timers, sleeps, watchdogs) | F1 |
+| 1 | Interrupt-disabled regions (cli-recovery page: softirq-at-irq-exit dispatch + irqsave sections + UART TX cli) | 26% of kernel ticks; 316 IRQ-OFF-WINDOW prints/780 s; nanosleep avg 1.86 s (max 295 s); pa14 shows raise-gating does NOT shrink this — lever is the dispatch discipline | 25-32% | **large** — multiplies everything (timers, sleeps, watchdogs) | F1 |
 | 2 | Scheduler wake-loss (WAKE-RUN-LEAK; lying busy slots + linked-starving) | 702 leak prints/780 s; census 23 refusals = 16 `curr_on&&on_cpu` lying slots + 7 `linked` starved; ages to 516 s+ | 448 episodes/boot | **large** — unchanged; still the wall-clock driver | F3 |
 | 3 | hilogd.server socket dual-drain (recvmsg+recvfrom 18.4K/s each) + sysevent_source + connect-retry (3.26M) | 26.5M calls by t=720 = ~37K/s = ~25% of ALL syscalls | 25.8M by t=900 (29K/s) | medium — now the **#1 flood**; OH userspace behavior (drain loop + dead-peer retries), kernel side is per-call cost | F2 |
 | 4 | ext4 metadata + write path (open/stat/getdents/fsync/pwrite/mkdir) | open 235 us, newfstatat 206 us, getdents 643 us, fsync avg 16 ms (62 calls); inode_hash page 3% | same order | medium (~300-500 CPU-s/boot at this horizon) | F4 |
@@ -386,16 +386,26 @@ fault), is verified fixed (see section 6).
    timer-lateness amplification (nanosleep 2.6 s -> ms-class).
    Lane: interrupt/softirq is shared-stable; small diffs, main
    session coordinates.
-   STATUS (pa14 A/B): the launcher lane implemented (a) as
-   empty-raise gates (69310bae: v1 on TCP-table high-water, v8 on a
-   TIMER_EVER_ARMED latch). Measured on the OH boot the gates only
-   bite for the first ~30 s: OH arms a timer by t~9 s (v8 latch
-   flips, raise unconditional thereafter) and creates its first TCP
-   socket by t~31 s (v1 high-water flips). v1/v8 marginal raise rate
-   is 199/s from then on, same as ungated pa13 — so on THIS workload
-   (a) as-written is a ~30 s trim, and the F1 lever is (b), the
-   dispatch discipline. The gate still pays off on timer-sparse
-   workloads (minimal rootfs boots).
+   STATUS (pa14 A/B, final numbers): the launcher lane implemented (a)
+   as empty-raise gates (69310bae: v1 on TCP-table high-water, v8 on a
+   TIMER_EVER_ARMED latch). Measured on the OH boot the gates have NO
+   measurable effect: from t=120 s on, the marginal raise rate is
+   199.2-199.7/s for BOTH vectors in BOTH runs (gated pa14 and ungated
+   pa13 — identical); cumulative differences at t=720 (v1 -2461, v8
+   +2010 raises) are inside early-boot run-to-run variance (pa14's
+   first-60 s softirq runs were 22% higher than pa13's on host-load
+   grounds alone). Reason: OH arms its first timer within seconds
+   (v8 latch flips) and creates its first TCP socket by ~t=30 s (v1
+   high-water flips — DHCP/netmanager); both latches are monotonic, so
+   the gates never engage again. The intra-run v8-vs-v1 split does
+   locate the latch moments (v8 latches ~t=9 s, v1 ~t=31 s, from the
+   v8-v1 = 4471 offset). Conclusion: on THIS workload the F1 lever is
+   (b), the irq-exit dispatch discipline; gate (a) still pays off on
+   timer/TCP-sparse workloads (minimal rootfs boots). Tick/page
+   agreement: kernel share 84.6/83.0% (pa14, 3 foreign QEMUs on host)
+   vs 84.2/83.3% (pa13, quiet); cli-recovery page 25% vs 26%, same
+   nm-verified symbol cluster (FileBuffer + enable_irq/restore_irq +
+   inb/outb, +0x20 patch shift).
 3. **Kill the hilogd.rd_kmsg spin (printk/dfx).** ~~92.6K read()/s
    sustained for the whole boot, ~15-25% of a vCPU. Attribution
    narrowed to "positive-returning reads on a non-kmsg fd" (pa4-8);
@@ -479,3 +489,11 @@ PLATFORM=x86_64 make build          # bzImage with syscost
 ./run/pa-boot.sh pa5 ... APPEND_EXTRA="syscost=1 sprobe=0"  # quiet variant
 python3 run/pa-parse.py run/pa-pa4-stamped.log --nm <(nm target/x86_64-unknown-none/debug/rux | sort)
 ```
+
+pa14 (softirq-gate A/B) provenance: the gate hunks were extracted from
+the launcher lane's 69310bae (`git show 69310bae -- kernel/src/timer.rs
+kernel/src/drivers/timer/x86_64.rs | git apply`), built once, the bzImage
+saved as `run/pa14-gate-bzImage`, and the patch reverted before commit —
+timer/sched files stay launcher-lane territory. Symbolize each run's
+pages against the ELF the run actually booted (pa13 vs pa14 layouts
+differ by the patch).
