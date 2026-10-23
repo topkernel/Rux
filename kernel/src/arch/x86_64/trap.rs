@@ -1227,6 +1227,7 @@ fn handle_timer_tick(regs: &mut PtRegs, cpu: usize) {
                 use core::sync::atomic::Ordering::Relaxed;
                 if regs.user_mode() {
                     (*task).utime_ticks.fetch_add(1, Relaxed);
+                    crate::dfx::syscost::tick_user();
                 } else {
                     (*task).stime_ticks.fetch_add(1, Relaxed);
                     // sc105 stime-burn attribution: sample WHERE the
@@ -1234,9 +1235,14 @@ fn handle_timer_tick(regs: &mut PtRegs, cpu: usize) {
                     // task comm, so one task's burn is separable from the
                     // boot crowd). KILLDUMP prints the table.
                     stime_sample_rip(regs.rip, (*task).comm());
+                    crate::dfx::syscost::tick_kern(regs.rip);
                 }
+            } else {
+                crate::dfx::syscost::tick_idle();
             }
         }
+    } else {
+        crate::dfx::syscost::tick_idle();
     }
 
     // 1. Update jiffies

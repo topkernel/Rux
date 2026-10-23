@@ -59,6 +59,9 @@ pub mod wildwatch;
 /// INV-HEAP-* audit of the buddy free lists + per-page bitmap; see
 /// dfx/metawatch.rs (wildwrite-hunt line).
 pub mod metawatch;
+/// Whole-syscall cost table + tick-mode accounting + kernel-rip page
+/// histogram (perf-audit line, cmdline `syscost=1`); see dfx/syscost.rs.
+pub mod syscost;
 
 /// Initialize the DFX subsystem.
 ///

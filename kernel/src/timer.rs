@@ -723,6 +723,11 @@ pub fn timer_softirq_handler(_nr: usize) {
         LAST_PERIODIC_DUMP.store(current, Ordering::Relaxed);
         crate::dfx::taskdump::dump_all_tasks("periodic");    }
 
+    // perf-audit line (cmdline `syscost=1`): whole-syscall cost table +
+    // tick-mode accounting + kernel-rip histogram dump every 60 s from
+    // this softirq. Own cmdline key — no dfx=switches.rs bit consumed.
+    crate::dfx::syscost::tick(current);
+
     // dfx=monowatch: ~1 Hz timebase jump tripwire (backward motion or
     // multi-second spikes, clocksource named) — same printk discipline
     // as the periodic dump above.
