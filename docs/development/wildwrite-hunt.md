@@ -2327,4 +2327,91 @@ reachable).
   SIGKILL; capture with plain redirection next time). Chain relaunched
   from r43 at 08:14.
 
+## Session 27 (continuation agent — MAP_SHARED verification close-out)
+
+### Inheritance reconstruction (session 26's close-out was never written)
+
+- Session 26's window died at 08:40 with the user pause, mid-close-out.
+  Artifact verdicts recovered at claim:
+  - **ww-fms1 (the 45-min OH 0-panic gate) was a ~21-MIN PARTIAL, not
+    the gate**: serial born 08:20, last write 08:40:57. Healthy storm
+    to the last line (wakes 1.88M), 0 KERNPANIC / 0 ALLOCTHROW / 0 OOM,
+    memfree_pages=428556 (1.67 GiB free at death), MM-DROP-CTX 0,
+    META-SMASH 0, USEGV-FOR 15 hits all at the documented
+    rip=0x7ff082996bac cr2=0 errno-as-pointer service-side family,
+    PREEMPT-LEAK 61 (wfi idle noise). Gate INCOMPLETE — re-run below.
+  - **riscv make-test rerun: ww-s26-rv-test.log is 0 bytes** — the leg
+    never completed. Re-run below.
+  - r42 (chain): FULL budget clean (~07:09-07:53, 0 WW-HIT, 0 panics).
+    r43 attempt 2 (08:14-08:40): killed at ~26/45 by the session-26
+    window death — clean partial (0 WW-HIT, 0 panics, storming to the
+    last line). Cumulative 0 WW-HIT across r1-r43.
+- Worktree clean at 6b49140b; the riscv alias migration item from the
+  handoff was already landed by the session-25/26 snapshot (verified in
+  code: ext4 MAP_SHARED faults go through filemap_pin_cache_page with
+  shared=true + dirty marking; only non-ext4 files keep the legacy
+  shared_file_fault_page permanent pin — page_fault.rs:660-705).
+
+### Task-1 legs re-run at HEAD (all green)
+
+- x86_64 build: PLATFORM=x86_64 make build is a cargo no-op reproducing
+  the byte-identical bzImage (md5 1fd06f7b...) — the binary session 26
+  validated is the committed code.
+- FMAP probe on BOTH platforms at HEAD (fresh boots this session):
+  **FMAP-PASS (FS1-FS8 + FSP) + FMAP-PERSIST-PASS on x86_64 AND
+  riscv64** — the handoff's probe-extension item (SHARED write
+  visibility = FS1/FS2/FS3, concurrent-mapping consistency = FS1/FS3/
+  FS4, msync persistence = FS5/FSP two-boot, truncate = FS6) was
+  implemented and validated by session 26; re-confirmed here on the
+  byte-identical binaries.
+- riscv64 in-kernel unit tests (plain file capture, run/
+  ww-s27-rv-test.log): **1085/1088** — byte-identical failure set to
+  the s6/7/9/12/13/15/18/24 baseline (the 3 pre-existing config_test.rs
+  size asserts). No regression from the MAP_SHARED writeback stack.
+- ww-fms2 (the 45-min OH 0-panic gate re-run): see below.
+
+## Session 27 close-out
+
+- **ww-fms2 (the 45-min OH 0-panic gate re-run): PASSED.** Full budget
+  (timeout kill as designed, 11:21-12:06), 94948 serial lines, storm
+  active to the last line, **0 KERNPANIC / 0 ALLOCTHROW / 0 OOM
+  events / 0 MM-DROP-CTX / 0 META-SMASH**, memfree_pages=422361
+  (1.65 GiB free at boot-end — no drain; the filemap fix holds with
+  the MAP_SHARED writeback stack riding). All 20 USEGV-FOR lines are
+  ONE victim: pid 546 render_service at rip=0x3fbf08ad30,
+  cr2=0x7ff00069a000, rdx=0x3a8 — the EXACT session-18 decoded
+  thread-creation geometry (struct-pthread context copy into the
+  2-page remnant above a worker-stack carve), service-side and
+  documented; capture recipe = 2f54454b prints if it needs a new
+  decode.
+- **MAP_SHARED writeback verification is COMPLETE** (the handoff's
+  task 1, all legs green at 6b49140b): FMAP x both platforms + two-boot
+  persistence, riscv 1085/1088, x86_64 byte-identical build, 45-min OH
+  0-panic. The "riscv alias migration" follow-on was already landed by
+  the session-25/26 snapshot — verified in code this session (ext4
+  SHARED faults pin via filemap_pin_cache_page with the conservative
+  dirty mark; the legacy shared_file_fault_page permanent pin survives
+  only for non-ext4 files, page_fault.rs:660-705). Code anchors for the
+  two critical session-26 fixes confirmed: riscv predicate
+  pte_is_shared_cache (mm_ops.rs:1838, the removed 1<<10 PPN-corrupting
+  bit documented at :1822), flush resume cursor
+  (page_cache.rs:804-808), dirty mark family (page_cache.rs:678-700).
+  6b49140b is MERGE-READY for main.
+- Chain: relaunched from r44 at 11:09 as this session's background
+  task (run/ww-chain-s27.log, 15-point set, WW-ARMED verified). r44
+  FULL budget clean (77489 lines, wakes 12.71M, strand_max 9.1s
+  healthy class, 0 WW-HIT / 0 heals / 0 panics); driver self-advanced
+  to r45 at 11:54 (armed verified). Cumulative: **0 WW-HIT across
+  r1-r44** partials, 0 META-SMASH. The make-test QEMU reaped after
+  results were file-captured (post-summary panic class, own PID).
+- Ops: serial-log grep discipline note — the rs-image OH boots print
+  no "fork: parent" lines in their storm phase (storm health reads
+  from appspawn/APPMAPSRC counts instead; the ww-boot chain image
+  prints both).
+- Next for the line: (1) chain continues toward the capture (the
+  machinery is proven; the engine's rate under this load remains the
+  variable); (2) 6b49140b rides to main at the next merge window; (3)
+  unclaimed follow-ups from the archive: reclaim-time writeback (v2),
+  close(2) deferred-flush divergence note, watchset room beyond 15.
+
 
