@@ -1257,6 +1257,19 @@ fn proc_kmsg_close(_file: &crate::fs::file::File) -> i32 {
 /// /proc/kmsg). Blocks while caught up (no O_NONBLOCK mode exists for
 /// /proc/kmsg on Linux); a too-small buffer truncates but still
 /// consumes the record.
+///
+/// The "block" is a ~10 ms timed poll (kmsg_poll_sleep), NOT a
+/// KMSG_READ_WQ wait. pa11: parking the reader on KMSG_READ_WQ made
+/// wake_up_all hold the queue lock across wake_up_process (WQ->GRQ,
+/// the R12-1 deferred-wake discipline) while scheduler-internal
+/// diagnostics printk under a GRQ lock (W3-RUNWAKE-REFUSED et al.) —
+/// a textbook ABBA that wedged both CPUs. The wake-side invariant
+/// ("no GRQ-held path takes a waitqueue lock") is violated by
+/// scheduler prints that predate this reader and is not enforceable
+/// from the printk lane; a timer-woken poll needs no queue entry, so
+/// the printk-side wake_up_all never holds the WQ lock against a
+/// waiter. Cost: up to ~1 jiffy of record-delivery latency, vs the
+/// 60-92K EOF reads/s the snapshot produced.
 fn proc_kmsg_read(_file: &crate::fs::file::File, buf: &mut [u8]) -> isize {
     loop {
         // Produce one record if the cursor has not caught up.
@@ -1284,7 +1297,6 @@ fn proc_kmsg_read(_file: &crate::fs::file::File, buf: &mut [u8]) -> isize {
                     record.cpu_id,
                 );
                 let text_bytes = &record.text[..record.text_len as usize];
-                let trailing_nl = text_bytes.last() == Some(&b'\n');
 
                 // Stage header+text in one line buffer, then truncate to
                 // the caller's request (record consumed regardless).
@@ -1306,35 +1318,73 @@ fn proc_kmsg_read(_file: &crate::fs::file::File, buf: &mut [u8]) -> isize {
                 rb.read_seq = seq + 1;
                 copy as isize
             } else {
-                -1 // caught up: go block
+                -1 // caught up: go sleep one poll interval
             }
         };
         if produced >= 0 {
             return produced;
         }
 
-        // Block until the next record lands: prepare → re-check under the
-        // lock → schedule (lost-wake discipline, same as kmsg_file_read).
-        let current = match crate::sched::current() {
-            Some(t) => t,
-            None => return -(crate::syscall::errno::EAGAIN as isize),
-        };
-        KMSG_READ_WQ.prepare_to_wait(current, false, true);
-        {
-            let rb2 = RING_BUFFER.lock_irqsave();
-            let ready = rb2.read_seq < rb2.next_seq;
-            drop(rb2);
-            if ready {
-                KMSG_READ_WQ.finish_wait(current);
-                // SAFETY: current is the running task; undo a racing wake
-                // enqueue (NEW-C2 discipline).
-                unsafe { crate::sched::dequeue_task(&*current); }
-                continue;
-            }
+        if !kmsg_poll_sleep(10) {
+            // No timer available (pool exhausted): fail soft rather
+            // than hot-spin — the caller retries like EAGAIN.
+            return -(crate::syscall::errno::EAGAIN as isize);
         }
+    }
+}
+
+/// Interruptible ~ms timed sleep for the /proc/kmsg poll loop (the
+/// evdev sleep_ms_interruptible discipline: one-shot jiffy timer as
+/// the only waker, state-first re-check, NEW-C2 self-dequeue on a
+/// racing wake). Returns false when no task/timer was available.
+fn kmsg_poll_sleep(ms: u64) -> bool {
+    use crate::process::task::{Task, TaskState};
+
+    let target =
+        crate::drivers::timer::get_jiffies() + crate::drivers::timer::msecs_to_jiffies(ms);
+
+    let current = match crate::sched::current() {
+        Some(c) => c as *mut Task,
+        None => return false,
+    };
+    // SAFETY: current is the running task (we are it); pid() is a const read.
+    let pid = unsafe { (*current).pid() };
+
+    let timer_id = crate::timer::add_timer_wakeup(target, pid);
+    if timer_id == 0 {
+        return false;
+    }
+
+    loop {
+        if crate::drivers::timer::get_jiffies() >= target || crate::signal::signal_pending() {
+            crate::timer::del_timer(timer_id);
+            return true;
+        }
+        // Mark INTERRUPTIBLE BEFORE the final re-check (state-first
+        // lost-wakeup discipline, same as sys_nanosleep).
+        // SAFETY: current is the running task's pointer.
+        unsafe {
+            (*current).set_state(TaskState::new(TaskState::INTERRUPTIBLE));
+        }
+        if crate::drivers::timer::get_jiffies() >= target || crate::signal::signal_pending() {
+            // SAFETY: current is the running task's pointer.
+            unsafe {
+                (*current).set_state(TaskState::new(TaskState::RUNNING));
+            }
+            // A racing wake may have enqueued us while still executing —
+            // take ourselves back off (NEW-C2 discipline).
+            // SAFETY: current is the running task's pointer.
+            unsafe {
+                crate::sched::dequeue_task(&*current);
+            }
+            crate::timer::del_timer(timer_id);
+            return true;
+        }
+        // Syscall context runs with SIE=0 — re-arm so the timer tick can
+        // reach this CPU and wake us.
         crate::arch::cpu::restore_irq(true);
         crate::sched::schedule();
-        KMSG_READ_WQ.finish_wait(current);
+        // Woke up (timer expiry or signal): loop tail re-checks and exits.
     }
 }
 

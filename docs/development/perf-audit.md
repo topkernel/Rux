@@ -21,6 +21,10 @@ Runs (this worktree, `run/`):
 | `pa-pa3` | + flood attribution | syscost=1 sprobe=0 | 780 s (killed) | flood/process attribution, softirq vecs |
 | `pa-pa4` | + kmsg read counters | syscost=1 sprobe=0 | ~180 s (killed) | proves the read flood never touches /dev/kmsg |
 | `pa-pa5/6/7/8` | + EOF/EAGAIN read censuses | syscost=1 sprobe=0 | 60-120 s each (killed) | fd-path census hunts (see F2) |
+| `pa-pa9` | + positive-read census (pa10 adds fail census) | syscost=1 sprobe=0 | 330 s | ATTRIBUTES the flood: hilogd.rd_kmsg reads /proc/kmsg, 196 data reads then idle while flood counter runs — so the flood reads return 0 |
+| `pa-pa10` | + failing-read census | syscost=1 sprobe=0 | 300 s | zero rd_fail rows all boot → flood reads are EOF; pa4-8 "not EOF" was census-table saturation (12/12 slots taken by earlier comms) |
+| `pa-pa11` | + /proc/kmsg stream (WQ block) + kmsg write fix | syscost=1 sprobe=0 | 330 s (wedged) | ABBA WAKE: WQ-held wake vs GRQ-held scheduler prints → both CPUs spin; kmsg write passthrough VERIFIED working ([kmsg] markers live) |
+| `pa-pa12` | + /proc/kmsg stream (timed-poll block) | syscost=1 sprobe=0 | 330 s | verification run for the fix |
 
 Host context for all runs: KVM q35 `-cpu max -m 4G -smp 2`, shared with
 2-3 foreign-lane QEMUs (load avg ~5.5). Absolute numbers carry that
