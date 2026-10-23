@@ -3631,6 +3631,8 @@ pub fn dequeue_if_enqueued(task: &Task) {
 pub fn scheduler_tick() {
     let cpu_id = crate::arch::cpu_id() as u64 as usize;
     crate::dfx::softlockup::touch(cpu_id);
+    // Linux's schedstat sched_count: one scheduler invocation.
+    crate::fs::procfs::schedstat::note_sched_run(cpu_id);
 
     // Kernel-preemption round 2 (2026-10-20): LEAK tripwire. A task whose
     // preempt_count stays nonzero for seconds while it keeps RUNNING in

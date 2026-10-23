@@ -193,6 +193,8 @@ fn no_context(_regs: &mut PtRegs, _fault_addr: VirtAddr) -> MmFaultResult {
 /// # Returns
 /// Handling result
 pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
+    // /proc/vmstat pgfault.
+    crate::mm::vmstat::note_fault();
     let fault_addr = VirtAddr::new(regs.badaddr);
 
     crate::pr_debug!("do_page_fault: addr={:#x}, epc={:#x}, type={:#x}, mode={}",

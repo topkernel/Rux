@@ -120,6 +120,8 @@ pub fn note_switch(prev: &crate::process::task::Task) {
     let blocked = state & (TaskState::INTERRUPTIBLE | TaskState::UNINTERRUPTIBLE) != 0;
     if blocked {
         prev.nvcsw.fetch_add(1, Ordering::Relaxed);
+        // Linux's schedstat yld_count: the task yielded.
+        super::schedstat::note_yield(crate::arch::cpu_id() as usize);
     } else {
         prev.nivcsw.fetch_add(1, Ordering::Relaxed);
     }
@@ -226,6 +228,17 @@ pub fn generate() -> Vec<u8> {
     out.push_str(&format!("processes {}\n", total_forks()));
     out.push_str(&format!("procs_running {}\n", procs_running()));
     out.push_str(&format!("procs_blocked {}\n", procs_blocked()));
+    // Linux's aggregate softirq line: one total per vector, in the
+    // kernel's vector order.
+    out.push_str("softirq");
+    for vec in 0..crate::interrupt::softirq::NR_SOFTIRQS {
+        let mut total = 0u64;
+        for cpu in 0..num_cpus {
+            total = total.saturating_add(crate::interrupt::softirq::raised_count(cpu, vec));
+        }
+        out.push_str(&format!(" {}", total));
+    }
+    out.push('\n');
 
     out.into_bytes()
 }

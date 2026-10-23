@@ -208,18 +208,24 @@ fields (it emitted 54) and fills priority, nice, num_threads, rss (in
 pages), processor and policy next to the utime/stime the timer IRQ
 already charged.
 
-**Part 2 — remaining.**
+**Part 2 — implemented.** `/proc/vmstat` (Linux key names, the page
+counters live in `kernel/src/mm/vmstat.rs`, the memory manager owning
+them like Linux's mm/vmstat.c), `/proc/buddyinfo` (free pages per order
+per zone, from the zone allocator's per-order free lists),
+`/proc/softirqs` (per-CPU per-vector raise counts, using the vector set
+and names Rux's softirq module already uses) and `/proc/schedstat`
+(version 17: timestamp plus the nine per-CPU fields, with real
+`yld_count` and `sched_count`). `/proc/stat` also grew Linux's
+aggregate `softirq` line.
 
-- Page allocator counters (alloc/free per zone, activate/deactivate,
-  fault counts) → `/proc/vmstat` with Linux's key names.
-- Scheduler counters (running/waiting per CPU, timeslices, switches) →
-  `/proc/schedstat` and `/proc/sched`.
-- Softirq counters → `/proc/softirqs`.
-- `/proc/buddyinfo` (the dead `mm/pglist.rs::print_buddyinfo` becomes a
-  procfs generator), `/proc/pagetypeinfo`, `/proc/locks`,
-  `/proc/diskstats`.
+**Part 3 — remaining.**
+
+- `/proc/sched` (per-task runqueue view), `/proc/pagetypeinfo`,
+  `/proc/locks`, `/proc/diskstats`, `/proc/timer_list`.
 - Per-task minor/major fault counters (fields 10/12 of
   `/proc/[pid]/stat`) and `starttime` (field 22).
+- `pgpgin`/`pgpgout` (block-I/O page counters) — Rux has a block layer
+  but no page accounting in it yet.
 
 Acceptance: `/proc/stat` totals track `/proc/uptime` within one tick per
 CPU; `/proc/vmstat` counters are monotonic and reconcile against the

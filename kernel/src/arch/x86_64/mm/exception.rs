@@ -132,6 +132,8 @@ fn no_context(regs: &mut PtRegs, _fault_addr: VirtAddr) -> MmFaultResult {
 /// # Returns
 /// Handling result
 pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
+    // /proc/vmstat pgfault.
+    crate::mm::vmstat::note_fault();
     let cr2 = crate::arch::cpu::read_cr2();
     let fault_addr = VirtAddr::new(cr2);
 
