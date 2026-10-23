@@ -2435,3 +2435,63 @@ FAULT-AROUND LANDED; CLONE-SCAN FLATNESS PROVEN IN VIVO.
   loaded-boot signature, NOT a mount/fault regression. Kernel-side
   metrics all healthy (no panic, no OOM faults, clone-scan flat).
   demand-fault avg 1.6ms/fault under load (KILLDUMP stat).
+
+SESSION R SIXTH LEG CLOSE-OUT (sc182/sc183, 23:5x-01:0x): WEDGE
+ELIMINATED IN THE 45-MIN WINDOW; LAUNCHER ALIVE TO THE END; NEXT
+BLOCKERS NAMED. MILESTONE (real launcher UI) NOT REACHED.
+
+- sc182 (45 min, fresh scgold copy, 2 foreign TCG QEMUs): the deepest
+  LIVE boot of the campaign. 51 AppSpawnChild by min 7 (78 total; the
+  spawn pipeline re-rate-limit-free), launcher narrating through min
+  45 - narration NEVER FROZE (sc179 froze min 16, sc180 min 23; the
+  hilogInput-saturation wedge did not occur within 45 min - the anon
+  fault-around + flat clone-scan removed the kernel-side burn that
+  starved hilogd). Spawn cycling stopped by min 15: the LAST launcher
+  attempt (pid 2095) survived 30+ min grinding its init.
+- clone-scan FLATNESS at scale (sc182 mtprobe, 400 binds): 19-22k cyc
+  average across nmounts buckets 0-477 (old kernel: 13.5M cyc at
+  nmounts 450 = ~675x; and the old cost grew without bound).
+- NEW BLOCKER #1 (launcher pace): the launcher's CommonBundleManager
+  init loop (getOsAccountLocalId rounds) ran ~592 rounds and was STILL
+  not finished at min 45; AMS flagged LIFECYCLE_HALF_TIMEOUT_WARNING /
+  APP_FREEZE 314 times (the appfreeze manager sees the main thread not
+  reaching its lifecycle callback). Not mount-bound, not wedge-bound:
+  it is the per-round IPC/syscall cost. demand-fault avg 1.6ms/fault
+  under load (sc181 KILLDUMP stat) is the cost model for the .so
+  dlopen chains.
+- NEW BLOCKER #2 (render service connect, THE screen gate):
+  RSRenderServiceConnectHub::Connect retried 998x in 45 min with
+  "clientToService is null"; "RenderService connect fail" logged
+  within the first minutes; RenderService itself DID start (SCHED_FIFO
+  + UniRender logs). BootAnimation started but cannot reach RS ->
+  screen stays black (colors=1 all boot; note sc180 was also black at
+  its end - NOT a regression from this line's changes). The RS client
+  connects through the samgr SA proxy - clientToService==null means
+  the SA lookup/registration path for RS fails. THIS is the seventh
+  leg's entry point: trace the RS SA registration/lookup (samgr side)
+  and why the proxy comes back null.
+- sc183 (90 min, launched 00:39 under THREE foreign QEMU pairs, load
+  8.6): slow start (1 spawn by min 8, the loaded-boot signature);
+  left running for the 90-min answer (does the launcher EVER finish
+  init now that the wedge is gone?). Serial: run/oh-sc183-serial.log.
+- SESSION R SIXTH LEG SUMMARY:
+  * LANDED: mount-registry chain index (8cd4f2c0) - MS_REC clone scan
+    O(registry x depth) -> O(subtree), flat 19-22k cyc at nmounts
+    0-477 (675x at sc179's worst point, unbounded better); anon
+    write-fault fault-around 32-page windows (798b4cb3 riscv64 +
+    1b742d80 x86_64 - the campaign boots q35/KVM, the x86 twin is the
+    one that counts).
+  * VERIFIED: no panic/OOM across 4 boots; mount index survives
+    switch_root (MS_MOVE-"/" rebuild), sandbox self-binds, namespace
+    teardown; unit tests 1085 PASS (3 pre-existing config_test
+    mismatches).
+  * CONVICTED: the sc179/180 wedge (every-logger writev EAGAIN at
+    min 16/23) did NOT occur in 45 min with the fixes - hilogd kept
+    draining.
+  * NOT REACHED: OnForeground 0, colors=1, no ohgpu launcher UI.
+    Next levers: RS SA connect (blocker #2, screen gate) and the
+    bundle-init per-round cost (blocker #1).
+- Branch state: feature/samgr-callback at this commit (adds: 8cd4f2c0
+  mount index, 798b4cb3 + 1b742d80 fault-around twins, notes commits).
+  bzImage (x86_64 debug, 01:xx era) = this kernel. config.rs left
+  dirty in worktree (build-generated platform-switch artifact).
