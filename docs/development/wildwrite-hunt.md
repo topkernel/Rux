@@ -3095,4 +3095,45 @@ rsp=0x7ff090410fc8" line (a USER frame). Confirmed MY lane's probe
   rip at the wild writer's instruction. Triage before declaring a
   capture; a probe-crash round is a clean-restart, not a milestone.
 - Smoke validation: ww-pafix1 (330 s OH boot, worktree bzImage at
-  HEAD+fix, dfx=wildwatch, port 12377) — verdict below.
+  HEAD+fix, dfx=wildwatch, port 12377): full budget, 45933 lines, 713
+  forks, 0 panics/canary/heals — and 456 IRQ-OFF-WINDOW firings with
+  ZERO crashes: 50 through the new user-frame skip (rsp values in the
+  pa15-geometry user stack-top region), 408 kernel walks. Both guard
+  branches exercised live.
+
+### Session 34 second relay (pa16): WW age=1000ms artifact + small_alloc lock queue item
+
+- pa16 relay (perf line, merged main 0634bc8f): (a) their EFLAGS-sampling
+  probe measured max closed-cli 4 ms for a whole boot while WW printed
+  359 age=1000ms lines; (b) mm/small_alloc.rs allocator cache lock =
+  12.6% of the whole machine (732M sections/boot at ~250 ns; the single
+  biggest IF=0 contributor) — fix direction: per-CPU freelist (my mm
+  lane, queued below).
+- **age artifact root cause: method, not arithmetic.** ww_tick_age_ms
+  (timer.rs) measures the WALL-CLOCK gap between timer-IRQ arrivals
+  (WW_TICK_LAST stamps at timer_interrupt_handler entry). A gap conflates
+  three causes no in-guest clock can separate: real IF=0 windows, host
+  vCPU steal (the CPU not scheduled — dominant under multi-QEMU host
+  contention; both pa16-KVM and my TCG smokes show it), and
+  tickless-style idle. Fix (2e41b614, trap.rs probe — the timer.rs side
+  is untouched territory): when the recovery tick lands on the IDLE
+  task the gap was idle/steal by construction — print " idle-wake" and
+  skip the culprit walk. Real-task frames keep the walk as a TRIAGE
+  HINT only: corroborate with an EFLAGS sampler (perf line's probe)
+  before reading age as IF=0. Both arches compile clean.
+- **Hunt-probe reading discipline going forward**: WW IRQ-OFF-WINDOW
+  lines under >=3-QEMU host contention are contention noise unless
+  corroborated; the wakewatch TIMER-SOFTIRQ-STALL report has the same
+  caveat for its tick_age field.
+
+### Session 34 chain ledger (post-relaunch 2)
+
+- r60 (FULL, relaunched): CLEAN — 97675 lines, wakes 12.43M, 1109
+  forks, strand_max 39.3s (contention class), 0 WW-HIT / 0 heals /
+  0 panics, armed try 0. Driver self-advanced to r61 (06:29:03).
+- load-r7 (FULL, relaunched): CLEAN — 167811 lines, wakes 9.46M, 2587
+  forks, **871 sdc exec cycles**, strand_max 8.7s (healthy class),
+  0 markers, armed try 0. Driver self-advanced to load-r8 (06:29:06).
+- Cumulative: **0 WW-HIT across r1-r60 complete rounds** (plus partials),
+  0 META-SMASH. Load surface: p1 + r1-r7 = **5965 sdc exec cycles over
+  8 full armed load-hours**, zero fires, zero false positives.
