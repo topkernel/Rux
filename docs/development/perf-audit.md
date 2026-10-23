@@ -218,9 +218,15 @@ tick-sampling inferences. Four instruments:
    hold a segment "open" across IF=1 time. Cross-checks caught this
    (uart-zone time 20x the summed per-putc times; REST nseg
    nonsensical at 32G). **Zone splits and the if0 totals are UPPER
-   BOUNDS only.** The fix is one line (do not push the UART zone for
-   IF=1 putcs); not re-run this session — the stateless instruments
-   above carry the findings.
+   BOUNDS only.** The v2 probe (run/pa15-probe.patch as committed:
+   zone pushes gated on if0_now for both putc and the ksoftirqd-side
+   softirq entry) fixes that class — smoke4 (pa15smoke4, 180 s)
+   validates cpu0 (uart zone 148 ms against 541 ms summed if0-putc
+   time, consistent order), but cpu1 STILL inflates (uart segments
+   averaging 10x the per-putc average, ~2 s stall maxes soaking
+   zones) — a second leak class stays open, so zone numbers remain
+   upper bounds until it is found. The stateless instruments above
+   carry the findings.
 
 **Finding 1 — the console path costs 16-18 us per byte and ~5% of the
 machine, and its stall tail is seconds-class.** Final t=721 tables:
