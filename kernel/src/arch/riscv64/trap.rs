@@ -82,7 +82,14 @@ pub fn pt_regs_rip_for_cpu(cpu: usize) -> u64 {
         return 0;
     }
     let p = CURRENT_PT_REGS[cpu].load(core::sync::atomic::Ordering::Relaxed) as *const PtRegs;
-    if p.is_null() || !crate::sched::sched::kernel_ptr_canonical(p as *const u8) {
+    // High-half bound added with the pa15 lesson (x86_64 twin): user
+    // addresses are canonical too, and this slot can only hold
+    // kernel-stack frames — a low-half value is a torn read, never
+    // deref it.
+    if p.is_null()
+        || (p as u64) < 0xffff_8000_0000_0000
+        || !crate::sched::sched::kernel_ptr_canonical(p as *const u8)
+    {
         return 0;
     }
     // SAFETY: the slot holds either a live trap frame on that CPU's
