@@ -2945,3 +2945,15 @@ Surface (private image, shared images untouched):
   windows). If a future session sees both chains dead again with no new
   PAUSE-NOTE, relaunch per the close-out recipe — the standing state
   and verdict ledger live in this file.
+
+### Session 31 final ledger
+
+- r56 (full, second relaunch): CLEAN — 81784 lines, 0 WW-HIT / 0 heals /
+  0 panics. Cumulative: **0 WW-HIT across r1-r56 complete rounds**.
+  Chain at r57 (01:14:07).
+- load r3 (full, second relaunch): CLEAN — 165380 lines, 785 sdc cycles,
+  0 capture markers. Load chain at r4 (01:14:14). Load-surface totals:
+  p1 + r1 + r2 + r3 = 2679 sdc exec cycles over ~4 armed load-hours,
+  zero fires, zero false positives.
+- Both chains hunting at max capture config (19-point set + RO tripwire
+  + canary) on two load profiles (standard storm; sdc-cycle storm).
