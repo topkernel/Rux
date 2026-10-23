@@ -2930,3 +2930,18 @@ Surface (private image, shared images untouched):
   Stop: touch run/ww-s2.stop / run/wwload.stop; kill the DRIVER ROOT
   (ww-chain2.sh / ww-loadchain.sh shell) first, then the round QEMU —
   proctrees in run/ww-s31-proctree.txt.
+
+### Session 31 addendum — second sweep, chains relaunched again
+
+- Second window-death sweep at ~00:28 (70 min after the first): both
+  chains killed mid-round again (r56 / load r3, each ~15/45 min in,
+  clean partials: r56 54134 lines, load-r3 79261 lines, 0 markers,
+  0 hits, armed to the last line). Relaunched immediately (main r56 at
+  00:29:07 run/ww-chain2-s31c.log; load r3 at 00:29:11
+  run/ww-loadchain-s31c.log; both verified armed).
+- Sweep cadence observation for the successor: ~70 min between sweeps
+  this session (23:18, 00:28); each window completes at least one full
+  round per chain (r54+r55 full / load r1+r2 full in the first two
+  windows). If a future session sees both chains dead again with no new
+  PAUSE-NOTE, relaunch per the close-out recipe — the standing state
+  and verdict ledger live in this file.

@@ -40,3 +40,9 @@
 # LOAD driver root:
   50389    9865       01:38 /bin/bash -c . '/home/william/.zcode/cli/exec/shell-
   50400   50389       01:38 /bin/bash ./run/ww-loadchain.sh wwload 100 12381 2
+
+# second sweep kill ~00:28 (r56/load-r3 15-min clean partials, 0 markers); relaunched 00:30:31:
+  62698       01:24 /bin/bash -c . '/home/william/.zcode/cli/exec/shell-snapshot
+  62709       01:24 /bin/bash ./run/ww-chain2.sh ww-s2 100 12371 56
+  62738       01:20 /bin/bash -c . '/home/william/.zcode/cli/exec/shell-snapshot
+  62749       01:20 /bin/bash ./run/ww-loadchain.sh wwload 100 12381 3
