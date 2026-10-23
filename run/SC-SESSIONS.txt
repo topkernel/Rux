@@ -2798,3 +2798,79 @@ clean (ff); v2 VERIFICATION BOOT sc192 RUNNING PAST EVERY PRIOR GATE.
   1s-scale preempt-held episodes stall readers mid-critical-section and
   the rwlock word never returns to 0. Consistent with parkdump-off ->
   GetService answered 4/4 (less UART burn under cli).
+
+SESSION R NINTH LEG MIDPOINT (sc192/sc193 verdicts + v3/v4, 06:0x-07:1x):
+V2 CURES THE CLEAN-EXIT AND USEGV CLASSES; THE KILL PATH NEEDED THE
+PICK GATE (v4); THE WEDGE LOOP IS CLOSED USERSPACE-SIDE; RISCV64 UNIT
+TEST PANICS (MAIN-SIDE, UNATTRIBUTED).
+
+- sc192 final (v2 kernel, full 45 min): 1072 PREEMPT-LEAK lines total,
+  but the ONLY permanent strand was the kill-path one (see below); the
+  62+ clean exits and 52+ USEGV deaths all passed clean. GetService
+  answered 4/4 parkdump-off; RS (622) went PAST sc190's stall (SetBrightness
+  then txn #42 code 0xb sent, embedded at line 22551); RS then waited ~8
+  min silent in FUTEX_WAIT on its own stack word (0x7fffffffc244 val=2)
+  and RETRIED 0xb - composer_host stopped serving direct HDI txns after
+  its early phase. No SA 10; 8-color oracle to the end.
+- sc192 KILL-PATH STRAND (the v2 gap): AMS killed launcher tgid 5111;
+  KILLDUMP showed tid 5129 (OS_FFRT_0_0, in futex WAIT_PRIVATE val=2)
+  state=0x0 on_cpu=true cpu=1, stime frozen; cpu1 then stranded with
+  rip=wfi+5, pc=0x10000, held 60+ s, ZERO TERM-DESCHED prints (pc was 0
+  at helper time - v2's print only fires on pc!=0). Third terminal shape:
+  SIGKILL teardown of an on-CPU FFRT/IPC thread.
+- v3 (c90f80b0): replaced the helper's 8-round terminal bare-wfi park
+  (which NEVER re-enters schedule - a permanent CPU loss whenever the
+  re-link race outlasts the budget) with a paced retry: enable_irq+wfi
+  between rounds. Plus a budgeted TERM-DESCHED engaged print.
+- sc193 (v3 kernel, parkdump off, 45 min): 4 launcher-kill KILLDUMPs
+  with ZERO strands for ~25 min (v3 working), 8 engaged prints (all
+  pc=0x0; budget consumed in min 1), both CPUs sampling. BUT launcher
+  tgid 5033's IPC thread (tid 5034) stranded cpu1 at ~min 25 for 13+
+  min: first sampler hit in outb+22 (its own kill-dump print!), then
+  wfi+5 with pc=0x10000 frozen - the paced loop cycled (timer wakes
+  arrived, sampler ran) but every schedule() returned unswitched. The
+  discipline exempts DEAD; the helper re-asserts DEAD+dequeue+ownership-
+  release each round; TERM_RETRY_N never consumed (pc always 0 at loop
+  top; the 0x10000 re-lands with each wake IRQ - the pa15 producer).
+  Remaining resolver: the CLASS PICK returning the re-linked DEAD task
+  (racer rewrote state to RUNNING between dequeue and pick -> prev_running
+  re-queued it -> CFS walk handed it back). No SA 10; wedge re-formed
+  (word 0x7ff0009e6c14, readers=16, age 1320s at end).
+- v4 (7a8044e0): DEAD-PICK GATE in all three class gates of
+  pick_next_task, mirroring the PID-0 poisoned-entry gate (drop + report
+  + pair nr_running + fall through to idle). A DEAD task must never be
+  handed a CPU no matter who re-linked it. Plus TERM-DESCHED stuck
+  forensics at power-of-two rounds (state/pc/claim) for the next strand.
+  sc194 (launched 07:11, v4 kernel, parkdump off) is the verification
+  roll.
+- WEDGE LOOP CLOSED (sc193 census, userspace-side): devmgr (tgid 336)
+  word 0x7ff0009e6c14 freezes at readers=16 - its own FFRT/IPC pool
+  holding the service-registry rdlock ACROSS blocking binder calls out
+  into the display stack; the display stack's threads need GetService
+  (code 3) FROM devmgr (its IPC threads SERVER-OWING txn2785/txn4678
+  code 3 parked as writers); tid 442's hist: sent txn485 to tid 374 =
+  DISP session server (DoHotPlugCallback) while OpenGLWrapper logs
+  "EglWrapperLayer Init Failed" (the libGLES_mali-missing retry loop
+  from the sc190 profile). Circular: devmgr readers -> display-stack
+  calls -> display stack -> GetService(devmgr). RS's endless 0xb retry
+  is collateral. Kernel-side wake/semantics exonerated (sc185 + sc193
+  census consistent). The producers that make the freeze WINDOW long
+  enough to matter are the 1s-scale vCPU-residency losses (my sc190 WW
+  profile + coordinator's ground truth: UART port-IO VM exits, host
+  deschedules - console-async is the lever, queued greenfield in my
+  lane after the dodge race).
+- RISCV64 UNIT TEST PANIC (finding, main-side attribution pending):
+  make test (riscv64, unit-test kernel from merged ea4e4e99 + my notes/
+  v3 commits - none of which touch boot paths) KERNPANICs during a
+  suite boot: pfault badaddr=0xffffffff80c00000 sp=0xffffffff80bfffe0
+  (the stack word read at sp+0x20 crosses the stack-top boundary) with
+  epc=trap_entry and the second fault in handle_page_fault's read_volatile
+  (trap.rs:1168, the KERNPANIC stack-dump reader): the boot-time kernel
+  stack ran down to its very top; the trap printer double-faulted. The
+  survivor run is still going; if it reproduces, pa15's +733-line
+  syscost merge (or perf-audit) is the likely depth culprit - needs a
+  main-baseline bisect, NOT mine (v1-v4 touch only exit/pick paths).
+- QEMU discipline note: three identical 'make test' executions were
+  spawned by the harness (original + 2 retries); I killed the duplicates
+  by exact PID after verifying parentage. If a background command
+  auto-retries, check for orphans before launching QEMUs.
