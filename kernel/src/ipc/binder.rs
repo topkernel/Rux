@@ -3115,7 +3115,14 @@ fn binder_ioctl(file: &crate::fs::File, request: u32, arg: usize) -> i64 {
             match existing {
                 Some(t) => t,
                 None => {
-                    let t = Arc::new(BinderThread::new(tid, crate::process::current_pid() as u32));
+                    // tgid, NOT current_pid(): process::current_pid()
+                    // returns the per-TASK pid (a worker thread's tid) —
+                    // stamping that as this thread's tgid made the sc161
+                    // ownership gate reject the daemon's own work.
+                    let tgid = crate::sched::current()
+                        .map(|t| unsafe { (*t).tgid() } as u32)
+                        .unwrap_or(0);
+                    let t = Arc::new(BinderThread::new(tid, tgid));
                     pm(world, &proc).im().threads.push(t.clone());
                     t
                 }
@@ -5167,12 +5174,20 @@ fn translate_object(sender: &Arc<BinderProc>, obj: &mut FlatBinderObject, target
                         match sp.im().nodes.iter().find(|n| n.ptr == ptr).cloned() {
                             Some(n) => n,
                             None => {
+                                // reg_tgid must be the registering
+                                // THREAD's TGID (sc161 bug: current_pid()
+                                // is the per-task tid, so worker-registered
+                                // nodes got reg_tgid=worker_tid and the
+                                // ownership gate rejected every reader).
+                                let reg_tgid = crate::sched::current()
+                                    .map(|t| unsafe { (*t).tgid() } as u32)
+                                    .unwrap_or(0);
                                 let n = Arc::new(BinderNode::new(
                                     world.next_id,
                                     ptr,
                                     obj.cookie,
                                     sender.id,
-                                    crate::process::current_pid() as u32,
+                                    reg_tgid,
                                     obj.flags,
                                 ));
                                 world.next_id += 1;
