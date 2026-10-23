@@ -2289,3 +2289,38 @@ SESSION R FIFTH LEG ADDENDUM 2 (sc178 A/B readback, 20:4x): FILEMAP FIX
 - Reroll plan: wait for the 2 foreign QEMUs to hit their 2700s timeouts
   (~20:53/54), then boot sc179 solo on the fixed kernel - the
   sc167/sc174 recipe (0-1 foreign QEMU converged; every 2+ boot died).
+
+SESSION R FIFTH LEG ADDENDUM 3 (sc179 readback + quiet-kernel work,
+  21:0x-21:3x): SC179 = DEEPEST BOOT EVER; WEDGED AT 16 MIN BY THE
+  HILOGD BACKPRESSURE FAMILY (the b128/b129 mechanism, rediscovered).
+- sc179 (fixed kernel, SOLO from 20:53): fastest boot of the campaign
+  (36 AppSpawnChild lines by min 2.5), launcher ALIVE and narrating
+  (Launcher_Default / LauncherAbilityManager / CommonBundleManager
+  query loop, 30k+ alog lines, Wallpaper+RS client stack active, 20
+  IPCWorkThread spawns, 160 route=child-looper deliveries, zero OOM
+  faults, zero kills) - but OnForeground/ArkUI never reached; the
+  launcher was still iterating its bundle-init at min 15.
+- WEDGE at 21:09 (min 16): userspace narration froze mid-line; from
+  then on EVERY family process (samgr tid 317, foundation tid 626, 9
+  launcher threads, systemui) sat in the writev(fd=3)->hilogInput
+  EAGAIN retry loop (clock_gettime+futex rings) - hilogd STOPPED
+  DRAINING. KILLDUMP stime table: hilogd.server 9150 ticks +
+  hilogd.rd_kmsg 9.2k ticks on kernel pages (VmaManager::find_mut /
+  VMA+NsRef drop paths) - hilogd burning whole seconds of kernel time
+  instead of reading; the launcher itself burned >100s of kernel fault
+  time (filemap faults + VMA lookups per page).
+- MECHANISM (matches the DfxSwitch::SyscallTrace doc verbatim - the
+  b128/b129 hunt already convicted this shape): kernel print volume ->
+  hilogd.rd_kmsg copies every line out of /dev/kmsg -> eats a vCPU ->
+  hilogd.server falls behind -> hilogInput socket fills -> every
+  logger in the system wedges in EAGAIN retry loops. sc179's kernel
+  prints were HALF the serial log (34.8k of 69k lines); APPMAP alone
+  was 17.5k lines (the APP-PARK VMA-table dumps, ~2.9k lines per dump).
+- QUIET-KERNEL FIX (committed next): new dfx switch "parkdump" gates
+  the RWFRZ-PARK + APP-PARK (+APPMAP+fd-table) dump family; the fd3
+  applog capture now rides under the existing dfx=writetrace. All OFF
+  by default - the sc1xx chain questions they answered are settled.
+  Keeps: APPTXN route=, SAREG, binder-stall, STALLWATCH, WW lines
+  (~2.6k/boot) for milestone-boot diagnosis.
+- sc180 plan: quiet kernel, solo host, judge whether the launcher
+  finishes init before the (now much later) hilogd saturation point.

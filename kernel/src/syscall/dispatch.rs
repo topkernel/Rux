@@ -817,7 +817,13 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
             || comm == "appspawn"
             || comm.contains("foundation")
             || comm.contains("sa_main");
-        if family {
+        // dfx=writetrace: the fd3 hilog writev capture settled the
+        // chain questions (sandbox narration, SA-501 attempts); in
+        // milestone boots it only adds ~2.4k kernel lines for
+        // hilogd.rd_kmsg to copy (the b128/b129 vCPU lesson).
+        if family
+            && crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::WriteTrace)
+        {
             // sc157: comm-based gating. The sc155/156 pid latch (first
             // family task to write fd3 = "the daemon") was fragile — in
             // sc156 an earlier appspawn-family writer latched a

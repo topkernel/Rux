@@ -1508,7 +1508,11 @@ pub fn sys_futex_handler(args: &[u64; 6]) -> i64 {
             static PARKED_DUMPS: core::sync::atomic::AtomicU32 =
                 core::sync::atomic::AtomicU32::new(0);
             let n = PARKED_DUMPS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-            if n < 16 {
+            // dfx=parkdump: each park dump costs hundreds of UART+kmsg
+            // lines (hilogd.rd_kmsg eats a vCPU copying them out of
+            // /dev/kmsg — the b128/b129 lesson), so the park-dump family
+            // is OFF in launcher-milestone boots.
+            if n < 16 && crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::ParkDump) {
                 if let Some(t) = crate::sched::current() {
                     let tk = unsafe { &*t };
                     let comm = tk.comm();
@@ -1559,7 +1563,16 @@ pub fn sys_futex_handler(args: &[u64; 6]) -> i64 {
                         core::sync::atomic::AtomicU32::new(0);
                     let n =
                         APPPARK_DUMPS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
-                    if n < 6 {
+                    // dfx=parkdump: the APP-PARK dump prints the child's
+                    // whole lib-region VMA table (APPMAP, ~2.9k lines per
+                    // dump in sc179) + fd table + syscall rings — pure
+                    // chain forensics, OFF in milestone boots (b128/b129
+                    // hilogd.rd_kmsg lesson).
+                    if n < 6
+                        && crate::dfx::switches::enabled(
+                            crate::dfx::switches::DfxSwitch::ParkDump,
+                        )
+                    {
                         crate::pr_warn!(
                             "APP-PARK #{} tid {} comm='{}' uaddr={:#x} val={:#x} op={:#x}",
                             n,
