@@ -4877,11 +4877,18 @@ fn binder_transaction(
             }
         }
 
-        // Name match on the first 192 parcel bytes (UTF-16LE
-        // "display_composer_service" prefix "display_co" = 10 chars).
-        const NAME: [u8; 20] = [
+        // Name match on the first 192 parcel bytes, both encodings: the
+        // samgr-family parcels carry UTF-16LE "display_composer_service"
+        // while the HDI IServiceManager's GetService writes the service
+        // name as ASCII bytes (sc184: RS's GetService parcel was 92 bytes
+        // — too small for the UTF-16 form, so the ASCII form is what the
+        // composer lookup actually uses). Match "display_co" in either.
+        const NAME16: [u8; 20] = [
             0x64, 0x00, 0x69, 0x00, 0x73, 0x00, 0x70, 0x00, 0x6c, 0x00, 0x61,
             0x00, 0x79, 0x00, 0x5f, 0x00, 0x63, 0x00, 0x6f, 0x00,
+        ];
+        const NAME8: [u8; 10] = [
+            0x64, 0x69, 0x73, 0x70, 0x6c, 0x61, 0x79, 0x5f, 0x63, 0x6f,
         ];
         let mut name_hit = false;
         if !reply && tr.data_buffer != 0 && data_size >= 4 {
@@ -4894,9 +4901,21 @@ fn binder_transaction(
                     n,
                 ) == 0
             } {
-                'outer: for i in 0..n.saturating_sub(NAME.len()) {
-                    for (k, &b) in NAME.iter().enumerate() {
+                'outer: for i in 0..n.saturating_sub(NAME16.len()) {
+                    for (k, &b) in NAME16.iter().enumerate() {
                         if buf[i + k] != b {
+                            // sc184 follow-up: also try the ASCII form at
+                            // the same offset (mutually exclusive encodings
+                            // can never both match at i).
+                            if i + NAME8.len() <= n {
+                                for (j, &a) in NAME8.iter().enumerate() {
+                                    if buf[i + j] != a {
+                                        continue 'outer;
+                                    }
+                                }
+                                name_hit = true;
+                                break 'outer;
+                            }
                             continue 'outer;
                         }
                     }
