@@ -166,8 +166,14 @@ fn shrink_inactive_list(
     sc: &mut ScanControl,
 ) {
     if lru == LRU_INACTIVE_FILE {
-        // Reclaim page cache pages via the shrinker interface
-        let cache_reclaimed = crate::fs::page_cache::get_page_cache().shrink(nr_to_scan);
+        // Reclaim page cache pages via the shrinker interface. Direct
+        // reclaim only (this path is the page_alloc slowpath, task
+        // context, IN_DIRECT_RECLAIM-serialized): shrink_reclaim adds
+        // dirty-frame writeback so abandoned unflushed MAP_SHARED pages
+        // become evictable instead of a permanent drain. The mmu_init
+        // PT-alloc retry must NOT use this variant (per-mm PteLock held).
+        let cache_reclaimed =
+            crate::fs::page_cache::get_page_cache().shrink_reclaim(nr_to_scan);
         sc.nr_reclaimed += cache_reclaimed;
     } else if lru == LRU_INACTIVE_ANON && sc.may_unmap && swap::nr_active_swap() {
         // Reclaim anonymous pages via swap
