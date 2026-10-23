@@ -1156,12 +1156,33 @@ fn handle_timer_tick(regs: &mut PtRegs, cpu: usize) {
                 }
             }
             let cur = crate::sched::current();
+            let cur_ptr = match cur {
+                Some(t) => t as *mut crate::process::task::Task as usize,
+                None => 0,
+            };
             let (pid, pc) = unsafe {
-                match cur {
-                    Some(t) => ((*t).pid() as u64, (*t).preempt_count() as u64),
-                    None => (0, 0),
+                if cur_ptr != 0 {
+                    let t = cur_ptr as *mut crate::process::task::Task;
+                    ((*t).pid() as u64, (*t).preempt_count() as u64)
+                } else {
+                    (0, 0)
                 }
             };
+            // pa16 calibration (perf line, 2026-10-24): age is a WALL-CLOCK
+            // gap between timer-IRQ arrivals, which conflates three causes
+            // the in-guest clock cannot separate: a real IF=0 window, host
+            // vCPU steal (the CPU simply not scheduled — dominant under
+            // multi-QEMU host contention), and tickless-style idle (no
+            // timer due, nothing to deliver). Their EFLAGS-sampling probe
+            // measured max closed-cli 4 ms while this probe printed
+            // age=1000ms lines — steal/idle, not IRQ-off. Annotation (not
+            // silence): when the recovery tick lands on the idle task the
+            // gap was idle/steal by construction, so say so and skip the
+            // culprit walk; a real-task frame keeps the walk as a triage
+            // hint only — corroborate with an EFLAGS sampler before
+            // believing IF=0.
+            let is_idle =
+                cur_ptr != 0 && cur_ptr == crate::sched::sched::idle_task_ptr(cpu);
             let msg: &[u8] = b"\nWW: IRQ-OFF-WINDOW cpu=";
             for &b in msg {
                 putchar(b);
@@ -1203,8 +1224,11 @@ fn handle_timer_tick(regs: &mut PtRegs, cpu: usize) {
             // stack and fault on its first unmapped page (KERNPANIC
             // pfault badaddr=user-page, rip=handle_timer_tick). A user
             // frame carries no kernel return addresses; skip the walk.
+            // pa16: an idle recovery frame likewise implicates nobody —
+            // the gap was idle/steal, not a culprit call chain.
             let (lo, hi) = crate::sched::sched::kernel_text_window();
             if !regs.user_mode()
+                && !is_idle
                 && regs.rsp >= 0xffff_8000_0000_0000
                 && crate::sched::sched::kernel_ptr_canonical(regs.rsp as *const u8)
             {
@@ -1222,6 +1246,11 @@ fn handle_timer_tick(regs: &mut PtRegs, cpu: usize) {
                 }
             } else if regs.user_mode() {
                 let msg: &[u8] = b" user-frame";
+                for &b in msg {
+                    putchar(b);
+                }
+            } else if is_idle {
+                let msg: &[u8] = b" idle-wake";
                 for &b in msg {
                     putchar(b);
                 }
