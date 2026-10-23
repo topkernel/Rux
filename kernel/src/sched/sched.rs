@@ -3100,7 +3100,15 @@ pub fn wake_up_enqueue(task: *mut Task) -> bool {
                                 w3_fz_naming = naming;
                                 w3_fz_exec = exec;
                                 w3_fz_djif = jif - prev_jif;
-                                w3_fz_retaddr = (*task).thread.callee.ret_addr as u64;
+                                #[cfg(feature = "x86_64")]
+                                {
+                                    w3_fz_retaddr =
+                                        (*task).thread.callee.ret_addr as u64;
+                                }
+                                #[cfg(not(feature = "x86_64"))]
+                                {
+                                    w3_fz_retaddr = (*task).thread.ra as u64;
+                                }
                                 w3_fz_sp = sp as u64;
                                 w3_fz_w[0] =
                                     unsafe { core::ptr::read_volatile(sp as *const u64) };
