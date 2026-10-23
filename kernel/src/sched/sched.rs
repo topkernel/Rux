@@ -1834,6 +1834,27 @@ pub fn schedule_dead_never_returns() {
         // out for good. wfi needs IF=1; force it on (a dead task holds
         // no critical section to protect).
         if rounds >= 8 {
+            // v4 forensics: name the stuck shape at power-of-two rounds so
+            // the next strand says WHY schedule() keeps returning — state
+            // rewritten by a racer (not DEAD), leaked count back (0x10000),
+            // or a pick that keeps resolving us. Budget: log2 rounds.
+            if rounds.is_power_of_two() && rounds <= 4096 {
+                if let Some(cur) = current() {
+                    let st = unsafe { (*cur).state() };
+                    let pc = unsafe { (*cur).preempt_count() };
+                    let claim = unsafe {
+                        (*cur).running_on_cpu.load(core::sync::atomic::Ordering::Acquire)
+                    };
+                    crate::pr_warn!(
+                        "TERM-DESCHED stuck pid={} rounds={} state={:#x} pc={:#x} claim={} rip_paced",
+                        unsafe { (*cur).pid() },
+                        rounds,
+                        st.bits(),
+                        pc,
+                        claim
+                    );
+                }
+            }
             crate::arch::cpu::enable_irq();
             // SAFETY: plain hint instruction, no side effects.
             crate::arch::cpu::wfi();
@@ -2305,7 +2326,18 @@ unsafe fn pick_next_task(grq: &mut GlobalRunQueue, cpu_id: usize, prev: *mut Tas
             // next class instead of context-switching onto a garbage
             // context (observed: PICK-LIVE-FORCED pid=0 → resume at a
             // stale boot-stack sp → fatal).
-            if (*task).pid() == 0 {
+            // DEAD-PICK GATE (sc193, v4): a task whose state reads DEAD
+            // must never be handed a CPU either — the exit path dequeued
+            // it, so a queue entry here means a racing wake/heal re-linked
+            // a dying task between the terminal deschedule's dequeue and
+            // this pick. Resuming it re-enters the wfi park loop in the
+            // dead context and strands the CPU for the rest of the boot
+            // (launcher tgid 5033/5034: slot named the dead IPC thread
+            // for 13+ min, rip=wfi+5, preempt_count re-leaked to 0x10000
+            // by every interrupt that woke the park). Drop it like a
+            // poisoned entry; the terminal deschedule loop keeps
+            // re-asserting DEAD+dequeue, so the next round picks idle.
+            if (*task).pid() == 0 || (*task).state().is_dead() {
                 report_poisoned_rq_entry(cpu_id, task as usize);
                 grq.nr_running.fetch_update(
                     core::sync::atomic::Ordering::SeqCst,
@@ -2340,8 +2372,9 @@ unsafe fn pick_next_task(grq: &mut GlobalRunQueue, cpu_id: usize, prev: *mut Tas
     //    Skipped entirely while the RT bandwidth is throttled (batch 8).
     if !grq.rt_rq.is_empty() && !RT_THROTTLED.load(core::sync::atomic::Ordering::Acquire) {
         if let Some(task) = grq.rt_rq.pick_next_cpu(cpu_id, prev) {
-            // PID-0 GATE — see the Deadline block above.
-            if (*task).pid() == 0 {
+            // PID-0 GATE — see the Deadline block above. Also the
+            // DEAD-PICK GATE (sc193, v4) — see the Deadline block above.
+            if (*task).pid() == 0 || (*task).state().is_dead() {
                 report_poisoned_rq_entry(cpu_id, task as usize);
                 grq.nr_running.fetch_update(
                     core::sync::atomic::Ordering::SeqCst,
@@ -2369,7 +2402,11 @@ unsafe fn pick_next_task(grq: &mut GlobalRunQueue, cpu_id: usize, prev: *mut Tas
             // word reading 0 (= cpu 0), mark_picked_on_cpu published it
             // LIVE ("PICK-LIVE-FORCED pid=0") and the switch resumed a
             // stale boot-stack context (rsp=0x10a870).
-            if (*task).pid() == 0 {
+            // DEAD-PICK GATE (sc193, v4) — see the Deadline block above;
+            // the CFS queue is where the re-linked launcher IPC thread
+            // (tgid 5033) was re-picked from, parking cpu1 in wfi+5 for
+            // 13+ min.
+            if (*task).pid() == 0 || (*task).state().is_dead() {
                 report_poisoned_rq_entry(cpu_id, task as usize);
                 grq.nr_running.fetch_update(
                     core::sync::atomic::Ordering::SeqCst,
