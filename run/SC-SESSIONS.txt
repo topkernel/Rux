@@ -2158,3 +2158,26 @@ ROUTE TRACER CLOSES THE KERNEL CHAIN, NODE COLLISION CONFIRMED LIVE.
     com.ohos.launcher (several times) + IOsAccount proxy EPIPE family
     (sc147) - watch whether the launcher UI ability resolve blocks the
     milestone even after routing is fixed.
+
+SESSION R THIRD LEG ADDENDUM (sc168-172, 11:4x-12:2x): THE WEDGE IS
+LOAD-CORRELATED DICE, NOT THE KERNEL; SOLO BOOTS CONVERGE.
+- sc168/sc169/sc170 (node-fix kernel) ALL wedged pre-children: multiple
+  foundation threads parked >90s (tids 784/637/1210/1216, rings ending
+  in the prctl/getpgid/mprotect/mmap/sigprocmask startup family), samgr
+  tid parked, sc169 even re-spawned appspawn (pid 1340 second
+  generation hammering samgr code=0xc - sc167 had ZERO such calls).
+- sc171 = the bisect: STORM-FIX-ONLY kernel (29a49444 rebuilt in the
+  sc166k scratch worktree - the EXACT binary family sc167 booted
+  children with) ALSO wedged the same way. The node-identity fix is
+  exonerated (also argued inert pre-children: all pre-child lookups
+  key reg_tgid==own-tgid identically).
+- Correlation that survived: sc167 booted SOLO at host load 4.3 with
+  zero foreign QEMU contention and converged; every wedge ran while 2+
+  QEMUs (mine or foreign) contended (load 5-7.3). The foundation safwk
+  loader's 100s phase-wait convergence is the fragility point (sc155
+  family); KVM tick delay stretches it past convergence.
+- sc172 (node-fix kernel, SOLO at load 1.1, 12:11): slower than sc167
+  (no children at 7.5 min) but ZERO STALLWATCH and its 69 IRQ-OFF lines
+  symbolize to wfi/cpu_idle_loop - the idle-tick-loss weather family
+  (CPU idle 1s+, first tick lands in wfi), not real windows. Letting it
+  run its 45 min.
