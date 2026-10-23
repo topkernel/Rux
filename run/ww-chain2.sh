@@ -23,6 +23,7 @@ PORT="${3:-12371}"
 i="${4:-1}"
 LAST=$((i + RUNS - 1))
 STOP="$ROOT/run/$TAG.stop"
+rm -f "$STOP"
 
 while [ "$i" -le "$LAST" ]; do
     [ -f "$STOP" ] && { echo "[chain] stop file, ending after $((i-1)) runs"; break; }
