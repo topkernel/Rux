@@ -195,13 +195,27 @@ impl<'a> fmt::Write for BufferWriter<'a> {
 /// 2. If level <= console_loglevel, writes to the ring buffer AND emits
 ///    synchronously to the console UART (review批次8: the console path was
 ///    missing entirely — kernel messages were invisible outside panics)
+///
+/// The console_loglevel filter here drops the message BEFORE the ring:
+/// that is a quiet-boot cost guard for internal kernel traffic, but it
+/// is NOT Linux /dev/kmsg semantics — userspace kmsg writes must always
+/// reach the ring (see printk_ring_always, pa9).
 pub fn printk(level: u8, args: fmt::Arguments) {
     // Perf: filter BEFORE formatting (same rationale as printk_ln below —
     // discarded messages must not pay the fmt pass).
     if level > CONSOLE_LOGLEVEL.load(Ordering::Relaxed) {
         return;
     }
+    printk_ring_always(level, args);
+}
 
+/// printk variant with Linux devkmsg semantics: the record ALWAYS enters
+/// the printk ring; CONSOLE_LOGLEVEL only gates the console emission.
+/// The old /dev/kmsg write passthrough went through pr_info! and the
+/// printk() pre-filter above, so whenever console_loglevel < 6 the whole
+/// record was dropped before the ring — OH's boot markers written to
+/// /dev/kmsg never reached any hilog consumer (pa9 correctness fix).
+fn printk_ring_always(level: u8, args: fmt::Arguments) {
     // Re-entrancy guard: if already in printk, discard
     let _guard = match PrintkGuard::try_new() {
         Some(g) => g,
@@ -224,8 +238,11 @@ pub fn printk(level: u8, args: fmt::Arguments) {
         write_to_ring_buffer(level, &buf[..text_len], timestamp);
     }
 
-    // Console emit (level filter already passed above)
-    emit_to_console(&buf[..text_len]);
+    // Console emit (level gated here: printk() pre-filtered already,
+    // printk_ring_always callers pass user-chosen levels).
+    if level <= CONSOLE_LOGLEVEL.load(Ordering::Relaxed) {
+        emit_to_console(&buf[..text_len]);
+    }
 }
 
 /// Whole-record console atomicity flag: with several harts printing
@@ -1118,10 +1135,22 @@ fn kmsg_file_read(file: &crate::fs::file::File, buf: &mut [u8]) -> isize {
 
 /// Write handler for /dev/kmsg — userspace passthrough (OH's init and
 /// services log boot markers this way). The line lands in the printk
-/// ring (so /dev/kmsg readers see it) and on the console, exactly like
-/// dev_dbg-style writes on Linux.
+/// ring (so /dev/kmsg readers see it) unconditionally — Linux devkmsg
+/// semantics: the ring always records, CONSOLE_LOGLEVEL only gates the
+/// console. The old pr_info! passthrough went through printk()'s
+/// pre-ring level filter and was dropped whole whenever console_loglevel
+/// < 6 (pa9: OH's boot markers never reached any hilog consumer).
+/// An optional `<N>` level prefix (N = 0..7) is honored like Linux;
+/// without one the record logs at KERN_INFO.
 fn kmsg_file_write(_file: &crate::fs::file::File, buf: &[u8]) -> isize {
-    crate::pr_info!("[kmsg] {}", core::str::from_utf8(buf).unwrap_or("<binary>"));
+    let text = core::str::from_utf8(buf).unwrap_or("<binary>");
+    let (level, text) = match text.as_bytes() {
+        [b'<', d, b'>', rest @ ..] if (b'0'..=b'7').contains(d) => {
+            (d - b'0', core::str::from_utf8(rest).unwrap_or(text))
+        }
+        _ => (loglevel::KERN_INFO, text),
+    };
+    printk_ring_always(level, format_args!("[kmsg] {}", text));
     buf.len() as isize
 }
 
@@ -1190,6 +1219,207 @@ pub fn init_kmsg_device() {
     devfs::registry::register_char_device(DEV_KMSG, &KMSG_OPS);
     let _ = devfs::mknod("kmsg", DEV_KMSG, 0o666 | 0o20000);
 }
+
+// ==================== /proc/kmsg Blocking Stream ====================
+//
+// perf-audit (pa9/pa10): hilogd.rd_kmsg reads /proc/kmsg, not /dev/kmsg.
+// The old procfs dynamic-file implementation SNAPSHOTS the whole ring at
+// open and serves the copy from a heap Box; after the snapshot drains,
+// every read returns 0 (EOF). Linux /proc/kmsg is a BLOCKING,
+// record-at-a-time stream (syslog(2) SYSLOG_ACTION_READ semantics:
+// read() blocks until the next record, returns exactly one record,
+// consumes it). OH's kmsg reader relies on the blocking semantics for
+// pacing — against the snapshot it EOF-looped at 60-92K read()/s for
+// the whole boot (~0.5 vCPU, pa1/pa3/pa9/pa10 flood counters).
+
+/// Single-reader gate. Linux fs/proc/kmsg.c: `xchg(&kmsg_open, 1)` — a
+/// second concurrent open gets -EBUSY. Released from the ops close.
+static PROC_KMSG_OPEN: AtomicBool = AtomicBool::new(false);
+
+/// /proc/kmsg open hook (called from procfs_open instead of snapshotting).
+pub fn proc_kmsg_open() -> i32 {
+    if PROC_KMSG_OPEN.swap(true, Ordering::AcqRel) {
+        return -crate::syscall::errno::EBUSY;
+    }
+    0
+}
+
+/// /proc/kmsg close hook: release the single-reader gate.
+fn proc_kmsg_close(_file: &crate::fs::file::File) -> i32 {
+    PROC_KMSG_OPEN.store(false, Ordering::Release);
+    0
+}
+
+/// /proc/kmsg read: one record per call, syslog human format
+/// `<level>[SSSSSS.MMMMMM] pid(N) cpu(M): text\n`, destructive via the
+/// SHARED `read_seq` cursor (the same cursor syslog(2) READ uses —
+/// Linux shares the syslog buffer consumption between klogctl(2) and
+/// /proc/kmsg). Blocks while caught up (no O_NONBLOCK mode exists for
+/// /proc/kmsg on Linux); a too-small buffer truncates but still
+/// consumes the record.
+///
+/// The "block" is a ~10 ms timed poll (kmsg_poll_sleep), NOT a
+/// KMSG_READ_WQ wait. pa11: parking the reader on KMSG_READ_WQ made
+/// wake_up_all hold the queue lock across wake_up_process (WQ->GRQ,
+/// the R12-1 deferred-wake discipline) while scheduler-internal
+/// diagnostics printk under a GRQ lock (W3-RUNWAKE-REFUSED et al.) —
+/// a textbook ABBA that wedged both CPUs. The wake-side invariant
+/// ("no GRQ-held path takes a waitqueue lock") is violated by
+/// scheduler prints that predate this reader and is not enforceable
+/// from the printk lane; a timer-woken poll needs no queue entry, so
+/// the printk-side wake_up_all never holds the WQ lock against a
+/// waiter. Cost: up to ~1 jiffy of record-delivery latency, vs the
+/// 60-92K EOF reads/s the snapshot produced.
+fn proc_kmsg_read(_file: &crate::fs::file::File, buf: &mut [u8]) -> isize {
+    loop {
+        // Produce one record if the cursor has not caught up.
+        let produced = {
+            let mut rb = RING_BUFFER.lock_irqsave();
+            let next_seq = rb.next_seq;
+            if rb.read_seq < next_seq {
+                // Skip records the ring has already overwritten.
+                let oldest = next_seq.saturating_sub(RING_BUFFER_CAPACITY as u64);
+                let seq = rb.read_seq.max(oldest);
+                let idx = (seq % RING_BUFFER_CAPACITY as u64) as usize;
+                let record = &rb.records[idx];
+                if record.text_len == 0 || record.seq != seq {
+                    // Overwritten: jump the cursor to live records.
+                    rb.read_seq = next_seq;
+                    drop(rb);
+                    continue;
+                }
+                let mut header_buf = [0u8; SYSLOG_HEADER_LEN];
+                let header_len = format_syslog_header(
+                    &mut header_buf,
+                    record.level,
+                    record.timestamp,
+                    record.pid,
+                    record.cpu_id,
+                );
+                let text_bytes = &record.text[..record.text_len as usize];
+
+                // Stage header+text in one line buffer, then truncate to
+                // the caller's request (record consumed regardless).
+                let mut line = [0u8; SYSLOG_HEADER_LEN + RECORD_TEXT_SIZE + 1];
+                let mut len = 0usize;
+                let hcopy = header_len.min(line.len());
+                line[..hcopy].copy_from_slice(&header_buf[..hcopy]);
+                len += hcopy;
+                let tcopy = text_bytes.len().min(line.len() - len);
+                line[len..len + tcopy].copy_from_slice(&text_bytes[..tcopy]);
+                len += tcopy;
+                if len > 0 && len < line.len() && line[len - 1] != b'\n' {
+                    line[len] = b'\n';
+                    len += 1;
+                }
+
+                let copy = len.min(buf.len());
+                buf[..copy].copy_from_slice(&line[..copy]);
+                rb.read_seq = seq + 1;
+                copy as isize
+            } else {
+                -1 // caught up: go sleep one poll interval
+            }
+        };
+        if produced >= 0 {
+            return produced;
+        }
+
+        if !kmsg_poll_sleep(10) {
+            // No timer available (pool exhausted): fail soft rather
+            // than hot-spin — the caller retries like EAGAIN.
+            return -(crate::syscall::errno::EAGAIN as isize);
+        }
+    }
+}
+
+/// Interruptible ~ms timed sleep for the /proc/kmsg poll loop (the
+/// evdev sleep_ms_interruptible discipline: one-shot jiffy timer as
+/// the only waker, state-first re-check, NEW-C2 self-dequeue on a
+/// racing wake). Returns false when no task/timer was available.
+fn kmsg_poll_sleep(ms: u64) -> bool {
+    use crate::process::task::{Task, TaskState};
+
+    let target =
+        crate::drivers::timer::get_jiffies() + crate::drivers::timer::msecs_to_jiffies(ms);
+
+    let current = match crate::sched::current() {
+        Some(c) => c as *mut Task,
+        None => return false,
+    };
+    // SAFETY: current is the running task (we are it); pid() is a const read.
+    let pid = unsafe { (*current).pid() };
+
+    let timer_id = crate::timer::add_timer_wakeup(target, pid);
+    if timer_id == 0 {
+        return false;
+    }
+
+    loop {
+        if crate::drivers::timer::get_jiffies() >= target || crate::signal::signal_pending() {
+            crate::timer::del_timer(timer_id);
+            return true;
+        }
+        // Mark INTERRUPTIBLE BEFORE the final re-check (state-first
+        // lost-wakeup discipline, same as sys_nanosleep).
+        // SAFETY: current is the running task's pointer.
+        unsafe {
+            (*current).set_state(TaskState::new(TaskState::INTERRUPTIBLE));
+        }
+        if crate::drivers::timer::get_jiffies() >= target || crate::signal::signal_pending() {
+            // SAFETY: current is the running task's pointer.
+            unsafe {
+                (*current).set_state(TaskState::new(TaskState::RUNNING));
+            }
+            // A racing wake may have enqueued us while still executing —
+            // take ourselves back off (NEW-C2 discipline).
+            // SAFETY: current is the running task's pointer.
+            unsafe {
+                crate::sched::dequeue_task(&*current);
+            }
+            crate::timer::del_timer(timer_id);
+            return true;
+        }
+        // Syscall context runs with SIE=0 — re-arm so the timer tick can
+        // reach this CPU and wake us.
+        crate::arch::cpu::restore_irq(true);
+        crate::sched::schedule();
+        // Woke up (timer expiry or signal): loop tail re-checks and exits.
+    }
+}
+
+/// /proc/kmsg poll: POLLIN iff unconsumed records exist; always writable
+/// (matches kmsg_file_poll's shape; epoll waiters need the edge).
+fn proc_kmsg_poll(_file: &crate::fs::file::File, events: u16) -> u16 {
+    use crate::syscall::misc::poll_events::*;
+    let rb = RING_BUFFER.lock_irqsave();
+    let readable = rb.read_seq < rb.next_seq;
+    drop(rb);
+    let mut ready = 0u16;
+    if readable && events & POLLIN != 0 {
+        ready |= POLLIN | POLLRDNORM;
+    }
+    if events & POLLOUT != 0 {
+        ready |= POLLOUT | POLLWRNORM;
+    }
+    ready
+}
+
+/// /proc/kmsg lseek: the stream is unseekable (Linux no_llseek → ESPIPE).
+fn proc_kmsg_lseek(_file: &crate::fs::file::File, _offset: isize, _whence: i32) -> isize {
+    -(crate::syscall::errno::ESPIPE as isize)
+}
+
+/// FileOps for the /proc/kmsg stream (attached by procfs_get_file_ops
+/// for the node whose content_generator is generate_kmsg).
+pub static PROC_KMSG_OPS: crate::fs::file::FileOps = crate::fs::file::FileOps {
+    read: Some(proc_kmsg_read),
+    write: None,
+    lseek: Some(proc_kmsg_lseek),
+    close: Some(proc_kmsg_close),
+    poll: Some(proc_kmsg_poll),
+    read_at: None,
+};
 
 // ==================== Convenience Macros ====================
 
