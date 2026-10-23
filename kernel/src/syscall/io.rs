@@ -86,6 +86,26 @@ pub fn tty_get_fg_pgrp() -> u32 {
 /// # Returns
 /// Returns number of bytes read on success, negative error code on failure
 pub fn sys_read(args: SyscallArgs) -> i64 {
+    // perf-audit (pa5): EAGAIN-spin census — pa4 proved hilogd.rd_kmsg's
+    // 92K reads/s never hit /dev/kmsg and never EOF; the remaining shape
+    // is a nonblocking fd returning EAGAIN in a hot loop. Census the
+    // (comm, path) of EAGAIN reads once per comm.
+    let ret = sys_read_inner(args);
+    if (ret == -11 || ret == 0) && crate::dfx::syscost::on() {
+        if let Some(file) = unsafe { crate::fs::get_file_fd(args[0] as usize) } {
+            if ret == -11 {
+                crate::dfx::syscost::note_read_eagain(&file);
+            } else {
+                // Covers the pipe/ext4 fast paths the generic-loop EOF
+                // census never sees (pa5: hilogd.rd_kmsg missing there).
+                crate::dfx::syscost::note_read_eof(&file);
+            }
+        }
+    }
+    ret
+}
+
+fn sys_read_inner(args: SyscallArgs) -> i64 {
     use crate::fs::get_file_fd;
     let fd = args[0] as usize;
     let buf = args[1] as *mut u8;
@@ -150,6 +170,13 @@ pub fn sys_read(args: SyscallArgs) -> i64 {
                         return if total > 0 { total as i64 } else { result as i32 as i64 };
                     }
                     if result == 0 {
+                        // perf-audit (pa4): EOF-spin census — a reader
+                        // whose fd hit EOF is a spin candidate (pa3:
+                        // hilogd.rd_kmsg at 92K reads/s never touches
+                        // /dev/kmsg's counters, so it is looping on some
+                        // EOF fd). Record (comm, path) once per comm;
+                        // syscost dumps print the table.
+                        crate::dfx::syscost::note_read_eof(&file);
                         break;
                     }
                     let n = result as usize;

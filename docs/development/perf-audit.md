@@ -18,7 +18,9 @@ Runs (this worktree, `run/`):
 |---|---|---|---|---|
 | `pa-pa1` | main@0727d295 + syscost | syscost=1 | 1560 s (killed; alive) | 66,910 serial lines; full diagnostics on |
 | `pa-pa2` | + softirq-vec counters | syscost=1 | ~360 s (killed) | dump lines interleaved by WW prints; superseded by pa3 |
-| `pa-pa3` | + flood attribution | syscost=1 sprobe=0 | 1500 s | cleaner dumps; flood/process attribution |
+| `pa-pa3` | + flood attribution | syscost=1 sprobe=0 | 780 s (killed) | flood/process attribution, softirq vecs |
+| `pa-pa4` | + kmsg read counters | syscost=1 sprobe=0 | ~180 s (killed) | proves the read flood never touches /dev/kmsg |
+| `pa-pa5/6/7/8` | + EOF/EAGAIN read censuses | syscost=1 sprobe=0 | 60-120 s each (killed) | fd-path census hunts (see F2) |
 
 Host context for all three: KVM q35 `-cpu max -m 4G -smp 2`, shared with
 2-3 foreign-lane QEMUs (load avg ~5.5). Absolute numbers carry that
@@ -74,12 +76,15 @@ event when it does (SC-SESSIONS, session R).
 
 ## 2. Where the CPU goes (tick-mode accounting, syscost)
 
-Per-dump samples (pa1, CPU0; CPU1 tracks within a few %):
+Per-dump samples (pa1 CPU0 and pa3 both CPUs; the two CPUs track within
+a few % — pa1's late dumps that showed only c0 were print interleaving,
+not a frozen vCPU):
 
 | t | user | kernel | idle |
 |---|---|---|---|
-| 60 s | 6.9% | 81.7% | 11.4% |
-| 900 s | 12.6% | 86.0% | 1.2% |
+| pa1 60 s | 6.9% | 81.7% | 11.4% |
+| pa1 900 s | 12.6% | 86.0% | 1.2% |
+| pa3 780 s | c0 12.2% / c1 12.1% | c0 87.0% / c1 86.8% | c0 0.8% / c1 1.1% |
 
 The kernel is CPU-saturated in kernel mode for the whole boot. In the
 reference, the same image spends most CPU in userspace (services doing
@@ -201,13 +206,31 @@ specific amplification. Measured result on current main:
   in the UART TX path (`outb`/`inb` with IF=0) and string-scan/atomic
   regions. The tick-sampling artifact (all queued ticks attribute to
   the re-enable page) explains why it shows as 32% "softirq page".
+  pa3 softirq vec counts add the composition detail: v1 (tcp_timer)
+  and v8 (hrtimer) are raised on *every* timer tick of *every* CPU
+  (199/s each — v1 for a usually-empty TCP table), v4 (block) 98/s
+  early then ~0 once I/O settles; total loop entries 298/s; handler
+  bodies only 0.4% CPU (WW_SOFTIRQ_TICKS 1369 ms over 780 s) — the
+  cost is the dispatch discipline and its cli window, not the handlers.
 - **F2 Flood amplification loop — CONFIRMED (new in the ranking).**
   Slow answers -> userspace retries -> per-call kernel cost x volume.
-  hilogd.rd_kmsg alone: 5.65M reads in the first 60 s (94K/s), ~25% of
-  a vCPU. hilogd.server: 395K socket receives/60 s. connect-retry
-  storm: 7.4M calls. None of these exist at that rate on the Linux
-  reference boot (which finishes before such loops matter). This is
-  the "systemic" multiplier that makes every per-op cost count double.
+  hilogd.rd_kmsg alone: 72.2M reads over 780 s (92.6K/s sustained for
+  the whole boot, ~15-25% of a vCPU). hilogd.server: 395K socket
+  receives in the first 60 s alone. connect-retry storm: 7.4M calls.
+  None of these exist at that rate on the Linux reference boot (which
+  finishes before such loops matter). This is the "systemic"
+  multiplier that makes every per-op cost count double.
+  Attribution status of the hilogd.rd_kmsg read flood (pa4-pa8 hunt):
+  the reads do NOT go to /dev/kmsg (its read counters stay 0 for the
+  whole boot), do not return EOF (fd-path census), do not return
+  EAGAIN (census) — they return data, ~92K times/s, from some other
+  fd. Remaining step: one taskdump of that thread's fdtable while the
+  flood is live (KILLDUMP already prints fd tables). Side finding
+  from the same hunt: userspace writes to /dev/kmsg go through a
+  `pr_info!` passthrough that loglevel 4 drops BEFORE the ring —
+  OH's boot markers written this way never reach any hilog consumer
+  (correctness bug, trivial fix: route the passthrough at KERN_INFO
+  into the ring unconditionally, console-gated).
 - **F3 Scheduler wake-loss — CONFIRMED as the dominant *wall-clock*
   family.** 448 WAKE-RUN-LEAK episodes (kicked >=2x, never picked),
   median 252 s, p90 467 s, max 520 s. The W3-RUNWAKE-REFUSED census
@@ -273,13 +296,15 @@ fault), is verified fixed (see section 6).
    timer-lateness amplification (nanosleep 2.6 s -> ms-class).
    Lane: interrupt/softirq is shared-stable; small diffs, main
    session coordinates.
-3. **Kill the hilogd.rd_kmsg spin (printk/dfx).** 94K read()/s at
-   ~25% of a vCPU. The read/poll pair is implemented; the spin means
-   hilogd's nonblocking drain never sleeps. One targeted capture
-   first: latch the thread's open flags + EAGAIN-vs-record ratio in
-   kmsg_file_read (a 5-line counter), then fix whichever side lies.
-   Lane: this perf-audit line can take it (no conflicts; printk.rs
-   kmsg region is not contended by other lanes right now).
+3. **Kill the hilogd.rd_kmsg spin (printk/dfx).** 92.6K read()/s
+   sustained for the whole boot, ~15-25% of a vCPU. Attribution
+   narrowed to "positive-returning reads on a non-kmsg fd" (pa4-8);
+   the remaining step is one fdtable dump of that thread mid-flood
+   (KILLDUMP prints fd tables; or a one-line fd-path latch in the
+   read fast paths). Also fix the /dev/kmsg write passthrough
+   (loglevel drop swallows OH's boot markers — one-line fix).
+   Lane: this perf-audit line can take both (no conflicts; the
+   printk.rs kmsg region is not contended by other lanes right now).
 4. **ext4 metadata path profiling (fs lane).** open/stat at 100-200x
    is the largest pure per-op factor. Likely dcache/name-lookup
    shape (String allocations visible at 4-6% of ticks) rather than
@@ -304,8 +329,14 @@ fault), is verified fixed (see section 6).
 - `kernel/src/dfx/syscost.rs` — cmdline `syscost=1` (own key, no
   dfx=switches.rs bit): per-syscall {n, wall, max}, >4 ms slow ring
   with comm, per-CPU tick modes (user/kernel/idle), 256-slot kernel-rip
-  page histogram, softirq vec counts, flood-nr per-comm attribution.
+  page histogram, softirq vec counts, flood-nr per-comm attribution,
+  kmsg read counters + EOF/EAGAIN read censuses (fd paths).
   60 s dumps from the timer softirq. Both arches; zero cost when off.
+  Diagnostic caveat: the read censuses add ~5 us to each read that
+  returns 0/EAGAIN while syscost=1 (fd re-resolution); flood-table
+  per-op numbers for read come from the pa3 binary (census-free).
+- `kernel/src/printk.rs` — kmsg read counters (records/EAGAIN/sleeps/
+  first-reader flags) for the spin hunt.
 - `run/pa-boot.sh` — quiet-OH measurement boot (snapshot shared disks,
   private reflink userdata) + host-side serial timestamping.
 - `run/patstamp.py` — host-side serial-line timestamper.

@@ -116,6 +116,24 @@ static LAST_DUMP: AtomicU64 = AtomicU64::new(0);
 /// Armed cache: 0 unknown, 1 off, 2 on (cmdline `syscost=1`).
 static ARMED: AtomicU8 = AtomicU8::new(0);
 
+
+struct EofSpin {
+    comm: [AtomicU8; 16],
+    path: [AtomicU8; 96],
+    n: AtomicU64,
+}
+
+const EMPTY_EOF: EofSpin = EofSpin {
+    comm: [const { AtomicU8::new(0) }; 16],
+    path: [const { AtomicU8::new(0) }; 96],
+    n: AtomicU64::new(0),
+};
+
+static EOF_SPIN: [EofSpin; 12] = [const { EMPTY_EOF }; 12];
+
+static EAGAIN_SPIN: [EofSpin; 12] = [const { EMPTY_EOF }; 12];
+
+
 #[inline]
 pub fn on() -> bool {
     match ARMED.load(Ordering::Relaxed) {
@@ -129,6 +147,106 @@ pub fn on() -> bool {
             };
             ARMED.store(v, Ordering::Relaxed);
             v == 2
+        }
+    }
+}
+
+
+/// pa4 EOF-spin census: (comm, path) of readers whose fd returned EOF,
+/// once per comm (a spin candidate is a reader looping read()==0; pa3
+/// proved hilogd.rd_kmsg's 92K/s never reaches /dev/kmsg's counters).
+pub fn note_read_eof(file: &crate::fs::File) {
+    use core::sync::atomic::Ordering::Relaxed;
+    if !on() {
+        return;
+    }
+    let comm: [u8; 16] = match crate::sched::current() {
+        // SAFETY: current task; comm is a fixed-size field.
+        Some(t) => unsafe { *(*t).comm() },
+        None => return,
+    };
+    // Keyed by COMM ONLY (pa7 lesson: init alone opened 8 different
+    // EOF files and starved the 12 slots before the interesting
+    // spinners started). First EOF path per comm is recorded.
+    for i in 0..EOF_SPIN.len() {
+        let same = (0..16).all(|j| EOF_SPIN[i].comm[j].load(Relaxed) == comm[j]);
+        if same {
+            EOF_SPIN[i].n.fetch_add(1, Relaxed);
+            return;
+        }
+    }
+    for i in 0..EOF_SPIN.len() {
+        let mut empty = true;
+        for j in 0..16 {
+            if EOF_SPIN[i].comm[j].load(Relaxed) != 0 {
+                empty = false;
+                break;
+            }
+        }
+        if empty {
+            for j in 0..16 {
+                EOF_SPIN[i].comm[j].store(comm[j], Relaxed);
+            }
+            // Reader-relative path (same shape as /proc/<pid>/fd/N).
+            let path = unsafe {
+                match &*file.dentry.get() {
+                    Some(dentry) => crate::fs::vfs::dentry_user_path(dentry),
+                    None => alloc::string::String::from("<no-dentry>"),
+                }
+            };
+            let mut k = 0;
+            for &b in path.as_bytes() {
+                if k >= 96 {
+                    break;
+                }
+                EOF_SPIN[i].path[k].store(b, Relaxed);
+                k += 1;
+            }
+            EOF_SPIN[i].n.fetch_add(1, Relaxed);
+            return;
+        }
+    }
+}
+
+
+/// pa5 EAGAIN-spin census: (comm, path) of nonblocking-fd reads that
+/// returned EAGAIN, once per comm — the fast-path twin of
+/// note_read_eof (pipe/sockets never reach the generic EOF census).
+pub fn note_read_eagain(file: &crate::fs::File) {
+    use core::sync::atomic::Ordering::Relaxed;
+    let comm: [u8; 16] = match crate::sched::current() {
+        // SAFETY: current task; comm is a fixed-size field.
+        Some(t) => unsafe { *(*t).comm() },
+        None => return,
+    };
+    for i in 0..EAGAIN_SPIN.len() {
+        let mut empty = true;
+        for j in 0..16 {
+            if EAGAIN_SPIN[i].comm[j].load(Relaxed) != 0 {
+                empty = false;
+                break;
+            }
+        }
+        if empty {
+            for j in 0..16 {
+                EAGAIN_SPIN[i].comm[j].store(comm[j], Relaxed);
+            }
+            let path = unsafe {
+                match &*file.dentry.get() {
+                    Some(dentry) => crate::fs::vfs::dentry_user_path(dentry),
+                    None => alloc::string::String::from("<no-dentry>"),
+                }
+            };
+            let mut k = 0;
+            for &b in path.as_bytes() {
+                if k >= 96 {
+                    break;
+                }
+                EAGAIN_SPIN[i].path[k].store(b, Relaxed);
+                k += 1;
+            }
+            EAGAIN_SPIN[i].n.fetch_add(1, Relaxed);
+            return;
         }
     }
 }
@@ -391,6 +509,17 @@ pub fn dump() {
     // Flood-nr per-comm attribution (which process drives the 10^5/s
     // calls; v0=Hi v1=Timer v2=NetTx v3=NetRx v4=Block v5=IrqPoll
     // v6=Tasklet v7=Sched v8=Hrtimer v9=Rcu for the vec line above).
+    {
+        use crate::printk::{KMSG_N_EAGAIN, KMSG_N_RECORD, KMSG_N_SLEEP, KMSG_FIRST_FLAGS};
+        crate::pr_warn!(
+            "SYSCOST t={}s kmsg: rec={} eagain={} sleep={} first_flags={:#x}",
+            secs,
+            KMSG_N_RECORD.load(Ordering::Relaxed),
+            KMSG_N_EAGAIN.load(Ordering::Relaxed),
+            KMSG_N_SLEEP.load(Ordering::Relaxed),
+            KMSG_FIRST_FLAGS.load(Ordering::Relaxed)
+        );
+    }
     for f in 0..FLOOD_NRS.len() {
         let mut line = alloc::string::String::new();
         for i in 0..16 {
@@ -454,6 +583,60 @@ pub fn dump() {
             r.2 / US / r.1.max(1), // us
             r.3 / US / 1000,
             r.2 / US / 1000
+        );
+    }
+
+    for i in 0..EAGAIN_SPIN.len() {
+        let n = EAGAIN_SPIN[i].n.load(Ordering::Relaxed);
+        if n == 0 {
+            continue;
+        }
+        let mut comm = [0u8; 16];
+        for j in 0..16 {
+            comm[j] = EAGAIN_SPIN[i].comm[j].load(Ordering::Relaxed);
+        }
+        let mut path = [0u8; 96];
+        let mut plen = 0;
+        for j in 0..96 {
+            path[j] = EAGAIN_SPIN[i].path[j].load(Ordering::Relaxed);
+            if path[j] == 0 {
+                plen = j;
+                break;
+            }
+        }
+        crate::pr_warn!(
+            "SYSCOST t={}s eagain comm={} path={}",
+            secs,
+            core::str::from_utf8(&comm).unwrap_or("?").split('\0').next().unwrap_or("?"),
+            core::str::from_utf8(&path[..plen]).unwrap_or("?")
+        );
+    }
+
+    // pa4 EOF-spin census table.
+    for i in 0..EOF_SPIN.len() {
+        let n = EOF_SPIN[i].n.load(Ordering::Relaxed);
+        if n == 0 {
+            continue;
+        }
+        let mut comm = [0u8; 16];
+        for j in 0..16 {
+            comm[j] = EOF_SPIN[i].comm[j].load(Ordering::Relaxed);
+        }
+        let mut path = [0u8; 96];
+        let mut plen = 0;
+        for j in 0..96 {
+            path[j] = EOF_SPIN[i].path[j].load(Ordering::Relaxed);
+            if path[j] == 0 {
+                plen = j;
+                break;
+            }
+        }
+        crate::pr_warn!(
+            "SYSCOST t={}s eofspin comm={} n={} path={}",
+            secs,
+            core::str::from_utf8(&comm).unwrap_or("?").split('\0').next().unwrap_or("?"),
+            n,
+            core::str::from_utf8(&path[..plen]).unwrap_or("?")
         );
     }
 
