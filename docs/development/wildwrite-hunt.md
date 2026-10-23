@@ -2408,6 +2408,14 @@ reachable).
   no "fork: parent" lines in their storm phase (storm health reads
   from appspawn/APPMAPSRC counts instead; the ww-boot chain image
   prints both).
+- Late-session ops: the chain background task was stopped externally
+  at ~12:10 mid-r45 (serial frozen 12:09:23 mid-storm, whole tree gone
+  — the s10/s13/s14 sweep class; the samgr-callback line started its
+  own oh-sc172 boot in the same window). r45 verdict: clean partial at
+  ~15/45 (53677 lines, storm-healthy tail, 0 WW-HIT, 0 panics).
+  Relaunched from r46 at 12:20 (run/ww-chain-s27b.log, WW-ARMED 15
+  verified, process tree re-recorded). Cumulative: **0 WW-HIT across
+  r1-r45** partials.
 - Next for the line: (1) chain continues toward the capture (the
   machinery is proven; the engine's rate under this load remains the
   variable); (2) 6b49140b rides to main at the next merge window; (3)
