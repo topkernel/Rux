@@ -1771,6 +1771,16 @@ pub fn schedule_dead_never_returns() {
                 }
                 dequeue_task(&*cur);
                 cur.clear_ti_flag(IN_SCHED);
+                // sc191 (v2): a CLEAN thread exit (libusb_event tid 649,
+                // code=0) still stranded in the v1 fallback — the pick
+                // machinery kept resolving the DEAD task as its own pick
+                // because its pick-ownership pair ({on_cpu, claim}, the
+                // R63 mid-switch-out shape) was never released: the real
+                // switch-out asm does this store, but the repick loop
+                // never reaches a switch. Release it explicitly — the
+                // same store the R56 heal paths use — so this CPU's pick
+                // can move to anything else, including idle.
+                (*cur).release_pick_ownership();
                 let pc = (*cur).preempt_count();
                 if pc != 0 {
                     // Leaked bits protect nothing on a task that will
