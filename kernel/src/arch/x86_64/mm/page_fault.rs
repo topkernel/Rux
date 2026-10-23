@@ -977,17 +977,17 @@ pub fn handle_mm_fault(
             let mut from_cache = [false; FAULT_AROUND_PAGES];
             let mut filled = 0usize;
             let cacheable = crate::fs::ext4::file::is_ext4_file(file.as_ref());
-                for i in 0..n_pages {
-                    let off_i = vma_offset + (fault_page - vma_start) + i * PAGE_SIZE_USIZE;
-                    if cacheable {
-                        if let Some(p) =
-                            filemap_pin_cache_page(file.as_ref(), off_i, effective_size, false)
-                        {
-                            phys[filled] = p;
-                            from_cache[filled] = true;
-                            filled += 1;
-                            continue;
-                        }
+            for i in 0..n_pages {
+                let off_i = vma_offset + (fault_page - vma_start) + i * PAGE_SIZE_USIZE;
+                if cacheable {
+                    if let Some(p) =
+                        filemap_pin_cache_page(file.as_ref(), off_i, effective_size, false)
+                    {
+                        phys[filled] = p;
+                        from_cache[filled] = true;
+                        filled += 1;
+                        continue;
+                    }
                     // Hole or populate failure — the private zero-filled
                     // copy below (holes never enter the page cache).
                 }

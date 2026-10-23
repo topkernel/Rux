@@ -2194,4 +2194,137 @@ Design (staged; implement behind probes, mm territory only):
   serials (only 3 MEMLEDGER lines per boot survived legible in the
   control run) — the dfx line's item.
 
+## Session 25 (reconstructed from snapshot 46696158 — quota death at
+## 07:07 Oct 23, no archive written at the time)
+
+The predecessor implemented the session-24 MAP_SHARED design end to end
+across BOTH arches + the fs layer, dying before any review or
+validation. What the snapshot carried (all unreviewed at death):
+
+- page_cache.rs: `CachedPage.dirty`, mark_dirty,
+  writeback_update_range (write(2) write-through into pinned frames,
+  replacing the write path's whole-inode invalidate), collect/flush_done
+  (chunked dirty flush, inodes lock never across I/O), dirty-skip in
+  both eviction arms.
+- ext4/file.rs: ext4_write_at_core (explicit-offset core shared by
+  write/pwrite/flush, u64::MAX O_APPEND sentinel), ext4_flush_dirty_inode,
+  write-through replacing invalidate; ext4 native write_at (kills the
+  set_pos/write/restore race in generic File::write_at); setattr
+  flush-before-cut on shrink; sys_fsync flushes dirty frames before the
+  data+journal sync; sys_msync flushes the span's dirty entries (with
+  the clamped-span offset-base bug already noted fixed) and skips
+  PCACHE leaves in the legacy PTE walk.
+- mm both arches: PCACHE protocol for SHARED ext4 faults (W in place,
+  PTE-owned pin — the riscv permanent pin retired), hole-as-zero cache
+  pages (mapper-coherent zeros, block allocated at flush), PCACHE_SHARED
+  carried through mprotect/marker rewrites; riscv alias migrated off
+  shared_file_fault_page for ext4; no rmap on PCACHE leaves (retires
+  the session-24 page_index-0 hazard).
+- test/filemap.c FS1-FS8 + FSP legs and the two-boot persistence pass.
+
+## Session 26 (continuation agent — snapshot reviewed, two critical bugs
+## fixed, MAP_SHARED validated on both platforms)
+
+### Inheritance reconstruction
+
+- Chain tree DEAD at claim (r42 killed 15 min in at 04:24 with the
+  predecessor's window — clean partial, 0 WW-HIT). Relaunched from r42
+  as this session's background task at 07:08.
+- Working tree = snapshot 46696158, nothing running otherwise. Audited
+  the full diff against the session-24 design before any build.
+
+### Audit verdict: design faithfully implemented; two critical bugs
+
+1. **riscv64 `PCACHE_SHARED = 1 << 10` corrupts the PPN.** Sv39 PTEs
+   are `(ppn << 10) | flags` — bit 10 is PPN[0], not an RSW bit (Sv39
+   has exactly two: 8=COW, 9=PCACHE, both taken). Setting it adds 4 KiB
+   to every shared mapping's physical address: each mapper would store
+   into a frame one page away from the cache page — silent neighbor-page
+   corruption, the exact engine class this hunt exists to catch. FIX:
+   the bit is gone; a SHARED cache leaf is identified by PREDICATE —
+   private cache installs now ALWAYS carry COW (read-only installs too),
+   so `PCACHE && !COW` (cow_flags::pte_is_shared_cache) holds exactly
+   for shared leaves at every consumer (mprotect walk, marker
+   re-present). x86_64 keeps its dedicated bit (AVL 11 — three software
+   bits exist there).
+2. **ext4_flush_dirty_inode could loop forever.** flush_done clears a
+   page's dirty bit only when its pin count reaches 0 — with a live
+   writable mapping (pin held) the page STAYS dirty by design, and
+   collect_dirty_range always returned the same leading chunk: the first
+   msync of any file with >16 live-mapped dirty pages (any writable
+   shared mapping >= 68 KiB) would rewrite the same 16 pages under the
+   ext4 big lock forever. FIX: resume cursor — each round collects from
+   the last collected index + 1 (progress rule documented on
+   collect_dirty_range).
+
+Smaller fixes in the same pass:
+
+- **Self-copy UB on the flush path**: ext4_flush_dirty_inode writes a
+  dirty frame's own bytes through ext4_write_at_core, whose
+  writeback_update_range would copy the frame onto itself
+  (copy_nonoverlapping with identical src/dst). writeback_update_range
+  gained `skip_pfn`; the flush passes its source frame.
+- **mprotect W-upgrade dirty gap** (both arches): a shared leaf faulted
+  under an RO VMA and later mprotect'ed RW gains W in place but was
+  never marked dirty — its stores would never flush. Both mprotect
+  sites (x86 mprotect_pte_range via the PCACHE_SHARED bit, riscv walker
+  via the predicate) now mark the page dirty at the W-grant
+  (page_cache::mark_dirty_pfn — descriptor mapping/index resolution).
+- **flush_done clears dirty on FAILED writes**: an I/O error or short
+  write left the page's dirty bit cleared at pin-0 anyway — for a page
+  whose mapping already unmapped (the frame is the only surviving copy)
+  clean-marking made it evictable and its data silently losable.
+  flush_done now takes per-entry (idx, pfn, write_ok) and requires ok.
+- flush_done empty-key cleanup (put_by_key parity); cosmetic
+  re-indentation of the x86 fault-around fill loop the snapshot had
+  mangled.
+
+Audit checks that PASSED as-is (documented for the next reader): pin
+accounting is mask-based (`& PCACHE != 0`) at every unmap/teardown/fork
+site, so the shared bit rides along; the ZERO_PAGE hole arm is
+duplicate-insert safe (insert() no-ops on a fresh existing entry, the
+following get_phys pins); arm ordering on x86 (SIGBUS gate → devfs
+SHARED → ext4 SHARED → fault-around excludes SHARED → private arms) is
+correct; the remaining invalidate_inode callers (fallocate, setattr
+post-cut, free_inode) are destructive-metadata paths where
+invalidate-after-flush is the right semantics; lock order pte → inodes
+and EXT4_BIG_LOCK → inodes holds everywhere, no inodes → BIG nesting
+(R-WRITESTORM-1 discipline intact); the riscv exclusive-COW fast path
+can never see a shared leaf (no COW bit → handle_cow_fault not
+reachable).
+
+### Validation (final code, all legs green)
+
+- Builds: x86_64 + riscv64 clean ("Compiling rux" fresh builds;
+  config.rs regenerated per platform, restored to the committed x86_64
+  flavor at commit — the generated-artifact quirk).
+- **FMAP-PASS x (FS1-FS8 + FSP) + FMAP-PERSIST-PASS on BOTH
+  platforms** (two boots of the same image, cold cache: the persist
+  pattern read back from disk proves msync/fsync writeback reached the
+  FILE). This validates: two-mapper immediate visibility (FS1),
+  write(2)/pwrite write-through into live mappings (FS2), mapping-store
+  → pread coherence (FS3), fork coherence (FS4), msync+fsync flush
+  (FS5), truncate cut + past-EOF SIGBUS (FS6), munmap pin release +
+  fresh-map retention (FS7), hole zero-fill + store+msync persisting
+  into an unallocated block (FS8).
+- Regression trio on x86_64: MMF-PASS (x14 legs), FAW-PASS (x6),
+  LVMAP-PASS — mprotect/fault/loader paths unregressed.
+- Probe-script fix along the way: boot_once now re-reads the serial
+  after guest exit (the probe powers down immediately after its verdict;
+  the poll loop kept losing the race — the known filedrain class).
+- OH 45-min 0-panic soak (ww-fms1, dfx=taskdump,watchdog,periodic,
+  memwatch,ledger): see close-out below.
+- riscv64 in-kernel unit tests: the first run (early code) was killed
+  by the 08:08 infra sweep with its pipe-tail buffer lost; rerun on the
+  final code with direct file capture — see close-out.
+
+### Ops events this session
+
+- ~08:08 infra sweep (the s10/s13/s14 class) took BOTH this session's
+  background tasks: the chain tree (r43 at 15/45, clean partial: 0
+  WW-HIT, 0 panics, healthy to the last line) and the make-test QEMU
+  (42 min in, output lost — `| tail > file` buffers everything on
+  SIGKILL; capture with plain redirection next time). Chain relaunched
+  from r43 at 08:14.
+
 

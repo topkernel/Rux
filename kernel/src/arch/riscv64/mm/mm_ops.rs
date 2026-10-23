@@ -1808,22 +1808,36 @@ pub mod cow_flags {
     /// dropped (with the matching `page_cache::put_by_key`) at unmap, mm
     /// teardown, and the COW break; duplicated (with `pin_by_key` +
     /// get_page) by the fork walk. Session 25: MAP_SHARED cache mappings
-    /// carry it TOO (with the PCACHE_SHARED bit below) — the riscv64
-    /// alias's PERMANENT pin is retired; every alias owns its pin, so
-    /// unmap bounds alias memory by live mappings instead of forever.
+    /// carry it TOO — the riscv64 alias's PERMANENT pin is retired; every
+    /// alias owns its pin, so unmap bounds alias memory by live mappings
+    /// instead of forever.
     pub const PCACHE: u64 = 1 << 9; // RSW bit 1
 
-    /// Session 25 (MAP_SHARED writeback): this PCACHE leaf belongs to a
-    /// MAP_SHARED VMA and maps the cache frame WRITABLE — stores go
-    /// straight into the frame (mapper coherence by construction) and a
-    /// W install marks the page dirty for msync/fsync writeback. Unlike a
-    /// private cache leaf, a W-upgrade (mprotect/marker re-present) must
-    /// grant W IN PLACE instead of forcing the COW bit: a COW copy would
-    /// fork a private frame, splitting the mapping from the cache and
-    /// from every other mapper. RSW bit 2. Carried through PTE rewrites
-    /// like PCACHE itself; fork's cow_exempt (SHARED VMAs) copies it
-    /// as-is.
-    pub const PCACHE_SHARED: u64 = 1 << 10; // RSW bit 2
+    /// Session 25 (MAP_SHARED writeback): SHARED cache leaves (a MAP_SHARED
+    /// VMA mapping its page-cache frame WRITABLE — stores go straight into
+    /// the frame, mapper coherence by construction, and a W install marks
+    /// the page dirty for msync/fsync writeback) are identified by
+    /// PREDICATE, not by a dedicated PTE bit: Sv39 offers only the two RSW
+    /// bits (COW, PCACHE) — bit 10 and up are the PPN field, and an earlier
+    /// draft of this change defined `PCACHE_SHARED = 1 << 10`, which added
+    /// 4 KiB to every shared mapping's PHYSICAL ADDRESS (PTE bits are
+    /// `(ppn << 10) | flags`): each mapper wrote a DIFFERENT, wrong frame
+    /// one page away from the cache page. The x86_64 twin keeps a real bit
+    /// (AVL bit 11) because that arch has three software bits.
+    ///
+    /// The predicate: PRIVATE cache leaves ALWAYS carry COW — writable
+    /// installs get it for the writenotify divert, and session 26 extends
+    /// it to read-only installs so the property "PCACHE set and COW clear"
+    /// holds EXACTLY for SHARED cache leaves (a W-upgrade on a RO-faulted
+    /// private leaf can then still be told apart from a shared one without
+    /// consulting the VMA). SHARED installs never set COW. Consumers:
+    /// `pte_is_shared_cache(bits)` below — the mprotect/marker re-present
+    /// sites grant W IN PLACE for shared leaves (a COW copy would fork a
+    /// private frame, splitting the mapping from the cache and from every
+    /// other mapper) and force the COW divert for private ones.
+    pub fn pte_is_shared_cache(bits: u64) -> bool {
+        bits & PCACHE != 0 && bits & COW == 0
+    }
 }
 
 /// Drop the page-cache pin owned by ONE mapping of a cache-backed frame

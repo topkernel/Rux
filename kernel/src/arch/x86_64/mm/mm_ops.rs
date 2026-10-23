@@ -2571,7 +2571,15 @@ pub unsafe fn mprotect_pte_range(root_ppn: u64, start_virt: u64, num_pages: u64,
                 // stores must land in the cache frame (every mapper + the
                 // writeback path observe them). A COW copy here would fork
                 // a private frame and silently detach this mapping from
-                // the file's shared state.
+                // the file's shared state. An upgrade that GRANTS W is a
+                // W-install (the leaf faulted under an RO VMA): mark the
+                // cache page dirty (conservative v1) so a later msync/fsync
+                // persists stores made through it — fault-path installs
+                // only mark dirty for leaves that faulted under a W VMA.
+                if new_bits & PageTableEntry::W != 0 && raw & PageTableEntry::W == 0 {
+                    crate::fs::page_cache::get_page_cache()
+                        .mark_dirty_pfn(e1.ppn() as usize);
+                }
             } else {
                 // A (private) cache-backed leaf NEVER gets W in place: the
                 // frame is shared with the page cache (and possibly other

@@ -156,6 +156,21 @@ def boot_once(cfg, img, serial, timeout, markers):
                 proc.wait(5)
             except subprocess.TimeoutExpired:
                 proc.kill()
+    # Final check after guest exit: the probe powers the system down right
+    # after printing its verdict — the poll loop can lose that race (known
+    # filedrain class). The serial file survives; read it once more.
+    if verdict is None:
+        try:
+            data = open(serial, "rb").read()
+            if b"FMAP-FAIL" in data or b"FMAP-PERSIST-FAIL" in data:
+                verdict = "FAIL"
+            elif b"KERNPANIC" in data or b"Kernel panic" in data:
+                verdict = "PANIC"
+                panicked = True
+            elif all(m in data for m in markers):
+                verdict = "PASS"
+        except FileNotFoundError:
+            pass
     return verdict, panicked
 
 

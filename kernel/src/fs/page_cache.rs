@@ -676,7 +676,12 @@ impl PageCache {
     /// flushing an unwritten page is harmless I/O. Missing/invalidated
     /// entries are ignored (nothing to persist).
     pub fn mark_dirty(&self, fs_id: u64, ino: u64, page_index: u64) {
-        let key = cache_key(fs_id, ino);
+        self.mark_dirty_by_key(cache_key(fs_id, ino), page_index);
+    }
+
+    /// `mark_dirty` by combined cache key — for callers that only hold the
+    /// descriptor's eviction keys (mapping/index).
+    pub fn mark_dirty_by_key(&self, key: u64, page_index: u64) {
         let cache = self.inodes.lock();
         if let Some(inode_cache) = cache.get(&key) {
             if let Some(page) = inode_cache.pages.get(&page_index) {
@@ -685,6 +690,27 @@ impl PageCache {
                 }
             }
         }
+    }
+
+    /// `mark_dirty` by frame PFN — for PTE-rewrite sites (mprotect
+    /// W-upgrades on SHARED cache leaves) that hold the leaf's PPN but not
+    /// the file identity. Resolves the cache entry through the page
+    /// descriptor's eviction keys (set by insert). No-op for non-cache
+    /// frames (mapping() == 0) and foreign descriptors.
+    pub fn mark_dirty_pfn(&self, pfn: usize) {
+        use crate::mm::page_desc::pfn_to_page_mut;
+        let page = pfn_to_page_mut(pfn);
+        if page.is_null() {
+            return;
+        }
+        // SAFETY: descriptor of a live frame; mapping/index are written
+        // only by the cache's insert/release paths.
+        let key = unsafe { (*page).mapping() as u64 };
+        if key == 0 {
+            return;
+        }
+        let index = unsafe { (*page).index() as u64 };
+        self.mark_dirty_by_key(key, index);
     }
 
     /// Post-write(2) cache update: copy the written bytes INTO every fresh
@@ -706,8 +732,20 @@ impl PageCache {
     /// data still exists only in the frame); a clean page written by
     /// write(2) is now on disk, hence clean.
     ///
+    /// `skip_pfn`: the writeback path itself calls this with the FLUSH
+    /// SOURCE frame (a dirty cache frame being written to disk) — copying
+    /// it onto itself is a self-overlap (UB via copy_nonoverlapping, and
+    /// pointless); passing its PFN skips exactly that entry.
+    ///
     /// memcpy only — no I/O, safe under the inodes lock.
-    pub fn writeback_update_range(&self, fs_id: u64, ino: u64, file_off: u64, data: &[u8]) {
+    pub fn writeback_update_range(
+        &self,
+        fs_id: u64,
+        ino: u64,
+        file_off: u64,
+        data: &[u8],
+        skip_pfn: u64,
+    ) {
         if data.is_empty() {
             return;
         }
@@ -725,6 +763,11 @@ impl PageCache {
             if page.invalidated {
                 // Stale-pinned entry: serves misses, dies on its last put —
                 // leave it alone (its frame is invisible to new faults).
+                continue;
+            }
+            if skip_pfn != 0 && page.pfn as u64 == skip_pfn {
+                // The flush source frame itself (see the doc comment) —
+                // copying a frame onto itself is a self-overlap.
                 continue;
             }
             let page_off = (idx * PAGE_SIZE as u64).max(file_off);
@@ -752,6 +795,16 @@ impl PageCache {
     /// while the caller flushes it OUTSIDE the inodes lock. Fills `out`
     /// with (page_index, pfn) pairs; returns the count collected. Callers
     /// MUST balance every collected entry with `flush_done`.
+    ///
+    /// PROGRESS RULE (session 26): a collected-and-flushed page whose
+    /// mapping is still up STAYS dirty (flush_done clears the bit only at
+    /// pin count zero), so a caller looping "collect until empty" would
+    /// re-collect the same leading pages forever — the first msync of any
+    /// file with >out.len() live-mapped dirty pages hung in an unbounded
+    /// write loop. Callers therefore resume from the LAST COLLECTED index:
+    /// pass `first_index = last_collected + 1` on the next call within one
+    /// flush operation (the entries collected but not yet flushed keep
+    /// their pins, and are skipped naturally by the advanced range).
     pub fn collect_dirty_range(
         &self,
         fs_id: u64,
@@ -785,14 +838,21 @@ impl PageCache {
 
     /// Complete a flush cycle for entries collected by `collect_dirty_range`:
     /// drop the flush pin and clear the dirty bit ONLY when the count reached
-    /// zero — no live mapping remains that could store into the frame again
-    /// (every mapping holds a pin). Concurrent mapper stores racing the flush
-    /// are last-writer-wins (POSIX accepted for unsynchronized msync); while
-    /// a mapping is up the bit stays set and the next sync rewrites the
+    /// zero AND the flush's write verifiably reached the file (`ok`) — no live
+    /// mapping remains that could store into the frame again (every mapping
+    /// holds a pin). Concurrent mapper stores racing the flush are
+    /// last-writer-wins (POSIX accepted for unsynchronized msync); while a
+    /// mapping is up the bit stays set and the next sync rewrites the
     /// page — the conservative v1 substitute for hardware dirty tracking.
     /// An entry invalidated meanwhile (truncate/unlink raced the flush) has
     /// its data discarded instead.
-    pub fn flush_done(&self, fs_id: u64, ino: u64, entries: &[(u64, u64)]) {
+    ///
+    /// `entries`: (page_index, pfn, write_ok) — a FAILED or short write
+    /// keeps the page dirty for the next sync even at pin count 0: the
+    /// frame may be the only surviving copy (mapping already unmapped),
+    /// and marking it clean would make it evictable and its data silently
+    /// losable.
+    pub fn flush_done(&self, fs_id: u64, ino: u64, entries: &[(u64, u64, bool)]) {
         if entries.is_empty() {
             return;
         }
@@ -801,19 +861,19 @@ impl PageCache {
         let Some(inode_cache) = cache.get_mut(&key) else {
             return;
         };
-        for &(page_index, _pfn) in entries {
+        for &(page_index, _pfn, write_ok) in entries {
             if let Some(page) = inode_cache.pages.get_mut(&page_index) {
                 // Clear dirty ONLY when the flush put brought the pin
                 // count to zero — i.e. NO live mapping remains (every
-                // PCACHE mapping holds a pin). While any mapping is up,
-                // the page MAY receive new stores the flush did not see;
-                // keeping the dirty bit makes the next sync rewrite it
-                // (the conservative v1 substitute for hardware dirty
-                // tracking). The same rule keeps the entry dirty after
-                // the LAST unmap of an unsynced page: bounded, unevictable
-                // until the next sync on the file, and coherent for every
-                // reader through the frame (POSIX deferred-writeback
-                // latitude).
+                // PCACHE mapping holds a pin) — AND the write succeeded.
+                // While any mapping is up, the page MAY receive new stores
+                // the flush did not see; keeping the dirty bit makes the
+                // next sync rewrite it (the conservative v1 substitute for
+                // hardware dirty tracking). The same rule keeps the entry
+                // dirty after the LAST unmap of an unsynced page: bounded,
+                // unevictable until the next sync on the file, and
+                // coherent for every reader through the frame (POSIX
+                // deferred-writeback latitude).
                 let mut clear_dirty = false;
                 let decremented = page
                     .ref_count
@@ -823,7 +883,7 @@ impl PageCache {
                     .is_ok();
                 if decremented {
                     let now = page.ref_count.load(Ordering::Acquire);
-                    clear_dirty = now == 0 && !page.invalidated;
+                    clear_dirty = now == 0 && !page.invalidated && write_ok;
                 }
                 if clear_dirty {
                     page.dirty.store(false, Ordering::Release);
@@ -842,6 +902,14 @@ impl PageCache {
                     release_page_frame(pfn);
                     self.total_pages.fetch_sub(1, Ordering::Relaxed);
                 }
+            }
+        }
+        // Empty-key cleanup, same as put_by_key: an inode whose last entry
+        // was an invalidated frame released here must not leave a permanent
+        // empty InodePageCache behind.
+        if let Some(inode_cache) = cache.get_mut(&key) {
+            if inode_cache.pages.is_empty() {
+                cache.remove(&key);
             }
         }
     }

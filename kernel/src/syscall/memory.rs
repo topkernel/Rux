@@ -1651,23 +1651,26 @@ fn sys_mprotect_inner(args: [u64; 6]) -> i64 {
                         // whose COW bit is set — the write fault path owns
                         // the copy.
                         //
-                        // PCACHE/PCACHE_SHARED (RSW bits 9/10, riscv64
-                        // filemap_fault port): mapping-ownership bits,
-                        // preserved like COW — dropping them would leak
-                        // the page-cache pin forever (frame unevictable).
-                        // A PRIVATE cache-backed leaf NEVER gains W in
-                        // place: the frame is shared with the page cache,
-                        // so a W-upgrade diverts the first write through
-                        // COW (Linux writenotify; x86_64
-                        // mprotect_pte_range twin). A SHARED cache leaf
-                        // (PCACHE_SHARED) keeps W in place — its stores
-                        // must land in the cache frame (session 25).
+                        // PCACHE (RSW bit 9, riscv64
+                        // filemap_fault port): a mapping-ownership bit,
+                        // preserved like COW — dropping it would leak the
+                        // page-cache pin forever (frame unevictable). A
+                        // PRIVATE cache-backed leaf NEVER gains W in place:
+                        // the frame is shared with the page cache, so a
+                        // W-upgrade diverts the first write through COW
+                        // (Linux writenotify; x86_64 mprotect_pte_range
+                        // twin). A SHARED cache leaf (PCACHE with no COW —
+                        // cow_flags::pte_is_shared_cache; Sv39 has no third
+                        // software bit) keeps W in place — its stores must
+                        // land in the cache frame (session 25), and gaining
+                        // W here (an RO-faulted shared leaf being upgraded)
+                        // is a W-install: mark the cache page dirty so the
+                        // later msync/fsync persists such stores.
                         let ppn = pte0.ppn();
                         let cow_bit =
                             pte0.bits() & crate::arch::mm::mm_ops::cow_flags::COW;
-                        let pcache_bit = pte0.bits()
-                            & (crate::arch::mm::mm_ops::cow_flags::PCACHE
-                                | crate::arch::mm::mm_ops::cow_flags::PCACHE_SHARED);
+                        let pcache_bit =
+                            pte0.bits() & crate::arch::mm::mm_ops::cow_flags::PCACHE;
                         let mut flags = new_flags;
                         if cow_bit != 0 {
                             flags |= cow_bit;
@@ -1675,13 +1678,16 @@ fn sys_mprotect_inner(args: [u64; 6]) -> i64 {
                         }
                         if pcache_bit != 0 {
                             flags |= pcache_bit;
-                            if flags & PageTableEntry::W != 0
-                                && pcache_bit
-                                    & crate::arch::mm::mm_ops::cow_flags::PCACHE_SHARED
-                                    == 0
-                            {
-                                flags |= crate::arch::mm::mm_ops::cow_flags::COW;
-                                flags &= !PageTableEntry::W;
+                            if flags & PageTableEntry::W != 0 {
+                                if crate::arch::mm::mm_ops::cow_flags::pte_is_shared_cache(
+                                    pte0.bits(),
+                                ) {
+                                    crate::fs::page_cache::get_page_cache()
+                                        .mark_dirty_pfn(ppn as usize);
+                                } else {
+                                    flags |= crate::arch::mm::mm_ops::cow_flags::COW;
+                                    flags &= !PageTableEntry::W;
+                                }
                             }
                         }
                         let new_pte = PageTableEntry::from_bits((ppn << 10) | flags);

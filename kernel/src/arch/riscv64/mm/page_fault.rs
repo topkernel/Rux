@@ -536,22 +536,21 @@ pub fn handle_mm_fault(
                     flags |= cow_bit;
                     flags &= !PageTableEntry::W;
                 }
-                // PCACHE/PCACHE_SHARED (RSW bits 9/10, filemap_fault port):
-                // the marker hides a pinned page-cache frame — the pin
-                // ownership must survive the re-present (else the later
-                // unmap leaks it). A PRIVATE cache leaf never gains W in
-                // place: a W-upgrade diverts the first write through COW
-                // like every other private file page (Linux writenotify;
-                // x86_64 twin in mprotect_pte_range). A SHARED cache leaf
-                // (PCACHE_SHARED) keeps W — its stores must land in the
-                // cache frame (session 25).
-                let pcache_bit = raw
-                    & (super::mm_ops::cow_flags::PCACHE
-                        | super::mm_ops::cow_flags::PCACHE_SHARED);
+                // PCACHE (RSW bit 9, filemap_fault port): the marker hides
+                // a pinned page-cache frame — the pin ownership must
+                // survive the re-present (else the later unmap leaks it).
+                // A PRIVATE cache leaf never gains W in place: a W-upgrade
+                // diverts the first write through COW like every other
+                // private file page (Linux writenotify; x86_64 twin in
+                // mprotect_pte_range). A SHARED cache leaf (PCACHE with no
+                // COW — see cow_flags::pte_is_shared_cache; Sv39 has no
+                // third RSW bit, bit 10 is the PPN field) keeps W — its
+                // stores must land in the cache frame (session 25).
+                let pcache_bit = raw & super::mm_ops::cow_flags::PCACHE;
                 if pcache_bit != 0 {
                     flags |= pcache_bit;
                     if flags & PageTableEntry::W != 0
-                        && pcache_bit & super::mm_ops::cow_flags::PCACHE_SHARED == 0
+                        && !super::mm_ops::cow_flags::pte_is_shared_cache(raw)
                     {
                         flags |= 1 << 8; // force COW
                         flags &= !PageTableEntry::W;
@@ -919,24 +918,24 @@ pub fn handle_mm_fault(
         // is shared with the page cache (and possibly other mappers). A
         // writable private VMA gets the COW bit and the first write copies
         // (do_cow_fault parity; x86_64 twin). The PCACHE bit records that
-        // this PTE owns one cache pin (see cow_flags).
+        // this PTE owns one cache pin (see cow_flags). Session 26: the COW
+        // bit is set on READ-ONLY installs too — "PCACHE set, COW clear"
+        // is the SHARED-leaf predicate (pte_is_shared_cache; Sv39 has no
+        // third software bit), so a private leaf must never present that
+        // combination even before any W-upgrade.
         pte_flags &= !PageTableEntry::W;
-        if vma_flags.is_writable() {
-            pte_flags |= super::mm_ops::cow_flags::COW;
-        }
+        pte_flags |= super::mm_ops::cow_flags::COW;
         pte_flags |= super::mm_ops::cow_flags::PCACHE;
     }
     if shared_pcache {
         // SHARED cache leaf (session 25): W stays granted IN PLACE —
         // stores land directly in the cache frame (mapper coherence).
-        // The PCACHE bit records the PTE-owned pin (released at unmap);
-        // PCACHE_SHARED keeps later W-upgrades from diverting through
-        // COW (a copy would detach this mapping from the file's shared
-        // state — see mprotect_pte_range).
+        // The PCACHE bit records the PTE-owned pin (released at unmap).
+        // Deliberately NO COW bit: PCACHE-without-COW is exactly how the
+        // mprotect/marker-represent sites recognize a shared leaf and
+        // keep granting W in place (a COW divert here would detach this
+        // mapping from the file's shared state — see pte_is_shared_cache).
         pte_flags |= super::mm_ops::cow_flags::PCACHE;
-        if vma_flags.is_writable() {
-            pte_flags |= super::mm_ops::cow_flags::PCACHE_SHARED;
-        }
     }
 
     // Map page under the PTE-modify lock and keep it held across the rmap

@@ -1476,7 +1476,8 @@ pub fn ext4_file_write_vfs(file: &File, buf: &[u8]) -> isize {
             file.get_pos()
         };
 
-        let written = ext4_write_at_core(fs, ext4_ino, inode, offset, buf);
+        // SAFETY: fs/inode resolution above; buf is the caller's slice.
+        let written = unsafe { ext4_write_at_core(fs, ext4_ino, inode, offset, buf, 0) };
         if written > 0 {
             let end = if offset == u64::MAX {
                 inode.size.load(core::sync::atomic::Ordering::Acquire)
@@ -1511,7 +1512,8 @@ pub unsafe fn ext4_file_write_at_vfs(file: &File, offset: u64, buf: *const u8, c
         None => return errno::Errno::IOError.as_neg_i32() as isize,
     };
     let data = core::slice::from_raw_parts(buf, count);
-    ext4_write_at_core(&*fs_ptr, inode.ino as u32, inode, offset, data)
+    // SAFETY: fs/inode resolution above; data is the caller's buffer.
+    unsafe { ext4_write_at_core(&*fs_ptr, inode.ino as u32, inode, offset, data, 0) }
 }
 
 /// Explicit-offset ext4 write core shared by write(2) and pwrite/writeback
@@ -1528,6 +1530,7 @@ unsafe fn ext4_write_at_core(
     inode: &crate::fs::inode::Inode,
     offset: u64,
     buf: &[u8],
+    skip_update_pfn: u64,
 ) -> isize {
     // SMP serialization for the write path (review 5.5 high: 写路径/位图
     // RMW 无锁——SMP 位图丢更新双分配): allocation, bitmap RMW, group
@@ -1607,12 +1610,16 @@ unsafe fn ext4_write_at_core(
                     // stale — a MAP_PRIVATE read-only mapper then served
                     // PRE-WRITE bytes from its still-pinned stale frame,
                     // and a MAP_SHARED re-fault forked a divergent frame.)
+                    // skip_update_pfn: the msync/fsync flush path writes a
+                    // cache frame's own bytes back to the file — updating
+                    // THAT entry would copy the frame onto itself.
                     if written_bytes > 0 {
                         page_cache::get_page_cache().writeback_update_range(
                             fs as *const crate::fs::ext4::Ext4FileSystem as u64,
                             ext4_ino as u64,
                             offset,
                             &buf[..written_bytes],
+                            skip_update_pfn,
                         );
                     }
                     written_bytes as isize
@@ -1666,18 +1673,37 @@ pub fn ext4_flush_dirty_inode(
 
     const CHUNK: usize = 16;
     let mut chunk: [(u64, u64); CHUNK] = [(0, 0); CHUNK];
+    // Per-entry write outcomes for flush_done: an entry may only go clean
+    // when its bytes verifiably reached the file (full write or a
+    // legitimate discard). A FAILED write keeps the page dirty — for a
+    // page whose mapping already unmapped (the flush is the only copy
+    // left) clearing the bit would make the sole surviving frame
+    // evictable and its data silently losable.
+    let mut done: [(u64, u64, bool); CHUNK] = [(0, 0, false); CHUNK];
     let mut total = 0usize;
+    // Resume cursor — the PROGRESS RULE (collect_dirty_range doc): pages
+    // of live writable mappings STAY dirty after their flush (flush_done
+    // clears the bit only at pin count 0), so re-collecting from
+    // first_index would return the same leading chunk forever. Advance
+    // past the last collected index each round.
+    let mut cursor = first_index;
     loop {
-        let n = cache.collect_dirty_range(fs_id, ino, first_index, last_index, &mut chunk);
+        if cursor > last_index {
+            break;
+        }
+        let n = cache.collect_dirty_range(fs_id, ino, cursor, last_index, &mut chunk);
         if n == 0 {
             break;
         }
-        for &(idx, pfn) in &chunk[..n] {
+        for i in 0..n {
+            let (idx, pfn) = chunk[i];
             // i_size clamp (see the doc comment). Read per page: a truncate
-            // or write racing the flush moves the boundary.
+            // or write racing the flush moves the boundary. Past-EOF is a
+            // legitimate DISCARD (truncate won): counts as done.
             let size = inode.get_size();
             let off = idx * crate::mm::PAGE_SIZE as u64;
             if off >= size {
+                done[i] = (idx, pfn, true);
                 continue;
             }
             let n_bytes =
@@ -1688,16 +1714,24 @@ pub fn ext4_flush_dirty_inode(
             // SAFETY: pfn belongs to a page-cache entry pinned by
             // collect_dirty_range; the linear map covers the whole frame and
             // n_bytes <= PAGE_SIZE. ext4_write_at_core validates the file
-            // references itself.
+            // references itself. The pfn is ALSO passed as the update-skip:
+            // the write core's cache write-through must not copy this frame
+            // onto itself (self-overlap UB, and the frame is already the
+            // source of truth being persisted).
             let src = unsafe { core::slice::from_raw_parts(kva, n_bytes) };
             // SAFETY: same inode/fs resolution discipline as write_vfs.
-            let _ = unsafe { ext4_write_at_core(&*fs_ptr, inode.ino as u32, inode, off, src) };
+            let written = unsafe {
+                ext4_write_at_core(&*fs_ptr, inode.ino as u32, inode, off, src, pfn)
+            };
+            done[i] = (idx, pfn, written == n_bytes as isize);
         }
-        cache.flush_done(fs_id, ino, &chunk[..n]);
+        cache.flush_done(fs_id, ino, &done[..n]);
         total += n;
-        if n < CHUNK {
+        let last_idx = chunk[n - 1].0;
+        if last_idx == u64::MAX {
             break;
         }
+        cursor = last_idx + 1;
     }
     total
 }
