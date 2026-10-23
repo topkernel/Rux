@@ -41,7 +41,7 @@
 //! each) plus the current uptime so host-side serial timestamps can be
 //! correlated with guest time.
 
-use core::sync::atomic::{AtomicU64, AtomicU8, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicI64, AtomicU64, AtomicU8, AtomicUsize, Ordering};
 
 use crate::alloc::string::ToString;
 
@@ -132,6 +132,225 @@ const EMPTY_EOF: EofSpin = EofSpin {
 static EOF_SPIN: [EofSpin; 12] = [const { EMPTY_EOF }; 12];
 
 static EAGAIN_SPIN: [EofSpin; 12] = [const { EMPTY_EOF }; 12];
+
+/// pa9 positive-read census slot: which open file description is
+/// actually RETURNING data, per comm. pa3-pa8 proved hilogd.rd_kmsg's
+/// 92K reads/s never touch /dev/kmsg and never return EOF/EAGAIN —
+/// they return data, from an unknown fd. Keyed by comm only (pa7
+/// lesson: anything finer lets init's config reads starve the table
+/// before the spinner starts); the slot FOLLOWS the comm's current
+/// open-file-description (`file_id`, never reused — R36-B1). A read on
+/// the tracked description costs one u64 compare + increments; a read
+/// on a different one retargets the slot (one dentry-path resolve +
+/// the ops-table pointer, symbolized host-side via nm). At dump time a
+/// spin loop shows one description with a huge n_cur.
+struct RdDataSlot {
+    /// First 8 comm bytes as one u64 — fast scan pre-filter (comm
+    /// compare is the per-read hot path; "hilogd.s*" vs "hilogd.r*"
+    /// differ here, and a filter miss is one load).
+    comm0: AtomicU64,
+    comm: [AtomicU8; 16],
+    file_id: AtomicU64,
+    fd: AtomicU64,
+    ops: AtomicU64,
+    n_cur: AtomicU64,
+    n_total: AtomicU64,
+    bytes: AtomicU64,
+    path: [AtomicU8; 96],
+}
+
+const EMPTY_RD: RdDataSlot = RdDataSlot {
+    comm0: AtomicU64::new(0),
+    comm: [const { AtomicU8::new(0) }; 16],
+    file_id: AtomicU64::new(0),
+    fd: AtomicU64::new(0),
+    ops: AtomicU64::new(0),
+    n_cur: AtomicU64::new(0),
+    n_total: AtomicU64::new(0),
+    bytes: AtomicU64::new(0),
+    path: [const { AtomicU8::new(0) }; 96],
+};
+
+static RD_DATA: [RdDataSlot; 16] = [const { EMPTY_RD }; 16];
+
+/// pa10 failing-read census: (comm, errno, fd-resolution) of reads that
+/// return a negative errno other than EAGAIN. pa9 closed the remaining
+/// gap: hilogd.rd_kmsg issues 15.4M reads/boot that return neither data
+/// (positive-read census: 195 reads total) nor EOF/EAGAIN (censuses
+/// fire and list other comms) — the only shape left is a failing errno,
+/// and WHICH errno (EBADF from a closed/write-only fd? EFAULT?) decides
+/// kernel-fix vs OH-behavior routing. Once per comm.
+struct RdFailSlot {
+    comm0: AtomicU64,
+    comm: [AtomicU8; 16],
+    ret: AtomicI64,
+    n: AtomicU64,
+    /// 1 = get_file_fd(fd) resolved at census time (fd open), 0 = it
+    /// did not (fd closed), 2 = resolved and file is O_WRONLY (read
+    /// mode check would EBADF before any file-layer read).
+    fd_state: AtomicU8,
+    fd: AtomicU64,
+    ops: AtomicU64,
+    path: [AtomicU8; 96],
+}
+
+const EMPTY_RDFAIL: RdFailSlot = RdFailSlot {
+    comm0: AtomicU64::new(0),
+    comm: [const { AtomicU8::new(0) }; 16],
+    ret: AtomicI64::new(0),
+    n: AtomicU64::new(0),
+    fd_state: AtomicU8::new(0),
+    fd: AtomicU64::new(0),
+    ops: AtomicU64::new(0),
+    path: [const { AtomicU8::new(0) }; 96],
+};
+
+static RD_FAIL: [RdFailSlot; 16] = [const { EMPTY_RDFAIL }; 16];
+
+/// pa10 failing-read census: call from the read wrapper when ret < 0
+/// and ret != -EAGAIN. Records the errno, whether the fd still
+/// resolves, and the path. Zero cost when syscost is off.
+pub fn note_read_fail(fd: usize, ret: i64) {
+    use core::sync::atomic::Ordering::Relaxed;
+    if !on() {
+        return;
+    }
+    let comm: [u8; 16] = match crate::sched::current() {
+        Some(t) => unsafe { *(*t).comm() },
+        None => return,
+    };
+    let comm0 = u64::from_le_bytes(comm[..8].try_into().unwrap());
+    // First-seen errno per comm is the story (a spin loops one errno).
+    for i in 0..RD_FAIL.len() {
+        if RD_FAIL[i].comm0.load(Relaxed) != comm0 {
+            continue;
+        }
+        let same = (0..16).all(|j| RD_FAIL[i].comm[j].load(Relaxed) == comm[j]);
+        if same {
+            RD_FAIL[i].n.fetch_add(1, Relaxed);
+            return;
+        }
+    }
+    for i in 0..RD_FAIL.len() {
+        if RD_FAIL[i].comm0.load(Relaxed) != 0 {
+            continue;
+        }
+        for j in 0..16 {
+            RD_FAIL[i].comm[j].store(comm[j], Relaxed);
+        }
+        RD_FAIL[i].comm0.store(comm0, Relaxed);
+        RD_FAIL[i].ret.store(ret, Relaxed);
+        RD_FAIL[i].fd.store(fd as u64, Relaxed);
+        RD_FAIL[i].n.store(1, Relaxed);
+        match unsafe { crate::fs::get_file_fd(fd) } {
+            Some(file) => {
+                let mode = file.flags.load(Relaxed) & crate::fs::file::FileFlags::O_ACCMODE;
+                RD_FAIL[i].fd_state.store(
+                    if mode == crate::fs::file::FileFlags::O_WRONLY { 2 } else { 1 },
+                    Relaxed,
+                );
+                RD_FAIL[i].ops.store(
+                    unsafe { (*file.ops.get()).map(|p| p as *const _ as u64).unwrap_or(0) },
+                    Relaxed,
+                );
+                let path = unsafe {
+                    match &*file.dentry.get() {
+                        Some(dentry) => crate::fs::vfs::dentry_user_path(dentry),
+                        None => alloc::string::String::from("<no-dentry>"),
+                    }
+                };
+                let mut k = 0;
+                for &b in path.as_bytes() {
+                    if k >= 96 {
+                        break;
+                    }
+                    RD_FAIL[i].path[k].store(b, Relaxed);
+                    k += 1;
+                }
+            }
+            None => {
+                RD_FAIL[i].fd_state.store(0, Relaxed);
+            }
+        }
+        return;
+    }
+}
+
+/// pa9 positive-read census: call on every read() that returned data.
+/// See `RdDataSlot` for the design; zero cost when syscost is off.
+pub fn note_read_data(file: &crate::fs::File, n: usize, fd: usize) {
+    use core::sync::atomic::Ordering::Relaxed;
+    if !on() {
+        return;
+    }
+    let comm: [u8; 16] = match crate::sched::current() {
+        // SAFETY: current task; comm is a fixed-size field.
+        Some(t) => unsafe { *(*t).comm() },
+        None => return,
+    };
+    let comm0 = u64::from_le_bytes(comm[..8].try_into().unwrap());
+    let mut slot: Option<&RdDataSlot> = None;
+    for i in 0..RD_DATA.len() {
+        if RD_DATA[i].comm0.load(Relaxed) != comm0 {
+            continue;
+        }
+        let same = (0..16).all(|j| RD_DATA[i].comm[j].load(Relaxed) == comm[j]);
+        if same {
+            slot = Some(&RD_DATA[i]);
+            break;
+        }
+    }
+    if slot.is_none() {
+        for i in 0..RD_DATA.len() {
+            if RD_DATA[i].comm0.load(Relaxed) != 0 {
+                continue;
+            }
+            for j in 0..16 {
+                RD_DATA[i].comm[j].store(comm[j], Relaxed);
+            }
+            RD_DATA[i].comm0.store(comm0, Relaxed);
+            slot = Some(&RD_DATA[i]);
+            break;
+        }
+    }
+    let s = match slot {
+        Some(s) => s,
+        // Table full of foreign comms — this comm goes untracked.
+        None => return,
+    };
+    s.n_total.fetch_add(1, Relaxed);
+    if s.file_id.load(Relaxed) == file.file_id {
+        s.n_cur.fetch_add(1, Relaxed);
+        s.bytes.fetch_add(n as u64, Relaxed);
+        return;
+    }
+    // Retarget: follow this description from now on.
+    s.file_id.store(file.file_id, Relaxed);
+    s.fd.store(fd as u64, Relaxed);
+    s.ops.store(
+        unsafe { (*file.ops.get()).map(|p| p as *const _ as u64).unwrap_or(0) },
+        Relaxed,
+    );
+    let path = unsafe {
+        match &*file.dentry.get() {
+            Some(dentry) => crate::fs::vfs::dentry_user_path(dentry),
+            None => alloc::string::String::from("<no-dentry>"),
+        }
+    };
+    for j in 0..96 {
+        s.path[j].store(0, Relaxed);
+    }
+    let mut k = 0;
+    for &b in path.as_bytes() {
+        if k >= 96 {
+            break;
+        }
+        s.path[k].store(b, Relaxed);
+        k += 1;
+    }
+    s.n_cur.store(1, Relaxed);
+    s.bytes.store(n as u64, Relaxed);
+}
 
 
 #[inline]
@@ -636,6 +855,71 @@ pub fn dump() {
             secs,
             core::str::from_utf8(&comm).unwrap_or("?").split('\0').next().unwrap_or("?"),
             n,
+            core::str::from_utf8(&path[..plen]).unwrap_or("?")
+        );
+    }
+
+    // pa9 positive-read census table (which fd returns the data).
+    for i in 0..RD_DATA.len() {
+        let n_total = RD_DATA[i].n_total.load(Ordering::Relaxed);
+        if n_total == 0 {
+            continue;
+        }
+        let mut comm = [0u8; 16];
+        for j in 0..16 {
+            comm[j] = RD_DATA[i].comm[j].load(Ordering::Relaxed);
+        }
+        let mut path = [0u8; 96];
+        let mut plen = 0;
+        for j in 0..96 {
+            path[j] = RD_DATA[i].path[j].load(Ordering::Relaxed);
+            if path[j] == 0 {
+                plen = j;
+                break;
+            }
+        }
+        crate::pr_warn!(
+            "SYSCOST t={}s rd_data comm={} n_cur={} n_tot={} bytes={} fd={} file_id={} ops={:#x} path={}",
+            secs,
+            core::str::from_utf8(&comm).unwrap_or("?").split('\0').next().unwrap_or("?"),
+            RD_DATA[i].n_cur.load(Ordering::Relaxed),
+            n_total,
+            RD_DATA[i].bytes.load(Ordering::Relaxed),
+            RD_DATA[i].fd.load(Ordering::Relaxed),
+            RD_DATA[i].file_id.load(Ordering::Relaxed),
+            RD_DATA[i].ops.load(Ordering::Relaxed),
+            core::str::from_utf8(&path[..plen]).unwrap_or("?")
+        );
+    }
+
+    // pa10 failing-read census table (errno + fd resolution state).
+    for i in 0..RD_FAIL.len() {
+        let n = RD_FAIL[i].n.load(Ordering::Relaxed);
+        if n == 0 {
+            continue;
+        }
+        let mut comm = [0u8; 16];
+        for j in 0..16 {
+            comm[j] = RD_FAIL[i].comm[j].load(Ordering::Relaxed);
+        }
+        let mut path = [0u8; 96];
+        let mut plen = 0;
+        for j in 0..96 {
+            path[j] = RD_FAIL[i].path[j].load(Ordering::Relaxed);
+            if path[j] == 0 {
+                plen = j;
+                break;
+            }
+        }
+        crate::pr_warn!(
+            "SYSCOST t={}s rd_fail comm={} ret={} n={} fd={} fd_state={} ops={:#x} path={}",
+            secs,
+            core::str::from_utf8(&comm).unwrap_or("?").split('\0').next().unwrap_or("?"),
+            RD_FAIL[i].ret.load(Ordering::Relaxed),
+            n,
+            RD_FAIL[i].fd.load(Ordering::Relaxed),
+            RD_FAIL[i].fd_state.load(Ordering::Relaxed),
+            RD_FAIL[i].ops.load(Ordering::Relaxed),
             core::str::from_utf8(&path[..plen]).unwrap_or("?")
         );
     }

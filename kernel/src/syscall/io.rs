@@ -102,6 +102,13 @@ pub fn sys_read(args: SyscallArgs) -> i64 {
             }
         }
     }
+    // perf-audit (pa10): failing-read census — pa9 showed hilogd.rd_kmsg
+    // issuing 15.4M reads/boot that return no data, no EOF, no EAGAIN;
+    // the remaining shape is a negative errno, and which one decides
+    // kernel-fix vs OH-behavior routing.
+    if ret < 0 && ret != -11 {
+        crate::dfx::syscost::note_read_fail(args[0] as usize, ret);
+    }
     ret
 }
 
@@ -136,7 +143,14 @@ fn sys_read_inner(args: SyscallArgs) -> i64 {
                 // staging below costs an alloc + 2 copies per op; on pipes
                 // that was ~half the per-syscall time under TCG.
                 if crate::fs::pipe::is_pipe_file(&file) {
-                    return crate::fs::pipe::pipe_read_user(&file, buf, count) as i64;
+                    let n = crate::fs::pipe::pipe_read_user(&file, buf, count) as i64;
+                    // perf-audit (pa9): positive-read census — which fd
+                    // returns the 92K reads/s hilogd.rd_kmsg issues (pa4-8:
+                    // not /dev/kmsg, not EOF, not EAGAIN).
+                    if n > 0 {
+                        crate::dfx::syscost::note_read_data(&file, n as usize, fd);
+                    }
+                    return n;
                 }
                 // ext4 fast path: page cache → user memory without the
                 // staging buffer (O_DIRECT keeps the generic staged path —
@@ -144,7 +158,11 @@ fn sys_read_inner(args: SyscallArgs) -> i64 {
                 if file.flags_bits() & crate::fs::file::FileFlags::O_DIRECT == 0
                     && crate::fs::ext4::file::is_ext4_file(&file)
                 {
-                    return crate::fs::ext4::file::ext4_file_read_user_vfs(&file, buf, count) as i64;
+                    let n = crate::fs::ext4::file::ext4_file_read_user_vfs(&file, buf, count) as i64;
+                    if n > 0 {
+                        crate::dfx::syscost::note_read_data(&file, n as usize, fd);
+                    }
+                    return n;
                 }
                 // Chunked read (SYSA-C1): stage at most RW_CHUNK at a time so
                 // a huge count can never OOM the kernel heap. A short chunk
@@ -167,6 +185,9 @@ fn sys_read_inner(args: SyscallArgs) -> i64 {
                     }
                     let result = file.read(kernel_buf.as_mut_ptr(), chunk);
                     if result < 0 {
+                        if total > 0 {
+                            crate::dfx::syscost::note_read_data(&file, total, fd);
+                        }
                         return if total > 0 { total as i64 } else { result as i32 as i64 };
                     }
                     if result == 0 {
@@ -196,6 +217,9 @@ fn sys_read_inner(args: SyscallArgs) -> i64 {
                     if n < chunk {
                         break; // short read: EOF or nothing more available now
                     }
+                }
+                if total > 0 {
+                    crate::dfx::syscost::note_read_data(&file, total, fd);
                 }
                 total as i64
             }
