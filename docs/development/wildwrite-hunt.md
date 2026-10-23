@@ -2550,4 +2550,42 @@ irq-off pathology from the flush path.
 - make-test QEMU reaped after results were file-captured (post-summary
   panic class, own PID after cwd verification); chain r47 untouched.
 
+### Session 28 close-out
+
+- **ww-v2soak (the 45-min OH 0-panic gate on the v2 kernel): killed at
+  20/45 min by the user pause (below) — a HEALTHY PARTIAL, not the
+  completed gate.** 72967 lines, full storm (864 forks, wakes 1.63M),
+  0 KERNPANIC / 0 ALLOCTHROW / 0 OOM events, memfree_pages=454461
+  (1.77 GiB free at death — no drain; the ww-fms2 45-min baseline was
+  422361), strand_max 29s (the >=3-QEMU host-contention class: chain
+  r47 + this soak + the samgr line ran concurrently). The completed
+  45-min 0-panic boot is the ONE remaining merge gate for 4fb5d480 —
+  everything else (A/B, both-arch probes, unit tests) is green.
+- **Ops finding — the mid-session kills were USER PAUSES, not a rogue
+  reaper:** QEMU trees died at 12:52:17 and 13:27:40, each minutes
+  BEFORE the real 2700s budget, each with the `timeout`-shaped rc=124
+  mid-storm end. run/PAUSE-NOTE-2026-10-23.md (written by the pause
+  mechanism) settles it: "Killed at pause" — the 12:51:56 wip snapshot
+  (24d43e53) and the 13:28 note are the same two events. Victims: r46
+  (12:52), then r47 + ww-v2soak simultaneously (13:27:40) and the chain
+  wrapper + r48 ~40 s into its run (~13:28). The chain's session-27
+  ownership did NOT matter — pauses reap QEMU tasks wholesale. Chain
+  relaunched from r49 at 13:46:52 as this session's own background task
+  (the pause note's "resume from r48" was one run stale — r48 had
+  already started and died with the wrapper).
+- r47 verdict (collected before the reaper took it): FULL 2700 s clean —
+  71411 lines, wakes 9.91M, strand_max 9648ms (healthy class), 0
+  WW-HIT / 0 heals / 0 panics. **First complete run on the 19-point
+  set.** r48: killed at ~40 s by the reaper (trivial clean partial,
+  0 hits). Cumulative: **0 WW-HIT across r1-r48**, 0 META-SMASH.
+- Commits: 5b1995f0 (watchset 19 + cap3), 24d43e53 (pause snapshot of
+  the v2 WIP, pushed by the snapshot mechanism), 4fb5d480 (v2 landing +
+  probes + this archive). All pushed via ssh.github.com:443.
+- Next for the line: (1) chain continues at r49 under live-session
+  ownership — any WW-HIT on the 19-point set is the capture; (2) the
+  45-min OH 0-panic soak re-run for 4fb5d480 (or it rides the next
+  merge window's gate); (3) MERGE-READY with that one gate named:
+  reclaim-writeback v2 (A/B-proven: stuck-640MB vs flushed-896MB with
+  census reconciliation), FMAP/MMF/make-test green on both arches.
+
 
