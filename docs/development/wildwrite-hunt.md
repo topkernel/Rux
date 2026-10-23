@@ -2957,3 +2957,49 @@ Surface (private image, shared images untouched):
   zero fires, zero false positives.
 - Both chains hunting at max capture config (19-point set + RO tripwire
   + canary) on two load profiles (standard storm; sdc-cycle storm).
+
+## Session 32 (reconstructed from artifacts — quota death at ~02:39, no
+## archive written at the time)
+
+- Claimed 01:28 with BOTH chains alive (inherited from the s31 relaunch:
+  r57 / load-r4 in flight, proctree in run/ww-s32-proctree.txt).
+- ~01:38 sweep (session-31 window death) killed both rounds at ~14 min —
+  clean partials, 0 markers. Relaunched immediately at 01:38:55 (main
+  from r57, load from r4; logs run/ww-chain2-s32.log / ww-loadchain-s32.log).
+- **MAIN r57 (full): CLEAN** — 78348 lines, 0 WW-HIT / 0 heals /
+  0 panics, wildwatch try 0. Driver advanced to r58 (02:23:56).
+- **LOAD r4 (full): CLEAN** — 773 sdc exec cycles, 0 gdb hits, 0 capture
+  markers, storm healthy (wakes 10.42M, avg_run 3ms, strand_max 43.5s =
+  the >=3-QEMU contention class), 166490 serial lines. Driver advanced
+  to r5 (02:23:58).
+- r58 + load-r5 started 02:23:56/58; the quota death killed the s32
+  window at 02:38:55, ~15/45 into both — clean partials armed to the
+  last line: r58 53664 lines (wakes 3.54M, strand_max 8.8s healthy
+  class, 0 markers), load-r5 83634 lines (wakes 2.78M, 248 sdc execs,
+  0 markers). The load-r5 "signal 15 from (timeout)" line is the
+  timeout process RELAYING the sweep's SIGTERM to its QEMU, not a
+  budget expiry.
+- No commits from s32 (HEAD stayed 3b8bf325; untracked round artifacts
+  only). Cumulative at s32 close: **0 WW-HIT across r1-r57 complete
+  rounds** (r58 partial x2), 0 META-SMASH; load surface at 5 full armed
+  load-hours (p1 + r1-r4 = ~3452 sdc exec cycles), zero fires, zero
+  false positives.
+
+## Session 33 (continuation agent — both chains reclaimed dead, relaunched r58 / load-r5)
+
+- Claim 03:29: BOTH chains dead (the s32 quota-death sweep), no QEMUs of
+  any line except a later-starting perf-audit KVM boot (foreign,
+  untouched). Host up since 17:09 (no reboot), load 0.37, 49G free —
+  capacity fine for the two chain QEMUs.
+- Frozen hunt pair verified intact (bzImage md5 bf779126...; GUARD=
+  0xffffffff80a7a000 matches every arm line). Stop files absent.
+- Relaunched at 03:30:26 as this session's background tasks:
+  main `./run/ww-chain2.sh ww-s2 100 12371 58` (log
+  run/ww-chain2-s33.log), load `./run/ww-loadchain.sh wwload 100
+  12381 5` (log run/ww-loadchain-s33.log). Both verified armed
+  (WW-ARMED 19, GUARD matches) and storming within 3 min. Process trees
+  in run/ww-s33-proctree.txt — kill the DRIVER ROOT
+  (ww-chain2.sh / ww-loadchain.sh shell) first, then the round QEMU.
+- Standing state for the successor (if both chains died with this
+  window): same recipe, next round numbers from the chain logs' last
+  "run N/100 starting" lines.
