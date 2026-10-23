@@ -30,6 +30,7 @@ Runs (this worktree, `run/`):
 | `pa-pa15` | main@f242b7be + pa15 probe (IF=0 zone hooks + UART per-byte + per-comm printk + recv census; hooks in run/pa15-probe.patch, bzImage run/pa15-probe-bzImage) | syscost=1 sprobe=0 | 782 s | F1 deep-dive + hilogd dual-drain profile. cpu1 parked by a KERNPANIC at t=418 (see incident) -> t>=480 windows are cpu0-only. 2 smoke runs first (pa15smoke/2/3): smoke1 caught the on()-before-cmdline cache-off bug, smoke2 caught a u64 multiply overflow in the dump |
 | `pa-pa16smoke1/2` | main@bb25a46d + WW user-frame fix (0d64ce7b) + pa16 probe v3 (edge-triggered zones + REST call-site table; hooks in run/pa16-probe.patch, bzImage run/pa16-probe-bzImage) | syscost=1 sprobe=0 | 180/120 s | v3 validation: heal 0.02% of segments, miss=0, both CPUs balanced, site table 97.6% of REST. smoke1 (host load ~6) caught seconds-class host-stall tails inside exit-bearing sections (REST max 2775 ms); smoke2 added the GRQ/PTE-guard track_caller layer |
 | `pa-pa16` | same kernel as smoke2 | syscost=1 sprobe=0 | 782 s | REST decomposition run (section 2c). No KERNPANIC all boot (WW user-frame fix in); host load ~7 (6-8 foreign QEMUs); max closed IF=0 segment 4 ms all boot |
+| `pa-pa17` | main@0634bc8f (launcher wake-loss fixes a39d2bc0 v1 + 6e9679c5 v2 now merged) + pa16 probe v3 applied clean (bzImage run/pa17-probe-bzImage) | syscost=1 sprobe=0 | 782 s | W3 acceptance retest (section 2d). Host load ~6.7 (5 foreign QEMUs); TERM-DESCHED=0 all boot; max closed IF=0 segment 5 ms |
 
 Host context for all runs: KVM q35 `-cpu max -m 4G -smp 2`, shared with
 2-3 foreign-lane QEMUs (load avg ~5.5). Absolute numbers carry that
@@ -441,6 +442,94 @@ deschedule fix (a39d2bc0, feature/samgr-callback) is still NOT in main
 at audit time, so this stays the pre-fix baseline; retest when they
 merge.
 
+### 2d. pa17: W3 acceptance retest — the launcher's wake-loss fixes merged, census unchanged, GRQ hold down 31%
+
+pa17 (sixth session) = main@0634bc8f, which now carries the launcher
+lane's wake-loss fixes: **a39d2bc0 (v1)** terminal-deschedule re-asserts
+DEAD + clears leaked preempt bits at the final switch, and **6e9679c5
+(v2)** terminal deschedule also releases pick ownership. The pa16 probe
+v3 applied clean on the merged tree (sched hunks shifted; the probe
+marks `#[track_caller]` by function, so nothing was lost — the GRQ site
+moved sched.rs:2015 -> 2092). Same 780 s horizon, same quiet-boot
+discipline; host load ~6.7 (5 foreign QEMUs) vs pa16's ~7.
+
+**W3 census, the acceptance measurement for roadmap item 1:**
+
+| counter | pa16 (pre-fix) | pa17 (v1+v2 in main) | verdict |
+|---|---|---|---|
+| WAKE-RUN-LEAK prints | 691 | 593 | -14%, inside the pa13/pa15/pa16 variance band (702/406*/691; *pa15 lost a CPU at t=418) |
+| W3-RUNWAKE-REFUSED total | 30 | 31 | unchanged |
+| — lying busy slot (`curr_on&&on_cpu`) | 21 | 22 | unchanged — this population is NOT born on the fixed path |
+| — linked, never picked | 9 | 7 | unchanged shape (same ~70/30 split) |
+| PREEMPT-LEAK | 9 | 8 | unchanged |
+| TERM-DESCHED (v1 helper firing) | n/a | **0** | the v1 trigger — a leaked preempt_count at the final switch of a dying task (the twice-reproduced sc186/sc189 shape) — did not occur once this boot |
+
+Reading: **the fixes are compatible and harmless on this workload, but
+this boot exercises neither.** TERM-DESCHED=0 means the terminal-
+deschedule-with-leaked-bits path never ran, so v1's acceptance cannot
+be demonstrated on this run (it is a rare-shape fix — sc186/sc189
+reproduced "twice in most boots" on THEIR instrumented builds; a clean
+census run cannot prove a fix for a shape it never sees). The census
+lying-slot population (22 vs 21) is unchanged, which says those lying
+slots are born on a DIFFERENT path than the terminal deschedule — the
+launcher lane's birth-forensics hunt remains the right next step there.
+No regression anywhere: milestones in band (composer_host.ready 31.4 s
+vs 34.5; appspawn.started 60.2 vs ~60), hilogd dual-drain same volume
+(10.08 M recvfrom + 10.29 M recvmsg, still 1:1, recvfrom max 393 s —
+the wake-tail victim class persists), syscall total 80.7 M vs 83.8 M,
+softirq raise rates ~191-199/s per vec.
+
+**One direct, measurable effect: the schedule() GRQ REST hold dropped
+31%.** Rest-site #3 (sched.rs:2092, `schedule()` GRQ take — the same
+site as pa16's sched.rs:2015): 38.7 s / 7.56 M holds / avg 5.1 us — vs
+pa16 56.6 s / 9.28 M / 6.1 us. Both n (-18%) and avg (-16%) fell; as a
+machine share 3.9% -> 2.7% of 1440 CPU-s. The v2 pick-ownership release
+plausibly removes repick-loop holds (their sc191 conviction: a DEAD
+task kept resolving as the CPU's pick). Treat as one-run evidence: the
+boot is single-sample and the GRQ hold interacts with host load; the
+direction is consistent with the fix's design intent.
+
+**Zones on the merged kernel (v3 holds):** IF=0 total 337.2 s / 1440
+CPU-s = 23.4% of machine (pa16: 25.0%); REST 88.8% (pa16 92.0%),
+HARDIRQ 7.7% (5.1%), SOFTIRQ 1.7% (1.6%), UART 1.9% (1.4%). Max closed
+IF=0 segment 5 ms (pa16 4 ms — same class; cpu1's uart-zone max 524 ms
+is a host-stall tail inside a putc VM exit, the known smoke1 shape,
+not a kernel cli section). heal 0.2% / miss = 0 on both CPUs — the v3
+adjudication is stable on the new kernel. REST segment volume 914.5 M
+(pa16 911 M). Top-9 site coverage 97.3% of REST cum. Full site table
+at t=720: small_alloc 169/281 n=370.5 M/369.6 M tot=89.1/86.0 s
+avg=240/232 ns (machine 12.2%, pa16 12.6% — now the B lane's accepted
+work); sched.rs:2092 above; file.rs:676 n=86.7 M tot=26.9 s (1.9%);
+wait.rs:161/319/287 = 20.2+3.5+2.1 s (1.8% family); misc.rs:190
+(EPOLL_WAKE_REGISTRY) 15.0 s (1.0%); deferred_free 9.9 s (0.7%); NEW in
+top-12: timer.rs:317 and timer.rs:173 (~0.6+0.5 s — the launcher's new
+timer lock sites, small).
+
+**Console sub-item retest (ranking row 1a, second data point):** uart
+if0 360 K bytes @ 18.5 us (6.7 s) + if1 5.25 M bytes @ 15.6 us (81.7 s)
+= ~88.3 s of emission = **6.1% of the machine** (pa16: 78.8 s = 5.5%;
+pa15: 78.8 s / 4.34 M bytes = 5.0%). Per-byte cost is stable across
+three boots (15.5-18.5 us; single LSR poll per byte, multi=0); the
+VOLUME swings with boot depth (this boot's init event-loop spam was
+heavier — [kmsg] le_epoll timeout markers repeat-stacked). Producers
+unchanged: `<irq>` 232 KB console (100% under IF=0), init 229 KB
+(con_if0B=244 ~ 0), OS_FFRT_2_0 145 KB. The console-async lever's size
+estimate moves 5-6% of machine, direction unchanged.
+
+**WW age lines demoted to TRIAGE HINT (cross-lane, resolved).** The B
+line calibrated the pa16-flagged tension (359 WW IRQ-OFF lines at
+age≈1000 ms vs EFLAGS-exact max 4 ms): root cause is method, not
+arithmetic — the wall-clock gap between timer-IRQ arrivals conflates
+real IF=0 with host vCPU steal and tickless idle, and burst tick
+delivery can only UNDERSTATE age, never inflate. Their fix (2e41b614):
+idle-task recovery ticks print `idle-wake` and skip the walk; real-task
+WW age lines are demoted to TRIAGE HINT under >=3-QEMU contention; the
+same caveat covers their TIMER-SOFTIRQ-STALL tick_age. The EFLAGS
+sampler (this lane's v3 zones) is confirmed as the ground-truth
+instrument; their lines corroborate only. pa17 context: 340
+IRQ-OFF-WINDOW lines (pa16: 359) — same order, now hint-class.
+
+
 
 ## 3. Syscall cost table (pa1, cumulative t=1500s)
 
@@ -490,26 +579,27 @@ Notes:
   main yet) is already far below the 1.7-1.9 s *per sandbox phase*
   telemetry, because a phase is dozens of mounts plus other work.
 
-## 4. Ranking table v2.2 (cost centers -> boot-time contribution)
+## 4. Ranking table v2.3 (cost centers -> boot-time contribution)
 
-v2.2 = v2.1 refined by pa16's exact, call-site-attributed IF=0 numbers
-(fifth session). The v2/v2.1 rows keep their numbers; the pa15/pa16
-columns carry the direct evidence. Contribution model unchanged: 2
-vCPUs; kernel mode ~86% of ticks (pa16 t=720: 86.5/86.3%).
+v2.3 = v2.2 refreshed by pa17 (sixth session: launcher wake-loss fixes
+merged into main, W3 acceptance retest, console sub-item second data
+point, allocator routed to the B lane). Contribution model unchanged:
+2 vCPUs; kernel mode ~86-89% of ticks (pa17 t=720: 89.4/88.4%; pa16:
+86.5/86.3%).
 
-| # | cost center | measured (pa13) | pa15/pa16 direct evidence | gap contribution | family |
+| # | cost center | measured (pa13) | pa15/pa16/pa17 direct evidence | gap contribution | family |
 |---|---|---|---|---|---|
-| 1 | Interrupt-disabled regions (cli-recovery page) | 26% of kernel ticks; 316 IRQ-OFF-WINDOW/780 s | pa16 EXACT: IF=0 = 25.0% of machine; split REST 92.0% / HARD 5.1% / SOFT 1.6% / UART 1.4%; max closed segment 4 ms (no long cli section exists); 1.26 M sections/s | **large** — decomposed below; levers per section, not per zone | F1 |
-| 1b | REST section bulk (NEW, exact decomposition) | (inside #1) | small-alloc cache locks 12.6% of machine (54.9% of REST, 732 M/boot); schedule() GRQ 3.9%; fdtable get_file 2.0%; waitqueue family 2.2%; EPOLL_WAKE_REGISTRY 1.1%; deferred_free 0.7% — 99.3% attributed to file:line (2c table) | **the F1 lever list** — allocator per-CPU freelists (mm lane), GRQ pick (sched lane), fdtable read path, waitqueue batching, epoll registry | F1/F5 |
-| 1a | Console/UART emission (sub-item of F1, sized pa15) | outb/inb in recovery rips; cli page shares inb/outb | 4.34 M bytes/boot, 16-18 us/byte, ~5% of machine; pa16 re-check: if0 321 K @16.4 us + if1 1.23 M @15.6 us (volume varies with boot depth; per-byte cost stable), max/byte 2-3 ms quiet / 2.8 s host-loaded | medium CPU + **large latency multiplier** under host load | F1 |
-| 2 | Scheduler wake-loss (WAKE-RUN-LEAK; lying busy slots + linked-starving) | 702 leak prints/780 s; census 16 lying + 7 linked | pa16 (WW user-frame fix in, both CPUs alive all boot): 691 prints / 30 refusals / 9 PREEMPT-LEAK — shape unchanged; launcher fix a39d2bc0 still unmerged, retest pending | **large** — unchanged; still the wall-clock driver | F3 |
-| 3 | hilogd.server socket dual-drain + sysevent_source + connect-retry | 26.5 M calls by t=720 = ~25% of ALL syscalls | pa16: 10.6 M recvfrom + 10.7 M recvmsg (1:1, avg 102/10 us, recvfrom max 58 s = wake-tail victim); writev 15.2 M; connect 2.55 M | medium — volume is OH userspace; kernel levers = per-call recv cost + the wake-loss tail | F2 |
-| 4 | ext4 metadata + write path (open/stat/getdents/fsync/pwrite/mkdir) | open 235 us, newfstatat 206 us, getdents 643 us, fsync avg 16 ms | (untouched; pa16 syscall table same shape) | medium (~300-500 CPU-s/boot at this horizon) | F4 |
-| 5 | Atomic/CAS contention (atomic glue page + fetch_update family) | 16% of kernel ticks | pa16: glue page 20% of ticks — and the RMW owners are now named (small_alloc/fdtable/GRQ sections, row 1b) | medium — fixes fold into 1b | F5 |
+| 1 | Interrupt-disabled regions (cli-recovery page) | 26% of kernel ticks; 316 IRQ-OFF-WINDOW/780 s (now TRIAGE HINT — see 2d) | pa16 EXACT: IF=0 = 25.0% of machine; pa17: 23.4%; split REST 88.8-92.0% / HARD 5.1-7.7% / SOFT 1.6-1.7% / UART 1.4-1.9%; max closed segment 4-5 ms (no long cli section exists); 1.26 M sections/s | **large** — decomposed below; levers per section, not per zone | F1 |
+| 1b | REST section bulk (exact decomposition) | (inside #1) | small-alloc cache locks 12.2-12.6% of machine (~55% of REST, 732-740 M/boot; **accepted by the B line, per-CPU freelist direction**); schedule() GRQ 2.7-3.9% (**pa17: -31% wall after launcher v2, 38.7 s vs 56.6 s**); fdtable get_file 1.9-2.0%; waitqueue family 1.8-2.2%; EPOLL_WAKE_REGISTRY 1.0-1.1%; deferred_free 0.7% — 97.3-99.3% attributed to file:line | **the F1 lever list** — allocator per-CPU freelists (B lane), GRQ pick (launcher lane, partially landed), fdtable read path, waitqueue batching, epoll registry (ipc lane) | F1/F5 |
+| 1a | Console/UART emission (sub-item of F1) | outb/inb in recovery rips; cli page shares inb/outb | pa15: 4.34 M bytes, ~5% of machine; pa16: 1.55 M bytes @ t=720, 5.5%; pa17: 5.61 M bytes, 6.1% — **per-byte cost stable 15.5-18.5 us across 3 boots; volume varies with boot depth**; producers init/<irq>/FFRT-worker; task-context emission 100% IF=1 | medium CPU (5-6%) + **large latency multiplier** under host load | F1 |
+| 2 | Scheduler wake-loss (WAKE-RUN-LEAK; lying busy slots + linked-starving) | 702 leak prints/780 s; census 16 lying + 7 linked | **pa17 (v1 a39d2bc0 + v2 6e9679c5 in main): 593 prints (-14%, in variance band) / 31 refusals (22 lying + 7 linked, unchanged) / 8 PREEMPT-LEAK / TERM-DESCHED=0** — fixes harmless, their trigger shape absent this boot; lying slots are born on another path; birth forensics continues on the launcher lane | **large** — unchanged; still the wall-clock driver | F3 |
+| 3 | hilogd.server socket dual-drain + sysevent_source + connect-retry | 26.5 M calls by t=720 = ~25% of ALL syscalls | pa16: 10.6 M recvfrom + 10.7 M recvmsg; pa17: 10.08 M + 10.29 M (1:1, avg 116/9 us, recvfrom max 393 s = wake-tail victim); writev 14.6-15.2 M; connect 2.47-2.55 M | medium — volume is OH userspace; kernel levers = per-call recv cost + the wake-loss tail | F2 |
+| 4 | ext4 metadata + write path (open/stat/getdents/fsync/pwrite/mkdir) | open 235 us, newfstatat 206 us, getdents 643 us, fsync avg 16 ms | pa17: open avg 1893 us (max 100 s — stall-tail inflated, see 2d), newfstatat 294 us, getdents 1043 us; medians unchanged | medium (~300-500 CPU-s/boot at this horizon) | F4 |
+| 5 | Atomic/CAS contention (atomic glue page + fetch_update family) | 16% of kernel ticks | pa16: glue page 20% of ticks — RMW owners named (small_alloc/fdtable/GRQ sections, row 1b) | medium — fixes fold into 1b | F5 |
 | 6 | Log-filter + fmt glue | ~11% of kernel ticks combined | (untouched) | small-medium | F2/F5 |
-| 7 | Allocation churn (~5% kernel ticks) + allocator irqsave volume | ~5% kernel ticks | now QUANTIFIED as F1's top item (12.6% of machine in irqsave alone, on top of the fmt/drop tick share) | medium-large — merges with 1b | F5 |
+| 7 | Allocation churn (~5% kernel ticks) + allocator irqsave volume | ~5% kernel ticks | quantified as F1's top item (12.2-12.6% of machine in irqsave alone) — **B lane's queue** | medium-large — merges with 1b | F5 |
 | 8 | Mount registry scan | mount not in pa13 top-40 by wall | (untouched) | small | F4 |
-| 9 | clock_gettime volume (no vDSO) | 43.6 M calls <1 us | pa16: 35.1 M @3 us | small CPU, medium latency-shape | F6 |
+| 9 | clock_gettime volume (no vDSO) | 43.6 M calls <1 us | pa16: 35.1 M @3 us; pa17: 33.3 M @4 us | small CPU, medium latency-shape | F6 |
 
 
 What moved v1 -> v2: the read storm (#3 in v1 at ~0.5-1.0 vCPU) is gone
@@ -637,6 +727,17 @@ fault), is verified fixed (see section 6).
    fix when it lands. pa15 (same census, cpu1 KERNPANIC-parked from
    t=418): 26 refusals / 406 prints / 5 PREEMPT-LEAK — baseline shape
    unchanged; their fix is the gate for the retest.
+   PA17 RETEST (sixth session, v1 a39d2bc0 + v2 6e9679c5 merged at
+   main@0634bc8f): census UNCHANGED (593 prints / 31 refusals = 22
+   lying + 7 linked / 8 PREEMPT-LEAK) and TERM-DESCHED=0 — the fixed
+   terminal-deschedule shape did not occur this boot, so the census
+   lying-slot population is born on another path; birth forensics on
+   the launcher lane remains the lever. One direct effect did land:
+   the schedule() GRQ REST hold fell 31% (56.6 -> 38.7 s; 3.9% ->
+   2.7% of machine) — consistent with v2's pick-ownership release
+   (single-run evidence). Acceptance of the v1 shape needs a boot
+   where TERM-DESCHED actually fires (their sc-family reproducer), not
+   this clean census run.
 2. **Shrink irq-exit softirq cli time (interrupt/timer).** Two
    independent pieces: (a) stop raising the tcp_timer softirq (v1)
    on every tick when the TCP table is empty (199 raises/s/CPU for
@@ -843,3 +944,107 @@ kernel/src/mm/mm_struct.rs`. The v3 zone/REST-site state and the
 heal/miss meters are committed in syscost.rs; the v2 file
 run/pa15-probe.patch is superseded (kept for history — its hooks call
 the removed v2 zone API and no longer apply to current syscost).
+
+pa17 (W3 acceptance retest) provenance: `git apply run/pa16-probe.patch`
+on main@0634bc8f applied clean (same patch file; sched hunks shifted by
+the launcher merge, `#[track_caller]` marks are function-level so the
+GRQ site moved sched.rs:2015 -> 2092 in the dump), built kernel
+`run/pa17-probe-bzImage`. Revert is the same checkout list as pa16.
+
+## 10. Final report structure (post-UI microbench report skeleton)
+
+The user-named deliverable for this lane: a consolidated post-UI-boot
+microbench report. Structure below is final; every number in it is
+already measured (pa16/pa17 for Rux, oh-ref-r1 for the Linux reference
+at `/home/william/rux-agents/oh-linux-ref/runs/`). The main session can
+lift this section verbatim as the report body.
+
+### 0. Environment and method (half a page)
+
+- Guest: OpenHarmony x86_64 image, QEMU q35, KVM, `-cpu max -m 4G -smp 2`
+  (identical config for Rux and the Linux reference boots).
+- Rux kernel: main@0634bc8f + syscost instrumentation (`syscost=1
+  sprobe=0`); measurement method: per-syscall {n, avg, max}, tick-mode
+  accounting, EFLAGS-exact IF=0 zone accounting (v3), kernel-rip page
+  histogram, host-side serial timestamping (patstamp.py).
+- Linux reference: same image, same machine config, reference kernel
+  boot (oh-ref-r1/r2). Caveats stated: wall averages include blocking;
+  host shared with foreign QEMUs (load 6.7-7); single-boot samples for
+  milestones (variance band given).
+
+### 1. Boot phase table (Rux vs Linux reference)
+
+| event | Linux t (oh-ref-r1) | Rux pa17 t | Rux band (pa1-pa17) | factor |
+|---|---|---|---|---|
+| kernel start -> /init running | 1.40 s | 0.85 s (pa1) | ~0.9 s | 0.6x (Rux faster) |
+| first ServiceExec | 1.84 s | ~4-5 s | ~4-5 s | ~2.5x |
+| hdf_devmgr SA-5100 registration | 2.90 s | 6.4 s | 6-7 s | 2.2x |
+| bootevent.appspawn.started | 4.81 s | 60.2 s | 32-66 s | 6.6-13x |
+| bootevent.composer_host.ready | 4.89 s | 31.4 s | 31-44 s | 6.4-9x |
+| bootevent.launcher.ready | 10.12 s | not reached in 13 min | never | >150x |
+| bootevent.bootanimation.finished | 10.73 s | not reached | never | >145x |
+
+Reading: divergence grows with depth — early services 2-6x, everything
+downstream of appspawn 8x to >100x: the signature of a latency
+multiplier (wake-loss, F3) on top of per-op costs, not a uniform slowdown.
+
+### 2. Syscall latency table (Rux pa17, t=720 s cumulative)
+
+Volume leaders (the flood):
+
+| syscall | calls | avg | max | total |
+|---|---|---|---|---|
+| clock_gettime | 33.3 M | 4 us | 1.0 s | 133 s |
+| writev (logging) | 14.6 M | 24 us | 1.0 s | 357 s |
+| recvfrom (hilogd PEEK) | 10.08 M | 116 us | **393 s** | 1176 s |
+| recvmsg (hilogd consume) | 10.29 M | 9 us | 1.0 s | 98 s |
+| connect (dead-peer retry) | 2.47 M | 98 us | 1.0 s | 244 s |
+| epoll_pwait | 2.16 M | 11.6 ms | 180 s | 25,179 s (blocked) |
+
+Per-op latency (medians are the honest per-op cost; maxes are the
+wake-loss tail; Linux norms are same-op references on tmpfs/ext4):
+
+| op | Rux avg (pa17; pa16 in parens) | Rux max | Linux norm | factor (median) | calls (pa17) |
+|---|---|---|---|---|---|
+| newfstatat | 294 us | 3.0 s | ~1 us | ~200x | 179 K |
+| getdents64 | 1043 us (789) | 2.0 s | 2-4 us | 100-250x | 33.6 K |
+| open | avg 1893 us, stall-inflated (pa16 avg 400 us) | 100 s | 1-2 us | 100-200x | 259 K (217 K) |
+| unlink | 114.7 ms (117.2) | 2.0 s | ~50 us | ~10^3x | 192 |
+| mkdir | 9.6 ms @16.4 K calls (pa16: 62 ms @ 940 — phase mix differs) | 3.0 s | ~50 us | 60-600x | 16.4 K (940) |
+| chmod | 11.1 ms (5.8) | 1.0 s | ~20 us | ~400x | 2.9 K |
+| fsync | 44.8 ms (15.4) | 2.0 s | 1-5 ms | 20-90x | 67 |
+| fdatasync | 39.6 ms | 2.0 s | 0.5-2 ms | 30-100x | 1.6 K |
+| pwrite64 | 14.7 ms (25.8) | 2.0 s | 50 us-1 ms | 20-300x | 13.6 K |
+| pread64 | 10.9 ms (5.2) | 125 s | 5-20 us | 100-350x | 19.2 K |
+| munmap | 166 us | 1.0 s | ~5 us | ~30x | 707 K |
+| futex (blocked waits) | 351 ms | 465 s | — | wake-loss tail | 284 K |
+| nanosleep | 2.2 s | 295 s | — | tick-lateness tail | 5.5 K |
+
+### 3. Cost-center ranking (v2.3 summary — the fix list in order)
+
+1. REST irqsave bulk = 20.8-23.0% of machine: small-alloc locks 12.2%
+   (B lane), GRQ 2.7% (down from 3.9%, launcher v2), fdtable 1.9%,
+   waitqueue 1.8%, EPOLL registry 1.0%.
+2. Wake-loss (WAKE-RUN-LEAK) — unchanged by the merged v1+v2 fixes at
+   census level (593 prints / 31 refusals); still the wall-clock driver.
+3. hilogd dual-drain ~25% of syscall volume — OH userspace; kernel
+   levers small.
+4. ext4 metadata 100-300x Linux norms.
+5. Console/UART 5-6% of machine + seconds-class stall tail (per-byte
+   15.5-18.5 us stable) — console-async is the highest-latency single fix.
+(IF=0 total 23.4-25.0% of machine, max closed cli section 4-5 ms —
+no long section exists; it is 1.26 M short sections/s.)
+
+### 4. Linux comparison (what the same image does on Linux)
+
+- Total boot to launcher.ready: Linux 10.12 s; Rux not reached in 13 min
+  (16-23 min in earlier full runs).
+- Syscall volume: Linux reference boot completes before the OH retry
+  loops matter (no read/connect storms at any comparable rate); Rux
+  80-84 M syscalls by t=720 (112-116 K/s), 60% logging traffic.
+- CPU mode split: Linux spends most of this boot in userspace; Rux
+  86-89% kernel ticks.
+- The report's conclusion sentence: the gap is dominated by (a) wake-loss
+  stalls multiplying every dependency chain, (b) 1.26 M irqsave
+  sections/s (allocator/locks), (c) userspace logging loops amplified by
+  per-call kernel costs, (d) metadata ops at 100-300x — in that order.
