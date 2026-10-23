@@ -1737,6 +1737,73 @@ pub extern "C" fn asm_schedule() {
     schedule();
 }
 
+/// Terminal deschedule for a DEAD task — do_exit's "final schedule, never
+/// returns". sc186/sc189 (session R eighth leg): a racing wake/heal can
+/// re-link the exiting task between its dequeue and the final pick, and
+/// __schedule's same-task repick fast path then RETURNS without a context
+/// switch — do_exit's schedule() returns, the wfi park loop after it runs,
+/// and the CPU slot keeps naming the dead task forever while its leaked
+/// preempt bits (0x10000 hardirq observed) sit uncleared: the cpu is lost
+/// for the rest of the boot (PREEMPT-LEAK cpu=0 pc=0x10000 rip=wfi+5 held
+/// 10+ min; sa_main OS_IPC threads right after fatal USEGV at rip=0,
+/// twice reproduced — each sa_main null-jump halved the machine).
+///
+/// Discipline here: re-assert the terminal state each round (a task that
+/// will never run userspace again holds no critical section worth
+/// stranding a CPU for), clear anything that can make the discipline or
+/// the recursion guard refuse the switch, and retry until a REAL context
+/// switch happens. Never returns to the caller on success.
+pub fn schedule_dead_never_returns() {
+    use crate::process::task::task_flags::TaskFlags;
+    const IN_SCHED: u32 = TaskFlags::TIF_IN_SCHED.bits();
+    static TERM_RETRY_N: core::sync::atomic::AtomicU32 =
+        core::sync::atomic::AtomicU32::new(0);
+    let mut rounds = 0u32;
+    loop {
+        if let Some(cur) = current() {
+            // SAFETY: cur is the running task (this very context).
+            unsafe {
+                // A racing wake/heal may have re-linked us or rewritten
+                // our state: re-assert DEAD and unlink before every
+                // attempt so the picker can never hand the CPU back.
+                if !(*cur).state().is_dead() {
+                    (*cur).set_state(TaskState::new(TaskState::DEAD));
+                }
+                dequeue_task(&*cur);
+                cur.clear_ti_flag(IN_SCHED);
+                let pc = (*cur).preempt_count();
+                if pc != 0 {
+                    // Leaked bits protect nothing on a task that will
+                    // never run again. Name them once per boot for the
+                    // count-producer hunt (F1 lane), then clear.
+                    let n = TERM_RETRY_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                    if n < 4 {
+                        crate::pr_warn!(
+                            "TERM-DESCHED pid={} leaked preempt_count={:#x} cleared for final switch (round {})",
+                            (*cur).pid(),
+                            pc,
+                            rounds
+                        );
+                    }
+                    crate::interrupt::preempt::preempt_count_reset();
+                }
+            }
+        }
+        schedule();
+        rounds += 1;
+        // schedule() returning means it refused/repicked us once more;
+        // loop and re-assert. After a generous bound (something re-links
+        // us every single round — not observed, but do not spin hot),
+        // park in wfi like the old code did.
+        if rounds >= 8 {
+            loop {
+                // SAFETY: plain hint instruction, no side effects.
+                crate::arch::cpu::wfi();
+            }
+        }
+    }
+}
+
 unsafe fn __schedule() {
     clear_need_resched();
 
