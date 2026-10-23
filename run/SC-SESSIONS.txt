@@ -2118,3 +2118,43 @@ but the dispatch still did not land in time:
   B (reg_tgid ownership gate + wake preference), exit-reap
   (binder_on_tgid_exit), tgid-stamp fix, per-tgid BR_SPAWN_LOOPER,
   looper-only thread targeting, APPTXN route= tracer.
+
+SESSION R THIRD LEG (sc167+, 11:2x-): STORM CONVICTED BY EXACT BINARY,
+ROUTE TRACER CLOSES THE KERNEL CHAIN, NODE COLLISION CONFIRMED LIVE.
+- sc166 re-symbolized against the EXACT-era binary (74c5cf88 rebuilt in
+  a scratch worktree /home/william/rux-agents/sc166k): the 1000ms
+  IRQ-OFF family is enable_irq x672 / outb x194 / inb x126 + printk
+  log-filter atomics = THE UART PRINT PATH ITSELF (the earlier
+  loop_dev/module-table readout was a layout-shift artifact; the
+  sc159/161 UART verdict stands). Fixes committed 29a49444: THRE wait
+  2ms->250us, TX_STALLED drop-probe throttled to 1/32 bytes (each probe
+  = KVM VM exit), IRQ-OFF budget 20->200 jiffies, TIMER-STALL budget
+  10->100 + USER-rip (KVM weather) skipped, WAKE-STRANDED threshold
+  50->1000ms + budget 2->20 jiffies, APPTXN oneway route= added.
+- sc167 (killed early on purpose after the verdicts, ~12 min):
+  * STORM CUT CONFIRMED: TIMER-SOFTIRQ-STALL 1 (vs 2503), WAKE-STRANDED
+    120 (vs 2380, now only >=1s strands), IRQ-OFF-WINDOW 65 (vs 2300).
+  * BOOT PACE: first AppSpawnChild at serial line 8214 within ~2.5 min;
+    children 1-4 spawned; settingsdata 1164 + systemui 1171 both
+    narrated AppScheduler registered -> SetRunnerStarted -> SpawnThread
+    OS_IPC_1 -> IPCWorkThread created (per-tgid SPAWN gate working).
+  * ROUTE TRACER VERDICT: AMS(pid 547)->child deliveries ALL
+    route=child-looper (16 lines) - the kernel dispatch chain
+    (shared proc + reg_tgid gate + looper-only thread targeting +
+    per-tgid SPAWN) DELIVERS to the child's own worker todo. The kernel
+    side of the chain is COMPLETE.
+  * NODE COLLISION CONFIRMED LIVE: children 1164 (settingsdata) and
+    1171 (systemui) both registered IPCObjectStub *.AppScheduler at the
+    SAME VA 12769968; with the old bare-ptr node lookup 1171's
+    registration reused 1164's node, so AMS->systemui txns printed
+    child=1164 (never child=1171) - the cross-child black hole,
+    exactly the Linux-parity gap (Linux: every child = own proc = own
+    node space). A third child (1175) landed at 12769984 (different
+    VA) - collision is per-boot allocation dice.
+  * FIX COMMITTED (sc168 kernel): node identity is (ptr, reg_tgid) in
+    translate_object; BC_INCREFS_DONE/ACQUIRE_DONE prefer the issuing
+    thread's own node.
+  * Secondary observation: BMS ImplicitQueryAllAbilityInfos failed for
+    com.ohos.launcher (several times) + IOsAccount proxy EPIPE family
+    (sc147) - watch whether the launcher UI ability resolve blocks the
+    milestone even after routing is fixed.
