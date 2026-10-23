@@ -2665,3 +2665,67 @@ ACROSS BLOCKING BINDER CALLS) - KERNEL WAKE PATHS EXONERATED THIS BOOT.
   excluded from registration, budget 192): running for the dodge.
   Artifacts: run/oh-sc185-serial.log (65k lines), oh-sc185-shot1.ppm,
   userdata-sc185/sc186.img private copies.
+
+SESSION R EIGHTH LEG CONTINUED (sc186-190, 04:1x-05:4x): TERMINAL-
+DESCHEDULE FIX LANDED; PARKDUMP-OFF IMPROVES THE DODGE; sc190 = THE
+DEEPEST COMPOSER CONVERSATION OF THE CAMPAIGN.
+
+- Dodge rolls: sc186/187/188 (parkdump ON, merged-main kernel) all
+  lost the race at ~jif 1900-2200 (devmgr SERVER-OWING code-3 txns;
+  multiple processes froze with 16 readers each - tgid 453/526/devmgr).
+- sc189 (parkdump OFF): FIRST half-dodge since sc184 - devmgr ANSWERED
+  RS's GetService (SACMP reply code=3 dlen=24), RS went direct to
+  composer_host (code=0x34 GetVersion). But cpu0 was lost at ~min 1:
+  pid 691 (sa_main OS_IPC_2_691) took a fatal USEGV at rip=0, and the
+  PREEMPT-LEAK probe then showed cpu0's slot naming the dead task for
+  10+ min, saved context resumed at arch::x86_64::cpu::wfi+5, preempt_
+  count frozen at 0x10000 (hardirq bit). Boot crawled on cpu1 (8.8k
+  serial lines in 30 min); RS stalled pre-SA-10.
+- ROOT CAUSE (the wfi-residency leak, twice reproduced - sc186 pid 775
+  same signature): do_exit's final "never returns" schedule() CAN
+  return - __schedule's same-task repick fast path returns without a
+  context switch when a racing wake/heal re-links the exiting task
+  between its dequeue and the pick (the fast path's own comment names
+  this shape). The wfi park loop after it then runs in the DEAD task,
+  the CPU slot never advances, and the leaked hardirq bit sits
+  uncleared: the CPU is lost for the rest of the boot. Every sa_main
+  OS_IPC null-jump (~1 min in most boots) is a coin flip on halving
+  the machine.
+- FIX (a39d2bc0): schedule_dead_never_returns() - per retry round,
+  re-assert the terminal state (ZOMBIE preserved for leaders),
+  unlink, clear TIF_IN_SCHED, reset a nonzero preempt_count with a
+  budgeted TERM-DESCHED forensics print, retry until a REAL context
+  switch. Both do_exit terminal tails use it.
+- sc190 (fix kernel, parkdump OFF, 45 min): VERIFIED. 49+ USEGV
+  crashes, ZERO PREEMPT-LEAK lines (sc189 leaked within the first
+  minute), both CPUs alive all boot - 42k serial lines in the first
+  5 min (sc189: 8.8k in 30). THE DODGE: devmgr answered RS's
+  GetService again (2nd consecutive parkdump-off answer; parkdump-on
+  boots are 0-for-4), RS ran a 42-txn DIRECT conversation with
+  composer_host (codes 0x34/0x1/0x9/0xb/0xc - past sc184's depth),
+  OnHotPlug(0,1) delivered, BootAnimationController START, composer
+  reached SetBrightness(drm_connector). SA 10 did NOT publish: RS's
+  conversation stalled at #42 and the devmgr wedge (word 16 readers,
+  waiters 8->11) re-formed ~2 min in and eventually cut a dependency
+  RS still needed mid-Init. Launcher spawned/died repeatedly (AMS
+  churn) - process-death cascade collateral.
+- PARKDUMP-DODGE CORRELATION: parkdump's RWFRZ-PARK stack dumps cost
+  hundreds of UART lines each exactly during the storm window; with
+  them OFF, devmgr has answered RS in 2/2 boots. Forensic boots and
+  dodge boots now want different flags.
+- Live F1 datum for the count-producer hunt (from main's merged
+  probes, not mine): WW: IRQ-OFF-WINDOW cpu=0 age=1000ms pc=0x10000/
+  0x10001 on ALIVE tasks (pids 0x147, 0xcf4) - the hardirq-bit leak
+  also occurs on living tasks in 1s episodes; my fix only cures the
+  death path. The producer itself is the F1 lane's pa15 target.
+- NEXT (ninth leg): reroll parkdump-off boots with the fix kernel -
+  the remaining gap to SA 10 is the devmgr wedge re-forming mid-
+  composer-init; each roll now has both CPUs and a served GetService.
+  If SA 10 lands: bootanimation frames (not the 8-color kernel
+  oracle - check colors>8 / shotstat) -> ScheduleStartAbility ->
+  OnForeground -> ohgpu screenshot = the terminal milestone.
+- Artifacts: run/oh-sc18[6-8]-lost-serial.log (parkdump-on losses),
+  oh-sc189-serial.log (half-dodge + leak capture), oh-sc190-serial.log
+  (fix verification + deepest composer conversation), shots
+  oh-sc18[9,190]-auto0.ppm (8-color oracle, not UI), userdata-sc18[5-
+  190].img private copies.
