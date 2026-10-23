@@ -2727,8 +2727,19 @@ With the cluster under the kernel trap, the 8 cluster watchpoint slots
 free up for outside-cluster statics. Eight candidates identified by
 source analysis (HEAL_LAST at fc88b0 — the hpet::BASE wide-smash
 neighborhood; KERNEL_MAP; VMEMMAP_INIT+INIT_DONE; the console ISIG pair
-and the three medium-risk console statics TX_LAST_NOTICE /
-DUMP_MAGIC_POS / LEDGER_MAGIC_POS). run/ww-qs2.sh boots a 15.5-min full
-OH storm with the 8 armed + wildwatch ON (coexistence validated in the
-same boot — armed try 0, storm healthy). Verdict: see close-out.
+  and the three medium-risk console statics TX_LAST_NOTICE /
+  DUMP_MAGIC_POS / LEDGER_MAGIC_POS). run/ww-qs2.sh boots a 15.5-min full
+  OH storm with the 8 armed + wildwatch ON (coexistence validated in the
+  same boot — armed try 0, storm healthy).
+
+**qs2 VERDICT: ALL 8 CANDIDATES STORM-QUIET — zero hits** through a
+56529-line full storm (wakes 2.89M, 0 panics, tripwire armed try 0).
+Even the three medium-risk console statics stayed silent (the
+TX-recovery notice path and the per-RX-char magic scanners never fire
+on headless storm boots). The watchset repurpose is DEPLOYED in
+ww-gdbscript.py (rides automatically from r54): the 8 redundant
+GUARD-cluster points replaced by the 8 proven-quiet candidates —
+19 points total, now ALL outside the cluster, tiling the hpet::BASE,
+timekeeper, console-UART, and PHYS_RAM_BASE neighborhoods, with the
+whole guard cluster under the kernel RO trap beneath them.
 

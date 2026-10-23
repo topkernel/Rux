@@ -43,15 +43,26 @@ def addr(sym_suffix):
 guard = addr("4hpet5GUARD")
 
 WATCHES = {
-    # GUARD cluster: canary page (two spots) + the member qwords.
-    "GUARD_CANARY_LO": guard + 0x000,
-    "GUARD_CANARY_MID": guard + 0x7F8,
-    "BASE_LOCKED": guard + 0x1000,
-    "BASE_LOCKED_INV": guard + 0x1008,
-    "DIV": guard + 0x1010,
-    "DIV_INV": guard + 0x1018,
-    "BOOT_OFFSET": guard + 0x1020,
-    "BOOT_OFFSET_INV": guard + 0x1028,
+    # s30 REPURPOSED slots (storm-quietness proven by run/ww-qs2: 15.5
+    # min full OH storm, wakes 2.89M, ZERO hits on all 8, wildwatch ON):
+    # the GUARD-cluster points they replace were made redundant by the
+    # dfx=wildwatch RO trap (whole 2-page cluster attributed via the
+    # kernel #PF printer; canary cadence covers DMA-class writers).
+    # HEAL_LAST sits in the hpet::BASE wide-smash neighborhood (wt1
+    # geometry); KERNEL_MAP is the init-once 7-qword struct beside
+    # PHYS_RAM_BASE; VMEMMAP_FLAG covers VMEMMAP_INIT + security
+    # INIT_DONE (init-once bytes) extending the timekeeper tile one
+    # qword down; ISIG pair + the console notice/magic scanners are the
+    # UART neighborhood (per-RX/notice writers exist but never fire on
+    # headless storm boots — qs2-proven).
+    "HEAL_LAST": addr("4hpet11heal_report4LAST"),
+    "KERNEL_MAP": addr("10KERNEL_MAP"),
+    "VMEMMAP_FLAG": addr("12VMEMMAP_INIT"),
+    "ISIG_JIFFY": addr("15LAST_ISIG_JIFFY"),
+    "ISIG_SIGNO": addr("15LAST_ISIG_SIGNO"),
+    "TX_NOTICE": addr("14TX_LAST_NOTICE"),
+    "DUMP_MAGIC": addr("14DUMP_MAGIC_POS"),
+    "LEDGER_MAGIC": addr("16LEDGER_MAGIC_POS"),
     # Session-10 expansion (capacity proven >= 10 by run/ww-cap1): the
     # static the engine actually smashed twice (b77/wt1) was OUTSIDE the
     # cluster and unwatched; TSC_MULT is the timekeeper-class middle
