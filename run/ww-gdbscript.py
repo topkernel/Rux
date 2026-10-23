@@ -7,8 +7,13 @@ into hpet::GUARD — a page-exclusive cluster; the watch set therefore
 targets the GUARD members directly so watchpoint boots work on both the
 pre- and post-relocation layouts).
 
-Note: do NOT combine with dfx=wildwatch — the RO trap faults the store
-before it lands, so the watchpoint would never see a value change.
+Note (s30 policy change): hunt boots DO combine with dfx=wildwatch now
+(ww-hunt.py appends it). On the GUARD-cluster points (1-8) the kernel RO
+trap fires FIRST — a store there faults with a full KERNPANIC
+attribution dump in the SERIAL log, and the gdb watchpoint never sees a
+value change (kept armed as a backstop for a failed wildwatch arm). The
+11 non-cluster points remain gdb's exclusive, rip-attributing surface.
+The chain stop check greps BOTH logs (see ww-chain2.sh).
 
 Legit writers post-attach are only the heal paths in
 validated_read_base / read_time_nominal (recognizable rip). Anything
@@ -38,15 +43,26 @@ def addr(sym_suffix):
 guard = addr("4hpet5GUARD")
 
 WATCHES = {
-    # GUARD cluster: canary page (two spots) + the member qwords.
-    "GUARD_CANARY_LO": guard + 0x000,
-    "GUARD_CANARY_MID": guard + 0x7F8,
-    "BASE_LOCKED": guard + 0x1000,
-    "BASE_LOCKED_INV": guard + 0x1008,
-    "DIV": guard + 0x1010,
-    "DIV_INV": guard + 0x1018,
-    "BOOT_OFFSET": guard + 0x1020,
-    "BOOT_OFFSET_INV": guard + 0x1028,
+    # s30 REPURPOSED slots (storm-quietness proven by run/ww-qs2: 15.5
+    # min full OH storm, wakes 2.89M, ZERO hits on all 8, wildwatch ON):
+    # the GUARD-cluster points they replace were made redundant by the
+    # dfx=wildwatch RO trap (whole 2-page cluster attributed via the
+    # kernel #PF printer; canary cadence covers DMA-class writers).
+    # HEAL_LAST sits in the hpet::BASE wide-smash neighborhood (wt1
+    # geometry); KERNEL_MAP is the init-once 7-qword struct beside
+    # PHYS_RAM_BASE; VMEMMAP_FLAG covers VMEMMAP_INIT + security
+    # INIT_DONE (init-once bytes) extending the timekeeper tile one
+    # qword down; ISIG pair + the console notice/magic scanners are the
+    # UART neighborhood (per-RX/notice writers exist but never fire on
+    # headless storm boots — qs2-proven).
+    "HEAL_LAST": addr("4hpet11heal_report4LAST"),
+    "KERNEL_MAP": addr("10KERNEL_MAP"),
+    "VMEMMAP_FLAG": addr("12VMEMMAP_INIT"),
+    "ISIG_JIFFY": addr("15LAST_ISIG_JIFFY"),
+    "ISIG_SIGNO": addr("15LAST_ISIG_SIGNO"),
+    "TX_NOTICE": addr("14TX_LAST_NOTICE"),
+    "DUMP_MAGIC": addr("14DUMP_MAGIC_POS"),
+    "LEDGER_MAGIC": addr("16LEDGER_MAGIC_POS"),
     # Session-10 expansion (capacity proven >= 10 by run/ww-cap1): the
     # static the engine actually smashed twice (b77/wt1) was OUTSIDE the
     # cluster and unwatched; TSC_MULT is the timekeeper-class middle
@@ -68,6 +84,23 @@ WATCHES = {
     "CMDLINE_PTR": addr("7cmdline11CMDLINE_PTR"),
     "GDT_PER_CPU": addr("4trap11GDT_PER_CPU"),
     "VIRTIO_MMIO_OFF": addr("11MMIO_OFFSET"),
+    # Session-28 expansion (capacity proven >= 20 by run/ww-cap3: 20/20
+    # armed, position-20 firing at 3629 hits/40s, 0 quiet hits): the four
+    # remaining timekeeper-neighborhood statics, tiling the full
+    # 0xffffffff80be8f80-8fb0 stretch except the hot JIFFIES qword
+    # (0x8f98, written every tick — a flood, correctly excluded).
+    # Writer classes: TSC_ACTIVE/TSC_CONTINUITY_OFFSET/TSC_BASE stores
+    # sit in the SAME HPET-gated calibration blocks as TSC_MULT's
+    # (x86_64.rs :212/:211/:210 and :381/:380/:379) — dead code on these
+    # boots (hpet::ready() since second 1; TSC_MULT 0 legit hits r19-r45).
+    # JIFFIES_BASE: one compare_exchange at the FIRST increment-jiffies
+    # call (x86_64.rs:433-436), seconds before attach. The wt1 engine
+    # fingerprint was a WIDE smash into this neighborhood — the full
+    # trio + hpet cluster + BASE now covers every confirmed geometry.
+    "TSC_ACTIVE": addr("10TSC_ACTIVE"),
+    "JIFFIES_BASE": addr("12JIFFIES_BASE"),
+    "TSC_CONT_OFF": addr("21TSC_CONTINUITY_OFFSET"),
+    "TSC_BASE": addr("8TSC_BASE"),
 }
 
 out = []

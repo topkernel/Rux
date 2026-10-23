@@ -2422,4 +2422,360 @@ reachable).
   unclaimed follow-ups from the archive: reclaim-time writeback (v2),
   close(2) deferred-flush divergence note, watchset room beyond 15.
 
+## Session 28 (continuation agent — watchset to 19, reclaim-time dirty writeback v2)
+
+### Inheritance reconstruction
+
+- Base: fast-forward merge of main (4496f7fb — main took the session-27
+  close-out via merge; our HEAD was already its parent). Clean tree.
+- The handoff's "r46 died with session 27" was STALE for the SIXTH time:
+  the whole tree was alive at claim (wrapper 2628474 → chain 2628485 →
+  hunt 2628490 → qemu 2628491), r46 armed with the 15-point set,
+  storming 5 min into its budget. Claimed as-is; no restart.
+
+### Watchset 15 → 19: the full timekeeper neighborhood (commit 5b1995f0)
+
+- Writer analysis (source-grounded): TSC_ACTIVE (:212/:381),
+  TSC_CONTINUITY_OFFSET (:211/:380), TSC_BASE (:210/:379) store only
+  inside the SAME HPET-gated calibration blocks that store TSC_MULT
+  (:209/:378) — dead code on these boots (hpet::ready() since second 1;
+  TSC_MULT has zero legit hits across r19-r45). JIFFIES_BASE is written
+  once by the first-tick compare_exchange (x86_64.rs:433-436), long
+  before the +20s gdb attach. The hot JIFFIES qword (0x8f98, CAS/fetch
+  per tick) stays excluded — 8-byte watchpoint granularity separates it
+  cleanly.
+- ww-cap3 (bare boot, port 12403, own PIDs): 20 SIMULTANEOUS hw
+  watchpoints arm with 20/20 confirmations and no insertion errors;
+  position 20 (JIFFIES) FIRED 3629x in 40s with the writer symbolized
+  (atomic_compare_exchange_weak = the increment_jiffies CAS loop) —
+  capacity >= 20 with firing at the deepest position, retroactively
+  validating the 15-point set's positions too. 0 hits on the 19 quiet
+  candidates.
+- Deployed from r47: the full 0xffffffff80be8f80-8fb0 stretch
+  (TSC_ACTIVE, JIFFIES_BASE, TSC_CONT_OFF, JIFFIES, TSC_BASE, TSC_MULT)
+  is now tiled except the hot JIFFIES qword — every confirmed victim
+  geometry (b77/wt1 wide-smash fingerprint included) sits under
+  watchpoints. r47 verified WW-ARMED 19, GUARD unchanged (frozen pair
+  untouched).
+
+### Chain stewardship
+
+- r46 verdict: clean run — 66816 serial lines, wakes 8.32M,
+  strand_max 10308ms (the healthy 9.5-10.5s class), ticks [100,100],
+  0 KERNPANIC/ALLOCTHROW, 0 WW-HIT, 0 heals. Ended at ~32/45 min by an
+  external timeout kill (rc=124 mid-storm, no teardown lines — the
+  sweep class; the driver self-advanced). Cumulative: **0 WW-HIT across
+  r1-r46**, 0 META-SMASH.
+- r47+ rides the 19-point set (verified armed).
+- Ops: the ~12:52 user pause produced the automatic wip snapshot commit
+  (24d43e53) of this session's in-flight v2 work — the established
+  pause-snapshot mechanism; work continued on top.
+
+### Reclaim-time dirty writeback v2 LANDED (the session-24/27 follow-up)
+
+The abandonment shape: a writable MAP_SHARED mapping stored, munmap'ed,
+never msynced leaves every page a DIRTY, unreferenced cache entry that
+evict_one must skip (evicting loses the only copy) — permanently
+unevictable, invisible to reclaim, bounded only by "a later open+fsync
+on the same file". The close(2)-deferred-flush divergence item folds
+into this one: POSIX explicitly permits deferred writeback past close
+(Linux does not flush on close either); the REAL gap was that no path
+ever flushed without an explicit sync. Assessment: document, don't bolt
+blocking I/O onto close(2) (that would diverge from Linux in the other
+direction); fix the gap where Linux fixes it — in reclaim.
+
+Implementation (page_cache.rs + vmscan.rs, arch-neutral):
+
+- `InodePageCache` records its raw `(fs_id, ino)` (cache_key is a
+  non-reversible hash; fs_id IS the Ext4FileSystem pointer, so the raw
+  pair resolves everything).
+- `PageCache::shrink_reclaim(nr)`: clean pass first (plain shrink), then
+  on any SHORTFALL — deliberately not only at the exhausted wall, so the
+  flush's own ext4/bio allocations still have memory to allocate (the
+  Linux dirty-threshold insight; flushing only at the wall would make
+  every journal/buffer alloc fail and the pages stay dirty forever) —
+  collect up to 2 inode windows of 16 dirty unreferenced pages under the
+  inodes lock, DROP the lock, resolve a live VFS Inode via
+  `icache_lookup(ino, fs_id)` (Inode.fs_id == the fs pointer for ext4 —
+  the same liveness contract sys_fsync uses), call the EXISTING
+  ext4_flush_dirty_inode on the window, loop (the next clean pass evicts
+  what the flush cleaned). Bounded: 2 inodes x 16 pages x 4 rounds per
+  call; a WRITEBACK_GUARD AtomicBool degrades nested re-entry (reclaim
+  inside the ext4 write path's own allocations) to clean-only.
+- vmscan shrink_inactive_list switches to shrink_reclaim — direct
+  reclaim only. That path is task context, spinlock-free, globally
+  serialized by IN_DIRECT_RECLAIM, and ALREADY performs blocking swap
+  I/O (reclaim_anonymous_pages), so blocking flush I/O changes no
+  context contract. The mmu_init PT-alloc retry (per-mm PteLock held)
+  KEEPS plain shrink() — the session-19 deadlock argument.
+- An inode missing from icache is skipped (stuck as before, bounded; a
+  future open() re-caches it). A mapper racing the flush keeps the page
+  dirty (flush_done pin rule) — rewritten next round, same POSIX
+  last-writer-wins latitude as concurrent msync.
+
+### reclaimwb A/B (the v2 validation, x86_64, q35/TCG/smp2/2G)
+
+New probe test/reclaimwb.c + reclaimwb_boot.py: ftruncate a 256MB file,
+mmap MAP_SHARED RW, store a pattern every 64 words, munmap, close —
+NO msync/fsync anywhere — then a sacrificial child touches anonymous
+memory until it dies at the wall (survivable pagefault-OOM path),
+reporting progress every 64MB. Discriminator = how far the child got +
+the OOM-moment census (no knife-edge RAM arithmetic).
+
+| kernel | child reached | census at OOM | panics |
+|---|---|---|---|
+| control 1fd06f7b (pre-v2) | 640MB | pagecache_pages=65536 (= the 256MB, dirty-stuck), anon=178755 | 0 |
+| v2 e5038877 | 896MB | pagecache_pages=0, lru_file=0, dirty=0, anon=244164 | 0 |
+
+The sums reconcile exactly: control anon 178755 + pagecache 65536 =
+244291 ≈ v2 anon 244164 = the zone's true ceiling (~959MB managed; 2G
+guest minus the 1GiB kernel-heap reservation). v2 converted the entire
+abandoned dirty region into reclaimable memory; both worlds survived
+the OOM-kill cleanly (0 panics; the v1 shape is the pre-existing
+documented behavior, not a regression). Serial diagnostics during the
+pressure grind (TIMER-SOFTIRQ-STALL ~1-4s, IRQ-OFF-WINDOW) symbolize to
+the known idle/softirq classes (cpu::wfi, enable_irq) — no new
+irq-off pathology from the flush path.
+
+### Regression legs (all green)
+
+- x86_64 (e5038877): FMAP PASS both passes (FS1-FS8 + FSP two-boot
+  persistence through the new shrink_reclaim path).
+- riscv64 (50fc6af5): in-kernel unit tests **1085/1088** (run/
+  ww-s28-rv-test.log — byte-identical failure set: the 3 pre-existing
+  config size asserts); FMAP PASS both passes; MMF-PASS (serial-verified;
+  the driver poller missed the poweroff race, serial has 0 FAILs);
+  reclaimwb PASS — the 128MB dirty region flushed, the 600MB child
+  target COMPLETED (1G guest had room once the dirty pages returned).
+- make-test QEMU reaped after results were file-captured (post-summary
+  panic class, own PID after cwd verification); chain r47 untouched.
+
+### Session 28 close-out
+
+- **ww-v2soak (the 45-min OH 0-panic gate on the v2 kernel): killed at
+  20/45 min by the user pause (below) — a HEALTHY PARTIAL, not the
+  completed gate.** 72967 lines, full storm (864 forks, wakes 1.63M),
+  0 KERNPANIC / 0 ALLOCTHROW / 0 OOM events, memfree_pages=454461
+  (1.77 GiB free at death — no drain; the ww-fms2 45-min baseline was
+  422361), strand_max 29s (the >=3-QEMU host-contention class: chain
+  r47 + this soak + the samgr line ran concurrently). The completed
+  45-min 0-panic boot is the ONE remaining merge gate for 4fb5d480 —
+  everything else (A/B, both-arch probes, unit tests) is green.
+- **Ops finding — the mid-session kills were USER PAUSES, not a rogue
+  reaper:** QEMU trees died at 12:52:17 and 13:27:40, each minutes
+  BEFORE the real 2700s budget, each with the `timeout`-shaped rc=124
+  mid-storm end. run/PAUSE-NOTE-2026-10-23.md (written by the pause
+  mechanism) settles it: "Killed at pause" — the 12:51:56 wip snapshot
+  (24d43e53) and the 13:28 note are the same two events. Victims: r46
+  (12:52), then r47 + ww-v2soak simultaneously (13:27:40) and the chain
+  wrapper + r48 ~40 s into its run (~13:28). The chain's session-27
+  ownership did NOT matter — pauses reap QEMU tasks wholesale. Chain
+  relaunched from r49 at 13:46:52 as this session's own background task
+  (the pause note's "resume from r48" was one run stale — r48 had
+  already started and died with the wrapper).
+- r47 verdict (collected before the reaper took it): FULL 2700 s clean —
+  71411 lines, wakes 9.91M, strand_max 9648ms (healthy class), 0
+  WW-HIT / 0 heals / 0 panics. **First complete run on the 19-point
+  set.** r48: killed at ~40 s by the reaper (trivial clean partial,
+  0 hits). Cumulative: **0 WW-HIT across r1-r48**, 0 META-SMASH.
+- Commits: 5b1995f0 (watchset 19 + cap3), 24d43e53 (pause snapshot of
+  the v2 WIP, pushed by the snapshot mechanism), 4fb5d480 (v2 landing +
+  probes + this archive). All pushed via ssh.github.com:443.
+- Next for the line: (1) chain continues at r49 under live-session
+  ownership — any WW-HIT on the 19-point set is the capture; (2) the
+  45-min OH 0-panic soak re-run for 4fb5d480 (or it rides the next
+  merge window's gate); (3) MERGE-READY with that one gate named:
+  reclaim-writeback v2 (A/B-proven: stuck-640MB vs flushed-896MB with
+  census reconciliation), FMAP/MMF/make-test green on both arches.
+
+## Session 29 (continuation agent — post-reboot claim: r49/r50 verdicts, chain from r51, v2soak gate re-run)
+
+### Inheritance reconstruction (handoff "resume from r48" was two runs stale)
+
+- The handoff note predated session 28's close-out: session 28 had
+  already relaunched the chain from r49 at 13:46:52 (after the 13:28
+  pause). r49 ran its FULL budget clean (106265 serial lines, 0 WW-HIT,
+  0 heals, driver self-advanced at 14:31:52). r50 was then killed
+  externally at ~15 min (serial last write 14:46, whole tree gone —
+  session-28 window death class).
+- **The HOST was rebooted**: at claim (17:13) uptime was 4 minutes, so
+  everything from before ~17:09 is gone regardless. No chain/QEMU
+  processes survived; nothing else was running on the host at claim
+  (44G free of 59G, no other line's QEMUs back yet).
+- r50 verdict from the artifacts: CLEAN PARTIAL — 54022 lines, full
+  storm to the last line (wakes 3.56M, strand_max 8764ms = healthy
+  class), 0 WW-HIT in the gdb log, 0 KERNPANIC/ALLOCTHROW. Cumulative:
+  **0 WW-HIT across r1-r50**, 0 META-SMASH.
+
+### Chain relaunched from r51 (primary task)
+
+- `./run/ww-chain.sh ww-s2 100 12371 51` as this session's background
+  task, 17:15. r51 verified armed with the full 19-point set
+  (WW-ARMED 19, GUARD=0xffffffff80a7a000, frozen pair untouched) and
+  storming within 4 min (36k serial lines, wakes 480k).
+- Process tree recorded in run/ww-s29-proctree.txt: bash 11631
+  (ww-chain.sh, THE driver root — kill first, then the QEMU) ->
+  ww-hunt.py 11646 -> timeout 11647 -> qemu 11657.
+
+### v2soak gate re-run (the one remaining merge gate for 4fb5d480)
+
+- Worktree rebuild: `PLATFORM=x86_64 make build` is a cargo no-op that
+  reproduces the byte-identical v2 kernel (md5 e5038877... = the
+  session-28 A/B "v2" binary; build/ helper dir was wiped by the
+  reboot, target/ survived).
+- ww-v2soak2 (run/ww-v2soak2.sh): TAG=ww-v2soak2, worktree bzImage,
+  dfx=taskdump,watchdog,periodic,memwatch,ledger (same flags as the
+  ww-fms2 45-min baseline so memfree_pages compares), SECS=2700,
+  own port 12375, launched 17:16 as a script-file background task.
+
+### Session 29 close-out (reconstructed by session 30 from artifacts)
+
+- The session-29 window died ~17:27 (serial last write 17:27:13) — it
+  took BOTH background tasks at once, ~11 min into each:
+  - r51 (chain, launched 17:15): CLEAN PARTIAL — 50264 lines, full
+    storm (wakes 2.53M, strand_max 3241 ms healthy class), 0 WW-HIT,
+    0 KERNPANIC/ALLOCTHROW. Cumulative: **0 WW-HIT across r1-r51**,
+    0 META-SMASH.
+  - ww-v2soak2 (gate re-run, launched 17:16): HEALTHY PARTIAL at
+    11/45 min — 55086 lines, 702 forks, wakes 652k, memfree_pages
+    ~455k (1.77 GiB free — no drain; v2soak's 20-min partial read
+    454461), **0 KERNPANIC / 0 ALLOCTHROW / 0 OOM events**, 0
+    MM-DROP-CTX / META-SMASH. The completed 45-min gate remains open.
+- Session 30 verified the push state: origin/feature/wildwrite-hunt
+  already sat at 47e5ab80 (session 29 pushed; the local tracking ref
+  was stale because https fetch times out — check the remote directly
+  before concluding "unpushed").
+
+## Session 30 (continuation agent — claim after host reboot + window death; chain from r52, v2soak3)
+
+### Inheritance reconstruction
+
+- Handoff said "resume from r48" — STALE BY FOUR ROUNDS (the recurring
+  pattern; archive sessions 28-29 are authoritative over pause notes):
+  session 28 relaunched from r49 (13:46), session 29 from r51 (17:15).
+  True state at claim (20:05): NOTHING running since 17:27; host
+  rebooted 17:09 (uptime 2:57 at 20:06); latest artifacts r51 + 
+  v2soak2, verdicts above.
+- Frozen hunt pair intact (Oct 21 15:05, GUARD=0xffffffff80a7a000
+  matches the r51 arm). Worktree v2 bzImage md5 e5038877... =
+  byte-identical to session-28's validated v2 binary.
+
+### Stewardship
+
+- Chain relaunched from r52 at 20:07 (run/ww-chain-s30.log):
+  WW-ARMED 19 verified, storming within 3 min. Driver root = the
+  ww-chain.sh shell (PID tree recorded in run/ww-s30-proctree.txt:
+  bash → ww-chain.sh 22556 → ww-hunt.py 22561 → timeout 22562 →
+  qemu 22572). Chain-discipline reminder honored: kill the driver
+  root FIRST, then the round's QEMU.
+- ww-v2soak3 (run/ww-v2soak3.sh): the completed-gate re-run for
+  4fb5d480, own port 12376, same flags/kernel as v2soak2. Verdict
+  below.
+- Foreign-QEMU watch at claim: samgr-callback line's KVM q35 boot
+  (PID 22503, cwd /home/william/rux-agents/samgr-callback) started in
+  the same minute — NOT touched (launcher-adjacent line, host-load
+  discipline: my 2 QEMUs + theirs = 3 total, the known contention
+  class for si_busy/strand readings).
+
+### r52 + the wildwatch landing
+
+- r52 (last round of the old flagless chain): FULL 2700 s clean —
+  71684 serial lines, 0 WW-HIT, 0 heals, 0 panics; the old driver
+  exited cleanly on the stop file (placed to avoid an in-place edit of
+  a script a live driver was executing — bash reads scripts
+  incrementally). Cumulative: **0 WW-HIT across r1-r52**, 0 META-SMASH.
+
+- **dfx=wildwatch now rides every hunt boot (r53+).** Discovery while
+  auditing the 19-point coverage: the 2-page hpet guard cluster (8 KB)
+  had 8 of 1024 qwords hardware-watched and NO kernel-side tripwire —
+  the dfx flag existed in the frozen kernel (42eb2006, pre-refreeze)
+  but was never added to EXTRA_APPEND, and the gdbscript doc even said
+  "do NOT combine" (written when the cluster points WERE the watchset).
+  With the tripwire armed the whole cluster is RO in every alias: any
+  CPU store there page-faults at the writer's RIP with the full
+  KERNPANIC attribution dump (addr2line on the frozen ELF), and the 1 s
+  canary cadence covers PTE-invisible/DMA-class writers — a ~128x
+  capture-surface increase on the confirmed-victim neighborhood. The
+  11 non-cluster watchpoints stay gdb's exclusive rip-attributing
+  surface; the 8 cluster points ride as an arm-failure backstop (the
+  heal paths are guard_armed()-gated — verified zero legit post-arm
+  writers before landing).
+- ww-chain2.sh (successor driver): stop check now greps BOTH logs —
+  WW-HIT (gdb), WILDWATCH-CANARY / scribble-heals ("hpet: clock
+  base|div|offset healed") / KERNPANIC (serial) — plus a per-round
+  anomaly note when the armed line is missing. "clock corrected
+  backward" (jitter clamp) deliberately not a stop marker.
+- r53 (first wildwatch round, launched 20:54 under ww-chain2.sh):
+  tripwire armed on try 0 ("2 guard pages RO (0 failed), 4 alias PTEs
+  guarded"), 19-point set armed, full storm — the boot is healthy with
+  the cluster RO, validating coexistence live.
+
+### v2soak3: THE 45-MIN GATE PASSED — 4fb5d480 fully merge-ready
+
+- Full budget (timeout kill as designed, 20:07-20:52), 141111 serial
+  lines, 1197 forks, wakes 5.96M to the end, **0 KERNPANIC / 0
+  ALLOCTHROW / 0 oom-killer / 0 OOMFX / 0 MM-DROP-CTX / 0 META-SMASH**,
+  memfree_pages=429832 (1.68 GiB free at boot-end — no drain; ww-fms2
+  baseline 422361). Every gate for the reclaim-time dirty writeback v2
+  is now green: the A/B (stuck-640MB control vs flushed-896MB with
+  census reconciliation), FMAP/MMF both arches, make-test 1085/1088,
+  and this 45-min 0-panic soak. MERGE-READY for the next main window.
+
+### qs2 (watchset-repurpose probe) — in flight
+
+With the cluster under the kernel trap, the 8 cluster watchpoint slots
+free up for outside-cluster statics. Eight candidates identified by
+source analysis (HEAL_LAST at fc88b0 — the hpet::BASE wide-smash
+neighborhood; KERNEL_MAP; VMEMMAP_INIT+INIT_DONE; the console ISIG pair
+  and the three medium-risk console statics TX_LAST_NOTICE /
+  DUMP_MAGIC_POS / LEDGER_MAGIC_POS). run/ww-qs2.sh boots a 15.5-min full
+  OH storm with the 8 armed + wildwatch ON (coexistence validated in the
+  same boot — armed try 0, storm healthy).
+
+**qs2 VERDICT: ALL 8 CANDIDATES STORM-QUIET — zero hits** through a
+56529-line full storm (wakes 2.89M, 0 panics, tripwire armed try 0).
+Even the three medium-risk console statics stayed silent (the
+TX-recovery notice path and the per-RX-char magic scanners never fire
+on headless storm boots). The watchset repurpose is DEPLOYED in
+ww-gdbscript.py (rides automatically from r54): the 8 redundant
+GUARD-cluster points replaced by the 8 proven-quiet candidates —
+19 points total, now ALL outside the cluster, tiling the hpet::BASE,
+timekeeper, console-UART, and PHYS_RAM_BASE neighborhoods, with the
+whole guard cluster under the kernel RO trap beneath them.
+
+### Session 30 close-out
+
+- r53 (first full wildwatch round): FULL 2700 s clean — 78978 lines,
+  0 WW-HIT, 0 heals, 0 panics, tripwire armed the whole boot. r54
+  verified armed with the REPURPOSED 19-point set (points 1-8 = the
+  qs2 candidates) + wildwatch try 0 — the chain now runs at maximum
+  capture configuration: kernel RO trap over the whole 8 KB guard
+  cluster (rip-attributed KERNPANIC on any CPU store), 1 s canary
+  cadence (DMA-class detection), 19 hardware watchpoints on every
+  outside-cluster victim neighborhood, and the two-log stop check.
+- Cumulative: **0 WW-HIT across r1-r53**, 0 META-SMASH. The engine's
+  rate remains below one fire per 51+ armed boot-hours; the capture
+  surface is now ~128x larger on the cluster + 8 new statics, so the
+  per-boot-hour hit probability rises accordingly from r54 on.
+- Archive follow-ups from the handoff all closed this session: reclaim
+  writeback v2 (gate passed — merge-ready), close deferred flush
+  (folded into v2's reclaim design, documented s28), watchset room
+  (wildwatch + repurpose, above).
+- Chain ownership: driver root = ww-chain2.sh shell (PID tree in
+  run/ww-s30-proctree2.txt; kill the driver root FIRST, then the round
+  QEMU). Ops notes: bash reads scripts incrementally — never edit a
+  script a live driver executes (use the stop-file handoff + successor
+  script); the qs1-style inline probe drivers were saved as durable
+  scripts (ww-qs2.sh) this session.
+- Commits this session (all pushed via ssh.github.com:443): 9004ebc1
+  (wildwatch on chain + serial capture markers), 4097d56f (stop-file
+  fix), 7f8b2a6a (qs2 probe), 3415f54c (r52/v2soak3/r53 archive),
+  f957865f (watchset repurpose deployment), + this close-out.
+- Next for the line: (1) chain continues — any WW-HIT /
+  WILDWATCH-CANARY / scribble-heal / KERNPANIC marker auto-stops it
+  with the evidence in place; (2) 4fb5d480 rides to main at the next
+  merge window (all gates green); (3) if long stretches stay silent,
+  the remaining escalation is load-profile diversity (fire6-style sdc
+  cycles) rather than more statics — every confirmed victim geometry
+  is now instrumented.
 

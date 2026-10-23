@@ -19,7 +19,7 @@
 //! small region around the kernel image.
 
 use alloc::collections::BTreeMap;
-use core::sync::atomic::{AtomicU32, AtomicU64, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use crate::sync::spinlock::Spinlock;
 use crate::mm::page_alloc::{alloc_page, alloc_page_batch, free_page};
 use crate::mm::zone::{GfpFlags, ZoneType};
@@ -90,6 +90,8 @@ static STAT_HITS: AtomicU64 = AtomicU64::new(0);
 static STAT_MISSES: AtomicU64 = AtomicU64::new(0);
 static STAT_EVICTIONS: AtomicU64 = AtomicU64::new(0);
 static STAT_DEMOTIONS: AtomicU64 = AtomicU64::new(0);
+/// Re-entrancy gate for shrink_reclaim's dirty-flush I/O (see there).
+static WRITEBACK_GUARD: AtomicBool = AtomicBool::new(false);
 
 /// A cached page of file data, backed by a zone-allocated physical page frame.
 struct CachedPage {
@@ -120,6 +122,13 @@ struct CachedPage {
 struct InodePageCache {
     /// page_index → cached page.
     pages: BTreeMap<u64, CachedPage>,
+    /// Identity of the owning (filesystem, inode) — cache_key is a
+    /// non-reversible hash, so reclaim-time writeback (shrink_reclaim)
+    /// records the raw inputs here to resolve a live VFS Inode via
+    /// icache_lookup and flush dirty entries through the normal
+    /// ext4_flush_dirty_inode machinery.
+    fs_id: u64,
+    ino: u64,
 }
 
 /// Global page cache, keyed by the combined (fs_id, inode) cache key.
@@ -242,6 +251,8 @@ impl PageCache {
 
         let inode_cache = cache.entry(key).or_insert_with(|| InodePageCache {
             pages: BTreeMap::new(),
+            fs_id,
+            ino,
         });
 
         // If already cached and fresh, nothing to do. (R7-C2: this used to
@@ -381,6 +392,8 @@ impl PageCache {
 
             let inode_cache = cache.entry(key).or_insert_with(|| InodePageCache {
                 pages: BTreeMap::new(),
+                fs_id,
+                ino,
             });
 
             // Copy per page (order-0 frames are not contiguous), describe,
@@ -980,6 +993,135 @@ impl PageCache {
                 break;
             }
             freed += 1;
+        }
+        freed
+    }
+
+    /// Reclaim-time dirty writeback (the session-24 "v2" item). Direct
+    /// reclaim ONLY: the plain shrink() evicts clean pages alone — a
+    /// DIRTY entry (unflushed MAP_SHARED stores of a mapping that has
+    /// since unmapped without msync) is skipped by evict_one by design,
+    /// because evicting it would lose the only copy of that data. When
+    /// nothing clean is left, such pages are a permanent, unevictable
+    /// drain (the abandonment shape of the fake-OOM family). This
+    /// variant makes progress where shrink() cannot: flush the dirty
+    /// entries to their file first, then let the clean pass evict them.
+    ///
+    /// Safety shape (each point verified against the callers):
+    /// - Runs from vmscan direct reclaim (page_alloc slowpath), which is
+    ///   task context, holds no spinlocks, and is globally serialized by
+    ///   IN_DIRECT_RECLAIM — never from the mmu_init PT-alloc retry,
+    ///   which holds the per-mm PteLock (sleeping on I/O there is the
+    ///   deadlock the session-19 comment documents; that caller keeps
+    ///   plain shrink()).
+    /// - The inodes lock is NEVER held across the flush I/O
+    ///   (R-WRITESTORM-1): candidates are collected under the lock, the
+    ///   lock is dropped, then ext4_flush_dirty_inode does its own
+    ///   chunked collect → write → complete cycle.
+    /// - The filesystem is reached through a LIVE VFS Inode resolved by
+    ///   icache_lookup (fs_id of an ext4 Inode IS the fs pointer, ext4
+    ///   mod.rs inode setup) — the same liveness contract sys_fsync
+    ///   uses. An inode no longer in icache is skipped: its dirty pages
+    ///   stay as they were (bounded, coherent to every reader through
+    ///   the frame); the next open() re-caches the inode and a later
+    ///   retry can flush them.
+    /// - WRITEBACK_GUARD stops re-entry: ext4's write path allocates
+    ///   memory, and a nested reclaim arriving inside our own flush
+    ///   must not start another flush (it degrades to clean-only).
+    /// - A page whose mapping re-pinned during the flush stays dirty
+    ///   (flush_done keeps the bit while pinned) and is simply picked
+    ///   again by a later round — the bounded round count below keeps
+    ///   one call from spinning on it.
+    pub fn shrink_reclaim(&self, nr_to_scan: usize) -> usize {
+        /// Max inode ranges flushed per round, and rounds per call. One
+        /// shrink_reclaim thus performs at most 2*16 chunked flushes of
+        /// I/O before returning — reclaim stays responsive while always
+        /// making progress (each flushed-and-now-clean page is evicted
+        /// by the follow-up clean pass).
+        const MAX_WB_INODES: usize = 2;
+        const MAX_WB_ROUNDS: usize = 4;
+        /// Dirty-page window per flush: matches ext4_flush_dirty_inode's
+        /// internal CHUNK (one collect/write/complete cycle).
+        const WB_WINDOW: u64 = 16;
+
+        let mut freed = 0usize;
+        for _round in 0..MAX_WB_ROUNDS {
+            let remaining = nr_to_scan.saturating_sub(freed);
+            if remaining == 0 {
+                break;
+            }
+            freed += self.shrink(remaining);
+
+            if freed >= nr_to_scan {
+                break;
+            }
+            // Shortfall: reclaim demand exceeds what clean eviction
+            // supplied. Flush dirty, unreferenced entries NOW — while
+            // clean pages may still exist elsewhere — rather than at
+            // the exhausted wall: the flush's own ext4/bio allocations
+            // (journal buffers, block mapping) must be able to allocate
+            // while it runs, or every write fails and the pages stay
+            // dirty forever (the Linux dirty-threshold insight: writeback
+            // starts far below the memory wall).
+            let mut work: [(u64, u64, u64, u64); MAX_WB_INODES] =
+                [(0, 0, 0, 0); MAX_WB_INODES];
+            let mut n_work = 0usize;
+            {
+                let cache = self.inodes.lock();
+                'outer: for (_key, inode_cache) in cache.iter() {
+                    let mut first: Option<u64> = None;
+                    let mut last: u64 = 0;
+                    for (&idx, page) in inode_cache.pages.iter() {
+                        if page.invalidated
+                            || page.ref_count.load(Ordering::Acquire) != 0
+                            || !page.dirty.load(Ordering::Acquire)
+                        {
+                            continue;
+                        }
+                        if first.is_none() {
+                            first = Some(idx);
+                        }
+                        last = idx;
+                        if idx - first.unwrap_or(idx) + 1 >= WB_WINDOW {
+                            break;
+                        }
+                    }
+                    if let Some(first) = first {
+                        work[n_work] = (inode_cache.fs_id, inode_cache.ino, first, last);
+                        n_work += 1;
+                        if n_work == MAX_WB_INODES {
+                            break 'outer;
+                        }
+                    }
+                }
+            }
+            if n_work == 0 {
+                break; // no flushable dirty pages anywhere
+            }
+            // Re-entrancy gate: nested reclaim (from inside ext4 write's
+            // own allocations) degrades to clean-only.
+            if WRITEBACK_GUARD
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_err()
+            {
+                break;
+            }
+            for i in 0..n_work {
+                let (fs_id, ino, first, last) = work[i];
+                // Liveness: same contract as sys_fsync (Inode Arc keeps
+                // the descriptor alive; private_data fs pointer is valid
+                // while the mount lives). Miss = skip, retry next call.
+                if let Some(inode) = crate::fs::inode::icache_lookup(ino, fs_id) {
+                    crate::fs::ext4::file::ext4_flush_dirty_inode(
+                        &inode,
+                        first,
+                        last.min(first + WB_WINDOW - 1),
+                    );
+                }
+            }
+            WRITEBACK_GUARD.store(false, Ordering::Release);
+            // Loop: the clean pass at the top of the next round evicts
+            // what the flush cleaned.
         }
         freed
     }
