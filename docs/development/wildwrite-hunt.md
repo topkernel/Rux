@@ -2588,4 +2588,44 @@ irq-off pathology from the flush path.
   reclaim-writeback v2 (A/B-proven: stuck-640MB vs flushed-896MB with
   census reconciliation), FMAP/MMF/make-test green on both arches.
 
+## Session 29 (continuation agent — post-reboot claim: r49/r50 verdicts, chain from r51, v2soak gate re-run)
+
+### Inheritance reconstruction (handoff "resume from r48" was two runs stale)
+
+- The handoff note predated session 28's close-out: session 28 had
+  already relaunched the chain from r49 at 13:46:52 (after the 13:28
+  pause). r49 ran its FULL budget clean (106265 serial lines, 0 WW-HIT,
+  0 heals, driver self-advanced at 14:31:52). r50 was then killed
+  externally at ~15 min (serial last write 14:46, whole tree gone —
+  session-28 window death class).
+- **The HOST was rebooted**: at claim (17:13) uptime was 4 minutes, so
+  everything from before ~17:09 is gone regardless. No chain/QEMU
+  processes survived; nothing else was running on the host at claim
+  (44G free of 59G, no other line's QEMUs back yet).
+- r50 verdict from the artifacts: CLEAN PARTIAL — 54022 lines, full
+  storm to the last line (wakes 3.56M, strand_max 8764ms = healthy
+  class), 0 WW-HIT in the gdb log, 0 KERNPANIC/ALLOCTHROW. Cumulative:
+  **0 WW-HIT across r1-r50**, 0 META-SMASH.
+
+### Chain relaunched from r51 (primary task)
+
+- `./run/ww-chain.sh ww-s2 100 12371 51` as this session's background
+  task, 17:15. r51 verified armed with the full 19-point set
+  (WW-ARMED 19, GUARD=0xffffffff80a7a000, frozen pair untouched) and
+  storming within 4 min (36k serial lines, wakes 480k).
+- Process tree recorded in run/ww-s29-proctree.txt: bash 11631
+  (ww-chain.sh, THE driver root — kill first, then the QEMU) ->
+  ww-hunt.py 11646 -> timeout 11647 -> qemu 11657.
+
+### v2soak gate re-run (the one remaining merge gate for 4fb5d480)
+
+- Worktree rebuild: `PLATFORM=x86_64 make build` is a cargo no-op that
+  reproduces the byte-identical v2 kernel (md5 e5038877... = the
+  session-28 A/B "v2" binary; build/ helper dir was wiped by the
+  reboot, target/ survived).
+- ww-v2soak2 (run/ww-v2soak2.sh): TAG=ww-v2soak2, worktree bzImage,
+  dfx=taskdump,watchdog,periodic,memwatch,ledger (same flags as the
+  ww-fms2 45-min baseline so memfree_pages compares), SECS=2700,
+  own port 12375, launched 17:16 as a script-file background task.
+  Verdict: see close-out.
 
