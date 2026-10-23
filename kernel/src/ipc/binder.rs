@@ -5706,13 +5706,34 @@ fn binder_thread_read(
                     // availability predicate (todo/txn_stack empty +
                     // looper flags), i.e. waiting_threads membership.
                     let ready = pim.threads.iter().any(|t| t.st().waiting_for_proc_work);
-                    if pim.requested_threads == 0
-                        && !ready
-                        && pim.max_threads > 0
-                        && pim.threads.len() < pim.max_threads as usize
-                        && staged.len() + 4 <= read_size
-                    {
-                        pim.requested_threads += 1;
+                    // sc164: forked children sharing this proc count as
+                    // their OWN pool (on Linux each child IS a fresh
+                    // proc): a child read must emit BR_SPAWN_LOOPER when
+                    // THAT CHILD has no waiting worker — the proc-wide
+                    // counters are polluted by the daemon's own pool and
+                    // every other child's threads, which starved the
+                    // children of reader threads (OH spawns IPCWorkThread
+                    // in the child exactly on this command; without it no
+                    // child thread ever blocks in a binder read and
+                    // AMS->child deliveries have no reader).
+                    let is_child = thread.tgid != 0 && thread.tgid != proc.pid as u32;
+                    let emit_spawn = if is_child && pim.max_threads > 0 {
+                        let child_ready = pim
+                            .threads
+                            .iter()
+                            .any(|t| t.tgid == thread.tgid && t.st().waiting_for_proc_work);
+                        let child_n = pim.threads.iter().filter(|t| t.tgid == thread.tgid).count();
+                        !child_ready && child_n < pim.max_threads as usize
+                    } else {
+                        pim.requested_threads == 0
+                            && !ready
+                            && pim.max_threads > 0
+                            && pim.threads.len() < pim.max_threads as usize
+                    };
+                    if emit_spawn && staged.len() + 4 <= read_size {
+                        if !is_child {
+                            pim.requested_threads += 1;
+                        }
                         stage_cmd!(BR_SPAWN_LOOPER);
                     }
                 }
