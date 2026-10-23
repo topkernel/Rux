@@ -1145,7 +1145,18 @@ unsafe fn post_txn_to_child_thread(
         .im()
         .threads
         .iter()
-        .filter(|t| t.tgid == pref_tgid)
+        .filter(|t| {
+            t.tgid == pref_tgid && {
+                // sc165 fix: only LOOPER-entered threads reliably drain
+                // their own todo (a plain client thread parked on the
+                // EventHandler futex never returns to a binder read —
+                // sc165 deliveries thread-targeted onto a parked child
+                // MAIN thread died there while AMS clocked
+                // LIFECYCLE_TIMEOUT).
+                let th = t.st();
+                (th.looper & (LOOPER_ENTERED | LOOPER_REGISTERED)) != 0
+            }
+        })
         .min_by_key(|t| t.st().txn_stack.len())
         .cloned();
     let t = pick?;
