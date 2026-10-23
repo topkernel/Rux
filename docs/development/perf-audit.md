@@ -25,6 +25,8 @@ Runs (this worktree, `run/`):
 | `pa-pa10` | + failing-read census | syscost=1 sprobe=0 | 300 s | zero rd_fail rows all boot → flood reads are EOF; pa4-8 "not EOF" was census-table saturation (12/12 slots taken by earlier comms) |
 | `pa-pa11` | + /proc/kmsg stream (WQ block) + kmsg write fix | syscost=1 sprobe=0 | 330 s (wedged) | ABBA WAKE: WQ-held wake vs GRQ-held scheduler prints → both CPUs spin; kmsg write passthrough VERIFIED working ([kmsg] markers live) |
 | `pa-pa12` | + /proc/kmsg stream (timed-poll block) | syscost=1 sprobe=0 | 330 s | verification run for the fix |
+| `pa-pa13` | same kernel as pa12 (= HEAD f94c9f19) | syscost=1 sprobe=0 | 780 s | post-F2 ranking re-measure, pa3 horizon; read rate -113x, hilogd.server now #1 flood; ranking v2 below |
+| `pa-pa14` | pa13 + launcher's softirq v1/v8 empty-raise gates (69310bae timer hunks, applied to a scratch build) | syscost=1 sprobe=0 | 780 s | F1 gate A/B: v1/v8 raise rates and the cli-page tick share |
 
 Host context for all runs: KVM q35 `-cpu max -m 4G -smp 2`, shared with
 2-3 foreign-lane QEMUs (load avg ~5.5). Absolute numbers carry that
@@ -130,6 +132,59 @@ sampled. Consistent evidence:
 - Timer consequences: `nanosleep` average 2.6-3.0 s (max 295 s) per
   call across the boot — sleep timers fire seconds late because ticks
   queue behind cli windows; every FFRT timer wheel in OH inherits this.
+- pa13 (post-F2) does not change this picture: 316 IRQ-OFF-WINDOW
+  prints over 780 s (0.44/s vs pa3's 0.49/s — same order), and the #1
+  rip page is still the cli-recovery cluster (below).
+
+### 2a. pa13: the post-F2 landscape (read storm gone)
+
+pa13 = same kernel as pa12, run to the 780 s horizon for apples-to-apples
+against pa3 (pre-fix). Host was quiet this time (load ~0.5, no foreign
+QEMU), so absolute rates are cleaner than pa1/pa3/pa12.
+
+Tick modes, last dump (t=720): cpu0 user 14.9% kernel 84.2% idle 0.9%;
+cpu1 14.9% / 83.3% / 1.8%. (pa3 t=900: 12.2-12.4% / 86.9% / ~0.8%.)
+Kernel share down ~3 pp, userspace up ~2.5 pp — the CPU the read storm
+burned moved partially to userspace, partially to idle.
+
+Syscall totals: 105.9M calls / 720 s = 147K/s vs pa3 188.7M / 900 s =
+210K/s (**-30% syscall rate**; pa12's -16% at 330 s was the early-phase
+slice). read: 591,713 total (0.82K/s) vs pa3 83.96M (93.3K/s) =
+**-113x**. hilogd.rd_kmsg flood count 19,459 vs 83.46M (**-4300x**).
+
+New flood leader (F2 remainder, confirmed): `hilogd.server` dual drain —
+13.26M recvmsg **and** 13.26M recvfrom by t=720 (one of each per loop
+iteration, 18.4K/s each; pa3: 11.62M each by t=900 = 12.9K/s — the
+drain spins FASTER now that rd_kmsg no longer competes). Then
+sysevent_source 672K, mmi_service 477K, connect-retry storm 3.26M
+(pa3: 4.38M). clock_gettime 43.6M and writev 19.8M unchanged (not
+flood-family: no per-call amplification, just volume).
+
+pa13 kernel-rip pages (nm-verified against pa13's own ELF):
+
+| page (pa13) | share | contents (nm) |
+|---|---|---|
+| 0xffffffff802cc000 | **26%** | `fs::buffer` FileChunk/FileBuffer read/write/resize + `cpu::enable_irq`/`disable_irq`/`restore_irq`/`save_and_disable_irq` + `inb`/`outb` — the same cli-recovery cluster as pa1/pa3's #1 page (layout shifted by the kmsg code); `__do_softirq` itself now lives on 0x806fe000, which is *below top-20* (<0.5%) |
+| 0xffffffff8046a000 | 16% | generic `atomic_load`/`atomic_store` monomorphizations (RootFSSuperBlock, Task, u8-u64, SuperBlock/Ext4FileSystem/VfsMount/SysfsSuperBlock words) — the F5 atomic-glue page (pa3 equivalent 19%) |
+| 0xffffffff80742000 | 5% | `log::__private_api::GlobalLogger::enabled` — log-filter checking per record |
+| 0xffffffff80740000 | 4% | `alloc::string::String` fmt Write |
+| 0xffffffff80632000 | 3% | `fs::inode::inode_hash` |
+| others (rt_sigprocmask page 2%, TwoWaySearcher 2%, flood_account 1%...) | ~15% | long tail |
+
+Reading: the F1 ticks-behind-cli page is still #1 at 26% (pa1 32%, pa3
+20%; composition stable — re-enable sites + UART cli + now sharing the
+page with FileBuffer). The parser's bare-symbol label for the page
+(`Ext4DirEntry::from_bytes +0x520`) is the page-base symbol only; the
+nm walk above is the authoritative content. The softirq *loop body*
+dropping below top-20 while v1/v8 raise rates stay ~194/s matches the
+established model: the cost is the dispatch discipline and where queued
+ticks land, not handler time.
+
+Boot milestones (single-run, high variance — do not over-read): pa13
+composer_host.ready 44.3 s, appspawn.started 65.9 s (pa3: 33.5/36.1,
+pa12: 36.0/43.8, pa1: 40.3/31.9). Early milestones stay in the same
+2x band pre/post fix; the F2 fix's wall-clock claim rests on the
+syscall/CPU structure above, not on these.
 
 ## 3. Syscall cost table (pa1, cumulative t=1500s)
 
@@ -179,23 +234,29 @@ Notes:
   main yet) is already far below the 1.7-1.9 s *per sandbox phase*
   telemetry, because a phase is dozens of mounts plus other work.
 
-## 4. Ranking table (cost centers -> boot-time contribution)
+## 4. Ranking table v2 (cost centers -> boot-time contribution)
 
-Contribution model: 2 vCPUs x 1500 s = 3000 CPU-s observed; kernel mode
-~85% = ~2550 CPU-s. "Gap contribution" = my estimate of how much of the
-16-23 min -> 10 s gap this center explains directly.
+v2 = re-ranked after the F2 rd_kmsg fix (pa13, 780 s, quiet host). The
+"was" column keeps the v1 (pa1/pa3) share for the items that moved.
+Contribution model unchanged: 2 vCPUs; kernel mode ~84% of ticks.
 
-| # | cost center | per-op | calls/boot | share of kernel CPU / wall | gap contribution | family |
-|---|---|---|---|---|---|---|
-| 1 | Interrupt-disabled regions (softirq-at-irq-exit loop + irqsave sections + UART TX cli) | 388 events >=1 s; ticks-behind-cli 25-32% of kernel ticks | continuous | ~25-32% of kernel-mode CPU; causes all timer lateness | **large** — multiplies everything (timers, sleeps, watchdogs) | F1 |
-| 2 | Scheduler wake-loss (WAKE-RUN-LEAK: lying busy slots + linked-but-starving) | median 252 s age per episode | 448 episodes/boot | latency, not CPU | **large** — the direct maker of the 16-23 min (minutes-long service stalls serialize the dependency chain) | F3 |
-| 3 | Logging syscall flood — **rd_kmsg half FIXED (pa12)**: was 60-92K read/s on /proc/kmsg EOF spin, now ~20/s. Remaining: hilogd.server drain + sysevent_source + connect-retry storm | 4-54 us per call | read: 20.4M -> 0.23M by t=300; recvmsg ~5.2M (unchanged); connect 7.4M (unchanged) | was ~0.5-1.0 vCPU sustained, now ~0.5 vCPU less (kernel tick share 88.0% -> 86.0%) | medium — was medium-large; the rd_kmsg half is gone | F2 |
-| 4 | ext4 metadata + write path (open/stat/getdents/fsync/pwrite/mkdir) | 100-300x Linux | ~700K calls | ~400-600 CPU-s | medium | F4 |
-| 5 | Softirq dispatch overhead proper (v1 tcp_timer + v8 hrtimer raised every tick per CPU = 400 entries/s; v4 block 98/s) | loop machinery | 125K entries/420 s | small (handlers 0.4% CPU) | small once F1's cli accounting is separated | F1 |
-| 6 | Page-cache/virtio CAS contention (fetch_update family) | - | - | 9-15% of kernel ticks | medium (I/O completion path) | F5 |
-| 7 | Allocation churn (Vec drop + grow + small_alloc) | - | - | ~5% kernel ticks | small-medium | F5 |
-| 8 | Mount registry scan (linear, unindexed on main) | 5.1 ms/mount whole-syscall | 12,145 | 62 s | small on main (fix already on launcher lane) | F4 |
-| 9 | IPC global epoch / WORLD lock (binder) | not directly measured this run | 598 SAREG + ~100K txns | folded into #1/#6 | small-medium (needs a binder-stat run to split out) | F5 |
+| # | cost center | measured (pa13) | was (pa1/pa3) | gap contribution | family |
+|---|---|---|---|---|---|
+| 1 | Interrupt-disabled regions (cli-recovery page: softirq-at-irq-exit dispatch + irqsave sections + UART TX cli) | 26% of kernel ticks; 316 IRQ-OFF-WINDOW prints/780 s; nanosleep avg 1.86 s (max 295 s) | 25-32% | **large** — multiplies everything (timers, sleeps, watchdogs) | F1 |
+| 2 | Scheduler wake-loss (WAKE-RUN-LEAK; lying busy slots + linked-starving) | 702 leak prints/780 s; census 23 refusals = 16 `curr_on&&on_cpu` lying slots + 7 `linked` starved; ages to 516 s+ | 448 episodes/boot | **large** — unchanged; still the wall-clock driver | F3 |
+| 3 | hilogd.server socket dual-drain (recvmsg+recvfrom 18.4K/s each) + sysevent_source + connect-retry (3.26M) | 26.5M calls by t=720 = ~37K/s = ~25% of ALL syscalls | 25.8M by t=900 (29K/s) | medium — now the **#1 flood**; OH userspace behavior (drain loop + dead-peer retries), kernel side is per-call cost | F2 |
+| 4 | ext4 metadata + write path (open/stat/getdents/fsync/pwrite/mkdir) | open 235 us, newfstatat 206 us, getdents 643 us, fsync avg 16 ms (62 calls); inode_hash page 3% | same order | medium (~300-500 CPU-s/boot at this horizon) | F4 |
+| 5 | Atomic/CAS contention (atomic glue page + fetch_update family) | 16% of kernel ticks | 19% | medium (I/O completion + superblock/task words) | F5 |
+| 6 | Log-filter + fmt glue (`GlobalLogger::enabled` 5% + String fmt 4% + TwoWaySearcher 2%) | ~11% of kernel ticks combined | ~6-8% | small-medium; scales with log volume (writev 19.8M) | F2/F5 |
+| 7 | Allocation churn (Vec drop + grow + small_alloc) | ~5% kernel ticks | ~5% | small | F5 |
+| 8 | Mount registry scan | mount not in pa13 top-40 by wall | 5.1 ms/mount, 62 s | small (index fix on launcher lane) | F4 |
+| 9 | clock_gettime volume (43.6M calls, no vDSO) | 60.6K/s but <1 us each | 48.7K/s | small CPU, medium latency-shape (each is a real syscall) | F6 |
+
+What moved v1 -> v2: the read storm (#3 in v1 at ~0.5-1.0 vCPU) is gone
+(read -113x, total syscalls -30%); its slot is taken by the hilogd.server
+dual-drain, which was always there underneath (11.6M by t=900 in pa3)
+and now spins faster. F1/F3 are unchanged — as predicted, the kmsg fix
+was CPU-side relief, not a wall-clock lever by itself.
 
 ## 5. Root-cause families (adjudicating the hypothesis)
 
@@ -243,10 +304,14 @@ specific amplification. Measured result on current main:
   dropped by printk()'s pre-ring loglevel filter — OH boot markers
   never reached any hilog consumer; now always ring-recorded,
   console-gated; 772 [kmsg] markers observed in pa12).
-  REMAINING in F2: hilogd.server socket drain (5.2M recvmsg by t=300
-  in pa12) + sysevent_source (~300K) + the 7.4M connect-retry storm —
-  OH userspace logging volume/retry behavior, route to the launcher
-  line with the pa12 numbers.
+  REMAINING in F2 (pa13-confirmed): **hilogd.server dual drain is the
+  new #1 flood** — 13.26M recvmsg + 13.26M recvfrom by t=720 (18.4K/s
+  each, ~25% of all syscalls; spins faster than pre-fix 12.9K/s because
+  rd_kmsg stopped competing), plus sysevent_source 672K, mmi_service
+  477K, and the connect-retry storm 3.26M — OH userspace logging
+  volume/retry behavior; route to the launcher line with the pa13
+  numbers (kernel-side lever is small unless recvmsg/recvfrom per-call
+  cost is attacked).
 - **F3 Scheduler wake-loss — CONFIRMED as the dominant *wall-clock*
   family.** 448 WAKE-RUN-LEAK episodes (kicked >=2x, never picked),
   median 252 s, p90 467 s, max 520 s. The W3-RUNWAKE-REFUSED census
@@ -254,6 +319,10 @@ specific amplification. Measured result on current main:
   (a lying busy slot — the task switched out but the CPU slot/on_cpu
   bookkeeping never cleared, so wake_up refuses forever) and 6 with
   `linked=true` (queued but never picked — pick-path starvation).
+  pa13 refresh (post-F2, pre-fix baseline for the launcher lane's
+  wake-loss fix): 702 leak prints over 780 s, census 23 refusals split
+  16 lying-slot / 7 linked — same ~70/30 shape; W3 output format is
+  grep-stable for co-run with the launcher's birth forensics.
   This family is why per-service phases take minutes: one leaked
   server thread stalls a whole dependency chain until something heals
   it. It is also *caused* by F1 in part (a wake issued while the
@@ -289,7 +358,7 @@ fault), is verified fixed (see section 6).
 | MOUNT_TABLE preempt-off (502ea7a7) | >=1 s cli sections in register_mount | mount avg 5.1 ms whole-syscall; residual cli windows now UART/memcmp-shaped | holds |
 | unix truesize (5157c305) | writev parked whole 3 s budgets (183 stime ticks) | writev avg 14 us | holds |
 | sticky one-shot wake re-issue (385c9793) | consumed wake tokens, tasks parked for minutes | REKICK now re-issues; the *residual* WAKE-RUN-LEAK (448/boot) is the next member of this family | partially — family continues |
-| /proc/kmsg blocking stream + /dev/kmsg write ring fix (perf-audit d931c345 + cfc39329, second session) | rd_kmsg EOF spin 60-92K read/s, ~15-25% of a vCPU; boot markers dropped pre-ring | rd_kmsg ~20 reads/s (one per record); read() total 20.4M -> 0.23M by t=300; kernel tick share 88.0% -> 86.0%; 772 [kmsg] markers live | holds (pa12; long-boot wall-clock effect not yet measured) |
+| /proc/kmsg blocking stream + /dev/kmsg write ring fix (perf-audit d931c345 + cfc39329, second session) | rd_kmsg EOF spin 60-92K read/s, ~15-25% of a vCPU; boot markers dropped pre-ring | pa12: rd_kmsg ~20 reads/s, 772 [kmsg] markers. pa13 (780 s): read() total -113x (93.3K/s -> 0.82K/s), total syscalls -30%, kernel tick share 86.9% -> 84.2/83.3%, user share +2.5 pp | holds |
 
 ## 7. Fix roadmap (ROI order, with lane routing)
 
@@ -302,6 +371,10 @@ fault), is verified fixed (see section 6).
    route to main session for assignment (wildwrite lane owns adjacent
    sched forensics). First step is cheap: extend the W3 print to dump
    the lying slot's owner timeline.
+   STATUS: launcher lane has a wake-loss fix in flight; pa13 recorded
+   the post-F2 pre-fix census baseline (23 refusals = 16 lying / 7
+   linked; 702 leak prints / 780 s) — re-measure W3 numbers on their
+   fix when it lands.
 2. **Shrink irq-exit softirq cli time (interrupt/timer).** Two
    independent pieces: (a) stop raising the tcp_timer softirq (v1)
    on every tick when the TCP table is empty (199 raises/s/CPU for
@@ -313,6 +386,16 @@ fault), is verified fixed (see section 6).
    timer-lateness amplification (nanosleep 2.6 s -> ms-class).
    Lane: interrupt/softirq is shared-stable; small diffs, main
    session coordinates.
+   STATUS (pa14 A/B): the launcher lane implemented (a) as
+   empty-raise gates (69310bae: v1 on TCP-table high-water, v8 on a
+   TIMER_EVER_ARMED latch). Measured on the OH boot the gates only
+   bite for the first ~30 s: OH arms a timer by t~9 s (v8 latch
+   flips, raise unconditional thereafter) and creates its first TCP
+   socket by t~31 s (v1 high-water flips). v1/v8 marginal raise rate
+   is 199/s from then on, same as ungated pa13 — so on THIS workload
+   (a) as-written is a ~30 s trim, and the F1 lever is (b), the
+   dispatch discipline. The gate still pays off on timer-sparse
+   workloads (minimal rootfs boots).
 3. **Kill the hilogd.rd_kmsg spin (printk/dfx).** ~~92.6K read()/s
    sustained for the whole boot, ~15-25% of a vCPU. Attribution
    narrowed to "positive-returning reads on a non-kmsg fd" (pa4-8);
