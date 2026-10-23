@@ -2205,3 +2205,29 @@ FORENSICS + REROLL DISCIPLINE.
   Rux influence = overall speed only. Strategy: reroll solo boots,
   ~20 min judgment point (children-by-then = good boot), keep the rest
   of the budget for the chain+screenshot.
+
+SESSION R FIFTH LEG (sc175+, 20:0x-): sc174 WAS A GOOD BOOT (re-read);
+  sc175 wedged at the spawn handshake under contention.
+- sc174 re-read: NOT a wedge - children 1-10 in ~6 min (node-fix kernel,
+  same code as the 17:29 bzImage; HEAD 0dfdb482 only adds notes after
+  06c12bdc). Zero launcher-segv. The user pause killed it at 12:51 while
+  the launcher child (pid 335 renamed m.ohos.launcher; newest child
+  pid 1301, connectionId 5) was mid-init: AppSpawn hooks [22]/[23],
+  AppKit MainThread "The bundleName = com.ohos.launcher", BMS
+  ApplicationInfo::Marshalling. NO OnForeground / ArkUI / render_service
+  narration yet; screen black at kill. Watch items did NOT fire (no
+  ImplicitQueryAllAbilityInfos failure, no EPIPE, no LIFECYCLE_TIMEOUT).
+  NEW observation: "GetForegroundOsAccountLocalId failed ret:4194349"
+  (OsAccount family) repeated by BMS/UiAppearance/AppMS - non-blocking
+  so far. APPTXN: launcher itself a live IPC client (sync code 0xc to
+  samgr pid 326, codes 0x62/0x69 to sa_main pid 627).
+- sc175 (20:07, host load 0.57 at launch): WEDGED at the spawn handshake
+  when two foreign TCG QEMUs pushed load to 4.2 mid-boot. Sequence:
+  APPSPAWN_CLIENT ECONNREFUSED on /dev/unix/socket/AppSpawn (slog 1933)
+  while the daemon was still in Hook stage 10 / dlopen acelibdir
+  (slog 2290); client then "Failed to create socket, try again" and
+  finally wrote to fd -1 (ENOTSOCK) -> reqId 1 (systemui) result
+  0xd000010 pid 0 -> AMS OnAppStateChanged state 99, no retry (sc162
+  precedent: dead boot). Kernel-side corruption of interleaved UART
+  prints under contention also visible. Wedge tally for the reroll
+  campaign: 1 (sc175). sc176 launched 20:19.
