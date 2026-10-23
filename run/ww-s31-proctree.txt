@@ -32,3 +32,11 @@
   43988 MINE (/home/william/rux-agents/wildwrite-hunt)
   43999 MINE (/home/william/rux-agents/wildwrite-hunt)
   44017 MINE (/home/william/rux-agents/wildwrite-hunt)
+
+# s31 relaunch after window-death kill (~23:18, both chains died mid-round; partials clean 0-markers)
+# MAIN driver root:
+  50353    9865       01:44 /bin/bash -c . '/home/william/.zcode/cli/exec/shell-
+  50364   50353       01:44 /bin/bash ./run/ww-chain2.sh ww-s2 100 12371 55
+# LOAD driver root:
+  50389    9865       01:38 /bin/bash -c . '/home/william/.zcode/cli/exec/shell-
+  50400   50389       01:38 /bin/bash ./run/ww-loadchain.sh wwload 100 12381 2

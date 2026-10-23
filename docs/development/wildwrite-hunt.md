@@ -2893,3 +2893,40 @@ Surface (private image, shared images untouched):
   worktree's cwd at 22:43 and exited on its own within a minute — not
   started by this session's scripts (both chain QEMUs were continuous);
   no action needed, noted for the record.
+
+### Session 31 close-out
+
+- **Window-death kill at ~23:18**: both chain background tasks died
+  mid-round (r55 at ~25/45, load r2 at ~23/45) with the session window —
+  the known class, NOT a user pause (no new PAUSE-NOTE; the samgr
+  line's KVM QEMU survived). Both partials clean (0 markers, 0 hits:
+  r55 57483 lines, load-r2 82717 lines/255 cycles). Both chains
+  relaunched within 10 min (main from r55 at 23:28:23, log
+  run/ww-chain2-s31b.log; load from r2 at 23:28:29, log
+  run/ww-loadchain-s31b.log), verified armed (19 + wildwatch try 0).
+- **r55 (full, relaunched): CLEAN** — 79694 lines, 0 WW-HIT / 0 heals /
+  0 panics. Cumulative: **0 WW-HIT across r1-r55 complete rounds**,
+  0 META-SMASH. Chain at r56.
+- **load r2 (full, relaunched): CLEAN** — 168085 lines, 782 sdc cycles,
+  0 capture markers of any kind. Load chain at r3.
+- Ops note for successors — the "ghost QEMU" pattern: `pgrep -f
+  qemu-system` in a watch command matches the WATCH COMMAND'S OWN bash
+  -c wrapper (the pattern string is in its cmdline; cwd = the worktree).
+  The transient PIDs seen this session (46915, 50251, 50829, 52469)
+  were all self-matches, gone in seconds. Real QEMU census must use
+  `pgrep -f 'qemu-system-x86_64 -M'` from a DIFFERENT shell than the
+  pattern-bearing one, or check /proc/<pid>/cmdline directly.
+- Session totals: main-chain rounds r54-r55 completed clean under s31
+  ownership + 3 clean partials (r54-first-attempt, r55-first-attempt,
+  load-r2-first-attempt); load surface deployed and validated (probe
+  p1: 285 cycles/930 s; rounds r1: 827 cycles, r2: 782 cycles per
+  2700 s — ~19/h under 2-chain host contention vs ~33/h solo); zero
+  capture markers anywhere. The engine remains silent under both load
+  profiles; the doubled capture surface hunts on.
+- Standing state for the successor (if both chains died with this
+  window):
+    ./run/ww-chain2.sh  ww-s2  100 12371 <next-main-round>
+    ./run/ww-loadchain.sh wwload 100 12381 <next-load-round>
+  Stop: touch run/ww-s2.stop / run/wwload.stop; kill the DRIVER ROOT
+  (ww-chain2.sh / ww-loadchain.sh shell) first, then the round QEMU —
+  proctrees in run/ww-s31-proctree.txt.
