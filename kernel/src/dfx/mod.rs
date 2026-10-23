@@ -76,6 +76,71 @@ pub fn init() {
     // hung_task detector is deferred — it requires kthread infrastructure
     // that may not be fully ready during early boot. Enable after testing.
     // hung_task::init();
+    // Publish the instrument switches in debugfs so they can be armed
+    // and disarmed while the system runs.
+    register_debugfs_knobs();
+}
+
+/// Register the DFX instrument switches in debugfs.
+///
+/// Linux keeps runtime debug knobs out of the stable userspace ABI and
+/// exposes them in debugfs instead. Rux follows the same rule and the
+/// same conventions:
+///
+/// - one file per switch, named after its `dfx=` spelling;
+/// - the file reads `Y` or `N` (Linux's `debugfs_create_bool`
+///   convention);
+/// - writing `Y`/`y`/`1` arms the instrument, `N`/`n`/`0` disarms it,
+///   anything else is `EINVAL` (Linux's `debugfs_bool_set`).
+///
+/// ```text
+/// /sys/kernel/debug/dfx/taskdump   -> Y
+/// ```
+///
+/// Returns the number of knobs registered.
+pub fn register_debugfs_knobs() -> usize {
+    use crate::fs::debugfs;
+    if !debugfs::create_dir("/dfx") {
+        return 0;
+    }
+    let mut count = 0;
+    for sw in switches::ALL {
+        let path = alloc::format!("/dfx/{}", sw.name());
+        let gen = move || {
+            // Linux debugfs bool files: "Y\n" / "N\n".
+            let mut out = alloc::vec![b'N', b'\n'];
+            if switches::enabled(sw) {
+                out[0] = b'Y';
+            }
+            out
+        };
+        let store = move |buf: &[u8]| -> i32 {
+            let text = core::str::from_utf8(buf).unwrap_or("").trim();
+            if text.is_empty() {
+                // The guest's `echo v > file` writes the value and the
+                // trailing newline as SEPARATE write() calls: the empty
+                // second write is a no-op, not an error (same convention
+                // as /proc/[pid]/oom_score_adj).
+                return 0;
+            }
+            let on = match text {
+                "Y" | "y" | "1" | "true" | "on" => true,
+                "N" | "n" | "0" | "false" | "off" => false,
+                _ => return crate::errno::Errno::InvalidArgument.as_neg_i32(),
+            };
+            switches::set(sw, on);
+            crate::pr_info!(
+                "dfx: runtime switch '{}' {}",
+                sw.name(),
+                if on { "enabled" } else { "disabled" }
+            );
+            0
+        };
+        if debugfs::create_file(&path, 0o644, gen, Some(store)) {
+            count += 1;
+        }
+    }
+    count
 }
 
 // ============================================================================

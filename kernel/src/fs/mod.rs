@@ -24,6 +24,7 @@ pub mod ext4;
 pub mod stat;
 pub mod procfs;
 pub mod sysfs;
+pub mod debugfs;
 pub mod dev_t;
 pub mod devfs;
 pub mod fs_struct;

@@ -518,3 +518,33 @@ pub fn kernel_fault_oom_kill() -> bool {
     let mut oc = OomControl::new(totalpages, 0, 0);
     out_of_memory(&mut oc)
 }
+
+/// Run the OOM killer on demand (Linux sysrq 'f': "invokes the OOM
+/// killer to terminate a memory-consuming process, without panicking if
+/// no process can be killed").
+///
+/// Returns true when a process was killed, false when nothing was
+/// killable — the caller must not panic in that case (Linux's sysrq 'f'
+/// deliberately avoids the panic path).
+pub fn sysrq_oom_kill() -> bool {
+    let mut totalpages = 0u64;
+    // SAFETY: diagnostic read-only node access.
+    if let Some(node) = unsafe { crate::mm::pglist::first_online_node() } {
+        for zt in [
+            crate::mm::zone::ZoneType::ZoneNormal,
+            crate::mm::zone::ZoneType::ZoneDma32,
+            crate::mm::zone::ZoneType::ZoneDma,
+        ] {
+            if let Some(zone) = node.zone(zt) {
+                if zone.is_initialized() {
+                    totalpages += zone.managed_pages() as u64;
+                }
+            }
+        }
+    }
+    if totalpages == 0 {
+        return false;
+    }
+    let mut oc = OomControl::new(totalpages, 0, 0);
+    out_of_memory(&mut oc)
+}

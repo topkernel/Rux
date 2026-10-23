@@ -73,28 +73,43 @@ pub fn tainted(flag: TaintFlags) -> bool {
 
 /// Convert taint bitmask to character string.
 ///
-/// Each character position represents one taint flag.
-/// 'G' = good (not tainted for this flag), specific letter = tainted.
+/// Linux renders the taint as a 16-column line ("Tainted: G        W
+///          "): the first column is the proprietary-module flag — 'P'
+/// when tainted, 'G' ("good") otherwise — and every other column holds
+/// its flag letter when the flag is set, a space when it is not. The
+/// letters are Linux's:
 ///
-/// Output format: 16 characters, e.g. "GWFGWFGWFGWFGWFGW"
-/// The string is written to the provided buffer (must be >= 17 bytes for 16 chars + null).
+/// | bit  | letter | flag                 | bit   | letter | flag               |
+/// |------|--------|----------------------|-------|--------|--------------------|
+/// | 1    | P      | proprietary module   | 256   | A      | ACPI override      |
+/// | 2    | F      | forced module        | 512   | W      | warning            |
+/// | 4    | S      | unsafe SMP           | 1024  | C      | crappy module      |
+/// | 8    | R      | forced rmmod        | 2048  | I      | firmware workaround|
+/// | 16   | M      | machine check        | 4096  | O      | out-of-tree module |
+/// | 32   | B      | bad page             | 8192  | E      | unsigned module    |
+/// | 64   | U      | user                 | 16384 | L      | soft lockup        |
+/// | 128  | D      | kernel died          | 32768 | K      | livepatch          |
+///
+/// The string is written to the provided buffer (must be >= 17 bytes for
+/// 16 chars + null).
 ///
 /// # Returns
 /// Number of characters written (excluding null terminator).
 pub fn taint_string(buf: &mut [u8]) -> usize {
-    const TAINT_CHARS: &[u8; 16] = b"GFfUvPDdCAcNIOsl";
-    const UNTAINTED_CHARS: &[u8; 16] = b"GGGGGGGGGGGGGGGG";
+    const TAINT_CHARS: &[u8; 16] = b"PFSRMBUDWACIOELK";
 
     let mask = get_taints();
     let len = 16.min(buf.len());
 
     for i in 0..len {
         let bit = 1u32 << i;
-        if mask & bit != 0 {
-            buf[i] = TAINT_CHARS[i];
+        buf[i] = if mask & bit != 0 {
+            TAINT_CHARS[i]
+        } else if i == 0 {
+            b'G' // "good" — Linux's first column
         } else {
-            buf[i] = UNTAINTED_CHARS[i];
-        }
+            b' '
+        };
     }
 
     len
