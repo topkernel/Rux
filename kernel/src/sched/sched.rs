@@ -2960,6 +2960,94 @@ pub fn wake_up_enqueue(task: *mut Task) -> bool {
                         (*task).ti_cpu()
                     );
                 }
+                // sc184 (session R, lane 1 wake-loss): the perf-audit census
+                // splits the residual WAKE-RUN-LEAK family into "lying busy
+                // slots" (curr_on refusal) and "linked but starved". A lying
+                // busy slot is convicted by PROGRESS: a CPU genuinely
+                // executing the named task advances its sum_exec_runtime; a
+                // slot that keeps naming a task whose exec clock is FROZEN
+                // (and which stays RUNNING+unlinked across repeated kicks)
+                // is stale bookkeeping nobody will ever clear. Record
+                // (task, sum_exec_runtime, jiffies) per refusal and print
+                // the frozen-clock signature when it matures. The saved
+                // switch retaddr + first stack words discriminate the
+                // legitimate userspace-spinner shape offline.
+                if curr_on && !linked && st == TaskState::new(TaskState::RUNNING) {
+                    const W3S: usize = 8;
+                    static W3_TASK: [core::sync::atomic::AtomicUsize; W3S] =
+                        [const { core::sync::atomic::AtomicUsize::new(0) }; W3S];
+                    static W3_EXEC: [core::sync::atomic::AtomicU64; W3S] =
+                        [const { core::sync::atomic::AtomicU64::new(0) }; W3S];
+                    static W3_JIF: [core::sync::atomic::AtomicU64; W3S] =
+                        [const { core::sync::atomic::AtomicU64::new(0) }; W3S];
+                    let jif = crate::drivers::timer::get_jiffies();
+                    let exec = (*task)
+                        .sched_entity()
+                        .sum_exec_runtime
+                        .load(core::sync::atomic::Ordering::Relaxed);
+                    let key = task as usize;
+                    for s in 0..W3S {
+                        let prev = W3_TASK[s].load(core::sync::atomic::Ordering::Relaxed);
+                        if prev == key {
+                            let prev_exec =
+                                W3_EXEC[s].load(core::sync::atomic::Ordering::Relaxed);
+                            let prev_jif =
+                                W3_JIF[s].load(core::sync::atomic::Ordering::Relaxed);
+                            W3_EXEC[s].store(exec, core::sync::atomic::Ordering::Relaxed);
+                            W3_JIF[s].store(jif, core::sync::atomic::Ordering::Relaxed);
+                            if exec == prev_exec && jif > prev_jif + (crate::config::KERNEL_HZ as u64) * 2 {
+                                let mut naming = MAX_CPUS;
+                                for c in 0..MAX_CPUS {
+                                    if cpu_state(c).current == task {
+                                        naming = c;
+                                        break;
+                                    }
+                                }
+                                let sp = (*task).thread.sp;
+                                crate::pr_warn!(
+                                    "W3-FROZEN-EXEC-SLOT pid={} naming_cpu={} exec={:#x} frozen for {}jif pk={} on_cpu={} retaddr={:#x}",
+                                    (*task).pid(),
+                                    naming,
+                                    exec,
+                                    jif - prev_jif,
+                                    (*task).pick_state(),
+                                    (*task).on_cpu(),
+                                    (*task).thread.callee.ret_addr,
+                                );
+                                crate::pr_warn!(
+                                    "W3-FROZEN-EXEC-STK pid={} sp={:#x} w={:#x} {:#x} {:#x} {:#x}",
+                                    (*task).pid(),
+                                    sp,
+                                    unsafe { core::ptr::read_volatile(sp as *const u64) },
+                                    unsafe {
+                                        core::ptr::read_volatile((sp as *const u64).add(1))
+                                    },
+                                    unsafe {
+                                        core::ptr::read_volatile((sp as *const u64).add(2))
+                                    },
+                                    unsafe {
+                                        core::ptr::read_volatile((sp as *const u64).add(3))
+                                    },
+                                );
+                            }
+                            break;
+                        }
+                        if prev == 0
+                            && W3_TASK[s]
+                                .compare_exchange(
+                                    0,
+                                    key,
+                                    core::sync::atomic::Ordering::Relaxed,
+                                    core::sync::atomic::Ordering::Relaxed,
+                                )
+                                .is_ok()
+                        {
+                            W3_EXEC[s].store(exec, core::sync::atomic::Ordering::Relaxed);
+                            W3_JIF[s].store(jif, core::sync::atomic::Ordering::Relaxed);
+                            break;
+                        }
+                    }
+                }
                 return false;
             }
             // R63: RUNNING ∧ unlinked ∧ owned by no current slot still has

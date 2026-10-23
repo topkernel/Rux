@@ -45,6 +45,32 @@ struct TimerEntry {
 /// programmed to min(next grid tick, this value).
 static HRES_NEXT: AtomicU64 = AtomicU64::new(u64::MAX);
 
+/// sc184 (lane 2, perf-audit F1): monotonic "a timer has been armed at
+/// least once" latch. The timer-tick softirq raise for the Hrtimer
+/// vector is gated on this (plus HRES_NEXT being due): before the first
+/// timer exists the vector's handler has literally nothing to scan, but
+/// the unconditional raise still cost an irq-exit dispatch pass at IF=0
+/// on every tick of every CPU (pa3: 199 raises/s/CPU). Monotonic by
+/// design — like the TCP table's high-water count, it never resets, so
+/// after the first timer the raise always happens and the softirq
+/// watchdog stamping inside the handler is unaffected.
+static TIMER_EVER_ARMED: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
+/// Lock-free pending-work test for the Hrtimer softirq raise gate (see
+/// TIMER_EVER_ARMED). A race (timer armed right after this read false)
+/// delays that timer's first dispatch opportunity by at most one tick:
+/// the arming path itself re-arms the hardware deadline, whose expiry
+/// re-raises the vector through the interrupt path.
+pub fn timer_softirq_work_pending() -> bool {
+    TIMER_EVER_ARMED.load(Ordering::Acquire)
+        || HRES_NEXT.load(Ordering::Acquire) <= timer::read_time()
+}
+
+fn mark_timer_armed() {
+    TIMER_EVER_ARMED.store(true, Ordering::Release);
+}
+
 /// Read the earliest outstanding high-resolution deadline (u64::MAX = none).
 pub fn hres_next_deadline() -> u64 {
     HRES_NEXT.load(Ordering::Acquire)
@@ -130,6 +156,7 @@ const EXPIRY_BUDGET: usize = 64;
 /// Timer ID (u64), or 0 on failure.
 pub fn add_timer_wakeup(expires: u64, wake_pid: u32) -> u64 {
     let id = NEXT_TIMER_ID.fetch_add(1, Ordering::Relaxed);
+    mark_timer_armed();
     if id == 0 {
         return 0;
     }
@@ -163,6 +190,7 @@ pub fn add_timer_wakeup(expires: u64, wake_pid: u32) -> u64 {
 /// lost-timer-wakeup root cause). Used by nanosleep/clock_nanosleep.
 pub fn add_timer_wakeup_hres(expires: u64, expires_time: u64, wake_pid: u32) -> u64 {
     let id = NEXT_TIMER_ID.fetch_add(1, Ordering::Relaxed);
+    mark_timer_armed();
     if id == 0 {
         return 0;
     }
@@ -213,6 +241,7 @@ pub fn add_timer_with_action(
     tfd_addr: u64,
 ) -> u64 {
     let id = NEXT_TIMER_ID.fetch_add(1, Ordering::Relaxed);
+    mark_timer_armed();
     if id == 0 {
         return 0;
     }
@@ -250,6 +279,7 @@ pub fn add_timer_with_action_hres(
     tfd_addr: u64,
 ) -> u64 {
     let id = NEXT_TIMER_ID.fetch_add(1, Ordering::Relaxed);
+    mark_timer_armed();
     if id == 0 {
         return 0;
     }

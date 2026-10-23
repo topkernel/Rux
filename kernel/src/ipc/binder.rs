@@ -4790,6 +4790,163 @@ fn binder_transaction(
         }
     }
 
+    // sc184 (session R, the screen gate): composer-path tracer. The render
+    // service never publishes SA 10 because its Init blocks in
+    // DisplayComposerHdiImpl::Create's wait loop — the GetService("display_
+    // composer_service") IPC into hdf_devmgr is delivered but never
+    // answered (devmgr's IPC threads park on a frozen rwlock; SERVER-OWING
+    // in every stall dump). This tracer prints (a) every transaction whose
+    // parcel carries the UTF-16 service name (composer_host's add-service,
+    // every client's GetService) plus the replies to those transactions,
+    // and (b) every transaction issued BY the render_service process (its
+    // whole binder conversation up to the block point — the last line
+    // before silence names the never-answered hop). Latches: RS pid by
+    // comm prefix "render_servi"; devmgr pid by the SAREG ADD of SA 5100.
+    {
+        static SACMP_RS_PID: core::sync::atomic::AtomicU32 =
+            core::sync::atomic::AtomicU32::new(0);
+        static SACMP_N: core::sync::atomic::AtomicUsize =
+            core::sync::atomic::AtomicUsize::new(0);
+        static SACMP_RS_N: core::sync::atomic::AtomicUsize =
+            core::sync::atomic::AtomicUsize::new(0);
+        // Matched-transaction ring: txn ids whose send carried the name, so
+        // the (much later) replies are printed too.
+        static SACMP_TXNS: [core::sync::atomic::AtomicU64; 32] =
+            [const { core::sync::atomic::AtomicU64::new(0) }; 32];
+
+        if !reply {
+            let comm_now = crate::sched::current()
+                .map(|t| unsafe { (*t).comm() })
+                .map(|c| core::str::from_utf8(c).unwrap_or(""))
+                .unwrap_or("")
+                .trim_end_matches('\0');
+            if comm_now.starts_with("render_servi") {
+                let prev = SACMP_RS_PID
+                    .swap(proc.pid, core::sync::atomic::Ordering::Relaxed);
+                if prev != proc.pid {
+                    crate::pr_warn!("SACMP rs-latch pid={}", proc.pid);
+                }
+                if SACMP_RS_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 120 {
+                    let mut pb = [0u8; 32];
+                    let hex: alloc::string::String = if tr.data_buffer != 0
+                        && unsafe {
+                            crate::arch::uaccess::copy_from_user(
+                                pb.as_mut_ptr(),
+                                tr.data_buffer as *const u8,
+                                pb.len(),
+                            ) == 0
+                        }
+                    {
+                        pb.iter().map(|b| alloc::format!("{:02x}", b)).collect()
+                    } else {
+                        alloc::string::String::from("-")
+                    };
+                    crate::pr_warn!(
+                        "SACMP-RS #{} pid={} -> pid={} code={:#x} oneway={} dlen={} parcel={}",
+                        SACMP_RS_N.load(core::sync::atomic::Ordering::Relaxed),
+                        proc.pid,
+                        target.pid,
+                        tr.code,
+                        oneway,
+                        data_size,
+                        hex
+                    );
+                }
+            }
+            // hdf_devmgr announces itself by registering SA 5100 (0x13EC)
+            // with samgr (code 3 = ADD_SYSTEM_ABILITY; parcel layout:
+            // 8-byte header + string16 token + u32 said at offset 60).
+            // Latch it for the FXDV frozen-rwlock tracer in futex.rs.
+            if tr.code == 3 && tr.data_buffer != 0 {
+                let mut sb = [0u8; 64];
+                if unsafe {
+                    crate::arch::uaccess::copy_from_user(
+                        sb.as_mut_ptr(),
+                        tr.data_buffer as *const u8,
+                        sb.len(),
+                    ) == 0
+                } && sb[12] == 0x6f
+                    && sb[13] == 0x00
+                    && sb[14] == 0x68
+                    && sb[15] == 0x00
+                    && sb[60] == 0xec
+                    && sb[61] == 0x13
+                {
+                    crate::sync::futex::fxdv_latch_devmgr(proc.pid);
+                }
+            }
+        }
+
+        // Name match on the first 192 parcel bytes (UTF-16LE
+        // "display_composer_service" prefix "display_co" = 10 chars).
+        const NAME: [u8; 20] = [
+            0x64, 0x00, 0x69, 0x00, 0x73, 0x00, 0x70, 0x00, 0x6c, 0x00, 0x61,
+            0x00, 0x79, 0x00, 0x5f, 0x00, 0x63, 0x00, 0x6f, 0x00,
+        ];
+        let mut name_hit = false;
+        if !reply && tr.data_buffer != 0 && data_size >= 4 {
+            let mut buf = [0u8; 192];
+            let n = core::cmp::min(buf.len(), data_size);
+            if unsafe {
+                crate::arch::uaccess::copy_from_user(
+                    buf.as_mut_ptr(),
+                    tr.data_buffer as *const u8,
+                    n,
+                ) == 0
+            } {
+                'outer: for i in 0..n.saturating_sub(NAME.len()) {
+                    for (k, &b) in NAME.iter().enumerate() {
+                        if buf[i + k] != b {
+                            continue 'outer;
+                        }
+                    }
+                    name_hit = true;
+                    break;
+                }
+            }
+        }
+        let reply_to_named = reply
+            && in_reply_to
+                .as_ref()
+                .map(|t| {
+                    SACMP_TXNS.iter().any(|s| {
+                        s.load(core::sync::atomic::Ordering::Relaxed) == t.id
+                    })
+                })
+                .unwrap_or(false);
+        if name_hit || reply_to_named {
+            if name_hit {
+                for s in SACMP_TXNS.iter() {
+                    if s.load(core::sync::atomic::Ordering::Relaxed) == 0 {
+                        s.store(txn_id, core::sync::atomic::Ordering::Relaxed);
+                        break;
+                    }
+                }
+            }
+            if SACMP_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 300 {
+                let comm2 = crate::sched::current()
+                    .map(|t| unsafe { (*t).comm() })
+                    .map(|c| core::str::from_utf8(c).unwrap_or(""))
+                    .unwrap_or("")
+                    .trim_end_matches('\0');
+                crate::pr_warn!(
+                    "SACMP {} code={} from pid={} comm='{}' -> pid={} dlen={} reply={}",
+                    if name_hit { "name" } else { "reply" },
+                    if reply {
+                        in_reply_to.as_ref().map(|t| t.code).unwrap_or(0)
+                    } else {
+                        tr.code
+                    },
+                    proc.pid,
+                    comm2,
+                    target.pid,
+                    data_size,
+                    reply,
+                );
+            }
+        }
+    }
+
     let mut wakes: Vec<Arc<BinderProc>> = Vec::new();
     // sc161: child-routed wakes — (proc, child tgid) for transactions
     // aimed at forked-child nodes; wake_proc_one prefers that child's

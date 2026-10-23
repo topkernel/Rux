@@ -474,13 +474,30 @@ pub fn timer_interrupt_handler() {
     // vDSO time page refresh (shared with the riscv64 twin)
     crate::mm::vdso::vdso_data_tick();
 
-    // Timer softirq for TCP timers (retransmission, delayed ACK)
-    crate::interrupt::softirq::raise_softirq_irqoff(
-        crate::interrupt::softirq::SoftirqIndex::Timer as usize,
-    );
+    // Timer softirq for TCP timers (retransmission, delayed ACK).
+    // sc184 (lane 2, perf-audit F1): the raise was unconditional —
+    // 199 raises/s per CPU for a usually-empty TCP table (pa3), each
+    // costing an irq-exit softirq dispatch pass at IF=0. The handler
+    // (tcp_timer_tick) already early-returns when the table's high-water
+    // count is 0, so gating the raise on the same count is
+    // behavior-identical minus the wasted dispatch. count() is a
+    // high-water mark: once any TCP socket has existed the raise
+    // resumes unconditionally (and the handler then has real work).
+    if crate::net::tcp::get_tcp_socket_table().count() > 0 {
+        crate::interrupt::softirq::raise_softirq_irqoff(
+            crate::interrupt::softirq::SoftirqIndex::Timer as usize,
+        );
+    }
 
-    // Hrtimer softirq for software timers
-    crate::interrupt::softirq::raise_softirq_irqoff(
-        crate::interrupt::softirq::SoftirqIndex::Hrtimer as usize,
-    );
+    // Hrtimer softirq for software timers. Same F1 gate: skip the raise
+    // while no timer has ever been armed AND no high-resolution deadline
+    // is due (timer::timer_softirq_work_pending is lock-free: a monotonic
+    // ever-armed atomic plus the HRES_NEXT deadline word). Before the
+    // first timer this skips the vector entirely; afterwards it never
+    // gates (the handler sweeps real timers).
+    if crate::timer::timer_softirq_work_pending() {
+        crate::interrupt::softirq::raise_softirq_irqoff(
+            crate::interrupt::softirq::SoftirqIndex::Hrtimer as usize,
+        );
+    }
 }

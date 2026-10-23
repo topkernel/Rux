@@ -46,6 +46,29 @@ pub const FUTEX_PRIVATE_FLAG: i32 = 128;
 pub const FUTEX_CLOCK_REALTIME: i32 = 256;
 pub const FUTEX_CMD_MASK: i32 = !(FUTEX_PRIVATE_FLAG | FUTEX_CLOCK_REALTIME);
 
+// sc184 (session R, screen gate): devmgr frozen-rwlock birth tracer state
+// (see the FXDV block in do_futex). Latched from the binder SAREG tracer
+// when hdf_devmgr's AddSystemAbility(SA 5100) is seen.
+pub static FXDV_PID: core::sync::atomic::AtomicU32 =
+    core::sync::atomic::AtomicU32::new(0);
+static FXDV_N: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+const FXDV_RINGSZ: usize = 24;
+static FXDV_ADDR: [core::sync::atomic::AtomicUsize; FXDV_RINGSZ] =
+    [const { core::sync::atomic::AtomicUsize::new(0) }; FXDV_RINGSZ];
+static FXDV_CNT: [core::sync::atomic::AtomicUsize; FXDV_RINGSZ] =
+    [const { core::sync::atomic::AtomicUsize::new(0) }; FXDV_RINGSZ];
+
+/// Latch the hdf_devmgr pid for the FXDV tracer (idempotent; first caller
+/// wins — binder.rs calls this when the SA 5100 registration is seen).
+pub fn fxdv_latch_devmgr(pid: u32) {
+    let prev = FXDV_PID.swap(pid, core::sync::atomic::Ordering::Relaxed);
+    if prev != pid {
+        crate::pr_warn!("FXDV latch devmgr pid={}", pid);
+    }
+}
+
+
 pub const FUTEX_BITSET_MATCH_ANY: u32 = 0xffffffff;
 
 // Internal flags
@@ -1410,6 +1433,77 @@ pub fn do_futex(uaddr: usize, op: i32, val: u32, _timeout: u64, uaddr2: usize, _
     // All futex words must be 4-byte aligned (Linux get_futex_key).
     if uaddr & 0x3 != 0 {
         return -EINVAL as i64;
+    }
+
+    // sc184 (session R, the screen gate): hdf_devmgr's frozen-rwlock birth
+    // tracer. Every stall dump shows devmgr's IPC threads parked in
+    // FUTEX_WAIT on a musl-rwlock word reading 0x80000000|N-readers (16
+    // and 148 observed) while their binder transactions sit SERVER-OWING —
+    // the wedge that keeps render_service's GetService unanswered and SA
+    // 10 unpublished (black screen). The word's lifecycle inside devmgr
+    // is invisible to every existing probe (uncontended rd/unlock paths
+    // never syscall). This tracer prints, for the latched devmgr pid
+    // ONLY, every WAIT whose expected value carries the waiters bit (the
+    // rwlock writer path — each line's `val` carries the reader count the
+    // writer saw) plus every WAKE on an address such a WAIT named,
+    // deduped per address so the UART survives: "WAIT-forever preceded by
+    // matching WAKEs" vs "no WAKE ever" decides lost-wake vs leaked-reader
+    // directly.
+    {
+        use core::sync::atomic::Ordering::Relaxed;
+        let cur_tgid =
+            crate::sched::current().map(|t| unsafe { (*t).tgid() as u32 });
+        if FXDV_PID.load(Relaxed) != 0 && cur_tgid == Some(FXDV_PID.load(Relaxed)) {
+            let is_rw_wait = matches!(cmd, FUTEX_WAIT | FUTEX_WAIT_BITSET)
+                && val & 0x8000_0000 != 0
+                && (val & 0x7fff_ffff) < 0x4000_0000;
+            let mut addr_idx = usize::MAX;
+            for (i, s) in FXDV_ADDR.iter().enumerate() {
+                if s.load(Relaxed) == uaddr {
+                    addr_idx = i;
+                    break;
+                }
+            }
+            if is_rw_wait && addr_idx == usize::MAX {
+                for (i, s) in FXDV_ADDR.iter().enumerate() {
+                    if s.load(Relaxed) == 0 {
+                        s.store(uaddr, Relaxed);
+                        addr_idx = i;
+                        break;
+                    }
+                }
+            }
+            let interesting = is_rw_wait
+                || (matches!(cmd, FUTEX_WAKE) && addr_idx != usize::MAX && val != 0);
+            if interesting {
+                let n = FXDV_N.fetch_add(1, Relaxed);
+                if n < 400 {
+                    // Dedup: first 3 per address, then every 64th.
+                    let c = if addr_idx == usize::MAX {
+                        0
+                    } else {
+                        FXDV_CNT[addr_idx].fetch_add(1, Relaxed)
+                    };
+                    if c < 3 || c % 64 == 0 {
+                        crate::pr_warn!(
+                            "FXDV #{} tid={} op={} uaddr={:#x} val={:#x} jif={}",
+                            n,
+                            crate::sched::current()
+                                .map(|t| unsafe { (*t).pid() })
+                                .unwrap_or(0),
+                            match cmd {
+                                FUTEX_WAIT => "WAIT",
+                                FUTEX_WAIT_BITSET => "WAITB",
+                                _ => "WAKE",
+                            },
+                            uaddr,
+                            val,
+                            crate::drivers::timer::get_jiffies(),
+                        );
+                    }
+                }
+            }
+        }
     }
 
     #[cfg(feature = "dfx-futex-trace")]
