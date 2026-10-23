@@ -4976,6 +4976,52 @@ fn binder_transaction(
                 }
                 th.txn_stack.push(txn.clone());
                 thread.hist(EV_TXN_SENT, txn.id as u32, target.pid);
+                // POSTING FIRST (sc166): the tracer below names the route
+                // this transaction actually took.
+                let via_origin_thread = t_thread.is_some();
+                let mut txn_route_label: &str = "origin-thread";
+                if let Some(tt) = t_thread {
+                    let tth = tt.st();
+                    tth.todo.push_back(Work::Transaction(txn.clone()));
+                    tth.process_todo = true;
+                    tt.hist(EV_TXN_TQUEUED, txn.id as u32, tt.tid);
+                    wake_ths.push(tt);
+                    txn_route_label = "origin-thread";
+                } else {
+                    // sc163: sync txn to a forked-child node — thread-target
+                    // a LOOPER-entered thread of the child (sc165: a plain
+                    // client thread parked on the EventHandler futex never
+                    // returns to a binder read). The gated proc todo +
+                    // preferred wake is the fallback a child's FIRST
+                    // IPCWorkThread read picks up.
+                    let pref = target_node
+                        .as_ref()
+                        .map(|n| n.reg_tgid)
+                        .filter(|&g| g != 0 && g != target.pid)
+                        .unwrap_or(0);
+                    let posted_thread = if pref != 0 {
+                        post_txn_to_child_thread(world, &target, pref, &txn)
+                    } else {
+                        None
+                    };
+                    match posted_thread {
+                        Some(ct) => {
+                            wake_ths.push(ct);
+                            txn_route_label = "child-looper";
+                        }
+                        None => {
+                            pm(world, &target).im().todo.push_back(Work::Transaction(txn.clone()));
+                            thread.hist(EV_TXN_PQUEUED, txn.id as u32, target.pid);
+                            if pref != 0 {
+                                wakes_child.push((target.clone(), pref));
+                                txn_route_label = "child-proctodo";
+                            } else {
+                                wakes.push(target.clone());
+                                txn_route_label = "proctodo";
+                            }
+                        }
+                    }
+                }
                 // sc140 (Session Q, launcher lane): the parked appspawn
                 // children poll WRITE_READ forever with an EMPTY read —
                 // the AMS ScheduleStartAbility transaction never reaches
@@ -5007,51 +5053,17 @@ fn binder_transaction(
                             core::sync::atomic::AtomicUsize::new(0);
                         if TXN_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 160 {
                             crate::pr_warn!(
-                                "APPTXN id={} from pid={} comm='{}' -> pid={} code={:#x} oneway={} {} child={}",
+                                "APPTXN id={} from pid={} comm='{}' -> pid={} code={:#x} oneway={} {} child={} route={}",
                                 txn.id,
                                 proc.pid,
                                 comm,
                                 target.pid,
                                 txn.code,
                                 oneway as u8,
-                                if t_thread.is_some() { "thr" } else { "proc" },
-                                target_node.as_ref().map(|n| n.reg_tgid).unwrap_or(0)
+                                if via_origin_thread { "thr" } else { "proc" },
+                                target_node.as_ref().map(|n| n.reg_tgid).unwrap_or(0),
+                                txn_route_label
                             );
-                        }
-                    }
-                }
-                if let Some(tt) = t_thread {
-                    let tth = tt.st();
-                    tth.todo.push_back(Work::Transaction(txn.clone()));
-                    tth.process_todo = true;
-                    tt.hist(EV_TXN_TQUEUED, txn.id as u32, tt.tid);
-                    wake_ths.push(tt);
-                } else {
-                    // sc163: sync txn to a forked-child node — thread-target
-                    // the child directly (children never enter the looper;
-                    // see post_txn_to_child_thread). The gated proc todo +
-                    // preferred wake stays as the fallback for a child that
-                    // has no binder thread entry yet.
-                    let pref = target_node
-                        .as_ref()
-                        .map(|n| n.reg_tgid)
-                        .filter(|&g| g != 0 && g != target.pid)
-                        .unwrap_or(0);
-                    let posted_thread = if pref != 0 {
-                        post_txn_to_child_thread(world, &target, pref, &txn)
-                    } else {
-                        None
-                    };
-                    match posted_thread {
-                        Some(ct) => wake_ths.push(ct),
-                        None => {
-                            pm(world, &target).im().todo.push_back(Work::Transaction(txn.clone()));
-                            thread.hist(EV_TXN_PQUEUED, txn.id as u32, target.pid);
-                            if pref != 0 {
-                                wakes_child.push((target.clone(), pref));
-                            } else {
-                                wakes.push(target.clone());
-                            }
                         }
                     }
                 }
