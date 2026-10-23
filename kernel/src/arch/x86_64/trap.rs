@@ -682,7 +682,13 @@ pub fn pt_regs_rip_for_cpu(cpu: usize) -> u64 {
         return 0;
     }
     let p = CURRENT_PT_REGS[cpu].load(core::sync::atomic::Ordering::Relaxed) as *const PtRegs;
-    if p.is_null() || !crate::sched::sched::kernel_ptr_canonical(p as *const u8) {
+    // High-half bound added with the pa15 lesson: user addresses are
+    // canonical too, and this slot can only hold kernel-stack frames —
+    // a value below the kernel-half base is a torn read, never deref it.
+    if p.is_null()
+        || (p as u64) < 0xffff_8000_0000_0000
+        || !crate::sched::sched::kernel_ptr_canonical(p as *const u8)
+    {
         return 0;
     }
     // SAFETY: canonical kernel address; the frame page stays mapped
@@ -1187,14 +1193,25 @@ fn handle_timer_tick(regs: &mut PtRegs, cpu: usize) {
             }
             ph(regs.rsp);
             // Stack words in kernel text — return addresses of the
-            // in-window call chain. Guarded by the canonical + text-range
-            // checks; anything else prints as '.'.
+            // in-window call chain. Guarded by kernel-mode + kernel-half
+            // + canonical + text-range checks; anything else prints '.'.
+            // pa15 incident (perf line, 2026-10-24): the window can break
+            // while the CPU is already executing USER code (recovery tick
+            // interrupts a user frame), so regs.rsp is a USER stack
+            // address — and user addresses are CANONICAL on x86_64, so
+            // kernel_ptr_canonical alone let this walk read the user
+            // stack and fault on its first unmapped page (KERNPANIC
+            // pfault badaddr=user-page, rip=handle_timer_tick). A user
+            // frame carries no kernel return addresses; skip the walk.
             let (lo, hi) = crate::sched::sched::kernel_text_window();
-            if crate::sched::sched::kernel_ptr_canonical(regs.rsp as *const u8) {
+            if !regs.user_mode()
+                && regs.rsp >= 0xffff_8000_0000_0000
+                && crate::sched::sched::kernel_ptr_canonical(regs.rsp as *const u8)
+            {
                 for i in 0..12 {
                     let addr = regs.rsp as *const u64;
-                    // SAFETY: canonical kernel address; the kernel stack
-                    // stays mapped, so the scalar read cannot fault.
+                    // SAFETY: kernel-half canonical address; the kernel
+                    // stack stays mapped, so the scalar read cannot fault.
                     let w = unsafe { core::ptr::addr_of!((*addr.add(i))).read_volatile() };
                     putchar(b' ');
                     if w >= lo && w < hi {
@@ -1202,6 +1219,11 @@ fn handle_timer_tick(regs: &mut PtRegs, cpu: usize) {
                     } else {
                         putchar(b'.');
                     }
+                }
+            } else if regs.user_mode() {
+                let msg: &[u8] = b" user-frame";
+                for &b in msg {
+                    putchar(b);
                 }
             }
             putchar(b'\n');
