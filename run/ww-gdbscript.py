@@ -68,6 +68,23 @@ WATCHES = {
     "CMDLINE_PTR": addr("7cmdline11CMDLINE_PTR"),
     "GDT_PER_CPU": addr("4trap11GDT_PER_CPU"),
     "VIRTIO_MMIO_OFF": addr("11MMIO_OFFSET"),
+    # Session-28 expansion (capacity proven >= 20 by run/ww-cap3: 20/20
+    # armed, position-20 firing at 3629 hits/40s, 0 quiet hits): the four
+    # remaining timekeeper-neighborhood statics, tiling the full
+    # 0xffffffff80be8f80-8fb0 stretch except the hot JIFFIES qword
+    # (0x8f98, written every tick — a flood, correctly excluded).
+    # Writer classes: TSC_ACTIVE/TSC_CONTINUITY_OFFSET/TSC_BASE stores
+    # sit in the SAME HPET-gated calibration blocks as TSC_MULT's
+    # (x86_64.rs :212/:211/:210 and :381/:380/:379) — dead code on these
+    # boots (hpet::ready() since second 1; TSC_MULT 0 legit hits r19-r45).
+    # JIFFIES_BASE: one compare_exchange at the FIRST increment-jiffies
+    # call (x86_64.rs:433-436), seconds before attach. The wt1 engine
+    # fingerprint was a WIDE smash into this neighborhood — the full
+    # trio + hpet cluster + BASE now covers every confirmed geometry.
+    "TSC_ACTIVE": addr("10TSC_ACTIVE"),
+    "JIFFIES_BASE": addr("12JIFFIES_BASE"),
+    "TSC_CONT_OFF": addr("21TSC_CONTINUITY_OFFSET"),
+    "TSC_BASE": addr("8TSC_BASE"),
 }
 
 out = []
