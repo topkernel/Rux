@@ -814,32 +814,39 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
             || comm.contains("settingsdata")
             || comm.contains("systemui")
             || comm.contains("dataability")
-            || comm == "appspawn";
-        if family {
-            // sc148: the DAEMON's own preload log storm (extension libs)
-            // ate the budget before any child forked. Skip the boot's
-            // original appspawn pid; forked children keep comm 'appspawn'
-            // pre-rename but carry different pids, so they still print.
-            static APPLOG_MAIN_PID: core::sync::atomic::AtomicU32 =
-                core::sync::atomic::AtomicU32::new(0);
-            let my_pid = crate::process::current_pid() as u32;
-            let main_pid = APPLOG_MAIN_PID.load(core::sync::atomic::Ordering::Relaxed);
-            if main_pid == 0 {
-                APPLOG_MAIN_PID.store(my_pid, core::sync::atomic::Ordering::Relaxed);
-            }
-            let is_daemon = main_pid != 0 && main_pid == my_pid;
+            || comm == "appspawn"
+            || comm.contains("foundation")
+            || comm.contains("sa_main");
+        // dfx=writetrace: the fd3 hilog writev capture settled the
+        // chain questions (sandbox narration, SA-501 attempts); in
+        // milestone boots it only adds ~2.4k kernel lines for
+        // hilogd.rd_kmsg to copy (the b128/b129 vCPU lesson).
+        if family
+            && crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::WriteTrace)
+        {
+            // sc157: comm-based gating. The sc155/156 pid latch (first
+            // family task to write fd3 = "the daemon") was fragile — in
+            // sc156 an earlier appspawn-family writer latched a
+            // non-daemon pid and the daemon's preload storm (ImplClass/
+            // APPSPAWN/MMG/...) printed UNFILTERED, eating 1062 of the
+            // 1200 budget before the launcher phase. Gate by comm
+            // instead: 'appspawn' (daemon AND pre-rename children — the
+            // sandbox-phase narration was decoded in Session Q already),
+            // foundation and sa_main are keyword-gated; renamed children
+            // print everything.
+            let keyword_daemon = comm == "appspawn"
+                || comm.contains("foundation")
+                || comm.contains("sa_main");
             // sc152 (Session Q): for the DAEMON itself, print only the
             // SA-registration lines — the SA 501 (AppMgrService,
             // libappms loaded into the daemon) never registers with
             // samgr, and the daemon's own narration says whether the
             // registration was attempted and how it failed.
-            // sc152: collection runs for the whole family; the PRINT
-            // below filters daemon lines to registration keywords
-            // (AddSystemAbility / RegisterSystemAbility / SA ids / samgr)
-            // so the daemon's preload storm cannot eat the budget.
+            // sc155 (Session R): BUDGET FIX — only lines that PASS the
+            // print filter consume budget.
             static HI_N: core::sync::atomic::AtomicUsize =
                 core::sync::atomic::AtomicUsize::new(0);
-            if HI_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 1200 {
+            if HI_N.load(core::sync::atomic::Ordering::Relaxed) < 2400 {
                 // iovec { void* base; size_t len }
                 let base = args[1];
                 if base != 0 {
@@ -868,7 +875,7 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
                                     let text: alloc::string::String = buf[..n]
                                         .iter()
                                         .map(|c| {
-                                            if (0x20..0x7f).contains(c) || *c == b'\n' {
+                                            if (0x20..=0x7f).contains(c) || *c == b'\n' {
                                                 *c as char
                                             } else {
                                                 '.'
@@ -882,19 +889,22 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
                     }
                     if !parts.is_empty() {
                         let joined = parts.join("|");
-                        let daemon_regn = is_daemon
+                        // sc156: the forked children's ArkCompiler GC
+                        // chatter ("[gc] AddRegion/RemoveRegion/...")
+                        // burned ~700 of the 1200 budget lines in sc155
+                        // before the launcher phase — engine noise, drop.
+                        let gc_noise = joined.contains("ArkCompiler.|[gc]");
+                        // sc155: the print filter decides FIRST; only
+                        // passing lines consume the budget (children
+                        // always pass; daemon/foundation/sa_main need a
+                        // registration keyword).
+                        let daemon_regn = keyword_daemon
                             && (joined.contains("SystemAbility")
                                 || joined.contains("501")
-                                || joined.contains("amgr"));
-                        if !is_daemon || daemon_regn {
-                            static DREG_N: core::sync::atomic::AtomicUsize =
-                                core::sync::atomic::AtomicUsize::new(0);
-                            if !is_daemon
-                                || DREG_N.fetch_add(
-                                    1,
-                                    core::sync::atomic::Ordering::Relaxed,
-                                ) < 60
-                            {
+                                || joined.contains("amgr")
+                                || joined.contains("SAM"));
+                        if !gc_noise && (!keyword_daemon || daemon_regn) {
+                            if HI_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 2400 {
                                 crate::pr_warn!(
                                     "applog pid={} comm='{}' ret={} |{}",
                                     crate::process::current_pid(),

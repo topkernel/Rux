@@ -1015,11 +1015,15 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize, vector: u64) {
 
 /// Rate gate for the IRQ-OFF-WINDOW probe: at most one direct-console
 /// report per 2 s of jiffies (episodes can cluster; the log must not).
+/// sc167: the 20-jiffy (200 ms) gate let sc166 print 2300 windows, and
+/// every report is itself a ~130-char direct-console line whose THRE
+/// waits run with IF=0 — the probe was feeding the very storm it
+/// measured. 200 jiffies restores the documented 2 s cadence.
 fn ww_irqwin_budget_ok() -> bool {
     static LAST: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
     let now = crate::drivers::timer::get_jiffies();
     let last = LAST.load(core::sync::atomic::Ordering::Acquire);
-    if now.wrapping_sub(last) < 20 {
+    if now.wrapping_sub(last) < 200 {
         return false;
     }
     LAST.compare_exchange(last, now, core::sync::atomic::Ordering::AcqRel, core::sync::atomic::Ordering::Acquire)
@@ -1692,6 +1696,46 @@ fn user_segv_forensics(regs: &PtRegs, fault_addr: u64) {
         .map(|c| core::str::from_utf8(c).unwrap_or(""))
         .unwrap_or("")
         .trim_end_matches('\0');
+    // sc160: the crash-retry loop (AMS respawns the launcher, every child
+    // dies at the same stale VA) turned this ~21-line report into a 14
+    // k-line serial storm — and each printk holds the UART irqsave lock,
+    // so the storm itself manufactured the 453-1000 ms IRQ-OFF windows
+    // that kill foundation via its XCollie watchdog (681 reports in
+    // sc159). Full forensics for the first 6 faults; after that a
+    // one-liner that keeps the census and adds the one attribution that
+    // matters: whether cr2 falls inside a live binder buffer mapping
+    // (the range forked children lost with VmaFlags DONTFORK in sc157).
+    let binder_hit = crate::ipc::binder::binder_mmap_owner_of(fault_addr);
+    {
+        static SEGVD_N: core::sync::atomic::AtomicUsize =
+            core::sync::atomic::AtomicUsize::new(0);
+        if SEGVD_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) >= 6 {
+            crate::pr_err!(
+                "USEGV-L pid={} comm='{}' rip={:#x} cr2={:#x} {}",
+                pid,
+                comm,
+                regs.rip,
+                fault_addr,
+                match binder_hit.as_ref() {
+                    Some((proc_id, owner_pid, base, size)) => alloc::format!(
+                        "BINDERBUF proc={} owner_pid={} base={:#x} size={:#x}",
+                        proc_id,
+                        owner_pid,
+                        base,
+                        size
+                    ),
+                    None => alloc::string::String::new(),
+                }
+            );
+            return;
+        }
+    }
+    if let Some((proc_id, owner_pid, base, size)) = binder_hit.as_ref() {
+        crate::pr_err!(
+            "USEGV-FOR: cr2 {:#x} INSIDE BINDER BUFFER of proc {} (owner pid {}) base {:#x} size {:#x} — stale daemon mapping dropped at fork (DONTFORK)",
+            fault_addr, proc_id, owner_pid, base, size
+        );
+    }
     crate::pr_err!(
         "USEGV-FOR: pid={} comm='{}' rip={:#x} cr2={:#x} rsp={:#x} rbp={:#x}",
         pid, comm, regs.rip, fault_addr, regs.rsp, regs.rbp

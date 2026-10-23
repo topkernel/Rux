@@ -204,9 +204,19 @@ pub enum DfxSwitch {
     /// the ww-v2 order-18 grind). One arming print per boot; zero
     /// traffic until a hit. See dfx/metawatch.rs.
     MetaWatch,
+    /// Futex park-dump family (sc1xx launcher-chain hunts): the
+    /// RWFRZ-PARK writer-parking dump, the APP-PARK app-child dump and
+    /// its whole-VMA APPMAP table + fd-table companions. Each park event
+    /// prints hundreds-to-thousands of lines (sc179: 17.5k APPMAP lines
+    /// from 6 budgeted dumps), and every kernel line is copied by OH's
+    /// hilogd.rd_kmsg out of /dev/kmsg — the b128/b129 lesson: that one
+    /// thread eats a vCPU at KVM speed and starves samgr. The chain
+    /// questions these probes answered (routing, park sites, fd
+    /// identities) are settled; OFF unless a park needs re-diagnosing.
+    ParkDump,
 }
 
-const SWITCH_COUNT: usize = 28;
+const SWITCH_COUNT: usize = 29;
 
 static SWITCHES: [AtomicBool; SWITCH_COUNT] = [const { AtomicBool::new(false) }; SWITCH_COUNT];
 
@@ -245,6 +255,7 @@ impl DfxSwitch {
             DfxSwitch::DataTap => 25,
             DfxSwitch::WildWatch => 26,
             DfxSwitch::MetaWatch => 27,
+            DfxSwitch::ParkDump => 28,
         }
     }
 
@@ -278,6 +289,7 @@ impl DfxSwitch {
             "datatap" => Some(DfxSwitch::DataTap),
             "wildwatch" => Some(DfxSwitch::WildWatch),
             "metawatch" => Some(DfxSwitch::MetaWatch),
+            "parkdump" => Some(DfxSwitch::ParkDump),
             _ => None,
         }
     }

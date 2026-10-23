@@ -618,6 +618,17 @@ pub fn vfs_bind_mount(
             // known (debugfs), so a mismatch proves the runtime shadowed or
             // recreated the dir rather than the lookup being broken.
             if e == -2 {
+                // sc160: the launcher crash-retry loop re-runs the whole
+                // sandbox bind set on every respawn — 4153 of these in
+                // sc159, each a printk under the UART irqsave lock and
+                // part of the IRQ-OFF storm that trips foundation's
+                // XCollie. First 300 carry the diagnosis; the rest are
+                // repeats of the same paths.
+                static BINDWALK_N: core::sync::atomic::AtomicUsize =
+                    core::sync::atomic::AtomicUsize::new(0);
+                if BINDWALK_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) >= 300 {
+                    return Err(e);
+                }
                 let mut ok_until = String::from("/");
                 let mut ok_ino: u64 = 0;
                 let mut comps: Vec<&str> =

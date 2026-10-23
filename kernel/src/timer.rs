@@ -382,17 +382,28 @@ pub fn timer_softirq_handler(_nr: usize) {
                 if ww_latefire_budget_ok() {
                     let tick_age_ms = ww_tick_age_ms(c);
                     let (pid, pc, rip) = crate::sched::sched::ww_stalled_cpu_state(c);
-                    crate::pr_err!(
-                        "WW: TIMER-SOFTIRQ-STALL cpu={} age={}ms tick_age={}ms n={} pid={} pc={:#x} rip={:#x}",
-                        c,
-                        (now_time.saturating_sub(l)) * 1000
-                            / crate::config::TIMER_CLOCK_FREQ_HZ,
-                        tick_age_ms,
-                        WW_HRES_N[c].load(Ordering::Relaxed),
-                        pid,
-                        pc,
-                        rip
-                    );
+                    // sc167 storm gate: a USER-space rip means the stalled
+                    // CPU was running userspace with IRQs enabled — the
+                    // tick simply stopped ARRIVING (KVM hrtimer delay under
+                    // host load; 2477 of sc166's 2503 STALL lines were this
+                    // family). It is not a Rux IF=0 window; printing it
+                    // burns a direct-console line with IF=0 and feeds the
+                    // storm. Only report stalls whose current context is
+                    // kernel text.
+                    let (klo, khi) = crate::sched::sched::kernel_text_window();
+                    if rip >= klo && rip < khi {
+                        crate::pr_err!(
+                            "WW: TIMER-SOFTIRQ-STALL cpu={} age={}ms tick_age={}ms n={} pid={} pc={:#x} rip={:#x}",
+                            c,
+                            (now_time.saturating_sub(l)) * 1000
+                                / crate::config::TIMER_CLOCK_FREQ_HZ,
+                            tick_age_ms,
+                            WW_HRES_N[c].load(Ordering::Relaxed),
+                            pid,
+                            pc,
+                            rip
+                        );
+                    }
                 }
             }
         }
@@ -914,6 +925,9 @@ fn ww_heartbeat(now_time: u64) {
         sched[7], sched[8], sched[9]
     );
     crate::sched::wakewatch::heartbeat();
+    // sc158 (Session R): one-shot park dump for wedged foundation/sa_main
+    // registrar threads - see wakewatch::stallwatch_tick.
+    crate::sched::wakewatch::stallwatch_tick();
 }
 
 /// Rate-gated direct-console print for fire-lateness outliers (no GRQ
@@ -923,7 +937,10 @@ fn ww_latefire_budget_ok() -> bool {
     static LAST: AtomicU64 = AtomicU64::new(0);
     let now = crate::drivers::timer::get_jiffies();
     let last = LAST.load(Ordering::Acquire);
-    if now.wrapping_sub(last) < 10 {
+    // sc167 storm gate: 10 jiffies (100 ms) let sc166 print 2503 STALL
+    // lines, each a ~110-char direct-console write charged with IF=0 —
+    // the report fed the storm it measured. 100 jiffies = one per second.
+    if now.wrapping_sub(last) < 100 {
         return false;
     }
     LAST.compare_exchange(last, now, Ordering::AcqRel, Ordering::Acquire)
