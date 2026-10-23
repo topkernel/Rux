@@ -2181,3 +2181,27 @@ LOAD-CORRELATED DICE, NOT THE KERNEL; SOLO BOOTS CONVERGE.
   symbolize to wfi/cpu_idle_loop - the idle-tick-loss weather family
   (CPU idle 1s+, first tick lands in wfi), not real windows. Letting it
   run its 45 min.
+
+SESSION R THIRD LEG ADDENDUM 2 (sc172-174, 12:1x-12:5x): WEDGE
+FORENSICS + REROLL DISCIPLINE.
+- sc172 (solo, load 1.1): STILL wedged; 1365 PREEMPT-LEAK lines
+  attributed to idle (pid 0/1 in wfi, one 115s hold) vs sc167's 11 -
+  the pre-existing preempt-count leak engine amplified, not new. Its
+  69 IRQ-OFF lines symbolize to wfi/cpu_idle_loop = idle tick-loss
+  weather, not real windows.
+- sc173 (after cache-warming the shared images - hypothesis: the 5x4GB
+  userdata copies evicted the page cache; sc167 booted cache-hot):
+  STILL wedged, so cache was not the variable either.
+- sc173 specifics: appspawn daemon SERVED its socket (processed
+  storage_manager's lockstatus type:10 msg, answered narration printed)
+  but the client's reply read never completed; AMS StartAbility for
+  SA:1123 succeeded; no AppSpawnChild ever. render_service leader exit
+  code=0 with IDENTICAL syscall tail appears in GOOD sc167 too - not
+  the discriminator.
+- STALLWATCH "parked >90s" lines on FFRT pool threads are largely
+  IDLE-pool shapes (rings with clone/mmap then futex park) - the probe
+  over-reports; do not treat as pathology by themselves.
+- Verdict: the wedge is the sc155-family OH-side convergence fragility;
+  Rux influence = overall speed only. Strategy: reroll solo boots,
+  ~20 min judgment point (children-by-then = good boot), keep the rest
+  of the budget for the chain+screenshot.
