@@ -2779,3 +2779,99 @@ whole guard cluster under the kernel RO trap beneath them.
   cycles) rather than more statics — every confirmed victim geometry
   is now instrumented.
 
+
+## Session 31 (continuation agent — chain claim, load-diversification
+## surface deployed: the sdc-cycle hunt chain)
+
+### Inheritance reconstruction
+
+- Chain ALIVE at claim (21:50): session-30's tree (wrapper 29743 →
+  ww-chain2.sh 29754 → r53 qemu) still storming, r53 already FULL-clean
+  per the chain log (78978 lines, 0 WW-HIT / 0 heals / 0 panics — the
+  s30 close-out verdicts hold). r54 in flight, verified armed with the
+  repurposed 19-point set + wildwatch try 0. Proctree recorded
+  (run/ww-s31-proctree.txt).
+- 21:54: session-30's zcode window died and reaped its background tree —
+  the chain died MID-r54 (~15/45 min). r54 verdict from artifacts:
+  CLEAN PARTIAL (56823 lines, storm-healthy, 0 WW-HIT / 0 KERNPANIC /
+  0 canary / 0 heals, armed to the last line). Cumulative: **0 WW-HIT
+  across r1-r54** (r54 counted once), 0 META-SMASH.
+- Chain relaunched from r54 at 22:18 as THIS session's background task
+  (run/ww-chain2-s31.log; note: the relaunch overwrites the killed
+  round's same-tag logs — its verdict lives here and in git history).
+- 4fb5d480 (reclaim writeback v2) confirmed in main f91ec1cc per the
+  handoff; nothing to redo there.
+
+### Load-profile diversification deployed (the archive's named escalation)
+
+Rationale: 0 fires in 51+ armed boot-hours under the ONE load profile
+the chain generates (standard OH storm). The two historical trigger
+contexts — b77's sdc fork/exec boundary and wt1's deep storm — are both
+instrumented; the variable left is load diversity. sdc cycles were the
+b77-era context, so the s30 close-out's escalation is exactly this.
+
+Surface (private image, shared images untouched):
+
+- run/ww31-system.img: private 3 GB copy of the OH system.img carrying
+  ONE change — /system/etc/init.cfg's import array additionally imports
+  /etc/init.wwload.cfg, which adds a `start wwload` cmd to the
+  post-fs-data job and defines the service: /system/bin/sh
+  /system/bin/wwload.sh, once, uid root. wwload.sh is an endless paced
+  loop: `echo WWLOAD-BEAT; timeout 2 /system/bin/sdc` — ~2-3 s per
+  cycle, i.e. hundreds of full fork+execve+interpreter+COW+teardown
+  lifetimes of the 182 KB StorageDaemon binary per round, on top of the
+  natural storm. Boot stays -snapshot + file.locking=off (all guest
+  writes discarded).
+- Injection method note (for successors): debugfs `write`/`rm` on this
+  image CORRUPTED silently (orphan + bad-type inodes; e2fsck then
+  deleted /system/etc/init.cfg). The working method: fresh copy → sudo
+  loop-mount → install files → clean umount → e2fsck -fn green. Do not
+  use debugfs writes on this image.
+- run/ww-loadboot.sh (ww-boot.sh clone pointing at the private image;
+  ww-boot.sh itself untouched — a live driver executes it),
+  run/ww-loadprobe.sh (ww-hunt.py-equivalent round driver: frozen kernel
+  + dfx=wildwatch + FULL 19-point ww-gdbscript.py set, own port 12381),
+  run/ww-loadchain.sh (chain wrapper, same two-log capture-marker stop
+  check as ww-chain2.sh plus a per-round sdc-cycle sanity count).
+
+### wwload-p1 probe verdict (930 s): ALL GREEN — surface validated
+
+- Import + service start confirmed in serial ("Import /etc/init.wwload.cfg",
+  "ServiceStart starting:wwload"; the "No secon item in wwload" SELinux
+  error is non-fatal — the service runs).
+- Load measured: 285 sdc execs in the window vs 1 in baseline rounds
+  (r53/r54). WWLOAD-BEAT echoes are invisible (service stdout is not
+  the console) — the kernel `exec: path=/system/bin/sdc` lines are the
+  load heartbeat.
+- Capture stack fully armed (WW-ARMED 19, wildwatch try 0) and coexisting
+  with the load; storm healthy (1445 forks, normal strand classes).
+- 0 WW-HIT / 0 KERNPANIC / 0 canary / 0 heals — quiet window, zero
+  false positives from the load.
+
+### Both chains live at close of work (QEMU budget: chain 1 + experiment 1)
+
+- MAIN chain: ww-chain2.sh driver (relaunched from r54, log
+  run/ww-chain2-s31.log, port 12371) — standard-storm profile.
+- LOAD chain: ww-loadchain.sh driver tag wwload from r1 (log
+  run/ww-loadchain-s31.log, port 12381, rounds 2700 s) — sdc-cycle
+  profile. Both at maximum capture configuration (19-point set + RO
+  tripwire + canary).
+- Driver roots recorded in run/ww-s31-proctree.txt; kill the DRIVER
+  ROOT first, then the round QEMU (chain discipline). Foreign QEMUs at
+  close: samgr-callback 43030, main-workspace 43497 — untouched.
+- Host load with both chains + foreign QEMUs reached ~5.7 (the known
+  >=3-QEMU contention class): strand_max readings from these windows
+  are inflated; capture markers (exact watchpoints/trap) are not
+  affected.
+
+### Next for the line
+
+1. Both chains hunt toward r100 or a capture; any WW-HIT /
+   WILDWATCH-CANARY / scribble-heal / KERNPANIC auto-stops THAT chain
+   with evidence in place (gdb log for watchpoint rip-attribution;
+   serial KERNPANIC dump for the tripwire; addr2line on the frozen ELF).
+2. If the load chain stays silent over several rounds, next diversity
+   step is MORE load flavors on the same image (e.g. multi-worker sdc,
+   bootanimation cycles) — not more statics.
+3. Successor claiming a dead load chain: relaunch with
+   `./run/ww-loadchain.sh wwload 100 12381 <next-round>`.
