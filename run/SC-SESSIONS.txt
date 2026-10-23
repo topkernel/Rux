@@ -2031,3 +2031,36 @@ sched::current().tgid() (the form binder_open already uses) at both
 stamps. Committed 08:03 (binder.rs BinderThread::new + the parcel-fixup
 node creation); sc162 boots the corrected kernel (A + B + exit-reap +
 tgid fix).
+
+SESSION R SECOND LEG sc162/sc163 READBACK (08:3x): the fix pair is
+working; one more routing layer was missing; sc164 carries it.
+- sc162: a storm-slow boot that died at the SPAWN HANDOFF — the
+  APPSPAWN_CLIENT wrote its request to the daemon's nwe socket, the
+  reply never came within the client timeout (Read rLen -1 errno 11 ->
+  Closed socket -> "Send msg to appspawn failed, ret=218103824"
+  0xD000010, pid:0) and AMS never retried. Host weather note: only 2
+  foreign TCG QEMUs at ~2 cores each on a 32-core host (load 4.4) — the
+  1000ms tick-loss family is NOT simple host saturation; treat as
+  boot-race dice (sc159/160/163 all got children under the same load).
+- sc163 (fast variant, 40 AppSpawnChild lines in 7 min):
+  * FIX A VERIFIED IN-BOOT: launcher-segv=0 for the entire boot (the
+    sc159/160 deterministic BINDERBUF crash-retry loop is GONE).
+  * FIX B verified one layer in: APPTXN shows real AMS->child deliveries
+    (id 9634/9761 from pid 654 foundation comm OS_FFRT_5_2 -> daemon proc
+    336, code 0x7 oneway, child=1199/child=1205) — the hop sc156 waited
+    for.
+  * STILL PARKED: the deliveries sat on the gated proc todo because NO
+    child thread can pull proc work — children never issue
+    BINDER_ENTER_LOOPER (zero looper-flagged child threads; OH spawns no
+    IPC workers in forked children), and the daemon's looper workers are
+    reg_tgid-gated off. APP-PARK #0 tid 1199: the launcher child's main
+    thread futex-parked (uaddr on its main stack, WAIT|PRIVATE) waiting
+    for event #3 = the ScheduleStartAbility dispatch.
+  * FIX C (sc164 kernel, commit after 08:35): post_txn_to_child_thread()
+    — child-aimed transactions (oneway + sync) go DIRECTLY onto a thread
+    of the child's own tgid (shallowest txn stack); own-thread todo
+    bypasses the looper gate entirely and wakes a blocked WRITE_READ via
+    thread_has_work's th.todo check; gated proc todo + preferred wake
+    stays as fallback. Children do issue WRITE_READs (appioctl:
+    BINDER_WRITE_READ 0xc0306201 from m.ohos.launcher fd 6), so the
+    thread-targeted work is picked up on their next/ongoing read.
