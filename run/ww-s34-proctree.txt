@@ -1,0 +1,10 @@
+# ww-s34 claim 2026-10-24 03:37 (session 34); s33's chains STILL ALIVE at claim (zcode-cli 9865
+# alive since 17:09 host reboot; wrappers not yet reaped) — CLAIMED as-is, no restart (rounds 6 min in).
+# Main chain r58:  driver root 104867 (ww-chain2.sh) -> ww-hunt.py 104872 -> timeout 104873 -> qemu 104883, gdb 105206
+# Load chain r5:   driver root 104897 (ww-loadchain.sh) -> ww-loadprobe.sh 104902 -> timeout 104905 -> qemu 104916, gdb 105216
+# Both WW-ARMED 19, GUARD=0xffffffff80a7a000 (frozen pair bf779126), wildwatch in EXTRA_APPEND, storming at claim.
+# No stop files. Round budget ends ~04:15:26 for both.
+# Foreign QEMU: 105707 perf-audit KVM (cwd /home/william/rux-agents/perf-audit, started 03:31) — DO NOT TOUCH.
+# Chain discipline: kill DRIVER ROOT first, then the round QEMU. Relaunch recipe (if swept):
+#   ./run/ww-chain2.sh  ww-s2  100 12371 <next-main-round>
+#   ./run/ww-loadchain.sh wwload 100 12381 <next-load-round>

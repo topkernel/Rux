@@ -3003,3 +3003,32 @@ Surface (private image, shared images untouched):
 - Standing state for the successor (if both chains died with this
   window): same recipe, next round numbers from the chain logs' last
   "run N/100 starting" lines.
+
+## Session 34 (continuation agent — chains claimed ALIVE, r58/load-r5 full-clean)
+
+- Claim 03:35: s33's chains were STILL ALIVE (the handoff's "may have
+  died with its window" was stale — the s33 zcode-cli ancestor 9865 was
+  alive, wrappers not yet reaped; the s10 lesson held again: ps before
+  trusting a dead-chain assumption). Rounds r58/load-r5 were 5 min in —
+  claimed as-is, no restart. Both WW-ARMED 19 (GUARD=0xffffffff80a7a000
+  = the frozen pair), wildwatch try 0, storming. Proctree in
+  run/ww-s34-proctree.txt; foreign QEMU: perf-audit KVM 105707,
+  untouched. Host in the >=3-QEMU contention class (2 chain TCG + 1
+  foreign KVM) — strand readings inflated, capture markers exact.
+- Watch cadence ~10 min (driver roots 104867/104897, WW-HIT in both gdb
+  logs, markers in both serials, line-count heartbeat). The chain
+  scripts' marker check runs between rounds; the manual polls cover
+  mid-round.
+- **MAIN r58 (FULL 2700 s): CLEAN** — 76639 serial lines, wakes 12.85M,
+  ticks [100,100], avg_run 2ms, 994 forks, strand_max 9782ms (healthy
+  class), 0 WW-HIT / 0 heals / 0 KERNPANIC/ALLOCTHROW, wildwatch armed
+  try 0. Driver self-advanced to r59 (04:15:27).
+- **LOAD r5 (FULL 2700 s): CLEAN** — 165628 lines, wakes 11.17M, 2642
+  forks, **813 sdc exec cycles**, strand_max 40.1s (the documented
+  >=3-QEMU contention class), 0 hits / 0 markers, armed try 0. Driver
+  self-advanced to load-r6 (04:15:29).
+- Cumulative: **0 WW-HIT across r1-r58 complete rounds** (plus partials),
+  0 META-SMASH. Load surface: p1 + r1-r5 = **4265 sdc exec cycles over
+  6 full armed load-hours**, zero fires, zero false positives.
+- Chains continue at r59/load-r6 (qemu 116201/116256, armed; budget ends
+  ~05:00:27/29).
