@@ -2677,3 +2677,58 @@ irq-off pathology from the flush path.
   discipline: my 2 QEMUs + theirs = 3 total, the known contention
   class for si_busy/strand readings).
 
+### r52 + the wildwatch landing
+
+- r52 (last round of the old flagless chain): FULL 2700 s clean —
+  71684 serial lines, 0 WW-HIT, 0 heals, 0 panics; the old driver
+  exited cleanly on the stop file (placed to avoid an in-place edit of
+  a script a live driver was executing — bash reads scripts
+  incrementally). Cumulative: **0 WW-HIT across r1-r52**, 0 META-SMASH.
+
+- **dfx=wildwatch now rides every hunt boot (r53+).** Discovery while
+  auditing the 19-point coverage: the 2-page hpet guard cluster (8 KB)
+  had 8 of 1024 qwords hardware-watched and NO kernel-side tripwire —
+  the dfx flag existed in the frozen kernel (42eb2006, pre-refreeze)
+  but was never added to EXTRA_APPEND, and the gdbscript doc even said
+  "do NOT combine" (written when the cluster points WERE the watchset).
+  With the tripwire armed the whole cluster is RO in every alias: any
+  CPU store there page-faults at the writer's RIP with the full
+  KERNPANIC attribution dump (addr2line on the frozen ELF), and the 1 s
+  canary cadence covers PTE-invisible/DMA-class writers — a ~128x
+  capture-surface increase on the confirmed-victim neighborhood. The
+  11 non-cluster watchpoints stay gdb's exclusive rip-attributing
+  surface; the 8 cluster points ride as an arm-failure backstop (the
+  heal paths are guard_armed()-gated — verified zero legit post-arm
+  writers before landing).
+- ww-chain2.sh (successor driver): stop check now greps BOTH logs —
+  WW-HIT (gdb), WILDWATCH-CANARY / scribble-heals ("hpet: clock
+  base|div|offset healed") / KERNPANIC (serial) — plus a per-round
+  anomaly note when the armed line is missing. "clock corrected
+  backward" (jitter clamp) deliberately not a stop marker.
+- r53 (first wildwatch round, launched 20:54 under ww-chain2.sh):
+  tripwire armed on try 0 ("2 guard pages RO (0 failed), 4 alias PTEs
+  guarded"), 19-point set armed, full storm — the boot is healthy with
+  the cluster RO, validating coexistence live.
+
+### v2soak3: THE 45-MIN GATE PASSED — 4fb5d480 fully merge-ready
+
+- Full budget (timeout kill as designed, 20:07-20:52), 141111 serial
+  lines, 1197 forks, wakes 5.96M to the end, **0 KERNPANIC / 0
+  ALLOCTHROW / 0 oom-killer / 0 OOMFX / 0 MM-DROP-CTX / 0 META-SMASH**,
+  memfree_pages=429832 (1.68 GiB free at boot-end — no drain; ww-fms2
+  baseline 422361). Every gate for the reclaim-time dirty writeback v2
+  is now green: the A/B (stuck-640MB control vs flushed-896MB with
+  census reconciliation), FMAP/MMF both arches, make-test 1085/1088,
+  and this 45-min 0-panic soak. MERGE-READY for the next main window.
+
+### qs2 (watchset-repurpose probe) — in flight
+
+With the cluster under the kernel trap, the 8 cluster watchpoint slots
+free up for outside-cluster statics. Eight candidates identified by
+source analysis (HEAL_LAST at fc88b0 — the hpet::BASE wide-smash
+neighborhood; KERNEL_MAP; VMEMMAP_INIT+INIT_DONE; the console ISIG pair
+and the three medium-risk console statics TX_LAST_NOTICE /
+DUMP_MAGIC_POS / LEDGER_MAGIC_POS). run/ww-qs2.sh boots a 15.5-min full
+OH storm with the 8 armed + wildwatch ON (coexistence validated in the
+same boot — armed try 0, storm healthy). Verdict: see close-out.
+
