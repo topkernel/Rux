@@ -1123,6 +1123,40 @@ fn wake_thread(t: &BinderThread) {
     t.wait.wake_up(crate::process::wait::WakeUpHint::Normal, 0);
 }
 
+/// sc163: post a transaction aimed at a forked-child node directly onto
+/// a thread of THAT child. Children never enter the binder looper (sc163
+/// boots: zero ENTER_LOOPER ioctls from any child thread), so no child
+/// thread is ever eligible to pull proc-todo work (the looper gate in
+/// binder_thread_read) — while the daemon's looper workers are
+/// reg_tgid-gated off the item. Thread-todo delivery bypasses both:
+/// own-thread todo is drained regardless of looper flags (the
+/// `from_thread` pull) and a blocked WRITE_READ wakes through
+/// thread_has_work's `!th.todo.is_empty()` check. Prefers a thread with
+/// the shallowest txn stack; returns the woken thread (caller wakes it
+/// AFTER WORLD is released, same contract as wake_ths).
+/// SAFETY: caller must hold WORLD; pushes onto the thread's todo only.
+unsafe fn post_txn_to_child_thread(
+    world: &World,
+    target: &Arc<BinderProc>,
+    pref_tgid: u32,
+    txn: &Arc<BinderTxn>,
+) -> Option<Arc<BinderThread>> {
+    let pick = pm(world, target)
+        .im()
+        .threads
+        .iter()
+        .filter(|t| t.tgid == pref_tgid)
+        .min_by_key(|t| t.st().txn_stack.len())
+        .cloned();
+    let t = pick?;
+    let th = t.st();
+    th.todo.push_back(Work::Transaction(txn.clone()));
+    th.process_todo = true;
+    let tid = t.tid;
+    t.hist(EV_TXN_TQUEUED, txn.id as u32, tid);
+    Some(t)
+}
+
 /// binder_select_thread_ilocked + wake: pick one thread of the proc that
 /// is blocked waiting for proc work (Linux keeps them on
 /// proc->waiting_threads) and wake just that one — no thundering herd
@@ -4831,8 +4865,31 @@ fn binder_transaction(
                 if !parked {
                     // SAFETY: under WORLD.
                     unsafe { txn.set_holds_async_slot(true) };
-                    pm(world, &target).im().todo.push_back(Work::Transaction(txn.clone()));
-                    thread.hist(EV_TXN_PQUEUED, txn.id as u32, target.pid);
+                    // sc163: child-aimed oneway — thread-target the
+                    // child directly (children never enter the looper;
+                    // see post_txn_to_child_thread).
+                    let pref = target_node
+                        .as_ref()
+                        .map(|n| n.reg_tgid)
+                        .filter(|&g| g != 0 && g != target.pid)
+                        .unwrap_or(0);
+                    let posted_thread = if pref != 0 {
+                        post_txn_to_child_thread(world, &target, pref, &txn)
+                    } else {
+                        None
+                    };
+                    match posted_thread {
+                        Some(ct) => wake_ths.push(ct),
+                        None => {
+                            pm(world, &target).im().todo.push_back(Work::Transaction(txn.clone()));
+                            thread.hist(EV_TXN_PQUEUED, txn.id as u32, target.pid);
+                            if pref != 0 {
+                                wakes_child.push((target.clone(), pref));
+                            } else {
+                                wakes.push(target.clone());
+                            }
+                        }
+                    }
                     // sc140: oneway half of the APPTXN tracer (see the
                     // sync branch below for the rationale).
                     {
@@ -4867,18 +4924,6 @@ fn binder_transaction(
                                 );
                             }
                         }
-                    }
-                    // sc161: oneway to a child-registered node — route the
-                    // wake to the child's own threads.
-                    let pref = target_node
-                        .as_ref()
-                        .map(|n| n.reg_tgid)
-                        .filter(|&g| g != 0 && g != target.pid)
-                        .unwrap_or(0);
-                    if pref != 0 {
-                        wakes_child.push((target.clone(), pref));
-                    } else {
-                        wakes.push(target.clone());
                     }
                 }
                 // The async buffer keeps its txn alive for the node-slot
@@ -4971,20 +5016,32 @@ fn binder_transaction(
                     tt.hist(EV_TXN_TQUEUED, txn.id as u32, tt.tid);
                     wake_ths.push(tt);
                 } else {
-                    pm(world, &target).im().todo.push_back(Work::Transaction(txn.clone()));
-                    thread.hist(EV_TXN_PQUEUED, txn.id as u32, target.pid);
-                    // sc161: sync txn queued on the proc todo — if the
-                    // target node belongs to a forked child, prefer that
-                    // child's threads for the wake.
+                    // sc163: sync txn to a forked-child node — thread-target
+                    // the child directly (children never enter the looper;
+                    // see post_txn_to_child_thread). The gated proc todo +
+                    // preferred wake stays as the fallback for a child that
+                    // has no binder thread entry yet.
                     let pref = target_node
                         .as_ref()
                         .map(|n| n.reg_tgid)
                         .filter(|&g| g != 0 && g != target.pid)
                         .unwrap_or(0);
-                    if pref != 0 {
-                        wakes_child.push((target.clone(), pref));
+                    let posted_thread = if pref != 0 {
+                        post_txn_to_child_thread(world, &target, pref, &txn)
                     } else {
-                        wakes.push(target.clone());
+                        None
+                    };
+                    match posted_thread {
+                        Some(ct) => wake_ths.push(ct),
+                        None => {
+                            pm(world, &target).im().todo.push_back(Work::Transaction(txn.clone()));
+                            thread.hist(EV_TXN_PQUEUED, txn.id as u32, target.pid);
+                            if pref != 0 {
+                                wakes_child.push((target.clone(), pref));
+                            } else {
+                                wakes.push(target.clone());
+                            }
+                        }
                     }
                 }
             }
