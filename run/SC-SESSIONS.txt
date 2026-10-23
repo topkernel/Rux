@@ -2580,3 +2580,88 @@ EVERY BOOT EVENTUALLY LOSES.
   capture of the freeze birth; clean W3 data), then the lane-1 heal
   design from the conviction data, and reroll boots until the wedge
   fires while SACMP is watching to name the last hop before silence.
+
+SESSION R EIGHTH LEG (sc185/sc186 line, 03:3x-): W3 PROBE DEADLOCK
+RISK FIXED BEFORE FORENSICS; sc185 BIRTH-MOMENT DATA CAPTURED; THE
+SCREEN GATE IS CHARACTERIZED USERSPACE-SIDE (FFRT POOL HOLDS RDLOCK
+ACROSS BLOCKING BINDER CALLS) - KERNEL WAKE PATHS EXONERATED THIS BOOT.
+
+- Pre-boot audit (the 7th leg's probe-self-variable warning): STALLWATCH
+  (timer tick context) and parkdump (futex syscall context) are GRQ-free
+  - safe. But the W3 trio (W3-RUNWAKE-REFUSED / W3-FROZEN-EXEC-SLOT /
+  W3-FROZEN-EXEC-STK) printed from INSIDE wake_up_enqueue's GRQ irqsave
+  region: printk -> write_to_ring_buffer -> KMSG_READ_WQ.wake_up_all()
+  -> wake_up_process -> wake_up_enqueue re-takes the GRQ = same-CPU
+  self-deadlock (IRQs off) whenever a kmsg reader is parked, cross-CPU
+  GRQ<->waitqueue ABAA otherwise. FIXED (4e4a29b0): capture all print
+  fields under the lock, drop the guard at the refusal tail, then
+  printk. Line formats byte-identical (the C-line W3 census greps stay
+  stable). Every other scheduler print under GRQ already uses the R34
+  direct-console path (r56_print_pid / wakewatch ww_msg).
+- FXDV comm-latch backstop (4e4a29b0): sc184 had ZERO FXDV lines - the
+  SA-5100 parcel matcher never fired. First futex from comm=='hdf_
+  devmgr' now latches. Worked in sc185 (latched pid=333).
+- NEW PROBE RWFRZ-WATCH (4e4a29b0 + 537c618a): RWFRZ-PARK registers its
+  word; every later futex op on it from ANY process prints. The
+  WAKE-or-silence lifecycle of a frozen word is the fork datum.
+- sc185 (probe boot, dfx=parkdump, fresh scgold, 30 min): THE WEDGE
+  FIRED AT ~jif 1900 AND WAS CAPTURED BORN. Data:
+  * Ordinary parks are NOT freezes: every RWFRZ-PARK with a matching
+    RWFRZ-WATCH WAKE resolved within a jiffy (WAIT 0x80000010 -> WAKE
+    val=1 from the draining last reader, same tgid). The param-arena
+    word (0x7ff00002ec64) churned healthily ALL boot (many processes);
+    samgr's word 0x7ff000fa697c froze 7 s (jif 501-1201) then HEALED
+    via delivered WAKEs. musl semantics work.
+  * TERMINAL FREEZE #1: devmgr (tgid 333) word 0x7ff000a30264 froze at
+    0x80000010, readers=16 CONSTANT for 9+ min (no fluctuation = the 16
+    readers are BLOCKED inside their critical sections, not cycling);
+    writers 8->10 (all IPC threads: 334/367/567/568/569/631/640/649+).
+    _rw_waiters at word+4 matched parked-writer count exactly (musl
+    layout verified from toolchain musl-1.2.5 source: readers CAS
+    val->val+1 unconditionally - NO writer preference; unlock WAKEs
+    only when count hits 0).
+  * TERMINAL FREEZE #2: tgid 609 (appspawn family) word 0x7ff000cb1e34,
+    SAME shape: readers=16, writers 3->4. 16 = the FFRT pool size.
+  * devmgr main thread (333) parked on 0x7ff000a301d0 = 0x80000000
+    (zero readers, waiter present) - a wake was owed and never came OR
+    the waiter parked into a stale waiters-bit state.
+  * KERNEL EXONERATED (this boot): ZERO W2-WAKE-REFUSED-SLEEPING, zero
+    WAKE-WILD-POISON drops, zero R80/R49/R56C heals, zero W3-FROZEN-
+    EXEC. The WAKE-RUN-LEAK census population (60+ tasks, kicked 2-4x)
+    decomposes into (a) idle workers with empty todos - the kicks
+    DELIVER (threads run, re-check, voluntarily re-park; WAKE_RET(0,0)
+    hist = normal condition-true returns) and (b) CLIENT-WAITING
+    threads on wedged servers (collateral). No evidence of a lost wake
+    on any observable word.
+  * MECHANISM (characterization DECIDED - userspace side): the 16 FFRT/
+    worker readers hold rdlock ACROSS blocking binder calls (dumped
+    parked in sys=0x10 ioctl fd=4 at rip=0x3fbf0d3466); the calls'
+    targets never reply (mutual stall 333 <-> 609-family <-> samgr
+    early-slow); the reader count never reaches 0; the 10 writer-parked
+    IPC threads include tid 631 = SERVER-OWING RS's client GetService
+    txn 2662 (from pid 592; RS itself asked at ~jif 2200 via the ASCII
+    'display_co' parcel - the 91064bdd matcher works) -> SA 10 never
+    published -> black screen (shot1.ppm = 100% black). RS tid 608 also
+    appears in the leak census - parked waiting on devmgr's answer.
+  * VERDICT FOR THE FORK: NOT kernel wake-loss (this boot); the lock
+    semantics + hold-across-blocking-call pattern is OH userspace. The
+    sc184 dodge (asked before the freeze, won) remains the milestone
+    path: the wedge is a race; sc186 rerolling for it.
+- Coordinator verdicts incorporated (pa13/pa14): the softirq empty-
+  raise gates (69310bae) are a NO-OP on OH boot (A/B: raise rate
+  199.2-199.7/s with vs without; gate flips once then never engages).
+  NOT counted toward F1. F1's real lever = irq-exit dispatch +
+  UART port-IO-under-cli cluster. Also merged main f242b7be (Linux-
+  faithful /proc/kmsg stream, rd_kmsg 93.3K/s -> 0.82K/s) before
+  sc186 - the reduced kmsg drain load should shift the storm window.
+- hilogd.server double-drain check (coordinator's item): our recv
+  semantics are faithful - sys_recvfrom/sys_recvmsg route unix/inet/
+  netlink/raw through their W3 blocking engines (unix_recv_ctl /
+  socket_recv_ctl loop with socket_wait_round for blocking fds); poll
+  readiness is data-driven (POLLIN only when queues non-empty). No
+  kernel shape forces the spin; hilogd.server's 18.4K/s recvmsg+
+  recvfrom pair is OH userspace behavior.
+- sc186 (reroll, merged-main kernel, hardened RWFRZ-WATCH: arena words
+  excluded from registration, budget 192): running for the dodge.
+  Artifacts: run/oh-sc185-serial.log (65k lines), oh-sc185-shot1.ppm,
+  userdata-sc185/sc186.img private copies.
