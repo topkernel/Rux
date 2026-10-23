@@ -36,6 +36,29 @@ Host context for all runs: KVM q35 `-cpu max -m 4G -smp 2`, shared with
 2-3 foreign-lane QEMUs (load avg ~5.5). Absolute numbers carry that
 noise; ratios and structure are stable across pa1/pa3.
 
+EIGHTH LEG (waiting state, 2026-10-24 06:50, main@298b69fe merged
+fast-forward): condition check for both pending retests came up empty,
+so zero QEMU this session so far, per discipline.
+
+- A-line v3 (c90f80b0, wfi-paced terminal-deschedule retries) is NOT
+  in origin/main. The launcher lane (samgr-callback worktree) is past
+  it: their branch tip is 0dfdb482 (wip: wedge-bisect in flight) —
+  sc192 (v2 kernel) ended at 06:33 with a still-leaking shape
+  (PREEMPT-LEAK pid 1409, rip=wfi+5 class), sc193 launched 06:20 and
+  running. GRQ/TERM retest boot (pa18) waits for their merge.
+- B-line per-CPU freelist: origin/main has no new commits since
+  298b69fe (docs-only since pa17's base 0634bc8f) — allocator
+  before/after condition unchanged, still not landed.
+- Launcher UI milestone: NOT reached. No OnForeground / launcher.ready
+  / bootanimation.finished markers in sc191/sc192/sc193 serial logs;
+  A-line's own ninth-leg note says SA 10 unpublished, screen at the
+  8-color oracle. Report v1.1 (post-UI row of table 1) stays pending.
+- pa18 readiness (cheap prep, no QEMU): `run/pa16-probe.patch` applies
+  clean on 298b69fe; `kernel/` is byte-identical to the pa17 base, so
+  the retest recipe when a merge lands is exactly: merge main, apply
+  patch, build, `./run/pa-boot.sh pa18 ... APPEND_EXTRA="syscost=1
+  sprobe=0"`, parse with pa-parse.py against the new ELF.
+
 ## Verdict in one paragraph
 
 The "one fix at a time" pattern was real but it has converged into a
