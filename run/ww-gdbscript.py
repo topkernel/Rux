@@ -7,8 +7,13 @@ into hpet::GUARD — a page-exclusive cluster; the watch set therefore
 targets the GUARD members directly so watchpoint boots work on both the
 pre- and post-relocation layouts).
 
-Note: do NOT combine with dfx=wildwatch — the RO trap faults the store
-before it lands, so the watchpoint would never see a value change.
+Note (s30 policy change): hunt boots DO combine with dfx=wildwatch now
+(ww-hunt.py appends it). On the GUARD-cluster points (1-8) the kernel RO
+trap fires FIRST — a store there faults with a full KERNPANIC
+attribution dump in the SERIAL log, and the gdb watchpoint never sees a
+value change (kept armed as a backstop for a failed wildwatch arm). The
+11 non-cluster points remain gdb's exclusive, rip-attributing surface.
+The chain stop check greps BOTH logs (see ww-chain2.sh).
 
 Legit writers post-attach are only the heal paths in
 validated_read_base / read_time_nominal (recognizable rip). Anything
