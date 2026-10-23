@@ -2345,3 +2345,48 @@ SESSION R FIFTH LEG ADDENDUM 4 (sc180 mid-run, 21:2x-21:3x): QUIET
   launcher-vs-lifecycle race: index mounts (by parent or path) instead
   of the linear registry scan in the MS_REC clone path.
 - sc180 runs to 22:07; watch OnForeground/colors>=9.
+
+SESSION R FIFTH LEG CLOSE-OUT (sc180 final, 21:4x): sc180 WEDGED AT
+  MIN ~23 - QUIET KERNEL BOUGHT 7 MINUTES; THE hilogInput CHANNEL
+  SATURATES ON OH'S OWN VOLUME.
+- sc180 final state: one long launcher attempt (like sc179's) ran the
+  CommonBundleManager init loop to alog 3451 (~590 rounds), narration
+  froze ~21:45, launcher tid 2193 + foundation tid 569 parked in the
+  connect(203)/futex(98)/writev(66)-EAGAIN retry family. Wedge moved
+  16 min -> 23 min vs sc179: cutting the kernel-print channel (25k
+  lines) delayed saturation, but the launcher's OWN ~30k slog lines
+  through hilogInput fill the socket anyway, and hilogd's per-message
+  cost (VmaManager::find_mut burn per KILLDUMP - its 10MB anon ring
+  buffer faults page-by-page) keeps the reader behind.
+- SESSION R FIFTH LEG SUMMARY (20:0x-21:4x, sc175-sc180):
+  * VERIFIED: node-identity fix (ptr,reg_tgid) on a converged boot -
+    sc174's same-desc(862896) AppScheduler stubs BOTH received their
+    own traffic; sc174 re-read = it was a GOOD boot killed by the user
+    pause, children 1-10 in 6 min, zero launcher-segv, watch items
+    silent.
+  * FIXED + A/B: sc176's death was the fake-OOM family (other_used
+    555215 pages = 75% of ZoneNormal; the wildwrite-hunt session-22/23
+    root cause: per-fault private copies). Cherry-picked ed444e08
+    (filemap_fault cache-page mapping) as db7229a7. sc178/179/180: ZERO
+    OOM pagefaults (sc176: 1727 + oom-kill). The deepest boots of the
+    whole campaign followed.
+  * CONVICTED: the sc155-family "wedge" mechanism = hilog backpressure
+    (writev fd3 -> hilogInput EAGAIN loops freeze every logger; the
+    b128/b129 hilogd.rd_kmsg mechanism extends to hilogd.server).
+    Mitigation committed (f643af0c: dfx=parkdump / dfx=writetrace
+    gates; APPMAP 17.5k lines -> 0). Wedge onset 16 -> 23 min.
+  * QUANTIFIED (next levers, load-independent):
+    1. mount-registry scan per MS_REC bind: 1.7-1.9s per sandbox mount
+       phase (ReportAbnormalDuration telemetry) - index the registry.
+    2. hilogd per-message VMA-op burn (find_mut page in KILLDUMP) -
+       likely its 10MB anon ring faulting page-by-page; needs either a
+       kernel fault-around for anon maps or an hilogd-side look.
+  * MILESTONE NOT REACHED: screen never left black/8-color; OnForeground
+    0 in every boot. The launcher reaches LauncherAbilityManager/
+    CommonBundleManager/Wallpaper/RS-client depth but its init
+    (minutes of bundle queries at current syscall speeds) loses to the
+    lifecycle clocks and the log-pipe saturation.
+- Branch state: HEAD 222cd95d on feature/samgr-callback (adds: notes
+  commits, db7229a7 filemap fix, f643af0c probe gates). bzImage 21:20
+  = quiet kernel. Artifacts: run/oh-sc17[5-8]-serial.log preserved;
+  userdata-sc17[5-9]/sc180 private copies remain for debugfs.
