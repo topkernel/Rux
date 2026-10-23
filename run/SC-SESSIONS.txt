@@ -2064,3 +2064,30 @@ working; one more routing layer was missing; sc164 carries it.
     stays as fallback. Children do issue WRITE_READs (appioctl:
     BINDER_WRITE_READ 0xc0306201 from m.ohos.launcher fd 6), so the
     thread-targeted work is picked up on their next/ongoing read.
+
+SESSION R SECOND LEG sc164 READBACK (08:4x): thread-targeting landed but
+the child still had NO READER - the last missing layer was the pool
+spawn command. sc164 (boot killed at 12 min by a task-control accident,
+log preserved): launcher-segv=0 again; APPTXN child=1149/1159 deliveries
+fired (foundation pid 621 -> daemon proc 336, code 7 oneway); child 1159
+(os.settingsdata) narration advanced to EventRunner enter ->
+SetRunnerStarted -> "excute event taskCallback" (the sc148 park point)
+and stopped - the thread-targeted delivery sat on the child MAIN
+thread's todo (that thread was futex-parked on the EventHandler, not in
+any binder read), and no other child thread ever issues a binder read:
+children spawn ZERO IPCWorkThreads (the IPCProcessSkeleton singleton is
+inherited from the daemon pre-fork; its pool object exists but no
+pthread was ever created in the child). On Linux each child is a FRESH
+binder proc: its first read gets BR_SPAWN_LOOPER from ITS OWN counters
+(proc-wide requested==0, no waiting threads, 1 < max_threads), OH's
+BinderInvoker::HandleCommands -> OnSpawnThread -> IPCWorkThreadPool::
+SpawnThread pthread_creates a real worker in the child, that worker
+ENTERs the looper and blocks in WRITE_READ - THAT is the reader every
+child uses for service-side deliveries. Rux emitted BR_SPAWN_LOOPER
+only under PROC-WIDE accounting, and the shared proc mixes the daemon's
+pool + every child's client threads -> the gate never fired for a child
+(fix: per-tgid accounting - a child read with no waiting same-tgid
+worker and child_n < max_threads gets the command; sc165 kernel).
+NOTE the whole chain sc161..sc165 is one coherent story: shared proc
+(A) + reg_tgid routing (B) + thread-target todo + per-tgid SPAWN_LOOPER
+= per-child binder pool semantics layered inside the daemon's proc.
