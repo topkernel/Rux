@@ -2627,5 +2627,53 @@ irq-off pathology from the flush path.
   dfx=taskdump,watchdog,periodic,memwatch,ledger (same flags as the
   ww-fms2 45-min baseline so memfree_pages compares), SECS=2700,
   own port 12375, launched 17:16 as a script-file background task.
-  Verdict: see close-out.
+
+### Session 29 close-out (reconstructed by session 30 from artifacts)
+
+- The session-29 window died ~17:27 (serial last write 17:27:13) — it
+  took BOTH background tasks at once, ~11 min into each:
+  - r51 (chain, launched 17:15): CLEAN PARTIAL — 50264 lines, full
+    storm (wakes 2.53M, strand_max 3241 ms healthy class), 0 WW-HIT,
+    0 KERNPANIC/ALLOCTHROW. Cumulative: **0 WW-HIT across r1-r51**,
+    0 META-SMASH.
+  - ww-v2soak2 (gate re-run, launched 17:16): HEALTHY PARTIAL at
+    11/45 min — 55086 lines, 702 forks, wakes 652k, memfree_pages
+    ~455k (1.77 GiB free — no drain; v2soak's 20-min partial read
+    454461), **0 KERNPANIC / 0 ALLOCTHROW / 0 OOM events**, 0
+    MM-DROP-CTX / META-SMASH. The completed 45-min gate remains open.
+- Session 30 verified the push state: origin/feature/wildwrite-hunt
+  already sat at 47e5ab80 (session 29 pushed; the local tracking ref
+  was stale because https fetch times out — check the remote directly
+  before concluding "unpushed").
+
+## Session 30 (continuation agent — claim after host reboot + window death; chain from r52, v2soak3)
+
+### Inheritance reconstruction
+
+- Handoff said "resume from r48" — STALE BY FOUR ROUNDS (the recurring
+  pattern; archive sessions 28-29 are authoritative over pause notes):
+  session 28 relaunched from r49 (13:46), session 29 from r51 (17:15).
+  True state at claim (20:05): NOTHING running since 17:27; host
+  rebooted 17:09 (uptime 2:57 at 20:06); latest artifacts r51 + 
+  v2soak2, verdicts above.
+- Frozen hunt pair intact (Oct 21 15:05, GUARD=0xffffffff80a7a000
+  matches the r51 arm). Worktree v2 bzImage md5 e5038877... =
+  byte-identical to session-28's validated v2 binary.
+
+### Stewardship
+
+- Chain relaunched from r52 at 20:07 (run/ww-chain-s30.log):
+  WW-ARMED 19 verified, storming within 3 min. Driver root = the
+  ww-chain.sh shell (PID tree recorded in run/ww-s30-proctree.txt:
+  bash → ww-chain.sh 22556 → ww-hunt.py 22561 → timeout 22562 →
+  qemu 22572). Chain-discipline reminder honored: kill the driver
+  root FIRST, then the round's QEMU.
+- ww-v2soak3 (run/ww-v2soak3.sh): the completed-gate re-run for
+  4fb5d480, own port 12376, same flags/kernel as v2soak2. Verdict
+  below.
+- Foreign-QEMU watch at claim: samgr-callback line's KVM q35 boot
+  (PID 22503, cwd /home/william/rux-agents/samgr-callback) started in
+  the same minute — NOT touched (launcher-adjacent line, host-load
+  discipline: my 2 QEMUs + theirs = 3 total, the known contention
+  class for si_busy/strand readings).
 

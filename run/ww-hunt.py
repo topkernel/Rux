@@ -28,6 +28,17 @@ serial = os.path.join(RUN, f"{tag}-serial.log")
 gdblog = os.path.join(RUN, f"{tag}-gdb.log")
 
 env = dict(os.environ, TAG=tag, GDBPORT=str(port))
+# s30: ride the kernel-side tripwire on every hunt boot. dfx=wildwatch
+# RO-arms the whole 2-page hpet guard cluster in every alias (any CPU
+# store there page-faults at the writer's RIP with a full KERNPANIC
+# attribution dump) and 1s-verifies the canary page (the only detector
+# for PTE-invisible/DMA-class writers). The frozen kernel carries the
+# code (42eb2006, pre-refreeze); heal paths are guard_armed()-gated, so
+# there are zero legit post-arm writers. Capture markers this adds in
+# SERIAL (the gdb watchpoints only cover 8 of the cluster's 1024
+# qwords): WILDWATCH-CANARY, "hpet: clock {base,div,offset} healed",
+# and the KERNPANIC of the RO trap itself.
+env["EXTRA_APPEND"] = (env.get("EXTRA_APPEND", "") + " dfx=wildwatch").strip()
 qemu = subprocess.Popen(
     [os.path.join(RUN, "ww-boot.sh")],
     env=env,
