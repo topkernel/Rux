@@ -2750,3 +2750,51 @@ for the CLEAN-exit variant; v2 (6e9679c5) releases pick ownership too.
   remaining SA 10 gap is the devmgr 16-reader wedge re-forming mid-
   composer-init (sc190 stalled at RS txn #42 after SetBrightness).
 - sc191 left running to term with shotmon attached; artifacts in run/.
+
+SESSION R NINTH LEG OPENING (sc191 verdict + merge + sc192, 05:4x-05:5x):
+sc191 COLLECTED (v1 kernel crawled to its endgame single-CPU); main merged
+clean (ff); v2 VERIFICATION BOOT sc192 RUNNING PAST EVERY PRIOR GATE.
+
+- sc191 final verdict (v1 kernel, parkdump off, full 45 min): cpu1 stranded
+  at ~min 1 by the CLEAN exit (libusb_event tid 649, code=0) - 514
+  PREEMPT-LEAK sampler lines over the rest of the boot, held_nonzero_for
+  grew past 0xd1e9 jiffies (~9 min), pc=0x10000, rip=wfi+5, ZERO
+  TERM-DESCHED (count was 0 at helper time - the v1 gap v2 targets).
+  GetService answered a 3rd consecutive parkdump-off time; BootAnimation
+  reached full frame prep (150 jpgs read, SetVSyncRate 30/2 success -
+  deeper than sc190's controller START); SA 10 never published; screen
+  stayed the 8-color oracle. Single-CPU crawl = sc189 precedent.
+- Merge: fast-forward to ea4e4e99 (main had already merged this branch at
+  82987cca; the W3 retaddr cfg-gate is main's side, untouched). riscv64
+  build verified clean post-merge (the break the gate fixed is gone).
+- sc192 (v2 kernel 6e9679c5 + ea4e4e99, parkdump off, fresh scgold copy
+  userdata-sc192.img, KVM q35, launched 05:48): at ~6 min -
+  * ZERO PREEMPT-LEAK with 62 clean exits + 52 USEGV deaths already
+    passed through (sc191 showed 514 leak lines by min 5) - v2's
+    pick-ownership release is holding for BOTH exit classes so far.
+  * Both CPUs sampling all boot (WW cpu=0/1 both live).
+  * GetService answered a 4th consecutive parkdump-off time; RS (pid 622)
+    is in DIRECT composer_host (581) conversation and PAST sc190's stall
+    point: txn #42 (code 0xb) sent after #40 0x9 / #41 0xc;
+    BootAnimationController START, OnHotPlug(0,1), SetBrightness 44 all
+    in log; BootAnimation 150 frames + SetVSyncRate again.
+  * SA 10 not yet published; watching.
+- sc190 alive-task WW birth profile (pa15 input, done while waiting):
+  768 WW IRQ-OFF-WINDOW lines, 210 distinct pids (80 multi-hit). Shape:
+  ages all at the 1s probe cap; pc 0x10000 (pure hardirq bit) 74%,
+  0x10001 14%, deeper the rest. ~40% of hits sit at stable addresses
+  inside printk::persistent_log::append (0x802c7d66=253 hits + 3 more
+  clusters) - the printk/UART-under-cli window is the dominant producer;
+  minority samples carry USERSPACE rips with pc!=0 = post-leak residual
+  count (survived return to user). Role map of the top repeat offenders:
+  the DISPLAY STACK owns the phenomenon - composer_host family (316/327/
+  364/548/549/625), render_service family (747/1179), their GPU loaders
+  (libGLES_mali dlopen, OpenGLWrapper 1408), and their clients
+  (DisplayManagerAdapter singleton 868, BootAnimation VSync receiver
+  1405), plus appspawn (334), os_ds_service (532), DfxWatchdog (963).
+  These tasks recur across the WHOLE boot (316 spans 5%->99.7% of the
+  log) - steady-state episodic 1s stalls, not one-shot birth events.
+  Same processes whose FFRT pools are the devmgr 16 readers: their
+  1s-scale preempt-held episodes stall readers mid-critical-section and
+  the rwlock word never returns to 0. Consistent with parkdump-off ->
+  GetService answered 4/4 (less UART burn under cli).
