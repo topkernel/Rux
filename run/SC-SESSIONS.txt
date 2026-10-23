@@ -2091,3 +2091,30 @@ worker and child_n < max_threads gets the command; sc165 kernel).
 NOTE the whole chain sc161..sc165 is one coherent story: shared proc
 (A) + reg_tgid routing (B) + thread-target todo + per-tgid SPAWN_LOOPER
 = per-child binder pool semantics layered inside the daemon's proc.
+
+SESSION R SECOND LEG sc165/sc166 STATE (09:2x): the per-tgid SPAWN gate
+WORKS (child narration shows "IPCWorkThreadPool SpawnThread:
+idleThreadNum:15" + "IPCWorkThread Start: create thread" IN A CHILD for
+the first time — OH creates real reader threads in forked children),
+but the dispatch still did not land in time:
+- sc165: deliveries fired (child=1187 launcher + settingsdata 1227),
+  workers spawned (1), but the sc164-era thread-targeting had put
+  deliveries on the child MAIN thread's todo (futex-parked on the
+  EventHandler, never returns to a binder read) while the fresh worker
+  idled - AMS clocked LIFECYCLE_TIMEOUT (AMSI7903 APP_FREEZE) on
+  settingsdata/systemui. FIX (sc166 kernel): post_txn_to_child_thread
+  only targets LOOPER-entered same-tgid threads; pre-worker deliveries
+  go to the gated proc todo where the child worker's first read picks
+  them up.
+- sc166 (running, storm-slow): AMS fired 103 transactions at the
+  systemui child's node (child=1288) while the child is STILL crawling
+  through sandbox bind setup (its narration is 8+ min in the bind-mount
+  phase); workers=1 so far; no OnForeground yet; screen still black.
+  A route= field was added to APPTXN after sc166 launched (committed) -
+  the NEXT boot names the queue every delivery lands in if sc166 does
+  not complete the chain.
+- FIX CHAIN SCOPUS (all committed on feature/samgr-callback):
+  a1303539 probes; then A (shared binder VMA inheritance restored),
+  B (reg_tgid ownership gate + wake preference), exit-reap
+  (binder_on_tgid_exit), tgid-stamp fix, per-tgid BR_SPAWN_LOOPER,
+  looper-only thread targeting, APPTXN route= tracer.
