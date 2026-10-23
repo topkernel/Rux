@@ -171,7 +171,7 @@ Before/after (fixes already in these numbers):
 ## 3. Cost-center ranking v2.3 — the fix list in order
 
 Contribution model: 2 vCPUs, kernel mode 86-89% of ticks (pa17 t=720:
-89.4%/88.4%; user 9-10%; idle ~1-2%).
+89.4%/88.4%; user 9-10%; idle 1-3%).
 
 | # | cost center | direct evidence (pa15-pa17, EFLAGS-exact) | share | family / lane |
 |---|---|---|---|---|
