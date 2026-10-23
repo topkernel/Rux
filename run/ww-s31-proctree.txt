@@ -1,0 +1,48 @@
+# ww-s31 claim 2026-10-23 21:50:16
+# driver root FIRST (29754), then round qemu; host load 2.44 3.28 3.76 5/3221 37432
+    PID    PPID     ELAPSED CMD
+  29743    9865       56:01 /bin/bash -c . '/home/william/.zcode/cli/exec/shell-snapshots/snapshot-bash-1792757151126-yzmyb2.sh' 2>/dev/null
+  29754   29743       56:01 /bin/bash ./run/ww-chain2.sh ww-s2 100 12371 53
+  35214   29754       11:00 python3 /home/william/rux-agents/wildwrite-hunt/run/ww-hunt.py ww-s2-r54 2700 12371
+  35215   35214       11:00 timeout --signal=TERM --kill-after=10 2700s qemu-system-x86_64 -M q35 -accel tcg,thread=multi -cpu max -m 4G -sm
+  35225   35215       11:00 qemu-system-x86_64 -M q35 -accel tcg,thread=multi -cpu max -m 4G -smp 2 -snapshot -gdb tcp:127.0.0.1:12371 -disp
+
+# session-30 window parent (9865) alive?
+    PID     ELAPSED CMD
+   9865    04:40:30 zcode-cli
+# ww-s31 proctrees 2026-10-23 22:20:21, load 5.14 3.65 3.03 6/3293 44505
+# MAIN chain (relaunched from r54 at 22:18):
+  43771    9865       02:05 /bin/bash -c . '/home/william/.zcode/cli/exec/shell-snapshots/snapshot-bash-179275
+  43782   43771       02:05 /bin/bash ./run/ww-chain2.sh ww-s2 100 12371 54
+  43787   43782       02:05 python3 /home/william/rux-agents/wildwrite-hunt/run/ww-hunt.py ww-s2-r54 2700 1237
+  43788   43787       02:05 timeout --signal=TERM --kill-after=10 2700s qemu-system-x86_64 -M q35 -accel tcg,t
+  43798   43788       02:05 qemu-system-x86_64 -M q35 -accel tcg,thread=multi -cpu max -m 4G -smp 2 -snapshot 
+
+# LOAD chain (launched r1 at 22:19):
+  43969    9865       01:10 /bin/bash -c . '/home/william/.zcode/cli/exec/shell-snapshots/snapshot-bash-179275
+  43980   43969       01:10 /bin/bash ./run/ww-loadchain.sh wwload 100 12381 1
+  43985   43980       01:10 /bin/bash /home/william/rux-agents/wildwrite-hunt/run/ww-loadprobe.sh wwload-r1 27
+  43988   43985       01:10 timeout --signal=TERM --kill-after=10 2700s qemu-system-x86_64 -M q35 -accel tcg,t
+  43999   43988       01:10 qemu-system-x86_64 -M q35 -accel tcg,thread=multi -cpu max -m 4G -smp 2 -snapshot 
+
+# all my QEMUs:
+  43030 foreign (/home/william/rux-agents/samgr-callback) — DO NOT TOUCH
+  43788 MINE (/home/william/rux-agents/wildwrite-hunt)
+  43798 MINE (/home/william/rux-agents/wildwrite-hunt)
+  43988 MINE (/home/william/rux-agents/wildwrite-hunt)
+  43999 MINE (/home/william/rux-agents/wildwrite-hunt)
+  44017 MINE (/home/william/rux-agents/wildwrite-hunt)
+
+# s31 relaunch after window-death kill (~23:18, both chains died mid-round; partials clean 0-markers)
+# MAIN driver root:
+  50353    9865       01:44 /bin/bash -c . '/home/william/.zcode/cli/exec/shell-
+  50364   50353       01:44 /bin/bash ./run/ww-chain2.sh ww-s2 100 12371 55
+# LOAD driver root:
+  50389    9865       01:38 /bin/bash -c . '/home/william/.zcode/cli/exec/shell-
+  50400   50389       01:38 /bin/bash ./run/ww-loadchain.sh wwload 100 12381 2
+
+# second sweep kill ~00:28 (r56/load-r3 15-min clean partials, 0 markers); relaunched 00:30:31:
+  62698       01:24 /bin/bash -c . '/home/william/.zcode/cli/exec/shell-snapshot
+  62709       01:24 /bin/bash ./run/ww-chain2.sh ww-s2 100 12371 56
+  62738       01:20 /bin/bash -c . '/home/william/.zcode/cli/exec/shell-snapshot
+  62749       01:20 /bin/bash ./run/ww-loadchain.sh wwload 100 12381 3
