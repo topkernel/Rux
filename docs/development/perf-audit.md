@@ -27,6 +27,7 @@ Runs (this worktree, `run/`):
 | `pa-pa12` | + /proc/kmsg stream (timed-poll block) | syscost=1 sprobe=0 | 330 s | verification run for the fix |
 | `pa-pa13` | same kernel as pa12 (= HEAD f94c9f19) | syscost=1 sprobe=0 | 780 s | post-F2 ranking re-measure, pa3 horizon; read rate -113x, hilogd.server now #1 flood; ranking v2 below |
 | `pa-pa14` | pa13 + launcher's softirq v1/v8 empty-raise gates (69310bae timer hunks, applied to a scratch build) | syscost=1 sprobe=0 | 780 s | F1 gate A/B: NO measurable effect on OH boot — marginal raise rates identical to ungated from t=120 (199.2-199.7/s); latch flips at ~9 s (v8) / ~31 s (v1); host shared with 3 foreign QEMUs (2x oh-display, 1x samgr-callback probe) from mid-run |
+| `pa-pa15` | main@f242b7be + pa15 probe (IF=0 zone hooks + UART per-byte + per-comm printk + recv census; hooks in run/pa15-probe.patch, bzImage run/pa15-probe-bzImage) | syscost=1 sprobe=0 | 782 s | F1 deep-dive + hilogd dual-drain profile. cpu1 parked by a KERNPANIC at t=418 (see incident) -> t>=480 windows are cpu0-only. 2 smoke runs first (pa15smoke/2/3): smoke1 caught the on()-before-cmdline cache-off bug, smoke2 caught a u64 multiply overflow in the dump |
 
 Host context for all runs: KVM q35 `-cpu max -m 4G -smp 2`, shared with
 2-3 foreign-lane QEMUs (load avg ~5.5). Absolute numbers carry that
@@ -186,6 +187,157 @@ pa12: 36.0/43.8, pa1: 40.3/31.9). Early milestones stay in the same
 2x band pre/post fix; the F2 fix's wall-clock claim rests on the
 syscall/CPU structure above, not on these.
 
+### 2b. pa15: F1 decomposed — UART per-byte cost, console producers, and the hilogd.server drain decoded
+
+pa15 = main@f242b7be plus a measurement probe (fourth session). What it
+adds over pa13/pa14: direct, stateless per-event numbers instead of
+tick-sampling inferences. Four instruments:
+
+1. **UART per-byte cost** (hook in `console.rs putc`, x86_64): every
+   console byte reports its whole-call wall time (raw TSC), LSR poll
+   count (one `inb` = one KVM VM exit), and whether it ran with the
+   probe's IF=0 model set. Stateless per call — these numbers are
+   exact regardless of the zone-accounting caveat below.
+2. **Per-comm printk volume** (hook at `write_to_ring_buffer` +
+   `emit_to_console`): records, ring bytes, console bytes, and
+   console-bytes-under-IF=0 per comm; IRQ-context prints bucket to a
+   `<irq>` pseudo-comm.
+3. **recv-family fd census** (hook in the syscall wrapper, nrs
+   47/45): per (comm, nr) slot that follows the current fd — flags,
+   O_NONBLOCK, ret-shape (data/EAGAIN/0/errno), bytes, ops-table
+   pointer (nm-symbolized host-side), and for AF_UNIX the socket
+   kind/bound-name/peer.
+4. **IF=0 zone accounting** (hooks in cpu.rs enable/disable, irq_enter/
+   irq_exit, `__do_softirq`, putc): cumulative wall time with IF=0,
+   split by zone — REST (explicit cli/irqsave sections), HARDIRQ
+   (delivery->irq_exit frame), SOFTIRQ (dispatch loop), UART (putc).
+   PROTOTYPE CAVEAT, stated up front: a task-context putc runs with
+   IF=1 and can be migrated by the scheduler between its zone push and
+   pop (the inb/outb VM exits are exactly where a resched IPI lands);
+   a leaked stack entry then mis-attributes that CPU's zones and can
+   hold a segment "open" across IF=1 time. Cross-checks caught this
+   (uart-zone time 20x the summed per-putc times; REST nseg
+   nonsensical at 32G). **Zone splits and the if0 totals are UPPER
+   BOUNDS only.** The fix is one line (do not push the UART zone for
+   IF=1 putcs); not re-run this session — the stateless instruments
+   above carry the findings.
+
+**Finding 1 — the console path costs 16-18 us per byte and ~5% of the
+machine, and its stall tail is seconds-class.** Final t=721 tables:
+
+| table | bytes | total | avg/byte | max/byte | polls>1 |
+|---|---|---|---|---|---|
+| putc with IF=0 | 282,194 | 4.57 s | 16.2 us | 3 ms | 0 |
+| putc with IF=1 | 4,061,151 | 74.19 s | 18.3 us | **7,085 ms** | 0 |
+
+Every single byte polls LSR exactly once (multi=0) — the cost is the
+`inb`+`outb` KVM-exit pair (~8-9 us per exit on this loaded host),
+plus a host-scheduling tail: healthy-path bytes have stalled up to
+7.1 s inside that one exit pair (2^34/2^35-cycle histogram outliers;
+smoke runs saw 2.9-4.0 s versions of the same). 4.34 M console bytes
+per boot at 11.5 printk records/s — total UART emission 78.8 s of CPU
+per 782 s boot = **~5% of the 2-vCPU machine**, of which only ~0.3%
+of machine (4.6 s) executes with IF=0. The per-byte latency tail, not
+the IF share, is the F1 multiplier: an emitter parked seconds in a
+putc while holding the printk/console lock is exactly the b140 wedge
+shape and the 1 s-class TIMER-SOFTIRQ-STALL / nanosleep-lateness
+feed (pa15: 363 IRQ-OFF-WINDOW prints at age≈1000 ms, same order as
+pa13's 316).
+
+**Finding 2 — who prints: OH userspace via /dev/kmsg dominates the
+console; kernel IRQ-context prints are the only IF=0 emitters.** Top
+console-byte producers, t=721 (8,962 records, 733 KB console bytes
+total, loglevel=4 filtered exactly 1 record all boot):
+
+| comm | records | console bytes | console bytes under IF=0 |
+|---|---|---|---|
+| init | 3,829 | 236,902 | 0 |
+| `<irq>` (kernel IRQ-context) | 2,518 | 211,135 | 211,135 |
+| OS_FFRT_2_0 (FFRT worker) | 958 | 138,613 | 0 |
+| storage_daemon | 967 | 77,423 | 0 |
+| storage_manager | 491 | 53,868 | 0 |
+
+All task-context console emission runs with IF=1 (every con_if0B=0);
+the only IF=0 console bytes are the kernel's own IRQ-context prints
+(WW/sprobe family — including the SYSCOST dumps themselves, ~52 KB —
+self-observation noted). Console-async or a console-loglevel drop
+reclaims the ~5% CPU and removes the seconds-class stall tail; the
+IF=0 portion (0.3% of machine) is secondary. This also sizes the
+`[kmsg]` passthrough decision from pa9-12: userspace kmsg writes are
+now the majority of console volume.
+
+**Finding 3 — the zone split (upper bound) says the 26% cli-recovery
+page is mostly REST.** t=420 (both CPUs alive), upper-bound IF=0 wall
+= 237.4 s / 840 s CPU-s = 28.3% — same order as pa13's independent
+26% tick-page estimate, so the model is right at the total level. The
+split ordering is REST (irqsave sections: spinlocks, FileBuffer,
+atomic RMW regions) > HARDIRQ frames > SOFTIRQ dispatch > UART —
+i.e., the launcher line's irq-exit dispatch fix (roadmap 2b) targets
+the hard+soft slice (single-digit % of CPU, upper bound ~5-8%), while
+the bulk of IF=0 time is short irqsave critical sections scattered
+across the kernel (60% of the upper bound). WW's own counters bound
+the softirq story precisely: handler-pass time (WW_SOFTIRQ_TICKS) is
+2.5 s per 420 s (0.6%), 203,849 passes (485/s against a 200/s two-CPU
+tick rate) — the loop machinery is NOT spinning out its 2 ms budget
+(~1.7 passes/invocation, ~95 us/invocation upper bound). The
+launcher's in-flight dead-task-holding-HARDIRQ-count conviction
+(sc186/sc189, parked in wfi) is a *lost-CPU* shape, not an IF=0
+shape: wfi executes with IF=1, so it cannot inflate the cli-recovery
+page — it would surface as kernel ticks with rip on the wfi page
+(pa13 has no unidentified multi-percent page; pa15's own PREEMPT-LEAK
+rips symbolize to `cpu::inb+0x10` (UART THRE poll inside an IRQ
+frame), a log-crate iterator, and one park inside the pa15 probe's
+own `irq_note_on` — the probe widens the classic sti-window and can
+act as a park site for the pre-existing leak; the count anomaly
+itself is the launcher lane's sc69 disassembly-proven pre-existing
+bug).
+
+**Finding 4 — hilogd.server dual-drain decoded: a PEEK+consume pair
+paced by real traffic, not a spin.** Final t=721 census:
+
+| syscall | calls | fd | target | flags | shape |
+|---|---|---|---|---|---|
+| recvfrom (45) | 9,477,284 | 12 | unix:dgram bound=/dev/unix/socket/hilogInput, UNIX_SOCKET_OPS, blocking | MSG_PEEK (0x2) | 100% data, exactly 2.0 B/call, 0 EAGAIN |
+| recvmsg (47) | 9,477,284 | 12 | same fd | 0x0 | 100% data, 74 B/call avg, 702 MB total, 0 EAGAIN |
+
+Perfectly 1:1 (both counters identical to the digit). The loop is:
+blocking `recvfrom(MSG_PEEK)` parks on the socket wait queue until the
+next hilog record arrives (avg 84 us/call at t=420 — exactly the
+12.2 K records/s arrival period; max 59 s during a stall), returns a
+2-byte peek, then `recvmsg` consumes the record (5 us avg). Evidence
+for the ipc lane: (a) the "flood" is real log volume — 702 MB of
+records per boot through one socket, fed by the writev storm (19.8 M
+calls) of 100+ services; (b) each record pays TWO full socket recv
+paths where one recvmsg suffices — the PEEK is pure OH-side overhead
+(9.5 M syscalls, 19 MB copied); (c) 12.2 K blocking wake+peek pairs
+per second ride the socket wait-queue wake path continuously, which
+is the same wake machinery the W3 census watches; (d) no kernel
+bug — per-call costs (5/84 us) are the lever, plus whatever the
+launcher lane's wake-loss fix does to the tail (recvfrom max 59 s =
+a WAKE-RUN-LEAK-class stall, not a kernel recv cost).
+
+**pa15 incident — cpu1 parked by KERNPANIC at t=418.**
+`trap: KERNPANIC pfault badaddr=0x00007ff090411000 rip=handle_timer_tick+0x526`
+— the WW tick-age probe's stack walk read a garbage (user-range)
+table base inside the timer tick handler, right after printing an
+IRQ-OFF-WINDOW whose recovery rip was already in user space
+(pid=0x42a rip=0x7ff0007c7a69). Not pa15 code (trap.rs is untouched
+by the probe); the pattern is forensics reading corrupted task/regs
+state — wildwrite-lane territory. Effect on pa15: cpu1's tick and
+probe counters freeze from t=480 on; all t>=480 windows above are
+cpu0-only. W3 census at 780 s: 26 refusals (pa13 baseline: 23),
+WAKE-RUN-LEAK prints 406 (pa13: 702 — lower because half the machine
+was parked), PREEMPT-LEAK 5.
+
+**pa15 probe bugs found and fixed in the committed code** (both by
+smoke runs before the real boot): (1) `syscost::on()` cached its
+"off" verdict the first time it was called before cmdline init — the
+pa15 zone hooks call it from the first boot-time irqsave spinlock,
+which killed the whole probe (now: no caching until the cmdline
+exists); (2) a `cyc * 1e9` u64 overflow in the UART dump line
+(divide-first now).
+
+
 ## 3. Syscall cost table (pa1, cumulative t=1500s)
 
 560M calls, 146 kinds. Hot by count (the flood):
@@ -234,23 +386,26 @@ Notes:
   main yet) is already far below the 1.7-1.9 s *per sandbox phase*
   telemetry, because a phase is dozens of mounts plus other work.
 
-## 4. Ranking table v2 (cost centers -> boot-time contribution)
+## 4. Ranking table v2.1 (cost centers -> boot-time contribution)
 
-v2 = re-ranked after the F2 rd_kmsg fix (pa13, 780 s, quiet host). The
-"was" column keeps the v1 (pa1/pa3) share for the items that moved.
-Contribution model unchanged: 2 vCPUs; kernel mode ~84% of ticks.
+v2.1 = v2 refined by pa15's direct measurements (fourth session). The
+v2 rows keep their pa13 numbers; the pa15 column adds the direct
+evidence. Contribution model unchanged: 2 vCPUs; kernel mode ~84% of
+ticks (pa15 2-CPU phase t<=420).
 
-| # | cost center | measured (pa13) | was (pa1/pa3) | gap contribution | family |
+| # | cost center | measured (pa13) | pa15 direct evidence | gap contribution | family |
 |---|---|---|---|---|---|
-| 1 | Interrupt-disabled regions (cli-recovery page: softirq-at-irq-exit dispatch + irqsave sections + UART TX cli) | 26% of kernel ticks; 316 IRQ-OFF-WINDOW prints/780 s; nanosleep avg 1.86 s (max 295 s); pa14 shows raise-gating does NOT shrink this — lever is the dispatch discipline | 25-32% | **large** — multiplies everything (timers, sleeps, watchdogs) | F1 |
-| 2 | Scheduler wake-loss (WAKE-RUN-LEAK; lying busy slots + linked-starving) | 702 leak prints/780 s; census 23 refusals = 16 `curr_on&&on_cpu` lying slots + 7 `linked` starved; ages to 516 s+ | 448 episodes/boot | **large** — unchanged; still the wall-clock driver | F3 |
-| 3 | hilogd.server socket dual-drain (recvmsg+recvfrom 18.4K/s each) + sysevent_source + connect-retry (3.26M) | 26.5M calls by t=720 = ~37K/s = ~25% of ALL syscalls | 25.8M by t=900 (29K/s) | medium — now the **#1 flood**; OH userspace behavior (drain loop + dead-peer retries), kernel side is per-call cost | F2 |
-| 4 | ext4 metadata + write path (open/stat/getdents/fsync/pwrite/mkdir) | open 235 us, newfstatat 206 us, getdents 643 us, fsync avg 16 ms (62 calls); inode_hash page 3% | same order | medium (~300-500 CPU-s/boot at this horizon) | F4 |
-| 5 | Atomic/CAS contention (atomic glue page + fetch_update family) | 16% of kernel ticks | 19% | medium (I/O completion + superblock/task words) | F5 |
-| 6 | Log-filter + fmt glue (`GlobalLogger::enabled` 5% + String fmt 4% + TwoWaySearcher 2%) | ~11% of kernel ticks combined | ~6-8% | small-medium; scales with log volume (writev 19.8M) | F2/F5 |
-| 7 | Allocation churn (Vec drop + grow + small_alloc) | ~5% kernel ticks | ~5% | small | F5 |
-| 8 | Mount registry scan | mount not in pa13 top-40 by wall | 5.1 ms/mount, 62 s | small (index fix on launcher lane) | F4 |
-| 9 | clock_gettime volume (43.6M calls, no vDSO) | 60.6K/s but <1 us each | 48.7K/s | small CPU, medium latency-shape (each is a real syscall) | F6 |
+| 1 | Interrupt-disabled regions (cli-recovery page) | 26% of kernel ticks; 316 IRQ-OFF-WINDOW/780 s | upper-bound IF=0 28.3% (t=420, 2 CPU); split ordering REST > HARDIRQ > SOFTIRQ > UART; softirq handler bodies only 0.6% CPU, ~1.7 passes/invocation (no budget spin) | **large** — but the levers split: REST bulk = irqsave-section audit; hard/soft = irq-exit discipline; UART = console async | F1 |
+| 1a | Console/UART emission (sub-item of F1, now sized) | outb/inb in recovery rips; cli page shares inb/outb | 4.34 M bytes/boot, 16-18 us/byte (inb+outb exit pair), 78.8 s CPU = **~5% of machine**, stall tail to 7.1 s/byte; producers: init 237 KB, `<irq>` 211 KB (all IF=0), FFRT worker 139 KB, storage 131 KB; task-context emission is 100% IF=1 | medium CPU + **large latency multiplier** (seconds-class emitter stalls holding printk lock) | F1 |
+| 2 | Scheduler wake-loss (WAKE-RUN-LEAK; lying busy slots + linked-starving) | 702 leak prints/780 s; census 16 lying + 7 linked | 26 refusals/406 prints at 780 s with cpu1 KERNPANIC-parked from t=418; recvfrom(hilogd) max stall 59 s = a wake-tail victim; launcher's dead-task-holds-HARDIRQ-count-in-wfi conviction folded in (lost-CPU shape, not IF=0) | **large** — unchanged; still the wall-clock driver | F3 |
+| 3 | hilogd.server socket dual-drain + sysevent_source + connect-retry | 26.5 M calls by t=720 = ~25% of ALL syscalls | DECODED: blocking recvfrom(MSG_PEEK, 2 B) + recvmsg(74 B) 1:1 on fd=12 unix:dgram /dev/unix/socket/hilogInput; 702 MB real log traffic/boot; 0 EAGAIN (paced by traffic, not a spin); PEEK = 9.5 M pure-overhead syscalls; 12.2 K wake-queue parks/s | medium — volume is OH userspace; kernel levers = per-call recv cost + the wake-loss tail | F2 |
+| 4 | ext4 metadata + write path (open/stat/getdents/fsync/pwrite/mkdir) | open 235 us, newfstatat 206 us, getdents 643 us, fsync avg 16 ms | (untouched this session) | medium (~300-500 CPU-s/boot at this horizon) | F4 |
+| 5 | Atomic/CAS contention (atomic glue page + fetch_update family) | 16% of kernel ticks | (untouched; part of the REST if0 bulk) | medium | F5 |
+| 6 | Log-filter + fmt glue | ~11% of kernel ticks combined | printk filtered_by_loglevel=1 all boot — the filter passes everything OH emits; fmt cost is real volume | small-medium | F2/F5 |
+| 7 | Allocation churn | ~5% kernel ticks | (untouched) | small | F5 |
+| 8 | Mount registry scan | mount not in pa13 top-40 by wall | (untouched) | small | F4 |
+| 9 | clock_gettime volume (no vDSO) | 43.6 M calls <1 us | (untouched) | small CPU, medium latency-shape | F6 |
+
 
 What moved v1 -> v2: the read storm (#3 in v1 at ~0.5-1.0 vCPU) is gone
 (read -113x, total syscalls -30%); its slot is taken by the hilogd.server
@@ -374,7 +529,9 @@ fault), is verified fixed (see section 6).
    STATUS: launcher lane has a wake-loss fix in flight; pa13 recorded
    the post-F2 pre-fix census baseline (23 refusals = 16 lying / 7
    linked; 702 leak prints / 780 s) — re-measure W3 numbers on their
-   fix when it lands.
+   fix when it lands. pa15 (same census, cpu1 KERNPANIC-parked from
+   t=418): 26 refusals / 406 prints / 5 PREEMPT-LEAK — baseline shape
+   unchanged; their fix is the gate for the retest.
 2. **Shrink irq-exit softirq cli time (interrupt/timer).** Two
    independent pieces: (a) stop raising the tcp_timer softirq (v1)
    on every tick when the TCP table is empty (199 raises/s/CPU for
@@ -406,6 +563,33 @@ fault), is verified fixed (see section 6).
    vs 84.2/83.3% (pa13, quiet); cli-recovery page 25% vs 26%, same
    nm-verified symbol cluster (FileBuffer + enable_irq/restore_irq +
    inb/outb, +0x20 patch shift).
+   PA15 REFINEMENT (fourth session): the F1 lever set splits three
+   ways. (i) Console async / console-loglevel: reclaims ~5% of the
+   machine's CPU (78.8 s of UART emission per 782 s boot at 16-18
+   us/byte) and removes the seconds-class per-byte stall tail (max
+   7.1 s in a single inb/outb exit pair) that parks emitters holding
+   the printk lock — the highest-latency-value single fix. Producers
+   are 2/3 OH userspace via /dev/kmsg (init 237 KB, FFRT worker
+   139 KB, storage daemons 131 KB); task-context emission is 100%
+   IF=1, so this is CPU+latency, not IF=0. (ii) irq-exit dispatch
+   discipline: the hard+soft IF=0 slice (upper bound ~5-8% of CPU);
+   the softirq loop is NOT budget-spinning (0.6% handler time, ~1.7
+   passes/invocation) — the slice is hardirq-frame + dispatch wall,
+   and the launcher's dead-task-with-HARDIRQ-count conviction is the
+   extreme case (lost CPU, not IF=0). (iii) The REST bulk (~60% of
+   the IF=0 upper bound): short irqsave critical sections across the
+   kernel (spinlocks, FileBuffer, atomic RMW regions) — needs its own
+   section-level audit (biggest single IF=0 bucket, least glamorous).
+   PA15 CAVEAT: zone-split numbers are upper bounds (probe migration
+   bug, see 2b); fix is known, one line.
+2b. **hilogd.server drain — evidence package delivered to the
+   ipc lane (pa15 census).** The dual drain is a blocking
+   recvfrom(MSG_PEEK, 2 B) + recvmsg(74 B avg) pair on fd=12
+   (unix:dgram, /dev/unix/socket/hilogInput), exactly 1:1, 0 EAGAIN,
+   paced by 12.2 K real log records/s (702 MB/boot — the writev storm
+   feeds it). Kernel levers: per-call recv cost, and the wake tail
+   (recvfrom max 59 s = wake-loss family). OH-side lever (their
+   code): drop the PEEK — 9.5 M syscalls/boot of pure overhead.
 3. **Kill the hilogd.rd_kmsg spin (printk/dfx).** ~~92.6K read()/s
    sustained for the whole boot, ~15-25% of a vCPU. Attribution
    narrowed to "positive-returning reads on a non-kmsg fd" (pa4-8);
@@ -452,13 +636,28 @@ fault), is verified fixed (see section 6).
   follows the current open-file-description by `file_id`, recording
   fd/ops/path/bytes; ops pointers symbolize host-side via nm) and the
   failing-read census (comm, errno, fd-resolution state).
+  (fourth session, pa15) the recv-family fd census (per-(comm,nr)
+  slot following the current fd: flags, O_NONBLOCK, ret-shape,
+  bytes, ops pointer, AF_UNIX kind/bound/peer; fed by a wrapper hook
+  in syscall dispatch for native nr 47/45, x86_64-gated), the UART
+  per-byte accumulators (`uart_putc_note`: n/cyc/max/polls + log2
+  histograms, split by IF=0/IF=1), the per-comm printk table
+  (`note_printk_ring`/`note_printk_con`/`note_printk_filtered`,
+  `<irq>` pseudo-comm for interrupt-context prints), and the IF=0
+  zone machinery (`irq_note_on/off`, `zone_push/pop`,
+  if0/cum/nseg/seg_max per CPU per zone — callers live in the pa15
+  probe patch until the zone-stack migration bug is fixed, see 2b).
+  Also: `on()` no longer caches its verdict before the cmdline exists
+  (boot-time callers would otherwise latch the probe off forever).
   60 s dumps from the timer softirq. Both arches; zero cost when off.
   Diagnostic caveats learned the hard way: the EOF/EAGAIN censuses are
   ONCE-PER-COMM tables (12 slots) — they saturate with early comms and
   silently DROP later spinners (this produced the wrong "not EOF"
   conclusion in pa4-8; the positive/fail censuses closed it); census
   adds ~5 us to each read that returns 0/EAGAIN while syscost=1;
-  flood-table per-op numbers for read come from the census-free binary.
+  flood-table per-op numbers for read come from the census-free binary;
+  the IF=0 zone split is an UPPER BOUND (migration stack leak —
+  fix: skip the UART zone push for IF=1 putcs).
 - `kernel/src/printk.rs` — kmsg read counters (records/EAGAIN/sleeps/
   first-reader flags) for the spin hunt.
 - `run/pa-boot.sh` — quiet-OH measurement boot (snapshot shared disks,
@@ -497,3 +696,15 @@ saved as `run/pa14-gate-bzImage`, and the patch reverted before commit —
 timer/sched files stay launcher-lane territory. Symbolize each run's
 pages against the ELF the run actually booted (pa13 vs pa14 layouts
 differ by the patch).
+
+pa15 (F1 deep-dive) provenance, same pattern: the IF=0-zone/UART/
+printk hooks live in `run/pa15-probe.patch` (cpu.rs, preempt.rs,
+softirq.rs, console.rs, printk.rs — all other lanes' territory), the
+built kernel is `run/pa15-probe-bzImage`, and the patch was reverted
+before commit. The stateless instruments (recv census via the syscall
+wrapper, UART per-byte, printk per-comm tables) plus their syscost.rs
+state ARE committed and active in any syscost=1 boot. To rebuild the
+probe kernel: `git apply run/pa15-probe.patch && PLATFORM=x86_64 make
+build`; revert with `git checkout -- kernel/src/arch/x86_64/cpu.rs
+kernel/src/console.rs kernel/src/interrupt/preempt.rs
+kernel/src/interrupt/softirq.rs kernel/src/printk.rs`.
