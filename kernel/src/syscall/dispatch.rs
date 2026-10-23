@@ -148,6 +148,17 @@ pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
     let sc_t0 = crate::dfx::syscost::enter();
     syscall_handler_inner(regs);
     crate::dfx::syscost::exit(sc_nr, sc_t0);
+    // pa15 recv-family fd census (hilogd.server dual-drain evidence for
+    // the ipc lane; fd/flags/ret profile per (comm, nr), zero cost when
+    // syscost off). x86_64 native nrs 47=recvmsg 45=recvfrom.
+    #[cfg(feature = "x86_64")]
+    if sc_nr == 47 || sc_nr == 45 {
+        let a = syscall_get_arguments(regs);
+        // recvmsg(fd, msg, flags) -> flags at a[2]; recvfrom(fd, buf,
+        // len, flags, ...) -> flags at a[3].
+        let flags = if sc_nr == 47 { a[2] } else { a[3] } as i32;
+        crate::dfx::syscost::recv_census(sc_nr, a[0] as usize, flags, regs.rax as i64);
+    }
 }
 
 fn syscall_handler_inner(regs: &mut PtRegs) {

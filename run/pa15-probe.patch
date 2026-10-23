@@ -1,0 +1,221 @@
+diff --git a/kernel/src/arch/x86_64/cpu.rs b/kernel/src/arch/x86_64/cpu.rs
+index 5a557b26..9e3fe71e 100644
+--- a/kernel/src/arch/x86_64/cpu.rs
++++ b/kernel/src/arch/x86_64/cpu.rs
+@@ -247,6 +247,7 @@ pub fn cpuid(leaf: u32, subleaf: u32) -> (u32, u32, u32, u32) {
+ pub fn enable_irq() {
+     // SAFETY: setting IF is safe at any point the caller wants IRQs on.
+     unsafe { core::arch::asm!("sti", options(nomem, nostack)) };
++    crate::dfx::syscost::irq_note_on(); // pa15 probe
+ }
+ 
+ /// Disable interrupts (CLI)
+@@ -254,6 +255,7 @@ pub fn enable_irq() {
+ pub fn disable_irq() {
+     // SAFETY: clearing IF is always safe.
+     unsafe { core::arch::asm!("cli", options(nomem, nostack)) };
++    crate::dfx::syscost::irq_note_off(); // pa15 probe
+ }
+ 
+ /// Wait for interrupt (HLT)
+diff --git a/kernel/src/console.rs b/kernel/src/console.rs
+index 5352b66b..f78daf42 100644
+--- a/kernel/src/console.rs
++++ b/kernel/src/console.rs
+@@ -298,49 +298,71 @@ impl Uart {
+ 
+         #[cfg(feature = "x86_64")]
+         {
+-            // Fast path while a stall is latched: probe at most once per
+-            // 32 bytes (each probe is a VM exit; see TX_SINCE_PROBE); if
+-            // THRE is back, unlatch and fall through to the normal write;
+-            // if not, drop the byte immediately (bounded cost per stall
+-            // episode).
+-            if TX_STALLED.load(Ordering::Acquire) {
+-                if TX_SINCE_PROBE.fetch_add(1, Ordering::Relaxed) < 32 {
+-                    TX_DROPPED.fetch_add(1, Ordering::Relaxed);
+-                    return;
+-                }
+-                TX_SINCE_PROBE.store(0, Ordering::Relaxed);
+-                if read_reg(COM1_BASE, UART_LSR) & LSR_THRE != 0 {
+-                    TX_STALLED.store(false, Ordering::Release);
+-                    TX_RECOVERY_PENDING.store(true, Ordering::Release);
+-                } else {
+-                    TX_DROPPED.fetch_add(1, Ordering::Relaxed);
+-                    return;
+-                }
++            // pa15 probe: per-byte UART cost + zone attribution.
++            let __t0 = crate::arch::cpu::read_counter();
++            let __if0 = crate::dfx::syscost::if0_now();
++            // Zone push ONLY under IF=0: an IF=1 putc runs in preemptible
++            // task context and can migrate between push and pop (the
++            // inb/outb VM exits are where resched IPIs land), leaking a
++            // stack entry on the old CPU (pa15 upper-bound caveat). An
++            // IF=1 push attributes nothing anyway (no open segment).
++            if __if0 {
++                crate::dfx::syscost::zone_push(crate::dfx::syscost::ZONE_UART, false);
+             }
+-            // Poll LSR bit 5 (THR Empty) before writing THR — the 8250
+-            // drops characters written while the shift register is busy.
+-            // BOUNDED by WALL TIME (UART perf gate, 2026-10-20): the old
+-            // 1e6-try budget was 1-2 s of IRQ-off/lock-held spin under
+-            // KVM when the chardev stalled (one `inb` = one VM exit).
+-            // The wait runs with the UART irqsave lock held (or from
+-            // IRQ-context printk with IF=0), so those spins were exactly
+-            // the TIMER-SOFTIRQ-STALL / TIMER-LATE-FIRE episodes. Give
+-            // up after UART_THRE_WAIT_TICKS of read_time(), latch the
+-            // stall, and drop the byte.
+-            let start = crate::arch::cpu::read_time();
+-            while read_reg(COM1_BASE, UART_LSR) & LSR_THRE == 0 {
+-                if crate::arch::cpu::read_time().saturating_sub(start)
+-                    >= UART_THRE_WAIT_TICKS
+-                {
+-                    TX_STALLED.store(true, Ordering::Release);
++            let mut __polls: u64 = 0;
++            'pa15: {
++                // Fast path while a stall is latched: probe at most once per
++                // 32 bytes (each probe is a VM exit; see TX_SINCE_PROBE); if
++                // THRE is back, unlatch and fall through to the normal write;
++                // if not, drop the byte immediately (bounded cost per stall
++                // episode).
++                if TX_STALLED.load(Ordering::Acquire) {
++                    if TX_SINCE_PROBE.fetch_add(1, Ordering::Relaxed) < 32 {
++                        TX_DROPPED.fetch_add(1, Ordering::Relaxed);
++                        break 'pa15;
++                    }
+                     TX_SINCE_PROBE.store(0, Ordering::Relaxed);
+-                    TX_DROPPED.fetch_add(1, Ordering::Relaxed);
+-                    return;
++                    __polls += 1;
++                    if read_reg(COM1_BASE, UART_LSR) & LSR_THRE != 0 {
++                        TX_STALLED.store(false, Ordering::Release);
++                        TX_RECOVERY_PENDING.store(true, Ordering::Release);
++                    } else {
++                        TX_DROPPED.fetch_add(1, Ordering::Relaxed);
++                        break 'pa15;
++                    }
+                 }
+-                core::hint::spin_loop();
++                // Poll LSR bit 5 (THR Empty) before writing THR — the 8250
++                // drops characters written while the shift register is busy.
++                // BOUNDED by WALL TIME (UART perf gate, 2026-10-20): the old
++                // 1e6-try budget was 1-2 s of IRQ-off/lock-held spin under
++                // KVM when the chardev stalled (one `inb` = one VM exit).
++                // The wait runs with the UART irqsave lock held (or from
++                // IRQ-context printk with IF=0), so those spins were exactly
++                // the TIMER-SOFTIRQ-STALL / TIMER-LATE-FIRE episodes. Give
++                // up after UART_THRE_WAIT_TICKS of read_time(), latch the
++                // stall, and drop the byte.
++                let start = crate::arch::cpu::read_time();
++                __polls += 1;
++                while read_reg(COM1_BASE, UART_LSR) & LSR_THRE == 0 {
++                    __polls += 1;
++                    if crate::arch::cpu::read_time().saturating_sub(start)
++                        >= UART_THRE_WAIT_TICKS
++                    {
++                        TX_STALLED.store(true, Ordering::Release);
++                        TX_SINCE_PROBE.store(0, Ordering::Relaxed);
++                        TX_DROPPED.fetch_add(1, Ordering::Relaxed);
++                        break 'pa15;
++                    }
++                    core::hint::spin_loop();
++                }
++                // SAFETY: COM1 THR is the standard 8250 data port.
++                unsafe { write_reg(COM1_BASE, UART_THR, c) };
++            }
++            if __if0 {
++                crate::dfx::syscost::zone_pop();
+             }
+-            // SAFETY: COM1 THR is the standard 8250 data port.
+-            unsafe { write_reg(COM1_BASE, UART_THR, c) };
++            let __dt = crate::arch::cpu::read_counter().saturating_sub(__t0);
++            crate::dfx::syscost::uart_putc_note(__dt, __polls, __if0);
+         }
+     }
+ }
+diff --git a/kernel/src/interrupt/preempt.rs b/kernel/src/interrupt/preempt.rs
+index 64cee437..0979e5a8 100644
+--- a/kernel/src/interrupt/preempt.rs
++++ b/kernel/src/interrupt/preempt.rs
+@@ -157,6 +157,7 @@ pub fn preempt_count_reset() {
+ #[inline]
+ pub fn irq_enter() {
+     preempt_count_add(HARDIRQ_OFFSET);
++    crate::dfx::syscost::zone_push(crate::dfx::syscost::ZONE_HARDIRQ, true); // pa15 probe
+ }
+ 
+ /// Exit IRQ context — decrement hardirq count and process softirqs
+@@ -201,6 +202,7 @@ pub fn irq_exit() {
+             crate::interrupt::ksoftirqd::wakeup_ksoftirqd();
+         }
+     }
++    crate::dfx::syscost::zone_pop(); // pa15 probe (delivery->iret window close)
+ }
+ 
+ // ============================================================================
+diff --git a/kernel/src/interrupt/softirq.rs b/kernel/src/interrupt/softirq.rs
+index 5e5bcccc..e970157e 100644
+--- a/kernel/src/interrupt/softirq.rs
++++ b/kernel/src/interrupt/softirq.rs
+@@ -176,6 +176,14 @@ pub fn __do_softirq() -> bool {
+     crate::interrupt::preempt_count_add(
+         crate::interrupt::preempt::SOFTIRQ_OFFSET
+     );
++    // pa15 probe: push ONLY when an IF=0 segment is open (irq-exit inline
++    // dispatch). From ksoftirqd task context (IF=1) the push attributes
++    // nothing and the preemptible window between push and pop can migrate
++    // the thread, leaking a stack entry on the old CPU.
++    let __pa15_zone = crate::dfx::syscost::if0_now();
++    if __pa15_zone {
++        crate::dfx::syscost::zone_push(crate::dfx::syscost::ZONE_SOFTIRQ, false);
++    }
+ 
+     let mut restart_count = 0;
+     let budget_t0 = crate::drivers::timer::read_time();
+@@ -231,6 +239,9 @@ pub fn __do_softirq() -> bool {
+     crate::interrupt::preempt_count_sub(
+         crate::interrupt::preempt::SOFTIRQ_OFFSET
+     );
++    if __pa15_zone {
++        crate::dfx::syscost::zone_pop(); // pa15 probe
++    }
+ 
+     // SAFETY: per-CPU arrays accessed only by current CPU; cpu_id is correct
+     unsafe { SOFTIRQ_IN_PROGRESS[cpu].store(0, Ordering::Release); }
+diff --git a/kernel/src/printk.rs b/kernel/src/printk.rs
+index d874bf4b..7f6e68db 100644
+--- a/kernel/src/printk.rs
++++ b/kernel/src/printk.rs
+@@ -204,6 +204,7 @@ pub fn printk(level: u8, args: fmt::Arguments) {
+     // Perf: filter BEFORE formatting (same rationale as printk_ln below —
+     // discarded messages must not pay the fmt pass).
+     if level > CONSOLE_LOGLEVEL.load(Ordering::Relaxed) {
++        crate::dfx::syscost::note_printk_filtered(); // pa15 probe
+         return;
+     }
+     printk_ring_always(level, args);
+@@ -338,12 +339,16 @@ fn emit_to_console(text: &[u8]) {
+         CONSOLE_EMIT_SKIPPED.fetch_add(1, Ordering::Relaxed);
+         return; // record is in the ring buffer; console line skipped
+     }
++    let mut emitted = 0usize; // pa15 probe
+     for &b in text {
+         if b == b'\n' {
+             crate::console::putchar_no_lock(b'\r');
++            emitted += 1;
+         }
+         crate::console::putchar_no_lock(b);
++        emitted += 1;
+     }
++    crate::dfx::syscost::note_printk_con(emitted); // pa15 probe
+     CONSOLE_EMIT_LOCK.store(false, Ordering::Release);
+ }
+ 
+@@ -435,6 +440,7 @@ fn printk_bytes(level: u8, text: &[u8]) {
+ // ==================== Ring Buffer Write ====================
+ 
+ fn write_to_ring_buffer(level: u8, text: &[u8], timestamp: u64) {
++    crate::dfx::syscost::note_printk_ring(text.len()); // pa15 probe
+     let pid = crate::process::current_pid() as u32;
+     // Real CPU id (review批次8: hard-coded 0 attributed every message to
+     // CPU 0, hiding cross-CPU issues in the logs).

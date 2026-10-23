@@ -207,6 +207,566 @@ const EMPTY_RDFAIL: RdFailSlot = RdFailSlot {
 
 static RD_FAIL: [RdFailSlot; 16] = [const { EMPTY_RDFAIL }; 16];
 
+// ============================================================================
+// pa15: F1 irq-exit dispatch quantification — IF=0 time decomposition,
+// UART per-byte cli cost, per-comm printk volume, recv-family fd census.
+//
+// The pa13/pa14 finding: ~26% of kernel ticks land on the page holding
+// enable_irq/restore_irq + inb/outb + FileBuffer, but that share is a
+// SAMPLING ARTIFACT (queued ticks attribute to the re-enable site), so
+// it does not say how much IF=0 time each producer actually costs. The
+// launcher line needs real numbers before fixing the irq-exit dispatch
+// discipline or making the console async: how much wall time is spent
+// with IF=0, split by zone (hardirq frame / softirq dispatch loop /
+// UART TX / other irqsave sections), plus the per-byte UART wait
+// distribution and who is printing.
+//
+// Zone model (x86_64 measurement hooks, activated by a scratch patch
+// over cpu.rs/preempt.rs/softirq.rs/console.rs/printk.rs — those files
+// are other lanes' territory, so the hooks ride the pa14 pattern: build,
+// save bzImage, revert; see run/pa15-probe.patch):
+//   - cpu.rs enable/disable/restore stamp IF 0->1 / 1->0 transitions.
+//   - irq_enter/irq_exit push/pop a HARDIRQ zone (delivery->iret frame;
+//     an interrupt gate frame always starts and ends with IF=1, so
+//     pop-to-depth-0 closes any open segment).
+//   - __do_softirq push/pop SOFTIRQ (nested under HARDIRQ).
+//   - putc push/pop UART per byte (nested under whatever is running —
+//     printk from softirq, from task context, from the direct-console
+//     probe printer).
+// Segments are stamped with the RAW TSC (read_counter), not read_time():
+// a segment opens and closes on the same CPU, so cross-CPU TSC offsets
+// never enter a delta, and rdtsc costs ~one instruction against
+// read_time()'s correction loads — the hooks must not inflate the very
+// windows they measure. Cumulatives are converted at dump time via
+// get_counter_freq().
+// ============================================================================
+
+/// IF=0 zones (index into per-CPU CUM rows and the zone stack).
+pub const ZONE_REST: u8 = 0;
+pub const ZONE_HARDIRQ: u8 = 1;
+pub const ZONE_SOFTIRQ: u8 = 2;
+pub const ZONE_UART: u8 = 3;
+
+const ZSTK_DEPTH: usize = 4;
+
+const EMPTY_ZROW: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
+
+struct If0Zone {
+    /// Our model of IF while the probe hooks are live (false = enabled).
+    if0: [AtomicU8; crate::config::MAX_CPUS],
+    /// Raw-TSC stamp of the currently open IF=0 segment (valid if if0).
+    t0: [AtomicU64; crate::config::MAX_CPUS],
+    /// Zone stack (nesting), ZD = current depth.
+    zstk: [[AtomicU8; ZSTK_DEPTH]; crate::config::MAX_CPUS],
+    zd: [AtomicU8; crate::config::MAX_CPUS],
+    /// Cumulative raw TSC per zone per CPU.
+    cum: [[AtomicU64; 4]; crate::config::MAX_CPUS],
+    /// Number of IF=0 segments closed per zone (window-count shape).
+    nseg: [[AtomicU64; 4]; crate::config::MAX_CPUS],
+    /// Longest closed segment per zone (raw TSC).
+    seg_max: [[AtomicU64; 4]; crate::config::MAX_CPUS],
+}
+
+static IFZ: If0Zone = If0Zone {
+    if0: [const { AtomicU8::new(0) }; crate::config::MAX_CPUS],
+    t0: [const { AtomicU64::new(0) }; crate::config::MAX_CPUS],
+    zstk: [const { [const { AtomicU8::new(0) }; ZSTK_DEPTH] }; crate::config::MAX_CPUS],
+    zd: [const { AtomicU8::new(0) }; crate::config::MAX_CPUS],
+    cum: [const { EMPTY_ZROW }; crate::config::MAX_CPUS],
+    nseg: [const { EMPTY_ZROW }; crate::config::MAX_CPUS],
+    seg_max: [const { EMPTY_ZROW }; crate::config::MAX_CPUS],
+};
+
+/// Current zone (stack top, or REST when empty). Caller-CPU only.
+#[inline]
+fn zone_cur(cpu: usize) -> u8 {
+    let d = IFZ.zd[cpu].load(Ordering::Relaxed) as usize;
+    if d == 0 {
+        ZONE_REST
+    } else {
+        IFZ.zstk[cpu][d - 1].load(Ordering::Relaxed)
+    }
+}
+
+/// Close the currently open segment into `z` (kept separate from
+/// `irq_note_on` only for the pop-to-zero path, which must NOT reopen).
+#[inline]
+fn seg_close(cpu: usize, z: u8, now: u64) {
+    let dt = now.saturating_sub(IFZ.t0[cpu].load(Ordering::Relaxed));
+    IFZ.cum[cpu][z as usize].fetch_add(dt, Ordering::Relaxed);
+    IFZ.nseg[cpu][z as usize].fetch_add(1, Ordering::Relaxed);
+    let mut m = IFZ.seg_max[cpu][z as usize].load(Ordering::Relaxed);
+    while dt > m {
+        match IFZ.seg_max[cpu][z as usize].compare_exchange_weak(
+            m,
+            dt,
+            Ordering::Relaxed,
+            Ordering::Relaxed,
+        ) {
+            Ok(_) => break,
+            Err(cur) => m = cur,
+        }
+    }
+}
+
+/// Hook for cpu.rs `disable_irq` / `save_and_disable_irq` (after cli):
+/// opens a REST-zone segment if none is open.
+#[inline]
+pub fn irq_note_off() {
+    if !on() {
+        return;
+    }
+    let cpu = crate::arch::cpu_id() as usize;
+    if cpu >= crate::config::MAX_CPUS {
+        return;
+    }
+    if IFZ.if0[cpu].load(Ordering::Relaxed) == 0 {
+        IFZ.t0[cpu].store(crate::arch::cpu::read_counter(), Ordering::Relaxed);
+        IFZ.if0[cpu].store(1, Ordering::Relaxed);
+    }
+}
+
+/// Hook for cpu.rs `enable_irq` / `restore_irq(true)`: closes the open
+/// segment into the current zone.
+#[inline]
+pub fn irq_note_on() {
+    if !on() {
+        return;
+    }
+    let cpu = crate::arch::cpu_id() as usize;
+    if cpu >= crate::config::MAX_CPUS {
+        return;
+    }
+    if IFZ.if0[cpu].load(Ordering::Relaxed) != 0 {
+        seg_close(cpu, zone_cur(cpu), crate::arch::cpu::read_counter());
+        IFZ.if0[cpu].store(0, Ordering::Relaxed);
+    }
+}
+
+/// Zone push (irq_enter / __do_softirq / putc). If an IF=0 segment is
+/// open it is split (credited to the old zone, a new one starts under
+/// the incoming zone). `open` is true ONLY for the irq_enter hook:
+/// interrupt delivery itself clears IF before any cpu.rs hook can
+/// observe it, so that push opens the delivery->iret segment when none
+/// is running. Softirq/UART pushes pass false — ksoftirqd dispatches
+/// softirqs with IF=1, and those must not manufacture IF=0 time.
+#[inline]
+pub fn zone_push(z: u8, open: bool) {
+    if !on() {
+        return;
+    }
+    let cpu = crate::arch::cpu_id() as usize;
+    if cpu >= crate::config::MAX_CPUS {
+        return;
+    }
+    let now = crate::arch::cpu::read_counter();
+    if IFZ.if0[cpu].load(Ordering::Relaxed) != 0 {
+        seg_close(cpu, zone_cur(cpu), now);
+    } else if open {
+        IFZ.t0[cpu].store(now, Ordering::Relaxed);
+        IFZ.if0[cpu].store(1, Ordering::Relaxed);
+    }
+    let d = IFZ.zd[cpu].load(Ordering::Relaxed) as usize;
+    if d < ZSTK_DEPTH {
+        IFZ.zstk[cpu][d].store(z, Ordering::Relaxed);
+        IFZ.zd[cpu].store((d + 1) as u8, Ordering::Relaxed);
+    }
+}
+
+/// Zone pop (irq_exit / __do_softirq exit / putc exit). At pop-to-zero
+/// (irq_exit, just before iret) the segment always closes: an interrupt
+/// gate frame was entered with IF=1 and iret restores IF=1, so any IF=0
+/// inside the frame ends at the frame boundary.
+#[inline]
+pub fn zone_pop() {
+    if !on() {
+        return;
+    }
+    let cpu = crate::arch::cpu_id() as usize;
+    if cpu >= crate::config::MAX_CPUS {
+        return;
+    }
+    let now = crate::arch::cpu::read_counter();
+    let d = IFZ.zd[cpu].load(Ordering::Relaxed) as usize;
+    if d == 0 {
+        return;
+    }
+    let z = IFZ.zstk[cpu][d - 1].load(Ordering::Relaxed);
+    IFZ.zd[cpu].store((d - 1) as u8, Ordering::Relaxed);
+    if IFZ.if0[cpu].load(Ordering::Relaxed) != 0 {
+        seg_close(cpu, z, now);
+        if d - 1 == 0 {
+            // Frame boundary: IF returns to its delivery-time value (1).
+            IFZ.if0[cpu].store(0, Ordering::Relaxed);
+        } else {
+            // Nested zone ended; the enclosing window continues.
+            IFZ.t0[cpu].store(now, Ordering::Relaxed);
+        }
+    }
+}
+
+/// Is the current CPU modeled IF=0 right now (for the putc if0 split)?
+#[inline]
+pub fn if0_now() -> bool {
+    let cpu = crate::arch::cpu_id() as usize;
+    cpu < crate::config::MAX_CPUS && IFZ.if0[cpu].load(Ordering::Relaxed) != 0
+}
+
+// ---------------------------------------------------------------------------
+// pa15 UART per-byte cost: every console.rs putc reports its wall time
+// (raw TSC, whole call incl. THRE poll + outb), its LSR poll count (one
+// inb = one KVM exit), and whether it ran modeled IF=0. Two independent
+// accumulator sets (if0 / if1) + log2 histograms give the launcher line
+// the per-byte cli-cost distribution for the console-async decision.
+// ---------------------------------------------------------------------------
+
+const UART_HIST: usize = 40;
+
+struct UartStat {
+    n: AtomicU64,
+    cyc: AtomicU64,
+    max: AtomicU64,
+    polls: AtomicU64,
+    polls_gt1: AtomicU64,
+    hist: [AtomicU64; UART_HIST],
+}
+
+const EMPTY_UART: UartStat = UartStat {
+    n: AtomicU64::new(0),
+    cyc: AtomicU64::new(0),
+    max: AtomicU64::new(0),
+    polls: AtomicU64::new(0),
+    polls_gt1: AtomicU64::new(0),
+    hist: [const { AtomicU64::new(0) }; UART_HIST],
+};
+
+static UART_IF0: UartStat = EMPTY_UART;
+static UART_IF1: UartStat = EMPTY_UART;
+
+/// Hook for console.rs putc (x86_64): `dt` raw TSC for the whole call,
+/// `polls` = LSR reads issued, `if0` = modeled interrupts-off.
+#[inline]
+pub fn uart_putc_note(dt: u64, polls: u64, if0: bool) {
+    use core::sync::atomic::Ordering::Relaxed;
+    if !on() {
+        return;
+    }
+    let s = if if0 { &UART_IF0 } else { &UART_IF1 };
+    s.n.fetch_add(1, Relaxed);
+    s.cyc.fetch_add(dt, Relaxed);
+    let mut m = s.max.load(Relaxed);
+    while dt > m {
+        match s.max.compare_exchange_weak(m, dt, Relaxed, Relaxed) {
+            Ok(_) => break,
+            Err(cur) => m = cur,
+        }
+    }
+    s.polls.fetch_add(polls, Relaxed);
+    if polls > 1 {
+        s.polls_gt1.fetch_add(1, Relaxed);
+    }
+    let b = (64 - dt.leading_zeros() as usize).min(UART_HIST - 1);
+    s.hist[b].fetch_add(1, Relaxed);
+}
+
+// ---------------------------------------------------------------------------
+// pa15 per-comm printk volume: who is printing. One 16-slot table keyed
+// by comm (records reaching write_to_ring_buffer = everything that
+// passed the loglevel filter, kernel prints AND /dev/kmsg writes; IRQ-
+// context records go to a "<irq>" pseudo-slot so scheduler-interrupt
+// prints do not smear random interrupted tasks). Console-emitted bytes
+// are counted separately, split by modeled IF=0 (console emission is
+// the only printk part that costs cli time in task context).
+// ---------------------------------------------------------------------------
+
+struct PrSlot {
+    comm0: AtomicU64,
+    comm: [AtomicU8; 16],
+    recs: AtomicU64,
+    ring_bytes: AtomicU64,
+    con_bytes: AtomicU64,
+    con_if0_bytes: AtomicU64,
+}
+
+const EMPTY_PR: PrSlot = PrSlot {
+    comm0: AtomicU64::new(0),
+    comm: [const { AtomicU8::new(0) }; 16],
+    recs: AtomicU64::new(0),
+    ring_bytes: AtomicU64::new(0),
+    con_bytes: AtomicU64::new(0),
+    con_if0_bytes: AtomicU64::new(0),
+};
+
+static PRNT: [PrSlot; 16] = [const { EMPTY_PR }; 16];
+
+/// printk() calls dropped by the console-loglevel pre-filter (they cost
+/// only the filter check — the number sizes the filter's value).
+static PRNT_FILTERED: AtomicU64 = AtomicU64::new(0);
+
+#[inline]
+fn pr_slot() -> Option<&'static PrSlot> {
+    use core::sync::atomic::Ordering::Relaxed;
+    let irq_ctx = crate::interrupt::preempt::in_interrupt();
+    let comm: [u8; 16] = if irq_ctx {
+        *b"<irq>\0\0\0\0\0\0\0\0\0\0\0"
+    } else {
+        match crate::sched::current() {
+            Some(t) => unsafe { *(*t).comm() },
+            None => *b"<nointask>\0\0\0\0\0\0",
+        }
+    };
+    let comm0 = u64::from_le_bytes(comm[..8].try_into().unwrap());
+    for i in 0..PRNT.len() {
+        if PRNT[i].comm0.load(Relaxed) != comm0 {
+            continue;
+        }
+        if (0..16).all(|j| PRNT[i].comm[j].load(Relaxed) == comm[j]) {
+            return Some(&PRNT[i]);
+        }
+    }
+    for i in 0..PRNT.len() {
+        if PRNT[i].comm0.load(Relaxed) != 0 {
+            continue;
+        }
+        for j in 0..16 {
+            PRNT[i].comm[j].store(comm[j], Relaxed);
+        }
+        PRNT[i].comm0.store(comm0, Relaxed);
+        return Some(&PRNT[i]);
+    }
+    None
+}
+
+/// Hook for printk() early return when level > console_loglevel.
+#[inline]
+pub fn note_printk_filtered() {
+    if on() {
+        PRNT_FILTERED.fetch_add(1, Ordering::Relaxed);
+    }
+}
+
+/// Hook at write_to_ring_buffer entry (every post-filter record).
+#[inline]
+pub fn note_printk_ring(len: usize) {
+    if !on() {
+        return;
+    }
+    if let Some(s) = pr_slot() {
+        s.recs.fetch_add(1, Ordering::Relaxed);
+        s.ring_bytes.fetch_add(len as u64, Ordering::Relaxed);
+    }
+}
+
+/// Hook at emit_to_console tail (console-emitted bytes; `len` counts the
+/// bytes actually pushed, CR-for-LF expansion included by the caller).
+#[inline]
+pub fn note_printk_con(len: usize) {
+    if !on() {
+        return;
+    }
+    let if0 = if0_now();
+    if let Some(s) = pr_slot() {
+        s.con_bytes.fetch_add(len as u64, Ordering::Relaxed);
+        if if0 {
+            s.con_if0_bytes.fetch_add(len as u64, Ordering::Relaxed);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// pa15 recv-family fd census (hilogd.server dual-drain evidence for the
+// launcher line's ipc work — measurement only, no semantics change).
+// Keyed by (comm, nr); the slot FOLLOWS the current fd: on fd/file_id
+// change it retargets and resets the per-fd shape counters (RD_DATA
+// pattern). Shape per current fd: data reads + bytes, EAGAINs, zeros,
+// first-seen errno; plus flags/O_NONBLOCK/ops/desc resolved at retarget
+// (unix sockets: kind + bound name + peer; symbolize ops host-side).
+// ---------------------------------------------------------------------------
+
+struct RxSlot {
+    comm0: AtomicU64,
+    comm: [AtomicU8; 16],
+    nr: AtomicU64,
+    fd: AtomicU64,
+    file_id: AtomicU64,
+    flags: AtomicI64,
+    nonblock: AtomicU8,
+    n_total: AtomicU64,
+    n_cur: AtomicU64,
+    n_data: AtomicU64,
+    data_bytes: AtomicU64,
+    n_eagain: AtomicU64,
+    n_zero: AtomicU64,
+    err: AtomicI64,
+    n_err: AtomicU64,
+    ops: AtomicU64,
+    desc: [AtomicU8; 96],
+}
+
+const EMPTY_RX: RxSlot = RxSlot {
+    comm0: AtomicU64::new(0),
+    comm: [const { AtomicU8::new(0) }; 16],
+    nr: AtomicU64::new(0),
+    fd: AtomicU64::new(0),
+    file_id: AtomicU64::new(0),
+    flags: AtomicI64::new(0),
+    nonblock: AtomicU8::new(0),
+    n_total: AtomicU64::new(0),
+    n_cur: AtomicU64::new(0),
+    n_data: AtomicU64::new(0),
+    data_bytes: AtomicU64::new(0),
+    n_eagain: AtomicU64::new(0),
+    n_zero: AtomicU64::new(0),
+    err: AtomicI64::new(0),
+    n_err: AtomicU64::new(0),
+    ops: AtomicU64::new(0),
+    desc: [const { AtomicU8::new(0) }; 96],
+};
+
+static RECV: [RxSlot; 16] = [const { EMPTY_RX }; 16];
+
+/// Describe a recv-family fd for the census table (resolved once per
+/// retarget, never on the hot path). Unix sockets get kind/bound/peer
+/// (peer pid via SO_PEERCRED semantics for streams, the connected dgram
+/// destination for dgrams); everything else records the ops-table
+/// pointer for host-side nm symbolization.
+fn recv_describe(fd: usize, out: &[AtomicU8; 96]) {
+    let mut s = alloc::string::String::new();
+    if let Some((usock, nonblock)) = crate::net::unix::unix_file_of(fd) {
+        let kind = match usock.kind {
+            crate::net::unix::UnixKind::Stream => "stream",
+            _ => "dgram",
+        };
+        let bound = usock.bound_name.lock().clone().unwrap_or_default();
+        let peer_name = match usock.peer_cred() {
+            Some(c) => alloc::format!("pid {}", c.pid),
+            None => usock
+                .dgram_peer
+                .lock()
+                .clone()
+                .unwrap_or_else(|| "-".to_string()),
+        };
+        s = alloc::format!(
+            "unix:{} bound=[{}] peer=[{}]{}",
+            kind,
+            bound,
+            peer_name,
+            if nonblock { " O_NONBLOCK" } else { "" }
+        );
+    } else if let Some(file) = unsafe { crate::fs::get_file_fd(fd) } {
+        let ops = unsafe { (*file.ops.get()).map(|p| p as *const _ as u64).unwrap_or(0) };
+        let path = unsafe {
+            match &*file.dentry.get() {
+                Some(dentry) => crate::fs::vfs::dentry_user_path(dentry),
+                None => alloc::string::String::from("<no-dentry>"),
+            }
+        };
+        s = alloc::format!("ops={:#x} path={}", ops, path);
+    } else {
+        s = alloc::format!("<closed fd {}>", fd);
+    }
+    for (k, b) in s.as_bytes().iter().take(96).enumerate() {
+        out[k].store(*b, Ordering::Relaxed);
+    }
+}
+
+/// pa15 recv census entry: called from the syscall wrapper for native
+/// nr 47 (recvmsg) / 45 (recvfrom) with the caller's fd, flags and the
+/// syscall's return value. Zero cost when syscost is off.
+pub fn recv_census(nr: usize, fd: usize, flags: i32, ret: i64) {
+    use core::sync::atomic::Ordering::Relaxed;
+    if !on() {
+        return;
+    }
+    let comm: [u8; 16] = match crate::sched::current() {
+        Some(t) => unsafe { *(*t).comm() },
+        None => return,
+    };
+    let comm0 = u64::from_le_bytes(comm[..8].try_into().unwrap());
+    let mut slot: Option<&RxSlot> = None;
+    for i in 0..RECV.len() {
+        if RECV[i].comm0.load(Relaxed) != comm0 {
+            continue;
+        }
+        if (0..16).all(|j| RECV[i].comm[j].load(Relaxed) == comm[j])
+            && RECV[i].nr.load(Relaxed) == nr as u64
+        {
+            slot = Some(&RECV[i]);
+            break;
+        }
+    }
+    if slot.is_none() {
+        for i in 0..RECV.len() {
+            if RECV[i].comm0.load(Relaxed) != 0 {
+                continue;
+            }
+            for j in 0..16 {
+                RECV[i].comm[j].store(comm[j], Relaxed);
+            }
+            RECV[i].comm0.store(comm0, Relaxed);
+            RECV[i].nr.store(nr as u64, Relaxed);
+            slot = Some(&RECV[i]);
+            break;
+        }
+    }
+    let s = match slot {
+        Some(s) => s,
+        None => return,
+    };
+    s.n_total.fetch_add(1, Relaxed);
+    // Retarget on fd change (follow the current description, RD_DATA
+    // pattern; the shape counters restart so the dump shows ONE fd's
+    // loop shape at a time).
+    let cur_file = unsafe { crate::fs::get_file_fd(fd) };
+    let fid = cur_file.as_ref().map(|f| f.file_id).unwrap_or(0);
+    if s.file_id.load(Relaxed) != fid || s.fd.load(Relaxed) != fd as u64 {
+        s.file_id.store(fid, Relaxed);
+        s.fd.store(fd as u64, Relaxed);
+        s.flags.store(flags as i64, Relaxed);
+        let nb = cur_file
+            .as_ref()
+            .map(|f| {
+                (f.flags.load(Relaxed)
+                    & crate::fs::file::FileFlags::O_NONBLOCK)
+                    != 0
+            })
+            .unwrap_or(false);
+        s.nonblock.store(if nb { 1 } else { 0 }, Relaxed);
+        s.ops.store(
+            cur_file
+                .as_ref()
+                .and_then(|f| unsafe { (*f.ops.get()).map(|p| p as *const _ as u64) })
+                .unwrap_or(0),
+            Relaxed,
+        );
+        for j in 0..96 {
+            s.desc[j].store(0, Relaxed);
+        }
+        recv_describe(fd, &s.desc);
+        s.n_cur.store(0, Relaxed);
+        s.n_data.store(0, Relaxed);
+        s.data_bytes.store(0, Relaxed);
+        s.n_eagain.store(0, Relaxed);
+        s.n_zero.store(0, Relaxed);
+        s.n_err.store(0, Relaxed);
+        s.err.store(0, Relaxed);
+    }
+    s.n_cur.fetch_add(1, Relaxed);
+    if ret > 0 {
+        s.n_data.fetch_add(1, Relaxed);
+        s.data_bytes.fetch_add(ret as u64, Relaxed);
+    } else if ret == 0 {
+        s.n_zero.fetch_add(1, Relaxed);
+    } else if ret == -(crate::errno::constants::EAGAIN as i64) {
+        s.n_eagain.fetch_add(1, Relaxed);
+    } else {
+        if s.n_err.load(Relaxed) == 0 {
+            s.err.store(ret, Relaxed);
+        }
+        s.n_err.fetch_add(1, Relaxed);
+    }
+}
+
 /// pa10 failing-read census: call from the read wrapper when ret < 0
 /// and ret != -EAGAIN. Records the errno, whether the fd still
 /// resolves, and the path. Zero cost when syscost is off.
@@ -359,10 +919,21 @@ pub fn on() -> bool {
         2 => true,
         1 => false,
         _ => {
-            let v = if crate::cmdline::get_param("syscost").as_deref() == Some("1") {
-                2
-            } else {
-                1
+            // pa15: do NOT cache a verdict before the cmdline exists.
+            // The first caller used to be the first syscall (long after
+            // cmdline::init); the pa15 IF=0 zone hooks fire from the very
+            // first boot-time irqsave spinlock — mm/heap init, well before
+            // cmdline::init_from — and a cached "off" from that call kept
+            // syscost dead for the whole boot (pa15smoke: zero dumps).
+            let v = match crate::cmdline::get_cmdline() {
+                None => return false,
+                Some(_) => {
+                    if crate::cmdline::get_param("syscost").as_deref() == Some("1") {
+                        2
+                    } else {
+                        1
+                    }
+                }
             };
             ARMED.store(v, Ordering::Relaxed);
             v == 2
@@ -768,6 +1339,160 @@ pub fn dump() {
                 line
             );
         }
+    }
+
+    // pa15 IF=0 zone decomposition (F1 irq-exit dispatch numbers; raw
+    // TSC -> ms). Zones: rest / hardirq-frame / softirq-dispatch / uart.
+    {
+        let tsc_hz = crate::arch::cpu::get_counter_freq().max(1);
+        let msd = tsc_hz / 1000;
+        for c in 0..crate::config::MAX_CPUS {
+            let v = [
+                IFZ.cum[c][0].load(Ordering::Relaxed),
+                IFZ.cum[c][1].load(Ordering::Relaxed),
+                IFZ.cum[c][2].load(Ordering::Relaxed),
+                IFZ.cum[c][3].load(Ordering::Relaxed),
+            ];
+            if v.iter().all(|&x| x == 0) {
+                continue;
+            }
+            let tot: u64 = v.iter().sum();
+            let nseg = [
+                IFZ.nseg[c][0].load(Ordering::Relaxed),
+                IFZ.nseg[c][1].load(Ordering::Relaxed),
+                IFZ.nseg[c][2].load(Ordering::Relaxed),
+                IFZ.nseg[c][3].load(Ordering::Relaxed),
+            ];
+            let mx = [
+                IFZ.seg_max[c][0].load(Ordering::Relaxed),
+                IFZ.seg_max[c][1].load(Ordering::Relaxed),
+                IFZ.seg_max[c][2].load(Ordering::Relaxed),
+                IFZ.seg_max[c][3].load(Ordering::Relaxed),
+            ];
+            crate::pr_warn!(
+                "SYSCOST t={}s if0 cpu={}: tot={}ms rest={}ms hard={}ms soft={}ms uart={}ms nseg={}/{}/{}/{} max={}ms/{}ms/{}ms/{}ms",
+                secs,
+                c,
+                tot / msd,
+                v[0] / msd,
+                v[1] / msd,
+                v[2] / msd,
+                v[3] / msd,
+                nseg[0], nseg[1], nseg[2], nseg[3],
+                mx[0] / msd, mx[1] / msd, mx[2] / msd, mx[3] / msd
+            );
+        }
+    }
+
+    // pa15 UART per-byte cost distribution (console-async decision
+    // input). Buckets are log2 of raw TSC cycles per putc call.
+    {
+        let tsc_hz = crate::arch::cpu::get_counter_freq().max(1);
+        let msd = tsc_hz / 1000;
+        for (tag, s) in [("if0", &UART_IF0), ("if1", &UART_IF1)] {
+            let n = s.n.load(Ordering::Relaxed);
+            if n == 0 {
+                continue;
+            }
+            crate::pr_warn!(
+                "SYSCOST t={}s uart {} : n={} cyc={}ms avg={}ns max={}ms polls={} multi={} ({:.0}%)",
+                secs,
+                tag,
+                n,
+                s.cyc.load(Ordering::Relaxed) / msd,
+                // avg ns/byte: divide first (cyc * 1e9 overflows u64 once
+                // the table passes ~7 s of accumulated TSC).
+                s.cyc.load(Ordering::Relaxed) / n.max(1) * 1000
+                    / (tsc_hz / 1_000_000).max(1),
+                s.max.load(Ordering::Relaxed) / msd,
+                s.polls.load(Ordering::Relaxed),
+                s.polls_gt1.load(Ordering::Relaxed),
+                s.polls_gt1.load(Ordering::Relaxed) as u64 * 100 / n
+            );
+            let mut line = alloc::string::String::new();
+            for b in 0..UART_HIST {
+                let c = s.hist[b].load(Ordering::Relaxed);
+                if c == 0 {
+                    continue;
+                }
+                if !line.is_empty() {
+                    line.push(' ');
+                }
+                line.push_str(&alloc::format!("2^{}={}", b, c));
+            }
+            if !line.is_empty() {
+                crate::pr_warn!("SYSCOST t={}s uart-hist {}: {}", secs, tag, line);
+            }
+        }
+    }
+
+    // pa15 per-comm printk volume (console producers; "<irq>" collects
+    // interrupt-context prints so they do not smear interrupted tasks).
+    {
+        crate::pr_warn!(
+            "SYSCOST t={}s printk: filtered_by_loglevel={}",
+            secs,
+            PRNT_FILTERED.load(Ordering::Relaxed)
+        );
+        for i in 0..PRNT.len() {
+            let recs = PRNT[i].recs.load(Ordering::Relaxed);
+            if recs == 0 {
+                continue;
+            }
+            let mut comm = [0u8; 16];
+            for j in 0..16 {
+                comm[j] = PRNT[i].comm[j].load(Ordering::Relaxed);
+            }
+            crate::pr_warn!(
+                "SYSCOST t={}s printk comm={} recs={} ringB={} conB={} con_if0B={}",
+                secs,
+                core::str::from_utf8(&comm).unwrap_or("?").split('\0').next().unwrap_or("?"),
+                recs,
+                PRNT[i].ring_bytes.load(Ordering::Relaxed),
+                PRNT[i].con_bytes.load(Ordering::Relaxed),
+                PRNT[i].con_if0_bytes.load(Ordering::Relaxed)
+            );
+        }
+    }
+
+    // pa15 recv-family fd census (hilogd.server dual-drain evidence).
+    for i in 0..RECV.len() {
+        let n_total = RECV[i].n_total.load(Ordering::Relaxed);
+        if n_total == 0 {
+            continue;
+        }
+        let mut comm = [0u8; 16];
+        for j in 0..16 {
+            comm[j] = RECV[i].comm[j].load(Ordering::Relaxed);
+        }
+        let mut desc = [0u8; 96];
+        let mut dlen = 0;
+        for j in 0..96 {
+            desc[j] = RECV[i].desc[j].load(Ordering::Relaxed);
+            if desc[j] == 0 {
+                dlen = j;
+                break;
+            }
+        }
+        crate::pr_warn!(
+            "SYSCOST t={}s recv comm={} nr={} tot={} fd={} cur={} data={}({}B) eagain={} zero={} err={}({}n) nb={} flags={:#x} ops={:#x} desc={}",
+            secs,
+            core::str::from_utf8(&comm).unwrap_or("?").split('\0').next().unwrap_or("?"),
+            RECV[i].nr.load(Ordering::Relaxed),
+            n_total,
+            RECV[i].fd.load(Ordering::Relaxed),
+            RECV[i].n_cur.load(Ordering::Relaxed),
+            RECV[i].n_data.load(Ordering::Relaxed),
+            RECV[i].data_bytes.load(Ordering::Relaxed),
+            RECV[i].n_eagain.load(Ordering::Relaxed),
+            RECV[i].n_zero.load(Ordering::Relaxed),
+            RECV[i].err.load(Ordering::Relaxed),
+            RECV[i].n_err.load(Ordering::Relaxed),
+            RECV[i].nonblock.load(Ordering::Relaxed),
+            RECV[i].flags.load(Ordering::Relaxed),
+            RECV[i].ops.load(Ordering::Relaxed),
+            core::str::from_utf8(&desc[..dlen]).unwrap_or("?")
+        );
     }
 
     // Syscall table: collect (nr, count, cyc, max), sort by cyc desc.
