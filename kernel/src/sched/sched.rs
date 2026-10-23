@@ -2946,20 +2946,33 @@ pub fn wake_up_enqueue(task: *mut Task) -> bool {
                 // refused shapes for minutes while REKICKs keep arriving —
                 // name the refusing guard so the next capture says which
                 // condition ate the wake (curr_on = a lying busy slot).
+                // PROBE-LOCK DISCIPLINE (the C-line ABAA conviction): this
+                // branch runs under the GRQ irqsave lock, and printk ->
+                // write_to_ring_buffer -> KMSG_READ_WQ.wake_up_all() ->
+                // wake_up_process -> wake_up_enqueue re-takes the GRQ: a
+                // same-CPU self-deadlock (IRQs off) whenever a kmsg reader
+                // is parked, a cross-CPU GRQ<->waitqueue ABAA otherwise.
+                // Capture every print field into locals here, drop the
+                // guard at the branch tail, then printk. Same line formats
+                // as before (the W3 census greps stay stable).
                 static W3_N: core::sync::atomic::AtomicU32 =
                     core::sync::atomic::AtomicU32::new(0);
-                if W3_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 32 {
-                    crate::pr_warn!(
-                        "W3-RUNWAKE-REFUSED pid={} state={:#x} linked={} curr_on={} on_cpu={} pk={} cpu={}",
-                        (*task).pid(),
-                        st.bits(),
-                        linked,
-                        curr_on,
-                        (*task).on_cpu(),
-                        (*task).pick_state(),
-                        (*task).ti_cpu()
-                    );
-                }
+                let w3_print_refused =
+                    W3_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 32;
+                let w3_pid = (*task).pid();
+                let w3_st_bits = st.bits();
+                let w3_on_cpu = (*task).on_cpu();
+                let w3_pk = (*task).pick_state();
+                let w3_cpu = (*task).ti_cpu();
+                // Frozen-slot capture (filled by the W3S block below; read
+                // out after the guard drop).
+                let mut w3_fz_ready = false;
+                let mut w3_fz_naming = MAX_CPUS;
+                let mut w3_fz_exec: u64 = 0;
+                let mut w3_fz_djif: u64 = 0;
+                let mut w3_fz_retaddr: u64 = 0;
+                let mut w3_fz_sp: u64 = 0;
+                let mut w3_fz_w: [u64; 4] = [0; 4];
                 // sc184 (session R, lane 1 wake-loss): the perf-audit census
                 // splits the residual WAKE-RUN-LEAK family into "lying busy
                 // slots" (curr_on refusal) and "linked but starved". A lying
@@ -3004,31 +3017,26 @@ pub fn wake_up_enqueue(task: *mut Task) -> bool {
                                     }
                                 }
                                 let sp = (*task).thread.sp;
-                                crate::pr_warn!(
-                                    "W3-FROZEN-EXEC-SLOT pid={} naming_cpu={} exec={:#x} frozen for {}jif pk={} on_cpu={} retaddr={:#x}",
-                                    (*task).pid(),
-                                    naming,
-                                    exec,
-                                    jif - prev_jif,
-                                    (*task).pick_state(),
-                                    (*task).on_cpu(),
-                                    (*task).thread.callee.ret_addr,
-                                );
-                                crate::pr_warn!(
-                                    "W3-FROZEN-EXEC-STK pid={} sp={:#x} w={:#x} {:#x} {:#x} {:#x}",
-                                    (*task).pid(),
-                                    sp,
-                                    unsafe { core::ptr::read_volatile(sp as *const u64) },
-                                    unsafe {
-                                        core::ptr::read_volatile((sp as *const u64).add(1))
-                                    },
-                                    unsafe {
-                                        core::ptr::read_volatile((sp as *const u64).add(2))
-                                    },
-                                    unsafe {
-                                        core::ptr::read_volatile((sp as *const u64).add(3))
-                                    },
-                                );
+                                // Capture (task fields + stack words) while
+                                // the GRQ still pins the task; print after
+                                // the guard drop.
+                                w3_fz_naming = naming;
+                                w3_fz_exec = exec;
+                                w3_fz_djif = jif - prev_jif;
+                                w3_fz_retaddr = (*task).thread.callee.ret_addr as u64;
+                                w3_fz_sp = sp as u64;
+                                w3_fz_w[0] =
+                                    unsafe { core::ptr::read_volatile(sp as *const u64) };
+                                w3_fz_w[1] = unsafe {
+                                    core::ptr::read_volatile((sp as *const u64).add(1))
+                                };
+                                w3_fz_w[2] = unsafe {
+                                    core::ptr::read_volatile((sp as *const u64).add(2))
+                                };
+                                w3_fz_w[3] = unsafe {
+                                    core::ptr::read_volatile((sp as *const u64).add(3))
+                                };
+                                w3_fz_ready = true;
                             }
                             break;
                         }
@@ -3047,6 +3055,45 @@ pub fn wake_up_enqueue(task: *mut Task) -> bool {
                             break;
                         }
                     }
+                }
+                // Drop the GRQ BEFORE printk (PROBE-LOCK DISCIPLINE above):
+                // the refusal decision is complete and every field was
+                // captured under the lock, so release-then-print cannot
+                // change the outcome; the printk wake path may then take
+                // the GRQ freely.
+                drop(grq_guard);
+                if w3_print_refused {
+                    crate::pr_warn!(
+                        "W3-RUNWAKE-REFUSED pid={} state={:#x} linked={} curr_on={} on_cpu={} pk={} cpu={}",
+                        w3_pid,
+                        w3_st_bits,
+                        linked,
+                        curr_on,
+                        w3_on_cpu,
+                        w3_pk,
+                        w3_cpu
+                    );
+                }
+                if w3_fz_ready {
+                    crate::pr_warn!(
+                        "W3-FROZEN-EXEC-SLOT pid={} naming_cpu={} exec={:#x} frozen for {}jif pk={} on_cpu={} retaddr={:#x}",
+                        w3_pid,
+                        w3_fz_naming,
+                        w3_fz_exec,
+                        w3_fz_djif,
+                        w3_pk,
+                        w3_on_cpu,
+                        w3_fz_retaddr,
+                    );
+                    crate::pr_warn!(
+                        "W3-FROZEN-EXEC-STK pid={} sp={:#x} w={:#x} {:#x} {:#x} {:#x}",
+                        w3_pid,
+                        w3_fz_sp,
+                        w3_fz_w[0],
+                        w3_fz_w[1],
+                        w3_fz_w[2],
+                        w3_fz_w[3],
+                    );
                 }
                 return false;
             }

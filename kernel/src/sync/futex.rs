@@ -68,6 +68,18 @@ pub fn fxdv_latch_devmgr(pid: u32) {
     }
 }
 
+// sc185 RWFRZ-WATCH: words named by RWFRZ-PARK (writers parked on
+// 0x80000000|N readers), watched for their post-park futex lifecycle from
+// ANY process. A later WAKE on the word that the parked writer never
+// consumes = kernel wake loss; silence forever = readers never released
+// (userspace). See the watch block in do_futex and the registration in the
+// RWFRZ-PARK hook.
+const RWFRZ_WATCH_SZ: usize = 8;
+static RWFRZ_WATCH: [core::sync::atomic::AtomicUsize; RWFRZ_WATCH_SZ] =
+    [const { core::sync::atomic::AtomicUsize::new(0) }; RWFRZ_WATCH_SZ];
+static RWFRZ_WATCH_CNT: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+
 // FXDV2: param-arena futex tracer budget (see the FXDV2 block in
 // do_futex — traces every futex op on the fixed-address /dev/__parameters__
 // window from any process).
@@ -1441,6 +1453,48 @@ pub fn do_futex(uaddr: usize, op: i32, val: u32, _timeout: u64, uaddr2: usize, _
         return -EINVAL as i64;
     }
 
+    // sc185 RWFRZ-WATCH: any futex op on a word that RWFRZ-PARK named (a
+    // writer parked there on 0x80000000|N readers). This is the birth-
+    // moment lifecycle: a WAKE arriving on the word while the parked
+    // writer never resumes = kernel lost the wake; total silence = the
+    // readers never released (userspace leak/stall); a re-issued WAIT
+    // from the parked tid = it DID wake once and re-parked (val still
+    // nonzero — reader side stuck). Budgeted at 64 lines total.
+    {
+        use core::sync::atomic::Ordering::Relaxed;
+        if RWFRZ_WATCH[0].load(Relaxed) != 0 || RWFRZ_WATCH[1].load(Relaxed) != 0 {
+            for w in RWFRZ_WATCH.iter() {
+                let wa = w.load(Relaxed);
+                if wa != 0 && wa == uaddr {
+                    let c = RWFRZ_WATCH_CNT.fetch_add(1, Relaxed);
+                    if c < 64 {
+                        let (tid, tgid) = match crate::sched::current() {
+                            Some(t) => unsafe { ((*t).pid(), (*t).tgid()) },
+                            None => (0, 0),
+                        };
+                        crate::pr_warn!(
+                            "RWFRZ-WATCH #{} tid={} tgid={} op={} uaddr={:#x} val={:#x} jif={}",
+                            c,
+                            tid,
+                            tgid,
+                            match cmd {
+                                FUTEX_WAIT => "WAIT",
+                                FUTEX_WAIT_BITSET => "WAITB",
+                                FUTEX_WAKE => "WAKE",
+                                FUTEX_REQUEUE | FUTEX_CMP_REQUEUE => "REQUEUE",
+                                _ => "other",
+                            },
+                            uaddr,
+                            val,
+                            crate::drivers::timer::get_jiffies(),
+                        );
+                    }
+                    break;
+                }
+            }
+        }
+    }
+
     // sc184 (session R, the screen gate): hdf_devmgr's frozen-rwlock birth
     // tracer. Every stall dump shows devmgr's IPC threads parked in
     // FUTEX_WAIT on a musl-rwlock word reading 0x80000000|N-readers (16
@@ -1459,6 +1513,21 @@ pub fn do_futex(uaddr: usize, op: i32, val: u32, _timeout: u64, uaddr2: usize, _
         use core::sync::atomic::Ordering::Relaxed;
         let cur_tgid =
             crate::sched::current().map(|t| unsafe { (*t).tgid() as u32 });
+        // sc185: the SA-5100 parcel latch never fired in sc184 (zero FXDV
+        // lines), so also latch by process name — the first futex from any
+        // thread of "hdf_devmgr" latches its tgid. The parcel matcher stays
+        // (earlier latch = earlier coverage), this is the backstop.
+        if FXDV_PID.load(Relaxed) == 0 {
+            if let Some(t) = crate::sched::current() {
+                let comm = unsafe { (*t).comm() };
+                let name = core::str::from_utf8(&comm[..])
+                    .unwrap_or("")
+                    .trim_end_matches('\0');
+                if name == "hdf_devmgr" {
+                    fxdv_latch_devmgr(unsafe { (*t).tgid() as u32 });
+                }
+            }
+        }
         if FXDV_PID.load(Relaxed) != 0 && cur_tgid == Some(FXDV_PID.load(Relaxed)) {
             let is_rw_wait = matches!(cmd, FUTEX_WAIT | FUTEX_WAIT_BITSET)
                 && val & 0x8000_0000 != 0
@@ -1662,6 +1731,15 @@ pub fn sys_futex_handler(args: &[u64; 6]) -> i64 {
                         val,
                         readers
                     );
+                    // sc185: register the word for RWFRZ-WATCH (post-park
+                    // lifecycle from any process — see the watch block in
+                    // do_futex's prologue).
+                    for w in RWFRZ_WATCH.iter() {
+                        if w.load(core::sync::atomic::Ordering::Relaxed) == 0 {
+                            w.store(uaddr, core::sync::atomic::Ordering::Relaxed);
+                            break;
+                        }
+                    }
                     // SAFETY: t is the current task, in its own syscall.
                     unsafe { rwfz_stack_frames(t, "park", 12, 64) };
                 }
