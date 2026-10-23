@@ -79,6 +79,9 @@ static RWFRZ_WATCH: [core::sync::atomic::AtomicUsize; RWFRZ_WATCH_SZ] =
     [const { core::sync::atomic::AtomicUsize::new(0) }; RWFRZ_WATCH_SZ];
 static RWFRZ_WATCH_CNT: core::sync::atomic::AtomicUsize =
     core::sync::atomic::AtomicUsize::new(0);
+// sc186: 64 lines died on arena churn before the wedge window; 192 keeps
+// the same worst-case UART bound as one parkdump stack dump.
+const RWFRZ_WATCH_BUDGET: usize = 192;
 
 // FXDV2: param-arena futex tracer budget (see the FXDV2 block in
 // do_futex — traces every futex op on the fixed-address /dev/__parameters__
@@ -1467,7 +1470,7 @@ pub fn do_futex(uaddr: usize, op: i32, val: u32, _timeout: u64, uaddr2: usize, _
                 let wa = w.load(Relaxed);
                 if wa != 0 && wa == uaddr {
                     let c = RWFRZ_WATCH_CNT.fetch_add(1, Relaxed);
-                    if c < 64 {
+                    if c < RWFRZ_WATCH_BUDGET {
                         let (tid, tgid) = match crate::sched::current() {
                             Some(t) => unsafe { ((*t).pid(), (*t).tgid()) },
                             None => (0, 0),
@@ -1733,11 +1736,18 @@ pub fn sys_futex_handler(args: &[u64; 6]) -> i64 {
                     );
                     // sc185: register the word for RWFRZ-WATCH (post-park
                     // lifecycle from any process — see the watch block in
-                    // do_futex's prologue).
-                    for w in RWFRZ_WATCH.iter() {
-                        if w.load(core::sync::atomic::Ordering::Relaxed) == 0 {
-                            w.store(uaddr, core::sync::atomic::Ordering::Relaxed);
-                            break;
+                    // do_futex's prologue). sc185 lesson: the param-arena
+                    // word (0x7ff00002ec64, inside FXDV2's window) churns
+                    // healthily all boot and ate the whole 64-line budget
+                    // by jif=1502, before the terminal freeze (born
+                    // ~jif=1900+). FXDV2 owns the arena window; skip it
+                    // here so the budget survives to the wedge window.
+                    if !(0x7ff0_0000_0000..0x7ff0_0010_0000).contains(&uaddr) {
+                        for w in RWFRZ_WATCH.iter() {
+                            if w.load(core::sync::atomic::Ordering::Relaxed) == 0 {
+                                w.store(uaddr, core::sync::atomic::Ordering::Relaxed);
+                                break;
+                            }
                         }
                     }
                     // SAFETY: t is the current task, in its own syscall.
