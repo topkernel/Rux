@@ -31,6 +31,7 @@ use alloc::vec::Vec;
 use alloc::string::String;
 use alloc::format;
 use alloc::sync::Arc;
+use alloc::collections::BTreeMap;
 use core::sync::atomic::Ordering;
 use crate::sync::spinlock::Spinlock;
 use crate::sync::Mutex;
@@ -144,12 +145,33 @@ struct VfsState {
     /// dentry WITHOUT reconstructing a path string (build_path() cannot
     /// cross mount boundaries: a mounted fs's root has no parent pointer).
     mounts: Vec<Arc<VfsMountInternal>>,
+    /// sc181: chain index — for every live mount, the PURE-PARENT chain of
+    /// its mountpoint dentry ([mp, parents..., first parentless dentry])
+    /// keys the mount into this map (key = dentry address, `anchor` pins
+    /// it). The MS_REC bind clone scan used to walk the WHOLE registry,
+    /// climbing parents for every mount (O(registry x depth) per bind,
+    /// 10-25 ms and growing with the boot-mount count — ns.rs sc98; sc180
+    /// telemetry: sandbox mount phases at 1.7-1.9 s). The index turns the
+    /// query into a DFS touching only mounts actually nested under the
+    /// bind source (collect_subtree_mounts).
+    mount_chain_index: BTreeMap<usize, MountBucket>,
+}
+
+/// One chain-index bucket. `anchor` pins the key dentry: without it a
+/// freed intermediate chain dentry could have its address reused by a
+/// fresh allocation, silently fusing two buckets.
+struct MountBucket {
+    #[allow(dead_code)] // pins the key address; never dereferenced
+    anchor: Arc<Dentry>,
+    /// Attach order (push order) — matches the registry Vec's order.
+    mounts: Vec<Arc<VfsMountInternal>>,
 }
 
 static VFS_STATE: Spinlock<VfsState> = Spinlock::new(VfsState {
     root_dentry: None,
     initialized: false,
     mounts: Vec::new(),
+    mount_chain_index: BTreeMap::new(),
 });
 
 /// Get the global VFS root dentry.
@@ -420,12 +442,12 @@ pub fn vfs_mount(
             };
 
             // Create mount descriptor
-            let mnt_desc = Arc::new(VfsMountInternal {
-                root: mounted_root.clone(),
-                flags: Spinlock::new(mnt_flags),
-            });
+            let mnt_desc = Arc::new(VfsMountInternal::new(mounted_root.clone(), mnt_flags));
             child.set_mount(mnt_desc.clone());
             state.mounts.push(mnt_desc.clone());
+            // sc181: index the mount under its mountpoint's parent chain
+            // (MS_REC clone scan — see collect_subtree_mounts).
+            mount_index_insert(&mut state, &mnt_desc, &child);
             // Mountpoint back-reference: dentries inside the mount climb
             // parent==None at the mount root and must hop to THIS
             // mountpoint dentry to carry the prefix (build_path_rooted).
@@ -499,6 +521,9 @@ pub fn vfs_umount(mountpoint: &str) -> Result<(), i32> {
     {
         let mut state = VFS_STATE.lock();
         state.mounts.retain(|m| !Arc::ptr_eq(m, &mnt));
+        // sc181: drop from the chain index BEFORE the mountpoint back-ref
+        // is cleared below (the chain is recomputed from the mountpoint).
+        mount_index_remove(&mut state, &mnt, &child);
     }
     // Drop the mountpoint back-reference with the mount (see vfs_mount).
     mnt.root.clear_mountpoint_back();
@@ -525,7 +550,10 @@ pub fn vfs_umount_object(mnt: &Arc<VfsMountInternal>) {
         if let Some(top) = cur.as_ref() {
             if !Arc::ptr_eq(top, mnt) {
                 // Shadowed by a newer mount at the same mountpoint: detach
-                // from the registry only.
+                // from the registry only. sc181: the chain-index entry
+                // STAYS — the mount's mountpoint back-ref is still set, so
+                // the old scan's climb (and thus the DFS) still reaches
+                // mounts inside this mount's tree.
                 drop(cur);
                 let mut state = VFS_STATE.lock();
                 state.mounts.retain(|m| !Arc::ptr_eq(m, mnt));
@@ -536,6 +564,9 @@ pub fn vfs_umount_object(mnt: &Arc<VfsMountInternal>) {
     }
     let mut state = VFS_STATE.lock();
     state.mounts.retain(|m| !Arc::ptr_eq(m, mnt));
+    // sc181: live unmount — drop the index entry before the back-ref
+    // clear below (the chain is recomputed from `mp`).
+    mount_index_remove(&mut state, mnt, &mp);
     mnt.root.clear_mountpoint_back();
 }
 
@@ -573,6 +604,150 @@ fn dentry_relpath_below(anc: &Arc<Dentry>, d: &Arc<Dentry>) -> Option<Vec<String
         };
         cur = next;
     }
+}
+
+// ============================================================================
+// sc181: mount-registry chain index (MS_REC bind clone scan)
+// ============================================================================
+
+/// sc181: pure-parent chain of a mountpoint dentry: [mp itself, each
+/// parent, ..., the first parentless (fs-root) dentry]. Never crosses
+/// mount hops — a chain lives inside ONE filesystem; cross-mount nesting
+/// is resolved at query time by the DFS in `collect_subtree_mounts`
+/// (mounts inside another mount's tree key their chains under that
+/// mount's ROOT dentry, and the DFS descends into every found mount's
+/// root). Dentry parents are immutable after creation, so the chain is
+/// stable — the one exception (MS_MOVE-onto-"/" rehoming) rebuilds the
+/// whole index.
+fn mountpoint_chain(mp: &Arc<Dentry>) -> Vec<Arc<Dentry>> {
+    let mut chain = Vec::new();
+    let mut cur = mp.clone();
+    loop {
+        chain.push(cur.clone());
+        let parent = cur.parent.lock().clone();
+        match parent {
+            Some(p) => cur = p,
+            None => return chain,
+        }
+    }
+}
+
+/// Index one freshly attached mount under every dentry of its
+/// mountpoint's parent chain. Callers hold VFS_STATE.
+fn mount_index_insert(state: &mut VfsState, mnt: &Arc<VfsMountInternal>, mp: &Arc<Dentry>) {
+    for d in mountpoint_chain(mp) {
+        state
+            .mount_chain_index
+            .entry(Arc::as_ptr(&d) as usize)
+            .or_insert_with(|| MountBucket {
+                anchor: d.clone(),
+                mounts: Vec::new(),
+            })
+            .mounts
+            .push(mnt.clone());
+    }
+}
+
+/// Drop one mount from the index. Callers hold VFS_STATE; `mp` must still
+/// be the mount's live mountpoint (call before clear_mountpoint_back —
+/// the chain is recomputed from it, and parents are immutable so it
+/// matches the insertion-time chain).
+fn mount_index_remove(state: &mut VfsState, mnt: &Arc<VfsMountInternal>, mp: &Arc<Dentry>) {
+    for d in mountpoint_chain(mp) {
+        let key = Arc::as_ptr(&d) as usize;
+        let mut drop_key = false;
+        if let Some(bucket) = state.mount_chain_index.get_mut(&key) {
+            bucket.mounts.retain(|m| !Arc::ptr_eq(m, mnt));
+            drop_key = bucket.mounts.is_empty();
+        }
+        if drop_key {
+            state.mount_chain_index.remove(&key);
+        }
+    }
+}
+
+/// Rebuild the chain index from the registry (MS_MOVE-onto-"/" rehomed
+/// mountpoint dentries to new parents; every cached chain changed).
+fn mount_index_rebuild(state: &mut VfsState) {
+    state.mount_chain_index.clear();
+    let mounts = state.mounts.clone();
+    for mnt in mounts.iter() {
+        if let Some(mp) = mnt.root.get_mountpoint_back() {
+            mount_index_insert(state, mnt, &mp);
+        }
+    }
+}
+
+/// sc181: the MS_REC clone set — mounts nested under `anc` — via the
+/// chain index, replacing the old whole-registry scan
+/// (`state.mounts.iter()` + `dentry_relpath_below` per mount, i.e.
+/// O(registry x depth) parent climbs per bind; sc180 measured sandbox
+/// mount phases at 1.7-1.9 s because of it).
+///
+/// Equivalence with the old scan, where the old predicate was
+/// "dentry_relpath_below(anc, m.mp) is Some(non-empty)" (a parent climb
+/// WITH mount hops from each registry mount's mountpoint):
+/// - a mount whose PURE chain contains `anc` is in bucket[anc] — its
+///   climb passes `anc`, relpath non-empty: cloned;
+/// - a mount with mountpoint == `anc` (the governing mount itself, or a
+///   stack) is in bucket[anc] too but has an EMPTY relpath: not cloned —
+///   exactly the old `rel.is_empty()` filter — while its subtree still
+///   is, so the DFS descends into its root dentry;
+/// - a mount inside ANOTHER mount's filesystem tree never reaches `anc`
+///   by pure parents (its chain tops at that mount's root); the DFS
+///   finds it by descending into each found mount's root, whose bucket
+///   contains every mount attached directly in its tree.
+/// Results are sorted by attach sequence — byte-identical order to the
+/// old registry scan — so stacked clones attach parents before children
+/// (bind_clone_attach crosses earlier clones while walking).
+fn collect_subtree_mounts(
+    anc: &Arc<Dentry>,
+    fresh_root: &Arc<Dentry>,
+) -> Vec<(Vec<String>, Arc<Dentry>, MntFlags)> {
+    let state = VFS_STATE.lock();
+    let mut found: Vec<(u64, Vec<String>, Arc<Dentry>, MntFlags)> = Vec::new();
+    let mut visited: Vec<*const VfsMountInternal> = Vec::new();
+    let mut stack: Vec<Arc<Dentry>> = Vec::new();
+    stack.push(anc.clone());
+    while let Some(node) = stack.pop() {
+        let Some(bucket) = state.mount_chain_index.get(&(Arc::as_ptr(&node) as usize)) else {
+            continue;
+        };
+        for mnt in bucket.mounts.iter() {
+            let mptr = Arc::as_ptr(mnt) as *const VfsMountInternal;
+            if visited.contains(&mptr) {
+                continue;
+            }
+            visited.push(mptr);
+            // Never clone the just-attached bind onto itself.
+            if Arc::ptr_eq(&mnt.root, fresh_root) {
+                continue;
+            }
+            let Some(mp) = mnt.root.get_mountpoint_back() else {
+                continue;
+            };
+            // Mounts deeper inside this mount's tree key their chains
+            // under its root dentry — descend regardless of whether this
+            // mount itself gets cloned.
+            stack.push(mnt.root.clone());
+            if Arc::ptr_eq(&mp, anc) {
+                // Mounted AT anc: empty relpath — the old rel.is_empty()
+                // filter; not cloned itself.
+                continue;
+            }
+            if let Some(rel) = dentry_relpath_below(anc, &mp) {
+                if !rel.is_empty() {
+                    found.push((mnt.seq, rel, mnt.root.clone(), *mnt.flags.lock()));
+                }
+            }
+        }
+    }
+    drop(state);
+    found.sort_by_key(|(seq, _, _, _)| *seq);
+    found
+        .into_iter()
+        .map(|(_, rel, root, flags)| (rel, root, flags))
+        .collect()
 }
 
 /// Bind mount: attach the subtree rooted at `source` over `target`
@@ -783,25 +958,11 @@ pub fn vfs_bind_mount(
             Some(d) => d.get_mountpoint_back().unwrap_or(d),
             None => return Ok(()),
         };
-        let clones: Vec<(Vec<String>, Arc<Dentry>, MntFlags)> = {
-            let state = VFS_STATE.lock();
-            state
-                .mounts
-                .iter()
-                .filter_map(|m| {
-                    // Never clone the just-attached bind onto itself.
-                    if Arc::ptr_eq(&m.root, &fresh_root) {
-                        return None;
-                    }
-                    let mp = m.root.get_mountpoint_back()?;
-                    let rel = dentry_relpath_below(&anc, &mp)?;
-                    if rel.is_empty() {
-                        return None;
-                    }
-                    Some((rel, m.root.clone(), *m.flags.lock()))
-                })
-                .collect()
-        };
+        // sc181: indexed DFS over the mounts nested under the source
+        // subtree (was: the whole-registry scan with a parent climb per
+        // mount — O(registry x depth) per bind, the 1.7-1.9 s sandbox
+        // mount phases in sc180's telemetry).
+        let clones = collect_subtree_mounts(&anc, &fresh_root);
         #[cfg(feature = "x86_64")]
         let (t3, n_mounts) = {
             (
@@ -919,14 +1080,13 @@ fn bind_clone_attach(
             let mounted_root = Arc::new(Dentry::new(String::from("/")));
             mounted_root.set_inode(root_inode);
             mounted_root.set_hashed();
-            let mnt_desc = Arc::new(VfsMountInternal {
-                root: mounted_root.clone(),
-                flags: Spinlock::new(flags),
-            });
+            let mnt_desc = Arc::new(VfsMountInternal::new(mounted_root.clone(), flags));
             child.set_mount(mnt_desc.clone());
             mounted_root.set_mountpoint_back(child.clone());
             let mut state = VFS_STATE.lock();
             state.mounts.push(mnt_desc.clone());
+            // sc181: index the clone under its mountpoint chain too.
+            mount_index_insert(&mut state, &mnt_desc, &child);
             drop(state);
             // sc98: MS_REC clones belong to the caller's namespace too —
             // a dying private ns must unmount them with the rest.
@@ -1010,6 +1170,12 @@ pub fn vfs_move_mount(from: &str, to: &str) -> Result<(), i32> {
         .clone();
 
     // Detach from the source mountpoint.
+    // sc181: drop the chain-index entry first (the chain is recomputed
+    // from the still-live mountpoint back-ref).
+    {
+        let mut state = VFS_STATE.lock();
+        mount_index_remove(&mut state, &mnt, &src_child);
+    }
     src_child.clear_mount();
     mnt.root.clear_mountpoint_back();
 
@@ -1029,6 +1195,9 @@ pub fn vfs_move_mount(from: &str, to: &str) -> Result<(), i32> {
             }
             root.clear_children();
             mnt.root.rehome_children_into(&root);
+            // sc181: rehoming reparented every mountpoint dentry under
+            // the moved root — all cached chains changed wholesale.
+            mount_index_rebuild(&mut state);
         }
         return Ok(());
     }
@@ -1058,6 +1227,9 @@ pub fn vfs_move_mount(from: &str, to: &str) -> Result<(), i32> {
             // back-reference drives the mountpoint prefix in dentry paths;
             // see vfs_mount).
             mnt.root.set_mountpoint_back(child.clone());
+            // sc181: index at the NEW mountpoint's chain.
+            let mut state = VFS_STATE.lock();
+            mount_index_insert(&mut state, &mnt, &child);
         } else {
             current = follow_mount(child);
         }

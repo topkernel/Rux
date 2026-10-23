@@ -77,6 +77,24 @@ pub struct VfsMountInternal {
     /// Mount flags (interior-mutable: mount(2) with MS_REMOUNT updates them
     /// in place while concurrent lookups read them on other CPUs)
     pub flags: Spinlock<MntFlags>,
+    /// sc181: global attach sequence (monotonic). The MS_REC clone scan
+    /// (fs::vfs::collect_subtree_mounts) uses it to emit the clone set in
+    /// attach order — identical to the old registry-order linear scan —
+    /// so stacked clones always attach parents before children.
+    pub seq: u64,
+}
+
+/// sc181: mount attach-sequence allocator (see VfsMountInternal::seq).
+static MOUNT_SEQ: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+impl VfsMountInternal {
+    pub fn new(root: Arc<Dentry>, flags: MntFlags) -> Self {
+        Self {
+            root,
+            flags: Spinlock::new(flags),
+            seq: MOUNT_SEQ.fetch_add(1, core::sync::atomic::Ordering::Relaxed),
+        }
+    }
 }
 
 unsafe impl Send for VfsMountInternal {}
