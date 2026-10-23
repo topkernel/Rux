@@ -505,16 +505,17 @@ wait.rs:161/319/287 = 20.2+3.5+2.1 s (1.8% family); misc.rs:190
 top-12: timer.rs:317 and timer.rs:173 (~0.6+0.5 s — the launcher's new
 timer lock sites, small).
 
-**Console sub-item retest (ranking row 1a, second data point):** uart
+**Console sub-item retest (ranking row 1a, third data point):** uart
 if0 360 K bytes @ 18.5 us (6.7 s) + if1 5.25 M bytes @ 15.6 us (81.7 s)
-= ~88.3 s of emission = **6.1% of the machine** (pa16: 78.8 s = 5.5%;
-pa15: 78.8 s / 4.34 M bytes = 5.0%). Per-byte cost is stable across
+= ~88.3 s of emission = **6.1% of the machine** (pa16: 24.5 s = 1.7%
+at 1.55 M bytes; pa15: 78.8 s / 4.34 M bytes = 5.0%). Per-byte cost is
+stable across
 three boots (15.5-18.5 us; single LSR poll per byte, multi=0); the
 VOLUME swings with boot depth (this boot's init event-loop spam was
 heavier — [kmsg] le_epoll timeout markers repeat-stacked). Producers
 unchanged: `<irq>` 232 KB console (100% under IF=0), init 229 KB
 (con_if0B=244 ~ 0), OS_FFRT_2_0 145 KB. The console-async lever's size
-estimate moves 5-6% of machine, direction unchanged.
+estimate swings 1.7-6.1% of machine with volume, direction unchanged.
 
 **WW age lines demoted to TRIAGE HINT (cross-lane, resolved).** The B
 line calibrated the pa16-flagged tension (359 WW IRQ-OFF lines at
@@ -591,7 +592,7 @@ point, allocator routed to the B lane). Contribution model unchanged:
 |---|---|---|---|---|---|
 | 1 | Interrupt-disabled regions (cli-recovery page) | 26% of kernel ticks; 316 IRQ-OFF-WINDOW/780 s (now TRIAGE HINT — see 2d) | pa16 EXACT: IF=0 = 25.0% of machine; pa17: 23.4%; split REST 88.8-92.0% / HARD 5.1-7.7% / SOFT 1.6-1.7% / UART 1.4-1.9%; max closed segment 4-5 ms (no long cli section exists); 1.26 M sections/s | **large** — decomposed below; levers per section, not per zone | F1 |
 | 1b | REST section bulk (exact decomposition) | (inside #1) | small-alloc cache locks 12.2-12.6% of machine (~55% of REST, 732-740 M/boot; **accepted by the B line, per-CPU freelist direction**); schedule() GRQ 2.7-3.9% (**pa17: -31% wall after launcher v2, 38.7 s vs 56.6 s**); fdtable get_file 1.9-2.0%; waitqueue family 1.8-2.2%; EPOLL_WAKE_REGISTRY 1.0-1.1%; deferred_free 0.7% — 97.3-99.3% attributed to file:line | **the F1 lever list** — allocator per-CPU freelists (B lane), GRQ pick (launcher lane, partially landed), fdtable read path, waitqueue batching, epoll registry (ipc lane) | F1/F5 |
-| 1a | Console/UART emission (sub-item of F1) | outb/inb in recovery rips; cli page shares inb/outb | pa15: 4.34 M bytes, ~5% of machine; pa16: 1.55 M bytes @ t=720, 5.5%; pa17: 5.61 M bytes, 6.1% — **per-byte cost stable 15.5-18.5 us across 3 boots; volume varies with boot depth**; producers init/<irq>/FFRT-worker; task-context emission 100% IF=1 | medium CPU (5-6%) + **large latency multiplier** under host load | F1 |
+| 1a | Console/UART emission (sub-item of F1) | outb/inb in recovery rips; cli page shares inb/outb | pa15: 4.34 M bytes, 5.0% of machine; pa16: 1.55 M bytes @ t=720, 1.7%; pa17: 5.61 M bytes, 6.1% — **per-byte cost stable 15.5-18.5 us across 3 boots; volume (and thus machine share) swings 1.7-6.1% with boot depth**; producers init/<irq>/FFRT-worker; task-context emission 100% IF=1 | medium CPU (2-6%) + **large latency multiplier** under host load | F1 |
 | 2 | Scheduler wake-loss (WAKE-RUN-LEAK; lying busy slots + linked-starving) | 702 leak prints/780 s; census 16 lying + 7 linked | **pa17 (v1 a39d2bc0 + v2 6e9679c5 in main): 593 prints (-14%, in variance band) / 31 refusals (22 lying + 7 linked, unchanged) / 8 PREEMPT-LEAK / TERM-DESCHED=0** — fixes harmless, their trigger shape absent this boot; lying slots are born on another path; birth forensics continues on the launcher lane | **large** — unchanged; still the wall-clock driver | F3 |
 | 3 | hilogd.server socket dual-drain + sysevent_source + connect-retry | 26.5 M calls by t=720 = ~25% of ALL syscalls | pa16: 10.6 M recvfrom + 10.7 M recvmsg; pa17: 10.08 M + 10.29 M (1:1, avg 116/9 us, recvfrom max 393 s = wake-tail victim); writev 14.6-15.2 M; connect 2.47-2.55 M | medium — volume is OH userspace; kernel levers = per-call recv cost + the wake-loss tail | F2 |
 | 4 | ext4 metadata + write path (open/stat/getdents/fsync/pwrite/mkdir) | open 235 us, newfstatat 206 us, getdents 643 us, fsync avg 16 ms | pa17: open avg 1893 us (max 100 s — stall-tail inflated, see 2d), newfstatat 294 us, getdents 1043 us; medians unchanged | medium (~300-500 CPU-s/boot at this horizon) | F4 |
@@ -1030,8 +1031,9 @@ wake-loss tail; Linux norms are same-op references on tmpfs/ext4):
 3. hilogd dual-drain ~25% of syscall volume — OH userspace; kernel
    levers small.
 4. ext4 metadata 100-300x Linux norms.
-5. Console/UART 5-6% of machine + seconds-class stall tail (per-byte
-   15.5-18.5 us stable) — console-async is the highest-latency single fix.
+5. Console/UART 1.7-6.1% of machine (volume-dependent) + seconds-class
+   stall tail (per-byte 15.5-18.5 us stable) — console-async is the
+   highest-latency single fix.
 (IF=0 total 23.4-25.0% of machine, max closed cli section 4-5 ms —
 no long section exists; it is 1.26 M short sections/s.)
 
