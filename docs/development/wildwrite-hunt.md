@@ -3032,3 +3032,67 @@ Surface (private image, shared images untouched):
   6 full armed load-hours**, zero fires, zero false positives.
 - Chains continue at r59/load-r6 (qemu 116201/116256, armed; budget ends
   ~05:00:27/29).
+
+### Session 34 continued — 04:30 sweep, relaunch, r59/load-r6 full-clean
+
+- The s33 window-death sweep arrived 04:30:26: both trees (driver
+  roots 104867/104897 + both round QEMUs) reaped mid-round at 15/45.
+  Both partials clean: r59-first-attempt 48008 lines, load-r6-first
+  77644 lines, 0 hits / 0 markers / armed to the last line. (Foreign
+  perf-audit KVM also gone with the same sweep's window; a samgr
+  foreign QEMU appeared after — untouched.)
+- Relaunched 04:35:36 as THIS session's background tasks, main from r59
+  (log run/ww-chain2-s34.log), load from r6 (run/ww-loadchain-s34.log);
+  new driver roots 120674/120704, proctree updated in
+  run/ww-s34-proctree.txt. Both verified armed (WW-ARMED 19, GUARD
+  matches) and storming within 3 min.
+- **MAIN r59 (FULL 2700 s, relaunched): CLEAN** — 76208 lines, wakes
+  12.98M, 959 forks, avg_run 2ms, strand_max 4035ms (healthiest class),
+  0 WW-HIT / 0 heals / 0 panics, wildwatch try 0. Driver self-advanced
+  to r60 (05:20:36).
+- **LOAD r6 (FULL 2700 s, relaunched): CLEAN** — 169172 lines, wakes
+  10.85M, 2690 forks, **829 sdc exec cycles**, strand_max 37.8s
+  (contention class), 0 hits / 0 markers, armed try 0. Driver
+  self-advanced to load-r7 (05:20:39).
+- Cumulative: **0 WW-HIT across r1-r59 complete rounds** (plus partials),
+  0 META-SMASH. Load surface: p1 + r1-r6 = **5094 sdc exec cycles over
+  7 full armed load-hours**, zero fires, zero false positives.
+- Chains at r60/load-r7 (qemu 130997/131044, armed; budget ends ~06:05).
+
+### Session 34 incident response — pa15 probe crash (coordinator relay): the WW IRQ-OFF-WINDOW walk must never touch a user rsp
+
+Relay: the perf line's pa15 boot KERNPANIC'd at t=418s on cpu1 —
+badaddr=0x7ff090411000 (USER page), rip symbolizing into
+handle_timer_tick, right after a "WW: IRQ-OFF-WINDOW ... rip=0x7ff0007c7a69
+rsp=0x7ff090410fc8" line (a USER frame). Confirmed MY lane's probe
+(aa742f18, UART perf gate round 2):
+
+- Bug: the probe walks 12 stack words at regs.rsp guarded ONLY by
+  kernel_ptr_canonical() — and user addresses are canonical on x86_64.
+  A recovery tick interrupting a user frame walked the USER stack; the
+  8th word (rsp+0x38) crossed into the stack's first unmapped page →
+  kernel #PF → KERNPANIC. The probe itself was the panic producer on a
+  healthy boot (perf line's log: /home/william/rux-agents/perf-audit/
+  run/pa-pa15-serial.log line 23293).
+- Fix (branch, both arches compile clean): (1) the walk now requires
+  !regs.user_mode() && rsp >= 0xffff_8000_0000_0000 && canonical —
+  user frames print " user-frame" and skip the walk (they carry no
+  kernel return addresses); (2) the same hole hardened in
+  pt_regs_rip_for_cpu (x86_64 + riscv64 twins: high-half bound before
+  deref of the possibly-torn CURRENT_PT_REGS slot). TIMER-SOFTIRQ-STALL
+  (timer.rs) prints values only — no deref, untouched.
+- Hunt impact assessment: the FROZEN kernel carries the unfixed probe,
+  and the probe fires regularly on chain boots (39 of ~67 round logs,
+  hundreds of firings — r56: 28, load-r3: 40) with ZERO crashes: the
+  crash needs the user-frame recovery tick AND rsp within 0x38 of an
+  unmapped user page. No mid-hunt refreeze; the fix rides the next
+  scheduled one.
+- **False-capture triage signature (for any chain KERNPANIC from here
+  on)**: badaddr in the USER half + rip inside handle_timer_tick + a
+  preceding WW: IRQ-OFF-WINDOW line with user rip/rsp on that cpu =
+  the probe bug, NOT a wild write. A REAL RO-trap capture has badaddr
+  inside the guard cluster (0xffffffff80a7a000-0xffffffff80a7bfff) and
+  rip at the wild writer's instruction. Triage before declaring a
+  capture; a probe-crash round is a clean-restart, not a milestone.
+- Smoke validation: ww-pafix1 (330 s OH boot, worktree bzImage at
+  HEAD+fix, dfx=wildwatch, port 12377) — verdict below.

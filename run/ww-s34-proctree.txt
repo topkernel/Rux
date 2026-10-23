@@ -4,7 +4,14 @@
 # Load chain r5:   driver root 104897 (ww-loadchain.sh) -> ww-loadprobe.sh 104902 -> timeout 104905 -> qemu 104916, gdb 105216
 # Both WW-ARMED 19, GUARD=0xffffffff80a7a000 (frozen pair bf779126), wildwatch in EXTRA_APPEND, storming at claim.
 # No stop files. Round budget ends ~04:15:26 for both.
+# SWEEP 04:30:26: s33 window-death sweep reaped both trees at 15/45 (clean partials: r59 48008 lines,
+# load-r6 77644 lines, 0 hits, 0 markers, armed; verdicts in doc s34). Both chain QEMUs died with the tree.
+# RELAUNCHED 04:35:36 as SESSION-34 background tasks (tasks exec_4ec78252 / exec_ad6e8ac3):
+#   MAIN  driver root 120674 (ww-chain2.sh) -> ww-hunt.py 120679 -> timeout -> qemu 120680, gdb 120796
+#   LOAD  driver root 120704 (ww-loadchain.sh) -> ww-loadprobe.sh 120709 -> timeout -> qemu 120712, gdb 120806
+# Both WW-ARMED 19 GUARD=0xffffffff80a7a000, storming by 04:38 (27k/28k lines). Budget ends ~05:20:36.
 # Foreign QEMU: 105707 perf-audit KVM (cwd /home/william/rux-agents/perf-audit, started 03:31) — DO NOT TOUCH.
+#   (gone by 04:36; new foreign QEMU 118468 samgr-callback cwd — DO NOT TOUCH either.)
 # Chain discipline: kill DRIVER ROOT first, then the round QEMU. Relaunch recipe (if swept):
 #   ./run/ww-chain2.sh  ww-s2  100 12371 <next-main-round>
 #   ./run/ww-loadchain.sh wwload 100 12381 <next-load-round>
