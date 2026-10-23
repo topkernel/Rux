@@ -55,10 +55,9 @@ const RIP_SLOTS: usize = 256;
 /// Slow-op ring size (>4 ms wall).
 const SLOW_RING: usize = 64;
 
-/// Slow-op threshold in raw TSC cycles. Calibrated at dump time against
-/// read_time(); 4 ms at ~3 GHz is ~12M cycles — 10M is a safe floor
-/// that only genuine outliers cross (a normal fast syscall is 1-30 us).
-const SLOW_CYC: u64 = 10_000_000;
+/// Slow-op threshold in nominal ticks (100 ns each): 4 ms. A normal
+/// fast syscall is 1-30 us; only genuine outliers cross this.
+const SLOW_CYC: u64 = 40_000;
 
 /// Dump cadence in jiffies (100 Hz -> 60 s).
 const SYSCOST_DUMP_SECS: u64 = 60;
@@ -134,17 +133,81 @@ pub fn on() -> bool {
     }
 }
 
-/// Syscall entry stamp. `None` when the probe is off.
+/// Syscall entry stamp. `None` when the probe is off. Stamps are in the
+/// NOMINAL time domain (`read_time()`, 10 ticks/us), NOT raw RDTSC:
+/// under KVM each vCPU carries its own TSC offset (the sc100/sc114
+/// lesson — offsets differ, rates match), so a raw delta across a CPU
+/// migration is garbage (pa1 first attempt: nanosleep "avg 1.5 s");
+/// `read_time()` applies the per-CPU correction and the monotonic
+/// ratchet, at ~2 atomic loads of overhead.
 #[inline]
 pub fn enter() -> Option<u64> {
     if on() {
-        Some(crate::arch::cpu::read_counter())
+        Some(crate::drivers::timer::read_time())
     } else {
         None
     }
 }
 
+/// Flood-nr per-comm attribution: which process drives the 10^5/s calls.
+/// Only the known flood nrs are tracked (16 comm slots each), so the
+/// hot path pays one array scan only for those nrs.
+const FLOOD_NRS: [usize; 6] = [0 /*read*/, 228 /*clock_gettime*/, 47 /*recvmsg*/, 45 /*recvfrom*/, 20 /*writev*/, 202 /*futex*/];
+
+
+struct CommCount {
+    comm: [AtomicU8; 16],
+    n: AtomicU64,
+}
+
+const EMPTY_CC: CommCount = CommCount {
+    comm: [const { AtomicU8::new(0) }; 16],
+    n: AtomicU64::new(0),
+};
+
+static FLOOD: [[CommCount; 16]; 6] = [const { [const { EMPTY_CC }; 16] }; 6];
+
+#[inline]
+fn flood_account(nr: usize) {
+    let f = match FLOOD_NRS.iter().position(|&x| x == nr) {
+        Some(i) => i,
+        None => return,
+    };
+    let comm: &[u8; 16] = match crate::sched::current() {
+        // SAFETY: current task; comm is a fixed-size field.
+        Some(t) => unsafe { (*t).comm() },
+        None => return,
+    };
+    let tab = &FLOOD[f];
+    for i in 0..16 {
+        let mut same = true;
+        let mut empty = true;
+        for j in 0..16 {
+            let c = tab[i].comm[j].load(Ordering::Relaxed);
+            if c != 0 {
+                empty = false;
+            }
+            if c != comm[j] {
+                same = false;
+            }
+        }
+        if same {
+            tab[i].n.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+        if empty {
+            // Claim the slot (comm first, count follows).
+            for j in 0..16 {
+                tab[i].comm[j].store(comm[j], Ordering::Relaxed);
+            }
+            tab[i].n.fetch_add(1, Ordering::Relaxed);
+            return;
+        }
+    }
+}
+
 /// Syscall exit accounting (wall cycles include blocking by design).
+/// `dt` in nominal ticks (100 ns each).
 #[inline]
 pub fn exit(nr: usize, t0: Option<u64>) {
     let t0 = match (t0, on()) {
@@ -154,7 +217,8 @@ pub fn exit(nr: usize, t0: Option<u64>) {
     if nr >= NR_SLOTS {
         return;
     }
-    let dt = crate::arch::cpu::read_counter().saturating_sub(t0);
+    flood_account(nr);
+    let dt = crate::drivers::timer::read_time().saturating_sub(t0);
     let e = &TABLE[nr];
     e.count.fetch_add(1, Ordering::Relaxed);
     e.cyc.fetch_add(dt, Ordering::Relaxed);
@@ -266,33 +330,6 @@ fn rip_sample(rip: u64) {
     }
 }
 
-/// Calibrate raw TSC/counter cycles -> microseconds, against the
-/// calibrated timekeeper (`read_time()` nominal @10 MHz), over a ~2 ms
-/// busy window at dump time.
-fn cycles_per_us() -> u64 {
-    let n0 = crate::drivers::timer::read_time();
-    let c0 = crate::arch::cpu::read_counter();
-    // Busy-wait ~2 ms nominal (20_000 ticks @10 MHz). Loop on the raw
-    // counter so the loop itself cannot be constant-folded.
-    while crate::arch::cpu::read_counter().wrapping_sub(c0) < 20_000_000 {
-        core::hint::spin_loop();
-    }
-    let n1 = crate::drivers::timer::read_time();
-    let c1 = crate::arch::cpu::read_counter();
-    let dn = n1.saturating_sub(n0); // nominal ticks (100 ns each)
-    let dc = c1.saturating_sub(c0); // raw counter ticks
-    if dn == 0 || dc == 0 {
-        return 3000; // ~3 GHz fallback
-    }
-    // us = cyc * (dn * 100ns->us/10) / dc  => cyc_per_us = dn*10/dc
-    let per_us = dn * 10 / dc;
-    if per_us == 0 {
-        1
-    } else {
-        per_us
-    }
-}
-
 /// Periodic dump from the timer softirq. Cheap when off.
 pub fn tick(now_jiffies: u64) {
     if !on() {
@@ -309,15 +346,14 @@ pub fn tick(now_jiffies: u64) {
 
 /// Print the full report (also usable from a debug trigger).
 pub fn dump() {
-    let cpu = cycles_per_us();
+    // Nominal domain: 10 ticks per microsecond by definition.
+    const US: u64 = 10;
     let secs = crate::drivers::timer::get_jiffies() / crate::config::KERNEL_HZ as u64;
 
     // Tick modes: one line per dump.
     let mut line = alloc::string::String::from("SYSCOST t=");
     line.push_str(&secs.to_string());
-    line.push_str("s cpu_per_us=");
-    line.push_str(&cpu.to_string());
-    line.push_str(" ticks(u/k/i):");
+    line.push_str("s ticks(u/k/i):");
     for c in 0..crate::config::MAX_CPUS {
         let u = TICK_USER[c].load(Ordering::Relaxed);
         let k = TICK_KERN[c].load(Ordering::Relaxed);
@@ -327,7 +363,64 @@ pub fn dump() {
         }
         line.push_str(&alloc::format!(" c{}={}/{}/{}", c, u, k, i));
     }
-    crate::pr_info!("{}", line);
+    crate::pr_warn!("{}", line);
+
+    // Softirq vector dispatch counts (the existing WW_VEC_RUN / run /
+    // busy-tick counters, printed cumulatively): names the vector behind
+    // the __do_softirq page burn seen in the rip histogram.
+    {
+        use crate::interrupt::softirq::{WW_SOFTIRQ_RUNS, WW_SOFTIRQ_TICKS, WW_VEC_RUN};
+        let mut line = alloc::string::String::new();
+        for v in 0..crate::interrupt::softirq::NR_SOFTIRQS {
+            let n = WW_VEC_RUN[v].load(Ordering::Relaxed) as u64;
+            if n > 0 {
+                line.push_str(&alloc::format!(" v{}={}", v, n));
+            }
+        }
+        let busy_ms = WW_SOFTIRQ_TICKS.load(Ordering::Relaxed)
+            / (crate::config::TIMER_CLOCK_FREQ_HZ / 1000);
+        crate::pr_warn!(
+            "SYSCOST t={}s softirq: runs={} busy={}ms vecs:{}",
+            secs,
+            WW_SOFTIRQ_RUNS.load(Ordering::Relaxed),
+            busy_ms,
+            line
+        );
+    }
+
+    // Flood-nr per-comm attribution (which process drives the 10^5/s
+    // calls; v0=Hi v1=Timer v2=NetTx v3=NetRx v4=Block v5=IrqPoll
+    // v6=Tasklet v7=Sched v8=Hrtimer v9=Rcu for the vec line above).
+    for f in 0..FLOOD_NRS.len() {
+        let mut line = alloc::string::String::new();
+        for i in 0..16 {
+            let n = FLOOD[f][i].n.load(Ordering::Relaxed);
+            if n == 0 {
+                continue;
+            }
+            let mut comm = [0u8; 16];
+            for j in 0..16 {
+                comm[j] = FLOOD[f][i].comm[j].load(Ordering::Relaxed);
+            }
+            let name = core::str::from_utf8(&comm)
+                .unwrap_or("?")
+                .split('\0')
+                .next()
+                .unwrap_or("?");
+            if !line.is_empty() {
+                line.push(' ');
+            }
+            line.push_str(&alloc::format!("{}={}", name, n));
+        }
+        if !line.is_empty() {
+            crate::pr_warn!(
+                "SYSCOST t={}s flood nr={}: {}",
+                secs,
+                FLOOD_NRS[f],
+                line
+            );
+        }
+    }
 
     // Syscall table: collect (nr, count, cyc, max), sort by cyc desc.
     let mut rows: alloc::vec::Vec<(usize, u64, u64, u64)> = alloc::vec::Vec::new();
@@ -345,27 +438,27 @@ pub fn dump() {
     }
     rows.sort_by(|a, b| b.2.cmp(&a.2));
     let total_cyc: u64 = rows.iter().map(|r| r.2).sum();
-    crate::pr_info!(
+    crate::pr_warn!(
         "SYSCOST t={}s syscalls: {} kinds {} calls tot={} ms",
         secs,
         rows.len(),
         rows.iter().map(|r| r.1).sum::<u64>(),
-        total_cyc / cpu / 1000
+        total_cyc / US / 1000
     );
     for r in rows.iter().take(48) {
-        crate::pr_info!(
+        crate::pr_warn!(
             "SYSCOST t={}s nr={} n={} avg={}us max={}ms tot={}ms",
             secs,
             r.0,
             r.1,
-            r.2 / cpu / r.1.max(1) / 1, // us
-            r.3 / cpu / 1000,
-            r.2 / cpu / 1000
+            r.2 / US / r.1.max(1), // us
+            r.3 / US / 1000,
+            r.2 / US / 1000
         );
     }
 
     // Slow ring (last SLOW_RING outliers, ring order).
-    crate::pr_info!("SYSCOST t={}s slow-ring (>4ms wall):", secs);
+    crate::pr_warn!("SYSCOST t={}s slow-ring (>4ms wall):", secs);
     let base = SLOW_IDX.load(Ordering::Relaxed);
     for k in 0..SLOW_RING {
         let i = (base + SLOW_RING - 1 - k) % SLOW_RING; // newest first
@@ -382,11 +475,11 @@ pub fn dump() {
             .split('\0')
             .next()
             .unwrap_or("?");
-        crate::pr_info!(
+        crate::pr_warn!(
             "SYSCOST t={}s slow nr={} cyc={}us comm={}",
             secs,
             SLOW[i].nr.load(Ordering::Relaxed),
-            cyc / cpu,
+            cyc / US,
             name
         );
     }
@@ -402,14 +495,14 @@ pub fn dump() {
     }
     pages.sort_by(|a, b| b.1.cmp(&a.1));
     let tot: u64 = pages.iter().map(|p| p.1).sum();
-    crate::pr_info!(
+    crate::pr_warn!(
         "SYSCOST t={}s rip-pages: {} pages {} kern-ticks",
         secs,
         pages.len(),
         tot
     );
     for p in pages.iter().take(32) {
-        crate::pr_info!(
+        crate::pr_warn!(
             "SYSCOST t={}s rip page={:#x} n={} ({}%)",
             secs,
             p.0,
