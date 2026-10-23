@@ -272,6 +272,15 @@ fn try_expand_stack(
 /// faults opt out (Linux do_fault_around parity).
 const FAULT_AROUND_PAGES: usize = 16;
 
+/// sc181: forward fault-around window (pages) for anonymous WRITE faults
+/// on large VMAs — the hilogd-ring family (see the anon batch in
+/// handle_mm_fault).
+const ANON_FAULTAROUND_PAGES: usize = 32;
+
+/// sc181: minimum VMA size that gets the anonymous fault-around (small
+/// stacks/heaps/brk keep exact one-page semantics).
+const ANON_FAULTAROUND_MIN_VMA: usize = 1024 * 1024;
+
 /// Fill one freshly allocated (exclusively owned) user page from `file`
 /// at `file_offset` — the single-page demand-fault fill semantics,
 /// extracted so the fault-around batch shares it byte-for-byte.
@@ -1147,6 +1156,161 @@ pub fn handle_mm_fault(
             // filled == 0: the allocator failed on the first page; fall
             // through so the single-page path returns OutOfMemory.
         }
+    }
+
+    // sc181: anonymous write-fault forward fault-around (hilogd-ring
+    // family). sc179/sc180 KILLDUMPs: hilogd burned 91s of kernel stime
+    // in 16 min faulting its 10MB anonymous log ring page-by-page —
+    // 2560 full trap/VMA-lookup/alloc/zero/map/rmap/LRU passes per cycle
+    // (the VmaManager::find_mut attribution). One trap now installs up
+    // to ANON_FAULTAROUND_PAGES forward zero pages for sequential
+    // writers, in the same batch shape as the file fault-around above.
+    // Gates: WRITE faults only, VMAs >= 1MB, not SHARED, forward-only,
+    // stops at the first already-mapped page (a downward-growing stack
+    // fault finds its older frames immediately above and degrades to
+    // single-page), best-effort on allocation. Window pages get the full
+    // Anonymous bookkeeping — identical to individually faulted pages.
+    // `faaround=0` disables. mincore03's untouched-mmap contract is safe:
+    // no fault means no window.
+    if vma_type == VmaType::Anonymous
+        && is_write
+        && !vma_flags.contains(crate::mm::vma::VmaFlags::SHARED)
+        && vma_end - vma_start >= ANON_FAULTAROUND_MIN_VMA
+        && crate::cmdline::get_param("faaround").map(|v| v != "0").unwrap_or(true)
+    {
+        let fault_page = page_virt_addr.as_usize() & !(PAGE_SIZE_USIZE - 1);
+        // Window: forward pages up to the first ALREADY-MAPPED one (the
+        // sequential-writer model; stack faults exit at the first hop),
+        // bounded by the VMA end and ANON_FAULTAROUND_PAGES.
+        let max_end = (fault_page + ANON_FAULTAROUND_PAGES * PAGE_SIZE_USIZE).min(vma_end);
+        let mut win_end = fault_page + PAGE_SIZE_USIZE;
+        while win_end < max_end {
+            if unsafe { PageTableWalker::walk(root_ppn, win_end as u64) }
+                .map_or(false, |(_p, bits)| pte_counts_as_mapped(bits, win_end as u64))
+            {
+                break;
+            }
+            win_end += PAGE_SIZE_USIZE;
+        }
+        let n_pages = (win_end - fault_page) / PAGE_SIZE_USIZE;
+
+        // Fill phase — NO locks held (same discipline as the file batch).
+        let mut phys: [u64; ANON_FAULTAROUND_PAGES] = [0; ANON_FAULTAROUND_PAGES];
+        let mut filled = 0usize;
+        for _i in 0..n_pages {
+            // Partial window on allocator failure is fine (Linux parity);
+            // filled == 0 falls through to the single-page OOM return.
+            let Some(pa) = alloc_user_phys_page() else { break };
+            // SAFETY: phys_to_virt of a freshly allocated, exclusively
+            // owned page; the memset stays within its PAGE_SIZE bounds.
+            unsafe {
+                core::ptr::write_bytes(
+                    phys_to_virt(PhysAddr::new(pa)).bits() as *mut u8,
+                    0,
+                    PAGE_SIZE_USIZE,
+                )
+            };
+            phys[filled] = pa;
+            filled += 1;
+        }
+
+        if filled > 0 {
+            let mut pte_flags = PageTableEntry::P | PageTableEntry::A
+                | PageTableEntry::D | PageTableEntry::NX | PageTableEntry::U;
+            if vma_flags.is_writable() {
+                pte_flags |= PageTableEntry::W;
+            }
+            if vma_flags.is_executable() {
+                pte_flags &= !PageTableEntry::NX;
+            }
+
+            // Re-verify the VMA snapshot under a re-taken read guard
+            // (INV-LOCK-7 order vma -> pte; same race closure as the
+            // file batch above — every mm-side mutator of this range
+            // needs the vma WRITE lock).
+            let vma_mgr2 = addr_space.vma_read();
+            let snapshot_ok = vma_mgr2
+                .find(PageVirtAddr::new(fault_page))
+                .is_some_and(|v| {
+                    v.start().as_usize() == vma_start
+                        && v.end().as_usize() >= win_end
+                        && v.flags() == vma_flags
+                        && v.vma_type() == VmaType::Anonymous
+                });
+            if !snapshot_ok {
+                drop(vma_mgr2);
+                for i in 0..filled {
+                    crate::mm::page_alloc::free_page(phys[i] as usize);
+                }
+                // VMA changed under us: retry via the fresh fault.
+                return MmFaultResult::Handled;
+            }
+
+            // One PTE-lock section for the whole batch.
+            let _pte_guard = crate::arch::mm::mm_ops::pte_lock_for(addr_space).lock();
+            let mut mapped = 0u64;
+            let mut fault_pg_failed = false;
+            for i in 0..filled {
+                let va_i = VirtAddr::new((fault_page + i * PAGE_SIZE_USIZE) as u64);
+                // Re-check per page (E8-MM rule): a page that lost a race
+                // frees its copy and is skipped.
+                if unsafe { PageTableWalker::walk(root_ppn, va_i.bits() as u64) }
+                    .map_or(false, |(_p, bits)| {
+                        pte_counts_as_mapped(bits, va_i.bits() as u64)
+                    })
+                {
+                    crate::mm::page_alloc::free_page(phys[i] as usize);
+                    continue;
+                }
+                // SAFETY: root_ppn valid, va_i page-aligned and
+                // VMA-verified, phys[i] a freshly zeroed page.
+                unsafe {
+                    if !map_page(root_ppn, va_i, PhysAddr::new(phys[i]), pte_flags) {
+                        crate::mm::page_alloc::free_page(phys[i] as usize);
+                        if i == 0 {
+                            fault_pg_failed = true;
+                        }
+                        continue;
+                    }
+                    crate::arch::cpu::invlpg(va_i.bits());
+                }
+                // Bookkeeping INSIDE the lock — the Anonymous arm of the
+                // single-page path below, verbatim.
+                {
+                    use crate::mm::page_desc::{pfn_to_page_mut, PageFlag};
+                    let page = pfn_to_page_mut((phys[i] >> PAGE_SHIFT) as usize);
+                    if !page.is_null() {
+                        // SAFETY: freshly allocated, exclusively owned
+                        // until the map above.
+                        unsafe {
+                            (*page).set_flag(PageFlag::Anonymous);
+                            (*page).set_flag(PageFlag::SwapBacked);
+                            (*page).set_index(va_i.bits() as usize / PAGE_SIZE_USIZE);
+                            (*page).inc_mapcount();
+                            crate::mm::rmap::page_record_mapping(
+                                &*page,
+                                addr_space as *const _ as usize,
+                                va_i.bits() as usize,
+                            );
+                            crate::mm::lru::page_add_anon_lru(&*page);
+                        }
+                    }
+                }
+                mapped += 1;
+            }
+            drop(_pte_guard);
+            drop(vma_mgr2);
+
+            if mapped > 0 {
+                addr_space.add_rss(mapped);
+            }
+            if fault_pg_failed {
+                return MmFaultResult::OutOfMemory;
+            }
+            return MmFaultResult::Handled;
+        }
+        // filled == 0: allocator failed on the faulting page itself;
+        // fall through so the single-page path returns OutOfMemory.
     }
 
     // Allocate new page
