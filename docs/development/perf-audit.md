@@ -960,6 +960,14 @@ already measured (pa16/pa17 for Rux, oh-ref-r1 for the Linux reference
 at `/home/william/rux-agents/oh-linux-ref/runs/`). The main session can
 lift this section verbatim as the report body.
 
+DELIVERED (seventh session): the expanded report lives at
+`docs/development/perf-report.md` (v1.0, pre-UI) — the four tables
+below plus interpretation paragraphs, the fix before/after ledger, and
+the known-limitations section, with the hilogd-PEEK footnote and the
+unlink fs-backlog annotation folded in. Only the pending last row of
+its table 1 (post-UI milestones) remains to be filled at the UI
+milestone.
+
 ### 0. Environment and method (half a page)
 
 - Guest: OpenHarmony x86_64 image, QEMU q35, KVM, `-cpu max -m 4G -smp 2`
