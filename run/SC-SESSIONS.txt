@@ -2495,3 +2495,258 @@ BLOCKERS NAMED. MILESTONE (real launcher UI) NOT REACHED.
   mount index, 798b4cb3 + 1b742d80 fault-around twins, notes commits).
   bzImage (x86_64 debug, 01:xx era) = this kernel. config.rs left
   dirty in worktree (build-generated platform-switch artifact).
+
+SESSION R SEVENTH LEG (sc184 line, 00:5x-02:xx): SCREEN GATE ROOT
+CAUSED END-TO-END AND DODGED LIVE (SA 10 PUBLISHED FOR THE FIRST TIME);
+SCANNOUT PIPELINE PROVEN END-TO-END; THE DEVGR WEDGE IS A TIMING RACE
+EVERY BOOT EVENTUALLY LOSES.
+
+- Screen gate (#2) mechanism, closed from OH source to kernel symptom:
+  * render_service (main/render_server/rs_render_service.cpp Init) ->
+    RSScreenManager::Init -> HdiBackend -> IDisplayComposerInterface::
+    Get() -> DisplayComposerHdiImpl::Create (drivers/interface/display/
+    composer/v1_4/hdi_impl) which loops FOREVER:
+    while ((hdi = CompHdi::Get()) == nullptr) usleep(10ms);
+    CompHdi::Get() = HDI IServiceManager GetService("display_
+    composer_service") binder IPC into hdf_devmgr + proxy->GetVersion.
+    RS main thread parked in that loop = AddSystemAbility(10) never
+    runs = SA 10 never in samgr = every RS client (BootAnimation,
+    launcher) fails "clientToService is null" -> black screen. NOT an
+    RS bug, NOT a samgr bug.
+  * The IPC that never returns: sc182 census - devmgr (pid 329) IPC
+    threads SERVER-OWING, parked in FUTEX_WAIT on musl rwlock words
+    frozen at 0x80000000|N readers (16 at 0x...6c14, 148 at 0x...6b80),
+    main thread parked on the second one; ZERO devmgr thread exits (not
+    exit-leaks); RS's txn2558 delivered to devmgr tid 574 and never
+    answered. musl rwlock semantics (verified from oh-robot musl
+    source): unlock only FUTEX_WAKEs when the reader count reaches 0 -
+    a frozen count wedges every writer forever. Same signature in
+    sc183 (devmgr=336). The wedge forms 15-23 s into boot, during the
+    host service-registration storm.
+  * The frozen readers are the wildwrite per-fault-private-copy family
+    (C line) OR readers stranded kernel-side (lane 1 wake-loss) - both
+    produce the identical word shape; WAKE-RUN-LEAK lines sit adjacent
+    to every devmgr stall in both logs.
+- sc184 (probe boot, dfx=parkdump, fresh scgold copy): THE WEDGE DID
+  NOT FIRE IN TIME. SACMP-RS traced render_service's (pid 634) whole
+  binder conversation: samgr codes, then -> hdf_devmgr HDI IService-
+  Manager, then DIRECT to composer_host (pid 617: GetVersion code 0,
+  0x34, 0x1, 0x2, 0x20, 0x9, 0xb, 0xc = 40+ txns), then SAREG ADD
+  SAID=10 FROM render_service (first time in the whole campaign),
+  DISP_HDI_COMP OnHotPlug(0,1) delivered, RSInterfaces::SetScreen-
+  ChangeCallback, ZERO "RenderService connect fail" in the whole boot.
+  BootAnimation entered main. ohgpu screendump: the 8-color banded
+  checker (the compose-content lane's kernel-side scanout-binding
+  oracle in drm/mod.rs, repainted per flip) - the RS -> composer ->
+  DRM -> virtio-gpu flip chain is PROVEN LIVE. Content still not
+  bootanimation frames = the cc line's black-GEM import issue, not
+  this lane. devmgr DID wedge later (~min 8+, tids 594/595/677
+  SERVER-OWING on the same 0x7ff0006c8264-family lock) - clients that
+  asked before the freeze won; the wedge is a race every boot
+  eventually loses, which is why sc180-183 all ended black.
+- Lane 1 (wake-loss, coordinator-assigned): WAKE-RUN-LEAK census in
+  sc184 = 254 lines, dominant shape state=0x1 sleeping cfs_linked=0
+  on_cpu=false pick_state=PICK_LIVE (stale LIVE mark + on_cpu=false is
+  the R74 protocol-impossible pair); W3-FROZEN-EXEC-SLOT (new lying-
+  busy-slot conviction probe, frozen sum_exec_runtime test) convicted
+  PID 1 TWICE: init named by a busy CPU slot, RUNNING+unlinked+LIVE,
+  exec clock frozen 600 and 2302 jiffies (23 s), retaddr inside
+  context_switch. A CPU stuck mid-context_switch with init as prev/
+  next for 23 s - or a stale slot - either way init stalled 23 s
+  stalls every service spawn behind it. NOTE sc184 ran with
+  dfx=parkdump whose UART floods amplify IF=0 windows (init sampled
+  twice inside outb for >1 s) - next conviction boot must run WITHOUT
+  parkdump.
+- Lane 2 (IRQ-exit softirq, coordinator-assigned): landed the two
+  empty-raise gates (commit with the probes): per-tick Timer (v1)
+  softirq now raised only when the TCP table's high-water count > 0
+  (the handler early-returns on 0 anyway); Hrtimer (v8) raised only
+  when a timer has ever been armed (new monotonic TIMER_EVER_ARMED
+  latch) or an hres deadline is due. Both arches. The bigger F1 items
+  (softirq-at-irq-exit running with IF=0, UART outb/inb cli windows)
+  belong to the interrupt and printk lanes - not touched here.
+- New always-on probes landed (no behavior change): SACMP (composer-
+  path binder tracer + render_service pid latch + display_composer_
+  service name match), FXDV (devmgr-latched futex rwlock WAIT/WAKE
+  history; latch fires on hdf_devmgr's SA 5100 registration - parcel
+  said offset 60), W3-FROZEN-EXEC (frozen-exec lying-slot conviction
+  with switch retaddr + stack words). sc183 close-out: under
+  3-foreign load only 1 spawn ever, launcher init never finished -
+  uninformative pace test; sc182 remains the pace reference.
+- Branch: feature/samgr-callback at 69310bae (probes + gates) on top
+  of merged main ae7e25f9. sc184 userdata-sc184.img private; serial
+  run/oh-sc184-serial.log preserved; shots run/oh-sc184-shot1/2.ppm.
+  NEXT: sc185 on the fixed-offset kernel WITHOUT parkdump (FXDV
+  capture of the freeze birth; clean W3 data), then the lane-1 heal
+  design from the conviction data, and reroll boots until the wedge
+  fires while SACMP is watching to name the last hop before silence.
+
+SESSION R EIGHTH LEG (sc185/sc186 line, 03:3x-): W3 PROBE DEADLOCK
+RISK FIXED BEFORE FORENSICS; sc185 BIRTH-MOMENT DATA CAPTURED; THE
+SCREEN GATE IS CHARACTERIZED USERSPACE-SIDE (FFRT POOL HOLDS RDLOCK
+ACROSS BLOCKING BINDER CALLS) - KERNEL WAKE PATHS EXONERATED THIS BOOT.
+
+- Pre-boot audit (the 7th leg's probe-self-variable warning): STALLWATCH
+  (timer tick context) and parkdump (futex syscall context) are GRQ-free
+  - safe. But the W3 trio (W3-RUNWAKE-REFUSED / W3-FROZEN-EXEC-SLOT /
+  W3-FROZEN-EXEC-STK) printed from INSIDE wake_up_enqueue's GRQ irqsave
+  region: printk -> write_to_ring_buffer -> KMSG_READ_WQ.wake_up_all()
+  -> wake_up_process -> wake_up_enqueue re-takes the GRQ = same-CPU
+  self-deadlock (IRQs off) whenever a kmsg reader is parked, cross-CPU
+  GRQ<->waitqueue ABAA otherwise. FIXED (4e4a29b0): capture all print
+  fields under the lock, drop the guard at the refusal tail, then
+  printk. Line formats byte-identical (the C-line W3 census greps stay
+  stable). Every other scheduler print under GRQ already uses the R34
+  direct-console path (r56_print_pid / wakewatch ww_msg).
+- FXDV comm-latch backstop (4e4a29b0): sc184 had ZERO FXDV lines - the
+  SA-5100 parcel matcher never fired. First futex from comm=='hdf_
+  devmgr' now latches. Worked in sc185 (latched pid=333).
+- NEW PROBE RWFRZ-WATCH (4e4a29b0 + 537c618a): RWFRZ-PARK registers its
+  word; every later futex op on it from ANY process prints. The
+  WAKE-or-silence lifecycle of a frozen word is the fork datum.
+- sc185 (probe boot, dfx=parkdump, fresh scgold, 30 min): THE WEDGE
+  FIRED AT ~jif 1900 AND WAS CAPTURED BORN. Data:
+  * Ordinary parks are NOT freezes: every RWFRZ-PARK with a matching
+    RWFRZ-WATCH WAKE resolved within a jiffy (WAIT 0x80000010 -> WAKE
+    val=1 from the draining last reader, same tgid). The param-arena
+    word (0x7ff00002ec64) churned healthily ALL boot (many processes);
+    samgr's word 0x7ff000fa697c froze 7 s (jif 501-1201) then HEALED
+    via delivered WAKEs. musl semantics work.
+  * TERMINAL FREEZE #1: devmgr (tgid 333) word 0x7ff000a30264 froze at
+    0x80000010, readers=16 CONSTANT for 9+ min (no fluctuation = the 16
+    readers are BLOCKED inside their critical sections, not cycling);
+    writers 8->10 (all IPC threads: 334/367/567/568/569/631/640/649+).
+    _rw_waiters at word+4 matched parked-writer count exactly (musl
+    layout verified from toolchain musl-1.2.5 source: readers CAS
+    val->val+1 unconditionally - NO writer preference; unlock WAKEs
+    only when count hits 0).
+  * TERMINAL FREEZE #2: tgid 609 (appspawn family) word 0x7ff000cb1e34,
+    SAME shape: readers=16, writers 3->4. 16 = the FFRT pool size.
+  * devmgr main thread (333) parked on 0x7ff000a301d0 = 0x80000000
+    (zero readers, waiter present) - a wake was owed and never came OR
+    the waiter parked into a stale waiters-bit state.
+  * KERNEL EXONERATED (this boot): ZERO W2-WAKE-REFUSED-SLEEPING, zero
+    WAKE-WILD-POISON drops, zero R80/R49/R56C heals, zero W3-FROZEN-
+    EXEC. The WAKE-RUN-LEAK census population (60+ tasks, kicked 2-4x)
+    decomposes into (a) idle workers with empty todos - the kicks
+    DELIVER (threads run, re-check, voluntarily re-park; WAKE_RET(0,0)
+    hist = normal condition-true returns) and (b) CLIENT-WAITING
+    threads on wedged servers (collateral). No evidence of a lost wake
+    on any observable word.
+  * MECHANISM (characterization DECIDED - userspace side): the 16 FFRT/
+    worker readers hold rdlock ACROSS blocking binder calls (dumped
+    parked in sys=0x10 ioctl fd=4 at rip=0x3fbf0d3466); the calls'
+    targets never reply (mutual stall 333 <-> 609-family <-> samgr
+    early-slow); the reader count never reaches 0; the 10 writer-parked
+    IPC threads include tid 631 = SERVER-OWING RS's client GetService
+    txn 2662 (from pid 592; RS itself asked at ~jif 2200 via the ASCII
+    'display_co' parcel - the 91064bdd matcher works) -> SA 10 never
+    published -> black screen (shot1.ppm = 100% black). RS tid 608 also
+    appears in the leak census - parked waiting on devmgr's answer.
+  * VERDICT FOR THE FORK: NOT kernel wake-loss (this boot); the lock
+    semantics + hold-across-blocking-call pattern is OH userspace. The
+    sc184 dodge (asked before the freeze, won) remains the milestone
+    path: the wedge is a race; sc186 rerolling for it.
+- Coordinator verdicts incorporated (pa13/pa14): the softirq empty-
+  raise gates (69310bae) are a NO-OP on OH boot (A/B: raise rate
+  199.2-199.7/s with vs without; gate flips once then never engages).
+  NOT counted toward F1. F1's real lever = irq-exit dispatch +
+  UART port-IO-under-cli cluster. Also merged main f242b7be (Linux-
+  faithful /proc/kmsg stream, rd_kmsg 93.3K/s -> 0.82K/s) before
+  sc186 - the reduced kmsg drain load should shift the storm window.
+- hilogd.server double-drain check (coordinator's item): our recv
+  semantics are faithful - sys_recvfrom/sys_recvmsg route unix/inet/
+  netlink/raw through their W3 blocking engines (unix_recv_ctl /
+  socket_recv_ctl loop with socket_wait_round for blocking fds); poll
+  readiness is data-driven (POLLIN only when queues non-empty). No
+  kernel shape forces the spin; hilogd.server's 18.4K/s recvmsg+
+  recvfrom pair is OH userspace behavior.
+- sc186 (reroll, merged-main kernel, hardened RWFRZ-WATCH: arena words
+  excluded from registration, budget 192): running for the dodge.
+  Artifacts: run/oh-sc185-serial.log (65k lines), oh-sc185-shot1.ppm,
+  userdata-sc185/sc186.img private copies.
+
+SESSION R EIGHTH LEG CONTINUED (sc186-190, 04:1x-05:4x): TERMINAL-
+DESCHEDULE FIX LANDED; PARKDUMP-OFF IMPROVES THE DODGE; sc190 = THE
+DEEPEST COMPOSER CONVERSATION OF THE CAMPAIGN.
+
+- Dodge rolls: sc186/187/188 (parkdump ON, merged-main kernel) all
+  lost the race at ~jif 1900-2200 (devmgr SERVER-OWING code-3 txns;
+  multiple processes froze with 16 readers each - tgid 453/526/devmgr).
+- sc189 (parkdump OFF): FIRST half-dodge since sc184 - devmgr ANSWERED
+  RS's GetService (SACMP reply code=3 dlen=24), RS went direct to
+  composer_host (code=0x34 GetVersion). But cpu0 was lost at ~min 1:
+  pid 691 (sa_main OS_IPC_2_691) took a fatal USEGV at rip=0, and the
+  PREEMPT-LEAK probe then showed cpu0's slot naming the dead task for
+  10+ min, saved context resumed at arch::x86_64::cpu::wfi+5, preempt_
+  count frozen at 0x10000 (hardirq bit). Boot crawled on cpu1 (8.8k
+  serial lines in 30 min); RS stalled pre-SA-10.
+- ROOT CAUSE (the wfi-residency leak, twice reproduced - sc186 pid 775
+  same signature): do_exit's final "never returns" schedule() CAN
+  return - __schedule's same-task repick fast path returns without a
+  context switch when a racing wake/heal re-links the exiting task
+  between its dequeue and the pick (the fast path's own comment names
+  this shape). The wfi park loop after it then runs in the DEAD task,
+  the CPU slot never advances, and the leaked hardirq bit sits
+  uncleared: the CPU is lost for the rest of the boot. Every sa_main
+  OS_IPC null-jump (~1 min in most boots) is a coin flip on halving
+  the machine.
+- FIX (a39d2bc0): schedule_dead_never_returns() - per retry round,
+  re-assert the terminal state (ZOMBIE preserved for leaders),
+  unlink, clear TIF_IN_SCHED, reset a nonzero preempt_count with a
+  budgeted TERM-DESCHED forensics print, retry until a REAL context
+  switch. Both do_exit terminal tails use it.
+- sc190 (fix kernel, parkdump OFF, 45 min): VERIFIED. 49+ USEGV
+  crashes, ZERO PREEMPT-LEAK lines (sc189 leaked within the first
+  minute), both CPUs alive all boot - 42k serial lines in the first
+  5 min (sc189: 8.8k in 30). THE DODGE: devmgr answered RS's
+  GetService again (2nd consecutive parkdump-off answer; parkdump-on
+  boots are 0-for-4), RS ran a 42-txn DIRECT conversation with
+  composer_host (codes 0x34/0x1/0x9/0xb/0xc - past sc184's depth),
+  OnHotPlug(0,1) delivered, BootAnimationController START, composer
+  reached SetBrightness(drm_connector). SA 10 did NOT publish: RS's
+  conversation stalled at #42 and the devmgr wedge (word 16 readers,
+  waiters 8->11) re-formed ~2 min in and eventually cut a dependency
+  RS still needed mid-Init. Launcher spawned/died repeatedly (AMS
+  churn) - process-death cascade collateral.
+- PARKDUMP-DODGE CORRELATION: parkdump's RWFRZ-PARK stack dumps cost
+  hundreds of UART lines each exactly during the storm window; with
+  them OFF, devmgr has answered RS in 2/2 boots. Forensic boots and
+  dodge boots now want different flags.
+- Live F1 datum for the count-producer hunt (from main's merged
+  probes, not mine): WW: IRQ-OFF-WINDOW cpu=0 age=1000ms pc=0x10000/
+  0x10001 on ALIVE tasks (pids 0x147, 0xcf4) - the hardirq-bit leak
+  also occurs on living tasks in 1s episodes; my fix only cures the
+  death path. The producer itself is the F1 lane's pa15 target.
+- NEXT (ninth leg): reroll parkdump-off boots with the fix kernel -
+  the remaining gap to SA 10 is the devmgr wedge re-forming mid-
+  composer-init; each roll now has both CPUs and a served GetService.
+  If SA 10 lands: bootanimation frames (not the 8-color kernel
+  oracle - check colors>8 / shotstat) -> ScheduleStartAbility ->
+  OnForeground -> ohgpu screenshot = the terminal milestone.
+- Artifacts: run/oh-sc18[6-8]-lost-serial.log (parkdump-on losses),
+  oh-sc189-serial.log (half-dodge + leak capture), oh-sc190-serial.log
+  (fix verification + deepest composer conversation), shots
+  oh-sc18[9,190]-auto0.ppm (8-color oracle, not UI), userdata-sc18[5-
+  190].img private copies.
+
+SESSION R EIGHTH LEG ADDENDUM (sc191 + fix v2, 05:5x): v1 insufficient
+for the CLEAN-exit variant; v2 (6e9679c5) releases pick ownership too.
+
+- sc191 (v1 fix kernel, parkdump off): devmgr answered RS's GetService
+  a THIRD consecutive time (parkdump-off now 3/3). But a CLEAN thread
+  exit (libusb_event tid 649, usb_host, code=0) still stranded in the
+  v1 8-round fallback: cpu1's slot named it, rip=wfi+5, count=0x10000,
+  no TERM-DESCHED print (count was 0 when the helper ran - the leak
+  lands elsewhere/later). The repick persisted because the pick
+  machinery resolves the DEAD task via its pick-ownership pair
+  ({on_cpu, claim} - R63 mid-switch-out shape); the real switch-out
+  asm releases the pair, a repick loop never reaches a switch.
+- v2 (6e9679c5, built, NOT yet boot-verified): the helper now also
+  calls release_pick_ownership() each round (the same aligned store
+  the R56 heal paths use). Ninth leg: boot-verify v2 (a long parkdump-
+  OFF boot should show ZERO permanent PREEMPT-LEAKs across both clean
+  exits and USEGV deaths), then reroll for the full dodge - the
+  remaining SA 10 gap is the devmgr 16-reader wedge re-forming mid-
+  composer-init (sc190 stalled at RS txn #42 after SetBrightness).
+- sc191 left running to term with shotmon attached; artifacts in run/.

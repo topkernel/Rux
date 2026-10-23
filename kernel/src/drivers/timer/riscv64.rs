@@ -212,15 +212,24 @@ pub fn timer_interrupt_handler() {
     crate::mm::vdso::vdso_data_tick();
 
     // 2. Raise Timer softirq for TCP timer processing
-    //    (retransmission, delayed ACK, etc. — deferred to bottom half)
-    crate::interrupt::softirq::raise_softirq_irqoff(
-        crate::interrupt::softirq::SoftirqIndex::Timer as usize,
-    );
+    //    (retransmission, delayed ACK, etc. — deferred to bottom half).
+    //    sc184 (lane 2, perf-audit F1): gated on the table's high-water
+    //    count — the handler early-returns when it is 0, so the raise
+    //    was pure irq-exit dispatch overhead (x86_64 twin has details).
+    if crate::net::tcp::get_tcp_socket_table().count() > 0 {
+        crate::interrupt::softirq::raise_softirq_irqoff(
+            crate::interrupt::softirq::SoftirqIndex::Timer as usize,
+        );
+    }
 
-    // 2.5 Raise Hrtimer softirq for software timer processing
-    crate::interrupt::softirq::raise_softirq_irqoff(
-        crate::interrupt::softirq::SoftirqIndex::Hrtimer as usize,
-    );
+    // 2.5 Raise Hrtimer softirq for software timer processing.
+    //     sc184 (lane 2): gated until a timer has been armed or an hres
+    //     deadline is due (see TIMER_EVER_ARMED in timer.rs).
+    if crate::timer::timer_softirq_work_pending() {
+        crate::interrupt::softirq::raise_softirq_irqoff(
+            crate::interrupt::softirq::SoftirqIndex::Hrtimer as usize,
+        );
+    }
 
     // 3. TODO: Update process runtime statistics
     //    - Current process utime/stime

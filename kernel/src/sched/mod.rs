@@ -43,6 +43,7 @@ pub use sched::{
     change_task_policy,
     init,
     schedule,
+    schedule_dead_never_returns,
     cpu_rq,
     this_cpu_rq,
     load_balance,

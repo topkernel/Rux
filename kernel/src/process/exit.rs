@@ -912,7 +912,16 @@ pub fn do_exit(exit_code: i32) -> ! {
             crate::interrupt::preempt::preempt_count_sub(1);
 
             // ===== do_task_dead: Final schedule, never returns =====
-            crate::sched::schedule();
+            // sc186/sc189 (session R eighth leg): the plain schedule()
+            // could be repicked/refused (a racing wake/heal re-links the
+            // exiting task; __schedule's same-task repick fast path then
+            // returns without switching) — the wfi park loop below would
+            // strand this CPU forever with the slot still naming the dead
+            // task and its leaked preempt bits uncleared (PREEMPT-LEAK
+            // pc=0x10000 rip=wfi+5, 10+ min, twice reproduced).
+            // schedule_dead_never_returns() re-asserts DEAD + unlinks +
+            // clears leaked preempt bits until a real context switch.
+            crate::sched::schedule_dead_never_returns();
 
             loop {
                 // SAFETY: `wfi` is a plain hint instruction with no side effects.
@@ -964,7 +973,11 @@ pub fn do_exit(exit_code: i32) -> ! {
         crate::interrupt::preempt::preempt_count_sub(1);
 
         // ===== do_task_dead: Final schedule, never returns =====
-        crate::sched::schedule();
+        // sc186/sc189: see the non-leader tail above — the terminal
+        // deschedule re-asserts ZOMBIE/DEAD + unlink + preempt-bit clear
+        // until a real context switch happens (the plain schedule() could
+        // be repicked/refused and strand this CPU in the wfi loop).
+        crate::sched::schedule_dead_never_returns();
 
         loop {
             // SAFETY: `wfi` is a plain hint instruction with no side effects.

@@ -1737,6 +1737,83 @@ pub extern "C" fn asm_schedule() {
     schedule();
 }
 
+/// Terminal deschedule for a DEAD task — do_exit's "final schedule, never
+/// returns". sc186/sc189 (session R eighth leg): a racing wake/heal can
+/// re-link the exiting task between its dequeue and the final pick, and
+/// __schedule's same-task repick fast path then RETURNS without a context
+/// switch — do_exit's schedule() returns, the wfi park loop after it runs,
+/// and the CPU slot keeps naming the dead task forever while its leaked
+/// preempt bits (0x10000 hardirq observed) sit uncleared: the cpu is lost
+/// for the rest of the boot (PREEMPT-LEAK cpu=0 pc=0x10000 rip=wfi+5 held
+/// 10+ min; sa_main OS_IPC threads right after fatal USEGV at rip=0,
+/// twice reproduced — each sa_main null-jump halved the machine).
+///
+/// Discipline here: re-assert the terminal state each round (a task that
+/// will never run userspace again holds no critical section worth
+/// stranding a CPU for), clear anything that can make the discipline or
+/// the recursion guard refuse the switch, and retry until a REAL context
+/// switch happens. Never returns to the caller on success.
+pub fn schedule_dead_never_returns() {
+    use crate::process::task::task_flags::TaskFlags;
+    const IN_SCHED: u32 = TaskFlags::TIF_IN_SCHED.bits();
+    static TERM_RETRY_N: core::sync::atomic::AtomicU32 =
+        core::sync::atomic::AtomicU32::new(0);
+    let mut rounds = 0u32;
+    loop {
+        if let Some(cur) = current() {
+            // SAFETY: cur is the running task (this very context).
+            unsafe {
+                // A racing wake/heal may have re-linked us or rewritten
+                // our state: re-assert DEAD and unlink before every
+                // attempt so the picker can never hand the CPU back.
+                if !(*cur).state().is_dead() {
+                    (*cur).set_state(TaskState::new(TaskState::DEAD));
+                }
+                dequeue_task(&*cur);
+                cur.clear_ti_flag(IN_SCHED);
+                // sc191 (v2): a CLEAN thread exit (libusb_event tid 649,
+                // code=0) still stranded in the v1 fallback — the pick
+                // machinery kept resolving the DEAD task as its own pick
+                // because its pick-ownership pair ({on_cpu, claim}, the
+                // R63 mid-switch-out shape) was never released: the real
+                // switch-out asm does this store, but the repick loop
+                // never reaches a switch. Release it explicitly — the
+                // same store the R56 heal paths use — so this CPU's pick
+                // can move to anything else, including idle.
+                (*cur).release_pick_ownership();
+                let pc = (*cur).preempt_count();
+                if pc != 0 {
+                    // Leaked bits protect nothing on a task that will
+                    // never run again. Name them once per boot for the
+                    // count-producer hunt (F1 lane), then clear.
+                    let n = TERM_RETRY_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                    if n < 4 {
+                        crate::pr_warn!(
+                            "TERM-DESCHED pid={} leaked preempt_count={:#x} cleared for final switch (round {})",
+                            (*cur).pid(),
+                            pc,
+                            rounds
+                        );
+                    }
+                    crate::interrupt::preempt::preempt_count_reset();
+                }
+            }
+        }
+        schedule();
+        rounds += 1;
+        // schedule() returning means it refused/repicked us once more;
+        // loop and re-assert. After a generous bound (something re-links
+        // us every single round — not observed, but do not spin hot),
+        // park in wfi like the old code did.
+        if rounds >= 8 {
+            loop {
+                // SAFETY: plain hint instruction, no side effects.
+                crate::arch::cpu::wfi();
+            }
+        }
+    }
+}
+
 unsafe fn __schedule() {
     clear_need_resched();
 
@@ -2946,18 +3023,153 @@ pub fn wake_up_enqueue(task: *mut Task) -> bool {
                 // refused shapes for minutes while REKICKs keep arriving —
                 // name the refusing guard so the next capture says which
                 // condition ate the wake (curr_on = a lying busy slot).
+                // PROBE-LOCK DISCIPLINE (the C-line ABAA conviction): this
+                // branch runs under the GRQ irqsave lock, and printk ->
+                // write_to_ring_buffer -> KMSG_READ_WQ.wake_up_all() ->
+                // wake_up_process -> wake_up_enqueue re-takes the GRQ: a
+                // same-CPU self-deadlock (IRQs off) whenever a kmsg reader
+                // is parked, a cross-CPU GRQ<->waitqueue ABAA otherwise.
+                // Capture every print field into locals here, drop the
+                // guard at the branch tail, then printk. Same line formats
+                // as before (the W3 census greps stay stable).
                 static W3_N: core::sync::atomic::AtomicU32 =
                     core::sync::atomic::AtomicU32::new(0);
-                if W3_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 32 {
+                let w3_print_refused =
+                    W3_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 32;
+                let w3_pid = (*task).pid();
+                let w3_st_bits = st.bits();
+                let w3_on_cpu = (*task).on_cpu();
+                let w3_pk = (*task).pick_state();
+                let w3_cpu = (*task).ti_cpu();
+                // Frozen-slot capture (filled by the W3S block below; read
+                // out after the guard drop).
+                let mut w3_fz_ready = false;
+                let mut w3_fz_naming = MAX_CPUS;
+                let mut w3_fz_exec: u64 = 0;
+                let mut w3_fz_djif: u64 = 0;
+                let mut w3_fz_retaddr: u64 = 0;
+                let mut w3_fz_sp: u64 = 0;
+                let mut w3_fz_w: [u64; 4] = [0; 4];
+                // sc184 (session R, lane 1 wake-loss): the perf-audit census
+                // splits the residual WAKE-RUN-LEAK family into "lying busy
+                // slots" (curr_on refusal) and "linked but starved". A lying
+                // busy slot is convicted by PROGRESS: a CPU genuinely
+                // executing the named task advances its sum_exec_runtime; a
+                // slot that keeps naming a task whose exec clock is FROZEN
+                // (and which stays RUNNING+unlinked across repeated kicks)
+                // is stale bookkeeping nobody will ever clear. Record
+                // (task, sum_exec_runtime, jiffies) per refusal and print
+                // the frozen-clock signature when it matures. The saved
+                // switch retaddr + first stack words discriminate the
+                // legitimate userspace-spinner shape offline.
+                if curr_on && !linked && st == TaskState::new(TaskState::RUNNING) {
+                    const W3S: usize = 8;
+                    static W3_TASK: [core::sync::atomic::AtomicUsize; W3S] =
+                        [const { core::sync::atomic::AtomicUsize::new(0) }; W3S];
+                    static W3_EXEC: [core::sync::atomic::AtomicU64; W3S] =
+                        [const { core::sync::atomic::AtomicU64::new(0) }; W3S];
+                    static W3_JIF: [core::sync::atomic::AtomicU64; W3S] =
+                        [const { core::sync::atomic::AtomicU64::new(0) }; W3S];
+                    let jif = crate::drivers::timer::get_jiffies();
+                    let exec = (*task)
+                        .sched_entity()
+                        .sum_exec_runtime
+                        .load(core::sync::atomic::Ordering::Relaxed);
+                    let key = task as usize;
+                    for s in 0..W3S {
+                        let prev = W3_TASK[s].load(core::sync::atomic::Ordering::Relaxed);
+                        if prev == key {
+                            let prev_exec =
+                                W3_EXEC[s].load(core::sync::atomic::Ordering::Relaxed);
+                            let prev_jif =
+                                W3_JIF[s].load(core::sync::atomic::Ordering::Relaxed);
+                            W3_EXEC[s].store(exec, core::sync::atomic::Ordering::Relaxed);
+                            W3_JIF[s].store(jif, core::sync::atomic::Ordering::Relaxed);
+                            if exec == prev_exec && jif > prev_jif + (crate::config::KERNEL_HZ as u64) * 2 {
+                                let mut naming = MAX_CPUS;
+                                for c in 0..MAX_CPUS {
+                                    if cpu_state(c).current == task {
+                                        naming = c;
+                                        break;
+                                    }
+                                }
+                                let sp = (*task).thread.sp;
+                                // Capture (task fields + stack words) while
+                                // the GRQ still pins the task; print after
+                                // the guard drop.
+                                w3_fz_naming = naming;
+                                w3_fz_exec = exec;
+                                w3_fz_djif = jif - prev_jif;
+                                w3_fz_retaddr = (*task).thread.callee.ret_addr as u64;
+                                w3_fz_sp = sp as u64;
+                                w3_fz_w[0] =
+                                    unsafe { core::ptr::read_volatile(sp as *const u64) };
+                                w3_fz_w[1] = unsafe {
+                                    core::ptr::read_volatile((sp as *const u64).add(1))
+                                };
+                                w3_fz_w[2] = unsafe {
+                                    core::ptr::read_volatile((sp as *const u64).add(2))
+                                };
+                                w3_fz_w[3] = unsafe {
+                                    core::ptr::read_volatile((sp as *const u64).add(3))
+                                };
+                                w3_fz_ready = true;
+                            }
+                            break;
+                        }
+                        if prev == 0
+                            && W3_TASK[s]
+                                .compare_exchange(
+                                    0,
+                                    key,
+                                    core::sync::atomic::Ordering::Relaxed,
+                                    core::sync::atomic::Ordering::Relaxed,
+                                )
+                                .is_ok()
+                        {
+                            W3_EXEC[s].store(exec, core::sync::atomic::Ordering::Relaxed);
+                            W3_JIF[s].store(jif, core::sync::atomic::Ordering::Relaxed);
+                            break;
+                        }
+                    }
+                }
+                // Drop the GRQ BEFORE printk (PROBE-LOCK DISCIPLINE above):
+                // the refusal decision is complete and every field was
+                // captured under the lock, so release-then-print cannot
+                // change the outcome; the printk wake path may then take
+                // the GRQ freely.
+                drop(grq_guard);
+                if w3_print_refused {
                     crate::pr_warn!(
                         "W3-RUNWAKE-REFUSED pid={} state={:#x} linked={} curr_on={} on_cpu={} pk={} cpu={}",
-                        (*task).pid(),
-                        st.bits(),
+                        w3_pid,
+                        w3_st_bits,
                         linked,
                         curr_on,
-                        (*task).on_cpu(),
-                        (*task).pick_state(),
-                        (*task).ti_cpu()
+                        w3_on_cpu,
+                        w3_pk,
+                        w3_cpu
+                    );
+                }
+                if w3_fz_ready {
+                    crate::pr_warn!(
+                        "W3-FROZEN-EXEC-SLOT pid={} naming_cpu={} exec={:#x} frozen for {}jif pk={} on_cpu={} retaddr={:#x}",
+                        w3_pid,
+                        w3_fz_naming,
+                        w3_fz_exec,
+                        w3_fz_djif,
+                        w3_pk,
+                        w3_on_cpu,
+                        w3_fz_retaddr,
+                    );
+                    crate::pr_warn!(
+                        "W3-FROZEN-EXEC-STK pid={} sp={:#x} w={:#x} {:#x} {:#x} {:#x}",
+                        w3_pid,
+                        w3_fz_sp,
+                        w3_fz_w[0],
+                        w3_fz_w[1],
+                        w3_fz_w[2],
+                        w3_fz_w[3],
                     );
                 }
                 return false;
