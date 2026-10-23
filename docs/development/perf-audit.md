@@ -22,7 +22,7 @@ Runs (this worktree, `run/`):
 | `pa-pa4` | + kmsg read counters | syscost=1 sprobe=0 | ~180 s (killed) | proves the read flood never touches /dev/kmsg |
 | `pa-pa5/6/7/8` | + EOF/EAGAIN read censuses | syscost=1 sprobe=0 | 60-120 s each (killed) | fd-path census hunts (see F2) |
 
-Host context for all three: KVM q35 `-cpu max -m 4G -smp 2`, shared with
+Host context for all runs: KVM q35 `-cpu max -m 4G -smp 2`, shared with
 2-3 foreign-lane QEMUs (load avg ~5.5). Absolute numbers carry that
 noise; ratios and structure are stable across pa1/pa3.
 
