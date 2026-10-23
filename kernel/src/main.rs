@@ -711,6 +711,38 @@ pub fn rust_main_tail() -> ! {
                 print_status("fs", "sysfs mounted /sys", ok);
             }
 
+            // debugfs at /sys/kernel/debug (Linux layout). debugfs is
+            // where the kernel exposes debug knobs that are deliberately
+            // not part of the stable userspace ABI — Rux uses it for the
+            // DFX instrument switches (see dfx/mod.rs).
+            {
+                let debugfs_init = fs::debugfs::init_debugfs();
+                let debugfs_mount = debugfs_init.and_then(|_| fs::debugfs::mount_debugfs());
+                let ok = debugfs_mount
+                    .map(|_| {
+                        // The mount point must already exist in the dentry
+                        // tree WITH an inode: vfs_mount walks the path and
+                        // creates missing components as bare dentries,
+                        // which would shadow sysfs's /sys/kernel
+                        // directory (uevent, uevent_seqnum). Resolving
+                        // the path first populates the chain properly.
+                        let _ = fs::vfs::path_lookup("/sys/kernel/debug", 0);
+                        fs::vfs::vfs_mount(
+                            "/sys/kernel/debug",
+                            fs::debugfs::create_root_inode(),
+                            fs::mount::MntFlags::new(0),
+                        );
+                        fs::mount::register_mount(
+                            "debugfs",
+                            "/sys/kernel/debug",
+                            "debugfs",
+                            "rw",
+                        );
+                    })
+                    .is_ok();
+                print_status("fs", "debugfs mounted /sys/kernel/debug", ok);
+            }
+
             // cgroup v2 unified hierarchy (U1b) — systemd's hard
             // dependency: mount cgroup2 at /sys/fs/cgroup after the
             // sysfs/procfS boot mounts. The hierarchy root exposes

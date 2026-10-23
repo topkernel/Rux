@@ -1309,6 +1309,9 @@ fn build_tree() -> Arc<KObject> {
 
     // ---------------- /sys/kernel ----------------
     let kernel = mk_dir(&root, "kernel", KType::Kernel);
+    // /sys/kernel/debug is the debugfs mount point (Linux: sysfs owns
+    // the directory, debugfs is mounted over it).
+    mk_dir(&kernel, "debug", KType::Kernel);
     attr_ro(&kernel, "uevent_seqnum", move || {
         format!("{}\n", UEVENT_SEQNUM.load(Ordering::Relaxed)).into_bytes()
     });

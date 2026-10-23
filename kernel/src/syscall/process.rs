@@ -4845,6 +4845,32 @@ pub fn init_exited_fallback_cascade() {
     }
 }
 
+/// Restart the machine now (Linux sysrq 'b': "immediately restarts the
+/// computer without syncing disks or unmounting them").
+///
+/// Never returns. The cascade still syncs what it can before the reset
+/// — a debug trigger must not leave the image torn.
+pub fn force_reboot() -> ! {
+    const LINUX_REBOOT_CMD_RESTART: u32 = 0x01234567;
+    crate::println!("sysrq: rebooting");
+    shutdown_cascade(LINUX_REBOOT_CMD_RESTART);
+    loop {
+        core::hint::spin_loop();
+    }
+}
+
+/// Power the machine off (Linux sysrq 'o').
+///
+/// Never returns.
+pub fn force_power_off() -> ! {
+    const LINUX_REBOOT_CMD_POWER_OFF: u32 = 0x4321FEDC;
+    crate::println!("sysrq: powering off");
+    shutdown_cascade(LINUX_REBOOT_CMD_POWER_OFF);
+    loop {
+        core::hint::spin_loop();
+    }
+}
+
 /// P1 shutdown cascade body. Performs the ordered teardown and drives the
 /// machine into the reset/shutdown SBI call; returns only if every SBI
 /// path failed (caller parks).

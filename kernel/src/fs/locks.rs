@@ -44,6 +44,48 @@ use crate::fs::inode::Inode;
 use crate::process::wait::WaitQueueHead;
 use crate::sync::spinlock::Spinlock;
 
+/// Print every lock currently held (Linux sysrq 'd').
+///
+/// Same tables a /proc/locks would report; printed to the console for
+/// the sysrq path. The rows are copied out under their lock and the
+/// lock is released before printing, so the console path never runs
+/// while a lock table is held.
+pub fn dump_held_locks() {
+    let flock_rows: Vec<(u64, u32, bool)> = {
+        let table = FILE_LOCK_TABLE.lock();
+        table
+            .iter()
+            .map(|e| (e.file_id, e.owner_pid, e.exclusive))
+            .collect()
+    };
+    let record_rows: Vec<(u32, u64, u64, bool)> = {
+        let table = RECORD_LOCK_TABLE.lock();
+        table
+            .iter()
+            .map(|e| (e.owner.report_pid(), e.start, e.end, e.exclusive))
+            .collect()
+    };
+
+    crate::println!("locks: {} flock, {} posix", flock_rows.len(), record_rows.len());
+    for (file_id, pid, exclusive) in flock_rows {
+        crate::println!(
+            "  flock: file={} pid={} type={}",
+            file_id,
+            pid,
+            if exclusive { "WRITE" } else { "READ " }
+        );
+    }
+    for (pid, start, end, exclusive) in record_rows {
+        crate::println!(
+            "  posix: pid={} start={} end={} type={}",
+            pid,
+            start,
+            end,
+            if exclusive { "WRITE" } else { "READ " }
+        );
+    }
+}
+
 /// flock(2) operation bits (Linux UAPI).
 pub mod flock_ops {
     pub const LOCK_SH: i32 = 1;

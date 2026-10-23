@@ -57,6 +57,7 @@ pub mod self_proc;
 pub mod pid;
 pub mod interrupts;
 pub mod sysctl;
+pub mod sysrq;
 pub mod net;
 pub mod configgz;
 
@@ -519,6 +520,20 @@ impl ProcFSSuperBlock {
 
         // Kernel log buffer
         self.create_dynamic_file("kmsg", crate::printk::generate_kmsg);
+
+        // SysRq trigger (Linux: /proc/sysrq-trigger). Writing a command
+        // character runs that command; the handler lives in
+        // fs/procfs/sysrq.rs.
+        {
+            let ino = self.alloc_ino();
+            let file = Arc::new(ProcFSNode::new_sysctl_file(
+                b"sysrq-trigger".to_vec(),
+                || alloc::vec![b'\n'],
+                sysrq::write_trigger,
+                ino,
+            ));
+            self.root_node.add_child(file);
+        }
 
         // /proc/self - symlink to current process directory
         self.create_dynamic_symlink("self", self_proc::get_self_link);
