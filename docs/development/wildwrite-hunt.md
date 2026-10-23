@@ -2194,4 +2194,232 @@ Design (staged; implement behind probes, mm territory only):
   serials (only 3 MEMLEDGER lines per boot survived legible in the
   control run) — the dfx line's item.
 
+## Session 25 (reconstructed from snapshot 46696158 — quota death at
+## 07:07 Oct 23, no archive written at the time)
+
+The predecessor implemented the session-24 MAP_SHARED design end to end
+across BOTH arches + the fs layer, dying before any review or
+validation. What the snapshot carried (all unreviewed at death):
+
+- page_cache.rs: `CachedPage.dirty`, mark_dirty,
+  writeback_update_range (write(2) write-through into pinned frames,
+  replacing the write path's whole-inode invalidate), collect/flush_done
+  (chunked dirty flush, inodes lock never across I/O), dirty-skip in
+  both eviction arms.
+- ext4/file.rs: ext4_write_at_core (explicit-offset core shared by
+  write/pwrite/flush, u64::MAX O_APPEND sentinel), ext4_flush_dirty_inode,
+  write-through replacing invalidate; ext4 native write_at (kills the
+  set_pos/write/restore race in generic File::write_at); setattr
+  flush-before-cut on shrink; sys_fsync flushes dirty frames before the
+  data+journal sync; sys_msync flushes the span's dirty entries (with
+  the clamped-span offset-base bug already noted fixed) and skips
+  PCACHE leaves in the legacy PTE walk.
+- mm both arches: PCACHE protocol for SHARED ext4 faults (W in place,
+  PTE-owned pin — the riscv permanent pin retired), hole-as-zero cache
+  pages (mapper-coherent zeros, block allocated at flush), PCACHE_SHARED
+  carried through mprotect/marker rewrites; riscv alias migrated off
+  shared_file_fault_page for ext4; no rmap on PCACHE leaves (retires
+  the session-24 page_index-0 hazard).
+- test/filemap.c FS1-FS8 + FSP legs and the two-boot persistence pass.
+
+## Session 26 (continuation agent — snapshot reviewed, two critical bugs
+## fixed, MAP_SHARED validated on both platforms)
+
+### Inheritance reconstruction
+
+- Chain tree DEAD at claim (r42 killed 15 min in at 04:24 with the
+  predecessor's window — clean partial, 0 WW-HIT). Relaunched from r42
+  as this session's background task at 07:08.
+- Working tree = snapshot 46696158, nothing running otherwise. Audited
+  the full diff against the session-24 design before any build.
+
+### Audit verdict: design faithfully implemented; two critical bugs
+
+1. **riscv64 `PCACHE_SHARED = 1 << 10` corrupts the PPN.** Sv39 PTEs
+   are `(ppn << 10) | flags` — bit 10 is PPN[0], not an RSW bit (Sv39
+   has exactly two: 8=COW, 9=PCACHE, both taken). Setting it adds 4 KiB
+   to every shared mapping's physical address: each mapper would store
+   into a frame one page away from the cache page — silent neighbor-page
+   corruption, the exact engine class this hunt exists to catch. FIX:
+   the bit is gone; a SHARED cache leaf is identified by PREDICATE —
+   private cache installs now ALWAYS carry COW (read-only installs too),
+   so `PCACHE && !COW` (cow_flags::pte_is_shared_cache) holds exactly
+   for shared leaves at every consumer (mprotect walk, marker
+   re-present). x86_64 keeps its dedicated bit (AVL 11 — three software
+   bits exist there).
+2. **ext4_flush_dirty_inode could loop forever.** flush_done clears a
+   page's dirty bit only when its pin count reaches 0 — with a live
+   writable mapping (pin held) the page STAYS dirty by design, and
+   collect_dirty_range always returned the same leading chunk: the first
+   msync of any file with >16 live-mapped dirty pages (any writable
+   shared mapping >= 68 KiB) would rewrite the same 16 pages under the
+   ext4 big lock forever. FIX: resume cursor — each round collects from
+   the last collected index + 1 (progress rule documented on
+   collect_dirty_range).
+
+Smaller fixes in the same pass:
+
+- **Self-copy UB on the flush path**: ext4_flush_dirty_inode writes a
+  dirty frame's own bytes through ext4_write_at_core, whose
+  writeback_update_range would copy the frame onto itself
+  (copy_nonoverlapping with identical src/dst). writeback_update_range
+  gained `skip_pfn`; the flush passes its source frame.
+- **mprotect W-upgrade dirty gap** (both arches): a shared leaf faulted
+  under an RO VMA and later mprotect'ed RW gains W in place but was
+  never marked dirty — its stores would never flush. Both mprotect
+  sites (x86 mprotect_pte_range via the PCACHE_SHARED bit, riscv walker
+  via the predicate) now mark the page dirty at the W-grant
+  (page_cache::mark_dirty_pfn — descriptor mapping/index resolution).
+- **flush_done clears dirty on FAILED writes**: an I/O error or short
+  write left the page's dirty bit cleared at pin-0 anyway — for a page
+  whose mapping already unmapped (the frame is the only surviving copy)
+  clean-marking made it evictable and its data silently losable.
+  flush_done now takes per-entry (idx, pfn, write_ok) and requires ok.
+- flush_done empty-key cleanup (put_by_key parity); cosmetic
+  re-indentation of the x86 fault-around fill loop the snapshot had
+  mangled.
+
+Audit checks that PASSED as-is (documented for the next reader): pin
+accounting is mask-based (`& PCACHE != 0`) at every unmap/teardown/fork
+site, so the shared bit rides along; the ZERO_PAGE hole arm is
+duplicate-insert safe (insert() no-ops on a fresh existing entry, the
+following get_phys pins); arm ordering on x86 (SIGBUS gate → devfs
+SHARED → ext4 SHARED → fault-around excludes SHARED → private arms) is
+correct; the remaining invalidate_inode callers (fallocate, setattr
+post-cut, free_inode) are destructive-metadata paths where
+invalidate-after-flush is the right semantics; lock order pte → inodes
+and EXT4_BIG_LOCK → inodes holds everywhere, no inodes → BIG nesting
+(R-WRITESTORM-1 discipline intact); the riscv exclusive-COW fast path
+can never see a shared leaf (no COW bit → handle_cow_fault not
+reachable).
+
+### Validation (final code, all legs green)
+
+- Builds: x86_64 + riscv64 clean ("Compiling rux" fresh builds;
+  config.rs regenerated per platform, restored to the committed x86_64
+  flavor at commit — the generated-artifact quirk).
+- **FMAP-PASS x (FS1-FS8 + FSP) + FMAP-PERSIST-PASS on BOTH
+  platforms** (two boots of the same image, cold cache: the persist
+  pattern read back from disk proves msync/fsync writeback reached the
+  FILE). This validates: two-mapper immediate visibility (FS1),
+  write(2)/pwrite write-through into live mappings (FS2), mapping-store
+  → pread coherence (FS3), fork coherence (FS4), msync+fsync flush
+  (FS5), truncate cut + past-EOF SIGBUS (FS6), munmap pin release +
+  fresh-map retention (FS7), hole zero-fill + store+msync persisting
+  into an unallocated block (FS8).
+- Regression trio on x86_64: MMF-PASS (x14 legs), FAW-PASS (x6),
+  LVMAP-PASS — mprotect/fault/loader paths unregressed.
+- Probe-script fix along the way: boot_once now re-reads the serial
+  after guest exit (the probe powers down immediately after its verdict;
+  the poll loop kept losing the race — the known filedrain class).
+- OH 45-min 0-panic soak (ww-fms1, dfx=taskdump,watchdog,periodic,
+  memwatch,ledger): see close-out below.
+- riscv64 in-kernel unit tests: the first run (early code) was killed
+  by the 08:08 infra sweep with its pipe-tail buffer lost; rerun on the
+  final code with direct file capture — see close-out.
+
+### Ops events this session
+
+- ~08:08 infra sweep (the s10/s13/s14 class) took BOTH this session's
+  background tasks: the chain tree (r43 at 15/45, clean partial: 0
+  WW-HIT, 0 panics, healthy to the last line) and the make-test QEMU
+  (42 min in, output lost — `| tail > file` buffers everything on
+  SIGKILL; capture with plain redirection next time). Chain relaunched
+  from r43 at 08:14.
+
+## Session 27 (continuation agent — MAP_SHARED verification close-out)
+
+### Inheritance reconstruction (session 26's close-out was never written)
+
+- Session 26's window died at 08:40 with the user pause, mid-close-out.
+  Artifact verdicts recovered at claim:
+  - **ww-fms1 (the 45-min OH 0-panic gate) was a ~21-MIN PARTIAL, not
+    the gate**: serial born 08:20, last write 08:40:57. Healthy storm
+    to the last line (wakes 1.88M), 0 KERNPANIC / 0 ALLOCTHROW / 0 OOM,
+    memfree_pages=428556 (1.67 GiB free at death), MM-DROP-CTX 0,
+    META-SMASH 0, USEGV-FOR 15 hits all at the documented
+    rip=0x7ff082996bac cr2=0 errno-as-pointer service-side family,
+    PREEMPT-LEAK 61 (wfi idle noise). Gate INCOMPLETE — re-run below.
+  - **riscv make-test rerun: ww-s26-rv-test.log is 0 bytes** — the leg
+    never completed. Re-run below.
+  - r42 (chain): FULL budget clean (~07:09-07:53, 0 WW-HIT, 0 panics).
+    r43 attempt 2 (08:14-08:40): killed at ~26/45 by the session-26
+    window death — clean partial (0 WW-HIT, 0 panics, storming to the
+    last line). Cumulative 0 WW-HIT across r1-r43.
+- Worktree clean at 6b49140b; the riscv alias migration item from the
+  handoff was already landed by the session-25/26 snapshot (verified in
+  code: ext4 MAP_SHARED faults go through filemap_pin_cache_page with
+  shared=true + dirty marking; only non-ext4 files keep the legacy
+  shared_file_fault_page permanent pin — page_fault.rs:660-705).
+
+### Task-1 legs re-run at HEAD (all green)
+
+- x86_64 build: PLATFORM=x86_64 make build is a cargo no-op reproducing
+  the byte-identical bzImage (md5 1fd06f7b...) — the binary session 26
+  validated is the committed code.
+- FMAP probe on BOTH platforms at HEAD (fresh boots this session):
+  **FMAP-PASS (FS1-FS8 + FSP) + FMAP-PERSIST-PASS on x86_64 AND
+  riscv64** — the handoff's probe-extension item (SHARED write
+  visibility = FS1/FS2/FS3, concurrent-mapping consistency = FS1/FS3/
+  FS4, msync persistence = FS5/FSP two-boot, truncate = FS6) was
+  implemented and validated by session 26; re-confirmed here on the
+  byte-identical binaries.
+- riscv64 in-kernel unit tests (plain file capture, run/
+  ww-s27-rv-test.log): **1085/1088** — byte-identical failure set to
+  the s6/7/9/12/13/15/18/24 baseline (the 3 pre-existing config_test.rs
+  size asserts). No regression from the MAP_SHARED writeback stack.
+- ww-fms2 (the 45-min OH 0-panic gate re-run): see below.
+
+## Session 27 close-out
+
+- **ww-fms2 (the 45-min OH 0-panic gate re-run): PASSED.** Full budget
+  (timeout kill as designed, 11:21-12:06), 94948 serial lines, storm
+  active to the last line, **0 KERNPANIC / 0 ALLOCTHROW / 0 OOM
+  events / 0 MM-DROP-CTX / 0 META-SMASH**, memfree_pages=422361
+  (1.65 GiB free at boot-end — no drain; the filemap fix holds with
+  the MAP_SHARED writeback stack riding). All 20 USEGV-FOR lines are
+  ONE victim: pid 546 render_service at rip=0x3fbf08ad30,
+  cr2=0x7ff00069a000, rdx=0x3a8 — the EXACT session-18 decoded
+  thread-creation geometry (struct-pthread context copy into the
+  2-page remnant above a worker-stack carve), service-side and
+  documented; capture recipe = 2f54454b prints if it needs a new
+  decode.
+- **MAP_SHARED writeback verification is COMPLETE** (the handoff's
+  task 1, all legs green at 6b49140b): FMAP x both platforms + two-boot
+  persistence, riscv 1085/1088, x86_64 byte-identical build, 45-min OH
+  0-panic. The "riscv alias migration" follow-on was already landed by
+  the session-25/26 snapshot — verified in code this session (ext4
+  SHARED faults pin via filemap_pin_cache_page with the conservative
+  dirty mark; the legacy shared_file_fault_page permanent pin survives
+  only for non-ext4 files, page_fault.rs:660-705). Code anchors for the
+  two critical session-26 fixes confirmed: riscv predicate
+  pte_is_shared_cache (mm_ops.rs:1838, the removed 1<<10 PPN-corrupting
+  bit documented at :1822), flush resume cursor
+  (page_cache.rs:804-808), dirty mark family (page_cache.rs:678-700).
+  6b49140b is MERGE-READY for main.
+- Chain: relaunched from r44 at 11:09 as this session's background
+  task (run/ww-chain-s27.log, 15-point set, WW-ARMED verified). r44
+  FULL budget clean (77489 lines, wakes 12.71M, strand_max 9.1s
+  healthy class, 0 WW-HIT / 0 heals / 0 panics); driver self-advanced
+  to r45 at 11:54 (armed verified). Cumulative: **0 WW-HIT across
+  r1-r44** partials, 0 META-SMASH. The make-test QEMU reaped after
+  results were file-captured (post-summary panic class, own PID).
+- Ops: serial-log grep discipline note — the rs-image OH boots print
+  no "fork: parent" lines in their storm phase (storm health reads
+  from appspawn/APPMAPSRC counts instead; the ww-boot chain image
+  prints both).
+- Late-session ops: the chain background task was stopped externally
+  at ~12:10 mid-r45 (serial frozen 12:09:23 mid-storm, whole tree gone
+  — the s10/s13/s14 sweep class; the samgr-callback line started its
+  own oh-sc172 boot in the same window). r45 verdict: clean partial at
+  ~15/45 (53677 lines, storm-healthy tail, 0 WW-HIT, 0 panics).
+  Relaunched from r46 at 12:20 (run/ww-chain-s27b.log, WW-ARMED 15
+  verified, process tree re-recorded). Cumulative: **0 WW-HIT across
+  r1-r45** partials.
+- Next for the line: (1) chain continues toward the capture (the
+  machinery is proven; the engine's rate under this load remains the
+  variable); (2) 6b49140b rides to main at the next merge window; (3)
+  unclaimed follow-ups from the archive: reclaim-time writeback (v2),
+  close(2) deferred-flush divergence note, watchset room beyond 15.
+
 

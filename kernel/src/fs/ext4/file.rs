@@ -1466,93 +1466,274 @@ pub fn ext4_file_write_vfs(file: &File, buf: &[u8]) -> isize {
         // ext4 lock (LTP fork07, Linux f_pos_lock discipline).
         let _pos_guard = file.io_lock.guard();
 
-        // SMP serialization for the write path (review 5.5 high: 写路径/位图
-        // RMW 无锁——SMP 位图丢更新双分配): allocation, bitmap RMW, group
-        // descriptor updates and the inode rewrite all happen under the
-        // ext4 big lock, same as namei.
-        let _ext4_guard = crate::fs::ext4::EXT4_BIG_LOCK.lock_fair();
-
-        // Start a journal transaction for data=ordered semantics:
-        // data blocks are synced during write, then the inode metadata is
-        // committed to the journal with all data already on disk.
-        let use_journal = fs.journal.is_some();
-        let mut journal_handle = match if use_journal {
-            super::journal::ext4_journal_start(fs, 4)
-        } else {
-            Err(0)
-        } {
-            Ok(h) => Some(h),
-            Err(_) => None,
-        };
-        // R9-6: register the FINAL location of the handle — the old code
-        // stored &mut of the match-arm binding and then MOVED it into
-        // Some(h), leaving Task.journal_handle pointing at a dead stack
-        // slot that later calls reused (the exact dead-frame deref M3 was
-        // meant to remove, in the main write path).
-        if let Some(h) = journal_handle.as_mut() {
-            super::namei::set_current_handle(h);
-        }
-
-        // Read ext4 inode from disk (write needs fresh on-disk data)
-        let mut ext4_inode = match fs.read_inode(ext4_ino) {
-            Ok(inode) => inode,
-            Err(e) => {
-                if journal_handle.is_some() {
-                    super::namei::clear_current_handle();
-                    if let Some(mut h) = journal_handle {
-                        let _ = super::journal::ext4_journal_stop(&mut h);
-                    }
-                }
-                return e as isize;
-            }
-        };
-
         // Get current file position (O_APPEND: always write at end of file)
         let offset = if file.flags().bits() & crate::fs::file::FileFlags::O_APPEND != 0 {
-            ext4_inode.get_size()
+            // Computed inside the core, from the disk-fresh inode under the
+            // big lock — an append racing on a different open description
+            // must be visible before our offset is fixed.
+            u64::MAX
         } else {
-            file.get_pos() as u64
+            file.get_pos()
         };
 
-        // Call internal write function
-        let result = match ext4_file_write(fs, &mut ext4_inode, offset, buf) {
-            Err(e) => e as isize,
-            Ok(written_bytes) => {
-                // Update cached copy in inode.sb
-                if let Some(ptr) = inode.sb {
-                    let cached = &mut *(ptr as *mut super::inode::Ext4Inode);
-                    cached.block = ext4_inode.block;
-                    cached.size = ext4_inode.size;
-                    cached.blocks = ext4_inode.blocks;
-                    cached.mtime = ext4_inode.mtime;
-                    cached.ctime = ext4_inode.ctime;
-                }
-                // Update cached VFS inode size
-                inode.size.store(ext4_inode.get_size(), core::sync::atomic::Ordering::Relaxed);
-                // Write back inode to disk (registers with journal if handle active)
-                match crate::fs::ext4::inode::write_inode(fs, ext4_ino, &ext4_inode) {
-                    Ok(()) => {
-                        // Invalidate page cache for this inode after write
-                        page_cache::get_page_cache().invalidate_inode(fs as *const crate::fs::ext4::Ext4FileSystem as u64, ext4_ino as u64);
-                        // Update file position
-                        file.set_pos(offset + written_bytes as u64);
-                        written_bytes as isize
-                    }
-                    Err(e) => e as isize,
+        // SAFETY: fs/inode resolution above; buf is the caller's slice.
+        let written = unsafe { ext4_write_at_core(fs, ext4_ino, inode, offset, buf, 0) };
+        if written > 0 {
+            let end = if offset == u64::MAX {
+                inode.size.load(core::sync::atomic::Ordering::Acquire)
+            } else {
+                offset + written as u64
+            };
+            file.set_pos(end);
+        }
+        written
+    }
+}
+
+/// Positional write for the ext4 file ops (FileOps::write_at, session 25):
+/// pwrite(2)/msync/flush writeback need an explicit-offset write that
+/// never touches the shared file position. O_APPEND is ignored per POSIX.
+/// This replaces the generic File::write_at fallback (set_pos/write/
+/// restore), which raced concurrent plain writes on the same open file
+/// description — the write twin of the R71 read race.
+///
+/// SAFETY: file.inode.get() fields written at open time, read-only after.
+pub unsafe fn ext4_file_write_at_vfs(file: &File, offset: u64, buf: *const u8, count: usize) -> isize {
+    if file.flags().is_readonly() {
+        return -9; // EBADF
+    }
+    let inode_opt = &*file.inode.get();
+    let inode = match inode_opt.as_ref() {
+        Some(i) => i,
+        None => return -9,
+    };
+    let fs_ptr = match inode.private_data {
+        Some(ptr) => ptr as *const crate::fs::ext4::Ext4FileSystem,
+        None => return errno::Errno::IOError.as_neg_i32() as isize,
+    };
+    let data = core::slice::from_raw_parts(buf, count);
+    // SAFETY: fs/inode resolution above; data is the caller's buffer.
+    unsafe { ext4_write_at_core(&*fs_ptr, inode.ino as u32, inode, offset, data, 0) }
+}
+
+/// Explicit-offset ext4 write core shared by write(2) and pwrite/writeback
+/// (session 25). Owns the EXT4_BIG_LOCK + journal discipline and the
+/// page-cache WRITE-THROUGH policy: after a successful write the cached
+/// frames overlapping the written range are updated IN PLACE (never
+/// invalidated — a pinned frame that serves misses would fork a second,
+/// divergent copy of the page on the next fault, permanently splitting
+/// mapper views). Same big-lock/bitmap serialization as the old inline
+/// body (review 5.5 high).
+unsafe fn ext4_write_at_core(
+    fs: &crate::fs::ext4::Ext4FileSystem,
+    ext4_ino: u32,
+    inode: &crate::fs::inode::Inode,
+    offset: u64,
+    buf: &[u8],
+    skip_update_pfn: u64,
+) -> isize {
+    // SMP serialization for the write path (review 5.5 high: 写路径/位图
+    // RMW 无锁——SMP 位图丢更新双分配): allocation, bitmap RMW, group
+    // descriptor updates and the inode rewrite all happen under the
+    // ext4 big lock, same as namei.
+    let _ext4_guard = crate::fs::ext4::EXT4_BIG_LOCK.lock_fair();
+
+    // Start a journal transaction for data=ordered semantics:
+    // data blocks are synced during write, then the inode metadata is
+    // committed to the journal with all data already on disk.
+    let use_journal = fs.journal.is_some();
+    let mut journal_handle = match if use_journal {
+        super::journal::ext4_journal_start(fs, 4)
+    } else {
+        Err(0)
+    } {
+        Ok(h) => Some(h),
+        Err(_) => None,
+    };
+    // R9-6: register the FINAL location of the handle — the old code
+    // stored &mut of the match-arm binding and then MOVED it into
+    // Some(h), leaving Task.journal_handle pointing at a dead stack
+    // slot that later calls reused (the exact dead-frame deref M3 was
+    // meant to remove, in the main write path).
+    if let Some(h) = journal_handle.as_mut() {
+        super::namei::set_current_handle(h);
+    }
+
+    // Read ext4 inode from disk (write needs fresh on-disk data)
+    let mut ext4_inode = match fs.read_inode(ext4_ino) {
+        Ok(inode) => inode,
+        Err(e) => {
+            if journal_handle.is_some() {
+                super::namei::clear_current_handle();
+                if let Some(mut h) = journal_handle {
+                    let _ = super::journal::ext4_journal_stop(&mut h);
                 }
             }
-        };
+            return e as isize;
+        }
+    };
 
-        // Stop journal transaction
-        if journal_handle.is_some() {
-            super::namei::clear_current_handle();
-            if let Some(mut h) = journal_handle {
-                let _ = super::journal::ext4_journal_stop(&mut h);
+    // O_APPEND sentinel from write_vfs: resolve the end-of-file offset NOW,
+    // from the disk-fresh inode under the big lock (the original inline
+    // body's discipline — an append racing on another description must be
+    // visible before the offset is fixed).
+    let offset = if offset == u64::MAX {
+        ext4_inode.get_size()
+    } else {
+        offset
+    };
+
+    // Call internal write function
+    let result = match ext4_file_write(fs, &mut ext4_inode, offset, buf) {
+        Err(e) => e as isize,
+        Ok(written_bytes) => {
+            // Update cached copy in inode.sb
+            if let Some(ptr) = inode.sb {
+                let cached = &mut *(ptr as *mut super::inode::Ext4Inode);
+                cached.block = ext4_inode.block;
+                cached.size = ext4_inode.size;
+                cached.blocks = ext4_inode.blocks;
+                cached.mtime = ext4_inode.mtime;
+                cached.ctime = ext4_inode.ctime;
+            }
+            // Update cached VFS inode size
+            inode.size.store(ext4_inode.get_size(), core::sync::atomic::Ordering::Relaxed);
+            // Write back inode to disk (registers with journal if handle active)
+            match crate::fs::ext4::inode::write_inode(fs, ext4_ino, &ext4_inode) {
+                Ok(()) => {
+                    // Session 25 write-through: update cached frames in the
+                    // written range IN PLACE instead of invalidating the
+                    // whole inode. Pinned entries (live mappings alias the
+                    // frame) MUST stay coherent with the file; clean ones
+                    // simply stay hot. (The old invalidate_inode freed
+                    // every clean page of the inode and marked pinned ones
+                    // stale — a MAP_PRIVATE read-only mapper then served
+                    // PRE-WRITE bytes from its still-pinned stale frame,
+                    // and a MAP_SHARED re-fault forked a divergent frame.)
+                    // skip_update_pfn: the msync/fsync flush path writes a
+                    // cache frame's own bytes back to the file — updating
+                    // THAT entry would copy the frame onto itself.
+                    if written_bytes > 0 {
+                        page_cache::get_page_cache().writeback_update_range(
+                            fs as *const crate::fs::ext4::Ext4FileSystem as u64,
+                            ext4_ino as u64,
+                            offset,
+                            &buf[..written_bytes],
+                            skip_update_pfn,
+                        );
+                    }
+                    written_bytes as isize
+                }
+                Err(e) => e as isize,
             }
         }
+    };
 
-        result
+    // Stop journal transaction
+    if journal_handle.is_some() {
+        super::namei::clear_current_handle();
+        if let Some(mut h) = journal_handle {
+            let _ = super::journal::ext4_journal_stop(&mut h);
+        }
     }
+
+    result
+}
+
+/// msync/fsync/truncate writeback (session 25): flush every DIRTY
+/// page-cache entry of this inode in the inclusive index range back to
+/// the file through the ext4 write machinery. Chunked collect → write →
+/// complete: the page-cache inodes lock is NEVER held across block I/O
+/// (R-WRITESTORM-1).
+///
+/// Each dirty frame is written at its own file offset, clamped to the
+/// CURRENT VFS inode size (a page straddling EOF flushes only its in-file
+/// tail — writeback never extends a file; a page fully past EOF — e.g. a
+/// truncate raced the flush — writes nothing and just clears its dirty
+/// state, which is the discard truncate semantics demand). For ftruncate
+/// the caller flushes BEFORE the new size is committed, so a straddling
+/// dirty page writes its full content first and the cut removes the tail
+/// (flush-then-cut = Linux's writeback-then-truncate semantics).
+///
+/// Returns the number of dirty pages processed (flush attempts, not
+/// necessarily clean writes: an I/O error leaves the page dirty for the
+/// next sync and still drops the flush pin here).
+pub fn ext4_flush_dirty_inode(
+    inode: &crate::fs::inode::Inode,
+    first_index: u64,
+    last_index: u64,
+) -> usize {
+    let fs_ptr = match inode.private_data {
+        Some(ptr) => ptr as *const crate::fs::ext4::Ext4FileSystem,
+        None => return 0,
+    };
+    let fs_id = fs_ptr as u64;
+    let ino = inode.ino as u64;
+    let cache = page_cache::get_page_cache();
+
+    const CHUNK: usize = 16;
+    let mut chunk: [(u64, u64); CHUNK] = [(0, 0); CHUNK];
+    // Per-entry write outcomes for flush_done: an entry may only go clean
+    // when its bytes verifiably reached the file (full write or a
+    // legitimate discard). A FAILED write keeps the page dirty — for a
+    // page whose mapping already unmapped (the flush is the only copy
+    // left) clearing the bit would make the sole surviving frame
+    // evictable and its data silently losable.
+    let mut done: [(u64, u64, bool); CHUNK] = [(0, 0, false); CHUNK];
+    let mut total = 0usize;
+    // Resume cursor — the PROGRESS RULE (collect_dirty_range doc): pages
+    // of live writable mappings STAY dirty after their flush (flush_done
+    // clears the bit only at pin count 0), so re-collecting from
+    // first_index would return the same leading chunk forever. Advance
+    // past the last collected index each round.
+    let mut cursor = first_index;
+    loop {
+        if cursor > last_index {
+            break;
+        }
+        let n = cache.collect_dirty_range(fs_id, ino, cursor, last_index, &mut chunk);
+        if n == 0 {
+            break;
+        }
+        for i in 0..n {
+            let (idx, pfn) = chunk[i];
+            // i_size clamp (see the doc comment). Read per page: a truncate
+            // or write racing the flush moves the boundary. Past-EOF is a
+            // legitimate DISCARD (truncate won): counts as done.
+            let size = inode.get_size();
+            let off = idx * crate::mm::PAGE_SIZE as u64;
+            if off >= size {
+                done[i] = (idx, pfn, true);
+                continue;
+            }
+            let n_bytes =
+                core::cmp::min(crate::mm::PAGE_SIZE as u64, size - off) as usize;
+            let kva = crate::arch::mm::phys_to_virt(crate::arch::mm::PhysAddr::new(
+                (pfn as u64) * crate::mm::PAGE_SIZE as u64,
+            )).0 as *const u8;
+            // SAFETY: pfn belongs to a page-cache entry pinned by
+            // collect_dirty_range; the linear map covers the whole frame and
+            // n_bytes <= PAGE_SIZE. ext4_write_at_core validates the file
+            // references itself. The pfn is ALSO passed as the update-skip:
+            // the write core's cache write-through must not copy this frame
+            // onto itself (self-overlap UB, and the frame is already the
+            // source of truth being persisted).
+            let src = unsafe { core::slice::from_raw_parts(kva, n_bytes) };
+            // SAFETY: same inode/fs resolution discipline as write_vfs.
+            let written = unsafe {
+                ext4_write_at_core(&*fs_ptr, inode.ino as u32, inode, off, src, pfn)
+            };
+            done[i] = (idx, pfn, written == n_bytes as isize);
+        }
+        cache.flush_done(fs_id, ino, &done[..n]);
+        total += n;
+        let last_idx = chunk[n - 1].0;
+        if last_idx == u64::MAX {
+            break;
+        }
+        cursor = last_idx + 1;
+    }
+    total
 }
 
 /// Get or create ReadAheadState stored in file.private_data.

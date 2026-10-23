@@ -396,6 +396,26 @@ impl File {
         // inode.write_data targets the in-memory FileBuffer and would
         // desynchronize disk-backed files (pwrite silently lost).
         if let Some(ops) = *self.ops.get() {
+            // ext4 (session 25): native position-invariant write — the
+            // set_pos/write/restore dance below raced concurrent plain
+            // write()/read() on the same open file description (the write
+            // twin of the R71 read_at race), and its trailing whole-inode
+            // page-cache invalidate broke shared-mapping coherence.
+            if core::ptr::eq(
+                ops as *const _,
+                &crate::fs::ext4::file::EXT4_FILE_OPS as *const _,
+            ) {
+                let n = crate::fs::ext4::file::ext4_file_write_at_vfs(self, offset, buf, count);
+                if n > 0 {
+                    // inotify IN_MODIFY on the pwrite(2) path (P0-4) —
+                    // sqlite's journal/WAL writes all go through pwrite.
+                    crate::fs::inotify::notify_file(
+                        self,
+                        crate::fs::inotify::inotify_events::IN_MODIFY,
+                    );
+                }
+                return n;
+            }
             if ops.write.is_some() && ops.lseek.is_some() {
                 let saved = self.get_pos();
                 self.set_pos(offset);

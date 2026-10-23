@@ -2007,6 +2007,19 @@ unsafe fn ext4_readlink(inode: &Inode, buf: &mut [u8]) -> isize {
 unsafe fn ext4_setattr(inode: &Inode, attr: u32, arg1: u64, arg2: u64) -> i32 {
     use crate::fs::inode::setattr_attr;
 
+    // Session 25 (MAP_SHARED writeback): on a SHRINK, flush dirty
+    // page-cache frames BEFORE the big lock and the new size commit. The
+    // flush takes EXT4_BIG_LOCK internally (ext4_write_at_core), so it
+    // cannot run inside this function's own critical section. Flush-then-
+    // cut: a dirty page straddling the new EOF writes its full content
+    // first, then the cut removes the tail (Linux writeback-then-
+    // truncate). A grow needs nothing — dirty pages sit below the old
+    // size. Stores racing after the flush are discarded by the
+    // invalidate below (POSIX: stores at truncate are undefined).
+    if attr == setattr_attr::ATTR_SIZE && arg1 < inode.get_size() {
+        crate::fs::ext4::file::ext4_flush_dirty_inode(inode, 0, u64::MAX);
+    }
+
     // ext4 has no internal concurrency protection on the block
     // allocator / inode writer (review 5.5 high: EXT4_BIG_LOCK 仅覆盖
     // namei): take the big lock for the whole setattr — truncate frees

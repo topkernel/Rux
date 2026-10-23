@@ -91,6 +91,9 @@ def build_image(cfg, path, probe, ldso_src):
 
 
 def qemu_cmd(cfg, img, serial):
+    # cache=none: the persistence pass terminates QEMU right after the
+    # probe prints PASS — guest writes must be on the host image file, not
+    # in a writeback cache that a SIGTERM can drop.
     if cfg["arch"] == "x86_64":
         return [cfg["qemu"],
                 "-M", "q35", "-accel", "tcg,thread=multi", "-cpu", "max",
@@ -98,7 +101,7 @@ def qemu_cmd(cfg, img, serial):
                 "-display", "none",
                 "-serial", "file:" + serial,
                 "-drive", "file=%s,if=none,id=rootfs,format=raw,"
-                         "file.locking=off" % img,
+                         "cache=none,file.locking=off" % img,
                 "-device", "virtio-blk-pci,drive=rootfs",
                 "-kernel", cfg["kernel"],
                 "-append", "root=/dev/vda rw init=/test/filemap "
@@ -109,10 +112,66 @@ def qemu_cmd(cfg, img, serial):
             "-m", cfg["mem"], "-smp", "2",
             "-display", "none", "-serial", "file:" + serial,
             "-drive", "file=%s,if=none,id=rootfs,format=raw,"
-                     "file.locking=off" % img,
+                     "cache=none,file.locking=off" % img,
             "-device", "virtio-blk-pci,disable-legacy=on,drive=rootfs",
             "-kernel", cfg["kernel"],
             "-append", "root=/dev/vda rw init=/test/filemap console=ttyS0"]
+
+
+def boot_once(cfg, img, serial, timeout, markers):
+    """Boot once; return (verdict, panicked). Success = every marker seen."""
+    if os.path.exists(serial):
+        os.remove(serial)
+    proc = subprocess.Popen(qemu_cmd(cfg, img, serial),
+                            stdin=subprocess.DEVNULL,
+                            stdout=subprocess.DEVNULL,
+                            stderr=subprocess.DEVNULL)
+    print("[boot] qemu pid=%d serial=%s" % (proc.pid, serial))
+    verdict = None
+    panicked = False
+    t0 = time.time()
+    try:
+        while time.time() - t0 < timeout:
+            time.sleep(2)
+            if proc.poll() is not None:
+                break
+            try:
+                data = open(serial, "rb").read()
+            except FileNotFoundError:
+                continue
+            if b"FMAP-FAIL" in data or b"FMAP-PERSIST-FAIL" in data:
+                verdict = "FAIL"
+                break
+            if b"KERNPANIC" in data or b"Kernel panic" in data:
+                verdict = "PANIC"
+                panicked = True
+                break
+            if all(m in data for m in markers):
+                verdict = "PASS"
+                break
+    finally:
+        if proc.poll() is None:
+            proc.terminate()
+            try:
+                proc.wait(5)
+            except subprocess.TimeoutExpired:
+                proc.kill()
+    # Final check after guest exit: the probe powers the system down right
+    # after printing its verdict — the poll loop can lose that race (known
+    # filedrain class). The serial file survives; read it once more.
+    if verdict is None:
+        try:
+            data = open(serial, "rb").read()
+            if b"FMAP-FAIL" in data or b"FMAP-PERSIST-FAIL" in data:
+                verdict = "FAIL"
+            elif b"KERNPANIC" in data or b"Kernel panic" in data:
+                verdict = "PANIC"
+                panicked = True
+            elif all(m in data for m in markers):
+                verdict = "PASS"
+        except FileNotFoundError:
+            pass
+    return verdict, panicked
 
 
 def main():
@@ -138,8 +197,7 @@ def main():
     img = os.path.join(WORK, "fmap-%s.img" % tag)
     probe = os.path.join(WORK, "filemap-%s" % tag)
     serial = os.path.join(WORK, "fmap-%s-serial.log" % tag)
-    if os.path.exists(serial):
-        os.remove(serial)
+    serial2 = os.path.join(WORK, "fmap-%s-serial2.log" % tag)
 
     ldso_src = build_probe(cfg, probe)
     if ldso_src is None:
@@ -148,46 +206,29 @@ def main():
         print("[img] mkfs failed")
         return 2
 
-    proc = subprocess.Popen(qemu_cmd(cfg, img, serial),
-                            stdin=subprocess.DEVNULL,
-                            stdout=subprocess.DEVNULL,
-                            stderr=subprocess.DEVNULL)
-    print("[boot] %s qemu pid=%d" % (tag, proc.pid))
-    verdict = None
-    panicked = False
-    t0 = time.time()
-    try:
-        while time.time() - t0 < args.timeout:
-            time.sleep(2)
-            if proc.poll() is not None:
-                break
-            try:
-                data = open(serial, "rb").read()
-            except FileNotFoundError:
-                continue
-            if b"FMAP-PASS" in data:
-                verdict = "PASS"
-                break
-            if b"FMAP-FAIL" in data:
-                verdict = "FAIL"
-                break
-            if b"KERNPANIC" in data or b"Kernel panic" in data:
-                verdict = "PANIC"
-                panicked = True
-                break
-    finally:
-        if proc.poll() is None:
-            proc.terminate()
-            try:
-                proc.wait(5)
-            except subprocess.TimeoutExpired:
-                proc.kill()
-    print("[boot] verdict: %s" % verdict)
-    if os.path.exists(serial):
-        sys.stdout.write(open(serial, errors="replace").read()[-6000:])
-    if panicked:
+    # Pass 1: the full FC/FS suite; the probe leaves /filemap-persist.dat
+    # (written through a MAP_SHARED mapping + msync + fsync) in the image.
+    verdict, panicked = boot_once(cfg, img, serial, args.timeout, [b"FMAP-PASS"])
+    print("[boot] pass1 verdict: %s" % verdict)
+    if verdict != "PASS":
+        if os.path.exists(serial):
+            sys.stdout.write(open(serial, errors="replace").read()[-6000:])
+        return 2 if panicked else 1
+
+    # Pass 2 (session 25): same image, cold page cache — the persist
+    # pattern read back here proves the msync/fsync writeback reached the
+    # DISK, not just the in-memory cache frames.
+    verdict2, panicked2 = boot_once(
+        cfg, img, serial2, args.timeout,
+        [b"FMAP-PASS", b"FMAP-PERSIST-PASS"])
+    print("[boot] pass2 verdict: %s" % verdict2)
+    for s in (serial2, serial):
+        if os.path.exists(s):
+            sys.stdout.write("---- %s ----\n" % s)
+            sys.stdout.write(open(s, errors="replace").read()[-6000:])
+    if panicked2:
         return 2
-    return 0 if verdict == "PASS" else 1
+    return 0 if verdict2 == "PASS" else 1
 
 
 if __name__ == "__main__":

@@ -288,6 +288,7 @@ fn filemap_pin_cache_page(
     file: &crate::fs::file::File,
     file_offset: usize,
     effective_size: usize,
+    hole_as_zero: bool,
 ) -> Option<u64> {
     if file_offset >= effective_size {
         return None;
@@ -304,9 +305,28 @@ fn filemap_pin_cache_page(
         return Some(phys);
     }
     // Miss: warm the cache (ReadDst::Discard — no bounce copy), then pin.
-    if !crate::fs::ext4::file::ext4_fault_populate_cache(file, file_offset as u64) {
+    // Holes never enter the page cache through the READ path (the fill
+    // skips unallocated blocks and zero-fills the destination in place),
+    // so populate can "succeed" without the page existing. For the
+    // hole_as_zero arm (SHARED mappings, session 25) that must not fall
+    // back to a private zero copy — mapper incoherence, nothing persists:
+    // insert an explicit ZERO page into the cache and alias THAT (x86_64
+    // twin). The flush path allocates the on-disk block at msync/fsync
+    // time. Private arms keep the private-copy fill.
+    let populated =
+        crate::fs::ext4::file::ext4_fault_populate_cache(file, file_offset as u64);
+    if populated {
+        if let Some(phys) = cache.get_phys(fs_id, ino, page_index) {
+            return Some(phys);
+        }
+    }
+    if !hole_as_zero {
         return None;
     }
+    // SAFETY: same read-only inode resolution as above.
+    let inode = unsafe { &*file.inode.get() }.as_ref()?;
+    static ZERO_PAGE: [u8; 4096] = [0; 4096];
+    cache.insert(inode.fs_id, inode.ino as u64, page_index, 0, &ZERO_PAGE);
     cache.get_phys(fs_id, ino, page_index)
 }
 
@@ -518,15 +538,20 @@ pub fn handle_mm_fault(
                 }
                 // PCACHE (RSW bit 9, filemap_fault port): the marker hides
                 // a pinned page-cache frame — the pin ownership must
-                // survive the re-present (else the later unmap leaks it),
-                // and the re-presented leaf never gains W in place: a
-                // W-upgrade diverts the first write through COW like every
-                // other private file page (Linux writenotify; x86_64 twin
-                // in mprotect_pte_range).
+                // survive the re-present (else the later unmap leaks it).
+                // A PRIVATE cache leaf never gains W in place: a W-upgrade
+                // diverts the first write through COW like every other
+                // private file page (Linux writenotify; x86_64 twin in
+                // mprotect_pte_range). A SHARED cache leaf (PCACHE with no
+                // COW — see cow_flags::pte_is_shared_cache; Sv39 has no
+                // third RSW bit, bit 10 is the PPN field) keeps W — its
+                // stores must land in the cache frame (session 25).
                 let pcache_bit = raw & super::mm_ops::cow_flags::PCACHE;
                 if pcache_bit != 0 {
                     flags |= pcache_bit;
-                    if flags & PageTableEntry::W != 0 {
+                    if flags & PageTableEntry::W != 0
+                        && !super::mm_ops::cow_flags::pte_is_shared_cache(raw)
+                    {
                         flags |= 1 << 8; // force COW
                         flags &= !PageTableEntry::W;
                     }
@@ -594,42 +619,94 @@ pub fn handle_mm_fault(
     // below. (LTP execl01..execveat02: the child re-mmaps the IPC
     // results file after exec; with private copies the parent never saw
     // the child's TPASS bits and TBROK'd "Test haven't reported
-    // results".) COW-exemption on fork already keys off
-    // VmaFlags::SHARED regardless of VmaType, so aliased frames inherit
-    // as-is; the pin taken by get_phys keeps the frame unevictable for
-    // the mapping's lifetime (see shared_file_fault_page).
-    let shared_alias_phys: Option<u64> = if vma_type == VmaType::FileBacked
-        && vma_flags.is_shared()
-    {
-        let file = addr_space
-            .get_vma_file(
-                addr_space
-                    .vma_read()
-                    .find(page_virt_addr)
-                    .map(|v| v.start().as_usize())
-                    .unwrap_or(0),
-            )
-            .or_else(|| {
-                if vma_file_fd >= 0 {
-                    unsafe { crate::fs::get_file_fd(vma_file_fd as usize) }
-                } else {
-                    None
+    // results".)
+    //
+    // Session 25 (writeback coherence): ext4 files migrate onto the
+    // PCACHE protocol — the SAME pin the private arm takes (get_phys /
+    // Discard-warm via filemap_pin_cache_page), released at unmap by the
+    // PTE's PCACHE bit. This retires the old PERMANENT pin (alias frames
+    // used to stay unevictable forever, bounding memory by every file
+    // ever shared-mapped instead of by live mappings), fixes write(2)
+    // divergence (the write path now updates pinned frames in place
+    // instead of invalidating the inode cache — a stale invalidated
+    // entry served the next fault from DISK, splitting mappers from the
+    // still-live alias frame), and gives the mapping W-through + dirty
+    // + msync/fsync persistence (stores land in the frame; the
+    // conservative dirty-at-install mark makes sync flush it). Non-ext4
+    // files keep the legacy permanent-pin alias.
+    let (shared_alias_phys, shared_pcache): (Option<u64>, bool) =
+        if vma_type == VmaType::FileBacked && vma_flags.is_shared() {
+            let file = addr_space
+                .get_vma_file(
+                    addr_space
+                        .vma_read()
+                        .find(page_virt_addr)
+                        .map(|v| v.start().as_usize())
+                        .unwrap_or(0),
+                )
+                .or_else(|| {
+                    if vma_file_fd >= 0 {
+                        unsafe { crate::fs::get_file_fd(vma_file_fd as usize) }
+                    } else {
+                        None
+                    }
+                });
+            let vma_start = addr_space
+                .vma_read()
+                .find(page_virt_addr)
+                .map(|v| v.start().as_usize());
+            match (file, vma_start) {
+                (Some(f), Some(vs)) => {
+                    let file_offset = vma_offset + (page_virt_addr.as_usize() - vs);
+                    if crate::fs::ext4::file::is_ext4_file(f.as_ref()) {
+                        // Effective size: CURRENT inode size (a file grown
+                        // by write(2) after the mmap must serve its new
+                        // pages), the mmap-time snapshot as fallback —
+                        // same rule as the private arm.
+                        let effective_size = unsafe { &*f.inode.get() }
+                            .as_ref()
+                            .map(|i| i.get_size())
+                            .unwrap_or(vma_file_size) as usize;
+                        match filemap_pin_cache_page(f.as_ref(), file_offset, effective_size, true)
+                        {
+                            Some(phys) => {
+                                // Conservative v1 dirty mark for a W
+                                // mapping (x86_64 twin): the store may
+                                // never come; flushing an unwritten page
+                                // is harmless I/O.
+                                if vma_flags.is_writable() {
+                                    if let Some(inode) =
+                                        unsafe { &*f.inode.get() }.as_ref()
+                                    {
+                                        crate::fs::page_cache::get_page_cache().mark_dirty(
+                                            inode.fs_id,
+                                            inode.ino as u64,
+                                            (file_offset / PAGE_SIZE_USIZE) as u64,
+                                        );
+                                    }
+                                }
+                                (Some(phys), true)
+                            }
+                            // Hole/populate failure: fall to the private
+                            // copy below (pre-existing behavior).
+                            None => (None, false),
+                        }
+                    } else {
+                        // Legacy non-ext4 alias: permanent pin, unchanged.
+                        match crate::fs::page_cache::shared_file_fault_page(
+                            &f,
+                            file_offset as u64,
+                        ) {
+                            Some(p) => (Some(p), false),
+                            None => (None, false),
+                        }
+                    }
                 }
-            });
-        let vma_start = addr_space
-            .vma_read()
-            .find(page_virt_addr)
-            .map(|v| v.start().as_usize());
-        match (file, vma_start) {
-            (Some(f), Some(vs)) => {
-                let file_offset = vma_offset + (page_virt_addr.as_usize() - vs);
-                crate::fs::page_cache::shared_file_fault_page(&f, file_offset as u64)
+                _ => (None, false),
             }
-            _ => None,
-        }
-    } else {
-        None
-    };
+        } else {
+            (None, false)
+        };
 
     // MAP_PRIVATE file read/exec fault (filemap_fault port of the x86_64
     // session-23 fix): pin the PAGE-CACHE frame and map it directly,
@@ -673,7 +750,7 @@ pub fn handle_mm_fault(
                     .unwrap_or(vma_file_size) as usize;
                 if let Some(f) = file {
                     let file_offset = vma_offset + (page_virt_addr.as_usize() - vs);
-                    filemap_pin_cache_page(&f, file_offset, effective_size)
+                    filemap_pin_cache_page(&f, file_offset, effective_size, false)
                 } else {
                     None
                 }
@@ -841,11 +918,23 @@ pub fn handle_mm_fault(
         // is shared with the page cache (and possibly other mappers). A
         // writable private VMA gets the COW bit and the first write copies
         // (do_cow_fault parity; x86_64 twin). The PCACHE bit records that
-        // this PTE owns one cache pin (see cow_flags).
+        // this PTE owns one cache pin (see cow_flags). Session 26: the COW
+        // bit is set on READ-ONLY installs too — "PCACHE set, COW clear"
+        // is the SHARED-leaf predicate (pte_is_shared_cache; Sv39 has no
+        // third software bit), so a private leaf must never present that
+        // combination even before any W-upgrade.
         pte_flags &= !PageTableEntry::W;
-        if vma_flags.is_writable() {
-            pte_flags |= super::mm_ops::cow_flags::COW;
-        }
+        pte_flags |= super::mm_ops::cow_flags::COW;
+        pte_flags |= super::mm_ops::cow_flags::PCACHE;
+    }
+    if shared_pcache {
+        // SHARED cache leaf (session 25): W stays granted IN PLACE —
+        // stores land directly in the cache frame (mapper coherence).
+        // The PCACHE bit records the PTE-owned pin (released at unmap).
+        // Deliberately NO COW bit: PCACHE-without-COW is exactly how the
+        // mprotect/marker-represent sites recognize a shared leaf and
+        // keep granting W in place (a COW divert here would detach this
+        // mapping from the file's shared state — see pte_is_shared_cache).
         pte_flags |= super::mm_ops::cow_flags::PCACHE;
     }
 
@@ -871,11 +960,11 @@ pub fn handle_mm_fault(
         drop(_pte_guard);
         // Lost the race: free our exclusively-owned fresh page and let the
         // caller retry — the next entry sees the mapping present.
-        // (A cache frame — MAP_SHARED alias or MAP_PRIVATE pin — is NOT
-        // exclusively owned; the pin belongs to the page cache. Freeing
-        // the frame would corrupt it; a private-cache pin is returned via
-        // put_by_key, a shared alias's pin is permanent by design.)
-        if private_cache_phys.is_some() {
+        // (A cache frame — SHARED PCACHE alias or MAP_PRIVATE pin — is NOT
+        // exclusively owned; the pin belongs to the page cache and is
+        // returned via put_by_key. Only the LEGACY non-ext4 shared alias
+        // keeps its permanent pin, released by nothing here.)
+        if private_cache_phys.is_some() || shared_pcache {
             super::mm_ops::release_cache_mapping_pin(
                 (phys_addr.bits() >> PAGE_SHIFT) as usize,
             );
@@ -894,9 +983,10 @@ pub fn handle_mm_fault(
         if !map_page(root_ppn, fault_addr, phys_addr, pte_flags) {
             // PT allocation failure (fake-OOM family): release the data
             // page, deliver OOM (trap layer SIGKILLs the user task). A
-            // private-cache pin is returned via put_by_key; a shared
-            // alias's pin is permanent (its frame stays cache-owned).
-            if private_cache_phys.is_some() {
+            // private pin or SHARED PCACHE pin is returned via put_by_key;
+            // only the LEGACY alias's pin is permanent (its frame stays
+            // cache-owned).
+            if private_cache_phys.is_some() || shared_pcache {
                 super::mm_ops::release_cache_mapping_pin(
                     (phys_addr.bits() >> PAGE_SHIFT) as usize,
                 );
@@ -937,11 +1027,20 @@ pub fn handle_mm_fault(
                 if shared_alias_phys.is_some() {
                     (*page).get_page();
                     (*page).inc_mapcount();
-                    crate::mm::rmap::page_record_mapping(
-                        unsafe { &*page },
-                        addr_space as *const _ as usize,
-                        fault_addr.bits() as usize,
-                    );
+                    if !shared_pcache {
+                        // Legacy non-ext4 alias only. A PCACHE leaf takes
+                        // NO rmap record: the descriptor's mapping/index
+                        // are the page cache's eviction keys and rmap
+                        // state would corrupt eviction (same discipline
+                        // as the private cache arm; this retires the
+                        // session-24 "unconditional page_record_mapping
+                        // on a cache frame" hazard for ext4).
+                        crate::mm::rmap::page_record_mapping(
+                            unsafe { &*page },
+                            addr_space as *const _ as usize,
+                            fault_addr.bits() as usize,
+                        );
+                    }
                 } else if private_cache_phys.is_some() {
                     // MAP_PRIVATE pinned cache frame (filemap_fault port):
                     // one descriptor reference (dropped by the unmap/COW
