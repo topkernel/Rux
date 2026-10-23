@@ -137,8 +137,20 @@ fn strace1_line(nr: u32, args: &SyscallArgs, result: i64) {
 
 /// System call entry function
 ///
-/// Called by trap.rs, dispatches to specific system call handlers
+/// Called by trap.rs, dispatches to specific system call handlers.
+/// perf-audit wrapper: whole-syscall wall-time accounting
+/// (dfx/syscost.rs, cmdline `syscost=1`) around the real dispatcher.
+/// Diverging paths (do_exit on exit_group / fatal signals) skip the
+/// exit hook, so those calls are undercounted — acceptable for a
+/// ranking probe.
 pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
+    let sc_nr = syscall_get_nr(regs) as usize;
+    let sc_t0 = crate::dfx::syscost::enter();
+    syscall_handler_inner(regs);
+    crate::dfx::syscost::exit(sc_nr, sc_t0);
+}
+
+fn syscall_handler_inner(regs: &mut PtRegs) {
     let syscall_no = syscall_get_nr(regs);
     let mut args = syscall_get_arguments(regs);
 

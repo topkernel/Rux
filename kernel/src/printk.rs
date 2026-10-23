@@ -9,7 +9,7 @@
 //! for userspace `dmesg` to read/manage kernel logs.
 
 use core::fmt;
-use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU8, AtomicU64, AtomicUsize, Ordering};
 
 extern crate alloc;
 
@@ -983,6 +983,15 @@ pub fn generate_kmsg() -> alloc::vec::Vec<u8> {
 static KMSG_READ_WQ: crate::process::wait::WaitQueueHead =
     crate::process::wait::WaitQueueHead::new();
 
+/// perf-audit counters for the hilogd.rd_kmsg spin hunt (pa3: 92.6K
+/// read()/s sustained — which arm of the read does that?): records
+/// returned, EAGAINs, blocking sleeps, and the open flags of the first
+/// reader (O_NONBLOCK visible in the bits). Printed from syscost dumps.
+pub static KMSG_N_RECORD: AtomicUsize = AtomicUsize::new(0);
+pub static KMSG_N_EAGAIN: AtomicUsize = AtomicUsize::new(0);
+pub static KMSG_N_SLEEP: AtomicUsize = AtomicUsize::new(0);
+pub static KMSG_FIRST_FLAGS: AtomicUsize = AtomicUsize::new(0);
+
 /// Read handler for /dev/kmsg.
 ///
 /// Each read() returns one record in /dev/kmsg format:
@@ -997,6 +1006,9 @@ static KMSG_READ_WQ: crate::process::wait::WaitQueueHead =
 /// vCPUs for the whole OH boot.
 fn kmsg_file_read(file: &crate::fs::file::File, buf: &mut [u8]) -> isize {
     let nonblock = file.flags().bits() & crate::fs::file::FileFlags::O_NONBLOCK != 0;
+    KMSG_FIRST_FLAGS
+        .compare_exchange(0, file.flags().bits() as usize, Ordering::Relaxed, Ordering::Relaxed)
+        .ok();
     loop {
         {
             let mut rb = RING_BUFFER.lock_irqsave();
@@ -1006,6 +1018,7 @@ fn kmsg_file_read(file: &crate::fs::file::File, buf: &mut [u8]) -> isize {
             if pos >= next_seq {
                 drop(rb);
                 if nonblock {
+                    KMSG_N_EAGAIN.fetch_add(1, Ordering::Relaxed);
                     return -(crate::syscall::errno::EAGAIN) as isize;
                 }
                 // Block until a record lands. prepare→re-check→schedule
@@ -1027,6 +1040,7 @@ fn kmsg_file_read(file: &crate::fs::file::File, buf: &mut [u8]) -> isize {
                         continue;
                     }
                 }
+                KMSG_N_SLEEP.fetch_add(1, Ordering::Relaxed);
                 crate::arch::cpu::restore_irq(true);
                 crate::sched::schedule();
                 KMSG_READ_WQ.finish_wait(current);
@@ -1092,6 +1106,7 @@ fn kmsg_file_read(file: &crate::fs::file::File, buf: &mut [u8]) -> isize {
 
             // Advance position to next record
             file.set_pos(seq + 1);
+            KMSG_N_RECORD.fetch_add(1, Ordering::Relaxed);
 
             // Drop lock before returning
             drop(rb);

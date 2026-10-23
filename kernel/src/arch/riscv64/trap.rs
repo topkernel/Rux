@@ -426,11 +426,17 @@ fn handle_timer_interrupt(regs: &mut PtRegs, cpu: usize) {
                 use core::sync::atomic::Ordering::Relaxed;
                 if regs.user_mode() {
                     (*task).utime_ticks.fetch_add(1, Relaxed);
+                    crate::dfx::syscost::tick_user();
                 } else {
                     (*task).stime_ticks.fetch_add(1, Relaxed);
+                    crate::dfx::syscost::tick_kern(regs.epc);
                 }
+            } else {
+                crate::dfx::syscost::tick_idle();
             }
         }
+    } else {
+        crate::dfx::syscost::tick_idle();
     }
 
     // 1. Update jiffies
