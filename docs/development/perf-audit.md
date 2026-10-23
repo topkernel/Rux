@@ -189,7 +189,7 @@ Contribution model: 2 vCPUs x 1500 s = 3000 CPU-s observed; kernel mode
 |---|---|---|---|---|---|---|
 | 1 | Interrupt-disabled regions (softirq-at-irq-exit loop + irqsave sections + UART TX cli) | 388 events >=1 s; ticks-behind-cli 25-32% of kernel ticks | continuous | ~25-32% of kernel-mode CPU; causes all timer lateness | **large** — multiplies everything (timers, sleeps, watchdogs) | F1 |
 | 2 | Scheduler wake-loss (WAKE-RUN-LEAK: lying busy slots + linked-but-starving) | median 252 s age per episode | 448 episodes/boot | latency, not CPU | **large** — the direct maker of the 16-23 min (minutes-long service stalls serialize the dependency chain) | F3 |
-| 3 | Logging syscall flood (hilogd.server socket drain + hilogd.rd_kmsg spin + writev) | 4-54 us per call | ~130M calls (read+recv*2+writev) | ~0.5-1.0 vCPU sustained | medium-large — burns a vCPU half, saturates softirq/wake paths | F2 |
+| 3 | Logging syscall flood — **rd_kmsg half FIXED (pa12)**: was 60-92K read/s on /proc/kmsg EOF spin, now ~20/s. Remaining: hilogd.server drain + sysevent_source + connect-retry storm | 4-54 us per call | read: 20.4M -> 0.23M by t=300; recvmsg ~5.2M (unchanged); connect 7.4M (unchanged) | was ~0.5-1.0 vCPU sustained, now ~0.5 vCPU less (kernel tick share 88.0% -> 86.0%) | medium — was medium-large; the rd_kmsg half is gone | F2 |
 | 4 | ext4 metadata + write path (open/stat/getdents/fsync/pwrite/mkdir) | 100-300x Linux | ~700K calls | ~400-600 CPU-s | medium | F4 |
 | 5 | Softirq dispatch overhead proper (v1 tcp_timer + v8 hrtimer raised every tick per CPU = 400 entries/s; v4 block 98/s) | loop machinery | 125K entries/420 s | small (handlers 0.4% CPU) | small once F1's cli accounting is separated | F1 |
 | 6 | Page-cache/virtio CAS contention (fetch_update family) | - | - | 9-15% of kernel ticks | medium (I/O completion path) | F5 |
@@ -224,17 +224,29 @@ specific amplification. Measured result on current main:
   None of these exist at that rate on the Linux reference boot (which
   finishes before such loops matter). This is the "systemic"
   multiplier that makes every per-op cost count double.
-  Attribution status of the hilogd.rd_kmsg read flood (pa4-pa8 hunt):
-  the reads do NOT go to /dev/kmsg (its read counters stay 0 for the
-  whole boot), do not return EOF (fd-path census), do not return
-  EAGAIN (census) — they return data, ~92K times/s, from some other
-  fd. Remaining step: one taskdump of that thread's fdtable while the
-  flood is live (KILLDUMP already prints fd tables). Side finding
-  from the same hunt: userspace writes to /dev/kmsg go through a
-  `pr_info!` passthrough that loglevel 4 drops BEFORE the ring —
-  OH's boot markers written this way never reach any hilog consumer
-  (correctness bug, trivial fix: route the passthrough at KERN_INFO
-  into the ring unconditionally, console-gated).
+  **RESOLVED (pa9-pa12, second session): the hilogd.rd_kmsg read flood
+  is an EOF spin on /proc/kmsg.** pa9's positive-read census caught the
+  fd: rd_kmsg opens /proc/kmsg (NOT /dev/kmsg — that is why pa4's
+  /dev/kmsg counters stayed 0), drains the procfs open-time SNAPSHOT
+  in 196 reads (~200 KB), and every subsequent read returns 0; pa10's
+  failing-read census showed zero errno returns all boot, so the flood
+  reads are EOFs — the pa4-8 "not EOF" conclusion was EOF-census table
+  saturation (12/12 slots claimed by earlier comms), not absence.
+  Linux /proc/kmsg is a BLOCKING record-at-a-time stream; OH's reader
+  paces on the blocking semantics. Fixed as a Linux-faithful stream
+  (single-reader EBUSY, one record per read, shared read_seq cursor,
+  timed-poll block — see the pa11 ABBA note below): rd_kmsg collapsed
+  from 60-92K reads/s to ~20/s (one syscall per delivered record),
+  system-wide read() count at t=300 fell from 20.4M to 228K (-90x),
+  total syscalls -16%, kernel tick share 88.0% -> 86.0%. The same
+  commit fixes the /dev/kmsg write passthrough (userspace writes were
+  dropped by printk()'s pre-ring loglevel filter — OH boot markers
+  never reached any hilog consumer; now always ring-recorded,
+  console-gated; 772 [kmsg] markers observed in pa12).
+  REMAINING in F2: hilogd.server socket drain (5.2M recvmsg by t=300
+  in pa12) + sysevent_source (~300K) + the 7.4M connect-retry storm —
+  OH userspace logging volume/retry behavior, route to the launcher
+  line with the pa12 numbers.
 - **F3 Scheduler wake-loss — CONFIRMED as the dominant *wall-clock*
   family.** 448 WAKE-RUN-LEAK episodes (kicked >=2x, never picked),
   median 252 s, p90 467 s, max 520 s. The W3-RUNWAKE-REFUSED census
@@ -277,6 +289,7 @@ fault), is verified fixed (see section 6).
 | MOUNT_TABLE preempt-off (502ea7a7) | >=1 s cli sections in register_mount | mount avg 5.1 ms whole-syscall; residual cli windows now UART/memcmp-shaped | holds |
 | unix truesize (5157c305) | writev parked whole 3 s budgets (183 stime ticks) | writev avg 14 us | holds |
 | sticky one-shot wake re-issue (385c9793) | consumed wake tokens, tasks parked for minutes | REKICK now re-issues; the *residual* WAKE-RUN-LEAK (448/boot) is the next member of this family | partially — family continues |
+| /proc/kmsg blocking stream + /dev/kmsg write ring fix (perf-audit d931c345 + cfc39329, second session) | rd_kmsg EOF spin 60-92K read/s, ~15-25% of a vCPU; boot markers dropped pre-ring | rd_kmsg ~20 reads/s (one per record); read() total 20.4M -> 0.23M by t=300; kernel tick share 88.0% -> 86.0%; 772 [kmsg] markers live | holds (pa12; long-boot wall-clock effect not yet measured) |
 
 ## 7. Fix roadmap (ROI order, with lane routing)
 
@@ -300,15 +313,22 @@ fault), is verified fixed (see section 6).
    timer-lateness amplification (nanosleep 2.6 s -> ms-class).
    Lane: interrupt/softirq is shared-stable; small diffs, main
    session coordinates.
-3. **Kill the hilogd.rd_kmsg spin (printk/dfx).** 92.6K read()/s
+3. **Kill the hilogd.rd_kmsg spin (printk/dfx).** ~~92.6K read()/s
    sustained for the whole boot, ~15-25% of a vCPU. Attribution
    narrowed to "positive-returning reads on a non-kmsg fd" (pa4-8);
    the remaining step is one fdtable dump of that thread mid-flood
    (KILLDUMP prints fd tables; or a one-line fd-path latch in the
-   read fast paths). Also fix the /dev/kmsg write passthrough
-   (loglevel drop swallows OH's boot markers — one-line fix).
-   Lane: this perf-audit line can take both (no conflicts; the
-   printk.rs kmsg region is not contended by other lanes right now).
+   read fast paths).~~ **DONE (second session, pa9-pa12): the spin was
+   an EOF loop on /proc/kmsg's open-time snapshot; /proc/kmsg is now a
+   Linux-faithful blocking stream (see F2 above). Also fixed the
+   /dev/kmsg write passthrough.** NEW CROSS-LANE FINDING from the
+   first draft (pa11): parking a reader on KMSG_READ_WQ deadlocks
+   against scheduler-internal printk under GRQ (WAKE/W3 print family)
+   because wake_up_all holds the WQ lock across wake_up_process
+   (R12-1). The waitqueue invariant "no GRQ-held path takes a
+   waitqueue lock" is violated by scheduler diagnostics prints —
+   scheduler-lane owners should either gate those prints or expect
+   this hazard for any new printk-woken waitqueue.
 4. **ext4 metadata path profiling (fs lane).** open/stat at 100-200x
    is the largest pure per-op factor. Likely dcache/name-lookup
    shape (String allocations visible at 4-6% of ticks) rather than
@@ -334,11 +354,18 @@ fault), is verified fixed (see section 6).
   dfx=switches.rs bit): per-syscall {n, wall, max}, >4 ms slow ring
   with comm, per-CPU tick modes (user/kernel/idle), 256-slot kernel-rip
   page histogram, softirq vec counts, flood-nr per-comm attribution,
-  kmsg read counters + EOF/EAGAIN read censuses (fd paths).
+  kmsg read counters + EOF/EAGAIN read censuses (fd paths), and
+  (second session) the positive-read census (comm-keyed fd latch that
+  follows the current open-file-description by `file_id`, recording
+  fd/ops/path/bytes; ops pointers symbolize host-side via nm) and the
+  failing-read census (comm, errno, fd-resolution state).
   60 s dumps from the timer softirq. Both arches; zero cost when off.
-  Diagnostic caveat: the read censuses add ~5 us to each read that
-  returns 0/EAGAIN while syscost=1 (fd re-resolution); flood-table
-  per-op numbers for read come from the pa3 binary (census-free).
+  Diagnostic caveats learned the hard way: the EOF/EAGAIN censuses are
+  ONCE-PER-COMM tables (12 slots) — they saturate with early comms and
+  silently DROP later spinners (this produced the wrong "not EOF"
+  conclusion in pa4-8; the positive/fail censuses closed it); census
+  adds ~5 us to each read that returns 0/EAGAIN while syscost=1;
+  flood-table per-op numbers for read come from the census-free binary.
 - `kernel/src/printk.rs` — kmsg read counters (records/EAGAIN/sleeps/
   first-reader flags) for the spin hunt.
 - `run/pa-boot.sh` — quiet-OH measurement boot (snapshot shared disks,
