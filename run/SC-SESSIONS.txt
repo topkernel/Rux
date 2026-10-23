@@ -2231,3 +2231,36 @@ SESSION R FIFTH LEG (sc175+, 20:0x-): sc174 WAS A GOOD BOOT (re-read);
   precedent: dead boot). Kernel-side corruption of interleaved UART
   prints under contention also visible. Wedge tally for the reroll
   campaign: 1 (sc175). sc176 launched 20:19.
+
+SESSION R FIFTH LEG ADDENDUM (sc176/177 forensics, 20:1x-20:2x): THE
+  sc176 KILLER IS THE fake-OOM FAMILY - AND THE FIX ALREADY EXISTS ON
+  MAIN (cherry-picked).
+- sc176 post-mortem: launcher child 1231 was NOT stuck on binder - it
+  OOM-faulted. 1727 "pagefault: Out of memory" lines in its window;
+  oom-killer killed ueventd once, later rounds "no killable processes
+  found"; appspawn client read timed out (fd 35 EAGAIN) -> OnClose ->
+  appspawn killed 1231 -> narration dead at slog[5093], AMS no-retry.
+- Raw ledger lines survived (printk wedged, raw UART copy did not):
+  MEMLEDGER-BUCKETS freeL=0 freeM=0 reserved=836858 pt=4591 anon=42397
+  cow=130 mapped_file=1022 lru_file=131543 OTHER_USED=555215 (=2.17GB,
+  75% of the 736006-page ZoneNormal) + OOMFX zone_free=0 walkable=0
+  orphan=0 inverse=0. Buddy genuinely empty; 131k CLEAN lru_file pages
+  sat unreclaimed while faults died.
+- Root cause (already attributed on main by the wildwrite-hunt sessions
+  22/23): every x86_64 PRIVATE file fault allocated a fresh per-fault
+  copy (read_at fill) with NO descriptor state - "permanently
+  unreclaimable and census-invisible, 539-558k pages = 74-76% of the
+  zone at OOM" (their numbers = my sc176 numbers exactly). The OH boot
+  privately mmaps the whole .so world; the copies ate the zone.
+- FIX: ed444e08 "filemap_fault alignment - cache-page mapping for
+  private file faults" (on main; NOT in this branch - we forked at
+  6dc0b762 before it). Cherry-picked cleanly onto feature/samgr-callback
+  as db7229a7 (page_fault/mm_ops/mmu_init/ext4-file/page_cache/rmap,
+  558 insertions); riscv64 twin 6e76430b NOT picked (ed444e08 keeps the
+  riscv shape unchanged - no riscv regression). Validated upstream by
+  fm1/fm2 gates ("45-min OH gate: 0 panics/0 OOM/0 faults").
+- sc177 = old-kernel control, killed at 11 min (2 OOM faults already,
+  0 children, BMS bundle-install loop) - superseded, not a wedge datum.
+- sc178 launched 20:25 on the FIXED kernel (bzImage 20:23). A/B: watch
+  "pagefault: Out of memory" count (sc176: 1727) and whether the
+  launcher child survives past sandbox init this time.
