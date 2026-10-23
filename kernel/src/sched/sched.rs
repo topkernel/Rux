@@ -4536,6 +4536,12 @@ unsafe fn context_switch(prev: &mut Task, next: &mut Task) {
 
     (*next).set_ti_cpu(cpu_id as i32);
 
+    // /proc/stat "ctxt" + the per-task voluntary/involuntary switch
+    // counters (Linux's __schedule accounting). The task being switched
+    // OUT is the one that is charged: it blocked (voluntary) or was
+    // preempted while still runnable (involuntary).
+    crate::fs::procfs::stat::note_switch(&*prev);
+
     if (*next).is_fork_child() {
         (*next).clear_fork_child();
     }

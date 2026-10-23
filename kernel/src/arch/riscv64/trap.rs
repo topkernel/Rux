@@ -414,7 +414,13 @@ fn handle_timer_interrupt(regs: &mut PtRegs, cpu: usize) {
         return;
     }
 
-    // 0. CPU-time accounting (Linux account_process_tick): charge this
+    // 0. Per-CPU time accounting for /proc/stat (Linux
+    // account_process_tick): the idle task means the CPU had nothing to
+    // run, otherwise the tick is user time (the timer hit the task in
+    // user mode) or system time (it hit it in kernel mode).
+    crate::fs::procfs::stat::charge_tick(regs.user_mode());
+
+    // 0b. CPU-time accounting (Linux account_process_tick): charge this
     // tick to the interrupted task as user or system time depending on
     // the privilege mode the timer hit. Only user tasks are charged
     // (kthreads are born without an address space).

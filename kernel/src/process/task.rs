@@ -1003,6 +1003,14 @@ pub struct Task {
     pub stime_ticks: AtomicU64,
     pub cutime_ticks: AtomicU64,
     pub cstime_ticks: AtomicU64,
+    /// Context-switch counters (Linux's task->nvcsw / task->nivcsw).
+    /// A voluntary switch is one where the task went to sleep; an
+    /// involuntary one is where the task was preempted while still
+    /// runnable. Counted in the scheduler's context_switch and read by
+    /// /proc/[pid]/status (voluntary_ctxt_switches /
+    /// nonvoluntary_ctxt_switches).
+    pub nvcsw: AtomicU64,
+    pub nivcsw: AtomicU64,
     /// RUSAGE_CHILDREN ru_maxrss (KB): max of reaped children's resident
     /// set at exit (Linux signal->cmaxrss). LTP getrusage03 requires the
     /// propagation (initial.children ~= 100MB after a 100MB consumer
@@ -1322,6 +1330,8 @@ impl Task {
             stime_ticks: AtomicU64::new(0),
             cutime_ticks: AtomicU64::new(0),
             cstime_ticks: AtomicU64::new(0),
+            nvcsw: AtomicU64::new(0),
+            nivcsw: AtomicU64::new(0),
             cmaxrss_kb: AtomicU64::new(0),
             exit_maxrss_kb: AtomicU64::new(0),
             tracer_pid: AtomicU32::new(0),
@@ -1750,6 +1760,17 @@ impl Task {
         );
         ptr::write(
             (ptr as usize + offset_of!(Task, cstime_ticks)) as *mut AtomicU64,
+            AtomicU64::new(0),
+        );
+        // Context-switch counters (Linux nvcsw/nivcsw): same non-zeroing
+        // discipline — /proc/[pid]/status reads them, so they must be
+        // initialized here or they carry allocator garbage.
+        ptr::write(
+            (ptr as usize + offset_of!(Task, nvcsw)) as *mut AtomicU64,
+            AtomicU64::new(0),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, nivcsw)) as *mut AtomicU64,
             AtomicU64::new(0),
         );
         // Ptrace + coredump state (P1 wave 3): same R9-1 discipline — the
@@ -2306,6 +2327,17 @@ impl Task {
         );
         ptr::write(
             (ptr as usize + offset_of!(Task, cstime_ticks)) as *mut AtomicU64,
+            AtomicU64::new(0),
+        );
+        // Context-switch counters (Linux nvcsw/nivcsw): same non-zeroing
+        // discipline — /proc/[pid]/status reads them, so they must be
+        // initialized here or they carry allocator garbage.
+        ptr::write(
+            (ptr as usize + offset_of!(Task, nvcsw)) as *mut AtomicU64,
+            AtomicU64::new(0),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, nivcsw)) as *mut AtomicU64,
             AtomicU64::new(0),
         );
         // Ptrace + coredump state (P1 wave 3): see new_idle_at — non-zeroing

@@ -1217,7 +1217,13 @@ fn handle_timer_tick(regs: &mut PtRegs, cpu: usize) {
         return;
     }
 
-    // 0. CPU-time accounting: charge the tick to the interrupted task,
+    // 0. Per-CPU time accounting for /proc/stat (Linux
+    // account_process_tick): the idle task means the CPU had nothing to
+    // run, otherwise the tick is user time (the timer hit the task in
+    // user mode) or system time (it hit it in kernel mode).
+    crate::fs::procfs::stat::charge_tick(regs.user_mode());
+
+    // 0b. CPU-time accounting: charge the tick to the interrupted task,
     // user or system time by the mode the timer hit (user tasks only).
     if let Some(task) = crate::sched::current() {
         // SAFETY: current() returned a live task pointer; we only touch

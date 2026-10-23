@@ -190,22 +190,36 @@ task dump and the help; `/proc/sys/kernel/tainted` reports the live
 mask; `/sys/kernel` still lists `uevent`, `uevent_helper`,
 `uevent_seqnum` and the new `debug` mount point.
 
-### Tranche 2 — performance counters
+### Tranche 2 — performance counters (part 1 done)
 
-Goal: answer "where does the time go" from inside the guest.
+Goal: answer "where did the time go" from inside the guest.
 
-- Per-CPU time accounting (user/system/idle/iowait/irq/softirq) fed by
-  the scheduler tick and the syscall-entry/exit path → `/proc/stat`.
+**Part 1 — implemented.** `/proc/stat` in Linux's layout
+(`kernel/src/fs/procfs/stat.rs`): the aggregate `cpu` line, one line per
+CPU, `intr`, `ctxt`, `btime`, `processes`, `procs_running`,
+`procs_blocked`. The timer tick charges one jiffy to whatever was
+running — idle for the idle task, user for a task hit in user mode,
+system otherwise (a kernel thread is system time, not idle time). The
+per-task context-switch counters (Linux `nvcsw`/`nivcsw`) are counted in
+the scheduler's `context_switch` — a task that went to sleep blocked
+(voluntary), a task still runnable was preempted (involuntary) — and
+surface in `/proc/[pid]/status`. `/proc/[pid]/stat` now has Linux's 52
+fields (it emitted 54) and fills priority, nice, num_threads, rss (in
+pages), processor and policy next to the utime/stime the timer IRQ
+already charged.
+
+**Part 2 — remaining.**
+
 - Page allocator counters (alloc/free per zone, activate/deactivate,
   fault counts) → `/proc/vmstat` with Linux's key names.
 - Scheduler counters (running/waiting per CPU, timeslices, switches) →
   `/proc/schedstat` and `/proc/sched`.
 - Softirq counters → `/proc/softirqs`.
-- Per-task context-switch counters (`nvcsw`/`nivcsw`) and `utime`/`stime`
-  → fill the zero fields in `/proc/[pid]/stat` and `/proc/[pid]/status`.
 - `/proc/buddyinfo` (the dead `mm/pglist.rs::print_buddyinfo` becomes a
   procfs generator), `/proc/pagetypeinfo`, `/proc/locks`,
   `/proc/diskstats`.
+- Per-task minor/major fault counters (fields 10/12 of
+  `/proc/[pid]/stat`) and `starttime` (field 22).
 
 Acceptance: `/proc/stat` totals track `/proc/uptime` within one tick per
 CPU; `/proc/vmstat` counters are monotonic and reconcile against the
