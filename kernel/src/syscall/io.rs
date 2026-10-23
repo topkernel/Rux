@@ -86,6 +86,33 @@ pub fn tty_get_fg_pgrp() -> u32 {
 /// # Returns
 /// Returns number of bytes read on success, negative error code on failure
 pub fn sys_read(args: SyscallArgs) -> i64 {
+    // perf-audit (pa5): EAGAIN-spin census — pa4 proved hilogd.rd_kmsg's
+    // 92K reads/s never hit /dev/kmsg and never EOF; the remaining shape
+    // is a nonblocking fd returning EAGAIN in a hot loop. Census the
+    // (comm, path) of EAGAIN reads once per comm.
+    let ret = sys_read_inner(args);
+    if (ret == -11 || ret == 0) && crate::dfx::syscost::on() {
+        if let Some(file) = unsafe { crate::fs::get_file_fd(args[0] as usize) } {
+            if ret == -11 {
+                crate::dfx::syscost::note_read_eagain(&file);
+            } else {
+                // Covers the pipe/ext4 fast paths the generic-loop EOF
+                // census never sees (pa5: hilogd.rd_kmsg missing there).
+                crate::dfx::syscost::note_read_eof(&file);
+            }
+        }
+    }
+    // perf-audit (pa10): failing-read census — pa9 showed hilogd.rd_kmsg
+    // issuing 15.4M reads/boot that return no data, no EOF, no EAGAIN;
+    // the remaining shape is a negative errno, and which one decides
+    // kernel-fix vs OH-behavior routing.
+    if ret < 0 && ret != -11 {
+        crate::dfx::syscost::note_read_fail(args[0] as usize, ret);
+    }
+    ret
+}
+
+fn sys_read_inner(args: SyscallArgs) -> i64 {
     use crate::fs::get_file_fd;
     let fd = args[0] as usize;
     let buf = args[1] as *mut u8;
@@ -116,7 +143,14 @@ pub fn sys_read(args: SyscallArgs) -> i64 {
                 // staging below costs an alloc + 2 copies per op; on pipes
                 // that was ~half the per-syscall time under TCG.
                 if crate::fs::pipe::is_pipe_file(&file) {
-                    return crate::fs::pipe::pipe_read_user(&file, buf, count) as i64;
+                    let n = crate::fs::pipe::pipe_read_user(&file, buf, count) as i64;
+                    // perf-audit (pa9): positive-read census — which fd
+                    // returns the 92K reads/s hilogd.rd_kmsg issues (pa4-8:
+                    // not /dev/kmsg, not EOF, not EAGAIN).
+                    if n > 0 {
+                        crate::dfx::syscost::note_read_data(&file, n as usize, fd);
+                    }
+                    return n;
                 }
                 // ext4 fast path: page cache → user memory without the
                 // staging buffer (O_DIRECT keeps the generic staged path —
@@ -124,7 +158,11 @@ pub fn sys_read(args: SyscallArgs) -> i64 {
                 if file.flags_bits() & crate::fs::file::FileFlags::O_DIRECT == 0
                     && crate::fs::ext4::file::is_ext4_file(&file)
                 {
-                    return crate::fs::ext4::file::ext4_file_read_user_vfs(&file, buf, count) as i64;
+                    let n = crate::fs::ext4::file::ext4_file_read_user_vfs(&file, buf, count) as i64;
+                    if n > 0 {
+                        crate::dfx::syscost::note_read_data(&file, n as usize, fd);
+                    }
+                    return n;
                 }
                 // Chunked read (SYSA-C1): stage at most RW_CHUNK at a time so
                 // a huge count can never OOM the kernel heap. A short chunk
@@ -147,9 +185,19 @@ pub fn sys_read(args: SyscallArgs) -> i64 {
                     }
                     let result = file.read(kernel_buf.as_mut_ptr(), chunk);
                     if result < 0 {
+                        if total > 0 {
+                            crate::dfx::syscost::note_read_data(&file, total, fd);
+                        }
                         return if total > 0 { total as i64 } else { result as i32 as i64 };
                     }
                     if result == 0 {
+                        // perf-audit (pa4): EOF-spin census — a reader
+                        // whose fd hit EOF is a spin candidate (pa3:
+                        // hilogd.rd_kmsg at 92K reads/s never touches
+                        // /dev/kmsg's counters, so it is looping on some
+                        // EOF fd). Record (comm, path) once per comm;
+                        // syscost dumps print the table.
+                        crate::dfx::syscost::note_read_eof(&file);
                         break;
                     }
                     let n = result as usize;
@@ -169,6 +217,9 @@ pub fn sys_read(args: SyscallArgs) -> i64 {
                     if n < chunk {
                         break; // short read: EOF or nothing more available now
                     }
+                }
+                if total > 0 {
+                    crate::dfx::syscost::note_read_data(&file, total, fd);
                 }
                 total as i64
             }

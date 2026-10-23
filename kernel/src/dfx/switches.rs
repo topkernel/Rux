@@ -33,6 +33,52 @@
 
 use core::sync::atomic::{AtomicBool, Ordering};
 
+/// The canonical switch table: enum variant → `dfx=` cmdline spelling.
+///
+/// This macro is the single source of truth for the catalog. It generates
+/// the enum→name mapping, the `ALL` enumeration used by the userspace
+/// control surface (the debugfs knobs under `/sys/kernel/debug/dfx/`,
+/// see `dfx/mod.rs`) and the per-switch control files. Adding a switch
+/// therefore means adding one line here plus the variant — nothing else
+/// has to be kept in sync.
+macro_rules! dfx_switch_table {
+    ($m:ident) => {
+        $m! {
+            WatchdogDump => "watchdog",
+            TaskDumpKey => "taskdump",
+            PeriodicDump => "periodic",
+            MemWatch => "memwatch",
+            MmForensics => "mmforensics",
+            Scribble => "scribble",
+            ScribblePark => "scribblepark",
+            ScribblePid1 => "scribblepid1",
+            ScribbleSweep => "scribblesweep",
+            InputTrace => "inputtrace",
+            EpollTrace => "epolltrace",
+            ClaimInject => "claiminject",
+            Strace1 => "strace1",
+            SchedTrace => "schedtrace",
+            Steptrace => "steptrace",
+            WriteTrace => "writetrace",
+            OncpuInject => "oncpuinject",
+            Ledger => "ledger",
+            BinderTrace => "bindertrace",
+            SyscallTrace => "syscalltrace",
+            FutexTrace => "futextrace",
+            MonoWatch => "monowatch",
+            TcpTrace => "tcptrace",
+            SleepSnap => "sleepsnap",
+            SockSnap => "socksnap",
+            DataTap => "datatap",
+            WildWatch => "wildwatch",
+            MetaWatch => "metawatch",
+            ParkDump => "parkdump",
+        }
+    };
+}
+
+pub(crate) use dfx_switch_table;
+
 /// Runtime DFX switches, indexed by name on the `dfx=` cmdline parameter.
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum DfxSwitch {
@@ -220,6 +266,32 @@ const SWITCH_COUNT: usize = 29;
 
 static SWITCHES: [AtomicBool; SWITCH_COUNT] = [const { AtomicBool::new(false) }; SWITCH_COUNT];
 
+macro_rules! build_all {
+    ($($variant:ident => $name:literal),* $(,)?) => {
+        /// Every DFX switch, in the canonical order of the switch table.
+        ///
+        /// The order matches the `index()` mapping below, so
+        /// `ALL[i].index() == i` holds for every entry.
+        pub const ALL: [DfxSwitch; SWITCH_COUNT] = [$(DfxSwitch::$variant),*];
+    };
+}
+
+dfx_switch_table!(build_all);
+
+const _: () = assert!(ALL.len() == SWITCH_COUNT);
+
+macro_rules! build_name {
+    ($($variant:ident => $name:literal),* $(,)?) => {
+        /// The `dfx=` cmdline spelling of this switch. Also the file name
+        /// of its control file under `/sys/kernel/debug/dfx/`.
+        pub fn name(self) -> &'static str {
+            match self {
+                $(DfxSwitch::$variant => $name),*
+            }
+        }
+    };
+}
+
 impl DfxSwitch {
     fn index(self) -> usize {
         match self {
@@ -259,39 +331,10 @@ impl DfxSwitch {
         }
     }
 
+    dfx_switch_table!(build_name);
+
     fn from_name(name: &str) -> Option<DfxSwitch> {
-        match name {
-            "watchdog" => Some(DfxSwitch::WatchdogDump),
-            "taskdump" => Some(DfxSwitch::TaskDumpKey),
-            "periodic" => Some(DfxSwitch::PeriodicDump),
-            "memwatch" => Some(DfxSwitch::MemWatch),
-            "mmforensics" => Some(DfxSwitch::MmForensics),
-            "scribble" => Some(DfxSwitch::Scribble),
-            "scribblepark" => Some(DfxSwitch::ScribblePark),
-            "scribblepid1" => Some(DfxSwitch::ScribblePid1),
-            "scribblesweep" => Some(DfxSwitch::ScribbleSweep),
-            "inputtrace" => Some(DfxSwitch::InputTrace),
-            "epolltrace" => Some(DfxSwitch::EpollTrace),
-            "claiminject" => Some(DfxSwitch::ClaimInject),
-            "strace1" => Some(DfxSwitch::Strace1),
-            "schedtrace" => Some(DfxSwitch::SchedTrace),
-            "steptrace" => Some(DfxSwitch::Steptrace),
-            "writetrace" => Some(DfxSwitch::WriteTrace),
-            "oncpuinject" => Some(DfxSwitch::OncpuInject),
-            "ledger" => Some(DfxSwitch::Ledger),
-            "bindertrace" => Some(DfxSwitch::BinderTrace),
-            "syscalltrace" => Some(DfxSwitch::SyscallTrace),
-            "sleepsnap" => Some(DfxSwitch::SleepSnap),
-            "futextrace" => Some(DfxSwitch::FutexTrace),
-            "monowatch" => Some(DfxSwitch::MonoWatch),
-            "tcptrace" => Some(DfxSwitch::TcpTrace),
-            "socksnap" => Some(DfxSwitch::SockSnap),
-            "datatap" => Some(DfxSwitch::DataTap),
-            "wildwatch" => Some(DfxSwitch::WildWatch),
-            "metawatch" => Some(DfxSwitch::MetaWatch),
-            "parkdump" => Some(DfxSwitch::ParkDump),
-            _ => None,
-        }
+        ALL.iter().find(|s| s.name() == name).copied()
     }
 }
 

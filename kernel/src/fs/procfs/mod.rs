@@ -57,6 +57,7 @@ pub mod self_proc;
 pub mod pid;
 pub mod interrupts;
 pub mod sysctl;
+pub mod sysrq;
 pub mod net;
 pub mod configgz;
 
@@ -519,6 +520,20 @@ impl ProcFSSuperBlock {
 
         // Kernel log buffer
         self.create_dynamic_file("kmsg", crate::printk::generate_kmsg);
+
+        // SysRq trigger (Linux: /proc/sysrq-trigger). Writing a command
+        // character runs that command; the handler lives in
+        // fs/procfs/sysrq.rs.
+        {
+            let ino = self.alloc_ino();
+            let file = Arc::new(ProcFSNode::new_sysctl_file(
+                b"sysrq-trigger".to_vec(),
+                || alloc::vec![b'\n'],
+                sysrq::write_trigger,
+                ino,
+            ));
+            self.root_node.add_child(file);
+        }
 
         // /proc/self - symlink to current process directory
         self.create_dynamic_symlink("self", self_proc::get_self_link);
@@ -1899,6 +1914,20 @@ pub static PROCFS_FILE_OPS: crate::fs::FileOps = crate::fs::FileOps {
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
 unsafe fn procfs_get_file_ops(inode: &Inode) -> Option<&'static crate::fs::file::FileOps> {
     if inode.mode.is_regular_file() {
+        // /proc/kmsg is a BLOCKING STREAM, not a snapshot dynamic file:
+        // hilogd.rd_kmsg read-EOF-looped at 60-92K/s on the snapshot
+        // (perf-audit pa9/pa10). Identified by its generator fn pointer
+        // — the node is created with create_dynamic_file("kmsg",
+        // printk::generate_kmsg); procfs_open applies the matching
+        // special case (single-reader gate, no snapshot Box).
+        let node = inode
+            .private_data
+            .map(|p| &*(p as *const ProcFSNode));
+        if let Some(node) = node {
+            if node.content_generator == Some(crate::printk::generate_kmsg) {
+                return Some(&crate::printk::PROC_KMSG_OPS);
+            }
+        }
         Some(&PROCFS_FILE_OPS)
     } else if inode.mode.is_directory() {
         Some(&crate::fs::file::DIR_FILE_OPS)
@@ -1918,6 +1947,13 @@ unsafe fn procfs_open(inode: &Inode, file: &crate::fs::File) -> i32 {
         None => return 0,
     };
     let node = &*(node_ptr as *const ProcFSNode);
+
+    // /proc/kmsg stream: single-reader gate (second concurrent open
+    // EBUSY, Linux fs/proc/kmsg.c), NO content snapshot — reads consume
+    // the shared printk ring cursor (see PROC_KMSG_OPS / pa9-pa10).
+    if node.content_generator == Some(crate::printk::generate_kmsg) {
+        return crate::printk::proc_kmsg_open();
+    }
 
     // ptrace_may_access gate for /proc/[pid]/environ (review 5.7: environ
     // 无 ptrace 权限): self or CAP_SYS_PTRACE. (The syscall-layer /proc
