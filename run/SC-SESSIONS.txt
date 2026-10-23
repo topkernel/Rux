@@ -2264,3 +2264,28 @@ SESSION R FIFTH LEG ADDENDUM (sc176/177 forensics, 20:1x-20:2x): THE
 - sc178 launched 20:25 on the FIXED kernel (bzImage 20:23). A/B: watch
   "pagefault: Out of memory" count (sc176: 1727) and whether the
   launcher child survives past sandbox init this time.
+
+SESSION R FIFTH LEG ADDENDUM 2 (sc178 A/B readback, 20:4x): FILEMAP FIX
+  WINS THE MEMORY A/B; sc178 DIED TO A DIFFERENT, CONTENTION-SIDE GATE.
+- sc178 (fixed kernel, launched 20:23:30 under host load 6 with 2 foreign
+  TCG QEMUs): pagefault-OOM count 0 for its whole 19 min (sc176: 1727 +
+  oom-killer). The fake-OOM fix holds on the OH boot.
+- New gate: systemui children spawn (12 by min 2) but EVERY attempt
+  stalls mid-sandbox. STALLWATCH tid 1121: clock_gettime(113) spam +
+  futex park at uaddr=0x7fffffffc7f4 val=2 (main-stack timed wait, the
+  bfc35fd2 single-threaded-child shape) and the FAILS ring is dominated
+  by nr66(writev)=-11 EAGAIN on fd=3 - the child CANNOT WRITE to its
+  parent-facing channel (buffer full, reader not draining) and OH's
+  write loop retries forever. AMS kept restarting (24+ "restart
+  ability" rounds, children 1089..1264); AMS->child deliveries still
+  fine (APPTXN child=1121 route=child-looper). NO child ever narrated
+  IPCWorkThreadPool SpawnThread this boot (vs sc167/sc174 where they
+  did). clone-gate probes printed ZERO refusals (F12 heap gate NOT the
+  cause). Verdict: log/ctl pipe backpressure under host contention =
+  slow death spiral; boot unrecoverable, killed at 20:42.
+- 8-color 100% screen state since ~30s into every sc175+ boot = the
+  KERNEL's own scanout pattern (byte-identical to the sc20 milestone
+  reference), NOT OH graphics. Milestone discriminator: colors >= 9.
+- Reroll plan: wait for the 2 foreign QEMUs to hit their 2700s timeouts
+  (~20:53/54), then boot sc179 solo on the fixed kernel - the
+  sc167/sc174 recipe (0-1 foreign QEMU converged; every 2+ boot died).
