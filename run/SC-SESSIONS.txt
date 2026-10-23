@@ -2729,3 +2729,24 @@ DEEPEST COMPOSER CONVERSATION OF THE CAMPAIGN.
   (fix verification + deepest composer conversation), shots
   oh-sc18[9,190]-auto0.ppm (8-color oracle, not UI), userdata-sc18[5-
   190].img private copies.
+
+SESSION R EIGHTH LEG ADDENDUM (sc191 + fix v2, 05:5x): v1 insufficient
+for the CLEAN-exit variant; v2 (6e9679c5) releases pick ownership too.
+
+- sc191 (v1 fix kernel, parkdump off): devmgr answered RS's GetService
+  a THIRD consecutive time (parkdump-off now 3/3). But a CLEAN thread
+  exit (libusb_event tid 649, usb_host, code=0) still stranded in the
+  v1 8-round fallback: cpu1's slot named it, rip=wfi+5, count=0x10000,
+  no TERM-DESCHED print (count was 0 when the helper ran - the leak
+  lands elsewhere/later). The repick persisted because the pick
+  machinery resolves the DEAD task via its pick-ownership pair
+  ({on_cpu, claim} - R63 mid-switch-out shape); the real switch-out
+  asm releases the pair, a repick loop never reaches a switch.
+- v2 (6e9679c5, built, NOT yet boot-verified): the helper now also
+  calls release_pick_ownership() each round (the same aligned store
+  the R56 heal paths use). Ninth leg: boot-verify v2 (a long parkdump-
+  OFF boot should show ZERO permanent PREEMPT-LEAKs across both clean
+  exits and USEGV deaths), then reroll for the full dodge - the
+  remaining SA 10 gap is the devmgr 16-reader wedge re-forming mid-
+  composer-init (sc190 stalled at RS txn #42 after SetBrightness).
+- sc191 left running to term with shotmon attached; artifacts in run/.
