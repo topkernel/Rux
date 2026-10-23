@@ -71,7 +71,19 @@ static TX_RECOVERY_PENDING: AtomicBool = AtomicBool::new(false);
 static TX_LAST_NOTICE: core::sync::atomic::AtomicU64 =
     core::sync::atomic::AtomicU64::new(0);
 
-/// WALL-TIME bound for one LSR.THRE wait (time ticks; 2 ms). The old
+/// Bytes since the last LSR probe while TX_STALLED is latched. A probe is
+/// one `inb` = one KVM VM exit, which on a host-loaded box costs tens of
+/// microseconds to milliseconds of WALL time — sc166's 1000 ms IRQ-off
+/// windows symbolized (exact-binary, 74c5cf88) to enable_irq/outb/inb in
+/// exactly this path: with a probe per dropped byte, a 130-char diagnostic
+/// line during a chardev outage burned up to a second of IF=0. Probe at
+/// most once per 32 bytes instead; bytes lost in between are storm-garbage
+/// diagnostics anyway (sc167 storm gate).
+#[cfg(feature = "x86_64")]
+static TX_SINCE_PROBE: core::sync::atomic::AtomicU32 =
+    core::sync::atomic::AtomicU32::new(0);
+
+/// WALL-TIME bound for one LSR.THRE wait (time ticks; 250 µs). The old
 /// budget counted iterations (UART_TX_POLL_BUDGET, 1e6 tries), and one
 /// `inb` under KVM costs a VM exit (~1-2 µs), so 1e6 tries is a 1-2 s
 /// spin. Every THRE wait runs either with IRQs disabled (the UART
@@ -80,12 +92,15 @@ static TX_LAST_NOTICE: core::sync::atomic::AtomicU64 =
 /// IRQ-off windows: TIMER-SOFTIRQ-STALL ~1 s ages, TIMER-LATE-FIRE
 /// 1-4 s, WAKE-STRANDED outliers (the launcher-line IPC perf gate,
 /// 2026-10-20). A healthy QEMU 16550 with a draining chardev asserts
-/// THRE on the first probe; 2 ms covers a full 16-byte FIFO drain at
-/// 115200 with margin. Beyond the bound the existing TX_STALLED
-/// latch/drop discipline takes over (one bounded wait per episode,
-/// single probe per byte afterwards).
+/// THRE on the first probe; the previous 2 ms bound was sized for a
+/// full 16-byte FIFO drain at 115200, but sc166 showed the WAIT branch
+/// itself (not just the drop probes) holding IF=0 for 1000 ms windows
+/// under host load, because each probe's VM exit burns wall time while
+/// the TSC budget keeps running. 250 µs covers a two-char hiccup with
+/// margin; beyond it the TX_STALLED latch/drop discipline takes over
+/// (one bounded wait per episode, one probe per 32 bytes afterwards).
 #[cfg(feature = "x86_64")]
-const UART_THRE_WAIT_TICKS: u64 = crate::config::TIMER_CLOCK_FREQ_HZ / 500;
+const UART_THRE_WAIT_TICKS: u64 = crate::config::TIMER_CLOCK_FREQ_HZ / 4000;
 
 /// Print a rate-limited notice (once per second) about how many bytes the
 /// console TX stall dropped. Called from the printk entry paths BEFORE
@@ -283,10 +298,17 @@ impl Uart {
 
         #[cfg(feature = "x86_64")]
         {
-            // Fast path while a stall is latched: one probe; if THRE is
-            // back, unlatch and fall through to the normal write; if not,
-            // drop the byte immediately (bounded cost per stall episode).
+            // Fast path while a stall is latched: probe at most once per
+            // 32 bytes (each probe is a VM exit; see TX_SINCE_PROBE); if
+            // THRE is back, unlatch and fall through to the normal write;
+            // if not, drop the byte immediately (bounded cost per stall
+            // episode).
             if TX_STALLED.load(Ordering::Acquire) {
+                if TX_SINCE_PROBE.fetch_add(1, Ordering::Relaxed) < 32 {
+                    TX_DROPPED.fetch_add(1, Ordering::Relaxed);
+                    return;
+                }
+                TX_SINCE_PROBE.store(0, Ordering::Relaxed);
                 if read_reg(COM1_BASE, UART_LSR) & LSR_THRE != 0 {
                     TX_STALLED.store(false, Ordering::Release);
                     TX_RECOVERY_PENDING.store(true, Ordering::Release);
@@ -311,6 +333,7 @@ impl Uart {
                     >= UART_THRE_WAIT_TICKS
                 {
                     TX_STALLED.store(true, Ordering::Release);
+                    TX_SINCE_PROBE.store(0, Ordering::Relaxed);
                     TX_DROPPED.fetch_add(1, Ordering::Relaxed);
                     return;
                 }

@@ -4889,6 +4889,17 @@ fn binder_transaction(
                     } else {
                         None
                     };
+                    // sc167: name the oneway route too (the sync branch
+                    // below carries route= — the AMS->child hop is mostly
+                    // ONEWAY (ScheduleStartAbility family), so the queue
+                    // verdict must be readable on both halves).
+                    let txn_route_label = if posted_thread.is_some() {
+                        "child-looper"
+                    } else if pref != 0 {
+                        "child-proctodo"
+                    } else {
+                        "proctodo"
+                    };
                     match posted_thread {
                         Some(ct) => wake_ths.push(ct),
                         None => {
@@ -4925,13 +4936,14 @@ fn binder_transaction(
                                 core::sync::atomic::AtomicUsize::new(0);
                             if TXN_NO.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 160 {
                                 crate::pr_warn!(
-                                    "APPTXN id={} from pid={} comm='{}' -> pid={} code={:#x} oneway=1 proc child={}",
+                                    "APPTXN id={} from pid={} comm='{}' -> pid={} code={:#x} oneway=1 proc child={} route={}",
                                     txn.id,
                                     proc.pid,
                                     comm,
                                     target.pid,
                                     txn.code,
-                                    target_node.as_ref().map(|n| n.reg_tgid).unwrap_or(0)
+                                    target_node.as_ref().map(|n| n.reg_tgid).unwrap_or(0),
+                                    txn_route_label
                                 );
                             }
                         }

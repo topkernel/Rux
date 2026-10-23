@@ -1015,11 +1015,15 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize, vector: u64) {
 
 /// Rate gate for the IRQ-OFF-WINDOW probe: at most one direct-console
 /// report per 2 s of jiffies (episodes can cluster; the log must not).
+/// sc167: the 20-jiffy (200 ms) gate let sc166 print 2300 windows, and
+/// every report is itself a ~130-char direct-console line whose THRE
+/// waits run with IF=0 — the probe was feeding the very storm it
+/// measured. 200 jiffies restores the documented 2 s cadence.
 fn ww_irqwin_budget_ok() -> bool {
     static LAST: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
     let now = crate::drivers::timer::get_jiffies();
     let last = LAST.load(core::sync::atomic::Ordering::Acquire);
-    if now.wrapping_sub(last) < 20 {
+    if now.wrapping_sub(last) < 200 {
         return false;
     }
     LAST.compare_exchange(last, now, core::sync::atomic::Ordering::AcqRel, core::sync::atomic::Ordering::Acquire)

@@ -45,7 +45,14 @@ const SLOT_MASK: usize = SLOTS - 1;
 /// the nominal clock below). Isolated probes put a healthy wake→run at
 /// a few ms; anything past 50 ms under load is part of the outlier
 /// family we are hunting.
-const STRAND_THRESHOLD_MS: u64 = 50;
+/// sc167 storm gate: raised to 1000 ms for the OH lane. Under the boot
+/// print-storm, EVERY wake strands past 50 ms and the report (printed
+/// in the PICKED task's context with IF=0, ~100 direct-console chars)
+/// eats exactly the LIFECYCLE_TIMEOUT budget of the child being picked
+/// — sc166 printed 2380 lines for five pids. Sub-second strands are
+/// storm weather; the pathological family this table exists for is the
+/// multi-second monopoly, which still reports.
+const STRAND_THRESHOLD_MS: u64 = 1000;
 
 struct WwSlot {
     task: AtomicU64,
@@ -238,13 +245,13 @@ pub fn heartbeat() {
     );
 }
 
-/// Rate gate: at most one direct-console line per 2 jiffies (matches
-/// the fair.rs heal-report budget).
+/// Rate gate: at most one direct-console line per 20 jiffies (200 ms;
+/// was 2 jiffies — sc166's 2380-line strand storm, see STRAND_THRESHOLD_MS).
 fn print_budget_ok() -> bool {
     static LAST: AtomicU64 = AtomicU64::new(0);
     let now = crate::drivers::timer::get_jiffies();
     let last = LAST.load(Ordering::Acquire);
-    if now.wrapping_sub(last) < 2 {
+    if now.wrapping_sub(last) < 20 {
         return false;
     }
     LAST.compare_exchange(last, now, Ordering::AcqRel, Ordering::Acquire)
