@@ -208,37 +208,53 @@ const EMPTY_RDFAIL: RdFailSlot = RdFailSlot {
 static RD_FAIL: [RdFailSlot; 16] = [const { EMPTY_RDFAIL }; 16];
 
 // ============================================================================
-// pa15: F1 irq-exit dispatch quantification — IF=0 time decomposition,
+// pa15/pa16: F1 irq-exit dispatch quantification — IF=0 time decomposition,
 // UART per-byte cli cost, per-comm printk volume, recv-family fd census.
 //
 // The pa13/pa14 finding: ~26% of kernel ticks land on the page holding
 // enable_irq/restore_irq + inb/outb + FileBuffer, but that share is a
 // SAMPLING ARTIFACT (queued ticks attribute to the re-enable site), so
-// it does not say how much IF=0 time each producer actually costs. The
-// launcher line needs real numbers before fixing the irq-exit dispatch
-// discipline or making the console async: how much wall time is spent
-// with IF=0, split by zone (hardirq frame / softirq dispatch loop /
-// UART TX / other irqsave sections), plus the per-byte UART wait
-// distribution and who is printing.
+// it does not say how much IF=0 time each producer actually costs.
+// pa15 added direct IF=0 zone accounting; pa16 (fifth session) makes it
+// (a) exact instead of an upper bound and (b) call-site attributed.
 //
-// Zone model (x86_64 measurement hooks, activated by a scratch patch
-// over cpu.rs/preempt.rs/softirq.rs/console.rs/printk.rs — those files
-// are other lanes' territory, so the hooks ride the pa14 pattern: build,
-// save bzImage, revert; see run/pa15-probe.patch):
-//   - cpu.rs enable/disable/restore stamp IF 0->1 / 1->0 transitions.
-//   - irq_enter/irq_exit push/pop a HARDIRQ zone (delivery->iret frame;
-//     an interrupt gate frame always starts and ends with IF=1, so
-//     pop-to-depth-0 closes any open segment).
-//   - __do_softirq push/pop SOFTIRQ (nested under HARDIRQ).
-//   - putc push/pop UART per byte (nested under whatever is running —
-//     printk from softirq, from task context, from the direct-console
-//     probe printer).
-// Segments are stamped with the RAW TSC (read_counter), not read_time():
-// a segment opens and closes on the same CPU, so cross-CPU TSC offsets
-// never enter a delta, and rdtsc costs ~one instruction against
-// read_time()'s correction loads — the hooks must not inflate the very
-// windows they measure. Cumulatives are converted at dump time via
-// get_counter_freq().
+// v3 zone model (pa16), edge-triggered + self-healing:
+//   - Every hook reads the REAL IF flag (EFLAGS/riscv twin) and
+//     adjudicates the model against it. A modeled-open segment found
+//     with IF=1 is a leak (the v2 failure mode: v2 had no IF ground
+//     truth, so one stuck model-open state soaked every later zone on
+//     that CPU — cpu1 inflation in smoke4/pa15); it closes into the
+//     HEAL counters (zone cum stays clean) and the model resets.
+//   - disable/enable hooks sit BEFORE the cli/sti asm: at the pre-cli
+//     edge the still-readable flag tells whether the previous modeled
+//     span was legitimate; at the pre-sti edge the flag confirms the
+//     close. A disable seen with IF=0 and model closed is a MISSED
+//     0-edge (raw cli / unhooked path) and opens unattributed.
+//   - Hardware IRQ delivery clears IF before any hook: the irq_enter
+//     hook opens the HARDIRQ segment (heal-closing any phantom first);
+//     the irq_exit hook (end of preempt::irq_exit, before
+//     irq_exit_maybe_preempt_kernel) closes it and hard-resets the
+//     zone stack (an iret frame boundary ends every zone).
+//   - __do_softirq entry splits the open segment (SOFTIRQ takes over;
+//     the enclosing HARDIRQ resumes at its exit) — ksoftirqd dispatch
+//     (IF=1, model closed) touches nothing.
+//   - putc splits an open segment into a UART zone only when BOTH the
+//     model is open AND the real flag is 0 (an IF=0 putc cannot
+//     migrate, so the pair is balanced by construction).
+//   - REST open sites are attributed with #[track_caller]: the probe
+//     patch marks disable_irq / save_and_disable_irq / irq_save /
+//     lock_irq* so Location::caller() propagates to the outermost
+//     caller — the actual critical-section owner (file:line). The
+//     global REST_SITES table (96 slots + counted overflow) decomposes
+//     REST cum into the launcher line's per-segment fix list.
+// Fault handlers never call irq_enter (verified: only LOCAL_TIMER/IPI/
+// IRQ vectors do) and no NMI source exists on this board, so the only
+// attribution hazards are the schedule window after irq_exit (accepted,
+// sub-frame) and a hypothetical handler bug that stis mid-section
+// (which the heal counters will expose loudly).
+// Segments are stamped with the RAW TSC (read_counter): open and close
+// land on the same CPU, so cross-CPU TSC offsets never enter a delta.
+// Cumulatives are converted at dump time via get_counter_freq().
 // ============================================================================
 
 /// IF=0 zones (index into per-CPU CUM rows and the zone stack).
@@ -250,6 +266,43 @@ pub const ZONE_UART: u8 = 3;
 const ZSTK_DEPTH: usize = 4;
 
 const EMPTY_ZROW: [AtomicU64; 4] = [const { AtomicU64::new(0) }; 4];
+
+// ---------------------------------------------------------------------------
+// REST call-site histogram (pa16): the probe patch marks the irqsave entry
+// points #[track_caller], so each REST segment knows the file:line of the
+// critical section that opened it. Keyed by Location pointer identity;
+// 96 slots + an overflow row that COUNTS what dropped (the pa4-8 lesson:
+// never drop attribution silently).
+// ---------------------------------------------------------------------------
+
+const REST_SITES_N: usize = 96;
+
+struct RestSite {
+    /// `Location as *const () as u64`; 0 = free slot.
+    loc: AtomicU64,
+    /// Opens charged to this site.
+    n: AtomicU64,
+    /// Closed span (raw TSC) charged to this site.
+    cyc: AtomicU64,
+    max: AtomicU64,
+}
+
+const EMPTY_SITE: RestSite = RestSite {
+    loc: AtomicU64::new(0),
+    n: AtomicU64::new(0),
+    cyc: AtomicU64::new(0),
+    max: AtomicU64::new(0),
+};
+
+/// Global (all-CPU) REST open-site table.
+static REST_SITES: [RestSite; REST_SITES_N] = [const { EMPTY_SITE }; REST_SITES_N];
+/// Overflow/miss row: sites beyond the table and unattributed (missed-edge)
+/// opens. `n` counts opens, `cyc`/`max` their closed spans.
+static REST_OF: RestSite = EMPTY_SITE;
+
+/// Per-CPU marker for which REST_SITES row the open segment charges.
+const SLOT_NONE: u8 = 0xff;
+const SLOT_OF: u8 = 0xfe;
 
 struct If0Zone {
     /// Our model of IF while the probe hooks are live (false = enabled).
@@ -265,6 +318,13 @@ struct If0Zone {
     nseg: [[AtomicU64; 4]; crate::config::MAX_CPUS],
     /// Longest closed segment per zone (raw TSC).
     seg_max: [[AtomicU64; 4]; crate::config::MAX_CPUS],
+    /// REST_SITES row (or SLOT_*) the open segment charges.
+    slot: [AtomicU8; crate::config::MAX_CPUS],
+    /// v3 self-heal evidence: modeled-open spans closed on IF=1 evidence.
+    heal_n: [AtomicU64; crate::config::MAX_CPUS],
+    heal_cyc: [AtomicU64; crate::config::MAX_CPUS],
+    /// v3 missed-edge counter: disable seen with real IF=0, model closed.
+    miss_n: [AtomicU64; crate::config::MAX_CPUS],
 }
 
 static IFZ: If0Zone = If0Zone {
@@ -275,6 +335,10 @@ static IFZ: If0Zone = If0Zone {
     cum: [const { EMPTY_ZROW }; crate::config::MAX_CPUS],
     nseg: [const { EMPTY_ZROW }; crate::config::MAX_CPUS],
     seg_max: [const { EMPTY_ZROW }; crate::config::MAX_CPUS],
+    slot: [const { AtomicU8::new(SLOT_NONE) }; crate::config::MAX_CPUS],
+    heal_n: [const { AtomicU64::new(0) }; crate::config::MAX_CPUS],
+    heal_cyc: [const { AtomicU64::new(0) }; crate::config::MAX_CPUS],
+    miss_n: [const { AtomicU64::new(0) }; crate::config::MAX_CPUS],
 };
 
 /// Current zone (stack top, or REST when empty). Caller-CPU only.
@@ -288,8 +352,9 @@ fn zone_cur(cpu: usize) -> u8 {
     }
 }
 
-/// Close the currently open segment into `z` (kept separate from
-/// `irq_note_on` only for the pop-to-zero path, which must NOT reopen).
+/// Close the currently open segment into `z`; REST spans also charge the
+/// open-site row (the site owns every piece of its span except spans a
+/// nested UART/SOFTIRQ split took over).
 #[inline]
 fn seg_close(cpu: usize, z: u8, now: u64) {
     let dt = now.saturating_sub(IFZ.t0[cpu].load(Ordering::Relaxed));
@@ -307,12 +372,108 @@ fn seg_close(cpu: usize, z: u8, now: u64) {
             Err(cur) => m = cur,
         }
     }
+    if z == ZONE_REST {
+        let s = IFZ.slot[cpu].load(Ordering::Relaxed);
+        let row: &RestSite = if s == SLOT_OF {
+            &REST_OF
+        } else if (s as usize) < REST_SITES_N {
+            &REST_SITES[s as usize]
+        } else {
+            return; // SLOT_NONE: opened by a non-REST hook — zone cum has it
+        };
+        row.cyc.fetch_add(dt, Ordering::Relaxed);
+        let mut rm = row.max.load(Ordering::Relaxed);
+        while dt > rm {
+            match row.max.compare_exchange_weak(rm, dt, Ordering::Relaxed, Ordering::Relaxed) {
+                Ok(_) => break,
+                Err(cur) => rm = cur,
+            }
+        }
+    }
 }
 
-/// Hook for cpu.rs `disable_irq` / `save_and_disable_irq` (after cli):
-/// opens a REST-zone segment if none is open.
+/// Claim/refresh the REST_SITES row for a section opening at `loc` now.
 #[inline]
-pub fn irq_note_off() {
+fn rest_site_open(cpu: usize, loc: usize) {
+    let key = loc as u64;
+    for i in 0..REST_SITES_N {
+        let cur = REST_SITES[i].loc.load(Ordering::Relaxed);
+        if cur == key {
+            REST_SITES[i].n.fetch_add(1, Ordering::Relaxed);
+            IFZ.slot[cpu].store(i as u8, Ordering::Relaxed);
+            return;
+        }
+        if cur == 0 {
+            match REST_SITES[i]
+                .loc
+                .compare_exchange(0, key, Ordering::Relaxed, Ordering::Relaxed)
+            {
+                Ok(_) => {
+                    REST_SITES[i].n.fetch_add(1, Ordering::Relaxed);
+                    IFZ.slot[cpu].store(i as u8, Ordering::Relaxed);
+                    return;
+                }
+                Err(_) => continue,
+            }
+        }
+    }
+    REST_OF.n.fetch_add(1, Ordering::Relaxed);
+    IFZ.slot[cpu].store(SLOT_OF, Ordering::Relaxed);
+}
+
+/// Pre-`cli` edge hook (probe patch: cpu.rs `disable_irq`, BEFORE the
+/// asm; `loc` = `Location::caller()` propagated through the track_caller
+/// chain — disable_irq / save_and_disable_irq / irq_save / lock_irq*).
+/// Edge-triggered with IF ground truth:
+///   model open + IF=1  -> leak (v2's failure mode): heal-close.
+///   model open + IF=0  -> nested disable: the outer owner keeps the
+///                         section (its whole span is genuinely IF=0).
+///   model closed + IF=1-> the normal open: REST segment at `loc`.
+///   model closed + IF=0-> missed 0-edge (raw cli / unhooked path):
+///                         open unattributed, count a miss.
+#[inline]
+pub fn irq_note_off(loc: Option<&'static core::panic::Location<'static>>) {
+    if !on() {
+        return;
+    }
+    let cpu = crate::arch::cpu_id() as usize;
+    if cpu >= crate::config::MAX_CPUS {
+        return;
+    }
+    if IFZ.if0[cpu].load(Ordering::Relaxed) != 0 {
+        if crate::arch::cpu::get_interrupts_state() {
+            // Heal: the flag says enabled, so the modeled span is not
+            // trustworthy end-to-end — charge it to the heal meters,
+            // never to a zone or a site.
+            let dt = crate::arch::cpu::read_counter()
+                .saturating_sub(IFZ.t0[cpu].load(Ordering::Relaxed));
+            IFZ.heal_n[cpu].fetch_add(1, Ordering::Relaxed);
+            IFZ.heal_cyc[cpu].fetch_add(dt, Ordering::Relaxed);
+            IFZ.if0[cpu].store(0, Ordering::Relaxed);
+            IFZ.zd[cpu].store(0, Ordering::Relaxed);
+            IFZ.slot[cpu].store(SLOT_NONE, Ordering::Relaxed);
+        }
+        return; // nested disable (or just healed): no new open
+    }
+    IFZ.t0[cpu].store(crate::arch::cpu::read_counter(), Ordering::Relaxed);
+    IFZ.zstk[cpu][0].store(ZONE_REST, Ordering::Relaxed);
+    IFZ.zd[cpu].store(1, Ordering::Relaxed);
+    IFZ.if0[cpu].store(1, Ordering::Relaxed);
+    match loc {
+        Some(l) => rest_site_open(cpu, l as *const _ as usize),
+        None => {
+            IFZ.miss_n[cpu].fetch_add(1, Ordering::Relaxed);
+            IFZ.slot[cpu].store(SLOT_OF, Ordering::Relaxed);
+        }
+    }
+}
+
+/// Pre-`sti` edge hook (probe patch: cpu.rs `enable_irq`, BEFORE the
+/// asm; restore_irq(true) funnels here). Model open + IF=0 = normal
+/// close; model open + IF=1 = the open was phantom (raw sti happened in
+/// between) — heal-close. Model closed = nothing (double-sti idiom).
+#[inline]
+pub fn irq_note_on() {
     if !on() {
         return;
     }
@@ -321,15 +482,54 @@ pub fn irq_note_off() {
         return;
     }
     if IFZ.if0[cpu].load(Ordering::Relaxed) == 0 {
-        IFZ.t0[cpu].store(crate::arch::cpu::read_counter(), Ordering::Relaxed);
-        IFZ.if0[cpu].store(1, Ordering::Relaxed);
+        return;
     }
+    let now = crate::arch::cpu::read_counter();
+    let dt = now.saturating_sub(IFZ.t0[cpu].load(Ordering::Relaxed));
+    if crate::arch::cpu::get_interrupts_state() {
+        IFZ.heal_n[cpu].fetch_add(1, Ordering::Relaxed);
+        IFZ.heal_cyc[cpu].fetch_add(dt, Ordering::Relaxed);
+    } else {
+        seg_close(cpu, zone_cur(cpu), now);
+    }
+    IFZ.if0[cpu].store(0, Ordering::Relaxed);
+    IFZ.zd[cpu].store(0, Ordering::Relaxed);
+    IFZ.slot[cpu].store(SLOT_NONE, Ordering::Relaxed);
 }
 
-/// Hook for cpu.rs `enable_irq` / `restore_irq(true)`: closes the open
-/// segment into the current zone.
+/// Hardware IRQ delivery hook (probe patch: preempt::irq_enter). IF was
+/// cleared by delivery before any hook could observe it, so the model
+/// must open here (delivery requires IF=1, so a modeled-open state at
+/// this point is phantom — heal it, then open the frame segment).
 #[inline]
-pub fn irq_note_on() {
+pub fn zone_hardirq_enter() {
+    if !on() {
+        return;
+    }
+    let cpu = crate::arch::cpu_id() as usize;
+    if cpu >= crate::config::MAX_CPUS {
+        return;
+    }
+    let now = crate::arch::cpu::read_counter();
+    if IFZ.if0[cpu].load(Ordering::Relaxed) != 0 {
+        let dt = now.saturating_sub(IFZ.t0[cpu].load(Ordering::Relaxed));
+        IFZ.heal_n[cpu].fetch_add(1, Ordering::Relaxed);
+        IFZ.heal_cyc[cpu].fetch_add(dt, Ordering::Relaxed);
+    }
+    IFZ.t0[cpu].store(now, Ordering::Relaxed);
+    IFZ.zstk[cpu][0].store(ZONE_HARDIRQ, Ordering::Relaxed);
+    IFZ.zd[cpu].store(1, Ordering::Relaxed);
+    IFZ.if0[cpu].store(1, Ordering::Relaxed);
+    IFZ.slot[cpu].store(SLOT_NONE, Ordering::Relaxed);
+}
+
+/// End of the IRQ frame (probe patch: end of preempt::irq_exit, after
+/// inline softirq dispatch, before irq_exit_maybe_preempt_kernel). The
+/// iret boundary ends every zone: close whatever is open into its zone
+/// (a non-HARDIRQ top here exposes a handler that leaked a section) and
+/// hard-reset the stack.
+#[inline]
+pub fn zone_hardirq_exit() {
     if !on() {
         return;
     }
@@ -341,17 +541,16 @@ pub fn irq_note_on() {
         seg_close(cpu, zone_cur(cpu), crate::arch::cpu::read_counter());
         IFZ.if0[cpu].store(0, Ordering::Relaxed);
     }
+    IFZ.zd[cpu].store(0, Ordering::Relaxed);
+    IFZ.slot[cpu].store(SLOT_NONE, Ordering::Relaxed);
 }
 
-/// Zone push (irq_enter / __do_softirq / putc). If an IF=0 segment is
-/// open it is split (credited to the old zone, a new one starts under
-/// the incoming zone). `open` is true ONLY for the irq_enter hook:
-/// interrupt delivery itself clears IF before any cpu.rs hook can
-/// observe it, so that push opens the delivery->iret segment when none
-/// is running. Softirq/UART pushes pass false — ksoftirqd dispatches
-/// softirqs with IF=1, and those must not manufacture IF=0 time.
+/// __do_softirq entry (probe patch). Inline irq-exit dispatch runs with
+/// the HARDIRQ frame's IF=0: split the open segment, SOFTIRQ takes over.
+/// ksoftirqd dispatch (IF=1, model closed) touches nothing — handlers'
+/// own irqsave sections open REST segments through the disable hook.
 #[inline]
-pub fn zone_push(z: u8, open: bool) {
+pub fn zone_softirq_enter() {
     if !on() {
         return;
     }
@@ -359,26 +558,25 @@ pub fn zone_push(z: u8, open: bool) {
     if cpu >= crate::config::MAX_CPUS {
         return;
     }
-    let now = crate::arch::cpu::read_counter();
-    if IFZ.if0[cpu].load(Ordering::Relaxed) != 0 {
-        seg_close(cpu, zone_cur(cpu), now);
-    } else if open {
-        IFZ.t0[cpu].store(now, Ordering::Relaxed);
-        IFZ.if0[cpu].store(1, Ordering::Relaxed);
+    if IFZ.if0[cpu].load(Ordering::Relaxed) == 0 {
+        return;
     }
+    let now = crate::arch::cpu::read_counter();
+    seg_close(cpu, zone_cur(cpu), now);
     let d = IFZ.zd[cpu].load(Ordering::Relaxed) as usize;
     if d < ZSTK_DEPTH {
-        IFZ.zstk[cpu][d].store(z, Ordering::Relaxed);
+        IFZ.zstk[cpu][d].store(ZONE_SOFTIRQ, Ordering::Relaxed);
         IFZ.zd[cpu].store((d + 1) as u8, Ordering::Relaxed);
     }
+    IFZ.t0[cpu].store(now, Ordering::Relaxed);
 }
 
-/// Zone pop (irq_exit / __do_softirq exit / putc exit). At pop-to-zero
-/// (irq_exit, just before iret) the segment always closes: an interrupt
-/// gate frame was entered with IF=1 and iret restores IF=1, so any IF=0
-/// inside the frame ends at the frame boundary.
+/// __do_softirq exit (probe patch). Close the SOFTIRQ piece and resume
+/// the enclosing frame (usually HARDIRQ). A non-SOFTIRQ top (a handler
+/// left its own section open) keeps running — it closes at its own
+/// restore, or at the frame boundary if the handler is buggy.
 #[inline]
-pub fn zone_pop() {
+pub fn zone_softirq_exit() {
     if !on() {
         return;
     }
@@ -386,23 +584,62 @@ pub fn zone_pop() {
     if cpu >= crate::config::MAX_CPUS {
         return;
     }
-    let now = crate::arch::cpu::read_counter();
-    let d = IFZ.zd[cpu].load(Ordering::Relaxed) as usize;
-    if d == 0 {
+    if IFZ.if0[cpu].load(Ordering::Relaxed) == 0 || zone_cur(cpu) != ZONE_SOFTIRQ {
         return;
     }
-    let z = IFZ.zstk[cpu][d - 1].load(Ordering::Relaxed);
-    IFZ.zd[cpu].store((d - 1) as u8, Ordering::Relaxed);
-    if IFZ.if0[cpu].load(Ordering::Relaxed) != 0 {
-        seg_close(cpu, z, now);
-        if d - 1 == 0 {
-            // Frame boundary: IF returns to its delivery-time value (1).
-            IFZ.if0[cpu].store(0, Ordering::Relaxed);
-        } else {
-            // Nested zone ended; the enclosing window continues.
-            IFZ.t0[cpu].store(now, Ordering::Relaxed);
-        }
+    let now = crate::arch::cpu::read_counter();
+    seg_close(cpu, ZONE_SOFTIRQ, now);
+    let d = IFZ.zd[cpu].load(Ordering::Relaxed) as usize;
+    IFZ.zd[cpu].store(d.saturating_sub(1) as u8, Ordering::Relaxed);
+    IFZ.t0[cpu].store(now, Ordering::Relaxed);
+}
+
+/// putc entry (probe patch: console.rs). Split the open segment into a
+/// UART piece, but only when BOTH the model is open and the real flag
+/// is 0 — an IF=0 putc cannot be migrated or preempted, so the
+/// push/pop pair is balanced by construction; an IF=1 putc (task
+/// context, preemptible) must not touch the zone stack at all.
+#[inline]
+pub fn zone_uart_push() {
+    if !on() {
+        return;
     }
+    let cpu = crate::arch::cpu_id() as usize;
+    if cpu >= crate::config::MAX_CPUS {
+        return;
+    }
+    if IFZ.if0[cpu].load(Ordering::Relaxed) == 0 || crate::arch::cpu::get_interrupts_state() {
+        return;
+    }
+    let now = crate::arch::cpu::read_counter();
+    seg_close(cpu, zone_cur(cpu), now);
+    let d = IFZ.zd[cpu].load(Ordering::Relaxed) as usize;
+    if d < ZSTK_DEPTH {
+        IFZ.zstk[cpu][d].store(ZONE_UART, Ordering::Relaxed);
+        IFZ.zd[cpu].store((d + 1) as u8, Ordering::Relaxed);
+    }
+    IFZ.t0[cpu].store(now, Ordering::Relaxed);
+}
+
+/// putc exit (probe patch): close the UART piece, resume the enclosing
+/// zone. No-op unless the stack top is UART.
+#[inline]
+pub fn zone_uart_pop() {
+    if !on() {
+        return;
+    }
+    let cpu = crate::arch::cpu_id() as usize;
+    if cpu >= crate::config::MAX_CPUS {
+        return;
+    }
+    if IFZ.if0[cpu].load(Ordering::Relaxed) == 0 || zone_cur(cpu) != ZONE_UART {
+        return;
+    }
+    let now = crate::arch::cpu::read_counter();
+    seg_close(cpu, ZONE_UART, now);
+    let d = IFZ.zd[cpu].load(Ordering::Relaxed) as usize;
+    IFZ.zd[cpu].store(d.saturating_sub(1) as u8, Ordering::Relaxed);
+    IFZ.t0[cpu].store(now, Ordering::Relaxed);
 }
 
 /// Is the current CPU modeled IF=0 right now (for the putc if0 split)?
@@ -559,12 +796,14 @@ pub fn note_printk_ring(len: usize) {
 
 /// Hook at emit_to_console tail (console-emitted bytes; `len` counts the
 /// bytes actually pushed, CR-for-LF expansion included by the caller).
+/// v3: reads the REAL flag (modeled was v2; self-healing keeps them
+/// equal, real is the ground truth).
 #[inline]
 pub fn note_printk_con(len: usize) {
     if !on() {
         return;
     }
-    let if0 = if0_now();
+    let if0 = !crate::arch::cpu::get_interrupts_state();
     if let Some(s) = pr_slot() {
         s.con_bytes.fetch_add(len as u64, Ordering::Relaxed);
         if if0 {
@@ -1341,8 +1580,10 @@ pub fn dump() {
         }
     }
 
-    // pa15 IF=0 zone decomposition (F1 irq-exit dispatch numbers; raw
-    // TSC -> ms). Zones: rest / hardirq-frame / softirq-dispatch / uart.
+    // pa15/pa16 IF=0 zone decomposition (F1 irq-exit dispatch numbers;
+    // raw TSC -> ms). Zones: rest / hardirq-frame / softirq-dispatch /
+    // uart. v3: exact (edge-triggered, self-healing) — heal/miss are
+    // the model-vs-reality disagreement meters and should read ~0.
     {
         let tsc_hz = crate::arch::cpu::get_counter_freq().max(1);
         let msd = tsc_hz / 1000;
@@ -1353,7 +1594,9 @@ pub fn dump() {
                 IFZ.cum[c][2].load(Ordering::Relaxed),
                 IFZ.cum[c][3].load(Ordering::Relaxed),
             ];
-            if v.iter().all(|&x| x == 0) {
+            let heal_n = IFZ.heal_n[c].load(Ordering::Relaxed);
+            let miss_n = IFZ.miss_n[c].load(Ordering::Relaxed);
+            if v.iter().all(|&x| x == 0) && heal_n == 0 && miss_n == 0 {
                 continue;
             }
             let tot: u64 = v.iter().sum();
@@ -1369,8 +1612,27 @@ pub fn dump() {
                 IFZ.seg_max[c][2].load(Ordering::Relaxed),
                 IFZ.seg_max[c][3].load(Ordering::Relaxed),
             ];
+            // Open-segment diagnostic (cross-CPU reads; KVM syncs TSC —
+            // treat the age as indicative). A cpu parked by a KERNPANIC
+            // shows a frozen, ever-aging open segment here.
+            let mut open = alloc::string::String::new();
+            if IFZ.if0[c].load(Ordering::Relaxed) != 0 {
+                let zn = match zone_cur(c) {
+                    ZONE_HARDIRQ => "hard",
+                    ZONE_SOFTIRQ => "soft",
+                    ZONE_UART => "uart",
+                    _ => "rest",
+                };
+                open = alloc::format!(
+                    " OPEN zone={} age={}ms",
+                    zn,
+                    (crate::arch::cpu::read_counter()
+                        .saturating_sub(IFZ.t0[c].load(Ordering::Relaxed)))
+                        / msd
+                );
+            }
             crate::pr_warn!(
-                "SYSCOST t={}s if0 cpu={}: tot={}ms rest={}ms hard={}ms soft={}ms uart={}ms nseg={}/{}/{}/{} max={}ms/{}ms/{}ms/{}ms",
+                "SYSCOST t={}s if0 cpu={}: tot={}ms rest={}ms hard={}ms soft={}ms uart={}ms nseg={}/{}/{}/{} max={}ms/{}ms/{}ms/{}ms heal={}n/{}ms miss={}n{}",
                 secs,
                 c,
                 tot / msd,
@@ -1379,7 +1641,81 @@ pub fn dump() {
                 v[2] / msd,
                 v[3] / msd,
                 nseg[0], nseg[1], nseg[2], nseg[3],
-                mx[0] / msd, mx[1] / msd, mx[2] / msd, mx[3] / msd
+                mx[0] / msd, mx[1] / msd, mx[2] / msd, mx[3] / msd,
+                heal_n,
+                IFZ.heal_cyc[c].load(Ordering::Relaxed) / msd,
+                miss_n,
+                open
+            );
+        }
+
+        // REST open-site table: top 12 rows by charged cycles + overflow.
+        // One row per file:line that opened an irqsave section; the fix
+        // list for the F1 REST bulk.
+        let mut top: [usize; 12] = [usize::MAX; 12];
+        let mut top_cyc: [u64; 12] = [0; 12];
+        for i in 0..REST_SITES_N {
+            let cy = REST_SITES[i].cyc.load(Ordering::Relaxed);
+            if cy == 0 {
+                continue;
+            }
+            for t in 0..top.len() {
+                if cy > top_cyc[t] {
+                    // shift down and place
+                    let mut j = top.len() - 1;
+                    while j > t {
+                        top[j] = top[j - 1];
+                        top_cyc[j] = top_cyc[j - 1];
+                        j -= 1;
+                    }
+                    top[t] = i;
+                    top_cyc[t] = cy;
+                    break;
+                }
+            }
+        }
+        let any_site = top.iter().any(|&t| t != usize::MAX);
+        let of_cyc = REST_OF.cyc.load(Ordering::Relaxed);
+        if any_site || of_cyc != 0 {
+            crate::pr_warn!(
+                "SYSCOST t={}s rest-sites: (top by charged cycles; n=opens tot=wall max=longest)",
+                secs
+            );
+        }
+        for t in 0..top.len() {
+            let i = top[t];
+            if i == usize::MAX {
+                continue;
+            }
+            let key = REST_SITES[i].loc.load(Ordering::Relaxed);
+            let n = REST_SITES[i].n.load(Ordering::Relaxed).max(1);
+            // SAFETY: keys are &'static Location references stored at
+            // open time by the disable hook on this kernel's own code.
+            let (file, line) = unsafe {
+                let l = &*(key as *const core::panic::Location<'static>);
+                (l.file(), l.line())
+            };
+            crate::pr_warn!(
+                "SYSCOST t={}s rest-site {:2}: {}:{} n={} tot={}ms avg={}ns max={}ms",
+                secs,
+                t + 1,
+                file,
+                line,
+                REST_SITES[i].n.load(Ordering::Relaxed),
+                top_cyc[t] / msd,
+                top_cyc[t] / n * 1000 / (tsc_hz / 1_000_000).max(1),
+                REST_SITES[i].max.load(Ordering::Relaxed) / msd
+            );
+        }
+        if of_cyc != 0 || REST_OF.n.load(Ordering::Relaxed) != 0 {
+            let n = REST_OF.n.load(Ordering::Relaxed).max(1);
+            crate::pr_warn!(
+                "SYSCOST t={}s rest-site of: n={} tot={}ms avg={}ns max={}ms (table-full + missed-edge opens)",
+                secs,
+                REST_OF.n.load(Ordering::Relaxed),
+                of_cyc / msd,
+                of_cyc / n * 1000 / (tsc_hz / 1_000_000).max(1),
+                REST_OF.max.load(Ordering::Relaxed) / msd
             );
         }
     }
