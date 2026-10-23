@@ -3953,11 +3953,18 @@ fn binder_thread_write(
                 // SAFETY: under WORLD.
                 unsafe {
                     let world = w.as_ref().unwrap();
-                    let node = pm(world, proc)
-                        .im()
-                        .nodes
+                    // sc167 node-identity parity: prefer the issuing
+                    // thread's OWN node at this ptr ((ptr, reg_tgid) key;
+                    // see translate_object) — forked siblings in this
+                    // shared proc can each own a stub at the same VA.
+                    let my_tgid = crate::sched::current()
+                        .map(|t| (*t).tgid() as u32)
+                        .unwrap_or(0);
+                    let nodes = &pm(world, proc).im().nodes;
+                    let node = nodes
                         .iter()
-                        .find(|n| n.ptr == node_ptr)
+                        .find(|n| n.ptr == node_ptr && n.reg_tgid == my_tgid)
+                        .or_else(|| nodes.iter().find(|n| n.ptr == node_ptr))
                         .cloned();
                     let Some(node) = node else {
                         drop(w);
@@ -5261,19 +5268,33 @@ fn translate_object(sender: &Arc<BinderProc>, obj: &mut FlatBinderObject, target
                 BINDER_TYPE_BINDER | BINDER_TYPE_WEAK_BINDER => {
                     let strong = obj.hdr_type == BINDER_TYPE_BINDER;
                     let ptr = (obj.handle as u64) | ((obj._handle_pad as u64) << 32);
+                    // reg_tgid must be the registering THREAD's TGID
+                    // (sc161 bug: current_pid() is the per-task tid, so
+                    // worker-registered nodes got reg_tgid=worker_tid and
+                    // the ownership gate rejected every reader).
+                    let reg_tgid = crate::sched::current()
+                        .map(|t| unsafe { (*t).tgid() } as u32)
+                        .unwrap_or(0);
+                    // sc167 node-identity parity: on Linux every forked
+                    // child is a FRESH binder proc with its own node
+                    // space, so two byte-identical siblings can each own
+                    // a stub at the same VA. In THIS shared proc the node
+                    // key is therefore (ptr, reg_tgid), not ptr alone —
+                    // a bare-ptr lookup would hand sibling B's
+                    // registration to sibling A's live node (and route
+                    // B's incoming transactions into A, the cross-child
+                    // black hole), or to a dead predecessor's node.
                     let node = {
                         let sp = pm(world, sender);
-                        match sp.im().nodes.iter().find(|n| n.ptr == ptr).cloned() {
+                        match sp
+                            .im()
+                            .nodes
+                            .iter()
+                            .find(|n| n.ptr == ptr && n.reg_tgid == reg_tgid)
+                            .cloned()
+                        {
                             Some(n) => n,
                             None => {
-                                // reg_tgid must be the registering
-                                // THREAD's TGID (sc161 bug: current_pid()
-                                // is the per-task tid, so worker-registered
-                                // nodes got reg_tgid=worker_tid and the
-                                // ownership gate rejected every reader).
-                                let reg_tgid = crate::sched::current()
-                                    .map(|t| unsafe { (*t).tgid() } as u32)
-                                    .unwrap_or(0);
                                 let n = Arc::new(BinderNode::new(
                                     world.next_id,
                                     ptr,
