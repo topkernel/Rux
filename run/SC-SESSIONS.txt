@@ -2324,3 +2324,24 @@ SESSION R FIFTH LEG ADDENDUM 3 (sc179 readback + quiet-kernel work,
   (~2.6k/boot) for milestone-boot diagnosis.
 - sc180 plan: quiet kernel, solo host, judge whether the launcher
   finishes init before the (now much later) hilogd saturation point.
+
+SESSION R FIFTH LEG ADDENDUM 4 (sc180 mid-run, 21:2x-21:3x): QUIET
+  KERNEL CONFIRMS THE NEXT BOTTLENECK - PER-MOUNT COST, NOT LEAKS.
+- sc180 (quiet kernel, solo): APP-PARK/APPMAP/applog all 0 (gates
+  work); 67 AppSpawnChild lines by min 8; launcher fast-cycling
+  (attempts 1430..1900+, each LIFECYCLE_HALF_TIMEOUT then process
+  died; sc179's single attempt survived 12 min, sc180's die in tens of
+  seconds - faster cycling, faster mounts each round?).
+- ReportAbnormalDuration telemetry names the bottleneck precisely:
+  single sandbox mount phases at 1695%->1936% of the 1000ms budget
+  (1.7-1.9 s per phase: "/mnt/user/100/sharefs/docs", "/data/app/el1/
+  public/shader_cache/cloud/..."), SPAWNCHILD at 321%. SOLO host,
+  quiet kernel - the cost is intrinsic.
+- ns.rs sc98 comment already quantified the mechanism: every MS_REC
+  bind SCANS THE WHOLE MOUNT REGISTRY (10-25 ms per mount; ~50 binds
+  per sandbox spawn). The leak is fixed (namespace Drop detaches), the
+  per-bind O(registry) scan remains: ~50 x 25ms = 1.2s+ per spawn,
+  growing with boot-mount count. THE next kernel lever for the
+  launcher-vs-lifecycle race: index mounts (by parent or path) instead
+  of the linear registry scan in the MS_REC clone path.
+- sc180 runs to 22:07; watch OnForeground/colors>=9.
