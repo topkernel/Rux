@@ -1758,11 +1758,28 @@ pub fn schedule_dead_never_returns() {
     const IN_SCHED: u32 = TaskFlags::TIF_IN_SCHED.bits();
     static TERM_RETRY_N: core::sync::atomic::AtomicU32 =
         core::sync::atomic::AtomicU32::new(0);
+    static TERM_ENGAGE_N: core::sync::atomic::AtomicU32 =
+        core::sync::atomic::AtomicU32::new(0);
     let mut rounds = 0u32;
     loop {
         if let Some(cur) = current() {
             // SAFETY: cur is the running task (this very context).
             unsafe {
+                // sc192 (v3): print ENGAGEMENT (once, budgeted) so the
+                // next strand can distinguish "helper never ran" from
+                // "helper ran silently with pc==0" — sc191/sc192 both
+                // stranded with ZERO TERM-DESCHED lines and the two were
+                // indistinguishable in the log.
+                if rounds == 0 {
+                    let n = TERM_ENGAGE_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                    if n < 8 {
+                        crate::pr_warn!(
+                            "TERM-DESCHED engaged pid={} pc={:#x}",
+                            (*cur).pid(),
+                            (*cur).preempt_count()
+                        );
+                    }
+                }
                 // A racing wake/heal may have re-linked us or rewritten
                 // our state: re-assert DEAD and unlink before every
                 // attempt so the picker can never hand the CPU back.
@@ -1802,14 +1819,24 @@ pub fn schedule_dead_never_returns() {
         schedule();
         rounds += 1;
         // schedule() returning means it refused/repicked us once more;
-        // loop and re-assert. After a generous bound (something re-links
-        // us every single round — not observed, but do not spin hot),
-        // park in wfi like the old code did.
+        // loop and re-assert. sc192 (v3): the old "park in wfi like the
+        // pre-v1 code did" fallback after 8 rounds is a PERMANENT CPU
+        // loss whenever the re-link race outlasts the budget — observed
+        // on a SIGKILL teardown of an on-CPU FFRT worker (launcher tgid
+        // 5111, tid 5129, killed mid-futex-wait): the bare wfi loop never
+        // re-enters schedule(), so no later interrupt or wake can hand
+        // this CPU to another task; the slot named the dead task for 60+
+        // s (rip=wfi+5, preempt_count froze at 0x10000 after an IRQ hit
+        // the park). A DEAD task holds no critical section worth
+        // stranding a CPU for: instead pace the retry with wfi — each
+        // interrupt (the timer tick at minimum) is another chance for
+        // the picker, now seeing {DEAD, dequeued, unowned}, to switch us
+        // out for good. wfi needs IF=1; force it on (a dead task holds
+        // no critical section to protect).
         if rounds >= 8 {
-            loop {
-                // SAFETY: plain hint instruction, no side effects.
-                crate::arch::cpu::wfi();
-            }
+            crate::arch::cpu::enable_irq();
+            // SAFETY: plain hint instruction, no side effects.
+            crate::arch::cpu::wfi();
         }
     }
 }
