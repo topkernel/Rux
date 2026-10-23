@@ -2875,3 +2875,21 @@ Surface (private image, shared images untouched):
    bootanimation cycles) — not more statics.
 3. Successor claiming a dead load chain: relaunch with
    `./run/ww-loadchain.sh wwload 100 12381 <next-round>`.
+
+### Session 31 first-round results (both chains, full budgets)
+
+- MAIN r54 (completed under session-31 ownership): FULL 2700 s clean —
+  77656 lines, 0 WW-HIT / 0 heals / 0 panics. Cumulative: **0 WW-HIT
+  across r1-r54 complete rounds** (plus partials), 0 META-SMASH. Chain
+  auto-advanced to r55.
+- LOAD r1 (first full sdc-cycle round): FULL 2700 s — 827 sdc exec
+  cycles (vs 1 in a baseline round; ~19/h under dual-chain host
+  contention), storm healthy to the end (wakes 11.27M, forks 2685),
+  strand_max 52.5 s (the documented >=3-QEMU host-contention class —
+  both my chains + foreign QEMUs share the host; capture markers are
+  exact, unaffected), 0 capture markers of any kind, tripwire armed
+  try 0. Chain auto-advanced to r2.
+- Ops: a transient foreign QEMU (PID 46915) briefly appeared in THIS
+  worktree's cwd at 22:43 and exited on its own within a minute — not
+  started by this session's scripts (both chain QEMUs were continuous);
+  no action needed, noted for the record.
