@@ -26,8 +26,13 @@ pub fn test_config() {
     // Kernel heap grew 32MB -> 128MB -> 512MB -> 1024MB (distro-scale
     // userspace, then the OH/GNOME service set, then the OH sandbox
     // workload); kernel stacks doubled again (64KB -> 128KB) after the
-    // r19 stack fix.
-    test_assert_eq!(KERNEL_HEAP_SIZE, 1073741824, "KERNEL_HEAP_SIZE == 1024MB");
+    // r19 stack fix. The unit-test suite runs on riscv64 only (run.sh
+    // test mode hardcodes qemu-system-riscv64), and build.rs clamps
+    // kernel_heap_size to 128MB on riscv64 (Kernel.toml's 1024MB is
+    // the x86_64 value; a 1GB heap overruns the riscv64 memory map —
+    // merge gate 2026-10-19), so the runtime constant here is always
+    // the clamped 128MB, never the raw Kernel.toml value.
+    test_assert_eq!(KERNEL_HEAP_SIZE, 134217728, "KERNEL_HEAP_SIZE == 128MB (riscv64-clamped)");
     test_assert_eq!(PHYS_MEMORY_SIZE, 2147483648, "PHYS_MEMORY_SIZE == 2GB");
     test_assert_eq!(USER_STACK_SIZE, 8388608, "USER_STACK_SIZE == 8MB");
     test_assert_eq!(KERNEL_STACK_SIZE, 131072, "KERNEL_STACK_SIZE == 128KB");
