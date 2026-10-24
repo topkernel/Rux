@@ -595,6 +595,72 @@ pub fn live_stats_kib() -> (u64, u64) {
     (obj_bytes / 1024, pages * 4)
 }
 
+/// Leg-16 census peek: dump the first two qwords of up to `per_page`
+/// objects from each active page of class `ci` (raw UART, allocation-
+/// free). Object headers carry vtables/magic/locks that identify the
+/// owning type — the census counts say WHICH CLASS holds the heap, this
+/// says WHICH TYPE fills the class. Caller must not hold the class lock.
+pub fn census_peek(ci: usize, per_page: usize) {
+    use crate::dfx::taskdump::{taskdump_dec, taskdump_raw_line};
+    if ci >= CLASSES.len() {
+        return;
+    }
+    let (heap_start, _heap_end) =
+        crate::mm::buddy_allocator::GLOBAL_ALLOCATOR.heap_bounds();
+    if heap_start == 0 {
+        return;
+    }
+    let cache = &CACHES[ci];
+    let s = CLASSES[ci];
+    let fo = first_off(s);
+    let objs = (PAGE_SIZE - fo) / s;
+    // Buffer-then-print (leg rule: no UART under locks): snapshot the
+    // object headers under the class irqsave lock, print after drop.
+    let per = per_page.min(8);
+    let mut snap: [[u64; 2]; 64] = [[0; 2]; 64];
+    let mut nsnap = 0usize;
+    let _g = cache.lock.lock_irqsave();
+    let mut page = cache.head.load(Ordering::Relaxed) as u32;
+    let mut pages = 0usize;
+    while page != 0 && pages < 8 && nsnap < snap.len() {
+        let page_addr = heap_start + page as usize * PAGE_SIZE;
+        let hdr = hdr_of(page_addr);
+        if hdr.magic != HDR_MAGIC || hdr.state != STATE_ACTIVE {
+            break;
+        }
+        let mut i = 0usize;
+        while i < objs && i < per && nsnap < snap.len() {
+            // SAFETY: page_addr is a live slab page of this class; slot
+            // offset fo + i*s is inside the page. Reading FREE slots is
+            // safe (they hold the freelist u16 at their start); live
+            // slots hold the object's own first fields.
+            let p = page_addr + fo + i * s;
+            let a0 = unsafe { core::ptr::read_volatile(p as *const u64) };
+            let a1 = unsafe { core::ptr::read_volatile((p + 8) as *const u64) };
+            if a0 != 0 || a1 != 0 {
+                snap[nsnap] = [a0, a1];
+                nsnap += 1;
+            }
+            i += 1;
+        }
+        page = hdr.next_page;
+        pages += 1;
+    }
+    drop(_g);
+    taskdump_raw_line(b"PEEK c");
+    taskdump_dec(s as u64);
+    taskdump_raw_line(b":\n");
+    let mut k = 0usize;
+    while k < nsnap {
+        taskdump_raw_line(b"  ");
+        taskdump_dec(snap[k][0]);
+        taskdump_raw_line(b" ");
+        taskdump_dec(snap[k][1]);
+        taskdump_raw_line(b"\n");
+        k += 1;
+    }
+}
+
 /// One-line census for the ALLOCTHROW dump (raw UART, allocation-free).
 pub fn census_line() {
     use crate::dfx::taskdump::{taskdump_dec, taskdump_raw_line};
