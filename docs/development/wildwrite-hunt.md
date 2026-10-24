@@ -3359,3 +3359,53 @@ rsp=0x7ff090410fc8" line (a USER frame). Confirmed MY lane's probe
   ~13:05; qemu 235499 / 235605, gdb 235637 / 235727, both WW-ARMED 19
   with GUARD=0xffffffff80a7a000, confirmed via gdb logs).
 - Commits: 0d200333 (s37 claim record + r66/load-r13 gdb cmds).
+
+## Session 38 (continuation agent — pure watch session: chains adopted
+## alive mid-round at r68/load-r15 after the ~12:33 quota death)
+
+### Inheritance reconstruction (claim 13:35 Oct 24)
+
+- Both chains ALIVE at claim (ps before assumption, the s10/s34 lesson):
+  driver roots 176512 (main, ww-chain2.sh — r68 in flight since
+  13:05:11) / 176547 (load, ww-loadchain.sh — load-r15 since 13:05:30),
+  the same PIDs the s36/s37 handoffs carried — third consecutive clean
+  PID handoff. Round QEMUs 242828/242838 and 242918/242929, gdb 242936 /
+  242986 on 12371/12381. Rounds WW-ARMED 19 (GUARD=0xffffffff80a7a000,
+  confirmed in both gdb logs), wildwatch try 0, storming mid-round with
+  0 markers.
+- The ~12:33 agent quota death did NOT take the drivers (detached by
+  design): across the 08:35-launched stint the chains ran autonomously,
+  main r62→r68 and load r9→r15, every intervening round full-budget
+  clean per the driver verdict blocks (chain2-s35 / loadchain-s35 logs).
+- Main repo drift check: 78460742 vs merged base 988e10c1 — ZERO commits
+  under kernel/ (docs + chore dropping two 11MB probe bzImages; the
+  perf-audit leg-13 merge adjudicates the IRQ-OFF age=1000ms family as
+  x86_64 timer 1Hz cadence). Frozen hunt pair unaffected; chains NOT
+  rebuilt, per the no-rebuild rule for docs-only main movement.
+- Handoff context (accepted, recorded): the age=1000ms IRQ-OFF family is
+  the TSC timekeeper 1s quantization bug, fix landing on the A-line
+  branch. This session's rounds show ZERO age=1000ms lines (r67: 1,
+  load-r14: 2, r68: 0, load-r15: 1 IRQ-OFF-WINDOW lines, all the benign
+  short class age 108-139 ms, same rip ffffffff80573d96 as always) —
+  consistent with cadence/jitter, not long cli, and no behavior change
+  expected on the frozen kernel. Real capture surfaces remain WW-HIT /
+  WILDWATCH-CANARY / META-SMASH / KERNPANIC / protection-cluster badaddr.
+- Foreign QEMUs at claim: none besides the two chain pairs (host load
+  lighter than s36/s37 claims).
+
+### Chain ledger (s38 ownership)
+
+- MAIN r67 (FULL 2700 s): CLEAN — 87395 lines, "budget spent" natural
+  end, 0 WW-HIT / 0 watchpoint hits / 0 heals, no panics, armed try 0.
+  Driver self-advanced to r68 (13:05:11).
+- LOAD r14 (FULL 2700 s): CLEAN — 169300 lines, 834 sdc exec cycles,
+  0 gdb hits / 0 capture markers, armed try 0. Driver self-advanced to
+  load-r15 (13:05:30).
+- Cumulative: **0 WW-HIT across r1-r67 complete rounds** (plus
+  partials), 0 META-SMASH. Load surface: p1 + r1-r14 = **~10760 sdc
+  exec cycles over 15 full armed load-hours**, zero fires, zero false
+  positives.
+- r68 / load-r15 in flight (started 13:05:11/13:05:30, budget ends
+  ~13:50; qemu 242828 / 242918, gdb 242936 / 242986, both WW-ARMED 19
+  with GUARD=0xffffffff80a7a000, confirmed via gdb logs).
+- Commits: (this claim record + r68/load-r15 gdb cmds).
