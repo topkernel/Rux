@@ -1829,7 +1829,7 @@ confirmed it on the launcher trajectory. Final quantification:
   not by code change".
 - **sc213 (19:02, same kernel fec94520, launcher trajectory — SA 10
   published, com.ohos.launcher active, launcher.ready still not set
-  behind their userspace RS park): same verdict through t=1409 s.**
+  behind their userspace RS park): same verdict through t=2059 s at leg close.**
   drct=0, slow=0, zfree stable ~420k pages, heap plateau 347 MB. The
   account retry rounds (QueryForegroundUserId, the sc210 loop's
   survivor) now cost bursts of ~103-255 COW faults per 10 s beat
@@ -1864,7 +1864,7 @@ main-class): zero launcher markers, crawl trajectory — no UI markers to
 report; screen frozen at BootAnimation's first color-pattern frame
 (their adjudicated RS read-lock leak, userspace). sc213 (A-line
 branch, launcher trajectory): SA 10 published, com.ohos.launcher
-active, **launcher.ready still not set** at t=1409 s — the RS park
+active, **launcher.ready still not set** at t=2059 s (leg close) — the RS park
 (userspace) gates the UI milestone now, not kernel perf. pa31
 (main-class): launcher.ready not set (section 2l(3)). The
 perf-report post-UI rows stay PENDING.
