@@ -3678,3 +3678,26 @@ rsp=0x7ff090410fc8" line (a USER frame). Confirmed MY lane's probe
   in flight since 19:50:13/19:50:55, budget ends ~20:35; both WW-ARMED
   19 with GUARD=0xffffffff80a7a000 (gdb logs). Driver roots unchanged
   (176512 / 176547).
+- MAIN r77 (FULL 2700 s): CLEAN — 78245 lines, "budget spent" natural
+  end, 0 WW-HIT / 0 watchpoint hits / 0 heals, no panics, 0 badaddr
+  (raw serial + gdb verified); 10 IRQ-OFF-WINDOW lines (6 canonical
+  enable_irq + 2 inb-family, ages up to 0x438=1080 ms; 1 at 80217659 =
+  unix-socket seg sum iterator, one-off). Driver self-advanced to r78
+  (20:35:14).
+- LOAD r24 (FULL 2700 s): CLEAN — 166015 lines, 776 sdc exec cycles,
+  0 gdb hits / 0 capture markers, armed try 0, 0 badaddr; 15
+  IRQ-OFF-WINDOW lines — the widest rip spread so far: 8 canonical +
+  outb 80573f16 (cpu.rs family) + 6 one-offs (RawVec dealloc /
+  finish_grow, CAS site, Atomic load, VMA btree walk 80580ca2,
+  hpet::r32 again), ages up to 0x46e=1134 ms. Every one-off is an
+  ordinary kernel path with no cli-loop character; the spread + host
+  load (5+ QEMUs running) keeps supporting the vCPU-deschedule jitter
+  reading. Driver self-advanced to load-r25 (20:35:58).
+- Cumulative: **0 WW-HIT across r1-r77 complete rounds** (plus
+  partials), 0 META-SMASH. Load surface: p1 + r1-r24 = **~18767 sdc
+  exec cycles over 25 full armed load-hours**, zero fires, zero false
+  positives.
+- r78 (qemu 386317, gdb 386347) / load-r25 (qemu 386462, gdb 386545)
+  in flight since 20:35:14/20:35:58, budget ends ~21:20; both WW-ARMED
+  19 with GUARD=0xffffffff80a7a000 (gdb logs). Driver roots unchanged
+  (176512 / 176547).
