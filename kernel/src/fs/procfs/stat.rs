@@ -226,21 +226,29 @@ pub fn generate() -> Vec<u8> {
     }
 
     // Linux's intr line: the grand total, then one sum over CPUs per
-    // IRQ, in IRQ index order (fs/proc/stat.c show_stat). The per-IRQ
-    // tail uses the same source list as /proc/interrupts: the two
-    // arch-internal vectors first (timer, IPI soft-interrupt), then the
-    // external (PLIC) lines.
+    // IRQ, in IRQ index order (fs/proc/stat.c show_stat). Linux
+    // accumulates the total from the very values it prints; Rux reads
+    // each source once and sums those, so the total always equals the
+    // tail (no read-skew between two passes). The per-IRQ tail uses
+    // the same source list as /proc/interrupts: the two arch-internal
+    // vectors first (timer, IPI soft-interrupt), then the external
+    // (PLIC) lines.
     out.push_str("intr ");
     {
-        let mut line = format!("{}", super::interrupts::total_interrupt_count());
+        let mut total = 0u64;
+        let mut line = String::new();
         // Arch-internal vectors (not in the PLIC irq space).
         for cpu in 0..num_cpus {
+            let v = super::interrupts::timer_count(cpu);
+            total = total.saturating_add(v);
             line.push(' ');
-            line.push_str(&super::interrupts::timer_count(cpu).to_string());
+            line.push_str(&v.to_string());
         }
         for cpu in 0..num_cpus {
+            let v = super::interrupts::soft_count(cpu);
+            total = total.saturating_add(v);
             line.push(' ');
-            line.push_str(&super::interrupts::soft_count(cpu).to_string());
+            line.push_str(&v.to_string());
         }
         // External IRQs, IRQ index order 0..48 (rows 16..31 do not
         // exist on either board we boot; Linux prints its full NR_IRQS
@@ -250,9 +258,11 @@ pub fn generate() -> Vec<u8> {
             for cpu in 0..num_cpus {
                 sum = sum.saturating_add(crate::interrupt::irq_get_count(irq, cpu));
             }
+            total = total.saturating_add(sum);
             line.push(' ');
             line.push_str(&sum.to_string());
         }
+        out.push_str(&total.to_string());
         out.push_str(&line);
     }
     out.push('\n');
