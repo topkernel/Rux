@@ -1,5 +1,5 @@
 #!/bin/bash
-# pbref-boot.sh — ONE Linux-reference pbench probe boot (perf-report.md
+# pbref-boot.sh — ONE reference-kernel pbench probe boot (perf-report.md
 # 8.4 protocol, reference side). Boots the OH image on its own OHOS
 # 6.6.101 bzImage with the machine class MATCHED to the pa series
 # (q35 / KVM / -cpu max / SMP2 / 4G — run-oh-linux-ref.sh defaults are
