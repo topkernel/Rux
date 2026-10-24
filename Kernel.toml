@@ -66,7 +66,24 @@ swap_size_mb = 256
 # BELOW the stack bottom. 128KB restores ~57KB of headroom; the pty
 # layer additionally boxes its 8KB master_rx buffer (see fs/pty.rs) so
 # pair construction no longer shuffles 8KB through every frame.
-kernel_stack_size = 131072
+#
+# Leg-16 (2026-10-24): 128KB -> 96KB. The kernel-heap anatomy at the
+# launcher floor (sc219 census) measured kernel stacks as the largest
+# single heap consumer: 2688 live x 128KB = 383MB of the 904MB floor
+# (42%), and that floor is what kills the launcher spawn inside
+# appspawn's window. The two fat chains that forced 128KB are fixed at
+# the source this leg (both `array::from_fn` materialising big arrays
+# through try_from_fn's wrapper copies in the debug build):
+# fill_page_cache_batch's [IoCompletion; 128] (resize2fs chain, measured
+# 80,496B deep) and Task construction's init rings (fork chains at
+# 65.8-76KB). Post-fix maximum measured depth is 89,368B (deterministic
+# across sc218/219/223; identity still pending — see the SC-KREC probe),
+# so 96KB keeps 8.9KB of headroom under the canary guard while saving
+# ~84MB at the floor. DUAL-ARCH NOTE: the 89,368B figure is x86_64
+# debug; the riscv64 depth profile differs — the merge gate's riscv
+# regression must stay green (the STACK-OVERFLOW canary prints loudly
+# on any overflow).
+kernel_stack_size = 98304
 # Buddy allocator max order
 buddy_max_order = 20
 # Slab cache count
