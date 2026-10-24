@@ -1657,6 +1657,53 @@ monitor). A-line branch kernel with FXRS probes, not a pa-series
 measurement boot — recorded as context for the PENDING post-UI row,
 which stays PENDING until launcher.ready lands on a main-class kernel.
 
+### 2l. NINETEENTH LEG: monitoring leg — patrol rounds, gate idle, probe-diagnosis hardening
+
+A waiting leg by design: standing UI patrol, standing census-hold gate,
+and small housekeeping on the leg-18 probe bugs. One self-started QEMU
+(pa30smoke, inside the hard cap of 2).
+
+**(1) Housekeeping: the two pa28 probe bugs (dcaf4564, ef3c02f9).**
+Code + evidence check first: both bugs were ALREADY fixed inside leg 18's
+merged probe commit (8c5d0ae7): the dump prints at pr_warn (pa28-a's
+drop-before-the-ring class — pr_info=6 > the pa-boot loglevel 4), and
+the dump cadence parks half an interval so FSW lands at :30 past each
+minute, clear of syscost's ~70-line :00 dump (pa28-b's emit-lock loss —
+emit_to_console from softirq context gets a 100µs acquire budget, and
+losing it skips the console line; the record only lives in the ring,
+which a pa serial-only boot never reads). pa29's serial confirms the
+fix held: 7/7 FSW1 rounds at t=90..450. What leg 19 added is the
+diagnosis gap that made leg 18 pay two boot iterations: the two failure
+classes are indistinguishable from a serial with zero FSW lines. FSW1
+now ends with `lvl=<console_loglevel> es=<console_emit_skipped>` (new
+read-only accessor on printk's skip counter): a vanished round with es
+climbing = emit-lock loss; lvl > 4 = level-filter drop; both flat =
+probe logic dead. Validated by **pa30smoke** (150 s, syscost=1 fsw=1,
+loglevel=4, KVM, 1 QEMU): `FSW1 t=90s ... lvl=4 es=111` landed cleanly
+between syscost's t=60/t=120 rounds, counter magnitudes match pa29's
+t=90 round. Side fix: pa-boot.sh died at `set -e` on the horizon kill
+(timeout's 124), skipping its own `.done` marker and stamper kill —
+now `rc=0; qemu ... || rc=$?`.
+
+**(2) UI patrol (standing).** Rounds over the leg window, latest boot
+first: bootanimation.finished SET holds across sc209/sc210/sc211 (the
+leg-18 first); launcher.ready still only the "not set" warning in every
+round; OnForeground 0; no ArkUI render markers (only param-name matches
+like persist.sys.arkui.animationscale). No main-class UI-marker boot
+appeared → the perf-report post-UI row stays PENDING. Round log at the
+end of this section.
+
+**(3) Census-hold gate (standing).** origin/main sat at 1702de2c (the
+leg-18 merge) through every round — no A-line fix merged mid-leg, the
+gate never triggered, zero QEMUs spent on it.
+
+**(4) QEMU ledger.** pa30smoke = 1 of the 2 permitted. Leg-18's overrun
+(3 vs 2) not repeated.
+
+Round log (host time, newest-boot basis):
+- R1 17:20 — sc211 (ended 17:15) checked: launcher.ready not set,
+  bootanimation.finished SET, no OnForeground/ArkUI. main@1702de2c.
+
 ## 4. Ranking table v2.8 (cost centers -> boot-time contribution)
 
 v2.8 = v2.7 + the F4 anatomy (leg 18, pa29, section 2k): row 4's weight
