@@ -48,6 +48,36 @@ median ±20% — any change touching `sched/` reports these.
 
 ---
 
+## D-2: Packed kernel-stack slab (x86_64)
+
+**Design.** Kernel stacks are carved three-per-256KB order-6 block (80KB
+slots) by a dedicated slab with a side-table slot map and empty-block
+reclaim, instead of the mainstream buddy allocator's
+one-power-of-two-block-per-request (a bare 80/96KB request burns a whole
+128KB order-5 block). riscv64 and unmeasured arches compile the slab out
+entirely and keep plain 128KB allocation — packing buys nothing at
+power-of-two sizes, and the 80KB margin is an x86_64-measured figure
+(the ungated first attempt corrupted adjacent heap data on the deeper-
+nesting riscv64 test kernel; the arch gate is itself regression-tested).
+
+**Advantage.** Per-stack footprint 85.3KB vs 128KB (~-115MB at the
+launcher-floor population where stacks were 42% of the 904MB floor);
+99.9% slot packing live (sc237: kb=981/ks=2941).
+
+**Compatibility evidence.** No external interface touched; riscv64 suite
+1096/1096 (the ungated variant read 1094/1096 — the gate caught it);
+x86_64 full-image boot to deepest-ever population (3445 live tasks) with
+zero canary hits; census exact hold across the gate boots.
+
+**Known cost.** A leaf side-table lock on the alloc fast path; 6.7%
+per-block tail waste; the ~15KB depth margin is arch-specific and thin.
+
+**Guard.** R18-2 canary at every slot bottom; KSTACK-HW depth probe
+(dfx=schb,ksprobe); SC-ANAT kb/ks packing columns; perf-gate allocator
+domain (Tier 1 census/ticks, Tier 2 fork rows).
+
+---
+
 <!-- Pending entries (register when they land on main):
      - packed kernel-stack slab (order-6 blocks carved into 80KB slots,
        vs plain buddy order-power allocation) — on the launcher lane branch,
