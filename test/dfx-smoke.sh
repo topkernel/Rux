@@ -99,6 +99,9 @@ rm -f "$LOG"
     sleep 0.3
     echo 'cat /proc/self/stat'
     sleep 0.3
+    echo 'echo ===SMOKE: proc timer_list ==='
+    echo 'cat /proc/timer_list'
+    sleep 0.3
     echo 'echo ===SMOKE: proc diskstats ==='
     echo 'cat /proc/diskstats'
     sleep 0.3

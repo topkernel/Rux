@@ -64,6 +64,7 @@ pub mod schedstat;
 pub mod softirqs;
 pub mod sysctl;
 pub mod sysrq;
+pub mod timer_list;
 pub mod vmstat;
 pub mod net;
 pub mod configgz;
@@ -528,6 +529,8 @@ impl ProcFSSuperBlock {
         self.create_dynamic_file("locks", locks::generate);
         // The per-device I/O statistics (Linux layout).
         self.create_dynamic_file("diskstats", diskstats::generate);
+        // The pending kernel timers (Linux layout).
+        self.create_dynamic_file("timer_list", timer_list::generate);
         // Memory statistics (Linux layout).
         self.create_dynamic_file("vmstat", vmstat::generate);
         self.create_dynamic_file("buddyinfo", vmstat::generate_buddyinfo);

@@ -235,9 +235,21 @@ layer counts reads, writes, sectors and the time spent per device
 block/genhd.c). Rux merges no requests, has no discard path and no
 separate flush path, so those columns report zero.
 
+**Part 3 — partly done (cont).** `/proc/timer_list` is implemented in
+Linux's structure (verified against a Linux guest: "Timer List Version:
+v0.10", the "now at <ns> nsecs" line, the per-CPU clock section and
+the "active timers" entries with their expiry). Rux has no hrtimer
+clock bases and no per-timer callback, so the two fields with no
+counterpart are filled with what the kernel knows — the timer id
+instead of the hrtimer struct address, and the action's kind
+(alarm/wake/timerfd/oneshot) instead of a callback function name.
+
 **Part 3 — remaining.**
 
-- `/proc/sched` (per-task runqueue view), `/proc/timer_list`.
+- `/proc/sched` (the per-task runqueue view). Its layout is a ~50
+  field per-task block; the reference host does not expose the file
+  (`CONFIG_SCHEDSTATS` off), so there is no format to copy — it is
+  left alone rather than invented.
 - `/proc/pagetypeinfo` — the exact text differs between kernel
   versions and the reference host does not expose the file
   (`CONFIG_PROC_PAGE_MONITOR` off), so the format is not verified yet
