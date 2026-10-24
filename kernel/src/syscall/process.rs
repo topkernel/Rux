@@ -1028,6 +1028,13 @@ fn do_execve(pathname: &str, argv: &[alloc::string::String], envp: &[alloc::stri
                     crate::drivers::timer::get_jiffies().wrapping_sub(xt_now)
                 );
             }
+            // sc209 (leg 14): latch render_service's tgid for the FXRS
+            // futex lifecycle tracer (SA 10 publish-wall forensics; see
+            // the FXRS block in sync/futex.rs). The exec'ing task is the
+            // group leader, so pid == tgid here.
+            if full_path.as_ref().ends_with("/system/bin/render_service") {
+                crate::sync::futex::fxrs_latch(crate::process::current_pid());
+            }
             crate::pr_debug!("exec: pid={} path={}", crate::process::current_pid(), full_path.as_ref());
             0
         }

@@ -1318,6 +1318,92 @@ pub fn unix_send(
                 .as_ref()
                 .map(|n| n.ends_with("hilogInput") || n.ends_with("hilogd.server"))
                 .unwrap_or(false);
+            // sc209 (leg 14): param-service control tap. sc208's crawl is
+            // samgr's on-demand loads timing out: "Start dynamic proc:
+            // installs,511,105_14991ms" x24 — ServiceControlWithExtra =
+            // SystemSetParameter("ohos.ctl.start", ...) over this socket,
+            // returning PARAM_CODE_TIMEOUT(105) after 15 s, and the
+            // server-side "Handle set param" log NEVER shows the installs
+            // sets (the client's FIRST attempt even returned 0 in 0 ms
+            // with no server handling — a stale/instant reply). This tap
+            // prints every ParamMessage (u32 type, u32 msgSize, u32 id,
+            // char key[100] @12, ParamMsgContent @112) SENT to the
+            // paramservice listener, plus param-ish messages SENT BY pid
+            // 1 (server responses carry type MSG_SET_PARAM with the
+            // result i32 at off 112). Client-send vs server-arrival gap =
+            // socket/wake loss; a pid-1 response with no matching request
+            // = the duplicated-reply conviction.
+            if !data.is_empty() && data.len() >= 12 {
+                let is_param_listener = target
+                    .bound_name
+                    .lock()
+                    .as_ref()
+                    .map(|n| n.ends_with("paramservice"))
+                    .unwrap_or(false);
+                let sender_pid = crate::process::current_pid();
+                // type: 0 SET / 1 WAIT / 2 ADD_WATCHER / 3 DEL_WATCHER /
+                // 4 NOTIFY / 5 SAVE. Plausibility gate: type <= 5 and
+                // msgSize == data.len() and key starts printable.
+                let mtype = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
+                let msize = u32::from_le_bytes([data[4], data[5], data[6], data[7]]);
+                let mid = u32::from_le_bytes([data[8], data[9], data[10], data[11]]);
+                let looks_param = mtype <= 5
+                    && msize as usize == data.len()
+                    && data.len() > 12
+                    && data[12] >= b'a'
+                    && data[12] <= b'z';
+                if is_param_listener || (sender_pid == 1 && looks_param) {
+                    static PCTL_N: core::sync::atomic::AtomicUsize =
+                        core::sync::atomic::AtomicUsize::new(0);
+                    let n = PCTL_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                    if n < 300 {
+                        let mut kbuf = [0u8; 40];
+                        let kmax = core::cmp::min(40, data.len() - 12);
+                        let mut klen = 0usize;
+                        while klen < kmax && data[12 + klen] != 0 {
+                            kbuf[klen] = data[12 + klen];
+                            klen += 1;
+                        }
+                        let key = core::str::from_utf8(&kbuf[..klen]).unwrap_or("?");
+                        let mut extra = alloc::string::String::new();
+                        if sender_pid == 1 {
+                            // Server response: result i32 at off 112.
+                            if data.len() >= 116 {
+                                let r = i32::from_le_bytes([
+                                    data[112], data[113], data[114], data[115],
+                                ]);
+                                extra = alloc::format!(" result={}", r);
+                            }
+                        } else if data.len() >= 116 {
+                            // Client request: ParamMsgContent @112
+                            // (u8 type=1 PARAM_VALUE, u16 size) → string @116.
+                            let ctype = data[112];
+                            if ctype == 1 {
+                                let mut vbuf = [0u8; 48];
+                                let vmax = core::cmp::min(48, data.len() - 116);
+                                let mut vlen = 0usize;
+                                while vlen < vmax && data[116 + vlen] != 0 {
+                                    vbuf[vlen] = data[116 + vlen];
+                                    vlen += 1;
+                                }
+                                extra.push(' ');
+                                extra.push_str(core::str::from_utf8(&vbuf[..vlen]).unwrap_or("?"));
+                            }
+                        }
+                        crate::pr_warn!(
+                            "PCTL-SEND #{} pid={} -> {} len={} type={} msgId={} key={}{}",
+                            n,
+                            sender_pid,
+                            if is_param_listener { "paramservice" } else { "client" },
+                            data.len(),
+                            mtype,
+                            mid,
+                            key,
+                            extra
+                        );
+                    }
+                }
+            }
             if is_hilog && !data.is_empty() {
                 let mut text = [0u8; 160];
                 let mut k = 0usize;
@@ -1765,6 +1851,39 @@ pub fn unix_recv(
                     }
                 }
                 drop(q);
+                // sc209 (leg 14): arrival half of the PCTL param tap (see
+                // the send side in unix_send). When pid 1 (begetd, which
+                // hosts the param service) reads a stream segment that
+                // parses as a ParamMessage, print it — client-send lines
+                // without a matching PCTL-RECV name where the installs
+                // ctl sets die (queue stall vs server epoll wake loss).
+                if copied >= 12 && crate::process::current_pid() == 1 {
+                    let mtype = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
+                    if mtype <= 5 && buf[12] >= b'a' && buf[12] <= b'z' {
+                        static PCTL_R_N: core::sync::atomic::AtomicUsize =
+                            core::sync::atomic::AtomicUsize::new(0);
+                        let n = PCTL_R_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                        if n < 300 {
+                            let mid = u32::from_le_bytes([buf[8], buf[9], buf[10], buf[11]]);
+                            let mut kbuf = [0u8; 40];
+                            let kmax = core::cmp::min(40, copied - 12);
+                            let mut klen = 0usize;
+                            while klen < kmax && buf[12 + klen] != 0 {
+                                kbuf[klen] = buf[12 + klen];
+                                klen += 1;
+                            }
+                            let key = core::str::from_utf8(&kbuf[..klen]).unwrap_or("?");
+                            crate::pr_warn!(
+                                "PCTL-RECV #{} pid=1 len={} type={} msgId={} key={}",
+                                n,
+                                copied,
+                                mtype,
+                                mid,
+                                key
+                            );
+                        }
+                    }
+                }
                 // Room may have freed for senders blocked on our queue.
                 sock.wait_queue.wake_up_all();
                 // Draining also raises the PEER's writability (its send
