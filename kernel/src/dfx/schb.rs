@@ -103,6 +103,69 @@ pub fn note_proc_open(pid: u32) {
     ring[(seq as usize - 1) % PROC_RING_LEN] = (seq, pid, j);
 }
 
+// ===== Leg-15 pace counters (launcher round decomposition) =====
+//
+// sc210 measured ~11 s per launcher getOsAccountLocalId round = ~3000 COW
+// faults + 40 forks, with the zone pinned at free~100 pages (wmark low
+// 2451, in_direct_reclaim=1) — every COW fault's page alloc rides the
+// serialized direct-reclaim slowpath. These cumulative counters decompose
+// the round cost from the heartbeat alone: avg ms/fault = 1000/KERNEL_HZ *
+// d(cowJ)/d(cow), reclaim share = d(drctJ)/beat-jiffies, regime =
+// zfree/heapK trajectory. All sites are fault/alloc hot paths: ONE
+// relaxed fetch_add per event, no locks held at any call site, no I/O —
+// the sc198 lesson (probe traffic modulates the race) is about prints;
+// the only UART cost stays here in schbd's beat.
+
+static PACE_COW: AtomicU64 = AtomicU64::new(0);
+static PACE_COW_J: AtomicU64 = AtomicU64::new(0);
+static PACE_DRCT: AtomicU64 = AtomicU64::new(0);
+static PACE_DRCT_J: AtomicU64 = AtomicU64::new(0);
+static PACE_DRCT_MAXJ: AtomicU64 = AtomicU64::new(0);
+static PACE_SLOW: AtomicU64 = AtomicU64::new(0);
+
+/// Record one COW fault resolution attempt. `j0` is the jiffies value
+/// captured at handle_cow_fault entry (callers pass it so the exit-side
+/// cost stays one read + adds). No-op unless `dfx=schb`.
+pub fn note_cow(j0: u64) {
+    if !switches::enabled(DfxSwitch::Schb) {
+        return;
+    }
+    PACE_COW.fetch_add(1, Ordering::Relaxed);
+    let d = crate::drivers::timer::get_jiffies().saturating_sub(j0);
+    PACE_COW_J.fetch_add(d, Ordering::Relaxed);
+}
+
+/// Record one direct-reclaim round (try_to_free_pages), same shape.
+pub fn note_drct(j0: u64) {
+    if !switches::enabled(DfxSwitch::Schb) {
+        return;
+    }
+    PACE_DRCT.fetch_add(1, Ordering::Relaxed);
+    let d = crate::drivers::timer::get_jiffies().saturating_sub(j0);
+    PACE_DRCT_J.fetch_add(d, Ordering::Relaxed);
+    PACE_DRCT_MAXJ.fetch_max(d, Ordering::Relaxed);
+}
+
+/// Record one page-alloc slowpath entry (zone fastpath failed).
+pub fn note_slow() {
+    if !switches::enabled(DfxSwitch::Schb) {
+        return;
+    }
+    PACE_SLOW.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Snapshot the pace counters for the beat line (schbd context only).
+fn pace_snapshot() -> (u64, u64, u64, u64, u64, u64) {
+    (
+        PACE_COW.load(Ordering::Relaxed),
+        PACE_COW_J.load(Ordering::Relaxed),
+        PACE_DRCT.load(Ordering::Relaxed),
+        PACE_DRCT_J.load(Ordering::Relaxed),
+        PACE_DRCT_MAXJ.load(Ordering::Relaxed),
+        PACE_SLOW.load(Ordering::Relaxed),
+    )
+}
+
 /// Start the schbd kthread. Gated on the `dfx=schb` switch; called from
 /// the same late-boot slot as khungtaskd (secondaries online, timer
 /// wakeups routable).
@@ -232,12 +295,21 @@ extern "C" fn schbd_fn(_arg: *mut core::ffi::c_void) -> i32 {
         let t_secs = crate::drivers::timer::get_jiffies().saturating_sub(boot_jiffies) / hz;
 
         {
+            // Leg-15 pace snapshot (all reads relaxed, schbd context):
+            // cumulative COW attempts + jiffies spent in handle_cow_fault,
+            // direct-reclaim rounds + jiffies + max round, slowpath
+            // entries, zone free pages, kernel heap used KB.
+            let (cow, cowj, drct, drctj, drctmax, slow) = pace_snapshot();
+            let zfree = crate::mm::pglist::first_online_node()
+                .map(|n| n.free_pages() as u64)
+                .unwrap_or(0);
+            let heapk = crate::mm::buddy_allocator::buddy_stats().used_bytes / 1024;
             let mut w = ConsoleWriter::new();
             let _ = writeln!(
                 w,
-                "SC-HB t={}s pidmax={} flow={} young={} tasks={} R={} M={} S={} D={} bproc={} bw={} bw15={}",
+                "SC-HB t={}s pidmax={} flow={} young={} tasks={} R={} M={} S={} D={} bproc={} bw={} bw15={} pace: cow={} cowJ={} drct={} drctJ={} drctMaxJ={} slow={} zfree={} heapK={}",
                 t_secs, max_pid, flow, comm_str(&young_comm), n_tasks, n_run, n_mark, n_s, n_d,
-                bprocs, bwait, bwait15
+                bprocs, bwait, bwait15, cow, cowj, drct, drctj, drctmax, slow, zfree, heapk
             );
         }
 

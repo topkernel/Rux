@@ -249,13 +249,17 @@ unsafe fn fault_in_write(start: *mut u8, len: usize) -> bool {
         ) {
             crate::arch::mm::MmFaultResult::CowPending => {
                 // handle_cow_fault resolves it
-                match unsafe {
+                // Leg-15 pace: tick after return (pte_lock released).
+                let cow_j0 = crate::drivers::timer::get_jiffies();
+                let cow_res = unsafe {
                     crate::arch::mm::mm_ops::handle_cow_fault(
                         addr_space,
                         root_ppn,
                         crate::arch::mm::VirtAddr::new(page as u64),
                     )
-                } {
+                };
+                crate::dfx::schb::note_cow(cow_j0);
+                match cow_res {
                     crate::arch::mm::CowFaultResult::Resolved
                     | crate::arch::mm::CowFaultResult::Retry => {
                         resolved_any = true;
