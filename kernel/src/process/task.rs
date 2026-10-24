@@ -1003,6 +1003,24 @@ pub struct Task {
     pub stime_ticks: AtomicU64,
     pub cutime_ticks: AtomicU64,
     pub cstime_ticks: AtomicU64,
+    /// Context-switch counters (Linux's task->nvcsw / task->nivcsw).
+    /// A voluntary switch is one where the task went to sleep; an
+    /// involuntary one is where the task was preempted while still
+    /// runnable. Counted in the scheduler's context_switch and read by
+    /// /proc/[pid]/status (voluntary_ctxt_switches /
+    /// nonvoluntary_ctxt_switches).
+    pub nvcsw: AtomicU64,
+    pub nivcsw: AtomicU64,
+    /// Page faults taken by this task in user mode (Linux's minflt).
+    /// Rux has no minor/major distinction — file-backed pages come
+    /// from the page cache, not from a fault-time disk read — so every
+    /// user fault is counted here and the major counter stays 0.
+    pub min_flt: AtomicU64,
+    /// Major page faults (Linux's majflt). Always 0 on Rux, see above.
+    pub maj_flt: AtomicU64,
+    /// The task's start time in jiffies since boot (Linux's starttime,
+    /// field 22 of /proc/[pid]/stat).
+    pub start_jiffies: AtomicU64,
     /// RUSAGE_CHILDREN ru_maxrss (KB): max of reaped children's resident
     /// set at exit (Linux signal->cmaxrss). LTP getrusage03 requires the
     /// propagation (initial.children ~= 100MB after a 100MB consumer
@@ -1322,6 +1340,11 @@ impl Task {
             stime_ticks: AtomicU64::new(0),
             cutime_ticks: AtomicU64::new(0),
             cstime_ticks: AtomicU64::new(0),
+            nvcsw: AtomicU64::new(0),
+            nivcsw: AtomicU64::new(0),
+            min_flt: AtomicU64::new(0),
+            maj_flt: AtomicU64::new(0),
+            start_jiffies: AtomicU64::new(crate::drivers::timer::get_jiffies()),
             cmaxrss_kb: AtomicU64::new(0),
             exit_maxrss_kb: AtomicU64::new(0),
             tracer_pid: AtomicU32::new(0),
@@ -1751,6 +1774,34 @@ impl Task {
         ptr::write(
             (ptr as usize + offset_of!(Task, cstime_ticks)) as *mut AtomicU64,
             AtomicU64::new(0),
+        );
+        // Context-switch counters (Linux nvcsw/nivcsw): same non-zeroing
+        // discipline — /proc/[pid]/status reads them, so they must be
+        // initialized here or they carry allocator garbage.
+        ptr::write(
+            (ptr as usize + offset_of!(Task, nvcsw)) as *mut AtomicU64,
+            AtomicU64::new(0),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, nivcsw)) as *mut AtomicU64,
+            AtomicU64::new(0),
+        );
+        // Fault counters + the start time: the buddy allocator does not
+        // zero Task pages, so /proc/[pid]/stat would otherwise read
+        // allocator garbage for fields 10/12/22.
+        ptr::write(
+            (ptr as usize + offset_of!(Task, min_flt)) as *mut AtomicU64,
+            AtomicU64::new(0),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, maj_flt)) as *mut AtomicU64,
+            AtomicU64::new(0),
+        );
+        // The task's start time (Linux's starttime, field 22 of
+        // /proc/[pid]/stat): the jiffies at which the task was built.
+        ptr::write(
+            (ptr as usize + offset_of!(Task, start_jiffies)) as *mut AtomicU64,
+            AtomicU64::new(crate::drivers::timer::get_jiffies()),
         );
         // Ptrace + coredump state (P1 wave 3): same R9-1 discipline — the
         // buddy allocator does not zero Task pages, so every new field
@@ -2307,6 +2358,34 @@ impl Task {
         ptr::write(
             (ptr as usize + offset_of!(Task, cstime_ticks)) as *mut AtomicU64,
             AtomicU64::new(0),
+        );
+        // Context-switch counters (Linux nvcsw/nivcsw): same non-zeroing
+        // discipline — /proc/[pid]/status reads them, so they must be
+        // initialized here or they carry allocator garbage.
+        ptr::write(
+            (ptr as usize + offset_of!(Task, nvcsw)) as *mut AtomicU64,
+            AtomicU64::new(0),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, nivcsw)) as *mut AtomicU64,
+            AtomicU64::new(0),
+        );
+        // Fault counters + the start time: the buddy allocator does not
+        // zero Task pages, so /proc/[pid]/stat would otherwise read
+        // allocator garbage for fields 10/12/22.
+        ptr::write(
+            (ptr as usize + offset_of!(Task, min_flt)) as *mut AtomicU64,
+            AtomicU64::new(0),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, maj_flt)) as *mut AtomicU64,
+            AtomicU64::new(0),
+        );
+        // The task's start time (Linux's starttime, field 22 of
+        // /proc/[pid]/stat): the jiffies at which the task was built.
+        ptr::write(
+            (ptr as usize + offset_of!(Task, start_jiffies)) as *mut AtomicU64,
+            AtomicU64::new(crate::drivers::timer::get_jiffies()),
         );
         // Ptrace + coredump state (P1 wave 3): see new_idle_at — non-zeroing
         // buddy allocator, init every enforcement-read field.

@@ -308,6 +308,18 @@ pub fn generate_status(pid: u64) -> Vec<u8> {
     content.push_str(&format!("CapBnd:\t{:016x}\n", cred.cap_bounding.bits()));
     content.push_str("Seccomp:\t0\n");
 
+    // Context-switch counters (Linux /proc/[pid]/status tail): a
+    // voluntary switch is one where the task went to sleep, an
+    // involuntary one where it was preempted while still runnable.
+    content.push_str(&format!(
+        "voluntary_ctxt_switches:\t{}\n",
+        task.nvcsw.load(core::sync::atomic::Ordering::Relaxed)
+    ));
+    content.push_str(&format!(
+        "nonvoluntary_ctxt_switches:\t{}\n",
+        task.nivcsw.load(core::sync::atomic::Ordering::Relaxed)
+    ));
+
     content.into_bytes()
 }
 
@@ -448,6 +460,7 @@ pub fn generate_cmdline(pid: u64) -> Vec<u8> {
 /// 52 fields total, matching the format of /proc/[pid]/stat.
 pub fn generate_stat(pid: u64) -> Vec<u8> {
     use crate::process::{current_task, current_pid, find_task_by_pid};
+    use alloc::string::ToString;
 
     let mut pinned;
     let task = if current_pid() as u64 == pid {
@@ -460,10 +473,14 @@ pub fn generate_stat(pid: u64) -> Vec<u8> {
         Some(pinned.get())
     };
 
-    let (name_str, ppid, state_ch, vsize_pages, sig_mask, exit_code, utime, stime, cutime, cstime) = match task {
+    let (name_str, ppid, state_ch, vsize_pages, rss_pages, sig_mask, exit_code,
+         utime, stime, cutime, cstime, priority, nice, threads, processor, policy,
+         min_flt, maj_flt, start_jiffies) = match task {
         Some(t) => {
             let ch = task_state_char(&t) as char;
             let vsize = t.address_space_arc().map(|mm| mm.total_vm()).unwrap_or(0);
+            // Linux reports rss in PAGES (field 24); vsize stays in bytes.
+            let rss = t.address_space_arc().map(|mm| mm.rss()).unwrap_or(0);
             let sigmask = t.sigmask;
             let ec = t.exit_code();
             use core::sync::atomic::Ordering::Relaxed;
@@ -473,36 +490,104 @@ pub fn generate_stat(pid: u64) -> Vec<u8> {
                 t.cutime_ticks.load(Relaxed),
                 t.cstime_ticks.load(Relaxed),
             );
+            // Linux's prio field is the static priority of a normal task
+            // (120 - nice); a real-time task carries its RT priority in
+            // field 40 instead.
+            let nice = t.nice();
+            let prio = 120 - nice;
+            let threads = {
+                let leader = unsafe { &*t.group_leader_ptr() };
+                leader.nr_threads().max(1)
+            };
+            // SchedPolicy already uses Linux's SCHED_* numbering
+            // (SCHED_OTHER=0, FIFO=1, RR=2, BATCH=3, IDLE=5).
+            let policy = t.policy() as i32;
+            let processor = t.ti_cpu();
             // comm (basename, like Linux), not the full exe path. Owned:
             // the Cow would borrow from the match-local binding.
-            (task_comm(&t).into_owned(), t.ppid(), ch, vsize, sigmask, ec,
-             ticks.0, ticks.1, ticks.2, ticks.3)
+            let faults = (
+                t.min_flt.load(Relaxed),
+                t.maj_flt.load(Relaxed),
+                t.start_jiffies.load(Relaxed),
+            );
+            (task_comm(&t).into_owned(), t.ppid(), ch, vsize, rss, sigmask, ec,
+             ticks.0, ticks.1, ticks.2, ticks.3, prio, nice, threads, processor, policy,
+             faults.0, faults.1, faults.2)
         }
-        None => (alloc::string::String::from("unknown"), 0, 'X', 0, 0, 0, 0, 0, 0, 0),
+        None => (alloc::string::String::from("unknown"), 0, 'X', 0, 0, 0, 0,
+                 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
     };
 
-    // Key fields filled: pid(1), comm(2), state(3), ppid(4), pgrp(5), session(6),
-    // utime(14)/stime(15) — own user/system CPU in ticks (timer-IRQ sampled);
-    // cutime(16)/cstime(17) — reaped-children CPU folded in at their exit;
-    // vsize(23) in bytes, signal block mask(31), exit_code(54).
-    // Fields 7-13,18-22 and 24-30,32-53 remain 0 — filled as accounting grows.
+    // Linux's /proc/[pid]/stat has exactly 52 fields (verified against a
+    // Linux guest: `awk '{print NF}' /proc/self/stat` → 52). The list is
+    // built field by field here so the numbering stays visible and
+    // checkable — a mistyped format string silently shifts every field
+    // after it.
+    //
+    // Filled from the kernel: pid(1), comm(2), state(3), ppid(4),
+    // pgrp(5), session(6), utime(14)/stime(15) (own user/system CPU in
+    // ticks, sampled in the timer IRQ), cutime(16)/cstime(17) (reaped
+    // children's CPU folded in at their exit), priority(18)/nice(19),
+    // num_threads(20), vsize(23) in bytes, rss(24) in pages, signal
+    // block mask(31), processor(39), policy(41), exit_code(52).
+    // The rest report 0 until the matching accounting exists.
     let vsize_bytes = vsize_pages * 4096;
-    let content = format!(
-        "{} ({}) {} {} {} {} 0 0 0 0 0 0 0 {} {} {} {} 0 0 0 0 0 {} 0 0 0 0 0 0 0 {} 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 {}\n",
-        pid,
-        name_str,
-        state_ch,
-        ppid,
-        pid,  // pgrp = pid
-        pid,  // session = pid
-        utime,
-        stime,
-        cutime,
-        cstime,
-        vsize_bytes,
-        sig_mask,
-        exit_code,
-    );
+    let mut fields: Vec<String> = Vec::with_capacity(52);
+    fields.push(pid.to_string()); // 1  pid
+    fields.push(format!("({})", name_str)); // 2  comm
+    fields.push(state_ch.to_string()); // 3  state
+    fields.push(ppid.to_string()); // 4  ppid
+    fields.push(pid.to_string()); // 5  pgrp
+    fields.push(pid.to_string()); // 6  session
+    fields.push("0".into()); // 7  tty_nr
+    fields.push("0".into()); // 8  tpgid
+    fields.push("0".into()); // 9  flags
+    fields.push(min_flt.to_string()); // 10 minflt
+    fields.push("0".into()); // 11 cminflt
+    fields.push(maj_flt.to_string()); // 12 majflt
+    fields.push("0".into()); // 13 cmajflt
+    fields.push(utime.to_string()); // 14 utime
+    fields.push(stime.to_string()); // 15 stime
+    fields.push(cutime.to_string()); // 16 cutime
+    fields.push(cstime.to_string()); // 17 cstime
+    fields.push(priority.to_string()); // 18 priority
+    fields.push(nice.to_string()); // 19 nice
+    fields.push(threads.to_string()); // 20 num_threads
+    fields.push("0".into()); // 21 itrealvalue
+    fields.push(start_jiffies.to_string()); // 22 starttime
+    fields.push(vsize_bytes.to_string()); // 23 vsize
+    fields.push(rss_pages.to_string()); // 24 rss
+    fields.push("0".into()); // 25 rsslim
+    fields.push("0".into()); // 26 startcode
+    fields.push("0".into()); // 27 endcode
+    fields.push("0".into()); // 28 startstack
+    fields.push("0".into()); // 29 kstkesp
+    fields.push("0".into()); // 30 kstkeip
+    fields.push(sig_mask.to_string()); // 31 signal
+    fields.push("0".into()); // 32 blocked
+    fields.push("0".into()); // 33 sigignore
+    fields.push("0".into()); // 34 sigcatch
+    fields.push("0".into()); // 35 wchan
+    fields.push("0".into()); // 36 nswap
+    fields.push("0".into()); // 37 cnswap
+    fields.push("0".into()); // 38 exit_signal
+    fields.push(processor.to_string()); // 39 processor
+    fields.push("0".into()); // 40 rt_priority
+    fields.push(policy.to_string()); // 41 policy
+    fields.push("0".into()); // 42 delayacct_blkio_ticks
+    fields.push("0".into()); // 43 guest_time
+    fields.push("0".into()); // 44 cguest_time
+    fields.push("0".into()); // 45 start_data
+    fields.push("0".into()); // 46 end_data
+    fields.push("0".into()); // 47 start_brk
+    fields.push("0".into()); // 48 arg_start
+    fields.push("0".into()); // 49 arg_end
+    fields.push("0".into()); // 50 env_start
+    fields.push("0".into()); // 51 env_end
+    fields.push(exit_code.to_string()); // 52 exit_code
+
+    let mut content = fields.join(" ");
+    content.push('\n');
     content.into_bytes()
 }
 

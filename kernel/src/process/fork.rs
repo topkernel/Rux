@@ -939,6 +939,9 @@ pub fn do_clone(args: CloneArgs) -> Result<Pid, i32> {
             taskdump_raw_line(b"\n");
         }
 
+        // /proc/stat "processes": the number of forks since boot.
+        crate::fs::procfs::stat::note_fork();
+
         Ok(pid)
     }
 }
