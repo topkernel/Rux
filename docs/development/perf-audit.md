@@ -365,9 +365,10 @@ Gate events + pa18 (11:00-11:15):
   eleventh-leg waiting state is discharged: gate A (launcher v3..v6)
   measured in pa18, gate B (magazine) measured in pa20, and the
   pa17-era GRQ attribution corrected. Remaining open items for the
-  next leg: UI milestone (launcher lane's sc-series; sc199 also died
-  without markers, sc200 rolling with their new schb soft-wedge
-  heartbeat dfx 858b455a), the census birth forensics (their lane),
+  next leg: UI milestone (launcher lane's sc-series; sc197-sc200 all
+  died without UI markers, sc201 rolling at leg close with the 8-color
+  oracle up and their schb soft-wedge heartbeat dfx 858b455a/18c194f6
+  in the kernel), the census birth forensics (their lane),
   and the allocation-churn hunt (row 7's new priority).
 
 
