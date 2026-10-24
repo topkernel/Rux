@@ -1961,7 +1961,11 @@ pub fn sys_futex_handler(args: &[u64; 6]) -> i64 {
                         // slot resolves offline against the image libs.
                         {
                             use core::fmt::Write;
-                            if let Some(aspace) = tk.address_space() {
+                            // sc242: Arc-pin the child's mm (unaccounted
+                            // foreign-borrow #GP family — see
+                            // rwfz_stack_frames).
+                            if let Some(aspace_pin) = tk.address_space_arc() {
+                                let aspace = aspace_pin.as_ref();
                                 let vmas = aspace.vma_read();
                                 for vm in vmas.iter() {
                                     let s0 = vm.start().as_usize();
@@ -3138,7 +3142,10 @@ unsafe fn apppark_rets(task: *const Task) {
     if rsp == 0 {
         return;
     }
-    let Some(aspace) = tk.address_space() else { return };
+    // sc242 (leg-17): Arc-pin the foreign task's mm for the whole scan
+    // (same unaccounted-borrow #GP family as rwfz_stack_frames).
+    let Some(aspace_pin) = tk.address_space_arc() else { return };
+    let aspace = aspace_pin.as_ref();
     let vmas = aspace.vma_read();
     let read_u64_at = |va: usize| -> Option<u64> {
         if va & 0xfff > 0xff8 {
@@ -3225,7 +3232,14 @@ unsafe fn rwfz_stack_frames(
     };
     #[cfg(not(any(feature = "x86_64", feature = "riscv64")))]
     let (rsp, rip) = (0u64, 0u64);
-    let Some(aspace) = tk.address_space() else { return };
+    // sc242 (leg-17): PIN the mm for the whole dump — the unaccounted
+    // `address_space()` borrow of a FOREIGN task lets the victim's
+    // concurrent exit_mm free the MmStruct (and its VMA btree) mid-walk
+    // (the documented "/proc maps #GP family"), and KILLDUMP runs
+    // exactly when the victim's exit is tearing the mm down. sc242
+    // #GP'd in the freed VMA tree at the second frame's vma_of lookup.
+    let Some(aspace_pin) = tk.address_space_arc() else { return };
+    let aspace = aspace_pin.as_ref();
     let vmas = aspace.vma_read();
     // sc90: return the VMA's BASE file offset separately — the loader
     // closes the fd after mmap, leaving fd=-1 on code VMAs that still
