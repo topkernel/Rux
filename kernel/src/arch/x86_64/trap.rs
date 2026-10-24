@@ -37,6 +37,63 @@ use crate::arch::pt_regs::{Cause, PtRegs, PT_REGS_SIZE};
 // Intel on x86 targets).
 core::arch::global_asm!(include_str!("trap.S"), options(att_syntax));
 
+// ============================================================================
+// ret_from_fork / ret_from_fork_kernel — fork/kthread first-instruction
+// entries as Rust naked fns (moved out of trap.S): these two are the only
+// trap.S symbols whose ADDRESS is taken from Rust (fork.rs, init.rs,
+// kthread.rs thread_set_entry), and under any LTO setting the linker
+// instantiated the include_str!'d global_asm! copy of trap.S more than
+// once, defining the address-taken symbol twice and failing the release
+// profile build (pa39 attempts 1-2, pa40 thin-LTO rerun — "symbol
+// 'ret_from_fork' is already defined"). Naked fns are ordinary Rust
+// functions: LTO-safe by construction. Bodies are the trap.S originals
+// byte-for-byte (AT&T syntax); every callee is a plain symbol
+// (#[no_mangle] get_prev_task / schedule_tail / ret_from_fork_kernel_helper,
+// and trap_exit exported .global/.hidden from trap.S).
+// ============================================================================
+#[no_mangle]
+#[unsafe(naked)]
+pub unsafe extern "C" fn ret_from_fork() {
+    // SAFETY: naked trampoline; contract documented in the trap.S comment
+    // block it replaced (fork sets thread.sp = frame, callee.ret_addr = here).
+    unsafe {
+        core::arch::naked_asm!(
+            "movq %rsp, %rbp",
+            "andq $-16, %rsp",
+            "call get_prev_task",
+            "movq %rax, %rdi",
+            "call schedule_tail",
+            "movq %rbp, %rsp",
+            "jmp trap_exit",
+            options(att_syntax)
+        );
+    }
+}
+
+#[no_mangle]
+#[unsafe(naked)]
+pub unsafe extern "C" fn ret_from_fork_kernel() {
+    // SAFETY: naked trampoline; never returns — the helper calls do_exit.
+    // R12 = kthread fn, R13 = fn_arg (switch-restored), RSP = scratch regs.
+    unsafe {
+        core::arch::naked_asm!(
+            "movq %rsp, %rbp",
+            "andq $-16, %rsp",
+            "call get_prev_task",
+            "movq %rax, %rdi",
+            "call schedule_tail",
+            "movq %r13, %rdi",
+            "movq %r12, %rsi",
+            "movq %rbp, %rdx",
+            "call ret_from_fork_kernel_helper",
+            "1:  cli",
+            "    hlt",
+            "    jmp 1b",
+            options(att_syntax)
+        );
+    }
+}
+
 // Table-load helpers (Intel-syntax inline quirks make the reload dance
 // easier as one asm unit: lgdt + CS reload + segment reloads + ltr).
 core::arch::global_asm!(
