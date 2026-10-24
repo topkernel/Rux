@@ -1,0 +1,51 @@
+# GNOME-SESSIONS.txt — Ubuntu->GNOME lane handoff log (like OH lane's SC-SESSIONS.txt)
+
+Lane: Ubuntu-GNOME ("Ubuntu see GNOME"), worktree
+/home/william/rux-agents/gnome-bringup, branch feature/gnome-bringup
+(base = main 5e498453). Mission: real GNOME Shell desktop (gnome-shell +
+mutter + gsd) visible and stable on the Ubuntu 22.04 riscv64 image.
+
+## Asset situation (surveyed at lane start)
+
+- The old GNOME verification image (/home/william/rux-agents/gnome-img/
+  gnome.img + fire6.py) and the gnome-int worktree are LOST (deleted).
+  The riscv-gnome worktree survives with run evidence under runs/
+  (fire-r84, fire-r85, bigalloc1..11) but no image and no builder.
+- The recipe survives in-tree as the x86 mirror: test/gnome-x86/
+  {build-img.sh, runit.c, fire.py} on main. Kernel-side fixes from the
+  GNOME campaign ARE on main (merge be8817dc: R83/R84/R85 trap.S +
+  sched fixes; plus later: 40920349 fake-OOM survivable PT alloc,
+  kernel_heap_size=1024, allocator magazines, from_fn stack fixes).
+- riscv64 ubuntu-base 22.04.3 rootfs cached at main repo
+  work/ubuntu-base-rootfs/22.04.3 (68M, RISC-V ELF verified).
+- riscv64 GNOME chain resolvable from mirrors.aliyun.com/ubuntu-ports
+  jammy: gnome-shell 42.9-0ubuntu2.3 + gnome-settings-daemon + mutter
+  (libmutter) closure = 693 packages.
+
+## Last known GNOME state before image loss (riscv-gnome/runs/fire-r85/v1, kernel = gnome-int = pre-R84)
+
+- M1 migrations @248s, M3 gnome-shell @233s (pid 369 RUNNING),
+  mutter_wm @316s, xterm x-ok @344s, M2 gsd @353s (gsd-wwan pid 391),
+  M4 screen_lit NOT reached (best nonblack 0.006), kernel panic @452s.
+- So the chain reached gsd + gnome-shell but never lit the screen on
+  that kernel; the 2026-10-13 roadmap milestone (M4 @601s, M5 @901s,
+  2100s clean) was on the same lost-worktree kernel family.
+
+## Lane plan
+
+1. test/ubuntu-gnome/{build-img.sh,runit.c,fire.py} — riscv64 rebuild
+   of the chain (full stock gnome session incl. gsd, /etc/runit-mode
+   knob for the minimal gs path). DONE (committed).
+2. Reproduce on current main kernel: smp2/1G first, then smp4/2G full
+   chain. Compare against fire-r85 milestones.
+3. Attack whatever blocks NOW (candidates per AGENTS.md: fake-OOM
+   ~342MB/2G [kernel much healthier now — re-verify], gsd->shell chain
+   stability, mutter/EGL on llvmpipe).
+4. Merge package needs the two-dimension gate (AGENTS.md Merge Gate):
+   pre-verify syscost/pbench tiers before declaring ready.
+
+## Session 1 (2026-10-25)
+
+- Created worktree from main 5e498453.
+- Kernel build: rc=0, target/riscv64gc-unknown-none-elf/debug/rux.
+- Image build: work/gnome-riscv64.img (in progress at this writing).
