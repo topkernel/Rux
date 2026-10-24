@@ -3337,3 +3337,47 @@ SLOW-TXN PROBE (14:2x-15:xx):
   nanosleep -21x, clock_gettime max 3 ms, WAKE-STRANDED 100->0, census
   counts hold - perf-audit.md 2h); diff-verified their scratch/tickfix
   9a451bef vs my 675095c0 hunk: BYTE-IDENTICAL.
+
+SESSION R THIRTEENTH LEG CLOSE-OUT - sc208 VERDICT: BOTH FIXES
+VERIFIED LIVE; THE PRE-LAUNCHER TIME SINK IS NAMED (foundation ->
+samgr code-7, exact 15 s server-side exec); READY FOR MERGE.
+
+- sc208 (deadlock fix + re-arm fix + SLOW-TXN probe, 14:59, 45 min):
+  census fired TWICE (t=350 and t=654) and the machine survived BOTH
+  (the sc207 freeze shape is gone); re-arm path structurally proven
+  (sc206 never got a second census). Boot: pid 1106@t=185 (fastest
+  quiet boot yet), oracle up, 0 panic, 0 PREEMPT-LEAK; ends in the
+  familiar crawl at pid 1233 (flow 0-2, bw15 ~237) - the crawl is NOT
+  the devmgr freeze and the census rekick does not heal it: it is the
+  exec-latency chain below.
+- THE SAMGR COST, ANSWERED (coordinator C-line cross-finding): 24
+  SLOW-TXN lines, ALL with queue = 0 ms - the binder machinery queues
+  nothing. 22/24 are ONE shape: foundation (pid 830, tids 830/884/
+  1054; once 467) -> samgr (pid 328, tids 328/335/345/358), code 7,
+  exec EXACTLY 15000 ms (x17), 30000 ms (x3), one 89390 ms. Exact-
+  15.000 s quantization = a deliberate 15 s timeout the samgr handler
+  waits out before replying (samgr waiting for an SA to publish that
+  never lands; foundation retries). Every SA-dependent call = 15 s
+  serial -> the pid-1100-1250 crawl. Next leg's first question: WHICH
+  SA never publishes - correlate samgr's not-found/retry hilog in the
+  printk-ring tail with the code-7 storm (census #2's ring tail +
+  SC-WEDGE-BW CLIENT-WAIT owed_pid=334/781 chains are in the sc208
+  serial).
+- Branch state: feature/samgr-callback at f5e0346a (pushed):
+  675095c0 fix(timer) TSC multiply-before-shift  [READY FOR MERGE -
+    byte-identical to the perf line's 9a451bef scratch; perf-audit.md
+    2h battery passed on main+exact-hunk; live-proven sc205/sc206/
+    sc207/sc208 TICKPROBE; corrects ALL x86_64 timing; riscv64
+    unaffected]
+  852d0cf2 diag(timer) TICKPROBE (one-shot, BSP-gated)
+  2a02d5db dfx(sched) tripwire discounts its own hardirq level
+  b634a615 fix(dfx) census re-arm dead code (verified in sc208)
+  d43c8753 fix(dfx) print-under-bucket-lock self-deadlock (verified
+    in sc208) + SLOW-TXN probe
+  + wip artifact/notes commits (ea8b9d1d, f5e0346a and the close-out
+    snapshot)
+- Rolls this leg: sc206 (45 min, crawled), sc207 (wedges -> root-
+  caused + fixed), sc208 (fixes verified). sc205-208 serials/ppm on
+  disk (serials gitignored). QEMUs ended by their own timeout
+  wrappers or killed by exact own PID after cmdline verification;
+  shotmon loops stopped per-tag; no setsid herds left behind.
