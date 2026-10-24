@@ -347,6 +347,10 @@ pub fn out_of_memory(oc: &mut OomControl) -> bool {
         true
     } else {
         crate::pr_err!("oom: no killable processes found");
+        // Leg-16: at the fake-OOM floor the interesting question is WHAT
+        // holds the ~900MB kernel heap. One-shot, raw UART, allocation-
+        // free (internally rate-limited to the first firing per boot).
+        crate::dfx::schb::oom_anat_dump();
         false
     }
 }

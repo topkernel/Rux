@@ -103,6 +103,128 @@ pub fn note_proc_open(pid: u32) {
     ring[(seq as usize - 1) % PROC_RING_LEN] = (seq, pid, j);
 }
 
+// ===== Leg-15 pace counters (launcher round decomposition) =====
+//
+// sc210 measured ~11 s per launcher getOsAccountLocalId round = ~3000 COW
+// faults + 40 forks, with the zone pinned at free~100 pages (wmark low
+// 2451, in_direct_reclaim=1) — every COW fault's page alloc rides the
+// serialized direct-reclaim slowpath. These cumulative counters decompose
+// the round cost from the heartbeat alone: avg ms/fault = 1000/KERNEL_HZ *
+// d(cowJ)/d(cow), reclaim share = d(drctJ)/beat-jiffies, regime =
+// zfree/heapK trajectory. All sites are fault/alloc hot paths: ONE
+// relaxed fetch_add per event, no locks held at any call site, no I/O —
+// the sc198 lesson (probe traffic modulates the race) is about prints;
+// the only UART cost stays here in schbd's beat.
+
+static PACE_COW: AtomicU64 = AtomicU64::new(0);
+static PACE_COW_J: AtomicU64 = AtomicU64::new(0);
+static PACE_DRCT: AtomicU64 = AtomicU64::new(0);
+static PACE_DRCT_J: AtomicU64 = AtomicU64::new(0);
+static PACE_DRCT_MAXJ: AtomicU64 = AtomicU64::new(0);
+static PACE_SLOW: AtomicU64 = AtomicU64::new(0);
+
+/// Record one COW fault resolution attempt. `j0` is the jiffies value
+/// captured at handle_cow_fault entry (callers pass it so the exit-side
+/// cost stays one read + adds). No-op unless `dfx=schb`.
+pub fn note_cow(j0: u64) {
+    if !switches::enabled(DfxSwitch::Schb) {
+        return;
+    }
+    PACE_COW.fetch_add(1, Ordering::Relaxed);
+    let d = crate::drivers::timer::get_jiffies().saturating_sub(j0);
+    PACE_COW_J.fetch_add(d, Ordering::Relaxed);
+}
+
+/// Record one direct-reclaim round (try_to_free_pages), same shape.
+pub fn note_drct(j0: u64) {
+    if !switches::enabled(DfxSwitch::Schb) {
+        return;
+    }
+    PACE_DRCT.fetch_add(1, Ordering::Relaxed);
+    let d = crate::drivers::timer::get_jiffies().saturating_sub(j0);
+    PACE_DRCT_J.fetch_add(d, Ordering::Relaxed);
+    PACE_DRCT_MAXJ.fetch_max(d, Ordering::Relaxed);
+}
+
+/// Record one page-alloc slowpath entry (zone fastpath failed).
+pub fn note_slow() {
+    if !switches::enabled(DfxSwitch::Schb) {
+        return;
+    }
+    PACE_SLOW.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Snapshot the pace counters for the beat line (schbd context only).
+fn pace_snapshot() -> (u64, u64, u64, u64, u64, u64) {
+    (
+        PACE_COW.load(Ordering::Relaxed),
+        PACE_COW_J.load(Ordering::Relaxed),
+        PACE_DRCT.load(Ordering::Relaxed),
+        PACE_DRCT_J.load(Ordering::Relaxed),
+        PACE_DRCT_MAXJ.load(Ordering::Relaxed),
+        PACE_SLOW.load(Ordering::Relaxed),
+    )
+}
+
+/// One-shot allocator anatomy at the first fake-OOM floor (leg-16).
+/// Called from the oom killer's "no killable processes" path: raw UART,
+/// allocation-free, counters only — safe in any context, once per boot
+/// regardless of dfx switches (NET_PAGES is always live; the kstack
+/// high-water needs dfx=schb to have armed its probe).
+pub fn oom_anat_dump() {
+    use crate::dfx::taskdump::{taskdump_dec, taskdump_raw_line};
+    static DONE: AtomicBool = AtomicBool::new(false);
+    if DONE.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    let (kn, khw) = crate::process::task::kstack_anat();
+    taskdump_raw_line(b"OOM-ANAT kstack live=");
+    taskdump_dec(kn);
+    taskdump_raw_line(b" hw=");
+    taskdump_dec(khw);
+    taskdump_raw_line(b" taskSZ=");
+    taskdump_dec(core::mem::size_of::<crate::process::task::Task>() as u64);
+    // Type sizes for the per-class census mapping below (bytes, the
+    // small-alloc class is the next power of two >= size).
+    taskdump_raw_line(b"\nOOM-ANAT sizes: vma=");
+    taskdump_dec(core::mem::size_of::<crate::mm::vma::Vma>() as u64);
+    taskdump_raw_line(b" file=");
+    taskdump_dec(core::mem::size_of::<crate::fs::file::File>() as u64);
+    taskdump_raw_line(b" dentry=");
+    taskdump_dec(core::mem::size_of::<crate::fs::dentry::Dentry>() as u64);
+    taskdump_raw_line(b" inode=");
+    taskdump_dec(core::mem::size_of::<crate::fs::inode::Inode>() as u64);
+    taskdump_raw_line(b" mm=");
+    taskdump_dec(core::mem::size_of::<crate::mm::mm_struct::MmStruct>() as u64);
+    taskdump_raw_line(b" ptregs=");
+    taskdump_dec(core::mem::size_of::<crate::arch::pt_regs::PtRegs>() as u64);
+    taskdump_raw_line(b" fdte=");
+    taskdump_dec(
+        core::mem::size_of::<[Option<alloc::sync::Arc<crate::fs::file::File>>; 1024]>() as u64
+            + 128,
+    );
+    taskdump_raw_line(b"\nOOM-ANAT buddy live pages by order:\n");
+    let np = &crate::mm::buddy_allocator::NET_PAGES;
+    let mut o = 0usize;
+    while o < np.len() {
+        let v = np[o].load(Ordering::Relaxed);
+        if v != 0 {
+            taskdump_raw_line(b" o");
+            taskdump_dec(o as u64);
+            taskdump_raw_line(b"=");
+            taskdump_dec(v as u64);
+            taskdump_raw_line(b"p\n");
+        }
+        o += 1;
+    }
+    crate::mm::small_alloc::census_line();
+    // Leg-16: type identification for the two heaviest classes at the
+    // floor (c256 ~520K live, c1024 ~84K live) — dump object headers from
+    // the active slab pages; vtables/magic are symbolisable offline.
+    crate::mm::small_alloc::census_peek(5, 8);
+    crate::mm::small_alloc::census_peek(7, 8);
+}
+
 /// Start the schbd kthread. Gated on the `dfx=schb` switch; called from
 /// the same late-boot slot as khungtaskd (secondaries online, timer
 /// wakeups routable).
@@ -193,6 +315,7 @@ extern "C" fn schbd_fn(_arg: *mut core::ffi::c_void) -> i32 {
         // --- Beat: one task-table walk + one binder count walk. ---
         let mut max_pid: u32 = 0;
         let mut n_tasks: usize = 0;
+        let mut n_procs: usize = 0; // leg-16: tgid leaders (processes vs threads)
         let mut n_run: usize = 0; // state bits clear: runnable or running
         let mut n_mark: usize = 0; // state clear + on_cpu: executing OR orphaned mark
         let mut n_s: usize = 0; // INTERRUPTIBLE
@@ -206,6 +329,9 @@ extern "C" fn schbd_fn(_arg: *mut core::ffi::c_void) -> i32 {
                 let t = &*task;
                 let pid = t.pid();
                 n_tasks += 1;
+                if t.tgid() == pid {
+                    n_procs += 1;
+                }
                 if pid > max_pid {
                     max_pid = pid;
                 }
@@ -232,12 +358,55 @@ extern "C" fn schbd_fn(_arg: *mut core::ffi::c_void) -> i32 {
         let t_secs = crate::drivers::timer::get_jiffies().saturating_sub(boot_jiffies) / hz;
 
         {
+            // Leg-15 pace snapshot (all reads relaxed, schbd context):
+            // cumulative COW attempts + jiffies spent in handle_cow_fault,
+            // direct-reclaim rounds + jiffies + max round, slowpath
+            // entries, zone free pages, kernel heap used KB.
+            let (cow, cowj, drct, drctj, drctmax, slow) = pace_snapshot();
+            let zfree = crate::mm::pglist::first_online_node()
+                .map(|n| n.free_pages() as u64)
+                .unwrap_or(0);
+            let heapk = crate::mm::buddy_allocator::buddy_stats().used_bytes / 1024;
+            // Leg-16: fire the allocator anatomy dump when the heap is
+            // ~80% full — comfortably before the floor/OOM would, so a
+            // roll that never quite reaches the fake-OOM still banks the
+            // census (one-shot; the OOM path reuses the same guard).
+            {
+                let st = crate::mm::buddy_allocator::buddy_stats();
+                if st.used_bytes * 5 >= st.heap_size * 4 {
+                    oom_anat_dump();
+                }
+            }
             let mut w = ConsoleWriter::new();
             let _ = writeln!(
                 w,
-                "SC-HB t={}s pidmax={} flow={} young={} tasks={} R={} M={} S={} D={} bproc={} bw={} bw15={}",
+                "SC-HB t={}s pidmax={} flow={} young={} tasks={} R={} M={} S={} D={} bproc={} bw={} bw15={} pace: cow={} cowJ={} drct={} drctJ={} drctMaxJ={} slow={} zfree={} heapK={}",
                 t_secs, max_pid, flow, comm_str(&young_comm), n_tasks, n_run, n_mark, n_s, n_d,
-                bprocs, bwait, bwait15
+                bprocs, bwait, bwait15, cow, cowj, drct, drctj, drctmax, slow, zfree, heapk
+            );
+        }
+
+        // Leg-16 anatomy line: decomposes heapK at the floor. procs =
+        // tgid leaders; kN/kK/kHW = live kernel stacks / their bytes /
+        // boot-max high-water (probe armed by dfx=schb); smallK vs
+        // smallPgK = live small-object estimate vs slab pages actually
+        // held (the delta is packing slack); oN = buddy per-order live
+        // pages (o5 = the 128KB kernel-stack class on this config).
+        {
+            let (kn, khw) = crate::process::task::kstack_anat();
+            let (small_k, small_pg_k) = crate::mm::small_alloc::live_stats_kib();
+            let np = &crate::mm::buddy_allocator::NET_PAGES;
+            let mut w = ConsoleWriter::new();
+            let _ = writeln!(
+                w,
+                "SC-ANAT t={}s procs={} kN={} kK={} kHW={} smallK={} smallPgK={} o0={} o1={} o2={} o3={} o4={} o5={} o6={} o7={} o8={}",
+                t_secs, n_procs, kn, kn * (crate::config::KERNEL_STACK_SIZE as u64) / 1024, khw,
+                small_k, small_pg_k,
+                np[0].load(Ordering::Relaxed), np[1].load(Ordering::Relaxed),
+                np[2].load(Ordering::Relaxed), np[3].load(Ordering::Relaxed),
+                np[4].load(Ordering::Relaxed), np[5].load(Ordering::Relaxed),
+                np[6].load(Ordering::Relaxed), np[7].load(Ordering::Relaxed),
+                np[8].load(Ordering::Relaxed)
             );
         }
 

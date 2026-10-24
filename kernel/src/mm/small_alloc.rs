@@ -573,6 +573,112 @@ fn flush_batch(entries: &[usize], ci: usize, heap_start: usize) {
     }
 }
 
+/// Leg-16 kernel-heap anatomy: (live small-object bytes, slab pages
+/// actually held) in KiB, from the forensic counters — the difference
+/// between the two is the packing slack. Object bytes round every live
+/// object up to its class size and ignore magazine residency (bounded
+/// skew of MAX_CPUS*8*MAG_DEPTH entries); page bytes are exact.
+pub fn live_stats_kib() -> (u64, u64) {
+    let mut obj_bytes: u64 = 0;
+    let mut pages: u64 = 0;
+    for ci in 0..8 {
+        let c = &CACHES[ci];
+        let a = c.obj_allocs.load(Ordering::Relaxed) as i64;
+        let f = c.obj_frees.load(Ordering::Relaxed) as i64;
+        let live = (a - f).max(0) as u64;
+        obj_bytes += live * CLASSES[ci] as u64;
+        pages += c
+            .pages_created
+            .load(Ordering::Relaxed)
+            .saturating_sub(c.pages_reclaimed.load(Ordering::Relaxed)) as u64;
+    }
+    (obj_bytes / 1024, pages * 4)
+}
+
+/// Leg-16 census peek: dump the first two qwords of up to `per_page`
+/// objects from each active page of class `ci` (raw UART, allocation-
+/// free). Object headers carry vtables/magic/locks that identify the
+/// owning type — the census counts say WHICH CLASS holds the heap, this
+/// says WHICH TYPE fills the class. Caller must not hold the class lock.
+pub fn census_peek(ci: usize, per_page: usize) {
+    use crate::dfx::taskdump::{taskdump_dec, taskdump_raw_line};
+    if ci >= CLASSES.len() {
+        return;
+    }
+    let (heap_start, _heap_end) =
+        crate::mm::buddy_allocator::GLOBAL_ALLOCATOR.heap_bounds();
+    if heap_start == 0 {
+        return;
+    }
+    let cache = &CACHES[ci];
+    let s = CLASSES[ci];
+    let fo = first_off(s);
+    let objs = (PAGE_SIZE - fo) / s;
+    // Header HISTOGRAM over up to 32 active pages (the first run's
+    // 8x8 sample hit mostly-free head pages): count DISTINCT first-qword
+    // values — a handful of dominant values = the type population.
+    // Buffer-then-print (leg rule: no UART under locks).
+    let mut vals: [u64; 24] = [0; 24];
+    let mut counts: [u64; 24] = [0; 24];
+    let mut nvals = 0usize;
+    let mut seen_total: u64 = 0;
+    let _g = cache.lock.lock_irqsave();
+    let mut page = cache.head.load(Ordering::Relaxed) as u32;
+    let mut pages = 0usize;
+    while page != 0 && pages < 32 {
+        let page_addr = heap_start + page as usize * PAGE_SIZE;
+        let hdr = hdr_of(page_addr);
+        if hdr.magic != HDR_MAGIC || hdr.state != STATE_ACTIVE {
+            break;
+        }
+        // Sample from the TOP of the page (most recently allocated
+        // slots sit past the freelist churn) and only slots that look
+        // populated.
+        let mut i = 0usize;
+        while i < objs && i < per_page.max(16) {
+            // SAFETY: live slab page of this class; slot in bounds.
+            let p = page_addr + fo + i * s;
+            let a0 = unsafe { core::ptr::read_volatile(p as *const u64) };
+            if a0 != 0 {
+                let mut k = 0usize;
+                while k < nvals {
+                    if vals[k] == a0 {
+                        counts[k] += 1;
+                        break;
+                    }
+                    k += 1;
+                }
+                if k == nvals && nvals < vals.len() {
+                    vals[nvals] = a0;
+                    counts[nvals] = 1;
+                    nvals += 1;
+                }
+                seen_total += 1;
+            }
+            i += 1;
+        }
+        page = hdr.next_page;
+        pages += 1;
+    }
+    drop(_g);
+    taskdump_raw_line(b"PEEK c");
+    taskdump_dec(s as u64);
+    taskdump_raw_line(b" sampled=");
+    taskdump_dec(seen_total);
+    taskdump_raw_line(b" distinct=");
+    taskdump_dec(nvals as u64);
+    taskdump_raw_line(b"\n");
+    let mut k = 0usize;
+    while k < nvals {
+        taskdump_raw_line(b"  hdr ");
+        taskdump_dec(vals[k]);
+        taskdump_raw_line(b" x");
+        taskdump_dec(counts[k]);
+        taskdump_raw_line(b"\n");
+        k += 1;
+    }
+}
+
 /// One-line census for the ALLOCTHROW dump (raw UART, allocation-free).
 pub fn census_line() {
     use crate::dfx::taskdump::{taskdump_dec, taskdump_raw_line};

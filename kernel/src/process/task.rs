@@ -111,9 +111,24 @@ unsafe impl Send for StackCache {}
 /// Global stack cache instance (wrapped in Spinlock, no separate lock needed).
 static STACK_CACHE: Spinlock<StackCache> = Spinlock::new(StackCache::new());
 
+// Leg-16 kernel-heap anatomy (dfx=schb): live kernel-stack count and the
+// boot-max stack high-water in bytes. The high-water probe ZEROES each
+// fresh stack at alloc (outside every lock) and scans for the first
+// nonzero word from the bottom at free time — the depth distribution is
+// the evidence for any KERNEL_STACK_SIZE reduction, which at pidmax ~4800
+// is 128KB x ~2860 live tasks = ~358MB of the ~900MB heap floor (the
+// single largest per-task item; see SC-SESSIONS leg-15 close-out).
+static KSTACK_LIVE: AtomicU64 = AtomicU64::new(0);
+static KSTACK_HW: AtomicU64 = AtomicU64::new(0);
+
+/// Leg-16 anatomy: (live kernel-stack count, boot-max high-water bytes).
+/// Both stay 0 unless dfx=schb armed the probe at alloc time.
+pub fn kstack_anat() -> (u64, u64) {
+    (KSTACK_LIVE.load(Ordering::Relaxed), KSTACK_HW.load(Ordering::Relaxed))
+}
+
 /// Allocate a kernel stack (with caching)
 fn stack_cache_alloc() -> *mut u8 {
-    let mut cache = STACK_CACHE.lock();
     // Reuse is DISABLED: freed stacks re-enter the cache while the dying
     // task can still be executing its final sret/exit path on that stack
     // (reaper/sweep races), and a pop hands the SAME memory to a new task —
@@ -124,19 +139,35 @@ fn stack_cache_alloc() -> *mut u8 {
     // written by the new owner of the reused stack. Cost of disabling:
     // bounded memory (cache grows with peak task churn); cost of enabling
     // with the early-free unfixed: cross-task context corruption.
-    let _ = &mut cache;
-    // fresh alloc also gets a canary
-    // fresh alloc also gets a canary
+    //
+    // With reuse disabled the lock guards nothing on this path, so the
+    // heap allocation (BUDDY nest) and the leg-16 probe zeroing run
+    // OUTSIDE it — no 128KB memset under a spinlock.
+    {
+        let mut cache = STACK_CACHE.lock();
+        let _ = &mut cache;
+    }
     // SAFETY: Layout is valid; null check follows.
-    unsafe {
+    let bottom = unsafe {
         let layout = Layout::from_size_align(KERNEL_STACK_SIZE, 16)
             .unwrap_or(Layout::new::<[u8; KERNEL_STACK_SIZE]>());
-        let bottom = alloc(layout);
-        if !bottom.is_null() {
-            core::ptr::write_volatile(bottom as *mut u64, StackCache::STACK_CANARY);
+        alloc(layout)
+    };
+    if !bottom.is_null() {
+        if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::Schb)
+            && crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::KsProbe)
+        {
+            // Fresh stack is visible to nobody else yet: zero it so the
+            // free-side scan can measure the true high-water, and count it.
+            // ~3 spawns/s x 128KB of memset across the OH boot — negligible
+            // next to the fork itself.
+            unsafe { core::ptr::write_bytes(bottom, 0, KERNEL_STACK_SIZE) };
+            KSTACK_LIVE.fetch_add(1, Ordering::Relaxed);
         }
-        return bottom;
+        // fresh alloc also gets a canary
+        unsafe { core::ptr::write_volatile(bottom as *mut u64, StackCache::STACK_CANARY) };
     }
+    bottom
 }
 
 /// Free a kernel stack (with caching)
@@ -202,6 +233,14 @@ fn stack_cache_free(stack_bottom: *mut u8) {
                 putchar(b'\n');
             }
         }
+    }
+    // Leg-16 anatomy (dfx=schb,ksprobe): the high-water scan + record
+    // stash lives in free_kernel_stack (needs self for comm/pid); this
+    // side only keeps the live count honest for the SC-ANAT kN column.
+    if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::Schb)
+        && crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::KsProbe)
+    {
+        KSTACK_LIVE.fetch_sub(1, Ordering::Relaxed);
     }
     let mut cache = STACK_CACHE.lock();
     // SAFETY: stack_bottom was allocated by stack_cache_alloc().
@@ -1244,17 +1283,24 @@ impl Task {
             ti_a1: core::sync::atomic::AtomicU64::new(0),
             ti_a2: core::sync::atomic::AtomicU64::new(0),
             last_syscall_nr: core::sync::atomic::AtomicU32::new(0),
-            last_fails: core::array::from_fn(|_| AtomicU32::new(0)),
+            // Stack-depth fix (leg-16 KSTACK-HW: check_module_up 65.8KB,
+            // hiview 76KB — both the Task-construction frame): from_fn
+            // materialises these arrays through try_from_fn's wrapper
+            // copies (several x 4KB for init_a0 alone). The inline-const
+            // repeat writes each element in place — same values, and the
+            // per-fork stack depth drops by the copy multiplier (the
+            // measured gate for any KERNEL_STACK_SIZE reduction).
+            last_fails: [const { AtomicU32::new(0) }; 8],
             last_fails_cur: core::sync::atomic::AtomicUsize::new(0),
-            last_fails_a0: core::array::from_fn(|_| AtomicU64::new(0)),
-            last_fails_a1: core::array::from_fn(|_| AtomicU64::new(0)),
-            last_calls: core::array::from_fn(|_| AtomicU32::new(0)),
+            last_fails_a0: [const { AtomicU64::new(0) }; 8],
+            last_fails_a1: [const { AtomicU64::new(0) }; 8],
+            last_calls: [const { AtomicU32::new(0) }; crate::process::task::LAST_CALLS_LEN],
             last_calls_cur: core::sync::atomic::AtomicUsize::new(0),
-            init_calls: core::array::from_fn(|_| AtomicU32::new(0)),
-            init_a0: core::array::from_fn(|_| AtomicU64::new(0)),
+            init_calls: [const { AtomicU32::new(0) }; crate::process::task::INIT_CALLS_LEN],
+            init_a0: [const { AtomicU64::new(0) }; crate::process::task::INIT_CALLS_LEN],
             init_calls_cur: core::sync::atomic::AtomicUsize::new(0),
-            birth_calls: core::array::from_fn(|_| AtomicU32::new(0)),
-            birth_a0: core::array::from_fn(|_| AtomicU64::new(0)),
+            birth_calls: [const { AtomicU32::new(0) }; crate::process::task::BIRTH_CALLS_LEN],
+            birth_a0: [const { AtomicU64::new(0) }; crate::process::task::BIRTH_CALLS_LEN],
             birth_done: core::sync::atomic::AtomicBool::new(false),
             last_syscall_a0: AtomicU64::new(0),
             last_syscall_a1: AtomicU64::new(0),
@@ -1932,7 +1978,7 @@ impl Task {
         // thread-exit forensics printed garbage nrs).
         ptr::write(
             (ptr as usize + offset_of!(Task, last_fails)) as *mut [AtomicU32; 8],
-            core::array::from_fn(|_| AtomicU32::new(0)),
+            [const { AtomicU32::new(0) }; 8],
         );
         ptr::write(
             (ptr as usize + offset_of!(Task, last_fails_cur))
@@ -1941,15 +1987,15 @@ impl Task {
         );
         ptr::write(
             (ptr as usize + offset_of!(Task, last_fails_a0)) as *mut [AtomicU64; 8],
-            core::array::from_fn(|_| AtomicU64::new(0)),
+            [const { AtomicU64::new(0) }; 8],
         );
         ptr::write(
             (ptr as usize + offset_of!(Task, last_fails_a1)) as *mut [AtomicU64; 8],
-            core::array::from_fn(|_| AtomicU64::new(0)),
+            [const { AtomicU64::new(0) }; 8],
         );
         ptr::write(
             (ptr as usize + offset_of!(Task, last_calls)) as *mut [AtomicU32; LAST_CALLS_LEN],
-            core::array::from_fn(|_| AtomicU32::new(0)),
+            [const { AtomicU32::new(0) }; LAST_CALLS_LEN],
         );
         ptr::write(
             (ptr as usize + offset_of!(Task, last_calls_cur))
@@ -1961,11 +2007,11 @@ impl Task {
         ptr::write(
             (ptr as usize + offset_of!(Task, init_calls))
                 as *mut [AtomicU32; INIT_CALLS_LEN],
-            core::array::from_fn(|_| AtomicU32::new(0)),
+            [const { AtomicU32::new(0) }; INIT_CALLS_LEN],
         );
         ptr::write(
             (ptr as usize + offset_of!(Task, init_a0)) as *mut [AtomicU64; INIT_CALLS_LEN],
-            core::array::from_fn(|_| AtomicU64::new(0)),
+            [const { AtomicU64::new(0) }; INIT_CALLS_LEN],
         );
         ptr::write(
             (ptr as usize + offset_of!(Task, init_calls_cur))
@@ -1975,12 +2021,12 @@ impl Task {
         ptr::write(
             (ptr as usize + offset_of!(Task, birth_calls))
                 as *mut [AtomicU32; BIRTH_CALLS_LEN],
-            core::array::from_fn(|_| AtomicU32::new(0)),
+            [const { AtomicU32::new(0) }; BIRTH_CALLS_LEN],
         );
         ptr::write(
             (ptr as usize + offset_of!(Task, birth_a0))
                 as *mut [AtomicU64; BIRTH_CALLS_LEN],
-            core::array::from_fn(|_| AtomicU64::new(0)),
+            [const { AtomicU64::new(0) }; BIRTH_CALLS_LEN],
         );
         ptr::write(
             (ptr as usize + offset_of!(Task, birth_done))
@@ -3918,6 +3964,81 @@ impl Task {
                     putchar(b'\n');
                     self.kernel_stack = None;
                     return;
+                }
+            }
+
+            // Leg-16 anatomy (dfx=schb,ksprobe): high-water scan + record
+            // stash. The stack is dead (on_cpu cleared + RCU waited
+            // upstream), no locks held — safe to walk. Records stash the
+            // surviving return addresses for the next schbd beat (the
+            // in-context print was eaten by early-boot UART storms twice).
+            if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::Schb)
+                && crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::KsProbe)
+            {
+                let base = stack_bottom as usize;
+                let mut off = 8usize; // skip the canary slot
+                while off < KERNEL_STACK_SIZE {
+                    // SAFETY: bounds validated above (base..base+SIZE).
+                    let v = unsafe { core::ptr::read_volatile((base + off) as *const u64) };
+                    if v != 0 {
+                        let hw = (KERNEL_STACK_SIZE - off) as u64;
+                        let old = KSTACK_HW.load(Ordering::Relaxed);
+                        if hw > old {
+                            KSTACK_HW.store(hw, Ordering::Relaxed);
+                            if hw > 40 * 1024 {
+                                use crate::console::putchar;
+                                const MSG: &[u8] = b"KSTACK-HW depth=";
+                                for &b in MSG { putchar(b); }
+                                let mut vv = hw;
+                                if vv == 0 { putchar(b'0'); }
+                                let mut dd = [0u8; 20]; let mut kk = 0;
+                                while vv > 0 { dd[kk] = b'0' + (vv % 10) as u8; kk += 1; vv /= 10; }
+                                while kk > 0 { kk -= 1; putchar(dd[kk]); }
+                                const P: &[u8] = b" pid=";
+                                for &b in P { putchar(b); }
+                                let mut pv = self.pid() as usize;
+                                if pv == 0 { putchar(b'0'); }
+                                let mut pd = [0u8; 10]; let mut pk = 0;
+                                while pv > 0 { pd[pk] = b'0' + (pv % 10) as u8; pk += 1; pv /= 10; }
+                                while pk > 0 { pk -= 1; putchar(pd[pk]); }
+                                const C: &[u8] = b" comm='";
+                                for &b in C { putchar(b); }
+                                for &cb in self.comm() { if cb != 0 { putchar(cb); } }
+                                // sc218 lesson: the region BELOW the first
+                                // nonzero word is a zeroed span (a memset'd
+                                // local or zero-initialised frames) — by
+                                // construction it carries no return
+                                // addresses. The surviving frames of the
+                                // deep chain sit just ABOVE `off`; walk
+                                // upward and print the first kernel-range
+                                // words (deepest surviving return
+                                // addresses, symbolisable with addr2line).
+                                const T: &[u8] = b"' tail:";
+                                for &b in T { putchar(b); }
+                                let mut shown = 0;
+                                let mut o2 = off;
+                                let o_end = off + 4096;
+                                while o2 < o_end && o2 < KERNEL_STACK_SIZE && shown < 40 {
+                                    // SAFETY: in-bounds per loop guard.
+                                    let ra = unsafe { core::ptr::read_volatile((base + o2) as *const u64) };
+                                    if ra >= 0xffffffff_80000000u64 && ra <= 0xffff_ffff_ffff_f000u64 {
+                                        putchar(b' ');
+                                        let mut sh2 = 64;
+                                        while sh2 > 0 {
+                                            sh2 -= 4;
+                                            let nb = ((ra >> sh2) & 0xF) as u8;
+                                            putchar(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 });
+                                        }
+                                        shown += 1;
+                                    }
+                                    o2 += 8;
+                                }
+                                putchar(b'\n');
+                            }
+                        }
+                        break;
+                    }
+                    off += 8;
                 }
             }
 

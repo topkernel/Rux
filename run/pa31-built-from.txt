@@ -1,0 +1,13 @@
+pa31 main-class kernel (pa31-main-bzImage, NOT committed - 11.4MB > 10MB rule)
+Built from: origin/main @ 14d8950d (detached checkout in this worktree,
+reflog HEAD@{2}; = 1bdbbf32 fdtable None-safe + 14d8950d FXRS/PCTL/SAREG
+leg-14 probes on top of the leg-18 merge 1702de2c).
+Build: make build-x86 (debug profile, target/x86_64-unknown-none/debug/
+bzImage, 11,456,512 bytes, mtime 2026-10-24 18:07; byte-count identity
+with run/pa31-main-bzImage).
+Boot: run/pa-boot.sh pa31 run/pa31-main-bzImage 780, APPEND_EXTRA
+default "syscost=1" ONLY (no fsw, no pa16 probe - plain main + syscost),
+KVM q35 -cpu max -m 4G -smp 2, fresh reflink userdata.
+Purpose: census-hold retest gate on the new main (leg-19 QEMU 2 of 2;
+run completed 18:20, leg 19 died of quota before recording - analyzed
+and recorded by leg 20 from the on-disk serial/stamped logs).

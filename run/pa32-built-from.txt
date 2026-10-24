@@ -1,0 +1,12 @@
+pa32 main-class kernel (pa32-main-bzImage, NOT committed - 11.5MB > 10MB rule)
+Built from: feature/perf-audit @ fb104f23 (= origin/main 3cb8a24e dfx-align
+tranche 1+2 + this branch's docs/tooling only; kernel code identical to
+origin/main 3cb8a24e).
+Build: make build-x86 (debug profile, target/x86_64-unknown-none/debug/
+bzImage, 11,501,568 bytes, mtime 2026-10-24 20:37).
+Boot: run/pa-boot.sh pa32 run/pa32-main-bzImage 780, APPEND_EXTRA default
+"syscost=1" ONLY (plain main + syscost, no pa16 probe), KVM q35 -cpu max
+-m 4G -smp 2, fresh reflink userdata.
+Purpose: census-hold gate — main moved to 3cb8a24e (30 kernel/ files,
+dfx-align tranche 1+2) after 8c4965b2; baseline pa31 census TERM-DESCHED
+8 / WAKE-REFUSED 32 / WAKE-STRANDED 0-3-organic (pa27: 0, pa31: 3 in-band).
