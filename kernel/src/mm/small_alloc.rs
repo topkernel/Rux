@@ -28,11 +28,14 @@
 //!   a reclaimed page falls through to the buddy tripwires (loud)
 //!   instead of corrupting the slab.
 //! - Per-class spinlock (irqsave). Active-page lists are singly linked
-//!   through the page headers (page-index linkage, 0 = end). A page that
-//!   fills up is unlinked immediately (the scan carries its prev); an
-//!   EMPTY page is physically unlinked (walk from head) and returned to
-//!   the buddy while still under the class lock — no other CPU can be
-//!   scanning it at that moment, so there is no use-after-reclaim race.
+//! through the page headers (page-index linkage, 0 = end). A page that
+//! fills up is unlinked immediately (the scan carries its prev); an
+//! EMPTY page is physically unlinked (walk from head) and returned to
+//! the buddy while still under the class lock — no other CPU can be
+//! scanning it at that moment, so there is no use-after-reclaim race.
+//! - Per-CPU magazines (pa16) front the class locks: alloc pops / free
+//! pushes run under LOCAL irq-off only; the class lock is taken once
+//! per batch refill/flush (see the magazine block comment below).
 //!
 //! Lock order: class lock -> buddy lock (page create/reclaim). The
 //! reverse nesting never occurs (the buddy knows nothing of classes).
@@ -155,8 +158,15 @@ static CACHES: [SmallCache; 8] = [
 // ~250 ns each, the single biggest IF=0 contributor). Fast paths pop /
 // push a per-CPU, per-class array of free object pointers under LOCAL
 // irq-off only — no lock, no cross-CPU contention, no preempt-count
-// traffic; the class lock is taken once per ~MAG_DEPTH misses/overflows
-// to refill/flush in batch.
+// traffic; the class lock is taken once per magazine refill/flush, i.e.
+// amortized over ~MAG_DEPTH objects.
+//
+// CPU affinity: cpu_id() is read INSIDE each irq-off window (or inside
+// the class irqsave hold, which also disables preemption). With IF=0
+// neither an IRQ nor a preempting tick can migrate the task between the
+// read and the row access; no pointer to a row is ever held across two
+// windows. The flush path snapshots the whole row out under ONE window
+// and then works on the local copy.
 //
 // Correctness of deferred frees (a magazine-resident object is NOT yet
 // reflected in its page header's free_count):
@@ -164,14 +174,30 @@ static CACHES: [SmallCache; 8] = [
 //   magazine entry for page P holds one of P's slots un-accounted, so
 //   free_count can never reach objs_per_page while such an entry
 //   exists — reclaim is blocked by construction and the slab bitmap
-//   stays set. Flush runs the exact pre-magazine locked free body
-//   (magic/cls re-validation, alignment checks, BAD_PAGE taints).
-// - Double frees corrupt the page freelist exactly as they did before
-//   (silently for partially-free pages, taint at the reclaim boundary);
-//   the magazine only defers the moment, it adds no new failure mode.
-// - Touching a magazine from IRQ context is impossible: every access
+//   stays set. This also holds inside a batch flush: a later entry on
+//   the same page keeps that page's free_count short of full, so no
+//   entry's page is reclaimed mid-batch while a same-page entry is
+//   still pending.
+// - Push-time screening: the fast push accepts an address only after
+//   re-reading the page header inside the irq-off window (live magic,
+//   matching class, in-range aligned slot). Anything doubtful —
+//   misaligned/foreign pointers, full-looking pages, header garbage —
+//   is routed to the locked body, which consumes and taints it exactly
+//   as the pre-magazine allocator did. A bad pointer therefore NEVER
+//   parks in a magazine (a later alloc pop would hand it out; the
+//   consume-and-taint hardening is load-bearing for the wild-write
+//   hunt line).
+// - Double frees of a VALID slot corrupt the page freelist exactly as
+//   they did before (silently for partially-free pages, taint at the
+//   full-page boundary); the magazine only defers the moment, it adds
+//   no new failure mode.
+// - Touching a magazine from IRQ context is serialized: every access
 //   sits between save_and_disable_irq/restore_irq (or under the class
 //   irqsave lock), and IRQ-context allocs/frees take the same guard.
+// - Counters (obj_allocs/obj_frees) are bumped ONLY in the locked
+//   bodies — at page-freelist removal/insertion — so every object is
+//   counted exactly once per lifecycle; magazine-resident objects skew
+//   the live estimate by at most MAX_CPUS*8*MAG_DEPTH (bounded).
 // ---------------------------------------------------------------------------
 const MAG_DEPTH: usize = 16;
 
@@ -184,12 +210,15 @@ struct Magazine {
 static mut MAGAZINES: [[Magazine; 8]; crate::config::MAX_CPUS] =
     [[Magazine { buf: [0; MAG_DEPTH], len: 0 }; 8]; crate::config::MAX_CPUS];
 
+/// Pointer to this CPU's class-ci magazine row. Callers must have IF=0
+/// (own irq-off window or the class irqsave hold), making the row
+/// private to this CPU for the duration of the access.
 #[inline]
-fn mag_of(cpu: usize, ci: usize) -> &'static mut Magazine {
-    // SAFETY: cpu < MAX_CPUS and ci < 8 are checked by callers; each CPU
-    // touches only its own row, always under local irq-off (or the class
-    // irqsave lock), so no two accesses to a slot can overlap.
-    unsafe { &mut MAGAZINES[cpu][ci] }
+fn mag_ptr(cpu: usize, ci: usize) -> *mut Magazine {
+    // SAFETY: addr_of_mut on the static avoids taking a reference to a
+    // static mut; the flat index matches the [[Magazine; 8]; MAX_CPUS]
+    // row-major layout. Aliasing is impossible under the caller's IF=0.
+    unsafe { core::ptr::addr_of_mut!(MAGAZINES).cast::<Magazine>().add(cpu * 8 + ci) }
 }
 
 /// Allocate a small object. Returns null when the layout does not fit
@@ -204,29 +233,34 @@ pub fn alloc(size: usize, align: usize) -> *mut u8 {
         return core::ptr::null_mut(); // heap not up yet
     }
     let ci = class_of(size, align);
-    let cache = &CACHES[ci];
 
-    // Fast path: pop from this CPU's magazine (local irq-off only).
-    let cpu = crate::arch::cpu_id() as usize;
-    if cpu < crate::config::MAX_CPUS {
-        let mag = mag_of(cpu, ci);
+    // Fast path: pop from THIS CPU's magazine. cpu_id() is read inside
+    // the irq-off window — with IF=0 the task cannot be preempted and
+    // migrated between the read and the row access.
+    {
         let flags = crate::arch::cpu::save_and_disable_irq();
-        if mag.len > 0 {
-            mag.len -= 1;
-            let ptr = mag.buf[mag.len];
-            crate::arch::cpu::restore_irq(flags);
-            cache.obj_allocs.fetch_add(1, Ordering::Relaxed);
-            return ptr as *mut u8;
+        let cpu = crate::arch::cpu_id() as usize;
+        if cpu < crate::config::MAX_CPUS {
+            let mag = unsafe { &mut *mag_ptr(cpu, ci) };
+            if mag.len > 0 {
+                mag.len -= 1;
+                let ptr = mag.buf[mag.len];
+                crate::arch::cpu::restore_irq(flags);
+                return ptr as *mut u8;
+            }
         }
         crate::arch::cpu::restore_irq(flags);
     }
 
-    // Slow path: one class-lock hold refills the magazine in batch and
-    // returns the first object.
+    // Slow path: ONE class-lock hold refills the magazine in batch and
+    // returns the first object. The irqsave guard has IF=0 + preemption
+    // disabled, so the cpu_id() read below is stable for the hold.
+    let cache = &CACHES[ci];
     let mut first: *mut u8 = core::ptr::null_mut();
     let _g = cache.lock.lock_irqsave();
+    let cpu = crate::arch::cpu_id() as usize;
     if cpu < crate::config::MAX_CPUS {
-        let mag = mag_of(cpu, ci); // private: IF is off (irqsave)
+        let mag = unsafe { &mut *mag_ptr(cpu, ci) }; // private: IF=0
         while mag.len < MAG_DEPTH {
             let p = alloc_locked(ci, heap_start);
             if p.is_null() {
@@ -351,10 +385,10 @@ pub fn free(addr: usize) -> bool {
         return false;
     }
     let page = addr & !(PAGE_SIZE - 1);
-    // Pre-lock peek only to pick the class lock/magazine bin; everything
-    // is re-validated under the lock at flush time (the page may have
-    // been emptied, reclaimed and re-created as a different class
-    // between the reads — the re-check catches that).
+    // Pre-lock peek only to pick the class/magazine bin; everything is
+    // re-validated under the lock at flush time (the page may have been
+    // emptied, reclaimed and re-created as a different class between
+    // the reads — the re-check catches that).
     let peek = hdr_of(page);
     let ci_guess = peek.cls as usize;
     if ci_guess >= CLASSES.len() {
@@ -362,126 +396,173 @@ pub fn free(addr: usize) -> bool {
         crate::dfx::taint::add_taint(crate::dfx::taint::TaintFlags::BAD_PAGE);
         return true;
     }
-    let cache = &CACHES[ci_guess];
 
-    // Fast path: push into this CPU's magazine (local irq-off only). A
-    // magazine-resident object blocks its page's reclaim by construction
-    // (see the magazine block comment), so no page-state check is due.
+    // Fast path: screen the pointer against the page header INSIDE the
+    // irq-off window (fresh magic/cls read, alignment, free_count head
+    // room), then push into THIS CPU's magazine. Anything the locked
+    // body would consume-and-taint is routed there instead — a bad
+    // pointer must never park in a magazine, because a later alloc pop
+    // on this CPU would hand it out as a live object.
+    let flags = crate::arch::cpu::save_and_disable_irq();
     let cpu = crate::arch::cpu_id() as usize;
     if cpu < crate::config::MAX_CPUS {
-        let mag = mag_of(cpu, ci_guess);
-        let flags = crate::arch::cpu::save_and_disable_irq();
-        if mag.len < MAG_DEPTH {
-            mag.buf[mag.len] = addr;
-            mag.len += 1;
+        let s = CLASSES[ci_guess];
+        let fo = first_off(s);
+        let objs_per_page = (PAGE_SIZE - fo) / s;
+        let off = addr - page - fo;
+        let h = hdr_of(page); // re-read under IF=0: another CPU may have
+        // changed the header since the peek; the flush re-validates
+        // under the class lock regardless.
+        if h.magic == HDR_MAGIC
+            && h.cls as usize == ci_guess
+            && addr != page
+            && off % s == 0
+            && off / s < objs_per_page
+            && (h.free_count as usize) < objs_per_page
+        {
+            let mag = unsafe { &mut *mag_ptr(cpu, ci_guess) };
+            if mag.len < MAG_DEPTH {
+                mag.buf[mag.len] = addr;
+                mag.len += 1;
+                crate::arch::cpu::restore_irq(flags);
+                return true;
+            }
+            // Magazine full: snapshot the whole row out under THIS
+            // window (no row pointer survives the window), then flush
+            // the snapshot and push addr after — the batch flush below
+            // empties the row, so the push always has room.
+            let mut snap: [usize; MAG_DEPTH] = [0; MAG_DEPTH];
+            let mut n = 0usize;
+            while mag.len > 0 {
+                mag.len -= 1;
+                snap[n] = mag.buf[mag.len];
+                n += 1;
+            }
             crate::arch::cpu::restore_irq(flags);
-            cache.obj_frees.fetch_add(1, Ordering::Relaxed);
+            flush_batch(&snap[..n], ci_guess, heap_start);
+            // Push addr into the (now empty) row. cpu_id re-read inside
+            // the new window: the task may have been preempted and
+            // migrated during the flush, and must not touch a stale
+            // row. An IRQ-context free that ran meanwhile leaves the
+            // row with fewer than MAG_DEPTH entries — the check still
+            // guards; the locked fallback covers the impossible rest.
+            let f2 = crate::arch::cpu::save_and_disable_irq();
+            let c2 = crate::arch::cpu_id() as usize;
+            if c2 < crate::config::MAX_CPUS {
+                let mag = unsafe { &mut *mag_ptr(c2, ci_guess) };
+                if mag.len < MAG_DEPTH {
+                    mag.buf[mag.len] = addr;
+                    mag.len += 1;
+                    crate::arch::cpu::restore_irq(f2);
+                    return true;
+                }
+            }
+            crate::arch::cpu::restore_irq(f2);
+            flush_batch(core::slice::from_ref(&addr), ci_guess, heap_start);
             return true;
         }
-        crate::arch::cpu::restore_irq(flags);
-        // Magazine full: flush it entry by entry through the locked body
-        // (self-locking, one hold per flushed object — 1/MAG_DEPTH of the
-        // pre-magazine lock traffic), then this free the same way. Each
-        // pop runs under its own irq-off window (an IRQ-context free on
-        // this CPU may interleave between the free_locked calls).
-        loop {
-            let p = {
-                let f = crate::arch::cpu::save_and_disable_irq();
-                let r = if mag.len > 0 {
-                    mag.len -= 1;
-                    Some(mag.buf[mag.len])
-                } else {
-                    None
-                };
-                crate::arch::cpu::restore_irq(f);
-                r
-            };
-            match p {
-                Some(p) => {
-                    free_locked(p, heap_start, heap_end, ci_guess);
-                }
-                None => break,
-            }
-        }
-        return free_locked(addr, heap_start, heap_end, ci_guess);
     }
-
-    // No magazine (cpu id out of range): the pre-magazine locked path.
-    free_locked(addr, heap_start, heap_end, ci_guess)
+    crate::arch::cpu::restore_irq(flags);
+    // Screen failed or cpu id out of range: the pre-magazine locked
+    // body (consume-and-taint semantics preserved exactly).
+    flush_batch(core::slice::from_ref(&addr), ci_guess, heap_start);
+    true
 }
 
 /// The pre-magazine free body (validation + push to page freelist +
-/// empty-page reclaim), self-locking on the ci_guess class lock (the
-/// internal empty-page reclaim must drop the guard before the buddy
-/// free, so the guard's ownership stays inside). Always returns true
-/// (consumed by the slab layer).
-fn free_locked(addr: usize, heap_start: usize, _heap_end: usize, ci_guess: usize) -> bool {
-    let cache = &CACHES[ci_guess];
-    let _g = cache.lock.lock_irqsave();
-    let page = addr & !(PAGE_SIZE - 1);
-    let hdr = hdr_of(page);
-    if hdr.magic != HDR_MAGIC || hdr.cls as usize != ci_guess {
-        // Reclaimed/re-created under us — no valid object can exist.
-        crate::dfx::taint::add_taint(crate::dfx::taint::TaintFlags::BAD_PAGE);
-        return true;
-    }
-    let s = CLASSES[ci_guess];
+/// empty-page reclaim), run for a BATCH of same-class entries under ONE
+/// class-lock hold (the snapshot's per-entry locking made the flush as
+/// lock-heavy as the pre-magazine path; the batch is the actual
+/// amortization). Empty pages are unlinked and marked reclaimed under
+/// the lock, then returned to the buddy AFTER the guard drops — the
+/// buddy free never runs inside the class lock (pre-magazine behavior).
+/// Every entry is CONSUMED by the slab layer no matter what (returns
+/// nothing, always accounted); invalid entries taint.
+fn flush_batch(entries: &[usize], ci: usize, heap_start: usize) {
+    let cache = &CACHES[ci];
+    let s = CLASSES[ci];
     let fo = first_off(s);
     let objs_per_page = (PAGE_SIZE - fo) / s;
-    let off = addr - page - fo;
-    if addr == page || off % s != 0 || off / s >= objs_per_page {
-        // Foreign/misaligned pointer into a live slab page: consume it —
-        // the buddy free would destroy the page's 500-odd neighbours.
-        crate::dfx::taint::add_taint(crate::dfx::taint::TaintFlags::BAD_PAGE);
-        return true;
-    }
-    if hdr.free_count as usize >= objs_per_page {
-        // Double free — refuse, but consume it (do not also buddy-free).
-        crate::dfx::taint::add_taint(crate::dfx::taint::TaintFlags::BAD_PAGE);
-        return true;
-    }
-    unsafe { core::ptr::write_volatile(addr as *mut u16, hdr.free_head) };
-    hdr.free_head = (off / s) as u16;
-    hdr.free_count += 1;
-    cache.obj_frees.fetch_add(1, Ordering::Relaxed);
-
-    if hdr.free_count as usize == objs_per_page {
-        // Page empty: physically unlink (walk from head), then return it
-        // to the buddy — all under the class lock, so no other CPU can be
-        // mid-scan on this page.
-        let pi = ((page - heap_start) / PAGE_SIZE) as u32;
-        let mut prev: u32 = 0;
-        let mut cur = cache.head.load(Ordering::Relaxed) as u32;
-        while cur != 0 {
-            let a = heap_start + cur as usize * PAGE_SIZE;
-            if cur == pi {
-                let next = hdr_of(a).next_page;
-                if prev == 0 {
-                    cache.head.store(next as usize, Ordering::Relaxed);
-                } else {
-                    hdr_of(heap_start + prev as usize * PAGE_SIZE).next_page = next;
-                }
-                break;
-            }
-            prev = cur;
-            cur = hdr_of(a).next_page;
+    let mut ret: [usize; MAG_DEPTH + 1] = [0; MAG_DEPTH + 1]; // pages to buddy-free after unlock
+    let mut nret = 0usize;
+    let _g = cache.lock.lock_irqsave();
+    for &addr in entries {
+        let page = addr & !(PAGE_SIZE - 1);
+        let hdr = hdr_of(page);
+        if hdr.magic != HDR_MAGIC || hdr.cls as usize != ci {
+            // Reclaimed/re-created under us — no valid object can exist.
+            crate::dfx::taint::add_taint(crate::dfx::taint::TaintFlags::BAD_PAGE);
+            continue;
         }
-        hdr.state = STATE_FULL;
-        hdr.magic = 0;
-        bmp_clear(page, heap_start);
-        cache.pages_reclaimed.fetch_add(1, Ordering::Relaxed);
-        drop(_g);
-        unsafe { crate::mm::buddy_allocator::GLOBAL_ALLOCATOR.free_page_raw(page as *mut u8) };
-        return true;
+        let off = addr - page - fo;
+        if addr == page || off % s != 0 || off / s >= objs_per_page {
+            // Foreign/misaligned pointer into a live slab page: consume
+            // it — the buddy free would destroy the page's 500-odd
+            // neighbours.
+            crate::dfx::taint::add_taint(crate::dfx::taint::TaintFlags::BAD_PAGE);
+            continue;
+        }
+        if hdr.free_count as usize >= objs_per_page {
+            // Double free — refuse, but consume it (do not also
+            // buddy-free).
+            crate::dfx::taint::add_taint(crate::dfx::taint::TaintFlags::BAD_PAGE);
+            continue;
+        }
+        unsafe { core::ptr::write_volatile(addr as *mut u16, hdr.free_head) };
+        hdr.free_head = (off / s) as u16;
+        hdr.free_count += 1;
+        cache.obj_frees.fetch_add(1, Ordering::Relaxed);
+
+        if hdr.free_count as usize == objs_per_page {
+            // Page empty: physically unlink (walk from head) and mark it
+            // reclaimed under the class lock, so no other CPU can be
+            // mid-scan on this page; the buddy free itself runs after
+            // the unlock below. A later batch entry on this page cannot
+            // exist here — its slot would be un-accounted, so the page
+            // could not have reached free_count == objs_per_page.
+            let pi = ((page - heap_start) / PAGE_SIZE) as u32;
+            let mut prev: u32 = 0;
+            let mut cur = cache.head.load(Ordering::Relaxed) as u32;
+            while cur != 0 {
+                let a = heap_start + cur as usize * PAGE_SIZE;
+                if cur == pi {
+                    let next = hdr_of(a).next_page;
+                    if prev == 0 {
+                        cache.head.store(next as usize, Ordering::Relaxed);
+                    } else {
+                        hdr_of(heap_start + prev as usize * PAGE_SIZE).next_page = next;
+                    }
+                    break;
+                }
+                prev = cur;
+                cur = hdr_of(a).next_page;
+            }
+            hdr.state = STATE_FULL;
+            hdr.magic = 0;
+            bmp_clear(page, heap_start);
+            cache.pages_reclaimed.fetch_add(1, Ordering::Relaxed);
+            if nret < ret.len() {
+                ret[nret] = page;
+                nret += 1;
+            }
+            continue;
+        }
+        if hdr.state == STATE_FULL {
+            // Became partially free again: relink at the list head.
+            hdr.state = STATE_ACTIVE;
+            let pi = ((page - heap_start) / PAGE_SIZE) as u32;
+            hdr.next_page = cache.head.load(Ordering::Relaxed) as u32;
+            cache.head.store(pi as usize, Ordering::Relaxed);
+        }
     }
-    if hdr.state == STATE_FULL {
-        // Became partially free again: relink at the list head.
-        hdr.state = STATE_ACTIVE;
-        let pi = ((page - heap_start) / PAGE_SIZE) as u32;
-        hdr.next_page = cache.head.load(Ordering::Relaxed) as u32;
-        cache.head.store(pi as usize, Ordering::Relaxed);
+    drop(_g);
+    let mut i = 0usize;
+    while i < nret {
+        unsafe {
+            crate::mm::buddy_allocator::GLOBAL_ALLOCATOR.free_page_raw(ret[i] as *mut u8)
+        };
+        i += 1;
     }
-    true
 }
 
 /// One-line census for the ALLOCTHROW dump (raw UART, allocation-free).
