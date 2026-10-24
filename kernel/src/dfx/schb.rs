@@ -49,11 +49,22 @@ extern crate alloc;
 /// freeze in at ~min 9.
 const BEAT_SECS: u64 = 10;
 
-/// Consecutive zero-flow beats that arm the one-shot wedge census
-/// (6 x 10s = 60s). Healthy boots move the pid frontier continuously
-/// (sc195: 900 -> 2500 without a minute-long pause); the soft-wedge
-/// plateaus for many minutes (sc197: 18+).
+/// Consecutive zero-flow beats that would arm a census on the freeze
+/// shape alone — kept as documentation of the original sc197 shape;
+/// the live trigger is the generalized STALL_BEATS below.
 const PLATEAU_BEATS: u32 = 6;
+#[allow(dead_code)]
+const _PLATEAU_DOC: u32 = PLATEAU_BEATS;
+
+/// sc200 (11th leg): the wedge also comes as a CRAWL, not a freeze —
+/// the pid frontier advances 1-9 pids per beat forever (retry-loop
+/// churn: DB_TaskExecutor threads), so flow==0 never happens. A beat
+/// counts as stalled when ANY of: flow == 0, flow <= CRAWL_FLOW_MAX,
+/// or bw15 >= WAITER15_FLOOR (the binder world that parked). Census
+/// after STALL_BEATS consecutive stalled beats (120s).
+const CRAWL_FLOW_MAX: u32 = 5;
+const WAITER15_FLOOR: usize = 150;
+const STALL_BEATS: u32 = 12;
 
 /// Minimum boot age (seconds) before a census may fire — early-boot
 /// lulls before the service storm are not the wedge.
@@ -107,9 +118,9 @@ pub fn init() {
     if started {
         RUNNING.store(true, Ordering::Release);
         crate::pr_err!(
-            "dfx: schbd soft-wedge heartbeat armed ({}s beat, census at {}s plateau)",
+            "dfx: schbd soft-wedge heartbeat armed ({}s beat, census at {}s stalled)",
             BEAT_SECS,
-            PLATEAU_BEATS as u64 * BEAT_SECS
+            STALL_BEATS as u64 * BEAT_SECS
         );
     } else {
         crate::pr_err!("dfx: schbd failed to start");
@@ -247,7 +258,7 @@ extern "C" fn schbd_fn(_arg: *mut core::ffi::c_void) -> i32 {
             }
         }
 
-        if flow == 0 {
+        if flow <= CRAWL_FLOW_MAX || bwait15 >= WAITER15_FLOOR {
             plateau = plateau.saturating_add(1);
         } else {
             plateau = 0;
@@ -255,9 +266,13 @@ extern "C" fn schbd_fn(_arg: *mut core::ffi::c_void) -> i32 {
         }
         last_pidmax = max_pid;
 
-        if plateau >= PLATEAU_BEATS && !dumped && n_tasks >= MIN_TASKS && t_secs >= MIN_BOOT_SECS {
+        if plateau >= STALL_BEATS && !dumped && n_tasks >= MIN_TASKS && t_secs >= MIN_BOOT_SECS {
             dumped = true;
-            wedge_census(t_secs, max_pid, plateau as u64 * BEAT_SECS);
+            wedge_census(
+                t_secs,
+                max_pid,
+                plateau as u64 * BEAT_SECS,
+            );
         }
     }
 
