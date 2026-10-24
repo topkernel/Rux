@@ -885,7 +885,11 @@ response ran the same hour and reached a terminal, measured verdict:
   kernel-commit classes (pa23 pre-merge, pa27 flagship, pa31, pa32
   dfx-align, pa33 stallwatch pidhash, pa38 from_fn) — TERM-DESCHED 8 /
   WAKE-REFUSED 32 every roll. The wake-loss and tick invariants do not
-  move with any of it.
+  move with any of it. (Leg-30 note: this battery is now formalized
+  as the repo merge gate — user policy 2026-10-25, AGENTS.md "Merge
+  Gate" + docs/development/perf-gate-baseline.md, Tier 1 bands
+  6-10/28-36 seeded from the pa38 roll; this lane's standing
+  census-hold discipline is unchanged and is the Tier-1 instrument.)
 
 **2. What the run day measured this fire, and why the Rux column
 stays unmeasured.** The milestone (bootevent.launcher.ready SET) —
