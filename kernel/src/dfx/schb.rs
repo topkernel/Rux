@@ -410,6 +410,28 @@ extern "C" fn schbd_fn(_arg: *mut core::ffi::c_void) -> i32 {
             );
         }
 
+        // Pending kstack high-water record (stashed at free time; printed
+        // here because the in-context print was eaten by early-boot UART
+        // storms twice — sc218/sc222 both lost the 89,368-byte chain).
+        if let Some(rec) = crate::process::task::kstack_rec_take() {
+            let mut w = ConsoleWriter::new();
+            let _ = write!(w, "SC-KREC hw={} pid={} comm='", rec.hw, rec.pid);
+            for &cb in rec.comm.iter() {
+                if cb == 0 {
+                    break;
+                }
+                // comm is comm bytes; printable ASCII only (lossy by
+                // substitution — core::str has no from_utf8_lossy here).
+                let c = if (0x20..0x7f).contains(&cb) { cb } else { b'?' };
+                let _ = write!(w, "{}", c as char);
+            }
+            let _ = write!(w, "' n={}", rec.n);
+            for k in 0..rec.n {
+                let _ = write!(w, " {:x}", rec.tail[k]);
+            }
+            let _ = writeln!(w);
+        }
+
         // Drain the proc-open ring (SC-PROC lines) after the beat line.
         {
             let cur = PROC_SEQ.load(Ordering::Relaxed);

@@ -121,6 +121,25 @@ static STACK_CACHE: Spinlock<StackCache> = Spinlock::new(StackCache::new());
 static KSTACK_LIVE: AtomicU64 = AtomicU64::new(0);
 static KSTACK_HW: AtomicU64 = AtomicU64::new(0);
 
+/// A new high-water record, stashed at record time and printed by the
+/// NEXT schbd beat (UART-storm-proof: sc218/sc222 lost the in-context
+/// print of the 89,368-byte chain twice — the boot window around t~35s
+/// drops raw putchar bursts; the beat line survives it).
+pub struct KStackRec {
+    pub hw: u64,
+    pub pid: u32,
+    pub comm: [u8; 16],
+    pub tail: [u64; 24],
+    pub n: usize,
+}
+static KSTACK_REC: crate::sync::spinlock::Spinlock<Option<KStackRec>> =
+    crate::sync::spinlock::Spinlock::new(None);
+
+/// Beat-side: take a pending record (prints it outside any hot context).
+pub fn kstack_rec_take() -> Option<KStackRec> {
+    KSTACK_REC.lock().take()
+}
+
 /// Leg-16 anatomy: (live kernel-stack count, boot-max high-water bytes).
 /// Both stay 0 unless dfx=schb armed the probe at alloc time.
 pub fn kstack_anat() -> (u64, u64) {
@@ -3982,56 +4001,38 @@ impl Task {
                         let old = KSTACK_HW.load(Ordering::Relaxed);
                         if hw > old {
                             KSTACK_HW.store(hw, Ordering::Relaxed);
-                            if hw > 40 * 1024 {
-                                use crate::console::putchar;
-                                const MSG: &[u8] = b"KSTACK-HW depth=";
-                                for &b in MSG { putchar(b); }
-                                let mut vv = hw;
-                                if vv == 0 { putchar(b'0'); }
-                                let mut dd = [0u8; 20]; let mut kk = 0;
-                                while vv > 0 { dd[kk] = b'0' + (vv % 10) as u8; kk += 1; vv /= 10; }
-                                while kk > 0 { kk -= 1; putchar(dd[kk]); }
-                                const P: &[u8] = b" pid=";
-                                for &b in P { putchar(b); }
-                                let mut pv = self.pid() as usize;
-                                if pv == 0 { putchar(b'0'); }
-                                let mut pd = [0u8; 10]; let mut pk = 0;
-                                while pv > 0 { pd[pk] = b'0' + (pv % 10) as u8; pk += 1; pv /= 10; }
-                                while pk > 0 { pk -= 1; putchar(pd[pk]); }
-                                const C: &[u8] = b" comm='";
-                                for &b in C { putchar(b); }
-                                for &cb in self.comm() { if cb != 0 { putchar(cb); } }
-                                // sc218 lesson: the region BELOW the first
-                                // nonzero word is a zeroed span (a memset'd
-                                // local or zero-initialised frames) — by
-                                // construction it carries no return
-                                // addresses. The surviving frames of the
-                                // deep chain sit just ABOVE `off`; walk
-                                // upward and print the first kernel-range
-                                // words (deepest surviving return
-                                // addresses, symbolisable with addr2line).
-                                const T: &[u8] = b"' tail:";
-                                for &b in T { putchar(b); }
-                                let mut shown = 0;
-                                let mut o2 = off;
-                                let o_end = off + 4096;
-                                while o2 < o_end && o2 < KERNEL_STACK_SIZE && shown < 40 {
-                                    // SAFETY: in-bounds per loop guard.
-                                    let ra = unsafe { core::ptr::read_volatile((base + o2) as *const u64) };
-                                    if ra >= 0xffffffff_80000000u64 && ra <= 0xffff_ffff_ffff_f000u64 {
-                                        putchar(b' ');
-                                        let mut sh2 = 64;
-                                        while sh2 > 0 {
-                                            sh2 -= 4;
-                                            let nb = ((ra >> sh2) & 0xF) as u8;
-                                            putchar(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 });
-                                        }
-                                        shown += 1;
-                                    }
-                                    o2 += 8;
+                            // sc218/sc222: the in-context print of records
+                            // is eaten by the early-boot UART storm (the
+                            // deterministic 89,368-byte chain was lost
+                            // twice). Stash the record (comm/pid + the
+                            // surviving return addresses ABOVE the zeroed
+                            // span — the region below the first nonzero
+                            // word holds no addresses by construction) and
+                            // let the next schbd beat print it.
+                            let mut rec = KStackRec {
+                                hw,
+                                pid: self.pid(),
+                                comm: *self.comm(),
+                                tail: [0; 24],
+                                n: 0,
+                            };
+                            let mut o2 = off;
+                            let o_end = off + 2048;
+                            while o2 < o_end && o2 < KERNEL_STACK_SIZE && rec.n < rec.tail.len() {
+                                // SAFETY: bounds validated above
+                                // (base..base+KERNEL_STACK_SIZE).
+                                let ra = unsafe {
+                                    core::ptr::read_volatile((base + o2) as *const u64)
+                                };
+                                if ra >= 0xffffffff_80000000u64
+                                    && ra <= 0xffff_ffff_ffff_f000u64
+                                {
+                                    rec.tail[rec.n] = ra;
+                                    rec.n += 1;
                                 }
-                                putchar(b'\n');
+                                o2 += 8;
                             }
+                            *KSTACK_REC.lock() = Some(rec);
                         }
                         break;
                     }
