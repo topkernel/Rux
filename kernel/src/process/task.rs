@@ -111,9 +111,24 @@ unsafe impl Send for StackCache {}
 /// Global stack cache instance (wrapped in Spinlock, no separate lock needed).
 static STACK_CACHE: Spinlock<StackCache> = Spinlock::new(StackCache::new());
 
+// Leg-16 kernel-heap anatomy (dfx=schb): live kernel-stack count and the
+// boot-max stack high-water in bytes. The high-water probe ZEROES each
+// fresh stack at alloc (outside every lock) and scans for the first
+// nonzero word from the bottom at free time — the depth distribution is
+// the evidence for any KERNEL_STACK_SIZE reduction, which at pidmax ~4800
+// is 128KB x ~2860 live tasks = ~358MB of the ~900MB heap floor (the
+// single largest per-task item; see SC-SESSIONS leg-15 close-out).
+static KSTACK_LIVE: AtomicU64 = AtomicU64::new(0);
+static KSTACK_HW: AtomicU64 = AtomicU64::new(0);
+
+/// Leg-16 anatomy: (live kernel-stack count, boot-max high-water bytes).
+/// Both stay 0 unless dfx=schb armed the probe at alloc time.
+pub fn kstack_anat() -> (u64, u64) {
+    (KSTACK_LIVE.load(Ordering::Relaxed), KSTACK_HW.load(Ordering::Relaxed))
+}
+
 /// Allocate a kernel stack (with caching)
 fn stack_cache_alloc() -> *mut u8 {
-    let mut cache = STACK_CACHE.lock();
     // Reuse is DISABLED: freed stacks re-enter the cache while the dying
     // task can still be executing its final sret/exit path on that stack
     // (reaper/sweep races), and a pop hands the SAME memory to a new task —
@@ -124,19 +139,33 @@ fn stack_cache_alloc() -> *mut u8 {
     // written by the new owner of the reused stack. Cost of disabling:
     // bounded memory (cache grows with peak task churn); cost of enabling
     // with the early-free unfixed: cross-task context corruption.
-    let _ = &mut cache;
-    // fresh alloc also gets a canary
-    // fresh alloc also gets a canary
+    //
+    // With reuse disabled the lock guards nothing on this path, so the
+    // heap allocation (BUDDY nest) and the leg-16 probe zeroing run
+    // OUTSIDE it — no 128KB memset under a spinlock.
+    {
+        let mut cache = STACK_CACHE.lock();
+        let _ = &mut cache;
+    }
     // SAFETY: Layout is valid; null check follows.
-    unsafe {
+    let bottom = unsafe {
         let layout = Layout::from_size_align(KERNEL_STACK_SIZE, 16)
             .unwrap_or(Layout::new::<[u8; KERNEL_STACK_SIZE]>());
-        let bottom = alloc(layout);
-        if !bottom.is_null() {
-            core::ptr::write_volatile(bottom as *mut u64, StackCache::STACK_CANARY);
+        alloc(layout)
+    };
+    if !bottom.is_null() {
+        if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::Schb) {
+            // Fresh stack is visible to nobody else yet: zero it so the
+            // free-side scan can measure the true high-water, and count it.
+            // ~3 spawns/s x 128KB of memset across the OH boot — negligible
+            // next to the fork itself.
+            unsafe { core::ptr::write_bytes(bottom, 0, KERNEL_STACK_SIZE) };
+            KSTACK_LIVE.fetch_add(1, Ordering::Relaxed);
         }
-        return bottom;
+        // fresh alloc also gets a canary
+        unsafe { core::ptr::write_volatile(bottom as *mut u64, StackCache::STACK_CANARY) };
     }
+    bottom
 }
 
 /// Free a kernel stack (with caching)
@@ -201,6 +230,26 @@ fn stack_cache_free(stack_bottom: *mut u8) {
                 }
                 putchar(b'\n');
             }
+        }
+    }
+    // Leg-16 anatomy (dfx=schb): high-water scan of the now-dead stack.
+    // The owner is fully off-CPU (the exit path waited for on_cpu clear +
+    // RCU before calling here), so this read-only walk is safe outside
+    // every lock. Depth = KERNEL_STACK_SIZE - offset of the first nonzero
+    // word from the bottom (skip offset 0: the canary slot).
+    if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::Schb) {
+        KSTACK_LIVE.fetch_sub(1, Ordering::Relaxed);
+        let base = stack_bottom as usize;
+        let mut off = 8usize;
+        while off < KERNEL_STACK_SIZE {
+            // SAFETY: stack_bottom was allocated with KERNEL_STACK_SIZE
+            // bytes; off < KERNEL_STACK_SIZE keeps the read in bounds.
+            let v = unsafe { core::ptr::read_volatile((base + off) as *const u64) };
+            if v != 0 {
+                KSTACK_HW.fetch_max((KERNEL_STACK_SIZE - off) as u64, Ordering::Relaxed);
+                break;
+            }
+            off += 8;
         }
     }
     let mut cache = STACK_CACHE.lock();
