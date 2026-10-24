@@ -1946,6 +1946,21 @@ Linux comparison. Design committed as perf-report.md section 8
 **(4) QEMU ledger.** 0 of 2 self-started. Zero QEMU this leg so far;
 both standing gates remain armed (patrol + census-hold on main move).
 
+**(5) Leg close rounds.** R2 (~19:40): sc213 ended 19:36 at t=2689 s —
+launcher.ready NEVER set (final "not set" warning at close; PACE clean
+to the last beat: drct=0 slow=0 zfree 420k); sc214/sc215 unchanged
+(bootanimation.finished SET, launcher.ready not set); no sc216+
+serial exists yet; origin/main still 62c2708e — census-hold gate
+never triggered this leg. One more design fact verified while waiting:
+the "same image" claim for the Linux comparison is literal — this
+lane's run/oh-img/* symlink to launcher-route/run/oh-img/* which
+symlink to oh-robot's phone/images/* (the exact files
+run-oh-linux-ref.sh boots), so Rux pa boots and reference boots ride
+identical bytes via snapshot=on. Prep deliverable committed (345cbde8):
+perf-report.md section 8 (v1.5 draft skeleton, placeholders) + this
+leg section. No change elsewhere: honest ledger = docs only, 0 QEMU,
+no kernel code, no image copies, no probe code (design-first mandate).
+
 ## 4. Ranking table v2.8 (cost centers -> boot-time contribution)
 
 Acquittal note (leg 20, no version bump — no row reweighted): the
