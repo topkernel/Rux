@@ -1188,44 +1188,6 @@ pub fn mount_procfs() -> Result<(), i32> {
 // ProcFS Inode Operations
 // ============================================================================
 
-/// Lookup operation for the synthetic /proc/[pid]/fd directory.
-///
-/// PROCFS_DIR_OPS.lookup: private_data carries the pid; only entries that
-/// are live descriptors of that task exist. Without this, path_lookup
-/// died with ENOTDIR (ops.lookup == None) on the walk INTO fd/<N> — so
-/// every path-based operation through a /proc/self/fd magic link
-/// (fchmodat/linkat/stat: LTP open13 musl fallback, open14 linkat)
-/// failed before it ever reached the link.
-// SAFETY: VFS callback contract; private_data stores a valid PID value.
-pub(crate) unsafe fn procfs_fd_dir_lookup(dir: &Inode, name: &[u8]) -> Result<Ino, i32> {
-    let pid = dir.private_data
-        .ok_or(errno::Errno::NotADirectory.as_neg_i32())? as usize as u64;
-    if name.is_empty() || name.len() > 6 || !name.iter().all(|b| b.is_ascii_digit()) {
-        return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
-    }
-    let mut fd: u64 = 0;
-    for &b in name {
-        fd = fd * 10 + (b - b'0') as u64;
-    }
-    if fd as usize >= crate::fs::file::MAX_FDS
-        || pid::get_fd_file(pid, fd as u32).is_none()
-    {
-        return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
-    }
-    Ok(pid * 10000 + FD_LINK_INO_OFF + fd)
-}
-
-/// Iget operation for the synthetic /proc/[pid]/fd directory: builds the
-/// FD_LINK symlink inode (same shape as the FD_LINK arm of procfs_iget —
-/// private_data None, (pid, fd) encoded in the ino).
-// SAFETY: VFS callback contract; builds a fresh inode.
-pub(crate) unsafe fn procfs_fd_dir_iget(_parent: &Inode, _name: &[u8], ino: Ino) -> Result<Arc<Inode>, i32> {
-    let mut inode = Inode::new(ino, InodeMode::new(InodeMode::S_IFLNK | 0o777));
-    inode.fs_id = crate::fs::inode::FS_ID_PROCFS;
-    inode.ops = Some(&PROCFS_INODE_OPS);
-    Ok(Arc::new(inode))
-}
-
 /// ProcFS inode lookup operation
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
 unsafe fn procfs_lookup(dir: &Inode, name: &[u8]) -> Result<Ino, i32> {
@@ -2338,10 +2300,16 @@ pub unsafe fn procfs_fd_dir_lookup(dir: &Inode, name: &[u8]) -> Result<Ino, i32>
         Some(p) => p as usize as u64,
         None => return Err(errno::Errno::NotADirectory.as_neg_i32()),
     };
-    if name.is_empty() || name.len() > 3 || !name.iter().all(|b| b.is_ascii_digit()) {
+    // Up to 6 digits: MAX_FDS is 1024 today (fds 1000-1023 exist — a
+    // 3-digit cap made them ENOENT by path), and the bound below rejects
+    // anything past the real table anyway.
+    if name.is_empty() || name.len() > 6 || !name.iter().all(|b| b.is_ascii_digit()) {
         return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
     }
     let fd: u64 = name.iter().fold(0u64, |acc, b| acc * 10 + (b - b'0') as u64);
+    if fd as usize >= crate::fs::file::MAX_FDS {
+        return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
+    }
     // Closed (or out-of-range) fds are ENOENT, like Linux.
     let open = crate::process::find_task_by_pid(pid_val as u32)
         .or_else(|| {

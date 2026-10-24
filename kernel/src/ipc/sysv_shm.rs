@@ -751,10 +751,11 @@ pub fn sys_shmat(args: [u64; 6]) -> i64 {
             // SHM_RND rounded the request down to the NULL page: treat it
             // as the NULL case — the kernel picks an address instead of
             // mapping page 0 (Linux ipc/shm.c; mapping the null page was
-            // LTP issue #319, shmat03).
-            match find_free_shm_addr(size_aligned) {
-                Some(a) => a.as_usize(),
-                None => return -(errno::ENOMEM as i64),
+            // LTP issue #319, shmat03). Same placement call as the
+            // shmaddr==0 arm below.
+            match addr_space.find_free_area(size_aligned) {
+                Ok(a) => a.as_usize(),
+                Err(_) => return -(errno::ENOMEM as i64),
             }
         } else {
             resolved
