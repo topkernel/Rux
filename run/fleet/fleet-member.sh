@@ -37,64 +37,71 @@ NICE="${NICE:-10}"
 rm -f "$STOP"
 mkdir -p "$LOGS"
 
-rv_drive() { # file id — shared snapshot discipline
-    printf ' -drive file=%s,if=none,id=%s,format=raw,snapshot=on,file.locking=off -device virtio-blk-pci,disable-legacy=on,drive=%s' "$1" "$2" "$2"
+CMD=() # boot_cmd builds the full argv here
+rv_drive() { # file id — appends shared-snapshot -drive/-device pairs to CMD
+    CMD+=(-drive "file=$1,if=none,id=$2,format=raw,snapshot=on,file.locking=off"
+          -device "virtio-blk-pci,disable-legacy=on,drive=$2")
+}
+rv_kdrive() { # private kernel-plain drive pair (no snapshot flag games)
+    CMD+=(-drive "file=$1,if=none,id=$2,format=raw,file.locking=off,snapshot=on"
+          -device "virtio-blk-pci,drive=$2")
+}
+rv_common() { # serial — the shared riscv64 front-matter
+    CMD+=(nice -n "$NICE" timeout --signal=TERM --kill-after=10 "${SECS}s"
+          qemu-system-riscv64 -M virt -accel tcg,thread=multi
+          -cpu "rv64,zbb=true,zba=true,zbs=true,zcb=true,v=true"
+          -m "${MEM:-2G}" -smp 2 -display none -monitor none
+          -serial "file:$1")
 }
 
-boot_cmd() { # echoes the full qemu argv (arrays via printf to keep set -u sane)
+boot_cmd() { # prints the full qemu argv, %q-quoted for exact eval round-trip
     local serial="$1" round="$2"
+    CMD=()
     case "$KIND" in
     ltp)
         local start=$(( (RANDOM * 32768 + RANDOM) % 1080 ))
-        echo nice -n "$NICE" timeout --signal=TERM --kill-after=10 "${SECS}s" \
-          qemu-system-riscv64 -M virt -accel tcg,thread=multi \
-          -cpu rv64,zbb=true,zba=true,zbs=true,zcb=true,v=true \
-          -m 2G -smp 2 -display none -monitor none \
-          -serial "file:$serial" $(rv_drive "$IMG/fleet-ltp-rootfs.img" rootfs) \
-          -kernel "$IMG/fleet-rv64-rux" \
-          -append "root=/dev/vda rw init=/test/sweep console=ttyS0 sweepstart=$start dfx=watchdog,taskdump roundtag=$MEMBER-r$round"
+        rv_common "$serial"
+        rv_drive "$IMG/fleet-ltp-rootfs.img" rootfs
+        CMD+=(-kernel "$IMG/fleet-rv64-rux"
+              -append "root=/dev/vda rw init=/test/sweep console=ttyS0 sweepstart=$start dfx=watchdog,taskdump roundtag=$MEMBER-r$round")
         ;;
     memstorm)
-        echo nice -n "$NICE" timeout --signal=TERM --kill-after=10 "${SECS}s" \
-          qemu-system-riscv64 -M virt -accel tcg,thread=multi \
-          -cpu rv64,zbb=true,zba=true,zbs=true,zcb=true,v=true \
-          -m 1G -smp 2 -display none -monitor none \
-          -serial "file:$serial" $(rv_drive "$IMG/fleet-ltp-rootfs.img" rootfs) \
-          -kernel "$IMG/fleet-rv64-rux" \
-          -append "root=/dev/vda rw init=/test/memstorm console=ttyS0 dfx=periodic,memwatch,watchdog roundtag=$MEMBER-r$round"
+        rv_common "$serial"
+        rv_drive "$IMG/fleet-ltp-rootfs.img" rootfs
+        CMD+=(-kernel "$IMG/fleet-rv64-rux"
+              -append "root=/dev/vda rw init=/test/memstorm console=ttyS0 dfx=periodic,memwatch,watchdog roundtag=$MEMBER-r$round")
         ;;
     fsfuzz)
-        echo nice -n "$NICE" timeout --signal=TERM --kill-after=10 "${SECS}s" \
-          qemu-system-riscv64 -M virt -accel tcg,thread=multi \
-          -cpu rv64,zbb=true,zba=true,zbs=true,zcb=true,v=true \
-          -m 1G -smp 2 -display none -monitor none \
-          -serial "file:$serial" $(rv_drive "$IMG/fleet-ltp-rootfs.img" rootfs) \
-          -kernel "$IMG/fleet-rv64-rux" \
-          -append "root=/dev/vda rw init=/test/fsfuzz console=ttyS0 dfx=watchdog,taskdump roundtag=$MEMBER-r$round"
+        rv_common "$serial"
+        rv_drive "$IMG/fleet-ltp-rootfs.img" rootfs
+        CMD+=(-kernel "$IMG/fleet-rv64-rux"
+              -append "root=/dev/vda rw init=/test/fsfuzz console=ttyS0 dfx=watchdog,taskdump roundtag=$MEMBER-r$round")
         ;;
     monkey)
         local OH=/home/william/rux-agents/oh-display/run/oh-img
         local ACC=tcg,thread=multi
         [ "${KVM:-1}" = 1 ] && ACC=kvm
-        local drv="" idx=0 f
+        local idx=0 f
+        CMD+=(nice -n "$NICE" timeout --signal=TERM --kill-after=10 "${SECS}s"
+              qemu-system-x86_64 -M q35 -accel "$ACC" -cpu max -m "${MEM:-4G}" -smp 2
+              -display none -vga none -device "virtio-gpu-pci,id=ohgpu,xres=720,yres=1280"
+              -serial "file:$serial" -monitor none
+              -kernel "$IMG/fleet-x86-bzImage" -initrd "$OH/ramdisk-x64.img"
+              -append "ip=dhcp loglevel=4 console=ttyS0,115200 init=init root=/dev/ram0 rw ohos.boot.hardware=virt default_boot_device=10007000.virtio_mmio ohos.boot.sn=01234567890 ohos.required_mount.system=/dev/vdb@/usr@ext4@ro,barrier=1@wait,required ohos.required_mount.vendor=/dev/vdc@/vendor@ext4@ro,barrier=1@wait,required ${EXTRA_APPEND:-} roundtag=$MEMBER-r$round")
         for f in updater.img; do
-            drv="$drv$(rv_drive "$OH/$f" ohd$idx)"; idx=$((idx+1))
+            rv_kdrive "$OH/$f" "ohd$idx"; idx=$((idx+1))
         done
-        drv="$drv -drive file=$IMG/fleet-monkey-system.img,if=none,id=ohd$idx,format=raw,file.locking=off,snapshot=on -device virtio-blk-pci,drive=ohd$idx"; idx=$((idx+1))
+        rv_kdrive "$IMG/fleet-monkey-system.img" "ohd$idx"; idx=$((idx+1))
         for f in vendor.img sys_prod.img chip_prod.img; do
-            drv="$drv$(rv_drive "$OH/$f" ohd$idx)"; idx=$((idx+1))
+            rv_kdrive "$OH/$f" "ohd$idx"; idx=$((idx+1))
         done
-        drv="$drv$(rv_drive "$OH/userdata-tok.img" ohd$idx)"
-        echo nice -n "$NICE" timeout --signal=TERM --kill-after=10 "${SECS}s" \
-          qemu-system-x86_64 -M q35 -accel "$ACC" -cpu max -m 4G -smp 2 \
-          -display none -vga none -device virtio-gpu-pci,id=ohgpu,xres=720,yres=1280 \
-          -serial "file:$serial" -monitor none \
-          -kernel "$IMG/fleet-x86-bzImage" -initrd "$OH/ramdisk-x64.img" \
-          -append "ip=dhcp loglevel=4 console=ttyS0,115200 init=init root=/dev/ram0 rw ohos.boot.hardware=virt default_boot_device=10007000.virtio_mmio ohos.boot.sn=01234567890 ohos.required_mount.system=/dev/vdb@/usr@ext4@ro,barrier=1@wait,required ohos.required_mount.vendor=/dev/vdc@/vendor@ext4@ro,barrier=1@wait,required ${EXTRA_APPEND:-} roundtag=$MEMBER-r$round" \
-          $drv -nic user,model=virtio-net-pci -device virtio-keyboard-pci -device virtio-tablet-pci
+        rv_kdrive "$OH/userdata-tok.img" "ohd$idx"
+        CMD+=(-nic user,model=virtio-net-pci -device virtio-keyboard-pci -device virtio-tablet-pci)
         ;;
     *) echo "unknown kind $KIND" >&2; return 1 ;;
     esac
+    printf '%q ' "${CMD[@]}"
+    echo
 }
 
 wedge_watch() { # serial-file qemu-pid -> returns when round ends; kills on wedge

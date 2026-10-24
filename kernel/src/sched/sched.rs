@@ -3950,8 +3950,27 @@ pub fn scheduler_tick() {
                     let task_word = slot.load(core::sync::atomic::Ordering::Relaxed);
                     if task_word == cur as usize as u64 {
                         let t0 = since.load(core::sync::atomic::Ordering::Relaxed);
+                        // Print gate (stress-fleet round 1, 2026-10-25):
+                        // this probe runs FROM the timer hardirq, so the
+                        // observed task always carries at least the tick's
+                        // own HARDIRQ_OFFSET — pc == 0x10000 exactly is
+                        // pure self-observation (idle in wfi, or a task
+                        // that simply stayed current across the window;
+                        // 600+ lines/round on the stress fleet buried the
+                        // signal). A LEAKED hardirq bit shows as 0x20000+
+                        // under the tick, and any PREEMPT/SOFTIRQ/NMI
+                        // bits survive the mask; those are the reportable
+                        // shapes. Slot/since bookkeeping is unchanged so
+                        // PREEMPT-HEAL (already base-masked) behaves
+                        // identically.
+                        let reportable = (pc
+                            & !crate::interrupt::preempt::HARDIRQ_MASK)
+                            != 0
+                            || (pc & crate::interrupt::preempt::HARDIRQ_MASK)
+                                > crate::interrupt::preempt::HARDIRQ_OFFSET;
                         if t0 != 0
                             && now.wrapping_sub(t0) >= 200
+                            && reportable
                         {
                             let lp = LEAK_LAST_PRINT.load(
                                 core::sync::atomic::Ordering::Acquire);

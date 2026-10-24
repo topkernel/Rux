@@ -1,0 +1,13 @@
+================ stress-fleet sweep 2026-10-25 05:09:40 ================
+--- host ---
+               total        used        free      shared  buff/cache   available
+内存：            59          29           3           0          27          29
+ 05:09:40 up 1 day, 12:00,  1 user,  load average: 25.09, 22.57, 17.68
+--- members (driver procs) ---
+--- adopted chains (frozen-kernel wildwrite capture) ---
+ww-s2 ALIVE current: ww-s2-r89-serial.log
+wwload ALIVE current: wwload-r36-serial.log
+--- flagged rounds (last 50 across fleet) ---
+flagged: 0/0 rounds
+--- qemu inventory (mine) ---
+fleet-owned qemu count: 20

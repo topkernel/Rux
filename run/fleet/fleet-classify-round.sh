@@ -70,6 +70,21 @@ beat=$(grep -cE "MONKEY-BEAT|MEMSTORM-BEAT|FSFUZZ-BEAT" "$SERIAL" 2>/dev/null)
 noise_usb=$(grep -ciE "usb_host.*(crash|died)|CrashDumpEntry.*usb_host" "$SERIAL" 2>/dev/null)
 noise_samgr=$(grep -cE "SAMgr.*(15|30|89)s|samgr.*cost" "$SERIAL" 2>/dev/null)
 
+# PREEMPT-LEAK: since the 2026-10-25 print gate, any line that survives
+# carries non-self bits (0x20000+ or PREEMPT/SOFTIRQ/NMI base) — a real
+# held-count candidate. Count in the summary line; WARN at volume.
+pleak=$(grep -c "PREEMPT-LEAK" "$SERIAL" 2>/dev/null)
+[ "$pleak" -gt 5 ] 2>/dev/null && WARN="${WARN}PREEMPT-LEAK=$pleak "
+
+# PARKED-LEAK: tracked open class (fires on ~47% of OH boots across
+# lanes; samgr-callback serials show it since sc-era). Context counter,
+# logged per round for the ledger; promoted to WARN only if it appears
+# on NON-OH members (riscv64 fleet members) where it has never been seen.
+park=$(grep -c "PARKED-LEAK" "$SERIAL" 2>/dev/null)
+if [ "$park" -gt 0 ] 2>/dev/null && ! grep -q "ohos.boot" "$SERIAL" 2>/dev/null; then
+    WARN="${WARN}PARKED-LEAK-RV=$park "
+fi
+
 if [ -n "$CRIT" ]; then
     CLS="CRITICAL"
 elif [ -n "$WARN" ]; then
@@ -80,6 +95,6 @@ else
     CLS="clean"
 fi
 
-echo "R$ROUND $CLS lines=$LINES rc=$RC wedge=$WEDGE beats=$beat sweepRES=$tres sweepWEDGE=$twedge ${CRIT}${WARN}noise:usb=$noise_usb,samgr=$noise_samgr heap:$heap_first->$heap_last KiB"
+echo "R$ROUND $CLS lines=$LINES rc=$RC wedge=$WEDGE beats=$beat sweepRES=$tres sweepWEDGE=$twedge ${CRIT}${WARN}noise:usb=$noise_usb,samgr=$noise_samgr,park=$park heap:$heap_first->$heap_last KiB"
 [ -n "$CRIT" ] || [ -n "$WARN" ] && echo "  serial: $SERIAL (preserve for sweep)"
 exit 0

@@ -15,12 +15,14 @@ free -g | head -2
 uptime
 
 echo "--- members (driver procs) ---"
-for m in $(ls "$LOGS" | grep -E '\-rounds\.log$' | sed 's/-rounds.log//'); do
+# union of members with rounds logs and members with live drivers (a
+# member in its first round has no rounds.log yet)
+for m in $( (ls "$LOGS" 2>/dev/null | grep -E '\-rounds\.log$' | sed 's/-rounds.log//'; pgrep -f 'fleet-member.sh' | xargs -r -I{} ps -o args= -p {} 2>/dev/null | awk '{print $3}' | sort -u) | sort -u); do
     alive=no
     pgrep -f "fleet-member.sh $m " >/dev/null 2>&1 && alive=yes
     last=$(tail -1 "$LOGS/$m-rounds.log" 2>/dev/null | cut -c1-160)
     rounds=$(wc -l < "$LOGS/$m-rounds.log" 2>/dev/null)
-    echo "$m alive=$alive rounds=$rounds last: $last"
+    echo "$m alive=$alive rounds=${rounds:-0} last: $last"
 done
 
 echo "--- adopted chains (frozen-kernel wildwrite capture) ---"
