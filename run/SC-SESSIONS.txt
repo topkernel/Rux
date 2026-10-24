@@ -3478,3 +3478,23 @@ EXECUTING IN ITS SANDBOX (16:0x-17:xx):
   arena-dst datapoint), (c) roll usbless (oh-img-p) to kill the
   usb_host churn, (d) the sc209-only param-socket deafness did not
   recur in sc210 - PCTL stays armed to catch it if it does.
+
+SESSION R FOURTEENTH LEG ADDENDUM - sc210's TERMINAL EVENT = A DIAGNOSTIC-
+PATH KERNEL PANIC (fixed); sc211 ROLLS THE FIX.
+
+- sc210's end (t=1410s, serial line 464278): the wedge census fired on
+  the launcher family and KILLDUMP walked pid 4902 (com.ohos.launcher,
+  fdtab shown fine) then a task whose fdtable was NOT initialized:
+  "Kernel panic - not syncing: PANIC: FdTable not initialized
+  (kernel/src/process/task.rs:3958)" twice, then CPU#1 soft lockup,
+  panic park, serial frozen at 0% CPU until the timeout wrapper ended
+  it. The diagnostic walk killed the deepest boot of the campaign.
+- FIX (6a3e9e34): every task-walking dump site now uses try_fdtable()
+  and skips when None - kill_dump_wedge's fdtab line + primary-fd block
+  + pipe-holder for_each_task scan + syscall fd notes, the APP-PARK
+  APPMAP/APPFD decode, the RWFRZ path_of cache (all sync/futex.rs),
+  and the APPMAPSRC tap (syscall/memory.rs). No behavior change on the
+  non-dump paths.
+- sc211 (17:12, fix kernel, same recipe): verification roll - expect
+  the census at the same launcher-family window to survive and the
+  boot to run its full 45 min. Verdict will be appended.
