@@ -4922,9 +4922,9 @@ pub fn yield_cpu() {
 /// `f` runs under the per-bucket lock: a task linked into a bucket cannot
 /// be removed (removal needs the same lock) and therefore cannot be freed
 /// while `f` runs. `f` must not sleep or take a PID-hash bucket lock.
-pub fn for_each_task<F>(f: F)
+pub fn for_each_task<F>(mut f: F)
 where
-    F: Fn(*mut Task),
+    F: FnMut(*mut Task),
 {
     crate::process::pid_hash::pid_hash_for_each_task(|t| f(t));
 }
