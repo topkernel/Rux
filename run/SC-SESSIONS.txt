@@ -4325,3 +4325,23 @@ LEG-17 ATTRIBUTION COMPLETE (sc243 peek-live census, 04:57):
   exist but the 98% live share is BinderTxn).
 NEXT: binder txn lifecycle audit - which clone of the txn Arc never
 drops (txn_stack pop? tcomplete finish? dead_reply queues?).
+
+LEG-17 FIX VERIFICATION (sc244, fix kernel c5c62bd5, 05:5x):
+- The reclaim mechanism WORKS: 89 "reclaimed stale buffer(s)" lines
+  by t=537s across services (pids 328/374/335...), boot ADVANCING
+  (pidmax 2845@t537, sc240-class pace), zero panics/canaries.
+- Census (t=660, pidmax ~3000, heap 590MB): c256 live 441,451 =
+  147/spawn vs sc243-park's 247/spawn (-40% per spawn at a DEEPER
+  state). NOTE: parts of the SMALLALLOC census print garbled by WW
+  watchdog lines interleaving on the raw UART (census prints from
+  schbd race softirq WW prints) - future censuses need interleave
+  protection or the WW printer muzzled during census.
+- THE REMAINING GAP: the dominant population is UNDELIVERED parked
+  oneways (pick_j==0, sitting on node.async_todo + proc todo of
+  silent receivers). The delivered-stale rule (pick_j+30s) cannot
+  free them. NEXT RULE (for the next roll): txns enqueued (enq_j)
+  >30s ago and never picked up are dead by the same silence proof;
+  freeing their BLOCKS requires RETIRING the txn itself (the node-
+  death pattern: set_holds_async_slot(false) + dead_reply_to_sender
+  + finish_work) so no BR_TRANSACTION ever hands out a reclaimed
+  buffer. Sweep then drains async_todo wholesale instead of 1/s.
