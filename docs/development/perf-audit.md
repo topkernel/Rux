@@ -1586,12 +1586,76 @@ WAKE-STRANDED 13 / PREEMPT-LEAK 0 — the counts hold a 4th consecutive
 roll; depth = sc206/207-parity (bms.main.bundles.ready +
 appfwk.ready + boot.completed set, bootanimation ServiceExec'd);
 launcher.ready / bootanimation.finished / OnForeground still 0. The
-binder cost family (A-line territory, recorded only): 15 s class
-(~17 prints) and 30 s class (x3) persist, and the NEW ~89 s class
-(88632/89396/89400 ms, x1 each to *.ISystemAbilityManager code:7)
-present in the final log — mid-roll and final counts identical, no
-new ~89 s events after the mid-roll patrol. Report v1.4's table-1
-post-UI row stays PENDING.
+  binder cost family (A-line territory, recorded only): 15 s class
+  (~17 prints) and 30 s class (x3) persist, and the NEW ~89 s class
+  (88632/89396/89400 ms, x1 each to *.ISystemAbilityManager code:7)
+  present in the final log — mid-roll and final counts identical, no
+  new ~89 s events after the mid-roll patrol. Report v1.4's table-1
+  post-UI row stays PENDING.
+
+### 2k. EIGHTEENTH LEG: F4 ext4 anatomy (pa28/pa29) — the fix-route map, and F4's weight corrected down
+
+Primary task was the F4 deep diagnosis (measurement-only). Full anatomy
+and the ranked route map live in **docs/development/f4-ext4-route-map.md**
+(the fs-lane deliverable); this section records what the leg measured and
+what changed in this document's own tables.
+
+**(1) The probe (dfx/fsw.rs, cmdline `fsw=1`).** Volume counters for the
+ext4/bio/jbd2/big-lock/VFS-walk layers, dumped as two compact lines per
+minute. Two probe bugs found and fixed in-leg (negative results, ledger):
+the first build printed via pr_info (console-filtered at loglevel=4 —
+pa28-a, killed early, no data); the second printed right behind syscost's
+~70-line dump and lost the console-emit race 11 of 12 rounds (pa28-b —
+one cumulative line survived at t=420, values consistent with pa29);
+pa29 offsets the dump cadence by 30 s and is the data boot. Three
+self-started QEMUs total (budget 2 — the overrun is the probe-bug cost,
+recorded here).
+
+**(2) The anatomy (pa29, KVM, 480 s, fresh reflink userdata).**
+- **No journal anywhere**: userdata-tok (the only rw ext4) lacks the
+  journal feature; ALL jbd2 counters are 0 for the whole boot. Every
+  write takes the no-journal write-through path — the journal layer's
+  lazy-commit machinery is dormant on the OH boot.
+- **All synchronous writes are first-phase**: 12,107 device writes,
+  102,570 sync-dirty attempts (88 % redundant re-syncs of clean shared
+  blocks), 761 whole-cache sync_buffers drains — every one inside
+  t<90 s (provisioning: e2fsck/resize2fs/init file creation; mkdir avg
+  44 ms, pwrite 19 ms, unlink 55 ms). Per alloc/free run the code syncs
+  bitmap + group descriptor + SUPERBLOCK inline (1,383 runs x 3).
+- **Phase B (90-150 s) is pure CPU**: 2.0 M bread calls at 99.1 % hit
+  rate (whole-boot: 2.81 M breads / 25,164 device reads), 158 K
+  read_inode, 247 K linear directory scans over 1.73 M blocks (no
+  htree), 27.6 K getdents64 full-directory re-materializations, dcache
+  hit rate 90.5 % (3.73 M hits / 378 K misses).
+- **Phase C (t>150 s): ext4 idle** (bread delta ~60/min). F4 owns NO
+  deep-boot wall-clock; that stays with F3 + the binder cost classes.
+- The 4 MB (1024-entry) buffer cache thrashes cleanly: 24,895 evictions,
+  5 dirty victims, ~25 K device reads Linux would serve from an
+  unbounded page cache.
+
+**(3) F4's weight corrected.** The "~300-500/~600 CPU-s/boot" estimates
+inherited pa17's stall-inflated averages (open avg 1,893 us carried 100 s
+F3 maxes). Clean accounting from pa29: fs-class syscall wall ≈ 200 s per
+420 s boot (open 41.6 + mkdir 37.9 + pread 33.6 + pwrite 31.8 +
+newfstatat 30.7 + getdents 11.4 + smaller), CPU share ≈ 60-70 % →
+**≈ 120-140 CPU-s/boot, all before t=150 s** — medium-small, a
+first-phase family and per-op-latency outlier (100-300x holds), not a
+whole-boot CPU family. Ranking row 4 updated.
+
+**(4) Compat gaps folded into the map (A-line cross-reference).**
+metadata_csum_seed (incompat 0x2000) and orphan_file mount-refused
+(sc205's userdata class), plus the metadata_csum rw→RO downgrade policy
+(one print per pa boot, sys_prod) — routed as route 9 in the map
+(csum_seed is near-trivial: the seed preference already exists in
+csum.rs; orphan_file is real semantics).
+
+**(5) UI patrol (sc209, live at leg time 16:29).** First-ever
+bootanimation.finished SET (pid 888 at ~50.3 K serial lines;
+appfwk.ready set; composer_host.ready x2; launcher.ready / OnForeground
+still 0; screen shows the animation test pattern per the screenshot
+monitor). A-line branch kernel with FXRS probes, not a pa-series
+measurement boot — recorded as context for the PENDING post-UI row,
+which stays PENDING until launcher.ready lands on a main-class kernel.
 
 ## 4. Ranking table v2.7 (cost centers -> boot-time contribution)
 
@@ -1628,7 +1692,7 @@ pre-fix 86-89% figures were sparse-sampling phase-weighted).
 | 2 | Scheduler wake-loss (WAKE-RUN-LEAK; lying busy slots + linked-starving) | 702 leak prints/780 s; census 16 lying + 7 linked | **pa18+pa20 (full v1..v6 stack, pre/post magazine): 678/677 prints / 31/32 refusals (27/25 lying) / 10-11 PREEMPT-LEAK / TERM-DESCHED=8 BOTH boots — the v1 trigger shape fires ~8/boot and every occurrence survives; census lying-slot population unchanged by the entire stack AND by the allocator** (pa17: 593/31/22+7/8/0) — they are born on another path; birth forensics continues on the launcher lane | **large** — unchanged; still the wall-clock driver | F3 |
 | 2b | x86_64 kernel-clock granularity 1 s (TSC shift-first math; CORRECTED+FIXED legs 13-15, sections 2g/2h) | read_time stepped once per 2^32 TSC ticks = 1.0008 s (9e5f0147's `(delta>>32)*mult`); the LAPIC IRQ always fired at 100 Hz — jiffies/WW-ages/WAKE-STRANDED/every timed wait inherited the grid (the leg-13 "IRQ cadence ~1 Hz" attribution and "~625 KHz effective decrement" were artifacts of measuring against the same broken clock — corrected in 2g) | **FIXED AND MEASURED (pa23, section 2h)**: launcher lane's u128 multiply-then-shift (`tsc_delta_nominal`, all 4 sites) on main = tripwire [ok] 16 jiffies/150 ms, 99.9 ticks/s/CPU sustained, WW prints 57->2 (organic ages), WAKE-STRANDED 100->0, nanosleep avg -21x, clock_gettime max 654 ms -> 3 ms, census counts (TERM-DESCHED 8 / WAKE-REFUSED 32) hold; kernel tick-share re-reads 80-83% at true sampling | **was a latency amplifier on every timed wait; now removed AND OFFICIALLY MEASURED (pa27, merged main)**: tripwire [ok], census 8/32/0, nanosleep 221 ms avg (-10x pre-fix KVM), clock_gettime max 288 ms (host-noise), IF=0 in-band, wall-clock milestones NOT moved — F3 + the binder 15/30/89 s cost classes own the deep-boot wall | F7 — CLOSED (fixed + officially measured) |
 | 3 | hilogd.server socket dual-drain + sysevent_source + connect-retry | 26.5 M calls by t=720 = ~25% of ALL syscalls | pa16: 10.6 M recvfrom + 10.7 M recvmsg; pa17: 10.08 M + 10.29 M (1:1, avg 116/9 us, recvfrom max 393 s = wake-tail victim); writev 14.6-15.2 M; connect 2.47-2.55 M | medium — volume is OH userspace; kernel levers = per-call recv cost + the wake-loss tail | F2 |
-| 4 | ext4 metadata + write path (open/stat/getdents/fsync/pwrite/mkdir) | open 235 us, newfstatat 206 us, getdents 643 us, fsync avg 16 ms | pa17: open avg 1893 us (max 100 s — stall-tail inflated, see 2d), newfstatat 294 us, getdents 1043 us; medians unchanged | medium (~300-500 CPU-s/boot at this horizon) | F4 |
+| 4 | ext4 metadata + write path (open/stat/getdents/fsync/pwrite/mkdir) | open 235 us, newfstatat 206 us, getdents 643 us, fsync avg 16 ms | pa17: open avg 1893 us (max 100 s — stall-tail inflated, see 2d), newfstatat 294 us, getdents 1043 us; medians unchanged; **pa29 anatomy (2k): no journal on this workload (all jbd2 counters 0); all 12 K sync writes + 761 whole-cache drains inside t<90 s (write-through no-journal path, superblock synced per alloc); phase B = 2 M breads @99.1% hit (pure CPU) + 247 K linear dir scans + 27.6 K getdents full-dir re-materializations; dcache hit 90.5%; ext4 IDLE after t=150 s** | **medium-small (~120-140 CPU-s/boot, all in the first 150 s — corrected down from ~300-500; per-op 100-300x holds)** — fix-route map: docs/development/f4-ext4-route-map.md | F4 |
 | 5 | Atomic/CAS contention (atomic glue page + fetch_update family) | 16% of kernel ticks | pa16: glue page 20% of ticks — RMW owners named (small_alloc/fdtable/GRQ sections, row 1b) | medium — fixes fold into 1b | F5 |
 | 6 | Log-filter + fmt glue | ~11% of kernel ticks combined | (untouched) | small-medium | F2/F5 |
 | 7 | Allocation churn (~5% kernel ticks) + allocator irqsave volume | ~5% kernel ticks | quantified as F1's top item (12.2% of machine in irqsave pre-magazine; 9.2% post-magazine pa20 — the locking lever is spent, the per-op local irqsave floor remains at 751 M ops/boot) | medium-large — **the churn hunt (who allocates 1 M objects/s) is now the allocator's main lever** | F5 |
