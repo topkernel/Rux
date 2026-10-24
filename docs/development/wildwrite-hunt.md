@@ -3319,3 +3319,29 @@ rsp=0x7ff090410fc8" line (a USER frame). Confirmed MY lane's probe
   ~12:20; qemu 222524 / 222584, gdb 222608 / 222655, both armed).
 - Commits: 2617b3d2 (s36 claim record), f1f1ffec (r65/load-r12 round
   artifacts).
+
+## Session 37 (continuation agent — pure watch session: chains adopted
+## alive mid-round at r66/load-r13)
+
+### Inheritance reconstruction (claim 11:52 Oct 24)
+
+- Both chains ALIVE at claim (ps before assumption, the s10/s34 lesson):
+  driver roots 176512 (main, ww-chain2.sh — r66 in flight since 11:35:10)
+  / 176547 (load, ww-loadchain.sh — load-r13 since 11:35:24), round
+  QEMUs 222524/222534 and 222584/222595, gdb 222608/222655 on
+  12371/12381. Rounds WW-ARMED 19 points (GUARD=0xffffffff80a7a000),
+  wildwatch try 0. The s36 handoff PIDs matched exactly — first clean
+  PID handoff in a while.
+- Mid-round sweep at claim (11:52): r66 56158 lines storming
+  (WW: wakes=4.15M), load-r13 87163 lines with normal execve/cow
+  traffic. 0 WW-HIT / CANARY / META-SMASH / KERNPANIC in both.
+- Main repo drift check: b8f686a6 vs the merged base 988e10c1 — zero
+  diff under kernel/ (the new commits are docs + a chore dropping the
+  perf-audit line's two 11MB probe bzImages). The frozen hunt pair is
+  unaffected; chains NOT rebuilt, per the no-rebuild rule for
+  docs-only main movement.
+- Foreign QEMUs at claim: samgr-callback (225991, KVM). Untouched.
+
+### Chain ledger (s37 ownership)
+
+(pending — rounds complete below)
