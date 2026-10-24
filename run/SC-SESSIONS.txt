@@ -3748,3 +3748,60 @@ kernel 361debe8)
   rounds at press time; the remaining gate above the rounds is the
   launcher ability chain's own progression (userspace), with the RS
   park race and the init bootevent timeout as the per-boot lottery.
+
+LEG-15 CLOSE-OUT (second attempt, quota-survived)
+
+Deliverables on the branch (feature/samgr-callback, ready for
+coordinator merge):
+  fec94520 wip(dfx): PACE counters on the SC-HB beat (predecessor)
+  3593c9d2 wip(sessions): sc212 readout
+  361debe8 fix(sched): stallwatch_tick must not block on pid-hash
+           bucket locks [READY FOR COORDINATOR MERGE]
+  ff3c9031 + 8b49e2c4 docs(sessions)
+  (+ this note)
+
+1. FIX VERIFIED (2 consecutive advancing boots, the leg rule):
+   sc216 (t=692s heartbeat, ticks/console to boot end) and sc217
+   (heartbeat to t=1530s, ticks alive to the 45-min timeout end) both
+   passed the sc215 freeze depth (t~580s) with zero bucket-deadlock
+   shapes. Both boots degraded afterward via the KNOWN userspace
+   walls (bootevent timeout), NOT the freeze. sc207's identical
+   freeze is explained by the same root cause (its fix had only
+   removed the printk-under-lock half).
+
+2. PACE verdict (the mission's primary question): the reclaim family
+   is ACQUITTED for everything up to the deepest launcher state - and
+   then measured precisely when the floor forms (sc217: zfree 31K
+   pages/heap 818MB still drct=0 at t=1220; floor + drct=90-127
+   rounds / drctJ 1836-3395j / drctMaxJ 70-209j / slow 36-50 only
+   after heap ~900MB at pidmax ~4800). COW handling is never the cost
+   (cowJ 91j/341K faults). The wall = kernel-heap pressure at very
+   high pid counts; the next lever is per-pid kernel footprint (mm
+   lane), for which the PACE zfree/heapK columns are the continuous
+   gauge.
+
+3. Launcher chain state (terminal milestone NOT reached this leg):
+   the deepest run (sc217) had RS alive all boot, launcher IN its
+   sandbox, LauncherAbilityManager rounds SUCCEEDING (localId 100),
+   bootevent.account.ready SET, pidmax 4853 - then appspawn's spawn
+   timeout SIGKILLed m.ohos.launcher (pid 5147, KILLTRACE sig=9 from
+   appspawn 336) at the floor: the launcher's fork/init is too slow
+   under the heap floor, appspawn kills+respawns it in a loop,
+   launcher.ready never sets before init's bootevent timeout. Both
+   timers (appspawn spawn window, init bootevent window) are image/
+   userspace constants - NOT kernel-adjustable within this leg's
+   rules. The path to the screenshot milestone: (a) win the RS-park
+   race (usbless deterministically loses it: RS#1 crashes at
+   rip=0x3fbf08ad30 then RS#2 parks - 3/3; full image won it 3/3 this
+   leg), so stay on the FULL image via oh-boot-m3g.sh + userdata-tok
+   reflink copies; (b) reduce kernel-heap footprint so the launcher's
+   spawn completes inside appspawn's window before the floor forms.
+
+4. Rolls this leg: sc212, sc213, sc214 (usbless, timeouts/exact-PID),
+   sc215 (full image, froze - the conviction boot; monitor evidence
+   in the sections above), sc216, sc217 (fix verification, full
+   image, both ended by their own timeout wrappers). All QEMUs and
+   shotmon loops stopped; sc202-210 orphan shotmon loops from dead
+   predecessor sessions also cleaned (exact PIDs, cmdline-verified).
+   Serials/ppm on disk (gitignored); userdata-sc212..217 private
+   reflink copies retained.
