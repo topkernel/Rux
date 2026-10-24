@@ -3489,3 +3489,23 @@ rsp=0x7ff090410fc8" line (a USER frame). Confirmed MY lane's probe
   in flight since 16:05:12/16:05:41, budget ends ~16:50; both WW-ARMED
   19 with GUARD=0xffffffff80a7a000 (confirmed in serial line 99 + gdb
   logs), wildwatch try 0. Driver roots unchanged (176512 / 176547).
+- MAIN r72 (FULL 2700 s): CLEAN — 78445 lines, "budget spent" natural
+  end, 0 WW-HIT / 0 watchpoint hits / 0 heals, no panics, 0 badaddr;
+  4 IRQ-OFF-WINDOW lines, benign short class (age 106-430 ms, known
+  rip). Driver self-advanced to r73 (16:50:12).
+- LOAD r19 (FULL 2700 s): CLEAN — 168411 lines, 804 sdc exec cycles,
+  0 gdb hits / 0 capture markers, 0 badaddr; 13 IRQ-OFF-WINDOW lines,
+  all at the known-benign rip ffffffff80573d96 (13/13 across both
+  rounds — single code path). NOTE: max observed age extended to
+  961 ms (0x3c1) this round, above the prior 103-771 ms band top but
+  below 1 s and at the same rip/stack as the adjudicated TSC-1Hz
+  family — classified benign jitter, watch continues. Driver
+  self-advanced to load-r20 (16:50:44).
+- Cumulative: **0 WW-HIT across r1-r72 complete rounds** (plus
+  partials), 0 META-SMASH. Load surface: p1 + r1-r19 = **~14839 sdc
+  exec cycles over 20 full armed load-hours**, zero fires, zero false
+  positives.
+- r73 (qemu 294159, gdb 294192) / load-r20 (qemu 294269, gdb 294312)
+  in flight since 16:50:12/16:50:44, budget ends ~17:35; both WW-ARMED
+  19 with GUARD=0xffffffff80a7a000 (serial line 99 + gdb logs),
+  wildwatch try 0. Driver roots unchanged (176512 / 176547).
