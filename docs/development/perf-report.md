@@ -964,11 +964,91 @@ never the harness.
 produce is delivered to the boundary of what the kernel can host:
 Reference side measured and final; Rux side blocked behind an identified
 pair — a deterministic IMAGE defect (usb_host DDK
-libusb_pnp_manager.z.so, present under the reference kernel too) whose restart-storm
-cost eats the boot window only because Rux's boot-window cost is
-~100x the reference boot, plus the fd-32 EBADF kernel bug (fixed on the
-launcher lane, pending merge) — with the full run-day apparatus
+libusb_pnp_manager.z.so, present under the reference kernel too) whose
+restart-storm cost eats the boot window only because Rux's boot-window
+cost is ~100x the reference boot, plus the fd-32 EBADF kernel bug (fixed
+on the launcher lane, pending merge) — with the full run-day apparatus
 staged and validated so the Rux column is one confirmed-milestone
 away. The performance findings that ARE measurable pre-UI (tick fix,
 census invariants, cost-center ranking, syscall tables) are final in
 sections 1-7 and survived six kernel generations unchanged.
+
+### 8.10 NORTH-STAR GOAL (user mandate 2026-10-25): outperform the
+reference kernel by 50%+ on every measured metric
+
+**The target.** Every pbench P1-P7 metric: target = reference median x
+0.5 (at least 2x faster than the reference kernel, image's own OHOS
+6.6.101). Boot-phase wall-clock included. New features and new internal
+architecture are both allowed; the three iron gates hold (external
+compatibility, LTP green, no upper-layer breakage) plus the perf merge
+gate (AGENTS.md, baselines in docs/development/perf-gate-baseline.md).
+
+**The trajectory (realism discipline).** Rux is a debug-build kernel
+far from parity on most rows — the goal is sequenced: (a) reach parity
+per metric, (b) then close to 2x. Gap table below, pb1 vs the banked
+reference medians:
+
+| metric | pb1 Rux med (us) | ref med (us) | gap | 2x target (ref x0.5) |
+|---|---|---|---|---|
+| p1 null syscall | 4.570 | 0.040 | 114x | 0.020 |
+| p1 clock_gettime | 4.951 | 0.070 | 71x | 0.035 |
+| p2 ctx switch | 15.409 | 0.090 | 171x | 0.045 |
+| p3a fault anon | 0.080 | 5.010 (bimodal) | ahead | met (caveat: ref THP) |
+| p3b fault COW | 24.614 | 0.751 | 33x | 0.376 |
+| p3c fault file | 0.070 | 0.100 | 1.4x ahead | 0.050 (not yet 2x) |
+| p4 fork+exit | 8324 | 10.88 | 765x | 5.44 |
+| p4 fork+exec | 13353 | 22.37 | 597x | 11.19 |
+| p5a pipe roundtrip | 21.517 | 0.180 | 120x | 0.090 |
+| p5b dgram send | 126.257 | 0.155 | 815x | 0.078 |
+| p5b dgram recv+peek | 275.445 | 0.215 | 1281x | 0.108 |
+| p5c stream write | 56.223 | 0.160 | 351x | 0.080 |
+| p6 stat | 127.710 | 0.271 | 471x | 0.136 |
+| p6 openclose | 310.071 | 0.436 | 711x | 0.218 |
+| p6 getdents (1000-entry) | 9975 | 88.88 | 112x | 44.44 |
+| p6 read_cached | 366.915 | 0.676 | 543x | 0.338 |
+| p6 write+fsync 4 KB | 18125 | 4755 | 3.8x | 2377 |
+| p6 append 4 KB | 500.378 | 0.471 | 1062x | 0.236 |
+| p6 mkdir+rmdir pair | 83192 | 40.43 | 2057x | 20.2 |
+| p6 unlink | 32816 | 26.99 | 1216x | 13.5 |
+| p7 sleep 1 ms overshoot | 2094 | 14.64 | 143x | 7.32 |
+
+(Caveats, one line: pb1 is ONE TCG minimal-rootfs smoke on the pa31-
+class DEBUG kernel — ranking-grade, not run-day-grade; the reference
+column is med-of-4 on the OH image. The run-day Rux column supersedes
+this table's left column when the milestone lands.)
+
+**Lever ladder (sequenced by impact; L0 gates the rest).**
+
+- **L0 — release-profile measurement (in flight, leg 30).** The p1
+  null-syscall floor is 4.57 us = 114x, and every multi-syscall row
+  (p5/p6 families) carries that floor per call: a debug-build entry
+  cost this size inflates the whole board. `make build-release`
+  exists (opt-level 3, LTO, codegen-units 1, strip; build/Makefile).
+  Measure the debug/release pair on the pbench_boot.py channel before
+  any hand-optimization — if release collapses the floor by a multiple,
+  the per-row engineering targets change (some rows may land at or
+  near parity for free; the remaining outliers are the real work).
+- **L1 — ext4 lazy no-journal write path (F4).** The metadata rows are
+  the board's worst gaps (mkdrmdir 2057x, unlink 1216x, append 1062x);
+  F4's estimate is -30-60 s boot wall AND these rows. fsync 3.8x is
+  already the closest row — the write path's journal work is the
+  difference between it and the metadata rows.
+- **L2 — console-async** (~5% CPU + tail latency; boot wall).
+- **L3 — EPOLL_WAKE_REGISTRY sharding** (1.0-1.2% of machine; p5
+  family indirectly).
+- **L4 — architectural levers**, drawn from
+  docs/architecture/rust-design-headroom.md (capability traits, typed
+  per-CPU + lock keys, ownership transfer, Result boundary, typed IPC
+  states, timer slots); every architectural WINNER gets an entry in
+  docs/architecture/design-divergences.md with its compatibility
+  evidence.
+
+**Optimization measurement protocol** (this lane's own battery, before
+every merge claim): before/after pair on the pbench_boot.py quiet-boot
+channel — same machine class, same accel mode, back-to-back in one
+host-load window, med-of-3 for merge evidence (med-of-1 acceptable as
+a quick gate); any change touching mm/sched/fs additionally runs the
+Tier-1 census quiet boot (TERM 8 / WAKE 32 hold) per the merge gate.
+The standing run-day trigger and terminal report (8.6/8.9) are
+unchanged — the day the milestone lands on a main-class kernel, table
+8a's Rux column fills from the OH-image run day.
