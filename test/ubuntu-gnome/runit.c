@@ -113,8 +113,34 @@ static void dump_log(const char *path) {
 }
 
 // Read a one-line knob file (/etc/runit-mode, /etc/runit-session).
+// Falls back to the kernel cmdline (/proc/cmdline) knob of the same
+// name: "runit-mode=gs runit-session=rux" on the qemu -append line
+// overrides the image-baked defaults, so fire.py can flip modes per
+// boot without an image rebuild (boots use -snapshot).
 static void read_knob(const char *path, char *buf, size_t cap) {
     buf[0] = 0;
+    const char *eq = strrchr(path, '/');
+    const char *key = eq ? eq + 1 : path;
+    char cmb[2048] = "";
+    int cf = open("/proc/cmdline", O_RDONLY);
+    if (cf >= 0) {
+        ssize_t n = read(cf, cmb, sizeof cmb - 1);
+        close(cf);
+        if (n > 0) cmb[n] = 0;
+    }
+    char pat[64];
+    snprintf(pat, sizeof pat, "%s=", key);
+    char *cm = cmb[0] ? strstr(cmb, pat) : NULL;
+    if (cm) {
+        cm += strlen(pat);
+        size_t i = 0;
+        while (cm[i] && cm[i] != ' ' && cm[i] != '\n' && i < cap - 1) {
+            buf[i] = cm[i];
+            i++;
+        }
+        buf[i] = 0;
+        return; // cmdline knob wins over the image file
+    }
     int mf = open(path, O_RDONLY);
     if (mf >= 0) {
         ssize_t n = read(mf, buf, cap - 1);
