@@ -3107,3 +3107,51 @@ THE QUIET BOOT HAS A SECOND, INVISIBLE SOFT-WEDGE SHAPE; sc198 (quietcon
   run/oh-sc198-serial.log for the stall shape; the fix is then either
   userspace-circular (C-line REST retest evidence pending) or a wake/
   residency term we have not met yet.
+
+SESSION R TENTH LEG CLOSE-OUT (11:0x):
+sc198 COMPLETED THE CAUSAL MATRIX - BOTH CONSOLE TERMS INDEPENDENTLY
+MODULATE THE FREEZE; QUIET-QUIET BOOTS HAVE A REMAINING SOFT-WEDGE
+SHAPE; MILESTONE NOT REACHED THIS LEG; v5+v6 READY FOR MERGE.
+
+- sc198 verdict (quietcon + LOGLEVEL=4, killed min ~10): tgid 336
+  (devmgr) froze at readers=16 word 0x80000010 uaddr 0x7ff0009d9a64 at
+  ~min 9 - the CLASSIC terminal freeze returns with ONLY the kernel
+  probe traffic on (userspace console muted). The causal matrix:
+    userspace-console ON + probes ON  (sc192/3/4): freeze min 1-2
+    userspace-console OFF + probes ON (sc198):    freeze min ~9
+    userspace-console OFF + probes OFF (sc195):   NO freeze in 45 min,
+                                                 deepest chain ever
+                                                 (sc196/197: same config
+                                                 soft-wedged early)
+  Both terms matter independently; the probes print INSIDE the racer
+  threads (SACMP/stkfutex in RS's own binder/futex paths), so their
+  port-IO cost lands exactly on the race's critical path.
+- The remaining blocker is the quiet-quiet SOFT-WEDGE (sc196 fresh-off-
+  warm + sc197 fresh: boot stalls in the pid 900-1400 zone from ~min
+  10-12, no rwlock freeze, no kernel evidence, 1-of-3 boots (sc195)
+  passes it). Diagnosing it needs probe visibility WITHOUT probe burn -
+  the obvious next-leg instrument is SPARSE probes (budgeted 1-in-N
+  sampling of binder-stall/stkfutex/SACMP so the census exists at a
+  fraction of the burn), plus an sc195-shaped run with more headroom
+  (SMP4 + 2G for final validation per repo discipline, or a longer
+  window) to see whether ArkUI-load completes into a first frame.
+- Milestone (ohgpu screenshot of real launcher UI): NOT reached. Best
+  point remains sc195's ArkTS MainAbility executing + ArkUI component
+  storm loading. The chain from there: ArkUI first frame -> RS compose
+  -> launcher window -> screenshot (the cc lane's black-GEM import
+  question is the known risk at the compose step).
+- Branch state: feature/samgr-callback at this commit; code deltas this
+  leg = v5 quietcon (12ea541e: tty/console_output divert + printk
+  ring_stash_console + cmdline quietcon + oh-boot-q.sh LOGLEVEL) and v6
+  R73 (9777f195: KERNPANIC dump bound + re-entrancy latch, both arches;
+  coordinator-assigned). Both compile clean on x86_64 and riscv64;
+  v5 verified live in sc195-198, v6 string-verified in the bzImage (its
+  panic path will get its live verification the first time OH's sysrq-c
+  fires - expect "re-entered during dump" or a clean bounded dump).
+  config.rs left dirty (riscv64 platform artifact from make build).
+  riscv64 make test on this branch needs main's 77ec1247 merged first.
+- Kills this leg: sc196/sc197/sc198 QEMUs by exact own PID after
+  verifying cmdline tag; shotmon tasks stopped; no setsid/nohup used;
+  RAM dumps (13GB) deleted after analysis; artifacts (serial logs,
+  csv, ppm, auto0 shots) on disk uncommitted except the milestone
+  interim shot.
