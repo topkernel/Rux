@@ -3815,7 +3815,20 @@ rsp=0x7ff090410fc8" line (a USER frame). Confirmed MY lane's probe
   partials), 0 META-SMASH. Load surface: p1 + r1-r31 = **~24582 sdc
   exec cycles over 32 full armed load-hours**, zero fires, zero false
   positives.
-- r85 (qemu 446638, gdb 446685) / load-r32 (qemu 446793, gdb 446852)
-  in flight since 01:50:16/01:51:18, budget ends ~02:35; both WW-ARMED
+- MAIN r85 (FULL 2700 s): CLEAN — 75548 lines, "budget spent" natural
+  end, 0 WW-HIT / 0 watchpoint hits / 0 heals, no panics, 0 badaddr
+  (raw serial + gdb verified); 5 IRQ-OFF-WINDOW lines (4 canonical,
+  max age 514 ms). Driver self-advanced to r86 (02:35:16).
+- LOAD r32 (FULL 2700 s): CLEAN — 158131 lines, 808 sdc exec cycles,
+  0 gdb hits / 0 capture markers, armed try 0, 0 badaddr; 10
+  IRQ-OFF-WINDOW lines (3 canonical + hpet::r32 + 2 kernel one-offs
+  + 3 user-half samples; max age 569 ms). Driver self-advanced to
+  load-r33 (02:36:21).
+- Cumulative: **0 WW-HIT across r1-r85 complete rounds** (plus
+  partials), 0 META-SMASH. Load surface: p1 + r1-r32 = **~25390 sdc
+  exec cycles over 33 full armed load-hours**, zero fires, zero false
+  positives.
+- r86 (qemu 459412, gdb 459880) / load-r33 (qemu 460087, gdb 460172)
+  in flight since 02:35:16/02:36:21, budget ends ~03:20; both WW-ARMED
   19 with GUARD=0xffffffff80a7a000 (gdb logs). Driver roots unchanged
   (176512 / 176547).
