@@ -4067,3 +4067,17 @@ FIRST TASK (slab re-land) state at 02:45:
 - Census note: the re-land bzImage contains peek v2 (529e9aee survived
   the revert), so the new-bzImage OH roll doubles as the census roll
   if it advances past 80% heap.
+
+LEG-17 MID-LEG NOTE (03:0x, session collision detected): an sc236 boot
+appeared in this worktree at 02:52 launched by a second instance of
+this line (quota auto-resume) - quietcon + loglevel=3 + dfx=schb,
+sleepsnap, NO censusat, loglevel 3 hides SC-HB beats. sc235 (mine,
+censusat=600) was killed by the resume teardown at ~02:50 (TERM from
+the dying tool shell). Coordination: censusat lever is commit 776a8007
+(bzImage 67b861f3); the census roll needs `censusat=<secs>` in
+EXTRA_APPEND and LOGLEVEL=7 for beat visibility. This instance runs
+sc237 (censusat=600) in parallel - do NOT kill sc236 if you are alive;
+the worktree state is shared, coordinate via this file. Park census
+fact banked so far: wedges at t~241-244s pidmax 1148-1350 in
+sc231/232/234 (kernel-clean, RS lottery; 0-for-4 tonight, host load
+~11 with 2 foreign TCG QEMUs).
