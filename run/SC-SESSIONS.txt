@@ -4308,3 +4308,20 @@ wording-clean, both arches build):
 - sc250-B LAUNCHED 04:46 (usbless, package kernel, LOGLEVEL=4 no
   quietcon for milestone visibility, SECS=3600, HDCPORT=12107): the
   launcher-window attempt + second advancing boot. Report follows.
+
+LEG-17 ATTRIBUTION COMPLETE (sc243 peek-live census, 04:57):
+- c1024 live=8823: uv=5642 (64%) = binder ALLOC BLOCK arrays
+  (Vec<BufBlock> buffers; records = (user_va_start, user_va_end,
+  off, size) of the mmap'd binder buffers, ~66/proc) + small=2565 =
+  ArcInner<BinderThread> ([strong,weak,tid|tgid<<32]) + kh=280.
+- c256 live=336,661: small=329,265 (98%) = ArcInner<BinderTxn>
+  ([1, 1, from_proc_ptr(CONSTANT = one daemon proc), sequential id
+  56025..56032...]) - EVERY binder transaction strands its Arc.
+  mmArc=2090, kh=4235 minor.
+- Both classes = THE BINDER SUBSYSTEM. At the floor: c256 520K +
+  c1024 ~90K ~= 210MB - the mission's 100MB-class lever, twice over.
+- mms do NOT leak (counters). Leg-16's File/dentry/inode c256 theory
+  was wrong for the LIVE population (File 144/dentry 160/inode 200
+  exist but the 98% live share is BinderTxn).
+NEXT: binder txn lifecycle audit - which clone of the txn Arc never
+drops (txn_stack pop? tcomplete finish? dead_reply queues?).
