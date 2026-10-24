@@ -132,6 +132,11 @@ struct SmallCache {
     pages_reclaimed: AtomicUsize,
     obj_allocs: AtomicUsize,
     obj_frees: AtomicUsize,
+    /// Class-lock acquisitions (slow paths only — one per magazine
+    /// refill/flush batch, pre-magazine one per operation). Printed by
+    /// the census so a boot's lock-traffic win is directly readable
+    /// against obj_allocs+obj_frees on the same line.
+    lock_holds: AtomicUsize,
 }
 
 impl SmallCache {
@@ -143,6 +148,7 @@ impl SmallCache {
             pages_reclaimed: AtomicUsize::new(0),
             obj_allocs: AtomicUsize::new(0),
             obj_frees: AtomicUsize::new(0),
+            lock_holds: AtomicUsize::new(0),
         }
     }
 }
@@ -258,6 +264,7 @@ pub fn alloc(size: usize, align: usize) -> *mut u8 {
     let cache = &CACHES[ci];
     let mut first: *mut u8 = core::ptr::null_mut();
     let _g = cache.lock.lock_irqsave();
+    cache.lock_holds.fetch_add(1, Ordering::Relaxed);
     let cpu = crate::arch::cpu_id() as usize;
     if cpu < crate::config::MAX_CPUS {
         let mag = unsafe { &mut *mag_ptr(cpu, ci) }; // private: IF=0
@@ -486,6 +493,7 @@ fn flush_batch(entries: &[usize], ci: usize, heap_start: usize) {
     let mut ret: [usize; MAG_DEPTH + 1] = [0; MAG_DEPTH + 1]; // pages to buddy-free after unlock
     let mut nret = 0usize;
     let _g = cache.lock.lock_irqsave();
+    cache.lock_holds.fetch_add(1, Ordering::Relaxed);
     for &addr in entries {
         let page = addr & !(PAGE_SIZE - 1);
         let hdr = hdr_of(page);
@@ -586,6 +594,8 @@ pub fn census_line() {
         taskdump_dec(c.pages_created.load(Ordering::Relaxed) as u64);
         taskdump_raw_line(b" recl=");
         taskdump_dec(c.pages_reclaimed.load(Ordering::Relaxed) as u64);
+        taskdump_raw_line(b" locks=");
+        taskdump_dec(c.lock_holds.load(Ordering::Relaxed) as u64);
         taskdump_raw_line(b"\n");
     }
 }

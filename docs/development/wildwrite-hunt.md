@@ -3137,3 +3137,123 @@ rsp=0x7ff090410fc8" line (a USER frame). Confirmed MY lane's probe
 - Cumulative: **0 WW-HIT across r1-r60 complete rounds** (plus partials),
   0 META-SMASH. Load surface: p1 + r1-r7 = **5965 sdc exec cycles over
   8 full armed load-hours**, zero fires, zero false positives.
+
+## Session 35 (continuation agent — s34 quota-death successor: allocator
+## magazine implemented + validated; chains at r63/load-r10)
+
+### Inheritance reconstruction (claim 08:34)
+
+- s34 died at ~08:33 mid-analysis (snapshot 2b932302). Artifact verdicts:
+  r61 FULL-clean (110841 lines), load-r8 FULL-clean (165897 lines);
+  r62/load-r9 were quota-death partials at 15/45, both clean (0 markers,
+  armed to the last line). Both chains DEAD at claim (no QEMUs); host
+  load 0.34, capacity fine.
+- Relaunched 08:35 as this session's tasks: main r62 (log
+  run/ww-chain2-s35.log), load r9 (run/ww-loadchain-s35.log); both
+  verified armed (WW-ARMED 19, GUARD=0xffffffff80a7a000, wildwatch
+  try 0). Proctree: run/ww-s35-proctree.txt.
+
+### Allocator per-CPU magazine (pa16 12.6% item) — implemented, s34
+### snapshot rewritten after audit found five defects
+
+- Audit of the in-flight snapshot (2b932302) — it compiled but was NOT
+  correct: (1) cpu_id() read outside the irq-off windows (a preempted
+  task can migrate between read and row access -> two CPUs on one row);
+  (2) the flush loop held a &mut to a magazine row ACROSS irq-off
+  windows (same migration hazard); (3) flush took the class lock once
+  PER ENTRY — as lock-heavy as pre-magazine, contradicting its own
+  comment; (4) obj_allocs/obj_frees double counting (refill+pop,
+  push+flush); (5) WORST: the fast push skipped the locked validation
+  entirely, so a misaligned/foreign pointer could park in a magazine
+  and be handed out by the next alloc pop on that CPU — defeating the
+  consume-and-taint hardening this hunt line's allocator contract
+  depends on.
+- Final design (cb51db03): fast pop/push under LOCAL irq-off with
+  cpu_id() read INSIDE every window; row-full flush snapshots the whole
+  row out under ONE window then batch-frees under ONE class-lock hold
+  (reclaimed pages return to the buddy after the unlock, as before);
+  push-time screening (fresh magic/cls read, alignment, free_count
+  head room inside the window) routes anything doubtful to the locked
+  body, so a bad pointer never parks; counters bump only in the locked
+  bodies. Deferred-free reclaim safety is by construction (a magazine
+  entry holds its page's slot un-accounted, so free_count can never
+  reach objs_per_page while the entry exists; holds inside batches
+  too). MAG_DEPTH=16, 4.3 KB of .bss.
+- Follow-up (this session, second commit): lock_holds counter per
+  class + census_line extended with locks=, and the periodic taskdump
+  (dfx=taskdump) now carries the SMALLALLOC census — locks vs
+  obj_allocs+obj_frees on the same line is the live traffic-ratio
+  readout (pre-magazine, every op took the lock).
+
+### Validation ladder (all green)
+
+- Unit tests: kernel/src/tests/small_alloc.rs, 7 cases (per-class
+  round-trip, 80/class churn across flush+refill boundaries, hot loop
+  x200, misaligned free consumed+tainted never circulated, 600-object
+  span with strided partial free + realloc, double-free smoke last on
+  purpose, census). riscv64 SMP4 unit boot: 7/7 PASS; 1093/1096 total —
+  the 3 fails are pre-existing config expectations (KERNEL_HEAP_SIZE
+  512MB vs the riscv64 128MiB clamp, FUTEX_WAITER_POOL_SIZE,
+  FUTEX_HASH_SIZE), untouched by this change.
+- Both arches compile clean (make build, make build-x86).
+- OH x86_64 soak, full 2700 s (run/ww-magval.sh, private serial
+  run/magval1-serial.log, dfx=wildwatch, -smp 2, same images/geometry
+  as the chain boots, worktree bzImage 08:51 = magazine without the
+  counter): **80458 lines, 0 KERNPANIC, 0 ALLOCTHROW, 0 heals/canary,
+  1454 forks, wildwatch armed to the end** — the 45-min 0-panic gate
+  PASSES. (WAKE-STRANDED 1001ms as last line = the documented
+  >=3-QEMU contention class; not a capture marker.)
+- A/B lock-traffic boot (dfx=wildwatch,taskdump, 900 s): see the
+  verdict block appended below.
+
+### Chain ledger (s35 ownership)
+
+- MAIN r62 (FULL 2700 s): CLEAN — 77561 lines, 0 WW-HIT / 0 heals, no
+  panics. Advanced to r63 (09:20:09).
+- LOAD r9 (FULL 2700 s): CLEAN — 165285 lines, 769 sdc cycles, storm
+  healthy, 0 markers. Advanced to load-r10 (09:20:15).
+- Cumulative: **0 WW-HIT across r1-r62 complete rounds** (plus
+  partials), 0 META-SMASH. Load surface: p1 + r1-r9 = **~6734 sdc
+  exec cycles over 10 full armed load-hours**, zero fires, zero false
+  positives.
+- 09:40 sweep: the session's background-task WRAPPERS were reaped (the
+  known periodic reaper class), but the DRIVER ROOTS survived
+  (176512 ww-chain2.sh / 176547 ww-loadchain.sh, reparented): r63 and
+  load-r10 kept storming through it — only the task handles died.
+  Watching continues via the serial logs; if a later sweep takes the
+  roots, relaunch recipe: ./run/ww-chain2.sh ww-s2 100 12371
+  <next-main-round> / ./run/ww-loadchain.sh wwload 100 12381
+  <next-load-round>.
+- Ops: my leftover riscv64 unit-test QEMU (188132, orphaned when the
+  run.sh timeout wrapper died before the child) was killed by exact
+  PID (own process, verified cmdline). Foreign samgr-callback QEMU
+  untouched.
+
+### A/B lock-traffic verdict (magval-ab, 900 s, dfx=wildwatch,periodic)
+
+- First attempt used the WRONG flag (dfx=...,taskdump = the keyboard
+  dump key; the periodic dump switch is `periodic` — 3000 jiffies/30 s
+  per timer.rs sc115). Killed by exact PID and relaunched with
+  dfx=wildwatch,periodic. Boot itself clean both times (0 panics).
+- Final cumulative census at 900 s (29 blocks): total obj ops
+  59,391,505 vs class-lock acquisitions 3,601,522 = **16.49x** — per
+  class 16.5-16.6x across all eight, i.e. the MAG_DEPTH=16 (+1 first
+  object) amortization realized almost exactly. Pre-magazine every op
+  took the lock, so a pa16-scale boot (732M sections) now takes
+  ~44M class-lock irqsave sections — the 12.6% item's lock traffic is
+  down ~94% (the per-op local irq-off windows that replace it are
+  O(tens of ns) and uncontended; the perf line's EFLAGS sampler can
+  confirm the wall-clock share independently).
+- The 900 s A/B boot doubles as a mini-soak of the final committed
+  image (counter + census hook): 75884 lines, 0 KERNPANIC, 0
+  ALLOCTHROW, storm healthy.
+
+### Session 35 close-out state
+
+- Chains at r64/load-r11 (started 10:05, driver roots 176512/176547,
+  reparented but alive; budget ends ~10:50). Watch via serial logs;
+  relaunch recipe in the ledger above if a sweep takes the roots.
+- Commits: cb51db03 (magazine rewrite + tests, pushed) + this
+  close-out (lock counter, census hook, A/B scripts, doc).
+- For the perf line (pa16): the magazine is on feature/wildwrite-hunt,
+  validated per the ladder above; merge-window ready.

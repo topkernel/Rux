@@ -691,6 +691,12 @@ pub fn dump_all_tasks(reason: &str) {
         // apparently free, zero STALL prints) was invisible without it.
         crate::fs::ext4::EXT4_BIG_LOCK.dfx_census_line();
         crate::dfx::memwatch::dump_mem();
+        // pa16 (magazine): the packing layer's per-class op counts and
+        // class-lock acquisitions on the same cadence — locks vs
+        // obj_allocs+obj_frees is the magazine's live traffic-ratio
+        // readout (atomic loads + raw UART only, no allocator lock,
+        // safe from the periodic path).
+        crate::mm::small_alloc::census_line();
     }
 }
 
