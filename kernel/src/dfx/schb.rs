@@ -184,6 +184,25 @@ pub fn oom_anat_dump() {
     taskdump_dec(khw);
     taskdump_raw_line(b" taskSZ=");
     taskdump_dec(core::mem::size_of::<crate::process::task::Task>() as u64);
+    // Type sizes for the per-class census mapping below (bytes, the
+    // small-alloc class is the next power of two >= size).
+    taskdump_raw_line(b"\nOOM-ANAT sizes: vma=");
+    taskdump_dec(core::mem::size_of::<crate::mm::vma::Vma>() as u64);
+    taskdump_raw_line(b" file=");
+    taskdump_dec(core::mem::size_of::<crate::fs::file::File>() as u64);
+    taskdump_raw_line(b" dentry=");
+    taskdump_dec(core::mem::size_of::<crate::fs::dentry::Dentry>() as u64);
+    taskdump_raw_line(b" inode=");
+    taskdump_dec(core::mem::size_of::<crate::fs::inode::Inode>() as u64);
+    taskdump_raw_line(b" mm=");
+    taskdump_dec(core::mem::size_of::<crate::mm::mm_struct::MmStruct>() as u64);
+    taskdump_raw_line(b" ptregs=");
+    taskdump_dec(core::mem::size_of::<crate::arch::pt_regs::PtRegs>() as u64);
+    taskdump_raw_line(b" fdte=");
+    taskdump_dec(
+        core::mem::size_of::<[Option<alloc::sync::Arc<crate::fs::file::File>>; 1024]>() as u64
+            + 128,
+    );
     taskdump_raw_line(b"\nOOM-ANAT buddy live pages by order:\n");
     let np = &crate::mm::buddy_allocator::NET_PAGES;
     let mut o = 0usize;
@@ -365,13 +384,14 @@ extern "C" fn schbd_fn(_arg: *mut core::ffi::c_void) -> i32 {
             let mut w = ConsoleWriter::new();
             let _ = writeln!(
                 w,
-                "SC-ANAT t={}s procs={} kN={} kK={} kHW={} smallK={} smallPgK={} o0={} o1={} o2={} o3={} o4={} o5={} o6={}",
+                "SC-ANAT t={}s procs={} kN={} kK={} kHW={} smallK={} smallPgK={} o0={} o1={} o2={} o3={} o4={} o5={} o6={} o7={} o8={}",
                 t_secs, n_procs, kn, kn * (crate::config::KERNEL_STACK_SIZE as u64) / 1024, khw,
                 small_k, small_pg_k,
                 np[0].load(Ordering::Relaxed), np[1].load(Ordering::Relaxed),
                 np[2].load(Ordering::Relaxed), np[3].load(Ordering::Relaxed),
                 np[4].load(Ordering::Relaxed), np[5].load(Ordering::Relaxed),
-                np[6].load(Ordering::Relaxed)
+                np[6].load(Ordering::Relaxed), np[7].load(Ordering::Relaxed),
+                np[8].load(Ordering::Relaxed)
             );
         }
 
