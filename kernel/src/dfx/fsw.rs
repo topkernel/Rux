@@ -16,9 +16,20 @@
 //! Dump format (stable, grep-able; two compact lines, emitted at :30 past
 //! each minute to avoid the console-emit race with syscost's dump — pa28):
 //! ```text
-//! FSW1 t=123s br=<bread> rd=<dev reads> wr=<dev writes> sd=<sync_dirty>/<skip> ev=<evict>/<dirty> sa=<sync_all> pb=<pub flush>.<records>
+//! FSW1 t=123s br=<bread> rd=<dev reads> wr=<dev writes> sd=<sync_dirty>/<skip> ev=<evict>/<dirty> sa=<sync_all> pb=<pub flush>.<records> lvl=<console_loglevel> es=<console emits skipped>
 //! FSW2 t=123s ri=<read_inode> wi=<write_inode> lk=<dir lookups>.<blocks> ls=<list_dir> ni=<new_inode> ar=<alloc runs> fr=<free runs> j=<jstart>.<jstop>.<jlazy>.<jcommit_fast>.<jrevoke> bl=<biglock>.<contended> w=<walks>.<hits>.<misses>
 //! ```
+//!
+//! `lvl`/`es` exist so the two pa28 probe-bug classes are separable from
+//! the serial alone (leg 18 paid two boot iterations to tell them apart):
+//! a vanished round with `es` climbing = emit-lock loss (this probe dumps
+//! from the timer softirq, whose console-emit acquire budget is 100µs —
+//! printing right behind syscost's ~70-line dump lost that race 11/12
+//! rounds); a vanished round with `es` flat and `lvl` < 4 = the records
+//! were dropped before the ring by the printk level filter (pa28-a: the
+//! first build dumped via pr_info, dead at the pa-boot default loglevel
+//! 4 — dump must stay at pr_warn or louder). Both fields are read once
+//! per dump; no hot-path cost.
 
 use core::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 
@@ -290,12 +301,14 @@ fn v(c: &AtomicU64) -> u64 {
 pub fn dump() {
     let secs = crate::drivers::timer::get_jiffies() / crate::config::KERNEL_HZ as u64;
     crate::pr_warn!(
-        "FSW1 t={}s br={} rd={} wr={} sd={}{} ev={}/{} sa={} pb={}.{}",
+        "FSW1 t={}s br={} rd={} wr={} sd={}{} ev={}/{} sa={} pb={}.{} lvl={} es={}",
         secs,
         v(&BREAD), v(&DEV_READ), v(&DEV_WRITE),
         v(&SYNC_DIRTY), v(&SYNC_DIRTY_SKIP),
         v(&EVICT), v(&EVICT_DIRTY), v(&SYNC_ALL),
         v(&PUB_FLUSH), v(&PUB_RECORDS),
+        crate::printk::get_console_loglevel(),
+        crate::printk::console_emit_skipped(),
     );
     crate::pr_warn!(
         "FSW2 t={}s ri={} wi={} lk={}.{} ls={} ni={} ar={} fr={} j={}.{}.{}.{}.{} bl={}.{} w={}.{}.{}",

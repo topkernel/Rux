@@ -296,6 +296,17 @@ static CONSOLE_EMIT_LOCK: AtomicBool = AtomicBool::new(false);
 /// remain in the ring buffer).
 static CONSOLE_EMIT_SKIPPED: AtomicU64 = AtomicU64::new(0);
 
+/// Read-only view of CONSOLE_EMIT_SKIPPED for probes: the fsw dump prints
+/// it (`es=`) so a console round that vanished from the serial is
+/// attributable from a surviving line alone — es climbing by the number of
+/// lost lines means emit-lock loss (softirq's 100µs budget losing the
+/// race); es flat means the records never reached the console path at all
+/// (level-filter drop or dead probe — the two pa28 failure classes looked
+/// identical from serial and cost two boot iterations to separate).
+pub fn console_emit_skipped() -> u64 {
+    CONSOLE_EMIT_SKIPPED.load(Ordering::Relaxed)
+}
+
 /// Acquire budget in interrupt context (hardirq/NMI/softirq): 100µs of
 /// read_time() units. Interrupt context must not spin long — the holder
 /// may itself be an interrupt-context emitter on another CPU or a
