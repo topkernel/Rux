@@ -31,6 +31,8 @@ Runs (this worktree, `run/`):
 | `pa-pa16smoke1/2` | main@bb25a46d + WW user-frame fix (0d64ce7b) + pa16 probe v3 (edge-triggered zones + REST call-site table; hooks in run/pa16-probe.patch, bzImage run/pa16-probe-bzImage) | syscost=1 sprobe=0 | 180/120 s | v3 validation: heal 0.02% of segments, miss=0, both CPUs balanced, site table 97.6% of REST. smoke1 (host load ~6) caught seconds-class host-stall tails inside exit-bearing sections (REST max 2775 ms); smoke2 added the GRQ/PTE-guard track_caller layer |
 | `pa-pa16` | same kernel as smoke2 | syscost=1 sprobe=0 | 782 s | REST decomposition run (section 2c). No KERNPANIC all boot (WW user-frame fix in); host load ~7 (6-8 foreign QEMUs); max closed IF=0 segment 4 ms all boot |
 | `pa-pa17` | main@0634bc8f (launcher wake-loss fixes a39d2bc0 v1 + 6e9679c5 v2 now merged) + pa16 probe v3 applied clean (bzImage run/pa17-probe-bzImage) | syscost=1 sprobe=0 | 782 s | W3 acceptance retest (section 2d). Host load ~6.7 (5 foreign QEMUs); TERM-DESCHED=0 all boot; max closed IF=0 segment 5 ms |
+| `pa19-unittest-main` | main@298b69fe (= this worktree, kernel/ byte-identical to main), riscv64 unit-test build, no probe | (unit test) | ~90 s | riscv64 make-test reproduction boot: instant truncated `trap: KERNPANIC pfa` before any kernel print; `-d int` trace (pa19-qemu-int.log) = store faults at trap_entry+0xda descending 0x120/frame from sp=_stack_top-8 — boot stack outside the 12MB early window (image 12.67MB). See NINTH LEG below |
+| `pa19-unittest-fix` | same + RUX-RISCV-LAYOUT-2 window/heap fix (this branch) | (unit test) | ~150 s | verification boot: full unit suite runs, 60 ok / 3 FAIL (stale config assertions, pre-existing: KERNEL_HEAP_SIZE 512-vs-1024 bc0ffbee, FUTEX_* 256/64-vs-8192/512 08fcfc04) |
 
 Host context for all runs: KVM q35 `-cpu max -m 4G -smp 2`, shared with
 2-3 foreign-lane QEMUs (load avg ~5.5). Absolute numbers carry that
@@ -58,6 +60,66 @@ so zero QEMU this session so far, per discipline.
   the retest recipe when a merge lands is exactly: merge main, apply
   patch, build, `./run/pa-boot.sh pa18 ... APPEND_EXTRA="syscost=1
   sprobe=0"`, parse with pa-parse.py against the new ELF.
+
+NINTH LEG (2026-10-24 08:40-09:05, main@298b69fe merge no-op, base
+unchanged): both retest conditions empty again; the launcher lane's
+ninth-leg notes flagged a riscv64 `make test` KERNPANIC and named this
+lane's syscost merge as the suspected "depth culprit", calling for a
+main-baseline run — that is this lane's work, so the QEMU budget went
+there (3 short riscv64 boots, own PIDs, staggered; A-line quota-dead
+then resumed mid-session with 3 x86_64 OH boots, untouched).
+
+- Conditions at open: A-line tip now past v4 (7a8044e0 DEAD-task pick
+  gates) at 10e338e8 (quota snapshot 08:33), all unmerged; their
+  sc192/193/194 serial logs carry zero UI markers (launcher.ready /
+  bootanimation.finished / OnForeground); B-line (alloc-crash) idle
+  since Oct 19 13:01, d56de697 slab-packing unmerged. pa18 (GRQ/TERM
+  retest) will cover v3+v4 together when their merge lands; the pa16
+  probe patch does not overlap any RUX-RISCV-LAYOUT-2 file, so the
+  pa18 recipe is unchanged. No new OH data -> report v1.0 tables and
+  ranking v2.3 stay as delivered (idle "tweaks/scroll" items are no-ops
+  without a measurement).
+- **pa19 finding — riscv64 make test is unbootable on main, and the
+  syscost suspicion was right about the trigger, wrong about the
+  mechanism.** Reproduced instantly on this worktree (kernel/ is
+  byte-identical to main@298b69fe): the boot dies with a truncated
+  `trap: KERNPANIC pfa` before the kernel's first printk. QEMU
+  `-d int` trace: after the designed satp trampoline (exec fault at
+  _start+0x320 fetching `.L2` — normal), rust_main's FIRST stack push
+  stores to sp=0xffffffff80c16ff8 = _stack_top-8 and faults —
+  boot.S's early page tables map a 6-PMD 12MB image window and the
+  unit-test image ends at 0xffffffff80c17000 (12.67MB), so the whole
+  256K boot stack sits unmapped; trap_entry re-enters per frame push
+  (store faults at trap_entry+0xda descending 0x120 bytes per nesting)
+  and recurses through unmapped memory until it crawls below the
+  window into .data, clobbering it, printing 20 bytes and dying.
+  Stack DEPTH is exonerated: depth moves sp AWAY from the window end —
+  more depth makes this double-fault less likely. This is the third
+  documented image outgrowth (8->10MB, 10->12MB in boot.S comments;
+  the pa16 syscost v3 statics, +50KB of .bss, were the straw past
+  12MB). The launcher lane's own mid-suite panic (their sp at
+  _stack_top-0x20, badaddr=_end) is a different, still-latent gap: the
+  R73 KERNPANIC dump's unbounded sp+0x20..0xC0 reads walk off the
+  image end when a fault lands within 0xC0 of the stack top
+  (f1ed661b territory — flagged to the coordinator, not touched here).
+- **Fix committed on this branch (RUX-RISCV-LAYOUT-2):** early window
+  12->14MB (PMD[6] in early_pmd; PMD[5]+[6] in trampoline_pmd — the
+  R3FIX had grown early_pmd to 12MB but left the trampoline at 10MB,
+  a latent drift); heap base 0x80E00000->0x81000000, RAM reservation
+  14->16MB and memory-map KERNEL_SIZE 12->14MB moved in lockstep
+  (reservation-end == heap-start, per the RUX-RISCV-LAYOUT no-gap
+  doctrine); buddy_allocator KERNEL_HEAP_PHYS matching copy; and a
+  riscv64 linker.ld `ASSERT(_end <= window end)` so the FOURTH
+  outgrowth fails the build instead of the boot.
+- Verification: pre-fix log `run/pa19-unittest-main.log`; post-fix
+  `run/pa19-unittest-fix.log` — the full unit suite runs (60 ok /
+  3 FAIL, the 3 being stale config-value assertions unrelated to this
+  change and pre-existing on main: KERNEL_HEAP_SIZE expects 512MB vs
+  the restored 1024 (bc0ffbee), FUTEX_WAITER_POOL_SIZE/FUTEX_HASH_SIZE
+  expect 256/64 vs the raised 8192/512 (08fcfc04) — test-side staleness
+  for the coordinator, not fixed here). Normal riscv64 build links at
+  _end 11.84MB (was never broken); all edits are cfg(riscv64) or
+  arch-local, x86_64 paths untouched.
 
 ## Verdict in one paragraph
 
