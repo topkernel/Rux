@@ -588,7 +588,18 @@ impl FdTable {
             count: 0,
         });
         let g = parent.entry.lock_irqsave();
-        child_entry.fds = g.fds.clone();
+        // Leg-16 stack-depth fix (the 89,368B KSTACK-HW chain, comm
+        // 'usb_host'): the old `child_entry.fds = g.fds.clone()` array
+        // clone went through SpecArrayClone/try_from_fn's wrapper copies
+        // — several full [Option<Arc<File>>; 1024] temporaries on the
+        // kernel stack, and this runs in the FORK path (the deepest
+        // calling contexts in the boot). Element-wise clone-into-place
+        // moves nothing larger than one slot.
+        let mut i = 0usize;
+        while i < MAX_FDS {
+            child_entry.fds[i] = g.fds[i].clone();
+            i += 1;
+        }
         child_entry.cloexec_bits = g.cloexec_bits;
         child_entry.count = g.count;
         child_entry.next_fd = g.next_fd;
