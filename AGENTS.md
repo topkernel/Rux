@@ -16,8 +16,14 @@ This is the **highest guiding principle** for Rux kernel development. All design
 - **ELF Format Compatible**: Executable format identical to Linux
 
 **Design Philosophy**:
-- **External interfaces must be 100% compatible** with Linux
-- **Internal implementation can be improved** when it doesn't affect external compatibility
+- **External interfaces must be 100% compatible** with the target ABI
+- **Advantageous internal design divergences are kept, not apologized for**:
+  where Rux's internal design differs from the mainstream approach and
+  holds an advantage, keep our design as long as (1) external compatibility
+  is intact, (2) LTP passes the affected families, (3) no upper-layer
+  software breaks. Record every such divergence in
+  `docs/architecture/design-divergences.md` (template inside; first entry:
+  the global run queue).
 
 **Reference Resources**:
 - Linux man pages (`man 2 syscall`) - for interface specifications
@@ -57,9 +63,15 @@ The gate, in order (coordinator runs it; lanes pre-verify to avoid surprises):
 1. **Dual-arch build** (`PLATFORM=x86_64 make build`, then `rm build/.config && make build`) — rc=0 both.
 2. **riscv64 regression boot** (minimal rootfs scripted serial: cd/proc, rc=0, zero panics).
 3. **`make test`** on riscv64 — full suite green (currently 1096/1096).
-4. **Performance gate** — measured with the in-tree DFX tools (`syscost`, census probes, `test/pbench.c`), against the last-accepted baseline in `docs/development/perf-gate-baseline.md`:
+4. **Performance gate** — measured with the in-tree DFX tools (`syscost`, census probes, `test/pbench.c`), against the last-accepted baseline in `docs/development/perf-gate-baseline.md`. **General principle (user mandate 2026-10-25): ANY subsystem that can affect system performance gets gate-code guardianship — if it is not measured, add the DFX tool that measures it.** The named guarded domains so far (a change touching any of them needs its domain check explicitly reported, not just the generic tiers):
+   - **Guarded domain: memory allocation/reclaim** (mm/, small_alloc, buddy, page cache) — small_alloc global class-lock sections ≤ ~25M/boot (post-magazine ~19.7M), small_alloc REST wall ≤ 10% of machine, no reclaim-slowpath emergence on standard boots (drct=0 class), zone free floor unchanged on standard loads.
+   - **Guarded domain: scheduling** (sched/, timer/, wakeup paths) — GRQ average hold flat (5.1–6.1 µs class), census in band (TERM 8±2 / REFUSED 32±4 / no grid strands), wake→pick deltas and context-switch cost (pbench P2) within band.
+   - **Guarded domain: filesystem hot paths** (fs/, ext4, bio, page cache) — pbench fs rows within band of baseline (stat/mkdir+rmdir/unlink/write+fsync medians), fsw counters show no new sync-write class outside the provisioning phase, buffer-cache hit rate ≥ baseline.
    - **Tier 1 (all kernel changes)** — one quiet syscost boot (KVM, standard machine config): census counts in band (TERM-DESCHED 8±2, WAKE-REFUSED 32±4, no 1001ms-grid strand class), ticks ≥99.5/s sustained to window end, zero new panic/OOM classes, total syscall volume within ±10% of baseline, key per-op averages (read/write/clock_gettime/nanosleep) within ±20% or improved.
-   - **Tier 2 (changes touching hot paths: mm/, sched/, fs/, ipc/, timer/, arch trap)** — additionally one `pbench` boot: P1-P7 medians within ±20% of the baseline column or improved.
+   - **Guarded domain: interrupts / IRQ paths** (arch trap, apic, softirq dispatch) — IF=0 share within band (official 25.7%; tick-mode kernel share 83–86% interim), max closed cli segments 3–7 ms class, SOFTIRQ dispatch share within band, no new IRQ-OFF print classes.
+   - **Guarded domain: IPC** (unix sockets, pipes, sysv ipc) — pbench P5 pipe/unix roundtrip medians within band, no regression in truesize/writev path (the 24 µs avg class), connect-storm volumes within band.
+   - **Guarded domain: binder** (ipc/binder.rs) — SLOW-TXN classes stable (queue=0 ms on clean boots; no new cost class outside the known image-side 15/30/89 s family), transaction throughput not regressed on standard loads.
+   - **Tier 2 (changes touching hot paths: mm/, sched/, fs/, ipc/, binder/, timer/, arch trap)** — additionally one `pbench` boot: P1-P7 medians within ±20% of the baseline column or improved.
    - **Tier 3 (allocator or IRQ-path changes)** — additionally an IF=0 measurement (EFLAGS-pair probe; if the probe patch is not yet on main, tick-mode shares from syscost serve as the interim proxy).
    - Baseline updates only via a merge that passed its own tier; regressions block the merge until fixed or justified in writing with numbers.
    - If a change's performance effect cannot be measured with existing tools, ADD a DFX tool for it (gated off by default) — measuring is part of the change, not an afterthought.

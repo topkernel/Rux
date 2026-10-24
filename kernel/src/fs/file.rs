@@ -278,12 +278,12 @@ impl File {
             }
         }
         // Valid fd, readable mode, but the type carries no read op
-        // (epoll, binder, access_token, io_uring). Linux vfs_read
-        // returns EINVAL here, NOT EBADF — returning EBADF makes an
+        // (epoll, binder, access_token, io_uring). The reference
+        // kernel's vfs_read returns EINVAL here, NOT EBADF — returning EBADF makes an
         // OH event loop read its own epoll fd (pa38: launcher fd 32,
         // 156K iterations) look like "fd closed", and the loop spins
         // on it instead of taking its EINVAL error path. The O_WRONLY
-        // EBADF above is the Linux-correct direction check and stays.
+        // EBADF above is the ABI-correct direction check and stays.
         -22 // EINVAL
     }
 
@@ -305,7 +305,7 @@ impl File {
             }
         }
         // Valid fd, writable mode, but the type carries no write op —
-        // Linux vfs_write returns EINVAL here (see read()'s note).
+        // the reference kernel's vfs_write returns EINVAL here (see read()'s note).
         -22 // EINVAL
     }
 

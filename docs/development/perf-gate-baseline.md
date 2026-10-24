@@ -27,6 +27,30 @@ Banked Linux reference column (same image, OHOS 6.6.11 kernel, med-of-4):
 perf-report.md §8.5. Rux medians must stay within ±20% of the pb1 column
 per metric or improve.
 
+## Guarded hot-path domains (user mandate: allocation/reclaim, scheduling, filesystem)
+
+| domain | metric | baseline (accepted) | band |
+|---|---|---|---|
+| alloc/reclaim | small_alloc global class-lock sections/boot | 19.7M (pa20, post-magazine) | ≤25M |
+| alloc/reclaim | small_alloc REST wall (share of machine) | 133.2s ≈ 9.2% | ≤10% |
+| alloc/reclaim | reclaim slowpath on standard boots | drct=0 class | no emergence |
+| scheduling | GRQ average hold | 5.1–6.1 µs flat | ±20% |
+| scheduling | context-switch half-rt (pbench P2) | pb1 column | ±20% |
+| scheduling | census TERM/REFUSED | 8 / 32 | 8±2 / 32±4 |
+| filesystem | stat / mkdir+rmdir / unlink / write+fsync medians (pbench P6) | pb1 column | ±20% or better |
+| filesystem | fsw sync-write classes | first-phase (t<90s) only | no new class |
+| filesystem | buffer-cache hit rate | 99.1% | ≥ baseline |
+| interrupts | IF=0 share (official KVM) | 25.7% | ±2pp |
+| interrupts | max closed cli segments | 3–7 ms | ≤10 ms |
+| interrupts | SOFTIRQ share of IF=0 | 3.1% | ±2pp |
+| IPC | pipe roundtrip (pbench P5) | pb1 column | ±20% |
+| IPC | unix writev/truesize avg | 24 µs class | ±20% |
+| binder | SLOW-TXN classes | queue=0 ms; image-side 15/30/89 s family only | no new class |
+
+General principle (user mandate): any subsystem that can affect system
+performance gets gate-code guardianship — not measured yet means "add the
+DFX tool", not "skip the check".
+
 ## Tier 3 — IF=0 share (allocator / IRQ-path changes)
 
 Official post-tick-fix KVM flagship (pa27): IF=0 = 25.7% of machine, heal
