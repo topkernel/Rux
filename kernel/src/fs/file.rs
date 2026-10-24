@@ -277,7 +277,14 @@ impl File {
                 return result;
             }
         }
-        -9  // EBADF
+        // Valid fd, readable mode, but the type carries no read op
+        // (epoll, binder, access_token, io_uring). The reference
+        // kernel's vfs_read returns EINVAL here, NOT EBADF — returning EBADF makes an
+        // OH event loop read its own epoll fd (pa38: launcher fd 32,
+        // 156K iterations) look like "fd closed", and the loop spins
+        // on it instead of taking its EINVAL error path. The O_WRONLY
+        // EBADF above is the ABI-correct direction check and stays.
+        -22 // EINVAL
     }
 
     /// Write file
@@ -297,7 +304,9 @@ impl File {
                 return result;
             }
         }
-        -9  // EBADF
+        // Valid fd, writable mode, but the type carries no write op —
+        // the reference kernel's vfs_write returns EINVAL here (see read()'s note).
+        -22 // EINVAL
     }
 
     /// Seek file position
@@ -345,7 +354,19 @@ impl File {
         let inode_opt = &*self.inode.get();
         let inode = match inode_opt.as_ref() {
             Some(i) => i,
-            None => return -9,
+            None => {
+                // No inode AND no read op anywhere = an unreadable type
+                // (epoll/binder/access_token/io_uring): EINVAL like
+                // read() above. A pipe/socket (read op, no inode) keeps
+                // the old -9 so the ESPIPE decision below stays reachable
+                // for whatever carries an inode-less seekable state.
+                if let Some(ops) = *self.ops.get() {
+                    if ops.read.is_none() && ops.read_at.is_none() {
+                        return -22; // EINVAL
+                    }
+                }
+                return -9;
+            }
         };
 
         // Disk-backed files (ext4) serve reads through their file ops;
