@@ -267,7 +267,76 @@ pub fn timer_start() -> bool {
     reg_write(XAPIC_TIMER_INIT, X2APIC_TIMER_INIT, ticks as u32);
     let lvt = (LOCAL_TIMER_VECTOR as u32) | LVT_TIMER_PERIODIC;
     reg_write(XAPIC_TIMER_LVT, X2APIC_TIMER_LVT, lvt);
+    tick_arm_probe(ticks);
     true
+}
+
+/// One-shot direct-console probe fired right after the LAPIC timer is
+/// armed (sc203/sc202, 2026-10-24): every WW IRQ-OFF-WINDOW in the OH
+/// boots reports an age of EXACTLY 1000 ms (KVM) / 536 ms (TCG), i.e.
+/// the armed periodic tick fires at ~1 Hz in guest time while the PIT
+/// calibration of the same CCR printed 62 MHz — a 50-100x disagreement
+/// that cannot come from the divide encoding (identical writes in both
+/// phases). This probe reads back INIT/DIV/LVT and samples the LIVE
+/// CCR decrement of the ARMED timer, so one boot decides whether the
+/// writes stuck and what rate the emulator actually runs. Raw values
+/// only; analysis offline. Rate-gated to the BSP by a one-shot flag.
+fn tick_arm_probe(ticks: u64) {
+    use core::sync::atomic::Ordering;
+    static PROBED: core::sync::atomic::AtomicBool = core::sync::atomic::AtomicBool::new(false);
+    if PROBED.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    // Direct console (R34): printk may be diverted by quietcon at this
+    // point of boot; the WW probes' putchar_no_lock channel always lands.
+    fn ph(v: u64) {
+        use crate::console::putchar_no_lock as putchar;
+        for sh in (0..16).rev() {
+            let n = ((v >> (sh * 4)) & 0xF) as u8;
+            putchar(if n < 10 { b'0' + n } else { b'a' + n - 10 });
+        }
+    }
+    fn pmsg(m: &[u8]) {
+        for &b in m {
+            crate::console::putchar_no_lock(b);
+        }
+    }
+    let init_rb = reg_read(XAPIC_TIMER_INIT, X2APIC_TIMER_INIT) as u64;
+    let div_rb = reg_read(XAPIC_TIMER_DIV, X2APIC_TIMER_DIV) as u64;
+    let lvt_rb = reg_read(XAPIC_TIMER_LVT, X2APIC_TIMER_LVT) as u64;
+    // Three CCR samples spaced ~2 ms of read_time (10 MHz timebase):
+    // far below any candidate period, far above read jitter.
+    let ccr0 = reg_read(XAPIC_TIMER_CURR, X2APIC_TIMER_CURR) as u64;
+    let t0 = crate::drivers::timer::read_time();
+    while crate::drivers::timer::read_time().wrapping_sub(t0) < 20_000 {
+        core::hint::spin_loop();
+    }
+    let ccr1 = reg_read(XAPIC_TIMER_CURR, X2APIC_TIMER_CURR) as u64;
+    let t1 = crate::drivers::timer::read_time();
+    while crate::drivers::timer::read_time().wrapping_sub(t1) < 20_000 {
+        core::hint::spin_loop();
+    }
+    let ccr2 = reg_read(XAPIC_TIMER_CURR, X2APIC_TIMER_CURR) as u64;
+    let t2 = crate::drivers::timer::read_time();
+    pmsg(b"\nTICKPROBE ticks=");
+    ph(ticks);
+    pmsg(b" init_rb=");
+    ph(init_rb);
+    pmsg(b" div_rb=");
+    ph(div_rb);
+    pmsg(b" lvt_rb=");
+    ph(lvt_rb);
+    pmsg(b" ccr0=");
+    ph(ccr0);
+    pmsg(b" ccr1=");
+    ph(ccr1);
+    pmsg(b" ccr2=");
+    ph(ccr2);
+    pmsg(b" dt1=");
+    ph(t1.wrapping_sub(t0));
+    pmsg(b" dt2=");
+    ph(t2.wrapping_sub(t1));
+    pmsg(b"\n");
 }
 
 /// Mask the LAPIC timer on this CPU.
