@@ -3228,3 +3228,71 @@ CLASSIC DEVMGR RWLOCK FREEZE, DELAYED AND INVISIBLE AT LOGLEVEL=3
   Lesson recorded: verify kills against wc/grep with visible echo.
 - sc203 (12:02, TCG, quietcon+loglevel3+dfx=schb,sleepsnap) was
   launched by the coordinator in this worktree - not touched.
+
+SESSION R THIRTEENTH LEG - sc205 VERDICT + sc206 ROLL + THE CENSUS
+RE-ARM DEAD-CODE FIX (13:3x-15:xx):
+
+- OPENING: inherited leg 12's TSC multiply-before-shift fix (wip
+  1e54319f) + sc205's unread 60-min serial. Split the wip into clean
+  commits: 675095c0 fix(timer) TSC multiply-before-shift, 852d0cf2
+  diag(timer) TICKPROBE, 2a02d5db dfx(sched) tripwire (below); all
+  pushed to origin (0dfdb482..b634a615). READY FOR COORDINATOR MERGE:
+  675095c0 is the high-value one (corrects ALL x86_64 timing; riscv64
+  untouched - reads the time CSR directly; coordinator runs dual-arch
+  build + riscv64 regression as usual).
+
+- sc205 VERDICT (the "PREEMPT-LEAK storm" is post-panic weather, NOT
+  a leak, NOT terminal-deschedule, NOT the sc190 producer):
+  * sc205's userdata (copy of userdata-blank-sc.img) carries
+    has_journal + orphan_file + metadata_csum_seed; Rux ext4 refuses:
+    "ext4: unsupported incompat features 0x2000" (= CSUM_SEED; the
+    driver's message lists feature names generically). Mount vdf->/data
+    ENODEV x3; sc204's userdata (old-style, no journal - userdata-tok
+    lineage) mounted fine. Template trap: blank-sc is NEW-style, tok
+    is OLD-style; sc203 (coordinator's) also used new-style.
+  * init finished its script with /data dead, ran beget's reboot path
+    (ParseRebootReason / reboot_misc / bbox kmsgs), which ended in a
+    sysrq 'c' write -> panic!("sysrq 'c'") -> panic park. pid 1 stayed
+    current on cpu 0 parked in wfi for 3560 s; the tick kept firing
+    into the park and the PREEMPT-LEAK tripwire printed 17,906 lines
+    (5/s at the 20-jiffy gate; 102 more = benign cpu 1 idle weather).
+    SC-HB stopped at t=30s (panic froze scheduling); ppm pure black
+    (died pre-display). R73/v6 KERNPANIC dump got its live
+    verification: bounded register/trace dump, no re-entry flood.
+  * WHY pc=0x10000 on every line: the LOCAL_TIMER trap path does
+    irq_enter() BEFORE handle_timer_tick, so the tripwire always
+    observes +1 HARDIRQ_OFFSET it added itself. Its true semantic was
+    "task monopolized CPU >= 2s", not "leaked count". Fix 2a02d5db:
+    report only task-context bits or nesting >= 2.
+  * sc206 therefore used a fresh copy of userdata-tok.img (old-style).
+
+- sc206 (KVM quiet-quiet, quietcon+loglevel3+dfx=schb,sleepsnap,
+  fixed clock + tripwire fix, 13:48, 45 min): TICKPROBE dt=20021/20038
+  (clock fix live again); 0 panic, 0 PREEMPT-LEAK, WW IRQ-OFF-WINDOW 2,
+  WAKE-STRANDED 5 (vs sc204's thousands); bootanimation 8-color oracle
+  UP from 13:53 and sustained; pid 485@t=40s -> 1121@t=290s (census
+  fired there: ALL binder waiters shape=NO-TXN owed_pid=0 - NO
+  server-debt chain this time; sleepsnap shows the whole graphics
+  stack instantiated - render_service tid 982, llvmpipe-0..3,
+  CompThreads, RSColorPicker - asleep in futex/ioctl) -> flow=80
+  burst at t=537 -> then a 940 s CRAWL at pid 1237-1269 (flow 0-2,
+  R=38-40 runnable, bw15 parked 223-244, M<=3). Launcher markers NOT
+  reached (no MainAbility/ArkUI/sceneboard strings).
+
+- sc206's crawl exposed the census re-arm bug (b634a615): the re-arm
+  branch (flow>=20) was an else-if under 'flow<=5 || bw15>=150' -
+  after the first census the parked cohort keeps bw15>=150 forever,
+  so the re-arm was DEAD CODE (same defect 19068d5a meant to fix, via
+  branch order). sc206's t=537 flow=80 never re-armed; the 410+ s
+  qualifying plateau got no second census. Fix: test the recovery arm
+  FIRST. sc207 (same config as sc206) rolls to verify: with a
+  re-arming census every crawl plateau gets its census+rekick ~2 min
+  in - the sc202-proven unwedge, now periodic.
+
+- Noted for later lanes: (1) Rux ext4 lacks metadata_csum_seed /
+  orphan_file support (Linux mounts these fine) - real compat gap,
+  hit by the new-style userdata template; (2) OH beget's reboot path
+  lands on sysrq 'c' = panic-park in Rux (no machine reset) - a
+  quiet boot that loses /data dies as a panic park; (3) idle-loop
+  hlt + tick = the documented benign LEAK weather, now silenced by
+  2a02d5db.
