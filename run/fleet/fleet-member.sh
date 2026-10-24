@@ -47,17 +47,17 @@ rv_kdrive() { # private kernel-plain drive pair (no snapshot flag games)
           -device "virtio-blk-pci,drive=$2")
 }
 rv_common() { # serial — the shared riscv64 front-matter
-    # CPU string: repo-standard zbb/zba/zbs ONLY. zcb=true (and v=true)
-    # were tried in round 1 and withdrawn: with zcb, QEMU 10.2.1 TCG
-    # nondeterministically raises illegal-instruction on legal guest
-    # instructions (fleet evidence 2026-10-25: byte-identical kernel
-    # panics at sys_mount's `csrrw a0,time,zero` within seconds-to-minutes
-    # on some boots, runs 30 min clean on others; without zcb, zero
-    # panics across all repro attempts; mcounteren.TM=1 at the trap —
-    # not counter gating). See stress-fleet ledger OPEN items.
+    # CPU string: zcb REQUIRED — the toolchain-built user probes
+    # (musl-gcc: fsfuzz/memstorm/sweep and variants) contain Zcb
+    # instructions (c.mul etc). Round-2 correction of the round-1
+    # "zcb withdrawal": the SIGILLs were (a) user-mode: c.mul decoding
+    # illegal without zcb — deterministic per binary, not corruption;
+    # (b) kernel-mode: read_counter's write-flavored csrrw time (now
+    # fixed in the kernel — read-only CSR write attempt). zcb was never
+    # the fault; it was withdrawn for ~1h on a misread and is restored.
     CMD+=(nice -n "$NICE" timeout --signal=TERM --kill-after=10 "${SECS}s"
           qemu-system-riscv64 -M virt -accel tcg,thread=multi
-          -cpu "rv64,zbb=true,zba=true,zbs=true"
+          -cpu "rv64,zbb=true,zba=true,zbs=true,zcb=true,v=true"
           -m "${MEM:-2G}" -smp 2 -display none -monitor none
           -serial "file:$1")
 }

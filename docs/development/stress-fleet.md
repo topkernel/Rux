@@ -44,6 +44,45 @@ See "Classification state (updated ...)" below — the single source of
 truth is the latest-dated block; older adjudications live in the round
 log.
 
+## ROOT-CAUSED (2026-10-25 06:30): the SIGILL family — kernel csrrw-time bug + toolchain zcb binaries; zcb adjudication REVERSED
+
+Two intertwined SIGILL classes produced the round-2/3 crash storm; both
+are now closed:
+
+1. KERNEL BUG (fixed, verified): read_counter() read the time CSR with
+   the WRITE-flavored form `csrrw a0, time, zero`. csrrw with a non-x0
+   rs1 attempts a write, and `time` is a read-only CSR, so the entire
+   instruction is illegal-instruction-prone whenever the platform
+   enforces read-only writes. Repro: init=/test/fsfuzz-mountonly
+   (mount(2) hammer loop; sys_mount's mntslow phase probes are the only
+   kernel caller) -> PANIC "illegal instruction in kernel mode" with
+   stval = the instruction word 0xc0101573, within ~100 s on EVERY
+   kernel build tried (v1 predecessor build and v3 alike; smp1/2,
+   thread single/multi, with/without zcb — my probe edits exonerated).
+   Fix: `csrr {}, time` (csrrs rd, csr, x0 — the canonical pure read,
+   identical semantics to rdtime; no write attempt). Verification:
+   v4 kernel survived 330 s / 3491 beats of the mountonly repro where
+   v1/v3 died < 100 s. Why it looked flaky: sys_mount is the only
+   caller, so only mount-heavy workloads reach it; low mount-rate runs
+   (memstorm: no mounts at all; fsfuzz r1: mounts at ~1/60 syscall
+   density for 30 min) survive by luck of never hitting the gated state.
+2. NOT A KERNEL BUG: user-mode SIGILLs at deterministic per-binary
+   offsets (fsfuzz 0x10704 = `c.mul`, etc.) — the musl cross toolchain
+   emits Zcb instructions into the static probes. With zcb in the CPU
+   string they execute; without it they are illegal. The "SIGILL-FORENSIC
+   garbage" was the binary's own valid zcb code (the forensic dump's
+   epc-16 window is offset by 4 vs its label — bytes matched the file at
+   the corrected offset).
+3. The round-1 "QEMU zcb flakiness" adjudication was WRONG (short 70 s
+   test cells + misread forensic offsets) and is REVERSED: zcb=true is
+   REQUIRED for these toolchain-built user probes and is restored in
+   fleet-member.sh. The repo-standard zbb/zba/zbs-only strings used by
+   other lanes remain fine for their glibc/toybox workloads — but any
+   binary built with run/fleet/bin/riscv64-musl-gcc needs zcb.
+
+Fleet state after fix: v4 kernel rolled; all 8 members relaunched
+(ltp-a r12 ... fsfuzz r172 continuing the numbering).
+
 ## Round log
 
 - 2026-10-25 06:01 — full relaunch after three harness/infra fixes (round
@@ -87,8 +126,9 @@ KNOWN classes (do not page):
   sampling race (see Round log 05:30); armed capture is the ground
   truth — 0 real hits in 88+ rounds. Fleet kernels v3+ have the
   double-check fix.
-- QEMU zcb flakiness (withdrawn): illegal-instruction on legal
-  instructions, QEMU 10.2.1 TCG + `-cpu ...,zcb=true`. Do not re-add.
+- (REVERSED 06:30 — see ROOT-CAUSED block: zcb is required for the
+  musl-built probes; the "flakiness" was the kernel csrrw-time bug,
+  now fixed.)
 - fsfuzz-r1 494s timer starvation (timer_irq=3): consistent with
   documented TCG host-contention vCPU starvation (kernel R57 comment:
   3-10 IRQs/s under load; here 3 total over 494s at load avg 25 with 16
