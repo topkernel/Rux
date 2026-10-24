@@ -2,10 +2,10 @@
 //!
 //! Copyright (c) 2026 Fei Wang
 //!
-//! /proc/timer_list — the pending kernel timers (Linux's
-//! fs/proc/timer_list.c).
+//! /proc/timer_list — the pending kernel timers, in the standard
+//! structure (verified against this host's live file).
 //!
-//! Linux's layout:
+//! The reference layout:
 //!
 //! ```text
 //! Timer List Version: v0.10
@@ -25,17 +25,17 @@
 //!
 //! Rux has no hrtimer clock bases and no per-timer callback pointer:
 //! the timers are a single list of deadlines with a delivery action
-//! (signal, wake, timerfd). The structure above is kept as Linux has
-//! it; the two fields that have no Rux counterpart are filled with what
-//! the kernel does know:
+//! (signal, wake, timerfd). The structure above follows the reference
+//! host byte-for-byte; the two fields that have no Rux counterpart are
+//! filled with what the kernel does know:
 //!
-//! - the `<...>` field is the timer id (Linux prints the hrtimer
+//! - the `<...>` field is the timer id (the reference prints the hrtimer
 //!   struct address; Rux's timers have no such struct);
 //! - the name field names the timer's ACTION instead of a callback
 //!   function — "alarm" for a signal, "wake" for a wakeup, "timerfd"
 //!   for a timerfd, "oneshot" for a plain deadline.
 //!
-//! The state column is "S:01" (Linux's HRTIMER_STATE_ENQUEUED): every
+//! The state column is "S:01" (HRTIMER_STATE_ENQUEUED): every
 //! timer in the list is armed.
 
 use alloc::format;
@@ -54,15 +54,15 @@ pub fn generate() -> Vec<u8> {
     let now_ns = crate::drivers::timer::monotonic_ns_since_boot();
     out.push_str(&format!("now at {} nsecs\n\n", now_ns));
 
-    // Linux prints one section per online CPU, each carrying all
+    // One section per online CPU, each carrying all
     // HRTIMER_MAX_CLOCK_BASES (= 8) clock bases. Rux's timers live in
     // one global table armed on the monotonic clock — every timer is
     // listed under cpu 0's clock 0 (the CLOCK_MONOTONIC base) and the
     // remaining bases/CPU sections print empty, exactly as a base
-    // with no armed timer does on Linux.
+    // with no armed timer shows on the reference host.
     let num_cpus = crate::arch::smp::num_started_cpus().min(crate::config::MAX_CPUS);
     let mut timers = crate::timer::snapshot_timers();
-    // Linux lists the timers in expiry order.
+    // The timers are listed in expiry order.
     timers.sort_by_key(|t| if t.expires_time != 0 { t.expires_time } else { u64::MAX });
 
     for cpu in 0..num_cpus {

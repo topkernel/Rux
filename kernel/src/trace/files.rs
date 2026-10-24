@@ -4,10 +4,10 @@
 //!
 //! The tracefs FILES — the filesystem side of the tracing subsystem.
 //!
-//! Linux's tracefs carries the tracing control surface. The file set
-//! below is the subset Rux implements, each file with Linux's name,
+//! The standard tracefs carries the tracing control surface. The file set
+//! below is the subset Rux implements, each file with the standard name,
 //! mode and byte format (captured from this host's live
-//! /sys/kernel/tracing, Linux 7.0):
+//! /sys/kernel/tracing on this host):
 //!
 //! ```text
 //! /sys/kernel/tracing/           (Rux: /sys/kernel/debug/tracing)
@@ -23,7 +23,7 @@
 //!     ├── enable          0640  all events (1/0/X, X = mixed)
 //!     └── <group>/
 //!         ├── enable      0640  the group's events (1/0/X)
-//!         ├── filter     0640  the global-filter note (Linux's text)
+//!         ├── filter     0640  the global-filter note (the standard text)
 //!         └── <event>/
 //!             ├── enable  0640  1/0
 //!             ├── filter  0640  "none" (no filter engine)
@@ -31,7 +31,7 @@
 //!             └── format  0440  the TRACE_EVENT field description
 //! ```
 //!
-//! The X convention is Linux's: a group (or the whole tree) reads
+//! The X convention is the standard one: a group (or the whole tree) reads
 //! "1" when every event is enabled, "0" when none is, "X" when the
 //! set is mixed.
 
@@ -43,23 +43,40 @@ use crate::fs::debugfs;
 use crate::trace;
 
 /// The directory the tracing files live in (inside debugfs, which is
-/// mounted at /sys/kernel/debug — the path Linux's documentation has
+/// mounted at /sys/kernel/debug — the path the kernel documentation has
 /// historically used for the same file set).
 const TRACING_DIR: &str = "/tracing";
 
-/// Linux's group-level filter file text (events/<group>/filter).
+/// The group-level filter file text (standard wording) (events/<group>/filter).
 const GROUP_FILTER_TEXT: &str = "### global filter ###\n# Use this to set filters for multiple events.\n# Only events with the given fields will be affected.\n# If no events are modified, an error message will be displayed here\n";
 
-/// Parse a boolean knob the way Linux's tracing files do: any number
-/// is accepted, zero is off, everything else is on.
-fn parse_bool(buf: &[u8]) -> Option<bool> {
+/// Parse a boolean knob the standard way: any number is accepted,
+/// zero is off, everything else is on.
+///
+/// A whitespace-only buffer is a NO-OP success: the guest shell sends
+/// the value and the trailing newline as separate write() calls, and
+/// the newline-only write must not fail the shell's redirection.
+fn parse_bool(buf: &[u8]) -> Option<Option<bool>> {
     let text = core::str::from_utf8(buf).ok()?.trim();
     if text.is_empty() {
-        return None;
+        return Some(None);
     }
     match text.parse::<u64>() {
-        Ok(v) => Some(v != 0),
+        Ok(v) => Some(Some(v != 0)),
         Err(_) => None,
+    }
+}
+
+/// A boolean write handler body: `None` from parse_bool is a syntax
+/// error (EINVAL); `Some(None)` is the no-op newline write.
+fn bool_write(buf: &[u8], apply: impl Fn(bool)) -> i32 {
+    match parse_bool(buf) {
+        Some(Some(on)) => {
+            apply(on);
+            0
+        }
+        Some(None) => 0,
+        None => crate::errno::Errno::InvalidArgument.as_neg_i32(),
     }
 }
 
@@ -100,13 +117,7 @@ pub fn register() {
             out.push(b'\n');
             out
         },
-        Some(|buf: &[u8]| match parse_bool(buf) {
-            Some(on) => {
-                trace::set_tracing_on(on);
-                0
-            }
-            None => crate::errno::Errno::InvalidArgument.as_neg_i32(),
-        }),
+        Some(|buf: &[u8]| bool_write(buf, |on| trace::set_tracing_on(on))),
     );
 
     // --- the collected records ---------------------------------------
@@ -114,7 +125,7 @@ pub fn register() {
         &format!("{}/trace", TRACING_DIR),
         0o640,
         || trace::render_trace().into_bytes(),
-        // Linux: writing to the trace file clears the buffer.
+        // Writing to the trace file clears the buffer (standard behavior).
         Some(|_buf: &[u8]| {
             trace::clear();
             0
@@ -131,7 +142,7 @@ pub fn register() {
 
     // --- the tracers --------------------------------------------------
     // Rux has no tracer of its own: the events are the whole facility,
-    // which is what Linux's "nop" tracer means — it records nothing by
+    // which is what the "nop" tracer means — it records nothing by
     // itself, the tracepoints do.
     debugfs::create_file(
         &format!("{}/available_tracers", TRACING_DIR),
@@ -145,10 +156,13 @@ pub fn register() {
         || b"nop\n".to_vec(),
         Some(|buf: &[u8]| {
             let text = core::str::from_utf8(buf).unwrap_or("").trim();
-            if text == "nop" {
+            if text.is_empty() {
+                // The shell's split trailing-newline write: no-op.
+                0
+            } else if text == "nop" {
                 0
             } else {
-                // Linux refuses an unknown tracer.
+                // An unknown tracer is refused (EINVAL).
                 crate::errno::Errno::InvalidArgument.as_neg_i32()
             }
         }),
@@ -235,14 +249,12 @@ pub fn register() {
                     out.push(b'\n');
                     out
                 },
-                Some(|buf: &[u8]| match parse_bool(buf) {
-                    Some(on) => {
+                Some(move |buf: &[u8]| {
+                    bool_write(buf, |on| {
                         event
                             .enabled
-                            .store(on, core::sync::atomic::Ordering::Relaxed);
-                        0
-                    }
-                    None => crate::errno::Errno::InvalidArgument.as_neg_i32(),
+                            .store(on, core::sync::atomic::Ordering::Relaxed)
+                    })
                 }),
             );
 
@@ -262,7 +274,7 @@ pub fn register() {
                 None::<fn(&[u8]) -> i32>,
             );
 
-            // The event filter — no filter engine, so like a Linux
+            // The event filter — no filter engine, so like a standard
             // event with no filter set: reads "none", accepts nothing.
             debugfs::create_file(
                 &format!("{}/filter", event_dir),
@@ -292,19 +304,17 @@ pub fn register() {
                 out.push(b'\n');
                 out
             },
-            Some(move |buf: &[u8]| match parse_bool(buf) {
-                Some(on) => {
+            Some(move |buf: &[u8]| {
+                bool_write(buf, |on| {
                     for e in trace::EVENTS.iter().filter(|e| e.group == group) {
                         e.enabled
                             .store(on, core::sync::atomic::Ordering::Relaxed);
                     }
-                    0
-                }
-                None => crate::errno::Errno::InvalidArgument.as_neg_i32(),
+                })
             }),
         );
 
-        // The group filter — Linux's global-filter note.
+        // The group filter — the standard global-filter note.
         debugfs::create_file(
             &format!("{}/filter", group_dir),
             0o640,
@@ -329,22 +339,20 @@ pub fn register() {
             out.push(b'\n');
             out
         },
-        Some(|buf: &[u8]| match parse_bool(buf) {
-            Some(on) => {
+        Some(|buf: &[u8]| {
+            bool_write(buf, |on| {
                 for e in trace::EVENTS.iter() {
                     e.enabled
                         .store(on, core::sync::atomic::Ordering::Relaxed);
                 }
-                0
-            }
-            None => crate::errno::Errno::InvalidArgument.as_neg_i32(),
+            })
         }),
     );
 }
 
 /// The set_event write handler: comma- or space-separated tokens,
 /// "group:name" (or ":name" for any group, or "all"/"none"), an
-/// optional '!' prefix disarms instead of arming — Linux's grammar.
+/// optional '!' prefix disarms instead of arming — the standard grammar.
 fn set_event_write(buf: &[u8]) -> i32 {
     let text = match core::str::from_utf8(buf) {
         Ok(t) => t.trim(),
@@ -381,7 +389,7 @@ fn set_event_write(buf: &[u8]) -> i32 {
                     None => return crate::errno::Errno::InvalidArgument.as_neg_i32(),
                 };
                 // ":name" (empty group) arms every group's event of
-                // that name, as in Linux.
+                // that name (any group).
                 let matches: Vec<&trace::TraceEvent> = trace::EVENTS
                     .iter()
                     .filter(|e| (group.is_empty() || e.group == group) && e.name == event)

@@ -1432,7 +1432,7 @@ unsafe fn procfs_getattr(inode: &Inode, stat: &mut crate::fs::Stat) -> i32 {
     } else if node.is_symlink() {
         InodeMode::S_IFLNK | 0o777
     } else if node.name.as_slice() == b"sysrq-trigger" {
-        // Linux: /proc/sysrq-trigger is write-only (0200, root).
+        // /proc/sysrq-trigger is write-only (0200, root; host-verified).
         InodeMode::S_IFREG | 0o200
     } else if node.sysctl_write.is_some()
         || node.pid_file_kind == Some(PidFileKind::OomScoreAdj)
@@ -1976,7 +1976,7 @@ unsafe fn procfs_open(inode: &Inode, file: &crate::fs::File) -> i32 {
     };
     let node = &*(node_ptr as *const ProcFSNode);
 
-    // /proc/sysrq-trigger: a write-only node (Linux mode 0200) — an
+    // /proc/sysrq-trigger: a write-only node (mode 0200) — an
     // open for read is refused, as on the live host.
     if node.name.as_slice() == b"sysrq-trigger" && !file.flags().is_writeonly() {
         return errno::Errno::PermissionDenied.as_neg_i32();

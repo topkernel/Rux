@@ -1862,7 +1862,7 @@ pub fn schedule_dead_never_returns() {
     }
 }
 
-/// The idle task's comm as Linux shapes it: "swapper/<cpu>" (used by
+/// The idle task's comm, standard shape: "swapper/<cpu>" (used by
 /// the sched:sched_switch tracepoint; Rux's idle Task keeps an empty
 /// comm).
 fn swapper_comm(cpu: usize) -> [u8; 16] {
@@ -2278,7 +2278,7 @@ unsafe fn __schedule() {
     // SAFETY: Runnable tasks cannot be freed while still on a CPU or runqueue.
     // IRQs remain disabled on this CPU, preventing concurrent scheduling.
     if !next.is_null() {
-        // The sched:sched_switch tracepoint (Linux records it in
+        // The sched:sched_switch tracepoint (recorded in
         // __schedule just before the switch). One `armed()` check when
         // off; the prev/next fields are marshalled only when on. IRQs
         // are off here, so the record path must not (and does not)
@@ -2287,7 +2287,7 @@ unsafe fn __schedule() {
             // SAFETY: prev is the running task and next was just
             // picked; both are pinned by the IRQs-off window.
             unsafe {
-                // The idle task's comm is empty; Linux names it
+                // The idle task's comm is empty; the convention names it
                 // swapper/N in the trace arguments.
                 let prev_comm = if (*prev).pid() == 0 {
                     swapper_comm(cpu_id)

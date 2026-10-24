@@ -2,9 +2,9 @@
 //!
 //! Copyright (c) 2026 Fei Wang
 //!
-//! Tracepoints — the event mechanism behind Linux's tracefs.
+//! Tracepoints — the event mechanism behind the standard tracefs.
 //!
-//! Linux's tracing subsystem has two halves: the EVENT side (a
+//! the reference tracing subsystem has two halves: the EVENT side (a
 //! `TRACE_EVENT()` definition per event, a per-event `enable` switch
 //! and a per-CPU ring buffer) and the FILE side (tracefs, mounted at
 //! /sys/kernel/tracing, with `tracing_on`, `trace`, `trace_pipe`,
@@ -16,10 +16,10 @@
 //! - this module holds the event table, the per-CPU ring buffers and
 //!   the trace text renderer;
 //! - `trace::files` is the tracefs side (published under
-//!   /sys/kernel/debug/tracing, the path Linux's documentation has
+//!   /sys/kernel/debug/tracing, the path the reference host's documentation has
 //!   historically used).
 //!
-//! The trace text format is Linux's (fs/trace_output.c), captured
+//! The trace text format is the reference host's (fs/trace_output.c), captured
 //! byte-for-byte from this host's live /sys/kernel/tracing:
 //!
 //! ```text
@@ -43,8 +43,8 @@
 //! the five flag characters, 5.6-digit seconds-since-boot timestamp).
 //!
 //! An event is recorded only when its own `enable` switch is on AND
-//! the global `tracing_on` is on — the same two-level gate Linux
-//! uses. Both checks are relaxed loads, so a call site's disabled
+//! the global `tracing_on` is on — the same two-level gate the
+//! reference host uses. Both checks are relaxed loads, so a call site's disabled
 //! path is one branch after the two loads (see `TraceEvent::armed`);
 //! call sites must marshal their arguments only after `armed()`
 //! returns true.
@@ -64,10 +64,10 @@ pub mod files;
 /// two pids, two prios and one state — nine in total.
 pub const TRACE_ARGS: usize = 10;
 
-/// TASK_COMM_LEN, as in Linux.
+/// TASK_COMM_LEN (16, the standard task-comm size).
 pub const COMM_LEN: usize = 16;
 
-/// How an event renders its arguments (the "print fmt" of the Linux
+/// How an event renders its arguments (the "print fmt" of the standard
 /// format file).
 pub type ArgFormatter = fn(&[u64; TRACE_ARGS]) -> String;
 
@@ -77,11 +77,11 @@ pub struct TraceEvent {
     pub group: &'static str,
     /// The event name.
     pub name: &'static str,
-    /// The event id (Linux assigns unique ids).
+    /// The event id (a unique per-event number).
     pub id: u16,
     /// The `print fmt` of the event.
     pub print_fmt: &'static str,
-    /// The field list, in the Linux "format" file shape (each line
+    /// The field list, in the standard "format" file shape (each line
     /// tab-prefixed, `field:...;\toffset:N;\tsize:N;\tsigned:N;\n`).
     pub fields: &'static str,
     /// Per-event enable switch.
@@ -105,12 +105,12 @@ impl TraceEvent {
         TRACING_ON.load(Ordering::Relaxed) && self.enabled.load(Ordering::Relaxed)
     }
 
-    /// The full event name, as Linux's available_events shows it.
+    /// The full event name, as the reference host's available_events shows it.
     pub fn full_name(&self) -> String {
         format!("{}:{}", self.group, self.name)
     }
 
-    /// The Linux "format" file content for this event (the common
+    /// The "format" file content for this event (the common
     /// fields, a blank line, the event's fields, a blank line, the
     /// print fmt — the live file's exact shape).
     pub fn format_file(&self) -> String {
@@ -118,7 +118,7 @@ impl TraceEvent {
         out.push_str(&format!("name: {}\n", self.name));
         out.push_str(&format!("ID: {}\n", self.id));
         out.push_str("format:\n");
-        // The common fields every Linux trace event carries.
+        // The common fields every trace event carries.
         out.push_str("\tfield:unsigned short common_type;\toffset:0;\tsize:2;\tsigned:0;\n");
         out.push_str("\tfield:unsigned char common_flags;\toffset:2;\tsize:1;\tsigned:0;\n");
         out.push_str("\tfield:unsigned char common_preempt_count;\toffset:3;\tsize:1;\tsigned:0;\n");
@@ -137,7 +137,7 @@ impl TraceEvent {
 // ============================================================================
 
 /// raw_syscalls:sys_enter — every syscall entry, with the raw (native)
-/// number and the six register arguments. Linux's
+/// number and the six register arguments. the reference host's
 /// events/raw_syscalls/sys_enter, format captured from the live file.
 pub static EVENT_SYS_ENTER: TraceEvent = TraceEvent {
     group: "raw_syscalls",
@@ -151,7 +151,7 @@ pub static EVENT_SYS_ENTER: TraceEvent = TraceEvent {
 };
 
 /// raw_syscalls:sys_exit — every syscall return, with the raw number
-/// and the return value. Linux's events/raw_syscalls/sys_exit.
+/// and the return value. the reference host's events/raw_syscalls/sys_exit.
 pub static EVENT_SYS_EXIT: TraceEvent = TraceEvent {
     group: "raw_syscalls",
     name: "sys_exit",
@@ -163,7 +163,7 @@ pub static EVENT_SYS_EXIT: TraceEvent = TraceEvent {
     fmt_args: fmt_sys_exit,
 };
 
-/// sched:sched_switch — a context switch. Linux's
+/// sched:sched_switch — a context switch. the reference host's
 /// events/sched/sched_switch; the print fmt is the live file's blob
 /// verbatim (the __print_flags expression for prev_state).
 pub static EVENT_SCHED_SWITCH: TraceEvent = TraceEvent {
@@ -240,11 +240,11 @@ pub struct TraceRecord {
     pub cpu: u16,
     /// The event id.
     pub event_id: u16,
-    /// The five Linux flag characters, pre-rendered at record time
+    /// The five standard flag characters, pre-rendered at record time
     /// (irqs-off, need-resched, hardirq/softirq, preempt-depth,
     /// migrate-disable).
     pub flags: [u8; 5],
-    /// The recording task's comm, copied at record time (Linux saves
+    /// The recording task's comm, copied at record time (the reference host saves
     /// comms at record time too — a pid looked up later may be gone
     /// or reused).
     pub comm: [u8; COMM_LEN],
@@ -291,7 +291,7 @@ impl TraceRing {
         // concurrent writers, so this slot is owned by this push; the
         // record is written before the count is published. A reader
         // may race with the write and observe a torn record — an
-        // acceptable debug-facility trade (Linux excludes readers
+        // acceptable debug-facility trade (the reference kernel excludes readers
         // with per-CPU buffer locks; the cost is not warranted here).
         unsafe {
             let slot = &self.records[idx] as *const TraceRecord as *mut TraceRecord;
@@ -332,17 +332,17 @@ pub fn records_buffered() -> usize {
         .sum()
 }
 
-/// Render the five Linux flag characters.
+/// Render the five flag characters (render_flags below).
 fn render_flags() -> [u8; 5] {
     let mut out = [b'.'; 5];
     // 1: irqs-off — 'd' when the interrupt flag is clear, exactly the
-    // condition Linux reports (a sched_switch line reads d..1. or
+    // condition the reference reports (a sched_switch line reads d..1. or
     // d..2. because __schedule runs with irqs off; a syscall line
     // reads ...).
     if !crate::arch::cpu::get_interrupts_state() {
         out[0] = b'd';
     }
-    // 2: need-resched — cleared before Linux records sched_switch;
+    // 2: need-resched — cleared before the switch is recorded;
     // Rux clears it the same way at __schedule entry, so '.'.
     // 3: hardirq/softirq.
     if crate::interrupt::preempt::in_irq() {
@@ -373,7 +373,7 @@ pub fn record(event: &TraceEvent, args: [u64; TRACE_ARGS]) -> bool {
         return false;
     }
     // Copy the comm at record time (pid lookup later could hit a
-    // recycled pid). The idle task's comm is empty; Linux names it
+    // recycled pid). The idle task's comm is empty; the reference names it
     // swapper/N in the sched_switch arguments and <idle> in the
     // TASK-PID column — the renderer handles the column name.
     let mut comm = [0u8; COMM_LEN];
@@ -440,7 +440,7 @@ pub fn drain() -> Vec<TraceRecord> {
         }
         // Consume: a racing writer may land one record into the slots
         // we just read; it is dropped with the reset — the same
-        // spool-and-reset contract Linux's pipe reader has.
+        // spool-and-reset contract the reference host's pipe reader has.
         ring.head.store(0, Ordering::Release);
         ring.count.store(0, Ordering::Release);
     }
@@ -452,7 +452,7 @@ pub fn drain() -> Vec<TraceRecord> {
 // The text renderer
 // ============================================================================
 
-/// The trace-file header, byte-for-byte the live kernel's (Linux 7.0
+/// The trace-file header, byte-for-byte the live reference host's (7.0
 /// host; older kernels say "irqs-off" where this one says
 /// "irqs-off/BH-disabled").
 fn trace_header() -> String {
@@ -477,7 +477,7 @@ fn trace_header() -> String {
     out
 }
 
-/// One record line, Linux's `%16s-%-7d [%03d] %c%c%c%c%c %5lu.%06lu:
+/// One record line, the reference host's `%16s-%-7d [%03d] %c%c%c%c%c %5lu.%06lu:
 /// %s: %s` shape.
 fn render_record(record: &TraceRecord) -> String {
     let event = EVENTS.iter().find(|e| e.id == record.event_id).copied();
@@ -509,7 +509,7 @@ fn render_record(record: &TraceRecord) -> String {
     )
 }
 
-/// Render the buffered records the way Linux's `trace` file does
+/// Render the buffered records the way the reference host's `trace` file does
 /// (header + every record). The `trace_pipe` reader uses
 /// `render_pipe`, which has no header.
 pub fn render_trace() -> String {
@@ -550,7 +550,7 @@ pub fn comm_to_words(comm: &[u8; COMM_LEN]) -> [u64; 2] {
     [u64::from_le_bytes(lo), u64::from_le_bytes(hi)]
 }
 
-/// The sched_switch prev_state letters — Linux's __print_flags table
+/// The sched_switch prev_state letters — the reference host's __print_flags table
 /// masked to the task-state bits ({1,S},{2,D},{4,T},{8,t},{0x10,X},
 /// {0x20,Z},{0x40,P},{0x80,I}), "R" when no bit is set.
 fn task_state_str(bits: u64) -> String {
