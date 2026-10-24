@@ -35,6 +35,8 @@ pub mod hung_task;
 #[cfg(feature = "riscv64")]
 pub mod sbi_debug;
 pub mod switches;
+/// Runtime kernel symbol table (/proc/kallsyms, symbolized traces).
+pub mod ksyms;
 pub mod taskdump;
 pub mod memwatch;
 /// Full physical-accounting ledger (fake-OOM family): census + counters

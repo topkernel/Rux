@@ -56,6 +56,7 @@ pub mod loadavg;
 pub mod self_proc;
 pub mod pid;
 pub mod interrupts;
+pub mod kallsyms;
 pub mod stat;
 pub mod schedstat;
 pub mod softirqs;
@@ -519,6 +520,8 @@ impl ProcFSSuperBlock {
         self.create_dynamic_file("interrupts", interrupts::generate);
         // Per-CPU time accounting + system counters (Linux layout).
         self.create_dynamic_file("stat", stat::generate);
+        // The kernel symbol table (Linux layout).
+        self.create_dynamic_file("kallsyms", kallsyms::generate);
         // Memory statistics (Linux layout).
         self.create_dynamic_file("vmstat", vmstat::generate);
         self.create_dynamic_file("buddyinfo", vmstat::generate_buddyinfo);

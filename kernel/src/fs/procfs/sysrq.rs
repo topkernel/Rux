@@ -137,6 +137,9 @@ fn signal_all_except_init(sig: i32) {
 /// current task of each CPU plus the kernel-text words on its stack —
 /// the same shape the hung-task detector reports.
 fn dump_all_cpu_stacks() {
+    // The calling CPU's own backtrace, symbolized (Linux's 'l' prints
+    // a backtrace per CPU; the other CPUs' stacks are scanned below).
+    crate::dfx::backtrace::dump_stack();
     let currents = crate::sched::sched::grq_diag_cpu_currents();
     for (cpu, (pid, is_idle, task)) in currents.iter().enumerate() {
         if task.is_null() {

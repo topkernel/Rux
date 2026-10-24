@@ -57,6 +57,12 @@ rm -f "$LOG"
     echo 'head -4 /proc/softirqs'
     echo 'echo ===SMOKE: proc schedstat ==='
     echo 'cat /proc/schedstat'
+    echo 'echo ===SMOKE: proc kallsyms ==='
+    echo 'head -3 /proc/kallsyms'
+    echo 'grep -m 3 "rux::" /proc/kallsyms'
+    echo 'echo ===SMOKE: symbolized backtrace ==='
+    echo 'echo l > /proc/sysrq-trigger'
+    sleep 3
     echo 'echo ===SMOKE: sysrq task dump ==='
     echo 'echo t > /proc/sysrq-trigger'
     sleep 4

@@ -232,23 +232,60 @@ CPU; `/proc/vmstat` counters are monotonic and reconcile against the
 ledger census; a busy-loop guest shows non-zero `user` and rising
 `voluntary_ctxt_switches`.
 
-### Tranche 3 — symbols and symbolized traces
+### Tranche 3 — symbols and symbolized traces (code in, table off by default)
 
 Goal: a backtrace that names its frames.
 
-- Build-time symbol table: `nm` over the linked kernel ELF, filtered to
-  text symbols, embedded as a compact table; the link pass runs twice
-  (the table lives in `.rodata`, so `.text` addresses are stable between
-  the two passes).
-- `/proc/kallsyms` in Linux's format (addresses zeroed unless
-  `kptr_restrict` allows).
-- Runtime symbolization inside `dfx/backtrace.rs`: frames print
-  `func+0xoff/0xsize` next to the raw address, so WARN/BUG/panic output
-  becomes triageable without offline `addr2line`.
-- Linux's `Call Trace:` capitalization and `?`/`0x` decoration.
+**Landed.** The build-time symbol pass (`build/gen-ksyms.py`): `nm` over
+the linked kernel ELF keeps the text symbols, `addr2line -C` resolves
+their DEMANGLED names (the kernel is built with Rust's v0 mangling, so
+the raw ELF names are unreadable), and the result is written as a
+compact table — one NUL-separated name blob (`ksyms.bin`, embedded with
+`include_bytes!`) plus an index of (name offset, address, size, type).
+`build/Makefile` runs the pass after the link and rebuilds; `build.rs`
+writes a placeholder so a plain `cargo build` still compiles. At runtime
+`dfx/ksyms.rs` binary-searches the index, `/proc/kallsyms` prints
+Linux's `addr type name` lines, and `dfx/backtrace.rs` prints
+`[<addr>] rux::mod::fn+0xoff/0xsize` (Linux's classic frame format,
+with `?` for an unresolved address) under Linux's `Call Trace:`
+header.
 
-Acceptance: a WARN in the kernel prints a frame with the Rust function
-name; `/proc/kallsyms` lists the same names.
+**Blocked: the table is OFF by default (`KSYMS_ENABLE=1` turns it on).**
+Embedding it grows the kernel image, and the image's address space is
+budgeted by hardcoded constants that the image has already outgrown:
+
+- `memory_layout.rs:130` — `KERNEL_SIZE = 0xC00000` (12MB): the
+  boot-time MMU maps exactly this much of the image
+  (`mmu_init.rs`, both the early identity map and the real map).
+- `boot.S` — the trampoline maps 5 PMDs and the early table 6 PMDs
+  (10MB / 12MB windows).
+- the heap base is the fixed physical `0x80E00000`
+  (`memory_layout.rs:139`, `main.rs:1167`, `buddy_allocator.rs:62`).
+
+Measured on the current tree: the image (text+rodata+data+bss+boot
+stack) ends at phys `0x80C31000` — already **195KB past the 12MB
+window**, so the tail of `.bss` and the boot stack are unmapped TODAY
+(latent hole, harmless only because nothing touches them). The symbol
+table needs ~2.3MB of names; a 1MB table moves the image end to
+`0x80D31000`, and the first early-touched `.bss` object (the syscall
+ring) lands in the hole: the kernel panics in `trap_entry` with
+`KERNPANIC pfault badaddr=0xffffffff80c00008` — the first byte past the
+old window.
+
+The fix is the memory-layout one the project's own notes describe
+(RUX-RISCV-LAYOUT in `main.rs` / `memory_layout.rs`): derive the image
+extent from the linker (`_end - _stext`) instead of `KERNEL_SIZE`,
+extend the `boot.S` windows to match, and move the heap base and the
+kernel reservation TOGETHER (the vmemmap backing search treats the gap
+between the image end and the heap base as free space — moving the
+image end without moving the heap base is what produced the documented
+riscv64 corruption family). That change touches the boot path and the
+memory map, so it belongs to a deliberate, verified change rather than
+to a DFX side-quest.
+
+Acceptance (once the image budget is enlarged): a WARN in the kernel
+prints a frame with the Rust function name; `/proc/kallsyms` lists the
+same names.
 
 ### Tranche 4 — tracepoint framework and tracefs
 
