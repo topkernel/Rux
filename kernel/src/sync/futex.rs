@@ -1977,8 +1977,15 @@ pub fn sys_futex_handler(args: &[u64; 6]) -> i64 {
                                     }
                                     let fd = vm.file_fd();
                                     let path = if fd >= 0 {
-                                        tk.fdtable()
-                                            .get_file(fd as usize)
+                                        // sc210: the wedge dump can walk a
+                                        // just-forked task whose fdtable is
+                                        // not set yet — fdtable() would
+                                        // panic and kill the boot (kernel
+                                        // panic "FdTable not initialized",
+                                        // task.rs:3958). Diagnostic walks
+                                        // must always be None-safe.
+                                        tk.try_fdtable()
+                                            .and_then(|fdt| fdt.get_file(fd as usize))
                                             .map(|f| probe_file_path(&f))
                                             .unwrap_or_else(|| alloc::string::String::from("?"))
                                     } else {
@@ -2007,7 +2014,14 @@ pub fn sys_futex_handler(args: &[u64; 6]) -> i64 {
                             // anon_inode mapping in sc137 needs the true
                             // object type named, and unix sockets also
                             // print their bound+peer names.
-                            let fdt = tk.fdtable();
+                            // sc210: fdtable() panics on a task whose
+                            // fdtable is not set — the dump must be
+                            // None-safe or it kills the boot it dumps
+                            // (kernel panic "FdTable not initialized").
+                            'fdscan: {
+                                let Some(fdt) = tk.try_fdtable() else {
+                                    break 'fdscan;
+                                };
                             let mut shown = 0u32;
                             for fd in 0..32u32 {
                                 if let Some(f) = fdt.get_file(fd as usize) {
@@ -2099,6 +2113,7 @@ pub fn sys_futex_handler(args: &[u64; 6]) -> i64 {
                                         break;
                                     }
                                 }
+                            }
                             }
                             // sc138 (Session Q): decode round 3.
                             // (a) The park caller's code bytes: raw
@@ -2649,7 +2664,12 @@ pub fn kill_dump_tgid(tgid: u32) {
                 let mut fdnote = alloc::string::String::new();
                 for arg in [r.rdi, r.rsi, r.rdx] {
                     if arg < 64 {
-                        if let Some(f) = tk.fdtable().get_file(arg as usize) {
+                        // sc210: None-safe fdtable walk (just-forked task
+                        // has no fdtable yet; fdtable() panics).
+                        if let Some(f) = tk
+                            .try_fdtable()
+                            .and_then(|fdt| fdt.get_file(arg as usize))
+                        {
                             use core::fmt::Write;
                             let _ = write!(fdnote, " fd{}={}", arg, f.path());
                         }
@@ -2788,11 +2808,16 @@ unsafe fn kill_dump_wedge(tk: &Task, t: *mut Task, nr: u64, args: [u64; 3]) {
     }
     // Whole low fdtable: fd/type/path one line — where fd3 came from and
     // what the process holds overall.
+    // sc210: try_fdtable — the wedge dump can observe a task whose
+    // fdtable is not initialized (just-forked); fdtable() would panic
+    // ("FdTable not initialized", task.rs) and take the whole boot down
+    // with a kernel panic mid-census — exactly how sc210 (the deepest
+    // boot ever, launcher executing) died at t=1410s.
     {
         let mut line = alloc::string::String::new();
         let _ = write!(line, "KILLDUMP: tid {} fdtab:", tk.pid());
         for fd in 0..16usize {
-            if let Some(f) = tk.fdtable().get_file(fd) {
+            if let Some(f) = tk.try_fdtable().and_then(|fdt| fdt.get_file(fd)) {
                 let _ = write!(line, " [{}:{}:{}]", fd, kd_fd_type(&f), f.path());
             }
         }
@@ -2800,8 +2825,12 @@ unsafe fn kill_dump_wedge(tk: &Task, t: *mut Task, nr: u64, args: [u64; 3]) {
     }
     // The syscall's primary fd (rdi for read/write/writev/ioctl-family).
     if let Some(&fd) = args.first() {
-        if fd < 64 && tk.fdtable().get_file(fd as usize).is_some() {
-            if let Some(f) = tk.fdtable().get_file(fd as usize) {
+        if fd < 64
+            && tk.try_fdtable()
+                .map(|fdt| fdt.get_file(fd as usize).is_some())
+                .unwrap_or(false)
+        {
+            if let Some(f) = tk.try_fdtable().and_then(|fdt| fdt.get_file(fd as usize)) {
                 let ty = kd_fd_type(&f);
                 crate::pr_warn!(
                     "KILLDUMP: tid {} fd{} type={} flags={:#x}",
@@ -2839,7 +2868,13 @@ unsafe fn kill_dump_wedge(tk: &Task, t: *mut Task, nr: u64, args: [u64; 3]) {
                                         return;
                                     }
                                     for hfd in 0..32usize {
-                                        if let Some(hf) = hk.fdtable().get_file(hfd) {
+                                        // sc210: None-safe — the census walks
+                                        // every task; a just-forked one has
+                                        // no fdtable yet.
+                                        if let Some(hf) = hk
+                                            .try_fdtable()
+                                            .and_then(|fdt| fdt.get_file(hfd))
+                                        {
                                             let hty = kd_fd_type(&hf);
                                             if hty == "pipe"
                                                 && unsafe { *hf.private_data.get() }
@@ -3255,8 +3290,8 @@ unsafe fn rwfz_stack_frames(
             return p.clone();
         }
         let p = tk
-            .fdtable()
-            .get_file(fd as usize)
+            .try_fdtable()
+            .and_then(|fdt| fdt.get_file(fd as usize))
             .map(|file| file.path())
             .unwrap_or_else(|| alloc::string::String::from("?"));
         cache.push((fd, p.clone()));
