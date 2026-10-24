@@ -3155,3 +3155,7 @@ SHAPE; MILESTONE NOT REACHED THIS LEG; v5+v6 READY FOR MERGE.
   RAM dumps (13GB) deleted after analysis; artifacts (serial logs,
   csv, ppm, auto0 shots) on disk uncommitted except the milestone
   interim shot.
+  (correction to the close-out above: config.rs is NOT dirty - the
+  snapshot already committed the riscv64 platform artifact, and the
+  riscv64 `make build` regenerated the same content. Tree is clean at
+  273489e7.)
