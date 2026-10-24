@@ -2874,3 +2874,64 @@ TEST PANICS (MAIN-SIDE, UNATTRIBUTED).
   spawned by the harness (original + 2 retries); I killed the duplicates
   by exact PID after verifying parentage. If a background command
   auto-retries, check for orphans before launching QEMUs.
+
+SESSION R TENTH LEG OPENING (sc194 verdict + v5 quiet-console, 08:5x-):
+SC194 VERIFIES v4 (ZERO STRANDS THROUGH A FULL 45-MIN KILL-CHURN BOOT);
+THE RACE ITSELF WAS LOST AT T+59s BY THE SAME 4-PROCESS 16-READER
+SATURATION; CONSOLE BURN IN THE DECISION WINDOW MEASURED (60% USERSPACE
+/ 17% OUR OWN PROBES) -> v5 quietcon ROLL.
+
+- sc194 (v4 kernel 7a8044e0, parkdump off, KVM q35 SMP2, 45 min,
+  07:11-07:56; serial quiet after 07:36 = wedged silence): verdict PASS
+  on the sched gate - 32 PREEMPT-LEAK lines ALL held_nonzero_for=0xc8
+  (2s transient; sc191 grew past 0xd1e9, sc192 had a permanent strand),
+  ONE launcher KILLDUMP (tgid 1801 m.ohos.launcher, mid-syscall, NOT
+  on futex, state=0x0 cfs_linked=1) with NO strand after it, 8
+  TERM-DESCHED engaged prints (all pc=0x0, budget consumed min 1),
+  DEAD-PICK gate never fired (0 prints), both CPUs sampling/alive to
+  the end of output. The v1-v4 kill-path/exit strand family is CLOSED
+  as far as one boot can prove.
+- sc194 race shape (timeline via RWFRZ age 1441s at EOF + composer
+  thread age): RS = pid 629; SACMP-RS #1-#41, GetService(devmgr 333)
+  ANSWERED (#7 code 3 -> reply at 3917), direct composer_host (610,
+  serving thread OS_IPC_0_648) conversation codes 0x0/0x34/0x1/0x2/
+  0x20/0x23/0x3/0x5/0x22/0x9/0x6/0x8/0x4/0x15x2/0x36/0x21/0xa/0xc
+  mostly ANSWERED; #41 code 0xc sent ~T+59s and froze - 648 parked on
+  the frozen rwlock family (age 1465s at EOF, kicked 25x = RWFRZ
+  re-kick count, state=0x1 cfs_linked=0: userspace-correct wait).
+  At the SAME minute devmgr tgid 333 word 0x7ff000888264 froze at
+  word=0x80000010 readers=16 AND tgids 619/1171/624 froze at readers=16
+  each (4-process FFRT-pool saturation, same as sc192/193 topology).
+  Launcher then spawn-exit-looped (childexits 4569..4714 status=0,
+  LauncherAbilityManager getOsAccountLocalIdFromProcess each spawn -
+  launcher needs RS which never publishes SA 10). BootAnimation
+  milestones all reached (controller START line 3500, OnHotPlug(0,1)
+  4271, SetVSyncRate 30/2 line 5500 - all BEFORE the freeze). No
+  SA 10; 8-color oracle to the end; shotmon csv ends 07:56:28.
+- Console burn in the decision window (first 10902 lines = 1.34MB in
+  59s, ~22KB/s): 60% userspace console stream (slog 342KB + kmsg 237KB
+  + alog 116KB + hilog 106KB - hilogd writes /dev/console direct),
+  17% OUR probes, ALL via pr_warn!: SAREG 110KB (495 of the 600-print
+  budget burned in min 1), FXDV 48KB, stkfutex 31KB, mtprobe 31KB,
+  SACMP 6KB; raw sinks minor (WW 5KB/29 lines, RWFRZ 0.9KB). The
+  probes fire IN the racer threads' own paths (RS's binder calls print
+  SACMP-RS; futex waits print stkfutex) - each probe line is port-IO
+  VM exits paid by the thread in the race.
+- v5 (this tree, feat(console)): `quietcon` boot param - fs/tty
+  console_output diverts /dev/console bytes into the printk ring
+  (printk::ring_stash_console, KERN_INFO record; dmesg stays complete,
+  UART idle); kernel printk and raw DFX sinks untouched. Roll APPEND:
+  LOGLEVEL=3 (oh-boot-q.sh now takes ${LOGLEVEL:-4}; get_param uses the
+  FIRST loglevel= token so the script token is the single source).
+  NOTE printk() drops level>console_loglevel records BEFORE the ring,
+  so loglevel=3 removes pr_warn! probe records from dmesg too -
+  acceptable for a milestone roll (hilogd keeps its own buffer; hdc
+  retrievable); re-roll instrumented if the race is lost again.
+- sc195 (roll): v4+v5 bzImage, fresh scgold copy userdata-sc195.img,
+  parkdump off, quietcon + loglevel=3, SMP=2 KVM q35, 45 min, shotmon
+  on ohgpu. Milestone gate: SA 10 publish (hdc hilog / dmesg [con]
+  stash) -> bootanimation frames -> launcher chain -> ohgpu screendump
+  shows real launcher UI (not the 8-color scanout oracle) -> save
+  screenshot + csv prominently, commit immediately.
+- QEMU discipline: no live QEMU at leg start (verified ps); sc194
+  ended on its own at 07:56 (timeout).
