@@ -33,6 +33,8 @@ Runs (this worktree, `run/`):
 | `pa-pa17` | main@0634bc8f (launcher wake-loss fixes a39d2bc0 v1 + 6e9679c5 v2 now merged) + pa16 probe v3 applied clean (bzImage run/pa17-probe-bzImage) | syscost=1 sprobe=0 | 782 s | W3 acceptance retest (section 2d). Host load ~6.7 (5 foreign QEMUs); TERM-DESCHED=0 all boot; max closed IF=0 segment 5 ms |
 | `pa-pa18` | main@9bc3a5c8 (launcher v3 c90f80b0 + v4 7a8044e0 + v5-param 12ea541e + v6/R73 9777f195 now merged; v5 inert, param not passed) + pa16 probe v3 (nm run/pa18-nm.txt; bzImage rebuildable from the pinned commit) | syscost=1 sprobe=0 | 780 s | v1..v6 stacking retest (section 2e). TERM-DESCHED fires 8x, all survive; census population unchanged; GRQ -31% claim corrected to volume-coupled; pre-magazine allocator (A-only rung; B landed as 988e10c1 after this build) |
 | `pa-pa20` | main@988e10c1 (= pa18 kernel + wildwrite per-CPU magazines cb51db03 + lock-hold counters 64156dcb) + pa16 probe v3 (nm run/pa20-nm.txt; bzImage rebuildable from the pinned commit) | syscost=1 sprobe=0 | 780 s | magazine before/after (section 2f). Global class-lock sections 741.7M -> 19.7M (-97.3%); small_alloc REST 176.1 -> 133.2 s (-24.3%); IF=0 23.0% of machine; W3 census unchanged |
+| `pa-pa21-tick-tcg` | main@b8f686a6 current-main rebuild, no probe patch (target/x86_64-unknown-none/debug/bzImage) | syscost=1 sprobe=0, **ACCEL=tcg** | 120 s | leg-13 accel-matrix datapoint (section 2g): tick cadence under TCG = WW ages pinned at exactly 1001 ms (53/53), boot tick check `[fail]` 0 jiffies/150 ms, calibration print identical to KVM ("TSC 4292 MHz, LAPIC 62 MHz" — the host TSC shows through under TCG too). Closes "KVM artifact" for the 1000 ms family |
+| `pa-pa22-tick-lvl7` | same kernel as pa21 | syscost=1 sprobe=0 loglevel=7, ACCEL=tcg | 60 s | leg-13 diagnostic: verbose console shifts WW ages to organic values (376 ms class, idle pid=0) — the ~1 s pinning is the quiet-boot steady state, not a fixed probe artifact; `tsc-clock: fell behind 110854` (11 ms slips) shows the TSC clock itself is fine; WW2 heartbeat did NOT print (Hrtimer-softirq dispatch condition unmet — open item) |
 | `pa19-unittest-main` | main@298b69fe (= this worktree, kernel/ byte-identical to main), riscv64 unit-test build, no probe | (unit test) | ~90 s | riscv64 make-test reproduction boot: instant truncated `trap: KERNPANIC pfa` before any kernel print; `-d int` trace (pa19-qemu-int.log) = store faults at trap_entry+0xda descending 0x120/frame from sp=_stack_top-8 — boot stack outside the 12MB early window (image 12.67MB). See NINTH LEG below |
 | `pa19-unittest-fix` | same + RUX-RISCV-LAYOUT-2 window/heap fix (this branch) | (unit test) | ~150 s | verification boot: full unit suite runs, 60 ok / 3 FAIL (stale config assertions, pre-existing: KERNEL_HEAP_SIZE 512-vs-1024 bc0ffbee, FUTEX_* 256/64-vs-8192/512 08fcfc04) |
 
@@ -371,9 +373,22 @@ Gate events + pa18 (11:00-11:15):
   in the kernel), the census birth forensics (their lane),
   and the allocation-churn hunt (row 7's new priority).
 
-
-
-
+- **THIRTEENTH LEG (tick-cadence adjudication, section 2g)**: the
+  A-line's "kernel-mode IRQ-OFF-WINDOW 1000 ms" triage item is closed
+  — it is the x86_64 timer IRQ's own ~1 Hz effective cadence (nominal
+  100 Hz), identical under KVM and TCG (pa21/pa22), NOT interrupt-off
+  time (EFLAGS pair accounting still bounds closed cli at 3-5 ms) and
+  NOT a KVM sampling artifact. Boot tripwire `lapic tick check: 0
+  jiffies / 150ms [fail]` fires in every x86_64 boot and is ignored;
+  calibration prints a constant "LAPIC 62 MHz" across accels/hosts vs
+  ~625 KHz effective (~100x). WAKE-STRANDED strands quantize on the
+  1 s grid (sc200: 1000 ms x1488) — wedge census COUNTS stay valid,
+  their LATENCY readouts do not resolve below 1 s. Ranking v2.5 row
+  2b (F7); report v1.2 limitation 8 + ledger candidate
+  X86-TICK-CADENCE; brief's "TCG+syscost" premise corrected (all pa
+  boots have been KVM since pa1 — section 0). UI patrol: sc200-sc203
+  no markers (sc202 patrolled to t=1664 s, sc204 rolling at commit
+  time); PENDING rows stay PENDING.
 
 ## Verdict in one paragraph
 
@@ -1075,14 +1090,133 @@ Notes:
   main yet) is already far below the 1.7-1.9 s *per sandbox phase*
   telemetry, because a phase is dozens of mounts plus other work.
 
-## 4. Ranking table v2.4 (cost centers -> boot-time contribution)
+### 2g. THIRTEENTH LEG: the "1000 ms IRQ-OFF-WINDOW" family adjudicated — it is the timer's own ~1 Hz cadence, not interrupt-off time
 
+Coordinator's leg-13 brief carried A-line triage input: sc201's
+terminal "kernel-mode IRQ-OFF-WINDOW 1000 ms" and sc200's 1141
+kernel-mode hits, against this lane's "max closed cli 4 ms" — framed
+as KVM-sampling-artifact vs real. The adjudication below closes it;
+**neither**: the 1000 ms family is the x86_64 timer IRQ's own delivery
+cadence, and it is not KVM-specific (identical under TCG).
+
+Evidence ladder (all logs in the shared run dirs):
+
+1. **Age quantization.** WW IRQ-OFF-WINDOW ages are pinned at
+   EXACTLY 1000 ms under KVM — sc200: 1212/1223 hits, sc201: 280/288,
+   sc202: 89/93; my pa15: 346/350; pa16/17/18/20 flagships: rate-gate
+   saturated whole-boot (340-364 prints each, one per ~2.15 s = the 2 s
+   gate ceiling). Under TCG (pa21): exactly 1001 ms, 53/53. Organic
+   critical sections do not quantize to the millisecond across 1200+
+   samples; a periodic timer's period does. (pa22, loglevel=7, shows
+   the complementary fact: with verbose console load the ages become
+   organic 376 ms-class values — the ~1 s pin is the quiet-boot steady
+   state.)
+2. **Boot tripwire.** `timer: lapic tick check: 0 jiffies / 150ms
+   [fail]` prints in EVERY x86_64 boot carrying the check — mine
+   (pa13/pa15smoke/pa16smoke, KVM; pa21/pa22, TCG) and A-line's
+   (sc200/201/202). The armed periodic LAPIC timer delivers zero ticks
+   in a 150 ms busy-spin with IRQs enabled, right after arming; the
+   check fails and the boot continues anyway.
+3. **Calibration is self-inconsistent with behavior.** Every boot,
+   every accel, every host load prints the same "TSC 4292 MHz, LAPIC
+   62 MHz". 62.5 MHz/100 (the arm path: ticks = freq/KERNEL_HZ) gives
+   count 625000; the observed 1.000 s period implies an effective
+   decrement of ~625 KHz — a factor ~100 below the calibrated rate.
+   (625 KHz = 10 MHz/16, and 62.5 MHz = 1 GHz/16 — the divide-by-16
+   appears twice with a 100x between calibration and running; the
+   exact arithmetic — calibration window via PIT ch2 OUT2 under
+   QEMU/KVM vs x2APIC divide semantics vs arm-path count — needs one
+   live probe boot with a period print, not resolvable statically.)
+4. **Not IF=0.** The EFLAGS-exact pair accounting (pa16 probe v3,
+   heal 0.02%, miss=0) bounds every closed cli section at 3-5 ms in
+   all flagship boots. No 1000 ms interrupt-off window exists. The
+   WW-age probe measures wall gaps between timer-IRQ arrivals
+   (TSC-domain read_time), which on this lane equals the timer period.
+5. **"Kernel-mode" is incidental.** sc200: 1089 kernel-mode / 133
+   user / 1 idle; the machine runs 83-90% kernel-mode, so ~9 in 10
+   rare recovery ticks land on kernel text. Symbolizing pa21's rips
+   against the exact pa21 build: `wfi`, `enable_irq`, `restore_irq`
+   (the idle loop's wake path), `atomic_load`, `Vec::drop` — the
+   interrupted frame is wherever the CPU was, not a culprit. A-line's
+   "sc201 terminal kernel-mode 1000 ms" is the same incidental
+   landing inside the wedge storm.
+6. **Downstream quantization (A-line relevance).** WAKE-STRANDED
+   strands quantize on the same grid: sc200 histogram 1000 ms x1488,
+   2001 ms x312, 1478 x56, 2478 x10; sc201: 1000 x490, 1480 x10,
+   2001 x5. Every strand=1000/2001 ms in a wedge roll means "one/two
+   ticks late", not a measured millisecond latency — sub-second wake
+   losses are unresolvable on x86_64 rolls until the tick is fixed.
+   Their TIMER-SOFTIRQ-STALL single lines per boot are the same
+   family. This does NOT take over their wedge triage: the wedge
+   shapes (CRAWL/soft-wedge, WAKE-STRANDED populations, PREEMPT-LEAK)
+   are census counts and stay valid; only their LATENCY readouts are
+   grid-limited.
+7. **Correction to the brief's premise.** The brief called our
+   "max 4 ms cli" finding "TCG+syscost" — the run table has said
+   since pa1 that ALL measurement boots are KVM q35 (section 0 of
+   the report; F6's note). There was never a TCG-vs-KVM divergence in
+   our data; the divergence was probe-vs-probe (WW wall-gap vs
+   EFLAGS pair accounting) in the same KVM environment, and pa21/pa22
+   (TCG) now close the matrix on the other axis as well: same
+   behavior, both accels.
+
+What stands, what carries a caveat (also report v1.2 limitation 8):
+STANDS — all EFLAGS-exact numbers (IF=0 23-25%, REST split, 1.3-1.4 M
+sections/s, max segment 3-5 ms, magazine/GRQ/fdtable/waitqueue/epoll
+walls), console per-byte costs, syscall volumes, milestone wall times
+(jiffies recompute from the TSC grid per arrival, so t= tracks wall —
+pa21's t=60 s dump landed at wall +65.8 s). CAVEAT — tick-mode u/k/i
+shares (sampled at the ACTUAL tick rate; phase-weighted, sparse in
+the ~1 Hz steady state — the 86-89% kernel figure is a real share of
+tick samples, but tick samples are no longer 200/boot-second), per-op
+MAXES (the 1.0 s cluster is tick-grid contamination until re-measured
+after a tick fix), nanosleep/futex tail ATTRIBUTION (the 1 s grid
+inflates them; F3 counts stand, F3 latencies do not resolve below
+1 s).
+
+Open items filed for the next legs / other lanes:
+- **Fix candidate X86-TICK-CADENCE** (report ledger): probe the live
+  period after arming (arm, busy-wait 200 ms, assert ticks>0 AND
+  period<=2x nominal; the [fail] check already exists and is ignored
+  — make it fatal or fix-and-retry). Owner: whoever owns
+  kernel/src/drivers/intc/apic.rs. Then this lane reruns the pa18-style
+  boot: expected collapses are the WW saturation, the 1.0 s maxes,
+  WAKE-STRANDED quantization, and (hypothesis) part of the
+  nanosleep/futex tails and deep-boot phase latencies.
+- **WW2 heartbeat availability**: pa22 (loglevel=7) still printed no
+  WW/WW2 heartbeat — the 1 Hz heartbeat rides the Hrtimer softirq,
+  whose dispatch condition was not met on that boot; getting
+  per-second WW_TICK_IRQ deltas on a normal boot (dfx switch or
+  moving the print into the SYSCOST dump) would close the residual
+  question of which boot phases feed the u/k/i counters (they
+  accumulate ~91-99/s/CPU on average while steady-state stamps are
+  ~1/s — a faster early phase is the likely reconciliation; pa22's
+  27 organic-age prints in 60 s vs pa21's 53/120 s steady-1001 s are
+  consistent with load-dependent cadence).
+- **UI-marker patrol** (leg-13 primary task): sc200 (died in the
+  storm family at 5595 quiet-con lines, userspace alive to t=2656 s),
+  sc201 (terminal storm), sc202 (patrolled to t=1664 s at leg close,
+  still in the wedge family, no markers), sc203 (died early, no SC-HB
+  reached), sc204 rolling at commit time. No
+  launcher.ready/OnForeground/ArkUI markers in any roll this leg; the
+  PENDING post-UI rows in report table 1 stay PENDING.
+
+
+
+
+
+## 4. Ranking table v2.5 (cost centers -> boot-time contribution)
+
+v2.5 = v2.4 + row 2b (leg 13: the x86_64 tick-cadence adjudication —
+the "1000 ms IRQ-OFF-WINDOW" family re-attributed from an IF=0
+suspect to the timer's own ~1 Hz delivery cadence; see section 2g).
 v2.4 = v2.3 refreshed by pa18 + pa20 (seventh session: the gate-A
 v1..v6 stacking retest and the gate-B magazine before/after — both
 wait-gates opened mid-leg and both ladders are now measured; GRQ
 -31% claim corrected to volume-coupled; TERM-DESCHED acceptance
 demonstrated). Contribution model unchanged: 2 vCPUs; kernel mode
-~83-90% of ticks (pa20 t=660: 88.1/83.2%).
+~83-90% of ticks (pa20 t=660: 88.1/83.2%; the u/k/i counters are
+themselves tick-sampled — cadence caveat in section 2g).
 
 | # | cost center | measured (pa13) | pa15/pa16/pa17 direct evidence | gap contribution | family |
 |---|---|---|---|---|---|
@@ -1090,6 +1224,7 @@ demonstrated). Contribution model unchanged: 2 vCPUs; kernel mode
 | 1b | REST section bulk (exact decomposition) | (inside #1) | small-alloc **MEASURED BEFORE/AFTER (pa18->pa20)**: global class-lock sections 741.7 M -> 19.7 M/boot (-97.3%, the 16.49x projection confirmed); REST wall 176.1 -> 133.2 s = 12.2% -> 9.2% of machine (**the -24% wall ceiling is the per-op local irqsave floor, 751 M ops @136-168 ns — the lever left is churn volume, not locking**); schedule() GRQ 2.7-4.6% (avg flat 5.1-6.1 us pa16-pa18, 6.7 us pa20 deepest boot; wall volume-coupled — pa17's -31% claim corrected in 2e); fdtable get_file 1.9-2.2%; waitqueue family 1.9-2.3%; EPOLL_WAKE_REGISTRY 1.0-1.2%; deferred_free 0.7-0.8% — 97-99% attributed to file:line | **the F1 lever list** — allocator magazines LANDED AND MEASURED; GRQ pick (launcher lane; full refactor deferred as intersecting the kill-path machinery); fdtable read path, waitqueue batching, epoll registry (launcher lane — sharding design in hand, their fb2a1354); allocation-churn hunt rises in priority (now the allocator's main lever) | F1/F5 |
 | 1a | Console/UART emission (sub-item of F1) | outb/inb in recovery rips; cli page shares inb/outb | pa15: 4.34 M bytes, 5.0% of machine; pa16: 1.55 M bytes @ t=720, 1.7%; pa17: 5.61 M bytes, 6.1%; pa18: 1.5 M bytes, 1.4%; pa20: 1.34 M bytes, 1.3% — **per-byte cost stable 13.2-18.5 us across 5 boots; volume (and thus machine share) swings 1.3-6.1% with boot depth**; producers init/<irq>/FFRT-worker; task-context emission 100% IF=1 | medium CPU (1-6%) + **large latency multiplier** under host load | F1 |
 | 2 | Scheduler wake-loss (WAKE-RUN-LEAK; lying busy slots + linked-starving) | 702 leak prints/780 s; census 16 lying + 7 linked | **pa18+pa20 (full v1..v6 stack, pre/post magazine): 678/677 prints / 31/32 refusals (27/25 lying) / 10-11 PREEMPT-LEAK / TERM-DESCHED=8 BOTH boots — the v1 trigger shape fires ~8/boot and every occurrence survives; census lying-slot population unchanged by the entire stack AND by the allocator** (pa17: 593/31/22+7/8/0) — they are born on another path; birth forensics continues on the launcher lane | **large** — unchanged; still the wall-clock driver | F3 |
+| 2b | x86_64 timer-IRQ cadence ~1 Hz (diagnosed leg 13, section 2g) | 316 IRQ-OFF-WINDOW/780 s at age~=1000 ms (pa13; re-read 2g: cadence, not IF=0) | WW inter-tick age pinned at EXACTLY 1000 ms (KVM) / 1001 ms (TCG) in every quiet boot, both accels, whole-boot gate saturation in pa16-pa20 (340-364 prints each); boot tripwire `lapic tick check: 0 jiffies / 150ms [fail]` in every x86_64 boot, ignored; calibration print constant "LAPIC 62 MHz" across accels/hosts vs ~625 KHz effective decrement (~100x); recovery rips land in wfi/enable_irq/restore_irq idle path (incidental — symbolized against the pa21 build); WAKE-STRANDED strands quantize on the 1 s grid (sc200: 1000 ms x1488, 2001 ms x312) | **latency amplifier, share unquantified** — every timed wait rounds up to the 1 s grid; feeds F3's measured latencies and the 1.0 s per-op maxes; fix is cheap and gated (boot check exists but is ignored) | F7 |
 | 3 | hilogd.server socket dual-drain + sysevent_source + connect-retry | 26.5 M calls by t=720 = ~25% of ALL syscalls | pa16: 10.6 M recvfrom + 10.7 M recvmsg; pa17: 10.08 M + 10.29 M (1:1, avg 116/9 us, recvfrom max 393 s = wake-tail victim); writev 14.6-15.2 M; connect 2.47-2.55 M | medium — volume is OH userspace; kernel levers = per-call recv cost + the wake-loss tail | F2 |
 | 4 | ext4 metadata + write path (open/stat/getdents/fsync/pwrite/mkdir) | open 235 us, newfstatat 206 us, getdents 643 us, fsync avg 16 ms | pa17: open avg 1893 us (max 100 s — stall-tail inflated, see 2d), newfstatat 294 us, getdents 1043 us; medians unchanged | medium (~300-500 CPU-s/boot at this horizon) | F4 |
 | 5 | Atomic/CAS contention (atomic glue page + fetch_update family) | 16% of kernel ticks | pa16: glue page 20% of ticks — RMW owners named (small_alloc/fdtable/GRQ sections, row 1b) | medium — fixes fold into 1b | F5 |
@@ -1188,6 +1323,14 @@ specific amplification. Measured result on current main:
   measurement and the reference are KVM; the vDSO-absence cost is
   already amortized by the TSC timekeeper fix — 114M clock_gettime at
   <1 us each).
+- **F7 x86_64 tick-cadence — CONFIRMED, diagnosed leg 13 (section
+  2g).** The timer IRQ delivers at ~1 Hz effective (nominal 100 Hz)
+  on the OH x86_64 lane, under BOTH KVM and TCG. Not an IF=0 family
+  (EFLAGS pair accounting: max closed segment 3-5 ms). It quantizes
+  every tick/wake-derived latency on the lane to a 1 s grid and is a
+  confounder for F3's latency measurements (counts unaffected). Fix
+  candidate filed in the report's ledger; perf lane retests when it
+  lands.
 
 The per-page/per-byte family, historically the biggest (1.5 s/file
 fault), is verified fixed (see section 6).
