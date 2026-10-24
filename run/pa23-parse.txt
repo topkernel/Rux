@@ -1,0 +1,69 @@
+=== last dump t=540s ===
+ticks: c0=10115/43101/662 c1=8872/44474/536
+cpu0: user 18.8% kernel 80.0% idle 1.2% (n=53878)
+cpu1: user 16.5% kernel 82.5% idle 1.0% (n=53882)
+
+=== syscall table (top 40 by total wall) ===
+nr     name                    n     avg_us       max_ms       tot_ms
+202    futex              143894     362503       325375     52162062
+16     ioctl               32291    1333393       446865     43056600
+281    epoll_pwait         76511     135689       301759     10381702
+35     nanosleep           13984     178674       295004      2498581
+7      ?                     935    2181464       300003      2039669
+45     recvfrom           449890       2755       175114      1239814
+0      read                36528      14660         7531       535504
+2      open               191189        943         1170       180398
+20     writev             470215        192           20        90720
+262    newfstatat          32511       2033          610        66099
+17     pread64              8617       7032         2827        60600
+228    clock_gettime     1686302         31          414        52515
+11     munmap              83882        613          239        51466
+9      mmap               141484        356           55        50370
+217    getdents64           6880       4752          828        32694
+83     mkdir                 775      39690         3101        30759
+10     mprotect            25699       1060           33        27265
+47     recvmsg            439180         56            4        24940
+18     pwrite64             1240      20022         1168        24827
+57     fork                  114     150732          888        17183
+75     fdatasync             329      37229         2171        12248
+61     wait4                4072       2941         5663        11976
+42     connect             19414        507            5         9851
+1      write              125008         67          560         8428
+89     readlink            12735        604          159         7694
+268    fchmodat            26590        288            6         7667
+25     mremap               8034        930            6         7475
+87     unlink                 93      59676         1688         5549
+3      close               32930        143            3         4737
+90     chmod                1223       3820          458         4672
+21     access               5691        802          151         4567
+257    openat               2805       1611           17         4519
+4      stat                 3593       1079          712         3880
+59     execve                110      33321          230         3665
+92     chown                 526       6340          227         3335
+74     fsync                  45      69134         1743         3111
+128    rt_sigtimedwait        215       8194           27         1761
+44     sendto              14211        106            4         1514
+286    timerfd_settime      21207         59            3         1263
+28     madvise                88      10655          393          937
+
+=== kernel-rip pages (top 20) ===
+0xffffffff8051b000 n=18556   24% 
+0xffffffff8060b000 n=4152     5% 
+0xffffffff8075a000 n=3115     4% 
+0xffffffff80471000 n=3110     4% 
+0xffffffff80759000 n=1546     2% 
+0xffffffff80642000 n=1510     1% 
+0xffffffff8060a000 n=1506     1% 
+0xffffffff804da000 n=1439     1% 
+0xffffffff8056b000 n=1335     1% 
+0xffffffff805c9000 n=1330     1% 
+0xffffffff80719000 n=889      1% 
+0xffffffff80472000 n=841      1% 
+0xffffffff80779000 n=817      1% 
+0xffffffff80290000 n=789      1% 
+0xffffffff8041b000 n=669      0% 
+0xffffffff8044a000 n=654      0% 
+0xffffffff805ca000 n=612      0% 
+0xffffffff80551000 n=602      0% 
+0xffffffff80702000 n=601      0% 
+0xffffffff806ea000 n=597      0% 

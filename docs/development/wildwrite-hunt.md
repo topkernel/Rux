@@ -2957,3 +2957,328 @@ Surface (private image, shared images untouched):
   zero fires, zero false positives.
 - Both chains hunting at max capture config (19-point set + RO tripwire
   + canary) on two load profiles (standard storm; sdc-cycle storm).
+
+## Session 32 (reconstructed from artifacts — quota death at ~02:39, no
+## archive written at the time)
+
+- Claimed 01:28 with BOTH chains alive (inherited from the s31 relaunch:
+  r57 / load-r4 in flight, proctree in run/ww-s32-proctree.txt).
+- ~01:38 sweep (session-31 window death) killed both rounds at ~14 min —
+  clean partials, 0 markers. Relaunched immediately at 01:38:55 (main
+  from r57, load from r4; logs run/ww-chain2-s32.log / ww-loadchain-s32.log).
+- **MAIN r57 (full): CLEAN** — 78348 lines, 0 WW-HIT / 0 heals /
+  0 panics, wildwatch try 0. Driver advanced to r58 (02:23:56).
+- **LOAD r4 (full): CLEAN** — 773 sdc exec cycles, 0 gdb hits, 0 capture
+  markers, storm healthy (wakes 10.42M, avg_run 3ms, strand_max 43.5s =
+  the >=3-QEMU contention class), 166490 serial lines. Driver advanced
+  to r5 (02:23:58).
+- r58 + load-r5 started 02:23:56/58; the quota death killed the s32
+  window at 02:38:55, ~15/45 into both — clean partials armed to the
+  last line: r58 53664 lines (wakes 3.54M, strand_max 8.8s healthy
+  class, 0 markers), load-r5 83634 lines (wakes 2.78M, 248 sdc execs,
+  0 markers). The load-r5 "signal 15 from (timeout)" line is the
+  timeout process RELAYING the sweep's SIGTERM to its QEMU, not a
+  budget expiry.
+- No commits from s32 (HEAD stayed 3b8bf325; untracked round artifacts
+  only). Cumulative at s32 close: **0 WW-HIT across r1-r57 complete
+  rounds** (r58 partial x2), 0 META-SMASH; load surface at 5 full armed
+  load-hours (p1 + r1-r4 = ~3452 sdc exec cycles), zero fires, zero
+  false positives.
+
+## Session 33 (continuation agent — both chains reclaimed dead, relaunched r58 / load-r5)
+
+- Claim 03:29: BOTH chains dead (the s32 quota-death sweep), no QEMUs of
+  any line except a later-starting perf-audit KVM boot (foreign,
+  untouched). Host up since 17:09 (no reboot), load 0.37, 49G free —
+  capacity fine for the two chain QEMUs.
+- Frozen hunt pair verified intact (bzImage md5 bf779126...; GUARD=
+  0xffffffff80a7a000 matches every arm line). Stop files absent.
+- Relaunched at 03:30:26 as this session's background tasks:
+  main `./run/ww-chain2.sh ww-s2 100 12371 58` (log
+  run/ww-chain2-s33.log), load `./run/ww-loadchain.sh wwload 100
+  12381 5` (log run/ww-loadchain-s33.log). Both verified armed
+  (WW-ARMED 19, GUARD matches) and storming within 3 min. Process trees
+  in run/ww-s33-proctree.txt — kill the DRIVER ROOT
+  (ww-chain2.sh / ww-loadchain.sh shell) first, then the round QEMU.
+- Standing state for the successor (if both chains died with this
+  window): same recipe, next round numbers from the chain logs' last
+  "run N/100 starting" lines.
+
+## Session 34 (continuation agent — chains claimed ALIVE, r58/load-r5 full-clean)
+
+- Claim 03:35: s33's chains were STILL ALIVE (the handoff's "may have
+  died with its window" was stale — the s33 zcode-cli ancestor 9865 was
+  alive, wrappers not yet reaped; the s10 lesson held again: ps before
+  trusting a dead-chain assumption). Rounds r58/load-r5 were 5 min in —
+  claimed as-is, no restart. Both WW-ARMED 19 (GUARD=0xffffffff80a7a000
+  = the frozen pair), wildwatch try 0, storming. Proctree in
+  run/ww-s34-proctree.txt; foreign QEMU: perf-audit KVM 105707,
+  untouched. Host in the >=3-QEMU contention class (2 chain TCG + 1
+  foreign KVM) — strand readings inflated, capture markers exact.
+- Watch cadence ~10 min (driver roots 104867/104897, WW-HIT in both gdb
+  logs, markers in both serials, line-count heartbeat). The chain
+  scripts' marker check runs between rounds; the manual polls cover
+  mid-round.
+- **MAIN r58 (FULL 2700 s): CLEAN** — 76639 serial lines, wakes 12.85M,
+  ticks [100,100], avg_run 2ms, 994 forks, strand_max 9782ms (healthy
+  class), 0 WW-HIT / 0 heals / 0 KERNPANIC/ALLOCTHROW, wildwatch armed
+  try 0. Driver self-advanced to r59 (04:15:27).
+- **LOAD r5 (FULL 2700 s): CLEAN** — 165628 lines, wakes 11.17M, 2642
+  forks, **813 sdc exec cycles**, strand_max 40.1s (the documented
+  >=3-QEMU contention class), 0 hits / 0 markers, armed try 0. Driver
+  self-advanced to load-r6 (04:15:29).
+- Cumulative: **0 WW-HIT across r1-r58 complete rounds** (plus partials),
+  0 META-SMASH. Load surface: p1 + r1-r5 = **4265 sdc exec cycles over
+  6 full armed load-hours**, zero fires, zero false positives.
+- Chains continue at r59/load-r6 (qemu 116201/116256, armed; budget ends
+  ~05:00:27/29).
+
+### Session 34 continued — 04:30 sweep, relaunch, r59/load-r6 full-clean
+
+- The s33 window-death sweep arrived 04:30:26: both trees (driver
+  roots 104867/104897 + both round QEMUs) reaped mid-round at 15/45.
+  Both partials clean: r59-first-attempt 48008 lines, load-r6-first
+  77644 lines, 0 hits / 0 markers / armed to the last line. (Foreign
+  perf-audit KVM also gone with the same sweep's window; a samgr
+  foreign QEMU appeared after — untouched.)
+- Relaunched 04:35:36 as THIS session's background tasks, main from r59
+  (log run/ww-chain2-s34.log), load from r6 (run/ww-loadchain-s34.log);
+  new driver roots 120674/120704, proctree updated in
+  run/ww-s34-proctree.txt. Both verified armed (WW-ARMED 19, GUARD
+  matches) and storming within 3 min.
+- **MAIN r59 (FULL 2700 s, relaunched): CLEAN** — 76208 lines, wakes
+  12.98M, 959 forks, avg_run 2ms, strand_max 4035ms (healthiest class),
+  0 WW-HIT / 0 heals / 0 panics, wildwatch try 0. Driver self-advanced
+  to r60 (05:20:36).
+- **LOAD r6 (FULL 2700 s, relaunched): CLEAN** — 169172 lines, wakes
+  10.85M, 2690 forks, **829 sdc exec cycles**, strand_max 37.8s
+  (contention class), 0 hits / 0 markers, armed try 0. Driver
+  self-advanced to load-r7 (05:20:39).
+- Cumulative: **0 WW-HIT across r1-r59 complete rounds** (plus partials),
+  0 META-SMASH. Load surface: p1 + r1-r6 = **5094 sdc exec cycles over
+  7 full armed load-hours**, zero fires, zero false positives.
+- Chains at r60/load-r7 (qemu 130997/131044, armed; budget ends ~06:05).
+
+### Session 34 incident response — pa15 probe crash (coordinator relay): the WW IRQ-OFF-WINDOW walk must never touch a user rsp
+
+Relay: the perf line's pa15 boot KERNPANIC'd at t=418s on cpu1 —
+badaddr=0x7ff090411000 (USER page), rip symbolizing into
+handle_timer_tick, right after a "WW: IRQ-OFF-WINDOW ... rip=0x7ff0007c7a69
+rsp=0x7ff090410fc8" line (a USER frame). Confirmed MY lane's probe
+(aa742f18, UART perf gate round 2):
+
+- Bug: the probe walks 12 stack words at regs.rsp guarded ONLY by
+  kernel_ptr_canonical() — and user addresses are canonical on x86_64.
+  A recovery tick interrupting a user frame walked the USER stack; the
+  8th word (rsp+0x38) crossed into the stack's first unmapped page →
+  kernel #PF → KERNPANIC. The probe itself was the panic producer on a
+  healthy boot (perf line's log: /home/william/rux-agents/perf-audit/
+  run/pa-pa15-serial.log line 23293).
+- Fix (branch, both arches compile clean): (1) the walk now requires
+  !regs.user_mode() && rsp >= 0xffff_8000_0000_0000 && canonical —
+  user frames print " user-frame" and skip the walk (they carry no
+  kernel return addresses); (2) the same hole hardened in
+  pt_regs_rip_for_cpu (x86_64 + riscv64 twins: high-half bound before
+  deref of the possibly-torn CURRENT_PT_REGS slot). TIMER-SOFTIRQ-STALL
+  (timer.rs) prints values only — no deref, untouched.
+- Hunt impact assessment: the FROZEN kernel carries the unfixed probe,
+  and the probe fires regularly on chain boots (39 of ~67 round logs,
+  hundreds of firings — r56: 28, load-r3: 40) with ZERO crashes: the
+  crash needs the user-frame recovery tick AND rsp within 0x38 of an
+  unmapped user page. No mid-hunt refreeze; the fix rides the next
+  scheduled one.
+- **False-capture triage signature (for any chain KERNPANIC from here
+  on)**: badaddr in the USER half + rip inside handle_timer_tick + a
+  preceding WW: IRQ-OFF-WINDOW line with user rip/rsp on that cpu =
+  the probe bug, NOT a wild write. A REAL RO-trap capture has badaddr
+  inside the guard cluster (0xffffffff80a7a000-0xffffffff80a7bfff) and
+  rip at the wild writer's instruction. Triage before declaring a
+  capture; a probe-crash round is a clean-restart, not a milestone.
+- Smoke validation: ww-pafix1 (330 s OH boot, worktree bzImage at
+  HEAD+fix, dfx=wildwatch, port 12377): full budget, 45933 lines, 713
+  forks, 0 panics/canary/heals — and 456 IRQ-OFF-WINDOW firings with
+  ZERO crashes: 50 through the new user-frame skip (rsp values in the
+  pa15-geometry user stack-top region), 408 kernel walks. Both guard
+  branches exercised live.
+
+### Session 34 second relay (pa16): WW age=1000ms artifact + small_alloc lock queue item
+
+- pa16 relay (perf line, merged main 0634bc8f): (a) their EFLAGS-sampling
+  probe measured max closed-cli 4 ms for a whole boot while WW printed
+  359 age=1000ms lines; (b) mm/small_alloc.rs allocator cache lock =
+  12.6% of the whole machine (732M sections/boot at ~250 ns; the single
+  biggest IF=0 contributor) — fix direction: per-CPU freelist (my mm
+  lane, queued below).
+- **age artifact root cause: method, not arithmetic.** ww_tick_age_ms
+  (timer.rs) measures the WALL-CLOCK gap between timer-IRQ arrivals
+  (WW_TICK_LAST stamps at timer_interrupt_handler entry). A gap conflates
+  three causes no in-guest clock can separate: real IF=0 windows, host
+  vCPU steal (the CPU not scheduled — dominant under multi-QEMU host
+  contention; both pa16-KVM and my TCG smokes show it), and
+  tickless-style idle. Fix (2e41b614, trap.rs probe — the timer.rs side
+  is untouched territory): when the recovery tick lands on the IDLE
+  task the gap was idle/steal by construction — print " idle-wake" and
+  skip the culprit walk. Real-task frames keep the walk as a TRIAGE
+  HINT only: corroborate with an EFLAGS sampler (perf line's probe)
+  before reading age as IF=0. Both arches compile clean.
+- **Hunt-probe reading discipline going forward**: WW IRQ-OFF-WINDOW
+  lines under >=3-QEMU host contention are contention noise unless
+  corroborated; the wakewatch TIMER-SOFTIRQ-STALL report has the same
+  caveat for its tick_age field.
+
+### Session 34 chain ledger (post-relaunch 2)
+
+- r60 (FULL, relaunched): CLEAN — 97675 lines, wakes 12.43M, 1109
+  forks, strand_max 39.3s (contention class), 0 WW-HIT / 0 heals /
+  0 panics, armed try 0. Driver self-advanced to r61 (06:29:03).
+- load-r7 (FULL, relaunched): CLEAN — 167811 lines, wakes 9.46M, 2587
+  forks, **871 sdc exec cycles**, strand_max 8.7s (healthy class),
+  0 markers, armed try 0. Driver self-advanced to load-r8 (06:29:06).
+- Cumulative: **0 WW-HIT across r1-r60 complete rounds** (plus partials),
+  0 META-SMASH. Load surface: p1 + r1-r7 = **5965 sdc exec cycles over
+  8 full armed load-hours**, zero fires, zero false positives.
+
+## Session 35 (continuation agent — s34 quota-death successor: allocator
+## magazine implemented + validated; chains at r63/load-r10)
+
+### Inheritance reconstruction (claim 08:34)
+
+- s34 died at ~08:33 mid-analysis (snapshot 2b932302). Artifact verdicts:
+  r61 FULL-clean (110841 lines), load-r8 FULL-clean (165897 lines);
+  r62/load-r9 were quota-death partials at 15/45, both clean (0 markers,
+  armed to the last line). Both chains DEAD at claim (no QEMUs); host
+  load 0.34, capacity fine.
+- Relaunched 08:35 as this session's tasks: main r62 (log
+  run/ww-chain2-s35.log), load r9 (run/ww-loadchain-s35.log); both
+  verified armed (WW-ARMED 19, GUARD=0xffffffff80a7a000, wildwatch
+  try 0). Proctree: run/ww-s35-proctree.txt.
+
+### Allocator per-CPU magazine (pa16 12.6% item) — implemented, s34
+### snapshot rewritten after audit found five defects
+
+- Audit of the in-flight snapshot (2b932302) — it compiled but was NOT
+  correct: (1) cpu_id() read outside the irq-off windows (a preempted
+  task can migrate between read and row access -> two CPUs on one row);
+  (2) the flush loop held a &mut to a magazine row ACROSS irq-off
+  windows (same migration hazard); (3) flush took the class lock once
+  PER ENTRY — as lock-heavy as pre-magazine, contradicting its own
+  comment; (4) obj_allocs/obj_frees double counting (refill+pop,
+  push+flush); (5) WORST: the fast push skipped the locked validation
+  entirely, so a misaligned/foreign pointer could park in a magazine
+  and be handed out by the next alloc pop on that CPU — defeating the
+  consume-and-taint hardening this hunt line's allocator contract
+  depends on.
+- Final design (cb51db03): fast pop/push under LOCAL irq-off with
+  cpu_id() read INSIDE every window; row-full flush snapshots the whole
+  row out under ONE window then batch-frees under ONE class-lock hold
+  (reclaimed pages return to the buddy after the unlock, as before);
+  push-time screening (fresh magic/cls read, alignment, free_count
+  head room inside the window) routes anything doubtful to the locked
+  body, so a bad pointer never parks; counters bump only in the locked
+  bodies. Deferred-free reclaim safety is by construction (a magazine
+  entry holds its page's slot un-accounted, so free_count can never
+  reach objs_per_page while the entry exists; holds inside batches
+  too). MAG_DEPTH=16, 4.3 KB of .bss.
+- Follow-up (this session, second commit): lock_holds counter per
+  class + census_line extended with locks=, and the periodic taskdump
+  (dfx=taskdump) now carries the SMALLALLOC census — locks vs
+  obj_allocs+obj_frees on the same line is the live traffic-ratio
+  readout (pre-magazine, every op took the lock).
+
+### Validation ladder (all green)
+
+- Unit tests: kernel/src/tests/small_alloc.rs, 7 cases (per-class
+  round-trip, 80/class churn across flush+refill boundaries, hot loop
+  x200, misaligned free consumed+tainted never circulated, 600-object
+  span with strided partial free + realloc, double-free smoke last on
+  purpose, census). riscv64 SMP4 unit boot: 7/7 PASS; 1093/1096 total —
+  the 3 fails are pre-existing config expectations (KERNEL_HEAP_SIZE
+  512MB vs the riscv64 128MiB clamp, FUTEX_WAITER_POOL_SIZE,
+  FUTEX_HASH_SIZE), untouched by this change.
+- Both arches compile clean (make build, make build-x86).
+- OH x86_64 soak, full 2700 s (run/ww-magval.sh, private serial
+  run/magval1-serial.log, dfx=wildwatch, -smp 2, same images/geometry
+  as the chain boots, worktree bzImage 08:51 = magazine without the
+  counter): **80458 lines, 0 KERNPANIC, 0 ALLOCTHROW, 0 heals/canary,
+  1454 forks, wildwatch armed to the end** — the 45-min 0-panic gate
+  PASSES. (WAKE-STRANDED 1001ms as last line = the documented
+  >=3-QEMU contention class; not a capture marker.)
+- A/B lock-traffic boot (dfx=wildwatch,taskdump, 900 s): see the
+  verdict block appended below.
+
+### Chain ledger (s35 ownership)
+
+- MAIN r62 (FULL 2700 s): CLEAN — 77561 lines, 0 WW-HIT / 0 heals, no
+  panics. Advanced to r63 (09:20:09).
+- LOAD r9 (FULL 2700 s): CLEAN — 165285 lines, 769 sdc cycles, storm
+  healthy, 0 markers. Advanced to load-r10 (09:20:15).
+- Cumulative: **0 WW-HIT across r1-r62 complete rounds** (plus
+  partials), 0 META-SMASH. Load surface: p1 + r1-r9 = **~6734 sdc
+  exec cycles over 10 full armed load-hours**, zero fires, zero false
+  positives.
+- 09:40 sweep: the session's background-task WRAPPERS were reaped (the
+  known periodic reaper class), but the DRIVER ROOTS survived
+  (176512 ww-chain2.sh / 176547 ww-loadchain.sh, reparented): r63 and
+  load-r10 kept storming through it — only the task handles died.
+  Watching continues via the serial logs; if a later sweep takes the
+  roots, relaunch recipe: ./run/ww-chain2.sh ww-s2 100 12371
+  <next-main-round> / ./run/ww-loadchain.sh wwload 100 12381
+  <next-load-round>.
+- Ops: my leftover riscv64 unit-test QEMU (188132, orphaned when the
+  run.sh timeout wrapper died before the child) was killed by exact
+  PID (own process, verified cmdline). Foreign samgr-callback QEMU
+  untouched.
+
+### A/B lock-traffic verdict (magval-ab, 900 s, dfx=wildwatch,periodic)
+
+- First attempt used the WRONG flag (dfx=...,taskdump = the keyboard
+  dump key; the periodic dump switch is `periodic` — 3000 jiffies/30 s
+  per timer.rs sc115). Killed by exact PID and relaunched with
+  dfx=wildwatch,periodic. Boot itself clean both times (0 panics).
+- Final cumulative census at 900 s (29 blocks): total obj ops
+  59,391,505 vs class-lock acquisitions 3,601,522 = **16.49x** — per
+  class 16.5-16.6x across all eight, i.e. the MAG_DEPTH=16 (+1 first
+  object) amortization realized almost exactly. Pre-magazine every op
+  took the lock, so a pa16-scale boot (732M sections) now takes
+  ~44M class-lock irqsave sections — the 12.6% item's lock traffic is
+  down ~94% (the per-op local irq-off windows that replace it are
+  O(tens of ns) and uncontended; the perf line's EFLAGS sampler can
+  confirm the wall-clock share independently).
+- The 900 s A/B boot doubles as a mini-soak of the final committed
+  image (counter + census hook): 75884 lines, 0 KERNPANIC, 0
+  ALLOCTHROW, storm healthy.
+
+### Session 35 close-out state
+
+- Chains at r64/load-r11 (started 10:05, driver roots 176512/176547,
+  reparented but alive; budget ends ~10:50). Watch via serial logs;
+  relaunch recipe in the ledger above if a sweep takes the roots.
+- Commits: cb51db03 (magazine rewrite + tests, pushed) + this
+  close-out (lock counter, census hook, A/B scripts, doc).
+- For the perf line (pa16): the magazine is on feature/wildwrite-hunt,
+  validated per the ladder above; merge-window ready.
+
+### Session 35 final ledger
+
+- MAIN r63 (FULL): CLEAN — 69205 lines, 0 WW-HIT / 0 heals / 0 panics.
+- LOAD r10 (FULL): CLEAN — 164395 lines, 740 sdc cycles, 0 markers.
+- MAIN r64 (FULL): CLEAN — 0 WW-HIT / 0 heals / 0 panics, armed try 0.
+- LOAD r11 (FULL): CLEAN — 164821 lines, 793 sdc cycles, 0 markers.
+- Cumulative: **0 WW-HIT across r1-r64 complete rounds** (plus
+  partials), 0 META-SMASH. Load surface: p1 + r1-r11 = **~8267 sdc
+  exec cycles over 12 full armed load-hours**, zero fires, zero false
+  positives.
+- Standing state for the successor: chains at r65/load-r12 (started
+  10:50:10/10:50:21, budget ends ~11:35), driver roots 176512/176547
+  (reparented orphans — check liveness FIRST with ps before assuming
+  death; the s10/s34 lesson). If dead, relaunch:
+    ./run/ww-chain2.sh  ww-s2  100 12371 <next-main-round>
+    ./run/ww-loadchain.sh wwload 100 12381 <next-load-round>
+  and record new driver roots in run/ww-s35-proctree.txt's successor.
+  False-capture triage signature unchanged (badaddr user half + rip in
+  handle_timer_tick after a user-frame WW IRQ-OFF-WINDOW line = probe
+  bug; real capture = badaddr inside the guard cluster
+  0xffffffff80a7a000-0xffffffff80a7bfff with rip at the writer).
+- The allocator magazine (cb51db03 + 64156dcb) is merge-window ready;
+  the perf line's EFLAGS sampler can independently confirm the
+  wall-clock share now that the lock traffic is down ~94%.
