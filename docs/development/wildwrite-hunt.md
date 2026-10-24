@@ -3282,3 +3282,40 @@ rsp=0x7ff090410fc8" line (a USER frame). Confirmed MY lane's probe
 - The allocator magazine (cb51db03 + 64156dcb) is merge-window ready;
   the perf line's EFLAGS sampler can independently confirm the
   wall-clock share now that the lock traffic is down ~94%.
+
+## Session 36 (continuation agent — pure watch session: chains claimed
+## alive at r65/load-r12, main merged)
+
+### Inheritance reconstruction (claim 11:04 Oct 24)
+
+- The handoff's "driver roots 176512/176547 may have survived" was
+  CORRECT for once — both chains ALIVE at claim (ps before assumption,
+  the s10/s34 lesson): driver roots 176512 (main, r65 in flight since
+  10:50:10) / 176547 (load, load-r12 since 10:50:21), rounds WW-ARMED 19
+  (GUARD=0xffffffff80a7a000, frozen pair md5-verified bf779126...),
+  wildwatch try 0, storming mid-round with 0 markers.
+- Merged origin/main 988e10c1 (fast-forward — s35's 39dc92b2 was already
+  its parent; branch == main now). Main brought the perf-audit line's
+  dfx/syscost.rs (+2041), trap.rs probe extensions, and mm/oom_kill /
+  arch page_fault additions; no conflicts, no action needed. The frozen
+  hunt pair is by design untouched by any of this.
+- Foreign QEMUs at claim: samgr-callback (212223), perf-audit (214304),
+  main-workspace (214924+) — untouched. Host in the >=3-QEMU heavy
+  contention class (load 8.15): strand readings inflated, capture
+  markers exact. No experiment QEMU launched this session on purpose.
+
+### Chain ledger (s36 ownership)
+
+- MAIN r65 (FULL 2700 s): CLEAN — 78752 lines, 0 WW-HIT / 0 heals, no
+  panics, armed try 0. Driver self-advanced to r66 (11:35:10).
+- LOAD r12 (FULL 2700 s): CLEAN — 167747 lines, 782 sdc exec cycles,
+  0 gdb hits / 0 capture markers, armed try 0. Driver self-advanced to
+  load-r13 (11:35:24).
+- Cumulative: **0 WW-HIT across r1-r65 complete rounds** (plus
+  partials), 0 META-SMASH. Load surface: p1 + r1-r12 = **~9049 sdc
+  exec cycles over 13 full armed load-hours**, zero fires, zero false
+  positives.
+- r66 / load-r13 in flight (started 11:35:10/11:35:24, budget ends
+  ~12:20; qemu 222524 / 222584, gdb 222608 / 222655, both armed).
+- Commits: 2617b3d2 (s36 claim record), f1f1ffec (r65/load-r12 round
+  artifacts).
