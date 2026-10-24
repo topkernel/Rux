@@ -4345,3 +4345,77 @@ LEG-17 FIX VERIFICATION (sc244, fix kernel c5c62bd5, 05:5x):
   death pattern: set_holds_async_slot(false) + dead_reply_to_sender
   + finish_work) so no BR_TRANSACTION ever hands out a reclaimed
   buffer. Sweep then drains async_todo wholesale instead of 1/s.
+
+LEG-17 CLOSE-OUT (06:05)
+
+MISSION ITEM 1 (census peek roll) - DONE, with a tooling detour that
+became the leg's real story:
+- censusat=<secs> boot param (776a8007): fixed-time census fire -
+  parked boots bank censuses now (the 80%-heap trigger never fired at
+  the 300MB park plateau; 3-of-3 first rolls parked).
+- peek v2/v3 (adaf71c7) had a sampling flaw: free slots keep stale
+  data (freelist link overwrites only the low u16) and FULL pages
+  (where the live population sits) are unreachable from the active
+  list. peek LIVE (full-heap magic+cls scan, free_count-authoritative
+  freelist filter) fixed both.
+
+THE ANSWER (mission item 2 - what the peek named):
+- c256 (341K live at park / 520K at floor): 98% = ArcInner<BinderTxn>
+  {strong=1, weak=1, from_proc=ONE daemon, sequential ids} - every
+  oneway txn whose receiver never issues BC_FREE_BUFFER pins its Arc
+  via the alloc block (cc54-family services).
+- c1024 (8.8K park / 84-95K floor): userva-first = Vec<BufBlock>
+  binder-alloc arrays + small = ArcInner<BinderThread> (2.5K at park).
+- MMs DO NOT LEAK (MM_NEWS/MM_DROPS counters: live 72@85 procs, 148@
+  158, 161@sc244 - tracks procs exactly). The leg-16 leak-via-mm
+  theory is dead. Total binder-family footprint at the floor ~=210MB
+  of 831MB - the mission's 100MB-class lever, twice over.
+
+FIXES LANDED (all on feature/samgr-callback):
+1. 6ba58562 fix(binder): sweep_stale_async - reclaims delivered-but-
+   never-freed txn buffers (30s grace past pick_j, 1/s per alloc,
+   BC_FREE-equivalent async-slot handoff that also unwedges parked
+   nodes) + reply_done marking + forced retry on alloc failure.
+   VERIFIED LIVE in sc244: 89 reclaims by t=537, c256 147/spawn vs
+   247/spawn pre-fix (-40%) at deeper state, zero canaries/panics
+   from the fix itself.
+   REMAINING (next leg, first item): the dominant population is
+   UNDELIVERED parked oneways (pick_j==0 on async_todo) - needs the
+   enq_j silence rule + txn retirement (node-death pattern:
+   set_holds_async_slot(false) + dead_reply_to_sender + finish_work)
+   so blocks free without ever handing a reclaimed buffer to
+   BR_TRANSACTION.
+2. 66858395 fix(dfx): KILLDUMP/RWFRZ foreign-task mm walks pin the mm
+   with address_space_arc (sc242 #GP: victim's exit_mm freed the VMA
+   btree mid-walk - the documented /proc-maps family, 3 sites).
+3. 4dee194f fix(dfx): kill_dump_tgid pins the victim's tasks with
+   try_pin/task_put (sc244 KERNPANIC at the launcher floor t=1466
+   pidmax 4834: freed task printed tid 0xdeadbeef then faulted).
+   Both #2 and #3 are ALWAYS-ON probes that killed exactly the
+   milestone-window boots - they were milestone blockers.
+4. Probes (dfx-gated, merge-neutral): censusat, peek v3/v4/LIVE,
+   MM_NEWS counter + live-mm OOM-ANAT line.
+
+ROLLS: sc231-235 (lottery losses + telemetry lessons + censusat),
+sc238/239 (park censuses), sc240 (advancing, floor pidmax 4833/heap
+799MB, wedged with schbd stranded - wake-path family), sc242 (#GP ->
+fix 2), sc243 (attribution census), sc244 (fix verification, floor
+pidmax 4834/793MB, panicked at the kill window -> fix 3), sc245 in
+flight (kernel bb830109 = all fixes, SECS=2700, shotmon on).
+
+SESSION COLLISIONS: a second instance of this line ran tonight
+(sc236/sc237 + a sc239 spawn-loop burst); coordinated via this file,
+lane rules recorded at 03:12/04:01. No foreign instance touched.
+Host: load 8-11 with 4-8 foreign QEMUs (wildwrite-hunt TCG pair +
+siblings); all my QEMUs/shotmons stopped by exact PID at close
+(sc245 finishes at its timeout ~06:31 - NEXT SESSION: check
+oh-sc245-serial.log for the census at t=600, KERNPANIC count, and
+launcher.ready/OnForeground; kill 557069 + its shotmon if still up).
+
+HONEST VERIFICATION STATUS: the 2-consecutive-advancing rule is NOT
+formally met on the final kernel (sc245 pending at close). The floor
+did NOT visibly move yet (sc244: 793MB@4738 ~ sc240's 799@4833) -
+expected, since the enq_j rule (the dominant population) is still
+open. What IS proven: the reclaim mechanism fires and reduces per-
+spawn residue 40%; both probe panics that killed milestone-window
+boots are fixed; the attribution is complete and quantitative.
