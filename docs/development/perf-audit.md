@@ -36,6 +36,7 @@ Runs (this worktree, `run/`):
 | `pa-pa21-tick-tcg` | main@b8f686a6 current-main rebuild, no probe patch (target/x86_64-unknown-none/debug/bzImage) | syscost=1 sprobe=0, **ACCEL=tcg** | 120 s | leg-13 accel-matrix datapoint (section 2g): tick cadence under TCG = WW ages pinned at exactly 1001 ms (53/53), boot tick check `[fail]` 0 jiffies/150 ms, calibration print identical to KVM ("TSC 4292 MHz, LAPIC 62 MHz" — the host TSC shows through under TCG too). Closes "KVM artifact" for the 1000 ms family |
 | `pa-pa22-tick-lvl7` | same kernel as pa21 | syscost=1 sprobe=0 loglevel=7, ACCEL=tcg | 60 s | leg-13 diagnostic: verbose console shifts WW ages to organic values (376 ms class, idle pid=0) — the ~1 s pinning is the quiet-boot steady state, not a fixed probe artifact; `tsc-clock: fell behind 110854` (11 ms slips) shows the TSC clock itself is fine; WW2 heartbeat did NOT print (Hrtimer-softirq dispatch condition unmet — open item) |
 | `pa-pa23-tickfix-tcg` | main@78460742 + the launcher lane's timer fix hunk ONLY (u128 multiply-then-shift, `tsc_delta_nominal`, extracted from samgr-callback wip 1e54319f; scratch branch `scratch/tickfix`, commit 9a451bef — pre-merge validation of the A-line fix, never for main) | syscost=1 sprobe=0, **ACCEL=tcg** | 600 s wall (~300 guest s, dumps t=60..540) | leg-15 tick-fix battery (section 2h): tripwire `[ok]` 16 jiffies/150 ms (pa21: 0 [fail]); tick counters 99.9/s/CPU sustained through all 9 dumps; WW IRQ-OFF-WINDOW 2 prints, organic ages 414/251 ms (pa21: 57 all at exactly 1001 ms); WAKE-STRANDED 0 (pa21: 100); TERM-DESCHED 8 and WAKE-REFUSED 32 — identical to pa21 (tick-independent census counts hold); nanosleep avg 1.87 s -> 88.5 ms (-21x) at same-horizon t=60; clock_gettime max 654 ms -> 3 ms; composer_host.ready +95.1 -> +89.9 s wall (-5.5%) |
+| `pa-pa24-tickfix-probe-tcg` | pa23's branch + pa16 probe v3 patch (scratch 520970f0; nm run/pa24-nm.txt) | syscost=1 sprobe=0, ACCEL=tcg | 600 s wall (dumps to t=540) | leg-15 battery item (b), EFLAGS-exact probe under the fix: IF=0 35.3% of machine at t=540 — TCG-inflated, not comparable to the KVM 23% band (official re-measure = post-merge KVM flagship); structure intact (heal 0.05-0.09% miss=0, max REST segment 13 ms ms-class, site table family shape kept) + expected new timer.rs:173/:317 site pair (true 100 Hz hrtimer dispatch); SOFTIRQ zone share 7.7-13.9% of IF=0 (was 1.0-1.7% pre-fix KVM — suppressed dispatch volume now real); WW/WAKE-STRANDED prints 0 all boot; tripwire `[ok]` |
 | `pa19-unittest-main` | main@298b69fe (= this worktree, kernel/ byte-identical to main), riscv64 unit-test build, no probe | (unit test) | ~90 s | riscv64 make-test reproduction boot: instant truncated `trap: KERNPANIC pfa` before any kernel print; `-d int` trace (pa19-qemu-int.log) = store faults at trap_entry+0xda descending 0x120/frame from sp=_stack_top-8 — boot stack outside the 12MB early window (image 12.67MB). See NINTH LEG below |
 | `pa19-unittest-fix` | same + RUX-RISCV-LAYOUT-2 window/heap fix (this branch) | (unit test) | ~150 s | verification boot: full unit suite runs, 60 ok / 3 FAIL (stale config assertions, pre-existing: KERNEL_HEAP_SIZE 512-vs-1024 bc0ffbee, FUTEX_* 256/64-vs-8192/512 08fcfc04) |
 
@@ -1308,6 +1309,35 @@ granularity; effect measured). The F3 wake-loss latencies and the
 deep-boot phase times are the quantities that were grid-contaminated
 and now resolve — the F3 vs F7 multiplier share question from report
 section 1 becomes measurable on the post-merge flagship run.
+
+**pa24-tickfix-probe-tcg** (same scratch branch + the pa16 probe v3
+patch, 520970f0; TCG, 600 s wall, dumps to t=540; nm table
+run/pa24-nm.txt, parse run/pa24-parse.txt) extends battery item (b)
+to the EFLAGS-exact probe under the fix:
+
+- Tripwire `[ok]` again; ticks 99.9/s/CPU at t=540; WW and
+  WAKE-STRANDED prints 0 for the whole boot (probe build).
+- IF=0 machine share reads **35.3% at t=540** (cpu0 182.8 s, cpu1
+  198.9 s over 2x540 s) — **TCG-inflated, NOT comparable to the KVM
+  23.0-23.7% flagship band**: under TCG the same section work
+  occupies more elapsed TSC time, and the newly-true timer dispatch
+  adds softirq-zone time. The official IF=0 re-measure stays the
+  post-merge KVM flagship (pa25) — this run's value is the STRUCTURE:
+  probe v3 meters intact (heal 0.05-0.09%, miss=0), max closed REST
+  segment 13 ms (ms-class, TCG-scaled — still no long cli section),
+  and the REST site table keeps its family shape (small_alloc.rs:413
+  22.8M opens @1324 ns and :247 22.9M @1110 ns on top, sched.rs:2140
+  GRQ 311K @71.7 us 3rd, deferred_free, fs/file.rs:676 fdtable
+  next) with one EXPECTED new pair: timer.rs:173/:317 (216K/142K
+  opens) — the hrtimer paths that true 100 Hz dispatch + resolvable
+  timed waits now exercise. No new IF=0 hotspot appeared with the
+  fix.
+- Zone-split shift worth recording: the SOFTIRQ zone's share grows
+  from the KVM pre-fix 1.0-1.7% to 7.7% (cpu0) / 13.9% (cpu1) of IF=0
+  time under the fix at TCG — the true timer softirq volume that the
+  broken clock had suppressed (fewer meaningful dispatches per
+  second). Part accel artifact, part real; the KVM flagship will
+  size the real part.
 
 ## 4. Ranking table v2.6 (cost centers -> boot-time contribution)
 

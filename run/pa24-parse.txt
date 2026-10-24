@@ -1,0 +1,97 @@
+=== last dump t=540s ===
+ticks: c0=4155/48950/837 c1=7546/45853/523
+cpu0: user 7.7% kernel 90.7% idle 1.6% (n=53942)
+cpu1: user 14.0% kernel 85.0% idle 1.0% (n=53922)
+
+=== syscall table (top 40 by total wall) ===
+nr     name                    n     avg_us       max_ms       tot_ms
+202    futex               84289     529862       315998     44661541
+16     ioctl               45158     700011       346311     31611115
+281    epoll_pwait         25812     294835       262307      7610291
+35     nanosleep            9903     253485       295002      2510264
+7      ?                     889    2341069       300007      2081210
+45     recvfrom           188938       4948        53751       934986
+0      read                29089      18284         9795       531875
+2      open               189564       1535          336       291132
+20     writev             292687        239            5        70028
+17     pread64              8169       7124          546        58203
+9      mmap               121812        412           69        50259
+42     connect             55255        825           72        45633
+61     wait4                2237      18650         8268        41720
+11     munmap              70846        565          123        40072
+262    newfstatat          10992       3403          598        37413
+83     mkdir                 784      37219         3333        29180
+228    clock_gettime      902226         31            4        28044
+10     mprotect            24036       1076           69        25865
+18     pwrite64             1240      19287          620        23916
+217    getdents64           2634       6360          576        16752
+57     fork                  113     145198          584        16407
+47     recvmsg            186913         79            4        14838
+75     fdatasync             329      28685          366         9437
+25     mremap               7546       1035            5         7811
+89     readlink             7723       1001          300         7731
+21     access               5391       1173          707         6326
+1      write               52164        119          140         6214
+3      close               32399        175            4         5696
+59     execve                109      51747         1770         5640
+87     unlink                 92      51445          269         4733
+268    fchmodat             9308        506          212         4711
+4      stat                 3109       1144          447         3557
+90     chmod                1223       2859          330         3497
+257    openat                757       2540           30         1923
+92     chown                 526       3040          238         1599
+44     sendto               3665        303            5         1112
+77     ftruncate             134       7588          139         1016
+6      lstat                1329        730            4          970
+286    timerfd_settime      10999         83            3          921
+137    statfs               1060        741            3          785
+
+=== kernel-rip pages (top 20) ===
+0xffffffff80685000 n=29464   34% _RNvNvNtCshgE7ic3rT0S_4core3ptr25swap_nonoverlapping_bytes25swap_nonoverlapping_shortCsgiC +0xf0
+0xffffffff80472000 n=4656     5% _RINvNtNtCshgE7ic3rT0S_4core4sync6atomic11atomic_loadONtNtNtCsgiCqCJ1KYcj_3rux2fs6rootfs16 +0x0
+0xffffffff8075e000 n=4225     4% _RNvXs0_CslyHnTMd0Oy9_3logNtB5_5LevelNtNtNtCshgE7ic3rT0S_4core3str6traits7FromStr8from_str +0x90
+0xffffffff8060c000 n=3855     4% _RNvNtNtCsgiCqCJ1KYcj_3rux7syscall6signal9sys_tkill +0x20
+0xffffffff8060d000 n=2717     3% _RNvMsQ_NtNtCshgE7ic3rT0S_4core4sync6atomicINtB5_6AtomicmE8fetch_orCsgiCqCJ1KYcj_3rux +0x110
+0xffffffff80686000 n=1785     2% _RNvNtNtNtCsgiCqCJ1KYcj_3rux4arch6x86_643cpu11disable_irqB7_ +0x0
+0xffffffff80646000 n=1744     2% _RNvNtNtCsgiCqCJ1KYcj_3rux3dfx7syscost14note_read_fail +0xf0
+0xffffffff80643000 n=1394     1% _RNvNtNtCsgiCqCJ1KYcj_3rux3dfx7syscost10rip_sampleB5_ +0x60
+0xffffffff80644000 n=1349     1% _RNvNtNtCsgiCqCJ1KYcj_3rux3dfx7syscost12irq_note_offB5_ +0xa0
+0xffffffff804dd000 n=1015     1% _RNvNtNtCsgiCqCJ1KYcj_3rux2mm15buddy_allocator19buddy_meta_selftest +0x4c0
+0xffffffff8075c000 n=999      1% _RNvXsP_NtCskPhSfSqUNT1_5alloc6stringNtB5_6StringINtNtCshgE7ic3rT0S_4core7convert4FromINtN +0x90
+0xffffffff805cb000 n=959      1% _RNCINvMs3_NtNtNtCskPhSfSqUNT1_5alloc11collections5btree8navigateINtB8_9LeafRangeNtNtNtBa_ +0x10
+0xffffffff80253000 n=868      1% _RNvMNtNtCsgiCqCJ1KYcj_3rux4sync8spinlockNtB2_11RawSpinlock11clear_ownerB6_ +0x0
+0xffffffff80426000 n=817      0% _RNvMsp_NtNtNtCskPhSfSqUNT1_5alloc11collections5btree8navigateINtNtB7_4node6HandleINtB10_7 +0x1b0
+0xffffffff8023a000 n=751      0% _RNvMNtNtCsgiCqCJ1KYcj_3rux4sync9semaphoreNtB2_9Semaphore3new +0x50
+0xffffffff8075d000 n=661      0% _RINvNtNtCshgE7ic3rT0S_4core4sync6atomic11atomic_loadjKb0_ECslyHnTMd0Oy9_3log +0x70
+0xffffffff80473000 n=633      0% _RINvNtNtCshgE7ic3rT0S_4core4sync6atomic12atomic_storetKb0_ECsgiCqCJ1KYcj_3rux +0x30
+0xffffffff8077d000 n=630      0% _RNvXsr_NtCshgE7ic3rT0S_4core3fmtShNtB5_5Debug3fmtB7_ +0x1e0
+0xffffffff8069e000 n=553      0% _RNvNtNtCsgiCqCJ1KYcj_3rux2mm11small_alloc12alloc_locked +0x110
+0xffffffff8069b000 n=520      0% _RNvNtNtNtCsgiCqCJ1KYcj_3rux2fs6procfs6sysctl26write_pipe_user_pages_soft +0x0
+
+=== IF=0 zones (latest dump) ===
+cpu0: tot=182777ms rest=157844ms hard=10752ms soft=14077ms uart=102ms nseg=48114474/536731/105679/45505 max=13ms/3ms/6ms/0ms heal=44324n/6832ms miss=0n OPEN zone=soft age=0ms
+cpu1: tot=198851ms rest=156132ms hard=14897ms soft=27558ms uart=262ms nseg=46109941/333851/177101/121261 max=13ms/2ms/5ms/0ms heal=25924n/7488ms miss=0n OPEN zone=rest age=0ms
+
+=== REST call sites (latest dump, top 20 by tot) ===
+file:line                                               n     tot_ms     avg_ns     max_ms
+kernel/src/sched/sched.rs:2140                    1252474      82273      65696         13
+kernel/src/mm/small_alloc.rs:413                 36378914      48587       1335          2
+kernel/src/mm/small_alloc.rs:247                 36479599      40770       1117          5
+kernel/src/fs/file.rs:676                         7711174      26073       3381          1
+kernel/src/timer.rs:173                           1038196      19496      18781          3
+kernel/src/timer.rs:317                            798596      14038      17580          1
+kernel/src/mm/deferred_free.rs:126                4126995      12386       3001          1
+kernel/src/sched/sched.rs:3746                     719376      11572      16088          2
+kernel/src/ipc/binder.rs:1070                      286025       7414      25924          3
+kernel/src/process/wait.rs:319                     729840       6853       9391          0
+kernel/src/process/wait.rs:287                     727514       4074       5601          0
+kernel/src/process/wait.rs:161                     450247       3084       6851          1
+kernel/src/process/wait.rs:138                     250167       2523      10087          0
+kernel/src/timer.rs:353                            162233       1685      10390          0
+kernel/src/syscall/memory.rs:1587                   18329       1414      77201          2
+kernel/src/mm/small_alloc.rs:266                    50945        720      14147          0
+kernel/src/mm/buddy_allocator.rs:737                37775        448      11873          0
+kernel/src/fs/file.rs:683                            4990        295      59319          0
+kernel/src/fs/bio.rs:1409                           36414        251       6914          0
+site-table sum: 283956 ms across 19 sites
+overflow row: n=316104 tot=4112ms avg=13010ns max=2ms (table-full + missed-edge opens)
