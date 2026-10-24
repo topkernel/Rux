@@ -1657,8 +1657,14 @@ monitor). A-line branch kernel with FXRS probes, not a pa-series
 measurement boot — recorded as context for the PENDING post-UI row,
 which stays PENDING until launcher.ready lands on a main-class kernel.
 
-## 4. Ranking table v2.7 (cost centers -> boot-time contribution)
+## 4. Ranking table v2.8 (cost centers -> boot-time contribution)
 
+v2.8 = v2.7 + the F4 anatomy (leg 18, pa29, section 2k): row 4's weight
+corrected to medium-small (~120-140 CPU-s/boot, all before t=150 s; the
+~300-500 estimate carried pa17's F3-inflated tails) and its evidence
+cell now carries the probe anatomy (no journal on this workload; all
+sync writes first-phase; dcache 90.5%; ext4 idle after t=150 s) with
+the fix-route map pointer.
 v2.7 = v2.6 + the official post-merge flagship (pa27, section 2j): row
 2b OFFICIALLY MEASURED on merged main (census and per-op numbers hold;
 wall-clock NOT moved — F3 + the binder cost classes own the deep-boot
@@ -1776,10 +1782,15 @@ specific amplification. Measured result on current main:
   it. It is also *caused* by F1 in part (a wake issued while the
   target CPU is cli-bound gets dropped/raced), forming a loop.
 - **F4 ext4/metadata per-op family — CONFIRMED, #1 in per-op factor
-  (100-300x), medium in total.** open 271 us, newfstatat 277 us,
-  getdents 501 us, fsync 90 ms. Combined ~600 CPU-s/boot. The mount
-  registry scan (O(n)) subcase is real but already fixed on the
-  launcher lane; the deeper cost is the name-lookup/journal path.
+  (100-300x), medium-small in total (leg-18 correction).** open 271 us,
+  newfstatat 277 us, getdents 501 us, fsync 90 ms. The original
+  "~600 CPU-s/boot" combined estimate inherited pa17's stall-inflated
+  averages; the pa29 anatomy re-measures it at **~120-140 CPU-s/boot,
+  all before t=150 s** (see 2k + the fix-route map). The mount registry
+  scan (O(n)) subcase is real but already fixed on the launcher lane;
+  the deeper cost is the no-journal write-through path (first 90 s) and
+  the CPU-bound lookup/bread path (90-150 s) — NOT the journal, which is
+  absent from this workload entirely.
 - **F5 Global-lock/atomic contention — CONFIRMED as a component, not
   the top.** 9-15% of kernel ticks in `fetch_update` CAS loops
   (virtio completion + PageCache RMW), plus `RawSpinlock::lock`
