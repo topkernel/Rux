@@ -24,7 +24,7 @@
 | | |
 |---|---|
 | ![GNOME desktop on Rux x86_64](docs/images/ubuntu-gnome-x86-2026-10-14.png) |
-| *GNOME Shell desktop on Rux (x86_64, amd64) — captured 40 minutes into a stable session: the Shell wallpaper and top bar/dock chrome compositing on screen. On riscv64 the same Ubuntu userland runs the image's udesk session end to end (pixel-verified, `test/ubuntu-gui/verify.py` 23/23); full GNOME Shell bring-up on riscv64 is the active goal (see the [Roadmap](docs/progress/roadmap.md))* |
+| *GNOME Shell desktop on Rux (x86_64, amd64) — captured 28 minutes into a stable session: the Shell's dark top bar with clock text, blue wallpaper, and shell chrome compositing on screen. On riscv64 the same Ubuntu userland runs the image's udesk session end to end (pixel-verified, `test/ubuntu-gui/verify.py` 23/23); full GNOME Shell bring-up on riscv64 is the active goal (see the [Roadmap](docs/progress/roadmap.md))* |
 
 ### OpenHarmony — support status
 
