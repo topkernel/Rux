@@ -173,7 +173,9 @@ fn stack_cache_alloc() -> *mut u8 {
         alloc(layout)
     };
     if !bottom.is_null() {
-        if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::Schb) {
+        if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::Schb)
+            && crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::KsProbe)
+        {
             // Fresh stack is visible to nobody else yet: zero it so the
             // free-side scan can measure the true high-water, and count it.
             // ~3 spawns/s x 128KB of memset across the OH boot — negligible
@@ -251,10 +253,12 @@ fn stack_cache_free(stack_bottom: *mut u8) {
             }
         }
     }
-    // Leg-16 anatomy (dfx=schb): the high-water scan + attribution print
-    // lives in free_kernel_stack (needs self for comm/pid); this side only
-    // keeps the live count honest for the SC-ANAT kN column.
-    if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::Schb) {
+    // Leg-16 anatomy (dfx=schb,ksprobe): the high-water scan + record
+    // stash lives in free_kernel_stack (needs self for comm/pid); this
+    // side only keeps the live count honest for the SC-ANAT kN column.
+    if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::Schb)
+        && crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::KsProbe)
+    {
         KSTACK_LIVE.fetch_sub(1, Ordering::Relaxed);
     }
     let mut cache = STACK_CACHE.lock();
@@ -3982,15 +3986,14 @@ impl Task {
                 }
             }
 
-            // Leg-16 anatomy (dfx=schb): high-water scan + record
-            // attribution. The stack is dead (on_cpu cleared + RCU waited
-            // upstream), no locks held — safe to walk and print. A NEW
-            // record deeper than 60KB dumps the deepest frames' return
-            // addresses so the fat chain can be named and fixed; that is
-            // the gate for any KERNEL_STACK_SIZE reduction (a 89KB-deep
-            // chain already measured this campaign would smash a 64KB
-            // stack).
-            if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::Schb) {
+            // Leg-16 anatomy (dfx=schb,ksprobe): high-water scan + record
+            // stash. The stack is dead (on_cpu cleared + RCU waited
+            // upstream), no locks held — safe to walk. Records stash the
+            // surviving return addresses for the next schbd beat (the
+            // in-context print was eaten by early-boot UART storms twice).
+            if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::Schb)
+                && crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::KsProbe)
+            {
                 let base = stack_bottom as usize;
                 let mut off = 8usize; // skip the canary slot
                 while off < KERNEL_STACK_SIZE {

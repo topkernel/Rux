@@ -74,6 +74,7 @@ macro_rules! dfx_switch_table {
             MetaWatch => "metawatch",
             ParkDump => "parkdump",
             Schb => "schb",
+            KsProbe => "ksprobe",
         }
     };
 }
@@ -273,9 +274,16 @@ pub enum DfxSwitch {
     /// so the quiet-quiet soft-wedge leaves no kernel evidence by design;
     /// this switch is the budgeted replacement. See dfx/schb.rs.
     Schb,
+    /// Leg-16 kstack high-water probe: zero-every-fresh-kernel-stack at
+    /// alloc + scan-at-free + the SC-KREC record stash. Adds a ~size-of-
+    /// stack memset to EVERY spawn — the anatomy is banked and the
+    /// sc218-224 pattern (probe-on boots lost the mid-boot RS lottery
+    /// 3-of-4, leg-15's probe-off boots won 3/3) argues it modulates the
+    /// race, so verification rolls run dfx=schb WITHOUT this token.
+    KsProbe,
 }
 
-const SWITCH_COUNT: usize = 30;
+const SWITCH_COUNT: usize = 31;
 
 static SWITCHES: [AtomicBool; SWITCH_COUNT] = [const { AtomicBool::new(false) }; SWITCH_COUNT];
 
@@ -342,6 +350,7 @@ impl DfxSwitch {
             DfxSwitch::MetaWatch => 27,
             DfxSwitch::ParkDump => 28,
             DfxSwitch::Schb => 29,
+            DfxSwitch::KsProbe => 30,
         }
     }
 
