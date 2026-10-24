@@ -1772,7 +1772,7 @@ fn user_segv_forensics(regs: &PtRegs, fault_addr: u64) {
     {
         static SEGVD_N: core::sync::atomic::AtomicUsize =
             core::sync::atomic::AtomicUsize::new(0);
-        if SEGVD_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) >= 6 {
+        if SEGVD_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) >= 8 {
             crate::pr_err!(
                 "USEGV-L pid={} comm='{}' rip={:#x} cr2={:#x} {}",
                 pid,
@@ -1829,6 +1829,73 @@ fn user_segv_forensics(regs: &PtRegs, fault_addr: u64) {
                     v.offset()
                 ),
                 None => crate::pr_err!("USEGV-FOR: vma({:#x}) = NONE", probe),
+            }
+        }
+        // sc252 probe (leg-18): for the FAULT-ADDRESS VMA, name the
+        // backing fd — path, open mode, inode size — plus every sibling
+        // VMA mapping the SAME fd in this mm. The launcher crash-loop
+        // writes into a READ|PRIVATE file VMA (fd 40); whether that fd
+        // is O_RDONLY (app-side fallback after an EACCES) or O_RDWR
+        // (kernel flag bug) is decided by this one line.
+        if let Some(v) = vmas.find(crate::mm::page::VirtAddr::new(fault_addr as usize)) {
+            let fd = v.file_fd();
+            if fd >= 0 {
+                match unsafe { crate::fs::file::get_file_fd(fd as usize) } {
+                    Some(f) => {
+                        let (mode, size) = unsafe {
+                            let inode_opt = &*f.inode.get();
+                            inode_opt
+                                .as_ref()
+                                .map(|i| (i.mode.bits(), i.get_size()))
+                                .unwrap_or((0, 0))
+                        };
+                        crate::pr_err!(
+                            "USEGV-FOR: cr2fd fd={} path={} accmode={:#x} rawflags={:#x} mode={:#o} size={}",
+                            fd,
+                            f.path(),
+                            f.flags().bits() & 0o3,
+                            f.flags().bits(),
+                            mode,
+                            size
+                        );
+                        // Siblings: other VMAs of the same fd (an RW|SHARED
+                        // twin would prove the app mapped the file twice
+                        // and wrote through the wrong one).
+                        let mut sibs = 0usize;
+                        for sv in vmas.iter() {
+                            if sv.file_fd() == fd
+                                && sv.start().as_usize() != v.start().as_usize()
+                            {
+                                if sibs >= 4 {
+                                    crate::pr_err!("USEGV-FOR: cr2fd-sib ... (capped)");
+                                    break;
+                                }
+                                crate::pr_err!(
+                                    "USEGV-FOR: cr2fd-sib {:#x}-{:#x} flags={:#x} off={:#x}",
+                                    sv.start().as_usize(),
+                                    sv.end().as_usize(),
+                                    sv.flags().bits(),
+                                    sv.offset()
+                                );
+                                sibs += 1;
+                            }
+                        }
+                    }
+                    None => {
+                        crate::pr_err!(
+                            "USEGV-FOR: cr2fd fd={} path=? (fd closed; vma_files pin)",
+                            fd
+                        );
+                        // The VMA's pinned file survives fd close — name it.
+                        if let Some(f) = aspace.get_vma_file(v.start().as_usize()) {
+                            crate::pr_err!(
+                                "USEGV-FOR: cr2fd-pin path={} accmode={:#x}",
+                                f.path(),
+                                f.flags().bits() & 0o3
+                            );
+                        }
+                    }
+                }
             }
         }
         // File path + module-relative fault offset for the rip VMA, so a
@@ -1928,17 +1995,31 @@ fn user_segv_forensics(regs: &PtRegs, fault_addr: u64) {
         // offset-anomaly family, session 18): the single vma(cr2) line
         // cannot show what borders the faulting region — whether a
         // writable stack sits directly below a mis-flagged PROT_NONE
-        // tail, a guard page, or a hole. Dump every VMA overlapping a
-        // +/-16MB window around cr2, capped at 12 entries (fatal path,
-        // rare; bounded by construction).
+        // tail, a guard page, or a hole. sc252 (leg-18): the old
+        // ascending walk with a 12-entry cap spent every entry on the
+        // huge module mappings tens of MB BELOW cr2 and never reached
+        // the faulting VMA's own neighbors (the launcher lock-region
+        // dump was cut at 0x7ff0817c0000, 2.5MB below the fault).
+        // Collect the window first, then print the 12 entries NEAREST
+        // cr2 (distance from the fault page), so the immediate
+        // neighborhood always makes the budget.
         {
             let lo = (fault_addr as usize).saturating_sub(0x100_0000);
             let hi = (fault_addr as usize).saturating_add(0x100_0000);
-            let mut shown = 0usize;
+            let mut window: alloc::vec::Vec<&crate::mm::vma::Vma> = alloc::vec::Vec::new();
             for v in vmas.iter() {
                 if v.end().as_usize() <= lo || v.start().as_usize() >= hi {
                     continue;
                 }
+                window.push(v);
+            }
+            window.sort_by_key(|v| {
+                v.start()
+                    .as_usize()
+                    .abs_diff(fault_addr as usize)
+            });
+            let mut shown = 0usize;
+            for v in window {
                 if shown >= 12 {
                     crate::pr_err!("USEGV-FOR: nearvma ... (capped)");
                     break;

@@ -268,6 +268,12 @@ pub fn sys_mmap(args: [u64; 6]) -> i64 {
     // '?'. Print fd + path + filesz for EVERY file-backed mmap of the
     // appspawn family — the offline map (ret -> lib -> fileoff) then
     // symbolizes the park chain.
+    //
+    // sc252 (leg-18): broadened — the launcher crash-loop writes into a
+    // READ|PRIVATE file VMA (fd 40), so the family trace now records
+    // EVERY file-backed mmap (any prot, any size) with the fd's open
+    // mode. The fd-40 mapping's own call line + any MMAP-EACCES line
+    // together decide read-only-fd vs VMA-flag bug.
     if ret > 0 {
         let comm = crate::sched::current()
             .map(|t| unsafe { (*t).comm() })
@@ -282,24 +288,25 @@ pub fn sys_mmap(args: [u64; 6]) -> i64 {
         let in_arena = (ret as usize) >= 0x7ff000000000 && (ret as usize) < 0x7ff100000000;
         if family {
             let fd = args[4] as i32;
-            if fd >= 0 && args[3] & 0x20 == 0 && args[2] & 0x4 != 0 /* file-backed EXEC segment */ {
+            if fd >= 0 && args[3] & 0x20 == 0 {
                 static NF: core::sync::atomic::AtomicUsize =
                     core::sync::atomic::AtomicUsize::new(0);
-                if NF.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 400 {
-                    let path = crate::sched::current()
+                if NF.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 150 {
+                    let (path, accmode) = crate::sched::current()
                         .and_then(|t| unsafe {
                             (*t).try_fdtable().and_then(|fdt| fdt.get_file(fd as usize))
                         })
-                        .map(|f| f.path())
-                        .unwrap_or_else(|| alloc::string::String::from("?"));
+                        .map(|f| (f.path(), f.flags().bits() & 0o3))
+                        .unwrap_or_else(|| (alloc::string::String::from("?"), 0));
                     crate::pr_warn!(
-                        "APPMAPSRC {:?} ret={:#x} len={:#x} prot={:#x} flags={:#x} fd={} off={:#x} {}",
+                        "APPMAPSRC {:?} ret={:#x} len={:#x} prot={:#x} flags={:#x} fd={} accmode={:#x} off={:#x} {}",
                         comm,
                         ret,
                         args[1],
                         args[2],
                         args[3],
                         fd,
+                        accmode,
                         args[5],
                         path
                     );
@@ -490,13 +497,37 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                 let readable = accmode != crate::fs::file::FileFlags::O_WRONLY;
                 let writable = accmode == crate::fs::file::FileFlags::O_RDWR
                     || accmode == crate::fs::file::FileFlags::O_WRONLY;
-                if !readable {
-                    return mmap_error::EACCES;
-                }
-                if map_flags & map::MAP_SHARED != 0
-                    && prot_flags & prot::PROT_WRITE != 0
-                    && !writable
+                if !readable
+                    || (map_flags & map::MAP_SHARED != 0
+                        && prot_flags & prot::PROT_WRITE != 0
+                        && !writable)
                 {
+                    // sc252 probe (leg-18): the launcher/dataability
+                    // crash-loop writes into a READ|PRIVATE file VMA —
+                    // the leading theory is the app's intended RW|SHARED
+                    // mmap failed HERE and a read-only fallback mapping
+                    // stayed. Name the fd, its path and its open mode so
+                    // the roll decides read-only-fd vs flag bug.
+                    static NE: core::sync::atomic::AtomicUsize =
+                        core::sync::atomic::AtomicUsize::new(0);
+                    if NE.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 40 {
+                        crate::pr_warn!(
+                            "MMAP-EACCES pid {} comm='{}' fd={} accmode={:#x} path={} prot={:#x} mapflags={:#x} len={:#x} off={:#x}",
+                            crate::process::current_pid(),
+                            crate::sched::current()
+                                .map(|t| unsafe { (*t).comm() })
+                                .map(|c| core::str::from_utf8(c).unwrap_or(""))
+                                .unwrap_or("")
+                                .trim_end_matches('\0'),
+                            fd,
+                            accmode,
+                            file.path(),
+                            prot_flags,
+                            map_flags,
+                            length,
+                            offset
+                        );
+                    }
                     return mmap_error::EACCES;
                 }
             }
@@ -1545,6 +1576,30 @@ fn sys_mprotect_inner(args: [u64; 6]) -> i64 {
                         }
                         if let Some(file) = addr_space.get_vma_file(vs) {
                             if file.flags().is_readonly() {
+                                // sc252 probe (leg-18): same attribution
+                                // as MMAP-EACCES — a PROT_WRITE upgrade
+                                // refused on a shared file mapping names
+                                // the read-only open path.
+                                static NP: core::sync::atomic::AtomicUsize =
+                                    core::sync::atomic::AtomicUsize::new(0);
+                                if NP.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 20 {
+                                    crate::pr_warn!(
+                                        "MPROTECT-EACCES pid {} comm='{}' addr={:#x} len={:#x} vma={:#x}-{:#x} accmode={:#x} path={}",
+                                        crate::process::current_pid(),
+                                        crate::sched::current()
+                                            .map(|t| unsafe { (*t).comm() })
+                                            .map(|c| core::str::from_utf8(c).unwrap_or(""))
+                                            .unwrap_or("")
+                                            .trim_end_matches('\0'),
+                                        addr,
+                                        length,
+                                        vs,
+                                        ve,
+                                        file.flags().bits()
+                                            & crate::fs::file::FileFlags::O_ACCMODE,
+                                        file.path()
+                                    );
+                                }
                                 return -13_i64; // EACCES
                             }
                         }
