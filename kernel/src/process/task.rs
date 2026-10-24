@@ -1279,17 +1279,24 @@ impl Task {
             ti_a1: core::sync::atomic::AtomicU64::new(0),
             ti_a2: core::sync::atomic::AtomicU64::new(0),
             last_syscall_nr: core::sync::atomic::AtomicU32::new(0),
-            last_fails: core::array::from_fn(|_| AtomicU32::new(0)),
+            // Stack-depth fix (leg-16 KSTACK-HW: check_module_up 65.8KB,
+            // hiview 76KB — both the Task-construction frame): from_fn
+            // materialises these arrays through try_from_fn's wrapper
+            // copies (several x 4KB for init_a0 alone). The inline-const
+            // repeat writes each element in place — same values, and the
+            // per-fork stack depth drops by the copy multiplier (the
+            // measured gate for any KERNEL_STACK_SIZE reduction).
+            last_fails: [const { AtomicU32::new(0) }; 8],
             last_fails_cur: core::sync::atomic::AtomicUsize::new(0),
-            last_fails_a0: core::array::from_fn(|_| AtomicU64::new(0)),
-            last_fails_a1: core::array::from_fn(|_| AtomicU64::new(0)),
-            last_calls: core::array::from_fn(|_| AtomicU32::new(0)),
+            last_fails_a0: [const { AtomicU64::new(0) }; 8],
+            last_fails_a1: [const { AtomicU64::new(0) }; 8],
+            last_calls: [const { AtomicU32::new(0) }; crate::process::task::LAST_CALLS_LEN],
             last_calls_cur: core::sync::atomic::AtomicUsize::new(0),
-            init_calls: core::array::from_fn(|_| AtomicU32::new(0)),
-            init_a0: core::array::from_fn(|_| AtomicU64::new(0)),
+            init_calls: [const { AtomicU32::new(0) }; crate::process::task::INIT_CALLS_LEN],
+            init_a0: [const { AtomicU64::new(0) }; crate::process::task::INIT_CALLS_LEN],
             init_calls_cur: core::sync::atomic::AtomicUsize::new(0),
-            birth_calls: core::array::from_fn(|_| AtomicU32::new(0)),
-            birth_a0: core::array::from_fn(|_| AtomicU64::new(0)),
+            birth_calls: [const { AtomicU32::new(0) }; crate::process::task::BIRTH_CALLS_LEN],
+            birth_a0: [const { AtomicU64::new(0) }; crate::process::task::BIRTH_CALLS_LEN],
             birth_done: core::sync::atomic::AtomicBool::new(false),
             last_syscall_a0: AtomicU64::new(0),
             last_syscall_a1: AtomicU64::new(0),
@@ -1967,7 +1974,7 @@ impl Task {
         // thread-exit forensics printed garbage nrs).
         ptr::write(
             (ptr as usize + offset_of!(Task, last_fails)) as *mut [AtomicU32; 8],
-            core::array::from_fn(|_| AtomicU32::new(0)),
+            [const { AtomicU32::new(0) }; 8],
         );
         ptr::write(
             (ptr as usize + offset_of!(Task, last_fails_cur))
@@ -1976,15 +1983,15 @@ impl Task {
         );
         ptr::write(
             (ptr as usize + offset_of!(Task, last_fails_a0)) as *mut [AtomicU64; 8],
-            core::array::from_fn(|_| AtomicU64::new(0)),
+            [const { AtomicU64::new(0) }; 8],
         );
         ptr::write(
             (ptr as usize + offset_of!(Task, last_fails_a1)) as *mut [AtomicU64; 8],
-            core::array::from_fn(|_| AtomicU64::new(0)),
+            [const { AtomicU64::new(0) }; 8],
         );
         ptr::write(
             (ptr as usize + offset_of!(Task, last_calls)) as *mut [AtomicU32; LAST_CALLS_LEN],
-            core::array::from_fn(|_| AtomicU32::new(0)),
+            [const { AtomicU32::new(0) }; LAST_CALLS_LEN],
         );
         ptr::write(
             (ptr as usize + offset_of!(Task, last_calls_cur))
@@ -1996,11 +2003,11 @@ impl Task {
         ptr::write(
             (ptr as usize + offset_of!(Task, init_calls))
                 as *mut [AtomicU32; INIT_CALLS_LEN],
-            core::array::from_fn(|_| AtomicU32::new(0)),
+            [const { AtomicU32::new(0) }; INIT_CALLS_LEN],
         );
         ptr::write(
             (ptr as usize + offset_of!(Task, init_a0)) as *mut [AtomicU64; INIT_CALLS_LEN],
-            core::array::from_fn(|_| AtomicU64::new(0)),
+            [const { AtomicU64::new(0) }; INIT_CALLS_LEN],
         );
         ptr::write(
             (ptr as usize + offset_of!(Task, init_calls_cur))
@@ -2010,12 +2017,12 @@ impl Task {
         ptr::write(
             (ptr as usize + offset_of!(Task, birth_calls))
                 as *mut [AtomicU32; BIRTH_CALLS_LEN],
-            core::array::from_fn(|_| AtomicU32::new(0)),
+            [const { AtomicU32::new(0) }; BIRTH_CALLS_LEN],
         );
         ptr::write(
             (ptr as usize + offset_of!(Task, birth_a0))
                 as *mut [AtomicU64; BIRTH_CALLS_LEN],
-            core::array::from_fn(|_| AtomicU64::new(0)),
+            [const { AtomicU64::new(0) }; BIRTH_CALLS_LEN],
         );
         ptr::write(
             (ptr as usize + offset_of!(Task, birth_done))
