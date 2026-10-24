@@ -397,12 +397,10 @@ extern "C" fn schbd_fn(_arg: *mut core::ffi::c_void) -> i32 {
             let (small_k, small_pg_k) = crate::mm::small_alloc::live_stats_kib();
             let np = &crate::mm::buddy_allocator::NET_PAGES;
             let mut w = ConsoleWriter::new();
-            let (kb, ks, _fb) = crate::process::task::kstack_slab_stats();
             let _ = writeln!(
                 w,
-                "SC-ANAT t={}s procs={} kN={} kK={} kHW={} kb={} ks={} smallK={} smallPgK={} o0={} o1={} o2={} o3={} o4={} o5={} o6={} o7={} o8={}",
+                "SC-ANAT t={}s procs={} kN={} kK={} kHW={} smallK={} smallPgK={} o0={} o1={} o2={} o3={} o4={} o5={} o6={} o7={} o8={}",
                 t_secs, n_procs, kn, kn * (crate::config::KERNEL_STACK_SIZE as u64) / 1024, khw,
-                kb, ks,
                 small_k, small_pg_k,
                 np[0].load(Ordering::Relaxed), np[1].load(Ordering::Relaxed),
                 np[2].load(Ordering::Relaxed), np[3].load(Ordering::Relaxed),
@@ -410,28 +408,6 @@ extern "C" fn schbd_fn(_arg: *mut core::ffi::c_void) -> i32 {
                 np[6].load(Ordering::Relaxed), np[7].load(Ordering::Relaxed),
                 np[8].load(Ordering::Relaxed)
             );
-        }
-
-        // Pending kstack high-water record (stashed at free time; printed
-        // here because the in-context print was eaten by early-boot UART
-        // storms twice — sc218/sc222 both lost the 89,368-byte chain).
-        if let Some(rec) = crate::process::task::kstack_rec_take() {
-            let mut w = ConsoleWriter::new();
-            let _ = write!(w, "SC-KREC hw={} pid={} comm='", rec.hw, rec.pid);
-            for &cb in rec.comm.iter() {
-                if cb == 0 {
-                    break;
-                }
-                // comm is comm bytes; printable ASCII only (lossy by
-                // substitution — core::str has no from_utf8_lossy here).
-                let c = if (0x20..0x7f).contains(&cb) { cb } else { b'?' };
-                let _ = write!(w, "{}", c as char);
-            }
-            let _ = write!(w, "' n={}", rec.n);
-            for k in 0..rec.n {
-                let _ = write!(w, " {:x}", rec.tail[k]);
-            }
-            let _ = writeln!(w);
         }
 
         // Drain the proc-open ring (SC-PROC lines) after the beat line.

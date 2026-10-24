@@ -66,30 +66,7 @@ swap_size_mb = 256
 # BELOW the stack bottom. 128KB restores ~57KB of headroom; the pty
 # layer additionally boxes its 8KB master_rx buffer (see fs/pty.rs) so
 # pair construction no longer shuffles 8KB through every frame.
-#
-# Leg-16 (2026-10-24): 128KB -> 80KB, served by the packed kstack slab
-# (process/task.rs: order-6 blocks carved into three 80KB slots — the
-# buddy only hands out power-of-two blocks, so a bare 80/96KB request
-# would still consume a 128KB order-5 block; the interim 64KB attempt
-# #GP'd on sc227: per-boot depth variance crossed the 3.1KB headroom).
-# The kernel-heap anatomy at the launcher floor (sc219 census) measured
-# kernel stacks as the largest single heap consumer: 2688 live x 128KB
-# = 383MB of the 904MB floor (42%), and that floor is what kills the
-# launcher spawn inside appspawn's window. The fat chains that forced
-# 128KB are fixed at the source this leg — all three were
-# `array::from_fn`/array-clone materialising big arrays through
-# try_from_fn's debug-build wrapper copies ON THE KERNEL STACK:
-#   - fill_page_cache_batch's [IoCompletion; 128] (resize2fs, 80,496B)
-#   - Task construction's init rings (fork chains, 65.8-76KB)
-#   - FdTable::fork_from's fds.clone() ([Option<Arc<File>>; 1024], the
-#     89,368B 'usb_host' chain — several 8KB copies per fork)
-# Post-fix maximum measured depth is 62,512B (sc226, canary-clean), but
-# sc227 proved variance can exceed 65,536; 80KB restores ~15KB of
-# margin while the slab cuts the per-stack footprint to ~85.3KB
-# (3 slots per 256KB block) — ~-115MB at the floor population.
-# DUAL-ARCH NOTE: depth figures are x86_64 debug; the merge gate's
-# riscv regression must stay green (canary prints loudly on overflow).
-kernel_stack_size = 81920
+kernel_stack_size = 131072
 # Buddy allocator max order
 buddy_max_order = 20
 # Slab cache count
