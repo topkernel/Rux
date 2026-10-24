@@ -149,6 +149,49 @@ static CACHES: [SmallCache; 8] = [
     SmallCache::new(), SmallCache::new(), SmallCache::new(), SmallCache::new(),
 ];
 
+// ---------------------------------------------------------------------------
+// Per-CPU magazines (pa16, 2026-10-24: the perf line measured the class
+// locks at 12.6% of the whole machine — 732M irqsave sections/boot at
+// ~250 ns each, the single biggest IF=0 contributor). Fast paths pop /
+// push a per-CPU, per-class array of free object pointers under LOCAL
+// irq-off only — no lock, no cross-CPU contention, no preempt-count
+// traffic; the class lock is taken once per ~MAG_DEPTH misses/overflows
+// to refill/flush in batch.
+//
+// Correctness of deferred frees (a magazine-resident object is NOT yet
+// reflected in its page header's free_count):
+// - Reclaim needs free_count == objs_per_page UNDER the class lock; a
+//   magazine entry for page P holds one of P's slots un-accounted, so
+//   free_count can never reach objs_per_page while such an entry
+//   exists — reclaim is blocked by construction and the slab bitmap
+//   stays set. Flush runs the exact pre-magazine locked free body
+//   (magic/cls re-validation, alignment checks, BAD_PAGE taints).
+// - Double frees corrupt the page freelist exactly as they did before
+//   (silently for partially-free pages, taint at the reclaim boundary);
+//   the magazine only defers the moment, it adds no new failure mode.
+// - Touching a magazine from IRQ context is impossible: every access
+//   sits between save_and_disable_irq/restore_irq (or under the class
+//   irqsave lock), and IRQ-context allocs/frees take the same guard.
+// ---------------------------------------------------------------------------
+const MAG_DEPTH: usize = 16;
+
+#[derive(Clone, Copy)]
+struct Magazine {
+    buf: [usize; MAG_DEPTH],
+    len: usize,
+}
+
+static mut MAGAZINES: [[Magazine; 8]; crate::config::MAX_CPUS] =
+    [[Magazine { buf: [0; MAG_DEPTH], len: 0 }; 8]; crate::config::MAX_CPUS];
+
+#[inline]
+fn mag_of(cpu: usize, ci: usize) -> &'static mut Magazine {
+    // SAFETY: cpu < MAX_CPUS and ci < 8 are checked by callers; each CPU
+    // touches only its own row, always under local irq-off (or the class
+    // irqsave lock), so no two accesses to a slot can overlap.
+    unsafe { &mut MAGAZINES[cpu][ci] }
+}
+
 /// Allocate a small object. Returns null when the layout does not fit
 /// this layer OR the backing page could not be created — the caller
 /// falls through to the buddy either way.
@@ -162,11 +205,53 @@ pub fn alloc(size: usize, align: usize) -> *mut u8 {
     }
     let ci = class_of(size, align);
     let cache = &CACHES[ci];
+
+    // Fast path: pop from this CPU's magazine (local irq-off only).
+    let cpu = crate::arch::cpu_id() as usize;
+    if cpu < crate::config::MAX_CPUS {
+        let mag = mag_of(cpu, ci);
+        let flags = crate::arch::cpu::save_and_disable_irq();
+        if mag.len > 0 {
+            mag.len -= 1;
+            let ptr = mag.buf[mag.len];
+            crate::arch::cpu::restore_irq(flags);
+            cache.obj_allocs.fetch_add(1, Ordering::Relaxed);
+            return ptr as *mut u8;
+        }
+        crate::arch::cpu::restore_irq(flags);
+    }
+
+    // Slow path: one class-lock hold refills the magazine in batch and
+    // returns the first object.
+    let mut first: *mut u8 = core::ptr::null_mut();
+    let _g = cache.lock.lock_irqsave();
+    if cpu < crate::config::MAX_CPUS {
+        let mag = mag_of(cpu, ci); // private: IF is off (irqsave)
+        while mag.len < MAG_DEPTH {
+            let p = alloc_locked(ci, heap_start);
+            if p.is_null() {
+                break;
+            }
+            if first.is_null() {
+                first = p;
+            } else {
+                mag.buf[mag.len] = p as usize;
+                mag.len += 1;
+            }
+        }
+    } else {
+        first = alloc_locked(ci, heap_start);
+    }
+    drop(_g);
+    first
+}
+
+/// The pre-magazine allocation body. Caller holds the class lock.
+fn alloc_locked(ci: usize, heap_start: usize) -> *mut u8 {
+    let cache = &CACHES[ci];
     let s = CLASSES[ci];
     let fo = first_off(s);
     let objs_per_page: u16 = ((PAGE_SIZE - fo) / s) as u16;
-
-    let _g = cache.lock.lock_irqsave();
 
     // 1. Serve from an active page; lazy-skip dead heads.
     let mut prev: u32 = 0; // page index of the previous live link point (0 = head)
@@ -252,8 +337,8 @@ pub fn alloc(size: usize, align: usize) -> *mut u8 {
 }
 
 /// Free a small object. Returns false ONLY when the page is not a slab
-/// page (the caller then falls through to the buddy free path). Once the
-/// bitmap says "slab page", the free is CONSUMED here no matter what:
+/// page (the caller then falls through to the buddy free path). Once
+/// the bitmap says "slab page", the free is CONSUMED here no matter what:
 /// the page holds up to 510 other objects, so a foreign or stale pointer
 /// must never reach the buddy (whose page-granular free would hand the
 /// live slab page to a second owner). Invalid frees taint and count.
@@ -266,10 +351,10 @@ pub fn free(addr: usize) -> bool {
         return false;
     }
     let page = addr & !(PAGE_SIZE - 1);
-    // Pre-lock peek only to pick the class lock; everything is
-    // re-validated under the lock (the page may have been emptied,
-    // reclaimed and re-created as a different class between the two
-    // reads — the re-check catches that).
+    // Pre-lock peek only to pick the class lock/magazine bin; everything
+    // is re-validated under the lock at flush time (the page may have
+    // been emptied, reclaimed and re-created as a different class
+    // between the reads — the re-check catches that).
     let peek = hdr_of(page);
     let ci_guess = peek.cls as usize;
     if ci_guess >= CLASSES.len() {
@@ -278,7 +363,62 @@ pub fn free(addr: usize) -> bool {
         return true;
     }
     let cache = &CACHES[ci_guess];
+
+    // Fast path: push into this CPU's magazine (local irq-off only). A
+    // magazine-resident object blocks its page's reclaim by construction
+    // (see the magazine block comment), so no page-state check is due.
+    let cpu = crate::arch::cpu_id() as usize;
+    if cpu < crate::config::MAX_CPUS {
+        let mag = mag_of(cpu, ci_guess);
+        let flags = crate::arch::cpu::save_and_disable_irq();
+        if mag.len < MAG_DEPTH {
+            mag.buf[mag.len] = addr;
+            mag.len += 1;
+            crate::arch::cpu::restore_irq(flags);
+            cache.obj_frees.fetch_add(1, Ordering::Relaxed);
+            return true;
+        }
+        crate::arch::cpu::restore_irq(flags);
+        // Magazine full: flush it entry by entry through the locked body
+        // (self-locking, one hold per flushed object — 1/MAG_DEPTH of the
+        // pre-magazine lock traffic), then this free the same way. Each
+        // pop runs under its own irq-off window (an IRQ-context free on
+        // this CPU may interleave between the free_locked calls).
+        loop {
+            let p = {
+                let f = crate::arch::cpu::save_and_disable_irq();
+                let r = if mag.len > 0 {
+                    mag.len -= 1;
+                    Some(mag.buf[mag.len])
+                } else {
+                    None
+                };
+                crate::arch::cpu::restore_irq(f);
+                r
+            };
+            match p {
+                Some(p) => {
+                    free_locked(p, heap_start, heap_end, ci_guess);
+                }
+                None => break,
+            }
+        }
+        return free_locked(addr, heap_start, heap_end, ci_guess);
+    }
+
+    // No magazine (cpu id out of range): the pre-magazine locked path.
+    free_locked(addr, heap_start, heap_end, ci_guess)
+}
+
+/// The pre-magazine free body (validation + push to page freelist +
+/// empty-page reclaim), self-locking on the ci_guess class lock (the
+/// internal empty-page reclaim must drop the guard before the buddy
+/// free, so the guard's ownership stays inside). Always returns true
+/// (consumed by the slab layer).
+fn free_locked(addr: usize, heap_start: usize, _heap_end: usize, ci_guess: usize) -> bool {
+    let cache = &CACHES[ci_guess];
     let _g = cache.lock.lock_irqsave();
+    let page = addr & !(PAGE_SIZE - 1);
     let hdr = hdr_of(page);
     if hdr.magic != HDR_MAGIC || hdr.cls as usize != ci_guess {
         // Reclaimed/re-created under us — no valid object can exist.

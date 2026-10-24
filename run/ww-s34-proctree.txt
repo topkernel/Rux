@@ -12,6 +12,13 @@
 # Both WW-ARMED 19 GUARD=0xffffffff80a7a000, storming by 04:38 (27k/28k lines). Budget ends ~05:20:36.
 # Foreign QEMU: 105707 perf-audit KVM (cwd /home/william/rux-agents/perf-audit, started 03:31) — DO NOT TOUCH.
 #   (gone by 04:36; new foreign QEMU 118468 samgr-callback cwd — DO NOT TOUCH either.)
+# SWEEP 2 at 05:35:36 (~60 min after the 04:35 relaunch; reaped LIVE-session tasks — reaper is periodic, not
+# session-death cleanup): r60/load-r7 died at 15/45, clean partials (59571/77173 lines, 0 markers, armed).
+# RELAUNCHED 05:44:03 as session-34 background tasks (tasks exec_bf65dca5 / exec_c80c2d8e):
+#   MAIN  driver root 140473 (ww-chain2.sh) -> ww-hunt.py -> timeout -> qemu 140479, gdb 140984
+#   LOAD  driver root 140517 (ww-loadchain.sh) -> ww-loadprobe.sh -> timeout -> qemu 140525, gdb 140994
+# Both WW-ARMED 19 GUARD=0xffffffff80a7a000, storming by 05:47. Budget ends ~06:29:03.
+# Foreign QEMU now: 135403 samgr-callback — DO NOT TOUCH.
 # Chain discipline: kill DRIVER ROOT first, then the round QEMU. Relaunch recipe (if swept):
 #   ./run/ww-chain2.sh  ww-s2  100 12371 <next-main-round>
 #   ./run/ww-loadchain.sh wwload 100 12381 <next-load-round>
