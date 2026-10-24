@@ -210,6 +210,60 @@ SBI putchar — unmeasurable. Effect: the panic printer can no longer
 nested-fault from its own dump; the launcher lane's mid-suite panic
 would have printed its full frame chain instead of dying mid-line.
 
+**R73 update: landed as the launcher lane's v6** (9777f195, "fix(trap):
+bound the KERNPANIC stack walk and latch dump re-entry", 2026-10-24
+10:06, commit message credits the sc195 live sighting and the
+coordinator's unit-test double-fault; it adds a dump re-entry latch on
+top of the proposed bound). Still unmerged to main at leg close.
+
+ELEVENTH LEG (2026-10-24 10:07-10:20, main merged fast-forward 484c8cb8
+-> a67d2a83): all three wait-gates re-checked; zero QEMU and zero
+builds this session, per discipline. One factual correction to gate B
+below.
+
+- Retest gate A (launcher sched fixes): still closed. NONE of v3
+  (c90f80b0), v4 (7a8044e0), v5 (12ea541e), the new v6/R73 (9777f195)
+  or the branch tip a480cd78 is in origin/main (`git merge-base
+  --is-ancestor` per commit; tip moved 6bc0be67 -> a480cd78 during this
+  leg: R73 v6 + sc196/sc197 notes). pa18 (GRQ/TERM retest over
+  v1+v2+v3+v4 together) keeps waiting.
+- Retest gate B (allocator): substantively still closed, but the
+  recorded reason was WRONG for two legs. CORRECTION: d56de697
+  (slab-packing) has been in origin/main since 2026-10-19 13:02 (merge
+  c00da61e, 54 s after the branch tip was committed) — the ninth- and
+  tenth-leg notes that called it "unmerged" were incorrect. Verified:
+  `merge-base --is-ancestor d56de697 origin/main` succeeds, it is an
+  ancestor of this audit's branch point 0727d295 (2026-10-23 21:54) and
+  therefore of EVERY pa baseline pa1-pa17. Consequences: (1) every
+  number in this report, including row 1b's small-alloc cache-lock
+  share (12.2-12.6% of machine, 732-740 M lock acquisitions/boot), is a
+  POST-slab-packing number — the per-CPU freelist lever targets the
+  cache-lock cost that remains AFTER slab-packing, so the estimate
+  stands or strengthens; (2) no allocator before/after is pending from
+  the slab side; (3) the actual gate-B lever (per-CPU freelists, the
+  direction the B line accepted in row 1b) exists nowhere — alloc-crash
+  worktree idle since Oct 19 (tip d56de697, now known-merged),
+  freelist-drift tip 93cadacb (Oct 18) likewise long merged, and
+  origin/main has zero allocator commits since Oct 20 (log since then:
+  this lane's docs + riscv64-only LAYOUT-2 + a readme). Gate stays
+  closed.
+- UI milestone: NOT reached. sc195 (final) and sc196 (killed by its
+  owner after a warm-reboot stall, per their notes) both carry zero
+  hits for launcher.ready / bootanimation.started|finished /
+  OnForeground / ArkUI and zero bootevent.* lines at all; sc197
+  launched 10:09 and was ~2 min in at leg close with 0 markers; the
+  shotmon CSV still reads the 8-color oracle screen (8 colors, 100%
+  non-black). Report v1.1 (post-UI row of table 1) stays pending.
+- pa18 readiness re-verified (cheap, no QEMU): `run/pa16-probe.patch`
+  applies clean on a67d2a83; recipe unchanged (merge main, apply patch,
+  PLATFORM=x86_64 make build, `./run/pa-boot.sh pa18 ... APPEND_EXTRA=
+  "syscost=1 sprobe=0"`, parse with pa-parse.py against the new ELF).
+- Report tweaks (idle item, no new measurement): section 0 base pointer
+  updated to main a67d2a83 (delta since the pa17 base 0634bc8f is still
+  riscv64-only + docs, so all x86_64 numbers remain current); row 1b
+  gained a post-slab-packing parenthetical. Ranking v2.3 and report
+  v1.0 tables otherwise unchanged — no new OH data.
+
 ## Verdict in one paragraph
 
 The "one fix at a time" pattern was real but it has converged into a
@@ -765,7 +819,7 @@ point, allocator routed to the B lane). Contribution model unchanged:
 | # | cost center | measured (pa13) | pa15/pa16/pa17 direct evidence | gap contribution | family |
 |---|---|---|---|---|---|
 | 1 | Interrupt-disabled regions (cli-recovery page) | 26% of kernel ticks; 316 IRQ-OFF-WINDOW/780 s (now TRIAGE HINT — see 2d) | pa16 EXACT: IF=0 = 25.0% of machine; pa17: 23.4%; split REST 88.8-92.0% / HARD 5.1-7.7% / SOFT 1.6-1.7% / UART 1.4-1.9%; max closed segment 4-5 ms (no long cli section exists); 1.26 M sections/s | **large** — decomposed below; levers per section, not per zone | F1 |
-| 1b | REST section bulk (exact decomposition) | (inside #1) | small-alloc cache locks 12.2-12.6% of machine (~55% of REST, 732-740 M/boot; **accepted by the B line, per-CPU freelist direction**); schedule() GRQ 2.7-3.9% (**pa17: -31% wall after launcher v2, 38.7 s vs 56.6 s**); fdtable get_file 1.9-2.0%; waitqueue family 1.8-2.2%; EPOLL_WAKE_REGISTRY 1.0-1.1%; deferred_free 0.7% — 97.3-99.3% attributed to file:line | **the F1 lever list** — allocator per-CPU freelists (B lane), GRQ pick (launcher lane, partially landed), fdtable read path, waitqueue batching, epoll registry (ipc lane) | F1/F5 |
+| 1b | REST section bulk (exact decomposition) | (inside #1) | small-alloc cache locks 12.2-12.6% of machine (~55% of REST, 732-740 M/boot; post-slab-packing — d56de697 has been in every measured baseline since 2026-10-19; **accepted by the B line, per-CPU freelist direction**); schedule() GRQ 2.7-3.9% (**pa17: -31% wall after launcher v2, 38.7 s vs 56.6 s**); fdtable get_file 1.9-2.0%; waitqueue family 1.8-2.2%; EPOLL_WAKE_REGISTRY 1.0-1.1%; deferred_free 0.7% — 97.3-99.3% attributed to file:line | **the F1 lever list** — allocator per-CPU freelists (B lane), GRQ pick (launcher lane, partially landed), fdtable read path, waitqueue batching, epoll registry (ipc lane) | F1/F5 |
 | 1a | Console/UART emission (sub-item of F1) | outb/inb in recovery rips; cli page shares inb/outb | pa15: 4.34 M bytes, 5.0% of machine; pa16: 1.55 M bytes @ t=720, 1.7%; pa17: 5.61 M bytes, 6.1% — **per-byte cost stable 15.5-18.5 us across 3 boots; volume (and thus machine share) swings 1.7-6.1% with boot depth**; producers init/<irq>/FFRT-worker; task-context emission 100% IF=1 | medium CPU (2-6%) + **large latency multiplier** under host load | F1 |
 | 2 | Scheduler wake-loss (WAKE-RUN-LEAK; lying busy slots + linked-starving) | 702 leak prints/780 s; census 16 lying + 7 linked | **pa17 (v1 a39d2bc0 + v2 6e9679c5 in main): 593 prints (-14%, in variance band) / 31 refusals (22 lying + 7 linked, unchanged) / 8 PREEMPT-LEAK / TERM-DESCHED=0** — fixes harmless, their trigger shape absent this boot; lying slots are born on another path; birth forensics continues on the launcher lane | **large** — unchanged; still the wall-clock driver | F3 |
 | 3 | hilogd.server socket dual-drain + sysevent_source + connect-retry | 26.5 M calls by t=720 = ~25% of ALL syscalls | pa16: 10.6 M recvfrom + 10.7 M recvmsg; pa17: 10.08 M + 10.29 M (1:1, avg 116/9 us, recvfrom max 393 s = wake-tail victim); writev 14.6-15.2 M; connect 2.47-2.55 M | medium — volume is OH userspace; kernel levers = per-call recv cost + the wake-loss tail | F2 |
@@ -1149,7 +1203,11 @@ milestone.
 - Rux kernel: main@0634bc8f + syscost instrumentation (`syscost=1
   sprobe=0`); measurement method: per-syscall {n, avg, max}, tick-mode
   accounting, EFLAGS-exact IF=0 zone accounting (v3), kernel-rip page
-  histogram, host-side serial timestamping (patstamp.py).
+  histogram, host-side serial timestamping (patstamp.py). Base pointer:
+  current main a67d2a83 differs from the measurement base by riscv64-only
+  commits (LAYOUT-2) and docs, so all x86_64 numbers remain current;
+  the measured baselines already include the slab-packing layer (see
+  the eleventh-leg gate B correction).
 - Linux reference: same image, same machine config, reference kernel
   boot (oh-ref-r1/r2). Caveats stated: wall averages include blocking;
   host shared with foreign QEMUs (load 6.7-7); single-boot samples for
