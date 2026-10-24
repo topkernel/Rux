@@ -73,6 +73,19 @@ boot_cmd() { # prints the full qemu argv, %q-quoted for exact eval round-trip
         CMD+=(-kernel "$IMG/fleet-rv64-rux"
               -append "root=/dev/vda rw init=/test/sweep console=ttyS0 sweepstart=$start dfx=watchdog,taskdump roundtag=$MEMBER-r$round")
         ;;
+    ltpm)
+        # current-main kernel member: same LTP sweep surface, kernel
+        # built from origin/main (worktree /home/william/rux-agents/
+        # wwh-main-kernel) — control arm for worktree-vs-main drift.
+        # NOTE pre-merge main still carries the csrrw-time read_counter
+        # bug: mount-heavy sweeps are expected to panic it inside
+        # minutes — that is the demonstration, not a new anomaly.
+        local start=$(( (RANDOM * 32768 + RANDOM) % 1080 ))
+        rv_common "$serial"
+        rv_drive "$IMG/fleet-ltp-rootfs.img" rootfs
+        CMD+=(-kernel "$IMG/fleet-rv64-main-rux"
+              -append "root=/dev/vda rw init=/test/sweep console=ttyS0 sweepstart=$start dfx=watchdog,taskdump roundtag=$MEMBER-r$round")
+        ;;
     memstorm)
         rv_common "$serial"
         rv_drive "$IMG/fleet-ltp-rootfs.img" rootfs

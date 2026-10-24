@@ -38,6 +38,24 @@ paced appspawn kill-restart, bm/hidumper/param walks, sync), memstorm
 storms, dfx=periodic,memwatch,watchdog), fsfuzz (riscv64, init=/test/fsfuzz:
 random-syscall fuzzer + file/pipe/socket/madvise/fork sequences).
 
+## Round log (cont.)
+
+- 2026-10-25 06:40 — OVERFLOW FIX (commit 93a18d53): fsfuzz r172 (v4)
+  panicked 'attempt to add with overflow' at syscall/memory.rs:2683 —
+  madvise page-round of length=-1. All seven user-length round-ups in
+  syscall/memory.rs (madvise/mprotect/msync/mremap/mincore/mlock/
+  munlock) now checked (EINVAL on wrap, reference-kernel end-wrap
+  semantics). Verified: v5 runs the deterministic seed-7 stream 150 s+
+  with zero panics (v4 died <60 s). v5 rolled to the fleet 06:39.
+- 2026-10-25 06:42 — ltpm member added: LTP sweep on the CURRENT MAIN
+  kernel (de41d5ab, built in detached worktree
+  /home/william/rux-agents/wwh-main-kernel — control arm for
+  worktree-vs-main drift; pre-merge main still carries the csrrw-time
+  bug, mount-heavy sweeps are EXPECTED to panic it — that is the
+  demonstration for the merge, not a new anomaly).
+- Fleet: 2 chains (r91/load-r38) + 9 members = 11 QEMUs. Host floor
+  >= 10G respected throughout (avail 30G at last check).
+
 ## Classification state
 
 See "Classification state (updated ...)" below — the single source of
