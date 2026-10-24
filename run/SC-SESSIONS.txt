@@ -3541,3 +3541,12 @@ CENSUS IT REACHED; HOST-OVERCOMMIT STALLS MISREAD AS KILLS (CORRECTED).
   their own timeout wrappers, sc211c killed by exact own PID after
   cmdline verification; shotmon loops stopped per-tag). Serials/ppm
   on disk (serials gitignored).
+- FINAL sc211/sc211b verdict: sc211 ran THREE full wedge censuses
+  (t=240/594/1039) to completion and stayed healthy to guest t=2521s -
+  1111s PAST the t=1410s point where sc210's census panicked; sc211b
+  two censuses, healthy at t=1982s. Both zero panics, zero
+  "FdTable not initialized". The fdtable fix is verified at the exact
+  depth that killed sc210. (This pair re-crawled at pidmax ~1370 - the
+  sc210 launcher trajectory is a per-boot race; see the leg summary.)
+  Both ended by exact verified PID at close-out; no QEMU or shotmon
+  of this leg remains.
