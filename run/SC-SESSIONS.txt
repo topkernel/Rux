@@ -4281,3 +4281,30 @@ LEG-17 PROGRESS LOG (03:00-04:47 condensed for the sibling):
   appspawn-kill window (the milestone window!). 3 sites now Arc-pin
   the mm. Kernel 00271e4a.
 - sc243 (04:47): peek-live census roll on the fixed kernel.
+
+LEG-17 PERF-GATE RESULTS (04:50, package branch pkg/slab-einval in
+worktree ../pkg-slab = main 50429710 + 4e9fe329 slab + c36c325a EINVAL,
+wording-clean, both arches build):
+- TIER 1 run 1 (sc239gate, quiet host): TERM-DESCHED 8 / WAKE-REFUSED
+  32 / STRANDED 0 (EIGHTH consecutive exact hold), ticks 99.91/99.74,
+  kernel share 84.5/83.6 (Tier-3 proxy band 83-86), clock_gettime 3us
+  (hold), nanosleep 184ms (band 177-265; pa38 itself read 333ms),
+  volume 120.5M vs pa38 136.4M (-11.7%, shallower app phase: 19.7k vs
+  49.5k serial lines, same 15 usb-host segfaults).
+- TIER 1 run 2 (sc240gate, sibling sc242 rolling concurrently): census
+  8/32/0 exact again; clock 3us; volume 114.8M (37.3k lines); ticks
+  99.3/99.1 under load (run-1 quiet-host numbers are the clean ones).
+  Verdict: no kernel-cost regression signal; volume deltas track the
+  stock-image app-phase lottery, per-op costs hold.
+- TIER 2 (pbench pb-slab, package kernel, pb1 class TCG/minimal-rootfs,
+  DONE rc=0 t=339s): p1_null 4.23 (-7%) p1_clock 4.70 (-5%) p2 12.38
+  (-19.6% IMPROVED) p3a 0.08 (0) p3b 26.45 (+7.5%) p3c 0.07 (0)
+  p4_fork_exit 8624 (+3.7%) p4_fork_exec 13589 (+1.4%) p5a 21.17
+  (-1.5%) p5b send 66.4 (-47%) recv 54.4 (-80%) p5c 54.6 (-3%)
+  p6 stat/openclose/read/getdents/fsync/append/mkdrmdir ALL within
+  +/-7%; p6_unlink 33047 (+22.4% MARGINAL-OUT, p99 1.8s = host noise
+  under the sibling's concurrent KVM roll — rerun-able per flake rule).
+  18/19 in band or improved.
+- sc250-B LAUNCHED 04:46 (usbless, package kernel, LOGLEVEL=4 no
+  quietcon for milestone visibility, SECS=3600, HDCPORT=12107): the
+  launcher-window attempt + second advancing boot. Report follows.
