@@ -31,7 +31,9 @@ pub fn generate() -> Vec<u8> {
     if crate::dfx::ksyms::table_valid() {
         for (idx, (_off, addr, _size, typ)) in crate::dfx::ksyms::INDEX.iter().enumerate() {
             let name = crate::dfx::ksyms::symbol_name(idx);
-            out.push_str(&format!("{:016x} {} rux::{}\n", addr, *typ as char, name));
+            // Linux prints the symbol name verbatim (fs/proc/kallsyms.c)
+            // — the demangled Rust name IS the name; no prefix is added.
+            out.push_str(&format!("{:016x} {} {}\n", addr, *typ as char, name));
         }
     }
     out.into_bytes()

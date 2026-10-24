@@ -133,12 +133,11 @@ def main() -> int:
     dropped = 0
     pairs = zip(syms, names) if enabled else ()
     for (addr, size, mangled, typ), demangled in pairs:
+        # The FULL demangled name is stored (verbatim, like Linux's
+        # /proc/kallsyms prints symbol names) — nothing is added back at
+        # runtime. Only the Rust hash suffix ("::h0123...") is dropped;
+        # it carries no information for a reader.
         name = demangled if demangled else mangled
-        # "rux::" is the crate prefix on every kernel symbol; the
-        # runtime adds it back, and the Rust hash suffix ("::h0123...")
-        # carries no information for a reader.
-        if name.startswith("rux::"):
-            name = name[5:]
         import re as _re
         name = _re.sub(r"::h[0-9a-f]{16}$", "", name)
         entry_cost = len(name) + 1 + 12

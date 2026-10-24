@@ -68,7 +68,12 @@ fn name_at(index: usize) -> &'static str {
     core::str::from_utf8(&rest[..end]).unwrap_or("?")
 }
 
-/// The name of the symbol at `index`, without the crate prefix.
+/// The name of the symbol at `index`, verbatim.
+///
+/// The build's symbol pass stores the full demangled name (e.g.
+/// "rux::arch::trap::do_trap" for kernel symbols, "memset" for C/asm
+/// ones); nothing is added at print time so /proc/kallsyms and
+/// backtraces show the symbol's real name, like Linux.
 pub fn symbol_name(index: usize) -> &'static str {
     name_at(index)
 }
@@ -109,15 +114,16 @@ pub fn lookup(pc: u64) -> Option<(&'static str, u64, u64)> {
 /// Linux-style symbol rendering: `func+0x1a/0x40`.
 ///
 /// Linux prints the function name, the offset into it and the function
-/// size, followed by `?` when the address could not be resolved.
+/// size, followed by `?` when the address could not be resolved. The
+/// name is the stored symbol name verbatim — no prefix.
 pub fn format_symbol(pc: u64) -> String {
     match lookup(pc) {
         Some((name, addr, size)) => {
             let off = pc - addr;
             if size > 0 {
-                format!("rux::{}+0x{:x}/0x{:x}", name, off, size)
+                format!("{}+0x{:x}/0x{:x}", name, off, size)
             } else {
-                format!("rux::{}+0x{:x}", name, off)
+                format!("{}+0x{:x}", name, off)
             }
         }
         None => "?".to_string(),
