@@ -23,8 +23,8 @@
 
 | | |
 |---|---|
-| ![Ubuntu login screen](docs/images/ubuntu-gnome-login-2026-10-15.png) | ![Ubuntu udesk desktop](docs/images/ubuntu-gnome-desktop-2026-10-15.png) |
-| *Ubuntu login screen on Rux (riscv64) — verify.py 23/23 PASS* | *The udesk desktop session on Rux (riscv64) — dock, panel, apps, and an interactive xterm; pixel-verified end to end. GNOME Shell pixels: [x86_64 bring-up capture, 2026-10-14](docs/images/gnome-desktop-2026-10-14.png)* |
+| ![GNOME desktop on Rux x86_64](docs/images/ubuntu-gnome-x86-2026-10-14.png) |
+| *GNOME Shell desktop on Rux (x86_64, amd64) — captured 40 minutes into a stable session: the Shell wallpaper and top bar/dock chrome compositing on screen. On riscv64 the same Ubuntu userland runs the image's udesk session end to end (pixel-verified, `test/ubuntu-gui/verify.py` 23/23); full GNOME Shell bring-up on riscv64 is the active goal (see the [Roadmap](docs/progress/roadmap.md))* |
 
 ### OpenHarmony — support status
 
