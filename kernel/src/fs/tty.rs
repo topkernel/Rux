@@ -774,10 +774,32 @@ impl TtyDevice {
 // ============================================================================
 
 /// Console output sink: raw UART bytes (translation already applied).
+///
+/// `quietcon` boot param (sc-series launcher race): when set, /dev/console
+/// output is DIVERTED from the UART into the printk ring instead of being
+/// written byte-by-byte through port IO. hilogd/alogs are 60% of the serial
+/// traffic in the launcher-race decision window (first ~60s of boot) and
+/// every console byte costs the writing task vCPU residency under KVM
+/// (port-IO VM exits); diverting them keeps dmesg complete while the UART
+/// stays idle during the race. The printk console path (loglevel-gated) and
+/// the raw DFX sinks are unaffected.
 fn console_output(_ctx: usize, bytes: &[u8]) {
+    if CONSOLE_SINK_QUIET.load(Ordering::Acquire) {
+        crate::printk::ring_stash_console(bytes);
+        return;
+    }
     for &b in bytes {
         crate::console::putchar(b);
     }
+}
+
+/// Whether /dev/console output is diverted to the printk ring (set by the
+/// `quietcon` cmdline param at boot; never toggled afterwards).
+static CONSOLE_SINK_QUIET: AtomicBool = AtomicBool::new(false);
+
+/// Arm the console-sink quiet mode (see `console_output`).
+pub fn set_console_sink_quiet(quiet: bool) {
+    CONSOLE_SINK_QUIET.store(quiet, Ordering::Release);
 }
 
 /// The console (UART) terminal. Owns the SHARED termios/winsize/fg-pgrp

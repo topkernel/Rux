@@ -25,8 +25,32 @@
 |---|---|
 | ![Ubuntu GNOME login](docs/images/ubuntu-gnome-login-2026-10-15.png) | ![Ubuntu GNOME desktop](docs/images/ubuntu-gnome-desktop-2026-10-15.png) |
 | *Ubuntu GNOME login screen on Rux (riscv64) — verify.py 23/23 PASS* | *Ubuntu GNOME desktop on Rux (riscv64) — the full udesk session with dock, panel, and apps* |
-| ![OH services](docs/images/oh-servicestart-2026-10-15.png) | ![OH display-path verification](docs/images/oh-drmpath-2026-10-19.png) |
-| *OpenHarmony x86_64_virt — ~80 system services (samgr, foundation, render_service, bootanimation…) start and stay up* | *Display-stack verification: a test painter from the bootanimation seat drives the kernel's full DRM path in a real OH boot (first flip + 400 ms ATOMIC loop, 100% of 720×1280). OH's own UI is not rendering yet — see status below* |
+
+### OpenHarmony — support status
+
+| | |
+|---|---|
+| ![OH services](docs/images/oh-servicestart-2026-10-15.png) | ![OH bootanimation](docs/images/oh-bootanimation-2026-10-24.png) |
+| *OpenHarmony x86_64_virt — ~80 system services (samgr, foundation, render_service, bootanimation…) start and stay up* | *OpenHarmony's own bootanimation rendering on the Rux kernel (720×1280 virtio-GPU, ohgpu screendump) — BootAnimationController verified at 150 frames* |
+
+**Where OpenHarmony stands today** (the boot chain, milestone by milestone):
+
+- **Boots with ~80 system services up** (samgr, foundation, render_service,
+  bootanimation, hilogd, appspawn, hdf devhosts, ...), `hdc shell` reaches the
+  live guest
+- **OH's own bootanimation renders fullscreen** on the kernel's virtio-GPU
+  DRM path (the screenshot above; `BootAnimationController START`, 150+
+  frames, SetVSyncRate delivered)
+- **The launcher process runs and works** — spawn completes end to end
+  (result 0 + pid), `LauncherAbilityManager`, `CommonBundleManager`,
+  `WallpaperExtAbility` and the render-service client all run and narrate
+  for 20+ minutes per boot
+- **Not yet on screen: the launcher UI.** render_service's SA-10 publish is
+  blocked by a userspace lock cascade in hdf_devmgr (a 16-reader FFRT pool
+  rwlock held across blocking binder calls freezes the composer service
+  mid-init); the devmgr→composer handshake (`OnHotPlug`, `SetBrightness`,
+  `SetVSyncRate`) is the deepest it has ever reached. Root-caused; fix in
+  flight.
 
 What is running in these screenshots, all on the Rux kernel:
 
@@ -96,16 +120,15 @@ python3 test/ubuntu-gui/verify.py --runs 2 --smp 4
 ## 📱 Rux Runs OpenHarmony
 
 **Status: the OpenHarmony x86_64_virt emulator boots on the Rux kernel
-with ~80 system services up (samgr, foundation, render_service,
-bootanimation, hilogd, appspawn, hdf devhosts, ...) and `hdc shell`
-reaching the live guest. The kernel's display path is proven end-to-end
-in a real boot — `CREATE_DUMB → ADDFB2 → first page flip → 400 ms ATOMIC
-flips` from a seat at the bootanimation position (that is the colored
-test pattern in the screenshot above, painted by our own
-`test/egl_painter`, not OH's UI). OH's own bootanimation/desktop does not
-render yet: render_service's EGL initialization still tears down late in
-bring-up, and the launcher chain stops at the screen-lock state machine
-on this image — both under active work.**
+with ~80 system services up, OH's own bootanimation rendering on the
+kernel DRM path (screenshot above), and the launcher process running
+end to end — spawn completes, the ability managers narrate real work.
+The launcher UI is not on screen yet: render_service's composer
+publish is blocked by a userspace rwlock cascade in hdf_devmgr
+(root-caused, fix in flight).** The kernel display path itself is
+proven end to end in a real boot — `CREATE_DUMB → ADDFB2 → first
+page flip → ATOMIC flips` from a seat at the bootanimation position
+(drive by `test/egl_painter`), and now by OH's own animation.
 
 The kernel-side fixes that made this work (the full campaign log is in
 git history; the load-bearing ones):

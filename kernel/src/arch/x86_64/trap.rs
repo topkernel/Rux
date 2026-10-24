@@ -682,7 +682,13 @@ pub fn pt_regs_rip_for_cpu(cpu: usize) -> u64 {
         return 0;
     }
     let p = CURRENT_PT_REGS[cpu].load(core::sync::atomic::Ordering::Relaxed) as *const PtRegs;
-    if p.is_null() || !crate::sched::sched::kernel_ptr_canonical(p as *const u8) {
+    // High-half bound added with the pa15 lesson: user addresses are
+    // canonical too, and this slot can only hold kernel-stack frames —
+    // a value below the kernel-half base is a torn read, never deref it.
+    if p.is_null()
+        || (p as u64) < 0xffff_8000_0000_0000
+        || !crate::sched::sched::kernel_ptr_canonical(p as *const u8)
+    {
         return 0;
     }
     // SAFETY: canonical kernel address; the frame page stays mapped
@@ -1154,12 +1160,33 @@ fn handle_timer_tick(regs: &mut PtRegs, cpu: usize) {
                 }
             }
             let cur = crate::sched::current();
+            let cur_ptr = match cur {
+                Some(t) => t as *mut crate::process::task::Task as usize,
+                None => 0,
+            };
             let (pid, pc) = unsafe {
-                match cur {
-                    Some(t) => ((*t).pid() as u64, (*t).preempt_count() as u64),
-                    None => (0, 0),
+                if cur_ptr != 0 {
+                    let t = cur_ptr as *mut crate::process::task::Task;
+                    ((*t).pid() as u64, (*t).preempt_count() as u64)
+                } else {
+                    (0, 0)
                 }
             };
+            // pa16 calibration (perf line, 2026-10-24): age is a WALL-CLOCK
+            // gap between timer-IRQ arrivals, which conflates three causes
+            // the in-guest clock cannot separate: a real IF=0 window, host
+            // vCPU steal (the CPU simply not scheduled — dominant under
+            // multi-QEMU host contention), and tickless-style idle (no
+            // timer due, nothing to deliver). Their EFLAGS-sampling probe
+            // measured max closed-cli 4 ms while this probe printed
+            // age=1000ms lines — steal/idle, not IRQ-off. Annotation (not
+            // silence): when the recovery tick lands on the idle task the
+            // gap was idle/steal by construction, so say so and skip the
+            // culprit walk; a real-task frame keeps the walk as a triage
+            // hint only — corroborate with an EFLAGS sampler before
+            // believing IF=0.
+            let is_idle =
+                cur_ptr != 0 && cur_ptr == crate::sched::sched::idle_task_ptr(cpu);
             let msg: &[u8] = b"\nWW: IRQ-OFF-WINDOW cpu=";
             for &b in msg {
                 putchar(b);
@@ -1191,14 +1218,28 @@ fn handle_timer_tick(regs: &mut PtRegs, cpu: usize) {
             }
             ph(regs.rsp);
             // Stack words in kernel text — return addresses of the
-            // in-window call chain. Guarded by the canonical + text-range
-            // checks; anything else prints as '.'.
+            // in-window call chain. Guarded by kernel-mode + kernel-half
+            // + canonical + text-range checks; anything else prints '.'.
+            // pa15 incident (perf line, 2026-10-24): the window can break
+            // while the CPU is already executing USER code (recovery tick
+            // interrupts a user frame), so regs.rsp is a USER stack
+            // address — and user addresses are CANONICAL on x86_64, so
+            // kernel_ptr_canonical alone let this walk read the user
+            // stack and fault on its first unmapped page (KERNPANIC
+            // pfault badaddr=user-page, rip=handle_timer_tick). A user
+            // frame carries no kernel return addresses; skip the walk.
+            // pa16: an idle recovery frame likewise implicates nobody —
+            // the gap was idle/steal, not a culprit call chain.
             let (lo, hi) = crate::sched::sched::kernel_text_window();
-            if crate::sched::sched::kernel_ptr_canonical(regs.rsp as *const u8) {
+            if !regs.user_mode()
+                && !is_idle
+                && regs.rsp >= 0xffff_8000_0000_0000
+                && crate::sched::sched::kernel_ptr_canonical(regs.rsp as *const u8)
+            {
                 for i in 0..12 {
                     let addr = regs.rsp as *const u64;
-                    // SAFETY: canonical kernel address; the kernel stack
-                    // stays mapped, so the scalar read cannot fault.
+                    // SAFETY: kernel-half canonical address; the kernel
+                    // stack stays mapped, so the scalar read cannot fault.
                     let w = unsafe { core::ptr::addr_of!((*addr.add(i))).read_volatile() };
                     putchar(b' ');
                     if w >= lo && w < hi {
@@ -1206,6 +1247,16 @@ fn handle_timer_tick(regs: &mut PtRegs, cpu: usize) {
                     } else {
                         putchar(b'.');
                     }
+                }
+            } else if regs.user_mode() {
+                let msg: &[u8] = b" user-frame";
+                for &b in msg {
+                    putchar(b);
+                }
+            } else if is_idle {
+                let msg: &[u8] = b" idle-wake";
+                for &b in msg {
+                    putchar(b);
                 }
             }
             putchar(b'\n');
@@ -1938,6 +1989,15 @@ fn user_segv_forensics(regs: &PtRegs, fault_addr: u64) {
 /// Handle page fault (#PF): decode the error code (in the orig_rax slot)
 /// into FaultFlags and hand off to `exception::do_page_fault`, then
 /// mirror the twin's outcome routing.
+/// R73: one-shot latch for the KERNPANIC raw dump. A fault DURING the
+/// dump (stack walk past the mapping, scribble park hook, frame walk on
+/// a wild rbp) re-enters `handle_page_fault`; without the latch that
+/// recursion prints the dump again and faults again — the print/read
+/// loop that wedged sc195's cpu0 for ~855 s (hardirq-held, rip parked
+/// in the UART `inb`). Second entry prints one marker and halts.
+static KP_DUMP_ENTERED: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
 fn handle_page_fault(regs: &mut PtRegs) {
     use crate::arch::mm::exception::do_page_fault;
     use crate::arch::mm::page_fault::MmFaultResult;
@@ -2086,8 +2146,31 @@ fn handle_page_fault(regs: &mut PtRegs) {
             }
         }
         MmFaultResult::KernelPanic => {
-            // Raw serial print (printk may be wedged on a lock this CPU
-            // holds), then halt — the twin's R9 discipline.
+            // R73 (sc195 strand + the coordinator's riscv64 double-fault
+            // root cause): the dump below used to read 16 words at rsp
+            // with NO bound — a word past the real stack top (boot stack
+            // at the image end, or any stack-adjacent hole) faulted back
+            // into THIS handler, and the print/read recursion wedged the
+            // CPU forever (sc195: cpu0 hardirq-held ~855 s at a stable
+            // inb rip — the recursive dump's UART output path — while the
+            // system limped on cpu1). Two guards:
+            // - re-entrancy latch: a fault DURING the dump goes straight
+            //   to the halt loop with one marker line (no second dump, no
+            //   recursion — the class dies here regardless of which
+            //   dump read faulted);
+            // - the kp-stk walk is bounded by the task's real
+            //   kernel-stack top (16K-aligned rsp heuristic when there is
+            //   no task context), stopping at the first past-top word.
+            if KP_DUMP_ENTERED.swap(true, core::sync::atomic::Ordering::Relaxed) {
+                for &b in b"trap: KERNPANIC re-entered during dump; halting\n" {
+                    crate::console::putchar_no_lock(b);
+                }
+                // SAFETY: hlt halts until the next interrupt; safe in a
+                // halt loop.
+                loop {
+                    unsafe { core::arch::asm!("hlt") };
+                }
+            }
             // SCRIBBLE2: park hook for gdb (walk the faulting CR3's page
             // tables live from the debugger).
             #[cfg(feature = "x86_64")]
@@ -2129,11 +2212,26 @@ fn handle_page_fault(regs: &mut PtRegs) {
             // use-after-free vtable...) this is the only record of what
             // the stack held at the jump. Words print one per line
             // ("kp-stk"), frames as "kp-frame".
+            //
+            // R73: the walk is BOUNDED at the faulting task's real
+            // kernel-stack top (16K-aligned rsp heuristic when there is
+            // no task context). A read past the mapping would fault back
+            // into this handler — the exact print/read recursion that
+            // wedged sc195's cpu0 for ~855 s; the KP_DUMP_ENTERED latch
+            // above is the safety net if any dump read still faults.
+            let kstack_top: usize = crate::sched::current()
+                .map(|t| unsafe { (*t).kernel_stack_top() })
+                .unwrap_or(((regs.rsp as usize | 0x3fff) + 1));
             for i in 0..16usize {
                 let addr = regs.rsp as usize + i * 8;
-                // SAFETY: best-effort read of our own kernel stack; a
-                // word past the mapping faults into this same handler's
-                // halt loop (no recovery attempted).
+                if addr + 8 > kstack_top {
+                    for &b in b"kp-stk <rest past kernel stack top>\n" {
+                        crate::console::putchar_no_lock(b);
+                    }
+                    break;
+                }
+                // SAFETY: bounded read of our own kernel stack (see the
+                // R73 comment above).
                 let v = unsafe { core::ptr::read_volatile(addr as *const u64) };
                 for &b in b"kp-stk " {
                     crate::console::putchar_no_lock(b);

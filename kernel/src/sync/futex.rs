@@ -46,6 +46,80 @@ pub const FUTEX_PRIVATE_FLAG: i32 = 128;
 pub const FUTEX_CLOCK_REALTIME: i32 = 256;
 pub const FUTEX_CMD_MASK: i32 = !(FUTEX_PRIVATE_FLAG | FUTEX_CLOCK_REALTIME);
 
+// sc184 (session R, screen gate): devmgr frozen-rwlock birth tracer state
+// (see the FXDV block in do_futex). Latched from the binder SAREG tracer
+// when hdf_devmgr's AddSystemAbility(SA 5100) is seen.
+pub static FXDV_PID: core::sync::atomic::AtomicU32 =
+    core::sync::atomic::AtomicU32::new(0);
+static FXDV_N: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+const FXDV_RINGSZ: usize = 24;
+static FXDV_ADDR: [core::sync::atomic::AtomicUsize; FXDV_RINGSZ] =
+    [const { core::sync::atomic::AtomicUsize::new(0) }; FXDV_RINGSZ];
+static FXDV_CNT: [core::sync::atomic::AtomicUsize; FXDV_RINGSZ] =
+    [const { core::sync::atomic::AtomicUsize::new(0) }; FXDV_RINGSZ];
+
+/// Latch the hdf_devmgr pid for the FXDV tracer (idempotent; first caller
+/// wins — binder.rs calls this when the SA 5100 registration is seen).
+pub fn fxdv_latch_devmgr(pid: u32) {
+    let prev = FXDV_PID.swap(pid, core::sync::atomic::Ordering::Relaxed);
+    if prev != pid {
+        crate::pr_warn!("FXDV latch devmgr pid={}", pid);
+    }
+}
+
+// sc209 (leg 14): render_service futex lifecycle tracer. sc208 closed the
+// SA-10 question to the publisher side: render_service main runs through
+// composer/HGM init, logs "HgmTaskHandleThread init" (hgm_context.cpp:60),
+// then parks in a futex forever — the very next source statement is
+// InitHgmTaskHandleThread's PostSyncTask (an FFRT queue->wait(handle)),
+// and AddSystemAbility(10) never runs (no "insert SA:10" all boot). The
+// census sleepsnap shows its FFRT workers (OS_FFRT_5_0/_1) alive but
+// asleep. This tracer latches the render_service tgid at exec and prints
+// EVERY futex WAIT/WAKE/REQUEUE from that process (entry + return): a
+// WAKE issued to the parked main's uaddr that it never consumes = kernel
+// wake loss; silence = the FFRT worker never ran the task (userspace
+// chain — the next hop is the worker's own wait lines).
+static FXRS_TGID: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+static FXRS_N: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+// sc209 postmortem: 600 ops died inside RS's own init (EGL/composer
+// setup is hundreds of condvar broadcasts), two dozen ops short of the
+// HGM window. 4000 ops (~8000 short lines, ~1 min of UART across a
+// 45 min boot) covers init + the PostSyncTask park window + any later
+// render-loop ops of interest.
+const FXRS_BUDGET: usize = 4000;
+
+/// Latch the render_service tgid for the FXRS tracer (idempotent; called
+/// from the exec path when /system/bin/render_service loads).
+pub fn fxrs_latch(tgid: u32) {
+    let prev = FXRS_TGID.swap(tgid, core::sync::atomic::Ordering::Relaxed);
+    if prev != tgid {
+        crate::pr_warn!("FXRS latch render_service tgid={}", tgid);
+    }
+}
+
+// sc185 RWFRZ-WATCH: words named by RWFRZ-PARK (writers parked on
+// 0x80000000|N readers), watched for their post-park futex lifecycle from
+// ANY process. A later WAKE on the word that the parked writer never
+// consumes = kernel wake loss; silence forever = readers never released
+// (userspace). See the watch block in do_futex and the registration in the
+// RWFRZ-PARK hook.
+const RWFRZ_WATCH_SZ: usize = 8;
+static RWFRZ_WATCH: [core::sync::atomic::AtomicUsize; RWFRZ_WATCH_SZ] =
+    [const { core::sync::atomic::AtomicUsize::new(0) }; RWFRZ_WATCH_SZ];
+static RWFRZ_WATCH_CNT: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+// sc186: 64 lines died on arena churn before the wedge window; 192 keeps
+// the same worst-case UART bound as one parkdump stack dump.
+const RWFRZ_WATCH_BUDGET: usize = 192;
+
+// FXDV2: param-arena futex tracer budget (see the FXDV2 block in
+// do_futex — traces every futex op on the fixed-address /dev/__parameters__
+// window from any process).
+static FXDV2_N: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+
+
 pub const FUTEX_BITSET_MATCH_ANY: u32 = 0xffffffff;
 
 // Internal flags
@@ -1412,6 +1486,168 @@ pub fn do_futex(uaddr: usize, op: i32, val: u32, _timeout: u64, uaddr2: usize, _
         return -EINVAL as i64;
     }
 
+    // sc185 RWFRZ-WATCH: any futex op on a word that RWFRZ-PARK named (a
+    // writer parked there on 0x80000000|N readers). This is the birth-
+    // moment lifecycle: a WAKE arriving on the word while the parked
+    // writer never resumes = kernel lost the wake; total silence = the
+    // readers never released (userspace leak/stall); a re-issued WAIT
+    // from the parked tid = it DID wake once and re-parked (val still
+    // nonzero — reader side stuck). Budgeted at 64 lines total.
+    {
+        use core::sync::atomic::Ordering::Relaxed;
+        if RWFRZ_WATCH[0].load(Relaxed) != 0 || RWFRZ_WATCH[1].load(Relaxed) != 0 {
+            for w in RWFRZ_WATCH.iter() {
+                let wa = w.load(Relaxed);
+                if wa != 0 && wa == uaddr {
+                    let c = RWFRZ_WATCH_CNT.fetch_add(1, Relaxed);
+                    if c < RWFRZ_WATCH_BUDGET {
+                        let (tid, tgid) = match crate::sched::current() {
+                            Some(t) => unsafe { ((*t).pid(), (*t).tgid()) },
+                            None => (0, 0),
+                        };
+                        crate::pr_warn!(
+                            "RWFRZ-WATCH #{} tid={} tgid={} op={} uaddr={:#x} val={:#x} jif={}",
+                            c,
+                            tid,
+                            tgid,
+                            match cmd {
+                                FUTEX_WAIT => "WAIT",
+                                FUTEX_WAIT_BITSET => "WAITB",
+                                FUTEX_WAKE => "WAKE",
+                                FUTEX_REQUEUE | FUTEX_CMP_REQUEUE => "REQUEUE",
+                                _ => "other",
+                            },
+                            uaddr,
+                            val,
+                            crate::drivers::timer::get_jiffies(),
+                        );
+                    }
+                    break;
+                }
+            }
+        }
+    }
+
+    // sc184 (session R, the screen gate): hdf_devmgr's frozen-rwlock birth
+    // tracer. Every stall dump shows devmgr's IPC threads parked in
+    // FUTEX_WAIT on a musl-rwlock word reading 0x80000000|N-readers (16
+    // and 148 observed) while their binder transactions sit SERVER-OWING —
+    // the wedge that keeps render_service's GetService unanswered and SA
+    // 10 unpublished (black screen). The word's lifecycle inside devmgr
+    // is invisible to every existing probe (uncontended rd/unlock paths
+    // never syscall). This tracer prints, for the latched devmgr pid
+    // ONLY, every WAIT whose expected value carries the waiters bit (the
+    // rwlock writer path — each line's `val` carries the reader count the
+    // writer saw) plus every WAKE on an address such a WAIT named,
+    // deduped per address so the UART survives: "WAIT-forever preceded by
+    // matching WAKEs" vs "no WAKE ever" decides lost-wake vs leaked-reader
+    // directly.
+    {
+        use core::sync::atomic::Ordering::Relaxed;
+        let cur_tgid =
+            crate::sched::current().map(|t| unsafe { (*t).tgid() as u32 });
+        // sc185: the SA-5100 parcel latch never fired in sc184 (zero FXDV
+        // lines), so also latch by process name — the first futex from any
+        // thread of "hdf_devmgr" latches its tgid. The parcel matcher stays
+        // (earlier latch = earlier coverage), this is the backstop.
+        if FXDV_PID.load(Relaxed) == 0 {
+            if let Some(t) = crate::sched::current() {
+                let comm = unsafe { (*t).comm() };
+                let name = core::str::from_utf8(&comm[..])
+                    .unwrap_or("")
+                    .trim_end_matches('\0');
+                if name == "hdf_devmgr" {
+                    fxdv_latch_devmgr(unsafe { (*t).tgid() as u32 });
+                }
+            }
+        }
+        if FXDV_PID.load(Relaxed) != 0 && cur_tgid == Some(FXDV_PID.load(Relaxed)) {
+            let is_rw_wait = matches!(cmd, FUTEX_WAIT | FUTEX_WAIT_BITSET)
+                && val & 0x8000_0000 != 0
+                && (val & 0x7fff_ffff) < 0x4000_0000;
+            let mut addr_idx = usize::MAX;
+            for (i, s) in FXDV_ADDR.iter().enumerate() {
+                if s.load(Relaxed) == uaddr {
+                    addr_idx = i;
+                    break;
+                }
+            }
+            if is_rw_wait && addr_idx == usize::MAX {
+                for (i, s) in FXDV_ADDR.iter().enumerate() {
+                    if s.load(Relaxed) == 0 {
+                        s.store(uaddr, Relaxed);
+                        addr_idx = i;
+                        break;
+                    }
+                }
+            }
+            let interesting = is_rw_wait
+                || (matches!(cmd, FUTEX_WAKE) && addr_idx != usize::MAX && val != 0);
+            if interesting {
+                let n = FXDV_N.fetch_add(1, Relaxed);
+                if n < 400 {
+                    // Dedup: first 3 per address, then every 64th.
+                    let c = if addr_idx == usize::MAX {
+                        0
+                    } else {
+                        FXDV_CNT[addr_idx].fetch_add(1, Relaxed)
+                    };
+                    if c < 3 || c % 64 == 0 {
+                        crate::pr_warn!(
+                            "FXDV #{} tid={} op={} uaddr={:#x} val={:#x} jif={}",
+                            n,
+                            crate::sched::current()
+                                .map(|t| unsafe { (*t).pid() })
+                                .unwrap_or(0),
+                            match cmd {
+                                FUTEX_WAIT => "WAIT",
+                                FUTEX_WAIT_BITSET => "WAITB",
+                                _ => "WAKE",
+                            },
+                            uaddr,
+                            val,
+                            crate::drivers::timer::get_jiffies(),
+                        );
+                    }
+                }
+            }
+        }
+        // FXDV2 (sc184 follow-up): the PARAM-ARENA lock tracer. The OH
+        // parameter service's shared arena is mapped at the fixed base
+        // 0x7ff000000000 (/dev/__parameters__ + fixed-address anon pages —
+        // the ww-line's mmap-time naming). Its rwlock word at 0x7ff00002ec64
+        // froze with 16 readers in sc184 while writers from param_watcher,
+        // el5_filekey_man and storage_manager parked on it — a MAP_SHARED
+        // lock whose readers span processes. Trace EVERY futex op in the
+        // first 64K of the arena window from ANY process: the WAIT/WAKE
+        // lifecycle of the shared lock decides leaked-reader (WAKEs stop
+        // while the count is nonzero) vs lost-wake (WAKE issued, writer
+        // still parked) vs coherence drift (two processes observe
+        // different vals for the same word).
+        if (0x7ff0_0000_0000..0x7ff0_0010_0000).contains(&uaddr) {
+            use core::sync::atomic::Ordering::Relaxed as R2;
+            let n = FXDV2_N.fetch_add(1, R2);
+            if n < 500 {
+                crate::pr_warn!(
+                    "FXDV2 #{} tgid={} tid={} op={} uaddr={:#x} val={:#x} jif={}",
+                    n,
+                    crate::sched::current().map(|t| unsafe { (*t).tgid() }).unwrap_or(0),
+                    crate::sched::current().map(|t| unsafe { (*t).pid() }).unwrap_or(0),
+                    match cmd {
+                        FUTEX_WAIT => "WAIT",
+                        FUTEX_WAIT_BITSET => "WAITB",
+                        FUTEX_WAKE => "WAKE",
+                        FUTEX_REQUEUE | FUTEX_CMP_REQUEUE => "REQUEUE",
+                        _ => "other",
+                    },
+                    uaddr,
+                    val,
+                    crate::drivers::timer::get_jiffies(),
+                );
+            }
+        }
+    }
+
     #[cfg(feature = "dfx-futex-trace")]
     {
         let pid = crate::sched::current().map(|t| unsafe { (*t).pid() as u64 }).unwrap_or(0);
@@ -1528,6 +1764,22 @@ pub fn sys_futex_handler(args: &[u64; 6]) -> i64 {
                         val,
                         readers
                     );
+                    // sc185: register the word for RWFRZ-WATCH (post-park
+                    // lifecycle from any process — see the watch block in
+                    // do_futex's prologue). sc185 lesson: the param-arena
+                    // word (0x7ff00002ec64, inside FXDV2's window) churns
+                    // healthily all boot and ate the whole 64-line budget
+                    // by jif=1502, before the terminal freeze (born
+                    // ~jif=1900+). FXDV2 owns the arena window; skip it
+                    // here so the budget survives to the wedge window.
+                    if !(0x7ff0_0000_0000..0x7ff0_0010_0000).contains(&uaddr) {
+                        for w in RWFRZ_WATCH.iter() {
+                            if w.load(core::sync::atomic::Ordering::Relaxed) == 0 {
+                                w.store(uaddr, core::sync::atomic::Ordering::Relaxed);
+                                break;
+                            }
+                        }
+                    }
                     // SAFETY: t is the current task, in its own syscall.
                     unsafe { rwfz_stack_frames(t, "park", 12, 64) };
                 }
@@ -1725,8 +1977,15 @@ pub fn sys_futex_handler(args: &[u64; 6]) -> i64 {
                                     }
                                     let fd = vm.file_fd();
                                     let path = if fd >= 0 {
-                                        tk.fdtable()
-                                            .get_file(fd as usize)
+                                        // sc210: the wedge dump can walk a
+                                        // just-forked task whose fdtable is
+                                        // not set yet — fdtable() would
+                                        // panic and kill the boot (kernel
+                                        // panic "FdTable not initialized",
+                                        // task.rs:3958). Diagnostic walks
+                                        // must always be None-safe.
+                                        tk.try_fdtable()
+                                            .and_then(|fdt| fdt.get_file(fd as usize))
                                             .map(|f| probe_file_path(&f))
                                             .unwrap_or_else(|| alloc::string::String::from("?"))
                                     } else {
@@ -1755,7 +2014,14 @@ pub fn sys_futex_handler(args: &[u64; 6]) -> i64 {
                             // anon_inode mapping in sc137 needs the true
                             // object type named, and unix sockets also
                             // print their bound+peer names.
-                            let fdt = tk.fdtable();
+                            // sc210: fdtable() panics on a task whose
+                            // fdtable is not set — the dump must be
+                            // None-safe or it kills the boot it dumps
+                            // (kernel panic "FdTable not initialized").
+                            'fdscan: {
+                                let Some(fdt) = tk.try_fdtable() else {
+                                    break 'fdscan;
+                                };
                             let mut shown = 0u32;
                             for fd in 0..32u32 {
                                 if let Some(f) = fdt.get_file(fd as usize) {
@@ -1847,6 +2113,7 @@ pub fn sys_futex_handler(args: &[u64; 6]) -> i64 {
                                         break;
                                     }
                                 }
+                            }
                             }
                             // sc138 (Session Q): decode round 3.
                             // (a) The park caller's code bytes: raw
@@ -2007,6 +2274,66 @@ pub fn sys_futex_handler(args: &[u64; 6]) -> i64 {
                 rwfz_op_log(uaddr, op, val, r);
                 crate::pr_warn!("stkfutex: tid {} -> {}", tid, r);
                 return r;
+            }
+        }
+    }
+    // sc209 (leg 14): render_service futex lifecycle tracer (see the
+    // FXRS_TGID block near the top of this file). Entry line BEFORE
+    // do_futex + result line after, for every WAIT/WAKE/BITSET/REQUEUE op
+    // issued by any thread of the latched render_service tgid. Main's
+    // park uaddr + whether ANY wake ever targets it decides kernel
+    // wake-loss vs the FFRT worker never running the synced task.
+    {
+        let lt = FXRS_TGID.load(core::sync::atomic::Ordering::Relaxed);
+        if lt != 0
+            && matches!(
+                op & FUTEX_CMD_MASK,
+                FUTEX_WAIT
+                    | FUTEX_WAKE
+                    | FUTEX_WAIT_BITSET
+                    | FUTEX_WAKE_BITSET
+                    | FUTEX_CMP_REQUEUE
+            )
+        {
+            let mine = crate::sched::current()
+                .map(|t| unsafe { (*t).tgid() == lt })
+                .unwrap_or(false);
+            if mine {
+                let n = FXRS_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                if n < FXRS_BUDGET {
+                    let tid = crate::sched::current()
+                        .map(|t| unsafe { (*t).pid() })
+                        .unwrap_or(0);
+                    let comm = crate::sched::current()
+                        .map(|t| unsafe { (*t).comm() })
+                        .map(|c| core::str::from_utf8(c).unwrap_or(""))
+                        .unwrap_or("")
+                        .trim_end_matches('\0');
+                    let cmd = match op & FUTEX_CMD_MASK {
+                        FUTEX_WAIT => "WAIT",
+                        FUTEX_WAKE => "WAKE",
+                        FUTEX_WAIT_BITSET => "WAIT-bs",
+                        FUTEX_WAKE_BITSET => "WAKE-bs",
+                        FUTEX_CMP_REQUEUE => "CMP-REQ",
+                        _ => "other",
+                    };
+                    crate::pr_warn!(
+                        "FXRS #{} {} tid {} comm='{}' uaddr={:#x} val={:#x} u2={:#x} v3={:#x} tmo={:#x}",
+                        n,
+                        cmd,
+                        tid,
+                        comm,
+                        uaddr,
+                        val,
+                        uaddr2,
+                        val3,
+                        timeout
+                    );
+                    let r = do_futex(uaddr, op, val, timeout, uaddr2, 0, val3);
+                    rwfz_op_log(uaddr, op, val, r);
+                    crate::pr_warn!("FXRS #{} -> ret={}", n, r);
+                    return r;
+                }
             }
         }
     }
@@ -2337,7 +2664,12 @@ pub fn kill_dump_tgid(tgid: u32) {
                 let mut fdnote = alloc::string::String::new();
                 for arg in [r.rdi, r.rsi, r.rdx] {
                     if arg < 64 {
-                        if let Some(f) = tk.fdtable().get_file(arg as usize) {
+                        // sc210: None-safe fdtable walk (just-forked task
+                        // has no fdtable yet; fdtable() panics).
+                        if let Some(f) = tk
+                            .try_fdtable()
+                            .and_then(|fdt| fdt.get_file(arg as usize))
+                        {
                             use core::fmt::Write;
                             let _ = write!(fdnote, " fd{}={}", arg, f.path());
                         }
@@ -2476,11 +2808,16 @@ unsafe fn kill_dump_wedge(tk: &Task, t: *mut Task, nr: u64, args: [u64; 3]) {
     }
     // Whole low fdtable: fd/type/path one line — where fd3 came from and
     // what the process holds overall.
+    // sc210: try_fdtable — the wedge dump can observe a task whose
+    // fdtable is not initialized (just-forked); fdtable() would panic
+    // ("FdTable not initialized", task.rs) and take the whole boot down
+    // with a kernel panic mid-census — exactly how sc210 (the deepest
+    // boot ever, launcher executing) died at t=1410s.
     {
         let mut line = alloc::string::String::new();
         let _ = write!(line, "KILLDUMP: tid {} fdtab:", tk.pid());
         for fd in 0..16usize {
-            if let Some(f) = tk.fdtable().get_file(fd) {
+            if let Some(f) = tk.try_fdtable().and_then(|fdt| fdt.get_file(fd)) {
                 let _ = write!(line, " [{}:{}:{}]", fd, kd_fd_type(&f), f.path());
             }
         }
@@ -2488,8 +2825,12 @@ unsafe fn kill_dump_wedge(tk: &Task, t: *mut Task, nr: u64, args: [u64; 3]) {
     }
     // The syscall's primary fd (rdi for read/write/writev/ioctl-family).
     if let Some(&fd) = args.first() {
-        if fd < 64 && tk.fdtable().get_file(fd as usize).is_some() {
-            if let Some(f) = tk.fdtable().get_file(fd as usize) {
+        if fd < 64
+            && tk.try_fdtable()
+                .map(|fdt| fdt.get_file(fd as usize).is_some())
+                .unwrap_or(false)
+        {
+            if let Some(f) = tk.try_fdtable().and_then(|fdt| fdt.get_file(fd as usize)) {
                 let ty = kd_fd_type(&f);
                 crate::pr_warn!(
                     "KILLDUMP: tid {} fd{} type={} flags={:#x}",
@@ -2527,7 +2868,13 @@ unsafe fn kill_dump_wedge(tk: &Task, t: *mut Task, nr: u64, args: [u64; 3]) {
                                         return;
                                     }
                                     for hfd in 0..32usize {
-                                        if let Some(hf) = hk.fdtable().get_file(hfd) {
+                                        // sc210: None-safe — the census walks
+                                        // every task; a just-forked one has
+                                        // no fdtable yet.
+                                        if let Some(hf) = hk
+                                            .try_fdtable()
+                                            .and_then(|fdt| fdt.get_file(hfd))
+                                        {
                                             let hty = kd_fd_type(&hf);
                                             if hty == "pipe"
                                                 && unsafe { *hf.private_data.get() }
@@ -2943,8 +3290,8 @@ unsafe fn rwfz_stack_frames(
             return p.clone();
         }
         let p = tk
-            .fdtable()
-            .get_file(fd as usize)
+            .try_fdtable()
+            .and_then(|fdt| fdt.get_file(fd as usize))
             .map(|file| file.path())
             .unwrap_or_else(|| alloc::string::String::from("?"));
         cache.push((fd, p.clone()));

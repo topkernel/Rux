@@ -178,6 +178,25 @@ _start:
     or t4, t4, t5
     sd t4, 32(t3)
 
+    // PMD[5]: VA -> PA sixth 2MB (keeps the trampoline in sync with
+    // early_pmd below; the R3FIX grew early_pmd to 12MB but left this
+    // table at 10MB - benign only while the "2:" stage's GOT loads stay
+    // below 10MB. Do not let the tables drift apart again.)
+    li t4, KERNEL_PHYS
+    li t6, 0xA00000              // 10MB
+    add t4, t4, t6
+    srli t4, t4, 2
+    or t4, t4, t5
+    sd t4, 40(t3)
+
+    // PMD[6]: VA -> PA seventh 2MB (window 14MB; see early_pmd PMD[6])
+    li t4, KERNEL_PHYS
+    li t6, 0xC00000              // 12MB
+    add t4, t4, t6
+    srli t4, t4, 2
+    or t4, t4, t5
+    sd t4, 48(t3)
+
     // --- Create early page table (full kernel mapping) ---
     // early_pg_dir: same as trampoline but points to early_pmd
     la t2, early_pg_dir
@@ -257,6 +276,24 @@ _start:
     srli t4, t4, 2
     or t4, t4, t5
     sd t4, 40(t3)
+
+    // PMD[6]: VA 0xFFFFFFFF80C00000 -> PA 0x80E00000 (seventh 2MB)
+    // RUX-RISCV-LAYOUT-2: the unit-test build grew past the 12MB window
+    // again (image end 0xffffffff80c17000 on main@298b69fe; this lane's
+    // syscost v3 statics were the straw): the boot stack's top sat on the
+    // first unmapped page and rust_main's very first stack push faulted
+    // into an infinite trap_entry frame-push recursion through unmapped
+    // memory (make-test boot, pa19). Window is now 14MB; the heap base,
+    // RAM reservation and memory-map KERNEL_SIZE moved with it (see
+    // main.rs RUX-RISCV-LAYOUT-2, memory_layout.rs, buddy_allocator.rs).
+    // The riscv64 linker.ld now ASSERTs _end against this window so the
+    // next outgrowth fails the BUILD, not the boot.
+    li t4, KERNEL_PHYS
+    li t6, 0xC00000              // 12MB
+    add t4, t4, t6
+    srli t4, t4, 2
+    or t4, t4, t5
+    sd t4, 48(t3)
 
     // --- MMIO identity mapping (UART at 0x10000000) ---
     // early_pg_dir[0] -> early_pmd_io (non-leaf, identity maps first 1GB)

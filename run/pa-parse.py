@@ -118,6 +118,36 @@ def main():
         for t, nr, us, comm in slow[-20:]:
             print("t=%ds nr=%d %-14s %8d us comm=%s" % (t, nr, NAMES.get(nr, '?'), us, comm))
 
+    # pa15/pa16 IF=0 zones + REST call-site table (latest dump).
+    if0 = {}          # cpu -> fields
+    sites = {}        # (file:line) -> [n, tot_ms, avg_ns, max_ms]
+    of_site = None
+    for line in open(log, errors='replace'):
+        m2 = re.search(r'SYSCOST t=\d+s if0 cpu=(\d+): (.*)$', line)
+        if m2:
+            if0[int(m2.group(1))] = m2.group(2)
+            continue
+        m2 = re.search(r'SYSCOST t=\d+s rest-site\s+\d+: (\S+?):(\d+) n=(\d+) tot=(\d+)ms avg=(\d+)ns max=(\d+)ms', line)
+        if m2:
+            f, ln, n, tot, avg, mx = m2.groups()
+            sites['%s:%s' % (f, ln)] = [int(n), int(tot), int(avg), int(mx)]
+            continue
+        m2 = re.search(r'SYSCOST t=\d+s rest-site of: (.*)$', line)
+        if m2:
+            of_site = m2.group(1)
+    if if0:
+        print("\n=== IF=0 zones (latest dump) ===")
+        for c in sorted(if0):
+            print("cpu%d: %s" % (c, if0[c]))
+    if sites:
+        print("\n=== REST call sites (latest dump, top 20 by tot) ===")
+        print("%-46s %10s %10s %10s %10s" % ("file:line", "n", "tot_ms", "avg_ns", "max_ms"))
+        for k, v in sorted(sites.items(), key=lambda kv: -kv[1][1])[:20]:
+            print("%-46s %10d %10d %10d %10d" % (k, v[0], v[1], v[2], v[3]))
+        print("site-table sum: %d ms across %d sites" % (sum(v[1] for v in sites.values()), len(sites)))
+    if of_site:
+        print("overflow row:", of_site)
+
     # wedge detection: last stamped timestamp
     ts = None
     try:

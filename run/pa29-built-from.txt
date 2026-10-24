@@ -1,0 +1,12 @@
+pa29 probe kernel (pa29-probe-bzImage, NOT committed - 11MB > 10MB rule)
+Built from: feature/perf-audit @ e25ffb80 (= origin/main, leg-18 start)
+plus the uncommitted-in-this-file fsw probe changes:
+  kernel/src/dfx/fsw.rs (new), dfx/mod.rs, timer.rs,
+  fs/bio.rs, fs/vfs.rs, fs/ext4/{mod,inode,namei,allocator}.rs,
+  fs/jbd2/{transaction,commit,revoke}.rs
+Build: make build-x86 (debug profile, target/x86_64-unknown-none/debug/bzImage)
+Boot: run/pa-boot.sh pa29 run/pa29-probe-bzImage 480, APPEND_EXTRA="syscost=1 fsw=1",
+  KVM q35 -cpu max -m 4G -smp 2, fresh reflink userdata (rm'd the tag copy first).
+Rebuild not byte-identical (link order nondeterminism, see pa26-built-from.txt).
+pa28-probe-bzImage: same sources minus the dump-offset fix (4-line dumps,
+console-raced) - pa28-b serial carries one surviving cumulative line at t=420.

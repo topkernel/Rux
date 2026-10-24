@@ -719,6 +719,15 @@ struct BinderTxn {
     /// Target-user address of the NUL-terminated secctx string in the sg
     /// area (0: the target node did not request a security context).
     security_ctx: u64,
+    /// sc208 (launcher leg 13, C-line cross-finding: SAMgr SendRequest
+    /// ~30 s per call once the clock was fixed): lifecycle stamps for the
+    /// SLOW-TXN probe. enq_j = jiffies at BC_TRANSACTION queue time;
+    /// pick_j = jiffies at BR_TRANSACTION delivery (server pickup), 0
+    /// until then. The reply pop computes queue-vs-exec and prints the
+    /// split for any sync txn over 5 s — where the 30 s goes (server not
+    /// picking up vs handler running long) names the next chain link.
+    enq_j: u32,
+    pick_j: core::cell::UnsafeCell<u32>,
 }
 
 impl BinderTxn {
@@ -1265,6 +1274,9 @@ pub fn binder_open(file: &crate::fs::File, ctx: BinderCtx) -> i32 {
         let mut w = world_lock();
         w.as_mut().unwrap().procs.push(proc.clone());
     }
+    // dfx=schb: record the new proc for the heartbeat's SC-PROC drain
+    // (no-op unless the switch is armed; never any I/O on this path).
+    crate::dfx::schb::note_proc_open(pid);
     crate::pr_info!("binder: pid {} opened the device (proc {})", pid, id);
     // sc157: device-open visibility at warn level (boot loglevel drops
     // the info line). Decides in one boot whether forked appspawn
@@ -2478,6 +2490,19 @@ pub fn sleep_snapshot() {
     if !crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SleepSnap) {
         return;
     }
+    // sc207 (launcher leg 13): NEVER print inside the for_each_task
+    // callback - it runs under the pid-hash bucket lock, and one printk
+    // per S-state task held each bucket across console port-IO for ~a
+    // second in total. A timer tick landing on that CPU mid-walk runs
+    // stallwatch_tick's own for_each_task at irq-exit softirq time,
+    // which then spins on the very bucket the interrupted walker holds
+    // (self-deadlock: the releaser is the interrupted task); the other
+    // CPU's scan spins on the same bucket and the machine hard-freezes
+    // with the serial cut mid-line (sc207: both vCPUs 100%, RIP in
+    // pid_hash::lock_bucket from stallwatch_tick). Collect lines here,
+    // print ONCE after the walk with every bucket released.
+    let mut out = alloc::string::String::new();
+    use core::fmt::Write as _;
     crate::sched::for_each_task(|task| {
         // SAFETY: callback runs under the pid-hash bucket lock (same
         // contract as hung_task's check_tasks); reads are confined to
@@ -2515,7 +2540,8 @@ pub fn sleep_snapshot() {
             let name = core::str::from_utf8(&comm[..])
                 .unwrap_or("")
                 .trim_end_matches('\0');
-            crate::pr_info!(
+            let _ = writeln!(
+                out,
                 "sleepsnap: {} tid {} state={:#x} sys={} rip={:#x} a0={:#x} a1={:#x}",
                 name,
                 tk.pid(),
@@ -2526,6 +2552,25 @@ pub fn sleep_snapshot() {
                 a1
             );        }
     });
+    // Emit with every pid-hash bucket released (see the sc207 note
+    // above). One printk for the whole snapshot: ring records have a
+    // length cap, so chunk on line boundaries at a size well under it.
+    if !out.is_empty() {
+        let mut rest = out.as_str();
+        while !rest.is_empty() {
+            let mut cut = rest.len().min(1024);
+            if cut < rest.len() {
+                // Extend to the next newline so lines stay whole.
+                match rest[cut..].find('\n') {
+                    Some(nl) => cut += nl,
+                    None => cut = rest.len(),
+                }
+            }
+            let (chunk, tail) = rest.split_at(cut);
+            crate::pr_info!("{}", chunk);
+            rest = tail;
+        }
+    }
 }
 
 /// World-wide search for queued/stacked transactions SENT by (pid, tid) —
@@ -2741,6 +2786,96 @@ fn thread_census_of(t: &Arc<BinderThread>) -> alloc::string::String {
         t.tid, total, woken, state, verdict
     );
     s
+}
+
+/// dfx=schb heartbeat counts (sc-series quiet-quiet soft-wedge hunt):
+/// cheap per-beat binder summary — live proc count, threads parked in
+/// the blocking binder read, and waiters older than 15s (the rekick
+/// threshold; a healthy boot parks readers for 1-3s at most). Read-only
+/// under WORLD; no formatting, no I/O — all output happens in schbd.
+pub fn schb_beat() -> (usize, usize, usize) {
+    let now = crate::drivers::timer::get_jiffies();
+    let hz = crate::config::KERNEL_HZ as u64;
+    let mut procs = 0usize;
+    let mut waiters = 0usize;
+    let mut waiters15 = 0usize;
+    let w = world_lock();
+    // SAFETY: read-only traversal under WORLD (pm() casts only reach
+    // each live proc's thread list).
+    unsafe {
+        if let Some(world) = w.as_ref() {
+            for p in &world.procs {
+                procs += 1;
+                let proc = pm(world, p);
+                for t in &proc.im().threads {
+                    let since = t.read_wait_since.load(core::sync::atomic::Ordering::Acquire);
+                    if since == 0 {
+                        continue;
+                    }
+                    waiters += 1;
+                    if hz != 0 && now.saturating_sub(since) >= 15 * hz {
+                        waiters15 += 1;
+                    }
+                }
+            }
+        }
+    }
+    (procs, waiters, waiters15)
+}
+
+/// dfx=schb wedge census: EVERY read-wait binder thread regardless of
+/// age. stall_report only prints waiters older than STALL_SECS (120s);
+/// the census fires at pid-plateau+60s where the wedge's waiters are
+/// younger. Formats under WORLD (no I/O); the caller emits the lines via
+/// ConsoleWriter after the guard drops (the sc89 stall_report
+/// discipline). No stall_reported latching, no rekick side effects.
+pub fn schb_waiter_census(out: &mut alloc::string::String) {
+    use core::fmt::Write as _;
+    let now = crate::drivers::timer::get_jiffies();
+    let hz = crate::config::KERNEL_HZ as u64;
+    if hz == 0 {
+        return;
+    }
+    let w = world_lock();
+    // SAFETY: read-only traversal under WORLD.
+    unsafe {
+        if let Some(world) = w.as_ref() {
+            for p in &world.procs {
+                let proc = pm(world, p);
+                for t in &proc.im().threads {
+                    let since = t.read_wait_since.load(core::sync::atomic::Ordering::Acquire);
+                    if since == 0 {
+                        continue;
+                    }
+                    let age = now.saturating_sub(since) / hz;
+                    let th = t.st();
+                    let depth = th.txn_stack.len();
+                    // Same discrimination as stall_report's stall lines:
+                    // SERVER-OWING (parked in read owing a reply — the
+                    // death-loop terminal shape) vs CLIENT-WAIT (waiting
+                    // for its own reply).
+                    let (shape, owed) = match th.txn_stack.last() {
+                        Some(txn) if txn.to_tid() == Some(t.tid) => {
+                            ("SERVER-OWING", txn.to_proc.pid)
+                        }
+                        Some(txn) => ("CLIENT-WAIT", txn.to_proc.pid),
+                        None => ("NO-TXN", 0),
+                    };
+                    let _ = writeln!(
+                        out,
+                        "SC-WEDGE-BW pid={} tid={} age={}s depth={} shape={} owed_pid={} kicks={}",
+                        proc.pid,
+                        t.tid,
+                        age,
+                        depth,
+                        shape,
+                        owed,
+                        t.rekick_count.load(core::sync::atomic::Ordering::Relaxed)
+                    );
+                }
+            }
+        }
+    }
 }
 
 pub fn stall_report() {
@@ -4249,6 +4384,48 @@ fn binder_transaction(
                     return;
                 }
                 let t = thread.st().txn_stack.pop().unwrap();
+                // sc208 SLOW-TXN probe (C-line: SAMgr SendRequest ~30 s
+                // per call with the fixed clock): split the sync-txn
+                // lifecycle into QUEUE (enq -> server pickup) and EXEC
+                // (pickup -> reply) and print both for anything over 5 s.
+                // Direct console (quietcon boots drop pr_warn pre-ring at
+                // loglevel 3), rate-capped to one line per 2 s. Printed
+                // from inside the WORLD guard like the surrounding
+                // pr_info!s on this path (single short line, bounded).
+                {
+                    let now = crate::drivers::timer::get_jiffies() as u32;
+                    let total = now.wrapping_sub(t.enq_j);
+                    if total >= 500 {
+                        static LAST: core::sync::atomic::AtomicU32 =
+                            core::sync::atomic::AtomicU32::new(0);
+                        use core::sync::atomic::Ordering::Relaxed;
+                        let last = LAST.load(Relaxed);
+                        if now.wrapping_sub(last) >= 200
+                            && LAST
+                                .compare_exchange(last, now, Relaxed, Relaxed)
+                                .is_ok()
+                        {
+                            let pick = unsafe { *t.pick_j.get() };
+                            let q = if pick != 0 { pick.wrapping_sub(t.enq_j) } else { 0 };
+                            let x = if pick != 0 { now.wrapping_sub(pick) } else { total };
+                            let mut w = crate::dfx::backtrace::ConsoleWriter::new();
+                            use core::fmt::Write as _;
+                            let _ = writeln!(
+                                w,
+                                "SLOW-TXN txn{} code {} from pid {} tid {} to pid {} tid {}: total {} ms (queue {} ms, exec {} ms)",
+                                t.id,
+                                t.code,
+                                t.from_proc.as_ref().map(|p| p.pid).unwrap_or(0),
+                                t.from_tid.unwrap_or(0),
+                                t.to_proc.pid,
+                                thread.tid,
+                                total * 10,
+                                q * 10,
+                                x * 10
+                            );
+                        }
+                    }
+                }
                 let (Some(from_proc), Some(from_tid)) = (t.from_proc.clone(), t.from_tid) else {
                     *err_cmd = BR_FAILED_REPLY;
                     crate::pr_info!("binder: BC_REPLY on oneway");
@@ -4686,6 +4863,8 @@ fn binder_transaction(
         offsets_size,
         buffer_off: block_off,
         security_ctx,
+        enq_j: crate::drivers::timer::get_jiffies() as u32,
+        pick_j: core::cell::UnsafeCell::new(0),
     });
 
     // sc155/156 (Session R): SA-table mutation tracer. Session Q closed
@@ -4709,6 +4888,14 @@ fn binder_transaction(
         const SAMGR_REMOVE: u32 = 4;
         const SAMGR_ADD_ONDEMAND: u32 = 10;
         const SAMGR_UNLOAD: u32 = 21;
+        // sc209 (leg 14): also trace LOAD (code 7). sc208's 15 s
+        // SLOW-TXN storm was 22/24 foundation->samgr code-7 loads with
+        // exec exactly 15000/30000/89390 ms — samgr's
+        // StartDynamicSystemProcess waiting out the param client's 15 s
+        // set-ack timeout for the "installs" on-demand process (SA 511)
+        // that init never spawns. The parcel head (header + token + said)
+        // names the target of every load offline.
+        const SAMGR_LOAD: u32 = 7;
         // The samgr interface token starts UTF-16 "oh" at parcel offset
         // 12 (after the 8-byte OH parcel header + u32 string length).
         static SAREG_SAMGR_PID: core::sync::atomic::AtomicU32 =
@@ -4717,7 +4904,10 @@ fn binder_transaction(
             core::sync::atomic::AtomicUsize::new(0);
         let mut is_samgr_req = false;
         if !reply
-            && matches!(tr.code, SAMGR_ADD | SAMGR_REMOVE | SAMGR_ADD_ONDEMAND | SAMGR_UNLOAD)
+            && matches!(
+                tr.code,
+                SAMGR_ADD | SAMGR_REMOVE | SAMGR_ADD_ONDEMAND | SAMGR_UNLOAD | SAMGR_LOAD
+            )
         {
             let mut hdr = [0u8; 16];
             let ok = tr.data_buffer != 0
@@ -4740,7 +4930,11 @@ fn binder_transaction(
                 .map(|t| {
                     matches!(
                         t.code,
-                        SAMGR_ADD | SAMGR_REMOVE | SAMGR_ADD_ONDEMAND | SAMGR_UNLOAD
+                        SAMGR_ADD
+                            | SAMGR_REMOVE
+                            | SAMGR_ADD_ONDEMAND
+                            | SAMGR_UNLOAD
+                            | SAMGR_LOAD
                     )
                 })
                 .unwrap_or(false)
@@ -4753,7 +4947,9 @@ fn binder_transaction(
                     .map(|c| core::str::from_utf8(c).unwrap_or(""))
                     .unwrap_or("")
                     .trim_end_matches('\0');
-                let mut pb = [0u8; 64];
+                // sc209: 64 -> 96 bytes so LOAD parcels' SA id survives
+                // past the (longer) samgr interface token.
+                let mut pb = [0u8; 96];
                 let mut pb_ok = false;
                 if tr.data_buffer != 0 {
                     pb_ok = unsafe {
@@ -4785,6 +4981,182 @@ fn binder_transaction(
                     target.pid,
                     data_size,
                     hex
+                );
+            }
+        }
+    }
+
+    // sc184 (session R, the screen gate): composer-path tracer. The render
+    // service never publishes SA 10 because its Init blocks in
+    // DisplayComposerHdiImpl::Create's wait loop — the GetService("display_
+    // composer_service") IPC into hdf_devmgr is delivered but never
+    // answered (devmgr's IPC threads park on a frozen rwlock; SERVER-OWING
+    // in every stall dump). This tracer prints (a) every transaction whose
+    // parcel carries the UTF-16 service name (composer_host's add-service,
+    // every client's GetService) plus the replies to those transactions,
+    // and (b) every transaction issued BY the render_service process (its
+    // whole binder conversation up to the block point — the last line
+    // before silence names the never-answered hop). Latches: RS pid by
+    // comm prefix "render_servi"; devmgr pid by the SAREG ADD of SA 5100.
+    {
+        static SACMP_RS_PID: core::sync::atomic::AtomicU32 =
+            core::sync::atomic::AtomicU32::new(0);
+        static SACMP_N: core::sync::atomic::AtomicUsize =
+            core::sync::atomic::AtomicUsize::new(0);
+        static SACMP_RS_N: core::sync::atomic::AtomicUsize =
+            core::sync::atomic::AtomicUsize::new(0);
+        // Matched-transaction ring: txn ids whose send carried the name, so
+        // the (much later) replies are printed too.
+        static SACMP_TXNS: [core::sync::atomic::AtomicU64; 32] =
+            [const { core::sync::atomic::AtomicU64::new(0) }; 32];
+
+        if !reply {
+            let comm_now = crate::sched::current()
+                .map(|t| unsafe { (*t).comm() })
+                .map(|c| core::str::from_utf8(c).unwrap_or(""))
+                .unwrap_or("")
+                .trim_end_matches('\0');
+            if comm_now.starts_with("render_servi") {
+                let prev = SACMP_RS_PID
+                    .swap(proc.pid, core::sync::atomic::Ordering::Relaxed);
+                if prev != proc.pid {
+                    crate::pr_warn!("SACMP rs-latch pid={}", proc.pid);
+                }
+                if SACMP_RS_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 120 {
+                    let mut pb = [0u8; 32];
+                    let hex: alloc::string::String = if tr.data_buffer != 0
+                        && unsafe {
+                            crate::arch::uaccess::copy_from_user(
+                                pb.as_mut_ptr(),
+                                tr.data_buffer as *const u8,
+                                pb.len(),
+                            ) == 0
+                        }
+                    {
+                        pb.iter().map(|b| alloc::format!("{:02x}", b)).collect()
+                    } else {
+                        alloc::string::String::from("-")
+                    };
+                    crate::pr_warn!(
+                        "SACMP-RS #{} pid={} -> pid={} code={:#x} oneway={} dlen={} parcel={}",
+                        SACMP_RS_N.load(core::sync::atomic::Ordering::Relaxed),
+                        proc.pid,
+                        target.pid,
+                        tr.code,
+                        oneway,
+                        data_size,
+                        hex
+                    );
+                }
+            }
+            // hdf_devmgr announces itself by registering SA 5100 (0x13EC)
+            // with samgr (code 3 = ADD_SYSTEM_ABILITY; parcel layout:
+            // 8-byte header + string16 token + u32 said at offset 60).
+            // Latch it for the FXDV frozen-rwlock tracer in futex.rs.
+            if tr.code == 3 && tr.data_buffer != 0 {
+                let mut sb = [0u8; 64];
+                if unsafe {
+                    crate::arch::uaccess::copy_from_user(
+                        sb.as_mut_ptr(),
+                        tr.data_buffer as *const u8,
+                        sb.len(),
+                    ) == 0
+                } && sb[12] == 0x6f
+                    && sb[13] == 0x00
+                    && sb[14] == 0x68
+                    && sb[15] == 0x00
+                    && sb[60] == 0xec
+                    && sb[61] == 0x13
+                {
+                    crate::sync::futex::fxdv_latch_devmgr(proc.pid);
+                }
+            }
+        }
+
+        // Name match on the first 192 parcel bytes, both encodings: the
+        // samgr-family parcels carry UTF-16LE "display_composer_service"
+        // while the HDI IServiceManager's GetService writes the service
+        // name as ASCII bytes (sc184: RS's GetService parcel was 92 bytes
+        // — too small for the UTF-16 form, so the ASCII form is what the
+        // composer lookup actually uses). Match "display_co" in either.
+        const NAME16: [u8; 20] = [
+            0x64, 0x00, 0x69, 0x00, 0x73, 0x00, 0x70, 0x00, 0x6c, 0x00, 0x61,
+            0x00, 0x79, 0x00, 0x5f, 0x00, 0x63, 0x00, 0x6f, 0x00,
+        ];
+        const NAME8: [u8; 10] = [
+            0x64, 0x69, 0x73, 0x70, 0x6c, 0x61, 0x79, 0x5f, 0x63, 0x6f,
+        ];
+        let mut name_hit = false;
+        if !reply && tr.data_buffer != 0 && data_size >= 4 {
+            let mut buf = [0u8; 192];
+            let n = core::cmp::min(buf.len(), data_size);
+            if unsafe {
+                crate::arch::uaccess::copy_from_user(
+                    buf.as_mut_ptr(),
+                    tr.data_buffer as *const u8,
+                    n,
+                ) == 0
+            } {
+                'outer: for i in 0..n.saturating_sub(NAME16.len()) {
+                    for (k, &b) in NAME16.iter().enumerate() {
+                        if buf[i + k] != b {
+                            // sc184 follow-up: also try the ASCII form at
+                            // the same offset (mutually exclusive encodings
+                            // can never both match at i).
+                            if i + NAME8.len() <= n {
+                                for (j, &a) in NAME8.iter().enumerate() {
+                                    if buf[i + j] != a {
+                                        continue 'outer;
+                                    }
+                                }
+                                name_hit = true;
+                                break 'outer;
+                            }
+                            continue 'outer;
+                        }
+                    }
+                    name_hit = true;
+                    break;
+                }
+            }
+        }
+        let reply_to_named = reply
+            && in_reply_to
+                .as_ref()
+                .map(|t| {
+                    SACMP_TXNS.iter().any(|s| {
+                        s.load(core::sync::atomic::Ordering::Relaxed) == t.id
+                    })
+                })
+                .unwrap_or(false);
+        if name_hit || reply_to_named {
+            if name_hit {
+                for s in SACMP_TXNS.iter() {
+                    if s.load(core::sync::atomic::Ordering::Relaxed) == 0 {
+                        s.store(txn_id, core::sync::atomic::Ordering::Relaxed);
+                        break;
+                    }
+                }
+            }
+            if SACMP_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 300 {
+                let comm2 = crate::sched::current()
+                    .map(|t| unsafe { (*t).comm() })
+                    .map(|c| core::str::from_utf8(c).unwrap_or(""))
+                    .unwrap_or("")
+                    .trim_end_matches('\0');
+                crate::pr_warn!(
+                    "SACMP {} code={} from pid={} comm='{}' -> pid={} dlen={} reply={}",
+                    if name_hit { "name" } else { "reply" },
+                    if reply {
+                        in_reply_to.as_ref().map(|t| t.code).unwrap_or(0)
+                    } else {
+                        tr.code
+                    },
+                    proc.pid,
+                    comm2,
+                    target.pid,
+                    data_size,
+                    reply,
                 );
             }
         }
@@ -5725,6 +6097,11 @@ fn binder_thread_read(
                             if !is_reply && t.flags & TF_ONE_WAY == 0 {
                                 // The receiver stacks it for its BC_REPLY.
                                 t.set_to_tid(thread.tid);
+                                // sc208 SLOW-TXN probe: server-pickup stamp.
+                                unsafe {
+                                    *t.pick_j.get() =
+                                        crate::drivers::timer::get_jiffies() as u32;
+                                }
                                 let recv_id = t.id as u32;
                                 thread.st().txn_stack.push(t);
                                 // sc79 ROOT CAUSE (the impossible shape):

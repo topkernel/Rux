@@ -70,6 +70,30 @@ const PIT_CH0_MODE3_BIN: u8 = 0x36;
 /// the 1 Hz bounded resync absorbs what is left.
 pub const TSC_MULSHIFT: u32 = 32;
 
+/// Map a raw TSC delta into the nominal 10 MHz domain at full precision:
+/// MULTIPLY FIRST, SHIFT SECOND.
+///
+/// sc204 TICKPROBE (2026-10-24, launcher leg 12): the shift-first form
+/// `(delta >> 32) * mult` introduced by 9e5f0147 (shift 12 -> 32) left
+/// the kernel clock with a granularity of `mult` nominal ticks — at
+/// 4.29 GHz that is ONE STEP EVERY 2^32 TSC ticks = 1.0008 SECONDS. Both
+/// of the probe's nominal-2 ms sample windows measured dt = 10,008,094
+/// ticks (one full step, identical twice); every sc200-sc203
+/// WW IRQ-OFF-WINDOW read an age of exactly 1000 ms and every
+/// WAKE-STRANDED strand quantized to the same grid, because read_time
+/// itself only moved once per second. Every timed wait in the kernel
+/// (nanosleep/expiry checks, scheduler deltas, binder slices, the OH
+/// boot chain) coarsened to 1 s steps — the quiet-quiet soft-wedge /
+/// crawl shape. At shift 12 the granularity was 2^12 TSC ticks (~1 us)
+/// and nobody noticed the form; raising the shift made it 1 s.
+/// Multiply-then-shift keeps the ~3 ppm rate accuracy of 9e5f0147 AND
+/// restores ~0.23 ns granularity. The u128 product of delta (< uptime x
+/// 4.3 GHz, far under 2^64) and mult (~10M) cannot overflow u128.
+#[inline]
+fn tsc_delta_nominal(delta: u64, mult: u64) -> u64 {
+    (((delta as u128) * (mult as u128)) >> TSC_MULSHIFT) as u64
+}
+
 /// TSC timekeeping state (written once by `lapic_time_calibrated`):
 /// nominal = ((tsc - base_tsc) >> SHIFT) * MULT, where
 /// MULT = round(CLOCK_FREQ << SHIFT / tsc_freq).
@@ -171,7 +195,7 @@ pub fn read_time() -> u64 {
         let now = crate::arch::cpu::read_counter();
         let base = TSC_BASE.load(Ordering::Acquire);
         let delta = now.wrapping_sub(base);
-        let mut v = (delta >> TSC_MULSHIFT).wrapping_mul(mult)
+        let mut v = tsc_delta_nominal(delta, mult)
             + TSC_CONTINUITY_OFFSET.load(Ordering::Acquire);
         // Per-CPU vCPU TSC-offset correction (TSC_CPU_OFF doc). Signed
         // add keeps cross-CPU monotonicity inside the i64 nominal range;
@@ -238,8 +262,7 @@ pub fn resync_tsc_against_hpet() {
         return;
     }
     let raw = crate::arch::cpu::read_counter();
-    let tsc_nom_uncorr =
-        ((raw.wrapping_sub(base) >> TSC_MULSHIFT).wrapping_mul(mult)).wrapping_add(off);
+    let tsc_nom_uncorr = tsc_delta_nominal(raw.wrapping_sub(base), mult).wrapping_add(off);
     let hpet_nom = crate::drivers::timer::hpet::read_time_nominal();
     let tsc_nom = tsc_nom_uncorr.wrapping_add(TSC_CPU_OFF[cpu].load(Ordering::Acquire) as u64);
     if hpet_nom > tsc_nom {
@@ -306,8 +329,8 @@ pub fn calibrate_cpu_tsc_offset(cpu: usize) {
         let t_after = crate::arch::cpu::read_counter();
         // Same base/mult math for each bracket's TSC stamps.
         let nom = |raw_t: u64| -> i64 {
-            (((raw_t.wrapping_sub(base)) >> TSC_MULSHIFT).wrapping_mul(mult) as i64)
-                .wrapping_add(off as i64)
+            tsc_delta_nominal(raw_t.wrapping_sub(base), mult)
+                .wrapping_add(off) as i64
         };
         // Lower bound of the true offset: the HPET read happened at or
         // before the t_after stamp, so hpet_nom - nom(t_after) can only
@@ -317,8 +340,8 @@ pub fn calibrate_cpu_tsc_offset(cpu: usize) {
             delta = d;
         }
     }
-    let tsc_nom_now = (((raw.wrapping_sub(base)) >> TSC_MULSHIFT).wrapping_mul(mult) as i64)
-        .wrapping_add(off as i64);
+    let tsc_nom_now = tsc_delta_nominal(raw.wrapping_sub(base), mult)
+        .wrapping_add(off) as i64;
     // Negative-sum guard: a vCPU that reads BEHIND by more than the
     // current uptime would wrap the u64 clock forward by ~2^64. Clamp
     // the correction so corrected >= 0 (the CPU then reads a hair fast
@@ -474,13 +497,30 @@ pub fn timer_interrupt_handler() {
     // vDSO time page refresh (shared with the riscv64 twin)
     crate::mm::vdso::vdso_data_tick();
 
-    // Timer softirq for TCP timers (retransmission, delayed ACK)
-    crate::interrupt::softirq::raise_softirq_irqoff(
-        crate::interrupt::softirq::SoftirqIndex::Timer as usize,
-    );
+    // Timer softirq for TCP timers (retransmission, delayed ACK).
+    // sc184 (lane 2, perf-audit F1): the raise was unconditional —
+    // 199 raises/s per CPU for a usually-empty TCP table (pa3), each
+    // costing an irq-exit softirq dispatch pass at IF=0. The handler
+    // (tcp_timer_tick) already early-returns when the table's high-water
+    // count is 0, so gating the raise on the same count is
+    // behavior-identical minus the wasted dispatch. count() is a
+    // high-water mark: once any TCP socket has existed the raise
+    // resumes unconditionally (and the handler then has real work).
+    if crate::net::tcp::get_tcp_socket_table().count() > 0 {
+        crate::interrupt::softirq::raise_softirq_irqoff(
+            crate::interrupt::softirq::SoftirqIndex::Timer as usize,
+        );
+    }
 
-    // Hrtimer softirq for software timers
-    crate::interrupt::softirq::raise_softirq_irqoff(
-        crate::interrupt::softirq::SoftirqIndex::Hrtimer as usize,
-    );
+    // Hrtimer softirq for software timers. Same F1 gate: skip the raise
+    // while no timer has ever been armed AND no high-resolution deadline
+    // is due (timer::timer_softirq_work_pending is lock-free: a monotonic
+    // ever-armed atomic plus the HRES_NEXT deadline word). Before the
+    // first timer this skips the vector entirely; afterwards it never
+    // gates (the handler sweeps real timers).
+    if crate::timer::timer_softirq_work_pending() {
+        crate::interrupt::softirq::raise_softirq_irqoff(
+            crate::interrupt::softirq::SoftirqIndex::Hrtimer as usize,
+        );
+    }
 }

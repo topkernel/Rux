@@ -906,6 +906,11 @@ pub fn rust_main_tail() -> ! {
             print_status("dfx", "khungtaskd hung-task detector", true);
         }
 
+        // sc-series soft-wedge heartbeat (dfx=schb): same late-boot slot
+        // as khungtaskd — its timer wakeups need secondaries online. The
+        // switch gates everything; schbd prints its own armed line.
+        crate::dfx::schb::init();
+
         // Enable external interrupts
         {
             arch::trap::enable_external_interrupt();
@@ -1150,8 +1155,14 @@ global_asm!(include_str!("arch/aarch64/trap.S"));
 /// kernel reservation and the heap (the earlier failed 0x80E00000 attempt
 /// left [0x80C00000,0x80E00000) free, the vmemmap backing search grabbed
 /// it, and Page::init_free walked descriptors over live heap pages).
+/// RUX-RISCV-LAYOUT-2: the unit-test build later outgrew the 12MB window
+/// itself (image end 0xffffffff80c17000 on main@298b69fe; the boot stack
+/// top sat unmapped and rust_main's first stack push faulted into an
+/// infinite trap_entry frame-push recursion). Window/heap/reservation
+/// moved 12MB->14MB together; riscv64 linker.ld now ASSERTs _end against
+/// the window so the next outgrowth fails the build.
 #[cfg(feature = "riscv64")]
-const KERNEL_RESERVE_SIZE: usize = 0xE0_0000; // 14MB
+const KERNEL_RESERVE_SIZE: usize = 0x100_0000; // 16MB
 #[cfg(feature = "x86_64")]
 const KERNEL_RESERVE_SIZE: usize = 0x1E0_0000; // 30MB
 /// Effective (RAM-clamped) static-region sizes computed by the early
@@ -1164,7 +1175,7 @@ static HEAP_SLAB_END_EFF: core::sync::atomic::AtomicUsize =
     core::sync::atomic::AtomicUsize::new(0);
 
 #[cfg(feature = "riscv64")]
-const KERNEL_HEAP_PHYS: usize = 0x80E0_0000;
+const KERNEL_HEAP_PHYS: usize = 0x8100_0000;
 #[cfg(feature = "x86_64")]
 const KERNEL_HEAP_PHYS: usize = 0x4000_0000;
 

@@ -64,6 +64,12 @@ pub mod metawatch;
 /// Whole-syscall cost table + tick-mode accounting + kernel-rip page
 /// histogram (perf-audit line, cmdline `syscost=1`); see dfx/syscost.rs.
 pub mod syscost;
+/// Soft-wedge heartbeat + one-shot wedge census (sc-series quiet-quiet
+/// hunt, cmdline `dfx=schb`); see dfx/schb.rs.
+pub mod schb;
+/// ext4/bio cost-anatomy counters (perf-audit line, cmdline `fsw=1`);
+/// see dfx/fsw.rs.
+pub mod fsw;
 
 /// Initialize the DFX subsystem.
 ///

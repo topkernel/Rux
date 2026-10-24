@@ -584,6 +584,14 @@ fn install(cmdline: &'static str) {
     } else if has_param("quiet") {
         crate::printk::set_console_loglevel(crate::printk::loglevel::KERN_WARNING);
     }
+
+    // `quietcon` (sc-series launcher race): divert /dev/console output
+    // from the UART into the printk ring. hilogd's console stream is the
+    // dominant serial burn in the launcher-race decision window; see
+    // fs/tty.rs `console_output` for the rationale.
+    if has_param("quietcon") {
+        crate::fs::tty::set_console_sink_quiet(true);
+    }
 }
 
 /// Get command line argument string (returns static reference to avoid allocation)
