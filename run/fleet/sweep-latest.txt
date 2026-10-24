@@ -1,13 +1,41 @@
-================ stress-fleet sweep 2026-10-25 05:09:40 ================
+================ stress-fleet sweep 2026-10-25 05:52:01 ================
 --- host ---
                total        used        free      shared  buff/cache   available
-内存：            59          29           3           0          27          29
- 05:09:40 up 1 day, 12:00,  1 user,  load average: 25.09, 22.57, 17.68
+内存：            59          27           9           0          24          32
+ 05:52:01 up 1 day, 12:42,  1 user,  load average: 21.15, 22.96, 22.02
 --- members (driver procs) ---
+fsfuzz alive=yes rounds=6 last: [fsfuzz] round 5: R5 WEDGE lines=216 rc=124 wedge=yes beats=0 sweepRES=0 sweepWEDGE=0 noise:usb=0,samgr=0,park=0 heap:-> KiB
+ltp-a alive=yes rounds=10 last:   serial: /home/william/rux-agents/wildwrite-hunt/run/fleet/logs/ltp-a-r5-serial.log (preserve for sweep)
+ltp-b alive=yes rounds=4 last:   serial: /home/william/rux-agents/wildwrite-hunt/run/fleet/logs/ltp-b-r2-serial.log (preserve for sweep)
+ltp-c alive=yes rounds=6 last:   serial: /home/william/rux-agents/wildwrite-hunt/run/fleet/logs/ltp-c-r3-serial.log (preserve for sweep)
+ltp-d alive=yes rounds=6 last:   serial: /home/william/rux-agents/wildwrite-hunt/run/fleet/logs/ltp-d-r3-serial.log (preserve for sweep)
+memstorm alive=yes rounds=2 last:   serial: /home/william/rux-agents/wildwrite-hunt/run/fleet/logs/memstorm-r1-serial.log (preserve for sweep)
+monkey-a alive=no rounds=2 last: [monkey-a] done after 1 rounds
+monkey-b alive=yes rounds=2 last:   serial: /home/william/rux-agents/wildwrite-hunt/run/fleet/logs/monkey-b-r1-serial.log (preserve for sweep)
 --- adopted chains (frozen-kernel wildwrite capture) ---
-ww-s2 ALIVE current: ww-s2-r89-serial.log
-wwload ALIVE current: wwload-r36-serial.log
+ww-s2 ALIVE current: ww-s2-r90-serial.log
+wwload ALIVE current: wwload-r37-serial.log
 --- flagged rounds (last 50 across fleet) ---
-flagged: 0/0 rounds
+[fsfuzz] round 1: R1 CRITICAL lines=16931 rc=124 wedge=no beats=0 sweepRES=0 sweepWEDGE=0 OOPS=1 PREEMPT-LEAK=8352 noise:usb=0,samgr=0,park=0 heap:-> KiB
+[fsfuzz] round 2: R2 WEDGE lines=216 rc=124 wedge=yes beats=0 sweepRES=0 sweepWEDGE=0 noise:usb=0,samgr=0,park=0 heap:-> KiB
+[fsfuzz] round 3: R3 WEDGE lines=216 rc=124 wedge=yes beats=0 sweepRES=0 sweepWEDGE=0 noise:usb=0,samgr=0,park=0 heap:-> KiB
+[fsfuzz] round 4: R4 WEDGE lines=216 rc=124 wedge=yes beats=0 sweepRES=0 sweepWEDGE=0 noise:usb=0,samgr=0,park=0 heap:-> KiB
+[fsfuzz] round 5: R5 WEDGE lines=216 rc=124 wedge=yes beats=0 sweepRES=0 sweepWEDGE=0 noise:usb=0,samgr=0,park=0 heap:-> KiB
+[ltp-a] round 1: R1 CRITICAL lines=4850 rc=124 wedge=no beats=0 sweepRES=11 sweepWEDGE=0 OOPS=1 PREEMPT-LEAK=2170 noise:usb=0,samgr=0,park=0 heap:-> KiB
+[ltp-a] round 2: R2 CRITICAL lines=2238 rc=124 wedge=yes beats=0 sweepRES=123 sweepWEDGE=0 OOPS=1 noise:usb=0,samgr=0,park=0 heap:-> KiB
+[ltp-a] round 3: R3 CRITICAL lines=210 rc=124 wedge=yes beats=0 sweepRES=1 sweepWEDGE=0 OOPS=1 noise:usb=0,samgr=0,park=0 heap:-> KiB
+[ltp-a] round 4: R4 CRITICAL lines=493 rc=124 wedge=yes beats=0 sweepRES=10 sweepWEDGE=0 OOPS=1 noise:usb=0,samgr=0,park=0 heap:-> KiB
+[ltp-a] round 5: R5 CRITICAL lines=491 rc=124 wedge=yes beats=0 sweepRES=11 sweepWEDGE=0 OOPS=1 noise:usb=0,samgr=0,park=0 heap:-> KiB
+[ltp-b] round 1: R1 CRITICAL lines=4650 rc=124 wedge=no beats=0 sweepRES=11 sweepWEDGE=0 OOPS=1 PREEMPT-LEAK=2073 noise:usb=0,samgr=0,park=0 heap:-> KiB
+[ltp-b] round 2: R2 CRITICAL lines=745 rc=124 wedge=yes beats=0 sweepRES=19 sweepWEDGE=0 OOPS=1 noise:usb=0,samgr=0,park=0 heap:-> KiB
+[ltp-c] round 1: R1 CRITICAL lines=6952 rc=124 wedge=no beats=0 sweepRES=117 sweepWEDGE=0 OOPS=1 PREEMPT-LEAK=2390 noise:usb=0,samgr=0,park=0 heap:-> KiB
+[ltp-c] round 2: R2 CRITICAL lines=200 rc=124 wedge=yes beats=0 sweepRES=0 sweepWEDGE=0 OOPS=1 noise:usb=0,samgr=0,park=0 heap:-> KiB
+[ltp-c] round 3: R3 CRITICAL lines=1747 rc=124 wedge=yes beats=0 sweepRES=82 sweepWEDGE=0 OOPS=1 noise:usb=0,samgr=0,park=0 heap:-> KiB
+[ltp-d] round 1: R1 CRITICAL lines=4877 rc=124 wedge=no beats=0 sweepRES=21 sweepWEDGE=0 OOPS=1 PREEMPT-LEAK=1996 noise:usb=0,samgr=0,park=0 heap:-> KiB
+[ltp-d] round 2: R2 CRITICAL lines=4301 rc=124 wedge=yes beats=0 sweepRES=169 sweepWEDGE=0 OOPS=1 noise:usb=0,samgr=0,park=0 heap:-> KiB
+[ltp-d] round 3: R3 CRITICAL lines=486 rc=124 wedge=yes beats=0 sweepRES=11 sweepWEDGE=0 OOPS=1 noise:usb=0,samgr=0,park=0 heap:-> KiB
+[memstorm] round 1: R1 WARN lines=20978 rc=124 wedge=no beats=75 sweepRES=0 sweepWEDGE=0 PREEMPT-LEAK=3085 noise:usb=0,samgr=0,park=0 heap:12996->37600 KiB
+[monkey-b] round 1: R1 CRITICAL lines=71771 rc=124 wedge=no beats=0 sweepRES=0 sweepWEDGE=0 OOPS=1 OOM=11 PREEMPT-LEAK=1133 noise:usb=0,samgr=0,park=23 heap:-> KiB
+flagged: 20/38 rounds
 --- qemu inventory (mine) ---
 fleet-owned qemu count: 20

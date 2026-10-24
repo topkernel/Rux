@@ -1,0 +1,145 @@
+version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+stderr[97] pid 336: link04.c:90: .[1;32mTPASS: .[0mlink(<non-existent file>, <nefile>): ENOENT (2).
+link04.c:90: [1;32mTPASS: [0mlink(<non-existent file>, <nefile>): ENOENT (2)
+link04.c:90: [1;32mTPASS: [0mlink(<path is empty string>, <nefile>): ENOENT (2)
+link04.c:90: [1;32mTPASS: [0mlink(<path contains a non-existent file>, <nefile>): ENOENT (2)
+missstat: ret=-20 nr=37 a0=0xffffffffffffff9c path='-' a2=0xffffffffffffff9c pid=336
+link04.c:90: [1;32mTPASS: [0mlink(<path contains a regular file>, <nefile>): ENOTDIR (20)
+link04.c:90: [1;32mTPASS: [0mlink(<pathname too long>, <nefile>): ENAMETOOLONG (36)
+EFAULTTRAC: pid=336 nr=37 a0=0xffffffffffffff9c a1=0x3000002000
+link04.c:90: [1;32mTPASS: [0mlink(<invalid address>, <nefile>): EFAULT (14)
+link04.c:90: [1;32mTPASS: [0mlink(<regfile>, <empty string>): ENOENT (2)
+link04.c:90: [1;32mTPASS: [0mlink(<regfile>, <path contains a non-existent file>): ENOENT (2)
+link04.c:90: [1;32mTPASS: [0mlink(<regfile>, <path contains a regular file>): ENOENT (2)
+link04.c:90: [1;32mTPASS: [0mlink(<regfile>, <pathname too long>): ENAMETOOLONG (36)
+EFAULTTRAC: pid=336 nr=37 a0=0xffffffffffffff9c a1=0x3b030
+link04.c:90: [1;32mTPASS: [0mlink(<regfile>, <invalid address>): EFAULT (14)
+link04.c:90: [1;32mTPASS: [0mlink(<regfile>, <regfile2>): EEXIST (17)
+link04.c:90: [1;32mTPASS: [0mlink(<Write access diretory>, <newpath>): EACCES (13)
+link04.c:90: [1;32mTPASS: [0mlink(<Search access diretory>, <dir2/testdir_1/new_tfile_2>): EACCES (13)
+stderr[98] pid 335: .Summary:.
+
+Summary:
+stderr[99] pid 335: passed   14.
+passed   14
+stderr[100] pid 335: failed   0.
+failed   0
+stderr[101] pid 335: broken   0.
+broken   0
+stderr[102] pid 335: skipped  0.
+skipped  0
+stderr[103] pid 335: warnings 0.
+warnings 0
+missstat: ret=-20 nr=56 a0=0xffffffffffffff9c path='-' a2=0x38000 pid=335
+missstat: ret=-20 nr=56 a0=0xffffffffffffff9c path='-' a2=0x38000 pid=335
+missstat: ret=-20 nr=56 a0=0xffffffffffffff9c path='-' a2=0x38000 pid=335
+missstat: ret=-20 nr=56 a0=0xffffffffffffff9c path='-' a2=0x38000 pid=335
+SFDDBG: send->pid1 sig=17 disp=IGN blocked=false pending=0x0
+SWEEP RES|534|link04|PASS|0|0
+mmap[13] pid 337 len=0x1000 flags=0x1 fd=3 off=0x0
+stderr[104] pid 337: tst_test.c:1733: .[1;34mTINFO: .[0mLTP version: 20240524.
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+WW: fires=178 late_max=0ms pidmiss=0 rearm=0 wheel=0/3 hres_next=85ms
+WW2: si_runs=452 si_busy=19ms ticks=[0,0] vec=[0,0,0,0,215,0,0,0,238,0]
+WW3: grq=0 cfs=0 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=338 st=0x0 pc=256)
+WW: wakes=1604 picks=1354 avg_run=0ms stranded=0 strand_max=0ms
+WW: fires=187 late_max=0ms pidmiss=0 rearm=0 wheel=1/3 hres_next=0ms
+WW2: si_runs=234 si_busy=9ms ticks=[0,0] vec=[0,0,0,0,0,0,0,0,234,0]
+WW3: grq=0 cfs=0 idle=0x1 nr=1 cpu0=(pid=0 st=0x0 pc=256) cpu1=(pid=338 st=0x0 pc=65537)
+WW: wakes=1717 picks=1466 avg_run=0ms stranded=0 strand_max=0ms
+
+PREEMPT-LEAK cpu=0000000000000001 pid=0000000000000152 pc=0000000000010001 held_nonzero_for=00000000000000c9jiffies rip=ffffffff800e94e0
+
+PREEMPT-LEAK cpu=0000000000000001 pid=0000000000000152 pc=0000000000010001 held_nonzero_for=00000000000000ddjiffies rip=ffffffff800dc97c
+missstat: ret=-2 nr=79 a0=0xffffffffffffff9c path='lkfile_338_171' a2=0x3fffffe380 pid=338
+stderr[105] pid 338: link05.c:43: .[1;31mTBROK: .[0mstat(lkfile_338_171,0x3fffffe4c8) failed: ENOENT (2).
+link05.c:43: [1;31mTBROK: [0mstat(lkfile_338_171,0x3fffffe4c8) failed: ENOENT (2)
+stderr[106] pid 337: .Summary:.
+
+Summary:
+stderr[107] pid 337: passed   0.
+passed   0
+stderr[108] pid 337: failed   0.
+failed   0
+stderr[109] pid 337: broken   1.
+broken   1
+stderr[110] pid 337: skipped  0.
+skipped  0
+stderr[111] pid 337: warnings 0.
+warnings 0
+missstat: ret=-20 nr=56 a0=0xffffffffffffff9c path='-' a2=0x38000 pid=337
+missstat: ret=-20 nr=56 a0=0xffffffffffffff9c path='-' a2=0x38000 pid=337
+missstat: ret=-20 nr=56 a0=0xffffffffffffff9c path='-' a2=0x38000 pid=337
+missstat: ret=-20 nr=56 a0=0xffffffffffffff9c path='-' a2=0x38000 pid=337
+missstat: ret=-20 nr=56 a0=0xffffffffffffff9c path='-' a2=0x38000 pid=337
+missstat: ret=-20 nr=56 a0=0xffffffffffffff9c path='-' a2=0x38000 pid=337
+missstat: ret=-20 nr=56 a0=0xffffffffffffff9c path='-' a2=0x38000 pid=337
+missstat: ret=-20 nr=56 a0=0xffffffffffffff9c path='-' a2=0x38000 pid=337
+missstat: ret=-20 nr=56 a0=0xffffffffffffff9c path='-' a2=0x38000 pid=337
+missstat: ret=-20 nr=56 a0=0xffffffffffffff9c path='-' a2=0x38000 pid=337
+missstat: ret=-20 nr=56 a0=0xffffffffffffff9c path='-' a2=0x38000 pid=337
+missstat: ret=-20 nr=56 a0=0xffffffffffffff9c path='-' a2=0x38000 pid=337
+missstat: ret=-20 nr=56 a0=0xffffffffffffff9c path='-' a2=0x38000 pid=337
+missstat: ret=-20 nr=56 a0=0xffffffffffffff9c path='-' a2=0x38000 pid=337
+missstat: ret=-20 nr=56 a0=0xffffffffffffff9c path='-' a2=0x38000 pid=337
+missstat: ret=-20 nr=56 a0=0xffffffffffffff9c path='-' a2=0x38000 pid=337
+missstat: ret=-20 nr=56 a0=0xffffffffffffff9c path='-' a2=0x38000 pid=337
+missstat: ret=-20 nr=56 a0=0xffffffffffffff9c path='-' a2=0x38000 pid=337
+WW: fires=197 late_max=0ms pidmiss=0 rearm=0 wheel=0/2 hres_next=3ms
+WW2: si_runs=240 si_busy=10ms ticks=[0,0] vec=[0,0,0,0,0,0,0,0,240,0]
+WW3: grq=0 cfs=0 idle=0x2 nr=2 cpu0=(pid=337 st=0x0 pc=65536) cpu1=(pid=0 st=0x0 pc=256)
+WW: wakes=1830 picks=1580 avg_run=0ms stranded=0 strand_max=0ms
+WW: fires=207 late_max=0ms pidmiss=0 rearm=0 wheel=0/2 hres_next=12ms
+WW2: si_runs=240 si_busy=8ms ticks=[0,0] vec=[0,0,0,0,0,0,0,0,240,0]
+WW3: grq=0 cfs=0 idle=0x2 nr=1 cpu0=(pid=337 st=0x0 pc=256) cpu1=(pid=0 st=0x0 pc=65536)
+WW: wakes=1947 picks=1697 avg_run=0ms stranded=0 strand_max=0ms
+stderr[112] pid 337: tst_tmpdir.c:342: .[1;35mTWARN: .[0mtst_rmdir: rmobj(/tmp/LTP_linECmocG) failed: remove(/tmp/LTP_linECmocG) failed; errno=39: ENOTEMPTY.
+tst_tmpdir.c:342: [1;35mTWARN: [0mtst_rmdir: rmobj(/tmp/LTP_linECmocG) failed: remove(/tmp/LTP_linECmocG) failed; errno=39: ENOTEMPTY
+SFDDBG: send->pid1 sig=17 disp=IGN blocked=false pending=0x0
+SWEEP RES|535|link05|FAIL|2|0
+mmap[14] pid 339 len=0x1000 flags=0x1 fd=3 off=0x0
+SR-REGS:
+  epc=0xffffffff800dc9ae ra=0xffffffff8023d3c2 sp=0xffffffd6018b9fd0
+  tp=0xffffffd601730000 s0=0xffffffd6018b9ff0 s1=0x0 gp=0x4ef98
+  a0=0xffffffd6018bb948 a1=0xffffffd6018bb588 a2=0x0 a3=0x28
+  a4=0x3aee0 a5=0xffffffffffffffff a6=0x0 a7=0x28
+  t0=0x4 t1=0x2802c t2=0x0 t3=0x8
+SR-STACK (ra chain via s0):
+  fp=0xffffffd6018b9ff0 ra=0xffffffd6018ea9e0
+
+
+Kernel panic - not syncing:
+
+PANIC: trap: illegal instruction in kernel mode at epc=0xffffffff800dc9ae badaddr=0xc0101573
+  Location: kernel/src/arch/riscv64/trap.rs: 370
+
+---[ end Kernel panic - not syncing ]---
+
+Sstatus: 0000000200000120
+Scause : 0000000000000002
+Stval  : 00000000c0101573
+Sepc   : ffffffff800dc9ae
+
+Registers:
+  ra  : ffffffff80206ae2  sp  : ffffffd6018b90f0  gp  : 000000000004ef98  tp  : ffffffd601730000  
+  t0  : 0000000000000008  t1  : 000000000000000a  t2  : 00000000c0101573  s0  : ffffffd6018b9220  
+  s1  : 0000000000000000  a0  : ffffffd6018b9228  a1  : ffffffd6018b9108  a2  : 00000000000000f8  
+  a3  : ffffffd6018b9108  a4  : ffffffd6018b9200  a5  : 0000000000000000  a6  : 0000000000000000  
+  a7  : ffffffd6018b91ce  s2  : 0000000000000003  s3  : 000000000004f8b0  s4  : 0000000000000000  
+  s5  : 0000003fffffea38  s6  : 0000003fffffeb08  s7  : 0000000000000001  s8  : 0000000000000000  
+  s9  : ffffffffffffffff  s10 : 0000000000000000  s11 : 0000003fffffea00  t3  : 0000000000000002  
+  t4  : 0000000000000000  t5  : 0000003000001050  t6  : 0000003000001030  
+
+Call trace:
+  [<ffffffff802065a6>] (current)
+  [<ffffffd6018b92f0>]
+
+BUG: soft lockup - CPU#0 stuck for 10s! timer_irq=2471
+  CPU: 0 PID: 339
+Call trace:
+  [<ffffffff802065a6>] (current)
+  [<ffffffff803d9b80>]
+
+WAKE-STRANDED pid=1 cpu=1 strand=1972ms policy=0 h0=(339/p0/0ms/pc=0) h1=(303/p0/2005ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=6ms

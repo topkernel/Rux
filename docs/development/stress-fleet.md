@@ -38,48 +38,80 @@ paced appspawn kill-restart, bm/hidumper/param walks, sync), memstorm
 storms, dfx=periodic,memwatch,watchdog), fsfuzz (riscv64, init=/test/fsfuzz:
 random-syscall fuzzer + file/pipe/socket/madvise/fork sequences).
 
-## Classification state (as of 2026-10-25 05:15)
+## Classification state
+
+See "Classification state (updated ...)" below — the single source of
+truth is the latest-dated block; older adjudications live in the round
+log.
+
+## Round log
+
+- 2026-10-25 06:01 — full relaunch after three harness/infra fixes (round
+  numbering continues: ltp-a r7 ...). (a) QEMU CPU string: zcb=true
+  WITHDRAWN — QEMU 10.2.1 TCG nondeterministically raises
+  illegal-instruction on legal guest instructions (fleet evidence:
+  byte-identical kernel panics at sys_mount's `csrrw a0,time,zero`
+  within seconds on some boots, runs 30 min clean on others; without zcb
+  zero panics across all repro matrix cells; at the trap mcounteren.TM=1
+  — not counter gating; repo convention `rv64,zbb=true,zba=true,zbs=true`
+  restored). v=true also withdrawn (not in repo convention; alone it did
+  not reproduce, kept out to match the 29 existing drivers). (b) monkey
+  members now boot with dfx=memwatch,periodic — monkey-b r1 caught the
+  fake-OOM class (see OPEN items). (c) stress-monkey.sh beats now write
+  to /dev/console (echo went to hilog, never to serial). Root-caused in
+  round 1: fsfuzz r2-r6 + ltp-a/c/d r2-r4 wedge-looped on the zcb panic.
+- 2026-10-25 ~05:30 — kernel probe fixes (commit 6ea6064d + parkwalk):
+  PREEMPT-LEAK print gated on non-self bits; parkwalk parked-check
+  double-sampled (was pc-then-parked: a task releasing a guard and
+  legally parking between the two loads printed as PARKED-WILDWRITE
+  "proof" — armed-capture ground truth never corroborated one across
+  88+ chain rounds; the shape fired every round at pc=1 exactly).
+  Frozen chain kernel keeps printing the old shapes (capture continuity:
+  do not rebase the chains); adjudicated KNOWN there.
+- 2026-10-25 04:51/05:06 — fleet launched (8 members; first batch 04:51
+  after fixing a boot_cmd eval quoting loss that qemu-misread `rw` as a
+  disk; 12 garbage no-serial rounds rotated to *.bootfail-quoting).
+- 2026-10-25 04:48 — chains self-advanced r88→r89 / load-r35→r36, both
+  alive, capture continuity preserved (frozen kernel + GUARD armed).
+
+## Classification state (updated 2026-10-25 06:05)
 
 KNOWN classes (do not page):
 - Image-side OH noise: usb_host DDK crash lines, SAMgr 15/30/89s cost
   family, RS userspace read-lock parks (excluded per hunt ledger).
 - IRQ-OFF-WINDOW known-noise: 103-771ms class at rip ffffffff80573d96
   (hunt ledger canonical family). Classifier WARNs only > 2000ms.
-- PREEMPT-LEAK self-observation: the LEAK tripwire in scheduler_tick ran
-  FROM the timer hardirq, so the observed task always carried the tick's
-  own HARDIRQ_OFFSET — pc==0x10000 lines (pid 0 in wfi, or any task
-  current across the window) were probe self-observation, 170-620
-  lines/round. FIXED 2026-10-25 (commit follows): print gate now requires
-  non-self bits (base != 0 or hardirq nest > 1). Any PREEMPT-LEAK line
-  after the fix is a real held-count candidate.
+- PREEMPT-LEAK self-observation (pc==0x10000, probe-owns-tick shape):
+  fixed in fleet kernel v2+; frozen chains still print it — ignore there.
+- PARKED-WILDWRITE / PARKED-LEAK on the FROZEN chain kernel: probe
+  sampling race (see Round log 05:30); armed capture is the ground
+  truth — 0 real hits in 88+ rounds. Fleet kernels v3+ have the
+  double-check fix.
+- QEMU zcb flakiness (withdrawn): illegal-instruction on legal
+  instructions, QEMU 10.2.1 TCG + `-cpu ...,zcb=true`. Do not re-add.
+- fsfuzz-r1 494s timer starvation (timer_irq=3): consistent with
+  documented TCG host-contention vCPU starvation (kernel R57 comment:
+  3-10 IRQs/s under load; here 3 total over 494s at load avg 25 with 16
+  QEMUs). Reclassify as kernel bug only if it reproduces on the new
+  fleet config at moderate host load.
 
-OPEN items (tracked, need targeted repro):
-- PARKED-LEAK on OH boots: fires on ~47% of OH boots across lanes
-  (107/230 samgr-callback serials, ~30 lines/boot, pc=1 exactly,
-  state=0/1, tcpu=1 mostly). Never seen on riscv64 members. Probe
-  invariant dates from the no-kernel-preemption era ("a parked task can
-  never legally hold a nonzero count") — with IRQ-exit kernel preemption
-  a legal producer may exist (preempted-with-guard via explicit
-  schedule()). Classifier: park=N in context; WARN only on non-OH members.
-- memstorm pid=1 tick-monopoly: 3 hits r1, pid 1 current on cpu1 across
-  218-820 consecutive ticks with pc=0x10001 (real PREEMPT_DISABLE bit at
-  the printing tick), rip=enable_irq (cpu.rs:63 — syscall-entry path or
-  schedule_dead park). Needs repro with memwatch + taskdump to separate
-  "compute monopoly while preemptible" (benign) from "held guard while
-  monopolizing" (real). PREEMPT-HEAL did NOT fire (no 10s+ base holds).
-
-## Round log
-
-- 2026-10-25 04:51/05:06 — fleet launched (8 members; first batch 04:51
-  after fixing a boot_cmd eval quoting loss that qemu-misread `rw` as a
-  disk; 12 garbage no-serial rounds rotated to *.bootfail-quoting).
-  Round-1 serials in progress; first classifications due ~05:21/05:36.
-- 2026-10-25 04:48 — chains self-advanced r88→r89 / load-r35→r36, both
-  alive, capture continuity preserved (frozen kernel + GUARD armed).
-- 2026-10-25 ~05:12 — probe-gated kernel (7fcff66a md5) smoke-booted
-  (fsfuzz init, 0 PREEMPT-LEAK in 100s where old kernel printed
-  dozens) and rolled into images/fleet-rv64-rux atomically; picked up
-  by members from their next round.
+OPEN items:
+- FAKE-OOM on OH monkey churn (mandate-named target): monkey-b r1
+  (4G guest, appspawn kill-restart + hilog churn) hit `pagefault: Out
+  of memory` and the oom-killer KILLED BOOT-CRITICAL SERVICES (ueventd
+  score 573, watchdog_service 449) with OOMFX-RAW zone_free=10 of
+  zone_managed=736006 and NO accounting corruption (dblfree=0,
+  inverse=0, orphan=85). If cache were reclaimable the allocator should
+  reclaim before killing; expected behavior (reference kernel + POSIX
+  OOM semantics): reclaim page cache / drop slab first; killing
+  ueventd on a 4G guest under app churn is the fake-OOM signature.
+  NEXT: instrumented rounds (dfx=memwatch,periodic now on) to capture
+  used-vs-reclaimable at the OOM point; then root-cause the reclaim
+  path (alloc domain, guarded — see AGENTS.md merge gate + perf
+  baseline).
+- ltp-a r1 soft lockup 10s CPU#0 (timer_irq=962, ticks flowing): brief
+  kernel monopolization during sweep; watch for recurrence at low host
+  load before spending a repro cycle.
 
 ## Resume (next session)
 
@@ -88,7 +120,6 @@ OPEN items (tracked, need targeted repro):
 2. Chains: if DEAD, see hunt ledger resume notes; do NOT restart live
    ones. Members auto-continue round numbering via rounds.log lines.
 3. Relaunch dead members with `stress-fleet.sh start <member>`.
-4. Monkey beats: if serials show churn noise but no MONKEY-BEAT lines,
-   apply /tmp fix — script echo goes to hilog, not console; v2 writes
-   beats to /dev/console (apply at a round boundary via debugfs, image
-   is snapshot-booted so base edits are safe between rounds only).
+4. Monkey OOM: check `logs/monkey-*-r*-serial.log` for OOMFX-RAW + MEM
+   lines; ledger OPEN item has the repro shape (appspawn killall storm
+   case 3 + hilog floods on 4G guest).

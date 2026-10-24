@@ -47,9 +47,17 @@ rv_kdrive() { # private kernel-plain drive pair (no snapshot flag games)
           -device "virtio-blk-pci,drive=$2")
 }
 rv_common() { # serial — the shared riscv64 front-matter
+    # CPU string: repo-standard zbb/zba/zbs ONLY. zcb=true (and v=true)
+    # were tried in round 1 and withdrawn: with zcb, QEMU 10.2.1 TCG
+    # nondeterministically raises illegal-instruction on legal guest
+    # instructions (fleet evidence 2026-10-25: byte-identical kernel
+    # panics at sys_mount's `csrrw a0,time,zero` within seconds-to-minutes
+    # on some boots, runs 30 min clean on others; without zcb, zero
+    # panics across all repro attempts; mcounteren.TM=1 at the trap —
+    # not counter gating). See stress-fleet ledger OPEN items.
     CMD+=(nice -n "$NICE" timeout --signal=TERM --kill-after=10 "${SECS}s"
           qemu-system-riscv64 -M virt -accel tcg,thread=multi
-          -cpu "rv64,zbb=true,zba=true,zbs=true,zcb=true,v=true"
+          -cpu "rv64,zbb=true,zba=true,zbs=true"
           -m "${MEM:-2G}" -smp 2 -display none -monitor none
           -serial "file:$1")
 }
@@ -87,7 +95,7 @@ boot_cmd() { # prints the full qemu argv, %q-quoted for exact eval round-trip
               -display none -vga none -device "virtio-gpu-pci,id=ohgpu,xres=720,yres=1280"
               -serial "file:$serial" -monitor none
               -kernel "$IMG/fleet-x86-bzImage" -initrd "$OH/ramdisk-x64.img"
-              -append "ip=dhcp loglevel=4 console=ttyS0,115200 init=init root=/dev/ram0 rw ohos.boot.hardware=virt default_boot_device=10007000.virtio_mmio ohos.boot.sn=01234567890 ohos.required_mount.system=/dev/vdb@/usr@ext4@ro,barrier=1@wait,required ohos.required_mount.vendor=/dev/vdc@/vendor@ext4@ro,barrier=1@wait,required ${EXTRA_APPEND:-} roundtag=$MEMBER-r$round")
+              -append "ip=dhcp loglevel=4 console=ttyS0,115200 init=init root=/dev/ram0 rw ohos.boot.hardware=virt default_boot_device=10007000.virtio_mmio ohos.boot.sn=01234567890 ohos.required_mount.system=/dev/vdb@/usr@ext4@ro,barrier=1@wait,required ohos.required_mount.vendor=/dev/vdc@/vendor@ext4@ro,barrier=1@wait,required ${EXTRA_APPEND:-} dfx=memwatch,periodic roundtag=$MEMBER-r$round")
         for f in updater.img; do
             rv_kdrive "$OH/$f" "ohd$idx"; idx=$((idx+1))
         done

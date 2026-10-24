@@ -1,0 +1,144 @@
+existent file>, <nefile>): ENOENT (2)
+link04.c:90: [1;32mTPASS: [0mlink(<path is empty string>, <nefile>): ENOENT (2)
+W3-RUNWAKE-REFUSED pid=316 state=0x0 linked=false curr_on=true on_cpu=true pk=1 cpu=0
+link04.c:90: [1;32mTPASS: [0mlink(<path contains a non-existent file>, <nefile>): ENOENT (2)
+missstat: ret=-20 nr=37 a0=0xffffffffffffff9c path='-' a2=0xffffffffffffff9c pid=317
+link04.c:90: [1;32mTPASS: [0mlink(<path contains a regular file>, <nefile>): ENOTDIR (20)
+link04.c:90: [1;32mTPASS: [0mlink(<pathname too long>, <nefile>): ENAMETOOLONG (36)
+EFAULTTRAC: pid=317 nr=37 a0=0xffffffffffffff9c a1=0x3000002000
+link04.c:90: [1;32mTPASS: [0mlink(<invalid address>, <nefile>): EFAULT (14)
+W3-RUNWAKE-REFUSED pid=316 state=0x0 linked=false curr_on=true on_cpu=true pk=1 cpu=0
+link04.c:90: [1;32mTPASS: [0mlink(<regfile>, <empty string>): ENOENT (2)
+link04.c:90: [1;32mTPASS: [0mlink(<regfile>, <path contains a non-existent file>): ENOENT (2)
+link04.c:90: [1;32mTPASS: [0mlink(<regfile>, <path contains a regular file>): ENOENT (2)
+link04.c:90: [1;32mTPASS: [0mlink(<regfile>, <pathname too long>): ENAMETOOLONG (36)
+EFAULTTRAC: pid=317 nr=37 a0=0xffffffffffffff9c a1=0x3b030
+link04.c:90: [1;32mTPASS: [0mlink(<regfile>, <invalid address>): EFAULT (14)
+link04.c:90: [1;32mTPASS: [0mlink(<regfile>, <regfile2>): EEXIST (17)
+link04.c:90: [1;32mTPASS: [0mlink(<Write access diretory>, <newpath>): EACCES (13)
+link04.c:90: [1;32mTPASS: [0mlink(<Search access diretory>, <dir2/testdir_1/new_tfile_2>): EACCES (13)
+W3-RUNWAKE-REFUSED pid=317 state=0x0 linked=false curr_on=true on_cpu=true pk=1 cpu=1
+stderr[26] pid 316: .Summary:.
+
+Summary:
+stderr[27] pid 316: passed   14.
+passed   14
+stderr[28] pid 316: failed   0.
+failed   0
+stderr[29] pid 316: broken   0.
+broken   0
+stderr[30] pid 316: skipped  0.
+skipped  0
+stderr[31] pid 316: warnings 0.
+warnings 0
+missstat: ret=-20 nr=56 a0=0xffffffffffffff9c path='-' a2=0x38000 pid=316
+missstat: ret=-20 nr=56 a0=0xffffffffffffff9c path='-' a2=0x38000 pid=316
+missstat: ret=-20 nr=56 a0=0xffffffffffffff9c path='-' a2=0x38000 pid=316
+missstat: ret=-20 nr=56 a0=0xffffffffffffff9c path='-' a2=0x38000 pid=316
+W3-RUNWAKE-REFUSED pid=316 state=0x0 linked=false curr_on=true on_cpu=true pk=1 cpu=0
+SFDDBG: send->pid1 sig=17 disp=IGN blocked=false pending=0x0
+SWEEP RES|534|link04|PASS|0|0
+mmap[4] pid 318 len=0x1000 flags=0x1 fd=3 off=0x0
+stderr[32] pid 318: tst_test.c:1733: .[1;34mTINFO: .[0mLTP version: 20240524.
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+WW: fires=64 late_max=0ms pidmiss=0 rearm=0 wheel=0/3 hres_next=32ms
+WW2: si_runs=484 si_busy=23ms ticks=[0,0] vec=[0,0,0,0,250,0,0,0,234,0]
+WW3: grq=0 cfs=0 idle=0x1 nr=3 cpu0=(pid=0 st=0x0 pc=256) cpu1=(pid=319 st=0x0 pc=256)
+WW: wakes=1045 picks=842 avg_run=0ms stranded=0 strand_max=0ms
+WW: fires=74 late_max=0ms pidmiss=0 rearm=0 wheel=0/3 hres_next=42ms
+WW2: si_runs=240 si_busy=11ms ticks=[0,0] vec=[0,0,0,0,0,0,0,0,241,0]
+WW3: grq=0 cfs=0 idle=0x1 nr=3 cpu0=(pid=0 st=0x0 pc=258) cpu1=(pid=319 st=0x0 pc=256)
+WW: wakes=1161 picks=958 avg_run=0ms stranded=0 strand_max=0ms
+missstat: ret=-2 nr=79 a0=0xffffffffffffff9c path='lkfile_319_171' a2=0x3fffffe380 pid=319
+stderr[33] pid 319: link05.c:43: .[1;31mTBROK: .[0mstat(lkfile_319_171,0x3fffffe4c8) failed: ENOENT (2).
+link05.c:43: [1;31mTBROK: [0mstat(lkfile_319_171,0x3fffffe4c8) failed: ENOENT (2)
+W3-RUNWAKE-REFUSED pid=319 state=0x0 linked=false curr_on=true on_cpu=true pk=1 cpu=0
+stderr[34] pid 318: .Summary:.
+
+Summary:
+stderr[35] pid 318: passed   0.
+passed   0
+stderr[36] pid 318: failed   0.
+failed   0
+stderr[37] pid 318: broken   1.
+broken   1
+stderr[38] pid 318: skipped  0.
+skipped  0
+stderr[39] pid 318: warnings 0.
+warnings 0
+missstat: ret=-20 nr=56 a0=0xffffffffffffff9c path='-' a2=0x38000 pid=318
+missstat: ret=-20 nr=56 a0=0xffffffffffffff9c path='-' a2=0x38000 pid=318
+missstat: ret=-20 nr=56 a0=0xffffffffffffff9c path='-' a2=0x38000 pid=318
+missstat: ret=-20 nr=56 a0=0xffffffffffffff9c path='-' a2=0x38000 pid=318
+missstat: ret=-20 nr=56 a0=0xffffffffffffff9c path='-' a2=0x38000 pid=318
+missstat: ret=-20 nr=56 a0=0xffffffffffffff9c path='-' a2=0x38000 pid=318
+missstat: ret=-20 nr=56 a0=0xffffffffffffff9c path='-' a2=0x38000 pid=318
+missstat: ret=-20 nr=56 a0=0xffffffffffffff9c path='-' a2=0x38000 pid=318
+missstat: ret=-20 nr=56 a0=0xffffffffffffff9c path='-' a2=0x38000 pid=318
+missstat: ret=-20 nr=56 a0=0xffffffffffffff9c path='-' a2=0x38000 pid=318
+missstat: ret=-20 nr=56 a0=0xffffffffffffff9c path='-' a2=0x38000 pid=318
+missstat: ret=-20 nr=56 a0=0xffffffffffffff9c path='-' a2=0x38000 pid=318
+missstat: ret=-20 nr=56 a0=0xffffffffffffff9c path='-' a2=0x38000 pid=318
+missstat: ret=-20 nr=56 a0=0xffffffffffffff9c path='-' a2=0x38000 pid=318
+missstat: ret=-20 nr=56 a0=0xffffffffffffff9c path='-' a2=0x38000 pid=318
+missstat: ret=-20 nr=56 a0=0xffffffffffffff9c path='-' a2=0x38000 pid=318
+missstat: ret=-20 nr=56 a0=0xffffffffffffff9c path='-' a2=0x38000 pid=318
+missstat: ret=-20 nr=56 a0=0xffffffffffffff9c path='-' a2=0x38000 pid=318
+WW: fires=84 late_max=0ms pidmiss=0 rearm=0 wheel=0/2 hres_next=53ms
+WW2: si_runs=239 si_busy=11ms ticks=[0,0] vec=[0,0,0,0,0,0,0,0,239,0]
+WW3: grq=0 cfs=0 idle=0x1 nr=3 cpu0=(pid=0 st=0x0 pc=256) cpu1=(pid=318 st=0x0 pc=258)
+WW: wakes=1280 picks=1077 avg_run=0ms stranded=0 strand_max=0ms
+stderr[40] pid 318: tst_tmpdir.c:342: .[1;35mTWARN: .[0mtst_rmdir: rmobj(/tmp/LTP_linDGMoKp) failed: remove(/tmp/LTP_linDGMoKp) failed; errno=39: ENOTEMPTY.
+tst_tmpdir.c:342: [1;35mTWARN: [0mtst_rmdir: rmobj(/tmp/LTP_linDGMoKp) failed: remove(/tmp/LTP_linDGMoKp) failed; errno=39: ENOTEMPTY
+W3-RUNWAKE-REFUSED pid=318 state=0x0 linked=false curr_on=true on_cpu=true pk=1 cpu=0
+SFDDBG: send->pid1 sig=17 disp=IGN blocked=false pending=0x0
+SWEEP RES|535|link05|FAIL|2|0
+WW: fires=94 late_max=0ms pidmiss=0 rearm=0 wheel=0/2 hres_next=76ms
+WW2: si_runs=240 si_busy=13ms ticks=[0,0] vec=[0,0,0,0,1,0,0,0,239,0]
+WW3: grq=0 cfs=0 idle=0x2 nr=3 cpu0=(pid=320 st=0x0 pc=256) cpu1=(pid=0 st=0x0 pc=65536)
+WW: wakes=1394 picks=1191 avg_run=0ms stranded=0 strand_max=0ms
+mmap[5] pid 320 len=0x1000 flags=0x1 fd=3 off=0x0
+SR-REGS:
+  epc=0xffffffff800dc9ae ra=0xffffffff8023d3c2 sp=0xffffffd601679fd0
+  tp=0xffffffd601438000 s0=0xffffffd601679ff0 s1=0x0 gp=0x4ef98
+  a0=0xffffffd60167b948 a1=0xffffffd60167b588 a2=0x0 a3=0x28
+  a4=0x3aee0 a5=0xffffffffffffffff a6=0x0 a7=0x28
+  t0=0x4 t1=0x2802c t2=0x0 t3=0x8
+SR-STACK (ra chain via s0):
+  fp=0xffffffd601679ff0 ra=0xffffffd601659440
+
+
+Kernel panic - not syncing:
+
+PANIC: trap: illegal instruction in kernel mode at epc=0xffffffff800dc9ae badaddr=0xc0101573
+  Location: kernel/src/arch/riscv64/trap.rs: 370
+
+---[ end Kernel panic - not syncing ]---
+
+Sstatus: 0000000200000120
+Scause : 0000000000000002
+Stval  : 00000000c0101573
+Sepc   : ffffffff800dc9ae
+
+Registers:
+  ra  : ffffffff80206ae2  sp  : ffffffd6016790f0  gp  : 000000000004ef98  tp  : ffffffd601438000  
+  t0  : 0000000000000008  t1  : 000000000000000a  t2  : 00000000c0101573  s0  : ffffffd601679220  
+  s1  : 0000000000000000  a0  : ffffffd601679228  a1  : ffffffd601679108  a2  : 00000000000000f8  
+  a3  : ffffffd601679108  a4  : ffffffd601679200  a5  : 0000000000000000  a6  : 0000000000000000  
+  a7  : ffffffd6016791ce  s2  : 0000000000000003  s3  : 000000000004f8b0  s4  : 0000000000000000  
+  s5  : 0000003fffffea38  s6  : 0000003fffffeb08  s7  : 0000000000000001  s8  : 0000000000000000  
+  s9  : ffffffffffffffff  s10 : 0000000000000000  s11 : 0000003fffffea00  t3  : 0000000000000002  
+  t4  : 0000000000000000  t5  : 0000003000001050  t6  : 0000003000001030  
+
+Call trace:
+  [<ffffffff802065a6>] (current)
+  [<ffffffd6016792f0>]
+
+BUG: soft lockup - CPU#0 stuck for 10s! timer_irq=1150
+  CPU: 0 PID: 320
+Call trace:
+  [<ffffffff802065a6>] (current)
+  [<ffffffff803d9b80>]
+
+WAKE-STRANDED pid=1 cpu=1 strand=2006ms policy=0 h0=(320/p0/0ms/pc=0) h1=(303/p0/2005ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=0ms

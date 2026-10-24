@@ -22,7 +22,13 @@ start_member() {
     kind=$(kind_of "$m")
     [ -z "$kind" ] && { echo "unknown member $m"; return 1; }
     rm -f "$FLEET/$m.stop"
-    local first=$(( $(grep -cE '^R[0-9]+ ' "$LOGS/$m-rounds.log" 2>/dev/null || echo 0) + 1 ))
+    # grep -c exits 1 when it prints 0 — don't chain || echo (yields
+    # "0\n0" and breaks the arithmetic); classify lines carry R<N>
+    # mid-line ("[member] round N: R1 ..."), so no ^ anchor.
+    local n
+    n=$(grep -cE 'round [0-9]+: R[0-9]+' "$LOGS/$m-rounds.log" 2>/dev/null)
+    [ -z "$n" ] && n=0
+    local first=$(( n + 1 ))
     if pgrep -f "fleet-member.sh $m " >/dev/null 2>&1; then
         echo "$m already running"
         return 0
