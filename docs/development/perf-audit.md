@@ -1236,6 +1236,12 @@ Open items filed for the next legs / other lanes:
   ~1/s — a faster early phase is the likely reconciliation; pa22's
   27 organic-age prints in 60 s vs pa21's 53/120 s steady-1001 s are
   consistent with load-dependent cadence).
+  [LEG-15: CLOSED — the reconciliation is the 2g correction (the
+  counters ALWAYS ran at the true 100 Hz; only the stamps were
+  grid-limited; no fast early phase exists — pa23 shows 99.9/s/CPU
+  linear through the whole boot), and sc206 (post-fix A-line roll)
+  prints the WW2 heartbeat 739 times with ticks=[100,100] on both
+  CPUs all boot.]
 - **UI-marker patrol** (leg-13 primary task): sc200 (died in the
   storm family at 5595 quiet-con lines, userspace alive to t=2656 s),
   sc201 (terminal storm), sc202 (patrolled to t=1664 s at leg close,
@@ -1243,6 +1249,20 @@ Open items filed for the next legs / other lanes:
   reached), sc204 rolling at commit time. No
   launcher.ready/OnForeground/ArkUI markers in any roll this leg; the
   PENDING post-UI rows in report table 1 stay PENDING.
+  [LEG-15 patrol (sc205 read by A-line leg 13, not duplicated):
+  sc206 (14:00, post-fix kernel, SC-HB to t=787 s) — STILL NO UI
+  markers (the only "arkui" strings are SELinux labels
+  `u:object_r:arkui_param:s0` and a param-watcher name, not boot
+  markers); PENDING rows stay PENDING. But sc206 is the DEEPEST roll
+  ever: first bootevent.boot.completed in any sc roll (sc204/205: 0),
+  plus appspawn.started / bms.main.bundles.ready / appfwk.ready /
+  account.ready; census families collapsed on the fixed clock
+  (WAKE-STRANDED 8 vs sc200's 1488+312; IRQ-OFF-WINDOW 2; TERM-
+  DESCHED 8), WW tail: wakes 28.34 M / picks 27.68 M / stranded=19 /
+  strand_max=140925 ms — the true F3 wake-loss face, off the grid;
+  still short of the UI: installd `Load system ability 511 failed`
+  and BMS bundle queries still running at the tail. Why the chain
+  stops there is the launcher lane's territory.]
 
 ### 2h. FIFTEENTH LEG: the tick fix verified before merge — pa23 battery on main + the fix hunk (section 2g's correction measured)
 
