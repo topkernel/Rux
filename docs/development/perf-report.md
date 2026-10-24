@@ -642,6 +642,14 @@ boot): IF=0 share __, census TERM/WAKE __/__ (baseline 8/32), ticks
 
 > Leg-23 update: step 4's Linux half is DONE (ref-r1..r4, section 8.8);
 > run day runs the Rux boots only, same private-image recipe.
+>
+> Leg-24 update: steps 3-4's Rux-side MATERIAL IS PRE-STAGED —
+> run/pbrux-system.img (injected reflink copy, e2fsck-clean, untracked),
+> run/pbrux-boot.sh (one probe boot: post-UI main-class kernel, plain
+> no-syscost boot, matched machine class, results extraction + SET
+> milestone check), run/pbmed.py (med-of-runs aggregator; validated —
+> it reproduces the banked 8a Linux column from ref-r1..r4 exactly).
+> The trigger response is: merge main, make build-x86, then the boots.
 
 1. Confirm the milestone in a main-class serial (this lane's patrol or
    the coordinator's signal); record kernel revision.
