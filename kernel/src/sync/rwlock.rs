@@ -177,6 +177,7 @@ impl<T> RwSpinlock<T> {
     /// Save IRQ + preempt disable + read lock.
     /// Guard drop: read unlock + preempt enable + restore IRQ.
     #[inline]
+    #[track_caller]
     pub fn read_irqsave(&self) -> RwSpinlockIrqReadGuard<'_, T> {
         let flags = irq_save();
         preempt_disable();
@@ -187,6 +188,7 @@ impl<T> RwSpinlock<T> {
     /// Save IRQ + preempt disable + write lock.
     /// Guard drop: write unlock + preempt enable + restore IRQ.
     #[inline]
+    #[track_caller]
     pub fn write_irqsave(&self) -> RwSpinlockIrqWriteGuard<'_, T> {
         let flags = irq_save();
         preempt_disable();
@@ -458,11 +460,13 @@ fn preempt_enable() {
 }
 
 #[inline]
-fn irq_save() -> bool {
+#[track_caller]
+fn irq_save() -> bool { // track_caller: syscost REST site attribution
     crate::arch::cpu::save_and_disable_irq()
 }
 
 #[inline]
+#[track_caller]
 fn irq_restore(flags: bool) {
     crate::arch::cpu::restore_irq(flags);
 }
