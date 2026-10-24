@@ -1693,16 +1693,110 @@ like persist.sys.arkui.animationscale). No main-class UI-marker boot
 appeared → the perf-report post-UI row stays PENDING. Round log at the
 end of this section.
 
-**(3) Census-hold gate (standing).** origin/main sat at 1702de2c (the
-leg-18 merge) through every round — no A-line fix merged mid-leg, the
-gate never triggered, zero QEMUs spent on it.
+**(3) Census-hold gate (standing).** CORRECTED POSTHUMOUSLY BY LEG 20:
+the skeleton above (written 17:27) said main sat at 1702de2c and the
+gate never triggered — that was true only until ~17:30. origin/main
+then advanced to 1bdbbf32 (wedge-census fdtable walks None-safe) +
+14d8950d (leg-14 FXRS/PCTL/SAREG probes): the A-line merge the gate
+exists for. Leg 19 fetched it, built it detached (reflog HEAD@{2}),
+and ran the gate check as **pa31** — the leg's QEMU 2 of 2. The boot
+completed cleanly at 18:20 (rc=124 horizon, cleanup + .done marker
+written — the ef3c02f9 fix working); leg 19 died of quota before
+recording the result. Analysis below is leg 20's, from the on-disk
+serial/stamped logs.
 
-**(4) QEMU ledger.** pa30smoke = 1 of the 2 permitted. Leg-18's overrun
-(3 vs 2) not repeated.
+**pa31 result (census-hold on main@14d8950d, plain kernel + syscost=1,
+KVM, 780 s):**
+- Census: TERM-DESCHED 8 / WAKE-REFUSED 32 — baseline EXACT hold.
+  WAKE-STRANDED 3 prints (pids 672 bootanimation 1036 ms, 829 1455 ms,
+  666 foundation 1207 ms) vs pa27's 0 — organic-shaped (1.0-1.5 s
+  strands, NOT the pre-tickfix exactly-1001 ms grid class); candidates
+  are host load (the 10-12-QEMU overcommit the A-line documented the
+  same evening) or the newly-active leg-14 probe prints at syscall
+  boundaries. Recorded as in-band with a footnote, not a trip.
+- Tripwire-equivalent (this kernel carries no pa16 probe): syscost
+  ticks c0 99.98/s, c1 99.7/s sustained through t=720 (5994/5996
+  samples at t=60 -> 71988/71788 at t=720). Tick-fix holds on merged
+  main + leg-14 probes.
+- fdtable fix: zero "FdTable not initialized" panics; RWFRZ scans
+  alive, censuses completed. (pa31's own depth — foundation SIGKILL'd
+  at +45.0 s, launcher never spawned — does not traverse the sc210
+  death window either, so this is a hold alongside sc211's verification,
+  not a new-depth proof.)
+- Milestones (host stamps): composer_host.ready +20.5 s (pa27 flagship
+  +29.8 s — single-boot variance, different probe set); foundation
+  (pid 666) exit signal 9 at +45.0 s; bootanimation.finished SET at
+  +92.8 s (pa27 reached no bootanimation exec at 780 s — race-class
+  variance, the same per-boot race the A-line documented for sc209 vs
+  sc210); launcher.ready NOT set; OnForeground 0; ArkUI 0.
+- fsw probe gated-off default verified ON A MAIN-CLASS BOOT: one-shot
+  resolution line "fsw: off (cmdline fsw param = None)" at serial line
+  58, zero FSW1 dumps all boot. (Armed case was pa30smoke.) The
+  leg-19 probe-fix task's verification is closed with evidence.
+- Context for the A-line (their probe, not mine to touch): FXRS
+  self-limited at its 4000-event budget; the late-serial volume is
+  OS_DfxWatchdog futex WAIT ret=-110 repeats (event #3865 by t=779).
+
+**(4) QEMU ledger.** pa30smoke = 1 of 2, pa31 = 2 of 2. Leg-18's
+overrun (3 vs 2) not repeated.
 
 Round log (host time, newest-boot basis):
+- R2 18:07-18:20 — pa31 census-hold boot on main@14d8950d (see (3)).
+  launcher.ready not set on a main-class kernel; bootanimation.finished
+  SET (+92.8 s). main moves to 14d8950d.
 - R1 17:20 — sc211 (ended 17:15) checked: launcher.ready not set,
   bootanimation.finished SET, no OnForeground/ArkUI. main@1702de2c.
+
+### 2m. TWENTIETH LEG: pa31 posthumous close-out; sc212 PACE watch opens; monitoring continues
+
+Leg start: merged main 14d8950d into the branch (8b1d4b9e) — the same
+merge the leg-19 gate had already validated with pa31, now in-tree.
+
+**(1) The leg-19 in-flight state, resolved honestly.** The "12 dirty
+files" were NOT source changes: the pa28-probe fixes themselves were
+already committed in leg 19 (dcaf4564 lvl/es diagnosis line + ef3c02f9
+pa-boot.sh horizon-kill cleanup, both validated by pa30smoke), and the
+dirty set was 8 small run artifacts (pid stamps + .done markers —
+committed this leg per the established tracked pattern) plus 4 bzImages
+(11.4 MB each, over the 10 MB rule — left untracked; provenance in
+run/pa31-built-from.txt). The genuinely unfinished piece was pa31's
+absence from the ledger — closed in section 2l(3) above. Nothing was
+discarded: every file was either committed, kept as untracked-by-rule
+with provenance, or analyzed.
+
+**(2) PACE watch (PRIMARY, A-line sc212).** The A-line's sc212 roll
+(wip fec94520: "PACE counters on the SC-HB beat") is live since 18:16.
+Counter format on the 10 s SC-HB heartbeat:
+`pace: cow=<n> cowJ=<jiffies> drct=<rounds> drctJ=<jiffies>
+drctMaxJ=<max-jiffies> slow=<alloc-slowpath-entries> zfree=<pages>
+heapK=<KiB>`. Observation through t=1691 s (serial read read-only;
+their QEMU untouched): **drct=0 for the entire boot**, zfree ~437k
+pages (~1.7 GB free), slow=0, cow=20340 cumulative with cowJ=7 (about
+70 ms of COW fault cost total). The sc210-class memory floor (zone
+Normal pinned at free ~100-190 pages below wmark_low 2451,
+in_direct_reclaim=1 on every COW alloc) is NOT reproducing in sc212 —
+this roll is on the crawl trajectory (pidmax ~1199, flow 0-1/s, zero
+launcher activity: no com.ohos.launcher, no bootanimation markers).
+Consequence for my task: **no reclaim-slowpath share can be quantified
+from this roll**, and the lead's magnitude is per-boot-race dependent
+(the same race that splits sc210-class launcher boots from sc211-class
+crawls). The ranking gets NO new row on this evidence — a row needs a
+boot that actually pins the floor plus a before/after of their fix.
+Watch continues; when a memory-floor boot appears in their PACE data
+(drct climbing, zfree pinned near wmark) or their fix merges, that is
+the quantification trigger.
+
+**(3) UI patrol (standing).** sc212 (A-line branch kernel, not
+main-class): zero launcher markers, crawl trajectory — no UI markers to
+report. pa31 (main-class): launcher.ready not set (section 2l(3)).
+The perf-report post-UI rows stay PENDING.
+
+**(4) Census-hold gate (standing).** The 14d8950d merge was validated
+by pa31 before this leg's window opened; within the leg-20 window so
+far main has not moved again. If the A-line pace fix merges mid-leg,
+one quiet census boot runs (QEMU budget: 0 of 2 used).
+
+**(5) QEMU ledger.** 0 of 2 self-started this leg.
 
 ## 4. Ranking table v2.8 (cost centers -> boot-time contribution)
 
