@@ -3859,3 +3859,27 @@ rsp=0x7ff090410fc8" line (a USER frame). Confirmed MY lane's probe
   in flight since 04:05:17/04:06:26, budget ends ~04:50; both WW-ARMED
   19 with GUARD=0xffffffff80a7a000 (gdb logs). Driver roots unchanged
   (176512 / 176547).
+
+## s2 fleet adjudication note (2026-10-25, stress lane): PARKED-WILDWRITE on the frozen kernel is a probe sampling race — do not page
+
+The frozen hunt kernel prints `PARKED-WILDWRITE pid=... pc=1` in every
+recent chain round (r80-r89 / load-r30-r35 verified, 16+ round files)
+while the armed capture (EFLAGS ground truth + guard-cluster
+watchpoints) recorded ZERO hits in those same rounds. Root cause (code
+reading, kernel/src/sched/sched.rs parkwalk): the walk sampled a task's
+preempt_count BEFORE checking parked-on-any-cpu, so a task that
+released its guard and legally parked between the two loads was recorded
+parked-with-nonzero, and the 0->nonzero-between-walks "unambiguous
+proof" shape fired on the stale snapshot. Additional discriminators:
+the shape always fires at pc=1 exactly (a leaked wild write would not
+be so disciplined) and fires every single round while the capture stack
+— built precisely to catch this engine — stays silent.
+
+Fixed in the worktree kernel (fleet kernels v3+; fleet
+s2/stress-fleet.md has the commit): the parked check is now
+double-sampled around the pc load. The FROZEN kernel intentionally
+keeps the old probe (capture continuity — do not rebase the chains);
+its PARKED-WILDWRITE/PARKED-LEAK/PREEMPT-LEAK(pc=0x10000) lines are
+adjudicated known-noise. The chain round verdicts' "0 WW-HIT" counts
+remain correct: they count armed-capture hits, which are the ground
+truth.
