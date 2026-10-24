@@ -44,6 +44,7 @@ Runs (this worktree, `run/`):
 | `pa19-unittest-fix` | same + RUX-RISCV-LAYOUT-2 window/heap fix (this branch) | (unit test) | ~150 s | verification boot: full unit suite runs, 60 ok / 3 FAIL (stale config assertions, pre-existing: KERNEL_HEAP_SIZE 512-vs-1024 bc0ffbee, FUTEX_* 256/64-vs-8192/512 08fcfc04) |
 | `ref-r1..r4` (LEG-23) | **reference kernel** = the OH image's own OHOS 6.6.101 bzImage (oh-robot images, same files oh-ref-r1 booted); userspace = image + pbench injected in the key_enable slot (run/pbref-inject.sh, private reflink system copy, e2fsck-clean; trigger = bootevent.launcher.ready param job) | private reflink userdata-tok, no snapshot on that drive | ~35-40 s wall each (probe starts t=10.2-16.7s, powerdown t=32-35s kernel) | **LINUX REFERENCE P1-P7 BANKED** (perf-report.md 8.8, table 8a Linux column): 4/4 boots full pass (25/25 lines, DONE rc=0, results extracted via debugfs), machine class matched to pa (q35/KVM/-cpu max/SMP2/4G, foreign_qemus 4-5). Med-of-4 highlights: p1_null 0.040us, p1_clock 0.070us, p2 half-rt 0.090us, p3a anon 5.01us med THP-bimodal (avg 9.8-10.3 stable), p3b COW 0.751us, p4 fork+exit 10.88us / fork+exec 22.37us, p5a 0.180us, p6 stat 0.271 / openclose 0.436 / read_cached 0.676us, getdents sweep 88.9us, write+fsync 4.75ms, mkdrmdir 40.4us, unlink 26.99us, p7 overshoot 14.64us. Med spread <=6.4% on 18/21 benches; p3a's 70% spread triggered the protocol's 4th run (THP 2MB coalescing — 0.38-7.15us med across runs, avg is the comparable stat) |
 | `pa-pa32` (LEG-23) | origin/main @ 3cb8a24e (dfx-align tranche 1+2, 30 kernel/ files — the commit that fired the census-hold gate), built via make build-x86 (run/pa32-built-from.txt; bzImage run/pa32-main-bzImage untracked 11.5MB) | syscost=1 (plain main, no pa16 probe) | 780 s | **CENSUS-HOLD GATE: HOLD.** TERM-DESCHED 8 / WAKE-REFUSED 32 — baseline EXACT hold (pa23/pa27/pa31 fourth consecutive roll). Ticks 99.85-99.86/s/CPU sustained to t=720 (71,890/71,902 samples — pa27 flagship rates) — tick fix holds on merged dfx-align. WAKE-STRANDED 7 prints: 2 organic 1.0-1.1s (pa31 class) + 5 strands pid=303 appspawn 24-34s — a phase pa31 never reached (its foundation died +45s); organic non-grid values, echoes the A-line's live sc217 strand_max 24.7s; recorded as phase-new + A-line-correlated, NOT a gate trip (no exactly-1001ms grid class). Depth: composer_host.ready SET, appspawn.started, bootanimation.finished SET, launcher.ready NOT set (warning +50.4s) — deeper than pa31, no UI milestone |
+| `pa-pa33` (LEG-24) | origin/main @ e207f86e (= 65d6c788 + 8480751c stallwatch pidhash fix + c2e2c885 config-test refresh — the kernel commit that fired the census-hold gate; branch fast-forwarded to main), built via make build-x86 (run/pa33-built-from.txt; bzImage run/pa33-main-bzImage untracked 11.5MB, md5 differs from pa32 as expected) | syscost=1 (plain main, no pa16 probe) | 780 s | **CENSUS-HOLD GATE: HOLD.** TERM-DESCHED 8 / WAKE-REFUSED 32 — baseline EXACT hold (pa23/pa27/pa31/pa32 fifth consecutive roll); the stallwatch pidhash fix does not move the census. Tick tripwire `[ok]` 15 jiffies/150 ms; ticks 99.86/99.83/s/CPU at t=720 (71,899/71,880 samples — pa27/pa32 rates). WAKE-STRANDED 2 prints only, both organic ~1s class (1010/1252 ms, no 1001ms grid, no appspawn 24-34s strands — pa32's new-phase strands did not recur this roll, consistent with organic). Depth: composer_host.ready, appspawn.started, bootanimation.finished all SET, launcher.ready NOT set — same profile as pa32, no UI milestone |
 
 Host context for all runs: KVM q35 `-cpu max -m 4G -smp 2`, shared with
 2-3 foreign-lane QEMUs (load avg ~5.5). Absolute numbers carry that
@@ -2101,6 +2102,75 @@ caveats), this ledger, runs-table rows for ref-r1..r4 and pa32. Run day
 now costs: 1 quiet syscost boot + N=3 Rux pbench boots + report freeze.
 Honest ledger = docs + run/test tooling, 0 kernel changes, private
 image copies only (reflink), QEMU 5 boots all accounted.
+
+### 2q. TWENTY-FOURTH LEG: census gate HELD on the stallwatch pidhash fix (pa33, 5th consecutive); run-day Rux side FULLY pre-staged; trigger NOT fired
+
+Leg start: origin/main moved to e207f86e — new since leg 23: 8480751c
+(fix(sched): stallwatch_tick must not block on pid-hash bucket locks,
+a KERNEL commit → census gate fires) + c2e2c885 (test-only config
+assertion refresh) + e207f86e itself (the leg-23 merge). Branch
+fast-forwarded to e207f86e (no divergence; my leg-23 head 65d6c788 is
+its ancestor). Later in the window main also took e5e2dea9 (README
+docs only — no gate).
+
+**(1) Census-hold gate FIRED and HELD (pa33).** Gate executed per
+spec: make build-x86 from e207f86e (run/pa33-built-from.txt; bzImage
+md5 d2ffbf82 differs from pa32's db79302a as expected), one quiet
+syscost=1 780 s boot. Verdict: TERM-DESCHED 8 / WAKE-REFUSED 32 —
+EXACT baseline hold, FIFTH consecutive roll (pa23/pa27/pa31/pa32/
+pa33); the stallwatch pidhash fix (sc215 both-vCPU freeze class) does
+not move the quiet-boot census. Tick tripwire `[ok]` 15 jiffies/
+150 ms; ticks 99.86/99.83/s/CPU at t=720 (71,899/71,880 samples —
+pa27/pa32 rates; tick fix holds). WAKE-STRANDED 2 prints only, both
+organic ~1 s (1010/1252 ms, no 1001 ms grid, no appspawn strands) —
+pa32's 5-strand appspawn class did not recur, consistent with the
+leg-23 "organic new-phase" reading. Depth: composer_host.ready +
+appspawn.started + bootanimation.finished SET, launcher.ready NOT set
+— identical profile to pa32, no UI milestone.
+
+**(2) Run-day Rux side FULLY pre-staged (no QEMU spent).**
+- run/pbrux-system.img: private reflink copy of the shared system.img
+  with the SAME key_enable inject as the ref side (run/pbref-inject.sh
+  transfers unchanged, as planned); binary round-trip verified,
+  e2fsck -fn clean (rc=0). Untracked (3.2G reflink, 0 real blocks).
+- run/pbrux-boot.sh (eff8bfcd): ONE Rux probe boot — post-UI
+  main-class kernel, machine class matched to pa/ref (q35/KVM/-cpu
+  max/SMP2/4G), PLAIN kernel (APPEND_EXTRA must stay empty — probe
+  numbers unperturbed; table 8b's syscost refresh comes from the
+  separate quiet boot), injected system drive + private per-tag
+  userdata copy with NO snapshot, SECS=2700 backstop, milestone/PBENCH
+  serial evidence + debugfs results extraction + SET-vs-not-set
+  milestone check (the SET line is param_service's "key:
+  bootevent.launcher.ready" / PCTL-SEND "key=... true"; init's
+  "not set" warning matches the plain substring — the script
+  distinguishes them).
+- run/pbmed.py (eff8bfcd): med-of-runs aggregator implementing the
+  8.5 cell rule (med of per-run meds; p99 = med of per-run p99s;
+  spread column for the stability check). VALIDATED against the banked
+  ref data: reproduces every cell of table 8a's Linux column from
+  run/ref-r{1..4}/results.txt exactly (all 21 rows).
+- Run-day response cost is now: merge main (if moved), make build-x86,
+  then 1 quiet syscost boot + N=3 pbrux boots + pbmed.py + report
+  freeze — zero remaining build/inject/authoring latency.
+
+**(3) UI patrol / trigger: NOT fired.** oh-sc218-serial.log appeared
+mid-leg (the A-line's live instrumented boot — WW prints, strand_max
+2.998 s at last look; their QEMU, untouched): launcher.ready 0,
+OnForeground 0, ArkUI 0 at every poll; no sc219+. No A-line
+kernel-footprint fix on main (their worktree has no uncommitted kernel
+work at leg close — the fix is future work). Both trigger conditions
+unmet; run day NOT started (the injected image waits on disk).
+
+**(4) QEMU ledger.** Self-started: 1 total (pa33, 780 s horizon kill,
+rc=124 expected). Cap never approached (rule <=2 at a time). Foreign
+QEMUs untouched (wildwrite-hunt pair, A-line sc218). Private image
+copies are reflink; nothing >10MB committed.
+
+**(5) Leg close.** Deliverables: run/pbrux-boot.sh, run/pbmed.py,
+run/pa33-built-from.txt (eff8bfcd), runs-table row pa33, this ledger,
+perf-report.md 8.6 pre-staging note. Honest ledger = docs + run
+tooling, 0 kernel changes, private reflink image copies only, QEMU 1
+boot accounted.
 
 ## 4. Ranking table v2.8 (cost centers -> boot-time contribution)
 
