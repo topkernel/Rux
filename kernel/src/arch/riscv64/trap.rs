@@ -1001,6 +1001,14 @@ pub extern "C" fn riscv_bad_user_frame(regs: *mut PtRegs) -> ! {
     }
 }
 
+/// R73: one-shot latch for the KERNPANIC raw dump — mirrors the x86_64
+/// twin. A fault DURING the dump (stack walk past the mapping, tp deref,
+/// frame walk on a wild fp) re-enters the handler; without the latch the
+/// print/read recursion never terminates (the riscv64 unit-test
+/// double-fault family). Second entry prints one marker and halts.
+static KP_DUMP_ENTERED: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
 fn handle_page_fault(regs: &mut PtRegs, access_type: u32) {    use crate::arch::mm::exception::{do_page_fault, MmFaultResult};
 
     let fault_addr = regs.badaddr;
@@ -1135,6 +1143,30 @@ fn handle_page_fault(regs: &mut PtRegs, access_type: u32) {    use crate::arch::
             // R9: print via SBI directly — printk can be wedged on a lock
             // this CPU holds (that is exactly how the earlier wedges lost
             // their diagnostics). Then halt.
+            //
+            // R73 (coordinator's boot.S root cause + the sc195 x86_64
+            // twin): the stack walk below used to read 24 words at sp
+            // assuming "the kernel stack is always mapped" — false for
+            // the boot stack at the image end (window fixed by 77ec1247)
+            // and for any stack-adjacent hole. A fault DURING this dump
+            // re-entered the handler and the print/read recursion never
+            // terminated (the riscv64 unit-test double-fault; on x86_64
+            // the same class wedged sc195's cpu0 for ~855 s). Two guards,
+            // mirroring the x86_64 twin: a re-entrancy latch (second
+            // entry prints one marker and halts) and a bounded walk (the
+            // task's real kernel-stack top; 16K-aligned sp heuristic
+            // otherwise).
+            if KP_DUMP_ENTERED.swap(true, core::sync::atomic::Ordering::Relaxed) {
+                let mut put = |b: u8| crate::console::putchar_no_lock(b);
+                for &b in b"trap: KERNPANIC re-entered during dump; halting\n" {
+                    put(b);
+                }
+                // SAFETY: wfi stalls until the next interrupt; safe in a
+                // halt loop.
+                loop {
+                    unsafe { core::arch::asm!("wfi") };
+                }
+            }
             unsafe {
                 let mut put = |b: u8| crate::console::putchar_no_lock(b);
                 for &b in b"trap: KERNPANIC pfault badaddr=0x" { put(b); }
@@ -1164,16 +1196,27 @@ fn handle_page_fault(regs: &mut PtRegs, access_type: u32) {    use crate::arch::
                 // words above sp — enough frames for wake-path panics
                 // (observed: epc=Task::pid ra=Task::wake_up with a wild
                 // 0xFFFFFFFF task pointer whose origin lived two frames up).
-                // The kernel stack is always mapped; words that happen to
-                // be data are simply ignored during symbolization.
                 // R73: USER-origin faults skip the dump — their sp is a
                 // USER address, and reading it with a direct kernel VA
                 // faults again (nested panic on top of panic; the r72-fire3
-                // KERNPANIC prints tripled exactly this way).
+                // KERNPANIC prints tripled exactly this way). The walk is
+                // also BOUNDED at the task's real kernel-stack top (16K-
+                // aligned sp heuristic when there is no task context):
+                // "the kernel stack is always mapped" is false for the
+                // boot stack at the image end, and a past-top read is the
+                // print/read recursion the KP_DUMP_ENTERED latch above
+                // exists to stop.
                 if regs.kernel_mode() {
+                    let kstack_top: usize = crate::sched::current()
+                        .map(|t| unsafe { (*t).kernel_stack_top() })
+                        .unwrap_or((regs.sp as usize | 0x3fff) + 1);
                     for &b in b"trap: stack:" { put(b); }
                     for i in 0..24usize {
                         let addr = regs.sp as usize + i * 8;
+                        if addr + 8 > kstack_top {
+                            for &b in b" <rest past kernel stack top>\n" { put(b); }
+                            break;
+                        }
                         let v = unsafe { core::ptr::read_volatile(addr as *const usize) };
                         put(b' ');
                         for sh in (0..64).step_by(4).rev() {

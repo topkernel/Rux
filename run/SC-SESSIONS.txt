@@ -2750,3 +2750,412 @@ for the CLEAN-exit variant; v2 (6e9679c5) releases pick ownership too.
   remaining SA 10 gap is the devmgr 16-reader wedge re-forming mid-
   composer-init (sc190 stalled at RS txn #42 after SetBrightness).
 - sc191 left running to term with shotmon attached; artifacts in run/.
+
+SESSION R NINTH LEG OPENING (sc191 verdict + merge + sc192, 05:4x-05:5x):
+sc191 COLLECTED (v1 kernel crawled to its endgame single-CPU); main merged
+clean (ff); v2 VERIFICATION BOOT sc192 RUNNING PAST EVERY PRIOR GATE.
+
+- sc191 final verdict (v1 kernel, parkdump off, full 45 min): cpu1 stranded
+  at ~min 1 by the CLEAN exit (libusb_event tid 649, code=0) - 514
+  PREEMPT-LEAK sampler lines over the rest of the boot, held_nonzero_for
+  grew past 0xd1e9 jiffies (~9 min), pc=0x10000, rip=wfi+5, ZERO
+  TERM-DESCHED (count was 0 at helper time - the v1 gap v2 targets).
+  GetService answered a 3rd consecutive parkdump-off time; BootAnimation
+  reached full frame prep (150 jpgs read, SetVSyncRate 30/2 success -
+  deeper than sc190's controller START); SA 10 never published; screen
+  stayed the 8-color oracle. Single-CPU crawl = sc189 precedent.
+- Merge: fast-forward to ea4e4e99 (main had already merged this branch at
+  82987cca; the W3 retaddr cfg-gate is main's side, untouched). riscv64
+  build verified clean post-merge (the break the gate fixed is gone).
+- sc192 (v2 kernel 6e9679c5 + ea4e4e99, parkdump off, fresh scgold copy
+  userdata-sc192.img, KVM q35, launched 05:48): at ~6 min -
+  * ZERO PREEMPT-LEAK with 62 clean exits + 52 USEGV deaths already
+    passed through (sc191 showed 514 leak lines by min 5) - v2's
+    pick-ownership release is holding for BOTH exit classes so far.
+  * Both CPUs sampling all boot (WW cpu=0/1 both live).
+  * GetService answered a 4th consecutive parkdump-off time; RS (pid 622)
+    is in DIRECT composer_host (581) conversation and PAST sc190's stall
+    point: txn #42 (code 0xb) sent after #40 0x9 / #41 0xc;
+    BootAnimationController START, OnHotPlug(0,1), SetBrightness 44 all
+    in log; BootAnimation 150 frames + SetVSyncRate again.
+  * SA 10 not yet published; watching.
+- sc190 alive-task WW birth profile (pa15 input, done while waiting):
+  768 WW IRQ-OFF-WINDOW lines, 210 distinct pids (80 multi-hit). Shape:
+  ages all at the 1s probe cap; pc 0x10000 (pure hardirq bit) 74%,
+  0x10001 14%, deeper the rest. ~40% of hits sit at stable addresses
+  inside printk::persistent_log::append (0x802c7d66=253 hits + 3 more
+  clusters) - the printk/UART-under-cli window is the dominant producer;
+  minority samples carry USERSPACE rips with pc!=0 = post-leak residual
+  count (survived return to user). Role map of the top repeat offenders:
+  the DISPLAY STACK owns the phenomenon - composer_host family (316/327/
+  364/548/549/625), render_service family (747/1179), their GPU loaders
+  (libGLES_mali dlopen, OpenGLWrapper 1408), and their clients
+  (DisplayManagerAdapter singleton 868, BootAnimation VSync receiver
+  1405), plus appspawn (334), os_ds_service (532), DfxWatchdog (963).
+  These tasks recur across the WHOLE boot (316 spans 5%->99.7% of the
+  log) - steady-state episodic 1s stalls, not one-shot birth events.
+  Same processes whose FFRT pools are the devmgr 16 readers: their
+  1s-scale preempt-held episodes stall readers mid-critical-section and
+  the rwlock word never returns to 0. Consistent with parkdump-off ->
+  GetService answered 4/4 (less UART burn under cli).
+
+SESSION R NINTH LEG MIDPOINT (sc192/sc193 verdicts + v3/v4, 06:0x-07:1x):
+V2 CURES THE CLEAN-EXIT AND USEGV CLASSES; THE KILL PATH NEEDED THE
+PICK GATE (v4); THE WEDGE LOOP IS CLOSED USERSPACE-SIDE; RISCV64 UNIT
+TEST PANICS (MAIN-SIDE, UNATTRIBUTED).
+
+- sc192 final (v2 kernel, full 45 min): 1072 PREEMPT-LEAK lines total,
+  but the ONLY permanent strand was the kill-path one (see below); the
+  62+ clean exits and 52+ USEGV deaths all passed clean. GetService
+  answered 4/4 parkdump-off; RS (622) went PAST sc190's stall (SetBrightness
+  then txn #42 code 0xb sent, embedded at line 22551); RS then waited ~8
+  min silent in FUTEX_WAIT on its own stack word (0x7fffffffc244 val=2)
+  and RETRIED 0xb - composer_host stopped serving direct HDI txns after
+  its early phase. No SA 10; 8-color oracle to the end.
+- sc192 KILL-PATH STRAND (the v2 gap): AMS killed launcher tgid 5111;
+  KILLDUMP showed tid 5129 (OS_FFRT_0_0, in futex WAIT_PRIVATE val=2)
+  state=0x0 on_cpu=true cpu=1, stime frozen; cpu1 then stranded with
+  rip=wfi+5, pc=0x10000, held 60+ s, ZERO TERM-DESCHED prints (pc was 0
+  at helper time - v2's print only fires on pc!=0). Third terminal shape:
+  SIGKILL teardown of an on-CPU FFRT/IPC thread.
+- v3 (c90f80b0): replaced the helper's 8-round terminal bare-wfi park
+  (which NEVER re-enters schedule - a permanent CPU loss whenever the
+  re-link race outlasts the budget) with a paced retry: enable_irq+wfi
+  between rounds. Plus a budgeted TERM-DESCHED engaged print.
+- sc193 (v3 kernel, parkdump off, 45 min): 4 launcher-kill KILLDUMPs
+  with ZERO strands for ~25 min (v3 working), 8 engaged prints (all
+  pc=0x0; budget consumed in min 1), both CPUs sampling. BUT launcher
+  tgid 5033's IPC thread (tid 5034) stranded cpu1 at ~min 25 for 13+
+  min: first sampler hit in outb+22 (its own kill-dump print!), then
+  wfi+5 with pc=0x10000 frozen - the paced loop cycled (timer wakes
+  arrived, sampler ran) but every schedule() returned unswitched. The
+  discipline exempts DEAD; the helper re-asserts DEAD+dequeue+ownership-
+  release each round; TERM_RETRY_N never consumed (pc always 0 at loop
+  top; the 0x10000 re-lands with each wake IRQ - the pa15 producer).
+  Remaining resolver: the CLASS PICK returning the re-linked DEAD task
+  (racer rewrote state to RUNNING between dequeue and pick -> prev_running
+  re-queued it -> CFS walk handed it back). No SA 10; wedge re-formed
+  (word 0x7ff0009e6c14, readers=16, age 1320s at end).
+- v4 (7a8044e0): DEAD-PICK GATE in all three class gates of
+  pick_next_task, mirroring the PID-0 poisoned-entry gate (drop + report
+  + pair nr_running + fall through to idle). A DEAD task must never be
+  handed a CPU no matter who re-linked it. Plus TERM-DESCHED stuck
+  forensics at power-of-two rounds (state/pc/claim) for the next strand.
+  sc194 (launched 07:11, v4 kernel, parkdump off) is the verification
+  roll.
+- WEDGE LOOP CLOSED (sc193 census, userspace-side): devmgr (tgid 336)
+  word 0x7ff0009e6c14 freezes at readers=16 - its own FFRT/IPC pool
+  holding the service-registry rdlock ACROSS blocking binder calls out
+  into the display stack; the display stack's threads need GetService
+  (code 3) FROM devmgr (its IPC threads SERVER-OWING txn2785/txn4678
+  code 3 parked as writers); tid 442's hist: sent txn485 to tid 374 =
+  DISP session server (DoHotPlugCallback) while OpenGLWrapper logs
+  "EglWrapperLayer Init Failed" (the libGLES_mali-missing retry loop
+  from the sc190 profile). Circular: devmgr readers -> display-stack
+  calls -> display stack -> GetService(devmgr). RS's endless 0xb retry
+  is collateral. Kernel-side wake/semantics exonerated (sc185 + sc193
+  census consistent). The producers that make the freeze WINDOW long
+  enough to matter are the 1s-scale vCPU-residency losses (my sc190 WW
+  profile + coordinator's ground truth: UART port-IO VM exits, host
+  deschedules - console-async is the lever, queued greenfield in my
+  lane after the dodge race).
+- RISCV64 UNIT TEST PANIC (finding, main-side attribution pending):
+  make test (riscv64, unit-test kernel from merged ea4e4e99 + my notes/
+  v3 commits - none of which touch boot paths) KERNPANICs during a
+  suite boot: pfault badaddr=0xffffffff80c00000 sp=0xffffffff80bfffe0
+  (the stack word read at sp+0x20 crosses the stack-top boundary) with
+  epc=trap_entry and the second fault in handle_page_fault's read_volatile
+  (trap.rs:1168, the KERNPANIC stack-dump reader): the boot-time kernel
+  stack ran down to its very top; the trap printer double-faulted. The
+  survivor run is still going; if it reproduces, pa15's +733-line
+  syscost merge (or perf-audit) is the likely depth culprit - needs a
+  main-baseline bisect, NOT mine (v1-v4 touch only exit/pick paths).
+- QEMU discipline note: three identical 'make test' executions were
+  spawned by the harness (original + 2 retries); I killed the duplicates
+  by exact PID after verifying parentage. If a background command
+  auto-retries, check for orphans before launching QEMUs.
+
+SESSION R TENTH LEG OPENING (sc194 verdict + v5 quiet-console, 08:5x-):
+SC194 VERIFIES v4 (ZERO STRANDS THROUGH A FULL 45-MIN KILL-CHURN BOOT);
+THE RACE ITSELF WAS LOST AT T+59s BY THE SAME 4-PROCESS 16-READER
+SATURATION; CONSOLE BURN IN THE DECISION WINDOW MEASURED (60% USERSPACE
+/ 17% OUR OWN PROBES) -> v5 quietcon ROLL.
+
+- sc194 (v4 kernel 7a8044e0, parkdump off, KVM q35 SMP2, 45 min,
+  07:11-07:56; serial quiet after 07:36 = wedged silence): verdict PASS
+  on the sched gate - 32 PREEMPT-LEAK lines ALL held_nonzero_for=0xc8
+  (2s transient; sc191 grew past 0xd1e9, sc192 had a permanent strand),
+  ONE launcher KILLDUMP (tgid 1801 m.ohos.launcher, mid-syscall, NOT
+  on futex, state=0x0 cfs_linked=1) with NO strand after it, 8
+  TERM-DESCHED engaged prints (all pc=0x0, budget consumed min 1),
+  DEAD-PICK gate never fired (0 prints), both CPUs sampling/alive to
+  the end of output. The v1-v4 kill-path/exit strand family is CLOSED
+  as far as one boot can prove.
+- sc194 race shape (timeline via RWFRZ age 1441s at EOF + composer
+  thread age): RS = pid 629; SACMP-RS #1-#41, GetService(devmgr 333)
+  ANSWERED (#7 code 3 -> reply at 3917), direct composer_host (610,
+  serving thread OS_IPC_0_648) conversation codes 0x0/0x34/0x1/0x2/
+  0x20/0x23/0x3/0x5/0x22/0x9/0x6/0x8/0x4/0x15x2/0x36/0x21/0xa/0xc
+  mostly ANSWERED; #41 code 0xc sent ~T+59s and froze - 648 parked on
+  the frozen rwlock family (age 1465s at EOF, kicked 25x = RWFRZ
+  re-kick count, state=0x1 cfs_linked=0: userspace-correct wait).
+  At the SAME minute devmgr tgid 333 word 0x7ff000888264 froze at
+  word=0x80000010 readers=16 AND tgids 619/1171/624 froze at readers=16
+  each (4-process FFRT-pool saturation, same as sc192/193 topology).
+  Launcher then spawn-exit-looped (childexits 4569..4714 status=0,
+  LauncherAbilityManager getOsAccountLocalIdFromProcess each spawn -
+  launcher needs RS which never publishes SA 10). BootAnimation
+  milestones all reached (controller START line 3500, OnHotPlug(0,1)
+  4271, SetVSyncRate 30/2 line 5500 - all BEFORE the freeze). No
+  SA 10; 8-color oracle to the end; shotmon csv ends 07:56:28.
+- Console burn in the decision window (first 10902 lines = 1.34MB in
+  59s, ~22KB/s): 60% userspace console stream (slog 342KB + kmsg 237KB
+  + alog 116KB + hilog 106KB - hilogd writes /dev/console direct),
+  17% OUR probes, ALL via pr_warn!: SAREG 110KB (495 of the 600-print
+  budget burned in min 1), FXDV 48KB, stkfutex 31KB, mtprobe 31KB,
+  SACMP 6KB; raw sinks minor (WW 5KB/29 lines, RWFRZ 0.9KB). The
+  probes fire IN the racer threads' own paths (RS's binder calls print
+  SACMP-RS; futex waits print stkfutex) - each probe line is port-IO
+  VM exits paid by the thread in the race.
+- v5 (this tree, feat(console)): `quietcon` boot param - fs/tty
+  console_output diverts /dev/console bytes into the printk ring
+  (printk::ring_stash_console, KERN_INFO record; dmesg stays complete,
+  UART idle); kernel printk and raw DFX sinks untouched. Roll APPEND:
+  LOGLEVEL=3 (oh-boot-q.sh now takes ${LOGLEVEL:-4}; get_param uses the
+  FIRST loglevel= token so the script token is the single source).
+  NOTE printk() drops level>console_loglevel records BEFORE the ring,
+  so loglevel=3 removes pr_warn! probe records from dmesg too -
+  acceptable for a milestone roll (hilogd keeps its own buffer; hdc
+  retrievable); re-roll instrumented if the race is lost again.
+- sc195 (roll): v4+v5 bzImage, fresh scgold copy userdata-sc195.img,
+  parkdump off, quietcon + loglevel=3, SMP=2 KVM q35, 45 min, shotmon
+  on ohgpu. Milestone gate: SA 10 publish (hdc hilog / dmesg [con]
+  stash) -> bootanimation frames -> launcher chain -> ohgpu screendump
+  shows real launcher UI (not the 8-color scanout oracle) -> save
+  screenshot + csv prominently, commit immediately.
+- QEMU discipline: no live QEMU at leg start (verified ps); sc194
+  ended on its own at 07:56 (timeout).
+
+SESSION R TENTH LEG MIDPOINT (sc195 in-flight interim, 09:2x):
+THE QUIETCON ROLL CHANGED THE RACE FUNDAMENTALLY - NO WEDGE THROUGH
+MIN 27 (sc192/193/194 ALL FROZE AT MIN 1-2; sc184 AT MIN 8) - AND THE
+LAUNCHER IS DEEPER THAN ANY SC-SERIES BOOT: ARKTS BYTECODE EXECUTING.
+
+- sc195 (v4+v5 12ea541e, parkdump off, quietcon + LOGLEVEL=3, fresh
+  scgold copy, KVM q35 SMP2, launched 08:54): serial burn collapsed
+  from sc194's ~22KB/s to ~2.3KB/s in the window (userspace hilog/
+  alog/slog streams GONE - 0 lines vs ~5100; only ERR-level [kmsg]
+  records + raw WW/WAKE-STRANDED remain). RWFRZ = 0 lines at min 27.
+  WAKE-STRANDED continues (episodic 1-4s stalls, strand ages bounded,
+  no growth) - the residual stall family is NOT console-driven alone
+  (host deschedules etc), but it no longer freezes the rwlock.
+- Progress gauges: pid churn steady organic (963 @decile1 -> 4030 @
+  min 24), USEGV deaths fixed at 46 early (no churn), screen = static
+  oracle (md5 a6d1f7e3 unchanged; the oracle pattern is ft-phased, so
+  static md5 = no flips = RS not composing yet).
+- RAM forensics (pmemsave via monitor; HMP notes: size must be <=32-bit
+  chunks, filename must be RELATIVE or the expression parser eats the
+  path): launcher past its sc194 ceiling - MainAbility.abc ArkTS module
+  EXECUTING (152 hits), UIAbility js modules, ArkUI/ace_engine/
+  WindowScene loaded (136/80/98), LauncherAbilityManager loop lines
+  184x, NO clientToService-null errors. BootAnimation one-shot lines
+  absent (ring wrap or never ran - ambiguous).
+- Read: quietcon removed the console-burn term of the freeze window;
+  the remaining chain (RS compose -> bootanimation -> launcher first
+  frame) is now gated by raw slowness (2 vCPUs, episodic stalls), not
+  by the wedge. Plan: let the 45-min window close (~09:39), then
+  reboot the SAME userdata (first-boot caches persist; second boot
+  faces a lighter service storm) with a longer window for the first
+  frame. If a frame appears: immediate screendump + save + commit.
+
+SESSION R TENTH LEG - sc195 FINAL VERDICT (09:4x):
+QUIETCON WINS THE WEDGE RACE 45/45 MIN (RWFRZ=0 THE WHOLE RUN - FIRST
+SC-SERIES BOOT EVER TO STAY UNWEDGED); LAUNCHER REACHED ARKTS/ARKUI
+(DEEPEST EVER); NEW RESIDUAL = pid-1 HARDIRQ-HELD STRAND FROM min~29
+(in inb, the sc184 W3-FROZEN-EXEC-SLOT family); SC196 WARM-REBOOT IN
+FLIGHT (hilogd stops writing /dev/console on boot 2 - stash blind).
+
+- sc195 final (45 min, ended 09:39): screen oracle-static to the end
+  (no RS flips), serial 731KB total. Launcher: MainAbility.abc ArkTS
+  EXECUTING + ArkUI/ace_engine/WindowScene component storm loading +
+  WindowShow 17 - every prior boot died in the LauncherAbilityManager
+  spawn loop LONG before bytecode. No clientToService-null errors.
+- THE QUIETCON RESULT (correlation now 5 boots deep): sc192/193/194
+  (loud, ~22KB/s window burn) froze devmgr at min 1-2, 3/3; sc195
+  (quiet, 2.3KB/s) ZERO wedge lines for 45 min. Console-burn -> freeze
+  window is causal for the min-1 freeze shape. The RWFRZ census
+  (writer-park based) saw nothing - and the chain KEPT ADVANCING to
+  min 45, confirming no silent freeze either.
+- NEW STRAND VARIANT (the v4 residual to chase next): init pid=1 held
+  hardirq-count (pc=0x10000) on cpu0 from ~min 29 to end-of-run - 844
+  PREEMPT-LEAK census prints 1/s from cpu1, held grew to 0x14d0b jif
+  (~855s), rip stable at 0xffffffff802b8dd0 = arch::x86_64::cpu::inb
+  (the generic port-in helper; NOT the bounded putc TX poll - that one
+  has a wall-time budget and stall latch). The interrupted-context rip
+  staying in inb across 844 samples = a tight RX-style poll loop or a
+  stuck hardirq handler in init's context. Early-boot transients
+  (held=0xc8) shared the same function region (802b8c6e=enable_irq,
+  802f1e05=vfs::sbx_want). Same family as sc184's W3-FROZEN-EXEC-SLOT
+  (init named by a frozen busy slot, retaddr in context_switch) - now
+  with an inb rip. System continued on cpu1 (ArkTS progress 152->191
+  hits between min-25 and min-39 RAM samples) but at half speed -
+  likely why RS never got to compose.
+- Warm-reboot observability caveat (sc196): hilogd on boot 2 does NOT
+  write /dev/console (config/flowcontrol persisted on userdata in boot
+  1) - the printk-ring [con] stash region is EMPTY on sc196; ring-
+  based forensics only work on fresh copies.
+- HMP pmemsave notes for future legs: size arg must be <=32-bit
+  (chunk 4GB in two), filename must be RELATIVE (the expression
+  parser eats /-paths as division), files land in QEMU's cwd (repo
+  root, not run/).
+
+SESSION R TENTH LEG - v6 (R73) LANDED + sc196 VERDICT (10:1x):
+COORDINATOR CORRECTION ADOPTED; THE sc195 STRAND ROOT-CAUSED AS THE
+PANIC-DUMPER UNBOUNDED-READ FAMILY AND FIXED ON BOTH ARCHES.
+
+- Coordinator merge 484c8cb8: the riscv64 unit-test panic was NOT stack
+  depth (ninth-leg theory dead) - boot.S's 12MB image window left the
+  boot stack unmapped; fixed on main by 77ec1247 (window/heap 14MB +
+  linker ASSERT). Noted so the wrong theory stops propagating.
+- sc195 strand root cause COMPLETED: the "Registers:" dump right at
+  strand onset + "PANIC: sysrq 'c'" at log line 3929 = OH's own
+  reliability flow (init reboot-plugin ParseRebootReason + bbox
+  context) wrote 'c' to /proc/sysrq-trigger at ~min 29; the KERNPANIC
+  dump's 16-word rsp walk read past the stack mapping, faulted back
+  into the handler, and the print/read recursion held cpu0 (hardirq
+  count, rip parked in the UART inb) for ~855 s. sc191/sc193 each had
+  one "Registers:" dump too - same family, third sighting. sysrq-c is
+  UNIQUE to sc195 across sc190-196 (0 hits elsewhere).
+- v6 (9777f195, both x86_64 and riscv64 twins): KP_DUMP_ENTERED one-
+  shot latch (fault during the dump prints one marker and halts - no
+  recursion, regardless of which read faults) + the kp-stk/24-word
+  walks bounded at the task's real kernel_stack_top() (16K heuristic
+  without task context), skip marker past the top. x86_64 bzImage
+  rebuilt 10:05 (string verified), riscv64 compiles clean.
+- sc196 (warm reboot on sc195's userdata, v5, 45+ min observed):
+  STALLED - pid churn froze at 1369 from ~min 10 to kill at min 33,
+  screen never left black (zero flips; sc195's first boot had the
+  oracle up by min 1), no strand, no RWFRZ, no sysrq-c; with loglevel=3
+  the binder-stall/stkfutex census is muted, so the wedge shape is
+  invisible (the observability cost of the quiet roll). Killed by exact
+  PID (mine), artifacts kept. Warm-reboot on this image loses the
+  early display bring-up - fresh copies remain the way.
+- sc197 (roll, launched 10:09): v6 bzImage, FRESH scgold copy, quietcon
+  + LOGLEVEL=3, SMP2 KVM q35, 90-MIN window - direct continuation of
+  sc195's trajectory (unwedged + ArkTS/ArkUI loading) with the cpu0
+  panic-strand fixed and double the time. Shotmon on ohgpu.
+
+SESSION R TENTH LEG - REST-QUEUE HANDOFF NOTES (for the next leg /
+coordinator, written while sc197 rolls):
+
+- EPOLL_WAKE_REGISTRY sharding (1.1% cost, misc.rs:154): single global
+  Spinlock<Vec<(u64 file_id, *mut EpollFile)>>; EVERY data arrival on
+  any open file (unix-socket enqueue, pipe write...) runs a GLOBAL
+  irqsave O(N) scan, and unregister paths run O(N) retains. Shard by
+  hash(file_id) into K registries (K=16); register/notify derive the
+  shard from file_id (pure partition, no cross-shard invariants).
+  WRINKLE: epoll_wake_unregister_all(ep) must not scan all K shards -
+  derive the epoll's file_id set from its own `entries` (already under
+  the per-epoll lock) and hit only the needed shards. Lock order
+  registry-shard -> per-epoll entries is unchanged. The sc103 leak
+  guard (registry size print before locking) should become per-shard.
+- GRQ cost (3.9%, sched.rs): every schedule/enqueue/wake path takes
+  the single global runqueue lock (per-class sub-queues inside). The
+  candidates are per-CPU runqueues with periodic steal or sharded
+  class queues - a major refactor that INTERSECTS the v1-v4 kill-path
+  machinery (terminal deschedule, DEAD-PICK gates all run under the
+  GRQ): do it only with the sc-series strand probes on, and re-run the
+  full strand verification boot afterwards. Not started this leg.
+- Console-async (the ninth leg's greenfield, now PARTIALLY done):
+  quietcon (v5) already removes the userspace console term. The
+  remaining piece for a production-grade fix: defer kernel printk
+  console emission to a kthread (Linux printk-kthread style) so
+  port-IO never runs under cli in task context. The WW profile's
+  printk::persistent_log::append cluster is the target. Design only.
+- riscv64 make test on THIS branch: main's 77ec1247 (image window fix)
+  is NOT merged into feature/samgr-callback yet - a make test here
+  would re-hit the boot-stack window bug. Merge main before testing.
+
+SESSION R TENTH LEG - sc197 VERDICT + sc198 DIAGNOSTIC ROLL (10:4x):
+THE QUIET BOOT HAS A SECOND, INVISIBLE SOFT-WEDGE SHAPE; sc198 (quietcon
++ LOGLEVEL=4) IS ROLLING TO MAKE IT VISIBLE.
+
+- sc197 (v6, FRESH scgold copy, quietcon + LOGLEVEL=3, launched 10:09,
+  killed 10:40): oracle up at min 1 (fresh-copy display bring-up works
+  - sc196's black screen was the warm-boot difference), then the boot
+  STOPPED PROGRESSING in the pid 900-1100 zone from ~min 12 to kill at
+  min ~30 (sc195 by then was past 2500 with ArkTS running). No RWFRZ,
+  no KERNPANIC, no sysrq-c, no permanent strand (all PREEMPT-LEAK
+  transient), serial fell to ~190B/s probe trickle, StorageDaemon
+  radar line ticking = alive but everyone-else-blocked. RAM census:
+  launcher strings ZERO (never started); hilogd buffer NOT findable
+  (sc195's "ring region" at 0x1877xxxx was hilogd's USERSPACE heap
+  under that boot's ASLR, not the kernel stash - correcting my earlier
+  note; the stash's kernel address is still unidentified).
+- READ: the quiet boot has (at least) two failure shapes - the min-1
+  devmgr rwlock freeze (ELIMINATED by quietcon, sc195 proof) and an
+  early soft-wedge around the display-stack/service zone that leaves
+  NO rwlock freeze and NO kernel-side evidence - with loglevel=3 the
+  binder-stall/stkfutex census is muted exactly when it is needed.
+  Whether it is the same circular family without the rwlock signature
+  or something new is THE open question for sc198.
+- sc198 (launched 10:41, 60 min): v6 bzImage, fresh scgold copy,
+  QUIETCON + LOGLEVEL=4 - userspace console stays muted (the 60% term)
+  while ALL pr_warn! probes print (the 17% term returns): the missing
+  matrix cell. If the soft-wedge forms, the binder-stall/stkfutex/
+  SACMP census will name the blocked pair. Next leg: read
+  run/oh-sc198-serial.log for the stall shape; the fix is then either
+  userspace-circular (C-line REST retest evidence pending) or a wake/
+  residency term we have not met yet.
+
+SESSION R TENTH LEG CLOSE-OUT (11:0x):
+sc198 COMPLETED THE CAUSAL MATRIX - BOTH CONSOLE TERMS INDEPENDENTLY
+MODULATE THE FREEZE; QUIET-QUIET BOOTS HAVE A REMAINING SOFT-WEDGE
+SHAPE; MILESTONE NOT REACHED THIS LEG; v5+v6 READY FOR MERGE.
+
+- sc198 verdict (quietcon + LOGLEVEL=4, killed min ~10): tgid 336
+  (devmgr) froze at readers=16 word 0x80000010 uaddr 0x7ff0009d9a64 at
+  ~min 9 - the CLASSIC terminal freeze returns with ONLY the kernel
+  probe traffic on (userspace console muted). The causal matrix:
+    userspace-console ON + probes ON  (sc192/3/4): freeze min 1-2
+    userspace-console OFF + probes ON (sc198):    freeze min ~9
+    userspace-console OFF + probes OFF (sc195):   NO freeze in 45 min,
+                                                 deepest chain ever
+                                                 (sc196/197: same config
+                                                 soft-wedged early)
+  Both terms matter independently; the probes print INSIDE the racer
+  threads (SACMP/stkfutex in RS's own binder/futex paths), so their
+  port-IO cost lands exactly on the race's critical path.
+- The remaining blocker is the quiet-quiet SOFT-WEDGE (sc196 fresh-off-
+  warm + sc197 fresh: boot stalls in the pid 900-1400 zone from ~min
+  10-12, no rwlock freeze, no kernel evidence, 1-of-3 boots (sc195)
+  passes it). Diagnosing it needs probe visibility WITHOUT probe burn -
+  the obvious next-leg instrument is SPARSE probes (budgeted 1-in-N
+  sampling of binder-stall/stkfutex/SACMP so the census exists at a
+  fraction of the burn), plus an sc195-shaped run with more headroom
+  (SMP4 + 2G for final validation per repo discipline, or a longer
+  window) to see whether ArkUI-load completes into a first frame.
+- Milestone (ohgpu screenshot of real launcher UI): NOT reached. Best
+  point remains sc195's ArkTS MainAbility executing + ArkUI component
+  storm loading. The chain from there: ArkUI first frame -> RS compose
+  -> launcher window -> screenshot (the cc lane's black-GEM import
+  question is the known risk at the compose step).
+- Branch state: feature/samgr-callback at this commit; code deltas this
+  leg = v5 quietcon (12ea541e: tty/console_output divert + printk
+  ring_stash_console + cmdline quietcon + oh-boot-q.sh LOGLEVEL) and v6
+  R73 (9777f195: KERNPANIC dump bound + re-entrancy latch, both arches;
+  coordinator-assigned). Both compile clean on x86_64 and riscv64;
+  v5 verified live in sc195-198, v6 string-verified in the bzImage (its
+  panic path will get its live verification the first time OH's sysrq-c
+  fires - expect "re-entered during dump" or a clean bounded dump).
+  config.rs left dirty (riscv64 platform artifact from make build).
+  riscv64 make test on this branch needs main's 77ec1247 merged first.
+- Kills this leg: sc196/sc197/sc198 QEMUs by exact own PID after
+  verifying cmdline tag; shotmon tasks stopped; no setsid/nohup used;
+  RAM dumps (13GB) deleted after analysis; artifacts (serial logs,
+  csv, ppm, auto0 shots) on disk uncommitted except the milestone
+  interim shot.
+  (correction to the close-out above: config.rs is NOT dirty - the
+  snapshot already committed the riscv64 platform artifact, and the
+  riscv64 `make build` regenerated the same content. Tree is clean at
+  273489e7.)

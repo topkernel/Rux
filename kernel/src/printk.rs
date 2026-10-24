@@ -245,6 +245,25 @@ fn printk_ring_always(level: u8, args: fmt::Arguments) {
     }
 }
 
+/// Console-sink stash (`quietcon` boot param, sc-series launcher race):
+/// bytes diverted from the /dev/console UART sink by fs::tty's
+/// `console_output` land in the printk ring as a single KERN_INFO
+/// record — the UART stays idle while dmesg keeps the full stream.
+/// Re-entrant and pre-init safe: drops the bytes in both cases.
+pub fn ring_stash_console(bytes: &[u8]) {
+    if bytes.is_empty() {
+        return;
+    }
+    let _guard = match PrintkGuard::try_new() {
+        Some(g) => g,
+        None => return,
+    };
+    if PRINTK_INITIALIZED.load(Ordering::Relaxed) {
+        let timestamp = crate::arch::cpu::read_time();
+        write_to_ring_buffer(loglevel::KERN_INFO, bytes, timestamp);
+    }
+}
+
 /// Whole-record console atomicity flag: with several harts printing
 /// concurrently, per-byte lock-free emission interleaved records
 /// mid-line (garbled boot log). Holders only push bytes to the UART

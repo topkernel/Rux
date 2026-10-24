@@ -1758,11 +1758,28 @@ pub fn schedule_dead_never_returns() {
     const IN_SCHED: u32 = TaskFlags::TIF_IN_SCHED.bits();
     static TERM_RETRY_N: core::sync::atomic::AtomicU32 =
         core::sync::atomic::AtomicU32::new(0);
+    static TERM_ENGAGE_N: core::sync::atomic::AtomicU32 =
+        core::sync::atomic::AtomicU32::new(0);
     let mut rounds = 0u32;
     loop {
         if let Some(cur) = current() {
             // SAFETY: cur is the running task (this very context).
             unsafe {
+                // sc192 (v3): print ENGAGEMENT (once, budgeted) so the
+                // next strand can distinguish "helper never ran" from
+                // "helper ran silently with pc==0" — sc191/sc192 both
+                // stranded with ZERO TERM-DESCHED lines and the two were
+                // indistinguishable in the log.
+                if rounds == 0 {
+                    let n = TERM_ENGAGE_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                    if n < 8 {
+                        crate::pr_warn!(
+                            "TERM-DESCHED engaged pid={} pc={:#x}",
+                            (*cur).pid(),
+                            (*cur).preempt_count()
+                        );
+                    }
+                }
                 // A racing wake/heal may have re-linked us or rewritten
                 // our state: re-assert DEAD and unlink before every
                 // attempt so the picker can never hand the CPU back.
@@ -1802,14 +1819,45 @@ pub fn schedule_dead_never_returns() {
         schedule();
         rounds += 1;
         // schedule() returning means it refused/repicked us once more;
-        // loop and re-assert. After a generous bound (something re-links
-        // us every single round — not observed, but do not spin hot),
-        // park in wfi like the old code did.
+        // loop and re-assert. sc192 (v3): the old "park in wfi like the
+        // pre-v1 code did" fallback after 8 rounds is a PERMANENT CPU
+        // loss whenever the re-link race outlasts the budget — observed
+        // on a SIGKILL teardown of an on-CPU FFRT worker (launcher tgid
+        // 5111, tid 5129, killed mid-futex-wait): the bare wfi loop never
+        // re-enters schedule(), so no later interrupt or wake can hand
+        // this CPU to another task; the slot named the dead task for 60+
+        // s (rip=wfi+5, preempt_count froze at 0x10000 after an IRQ hit
+        // the park). A DEAD task holds no critical section worth
+        // stranding a CPU for: instead pace the retry with wfi — each
+        // interrupt (the timer tick at minimum) is another chance for
+        // the picker, now seeing {DEAD, dequeued, unowned}, to switch us
+        // out for good. wfi needs IF=1; force it on (a dead task holds
+        // no critical section to protect).
         if rounds >= 8 {
-            loop {
-                // SAFETY: plain hint instruction, no side effects.
-                crate::arch::cpu::wfi();
+            // v4 forensics: name the stuck shape at power-of-two rounds so
+            // the next strand says WHY schedule() keeps returning — state
+            // rewritten by a racer (not DEAD), leaked count back (0x10000),
+            // or a pick that keeps resolving us. Budget: log2 rounds.
+            if rounds.is_power_of_two() && rounds <= 4096 {
+                if let Some(cur) = current() {
+                    let st = unsafe { (*cur).state() };
+                    let pc = unsafe { (*cur).preempt_count() };
+                    let claim = unsafe {
+                        (*cur).running_on_cpu.load(core::sync::atomic::Ordering::Acquire)
+                    };
+                    crate::pr_warn!(
+                        "TERM-DESCHED stuck pid={} rounds={} state={:#x} pc={:#x} claim={} rip_paced",
+                        unsafe { (*cur).pid() },
+                        rounds,
+                        st.bits(),
+                        pc,
+                        claim
+                    );
+                }
             }
+            crate::arch::cpu::enable_irq();
+            // SAFETY: plain hint instruction, no side effects.
+            crate::arch::cpu::wfi();
         }
     }
 }
@@ -2278,7 +2326,18 @@ unsafe fn pick_next_task(grq: &mut GlobalRunQueue, cpu_id: usize, prev: *mut Tas
             // next class instead of context-switching onto a garbage
             // context (observed: PICK-LIVE-FORCED pid=0 → resume at a
             // stale boot-stack sp → fatal).
-            if (*task).pid() == 0 {
+            // DEAD-PICK GATE (sc193, v4): a task whose state reads DEAD
+            // must never be handed a CPU either — the exit path dequeued
+            // it, so a queue entry here means a racing wake/heal re-linked
+            // a dying task between the terminal deschedule's dequeue and
+            // this pick. Resuming it re-enters the wfi park loop in the
+            // dead context and strands the CPU for the rest of the boot
+            // (launcher tgid 5033/5034: slot named the dead IPC thread
+            // for 13+ min, rip=wfi+5, preempt_count re-leaked to 0x10000
+            // by every interrupt that woke the park). Drop it like a
+            // poisoned entry; the terminal deschedule loop keeps
+            // re-asserting DEAD+dequeue, so the next round picks idle.
+            if (*task).pid() == 0 || (*task).state().is_dead() {
                 report_poisoned_rq_entry(cpu_id, task as usize);
                 grq.nr_running.fetch_update(
                     core::sync::atomic::Ordering::SeqCst,
@@ -2313,8 +2372,9 @@ unsafe fn pick_next_task(grq: &mut GlobalRunQueue, cpu_id: usize, prev: *mut Tas
     //    Skipped entirely while the RT bandwidth is throttled (batch 8).
     if !grq.rt_rq.is_empty() && !RT_THROTTLED.load(core::sync::atomic::Ordering::Acquire) {
         if let Some(task) = grq.rt_rq.pick_next_cpu(cpu_id, prev) {
-            // PID-0 GATE — see the Deadline block above.
-            if (*task).pid() == 0 {
+            // PID-0 GATE — see the Deadline block above. Also the
+            // DEAD-PICK GATE (sc193, v4) — see the Deadline block above.
+            if (*task).pid() == 0 || (*task).state().is_dead() {
                 report_poisoned_rq_entry(cpu_id, task as usize);
                 grq.nr_running.fetch_update(
                     core::sync::atomic::Ordering::SeqCst,
@@ -2342,7 +2402,11 @@ unsafe fn pick_next_task(grq: &mut GlobalRunQueue, cpu_id: usize, prev: *mut Tas
             // word reading 0 (= cpu 0), mark_picked_on_cpu published it
             // LIVE ("PICK-LIVE-FORCED pid=0") and the switch resumed a
             // stale boot-stack context (rsp=0x10a870).
-            if (*task).pid() == 0 {
+            // DEAD-PICK GATE (sc193, v4) — see the Deadline block above;
+            // the CFS queue is where the re-linked launcher IPC thread
+            // (tgid 5033) was re-picked from, parking cpu1 in wfi+5 for
+            // 13+ min.
+            if (*task).pid() == 0 || (*task).state().is_dead() {
                 report_poisoned_rq_entry(cpu_id, task as usize);
                 grq.nr_running.fetch_update(
                     core::sync::atomic::Ordering::SeqCst,
