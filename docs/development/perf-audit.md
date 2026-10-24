@@ -1339,6 +1339,21 @@ to the EFLAGS-exact probe under the fix:
   second). Part accel artifact, part real; the KVM flagship will
   size the real part.
 
+**PREEMPT-LEAK verdict noted (A-line's, not this lane's work):** the
+brief flagged sc205's 17,906-line PREEMPT-LEAK storm as the post-fix
+next-layer blocker. A-line's own verdict (commit 8dc3407f, sc205
+snapshot): the storm is POST-PANIC tick weather — sc205 died at t=30 s
+(ext4 refused their userdata copy: unsupported incompat 0x2000 =
+metadata_csum_seed; mount ENODEV x3 -> beget ExecReboot -> sysrq 'c'
+-> panic park), pid 1 sat parked in wfi and the tripwire watched its
+own hardirq bit; SC-HB froze with scheduling. sc206 (their next roll,
+healthy mount, deepest boot ever) prints PREEMPT-LEAK 0. So the storm
+does NOT persist on healthy boots and is not observed as a boot-time
+performance blocker; the sched.rs:1747 terminal-deschedule family
+tracking stays with the launcher lane. Their ext4 note (missing
+metadata_csum_seed / orphan_file support vs Linux) is a compatibility
+gap for the fs lane's list, recorded here for cross-reference only.
+
 ## 4. Ranking table v2.6 (cost centers -> boot-time contribution)
 
 v2.6 = v2.5 + row 2b corrected and closed (leg 15: mechanism corrected
