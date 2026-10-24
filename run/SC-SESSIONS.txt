@@ -4482,3 +4482,15 @@ Rolls this leg: sc231-236 (stock, parked), sc237 (usbless clean
 advancing, deepest tasks), sc239gate/sc240gate (perf-gate Tier-1),
 pb-slab (Tier-2), sc250B (parked), sc251B (deepest pidmax+floor).
 All QEMUs and shotmons stopped by exact own PID (verified cmdlines).
+
+LEG-17 CLOSE-OUT CORRECTION (06:14, sc245 park census landed): the
+clean A/B at the MATCHED park state (pidmax ~1350, heap ~301MB) shows
+c256 live sc245(fix) 339,885 vs sc243(pre-fix) 336,661 - NO
+reduction. The earlier "-40%/spawn" from sc244 was a state-
+composition artifact (churn boot vs park boot), NOT a fix effect -
+withdrawn. The delivered-stale reclaim is correct and useful (102
+reclaims in sc245, zero panics, unwedges nodes) but the dominant
+population (undelivered parked oneways, pick_j==0) is untouched, as
+predicted. THE NEXT LEG'S enq_j + retirement rule IS the lever; the
+floor has NOT moved yet. Verification status unchanged: no formal
+2-advancing verdict on the final kernel (sc245 parked).
