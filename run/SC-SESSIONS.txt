@@ -3805,3 +3805,80 @@ coordinator merge):
    predecessor sessions also cleaned (exact PIDs, cmdline-verified).
    Serials/ppm on disk (gitignored); userdata-sc212..217 private
    reflink copies retained.
+
+LEG-16 (launcher line, per-pid kernel-heap footprint) — RUNNING SECTION
+
+Mission: reduce per-pid kernel footprint so the heap floor forms past
+appspawn's launcher-spawn window (leg-15 verdict: floor at heap ~900MB,
+pidmax ~4800; launcher fork too slow under it, appspawn SIGKILL loop).
+
+Tooling built this leg (all dfx=schb-gated where hot, committed):
+- SC-ANAT beat line: procs (tgid leaders), kN/kK (live kstacks), kHW
+  (boot-max stack high-water), smallK/smallPgK (live small-object
+  estimate vs slab pages held), buddy NET_PAGES per order o0..o8.
+- kstack high-water probe: zero-at-alloc, scan-at-free (in
+  free_kernel_stack, outside every lock), KSTACK-HW record print with
+  comm/pid + UP-walking return-address tail (the down-walk was a bug:
+  the zeroed span below the first nonzero word has no addresses by
+  construction - fixed after sc218/sc220).
+- OOM-ANAT: one-shot dump at the fake-OOM no-killable path AND early
+  at 80% heap on the beat: kstack live/hw, sizeof Task + vma/file/
+  dentry/inode/mm/ptregs/fdte, full NET_PAGES order table, SMALLALLOC
+  per-class census (allocs/frees/pages), census_peek of c256/c1024
+  object headers (buffer-then-print under the class lock).
+
+Rolls:
+- sc218 (full-image anatomy probe roll): LOST the mid-boot RS lottery
+  (render_service tid 1063 parked at ioctl sys=281, the cc54-family
+  userspace RW leak; wedge census + rekick did not unwedge). Probes
+  verified; mid-boot anatomy banked. heapK STABLE at 341MB for 500+s
+  while parked - the small-object population is a stable live set, not
+  a leak. kstack floor relevance: kN=611 kstacks = 88MB at 620 tasks.
+- sc219 (full roll, attribution-era kernel): HEALTHY boot, deepest
+  dataset of the campaign - reached the floor (heap 904MB, pidmax
+  5149, tasks 2729) where the fake-OOM fired WITH the full census:
+    * kstack (o5): 383MB = 42% - kstack live 2688 x 128KB
+    * small-object slab (o0): 343MB = 38%
+      - c256: 520,363 live (File=144B / dentry=160 / inode=200 all
+        class 256) = 128MB live, the single biggest class
+      - c1024: 84,415 live = 83MB
+      - c128: 185K live but 524 MILLION allocs (350K/s churn)
+      - c8/c16/c32: ~520K live (name-sized strings)
+    * Task (14080B -> 16KB blocks, o2): 2688 + fdtables ~48MB
+    * big blocks o9+o10+o12: ~82MB; sum tracks heapK within ~5%
+  At the floor: launcher spawn died exactly as leg-15 said - appspawn
+  crash #4 -> init ServiceReap ExecReboot panic -> deliberate sysrq-c.
+  bproc 66->15 (services dying under floor pressure).
+- sc220/sc221/sc222 (short 300-420s attribution boots):
+  * sc220: fixed tail-walk named the deepest chain: resize2fs (BEGET's
+    early-boot userdata resize) depth 80,496 with the tail INSIDE
+    array::from_fn wrappers constructing [IoCompletion; 128].
+  * sc221 (ext4 fix in): resize2fs GONE from records; new records
+    check_module_up 65,824 + hiview 76,000 - tail inside Task
+    construction from_fn (init_a0 [AtomicU64; 512] x wrapper copies).
+  * sc222 (both fixes in): records resize2fs 61,064 / e2fsck 62,416 /
+    check_module_up 69,712 / mv 69,800; the 69.8KB chain = fork ->
+    CFS enqueue -> BTreeMap insert_recursing debug frames (structural).
+    kHW still reached 89,368 via ONE unprinted record ~t=30-40s (UART
+    storm ate the print - proven lossy window). Max depth is 89,368,
+    deterministic across sc218/219/222.
+- sc223 (full roll, both from_fn fixes + census peek + early census):
+  running at press time. No KSTACK-HW record >40KB in the first 120s
+  (previous boots printed 61-80K by then) - the fixes are holding.
+
+FIXES LANDED (committed on feature/samgr-callback):
+- cbb84244 fix(ext4): fill_page_cache_batch from_fn -> const-repeat
+  (resize2fs chain 80.5K -> 61K)
+- 94082866 fix(task): Task construction + clone-path from_fn ->
+  const-repeat (fork-family chains 65.8-76K -> unprinted, <69.7K)
+- probes: 7df82c8f (anatomy), attribution fix + OOM-ANAT type sizes +
+  o7/o8, slab census peek + 80%-heap early dump (see git log for ids)
+
+PENDING DECISION (sc223's census peek): c256 520K live and c1024 84K
+live = ~283MB of the 904MB floor. Candidates: Arc<File>, BinderTxn
+(200B, churn-leak?), timer nodes, inotify. The peek dumps object
+headers (vtables symbolisable) at 80% heap ~t=1400s. Reduction levers
+shortlisted: (a) type-targeted fix once identified; (b) kstack
+128->96KB = -74MB at floor (89.4K max vs 96K = 8.9K headroom, canary
+guarded, deterministic max across boots - acceptable for a probe roll,
+not yet for the verified-fix roll); (c) both.
