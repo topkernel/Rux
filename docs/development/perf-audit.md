@@ -45,6 +45,7 @@ Runs (this worktree, `run/`):
 | `ref-r1..r4` (LEG-23) | **reference kernel** = the OH image's own OHOS 6.6.101 bzImage (oh-robot images, same files oh-ref-r1 booted); userspace = image + pbench injected in the key_enable slot (run/pbref-inject.sh, private reflink system copy, e2fsck-clean; trigger = bootevent.launcher.ready param job) | private reflink userdata-tok, no snapshot on that drive | ~35-40 s wall each (probe starts t=10.2-16.7s, powerdown t=32-35s kernel) | **LINUX REFERENCE P1-P7 BANKED** (perf-report.md 8.8, table 8a Linux column): 4/4 boots full pass (25/25 lines, DONE rc=0, results extracted via debugfs), machine class matched to pa (q35/KVM/-cpu max/SMP2/4G, foreign_qemus 4-5). Med-of-4 highlights: p1_null 0.040us, p1_clock 0.070us, p2 half-rt 0.090us, p3a anon 5.01us med THP-bimodal (avg 9.8-10.3 stable), p3b COW 0.751us, p4 fork+exit 10.88us / fork+exec 22.37us, p5a 0.180us, p6 stat 0.271 / openclose 0.436 / read_cached 0.676us, getdents sweep 88.9us, write+fsync 4.75ms, mkdrmdir 40.4us, unlink 26.99us, p7 overshoot 14.64us. Med spread <=6.4% on 18/21 benches; p3a's 70% spread triggered the protocol's 4th run (THP 2MB coalescing — 0.38-7.15us med across runs, avg is the comparable stat) |
 | `pa-pa32` (LEG-23) | origin/main @ 3cb8a24e (dfx-align tranche 1+2, 30 kernel/ files — the commit that fired the census-hold gate), built via make build-x86 (run/pa32-built-from.txt; bzImage run/pa32-main-bzImage untracked 11.5MB) | syscost=1 (plain main, no pa16 probe) | 780 s | **CENSUS-HOLD GATE: HOLD.** TERM-DESCHED 8 / WAKE-REFUSED 32 — baseline EXACT hold (pa23/pa27/pa31 fourth consecutive roll). Ticks 99.85-99.86/s/CPU sustained to t=720 (71,890/71,902 samples — pa27 flagship rates) — tick fix holds on merged dfx-align. WAKE-STRANDED 7 prints: 2 organic 1.0-1.1s (pa31 class) + 5 strands pid=303 appspawn 24-34s — a phase pa31 never reached (its foundation died +45s); organic non-grid values, echoes the A-line's live sc217 strand_max 24.7s; recorded as phase-new + A-line-correlated, NOT a gate trip (no exactly-1001ms grid class). Depth: composer_host.ready SET, appspawn.started, bootanimation.finished SET, launcher.ready NOT set (warning +50.4s) — deeper than pa31, no UI milestone |
 | `pa-pa33` (LEG-24) | origin/main @ e207f86e (= 65d6c788 + 8480751c stallwatch pidhash fix + c2e2c885 config-test refresh — the kernel commit that fired the census-hold gate; branch fast-forwarded to main), built via make build-x86 (run/pa33-built-from.txt; bzImage run/pa33-main-bzImage untracked 11.5MB, md5 differs from pa32 as expected) | syscost=1 (plain main, no pa16 probe) | 780 s | **CENSUS-HOLD GATE: HOLD.** TERM-DESCHED 8 / WAKE-REFUSED 32 — baseline EXACT hold (pa23/pa27/pa31/pa32 fifth consecutive roll); the stallwatch pidhash fix does not move the census. Tick tripwire `[ok]` 15 jiffies/150 ms; ticks 99.86/99.83/s/CPU at t=720 (71,899/71,880 samples — pa27/pa32 rates). WAKE-STRANDED 2 prints only, both organic ~1s class (1010/1252 ms, no 1001ms grid, no appspawn 24-34s strands — pa32's new-phase strands did not recur this roll, consistent with organic). Depth: composer_host.ready, appspawn.started, bootanimation.finished all SET, launcher.ready NOT set — same profile as pa32, no UI milestone |
+| `pa34-maketest` (LEG-25) | this branch @ 26e8f067 (= main; kernel/ identical to main), riscv64 unit-test build (same target path as the normal kernel — restored after via make build-x86, config.rs diff verified clean) | test/run.sh test mode (qemu-system-riscv64 TCG smp4 -m 2G, unit-test feature) | suite body ~4.5 min; wrapper EXIT=124 = the 550 s timeout killing QEMU AFTER the full summary + the deliberate failing-suite panic parked it (not a load timeout) | **MAIN SESSION'S PENDING make-test VERIFICATION DISCHARGED: Total 1096 / Passed 1095 / Failed 1.** The one failure = `KERNEL_HEAP_SIZE == 1024MB` (c2e2c885's refresh). Root cause: the suite is riscv64-only (run.sh test mode) and build.rs clamps kernel_heap_size to 128MB on riscv64 (Kernel.toml's 1024 is the x86_64 value; a 1GB heap overruns the riscv64 memory map — the documented 2026-10-19 merge gate), so the runtime constant is 134217728 and the 1024MB assertion can never pass in-suite. NOT a kernel regression. Fixed test-only on this branch (015e5488: assert the clamped 128MB + comment); next full run on main should read 1096/1096. Log: run/pa34-maketest.log (untracked). Setup note: first invocation died pre-boot (test/rootfs.img missing — generated artifact, not committed; reflink-copied from the main repo's fresh Oct-24 copy, gitignored) |
 
 Host context for all runs: KVM q35 `-cpu max -m 4G -smp 2`, shared with
 2-3 foreign-lane QEMUs (load avg ~5.5). Absolute numbers carry that
@@ -2171,6 +2172,88 @@ run/pa33-built-from.txt (eff8bfcd), runs-table row pa33, this ledger,
 perf-report.md 8.6 pre-staging note. Honest ledger = docs + run
 tooling, 0 kernel changes, private reflink image copies only, QEMU 1
 boot accounted.
+
+### 2r. TWENTY-FIFTH LEG: the main session's pending make-test verification DISCHARGED (pa34: 1095/1096, the one failure root-caused and fixed test-only); both patrol gates idle
+
+Leg start: fast-forwarded 431e050f -> 26e8f067 (the leg-24 merge;
+no divergence — my leg-24 head is its ancestor).
+
+**(1) Quiet-time duty — the main session's stale-assertion
+verification, run to a full verdict (pa34).** The pending item:
+c2e2c885 (test-only config assertion refresh) was verified against
+the constants but the suite run timed out twice under host load on
+the main repo. This window qualified as quiet (32-thread host, load
+6.5, only 3 foreign QEMUs: A-line sc218 KVM + 2 TCG boots), so the
+one allowed `timeout 550 make test` ran here.
+
+- First invocation died PRE-BOOT: `test/rootfs.img` (a generated,
+  gitignored artifact of `make rootfs`) does not exist in this
+  worktree. Reflink-copied from the main repo's fresh Oct-24 20:39
+  copy (read-only on the source; 1.3G apparent / 477M real). The
+  suite itself never ran, so this did not consume the one run.
+- Second invocation ran the FULL suite on the quiet host:
+  **Total 1096 / Passed 1095 / Failed 1** — the suite body completed
+  at ~4.5 min; the wrapper's EXIT=124 is the 550 s timeout killing
+  QEMU only after the end-of-suite summary and the deliberate
+  failing-suite panic (`PANIC: 1 test(s) failed!`, main.rs:1021) had
+  parked it. Not a load timeout.
+- The single failure: `KERNEL_HEAP_SIZE == 1024MB` — i.e. exactly the
+  c2e2c885-refreshed assertion. Root cause chain: the unit-test suite
+  is riscv64-ONLY (test/run.sh test mode hardcodes
+  qemu-system-riscv64), and kernel/build.rs clamps kernel_heap_size
+  to min(128MB, configured) on riscv64 — with the in-file comment
+  naming the reason (Kernel.toml's 1024MB is the x86_64 value; a 1GB
+  heap overruns the riscv64 memory map and killed every minimal-rootfs
+  smoke silently — the 2026-10-19 merge gate). So the runtime constant
+  in any suite run is 134217728, and an assertion of 1073741824 can
+  never pass in-suite. c2e2c885's "verified against constants" check
+  compared against Kernel.toml, which is correct for x86_64 and wrong
+  for the only platform the suite runs on. NOT a kernel regression;
+  the kernel config itself is consistent.
+- Fix committed TEST-ONLY on this branch (015e5488): assert the
+  clamped 134217728 ("128MB (riscv64-clamped)") with a comment
+  carrying the clamp pointer, so the next refresh does not re-derive
+  this the hard way. Expected next full run on main: 1096/1096. (No
+  rerun here: the duty allows one run, the runtime constant was read
+  directly out of the test-built config.rs, and asserting exactly
+  that measured value cannot fail.)
+- Tree restored per the process rule: this lane's normal kernel is
+  x86_64, so the restore is `make build-x86` (which also regenerates
+  kernel/src/config.rs to its committed content — post-build
+  `git diff kernel/src/config.rs` verified empty, TARGET_PLATFORM
+  back to x86_64 / heap 1073741824).
+
+**(2) UI patrol / trigger: NOT fired.** sc218 soaked the whole window
+(wakes counter to 54M, strand_max steady 2998 ms, OS_DfxWatchdog
+futex WAIT loops timing out at -110 — their instrumented soak, not
+main-class): launcher.ready 1 mention = init's "not set" warning,
+OnForeground 0, ArkUI 0. sc219 appeared 21:29 (log growing fast,
+14MB within minutes) — 0 milestone hits there too, WW prints present
+= still the A-line's instrumented kernel, not main-class. No A-line
+kernel-footprint fix on main (their worktree tip is wip dfx anatomy
+probes, nothing merged; origin/main == 26e8f067 all window). Both
+trigger conditions unmet; the injected run-day image stays parked.
+
+**(3) Census-hold gate: IDLE.** origin/main == main == 26e8f067 for
+the entire window; zero kernel/ commits since 8480751c (pa33's
+coverage stands at five consecutive rolls). My own 015e5488 touches
+only kernel/src/tests/ (never compiled into the shipping kernel) —
+it does not fire my gate, and the leg-23 precedent (c2e2c885,
+same file class) counted it the same way.
+
+**(4) QEMU ledger.** Self-started: 1 total (the pa34 riscv64 TCG
+test QEMU, killed by the run's own 550 s timeout). Cap never
+approached (rule <=2 at a time). Foreign QEMUs untouched (A-line
+sc218/sc219 + 2 TCG). test/rootfs.img = reflink copy of the main
+repo's generated artifact, gitignored, never committed; nothing
+>10MB committed.
+
+**(5) Leg close.** Deliverables: 015e5488 (test-only assertion fix —
+for the coordinator to cherry-pick/merge so the main repo's next
+`make test` reads 1096/1096), runs-table row pa34-maketest, this
+ledger. Honest ledger = 1 test-only commit + docs + run logs,
+0 kernel-code changes, 1 reflink artifact copy, QEMU 1 boot
+accounted. Branch ready for coordinator review/merge.
 
 ## 4. Ranking table v2.8 (cost centers -> boot-time contribution)
 
