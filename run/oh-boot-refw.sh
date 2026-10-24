@@ -1,5 +1,5 @@
 #!/bin/bash
-# oh-boot-refw.sh — reference-Linux OH boot with a WRITABLE private userdata
+# oh-boot-refw.sh — reference-kernel OH boot with a WRITABLE private userdata
 # copy (my own file, not shared) so the post-boot /data tree can be inspected
 # offline. Everything else mirrors test/run-oh-linux-ref.sh. hdc port 12056.
 # Usage: oh-boot-refw.sh <tag> <userdata-img> [secs]
