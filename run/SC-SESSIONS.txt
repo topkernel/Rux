@@ -4510,3 +4510,55 @@ authoritative leg-17 next-step ledger; my census/attribution chain and
 both KILLDUMP fixes feed it. All probes are dfx-gated; the three
 substantive fixes (binder reclaim 6ba58562, mm-pin 66858395, task-pin
 4dee194f) are mainline candidates subject to the merge-gate policy.
+
+LEG-18 (launcher line: R-only VMA fd40 write blocker — probe roll) —
+OPENED 06:30.
+
+Mission (from 86225d02): the launcher + honydataability crash-loop
+writes (lock cmpxchg, a refcount/lock op) into a READ-only file-backed
+VMA (fd 40, off 0, 72KB at 0x7ff081ec0000). Ordered leads: (1) DFX
+probe roll to name fd 40's path + open mode at fault time and every
+mmap/mprotect EACCES; (2) if the fd WAS O_RDWR and asked PROT_WRITE
+yet the VMA came back R-only, audit VMA flag construction.
+
+PRE-ROLL AUDIT RESULT (code reading, no roll needed):
+- VmaFlags bits decoded: 0x1 READ, 0x2 WRITE, 0x4 EXEC, 0x8 SHARED,
+  0x10 PRIVATE. The faulting VMA flags=0x11 = READ|PRIVATE (leg-17's
+  "R-only SHARED" shorthand was wrong on the SHARED bit: it is a
+  PRIVATE mapping). The rip module VMA 0x15 = R|X|PRIVATE.
+- sys_mmap_inner constructs VmaFlags exactly from (prot, map_flags) —
+  WRITE iff PROT_WRITE, no silent downgrade; EACCES paths return
+  errors, they never create a downgraded VMA.
+- MAP_FIXED replacement surgery preserves overlapped pieces' flags
+  verbatim (mm_ops.rs x86_64 mmap); mprotect rewrites only on request;
+  fork copies flags; binder translate_fd_into and unix-socket
+  SCM_RIGHTS install the SAME Arc<File> (open mode preserved);
+  memfd_create is always O_RDWR; ashmem_mmap builds SharedMemory/
+  Anonymous VMA types, NOT FileBacked — so the fd-40 VMA came from the
+  GENERIC file path, i.e. an actual mmap(PROT_READ, MAP_PRIVATE) call
+  succeeded there. Leading theory: the app's intended RW|SHARED mmap
+  failed (EACCES: read-only fd) and a read-only fallback mapping
+  stayed; probes decide.
+- LOCATION VERIFIED: 6ba58562 (binder reclaim, the ~210MB floor lever)
+  is on feature/samgr-callback ONLY, NOT in main — the leg-17
+  close-out line "main's merged binder fix 6ba58562" is wrong; it is a
+  branch commit / mainline candidate.
+
+PROBES LANDED (commit 4554da7a): MMAP-EACCES + MPROTECT-EACCES
+attribution lines (fd/path/accmode/prot/flags), APPMAPSRC broadened to
+every family file-backed mmap with accmode (budget 150), USEGV-FOR
+cr2fd line (fault VMA's fd path/raw flags/inode mode+size + same-fd
+sibling VMAs + vma_files-pin fallback), nearvma dump now prints the 12
+entries NEAREST cr2 (sc251B's ascending walk burned the budget 2.5MB
+below the fault), full-forensics budget 6->8.
+
+sc252 ROLLING (launched 06:24): usbless oh-img-p, fresh scgold reflink
+userdata-sc252.img, quietcon LOGLEVEL=4 dfx=schb,sleepsnap, SMP2 KVM
+4G, SECS=1200, HDCPORT=12108, shotmon 30s. QEMU pid in
+run/oh-sc252-qemu.pid (own-PID discipline).
+EARLY sc252 OBSERVATION (t~150s): first crash is a NEW variant —
+DB_TaskExecutor thread (settingsdata family, pid 1156) memcpy (rep
+movsq) reading 0x3a8 bytes from 0x7ff000729000 = a PROT_NONE (0x10)
+thread-stack guard page top; source object spans past the stack top.
+Same 0x3fbf077000 module region as the launcher crash — the module is
+the DB/SharedBlock family (RDB CursorWindow-class shared memory).
