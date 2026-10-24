@@ -28,8 +28,11 @@ use alloc::vec::Vec;
 pub fn generate() -> Vec<u8> {
     let mut out = String::new();
     for stat in crate::drivers::blkdev::iostat::snapshot().iter() {
+        // Column order is Linux's: writes COMPLETED is field 8 and
+        // writes MERGED is field 9 (the merged columns are the literal
+        // zeros — Rux merges no requests).
         out.push_str(&format!(
-            "{} {} {} {} 0 {} {} 0 {} {} {} {} {} {} 0 0 0 0 0 0\n",
+            "{} {} {} {} 0 {} {} {} 0 {} {} {} {} {} 0 0 0 0 0 0\n",
             stat.major,
             stat.minor,
             stat.name,
