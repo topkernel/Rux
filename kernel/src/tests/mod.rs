@@ -199,6 +199,8 @@ pub mod signal;
 #[cfg(feature = "unit-test")]
 pub mod heap_allocator;
 #[cfg(feature = "unit-test")]
+pub mod small_alloc;
+#[cfg(feature = "unit-test")]
 pub mod page_allocator;
 #[cfg(feature = "unit-test")]
 pub mod buffer_state;
@@ -420,6 +422,9 @@ pub fn run_all_tests() {
     // ===== 3. Memory management =====
     test_group_start("heap_allocator");
     heap_allocator::test_heap_allocator();
+
+    test_group_start("small_alloc");
+    small_alloc::test_small_alloc();
 
     test_group_start("page_allocator");
     page_allocator::test_page_allocator();
