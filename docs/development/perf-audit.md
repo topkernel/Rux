@@ -46,6 +46,7 @@ Runs (this worktree, `run/`):
 | `pa-pa32` (LEG-23) | origin/main @ 3cb8a24e (dfx-align tranche 1+2, 30 kernel/ files — the commit that fired the census-hold gate), built via make build-x86 (run/pa32-built-from.txt; bzImage run/pa32-main-bzImage untracked 11.5MB) | syscost=1 (plain main, no pa16 probe) | 780 s | **CENSUS-HOLD GATE: HOLD.** TERM-DESCHED 8 / WAKE-REFUSED 32 — baseline EXACT hold (pa23/pa27/pa31 fourth consecutive roll). Ticks 99.85-99.86/s/CPU sustained to t=720 (71,890/71,902 samples — pa27 flagship rates) — tick fix holds on merged dfx-align. WAKE-STRANDED 7 prints: 2 organic 1.0-1.1s (pa31 class) + 5 strands pid=303 appspawn 24-34s — a phase pa31 never reached (its foundation died +45s); organic non-grid values, echoes the A-line's live sc217 strand_max 24.7s; recorded as phase-new + A-line-correlated, NOT a gate trip (no exactly-1001ms grid class). Depth: composer_host.ready SET, appspawn.started, bootanimation.finished SET, launcher.ready NOT set (warning +50.4s) — deeper than pa31, no UI milestone |
 | `pa-pa33` (LEG-24) | origin/main @ e207f86e (= 65d6c788 + 8480751c stallwatch pidhash fix + c2e2c885 config-test refresh — the kernel commit that fired the census-hold gate; branch fast-forwarded to main), built via make build-x86 (run/pa33-built-from.txt; bzImage run/pa33-main-bzImage untracked 11.5MB, md5 differs from pa32 as expected) | syscost=1 (plain main, no pa16 probe) | 780 s | **CENSUS-HOLD GATE: HOLD.** TERM-DESCHED 8 / WAKE-REFUSED 32 — baseline EXACT hold (pa23/pa27/pa31/pa32 fifth consecutive roll); the stallwatch pidhash fix does not move the census. Tick tripwire `[ok]` 15 jiffies/150 ms; ticks 99.86/99.83/s/CPU at t=720 (71,899/71,880 samples — pa27/pa32 rates). WAKE-STRANDED 2 prints only, both organic ~1s class (1010/1252 ms, no 1001ms grid, no appspawn 24-34s strands — pa32's new-phase strands did not recur this roll, consistent with organic). Depth: composer_host.ready, appspawn.started, bootanimation.finished all SET, launcher.ready NOT set — same profile as pa32, no UI milestone |
 | `pa34-maketest` (LEG-25) | this branch @ 26e8f067 (= main; kernel/ identical to main), riscv64 unit-test build (same target path as the normal kernel — restored after via make build-x86, config.rs diff verified clean) | test/run.sh test mode (qemu-system-riscv64 TCG smp4 -m 2G, unit-test feature) | suite body ~4.5 min; wrapper EXIT=124 = the 550 s timeout killing QEMU AFTER the full summary + the deliberate failing-suite panic parked it (not a load timeout) | **MAIN SESSION'S PENDING make-test VERIFICATION DISCHARGED: Total 1096 / Passed 1095 / Failed 1.** The one failure = `KERNEL_HEAP_SIZE == 1024MB` (c2e2c885's refresh). Root cause: the suite is riscv64-only (run.sh test mode) and build.rs clamps kernel_heap_size to 128MB on riscv64 (Kernel.toml's 1024 is the x86_64 value; a 1GB heap overruns the riscv64 memory map — the documented 2026-10-19 merge gate), so the runtime constant is 134217728 and the 1024MB assertion can never pass in-suite. NOT a kernel regression. Fixed test-only on this branch (015e5488: assert the clamped 128MB + comment); next full run on main should read 1096/1096. Log: run/pa34-maketest.log (untracked). Setup note: first invocation died pre-boot (test/rootfs.img missing — generated artifact, not committed; reflink-copied from the main repo's fresh Oct-24 copy, gitignored) |
+| `pa35-maketest` (LEG-26) | this branch @ 73c98a45 (tree 33ae90fb == merged main a94bf77b, identity verified), riscv64 unit-test build (restored after via make build-x86: cargo fresh 1.4 s, bzImage 11501568 B regenerated) | test/run.sh test mode (qemu-system-riscv64 TCG smp4 -m 2G, unit-test feature; incremental build 7.94 s — tree unchanged since pa34's build) | suite body well inside the 550 s window; kernel printed "All tests passed! Halting..." and QEMU lingered in the halt loop (watchdog chatter) until the wrapper's kill — same linger class as pa34, wrapper status reflects the kill, not a suite fault | **CONFIRMATION RUN: 015e5488 VERIFIED ON MERGED MAIN — Total 1096 / Passed 1096 / Failed 0, `*** ALL TESTS PASSED ***`** (log lines 21416-21424). The pa34 failure is gone; the suite is green on main as merged. Log: run/pa35-make-test.log (untracked) |
 
 Host context for all runs: KVM q35 `-cpu max -m 4G -smp 2`, shared with
 2-3 foreign-lane QEMUs (load avg ~5.5). Absolute numbers carry that
@@ -2254,6 +2255,69 @@ for the coordinator to cherry-pick/merge so the main repo's next
 ledger. Honest ledger = 1 test-only commit + docs + run logs,
 0 kernel-code changes, 1 reflink artifact copy, QEMU 1 boot
 accounted. Branch ready for coordinator review/merge.
+
+### 2s. TWENTY-SIXTH LEG: the cheapest waiting leg — confirmation run printed the expected 1096/1096 on merged main (pa35); trigger and census both idle
+
+Leg start: main already fast-forwarded to a94bf77b (my own leg-25
+merge; main worktree updated by the main session at merge time
+21:40). Tree identity verified before any run: 73c98a45^{tree} ==
+a94bf77b^{tree} == 33ae90fb, so testing this worktree IS testing
+merged main.
+
+**(1) The optional confirmation run (pa35).** Window qualified as
+quiet: 32-thread host, load 8.9, 8 foreign QEMUs, 33G available.
+`timeout 550 make test` on the merged-main tree:
+
+- Build incremental (7.94 s — nothing changed since pa34's 21:25
+  build), QEMU up at once, full suite completed: **Total 1096 /
+  Passed 1096 / Failed 0 — `*** ALL TESTS PASSED ***`** (log
+  21416-21424). The one pa34 failure (`KERNEL_HEAP_SIZE == 1024MB`)
+  is gone with 015e5488's clamped-128MB assertion. The main
+  session's expected verdict is now on the record, not projected.
+- Post-success behavior worth noting once: the kernel prints
+  "All tests passed! Halting..." but QEMU does not exit — it sits in
+  the halt loop emitting WW/WW2/WW3 watchdog chatter until killed.
+  pa34 showed the same linger (its QEMU died only to the 550 s
+  signal), so this is pre-existing success-path behavior, not a
+  regression and not a load artifact. A future `-no-reboot`/poweroff
+  tweak to the test wrapper would make the exit status meaningful;
+  not this leg's change.
+- Restore per leg procedure: `rm -f build/.config` (no-op — none
+  existed) + `make build-x86` → cargo fresh 1.4 s, bzImage
+  regenerated (11501568 B, same size as the leg-25 restore). Normal
+  kernel in place; no QEMU needed for the restore.
+
+**(2) UI patrol / trigger: NOT fired.** The sc-line's boots live in
+the `samgr-callback` worktree (serial logs oh-sc218..oh-sc222;
+actively committing — tip 07a1e7be "fix(task) ... init_a0
+[AtomicU64;512]" at 21:41).
+Newest boots sc220/sc221/sc222 swept: launcher.ready appears only
+in init's "not set" warnings, OnForeground 0, ArkUI 0; sc222 even
+pagefaults (cow) right after the not-set warning — mid-debug, no
+milestone. Nothing sc-side merged to main (origin/main == a94bf77b
+== my own leg-25 merge, all window), and no A-line kernel-footprint
+fix landed. Both trigger conditions unmet; run-day assets stay
+parked (pbrux-system.img, pbrux-boot.sh, pbmed.py, banked Linux
+column — nothing rebuilt, per the cheapest-leg mandate).
+
+**(3) Census-hold gate: IDLE.** Zero kernel/ commits on main since
+8480751c — a94bf77b carries only docs + the kernel/src/tests/ file
+class (015e5488, never compiled into the shipping kernel; leg-23
+precedent c2e2c885 counted the same way). pa33's five-consecutive
+8/32 hold stands as the operative census record.
+
+**(4) QEMU ledger.** Self-started: 1 total (the pa35 riscv64 TCG
+test QEMU; killed by the wrapper's timeout chain — verified 0
+leftover perf-audit QEMUs after). Foreign QEMUs untouched (8 at leg
+start, 6 by leg end — their own lifecycle). Nothing >10MB
+committed; run/pa35-*.log untracked.
+
+**(5) Leg close.** Deliverables: the pa35 confirmation (1096/1096
+printed on merged main), runs-table row pa35-maketest, this ledger.
+No code changes this leg. Honest ledger = docs + run logs only,
+QEMU 1 boot accounted. Branch ready for coordinator review/merge;
+nothing here needs cherry-picking — the leg-25 substance is already
+merged as a94bf77b, and this leg's commit is ledger-only.
 
 ## 4. Ranking table v2.8 (cost centers -> boot-time contribution)
 
