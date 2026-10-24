@@ -46,6 +46,9 @@ pub fn sys_futex(args: SyscallArgs) -> i64 {
 /// # Returns
 /// Always returns 0
 pub fn sys_sched_yield(_args: SyscallArgs) -> i64 {
+    // Linux's schedstat yld_count: incremented in the sched_yield paths
+    // only (kernel/sched/syscalls.c schedstat_inc(rq->yld_count)).
+    crate::fs::procfs::schedstat::note_yield(crate::arch::cpu_id() as usize);
     crate::sched::yield_cpu();
     0
 }

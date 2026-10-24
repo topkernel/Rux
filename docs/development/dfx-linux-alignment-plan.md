@@ -214,8 +214,9 @@ them like Linux's mm/vmstat.c), `/proc/buddyinfo` (free pages per order
 per zone, from the zone allocator's per-order free lists),
 `/proc/softirqs` (per-CPU per-vector raise counts, using the vector set
 and names Rux's softirq module already uses) and `/proc/schedstat`
-(version 17: timestamp plus the nine per-CPU fields, with real
-`yld_count` and `sched_count`). `/proc/stat` also grew Linux's
+(version 17: jiffies timestamp plus the nine per-CPU fields, with real
+`yld_count` (sched_yield() calls, as in kernel/sched/syscalls.c) and
+`sched_count` in Linux's field positions). `/proc/stat` also grew Linux's
 aggregate `softirq` line.
 
 **Part 3 — partly done.** Per-task minor-fault counters (field 10 of

@@ -31,6 +31,7 @@
 
 use alloc::format;
 use alloc::string::String;
+use alloc::string::ToString;
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU64, Ordering};
 
@@ -120,8 +121,10 @@ pub fn note_switch(prev: &crate::process::task::Task) {
     let blocked = state & (TaskState::INTERRUPTIBLE | TaskState::UNINTERRUPTIBLE) != 0;
     if blocked {
         prev.nvcsw.fetch_add(1, Ordering::Relaxed);
-        // Linux's schedstat yld_count: the task yielded.
-        super::schedstat::note_yield(crate::arch::cpu_id() as usize);
+        // NOTE: this is a voluntary context switch (nvcsw), NOT a
+        // schedstat yld_count — Linux counts yld_count only in the
+        // sched_yield paths (kernel/sched/syscalls.c), so the schedstat
+        // counter is bumped from sys_sched_yield, not here.
     } else {
         prev.nivcsw.fetch_add(1, Ordering::Relaxed);
     }
@@ -222,7 +225,37 @@ pub fn generate() -> Vec<u8> {
         ));
     }
 
-    out.push_str(&format!("intr {}\n", super::interrupts::total_interrupt_count()));
+    // Linux's intr line: the grand total, then one sum over CPUs per
+    // IRQ, in IRQ index order (fs/proc/stat.c show_stat). The per-IRQ
+    // tail uses the same source list as /proc/interrupts: the two
+    // arch-internal vectors first (timer, IPI soft-interrupt), then the
+    // external (PLIC) lines.
+    out.push_str("intr ");
+    {
+        let mut line = format!("{}", super::interrupts::total_interrupt_count());
+        // Arch-internal vectors (not in the PLIC irq space).
+        for cpu in 0..num_cpus {
+            line.push(' ');
+            line.push_str(&super::interrupts::timer_count(cpu).to_string());
+        }
+        for cpu in 0..num_cpus {
+            line.push(' ');
+            line.push_str(&super::interrupts::soft_count(cpu).to_string());
+        }
+        // External IRQs, IRQ index order 0..48 (rows 16..31 do not
+        // exist on either board we boot; Linux prints its full NR_IRQS
+        // space the same way, holes included).
+        for irq in 0..48u32 {
+            let mut sum = 0u64;
+            for cpu in 0..num_cpus {
+                sum = sum.saturating_add(crate::interrupt::irq_get_count(irq, cpu));
+            }
+            line.push(' ');
+            line.push_str(&sum.to_string());
+        }
+        out.push_str(&line);
+    }
+    out.push('\n');
     out.push_str(&format!("ctxt {}\n", total_context_switches()));
     out.push_str(&format!("btime {}\n", btime()));
     out.push_str(&format!("processes {}\n", total_forks()));
