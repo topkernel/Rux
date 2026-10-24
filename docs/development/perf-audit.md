@@ -37,6 +37,7 @@ Runs (this worktree, `run/`):
 | `pa-pa22-tick-lvl7` | same kernel as pa21 | syscost=1 sprobe=0 loglevel=7, ACCEL=tcg | 60 s | leg-13 diagnostic: verbose console shifts WW ages to organic values (376 ms class, idle pid=0) — the ~1 s pinning is the quiet-boot steady state, not a fixed probe artifact; `tsc-clock: fell behind 110854` (11 ms slips) shows the TSC clock itself is fine; WW2 heartbeat did NOT print (Hrtimer-softirq dispatch condition unmet — open item) |
 | `pa-pa23-tickfix-tcg` | main@78460742 + the launcher lane's timer fix hunk ONLY (u128 multiply-then-shift, `tsc_delta_nominal`, extracted from samgr-callback wip 1e54319f; scratch branch `scratch/tickfix`, commit 9a451bef — pre-merge validation of the A-line fix, never for main) | syscost=1 sprobe=0, **ACCEL=tcg** | 600 s wall (~300 guest s, dumps t=60..540) | leg-15 tick-fix battery (section 2h): tripwire `[ok]` 16 jiffies/150 ms (pa21: 0 [fail]); tick counters 99.9/s/CPU sustained through all 9 dumps; WW IRQ-OFF-WINDOW 2 prints, organic ages 414/251 ms (pa21: 57 all at exactly 1001 ms); WAKE-STRANDED 0 (pa21: 100); TERM-DESCHED 8 and WAKE-REFUSED 32 — identical to pa21 (tick-independent census counts hold); nanosleep avg 1.87 s -> 88.5 ms (-21x) at same-horizon t=60; clock_gettime max 654 ms -> 3 ms; composer_host.ready +95.1 -> +89.9 s wall (-5.5%) |
 | `pa-pa24-tickfix-probe-tcg` | pa23's branch + pa16 probe v3 patch (scratch 520970f0; nm run/pa24-nm.txt) | syscost=1 sprobe=0, ACCEL=tcg | 600 s wall (dumps to t=540) | leg-15 battery item (b), EFLAGS-exact probe under the fix: IF=0 35.3% of machine at t=540 — TCG-inflated, not comparable to the KVM 23% band (official re-measure = post-merge KVM flagship); structure intact (heal 0.05-0.09% miss=0, max REST segment 13 ms ms-class, site table family shape kept) + expected new timer.rs:173/:317 site pair (true 100 Hz hrtimer dispatch); SOFTIRQ zone share 7.7-13.9% of IF=0 (was 1.0-1.7% pre-fix KVM — suppressed dispatch volume now real); WW/WAKE-STRANDED prints 0 all boot; tripwire `[ok]` |
+| `pa-pa25-prefix-tcg` | stock main@78460742 (pre-fix rebuild; tripwire `[fail]` confirms) | syscost=1 sprobe=0, ACCEL=tcg | 600 s wall (dumps to t=540) | leg-15 same-accel deep baseline for pa23: WW ages pinned 1001 ms x283; nanosleep @t=240 avg 1.34 s / n 1300 (pa23: 120 ms / 6549, -11x at depth); futex+epoll avgs UNCHANGED (F3 tail, tick-independent); composer 130.3 s vs pa23 89.9 s but appspawn.started 312 s vs 468 s — opposite directions, wall-clock deltas noise-dominated, no claim; both runs end at the same depth (appspawn, not bundles) |
 | `pa19-unittest-main` | main@298b69fe (= this worktree, kernel/ byte-identical to main), riscv64 unit-test build, no probe | (unit test) | ~90 s | riscv64 make-test reproduction boot: instant truncated `trap: KERNPANIC pfa` before any kernel print; `-d int` trace (pa19-qemu-int.log) = store faults at trap_entry+0xda descending 0x120/frame from sp=_stack_top-8 — boot stack outside the 12MB early window (image 12.67MB). See NINTH LEG below |
 | `pa19-unittest-fix` | same + RUX-RISCV-LAYOUT-2 window/heap fix (this branch) | (unit test) | ~150 s | verification boot: full unit suite runs, 60 ok / 3 FAIL (stale config assertions, pre-existing: KERNEL_HEAP_SIZE 512-vs-1024 bc0ffbee, FUTEX_* 256/64-vs-8192/512 08fcfc04) |
 
@@ -1338,6 +1339,34 @@ to the EFLAGS-exact probe under the fix:
   broken clock had suppressed (fewer meaningful dispatches per
   second). Part accel artifact, part real; the KVM flagship will
   size the real part.
+
+**pa25-prefix-tcg** (stock main@78460742, pre-fix, same TCG quiet
+config as pa23, 600 s wall) closes the same-accel deep-horizon
+comparison (pa21 was only 120 s):
+
+- Pre-fix signatures all present: tripwire `[fail]`, WW ages pinned
+  1001 ms x283 (plus organic 344 ms x12, 4097 ms x8), ticks still
+  ~99.9/s/CPU at the counters (2g correction's prediction).
+- Same-horizon t=240 rows: nanosleep avg 1.34 s -> 120 ms (-11x at
+  depth), n 1300 -> 6549 (5x more sleeps complete), max 21.0 ->
+  10.0 s; clock_gettime max 1001 ms -> 3 ms. **futex avg UNCHANGED
+  (421 vs 423 ms) and epoll_pwait avg unchanged (229 vs 238 ms)** —
+  the deep-boot futex/epoll tail is the F3 wake-loss family and does
+  NOT improve with the tick fix, exactly as the unchanged census
+  counts predict. The fix removes the F7 grid amplifier; F3 remains
+  the wall-clock driver.
+- Wall-clock milestones at depth are NOISE-DOMINATED on this pair:
+  composer_host.ready 130.3 s (pre) -> 89.9 s (post) but
+  appspawn.started 312 s (pre) -> 468 s (post) — opposite
+  directions, single boots, shared host (limitation 1's ~2x band).
+  Honest verdict: no wall-clock claim from this pair; the wall-clock
+  question moves to the post-merge KVM flagship (or multi-run
+  average). Both runs reached the same depth (appspawn.started, not
+  bms bundles).
+- WAKE-STRANDED printed 0 in pa25 vs 100 in pa21 (both pre-fix) —
+  the strand PRINT count is load/shape-dependent (it needs wakes
+  landing on the census window), while the WW 1001 ms pinning is the
+  deterministic pre-fix signature (283/293 prints in pa25).
 
 **PREEMPT-LEAK verdict noted (A-line's, not this lane's work):** the
 brief flagged sc205's 17,906-line PREEMPT-LEAK storm as the post-fix
