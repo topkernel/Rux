@@ -1162,7 +1162,7 @@ global_asm!(include_str!("arch/aarch64/trap.S"));
 /// moved 12MB->14MB together; riscv64 linker.ld now ASSERTs _end against
 /// the window so the next outgrowth fails the build.
 #[cfg(feature = "riscv64")]
-const KERNEL_RESERVE_SIZE: usize = 0x100_0000; // 16MB
+const KERNEL_RESERVE_SIZE: usize = 0x120_0000; // 18MB (16MB window + 2MB OpenSBI lead-in)
 #[cfg(feature = "x86_64")]
 const KERNEL_RESERVE_SIZE: usize = 0x1E0_0000; // 30MB
 /// Effective (RAM-clamped) static-region sizes computed by the early
@@ -1175,7 +1175,7 @@ static HEAP_SLAB_END_EFF: core::sync::atomic::AtomicUsize =
     core::sync::atomic::AtomicUsize::new(0);
 
 #[cfg(feature = "riscv64")]
-const KERNEL_HEAP_PHYS: usize = 0x8100_0000;
+const KERNEL_HEAP_PHYS: usize = 0x8120_0000;
 #[cfg(feature = "x86_64")]
 const KERNEL_HEAP_PHYS: usize = 0x4000_0000;
 
