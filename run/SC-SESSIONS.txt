@@ -3008,3 +3008,39 @@ FLIGHT (hilogd stops writing /dev/console on boot 2 - stash blind).
   (chunk 4GB in two), filename must be RELATIVE (the expression
   parser eats /-paths as division), files land in QEMU's cwd (repo
   root, not run/).
+
+SESSION R TENTH LEG - v6 (R73) LANDED + sc196 VERDICT (10:1x):
+COORDINATOR CORRECTION ADOPTED; THE sc195 STRAND ROOT-CAUSED AS THE
+PANIC-DUMPER UNBOUNDED-READ FAMILY AND FIXED ON BOTH ARCHES.
+
+- Coordinator merge 484c8cb8: the riscv64 unit-test panic was NOT stack
+  depth (ninth-leg theory dead) - boot.S's 12MB image window left the
+  boot stack unmapped; fixed on main by 77ec1247 (window/heap 14MB +
+  linker ASSERT). Noted so the wrong theory stops propagating.
+- sc195 strand root cause COMPLETED: the "Registers:" dump right at
+  strand onset + "PANIC: sysrq 'c'" at log line 3929 = OH's own
+  reliability flow (init reboot-plugin ParseRebootReason + bbox
+  context) wrote 'c' to /proc/sysrq-trigger at ~min 29; the KERNPANIC
+  dump's 16-word rsp walk read past the stack mapping, faulted back
+  into the handler, and the print/read recursion held cpu0 (hardirq
+  count, rip parked in the UART inb) for ~855 s. sc191/sc193 each had
+  one "Registers:" dump too - same family, third sighting. sysrq-c is
+  UNIQUE to sc195 across sc190-196 (0 hits elsewhere).
+- v6 (9777f195, both x86_64 and riscv64 twins): KP_DUMP_ENTERED one-
+  shot latch (fault during the dump prints one marker and halts - no
+  recursion, regardless of which read faults) + the kp-stk/24-word
+  walks bounded at the task's real kernel_stack_top() (16K heuristic
+  without task context), skip marker past the top. x86_64 bzImage
+  rebuilt 10:05 (string verified), riscv64 compiles clean.
+- sc196 (warm reboot on sc195's userdata, v5, 45+ min observed):
+  STALLED - pid churn froze at 1369 from ~min 10 to kill at min 33,
+  screen never left black (zero flips; sc195's first boot had the
+  oracle up by min 1), no strand, no RWFRZ, no sysrq-c; with loglevel=3
+  the binder-stall/stkfutex census is muted, so the wedge shape is
+  invisible (the observability cost of the quiet roll). Killed by exact
+  PID (mine), artifacts kept. Warm-reboot on this image loses the
+  early display bring-up - fresh copies remain the way.
+- sc197 (roll, launched 10:09): v6 bzImage, FRESH scgold copy, quietcon
+  + LOGLEVEL=3, SMP2 KVM q35, 90-MIN window - direct continuation of
+  sc195's trajectory (unwedged + ArkTS/ArkUI loading) with the cpu0
+  panic-strand fixed and double the time. Shotmon on ohgpu.
