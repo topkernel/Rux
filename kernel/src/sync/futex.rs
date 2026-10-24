@@ -2592,10 +2592,18 @@ pub fn kill_dump_tgid(tgid: u32) {
     // locks forbid heavy work); the page-table reads happen after.
     // for_each_task takes an Fn closure, so the list goes through a
     // RefCell.
+    // sc244 (leg-17): PIN every collected task. The dump runs at
+    // SIGKILL send time, so the victim's threads exit CONCURRENTLY —
+    // an unpinned raw pointer freed mid-dump printed a poisoned tid
+    // (0xdeadbeef) and page-faulted the boot at the launcher floor
+    // (sc244, t=1466, pidmax 4834). try_pin under the bucket lock is
+    // the documented pin discipline; task_put at the end.
     let threads_cell = core::cell::RefCell::new(alloc::vec::Vec::<*mut Task>::new());
     crate::sched::for_each_task(|t| {
         if unsafe { (*t).tgid() as u32 } == tgid {
-            threads_cell.borrow_mut().push(t);
+            if crate::process::task::Task::try_pin(t) {
+                threads_cell.borrow_mut().push(t);
+            }
         }
     });
     let threads = threads_cell.into_inner();
@@ -2694,6 +2702,12 @@ pub fn kill_dump_tgid(tgid: u32) {
             }
         }
         unsafe { rwfz_stack_frames(t, "KILLDUMP", 10, 96) };
+    }
+    // sc244: release the pins taken at collection (may free the last
+    // references of the concurrently-dying threads — schedulable
+    // context, no locks held).
+    for &t in threads.iter() {
+        crate::process::task::Task::task_put(t);
     }
 }
 
