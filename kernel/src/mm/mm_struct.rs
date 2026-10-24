@@ -345,6 +345,12 @@ impl MmStruct {
             (2 * core::mem::size_of::<usize>()) + core::mem::size_of::<MmStruct>(),
         );
 
+        // Leg-17 leak census: creation-side twin of memwatch::MM_DROPS —
+        // both gated on User spaces so live_mm = MM_NEWS - MM_DROPS.
+        if space_type == PageTableType::User {
+            crate::dfx::memwatch::MM_NEWS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        }
+
         let vma_manager = VmaManager::new();
         let brk_default = if space_type == PageTableType::User {
             super::vma::RiscVAddressSpaceLayout::heap_start()

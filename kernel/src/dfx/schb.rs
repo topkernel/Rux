@@ -215,6 +215,20 @@ pub fn oom_anat_dump() {
             + 128,
     );
     taskdump_raw_line(b"\nOOM-ANAT buddy live pages by order:\n");
+    // Leg-17 leak test: live user mms = creations - drops. If live_mm
+    // >> live procs at the census moment, every spawn strands its
+    // AddressSpace (and its VMA tree + vma_files pins ride along).
+    {
+        let mn = crate::dfx::memwatch::MM_NEWS.load(Ordering::Relaxed) as u64;
+        let md = crate::dfx::memwatch::MM_DROPS.load(Ordering::Relaxed) as u64;
+        taskdump_raw_line(b"OOM-ANAT mm: new=");
+        taskdump_dec(mn);
+        taskdump_raw_line(b" drop=");
+        taskdump_dec(md);
+        taskdump_raw_line(b" live=");
+        taskdump_dec(mn.saturating_sub(md));
+        taskdump_raw_line(b"\n");
+    }
     let np = &crate::mm::buddy_allocator::NET_PAGES;
     let mut o = 0usize;
     while o < np.len() {
@@ -234,6 +248,10 @@ pub fn oom_anat_dump() {
     // the active slab pages; vtables/magic are symbolisable offline.
     crate::mm::small_alloc::census_peek(5, 8);
     crate::mm::small_alloc::census_peek(7, 8);
+    // Leg-17: structural buckets (the v2 histogram alone cannot name a
+    // pointer-first heterogeneous population).
+    crate::mm::small_alloc::census_peek3(5);
+    crate::mm::small_alloc::census_peek3(7);
 }
 
 /// Start the schbd kthread. Gated on the `dfx=schb` switch; called from
