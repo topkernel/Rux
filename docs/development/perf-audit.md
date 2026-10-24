@@ -2319,6 +2319,72 @@ QEMU 1 boot accounted. Branch ready for coordinator review/merge;
 nothing here needs cherry-picking — the leg-25 substance is already
 merged as a94bf77b, and this leg's commit is ledger-only.
 
+### 2t. TWENTY-SEVENTH LEG: true zero-run waiting leg — both gates idle all window, A-line mid-debug on two pagefault boots (sc219/sc222)
+
+Leg start: branch fast-forwarded daa469f8 -> 9dbb2a4f (main == own
+leg-26 merge; no foreign commits on main at any point this window).
+Worktree clean except untracked run/ artifacts; normal x86 kernel in
+place from leg-26's restore (bzImage 11501568 B unchanged). Nothing
+rebuilt, per the cheapest-leg mandate — every run-day asset stays
+parked on disk (pbrux-system.img, pbrux-boot.sh, pbmed.py, banked
+Linux column ref-r1..r4).
+
+**(1) UI patrol / trigger: NOT fired (re-checked at leg start and
+after the last live boot closed).** The sc-line's boots live in the
+`samgr-callback` worktree. Swept sc219 (the one live boot at leg
+start — their KVM q35 run, private userdata reflink, all shared
+drives snapshot=on) plus a final read of sc220/221/222:
+
+- sc219 closed at its wrapper timeout ~22:15 (serial quiet since
+  22:01, 509,878 lines): launcher.ready appears only in init's "not
+  set" warning (with lockscreen.ready and bms.main.bundles.ready),
+  OnForeground 0, ArkUI 0 — and the log tail is a `pagefault: cow at
+  0x5555555cc37c (user-mode)` with kernel stack-trace fragments, the
+  same mid-debug death class as sc222 (cow at 0x7ff0a132f000). Two
+  of the four newest boots die in user-mode COW faults right in the
+  launcher/bundles window — the A-line is actively hunting this (their
+  tip history is exactly that work).
+- sc220: deepest clean tail (devopen-probe rows inside the
+  com.ohos.launcher sandbox), bootanimation.finished SET — but
+  launcher.ready not-set, OnForeground 0. sc221: early COW pagefaults,
+  0 milestone lines at all.
+- None of these are main-class kernels anyway: all four boot the
+  samgr-callback instrumented branch (KSTACK-HW / WW census / slab
+  probes), so even a milestone would have needed the main-class
+  re-boot before run day.
+
+**(2) A-line footprint-fix arm: NOT fired.** origin/main ==
+9dbb2a4f == own leg-26 merge, all window (re-fetched at 22:15). The
+A-line's footprint work is real and moving on their branch — d08dca37
+21:37 fix(ext4) fill_page_cache_batch stack materialisation,
+07a1e7be 21:41 fix(task) fork-path from_fn array init (the
+65-76KB-span fixes KSTACK-HW measured), 93c970a3 22:03 wip(dfx) slab
+census peek + 80%-heap anatomy dump — but nothing merged to main
+yet; the trigger waits for the merge, not the wip.
+
+**(3) Census-hold gate: IDLE.** Zero runtime kernel commits on main
+since 8480751c: the only kernel/-tree commit in 8480751c..main is
+own 015e5488 (kernel/src/tests/config_test.rs assertion, test-mode
+code never in the shipping kernel — same ruling as leg-23's c2e2c885
+precedent). pa33's five-consecutive TERM 8 / WAKE 32 exact hold
+stands as the operative census record; no boot spent.
+
+**(4) QEMU ledger.** Self-started: 0 (no gate fired; the cheapest-leg
+mandate held — first true zero-run leg since the gate regime began).
+Foreign QEMUs untouched: wildwrite-hunt pair (ww-s2-r79, wwload-r26)
+and the A-line sc219 (left to its own wrapper timeout, verified ended)
+— all by exact PID/cmdline identification, never signaled. Verified 0
+perf-audit-tagged QEMU processes at leg close. Nothing >10MB
+committed; no new run/ artifacts beyond this ledger.
+
+**(5) Leg close.** Deliverables: this ledger entry alone. No code, no
+runs, no report deltas — v1.5 stays one Rux column from done, blocked
+on the same two conditions (sc-milestone on a main-class kernel, or
+the A-line footprint fix merging). Branch fast-forwarded to main
+(9dbb2a4f) + this commit; ready for coordinator review/merge — and
+again nothing needs cherry-picking beyond the fast-forward pointer
+and the ledger.
+
 ## 4. Ranking table v2.8 (cost centers -> boot-time contribution)
 
 Acquittal note (leg 20, no version bump — no row reweighted): the
