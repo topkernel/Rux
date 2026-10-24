@@ -964,11 +964,228 @@ never the harness.
 produce is delivered to the boundary of what the kernel can host:
 Reference side measured and final; Rux side blocked behind an identified
 pair — a deterministic IMAGE defect (usb_host DDK
-libusb_pnp_manager.z.so, present under the reference kernel too) whose restart-storm
-cost eats the boot window only because Rux's boot-window cost is
-~100x the reference boot, plus the fd-32 EBADF kernel bug (fixed on the
-launcher lane, pending merge) — with the full run-day apparatus
+libusb_pnp_manager.z.so, present under the reference kernel too) whose
+restart-storm cost eats the boot window only because Rux's boot-window
+cost is ~100x the reference boot, plus the fd-32 EBADF kernel bug (fixed
+on the launcher lane, pending merge) — with the full run-day apparatus
 staged and validated so the Rux column is one confirmed-milestone
 away. The performance findings that ARE measurable pre-UI (tick fix,
 census invariants, cost-center ranking, syscall tables) are final in
 sections 1-7 and survived six kernel generations unchanged.
+
+### 8.10 NORTH-STAR GOAL (user mandate 2026-10-25): outperform the
+reference kernel by 50%+ on every measured metric
+
+**The target.** Every pbench P1-P7 metric: target = reference median x
+0.5 (at least 2x faster than the reference kernel, image's own OHOS
+6.6.101). Boot-phase wall-clock included. New features and new internal
+architecture are both allowed; the three iron gates hold (external
+compatibility, LTP green, no upper-layer breakage) plus the perf merge
+gate (AGENTS.md, baselines in docs/development/perf-gate-baseline.md).
+
+**The trajectory (realism discipline).** Rux is a debug-build kernel
+far from parity on most rows — the goal is sequenced: (a) reach parity
+per metric, (b) then close to 2x. Gap table below, pb1 vs the banked
+reference medians:
+
+| metric | pb1 Rux med (us) | ref med (us) | gap | 2x target (ref x0.5) |
+|---|---|---|---|---|
+| p1 null syscall | 4.570 | 0.040 | 114x | 0.020 |
+| p1 clock_gettime | 4.951 | 0.070 | 71x | 0.035 |
+| p2 ctx switch | 15.409 | 0.090 | 171x | 0.045 |
+| p3a fault anon | 0.080 | 5.010 (bimodal) | ahead | met (caveat: ref THP) |
+| p3b fault COW | 24.614 | 0.751 | 33x | 0.376 |
+| p3c fault file | 0.070 | 0.100 | 1.4x ahead | 0.050 (not yet 2x) |
+| p4 fork+exit | 8324 | 10.88 | 765x | 5.44 |
+| p4 fork+exec | 13353 | 22.37 | 597x | 11.19 |
+| p5a pipe roundtrip | 21.517 | 0.180 | 120x | 0.090 |
+| p5b dgram send | 126.257 | 0.155 | 815x | 0.078 |
+| p5b dgram recv+peek | 275.445 | 0.215 | 1281x | 0.108 |
+| p5c stream write | 56.223 | 0.160 | 351x | 0.080 |
+| p6 stat | 127.710 | 0.271 | 471x | 0.136 |
+| p6 openclose | 310.071 | 0.436 | 711x | 0.218 |
+| p6 getdents (1000-entry) | 9975 | 88.88 | 112x | 44.44 |
+| p6 read_cached | 366.915 | 0.676 | 543x | 0.338 |
+| p6 write+fsync 4 KB | 18125 | 4755 | 3.8x | 2377 |
+| p6 append 4 KB | 500.378 | 0.471 | 1062x | 0.236 |
+| p6 mkdir+rmdir pair | 83192 | 40.43 | 2057x | 20.2 |
+| p6 unlink | 32816 | 26.99 | 1216x | 13.5 |
+| p7 sleep 1 ms overshoot | 2094 | 14.64 | 143x | 7.32 |
+
+(Caveats, one line: pb1 is ONE TCG minimal-rootfs smoke on the pa31-
+class DEBUG kernel — ranking-grade, not run-day-grade; the reference
+column is med-of-4 on the OH image. The run-day Rux column supersedes
+this table's left column when the milestone lands.)
+
+**Lever ladder (sequenced by impact; L0 gates the rest).**
+
+- **L0 — release-profile measurement. DONE (leg 32, pa41 battery — see
+  8.10.1): the answer is decisive.** A properly optimized release build
+  (lto=true, codegen-units=1, strip) collapses the syscall floor 12-32x
+  vs the debug build every kernel generation to date has been measured
+  on: p1_null 6.89 -> 0.55 us, p2 28.7 -> 1.38 us, p4_fork_exit
+  13.4 ms -> 420 us, p6_stat 220 -> 14.8 us, p6_getdents 17.8 -> 1.50
+  ms (same-window back-to-back pairs). The weakening the leg-31
+  snapshot carried (lto=false) costs a further 30-50% on those rows;
+  it was a workaround for a release-LINK breakage, not a profile
+  choice, and is reverted. Consequence for the ladder: the per-row
+  engineering targets are now set against the RELEASE-STRONG kernel;
+  the remaining outliers (ext4 metadata rows, dgram/stream socket
+  family, fork+exec tail) are the real work. L0 also unblocked the
+  release path itself, which had been un-buildable on main-class trees
+  since the crate grew past the dfx-align merge (see 8.10.1 for the
+  breakage and the two stacked fixes).
+- **L1 — ext4 lazy no-journal write path (F4).** The metadata rows are
+  the board's worst gaps and L0 barely moved them (mkdrmdir -8%,
+  unlink -12%, append improved via the floor but still ~175x):
+  release-strong reads mkdrmdir 76.4 ms = 1890x and unlink 29.3 ms =
+  1085x vs the reference medians. F4's estimate is -30-60 s boot wall
+  AND these rows. fsync 2.7x is already the closest row — the write
+  path's journal work is the difference between it and the metadata
+  rows.
+- **L2 — console-async** (~5% CPU + tail latency; boot wall).
+- **L3 — EPOLL_WAKE_REGISTRY sharding** (1.0-1.2% of machine; p5
+  family indirectly). After L0 the dgram/socket family is a
+  first-tier outlier in its own right (p5b/p5c ~190-260x vs reference
+  on release-strong; they improved only -58% where the floor families
+  improved -90%).
+- **L4 — architectural levers**, drawn from
+  docs/architecture/rust-design-headroom.md (capability traits, typed
+  per-CPU + lock keys, ownership transfer, Result boundary, typed IPC
+  states, timer slots); every architectural WINNER gets an entry in
+  docs/architecture/design-divergences.md with its compatibility
+  evidence.
+
+**Optimization measurement protocol** (this lane's own battery, before
+every merge claim): before/after pair on the pbench_boot.py quiet-boot
+channel — same machine class, same accel mode, back-to-back in one
+host-load window, med-of-3 for merge evidence (med-of-1 acceptable as
+a quick gate); any change touching mm/sched/fs additionally runs the
+Tier-1 census quiet boot (TERM 8 / WAKE 32 hold) per the merge gate.
+**Profile-class is part of the run conditions from L0 on**: every
+pbench row recorded in this report states debug vs release-strong
+(they differ by an order of magnitude on the floor families); cross-
+class comparisons are meaningless. The standing run-day trigger and
+terminal report (8.6/8.9) are unchanged — the day the milestone lands
+on a main-class kernel, table 8a's Rux column fills from the OH-image
+run day (and that column must be collected on a release-strong kernel
+plus a debug twin, or the L0 question relitigates forever).
+
+### 8.10.1 L0 results (leg 32, 2026-10-25, pa41 battery)
+
+**Setup.** Three kernels from ONE source tree (4f9a25cd = main 6f7e4ac3
++ docs + the ret_from_fork shim removal), differing only in the
+release profile: debug (the class of every pa/pb run to date),
+release-weak (lto=false, cgu=16, no strip — the leg-31 snapshot's
+inherited default), release-strong (lto=true, cgu=1, strip — main's
+own profile, via the new `make build-release-opt` env gate, no default
+change). Channel: test/pbench_boot.py quiet boot (TCG, q35, SMP2/2G,
+minimal-rootfs), back-to-back 05:54-06:11 in one host-load window
+(15-19 foreign QEMUs), med-of-1 per kernel (protocol quick-gate tier;
+the deltas below are far outside that noise class). Provenance:
+run/pa41-built-from.txt (hashes), run/pa41-*.log.
+
+**Precondition found and fixed: the release path was un-buildable on
+main-class trees.** Both release profiles failed since the crate grew
+(main 6f7e4ac3 era) with `ret_from_fork changed binding to
+STB_GLOBAL / already defined`: a fossil `.weak ret_from_fork`
+link-shim in main.rs (its own comment predates trap.S: "trap.S is not
+written yet") collided with trap.S's `.globl` definition whenever
+rustc placed the two global_asm! blocks into one assembly unit —
+which cgu=1/lto forced pre-merge (pa39 builds 1-2) and crate growth
+then forced under EVERY profile post-merge. The leg-31 weakening of
+[profile.release] was the predecessor's undocumented workaround for
+the cgu=1 flavour. Two independent fixes landed on the branch this
+leg and stack cleanly: 4f9a25cd (delete the fossil shim; root-caused
+via the emitted CGU asm — the shim text is visible at its head) and
+4c0c80ea (leg-31's gasp commit: move the two symbols to Rust naked
+fns). pa42 re-verified: all three profiles build at HEAD.
+
+**Board (medians, us; pb1 anchor = the pa31-class debug smoke; ref =
+the banked 8.5 reference column):**
+
+| bench | pb1 (dbg) | pa41 dbg | pa41 strong | pa41 weak | strong/ref | 2x target |
+|---|---|---|---|---|---|---|
+| p1_null | 4.570 | 6.887 | 0.551 | 0.891 | 13.8x | 0.020 |
+| p1_clock | 4.951 | 9.734 | 0.651 | 0.641 | 9.3x | 0.035 |
+| p2_ctxsw | 15.409 | 28.667 | 1.383 | 1.894 | 15.4x | 0.045 |
+| p3a anon | 0.080 | 0.130 | 0.080 | 0.140 | ahead (ref THP) | met* |
+| p3b COW | 24.614 | 35.489 | 2.846 | 4.799 | 3.8x | 0.376 |
+| p3c file | 0.070 | 0.130 | 0.070 | 0.130 | 1.4x ahead | 0.050 |
+| p4 fork+exit | 8324 | 13407 | 420.4 | 623.0 | 38.6x | 5.44 |
+| p4 fork+exec | 13353 | 20453 | 1528.5 | 1598.6 | 68.4x | 11.19 |
+| p5a pipe | 21.517 | 36.261 | 2.766 | 2.434 | 15.4x | 0.090 |
+| p5b dgram send | 126.257 | 97.444 | 40.985 | 6.322** | 264x | 0.078 |
+| p5b dgram recv+peek | 275.445 | 96.492 | 40.945 | 5.340** | 190x | 0.108 |
+| p5c stream 74B | 56.223 | 103.128 | 40.795 | 41.678 | 255x | 0.080 |
+| p6_stat | 127.710 | 219.530 | 14.791 | 24.125 | 54.6x | 0.136 |
+| p6_openclose | 310.071 | 478.839 | 27.427 | 44.182 | 62.9x | 0.218 |
+| p6_getdents (1000) | 9975 | 17765 | 1497.6 | 2276.0 | 16.8x | 44.44 |
+| p6_read_cached | 366.915 | 417.365 | 35.033 | 62.616 | 51.8x | 0.338 |
+| p6_write_fsync | 18125 | 20691 | 12685 | 18167 | 2.7x | 2377 |
+| p6_append | 500.378 | 1000.576 | 82.621 | 151.913 | 175x | 0.236 |
+| p6_mkdrmdir | 83192 | 82815 | 76431 | 93515 | 1890x | 20.2 |
+| p6_unlink | 32816 | 33396 | 29271 | 45438 | 1085x | 13.5 |
+| p7 sleep overshoot | 2094 | 1471 | 975.2 | 934.4 | 66.6x | 7.32 |
+
+(**p5b weak-column values are scatter: that family's per-run spread
+under load spans 5-100 us across all pa41 boots — the strong-column
+value is the stable one to read. *p3a caveat unchanged: the reference
+is THP-bimodal, Rux faults every page.)
+
+**Readings.**
+
+1. **The debug floor was inflating the whole board 12-32x.** Same
+   window, same source: strong/debug = -92% (p1_null) to -95% (p2,
+   fork+exit) on every floor-carrying row. The pb1-class gaps (114x,
+   171x, 765x) were mostly BUILD CLASS, not kernel engineering.
+2. **Strong beats weak by 30-50% where it matters** (p1_null 0.551 vs
+   0.891, p2 1.383 vs 1.894, p4_fork_exit 420 vs 623, p6_stat 14.8 vs
+   24.1, p6_append 82.6 vs 151.9): the inherited weakening is
+   reverted; the release profile is strong again (matching main).
+3. **What did NOT move: ext4 metadata writes** (mkdrmdir -7.7%,
+   unlink -12.4%, fsync -38.7%) — these are journal/write-path work,
+   immune to codegen. L1 is now unambiguously the top lever, with the
+   socket family (p5b/p5c, improved only ~2.4x from dbg) next.
+4. **North-star trajectory: parity band reached on nothing yet, but
+   the board moved from 100-2000x to 10-70x on the floor families**
+   (p3b/p3c/fsync are the closest rows: 3.8x / ahead / 2.7x). The
+   post-L0 gap table above is the working ladder now.
+5. **Verification chain:** p6_unlink gate row (b) rerun on the
+   main-class debug kernel: 33396 us = +1.8% vs the pb1 anchor — IN
+   BAND; the flagged +22.4% marginal-out does not reproduce, and
+   2f17d663 explains the bookkeeping error that produced it (four
+   Tier-2 ANCHOR cells in run/perf-gate.sh had been transcribed from
+   the reference-kernel column instead of pb1's own medians — fixed
+   there; the anchor table is authoritative again).
+6. **HEAD re-verification (pa42):** after stacking leg-31's naked-fn
+   variant, release-strong still builds (all three profiles) and
+   boots 25/25. The same-window A-B (pa41-strong vs pa42-headstrong,
+   both boots under loadavg ~26) shows the STABLE rows equivalent
+   within noise (p1_null +2.2%, p2 -5.9%, p6_stat -2.0%, getdents
+   -1.4%, fsync +0.9%) while the load-noisy rows scatter both ways
+   (fork+exec +48%, openclose -34%, append +78%, p7 -55%) — and the
+   control rerun of the SAME trap.S binary across load windows
+   (p1_null 0.551 at load ~17 vs 0.892 at load ~26, +62%) quantifies
+   the host-load confound that dwarfs any variant effect. Verdict:
+   the naked-fn entry path is performance-equivalent; the L0 table
+   cites the 4f9a25cd tree, and HEAD (naked-fn) is the merge shape.
+   Run logs: run/pa41-pb-strong2.log, run/pa42-pb-headstrong.log.
+
+**Tier-1 gate outcome the same hour (pa41gate, 780 s quiet syscost
+boot, main-class debug kernel, KVM/SMP2/4G):** census TERM-DESCHED 8 /
+WAKE-REFUSED 32 — EXACT hold again; panics/OOM 0; clock_gettime 4 us,
+GRQ hold 6.9 us, small_alloc share 6.6% — all in band. Two rows FAIL
+under tonight's load (14-19 foreign QEMUs, loadavg up to 26): tick
+cpu0 99.40/s (marginal, one CPU) and syscall volume 77.1 M vs the
+136.4 M band. The volume row is hereby attributed, not re-banked:
+pace was flat -35% vs pa38 from the FIRST checkpoint (13.9-14.9 M per
+120 s interval throughout, incl. pre-app phases) while every per-op
+cost held — volume-in-window is host-pace-coupled, not kernel cost
+(the dead leg-31 decider's pa40 boot read 76.6 M with the same
+signature). The launcher lane's 120.5/114.8 M readings are the same
+class. Standing item: re-bank volume AND the nanosleep row from a
+PASSING quiet-window gate run — nanosleep readings across boots now
+span 174-333 ms (pa41gate 174, sc239 184, seed 221, pa38 333), which
+proves the single-point 221 ms seed was workload-mix artifact; the
+baseline doc marks the row unbanked pending that window (below).
