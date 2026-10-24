@@ -35,6 +35,9 @@ Runs (this worktree, `run/`):
 | `pa-pa20` | main@988e10c1 (= pa18 kernel + wildwrite per-CPU magazines cb51db03 + lock-hold counters 64156dcb) + pa16 probe v3 (nm run/pa20-nm.txt; bzImage rebuildable from the pinned commit) | syscost=1 sprobe=0 | 780 s | magazine before/after (section 2f). Global class-lock sections 741.7M -> 19.7M (-97.3%); small_alloc REST 176.1 -> 133.2 s (-24.3%); IF=0 23.0% of machine; W3 census unchanged |
 | `pa-pa21-tick-tcg` | main@b8f686a6 current-main rebuild, no probe patch (target/x86_64-unknown-none/debug/bzImage) | syscost=1 sprobe=0, **ACCEL=tcg** | 120 s | leg-13 accel-matrix datapoint (section 2g): tick cadence under TCG = WW ages pinned at exactly 1001 ms (53/53), boot tick check `[fail]` 0 jiffies/150 ms, calibration print identical to KVM ("TSC 4292 MHz, LAPIC 62 MHz" — the host TSC shows through under TCG too). Closes "KVM artifact" for the 1000 ms family |
 | `pa-pa22-tick-lvl7` | same kernel as pa21 | syscost=1 sprobe=0 loglevel=7, ACCEL=tcg | 60 s | leg-13 diagnostic: verbose console shifts WW ages to organic values (376 ms class, idle pid=0) — the ~1 s pinning is the quiet-boot steady state, not a fixed probe artifact; `tsc-clock: fell behind 110854` (11 ms slips) shows the TSC clock itself is fine; WW2 heartbeat did NOT print (Hrtimer-softirq dispatch condition unmet — open item) |
+| `pa-pa23-tickfix-tcg` | main@78460742 + the launcher lane's timer fix hunk ONLY (u128 multiply-then-shift, `tsc_delta_nominal`, extracted from samgr-callback wip 1e54319f; scratch branch `scratch/tickfix`, commit 9a451bef — pre-merge validation of the A-line fix, never for main) | syscost=1 sprobe=0, **ACCEL=tcg** | 600 s wall (~300 guest s, dumps t=60..540) | leg-15 tick-fix battery (section 2h): tripwire `[ok]` 16 jiffies/150 ms (pa21: 0 [fail]); tick counters 99.9/s/CPU sustained through all 9 dumps; WW IRQ-OFF-WINDOW 2 prints, organic ages 414/251 ms (pa21: 57 all at exactly 1001 ms); WAKE-STRANDED 0 (pa21: 100); TERM-DESCHED 8 and WAKE-REFUSED 32 — identical to pa21 (tick-independent census counts hold); nanosleep avg 1.87 s -> 88.5 ms (-21x) at same-horizon t=60; clock_gettime max 654 ms -> 3 ms; composer_host.ready +95.1 -> +89.9 s wall (-5.5%) |
+| `pa-pa24-tickfix-probe-tcg` | pa23's branch + pa16 probe v3 patch (scratch 520970f0; nm run/pa24-nm.txt) | syscost=1 sprobe=0, ACCEL=tcg | 600 s wall (dumps to t=540) | leg-15 battery item (b), EFLAGS-exact probe under the fix: IF=0 35.3% of machine at t=540 — TCG-inflated, not comparable to the KVM 23% band (official re-measure = post-merge KVM flagship); structure intact (heal 0.05-0.09% miss=0, max REST segment 13 ms ms-class, site table family shape kept) + expected new timer.rs:173/:317 site pair (true 100 Hz hrtimer dispatch); SOFTIRQ zone share 7.7-13.9% of IF=0 (was 1.0-1.7% pre-fix KVM — suppressed dispatch volume now real); WW/WAKE-STRANDED prints 0 all boot; tripwire `[ok]` |
+| `pa-pa25-prefix-tcg` | stock main@78460742 (pre-fix rebuild; tripwire `[fail]` confirms) | syscost=1 sprobe=0, ACCEL=tcg | 600 s wall (dumps to t=540) | leg-15 same-accel deep baseline for pa23: WW ages pinned 1001 ms x283; nanosleep @t=240 avg 1.34 s / n 1300 (pa23: 120 ms / 6549, -11x at depth); futex+epoll avgs UNCHANGED (F3 tail, tick-independent); composer 130.3 s vs pa23 89.9 s but appspawn.started 312 s vs 468 s — opposite directions, wall-clock deltas noise-dominated, no claim; both runs end at the same depth (appspawn, not bundles) |
 | `pa19-unittest-main` | main@298b69fe (= this worktree, kernel/ byte-identical to main), riscv64 unit-test build, no probe | (unit test) | ~90 s | riscv64 make-test reproduction boot: instant truncated `trap: KERNPANIC pfa` before any kernel print; `-d int` trace (pa19-qemu-int.log) = store faults at trap_entry+0xda descending 0x120/frame from sp=_stack_top-8 — boot stack outside the 12MB early window (image 12.67MB). See NINTH LEG below |
 | `pa19-unittest-fix` | same + RUX-RISCV-LAYOUT-2 window/heap fix (this branch) | (unit test) | ~150 s | verification boot: full unit suite runs, 60 ok / 3 FAIL (stale config assertions, pre-existing: KERNEL_HEAP_SIZE 512-vs-1024 bc0ffbee, FUTEX_* 256/64-vs-8192/512 08fcfc04) |
 
@@ -389,6 +392,10 @@ Gate events + pa18 (11:00-11:15):
   boots have been KVM since pa1 — section 0). UI patrol: sc200-sc203
   no markers (sc202 patrolled to t=1664 s, sc204 rolling at commit
   time); PENDING rows stay PENDING.
+  [LEG-15: the mechanism attribution in this bullet was corrected —
+  see the correction block at the top of section 2g. The 1 s period
+  was read_time's step size (TSC shift-first math), not the IRQ
+  cadence; the LAPIC always fired at 100 Hz.]
 
 ## Verdict in one paragraph
 
@@ -1092,6 +1099,39 @@ Notes:
 
 ### 2g. THIRTEENTH LEG: the "1000 ms IRQ-OFF-WINDOW" family adjudicated — it is the timer's own ~1 Hz cadence, not interrupt-off time
 
+> **LEG-15 CORRECTION (2026-10-24): the adjudication below was 90%
+> right and the mechanism 100% wrong.** The 1 s periodicity is real,
+> it is not IF=0, and it is not KVM-specific — the evidence ladder
+> stands. But it is NOT the timer IRQ's delivery cadence (the LAPIC
+> timer IRQ fired at the nominal 100 Hz all along) and NOT a LAPIC
+> arming/calibration mismatch (item 3's divide-by-16 speculation was
+> wrong). The true mechanism, found by the launcher lane's sc204
+> TICKPROBE (their leg 12) and fixed on their branch: `read_time()`
+> itself only moved once per second. 9e5f0147 (shift 12 -> 32) left
+> the timekeeper computing `(delta_tsc >> 32) * mult` — shift FIRST —
+> so at TSC 4.292 GHz the clock took one step every 2^32 TSC ticks =
+> **1.0008 s**, each step being `mult` nominal ticks (the probe's
+> nominal-2 ms windows both measured dt = 10,008,094 — exactly one
+> step). Everything derived from read_time inherited the grid:
+> jiffies (the tick handler derives it from the timebase, hence the
+> `0 jiffies / 150ms [fail]` tripwire — the IRQ fired, the clock
+> didn't move), the WW ages (measured in read_time's domain — the
+> "1000/1001 ms inter-arrival" was the clock's step size, not the
+> IRQ's period), WAKE-STRANDED strands, every timed wait. My "~625 KHz
+> effective decrement (100x below calibrated)" was an artifact of
+> measuring the CCR against the same broken clock. The u/k/i tick
+> counters accumulating at 91-99/s/CPU "on average" while stamps
+> showed ~1/s (open item below) is also now explained: the counters
+> were ALWAYS sampled at the true 100 Hz IRQ rate; only the
+> timestamps were grid-limited — there was no "faster early phase".
+> Fix: u128 multiply-then-shift (`tsc_delta_nominal`, all 4
+> shift-first sites), ~0.23 ns granularity restored; verified live by
+> the launcher lane on sc205 (WW IRQ-OFF prints 0, WAKE-STRANDED 0,
+> 2 ms busy-wait measures true) and retested by this lane in pa23
+> (section 2h). Ranking row 2b and report v1.3 are updated
+> accordingly; the X86-TICK-CADENCE ledger candidate is discharged
+> with the mechanism corrected.
+
 Coordinator's leg-13 brief carried A-line triage input: sc201's
 terminal "kernel-mode IRQ-OFF-WINDOW 1000 ms" and sc200's 1141
 kernel-mode hits, against this lane's "max closed cli 4 ms" — framed
@@ -1127,6 +1167,11 @@ Evidence ladder (all logs in the shared run dirs):
    exact arithmetic — calibration window via PIT ch2 OUT2 under
    QEMU/KVM vs x2APIC divide semantics vs arm-path count — needs one
    live probe boot with a period print, not resolvable statically.)
+   [LEG-15: WRONG — the "observed 1.000 s period" was read_time's
+   step size, not the CCR's decrement period; the CCR always ran at
+   the calibrated 62.5 MHz and the IRQ always fired at 100 Hz. The
+   probe this item asked for is what the launcher lane's sc204
+   TICKPROBE then did, and its result is the correction above.]
 4. **Not IF=0.** The EFLAGS-exact pair accounting (pa16 probe v3,
    heal 0.02%, miss=0) bounds every closed cli section at 3-5 ms in
    all flagship boots. No 1000 ms interrupt-off window exists. The
@@ -1193,6 +1238,12 @@ Open items filed for the next legs / other lanes:
   ~1/s — a faster early phase is the likely reconciliation; pa22's
   27 organic-age prints in 60 s vs pa21's 53/120 s steady-1001 s are
   consistent with load-dependent cadence).
+  [LEG-15: CLOSED — the reconciliation is the 2g correction (the
+  counters ALWAYS ran at the true 100 Hz; only the stamps were
+  grid-limited; no fast early phase exists — pa23 shows 99.9/s/CPU
+  linear through the whole boot), and sc206 (post-fix A-line roll)
+  prints the WW2 heartbeat 739 times with ticks=[100,100] on both
+  CPUs all boot.]
 - **UI-marker patrol** (leg-13 primary task): sc200 (died in the
   storm family at 5595 quiet-con lines, userspace alive to t=2656 s),
   sc201 (terminal storm), sc202 (patrolled to t=1664 s at leg close,
@@ -1200,13 +1251,154 @@ Open items filed for the next legs / other lanes:
   reached), sc204 rolling at commit time. No
   launcher.ready/OnForeground/ArkUI markers in any roll this leg; the
   PENDING post-UI rows in report table 1 stay PENDING.
+  [LEG-15 patrol (sc205 read by A-line leg 13, not duplicated):
+  sc206 (14:00, post-fix kernel, SC-HB to t=787 s) — STILL NO UI
+  markers (the only "arkui" strings are SELinux labels
+  `u:object_r:arkui_param:s0` and a param-watcher name, not boot
+  markers); PENDING rows stay PENDING. But sc206 is the DEEPEST roll
+  ever: first bootevent.boot.completed in any sc roll (sc204/205: 0),
+  plus appspawn.started / bms.main.bundles.ready / appfwk.ready /
+  account.ready; census families collapsed on the fixed clock
+  (WAKE-STRANDED 8 vs sc200's 1488+312; IRQ-OFF-WINDOW 2; TERM-
+  DESCHED 8), WW tail: wakes 28.34 M / picks 27.68 M / stranded=19 /
+  strand_max=140925 ms — the true F3 wake-loss face, off the grid;
+  still short of the UI: installd `Load system ability 511 failed`
+  and BMS bundle queries still running at the tail. Why the chain
+  stops there is the launcher lane's territory.]
+  [LEG-15 addendum: sc207 (14:5x, rolling at patrol time, SC-HB
+  t=185 s) — no UI markers yet (no bootevent milestones at all at
+  that depth); healthy post-fix census (TERM-DESCHED 8,
+  WAKE-STRANDED 3, PREEMPT-LEAK 0, IRQ-OFF 0); the fixed clock now
+  exposes the deep-boot wait face directly: IPCObjectStub
+  SendRequestInner to *.ISystemAbilityManager at cost:29998 ms
+  (~30 s binder timeouts) and installd SA-511 load failure — the
+  post-grid blocker chain for the launcher lane.]
 
+### 2h. FIFTEENTH LEG: the tick fix verified before merge — pa23 battery on main + the fix hunk (section 2g's correction measured)
 
+Leg 14 died of quota exhaustion 18 s in; this leg does its job. The
+launcher lane's sc204 TICKPROBE found the real mechanism (read_time's
+shift-first math, section 2g correction) and their fix (u128
+multiply-then-shift, `tsc_delta_nominal` at all 4 sites) sits in
+their wip snapshot 1e54319f awaiting a clean commit + coordinator
+merge. Rather than wait idle, this lane extracted the timer hunk
+ALONE (x86_64.rs is unchanged on main since their branch point
+9bc3a5c8, so the extraction is exactly one hunk), applied it on
+current main (scratch branch `scratch/tickfix`, 9a451bef — local
+only, never for main), and ran the leg-14/15 battery as pa23 (TCG,
+quiet, syscost=1 sprobe=0, 600 s wall = dumps t=60..540; pa21 is the
+same-config pre-fix baseline). Results:
 
+| battery item | before (pa21, pre-fix) | after (pa23, main+fix) |
+|---|---|---|
+| (a) boot tripwire | `lapic tick check: 0 jiffies / 150ms [fail]` | **`lapic tick check: 16 jiffies / 150ms [ok]`** (~107/s) |
+| (a) tick counter rate | ~5990/60 s/CPU in t=0-60, interpretation ambiguous (see 2g open item) | **99.9/s/CPU SUSTAINED, linear through all 9 dumps** (5994-5997 per 60 s per CPU) — the "faster early phase" reconciliation: the counters always ran at the true 100 Hz; only the stamps were grid-limited |
+| (b) u/k/i shares (tick-sampled) | c0 88.0% kernel (sparse steady-state sampling; caveat) | **c0 18.8/80.0/1.2, c1 16.5/82.5/1.0 at t=540** — kernel share now 80-83% at true 100 Hz sampling (the 86-89% pre-fix figure was phase-weighted by sparse sampling); EFLAGS-pair IF=0 numbers need the pa16 probe patch — measured pre-merge under TCG in pa24 (below; structure holds) and re-run on merged main as the KVM flagship for the official share |
+| (c) WW IRQ-OFF-WINDOW | 57 prints, ALL exactly 1001 ms | **2 prints, organic ages 414/251 ms** (the pa22 loglevel=7 class — residual host-steal/tickless gaps, not a grid) |
+| (c) WAKE-STRANDED | 100 (quantized 1000/2001 ms strands) | **0** |
+| (d) nanosleep (t=60 rows) | n=60, avg 1,869,294 us, max 10,014 ms | **n=1086 (18x more sleeps complete), avg 88,505 us (-21x), max 10,006 ms** (the 10 s maxes are real OH retry-loop sleep durations now, not 10 x 1 s grid) |
+| (d) futex (t=60 rows) | n=5910, avg 125,896 us | n=5659, avg 89,562 us (-29%) — remaining tail is the true F3 wake-loss face |
+| (d) epoll_pwait (t=60) | avg 746,503 us | avg 287,856 us (-61%) |
+| (d) clock_gettime max | 654 ms (grid-inflated) | **3 ms** |
+| census holds | TERM-DESCHED 8, WAKE-REFUSED 32 | **TERM-DESCHED 8, WAKE-REFUSED 32** — tick-independent census counts identical, as section 2g predicted |
+| phase wall (host stamps) | composer_host.ready +95.1 s | +89.9 s (-5.5% — early phase, few timed waits; the expected bigger effect is in the deep-boot phases this TCG window only began) |
+| PREEMPT-LEAK (A-line's post-fix storm) | n/a | **0 on the quiet boot** — sc205's 17,906-line storm is their wedge-storm context, not a quiet-boot property; performance-relevant verdict stays theirs (noted, not taken over) |
 
+Also measured: WAKE-RUN-LEAK now prints 12 times by t=150 (pa21
+printed 0 in its 120 s window) — with true sub-second ages these are
+REAL leak events with resolvable latencies, where pre-fix the same
+family was either invisible or mis-aged on the grid; the pa18/pa20
+"677-678 prints/780 s" KVM quiet-boot figures are the comparable
+population and will be re-baselined on merged main. WW2 heartbeat:
+still 0 prints (same open item as pa22).
 
-## 4. Ranking table v2.5 (cost centers -> boot-time contribution)
+What this changes in the ranking: row 2b's "latency amplifier" is
+now REMOVED-FIX-VERIFIED (mechanism corrected to read_time
+granularity; effect measured). The F3 wake-loss latencies and the
+deep-boot phase times are the quantities that were grid-contaminated
+and now resolve — the F3 vs F7 multiplier share question from report
+section 1 becomes measurable on the post-merge flagship run.
 
+**pa24-tickfix-probe-tcg** (same scratch branch + the pa16 probe v3
+patch, 520970f0; TCG, 600 s wall, dumps to t=540; nm table
+run/pa24-nm.txt, parse run/pa24-parse.txt) extends battery item (b)
+to the EFLAGS-exact probe under the fix:
+
+- Tripwire `[ok]` again; ticks 99.9/s/CPU at t=540; WW and
+  WAKE-STRANDED prints 0 for the whole boot (probe build).
+- IF=0 machine share reads **35.3% at t=540** (cpu0 182.8 s, cpu1
+  198.9 s over 2x540 s) — **TCG-inflated, NOT comparable to the KVM
+  23.0-23.7% flagship band**: under TCG the same section work
+  occupies more elapsed TSC time, and the newly-true timer dispatch
+  adds softirq-zone time. The official IF=0 re-measure stays the
+  post-merge KVM flagship (pa25) — this run's value is the STRUCTURE:
+  probe v3 meters intact (heal 0.05-0.09%, miss=0), max closed REST
+  segment 13 ms (ms-class, TCG-scaled — still no long cli section),
+  and the REST site table keeps its family shape (small_alloc.rs:413
+  22.8M opens @1324 ns and :247 22.9M @1110 ns on top, sched.rs:2140
+  GRQ 311K @71.7 us 3rd, deferred_free, fs/file.rs:676 fdtable
+  next) with one EXPECTED new pair: timer.rs:173/:317 (216K/142K
+  opens) — the hrtimer paths that true 100 Hz dispatch + resolvable
+  timed waits now exercise. No new IF=0 hotspot appeared with the
+  fix.
+- Zone-split shift worth recording: the SOFTIRQ zone's share grows
+  from the KVM pre-fix 1.0-1.7% to 7.7% (cpu0) / 13.9% (cpu1) of IF=0
+  time under the fix at TCG — the true timer softirq volume that the
+  broken clock had suppressed (fewer meaningful dispatches per
+  second). Part accel artifact, part real; the KVM flagship will
+  size the real part.
+
+**pa25-prefix-tcg** (stock main@78460742, pre-fix, same TCG quiet
+config as pa23, 600 s wall) closes the same-accel deep-horizon
+comparison (pa21 was only 120 s):
+
+- Pre-fix signatures all present: tripwire `[fail]`, WW ages pinned
+  1001 ms x283 (plus organic 344 ms x12, 4097 ms x8), ticks still
+  ~99.9/s/CPU at the counters (2g correction's prediction).
+- Same-horizon t=240 rows: nanosleep avg 1.34 s -> 120 ms (-11x at
+  depth), n 1300 -> 6549 (5x more sleeps complete), max 21.0 ->
+  10.0 s; clock_gettime max 1001 ms -> 3 ms. **futex avg UNCHANGED
+  (421 vs 423 ms) and epoll_pwait avg unchanged (229 vs 238 ms)** —
+  the deep-boot futex/epoll tail is the F3 wake-loss family and does
+  NOT improve with the tick fix, exactly as the unchanged census
+  counts predict. The fix removes the F7 grid amplifier; F3 remains
+  the wall-clock driver.
+- Wall-clock milestones at depth are NOISE-DOMINATED on this pair:
+  composer_host.ready 130.3 s (pre) -> 89.9 s (post) but
+  appspawn.started 312 s (pre) -> 468 s (post) — opposite
+  directions, single boots, shared host (limitation 1's ~2x band).
+  Honest verdict: no wall-clock claim from this pair; the wall-clock
+  question moves to the post-merge KVM flagship (or multi-run
+  average). Both runs reached the same depth (appspawn.started, not
+  bms bundles).
+- WAKE-STRANDED printed 0 in pa25 vs 100 in pa21 (both pre-fix) —
+  the strand PRINT count is load/shape-dependent (it needs wakes
+  landing on the census window), while the WW 1001 ms pinning is the
+  deterministic pre-fix signature (283/293 prints in pa25).
+
+**PREEMPT-LEAK verdict noted (A-line's, not this lane's work):** the
+brief flagged sc205's 17,906-line PREEMPT-LEAK storm as the post-fix
+next-layer blocker. A-line's own verdict (commit 8dc3407f, sc205
+snapshot): the storm is POST-PANIC tick weather — sc205 died at t=30 s
+(ext4 refused their userdata copy: unsupported incompat 0x2000 =
+metadata_csum_seed; mount ENODEV x3 -> beget ExecReboot -> sysrq 'c'
+-> panic park), pid 1 sat parked in wfi and the tripwire watched its
+own hardirq bit; SC-HB froze with scheduling. sc206 (their next roll,
+healthy mount, deepest boot ever) prints PREEMPT-LEAK 0. So the storm
+does NOT persist on healthy boots and is not observed as a boot-time
+performance blocker; the sched.rs:1747 terminal-deschedule family
+tracking stays with the launcher lane. Their ext4 note (missing
+metadata_csum_seed / orphan_file support vs Linux) is a compatibility
+gap for the fs lane's list, recorded here for cross-reference only.
+
+## 4. Ranking table v2.6 (cost centers -> boot-time contribution)
+
+v2.6 = v2.5 + row 2b corrected and closed (leg 15: mechanism corrected
+to read_time's TSC shift-first granularity — the LAPIC always fired at
+100 Hz; the launcher lane's fix verified pre-merge in pa23, section
+2h: tick 99.9/s/CPU sustained, WW/WAKE-STRANDED grids gone, nanosleep
+avg -21x, tick-mode u/k/i now resolve at true 100 Hz — kernel share
+80-83%, not 86-89%).
 v2.5 = v2.4 + row 2b (leg 13: the x86_64 tick-cadence adjudication —
 the "1000 ms IRQ-OFF-WINDOW" family re-attributed from an IF=0
 suspect to the timer's own ~1 Hz delivery cadence; see section 2g).
@@ -1216,7 +1408,9 @@ wait-gates opened mid-leg and both ladders are now measured; GRQ
 -31% claim corrected to volume-coupled; TERM-DESCHED acceptance
 demonstrated). Contribution model unchanged: 2 vCPUs; kernel mode
 ~83-90% of ticks (pa20 t=660: 88.1/83.2%; the u/k/i counters are
-themselves tick-sampled — cadence caveat in section 2g).
+themselves tick-sampled — cadence caveat in section 2g, RESOLVED by
+pa23: at true 100 Hz sampling the kernel share reads 80-83%, so the
+pre-fix 86-89% figures were sparse-sampling phase-weighted).
 
 | # | cost center | measured (pa13) | pa15/pa16/pa17 direct evidence | gap contribution | family |
 |---|---|---|---|---|---|
@@ -1224,7 +1418,7 @@ themselves tick-sampled — cadence caveat in section 2g).
 | 1b | REST section bulk (exact decomposition) | (inside #1) | small-alloc **MEASURED BEFORE/AFTER (pa18->pa20)**: global class-lock sections 741.7 M -> 19.7 M/boot (-97.3%, the 16.49x projection confirmed); REST wall 176.1 -> 133.2 s = 12.2% -> 9.2% of machine (**the -24% wall ceiling is the per-op local irqsave floor, 751 M ops @136-168 ns — the lever left is churn volume, not locking**); schedule() GRQ 2.7-4.6% (avg flat 5.1-6.1 us pa16-pa18, 6.7 us pa20 deepest boot; wall volume-coupled — pa17's -31% claim corrected in 2e); fdtable get_file 1.9-2.2%; waitqueue family 1.9-2.3%; EPOLL_WAKE_REGISTRY 1.0-1.2%; deferred_free 0.7-0.8% — 97-99% attributed to file:line | **the F1 lever list** — allocator magazines LANDED AND MEASURED; GRQ pick (launcher lane; full refactor deferred as intersecting the kill-path machinery); fdtable read path, waitqueue batching, epoll registry (launcher lane — sharding design in hand, their fb2a1354); allocation-churn hunt rises in priority (now the allocator's main lever) | F1/F5 |
 | 1a | Console/UART emission (sub-item of F1) | outb/inb in recovery rips; cli page shares inb/outb | pa15: 4.34 M bytes, 5.0% of machine; pa16: 1.55 M bytes @ t=720, 1.7%; pa17: 5.61 M bytes, 6.1%; pa18: 1.5 M bytes, 1.4%; pa20: 1.34 M bytes, 1.3% — **per-byte cost stable 13.2-18.5 us across 5 boots; volume (and thus machine share) swings 1.3-6.1% with boot depth**; producers init/<irq>/FFRT-worker; task-context emission 100% IF=1 | medium CPU (1-6%) + **large latency multiplier** under host load | F1 |
 | 2 | Scheduler wake-loss (WAKE-RUN-LEAK; lying busy slots + linked-starving) | 702 leak prints/780 s; census 16 lying + 7 linked | **pa18+pa20 (full v1..v6 stack, pre/post magazine): 678/677 prints / 31/32 refusals (27/25 lying) / 10-11 PREEMPT-LEAK / TERM-DESCHED=8 BOTH boots — the v1 trigger shape fires ~8/boot and every occurrence survives; census lying-slot population unchanged by the entire stack AND by the allocator** (pa17: 593/31/22+7/8/0) — they are born on another path; birth forensics continues on the launcher lane | **large** — unchanged; still the wall-clock driver | F3 |
-| 2b | x86_64 timer-IRQ cadence ~1 Hz (diagnosed leg 13, section 2g) | 316 IRQ-OFF-WINDOW/780 s at age~=1000 ms (pa13; re-read 2g: cadence, not IF=0) | WW inter-tick age pinned at EXACTLY 1000 ms (KVM) / 1001 ms (TCG) in every quiet boot, both accels, whole-boot gate saturation in pa16-pa20 (340-364 prints each); boot tripwire `lapic tick check: 0 jiffies / 150ms [fail]` in every x86_64 boot, ignored; calibration print constant "LAPIC 62 MHz" across accels/hosts vs ~625 KHz effective decrement (~100x); recovery rips land in wfi/enable_irq/restore_irq idle path (incidental — symbolized against the pa21 build); WAKE-STRANDED strands quantize on the 1 s grid (sc200: 1000 ms x1488, 2001 ms x312) | **latency amplifier, share unquantified** — every timed wait rounds up to the 1 s grid; feeds F3's measured latencies and the 1.0 s per-op maxes; fix is cheap and gated (boot check exists but is ignored) | F7 |
+| 2b | x86_64 kernel-clock granularity 1 s (TSC shift-first math; CORRECTED+FIXED legs 13-15, sections 2g/2h) | read_time stepped once per 2^32 TSC ticks = 1.0008 s (9e5f0147's `(delta>>32)*mult`); the LAPIC IRQ always fired at 100 Hz — jiffies/WW-ages/WAKE-STRANDED/every timed wait inherited the grid (the leg-13 "IRQ cadence ~1 Hz" attribution and "~625 KHz effective decrement" were artifacts of measuring against the same broken clock — corrected in 2g) | **FIXED AND MEASURED (pa23, section 2h)**: launcher lane's u128 multiply-then-shift (`tsc_delta_nominal`, all 4 sites) on main = tripwire [ok] 16 jiffies/150 ms, 99.9 ticks/s/CPU sustained, WW prints 57->2 (organic ages), WAKE-STRANDED 100->0, nanosleep avg -21x, clock_gettime max 654 ms -> 3 ms, census counts (TERM-DESCHED 8 / WAKE-REFUSED 32) hold; kernel tick-share re-reads 80-83% at true sampling | **was a latency amplifier on every timed wait; now removed** — official merged-main KVM flagship re-run (pa16-probe for IF=0) pending the A-line merge | F7 |
 | 3 | hilogd.server socket dual-drain + sysevent_source + connect-retry | 26.5 M calls by t=720 = ~25% of ALL syscalls | pa16: 10.6 M recvfrom + 10.7 M recvmsg; pa17: 10.08 M + 10.29 M (1:1, avg 116/9 us, recvfrom max 393 s = wake-tail victim); writev 14.6-15.2 M; connect 2.47-2.55 M | medium — volume is OH userspace; kernel levers = per-call recv cost + the wake-loss tail | F2 |
 | 4 | ext4 metadata + write path (open/stat/getdents/fsync/pwrite/mkdir) | open 235 us, newfstatat 206 us, getdents 643 us, fsync avg 16 ms | pa17: open avg 1893 us (max 100 s — stall-tail inflated, see 2d), newfstatat 294 us, getdents 1043 us; medians unchanged | medium (~300-500 CPU-s/boot at this horizon) | F4 |
 | 5 | Atomic/CAS contention (atomic glue page + fetch_update family) | 16% of kernel ticks | pa16: glue page 20% of ticks — RMW owners named (small_alloc/fdtable/GRQ sections, row 1b) | medium — fixes fold into 1b | F5 |
