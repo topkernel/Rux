@@ -269,11 +269,19 @@ extern "C" fn schbd_fn(_arg: *mut core::ffi::c_void) -> i32 {
         // the re-arm - sc202 recovered to flow 27-54 with bw15 still ~300
         // (the old parked cohort never drains), and bw15-gating kept the
         // plateau counter alive forever, permanently disarming the census.
-        if flow <= CRAWL_FLOW_MAX || bwait15 >= WAITER15_FLOOR {
-            plateau = plateau.saturating_add(1);
-        } else if flow >= 20 {
+        // sc206: the else-if had the same defect through branch ORDER -
+        // after the first census the parked cohort keeps bw15 >=
+        // WAITER15_FLOOR on every beat, so the first arm of the OR always
+        // fired and the flow >= 20 re-arm below was dead code: sc206's
+        // t=537 flow=80 burst never re-armed the census and a 410 s
+        // qualifying plateau (t=547-957, bw15 223-244) got no census.
+        // Test the recovery arm FIRST: a flow >= 20 beat is a real
+        // frontier move regardless of the parked waiter count.
+        if flow >= 20 {
             plateau = 0;
             dumped = false;
+        } else if flow <= CRAWL_FLOW_MAX || bwait15 >= WAITER15_FLOOR {
+            plateau = plateau.saturating_add(1);
         }
         last_pidmax = max_pid;
 
