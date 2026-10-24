@@ -3975,7 +3975,7 @@ impl Task {
                         let old = KSTACK_HW.load(Ordering::Relaxed);
                         if hw > old {
                             KSTACK_HW.store(hw, Ordering::Relaxed);
-                            if hw > 60 * 1024 {
+                            if hw > 40 * 1024 {
                                 use crate::console::putchar;
                                 const MSG: &[u8] = b"KSTACK-HW depth=";
                                 for &b in MSG { putchar(b); }
@@ -3994,11 +3994,21 @@ impl Task {
                                 const C: &[u8] = b" comm='";
                                 for &b in C { putchar(b); }
                                 for &cb in self.comm() { if cb != 0 { putchar(cb); } }
+                                // sc218 lesson: the region BELOW the first
+                                // nonzero word is a zeroed span (a memset'd
+                                // local or zero-initialised frames) — by
+                                // construction it carries no return
+                                // addresses. The surviving frames of the
+                                // deep chain sit just ABOVE `off`; walk
+                                // upward and print the first kernel-range
+                                // words (deepest surviving return
+                                // addresses, symbolisable with addr2line).
                                 const T: &[u8] = b"' tail:";
                                 for &b in T { putchar(b); }
                                 let mut shown = 0;
-                                let mut o2 = 8usize;
-                                while o2 < off && shown < 40 {
+                                let mut o2 = off;
+                                let o_end = off + 4096;
+                                while o2 < o_end && o2 < KERNEL_STACK_SIZE && shown < 40 {
                                     // SAFETY: in-bounds per loop guard.
                                     let ra = unsafe { core::ptr::read_volatile((base + o2) as *const u64) };
                                     if ra >= 0xffffffff_80000000u64 && ra <= 0xffff_ffff_ffff_f000u64 {
