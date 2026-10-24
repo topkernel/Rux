@@ -3044,3 +3044,34 @@ PANIC-DUMPER UNBOUNDED-READ FAMILY AND FIXED ON BOTH ARCHES.
   + LOGLEVEL=3, SMP2 KVM q35, 90-MIN window - direct continuation of
   sc195's trajectory (unwedged + ArkTS/ArkUI loading) with the cpu0
   panic-strand fixed and double the time. Shotmon on ohgpu.
+
+SESSION R TENTH LEG - REST-QUEUE HANDOFF NOTES (for the next leg /
+coordinator, written while sc197 rolls):
+
+- EPOLL_WAKE_REGISTRY sharding (1.1% cost, misc.rs:154): single global
+  Spinlock<Vec<(u64 file_id, *mut EpollFile)>>; EVERY data arrival on
+  any open file (unix-socket enqueue, pipe write...) runs a GLOBAL
+  irqsave O(N) scan, and unregister paths run O(N) retains. Shard by
+  hash(file_id) into K registries (K=16); register/notify derive the
+  shard from file_id (pure partition, no cross-shard invariants).
+  WRINKLE: epoll_wake_unregister_all(ep) must not scan all K shards -
+  derive the epoll's file_id set from its own `entries` (already under
+  the per-epoll lock) and hit only the needed shards. Lock order
+  registry-shard -> per-epoll entries is unchanged. The sc103 leak
+  guard (registry size print before locking) should become per-shard.
+- GRQ cost (3.9%, sched.rs): every schedule/enqueue/wake path takes
+  the single global runqueue lock (per-class sub-queues inside). The
+  candidates are per-CPU runqueues with periodic steal or sharded
+  class queues - a major refactor that INTERSECTS the v1-v4 kill-path
+  machinery (terminal deschedule, DEAD-PICK gates all run under the
+  GRQ): do it only with the sc-series strand probes on, and re-run the
+  full strand verification boot afterwards. Not started this leg.
+- Console-async (the ninth leg's greenfield, now PARTIALLY done):
+  quietcon (v5) already removes the userspace console term. The
+  remaining piece for a production-grade fix: defer kernel printk
+  console emission to a kthread (Linux printk-kthread style) so
+  port-IO never runs under cli in task context. The WW profile's
+  printk::persistent_log::append cluster is the target. Design only.
+- riscv64 make test on THIS branch: main's 77ec1247 (image window fix)
+  is NOT merged into feature/samgr-callback yet - a make test here
+  would re-hit the boot-stack window bug. Merge main before testing.
