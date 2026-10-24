@@ -3945,7 +3945,22 @@ pub fn scheduler_tick() {
                     unsafe { (*cur).preempt_count() };
                 let slot = &LEAK_TASK[cpu_id];
                 let since = &LEAK_SINCE[cpu_id];
-                if pc != 0 {
+                // sc205 (launcher leg 13): this tripwire runs INSIDE the
+                // timer IRQ, whose trap entry (trap.rs LOCAL_TIMER path)
+                // already did irq_enter() — so the interrupted task's
+                // count ALWAYS carries exactly one HARDIRQ_OFFSET here.
+                // A single level is legal observation context, not a
+                // leak: report only task-context bits, or hardirq
+                // nesting beyond the probe's own level (a real leak
+                // either way). The unmasked `pc != 0` test read every
+                // 2s-resident task as leaking and printed 17,906
+                // benign lines over sc205's post-panic park (5/s at the
+                // 20-jiffy gate) plus idle-park weather on the other
+                // CPU — noise that buried the (absent) real signal.
+                let task_bits = pc & !crate::interrupt::preempt::HARDIRQ_MASK;
+                let nest_extra = (pc & crate::interrupt::preempt::HARDIRQ_MASK)
+                    - crate::interrupt::preempt::HARDIRQ_OFFSET;
+                if task_bits != 0 || nest_extra > 0 {
                     let now = crate::drivers::timer::get_jiffies();
                     let task_word = slot.load(core::sync::atomic::Ordering::Relaxed);
                     if task_word == cur as usize as u64 {
