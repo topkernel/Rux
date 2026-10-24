@@ -3657,3 +3657,24 @@ rsp=0x7ff090410fc8" line (a USER frame). Confirmed MY lane's probe
   in flight since 19:05:13/19:05:52, budget ends ~19:50; both WW-ARMED
   19 with GUARD=0xffffffff80a7a000 (gdb logs), wildwatch try 0.
   Driver roots unchanged (176512 / 176547).
+- MAIN r76 (FULL 2700 s): CLEAN — 81080 lines, "budget spent" natural
+  end, 0 WW-HIT / 0 watchpoint hits / 0 heals, no panics, 0 badaddr
+  (raw serial + gdb verified); 10 IRQ-OFF-WINDOW lines (7 canonical
+  enable_irq, ages up to ~348 ms; 1 user-half sample 0x3fbf08a8bb —
+  same post-iret artifact family as load-r22's; 1 at the CAS site
+  80447ff0; 1 serial-interleaved garbled line). Driver self-advanced
+  to r77 (19:50:13).
+- LOAD r23 (FULL 2700 s): CLEAN — 161661 lines, 777 sdc exec cycles,
+  0 gdb hits / 0 capture markers, armed try 0, 0 badaddr; 13
+  IRQ-OFF-WINDOW lines (10 canonical + 2 inb-family 80573ed0, ages
+  332-698 ms; 1 at 8022214a = `TwoWaySearcher::next` — a new one-off
+  sampling point, string-scan loop, same jitter reading). Driver
+  self-advanced to load-r24 (19:50:55).
+- Cumulative: **0 WW-HIT across r1-r76 complete rounds** (plus
+  partials), 0 META-SMASH. Load surface: p1 + r1-r23 = **~17991 sdc
+  exec cycles over 24 full armed load-hours**, zero fires, zero false
+  positives.
+- r77 (qemu 363698, gdb 363761) / load-r24 (qemu 363836, gdb 365929)
+  in flight since 19:50:13/19:50:55, budget ends ~20:35; both WW-ARMED
+  19 with GUARD=0xffffffff80a7a000 (gdb logs). Driver roots unchanged
+  (176512 / 176547).
