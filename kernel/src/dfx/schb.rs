@@ -218,6 +218,11 @@ pub fn oom_anat_dump() {
         o += 1;
     }
     crate::mm::small_alloc::census_line();
+    // Leg-16: type identification for the two heaviest classes at the
+    // floor (c256 ~520K live, c1024 ~84K live) — dump object headers from
+    // the active slab pages; vtables/magic are symbolisable offline.
+    crate::mm::small_alloc::census_peek(5, 8);
+    crate::mm::small_alloc::census_peek(7, 8);
 }
 
 /// Start the schbd kthread. Gated on the `dfx=schb` switch; called from
@@ -362,6 +367,16 @@ extern "C" fn schbd_fn(_arg: *mut core::ffi::c_void) -> i32 {
                 .map(|n| n.free_pages() as u64)
                 .unwrap_or(0);
             let heapk = crate::mm::buddy_allocator::buddy_stats().used_bytes / 1024;
+            // Leg-16: fire the allocator anatomy dump when the heap is
+            // ~80% full — comfortably before the floor/OOM would, so a
+            // roll that never quite reaches the fake-OOM still banks the
+            // census (one-shot; the OOM path reuses the same guard).
+            {
+                let st = crate::mm::buddy_allocator::buddy_stats();
+                if st.used_bytes * 5 >= st.heap_size * 4 {
+                    oom_anat_dump();
+                }
+            }
             let mut w = ConsoleWriter::new();
             let _ = writeln!(
                 w,
