@@ -35,6 +35,19 @@ pub enum SoftirqIndex {
 /// Total number of softirq vectors
 pub const NR_SOFTIRQS: usize = 10;
 
+/// Per-CPU, per-vector softirq raise counters (Linux /proc/softirqs).
+pub static SOFTIRQ_RAISED: [[AtomicU64; NR_SOFTIRQS]; crate::config::MAX_CPUS] =
+    [const { [const { AtomicU64::new(0) }; NR_SOFTIRQS] }; crate::config::MAX_CPUS];
+
+/// Read one per-CPU softirq counter (Linux /proc/softirqs).
+pub fn raised_count(cpu: usize, vec: usize) -> u64 {
+    if cpu < crate::config::MAX_CPUS && vec < NR_SOFTIRQS {
+        SOFTIRQ_RAISED[cpu][vec].load(Ordering::Relaxed)
+    } else {
+        0
+    }
+}
+
 /// Maximum softirq processing loops before waking ksoftirqd
 const MAX_SOFTIRQ_RESTART: usize = 10;
 
@@ -133,6 +146,10 @@ pub fn raise_softirq_irqoff(nr: usize) {
     // SAFETY: per-CPU arrays accessed only by current CPU; cpu_id is correct
     unsafe {
         SOFTIRQ_PENDING[cpu].fetch_or(1u32 << nr, Ordering::Release);
+    }
+    // /proc/softirqs: count the raise on the CPU that raised it.
+    if cpu < crate::config::MAX_CPUS && nr < NR_SOFTIRQS {
+        SOFTIRQ_RAISED[cpu][nr].fetch_add(1, Ordering::Relaxed);
     }
 }
 

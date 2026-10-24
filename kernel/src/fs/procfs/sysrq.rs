@@ -33,8 +33,16 @@ fn run_command(cmd: u8) {
             crate::println!("sysrq: crashing the kernel on request");
             panic!("sysrq 'c' — deliberate crash");
         }
-        // Display every lock currently held.
-        b'd' => crate::fs::locks::dump_held_locks(),
+        // Display every lock currently held — Linux's sysrq 'd' prints
+        // the /proc/locks rows.
+        b'd' => {
+            let locks = crate::fs::procfs::locks::render();
+            if locks.is_empty() {
+                crate::println!("sysrq: no locks held");
+            } else {
+                crate::println!("{}", locks.trim_end());
+            }
+        }
         // Send SIGTERM to all processes except init.
         b'e' => signal_all_except_init(crate::signal::Signal::SIGTERM as i32),
         // Invoke the OOM killer.
@@ -45,6 +53,9 @@ fn run_command(cmd: u8) {
                 if killed { "killed a process" } else { "found nothing to kill" }
             );
         }
+        // Send SIGKILL to all processes except init (upstream sysrq-i;
+        // 'e' is the SIGTERM twin).
+        b'i' => signal_all_except_init(crate::signal::Signal::SIGKILL as i32),
         // Secure Access Key: kill the programs attached to the console.
         b'k' => {
             crate::println!("sysrq: SAK is not supported (no virtual console)");
@@ -105,14 +116,10 @@ fn run_command(cmd: u8) {
             crate::printk::set_console_loglevel(level);
             crate::println!("sysrq: console loglevel set to {}", level);
         }
-        // Replay the kernel log messages on the consoles.
-        b'R' => {
-            let log = crate::printk::generate_kmsg();
-            if let Ok(text) = core::str::from_utf8(&log) {
-                crate::println!("{}", text);
-            }
-        }
-        // 'h' and every unlisted key print the help text.
+        // 'h' and every unlisted key print the help text — the upstream
+        // table has no 'R', so a write of 'R' prints the help here too,
+        // exactly like Linux. (Kernel-log replay is /dev/kmsg + dmesg,
+        // not a sysrq command.)
         _ => print_help(),
     }
 }
@@ -137,6 +144,9 @@ fn signal_all_except_init(sig: i32) {
 /// current task of each CPU plus the kernel-text words on its stack —
 /// the same shape the hung-task detector reports.
 fn dump_all_cpu_stacks() {
+    // The calling CPU's own backtrace, symbolized (Linux's 'l' prints
+    // a backtrace per CPU; the other CPUs' stacks are scanned below).
+    crate::dfx::backtrace::dump_stack();
     let currents = crate::sched::sched::grq_diag_cpu_currents();
     for (cpu, (pid, is_idle, task)) in currents.iter().enumerate() {
         if task.is_null() {
@@ -246,7 +256,6 @@ fn print_help() {
     crate::println!("sysrq: t       - task list and task information");
     crate::println!("sysrq: w       - tasks stuck in uninterruptible state");
     crate::println!("sysrq: 0-9     - set the console log level");
-    crate::println!("sysrq: R       - replay the kernel log");
     crate::println!("sysrq: _cmd    - run several commands in sequence");
 }
 

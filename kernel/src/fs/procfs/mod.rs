@@ -55,9 +55,16 @@ pub mod mounts;
 pub mod loadavg;
 pub mod self_proc;
 pub mod pid;
+pub mod diskstats;
 pub mod interrupts;
+pub mod kallsyms;
+pub mod locks;
+pub mod stat;
+pub mod schedstat;
+pub mod softirqs;
 pub mod sysctl;
 pub mod sysrq;
+pub mod vmstat;
 pub mod net;
 pub mod configgz;
 
@@ -513,6 +520,21 @@ impl ProcFSSuperBlock {
         self.create_dynamic_file("filesystems", mounts::generate_filesystems);
         self.create_dynamic_file("mountinfo", mounts::generate_mountinfo);
         self.create_dynamic_file("interrupts", interrupts::generate);
+        // Per-CPU time accounting + system counters (Linux layout).
+        self.create_dynamic_file("stat", stat::generate);
+        // The kernel symbol table (Linux layout).
+        self.create_dynamic_file("kallsyms", kallsyms::generate);
+        // The held file locks (Linux layout).
+        self.create_dynamic_file("locks", locks::generate);
+        // The per-device I/O statistics (Linux layout).
+        self.create_dynamic_file("diskstats", diskstats::generate);
+        // Memory statistics (Linux layout).
+        self.create_dynamic_file("vmstat", vmstat::generate);
+        self.create_dynamic_file("buddyinfo", vmstat::generate_buddyinfo);
+        // Scheduler statistics (Linux layout).
+        self.create_dynamic_file("schedstat", schedstat::generate);
+        // Softirq statistics (Linux layout).
+        self.create_dynamic_file("softirqs", softirqs::generate);
         self.create_dynamic_file("partitions", partitions_generate);
 
         // U2 kmod: registered loadable modules (kernel/src/module).

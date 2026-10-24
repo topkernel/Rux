@@ -23,10 +23,11 @@ pub fn test_config() {
     test_assert_eq!(MAX_TASKS, 256, "MAX_TASKS == 256");
 
     // Test 4: Memory sizes
-    // Kernel heap grew 32MB -> 128MB -> 512MB (distro-scale userspace,
-    // then the OH/GNOME service set); kernel stacks doubled again
-    // (64KB -> 128KB) after the r19 stack fix.
-    test_assert_eq!(KERNEL_HEAP_SIZE, 536870912, "KERNEL_HEAP_SIZE == 512MB");
+    // Kernel heap grew 32MB -> 128MB -> 512MB -> 1024MB (distro-scale
+    // userspace, then the OH/GNOME service set, then the OH sandbox
+    // workload); kernel stacks doubled again (64KB -> 128KB) after the
+    // r19 stack fix.
+    test_assert_eq!(KERNEL_HEAP_SIZE, 1073741824, "KERNEL_HEAP_SIZE == 1024MB");
     test_assert_eq!(PHYS_MEMORY_SIZE, 2147483648, "PHYS_MEMORY_SIZE == 2GB");
     test_assert_eq!(USER_STACK_SIZE, 8388608, "USER_STACK_SIZE == 8MB");
     test_assert_eq!(KERNEL_STACK_SIZE, 131072, "KERNEL_STACK_SIZE == 128KB");
@@ -60,6 +61,6 @@ pub fn test_config() {
     test_assert_eq!(PIPE_BUFFER_SIZE, 16384, "PIPE_BUFFER_SIZE == 16384");
 
     // Test 12: Futex
-    test_assert_eq!(FUTEX_WAITER_POOL_SIZE, 256, "FUTEX_WAITER_POOL_SIZE == 256");
-    test_assert_eq!(FUTEX_HASH_SIZE, 64, "FUTEX_HASH_SIZE == 64");
+    test_assert_eq!(FUTEX_WAITER_POOL_SIZE, 8192, "FUTEX_WAITER_POOL_SIZE == 8192");
+    test_assert_eq!(FUTEX_HASH_SIZE, 512, "FUTEX_HASH_SIZE == 512");
 }

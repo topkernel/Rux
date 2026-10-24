@@ -222,6 +222,9 @@ impl BlockDeviceManager {
 /// # Returns
 /// Ok(()) if submitted successfully, Err on failure.
 // SAFETY: disk is a valid GenDisk pointer from register_disk; completion outlives the async operation.
+/// Per-device I/O statistics (Linux's /proc/diskstats counters).
+pub mod iostat;
+
 pub fn blkdev_read_async(
     disk: *const GenDisk,
     sector: u64,
@@ -231,7 +234,16 @@ pub fn blkdev_read_async(
     unsafe {
         let gd = &*disk;
         if let Some(async_fn) = gd.async_read_fn {
+            // /proc/diskstats: the async path does not go through
+            // submit_request, so it is counted here.
+            let major = gd.major;
+            let minor = gd.first_minor;
+            let sectors = (buf.len() / 512) as u64;
+            let t0 = crate::drivers::timer::read_time();
             let ret = async_fn(disk, sector, buf, completion as *const _ as *mut _);
+            let elapsed_ns = crate::drivers::timer::read_time().saturating_sub(t0) * 100
+                / crate::config::TIMER_CLOCK_FREQ_HZ;
+            iostat::note_io(major, minor, false, sectors, elapsed_ns);
             if ret < 0 {
                 Err(ret)
             } else {
@@ -246,6 +258,8 @@ pub fn blkdev_read_async(
 static BLOCK_MANAGER: BlockDeviceManager = BlockDeviceManager::new();
 
 pub fn register_disk(disk: Box<GenDisk>) -> Result<(), &'static str> {
+    // /proc/diskstats lists every registered device.
+    iostat::register_device(disk.major, disk.first_minor, disk.name);
     BLOCK_MANAGER.register_disk(disk)
 }
 
@@ -254,7 +268,20 @@ pub fn get_disk(major: u32) -> Option<*const GenDisk> {
 }
 
 pub fn submit_request(disk: *const GenDisk, req: &mut Request) -> i32 {
-    BLOCK_MANAGER.submit_request(disk, req)
+    // /proc/diskstats: count the request and the time it took. The
+    // request carries the transfer size, so the sector count is exact.
+    let major = unsafe { (*disk).major };
+    let minor = unsafe { (*disk).first_minor };
+    let is_write = matches!(req.cmd_type, ReqCmd::Write);
+    let sectors = (req.buffer.len() / 512) as u64;
+    let t0 = crate::drivers::timer::read_time();
+    iostat::note_start(major, minor);
+    let ret = BLOCK_MANAGER.submit_request(disk, req);
+    iostat::note_end(major, minor);
+    let elapsed_ns = crate::drivers::timer::read_time().saturating_sub(t0) * 100
+        / crate::config::TIMER_CLOCK_FREQ_HZ;
+    iostat::note_io(major, minor, is_write, sectors, elapsed_ns);
+    ret
 }
 
 pub fn blkdev_read(disk: *const GenDisk, sector: u64, buf: &mut [u8]) -> Result<usize, i32> {

@@ -17,6 +17,8 @@ pub mod meminfo;
 pub mod mm_struct;
 pub mod memblock;
 pub mod zone;
+/// Kernel VM statistics (the counters behind /proc/vmstat).
+pub mod vmstat;
 pub mod pglist;
 pub mod page_alloc;
 pub mod rmap;

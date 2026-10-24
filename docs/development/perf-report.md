@@ -56,6 +56,12 @@ post-merge flagship; = the timer fix 199f308c on the pa20-era kernel);
 pre-flagship rows cite main@988e10c1 (pa20) and main@9bc3a5c8 (pa18). The
 only pending addition remains the **last row of table 1** (post-UI-boot
 milestones), to be filled when the UI milestone is reached.
+**Section 8 is the v1.5 draft skeleton** (leg 21): the design of the
+post-UI microbench + same-host Linux comparison layer the user has
+mandated — probe list, delivery method, comparison protocol, and
+placeholder tables. It contains no numbers yet; it exists so the
+measurement can run the day the UI milestone lands on a main-class
+kernel.
 
 ---
 
@@ -488,3 +494,221 @@ table):
   measurement boot on the post-UI kernel (same method, same 780 s
   horizon); optionally refresh table 2/3 totals in one sentence if
   they shift materially — no structural change expected.
+
+---
+
+## 8. Post-UI microbench + same-host Linux comparison (v1.5 DRAFT — design only, no numbers)
+
+Leg-21 design skeleton. The user mandate: when the UI milestone lands
+(launcher.ready SET on a main-class kernel), produce the full post-UI
+performance report with microbenchmarks and a same-host Linux
+comparison. This section is pre-built so that day is a measurement
+day, not a design day. Everything below is committed as design;
+**all result cells are placeholders** until the runs exist.
+
+### 8.1 Division of labor: what syscost already answers vs what needs a probe
+
+The quiet-boot syscost instrument (per-syscall {n, avg, max, wall},
+slow-ring >4 ms, tick modes, EFLAGS-exact IF=0 zones + REST sites,
+census, UART/printk tables) already answers, from ONE quiet pa boot on
+the post-UI kernel:
+
+| question | syscost source (existing) | post-UI action |
+|---|---|---|
+| post-UI milestone timeline (table 1 pending row) | patstamp host stamps | fill row, this boot |
+| whole-boot per-op syscall costs (table 2 refresh) | per-nr {n,avg,max} | refresh in one sentence |
+| CPU mode split, IF=0 share/composition (rows 1/1b) | tick modes + zone v3 | hold-or-move check |
+| wake-loss census (row 2 tripwire) | TERM/WAKE counters | hold check |
+| console/UART share (row 1a) | uart_putc tables | hold check |
+
+What syscost CANNOT answer, by construction — the probe set's scope:
+
+1. **Steady-state per-op costs free of boot phase mix.** Boot-mix
+   averages are phase-coupled (mkdir 9.6 ms vs 62 ms across boots was
+   phase mix, not kernel change); the probe measures each op in a
+   controlled loop with median/p99.
+2. **Any Linux-side per-op number.** The reference kernel (OHOS
+   6.6.101, the image's own bzImage) has no syscost; a userspace probe
+   binary is the only instrument that runs IDENTICALLY on both
+   kernels. The v1.4 "Linux norm" column was order-of-magnitude
+   references; v1.5 replaces them with same-binary measurements.
+3. **Ops the boot never does in a controlled shape**: null-syscall
+   floor, context switch, fork+exit, pipe/socket roundtrip, page-fault
+   classes, sleep overshoot.
+
+### 8.2 Probe set (one static binary, P1-P7)
+
+One static musl x86_64 binary (toolchain `x86_64-rux-linux-musl`,
+musl = the OH image's own libc family; static = no libc-version
+skew between sides). Timing: `rdtsc` deltas calibrated per-run
+against `CLOCK_MONOTONIC_RAW` (supported on Rux, kernel/src/syscall/
+time.rs); medians + p99 over fixed N with warmup discarded — means
+stay useless under foreign-QEMU host noise. One parsable result line
+per bench (`PBENCH <name> n=<N> med=<us> p99=<us> min=<us> ...`).
+
+| id | bench | method (both sides identical) | what it pins down |
+|---|---|---|---|
+| P1 | null syscall floor | `syscall(SYS_getuid)` loop, N=1e6; separate row: `clock_gettime` loop | raw kernel entry/exit cost; the syscall() wrapper bypasses Linux's vDSO/glibc caching, so both sides measure the true entry path. Rux side cross-check: syscost clock_gettime avg 3-4 us |
+| P2 | context switch / wakeup | two processes, `sched_setaffinity` to opposite CPUs (supported, sched.rs:938), 1-byte pipe ping-pong, N=1e5; report half-roundtrip | scheduler + IPC wake cost in controlled shape; complements workload-shaped futex tails |
+| P3 | page-fault classes | (a) first-touch anon (touch every page of a fresh 64 MB map); (b) COW (fork, child writes shared touched pages, N faults counted); (c) file-map cold read (mmap+touch a file the probe wrote first) | us/fault per class; cross-check: A-line PACE healthy-regime 3.4 us/COW (their branch kernel; this gives the main-class + Linux pair) |
+| P4 | fork+exit; fork+exec+exit | N=1e3 loops; exec target = a tiny static binary shipped next to the probe | process create/destroy cost (appspawn's shape) |
+| P5 | pipe/socket roundtrip | (a) pipe 1-byte roundtrip; (b) unix dgram sendto/recvfrom pair incl. one `MSG_PEEK` variant = the exact hilogd protocol; (c) unix stream 74 B write/read pair (hilogd consume shape) | per-record socket cost behind ~25% of boot syscall volume (row 3); the PEEK row measures the OH-side protocol overhead on both kernels |
+| P6 | fs ops on ext4 (userdata) | a prep pass builds an identical tree (1000-entry dir, 1000 x 4 KB files) on the private userdata copy, then: stat, open+close, getdents, unlink, mkdir+rmdir, 4 KB write+fsync, page-cached read, append; N=1e3-1e4 each | steady-state row-4 numbers free of boot phase mix; same ext4 contents on both sides |
+| P7 | sleep resolution | nanosleep(1 ms) x 1e4, report avg overshoot | post-tick-fix regression guard (221 ms boot avg is the mixed tail; this isolates the healthy path) |
+
+Not probed (deliberately): CPU-bound user loops (kernel report, not a
+CPU survey), memory bandwidth (same), TCP loopback (unix dgram is the
+workload shape; TCP can be a v1.6 addition).
+
+### 8.3 Delivery and output channel (open point, one decision left)
+
+Options, with the established precedents:
+
+- **(A) RECOMMENDED — late-service slot swap**: debugfs-inject the
+  static probe into a PRIVATE copy of system.img at a slot OH execs
+  late in boot, replacing a non-essential service binary (precedent:
+  the A-line zeroed libusb_pnp_manager in oh-img-p without breaking
+  boot). Criteria for the slot: exec'd (not dlopen'd), starts after
+  launcher/appspawn phase, non-essential. Decide the exact slot by
+  reading the image's cfg XMLs on build day. Output: results written
+  to a file on /data (userdata, extracted via debugfs post-boot —
+  A-line precedent) PLUS best-effort write to /dev/console for live
+  serial monitoring.
+- (B) bootanimation slot: runs earlier (post-composer, pre-launcher on
+  Rux) — wrong phase for a post-UI report; reject unless (A) is
+  blocked.
+- (C) hdc shell post-boot: needs hdc working on both kernels; Rux-side
+  status is the hdc-tcp lane's territory. Fallback only.
+
+Linux side identical: same injected binary, same private image copies,
+booted with the oh-linux-ref harness (`test/run-oh-linux-ref.sh`,
+reference bzImage = OHOS 6.6.101) with machine config aligned to the
+pa series: **SMP=2 MEM=4096M** (its defaults are smp6/8G — must be
+overridden) and `-cpu host` vs pa's `-cpu max` delta recorded (or the
+script patched for the probe runs; oh-ref-r1/r2 timeline boots stay
+untouched).
+
+### 8.4 Same-host Linux comparison protocol
+
+| number | source | new boots needed? |
+|---|---|---|
+| table 1 Linux milestone column; section 4 topology statements | oh-ref-r1/r2 serial logs (existing) | no |
+| every P1-P7 probe number | probe runs on the reference kernel | yes: N=3 Linux probe boots |
+| every P1-P7 Rux number | probe runs on post-UI main-class kernel | yes: N=3 Rux probe boots |
+| post-UI milestone row + tables 2/3 refresh | one quiet syscost boot (the standard pa recipe) | yes: 1 x 780 s Rux boot |
+
+Protocol details: probe boots are SHORT (milestone + probe wall +
+margin — no 780 s horizon; the probe itself is seconds-to-minutes);
+Rux and Linux probe boots run back-to-back in one contiguous window,
+interleaved (R,L,R,L,...), foreign-QEMU count noted per boot like the
+pa series; medians/p99 make single-run outliers visible; 3 per side
+gives the range column. v1.4's "Linux norm" cells get replaced by
+these measurements where they exist (flagged in place), keeping the
+old text as the historical pre-UI reading.
+
+### 8.5 Result tables (PLACEHOLDERS — empty until measured)
+
+Table 8a — probe grid (per side: median of 3 boots; p99 in parens):
+
+| bench | Rux (post-UI main-class) | Linux (OHOS 6.6.101) | factor |
+|---|---|---|---|
+| P1 null syscall | PENDING | PENDING | — |
+| P1 clock_gettime | PENDING | PENDING | — |
+| P2 ctx switch (half roundtrip) | PENDING | PENDING | — |
+| P3a/b/c fault anon/COW/file | PENDING | PENDING | — |
+| P4 fork+exit / fork+exec | PENDING | PENDING | — |
+| P5 pipe / dgram pair / PEEK / stream | PENDING | PENDING | — |
+| P6 fs ops (per-op rows) | PENDING | PENDING | — |
+| P7 sleep overshoot 1 ms | PENDING | PENDING | — |
+
+Table 8b — syscost refresh vs the pa27 flagship (one quiet post-UI
+boot): IF=0 share __, census TERM/WAKE __/__ (baseline 8/32), ticks
+/s __, nanosleep avg __ ms, milestones __ — PENDING.
+
+### 8.6 Run-day checklist (the day UI lands on a main-class kernel)
+
+1. Confirm the milestone in a main-class serial (this lane's patrol or
+   the coordinator's signal); record kernel revision.
+2. Merge main into this branch; build; run the standard quiet boot
+   (pa32+: syscost=1 sprobe=0, 780 s) — fills table 1's pending row
+   and table 8b.
+3. Write the probe binary per 8.2 (design is committed; the code is
+   deliberately not written yet); pick the 8.3 slot from the cfg XMLs;
+   inject into private image copies (Rux + reference).
+4. N=3 + N=3 interleaved probe boots (8.4); parse; fill table 8a.
+5. Freeze v1.5: replace v1.4's "Linux norm" reference cells with
+   measured pairs where they exist; write the reading paragraph.
+
+Budget note: 1 long boot + ~6 short boots, sequential — fits the
+2-self-started-QEMUs-at-a-time discipline with the long boot alone in
+its window; this plan is the next leg's gate spec.
+
+### 8.7 Harness status (leg 22): probe built and smoke-validated — run day starts from a tested binary
+
+The 8.2 design is now code (leg 22, commit b72e0011):
+`test/pbench.c` (one static musl x86_64 binary, ~70 KB) +
+`test/pbench_boot.py` (quiet-boot driver, faultlat mkfs-d recipe).
+Every bench emits `PBENCH <name> n= med= p99= min= max= avg= wall=`
+(rdtsc med/p99 + a MONOTONIC_RAW wall backstop), a `SKIP why=` line on
+unsupported primitives instead of aborting, `PBENCH DONE rc=0` last,
+then reboot(POWER_OFF) (clean sync + powerdown, verified).
+
+Validation chain:
+
+1. Host run (Linux, same binary): 25/25 lines, med/p99 sane — caught
+   and fixed a fmt stack-overread and a pipe read/write-end swap
+   (P2/P5a) plus an echo-child EOF deadlock before any QEMU burn.
+2. Guest smoke **pb1** (kernel pa31-main-bzImage = main 62c2708e; the
+   only delta to main 9fe7cdbb is this report's docs): quiet boot,
+   init=/test/pbench, q35/-cpu max/SMP2/2G, DONE at t=378 s — the
+   whole probe fits a SHORT boot with wide margin (8.4's "seconds to
+   minutes" holds). Full set landed: 25/25 lines, aff=1 (pinning
+   works), n full on every bench.
+3. Output channel both ways: serial lines live AND
+   /test/pbench-results.txt persisted in the guest ext4, extracted
+   post-poweroff via debugfs — the file half of the 8.3(A) delivery
+   option is proven (on the quiet-boot image).
+
+Provisional smoke numbers (pb1, ONE boot, minimal-rootfs ext4, NOT the
+OH image, NOT run-day numbers — recorded so run day has a sanity anchor
+and so gross regressions in the harness itself are visible):
+
+| bench | med | p99 | note |
+|---|---|---|---|
+| p1_null | 4.57 us | 6.8 us | true entry path via syscall() |
+| p1_clock | 4.95 us | 5.4 us | cross-checks syscost clock_gettime avg 3-4 us — harness agrees with the kernel-side instrument |
+| p2_ctxsw (half rt) | 15.4 us | 437.7 us | pinned CPU0/CPU1, aff=1 |
+| p3a anon fault | 0.08 us | 583 us | med sub-us = most stores hit already-mapped pages (eager anon mapping); p99 is the fault tail |
+| p3b COW fault | 24.6 us | 52.0 us | A-line PACE healthy-regime said 3.4 us/COW on their branch kernel — same order, different kernel/boot, recheck on run day |
+| p3c file fault | 0.07 us | 1103 us | med sub-us = faultaround mapping ahead of the touch; p99 1.1 ms = cold fault |
+| p4_fork_exit | 8.32 ms | 12.0 ms | |
+| p4_fork_exec | 13.4 ms | 19.7 ms | exec target = self re-exec |
+| p5a pipe rt | 21.5 us | 32.4 us | unpinned |
+| p5b dgram send / recv+PEEK | 126 / 275 us | 462 / 479 us | hilogd protocol shape |
+| p5c stream write 74 B | 56.2 us | 568 us | |
+| p6_stat / openclose / read_cached | 128 / 310 / 367 us | 0.3-0.7 ms | |
+| p6_getdents (full 1000-entry sweep) | 9.98 ms | 13.1 ms | |
+| p6_write_fsync 4 KB | 18.1 ms | 48.7 ms | fsync dominates |
+| p6_append 4 KB | 500 us | 744 us | |
+| p6_mkdrmdir pair | **83.2 ms** | 139.7 ms | metadata writes: see below |
+| p6_unlink | **32.8 ms** | 66.5 ms | |
+| p7 sleep 1 ms overshoot | 2.09 ms | 2.25 ms | wall avg 9.98 ms is host-noise contaminated (load 10); med/p99 are the signal |
+
+Two findings worth carrying into run day regardless of UI timing:
+
+- **Metadata-write ops are the ext4 outlier, steady state.** mkdir+rmdir
+  83 ms and unlink 33 ms per op on a QUIET boot with zero boot-phase
+  mix — 2 orders over reads (stat 128 us). This pins the old table-4
+  boot-mix mkdir spread (9.6-62 ms) as real per-op cost, not phase
+  mix. The Linux pair on run day will size the gap.
+- **1G is below this kernel's early-boot heap floor.** A minimal-rootfs
+  q35 boot with -m 1G panics in ~3 s on a 4 MB kernel-heap allocation
+  (main.rs:271 OOM path) before init runs; -m 2G is the working floor
+  (faultlat precedent; Makefile default). Affects any line sizing
+  "cheap" test boots at 1G on x86_64.
+
+Still untested (run-day items, by design — QEMU budget spent on the
+quiet-boot smoke): the 8.3(A) late-service slot pick from the OH cfg
+XMLs, the debugfs swap into a private system.img copy, and the probe
+running to DONE inside the OH boot. The quiet-boot path (8.6 step 2
+shape) is fully proven.
