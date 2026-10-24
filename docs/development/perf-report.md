@@ -613,6 +613,18 @@ Table 8a — probe grid (per side: median of 3 boots; p99 in parens).
 Rux column fills on run day.** Linux cells = median of 4 boots
 (med-of-runs; p99 = med-of-runs of per-run p99), unit us:
 
+> **Leg-29 (2026-10-25) terminal state of the Rux column:** the
+> trigger's footprint arm fired (the A-line from_fn trilogy landed on
+> main as dca64cc4/056b68ad/26391849; tip fee7774f) and the run day
+> opened — but the probe's start condition (bootevent.launcher.ready
+> SET) is observably FALSE on the fee7774f main-class kernel (pa38
+> quiet boot, 780 s: milestone never set, same depth profile family
+> as pa32/pa33, death class below). 8.6's own step 1 (confirm the
+> milestone in a main-class serial) gates step 4, so the N=3 probe
+> boots were not spent on a start condition known false — the cells
+> stay unmeasured, NOT abandoned: 8.9 records the exact re-fire
+> condition and the pre-staged run-day assets.
+
 | bench | Rux (post-UI main-class) | Linux (OHOS 6.6.101) | factor |
 |---|---|---|---|
 | P1 null syscall | PENDING | 0.040 (0.050) | — |
@@ -638,6 +650,22 @@ Table 8b — syscost refresh vs the pa27 flagship (one quiet post-UI
 boot): IF=0 share __, census TERM/WAKE __/__ (baseline 8/32), ticks
 /s __, nanosleep avg __ ms, milestones __ — PENDING.
 
+> **Leg-29 (pa38, main-class fee7774f = from_fn trilogy, terminal
+> state — the "post-UI" refresh remains unreachable, UI never
+> landed):** census TERM-DESCHED 8 / WAKE-REFUSED 32 — EXACT baseline
+> hold, sixth consecutive roll (pa23/pa27/pa31/pa32/pa33/pa38); the
+> from_fn fork-path fixes do not move the census. Ticks 99.74/99.76/s
+> per CPU at t=720 (SYSCOST dump deltas 60s->720s: 65,828/65,840
+> samples over 660 s; pa33 was 99.86/99.83 — in-band). WAKE-STRANDED
+> 2 prints, organic ~1-2 s class (1332 ms pid 318, 2013 ms pid 675;
+> no 1001 ms grid). Milestones: composer_host.ready / appspawn.started
+> / bootanimation.finished SET; appfwk.ready, bms.main.bundles.ready,
+> launcher.ready, lockscreen.ready NOT set (launcher warning at
+> +44.1 s). Boot volume 49,540 serial lines vs pa33's 21,580 — the
+> app phase now runs the full window (81 ABC ability restarts:
+> launcher 48, systemui extensions 33) instead of stalling early;
+> 136.4 M syscalls (deepest pa-series volume, pa27 was 100.9 M).
+
 ### 8.6 Run-day checklist (the day UI lands on a main-class kernel)
 
 > Leg-23 update: step 4's Linux half is DONE (ref-r1..r4, section 8.8);
@@ -650,6 +678,20 @@ boot): IF=0 share __, census TERM/WAKE __/__ (baseline 8/32), ticks
 > milestone check), run/pbmed.py (med-of-runs aggregator; validated —
 > it reproduces the banked 8a Linux column from ref-r1..r4 exactly).
 > The trigger response is: merge main, make build-x86, then the boots.
+>
+> Leg-29 update (2026-10-25): the footprint arm of the trigger FIRED
+> (from_fn trilogy on main, tip fee7774f) and the response ran:
+> merge -> make build-x86 (run/pa38-main-bzImage, provenance
+> run/pa38-built-from.txt) -> quiet boot pa38 (780 s) -> milestone
+> verdict. Step 1 FAILED to confirm the milestone (launcher.ready
+> never set; see the 8b note and 8.9), so step 4's N=3 probe boots
+> were not launched — the probe's param job is conditioned on
+> bootevent.launcher.ready=true, a condition measured false on this
+> exact kernel 40 minutes into the same boot class that would host
+> it. Everything else the checklist lists as run-day material is in
+> place and re-verified (leg 28): injected image, boot script,
+> aggregator, banked Linux column. The next fire of either trigger
+> arm repeats this response from step 1.
 
 1. Confirm the milestone in a main-class serial (this lane's patrol or
    the coordinator's signal); record kernel revision.
@@ -815,3 +857,86 @@ this worktree's userdata-tok reflink (not oh-robot's 16G stock that
 oh-ref-r1/r2 booted): run-day Rux boots will use the SAME base, so
 side parity holds. p7 wall backstop reads ~1.067 ms/op vs req+avg
 1.016 ms — per-iter clock-pair overhead; med/p99 remain the signal.
+
+### 8.9 TERMINAL REPORT (leg 29, 2026-10-25 — trigger fired; run day executed to its terminal state)
+
+The user mandate for this line was: when the trigger fires, produce
+the full post-UI performance report — microbenchmarks, same-host
+Linux comparison, v1.5 frozen. The trigger fired on 2026-10-25 02:31
+(watcher tick `main=fee7774f footprint=YES kernel_new=14`): the A-line
+from_fn footprint trilogy landed on main (rebased as dca64cc4 ext4
+fill_page_cache_batch / 056b68ad Task construction / 26391849 FdTable
+fork_from), followed at tip by fee7774f reverting the kstack-sizing
+third of their stack (80KB slots overflowed the deeper-nesting riscv64
+kernel; suite 1094/1096 -> 1096/1096 with the revert). The run-day
+response ran the same hour and reached a terminal, measured verdict:
+
+**1. What is DONE and banked.**
+
+- Linux half complete (leg 23, 8.8): all 21 benches, med-of-4,
+  stability within protocol — table 8a's Linux column is final.
+- Rux pre-UI performance work complete and merged across legs 13-26:
+  the tick-grid fix (official pa27: census TERM 8 / WAKE 32 / STRANDED
+  0, nanosleep -10x, clock_gettime max 654 ms -> 3 ms), the IF=0/UART
+  cost-center map (v1.4), the probe harness (test/pbench.c, smoke-
+  validated end to end both output channels), and the run-day
+  mechanics (inject + boot + aggregate, all re-verified byte-clean).
+- Census discipline: SIX consecutive exact baseline holds across five
+  kernel-commit classes (pa23 pre-merge, pa27 flagship, pa31, pa32
+  dfx-align, pa33 stallwatch pidhash, pa38 from_fn) — TERM-DESCHED 8 /
+  WAKE-REFUSED 32 every roll. The wake-loss and tick invariants do not
+  move with any of it.
+
+**2. What the run day measured this fire, and why the Rux column
+stays unmeasured.** The milestone (bootevent.launcher.ready SET) —
+the probe's own start condition — is FALSE on the fee7774f
+main-class kernel (pa38, 780 s quiet boot, syscost=1). The blocker is
+NOT memory anymore: zero kernel OOM lines with the from_fn trilogy in
+(the fake-OOM class the footprint campaign targeted is gone from this
+boot class), and the census/tick invariants hold exactly. The blocker
+is a deterministic userspace-visible fault:
+
+```
+pagefault: Segfault at 0x0, rip=0x7ff082996bac, rsp=0x7fffffffcb10, mode=user
+```
+
+- Same rip, same rsp, fault address 0x0, in EVERY appspawn'd app
+  process (5 pids x 3 prints in pa38: 602/778/811/836/1401); ABC
+  restarts abilities 81 times across the window (launcher 48,
+  systemui extensions 33); the wedged launcher then spins on a dead
+  fd (SYSCOST rd_fail comm=m.ohos.launcher ret=-9 n=155,991 fd=32).
+- PRE-EXISTING, not a from_fn regression: pa33 (pre-from_fn main,
+  leg 24) carries the byte-identical signature at the same rip. What
+  from_fn changed is everything AROUND it: serial volume 21.5k ->
+  49.5k lines, restarts 0 -> 81, syscalls 100.9 M -> 136.4 M — the
+  app phase now survives deeper and retries for the full window
+  instead of stalling.
+- Rux-attributable: the SAME image under the reference OHOS 6.6.101
+  kernel reaches launcher.ready at t=10.1-16.7 s in all four ref-r
+  boots (8.8) — no crash. One kernel difference between those worlds
+  makes every spawned app deref NULL at one fixed instruction. The
+  rip is in the image's userspace (0x7ff0... arena); symbolizing it
+  against the image's libs and finding the divergent syscall is
+  launcher-lane work — the signature above is the handoff.
+
+**3. Re-fire condition (exact).** Either arm: (a) a sc2xx-class boot
+shows launcher.ready SET / OnForeground / ArkUI on a main-class
+kernel, or (b) main moves again with launcher-lane fix material. The
+response is the 8.6 checklist from step 1 — assets are staged
+(run/pbrux-system.img injected + e2fsck-clean, run/pbrux-boot.sh,
+run/pbmed.py, banked Linux column; pa38 proved the merge->build->
+quiet-boot loop same-day). With the milestone confirmed, the probe
+boots are minutes-class (ref side: full 21-bench probe + powerdown
+in ~35-40 s wall; pb1 smoke on Rux: DONE at t=378 s in a SHORT
+quiet boot) — the measurement day itself is small; the blocker was
+never the harness.
+
+**4. Verdict on the mandate.** The report this line was mandated to
+produce is delivered to the boundary of what the kernel can host:
+Linux side measured and final; Rux side blocked at a single
+identified, deterministic, Rux-attributable fault in the app-spawn
+path — with the full run-day apparatus staged and validated so the
+Rux column is one confirmed-milestone away. The performance findings
+that ARE measurable pre-UI (tick fix, census invariants, cost-center
+ranking, syscall tables) are final in sections 1-7 and survived six
+kernel generations unchanged.
