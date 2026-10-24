@@ -3,3 +3,28 @@ timer file verified byte-identical to scratch/tickfix (9a451bef) validated by pa
 probe patch applies clean on merged state (pre-verified leg 16)
 built 2026-10-24 15:03:27 PLATFORM=x86_64 make build
 6aa2fc74272c736551e0bb1e08990e7906e0d33c
+
+REBUILD RECIPE (verified leg 17; bzImage run/pa26-preview-bzImage is
+untracked per the >10MB leg rule):
+  git checkout 6aa2fc74 && git merge --no-commit 675095c0   \
+    && git apply run/pa16-probe.patch && PLATFORM=x86_64 make build
+  (675095c0 lives on the samgr-callback lane branch; its parent
+  efd3868e is NOT on main, so the merge --no-commit is a real
+  three-way merge, not a fast application of the fix alone.)
+Build is not bit-reproducible (link order); rebuilds differ from the
+archived bzImage in low bytes even from identical sources.
+
+LEG-17 CORRECTION (recorded with the official flagship pa27):
+"merge --no-commit of 675095c0" brought the A-line branch deltas
+beyond the timer fix — their dfx commits 852d0cf2 (one-shot TICKPROBE),
+2a02d5db (PREEMPT-LEAK tripwire hardirq discount), b634a615 (schb
+census re-arm) plus binder-stall/sleepsnap print code
+(kernel/src/ipc/binder.rs, printk.rs, sched.rs; none of these are in
+main). Evidence: the pa26 preview serial log carries 563 binder-stall
+lines, which only that code prints. The timer file itself WAS
+byte-identical to scratch/tickfix (verified), so the tick-fix
+validation transfer holds. Consequence: pa26's kernel is NOT identical
+to the official post-merge kernel (pa27 = main e1e317f2 + probe, where
+199f308c = the timer fix ONLY); the pa26 numbers remain a preview with
+extra dfx serial volume (563 lines over 600 s — negligible vs
+1.3-5.6 M console bytes/boot), superseded by pa27 wherever both exist.

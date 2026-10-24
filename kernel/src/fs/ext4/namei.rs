@@ -162,6 +162,7 @@ pub fn ext4_new_inode(
     // Find suitable group
     let is_dir = (mode & S_IFMT) == S_IFDIR;
     let group = find_group_orlov(fs, dir, is_dir)?;
+    crate::dfx::fsw::note_new_inode();
 
     // Get group descriptor
     let inode_bitmap_block = {

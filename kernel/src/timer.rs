@@ -758,6 +758,10 @@ pub fn timer_softirq_handler(_nr: usize) {
     // this softirq. Own cmdline key — no dfx=switches.rs bit consumed.
     crate::dfx::syscost::tick(current);
 
+    // perf-audit line (cmdline `fsw=1`): ext4/bio cost-anatomy counters
+    // (F4 diagnosis), same 60 s cadence.
+    crate::dfx::fsw::tick(current);
+
     // dfx=monowatch: ~1 Hz timebase jump tripwire (backward motion or
     // multi-second spikes, clocksource named) — same printk discipline
     // as the periodic dump above.

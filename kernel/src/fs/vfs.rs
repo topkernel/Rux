@@ -1620,6 +1620,7 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
     if pathname.is_empty() {
         return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
     }
+    crate::dfx::fsw::note_walk();
 
     // Convert to absolute path and normalize. P1 chroot: absolute paths are
     // interpreted in the CURRENT TASK'S namespace (root prefix), and the
@@ -1772,10 +1773,12 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
                         c.set_inode(fresh);
                     }
                 }
+                crate::dfx::fsw::note_walk_hit();
                 c
             }
             None => {
                 // Not in dentry cache — ask the filesystem to look it up
+                crate::dfx::fsw::note_walk_miss();
                 let dir_inode = match current.get_inode() {
                     Some(i) => i,
                     None => {
