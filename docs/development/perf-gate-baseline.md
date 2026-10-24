@@ -40,6 +40,16 @@ per metric or improve.
 | filesystem | stat / mkdir+rmdir / unlink / write+fsync medians (pbench P6) | pb1 column | ±20% or better |
 | filesystem | fsw sync-write classes | first-phase (t<90s) only | no new class |
 | filesystem | buffer-cache hit rate | 99.1% | ≥ baseline |
+| interrupts | IF=0 share (official KVM) | 25.7% | ±2pp |
+| interrupts | max closed cli segments | 3–7 ms | ≤10 ms |
+| interrupts | SOFTIRQ share of IF=0 | 3.1% | ±2pp |
+| IPC | pipe roundtrip (pbench P5) | pb1 column | ±20% |
+| IPC | unix writev/truesize avg | 24 µs class | ±20% |
+| binder | SLOW-TXN classes | queue=0 ms; image-side 15/30/89 s family only | no new class |
+
+General principle (user mandate): any subsystem that can affect system
+performance gets gate-code guardianship — not measured yet means "add the
+DFX tool", not "skip the check".
 
 ## Tier 3 — IF=0 share (allocator / IRQ-path changes)
 
