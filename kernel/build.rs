@@ -657,7 +657,21 @@ pub const PRINTK_RING_BUFFER_SIZE: usize = {};
         get_usize("memory", "user_stack_size", 8) * 1024 * 1024,
         get_usize("memory", "user_stack_max_size", 8388608),
         get_usize("memory", "user_heap_max_size", 134217728),
-        get_usize("memory", "kernel_stack_size", 32768),
+        // kernel_stack_size is per-arch (leg-17 re-land, fee7774f lesson):
+        // the base value (128KB) is what riscv64 and any unmeasured arch
+        // get — the riscv64 kernel nests deeper in kernel mode and an
+        // 80KB slot corrupted adjacent data under the LTP test kernel.
+        // x86_64 (where the 62.5KB max depth was measured, canary-clean)
+        // overrides to 80KB served by the cfg(x86_64)-only packed slab
+        // in process/task.rs.
+        {
+            let kstack_base = get_usize("memory", "kernel_stack_size", 131072);
+            if target_platform == "x86_64" {
+                get_usize("memory", "kernel_stack_size_x86_64", kstack_base as i64)
+            } else {
+                kstack_base
+            }
+        },
         get_usize("memory", "max_page_tables", 1024),
         get_usize("memory", "buddy_max_order", 20),
         get_usize("memory", "slab_num_caches", 10),

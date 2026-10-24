@@ -48,25 +48,40 @@ user_heap_max_size = 134217728
 enable_swap = true
 # Swap size (MB) — carved from end of block device
 swap_size_mb = 256
-# Kernel stack size (bytes) - 128KB.
+# Kernel stack size (bytes) - 128KB base, 80KB on x86_64.
 #
-# Was 64KB: the open("/dev/ptmx") chain (sys_openat → file_open →
-# devfs_open → ptmx_open → alloc_pty → PtyPair::new → TtyDevice::new)
-# moves the ~12KB PtyPair through by-value construction frames and ran
-# ~71KB deep in the debug build — spilling frames ~2 pages PAST the
-# stack bottom into the adjacent buddy-heap page. The spill zeroed
-# whatever object lived there (reproduced deterministically with
-# virtio-gpu: PID 1's FsStruct.root Vec buffer sat one page below the
-# stack; after the zeroing every path lookup was prefixed with a
-# garbage root byte ("\0/dev/pts/0") and all /dev opens failed ENOENT —
-# the "pty create/destroy race"; other heap draws zeroed File/PtyPair
-# objects instead: stale TIOCGPTN index, ENXIO slave opens, wild-jump
-# panics). A GDB hardware-watchpoint on the victim page caught the
-# writer: the Spinlock<TtyInput>::new memcpy executing at sp 0x1CC0
-# BELOW the stack bottom. 128KB restores ~57KB of headroom; the pty
-# layer additionally boxes its 8KB master_rx buffer (see fs/pty.rs) so
-# pair construction no longer shuffles 8KB through every frame.
+# ARCH-GATED since leg-17 (fee7774f lesson): the 80KB packed-slab slot
+# of leg-16 was measured safe on x86_64 OH loads only (max depth
+# 62,512B post-from_fn-trilogy, canary-clean) — the riscv64 TEST kernel
+# nests deeper in kernel mode, the ~15KB margin did not hold there
+# (make test: getpriority PRIO_PGRP read a corrupted nice=-120 → 140;
+# diagnostic revert restored 1096/1096). riscv64 (and any unmeasured
+# arch) therefore KEEPS the 128KB base: a power-of-two request is
+# already perfectly packed in one order-5 buddy block, and the packed
+# slab in process/task.rs is cfg(x86_64)-only. kernel_stack_size_x86_64
+# overrides the base for x86_64 builds (81920 = 80KB; served as three
+# slots per order-6 block, per-stack footprint 85.3KB).
+#
+# History (why 128KB is the floor for unmeasured arches): the
+# open("/dev/ptmx") chain (sys_openat → file_open → devfs_open →
+# ptmx_open → alloc_pty → PtyPair::new → TtyDevice::new) moves the
+# ~12KB PtyPair through by-value construction frames and ran ~71KB deep
+# in the debug build — spilling frames ~2 pages PAST the stack bottom
+# into the adjacent buddy-heap page. The spill zeroed whatever object
+# lived there (reproduced deterministically with virtio-gpu: PID 1's
+# FsStruct.root Vec buffer sat one page below the stack; after the
+# zeroing every path lookup was prefixed with a garbage root byte
+# ("\0/dev/pts/0") and all /dev opens failed ENOENT — the "pty
+# create/destroy race"; other heap draws zeroed File/PtyPair objects
+# instead: stale TIOCGPTN index, ENXIO slave opens, wild-jump panics).
+# A GDB hardware-watchpoint on the victim page caught the writer: the
+# Spinlock<TtyInput>::new memcpy executing at sp 0x1CC0 BELOW the stack
+# bottom. 128KB restores ~57KB of headroom; the pty layer additionally
+# boxes its 8KB master_rx buffer (see fs/pty.rs) so pair construction
+# no longer shuffles 8KB through every frame.
 kernel_stack_size = 131072
+# x86_64 arch override (see above): 80KB packed-slab slots.
+kernel_stack_size_x86_64 = 81920
 # Buddy allocator max order
 buddy_max_order = 20
 # Slab cache count
