@@ -263,11 +263,17 @@ extern "C" fn schbd_fn(_arg: *mut core::ffi::c_void) -> i32 {
             }
         }
 
+        // Re-arm on REAL recovery only: a beat with healthy flow (>= 20)
+        // proves the frontier moves and any prior census's heal worked, so
+        // a later re-freeze gets a fresh census. bw15 alone must NOT gate
+        // the re-arm - sc202 recovered to flow 27-54 with bw15 still ~300
+        // (the old parked cohort never drains), and bw15-gating kept the
+        // plateau counter alive forever, permanently disarming the census.
         if flow <= CRAWL_FLOW_MAX || bwait15 >= WAITER15_FLOOR {
             plateau = plateau.saturating_add(1);
-        } else {
+        } else if flow >= 20 {
             plateau = 0;
-            dumped = false; // re-arm after the system moves again
+            dumped = false;
         }
         last_pidmax = max_pid;
 
