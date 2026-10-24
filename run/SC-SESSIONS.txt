@@ -2967,3 +2967,44 @@ LAUNCHER IS DEEPER THAN ANY SC-SERIES BOOT: ARKTS BYTECODE EXECUTING.
   reboot the SAME userdata (first-boot caches persist; second boot
   faces a lighter service storm) with a longer window for the first
   frame. If a frame appears: immediate screendump + save + commit.
+
+SESSION R TENTH LEG - sc195 FINAL VERDICT (09:4x):
+QUIETCON WINS THE WEDGE RACE 45/45 MIN (RWFRZ=0 THE WHOLE RUN - FIRST
+SC-SERIES BOOT EVER TO STAY UNWEDGED); LAUNCHER REACHED ARKTS/ARKUI
+(DEEPEST EVER); NEW RESIDUAL = pid-1 HARDIRQ-HELD STRAND FROM min~29
+(in inb, the sc184 W3-FROZEN-EXEC-SLOT family); SC196 WARM-REBOOT IN
+FLIGHT (hilogd stops writing /dev/console on boot 2 - stash blind).
+
+- sc195 final (45 min, ended 09:39): screen oracle-static to the end
+  (no RS flips), serial 731KB total. Launcher: MainAbility.abc ArkTS
+  EXECUTING + ArkUI/ace_engine/WindowScene component storm loading +
+  WindowShow 17 - every prior boot died in the LauncherAbilityManager
+  spawn loop LONG before bytecode. No clientToService-null errors.
+- THE QUIETCON RESULT (correlation now 5 boots deep): sc192/193/194
+  (loud, ~22KB/s window burn) froze devmgr at min 1-2, 3/3; sc195
+  (quiet, 2.3KB/s) ZERO wedge lines for 45 min. Console-burn -> freeze
+  window is causal for the min-1 freeze shape. The RWFRZ census
+  (writer-park based) saw nothing - and the chain KEPT ADVANCING to
+  min 45, confirming no silent freeze either.
+- NEW STRAND VARIANT (the v4 residual to chase next): init pid=1 held
+  hardirq-count (pc=0x10000) on cpu0 from ~min 29 to end-of-run - 844
+  PREEMPT-LEAK census prints 1/s from cpu1, held grew to 0x14d0b jif
+  (~855s), rip stable at 0xffffffff802b8dd0 = arch::x86_64::cpu::inb
+  (the generic port-in helper; NOT the bounded putc TX poll - that one
+  has a wall-time budget and stall latch). The interrupted-context rip
+  staying in inb across 844 samples = a tight RX-style poll loop or a
+  stuck hardirq handler in init's context. Early-boot transients
+  (held=0xc8) shared the same function region (802b8c6e=enable_irq,
+  802f1e05=vfs::sbx_want). Same family as sc184's W3-FROZEN-EXEC-SLOT
+  (init named by a frozen busy slot, retaddr in context_switch) - now
+  with an inb rip. System continued on cpu1 (ArkTS progress 152->191
+  hits between min-25 and min-39 RAM samples) but at half speed -
+  likely why RS never got to compose.
+- Warm-reboot observability caveat (sc196): hilogd on boot 2 does NOT
+  write /dev/console (config/flowcontrol persisted on userdata in boot
+  1) - the printk-ring [con] stash region is EMPTY on sc196; ring-
+  based forensics only work on fresh copies.
+- HMP pmemsave notes for future legs: size arg must be <=32-bit
+  (chunk 4GB in two), filename must be RELATIVE (the expression
+  parser eats /-paths as division), files land in QEMU's cwd (repo
+  root, not run/).
