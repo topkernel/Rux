@@ -3882,3 +3882,48 @@ shortlisted: (a) type-targeted fix once identified; (b) kstack
 128->96KB = -74MB at floor (89.4K max vs 96K = 8.9K headroom, canary
 guarded, deterministic max across boots - acceptable for a probe roll,
 not yet for the verified-fix roll); (c) both.
+
+LEG-16 ADDENDUM (reduction set complete, sc225 verification in flight)
+
+THE 89,368B MYSTERY CHAIN IDENTIFIED AND FIXED:
+- sc224 (96KB-stack kernel + SC-KREC beat-deferred record stash — the
+  in-context print had been eaten by the early-boot UART storm in
+  sc218/sc222) delivered the record: comm='usb_host' pid=674, 7
+  surviving return addresses, all inside [Option<Arc<File>>; 1024]'s
+  array-clone machinery (SpecArrayClone::clone::<1024> ->
+  try_from_fn_erased -> NeverShortCircuit wrappers).
+- Source: FdTable::fork_from's `child_entry.fds = g.fds.clone()` —
+  several 8KB stack copies on EVERY process fork. Fixed with an
+  element-wise clone-into-place loop (commit on branch).
+- That closes the from_fn trilogy: ext4 batch [IoCompletion;128]
+  (resize2fs 80.5K), Task init rings (forks 65.8-76K), FdTable
+  fds[1024] (forks 89.4K). All three were debug-build try_from_fn
+  wrapper copies of big arrays ON THE KERNEL STACK.
+
+REDUCTION SET NOW ON THE BRANCH (all committed):
+1. cbb84244 fix(ext4): fill_page_cache_batch const-repeat
+2. 94082866 fix(task): Task construction/clone-path const-repeat
+3. (fds fix) fix(fs): FdTable fork_from element-wise clone
+4. feat(config): KERNEL_STACK_SIZE 128KB -> 96KB (~-84MB at floor;
+   max measured depth 89,368B pre-fds-fix, 8.9KB headroom then; with
+   the fds fix the fork-family chains drop further)
+5. dfx(switches): ksprobe token - the kstack zero/scan/stash probe is
+   OFF by default now: tonight's probe-on boots lost the mid-boot RS
+   lottery 3-of-4 (sc218/223/224 parked at pidmax ~1300) while
+   leg-15's probe-off boots won 3/3 - the ~100-200us added to every
+   spawn (memset + scan) plausibly modulates the render_service race.
+   sc219 (probe-on) DID win once, so it is a nudge, not a wall.
+
+EXPECTED PHYSICS for sc225+ (dfx=schb,sleepsnap, no ksprobe):
+- kstack floor share: 2688 x 96KB = 249MB (was 383MB) -> floor forms
+  at heap ~904-84 = 820MB-equivalent population, i.e. ~10% later in
+  pidmax/time; if the launcher chain reaches its spawn before that,
+  launcher.ready sets INSIDE appspawn's window.
+- Forks are also CHEAPER now (no 4x array copies at Task/FdTable
+  construction) - spawn latency itself drops, which also helps the
+  3s appspawn child watchdog directly.
+
+sc224 note: verification roll of the 96KB stack ran t=0-1409s parked
+(mid-boot lottery loss, KNOWN userspace park) with ZERO STACK-OVERFLOW
+canary hits and kHW=89,368 exactly as predicted - the size reduction
+is canary-clean under real load. Killed at the plateau verdict.
