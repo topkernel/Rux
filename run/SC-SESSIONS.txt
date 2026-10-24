@@ -3381,3 +3381,100 @@ samgr code-7, exact 15 s server-side exec); READY FOR MERGE.
   disk (serials gitignored). QEMUs ended by their own timeout
   wrappers or killed by exact own PID after cmdline verification;
   shotmon loops stopped per-tag; no setsid herds left behind.
+
+SESSION R FOURTEENTH LEG - THE PRE-LAUNCHER WALL DECODED (WHICH SA
+NEVER PUBLISHES: TWO OF THEM, BOTH NOW FALLEN); sc210 = LAUNCHER APP
+EXECUTING IN ITS SANDBOX (16:0x-17:xx):
+
+- STEP 1 (offline, sc208 serial + OH source; no boot needed):
+  * CODE 7 = LOAD_SYSTEM_ABILITY (samgr_ipc_interface_code.h). The
+    15s storm = foundation asking samgr to LOAD SA 511 "installs"
+    (BMS installer; on-demand sa_main, installs.cfg/installs.json).
+    samgr's StartDynamicSystemProcess -> ServiceControlWithExtra =
+    SystemSetParameter("ohos.ctl.start", "installs|511#...") over the
+    paramservice AF_UNIX socket. The sc208 serial prints
+    "Start dynamic proc:installs,511,0_0ms" ONCE (result 0 in 0ms
+    with NO server-side "Handle set param" line) then "511,105_14991ms"
+    x24: 105 = PARAM_CODE_TIMEOUT (init_param.h enum), 14991ms = the
+    param client's 15s reply-ack window. pid 339 (samgr's param-setter
+    thread) had logged msgIds 2..5 on that connection (samgr.cache.sa,
+    bootevent.samgr.ready, wifi ctl, deviceprofile ctl) and NOTHING
+    ever again - the client socket went deaf: sends never arrive at
+    the server, and the first installs attempt got an instant bogus
+    "0" reply (stale/duplicated-reply anomaly). Kernel suspects: AF_
+    UNIX stream reply duplication + server-side reader wake loss.
+  * SA 10 (RENDER_SERVICE, system_ability_definition.h) never
+    published in sc208 because render_service main parked in a futex
+    right after hilog "HgmTaskHandleThread init" (hgm_context.cpp:60).
+    The very next statement is InitHgmTaskHandleThread's PostSyncTask
+    (an FFRT queue->wait(handle)) and AddSystemAbility(10) never ran
+    (no "insert SA:10" all boot; the next expected logs
+    "UpdateGpuContextCacheSize"/"RSLuminanceControl init" never
+    appear). Census sleepsnap: RS's FFRT workers (OS_FFRT_5_0/_1,
+    spawned exactly at the HGM window) alive but asleep; main waits on
+    a stack futex (sys=202) no one ever wakes. Foundation's tid 1010
+    (DisplayManagerService) then polled GetSystemAbility(10) forever:
+    1207x "RSRenderServiceConnectHub::Connect ... failed to get render
+    service proxy" across the whole boot - THE screen-gate symptom.
+  * Census #2 CLIENT-WAIT owed_pid=334 chains decoded: powermgr 781
+    (depth 2; txn55405 code 3 TXN_PQUEUED to hdf_devmgr since jif
+    39026, 43 rekicks, never consumed), drm_service 837, usb_host
+    1142 - the devmgr debt (separate wall, rekick-resistant in sc208).
+- PROBES (commit 7908a764): FXRS (latch render_service tgid at exec;
+    every futex WAIT/WAKE/REQUEUE of that process, entry+return,
+    budget 4000 ops - the original 600 died inside RS's own init
+    chatter two dozen ops short of the HGM window); PCTL (paramservice
+    socket duplex tap: ParamMessage type/msgId/key/value on sends to
+    the listener, on pid-1 responses, on pid-1 receives); SAREG gains
+    code 7 + 96-byte parcel head (decodes the load target SA id past
+    the samgr interface token - "c2120000"=4802 device_manager etc).
+- sc209 (16:16, probes, same recipe as sc208): BOTH WALLS FELL. SA 10
+    published ("insert SA:10_60" - first time in the campaign);
+    installs loaded ONCE, 0_1ms, and SPAWNED (pid 1034, BMSInstalld
+    serving bmsdb Reset ops); only ONE "RenderService connect fail"
+    the whole boot. BootAnimation went all the way: RSSurfaceNode
+    BootAnimationNode, EGL context, 150 jpg frames read, SetVSyncRate
+    30, RSComposerAdapter::CreateBufferLayer repeatedly - the RS ->
+    composer -> DRM chain serving bootanimation frames. Then RS 851
+    hit the KNOWN deterministic mm crash (Session O GATE 2: rip
+    0x3fbf08ad30 rep-movsq memcpy tail) - but with a NEW datapoint:
+    cr2=0x7ff0006f1000 (malloc-arena window) not the old stack dst,
+    right after two 0x3c0000 BIGMUNMAPs in pid 851. init respawned RS
+    (1115) which published again (SA:10_65). No HGM park: FXRS shows
+    the FFRT workers WAITing, main's WAKEs returning ret=1 (delivered)
+    and the sync task completing -> the sc208 park was a race, not a
+    hard gate (probe pacing may have shifted it).
+  * sc209's mid-boot tear-down: init's bootevent timeout fired
+    ("bootevent.lockscreen/launcher/bms.main.bundles.ready not set")
+    and SIGKILLed the service tree (foundation x2, appspawn,
+    accountmgr...) - a reset, not a wedge. Post-reset world re-parked
+    (bw15=240) but with only 2 SLOW-TXN the whole boot (vs sc208's
+    24) and the remaining code-7 loads = device_manager 4802 x11 from
+    distributeddata/softbus, resolving without 15s costs.
+  * usb_host (hdf_devhost) crash-loops at the KNOWN usb DDK PnP
+    NULL-walk (rip voff 0x15bac, cr2=0) - THIS worktree's oh-img
+    still carries libusb_pnp_manager.z.so; the zeroed copy lives in
+    oh-img-p (oh-boot-usbless.sh). Next rolls should go usbless.
+- sc210 (16:33, FXRS budget 4000, same recipe): SA 10 published at
+    t~3min, installs spawned, RS NEVER crashed (no USEGV on 840 all
+    boot), NO bootevent reset, and the boot kept climbing past every
+    previous depth: BMS ran the real HAP install flow (MainAbility.abc
+    entries through BMSInstalld), AMS StartResidentAbility
+    com.ohos.settingsdata + com.ohos.systemui statusbar, AppSpawnChild
+    ids up to 40+, and at ~t=10min the LAUNCHER app entered its
+    sandbox: pivot_root '/mnt/sandbox/100/com.ohos.launcher' and
+    Launcher_Default LauncherAbilityManager executing - THE deepest
+    point of the campaign, past the pre-launcher wall. Remaining pace
+    wall there: the launcher's getOsAccountLocalId loop (322+ rounds
+    at ~13/min at t=24min - the known per-round IPC-cost blocker #1,
+    perf lane). pidmax 4900+ and rising, flow 19-24 (the old crawl was
+    flow 0-2 at pid 1255).
+- VERDICT FOR THE MERGE: two consecutive boots (sc209, sc210) advanced
+  past the sc208 crawl wall with SA 10 publishing and SA 511 loading;
+  sc210 reached launcher execution. The probes are no-behavior-change
+  diagnostics (all prints at syscall boundary, none under locks).
+  Leg-15 entry points: (a) launcher getOsAccountLocalId pace (perf
+  lane, blocker #1), (b) RS mm crash randomness (mm lane, new
+  arena-dst datapoint), (c) roll usbless (oh-img-p) to kill the
+  usb_host churn, (d) the sc209-only param-socket deafness did not
+  recur in sc210 - PCTL stays armed to catch it if it does.
