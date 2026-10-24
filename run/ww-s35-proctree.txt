@@ -14,3 +14,12 @@
 # all FULL-clean under s35; chains now at r64 (qemu 198336+) / load-r11 (qemu 198415+),
 # budget ends ~10:50. Kill order if needed: driver root FIRST, then round QEMU.
 # Experiment QEMUs (magval soak + ab) completed and gone; leftover unit-test QEMU 188132 killed.
+
+# s36 claim 2026-10-24 11:04 (session 36, successor of s35): BOTH chains claimed ALIVE
+# (ps before assumption - s10/s34 lesson held again). Driver roots 176512 (main) /
+# 176547 (load) still the s35 originals. Rounds in flight: r65 (timeout 210737 /
+# qemu 210747, started 10:50:10) and load-r12 (timeout 210784 / qemu 210795,
+# started 10:50:21), budget ends ~11:35. Both WW-ARMED 19 (GUARD=0xffffffff80a7a000),
+# wildwatch try 0, 0 WW-HIT / 0 markers mid-round. Foreign QEMUs: samgr-callback
+# 212223/212224, perf-audit 214304/214305, main-workspace 214924+ - NOT touched.
+# Merged origin/main 988e10c1 (fast-forward; branch == main now).
