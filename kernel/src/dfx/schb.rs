@@ -194,6 +194,7 @@ extern "C" fn schbd_fn(_arg: *mut core::ffi::c_void) -> i32 {
         let mut max_pid: u32 = 0;
         let mut n_tasks: usize = 0;
         let mut n_run: usize = 0; // state bits clear: runnable or running
+        let mut n_mark: usize = 0; // state clear + on_cpu: executing OR orphaned mark
         let mut n_s: usize = 0; // INTERRUPTIBLE
         let mut n_d: usize = 0; // UNINTERRUPTIBLE
         let mut young_pid: u32 = 0;
@@ -214,7 +215,11 @@ extern "C" fn schbd_fn(_arg: *mut core::ffi::c_void) -> i32 {
                 }
                 let b = t.state().bits();
                 if b & 0x37 == 0 {
-                    n_run += 1;
+                    if t.on_cpu() {
+                        n_mark += 1;
+                    } else {
+                        n_run += 1;
+                    }
                 } else if b & 0x02 != 0 {
                     n_d += 1;
                 } else if b & 0x01 != 0 {
@@ -230,9 +235,9 @@ extern "C" fn schbd_fn(_arg: *mut core::ffi::c_void) -> i32 {
             let mut w = ConsoleWriter::new();
             let _ = writeln!(
                 w,
-                "SC-HB t={}s pidmax={} flow={} young={} tasks={} R={} S={} D={} bproc={} bw={} bw15={}",
-                t_secs, max_pid, flow, comm_str(&young_comm), n_tasks, n_run, n_s, n_d, bprocs,
-                bwait, bwait15
+                "SC-HB t={}s pidmax={} flow={} young={} tasks={} R={} M={} S={} D={} bproc={} bw={} bw15={}",
+                t_secs, max_pid, flow, comm_str(&young_comm), n_tasks, n_run, n_mark, n_s, n_d,
+                bprocs, bwait, bwait15
             );
         }
 
@@ -385,6 +390,14 @@ fn wedge_census(t_secs: u64, pidmax: u32, plateau_secs: u64) {
         crate::printk::set_console_loglevel(4);
     }
     crate::ipc::binder::stall_report();
+    // dfx=sleepsnap names the syscall every S-state task is parked in —
+    // the wedge census's blind spot is a server parked OUTSIDE binder
+    // (samgr in sc201: not runnable, not binder-waiting, clients owed
+    // 200s+). sleep_snapshot is self-gated on its own dfx switch; boots
+    // that arm dfx=schb,sleepsnap get its census inside this lifted
+    // window (its khungtaskd-driven prints at loglevel 3 are dropped
+    // pre-ring, so the 60s cadence costs no UART burn).
+    crate::ipc::binder::sleep_snapshot();
     if saved < 4 {
         crate::printk::set_console_loglevel(saved);
     }
