@@ -3344,4 +3344,18 @@ rsp=0x7ff090410fc8" line (a USER frame). Confirmed MY lane's probe
 
 ### Chain ledger (s37 ownership)
 
-(pending — rounds complete below)
+- MAIN r66 (FULL 2700 s): CLEAN — 76772 lines, 0 WW-HIT / 0 heals / 0
+  watchpoint hits, no panics, armed try 0. Driver self-advanced to r67
+  (12:20:10).
+- LOAD r13 (FULL 2700 s): CLEAN — 164915 lines, 877 sdc exec cycles,
+  storm healthy (WW: wakes=9.49M, one strand_max 3949ms — host
+  contention class, no markers), 0 gdb hits / 0 capture markers, armed
+  try 0. Driver self-advanced to load-r14 (12:20:27).
+- Cumulative: **0 WW-HIT across r1-r66 complete rounds** (plus
+  partials), 0 META-SMASH. Load surface: p1 + r1-r13 = **~9926 sdc
+  exec cycles over 14 full armed load-hours**, zero fires, zero false
+  positives.
+- r67 / load-r14 in flight (started 12:20:10/12:20:27, budget ends
+  ~13:05; qemu 235499 / 235605, gdb 235637 / 235727, both WW-ARMED 19
+  with GUARD=0xffffffff80a7a000, confirmed via gdb logs).
+- Commits: 0d200333 (s37 claim record + r66/load-r13 gdb cmds).
