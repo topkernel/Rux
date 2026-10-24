@@ -3159,3 +3159,72 @@ SHAPE; MILESTONE NOT REACHED THIS LEG; v5+v6 READY FOR MERGE.
   snapshot already committed the riscv64 platform artifact, and the
   riscv64 `make build` regenerated the same content. Tree is clean at
   273489e7.)
+
+SESSION R ELEVENTH LEG - OPENING + THE SOFT-WEDGE IS SOLVED: IT IS THE
+CLASSIC DEVMGR RWLOCK FREEZE, DELAYED AND INVISIBLE AT LOGLEVEL=3
+(sc199/200/201/202, schb probe line, 2026-10-24 ~12:15):
+
+- Opening: merged main 9bc3a5c8 (fast-forward, brings perf-audit +
+  my v3..v6). sc199 = pristine v6 quietcon+loglevel3 reroll (90min,
+  KVM SMP2, fresh scgold copy, shotmon): soft-wedged at ~200B/s
+  trickle, oracle black, killed at ~t=35min after RAM dump.
+- ROOT FINDING #1 (why "no kernel evidence"): printk_bytes drops
+  every record above CONSOLE_LOGLEVEL BEFORE the ring buffer. At
+  loglevel=3 all pr_warn! census output (SACMP/binder-stall/stkfutex/
+  RWFRZ) NEVER EXISTED - not muted, never recorded. The tenth leg's
+  "quiet-quiet soft-wedge with no rwlock freeze" was a visibility
+  artifact of this pre-filter. (printk.rs printk()/printk_bytes level
+  gate; kmsg writes bypass it via printk_ring_always - pa9.)
+- TOOL BUILT (v7-equivalent, committed): dfx=schb - schbd kthread,
+  10s heartbeat (one ~90B SC-HB line via ConsoleWriter, off every
+  racer path: pid frontier/flow, youngest task, R/M/S/D, binder
+  proc/waiter/waiter>15s counts; M = state-clear AND on_cpu cohort -
+  sc202 measured M=2 = no orphaned-mark cohort), SC-PROC drain ring
+  fed by binder_open, and a one-shot wedge census firing on
+  flow<=5 OR bw15>=150 sustained 120s past t>=240s: all binder
+  read-waiters regardless of age (SERVER-OWING/CLIENT-WAIT + owed
+  pid + kicks), runnable/D-state scheduler views, ONE stall_report +
+  freeze_scan pass with the console loglevel lifted 3->4 for its
+  duration, binder::sleep_snapshot (with dfx=schb,sleepsnap), and a
+  printk-ring tail dump (quietcon's diverted userspace console
+  stream = userspace last-known-good boundary). for_each_task
+  widened Fn->FnMut; printk::ring_tail(n) helper added. Census
+  re-arms on flow>=20 (sc202 lesson: bw15 never drains after heal).
+- ROOT FINDING #2 (the wedge identity): sc202's census caught it
+  live - RWFRZ: FROZEN tgid 331 comm='hdf_devmgr' uaddr=0x7ff000859a64
+  word=0x80000010 readers=16 waiters=7 (nb+4=0x7) - THE classic
+  terminal freeze (sc198 shape, delayed from min 1-2 to t~100-250s by
+  quietcon). CLIENT-WAIT chains owed to 331 (devmgr) + 644; samgr's
+  installs retries + APPSPAWN "App enable -1" + foundation's 75-136s
+  SA loads are all downstream of devmgr not answering GetService.
+  Deterministic fingerprint (sc199==sc200 within seconds: App enable
+  -1 at t~25s, installs retry from t~93.5s, foundation SA:401 spend
+  75053/75057ms, t~150s burst-drain, then freeze).
+- ROOT FINDING #3 (a kernel-side MITIGATION works): the census's
+  stall_report pass (rekick heals) BROKE the freeze - sc202 flow went
+  6-8/beat -> 27-54/beat right after the t=260 census and the boot
+  went to depths NO prior quiet boot reached (pid 3345 > sc195's
+  2500; bootanimation 8-color oracle 100% non-black from ~t=540s;
+  still rolling at t=1223). Periodic (re-arming) census passes may
+  carry quiet-quiet boots THROUGH the freeze window - candidate
+  follow-up: a bounded auto-rekick in freeze_scan when a frozen word
+  persists (the census already proves the rekick unwedges it).
+- Method artifacts committed: run/sc-ring-parse.py (offline printk-
+  ring extraction from QEMU ELF guest dumps, signature-scan locating
+  for symbol-less old kernels; LogRecord real stride is 288 not 280 -
+  repr(C) pads seq to 16). QEMU monitor dump-guest-memory + ring walk
+  = the standing no-rebuild census substitute for loglevel-3 boots.
+- sc200 extras: ONE TIMER-SOFTIRQ-STALL 14009ms episode (cpu1,
+  ticks arriving - dispatch skipped; transient, not the engine; both
+  CPUs healthy at dump time) and ONE foundation USEGV executing at
+  rip inside an R|X|SHARED /dev/binder-file VMA (binder_mmap_handler
+  only creates RW|SHARED - the RX exec mapping is an mmap/VMA file-
+  association anomaly; foundation was reaped+restarted by init and
+  was NOT required for the wedge - sc199 wedged with no foundation
+  crash. Filed for a later lane).
+- sc201 was killed ~t=10min by my own error: a grep -c tool call
+  returned EMPTY output (glitch) and I misread schb as dead - the
+  census HAD fired (224 lines, all data banked in its serial).
+  Lesson recorded: verify kills against wc/grep with visible echo.
+- sc203 (12:02, TCG, quietcon+loglevel3+dfx=schb,sleepsnap) was
+  launched by the coordinator in this worktree - not touched.
