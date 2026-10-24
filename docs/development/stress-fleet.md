@@ -181,3 +181,11 @@ OPEN items:
 4. Monkey OOM: check `logs/monkey-*-r*-serial.log` for OOMFX-RAW + MEM
    lines; ledger OPEN item has the repro shape (appspawn killall storm
    case 3 + hilog floods on 4G guest).
+
+- 2026-10-25 06:47 — ltpm CONTROL RESULT: main@de41d5ab panicked at
+  06:4x with the exact csrrw-time signature (badaddr=0xc0101573, the
+  read_counter instruction word) after 155 sweep results — while the
+  same sweep on the fixed worktree kernel (ltp-a/b/c/d r12+ on v4,
+  then v5) ran clean. Merge-gate evidence: main carries the
+  read_counter bug fixed by 52abd2ea. ltpm continues rotating (each
+  panic round auto-restarts per the member driver).
