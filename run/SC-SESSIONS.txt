@@ -4138,3 +4138,40 @@ read `ps aux | grep qemu` for in-flight boots first; two same-tag boots
 corrupt each other (your 03:09 sc237 cp truncated instance A's live
 userdata-sc237.img - that boot was killed). Census verdict lines are
 raw-UART (visible at any loglevel): OOM-ANAT / PEEK c256 / PEEK c1024.
+
+LEG-17 CENSUS RESULT (sc238, parked boot, censusat=600 fired at t=608s
+- THE FIXED-TIME TRIGGER WORKS, first census ever banked on a parked
+boot; park state: pidmax 1398, procs 85, heap 324MB):
+
+SMALLALLOC live (a-f) at park: c8 61.6K c16 114.3K c32 152.7K
+c64 36.0K c128 161.9K c256 340,736 c512 60.6K c1024 9,895.
+smallK 155MB - at 85 PROCS. Per-SPAWN (1398 spawns): c256 244,
+c1024 7.1.
+
+PEEK v2 histograms:
+- c256 (90 sampled): DOMINANT 0x4b524f57_00000098 x35 (39%!) =
+  {u32 152, tag "WORK"} magic records - NOT any kernel magic greppable
+  in kernel/src; + 0x49564948 "HIVI"(hiview) x1; + timestamp-first
+  family 0x2612d98xxxx (~2616.1e9 units, monotonic clock reads) x20;
+  + refcounts 1/2 x16; + 1 userva. So the park-stage c256 is ~40%
+  "WORK"-tagged 152B-ish records + event/timestamp records + the known
+  File/dentry/inode trio.
+- c1024 (50 sampled): NO dominant constant - 0xffff88807cfcffff x11
+  (kheap-range END marker, ptr|0xffff), 0xffff x6 (u16 at capacity),
+  userva x4, PIE 0x555555557000 x1, rest unique kheap/userva ptrs =
+  POINTER-FIRST HETEROGENEOUS population (BTree parents, Vec buffers,
+  range descriptors) - exactly what per-spawn leaked mm residue would
+  look like (mm + VMA trees + auxv/buffers).
+
+ARITHMETIC CONVICTION: c1024 live scales with SPAWNS not procs
+(9,895 at 85 procs/1,398 spawns = 7.1/spawn; floor: 84K at ~5.3K
+spawns = 15.8/spawn - residue grows with churn stage). c256 at park
+244/spawn. Hypothesis: exited processes strand their AddressSpace
+(via some clone) -> each pins ArcInner<MmStruct>(664B c1024) + VMA
+LeafNode(632)/InternalNode(728) + vma_files Arc<File> pins (File 144
++ dentry 160 + inode 200 = 3x c256 per mapped DSO).
+
+NEXT: (1) MmStruct new/drop counters in OOM-ANAT (definitive leak
+test); (2) peek v3 structural buckets for c1024 (vma-node signature:
+parent@0, len u16@+8 <=11, keys userva@+16; mm-arc signature:
+strong/weak small + pgd small) - census_peek3 alongside v2.
