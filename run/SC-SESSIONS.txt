@@ -4081,3 +4081,48 @@ the worktree state is shared, coordinate via this file. Park census
 fact banked so far: wedges at t~241-244s pidmax 1148-1350 in
 sc231/232/234 (kernel-clean, RS lottery; 0-for-4 tonight, host load
 ~11 with 2 foreign TCG QEMUs).
+
+LEG-17 attempt-2 mid-leg (03:10) — coordinator handoff decoded, both
+blockers resolved from THIS lane's own history + one new kernel fix:
+
+COORDINATOR HANDOFF (perf lane leg-29, main 257698a5): with the
+from_fn trilogy on main the fake-OOM is GONE from the main-class
+boot; the UI chain now dies on (1) a deterministic user NULL-deref
+rip=0x7ff082996bac in every "appspawn child", (2) a wedged launcher
+spinning read() EBADF on fd 32, n=155,991.
+
+(1) DECODED — NOT appspawn children, and NOT a new bug: pa38's
+USEGV-FOR forensics names comm='usb_host' (pids 602/778/811/836/
+1401) at a memfd-hosted lib whose .dynstr scan reads UsbPnpManager-*
+UsbDdkPnpLoader* __cfi_check — THE sc87-91 libusb_pnp_manager NULL
+list-walk (rip voff 0x15bac, DdkListenerMgrIsExists inlined in
+DdkListenerMgrAdd; image lib predates master, DdkListenerMgrInit
+imported by nobody, g_usbPnpSrv list never initialized on ANY
+kernel incl. Linux; ripbytes 48 8b 03 / 48 39 eb / 75 ec = deref-
+before-nullcheck loop). MITIGATION EXISTS AND IS VERIFIED:
+oh-img-p usbless image (libusb_pnp_manager.z.so zeroed + Session L
+hdf_devhost.cfg usb_host removal) — sc113-116 ran ZERO DDK crashes.
+Every leg-17 roll so far (sc231-236, and the perf lane's pa38) used
+the STOCK image. Lesson recorded: launcher-line full rolls go
+USBLESS by default.
+
+(2) REAL KERNEL BUG — FIXED (this leg, commit "fix(fs): read/write/
+pread ... EINVAL not EBADF"): pa38's rd_fail line shows fd 32
+RESOLVES at first failure (fd_state=1, ops=0xffffffff807a0b18 =
+syscall::misc::EPOLL_OPS, path=<no-dentry>) — the launcher was
+read()ing its own EPOLL fd and File::read returned -EBADF for the
+missing read handler. Linux vfs_read/vfs_write return EINVAL for a
+valid fd whose type has no read op; EBADF reads as "fd was closed"
+and the OH event loop spins instead of taking its EINVAL path.
+Fixed in fs/file.rs: read/write missing-handler -> -22 (O_WRONLY/
+O_RDONLY direction checks keep EBADF per Linux; read_at inode-less
+guard maps only truly unreadable types (epoll/binder/access_token/
+io_uring) to EINVAL, pipes keep ESPIPE). riscv64 + x86_64 build
+clean.
+
+VERIFICATION STATE: make test riscv64 1096/1096 GREEN post-re-land
+(run/make-test-relleg-slab.log); slab live on x86_64 (sc236 SC-ANAT
+kb=253 ks=740 before the park). sc237 LAUNCHED 03:09 — FIRST USBLESS
+ROLL OF THE LEG on bzImage b0615030 (slab re-land + EINVAL + from_fn
+trilogy): targets slab advancing evidence + the EINVAL effect on the
+launcher wedge + census peek v2 (fires at 80% heap ~850MB).
