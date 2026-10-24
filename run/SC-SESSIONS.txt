@@ -3629,3 +3629,69 @@ exonerated); SC212 ROLLED, SC213 = RACE RETRY
   recipe, fresh scgold reflink - target the sc210-style trajectory
   (SA 10 published ~t3min, installs spawn, launcher sandbox) with
   PACE counters live for the first usbless launcher run.
+
+LEG-15 CONTINUED (second launcher attempt) - sc213/sc214 usbless
+replication, sc215 FULL-image launcher roll, THE BOTH-VCPU FREEZE
+CONVICTED AND FIXED (361debe8)
+
+- sc213 (18:51, same kernel as sc212, usbless, KVM): BOTH races WON -
+  insert SA:10_61 t~50s, installs spawned 0_60ms + insert SA:511_65,
+  BootAnimation ran its RS chain (RSSurfaceNode/InitRsSurface/
+  CreateBufferLayer) and ENDED, BMS/AMS chains ran (StartResidentAbility
+  systemui x4). Then: RS#1 (tgid 812) hit the ADJUDICATED deterministic
+  mm crash at t~60-100s (USEGV-FOR rip=0x3fbf08ad30, cr2=0x7ff000693000
+  - Session O GATE 2 rep-movsq memcpy tail, arena window), respawn
+  RS#2 (tgid 1147) published SA:10_65 and then PARKED the sc212 way
+  (cc54 progression); a sa_main (pid 418) txn sat SERVER-OWING on
+  RS#2 tid 1290; init's bootevent timeout fired (launcher.ready /
+  lockscreen.ready not set) and SIGTERM'd appspawn (KILLTRACE sig=15).
+  Boot crawled to its timeout with young=DB_TaskExecutor.
+- sc214 (19:07, usbless replicate): IDENTICAL outcome - RS#1 publish,
+  crash at the SAME rip, RS#2 publish + cc54 park. Three-for-three:
+  on the usbless image the RS outcome is deterministic (crash-then-
+  park); the usbless roll can never reach the launcher window.
+  sc214 stopped by exact PID once the park was census-confirmed.
+- PACE across sc213/214/215: drct=0 drctJ=0 slow=0 ENTIRE boots;
+  zfree 415-423K pages; cowJ<=10; the getOsAccountLocalId rounds now
+  ~255 COW faults each with no measurable jiffies. Reclaim acquittal
+  confirmed on three independent boots (perf lane adjudicated the
+  same from merged main).
+- sc215 (19:11, FULL image oh-img + userdata-tok reflink via
+  oh-boot-m3g.sh - the sc209/210 launcher recipe): RS#1 (839)
+  published, exited SIGABRT (-6, new crash-family datapoint - not
+  the adjudicated SEGV); RS#2 (1151) published SA:10_64 and its HGM
+  PostSyncTask parks RETURNED (ce04->0, cc54->0 - the sc209 shape,
+  sync task completes). BootAnimation drove CreateBufferLayer frames;
+  44 getOsAccountLocalId-family retries; pivot_root /mnt/sandbox/
+  system seen. LAUNCHER trajectory live at t~560s.
+- THEN sc215 HARD-FROZE at t~580s: serial cut mid-RWFRZ line, zero
+  ticks, both vCPUs 100% host CPU. MONITOR CONVICTION (QEMU monitor
+  via unix sock): CPU0 RIP in pid_hash::lock_bucket retry loop, its
+  stack symbolized ww_heartbeat -> wakewatch::stallwatch_tick ->
+  sched::for_each_task -> pid_hash_for_each_task (the BLOCKING walk);
+  CPU0's frame slot idx=0x60; CPU1 RDI=&BUCKET_LOCK[96]; BUCKET_LOCK
+  array (phys 0xed7a50, RW-segment mapping - NOT the text-segment
+  base) shows exactly bucket 96 stuck at 1; WW_TICK_IRQ frozen
+  across two samples 4s apart (0xdc37 both).
+  ROOT CAUSE: stallwatch_tick runs in the timer tick (softirq) via
+  ww_heartbeat and walked tasks with the BLOCKING pid_hash_for_each_
+  task, which takes per-bucket spinlocks. Any task-context bucket
+  holder (fork insert / exit remove / kill for_each - all hold
+  buckets with IRQs ON) interrupted by the tick self-deadlocks: the
+  handler spins for the bucket its own interrupted owner holds; the
+  other CPU's scan reaches the same stuck bucket and joins. Total
+  IRQ death, console dies mid-line. The sc207 fix ("print after the
+  walk") had removed only the printk-under-bucket half of the hazard.
+  THIS is also the likely truth behind older "serial cut mid-line"
+  hard freezes attributed to the console: same walk, same shape.
+- FIX (361debe8): stallwatch_tick switched to
+  pid_hash_for_each_task_try (the wedge-safe variant that skips held
+  buckets; a skipped round misses tasks for one ~5s scan). A
+  post-walk line names nonzero skipped-bucket counts (near-miss
+  observability; recurring high counts would argue for irqsave
+  bucket locks - RECOMMENDED to the coordinator as the class-level
+  follow-up, since pid_hash lock_bucket is still plain TAS and the
+  IRQ-context blocking hazard remains for any future IRQ-side user).
+- sc216 (19:39, fix kernel, same full-image recipe): verification
+  roll - must advance past t~580s with continuous SC-HB beats, then
+  one more consecutive advancing boot completes the 2-boot rule.
