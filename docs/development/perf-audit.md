@@ -298,6 +298,37 @@ discipline. This leg's live item is sc197 monitoring (below).
   same fix applied to the section 10 skeleton's base-pointer sentence.
   Ranking v2.3 and report tables otherwise unchanged — no new OH data.
 
+Mid-leg updates (10:36-10:40):
+
+- **sc197 verdict (launcher lane notes 20848543): soft-wedge at min ~12
+  in the pid 900-1100 zone, ZERO UI markers, launcher NEVER STARTED**
+  (RAM census: zero launcher strings — the deepest point was before
+  appspawn's launcher phase; sc195 by the same minute was past pid 2500
+  with ArkTS running). Oracle screen up at min 1 (fresh-copy bring-up
+  works; sc196's black screen was warm-reboot-specific). No RWFRZ, no
+  KERNPANIC, no sysrq-c, serial at ~190 B/s trickle = alive but
+  everyone-else-blocked. READ (their words): the quiet boot has at
+  least two failure shapes — the min-1 devmgr rwlock freeze (killed by
+  quietcon v5) and an early soft-wedge around the display/service zone
+  that leaves no kernel-side evidence at loglevel 3, exactly where the
+  binder-stall/stkfutex census is muted. sc198 (quietcon + LOGLEVEL=4
+  diagnostic roll) launched 10:35 to make it visible — this lane's UI
+  monitoring item transfers to sc198.
+- **A-line accepted the F1 REST lever list (their fb2a1354 notes,
+  design-only, nothing coded/merged):** (1) EPOLL_WAKE_REGISTRY
+  sharding designed — K=16 shards by hash(file_id), register/notify
+  derive the shard, unregister derives from the epoll's own entries
+  (no K-shard scan), lock order registry-shard -> per-epoll unchanged,
+  per-shard leak guard; (2) GRQ refactor (per-CPU runqueues or sharded
+  class queues) explicitly deferred — it intersects the v1-v4 kill-path
+  machinery and needs the sc-series strand probes on; (3) console-async
+  remaining piece = printk-kthread for kernel task-context emission
+  (quietcon already removed the userspace console term) — design only.
+  Routing update for ranking row 1b: the epoll-registry item moves from
+  "ipc lane" to "launcher lane, design in hand". None of this is in
+  main; gate A re-verified closed on their new tip 20848543.
+
+
 
 ## Verdict in one paragraph
 
@@ -854,7 +885,7 @@ point, allocator routed to the B lane). Contribution model unchanged:
 | # | cost center | measured (pa13) | pa15/pa16/pa17 direct evidence | gap contribution | family |
 |---|---|---|---|---|---|
 | 1 | Interrupt-disabled regions (cli-recovery page) | 26% of kernel ticks; 316 IRQ-OFF-WINDOW/780 s (now TRIAGE HINT — see 2d) | pa16 EXACT: IF=0 = 25.0% of machine; pa17: 23.4%; split REST 88.8-92.0% / HARD 5.1-7.7% / SOFT 1.6-1.7% / UART 1.4-1.9%; max closed segment 4-5 ms (no long cli section exists); 1.26 M sections/s | **large** — decomposed below; levers per section, not per zone | F1 |
-| 1b | REST section bulk (exact decomposition) | (inside #1) | small-alloc cache locks 12.2-12.6% of machine (~55% of REST, 732-740 M/boot; post-slab-packing — d56de697 has been in every measured baseline since 2026-10-19; **accepted by the B line, per-CPU freelist direction**); schedule() GRQ 2.7-3.9% (**pa17: -31% wall after launcher v2, 38.7 s vs 56.6 s**); fdtable get_file 1.9-2.0%; waitqueue family 1.8-2.2%; EPOLL_WAKE_REGISTRY 1.0-1.1%; deferred_free 0.7% — 97.3-99.3% attributed to file:line | **the F1 lever list** — allocator per-CPU freelists (B lane), GRQ pick (launcher lane, partially landed), fdtable read path, waitqueue batching, epoll registry (ipc lane) | F1/F5 |
+| 1b | REST section bulk (exact decomposition) | (inside #1) | small-alloc cache locks 12.2-12.6% of machine (~55% of REST, 732-740 M/boot; post-slab-packing — d56de697 has been in every measured baseline since 2026-10-19; **accepted by the B line, per-CPU freelist direction**); schedule() GRQ 2.7-3.9% (**pa17: -31% wall after launcher v2, 38.7 s vs 56.6 s**); fdtable get_file 1.9-2.0%; waitqueue family 1.8-2.2%; EPOLL_WAKE_REGISTRY 1.0-1.1%; deferred_free 0.7% — 97.3-99.3% attributed to file:line | **the F1 lever list** — allocator per-CPU freelists (B lane), GRQ pick (launcher lane, partially landed; full refactor deferred as intersecting the kill-path machinery), fdtable read path, waitqueue batching, epoll registry (launcher lane — sharding design in hand, their fb2a1354) | F1/F5 |
 | 1a | Console/UART emission (sub-item of F1) | outb/inb in recovery rips; cli page shares inb/outb | pa15: 4.34 M bytes, 5.0% of machine; pa16: 1.55 M bytes @ t=720, 1.7%; pa17: 5.61 M bytes, 6.1% — **per-byte cost stable 15.5-18.5 us across 3 boots; volume (and thus machine share) swings 1.7-6.1% with boot depth**; producers init/<irq>/FFRT-worker; task-context emission 100% IF=1 | medium CPU (2-6%) + **large latency multiplier** under host load | F1 |
 | 2 | Scheduler wake-loss (WAKE-RUN-LEAK; lying busy slots + linked-starving) | 702 leak prints/780 s; census 16 lying + 7 linked | **pa17 (v1 a39d2bc0 + v2 6e9679c5 in main): 593 prints (-14%, in variance band) / 31 refusals (22 lying + 7 linked, unchanged) / 8 PREEMPT-LEAK / TERM-DESCHED=0** — fixes harmless, their trigger shape absent this boot; lying slots are born on another path; birth forensics continues on the launcher lane | **large** — unchanged; still the wall-clock driver | F3 |
 | 3 | hilogd.server socket dual-drain + sysevent_source + connect-retry | 26.5 M calls by t=720 = ~25% of ALL syscalls | pa16: 10.6 M recvfrom + 10.7 M recvmsg; pa17: 10.08 M + 10.29 M (1:1, avg 116/9 us, recvfrom max 393 s = wake-tail victim); writev 14.6-15.2 M; connect 2.47-2.55 M | medium — volume is OH userspace; kernel levers = per-call recv cost + the wake-loss tail | F2 |
@@ -1059,7 +1090,8 @@ fault), is verified fixed (see section 6).
    in machine-share order: small-alloc cache locks 12.6% (per-CPU
    freelists, mm lane), schedule() GRQ 3.9% (sched lane), fdtable
    get_file 2.0%, waitqueue family 2.2%, EPOLL_WAKE_REGISTRY 1.1%
-   (ipc lane). Also: the longest real IF=0 segment is 4 ms — there is
+   (launcher lane — sharding design in their fb2a1354 notes, twelfth-leg
+   handoff; was routed ipc lane). Also: the longest real IF=0 segment is 4 ms — there is
    no long cli section to break up; seconds-class window observations
    are host-stall tails inside exit-bearing sections (IPI/UART MMIO),
    so the highest-latency single fix remains console-async (1a).
