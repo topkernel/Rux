@@ -133,6 +133,7 @@ mod dfx;
 mod ipc;
 mod io_uring;
 mod timer;
+mod trace;
 mod module;
 
 #[cfg(feature = "unit-test")]

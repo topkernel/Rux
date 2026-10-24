@@ -146,7 +146,26 @@ fn strace1_line(nr: u32, args: &SyscallArgs, result: i64) {
 pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
     let sc_nr = syscall_get_nr(regs) as usize;
     let sc_t0 = crate::dfx::syscost::enter();
+    // The syscalls:sys_enter / syscalls:sys_exit tracepoints. Both are
+    // off by default; the cost when off is one relaxed load each.
+    let trace_args = syscall_get_arguments(regs);
+    crate::trace::record(
+        &crate::trace::EVENT_SYS_ENTER,
+        [
+            sc_nr as u64,
+            trace_args[0],
+            trace_args[1],
+            trace_args[2],
+            trace_args[3],
+            trace_args[4],
+        ],
+    );
     syscall_handler_inner(regs);
+    let ret = regs.ra as u64;
+    crate::trace::record(
+        &crate::trace::EVENT_SYS_EXIT,
+        [sc_nr as u64, ret, 0, 0, 0, 0],
+    );
     crate::dfx::syscost::exit(sc_nr, sc_t0);
     // pa15 recv-family fd census (hilogd.server dual-drain evidence for
     // the ipc lane; fd/flags/ret profile per (comm, nr), zero cost when

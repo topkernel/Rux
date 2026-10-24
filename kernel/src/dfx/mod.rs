@@ -87,6 +87,8 @@ pub fn init() {
     // Publish the instrument switches in debugfs so they can be armed
     // and disarmed while the system runs.
     register_debugfs_knobs();
+    // Publish the tracepoint control surface (tracefs).
+    crate::trace::files::register();
 }
 
 /// Register the DFX instrument switches in debugfs.
