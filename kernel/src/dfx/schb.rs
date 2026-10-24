@@ -166,6 +166,41 @@ fn pace_snapshot() -> (u64, u64, u64, u64, u64, u64) {
     )
 }
 
+/// One-shot allocator anatomy at the first fake-OOM floor (leg-16).
+/// Called from the oom killer's "no killable processes" path: raw UART,
+/// allocation-free, counters only — safe in any context, once per boot
+/// regardless of dfx switches (NET_PAGES is always live; the kstack
+/// high-water needs dfx=schb to have armed its probe).
+pub fn oom_anat_dump() {
+    use crate::dfx::taskdump::{taskdump_dec, taskdump_raw_line};
+    static DONE: AtomicBool = AtomicBool::new(false);
+    if DONE.swap(true, Ordering::AcqRel) {
+        return;
+    }
+    let (kn, khw) = crate::process::task::kstack_anat();
+    taskdump_raw_line(b"OOM-ANAT kstack live=");
+    taskdump_dec(kn);
+    taskdump_raw_line(b" hw=");
+    taskdump_dec(khw);
+    taskdump_raw_line(b" taskSZ=");
+    taskdump_dec(core::mem::size_of::<crate::process::task::Task>() as u64);
+    taskdump_raw_line(b"\nOOM-ANAT buddy live pages by order:\n");
+    let np = &crate::mm::buddy_allocator::NET_PAGES;
+    let mut o = 0usize;
+    while o < np.len() {
+        let v = np[o].load(Ordering::Relaxed);
+        if v != 0 {
+            taskdump_raw_line(b" o");
+            taskdump_dec(o as u64);
+            taskdump_raw_line(b"=");
+            taskdump_dec(v as u64);
+            taskdump_raw_line(b"p\n");
+        }
+        o += 1;
+    }
+    crate::mm::small_alloc::census_line();
+}
+
 /// Start the schbd kthread. Gated on the `dfx=schb` switch; called from
 /// the same late-boot slot as khungtaskd (secondaries online, timer
 /// wakeups routable).
@@ -256,6 +291,7 @@ extern "C" fn schbd_fn(_arg: *mut core::ffi::c_void) -> i32 {
         // --- Beat: one task-table walk + one binder count walk. ---
         let mut max_pid: u32 = 0;
         let mut n_tasks: usize = 0;
+        let mut n_procs: usize = 0; // leg-16: tgid leaders (processes vs threads)
         let mut n_run: usize = 0; // state bits clear: runnable or running
         let mut n_mark: usize = 0; // state clear + on_cpu: executing OR orphaned mark
         let mut n_s: usize = 0; // INTERRUPTIBLE
@@ -269,6 +305,9 @@ extern "C" fn schbd_fn(_arg: *mut core::ffi::c_void) -> i32 {
                 let t = &*task;
                 let pid = t.pid();
                 n_tasks += 1;
+                if t.tgid() == pid {
+                    n_procs += 1;
+                }
                 if pid > max_pid {
                     max_pid = pid;
                 }
@@ -310,6 +349,29 @@ extern "C" fn schbd_fn(_arg: *mut core::ffi::c_void) -> i32 {
                 "SC-HB t={}s pidmax={} flow={} young={} tasks={} R={} M={} S={} D={} bproc={} bw={} bw15={} pace: cow={} cowJ={} drct={} drctJ={} drctMaxJ={} slow={} zfree={} heapK={}",
                 t_secs, max_pid, flow, comm_str(&young_comm), n_tasks, n_run, n_mark, n_s, n_d,
                 bprocs, bwait, bwait15, cow, cowj, drct, drctj, drctmax, slow, zfree, heapk
+            );
+        }
+
+        // Leg-16 anatomy line: decomposes heapK at the floor. procs =
+        // tgid leaders; kN/kK/kHW = live kernel stacks / their bytes /
+        // boot-max high-water (probe armed by dfx=schb); smallK vs
+        // smallPgK = live small-object estimate vs slab pages actually
+        // held (the delta is packing slack); oN = buddy per-order live
+        // pages (o5 = the 128KB kernel-stack class on this config).
+        {
+            let (kn, khw) = crate::process::task::kstack_anat();
+            let (small_k, small_pg_k) = crate::mm::small_alloc::live_stats_kib();
+            let np = &crate::mm::buddy_allocator::NET_PAGES;
+            let mut w = ConsoleWriter::new();
+            let _ = writeln!(
+                w,
+                "SC-ANAT t={}s procs={} kN={} kK={} kHW={} smallK={} smallPgK={} o0={} o1={} o2={} o3={} o4={} o5={} o6={}",
+                t_secs, n_procs, kn, kn * (crate::config::KERNEL_STACK_SIZE as u64) / 1024, khw,
+                small_k, small_pg_k,
+                np[0].load(Ordering::Relaxed), np[1].load(Ordering::Relaxed),
+                np[2].load(Ordering::Relaxed), np[3].load(Ordering::Relaxed),
+                np[4].load(Ordering::Relaxed), np[5].load(Ordering::Relaxed),
+                np[6].load(Ordering::Relaxed)
             );
         }
 

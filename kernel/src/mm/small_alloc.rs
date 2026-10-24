@@ -573,6 +573,28 @@ fn flush_batch(entries: &[usize], ci: usize, heap_start: usize) {
     }
 }
 
+/// Leg-16 kernel-heap anatomy: (live small-object bytes, slab pages
+/// actually held) in KiB, from the forensic counters — the difference
+/// between the two is the packing slack. Object bytes round every live
+/// object up to its class size and ignore magazine residency (bounded
+/// skew of MAX_CPUS*8*MAG_DEPTH entries); page bytes are exact.
+pub fn live_stats_kib() -> (u64, u64) {
+    let mut obj_bytes: u64 = 0;
+    let mut pages: u64 = 0;
+    for ci in 0..8 {
+        let c = &CACHES[ci];
+        let a = c.obj_allocs.load(Ordering::Relaxed) as i64;
+        let f = c.obj_frees.load(Ordering::Relaxed) as i64;
+        let live = (a - f).max(0) as u64;
+        obj_bytes += live * CLASSES[ci] as u64;
+        pages += c
+            .pages_created
+            .load(Ordering::Relaxed)
+            .saturating_sub(c.pages_reclaimed.load(Ordering::Relaxed)) as u64;
+    }
+    (obj_bytes / 1024, pages * 4)
+}
+
 /// One-line census for the ALLOCTHROW dump (raw UART, allocation-free).
 pub fn census_line() {
     use crate::dfx::taskdump::{taskdump_dec, taskdump_raw_line};
