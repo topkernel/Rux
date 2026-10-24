@@ -32,6 +32,7 @@ Runs (this worktree, `run/`):
 | `pa-pa16` | same kernel as smoke2 | syscost=1 sprobe=0 | 782 s | REST decomposition run (section 2c). No KERNPANIC all boot (WW user-frame fix in); host load ~7 (6-8 foreign QEMUs); max closed IF=0 segment 4 ms all boot |
 | `pa-pa17` | main@0634bc8f (launcher wake-loss fixes a39d2bc0 v1 + 6e9679c5 v2 now merged) + pa16 probe v3 applied clean (bzImage run/pa17-probe-bzImage) | syscost=1 sprobe=0 | 782 s | W3 acceptance retest (section 2d). Host load ~6.7 (5 foreign QEMUs); TERM-DESCHED=0 all boot; max closed IF=0 segment 5 ms |
 | `pa-pa18` | main@9bc3a5c8 (launcher v3 c90f80b0 + v4 7a8044e0 + v5-param 12ea541e + v6/R73 9777f195 now merged; v5 inert, param not passed) + pa16 probe v3 (bzImage run/pa18-probe-bzImage, nm run/pa18-nm.txt) | syscost=1 sprobe=0 | 780 s | v1..v6 stacking retest (section 2e). TERM-DESCHED fires 8x, all survive; census population unchanged; GRQ -31% claim corrected to volume-coupled; pre-magazine allocator (A-only rung; B landed as 988e10c1 after this build) |
+| `pa-pa20` | main@988e10c1 (= pa18 kernel + wildwrite per-CPU magazines cb51db03 + lock-hold counters 64156dcb) + pa16 probe v3 (bzImage run/pa20-probe-bzImage, nm run/pa20-nm.txt) | syscost=1 sprobe=0 | 780 s | magazine before/after (section 2f). Global class-lock sections 741.7M -> 19.7M (-97.3%); small_alloc REST 176.1 -> 133.2 s (-24.3%); IF=0 23.0% of machine; W3 census unchanged |
 | `pa19-unittest-main` | main@298b69fe (= this worktree, kernel/ byte-identical to main), riscv64 unit-test build, no probe | (unit test) | ~90 s | riscv64 make-test reproduction boot: instant truncated `trap: KERNPANIC pfa` before any kernel print; `-d int` trace (pa19-qemu-int.log) = store faults at trap_entry+0xda descending 0x120/frame from sp=_stack_top-8 — boot stack outside the 12MB early window (image 12.67MB). See NINTH LEG below |
 | `pa19-unittest-fix` | same + RUX-RISCV-LAYOUT-2 window/heap fix (this branch) | (unit test) | ~150 s | verification boot: full unit suite runs, 60 ok / 3 FAIL (stale config assertions, pre-existing: KERNEL_HEAP_SIZE 512-vs-1024 bc0ffbee, FUTEX_* 256/64-vs-8192/512 08fcfc04) |
 
@@ -352,6 +353,23 @@ Gate events + pa18 (11:00-11:15):
   5.1-6.1 us, wall tracks n); IF=0 23.7% of machine; small_alloc
   12.2% cross-check pass; bootanimation process starts (no UI
   markers); console row fourth point 1.4% at 13-14 us/byte.
+- **pa20 delivered (section 2f)**: the magazine measured on the OH
+  boot — global class-lock sections 741.7 M -> 19.7 M/boot (-97.3%,
+  confirming the wildwrite 16.49x projection), small_alloc REST wall
+  176.1 -> 133.2 s (12.2% -> 9.2% of machine, -24.3%); machine IF=0
+  23.7% -> 23.0% (volume growth elsewhere ate part of the win; GRQ
+  at its deepest-boot maximum 66.5 s); W3 census identical (the
+  allocator touches no wake path). Ranking bumped to v2.4; report to
+  v1.1.
+- **Both retest gates closed out this leg** — the eighth- through
+  eleventh-leg waiting state is discharged: gate A (launcher v3..v6)
+  measured in pa18, gate B (magazine) measured in pa20, and the
+  pa17-era GRQ attribution corrected. Remaining open items for the
+  next leg: UI milestone (launcher lane's sc-series; sc199 also died
+  without markers, sc200 rolling with their new schb soft-wedge
+  heartbeat dfx 858b455a), the census birth forensics (their lane),
+  and the allocation-churn hunt (row 7's new priority).
+
 
 
 
@@ -940,6 +958,74 @@ the /proc/kmsg stream fix holding). New shape worth naming: ioctl
 66.7 K calls @599 ms avg blocked (display/fb path) — prelude to the
 UI phase, watch it in pa20.
 
+### 2f. pa20: the magazine measured — global class-lock sections -97.3%, REST wall -24.3%, machine IF=0 barely moves
+
+pa20 (seventh session, 11:18-11:31) = origin/main@988e10c1 = pa18's
+kernel PLUS the wildwrite lane's per-CPU magazines (cb51db03) and
+their lock-hold counters (64156dcb) — the A+B composite rung of the
+ladder. Same probe (pa16 v3, applied clean), same 780 s horizon,
+`syscost=1 sprobe=0`, loglevel=4, host load ~6. The magazine diff is
+small_alloc.rs only, so every other site delta is boot-volume noise
+by construction.
+
+**The allocator before/after (REST wall at t=720, site-attributed):**
+
+| family | pa18 (pre-magazine) | pa20 (magazine) | delta |
+|---|---|---|---|
+| alloc path | :169 global class-lock 371.3 M @243 ns = 90.4 s | :247 magazine pop (local irqsave) 376.0 M @136 ns = 51.6 s + :266 refill class-lock 9.6 M @957 ns = 9.2 s | 90.4 -> 60.8 s |
+| free path | :281 global class-lock 370.4 M @231 ns = 85.7 s | :413 magazine push (local irqsave) 375.2 M @168 ns = 63.4 s + :456 flush window 10.1 M @205 ns = 2.1 s + :495 flush class-lock 10.1 M @684 ns = 6.9 s | 85.7 -> 72.4 s |
+| **global class-lock sections** | **~741.7 M/boot** | **19.7 M/boot (:266+:495)** | **-97.3% — the wildwrite 16.49x/-94% projection CONFIRMED and slightly exceeded** |
+| total small_alloc REST | 176.1 s = 12.2% of machine | 133.2 s = 9.2% of machine | **-24.3% wall** |
+
+Reading: the magazine did exactly what it was designed to do — the
+GLOBAL lock is now touched only on refill/flush batches (19.7 M/boot
+instead of every op). The wall-time ceiling is the per-op LOCAL
+irqsave that guards the cpu_id/magazine consistency (136-168 ns per
+op, 751 M ops/boot): that is the design's floor, not contention. The
+12.6% machine item becomes a 9.2% item; the remaining lever is churn
+volume (F5/fs#4: who allocates 1 M objects/s), not locking.
+
+**Machine-level IF=0: 330.6 s / 1440 CPU-s = 23.0% (pa18 23.7, pa17
+23.4, pa16 25.0) — a -0.7 pp move, because the allocator's -42.9 s
+was partly eaten by volume growth elsewhere**: schedule() GRQ
+46.2 -> 66.5 s (n 8.75 -> 9.88 M, avg 5.28 -> 6.73 us — deepest boot
+of the four by hold count; avg up with it; single-run, treat as
+volume+phase mix), fdtable 29.8 -> 32.3 s, waitqueue family 27.9 ->
+32.9 s, deferred_free 9.7 -> 12.2 s. REST total 311.3 -> 297.6 s;
+REST segment volume 934 -> 970 M (the magazine's local sections add
+to the count). Max closed IF=0 segment 4 ms (band); heal 0.2%/miss 0
+— the v3 adjudication holds on the composite kernel.
+
+**W3 census: unchanged by the allocator (as expected — it touches no
+wake path):** 677 leak prints / 32 refusals (25 lying + 7 linked) /
+11 PREEMPT-LEAK / TERM-DESCHED 8 (fires ~8/boot and survives — now
+two boots in a row). Milestones in band (composer_host.ready 35.1 s,
+appspawn.started 68.0 s); no UI markers (bootanimation sleeps as in
+pa18). Console row fifth point: 1.34 M bytes, 18.2 s emission = 1.3%
+of machine @13.4-14.1 us/byte (volume low again; the 1.3-6.1% band
+widens at the bottom). Tick modes (t=660 — the t=720 tick line was
+lost to a print interleave): c0 11.1/88.1/0.5, c1 14.3/83.2/2.5 —
+kernel share 83-88%, same class. Syscall totals in band (~90 M):
+hilogd dual-drain 10.72 M + 10.86 M (1:1), writev 15.6 M,
+clock_gettime 35.5 M, connect 2.67 M; ioctl display/fb blocked shape
+persists (65.4 K @630 ms avg).
+
+**Ladder summary (four boots, same probe, same horizon):**
+
+| metric | pa16 | pa17 | pa18 | pa20 |
+|---|---|---|---|---|
+| kernel (scheduler) | pre-fix | +v1+v2 | +v3+v4(+v5 param inert, v6) | same as pa18 |
+| allocator | class-lock | class-lock | class-lock | **magazine** |
+| IF=0 % of machine | 25.0 | 23.4 | 23.7 | 23.0 |
+| small_alloc REST s | 181.7 | 175.1 | 176.1 | **133.2** |
+| GRQ REST s (site) | 56.6 | 38.7 | 46.2 | 66.5 |
+| WAKE-RUN-LEAK prints | 691 | 593 | 678 | 677 |
+| census refusals (lying) | 30 (21) | 31 (22) | 31 (27) | 32 (25) |
+| TERM-DESCHED | n/a | 0 | 8 | 8 |
+| console emission % | 1.7 | 6.1 | 1.4 | 1.3 |
+
+
+
 ## 3. Syscall cost table (pa1, cumulative t=1500s)
 
 560M calls, 146 kinds. Hot by count (the flood):
@@ -988,25 +1074,26 @@ Notes:
   main yet) is already far below the 1.7-1.9 s *per sandbox phase*
   telemetry, because a phase is dozens of mounts plus other work.
 
-## 4. Ranking table v2.3 (cost centers -> boot-time contribution)
+## 4. Ranking table v2.4 (cost centers -> boot-time contribution)
 
-v2.3 = v2.2 refreshed by pa17 (sixth session: launcher wake-loss fixes
-merged into main, W3 acceptance retest, console sub-item second data
-point, allocator routed to the B lane). Contribution model unchanged:
-2 vCPUs; kernel mode ~86-89% of ticks (pa17 t=720: 89.4/88.4%; pa16:
-86.5/86.3%).
+v2.4 = v2.3 refreshed by pa18 + pa20 (seventh session: the gate-A
+v1..v6 stacking retest and the gate-B magazine before/after — both
+wait-gates opened mid-leg and both ladders are now measured; GRQ
+-31% claim corrected to volume-coupled; TERM-DESCHED acceptance
+demonstrated). Contribution model unchanged: 2 vCPUs; kernel mode
+~83-90% of ticks (pa20 t=660: 88.1/83.2%).
 
 | # | cost center | measured (pa13) | pa15/pa16/pa17 direct evidence | gap contribution | family |
 |---|---|---|---|---|---|
-| 1 | Interrupt-disabled regions (cli-recovery page) | 26% of kernel ticks; 316 IRQ-OFF-WINDOW/780 s (now TRIAGE HINT — see 2d) | pa16 EXACT: IF=0 = 25.0% of machine; pa17: 23.4%; split REST 88.8-92.0% / HARD 5.1-7.7% / SOFT 1.6-1.7% / UART 1.4-1.9%; max closed segment 4-5 ms (no long cli section exists); 1.26 M sections/s | **large** — decomposed below; levers per section, not per zone | F1 |
-| 1b | REST section bulk (exact decomposition) | (inside #1) | small-alloc cache locks 12.2-12.6% of machine (~55% of REST, 732-740 M/boot; post-slab-packing — d56de697 has been in every measured baseline since 2026-10-19; **per-CPU magazines LANDED as 988e10c1 after pa18 — pa18 is the last pre-magazine datum, pa20 measures the after**); schedule() GRQ 2.7-3.9% (avg flat 5.1-6.1 us across pa16-pa18; wall total volume-coupled — pa17's -31% claim corrected in 2e); fdtable get_file 1.9-2.1%; waitqueue family 1.8-2.2%; EPOLL_WAKE_REGISTRY 1.0-1.2%; deferred_free 0.7% — 97.3-99.3% attributed to file:line | **the F1 lever list** — allocator magazines (LANDED, awaiting pa20 re-measure), GRQ pick (launcher lane; full refactor deferred as intersecting the kill-path machinery), fdtable read path, waitqueue batching, epoll registry (launcher lane — sharding design in hand, their fb2a1354) | F1/F5 |
-| 1a | Console/UART emission (sub-item of F1) | outb/inb in recovery rips; cli page shares inb/outb | pa15: 4.34 M bytes, 5.0% of machine; pa16: 1.55 M bytes @ t=720, 1.7%; pa17: 5.61 M bytes, 6.1% — **per-byte cost stable 15.5-18.5 us across 3 boots; volume (and thus machine share) swings 1.7-6.1% with boot depth**; producers init/<irq>/FFRT-worker; task-context emission 100% IF=1 | medium CPU (2-6%) + **large latency multiplier** under host load | F1 |
-| 2 | Scheduler wake-loss (WAKE-RUN-LEAK; lying busy slots + linked-starving) | 702 leak prints/780 s; census 16 lying + 7 linked | **pa18 (full v1..v6 stack in main): 678 prints / 31 refusals (27 lying + 4 linked) / 10 PREEMPT-LEAK / TERM-DESCHED=8 — the v1 trigger shape FIRED 8x and every occurrence survived; census lying-slot population unchanged by the entire stack** (pa17: 593/31/22+7/8/0) — they are born on another path; birth forensics continues on the launcher lane | **large** — unchanged; still the wall-clock driver | F3 |
+| 1 | Interrupt-disabled regions (cli-recovery page) | 26% of kernel ticks; 316 IRQ-OFF-WINDOW/780 s (now TRIAGE HINT — see 2d) | pa16 EXACT: IF=0 = 25.0% of machine; pa17: 23.4; pa18 (v1..v6): 23.7; **pa20 (magazine): 23.0**; split REST 88.8-92.1% / HARD 5.1-7.7% / SOFT 1.0-1.7% / UART 1.0-1.9%; max closed segment 3-5 ms (no long cli section exists); 1.3-1.4 M sections/s | **large** — decomposed below; levers per section, not per zone | F1 |
+| 1b | REST section bulk (exact decomposition) | (inside #1) | small-alloc **MEASURED BEFORE/AFTER (pa18->pa20)**: global class-lock sections 741.7 M -> 19.7 M/boot (-97.3%, the 16.49x projection confirmed); REST wall 176.1 -> 133.2 s = 12.2% -> 9.2% of machine (**the -24% wall ceiling is the per-op local irqsave floor, 751 M ops @136-168 ns — the lever left is churn volume, not locking**); schedule() GRQ 2.7-4.6% (avg flat 5.1-6.1 us pa16-pa18, 6.7 us pa20 deepest boot; wall volume-coupled — pa17's -31% claim corrected in 2e); fdtable get_file 1.9-2.2%; waitqueue family 1.9-2.3%; EPOLL_WAKE_REGISTRY 1.0-1.2%; deferred_free 0.7-0.8% — 97-99% attributed to file:line | **the F1 lever list** — allocator magazines LANDED AND MEASURED; GRQ pick (launcher lane; full refactor deferred as intersecting the kill-path machinery); fdtable read path, waitqueue batching, epoll registry (launcher lane — sharding design in hand, their fb2a1354); allocation-churn hunt rises in priority (now the allocator's main lever) | F1/F5 |
+| 1a | Console/UART emission (sub-item of F1) | outb/inb in recovery rips; cli page shares inb/outb | pa15: 4.34 M bytes, 5.0% of machine; pa16: 1.55 M bytes @ t=720, 1.7%; pa17: 5.61 M bytes, 6.1%; pa18: 1.5 M bytes, 1.4%; pa20: 1.34 M bytes, 1.3% — **per-byte cost stable 13.2-18.5 us across 5 boots; volume (and thus machine share) swings 1.3-6.1% with boot depth**; producers init/<irq>/FFRT-worker; task-context emission 100% IF=1 | medium CPU (1-6%) + **large latency multiplier** under host load | F1 |
+| 2 | Scheduler wake-loss (WAKE-RUN-LEAK; lying busy slots + linked-starving) | 702 leak prints/780 s; census 16 lying + 7 linked | **pa18+pa20 (full v1..v6 stack, pre/post magazine): 678/677 prints / 31/32 refusals (27/25 lying) / 10-11 PREEMPT-LEAK / TERM-DESCHED=8 BOTH boots — the v1 trigger shape fires ~8/boot and every occurrence survives; census lying-slot population unchanged by the entire stack AND by the allocator** (pa17: 593/31/22+7/8/0) — they are born on another path; birth forensics continues on the launcher lane | **large** — unchanged; still the wall-clock driver | F3 |
 | 3 | hilogd.server socket dual-drain + sysevent_source + connect-retry | 26.5 M calls by t=720 = ~25% of ALL syscalls | pa16: 10.6 M recvfrom + 10.7 M recvmsg; pa17: 10.08 M + 10.29 M (1:1, avg 116/9 us, recvfrom max 393 s = wake-tail victim); writev 14.6-15.2 M; connect 2.47-2.55 M | medium — volume is OH userspace; kernel levers = per-call recv cost + the wake-loss tail | F2 |
 | 4 | ext4 metadata + write path (open/stat/getdents/fsync/pwrite/mkdir) | open 235 us, newfstatat 206 us, getdents 643 us, fsync avg 16 ms | pa17: open avg 1893 us (max 100 s — stall-tail inflated, see 2d), newfstatat 294 us, getdents 1043 us; medians unchanged | medium (~300-500 CPU-s/boot at this horizon) | F4 |
 | 5 | Atomic/CAS contention (atomic glue page + fetch_update family) | 16% of kernel ticks | pa16: glue page 20% of ticks — RMW owners named (small_alloc/fdtable/GRQ sections, row 1b) | medium — fixes fold into 1b | F5 |
 | 6 | Log-filter + fmt glue | ~11% of kernel ticks combined | (untouched) | small-medium | F2/F5 |
-| 7 | Allocation churn (~5% kernel ticks) + allocator irqsave volume | ~5% kernel ticks | quantified as F1's top item (12.2-12.6% of machine in irqsave alone) — **B lane's queue** | medium-large — merges with 1b | F5 |
+| 7 | Allocation churn (~5% kernel ticks) + allocator irqsave volume | ~5% kernel ticks | quantified as F1's top item (12.2% of machine in irqsave pre-magazine; 9.2% post-magazine pa20 — the locking lever is spent, the per-op local irqsave floor remains at 751 M ops/boot) | medium-large — **the churn hunt (who allocates 1 M objects/s) is now the allocator's main lever** | F5 |
 | 8 | Mount registry scan | mount not in pa13 top-40 by wall | (untouched) | small | F4 |
 | 9 | clock_gettime volume (no vDSO) | 43.6 M calls <1 us | pa16: 35.1 M @3 us; pa17: 33.3 M @4 us | small CPU, medium latency-shape | F6 |
 

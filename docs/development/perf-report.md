@@ -1,13 +1,21 @@
-# Rux kernel microbench report — OH boot (v1.0, pre-UI)
+# Rux kernel microbench report — OH boot (v1.1, pre-UI)
 
 Date: 2026-10-24. Lane: `feature/perf-audit`. This is the consolidated
 deliverable of the systematic performance audit (working log with the full
 evidence trail: `docs/development/perf-audit.md`).
 
-Status: every number below is measured and final for the pre-UI kernel.
-The only pending addition is the **last row of table 1** (post-UI-boot
-milestones), to be filled when the UI milestone is reached; nothing else
-in this report needs to change at that point.
+v1.1 = v1.0 refreshed by pa18 + pa20 (seventh session): the launcher
+lane's full scheduler stack v1..v6 (merged 9bc3a5c8) retested in pa18,
+and the wildwrite lane's per-CPU magazine allocator (merged 988e10c1)
+measured before/after in pa18->pa20. Headline changes: TERM-DESCHED
+acceptance demonstrated (fires ~8/boot, all survive); census lying-slot
+population unchanged by everything; the magazine cuts global class-lock
+sections -97.3% and small_alloc IF=0 wall -24.3% (12.2% -> 9.2% of
+machine); the GRQ "-31% after v2" claim is corrected to volume-coupled.
+
+Status: numbers below are measured through main@988e10c1. The only
+pending addition remains the **last row of table 1** (post-UI-boot
+milestones), to be filled when the UI milestone is reached.
 
 ---
 
@@ -16,19 +24,14 @@ in this report needs to change at that point.
 - Guest: OpenHarmony x86_64 image, QEMU q35, KVM, `-cpu max -m 4G
   -smp 2` — identical machine config for Rux and the Linux reference
   boots.
-- Rux kernel: main@0634bc8f (pa17 measurement boot; the launcher lane's
-  wake-loss fixes v1 a39d2bc0 + v2 6e9679c5 included) plus the lane's
-  measurement probe (`syscost=1 sprobe=0`). Baseline comparisons cite
-  earlier boots on their own kernel revisions (pa1/pa3 pre-fix,
-  pa13/pa15/pa16 progressively fixed) — each run's revision is listed
-  in `perf-audit.md`'s run table. (Current main has since moved to
-  d304069d; the delta is the riscv64 boot-window fix
-  RUX-RISCV-LAYOUT-2 plus docs commits only — cfg(riscv64)-scoped, no
-  x86_64 code change —
-  so every number in this report remains current for the x86_64
-  measurement workload. The launcher lane's sched v3/v4/v5 remain
-  unmerged; the retest that would refresh sections 2-3 waits for
-  them.)
+- Rux kernel: current numbers are main@988e10c1 (pa20; = launcher
+  v1..v6 scheduler stack + magazine allocator) and main@9bc3a5c8
+  (pa18; scheduler stack only, pre-magazine rung); the pa17 rows cite
+  main@0634bc8f. Every boot carried the lane's measurement probe
+  (`syscost=1 sprobe=0`); each run's revision is listed in
+  `perf-audit.md`'s run table. The quietcon console divert (v5) is
+  boot-param-gated and deliberately NOT passed, so console behavior is
+  identical across all compared boots.
 - Instruments: per-syscall {n, avg, max, total-wall} accounting;
   per-CPU tick-mode counters (user/kernel/idle); EFLAGS-exact IF=0
   zone accounting (v3: edge-triggered, self-healing, adjudicated
@@ -39,8 +42,8 @@ in this report needs to change at that point.
 - Linux reference: same image, same machine config, reference kernel
   boot `oh-ref-r1` (`/home/william/rux-agents/oh-linux-ref/runs/`).
 - Host context: the measurement host is shared with foreign-lane QEMUs
-  (load ~6.7 during pa17). Absolute wall numbers carry that noise;
-  ratios and structure are stable across pa13/pa15/pa16/pa17. Where a
+  (load ~6-7 during pa16-pa20). Absolute wall numbers carry that noise;
+  ratios and structure are stable across pa13-pa20. Where a
   number is host-load-sensitive the text says so.
 
 What this report is: a boot-time microbench of the quiet-OH-boot
@@ -89,6 +92,12 @@ the "never reached" verdicts are horizon-limited (13 min), and full
 ---
 
 ## 2. Syscall volume and per-op latency (pa17, cumulative t=720 s)
+
+(pa18/pa20 refresh: volumes within a few percent of these rows —
+hilogd dual-drain 11.5/10.7-11.7/10.9 M, writev 15.6-16.0 M,
+clock_gettime 35.5-37.3 M, connect 2.5-2.7 M; the new named shape is
+ioctl 65-67 K calls at ~600 ms avg blocked on the display/fb path —
+the UI-phase prelude. Full tables: run/pa18-parse.txt, run/pa20-parse.txt.)
 
 ### 2.1 Volume leaders — the flood
 
@@ -170,52 +179,57 @@ Before/after (fixes already in these numbers):
 | unix-segment truesize (5157c305) | writev parked whole 3 s budgets (183 stime ticks/message storm) | writev avg 24 us (pa17) |
 | TSC timekeeper (753c834b..9e5f0147) | clock_gettime = HPET MMIO VM exit each call | 33.3 M calls at 4 us avg |
 | anon fault-around + filemap cache (6782020e, 1b742d80/798b4cb3, dc096f14) | 802 s single .so load; 1727 OOM faults (sc176) | 0 OOM lines; pread64 completes at 10.9 ms avg incl. stall tail |
-| per-mm PTE locks (681da2da) | 470-615 s single-task fork-walk monopolies | none observed pa13-pa17 |
+| per-mm PTE locks (681da2da) | 470-615 s single-task fork-walk monopolies | none observed pa13-pa20 |
 | MOUNT_TABLE preempt-off (502ea7a7) | >= 1 s cli sections inside register_mount | mount syscall avg 5.1 ms, no residual mount-shaped cli windows |
 
 ---
 
-## 3. Cost-center ranking v2.3 — the fix list in order
+## 3. Cost-center ranking v2.4 — the fix list in order
 
-Contribution model: 2 vCPUs, kernel mode 86-89% of ticks (pa17 t=720:
-89.4%/88.4%; user 9-10%; idle 1-3%).
+Contribution model: 2 vCPUs, kernel mode 83-90% of ticks (pa20 t=660:
+88.1%/83.2%; user 11-14%; idle 0.5-2.5%).
 
-| # | cost center | direct evidence (pa15-pa17, EFLAGS-exact) | share | family / lane |
+| # | cost center | direct evidence (pa15-pa20, EFLAGS-exact) | share | family / lane |
 |---|---|---|---|---|
-| 1 | IRQ-off regions total | IF=0 = 23.4-25.0% of machine; split REST 88.8-92.0% / HARDIRQ 5.1-7.7% / SOFTIRQ 1.6-1.7% / UART 1.4-1.9%; **max closed IF=0 segment 4-5 ms — no long cli section exists; it is 1.26 M short sections/s** | 23-25% | F1 |
-| 1b | REST bulk, by site | small-alloc locks 12.2% (~55% of REST, 732-740 M sections/boot; B lane, per-CPU freelist direction); schedule() GRQ 2.7% (**-31% wall after launcher v2: 56.6 -> 38.7 s**); fdtable get_file 1.9-2.0%; waitqueue family 1.8-2.2%; EPOLL_WAKE_REGISTRY 1.0-1.1%; deferred_free 0.7% — 97.3-99.3% attributed to file:line | 20.8-23.0% | F1/F5 — the lever list |
-| 1a | Console/UART emission | per-byte cost stable 15.5-18.5 us across 3 boots (one LSR poll per byte = one inb+outb KVM-exit pair); volume swings 1.55-5.61 M bytes/boot -> machine share 1.7-6.1%; producers 2/3 OH userspace via /dev/kmsg; task-context emission 100% IF=1 | 2-6% + seconds-class stall tail | F1 — console-async = highest-latency single fix |
-| 2 | Scheduler wake-loss | WAKE-RUN-LEAK 593 prints / 780 s; 31 refusals (22 lying busy slot + 7 linked, never picked); recvfrom max 393 s and futex avg 351 ms are this family's syscall-side face; launcher v1+v2 merged — census unchanged, their trigger shape absent this boot (TERM-DESCHED=0); lying slots born on another path, birth forensics continues | **large — still the wall-clock driver** | F3 (launcher lane) |
+| 1 | IRQ-off regions total | IF=0 = 23.0-25.0% of machine across pa16-pa20 (magazine moved it 23.7 -> 23.0); split REST 88.8-92.1% / HARDIRQ 5.1-7.7% / SOFTIRQ 1.0-1.7% / UART 1.0-1.9%; **max closed IF=0 segment 3-5 ms — no long cli section exists; it is 1.3-1.4 M short sections/s** | 23-25% | F1 |
+| 1b | REST bulk, by site | small-alloc **MEASURED pa18->pa20: global class-lock sections 741.7 M -> 19.7 M/boot (-97.3%); REST wall 12.2% -> 9.2% of machine — the remaining 751 M local magazine irqsave ops (136-168 ns) are the design floor; the lever left is churn volume**; schedule() GRQ 2.7-4.6% (volume-coupled; avg 5.1-6.7 us; the earlier -31% claim was single-run variance — corrected); fdtable get_file 1.9-2.2%; waitqueue family 1.9-2.3%; EPOLL_WAKE_REGISTRY 1.0-1.2% (launcher lane holds a sharding design); deferred_free 0.7-0.8% — 97-99% attributed to file:line | 20.7-23.0% | F1/F5 — the lever list |
+| 1a | Console/UART emission | per-byte cost stable 13.2-18.5 us across 5 boots (one LSR poll per byte = one inb+outb KVM-exit pair); volume swings 1.34-5.61 M bytes/boot -> machine share 1.3-6.1%; producers 2/3 OH userspace via /dev/kmsg; task-context emission 100% IF=1 | 1-6% + seconds-class stall tail | F1 — console-async = highest-latency single fix |
+| 2 | Scheduler wake-loss | WAKE-RUN-LEAK 677-678 prints / 780 s on the FULL v1..v6 stack (pa18/pa20); 31-32 refusals (25-27 lying busy slot + linked); TERM-DESCHED fires ~8/boot and every occurrence survives (acceptance demonstrated, pa17 could not test it); recvfrom max 121 s and futex avg 519 ms are this family's syscall-side face; lying slots born on another path — birth forensics continues | **large — still the wall-clock driver** | F3 (launcher lane) |
 | 3 | hilogd dual-drain + retry loops | ~25% of all syscall volume (section 2.1); volume is OH userspace | medium | F2 — kernel levers small (per-call recv cost) |
 | 4 | ext4 metadata + write path | section 2.2 rows, medians 100-300x Linux | medium (~300-500 CPU-s/boot) | F4 (fs lane) |
-| 5 | Atomic/CAS contention | glue page ~16-20% of kernel ticks; RMW owners named — they ARE the 1b sections | medium — folds into 1b | F5 |
-| 6 | clock_gettime volume (no vDSO) | 33.3 M calls at 4 us — amortized by TSC timekeeper | small | F6 — closed |
+| 5 | Atomic/CAS contention | glue page ~16-22% of kernel ticks; RMW owners named — they ARE the 1b sections | medium — folds into 1b | F5 |
+| 6 | clock_gettime volume (no vDSO) | 33.3-37.3 M calls at 3-4 us — amortized by TSC timekeeper | small | F6 — closed |
 
 Reading. The gap is not one hotspot; it is four stacked layers in this
 order: (a) wake-loss stalls multiplying every dependency chain (the
-phase-timeline driver), (b) 1.26 M irqsave sections/s — allocator and
-lock volume, each section only ~250 ns to 6 us long, (c) userspace
+phase-timeline driver), (b) 1.3 M irqsave sections/s — allocator and
+lock volume, each section only ~140 ns to 6 us long, (c) userspace
 logging/retry loops amplified by per-call kernel costs, (d) metadata
 ops at 100-300x. The IRQ-off family (row 1) decomposes almost entirely
 into per-site work (row 1b) — there is no single long critical section
-to break up; the fixes are per-site (per-CPU freelists for the
-allocator, pick-path work for the GRQ, RCU-ish reads for fdtable).
+to break up; the fixes are per-site (magazines DONE for the allocator;
+pick-path work for the GRQ; RCU-ish reads for fdtable).
 
-Ranking movement v1 -> v2.3 (what fixes moved). The read storm (v1's
+Ranking movement v1 -> v2.4 (what fixes moved). The read storm (v1's
 #3, ~0.5-1.0 vCPU) is gone after the kmsg fix; its slot was taken by
 the hilogd dual-drain, which was always underneath and spins faster
-now that rd_kmsg stopped competing. The GRQ site fell 3.9% -> 2.7%
-when the launcher's v2 pick-ownership release merged (single-boot
-evidence, direction consistent with design intent). The softirq
-empty-raise gates (pa14 A/B) measured NO effect on this workload —
-both latch bits flip within the first 31 s and never re-engage; honest
-negative result, the gates still pay on timer/TCP-sparse workloads.
+now that rd_kmsg stopped competing. The launcher's v1..v6 stack
+(pa18) leaves the census population and CPU-side picture unchanged
+but demonstrably survives its own rare shape (TERM-DESCHED 8/boot,
+pa17 had 0 — clean boots never exercised it). The magazine (pa20)
+delivers the projected -97.3% global-lock sections and -24.3%
+allocator wall; machine IF=0 only moves -0.7 pp because the remaining
+floor is per-op local irqsave and other sites grew with boot depth.
+The softirq empty-raise gates (pa14 A/B) measured NO effect on this
+workload — both latch bits flip within the first 31 s and never
+re-engage; honest negative result, the gates still pay on
+timer/TCP-sparse workloads.
 
 Known limitations. Single-boot samples per kernel revision; shares are
 of a 1440 CPU-s machine window at t=720; console share swings with
-printk volume (1.7-6.1%) while per-byte cost is the stable quantity;
-the GRQ -31% is one run against one baseline (host-load interacts with
-hold times — treat direction, not the exact percent).
+printk volume (1.3-6.1%) while per-byte cost is the stable quantity;
+the GRQ hold interacts with boot depth (n varies 7.6-9.9 M across
+boots) — compare avg and n, never the wall total alone.
 
 ---
 
@@ -236,13 +250,15 @@ hold times — treat direction, not the exact percent).
 
 Conclusion (the one-sentence version): the Rux-vs-Linux boot gap is
 dominated, in order, by (a) scheduler wake-loss stalls that multiply
-every dependency chain, (b) 1.26 M short irqsave sections/s
-(allocator + lock volume — no long cli section exists), (c) OH
-userspace logging/retry loops amplified by kernel per-call costs, and
-(d) ext4-family metadata ops at 100-300x Linux norms — and the fix
-order that follows is wake-loss birth forensics (launcher lane),
-allocator per-CPU freelists (B lane), console-async (highest-latency
-single fix), then the fs metadata hunt.
+every dependency chain, (b) 1.3 M short irqsave sections/s
+(lock + allocator volume — no long cli section exists; the
+allocator's global-lock share is now fixed by the magazines, its
+remaining floor is churn volume), (c) OH userspace logging/retry
+loops amplified by kernel per-call costs, and (d) ext4-family
+metadata ops at 100-300x Linux norms — and the fix order that
+follows is wake-loss birth forensics (launcher lane), console-async
+(highest-latency single fix), allocation-churn hunt, then the fs
+metadata hunt.
 
 ---
 
@@ -251,7 +267,7 @@ single fix), then the fs metadata hunt.
 Fixes already in main, verified by this lane's measurements (no
 re-fix; full table in `perf-audit.md` section 6):
 
-| fix | before (measured then) | after (pa13-pa17) | verdict |
+| fix | before (measured then) | after (pa13-pa20) | verdict |
 |---|---|---|---|
 | /proc/kmsg stream + /dev/kmsg ring (d931c345, cfc39329) | 93.3K read/s EOF spin; markers dropped | -113x reads, syscalls -30%, markers live | holds |
 | unix truesize (5157c305) | writev parks whole 3 s budgets | avg 24 us | holds |
@@ -262,7 +278,9 @@ re-fix; full table in `perf-audit.md` section 6):
 | MOUNT_TABLE preempt-off (502ea7a7) | >= 1 s cli in register_mount | mount avg 5.1 ms syscall | holds |
 | UART THRE budget 250 us (29a49444) | softirq-stall/WAKE-STRANDED storms fed by prints | 7 stall lines/boot class | holds |
 | sticky wake re-issue (385c9793) | consumed tokens, minutes-long parks | re-issues; residual 593/boot leak prints remain | partial — family continues |
-| launcher wake-loss v1+v2 (a39d2bc0, 6e9679c5) | pre-fix census 691 prints / 30 refusals | census 593/31 (in variance band); **GRQ hold -31% (56.6 -> 38.7 s)** | compatible; v1's rare shape absent from clean boots — acceptance needs their reproducer; lying-slot birth path still open |
+| launcher wake-loss v1+v2 (a39d2bc0, 6e9679c5) | pre-fix census 691 prints / 30 refusals | census 593/31 (in variance band) | compatible; v1's rare shape absent from clean boots |
+| launcher sched v3+v4 (+v6/R73) (c90f80b0, 7a8044e0, 9777f195) | — | **pa18: TERM-DESCHED fires 8x/boot and all survive (acceptance demonstrated); census population unchanged (lying slots born elsewhere); GRQ hold volume-coupled, avg flat 5.1-6.1 us — the earlier -31% wall claim was variance, corrected** | v1..v6 stack verified harmless-and-effective on its own shape; census birth forensics remains open |
+| per-CPU magazine allocator (cb51db03) | 741.7 M global class-lock sections/boot, 176.1 s REST (12.2% of machine) | **pa20: 19.7 M lock sections (-97.3%), 133.2 s REST (9.2%) — the 16.49x projection confirmed; remaining floor is per-op local irqsave (751 M ops @136-168 ns)** | holds — locking lever spent; churn volume is the allocator's next lever |
 | softirq empty-raise gates (69310bae) | (hypothesis: wasted raises) | no measurable effect on OH boot — latches flip by t=31 and never re-engage | negative result, recorded |
 
 ---
