@@ -38,6 +38,7 @@ Runs (this worktree, `run/`):
 | `pa-pa23-tickfix-tcg` | main@78460742 + the launcher lane's timer fix hunk ONLY (u128 multiply-then-shift, `tsc_delta_nominal`, extracted from samgr-callback wip 1e54319f; scratch branch `scratch/tickfix`, commit 9a451bef — pre-merge validation of the A-line fix, never for main) | syscost=1 sprobe=0, **ACCEL=tcg** | 600 s wall (~300 guest s, dumps t=60..540) | leg-15 tick-fix battery (section 2h): tripwire `[ok]` 16 jiffies/150 ms (pa21: 0 [fail]); tick counters 99.9/s/CPU sustained through all 9 dumps; WW IRQ-OFF-WINDOW 2 prints, organic ages 414/251 ms (pa21: 57 all at exactly 1001 ms); WAKE-STRANDED 0 (pa21: 100); TERM-DESCHED 8 and WAKE-REFUSED 32 — identical to pa21 (tick-independent census counts hold); nanosleep avg 1.87 s -> 88.5 ms (-21x) at same-horizon t=60; clock_gettime max 654 ms -> 3 ms; composer_host.ready +95.1 -> +89.9 s wall (-5.5%) |
 | `pa-pa24-tickfix-probe-tcg` | pa23's branch + pa16 probe v3 patch (scratch 520970f0; nm run/pa24-nm.txt) | syscost=1 sprobe=0, ACCEL=tcg | 600 s wall (dumps to t=540) | leg-15 battery item (b), EFLAGS-exact probe under the fix: IF=0 35.3% of machine at t=540 — TCG-inflated, not comparable to the KVM 23% band (official re-measure = post-merge KVM flagship); structure intact (heal 0.05-0.09% miss=0, max REST segment 13 ms ms-class, site table family shape kept) + expected new timer.rs:173/:317 site pair (true 100 Hz hrtimer dispatch); SOFTIRQ zone share 7.7-13.9% of IF=0 (was 1.0-1.7% pre-fix KVM — suppressed dispatch volume now real); WW/WAKE-STRANDED prints 0 all boot; tripwire `[ok]` |
 | `pa-pa25-prefix-tcg` | stock main@78460742 (pre-fix rebuild; tripwire `[fail]` confirms) | syscost=1 sprobe=0, ACCEL=tcg | 600 s wall (dumps to t=540) | leg-15 same-accel deep baseline for pa23: WW ages pinned 1001 ms x283; nanosleep @t=240 avg 1.34 s / n 1300 (pa23: 120 ms / 6549, -11x at depth); futex+epoll avgs UNCHANGED (F3 tail, tick-independent); composer 130.3 s vs pa23 89.9 s but appspawn.started 312 s vs 468 s — opposite directions, wall-clock deltas noise-dominated, no claim; both runs end at the same depth (appspawn, not bundles) |
+| `pa-pa26-preview-kvm` | main@6aa2fc74 + merge --no-commit of A-line 675095c0 (fix only; timer file verified byte-identical to scratch/tickfix) + pa16-probe v3; provenance run/pa26-built-from.txt; bzImage run/pa26-preview-bzImage (untracked, >10MB leg rule) | syscost=1 sprobe=0, **ACCEL=kvm** | 600 s wall (dumps to t=540) | **LEG-16 PREVIEW of the flagship** (official = post-merge re-run; see 2i): tripwire `[ok]` 15 jiffies/150 ms; **IF=0 = 25.5% of machine cumulative** (cpu0 138.6 s + cpu1 136.8 s / 2x540 s) — INSIDE the pre-fix KVM band 23.4-25.0%, so the fix does NOT move total IRQ-off share (it removes clock granularity, not irqsave work); splits REST 88.4% / HARD 7.7% / SOFT 3.1% / UART 0.7% — SOFTIRQ component 1.0-1.7% -> 3.1% of IF=0 (real hrtimer dispatch; direction matches pa24's TCG 7.7-13.9% but far below TCG inflation); max closed segments 3-7 ms ms-class; heal miss=0; REST #1 single site = GRQ sched.rs:2140 (68.8 s, 12.3 M seg, avg 5.6 us) over small_alloc family 71.5 s/4 sites, file.rs:676 29.1 s, wait.rs family 36.3 s, NEW timer.rs:173 pair 2.3 s; tick-mode kernel share 84.1-85.6% (post-fix true sampling; pa17/20 pre-fix read 86-89%); nanosleep avg 183 ms @ n=20048 (pa17 pre-fix KVM: 2.2 s — ~-12x on KVM, confirming the TCG -11x at depth); clock_gettime 30.9 M @ 3 us avg, cumulative max 289 ms (late-boot host-noise class); depth: appspawn binary load +5.4 s, composer host start +25.4 s, BootAnimation procs ready-true +39.98 s and alive to +541 s, foundation SIGCHLD +50.3 s (appfwk/launcher/bms/lockscreen not set), NO bootanimation.finished/launcher.ready at 600 s — same depth class as pre-fix quiet boots, single boot, no wall-clock claim; hot rip page 26% = the enable_irq/restore_irq thunk page (documented cli-window re-enable bias, amplified because ticks now really land — NOT a new cost center) |
 | `pa19-unittest-main` | main@298b69fe (= this worktree, kernel/ byte-identical to main), riscv64 unit-test build, no probe | (unit test) | ~90 s | riscv64 make-test reproduction boot: instant truncated `trap: KERNPANIC pfa` before any kernel print; `-d int` trace (pa19-qemu-int.log) = store faults at trap_entry+0xda descending 0x120/frame from sp=_stack_top-8 — boot stack outside the 12MB early window (image 12.67MB). See NINTH LEG below |
 | `pa19-unittest-fix` | same + RUX-RISCV-LAYOUT-2 window/heap fix (this branch) | (unit test) | ~150 s | verification boot: full unit suite runs, 60 ok / 3 FAIL (stale config assertions, pre-existing: KERNEL_HEAP_SIZE 512-vs-1024 bc0ffbee, FUTEX_* 256/64-vs-8192/512 08fcfc04) |
 
@@ -1273,6 +1274,45 @@ Open items filed for the next legs / other lanes:
   SendRequestInner to *.ISystemAbilityManager at cost:29998 ms
   (~30 s binder timeouts) and installd SA-511 load failure — the
   post-grid blocker chain for the launcher lane.]
+  [LEG-16 patrol, sc207 FINAL (log closed 14:36, sleepsnap tail =
+  run end): the mid-roll note above was premature on "no bootevent
+  milestones" — sc207 reached the SAME plateau as sc206 later in the
+  run. Full marker-set diff sc206 vs sc207: 15 shared bootevent
+  markers (incl. boot.completed, appfwk.ready, samgr.ready,
+  composer_host.ready, appspawn.started); sc206 uniquely has
+  bootevent.bms.main.bundles.ready, sc207 adds no new marker; both
+  exec bootanimation (ServiceStart started -> ServiceExec -> exec
+  path=/system/bin/bootanimation, pid 857/858 class). Still NO
+  launcher.ready / bootanimation.finished / OnForeground in either.
+  Two consecutive post-fix rolls now stop at the same depth — the
+  plateau is real, its owner is the launcher lane. Census holds
+  exactly: TERM-DESCHED 8 / WAKE-REFUSED 32 in BOTH rolls (matches
+  pa21/pa23 battery counts). WAKE-STRANDED 15 (sc206) vs 3 (sc207),
+  strands 1019/1185/1250 ms, organic off-grid ~1 s class — the F3
+  wake-loss face, tick-independent as predicted. Binder cost family
+  (A-line's next chain link, recorded not taken over): 9
+  SendRequestInner-to-ISystemAbilityManager cost prints in sc207,
+  QUANTIZED to userspace timeout classes on the now-true clock —
+  15 s class x4 (14988/14995/15001/+1), 30 s class x4 (29998 x2,
+  29999, 28647), one 3128 ms; the 30 s class pairs with
+  `SAMGR: Start dynamic proc:installs,511,105_29997ms` — SAMgr
+  dynamic-proc start (installs SA-511) is the single wait that
+  matches the sc206 installd SA-511 load failure. Pre-fix rolls
+  could not see any of this (cost prints wrapped to ~4.29e6 ms).
+  ENDING CLARIFICATION (A-line f5e0346a, 14:59): sc207 did NOT time
+  out — it ended in a HARD FREEZE, root-caused by the A-line as a
+  print-under-bucket-lock self-deadlock (binder); the sleepsnap tail
+  and the trailing WAKE-STRANDED print are freeze-context, not census
+  events. sc208 (14:59, rolling) is their fix roll — patrol continues
+  there next leg.]
+  [LEG-16 addendum, sc208 mid-roll (62 K lines at 15:36, still live):
+  census holds for the THIRD consecutive roll — TERM-DESCHED 8 /
+  WAKE-REFUSED 32 / PREEMPT-LEAK 0; WAKE-STRANDED 12; bms.main.bundles
+  .ready AND appfwk.ready both set (sc206-parity depth), launcher 0.
+  Binder cost family DEEPENS: the 15 s (x5) and 30 s (x3) classes
+  persist and a NEW ~89 s class appears (88632/89396/89400 ms x1 each)
+  — longer-than-timeout waits now visible; recorded for the A-line
+  samgr chain, not taken over.]
 
 ### 2h. FIFTEENTH LEG: the tick fix verified before merge — pa23 battery on main + the fix hunk (section 2g's correction measured)
 
@@ -1390,6 +1430,67 @@ performance blocker; the sched.rs:1747 terminal-deschedule family
 tracking stays with the launcher lane. Their ext4 note (missing
 metadata_csum_seed / orphan_file support vs Linux) is a compatibility
 gap for the fs lane's list, recorded here for cross-reference only.
+
+### 2i. SIXTEENTH LEG: fix commit pinned + flagship armed (no merge yet at leg start)
+
+Leg start 14:55 (leg-15 head 4bcd5594 fast-forwarded through the
+merge commit 6aa2fc74 — main carries no new kernel commits since).
+
+**(1) The fix is now a clean commit, and it is EXACTLY the validated
+hunk.** A-line re-committed the wip timer fix properly on
+feature/samgr-callback as 675095c0 `fix(timer): x86_64 TSC timekeeper
+must multiply before shifting` (10-24 13:47). This lane diffed
+675095c0's kernel/src/drivers/timer/x86_64.rs change against the
+scratch/tickfix hunk 9a451bef that pa23/pa24/pa25 validated:
+**byte-identical (whitespace-exact, 76 diff lines each)**. The
+pre-merge battery therefore covers exactly what will merge — no
+re-validation gap. Their branch also carries 852d0cf2 (one-shot
+TICKPROBE, sc203-205 diagnostic), 2a02d5db (PREEMPT-LEAK tripwire
+hardirq discount), b634a615 (schb census re-arm fix) — dfx-only,
+outside this lane's measurement surface except as extra log lines.
+
+**(2) Main does NOT have the fix yet** (verified by diff
+main:kernel/src/drivers/timer/x86_64.rs vs scratch/tickfix at leg
+start: all 4 shift-first sites still present). The KVM flagship
+trigger has not fired. sc206/sc207 (A-line rolls on their branch
+kernel) are post-fix and show the plateau + census described in the
+section 2g LEG-16 patrol note above.
+
+**(3) Flagship runbook (armed; executes same-leg the moment the merge
+lands on main):**
+1. Confirm merged main's kernel/src/drivers/timer/x86_64.rs ==
+   scratch/tickfix's file for the timer hunk (record the diff either
+   way; expect empty modulo any other branch commits touching the
+   file — 675095c0 is the only timer change on their branch).
+2. `git checkout -b` nothing — run on main directly, worktree clean;
+   apply run/pa16-probe.patch (probe v3, EFLAGS-exact IF=0 zones +
+   REST call sites) on merged main; build x86_64 kernel.
+3. ONE KVM boot (q35, -cpu max -m 4G -smp 2, snapshot +
+   file.locking=off, syscost=1 sprobe=0, 600 s wall, serial stamped)
+   — the OFFICIAL post-fix IF=0 share (pa24's 35.3% is TCG-inflated;
+   the pre-fix KVM band was 23.4-25.0%) and the wall-clock milestone
+   question (pa25-vs-pa23 was noise-dominated, no claim): appspawn /
+   composer_host / bms bundles / appfwk / bootanimation markers with
+   host timestamps, compared against the pa17/pa25 KVM-class band.
+4. Report v1.4 + ranking row 2b official-share cell fill.
+
+**(4) PREVIEW EXECUTED (pa26, 15:04-15:14, one of this leg's 2 QEMU
+slots).** With the merge not landed and idle capacity, the whole
+flagship pipeline was dry-run end-to-end on main+675095c0+probe
+(the exact future-merge timer file, pre-verified identical):
+patch applies clean, kernel builds, boot/parse pipeline works,
+and the preview numbers exist — **IF=0 = 25.5% of machine, INSIDE
+the pre-fix band; SOFTIRQ component 1.0-1.7% -> 3.1% of IF=0;
+nanosleep avg -12x on KVM; depth class unchanged (foundation
+chain), single boot, no wall-clock claim** (full row: run table
+pa-pa26-preview-kvm above). Consequences for the official run:
+expect the share to land ~25% (the fix removes clock granularity,
+not irqsave work — row 1's cell should NOT move materially; the
+SOFTIRQ sub-share and the timer.rs:173 REST site pair are the real
+post-fix signature); expect the wall-clock verdict to stay
+inconclusive unless the official boot gets past the foundation
+chain. The preview does NOT fill any v1.4 cell — every number
+there is <<FILL>> until the post-merge boot.
 
 ## 4. Ranking table v2.6 (cost centers -> boot-time contribution)
 

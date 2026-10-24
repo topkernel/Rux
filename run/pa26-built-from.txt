@@ -1,0 +1,5 @@
+kernel state: origin/main 6aa2fc74 + merge --no-commit of samgr-callback 675095c0 (fix(timer): multiply-then-shift) + run/pa16-probe.patch applied
+timer file verified byte-identical to scratch/tickfix (9a451bef) validated by pa23/24/25
+probe patch applies clean on merged state (pre-verified leg 16)
+built 2026-10-24 15:03:27 PLATFORM=x86_64 make build
+6aa2fc74272c736551e0bb1e08990e7906e0d33c

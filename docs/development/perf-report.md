@@ -37,6 +37,42 @@ population unchanged by everything; the magazine cuts global class-lock
 sections -97.3% and small_alloc IF=0 wall -24.3% (12.2% -> 9.2% of
 machine); the GRQ "-31% after v2" claim is corrected to volume-coupled.
 
+<!-- v1.4 SKELETON — fill when the merged-main KVM flagship runs (leg-16
+     runbook step 4). Placeholders marked <<FILL:...>>. Delete this
+     comment block after filling. Pre-leg verification already done:
+     merged x86_64.rs == scratch/tickfix byte-identical; pa16-probe
+     applies clean on merged state; kernel builds (dryrun 15:02).
+     Preview boot pa26 (KVM, main+675095c0+probe, syscost=1 sprobe=0,
+     600 s) exists if the official merge is delayed — label it PREVIEW
+     in every cell it fills; official numbers supersede it.
+
+v1.4 = v1.3 + the merged-main KVM flagship: the timer fix (675095c0,
+byte-identical to the pa23-validated hunk) merged to main at
+<<FILL: merge commit>>, official post-fix numbers:
+
+  - OFFICIAL post-fix IF=0 share (KVM, EFLAGS-exact, pa16 probe v3):
+    <<FILL: total %, REST/HARDIRQ/SOFTIRQ/UART split, vs pre-fix KVM
+    band 23.4-25.0%>> — pa24's 35.3% was TCG-inflated and is
+    superseded here.
+  - SOFTIRQ zone share (was 1.0-1.7% pre-fix KVM; pa24 TCG read
+    7.7-13.9% — suppressed hrtimer dispatch volume now real):
+    <<FILL>>.
+  - Wall-clock milestone verdict (the TCG pair was noise-dominated):
+    appspawn.started <<FILL t>> (band 32-66 s), composer_host.ready
+    <<FILL t>> (band 31-44 s), bms bundles / appfwk / bootanimation
+    class <<FILL reached-or-not at 600 s>>; verdict: <<FILL: moved /
+    not moved beyond the band — with the F3 attribution sentence>>.
+  - Census re-read: TERM-DESCHED <<FILL>>, WAKE-REFUSED <<FILL>>
+    (band 8 / 32), WAKE-STRANDED <<FILL>>.
+  - Tick-mode kernel share: <<FILL u/k/i>> (pa23 TCG read 80-83%
+    kernel).
+  - Ranking row 1 share cell: <<FILL>> (replaces "23-25%" if moved).
+  - Row 2b status: closed FIXED + OFFICIALLY MEASURED (drop "pending").
+  - Ledger tick-fix row after-cell: append "merged-main flagship:
+    <<FILL one-line>>" and drop "(merged-main flagship ... pending)".
+
+-->
+
 Status: numbers below are measured through main@988e10c1. The only
 pending addition remains the **last row of table 1** (post-UI-boot
 milestones), to be filled when the UI milestone is reached.
