@@ -868,6 +868,146 @@ pub fn census_peek4(ci: usize, dump_n: usize) {
     taskdump_raw_line(b"\n");
 }
 
+/// Leg-17 census peek LIVE: the v2-v4 walks only reached ACTIVE-listed
+/// pages (pages with free slots) — the population actually sits on FULL
+/// pages (all-live, unlinked: c1024 held 3305 pages x ~3 slots = exactly
+/// its 9.9K live census count) and free slots keep STALE data (only the
+/// low u16 is the freelist link), so earlier peeks sampled garbage.
+/// This scans the WHOLE heap for magic+cls slab pages and classifies
+/// only LIVE slots: free_count is authoritative (a FULL page has no
+/// chain to walk; an ACTIVE page's chain length == free_count).
+pub fn census_peek_live(ci: usize, dump_n: usize) {
+    use crate::dfx::taskdump::{taskdump_dec, taskdump_raw_line};
+    if ci >= CLASSES.len() {
+        return;
+    }
+    let (heap_start, heap_end) =
+        crate::mm::buddy_allocator::GLOBAL_ALLOCATOR.heap_bounds();
+    if heap_start == 0 {
+        return;
+    }
+    let cache = &CACHES[ci];
+    let s = CLASSES[ci];
+    let fo = first_off(s);
+    let objs = (PAGE_SIZE - fo) / s;
+    if objs > 64 {
+        return; // free_set cap; only used for c256/c512/c1024
+    }
+
+    #[inline]
+    fn is_kheap(a: u64) -> bool {
+        a >= 0xffff_8880_0000_0000
+    }
+    #[inline]
+    fn is_userva(a: u64) -> bool {
+        (0x0000_7f00_0000_0000..0x0000_8000_0000_0000).contains(&a)
+    }
+
+    let mut pages_seen: u64 = 0;
+    let mut live: u64 = 0;
+    let (mut n_arc, mut n_vma, mut n_work) = (0u64, 0u64, 0u64);
+    let (mut n_uv, mut n_kh, mut n_sm, mut n_ot) = (0u64, 0u64, 0u64, 0u64);
+    let mut dumped = 0usize;
+    let _g = cache.lock.lock_irqsave();
+    let heap_pages = (heap_end - heap_start) / PAGE_SIZE;
+    let mut pi = 0usize;
+    while pi < heap_pages {
+        let page_addr = heap_start + pi * PAGE_SIZE;
+        let hdr = hdr_of(page_addr);
+        if hdr.magic == HDR_MAGIC
+            && hdr.cls as usize == ci
+            && (hdr.state == STATE_ACTIVE || hdr.state == STATE_FULL)
+        {
+            pages_seen += 1;
+            // Free-slot set: walk the freelist chain ONLY on pages that
+            // report free slots (free_count authoritative; on a FULL
+            // page free_head is stale and every slot is live).
+            let mut free_set = [false; 64];
+            if hdr.free_count > 0 {
+                let mut idx = hdr.free_head as usize;
+                let mut steps = 0usize;
+                while idx != 0xFFFF && idx < objs && steps <= objs as usize {
+                    if idx < 64 {
+                        free_set[idx] = true;
+                    }
+                    // SAFETY: slot of this page; first u16 is the link.
+                    let p = page_addr + fo + idx * s;
+                    idx = unsafe { core::ptr::read_volatile(p as *const u16) } as usize;
+                    steps += 1;
+                }
+            }
+            let mut i = 0usize;
+            while i < objs {
+                if !free_set[i] {
+                    // SAFETY: live slab slot of this class, in bounds.
+                    let p = page_addr + fo + i * s;
+                    let a0 = unsafe { core::ptr::read_volatile(p as *const u64) };
+                    let a1 = unsafe { core::ptr::read_volatile((p + 8) as *const u64) };
+                    let a2 = unsafe { core::ptr::read_volatile((p + 16) as *const u64) };
+                    let a3 = unsafe { core::ptr::read_volatile((p + 24) as *const u64) };
+                    live += 1;
+                    let blen =
+                        unsafe { core::ptr::read_volatile((p + 10) as *const u16) } as u64;
+                    if a0 <= 4096 && a1 <= 4096 && a2 != 0 && a2 < (1 << 24) {
+                        n_arc += 1;
+                    } else if (a0 == 0 || is_kheap(a0))
+                        && (1..=11).contains(&blen)
+                        && is_userva(a2)
+                    {
+                        n_vma += 1;
+                    } else if (a1 >> 32) == 0x4b52_4f57 {
+                        n_work += 1;
+                    } else if is_userva(a0) {
+                        n_uv += 1;
+                    } else if is_kheap(a0) {
+                        n_kh += 1;
+                    } else if a0 <= 64 {
+                        n_sm += 1;
+                    } else {
+                        n_ot += 1;
+                    }
+                    if dumped < dump_n {
+                        taskdump_raw_line(b"  PL ");
+                        taskdump_dec(a0);
+                        taskdump_raw_line(b" ");
+                        taskdump_dec(a1);
+                        taskdump_raw_line(b" ");
+                        taskdump_dec(a2);
+                        taskdump_raw_line(b" ");
+                        taskdump_dec(a3);
+                        taskdump_raw_line(b"\n");
+                        dumped += 1;
+                    }
+                }
+                i += 1;
+            }
+        }
+        pi += 1;
+    }
+    drop(_g);
+    taskdump_raw_line(b"PEEKLIVE c");
+    taskdump_dec(s as u64);
+    taskdump_raw_line(b": pages=");
+    taskdump_dec(pages_seen);
+    taskdump_raw_line(b" live=");
+    taskdump_dec(live);
+    taskdump_raw_line(b" mmArc=");
+    taskdump_dec(n_arc);
+    taskdump_raw_line(b" vmaNode=");
+    taskdump_dec(n_vma);
+    taskdump_raw_line(b" work=");
+    taskdump_dec(n_work);
+    taskdump_raw_line(b" uv=");
+    taskdump_dec(n_uv);
+    taskdump_raw_line(b" kh=");
+    taskdump_dec(n_kh);
+    taskdump_raw_line(b" small=");
+    taskdump_dec(n_sm);
+    taskdump_raw_line(b" other=");
+    taskdump_dec(n_ot);
+    taskdump_raw_line(b"\n");
+}
+
 /// One-line census for the ALLOCTHROW dump (raw UART, allocation-free).
 pub fn census_line() {
     use crate::dfx::taskdump::{taskdump_dec, taskdump_raw_line};

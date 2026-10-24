@@ -252,10 +252,11 @@ pub fn oom_anat_dump() {
     // pointer-first heterogeneous population).
     crate::mm::small_alloc::census_peek3(5);
     crate::mm::small_alloc::census_peek3(7);
-    // Leg-17: deep-walk value dump (the population is scattered ~3/page;
-    // the 32-page walk sampled 1% of it).
-    crate::mm::small_alloc::census_peek4(7, 24);
-    crate::mm::small_alloc::census_peek4(5, 16);
+    // Leg-17: LIVE-only full-heap scan — the earlier walks missed FULL
+    // pages (where the population actually lives) and sampled stale
+    // free-slot data.
+    crate::mm::small_alloc::census_peek_live(7, 24);
+    crate::mm::small_alloc::census_peek_live(5, 16);
 }
 
 /// Start the schbd kthread. Gated on the `dfx=schb` switch; called from
