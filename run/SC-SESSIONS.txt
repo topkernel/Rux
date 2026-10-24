@@ -3550,3 +3550,82 @@ CENSUS IT REACHED; HOST-OVERCOMMIT STALLS MISREAD AS KILLS (CORRECTED).
   sc210 launcher trajectory is a per-boot race; see the leg summary.)
   Both ended by exact verified PID at close-out; no QEMU or shotmon
   of this leg remains.
+
+SESSION R FIFTEENTH LEG - PACE COUNTERS ACQUIT THE RECLAIM PATH; THE
+USBLESS WALL IS THE RS PARK (userspace RW leak, kernel futex
+exonerated); SC212 ROLLED, SC213 = RACE RETRY
+
+- Launcher line second attempt (predecessor died of quota ~21 min in;
+  sc212 roll survived it under the timeout wrapper). Branch state at
+  take-over: fec94520 (PACE counters on the SC-HB beat) on top of the
+  main-merge ac15059a; bzImage stamped 18:13 = commit time, so the
+  running kernel HAS the PACE counters (verified live in the serial).
+
+- sc212 (18:16, KVM q35 usbless oh-img-p, userdata-sc213-class private
+  reflink, loglevel=7, dfx=schb,sleepsnap, SMP2 4G, SECS=2700):
+  the pace data lands and ACQUITS the whole reclaim family:
+    * zfree never left the ~436-437K page band (of 4G) all boot; no
+      memory floor. heapK plateaus 319MB (vs sc210's 907/1015MB).
+    * drct=0 drctJ=0 drctMaxJ=0 slow=0 for the WHOLE boot - zero
+      direct-reclaim rounds, zero page-alloc slowpath entries.
+    * COW: 20032 faults cumulative, cowJ=7 jiffies total. The two
+      post-boot COW bursts (t=961 +255, t=1261 +255) are the
+      getOsAccountLocalId retry rounds (AccountDelegateNormalImpl
+      "QueryForegroundUserId ... 4194349" every ~5s from t=970):
+      each round now costs ~255 faults and no measurable jiffies.
+  CONCLUSION: the sc210 pace wall (zone floor free~100-190,
+    in_direct_reclaim=1, 4.6s/round) was a DOWNSTREAM effect of the
+    usb_host crash loop (5 sig=11/round drove forks+COW+heap to the
+    floor). The usbless roll removes the entire regime. Nothing in
+    reclaim/page-alloc is left to fix for this trajectory; the
+    predecessor's "fix the reclaim slowpath" mission item is closed
+    by measurement, not by code change.
+
+- The sc212 wall (bw15=247/594, screen frozen at BootAnimation's
+  first color-pattern frame, no launcher spawn) = the RS park, now
+  fully decoded end-to-end:
+    * render_service tid 734 main parked t~? on PRIVATE stack futex
+      uaddr=0x7fffffffcc54 val=2 (stkfutex + sleepsnap sys=202 all
+      census cycles) - the leg-14 PostSyncTask park after
+      HgmTaskHandleThread init.
+    * FXRS (live long past the park, #2071/4000 budget) shows ZERO
+      wakes ever targeting cc54 from ANY RS thread: per the probe's
+      own decision rule that is a userspace chain, not kernel wake
+      loss.
+    * NEW final hop (leg-15): the FFRT worker OS_FFRT_5_0 tid 958
+      that should run the synced task is itself frozen on an RW-lock
+      word - RWFRZ-HIGH uaddr=0x7ff093d11754 waiters=1 word=0x2
+      readers=2, word d+0 forever; main's last act (#559) was a WAKE
+      on that word (delivered, worker woke, re-read the true 0x2,
+      re-parked) - the futex/wake path is CORRECT; two RS readers
+      leaked the lock and never released it. Same shape frozen in
+      many other tgids (RWFRZ scan: 378/317/667/496/721 all d+0).
+      RS internal read-lock leak = userspace; adjudicated family, no
+      kernel hunt.
+    * WAKE-RUN-LEAK tid 966 (RS IPC thread, kicked 5x age 241s) is
+      the benign idle-binder shape ("no pending txn") - not a leak.
+  Downstream symptoms all consistent: RSRenderServiceConnectHub
+    Connect failed x5 loops, boot.completed reached, SA 10 never
+    inserted, screen frozen at the 4-color test pattern (sampled
+    RGBW 789/789/786/785 cells of the ppm).
+
+- SA 511 installs loop, sc212 datapoint (updates sc208's "socket
+  deafness" frame): 23 ctl.start installs sends, ALL received AND
+  ACKed by paramservice (msgIds 26-32, 37-41 round-trip in the PCTL
+  tap). The deafness is GONE in this boot; the service still never
+  registers (no "insert SA:511"; SELinux init error "Unknown class
+  parameter_service" nearby). Failure is downstream of paramservice
+  (init service-control / policy, userspace). sc210 proved installs
+  CAN spawn (full image, race won) - per-boot race like SA 10.
+
+- osaccount 4194349: QueryForegroundUserId calls DO reach accountmgr
+  (SAREG code=4 send/reply pairs pid762->784, reply dlen=4 = an
+  error int). Native osaccount layer created+activated account 100
+  at t~1083-1095 (OnStateChanged state 7). accountmgr returns an
+  error for the FOREGROUND query - consistent with display/WM state
+  never coming up behind the parked RS. Userspace chain.
+
+- Play for the race: sc213 same kernel (fec94520 bzImage), same
+  recipe, fresh scgold reflink - target the sc210-style trajectory
+  (SA 10 published ~t3min, installs spawn, launcher sandbox) with
+  PACE counters live for the first usbless launcher run.
