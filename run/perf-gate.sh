@@ -311,11 +311,17 @@ tier2_check() {
 import re, sys
 res, basefile = sys.argv[1], (sys.argv[2] if len(sys.argv) > 2 else "")
 # pb1 smoke anchor column (perf-report.md 8.5 notes; ONE boot, TCG,
-# minimal rootfs — sanity anchor, not a banked baseline)
+# minimal rootfs — sanity anchor, not a banked baseline). All cells are
+# pb1's own medians from run/pb1-results.txt (us). Leg-31 fix: four
+# cells (write_fsync/mkdir_rmdir/unlink/append) had been transcribed
+# from the REFERENCE kernel column of the 8.10 gap table — values 4-1000x
+# below anything a Rux boot can read, making those rows FAIL by
+# construction. Pass --pbench-baseline <results file> to override.
 ANCHOR = {
     "p1_null": 4.57, "p1_clock": 4.95, "p2_ctxsw": 15.4,
-    "p3b_cow": 24.6, "p6_write_fsync": 4754.99, "p6_mkdir_rmdir": 40.43,
-    "p6_unlink": 26.99, "p6_append": 0.471,
+    "p3b_cow": 24.6, "p6_write_fsync": 18124.666,
+    "p6_mkdir_rmdir": 83191.968, "p6_unlink": 32815.925,
+    "p6_append": 500.378,
 }
 if basefile:
     for line in open(basefile, errors="replace"):
