@@ -84,6 +84,19 @@ impl StackCache {
 
     fn push(&mut self, stack_bottom: *mut u8) {
         if self.count >= Self::MAX_CACHED_STACKS {
+            // Leg-17: on x86_64 route through the packed slab (slot map
+            // + empty-block reclaim); the plain GlobalAlloc dealloc is
+            // the non-slab path (every other arch) and the fallback for
+            // exhaustion-allocated stacks. We hold STACK_CACHE;
+            // KSTACK_BLOCKS nests BELOW it (leaf) and the buddy free
+            // inside runs outside KSTACK_BLOCKS — same STACK_CACHE ->
+            // BUDDY nesting the old dealloc had.
+            #[cfg(target_arch = "x86_64")]
+            {
+                if kstack_slab_free(stack_bottom) {
+                    return;
+                }
+            }
             // SAFETY: stack_bottom was allocated by stack_cache_alloc() with the same
             // layout (size=KERNEL_STACK_SIZE, align=16), and we hold STACK_CACHE_LOCK.
             unsafe {
@@ -111,6 +124,177 @@ unsafe impl Send for StackCache {}
 /// Global stack cache instance (wrapped in Spinlock, no separate lock needed).
 static STACK_CACHE: Spinlock<StackCache> = Spinlock::new(StackCache::new());
 
+// ===== Leg-17 packed kstack slab — x86_64 ONLY =====
+//
+// The buddy only serves power-of-two blocks, so a bare 80KB (or 96KB)
+// stack request still consumes a whole 128KB order-5 block — sc225's
+// o5-block math showed the interim 96KB attempt saved NOTHING. On
+// x86_64 (where KERNEL_STACK_SIZE is 81920 via kernel_stack_size_x86_64
+// in Kernel.toml + build.rs) this carver takes 256KB order-6 blocks and
+// slices three KERNEL_STACK_SIZE slots (3 x 80KB = 240KB; the 16KB tail
+// per block is the only waste, 6.7% vs the 60% padding of an unpadded
+// request). Per-stack footprint 85.3KB (was 128KB): ~-115MB at the
+// launcher-floor population of ~2690 stacks, which is the point of the
+// whole exercise (the floor is what kills the launcher spawn inside
+// appspawn's window).
+//
+// ARCH GATE (fee7774f lesson, leg-17 re-land): the 80KB slot's ~15KB
+// margin over the 62.5KB measured max is an x86_64-OH figure only. The
+// riscv64 kernel nests deeper in kernel mode — under its LTP test
+// kernel the slot overflowed and corrupted adjacent heap data
+// (getpriority PRIO_PGRP read nice=-120 → 140). riscv64 keeps 128KB
+// (config.rs gets the Kernel.toml base there), where this slab is
+// compiled out entirely: a power-of-two request is already perfectly
+// packed in one order-5 buddy block, so packing buys nothing.
+//
+// Slot state lives in a side table under KSTACK_BLOCKS — the stack
+// pages themselves stay pure (R18-2 canary still sits at each SLOT
+// bottom). Lock order: KSTACK_BLOCKS is a leaf; the buddy block
+// alloc/free runs OUTSIDE it (take the lock, pick/insert, drop, then
+// touch the buddy). Fully-empty blocks return to the buddy.
+#[cfg(target_arch = "x86_64")]
+const KSTACK_BLOCK: usize = 262144; // order-6, 64 pages
+#[cfg(target_arch = "x86_64")]
+const KSTACK_SLOTS: usize = 3;
+// The slot carve must fit the block (compile-time guard against a
+// future kernel_stack_size_x86_64 edit, e.g. 96KB would need 288KB).
+#[cfg(target_arch = "x86_64")]
+const _: () = assert!(KSTACK_SLOTS * KERNEL_STACK_SIZE <= KSTACK_BLOCK);
+
+#[cfg(target_arch = "x86_64")]
+struct KstackBlocks {
+    bases: alloc::vec::Vec<*mut u8>,
+    maps: alloc::vec::Vec<u8>,
+}
+
+// SAFETY: the raw block bases are only ever dereferenced as stack
+// storage handed out one slot at a time under the KSTACK_BLOCKS lock —
+// same contract as StackCache's raw pointers behind their lock.
+#[cfg(target_arch = "x86_64")]
+unsafe impl Send for KstackBlocks {}
+
+#[cfg(target_arch = "x86_64")]
+static KSTACK_BLOCKS: Spinlock<KstackBlocks> = Spinlock::new(KstackBlocks {
+    bases: alloc::vec::Vec::new(),
+    maps: alloc::vec::Vec::new(),
+});
+
+/// Carve one stack out of a packed block (or fall back to a whole
+/// order-5 buddy block when the slab cannot grow — keeps booting on
+/// heap exhaustion instead of dying).
+#[cfg(target_arch = "x86_64")]
+fn kstack_slab_alloc() -> *mut u8 {
+    // Fast path: existing block with a free slot.
+    {
+        let mut g = KSTACK_BLOCKS.lock();
+        for bi in 0..g.maps.len() {
+            if g.maps[bi] == 0b111 {
+                continue;
+            }
+            for s in 0..KSTACK_SLOTS {
+                if g.maps[bi] & (1 << s) == 0 {
+                    g.maps[bi] |= 1 << s;
+                    // SAFETY: block base is a live allocation of
+                    // KSTACK_BLOCK bytes; slot s fits (const assert above).
+                    return unsafe { g.bases[bi].add(s * KERNEL_STACK_SIZE) };
+                }
+            }
+        }
+    }
+    // Slow path: new order-6 block from the buddy (OUTSIDE the slab
+    // lock — no lock nesting with BUDDY).
+    // SAFETY: layout is a valid power-of-two-multiple of PAGE_SIZE.
+    let block = unsafe {
+        alloc(
+            Layout::from_size_align(KSTACK_BLOCK, 4096)
+                .unwrap_or(Layout::new::<[u8; KSTACK_BLOCK]>()),
+        )
+    };
+    if block.is_null() {
+        return core::ptr::null_mut();
+    }
+    {
+        let mut g = KSTACK_BLOCKS.lock();
+        g.bases.push(block);
+        g.maps.push(0b001); // slot 0 taken by this allocation
+    }
+    block
+}
+
+/// Return a slot to its block; a fully-empty block goes back to the
+/// buddy. Returns false when the address is not a slab slot (the
+/// fallback path allocated it as a plain order-5 block — caller frees
+/// it through the normal GlobalAlloc path).
+#[cfg(target_arch = "x86_64")]
+fn kstack_slab_free(bottom: *mut u8) -> bool {
+    let addr = bottom as usize;
+    let mut free_block: *mut u8 = core::ptr::null_mut();
+    {
+        let mut g = KSTACK_BLOCKS.lock();
+        let mut bi = 0usize;
+        let mut found = false;
+        while bi < g.bases.len() {
+            let base = g.bases[bi] as usize;
+            if addr >= base && addr < base + KSTACK_BLOCK {
+                found = true;
+                let off = addr - base;
+                if off % KERNEL_STACK_SIZE != 0 {
+                    return true; // foreign pointer inside a slab block:
+                    // consume it (do NOT touch the slot map)
+                }
+                let s = off / KERNEL_STACK_SIZE;
+                if s >= KSTACK_SLOTS || g.maps[bi] & (1 << s) == 0 {
+                    return true; // double free / not allocated: consume
+                }
+                g.maps[bi] &= !(1 << s);
+                if g.maps[bi] == 0 {
+                    free_block = g.bases[bi];
+                    g.bases.swap_remove(bi);
+                    g.maps.swap_remove(bi);
+                }
+                break;
+            }
+            bi += 1;
+        }
+        if !found {
+            return false; // not our memory: plain buddy allocation
+        }
+    }
+    if !free_block.is_null() {
+        // Buddy free OUTSIDE the slab lock.
+        // SAFETY: block was allocated by kstack_slab_alloc with the
+        // same layout and is now fully empty.
+        unsafe {
+            dealloc(
+                free_block,
+                Layout::from_size_align(KSTACK_BLOCK, 4096)
+                    .unwrap_or(Layout::new::<[u8; KSTACK_BLOCK]>()),
+            );
+        }
+    }
+    true
+}
+
+/// Packed-slab state for the SC-ANAT beat line (dfx=schb):
+/// (blocks, live slots, fallback note). x86_64 only — every other arch
+/// keeps the plain power-of-two buddy allocation and reports zeros.
+#[cfg(target_arch = "x86_64")]
+pub fn kstack_slab_stats() -> (u64, u64, u64) {
+    let g = KSTACK_BLOCKS.lock();
+    let mut live: u64 = 0;
+    for bm in g.maps.iter() {
+        live += bm.count_ones() as u64;
+    }
+    (g.bases.len() as u64, live, 0)
+}
+
+/// Non-x86_64 shim: no packed slab — the beat line stays format-stable
+/// across arches (kb=0 ks=0 reads as "no slab", which is the truth).
+#[cfg(not(target_arch = "x86_64"))]
+pub fn kstack_slab_stats() -> (u64, u64, u64) {
+    (0, 0, 0)
+}
+
 // Leg-16 kernel-heap anatomy (dfx=schb): live kernel-stack count and the
 // boot-max stack high-water in bytes. The high-water probe ZEROES each
 // fresh stack at alloc (outside every lock) and scans for the first
@@ -125,6 +309,19 @@ static KSTACK_HW: AtomicU64 = AtomicU64::new(0);
 /// Both stay 0 unless dfx=schb armed the probe at alloc time.
 pub fn kstack_anat() -> (u64, u64) {
     (KSTACK_LIVE.load(Ordering::Relaxed), KSTACK_HW.load(Ordering::Relaxed))
+}
+
+/// Plain buddy allocation of one kernel stack (the pre-slab path).
+/// On x86_64 this is only the packed-slab exhaustion fallback (the
+/// 80KB request rounds up to a 128KB order-5 block inside GlobalAlloc);
+/// elsewhere it is THE allocation path.
+fn plain_kstack_alloc() -> *mut u8 {
+    // SAFETY: Layout is valid; null check follows.
+    unsafe {
+        let layout = Layout::from_size_align(KERNEL_STACK_SIZE, 16)
+            .unwrap_or_else(|_| Layout::new::<[u8; KERNEL_STACK_SIZE]>());
+        alloc(layout)
+    }
 }
 
 /// Allocate a kernel stack (with caching)
@@ -147,12 +344,21 @@ fn stack_cache_alloc() -> *mut u8 {
         let mut cache = STACK_CACHE.lock();
         let _ = &mut cache;
     }
-    // SAFETY: Layout is valid; null check follows.
-    let bottom = unsafe {
-        let layout = Layout::from_size_align(KERNEL_STACK_SIZE, 16)
-            .unwrap_or(Layout::new::<[u8; KERNEL_STACK_SIZE]>());
-        alloc(layout)
+    // Leg-17: on x86_64 stacks come from the packed slab first (three
+    // 80KB slots per 256KB order-6 block — see the slab block comment);
+    // a whole order-5 buddy block is only the exhaustion fallback.
+    // Every other arch keeps the plain power-of-two allocation, where
+    // 128KB is already one perfectly-packed order-5 block.
+    #[cfg(target_arch = "x86_64")]
+    let bottom = {
+        let mut b = kstack_slab_alloc();
+        if b.is_null() {
+            b = plain_kstack_alloc();
+        }
+        b
     };
+    #[cfg(not(target_arch = "x86_64"))]
+    let bottom = plain_kstack_alloc();
     if !bottom.is_null() {
         if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::Schb)
             && crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::KsProbe)

@@ -394,13 +394,18 @@ extern "C" fn schbd_fn(_arg: *mut core::ffi::c_void) -> i32 {
         // pages (o5 = the 128KB kernel-stack class on this config).
         {
             let (kn, khw) = crate::process::task::kstack_anat();
+            // kb/ks = packed-slab blocks/live slots (x86_64 only; 0/0
+            // reads as "no slab" on arches that keep plain order-5
+            // stacks — see process/task.rs).
+            let (kb, ks, _fb) = crate::process::task::kstack_slab_stats();
             let (small_k, small_pg_k) = crate::mm::small_alloc::live_stats_kib();
             let np = &crate::mm::buddy_allocator::NET_PAGES;
             let mut w = ConsoleWriter::new();
             let _ = writeln!(
                 w,
-                "SC-ANAT t={}s procs={} kN={} kK={} kHW={} smallK={} smallPgK={} o0={} o1={} o2={} o3={} o4={} o5={} o6={} o7={} o8={}",
+                "SC-ANAT t={}s procs={} kN={} kK={} kHW={} kb={} ks={} smallK={} smallPgK={} o0={} o1={} o2={} o3={} o4={} o5={} o6={} o7={} o8={}",
                 t_secs, n_procs, kn, kn * (crate::config::KERNEL_STACK_SIZE as u64) / 1024, khw,
+                kb, ks,
                 small_k, small_pg_k,
                 np[0].load(Ordering::Relaxed), np[1].load(Ordering::Relaxed),
                 np[2].load(Ordering::Relaxed), np[3].load(Ordering::Relaxed),
