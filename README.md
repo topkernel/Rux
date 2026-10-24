@@ -19,12 +19,12 @@
 
 ## 🖥️ Rux Runs Ubuntu
 
-**A complete Ubuntu 22.04 userland — glibc dynamic binaries, real shells, D-Bus, Xorg rendering X client windows, an interactive xterm, and a real GNOME Shell desktop (gnome-shell + mutter compositing, the gsd settings daemons) — boots on the Rux kernel today, on both riscv64 and x86_64 (amd64).**
+**A complete Ubuntu 22.04 userland — glibc dynamic binaries, real shells, D-Bus, Xorg rendering X client windows, and an interactive desktop session — boots on the Rux kernel today, on both riscv64 and x86_64 (amd64). On riscv64 the pixel-verified interactive desktop is the image's udesk session (shown below). GNOME Shell runs further on x86_64, where the port campaign drew the GNOME desktop on screen; full GNOME Shell bring-up on riscv64 is the active goal (see the [Roadmap](docs/progress/roadmap.md)).**
 
 | | |
 |---|---|
-| ![Ubuntu GNOME login](docs/images/ubuntu-gnome-login-2026-10-15.png) | ![Ubuntu GNOME desktop](docs/images/ubuntu-gnome-desktop-2026-10-15.png) |
-| *Ubuntu GNOME login screen on Rux (riscv64) — verify.py 23/23 PASS* | *Ubuntu GNOME desktop on Rux (riscv64) — the full udesk session with dock, panel, and apps* |
+| ![Ubuntu login screen](docs/images/ubuntu-gnome-login-2026-10-15.png) | ![Ubuntu udesk desktop](docs/images/ubuntu-gnome-desktop-2026-10-15.png) |
+| *Ubuntu login screen on Rux (riscv64) — verify.py 23/23 PASS* | *The udesk desktop session on Rux (riscv64) — dock, panel, apps, and an interactive xterm; pixel-verified end to end. GNOME Shell pixels: [x86_64 bring-up capture, 2026-10-14](docs/images/gnome-desktop-2026-10-14.png)* |
 
 ### OpenHarmony — support status
 
