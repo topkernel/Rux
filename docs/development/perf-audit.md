@@ -1747,7 +1747,7 @@ Round log (host time, newest-boot basis):
 - R1 17:20 — sc211 (ended 17:15) checked: launcher.ready not set,
   bootanimation.finished SET, no OnForeground/ArkUI. main@1702de2c.
 
-### 2m. TWENTIETH LEG: pa31 posthumous close-out; sc212 PACE watch opens; monitoring continues
+### 2m. TWENTIETH LEG: pa31 posthumous close-out; PACE watch ran to verdict — reclaim family acquitted by measurement
 
 Leg start: merged main 14d8950d into the branch (8b1d4b9e) — the same
 merge the leg-19 gate had already validated with pa31, now in-tree.
@@ -1780,25 +1780,118 @@ launcher activity: no com.ohos.launcher, no bootanimation markers).
 Consequence for my task: **no reclaim-slowpath share can be quantified
 from this roll**, and the lead's magnitude is per-boot-race dependent
 (the same race that splits sc210-class launcher boots from sc211-class
-crawls). The ranking gets NO new row on this evidence — a row needs a
+crawls). [SUPERSEDED within the hour by the A-line's adjudication and
+sc213 — see (2b): the floor is not free-floating race variance, it is
+conditional on the usb_host crash loop, which the usbless image
+removes.] The ranking gets NO new row on this evidence — a row needs a
 boot that actually pins the floor plus a before/after of their fix.
 Watch continues; when a memory-floor boot appears in their PACE data
 (drct climbing, zfree pinned near wmark) or their fix merges, that is
 the quantification trigger.
 
+**Quantification contract for that trigger** (agreed method, computed
+from their SC-HB beats; no new probes needed from my side):
+- Healthy-regime COW baseline, first PACE datapoint (sc212, t=1931 s):
+  cowJ=7 jiffies for cow=20610 cumulative -> **3.4 us per COW fault**
+  when the zone has 437k free pages. This is the "after"/healthy
+  reference for any fix, and the ranking's COW-class unit cost.
+- Floor-regime expectation from the A-line's sc210 lead (~3000 COW
+  faults + 40 forks per launcher round, ~4.6 s/round): if COW allocs
+  own the round, cowJ should climb ~460 jiffies per round (3000 x
+  ~1.5 ms), i.e. cowJ/cow blows up from 3.4 us toward milliseconds,
+  and drctJ/round-wall gives the reclaim-slowpath share directly
+  (drctJ x 10 ms / 4600 ms).
+- sc210's floor evidence (their serial, read-only; the numbers behind
+  the lead): zone Normal free_cnt 387 -> 106 -> 119 -> 99 pages vs
+  wmark min/low/high=1715/2451/3187; MEMLEDGER-CENSUS used
+  1,572,471 of 1,572,864 pages (free 393 -> 93 -> 134); MEMLEDGER-
+  COMPACT memfree_pages=1, heapK 907168/1015808, swap_active=0 (so
+  direct reclaim can only squeeze file pagecache — lru 451-457k
+  pages, mapped 563k with anon 457k); in_direct_reclaim=1 at OOM-
+  FORENSIC #2. With no swap and anon > file reclaimables, a pinned
+  floor means every COW alloc's reclaim scan finds little — the
+  serialized-slowpath story. Whether the pinned floor is legitimate
+  pressure or an accounting leak is the A-line's call, not mine.
+
+**(2b) RESOLUTION (same leg, ~19:20): the PACE data landed and
+ACQUITTED the reclaim family.** The A-line's leg-15 addendum (their
+SC-SESSIONS, 18:51) closed the question by measurement, and sc213
+confirmed it on the launcher trajectory. Final quantification:
+
+- **sc212 (usbless roll, full 45 min, crawl class): drct=0, drctJ=0,
+  drctMaxJ=0, slow=0 for the ENTIRE boot.** zfree never left the
+  ~436-437k-page band; heapK plateaus at 319 MB (sc210: 907 of
+  1015 MB). Their adjudication: the sc210 floor was DOWNSTREAM of the
+  usb_host crash loop (5 sig=11 crashes/round driving forks+COW+heap
+  to the floor); the usbless image (oh-img-p, zeroed
+  libusb_pnp_manager) removes the entire regime. Their words: the
+  mission item "fix the reclaim slowpath" is "closed by measurement,
+  not by code change".
+- **sc213 (19:02, same kernel fec94520, launcher trajectory — SA 10
+  published, com.ohos.launcher active, launcher.ready still not set
+  behind their userspace RS park): same verdict through t=1409 s.**
+  drct=0, slow=0, zfree stable ~420k pages, heap plateau 347 MB. The
+  account retry rounds (QueryForegroundUserId, the sc210 loop's
+  survivor) now cost bursts of ~103-255 COW faults per 10 s beat
+  with **zero measurable jiffies** (cowJ flat).
+- **Reclaim-slowpath share of round cost = 0% (measured)** in the
+  live trajectory. Before/after across the only fix (the image
+  change, no kernel code): sc210 floor regime ~4.6 s/round with
+  ~3000 COW + 40 forks (free 93-387 pages, in_direct_reclaim=1)
+  -> sc212/213 rounds at ~3.4 us/fault whole-boot average (cowJ=7
+  jiffies per ~20-25k faults), heap 907 -> 319-347 MB.
+- **Ranking decision: NO new row.** The family measures zero where
+  the boot actually goes now, and its sc210-era cost is a symptom of
+  a userspace crash loop (usb DDK PnP NULL-walk — the A-line's
+  adjudicated family, fixed by image). A row would memorialize a
+  phantom cost center. Acquittal note added under the section-4
+  header (no version bump — no existing row reweighted).
+- Counterfactual honesty: the split of sc210's 4.6 s/round among
+  reclaim/fork/crash handling was never directly measured (no PACE
+  counters existed in that regime) and is now unmeasurable — the
+  regime does not recur without the crash loop. The 0% figure is the
+  share in the current, usbless trajectory, which is the only one
+  the campaign can reach.
+- Exposure note: the pa-series measurement boots still use the FULL
+  oh-img (usb DDK present). No pa boot has shown floor-class costs
+  (pa27 small_alloc 91 s/720 s, pa31 slow rows are epoll-wait
+  shaped), but if one ever pins a floor the syscost slow/alloc
+  classes will show it — the A-line's oh-img-p exists if a pa roll
+  ever needs the usbless control.
+
 **(3) UI patrol (standing).** sc212 (A-line branch kernel, not
 main-class): zero launcher markers, crawl trajectory — no UI markers to
-report. pa31 (main-class): launcher.ready not set (section 2l(3)).
-The perf-report post-UI rows stay PENDING.
+report; screen frozen at BootAnimation's first color-pattern frame
+(their adjudicated RS read-lock leak, userspace). sc213 (A-line
+branch, launcher trajectory): SA 10 published, com.ohos.launcher
+active, **launcher.ready still not set** at t=1409 s — the RS park
+(userspace) gates the UI milestone now, not kernel perf. pa31
+(main-class): launcher.ready not set (section 2l(3)). The
+perf-report post-UI rows stay PENDING.
 
 **(4) Census-hold gate (standing).** The 14d8950d merge was validated
-by pa31 before this leg's window opened; within the leg-20 window so
-far main has not moved again. If the A-line pace fix merges mid-leg,
-one quiet census boot runs (QEMU budget: 0 of 2 used).
+by pa31 before this leg's window opened; within the leg-20 window
+origin/main stayed at 14d8950d through close (verified at leg end —
+no further A-line merge, and the leg's finding made one unlikely:
+their pace lead resolved as a userspace crash-loop symptom, so no
+kernel fix is coming from that quarter). Gate did not trigger; zero
+QEMUs spent.
 
-**(5) QEMU ledger.** 0 of 2 self-started this leg.
+**(5) QEMU ledger.** 0 of 2 self-started this leg — a pure
+watching/documentation leg: the leg-19 pa31 serial answered the gate
+question, and the A-line's live PACE rolls answered the primary
+question. Nothing this leg needed a boot of its own.
 
 ## 4. Ranking table v2.8 (cost centers -> boot-time contribution)
+
+Acquittal note (leg 20, no version bump — no row reweighted): the
+A-line leg-15 PACE counters measured the reclaim/page-alloc slowpath
+family at ZERO for entire boots (sc212 full roll and the sc213
+launcher trajectory: drct=0 drctJ=0 slow=0, zfree 420-437k pages,
+rounds at 3.4 us/COW). The sc210 memory-floor lead (free 93-387
+pages, in_direct_reclaim=1, 4.6 s/round) was downstream of the
+usb_host crash loop and dies with the usbless image — it never
+becomes a row here. Details in section 2m(2)/(2b).
 
 v2.8 = v2.7 + the F4 anatomy (leg 18, pa29, section 2k): row 4's weight
 corrected to medium-small (~120-140 CPU-s/boot, all before t=150 s; the
