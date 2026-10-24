@@ -3409,12 +3409,20 @@ rsp=0x7ff090410fc8" line (a USER frame). Confirmed MY lane's probe
   0 gdb hits / 0 capture markers, armed try 0; 10 IRQ-OFF-WINDOW lines,
   all benign short class (age 108-546 ms). Driver self-advanced to
   load-r16 (13:50:32).
-- Cumulative: **0 WW-HIT across r1-r68 complete rounds** (plus
-  partials), 0 META-SMASH. Load surface: p1 + r1-r15 = **~11608 sdc
-  exec cycles over 16 full armed load-hours**, zero fires, zero false
+- MAIN r69 (FULL 2700 s): CLEAN — 81206 lines, "budget spent" natural
+  end, 0 WW-HIT / 0 watchpoint hits / 0 heals, no panics, armed try 0;
+  3 IRQ-OFF-WINDOW lines, benign short class (age 103-460 ms). Driver
+  self-advanced to r70 (14:35:11).
+- LOAD r16 (FULL 2700 s): CLEAN — 167297 lines, 781 sdc exec cycles,
+  0 gdb hits / 0 capture markers, armed try 0. Driver self-advanced to
+  load-r17 (14:35:35).
+- Cumulative: **0 WW-HIT across r1-r69 complete rounds** (plus
+  partials), 0 META-SMASH. Load surface: p1 + r1-r16 = **~12389 sdc
+  exec cycles over 17 full armed load-hours**, zero fires, zero false
   positives.
-- r69 / load-r16 in flight (started 13:50:11/13:50:32, budget ends
-  ~14:35; qemu 250761 / 250844, gdb 250803 / 250898, both WW-ARMED 19
+- r70 / load-r17 in flight (started 14:35:11/14:35:35, budget ends
+  ~15:20; qemu 258402 / 258532, gdb 258477 / 258600, both WW-ARMED 19
   with GUARD=0xffffffff80a7a000, wildwatch try 0, confirmed via gdb
   logs).
-- Commits: d79636ea (claim record + r68/load-r15 gdb cmds).
+- Commits: d79636ea (claim record + r68/load-r15 gdb cmds), a869968d
+  (r67-r68/load-r14-r15 ledger + r69/load-r16 gdb cmds).
