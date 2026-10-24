@@ -121,6 +121,95 @@ then resumed mid-session with 3 x86_64 OH boots, untouched).
   _end 11.84MB (was never broken); all edits are cfg(riscv64) or
   arch-local, x86_64 paths untouched.
 
+TENTH LEG (2026-10-24 10:00, main merged fast-forward 865eddaa ->
+484c8cb8 — the ninth-leg RUX-RISCV-LAYOUT-2 fix is confirmed in main):
+all three wait-gates re-checked and still closed, so zero QEMU again
+this session, per discipline.
+
+- Retest gate A (launcher sched fixes): NONE of v3 (c90f80b0, wfi-paced
+  terminal-deschedule retries), v4 (7a8044e0, DEAD-task pick gates), or
+  v5 (12ea541e, quietcon console divert) is in origin/main — verified
+  per-commit with `git merge-base --is-ancestor` (their branch tip
+  6bc0be67 likewise unmerged). Their lane is on their own tenth leg:
+  sc195 final notes say quietcon wins the wedge race (45/45 min no
+  wedge, RWFRZ=0) and the launcher reaches ArkTS/ArkUI executing —
+  deepest ever; new residual strand: init pid=1 held hardirq-count
+  from ~min 29 with rip stable in `cpu::inb` (844 PREEMPT-LEAK
+  prints, system continuing on cpu1 at half speed). sc196 in flight
+  (warm-reboot caveat noted by them: hilogd writes no /dev/console on
+  boot 2, so ring forensics need fresh userdata). pa18 (GRQ/TERM
+  retest, now covering v1+v2+v3+v4 together) still waits for their
+  merge.
+- Retest gate B (per-CPU freelist / allocator): alloc-crash worktree
+  unchanged since 2026-10-19 (tip d56de697 slab-packing, unmerged) —
+  before/after condition unchanged.
+- UI milestone: NOT reached. sc195/sc196 serial logs carry zero
+  hits for launcher.ready / bootanimation.finished / OnForeground /
+  bootanimation.started; the shot monitor still shows the 8-color
+  oracle screen (MILESTONE file, 100% non-black 8 colors). Report
+  v1.1 (post-UI row of table 1) stays pending. "Deepest ever" =
+  ArkTS/ArkUI code executing, not a UI event.
+- pa18 readiness re-staged (cheap, no QEMU): `run/pa16-probe.patch`
+  applies clean on 484c8cb8 (`git apply --check`); recipe unchanged —
+  merge main, apply patch, `PLATFORM=x86_64 make build`,
+  `./run/pa-boot.sh pa18 ... APPEND_EXTRA="syscost=1 sprobe=0"`,
+  parse with pa-parse.py against the new ELF.
+- Process lesson persisted for this lane (hit by the main session
+  after pa19): `make test` builds into the SAME
+  `target/.../debug/rux` path as the normal kernel — after any unit
+  test run, a normal regression gate must first `rm build/.config &&
+  make build` to rebuild the real kernel, or the gate boots the test
+  binary (a `^test:` line in the boot log = wrong binary).
+- Ranking v2.3 / report v1.0 tables: no new OH data -> unchanged
+  (scroll items stay no-ops without a measurement). Report section 0
+  gained one base-pointer sentence (current main 484c8cb8 is
+  riscv64-only delta; all x86_64 numbers remain current).
+- **R73 follow-up proposal drafted below (fix proposal for the A
+  line's territory — this lane does not touch trap.rs).**
+
+R73 follow-up: bound the KERNPANIC stack dump (fix PROPOSAL, for the
+launcher lane; no code changed here)
+
+Site: `kernel/src/arch/riscv64/trap.rs`, the `MmFaultResult::KernelPanic`
+printer, the 24-word stack dump behind `if regs.kernel_mode()` (~line
+1173): `let addr = regs.sp as usize + i * 8;` with `i in 0..24` and an
+unconditional `read_volatile`.
+
+Gap: R73's own comment gates USER-origin faults (user sp must not be
+read — nested panic, the r72-fire3 tripled-print shape), but a KERNEL
+sp within 0xC0 of the stack top is unguarded. That case is real, not
+hypothetical: the launcher lane's mid-suite panic had sp =
+`_stack_top-0x20`, badaddr = `_end` — dump words 0-3 read in bounds,
+words 4-23 (sp+0x20..sp+0xB8) walked off the image end and re-entered
+the trap inside the panic printer, killing the diagnostics mid-line
+(exactly the nested-panic failure class R73 exists to prevent, arriving
+from the kernel-sp direction). On the pre-LAYOUT-2 unit-test boot this
+compounded the window overflow into near-silence.
+
+Proposed fix (one guard, mirrors the existing user-sp branch):
+
+1. Boot/early context (current()/tp not validated — the r74 concern
+   two blocks below): bound the walk by the link-time `_stack_top`
+   symbol (`linker.ld:71`, already `la`-ed in `boot.S:396`). As an
+   extern symbol in Rust: `extern "C" { static _stack_top: u8; }`.
+   In the loop, `if addr + 8 > stack_top { emit " >(top)"; break; }` —
+   break (not skip) keeps the dump line shape stable for the
+   addr2line/symbolization workflow.
+2. Task context (validated tp/current only): same guard against the
+   task's own stack top — task kernel stacks are KERNEL_STACK_SIZE =
+   128 KB (`kernel/src/config.rs:44`), top = stack bottom + size (the
+   context switch already computes this in `context.rs:267`). If
+   validation fails, fall back to guard 1; the case that actually
+   fired is the boot stack, which guard 1 covers.
+3. Optional symmetric bottom bound (`addr < stack_bottom`): a garbage
+   kernel sp prints `(sp outside stack)` and skips the dump, same
+   spirit as the user-sp branch.
+
+Cost: one compare per word inside a path that emits 24 words over
+SBI putchar — unmeasurable. Effect: the panic printer can no longer
+nested-fault from its own dump; the launcher lane's mid-suite panic
+would have printed its full frame chain instead of dying mid-line.
+
 ## Verdict in one paragraph
 
 The "one fix at a time" pattern was real but it has converged into a
