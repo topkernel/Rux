@@ -2385,6 +2385,77 @@ the A-line footprint fix merging). Branch fast-forwarded to main
 again nothing needs cherry-picking beyond the fast-forward pointer
 and the ledger.
 
+### 2u. TWENTY-EIGHTH LEG: second zero-run waiting leg — both gates idle, A-line fix stack grows to 8 unmerged commits; run-day inject re-verified byte-clean
+
+Leg start: origin/main == e5fa6f85 == own leg-27 merge (main session
+already fast-forwarded the main worktree's branch; nothing to pull).
+Worktree clean except untracked run/ artifacts; nothing rebuilt — all
+run-day assets stay parked. A detached read-only watcher (run/pa36-watch.sh
+-> run/pa36-watch.log, 77 ticks 22:21:35-01:00:15, 120 s cadence) held
+both standing watches for the whole window; this entry is its digest.
+
+**(1) UI patrol / trigger: NOT fired.** The sc-line rolled EIGHT boots
+this window — sc219-rerun (already closed at leg start: launcher.ready
+not-set + cow pagefault 0x5555555cc37c), then sc223, sc224, sc225,
+sc226, sc227, sc228, sc229 (still live at close). Every one: 0
+OnForeground / ArkUI / PBENCH lines, launcher.ready appears only in
+init's "not set" warning; the COW-pagefault death class persists (sc223
+cow at 0x7ff00066701c, sc224 0x7ff00063023d, sc228 0x7ff0006e6958 +
+0x3fbf13dab8; sc226/227 ended in stack-dump crashes, sc225/228-style
+deep rolls wedge then get wrapper-reaped). All roll on the
+samgr-callback instrumented branch, not main-class, so even a milestone
+would still have needed the main-class re-boot before run day.
+
+**(2) A-line footprint-fix arm: NOT fired — but the stack is visibly
+converging on their branch.** origin/main == e5fa6f85 all 77 ticks.
+Their worktree tip moved 93c970a3 -> fb0141e8 (wip floor anatomy:
+kstack 42%, c256 520K live) -> 3a673c25 (feat(config) kstack 128->96KB)
+-> 2d308b98 (fix(fs) FdTable fork_from must not array-clone — THE
+89,368B deepest chain) -> 753defbd (dfx ksprobe gate) -> b35919b3 (wip
+"from_fn trilogy closed") -> 466cde69 (feat(config) kstack 64KB, 62,432B
+max depth) -> f793c63f (feat(mm) packed kstack slab: order-6 blocks
+carved into three 80KB slots, ~-115MB at launcher-floor) -> ab84c96e
+(wip census peek v2). Eight new commits, none on main; d08dca37 and
+07a1e7be from leg-27 also still unmerged. The trigger waits for the
+merge; with the COW deaths persisting across all eight rolls, that
+merge is clearly not imminent.
+
+**(3) Census-hold gate: IDLE.** kernel_new=0 on every tick — the only
+kernel/ commit in 8480751c..main remains own test-only 015e5488
+(config_test.rs assertion; test-mode code, same ruling as c2e2c885).
+pa33's five-consecutive TERM 8 / WAKE 32 exact hold stands; no boot
+spent.
+
+**(4) QEMU ledger.** Self-started: 0 — second consecutive true
+zero-run leg. Foreign untouched: the wildwrite-hunt pair from leg start
+(ww-s2-r80 / wwload-r27) ran out on their own 2700 s wrappers (~22:50;
+their line replaced them with ww-s2-r83 / wwload-r30 later — also
+untouched), and every A-line sc2xx boot above. At close: 6 QEMU
+processes on the host, all foreign (sc229, ww-s2-r83, wwload-r30), zero
+perf-audit-tagged. Nothing >10MB committed; new untracked run/ files
+this leg: pa36-watch.sh + pa36-watch.log only.
+
+**(5) Idle-window item: run-day inject re-verified byte-clean (zero
+QEMU, read-only).** e2fsck -fn run/pbrux-system.img: all 5 passes clean,
+no complaints (5525/196608 files, 386998/786432 blocks). debugfs
+confirmed the inject payload intact: /etc/init/key_enable.cfg still
+carries the param:bootevent.launcher.ready job (mkdir pbench + start
+key_enable) and /bin/key_enable is exactly 72,064 B == work/pbench
+(root:root 0755). Plus the rest of pre-staging re-validated: pbmed.py
+reproduces the banked 8a Linux column exactly from ref-r1..r4
+(p1_null 0.040 / p2_ctxsw 0.090 / p4_fork_exit 10.88 / p4_fork_exec
+22.367 / p5a_pipe 0.180 ...), ref-r1..r4 results.txt all 25 lines,
+pa31/pa33 bzImages present. Run day trips on nothing if the trigger
+fires next leg.
+
+**(6) Leg close.** Deliverables: this ledger entry + the two watcher
+files. No code, no runs, no report deltas — v1.5 stays one Rux column
+from done, blocked on the same two conditions (sc-milestone on a
+main-class kernel, or the A-line footprint fix merging; the watcher's
+footprint= / kernel_new= / milestones= fields are the exact tripwires
+for the next leg). Branch head = this commit on top of 20e8e630; ready
+for coordinator review/merge — nothing to cherry-pick beyond the ledger.
+
 ## 4. Ranking table v2.8 (cost centers -> boot-time contribution)
 
 Acquittal note (leg 20, no version bump — no row reweighted): the
