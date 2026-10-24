@@ -190,45 +190,124 @@ task dump and the help; `/proc/sys/kernel/tainted` reports the live
 mask; `/sys/kernel` still lists `uevent`, `uevent_helper`,
 `uevent_seqnum` and the new `debug` mount point.
 
-### Tranche 2 — performance counters
+### Tranche 2 — performance counters (part 1 done)
 
-Goal: answer "where does the time go" from inside the guest.
+Goal: answer "where did the time go" from inside the guest.
 
-- Per-CPU time accounting (user/system/idle/iowait/irq/softirq) fed by
-  the scheduler tick and the syscall-entry/exit path → `/proc/stat`.
-- Page allocator counters (alloc/free per zone, activate/deactivate,
-  fault counts) → `/proc/vmstat` with Linux's key names.
-- Scheduler counters (running/waiting per CPU, timeslices, switches) →
-  `/proc/schedstat` and `/proc/sched`.
-- Softirq counters → `/proc/softirqs`.
-- Per-task context-switch counters (`nvcsw`/`nivcsw`) and `utime`/`stime`
-  → fill the zero fields in `/proc/[pid]/stat` and `/proc/[pid]/status`.
-- `/proc/buddyinfo` (the dead `mm/pglist.rs::print_buddyinfo` becomes a
-  procfs generator), `/proc/pagetypeinfo`, `/proc/locks`,
-  `/proc/diskstats`.
+**Part 1 — implemented.** `/proc/stat` in Linux's layout
+(`kernel/src/fs/procfs/stat.rs`): the aggregate `cpu` line, one line per
+CPU, `intr`, `ctxt`, `btime`, `processes`, `procs_running`,
+`procs_blocked`. The timer tick charges one jiffy to whatever was
+running — idle for the idle task, user for a task hit in user mode,
+system otherwise (a kernel thread is system time, not idle time). The
+per-task context-switch counters (Linux `nvcsw`/`nivcsw`) are counted in
+the scheduler's `context_switch` — a task that went to sleep blocked
+(voluntary), a task still runnable was preempted (involuntary) — and
+surface in `/proc/[pid]/status`. `/proc/[pid]/stat` now has Linux's 52
+fields (it emitted 54) and fills priority, nice, num_threads, rss (in
+pages), processor and policy next to the utime/stime the timer IRQ
+already charged.
+
+**Part 2 — implemented.** `/proc/vmstat` (Linux key names, the page
+counters live in `kernel/src/mm/vmstat.rs`, the memory manager owning
+them like Linux's mm/vmstat.c), `/proc/buddyinfo` (free pages per order
+per zone, from the zone allocator's per-order free lists),
+`/proc/softirqs` (per-CPU per-vector raise counts, using the vector set
+and names Rux's softirq module already uses) and `/proc/schedstat`
+(version 17: jiffies timestamp plus the nine per-CPU fields, with real
+`yld_count` (sched_yield() calls, as in kernel/sched/syscalls.c) and
+`sched_count` in Linux's field positions). `/proc/stat` also grew Linux's
+aggregate `softirq` line.
+
+**Part 3 — partly done.** Per-task minor-fault counters (field 10 of
+`/proc/[pid]/stat`) and `starttime` (field 22) are real now: the fault
+handlers charge the task's `min_flt`, and the task's start time is
+stamped with the jiffies at which it was built. `/proc/locks` is
+implemented in Linux's format (verified against a Linux guest:
+`1: POSIX  ADVISORY  WRITE 28848 08:12:76022103 0 EOF`), and the
+sysrq `d` command prints the same rows, as Linux's does.
+
+**Part 3 — partly done (cont).** `/proc/diskstats` is implemented in
+Linux's layout (the reference host's line:
+`   7       0 loop0 14 0 34 2 0 0 0 0 0 1 2 0 0 0 0 0 0`): the block
+layer counts reads, writes, sectors and the time spent per device
+(`drivers/blkdev/iostat.rs`, the same place Linux keeps them —
+block/genhd.c). Rux merges no requests, has no discard path and no
+separate flush path, so those columns report zero.
+
+**Part 3 — remaining.**
+
+- `/proc/sched` (per-task runqueue view), `/proc/timer_list`.
+- `/proc/pagetypeinfo` — the exact text differs between kernel
+  versions and the reference host does not expose the file
+  (`CONFIG_PROC_PAGE_MONITOR` off), so the format is not verified yet
+  and the file is not added rather than guessed.
+- `pgpgin`/`pgpgout` (block-I/O page counters) — Rux has a block layer
+  but no per-device I/O accounting in it yet.
+- Per-task major-fault counters (field 12): Rux populates file-backed
+  pages from the page cache instead of reading from the block device
+  inside the fault handler, so there is no fault-time disk read to
+  classify yet and the counter stays 0.
 
 Acceptance: `/proc/stat` totals track `/proc/uptime` within one tick per
 CPU; `/proc/vmstat` counters are monotonic and reconcile against the
 ledger census; a busy-loop guest shows non-zero `user` and rising
 `voluntary_ctxt_switches`.
 
-### Tranche 3 — symbols and symbolized traces
+### Tranche 3 — symbols and symbolized traces (code in, table off by default)
 
 Goal: a backtrace that names its frames.
 
-- Build-time symbol table: `nm` over the linked kernel ELF, filtered to
-  text symbols, embedded as a compact table; the link pass runs twice
-  (the table lives in `.rodata`, so `.text` addresses are stable between
-  the two passes).
-- `/proc/kallsyms` in Linux's format (addresses zeroed unless
-  `kptr_restrict` allows).
-- Runtime symbolization inside `dfx/backtrace.rs`: frames print
-  `func+0xoff/0xsize` next to the raw address, so WARN/BUG/panic output
-  becomes triageable without offline `addr2line`.
-- Linux's `Call Trace:` capitalization and `?`/`0x` decoration.
+**Landed.** The build-time symbol pass (`build/gen-ksyms.py`): `nm` over
+the linked kernel ELF keeps the text symbols, `addr2line -C` resolves
+their DEMANGLED names (the kernel is built with Rust's v0 mangling, so
+the raw ELF names are unreadable), and the result is written as a
+compact table — one NUL-separated name blob (`ksyms.bin`, embedded with
+`include_bytes!`) plus an index of (name offset, address, size, type).
+`build/Makefile` runs the pass after the link and rebuilds; `build.rs`
+writes a placeholder so a plain `cargo build` still compiles. At runtime
+`dfx/ksyms.rs` binary-searches the index, `/proc/kallsyms` prints
+Linux's `addr type name` lines, and `dfx/backtrace.rs` prints
+`[<addr>] rux::mod::fn+0xoff/0xsize` (Linux's classic frame format,
+with `?` for an unresolved address) under Linux's `Call Trace:`
+header.
 
-Acceptance: a WARN in the kernel prints a frame with the Rust function
-name; `/proc/kallsyms` lists the same names.
+**Blocked: the table is OFF by default (`KSYMS_ENABLE=1` turns it on).**
+Embedding it grows the kernel image, and the image's address space is
+budgeted by hardcoded constants that the image has already outgrown:
+
+- `memory_layout.rs:130` — `KERNEL_SIZE = 0xC00000` (12MB): the
+  boot-time MMU maps exactly this much of the image
+  (`mmu_init.rs`, both the early identity map and the real map).
+- `boot.S` — the trampoline maps 5 PMDs and the early table 6 PMDs
+  (10MB / 12MB windows).
+- the heap base is the fixed physical `0x80E00000`
+  (`memory_layout.rs:139`, `main.rs:1167`, `buddy_allocator.rs:62`).
+
+Measured on the current tree: the image (text+rodata+data+bss+boot
+stack) ends at phys `0x80C31000` — already **195KB past the 12MB
+window**, so the tail of `.bss` and the boot stack are unmapped TODAY
+(latent hole, harmless only because nothing touches them). The symbol
+table needs ~2.3MB of names; a 1MB table moves the image end to
+`0x80D31000`, and the first early-touched `.bss` object (the syscall
+ring) lands in the hole: the kernel panics in `trap_entry` with
+`KERNPANIC pfault badaddr=0xffffffff80c00008` — the first byte past the
+old window.
+
+The fix is the memory-layout one the project's own notes describe
+(RUX-RISCV-LAYOUT in `main.rs` / `memory_layout.rs`): derive the image
+extent from the linker (`_end - _stext`) instead of `KERNEL_SIZE`,
+extend the `boot.S` windows to match, and move the heap base and the
+kernel reservation TOGETHER (the vmemmap backing search treats the gap
+between the image end and the heap base as free space — moving the
+image end without moving the heap base is what produced the documented
+riscv64 corruption family). That change touches the boot path and the
+memory map, so it belongs to a deliberate, verified change rather than
+to a DFX side-quest.
+
+Acceptance (once the image budget is enlarged): a WARN in the kernel
+prints a frame with the Rust function name; `/proc/kallsyms` lists the
+same names.
 
 ### Tranche 4 — tracepoint framework and tracefs
 

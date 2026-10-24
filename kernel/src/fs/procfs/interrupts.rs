@@ -72,6 +72,23 @@ pub fn soft_count(cpu: usize) -> u64 {
     }
 }
 
+/// Total interrupts since boot, summed over every source this file
+/// reports (Linux /proc/stat "intr").
+pub fn total_interrupt_count() -> u64 {
+    let num_cpus = crate::arch::smp::num_started_cpus().min(MAX_CPUS);
+    let mut total = 0u64;
+    for cpu in 0..num_cpus {
+        total = total.saturating_add(timer_count(cpu));
+        total = total.saturating_add(soft_count(cpu));
+    }
+    for irq in (1..=15).chain(32..=47) {
+        for cpu in 0..num_cpus {
+            total = total.saturating_add(crate::interrupt::irq_get_count(irq as u32, cpu));
+        }
+    }
+    total
+}
+
 // ============================================================================
 // PLIC counters now live in irq_desc.per_cpu_count
 // These wrappers delegate to the IRQ framework.
