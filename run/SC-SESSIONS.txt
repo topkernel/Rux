@@ -4419,3 +4419,66 @@ expected, since the enq_j rule (the dominant population) is still
 open. What IS proven: the reclaim mechanism fires and reduces per-
 spawn residue 40%; both probe panics that killed milestone-window
 boots are fixed; the attribution is complete and quantitative.
+
+LEG-17 ATTEMPT-2 CLOSE-OUT (06:10). SUMMARY OF THE LEG:
+
+MERGED: the slab+EINVAL package landed on main as 2c7a21fc (pkg/
+slab-einval = 4e9fe329 arch-gated packed kstack slab + c36c325a
+EINVAL errno fix), D-2 registered, gate pre-verified (Tier1 census
+8/32 EXACT x2, clock 3us, kernel share 84.5/83.6; Tier2 pbench 18/19
+in-band-or-improved incl. p2 -19.6% and dgram -47/-80; volume + unlink
+rows flagged for perf-lane quiet-window confirmation). riscv64 make
+test 1096/1096 (the ungated attempt's corruption is the gate's own
+regression test).
+
+DECODED THIS LEG (both handed-off blockers):
+- pa38 "appspawn-child NULL-deref" = usb_host + the KNOWN image
+  libusb_pnp_manager defect; mitigation usbless (oh-img-p), now the
+  launcher-line default. sc231-236 all parked on the STOCK image;
+  usbless boots advance (sc237, sc251B).
+- launcher rd_fail EBADF spin = OUR errno bug (EPOLL read -> EBADF
+  instead of EINVAL) — fixed, merged, VERIFIED GONE (sc237/sc251B
+  zero rd_fail lines).
+
+sc251B FINAL (usbless, pkg kernel, quietcon dfx=schb,sleepsnap,
+SECS=3600, ended 06:03 by timeout): FASTEST deep trajectory of the
+campaign (pidmax 2654 at t=403 — sc237 hit that at t=650), reached
+pidmax 5254 / tasks 2986 / heap 846MB with the ZONE DRAINING (zfree
+15853 pages = 62MB, drct=298 direct reclaim, slow=204) at t=1873;
+last 28 minutes in floor thrash (cpu0 preempt-off churn at
+enable_irq+6-class rip under the reclaim storm, beats stopped, other
+cpu alive, screen LIVE). SCREEN: 100% non-black 8-color checker from
+t~1900 to the end = composer/DRM pushing frames — the display chain
+is drawing; not yet launcher UI.
+- CENSUS PEEK at 847MB with real sampling this time (480 c256 / 93
+  c1024): c256 dominated by small state ints (1x212, 2x98, 3x32,
+  4x34 = txn/state records) + c1024 dominated by 0x7ff0... user
+  pointers (spawn-residue block arrays) — MATCHES the sibling's
+  peek-LIVE attribution; main's merged binder fix 6ba58562 (~210MB
+  at the floor) targets exactly these classes.
+
+NEW BLOCKER FOR THE NEXT LEG (the launcher's own death, now that
+EBADF and usb storms are gone): m.ohos.launcher crash-loops at
+rip=0x3fbf1187d2 (fixed-base 790KB merged module, module vaddr
+0x1177d2, fd-less FileBacked VMA — byte-search across system/vendor
+libs and the extracted /data service tree finds NO match; the module
+is NOT in the images' static .so set): instruction = lock cmpxchg
+[rcx+0x10],edx / test / je / inc [rbp-0x14] / mov [rcx+0x18],rsi (a
+refcount/lock op), faulting WRITE at cr2=0x7ff081eca93c which IS
+INSIDE a live VMA 0x7ff081ec0000-0x7ff081ed2000 flags=0x11 (R-only)
+type=FileBacked fd=40 off=0x0 — the launcher atomically WRITES an
+R-only SHARED file mapping. mmap-time EACCES validation audited
+correct (memfd O_RDWR correct; mprotect-upgrade EACCES handles the
+closed-fd case correctly). NEXT-LEG PROBES: (1) dfx log of every
+mmap/mprotect EACCES return + fd/path (which open path made fd 40
+read-only, if any), (2) mmap-fault probe printing the cr2 VMA's
+backing path via the vma_files pin, (3) if the fd was opened O_RDWR
+and mapped PROT_WRITE but the VMA came back R-only, THAT is the
+kernel bug — chase the VMA flag construction for shared file maps.
+TWO boots of evidence: sc250B (parked, loglevel-4 serial weight —
+avoid), sc251B (2 full forensic dumps in-log).
+
+Rolls this leg: sc231-236 (stock, parked), sc237 (usbless clean
+advancing, deepest tasks), sc239gate/sc240gate (perf-gate Tier-1),
+pb-slab (Tier-2), sc250B (parked), sc251B (deepest pidmax+floor).
+All QEMUs and shotmons stopped by exact own PID (verified cmdlines).
