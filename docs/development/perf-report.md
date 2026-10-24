@@ -118,6 +118,13 @@ single-boot variance), appfwk.ready set by +57.4 s, bms
 Verdict: the tick fix does not move the phase timeline; the driver
 stays F3 + the binder cost classes.
 
+Leg-18 note (sc209, A-line branch kernel with FXRS probes — context
+only, not a pa-series measurement): **bootanimation.finished was SET
+for the first time** (pid 888; appfwk.ready also set; screen shows the
+animation test pattern). launcher.ready / OnForeground still 0. The
+post-UI row stays PENDING until launcher.ready lands on a main-class
+kernel.
+
 Reading. Divergence grows with boot depth. Early services are only
 2-6x slower; everything downstream of appspawn runs 8x to >100x
 slower, and the two final milestones are never reached inside the

@@ -117,6 +117,7 @@ pub fn jbd2_journal_revoke(
     // Record (block, tid): commit writes a revoke block; recovery skips
     // replaying older journal entries for this block.
     insert_revoke_hash(&journal, blocknr, txn.t_tid)?;
+    crate::dfx::fsw::note_j_revoke();
 
     Ok(())
 }
