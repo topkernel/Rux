@@ -26,7 +26,7 @@ qemu_drive() { # idx file (shared, read-only overlay)
     printf ' -drive file=%s,if=none,id=ohd%d,format=raw,file.locking=off,snapshot=on -device virtio-blk-pci,drive=ohd%d' "$file" "$idx" "$idx"
 }
 
-APPEND="ip=dhcp loglevel=4 console=ttyS0,115200"
+APPEND="ip=dhcp loglevel=${LOGLEVEL:-4} console=ttyS0,115200"
 APPEND="$APPEND init=init root=/dev/ram0 rw"
 APPEND="$APPEND ohos.boot.hardware=virt default_boot_device=10007000.virtio_mmio"
 APPEND="$APPEND ohos.boot.sn=01234567890"
