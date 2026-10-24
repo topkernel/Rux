@@ -35,18 +35,24 @@ pub fn generate() -> Vec<u8> {
 pub fn render() -> alloc::string::String {
     let mut out = String::new();
     for (id, lock) in crate::fs::locks::snapshot_locks().iter().enumerate() {
+        // Column layout from Linux fs/locks.c lock_get_status:
+        // "POSIX " + " ADVISORY " + "WRITE " + "pid ..." — i.e. two
+        // spaces between class and type and between type and mode, one
+        // space before the pid. FLOCK rows are the literal
+        // "FLOCK  ADVISORY  " there; both classes pad to the same
+        // columns here ("POSIX "/"FLOCK " + " ADVISORY  ").
         let class = match lock.class {
             1 => "FLOCK ",
             _ => "POSIX ",
         };
-        let mode = if lock.exclusive { "WRITE" } else { "READ " };
+        let mode = if lock.exclusive { "WRITE" } else { "READ" };
         let end = if lock.end == u64::MAX {
             "EOF".to_string()
         } else {
             format!("{}", lock.end)
         };
         out.push_str(&format!(
-            "{}: {}{}ADVISORY  {} {} 00:00:{} {} {}\n",
+            "{}: {}{} ADVISORY  {} {} 00:00:{} {} {}\n",
             id + 1,
             if lock.waiting { "-> " } else { "" },
             class,

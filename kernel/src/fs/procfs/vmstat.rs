@@ -118,6 +118,16 @@ pub fn generate() -> Vec<u8> {
         "pgfree {}\n",
         vmstat::PGFREE.load(Ordering::Relaxed)
     ));
+    // Linux's pgalloc_* order follows the zone-type enum
+    // (mm/vmstat.c VMSTAT_ITEMS): DMA, DMA32, Normal, Movable.
+    out.push_str(&format!(
+        "pgalloc_dma {}\n",
+        vmstat::PGALLOC_DMA.load(Ordering::Relaxed)
+    ));
+    out.push_str(&format!(
+        "pgalloc_dma32 {}\n",
+        vmstat::PGALLOC_DMA32.load(Ordering::Relaxed)
+    ));
     out.push_str(&format!(
         "pgalloc_normal {}\n",
         vmstat::PGALLOC_NORMAL.load(Ordering::Relaxed)
@@ -125,14 +135,6 @@ pub fn generate() -> Vec<u8> {
     out.push_str(&format!(
         "pgalloc_movable {}\n",
         vmstat::PGALLOC_MOVABLE.load(Ordering::Relaxed)
-    ));
-    out.push_str(&format!(
-        "pgalloc_dma32 {}\n",
-        vmstat::PGALLOC_DMA32.load(Ordering::Relaxed)
-    ));
-    out.push_str(&format!(
-        "pgalloc_dma {}\n",
-        vmstat::PGALLOC_DMA.load(Ordering::Relaxed)
     ));
     out.push_str("pgactivate 0\n");
     out.push_str("pgdeactivate 0\n");
@@ -171,8 +173,11 @@ pub fn generate_buddyinfo() -> Vec<u8> {
                 stats.node_id,
                 zone_name(zt)
             ));
+            // Linux prints each order count as "%6lu " — right-aligned
+            // in six columns plus one trailing space (mm/vmstat.c
+            // frag_show_print), so the line ends with a space too.
             for order in 0..stats.free_blocks.len() {
-                out.push_str(&format!("{:>6}", stats.free_blocks[order]));
+                out.push_str(&format!("{:>6} ", stats.free_blocks[order]));
             }
             out.push('\n');
         }
