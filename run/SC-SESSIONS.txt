@@ -3296,3 +3296,44 @@ RE-ARM DEAD-CODE FIX (13:3x-15:xx):
   quiet boot that loses /data dies as a panic park; (3) idle-loop
   hlt + tick = the documented benign LEAK weather, now silenced by
   2a02d5db.
+
+SESSION R THIRTEENTH LEG ADDENDUM - sc207 HARD-FREEZE ROOT CAUSE,
+THE PRINT-UNDER-BUCKET-LOCK SELF-DEADLOCK; sc208 ROLLS THE FIX +
+SLOW-TXN PROBE (14:2x-15:xx):
+
+- sc207 (re-arm fix kernel) boot was FAST (pid 1106 @ t=185 vs sc206's
+  1121 @ t=290), then HARD-FROZE at ~t=190-240: serial cut MID-LINE,
+  both vCPUs at 100% host CPU, no panic, no beats, no tick prints.
+  Forensics via QEMU monitor (no gdb on this launch): CPU0 RIP in a
+  CAS loop; stack walk symbolized to
+    stallwatch_tick -> for_each_task closure ->
+    pid_hash::pid_hash_for_each_task -> pid_hash::lock_bucket (SPIN)
+  The census was mid-sleepsnap when it died (serial tail = raw
+  sleepsnap lines + one interleaved WAKE-STRANDED tick-path report).
+- ROOT CAUSE: sleep_snapshot() printed one pr_info! PER TASK inside
+  for_each_task - the callback runs under the pid-hash bucket lock, so
+  the census held each bucket across console port-IO (~1 s total over
+  the ~590-task walk). stallwatch_tick (softirq at irq-exit, 2.5 s
+  cadence) runs its own for_each_task: a tick landing on the walking
+  CPU self-deadlocks (the softirq spins on the bucket only the
+  interrupted task can release), and the other CPU's scan spins on the
+  same bucket. sc206 survived its census by luck (its census at t=290
+  dodged the 2.5 s scan); sc207's earlier census collided. This also
+  explains why ordinary forks never hit it: they hold buckets for
+  microseconds, the census opened a second-scale window.
+- FIX (d43c8753): sleep_snapshot collects lines into a String, prints
+  once after the walk (chunked on line boundaries for the ring record
+  cap); stallwatch_tick buffers its two report lines identically (its
+  pr_warn!s were inside the bucket-locked closure too). Every other
+  walker already buffer-then-printed - these two were the outliers.
+- d43c8753 also carries the SLOW-TXN probe (coordinator cross-finding,
+  C-line leg 15: SAMgr SendRequest = ~30 s per call with the fixed
+  clock; sc206 was the deepest roll ever - first
+  bootevent.boot.completed): BinderTxn gains enq_j/pick_j stamps; the
+  BC_REPLY pop prints "SLOW-TXN ... total/queue/exec" for sync txns
+  over 5 s, direct console, rate-capped 1/2 s. sc208 rolls it.
+- Coordinator notes folded in: the perf line pre-verified the timer
+  hunk on main+exact-hunk (pa23/24/25: 99.9 ticks/s sustained,
+  nanosleep -21x, clock_gettime max 3 ms, WAKE-STRANDED 100->0, census
+  counts hold - perf-audit.md 2h); diff-verified their scratch/tickfix
+  9a451bef vs my 675095c0 hunk: BYTE-IDENTICAL.
