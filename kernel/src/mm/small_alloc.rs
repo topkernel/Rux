@@ -614,32 +614,46 @@ pub fn census_peek(ci: usize, per_page: usize) {
     let s = CLASSES[ci];
     let fo = first_off(s);
     let objs = (PAGE_SIZE - fo) / s;
-    // Buffer-then-print (leg rule: no UART under locks): snapshot the
-    // object headers under the class irqsave lock, print after drop.
-    let per = per_page.min(8);
-    let mut snap: [[u64; 2]; 64] = [[0; 2]; 64];
-    let mut nsnap = 0usize;
+    // Header HISTOGRAM over up to 32 active pages (the first run's
+    // 8x8 sample hit mostly-free head pages): count DISTINCT first-qword
+    // values — a handful of dominant values = the type population.
+    // Buffer-then-print (leg rule: no UART under locks).
+    let mut vals: [u64; 24] = [0; 24];
+    let mut counts: [u64; 24] = [0; 24];
+    let mut nvals = 0usize;
+    let mut seen_total: u64 = 0;
     let _g = cache.lock.lock_irqsave();
     let mut page = cache.head.load(Ordering::Relaxed) as u32;
     let mut pages = 0usize;
-    while page != 0 && pages < 8 && nsnap < snap.len() {
+    while page != 0 && pages < 32 {
         let page_addr = heap_start + page as usize * PAGE_SIZE;
         let hdr = hdr_of(page_addr);
         if hdr.magic != HDR_MAGIC || hdr.state != STATE_ACTIVE {
             break;
         }
+        // Sample from the TOP of the page (most recently allocated
+        // slots sit past the freelist churn) and only slots that look
+        // populated.
         let mut i = 0usize;
-        while i < objs && i < per && nsnap < snap.len() {
-            // SAFETY: page_addr is a live slab page of this class; slot
-            // offset fo + i*s is inside the page. Reading FREE slots is
-            // safe (they hold the freelist u16 at their start); live
-            // slots hold the object's own first fields.
+        while i < objs && i < per_page.max(16) {
+            // SAFETY: live slab page of this class; slot in bounds.
             let p = page_addr + fo + i * s;
             let a0 = unsafe { core::ptr::read_volatile(p as *const u64) };
-            let a1 = unsafe { core::ptr::read_volatile((p + 8) as *const u64) };
-            if a0 != 0 || a1 != 0 {
-                snap[nsnap] = [a0, a1];
-                nsnap += 1;
+            if a0 != 0 {
+                let mut k = 0usize;
+                while k < nvals {
+                    if vals[k] == a0 {
+                        counts[k] += 1;
+                        break;
+                    }
+                    k += 1;
+                }
+                if k == nvals && nvals < vals.len() {
+                    vals[nvals] = a0;
+                    counts[nvals] = 1;
+                    nvals += 1;
+                }
+                seen_total += 1;
             }
             i += 1;
         }
@@ -649,13 +663,17 @@ pub fn census_peek(ci: usize, per_page: usize) {
     drop(_g);
     taskdump_raw_line(b"PEEK c");
     taskdump_dec(s as u64);
-    taskdump_raw_line(b":\n");
+    taskdump_raw_line(b" sampled=");
+    taskdump_dec(seen_total);
+    taskdump_raw_line(b" distinct=");
+    taskdump_dec(nvals as u64);
+    taskdump_raw_line(b"\n");
     let mut k = 0usize;
-    while k < nsnap {
-        taskdump_raw_line(b"  ");
-        taskdump_dec(snap[k][0]);
-        taskdump_raw_line(b" ");
-        taskdump_dec(snap[k][1]);
+    while k < nvals {
+        taskdump_raw_line(b"  hdr ");
+        taskdump_dec(vals[k]);
+        taskdump_raw_line(b" x");
+        taskdump_dec(counts[k]);
         taskdump_raw_line(b"\n");
         k += 1;
     }
