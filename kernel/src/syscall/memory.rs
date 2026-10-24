@@ -287,7 +287,9 @@ pub fn sys_mmap(args: [u64; 6]) -> i64 {
                     core::sync::atomic::AtomicUsize::new(0);
                 if NF.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 400 {
                     let path = crate::sched::current()
-                        .and_then(|t| unsafe { (*t).fdtable().get_file(fd as usize) })
+                        .and_then(|t| unsafe {
+                            (*t).try_fdtable().and_then(|fdt| fdt.get_file(fd as usize))
+                        })
                         .map(|f| f.path())
                         .unwrap_or_else(|| alloc::string::String::from("?"));
                     crate::pr_warn!(
