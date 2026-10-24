@@ -264,6 +264,41 @@ below.
   gained a post-slab-packing parenthetical. Ranking v2.3 and report
   v1.0 tables otherwise unchanged — no new OH data.
 
+TWELFTH LEG (2026-10-24 10:15 open, main merged fast-forward 1938f19c
+-> d304069d — the eleventh-leg docs are confirmed in main): all three
+wait-gates re-checked at open; zero QEMU and zero builds, per
+discipline. This leg's live item is sc197 monitoring (below).
+
+- Retest gate A (launcher sched fixes): still closed. NONE of v3
+  (c90f80b0), v4 (7a8044e0), v5 (12ea541e), v6/R73 (9777f195) or the
+  branch tip a480cd78 is in origin/main (`git merge-base --is-ancestor`
+  per commit); the launcher lane's tip has not moved since 10:10
+  (a480cd78 = sc196/sc197 notes). pa18 (GRQ/TERM retest over
+  v1..v4 together) keeps waiting; `run/pa16-probe.patch` re-verified
+  to apply clean on d304069d.
+- Retest gate B (allocator): closed, unchanged. origin/main has not
+  moved since the eleventh-leg check except for this lane's own docs
+  commit and its merge (d304069d); the mm-touching commits in main's
+  recent log are the pre-existing samgr-callback merges (filemap_fault
+  wip, VM_DONTCOPY, OOM retry policy) that predate this lane's branch
+  point — no per-CPU freelist exists anywhere.
+- UI milestone: sc197 in flight — the launcher lane rolled it at 10:09
+  (v6 bzImage = R73 dump-bound kernel, FRESH userdata copy after
+  sc196's warm-reboot stall, quietcon + LOGLEVEL=3, SMP2 KVM q35,
+  90-minute window to ~11:39, per their SC-SESSIONS notes). At leg
+  open (10:15, min 6): 965 serial lines, ZERO hits for launcher.ready /
+  bootanimation.started|finished / OnForeground / ArkUI / bootevent —
+  expected, sc195's ArkTS/ArkUI moment was ~min 25; shotmon still
+  reads the 8-color oracle screen (8 colors, 100% non-black). Report
+  v1.1 (post-UI row of table 1) stays pending; monitoring continues
+  through this leg.
+- Report tweak (idle item): perf-report.md section 0 base pointer was
+  still 484c8cb8 (stale from the tenth leg) — updated to d304069d
+  (delta since the measurement base remains riscv64-only + docs);
+  same fix applied to the section 10 skeleton's base-pointer sentence.
+  Ranking v2.3 and report tables otherwise unchanged — no new OH data.
+
+
 ## Verdict in one paragraph
 
 The "one fix at a time" pattern was real but it has converged into a
@@ -1204,7 +1239,7 @@ milestone.
   sprobe=0`); measurement method: per-syscall {n, avg, max}, tick-mode
   accounting, EFLAGS-exact IF=0 zone accounting (v3), kernel-rip page
   histogram, host-side serial timestamping (patstamp.py). Base pointer:
-  current main a67d2a83 differs from the measurement base by riscv64-only
+  current main d304069d differs from the measurement base by riscv64-only
   commits (LAYOUT-2) and docs, so all x86_64 numbers remain current;
   the measured baselines already include the slab-packing layer (see
   the eleventh-leg gate B correction).

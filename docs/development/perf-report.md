@@ -22,8 +22,9 @@ in this report needs to change at that point.
   earlier boots on their own kernel revisions (pa1/pa3 pre-fix,
   pa13/pa15/pa16 progressively fixed) — each run's revision is listed
   in `perf-audit.md`'s run table. (Current main has since moved to
-  484c8cb8; the only delta is the riscv64 boot-window fix
-  RUX-RISCV-LAYOUT-2 — cfg(riscv64)-scoped, no x86_64 code change —
+  d304069d; the delta is the riscv64 boot-window fix
+  RUX-RISCV-LAYOUT-2 plus docs commits only — cfg(riscv64)-scoped, no
+  x86_64 code change —
   so every number in this report remains current for the x86_64
   measurement workload. The launcher lane's sched v3/v4/v5 remain
   unmerged; the retest that would refresh sections 2-3 waits for
