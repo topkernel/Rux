@@ -356,8 +356,27 @@ guest shell by test/tracefs-smoke.sh.
 
 ### Tranche 5 — crash policy and persistent evidence
 
-- `panic=` timeout (`panic=N`, `panic=o`, `panic=immediate`): reboot
-  after N seconds instead of halting in `wfi` forever.
+**Part 1 — done.** The `panic=` kernel parameter (Linux's
+Documentation/admin-guide/kernel-parameters.txt): `panic=N` reboots N
+seconds after the panic, `panic=o` / `panic=O` / `panic=immediate`
+reboot at once, and with no `panic=` (or `panic=0`) the kernel halts —
+Linux's default, and Rux's behaviour until now. The reboot path
+deliberately does NOT signal init and does NOT sync the filesystems:
+Linux's panic path reboots without touching the disks, because the panic
+may well be the storage stack itself, and a sync that hangs in a panic
+would defeat the timeout.
+
+**Part 2 — remaining.**
+
+- Non-fatal `Oops` path for recoverable faults (Linux's `oops=panic`
+  default off).
+- pstore/ramoops-lite: keep the last panic record (registers + the tail
+  of the ring buffer) in a reserved RAM area and expose it through
+  `/sys/fs/pstore/` after the next boot.
+- Re-enable `printk::persistent_log_init()` with a size cap, so the
+  serial tail survives the reboot.
+
+The original bullets, for reference:
 - Non-fatal `Oops` path for recoverable faults (Linux's `oops=panic`
   default off).
 - pstore/ramoops-lite: keep the last panic record (registers + the tail
