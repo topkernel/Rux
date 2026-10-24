@@ -345,7 +345,23 @@ pub fn stallwatch_tick() {
     // Report lines collect here and print AFTER the walk (see the note
     // at the pr_warn loop below).
     let mut reports: alloc::vec::Vec<alloc::string::String> = alloc::vec::Vec::new();
-    crate::sched::for_each_task(|t| {
+    // sc215 (leg 15): the walk itself must never block. This scanner
+    // runs in the timer-tick (softirq) path via ww_heartbeat; the
+    // blocking pid_hash_for_each_task takes per-bucket spinlocks, and a
+    // task-context holder (fork insert / exit remove / kill for_each —
+    // all hold buckets with IRQs on) interrupted by the tick
+    // self-deadlocks: the handler spins for the very bucket its
+    // interrupted owner holds, the second vCPU's scan reaches the same
+    // stuck bucket and joins, ticks stop, the console dies mid-line.
+    // sc215 froze exactly this way at BUCKET_LOCK[96] (monitor-
+    // convicted: stuck byte=1, CPU0 stack ww_heartbeat ->
+    // stallwatch_tick -> for_each_task -> lock_bucket spin, tick
+    // counter frozen at both samples). The sc207 "print after the
+    // walk" fix removed the printk-under-bucket-lock half of the
+    // hazard but left the acquisition itself blocking. The _try walk
+    // skips held buckets — a skipped round just misses tasks for one
+    // ~5s scan, harmless for a stall detector that re-scans forever.
+    let _skipped = crate::process::pid_hash::pid_hash_for_each_task_try(|t| {
         // SAFETY: for_each_task pins the task (per-bucket lock); reads
         // are of stable fields.
         let tk = unsafe { &*t };
@@ -425,5 +441,12 @@ pub fn stallwatch_tick() {
     // vCPUs exactly this way against the sleepsnap census printer).
     for r in &reports {
         crate::pr_warn!("{}", r);
+    }
+    // sc215: name near-misses — buckets a slow task-context holder
+    // kept locked during this scan. The _try walk skipped them (pre-
+    // fix this was the deadlock window itself); a recurring high
+    // number here is the argument for irqsave bucket locks.
+    if _skipped != 0 {
+        crate::pr_warn!("STALLWATCH scan skipped {} held pid-hash buckets", _skipped);
     }
 }
