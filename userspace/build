@@ -77,23 +77,6 @@ build_userspace() {
     cd "$SCRIPT_DIR"
 
     # Build all user programs
-    # GUI library
-    info "Compiling rux_gui library..."
-    cargo build $RELEASE_FLAG -p rux_gui
-
-    # GUI applications (apps/)
-    info "Compiling desktop..."
-    cargo build $RELEASE_FLAG -p desktop
-
-    info "Compiling calculator..."
-    cargo build $RELEASE_FLAG -p calculator
-
-    info "Compiling clock..."
-    cargo build $RELEASE_FLAG -p clock
-
-    info "Compiling vshell..."
-    cargo build $RELEASE_FLAG -p vshell
-
     # Test programs (tests/)
     info "Compiling smoke_test..."
     cargo build $RELEASE_FLAG -p smoke_test

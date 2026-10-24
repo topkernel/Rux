@@ -104,6 +104,53 @@ unsafe fn link_tail_locked(
     node.lru_sizes[lru].fetch_add(1, core::sync::atomic::Ordering::Relaxed);
 }
 
+/// O(1) link of `page` at the HEAD of LRU list `lru` — caller holds
+/// `lru_lock`.
+///
+/// Head is the young end in the two-tier file-LRU policy (see
+/// `page_add_file_lru_young`): pages drift toward the tail as newer pages
+/// arrive, so the tail stays the oldest end reclaim consumes.
+///
+/// # Safety
+/// `page` must not currently be linked on any list.
+unsafe fn link_head_locked(
+    node: &super::pglist::PglistData,
+    page: &Page,
+    lru: usize,
+) {
+    let pfn = page_to_pfn(page as *const Page);
+
+    // New page becomes the new head (no prev)
+    page.set_lru_next(LRU_NONE);
+    page.set_lru_prev(LRU_NONE);
+    page.set_lru_list(lru);
+
+    let head = node.lru_heads[lru].load(core::sync::atomic::Ordering::Relaxed);
+
+    if head != LRU_NONE {
+        // Link old head → new page
+        let head_page = pfn_to_page_mut(head);
+        if !head_page.is_null() {
+            (*head_page).set_lru_prev(pfn);
+        }
+        page.set_lru_next(head);
+        node.lru_heads[lru].store(pfn, core::sync::atomic::Ordering::Relaxed);
+    } else {
+        // List was empty — new page is both head and tail
+        node.lru_heads[lru].store(pfn, core::sync::atomic::Ordering::Relaxed);
+        node.lru_tails[lru].store(pfn, core::sync::atomic::Ordering::Relaxed);
+    }
+
+    node.lru_sizes[lru].fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+}
+
+/// Clear the on-page LRU membership bits (the Lru flag and list index) —
+/// small helper shared by the unlink-then-relink policy paths.
+fn page_clear_lru_bits(page: &Page) {
+    page.clear_flag(PageFlag::Lru);
+    page.clear_lru_list();
+}
+
 /// Add a page to the *tail* of the specified LRU list.
 ///
 /// The tail is the least-recently-used end; kswapd scans from here.
@@ -178,6 +225,32 @@ pub fn lru_move_to_tail(page: &Page, new_lru: usize) {
             }
         }
         link_tail_locked(node, page, new_lru);
+    }
+    page.set_flag(PageFlag::Lru);
+}
+
+/// Move a page to the head of a (possibly different) LRU list — the young
+/// end in the two-tier file-LRU policy (see `page_add_file_lru_young`).
+///
+/// Acquires the LRU lock once for both the unlink and the relink.
+pub fn lru_move_to_head(page: &Page, new_lru: usize) {
+    // SAFETY: called with lru_lock held — exclusive node access.
+    let node = match unsafe { first_online_node_mut() } {
+        Some(n) => n,
+        None => return,
+    };
+
+    let _guard = node.lru_lock.lock();
+    // SAFETY: unlink only when the page really is linked; lock held.
+    unsafe {
+        if page.test_flag(PageFlag::Lru) {
+            let lru = page.lru_list();
+            if lru < NR_LRU_LISTS {
+                unlink_locked(node, page, lru);
+                page_clear_lru_bits(page);
+            }
+        }
+        link_head_locked(node, page, new_lru);
     }
     page.set_flag(PageFlag::Lru);
 }
@@ -293,6 +366,130 @@ pub fn page_add_file_lru_batch(pages: &[*mut Page]) {
             }
         }
     }
+}
+
+// ==================== Two-tier file-LRU policy (page cache) ====================
+//
+// The functions below implement the aging direction the page cache relies
+// on. They are ADDITIVE: the legacy tail-link helpers above stay unchanged
+// for their existing callers (rmap, anon reclaim).
+//
+// Direction contract (matching Linux's head=young, tail=old):
+//   - Freshly cached file pages enter at the HEAD (young end).
+//   - Reclaim scans and demotion consume from the TAIL (old end).
+// The pre-two-tier code linked new pages at the TAIL — the same end
+// `evict_one` scanned from — so every eviction examined the NEWEST page
+// first (an anti-LRU: concurrent fillers evicted each other's freshest
+// pages, the OH .so-load thrash family).
+
+/// Link `page` at the HEAD (young end) of LRU_INACTIVE_FILE.
+pub fn page_add_file_lru_young(page: &Page) {
+    // SAFETY: same node-access discipline as lru_add_page.
+    let node = match unsafe { first_online_node_mut() } {
+        Some(n) => n,
+        None => return,
+    };
+    let _guard = node.lru_lock.lock();
+    // SAFETY: page is not linked (Lru flag checked) and the lock is held.
+    unsafe {
+        if !page.test_flag(PageFlag::Lru) {
+            link_head_locked(node, page, super::pglist::LRU_INACTIVE_FILE);
+            page.set_flag(PageFlag::Lru);
+        }
+    }
+}
+
+/// Batch version of `page_add_file_lru_young`: link each page at the head
+/// of LRU_INACTIVE_FILE under ONE lru_lock. Pages are linked in slice
+/// order, each at the head — so the LAST slice element ends up closest to
+/// the head (youngest) and the first element is the oldest of the batch.
+pub fn page_add_file_lru_young_batch(pages: &[*mut Page]) {
+    // SAFETY: same node-access discipline as lru_add_page.
+    let node = match unsafe { first_online_node_mut() } {
+        Some(n) => n,
+        None => return,
+    };
+    let _guard = node.lru_lock.lock();
+    for page_ptr in pages {
+        if page_ptr.is_null() {
+            continue;
+        }
+        // SAFETY: caller owns these frames (fresh allocations); the Lru
+        // flag check keeps double links impossible — same contract as
+        // page_add_file_lru_batch.
+        unsafe {
+            let page = &**page_ptr;
+            if !page.test_flag(PageFlag::Lru) {
+                link_head_locked(node, page, super::pglist::LRU_INACTIVE_FILE);
+                page.set_flag(PageFlag::Lru);
+            }
+        }
+    }
+}
+
+/// Activate a referenced inactive file page onto the HEAD (young end) of
+/// LRU_ACTIVE_FILE, clearing nothing — the caller clears Referenced.
+///
+/// Linking at the young end makes the ACTIVE tail the "oldest active"
+/// end, which is where `lru_demote_active_file_oldest` demotes from.
+pub fn lru_activate_young(page: &Page) {
+    if !page.test_flag(PageFlag::Lru) || page.test_flag(PageFlag::Unevictable) {
+        return;
+    }
+    if !page.test_flag(PageFlag::Active) {
+        page.set_flag(PageFlag::Active);
+    }
+    lru_move_to_head(page, super::pglist::LRU_ACTIVE_FILE);
+}
+
+/// Demote up to `nr` of the OLDEST pages on LRU_ACTIVE_FILE back onto the
+/// HEAD (young end) of LRU_INACTIVE_FILE, clearing Referenced — the
+/// second-chance handoff that keeps eviction making progress when every
+/// inactive page is pinned or hot.
+///
+/// Returns the number of pages demoted (0 when the active list is empty
+/// or its oldest members are unevictable).
+pub fn lru_demote_active_file_oldest(nr: usize) -> usize {
+    if nr == 0 {
+        return 0;
+    }
+    // SAFETY: same node-access discipline as lru_collect_cold.
+    let node = match unsafe { first_online_node_mut() } {
+        Some(n) => n,
+        None => return 0,
+    };
+    let _guard = node.lru_lock.lock();
+    let mut demoted = 0usize;
+    let mut cur = node.lru_tails[super::pglist::LRU_ACTIVE_FILE]
+        .load(core::sync::atomic::Ordering::Relaxed);
+    while cur != LRU_NONE && demoted < nr {
+        // SAFETY: cur comes from the (locked) list chain.
+        let p = match pfn_to_page_mut(cur) {
+            p if p.is_null() => break,
+            p => unsafe { &*p },
+        };
+        let prev = p.lru_prev(); // toward the head = toward younger
+        if p.test_flag(PageFlag::Unevictable) {
+            cur = prev;
+            continue;
+        }
+        // SAFETY: page is linked on the ACTIVE list; the lock is held for
+        // the unlink+relink (unlink_locked/link_head_locked contract).
+        unsafe {
+            let lru = p.lru_list();
+            if lru < NR_LRU_LISTS {
+                unlink_locked(node, p, lru);
+                page_clear_lru_bits(p);
+            }
+            p.clear_flag(PageFlag::Referenced);
+            p.clear_flag(PageFlag::Active);
+            link_head_locked(node, p, super::pglist::LRU_INACTIVE_FILE);
+            p.set_flag(PageFlag::Lru);
+        }
+        demoted += 1;
+        cur = prev;
+    }
+    demoted
 }
 
 /// Remove a page from its LRU list when the last mapping is removed.

@@ -227,8 +227,11 @@ fn dfx_dump_user_stack(t: &crate::process::Task, usp: u64) {
             };
             // User code pointers: Xorg image (< 0x1d0000) or shared libs
             // (0x0000_3000_xxxx_xxxx) or any canonical user text pointer.
+            // sc119: OH app children park with library frames at
+            // 0x0000_7ff0_xxxx_xxxx (sc118 USEGV rip 0x7ff000fe1b07 family)
+            // — same 4-GB-prefix test as the other two families.
             let is_user_ptr = (v > 0x1000 && v < 0x4000_0000_0000)
-                && (v < 0x00d0_0000 || (v >> 32) == 0x3000 || (v >> 32) == 0x3fff);
+                && (v < 0x00d0_0000 || (v >> 32) == 0x3000 || (v >> 32) == 0x3fff || (v >> 32) == 0x7ff0);
             if is_user_ptr {
                 taskdump_raw_line(b"FTX-US +");
                 taskdump_dec(addr.wrapping_sub(usp) as i64 as u64);
@@ -252,6 +255,46 @@ fn dfx_dump_user_stack(t: &crate::process::Task, usp: u64) {
 
 /// Snapshot every task in the PID hash. One line per task, plus a header
 /// so the dump is self-describing in a log full of interleaved output.
+// ---- dfx-taskdump-bt arch accessors --------------------------------
+// The bt lines read the task's last trap frame: (user pc, user sp,
+// syscall nr, arg0..arg2). Field names differ per arch: riscv64 keeps
+// the RISC-V names (epc/sp/a7/orig_a0..a2), x86_64 keeps
+// rip/rsp/orig_rax/rdi/rsi/rdx. nr==0 means "in pure user mode" on
+// both (no syscall in flight).
+#[cfg(feature = "dfx-taskdump-bt")]
+unsafe fn bt_frame(
+    pr: *mut crate::arch::pt_regs::PtRegs,
+) -> (u64, u64, u64, u64, u64, u64) {
+    #[cfg(feature = "riscv64")]
+    unsafe { ((*pr).epc, (*pr).sp, (*pr).a7, (*pr).orig_a0, (*pr).a1, (*pr).a2) }
+    #[cfg(feature = "x86_64")]
+    unsafe { ((*pr).rip, (*pr).rsp, (*pr).orig_rax, (*pr).rdi, (*pr).rsi, (*pr).rdx) }
+    #[cfg(not(any(feature = "riscv64", feature = "x86_64")))]
+    unsafe { (0, 0, 0, 0, 0, 0) }
+}
+
+/// Kernel-text window for the stack-word return-address filter.
+/// riscv64: kernel half from 0xffffffff80000000; x86_64: linked image
+/// at 0xffffffff80200000 (boot log "image 0xffffffff80200000-...") with
+/// headroom to 0xffffffff82000000 for the tail/bss — diagnostics only,
+/// a stray extra word costs nothing.
+#[cfg(feature = "dfx-taskdump-bt")]
+const fn bt_text_window() -> (u64, u64) {
+    #[cfg(feature = "riscv64")]
+    { (0xffff_ffff_8000_0000, 0xffff_ffff_8020_0000) }
+    #[cfg(feature = "x86_64")]
+    { (0xffff_ffff_8020_0000, 0xffff_ffff_8200_0000) }
+    #[cfg(not(any(feature = "riscv64", feature = "x86_64")))]
+    { (0, 0) }
+}
+
+/// Plausible-user-pointer window for uepc/usp (matches the historical
+/// 0x1000..0x0000_4000_0000_0000 guards).
+#[cfg(feature = "dfx-taskdump-bt")]
+const fn bt_user_window() -> (u64, u64) {
+    (0x1000, 0x0000_4000_0000_0000)
+}
+
 pub fn dump_all_tasks(reason: &str) {
     puts("\n=== DFX TASK DUMP (");
     puts(reason);
@@ -361,8 +404,9 @@ pub fn dump_all_tasks(reason: &str) {
             {
                 let pr = unsafe { (*t).pt_regs() };
                 if !pr.is_null() {
-                    let epc = unsafe { (*pr).epc };
-                    if epc > 0x1000 && epc < 0x0000_4000_0000_0000 {
+                    let (epc, _usp, _nr, _a0, _a1, _a2) = unsafe { bt_frame(pr) };
+                    let (lo, hi) = bt_user_window();
+                    if epc > lo && epc < hi {
                         puts(" uepc=");
                         put_hex(epc);
                     }
@@ -381,7 +425,7 @@ pub fn dump_all_tasks(reason: &str) {
                         // SAFETY: diagnostic read within the task's own kernel
                         // stack pages (mapped while the Task exists).
                         let v = unsafe { core::ptr::read_volatile(base.wrapping_sub(k)) };
-                        if v >= 0xffffffff80000000 && v < 0xffffffff80200000 && (v & 1) == 0 {
+                        if v >= bt_text_window().0 && v < bt_text_window().1 && (v & 1) == 0 {
                             putc(b' ');
                             put_hex(v);
                             shown += 1;
@@ -418,6 +462,13 @@ pub fn dump_all_tasks(reason: &str) {
             put_hex(task_ptr as u64);
             puts(" pid=");
             put_dec(t.pid() as u64);
+            // Thread-group attribution: comm alone cannot say which
+            // process an OS_FFRT_2_2 or OS_IPC_3 worker serves, and the
+            // b140 hunt needed exactly that (accountmgr's FFRT worker
+            // normal-exited mid-activation while its IPC threads kept
+            // answering callbacks). tgid= names the owner unambiguously.
+            puts(" tgid=");
+            put_dec(t.tgid() as u64);
             puts(" state=");
             puts(state_name(t.state().bits()));
             puts(" ti_cpu=");
@@ -494,6 +545,27 @@ pub fn dump_all_tasks(reason: &str) {
                     putc(b'.');
                 }
             }
+            // Last syscall latched at dispatch ENTRY (per-task): for a
+            // sleeping task this names the syscall it is parked in —
+            // the discriminator for "which kernel object is this waiter
+            // on" hunts (account-activation stall: epoll? futex? binder
+            // ioctl? signalfd?).
+            {
+                let nr = t.last_syscall_nr.load(core::sync::atomic::Ordering::Relaxed);
+                if nr != 0 {
+                    let a0 = t.last_syscall_a0.load(core::sync::atomic::Ordering::Relaxed);
+                    let a1 = t.last_syscall_a1.load(core::sync::atomic::Ordering::Relaxed);
+                    puts(" lastsys=");
+                    put_dec(nr as u64);
+                    puts("(");
+                    put_hex(a0);
+                    putc(b',');
+                    put_hex(a1);
+                    puts(")");
+                } else {
+                    puts(" lastsys=?");
+                }
+            }
             putc(b'\n');
             #[cfg(feature = "dfx-taskdump-bt")]
             {
@@ -511,20 +583,20 @@ pub fn dump_all_tasks(reason: &str) {
                     if !pr.is_null() {
                         // SAFETY: pt_regs is the task's own kernel-stack-top
                         // trap frame; read-only diagnostic access.
-                        let (epc, usp) = unsafe { ((*pr).epc, (*pr).sp) };
-                        if epc > 0x1000 && epc < 0x0000_4000_0000_0000 {
+                        let (epc, usp, a7, a0, a1, a2) = unsafe { bt_frame(pr) };
+                        let (ulo, uhi) = bt_user_window();
+                        if epc > ulo && epc < uhi {
                             puts(" uepc=");
                             put_hex(epc);
                         }
-                        if usp > 0x1000 && usp < 0x0000_4000_0000_0000 {
+                        if usp > ulo && usp < uhi {
                             puts(" usp=");
                             put_hex(usp);
                         }
-                        // Last syscall args (a7=nr, orig_a0..a2) — identifies
-                        // the futex word a sleeper is parked on (a0 holds the
-                        // return slot; the true first arg is orig_a0).
-                        let (a7, a0, a1, a2) =
-                            unsafe { ((*pr).a7, (*pr).orig_a0, (*pr).a1, (*pr).a2) };
+                        // Last syscall args (nr, arg0..arg2) — identifies
+                        // the futex word a sleeper is parked on. riscv64
+                        // keeps the nr in a7 (98=futex); x86_64 in
+                        // orig_rax (202=futex).
                         if a7 > 0 && a7 < 500 {
                             puts(" nr=");
                             put_dec(a7);
@@ -541,10 +613,34 @@ pub fn dump_all_tasks(reason: &str) {
                         // sites must carry the SAME gate or the
                         // `dfx-taskdump-bt` feature fails to link alone.
                         #[cfg(feature = "dfx-futex-trace")]
-                        if a7 == 98 && a0 > 0x1000 && (a0 & 0x3) == 0 {
-                            if t.state().is_sleeping() {
-                                crate::sync::futex::dfx_dump_futex_state(a0 as usize, t.pid());
-                                dfx_dump_user_stack(&t, usp);
+                        {
+                            #[cfg(feature = "riscv64")]
+                            const FUTEX_NR: u64 = 98;
+                            #[cfg(feature = "x86_64")]
+                            const FUTEX_NR: u64 = 202;
+                            #[cfg(not(any(feature = "riscv64", feature = "x86_64")))]
+                            const FUTEX_NR: u64 = 0;
+                            if a7 == FUTEX_NR && a0 > 0x1000 && (a0 & 0x3) == 0 {
+                                if t.state().is_sleeping() {
+                                    // sc119: the OH app-child hunt. Hundreds of
+                                    // futex sleepers exist per dump; the word
+                                    // read inside FTX-STATE lands in the
+                                    // DUMPER's mm anyway (wrong address space)
+                                    // and a full ustack per sleeper floods the
+                                    // UART. Gate the expensive dumps to the
+                                    // hunt page 0x7fffffffc000 (every process's
+                                    // stack-top-minus-3rd page, where all 13
+                                    // app children parked); the bucket-chain
+                                    // walk inside FTX-STATE is kernel-global
+                                    // and stays valid there.
+                                    if (a0 & !0xfffu64) == 0x7fffffffc000 {
+                                        crate::sync::futex::dfx_dump_futex_state(
+                                            a0 as usize,
+                                            t.pid(),
+                                        );
+                                        dfx_dump_user_stack(&t, usp);
+                                    }
+                                }
                             }
                         }
                     }
@@ -559,7 +655,7 @@ pub fn dump_all_tasks(reason: &str) {
                         // SAFETY: diagnostic read within the task's own kernel
                         // stack pages (mapped while the Task exists).
                         let v = unsafe { core::ptr::read_volatile(base.wrapping_sub(k)) };
-                        if v >= 0xffffffff80000000 && v < 0xffffffff80200000 && (v & 1) == 0 {
+                        if v >= bt_text_window().0 && v < bt_text_window().1 && (v & 1) == 0 {
                             putc(b' ');
                             put_hex(v);
                             shown += 1;
@@ -590,7 +686,17 @@ pub fn dump_all_tasks(reason: &str) {
     // the periodic path — the watchdog variant may run while the heap lock
     // is the wedged one, and the stats walk takes allocator locks.
     if reason == "periodic" {
+        // R85 (b148 crawl hunt): the ext4 biglock's own state beside the
+        // task snapshot — the b148 shape (whole OH cohort D-parked, lock
+        // apparently free, zero STALL prints) was invisible without it.
+        crate::fs::ext4::EXT4_BIG_LOCK.dfx_census_line();
         crate::dfx::memwatch::dump_mem();
+        // pa16 (magazine): the packing layer's per-class op counts and
+        // class-lock acquisitions on the same cadence — locks vs
+        // obj_allocs+obj_frees is the magazine's live traffic-ratio
+        // readout (atomic loads + raw UART only, no allocator lock,
+        // safe from the periodic path).
+        crate::mm::small_alloc::census_line();
     }
 }
 

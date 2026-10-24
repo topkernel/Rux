@@ -75,7 +75,6 @@ const SPURIOUS_VECTOR: u32 = 0xFF;
 
 /// LAPIC timer divide configuration: divide by 16 (encoding 0x3).
 const TIMER_DIV_16: u64 = 0x3;
-const TIMER_DIVISOR: u64 = 16;
 
 /// LVT mask bit.
 const LVT_MASKED: u32 = 1 << 16;
@@ -248,7 +247,19 @@ pub fn timer_start() -> bool {
     if freq == 0 {
         return false; // calibration never ran: keep the timer masked
     }
-    let ticks = freq / TIMER_DIVISOR / (crate::config::KERNEL_HZ as u64);
+    // WT4 (vsync-starvation hunt, 2026-10-19): the old expression divided
+    // by TIMER_DIVISOR (16) AGAIN — but LAPIC_TIMER_FREQ is the CALIBRATED
+    // CCR DECREMENT RATE, already measured with the divide configuration
+    // armed (and in x2APIC mode, where this kernel runs, the divide
+    // register is ignored entirely). The double division programmed the
+    // initial count 16x too small: the periodic tick ran at ~1550 Hz per
+    // CPU instead of HZ=100, and every tick raised Timer+Hrtimer softirqs
+    // — wakewatch measured 3100 softirq passes/s, si_busy growing from
+    // 12% to >90% of both CPUs as the timer wheel and TCP lists grew,
+    // until task scheduling starved completely (picks frozen at ~60 s:
+    // the compose-content 41.5 s dead stop / 0.5-0.7 s usleep blowouts
+    // and the appspawn sleeps-through-socket-events shape).
+    let ticks = freq / (crate::config::KERNEL_HZ as u64);
     if ticks == 0 {
         return false;
     }

@@ -81,6 +81,9 @@ fn alloc_pages_inner(gfp_flags: GfpFlags, order: usize) -> usize {
                 if !zone.watermark_ok(order, WMARK_LOW) {
                     super::kswapd::wakeup_kswapd(order as i32);
                 }
+                // Leg-15 pace: one tick per slowpath entry (zone fastpath
+                // failed), dfx=schb-gated counter only.
+                crate::dfx::schb::note_slow();
 
                 // Synchronous direct reclaim (Linux __alloc_pages_slowpath):
                 // waking kswapd alone loses the race — the faulting task
@@ -89,23 +92,49 @@ fn alloc_pages_inner(gfp_flags: GfpFlags, order: usize) -> usize {
                 // page cache first, then anonymous pages to swap) and retry.
                 // Skipped for GFP_ATOMIC (IRQ contexts must not block on I/O)
                 // and while already inside reclaim (PF_MEMALLOC equivalent).
-                if gfp_flags.0 & GfpFlags::GFP_ATOMIC.0 == 0
-                    && IN_DIRECT_RECLAIM
-                        .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
-                        .is_ok()
-                {
-                    for _ in 0..8 {
-                        let freed = super::vmscan::try_to_free_pages(order as i32);
+                if gfp_flags.0 & GfpFlags::GFP_ATOMIC.0 == 0 {
+                    // GATE CONTENTION (the at-cap crawl): the gate used to be
+                    // take-it-or-skip — when another task was mid-reclaim,
+                    // THIS allocation skipped reclaim entirely and could
+                    // return 0 while the reclaimer was freeing a 32-page
+                    // batch (page-cache inserts bailed mid-batch, faults
+                    // OOM-killed loaders; faultlat3 at-cap: 10-20 s single-
+                    // page stalls). Wait for the gate instead: retry the
+                    // fastpath (the reclaimer's freed pages may already
+                    // cover us) and yield the CPU between attempts so the
+                    // reclaimer and kswapd actually run. Bounded — a stuck
+                    // holder falls through to the old skip path.
+                    let mut gate_attempts = 0u32;
+                    let mut held_gate = false;
+                    while gate_attempts < 64 {
+                        if IN_DIRECT_RECLAIM
+                            .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
+                            .is_ok()
+                        {
+                            held_gate = true;
+                            break;
+                        }
                         if let Some(pfn) = zone.alloc_pages(order) {
                             ZONE_ALLOCS.fetch_add(1, Ordering::Relaxed);
-                            IN_DIRECT_RECLAIM.store(0, Ordering::Release);
                             return pfn_to_phys(pfn);
                         }
-                        if freed == 0 {
-                            break; // no progress — do not spin
-                        }
+                        crate::sched::yield_cpu();
+                        gate_attempts += 1;
                     }
-                    IN_DIRECT_RECLAIM.store(0, Ordering::Release);
+                    if held_gate {
+                        for _ in 0..8 {
+                            let freed = super::vmscan::try_to_free_pages(order as i32);
+                            if let Some(pfn) = zone.alloc_pages(order) {
+                                ZONE_ALLOCS.fetch_add(1, Ordering::Relaxed);
+                                IN_DIRECT_RECLAIM.store(0, Ordering::Release);
+                                return pfn_to_phys(pfn);
+                            }
+                            if freed == 0 {
+                                break; // no progress — do not spin
+                            }
+                        }
+                        IN_DIRECT_RECLAIM.store(0, Ordering::Release);
+                    }
                 }
 
                 // High-order allocation failed: try compaction to reduce fragmentation
@@ -187,6 +216,11 @@ pub fn oom_forensic_dump(site: &str) {
     if DUMPS.fetch_add(1, Ordering::Relaxed) >= 4 {
         return;
     }
+
+    // Full accounting ledger first (dfx/ledger.rs): where every managed
+    // page went at this moment — the census + counter reconciliation that
+    // attributes the "out of memory" to a category (or to drift).
+    super::super::dfx::ledger::dump(&alloc::format!("oom: {}", site));
 
     crate::println!("==== OOM-FORENSIC #{} @ {} ====", DUMPS.load(Ordering::Relaxed), site);
     crate::println!("OOM-FORENSIC: in_direct_reclaim={}", IN_DIRECT_RECLAIM.load(Ordering::Relaxed));
@@ -303,6 +337,37 @@ pub fn oom_forensic_dump(site: &str) {
             "OOM-FORENSIC: inverse(linked,ref>0)={} first={:?}",
             inverse, inverse_first
         );
+
+        // Raw-UART copy of the decisive numbers. printk may be wedged
+        // during the very storms this dump targets (the pt1 audit lost
+        // every println line of this dump while the raw MEMLEDGER-COMPACT
+        // line survived): zone counter-vs-walk mismatch for ZoneNormal
+        // plus the corruption indices, one raw line.
+        let mut zf = 0usize;
+        let mut zm = 0usize;
+        let mut zw = 0usize;
+        // SAFETY: diagnostic read-only node access.
+        if let Some(node) = unsafe { crate::mm::pglist::first_online_node() } {
+            if let Some(zone) = node.zone(super::zone::ZoneType::ZoneNormal) {
+                if zone.is_initialized() {
+                    zf = zone.nr_free();
+                    zm = zone.managed_pages();
+                    let report = zone.forensic_free_report();
+                    for order in 0..=super::zone::MAX_ORDER {
+                        zw += report[order].1 << order;
+                    }
+                }
+            }
+        }
+        crate::dfx::ledger::oomfx_line(
+            zf as u64,
+            zw as u64,
+            zm as u64,
+            orphan as u64,
+            inverse as u64,
+            super::zone::SEED_ALARMS.load(Ordering::Relaxed) as u64,
+            super::zone::DOUBLE_FREE_COUNT.load(Ordering::Relaxed) as u64,
+        );
     }
     crate::println!("==== OOM-FORENSIC end ====");
 }
@@ -357,32 +422,139 @@ pub fn get_zeroed_page(gfp_flags: GfpFlags) -> usize {
     addr
 }
 
+/// Count of user leaf PTEs skipped by PTE walkers because the mapped
+/// frame is foreign (boot-reserved). Readable from memwatch-style dumps;
+/// nonzero after drm GEM activity is expected and healthy.
+pub static FOREIGN_LEAF_SKIPS: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+
+/// True when `phys` is a boot-reserved frame (kernel image, kernel heap,
+/// slab, vmemmap, dtb). A USER leaf PTE mapping such a frame points at
+/// FOREIGN memory: drm GEM dumb buffers and the virtio-gpu framebuffer
+/// backing are kernel-heap allocations that get mmap(2)'d into userspace
+/// (see drm::create_dumb + gem_mmap_resolve). No mapping-side refcount
+/// was ever taken and the page_desc belongs to whichever subsystem owns
+/// the frame, so every PTE walk (fork copy, unmap/zap, full teardown)
+/// must SKIP these frames entirely: no get_page, no rmap, no put_page,
+/// no free — the owner releases the frame through its own path
+/// (GemObject::drop -> heap dealloc).
+///
+/// History: before this discriminator, fork's COW copy get_page()'d the
+/// foreign GEM frames and the LAST teardown's put hit 0 and called
+/// free_pages on kernel-heap phys — one loud pr_err PER FRAME from a
+/// free context (sc83: a 7442-line REFUSED flood sweeping ~24 MB of
+/// heap phys while the walk monopolized its locks; the printk storm
+/// itself wedged the box). Generalizes the older framebuffer-range
+/// special cases in both arches' walkers.
+#[inline]
+pub fn is_foreign_user_frame(phys: usize) -> bool {
+    let foreign = crate::mm::memblock::memblock().is_reserved(phys);
+    if foreign {
+        FOREIGN_LEAF_SKIPS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    }
+    foreign
+}
+
+/// Rate-limited evidence printer for free_pages refusals/drops: the
+/// first `DETAIL_BUDGET` events print in full, afterwards only one line
+/// per `SUMMARY_EVERY` events. A single corrupted PTE tree can sweep
+/// thousands of frames through here — per-frame printk from a free
+/// context (console locks + UART at 115200) is itself a wedge vector
+/// (sc83), so the flood is capped while the evidence survives.
+fn report_free_refusal(detail_msg: &core::fmt::Arguments) {
+    use core::sync::atomic::Ordering::Relaxed;
+    const DETAIL_BUDGET: usize = 8;
+    const SUMMARY_EVERY: usize = 4096;
+    static COUNT: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+    let n = COUNT.fetch_add(1, Relaxed);
+    if n < DETAIL_BUDGET {
+        crate::pr_err!("{}", detail_msg);
+    } else if (n + 1) % SUMMARY_EVERY == 0 {
+        crate::pr_err!(
+            "free_pages: refused/dropped {} frames so far (per-frame prints suppressed)",
+            n + 1
+        );
+    }
+}
+
 /// Free contiguous physical pages
 ///
 /// # Arguments
 /// - `addr`: Physical address of the first page
 /// - `order`: Order of the allocation
 pub fn free_pages(addr: usize, order: usize) {
+    use crate::dfx::driftwatch as dw;
     if addr == 0 {
+        dw::FREE_NULL.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         return;
     }
 
-    // Sentinel: a kernel VMA (or any address >= 4GB "phys") entering the zone
-    // poisons the freelist — the next alloc returns it as a wild phys.
-    // (x86_64 diagnostic from the feature branch; kept as a cheap guard.)
-    if addr >= 0x1_0000_0000 {
+    // REUSE-WHILE-MAPPED tripwire (b88 samgr heap corruption hunt): a
+    // frame whose descriptor still says "mapped" must never re-enter the
+    // zone — the surviving PTE would alias the next allocation and the
+    // two owners scribble over each other (observed as mallocng meta
+    // corruption and a zeroed binder write buffer in samgr, with NO
+    // PTE-OVERWRITE at map time because the old leaf simply stayed).
+    // Refuse the free (bounded leak) and name the frame; the mapping
+    // keeps working, so the boot survives to reveal more.
+    {
+        let pd = crate::mm::page_desc::pfn_to_page(phys_to_pfn(addr));
+        if !pd.is_null() && unsafe { (*pd).is_mapped() } {
+            static MAPPED_FREES: core::sync::atomic::AtomicUsize =
+                core::sync::atomic::AtomicUsize::new(0);
+            dw::FREE_REFUSED_MAPPED
+                .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            if MAPPED_FREES.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 8 {
+                crate::pr_err!(
+                    "free_pages: REFUSED frame {:#x} order {} still MAPPED (mapcount {}) pid {} — leaking instead of aliasing",
+                    addr,
+                    order,
+                    unsafe { (*pd).mapcount() },
+                    crate::process::current_pid()
+                );
+                crate::dfx::backtrace::dump_stack();
+            }
+            return;
+        }
+    }
+
+    // Sentinel: a kernel VMA (or any address outside the managed physical
+    // range) entering the zone poisons the freelist — the next alloc
+    // returns it as a wild phys. (x86_64 diagnostic from the feature
+    // branch; kept as a cheap guard.)
+    //
+    // Fake-OOM fix: the bound used to be a hard-coded 4 GiB ceiling, but
+    // qemu virt maps guest DRAM starting at 0x8000_0000, so on -m 4G HALF
+    // the RAM (0x1_0000_0000..0x1_8000_0000) is above it — every free of
+    // an above-4G page was dropped and the frame leaked (oomchurn anon
+    // 2600 MB on 4G: exactly 524288 WILD lines = 2 GiB leaked on one
+    // munmap; rerunning the workload then fails with a page allocator
+    // "out of memory" while most of the RAM is only leaked, not used).
+    // The managed-range check rejects genuinely wild addresses (kernel
+    // VMAs are far outside it) while accepting every page the zone can
+    // hand out — the two sets must agree by construction.
+    if !super::page_desc::phys_valid(addr) {
+        dw::FREE_DROPPED_WILD.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
         // Caller diagnostic is x86-only (frame-pointer walk via att_syntax
         // asm); the riscv64 build has no equivalent and just drops it.
+        // Rate-limited (see report_free_refusal): a wild sweep hits this
+        // per frame.
         #[cfg(feature = "x86_64")]
         {
             let ret: u64;
             // SAFETY: frame pointers forced on; diagnostic return-address read.
             unsafe { core::arch::asm!("movq 8(%rbp), {}", out(reg) ret, options(att_syntax)); }
-            crate::println!("free_pages: WILD addr={:#x} order={} caller={:#x}", addr, order, ret);
+            report_free_refusal(&format_args!(
+                "free_pages: WILD addr={:#x} order={} caller={:#x}",
+                addr, order, ret
+            ));
         }
         #[cfg(not(feature = "x86_64"))]
         {
-            crate::println!("free_pages: WILD addr={:#x} order={}", addr, order);
+            report_free_refusal(&format_args!(
+                "free_pages: WILD addr={:#x} order={}",
+                addr, order
+            ));
         }
 
         return;
@@ -397,10 +569,18 @@ pub fn free_pages(addr: usize, order: usize) {
     // user mapping (observed: corrupted task children lists, do_wait
     // panics). Refuse loudly and keep the frame leaked instead.
     if crate::mm::memblock::memblock().is_reserved(addr) {
-        crate::pr_err!(
+        dw::FREE_REFUSED_RESERVED
+            .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        // Rate-limited (see report_free_refusal): sc83 showed a 7442-line
+        // flood of this exact line from one teardown walk of drm-GEM-mapped
+        // kernel-heap frames; the printk storm from the free context was
+        // itself a wedge vector. The walker-side is_foreign_user_frame skip
+        // now prevents the GEM case from reaching here at all — this
+        // refusal remains the last-line defense for genuinely forged frees.
+        report_free_refusal(&format_args!(
             "free_pages: REFUSED boot-reserved frame {:#x} order {} — not returned to zone",
             addr, order
-        );
+        ));
         return;
     }
 
@@ -462,12 +642,18 @@ pub fn free_pages(addr: usize, order: usize) {
                         TEXT_OWN_FREES.load(core::sync::atomic::Ordering::Relaxed)
                     );
                     crate::dfx::backtrace::dump_stack();
+                    dw::FREE_REFUSED_TEXT
+                        .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                 }
                 #[cfg(not(feature = "riscv64"))]
-                crate::pr_err!(
-                    "TEXTFREE-FOREIGN pfn={:#x} order={} owner_pid={} owner_va={:#x} dying_pid={} — free REFUSED (leaked)",
-                    pfn, order, owner_pid, owner_va, dying
-                );
+                {
+                    crate::pr_err!(
+                        "TEXTFREE-FOREIGN pfn={:#x} order={} owner_pid={} owner_va={:#x} dying_pid={} — free REFUSED (leaked)",
+                        pfn, order, owner_pid, owner_va, dying
+                    );
+                    dw::FREE_REFUSED_TEXT
+                        .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                }
                 return;
             } else {
                 // Switch off: keep historical behavior, just drop the stamp.
@@ -501,6 +687,7 @@ pub fn free_pages(addr: usize, order: usize) {
                     let end_pfn = zone.end_pfn();
                     if pfn >= start_pfn && pfn < end_pfn {
                         zone.free_pages(pfn, order);
+                        dw::FREE_OK.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                         return;
                     }
                 }
@@ -510,6 +697,7 @@ pub fn free_pages(addr: usize, order: usize) {
 
     // Page doesn't belong to any zone - this shouldn't happen in normal operation
     // Pages allocated via memblock during early boot are not tracked and don't need freeing
+    dw::FREE_NO_ZONE.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
 }
 
 /// Free a single page
@@ -572,9 +760,14 @@ pub fn page_to_virt(page: &Page) -> usize {
 ///
 /// # Arguments
 /// - `phys_start`: Physical memory start address
-/// - `phys_size`: Total physical memory size in bytes
-/// - `kernel_end`: End of kernel memory (where allocation can start)
-pub fn init_zone_system(phys_start: usize, phys_size: usize, kernel_end: usize) {
+/// - `phys_size`: SIZE OF THE PFN SPAN (max region end − phys_start),
+///   including MMIO holes — matching the descriptor/vmemmap sizing. The
+///   zone spans the whole discovered map; only memblock-FREE pages are
+///   seeded, so holes and static regions contribute no free pages.
+/// - `kernel_end`: legacy, unused (the zone no longer starts after the
+///   heap/slab window — that clamp is what left ~980 MB below
+///   KERNEL_HEAP_PHYS permanently unmanaged on x86_64).
+pub fn init_zone_system(phys_start: usize, phys_size: usize, _kernel_end: usize) {
     // Initialize node data structure
     // SAFETY: Called once during early boot before any page allocation.
     unsafe {
@@ -590,13 +783,18 @@ pub fn init_zone_system(phys_start: usize, phys_size: usize, kernel_end: usize) 
         }
     };
 
-    // Validate phys_size against MAX_PAGES
-    // This ensures zone allocations stay within vmemmap bounds
+    // Validate phys_size against the descriptor ceiling (fake-OOM fix:
+    // the old limit here was the Kernel.toml NOMINAL size, so >2GiB
+    // machines silently lost every page above the line — see the
+    // MAX_PAGES comment in page_desc.rs). The runtime descriptor count is
+    // published by init_vmemmap from the same discovered memory map, so
+    // vmemmap bounds stay consistent with the zone span.
     let max_pages = super::page_desc::MAX_PAGES;
     let max_phys_size = max_pages * PAGE_SIZE;
     let effective_phys_size = phys_size.min(max_phys_size);
     if effective_phys_size != phys_size {
-        crate::println!("page_alloc: phys_size {}MB exceeds MAX_PAGES limit {}MB, truncating",
+        crate::pr_err!(
+            "page_alloc: phys_size {}MB exceeds MAX_PAGES limit {}MB, truncating",
             phys_size / (1024 * 1024), max_phys_size / (1024 * 1024));
     }
 
@@ -605,9 +803,17 @@ pub fn init_zone_system(phys_start: usize, phys_size: usize, kernel_end: usize) 
     let total_pages = effective_phys_size / PAGE_SIZE;
     node.init(start_pfn, total_pages, total_pages);
 
-    // Create ZONE_NORMAL for all allocatable memory
-    // On RISC-V, we don't need DMA zones, but we'll use ZONE_NORMAL
-    let alloc_start_pfn = (kernel_end / PAGE_SIZE).max(start_pfn);
+    // ZONE_NORMAL spans the WHOLE discovered PFN space (fake-OOM family):
+    // the old span started at `kernel_end` (heap+slab end), so on x86_64
+    // every memblock-free page below it — ~980 MB between the kernel
+    // image and the heap at 0x40000000 — was never seeded and stayed
+    // permanently unallocatable while the OOM killer fired (census:
+    // 237,521 of 524,140 descriptors rc==0, unlinked, unmanaged on one
+    // 2G boot). Linux parity: the zone spans present memory; reserved
+    // ranges and non-RAM holes inside the span are simply never seeded,
+    // and the memblock_is_reserved / PageFlag::Reserved guards on the
+    // free path refuse anything forged against them.
+    let alloc_start_pfn = start_pfn;
     let alloc_end_pfn = start_pfn + total_pages;
     let alloc_start = alloc_start_pfn * PAGE_SIZE;
     let alloc_end = alloc_end_pfn * PAGE_SIZE;
@@ -662,6 +868,12 @@ pub fn init_zone_system(phys_start: usize, phys_size: usize, kernel_end: usize) 
         }
     });
 
+    // Managed pages = what the buddy actually owns (span minus reserved
+    // ranges and non-RAM holes), like Linux zone->managed_pages vs
+    // spanned_pages. The old span-equals-managed accounting overstated
+    // availability and sized watermarks off phantom pages.
+    zone.set_managed_pages(total_added);
+
     // Add zone to node
     node.add_zone(ZoneType::ZoneNormal, zone);
 
@@ -671,6 +883,17 @@ pub fn init_zone_system(phys_start: usize, phys_size: usize, kernel_end: usize) 
         let refs: [&Zone; 1] = [zone_ref];
         super::zone::setup_per_zone_wmarks(&refs, total_managed);
     }
+
+    // One-line boot banner: span vs seeded vs holes, so any future
+    // structural loss is visible immediately.
+    let span_pages = alloc_end_pfn - alloc_start_pfn;
+    crate::println!(
+        "page_alloc: zone Normal span={} pages ({} MB), seeded={} ({} MB), unmanaged-in-span={} ({} MB)",
+        span_pages, span_pages * PAGE_SIZE / (1024 * 1024),
+        total_added, total_added * PAGE_SIZE / (1024 * 1024),
+        span_pages.saturating_sub(total_added),
+        span_pages.saturating_sub(total_added) * PAGE_SIZE / (1024 * 1024)
+    );
 }
 
 // ==================== Page Allocation APIs ====================

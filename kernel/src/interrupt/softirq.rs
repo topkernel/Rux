@@ -9,7 +9,7 @@
 //! handlers. Processing happens in `__do_softirq()` at `irq_exit()` time
 //! or in the ksoftirqd kernel thread on overflow.
 
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use crate::config::MAX_CPUS;
 
 // ============================================================================
@@ -35,8 +35,30 @@ pub enum SoftirqIndex {
 /// Total number of softirq vectors
 pub const NR_SOFTIRQS: usize = 10;
 
+/// Per-CPU, per-vector softirq raise counters (Linux /proc/softirqs).
+pub static SOFTIRQ_RAISED: [[AtomicU64; NR_SOFTIRQS]; crate::config::MAX_CPUS] =
+    [const { [const { AtomicU64::new(0) }; NR_SOFTIRQS] }; crate::config::MAX_CPUS];
+
+/// Read one per-CPU softirq counter (Linux /proc/softirqs).
+pub fn raised_count(cpu: usize, vec: usize) -> u64 {
+    if cpu < crate::config::MAX_CPUS && vec < NR_SOFTIRQS {
+        SOFTIRQ_RAISED[cpu][vec].load(Ordering::Relaxed)
+    } else {
+        0
+    }
+}
+
 /// Maximum softirq processing loops before waking ksoftirqd
 const MAX_SOFTIRQ_RESTART: usize = 10;
+
+/// Maximum wall time spent processing softirqs at one irq_exit before
+/// deferring the rest to ksoftirqd — Linux MAX_SOFTIRQ_TIME parity
+/// (kernel/softirq.c: "Do NOT run for too long or the watchdog fires").
+/// WT4 evidence: an unbounded irq-exit softirq budget let a timer/IO
+/// storm pin both CPUs in IRQ context (93% si_busy) with scheduling
+/// starved to zero picks. 2 ms of the nominal 10 MHz timebase.
+const MAX_SOFTIRQ_TIME_TICKS: u64 =
+    2 * crate::config::TIMER_CLOCK_FREQ_HZ / 1000;
 
 // ============================================================================
 // Softirq action handler type
@@ -66,6 +88,26 @@ static mut SOFTIRQ_PENDING: [AtomicU32; MAX_CPUS] = [
     AtomicU32::new(0), AtomicU32::new(0),
     AtomicU32::new(0), AtomicU32::new(0),
 ];
+
+// ==================== Wakewatch forensics (softirq-storm hunt) ====
+//
+// wt1/wt2 (vsync-starvation boots): after ~60 s the machine collapses —
+// picks go to zero while both vCPUs stay 100% busy with IF=0, sampled
+// RIPs inside softirq-context code (buddy free, spinlock). __do_softirq
+// has a RESTART budget but NO TIME budget (Linux caps irq-exit softirq
+// work at 2 ms and defers the rest to ksoftirqd), so a packet/I-O storm
+// can pin the CPUs in IRQ context forever — no schedule() ever runs
+// again. These counters name the storm vector:
+pub static WW_VEC_RUN: [AtomicU32; NR_SOFTIRQS] = [
+    AtomicU32::new(0), AtomicU32::new(0), AtomicU32::new(0),
+    AtomicU32::new(0), AtomicU32::new(0), AtomicU32::new(0),
+    AtomicU32::new(0), AtomicU32::new(0), AtomicU32::new(0),
+    AtomicU32::new(0),
+];
+/// Times __do_softirq spent in handler dispatch (ticks; 1 pass each).
+pub static WW_SOFTIRQ_TICKS: AtomicU64 = AtomicU64::new(0);
+/// __do_softirq invocations (all contexts).
+pub static WW_SOFTIRQ_RUNS: AtomicU64 = AtomicU64::new(0);
 
 /// Per-CPU flag: is __do_softirq currently executing on this CPU?
 /// Prevents recursive softirq invocation.
@@ -104,6 +146,10 @@ pub fn raise_softirq_irqoff(nr: usize) {
     // SAFETY: per-CPU arrays accessed only by current CPU; cpu_id is correct
     unsafe {
         SOFTIRQ_PENDING[cpu].fetch_or(1u32 << nr, Ordering::Release);
+    }
+    // /proc/softirqs: count the raise on the CPU that raised it.
+    if cpu < crate::config::MAX_CPUS && nr < NR_SOFTIRQS {
+        SOFTIRQ_RAISED[cpu][nr].fetch_add(1, Ordering::Relaxed);
     }
 }
 
@@ -149,8 +195,9 @@ pub fn __do_softirq() -> bool {
     );
 
     let mut restart_count = 0;
+    let budget_t0 = crate::drivers::timer::read_time();
 
-    loop {
+    'outer: loop {
         // Atomically snapshot and clear pending bits
         let pending = unsafe {
             SOFTIRQ_PENDING[cpu].swap(0, Ordering::AcqRel)
@@ -159,6 +206,9 @@ pub fn __do_softirq() -> bool {
         if pending == 0 {
             break;
         }
+
+        WW_SOFTIRQ_RUNS.fetch_add(1, Ordering::Relaxed);
+        let t0 = crate::drivers::timer::read_time();
 
         // Process each set bit from LSB (highest priority) to MSB
         let mut remaining = pending;
@@ -169,13 +219,28 @@ pub fn __do_softirq() -> bool {
             // Dispatch to registered handler
             let handler = unsafe { SOFTIRQ_VEC[bit] };
             if let Some(h) = handler {
+                WW_VEC_RUN[bit].fetch_add(1, Ordering::Relaxed);
                 h(bit);
             }
         }
 
+        WW_SOFTIRQ_TICKS.fetch_add(
+            crate::drivers::timer::read_time().saturating_sub(t0),
+            Ordering::Relaxed,
+        );
+
         restart_count += 1;
-        if restart_count >= MAX_SOFTIRQ_RESTART {
-            break;
+        // Linux irq_exit() discipline: stop after the restart budget OR
+        // the 2 ms time budget — leave the rest pending for ksoftirqd so
+        // the interrupted context (idle loop / user task) always regains
+        // the CPU and scheduling continues. Without the time budget a
+        // self-re-raising vector (timer+net/blk storm) keeps this loop
+        // inside the IRQ context forever (the WT4 collapse shape).
+        if restart_count >= MAX_SOFTIRQ_RESTART
+            || crate::drivers::timer::read_time().saturating_sub(budget_t0)
+                >= MAX_SOFTIRQ_TIME_TICKS
+        {
+            break 'outer;
         }
     }
 

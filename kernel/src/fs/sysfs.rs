@@ -94,6 +94,8 @@ pub enum KType {
     Input,
     /// tty class devices
     Tty,
+    /// DRM class devices (card0/renderD128 under /sys/class/drm)
+    Drm,
     /// /sys/devices/system/cpu
     Cpu,
     /// /sys/module
@@ -122,6 +124,7 @@ impl KType {
             KType::Block => Some("block"),
             KType::Input => Some("input"),
             KType::Tty => Some("tty"),
+            KType::Drm => Some("drm"),
             KType::Cpu => Some("cpu"),
             KType::Module => Some("module"),
             KType::Kernel => Some("kernel"),
@@ -766,12 +769,122 @@ pub fn unregister_block_disk(name: &str, major: u32, minor: u32) -> u64 {
     uevent_send_full(&devpath, "remove", "block", &extra)
 }
 
-/// Register an input event node under /sys/class/input/<name> (+ the
-/// /sys/dev/char/<maj:min> mapping) and broadcast the "add" uevent.
+/// Registration data for one evdev event node and its input_dev parent —
+/// the two-kobject layout every Linux input device has:
 ///
-/// DEVNAME is "input/<name>" — the node path relative to /dev — exactly
-/// what udev/mdev need to create /dev/input/event<N>.
-pub fn register_input_event(name: &str, major: u32, minor: u32) -> u64 {
+/// ```text
+/// /sys/class/input/inputN                (input_dev: uevent carries
+///                                         PRODUCT/NAME/PROP/EV/KEY/...)
+/// /sys/class/input/inputN/eventM         (char node: uevent carries
+///                                         MAJOR/MINOR/DEVNAME)
+/// /sys/class/input/eventM       -> link  ../../devices/virtual/input/inputN/eventM
+/// /sys/dev/char/<maj:min>      -> link  ../../devices/virtual/input/inputN/eventM
+/// ```
+///
+/// The canonical DEVPATH spelling is `/devices/virtual/input/inputN/...`
+/// (Linux parity); it resolves through the `/sys/devices/virtual ->
+/// ../../class` compat link onto the real kobject dirs. Both spellings
+/// must work because consumers mix them: OH's libudev shim resolves
+/// `/sys/dev/char/<maj:min>` readlink and then stats
+/// `<resolved>/uevent`, while udevd/mdev walk `/sys/class/input`.
+///
+/// The capability bitmap strings MUST come from the same bitmaps the
+/// driver serves through EVIOCGBIT — libinput computes ID_INPUT_KEYBOARD
+/// / ID_INPUT_MOUSE / ID_INPUT_TOUCHSCREEN tags from these uevent lines
+/// (via OH's libudev shim) and cross-checks them against the ioctl caps.
+#[derive(Debug, Clone)]
+pub struct InputEventReg {
+    /// input_dev kobject name ("input0")
+    pub input_name: String,
+    /// event node name ("event0")
+    pub event_name: String,
+    pub major: u32,
+    pub minor: u32,
+    /// input device name ("VirtIO Keyboard") — NAME= env + name attr
+    pub dev_name: String,
+    pub bustype: u32,
+    pub vendor: u32,
+    pub product: u32,
+    pub version: u32,
+    /// EV= bitmap string (Linux input_print_bitmap format: space-separated
+    /// lowercase-hex 64-bit words, most-significant first)
+    pub ev: String,
+    /// KEY= bitmap string, empty → line omitted (type not supported)
+    pub key: String,
+    /// REL= bitmap string, empty → omitted
+    pub rel: String,
+    /// ABS= bitmap string, empty → omitted
+    pub abs: String,
+}
+
+impl InputEventReg {
+    /// The Linux `input_dev_uevent()` environment block for the input_dev
+    /// kobject (PRODUCT/NAME/PROP/EV/KEY/REL/ABS in kernel emit order).
+    fn dev_env(&self) -> Vec<(String, String)> {
+        let mut env: Vec<(String, String)> = Vec::new();
+        env.push((
+            String::from("PRODUCT"),
+            format!("{:x}/{:x}/{:x}/{:x}", self.bustype, self.vendor, self.product, self.version),
+        ));
+        // Linux quotes NAME in the uevent environment (NAME="%s").
+        env.push((String::from("NAME"), format!("\"{}\"", self.dev_name)));
+        env.push((String::from("PROP"), String::from("0")));
+        env.push((String::from("EV"), self.ev.clone()));
+        if !self.key.is_empty() {
+            env.push((String::from("KEY"), self.key.clone()));
+        }
+        if !self.rel.is_empty() {
+            env.push((String::from("REL"), self.rel.clone()));
+        }
+        if !self.abs.is_empty() {
+            env.push((String::from("ABS"), self.abs.clone()));
+        }
+        env
+    }
+}
+
+/// A uevent attribute whose environment is a fixed key=value set (the
+/// input_dev kobject: PRODUCT/NAME/PROP/EV/...). Same read/write contract
+/// as `add_uevent_attr` — read returns the env block, write of
+/// add/remove/change re-broadcasts it on the netlink socket.
+fn add_env_uevent_attr(dev: &Arc<KObject>, devpath: &str, env: Vec<(String, String)>) {
+    let env_show = env.clone();
+    let devpath = String::from(devpath);
+    attr_rw(
+        dev,
+        "uevent",
+        move || {
+            let mut out = String::new();
+            for (k, v) in env_show.iter() {
+                out.push_str(k);
+                out.push('=');
+                out.push_str(v);
+                out.push('\n');
+            }
+            out.into_bytes()
+        },
+        move |buf| {
+            let action = match parse_uevent_action(buf) {
+                Some(a) => a,
+                None => return errno::Errno::InvalidArgument.as_neg_i32(),
+            };
+            let extra: Vec<(&str, &str)> =
+                env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+            uevent_send_full(&devpath, action, "input", &extra);
+            0
+        },
+    );
+}
+
+/// Register an input_dev + event node pair (see `InputEventReg`) and
+/// broadcast both "add" uevents — the input_dev registration event (with
+/// PRODUCT/NAME/EV/KEY/... like Linux `input_register_device()`) followed
+/// by the event node event (MAJOR/MINOR/DEVNAME like Linux `device_add()`
+/// on the evdev cdev).
+///
+/// Returns the uevent SEQNUM of the event-node "add" (0 when sysfs is not
+/// up or the pair is already registered).
+pub fn register_input_event(reg: &InputEventReg) -> u64 {
     if sysfs_root().is_none() {
         return 0;
     }
@@ -782,58 +895,260 @@ pub fn register_input_event(name: &str, major: u32, minor: u32) -> u64 {
             None => return 0,
         },
     };
-    if class_input.find_child(name.as_bytes()).is_some() {
+    if class_input.find_child(reg.event_name.as_bytes()).is_some() {
         return 0; // already registered
     }
 
-    let dev = mk_dir(&class_input, name, KType::Input);
-    *dev.devno.lock() = Some((major, minor));
-    *dev.devname.lock() = Some(format!("input/{}", name));
+    // ---- input_dev kobject (/sys/class/input/inputN) ----
+    let input_dev = mk_dir(&class_input, &reg.input_name, KType::Input);
 
-    attr_ro(&dev, "dev", move || format!("{}:{}\n", major, minor).into_bytes());
-    add_uevent_attr(&dev);
+    let dev_name = reg.dev_name.clone();
+    attr_ro(&input_dev, "name", move || {
+        let mut v = dev_name.as_bytes().to_vec();
+        v.push(b'\n');
+        v
+    });
 
-    // /sys/dev/char/<maj:min> → ../../../class/input/<name>
+    // id/{bustype,vendor,product,version} — %04x like Linux input_dev attrs.
+    let id = mk_dir(&input_dev, "id", KType::Generic);
+    for (nm, val) in [
+        ("bustype", reg.bustype),
+        ("vendor", reg.vendor),
+        ("product", reg.product),
+        ("version", reg.version),
+    ] {
+        let v = val;
+        attr_ro(&id, nm, move || format!("{:04x}\n", v).into_bytes());
+    }
+
+    // capabilities/{ev,key,rel,abs} — same bitmap strings as the uevent env.
+    let caps = mk_dir(&input_dev, "capabilities", KType::Generic);
+    for (nm, s) in [
+        ("ev", &reg.ev),
+        ("key", &reg.key),
+        ("rel", &reg.rel),
+        ("abs", &reg.abs),
+    ] {
+        let val = s.clone();
+        attr_ro(&caps, nm, move || {
+            if val.is_empty() {
+                Vec::new()
+            } else {
+                let mut v = val.as_bytes().to_vec();
+                v.push(b'\n');
+                v
+            }
+        });
+    }
+
+    // subsystem link: resolves to /sys/class/input (basename "input", the
+    // value GetSubsystem()-style consumers take after the last '/').
+    mk_link(&input_dev, "subsystem", "../../../class/input");
+
+    let devpath_dev = format!("/devices/virtual/input/{}", reg.input_name);
+    let dev_env = reg.dev_env();
+    add_env_uevent_attr(&input_dev, &devpath_dev, dev_env.clone());
+
+    // ---- event node kobject (/sys/class/input/inputN/eventM) ----
+    let evnode = mk_dir(&input_dev, &reg.event_name, KType::Input);
+    *evnode.devno.lock() = Some((reg.major, reg.minor));
+    *evnode.devname.lock() = Some(format!("input/{}", reg.event_name));
+
+    let ev_major = reg.major;
+    let ev_minor = reg.minor;
+    attr_ro(&evnode, "dev", move || format!("{}:{}\n", ev_major, ev_minor).into_bytes());
+    add_uevent_attr(&evnode);
+    mk_link(&evnode, "subsystem", "../../../../class/input");
+
+    // ---- links: /sys/class/input/eventM and /sys/dev/char/<maj:min> ----
+    let target = format!("../../devices/virtual/input/{}/{}", reg.input_name, reg.event_name);
+    mk_link(&class_input, &reg.event_name, &target);
     if let Some(dev_char) = lookup_path("dev/char") {
         mk_link(
             &dev_char,
-            &format!("{}:{}", major, minor),
-            &format!("../../../class/input/{}", name),
+            &format!("{}:{}", reg.major, reg.minor),
+            &format!("../../devices/virtual/input/{}/{}", reg.input_name, reg.event_name),
         );
     }
 
-    let devpath = dev.path();
-    let devname = format!("input/{}", name);
-    let maj = format!("{}", major);
-    let min = format!("{}", minor);
+    // ---- "add" uevents: input_dev first, event node second ----
+    let extra_env: Vec<(&str, &str)> =
+        dev_env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
+    uevent_send_full(&devpath_dev, "add", "input", &extra_env);
+
+    let devpath_ev = format!("{}/{}", devpath_dev, reg.event_name);
+    let maj = format!("{}", reg.major);
+    let min = format!("{}", reg.minor);
+    let devname = format!("input/{}", reg.event_name);
     let extra: [(&str, &str); 3] = [
         ("MAJOR", maj.as_str()),
         ("MINOR", min.as_str()),
         ("DEVNAME", devname.as_str()),
     ];
-    uevent_send_full(&devpath, "add", "input", &extra)
+    uevent_send_full(&devpath_ev, "add", "input", &extra)
 }
 
-/// Unregister an input event node (drop tree entries, broadcast "remove").
-/// (No evdev removal path exists yet — kept for device_del bring-up.)
+/// Unregister an input event node pair (drop tree entries, broadcast
+/// "remove"). (No evdev removal path exists yet — kept for device_del
+/// bring-up.)
 #[allow(dead_code)]
-pub fn unregister_input_event(name: &str, major: u32, minor: u32) -> u64 {
+pub fn unregister_input_event(reg: &InputEventReg) -> u64 {
     if let Some(class_input) = lookup_path("class/input") {
-        class_input.remove_child(name);
+        class_input.remove_child(&reg.event_name);
+        class_input.remove_child(&reg.input_name);
     }
     if let Some(dev_char) = lookup_path("dev/char") {
-        dev_char.remove_child(&format!("{}:{}", major, minor));
+        dev_char.remove_child(&format!("{}:{}", reg.major, reg.minor));
     }
-    let devpath = format!("/class/input/{}", name);
-    let devname = format!("input/{}", name);
-    let maj = format!("{}", major);
-    let min = format!("{}", minor);
+    let devpath_ev = format!("/devices/virtual/input/{}/{}", reg.input_name, reg.event_name);
+    let devname = format!("input/{}", reg.event_name);
+    let maj = format!("{}", reg.major);
+    let min = format!("{}", reg.minor);
     let extra: [(&str, &str); 3] = [
         ("MAJOR", maj.as_str()),
         ("MINOR", min.as_str()),
         ("DEVNAME", devname.as_str()),
     ];
-    uevent_send_full(&devpath, "remove", "input", &extra)
+    uevent_send_full(&devpath_ev, "remove", "input", &extra)
+}
+
+/// Register the virtio-gpu DRM class entries for the PCI function at
+/// `slot_name` (Linux PCI_SLOT_NAME spelling, e.g. "0000:00:04.0").
+///
+/// Everything here exists for libdrm + the Mesa gbm/EGL loader in the OH
+/// image (verified against the string tables of the image's
+/// /vendor/lib64/chipsetsdk/{libgbm.so,libEGL.so} and
+/// /system/lib64/chipset-sdk/libdrm.so):
+///
+/// ```text
+/// /sys/devices/pci0000:00/<slot>/vendor             "0x1af4\n"
+/// /sys/devices/pci0000:00/<slot>/device             "0x1050\n"
+/// /sys/devices/pci0000:00/<slot>/subsystem_vendor   "0x1af4\n"
+/// /sys/devices/pci0000:00/<slot>/subsystem_device   "0x1100\n"
+/// /sys/devices/pci0000:00/<slot>/subsystem          -> ../../../bus/pci
+/// /sys/devices/pci0000:00/<slot>/drm/card0          (uevent MAJOR=226 MINOR=0 DEVNAME=dri/card0)
+/// /sys/devices/pci0000:00/<slot>/drm/renderD128     (uevent MAJOR=226 MINOR=128 ...)
+/// /sys/class/drm/card0                -> ../../devices/pci0000:00/<slot>/drm/card0
+/// /sys/class/drm/renderD128           -> ../../devices/pci0000:00/<slot>/drm/renderD128
+/// /sys/dev/char/226:0                 -> ../../devices/pci0000:00/<slot>/drm/card0
+/// /sys/dev/char/226:128               -> ../../devices/pci0000:00/<slot>/drm/renderD128
+/// /sys/bus/pci/devices/<slot>         -> ../../../devices/pci0000:00/<slot>
+/// ```
+///
+/// drmGetDevice(fd) readlinks /sys/dev/char/226:<minor>, strips the
+/// trailing node component to find the PCI function, reads its
+/// subsystem/vendor/device ids, and enumerates <function>/drm/ for the
+/// sibling node names. gbm_create_device() then maps the kernel driver
+/// name (DRM_IOCTL_VERSION — "virtio_gpu" on the reference kernel) onto
+/// virtio_gpu_dri.so with a kms_swrast fallback. Without this tree the
+/// whole chain dies at the first readlink and no DRM ioctl beyond
+/// VERSION is ever issued — exactly the u1/b155 behavior (one card0
+/// open, then silence).
+pub fn register_drm_device(slot_name: &str) {
+    if sysfs_root().is_none() {
+        return;
+    }
+    // Idempotence: a second init pass must not duplicate the nodes.
+    if lookup_path(&format!("class/drm/card0")).is_some() {
+        return;
+    }
+
+    let devices = match lookup_path("devices") {
+        Some(d) => d,
+        None => return,
+    };
+
+    // ---- PCI root + function directory ----
+    let pci_root = match lookup_path("devices/pci0000:00") {
+        Some(d) => d,
+        None => mk_dir(&devices, "pci0000:00", KType::Generic),
+    };
+    let func = mk_dir(&pci_root, slot_name, KType::Generic);
+    for (nm, v) in [
+        ("vendor", "0x1af4\n"),            // Red Hat/virtio vendor id
+        ("device", "0x1050\n"),            // virtio-gpu modern device id
+        ("subsystem_vendor", "0x1af4\n"),  // QEMU default subsystem vendor
+        ("subsystem_device", "0x1100\n"),  // QEMU generic subsystem device
+        ("class", "0x030000\n"),           // PCI_CLASS_DISPLAY_VGA
+        ("revision", "0x00\n"),
+    ] {
+        let val = String::from(v);
+        attr_ro(&func, nm, move || val.as_bytes().to_vec());
+    }
+    // /sys/devices/pci0000:00/<slot>/subsystem -> ../../../bus/pci
+    mk_link(&func, "subsystem", "../../../bus/pci");
+    // Static PCI uevent (device_add on a PCI function).
+    add_env_uevent_attr(
+        &func,
+        &format!("/devices/pci0000:00/{}", slot_name),
+        vec![
+            (String::from("DRIVER"), String::from("virtio-pci")),
+            (String::from("PCI_SLOT_NAME"), String::from(slot_name)),
+            (String::from("PCI_CLASS"), String::from("30000")),
+            (
+                String::from("MODALIAS"),
+                format!("pci:v00001AF4d00001050sv00001AF4sd00001100bc03sc00i00"),
+            ),
+        ],
+    );
+
+    // ---- drm/ minor nodes on the function ----
+    let drm_dir = mk_dir(&func, "drm", KType::Drm);
+    for (name, minor, devname) in [
+        ("card0", 0u32, "dri/card0"),
+        ("renderD128", 128u32, "dri/renderD128"),
+    ] {
+        let node = mk_dir(&drm_dir, name, KType::Drm);
+        *node.devno.lock() = Some((crate::drivers::drm::DRM_MAJOR_NUM, minor));
+        *node.devname.lock() = Some(String::from(devname));
+        let (maj, min) = (crate::drivers::drm::DRM_MAJOR_NUM, minor);
+        attr_ro(&node, "dev", move || format!("{}:{}\n", maj, min).into_bytes());
+        // <node>/device -> the PCI function (libdrm's legacy
+        // "<node-path>/device" walk).
+        mk_link(&node, "device", "../..");
+        // <node>/subsystem -> the drm class dir.
+        mk_link(&node, "subsystem", "../../../../../class/drm");
+        add_uevent_attr(&node);
+    }
+
+    // ---- class + dev/char + bus links ----
+    let class_drm = match lookup_path("class/drm") {
+        Some(d) => d,
+        None => return,
+    };
+    mk_link(&class_drm, "card0", &format!("../../devices/pci0000:00/{}/drm/card0", slot_name));
+    mk_link(&class_drm, "renderD128", &format!("../../devices/pci0000:00/{}/drm/renderD128", slot_name));
+
+    if let Some(dev_char) = lookup_path("dev/char") {
+        mk_link(&dev_char, "226:0", &format!("../../devices/pci0000:00/{}/drm/card0", slot_name));
+        mk_link(
+            &dev_char,
+            "226:128",
+            &format!("../../devices/pci0000:00/{}/drm/renderD128", slot_name),
+        );
+    }
+    if let Some(pci_devices) = lookup_path("bus/pci/devices") {
+        mk_link(&pci_devices, slot_name, &format!("../../../devices/pci0000:00/{}", slot_name));
+    }
+
+    // Broadcast the node "add" uevents (coldboot parity; the events are
+    // informational for this boot since the nodes predate userland).
+    for (minor, devname) in [(0u32, "dri/card0"), (128u32, "dri/renderD128")] {
+        let maj = format!("{}", crate::drivers::drm::DRM_MAJOR_NUM);
+        let min = format!("{}", minor);
+        let dn = String::from(devname);
+        let extra: [(&str, &str); 3] = [
+            ("MAJOR", maj.as_str()),
+            ("MINOR", min.as_str()),
+            ("DEVNAME", dn.as_str()),
+        ];
+        uevent_send_full(
+            &format!("/devices/pci0000:00/{}/drm/{}", slot_name, devname),
+            "add",
+            "drm",
+            &extra,
+        );
+    }
 }
 
 /// Build a /sys/class/tty device directory.
@@ -900,9 +1215,15 @@ fn build_tree() -> Arc<KObject> {
     // from PCI rescan hotplug). virtio-blk conventionally uses major 254.
     let _block = mk_dir(&class, "block", KType::Block);
 
-    // /sys/class/input — skeleton; event0/event1 register via
+    // /sys/class/input — skeleton; the inputN/eventN pairs register via
     // register_input_event() when evdev initializes.
     let _input = mk_dir(&class, "input", KType::Input);
+
+    // /sys/class/drm — skeleton (version file is static); the
+    // card0/renderD128 entries register via register_drm_device() when
+    // the virtio-gpu DRM nodes come up.
+    let drm_class = mk_dir(&class, "drm", KType::Drm);
+    attr_ro(&drm_class, "version", move || b"drm 1.1.0 20060810\n".to_vec());
 
     let tty = mk_dir(&class, "tty", KType::Tty);
     add_tty_device(&tty, "console", 5, 1);
@@ -988,6 +1309,9 @@ fn build_tree() -> Arc<KObject> {
 
     // ---------------- /sys/kernel ----------------
     let kernel = mk_dir(&root, "kernel", KType::Kernel);
+    // /sys/kernel/debug is the debugfs mount point (Linux: sysfs owns
+    // the directory, debugfs is mounted over it).
+    mk_dir(&kernel, "debug", KType::Kernel);
     attr_ro(&kernel, "uevent_seqnum", move || {
         format!("{}\n", UEVENT_SEQNUM.load(Ordering::Relaxed)).into_bytes()
     });
@@ -1011,7 +1335,19 @@ fn build_tree() -> Arc<KObject> {
     }
 
     // ---------------- /sys/fs, /sys/firmware, /sys/hypervisor ----------
-    mk_dir(&root, "fs", KType::Fs);
+    // /sys/fs needs the standard mountpoint skeleton (selinux, bpf,
+    // cgroup, pstore). On Linux with SELinux built in the kernel itself
+    // creates and mounts /sys/fs/selinux at boot (init_selinux_fs), so
+    // OH first-stage init's mount("selinuxfs", "/sys/fs/selinux") never
+    // sees ENOENT; without the dir our mount answer is ENOENT and the
+    // whole selinuxfs path (samgr's SA-permission gate) stays dead.
+    // Same story for init.virt.cfg's bpf/cgroup/pstore mounts (they
+    // warn-only, but quiet is better).
+    let sys_fs = mk_dir(&root, "fs", KType::Fs);
+    mk_dir(&sys_fs, "selinux", KType::Fs);
+    mk_dir(&sys_fs, "bpf", KType::Fs);
+    mk_dir(&sys_fs, "cgroup", KType::Fs);
+    mk_dir(&sys_fs, "pstore", KType::Fs);
     mk_dir(&root, "firmware", KType::Firmware);
     mk_dir(&root, "hypervisor", KType::Hypervisor);
 
@@ -1078,6 +1414,32 @@ fn build_tree() -> Arc<KObject> {
     mk_dir(&bus, "platform", KType::Generic);
     let _virtio_bus = mk_dir(&bus, "virtio", KType::Generic);
     let _block_bus = mk_dir(&bus, "block", KType::Block);
+    // /sys/bus/pci/devices — the per-function symlinks libdrm's
+    // drmGetDevice falls back to when /sys/dev/char is not usable
+    // ("/sys/bus/pci/devices/%04x:%02x:%02x.%d" is in the image's
+    // libdrm.so string table).
+    let _pci_bus_devices = mk_dir(&pci_bus, "devices", KType::Generic);
+
+    // ---------------- /sys/bus/usb ----------------
+    // Rux has no USB host-controller driver, but Linux's usb core
+    // registers the "usb" bus type unconditionally at init
+    // (bus_register creates bus/<name>/{devices,drivers} for every
+    // bus), so /sys/bus/usb/devices exists — EMPTY — even on hosts
+    // with zero USB controllers. OH's usb DDK PnP manager depends on
+    // that shape: DdkDevMgrInit -> DdkDevMgrScanSysfs opendir()s
+    // SYSFS_DEVICES_DIR ("/sys/bus/usb/devices") and treats ENOENT as
+    // HDF_FAILURE, which aborts UsbPnpManagerInit BEFORE
+    // DdkListenerMgrInit runs; the listener list head then stays
+    // NULL-zeroed and the next DdkListenerMgrAdd (usb_manager
+    // registering its event listener) walks NULL -> SIGSEGV ->
+    // devhost_usb crash loop (sc87: rip libusb_pnp_manager+0x15bac,
+    // 'mov rax,[rbx]' with rbx=0). An empty dir is exact parity for
+    // a controller-less host: the scan skips 'usb1' (non-digit
+    // prefix) and '1-0:1.0' (':' entries), so Linux also enumerates
+    // zero devices and init succeeds.
+    let usb_bus = mk_dir(&bus, "usb", KType::Generic);
+    let _usb_bus_devices = mk_dir(&usb_bus, "devices", KType::Generic);
+    let _usb_bus_drivers = mk_dir(&usb_bus, "drivers", KType::Generic);
 
     root
 }

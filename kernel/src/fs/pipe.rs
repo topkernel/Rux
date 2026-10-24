@@ -372,6 +372,22 @@ impl Pipe {
         self.write_closed.load(Ordering::Acquire) == 1
     }
 
+    /// sc97 KILLDUMP support: flow-control snapshot for the
+    /// wedged-writer forensics — (fill_bytes, capacity_bytes,
+    /// read_closed, write_closed). A writer parked with fill ==
+    /// capacity names a consumer that stopped draining; fill < capacity
+    /// names a lost-wakeup/kernel-side wedge instead.
+    pub fn diag_snapshot(&self) -> (usize, usize, bool, bool) {
+        let fill = self.buffer.lock().available_read();
+        let cap = self.buffer.lock().capacity();
+        (
+            fill,
+            cap,
+            self.is_read_closed(),
+            self.is_write_closed(),
+        )
+    }
+
     /// Get read wait queue
     pub fn read_queue(&self) -> &WaitQueueHead {
         &self.read_queue

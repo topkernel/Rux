@@ -64,6 +64,51 @@ pub struct DevfsEntry {
     pub gid: AtomicU32,
     /// File contents (regular files only — devtmpfs file storage)
     pub data: Spinlock<alloc::vec::Vec<u8>>,
+    /// Authoritative file size in bytes (regular files). devfs_iget
+    /// builds a FRESH Inode per lookup and Inode.size is a plain field,
+    /// so a size change through one fd's inode (ftruncate/write) was
+    /// invisible to every OTHER open's inode — a mapper's inode kept its
+    /// lookup-time snapshot and the mmap EOF gate SIGBUSed mapped pages
+    /// of a file that had long since been ftruncated bigger (b74: pid 1
+    /// SIGBUS at file_off 0, eff_size 0, while the TRUNC trace showed
+    /// 0 -> 10MB minutes earlier — the OH param workspaces mmap across
+    /// separate opens). Mode/uid/gid already live on the entry for the
+    /// same reason; size joins them.
+    pub size: core::sync::atomic::AtomicU64,
+    /// Shared page backing for MAP_SHARED mmaps of this regular file
+    /// (see SharedFilePages). None until the first shared mapping
+    /// fault; regular files only.
+    pub shared_pages: Spinlock<Option<SharedFilePages>>,
+}
+
+/// True shared-memory backing for a devfs regular file (devtmpfs
+/// semantics — Linux tmpfs MAP_SHARED is coherent across processes).
+///
+/// OH's parameter workspaces (/dev/__parameters__/{param_sec_dac,
+/// param_selinux,u:object_r:default_param:s0,...}) are plain files the
+/// init process creates (open O_CREAT + ftruncate + mmap MAP_SHARED)
+/// and then fills by PLAIN MEMCPY — no msync (WriteParamToSharedMem in
+/// the selinux adapter, the param trie builders). Every other process
+/// mmaps the same file read-only and expects to see those writes
+/// instantly. The generic FileBacked demand-fault path fills each
+/// process's PRIVATE page from read_at, so init's memcpy stayed in
+/// init's private pages: clients faulted in the empty file, every
+/// param label lookup failed ("Can not get security label"), every
+/// labeled param set was forbidden — including the bootevent.* family
+/// init's boot graph waits on, which froze the boot before the UI
+/// stack (SA 5100 sceneboard) ever started (b70 capture: bootanimation
+/// + composer_host spin "Waiting for SA:5100" forever).
+///
+/// Fix: once any MAP_SHARED mapping of the file exists, move the
+/// canonical contents into a stable array of physical pages; shared
+/// faults map THOSE pages directly (read-write per prot) into every
+/// mapper, making the mapping coherent by construction. The read/
+/// write/read_at/write_at paths serve the same pages while active.
+pub struct SharedFilePages {
+    /// Physical frame numbers, one per page of the file (divceil(size)).
+    pub pfns: alloc::vec::Vec<usize>,
+    /// Logical size in bytes (matches inode size while active).
+    pub size: usize,
 }
 
 impl DevfsEntry {
@@ -78,6 +123,8 @@ impl DevfsEntry {
             uid: AtomicU32::new(0),
             gid: AtomicU32::new(0),
             data: Spinlock::new(alloc::vec::Vec::new()),
+            size: core::sync::atomic::AtomicU64::new(0),
+            shared_pages: Spinlock::new(None),
         }
     }
 
@@ -92,6 +139,8 @@ impl DevfsEntry {
             uid: AtomicU32::new(0),
             gid: AtomicU32::new(0),
             data: Spinlock::new(alloc::vec::Vec::new()),
+            size: core::sync::atomic::AtomicU64::new(0),
+            shared_pages: Spinlock::new(None),
         }
     }
 
@@ -106,6 +155,8 @@ impl DevfsEntry {
             uid: AtomicU32::new(0),
             gid: AtomicU32::new(0),
             data: Spinlock::new(alloc::vec::Vec::new()),
+            size: core::sync::atomic::AtomicU64::new(0),
+            shared_pages: Spinlock::new(None),
         }
     }
 
@@ -120,6 +171,8 @@ impl DevfsEntry {
             uid: AtomicU32::new(0),
             gid: AtomicU32::new(0),
             data: Spinlock::new(alloc::vec::Vec::new()),
+            size: core::sync::atomic::AtomicU64::new(0),
+            shared_pages: Spinlock::new(None),
         }
     }
 
@@ -136,6 +189,8 @@ impl DevfsEntry {
             uid: AtomicU32::new(0),
             gid: AtomicU32::new(0),
             data: Spinlock::new(alloc::vec::Vec::new()),
+            size: core::sync::atomic::AtomicU64::new(0),
+            shared_pages: Spinlock::new(None),
         }
     }
 
@@ -365,35 +420,17 @@ static RANDDEV_OPS: crate::fs::file::FileOps = crate::fs::file::FileOps {
     read_at: None,
 };
 
-/// /dev/kmsg — kernel message sink (OH Phase 1b: OH's init and early
-/// services write boot markers here after mknod'ing it on their tmpfs
-/// /dev). Writes append to the kernel log (prefix-style passthrough to
-/// printk); reads return EOF (no readable record ring yet — consumers
-/// use the serial console); always writable, never readable-ready.
-fn kmsgdev_write(_file: &crate::fs::file::File, buf: &[u8]) -> isize {
-    // Print as one line chunk; control chars other than \n are passed
-    // through unchanged by printk's escapes.
-    crate::pr_info!("[kmsg] {}", core::str::from_utf8(buf).unwrap_or("<binary>"));
-    buf.len() as isize
-}
-
-fn kmsgdev_read(_file: &crate::fs::file::File, _buf: &mut [u8]) -> isize {
-    0 // EOF — no record ring to drain
-}
-
-fn kmsgdev_poll(_file: &crate::fs::file::File, _events: u16) -> u16 {
-    use crate::syscall::misc::poll_events::*;
-    POLLERR | POLLOUT | POLLWRNORM // not readable; writes never block
-}
-
-static KMSGDEV_OPS: crate::fs::file::FileOps = crate::fs::file::FileOps {
-    read: Some(kmsgdev_read),
-    write: Some(kmsgdev_write),
-    lseek: None,
-    close: None,
-    poll: Some(kmsgdev_poll),
-    read_at: None,
-};
+/// /dev/kmsg is owned by printk.rs's record-ring implementation
+/// (KMSG_OPS): blocking reads in the `prio,seq,timestamp_us,-;text`
+/// record format, lseek positioning, poll that reports POLLIN only when
+/// a record newer than the fd position exists, and a passthrough write.
+/// The old EOF-read + POLLERR stub registered here FIRST, so
+/// printk::init_kmsg_device's later registration always lost the
+/// duplicate check and every kmsg consumer (hilogd's kmsg parser thread)
+/// read-EOF-looped at 100% CPU on one of two vCPUs for the whole OH
+/// boot. Registering the real ops here (and letting the later duplicate
+/// registration in init_kmsg_device fail harmlessly) fixes both the spin
+/// and gives userspace actual kernel-log ingestion.
 
 /// virtio-blk major on this platform (matches sysfs /sys/class/block/vda).
 pub const VIRTIO_BLK_MAJOR: u32 = 254;
@@ -433,7 +470,7 @@ fn devtmpfs_populate() {
     let _ = registry::register_char_device(DevNo::new(MEM_MAJOR, 7), &FULLDEV_OPS);
     let _ = registry::register_char_device(crate::fs::dev_t::DEV_RANDOM, &RANDDEV_OPS);
     let _ = registry::register_char_device(crate::fs::dev_t::DEV_URANDOM, &RANDDEV_OPS);
-    let _ = registry::register_char_device(crate::fs::dev_t::DEV_KMSG, &KMSGDEV_OPS);
+    let _ = registry::register_char_device(crate::fs::dev_t::DEV_KMSG, &crate::printk::KMSG_OPS);
 
     // --- OpenHarmony Phase 2 device nodes (port plan §6 items 2/3):
     // /dev/ashmem and /dev/access_token_id. Registered here (NOT via
@@ -447,6 +484,13 @@ fn devtmpfs_populate() {
     let _ = registry::register_char_device(
         crate::drivers::access_tokenid::DEV_ACCESS_TOKENID,
         &crate::drivers::access_tokenid::TOKENID_OPS,
+    );
+    // /dev/watchdog (misc 10:130): OH watchdog_service (init_watchdog.c)
+    // stats/opens it at boot; without the node the service waits 10s and
+    // dies (b151 pid 306). Non-firing softdog — see drivers/watchdog.rs.
+    let _ = registry::register_char_device(
+        crate::drivers::watchdog::DEV_WATCHDOG,
+        &crate::drivers::watchdog::WATCHDOG_OPS,
     );
 
     let mut root = DEVFS_ROOT.lock_irqsave();
@@ -468,11 +512,16 @@ fn devtmpfs_populate() {
         ("urandom", crate::fs::dev_t::DEV_URANDOM, 0o666),
         ("kmsg", crate::fs::dev_t::DEV_KMSG, 0o600),
         ("ashmem", crate::drivers::ashmem::DEV_ASHMEM, 0o666),
-        (
-            "access_token_id",
-            crate::drivers::access_tokenid::DEV_ACCESS_TOKENID,
-            0o666,
-        ),
+        ("watchdog", crate::drivers::watchdog::DEV_WATCHDOG, 0o666),
+        // NOTE: no "access_token_id" here — the node is registered below
+        // with the ipc access-token registry (single store). This batch
+        // inserts AFTER that registration, so a duplicate entry here
+        // shadowed the registry with the old drivers/access_tokenid
+        // per-task skeleton: init's SET_TOKENID writes landed in a store
+        // BINDER_GET_SENDER_INFO never reads (senders decoded as
+        // TOKEN_SHELL, samgr denied every AddSystemAbility — b98-b120;
+        // see docs/development/oh-linux-vs-rux-boot.md on
+        // feature/oh-linux-ref).
     ];
     // Loop family: /dev/loop-control (misc) + /dev/loop0..7 (BLOCK
     // majors) — LTP tst_acquire_device and losetup need both (the loop
@@ -519,6 +568,24 @@ fn devtmpfs_populate() {
             )),
         );
     }
+
+    // /dev/access_token_id (OH access-token registry): init's service
+    // children store their native token id here (SET_TOKENID between fork
+    // and exec) and libbinder reads it back on every binder open; the
+    // binder driver consults it for BINDER_GET_SENDER_INFO. Mode 0666:
+    // the SET path permission-checks uid internally (root/3020).
+    let _ = registry::register_char_device(
+        crate::ipc::access_token::DEV_ACCESS_TOKEN,
+        &crate::ipc::access_token::ACCESS_TOKEN_OPS,
+    );
+    children.insert(
+        String::from("access_token_id"),
+        Arc::new(DevfsEntry::new_char_device_with_mode(
+            "access_token_id",
+            crate::ipc::access_token::DEV_ACCESS_TOKEN,
+            0o020000 | 0o666,
+        )),
+    );
 
     for (name, devno, mode) in char_nodes.iter() {
         children.insert(
@@ -671,6 +738,34 @@ pub fn init() {
         .children
         .lock_irqsave()
         .insert(String::from("null"), null_entry);
+
+    // sc136 (Session Q): OH's code-protection devices, absent stubs.
+    // Every forked app child opens /dev/dec then /dev/xpm (O_RDWR|
+    // O_CLOEXEC) during engine init right before the dlopen cascade —
+    // on real OH these are the XPM ("executable protection manager",
+    // code-signature verification) misc devices. Their ENOENT is the
+    // first engine-init failure in the parked children's tails, while
+    // the WORKING appspawn children are native services that never
+    // load the ark engine — so the missing driver is a live suspect
+    // for why app children abort before their first pthread_create.
+    // Null-semantics stub nodes (write swallowed, read EOF) decide
+    // causality the same way the sc134 empty-DSO test did for the
+    // enhance-lib: if children park identically with the nodes
+    // present, XPM is exonerated; if they proceed, the driver needs a
+    // real implementation.
+    for (name, minor) in [("xpm", 240u32), ("dec", 241u32)] {
+        let dev = crate::fs::dev_t::DevNo::new(crate::fs::dev_t::MISC_MAJOR, minor);
+        let _ = registry::register_char_device(dev, &NULLDEV_OPS);
+        let entry = Arc::new(DevfsEntry::new_char_device_with_mode(
+            name,
+            dev,
+            0o666 | 0o020000, // S_IFCHR | rw-rw-rw-
+        ));
+        root_entry
+            .children
+            .lock_irqsave()
+            .insert(String::from(name), entry);
+    }
 
     // /dev/ptmx: every open allocates a new pty pair (fs/pty.rs ptmx_open).
     let ptmx_entry = Arc::new(DevfsEntry::new_char_device_with_mode(
@@ -1096,7 +1191,13 @@ unsafe fn devfs_iget(parent: &Inode, name: &[u8], _ino: Ino) -> Result<alloc::sy
     // independently of the BTreeMap entry. The refcount is incremented by
     // clone() and preserved by into_raw() (which doesn't decrement).
     if child.is_regular_file() {
-        inode.set_size(child.data.lock().len() as u64);
+        // Seed from the ENTRY-AUTHORITATIVE size (not data.len() at this
+        // instant — the same value, but the discipline is one store):
+        // every lookup builds a fresh Inode whose size field is a
+        // snapshot; later size changes through another fd's inode update
+        // entry.size, which devfs_reg_current_size serves to cross-open
+        // readers (the mmap EOF gate).
+        inode.set_size(child.size.load(Ordering::Acquire));
     }
     let child_arc = Arc::clone(&child);
     inode.private_data = Some(Arc::into_raw(child_arc) as *mut u8);
@@ -1199,6 +1300,22 @@ unsafe fn devfs_open(inode: &Inode, file: &crate::fs::File) -> i32 {
     }
     if entry.devno.major == crate::fs::pty::PTY_SLAVE_MAJOR {
         return crate::fs::pty::slave_open(file, entry.devno.minor);
+    }
+    // DRM node open trace (OH bring-up): the composer's first move is
+    // open("/dev/dri/card0"), the gralloc's is open("/dev/dri/renderD128")
+    // — neither produces hilog output, so this is the only on-serial
+    // visibility into their startup.
+    if entry.devno == crate::drivers::drm::DEV_DRM_CARD0
+        || entry.devno == crate::drivers::drm::DEV_DRM_RENDER
+    {
+        static DRM_OPENS: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+        let n = DRM_OPENS.fetch_add(1, Ordering::Relaxed);
+        crate::pr_warn!(
+            "drm: open {} (#{}) by pid {}",
+            entry.name,
+            n + 1,
+            crate::process::current_pid()
+        );
     }
     // evdev nodes: stash the DevNo in file.private_data — evdev's
     // read/poll dispatch on it (the hook the comments promised but no
@@ -1397,6 +1514,278 @@ unsafe fn devfs_create(dir: &Inode, name: &[u8], mode: InodeMode) -> Result<Arc<
 }
 
 /// Regular-file ops on devfs (devtmpfs file storage).
+// ==================== MAP_SHARED coherent backing ====================
+//
+// While `shared_pages` is Some it is the CANONICAL content store for the
+// file (entry.data is stale and ignored); read/write/read_at/write_at all
+// serve the shared pages so mapping stores and syscall IO stay coherent.
+
+/// Copy `n` bytes at `off` OUT of the shared backing (bounded by the
+/// backed size and the logical size). Returns bytes copied.
+///
+/// Grow (or create) the shared backing to at least `min_len` bytes,
+/// copying the canonical contents in. Returns the byte length now
+/// backed. Allocation failure returns what is already backed (possibly
+/// 0); the fault hook treats a short backing as "not shared" and the
+/// generic path serves the fault.
+fn shared_grow_locked(entry: &DevfsEntry, min_len: usize) -> usize {
+    let page = crate::mm::page::PAGE_SIZE as usize;
+    let mut guard = entry.shared_pages.lock_irqsave();
+    let cur = guard.as_ref().map(|sp| sp.size).unwrap_or(0);
+    if cur >= min_len {
+        return cur;
+    }
+    let npages = min_len.div_ceil(page);
+    let first_activation = guard.is_none();
+    let mut pfns: alloc::vec::Vec<usize> = match guard.as_ref() {
+        Some(sp) => sp.pfns.clone(),
+        None => alloc::vec::Vec::with_capacity(npages),
+    };
+    while pfns.len() < npages {
+        match crate::arch::mm::mm_ops::alloc_user_phys_page() {
+            Some(pa) => {
+                let kva = crate::arch::mm::phys_to_virt(
+                    crate::arch::mm::memory_layout::PhysAddr(pa),
+                )
+                .as_usize() as *mut u8;
+                // SAFETY: freshly allocated page, exclusively owned here.
+                unsafe { core::ptr::write_bytes(kva, 0, page) };
+                pfns.push((pa >> 12) as usize);
+            }
+            None => break,
+        }
+    }
+    if pfns.is_empty() {
+        return 0;
+    }
+    if first_activation {
+        // Seed the pages from the Vec store (front to back).
+        let snap: alloc::vec::Vec<u8> = entry.data.lock_irqsave().clone();
+        let mut off = 0usize;
+        while off < snap.len() {
+            let pi = off / page;
+            if pi >= pfns.len() {
+                break;
+            }
+            let kva = crate::arch::mm::phys_to_virt(
+                crate::arch::mm::memory_layout::PhysAddr((pfns[pi] as u64) << 12),
+            )
+            .as_usize() as *mut u8;
+            let in_page = off % page;
+            let chunk = core::cmp::min(page - in_page, snap.len() - off);
+            // SAFETY: kva is a live shared page; chunk is in-page.
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    snap[off..].as_ptr(),
+                    kva.add(in_page),
+                    chunk,
+                );
+            }
+            off += chunk;
+        }
+    }
+    let backed = pfns.len() * page;
+    *guard = Some(SharedFilePages { pfns, size: backed });
+    backed
+}
+
+/// Entry-authoritative CURRENT size of a devfs regular file, for
+/// cross-open readers (the mmap EOF gate in the page-fault path): the
+/// pinned vm_file's Inode.size is a snapshot from ITS open, and
+/// ftruncate/write through other fds update entry.size, not that
+/// snapshot — reading the entry gives Linux-tmpfs behavior (b74: pid 1
+/// SIGBUSed at file_off 0 because its mapper inode still said 0 after
+/// the workspace had been ftruncated to 10MB through the creating fd).
+/// None for non-devfs files.
+///
+/// DEVFS INODES ONLY. The page-fault path calls this for EVERY
+/// file-backed VMA fault, whatever the filesystem — and other
+/// filesystems store non-pointer values in inode.private_data
+/// (selinuxfs: a NODES table index, procfs: a pid). Treating those as
+/// `*const DevfsEntry` and touching `entry.entry_type` was the
+/// deterministic NULL-deref panic ~7 min into OH boots (badaddr 0xa7 =
+/// selinuxfs `status` idx 11 + offsetof(DevfsEntry, entry_type) 0x9c,
+/// in DevEntryType::eq ← is_regular_file ← this function, when
+/// composer_host/render_service's libselinux selinux_status_open()
+/// mmapped /sys/fs/selinux/status MAP_SHARED and faulted it). The
+/// fs_id + S_IFREG gate rejects every foreign inode BEFORE
+/// private_data is dereferenced; a NULL private_data is rejected too.
+pub fn devfs_reg_current_size(file: &crate::fs::File) -> Option<u64> {
+    // SAFETY: caller passes a valid File; only stable fields are read.
+    unsafe {
+        let inode = (*file.inode.get()).as_ref()?;
+        if inode.fs_id != crate::fs::inode::FS_ID_DEVFS
+            || !inode.mode.is_regular_file()
+        {
+            return None;
+        }
+        let ptr = inode.private_data?;
+        if ptr.is_null() {
+            return None;
+        }
+        let entry = &*(ptr as *const DevfsEntry);
+        Some(entry.size.load(Ordering::Acquire))
+    }
+}
+
+/// Shared-fault hook: the physical address of the page holding
+/// `file_off` for a MAP_SHARED mapping of this devfs regular file,
+/// activating/growing the shared backing on demand. None → the caller
+/// falls back to the generic private-page path.
+pub fn shared_fault_file_page(file: &crate::fs::File, file_off: usize) -> Option<u64> {
+    // SAFETY: fault-path caller passes the pinned vm_file; only the
+    // inode pointer field and its stable private_data are read.
+    let entry = unsafe {
+        let inode = (*file.inode.get()).as_ref()?;
+        // Same identity gate as devfs_reg_current_size: private_data is
+        // only a DevfsEntry pointer on devfs inodes (foreign filesystems
+        // store table indices/pids there — see that function's comment).
+        if inode.fs_id != crate::fs::inode::FS_ID_DEVFS
+            || !inode.mode.is_regular_file()
+        {
+            return None;
+        }
+        let ptr = inode.private_data?;
+        if ptr.is_null() {
+            return None;
+        }
+        &*(ptr as *const DevfsEntry)
+    };
+    let inode_size = unsafe {
+        (*file.inode.get()).as_ref().map(|i| i.get_size() as usize).unwrap_or(0)
+    };
+    // Entry-authoritative size: the mapper's inode snapshot may predate
+    // the ftruncate that sized the workspace (see devfs_reg_current_size).
+    let inode_size = inode_size.max(
+        devfs_reg_current_size(file).map(|s| s as usize).unwrap_or(0),
+    );
+    // The mmap-time EOF gate ran on the CURRENT inode size; the shared
+    // backing must cover at least that, plus this fault's page.
+    let need = core::cmp::max(inode_size, file_off + 1);
+    let backed = shared_grow_locked(entry, need);
+    if file_off >= backed {
+        return None;
+    }
+    let guard = entry.shared_pages.lock_irqsave();
+    let sp = guard.as_ref()?;
+    let idx = file_off / (crate::mm::page::PAGE_SIZE as usize);
+    let pfn = *sp.pfns.get(idx)?;
+    // b83 hunt: the selinux-trie walker reads the WRONG file's bytes at
+    // its mapping base — name which file each shared fault serves.
+    static SF_N: core::sync::atomic::AtomicUsize =
+        core::sync::atomic::AtomicUsize::new(0);
+    let n = SF_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    if n < 40 {
+        crate::pr_info!(
+            "sharedfault[{}] path {} off {:#x} -> pfn {:#x} (pid {})",
+            n,
+            file.path(),
+            file_off,
+            pfn,
+            unsafe { crate::process::current_pid() }
+        );
+    }
+    Some((pfn << 12) as u64)
+}
+
+/// Whether the file's regular devfs entry currently has an ACTIVE shared
+/// backing (read/write paths consult this — while active the backing is
+/// the canonical store, entry.data is stale).
+fn shared_entry_of(file: &crate::fs::File) -> Option<(&'static DevfsEntry, usize)> {
+    // SAFETY: caller passes a valid File; only stable inode fields are
+    // read. The entry is leaked-Arc-backed and outlives the file.
+    unsafe {
+        let inode = (*file.inode.get()).as_ref()?;
+        let ptr = inode.private_data?;
+        let entry = &*(ptr as *const DevfsEntry);
+        if !entry.is_regular_file() {
+            return None;
+        }
+        if entry.shared_pages.lock_irqsave().is_none() {
+            return None;
+        }
+        let size = inode.get_size() as usize;
+        Some((entry, size))
+    }
+}
+
+/// Copy `n` bytes at `off` OUT of the shared backing (bounded by the
+/// backed size and the logical size). Returns bytes copied.
+fn shared_read_off(entry: &DevfsEntry, logical: usize, off: usize, buf: &mut [u8]) -> usize {
+    let page = crate::mm::page::PAGE_SIZE as usize;
+    let guard = entry.shared_pages.lock_irqsave();
+    let Some(sp) = guard.as_ref() else { return 0 };
+    let limit = core::cmp::min(sp.size, logical);
+    let avail = limit.saturating_sub(off);
+    let n = buf.len().min(avail);
+    let mut done = 0usize;
+    while done < n {
+        let pi = (off + done) / page;
+        let Some(pfn) = sp.pfns.get(pi) else { break };
+        let kva = crate::arch::mm::phys_to_virt(
+            crate::arch::mm::memory_layout::PhysAddr(((*pfn as u64) << 12)),
+        )
+        .as_usize() as *mut u8;
+        let in_page = (off + done) % page;
+        let chunk = core::cmp::min(page - in_page, n - done);
+        // SAFETY: kva is a live shared page; the chunk is in-page and the
+        // destination slice is caller-valid.
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                kva.add(in_page) as *const u8,
+                buf.as_mut_ptr().add(done),
+                chunk,
+            );
+        }
+        done += chunk;
+    }
+    done
+}
+
+/// Write `buf` at `off` INTO the shared backing, growing it (and the
+/// inode size) when the write extends the file. Returns bytes written.
+fn shared_write_off(
+    entry: &DevfsEntry,
+    inode: &crate::fs::inode::Inode,
+    off: usize,
+    buf: &[u8],
+) -> usize {
+    let page = crate::mm::page::PAGE_SIZE as usize;
+    let need = off.saturating_add(buf.len());
+    let backed = shared_grow_locked(entry, need);
+    if backed < need {
+        return 0;
+    }
+    let guard = entry.shared_pages.lock_irqsave();
+    let Some(sp) = guard.as_ref() else { return 0 };
+    let mut done = 0usize;
+    while done < buf.len() {
+        let pi = (off + done) / page;
+        let Some(pfn) = sp.pfns.get(pi) else { break };
+        let kva = crate::arch::mm::phys_to_virt(
+            crate::arch::mm::memory_layout::PhysAddr(((*pfn as u64) << 12)),
+        )
+        .as_usize() as *mut u8;
+        let in_page = (off + done) % page;
+        let chunk = core::cmp::min(page - in_page, buf.len() - done);
+        // SAFETY: kva is a live shared page; the chunk is in-page; the
+        // source slice is caller-valid.
+        unsafe {
+            core::ptr::copy_nonoverlapping(
+                buf.as_ptr().add(done),
+                kva.add(in_page),
+                chunk,
+            );
+        }
+        done += chunk;
+    }
+    if done > 0 && (off + done) as u64 > inode.get_size() {
+        inode.set_size((off + done) as u64);
+        entry.size.store((off + done) as u64, Ordering::Release);
+    }
+    done
+}
+
 fn devfs_file_read(file: &crate::fs::File, buf: &mut [u8]) -> isize {
     // SAFETY: VFS callback contract — inode/private_data are valid.
     unsafe {
@@ -1408,8 +1797,16 @@ fn devfs_file_read(file: &crate::fs::File, buf: &mut [u8]) -> isize {
             Some(p) => &*(p as *const DevfsEntry),
             None => return -9,
         };
-        let data = entry.data.lock();
         let off = file.get_pos() as usize;
+        // Coherent shared backing active: it is the canonical store.
+        if let Some((sentry, logical)) = shared_entry_of(file) {
+            let n = shared_read_off(sentry, logical, off, buf);
+            if n > 0 {
+                file.set_pos((off + n) as u64);
+            }
+            return n as isize;
+        }
+        let data = entry.data.lock();
         let avail = data.len().saturating_sub(off);
         let n = buf.len().min(avail);
         buf[..n].copy_from_slice(&data[off..off + n]);
@@ -1432,6 +1829,15 @@ fn devfs_file_write(file: &crate::fs::File, buf: &[u8]) -> isize {
             None => return -9,
         };
         let off = file.get_pos() as usize;
+        // Coherent shared backing active: write into it (it grows and
+        // keeps inode.size current).
+        if let Some((sentry, _)) = shared_entry_of(file) {
+            let n = shared_write_off(sentry, inode, off, buf);
+            if n > 0 {
+                file.set_pos((off + n) as u64);
+            }
+            return n as isize;
+        }
         let mut data = entry.data.lock();
         let need = off.saturating_add(buf.len());
         if data.len() < need {
@@ -1439,7 +1845,9 @@ fn devfs_file_write(file: &crate::fs::File, buf: &[u8]) -> isize {
         }
         data[off..off + buf.len()].copy_from_slice(buf);
         file.set_pos(need as u64);
-        // Keep the generic Inode.size coherent (mmap EOF checks read it).
+        // Keep the generic Inode.size coherent (mmap EOF checks read it)
+        // and the entry-authoritative size in sync (cross-open readers).
+        entry.size.store(need as u64, Ordering::Release);
         inode.set_size(need as u64);
         buf.len() as isize
     }
@@ -1480,14 +1888,26 @@ fn devfs_file_read_at(file: &crate::fs::File, offset: u64, buf: &mut [u8]) -> is
             Some(p) => &*(p as *const DevfsEntry),
             None => return -9,
         };
-        let data = entry.data.lock();
         let off = offset as usize;
+        // Coherent shared backing active: it is the canonical store.
+        if let Some((sentry, logical)) = shared_entry_of(file) {
+            return shared_read_off(sentry, logical, off, buf) as isize;
+        }
+        let data = entry.data.lock();
         let avail = data.len().saturating_sub(off);
         let n = buf.len().min(avail);
         buf[..n].copy_from_slice(&data[off..off + n]);
         n as isize
     }
 }
+
+/// write_at for devfs regular files is served by the GENERIC
+/// File::write_at fallback (save pos → write → restore pos): devfs
+/// carries native write+lseek ops, and write routes into the shared
+/// backing when it is active, so msync's MAP_SHARED writeback and
+/// pwrite(2) both land in the canonical store. (No native write_at
+/// entry exists in FileOps; adding one would touch all 45 literals for
+/// no behavioral gain on this path.)
 
 /// File ops for devfs regular files (devtmpfs).
 pub static DEVFS_REG_FILE_OPS: FileOps = FileOps {
@@ -1628,7 +2048,35 @@ unsafe fn devfs_setattr(inode: &Inode, attr: u32, arg1: u64, arg2: u64) -> i32 {
             if let Some(ptr) = inode.private_data {
                 let entry = &*(ptr as *const DevfsEntry);
                 if entry.is_regular_file() {
-                    entry.data.lock().resize(arg1 as usize, 0);
+                    // b72/b73 SIGBUS hunt: name every size change on the
+                    // param workspace files (a size-0 window between
+                    // open(O_TRUNC) and ftruncate SIGBUSes every mapper).
+                    crate::pr_info!(
+                        "devfs TRUNC '{}' {} -> {} (pid {})",
+                        entry.name,
+                        inode.get_size(),
+                        arg1,
+                        unsafe { crate::process::current_pid() }
+                    );
+                    // Shared backing active: keep it canonical. Grow
+                    // extends the page array (zero-filled); shrink just
+                    // drops the logical size (read_at/fault bounds use the
+                    // inode size, so the tail becomes inaccessible — Linux
+                    // unmaps it, we leave the pages allocated).
+                    {
+                        let active = entry.shared_pages.lock_irqsave().is_some();
+                        if active && arg1 as usize > inode.get_size() as usize {
+                            drop(entry.shared_pages.lock_irqsave());
+                            shared_grow_locked(entry, arg1 as usize);
+                        }
+                    }
+                    if entry.shared_pages.lock_irqsave().is_none() {
+                        entry.data.lock().resize(arg1 as usize, 0);
+                    }
+                    // Entry-authoritative size (cross-open readers — the
+                    // mmap EOF gate reads this through
+                    // devfs_reg_current_size).
+                    entry.size.store(arg1, Ordering::Release);
                     inode.set_size(arg1);
                 }
             }
@@ -1667,6 +2115,7 @@ pub static DEVFS_INODE_OPS: INodeOps = INodeOps {
 /// Called during mount to set up the root dentry's inode.
 pub fn create_root_inode(root_entry: &Arc<DevfsEntry>) -> alloc::sync::Arc<Inode> {
     let mut inode = Inode::new(1, InodeMode::new(InodeMode::S_IFDIR | 0o755));
+    inode.fs_id = crate::fs::inode::FS_ID_DEVFS;
     inode.ops = Some(&DEVFS_INODE_OPS);
     inode.private_data = Some(Arc::into_raw(Arc::clone(root_entry)) as *mut u8);
     alloc::sync::Arc::new(inode)

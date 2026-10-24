@@ -175,6 +175,7 @@ unsafe fn fault_in_write(start: *mut u8, len: usize) -> bool {
             // Valid but read-only: COW? (COW software bit 8)
             if bits & (1 << 8) != 0 {
                 match crate::arch::mm::mm_ops::handle_cow_fault(
+                    addr_space,
                     root_ppn,
                     ArchVirtAddr::new(page as u64),
                 ) {
@@ -205,6 +206,7 @@ unsafe fn fault_in_write(start: *mut u8, len: usize) -> bool {
             crate::arch::mm::page_fault::MmFaultResult::CowPending => {
                 // handle_cow_fault resolves it
                 match crate::arch::mm::mm_ops::handle_cow_fault(
+                    addr_space,
                     root_ppn,
                     ArchVirtAddr::new(page as u64),
                 ) {

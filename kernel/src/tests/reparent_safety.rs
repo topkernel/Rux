@@ -317,7 +317,7 @@ pub fn test_megapage_demotion() {
             .unwrap_or(false);
         if !had_leaf {
             test_skip("megapage demotion", "device megapage not present in clone");
-            free_user_page_tables(root_ppn);
+            free_user_page_tables(&crate::mm::mm_struct::FRESH_TREE_PTE_LOCK, root_ppn);
             return;
         }
 
@@ -325,7 +325,7 @@ pub fn test_megapage_demotion() {
         let ram = get_zeroed_page(GfpFlags::GFP_KERNEL);
         if ram == 0 {
             test_skip("megapage demotion", "no RAM page for the probe");
-            free_user_page_tables(root_ppn);
+            free_user_page_tables(&crate::mm::mm_struct::FRESH_TREE_PTE_LOCK, root_ppn);
             return;
         }
         let user_flags = PageTableEntry::V
@@ -397,7 +397,7 @@ pub fn test_megapage_demotion() {
         // Teardown of a root with a demoted table: the device (U=0)
         // entries must be skipped, the table frames freed — no crash,
         // no put_page of MMIO frames.
-        free_user_page_tables(root_ppn);
+        free_user_page_tables(&crate::mm::mm_struct::FRESH_TREE_PTE_LOCK, root_ppn);
         test_pass("teardown of demoted root survived");
     }
 }

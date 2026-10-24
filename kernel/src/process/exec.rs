@@ -122,6 +122,8 @@ pub(crate) fn do_execve_elf(
     pathname: &str,
     interp_data: Option<&[u8]>,
     secure_exec: bool,
+    exe_file: Option<&alloc::sync::Arc<crate::fs::file::File>>,
+    interp_file: Option<&alloc::sync::Arc<crate::fs::file::File>>,
 ) -> Result<(), i32> {
     use crate::arch::mm::{
         create_user_address_space,
@@ -215,6 +217,25 @@ pub(crate) fn do_execve_elf(
     let virt_start = min_vaddr & !(PAGE_SIZE - 1);
     let virt_end = (max_vaddr + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
 
+    // Linux binfmt_elf load bias: ET_DYN executables (PIE) load at a
+    // NONZERO base — ELF_ET_DYN_BASE = (TASK_SIZE/3*2) page-aligned, plus
+    // ASLR on Linux — never at their raw p_vaddr. We mapped PIEs at bias
+    // 0, so the image started at VA 0 and musl computed app.map =
+    // AT_PHDR - PT_PHDR.p_vaddr + min_vaddr == 0; OH musl's cross-DSO CFI
+    // then treats the main exe as "the dso has no data! map[0]" and skips
+    // filling its shadow slice — every indirect call into exe code read
+    // the still-PROT_NONE CFI shadow page and SIGSEGV'd in
+    // __cfi_slowpath (the samgr/hilogd "Permission denied at ld.so+0x89ac6"
+    // family that killed first pixels). ET_EXEC keeps absolute p_vaddr
+    // (bias 0). The base is clear of the fixed INTERP_BASE (0x3FBF000000
+    // = 17GB) and of MMAP_START (TASK_SIZE-64GB) on both arches.
+    let exec_load_bias: u64 = if ehdr.e_type == crate::fs::elf::ElfType::ET_DYN as u16 {
+        let task_size = crate::arch::mm::user_addr::TASK_SIZE as u64;
+        (task_size / 3 * 2) & !(PAGE_SIZE - 1)
+    } else {
+        0
+    };
+
     // Calculate initial stack size needed
     let argc = argv.len() as u64;
     let argv_count = argv.len();
@@ -269,8 +290,15 @@ pub(crate) fn do_execve_elf(
     impl Drop for UserAddrSpaceGuard {
         fn drop(&mut self) {
             // SAFETY: user_ppn was allocated by create_user_address_space;
-            // on error path, free all page tables to avoid physical page leaks.
-            unsafe { crate::arch::mm::mmu_init::free_user_page_tables(self.0); }
+            // on error path, free all page tables to avoid physical page
+            // leaks. FRESH_TREE_PTE_LOCK: this tree is unpublished (no
+            // MmStruct owns it yet), no mm-side writers exist (INV-LOCK-7).
+            unsafe {
+                crate::arch::mm::mmu_init::free_user_page_tables(
+                    &crate::mm::mm_struct::FRESH_TREE_PTE_LOCK,
+                    self.0,
+                );
+            }
         }
     }
     let _guard = UserAddrSpaceGuard(user_ppn);
@@ -280,13 +308,14 @@ pub(crate) fn do_execve_elf(
                PageTableEntry::R | PageTableEntry::W |
                PageTableEntry::A | PageTableEntry::D;
 
-    // SAFETY: user_ppn is a freshly allocated page table root, virt_start..virt_start+total_size
+    // SAFETY: user_ppn is a freshly allocated page table root, image_start..image_start+total_size
     // is a valid range, and flags contains valid PTE bits for user pages.
     // NOTE: with the chunked allocator the image may span MULTIPLE physical
     // blocks — never write through phys_base + vaddr offset; the segment
     // loader below walks the page tables page by page.
+    let image_start = virt_start + exec_load_bias;
     let _image_phys_base = unsafe {
-        alloc_and_map_to_user_table(user_ppn, virt_start, total_size, flags)
+        alloc_and_map_to_user_table(user_ppn, image_start, total_size, flags)
     }.ok_or(crate::errno::Errno::OutOfMemory.as_neg_i32())?;
 
     // Initial stack at the top of user space (one guard page below
@@ -354,7 +383,7 @@ pub(crate) fn do_execve_elf(
             .ok_or(crate::errno::Errno::FunctionNotImplemented.as_neg_i32())?;
 
         if phdr.is_load() {
-            let virt_addr = phdr.p_vaddr;
+            let virt_addr = exec_load_bias + phdr.p_vaddr;
             let file_size = phdr.p_filesz;
             let mem_size = phdr.p_memsz;
             let offset = phdr.p_offset as usize;
@@ -364,8 +393,8 @@ pub(crate) fn do_execve_elf(
             // attacker-controlled) ELF file; slicing or writing past the
             // mapped region without these checks panics or corrupts memory.
             if file_size > mem_size
-                || virt_addr < virt_start
-                || virt_addr.saturating_add(mem_size) > virt_end
+                || virt_addr < image_start
+                || virt_addr.saturating_add(mem_size) > virt_end + exec_load_bias
                 || offset.checked_add(file_size as usize).map_or(true, |end| end > program_data.len())
             {
                 return Err(crate::errno::Errno::ExecFormatError.as_neg_i32());
@@ -402,7 +431,7 @@ pub(crate) fn do_execve_elf(
             .ok_or(crate::errno::Errno::FunctionNotImplemented.as_neg_i32())?;
 
         if phdr.is_load() && phdr.p_memsz > 0 {
-            let seg_start = phdr.p_vaddr;
+            let seg_start = exec_load_bias + phdr.p_vaddr;
             let seg_end = (seg_start + phdr.p_memsz + PAGE_SIZE as u64 - 1) & !(PAGE_SIZE as u64 - 1);
 
             // Build per-segment PTE flags
@@ -716,7 +745,9 @@ pub(crate) fn do_execve_elf(
 
         (interp_entry, interp_base)
     } else {
-        (entry, 0)
+        // No interpreter (static or static-PIE): control goes straight to
+        // the executable entry — apply its load bias for ET_DYN.
+        (exec_load_bias + entry, 0)
     };
 
     // Set up stack (Linux reserves 256 bytes of slop below the raw top).
@@ -813,7 +844,7 @@ pub(crate) fn do_execve_elf(
                 // program_data (Wave 1 central check).
                 if let Some(ph) = unsafe { ehdr.get_program_header(program_data, i) } {
                     if ph.p_type == crate::fs::elf::ElfPtType::PT_PHDR as u32 {
-                        found = Some(ph.p_vaddr);
+                        found = Some(exec_load_bias + ph.p_vaddr);
                         break;
                     }
                 }
@@ -926,7 +957,10 @@ pub(crate) fn do_execve_elf(
             (AT_PHNUM, phnum),
             (AT_PAGESZ, PAGE_SIZE as u64),
             (AT_BASE, at_base),
-            (AT_ENTRY, entry),
+            // Linux AT_ENTRY is the main executable's entry (load bias +
+            // e_entry), even when control is first transferred to the
+            // interpreter.
+            (AT_ENTRY, exec_load_bias + entry),
             (AT_UID, at_uid),
             (AT_EUID, at_euid),
             (AT_GID, at_gid),
@@ -1007,9 +1041,10 @@ pub(crate) fn do_execve_elf(
     // through a function pointer at 0x1c29c, a parent-brk heap address).
     // Linux resets start_brk/brk to the page-aligned end of the new
     // image's highest PT_LOAD.
-    new_addr_space.set_start_brk(virt_end as usize);
-    new_addr_space.set_brk_val(virt_end as usize);
-    unsafe { (*task_ptr).set_brk(virt_end); };
+    let image_end = virt_end + exec_load_bias;
+    new_addr_space.set_start_brk(image_end as usize);
+    new_addr_space.set_brk_val(image_end as usize);
+    unsafe { (*task_ptr).set_brk(image_end); };
 
     // Record envp range for /proc/pid/environ
     if !envp.is_empty() {
@@ -1060,7 +1095,7 @@ pub(crate) fn do_execve_elf(
             // SAFETY: i < phdr_count and program_data is a valid ELF file slice.
             if let Some(phdr) = unsafe { ehdr.get_program_header(program_data, i) } {
                 if phdr.is_load() {
-                    let seg_start = phdr.p_vaddr;
+                    let seg_start = exec_load_bias + phdr.p_vaddr;
                     let seg_end = seg_start + phdr.p_memsz;
                     if seg_end <= seg_start {
                         continue;
@@ -1085,11 +1120,33 @@ pub(crate) fn do_execve_elf(
                         first_exec_set = true;
                     }
 
-                    let vma = Vma::new(
+                    // Linux binfmt_elf parity: the executable's LOADs are
+                    // FILE VMAs (vm_file = the exe, vm_pgoff = ELF_PAGESTART
+                    // file offset) — /proc/<pid>/maps prints the path and a
+                    // per-segment offset, and forensic symbolization of
+                    // in-image rips can compute file positions
+                    // (file_off = vma_off + (rip - vma_start)). The image is
+                    // still copied into private anon frames at exec (the
+                    // mapping model is unchanged); fd stays -1 so no
+                    // fd-gated fault path is activated, and the identity
+                    // lives on the pinned vm_file instead of an fd number
+                    // (which exec closes and userspace could reuse).
+                    let mut vma = Vma::new(
                         crate::mm::page::VirtAddr::new(vma_start as usize),
                         crate::mm::page::VirtAddr::new(vma_end as usize),
                         vma_flags,
                     );
+                    vma.set_type(VmaType::FileBacked);
+                    vma.set_file_fd(-1);
+                    vma.set_file_size(program_data.len() as u64);
+                    // File page mapped at vma_start (elf_map:
+                    // off = p_offset - ELF_PAGEOFFSET(p_vaddr)).
+                    vma.set_offset(
+                        (phdr.p_offset - (phdr.p_vaddr & (PAGE_SIZE as u64 - 1))) as usize,
+                    );
+                    if let Some(f) = exe_file {
+                        new_addr_space.pin_vma_file(vma_start as usize, f.clone());
+                    }
                     let _ = vma_mgr.add(vma);
                 }
             }
@@ -1120,13 +1177,93 @@ pub(crate) fn do_execve_elf(
                 // Page-align the size
                 let raw_size = interp_max - interp_min;
                 let interp_size = (raw_size + PAGE_SIZE as u64 - 1) & !(PAGE_SIZE as u64 - 1);
-                let mut interp_flags = VmaFlags::from_bits(VmaFlags::READ | VmaFlags::EXEC | VmaFlags::PRIVATE);
-                let interp_vma = Vma::new(
-                    crate::mm::page::VirtAddr::new(interp_base as usize),
-                    crate::mm::page::VirtAddr::new((interp_base + interp_size) as usize),
-                    interp_flags,
-                );
-                let _ = vma_mgr.add(interp_vma);
+                // Linux load_elf_interp parity: the interpreter's LOAD
+                // segments are FILE VMAs (vm_file = the interp file) with
+                // per-segment permissions and pgoff. The old single flat
+                // R-X anonymous VMA over [INTERP_BASE, INTERP_BASE+size)
+                // lost fd/offset/path entirely — /proc/<pid>/maps never
+                // showed the interp, and rip-level forensics inside the
+                // ld.so span (the 0x3fbf08ad30/0x3fbf116dea families)
+                // could not convert a rip into a file offset. The image is
+                // still eagerly copied into private anon frames at exec;
+                // fd stays -1 (no fd-gated fault path activates) and the
+                // file identity lives on the pinned vm_file.
+                let mut prev_end = interp_base;
+                let mut added_any = false;
+                for i in 0..interp_ehdr.e_phnum as usize {
+                    // SAFETY: i < e_phnum and interp_bytes is a valid ELF file.
+                    if let Some(phdr) = unsafe { interp_ehdr.get_program_header(interp_bytes, i) } {
+                        if !phdr.is_load() || phdr.p_memsz == 0 {
+                            continue;
+                        }
+                        let seg_vaddr = interp_base + phdr.p_vaddr - interp_min;
+                        let seg_start = seg_vaddr & !(PAGE_SIZE as u64 - 1);
+                        let seg_end = (seg_vaddr + phdr.p_memsz + PAGE_SIZE as u64 - 1)
+                            & !(PAGE_SIZE as u64 - 1);
+                        if seg_end <= seg_start {
+                            continue;
+                        }
+                        // Keep the whole span VMA-covered like the old flat
+                        // mapping: inter-segment gaps become PROT_NONE
+                        // anonymous fillers (Linux leaves holes; PROT_NONE
+                        // faults identically for an access while preserving
+                        // mprotect's whole-range coverage checks).
+                        if seg_start > prev_end {
+                            let filler = Vma::new(
+                                crate::mm::page::VirtAddr::new(prev_end as usize),
+                                crate::mm::page::VirtAddr::new(seg_start as usize),
+                                VmaFlags::from_bits(VmaFlags::PRIVATE),
+                            );
+                            let _ = vma_mgr.add(filler);
+                        }
+                        let mut seg_flags = VmaFlags::new();
+                        if phdr.is_readable() { seg_flags.insert(VmaFlags::READ); }
+                        if phdr.is_writable() { seg_flags.insert(VmaFlags::WRITE); }
+                        if phdr.is_executable() { seg_flags.insert(VmaFlags::EXEC); }
+                        seg_flags.insert(VmaFlags::PRIVATE);
+                        let mut vma = Vma::new(
+                            crate::mm::page::VirtAddr::new(seg_start as usize),
+                            crate::mm::page::VirtAddr::new(seg_end as usize),
+                            seg_flags,
+                        );
+                        vma.set_type(VmaType::FileBacked);
+                        vma.set_file_fd(-1);
+                        vma.set_file_size(interp_bytes.len() as u64);
+                        // elf_map: file page mapped at seg_start is
+                        // p_offset - ELF_PAGEOFFSET(p_vaddr) — exact
+                        // rip->file_off arithmetic for forensics.
+                        vma.set_offset(
+                            (phdr.p_offset - (phdr.p_vaddr & (PAGE_SIZE as u64 - 1))) as usize,
+                        );
+                        if let Some(f) = interp_file {
+                            new_addr_space.pin_vma_file(seg_start as usize, f.clone());
+                        }
+                        let _ = vma_mgr.add(vma);
+                        added_any = true;
+                        prev_end = seg_end;
+                    }
+                }
+                // Tail filler to the page-rounded image end (BSS tail).
+                let span_end = interp_base + interp_size;
+                if added_any && span_end > prev_end {
+                    let filler = Vma::new(
+                        crate::mm::page::VirtAddr::new(prev_end as usize),
+                        crate::mm::page::VirtAddr::new(span_end as usize),
+                        VmaFlags::from_bits(VmaFlags::PRIVATE),
+                    );
+                    let _ = vma_mgr.add(filler);
+                }
+                // Degenerate case (no loadable segments parsed here but
+                // interp_max > interp_min): keep the old flat coverage.
+                if !added_any {
+                    let interp_flags = VmaFlags::from_bits(VmaFlags::READ | VmaFlags::EXEC | VmaFlags::PRIVATE);
+                    let interp_vma = Vma::new(
+                        crate::mm::page::VirtAddr::new(interp_base as usize),
+                        crate::mm::page::VirtAddr::new(span_end as usize),
+                        interp_flags,
+                    );
+                    let _ = vma_mgr.add(interp_vma);
+                }
             }
         }
     }

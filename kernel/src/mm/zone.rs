@@ -294,6 +294,13 @@ impl Zone {
         self.free_pages.load(Ordering::Acquire)
     }
 
+    /// Set managed pages (boot-time only): the count of pages actually
+    /// handed to the buddy (span minus reserved/hole pages), mirroring
+    /// Linux zone->managed_pages vs spanned_pages.
+    pub fn set_managed_pages(&self, n: usize) {
+        self.managed_pages.store(n, Ordering::Release);
+    }
+
     /// Get watermark value for the given level (WMARK_MIN/LOW/HIGH).
     pub fn watermark(&self, wmark: usize) -> usize {
         self._watermark[wmark].load(Ordering::Relaxed)
@@ -396,6 +403,8 @@ impl Zone {
                     ZTRACE_ALLOC[ZALLOC_CUR.fetch_add(1, Ordering::Relaxed) % ZTRACE_ALLOC.len()]
                         .store((pfn as u64) << 4 | (order as u64 & 0xF), Ordering::Relaxed);
                     let count = 1usize << order;
+                    // /proc/vmstat pgalloc_* counters.
+                    super::vmstat::note_alloc(self.zone_type, count as u64);
                     for i in 0..count {
                         let page = pfn_to_page_mut(pfn + i);
                         if !page.is_null() {
@@ -494,6 +503,9 @@ impl Zone {
     /// - `pfn`: Page frame number of the block to free
     /// - `order`: Order of the block
     pub fn free_pages(&self, pfn: usize, order: usize) {
+        // /proc/vmstat pgfree counter (the pages really go back to the
+        // free lists further down, after the range check).
+        super::vmstat::note_free(1u64 << order);
         // FORENSIC free ledger.
         ZTRACE_FREE[ZFREE_CUR.fetch_add(1, Ordering::Relaxed) % ZTRACE_FREE.len()]
             .store((pfn as u64) << 4 | (order as u64 & 0xF), Ordering::Relaxed);

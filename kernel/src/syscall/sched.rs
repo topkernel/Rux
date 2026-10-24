@@ -46,6 +46,9 @@ pub fn sys_futex(args: SyscallArgs) -> i64 {
 /// # Returns
 /// Always returns 0
 pub fn sys_sched_yield(_args: SyscallArgs) -> i64 {
+    // Linux's schedstat yld_count: incremented in the sched_yield paths
+    // only (kernel/sched/syscalls.c schedstat_inc(rq->yld_count)).
+    crate::fs::procfs::schedstat::note_yield(crate::arch::cpu_id() as usize);
     crate::sched::yield_cpu();
     0
 }
@@ -976,6 +979,26 @@ pub fn sys_sched_setaffinity(args: SyscallArgs) -> i64 {
     // Read the mask word by word; an UNREADABLE word is EFAULT, not a
     // silent zero (LTP setaffinity01 case 1 passes a bad address).
     let ncpus = crate::config::MAX_CPUS;
+    // The mask must name CPUs that actually exist at runtime. Linux
+    // rejects a mask disjoint from cpu_possible_mask with EINVAL;
+    // accepting bits for absent CPUs starves the caller forever — the
+    // RT/CFS pick paths skip a task whose cpus_allowed has no bit for
+    // any online CPU. OH's render_service pins its main thread to
+    // "the last CPU" from userspace topology info (mask 0x4 = CPU2 on
+    // the SMP=2 boot); the old MAX_CPUS-only clamp let that through and
+    // RS sat runnable-but-never-picked after opening /dev/dri/card0 —
+    // the SA:10 / bootanimation / launcher chain all died on that
+    // starvation.
+    let online = {
+        // apic::cpu_count is x86_64-only; riscv64 reports via the SMP
+        // online mask the boot code programs.
+        #[cfg(feature = "x86_64")]
+        let n = crate::drivers::intc::apic::cpu_count();
+        #[cfg(not(feature = "x86_64"))]
+        let n = crate::config::MAX_CPUS as usize;
+        if n == 0 { 1 } else { n }
+    };
+    let online_mask: u32 = if online >= 32 { u32::MAX } else { (1u32 << online) - 1 };
     let mask_words = core::cmp::min(size / core::mem::size_of::<usize>(), 8);
     let mut stored_mask: u32 = 0;
     for i in 0..mask_words {
@@ -995,7 +1018,9 @@ pub fn sys_sched_setaffinity(args: SyscallArgs) -> i64 {
             }
         }
     }
-    // An empty mask (no online CPU set) is EINVAL (LTP case 2).
+    // Disjoint from the online set -> EINVAL (Linux semantics; the
+    // "empty mask" LTP case is subsumed: an empty mask is disjoint too).
+    stored_mask &= online_mask;
     if stored_mask == 0 {
         return -(errno::EINVAL as i64);
     }

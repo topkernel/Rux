@@ -49,7 +49,32 @@ pub fn sys_clone(args: SyscallArgs) -> i64 {
     // Linux refuses clone with ENOMEM before exhausting the last of its
     // allocator (musl maps that to EAGAIN for pthread_create callers —
     // the graceful "unable to create more threads" path).
+    //
+    // sc116 probe: every OH app child (launcher/settingsdata/systemui)
+    // ends up SINGLE-THREADED with the main thread parked in a private
+    // stack futex — the shape of a runtime whose FIRST pthread_create
+    // failed silently and now waits forever for a worker that was never
+    // born. If the 1 GiB OH boot drains the buddy heap under the 8 MiB
+    // reserve mid-boot (the fake-OOM family), this gate refuses EVERY
+    // thread from then on with no trace. Name each refusal (budgeted):
+    // errno + free_bytes + comm is one line and settles gate-vs-other.
     if clone_heap_reserve_low() {
+        static N: core::sync::atomic::AtomicUsize =
+            core::sync::atomic::AtomicUsize::new(0);
+        if N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 40 {
+            let st = crate::mm::buddy_allocator::buddy_stats();
+            let comm = crate::sched::current()
+                .map(|t| unsafe { (*t).comm() })
+                .map(|c| core::str::from_utf8(c).unwrap_or(""))
+                .unwrap_or("")
+                .trim_end_matches('\0');
+            crate::pr_warn!(
+                "clone-gate: ENOMEM comm='{}' free={}/{} bytes",
+                comm,
+                st.free_bytes,
+                st.heap_size
+            );
+        }
         return -(errno::ENOMEM as i64);
     }
 
@@ -79,6 +104,90 @@ pub fn sys_clone(args: SyscallArgs) -> i64 {
     // copy_process: p->exit_signal = args->exit_signal == CSIGNAL mask).
     let exit_signal = (flags & 0xff) as u8;
 
+    // sc135 (Session Q): the appspawn parent's tgid, recorded at its
+    // first child fork so the census-side APP-THR dump can EXCLUDE the
+    // parent's own thread batches (OS_GC_Thread pool, comm 'appspawn')
+    // and keep only forked-children thread creations — the working-shape
+    // init ring the divergence comparison needs.
+    static APPSPAWN_TGID: core::sync::atomic::AtomicU32 =
+        core::sync::atomic::AtomicU32::new(0);
+
+    // sc123 (Session P): APP-PARK decoded the children's eternal wait as
+    // pthread_cond_timedwait's MUTEX RELOCK (return chain: wait wrapper <-
+    // pthread_mutex_lock <- pthread_cond_timedwait at musl+0x11849d) on
+    // a stack-local mutex at 0x7fffffffc754 whose word reads 2 (locked +
+    // waiters) in a SINGLE-THREADED child. Two theories: (A) fork-inherited
+    // held lock — an appspawn parent-side task held this mutex when fork()
+    // copied the main stack, and no child thread can ever unlock it; (B)
+    // the child locked it itself and re-locks on an error path Rux takes
+    // but Linux does not. This probe fires AT FORK (clone without
+    // CLONE_VM/CLONE_THREAD from comm appspawn) in the forking thread's
+    // own context: it reads BOTH candidate words on the forking stack and
+    // lists every sibling thread of the tgid (comm + state + last syscall
+    // nr) — the siblings awake at fork instant are the theory-A holder
+    // candidates. word==1/2 at fork settles A outright.
+    if flags & 0x00000100 == 0 /* !CLONE_VM: real fork, stack copied */
+        && flags & 0x00010000 == 0 /* !CLONE_THREAD */
+    {
+        let comm = crate::sched::current()
+            .map(|t| unsafe { (*t).comm() })
+            .map(|c| core::str::from_utf8(c).unwrap_or(""))
+            .unwrap_or("")
+            .trim_end_matches('\0');
+        if comm == "appspawn" {
+            if APPSPAWN_TGID.load(core::sync::atomic::Ordering::Relaxed) == 0 {
+                if let Some(t) = crate::sched::current() {
+                    // SAFETY: t is the current task.
+                    unsafe {
+                        APPSPAWN_TGID.store(
+                            (*t).tgid() as u32,
+                            core::sync::atomic::Ordering::Relaxed,
+                        );
+                    }
+                }
+            }
+            static NF: core::sync::atomic::AtomicUsize =
+                core::sync::atomic::AtomicUsize::new(0);
+            if NF.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 10 {
+                use crate::arch::uaccess::get_user;
+                let w1 = unsafe { get_user(0x7fffffffc754 as *const u32) };
+                let w2 = unsafe { get_user(0x7fffffffc7f4 as *const u32) };
+                crate::pr_warn!(
+                    "forkgate: appspawn fork flags={:#x} word@c754={:?} word@c7f4={:?}",
+                    flags,
+                    w1,
+                    w2
+                );
+                // Sibling snapshot: who else of this tgid is alive at
+                // fork, and what are they doing (holder candidates).
+                let my_pid = crate::process::current_pid();
+                let listed_cell = core::cell::Cell::new(0usize);
+                crate::sched::for_each_task(|t| {
+                    if listed_cell.get() >= 12 {
+                        return;
+                    }
+                    let tk = unsafe { &*t };
+                    if tk.tgid() != my_pid || tk.pid() == my_pid {
+                        return;
+                    }
+                    let nc = core::str::from_utf8(tk.comm())
+                        .unwrap_or("")
+                        .trim_end_matches('\0');
+                    let nr = tk.last_syscall_nr.load(core::sync::atomic::Ordering::Relaxed);
+                    let running = tk.state().is_running();
+                    crate::pr_warn!(
+                        "forkgate:  sib tid {} comm='{}' lastsys={} {}",
+                        tk.pid(),
+                        nc,
+                        nr,
+                        if running { "RUNNING" } else { "sleep" }
+                    );
+                    listed_cell.set(listed_cell.get() + 1);
+                });
+            }
+        }
+    }
+
     let clone_args = CloneArgs {
         flags,
         stack,
@@ -88,9 +197,273 @@ pub fn sys_clone(args: SyscallArgs) -> i64 {
         exit_signal,
     };
 
+    // sc118 decode (Session P): the sc117-kernel boot with the refusal
+    // probes produced ZERO clone-gate / clone-fail lines while app
+    // children (os.settingsdata, telephonydataability) STILL parked
+    // single-threaded on the stack futex 0x7fffffffc754 — no clone
+    // FAILED, so either no clone was ever ATTEMPTED by these runtimes,
+    // or the worker clone SUCCEEDED and the thread died before doing
+    // its work. This census names every clone attempt (success or
+    // failure) from the app-child binaries, budgeted 80 lines: with it,
+    // "no attempt" (userspace never reaches pthread_create) separates
+    // from "success then instant death" (worker fault/exit).
+    {
+        let comm = crate::sched::current()
+            .map(|t| unsafe { (*t).comm() })
+            .map(|c| core::str::from_utf8(c).unwrap_or(""))
+            .unwrap_or("")
+            .trim_end_matches('\0');
+        let is_app = comm.contains("launcher")
+            || comm.contains("settingsdata")
+            || comm.contains("systemui")
+            || comm.contains("dataability");
+        // sc124 (Session P): the comm filter was BLIND for the pre-rename
+        // window — an appspawn child keeps comm 'appspawn' until late
+        // (dlopen of the engine + its .init_array constructors run under
+        // the OLD name; sc118 caught pid 1200 comm=appspawn RUNNING as a
+        // fresh child). The park decode (pthread_cond_timedwait on a
+        // stack cond, PRIVATE futex — same-process signaler required)
+        // makes the constructor-phase thread creation the prime suspect:
+        // on Linux engine constructors create the worker that later
+        // signals this cond; whether that clone HAPPENS on Rux was never
+        // measured. Log clones from comm 'appspawn' too — the flags
+        // field separates the parent's fork (SIGCHLD, no CLONE_VM) from
+        // the child's engine thread creation (CLONE_VM|CLONE_THREAD).
+        let is_spawn = comm == "appspawn";
+        if is_app || is_spawn {
+            static N3: core::sync::atomic::AtomicUsize =
+                core::sync::atomic::AtomicUsize::new(0);
+            if N3.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 120 {
+                return match do_clone(clone_args) {
+                    Ok(pid) => {
+                        crate::pr_warn!(
+                            "appclone: comm='{}' flags={:#x} -> pid {}",
+                            comm,
+                            flags,
+                            pid
+                        );
+                        // sc140: let the binder tracer see transactions
+                        // targeting forked appspawn children.
+                        if flags & 0x00000100 == 0 && flags & 0x00010000 == 0 {
+                            crate::ipc::binder::register_app_child_pid(pid as u32);
+                        }
+                        // sc139 (Session Q): the WORKING reference — the
+                        // appspawn daemon's own filtered init ring, dumped
+                        // in the forking thread's context at a real fork
+                        // (no CLONE_VM). The daemon reaches pthread_create
+                        // and runs its whole loader cascade; APP-PARK shows
+                        // the parked child's ring. The diff of the two is
+                        // the divergence hunt. Budget 2 (first two forks).
+                        if flags & 0x00000100 == 0 {
+                            use core::fmt::Write;
+                            use core::sync::atomic::Ordering::Relaxed;
+                            static NPAR: core::sync::atomic::AtomicUsize =
+                                core::sync::atomic::AtomicUsize::new(0);
+                            if NPAR.fetch_add(1, Relaxed) < 2 {
+                                if let Some(t) = crate::sched::current() {
+                                    unsafe {
+                                        const RL: usize =
+                                            crate::process::task::INIT_CALLS_LEN;
+                                        let cur = (*t).init_calls_cur.load(Relaxed);
+                                        let mut s2 = alloc::string::String::new();
+                                        let _ = write!(
+                                            s2,
+                                            "APP-PAR: tgid {} comm='{}' init:",
+                                            (*t).tgid(),
+                                            core::str::from_utf8((*t).comm())
+                                                .unwrap_or("")
+                                                .trim_end_matches('\0')
+                                        );
+                                        for k in 0..RL {
+                                            let i = (cur + RL - k) % RL;
+                                            let v = (*t).init_calls[i].load(Relaxed);
+                                            if v != 0 {
+                                                let _ = write!(s2, " {}", v);
+                                            }
+                                        }
+                                        crate::pr_warn!("{}", s2);
+                                        let mut s3 = alloc::string::String::new();
+                                        let _ = write!(s3, "APP-PAR: initA:");
+                                        for k in 0..RL {
+                                            let i = (cur + RL - k) % RL;
+                                            let v = (*t).init_calls[i].load(Relaxed);
+                                            if v != 0 {
+                                                let a0 = (*t).init_a0[i].load(Relaxed);
+                                                let _ = write!(s3, " {}@{:#x}", v, a0);
+                                            }
+                                        }
+                                        crate::pr_warn!("{}", s3);
+                                    }
+                                }
+                            }
+                        }
+                        // sc135 (Session Q): a forked appspawn child that
+                        // CREATES a thread is the WORKING shape (sc125:
+                        // tgid 1146 -> OS_IPC_0 + OS_DfxWatchdog, alive)
+                        // while its siblings park single-threaded before
+                        // their first pthread_create. Dump the CREATING
+                        // thread's full init ring (all-calls + fails, same
+                        // format as APP-PARK) so the two sequences can be
+                        // diffed — the divergence point is the abort.
+                        // Parent's own batches excluded via APPSPAWN_TGID.
+                        if flags & 0x00010000 != 0 /* CLONE_THREAD */
+                            && APPSPAWN_TGID.load(core::sync::atomic::Ordering::Relaxed) != 0
+                        {
+                            if let Some(t) = crate::sched::current() {
+                                // SAFETY: t is the current (forking) task.
+                                unsafe {
+                                    let spawn_tgid = APPSPAWN_TGID
+                                        .load(core::sync::atomic::Ordering::Relaxed);
+                                    if (*t).tgid() as u32 != spawn_tgid {
+                                        static NT: core::sync::atomic::AtomicUsize =
+                                            core::sync::atomic::AtomicUsize::new(0);
+                                        if NT.fetch_add(
+                                            1,
+                                            core::sync::atomic::Ordering::Relaxed,
+                                        ) < 6
+                                        {
+                                            use core::fmt::Write;
+                                            const RL: usize =
+                                                crate::process::task::LAST_CALLS_LEN;
+                                            let cur = (*t)
+                                                .last_calls_cur
+                                                .load(core::sync::atomic::Ordering::Relaxed);
+                                            let mut s2 = alloc::string::String::new();
+                                            let _ = write!(
+                                                s2,
+                                                "APP-THR: tgid {} comm='{}' leader='{}' calls:",
+                                                (*t).tgid(),
+                                                core::str::from_utf8((*t).comm())
+                                                    .unwrap_or("")
+                                                    .trim_end_matches('\0'),
+                                                core::str::from_utf8(
+                                                    (*(*t).group_leader_ptr()).comm()
+                                                )
+                                                .unwrap_or("")
+                                                .trim_end_matches('\0')
+                                            );
+                                            for k in 0..RL {
+                                                let i = (cur + RL - k) % RL; // newest first
+                                                let v = (*t).last_calls[i]
+                                                    .load(core::sync::atomic::Ordering::Relaxed);
+                                                if v != 0 {
+                                                    let _ = write!(s2, " {}", v);
+                                                }
+                                            }
+                                            crate::pr_warn!("{}", s2);
+                                            let cur8 = (*t)
+                                                .last_fails_cur
+                                                .load(core::sync::atomic::Ordering::Relaxed);
+                                            let mut s = alloc::string::String::new();
+                                            let _ = write!(s, "APP-THR: tgid {} fails:", (*t).tgid());
+                                            for k in 0..8 {
+                                                let i = (cur8 + 8 - 1 - k) % 8;
+                                                let v = (*t).last_fails[i]
+                                                    .load(core::sync::atomic::Ordering::Relaxed);
+                                                if v != 0 {
+                                                    let a0 = (*t).last_fails_a0[i]
+                                                        .load(core::sync::atomic::Ordering::Relaxed);
+                                                    let a1 = (*t).last_fails_a1[i]
+                                                        .load(core::sync::atomic::Ordering::Relaxed);
+                                                    let _ = write!(
+                                                        s,
+                                                        " nr{}=-{} a0={:#x} a1={:#x}",
+                                                        v & 0xffff,
+                                                        v >> 16,
+                                                        a0,
+                                                        a1
+                                                    );
+                                                }
+                                            }
+                                            crate::pr_warn!("{}", s);
+                                            // sc138 (Session Q): the FILTERED
+                                            // init ring for the WORKING side —
+                                            // this creator reached
+                                            // pthread_create; APP-PARK dumps
+                                            // the parked side. The diff
+                                            // between the two sequences is
+                                            // the abort point.
+                                            {
+                                                use core::sync::atomic::Ordering::Relaxed;
+                                                const RL: usize =
+                                                    crate::process::task::INIT_CALLS_LEN;
+                                                let icur = (*t)
+                                                    .init_calls_cur
+                                                    .load(Relaxed);
+                                                let mut s4 = alloc::string::String::new();
+                                                let _ = write!(
+                                                    s4,
+                                                    "APP-THR: tgid {} init:",
+                                                    (*t).tgid()
+                                                );
+                                                for k in 0..RL {
+                                                    let i = (icur + RL - k) % RL;
+                                                    let v = (*t).init_calls[i]
+                                                        .load(Relaxed);
+                                                    if v != 0 {
+                                                        let _ = write!(s4, " {}", v);
+                                                    }
+                                                }
+                                                crate::pr_warn!("{}", s4);
+                                                let mut s5 = alloc::string::String::new();
+                                                let _ = write!(
+                                                    s5,
+                                                    "APP-THR: tgid {} initA:",
+                                                    (*t).tgid()
+                                                );
+                                                for k in 0..32.min(RL) {
+                                                    let i = (icur + RL - k) % RL;
+                                                    let v = (*t).init_calls[i]
+                                                        .load(Relaxed);
+                                                    if v != 0 {
+                                                        let a0 = (*t).init_a0[i]
+                                                            .load(Relaxed);
+                                                        let _ =
+                                                            write!(s5, " {}@{:#x}", v, a0);
+                                                    }
+                                                }
+                                                crate::pr_warn!("{}", s5);
+                                            }
+                                        }
+                                    }
+                                }
+                            }
+                        }
+                        pid as i64
+                    }
+                    Err(e) => {
+                        crate::pr_warn!(
+                            "appclone: comm='{}' flags={:#x} -> errno {}",
+                            comm,
+                            flags,
+                            -(e as i32)
+                        );
+                        e as i64
+                    }
+                };
+            }
+        }
+    }
+
     match do_clone(clone_args) {
         Ok(pid) => pid as i64,
-        Err(e) => e as i64,
+        Err(e) => {
+            // sc116 probe (see the reserve-gate comment): any other
+            // clone failure is equally invisible to the taskdump — the
+            // caller's runtime often ignores pthread_create errors and
+            // parks on a rendezvous that never completes.
+            static N2: core::sync::atomic::AtomicUsize =
+                core::sync::atomic::AtomicUsize::new(0);
+            if N2.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 40 {
+                let comm = crate::sched::current()
+                    .map(|t| unsafe { (*t).comm() })
+                    .map(|c| core::str::from_utf8(c).unwrap_or(""))
+                    .unwrap_or("")
+                    .trim_end_matches('\0');
+                crate::pr_warn!("clone-fail: errno {} comm='{}'", -(e as i32), comm);
+            }
+            e as i64
+        }
     }
 }
 
@@ -140,11 +513,54 @@ fn parse_shebang(data: &[u8]) -> Option<(&str, Option<&str>)> {
 
 /// Read file content from filesystem (ext4 or rootfs)
 fn read_exec_file(path: &str) -> Option<alloc::vec::Vec<u8>> {
+    // VFS-first (OH Phase 2): the raw-ext4 shortcut below resolves
+    // against the ROOT ext4 superblock only — executables on other
+    // mounts (/vendor/bin/hdf_devhost for every display *_host service)
+    // came back ENOENT even though the exec pre-flight path_lookup
+    // succeeded. Open through the VFS (any mount) and read in chunks.
+    if let Ok(fd) = crate::fs::vfs::file_open(path, 0 /* O_RDONLY */, 0) {
+        let file = unsafe { crate::fs::file::get_file_fd(fd) };
+        if let Some(file) = file {
+            let mut data = alloc::vec::Vec::new();
+            let mut chunk = [0u8; 16384];
+            loop {
+                let n = unsafe { file.read(chunk.as_mut_ptr(), chunk.len()) };
+                if n <= 0 {
+                    break;
+                }
+                data.extend_from_slice(&chunk[..n as usize]);
+                if (n as usize) < chunk.len() {
+                    break;
+                }
+            }
+            // SAFETY: fd came from file_open on the current task's table.
+            let _ = unsafe { crate::fs::file::close_file_fd(fd) };
+            if !data.is_empty() {
+                return Some(data);
+            }
+        } else {
+            // SAFETY: fd came from file_open on the current task's table.
+            let _ = unsafe { crate::fs::file::close_file_fd(fd) };
+        }
+    }
     if crate::fs::ext4::is_mounted() {
         crate::fs::ext4::read_file_from_mounted(path)
     } else {
         crate::fs::read_file_from_rootfs(path)
     }
+}
+
+/// Open `path` through the VFS and return the file as an Arc WITHOUT
+/// keeping an fd (Linux vm_file semantics): the Arc outlives any closed fd
+/// number, so pinning it on the exec-time segment VMAs gives
+/// /proc/<pid>/maps a stable path identity even though exec holds no
+/// descriptor for the exe or the interpreter. Delegates to the fd-free VFS
+/// resolver, which also works in the PID-1 boot exec where no fdtable
+/// exists yet (the old file_open-based body returned None there — PID 1's
+/// maps lost the path column on every boot). Best-effort: None simply
+/// leaves the VMAs without a pinned file (offset bookkeeping stands).
+pub(crate) fn open_file_arc(path: &str) -> Option<alloc::sync::Arc<crate::fs::file::File>> {
+    crate::fs::vfs::open_file_arc_nofd(path)
 }
 
 /// ARG_MAX approximation for execve argument limits (Linux uses a 2MB-ish
@@ -402,6 +818,7 @@ fn do_execve(pathname: &str, argv: &[alloc::string::String], envp: &[alloc::stri
     };
 
     // Check for PT_INTERP (dynamic executable)
+    let mut interp_path_str: Option<&str> = None;
     let interp_data: Option<alloc::vec::Vec<u8>> = if let Some(interp_path) = ElfLoader::get_interpreter(&program_data) {
         let interp_str = match core::str::from_utf8(interp_path) {
             Ok(s) => s,
@@ -421,7 +838,10 @@ fn do_execve(pathname: &str, argv: &[alloc::string::String], envp: &[alloc::stri
             attempt += 1;
         }
         match data {
-            Some(d) => Some(d),
+            Some(d) => {
+                interp_path_str = Some(interp_str);
+                Some(d)
+            }
             None => {
                 crate::pr_err!(
                     "exec: interpreter read failed for {} (pid {}) — ENOENT",
@@ -588,7 +1008,18 @@ fn do_execve(pathname: &str, argv: &[alloc::string::String], envp: &[alloc::stri
         crate::process::exit::de_thread(current);
     }
 
-    match do_execve_elf(current, &program_data, &final_argv, &final_envp, entry, phdr_count_usize, &ehdr, full_path.as_ref(), interp_data.as_deref(), secure_exec) {
+    // Pinned file identities for the exec-time segment VMAs (vm_file
+    // semantics — see open_file_arc). Best-effort: a failure only drops
+    // the /proc/<pid>/maps path column, never the exec.
+    let exe_file_arc = open_file_arc(full_path.as_ref());
+    let interp_file_arc = interp_path_str.and_then(open_file_arc);
+    if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SyscallTrace) {
+        crate::pr_info!("LVMA-DBG pid {} exe_pin={} interp_pin={} path {}",
+            crate::process::current_pid(),
+            exe_file_arc.is_some(), interp_file_arc.is_some(), full_path.as_ref());
+    }
+
+    match do_execve_elf(current, &program_data, &final_argv, &final_envp, entry, phdr_count_usize, &ehdr, full_path.as_ref(), interp_data.as_deref(), secure_exec, exe_file_arc.as_ref(), interp_file_arc.as_ref()) {
         Ok(()) => {
             // The image changed: the parent may no longer setpgid us
             // (Linux sys_setpgid EACCES after exec; LTP setpgid03).
@@ -600,6 +1031,13 @@ fn do_execve(pathname: &str, argv: &[alloc::string::String], envp: &[alloc::stri
                     xt_pid, full_path.as_ref(),
                     crate::drivers::timer::get_jiffies().wrapping_sub(xt_now)
                 );
+            }
+            // sc209 (leg 14): latch render_service's tgid for the FXRS
+            // futex lifecycle tracer (SA 10 publish-wall forensics; see
+            // the FXRS block in sync/futex.rs). The exec'ing task is the
+            // group leader, so pid == tgid here.
+            if full_path.as_ref().ends_with("/system/bin/render_service") {
+                crate::sync::futex::fxrs_latch(crate::process::current_pid());
             }
             crate::pr_debug!("exec: pid={} path={}", crate::process::current_pid(), full_path.as_ref());
             0
@@ -669,7 +1107,35 @@ pub fn sys_execve(args: SyscallArgs) -> i64 {
         Err(e) => return e,
     };
 
-    do_execve(pathname_str, &argv, &envp, 0) as i64
+    let rc = do_execve(pathname_str, &argv, &envp, 0) as i64;
+    // sc39 gate: the launcher spawn child completes every sandbox hook
+    // ('Child process:com.ohos.launcher success') then exits 0 WITHOUT
+    // exec'ing — name any failed exec of an app-shaped path (a bare
+    // execve ENOENT is otherwise invisible on the serial).
+    if rc < 0
+        && (pathname_str.starts_with("/data/")
+            || pathname_str.starts_with("/mnt/sandbox/"))
+    {
+        static EXEC_FAIL_N: core::sync::atomic::AtomicUsize =
+            core::sync::atomic::AtomicUsize::new(0);
+        let n = EXEC_FAIL_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        if n < 120 {
+            let root = crate::sched::current()
+                .and_then(|t| unsafe { (*t).fs_arc() })
+                .map(|fs| fs.get_root())
+                .unwrap_or_default();
+            let root_str = core::str::from_utf8(&root).unwrap_or("?");
+            crate::pr_warn!(
+                "execfail[{}] '{}' -> {} root='{}' (pid {})",
+                n,
+                pathname_str,
+                rc,
+                root_str,
+                unsafe { crate::process::current_pid() }
+            );
+        }
+    }
+    rc
 }
 
 /// sys_exit - Exit the CALLING THREAD only (Linux exit(2) semantics)
@@ -680,7 +1146,15 @@ pub fn sys_execve(args: SyscallArgs) -> i64 {
 /// # Returns
 /// Does not return
 pub fn sys_exit(args: SyscallArgs) -> i64 {
-    let status = args[0] as i32;
+    // Linux ABI (kernel/exit.c): the user code is masked to 8 bits and
+    // pre-shifted into wait-status layout at the syscall boundary —
+    // sys_exit stores `(error_code & 0xff) << 8`. Storing the raw value
+    // made `exit(-1)` indistinguishable from death-by-SIGHUP everywhere
+    // downstream (Rux encodes signal deaths as negative exit codes), so
+    // every OH service exiting with -1 was misreported as a
+    // kernel-origin SIGHUP kill (SIGDEATH sig=1, si_pid=0) and init's
+    // wait4 saw WIFSIGNALED where Linux reports WIFEXITED/255.
+    let status = (((args[0] as u32) & 0xFF) << 8) as i32;
     crate::process::exit::do_exit(status);
     0 // unreachable
 }
@@ -692,7 +1166,59 @@ pub fn sys_exit(args: SyscallArgs) -> i64 {
 /// `exit` / return-from-main all come through here — without it a
 /// multi-threaded process kept running after "exit".
 pub fn sys_exit_group(args: SyscallArgs) -> i64 {
-    let status = args[0] as i32;
+    // Same Linux pre-shift as sys_exit (see the comment there).
+    let status = (((args[0] as u32) & 0xFF) << 8) as i32;
+    // sc40 gate: every appspawn child completes its sandbox hooks then
+    // exits 0 here without ever running the ability runtime — dump the
+    // child's last syscalls from the forensic ring so the terminal
+    // sequence (what it read/checked right before deciding to die) is
+    // on the serial. Deep-root (app sandbox) processes only.
+    {
+        let root = crate::sched::current()
+            .and_then(|t| unsafe { (*t).fs_arc() })
+            .map(|fs| fs.get_root())
+            .unwrap_or_default();
+        let root_str = core::str::from_utf8(&root).unwrap_or("");
+        let deep = root_str
+            .split('/')
+            .filter(|s| !s.is_empty())
+            .count() >= 4;
+        if deep {
+            use core::sync::atomic::Ordering::Relaxed;
+            let pid = unsafe { crate::process::current_pid() } as u32;
+            let mut picks: [(u32, u64, u64, u64); 12] = [(0, 0, 0, 0); 12];
+            let mut n = 0usize;
+            for e in crate::syscall::dispatch::SYSCALL_RING.iter() {
+                if e.pid.load(Relaxed) == pid && n < picks.len() {
+                    picks[n] = (
+                        e.nr.load(Relaxed),
+                        e.a0.load(Relaxed),
+                        e.a1.load(Relaxed),
+                        e.ret.load(Relaxed),
+                    );
+                    n += 1;
+                }
+            }
+            crate::pr_warn!(
+                "childexit pid={} root='{}' status={:#x} last{}:",
+                pid,
+                root_str,
+                args[0] as u32,
+                n
+            );
+            for i in (0..n).rev() {
+                let (nr, a0, a1, ret) = picks[i];
+                crate::pr_warn!(
+                    "  [{:02}] nr={} a0={:#x} a1={:#x} -> {}",
+                    i,
+                    nr,
+                    a0,
+                    a1,
+                    ret as i64
+                );
+            }
+        }
+    }
     crate::process::exit::do_exit_group(status);
     0 // unreachable
 }
@@ -1241,10 +1767,12 @@ pub fn sys_setuid(args: SyscallArgs) -> i64 {
                 return -(errno::EPERM as i64);
             }
             // Leaving euid 0 drops all capabilities (Linux commit_creds)
-            // unless PR_SET_KEEPCAPS was set (libcap-ng capng_change_id).
+            // unless PR_SET_KEEPCAPS was set (libcap-ng capng_change_id),
+            // or SECBIT_NO_SETUID_FIXUP is in effect (OH init's service
+            // path — see Cred::keeps_caps_on_setuid).
             // RETURNING to euid 0 (ruid or suid still 0) restores them from
             // the bounding set — see sys_setresuid for the full rationale.
-            if cred.euid != 0 && !cred.keepcaps {
+            if cred.euid != 0 && !cred.keeps_caps_on_setuid() {
                 cred.cap_effective = crate::security::capability::Cap::EMPTY;
                 cred.cap_permitted = crate::security::capability::Cap::EMPTY;
             } else if cred.euid == 0 && (cred.uid == 0 || cred.suid == 0) {
@@ -1346,7 +1874,7 @@ pub fn sys_setreuid(args: SyscallArgs) -> i64 {
             // the bounding set (LTP creat08: root → setreuid(-1,nobody) →
             // setreuid(-1,0) must regain CAP_FSETID to keep S_ISGID on
             // files created in a setgid directory).
-            if cred.euid != 0 && !cred.keepcaps {
+            if cred.euid != 0 && !cred.keeps_caps_on_setuid() {
                 cred.cap_effective = crate::security::capability::Cap::EMPTY;
                 cred.cap_permitted = crate::security::capability::Cap::EMPTY;
             } else if cred.euid == 0 && (new_ruid == 0 || cred.suid == 0) {
@@ -1482,7 +2010,7 @@ pub fn sys_setresuid(args: SyscallArgs) -> i64 {
             //   that setresuid()s to another user and back keeps EMPTY
             //   capability sets and loses CAP_SETUID forever (LTP
             //   setresuid01: setresuid(main,-1,-1) after the round trip).
-            if cred.euid != 0 && !cred.keepcaps {
+            if cred.euid != 0 && !cred.keeps_caps_on_setuid() {
                 cred.cap_effective = crate::security::capability::Cap::EMPTY;
                 cred.cap_permitted = crate::security::capability::Cap::EMPTY;
             } else if cred.euid == 0
@@ -2204,7 +2732,125 @@ pub fn sys_prctl(args: SyscallArgs) -> i64 {
             }
             0
         }
-        _ => -(errno::EINVAL as i64),
+        27 => {
+            // PR_GET_SECUREBITS: current SECBIT_* mask.
+            // SAFETY: current is a valid task pointer.
+            unsafe { (*current).cred().securebits as i64 }
+        }
+        28 => {
+            // PR_SET_SECUREBITS: arg2 = SECBIT_* mask (8 defined bits).
+            // OH's init programs SECBIT_NO_SETUID_FIXUP(+_LOCKED) and
+            // SECBIT_KEEP_CAPS(+_LOCKED) on its display services before
+            // exec; EINVAL there made init abort the child
+            // (INIT_EKEEPCAP) and composer_host/render_service/
+            // bootanimation never started. SECBIT_KEEP_CAPS mirrors the
+            // PR_SET_KEEPCAPS flag so the setuid cap-retention path sees
+            // one consistent bit.
+            if arg2 > 0xff {
+                return -(errno::EINVAL as i64);
+            }
+            // SAFETY: current is a valid task pointer; cred_mut returns
+            // the task's own credential structure.
+            unsafe {
+                let cred = (*current).cred_mut();
+                // Locked bits never clear once set (issecure() rule);
+                // honor it by OR-ing the locked-alive bits back.
+                let old = cred.securebits;
+                let mut new_bits = arg2 as u32;
+                for (bit, lock) in [(0u32, 1u32), (2, 3), (4, 5), (6, 7)] {
+                    if old & (1 << lock) != 0 {
+                        new_bits |= 1 << bit; // locked-set bits stay set
+                        new_bits |= 1 << lock;
+                    }
+                }
+                cred.securebits = new_bits;
+                cred.keepcaps = new_bits & crate::process::task::SECBIT_KEEP_CAPS != 0;
+            }
+            0
+        }
+        47 => {
+            // PR_CAP_AMBIENT: arg2 selects the sub-operation
+            // (1 IS_SET / 2 RAISE / 3 LOWER / 4 CLEAR_ALL), arg3 is the
+            // capability. OH's init raises ambient caps on its services
+            // (SetAmbientCapability) — EINVAL aborted the service child
+            // with INIT_ECAP before exec.
+            const PR_CAP_AMBIENT_IS_SET: u64 = 1;
+            const PR_CAP_AMBIENT_RAISE: u64 = 2;
+            const PR_CAP_AMBIENT_LOWER: u64 = 3;
+            const PR_CAP_AMBIENT_CLEAR_ALL: u64 = 4;
+            let cap = arg3 as u32;
+            match arg2 {
+                PR_CAP_AMBIENT_IS_SET => {
+                    if cap > crate::security::capability::CAP_LAST_CAP {
+                        return -(errno::EINVAL as i64);
+                    }
+                    // SAFETY: current is a valid task pointer.
+                    unsafe { (*current).cred().cap_ambient.has(cap) as i64 }
+                }
+                PR_CAP_AMBIENT_RAISE => {
+                    if cap > crate::security::capability::CAP_LAST_CAP {
+                        return -(errno::EINVAL as i64);
+                    }
+                    // Linux requires the cap in BOTH the permitted and
+                    // inheritable sets; init's service children run with
+                    // full root sets before dropping.
+                    // SAFETY: current is a valid task pointer.
+                    unsafe {
+                        let cred = (*current).cred();
+                        if !cred.cap_permitted.has(cap) || !cred.cap_inheritable.has(cap) {
+                            return -(errno::EPERM as i64);
+                        }
+                    }
+                    // SAFETY: current is a valid task pointer.
+                    unsafe { (*current).cred_mut().cap_ambient.set(cap); }
+                    0
+                }
+                PR_CAP_AMBIENT_LOWER => {
+                    if cap > crate::security::capability::CAP_LAST_CAP {
+                        return -(errno::EINVAL as i64);
+                    }
+                    // SAFETY: current is a valid task pointer.
+                    unsafe { (*current).cred_mut().cap_ambient.clear(cap); }
+                    0
+                }
+                PR_CAP_AMBIENT_CLEAR_ALL => {
+                    // SAFETY: current is a valid task pointer.
+                    unsafe { (*current).cred_mut().cap_ambient = crate::security::capability::Cap::EMPTY; }
+                    0
+                }
+                _ => -(errno::EINVAL as i64),
+            }
+        }
+        // PR_SET_VMA (Linux with CONFIG_ANON_VMA_NAME): name an anonymous
+        // VMA — (option, addr, size, PR_SET_VMA_ANON_NAME, name). OH's
+        // userspace names thread stacks/arenas at creation and treats
+        // EINVAL as a failure it retries (bootanimation's thread-creation
+        // loop). Accept and ignore the name (we don't track VMA names).
+        0x5356_4d41 => {
+            // prctl(PR_SET_VMA, PR_SET_VMA_ANON_NAME, addr, size, name):
+            // the SUB-OPERATION is arg2 (addr in arg3, size in arg4).
+            const PR_SET_VMA_ANON_NAME: u64 = 0;
+            if arg2 != PR_SET_VMA_ANON_NAME {
+                return -(errno::EINVAL as i64);
+            }
+            0
+        }
+        _ => {
+            // Bring-up visibility: which unimplemented options callers
+            // actually exercise (throttled — hdf_devhost retries some in
+            // a loop).
+            static UNK_PRCTL: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+            let n = UNK_PRCTL.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            if n < 32 {
+                crate::pr_warn!(
+                    "prctl: unimplemented option {} arg2={:#x} (pid {})",
+                    option,
+                    arg2,
+                    crate::process::current_pid()
+                );
+            }
+            -(errno::EINVAL as i64)
+        }
     }
 }
 
@@ -2355,13 +3001,48 @@ pub fn sys_rt_sigqueueinfo(args: SyscallArgs) -> i64 {
 }
 
 /// sys_rt_tgsigqueueinfo - send signal with data to a precise THREAD
-/// (Linux asm-generic NR 240: 3 parameters — tgid, tid, uinfo)
+/// (Linux asm-generic NR 240: 4 parameters — tgid, tid, sig, uinfo).
+///
+/// HILOGD fix: this previously parsed THREE arguments (tgid, tid,
+/// uinfo=args[2]) — args[2] is the SIGNAL number, so uinfo became a
+/// garbage pointer the size of the signo (e.g. 0x23), failed
+/// access_ok, and every caller got EFAULT. hilogd's DFX stack-dump
+/// path (rt_tgsigqueueinfo(self-tgid, self-tid, SIGDUMP, &si on its
+/// own stack) — b154/sweep1: `EFAULTTRAC: nr=240 a0=<tgid> a1=<tid>`
+/// immediately before the hilogd.server SIGSEGV at 0x18) depends on
+/// this syscall succeeding; with EFAULT the whole hilog pipeline was
+/// dead from boot. Linux reads sig=args[2], uinfo=args[3]
+/// (kernel/signal.c sys_rt_tgsigqueueinfo).
 pub fn sys_rt_tgsigqueueinfo(args: SyscallArgs) -> i64 {
     let tgid = args[0] as u32;
     let tid = args[1] as u32;
-    let uinfo = args[2] as *const u8;
+    let sig = args[2] as i32;
+    let uinfo = args[3] as *const u8;
 
-    // Resolve the exact thread first.
+    // Linux order (kernel/signal.c): copy siginfo from user FIRST
+    // (EFAULT), then valid_signal (EINVAL), then the thread lookup
+    // (ESRCH), then the si_code forge check (EPERM), then permission,
+    // and sig==0 validates only — no delivery.
+    if uinfo.is_null() {
+        return -(errno::EFAULT as i64);
+    }
+    if !crate::arch::uaccess::access_ok(uinfo as usize, 128) {
+        return -(errno::EFAULT as i64);
+    }
+    // si_signo (offset 0), si_code (offset 8), si_value.sival_ptr
+    // (offset 24) — the fields we deliver; Linux copies the full
+    // 128-byte struct and overwrites si_signo with `sig`.
+    let mut buf = [0u8; 32];
+    if unsafe { crate::arch::uaccess::copy_from_user(buf.as_mut_ptr(), uinfo, 32) } != 0 {
+        return -(errno::EFAULT as i64);
+    }
+    let si_code = i32::from_le_bytes(buf[8..12].try_into().unwrap());
+
+    if sig < 0 || sig > 64 {
+        return -(errno::EINVAL as i64);
+    }
+
+    // Resolve the exact thread.
     // SAFETY: find_task_by_pid returns valid pointer when non-null.
     let target = unsafe { crate::sched::find_task_by_pid(tid) };
     if target.is_null() {
@@ -2372,50 +3053,20 @@ pub fn sys_rt_tgsigqueueinfo(args: SyscallArgs) -> i64 {
     if target_task.tgid() != tgid {
         return -(errno::ESRCH as i64);
     }
-    if !crate::security::can_send_signal(target_task.cred()) {
+
+    // Linux (do_rt_tgsigqueueinfo): si_code >= 0 or SI_TKILL (-6) means
+    // the caller tries to forge a kernel signal source — EPERM.
+    if si_code >= 0 || si_code == -6 {
         return -(errno::EPERM as i64);
     }
-
-    if uinfo.is_null() {
-        return -(errno::EFAULT as i64);
-    }
-    if !crate::arch::uaccess::access_ok(uinfo as usize, 128) {
-        return -(errno::EFAULT as i64);
-    }
-
-    // Read si_signo (offset 0) and si_code (offset 8).
-    let mut hdr = [0u8; 12];
-    if unsafe {
-        crate::arch::uaccess::copy_from_user(hdr.as_mut_ptr(), uinfo, 12)
-    } != 0
-    {
-        return -(errno::EFAULT as i64);
-    }
-    let sig = i32::from_le_bytes(hdr[0..4].try_into().unwrap());
-    if sig < 0 || sig > 64 {
-        return -(errno::EINVAL as i64);
+    if !crate::security::can_send_signal(target_task.cred()) {
+        return -(errno::EPERM as i64);
     }
     if sig == 0 {
         return 0;
     }
-    let si_code = i32::from_le_bytes(hdr[8..12].try_into().unwrap());
-    if si_code >= 0 {
-        return -(errno::EPERM as i64);
-    }
 
-    // Preserve the user payload (si_value @24) for SA_SIGINFO receivers,
-    // mirroring rt_sigqueueinfo above.
-    let mut payload = [0u8; 8];
-    if unsafe {
-        crate::arch::uaccess::copy_from_user(
-            payload.as_mut_ptr(),
-            uinfo.add(24),
-            8,
-        )
-    } != 0
-    {
-        return -(errno::EFAULT as i64);
-    }
+    let payload: [u8; 8] = buf[24..32].try_into().unwrap();
     let mut info = crate::signal::SigInfo::new(
         sig,
         si_code,
@@ -2826,10 +3477,14 @@ pub fn sys_sysinfo(args: SyscallArgs) -> i64 {
         let _ = put_u64(info_ptr.add(8) as *mut u64, 0);
         let _ = put_u64(info_ptr.add(16) as *mut u64, 0);
         let _ = put_u64(info_ptr.add(24) as *mut u64, 0);
-        // totalram (bytes)
-        let _ = put_u64(info_ptr.add(32) as *mut u64, crate::config::PHYS_MEMORY_SIZE as u64);
+        // totalram (bytes): the discovered memory map (runtime descriptor
+        // count), not the Kernel.toml nominal size — sysinfo(2) callers
+        // (installers, OOM-aware daemons) size their behavior off these
+        // fields; freeram used to be a hard-coded "half of nominal".
+        let mem = crate::mm::meminfo::get_basic_memory_info();
+        let _ = put_u64(info_ptr.add(32) as *mut u64, mem.mem_total as u64);
         // freeram
-        let _ = put_u64(info_ptr.add(40) as *mut u64, crate::config::PHYS_MEMORY_SIZE as u64 / 2);
+        let _ = put_u64(info_ptr.add(40) as *mut u64, mem.mem_free as u64);
         // sharedram, bufferram
         let _ = put_u64(info_ptr.add(48) as *mut u64, 0);
         let _ = put_u64(info_ptr.add(56) as *mut u64, 0);
@@ -3606,6 +4261,15 @@ pub fn sys_capset(args: SyscallArgs) -> i64 {
     // 3. new effective must be a subset of new permitted
     let cred = current.cred();
     if !new_permitted.is_subset_of(cred.cap_permitted) {
+        crate::pr_info!(
+            "capset: pid {} uid {} EPERM: new permitted {:#x} not subset of {:#x} (securebits {:#x} keepcaps {})",
+            unsafe { (*current).pid() },
+            cred.euid,
+            new_permitted.bits(),
+            cred.cap_permitted.bits(),
+            cred.securebits,
+            cred.keepcaps
+        );
         return -(errno::EPERM as i64);
     }
     if !new_inheritable.is_subset_of(cred.cap_inheritable) {
@@ -3706,22 +4370,33 @@ pub fn sys_pivot_root(args: SyscallArgs) -> i64 {
         return -(errno::ENOTDIR as i64);
     }
 
-    // put_old must be strictly underneath new_root.
-    let under = if put_old == new_root {
-        false
-    } else {
-        put_old.starts_with(&if new_root == "/" {
+    // put_old must be underneath new_root — or EQUAL to it: Linux's check
+    // is is_subdir(put_old, new_root), and is_subdir(d, d) is true, so the
+    // documented idiom pivot_root(new_root, new_root) is legal. OH's
+    // appspawn sandbox (sandbox_core.cpp:1269) uses it; the old
+    // put_old == new_root → EINVAL rejected every sandbox pivot.
+    let under = put_old == new_root
+        || put_old.starts_with(&if new_root == "/" {
             alloc::string::String::from("/")
         } else {
             alloc::format!("{}/", new_root)
-        })
-    };
+        });
     if !under {
+        crate::pr_info!(
+            "pivot_root EINVAL(not-under): new='{}' put_old='{}'",
+            new_root,
+            put_old
+        );
         return -(errno::EINVAL as i64);
     }
 
     // new_root must be a mountpoint of the current mount namespace.
     if !crate::process::ns::ns_is_mountpoint(&new_root) {
+        crate::pr_info!(
+            "pivot_root EINVAL(not-mountpoint): new='{}' put_old='{}'",
+            new_root,
+            put_old
+        );
         return -(errno::EINVAL as i64);
     }
 
@@ -3730,13 +4405,43 @@ pub fn sys_pivot_root(args: SyscallArgs) -> i64 {
     };
 
     // (a) jail: fs root prefix → new_root (chroot-style, ".." clamped).
-    current.set_root(new_root.as_bytes());
+    // Record the jail-root DENTRY too (same as chroot): getcwd derives
+    // root-relative paths from it, and the string self-heals from it if
+    // mounts move. Best-effort — a failed lookup keeps string-only root.
+    let root_dentry = match crate::fs::vfs::path_lookup(
+        &new_root,
+        crate::fs::vfs::LOOKUP_FOLLOW,
+    ) {
+        Ok(vpath) => vpath.dentry.clone(),
+        Err(_) => None,
+    };
+    // sc29 hunt: the recorded root STRING is the user argument, but the
+    // resolved dentry may live at a different GLOBAL path (a chroot prefix
+    // like /usr can be in effect at pivot time) — every later prefixed
+    // lookup walks the string against the global tree. Print both.
+    if let Some(rd) = root_dentry.as_ref() {
+        crate::pr_info!(
+            "pivot_root: arg='{}' resolved dentry global='{}'",
+            new_root,
+            rd.build_path()
+        );
+    }
+    if let Some(fs) = current.fs_arc() {
+        fs.set_root_with_dentry(new_root.as_bytes(), root_dentry);
+        // Record put_old for the post-pivot cleanup umount2 (Linux leaves
+        // the old root MOUNTED at put_old; our jail-style pivot stacks
+        // nothing, so the matching umount2(MNT_DETACH) consumes the marker
+        // and reports success — OH's sandbox teardowns fail otherwise).
+        fs.set_pivot_put_old(put_old.as_bytes());
+    }
     // (d) cwd: move into the new root when the old cwd fell outside it.
     let cwd = current.get_cwd();
     let cwd_str = core::str::from_utf8(&cwd).unwrap_or("/");
     let cwd_norm = crate::fs::path::path_normalize(cwd_str);
     let inside = cwd_norm == "/" || cwd_norm.starts_with(&new_root);
     if !inside {
+        // String-only reset (clears any cwd dentry — the string is the
+        // truth again for this legacy-compat branch).
         current.set_cwd(b"/");
     }
 
@@ -4246,6 +4951,32 @@ pub fn init_exited_fallback_cascade() {
     crate::println!("kernel: init exited — powering system down");
     shutdown_cascade(LINUX_REBOOT_CMD_POWER_OFF);
     // shutdown_cascade returns only on total SBI failure — park.
+    loop {
+        core::hint::spin_loop();
+    }
+}
+
+/// Restart the machine now (Linux sysrq 'b': "immediately restarts the
+/// computer without syncing disks or unmounting them").
+///
+/// Never returns. The cascade still syncs what it can before the reset
+/// — a debug trigger must not leave the image torn.
+pub fn force_reboot() -> ! {
+    const LINUX_REBOOT_CMD_RESTART: u32 = 0x01234567;
+    crate::println!("sysrq: rebooting");
+    shutdown_cascade(LINUX_REBOOT_CMD_RESTART);
+    loop {
+        core::hint::spin_loop();
+    }
+}
+
+/// Power the machine off (Linux sysrq 'o').
+///
+/// Never returns.
+pub fn force_power_off() -> ! {
+    const LINUX_REBOOT_CMD_POWER_OFF: u32 = 0x4321FEDC;
+    crate::println!("sysrq: powering off");
+    shutdown_cascade(LINUX_REBOOT_CMD_POWER_OFF);
     loop {
         core::hint::spin_loop();
     }
@@ -4789,6 +5520,31 @@ pub fn sys_clone3(args: SyscallArgs) -> i64 {
         tls,
         exit_signal: exit_signal as u8,
     };
+
+    // sc119 insurance: the appclone census lives in sys_clone; a caller
+    // using clone3 (this path) would bypass it, muddying the "no clone
+    // ever attempted" decode. Same filter, same 80-line budget counter
+    // is NOT shared (this one has its own — clone3 use by OH runtimes
+    // is unlikely, the budget here is small and separate).
+    {
+        let comm = crate::sched::current()
+            .map(|t| unsafe { (*t).comm() })
+            .map(|c| core::str::from_utf8(c).unwrap_or(""))
+            .unwrap_or("")
+            .trim_end_matches('\0');
+        let is_app = comm.contains("launcher")
+            || comm.contains("settingsdata")
+            || comm.contains("systemui")
+            || comm.contains("dataability");
+        let is_spawn = comm == "appspawn";
+        if is_app || is_spawn {
+            static N4: core::sync::atomic::AtomicUsize =
+                core::sync::atomic::AtomicUsize::new(0);
+            if N4.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 20 {
+                crate::pr_warn!("appclone3: comm='{}' flags={:#x}", comm, flags);
+            }
+        }
+    }
 
     match do_clone(clone_args) {
         Ok(pid) => pid as i64,

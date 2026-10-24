@@ -61,18 +61,39 @@ pub fn init_task_storage_addr() -> usize {
 pub fn init() {
     let rootfs_first = crate::initrd::loaded();
     for init_path in init_candidates() {
-        println!("init: trying {}", init_path);
         let program_data = load_init_program(&init_path, rootfs_first);
         if let Some(data) = program_data {
             if create_and_start_init_process(&data, &init_path, rootfs_first).is_some() {
+                // Success: the two structured init lines (serial-clean:
+                // used to live in main.rs after init() returned, with a
+                // raw "init: trying <path>" printed above them; the
+                // chosen path is now folded into the load line).
+                crate::print_status(
+                    "init",
+                    &alloc::format!("ELF {} loaded", init_path),
+                    true,
+                );
+                crate::print_status("init", "init task (PID 1) enqueued", true);
                 return;
             }
-            println!("init: Failed to create init process for {}", init_path);
+            crate::print_status(
+                "init",
+                &alloc::format!("{} start failed", init_path),
+                false,
+            );
         } else {
-            println!("init: {} not found on any filesystem", init_path);
+            // Neutral [done]: the candidate list intentionally tries
+            // several paths (Linux kernel_init semantics); a miss is
+            // normal, not a boot failure (serial-clean: was a raw
+            // println).
+            crate::print_status_ex(
+                "init",
+                &alloc::format!("{} not found", init_path),
+                None,
+            );
         }
     }
-    println!("init: no init program could be loaded — halting");
+    crate::print_status("init", "no init program loadable", false);
     halt();
 }
 
@@ -205,6 +226,13 @@ fn create_and_start_init_process(
 
         // Load ELF program into memory and set up user context
         if let Err(e) = load_and_setup_elf(task_ptr, program_data, init_path, rootfs_first) {
+            crate::print_status(
+                "init",
+                &alloc::format!("{} ELF load failed", init_path),
+                false,
+            );
+            // Error detail (broken-boot diagnostic; not part of the
+            // normal boot table).
             println!("init: ELF load failed err={:?} path={} len={} first8={:02x}{:02x}{:02x}{:02x}",
                 e, init_path, program_data.len(),
                 program_data.get(0).copied().unwrap_or(0),
@@ -299,19 +327,62 @@ fn load_and_setup_elf(
 
     // Same argv/envp the old inline stack builder provided.
     let argv: Vec<String> = alloc::vec![String::from(init_path)];
-    let envp: Vec<String> = alloc::vec![
+    let mut envp: Vec<String> = alloc::vec![
         String::from("PATH=/bin:/usr/bin:/sbin:/usr/sbin"),
         String::from("HOME=/root"),
         String::from("TERM=linux"),
         String::from("PS1=\x1b[1;32mroot\x1b[0m:\x1b[1;34m${PWD}\x1b[0m# "),
         String::from("ENV=/etc/mrshrc"),
     ];
+    // OH bring-up (x86_64_virt image): init's environment is inherited
+    // by every OH service (SetServiceEnv only ADDS cfg setenvs on top).
+    // The display composer's vendor backend (libdisplay_composer_vendor)
+    // needs libdrm.so, which this image ships only under
+    // /sys_prod/robot/out/lib (the robot/ROS payload's lib tree) — not
+    // in any ld-musl default directory. Handing init an LD_LIBRARY_PATH
+    // that includes it lets the composer devhost resolve libdrm.so.
+    if cmdline::get_param("ohos.boot.hardware").is_some() {
+        // The image ships only /etc/ld-musl-aarch64.path, so the x86_64
+        // ld-musl never reads a search-path file and falls back to bare
+        // /lib:/usr/local/lib:/usr/lib — every OH directory (and the
+        // robot payload's libdrm.so) would be unsearchable. Replicate
+        // the full namespace dir list from the image's
+        // /system/etc/ld-musl-namespace-x86_64.ini (default + ndk
+        // namespaces; libffrt.so and libsync_fence.z.so, both needed by
+        // librender_service.z.so, live ONLY in /system/lib64/ndk —
+        // without it render_service and bootanimation exit 127 at
+        // loader stage) plus the robot lib tree.
+        //
+        // ORDERING (eglCreateImageKHR hunt): the robot tree must come
+        // AFTER every OH directory. /sys_prod/robot/out/lib carries a
+        // Mesa 25.2.2 stack whose libEGL.so exports only eglCreateImage
+        // (the KHR-suffixed entry points were dropped); when it sat
+        // first, musl resolved librender_service_base.z.so's
+        // DT_NEEDED libEGL.so to Mesa's build and the process died with
+        // "Error relocating ... eglCreateImageKHR: symbol not found" —
+        // both render_service and bootanimation. OH's own
+        // /system/lib64/platformsdk/libEGL.so exports all 22 egl*
+        // symbols rsb imports, so OH dirs must win every SONAME clash;
+        // the robot tree stays on the list (last) for names only it
+        // has (libdrm.so, libgallium-25.2.2.so, ...).
+        envp.push(String::from(
+            "LD_LIBRARY_PATH=/usr/system/lib64:/vendor/lib64:/vendor/lib64/chipsetsdk:/vendor/lib64/chipset-sdk:/vendor/lib64/passthrough:/vendor/lib64/passthrough/indirect:/usr/system/lib64/chipset-pub-sdk:/usr/system/lib64/chipset-sdk:/usr/system/lib64/platformsdk:/usr/system/lib64/module:/usr/system/lib64/module/data:/usr/system/lib64/module/multimedia:/usr/system/lib64/module/security:/usr/system/lib64/llndk:/usr/system/lib64/chipset-sdk-sp:/usr/system/lib64/ndk:/vendor/lib64/hw:/vendor/lib64/chipset-sdk-sp:/lib64/platformsdk:/lib64/chipset-pub-sdk:/lib64/chipsetsdk:/lib64/llndk:/lib64/chipset-sdk:/lib64/chipset-sdk-sp:/sys_prod/lib64:/sys_prod/robot/out/lib:/usr/system/lib:/usr/system/lib/ndk:/system/lib64:/system/lib64/chipset-pub-sdk:/system/lib64/chipset-sdk:/system/lib64/platformsdk:/system/lib64/module:/system/lib64/module/data:/system/lib64/module/multimedia:/system/lib64/module/security:/system/lib64/llndk:/system/lib64/chipset-sdk-sp:/system/lib64/ndk:/system/lib:/system/lib/ndk:/lib:/usr/local/lib:/usr/lib:/vendor/modem/modem_vendor/lib64:/chip_prod/lib64:/chip_prod/lib64/passthrough:/chip_prod/lib64/passthrough/indirect",
+        ));
+    }
 
     // do_execve_elf switches this hart's satp to the new (init) address
     // space; capture the kernel root so boot continues on the kernel page
     // table afterwards, exactly as before this call existed.
     // SAFETY: reads the boot-time root PPN, no invariants to uphold.
     let kernel_root_ppn = unsafe { crate::arch::mm::mmu_init::root_page_table_ppn() };
+
+    // Pinned vm_file identities for the PID-1 segment VMAs (vm_file
+    // semantics — same as sys_execve): best-effort VFS opens; a None
+    // only drops the /proc/<pid>/maps path column.
+    let init_file_arc = crate::syscall::process::open_file_arc(init_path);
+    let interp_file_arc = ElfLoader::get_interpreter(program_data)
+        .and_then(|p| core::str::from_utf8(p).ok())
+        .and_then(crate::syscall::process::open_file_arc);
 
     // SAFETY: task_ptr points to the freshly built PID 1 task (static
     // INIT_TASK_STORAGE); do_execve_elf only needs it to carry a valid
@@ -328,6 +399,8 @@ fn load_and_setup_elf(
             init_path,
             interp_data.as_deref(),
             false,
+            init_file_arc.as_ref(),
+            interp_file_arc.as_ref(),
         )
     };
     match result {

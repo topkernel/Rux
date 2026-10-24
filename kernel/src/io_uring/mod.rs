@@ -558,6 +558,26 @@ pub fn io_uring_mmap_handler(
         }
     }
 
+    // ATOMIC RESERVE (b91 corruption fix): add the ring's VMA BEFORE any
+    // eager PTE work — the old order (map loop, then vma_write().add)
+    // raced same-mm mappers for the picked range: the loser's add failed
+    // AFTER its PTEs were installed (leaked mapping over a foreign VMA),
+    // or its map_page overwrote the winner's demand PTEs. Reserved first,
+    // the map loop below can only install into our own VMA.
+    let mut vma_flags = VmaFlags::new();
+    vma_flags.insert(VmaFlags::READ);
+    vma_flags.insert(VmaFlags::WRITE);
+    vma_flags.insert(VmaFlags::SHARED);
+
+    let vma = Vma::new(
+        PageVirtAddr::new(vaddr),
+        PageVirtAddr::new(vaddr + region.size),
+        vma_flags,
+    );
+    if addr_space.vma_write().add(vma).is_err() {
+        return Err(-12);
+    }
+
     unsafe {
         let mut pte_flags = PageTableEntry::V | PageTableEntry::U
             | PageTableEntry::A | PageTableEntry::D;
@@ -580,20 +600,6 @@ pub fn io_uring_mmap_handler(
             }
         }
         crate::arch::mm::asid::flush_tlb_all();
-    }
-
-    let mut vma_flags = VmaFlags::new();
-    vma_flags.insert(VmaFlags::READ);
-    vma_flags.insert(VmaFlags::WRITE);
-    vma_flags.insert(VmaFlags::SHARED);
-
-    let vma = Vma::new(
-        PageVirtAddr::new(vaddr),
-        PageVirtAddr::new(vaddr + region.size),
-        vma_flags,
-    );
-    if addr_space.vma_write().add(vma).is_err() {
-        return Err(-12);
     }
 
     Ok(vaddr)

@@ -1008,7 +1008,35 @@ pub fn sys_connect(args: SyscallArgs) -> i64 {
             Some((sock, nonblock)) => {
                 match crate::net::unix::unix_connect(&sock, &uaddr, nonblock) {
                     Ok(()) => 0,
-                    Err(e) => e as i64,
+                    Err(e) => {
+                        // OH bring-up: throttled unix-connect-failure trace
+                        // — param/hilog clients retry forever against a
+                        // missing node and hilog never reaches console.
+                        static UCONN_SEEN: crate::sync::spinlock::Spinlock<
+                            Option<alloc::vec::Vec<alloc::string::String>>,
+                        > = crate::sync::spinlock::Spinlock::new(None);
+                        let mut print_it = false;
+                        {
+                            let mut seen = UCONN_SEEN.lock_irqsave();
+                            let list = seen.get_or_insert_with(alloc::vec::Vec::new);
+                            if list.len() < 32
+                                && !list.iter().any(|p| p.as_str() == uaddr.key.as_str())
+                            {
+                                list.push(alloc::string::String::from(uaddr.key.as_str()));
+                                print_it = true;
+                            }
+                        }
+                        if print_it {
+                            crate::pr_info!(
+                                "unix connect fail({}) '{}':{} (pid {})",
+                                e,
+                                uaddr.key,
+                                uaddr.key.len(),
+                                unsafe { crate::process::current_pid() }
+                            );
+                        }
+                        e as i64
+                    }
                 }
             }
             None => -(errno::ENOTSOCK as i64),
@@ -2169,7 +2197,12 @@ pub fn sys_getsockopt(args: SyscallArgs) -> i64 {
         Some(v) => v,
         None => return -(errno::EFAULT as i64),
     };
-    if optlen == 0 || (optlen as i32) < 0 || optlen > 128 {
+    // Cap 256 (not 128): libselinux's getpeercon(3) calls getsockopt with
+    // INITCONTEXTLEN+1 = 256 for SO_PEERSEC — a smaller cap made every
+    // peer-label query fail EINVAL before the option dispatch ran, which
+    // turned init's param-service SELinux check into a hard "Forbid to set
+    // parameter bootevent.*" (b151). 0 and (socklen_t)-1 still EINVAL.
+    if optlen == 0 || (optlen as i32) < 0 || optlen > 256 {
         return -(errno::EINVAL as i64);
     }
     let optlen = optlen as usize;
@@ -2184,6 +2217,7 @@ pub fn sys_getsockopt(args: SyscallArgs) -> i64 {
         const SO_SNDTIMEO_GET: i32 = 21;
         const SOL_SOCKET_GET: i32 = 1;
         const SO_PEERCRED_GET: i32 = 17;
+        const SO_PEERSEC_GET: i32 = 31;
         if level == SOL_SOCKET_GET && optname == SO_PEERCRED_GET {
             // struct ucred { pid_t pid; uid_t uid; gid_t gid; } = 12 bytes.
             // dbus EXTERNAL auth reads the connecting client's identity
@@ -2208,6 +2242,77 @@ pub fn sys_getsockopt(args: SyscallArgs) -> i64 {
                     write_len,
                 );
                 let _ = crate::arch::uaccess::put_user(optlen_ptr, write_len as u32);
+            }
+            return 0;
+        }
+        if level == SOL_SOCKET_GET && optname == SO_PEERSEC_GET {
+            // SO_PEERSEC: the peer's LSM security context (getpeercon(3)).
+            // OpenHarmony's param service calls getpeercon() on the client
+            // socket inside SetParamCheck (libparaperm_checker), and a
+            // failure makes init forbid EVERY bootevent.* parameter set —
+            // which wedges bootanimation in WaitRenderServiceInit() polling
+            // bootevent.renderservice.ready forever (b151: 225k serial
+            // lines, black screen, render_service asleep after publishing
+            // SA 10). We have no policy engine, so synthesize a context
+            // "u:r:<peer comm>:s0": nothing parses it semantically — OH's
+            // selinux_check_access("parameter_service") hits the unknown
+            // class path and our selinuxfs deny_unknown=0 makes that
+            // ALLOW (same permissive answer the samgr SA gate relies on).
+            // ENOTCONN when there is no peer (Linux stream behavior).
+            let cred = match usock.peer_cred() {
+                Some(c) => c,
+                None => return -(errno::ENOTCONN as i64),
+            };
+            // Linux writes the context NUL-terminated and reports the
+            // length INCLUDING the NUL (selinux_socket_getpeersec_stream);
+            // a too-small buffer gets ERANGE with the needed size, and
+            // libselinux reallocs and retries with that size.
+            let mut ctx = [0u8; 32];
+            let mut n = 0usize;
+            for &b in b"u:r:" {
+                ctx[n] = b;
+                n += 1;
+            }
+            let mut have_name = false;
+            if cred.pid > 0 {
+                if let Some(task) = crate::process::find_task_by_pid(cred.pid as u32) {
+                    for &b in task.comm() {
+                        if b == 0 || n + 5 > ctx.len() {
+                            break;
+                        }
+                        if b.is_ascii_alphanumeric() || b == b'_' {
+                            ctx[n] = b;
+                            n += 1;
+                            have_name = true;
+                        }
+                    }
+                }
+            }
+            if !have_name {
+                for &b in b"init" {
+                    ctx[n] = b;
+                    n += 1;
+                }
+            }
+            ctx[n] = b':';
+            ctx[n + 1] = b's';
+            ctx[n + 2] = b'0';
+            n += 4; // ":s0" + NUL
+            if optlen < n {
+                // SAFETY: put_user is the exception-table (SUM=0 safe)
+                // copy path; optlen_ptr was validated at entry.
+                unsafe {
+                    let _ = crate::arch::uaccess::put_user(optlen_ptr, n as u32);
+                }
+                return -(errno::ERANGE as i64);
+            }
+            // SAFETY: optval validated with access_ok(optlen) at entry;
+            // copy_to_user/put_user are the exception-table (SUM=0 safe)
+            // paths.
+            unsafe {
+                crate::arch::uaccess::clear_user(optval, optlen.min(n));
+                crate::arch::uaccess::copy_to_user(optval, ctx.as_ptr(), n);
+                let _ = crate::arch::uaccess::put_user(optlen_ptr, n as u32);
             }
             return 0;
         }
@@ -2815,6 +2920,10 @@ pub fn sys_sendmsg(args: SyscallArgs) -> i64 {
 const MSG_DONTWAIT: i32 = 0x40;
 /// W3: MSG_TRUNC (reported in recvmsg's msg_flags).
 const MSG_TRUNC: i32 = 0x20;
+/// MSG_PEEK: receive without consuming (AF_UNIX — hilogd's datagram
+/// length probe reads the first 2 bytes of every HilogMsg this way; a
+/// consuming "peek" destroyed the record and hilog query stayed empty).
+const MSG_PEEK: i32 = 0x02;
 /// Ancillary data was dropped (control buffer too small) — reported in
 /// recvmsg's msg_flags like Linux.
 const MSG_CTRUNC: i32 = 0x08;
@@ -2910,7 +3019,8 @@ pub fn sys_recvmsg(args: SyscallArgs) -> i64 {
     if let Some((usock, file_nonblock)) = crate::net::unix::unix_file_of(fd as usize) {
         let nonblock = file_nonblock || (flags & MSG_DONTWAIT) != 0;
         let deadline = usock.rcvtimeo_deadline();
-        let r = match crate::net::unix::unix_recv_ctl(&usock, &mut buf, nonblock, deadline) {
+        let peek = (flags & MSG_PEEK) != 0;
+        let r = match crate::net::unix::unix_recv_ctl(&usock, &mut buf, nonblock, deadline, peek) {
             Ok(r) => r,
             Err(e) => return e as i64,
         };
@@ -2941,11 +3051,20 @@ pub fn sys_recvmsg(args: SyscallArgs) -> i64 {
             }
         }
         // SCM_RIGHTS / SCM_CREDENTIALS: install the attached files and
-        // write the cmsg chain.
+        // write the cmsg chain. Credentials are emitted only when the
+        // RECEIVING socket has SO_PASSCRED — Linux unix_{dgram,stream}
+        // gate the whole cred emission on the receiver's flag (the
+        // sender-side snapshot is unconditional; see the enqueue site in
+        // net::unix). hilogd's stats-query path requires it.
+        let emit_cred = if usock.options.lock().passcred {
+            r.cred
+        } else {
+            None
+        };
         let mut cmsg_bytes = 0usize;
-        if !r.files.is_empty() || r.cred.is_some() {
+        if !r.files.is_empty() || emit_cred.is_some() {
             // SAFETY: msg_ptr was access_ok(64)-validated at fn entry.
-            match unsafe { deliver_unix_cmsgs(msg_ptr, &r.files, r.cred) } {
+            match unsafe { deliver_unix_cmsgs(msg_ptr, &r.files, emit_cred) } {
                 Ok(n) => cmsg_bytes = n,
                 Err(e) => return e,
             }
@@ -2981,7 +3100,7 @@ pub fn sys_recvmsg(args: SyscallArgs) -> i64 {
         if r.truncated {
             out_flags |= MSG_TRUNC as u32;
         }
-        if (!r.files.is_empty() || r.cred.is_some()) && cmsg_bytes == 0 {
+        if (!r.files.is_empty() || emit_cred.is_some()) && cmsg_bytes == 0 {
             out_flags |= MSG_CTRUNC as u32;
         }
         // SAFETY: msg_ptr validated with access_ok(64) at entry.
@@ -3776,8 +3895,9 @@ pub fn sys_recvfrom(args: SyscallArgs) -> i64 {
         }
         kbuf.resize(stage, 0);
         let nonblock = file_nonblock || (flags & MSG_DONTWAIT) != 0;
+        let peek = (flags & MSG_PEEK) != 0;
         let deadline = usock.rcvtimeo_deadline();
-        return match crate::net::unix::unix_recv_ctl(&usock, kbuf.as_mut_slice(), nonblock, deadline)
+        return match crate::net::unix::unix_recv_ctl(&usock, kbuf.as_mut_slice(), nonblock, deadline, peek)
         {
             Ok(r) => {
                 if r.len > 0 {

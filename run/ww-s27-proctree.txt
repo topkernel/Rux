@@ -1,0 +1,3 @@
+2628474 1572958       01:18 /bin/bash -c . '/home/william/.zcode/cli/exec/shell-snapshots/snapshot-bash-1792724704395-5vfmg0.sh' 2>/dev/null || true . '/home/william/.zcode/cli/exec/bash-startup/sess_subagent_agent_27c43311-d9fe-48ce-95ff-0e6186651310/embedded-search-startup-3bcdfa73ca8e35cf.sh' cd /home/william/rux-agents/wildwrite-hunt && ./run/ww-chain.sh ww-s2 100 12371 46 > run/ww-chain-s27b.log 2>&1
+2628485 2628474       01:18 /bin/bash ./run/ww-chain.sh ww-s2 100 12371 46
+2628490 2628485       01:18 python3 /home/william/rux-agents/wildwrite-hunt/run/ww-hunt.py ww-s2-r46 2700 12371

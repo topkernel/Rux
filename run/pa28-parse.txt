@@ -1,0 +1,69 @@
+=== last dump t=720s ===
+ticks: c0=10679/60505/694 c1=10455/60293/1153
+cpu0: user 14.9% kernel 84.2% idle 1.0% (n=71878)
+cpu1: user 14.5% kernel 83.9% idle 1.6% (n=71901)
+
+=== syscall table (top 40 by total wall) ===
+nr     name                    n     avg_us       max_ms       tot_ms
+202    futex              251405     264760       299983     66562100
+281    epoll_pwait       3289631       6134       225827     20180562
+16     ioctl              128291      83894       285955     10762886
+35     nanosleep           30576     184039       295004      5627183
+7      ?                    1262    2233822       300008      2819083
+0      read               602975       1199        10010       723285
+45     recvfrom         19264657         37        20571       717515
+20     writev           18681978         19          227       370734
+228    clock_gettime    51719318          3          232       197173
+11     munmap             681263        152          204       103986
+47     recvmsg          19207087          4            3        90542
+2      open               287360        132          553        38134
+262    newfstatat         178696        178          386        31810
+18     pwrite64             1744      14790          216        25794
+9      mmap               754108         30            5        22681
+17     pread64             11014       1989          189        21910
+83     mkdir                 901      23427         1023        21108
+23     ?                       1   15641864        15641        15641
+128    rt_sigtimedwait        674      18651         1008        12571
+217    getdents64          27964        363          322        10175
+1      write             1164431          6           84         8018
+75     fdatasync             448      14188          196         6356
+87     unlink                100      54999          500         5499
+61     wait4                 620       6987         1628         4332
+90     chmod                1261       3260          155         4111
+92     chown                 572       5860          216         3352
+268    fchmodat           144314         22           72         3235
+10     mprotect            33323         75            9         2523
+102    getuid            3870047          0            2         1824
+77     ftruncate             213       7628          157         1624
+257    openat              12786        115           12         1474
+89     readlink            24399         47           12         1165
+42     connect             28518         37            1         1061
+59     execve                125       8315          159         1039
+3      close               96383          9            0          962
+49     bind                   42      21562          387          905
+25     mremap              10454         72            1          760
+267    readlinkat           8649         73            0          631
+74     fsync                  57      10929           48          623
+57     fork                  141       4000           72          564
+
+=== kernel-rip pages (top 20) ===
+0xffffffff802a0000 n=29958   25% _RINvMNtCshgE7ic3rT0S_4core6resultINtB3_6ResultNtNtCskPhSfSqUNT1_5alloc6string6StringNtNtN +0x20
+0xffffffff80465000 n=13834   12% _RINvMs16_NtNtCshgE7ic3rT0S_4core4sync6atomicINtB7_6AtomicjE10try_updateNvNvMsK_NtNtCskPhS +0x90
+0xffffffff80466000 n=8135     7% _RINvNtNtCshgE7ic3rT0S_4core4sync6atomic11atomic_loadmKb0_ECsgiCqCJ1KYcj_3rux +0x60
+0xffffffff8075f000 n=7395     6% _RNvCslyHnTMd0Oy9_3log10set_logger +0x10
+0xffffffff80639000 n=6994     6% _RNvNtNtCsgiCqCJ1KYcj_3rux3dfx7syscost13flood_accountB5_ +0xb0
+0xffffffff80592000 n=3817     3% _RNvNtNtNtCsgiCqCJ1KYcj_3rux2fs4jbd26revoke19jbd2_journal_revoke +0x0
+0xffffffff8075e000 n=3807     3% _RNvXsh_NtCskPhSfSqUNT1_5alloc6stringSReNtB5_13SpecExtendStr16spec_extend_into +0x0
+0xffffffff80222000 n=2845     2% _RNvNtNtNtCsgiCqCJ1KYcj_3rux2fs4jbd28recovery14write_clean_sb +0x100
+0xffffffff8076a000 n=2430     2% _RNvMsl_NtNtNtCshgE7ic3rT0S_4core3fmt3num3impi11format_into +0x20
+0xffffffff80780000 n=2354     2% _RNvNtNtCs7iVGSxg5vTD_17compiler_builtins5float3mul8___muldf3 +0x10
+0xffffffff80593000 n=1483     1% _RNvMs16_NtNtCshgE7ic3rT0S_4core4sync6atomicINtB6_6AtomicjE4swapCsgiCqCJ1KYcj_3rux +0x80
+0xffffffff8077f000 n=1307     1% memcpy +0x0
+0xffffffff8047a000 n=935      0% _RNvXs3_NtNtCskPhSfSqUNT1_5alloc3vec5drainINtB5_5DrainNtNtNtCsgiCqCJ1KYcj_3rux3net3tcp9Tcp +0x40
+0xffffffff802d3000 n=836      0% _RNvNtNtNtNtCsgiCqCJ1KYcj_3rux4arch6x86_642mm10page_fault17handle_swap_fault +0x460
+0xffffffff80467000 n=709      0% _RINvNtNtCshgE7ic3rT0S_4core4sync6atomic23atomic_compare_exchangehECsgiCqCJ1KYcj_3rux +0x340
+0xffffffff8043d000 n=689      0% _RNvNtNtCsgiCqCJ1KYcj_3rux5sched5sched24report_poisoned_rq_entry +0x240
+0xffffffff80431000 n=586      0% _RNvMs7_NtCskPhSfSqUNT1_5alloc7raw_vecINtB5_6RawVecyE8grow_oneCsgiCqCJ1KYcj_3rux +0x60
+0xffffffff8054a000 n=547      0% _RNCNvNtNtCsgiCqCJ1KYcj_3rux3net4unix9unix_sends0_0B7_ +0x70
+0xffffffff804e4000 n=522      0% _RINvXs2J_NtNtCshgE7ic3rT0S_4core5slice4iterINtB7_4IterReENtNtNtNtBb_4iter6traits8iterator +0x80
+0xffffffff80574000 n=500      0% _RNvMNtCskPhSfSqUNT1_5alloc3vecINtB2_3VecINtNtNtB4_3rcs3arc3ArcNtNtNtCsgiCqCJ1KYcj_3rux2fs +0x0

@@ -143,6 +143,32 @@ pub struct MountNamespace {
     /// Private copy of the mount table. Copy-on-write: modifications after
     /// CLONE_NEWNS only touch this Vec, never the parent's.
     pub mounts: Spinlock<Vec<MountEntry>>,
+    /// sc98: the actual VfsMountInternal objects this namespace attached
+    /// into the SHARED dentry tree after creation. Rux attaches every
+    /// mount globally (there is one dentry tree), so without a per-ns
+    /// list a dying private namespace would leave its mounts — and their
+    /// VFS_STATE.mounts registry entries — attached forever. The OH
+    /// appspawn child CLONE_NEWNS'es and makes ~50 sandbox binds; killed
+    /// children (the launcher's LIFECYCLE_TIMEOUT restart loop) leaked
+    /// them all, the registry grew into the thousands, and every later
+    /// MS_REC bind cloned by scanning the whole registry (10-25 ms per
+    /// mount) until NO spawn could finish inside appspawn's 3 s child
+    /// watchdog. Linux unmounts a private namespace's mounts when its
+    /// last task exits; Drop below restores exactly that contract.
+    pub vfs_mounts: Spinlock<Vec<Arc<crate::fs::dentry::VfsMountInternal>>>,
+}
+
+impl Drop for MountNamespace {
+    fn drop(&mut self) {
+        // Last owner of this namespace is gone: detach every mount it
+        // attached (Linux mntput-on-nsput). The init namespace is held
+        // by a static Arc and never drops, so boot mounts are safe.
+        let mounts: Vec<Arc<crate::fs::dentry::VfsMountInternal>> =
+            core::mem::take(&mut *self.vfs_mounts.lock());
+        for mnt in mounts.iter().rev() {
+            crate::fs::vfs::vfs_umount_object(mnt);
+        }
+    }
 }
 
 impl MountNamespace {
@@ -151,8 +177,26 @@ impl MountNamespace {
             inum,
             root: Spinlock::new(crate::fs::vfs::get_vfs_root()),
             mounts: Spinlock::new(mounts),
+            vfs_mounts: Spinlock::new(Vec::new()),
         }
     }
+}
+
+/// sc98: record a freshly attached mount in the CURRENT namespace so its
+/// Drop can detach it when the namespace dies (see MountNamespace::vfs_mounts).
+pub fn ns_track_vfsmount(mnt: Arc<crate::fs::dentry::VfsMountInternal>) {
+    let ns = current_mnt_ns();
+    ns.vfs_mounts.lock().push(mnt);
+}
+
+/// True when the caller runs in the init (boot) mount namespace — mounts
+/// made there must NOT pollute private namespaces' teardown lists (they
+/// are tracked in the init ns, which never drops) and vice versa.
+pub fn in_init_mnt_ns() -> bool {
+    crate::sched::current()
+        .and_then(|t| t.ns_mount.clone())
+        .map(|ns| Arc::ptr_eq(&ns, &init_mnt_ns()))
+        .unwrap_or(true)
 }
 
 // ============================================================================

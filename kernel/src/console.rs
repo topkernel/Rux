@@ -10,7 +10,7 @@
 
 use core::fmt;
 use core::arch::asm;
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use crate::sync::spinlock::{Spinlock, SpinlockGuard, SpinlockIrqGuard};
 
 #[cfg(feature = "riscv64")]
@@ -42,6 +42,94 @@ const FCR_TRIGGER_8: u8 = 0x80; // Trigger at 8 bytes (half of 16-byte FIFO)
 // LSR bits
 const LSR_DR: u8 = 0x01; // Data Ready
 const LSR_THRE: u8 = 0x20; // THR Empty
+
+// ============================================================================
+// Console TX stall tracking (printk-wedge, OH b140 family)
+// ============================================================================
+
+/// The x86_64 `putc` used to poll LSR.THRE forever. A stalled emulated
+/// UART (host under memory pressure, chardev flush stall, KVM exit storm)
+/// then froze the emitting CPU *while it held the printk console emit
+/// lock* — every other CPU printked into that lock and spun, and the box
+/// wedged (OH decisive round b140: 1-in-5 boots, CPU0 inside
+/// emit_to_console with IF=0, CPU1 mid-line at "len "). `putc` now bounds
+/// the THRE wait, drops the byte, and latches this flag so every
+/// subsequent byte costs a single probe until THRE returns. Losing a byte
+/// beats wedging the box — Linux 8250 drivers bound their TX waits the
+/// same way.
+static TX_STALLED: AtomicBool = AtomicBool::new(false);
+
+/// Bytes dropped due to TX stalls (diagnostic; reported on recovery).
+static TX_DROPPED: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+
+/// Recovery was observed; a notice should be printed from a context where
+/// printk is not re-entrancy-guarded (see `report_tx_stall_recovery`).
+static TX_RECOVERY_PENDING: AtomicBool = AtomicBool::new(false);
+
+/// `read_time()` stamp of the last recovery notice, for rate limiting.
+static TX_LAST_NOTICE: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+
+/// Bytes since the last LSR probe while TX_STALLED is latched. A probe is
+/// one `inb` = one KVM VM exit, which on a host-loaded box costs tens of
+/// microseconds to milliseconds of WALL time — sc166's 1000 ms IRQ-off
+/// windows symbolized (exact-binary, 74c5cf88) to enable_irq/outb/inb in
+/// exactly this path: with a probe per dropped byte, a 130-char diagnostic
+/// line during a chardev outage burned up to a second of IF=0. Probe at
+/// most once per 32 bytes instead; bytes lost in between are storm-garbage
+/// diagnostics anyway (sc167 storm gate).
+#[cfg(feature = "x86_64")]
+static TX_SINCE_PROBE: core::sync::atomic::AtomicU32 =
+    core::sync::atomic::AtomicU32::new(0);
+
+/// WALL-TIME bound for one LSR.THRE wait (time ticks; 250 µs). The old
+/// budget counted iterations (UART_TX_POLL_BUDGET, 1e6 tries), and one
+/// `inb` under KVM costs a VM exit (~1-2 µs), so 1e6 tries is a 1-2 s
+/// spin. Every THRE wait runs either with IRQs disabled (the UART
+/// irqsave lock, IRQ-context printk) or inside a syscall holding it —
+/// so a slow/stalled chardev turned that budget into multi-second
+/// IRQ-off windows: TIMER-SOFTIRQ-STALL ~1 s ages, TIMER-LATE-FIRE
+/// 1-4 s, WAKE-STRANDED outliers (the launcher-line IPC perf gate,
+/// 2026-10-20). A healthy QEMU 16550 with a draining chardev asserts
+/// THRE on the first probe; the previous 2 ms bound was sized for a
+/// full 16-byte FIFO drain at 115200, but sc166 showed the WAIT branch
+/// itself (not just the drop probes) holding IF=0 for 1000 ms windows
+/// under host load, because each probe's VM exit burns wall time while
+/// the TSC budget keeps running. 250 µs covers a two-char hiccup with
+/// margin; beyond it the TX_STALLED latch/drop discipline takes over
+/// (one bounded wait per episode, one probe per 32 bytes afterwards).
+#[cfg(feature = "x86_64")]
+const UART_THRE_WAIT_TICKS: u64 = crate::config::TIMER_CLOCK_FREQ_HZ / 4000;
+
+/// Print a rate-limited notice (once per second) about how many bytes the
+/// console TX stall dropped. Called from the printk entry paths BEFORE
+/// the per-CPU re-entrancy guard is taken: a notice issued from inside
+/// the guarded emit path would be silently dropped by that same guard.
+/// On non-x86_64 targets the stall latch is never set, so this is an
+/// inexpensive no-op (one relaxed-ish atomic swap).
+pub fn report_tx_stall_recovery() {
+    if !TX_RECOVERY_PENDING.swap(false, Ordering::AcqRel) {
+        return;
+    }
+    let now = crate::arch::cpu::read_time();
+    let last = TX_LAST_NOTICE.load(Ordering::Acquire);
+    // One notice per second of wall time.
+    if last != 0 && now.saturating_sub(last) < crate::config::TIMER_CLOCK_FREQ_HZ {
+        // Too soon: re-arm so the next printk retries after the window.
+        TX_RECOVERY_PENDING.store(true, Ordering::Release);
+        return;
+    }
+    let dropped = TX_DROPPED.swap(0, Ordering::AcqRel);
+    if dropped == 0 {
+        return;
+    }
+    TX_LAST_NOTICE.store(now, Ordering::Release);
+    crate::printk::printk_ln(
+        crate::printk::loglevel::KERN_WARNING,
+        format_args!("console: UART TX stalled, dropped {} bytes", dropped),
+    );
+}
 
 /// UART IRQ number on QEMU virt
 const UART_IRQ: u32 = 10;
@@ -135,6 +223,11 @@ static UART_IRQ_ARMED: core::sync::atomic::AtomicBool =
 /// Rolling match position for the DFX "DUMP!" magic (RX IRQ context only).
 static mut DUMP_MAGIC_POS: usize = 0;
 
+/// Rolling-match position for the "LEDGER!" accounting-census magic
+/// (dfx=ledger). The RX handler only latches dfx::ledger::PENDING — the
+/// census itself runs from the timer softirq (see ledger.rs).
+static mut LEDGER_MAGIC_POS: usize = 0;
+
 /// Rolling match position for the serial Ctrl-Alt-Del sequence (RX IRQ
 /// context only). The xterm/modifier encoding of Ctrl+Alt+Delete is
 /// CSI 3;7~ (ESC [ 3 ; 7 ~): tilcode 3 = Delete, modifier 7 = 1 + Ctrl(4)
@@ -205,9 +298,45 @@ impl Uart {
 
         #[cfg(feature = "x86_64")]
         {
+            // Fast path while a stall is latched: probe at most once per
+            // 32 bytes (each probe is a VM exit; see TX_SINCE_PROBE); if
+            // THRE is back, unlatch and fall through to the normal write;
+            // if not, drop the byte immediately (bounded cost per stall
+            // episode).
+            if TX_STALLED.load(Ordering::Acquire) {
+                if TX_SINCE_PROBE.fetch_add(1, Ordering::Relaxed) < 32 {
+                    TX_DROPPED.fetch_add(1, Ordering::Relaxed);
+                    return;
+                }
+                TX_SINCE_PROBE.store(0, Ordering::Relaxed);
+                if read_reg(COM1_BASE, UART_LSR) & LSR_THRE != 0 {
+                    TX_STALLED.store(false, Ordering::Release);
+                    TX_RECOVERY_PENDING.store(true, Ordering::Release);
+                } else {
+                    TX_DROPPED.fetch_add(1, Ordering::Relaxed);
+                    return;
+                }
+            }
             // Poll LSR bit 5 (THR Empty) before writing THR — the 8250
             // drops characters written while the shift register is busy.
+            // BOUNDED by WALL TIME (UART perf gate, 2026-10-20): the old
+            // 1e6-try budget was 1-2 s of IRQ-off/lock-held spin under
+            // KVM when the chardev stalled (one `inb` = one VM exit).
+            // The wait runs with the UART irqsave lock held (or from
+            // IRQ-context printk with IF=0), so those spins were exactly
+            // the TIMER-SOFTIRQ-STALL / TIMER-LATE-FIRE episodes. Give
+            // up after UART_THRE_WAIT_TICKS of read_time(), latch the
+            // stall, and drop the byte.
+            let start = crate::arch::cpu::read_time();
             while read_reg(COM1_BASE, UART_LSR) & LSR_THRE == 0 {
+                if crate::arch::cpu::read_time().saturating_sub(start)
+                    >= UART_THRE_WAIT_TICKS
+                {
+                    TX_STALLED.store(true, Ordering::Release);
+                    TX_SINCE_PROBE.store(0, Ordering::Relaxed);
+                    TX_DROPPED.fetch_add(1, Ordering::Relaxed);
+                    return;
+                }
                 core::hint::spin_loop();
             }
             // SAFETY: COM1 THR is the standard 8250 data port.
@@ -440,6 +569,25 @@ fn uart_rx_debug_magic(c: u8) {
                 crate::drivers::virtio::vw_report("dump");
                 crate::dfx::taskdump::dump_all_tasks("uart-magic");
                 crate::ipc::binder::binder_dfx_dump();
+            }
+        }
+
+        // Accounting-ledger magic trigger (dfx=ledger): latch only — the
+        // census is printk-heavy and runs from the timer softirq.
+        if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::Ledger) {
+            const LMAGIC: &[u8; 7] = b"LEDGER!";
+            LEDGER_MAGIC_POS = if LEDGER_MAGIC_POS < LMAGIC.len()
+                && c == LMAGIC[LEDGER_MAGIC_POS]
+            {
+                LEDGER_MAGIC_POS + 1
+            } else if c == LMAGIC[0] {
+                1
+            } else {
+                0
+            };
+            if LEDGER_MAGIC_POS == LMAGIC.len() {
+                LEDGER_MAGIC_POS = 0;
+                crate::dfx::ledger::PENDING.store(true, core::sync::atomic::Ordering::Release);
             }
         }
 

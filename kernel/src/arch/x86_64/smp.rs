@@ -542,11 +542,14 @@ pub extern "C" fn ap_entry64() -> ! {
     // The AP inherits the power-on CR0 with CD|NW set (uncached, no
     // write-through) — the trampoline only adds PE/PG.  Clear them so
     // this CPU runs cached like the BSP (NW=1 also violates the
-    // WB-memory SMP coherence contract).
-    // SAFETY: only CD/NW are changed; PE/PG/PAE stay set.
+    // WB-memory SMP coherence contract). Set CR0.WP in the same RMW:
+    // the BSP arms it at early_boot_init (F1b fix) and every AP must
+    // match before userspace can run on it, or this CPU's ring-0
+    // stores would pierce the COW protections the BSP enforces.
+    // SAFETY: only CD/NW are cleared and WP set; PE/PG/PAE stay set.
     unsafe {
         let cr0 = crate::arch::cpu::read_cr0();
-        crate::arch::cpu::write_cr0(cr0 & !(0x6000_0000));
+        crate::arch::cpu::write_cr0((cr0 & !(0x6000_0000)) | 0x1_0000);
     }
 
     // Switch to the real kernel CR3 — both roots map the kernel upper
@@ -562,6 +565,12 @@ pub extern "C" fn ap_entry64() -> ! {
     // Local APIC on this CPU (also arms the periodic timer; delivery
     // waits for STI below).
     crate::drivers::intc::apic::init_secondary();
+
+    // Per-CPU vCPU TSC-offset calibration while IRQs are still off and
+    // before this CPU's first tick can serve read_time() (sc110: the
+    // one-time ~25 s TSC-vs-HPET step tracked secondary online). No-op
+    // unless the HPET-calibrated TSC timekeeper is active (tscclk).
+    crate::drivers::timer::x86_64::calibrate_cpu_tsc_offset(cpu);
 
     // Publish the idle task as `current` so the first timer tick (which
     // can arrive right after STI) finds a valid task on this CPU, and

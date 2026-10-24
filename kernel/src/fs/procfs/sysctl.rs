@@ -116,11 +116,17 @@ pub fn generate_ostype() -> Vec<u8> {
     Vec::from(&b"Linux\n"[..])
 }
 
-/// /proc/sys/kernel/tainted — taint-flag bitmap. The kernel sets no taint
-/// bits today; LTP's tst_taint reads it before/after each test to detect
-/// kernel bugs (timerfd_settime02 aborts TBROK when the file is missing).
+/// /proc/sys/kernel/tainted — taint-flag bitmap.
+///
+/// Linux's format is NUMERIC ("Non-zero if the kernel has been tainted.
+/// Numeric values, which can be ORed together.") — the letters appear
+/// in the "Tainted:" line of WARN/BUG/panic output, not here. The value
+/// is the live `dfx::taint` mask, so a WARN or a soft lockup shows up
+/// immediately. LTP's tst_taint reads it before/after each test to
+/// detect kernel bugs (timerfd_settime02 aborts TBROK when the file is
+/// missing).
 pub fn generate_tainted() -> Vec<u8> {
-    b"0\n".to_vec()
+    alloc::format!("{}\n", crate::dfx::taint::get_taints()).into_bytes()
 }
 
 

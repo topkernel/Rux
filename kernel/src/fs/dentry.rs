@@ -77,6 +77,24 @@ pub struct VfsMountInternal {
     /// Mount flags (interior-mutable: mount(2) with MS_REMOUNT updates them
     /// in place while concurrent lookups read them on other CPUs)
     pub flags: Spinlock<MntFlags>,
+    /// sc181: global attach sequence (monotonic). The MS_REC clone scan
+    /// (fs::vfs::collect_subtree_mounts) uses it to emit the clone set in
+    /// attach order — identical to the old registry-order linear scan —
+    /// so stacked clones always attach parents before children.
+    pub seq: u64,
+}
+
+/// sc181: mount attach-sequence allocator (see VfsMountInternal::seq).
+static MOUNT_SEQ: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+impl VfsMountInternal {
+    pub fn new(root: Arc<Dentry>, flags: MntFlags) -> Self {
+        Self {
+            root,
+            flags: Spinlock::new(flags),
+            seq: MOUNT_SEQ.fetch_add(1, core::sync::atomic::Ordering::Relaxed),
+        }
+    }
 }
 
 unsafe impl Send for VfsMountInternal {}
@@ -97,6 +115,14 @@ pub struct Dentry {
     /// If this dentry is a mount point, points to the mount descriptor.
     /// None means this dentry is not a mount point.
     pub vfsmount: Spinlock<Option<Arc<VfsMountInternal>>>,
+    /// Only set on a MOUNTED FILESYSTEM'S ROOT dentry: the mountpoint
+    /// dentry in the parent filesystem. Weak on purpose — the mountpoint
+    /// dentry holds the mount (`vfsmount`) which holds this dentry
+    /// strongly; a strong edge back would form an Arc cycle. Lets
+    /// `build_path()` cross the mount boundary: a mounted fs root has no
+    /// `parent` pointer, so without this hop paths of entries inside a
+    /// mount lose the mountpoint prefix (chdir("/proc") stored cwd="/").
+    mountpoint: Spinlock<Option<alloc::sync::Weak<Dentry>>>,
     /// dentry state
     pub state: Spinlock<DentryState>,
     /// dentry flags
@@ -119,6 +145,7 @@ impl Dentry {
             children: Spinlock::new(BTreeMap::new()),
             inode: Spinlock::new(None),
             vfsmount: Spinlock::new(None),
+            mountpoint: Spinlock::new(None),
             state: Spinlock::new(DentryState::DUnhashed),
             flags: Spinlock::new(DentryFlags::new(DentryFlags::DCACHE_UNHASHED)),
             ref_count: AtomicU64::new(1),
@@ -148,29 +175,97 @@ impl Dentry {
 
     /// Build full path from root by walking parent chain
     pub fn build_path(&self) -> alloc::string::String {
+        // The global climb can never fail (it terminates at the global
+        // root); the Option only exists for the rooted variant below.
+        self.build_path_rooted(None)
+            .unwrap_or_else(|| alloc::string::String::from("/"))
+    }
+
+    /// Build the path of `self` the way Linux prepend_path() does: the
+    /// climb stops at `stop` — the dentry treated as the process root —
+    /// instead of the global root, so the result is ROOT-RELATIVE (after
+    /// chroot("/usr") the "/usr/bin" dentry reports "/bin").
+    ///
+    /// Returns None when the climb reaches the global root without passing
+    /// through `stop` — the path is not reachable under that root. getcwd
+    /// translates this to ENOENT (Linux behavior for a cwd outside the
+    /// process root); display-only callers may fall back to the global
+    /// path.
+    ///
+    /// `stop = None` is the plain global path: same walk, same
+    /// mount-boundary crossing as build_path() (a mount root climbs from
+    /// its mountpoint so entries inside a mount carry the mountpoint
+    /// prefix — chdir("/proc") must store cwd="/proc", not "/").
+    pub fn build_path_rooted(
+        &self,
+        stop: Option<&Arc<Dentry>>,
+    ) -> Option<alloc::string::String> {
         let mut components: alloc::vec::Vec<alloc::string::String> = alloc::vec::Vec::new();
-        let mut current: Option<Arc<Dentry>> = self.parent.lock().clone();
         let name = self.get_name();
         // Limit depth to prevent infinite loops on corrupted dentry trees.
         // 256 (review 5.1: build_path>64 截断 — deep trees silently got
         // truncated paths, breaking /proc/self/fd links and getcwd).
         let max_depth = 256;
+        // `self` IS the process root: the rooted path is "/".
+        if let Some(s) = stop {
+            if core::ptr::eq(self, s.as_ref()) {
+                return Some(alloc::string::String::from("/"));
+            }
+        }
+        // A mounted filesystem's root dentry has NO parent pointer; the
+        // climb starts at (or continues into) the MOUNTPOINT dentry in the
+        // parent filesystem instead, so paths of entries inside a mount
+        // carry the mountpoint prefix. Without this hop, build_path() on
+        // the procfs root returned "/" and chdir("/proc") silently stored
+        // cwd="/" — cd appeared to have no effect (pwd and ls still saw /).
+        let mut current: Option<Arc<Dentry>> = match self.parent.lock().clone() {
+            Some(p) => Some(p),
+            // `self` is a filesystem root; a mount root climbs from its
+            // mountpoint, the global root contributes nothing.
+            None => self.mountpoint_dentry(),
+        };
         while let Some(d) = current {
             if components.len() >= max_depth {
                 break;
             }
-            let parent = d.parent.lock().clone();
-            if parent.is_none() {
-                // Reached the root dentry. Its name is "/" — pushing it as
-                // a COMPONENT made the join below emit "//tmp/..." (a
-                // leading double slash) for every absolute path. Callers
-                // that string-compare results (LTP getcwd01, symlink01
-                // chdir01 vs getcwd) need the canonical single-slash form,
-                // so the root contributes the leading '/', not a component.
-                break;
+            // Arrived at the process root: stop here — everything collected
+            // so far is the path BELOW the root.
+            if let Some(s) = stop {
+                if core::ptr::eq(d.as_ref(), s.as_ref()) {
+                    break;
+                }
             }
-            components.push(d.get_name());
-            current = parent;
+            let parent = d.parent.lock().clone();
+            match parent {
+                Some(p) => {
+                    components.push(d.get_name());
+                    current = Some(p);
+                }
+                None => {
+                    // Reached a filesystem root. Its name is "/" — pushing
+                    // it as a COMPONENT made the join below emit "//tmp/..."
+                    // (a leading double slash) for every absolute path.
+                    // Callers that string-compare results (LTP getcwd01,
+                    // symlink01 chdir01 vs getcwd) need the canonical
+                    // single-slash form, so the root contributes the leading
+                    // '/', not a component. A MOUNT root instead crosses
+                    // into the parent filesystem at its mountpoint (stacked
+                    // mounts resolve one hop per loop iteration); the
+                    // mountpoint's own name is pushed on the next iteration.
+                    match d.mountpoint_dentry() {
+                        Some(mp) => current = Some(mp),
+                        // The global (or a detached) filesystem root: with a
+                        // stop requested we never met the process root, so
+                        // `self` is NOT under it (Linux: unreachable).
+                        None => {
+                            if stop.is_some() {
+                                return None;
+                            }
+                            break;
+                        }
+                    }
+                }
+            }
         }
         components.reverse();
         // Build path — absolute: "/" + root-to-leaf components.
@@ -187,7 +282,7 @@ impl Dentry {
             }
             path.push_str(&name);
         }
-        path
+        Some(path)
     }
 
     /// Look up a child dentry by name. Returns None if not found.
@@ -228,9 +323,15 @@ impl Dentry {
         self.children.lock().clear();
     }
 
-    /// Detach the mount descriptor (mount(2) MS_MOVE source side).
+    /// Detach the mount descriptor (mount(2) MS_MOVE source side and
+    /// umount(2)). Also forgets the mounted root's mountpoint
+    /// back-pointer so a detached mount's root stops claiming a
+    /// mountpoint it no longer occupies.
     pub fn clear_mount(&self) {
-        *self.vfsmount.lock() = None;
+        let mnt = self.vfsmount.lock().take();
+        if let Some(mnt) = mnt {
+            mnt.root.clear_mountpoint_back();
+        }
     }
 
     /// Set the mount descriptor (marks this dentry as a mount point).
@@ -241,6 +342,31 @@ impl Dentry {
     /// Get the mount descriptor (if this is a mount point).
     pub fn get_mount(&self) -> Option<Arc<VfsMountInternal>> {
         self.vfsmount.lock().clone()
+    }
+
+    /// Record the mountpoint dentry on a mounted filesystem's ROOT dentry
+    /// (the reverse edge of `set_mount`'s mountpoint→root link, held Weak
+    /// to avoid an Arc cycle). Set by vfs_mount()/vfs_move_mount().
+    pub fn set_mountpoint_back(&self, mountpoint: Arc<Dentry>) {
+        *self.mountpoint.lock() = Some(Arc::downgrade(&mountpoint));
+    }
+
+    /// The mountpoint this fs-root dentry is mounted on, if any (see
+    /// set_mountpoint_back). Used by ancestry walks that must cross mount
+    /// boundaries upward (MS_REC bind cloning).
+    pub fn get_mountpoint_back(&self) -> Option<Arc<Dentry>> {
+        self.mountpoint.lock().as_ref().and_then(|w| w.upgrade())
+    }
+
+    /// Forget the mountpoint back-pointer (mount detached/moved away).
+    pub fn clear_mountpoint_back(&self) {
+        *self.mountpoint.lock() = None;
+    }
+
+    /// The mountpoint dentry this filesystem root is mounted at, if this
+    /// is a mounted root and the mountpoint dentry is still alive.
+    pub fn mountpoint_dentry(&self) -> Option<Arc<Dentry>> {
+        self.mountpoint.lock().as_ref().and_then(|w| w.upgrade())
     }
 
     /// Set to hashed state

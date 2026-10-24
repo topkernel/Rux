@@ -378,15 +378,43 @@ impl VirtIOPCI {
                     return Err("Firmware left PCI BAR unassigned");
                 }
                 // 64-bit BARs land ABOVE 4GB in QEMU's PCI window (the
-                // 32-bit hole fills up with many devices). The kernel's
-                // device map only covers ECAM + the low hole — ioremap the
-                // BAR's own range here (2MB-rounded, identity, uncached)
-                // and record it for the E8-MM device-window restore list.
-                if bar_obj.base_addr >= 0x1_0000_0000 {
-                    let lo = bar_obj.base_addr & !0x1F_FFFF;
-                    let hi = (bar_obj.base_addr + bar_obj.size as u64 + 0x1F_FFFF) & !0x1F_FFFF;
-                    unsafe {
-                        crate::arch::mm::mmu_init::ioremap_device_window(lo, hi - lo);
+                // 32-bit hole fills up with many devices). Under KVM the
+                // q35 host bridge places them FAR beyond the fixed
+                // DEVICE_ALIAS64 window (observed 0xe0000008000 = 14TiB
+                // with the full OH device set; TCG on the same machine
+                // stayed under 1TB), so the old identity ioremap —
+                // boot-root low half only, invisible under every user
+                // CR3 — KERNPANICed the first notify MMIO from a user
+                // task. ioremap the BAR's full probed size into the
+                // kernel-half arena instead (K1-BAR): the mapping lands
+                // in the static root before the first user mm exists,
+                // and device_alias resolves it under any CR3.
+                if bar_obj.base_addr >= 0x1_0000_0000
+                    && crate::arch::mm::memory_layout::device_alias_fixed(bar_obj.base_addr)
+                        .is_none()
+                {
+                    // read_bar does not populate .size; bar_size was probed
+                    // above in this loop. A zero probe (BAR unimplemented?)
+                    // still gets a 2MB chunk — cheap and always sufficient
+                    // for virtio modern capabilities living in this BAR.
+                    let map_size = if bar_size > 0 { bar_size } else { 0x20_0000 };
+                    match crate::arch::mm::mmu_init::ioremap_bar_kernel(
+                        bar_obj.base_addr,
+                        map_size,
+                    ) {
+                        Some(va) => {
+                            crate::println!(
+                                "virtio-pci: BAR {:#x}+{:#x} -> ioremap arena {:#x}",
+                                bar_obj.base_addr, map_size, va
+                            );
+                        }
+                        None => {
+                            crate::pr_err!(
+                                "virtio-pci: BAR {:#x} above-4G ioremap FAILED \
+                                 (registry/arena exhausted)",
+                                bar_obj.base_addr
+                            );
+                        }
                     }
                 }
                 assigned_bars.insert(bar_idx, bar_obj);
@@ -1198,15 +1226,55 @@ fn read_block_once(
     let slot = pci_dev.blk_slot;
     use crate::drivers::virtio::queue::{VirtIOBlkReqHeader, VirtIOBlkResp, req_type, VirtQueue};
 
+    // R17-C: ONE allocation carries header (offset 0) + response
+    // (offset 48). Two separate page-granular allocations per I/O was
+    // the system's highest-volume order-0 firehose — every mis-handed
+    // heap page cycled through here within milliseconds (ring-proven
+    // in round 17). 48 keeps the resp cacheline-separate from header.
+    //
+    // Allocated BEFORE the BLK lock (Linux parity: request allocation
+    // happens outside the queue lock): the heap allocator's internal
+    // lock nested inside this lock's IRQ-off window was a contention
+    // amplifier, and the b125 wedge hunt demands the BLK critical
+    // section contain only ring RAM writes (see mod.rs forensics).
+    let io_layout = alloc::alloc::Layout::from_size_align(64, 16).unwrap();
+    // SAFETY: Layout is non-zero-sized; null check follows immediately.
+    let io_buf: *mut u8 = unsafe { alloc::alloc::alloc(io_layout) };
+    if io_buf.is_null() {
+        return Err("Failed to allocate header");
+    }
+    let header_layout = io_layout; // dealloc layout for the combined block
+    let header_ptr = io_buf as *mut VirtIOBlkReqHeader;
+    // SAFETY: io_buf is non-null and 64 bytes; +48 is in bounds.
+    let resp_ptr = unsafe { io_buf.add(48) } as *mut VirtIOBlkResp;
+    // SAFETY: header_ptr is non-null and properly aligned (16B).
+    unsafe {
+        *header_ptr = VirtIOBlkReqHeader {
+            type_: req_type::VIRTIO_BLK_T_IN,
+            reserved: 0,
+            sector,
+        };
+        (*resp_ptr).status = 0xFF;  // Initialize to invalid status
+    }
+
+    // VirtIO descriptor flags
+    const VIRTQ_DESC_F_NEXT: u16 = 1;
+    const VIRTQ_DESC_F_WRITE: u16 = 2;
+
     // Phase 1: Set up and submit request (under PCI lock)
-    let (used_ring_ptr, prev_expected, header_ptr, header_layout, resp_ptr) = {
-        let _guard = crate::drivers::virtio::PCI_BLK_LOCKS[slot].lock_irqsave();
+    let phase1: Result<(*const queue::UsedRing, u16), &'static str> = 'blk: {
+        let _guard = crate::drivers::virtio::pci_blk_lock(slot);
         let _nest = crate::drivers::virtio::VirtioLockNest::new();
 
         // Get configured VirtQueue (mutable reference)
         let virt_queue = match crate::drivers::virtio::get_pci_device_queue_mut_at(slot) {
             Some(q) => q,
-            None => return Err("No configured VirtQueue found"),
+            None => {
+                // SAFETY: io_buf was allocated above and no chain was
+                // built from it; freed by the Err handling below,
+                // OUTSIDE the lock.
+                break 'blk Err("No configured VirtQueue found");
+            }
         };
 
         // Reclaim descriptors that the device has finished with
@@ -1219,63 +1287,28 @@ fn read_block_once(
         // failure.
         let header_desc_idx = match virt_queue.alloc_desc() {
             Some(idx) => idx,
-            None => return Err("Failed to alloc header descriptor"),
+            None => break 'blk Err("Failed to alloc header descriptor"),
         };
         let data_desc_idx = match virt_queue.alloc_desc() {
             Some(idx) => idx,
-            None => return Err("Failed to alloc data descriptor"),
+            None => break 'blk Err("Failed to alloc data descriptor"),
         };
         let resp_desc_idx = match virt_queue.alloc_desc() {
             Some(idx) => idx,
-            None => return Err("Failed to alloc response descriptor"),
+            None => break 'blk Err("Failed to alloc response descriptor"),
         };
-
-        // Construct VirtIO block request header
-        let req_header = VirtIOBlkReqHeader {
-            type_: req_type::VIRTIO_BLK_T_IN,
-            reserved: 0,
-            sector,
-        };
-
-        // R17-C: ONE allocation carries header (offset 0) + response
-        // (offset 48). Two separate page-granular allocations per I/O was
-        // the system's highest-volume order-0 firehose — every mis-handed
-        // heap page cycled through here within milliseconds (ring-proven
-        // in round 17). 48 keeps the resp cacheline-separate from header.
-        let io_layout = alloc::alloc::Layout::from_size_align(64, 16).unwrap();
-        // SAFETY: Layout is non-zero-sized; null check follows immediately.
-        let io_buf: *mut u8;
-        unsafe {
-            io_buf = alloc::alloc::alloc(io_layout);
-        }
-        if io_buf.is_null() {
-            return Err("Failed to allocate header");
-        }
-        let header_layout = io_layout; // dealloc layout for the combined block
-        let header_ptr = io_buf as *mut VirtIOBlkReqHeader;
-        // SAFETY: io_buf is non-null and 64 bytes; +48 is in bounds.
-        let resp_ptr = unsafe { io_buf.add(48) } as *mut VirtIOBlkResp;
-        // SAFETY: header_ptr is non-null and properly aligned (16B).
-        unsafe {
-            *header_ptr = req_header;
-            (*resp_ptr).status = 0xFF;  // Initialize to invalid status
-        }
-
-        // VirtIO descriptor flags
-        const VIRTQ_DESC_F_NEXT: u16 = 1;
-        const VIRTQ_DESC_F_WRITE: u16 = 2;
 
         // Convert virtual addresses to physical addresses
         let header_phys_addr = crate::arch::mm::virt_to_phys(
-            crate::arch::mm::VirtAddr::new(header_ptr as u64)
+            crate::arch::mm::VirtAddr::new(header_ptr as u64),
         ).0;
         let resp_phys_addr = crate::arch::mm::virt_to_phys(
-            crate::arch::mm::VirtAddr::new(resp_ptr as u64)
+            crate::arch::mm::VirtAddr::new(resp_ptr as u64),
         ).0;
 
         // For PCI VirtIO, we need to ensure buffer is accessible in physical memory
         let data_phys_addr = crate::arch::mm::virt_to_phys(
-            crate::arch::mm::VirtAddr::new(buf.as_ptr() as u64)
+            crate::arch::mm::VirtAddr::new(buf.as_ptr() as u64),
         ).0;
 
         // Set request header descriptor
@@ -1321,15 +1354,14 @@ fn read_block_once(
             header_desc_idx,
         ) {
             // SAFETY: io_buf was allocated above and nothing references it
-            // yet (no chain was built from these descriptors).
-            unsafe {
-                alloc::alloc::dealloc(header_ptr as *mut u8, header_layout);
-            }
-            return Err("Pending table lag (completion walker behind)");
+            // yet (no chain was built from these descriptors); freed
+            // below, OUTSIDE the lock.
+            break 'blk Err("Pending table lag (completion walker behind)");
         }
 
-        // Submit to available ring (submit internally calls notify())
-        virt_queue.submit(header_desc_idx);
+        // Submit to the available ring QUIETLY (no MMIO under the lock —
+        // the kick happens after the guard drops; see below).
+        virt_queue.submit_quiet(header_desc_idx);
 
         // Increment expected used.idx (track our expected completion count)
         crate::drivers::virtio::increment_expected_used_idx_at(slot);
@@ -1353,9 +1385,31 @@ fn read_block_once(
         // Snapshot used ring pointer for interrupt-driven wait
         let used_ptr = virt_queue.used_ring_ptr();
 
-        (used_ptr, prev_expected, header_ptr, header_layout, resp_ptr)
+        break 'blk Ok((used_ptr, prev_expected));
     };
     // PCI lock dropped here — other I/O operations can proceed while we wait
+    let (used_ring_ptr, prev_expected) = match phase1 {
+        Ok(v) => v,
+        Err(e) => {
+            // SAFETY: io_buf was allocated above; every error above left
+            // no submitted chain referencing it. Freed outside the BLK
+            // lock's IRQ window.
+            unsafe { alloc::alloc::dealloc(io_buf, io_layout); }
+            return Err(e);
+        }
+    };
+
+    // Kick the device OUTSIDE the BLK lock: notify() is an MMIO write
+    // (a VM exit under KVM; under TCG an emulator trap). Running it
+    // inside the irqsave critical section made the lock's hold time
+    // hostage to host-side device emulation latency — one of the two
+    // unbounded windows the b125 spin-wedge hunt closed. Order is safe:
+    // the tombstone above was published under the same lock any walker
+    // must take before observing the used ring, and the device cannot
+    // complete an un-kicked chain.
+    if let Some(q) = crate::drivers::virtio::get_pci_device_queue_at(slot) {
+        q.notify();
+    }
 
     // Phase 2: Wait for completion (interrupt-driven, releases BKL during
     // sleep; bounded by a 10s wall-clock deadline — see
@@ -1463,15 +1517,41 @@ fn write_block_once(
     use crate::drivers::virtio::queue::{VirtIOBlkReqHeader, VirtIOBlkResp, req_type, VirtQueue};
     let slot = pci_dev.blk_slot;
 
+    // R17-C combined header+resp block, allocated BEFORE the BLK lock
+    // (same discipline as read_block_once — see the comment there).
+    let io_layout = alloc::alloc::Layout::from_size_align(64, 16).unwrap();
+    // SAFETY: Layout is non-zero-sized; null check follows immediately.
+    let io_buf: *mut u8 = unsafe { alloc::alloc::alloc(io_layout) };
+    if io_buf.is_null() {
+        return Err("Failed to allocate header");
+    }
+    let header_layout = io_layout; // dealloc layout for the combined block
+    let header_ptr = io_buf as *mut VirtIOBlkReqHeader;
+    // SAFETY: io_buf is non-null and 64 bytes; +48 is in bounds.
+    let resp_ptr = unsafe { io_buf.add(48) } as *mut VirtIOBlkResp;
+    // SAFETY: header_ptr is non-null and properly aligned (16B).
+    unsafe {
+        *header_ptr = VirtIOBlkReqHeader {
+            type_: req_type::VIRTIO_BLK_T_OUT,
+            reserved: 0,
+            sector,
+        };
+        (*resp_ptr).status = 0xFF;  // Initialize to invalid status
+    }
+
+    // VirtIO descriptor flags
+    const VIRTQ_DESC_F_NEXT: u16 = 1;
+    const VIRTQ_DESC_F_WRITE: u16 = 2;
+
     // Phase 1: Set up and submit request (under PCI lock)
-    let (used_ring_ptr, prev_expected, header_ptr, header_layout, resp_ptr) = {
-        let _guard = crate::drivers::virtio::PCI_BLK_LOCKS[slot].lock_irqsave();
+    let phase1: Result<(*const queue::UsedRing, u16), &'static str> = 'blk: {
+        let _guard = crate::drivers::virtio::pci_blk_lock(slot);
         let _nest = crate::drivers::virtio::VirtioLockNest::new();
 
         // Get configured VirtQueue (mutable reference)
         let virt_queue = match crate::drivers::virtio::get_pci_device_queue_mut_at(slot) {
             Some(q) => q,
-            None => return Err("No configured VirtQueue found"),
+            None => break 'blk Err("No configured VirtQueue found"),
         };
 
         // Reclaim descriptors that the device has finished with
@@ -1481,63 +1561,28 @@ fn write_block_once(
         // ids); slot/window safety is checked below and is RETRYABLE.
         let header_desc_idx = match virt_queue.alloc_desc() {
             Some(idx) => idx,
-            None => return Err("Failed to alloc header descriptor"),
+            None => break 'blk Err("Failed to alloc header descriptor"),
         };
         let data_desc_idx = match virt_queue.alloc_desc() {
             Some(idx) => idx,
-            None => return Err("Failed to alloc data descriptor"),
+            None => break 'blk Err("Failed to alloc data descriptor"),
         };
         let resp_desc_idx = match virt_queue.alloc_desc() {
             Some(idx) => idx,
-            None => return Err("Failed to alloc response descriptor"),
+            None => break 'blk Err("Failed to alloc response descriptor"),
         };
-
-        // Construct VirtIO block request header (WRITE type)
-        let req_header = VirtIOBlkReqHeader {
-            type_: req_type::VIRTIO_BLK_T_OUT,
-            reserved: 0,
-            sector,
-        };
-
-        // R17-C: ONE allocation carries header (offset 0) + response
-        // (offset 48). Two separate page-granular allocations per I/O was
-        // the system's highest-volume order-0 firehose — every mis-handed
-        // heap page cycled through here within milliseconds (ring-proven
-        // in round 17). 48 keeps the resp cacheline-separate from header.
-        let io_layout = alloc::alloc::Layout::from_size_align(64, 16).unwrap();
-        // SAFETY: Layout is non-zero-sized; null check follows immediately.
-        let io_buf: *mut u8;
-        unsafe {
-            io_buf = alloc::alloc::alloc(io_layout);
-        }
-        if io_buf.is_null() {
-            return Err("Failed to allocate header");
-        }
-        let header_layout = io_layout; // dealloc layout for the combined block
-        let header_ptr = io_buf as *mut VirtIOBlkReqHeader;
-        // SAFETY: io_buf is non-null and 64 bytes; +48 is in bounds.
-        let resp_ptr = unsafe { io_buf.add(48) } as *mut VirtIOBlkResp;
-        // SAFETY: header_ptr is non-null and properly aligned (16B).
-        unsafe {
-            *header_ptr = req_header;
-            (*resp_ptr).status = 0xFF;  // Initialize to invalid status
-        }
-
-        // VirtIO descriptor flags
-        const VIRTQ_DESC_F_NEXT: u16 = 1;
-        const VIRTQ_DESC_F_WRITE: u16 = 2;
 
         // Convert virtual addresses to physical addresses
         let header_phys_addr = crate::arch::mm::virt_to_phys(
-            crate::arch::mm::VirtAddr::new(header_ptr as u64)
+            crate::arch::mm::VirtAddr::new(header_ptr as u64),
         ).0;
         let resp_phys_addr = crate::arch::mm::virt_to_phys(
-            crate::arch::mm::VirtAddr::new(resp_ptr as u64)
+            crate::arch::mm::VirtAddr::new(resp_ptr as u64),
         ).0;
 
         // For PCI VirtIO, we need to ensure buffer is accessible in physical memory
         let data_phys_addr = crate::arch::mm::virt_to_phys(
-            crate::arch::mm::VirtAddr::new(buf.as_ptr() as u64)
+            crate::arch::mm::VirtAddr::new(buf.as_ptr() as u64),
         ).0;
 
         // Set request header descriptor (device reads this)
@@ -1579,15 +1624,13 @@ fn write_block_once(
             header_desc_idx,
         ) {
             // SAFETY: io_buf was allocated above and nothing references it
-            // yet (no chain was built from these descriptors).
-            unsafe {
-                alloc::alloc::dealloc(header_ptr as *mut u8, header_layout);
-            }
-            return Err("Pending table lag (completion walker behind)");
+            // yet (no chain was built from these descriptors); freed
+            // below, OUTSIDE the lock.
+            break 'blk Err("Pending table lag (completion walker behind)");
         }
 
-        // Submit to available ring (submit internally calls notify())
-        virt_queue.submit(header_desc_idx);
+        // Submit quietly (no MMIO under the lock; kick after release).
+        virt_queue.submit_quiet(header_desc_idx);
 
         // Increment expected used.idx (track our expected completion count)
         crate::drivers::virtio::increment_expected_used_idx_at(slot);
@@ -1605,9 +1648,24 @@ fn write_block_once(
         // Snapshot used ring pointer for interrupt-driven wait
         let used_ptr = virt_queue.used_ring_ptr();
 
-        (used_ptr, prev_expected, header_ptr, header_layout, resp_ptr)
+        break 'blk Ok((used_ptr, prev_expected));
     };
     // PCI lock dropped here — other I/O operations can proceed while we wait
+    let (used_ring_ptr, prev_expected) = match phase1 {
+        Ok(v) => v,
+        Err(e) => {
+            // SAFETY: io_buf was allocated above; every error above left
+            // no submitted chain referencing it. Freed outside the BLK
+            // lock's IRQ window.
+            unsafe { alloc::alloc::dealloc(io_buf, io_layout); }
+            return Err(e);
+        }
+    };
+
+    // Kick the device OUTSIDE the BLK lock (see read_block_once).
+    if let Some(q) = crate::drivers::virtio::get_pci_device_queue_at(slot) {
+        q.notify();
+    }
 
     // Phase 2: Wait for completion (interrupt-driven, releases BKL during
     // sleep; bounded by a 10s wall-clock deadline — see
@@ -1708,13 +1766,38 @@ fn flush_block_once(slot: usize) -> Result<usize, &'static str> {
     use crate::drivers::virtio::queue::{VirtIOBlkReqHeader, VirtIOBlkResp, req_type, VirtQueue};
     use crate::arch::mm::VirtAddr;
 
-    let (used_ring_ptr, prev_expected, header_ptr, header_layout, resp_ptr) = {
-        let _guard = crate::drivers::virtio::PCI_BLK_LOCKS[slot].lock_irqsave();
+    // Combined header+resp block (R17-C discipline, same as RW paths),
+    // allocated BEFORE the BLK lock (see read_block_once).
+    let io_layout = alloc::alloc::Layout::from_size_align(64, 16).unwrap();
+    // SAFETY: Layout is non-zero-sized; null check follows immediately.
+    let io_buf: *mut u8 = unsafe { alloc::alloc::alloc(io_layout) };
+    if io_buf.is_null() {
+        return Err("Failed to allocate flush header");
+    }
+    let header_layout = io_layout;
+    let header_ptr = io_buf as *mut VirtIOBlkReqHeader;
+    // SAFETY: io_buf is non-null and 64 bytes; +48 is in bounds.
+    let resp_ptr = unsafe { io_buf.add(48) } as *mut VirtIOBlkResp;
+    // SAFETY: header_ptr is non-null and 16B-aligned.
+    unsafe {
+        *header_ptr = VirtIOBlkReqHeader {
+            type_: req_type::VIRTIO_BLK_T_FLUSH,
+            reserved: 0,
+            sector: 0,
+        };
+        (*resp_ptr).status = 0xFF;
+    }
+
+    const VIRTQ_DESC_F_NEXT: u16 = 1;
+    const VIRTQ_DESC_F_WRITE: u16 = 2;
+
+    let phase1: Result<(*const queue::UsedRing, u16), &'static str> = 'blk: {
+        let _guard = crate::drivers::virtio::pci_blk_lock(slot);
         let _nest = crate::drivers::virtio::VirtioLockNest::new();
 
         let virt_queue = match crate::drivers::virtio::get_pci_device_queue_mut_at(slot) {
             Some(q) => q,
-            None => return Err("No configured VirtQueue found"),
+            None => break 'blk Err("No configured VirtQueue found"),
         };
 
         virt_queue.reclaim_descs();
@@ -1722,44 +1805,18 @@ fn flush_block_once(slot: usize) -> Result<usize, &'static str> {
         // FLUSH is a 2-descriptor chain: header -> resp (no data).
         let header_desc_idx = match virt_queue.alloc_desc_chain(2) {
             Some(idx) => idx,
-            None => return Err("Failed to alloc header descriptor"),
+            None => break 'blk Err("Failed to alloc header descriptor"),
         };
         let resp_desc_idx = match virt_queue.alloc_desc_chain(2) {
             Some(idx) => idx,
-            None => return Err("Failed to alloc response descriptor"),
+            None => break 'blk Err("Failed to alloc response descriptor"),
         };
-
-        let req_header = VirtIOBlkReqHeader {
-            type_: req_type::VIRTIO_BLK_T_FLUSH,
-            reserved: 0,
-            sector: 0,
-        };
-
-        // Combined header+resp block (R17-C discipline, same as RW paths).
-        let io_layout = alloc::alloc::Layout::from_size_align(64, 16).unwrap();
-        // SAFETY: Layout is non-zero-sized; null check follows immediately.
-        let io_buf: *mut u8 = unsafe { alloc::alloc::alloc(io_layout) };
-        if io_buf.is_null() {
-            return Err("Failed to allocate flush header");
-        }
-        let header_layout = io_layout;
-        let header_ptr = io_buf as *mut VirtIOBlkReqHeader;
-        // SAFETY: io_buf is non-null and 64 bytes; +48 is in bounds.
-        let resp_ptr = unsafe { io_buf.add(48) } as *mut VirtIOBlkResp;
-        // SAFETY: header_ptr is non-null and 16B-aligned.
-        unsafe {
-            *header_ptr = req_header;
-            (*resp_ptr).status = 0xFF;
-        }
-
-        const VIRTQ_DESC_F_NEXT: u16 = 1;
-        const VIRTQ_DESC_F_WRITE: u16 = 2;
 
         let header_phys_addr = crate::arch::mm::virt_to_phys(
-            VirtAddr::new(header_ptr as u64)
+            crate::arch::mm::VirtAddr::new(header_ptr as u64),
         ).0;
         let resp_phys_addr = crate::arch::mm::virt_to_phys(
-            VirtAddr::new(resp_ptr as u64)
+            crate::arch::mm::VirtAddr::new(resp_ptr as u64),
         ).0;
 
         virt_queue.set_desc(
@@ -1790,14 +1847,13 @@ fn flush_block_once(slot: usize) -> Result<usize, &'static str> {
             header_desc_idx,
         ) {
             // SAFETY: io_buf was allocated above and nothing references it
-            // yet (no chain was built from these descriptors).
-            unsafe {
-                alloc::alloc::dealloc(header_ptr as *mut u8, header_layout);
-            }
-            return Err("Pending table lag (completion walker behind)");
+            // yet (no chain was built from these descriptors); freed
+            // below, OUTSIDE the lock.
+            break 'blk Err("Pending table lag (completion walker behind)");
         }
 
-        virt_queue.submit(header_desc_idx);
+        // Submit quietly (no MMIO under the lock; kick after release).
+        virt_queue.submit_quiet(header_desc_idx);
         crate::drivers::virtio::increment_expected_used_idx_at(slot);
 
         // Publish the sync-chain tombstone at its ordinal slot (same
@@ -1811,8 +1867,23 @@ fn flush_block_once(slot: usize) -> Result<usize, &'static str> {
         );
 
         let used_ptr = virt_queue.used_ring_ptr();
-        (used_ptr, prev_expected, header_ptr, header_layout, resp_ptr)
+        break 'blk Ok((used_ptr, prev_expected));
     };
+    let (used_ring_ptr, prev_expected) = match phase1 {
+        Ok(v) => v,
+        Err(e) => {
+            // SAFETY: io_buf was allocated above; every error above left
+            // no submitted chain referencing it. Freed outside the BLK
+            // lock's IRQ window.
+            unsafe { alloc::alloc::dealloc(io_buf, io_layout); }
+            return Err(e);
+        }
+    };
+
+    // Kick the device OUTSIDE the BLK lock (see read_block_once).
+    if let Some(q) = crate::drivers::virtio::get_pci_device_queue_at(slot) {
+        q.notify();
+    }
 
     let new_used = VirtQueue::wait_for_used_interruptible(
         used_ring_ptr,

@@ -122,6 +122,20 @@ extern "C" fn khungtaskd_fn(_arg: *mut core::ffi::c_void) -> i32 {
 
         // Scan all tasks
         check_tasks();
+
+        // Binder stall scan: threads parked in a blocking binder read are
+        // S-state (invisible above); they mark an IPC chain that stopped
+        // answering — the common OH bring-up stall shape.
+        crate::ipc::binder::stall_report();
+
+        // dfx=sleepsnap: name the syscall every other S-state thread is
+        // parked in (appspawn-server wedge hunt, b11) — self-gated.
+        crate::ipc::binder::sleep_snapshot();
+
+        // dfx=socksnap: AF_UNIX listener queue depths + every epoll
+        // interest set (appspawn-server wedge hunt, b15) — self-gated.
+        crate::net::unix::unix_listener_snapshot();
+        crate::syscall::misc::epoll_interest_snapshot();
     }
 
     RUNNING.store(false, Ordering::Release);
@@ -220,11 +234,35 @@ fn report_hung_task(task: *mut crate::process::task::Task, elapsed_secs: u64) {
             // the parked chain live at HIGHER addresses (stacks grow down);
             // the words below sp are the context-switch machinery, which is
             // byte-identical for every parked task and names nothing.
+            // Window = [text start, text end): the old hardcoded cap
+            // 0xffffffff80200000 sat entirely BELOW the x86_64 kernel text
+            // (0xffffffff80200000..0xffffffff80690000), so no victim frame
+            // ever matched and every report showed only the scanner's own
+            // backtrace. The two arch linker scripts spell the bounds
+            // differently (x86_64: __stext/__etext, riscv64: _stext/_etext).
+            #[cfg(feature = "x86_64")]
+            extern "C" {
+                static __stext: u8;
+                static __etext: u8;
+            }
+            #[cfg(not(feature = "x86_64"))]
+            extern "C" {
+                static _stext: u8;
+                static _etext: u8;
+            }
+            #[cfg(feature = "x86_64")]
+            let lo = core::ptr::addr_of!(__stext) as u64;
+            #[cfg(feature = "x86_64")]
+            let hi = core::ptr::addr_of!(__etext) as u64;
+            #[cfg(not(feature = "x86_64"))]
+            let lo = core::ptr::addr_of!(_stext) as u64;
+            #[cfg(not(feature = "x86_64"))]
+            let hi = core::ptr::addr_of!(_etext) as u64;
             for k in 0..80 {
                 // SAFETY: diagnostic read within the task's own kernel
                 // stack pages (the Task exists and pins them).
                 let v = unsafe { core::ptr::read_volatile(base.add(k)) };
-                if v >= 0xffffffff80000000 && v < 0xffffffff80200000 && (v & 1) == 0 {
+                if v >= lo && v < hi && (v & 1) == 0 {
                     let _ = write!(w, " {:#x}", v);
                     shown += 1;
                     if shown >= 8 {

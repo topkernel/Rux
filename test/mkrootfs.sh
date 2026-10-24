@@ -139,8 +139,45 @@ if [ -f "$SLIRP_TEST_SRC" ] && command -v riscv64-linux-gnu-gcc &> /dev/null; th
          -o "$STAGING/test/slirp_test" "$SLIRP_TEST_SRC"; then
         chmod +x "$STAGING/test/slirp_test"
     else
-        echo "Warning: slirp_test failed to compile (skipping)"
+        echo "Warning: slirp_test failed to compile (skipped)"
         rm -f "$STAGING/test/slirp_test"
+    fi
+fi
+
+# Build + install the printk wedge flood probe (freestanding raw-syscall
+# recipe, same as nettest: static glibc objects carry rv64+V vector code
+# the boot CPU cannot execute; drives the MREMAP-CFI kernel printk flood
+# and direct console-write pressure; see test/printk_flood.c).
+PRINTK_FLOOD_SRC="$PROJECT_ROOT/test/printk_flood.c"
+if [ -f "$PRINTK_FLOOD_SRC" ] && command -v riscv64-linux-gnu-gcc &> /dev/null; then
+    echo "Installing printk_flood to /test/printk_flood..."
+    if riscv64-linux-gnu-gcc -march=rv64gc_zba_zbb_zbs -nostdlib -nostartfiles -static -O2 -fno-builtin \
+         -o "$STAGING/test/printk_flood" "$PRINTK_FLOOD_SRC"; then
+        chmod +x "$STAGING/test/printk_flood"
+    else
+        echo "Warning: printk_flood failed to compile (skipped)"
+        rm -f "$STAGING/test/printk_flood"
+    fi
+else
+    echo "Warning: riscv64-linux-gnu-gcc not found, skipping printk_flood"
+fi
+
+# Build + install the chroot/getcwd semantics probe (same freestanding
+# recipe; checks root-relative getcwd, ENOENT for a cwd outside the jail,
+# in-root absolute opens, and the cwd self-heal across MS_MOVE — the
+# busybox/OH switch_root idiom).
+CHROOTCWD_SRC="$PROJECT_ROOT/test/chrootcwd.c"
+if [ -f "$CHROOTCWD_SRC" ] && command -v riscv64-linux-gnu-gcc &> /dev/null; then
+    echo "Installing chrootcwd to /test/chrootcwd..."
+    # -march pinned WITHOUT vector: this gcc defaults to an rv64+V march
+    # and -O2 auto-vectorizes the buffer-clear loops into vsetivli — the
+    # QEMU boot CPU has no V extension and the probe SIGILLs.
+    if riscv64-linux-gnu-gcc -march=rv64gc_zba_zbb_zbs -nostdlib -nostartfiles -static -O2 -fno-builtin \
+         -o "$STAGING/test/chrootcwd" "$CHROOTCWD_SRC"; then
+        chmod +x "$STAGING/test/chrootcwd"
+    else
+        echo "Warning: chrootcwd failed to compile (skipped)"
+        rm -f "$STAGING/test/chrootcwd"
     fi
 fi
 
@@ -156,6 +193,23 @@ if [ -f "$REBOOT_PROBE_SRC" ] && command -v riscv64-linux-gnu-gcc &> /dev/null; 
     else
         echo "Warning: reboot_probe failed to compile (skipped)"
         rm -f "$STAGING/test/reboot_probe"
+    fi
+fi
+
+# Build + install the heap-corruption damage detector (static glibc +
+# pthreads; watches binder-like/stack-like/malloc regions with per-page
+# checksums + write probes, dumps /proc/self/maps on the first mismatch —
+# repro aid for the OH heap corruption, see
+# docs/development/heap-corruption-timeline.md).
+HEAPWATCH_SRC="$PROJECT_ROOT/test/heapwatch/heapwatch.c"
+if [ -f "$HEAPWATCH_SRC" ] && command -v riscv64-linux-gnu-gcc &> /dev/null; then
+    echo "Installing heapwatch to /test/heapwatch..."
+    if riscv64-linux-gnu-gcc -static -pthread -O2 -Wall \
+         -o "$STAGING/test/heapwatch" "$HEAPWATCH_SRC"; then
+        chmod +x "$STAGING/test/heapwatch"
+    else
+        echo "Warning: heapwatch failed to compile (skipped)"
+        rm -f "$STAGING/test/heapwatch"
     fi
 fi
 
@@ -180,6 +234,80 @@ if [ -f "$ORPHAN_STORM_SRC" ] && command -v riscv64-linux-gnu-gcc &> /dev/null; 
     else
         echo "Warning: orphan_storm failed to compile (skipped)"
         rm -f "$STAGING/test/orphan_storm"
+    fi
+fi
+
+# Build + install the musl cross-DSO CFI shadow init probe (static glibc +
+# pthreads; replicates ld-musl's exact 2GB PROT_NONE reserve + per-slice
+# mprotect(PROT_READ) + mremap(MREMAP_FIXED) fill sequence — the OH
+# "Permission denied at __cfi_slowpath" SIGSEGV family that kills samgr).
+MUSL_SDK="$PROJECT_ROOT/toolchain/riscv64-rux-linux-musl"
+
+# Build + install the EXT4_BIG_LOCK fairness probe (the b139 starvation
+# shape — many tenants driving page-cache MISS reads through ext4 at SMP2
+# while a 10 Hz canary reader asserts bounded latency; gate for the R84
+# handoff/fairness fix). musl recipe, NOT static glibc: the current host
+# glibc.a ships riscv vector stringops that SIGILL on the no-V boot CPU
+# regardless of -march (verified: orphan_storm, rebuilt by the stock
+# recipe, traps at insn16=0x7057).
+BIGFAIR_SRC="$PROJECT_ROOT/test/biglock_fair.c"
+MUSL_SDK_RISCV="$PROJECT_ROOT/toolchain/riscv64-rux-linux-musl"
+if [ ! -d "$MUSL_SDK_RISCV/lib" ]; then
+    # Fall back to the shared main-repo SDK if this worktree has not
+    # built one (make sdk).
+    MUSL_SDK_RISCV="/home/william/workspace/Rux/toolchain/riscv64-rux-linux-musl"
+fi
+if [ -f "$BIGFAIR_SRC" ] && [ -d "$MUSL_SDK_RISCV/lib" ]; then
+    echo "Installing biglock_fair to /test/biglock_fair..."
+    if riscv64-linux-gnu-gcc -march=rv64gc_zba_zbb_zbs -static -O2 -pthread -Wall \
+         -nostdinc -isystem "$MUSL_SDK_RISCV/include" -nostdlib \
+         -o "$STAGING/test/biglock_fair" "$BIGFAIR_SRC" \
+         "$MUSL_SDK_RISCV/lib/crt1.o" "$MUSL_SDK_RISCV/lib/crti.o" "$MUSL_SDK_RISCV/lib/crtn.o" \
+         -L"$MUSL_SDK_RISCV/lib" -lc \
+         $(riscv64-linux-gnu-gcc -march=rv64gc_zba_zbb_zbs -print-libgcc-file-name); then
+        chmod +x "$STAGING/test/biglock_fair"
+    else
+        echo "Warning: biglock_fair failed to compile (skipped)"
+        rm -f "$STAGING/test/biglock_fair"
+    fi
+else
+    echo "Warning: biglock_fair source or musl SDK missing (skipped)"
+fi
+
+# Build + install the GWP-Asan mprotect/fault churn probe (same musl
+# SDK recipe as cfi_shadow — static glibc SIGILLs on the no-V boot CPU).
+GWP_CHURN_SRC="$PROJECT_ROOT/test/gwp_churn.c"
+if [ -f "$GWP_CHURN_SRC" ] && command -v riscv64-linux-gnu-gcc &> /dev/null; then
+    echo "Installing gwp_churn to /test/gwp_churn..."
+    if riscv64-linux-gnu-gcc -march=rv64gc_zba_zbb_zbs -static -O2 -pthread -Wall \
+         -nostdinc -isystem "$MUSL_SDK/include" -nostdlib \
+         -o "$STAGING/test/gwp_churn" "$GWP_CHURN_SRC" \
+         "$MUSL_SDK/lib/crt1.o" "$MUSL_SDK/lib/crti.o" "$MUSL_SDK/lib/crtn.o" \
+         -L"$MUSL_SDK/lib" -lc \
+         $(riscv64-linux-gnu-gcc -march=rv64gc_zba_zbb_zbs -print-libgcc-file-name); then
+        chmod +x "$STAGING/test/gwp_churn"
+    else
+        echo "Warning: gwp_churn failed to compile (skipped)"
+        rm -f "$STAGING/test/gwp_churn"
+    fi
+fi
+
+CFI_SHADOW_SRC="$PROJECT_ROOT/test/cfi_shadow.c"
+if [ -f "$CFI_SHADOW_SRC" ] && command -v riscv64-linux-gnu-gcc &> /dev/null; then
+    echo "Installing cfi_shadow to /test/cfi_shadow..."
+    # Built against the project's riscv64 musl SDK (libc.a + headers):
+    # Debian's static glibc now ships vectorized memset/memcpy as the
+    # ifunc default, which SIGILLs on the boot CPU (no V extension).
+    if riscv64-linux-gnu-gcc -march=rv64gc_zba_zbb_zbs -static -O2 -pthread -Wall \
+         -nostdinc -isystem "$MUSL_SDK/include" -nostdlib \
+         -o "$STAGING/test/cfi_shadow" "$CFI_SHADOW_SRC" \
+         "$MUSL_SDK/lib/crt1.o" "$MUSL_SDK/lib/crti.o" "$MUSL_SDK/lib/crtn.o" \
+         -L"$MUSL_SDK/lib" -lc \
+         $(riscv64-linux-gnu-gcc -march=rv64gc_zba_zbb_zbs -print-libgcc-file-name); then
+        chmod +x "$STAGING/test/cfi_shadow"
+    else
+        echo "Warning: cfi_shadow failed to compile (skipped)"
+        rm -f "$STAGING/test/cfi_shadow"
     fi
 fi
 

@@ -83,11 +83,6 @@ run:
 	@echo "Starting QEMU (mrsh)..."
 	@./test/run.sh console /bin/sh
 
-# Run GUI mode (desktop environment)
-gui:
-	@echo "Starting QEMU (GUI - desktop)..."
-	@./test/run.sh gui /app/desktop
-
 # ---- Ubuntu native desktop (udesk on Ubuntu 22.04 rootfs) ----
 # Build (or rebuild) the Ubuntu GUI disk image: work/ubuntu-gui.img.
 # Requires riscv64-linux-gnu-gcc and the shared Ubuntu rootfs (see

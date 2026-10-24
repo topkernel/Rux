@@ -158,7 +158,15 @@ pub fn page_remove_rmap(page: &Page) {
 
         // If last mapping, clear flags and remove from LRU.
         // Safe now: LRU uses dedicated lru_next field, not mapping/index
-        if new_count == -1 {
+        //
+        // PageCache frames (mm filemap_fault, x86_64): the file LRU
+        // membership and the mapping/index fields belong to the PAGE
+        // CACHE — the last PTE unmap must NOT unlink the frame from the
+        // cache's LRU (eviction would lose sight of a still-cached page)
+        // and must not clear bookkeeping the cache still needs. The
+        // mapping's own release (descriptor put + cache pin put) happens
+        // in the unmap/teardown callers keyed off the PTE's PCACHE bit.
+        if new_count == -1 && page.page_type() != super::page_desc::PageType::PageCache {
             page.clear_flag(super::page_desc::PageFlag::Anonymous);
             page.clear_flag(super::page_desc::PageFlag::SwapBacked);
             super::lru::page_remove_lru(page);
@@ -329,6 +337,13 @@ fn try_to_unmap_inner(page: &Page, swap_entry: u64) -> i32 {
 
     let unmapped_count = Cell::new(0i32);
 
+    // mm-teardown vs spinlocks: for_each_task holds pid-hash bucket locks
+    // across the callback; an mm Arc dropped there could be the LAST
+    // reference, running the page-table teardown (which may schedule an
+    // RCU grace-period wait) under the spinlock. Collect the pinned Arcs
+    // under the locks (moved into the vector — never dropped there), then
+    // walk them with no locks held. RefCell: the walker takes F: Fn.
+    let mm_pins = Cell::new(Vec::<alloc::sync::Arc<crate::mm::mm_struct::MmStruct>>::new());
     crate::sched::for_each_task(|task_ptr| {
         // SAFETY: for_each_task provides valid task pointers; the task struct
         // is protected by the task list lock inside for_each_task.
@@ -338,12 +353,23 @@ fn try_to_unmap_inner(page: &Page, swap_entry: u64) -> i32 {
             // Skip tasks without an address space (kernel threads)
             // R25-2: PIN the address space — do_exit's set_address_space(None)
             // + Drop(MmStruct) free the page tables without the VMA lock;
-            // a raw borrow raced that free (NEW2-shaped UAF-read).
-            let _mm_arc = match task.address_space_arc() {
-                Some(a) => a,
-                None => return,
-            };
-            let mm = _mm_arc.as_ref();
+            // a raw borrow raced that free (NEW2-shaped UAF-read). The
+            // clone is mm-slot-lock serialized (cannot resurrect a freed
+            // Arc).
+            if let Some(mm_arc) = task.address_space_arc() {
+                let mut pins = mm_pins.take();
+                pins.push(mm_arc);
+                mm_pins.set(pins);
+            }
+        }
+    });
+
+    for mm_arc in mm_pins.take() {
+        // SAFETY: the Arc pins this mm (page tables and VMA tree stay
+        // allocated); the PTE walk/mutation below follows the same
+        // discipline the old closure body used.
+        unsafe {
+        let mm = mm_arc.as_ref();
 
             for target_vaddr in target_vaddrs.iter() {
                 let target_vaddr = *target_vaddr;
@@ -391,7 +417,7 @@ fn try_to_unmap_inner(page: &Page, swap_entry: u64) -> i32 {
                         // R22-3 (§17.4 close): leaf-PTE mutation under the
                         // PTE lock like every other writer (fork-COW/munmap/
                         // mprotect/fault-map) — was racing them.
-                        let _pte_g = crate::arch::mm::mm_ops::PTE_MODIFY_LOCK.lock_irqsave();
+                        let _pte_g = crate::arch::mm::mm_ops::pte_lock_for(mm).lock_irqsave();
 
                         // Re-validate the leaf under the lock (R7-C3 pattern):
                         // the walk above ran OUTSIDE it, and a concurrent leaf
@@ -430,7 +456,7 @@ crate::mm::flush_tlb_page_local(target_vaddr as u64);
                 }
             }
         }
-    });
+    }
 
     unmapped_count.get()
 }

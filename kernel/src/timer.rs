@@ -45,6 +45,32 @@ struct TimerEntry {
 /// programmed to min(next grid tick, this value).
 static HRES_NEXT: AtomicU64 = AtomicU64::new(u64::MAX);
 
+/// sc184 (lane 2, perf-audit F1): monotonic "a timer has been armed at
+/// least once" latch. The timer-tick softirq raise for the Hrtimer
+/// vector is gated on this (plus HRES_NEXT being due): before the first
+/// timer exists the vector's handler has literally nothing to scan, but
+/// the unconditional raise still cost an irq-exit dispatch pass at IF=0
+/// on every tick of every CPU (pa3: 199 raises/s/CPU). Monotonic by
+/// design — like the TCP table's high-water count, it never resets, so
+/// after the first timer the raise always happens and the softirq
+/// watchdog stamping inside the handler is unaffected.
+static TIMER_EVER_ARMED: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
+/// Lock-free pending-work test for the Hrtimer softirq raise gate (see
+/// TIMER_EVER_ARMED). A race (timer armed right after this read false)
+/// delays that timer's first dispatch opportunity by at most one tick:
+/// the arming path itself re-arms the hardware deadline, whose expiry
+/// re-raises the vector through the interrupt path.
+pub fn timer_softirq_work_pending() -> bool {
+    TIMER_EVER_ARMED.load(Ordering::Acquire)
+        || HRES_NEXT.load(Ordering::Acquire) <= timer::read_time()
+}
+
+fn mark_timer_armed() {
+    TIMER_EVER_ARMED.store(true, Ordering::Release);
+}
+
 /// Read the earliest outstanding high-resolution deadline (u64::MAX = none).
 pub fn hres_next_deadline() -> u64 {
     HRES_NEXT.load(Ordering::Acquire)
@@ -130,6 +156,7 @@ const EXPIRY_BUDGET: usize = 64;
 /// Timer ID (u64), or 0 on failure.
 pub fn add_timer_wakeup(expires: u64, wake_pid: u32) -> u64 {
     let id = NEXT_TIMER_ID.fetch_add(1, Ordering::Relaxed);
+    mark_timer_armed();
     if id == 0 {
         return 0;
     }
@@ -163,6 +190,7 @@ pub fn add_timer_wakeup(expires: u64, wake_pid: u32) -> u64 {
 /// lost-timer-wakeup root cause). Used by nanosleep/clock_nanosleep.
 pub fn add_timer_wakeup_hres(expires: u64, expires_time: u64, wake_pid: u32) -> u64 {
     let id = NEXT_TIMER_ID.fetch_add(1, Ordering::Relaxed);
+    mark_timer_armed();
     if id == 0 {
         return 0;
     }
@@ -213,6 +241,7 @@ pub fn add_timer_with_action(
     tfd_addr: u64,
 ) -> u64 {
     let id = NEXT_TIMER_ID.fetch_add(1, Ordering::Relaxed);
+    mark_timer_armed();
     if id == 0 {
         return 0;
     }
@@ -250,6 +279,7 @@ pub fn add_timer_with_action_hres(
     tfd_addr: u64,
 ) -> u64 {
     let id = NEXT_TIMER_ID.fetch_add(1, Ordering::Relaxed);
+    mark_timer_armed();
     if id == 0 {
         return 0;
     }
@@ -354,6 +384,69 @@ pub fn timer_softirq_handler(_nr: usize) {
     let now_time = timer::read_time();
     let hres_due = HRES_NEXT.load(Ordering::Acquire) <= now_time;
 
+    // Wakewatch forensics: stamp this CPU's Hrtimer-softirq entry
+    // unconditionally (even a deduped no-op run proves the vector is
+    // being serviced), then run the 1 Hz heartbeat + stall watchdog.
+    {
+        let cpu = crate::arch::cpu_id() as usize;
+        if cpu < crate::config::MAX_CPUS {
+            WW_HRES_LAST[cpu].store(now_time, Ordering::Release);
+            WW_HRES_N[cpu].fetch_add(1, Ordering::Relaxed);
+        }
+        // Stall watchdog: a CPU whose last Hrtimer run aged past 1 s
+        // while the machine is up is timer-starved (IRQ-off windows or
+        // softirq overflow with a starved ksoftirqd). One print per
+        // episode start, rate-gated globally.
+        //
+        // UART perf gate (2026-10-20): the report now also carries the
+        // stalled CPU's timer-IRQ arrival age and its current task
+        // (pid/preempt_count/RIP). tick_age ≈ softirq age ⇒ that CPU's
+        // timer IRQs stopped arriving too ⇒ a long IF=0 window (UART
+        // THRE poll under the console lock was the convicted producer).
+        // tick_age small but softirq age large ⇒ IRQs arrived and the
+        // dispatch was skipped (in_softirq deferral to a starved
+        // ksoftirqd, or stuck SOFTIRQ_IN_PROGRESS).
+        for c in 0..crate::config::MAX_CPUS {
+            let l = WW_HRES_LAST[c].load(Ordering::Acquire);
+            if l != 0 && now_time.saturating_sub(l) > crate::config::TIMER_CLOCK_FREQ_HZ {
+                if ww_latefire_budget_ok() {
+                    let tick_age_ms = ww_tick_age_ms(c);
+                    let (pid, pc, rip) = crate::sched::sched::ww_stalled_cpu_state(c);
+                    // sc167 storm gate: a USER-space rip means the stalled
+                    // CPU was running userspace with IRQs enabled — the
+                    // tick simply stopped ARRIVING (KVM hrtimer delay under
+                    // host load; 2477 of sc166's 2503 STALL lines were this
+                    // family). It is not a Rux IF=0 window; printing it
+                    // burns a direct-console line with IF=0 and feeds the
+                    // storm. Only report stalls whose current context is
+                    // kernel text.
+                    let (klo, khi) = crate::sched::sched::kernel_text_window();
+                    if rip >= klo && rip < khi {
+                        crate::pr_err!(
+                            "WW: TIMER-SOFTIRQ-STALL cpu={} age={}ms tick_age={}ms n={} pid={} pc={:#x} rip={:#x}",
+                            c,
+                            (now_time.saturating_sub(l)) * 1000
+                                / crate::config::TIMER_CLOCK_FREQ_HZ,
+                            tick_age_ms,
+                            WW_HRES_N[c].load(Ordering::Relaxed),
+                            pid,
+                            pc,
+                            rip
+                        );
+                    }
+                }
+            }
+        }
+        // 1 Hz heartbeat (100 jiffies at HZ=100).
+        let hb_last = WW_LAST_HEARTBEAT.load(Ordering::Relaxed);
+        if current.wrapping_sub(hb_last) >= 100 && WW_LAST_HEARTBEAT
+            .compare_exchange(hb_last, current, Ordering::AcqRel, Ordering::Acquire)
+            .is_ok()
+        {
+            ww_heartbeat(now_time);
+        }
+    }
+
     if current == last && !hres_due {
         return;
     }
@@ -381,6 +474,22 @@ pub fn timer_softirq_handler(_nr: usize) {
         }
     }
 
+    // dfx=oncpuinject (R85 tail-wedge adjudication): every 50 jiffies,
+    // stamp the lost-release ownership shape {on_cpu=1, claim=7, LIVE}
+    // onto the linked pickable set. Unpatched kernels strand the poisoned
+    // tasks exactly like the pid-1 tail wedge (every pick skips them
+    // why=1 forever); kernels with the R85 pick-side ownership
+    // adjudication must sweep the poison (STALE-ONCPU-RESET) and keep
+    // scheduling.
+    if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::OncpuInject)
+        && current % 50 == 0
+    {
+        let n = crate::sched::sched::dfx_oncpu_inject();
+        if n > 0 {
+            crate::pr_err!("ONCPU-INJECT poisoned={}", n);
+        }
+    }
+
     // Collect expired timers under locks; deliver AFTER releasing them
     // (R12-3 — see the moved delivery block below).
     // R34: capacity reserved OUTSIDE the lock; the budget counter below
@@ -405,10 +514,12 @@ pub fn timer_softirq_handler(_nr: usize) {
     // makes handler re-entry on the same CPU impossible, so a per-CPU
     // buffer needs no lock. (TimerAction is Copy — moved out of the map
     // below.)
-    /// Per-CPU expired-timer scratch (EXPIRY_BUDGET entries).
-    static mut EXPIRED_BUF: [[(u64, TimerAction); EXPIRY_BUDGET];
+    /// Per-CPU expired-timer scratch (EXPIRY_BUDGET entries). Third
+    /// element: fire lateness in time ticks (now_time - expires_time at
+    /// collection; wakewatch forensics).
+    static mut EXPIRED_BUF: [[(u64, TimerAction, u64); EXPIRY_BUDGET];
         crate::config::MAX_CPUS] =
-        [[(0, TimerAction::EMPTY); EXPIRY_BUDGET]; crate::config::MAX_CPUS];
+        [[(0, TimerAction::EMPTY, 0); EXPIRY_BUDGET]; crate::config::MAX_CPUS];
     /// Per-CPU fill level of EXPIRED_BUF.
     static mut EXPIRED_LEN: [usize; crate::config::MAX_CPUS] = [0; crate::config::MAX_CPUS];
     let cpu = crate::arch::cpu_id() as usize;
@@ -417,8 +528,8 @@ pub fn timer_softirq_handler(_nr: usize) {
     }
     // SAFETY: per-CPU rows indexed by this CPU's id; the SOFTIRQ_IN_PROGRESS
     // guard prevents re-entry, so this CPU's row is exclusively ours.
-    let buf_ptr: *mut [(u64, TimerAction); EXPIRY_BUDGET] =
-        unsafe { (core::ptr::addr_of_mut!(EXPIRED_BUF) as *mut [(u64, TimerAction); EXPIRY_BUDGET]).add(cpu) };
+    let buf_ptr: *mut [(u64, TimerAction, u64); EXPIRY_BUDGET] =
+        unsafe { (core::ptr::addr_of_mut!(EXPIRED_BUF) as *mut [(u64, TimerAction, u64); EXPIRY_BUDGET]).add(cpu) };
     let len_ptr: *mut usize =
         unsafe { (core::ptr::addr_of_mut!(EXPIRED_LEN) as *mut usize).add(cpu) };
     unsafe { *len_ptr = 0 };
@@ -490,7 +601,7 @@ pub fn timer_softirq_handler(_nr: usize) {
                         // map keeps its own entry for the next expiry.
                         unsafe {
                             if *len_ptr < EXPIRY_BUDGET {
-                                (*buf_ptr)[*len_ptr] = (id, *action); *len_ptr += 1;
+                                (*buf_ptr)[*len_ptr] = (id, *action, 0); *len_ptr += 1;
                             }
                         }
                         // Periodic re-arm is jiffy-based — drop any stale
@@ -514,7 +625,17 @@ pub fn timer_softirq_handler(_nr: usize) {
                         // SAFETY: budget > 0 guarantees *len < EXPIRY_BUDGET;
                         // per-CPU buffer, non-reentrant via SOFTIRQ guard.
                         let n = *len_ptr;
-                        (*buf_ptr)[n] = (id, action);
+                        // Wakewatch: capture the fire lateness of this
+                        // one-shot. HRES entries only — a jiffy entry's
+                        // expires_time is 0 and (now - 0) would report the
+                        // whole uptime as "lateness" (probe bug found on
+                        // wt5: late_max tracked boot age, not delay).
+                        let late = if entry.expires_time != 0 {
+                            now_time.saturating_sub(entry.expires_time)
+                        } else {
+                            0
+                        };
+                        (*buf_ptr)[n] = (id, action, late);
                         *len_ptr = n + 1;
                     }
                 }
@@ -549,8 +670,39 @@ pub fn timer_softirq_handler(_nr: usize) {
     // removed from the maps under the locks above.
     // SAFETY: slice of this CPU's row, filled under the locks above.
     let expired_len = unsafe { *len_ptr };
-    let expired: &[(u64, TimerAction)] = &unsafe { &*buf_ptr }[..expired_len];
-    for (id, action) in expired {
+    let expired: &[(u64, TimerAction, u64)] = &unsafe { &*buf_ptr }[..expired_len];
+    for (id, action, late_ticks) in expired {
+        // Wakewatch: fire-lateness classification (one-shot hres fires
+        // only; periodic entries carry 0). Healthy fire lateness is
+        // bounded by one tick (10 ms at HZ=100); anything past 20 ms
+        // under load is part of the outlier family.
+        let _ = id;
+        if *late_ticks > 0 {
+            WW_FIRE_N.fetch_add(1, Ordering::Relaxed);
+            let late_ms = late_ticks * 1000 / crate::config::TIMER_CLOCK_FREQ_HZ;
+            if late_ms >= 1 {
+                WW_FIRE_LATE_N.fetch_add(1, Ordering::Relaxed);
+            }
+            let mut cur = WW_FIRE_LATE_MAX_MS.load(Ordering::Relaxed);
+            while late_ms > cur {
+                match WW_FIRE_LATE_MAX_MS.compare_exchange_weak(
+                    cur,
+                    late_ms,
+                    Ordering::Relaxed,
+                    Ordering::Relaxed,
+                ) {
+                    Ok(_) => break,
+                    Err(actual) => cur = actual,
+                }
+            }
+            if late_ms > 20 && ww_latefire_budget_ok() {
+                crate::pr_err!(
+                    "WW: TIMER-LATE-FIRE pid={} late={}ms (timer fired late; softirq starvation?)",
+                    action.wake_pid,
+                    late_ms
+                );
+            }
+        }
         if action.wake_pid != 0 {
             // R13-3: pinned (softirq wake racing a concurrent reap) — the
             // last unpinned cross-CPU wake path.
@@ -558,6 +710,12 @@ pub fn timer_softirq_handler(_nr: usize) {
             if !task.is_null() {
                 crate::sched::wake_up_process(task);
                 crate::process::task::Task::task_put(task);
+            } else if ww_latefire_budget_ok() {
+                WW_PIDMISS_N.fetch_add(1, Ordering::Relaxed);
+                crate::pr_err!(
+                    "WW: WAKE-PID-MISS pid={} (timer fired but target unresolved — wake dropped)",
+                    action.wake_pid
+                );
             }
         } else if action.tfd_addr != 0 {
             // R13-3 (H48 re-closed after R12-3): re-validate under TIMERS
@@ -583,15 +741,251 @@ pub fn timer_softirq_handler(_nr: usize) {
     // hangs (form-B) trip no watchdog and swallow the UART magic (a wedged
     // shell stops draining the RX path) — a timed snapshot from the timer
     // softirq always lands. SBI-direct, no locks held here.
+    // sc115: the 500-jiffy (5 s) interval x ~500 tasks floods the
+    // busy-poll UART (~87 us/byte charged to whoever is current); 3000
+    // jiffies (30 s) still catches a hung launcher child's parked
+    // syscall — the children live ~10 s between LIFECYCLE_TIMEOUT and
+    // the AMS restart, so every other dump sees one — without
+    // distorting the boot it is diagnosing.
     if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::PeriodicDump)
-        && current.saturating_sub(LAST_PERIODIC_DUMP.load(Ordering::Relaxed)) >= 500
+        && current.saturating_sub(LAST_PERIODIC_DUMP.load(Ordering::Relaxed)) >= 3000
     {
         LAST_PERIODIC_DUMP.store(current, Ordering::Relaxed);
         crate::dfx::taskdump::dump_all_tasks("periodic");    }
+
+    // perf-audit line (cmdline `syscost=1`): whole-syscall cost table +
+    // tick-mode accounting + kernel-rip histogram dump every 60 s from
+    // this softirq. Own cmdline key — no dfx=switches.rs bit consumed.
+    crate::dfx::syscost::tick(current);
+
+    // perf-audit line (cmdline `fsw=1`): ext4/bio cost-anatomy counters
+    // (F4 diagnosis), same 60 s cadence.
+    crate::dfx::fsw::tick(current);
+
+    // dfx=monowatch: ~1 Hz timebase jump tripwire (backward motion or
+    // multi-second spikes, clocksource named) — same printk discipline
+    // as the periodic dump above.
+    if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::MonoWatch) {
+        crate::dfx::monowatch::tick(current);
+    }
+
+    // dfx=wildwatch: canary re-verify on a 1 s cadence (DMA-class
+    // writers bypass PTEs; the RO trap cannot see them).
+    if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::WildWatch)
+        && current.saturating_sub(LAST_WILDWATCH_VERIFY.load(Ordering::Relaxed)) >= 100
+    {
+        LAST_WILDWATCH_VERIFY.store(current, Ordering::Relaxed);
+        crate::dfx::wildwatch::verify();
+    }
+
+    // dfx=metawatch: buddy-meta shadow audit on a 10 s cadence (the
+    // buddy face of the wild writer — see dfx/metawatch.rs). Throttle
+    // is internal to the module.
+    if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::MetaWatch) {
+        crate::dfx::metawatch::tick(current);
+    }
+
+    // dfx=ledger: run a pending on-demand accounting census latched by the
+    // "LEDGER!" UART magic. The RX IRQ itself only sets the flag (printk
+    // from IRQ context is the classic self-wedge); this softirq already
+    // hosts the periodic dumps, so printk discipline is the same.
+    crate::dfx::ledger::run_pending();
 }
 
 /// Jiffies of the last periodic DFX snapshot (dfx=periodic).
 static LAST_PERIODIC_DUMP: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// Jiffies of the last wildwatch canary verify (dfx=wildwatch).
+static LAST_WILDWATCH_VERIFY: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+// ==================== Wakewatch forensics (vsync-starvation hunt) ====
+//
+// cc13 evidence: a 16 ms usleep in the loaded OH system occasionally
+// takes 0.5–0.7 s in-process, plus one ~41 s dead stop per boot, while
+// the isolated probe stays at 16.2/16.8 ms. These counters bracket the
+// outlier from the kernel side:
+//
+//   - WW_HRES_LAST/N: per-CPU stamp of the last Hrtimer-softirq entry
+//     (time ticks) + run count. A CPU whose stamp ages > 1 s while
+//     others tick names timer-softirq starvation on THAT CPU.
+//   - fire lateness: for every fired hres entry, now - expires_time at
+//     collection. TIMER-LATE-FIRE prints outliers (>20 ms) after the
+//     TIMERS/ACTIONS locks drop; the heartbeat carries the max.
+//   - WAKE-PID-MISS: an expiry whose wake_pid no longer resolves —
+//     a silently dropped wake token.
+//   - heartbeat: one printk line per second with the cumulative view
+//     (fires, late max, per-CPU softirq age, wake→run stats from
+//     sched::wakewatch).
+static WW_HRES_LAST: [AtomicU64; crate::config::MAX_CPUS] =
+    [const { AtomicU64::new(0) }; crate::config::MAX_CPUS];
+static WW_HRES_N: [AtomicU64; crate::config::MAX_CPUS] =
+    [const { AtomicU64::new(0) }; crate::config::MAX_CPUS];
+static WW_FIRE_N: AtomicU64 = AtomicU64::new(0);
+static WW_FIRE_LATE_MAX_MS: AtomicU64 = AtomicU64::new(0);
+static WW_FIRE_LATE_N: AtomicU64 = AtomicU64::new(0);
+static WW_PIDMISS_N: AtomicU64 = AtomicU64::new(0);
+static WW_LAST_HEARTBEAT: AtomicU64 = AtomicU64::new(0);
+/// Wakewatch: nanosleep belt-and-braces re-arms (one-shot token
+/// consumed before deadline — the early-fire family).
+static WW_REARM_N: AtomicU64 = AtomicU64::new(0);
+
+/// Wakewatch: count a nanosleep early-token-consumption re-arm.
+pub fn ww_note_rearm() {
+    WW_REARM_N.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Wakewatch: per-CPU timer-IRQ arrival counts (storm detector).
+pub static WW_TICK_IRQ: [AtomicU64; crate::config::MAX_CPUS] =
+    [const { AtomicU64::new(0) }; crate::config::MAX_CPUS];
+
+/// Wakewatch: per-CPU stamp of the last timer-IRQ arrival (time ticks;
+/// 0 = never). Lets the TIMER-SOFTIRQ-STALL report discriminate "IRQs
+/// stopped arriving" (IF=0 window) from "arrived but dispatch skipped".
+static WW_TICK_LAST: [AtomicU64; crate::config::MAX_CPUS] =
+    [const { AtomicU64::new(0) }; crate::config::MAX_CPUS];
+
+/// Wakewatch: record a timer-IRQ arrival on `cpu` (x86_64 tick path).
+pub fn ww_note_tick_arrival(cpu: usize) {
+    if cpu < crate::config::MAX_CPUS {
+        WW_TICK_LAST[cpu].store(read_time_stamp(), Ordering::Release);
+    }
+}
+
+#[inline]
+fn read_time_stamp() -> u64 {
+    crate::drivers::timer::read_time()
+}
+
+/// Wakewatch: age in ms of cpu's last timer-IRQ arrival (0 = never
+/// arrived — pre-tick boot, or the stamp predates the LAPIC switch).
+pub fn ww_tick_age_ms(cpu: usize) -> u64 {
+    if cpu >= crate::config::MAX_CPUS {
+        return 0;
+    }
+    let last = WW_TICK_LAST[cpu].load(Ordering::Acquire);
+    if last == 0 {
+        return 0;
+    }
+    let age = crate::drivers::timer::read_time().saturating_sub(last);
+    age * 1000 / crate::config::TIMER_CLOCK_FREQ_HZ
+}
+
+/// Per-CPU softirq-run age in ms (heartbeat helper); 0 = never ran.
+pub fn ww_hres_age_ms(cpu: usize) -> u64 {
+    if cpu >= crate::config::MAX_CPUS {
+        return 0;
+    }
+    let last = WW_HRES_LAST[cpu].load(Ordering::Acquire);
+    if last == 0 {
+        return 0;
+    }
+    let age = crate::drivers::timer::read_time().saturating_sub(last);
+    age * 1000 / crate::config::TIMER_CLOCK_FREQ_HZ
+}
+
+/// Print one WW heartbeat line (called from the softirq, printk-safe
+/// context — the claim-inject probe above prints from here too).
+/// v2: adds the softirq-storm counters (per-vector dispatch deltas,
+/// softirq busy ticks), timer-IRQ rate, scheduler slots (per-CPU current
+/// pid/state/preempt_count, idle + need_resched masks, queue depths)
+/// and the wheel census (len, overdue backlog) — everything the wt1/wt2
+/// collapse discrimination needs on one line per second.
+fn ww_heartbeat(now_time: u64) {
+    use crate::interrupt::softirq::{WW_SOFTIRQ_RUNS, WW_SOFTIRQ_TICKS, WW_VEC_RUN};
+    static LAST_VEC: [AtomicU64; crate::interrupt::softirq::NR_SOFTIRQS] =
+        [const { AtomicU64::new(0) }; crate::interrupt::softirq::NR_SOFTIRQS];
+    static LAST_RUNS: AtomicU64 = AtomicU64::new(0);
+    static LAST_TICKS: AtomicU64 = AtomicU64::new(0);
+    static LAST_IRQ: [AtomicU64; crate::config::MAX_CPUS] =
+        [const { AtomicU64::new(0) }; crate::config::MAX_CPUS];
+
+    let fire_n = WW_FIRE_N.load(Ordering::Relaxed);
+    let late_max = WW_FIRE_LATE_MAX_MS.load(Ordering::Relaxed);
+    let pidmiss = WW_PIDMISS_N.load(Ordering::Relaxed);
+
+    let runs_d = WW_SOFTIRQ_RUNS.load(Ordering::Relaxed)
+        .saturating_sub(LAST_RUNS.load(Ordering::Relaxed));
+    // Divide first: raw tick deltas can approach u64::MAX (e.g. HRES_NEXT
+    // sentinel) and a *1000 would overflow in the debug build.
+    let ticks_per_ms = crate::config::TIMER_CLOCK_FREQ_HZ / 1000;
+    let busy_ms = WW_SOFTIRQ_TICKS
+        .load(Ordering::Relaxed)
+        .saturating_sub(LAST_TICKS.load(Ordering::Relaxed))
+        / ticks_per_ms;
+    let mut vecs = [0u64; crate::interrupt::softirq::NR_SOFTIRQS];
+    for v in 0..crate::interrupt::softirq::NR_SOFTIRQS {
+        vecs[v] = WW_VEC_RUN[v].load(Ordering::Relaxed) as u64
+            - LAST_VEC[v].load(Ordering::Relaxed);
+        LAST_VEC[v].store(WW_VEC_RUN[v].load(Ordering::Relaxed) as u64, Ordering::Relaxed);
+    }
+    LAST_RUNS.store(WW_SOFTIRQ_RUNS.load(Ordering::Relaxed), Ordering::Relaxed);
+    LAST_TICKS.store(WW_SOFTIRQ_TICKS.load(Ordering::Relaxed), Ordering::Relaxed);
+
+    let mut irq_d = [0u64; crate::config::MAX_CPUS];
+    for c in 0..crate::config::MAX_CPUS {
+        let cur = WW_TICK_IRQ[c].load(Ordering::Relaxed);
+        irq_d[c] = cur.saturating_sub(LAST_IRQ[c].load(Ordering::Relaxed));
+        LAST_IRQ[c].store(cur, Ordering::Relaxed);
+    }
+
+    // Wheel census (short lock; heartbeat is 1 Hz and holds no timer
+    // locks at this point).
+    let (wheel_len, overdue) = {
+        let timers = TIMERS.lock_irqsave();
+        let len = timers.len();
+        let mut od = 0u64;
+        for e in timers.values() {
+            if e.expires_time != 0 && e.expires_time <= now_time {
+                od += 1;
+            }
+        }
+        (len, od)
+    };
+
+    let sched = crate::sched::sched::ww_sched_snapshot();
+
+    crate::pr_info!(
+        "WW: fires={} late_max={}ms pidmiss={} rearm={} wheel={}/{} hres_next={}ms\nWW2: si_runs={} si_busy={}ms ticks=[{},{}] vec=[{},{},{},{},{},{},{},{},{},{}]\nWW3: grq={} cfs={} idle={:#x} nr={} cpu0=(pid={} st={:#x} pc={}) cpu1=(pid={} st={:#x} pc={})",
+        fire_n,
+        late_max,
+        pidmiss,
+        WW_REARM_N.load(Ordering::Relaxed),
+        overdue,
+        wheel_len,
+        HRES_NEXT.load(Ordering::Acquire).saturating_sub(now_time) / ticks_per_ms,
+        runs_d,
+        busy_ms,
+        irq_d[0],
+        irq_d[1],
+        vecs[0], vecs[1], vecs[2], vecs[3], vecs[4],
+        vecs[5], vecs[6], vecs[7], vecs[8], vecs[9],
+        sched[0], sched[1], sched[2], sched[3],
+        sched[4], sched[5], sched[6],
+        sched[7], sched[8], sched[9]
+    );
+    crate::sched::wakewatch::heartbeat();
+    // sc158 (Session R): one-shot park dump for wedged foundation/sa_main
+    // registrar threads - see wakewatch::stallwatch_tick.
+    crate::sched::wakewatch::stallwatch_tick();
+}
+
+/// Rate-gated direct-console print for fire-lateness outliers (no GRQ
+/// held at the call site, but printk could interleave with GRQ-held
+/// direct writes — keep the same putchar_no_lock discipline).
+fn ww_latefire_budget_ok() -> bool {
+    static LAST: AtomicU64 = AtomicU64::new(0);
+    let now = crate::drivers::timer::get_jiffies();
+    let last = LAST.load(Ordering::Acquire);
+    // sc167 storm gate: 10 jiffies (100 ms) let sc166 print 2503 STALL
+    // lines, each a ~110-char direct-console write charged with IF=0 —
+    // the report fed the storm it measured. 100 jiffies = one per second.
+    if now.wrapping_sub(last) < 100 {
+        return false;
+    }
+    LAST.compare_exchange(last, now, Ordering::AcqRel, Ordering::Acquire)
+        .is_ok()
+}
+
 
 // Initialization: the old dead `pub fn init()` (never called anywhere — it
 // only seeded LAST_TICK and printed a banner) was removed in the review

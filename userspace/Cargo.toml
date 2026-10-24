@@ -12,12 +12,7 @@
 resolver = "2"
 members = [
     # GUI library
-    "libs/gui",
     # GUI applications -> /app/
-    "apps/desktop",
-    "apps/calculator",
-    "apps/clock",
-    "apps/vshell",
     # User space test cases -> /test/
     "tests/smoke_test",
 ]
@@ -26,7 +21,7 @@ members = [
 [workspace.package]
 version = "0.1.0"
 edition = "2021"
-authors = ["Rux Developers"]
+authors = ["Fei Wang"]
 
 # Optimization config: reduce binary size
 [workspace.metadata.cargo-compilation]

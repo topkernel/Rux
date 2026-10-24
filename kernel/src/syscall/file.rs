@@ -66,8 +66,92 @@ pub fn sys_openat(args: SyscallArgs) -> i64 {
 
     let full_path = match resolve_user_path(dirfd, pathname_ptr) {
         Ok(p) => p,
-        Err(e) => return e as i64,
+        Err(e) => {
+            // OH DRM bring-up (rs-egl): the composer VDI's
+            // FindAndOpenKmsCard openat(dirfd, "card0") died silently —
+            // resolution failures return before every later trace, so
+            // name the dirfd-relative resolution failure directly.
+            if dirfd != -100 {
+                let mut pb = [0u8; PATH_MAX];
+                let name = match strncpy_from_user(pathname_ptr, pb.len(), &mut pb) {
+                    Ok(s) => core::str::from_utf8(s).unwrap_or(""),
+                    Err(_) => "",
+                };
+                if name.starts_with("card") || name.starts_with("renderD") {
+                    static ATRES_FAIL_N: core::sync::atomic::AtomicUsize =
+                        core::sync::atomic::AtomicUsize::new(0);
+                    let n = ATRES_FAIL_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                    if n < 16 {
+                        crate::pr_warn!(
+                            "openat-resolve-fail[{}] dirfd {} '{}' -> errno {} (pid {})",
+                            n,
+                            dirfd,
+                            name,
+                            -(e as i64),
+                            unsafe { crate::process::current_pid() }
+                        );
+                    }
+                }
+            }
+            return e as i64;
+        }
     };
+
+    // OH bring-up: trace O_PATH opens (musl's fchmodat fallback opens
+    // the target O_PATH then fstatat(fd,"",AT_EMPTY_PATH)s it).
+    {
+        const O_PATH_X: u32 = 0x200000;
+        if (flags & O_PATH_X) != 0 {
+            static OPATH_TRACE_N: core::sync::atomic::AtomicUsize =
+                core::sync::atomic::AtomicUsize::new(0);
+            let pid = unsafe { crate::process::current_pid() };
+            let n = if pid >= 300 {
+                OPATH_TRACE_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed)
+            } else {
+                OPATH_TRACE_N.load(core::sync::atomic::Ordering::Relaxed)
+            };
+            if n < 20 && pid >= 300 {
+                crate::pr_info!(
+                    "o-path open: '{}' flags={:#x} pid={}",
+                    full_path, flags, pid
+                );
+            }
+        }
+    }
+
+    // OH bring-up: capped .so-open trace (SUCCESS too — a dlopen retry
+    // loop is only visible when the loaded-each-round libs are shown).
+    // dfx=syscalltrace only: ungated, hilogd.rd_kmsg copies the whole
+    // trace from /dev/kmsg and eats a vCPU at KVM speed (b128/b129).
+    if full_path.ends_with(".so")
+        && crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SyscallTrace)
+    {
+        // Per-pid budget: a flat counter let hdf_devhost (~pid 418,
+        // every lib searched across ~15 dirs) consume the whole budget
+        // before render_service (~443) opened its first library. 8
+        // pid-slots x 64 lines each, indexed by pid % 8 (collisions
+        // just share a budget). Late-boot services only (pid >= 418).
+        static SO_SLOT_PID: [core::sync::atomic::AtomicU32; 8] =
+            [const { core::sync::atomic::AtomicU32::new(0) }; 8];
+        static SO_SLOT_N: [core::sync::atomic::AtomicU32; 8] =
+            [const { core::sync::atomic::AtomicU32::new(0) }; 8];
+        let pid = unsafe { crate::process::current_pid() } as u32;
+        let slot = (pid % 8) as usize;
+        let slot_pid = SO_SLOT_PID[slot].load(core::sync::atomic::Ordering::Relaxed);
+        if slot_pid != pid && pid >= 418 {
+            // Claim the slot for this pid (last writer wins on races —
+            // this is a diagnostic, approximate is fine).
+            SO_SLOT_PID[slot].store(pid, core::sync::atomic::Ordering::Relaxed);
+            SO_SLOT_N[slot].store(0, core::sync::atomic::Ordering::Relaxed);
+        }
+        let claimed = SO_SLOT_PID[slot].load(core::sync::atomic::Ordering::Relaxed);
+        if claimed == pid && pid >= 418 {
+            let n = SO_SLOT_N[slot].fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            if n < 64 {
+                crate::pr_info!("so-open[{}.{}] '{}' (pid {})", slot, n, full_path, pid);
+            }
+        }
+    }
 
     // Shortcut: /proc/[pid]/fd with O_DIRECTORY. P1 chroot: the string
     // shortcuts below address the GLOBAL /proc namespace — under a chroot
@@ -210,6 +294,258 @@ pub fn sys_openat(args: SyscallArgs) -> i64 {
         crate::fs::file_open(&full_path, flags, mode)
     };
 
+    // sc33/sc34 hunt: the pivoted appspawn child dies at
+    // appspawn_common.c:350 'open dev_null error: 2'. The first 60-line
+    // budget was eaten by boot noise (param-service, cpuset/memcg
+    // walkers — all with the 3-segment SYSTEM sandbox root); gate to
+    // processes rooted in a 4+-segment APP sandbox root
+    // ('/mnt/sandbox/<uid>/<pkg>') so only appspawn children print.
+    // sc36: also resolve the path OURSELVES and print the inode — the
+    // walk trails were silent for the failing opens, so the ENOENT is
+    // post-lookup; name what the lookup found.
+    // sc109/sc112: these lines fire in the LAUNCHER's own context and
+    // drain to the busy-poll UART (~87us/byte charged as launcher
+    // stime) — `sprobe=0` silences both prints, counters stay.
+    if full_path.starts_with("/dev/")
+        && crate::cmdline::get_param("sprobe").map(|v| v != "0").unwrap_or(true)
+    {
+        let root = crate::sched::current()
+            .and_then(|t| unsafe { (*t).fs_arc() })
+            .map(|fs| fs.get_root())
+            .unwrap_or_default();
+        let root_str = core::str::from_utf8(&root).unwrap_or("?");
+        let deep_root = root_str
+            .split('/')
+            .filter(|s| !s.is_empty())
+            .count() >= 4;
+        if deep_root {
+            let mut detail = alloc::string::String::new();
+            match crate::fs::vfs::path_lookup(&full_path, 0) {
+                Ok(vp) => {
+                    if let Some(i) = vp.inode.as_ref() {
+                        detail.push_str(&alloc::format!(
+                            "lookup OK ino={:#x} mode={:#o} fs_id={} ops={}",
+                            i.ino,
+                            i.mode.bits(),
+                            i.fs_id,
+                            i.ops.is_some()
+                        ));
+                    } else {
+                        detail.push_str("lookup OK but NO inode");
+                    }
+                }
+                Err(e) => {
+                    detail.push_str(&alloc::format!("lookup ERR {}", e));
+                }
+            }
+            // sc37 lesson: per-spawn probes x appspawn retry storms
+            // flooded the UART; 400 lines name every distinct gate.
+            static PROBE_N: core::sync::atomic::AtomicUsize =
+                core::sync::atomic::AtomicUsize::new(0);
+            if PROBE_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 400 {
+                crate::pr_warn!(
+                    "devopen-probe '{}' flags {:#x} root='{}' {} (pid {})",
+                    full_path,
+                    flags,
+                    root_str,
+                    detail,
+                    unsafe { crate::process::current_pid() }
+                );
+            }
+            if let Err(e) = &result {
+                static DEVOPEN_FAIL_N: core::sync::atomic::AtomicUsize =
+                    core::sync::atomic::AtomicUsize::new(0);
+                let n = DEVOPEN_FAIL_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                if n < 200 {
+                    crate::pr_warn!(
+                        "devopen-fail[{}] '{}' flags {:#x} -> errno {} root='{}' (pid {})",
+                        n,
+                        full_path,
+                        flags,
+                        -e,
+                        root_str,
+                        unsafe { crate::process::current_pid() }
+                    );
+                }
+            }
+        }
+    }
+
+    // OH DRM bring-up (rs-egl): the composer HDI's DrmDevice::Create
+    // (drm_device.cpp:90, passthrough-loaded into render_service) logs
+    // "can't open drm card device" — but its message carries no errno,
+    // and ENOENT-only tracing missed the real reason. Print every
+    // FAILED open under /dev/dri with the errno so the composer's
+    // failure is named directly (successes are already counted by the
+    // drm driver's own open trace).
+    if full_path.starts_with("/dev/dri") {
+        if let Err(e) = &result {
+            static DRIOpen_FAIL_N: core::sync::atomic::AtomicUsize =
+                core::sync::atomic::AtomicUsize::new(0);
+            let n = DRIOpen_FAIL_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            if n < 32 {
+                crate::pr_warn!(
+                    "dri-open-fail[{}] '{}' flags {:#x} -> errno {} (pid {})",
+                    n,
+                    full_path,
+                    flags,
+                    -e,
+                    unsafe { crate::process::current_pid() }
+                );
+            }
+        } else if (flags & O_DIRECTORY) != 0 {
+            // The composer's FindAndOpenKmsCard opendir()s /dev/dri and
+            // then openat(dirfd)«card0»s; a successful opendir followed
+            // by NO drm ioctl means readdir/openat/getdents broke —
+            // trace the directory open too so the whole walk is
+            // visible on serial.
+            static DRIDIR_OPEN_N: core::sync::atomic::AtomicUsize =
+                core::sync::atomic::AtomicUsize::new(0);
+            let n = DRIDIR_OPEN_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            if n < 8 {
+                crate::pr_warn!(
+                    "dri-dir-open[{}] '{}' flags {:#x} ok (pid {})",
+                    n,
+                    full_path,
+                    flags,
+                    unsafe { crate::process::current_pid() }
+                );
+            }
+        }
+    }
+
+    // OH param-workspace hunt (b70): /dev/__parameters__/{param_sec_dac,
+    // param_selinux} end up missing — init's GetSharedMem create-open
+    // (O_CREAT|O_RDWR|O_TRUNC + ftruncate + mmap MAP_SHARED) fails
+    // silently (ENOENT-only tracing misses non-ENOENT errnos), every
+    // later param label lookup is refused, bootevent.* sets are
+    // forbidden and init's boot graph never starts the UI stack. Print
+    // EVERY open under that directory with its result, plus the
+    // create-open's flags, so the failing errno is named directly.
+    if full_path.starts_with("/dev/__parameters__") {
+        static PARAMWS_N: core::sync::atomic::AtomicUsize =
+            core::sync::atomic::AtomicUsize::new(0);
+        let n = PARAMWS_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        if n < 48 {
+            let rc = match &result {
+                Ok(fd) => *fd as i64,
+                Err(e) => *e as i64,
+            };
+            let creating = (flags & O_CREAT) != 0;
+            crate::pr_info!(
+                "paramws open[{}] '{}' flags {:#x} creat={} -> {} (pid {})",
+                n,
+                full_path,
+                flags,
+                creating,
+                rc,
+                unsafe { crate::process::current_pid() }
+            );
+        }
+    }
+
+    // OH bring-up: throttled ENOENT trace — the display HDF hosts retry
+    // missing files in tight loops and their hilog never reaches the
+    // console; the failing path list is the only visibility into what
+    // userspace still lacks. ld.so directory probes would burn the
+    // budget, so: /dev/ paths always print (device nodes are the
+    // bring-up signal), every other DISTINCT path prints once (the
+    // linker search list dedupes to one line per missing library).
+    if let Err(e) = &result {
+        if *e == -(errno::ENOENT as i32) {
+            static ENO_SEEN: crate::sync::spinlock::Spinlock<
+                Option<alloc::vec::Vec<alloc::string::String>>,
+            > = crate::sync::spinlock::Spinlock::new(None);
+            let mut print_it = false;
+            if full_path.starts_with("/dev/") {
+                static ENO_DEV_N: core::sync::atomic::AtomicUsize =
+                    core::sync::atomic::AtomicUsize::new(0);
+                print_it = ENO_DEV_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 32;
+            } else {
+                // ".so" misses get their own budget: the ld.so probe
+                // storm would otherwise starve the runtime-failure
+                // budget, but a lib missing from EVERY directory is the
+                // dlopen-failure signal (bootanimation retry loops).
+                // The BASE name dedupes the ~30 directory probes per
+                // missing lib to one line.
+                let is_lib_probe = full_path.ends_with(".so")
+                    || full_path.ends_with(".z.so")
+                    || full_path.ends_with(".so.1");
+if is_lib_probe {
+                    // Per-(basename,parent_dir) counter map: keeps the
+                    // dlopen directory probe storm deduplicated while
+                    // still surfacing WHERE the loader looked. The
+                    // (lib,dir) tuple is the unit — "still missing
+                    // libEGL.so in /system/lib64" is one line,
+                    // "/vendor/lib64" is another. Without the dir axis
+                    // the loader can hit /system/lib64 and miss, hit
+                    // /vendor/lib64 and miss, and we only see one
+                    // "still missing libEGL.so" that tells us nothing.
+                    static SO_COUNTS: crate::sync::spinlock::Spinlock<
+                        Option<alloc::vec::Vec<((alloc::string::String, alloc::string::String), u32)>>,
+                    > = crate::sync::spinlock::Spinlock::new(None);
+                    let base = alloc::string::String::from(
+                        full_path.rsplit('/').next().unwrap_or(""),
+                    );
+                    let parent = alloc::string::String::from(
+                        match full_path.rsplit_once('/') {
+                            Some((d, _)) if !d.is_empty() => d,
+                            _ => "/",
+                        },
+                    );
+                    let mut counts = SO_COUNTS.lock_irqsave();
+                    let list = counts.get_or_insert_with(alloc::vec::Vec::new);
+                    if list.len() < 420 {
+                        let key = (base.clone(), parent.clone());
+                        match list.iter_mut().find(|(k, _)| *k == key) {
+                            Some((_, c)) => {
+                                *c += 1;
+                                if *c % 64 == 0 {
+                                    crate::pr_info!(
+                                        "open ENOENT: still missing '{}' in '{}' x{} (pid {})",
+                                        base,
+                                        parent,
+                                        c,
+                                        unsafe { crate::process::current_pid() }
+                                    );
+                                }
+                            }
+                            None => {
+                                crate::pr_info!(
+                                    "open ENOENT: '{}' in '{}' (pid {})",
+                                    base,
+                                    parent,
+                                    unsafe { crate::process::current_pid() }
+                                );
+                                list.push((key, 1));
+                            }
+                        }
+                    }
+                } else {
+                    let mut seen = ENO_SEEN.lock_irqsave();
+                    let list = seen.get_or_insert_with(alloc::vec::Vec::new);
+                    if list.len() < 96 {
+                        if !list.iter().any(|p| p.as_str() == full_path.as_str()) {
+                            list.push(alloc::string::String::from(full_path.as_str()));
+                            crate::pr_info!(
+                                "open ENOENT: '{}' (pid {})",
+                                full_path,
+                                unsafe { crate::process::current_pid() }
+                            );
+                        }
+                    }
+                }
+            }
+            if print_it {
+                crate::pr_info!(
+                    "open ENOENT: '{}' (pid {})",
+                    full_path,
+                    unsafe { crate::process::current_pid() }
+                );
+            }
+        }
+    }
+
     match result {
         Ok(fd) => {
             if (flags & O_CLOEXEC) != 0 { crate::fs::set_cloexec_fd(fd, true); }
@@ -242,18 +578,44 @@ pub fn sys_close(args: SyscallArgs) -> i64 {
     }
 
     use crate::fs::close_file_fd;
+    // Capture a Weak handle BEFORE the close so the purge below can tell
+    // whether THIS close dropped the last fd-table reference to the open
+    // file description. A strong Arc here would keep the description
+    // alive and suppress its close op (pipe EOF, socket HUP) — a Weak
+    // observes without holding.
+    let desc_weak = crate::sched::get_current_fdtable().and_then(|ft| {
+        ft.get_file(fd)
+            .map(|f| alloc::sync::Arc::downgrade(&f))
+    });
     // SAFETY: fd is a valid file descriptor owned by the current process.
     unsafe {
         match close_file_fd(fd) {
             Ok(()) => {
-                // Linux eventpoll removes interest entries when the last
+                // Linux eventpoll removes interest entries when the LAST
                 // reference to the registered file description goes away
-                // (eventpoll_release). Best-effort same-process equivalent:
-                // purge this fd from every epoll instance the caller still
-                // holds open, so a stale entry cannot keep reporting
-                // EPOLLERR|EPOLLHUP forever (review批次1: close 后 epoll
-                // 条目不删).
-                crate::syscall::misc::epoll_purge_closed_fd(fd);
+                // (eventpoll_release — the epoll's own epi reference is
+                // what removes it, and only when THAT is the last one).
+                // Purging on ANY close was wrong in the cross-process
+                // shape: a forked child that inherited the fd table (and
+                // with it the epoll fd) closed its inherited copy on
+                // exit, and the purge — resolving "live" against the
+                // child's table, where the slot was just cleared —
+                // stripped the PARENT's live interest. appspawn's
+                // bundle-scan child did exactly this to the AppSpawn
+                // listener: after the child exited, the server's epoll
+                // held only its timer fd, every epoll_wait returned
+                // timer-only events, and client connections piled up in
+                // the accept queue (q reached 210 in sc18) with the
+                // server never accepting — the launcher chain's
+                // spawn-blocker. Gate the purge on this close being the
+                // description's last fd-table reference.
+                let others = desc_weak
+                    .as_ref()
+                    .map(alloc::sync::Weak::strong_count)
+                    .unwrap_or(1);
+                if others == 0 {
+                    crate::syscall::misc::epoll_purge_closed_fd(fd);
+                }
                 0
             }
             Err(e) => e as i64,
@@ -313,6 +675,37 @@ pub fn sys_fstat(args: SyscallArgs) -> i64 {
 /// - args[1]: pathname - file path
 /// - args[2]: statbuf - stat structure buffer
 /// - args[3]: flags - flags (AT_SYMLINK_NOFOLLOW, etc.)
+
+/// Parse a "/proc/[self|<pid>]/fd/<n>" magic-link path (OH bring-up:
+/// musl's fchmodat(AT_SYMLINK_NOFOLLOW) fallback stats and chmods
+/// exactly this path — see the sys_fstatat/sys_fchmodat shortcuts).
+/// Returns (pid, fd) when the path matches and the fd is open in that
+/// pid's table.
+fn proc_fd_magic(path: &str) -> Option<(u32, u32)> {
+    let rest = path.strip_prefix("/proc/")?;
+    let (pid_s, fd_s) = rest.split_once("/fd/")?;
+    if fd_s.is_empty() || !fd_s.bytes().all(|b| b.is_ascii_digit()) {
+        return None;
+    }
+    let pid: u32 = if pid_s == "self" {
+        unsafe { crate::process::current_pid() }
+    } else if !pid_s.is_empty() && pid_s.bytes().all(|b| b.is_ascii_digit()) {
+        pid_s.parse().ok()?
+    } else {
+        return None;
+    };
+    let fd: u32 = fd_s.parse().ok()?;
+    let open = crate::process::find_task_by_pid(pid)
+        .or_else(|| {
+            use crate::process::{current_pid, current_task};
+            if current_pid() == pid { current_task() } else { None }
+        })
+        .and_then(|t| t.try_fdtable())
+        .map(|ft| ft.get_file(fd as usize).is_some())
+        .unwrap_or(false);
+    if open { Some((pid, fd)) } else { None }
+}
+
 pub fn sys_fstatat(args: SyscallArgs) -> i64 {
     use crate::fs::{Stat, stat_file_by_path};
 
@@ -326,6 +719,38 @@ pub fn sys_fstatat(args: SyscallArgs) -> i64 {
     }
     if !crate::arch::uaccess::access_ok(statbuf as usize, crate::fs::user_stat_size()) {
         return -(errno::EFAULT as i64);
+    }
+
+    // Magic-link shortcut: stat("/proc/[self|<pid>]/fd/<n>") stats the
+    // file the fd refers to (Linux open traversal of the procfs fd link).
+    // musl's fchmodat(NO-FOLLOW) fallback stats this path after its
+    // O_PATH open; walking the synthetic symlink re-resolves a target
+    // string that socket fds cannot express. (Non-chrooted tasks only,
+    // like the other global /proc shortcuts.)
+    if !crate::fs::vfs::chrooted() {
+        let mut probe = [0u8; 64];
+        if !pathname_ptr.is_null()
+            && crate::arch::uaccess::access_ok(pathname_ptr as usize, probe.len())
+            && unsafe {
+                crate::arch::uaccess::copy_from_user(
+                    probe.as_mut_ptr(), pathname_ptr, probe.len())
+            } == 0
+        {
+            let len = probe.iter().position(|&b| b == 0).unwrap_or(probe.len());
+            if let Ok(p) = core::str::from_utf8(&probe[..len]) {
+                if let Some((_, fd)) = proc_fd_magic(p) {
+                    let mut stat = Stat::new();
+                    match crate::fs::file_stat(fd as usize, &mut stat) {
+                        Ok(()) => {
+                            let r = crate::fs::copy_stat_to_user(
+                                statbuf as *mut u8, &stat);
+                            return if r != 0 { -(errno::EFAULT as i64) } else { 0 };
+                        }
+                        Err(e) => return e as i64,
+                    }
+                }
+            }
+        }
     }
 
     // Validate flags: AT_SYMLINK_NOFOLLOW (0x100), AT_EMPTY_PATH (0x1000)
@@ -368,7 +793,20 @@ pub fn sys_fstatat(args: SyscallArgs) -> i64 {
         match crate::fs::file_stat(dirfd as usize, &mut stat) {
             Ok(()) => {}
             // Already-negative errno (see sys_fstat): don't re-negate.
-            Err(e) => return e as i64,
+            Err(e) => {
+                static FSTAT_EP_ERR_N: core::sync::atomic::AtomicUsize =
+                    core::sync::atomic::AtomicUsize::new(0);
+                if FSTAT_EP_ERR_N.fetch_add(
+                    1, core::sync::atomic::Ordering::Relaxed) < 20
+                {
+                    crate::pr_info!(
+                        "fstatat empty-path err: dirfd={} flags={:#x} ret={} pid={}",
+                        dirfd, flags, e,
+                        unsafe { crate::process::current_pid() }
+                    );
+                }
+                return e as i64;
+            }
         }
         let result = crate::fs::copy_stat_to_user(statbuf as *mut u8, &stat);
         return if result != 0 { -(errno::EFAULT as i64) } else { 0 };
@@ -376,7 +814,33 @@ pub fn sys_fstatat(args: SyscallArgs) -> i64 {
 
     let full_path = match resolve_user_path(dirfd, pathname_ptr) {
         Ok(p) => p,
-        Err(e) => return e as i64,
+        Err(e) => {
+            // OH bring-up: init's service-socket chmod path dies with
+            // ENOTDIR — name the failing call.
+            {
+                static FSTATAT_ERR_TRACE_N: core::sync::atomic::AtomicUsize =
+                    core::sync::atomic::AtomicUsize::new(0);
+                let pid = unsafe { crate::process::current_pid() };
+                let n = if pid >= 300 {
+                    FSTATAT_ERR_TRACE_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed)
+                } else {
+                    FSTATAT_ERR_TRACE_N.load(core::sync::atomic::Ordering::Relaxed)
+                };
+                if n < 40 && pid >= 300 {
+                    let mut pb = [0u8; 96];
+                    let shown = crate::arch::uaccess::strncpy_from_user(
+                        pathname_ptr, pb.len(), &mut pb)
+                        .map(|s| core::str::from_utf8(s).unwrap_or("?"))
+                        .unwrap_or("?");
+                    crate::pr_info!(
+                        "fstatat err: dirfd={} path='{}' flags={:#x} ret={} pid={}",
+                        dirfd, shown, flags, e,
+                        pid
+                    );
+                }
+            }
+            return e as i64;
+        }
     };
 
     // AT_SYMLINK_NOFOLLOW: don't follow symlinks (for lstat)
@@ -439,6 +903,63 @@ pub fn sys_getdents64(args: SyscallArgs) -> i64 {
 
     // Call VFS layer
     let result = file_getdents64(fd, &mut buffer, count);
+
+    // OH DRM bring-up (rs-egl): the composer VDI's FindAndOpenKmsCard
+    // opendir()s /dev/dri then openat()s "card0" per readdir entry; a
+    // getdents that returns no entries (or errors) leaves the loop empty
+    // and the composer reports "can't open drm card device" with no drm
+    // ioctl ever issued. Name the /dev/dri getdents result directly.
+    {
+        let path = crate::sched::get_current_fdtable()
+            .and_then(|ft| ft.get_file(fd))
+            .and_then(|f| {
+                let p = f.path();
+                if p.is_empty() { None } else { Some(p) }
+            });
+        if let Some(p) = path {
+            if p.ends_with("dri") {
+                static DRIDENTS_N: core::sync::atomic::AtomicUsize =
+                    core::sync::atomic::AtomicUsize::new(0);
+                let n = DRIDENTS_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                if n < 24 {
+                    match &result {
+                        Ok(b) => {
+                            // Entry dump (the composer's FindAndOpenKmsCard
+                            // strncmp()s d_name against "card" — if the
+                            // names/reclens are wrong the loop skips every
+                            // entry and "can't open drm card device" follows
+                            // with no openat ever issued; the raw bytes name
+                            // that directly).
+                            let mut txt = alloc::string::String::with_capacity(96);
+                            for &byte in buffer.iter().take((*b).min(96)) {
+                                if byte >= 0x20 && byte < 0x7f {
+                                    txt.push(byte as char);
+                                } else {
+                                    txt.push('.');
+                                }
+                            }
+                            crate::pr_warn!(
+                                "dri-getdents[{}] '{}' -> {} bytes: {} (pid {})",
+                                n,
+                                p,
+                                b,
+                                txt,
+                                unsafe { crate::process::current_pid() }
+                            );
+                        }
+                        Err(e) => crate::pr_warn!(
+                            "dri-getdents[{}] '{}' -> errno {} (pid {})",
+                            n,
+                            p,
+                            -e,
+                            unsafe { crate::process::current_pid() }
+                        ),
+                    }
+                }
+            }
+        }
+    }
+
     match result {
         Ok(bytes_read) => {
             // SAFETY: dirp validated with access_ok(count); bytes_read <= count.
@@ -463,6 +984,28 @@ pub fn sys_getdents64(args: SyscallArgs) -> i64 {
     }
 }
 
+/// datatap (el2/100 bundle-dir hunt, dt lane): one serial line per
+/// /data namespace mutation. The sc21 boot replaced or emptied the
+/// baked per-user-100 bundle dirs at runtime with no guest-side record
+/// (bindwalk saw el2/100/log as ino 172 and el1/100/database as ino 44
+/// — neither is the baked inode 79/41), so every relevant syscall's
+/// path + result is recorded kernel-side while dfx=datatap is on.
+fn datatap_enabled(path: &str) -> bool {
+    crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::DataTap)
+        && (path.starts_with("/data/") || path == "/data")
+}
+
+fn datatap_log(op: &str, path: &str, detail: &str, rc: i64) {
+    crate::pr_info!(
+        "apptap {} '{}' {} -> {} (pid {})",
+        op,
+        path,
+        detail,
+        rc,
+        unsafe { crate::process::current_pid() }
+    );
+}
+
 /// sys_mkdir - Create directory (legacy wrapper)
 ///
 /// NOTE: riscv64 has no plain `mkdir` syscall — kept for the in-kernel test
@@ -477,10 +1020,14 @@ pub fn sys_mkdir(args: SyscallArgs) -> i64 {
         Err(e) => return e as i64,
     };
 
-    match crate::fs::vfs::file_mkdir(pathname, mode) {
+    let rc = match crate::fs::vfs::file_mkdir(pathname, mode) {
         Ok(()) => 0,
         Err(e) => e as i64,
+    };
+    if datatap_enabled(pathname) {
+        datatap_log("mkdir", pathname, &alloc::format!("mode {mode:#o}"), rc);
     }
+    rc
 }
 
 /// sys_mkdirat - Create directory relative to directory file descriptor
@@ -495,10 +1042,44 @@ pub fn sys_mkdirat(args: SyscallArgs) -> i64 {
         Err(e) => return e as i64,
     };
 
-    match crate::fs::vfs::file_mkdir(&full_path, mode) {
-        Ok(()) => 0,
-        Err(e) => e as i64,
+    // OH param-workspace hunt (b70) — see the open tracer in sys_open.
+    if full_path.starts_with("/dev/__parameters") {
+        let rc = match crate::fs::vfs::file_mkdir(&full_path, mode) {
+            Ok(()) => 0,
+            Err(e) => e as i64,
+        };
+        crate::pr_info!(
+            "paramws mkdir '{}' mode {:#o} -> {} (pid {})",
+            full_path,
+            mode,
+            rc,
+            unsafe { crate::process::current_pid() }
+        );
+        return rc;
     }
+
+    let rc = match crate::fs::vfs::file_mkdir(&full_path, mode) {
+        Ok(()) => 0,
+        Err(e) => {
+            // b18/sc18 appspawn hunt: DoSandboxRootFolderCreate fails with
+            // no errno on the guest side; the sandbox roots live under
+            // /mnt and /data, so surface failed mkdirs there on serial.
+            if e != -(17) && (full_path.starts_with("/mnt") || full_path.starts_with("/data")) {
+                crate::pr_info!(
+                    "mkdirfail '{}' mode {:#o}: {} (pid {})",
+                    full_path,
+                    mode,
+                    e,
+                    unsafe { crate::process::current_pid() }
+                );
+            }
+            e as i64
+        }
+    };
+    if datatap_enabled(&full_path) {
+        datatap_log("mkdir", &full_path, &alloc::format!("mode {mode:#o}"), rc);
+    }
+    rc
 }
 
 /// sys_rmdir - Remove empty directory
@@ -511,10 +1092,14 @@ pub fn sys_rmdir(args: SyscallArgs) -> i64 {
         Err(e) => return e as i64,
     };
 
-    match crate::fs::vfs::file_rmdir(pathname) {
+    let rc = match crate::fs::vfs::file_rmdir(pathname) {
         Ok(()) => 0,
         Err(e) => e as i64,
+    };
+    if datatap_enabled(pathname) {
+        datatap_log("rmdir", pathname, "dir", rc);
     }
+    rc
 }
 
 /// sys_unlink - Remove file
@@ -595,15 +1180,23 @@ pub fn sys_unlinkat(args: SyscallArgs) -> i64 {
     };
 
     if (flags & AT_REMOVEDIR) != 0 {
-        match crate::fs::vfs::file_rmdir(&full_path) {
+        let rc = match crate::fs::vfs::file_rmdir(&full_path) {
             Ok(()) => 0,
             Err(e) => e as i64,
+        };
+        if datatap_enabled(&full_path) {
+            datatap_log("rmdir", &full_path, "dir", rc);
         }
+        rc
     } else {
-        match crate::fs::vfs::file_unlink(&full_path) {
+        let rc = match crate::fs::vfs::file_unlink(&full_path) {
             Ok(()) => 0,
             Err(e) => e as i64,
+        };
+        if datatap_enabled(&full_path) {
+            datatap_log("unlink", &full_path, "file", rc);
         }
+        rc
     }
 }
 
@@ -629,10 +1222,14 @@ pub fn sys_renameat(args: SyscallArgs) -> i64 {
         Err(e) => return e as i64,
     };
 
-    match crate::fs::vfs::vfs_rename(&old_full, &new_full) {
+    let rc = match crate::fs::vfs::vfs_rename(&old_full, &new_full) {
         Ok(()) => 0,
         Err(e) => e as i64,
+    };
+    if datatap_enabled(&old_full) || datatap_enabled(&new_full) {
+        datatap_log("rename", &old_full, &alloc::format!("=> '{new_full}'"), rc);
     }
+    rc
 }
 
 /// sys_readlinkat - Read symbolic link
@@ -783,35 +1380,61 @@ pub fn sys_readlinkat(args: SyscallArgs) -> i64 {
 
     // Generic path: look up the symlink itself (NOFOLLOW) and read its
     // target through the filesystem's readlink op.
-    match crate::fs::vfs::path_lookup(&full_path, crate::fs::vfs::LOOKUP_NOFOLLOW) {
-        Ok(vpath) => {
-            let inode = match vpath.inode {
-                Some(i) => i,
-                None => return -(errno::ENOENT as i64),
-            };
-            if !inode.mode.is_symlink() {
-                return -(errno::EINVAL as i64);
-            }
-            let mut target_buf = [0u8; PATH_MAX];
-            let n = inode.op_readlink(&mut target_buf);
-            if n < 0 {
-                return n as i64;
-            }
-            let n = n as usize;
-            if n > target_buf.len() {
-                return -(errno::ENAMETOOLONG as i64);
-            }
-            let copy_len = n.min(bufsize);
-            // SAFETY: buf validated with access_ok(bufsize); exception-table copy.
-            unsafe {
-                if crate::arch::uaccess::copy_to_user(buf, target_buf.as_ptr(), copy_len) != 0 {
-                    return -(errno::EFAULT as i64);
-                }
-            }
-            // Linux truncates to bufsiz and returns the truncated length
-            copy_len as i64
+    let rl_result: Result<i64, i64> = (|| {
+        let vpath = crate::fs::vfs::path_lookup(&full_path, crate::fs::vfs::LOOKUP_NOFOLLOW)
+            .map_err(|e| e as i64)?;
+        let inode = vpath.inode.ok_or(-(errno::ENOENT as i64))?;
+        if !inode.mode.is_symlink() {
+            return Err(-(errno::EINVAL as i64));
         }
-        Err(e) => e as i64,
+        let mut target_buf = [0u8; PATH_MAX];
+        let n = inode.op_readlink(&mut target_buf);
+        if n < 0 {
+            return Err(n as i64);
+        }
+        let n = n as usize;
+        if n > target_buf.len() {
+            return Err(-(errno::ENAMETOOLONG as i64));
+        }
+        let copy_len = n.min(bufsize);
+        // SAFETY: buf validated with access_ok(bufsize); exception-table copy.
+        unsafe {
+            if crate::arch::uaccess::copy_to_user(buf, target_buf.as_ptr(), copy_len) != 0 {
+                return Err(-(errno::EFAULT as i64));
+            }
+        }
+        // Linux truncates to bufsiz and returns the truncated length
+        Ok(copy_len as i64)
+    })();
+    // OH bring-up: throttled readlink-failure trace (HDF devhost probes
+    // its module directory through readlink; hilog never reaches the
+    // console). Distinct paths only, like the ENOENT open trace.
+    if let Err(e) = &rl_result {
+        static RL_SEEN: crate::sync::spinlock::Spinlock<
+            Option<alloc::vec::Vec<alloc::string::String>>,
+        > = crate::sync::spinlock::Spinlock::new(None);
+        let mut print_it = false;
+        {
+            let mut seen = RL_SEEN.lock_irqsave();
+            let list = seen.get_or_insert_with(alloc::vec::Vec::new);
+            if list.len() < 48 && !list.iter().any(|p| p.as_str() == full_path.as_str()) {
+                list.push(alloc::string::String::from(full_path.as_str()));
+                print_it = true;
+            }
+        }
+        if print_it {
+            crate::pr_info!(
+                "readlink fail({}) '{}': not-a-symlink={} (pid {})",
+                e,
+                full_path,
+                *e == -(errno::EINVAL as i64),
+                unsafe { crate::process::current_pid() }
+            );
+        }
+    }
+    match rl_result {
+        Ok(v) => v,
+        Err(e) => e,
     }
 }
 
@@ -948,29 +1571,13 @@ pub fn sys_chdir(args: SyscallArgs) -> i64 {
         Err(e) => return e as i64,
     };
 
-    // Verify path exists and is a directory (no fd allocated)
-    let abs_path = if pathname.starts_with('/') {
-        pathname.as_bytes().to_vec()
-    } else {
-        if let Some(current) = crate::sched::current() {
-            let cwd = unsafe { (*current).get_cwd() };
-            let mut abs = cwd.to_vec();
-            if !cwd.ends_with(&[b'/']) {
-                abs.push(b'/');
-            }
-            abs.extend_from_slice(pathname.as_bytes());
-            abs
-        } else {
-            return -(errno::ENOENT as i64);
-        }
-    };
-
-    let path_str = match core::str::from_utf8(&abs_path) {
-        Ok(s) => s,
-        Err(_) => return -(errno::EINVAL as i64),
-    };
-
-    match crate::fs::vfs::path_lookup(path_str, 0) {
+    // Resolve the RAW user path through path_lookup: it joins relative
+    // paths against the cwd and prefixes the task root onto absolute
+    // paths, in the caller's namespace. The old manual cwd join here
+    // produced a GLOBAL absolute path which path_lookup then
+    // root-prefixed a SECOND time — every relative chdir() under
+    // chroot() failed with ENOENT.
+    match crate::fs::vfs::path_lookup(pathname, 0) {
         Ok(vpath) => {
             if let Some(ref inode) = vpath.inode {
                 if !inode.mode.is_directory() {
@@ -995,18 +1602,22 @@ pub fn sys_chdir(args: SyscallArgs) -> i64 {
             // symlink reports the RESOLVED location, never the symlink
             // name (LTP symlink01 chdir01 compares getcwd against the
             // object directory). Storing the literal argument string made
-            // getcwd echo the unresolved symlink path.
+            // getcwd echo the unresolved symlink path. The dentry is
+            // recorded alongside the string: it is the truth that keeps
+            // the cwd correct across later mount moves (MS_MOVE) and lets
+            // getcwd compute root-relative paths under chroot.
             let physical = vpath
                 .dentry
                 .as_ref()
                 .map(|d| d.build_path())
-                .unwrap_or_else(|| {
-                    core::str::from_utf8(&abs_path)
-                        .map(|s| alloc::string::String::from(s))
-                        .unwrap_or_else(|_| alloc::string::String::from("/"))
-                });
+                .unwrap_or_else(|| alloc::string::String::from(pathname));
+            let cwd_dentry = vpath.dentry.clone();
             if let Some(current) = crate::sched::current() {
-                unsafe { (*current).set_cwd(physical.as_bytes()); }
+                // SAFETY: current is the running task's Task pointer from
+                // sched::current(); fs_arc() only clones the Arc out of it.
+                if let Some(fs) = unsafe { (*current).fs_arc() } {
+                    fs.set_cwd_with_dentry(physical.as_bytes(), cwd_dentry);
+                }
             }
             0
         }
@@ -1053,35 +1664,23 @@ pub fn sys_fchdir(args: SyscallArgs) -> i64 {
         None => return -(errno::EBADF as i64),
     };
 
-    // Walk dentry chain up to root, collect names
-    let mut components = alloc::vec::Vec::new();
-    let mut current = dentry.clone();
-    loop {
-        let name = current.get_name();
-        if name == "/" {
-            break;
-        }
-        components.push(name);
-        let parent_opt = current.parent.lock().clone();
-        match parent_opt {
-            Some(p) => current = p,
-            None => break,
-        }
-    }
-
-    // Build absolute path: / + reversed components
-    let mut path = alloc::vec::Vec::new();
-    path.push(b'/');
-    for (i, comp) in components.iter().rev().enumerate() {
-        if i > 0 {
-            path.push(b'/');
-        }
-        path.extend_from_slice(comp.as_bytes());
-    }
+    // The physical (mount-crossing) path of the target directory, exactly
+    // what sys_chdir stores. The old manual parent walk could not cross
+    // mount boundaries (a mounted fs root has no parent pointer), so
+    // fchdir to a /proc or /dev fd stored cwd="/" (or dropped the
+    // mountpoint prefix) — same defect chdir had before build_path()
+    // became mount-aware. The dentry is recorded alongside the string
+    // (same rationale as sys_chdir — survives later mount moves, feeds
+    // root-relative getcwd).
+    let physical = dentry.build_path();
+    let cwd_dentry = dentry.clone();
 
     if let Some(task) = crate::sched::current() {
-        // SAFETY: task is the running task's Task pointer from sched::current().
-        unsafe { (*task).set_cwd(&path); }
+        // SAFETY: task is the running task's Task pointer from
+        // sched::current(); fs_arc() only clones the Arc out of it.
+        if let Some(fs) = unsafe { (*task).fs_arc() } {
+            fs.set_cwd_with_dentry(physical.as_bytes(), Some(cwd_dentry));
+        }
     }
 
     0
@@ -1100,23 +1699,56 @@ pub fn sys_getcwd(args: SyscallArgs) -> i64 {
     }
 
     if let Some(current) = crate::sched::current() {
-        // SAFETY: current is the running task's Task pointer from sched::current().
-        let cwd = unsafe { (*current).get_cwd() };
+        // SAFETY: current is the running task's Task pointer from
+        // sched::current(); fs_arc() only clones the Arc out of it.
+        let fs = unsafe { (*current).fs_arc() };
 
-        // Linux walks the cwd dentry UP TO the process ROOT; after chroot()
-        // WITHOUT chdir() the cwd lies outside the root and that walk never
-        // terminates at the root — getcwd fails with ENOENT (the
+        // Linux prepend_path() walks the cwd dentry UP TO the process ROOT
+        // (fs->root), so getcwd reports a path RELATIVE TO THE JAIL: after
+        // chroot("/usr") + chdir("/usr/bin"), getcwd() is "/bin", not
+        // "/usr/bin". When the walk reaches the global root without
+        // meeting the process root (chroot() without chdir() — the cwd
+        // stays outside the jail, historic Linux behavior), getcwd fails
+        // with ENOENT ("(unreachable)" in modern kernels; the
         // CVE-2018-1000001 shape; LTP realpath01 chroots into an empty dir
         // and expects realpath(".") == NULL/ENOENT because getcwd does).
-        // Path-string approximation: the stored global cwd must run under
-        // the task's (global-namespace) root.
-        {
-            // SAFETY: same task pointer as above.
-            let root = unsafe { (*current).get_root() };
-            if root.as_ref() != b"/".as_slice() && !cwd.starts_with(&root[..]) {
-                return -(errno::ENOENT as i64);
+        let cwd: alloc::vec::Vec<u8> = match fs.as_ref() {
+            Some(fs) if fs.cwd_dentry().is_some() => {
+                let cwd_d = fs.cwd_dentry().unwrap();
+                let root = fs.get_root();
+                if root.as_slice() == b"/" {
+                    // Not chrooted: the mount-crossing global path —
+                    // `cd /proc; pwd` must report "/proc".
+                    cwd_d.build_path().into_bytes()
+                } else if let Some(root_d) = fs.root_dentry() {
+                    match cwd_d.build_path_rooted(Some(&root_d)) {
+                        Some(p) => p.into_bytes(),
+                        // cwd outside the jail: Linux getcwd fails ENOENT.
+                        None => return -(errno::ENOENT as i64),
+                    }
+                } else {
+                    // Chrooted without a root dentry (legacy root set by a
+                    // string-only path): approximate with the string prefix.
+                    let cwd = fs.get_cwd();
+                    if !cwd.starts_with(&root[..]) {
+                        return -(errno::ENOENT as i64);
+                    }
+                    cwd
+                }
             }
-        }
+            _ => {
+                // No cwd dentry recorded (early boot / string-only state):
+                // old string-prefix approximation, unchanged.
+                // SAFETY: same task pointer as above.
+                let cwd = unsafe { (*current).get_cwd() };
+                // SAFETY: same task pointer as above.
+                let root = unsafe { (*current).get_root() };
+                if root.as_ref() != b"/".as_slice() && !cwd.starts_with(&root[..]) {
+                    return -(errno::ENOENT as i64);
+                }
+                cwd.into()
+            }
+        };
 
         let cwd_len = cwd.len();
 
@@ -1169,7 +1801,90 @@ pub fn sys_umask(args: SyscallArgs) -> i64 {
 /// sys_mount - Mount a filesystem (syscall 40)
 ///
 /// mount(source, target, filesystemtype, mountflags, data)
+/// sys_mount(2) — instrumented shell (sc112 execution item 3): appspawn
+/// logs "mount X time ~13-15ms avg" per sandbox bind while sc99's kernel
+/// breakdown measured vfs_bind_mount at 40-80us — a 160x gap. This
+/// wrapper times the WHOLE syscall (string copies, target path_lookup,
+/// bind/clone, registry update) with RDTSC and prints one line per call
+/// over 2 ms so the missing time gets attributed. `sprobe=0` silences
+/// (the print lands on the busy-poll UART in the child's stime).
+/// Per-phase wall-clock (TSC) accumulator for the sys_mount shell —
+/// mntslow attribution probe (sc116 follow-up, execution item 1).
+/// sc116 measured the whole syscall at 3.5-9.2 ms for every caller
+/// while mtprobe's breakdown of the SAME binds puts the vfs_bind_mount
+/// core at 45-70 us: ~5 ms hides in the wrapper (string copies, the
+/// capable() LSM call, cwd join, path_lookup, registry update) or in
+/// preemption inside it. TSC deltas INCLUDE preemption/deschedule time
+/// inside a phase — that is deliberate: the question is which phase
+/// absorbs the wall time, not who burns cpu.
+///
+/// Index map (printed as named fields in the mntslow line):
+/// [0]=src copy, [1]=capable, [2]=tgt copy, [3]=cwd join,
+/// [4]=fstype copy, [5]=target path_lookup, [6]=core op
+/// (move/remount/bind/do_mount), [7]=register_mount.
+struct MntPhases([u64; 8]);
+
+impl MntPhases {
+    #[inline]
+    fn new() -> Self {
+        MntPhases([0; 8])
+    }
+
+    /// Time one phase of the mount shell. Zero overhead when the
+    /// probes are off (two RDTSCs, ~50 cycles).
+    #[inline]
+    fn t<T>(&mut self, i: usize, f: impl FnOnce() -> T) -> T {
+        let t0 = crate::arch::cpu::read_counter();
+        let r = f();
+        self.0[i] += crate::arch::cpu::read_counter().saturating_sub(t0);
+        r
+    }
+}
+
 pub fn sys_mount(args: SyscallArgs) -> i64 {
+    let t0 = crate::arch::cpu::read_counter();
+    let mut ph = MntPhases::new();
+    let r = sys_mount_inner(args, &mut ph);
+    if crate::cmdline::get_param("sprobe").map(|v| v != "0").unwrap_or(true) {
+        let dt = crate::arch::cpu::read_counter().saturating_sub(t0);
+        // >2 ms at a ~2.5 GHz TSC. TSC_CYCLES_PER_MS would be nicer but
+        // the timer lane owns the calibration; 5M cycles is a floor that
+        // only real stalls cross (normal mounts are 40-100us).
+        if dt > 5_000_000 {
+            static N: core::sync::atomic::AtomicUsize =
+                core::sync::atomic::AtomicUsize::new(0);
+            if N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 120 {
+                let comm = crate::sched::current()
+                    .map(|t| unsafe { (*t).comm() })
+                    .map(|c| core::str::from_utf8(c).unwrap_or(""))
+                    .unwrap_or("")
+                    .trim_end_matches('\0');
+                // Phase breakdown in us (cyc/2500): names match the
+                // MntPhases index map above; unread phases stay 0 for
+                // early-return paths (EFAULT before capable, ...).
+                let p = ph.0;
+                crate::pr_warn!(
+                    "mntslow: {} cyc (~{} us) comm='{}' -> {} | us: src={} cap={} tgt={} cwd={} fst={} lkp={} op={} reg={}",
+                    dt,
+                    dt / 2500,
+                    comm,
+                    r,
+                    p[0] / 2500,
+                    p[1] / 2500,
+                    p[2] / 2500,
+                    p[3] / 2500,
+                    p[4] / 2500,
+                    p[5] / 2500,
+                    p[6] / 2500,
+                    p[7] / 2500
+                );
+            }
+        }
+    }
+    r
+}
+
+fn sys_mount_inner(args: SyscallArgs, ph: &mut MntPhases) -> i64 {
     // Linux order: copy source (EFAULT on a bad pointer — LTP mount03
     // "EFAULT for filesystemtype/source" cases) BEFORE capability checks
     // on the strings; CAP_SYS_ADMIN gates the actual mount.
@@ -1184,7 +1899,7 @@ pub fn sys_mount(args: SyscallArgs) -> i64 {
     let source = if args[0] == 0 {
         "none"
     } else {
-        match read_user_path(args[0] as *const u8, &mut source_buf) {
+        match ph.t(0, || read_user_path(args[0] as *const u8, &mut source_buf)) {
             Ok(s) => s,
             Err(e) => return e as i64,
         }
@@ -1192,12 +1907,12 @@ pub fn sys_mount(args: SyscallArgs) -> i64 {
     let source = if source.is_empty() { "none" } else { source };
 
     // CAP_SYS_ADMIN required to mount
-    if !crate::security::capable(crate::security::CAP_SYS_ADMIN) {
+    if !ph.t(1, || crate::security::capable(crate::security::CAP_SYS_ADMIN)) {
         return crate::errno::Errno::OperationNotPermitted.as_neg_i32() as i64;
     }
 
     let mut target_buf = [0u8; PATH_MAX];
-    let target = match read_user_path(args[1] as *const u8, &mut target_buf) {
+    let target = match ph.t(2, || read_user_path(args[1] as *const u8, &mut target_buf)) {
         Ok(s) => s,
         Err(e) => return e as i64,
     };
@@ -1209,26 +1924,34 @@ pub fn sys_mount(args: SyscallArgs) -> i64 {
     // which walks from the VFS ROOT — the mount landed on a phantom
     // /tmp_madvise dentry and every later lookup crossed into the
     // unmounted ext4 dir instead.
-    let target_owned = if !target.starts_with('/') {
-        match crate::sched::current() {
-            Some(t) => {
-                let cwd = unsafe { (*t).get_cwd() };
-                let mut abs = alloc::vec::Vec::with_capacity(cwd.len() + 1 + target.len());
-                abs.extend_from_slice(&cwd);
-                if !cwd.ends_with(&[b'/']) {
-                    abs.push(b'/');
+    let target_owned = ph.t(3, || {
+        if !target.starts_with('/') {
+            match crate::sched::current() {
+                Some(t) => {
+                    let cwd = unsafe { (*t).get_cwd() };
+                    let mut abs = alloc::vec::Vec::with_capacity(cwd.len() + 1 + target.len());
+                    abs.extend_from_slice(&cwd);
+                    if !cwd.ends_with(&[b'/']) {
+                        abs.push(b'/');
+                    }
+                    abs.extend_from_slice(target.as_bytes());
+                    match alloc::string::String::from_utf8(abs) {
+                        Ok(s) => s,
+                        Err(_) => alloc::string::String::new(), // EINVAL below
+                    }
                 }
-                abs.extend_from_slice(target.as_bytes());
-                match alloc::string::String::from_utf8(abs) {
-                    Ok(s) => s,
-                    Err(_) => return -(errno::EINVAL as i64),
-                }
+                None => alloc::string::String::from(target),
             }
-            None => alloc::string::String::from(target),
+        } else {
+            alloc::string::String::from(target)
         }
-    } else {
-        alloc::string::String::from(target)
-    };
+    });
+    // The from_utf8 failure path must still return EINVAL (it computed
+    // inside the phase closure); an empty joined string for a non-empty
+    // relative target only arises there.
+    if target_owned.is_empty() && !target.is_empty() {
+        return -(errno::EINVAL as i64);
+    }
     let target = target_owned.as_str();
 
     // fstype is OPTIONAL for MS_MOVE/MS_REMOUNT-style calls (Linux
@@ -1239,7 +1962,7 @@ pub fn sys_mount(args: SyscallArgs) -> i64 {
     let fs_type_str = if args[2] == 0 {
         ""
     } else {
-        match read_user_str(args[2] as *const u8, &mut fstype_buf) {
+        match ph.t(4, || read_user_str(args[2] as *const u8, &mut fstype_buf)) {
             Ok(s) => s,
             Err(e) => return e as i64,
         }
@@ -1248,7 +1971,7 @@ pub fn sys_mount(args: SyscallArgs) -> i64 {
     // The mount target must exist (Linux path_mount resolves it before the
     // filesystem-specific helper runs — the old code fabricated success for
     // any path string).
-    if let Err(e) = crate::fs::vfs::path_lookup(target, 0) {
+    if let Err(e) = ph.t(5, || crate::fs::vfs::path_lookup(target, 0)) {
         return e as i64;
     }
 
@@ -1264,14 +1987,20 @@ pub fn sys_mount(args: SyscallArgs) -> i64 {
     // fresh instance: the VfsMountInternal (flags included) moves.
     const MS_MOVE: u64 = 8192;
     if args[3] & MS_MOVE != 0 {
-        return match crate::fs::vfs::vfs_move_mount(source, target) {
+        return match ph.t(6, || crate::fs::vfs::vfs_move_mount(source, target)) {
             Ok(()) => {
                 // Keep the /proc/mounts row pointed at the new target.
-                let existing = crate::fs::mount::get_mounts()
-                    .into_iter()
-                    .find(|(_, mp, _, _)| mp == source);
-                if let Some((device, _, fs_type, flags)) = existing {
-                    crate::fs::mount::register_mount(&device, target, &fs_type, &flags);
+                let existing = ph
+                    .t(7, || {
+                        crate::fs::mount::get_mounts()
+                            .into_iter()
+                            .find(|(_, mp, _, _)| mp == source)
+                    })
+                    .map(|(device, _, fs_type, flags)| (device, fs_type, flags));
+                if let Some((device, fs_type, flags)) = existing {
+                    ph.t(7, || {
+                        crate::fs::mount::register_mount(&device, target, &fs_type, &flags)
+                    });
                 }
                 0
             }
@@ -1280,25 +2009,114 @@ pub fn sys_mount(args: SyscallArgs) -> i64 {
     }
 
     const MS_REMOUNT: u64 = 32;
-    if args[3] & MS_REMOUNT != 0 {        let new_flags = crate::fs::mount::translate_mnt_flags_public(args[3] & !MS_REMOUNT);
-        match crate::fs::vfs::vfs_remount(target, new_flags) {
+    if args[3] & MS_REMOUNT != 0 {
+        let new_flags =
+            crate::fs::mount::translate_mnt_flags_public(args[3] & !MS_REMOUNT);
+        match ph.t(6, || crate::fs::vfs::vfs_remount(target, new_flags)) {
             Ok(()) => {
                 // Keep the /proc/mounts row in sync (ro/rw string).
-                let existing = crate::fs::mount::get_mounts()
-                    .into_iter()
-                    .find(|(_, mp, _, _)| mp == target);
-                if let Some((device, _, fs_type, _)) = existing {
-                    crate::fs::mount::register_mount(
-                        &device,
-                        target,
-                        &fs_type,
-                        if new_flags.is_readonly() { "ro" } else { "rw" },
-                    );
+                let existing = ph
+                    .t(7, || {
+                        crate::fs::mount::get_mounts()
+                            .into_iter()
+                            .find(|(_, mp, _, _)| mp == target)
+                    })
+                    .map(|(device, _, fs_type, _)| (device, fs_type));
+                if let Some((device, fs_type)) = existing {
+                    ph.t(7, || {
+                        crate::fs::mount::register_mount(
+                            &device,
+                            target,
+                            &fs_type,
+                            if new_flags.is_readonly() { "ro" } else { "rw" },
+                        )
+                    });
                 }
                 return 0;
             }
             Err(e) => return e as i64,
         }
+    }
+
+    // MS_BIND: attach the source subtree over the target (Linux
+    // do_loopback; dispatch order REMOUNT → BIND → MOVE → propagation).
+    // OH's appspawn sandbox construction binds /proc, /dev, /sys,
+    // /system/... into /mnt/sandbox/<user>/<pkg>/ — b19 showed every
+    // one failing EINVAL right after the propagation fix landed. The
+    // new mount SHARES the source directory's inode (see
+    // vfs_bind_mount); fstype and data are ignored, as on Linux.
+    const BIND_MS_BIND: u64 = 4096;
+    const BIND_MS_REC: u64 = 16384;
+    if args[3] & BIND_MS_BIND != 0 {
+        let mnt_flags = crate::fs::mount::translate_mnt_flags_public(args[3]);
+        let ret = match ph.t(
+            6,
+            || {
+                crate::fs::vfs::vfs_bind_mount(
+                    source,
+                    target,
+                    mnt_flags,
+                    args[3] & BIND_MS_REC != 0,
+                )
+            },
+        ) {
+            Ok(()) => {
+                // Register in /proc/mounts AND the caller's mount namespace:
+                // OH's appspawn child self-binds the sandbox root precisely
+                // so pivot_root's is-mountpoint check passes (b22: sandbox
+                // setup completed, then `pivot /mnt/sandbox/0/<pkg> failed,
+                // err 22` because the bind was never registered anywhere).
+                ph.t(7, || {
+                    crate::fs::mount::register_mount(
+                        source,
+                        target,
+                        "bind",
+                        if mnt_flags.is_readonly() { "ro" } else { "rw" },
+                    )
+                });
+                0
+            }
+            Err(e) => e,
+        };
+        if ret != 0 {
+            crate::pr_info!(
+                "bindmount '{}' -> '{}' flags {:#x}: {}",
+                source,
+                target,
+                args[3],
+                ret
+            );
+        }
+        return ret as i64;
+    }
+
+    // Propagation-type change (Linux do_mount dispatch: REMOUNT → BIND →
+    // MOVE → propagation → new mount; this block sits after REMOUNT and
+    // MOVE). When flags carry ONLY propagation bits (MS_SHARED/MS_PRIVATE/
+    // MS_SLAVE/MS_UNBINDABLE, plus harmless modifiers like MS_REC),
+    // mount() changes the propagation type of the mount containing
+    // `target` — no new filesystem instance, fstype/source ignored. Rux
+    // mounts never propagate, so the change is a success no-op — but
+    // returning EINVAL killed real callers: OH init's sandbox prepare
+    // ("Failed set mount slave err = 22"), and the appspawn child's
+    // mount(NULL, "/", NULL, MS_SLAVE|MS_REC) right after creating the
+    // sandbox root dirs — b18 nailed DoSandboxRootFolderCreate dying at
+    // exactly mount[29] flags 0x84000 = MS_SLAVE|MS_REC → EINVAL, which
+    // failed every START_PROCESS (systemui, launcher) after the fork.
+    const CHG_MS_UNBINDABLE: u64 = 1 << 17;
+    const CHG_MS_PRIVATE: u64 = 1 << 18;
+    const CHG_MS_SLAVE: u64 = 1 << 19;
+    const CHG_MS_SHARED: u64 = 1 << 20;
+    const CHG_PROPAGATION: u64 =
+        CHG_MS_SHARED | CHG_MS_PRIVATE | CHG_MS_SLAVE | CHG_MS_UNBINDABLE;
+    if args[3] & CHG_PROPAGATION != 0 {
+        let prop = args[3] & CHG_PROPAGATION;
+        // Multiple propagation types at once is EINVAL (Linux
+        // change_mount_flags rejects the combination).
+        if prop & prop.wrapping_sub(1) != 0 {
+            return -(errno::EINVAL as i64);
+        }
+        return 0;
     }
 
     // Mount options string (mount(2) arg 5): consumed by tmpfs today
@@ -1316,6 +2134,53 @@ pub fn sys_mount(args: SyscallArgs) -> i64 {
     } else {
         None
     };
+
+    // OH bring-up: throttled mount trace — the param service mounts
+    // tmpfs at /dev/__parameters__; a failed mount there stalls every
+    // later param get (samgr/devhost startup).
+    {
+        static MNT_N: core::sync::atomic::AtomicUsize =
+            core::sync::atomic::AtomicUsize::new(0);
+        let n = MNT_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        // hmdfs/sharefs are always traced (b143: StorageDaemon's
+        // per-user /mnt/hmdfs/<id>/account mount "fails errno 11" and
+        // the account-ready chain rides on diagnosing it; a handful of
+        // mounts per boot, not per-transaction).
+        let always = fs_type_str == "hmdfs" || fs_type_str == "sharefs";
+        {
+            let ret = match ph.t(
+                6,
+                || {
+                    crate::fs::mount::do_mount(
+                        source,
+                        target,
+                        fs_type_str,
+                        args[3],
+                        mount_data,
+                    )
+                },
+            ) {
+                Ok(()) => 0,
+                Err(e) => e,
+            };
+            // b18/sc18: print EVERY failed mount, however late in the boot.
+            // The old n<24 gate made appspawn's DoSandboxRootFolderCreate
+            // failure (systemui spawn, hook stage 31) invisible — sandbox
+            // mounts happen thousands of mounts into the boot.
+            if ret != 0 || n < 12 || always {
+                crate::pr_info!(
+                    "mount[{}] '{}' -> '{}' type '{}' flags {:#x}: {}",
+                    n,
+                    source,
+                    target,
+                    fs_type_str,
+                    args[3],
+                    ret
+                );
+            }
+            return ret as i64;
+        }
+    }
 
     match crate::fs::mount::do_mount(source, target, fs_type_str, args[3], mount_data) {
         Ok(()) => 0,
@@ -1385,7 +2250,12 @@ pub fn sys_umount(args: SyscallArgs) -> i64 {
     } else {
         alloc::string::String::from(target)
     };
-    let target = target_owned.as_str();
+    // Normalize like Linux's user_path_at: OH's post-pivot cleanup calls
+    // umount2("<sandbox-root>/.", MNT_DETACH) and the literal "." component
+    // made vfs_umount's parent/name split fail EINVAL (sc23 umountfail
+    // trace), leaving init wedged in a half-prepared sandbox.
+    let target = crate::fs::path::path_normalize(&target_owned);
+    let target = target.as_str();
 
     // U1c: drop the mount row from the CALLER's mount namespace (the
     // dentry-level unmount below is global — recorded divergence).
@@ -1411,10 +2281,58 @@ pub fn sys_umount(args: SyscallArgs) -> i64 {
         }
     }
 
-    match crate::fs::vfs::vfs_umount(target) {
-        Ok(()) => 0,
-        Err(e) => e as i64,
+    // Post-pivot cleanup umount2(put_old | ".", MNT_DETACH): our
+    // jail-style pivot_root stacks no real mount in the shared dentry
+    // tree, so there is nothing for vfs_umount to detach; Linux's
+    // pivot_root leaves the OLD root mounted at put_old and this umount
+    // drops it. When the target matches the caller's recorded put_old
+    // (OH appspawn sandbox_core.cpp:1272 umounts "." right after
+    // pivot_root(p, p); init's sandbox cleanup umounts put_old too),
+    // consume the marker and report success so the sandbox setup
+    // proceeds — the jail root itself is untouched.
+    if flags & MNT_DETACH != 0 {
+        if let Some(t) = crate::sched::current() {
+            // SAFETY: sched::current() yields a valid task reference.
+            if let Some(fs) = unsafe { (*t).fs_arc() } {
+                if let Some(po) = fs.pivot_put_old() {
+                    let po_str =
+                        core::str::from_utf8(&po).unwrap_or("/");
+                    let po_norm = crate::fs::path::path_normalize(po_str);
+                    // "/" also names the old-root stack for the
+                    // pivot_root(new, new) idiom: OH's appspawn child
+                    // chdir's into the sandbox root, pivots, and its cwd
+                    // collapses to "/" inside the new root — umount2(".",
+                    // MNT_DETACH) then arrives here as "/" (b25: children
+                    // 1185-1189 all EBUSY on exactly that). A pivot
+                    // happened in this fs (po is set), so the DETACH pops
+                    // the (unmodelled) old-root stack: no-op success.
+                    if target == po_norm || target == "/" {
+                        fs.clear_pivot_put_old();
+                        return 0;
+                    }
+                }
+            }
+        }
     }
+
+    let ret = match crate::fs::vfs::vfs_umount(target) {
+        Ok(()) => 0,
+        Err(e) => e,
+    };
+    if ret != 0 {
+        // b24: after the (now-working) sandbox pivot, OH init's cleanup
+        // umount2(old_root, MNT_DETACH) fails EINVAL and wedges the boot
+        // in a half-pivoted state — name every failed umount so the
+        // topology gap is one glance.
+        crate::pr_info!(
+            "umountfail '{}' flags {:#x}: {} (pid {})",
+            target,
+            flags,
+            ret,
+            crate::process::current_pid()
+        );
+    }
+    ret as i64
 }
 
 /// Per-mount MNT_EXPIRE bookkeeping: (armed, accessed-since-arm) keyed by
@@ -1726,21 +2644,17 @@ pub fn resolve_user_path(dirfd: i32, pathname_ptr: *const u8) -> Result<alloc::s
     let full_path: alloc::string::String = if pathname_str.starts_with('/') {
         alloc::string::String::from(pathname_str)
     } else if dirfd == AT_FDCWD {
-        if let Some(current) = crate::sched::current() {
-            // SAFETY: current is the running task's Task pointer from sched::current().
-            let cwd = unsafe { (*current).get_cwd() };
-            if let Ok(cwd_str) = core::str::from_utf8(&cwd) {
-                let mut path = alloc::string::String::with_capacity(cwd_str.len() + pathname_str.len() + 1);
-                path.push_str(cwd_str);
-                if !path.ends_with('/') { path.push('/'); }
-                path.push_str(pathname_str);
-                path
-            } else {
-                alloc::string::String::from(pathname_str)
-            }
-        } else {
-            alloc::string::String::from(pathname_str)
-        }
+        // Join against the cwd AS THE USER SEES IT (root-relative, the
+        // getcwd(3) string). The result feeds path_lookup-style callers
+        // that PREFIX the task root onto absolute paths; joining the
+        // GLOBAL cwd here made them prefix it twice, so every relative
+        // *at()/chroot() path under chroot() failed with ENOENT.
+        let cwd_str = crate::fs::vfs::get_cwd_user();
+        let mut path = alloc::string::String::with_capacity(cwd_str.len() + pathname_str.len() + 1);
+        path.push_str(&cwd_str);
+        if !path.ends_with('/') { path.push('/'); }
+        path.push_str(pathname_str);
+        path
     } else {
         // Relative path resolved against the directory referenced by dirfd.
         // The fd must exist and be a directory (Linux: EBADF / ENOTDIR).
@@ -1757,7 +2671,21 @@ pub fn resolve_user_path(dirfd: i32, pathname_ptr: *const u8) -> Result<alloc::s
         if !is_dir {
             return Err((-errno::ENOTDIR as i64) as u64);
         }
-        let base = file.path();
+        // Same namespace discipline as the AT_FDCWD branch: the base is
+        // the dirfd's path RELATIVE TO THE TASK ROOT (d_path style — what
+        // /proc/<pid>/fd shows), so downstream root-prefixing applies
+        // exactly once. A dirfd outside the jail has no in-jail spelling
+        // and keeps its global path (string roots cannot express Linux's
+        // dentry-based dirfd escape).
+        let base = {
+            // SAFETY: file comes from the fd table; dentry written once at
+            // open time and never mutated afterwards; read-only access.
+            let dentry_opt = unsafe { (*file.dentry.get()).clone() };
+            match dentry_opt {
+                Some(d) => crate::fs::vfs::dentry_user_path(&d),
+                None => file.path(),
+            }
+        };
         let mut path = alloc::string::String::with_capacity(base.len() + pathname_str.len() + 1);
         path.push_str(&base);
         if !path.ends_with('/') { path.push('/'); }
@@ -1783,6 +2711,28 @@ pub fn sys_fchmodat(args: SyscallArgs) -> i64 {
     // and flag validation live in fchmodat2 (452) only. Verified on
     // Linux 7.0: fchmodat(path, mode, 999) succeeds on a real path and
     // an empty pathname yields ENOENT regardless of AT_EMPTY_PATH.
+
+    // Magic-link shortcut (see sys_fstatat): chmod("/proc/*/fd/<n>")
+    // chmods the file the fd refers to.
+    if !crate::fs::vfs::chrooted() {
+        let mut probe = [0u8; 64];
+        if !pathname_ptr.is_null()
+            && crate::arch::uaccess::access_ok(pathname_ptr as usize, probe.len())
+            && unsafe {
+                crate::arch::uaccess::copy_from_user(
+                    probe.as_mut_ptr(), pathname_ptr, probe.len())
+            } == 0
+        {
+            let len = probe.iter().position(|&b| b == 0).unwrap_or(probe.len());
+            if let Ok(p) = core::str::from_utf8(&probe[..len]) {
+                if let Some((_, fd)) = proc_fd_magic(p) {
+                    return sys_fchmod([
+                        fd as u64, mode as u64, 0, 0, 0, 0,
+                    ]);
+                }
+            }
+        }
+    }
 
     let full_path = match resolve_user_path(dirfd, pathname_ptr) {
         Ok(p) => p,
@@ -1829,10 +2779,14 @@ pub fn sys_fchownat(args: SyscallArgs) -> i64 {
     // made lchown chown the target instead (LTP chown05 saw the link keep
     // root:root where it expected the nobody ownership it had set).
     let follow = flags & AT_SYMLINK_NOFOLLOW == 0;
-    match crate::fs::vfs::vfs_chown(full_path.as_ref(), uid, gid, follow) {
+    let rc = match crate::fs::vfs::vfs_chown(full_path.as_ref(), uid, gid, follow) {
         Ok(()) => 0,
         Err(e) => e as i64,
+    };
+    if datatap_enabled(&full_path) {
+        datatap_log("chown", &full_path, &alloc::format!("uid {uid} gid {gid}"), rc);
     }
+    rc
 }
 
 /// sys_ftruncate - Truncate an open file (syscall 46)
@@ -1977,6 +2931,22 @@ fn fill_statfs_for_inode(inode: &crate::fs::inode::Inode, buf: &mut Statfs) {
         fill_rootfs_statfs(buf);
         buf.f_type = crate::fs::tmpfs::TMPFS_MAGIC as u32 as u64;
         buf.f_fsid = [crate::fs::tmpfs::TMPFS_MAGIC, 0];
+        return;
+    }
+    if inode
+        .ops
+        .is_some_and(|o| core::ptr::eq(o as *const _, &crate::fs::selinuxfs::SELINUXFS_INODE_OPS as *const _))
+    {
+        // selinuxfs: f_type MUST be SELINUX_MAGIC (0xf97cff8c) —
+        // libselinux's verify_selinuxmnt() gates selinux_mnt (and thus
+        // every security_check_context) on exactly this magic and a
+        // non-read-only statvfs. OH samgr's SA-permission gate depends
+        // on it (boot b50's "SA:5100 selinux denied" loop).
+        const SELINUX_MAGIC: u64 = 0xf97c_ff8c;
+        fill_rootfs_statfs(buf);
+        buf.f_type = SELINUX_MAGIC;
+        buf.f_fsid = [SELINUX_MAGIC as u32, 0];
+        buf.f_flags = 0; // rw — verify_selinuxmnt rejects ST_RDONLY
         return;
     }
     fill_rootfs_statfs(buf);
@@ -2885,6 +3855,15 @@ pub fn sys_fsync(args: SyscallArgs) -> i64 {
                             Some(p) => unsafe { &*(p as *const crate::fs::ext4::inode::Ext4Inode) },
                             None => return -(errno::EIO as i64),
                         };
+                        // Session 25: MAP_SHARED mappings store into
+                        // page-cache frames that only exist there until
+                        // flushed — ext4_sync_file alone would sync the
+                        // buffer cache while dirty FRAMES never reached
+                        // it. Flush every dirty cache entry of the inode
+                        // first (collect/write/complete; no page-cache
+                        // lock across I/O), then the normal data+journal
+                        // sync persists what the flush wrote.
+                        crate::fs::ext4::file::ext4_flush_dirty_inode(inode, 0, u64::MAX);
                         // SAFETY: both pointers were installed at file open
                         // time and live as long as the inode (Arc).
                         match unsafe { crate::fs::ext4::file::ext4_sync_file(&*fs_ptr, ext4_inode) } {
@@ -3103,10 +4082,14 @@ pub fn sys_setxattr(args: SyscallArgs) -> i64 {
         Ok(p) => p,
         Err(e) => return e as i64,
     };
-    match xattr_inode_by_path(&path, true) {
+    let rc = match xattr_inode_by_path(&path, true) {
         Ok(inode) => do_setxattr(&inode, args),
         Err(e) => e as i64,
+    };
+    if datatap_enabled(&path) {
+        datatap_log("setxattr", &path, "", rc);
     }
+    rc
 }
 
 pub fn sys_lsetxattr(args: SyscallArgs) -> i64 {
@@ -3114,10 +4097,14 @@ pub fn sys_lsetxattr(args: SyscallArgs) -> i64 {
         Ok(p) => p,
         Err(e) => return e as i64,
     };
-    match xattr_inode_by_path(&path, false) {
+    let rc = match xattr_inode_by_path(&path, false) {
         Ok(inode) => do_setxattr(&inode, args),
         Err(e) => e as i64,
+    };
+    if datatap_enabled(&path) {
+        datatap_log("lsetxattr", &path, "", rc);
     }
+    rc
 }
 
 pub fn sys_fsetxattr(args: SyscallArgs) -> i64 {
@@ -3132,10 +4119,14 @@ pub fn sys_getxattr(args: SyscallArgs) -> i64 {
         Ok(p) => p,
         Err(e) => return e as i64,
     };
-    match xattr_inode_by_path(&path, true) {
+    let rc = match xattr_inode_by_path(&path, true) {
         Ok(inode) => do_getxattr(&inode, args),
         Err(e) => e as i64,
+    };
+    if datatap_enabled(&path) {
+        datatap_log("getxattr", &path, "", rc);
     }
+    rc
 }
 
 pub fn sys_lgetxattr(args: SyscallArgs) -> i64 {
@@ -3428,16 +4419,34 @@ pub fn sys_chroot(args: SyscallArgs) -> i64 {
         return -(errno::EPERM as i64);
     }
 
-    // P1 chroot: store the (normalized, real-namespace) root in fs_struct.
-    // path_lookup interprets every subsequent absolute path against this
-    // prefix and clamps ".." at it (see vfs::normalize_with_root), so the
-    // jail is enforced for lookups, opens, creates and unlinks alike.
-    // Known boundary (matches historic Linux, not pivot_root): the cwd is
-    // NOT moved — relative paths from a cwd outside the jail still resolve
-    // there, and getcwd() reports real-namespace paths.
-    let normalized = crate::fs::path::path_normalize(&full_path);
+    // P1 chroot: store the jail root in fs_struct — the dentry of the
+    // resolved directory plus its real-namespace path string.
+    // path_lookup interprets every subsequent absolute path against the
+    // string prefix and clamps ".." at it (see vfs::normalize_with_root),
+    // so the jail is enforced for lookups, opens, creates and unlinks
+    // alike. The dentry is what Linux's fs->root is: getcwd computes
+    // root-relative paths from the cwd dentry up to it, and a cwd outside
+    // the jail fails getcwd with ENOENT ("(unreachable)" in modern
+    // kernels).
+    //
+    // The path string is the CANONICAL build_path() of the resolved
+    // dentry, not path_normalize(full_path): the user path may contain
+    // symlinks the FOLLOW lookup already resolved, and — critically for
+    // switch_root-style flows — cwd-relative arguments like "." must
+    // capture where the cwd dentry IS NOW, as a string that stays valid
+    // for the prefix machinery (the cwd string itself is rebuilt from the
+    // cwd dentry, so it cannot be stale here).
+    let root_dentry = vpath.dentry.clone();
+    let normalized = match root_dentry.as_ref() {
+        Some(d) => d.build_path(),
+        None => crate::fs::path::path_normalize(&full_path),
+    };
     if let Some(current) = crate::sched::current() {
-        current.set_root(normalized.as_bytes());
+        // SAFETY: current is the running task's Task pointer from
+        // sched::current(); fs_arc() only clones the Arc out of it.
+        if let Some(fs) = unsafe { (*current).fs_arc() } {
+            fs.set_root_with_dentry(normalized.as_bytes(), root_dentry);
+        }
     }
     0
 }
@@ -4392,8 +5401,17 @@ pub fn sys_renameat2(args: SyscallArgs) -> i64 {
         }
     }
 
-    match crate::fs::vfs::vfs_rename(&old, &new) {
+    let rc = match crate::fs::vfs::vfs_rename(&old, &new) {
         Ok(()) => 0,
         Err(e) => e as i64,
+    };
+    if datatap_enabled(&old) || datatap_enabled(&new) {
+        datatap_log(
+            "rename",
+            &old,
+            &alloc::format!("=> '{new}' flags {flags:#x}"),
+            rc,
+        );
     }
+    rc
 }

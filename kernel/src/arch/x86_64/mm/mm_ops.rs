@@ -108,12 +108,19 @@ impl MmStruct {
         // SAFETY: self.pgd is a valid root page-table PPN, virt_addr is page-aligned, and
         // phys_addr points to a freshly allocated (and zeroed) page that we exclusively own.
         unsafe {
-            map_page(
+            if !map_page(
                 self.pgd,
                 virt_addr,
                 PhysAddr::new(phys_addr as u64),
                 flags,
-            );
+            ) {
+                // Page-table allocation failure (fake-OOM family): free
+                // the exclusively-owned data page and report OOM — the
+                // caller propagates the error instead of the old kernel
+                // panic.
+                crate::mm::page_alloc::free_page(phys_addr);
+                return Err(MapError::OutOfMemory);
+            }
         }
 
         // SAFETY: phys_addr is a valid page from the allocator; pfn_to_page_mut returns a valid
@@ -151,6 +158,11 @@ impl MmStruct {
     }
 
     /// Adjust heap pointer (brk system call)
+    /// LEGACY/UNUSED: the live brk path is sys_brk (syscall/memory.rs,
+    /// task.brk + VMA surgery + demand-fault pages); this eager-map
+    /// variant has no callers (do_brk below is its only wrapper, also
+    /// uncalled). Kept in sync with the mm.brk mirror for when an
+    /// in-kernel caller reappears.
     pub fn set_brk(&self, new_brk: PageVirtAddr) -> Result<PageVirtAddr, MapError> {
         use user_addr::{HEAP_START, HEAP_MAX_SIZE, BRK_DEFAULT, MMAP_START};
 
@@ -191,10 +203,10 @@ impl MmStruct {
                     let flags = perm_to_flags(Perm::ReadWrite, self.space_type());
                     // Serialize the leaf-PTE write + rmap setup against a
                     // concurrent fork()/COW walk on this mm — brk was the
-                    // one leaf-PTE writer left outside PTE_MODIFY_LOCK
+                    // one leaf-PTE writer left outside the PTE section
                     // (same protocol as the demand-fault paths in
-                    // page_fault.rs).
-                    let _pte_guard = PTE_MODIFY_LOCK.lock_irqsave();
+                    // page_fault.rs). Per-mm section (INV-LOCK-7).
+                    let _pte_guard = pte_lock_for(self).lock();
                     // Re-check under the lock: a racing thread of this mm
                     // (CLONE_VM) may have mapped this address between the
                     // walk above and here; mapping again would orphan the
@@ -206,12 +218,32 @@ impl MmStruct {
                         // SAFETY: self.pgd is a valid root PPN, addr is page-aligned in the heap
                         // region, and phys_addr is a freshly allocated exclusive page.
                         unsafe {
-                            map_page(
+                            if !map_page(
                                 self.pgd,
                                 VirtAddr::new(addr as u64),
                                 PhysAddr::new(phys_addr as u64),
                                 flags,
-                            );
+                            ) {
+                                // PT allocation failure (fake-OOM family):
+                                // free the data page (anti-leak) and leave
+                                // the address unmapped — the access faults
+                                // later and the demand-fault path delivers
+                                // the OOM kill (Linux pagefault-OOM
+                                // semantics) instead of the old panic.
+                                static HEAPMAP_N: core::sync::atomic::AtomicUsize =
+                                    core::sync::atomic::AtomicUsize::new(0);
+                                if HEAPMAP_N
+                                    .fetch_add(1, core::sync::atomic::Ordering::Relaxed)
+                                    < 8
+                                {
+                                    crate::pr_err!(
+                                        "brk eager map: PT alloc failed at {:#x} — page left for demand fault",
+                                        addr
+                                    );
+                                }
+                                drop(_pte_guard);
+                                continue;
+                            }
                         }
                         // Set up reverse mapping for heap page
                         {
@@ -281,10 +313,30 @@ impl MmStruct {
             & (map::MAP_FIXED | map::MAP_FIXED_NOREPLACE)
             != 0;
 
-        use user_addr::BRK_DEFAULT;
-        use user_addr::MMAP_START;
         let end_addr = addr.as_usize() + aligned_size;
-        let has_brk_conflict = addr.as_usize() < MMAP_START && end_addr > BRK_DEFAULT;
+        // Linux places MAP_FIXED anywhere in the user range, unmapping
+        // whatever is covered. The historical blanket refusal
+        // (addr < MMAP_START && end > BRK_DEFAULT) rejected EVERY fixed
+        // mapping between 512MB and MMAP_START — mid-low placements
+        // Linux allows (0x50000000-class: JVM compressed oops, wine,
+        // LTP shapes) all returned EINVAL (session-14/15 probe, MF1-3).
+        // Refuse only the LIVE brk heap span
+        // [align_down(start_brk), align(brk)): mapping over malloc's
+        // own storage stays EINVAL (deliberate divergence — Linux would
+        // unmap the heap; we never silently free brk-managed pages).
+        // Everything above the live heap is safe: the fixed-path surgery
+        // below splits/zaps/replaces whatever VMA+PTE state exists, brk
+        // growth into foreign VMAs is refused by sys_brk's VmaManager
+        // overlap check, and the mm.brk mirror is synced by sys_brk so
+        // this span tracks the real break.
+        let brk_cur = self.brk().as_usize();
+        let heap_lo = self.start_brk() & !(PAGE_SIZE_USIZE - 1);
+        let heap_hi = if brk_cur > self.start_brk() {
+            (brk_cur + PAGE_SIZE_USIZE - 1) & !(PAGE_SIZE_USIZE - 1)
+        } else {
+            heap_lo
+        };
+        let has_brk_conflict = addr.as_usize() < heap_hi && end_addr > heap_lo;
 
         // ATOMIC find + insert: the non-fixed paths pick the address AND
         // install the VMA under ONE vma_write guard. The old shape
@@ -321,32 +373,88 @@ impl MmStruct {
                 return Err(MapError::Invalid);
             }
             start
-        } else if map_flags & map::MAP_32BIT != 0 {
-            // Linux x86_64 arch_get_unmapped_area: MAP_32BIT forces the
-            // mapping into the FIRST 2GB, bottom-up from 1GB (observed
-            // Linux placement: a MAP_32BIT mmap on the host lands just
-            // above 0x40000000). The caller's hint is subordinate to the
-            // constraint. OH's musl ld.so issues MAP_PRIVATE|MAP_32BIT for
-            // every library header probe.
-            self.find_free_area_32bit(aligned_size)?
-        } else if addr.as_usize() == 0 {
-            self.find_free_area(aligned_size)?
+        } else if map_flags & map::MAP_32BIT != 0 || addr.as_usize() == 0 {
+            // ATOMIC pick + insert for the kernel-chosen placements too
+            // (mm-audit, OH heap-corruption hunt): MAP_32BIT and the
+            // no-hint anonymous path (musl pthread stacks, mallocng
+            // groups — the hottest concurrent-mmap paths) previously ran
+            // find_free_area under a READ lock and added the VMA later
+            // under a separate WRITE lock. Two same-mm threads in that
+            // window were both handed the same address; the loser's add
+            // then failed and userspace saw a bogus EINVAL (Linux never
+            // fails here short of ENOMEM), or worse, the interleaving
+            // with MAP_FIXED's multi-phase surgery dropped a live VMA
+            // piece. Pick AND insert under ONE guard, like the hint path
+            // below and the riscv64 twin.
+            let mut vma_mgr = self.vma_write();
+            let chosen = if map_flags & map::MAP_32BIT != 0 {
+                // Linux x86_64 arch_get_unmapped_area: MAP_32BIT forces
+                // the mapping into the FIRST 2GB, bottom-up from 1GB
+                // (observed Linux placement: a MAP_32BIT mmap on the
+                // host lands just above 0x40000000). The caller's hint
+                // is subordinate to the constraint. OH's musl ld.so
+                // issues MAP_PRIVATE|MAP_32BIT for every library header
+                // probe.
+                self.find_free_area_32bit_locked(&vma_mgr, aligned_size)?
+            } else {
+                self.find_free_area_locked(&vma_mgr, aligned_size)?
+            };
+            let vend = PageVirtAddr::new(chosen.as_usize() + aligned_size);
+            let mut vma = Vma::new(chosen, vend, flags);
+            vma.set_type(vma_type);
+            vma_mgr
+                .add(vma)
+                .map_err(|_| MapError::Invalid)?;
+            drop(vma_mgr);
+            self.add_total_vm((aligned_size / PAGE_SIZE_USIZE) as u64);
+            self.update_highest_vm_end(chosen.as_usize() + aligned_size);
+            vma_installed = true;
+            chosen
         } else {
             // Non-fixed placement: reserve atomically (see the comment at
-            // vma_installed above). The hint (addr != 0) is honored only
-            // when the whole target range is free of VMAs and clear of the
-            // brk region — same predicate as before, now evaluated under
-            // the write lock so it cannot change between check and add.
+            // vma_installed above). Linux honors a free hint ANYWHERE in
+            // the user range (arch_get_unmapped_area): the hint is
+            // rounded DOWN and used when its gap is free, otherwise the
+            // kernel-chosen search runs. The historical blanket discard
+            // of hints below MMAP_START is gone (session-17 parity):
+            // low hints (arena-class placement requests, LTP shapes)
+            // now land where Linux would place them. Like Linux the
+            // hint is IGNORED (never an error) when it is below
+            // MIN_MAP_ADDR (mmap_min_addr analog), lands on the LIVE
+            // brk heap span (Linux's heap is a VMA from exec time; ours
+            // below MMAP_START can be mirror-only before the first
+            // growth, so the same span check as the fixed path applies),
+            // or ends past USER_END (the syscall layer pre-checked the
+            // raw length; rounding the length UP can still push the
+            // last page over). Residual divergence, documented: no
+            // stack-guard-gap reservation below GROWSDOWN VMAs (Linux
+            // vm_start_gap reserves 1MB) — this VMA has no guard-gap
+            // model. The round-down also closes a kernel panic vector:
+            // an unaligned hint used to reach Vma::new and trip its
+            // page-alignment assert (Vma::new asserts; Linux masks the
+            // hint instead).
             let mut vma_mgr = self.vma_write();
             let chosen = if addr.as_usize() != 0 {
-                let end = PageVirtAddr::new(addr.as_usize() + aligned_size);
-                let test_vma = Vma::new(addr, end, flags);
-                let has_vma_conflict =
-                    vma_mgr.iter().any(|v| v.overlaps(&test_vma));
-                let hint_brk_conflict =
-                    addr.as_usize() < MMAP_START && addr.as_usize() >= BRK_DEFAULT;
-                if !has_vma_conflict && !hint_brk_conflict {
-                    addr
+                let hint = addr.as_usize() & !(PAGE_SIZE_USIZE - 1);
+                let hint_end = hint.checked_add(aligned_size);
+                let hint_heap_conflict =
+                    hint < heap_hi && hint_end.map_or(true, |e| e > heap_lo);
+                let hint_ok = hint >= user_addr::MIN_MAP_ADDR
+                    && hint_end.map_or(false, |e| e <= user_addr::USER_END)
+                    && !hint_heap_conflict;
+                let mut use_hint = false;
+                if hint_ok {
+                    let test_vma = Vma::new(
+                        PageVirtAddr::new(hint),
+                        PageVirtAddr::new(hint + aligned_size),
+                        flags,
+                    );
+                    let has_vma_conflict =
+                        vma_mgr.iter().any(|v| v.overlaps(&test_vma));
+                    use_hint = !has_vma_conflict;
+                }
+                if use_hint {
+                    PageVirtAddr::new(hint)
                 } else {
                     self.find_free_area_locked(&vma_mgr, aligned_size)?
                 }
@@ -376,20 +484,36 @@ impl MmStruct {
             // _dl_map_object_from_fd): every page outside the final
             // segment lost its VMA and faulted with SIGSEGV (Ubuntu
             // dash/libc load).
+            //
+            // ATOMICITY (mm-audit, OH stack-VMA-vanishing): the whole
+            // surgery — snapshot, remove, piece re-add, PTE zap of the
+            // fixed range, and the new VMA's install — runs under ONE
+            // vma_write guard. The old shape released the guard between
+            // the removal phase and the piece re-adds (each piece under
+            // its own guard, add failures silently swallowed), so a
+            // concurrent same-mm mmap that picked the just-opened gap
+            // made a piece's re-add fail with Overlap and the piece was
+            // silently DROPPED: a live mapping (e.g. a thread's stack)
+            // kept its pages but lost its VMA — later faults there report
+            // "no VMA" while the pages stay resident (the b89
+            // fresh-thread hole), and any mapping landing in the hole
+            // collides with the zombie range. unmap_pages takes no VMA
+            // lock (PTE lock only, nested one-way), so holding the guard
+            // across it is safe.
             let fixed_end = PageVirtAddr::new(start.as_usize() + aligned_size);
             let test_vma = Vma::new(start, fixed_end, flags);
+
+            let mut vma_mgr = self.vma_write();
 
             // Snapshot full-attribute VMAs that overlap the fixed range,
             // along with their pinned backing files (the pin is keyed by
             // VMA start; split pieces must re-pin or lose the file when
             // the mapping fd is closed).
-            let overlapping: Vec<(Vma, Option<alloc::sync::Arc<crate::fs::file::File>>)> = {
-                let vma_mgr = self.vma_read();
-                vma_mgr.iter()
-                    .filter(|v| v.overlaps(&test_vma))
-                    .map(|v| (v.clone(), self.get_vma_file(v.start().as_usize())))
-                    .collect()
-            };
+            let overlapping: Vec<(Vma, Option<alloc::sync::Arc<crate::fs::file::File>>)> = vma_mgr
+                .iter()
+                .filter(|v| v.overlaps(&test_vma))
+                .map(|v| (v.clone(), self.get_vma_file(v.start().as_usize())))
+                .collect();
 
             // Compute the preserved head/tail pieces.
             let mut kept: Vec<(Vma, Option<alloc::sync::Arc<crate::fs::file::File>>)> = Vec::new();
@@ -414,24 +538,16 @@ impl MmStruct {
                 }
             }
 
-            // Remove the overlapped VMAs, then re-add the preserved pieces.
-            {
-                let mut vma_mgr = self.vma_write();
-                let overlap_starts: Vec<PageVirtAddr> = vma_mgr
-                    .iter()
-                    .filter(|v| v.overlaps(&test_vma))
-                    .map(|v| v.start())
-                    .collect();
-                for vma_start in overlap_starts {
-                    let _ = vma_mgr.remove(vma_start);
-                    self.unpin_vma_file(vma_start.as_usize());
-                }
-                drop(vma_mgr);
-                for (piece, file) in kept {
-                    let _ = self.vma_write().add(piece.clone());
-                    if let Some(f) = file {
-                        self.pin_vma_file(piece.start().as_usize(), f);
-                    }
+            // Remove the overlapped VMAs, then re-add the preserved
+            // pieces — under the SAME guard (see ATOMICITY above).
+            for (vma, _) in overlapping.iter() {
+                let _ = vma_mgr.remove(vma.start());
+                self.unpin_vma_file(vma.start().as_usize());
+            }
+            for (piece, file) in kept {
+                let _ = vma_mgr.add(piece.clone());
+                if let Some(f) = file {
+                    self.pin_vma_file(piece.start().as_usize(), f);
                 }
             }
 
@@ -440,11 +556,23 @@ impl MmStruct {
             // the previous inline copy raced fork's table walk (round 6
             // HIGH: MAP_FIXED PTE teardown bypassed the lock).
             self.unmap_pages(start, aligned_size)?;
+
+            // Install the replacement VMA under the SAME guard (map_vma
+            // would re-acquire vma_write — recursion — so inline its
+            // body: add + stats).
+            let end = PageVirtAddr::new(start.as_usize() + aligned_size);
+            let mut vma = Vma::new(start, end, flags);
+            vma.set_type(vma_type);
+            vma_mgr.add(vma).map_err(|_| MapError::Invalid)?;
+            drop(vma_mgr);
+            self.add_total_vm((aligned_size / PAGE_SIZE_USIZE) as u64);
+            self.update_highest_vm_end(end.as_usize());
+            vma_installed = true;
         }
 
         if !vma_installed {
-            // Fixed placement: the VMA is added only after the overlap
-            // surgery above has cleared the target range.
+            // Unreachable today (every non-fixed path installs inline);
+            // kept as a safety net for future placement paths.
             let end = PageVirtAddr::new(start.as_usize() + aligned_size);
             let mut vma = Vma::new(start, end, flags);
             vma.set_type(vma_type);
@@ -460,6 +588,18 @@ impl MmStruct {
     /// live below; the gap walk skips whatever exists. ENOMEM when the
     /// 2GB window has no room.
     pub fn find_free_area_32bit(&self, size: usize) -> Result<PageVirtAddr, MapError> {
+        let vma_mgr = self.vma_read();
+        self.find_free_area_32bit_locked(&vma_mgr, size)
+    }
+
+    /// Scan body of find_free_area_32bit under a lock the CALLER holds
+    /// (read for the wrapper, write for mmap's atomic pick-and-insert —
+    /// same TOCTOU contract as find_free_area_locked).
+    fn find_free_area_32bit_locked(
+        &self,
+        vma_mgr: &crate::mm::vma::VmaManager,
+        size: usize,
+    ) -> Result<PageVirtAddr, MapError> {
         const MAP32_LOW: usize = 0x4000_0000; // 1GB
         const MAP32_HIGH: usize = 0x8000_0000; // 2GB
 
@@ -468,7 +608,6 @@ impl MmStruct {
             return Err(MapError::Invalid);
         }
 
-        let vma_mgr = self.vma_read();
         let mut search_start = MAP32_LOW;
         for vma in vma_mgr.iter() {
             let vma_start = vma.start().as_usize();
@@ -572,6 +711,22 @@ impl MmStruct {
         // critical sections let a same-mm mmap/MAP_FIXED install into the
         // gap (VMA over unmapped PTEs, or stale keys removing a re-created
         // VMA). VmaManager::add is a plain method; no recursion.
+        //
+        // mm-audit: the guard now also spans the PTE zap below. Releasing
+        // it between surgery and unmap_pages exposed the range as "free"
+        // while its PTEs were still live — a racing mmap could land in
+        // the hole and its demand-fault installs then interleaved with
+        // the zap's walk (the kernel-side engine behind silently zeroed
+        // or half-torn fresh mappings). unmap_pages takes no VMA lock
+        // (PTE lock only, nested one-way), so the extended hold is safe.
+        //
+        // Pin-table discipline (vm_file semantics): a split FILE VMA's
+        // tail starts at a new address, so the pin keyed at the original
+        // start no longer resolves for it — re-pin the tail at its own
+        // start and drop the original key. Without this, demand faults on
+        // the tail fell back to fd-number resolution and produced ZERO
+        // pages once the mapping fd was closed (Linux vm_file follows the
+        // VMA, not the address).
         {
             let mut vma_mgr = self.vma_write();
             let mut rm = Vec::new();
@@ -582,6 +737,7 @@ impl MmStruct {
                 if ve <= addr.as_usize() || vs >= end_addr {
                     continue;
                 }
+                let pinned = self.get_vma_file(vs);
                 rm.push(vma.start());
                 if vs < addr.as_usize() {
                     let mut head = Vma::new(
@@ -593,7 +749,7 @@ impl MmStruct {
                     head.set_file_fd(vma.file_fd());
                     head.set_file_size(vma.file_size());
                     head.set_offset(vma.offset());
-                    add.push(head);
+                    add.push((head, pinned.clone()));
                 }
                 if ve > end_addr {
                     let mut tail = Vma::new(
@@ -605,26 +761,30 @@ impl MmStruct {
                     tail.set_file_fd(vma.file_fd());
                     tail.set_file_size(vma.file_size());
                     tail.set_offset(vma.offset() + (end_addr - vs));
-                    add.push(tail);
+                    add.push((tail, pinned.clone()));
                 }
             }
             for start in &rm {
                 let _ = vma_mgr.remove(*start);
+                self.unpin_vma_file(start.as_usize());
             }
-            for vma in &add {
+            for (vma, file) in &add {
                 let _ = vma_mgr.add(vma.clone());
+                if let Some(f) = file {
+                    self.pin_vma_file(vma.start().as_usize(), f.clone());
+                }
             }
-        }
 
-        self.unmap_pages(addr, aligned_size)?;
+            self.unmap_pages(addr, aligned_size)?;
+        }
 
         Ok(())
     }
 
     /// Zap the mapped pages in [start, start+size) WITHOUT touching the
     /// VMAs — madvise(MADV_DONTNEED) semantics. Reuses unmap_pages so the
-    /// walk/rmap/refcount/clear_pte/TLB teardown happens under
-    /// PTE_MODIFY_LOCK.
+    /// walk/rmap/refcount/clear_pte/TLB teardown happens under this mm's
+    /// PTE section.
     pub fn zap_page_range(&self, start: PageVirtAddr, size: usize) -> Result<(), MapError> {
         let aligned_size = (size + PAGE_SIZE_USIZE - 1) & !(PAGE_SIZE_USIZE - 1);
         if start.as_usize() % PAGE_SIZE_USIZE != 0 {
@@ -638,8 +798,9 @@ impl MmStruct {
 
     /// Unmap physical pages in specified range
     fn unmap_pages(&self, start: PageVirtAddr, size: usize) -> Result<(), MapError> {
-        // Serialize against fork's table walk and COW faults (PTE lock).
-        let _pte_guard = PTE_MODIFY_LOCK.lock_irqsave();
+        // Serialize against fork's table walk and COW faults (this mm's
+        // PTE section, INV-LOCK-7).
+        let _pte_guard = pte_lock_for(self).lock();
         let mut addr = start.as_usize();
         let end = addr.saturating_add(size);
 
@@ -684,6 +845,18 @@ impl MmStruct {
                     addr += PAGE_SIZE_USIZE;
                     continue;
                 }
+                // Foreign frame (kernel-heap GEM/fb backing): not this
+                // mm's to put/free — clear the PTE only. Same discipline
+                // as the framebuffer case in unmap_one_user_leaf_locked.
+                if crate::mm::page_alloc::is_foreign_user_frame(
+                    (ppn_val as usize) << PAGE_SHIFT,
+                ) {
+                    // SAFETY: addr is a page-aligned user address whose
+                    // leaf we just verified above.
+                    unsafe { self.clear_pte(addr as u64); }
+                    addr += PAGE_SIZE_USIZE;
+                    continue;
+                }
                 // Remove reverse mapping before clearing PTE, then drop this
                 // mapping's reference; the last reference frees the page.
                 use crate::mm::page_desc::pfn_to_page_mut;
@@ -703,11 +876,20 @@ impl MmStruct {
                         crate::mm::rmap::page_remove_rmap(unsafe { &*page });
                     }
                     // SAFETY: page descriptor for a page mapped by this address space.
-                    let new_ref = unsafe { (*page).put_page() };
+                    let new_ref =
+                        unsafe { (*page).put_page_site(crate::dfx::driftwatch::S_UNMAP_X86) };
                     if new_ref == 0 {
                         crate::mm::page_alloc::free_pages(
                             (ppn_val as usize) << PAGE_SHIFT, 0,
                         );
+                    }
+                    // PCACHE mapping (filemap_fault): drop this mapping's
+                    // page-cache pin AFTER the descriptor put (see
+                    // release_cache_mapping_pin). Order matters: the pin's
+                    // release may free an invalidated frame — every
+                    // reference must be gone by then.
+                    if pte_bits & cow_flags::PCACHE != 0 {
+                        release_cache_mapping_pin(ppn_val as usize);
                     }
                 }
                 // SAFETY: addr is a valid, page-aligned virtual address in this address space,
@@ -735,6 +917,71 @@ impl MmStruct {
         crate::arch::mm::asid::flush_tlb_all();
 
         Ok(())
+    }
+
+    /// Teardown of ONE present user leaf at `va`, for callers that already
+    /// hold PTE_MODIFY_LOCK (mremap's page-move copy). Mirrors the per-page
+    /// body of unmap_pages: kernel-only leaves (no U bit) and device
+    /// frames are left untouched; a normal user leaf gets rmap removal,
+    /// refcount drop (last ref frees) and its PTE cleared. Returns true if
+    /// a leaf was torn down.
+    ///
+    /// Used by copy_old_to_new_pages when the mremap destination holds a
+    /// page mapped by a racing same-mm fault between the destination VMA's
+    /// MAP_FIXED install and the PTE copy — Linux's mremap moves PTEs
+    /// atomically under mmap_lock and the move REPLACES whatever sits in
+    /// the destination; skipping the page (the old MREMAP-DST-LIVE guard)
+    /// permanently lost the source data.
+    pub unsafe fn unmap_one_user_leaf_locked(&self, va: usize) -> bool {
+        let Some((ppn_val, pte_bits)) = PageTableWalker::walk(self.pgd, va as u64) else {
+            return false;
+        };
+        if pte_bits & PageTableEntry::U == 0 {
+            return false; // kernel translation overlapped in the walk
+        }
+        // Device frames (virtio-gpu framebuffer) are not RAM pages, and
+        // neither is any other boot-reserved (kernel-heap) frame — the
+        // drm GEM dumb-buffer backing. Clear the PTE only.
+        {
+            let phys = (ppn_val as u64) << 12;
+            let fb = crate::drivers::gpu::get_framebuffer_info()
+                .map_or(false, |i| phys >= i.addr && phys < i.addr + i.size as u64);
+            if fb || crate::mm::page_alloc::is_foreign_user_frame(phys as usize) {
+                self.clear_pte(va as u64);
+                return true;
+            }
+        }
+        use crate::mm::page_desc::pfn_to_page_mut;
+        let page = pfn_to_page_mut(ppn_val as usize);
+        if !page.is_null() {
+            // SAFETY: page is non-null (checked) and points to the page
+            // descriptor of the leaf frame mapped at `va`.
+            unsafe {
+                (*page).rmap_alt_remove(
+                    self as *const _ as usize,
+                    va / PAGE_SIZE_USIZE,
+                );
+            }
+            if unsafe { (*page).is_mapped() } {
+                // SAFETY: page descriptor for a page mapped by this address space.
+                unsafe { crate::mm::rmap::page_remove_rmap(&*page) };
+            }
+            // SAFETY: page descriptor for a page mapped by this address space.
+            let new_ref =
+                unsafe { (*page).put_page_site(crate::dfx::driftwatch::S_UNMAP_X86) };
+            if new_ref == 0 {
+                crate::mm::page_alloc::free_pages((ppn_val as usize) << PAGE_SHIFT, 0);
+            }
+            // PCACHE mapping: drop the pin after the descriptor put (same
+            // ordering as unmap_pages).
+            if pte_bits & cow_flags::PCACHE != 0 {
+                release_cache_mapping_pin(ppn_val as usize);
+            }
+        }
+        // SAFETY: `va` was just verified as a mapped user leaf.
+        unsafe { self.clear_pte(va as u64) };
+        self.sub_rss(1);
+        true
     }
 
     /// Clear page table entry at specified virtual address (4-level walk)
@@ -802,7 +1049,7 @@ impl MmStruct {
             return; // refuse kernel-range rewrites
         }
 
-        let _pte_guard = PTE_MODIFY_LOCK.lock_irqsave();
+        let _pte_guard = pte_lock_for(self).lock();
         let mut va = aligned_start;
         while va < end {
             let a = VirtAddr::new(va);
@@ -873,33 +1120,62 @@ impl MmStruct {
 
     /// Copy address space using Copy-on-Write mechanism
     pub fn fork(&self) -> Result<MmStruct, MapError> {
-        // COW-exempt VMA regions (MAP_SHARED / device mappings). fork's COW
-        // walk historically write-protected EVERY user-writable PTE — in the
-        // PARENT too. A MAP_SHARED mapping then COW-faulted on the first
-        // post-fork store: the fault handler allocated a private copy and
-        // every subsequent store landed there, never in the shared backing
-        // (the fbterm framebuffer-freeze root cause on riscv64). Shared and
-        // device VMAs must be inherited as-is: bump the refcount, keep the
-        // write permission.
-        let cow_exempt: Vec<(u64, u64)> = {
-            let vma_mgr = self.vma_read();
-            vma_mgr
+        // R-WRITESTORM-3 (fork/VMA atomicity), phase-2 shape: SNAPSHOT
+        // FIRST. The original protocol held ONE vma_read guard across the
+        // cow_exempt scan, the COW page-table copy, AND the VMA snapshot so
+        // the child could never pair OLD PTEs with NEW (mprotect-upgraded)
+        // VMA flags — the SIGSEGV/EACCES "Permission denied" family. But a
+        // vma_read guard is preempt-disabling, so that shape also pinned the
+        // whole (multi-second, large-mm) COW walk to one CPU — the launcher
+        // line's structural wall (session-G sc62/64 strand monsters).
+        //
+        // Snapshot-first keeps the consistency and drops the long hold:
+        // exempt scan AND VMA snapshot come from the SAME read-guard era,
+        // so the child pairs PTEs and VMAs of one coherent pre-fork
+        // generation. The walk then runs with NO vma lock and only
+        // per-leaf-table PTE-lock chunks (see copy_page_table_cow); a
+        // concurrent mprotect/munmap/mmap on the parent interleaves at
+        // per-PTE granularity and simply stays out of the child's
+        // snapshot — the race-equivalent outcome POSIX already assigns to
+        // mm writers concurrent with fork.
+        let (cow_exempt, vma_snapshot): (Vec<(u64, u64)>, Vec<(PageVirtAddr, PageVirtAddr, VmaFlags, VmaType, i32, u64, usize)>) = {
+            let parent_vma_guard = self.vma_read();
+
+            // COW-exempt VMA regions (MAP_SHARED / device mappings). fork's COW
+            // walk historically write-protected EVERY user-writable PTE — in the
+            // PARENT too. A MAP_SHARED mapping then COW-faulted on the first
+            // post-fork store: the fault handler allocated a private copy and
+            // every subsequent store landed there, never in the shared backing
+            // (the fbterm framebuffer-freeze root cause on riscv64). Shared and
+            // device VMAs must be inherited as-is: bump the refcount, keep the
+            // write permission.
+            let exempt: Vec<(u64, u64)> = parent_vma_guard
                 .iter()
                 .filter(|vma| {
                     vma.flags().contains(crate::mm::vma::VmaFlags::SHARED)
                         || vma.vma_type() == crate::mm::vma::VmaType::Device
                 })
                 .map(|vma| (vma.start().0 as u64, vma.end().0 as u64))
-                .collect()
+                .collect();
+
+            // Snapshot VMA data under the SAME parent read-guard (R-WRITESTORM-3
+            // consistency era — see the comment above).
+            let snapshot: Vec<(PageVirtAddr, PageVirtAddr, VmaFlags, VmaType, i32, u64, usize)> =
+                parent_vma_guard.iter().map(|vma| {
+                    (vma.start(), vma.end(), vma.flags(), vma.vma_type(), vma.file_fd(), vma.file_size(), vma.offset())
+                }).collect();
+
+            (exempt, snapshot)
         };
 
         // SAFETY: self.pgd is a valid root PPN for the current address space. The caller
         // (fork) guarantees the parent address space is fully initialized and consistent.
-        let _pte_guard = PTE_MODIFY_LOCK.lock_irqsave();
+        // The walk takes the PARENT's per-mm PTE section internally per leaf
+        // table and may cond_resched between chunks (launcher wall fix — see
+        // the function's own comment for the exclusion argument).
         let new_root_ppn = unsafe {
-            copy_page_table_cow(self.pgd, &cow_exempt).ok_or(MapError::OutOfMemory)?
+            copy_page_table_cow(self, &cow_exempt).ok_or(MapError::OutOfMemory)?
         };
-        drop(_pte_guard);
 
         // SAFETY: new_root_ppn was just returned from copy_page_table_cow, so it points to
         // a valid, freshly allocated root page table. space_type and brk are valid by
@@ -911,16 +1187,8 @@ impl MmStruct {
         ) };
 
         {
-            // Snapshot VMA data under parent read-lock, then drop it before
-            // acquiring child write-lock to avoid nested read-then-write deadlock.
-            let vma_snapshot: Vec<(PageVirtAddr, PageVirtAddr, VmaFlags, VmaType, i32, u64, usize)> = {
-                let vma_mgr = self.vma_read();
-                vma_mgr.iter().map(|vma| {
-                    (vma.start(), vma.end(), vma.flags(), vma.vma_type(), vma.file_fd(), vma.file_size(), vma.offset())
-                }).collect()
-            };
-            // Parent read-lock is now dropped.
-
+            // Everything after this point only touches the CHILD's manager
+            // (the snapshot was taken before the walk — no parent lock held).
             if !vma_snapshot.is_empty() {
                 let mut new_vma_mgr = new_space.vma_write();
                 for (start, end, flags, vma_type, file_fd, file_size, offset) in vma_snapshot {
@@ -1023,6 +1291,30 @@ impl PageTableWalker {
     /// `user_root_ppn` must be a live page-table root.
     pub unsafe fn walk(user_root_ppn: u64, virt: u64) -> Option<(u64, u64)> {
         let a = VirtAddr::new(virt);
+
+        // Root guard: a caller whose mm was freed under it (unpinned
+        // procfs borrow) feeds a garbage root ppn — the very first
+        // get_page_table_virt then dies in phys_to_virt OVERFLOW
+        // (exitwalk probe: generate_smaps -> walk with root phys
+        // 0xf888000000000000). Bail with the same bounded forensic line.
+        {
+            let root_pa = user_root_ppn << PAGE_SHIFT;
+            if crate::mm::page_desc::descs_published()
+                && root_pa != 0
+                && !crate::mm::phys_valid(root_pa as usize)
+            {
+                static ROOT_STALE: core::sync::atomic::AtomicUsize =
+                    core::sync::atomic::AtomicUsize::new(0);
+                if ROOT_STALE.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 8 {
+                    crate::pr_err!(
+                        "PT-WALK-STALE: root={:#x} va={:#x} ROOT phys {:#x} off-machine, pid={}",
+                        user_root_ppn, virt, root_pa,
+                        crate::sched::get_current_pid()
+                    );
+                }
+                return None;
+            }
+        }
         let pml4 = get_page_table_virt(user_root_ppn << PAGE_SHIFT);
         let mut table: *mut PageTable = pml4;
 
@@ -1038,6 +1330,31 @@ impl PageTableWalker {
                 let offset = virt & ((1 << shift) - 1);
                 let phys = pte.phys_addr() + offset;
                 return Some((phys >> PAGE_SHIFT, pte.bits()));
+            }
+            // Stale-intermediate guard (exitwalk probe, PT-teardown vs
+            // walkers): a walker that reaches an intermediate entry whose
+            // target is not machine memory is walking a freed/recycled
+            // (or never-table) frame. Feeding it to get_page_table_virt
+            // used to die in phys_to_virt OVERFLOW (bogus phys
+            // 0xf888000000000000, PageTableWalker::walk ->
+            // get_page_table_virt, full-machine panic). Bail out with a
+            // bounded forensic line that names the walk inputs so the
+            // racing walker/lifetime gap is attributable, and return None
+            // like any unmapped address.
+            {
+                let pa = pte.phys_addr();
+                if crate::mm::page_desc::descs_published() && pa != 0 && !crate::mm::phys_valid(pa as usize) {
+                    static WALK_STALE: core::sync::atomic::AtomicUsize =
+                        core::sync::atomic::AtomicUsize::new(0);
+                    if WALK_STALE.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 8 {
+                        crate::pr_err!(
+                            "PT-WALK-STALE: root={:#x} va={:#x} lvl={} pte={:#x} -> phys {:#x} off-machine, pid={}",
+                            user_root_ppn, virt, level, pte.bits(), pa,
+                            crate::sched::get_current_pid()
+                        );
+                    }
+                    return None;
+                }
             }
             table = get_page_table_virt(pte.phys_addr());
         }
@@ -1084,6 +1401,13 @@ pub fn create_user_address_space() -> Option<u64> {
     // alloc_page_table, so it is otherwise unstamped and its teardown free
     // is refused — one leaked frame per exec'd mm).
     super::mmu_init::PT_LEDGER.stamp_root(root_page >> PAGE_SHIFT);
+
+    // K1-BAR: from this point on, new kernel-half PML4 entries installed
+    // in the static root (per-BAR ioremap arena) are invisible to mm
+    // trees forked earlier — they copied the kernel-half links at their
+    // own creation. PCI probe must finish before the first user mm;
+    // ioremap_bar_kernel reports a violation loudly.
+    super::mmu_init::mark_user_mms_exist();
 
     // SAFETY: root_page is a freshly allocated physical page; get_page_table_virt returns a
     // valid kernel-virtual pointer to it. copy_kernel_mappings expects a valid root PPN for
@@ -1156,19 +1480,47 @@ unsafe fn copy_kernel_mappings(user_root_ppn: u64, kernel_root_ppn: u64) {
 }
 
 /// Map user page
-pub unsafe fn map_user_page(user_root_ppn: u64, user_virt: VirtAddr, phys: PhysAddr, flags: u64) {
-    map_page(user_root_ppn, user_virt, phys, flags);
+///
+/// Returns false when the mapping could not be installed (page-table
+/// allocation failure — failible map_page, fake-OOM family).
+pub unsafe fn map_user_page(user_root_ppn: u64, user_virt: VirtAddr, phys: PhysAddr, flags: u64) -> bool {
+    map_page(user_root_ppn, user_virt, phys, flags)
 }
 
 /// Global PTE-modification lock (interface parity with riscv64)
 ///
-/// Coarse leaf-PTE serialization: copy_page_table_cow (fork) mutates the
-/// PARENT's PTEs while walking them; handle_cow_fault atomically swaps a
-/// parent PTE; exec/exit teardown frees them. With no per-PTE locks, any
-/// two of these racing on the same page produce stale refcounts and
-/// dangling child PTEs — the NEW2 class. One writer at a time.
-pub static PTE_MODIFY_LOCK: crate::sync::spinlock::Spinlock<()> =
-    crate::sync::spinlock::Spinlock::new(());
+/// Leaf-PTE exclusion epoch (INV-LOCK-7; type `GlobalPteLock`, see
+/// mm/mm_struct.rs and docs/architecture/lock-ordering.md).
+///
+/// x86_64 runs in SPLIT mode: leaf-PTE writers that can reach the owning
+/// mm take that mm's `PteLock` (epoch SHARED + per-mm spin) via
+/// `pte_lock_for(mm)` — writers of different mms run concurrently, which
+/// is what breaks the fork-walk CPU monopoly. Holders of THIS static
+/// (epoch EXCLUSIVE) keep the old whole-domain one-writer-at-a-time
+/// semantics: the ipc install paths (binder / sysv_shm), `map_user_region`
+/// (exec/fresh-table/device cold paths), and kernel-root maps.
+///
+/// Direct users must NOT be reachable while any per-mm PTE section is
+/// held by the same CPU (write-inside-read self-deadlocks) — the old
+/// global-Spinlock discipline forbade the same nestings, so no live path
+/// regresses.
+pub static PTE_MODIFY_LOCK: crate::mm::mm_struct::GlobalPteLock =
+    crate::mm::mm_struct::GlobalPteLock::new();
+
+/// Per-mm leaf-PTE section hook (INV-LOCK-7): every site that can reach
+/// the owning mm locks through here instead of PTE_MODIFY_LOCK.
+#[inline]
+pub fn pte_lock_for(mm: &crate::mm::mm_struct::MmStruct) -> &crate::mm::mm_struct::PteLock {
+    mm.pte_lock()
+}
+
+/// map_page caller-context marker (corruption hunt, advisory): set right
+/// before the unchecked map helpers run so the PTE-OVERWRITE-LIVE
+/// tripwire can name the site. Values:
+/// 1 shmat attach, 2 mmap(/dev/fb0), 3 mmap MAP_SHARED|ANON eager,
+/// 4 mremap copy, 5 ashrem/ashmem pin, 6 brk growth, 7 anon demand fault,
+/// 8 file/shm demand fault, 9 swap-in. 0 = unset.
+pub static MM_CTX: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
 /// Map a user region: `phys_start` pages mapped at `virt_start` in
 /// lockstep over `size` bytes.
@@ -1185,8 +1537,12 @@ pub unsafe fn map_user_region(
     size: u64,
     flags: u64,
 ) {
-    // Serialize against fork's table walk (PTE lock coverage).
-    let _pte_guard = PTE_MODIFY_LOCK.lock_irqsave();
+    // GLOBAL-mode section (INV-LOCK-7): this helper only receives the
+    // root PPN, so it cannot reach the owning mm's PteLock. Its callers
+    // are cold paths (exec building a fresh unpublished tree, kernel-root
+    // windows, one-shot device maps), so whole-domain exclusion is the
+    // right trade here.
+    let _pte_guard = PTE_MODIFY_LOCK.lock();
     let virt_end_checked = virt_start.checked_add(size);
     let virt_end_val = match virt_end_checked {
         Some(v) => v,
@@ -1261,13 +1617,51 @@ pub unsafe fn alloc_and_map_user_memory(
             block_pages * PAGE_SIZE as usize,
         );
 
-        map_user_region(
-            user_root_ppn,
-            virt_addr + (mapped_pages * PAGE_SIZE as usize) as u64,
-            phys_addr as u64,
-            chunk_bytes as u64,
-            flags,
-        );
+        // PRESERVE PRESENT LEAVES (Linux do_brk_flags only maps ABSENT
+        // pages). A brk shrink that failed to unmap (its munmap error is
+        // ignored), or any stale leaf left in the growth window, used to
+        // be blindly re-mapped with the fresh zero block — destroying
+        // whatever still lived there (PTE-OVERWRITE-LIVE burst
+        // 0x502000-0x519000 in gnome-shell's heap; the [pango] FcInit
+        // abort/SIGSEGV). Skip pages that already have a present
+        // translation; free the block's skipped pages back.
+        {
+            let mut skipped = 0usize;
+            let base_pfn = phys_addr >> PAGE_SHIFT;
+            for i in 0..chunk_pages {
+                let va = virt_addr + ((mapped_pages + i) * PAGE_SIZE as usize) as u64;
+                // SAFETY: user_root_ppn is a valid root and va is a
+                // page-aligned user address; walk is read-only.
+                let present = unsafe { PageTableWalker::walk(user_root_ppn, va) }
+                    .map_or(false, |(_p, bits)| {
+                        bits & PageTableEntry::P != 0
+                    });
+                if present {
+                    // SAFETY: freshly allocated, exclusively owned page.
+                    unsafe {
+                        crate::mm::page_alloc::free_pages(
+                            ((base_pfn + i) as usize) << PAGE_SHIFT,
+                            0,
+                        );
+                    }
+                    skipped += 1;
+                    continue;
+                }
+                // SAFETY: user_root_ppn valid; the target leaf is absent
+                // (checked above under the same lock scope in
+                // map_user_region); phys frames are freshly zeroed.
+                unsafe {
+                    map_user_region(
+                        user_root_ppn,
+                        va,
+                        ((base_pfn + i) as u64) << PAGE_SHIFT,
+                        PAGE_SIZE as u64,
+                        flags,
+                    );
+                }
+            }
+            let _ = skipped;
+        }
 
         // R7-C5: the rounded-up block allocated 2^order pages but the
         // mapping only covers chunk_pages — the unmapped excess has no
@@ -1417,6 +1811,53 @@ pub unsafe fn alloc_and_map_to_user_table(
 /// x86, unlike riscv where bit 8 was free).
 pub mod cow_flags {
     pub const COW: u64 = 1 << 9;
+
+    /// This PTE maps a PAGE-CACHE frame directly (mm filemap_fault, x86_64)
+    /// and OWNS one page-cache pin (`CachedPage.ref_count`) plus one page
+    /// descriptor reference for its mapping lifetime. Carried through
+    /// mprotect rewrites and PROT_NONE markers like COW; dropped (with the
+    /// matching `page_cache::put_by_key`) at unmap, mm teardown, and the
+    /// COW break; duplicated (with `pin_by_key` + get_page) by the fork
+    /// walk. Session 25: MAP_SHARED cache mappings carry it TOO (with the
+    /// PCACHE_SHARED bit below) — the old riscv-style permanent pin is
+    /// gone; every alias owns its pin, so unmap bounds alias memory by
+    /// live mappings instead of forever.
+    pub const PCACHE: u64 = 1 << 10;
+    /// Session 25 (MAP_SHARED writeback): this PCACHE leaf belongs to a
+    /// MAP_SHARED VMA and maps the cache frame WRITABLE — stores go
+    /// straight into the frame (mapper coherence by construction). Unlike
+    /// a private cache leaf, a W-upgrade (mprotect/marker re-present) must
+    /// grant W IN PLACE instead of forcing the COW bit: a COW copy would
+    /// fork a private frame, splitting the mapping from the cache and from
+    /// every other mapper. Carried (preserved) through PTE rewrites like
+    /// PCACHE itself; fork's cow_exempt (SHARED VMAs) copies it as-is.
+    pub const PCACHE_SHARED: u64 = 1 << 11;
+}
+
+/// Drop the page-cache pin owned by ONE mapping of a cache-backed frame
+/// (the PTE carried `cow_flags::PCACHE`). The descriptor's mapping/index
+/// fields carry the page-cache eviction keys (set by cache insert); this
+/// must run AFTER the descriptor's `put_page_site` so the frame's
+/// refcount is already back at the cache's base reference before the pin
+/// drop — which may release and free an invalidated entry — decides the
+/// frame's fate. No-op when the cache entry is already gone (floored put
+/// discipline, R14-16).
+pub(super) fn release_cache_mapping_pin(ppn: usize) {
+    use crate::mm::page_desc::pfn_to_page_mut;
+    let page = pfn_to_page_mut(ppn);
+    if page.is_null() {
+        return;
+    }
+    // SAFETY: descriptor of a live frame that was mapped until this unmap;
+    // mapping/index are only cleared by the cache's own release path, which
+    // cannot run while a pin (held until this call) exists.
+    unsafe {
+        let key = (*page).mapping() as u64;
+        let index = (*page).index() as u64;
+        if key != 0 {
+            crate::fs::page_cache::get_page_cache().put_by_key(key, index);
+        }
+    }
 }
 
 /// Copy page table with COW marking (4-level).
@@ -1432,13 +1873,22 @@ pub mod cow_flags {
 /// (derived, fragile) VMA flags, so no fork can ever COW the scanout away
 /// (see the twin's comment for the fb0 read-regression history).
 pub unsafe fn copy_page_table_cow(
-    parent_root_ppn: u64,
+    parent: &crate::mm::mm_struct::MmStruct,
     cow_exempt: &[(u64, u64)],
 ) -> Option<u64> {
-    // NOTE: the whole walk runs under the caller's (AddressSpace::fork)
-    // PTE_MODIFY_LOCK, serializing it against demand faults, COW faults,
-    // and exec/unmap teardown. Per-leaf PTL granularity (Linux-style) is
-    // still a TODO for SMP scalability.
+    let parent_root_ppn = parent.root_ppn();
+    // NOTE (launcher wall fix, session-3, updated for per-mm sections):
+    // the walk runs CHUNKED — one PTE section per leaf table (vpn2
+    // iteration), with cond_resched() at every chunk boundary. The parent
+    // chunk takes the PARENT mm's PteLock (INV-LOCK-7): per-PTE atomicity
+    // vs demand faults, COW faults, mprotect/munmap of THIS mm is
+    // preserved (every same-mm leaf writer takes the same per-mm spin);
+    // faults of OTHER mms no longer queue behind the walk — that
+    // cross-mm serialization was the fork-walk CPU monopoly. Structural
+    // safety is unchanged: the parent mm is Arc-pinned by the forking
+    // task (teardown cannot run) and intermediate tables are never
+    // unlinked mid-life. The caller (AddressSpace::fork) holds NO lock
+    // across the walk.
     use crate::mm::page_desc::pfn_to_page_mut;
 
     // Framebuffer frames (virtio-gpu scanout backing store) are
@@ -1499,9 +1949,15 @@ pub unsafe fn copy_page_table_cow(
 
             // 1GB leaf: kernel device/identity leaves (U=0) are shared
             // as-is; user 1GB leaves (never created by this port) bump
-            // the refcount like any shared user page.
+            // the refcount like any shared user page. Foreign
+            // (boot-reserved, kernel-heap GEM/fb) frames are copied
+            // as-is with NO refcount — see is_foreign_user_frame.
             if pte3.is_leaf() {
-                if pte3.is_user() {
+                if pte3.is_user()
+                    && !crate::mm::page_alloc::is_foreign_user_frame(
+                        (pte3.ppn() as usize) << PAGE_SHIFT,
+                    )
+                {
                     let page = pfn_to_page_mut(pte3.ppn() as usize);
                     if !page.is_null() {
                         (*page).get_page();
@@ -1533,40 +1989,67 @@ pub unsafe fn copy_page_table_cow(
                     continue;
                 }
 
-                // 2MB leaf: share (device/identity leaves, or user huge
-                // pages with a refcount bump).
-                if pte2.is_leaf() {
-                    if pte2.is_user() {
-                        let page = pfn_to_page_mut(pte2.ppn() as usize);
-                        if !page.is_null() {
-                            (*page).get_page();
-                            (*page).inc_mapcount();
+                // ONE-LEAF-TABLE CHUNK under the PARENT's per-mm PTE
+                // section (launcher wall fix, session-3; per-mm split,
+                // INV-LOCK-7): the walk no longer holds one global
+                // section for the whole parent tree — that monopolized a
+                // CPU (preempt disabled) for the multi-second walk of a
+                // large mm and blocked every other mm's faults behind it.
+                // Exclusion still holds where it must:
+                // - leaf-PTE atomicity (this table's reads/writes vs
+                //   demand faults, COW faults, mprotect/munmap on the
+                //   parent): the per-chunk parent PteLock, which every
+                //   same-mm leaf writer also takes;
+                // - structure: intermediate tables are never unlinked
+                //   mid-life (only free_user_page_tables frees them, and
+                //   the parent mm is Arc-pinned by the forking task, so
+                //   its Drop cannot run during the walk); faults only
+                //   ADD tables, and an index-ordered traversal reads
+                //   additions either before or after the chunk that
+                //   covers them — both consistent.
+                {
+                    // ONE-LEAF-TABLE CHUNK under the PARENT mm's PTE
+                    // section (INV-LOCK-7) — see the walk-head comment.
+                    let _pte_guard = pte_lock_for(parent).lock();
+
+                    // 2MB leaf: share (device/identity leaves, or user huge
+                    // pages with a refcount bump). Foreign (boot-reserved,
+                    // kernel-heap GEM/fb) frames are copied as-is with NO
+                    // refcount — see is_foreign_user_frame.
+                    if pte2.is_leaf() {
+                        if pte2.is_user()
+                            && !crate::mm::page_alloc::is_foreign_user_frame(
+                                (pte2.ppn() as usize) << PAGE_SHIFT,
+                            )
+                        {
+                            let page = pfn_to_page_mut(pte2.ppn() as usize);
+                            if !page.is_null() {
+                                (*page).get_page();
+                                (*page).inc_mapcount();
+                            }
                         }
-                    }
-                    (*child_pmd_ref).set(vpn2, pte2);
-                    continue;
-                }
+                        (*child_pmd_ref).set(vpn2, pte2);
+                    } else {
+                        let ppn1 = pte2.ppn();
 
-                let ppn1 = pte2.ppn();
+                        let child_pt_phys = alloc_page_table()?;
+                        let child_ppn1 = child_pt_phys >> PAGE_SHIFT;
+                        (*child_pmd_ref).set(
+                            vpn2,
+                            PageTableEntry::from_bits(
+                                PageTableEntry::new_table(child_ppn1).bits() | (pte2.bits() & PageTableEntry::US),
+                            ),
+                        );
 
-                let child_pt_phys = alloc_page_table()?;
-                let child_ppn1 = child_pt_phys >> PAGE_SHIFT;
-                (*child_pmd_ref).set(
-                    vpn2,
-                    PageTableEntry::from_bits(
-                        PageTableEntry::new_table(child_ppn1).bits() | (pte2.bits() & PageTableEntry::US),
-                    ),
-                );
+                        let parent_pt = get_page_table_virt(ppn1 << PAGE_SHIFT);
+                        let child_pt_ref = &mut *get_page_table_virt(child_pt_phys);
 
-                let parent_pt = get_page_table_virt(ppn1 << PAGE_SHIFT);
-                let child_pt_ref = &mut *get_page_table_virt(child_pt_phys);
-
-                for vpn1 in 0..512usize {
-                    // The whole walk runs under AddressSpace::fork()'s
-                    // PTE_MODIFY_LOCK, which serializes it against demand
-                    // faults, COW faults, and teardown — no per-leaf
-                    // locking here (the lock is not reentrant).
-                    let pte1 = (*parent_pt).get(vpn1);
+                        for vpn1 in 0..512usize {
+                            // Per-PTE atomicity vs demand/COW faults and
+                            // mprotect/munmap: every access to this leaf
+                            // table happens under the chunk's
+                            // PTE_MODIFY_LOCK above.
+                            let pte1 = (*parent_pt).get(vpn1);
 
                     if !pte1.is_valid() {
                         continue;
@@ -1591,11 +2074,39 @@ pub unsafe fn copy_page_table_cow(
                             pte1.ppn() >= lo && pte1.ppn() < hi
                         });
 
-                    let new_pte = if is_user {
+                    let new_pte = if is_user
+                        && !crate::mm::page_alloc::is_foreign_user_frame(
+                            (pte1.ppn() as usize) << PAGE_SHIFT,
+                        )
+                    {
+                        // Foreign (boot-reserved, kernel-heap GEM/fb) frames
+                        // take no refcount and never COW-mark — the else
+                        // branch copies the PTE as-is (the mapping is
+                        // inherited unchanged; the owning subsystem frees
+                        // the memory).
                         let phys_ppn = pte1.ppn() as usize;
                         let page = pfn_to_page_mut(phys_ppn);
 
                         if !page.is_null() {
+                            // PCACHE leaf (filemap_fault): the child's copy
+                            // owns its own pin — without this, the parent's
+                            // unmap would drop the LAST pin and eviction
+                            // could free a frame the child still maps.
+                            if pte1.bits() & cow_flags::PCACHE != 0 {
+                                let key = (*page).mapping() as u64;
+                                let index = (*page).index() as u64;
+                                if !crate::fs::page_cache::get_page_cache()
+                                    .pin_by_key(key, index)
+                                {
+                                    // Entry vanished while a pin existed —
+                                    // cache/frame bookkeeping drift. The
+                                    // mapping still works (frame is pinned
+                                    // by the parent's not-yet-dropped pin);
+                                    // do not COW-mark so the child's write
+                                    // takes the normal COW copy path.
+                                }
+                            }
+
                             // Increment refcount for shared user pages (one ref per sharer)
                             (*page).get_page();
                             (*page).inc_mapcount();
@@ -1626,7 +2137,17 @@ pub unsafe fn copy_page_table_cow(
                         leaf_va,
                         new_pte.ppn(),
                     );
-                }
+                        }
+                    } // else (non-leaf) — end of leaf-table processing
+                } // end one-leaf-table chunk (PTE lock released)
+
+                // Chunk boundary: no lock is held and the parent mm stays
+                // Arc-pinned by the caller, so the walk state is stable.
+                // cond_resched() yields ONLY when task context + fully
+                // preemptible (it no-ops under any lock/bh/rcu section) —
+                // with need_resched set this is what breaks the CPU
+                // monopoly of a large-mm fork walk.
+                crate::sched::cond_resched();
             }
         }
     }
@@ -1662,9 +2183,15 @@ pub enum CowFaultResult {
     OutOfMemory,
 }
 
-/// Handle copy-on-write page fault (4-level walk under PTE_MODIFY_LOCK)
-pub unsafe fn handle_cow_fault(root_ppn: u64, fault_addr: VirtAddr) -> CowFaultResult {
-    let _pte_guard = PTE_MODIFY_LOCK.lock_irqsave();
+/// Handle copy-on-write page fault (4-level walk under the faulting mm's
+/// PTE section, INV-LOCK-7). `mm` must be the address space that owns
+/// `root_ppn`.
+pub unsafe fn handle_cow_fault(
+    mm: &crate::mm::mm_struct::MmStruct,
+    root_ppn: u64,
+    fault_addr: VirtAddr,
+) -> CowFaultResult {
+    let _pte_guard = pte_lock_for(mm).lock();
     use crate::mm::page_desc::pfn_to_page_mut;
 
     let virt_addr = fault_addr.bits();
@@ -1796,8 +2323,15 @@ pub unsafe fn handle_cow_fault(root_ppn: u64, fault_addr: VirtAddr) -> CowFaultR
     // across COW cycles and eventually corrupts page reclaim / rmap
     // decisions.
     if !old_page.is_null() {
-        (*old_page).put_page();
+        (*old_page).put_page_site(crate::dfx::driftwatch::S_COW_X86);
         (*old_page).dec_mapcount();
+    }
+
+    // PCACHE old leaf (filemap_fault private mapping): the mapping moved to
+    // the private copy — this mapping's cache pin goes with it. Same
+    // put-after-descriptor-put ordering as unmap_pages.
+    if old_bits & cow_flags::PCACHE != 0 {
+        release_cache_mapping_pin(old_ppn as usize);
     }
 
     // Set up reverse mapping for the new COW page
@@ -2019,10 +2553,45 @@ pub unsafe fn mprotect_pte_range(root_ppn: u64, start_virt: u64, num_pages: u64,
         // (restoring P) while preserving its PPN.
 
         let cow_bit = raw & cow_flags::COW;
+        // PCACHE/PCACHE_SHARED are mapping-ownership bits (this PTE owns a
+        // page-cache pin; a SHARED leaf maps the frame writable), not
+        // protection bits — they must survive protection rewrites exactly
+        // like the COW bit, or a later unmap/COW would leak the pin (frame
+        // unevictable forever).
+        let pcache_bit = raw & (cow_flags::PCACHE | cow_flags::PCACHE_SHARED);
         let mut new_bits = (raw & PageTableEntry::PHYS_MASK_PUBLIC) | base;
         if cow_bit != 0 {
             new_bits |= cow_bit;
             new_bits &= !PageTableEntry::W; // W deferred to the COW fault
+        }
+        if pcache_bit != 0 {
+            new_bits |= pcache_bit;
+            if pcache_bit & cow_flags::PCACHE_SHARED != 0 {
+                // SHARED cache leaf (session 25): W is granted IN PLACE —
+                // stores must land in the cache frame (every mapper + the
+                // writeback path observe them). A COW copy here would fork
+                // a private frame and silently detach this mapping from
+                // the file's shared state. An upgrade that GRANTS W is a
+                // W-install (the leaf faulted under an RO VMA): mark the
+                // cache page dirty (conservative v1) so a later msync/fsync
+                // persists stores made through it — fault-path installs
+                // only mark dirty for leaves that faulted under a W VMA.
+                if new_bits & PageTableEntry::W != 0 && raw & PageTableEntry::W == 0 {
+                    crate::fs::page_cache::get_page_cache()
+                        .mark_dirty_pfn(e1.ppn() as usize);
+                }
+            } else {
+                // A (private) cache-backed leaf NEVER gets W in place: the
+                // frame is shared with the page cache (and possibly other
+                // mappers). A W-upgrade on a leaf that faulted under a
+                // read-only VMA (no COW bit yet) must divert the first
+                // write through COW like every other private file page
+                // (Linux writenotify).
+                if new_bits & PageTableEntry::W != 0 {
+                    new_bits |= cow_flags::COW;
+                    new_bits &= !PageTableEntry::W;
+                }
+            }
         }
         (*pt).set(a.pte_index() as usize, PageTableEntry::from_bits(new_bits));
 

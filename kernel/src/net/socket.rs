@@ -1400,6 +1400,19 @@ fn socket_file_poll(file: &File, events: u16) -> u16 {
                 let _g = crate::net::tcp::TCP_TABLE_LOCK.lock_irqsave();
                 if let Some(ts) = crate::net::tcp::tcp_socket_get(tcp_fd) {
                     readable = !ts.recv_buffer.is_empty();
+                    // LISTEN sockets are readable when a child connection
+                    // finished the handshake and waits for accept()
+                    // (Linux tcp_poll: POLLIN iff accept queue non-empty).
+                    // Without this, libuv (hdcd) polled its listener,
+                    // never saw it readable, never accept()ed — the host
+                    // hdc tconn handshake data sat in the child socket
+                    // until hdc timed out ("Connect failed"), though the
+                    // TCP handshake and data delivery both worked.
+                    // Inlined (not tcp_accept_pending): that helper takes
+                    // this very lock — nesting would deadlock.
+                    if !readable && ts.state == crate::net::tcp::TcpState::TCP_LISTEN {
+                        readable = crate::net::tcp::tcp_listen_has_pending_child(tcp_fd);
+                    }
                     if !readable
                         && (ts.state == crate::net::tcp::TcpState::TCP_CLOSE_WAIT
                             || ts.state == crate::net::tcp::TcpState::TCP_CLOSE)

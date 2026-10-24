@@ -25,8 +25,32 @@
 |---|---|
 | ![Ubuntu GNOME login](docs/images/ubuntu-gnome-login-2026-10-15.png) | ![Ubuntu GNOME desktop](docs/images/ubuntu-gnome-desktop-2026-10-15.png) |
 | *Ubuntu GNOME login screen on Rux (riscv64) — verify.py 23/23 PASS* | *Ubuntu GNOME desktop on Rux (riscv64) — the full udesk session with dock, panel, and apps* |
-| ![OH services](docs/images/oh-servicestart-2026-10-15.png) | ![OH boot](docs/images/oh-boot-2026-10-15.png) |
-| *OpenHarmony x86_64_virt — 74 system services (samgr, foundation, render_service, bootanimation…) start and stay up (Phase 1 gate)* | *OpenHarmony boot: the kernel drives virtio-gpu at 720×1280 on QEMU q35 (display HDI in progress)* |
+
+### OpenHarmony — support status
+
+| | |
+|---|---|
+| ![OH services](docs/images/oh-servicestart-2026-10-15.png) | ![OH bootanimation](docs/images/oh-bootanimation-2026-10-24.png) |
+| *OpenHarmony x86_64_virt — ~80 system services (samgr, foundation, render_service, bootanimation…) start and stay up* | *OpenHarmony's own bootanimation rendering on the Rux kernel (720×1280 virtio-GPU, ohgpu screendump) — BootAnimationController verified at 150 frames* |
+
+**Where OpenHarmony stands today** (the boot chain, milestone by milestone):
+
+- **Boots with ~80 system services up** (samgr, foundation, render_service,
+  bootanimation, hilogd, appspawn, hdf devhosts, ...), `hdc shell` reaches the
+  live guest
+- **OH's own bootanimation renders fullscreen** on the kernel's virtio-GPU
+  DRM path (the screenshot above; `BootAnimationController START`, 150+
+  frames, SetVSyncRate delivered)
+- **The launcher process runs and works** — spawn completes end to end
+  (result 0 + pid), `LauncherAbilityManager`, `CommonBundleManager`,
+  `WallpaperExtAbility` and the render-service client all run and narrate
+  for 20+ minutes per boot
+- **Not yet on screen: the launcher UI.** render_service's SA-10 publish is
+  blocked by a userspace lock cascade in hdf_devmgr (a 16-reader FFRT pool
+  rwlock held across blocking binder calls freezes the composer service
+  mid-init); the devmgr→composer handshake (`OnHotPlug`, `SetBrightness`,
+  `SetVSyncRate`) is the deepest it has ever reached. Root-caused; fix in
+  flight.
 
 What is running in these screenshots, all on the Rux kernel:
 
@@ -95,30 +119,57 @@ python3 test/ubuntu-gui/verify.py --runs 2 --smp 4
 
 ## 📱 Rux Runs OpenHarmony
 
-**The OpenHarmony x86_64_virt emulator boots on the Rux kernel to a full
-system service bring-up: 74 services (ueventd, samgr, appspawn,
-foundation, render_service, bootanimation, hilogd, storage_daemon, ...) start
-and stay up — verified stable for 300 seconds with zero panics.**
+**Status: the OpenHarmony x86_64_virt emulator boots on the Rux kernel
+with ~80 system services up, OH's own bootanimation rendering on the
+kernel DRM path (screenshot above), and the launcher process running
+end to end — spawn completes, the ability managers narrate real work.
+The launcher UI is not on screen yet: render_service's composer
+publish is blocked by a userspace rwlock cascade in hdf_devmgr
+(root-caused, fix in flight).** The kernel display path itself is
+proven end to end in a real boot — `CREATE_DUMB → ADDFB2 → first
+page flip → ATOMIC flips` from a seat at the bootanimation position
+(drive by `test/egl_painter`), and now by OH's own animation.
 
-The kernel-side fixes that made this work:
+The kernel-side fixes that made this work (the full campaign log is in
+git history; the load-bearing ones):
 
-- **virtio 64-bit BAR mapping**: QEMU places virtio PCI BARs above 4GiB (up
-  to 768GiB); extended the kernel's device-alias window to cover the full
-  64-bit PCI space
-- **musl dynamic loader**: OH's ld.so uses `mmap(MAP_32BIT)` to load every
-  shared library — the kernel now implements this x86-64 Linux UAPI flag
-- **ext4 metadata_csum**: the OH system/vendor images carry the
-  `metadata_csum` feature; a new checksum verification module
-  (`kernel/src/fs/ext4/csum.rs`) validates and mounts them
-- **switch_root**: `mount(src, dst, NULL, MS_MOVE, NULL)` and the root
-  switch-over with child mount rehoming
-- **devfs with devtmpfs semantics**: `O_CREAT` + `ftruncate` + `mmap` on
-  `/dev/__parameters__` (the OH parameter service workspace)
+- **Binder + token plumbing**: single access-token store (a devfs double
+  registration shadowed the real registry), OH token type-bit layout,
+  `binder_handle_cookie` packed to 12 bytes (OH `__packed`), death
+  notification words, `BR_DEAD_REPLY` on transactions racing their
+  target's death (was a kernel panic)
+- **`SO_PEERSEC` on AF_UNIX**: init's parameter service checks
+  `getpeercon()` on every `bootevent.*` set — without it every set was
+  FORBIDDEN and bootanimation waited forever
+- **PIE load bias (ELF_ET_DYN_BASE parity)**: at bias 0, OH musl's CFI
+  shadow logic treats the main exe as "no data" and skips its shadow
+  fill → every cross-DSO indirect call SIGSEGV'd
+- **Memory model**: PFN span now sized by the max region end (2 GiB of
+  q35 DRAM above 4G was invisible; the MMIO hole got phantom
+  descriptors), zone seeds the full map, page cache scales to RAM with a
+  real LRU (was: anti-LRU eviction + a 32 MiB hard cap — a 509 s fault
+  storm, now 58 s)
+- **ext4**: recursive biglock (alloc-under-lock self-deadlock) and
+  HANDOFF fairness (barging starvation at ~1.5 s/page-fault)
+- **mmap ENODEV for unmappable fds**: inode-less fds (pipes/eventfd)
+  built size-0 file VMAs whose first touch SIGBUS'd — killed accountmgr's
+  and hdf_devmgr's binder threads
+- **x86_64 AVX/XSAVE**: the kernel never set CR4.OSXSAVE/XCR0 while
+  CPUID advertised AVX — every VEX instruction SIGILL'd (hdcd died 15+
+  times per boot)
+- **TCP poll parity**: a listening socket never reported readable with a
+  pending child — libuv servers (hdcd) could never `accept()`
+- **virtio 64-bit BAR mapping** (above-4G ioremap arena), **musl
+  MAP_32BIT**, **ext4 metadata_csum**, **switch_root/MS_MOVE**,
+  **devfs with devtmpfs semantics** (`/dev/__parameters__` shared
+  workspaces with coherent MAP_SHARED pages)
 
 ```bash
 # Boot the OH emulator on Rux:
 ./test/run-oh.sh ~/oh-images console     # serial console
 ./test/run-oh.sh ~/oh-images gui        # virtio-gpu at 720×1280
+# The animation-on-screen boot (egl_painter from the bootanimation seat):
+#   see test/egl_probe*, run/ui-boot.sh SYSTEMIMG=… in the ui-sprint lineage
 ```
 
 ---

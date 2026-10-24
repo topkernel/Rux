@@ -234,6 +234,21 @@ impl UnixSocket {
         q.iter().map(|s| s.data.len()).sum()
     }
 
+    /// sc97 KILLDUMP support: flow-control snapshot for the
+    /// wedged-writer forensics — (queued_bytes, queued_truesize,
+    /// sndbuf_cap, recv_queue_len).
+    pub fn diag_snapshot(&self) -> (usize, usize, usize, usize) {
+        let (qb, ql) = {
+            let q = self.recv_queue.lock();
+            (
+                q.iter().map(|s| s.data.len()).sum(),
+                q.len(),
+            )
+        };
+        let cap = self.options.lock().sndbuf as usize;
+        (qb, self.queued_truesize(), cap, ql)
+    }
+
     /// Kernel-heap cost of the receive queue (Linux `sk_wmem_alloc` /
     /// skb-truesize semantics).
     ///
@@ -247,8 +262,10 @@ impl UnixSocket {
     /// whole sweep chunk down (the r8 sendfile/sendmsg/sendmmsg CRASH
     /// family). Linux charges skb->truesize for exactly this reason.
     fn queued_truesize(&self) -> usize {
-        const SEG_OVERHEAD: usize = core::mem::size_of::<UnixSeg>()
-            + crate::arch::mm::PAGE_SIZE as usize;
+        // sc101: keep this in lockstep with seg_charge (proportional slab
+        // cost — see its comment); divergent formulas made the enqueue
+        // gate and target_has_room disagree.
+        const SEG_OVERHEAD: usize = core::mem::size_of::<UnixSeg>() + 512;
         let q = self.recv_queue.lock();
         q.iter()
             .map(|s| s.data.len() + SEG_OVERHEAD)
@@ -477,6 +494,87 @@ pub fn proc_net_unix_snapshot() -> Vec<u8> {
     out.into_bytes()
 }
 
+/// sc138 (Session Q): diagnostic registry snapshot for the app-park
+/// decode — one compact line per NAMED unix socket with the state
+/// machine position, queue depths, peer name, and the creator pid.
+/// Unlike proc_net_unix_snapshot this keeps the leading-NUL of
+/// abstract names (escaped) so the appconn hex can be matched exactly.
+pub fn registry_snapshot() -> alloc::vec::Vec<alloc::string::String> {
+    let mut lines = alloc::vec::Vec::new();
+    // Clone Arcs under the table lock, then read per-socket fields
+    // AFTER releasing it (socket locks never nest into the table).
+    let entries: alloc::vec::Vec<(alloc::string::String, Arc<UnixSocket>)> = {
+        let table = UNIX_TABLE.lock();
+        table
+            .iter()
+            .map(|(k, s)| (k.clone(), Arc::clone(s)))
+            .collect()
+    };
+    for (key, sock) in entries.iter().take(48) {
+        let name = sock
+            .bound_name
+            .lock()
+            .clone()
+            .unwrap_or_else(|| alloc::string::String::from("?"));
+        let shown: alloc::string::String = name
+            .bytes()
+            .map(|b| {
+                if (0x20..0x7f).contains(&b) {
+                    alloc::format!("{}", b as char)
+                } else {
+                    alloc::format!("\\x{:02x}", b)
+                }
+            })
+            .collect();
+        let st = match *sock.state.lock() {
+            UnixState::Unconnected => "unconn",
+            UnixState::Connecting => "connecting",
+            UnixState::Connected => "connected",
+            UnixState::Listening => "LISTEN",
+            UnixState::Closed => "closed",
+        };
+        let kind = match sock.kind {
+            UnixKind::Stream => "stream",
+            UnixKind::Seqpacket => "seqpkt",
+            UnixKind::Dgram => "dgram",
+        };
+        let rxq = sock.recv_queue.lock().len();
+        let accq = sock.accept_queue.lock().len();
+        let peer = sock
+            .peer
+            .lock()
+            .as_ref()
+            .and_then(|w| w.upgrade())
+            .and_then(|p| p.bound_name.lock().clone())
+            .unwrap_or_else(|| alloc::string::String::from("-"));
+        let pid = sock.creds.lock().pid;
+        let esc = |s: &str| -> alloc::string::String {
+            s.bytes()
+                .take(56)
+                .map(|b| {
+                    if (0x20..0x7f).contains(&b) {
+                        alloc::format!("{}", b as char)
+                    } else {
+                        alloc::format!("\\x{:02x}", b)
+                    }
+                })
+                .collect()
+        };
+        lines.push(alloc::format!(
+            "unixreg: key='{}' name='{}' {} {} rxq={} accq={} peer='{}' pid={}",
+            esc(key),
+            shown,
+            kind,
+            st,
+            rxq,
+            accq,
+            esc(&peer),
+            pid
+        ));
+    }
+    lines
+}
+
 // ============================================================================
 // sockaddr_un parsing / serialization
 // ============================================================================
@@ -610,14 +708,24 @@ fn unix_wait_round(
 
 /// Blocking recv engine: try recv, on would-block return EAGAIN
 /// (non-blocking) or wait on the socket's own queue and retry.
+///
+/// `peek` (MSG_PEEK, Linux recv(2)): return the data that the NEXT receive
+/// would return WITHOUT consuming it — the segment stays queued, ancillary
+/// data stays attached, and a subsequent non-peek receive returns the same
+/// bytes. hilogd's datagram reader probes each packet's 2-byte length
+/// header with `recv(fd, &len, 2, MSG_PEEK)` before the real recvmsg;
+/// without peek semantics the probe consumed the record's first two bytes
+/// and discarded the rest, so hilogd never saw one well-formed HilogMsg
+/// and `hilog` query output stayed empty.
 pub fn unix_recv_ctl(
     sock: &Arc<UnixSocket>,
     buf: &mut [u8],
     nonblock: bool,
     deadline: Option<u64>,
+    peek: bool,
 ) -> Result<UnixRecvResult, i32> {
     loop {
-        match unix_recv(sock, buf) {
+        match unix_recv(sock, buf, peek) {
             Ok(r) => return Ok(r),
             Err(e) if e != -11 => return Err(e),
             Err(_) => {}
@@ -889,6 +997,43 @@ pub fn unix_connect(
             if fid != 0 {
                 crate::syscall::misc::epoll_notify_file(fid);
             }
+            // dfx=socksnap (launcher-chain hunt, b16): name every client
+            // that reaches a Spawn-family listener. The OH appspawn
+            // protocol is one connect + one request + one pid reply, so
+            // this line paired with the REQ dump in unix_send answers
+            // "who asked appspawn to start what" without a guest shell.
+            // AppSpawn/NativeSpawn/CJAppSpawn/HybridSpawn all end in
+            // "Spawn"; other listeners stay silent.
+            // sc18 addendum: census the listener's wait queue around the
+            // wake (total, woken-flagged, awakened). The b14-sc18 wedge
+            // shape is "server parked in an infinite epoll_pwait, zero
+            // deliveries ever, accept queue fills" — entries==0 means the
+            // park never registered on this socket (poll_wait routing
+            // bug); entries>0 with woken>0 but awakened==0 is the VW
+            // sticky-skip lost wake (entry marked, task never scheduled).
+            if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SockSnap) {
+                let name = server.bound_name.lock().clone();
+                if name.as_deref().map(|n| n.ends_with("Spawn")).unwrap_or(false) {
+                    let (tot, won) = server.wait_queue.vw_queue_census();
+                    let awok = server.wait_queue.wake_up_all();
+                    crate::pr_warn!(
+                        "socksnap: CONNECT pid={} -> {} (server fid={:#x}) wq=({},{}) woke={}",
+                        crate::process::current_pid(),
+                        key_shown(name.as_deref().unwrap_or("?")),
+                        fid,
+                        tot,
+                        won,
+                        awok
+                    );
+                    // b20: the khungtaskd snapshot cadence wedges after its
+                    // first pass, so pin the watching epolls' counters to
+                    // THIS connect's timeline (waits/rep discrimination for
+                    // the epoll_pwait wedge; 5060e524 fixed the purge —
+                    // this verifies the listener interest now survives
+                    // spawn-child exits).
+                    crate::syscall::misc::epoll_dump_for_file(fid);
+                }
+            }
             Ok(())
         }
         UnixKind::Dgram => {
@@ -966,11 +1111,24 @@ pub fn unix_peer_bound_name(sock: &Arc<UnixSocket>) -> Option<String> {
 }
 
 /// Flow-control charge of one segment of `len` payload bytes: payload plus
-/// the per-segment heap cost (see UnixSocket::queued_truesize — the buddy
-/// heap allocates whole pages).
+/// the per-segment heap cost. Linux charges skb->truesize ≈ len + ~512
+/// (slab-object overhead), NOT a page per skb.
+///
+/// sc101: the old charge added PAGE_SIZE per segment (the r8 buddy-heap
+/// discipline, written when the heap looked page-granular), but the
+/// CombinedAllocator routes ≤4096-byte allocations to the SLAB — a
+/// 200-byte hilog message really costs ~a slab object, not 4 KiB. The
+/// overcharge throttled a default 212992-byte SO_SNDBUF to ~50 queued
+/// messages, so every chatty client (OH developer-mode apps emit
+/// thousands of libhilog writev's at startup) blocked on the receiver's
+/// drain rate — hilogd writes each record to the serial console, and
+/// the launcher burned its whole 3 s spawn budget parked in writev
+/// (stime 183 ticks, utime 2). Proportional charge: sndbuf now bounds
+/// ~hundreds of messages, absorbing bursts while still capping total
+/// queued bytes ≈ real heap cost (the r8 1-byte-storm hole stays closed
+/// — the charge still exceeds the true per-segment allocation).
 fn seg_charge(len: usize) -> usize {
-    const SEG_OVERHEAD: usize = core::mem::size_of::<UnixSeg>()
-        + crate::arch::mm::PAGE_SIZE as usize;
+    const SEG_OVERHEAD: usize = core::mem::size_of::<UnixSeg>() + 512;
     len + SEG_OVERHEAD
 }
 
@@ -1009,7 +1167,35 @@ pub fn unix_send(
     }
     let cap = sock.options.lock().sndbuf as usize;
 
+    // sc102 spin detector: a sender whose rip parks in the writev wrapper
+    // while stime runs away (183-190 ticks, utime ~0) is LOOPING here —
+    // either the enqueue gate and target_has_room disagree (busy retry) or
+    // each round enqueues into a queue that never effectively drains.
+    // Rate-limited: one print per socket per 1000 rounds names the gate
+    // values at the moment of suspicion.
+    let mut rounds: u32 = 0;
+
     loop {
+        rounds = rounds.wrapping_add(1);
+        if rounds % 1000 == 0 {
+            let tqp = {
+                let tk = sock.dgram_peer.lock().clone();
+                tk.unwrap_or_default()
+            };
+            let (qb, qt, _c, ql) = sock.diag_snapshot();
+            crate::pr_warn!(
+                "unixsend-loop: pid {} rounds={} dgram_peer={} self(q={}B true={} qlen={}) len={} cap={} nonblock={}",
+                crate::process::current_pid(),
+                rounds,
+                tqp,
+                qb,
+                qt,
+                ql,
+                data.len(),
+                cap,
+                nonblock
+            );
+        }
         // Resolve the receiving end fresh each round (the peer may have
         // closed while we were blocked).
         let target: Arc<UnixSocket> = match sock.kind {
@@ -1062,6 +1248,393 @@ pub fn unix_send(
             return Err(-32); // EPIPE
         }
 
+        // dfx=socksnap (launcher-chain hunt, b16): dump the head of every
+        // message whose receiving end belongs to a Spawn-family listener
+        // (AppSpawn/NativeSpawn/CJAppSpawn/HybridSpawn). The OH request
+        // carries the target process name as a C string inside the struct,
+        // so hex+printable of the first 64 bytes names the app being asked
+        // for. Replies from appspawn ride the same socket in the other
+        // direction (target = client socket, no Spawn bound name) and stay
+        // silent — only requests print.
+        if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SockSnap)
+            && !data.is_empty()
+        {
+            let is_spawn = target
+                .bound_name
+                .lock()
+                .as_ref()
+                .map(|n| n.ends_with("Spawn"))
+                .unwrap_or(false);
+            if is_spawn {
+                let n = data.len().min(64);
+                let mut hex = alloc::string::String::new();
+                for i in 0..n {
+                    hex.push_str(&alloc::format!("{:02x}", data[i]));
+                }
+                let mut txt: alloc::vec::Vec<u8> = alloc::vec::Vec::with_capacity(n);
+                for &b in &data[..n] {
+                    txt.push(if b >= 0x20 && b < 0x7f { b } else { b'.' });
+                }
+                let s = core::str::from_utf8(&txt).unwrap_or("");
+                let name = target.bound_name.lock().clone();
+                crate::pr_warn!(
+                    "socksnap: REQ pid={} -> {} len={} hex={} txt={}",
+                    crate::process::current_pid(),
+                    key_shown(name.as_deref().unwrap_or("?")),
+                    data.len(),
+                    hex,
+                    s
+                );
+            }
+        }
+
+        // hilog tap (drm/ui bring-up): OH's userspace log lines exist
+        // ONLY inside hilogd (libEGL's stderr adapter prints '<message
+        // truncated>' markers). The receiving sockets are bound to
+        // .../hilogInput / .../hilogd.server — mirror graphics-relevant
+        // logs to serial. Datagrams on hilogInput are HilogMsg records
+        // (base/hiviewdfx/hilog frameworks/libhilog/include/hilog_base.h),
+        // a __packed 28-byte header followed by tag and content:
+        //
+        //   off 0  u16 len            total: 28 + tagLen + contentLen
+        //   off 2  u16 bitfield       version:3 | type:4<<3 | level:3<<7
+        //                              | tagLen:6<<10   (little-endian)
+        //   off 4  u32 tv_sec   off 8  u32 tv_nsec  off 12 u32 mono_sec
+        //   off 16 u32 pid       off 20 u32 tid      off 24 u32 domain
+        //   off 28 u8 tag[tagLen]     NUL-terminated
+        //   off 28+tagLen u8 content  plain text: args are vsnprintf'd
+        //                              client-side; {private} args arrive
+        //                              as the literal "<private>"
+        //
+        // The first tap smeared the whole datagram through a printable
+        // filter, mixing header bytes into the text and hiding the exact
+        // EGL failure lines behind garbage ("EGLC0GL" etc). Decode the
+        // header, then tag: content, and only fall back to the smear for
+        // records that do not parse.
+        {
+            let is_hilog = target
+                .bound_name
+                .lock()
+                .as_ref()
+                .map(|n| n.ends_with("hilogInput") || n.ends_with("hilogd.server"))
+                .unwrap_or(false);
+            // sc209 (leg 14): param-service control tap. sc208's crawl is
+            // samgr's on-demand loads timing out: "Start dynamic proc:
+            // installs,511,105_14991ms" x24 — ServiceControlWithExtra =
+            // SystemSetParameter("ohos.ctl.start", ...) over this socket,
+            // returning PARAM_CODE_TIMEOUT(105) after 15 s, and the
+            // server-side "Handle set param" log NEVER shows the installs
+            // sets (the client's FIRST attempt even returned 0 in 0 ms
+            // with no server handling — a stale/instant reply). This tap
+            // prints every ParamMessage (u32 type, u32 msgSize, u32 id,
+            // char key[100] @12, ParamMsgContent @112) SENT to the
+            // paramservice listener, plus param-ish messages SENT BY pid
+            // 1 (server responses carry type MSG_SET_PARAM with the
+            // result i32 at off 112). Client-send vs server-arrival gap =
+            // socket/wake loss; a pid-1 response with no matching request
+            // = the duplicated-reply conviction.
+            if !data.is_empty() && data.len() >= 12 {
+                let is_param_listener = target
+                    .bound_name
+                    .lock()
+                    .as_ref()
+                    .map(|n| n.ends_with("paramservice"))
+                    .unwrap_or(false);
+                let sender_pid = crate::process::current_pid();
+                // type: 0 SET / 1 WAIT / 2 ADD_WATCHER / 3 DEL_WATCHER /
+                // 4 NOTIFY / 5 SAVE. Plausibility gate: type <= 5 and
+                // msgSize == data.len() and key starts printable.
+                let mtype = u32::from_le_bytes([data[0], data[1], data[2], data[3]]);
+                let msize = u32::from_le_bytes([data[4], data[5], data[6], data[7]]);
+                let mid = u32::from_le_bytes([data[8], data[9], data[10], data[11]]);
+                let looks_param = mtype <= 5
+                    && msize as usize == data.len()
+                    && data.len() > 12
+                    && data[12] >= b'a'
+                    && data[12] <= b'z';
+                if is_param_listener || (sender_pid == 1 && looks_param) {
+                    static PCTL_N: core::sync::atomic::AtomicUsize =
+                        core::sync::atomic::AtomicUsize::new(0);
+                    let n = PCTL_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                    if n < 300 {
+                        let mut kbuf = [0u8; 40];
+                        let kmax = core::cmp::min(40, data.len() - 12);
+                        let mut klen = 0usize;
+                        while klen < kmax && data[12 + klen] != 0 {
+                            kbuf[klen] = data[12 + klen];
+                            klen += 1;
+                        }
+                        let key = core::str::from_utf8(&kbuf[..klen]).unwrap_or("?");
+                        let mut extra = alloc::string::String::new();
+                        if sender_pid == 1 {
+                            // Server response: result i32 at off 112.
+                            if data.len() >= 116 {
+                                let r = i32::from_le_bytes([
+                                    data[112], data[113], data[114], data[115],
+                                ]);
+                                extra = alloc::format!(" result={}", r);
+                            }
+                        } else if data.len() >= 116 {
+                            // Client request: ParamMsgContent @112
+                            // (u8 type=1 PARAM_VALUE, u16 size) → string @116.
+                            let ctype = data[112];
+                            if ctype == 1 {
+                                let mut vbuf = [0u8; 48];
+                                let vmax = core::cmp::min(48, data.len() - 116);
+                                let mut vlen = 0usize;
+                                while vlen < vmax && data[116 + vlen] != 0 {
+                                    vbuf[vlen] = data[116 + vlen];
+                                    vlen += 1;
+                                }
+                                extra.push(' ');
+                                extra.push_str(core::str::from_utf8(&vbuf[..vlen]).unwrap_or("?"));
+                            }
+                        }
+                        crate::pr_warn!(
+                            "PCTL-SEND #{} pid={} -> {} len={} type={} msgId={} key={}{}",
+                            n,
+                            sender_pid,
+                            if is_param_listener { "paramservice" } else { "client" },
+                            data.len(),
+                            mtype,
+                            mid,
+                            key,
+                            extra
+                        );
+                    }
+                }
+            }
+            if is_hilog && !data.is_empty() {
+                let mut text = [0u8; 160];
+                let mut k = 0usize;
+                let mut prefix = [0u8; 24];
+                let mut plen = 0usize;
+                let mut decoded = false;
+                if data.len() >= 28 {
+                    let mlen = u16::from_le_bytes([data[0], data[1]]) as usize;
+                    let bits = u16::from_le_bytes([data[2], data[3]]) as usize;
+                    let level = (bits >> 7) & 0x7;
+                    let tag_len = (bits >> 10) & 0x3f;
+                    let mut pid = u32::from_le_bytes([data[16], data[17], data[18], data[19]]);
+                    if 28 + tag_len <= mlen && mlen <= data.len() {
+                        let lv = match level {
+                            3 => b'D',
+                            4 => b'I',
+                            5 => b'W',
+                            6 => b'E',
+                            7 => b'F',
+                            _ => b'?',
+                        };
+                        // "L<lv> <pid> " then "<tag>: <content>". OH builds
+                        // libhilog with __RECV_MSG_WITH_UCRED_: the header
+                        // pid stays 0 and the real sender rides
+                        // SCM_CREDENTIALS — stamp that pid on the tap line.
+                        if pid == 0 {
+                            if let Some(c) = cred.as_ref() {
+                                if c.pid > 0 {
+                                    pid = c.pid as u32;
+                                }
+                            }
+                        }
+                        let mut pfx: [u8; 16] = [0; 16];
+                        let mut n = 0usize;
+                        pfx[n] = lv;
+                        n += 1;
+                        let mut num = [0u8; 10];
+                        let mut nd = 0usize;
+                        let mut v = pid;
+                        loop {
+                            num[nd] = b'0' + (v % 10) as u8;
+                            nd += 1;
+                            v /= 10;
+                            if v == 0 {
+                                break;
+                            }
+                        }
+                        while nd > 0 {
+                            nd -= 1;
+                            pfx[n] = num[nd];
+                            n += 1;
+                        }
+                        pfx[n] = b' ';
+                        n += 1;
+                        plen = n;
+                        prefix[..n].copy_from_slice(&pfx[..n]);
+                        let tag = &data[28..28 + tag_len];
+                        let content = &data[28 + tag_len..mlen];
+                        let mut append = |src: &[u8], text: &mut [u8; 160], k: &mut usize| {
+                            for &b in src.iter() {
+                                if b == 0 {
+                                    break;
+                                }
+                                if b == b'\n' || b == b'\t' {
+                                    if *k < text.len() {
+                                        text[*k] = b' ';
+                                        *k += 1;
+                                    }
+                                    continue;
+                                }
+                                if b >= 0x20 && b < 0x7f && *k < text.len() {
+                                    text[*k] = b;
+                                    *k += 1;
+                                }
+                            }
+                        };
+                        append(tag, &mut text, &mut k);
+                        if k > 0 && k < text.len() {
+                            text[k] = b':';
+                            k += 1;
+                            text[k] = b' ';
+                            k += 1;
+                        } else if k < text.len() {
+                            text[k] = b':';
+                            k += 1;
+                        }
+                        append(content, &mut text, &mut k);
+                        decoded = true;
+                    }
+                }
+                if !decoded {
+                    for &b in data.iter() {
+                        if b >= 0x20 && b < 0x7f {
+                            text[k] = b;
+                            k += 1;
+                            if k == text.len() {
+                                break;
+                            }
+                        }
+                    }
+                }
+                let s = core::str::from_utf8(&text[..k]).unwrap_or("");
+                // u17 lesson: "dri" matches "driver", "Render" matches
+                // the audio RenderRouters flood, "display" matches
+                // everything — keep the set tight and case-distinct.
+                // Tag allowlist first (decoded tags are exact, no
+                // substring risk): RS/bootanimation/composer cohort.
+                const TAGS: [&str; 12] = [
+                    "OHOS::RS", "BootAnimation", "Composer", "ComposerAgent",
+                    "ComposerManager", "2DGraphics", "FrameCollector",
+                    "FramePainter", "EGL", "OpenGLWrapper", "DISP", "MESA",
+                ];
+                const KEYS: [&str; 23] = [
+                    "EGL", "egl", "DRI", "dri2", "Mesa", "mesa", "gbm", "GBM", "virtio",
+                    "llvmpipe", "gallium", "swrast", "softpipe", "GL_", "GLES", "Composer",
+                    "composer", "Rosen", "rosen", "DISP", "gralloc", "Gralloc", "DRI2",
+                ];
+                // Mesa's egl_dri2 extension probe floods ~1200
+                // "[dri2_get_proc_address@...] procname = gl..." lines
+                // through the DISP tag right before the interesting
+                // window (screen create → llvmpipe init → verdict);
+                // skipping them keeps the budget for the verdict lines.
+                let flood = s.contains("procname = gl");
+                // Decoded line is "<tag>: <content>" — prefix-match the
+                // tag so "OHOS::RS" (which contains ':') still works.
+                let interesting = TAGS.iter().any(|t| {
+                    s.starts_with(t) && s.as_bytes().get(t.len()) == Some(&b':')
+                }) || KEYS.iter().any(|key| s.contains(key));
+                if !flood && interesting {
+                    static HILOG_TAPS: core::sync::atomic::AtomicU32 =
+                        core::sync::atomic::AtomicU32::new(0);
+                    let n = HILOG_TAPS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                    if n < 3000 {
+                        let p = core::str::from_utf8(&prefix[..plen]).unwrap_or("");
+                        crate::pr_warn!("hilog[{}] {}{}", n, p, s);
+                    }
+                }
+                // Spawn-chain tap (launcher hunt, b16): the appspawn ->
+                // fork -> exec/ArkTS-chain evidence lives in hilog under
+                // appspawn/ams/bms/ability-runtime tags, none of which the
+                // graphics filter above passes. b16 exhausted the 3000
+                // graphics taps before appspawn's single fork ever
+                // logged, so this cohort gets its own counter and budget.
+                // Exact tags first, then one substring set — "ppSpawn"
+                // spans AppSpawn/APPSPAWN/appspawn (the family of
+                // spellings OH actually emits) without matching unrelated
+                // words.
+                const SPAWN_TAGS: [&str; 10] = [
+                    "APPSPAWN", "AppSpawn", "Ams", "Bms", "BundleMgr",
+                    "AbilityRuntime", "AbilityManagerService", "CJAppspawn",
+                    "NativeService", "appspawn",
+                ];
+                const SPAWN_KEYS: [&str; 9] = [
+                    "ppSpawn", "StartAbility", "start ability", "bundleName",
+                    "AbilityManager", "appspawn", "OnForeground", "OnBackground",
+                    "AbilityScheduler",
+                ];
+                let spawn_hit = SPAWN_TAGS.iter().any(|t| {
+                    s.starts_with(t) && s.as_bytes().get(t.len()) == Some(&b':')
+                }) || SPAWN_KEYS.iter().any(|key| s.contains(key));
+                if spawn_hit {
+                    static SPAWN_TAPS: core::sync::atomic::AtomicU32 =
+                        core::sync::atomic::AtomicU32::new(0);
+                    let n = SPAWN_TAPS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                    // b21 lesson: 3000 taps ran out mid-boot (slog[2999])
+                    // right at the spawn-section logs — the whole chain
+                    // (BMS dir creation, child runtime, OnForeground) went
+                    // dark exactly when it got interesting. 30000 covers a
+                    // full OH boot's spawn-cohort traffic (~4.5MB serial).
+                    if n < 30000 {
+                        let p = core::str::from_utf8(&prefix[..plen]).unwrap_or("");
+                        crate::pr_warn!("slog[{}] {}{}", n, p, s);
+                    }
+                }
+                // ACCOUNT cohort (sc43 hunt): the USER_UNLOCKED publish chain
+                // — osaccount SendToStorageAccountStart -> UnlockUser ->
+                // ActiveUserKey/PrepareStartUser -> SetIsVerified ->
+                // PublishCommonEvent(USER_UNLOCKED) -> BMS
+                // user_unlocked_event_subscriber creating the per-bundle
+                // el1/100/database dirs — is the one link that never fires on
+                // Rux. accountmgr's hilog (domain 0xd001b00, tags OsAccount/
+                // AccountMgr/AccountFwk) was invisible to both cohorts above.
+                const ACCT_TAGS: [&str; 7] = [
+                    "OsAccount", "AccountMgr", "AccountFwk", "ACCOUNT",
+                    "AccountSA", "StorageManager", "StorageDaemon",
+                ];
+                const ACCT_KEYS: [&str; 8] = [
+                    "USER_UNLOCKED", "UnlockUser", "PrepareStartUser",
+                    "ActiveUserKey", "is unlocked", "user_unlocked",
+                    "need CreateBundleDataDir", "OsAccount",
+                ];
+                let acct_hit = ACCT_TAGS.iter().any(|t| {
+                    s.starts_with(t) && s.as_bytes().get(t.len()) == Some(&b':')
+                }) || ACCT_KEYS.iter().any(|key| s.contains(key));
+                if acct_hit {
+                    static ACCT_TAPS: core::sync::atomic::AtomicU32 =
+                        core::sync::atomic::AtomicU32::new(0);
+                    let n = ACCT_TAPS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                    if n < 6000 {
+                        let p = core::str::from_utf8(&prefix[..plen]).unwrap_or("");
+                        crate::pr_warn!("alog[{}] {}{}", n, p, s);
+                    }
+                }
+                // INSTALLD cohort (sc45 hunt): installd-in-BMS creates
+                // el1/<uid>/base/<b> but never el1/<uid>/database/<b> nor
+                // any el2 leaf on Rux, while the Linux reference creates
+                // all of them. The BMSInstalld tag (domain 0xD001122)
+                // logs every abort reason in CreateBundleDataDir
+                // ("Base directory does not existed",
+                // "HapFileRestorecon failed", "MkOwnerDir failed errno")
+                // but was invisible to every cohort above.
+                const ILD_TAGS: [&str; 1] = ["BMSInstalld"];
+                const ILD_KEYS: [&str; 6] = [
+                    "CreateBundleDataDir", "HapFileRestorecon", "SetDirApl",
+                    "MkOwnerDir", "does not existed", "installd permission",
+                ];
+                let ild_hit = ILD_TAGS.iter().any(|t| {
+                    s.starts_with(t) && s.as_bytes().get(t.len()) == Some(&b':')
+                }) || ILD_KEYS.iter().any(|key| s.contains(key));
+                if ild_hit {
+                    static ILD_TAPS: core::sync::atomic::AtomicU32 =
+                        core::sync::atomic::AtomicU32::new(0);
+                    let n = ILD_TAPS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                    if n < 10000 {
+                        let p = core::str::from_utf8(&prefix[..plen]).unwrap_or("");
+                        crate::pr_warn!("ilog[{}] {}{}", n, p, s);
+                    }
+                }
+            }
+        }
+
         // STREAM + zero-length payload: never enqueue an empty segment.
         // A byte stream has no record boundaries — ancillary data rides the
         // first subsequently queued bytes (Linux association semantics); a
@@ -1096,6 +1669,21 @@ pub fn unix_send(
                             cred = pc;
                         }
                     }
+                }
+                // SO_PASSCRED parity: Linux stamps the sender's
+                // {pid,uid,gid} into every skb at send time (scm.c
+                // __scm_send snapshots the current task unconditionally);
+                // the RECEIVER's recvmsg emits the SCM_CREDENTIALS cmsg
+                // only when the receiving socket has SO_PASSCRED set.
+                // hilogd's stats-query socket rides on this contract: its
+                // RequestStatsQuery derefs the cmsg buffer pointer
+                // unconditionally after a successful recvmsg (compiled
+                // path at libhilog.so+0x17efc reads [rax+0x18] with rax
+                // = msg_control when controllen < 16), so a receive
+                // without the cmsg is a NULL-deref SIGSEGV that kills
+                // the hilogd.server thread — no hilog visibility.
+                if cred.is_none() {
+                    cred = Some(current_unix_cred());
                 }
                 q.push_back(UnixSeg {
                     data: data.to_vec(),
@@ -1153,8 +1741,79 @@ fn unix_recv_eof() -> UnixRecvResult {
 
 /// Receive one message (STREAM: drain across segments; DGRAM: one
 /// segment). Returns EAGAIN when nothing is available.
-pub fn unix_recv(sock: &Arc<UnixSocket>, buf: &mut [u8]) -> Result<UnixRecvResult, i32> {
+///
+/// `peek` (MSG_PEEK): copy from the front of the queue WITHOUT popping —
+/// the record, its ancillary data and its sender name all stay queued for
+/// the next non-peek receive (Linux unix_dgram_recvmsg/unix_stream_read_generic
+/// MSG_PEEK semantics).
+pub fn unix_recv(
+    sock: &Arc<UnixSocket>,
+    buf: &mut [u8],
+    peek: bool,
+) -> Result<UnixRecvResult, i32> {
     let mut q = sock.recv_queue.lock();
+    if peek {
+        if let Some(front) = q.front() {
+            match sock.kind {
+                UnixKind::Dgram | UnixKind::Seqpacket => {
+                    // One record, boundaries visible through the peek.
+                    let orig_len = front.data.len();
+                    let take = orig_len.min(buf.len());
+                    buf[..take].copy_from_slice(&front.data[..take]);
+                    // Ancillary data is reported but NOT consumed.
+                    let files = front.files.clone();
+                    let cred = front.cred;
+                    let src = front.src.clone();
+                    drop(q);
+                    return Ok(UnixRecvResult {
+                        len: take,
+                        orig_len,
+                        src,
+                        files,
+                        cred,
+                        truncated: take < orig_len,
+                    });
+                }
+                UnixKind::Stream => {
+                    // Byte-stream peek: across as many queued segments as
+                    // the buffer holds, nothing consumed.
+                    let mut copied = 0usize;
+                    let mut orig_total = 0usize;
+                    let mut files = Vec::new();
+                    let mut cred: Option<UnixCred> = None;
+                    let mut src: Option<String> = None;
+                    for seg in q.iter() {
+                        orig_total += seg.data.len();
+                        let take = seg.data.len().min(buf.len() - copied);
+                        buf[copied..copied + take].copy_from_slice(&seg.data[..take]);
+                        copied += take;
+                        if cred.is_none() {
+                            cred = seg.cred;
+                        }
+                        if src.is_none() {
+                            src = seg.src.clone();
+                        }
+                        if copied >= buf.len() {
+                            break;
+                        }
+                    }
+                    drop(q);
+                    return Ok(UnixRecvResult {
+                        len: copied,
+                        orig_len: orig_total,
+                        src,
+                        files,
+                        cred,
+                        // A stream peek that stopped at the buffer edge with
+                        // more bytes queued is not a "record" truncation;
+                        // Linux reports no MSG_TRUNC for streams either.
+                        truncated: false,
+                    });
+                }
+            }
+        }
+        // Empty queue under peek: fall through to the EOF/EAGAIN tail below.
+    }
     match sock.kind {
         UnixKind::Stream => {
             if let Some(mut seg) = q.pop_front() {
@@ -1192,6 +1851,39 @@ pub fn unix_recv(sock: &Arc<UnixSocket>, buf: &mut [u8]) -> Result<UnixRecvResul
                     }
                 }
                 drop(q);
+                // sc209 (leg 14): arrival half of the PCTL param tap (see
+                // the send side in unix_send). When pid 1 (begetd, which
+                // hosts the param service) reads a stream segment that
+                // parses as a ParamMessage, print it — client-send lines
+                // without a matching PCTL-RECV name where the installs
+                // ctl sets die (queue stall vs server epoll wake loss).
+                if copied >= 12 && crate::process::current_pid() == 1 {
+                    let mtype = u32::from_le_bytes([buf[0], buf[1], buf[2], buf[3]]);
+                    if mtype <= 5 && buf[12] >= b'a' && buf[12] <= b'z' {
+                        static PCTL_R_N: core::sync::atomic::AtomicUsize =
+                            core::sync::atomic::AtomicUsize::new(0);
+                        let n = PCTL_R_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                        if n < 300 {
+                            let mid = u32::from_le_bytes([buf[8], buf[9], buf[10], buf[11]]);
+                            let mut kbuf = [0u8; 40];
+                            let kmax = core::cmp::min(40, copied - 12);
+                            let mut klen = 0usize;
+                            while klen < kmax && buf[12 + klen] != 0 {
+                                kbuf[klen] = buf[12 + klen];
+                                klen += 1;
+                            }
+                            let key = core::str::from_utf8(&kbuf[..klen]).unwrap_or("?");
+                            crate::pr_warn!(
+                                "PCTL-RECV #{} pid=1 len={} type={} msgId={} key={}",
+                                n,
+                                copied,
+                                mtype,
+                                mid,
+                                key
+                            );
+                        }
+                    }
+                }
                 // Room may have freed for senders blocked on our queue.
                 sock.wait_queue.wake_up_all();
                 // Draining also raises the PEER's writability (its send
@@ -1352,6 +2044,18 @@ unsafe fn unix_of_file(file: &File) -> Option<Arc<UnixSocket>> {
     Some(Arc::from_raw(socket_ptr))
 }
 
+/// sc97 KILLDUMP support: identity-checked reconstruction for a File
+/// from ANOTHER task's fdtable (unix_file_of only sees current's).
+/// Returns None for non-unix files.
+pub fn unix_of_file_diag(file: &File) -> Option<Arc<UnixSocket>> {
+    let ops = file.get_ops()?;
+    if !core::ptr::eq(ops as *const _, &UNIX_SOCKET_OPS as *const _) {
+        return None;
+    }
+    // SAFETY: ops identity checked above.
+    unsafe { unix_of_file(file) }
+}
+
 fn unix_file_nonblock(file: &File) -> bool {
     (file.flags().bits() & FileFlags::O_NONBLOCK) != 0
 }
@@ -1365,7 +2069,7 @@ fn unix_file_read(file: &File, buf: &mut [u8]) -> isize {
     };
     let nonblock = unix_file_nonblock(file);
     let deadline = socket.rcvtimeo_deadline();
-    match unix_recv_ctl(&socket, buf, nonblock, deadline) {
+    match unix_recv_ctl(&socket, buf, nonblock, deadline, false) {
         Ok(r) => r.len as isize,
         Err(e) => e as isize,
     }
@@ -1481,6 +2185,44 @@ pub fn unix_poll_unwait(file: &File, task: *mut crate::process::task::Task) {
     // SAFETY: same identity/ownership contract as unix_poll_wait.
     if let Some(socket) = unsafe { unix_of_file(file) } {
         socket.wait_queue.remove(task);
+    }
+}
+
+/// dfx=socksnap (appspawn wedge hunt, b15): one console line per
+/// LISTENING socket in the namespace — registry key, accept-queue depth,
+/// backlog cap, and the open-file-description id that epoll registrations
+/// key on. Cross-reference the printed file id against the epoll interest
+/// dump (syscall::misc::epoll_interest_snapshot) to decide whether a
+/// wedged server's listener is still registered anywhere. Purely
+/// diagnostic; self-gated, OFF unless dfx=socksnap is on the cmdline.
+pub fn unix_listener_snapshot() {
+    if !crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SockSnap) {
+        return;
+    }
+    let table = UNIX_TABLE.lock();
+    for (key, sock) in table.iter() {
+        if *sock.state.lock() != UnixState::Listening {
+            continue;
+        }
+        let q = sock.accept_queue.lock().len();
+        let bk = *sock.backlog.lock();
+        let fid = sock.file_id.load(core::sync::atomic::Ordering::Acquire);
+        // bound_name is the sun_path the server bound (display name);
+        // the registry key is an inode identity for fs sockets. Show
+        // the NAME — the launcher-chain hunt needs "which server is
+        // which" (AppSpawn vs hilogInput vs ...) without a guest shell.
+        let name = sock
+            .bound_name
+            .lock()
+            .clone()
+            .unwrap_or_else(|| String::from(key_shown(key)));
+        crate::pr_info!(
+            "socksnap: LISTEN name={} q={} backlog={} fid={:#x}",
+            key_shown(&name),
+            q,
+            bk,
+            fid
+        );
     }
 }
 
@@ -1662,10 +2404,31 @@ pub fn unix_setsockopt(
     const SO_RCVBUF: i32 = 8;
     const SO_RCVTIMEO: i32 = 20;
     const SO_SNDTIMEO: i32 = 21;
+    // OH/Android SELinux socket label option (OH musl: value 33). OH
+    // init sets the service socket's security context through it before
+    // bind (init_service_socket.c:81) and treats failure as fatal —
+    // ENOPROTOOPT aborted every socket-owning service child (hilogd,
+    // faultloggerd) with "Service error 97 ... failed to create service
+    // socket". Rux has no LSM: accept and drop the label.
+    const SO_SECURITYCONTEXT: i32 = 33;
+    const SO_PASSCRED: i32 = 16;
     if level != SOL_SOCKET {
         return -97; // ENOPROTOOPT for unknown levels
     }
     match optname {
+        SO_SECURITYCONTEXT => 0,
+        // SO_PASSCRED (init's second mandatory service-socket option,
+        // init_service_socket.c:81): store the flag — the recvmsg side
+        // attaches creds cmsgs when it is set (shared SocketOptions
+        // field, same as the netlink path).
+        SO_PASSCRED => {
+            let v = match read_i32() {
+                Some(v) => v,
+                None => return -22,
+            };
+            sock.options.lock().passcred = v != 0;
+            0
+        }
         SO_RCVTIMEO | SO_SNDTIMEO => {
             let us = match read_timeval_us() {
                 Some(us) => us,

@@ -385,9 +385,40 @@ pub fn do_clone(args: CloneArgs) -> Result<Pid, i32> {
                 // task/stack allocation failure (ENOMEM): probe the PID
                 // allocator — if it is exhausted the failure was the PID.
                 return Err(match crate::process::pid::alloc_pid() {
-                    None => eagain(),
+                    None => {
+                        // OH bring-up: the "thread constructor failed:
+                        // Resource temporarily unavailable" storm that kills
+                        // render_service (and with it SA:10) lands here when
+                        // the pid space is drained. Name the state once.
+                        static EAGAIN_DUMPED: core::sync::atomic::AtomicBool =
+                            core::sync::atomic::AtomicBool::new(false);
+                        if !EAGAIN_DUMPED.swap(true, core::sync::atomic::Ordering::Relaxed) {
+                            crate::pr_warn!(
+                                "fork: EAGAIN by pid {} flags={:#x}: pid space exhausted ({}/{} live)",
+                                (*current_ptr).pid(),
+                                args.flags,
+                                crate::process::pid::allocated_count(),
+                                crate::process::pid::PID_MAX_DEFAULT
+                            );
+                        }
+                        eagain()
+                    }
                     Some(p) => {
                         crate::process::pid::free_pid(p);
+                        // Same visibility for the ENOMEM arm (Task/kernel
+                        // stack allocation failed — heap pressure).
+                        static ENOMEM_DUMPED: core::sync::atomic::AtomicBool =
+                            core::sync::atomic::AtomicBool::new(false);
+                        if !ENOMEM_DUMPED.swap(true, core::sync::atomic::Ordering::Relaxed) {
+                            let st = crate::mm::buddy_allocator::buddy_stats();
+                            crate::pr_warn!(
+                                "fork: ENOMEM by pid {} flags={:#x}: task/stack alloc failed (kernel heap {}K/{}K)",
+                                (*current_ptr).pid(),
+                                args.flags,
+                                st.used_bytes / 1024,
+                                st.heap_size / 1024
+                            );
+                        }
                         enomem()
                     }
                 });
@@ -532,7 +563,7 @@ pub fn do_clone(args: CloneArgs) -> Result<Pid, i32> {
             child_root: u64,
             child_tid: *mut i32,
             tid: i32,
-            _child_task: *mut Task,
+            child_task: *mut Task,
         ) -> bool {
             use crate::arch::mm::memory_layout::{phys_to_virt, PhysAddr};
             use crate::arch::mm::mm_ops::PageTableWalker;
@@ -540,9 +571,18 @@ pub fn do_clone(args: CloneArgs) -> Result<Pid, i32> {
 
             let va = child_tid as u64;
 
+            // The child mm for the COW walk's PTE section (INV-LOCK-7).
+            // set_address_space already ran, and the child has not been
+            // scheduled — this Arc clone is the only other reference.
+            let child_mm = match (*child_task).address_space_arc() {
+                Some(mm) => mm,
+                None => return false,
+            };
+
             // Break COW (if the leaf is still RO+COW) through the arch's
             // own walker. Retry is fine: a sibling already resolved it.
             match crate::arch::mm::mm_ops::handle_cow_fault(
+                &child_mm,
                 child_root,
                 ArchVirtAddr::new(va),
             ) {
@@ -697,9 +737,16 @@ pub fn do_clone(args: CloneArgs) -> Result<Pid, i32> {
                 (*task_ptr).set_fs(Some(parent_fs));
             }
         } else {
-            // Copy filesystem info (child gets its own FsStruct with same cwd)
-            let parent_cwd = (*current_ptr).get_cwd();
-            (*task_ptr).set_cwd(&parent_cwd);
+            // Copy filesystem info: the child gets its own FsStruct with
+            // the same cwd AND root — including the cwd/root DENTRIES
+            // (fork duplicates fs_struct wholesale in Linux; the old
+            // string-only cwd copy let a forked child of a chrooted task
+            // escape the jail and lose the mount-aware cwd).
+            if let (Some(parent_fs), Some(child_fs)) =
+                ((*current_ptr).fs_arc(), (*task_ptr).fs_arc())
+            {
+                child_fs.copy_fs_from(&parent_fs);
+            }
         }
 
         // === CLONE_THREAD: join the parent's thread group ===
@@ -782,8 +829,20 @@ pub fn do_clone(args: CloneArgs) -> Result<Pid, i32> {
 
         // OpenHarmony access-token inheritance (upstream accesstokenid
         // patch: child inherits the normal token, ftoken is cleared).
+        // Both stores: the per-task field (legacy accessor) and the ipc
+        // registry keyed by tgid (what BINDER_GET_SENDER_INFO reads) —
+        // a forked child (e.g. devmgr -> devhost) must keep the
+        // parent's registered token or permission checks in samgr/ATM
+        // would see it fall back to the synthetic native id.
         (*task_ptr).set_access_token((*current_ptr).access_token());
         (*task_ptr).set_access_ftoken(0);
+        {
+            if let Some((ptok, _)) = crate::ipc::access_token::registered_token_of((*current_ptr).tgid() as u32) {
+                if ptok != 0 {
+                    crate::ipc::access_token::mirror_set((*task_ptr).tgid() as u32, false, ptok);
+                }
+            }
+        }
 
         // === U1c namespaces: default share the parent's namespace objects
         // (Arc clone); CLONE_NEW* bits give the child fresh ones. Fails the
@@ -879,6 +938,9 @@ pub fn do_clone(args: CloneArgs) -> Result<Pid, i32> {
             taskdump_dec(pid as u64);
             taskdump_raw_line(b"\n");
         }
+
+        // /proc/stat "processes": the number of forks since boot.
+        crate::fs::procfs::stat::note_fork();
 
         Ok(pid)
     }

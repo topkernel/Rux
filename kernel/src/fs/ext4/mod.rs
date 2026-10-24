@@ -79,8 +79,15 @@ pub mod features {
     /// Incompatible features this implementation UNDERSTANDS. Any other
     /// incompat bit means on-disk structures we would misparse — refuse
     /// the mount (Linux does the same for unknown incompat features).
+    /// ENCRYPT is a fs CAPABILITY flag: its presence only means the fs
+    /// supports per-file encryption — unencrypted files (all of them in
+    /// the OH images) read and write identically. Linux mounts such a
+    /// filesystem without complaint; refusing it with ENODEV blocked the
+    /// stock OH userdata partition entirely (mount[11] -19, /data dead,
+    /// the whole OH service mkdir storm failing with err=2/5).
     pub const KNOWN_INCOMPAT: u32 = incompat::FILETYPE | incompat::RECOVER
-        | incompat::EXTENTS | incompat::B64BIT | incompat::FLEX_BG;
+        | incompat::EXTENTS | incompat::B64BIT | incompat::FLEX_BG
+        | incompat::ENCRYPT;
 
     /// Read-only-compat features that are safe for our (write-through,
     /// no-checksum) metadata paths. Everything else — notably BIGALLOC
@@ -95,7 +102,7 @@ pub mod features {
     pub const REJECTED_INCOMPAT: u32 = incompat::COMPRESSION | incompat::JOURNAL_DEV
         | incompat::META_BG | incompat::MMP | incompat::EA_INODE
         | incompat::DIRDATA | incompat::CSUM_SEED | incompat::LARGEDIR
-        | incompat::INLINE_DATA | incompat::ENCRYPT;
+        | incompat::INLINE_DATA;
 
     /// Per-directory flag: directory is htree-indexed (EXT4_INDEX_FL).
     /// Our directory code is linear-scan; READING an indexed directory
@@ -273,10 +280,18 @@ impl Ext4FileSystem {
                 // read-path verification (csum.rs — OH Phase 1: the OH
                 // system/vendor images are mkfs'd with metadata_csum);
                 // bigalloc stays rejected outright.
+                //
+                // OH bring-up policy (sys_prod/userdata): those images
+                // are also metadata_csum and OH's fstab mounts them rw.
+                // Refusing with ENODEV stalled the second-stage boot
+                // (sys_prod carries libdrm.so for the display composer
+                // backend). Downgrade the mount to read-only with a
+                // loud warning instead — readers work, writers get EROFS.
                 if ro_compat & features::ro_compat::METADATA_CSUM != 0 && !self.read_only {
-                    crate::pr_err!("ext4: metadata_csum rw mount not supported — refusing mount");
-                    bio::brelse(sb_bh);
-                    return Err(errno::Errno::NoSuchDevice.as_neg_i32()); // ENODEV
+                    crate::pr_warn!(
+                        "ext4: metadata_csum rw mount downgraded to read-only (OH bring-up policy)"
+                    );
+                    self.read_only = true;
                 }
                 if ro_compat & features::ro_compat::BIGALLOC != 0 {
                     crate::pr_err!("ext4: bigalloc not supported — refusing mount");
@@ -467,6 +482,7 @@ impl Ext4FileSystem {
 
     /// Read inode
     pub fn read_inode(&self, ino: u32) -> Result<inode::Ext4Inode, i32> {
+        crate::dfx::fsw::note_read_inode();
         if ino == 0 {
             return Err(errno::Errno::InvalidArgument.as_neg_i32());
         }
@@ -549,6 +565,7 @@ impl Ext4FileSystem {
         unsafe {
             // Traverse directory's data blocks
             let blocks = dir.get_data_blocks(self)?;
+            crate::dfx::fsw::note_dir_lookup(blocks.len());
 
             for block in blocks.iter() {
                 if *block == 0 {
@@ -611,6 +628,7 @@ impl Ext4FileSystem {
 
             // Traverse directory's data blocks
             let blocks = dir.get_data_blocks(self)?;
+            crate::dfx::fsw::note_list_dir();
 
             for block in blocks.iter() {
                 if *block == 0 {
@@ -1992,13 +2010,30 @@ unsafe fn ext4_readlink(inode: &Inode, buf: &mut [u8]) -> isize {
 unsafe fn ext4_setattr(inode: &Inode, attr: u32, arg1: u64, arg2: u64) -> i32 {
     use crate::fs::inode::setattr_attr;
 
+    // Session 25 (MAP_SHARED writeback): on a SHRINK, flush dirty
+    // page-cache frames BEFORE the big lock and the new size commit. The
+    // flush takes EXT4_BIG_LOCK internally (ext4_write_at_core), so it
+    // cannot run inside this function's own critical section. Flush-then-
+    // cut: a dirty page straddling the new EOF writes its full content
+    // first, then the cut removes the tail (Linux writeback-then-
+    // truncate). A grow needs nothing — dirty pages sit below the old
+    // size. Stores racing after the flush are discarded by the
+    // invalidate below (POSIX: stores at truncate are undefined).
+    if attr == setattr_attr::ATTR_SIZE && arg1 < inode.get_size() {
+        crate::fs::ext4::file::ext4_flush_dirty_inode(inode, 0, u64::MAX);
+    }
+
     // ext4 has no internal concurrency protection on the block
     // allocator / inode writer (review 5.5 high: EXT4_BIG_LOCK 仅覆盖
     // namei): take the big lock for the whole setattr — truncate frees
     // blocks (bitmap RMW) and rewrites the inode.
     let _ext4_guard = EXT4_BIG_LOCK.lock_fair();
 
-    let fs = match get_ext4_fs_from_inode(inode) {
+    // Every setattr flavor mutates on-disk state; a read-only mount
+    // answers EROFS (Linux notify_change/mnt_want_write; sc21). atime
+    // updates from reads call this too, but both callers discard the
+    // result, so read paths on ro images are unaffected.
+    let fs = match get_ext4_fs_rw_from_inode(inode) {
         Ok(fs) => fs,
         Err(e) => return e,
     };
@@ -2325,6 +2360,29 @@ unsafe fn ext4_destroy_inode(inode: &mut crate::fs::inode::Inode) {
 /// discipline that R7-A2 predated: register on the queue BEFORE
 /// re-checking the state, EXCLUSIVE/FIFO, wake-one on release, and undo
 /// a spurious concurrent enqueue on the fast path.
+///
+/// R84 (b139 fairness): wake-one alone is NOT a handoff. The woken
+/// waiter must first be scheduled, and in that window any FRESH
+/// fast-path caller (`!st.locked` → take) barged past it. Under KVM's
+/// I/O concurrency every .so page fault re-enters ext4 through the page
+/// cache, so the bargers never stopped: oh-b139 parked bootanimation /
+/// sa_main / render_service for 10+ s (47 EXT4-BIGLOCK-STALL prints,
+/// holder cycling at held=0j) while 10+ services sat UNINTERRUPTIBLE —
+/// pure fairness starvation (nr_running=6 with idle CPU headroom), not
+/// a deadlock. TCG boots flowed only because lower concurrency means
+/// less barging. Fixed with Linux-mutex-HANDOFF semantics:
+///  - `waiters` counts parked tasks plus unspent wake tokens;
+///  - fresh SLEEPABLE callers are gated (`try_acquire_or_recurse_fair`):
+///    a free lock is taken only when `waiters == 0`, so they queue;
+///  - the woken waiter spends its token as ownership
+///    (`try_acquire_wake_token`): unconditional take of the free lock,
+///    count dropped in the same critical section;
+///  - non-sleeping spinners (no task ctx / preempt_count != 0) stay
+///    UNGATED — they cannot queue, so the queue can never serve them;
+///  - a waiter parked longer than ANTI_STARVE_JIFFIES may take a
+///    free lock at the registration re-check even with other waiters
+///    queued: bounded-latency self-heal so the gate itself can never
+///    strand a free lock behind a stuck count.
 pub static EXT4_BIG_LOCK: Ext4BigLock = Ext4BigLock::new();
 
 /// Task-recursive big lock.
@@ -2369,9 +2427,40 @@ struct Ext4BigState {
     /// parks every later ext4 user in D-state forever: the full3/inst-full1
     /// wedge shape).
     acquired_at: u64,
+    /// R84 (b139 fairness): tasks parked on `wait` PLUS tasks holding an
+    /// unspent release() wake token. A task enters the count when it
+    /// first registers on the queue and leaves it in the same critical
+    /// section in which it takes the lock (token spend or sole-waiter
+    /// take). While nonzero, the fair fast path refuses fresh sleepable
+    /// acquirers — see try_acquire_or_recurse_fair.
+    waiters: u32,
+    /// R85 (b148 silent crawl): orphaned-handoff epoch. release() hands
+    /// the lock to ONE waiter via wake_up_one; when the queue is empty
+    /// at that moment (every counted waiter is mid-loop between
+    /// finish_wait and its next prepare_to_wait — the failed-token-spend
+    /// re-register path) the wake is dropped and the lock sits FREE
+    /// behind a nonzero `waiters` with nobody left to wake it. Each such
+    /// drop bumps this epoch: a waiter whose registration snapshot of
+    /// the epoch predates the bump may take the free lock at its
+    /// re-check, so an orphaned handoff is recovered by the FIRST
+    /// mid-loop waiter to re-register instead of stranding everyone
+    /// until an incidental foreign wake.
+    handoff_epoch: u64,
 }
 
 impl Ext4BigLock {
+    /// R84 (b139 fairness): a waiter older than this may take a FREE
+    /// lock at the registration re-check even with other waiters
+    /// queued — the self-heal that bounds any residual gate pathology
+    /// (stale count, token-holder races beyond the analysis) at a few
+    /// seconds of extra wait instead of an unbounded wedge.
+    const ANTI_STARVE_JIFFIES: u64 = crate::config::KERNEL_HZ as u64 * 5;
+
+    /// R84: stall tripwire threshold on the WAITER's own queue age
+    /// (first registration to now). Normal parking lasts milliseconds;
+    /// 3 s queued means the handoff is not reaching this waiter.
+    const STALL_WAITER_JIFFIES: u64 = crate::config::KERNEL_HZ as u64 * 3;
+
     const fn new() -> Self {
         Self {
             state: crate::sync::spinlock::Spinlock::new(Ext4BigState {
@@ -2379,13 +2468,25 @@ impl Ext4BigLock {
                 owner: 0,
                 depth: 0,
                 acquired_at: 0,
+                waiters: 0,
+                handoff_epoch: 0,
             }),
             wait: crate::process::wait::WaitQueueHead::new(),
         }
     }
 
-    /// Try to take the lock / recurse into it. Returns the guard on
-    /// success. Caller must NOT hold the state spinlock.
+    /// Try to take the lock / recurse into it, UNGATED: a free lock goes
+    /// to whoever asks. Caller must NOT hold the state spinlock.
+    ///
+    /// R84 (b139 fairness): this is no longer the general acquire. It
+    /// survives for exactly the callers the queue cannot serve:
+    ///  - the non-sleeping spinner in lock_fair (no task context or
+    ///    preempt_count != 0 — it cannot register on the waitqueue, so
+    ///    gating it would livelock it behind a queue that never drains
+    ///    under load; its section is preempt/IRQ-constrained and short);
+    ///  - any path that must never be rejected for recursion reasons.
+    /// Fresh sleepable callers use try_acquire_or_recurse_fair; the
+    /// woken waiter uses try_acquire_wake_token.
     fn try_acquire_or_recurse(&'static self, pid: u32) -> Option<Ext4BigGuard> {
         let mut st = self.state.lock();
         if !st.locked {
@@ -2402,15 +2503,73 @@ impl Ext4BigLock {
         }
     }
 
+    /// R84 (b139 fairness): the acquire for fresh sleepable callers.
+    /// Identical to try_acquire_or_recurse except a FREE lock is only
+    /// taken when no waiter is parked and no wake token is outstanding
+    /// (`waiters == 0`) — everyone else must queue. This is what stops
+    /// the barging: before it, any task on another CPU could take the
+    /// just-released lock during the scheduling window of the waiter
+    /// that release() had woken, and under KVM's .so-page-fault churn
+    /// the bargers never stopped (47 STALL prints, waiters aged 10+ s
+    /// while holders cycled at held=0j).
+    fn try_acquire_or_recurse_fair(&'static self, pid: u32) -> Option<Ext4BigGuard> {
+        let mut st = self.state.lock();
+        if !st.locked && st.waiters == 0 {
+            st.locked = true;
+            st.owner = pid;
+            st.depth = 1;
+            st.acquired_at = crate::drivers::timer::get_jiffies();
+            Some(Ext4BigGuard { lock: self })
+        } else if st.owner == pid {
+            st.depth += 1;
+            Some(Ext4BigGuard { lock: self })
+        } else {
+            None
+        }
+    }
+
+    /// R84 (b139 fairness): spend the release() handoff token. The woken
+    /// waiter takes a FREE lock unconditionally and leaves the waiter
+    /// count in the same critical section — the count keeps covering the
+    /// token holder for the whole wake-to-take window, which is what
+    /// holds fresh callers at the gate until ownership has actually
+    /// changed hands (Linux mutex HANDOFF, in miniature). A held lock or
+    /// a lost race against another token holder returns None: the caller
+    /// re-parks and keeps its count. Recursion is honored without
+    /// touching the count (a counted task cannot be the owner — it has
+    /// not taken the lock yet — so that branch is unreachable defensive
+    /// code; the anti-starvation override heals any hypothetical stale
+    /// count it would leave behind).
+    fn try_acquire_wake_token(&'static self, pid: u32) -> Option<Ext4BigGuard> {
+        let mut st = self.state.lock();
+        if st.owner == pid {
+            st.depth += 1;
+            Some(Ext4BigGuard { lock: self })
+        } else if !st.locked {
+            if st.waiters > 0 {
+                st.waiters -= 1;
+            }
+            st.locked = true;
+            st.owner = pid;
+            st.depth = 1;
+            st.acquired_at = crate::drivers::timer::get_jiffies();
+            Some(Ext4BigGuard { lock: self })
+        } else {
+            None
+        }
+    }
+
     /// Acquire (sleep on contention, recursive per task).
     pub fn lock_fair(&'static self) -> Ext4BigGuard {
         let pid = crate::process::current_pid();
+        crate::dfx::fsw::note_biglock();
 
         // Adaptive: a short spin first covers the common case of a holder
         // that is on-CPU and about to release (boot-time short sections
-        // never touch the waitqueue at all).
+        // never touch the waitqueue at all). R84: gated so the spin
+        // cannot barge past parked waiters either.
         for _ in 0..4 {
-            if let Some(g) = self.try_acquire_or_recurse(pid) {
+            if let Some(g) = self.try_acquire_or_recurse_fair(pid) {
                 return g;
             }
             for _ in 0..64 {
@@ -2430,6 +2589,7 @@ impl Ext4BigLock {
         // can still take its ticks and release us.
         let can_sleep = crate::sched::current().is_some()
             && crate::interrupt::preempt::preempt_count() == 0;
+        crate::dfx::fsw::note_biglock_contend();
         let cur = match crate::sched::current() {
             Some(t) if can_sleep => t,
             _ => {
@@ -2450,8 +2610,45 @@ impl Ext4BigLock {
         };
         let mut wait_snap_set = false;
 
+        // R84 (b139 fairness) waiter bookkeeping:
+        //  counted      <=> st.waiters already includes us (we are on the
+        //                   queue or hold an unspent wake token); the count
+        //                   is entered once at first registration and left
+        //                   in the same critical section as a take.
+        //  woken_retry  <=> schedule() just returned: the release() that
+        //                   woke us spent its one handoff token on us.
+        //  first_park   <=> jiffies of our FIRST registration; re-parks
+        //                   keep it so the anti-starvation override below
+        //                   measures true queue age.
+        //  timer_id     <=> R85: anti-starve deadline wake armed for the
+        //                   CURRENT park (0 = none). A parked waiter has
+        //                   no waker of its own when a handoff is dropped
+        //                   (empty-queue release) or its token is lost —
+        //                   without this timer the ANTI_STARVE override
+        //                   below can never fire, because it is only
+        //                   evaluated on a loop iteration and iterating
+        //                   requires a wake. That was the b148 shape: a
+        //                   free lock, dozens of UNINTERRUPTIBLE waiters,
+        //                   zero STALL prints, progress only on incidental
+        //                   foreign wakes.
+        let mut counted = false;
+        let mut woken_retry = false;
+        let mut first_park = 0u64;
+        let mut timer_id = 0u64;
+
         loop {
-            if let Some(g) = self.try_acquire_or_recurse(pid) {
+            if woken_retry {
+                // Handoff: the free lock is ours if it is still free.
+                // Losing it means another token holder won the race or a
+                // spurious wake — fall through and re-park like any
+                // contender (our count stays).
+                if let Some(g) = self.try_acquire_wake_token(pid) {
+                    counted = false;
+                    return g;
+                }
+                woken_retry = false;
+            }
+            if let Some(g) = self.try_acquire_or_recurse_fair(pid) {
                 return g;
             }
             // R83b (R74 producer hunt): every capture so far had the victim
@@ -2481,64 +2678,183 @@ impl Ext4BigLock {
             // attempt finds us queued and hands its wake token to us.
             // EXCLUSIVE + tail insert => FIFO, one wake per release.
             self.wait.prepare_to_wait(cur, true, false);
-            match self.try_acquire_or_recurse(pid) {
-                Some(g) => {
+            // R85: snapshot the orphaned-handoff epoch BEFORE the
+            // registration critical section below — a release() that
+            // dropped its wake (empty queue) between this read and the
+            // re-check shows up as an epoch change, letting us take the
+            // free lock it stranded instead of parking past it.
+            let my_epoch = {
+                let st = self.state.lock();
+                st.handoff_epoch
+            };
+            // R7-B6b re-check, fairness-aware (R84): count ourselves under
+            // the state lock — once; re-parks keep the count — then take
+            // the free lock ONLY when no OTHER waiter/token exists
+            // (`waiters == 1`: us). That covers the release that raced
+            // our registration (its wake found an empty queue — nobody
+            // else can ever hand the lock out, so we must). With older
+            // waiters queued the pending handoff belongs to them and we
+            // sleep like everyone else. The anti-starvation override
+            // (parked > ANTI_STARVE_JIFFIES and the lock is free) is the
+            // self-heal that guarantees the gate can never strand a free
+            // lock behind a stuck count: it converts any residual
+            // pathology into bounded latency instead of a wedge, and in
+            // normal operation it never fires because tokens already
+            // flow FIFO. R85 adds the epoch term: a handoff that was
+            // DROPPED (empty-queue release bumped the epoch after we
+            // registered) belongs to nobody — take the free lock now.
+            {
+                let now = crate::drivers::timer::get_jiffies();
+                let mut st = self.state.lock();
+                if !counted {
+                    st.waiters += 1;
+                    counted = true;
+                    first_park = now;
+                }
+                let take = if st.owner == pid {
+                    // Unreachable while parked (a counted waiter has not
+                    // taken the lock, so it cannot own it), kept so
+                    // recursion is honored on every path.
+                    st.waiters -= 1;
+                    counted = false;
+                    st.depth += 1;
+                    true
+                } else if !st.locked
+                    && (st.waiters == 1
+                        || st.handoff_epoch != my_epoch
+                        || now.wrapping_sub(first_park)
+                            > Self::ANTI_STARVE_JIFFIES)
+                {
+                    st.waiters -= 1;
+                    counted = false;
+                    st.locked = true;
+                    st.owner = pid;
+                    st.depth = 1;
+                    st.acquired_at = now;
+                    true
+                } else {
+                    false
+                };
+                drop(st);
+                if take {
                     self.wait.finish_wait(cur);
                     // A concurrent release()'s wake_up_one may have seen
                     // us queued+sleeping and enqueued us between the
                     // registration and the acquire — undo it (the
-                    // per-class on_rq guards make this a no-op when we
+                    // per-class on_rq guards make it a no-op when we
                     // were not actually enqueued). Mirrors Semaphore::down.
                     crate::sched::dequeue_task(&*cur);
-                    return g;
+                    if timer_id != 0 && crate::timer::timer_pending(timer_id) {
+                        crate::timer::del_timer(timer_id);
+                    }
+                    return Ext4BigGuard { lock: self };
                 }
-                None => {}
             }
             // Sleep until release() wakes us (UNINTERRUPTIBLE: ext4 ops
             // are not signal-interruptible and the guard must be carried
             // back out of the critical section).
             //
-            // R77 (wedge hunt tripwire): a waiter parked here for many
-            // seconds means the holder leaked the lock (killed
-            // synchronously inside the critical section — RAII never runs
-            // through do_exit). Name the holder, its depth, and how long
-            // it has held, rate-limited to one line per 10 s.
+            // R77 (wedge hunt tripwire): a holder that never releases
+            // (killed synchronously inside the critical section — RAII
+            // never runs through do_exit) shows up as held growing. R84
+            // (b139 fairness): a WAITER parked/retrying for many seconds
+            // while holders cycle (held ~0) is the starvation shape the
+            // fairness gate exists to kill. Normal parking lasts
+            // milliseconds, so the tripwire only prints when EITHER the
+            // waiter has been queued 3+ s (fairness starvation) or the
+            // holder has held 10+ s (leak) — rate-limited to one line
+            // per 10 s either way.
+            //
+            // R85 (b148): the old tripwire only reported a LIVE owner —
+            // the stranded-LOCK-FREE shape (owner=0, waiters stuck,
+            // dropped handoff) printed NOTHING while the whole OH cohort
+            // crawled, which is exactly how b148 looked (zero STALL
+            // prints, 120 s+ D-state waiters, free lock). Report that
+            // shape too, same rate limit.
             {
-                static LAST_WAIT_REPORT: core::sync::atomic::AtomicU64 =
-                    core::sync::atomic::AtomicU64::new(0);
                 let now = crate::drivers::timer::get_jiffies();
-                let last = LAST_WAIT_REPORT.load(core::sync::atomic::Ordering::Relaxed);
-                let (owner, depth, held) = {
+                let (owner, depth, held, nwaiters, locked) = {
                     let st = self.state.lock();
-                    (st.owner, st.depth, now.saturating_sub(st.acquired_at))
+                    (
+                        st.owner,
+                        st.depth,
+                        now.saturating_sub(st.acquired_at),
+                        st.waiters,
+                        st.locked,
+                    )
                 };
-                if locked_owner_alive_wait(&owner)
-                    && now.wrapping_sub(last) >= crate::config::KERNEL_HZ as u64 * 10
-                    && LAST_WAIT_REPORT
-                        .compare_exchange(
-                            last,
-                            now,
-                            core::sync::atomic::Ordering::Relaxed,
-                            core::sync::atomic::Ordering::Relaxed,
-                        )
-                        .is_ok()
+                let waited = now.wrapping_sub(first_park);
+                let stranded_free = !locked && nwaiters > 0 && waited >= Self::STALL_WAITER_JIFFIES;
+                if (waited >= Self::STALL_WAITER_JIFFIES
+                    || held >= crate::config::KERNEL_HZ as u64 * 10)
+                    && (stranded_free || locked_owner_alive_wait(&owner))
                 {
-                    let cur_pid = crate::process::current_pid();
-                    crate::pr_err!(
-                        "EXT4-BIGLOCK-STALL waiter={} holder={} depth={} held={}j",
-                        cur_pid,
-                        owner,
-                        depth,
-                        held
-                    );
+                    static LAST_WAIT_REPORT: core::sync::atomic::AtomicU64 =
+                        core::sync::atomic::AtomicU64::new(0);
+                    let last = LAST_WAIT_REPORT.load(core::sync::atomic::Ordering::Relaxed);
+                    if now.wrapping_sub(last) >= crate::config::KERNEL_HZ as u64 * 10
+                        && LAST_WAIT_REPORT
+                            .compare_exchange(
+                                last,
+                                now,
+                                core::sync::atomic::Ordering::Relaxed,
+                                core::sync::atomic::Ordering::Relaxed,
+                            )
+                            .is_ok()
+                    {
+                        let cur_pid = crate::process::current_pid();
+                        if stranded_free {
+                            crate::pr_err!(
+                                "EXT4-BIGLOCK-STALL-FREE waiter={} owner=none waiters={} waited={}j (dropped handoff / stuck count)",
+                                cur_pid,
+                                nwaiters,
+                                waited
+                            );
+                        } else {
+                            crate::pr_err!(
+                                "EXT4-BIGLOCK-STALL waiter={} holder={} depth={} held={}j waiters={} waited={}j",
+                                cur_pid,
+                                owner,
+                                depth,
+                                held,
+                                nwaiters,
+                                waited
+                            );
+                        }
+                    }
                 }
             }
+            // R85: arm the anti-starve self-wake. schedule() below blocks
+            // until SOMETHING wakes us; when the handoff was dropped (the
+            // empty-queue release) or our token is stolen, that someone
+            // does not exist — without this timer the override above can
+            // never evaluate and a stranded waiter sleeps indefinitely
+            // (re-armed on every re-park so a held lock is polled at
+            // ANTI_STARVE granularity, not hot-looped). Timer-table full
+            // (id 0) degrades to the old wake-dependent behavior.
+            if timer_id != 0 {
+                crate::timer::del_timer(timer_id);
+                timer_id = 0;
+            }
+            timer_id = crate::timer::add_timer_wakeup(
+                crate::drivers::timer::get_jiffies() + Self::ANTI_STARVE_JIFFIES,
+                pid,
+            );
             crate::arch::cpu::restore_irq(true);
             crate::sched::schedule();
+            if timer_id != 0 {
+                if crate::timer::timer_pending(timer_id) {
+                    crate::timer::del_timer(timer_id);
+                }
+                timer_id = 0;
+            }
             self.wait.finish_wait(cur);
-            // Woken: loop and retry the acquire (another task may have
-            // barged past us — the release that woke us is not a
-            // reservation, just a retry token).
+            // Woken: the release() that issued this wake spent its handoff
+            // token on us — spend it at the top of the loop. (R85: a timer
+            // or foreign wake ALSO lands here with no token; the token
+            // spend fails or succeeds on lock state alone, so a spurious
+            // retry is harmless.)
+            woken_retry = true;
         }
     }
 
@@ -2553,11 +2869,32 @@ impl Ext4BigLock {
                 }
             }
         }
-        // Hand the lock to one waiter. Done outside the state spinlock:
-        // the waker takes the waitqueue lock, the waiter's finish_wait
-        // takes it too — never both at once. Waking an empty queue is a
-        // no-op, so this is safe even without waiter accounting.
-        self.wait.wake_up_one();
+        // Hand the lock to one waiter. R84 (b139 fairness): this wake is
+        // a HANDOFF token, not a retry hint — the woken waiter takes the
+        // free lock unconditionally in lock_fair, and
+        // try_acquire_or_recurse_fair keeps fresh callers queued behind
+        // it until the token is spent. Still done outside the state
+        // spinlock: the waker takes the waitqueue lock, the waiter's
+        // finish_wait takes it too — never both at once. Waking an empty
+        // queue is a no-op (an outstanding token holder takes the free
+        // lock on its own), so this is safe even without waiter
+        // accounting.
+        let woke = self.wait.wake_up_one();
+        if woke == 0 {
+            // R85 (b148 silent crawl): the handoff was DROPPED — the
+            // queue was empty, so every counted waiter is mid-loop
+            // between finish_wait and its next prepare_to_wait and the
+            // just-freed lock has no taker: the fresh-caller gate
+            // (waiters > 0) bars everyone else. Bump the orphaned-handoff
+            // epoch so the first mid-loop waiter to re-register takes the
+            // free lock at its re-check instead of parking past it. (No
+            // counted waiters at all: the bump is inert — nobody's
+            // registration snapshot can predate it.)
+            let mut st = self.state.lock();
+            if !st.locked && st.waiters > 0 {
+                st.handoff_epoch += 1;
+            }
+        }
     }
 
     /// R73 exit-path release: force-drop the lock when its owner dies.
@@ -2595,7 +2932,14 @@ impl Ext4BigLock {
             }
         };
         if was_held {
-            self.wait.wake_up_one();
+            let woke = self.wait.wake_up_one();
+            if woke == 0 {
+                // R85: same dropped-handoff recovery as release().
+                let mut st = self.state.lock();
+                if !st.locked && st.waiters > 0 {
+                    st.handoff_epoch += 1;
+                }
+            }
         }
     }
 
@@ -2621,6 +2965,38 @@ impl Ext4BigLock {
             (usize::MAX, 0)
         };
         (locked, owner, depth, queued, woken)
+    }
+
+    /// R85 (b148 hunt): one SBI-console census line for the periodic
+    /// taskdump — the b148 wedge was invisible because nothing printed
+    /// the biglock's own state (zero STALL prints while every OH service
+    /// sat D-parked). Try-locks only (taskdump context may be the
+    /// watchdog); busy locks print as '?' fields, never block.
+    pub fn dfx_census_line(&'static self) {
+        use crate::dfx::taskdump::{taskdump_dec, taskdump_raw_line};
+        let (locked, owner, depth, waiters, epoch) = match self.state.try_lock() {
+            Some(st) => (st.locked, st.owner, st.depth, st.waiters, st.handoff_epoch),
+            None => (false, u32::MAX, 0, u32::MAX, u64::MAX),
+        };
+        let (queued, woken) = match self.wait.vw_queue_census_try() {
+            Some(v) => v,
+            None => (usize::MAX, 0),
+        };
+        taskdump_raw_line(b"EXT4-BIGLOCK-CENSUS locked=");
+        taskdump_dec(locked as u64);
+        taskdump_raw_line(b" owner=");
+        taskdump_dec(owner as u64);
+        taskdump_raw_line(b" depth=");
+        taskdump_dec(depth as u64);
+        taskdump_raw_line(b" waiters=");
+        taskdump_dec(waiters as u64);
+        taskdump_raw_line(b" epoch=");
+        taskdump_dec(epoch);
+        taskdump_raw_line(b" queued=");
+        taskdump_dec(queued as u64);
+        taskdump_raw_line(b" wokenflag=");
+        taskdump_dec(woken as u64);
+        taskdump_raw_line(b"\n");
     }
 }
 
@@ -2680,7 +3056,7 @@ unsafe fn ext4_iget(parent: &Inode, _name: &[u8], ino: Ino) -> Result<alloc::syn
 unsafe fn ext4_mkdir_wrapper(dir: &Inode, name: &[u8], mode: InodeMode) -> Result<alloc::sync::Arc<Inode>, i32> {
     flush_pending_reaps();
     let _ext4_guard = EXT4_BIG_LOCK.lock_fair();
-    let fs = get_ext4_fs_from_inode(dir)?;
+    let fs = get_ext4_fs_rw_from_inode(dir)?;
 
     // Call namei's ext4_mkdir
     let new_ino = namei::ext4_mkdir(fs, dir.ino as u32, name, mode.bits() as u16)?;
@@ -2720,7 +3096,7 @@ unsafe fn refresh_inode_cache(inode: &Inode, fs: &Ext4FileSystem) {
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
 unsafe fn ext4_rmdir_wrapper(dir: &Inode, name: &[u8]) -> i32 {
     let _ext4_guard = EXT4_BIG_LOCK.lock_fair();
-    let fs = match get_ext4_fs_from_inode(dir) {
+    let fs = match get_ext4_fs_rw_from_inode(dir) {
         Ok(f) => f,
         Err(e) => return e,
     };
@@ -2747,7 +3123,7 @@ unsafe fn ext4_rmdir_wrapper(dir: &Inode, name: &[u8]) -> i32 {
 unsafe fn ext4_create_wrapper(dir: &Inode, name: &[u8], mode: InodeMode) -> Result<alloc::sync::Arc<Inode>, i32> {
     flush_pending_reaps();
     let _ext4_guard = EXT4_BIG_LOCK.lock_fair();
-    let fs = get_ext4_fs_from_inode(dir)?;
+    let fs = get_ext4_fs_rw_from_inode(dir)?;
     let new_ino = namei::ext4_create(fs, dir.ino as u32, name, mode.bits() as u16)?;
 
     // Update parent directory's cached Ext4Inode
@@ -2764,7 +3140,7 @@ unsafe fn ext4_create_wrapper(dir: &Inode, name: &[u8], mode: InodeMode) -> Resu
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
 unsafe fn ext4_mknod_wrapper(dir: &Inode, name: &[u8], mode: InodeMode, dev: u64) -> Result<alloc::sync::Arc<Inode>, i32> {
     let _ext4_guard = EXT4_BIG_LOCK.lock_fair();
-    let fs = get_ext4_fs_from_inode(dir)?;
+    let fs = get_ext4_fs_rw_from_inode(dir)?;
     let new_ino = namei::ext4_mknod(fs, dir.ino as u32, name, mode.bits() as u16, dev)?;
 
     // Update parent directory's cached Ext4Inode
@@ -2781,7 +3157,7 @@ unsafe fn ext4_mknod_wrapper(dir: &Inode, name: &[u8], mode: InodeMode, dev: u64
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
 unsafe fn ext4_symlink_wrapper(dir: &Inode, name: &[u8], target: &[u8]) -> Result<alloc::sync::Arc<Inode>, i32> {
     let _ext4_guard = EXT4_BIG_LOCK.lock_fair();
-    let fs = get_ext4_fs_from_inode(dir)?;
+    let fs = get_ext4_fs_rw_from_inode(dir)?;
     let new_ino = namei::ext4_symlink(fs, dir.ino as u32, name, target)?;
 
     // Update parent directory's cached Ext4Inode
@@ -2798,7 +3174,7 @@ unsafe fn ext4_symlink_wrapper(dir: &Inode, name: &[u8], target: &[u8]) -> Resul
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
 unsafe fn ext4_link_wrapper(dir: &Inode, name: &[u8], target: &Inode) -> i32 {
     let _ext4_guard = EXT4_BIG_LOCK.lock_fair();
-    let fs = match get_ext4_fs_from_inode(dir) {
+    let fs = match get_ext4_fs_rw_from_inode(dir) {
         Ok(f) => f,
         Err(e) => return e,
     };
@@ -2826,7 +3202,7 @@ unsafe fn ext4_link_wrapper(dir: &Inode, name: &[u8], target: &Inode) -> i32 {
 unsafe fn ext4_unlink_wrapper(dir: &Inode, name: &[u8]) -> i32 {
     flush_pending_reaps();
     let _ext4_guard = EXT4_BIG_LOCK.lock_fair();
-    let fs = match get_ext4_fs_from_inode(dir) {
+    let fs = match get_ext4_fs_rw_from_inode(dir) {
         Ok(f) => f,
         Err(e) => return e,
     };
@@ -2848,7 +3224,7 @@ unsafe fn ext4_unlink_wrapper(dir: &Inode, name: &[u8]) -> i32 {
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
 unsafe fn ext4_rename_wrapper(old_dir: &Inode, old_name: &[u8], new_dir: &Inode, new_name: &[u8]) -> i32 {
     let _ext4_guard = EXT4_BIG_LOCK.lock_fair();
-    let fs = match get_ext4_fs_from_inode(old_dir) {
+    let fs = match get_ext4_fs_rw_from_inode(old_dir) {
         Ok(f) => f,
         Err(e) => return e,
     };
@@ -2867,6 +3243,23 @@ fn get_ext4_fs_from_inode(inode: &Inode) -> Result<&'static Ext4FileSystem, i32>
     unsafe {
         Ok(&*(fs_ptr as *const Ext4FileSystem))
     }
+}
+
+/// Mutating-op variant of get_ext4_fs_from_inode: a read-only-mounted ext4
+/// refuses writes with EROFS, the way Linux does (may_create checks
+/// IS_RDONLY(dir), ext4_new_inode its own sb_rdonly; sc21). The guard must
+/// sit at the op WRAPPERS because binds SHARE inodes with the original
+/// mount — check_not_readonly only sees the bind's own flags, and without
+/// the fs-level refusal a mkdir/create under a bind of the ro /usr or
+/// /vendor ext4 ran the full write path (bitmap RMW, superblock counter,
+/// journal) and failed deep inside with EIO, mis-reporting the errno
+/// (sc20: sandbox prep mkdirs under /mnt/sandbox/system returned -5).
+fn get_ext4_fs_rw_from_inode(inode: &Inode) -> Result<&'static Ext4FileSystem, i32> {
+    let fs = get_ext4_fs_from_inode(inode)?;
+    if fs.read_only {
+        return Err(errno::Errno::ReadOnlyFileSystem.as_neg_i32());
+    }
+    Ok(fs)
 }
 
 /// Get file operations for ext4 regular files and directories
@@ -2977,7 +3370,7 @@ pub fn create_vfs_inode_in(
 pub fn mount_loop_instance(
     disk: *const blkdev::GenDisk,
     read_only: bool,
-) -> Result<alloc::sync::Arc<Inode>, i32> {
+) -> Result<(alloc::sync::Arc<Inode>, bool), i32> {
     if disk.is_null() {
         return Err(errno::Errno::InvalidArgument.as_neg_i32());
     }
@@ -2993,7 +3386,7 @@ pub fn mount_loop_instance(
     // SAFETY: fs_ptr is a leaked, valid instance pointer.
     let fs_ref = unsafe { &*fs_ptr };
     match fs_ref.read_inode(2) {
-        Ok(ext4_inode) => Ok(create_vfs_inode_in(fs_ptr, 2, &ext4_inode)),
+        Ok(ext4_inode) => Ok((create_vfs_inode_in(fs_ptr, 2, &ext4_inode), fs_ref.read_only)),
         Err(_) => {
             // Not a filesystem root (bad magic / inode 2): fail the mount
             // and reclaim the instance.

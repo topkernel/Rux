@@ -19,23 +19,79 @@
 //! small region around the kernel image.
 
 use alloc::collections::BTreeMap;
-use core::sync::atomic::{AtomicU32, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, AtomicUsize, Ordering};
 use crate::sync::spinlock::Spinlock;
 use crate::mm::page_alloc::{alloc_page, alloc_page_batch, free_page};
-use crate::mm::zone::GfpFlags;
+use crate::mm::zone::{GfpFlags, ZoneType};
 use crate::mm::page_desc::{PageFlag, PageType, pfn_to_page_mut, Page};
 use crate::mm::lru;
-use crate::mm::pglist::{first_online_node_mut, LRU_INACTIVE_FILE, LRU_ACTIVE_FILE};
+use crate::mm::pglist::{first_online_node, LRU_INACTIVE_FILE};
 use crate::mm::{pfn_to_phys, PAGE_SIZE};
 use crate::arch::mm::{phys_to_virt, PhysAddr};
 
-/// Maximum cached pages across all inodes (8192 x 4KB = 32MB).
+/// Minimum cached pages across all inodes (8192 x 4KB = 32MB).
 ///
-/// Was 512 pages (2MB): smaller than one Ubuntu binary's text+data working
-/// set, so every exec/read cycle re-fetched from disk and a 10MB sequential
-/// read thrashed the LRU 5x over. 32MB still leaves the 2GB guest plenty of
-/// user memory and eviction/reclaim paths unchanged.
-const MAX_CACHED_PAGES: usize = 8192;
+/// Was the WHOLE cap (a fixed `MAX_CACHED_PAGES = 8192`): smaller than one
+/// Ubuntu binary's text+data working set, so every exec/read cycle
+/// re-fetched from disk and a 10MB sequential read thrashed the LRU 5x
+/// over. It is now the FLOOR of the dynamic cap below.
+const MIN_CACHED_PAGES: usize = 8192;
+
+/// Fraction of managed RAM the page cache may occupy before inserts evict
+/// (soft cap — see `max_cached_pages`).
+///
+/// The fixed 32MB cap was the OH `.so`-load thrash: the image's shared
+/// libraries alone are gigabytes, so with ~580 tasks faulting libraries
+/// EVERY fault was a cache miss + eviction + disk refetch + ext4 big-lock
+/// round trip, and measured ~1.5 s per fault (`SA:3002 OpenSo 802166ms`).
+/// Linux scales the page cache to reclaimable memory; Rux now caps it at
+/// half of managed RAM (reclaim still shrinks it below watermark via
+/// `shrink`, so user allocations keep headroom).
+const PAGE_CACHE_CAP_RAM_DIVISOR: usize = 2;
+
+/// Cached dynamic cap (0 = not computed yet). Computed lazily on first
+/// use; falls back to `MIN_CACHED_PAGES` before zone init.
+static PAGE_CACHE_CAP: AtomicUsize = AtomicUsize::new(0);
+
+/// Soft cap on total cached pages: half of managed RAM, at least 32MB.
+///
+/// Computed once (atomic compare-exchange); before the zone system is up
+/// the old fixed floor applies. Reads managed pages from all initialized
+/// zones — no allocation, no locks, safe from any insert path.
+#[inline]
+fn max_cached_pages() -> usize {
+    let cached = PAGE_CACHE_CAP.load(Ordering::Relaxed);
+    if cached != 0 {
+        return cached;
+    }
+    let mut total = 0usize;
+    if let Some(node) = first_online_node() {
+        for zt in [ZoneType::ZoneNormal, ZoneType::ZoneDma32, ZoneType::ZoneDma] {
+            if let Some(zone) = node.zone(zt) {
+                if zone.is_initialized() {
+                    total += zone.managed_pages();
+                }
+            }
+        }
+    }
+    if total == 0 {
+        return MIN_CACHED_PAGES; // zones not up yet — old fixed cap
+    }
+    let cap = core::cmp::max(total / PAGE_CACHE_CAP_RAM_DIVISOR, MIN_CACHED_PAGES);
+    let _ = PAGE_CACHE_CAP.compare_exchange(0, cap, Ordering::AcqRel, Ordering::Acquire);
+    PAGE_CACHE_CAP.load(Ordering::Relaxed)
+}
+
+/// Page-cache observability counters (Rux extension, /proc/meminfo
+/// `PageCacheOps:` line). Cheap relaxed atomics on the insert/evict paths;
+/// the point is ratio visibility on OH boots (hits vs misses vs evictions
+/// under the real service mixture).
+static STAT_HITS: AtomicU64 = AtomicU64::new(0);
+static STAT_MISSES: AtomicU64 = AtomicU64::new(0);
+static STAT_EVICTIONS: AtomicU64 = AtomicU64::new(0);
+static STAT_DEMOTIONS: AtomicU64 = AtomicU64::new(0);
+/// Re-entrancy gate for shrink_reclaim's dirty-flush I/O (see there).
+static WRITEBACK_GUARD: AtomicBool = AtomicBool::new(false);
 
 /// A cached page of file data, backed by a zone-allocated physical page frame.
 struct CachedPage {
@@ -53,12 +109,26 @@ struct CachedPage {
     /// can both reach the release for the same entry; the frame must be
     /// returned to the zone exactly once (the zone dblfree stream).
     released: core::sync::atomic::AtomicBool,
+    /// Session 25 (MAP_SHARED writeback): the frame holds stores from a
+    /// writable shared mapping that have NOT reached the file yet. Set
+    /// conservatively at W-map install time (a writable mapping MAY write;
+    /// flushing an unwritten page is harmless I/O), cleared by the
+    /// msync/fsync flush. Dirty entries skip eviction — their content
+    /// exists nowhere else but the frame.
+    dirty: core::sync::atomic::AtomicBool,
 }
 
 /// Per-inode page cache.
 struct InodePageCache {
     /// page_index → cached page.
     pages: BTreeMap<u64, CachedPage>,
+    /// Identity of the owning (filesystem, inode) — cache_key is a
+    /// non-reversible hash, so reclaim-time writeback (shrink_reclaim)
+    /// records the raw inputs here to resolve a live VFS Inode via
+    /// icache_lookup and flush dirty entries through the normal
+    /// ext4_flush_dirty_inode machinery.
+    fs_id: u64,
+    ino: u64,
 }
 
 /// Global page cache, keyed by the combined (fs_id, inode) cache key.
@@ -109,6 +179,7 @@ impl PageCache {
             // the caller re-reads current data from disk.
             return None;
         }
+        STAT_HITS.fetch_add(1, Ordering::Relaxed);
         page.ref_count.fetch_add(1, Ordering::AcqRel);
 
         // Mark page as recently accessed for LRU rotation
@@ -134,6 +205,7 @@ impl PageCache {
         if page.invalidated {
             return None;
         }
+        STAT_HITS.fetch_add(1, Ordering::Relaxed);
         page.ref_count.fetch_add(1, Ordering::AcqRel);
         let page_desc = pfn_to_page_mut(page.pfn);
         if !page_desc.is_null() {
@@ -148,28 +220,48 @@ impl PageCache {
     /// If the page already exists, just increments ref_count.
     pub fn insert(&self, fs_id: u64, ino: u64, page_index: u64, _block_nr: u64, data: &[u8]) {
         let key = cache_key(fs_id, ino);
+
+        // R-WRITESTORM-1: allocate the frame BEFORE taking the inodes
+        // lock. alloc_page(GFP_KERNEL) can enter synchronous direct
+        // reclaim (page_alloc.rs slowpath), which reaches
+        // vmscan::try_to_free_pages -> PageCache::shrink -> inodes.lock()
+        // — allocating under the lock self-deadlocks the CPU on its own
+        // spinlock. Under the OH /data write storm (memory pressure makes
+        // the zone slowpath routine) that wedged BOTH CPUs spinning on
+        // PAGE_CACHE while the ext4 big-lock holder sat inside insert()
+        // (oh b120/b121 deadlock watchdog: lock=...page_cache::PAGE_CACHE,
+        // preceded by EXT4-BIGLOCK-STALL).
+        let phys_addr = alloc_page(GfpFlags::GFP_KERNEL);
+        if phys_addr == 0 {
+            return;
+        }
+
+        STAT_MISSES.fetch_add(1, Ordering::Relaxed);
         let mut cache = self.inodes.lock();
 
         // Evict if needed (with progress check to prevent infinite loop
-        // when all cached pages have ref_count > 0).
-        while self.total_pages.load(Ordering::Relaxed) as usize >= MAX_CACHED_PAGES {
-            let before = self.total_pages.load(Ordering::Relaxed);
-            Self::evict_one(&mut cache, &self.total_pages);
-            let after = self.total_pages.load(Ordering::Relaxed);
-            if after >= before {
+        // when all cached pages have ref_count > 0). The frame is already
+        // in hand, so exceeding the soft cap by one page here is harmless
+        // — the next insert evicts.
+        while self.total_pages.load(Ordering::Relaxed) as usize >= max_cached_pages() {
+            if !Self::evict_one(&mut cache, &self.total_pages) {
                 break; // Cannot evict — all pages in use
             }
         }
 
         let inode_cache = cache.entry(key).or_insert_with(|| InodePageCache {
             pages: BTreeMap::new(),
+            fs_id,
+            ino,
         });
 
         // If already cached and fresh, nothing to do. (R7-C2: this used to
         // bump ref_count with no matching put — a permanent pin leak that
-        // defeated eviction and pinned stale data forever.)
+        // defeated eviction and pinned stale data forever.) The frame we
+        // pre-allocated is unused on both early-return paths — return it.
         if let Some(page) = inode_cache.pages.get(&page_index) {
             if !page.invalidated {
+                free_page(phys_addr);
                 return;
             }
             // R8-3: invalidated-but-still-pinned — the final put() owns the
@@ -177,12 +269,7 @@ impl PageCache {
             // ref_count, handing the pinned reader a freed physical page
             // (exactly what invalidate_inode promises not to do). Skip
             // caching this read; the old entry dies via its refcount.
-            return;
-        }
-
-        // Allocate a physical page frame from zone allocator
-        let phys_addr = alloc_page(GfpFlags::GFP_KERNEL);
-        if phys_addr == 0 {
+            free_page(phys_addr);
             return;
         }
 
@@ -198,8 +285,11 @@ impl PageCache {
                 (*page_desc).set_mapping(key as usize as *mut core::ffi::c_void);
                 (*page_desc).set_index(page_index as usize);
             }
-            // Add to LRU_INACTIVE_FILE — must happen after setting flags
-            lru::page_add_file_lru(unsafe { &*page_desc });
+            // Add to LRU_INACTIVE_FILE at the YOUNG end — must happen after
+            // setting flags. (Two-tier policy: young at head, reclaim from
+            // tail; linking at the tail made the eviction scan see the
+            // freshest page first.)
+            lru::page_add_file_lru_young(unsafe { &*page_desc });
         }
 
         // Copy data into the physical page via linear mapping
@@ -217,6 +307,7 @@ impl PageCache {
             ref_count: AtomicU32::new(0),
             invalidated: false,
             released: core::sync::atomic::AtomicBool::new(false),
+            dirty: core::sync::atomic::AtomicBool::new(false),
         });
         self.total_pages.fetch_add(1, Ordering::Relaxed);
     }
@@ -256,39 +347,22 @@ impl PageCache {
             return;
         }
         let key = cache_key(fs_id, ino);
-        let mut cache = self.inodes.lock();
 
-        // Eviction headroom for the whole run (soft cap — bounded loop, the
-        // batch may proceed slightly over if everything is pinned).
-        let mut evict_tries = 0u32;
-        while self.total_pages.load(Ordering::Relaxed) as usize + npages > MAX_CACHED_PAGES {
-            let before = self.total_pages.load(Ordering::Relaxed);
-            Self::evict_one(&mut cache, &self.total_pages);
-            let after = self.total_pages.load(Ordering::Relaxed);
-            if after >= before {
-                evict_tries += 1;
-                if evict_tries >= 32 {
-                    break;
-                }
-            }
-        }
-
-        let inode_cache = cache.entry(key).or_insert_with(|| InodePageCache {
-            pages: BTreeMap::new(),
-        });
-
-        // Allocate frames in order-0 batches (one zone lock per 64 pages),
-        // copy per page (order-0 frames are not contiguous), describe, link
-        // to the LRU in one locked batch, and insert into the inode map
-        // directly. Order-0 deliberately: eviction frees page-cache frames
-        // one page at a time, higher-order buddy chunks failed expensively
-        // (reclaim + compaction slowpaths), and a temp-map `append` proved
-        // 3x slower than direct inserts under the debug build.
+        // R-WRITESTORM-1 (the insert_batch twin): allocate EVERY frame
+        // BEFORE taking the inodes lock. The old loop called
+        // alloc_page_batch(GFP_KERNEL) under the lock; under memory
+        // pressure that enters the page-allocator slowpath →
+        // vmscan::try_to_free_pages → PageCache::shrink → inodes.lock() —
+        // the SAME lock the caller already holds: a spinlock self-deadlock
+        // with one CPU spinning forever (the OH b120/b121 wedge insert()
+        // was fixed for, resurrected here at RAM-scale cache pressure —
+        // every insert batch wedged a CPU, SA .so loads never completed).
+        // Chunked 64 frames at a time: each chunk allocates unlocked, then
+        // one locked section does eviction headroom + inserts for the
+        // chunk.
         const ALLOC_CHUNK: usize = 64;
         let mut phys_buf: [usize; ALLOC_CHUNK] = [0; ALLOC_CHUNK];
-        let mut lru_batch: [*mut Page; ALLOC_CHUNK] = [core::ptr::null_mut(); ALLOC_CHUNK];
-        let mut lru_n: usize = 0;
-        let mut appended: u32 = 0;
+
         let mut done: usize = 0;
         while done < npages {
             let want = core::cmp::min(ALLOC_CHUNK, npages - done);
@@ -298,6 +372,41 @@ impl PageCache {
                 // per-page fallback covers the tail.
                 break;
             }
+
+            let mut cache = self.inodes.lock();
+
+            // Eviction headroom for this chunk (soft cap — bounded loop,
+            // the batch may proceed slightly over if everything is
+            // pinned).
+            let mut evict_tries = 0u32;
+            while self.total_pages.load(Ordering::Relaxed) as usize + got > max_cached_pages() {
+                if !Self::evict_one(&mut cache, &self.total_pages) {
+                    evict_tries += 1;
+                    if evict_tries >= 32 {
+                        break;
+                    }
+                }
+            }
+
+            STAT_MISSES.fetch_add(1, Ordering::Relaxed);
+
+            let inode_cache = cache.entry(key).or_insert_with(|| InodePageCache {
+                pages: BTreeMap::new(),
+                fs_id,
+                ino,
+            });
+
+            // Copy per page (order-0 frames are not contiguous), describe,
+            // link to the LRU in one locked batch, and insert into the
+            // inode map directly. Order-0 deliberately: eviction frees
+            // page-cache frames one page at a time, higher-order buddy
+            // chunks failed expensively (reclaim + compaction slowpaths),
+            // and a temp-map `append` proved 3x slower than direct inserts
+            // under the debug build.
+            let mut lru_batch: [*mut Page; ALLOC_CHUNK] =
+                [core::ptr::null_mut(); ALLOC_CHUNK];
+            let mut lru_n: usize = 0;
+            let mut appended: u32 = 0;
             for k in 0..got {
                 let phys = phys_buf[k];
                 let pfn = phys / PAGE_SIZE;
@@ -338,18 +447,17 @@ impl PageCache {
                         ref_count: AtomicU32::new(0),
                         invalidated: false,
                         released: core::sync::atomic::AtomicBool::new(false),
+                        dirty: core::sync::atomic::AtomicBool::new(false),
                     },
                 );
                 appended += 1;
             }
-            done += got;
             if lru_n > 0 {
-                lru::page_add_file_lru_batch(&lru_batch[..lru_n]);
-                lru_n = 0;
+                lru::page_add_file_lru_young_batch(&lru_batch[..lru_n]);
             }
+            self.total_pages.fetch_add(appended, Ordering::Relaxed);
+            done += got;
         }
-
-        self.total_pages.fetch_add(appended, Ordering::Relaxed);
     }
 
     /// Pin up to `out.len()` consecutive cached pages starting at
@@ -404,6 +512,7 @@ impl PageCache {
             if page.invalidated {
                 break;
             }
+            STAT_HITS.fetch_add(1, Ordering::Relaxed);
             page.ref_count.fetch_add(1, Ordering::AcqRel);
             let page_desc = pfn_to_page_mut(page.pfn);
             if !page_desc.is_null() {
@@ -497,6 +606,327 @@ impl PageCache {
         }
     }
 
+    /// mm-side release for a mapping-owned pin (x86_64 filemap_fault).
+    ///
+    /// The combined key and page_index come from the page DESCRIPTOR's
+    /// mapping/index fields, which insert/insert_batch maintain as the
+    /// eviction keys — the unmap/COW/fork paths only have the frame. Same
+    /// release discipline as `put()` (R14-16: only a put that actually
+    /// decremented may release an invalidated entry's frame).
+    pub fn put_by_key(&self, key: u64, page_index: u64) {
+        let mut cache = self.inodes.lock();
+        if let Some(inode_cache) = cache.get_mut(&key) {
+            if let Some(page) = inode_cache.pages.get_mut(&page_index) {
+                let decremented = page
+                    .ref_count
+                    .fetch_update(Ordering::AcqRel, Ordering::Acquire, |v| {
+                        v.checked_sub(1)
+                    })
+                    .is_ok();
+                if decremented
+                    && page.ref_count.load(Ordering::Acquire) == 0
+                    && page.invalidated
+                    && !page.released.swap(true, Ordering::AcqRel)
+                {
+                    let pfn = page.pfn;
+                    inode_cache.pages.remove(&page_index);
+                    let page_desc = pfn_to_page_mut(pfn);
+                    if !page_desc.is_null() {
+                        unsafe { lru::page_remove_lru(&*page_desc); }
+                    }
+                    release_page_frame(pfn);
+                    self.total_pages.fetch_sub(1, Ordering::Relaxed);
+                }
+            }
+            if inode_cache.pages.is_empty() {
+                cache.remove(&key);
+            }
+        }
+    }
+
+    /// mm-side pin acquisition for a frame the page tables are about to
+    /// share (fork's COW walk copying a cache-mapped PTE into the child).
+    ///
+    /// Private cache mappings own exactly one pin per PTE (taken by
+    /// `get_phys` at fault time, released by `put_by_key` at unmap/COW);
+    /// the fork walk copies the PTE, so it must copy the pin ownership
+    /// too — otherwise the parent's unmap would drop the last pin and
+    /// eviction could free a frame the child still maps. Pins are also
+    /// taken on `invalidated` entries (the R7-C2/R8-3 release accounting
+    /// counts every holder; a refused pin would let a later put release
+    /// another mapping's frame). Returns false when the entry is gone
+    /// entirely (no pin possible; the frame is no longer cache-owned).
+    pub fn pin_by_key(&self, key: u64, page_index: u64) -> bool {
+        let cache = self.inodes.lock();
+        if let Some(inode_cache) = cache.get(&key) {
+            if let Some(page) = inode_cache.pages.get(&page_index) {
+                page.ref_count.fetch_add(1, Ordering::AcqRel);
+                let page_desc = pfn_to_page_mut(page.pfn);
+                if !page_desc.is_null() {
+                    unsafe {
+                        (*page_desc).set_flag(PageFlag::Referenced);
+                    }
+                }
+                return true;
+            }
+        }
+        false
+    }
+
+    // ==================== MAP_SHARED writeback (session 25) ====================
+    //
+    // Writable shared mappings alias the cache frame with W, so their
+    // stores land DIRECTLY in the frame (mapper coherence by construction).
+    // Persistence is then the cache's problem: the frame is marked dirty
+    // at W-map install (conservative v1), write(2) writes THROUGH pinned
+    // frames instead of invalidating them, and msync/fsync flush dirty
+    // frames back to the file. The inodes lock is NEVER held across the
+    // block I/O of a flush (R-WRITESTORM-1): collection and completion are
+    // separate locked passes, the flush itself runs pinned but unlocked.
+
+    /// Mark one cached page dirty (a writable shared mapping was just
+    /// installed on it). Conservative: a writable mapping MAY write, and
+    /// flushing an unwritten page is harmless I/O. Missing/invalidated
+    /// entries are ignored (nothing to persist).
+    pub fn mark_dirty(&self, fs_id: u64, ino: u64, page_index: u64) {
+        self.mark_dirty_by_key(cache_key(fs_id, ino), page_index);
+    }
+
+    /// `mark_dirty` by combined cache key — for callers that only hold the
+    /// descriptor's eviction keys (mapping/index).
+    pub fn mark_dirty_by_key(&self, key: u64, page_index: u64) {
+        let cache = self.inodes.lock();
+        if let Some(inode_cache) = cache.get(&key) {
+            if let Some(page) = inode_cache.pages.get(&page_index) {
+                if !page.invalidated {
+                    page.dirty.store(true, Ordering::Release);
+                }
+            }
+        }
+    }
+
+    /// `mark_dirty` by frame PFN — for PTE-rewrite sites (mprotect
+    /// W-upgrades on SHARED cache leaves) that hold the leaf's PPN but not
+    /// the file identity. Resolves the cache entry through the page
+    /// descriptor's eviction keys (set by insert). No-op for non-cache
+    /// frames (mapping() == 0) and foreign descriptors.
+    pub fn mark_dirty_pfn(&self, pfn: usize) {
+        use crate::mm::page_desc::pfn_to_page_mut;
+        let page = pfn_to_page_mut(pfn);
+        if page.is_null() {
+            return;
+        }
+        // SAFETY: descriptor of a live frame; mapping/index are written
+        // only by the cache's insert/release paths.
+        let key = unsafe { (*page).mapping() as u64 };
+        if key == 0 {
+            return;
+        }
+        let index = unsafe { (*page).index() as u64 };
+        self.mark_dirty_by_key(key, index);
+    }
+
+    /// Post-write(2) cache update: copy the written bytes INTO every fresh
+    /// cached frame overlapping [file_off, file_off+data.len()) and leave
+    /// the entries in place. This replaces the old whole-inode invalidate
+    /// on the write path:
+    /// - PINNED entries (shared or private mappings alias them) MUST be
+    ///   updated, never invalidated — a pinned-but-invalidated entry serves
+    ///   misses, so the next fault would re-read from disk into a SECOND
+    ///   frame while live mappings keep writing the old one: permanent
+    ///   mapper divergence. Updating the frame keeps every alias coherent
+    ///   (Linux writes into the page cache the same way).
+    /// - Unpinned entries stay cached and clean: the bytes just reached
+    ///   the file, so the frame matches disk — cache stays hot instead of
+    ///   being dropped (the old behavior re-fetched the whole inode on
+    ///   every write).
+    /// The dirty bit is deliberately untouched: a page holding UNFLUSHED
+    /// shared-mapping stores outside the written range stays dirty (its
+    /// data still exists only in the frame); a clean page written by
+    /// write(2) is now on disk, hence clean.
+    ///
+    /// `skip_pfn`: the writeback path itself calls this with the FLUSH
+    /// SOURCE frame (a dirty cache frame being written to disk) — copying
+    /// it onto itself is a self-overlap (UB via copy_nonoverlapping, and
+    /// pointless); passing its PFN skips exactly that entry.
+    ///
+    /// memcpy only — no I/O, safe under the inodes lock.
+    pub fn writeback_update_range(
+        &self,
+        fs_id: u64,
+        ino: u64,
+        file_off: u64,
+        data: &[u8],
+        skip_pfn: u64,
+    ) {
+        if data.is_empty() {
+            return;
+        }
+        let key = cache_key(fs_id, ino);
+        let first_index = file_off / PAGE_SIZE as u64;
+        let last_index = (file_off + data.len() as u64 - 1) / PAGE_SIZE as u64;
+        let cache = self.inodes.lock();
+        let Some(inode_cache) = cache.get(&key) else {
+            return;
+        };
+        for idx in first_index..=last_index {
+            let Some(page) = inode_cache.pages.get(&idx) else {
+                continue;
+            };
+            if page.invalidated {
+                // Stale-pinned entry: serves misses, dies on its last put —
+                // leave it alone (its frame is invisible to new faults).
+                continue;
+            }
+            if skip_pfn != 0 && page.pfn as u64 == skip_pfn {
+                // The flush source frame itself (see the doc comment) —
+                // copying a frame onto itself is a self-overlap.
+                continue;
+            }
+            let page_off = (idx * PAGE_SIZE as u64).max(file_off);
+            let page_end = ((idx + 1) * PAGE_SIZE as u64).min(file_off + data.len() as u64);
+            if page_off >= page_end {
+                continue;
+            }
+            let src_skip = (page_off - file_off) as usize;
+            let dst = phys_to_virt_ptr(pfn_to_phys(page.pfn));
+            let n = (page_end - page_off) as usize;
+            // SAFETY: dst is the linear map of the entry's frame (PAGE_SIZE
+            // writable bytes); page_off%PAGE + n <= PAGE_SIZE by construction.
+            unsafe {
+                core::ptr::copy_nonoverlapping(
+                    data.as_ptr().add(src_skip),
+                    dst.add((page_off % PAGE_SIZE as u64) as usize),
+                    n,
+                );
+            }
+        }
+    }
+
+    /// Collect up to `out.len()` dirty pages in [first_index, last_index]
+    /// (inclusive), PINNING each (ref++) so its frame cannot be freed
+    /// while the caller flushes it OUTSIDE the inodes lock. Fills `out`
+    /// with (page_index, pfn) pairs; returns the count collected. Callers
+    /// MUST balance every collected entry with `flush_done`.
+    ///
+    /// PROGRESS RULE (session 26): a collected-and-flushed page whose
+    /// mapping is still up STAYS dirty (flush_done clears the bit only at
+    /// pin count zero), so a caller looping "collect until empty" would
+    /// re-collect the same leading pages forever — the first msync of any
+    /// file with >out.len() live-mapped dirty pages hung in an unbounded
+    /// write loop. Callers therefore resume from the LAST COLLECTED index:
+    /// pass `first_index = last_collected + 1` on the next call within one
+    /// flush operation (the entries collected but not yet flushed keep
+    /// their pins, and are skipped naturally by the advanced range).
+    pub fn collect_dirty_range(
+        &self,
+        fs_id: u64,
+        ino: u64,
+        first_index: u64,
+        last_index: u64,
+        out: &mut [(u64, u64)],
+    ) -> usize {
+        let key = cache_key(fs_id, ino);
+        if out.is_empty() {
+            return 0;
+        }
+        let mut n = 0usize;
+        let cache = self.inodes.lock();
+        let Some(inode_cache) = cache.get(&key) else {
+            return 0;
+        };
+        for (&idx, page) in inode_cache.pages.range(first_index..=last_index) {
+            if n == out.len() {
+                break;
+            }
+            if page.invalidated || !page.dirty.load(Ordering::Acquire) {
+                continue;
+            }
+            page.ref_count.fetch_add(1, Ordering::AcqRel);
+            out[n] = (idx, page.pfn as u64);
+            n += 1;
+        }
+        n
+    }
+
+    /// Complete a flush cycle for entries collected by `collect_dirty_range`:
+    /// drop the flush pin and clear the dirty bit ONLY when the count reached
+    /// zero AND the flush's write verifiably reached the file (`ok`) — no live
+    /// mapping remains that could store into the frame again (every mapping
+    /// holds a pin). Concurrent mapper stores racing the flush are
+    /// last-writer-wins (POSIX accepted for unsynchronized msync); while a
+    /// mapping is up the bit stays set and the next sync rewrites the
+    /// page — the conservative v1 substitute for hardware dirty tracking.
+    /// An entry invalidated meanwhile (truncate/unlink raced the flush) has
+    /// its data discarded instead.
+    ///
+    /// `entries`: (page_index, pfn, write_ok) — a FAILED or short write
+    /// keeps the page dirty for the next sync even at pin count 0: the
+    /// frame may be the only surviving copy (mapping already unmapped),
+    /// and marking it clean would make it evictable and its data silently
+    /// losable.
+    pub fn flush_done(&self, fs_id: u64, ino: u64, entries: &[(u64, u64, bool)]) {
+        if entries.is_empty() {
+            return;
+        }
+        let key = cache_key(fs_id, ino);
+        let mut cache = self.inodes.lock();
+        let Some(inode_cache) = cache.get_mut(&key) else {
+            return;
+        };
+        for &(page_index, _pfn, write_ok) in entries {
+            if let Some(page) = inode_cache.pages.get_mut(&page_index) {
+                // Clear dirty ONLY when the flush put brought the pin
+                // count to zero — i.e. NO live mapping remains (every
+                // PCACHE mapping holds a pin) — AND the write succeeded.
+                // While any mapping is up, the page MAY receive new stores
+                // the flush did not see; keeping the dirty bit makes the
+                // next sync rewrite it (the conservative v1 substitute for
+                // hardware dirty tracking). The same rule keeps the entry
+                // dirty after the LAST unmap of an unsynced page: bounded,
+                // unevictable until the next sync on the file, and
+                // coherent for every reader through the frame (POSIX
+                // deferred-writeback latitude).
+                let mut clear_dirty = false;
+                let decremented = page
+                    .ref_count
+                    .fetch_update(Ordering::AcqRel, Ordering::Acquire, |v| {
+                        v.checked_sub(1)
+                    })
+                    .is_ok();
+                if decremented {
+                    let now = page.ref_count.load(Ordering::Acquire);
+                    clear_dirty = now == 0 && !page.invalidated && write_ok;
+                }
+                if clear_dirty {
+                    page.dirty.store(false, Ordering::Release);
+                }
+                if decremented
+                    && page.ref_count.load(Ordering::Acquire) == 0
+                    && page.invalidated
+                    && !page.released.swap(true, Ordering::AcqRel)
+                {
+                    let pfn = page.pfn;
+                    inode_cache.pages.remove(&page_index);
+                    let page_desc = pfn_to_page_mut(pfn);
+                    if !page_desc.is_null() {
+                        unsafe { lru::page_remove_lru(&*page_desc); }
+                    }
+                    release_page_frame(pfn);
+                    self.total_pages.fetch_sub(1, Ordering::Relaxed);
+                }
+            }
+        }
+        // Empty-key cleanup, same as put_by_key: an inode whose last entry
+        // was an invalidated frame released here must not leave a permanent
+        // empty InodePageCache behind.
+        if let Some(inode_cache) = cache.get_mut(&key) {
+            if inode_cache.pages.is_empty() {
+                cache.remove(&key);
+            }
+        }
+    }
+
     /// Invalidate all cached pages for a given inode.
     /// Called after writes or truncates to prevent stale data.
     ///
@@ -558,13 +988,8 @@ impl PageCache {
             if self.total_pages.load(Ordering::Relaxed) == 0 {
                 break;
             }
-            let before = self.total_pages.load(Ordering::Relaxed);
-            {
-                let mut cache = self.inodes.lock();
-                Self::evict_one(&mut cache, &self.total_pages);
-            }
-            let after = self.total_pages.load(Ordering::Relaxed);
-            if after >= before {
+            let mut cache = self.inodes.lock();
+            if !Self::evict_one(&mut cache, &self.total_pages) {
                 break;
             }
             freed += 1;
@@ -572,83 +997,252 @@ impl PageCache {
         freed
     }
 
-    /// Evict one page with ref_count == 0 from LRU_INACTIVE_FILE.
+    /// Reclaim-time dirty writeback (the session-24 "v2" item). Direct
+    /// reclaim ONLY: the plain shrink() evicts clean pages alone — a
+    /// DIRTY entry (unflushed MAP_SHARED stores of a mapping that has
+    /// since unmapped without msync) is skipped by evict_one by design,
+    /// because evicting it would lose the only copy of that data. When
+    /// nothing clean is left, such pages are a permanent, unevictable
+    /// drain (the abandonment shape of the fake-OOM family). This
+    /// variant makes progress where shrink() cannot: flush the dirty
+    /// entries to their file first, then let the clean pass evict them.
     ///
-    /// Walks the LRU list from the tail (least recently used end) looking
-    /// for a PageCache page with ref_count == 0 and no Referenced flag.
-    /// Referenced pages are moved to the active list and skipped.
+    /// Safety shape (each point verified against the callers):
+    /// - Runs from vmscan direct reclaim (page_alloc slowpath), which is
+    ///   task context, holds no spinlocks, and is globally serialized by
+    ///   IN_DIRECT_RECLAIM — never from the mmu_init PT-alloc retry,
+    ///   which holds the per-mm PteLock (sleeping on I/O there is the
+    ///   deadlock the session-19 comment documents; that caller keeps
+    ///   plain shrink()).
+    /// - The inodes lock is NEVER held across the flush I/O
+    ///   (R-WRITESTORM-1): candidates are collected under the lock, the
+    ///   lock is dropped, then ext4_flush_dirty_inode does its own
+    ///   chunked collect → write → complete cycle.
+    /// - The filesystem is reached through a LIVE VFS Inode resolved by
+    ///   icache_lookup (fs_id of an ext4 Inode IS the fs pointer, ext4
+    ///   mod.rs inode setup) — the same liveness contract sys_fsync
+    ///   uses. An inode no longer in icache is skipped: its dirty pages
+    ///   stay as they were (bounded, coherent to every reader through
+    ///   the frame); the next open() re-caches the inode and a later
+    ///   retry can flush them.
+    /// - WRITEBACK_GUARD stops re-entry: ext4's write path allocates
+    ///   memory, and a nested reclaim arriving inside our own flush
+    ///   must not start another flush (it degrades to clean-only).
+    /// - A page whose mapping re-pinned during the flush stays dirty
+    ///   (flush_done keeps the bit while pinned) and is simply picked
+    ///   again by a later round — the bounded round count below keeps
+    ///   one call from spinning on it.
+    pub fn shrink_reclaim(&self, nr_to_scan: usize) -> usize {
+        /// Max inode ranges flushed per round, and rounds per call. One
+        /// shrink_reclaim thus performs at most 2*16 chunked flushes of
+        /// I/O before returning — reclaim stays responsive while always
+        /// making progress (each flushed-and-now-clean page is evicted
+        /// by the follow-up clean pass).
+        const MAX_WB_INODES: usize = 2;
+        const MAX_WB_ROUNDS: usize = 4;
+        /// Dirty-page window per flush: matches ext4_flush_dirty_inode's
+        /// internal CHUNK (one collect/write/complete cycle).
+        const WB_WINDOW: u64 = 16;
+
+        let mut freed = 0usize;
+        for _round in 0..MAX_WB_ROUNDS {
+            let remaining = nr_to_scan.saturating_sub(freed);
+            if remaining == 0 {
+                break;
+            }
+            freed += self.shrink(remaining);
+
+            if freed >= nr_to_scan {
+                break;
+            }
+            // Shortfall: reclaim demand exceeds what clean eviction
+            // supplied. Flush dirty, unreferenced entries NOW — while
+            // clean pages may still exist elsewhere — rather than at
+            // the exhausted wall: the flush's own ext4/bio allocations
+            // (journal buffers, block mapping) must be able to allocate
+            // while it runs, or every write fails and the pages stay
+            // dirty forever (the Linux dirty-threshold insight: writeback
+            // starts far below the memory wall).
+            let mut work: [(u64, u64, u64, u64); MAX_WB_INODES] =
+                [(0, 0, 0, 0); MAX_WB_INODES];
+            let mut n_work = 0usize;
+            {
+                let cache = self.inodes.lock();
+                'outer: for (_key, inode_cache) in cache.iter() {
+                    let mut first: Option<u64> = None;
+                    let mut last: u64 = 0;
+                    for (&idx, page) in inode_cache.pages.iter() {
+                        if page.invalidated
+                            || page.ref_count.load(Ordering::Acquire) != 0
+                            || !page.dirty.load(Ordering::Acquire)
+                        {
+                            continue;
+                        }
+                        if first.is_none() {
+                            first = Some(idx);
+                        }
+                        last = idx;
+                        if idx - first.unwrap_or(idx) + 1 >= WB_WINDOW {
+                            break;
+                        }
+                    }
+                    if let Some(first) = first {
+                        work[n_work] = (inode_cache.fs_id, inode_cache.ino, first, last);
+                        n_work += 1;
+                        if n_work == MAX_WB_INODES {
+                            break 'outer;
+                        }
+                    }
+                }
+            }
+            if n_work == 0 {
+                break; // no flushable dirty pages anywhere
+            }
+            // Re-entrancy gate: nested reclaim (from inside ext4 write's
+            // own allocations) degrades to clean-only.
+            if WRITEBACK_GUARD
+                .compare_exchange(false, true, Ordering::AcqRel, Ordering::Acquire)
+                .is_err()
+            {
+                break;
+            }
+            for i in 0..n_work {
+                let (fs_id, ino, first, last) = work[i];
+                // Liveness: same contract as sys_fsync (Inode Arc keeps
+                // the descriptor alive; private_data fs pointer is valid
+                // while the mount lives). Miss = skip, retry next call.
+                if let Some(inode) = crate::fs::inode::icache_lookup(ino, fs_id) {
+                    crate::fs::ext4::file::ext4_flush_dirty_inode(
+                        &inode,
+                        first,
+                        last.min(first + WB_WINDOW - 1),
+                    );
+                }
+            }
+            WRITEBACK_GUARD.store(false, Ordering::Release);
+            // Loop: the clean pass at the top of the next round evicts
+            // what the flush cleaned.
+        }
+        freed
+    }
+
+    /// Evict one unreferenced page, two-tier (Linux file-LRU shape).
+    ///
+    /// 1. Walk LRU_INACTIVE_FILE from the TAIL — the oldest end, walking
+    ///    `lru_prev` toward younger pages. Pinned pages (ref_count > 0)
+    ///    are skipped. Referenced pages get the flag cleared and are
+    ///    activated onto the young end of LRU_ACTIVE_FILE. The first
+    ///    clean unreferenced page is evicted.
+    /// 2. If the inactive walk found nothing, demote the OLDEST active
+    ///    pages back onto the young end of inactive (second chance) and
+    ///    re-walk once. Without demotion every page that was ever served
+    ///    accumulated on the active list forever (`lru_deactivate` had no
+    ///    callers), eviction could not make progress, and inserts fell
+    ///    through to the hash-order map fallback — semantically RANDOM
+    ///    eviction, the OH multi-loader thrash amplifier.
+    /// 3. Safety net: BTreeMap scan (hash-key order) for pages the LRU
+    ///    walk cannot reach (descriptor-less frames, list corruption).
+    ///
+    /// History: the pre-two-tier walk started at the tail and followed
+    /// `lru_next` — the terminator direction — so it examined exactly ONE
+    /// page per call: the newest (fresh pages linked at the tail back
+    /// then), i.e. "evict the page most likely to be needed next".
+    ///
+    /// Returns true when a page was actually evicted.
     fn evict_one(
         cache: &mut BTreeMap<u64, InodePageCache>,
         total_pages: &AtomicU32,
-    ) {
-        // Walk LRU_INACTIVE_FILE looking for an evictable page cache page
-        let mut pfn = lru::lru_tail(LRU_INACTIVE_FILE);
-        let mut scanned = 0usize;
-        let max_scan = 64; // bound scan to limit latency
+    ) -> bool {
+        const MAX_SCAN: usize = 64; // bound scan to limit latency
+        const DEMOTE_BATCH: usize = 32;
 
-        while pfn != 0 && scanned < max_scan {
-            scanned += 1;
-            let page_desc = pfn_to_page_mut(pfn);
-            if page_desc.is_null() {
+        for _round in 0..2 {
+            let mut pfn = lru::lru_tail(LRU_INACTIVE_FILE);
+            let mut scanned = 0usize;
+
+            while pfn != 0 && scanned < MAX_SCAN {
+                scanned += 1;
+                let page_desc = pfn_to_page_mut(pfn);
+                if page_desc.is_null() {
+                    break;
+                }
+
+                unsafe {
+                    let page = &*page_desc;
+                    // Tail = oldest end; lru_prev walks toward the head
+                    // (younger). Capture BEFORE any move of this page.
+                    let next_pfn = page.lru_prev();
+
+                    // Only evict PageCache pages
+                    if page.page_type() != PageType::PageCache {
+                        pfn = next_pfn;
+                        continue;
+                    }
+
+                    // Check ref_count — pages being read are not evictable.
+                    // Use mapping (inode key) and index (page_index) for the
+                    // lookup.
+                    let ino = page.mapping() as u64;
+                    let page_index = page.index() as u64;
+
+                    let evictable = if let Some(inode_cache) = cache.get(&ino) {
+                        if let Some(cached) = inode_cache.pages.get(&page_index) {
+                            cached.ref_count.load(Ordering::Acquire) == 0
+                                // Session 25: dirty frames hold unflushed
+                                // shared-mapping stores — evicting one
+                                // would lose the only copy of that data.
+                                && !cached.dirty.load(Ordering::Acquire)
+                        } else {
+                            // Page not in BTreeMap — stale, should clean up
+                            true
+                        }
+                    } else {
+                        true
+                    };
+
+                    if !evictable {
+                        pfn = next_pfn;
+                        continue;
+                    }
+
+                    // Referenced: second chance — clear the flag, promote to
+                    // the young end of the active list, keep scanning.
+                    if page.test_flag(PageFlag::Referenced) {
+                        page.clear_flag(PageFlag::Referenced);
+                        lru::lru_activate_young(page);
+                        pfn = next_pfn;
+                        continue;
+                    }
+
+                    // Evict: remove from BTreeMap, LRU, and free page
+                    if let Some(inode_cache) = cache.get_mut(&ino) {
+                        inode_cache.pages.remove(&page_index);
+                    }
+                    lru::page_remove_lru(page);
+                    release_page_frame(pfn);
+                    total_pages.fetch_sub(1, Ordering::Relaxed);
+                    STAT_EVICTIONS.fetch_add(1, Ordering::Relaxed);
+                    return true;
+                }
+            }
+
+            // Inactive walk made no progress — demote the oldest ACTIVE
+            // pages to the young end of inactive and retry once. An empty
+            // active list (or nothing demotable) falls to the map scan.
+            let demoted = lru::lru_demote_active_file_oldest(DEMOTE_BATCH);
+            if demoted == 0 {
                 break;
             }
-
-            unsafe {
-                let page = &*page_desc;
-                let next_pfn = page.lru_next();
-
-                // Only evict PageCache pages
-                if page.page_type() != PageType::PageCache {
-                    pfn = next_pfn;
-                    continue;
-                }
-
-                // Check ref_count — pages being read are not evictable.
-                // We need to find the CachedPage in the BTreeMap to check.
-                // Use mapping (inode) and index (page_index) for lookup.
-                let ino = page.mapping() as u64;
-                let page_index = page.index() as u64;
-
-                let evictable = if let Some(inode_cache) = cache.get(&ino) {
-                    if let Some(cached) = inode_cache.pages.get(&page_index) {
-                        cached.ref_count.load(Ordering::Acquire) == 0
-                    } else {
-                        // Page not in BTreeMap — stale, should clean up
-                        true
-                    }
-                } else {
-                    true
-                };
-
-                if !evictable {
-                    pfn = next_pfn;
-                    continue;
-                }
-
-                // Check referenced flag — give recently accessed pages another chance
-                if page.test_flag(PageFlag::Referenced) {
-                    page.clear_flag(PageFlag::Referenced);
-                    lru::lru_activate(page);
-                    pfn = next_pfn;
-                    continue;
-                }
-
-                // Evict: remove from BTreeMap, LRU, and free page
-                if let Some(inode_cache) = cache.get_mut(&ino) {
-                    inode_cache.pages.remove(&page_index);
-                }
-                lru::page_remove_lru(page);
-                release_page_frame(pfn);
-                total_pages.fetch_sub(1, Ordering::Relaxed);
-                return;
-            }
+            STAT_DEMOTIONS.fetch_add(demoted as u64, Ordering::Relaxed);
         }
 
         // LRU walk exhausted — fall back to BTreeMap scan (safety net)
         for (_ino, inode_cache) in cache.iter_mut() {
             let mut to_remove = None;
             for (&page_idx, page) in inode_cache.pages.iter() {
-                if page.ref_count.load(Ordering::Acquire) == 0 {
+                if page.ref_count.load(Ordering::Acquire) == 0
+                    && !page.dirty.load(Ordering::Acquire)
+                {
                     // Also check Referenced flag
                     let page_desc = pfn_to_page_mut(page.pfn);
                     let skip = if !page_desc.is_null() {
@@ -656,7 +1250,7 @@ impl PageCache {
                             let p = &*page_desc;
                             if p.test_flag(PageFlag::Referenced) {
                                 p.clear_flag(PageFlag::Referenced);
-                                lru::lru_activate(p);
+                                lru::lru_activate_young(p);
                                 true
                             } else {
                                 false
@@ -680,9 +1274,11 @@ impl PageCache {
                     release_page_frame(page.pfn);
                 }
                 total_pages.fetch_sub(1, Ordering::Relaxed);
-                return;
+                STAT_EVICTIONS.fetch_add(1, Ordering::Relaxed);
+                return true;
             }
         }
+        false
     }
 }
 
@@ -716,6 +1312,25 @@ pub fn get_page_cache() -> &'static PageCache {
 /// Get the total number of cached pages (for /proc/meminfo).
 pub fn page_cache_total_pages() -> u32 {
     PAGE_CACHE.total_pages.load(Ordering::Relaxed)
+}
+
+/// Page-cache op counters (hits, misses, evictions, active demotions) for
+/// the /proc/meminfo `PageCacheOps:` Rux-extension line. Under the OH
+/// service mixture the hit/miss ratio is the direct read on whether the
+/// cache still thrashes (miss ≈ every fault pays the ext4 big lock).
+pub fn page_cache_stats() -> (u64, u64, u64, u64) {
+    (
+        STAT_HITS.load(Ordering::Relaxed),
+        STAT_MISSES.load(Ordering::Relaxed),
+        STAT_EVICTIONS.load(Ordering::Relaxed),
+        STAT_DEMOTIONS.load(Ordering::Relaxed),
+    )
+}
+
+/// Effective page-cache cap (dynamic: half of managed RAM, min 32MB).
+/// Exposed for the meminfo observability line.
+pub fn page_cache_cap_pages() -> usize {
+    max_cached_pages()
 }
 
 /// Resolve a MAP_SHARED file-mapping fault to the page-cache frame for

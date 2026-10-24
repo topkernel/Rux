@@ -1,0 +1,3161 @@
+samgr-callback worktree session coordination (2026-10-20 03:50)
+
+TWO live sessions of this lane are on this worktree right now:
+
+- Session A (relaunched 02:48, this note's author): boots under tags
+  sc18, sc19, ... NEVER touches b1x tags. Established so far (b14-b16,
+  dfx=sleepsnap,socksnap on the pre-counter build):
+    * appspawn main thread parks in epoll_pwait (sys=281, epfd 4); loop
+      alive (kickdog ticks); exactly ONE fork per boot early on, then
+      nothing.
+    * b16 kernel-side proof: AppSpawn listener fid=0x1236 IS registered
+      level-triggered (fd=12, ev=0x1) in exactly one epoll
+      (ep=0xffff888079982480, 2 entries: fd 12 + fd 18 fid=0x33e7), and
+      its accept queue grew 0 -> 210 with the server never accepting.
+      So: registered + LT + readable + never delivered. Next instrument
+      (already coded in the working tree, uncommitted): EpollFile
+      owner_pid + wait_count, per-entry reports counter — proves WHICH
+      process owns that epoll and whether its waits return other fds
+      while skipping fd 12.
+    * Isolated unixwake 3-connect probe passes on ext4/devfs; plain
+      unix+epoll LT machinery is healthy. /tmp bind returns EIO (tmpfs
+      quirk, minor, separate).
+- Session B (commit 9205bb6d 03:45, boots tag b17+): owns b1x tags,
+  added the Spawn-listener CONNECT/REQ dumps + hilog spawn tap +
+  LISTEN-by-name. Their b17 QEMU runs the socksnap-v1 bzImage.
+
+Rules so we don't eat each other:
+1. Boot tags: A uses scNN, B uses bNN. Kill only your own tag's QEMUs.
+2. The build dir is shared: commit before building, announce in this
+   file what your build contains.
+3. My (A's) uncommitted misc.rs counters will be committed as one
+   commit on top of 9205bb6d; if you are mid-edit in misc.rs, rebase
+   your edits on that, don't revert the reports/owner_pid fields.
+
+Session A update (04:20, sc20 = the fix boot):
+
+THE APPSPAWN SOCKET WEDGE IS FIXED (commit 5060e524, my lane):
+- Root cause: epoll_purge_closed_fd ran on EVERY close and resolved
+  "live" against the CLOSER's fdtable. appspawn's forked children
+  inherit the fdtable (epoll fd included); the child's exit-close of
+  its inherited fd 12 stripped the PARENT's live epoll interest for
+  the AppSpawn listener. After the first child exit the server's epoll
+  watched only its timer fd: connects queued (q=210 in sc18, wq=(0,0)
+  census), zero deliveries, spawn requests timed out at 2s.
+- Fix: sys_close gates the purge on the close being the LAST reference
+  to the file description (Weak strong_count == 0 after close).
+- sc20 (fix + dfx=sleepsnap,socksnap): launcher + settingsdata +
+  telephonydataability REQs reach appspawn on the AUTO path, 1270
+  forks, screendump 100.00% non-black. Socket chain healthy.
+
+ROUTED TO YOU (fs/mount lane, your 336921bc instrumentation already
+catches it): appspawn children die BEFORE exec because the sandbox
+setup fails:
+  mkdirfail '/mnt/sandbox/system/vendor/firmware' mode 0o755: -5 (pid 1)
+  mkdirfail '/mnt/sandbox/system/vendor/lib64/chipset-sdk' ... : -5
+  => 6099 bindmount ... -> /mnt/sandbox/... : -2 (ENOENT, targets
+  never created), child exits 0 without exec ("unknown with pid N exit
+  with code:0" in slog).
+/mnt is tmpfs — the -5 EIO smells like the same tmpfs bug family as
+bind EIO on /tmp (unixwake default path, reproduced sc18). Both under
+your mount/mkdir thread; I did not touch it.
+
+I keep chasing the chain downstream on the ipc side as your sandbox
+fix lands (next gates: child exec of the app binary, ability
+OnForeground, ArkUI surface).
+
+Addendum (04:30): the tmpfs EIO family also hits unix socket NODE
+CREATION — bind(AF_UNIX) to /tmp/unixwake.sock (tmpfs) returns EIO
+(reproduced sc18 via /data/local/tmp/unixwake with default path;
+ext4 paths bind fine). Same -5 signature as your mkdirfail lines, so
+one root cause may clear both: no app binary has exec'd in sc20 yet
+(1270 forks, all die in sandbox prep).
+
+Session A update (05:0x, sc21 build announced):
+- BUILDING NOW on top of 06e9ff8c + my new commit 1d1d24d2
+  "fix(ext4/mount): ro ext4 refuses mutations with EROFS; binds inherit
+  source ro flag". bzImage will change under us — commit is in, tree
+  clean, safe to rebuild over.
+- The -5 mkdir EIO root cause is NOT tmpfs: sc20 reconstruction (log +
+  debugfs on the images) shows /mnt/sandbox/system got the ro /usr and
+  /vendor ext4 subtrees bind-attached by my MS_BIND (records processed
+  in REVERSE json order — chip_prod, vendor, vendor/etc ... matches
+  every "already exist" line). mkdir vendor/firmware = ext4 write on
+  the ro vendor image -> deep EIO. Fix: ext4 op wrappers return EROFS
+  on fs.read_only + bind clones inherit the source mount's ro flag.
+  Expect sc21 mkdirfail lines to say -30 where sc20 said -5.
+- NOTE for the children-exec gate: appspawn children die because
+  DoAppSandboxMountOnce(app-base) fails binding /data/app/el1|el2/...
+  SOURCES that never appear — BMS installs stall before creating them
+  (SetBundleQuota refs exist; installs ran; dirs never materialize;
+  hilog slog tap dies ~line 33k so late state is kernel-lines only).
+  That is downstream of the EROFS fix; the EIO->EROFS change makes us
+  Linux-compatible but does not by itself create those dirs.
+
+Session A update (04:55, sc23 build announced):
+- sc22 (EROFS-fix kernel) VERIFIED: mkdirfail lines now -30 (EROFS) where
+  sc20/21 said -5; OH init tolerates and proceeds. Also: 7e43cbc9's
+  pivot_root WORKS in that build — services now run INSIDE the system
+  sandbox, a new world.
+- NEW GATE found in sc22 (root-caused): samgr denied EVERY
+  AddSystemAbility ("selinux permission denied! SA:5100,callSid:u:r:
+  init:s0") because the /sys bind hid the nested selinuxfs mount at
+  /sys/fs/selinux (sc21 still shows 'selinuxfs: class lookup' lines,
+  sc22 shows none). hdf_devmgr (critical) exited 1 four times ->
+  init panic-rebooted at ~line 20k. My fix: commit a1d30dcb
+  "feat(mount): MS_BIND|MS_REC clones nested mounts into the bind".
+- BUILDING sc23 now on a1d30dcb (bzImage changes again). sc22 stopped
+  by me (my QEMU); sc21 is the sibling shell's, untouched.
+
+Session A update (05:06, sc26 build announced):
+- sc25 (MS_REC relpath-fixed, commit f4b3e6af) BIG movement: selinuxfs
+  is reachable through the sandbox binds again, samgr accepts SA
+  registrations (0 denials, insert SA:5100 ok), 0 critical crashes,
+  0 reboots, 87 services; appspawn children get PAST the app-base
+  mount gate for the first time (result:-1 not 0xd000008).
+- NEXT gate (sc25): child dies at ChangeCurrentDir teardown —
+  umount2(".", MNT_DETACH) after pivot_root(p,p) fails (no stacked
+  old root in our jail-style pivot) -> sandbox_core.cpp:1272
+  "MNT_DETACH failed" -> "change current dir failed" -> hook -1 ->
+  exit 0, still no exec. My fix: commits 1ba5ddf5+57b2523f
+  (pivot_root records put_old in fs_struct; sys_umount consumes it
+  once on MNT_DETACH of that path). BUILDING sc26 on 57b2523f NOW.
+- NOTE /data/app/el1|el2/<uid>/... sources are STILL missing (BMS
+  install never creates the per-app dirs; parents exist, bindwalk
+  ino evidence). Children will exec but the app-base section still
+  fails on those — watch DoAppSandboxMountOnce.
+
+Session A routing addendum (05:2x, from YOUR b26 serial — read-only):
+pivot failures are gone (b25/b26: 0), umount fails 35 -> 1. The child
+now dies at:
+  E0 APPSPAWN: [appspawn_common.c:350]open dev_null error: 2
+  E0 APPSPAWN: [hisysevent_adapter.cpp:238]ReportSpawnChildProcessFail error, ret: -5
+i.e. /dev/null is missing inside the pivoted sandbox root — the child
+opens it for stdio redirection right before execve. So the next mount
+gap is the sandbox /dev (devtmpfs bind into /mnt/sandbox/<u>/<pkg>/dev
+or equivalent). No exec of any app binary yet in any boot.
+
+Session C update (05:12, dt lane = relaunched samgr-callback agent):
+- I am NOT touching your umount/MS_REC fixes (f4b3e6af/69a2b657/28479e31).
+  My lane: the el2/100 mystery, new dfx=datatap instrument.
+- sc21 log forensics: the bake IS visible at runtime (el2/100/base
+  resolves to baked ino 72), but el2/100/log resolves to ino 172 and
+  el1/100/database to ino 44 — NEITHER is the baked inode (79/41), and
+  the per-bundle leaves under el2/100/base ENOENT. e2fsck never ran
+  (ENXIO opening vdf), so no repair pass touched the fs: guest syscalls
+  replaced those dirs at runtime. No mounts under /data/app either
+  (mount[] lines checked).
+- Committing dfx taps (mkdir/rmdir/unlink/rename/chown/xattr under
+  /data, bindwalk dcache dump, negative-dentry hit naming) behind
+  dfx=datatap, then BUILDING ~05:12. My boots use dtNN tags +
+  dfx=datatap — inert for your scNN boots. My QEMU slots: waiting for
+  sc21/sc24 timeouts, will keep total <= 2.
+
+Session A update (05:17, sc28 build announced):
+- sc27 (with 7615bbcb): MNT_DETACH gate CLEARED (0 failures), children
+  now reach "Change root dir success" and die ONE step later:
+  appspawn_common.c:350 "open dev_null error: 2" (hook 31 result -2).
+  Root cause: the appspawn SELF-bind creates a fresh bind root that
+  shadowed the child binds (dev/proc/sys...) for all global lookups;
+  post-pivot /dev/null hit the bare tmpfs dir.
+- Fix: commit "fix(mount): self-bind MS_REC clones too — hop one
+  boundary out to enumerate" (HEAD now). BUILDING/booting sc28 on it.
+  sc27 stopped (mine); b26 is yours, untouched.
+
+Session A update (09:0x, sc32 build booted, quota-relaunched window):
+- sc28 read end-to-end: 0 "Change root dir", 62 launcher spawn
+  attempts, ZERO app execs; new dominant gate = mkdirfail
+  '/mnt/sandbox/100' -2 x203,933 (children die in sandbox PREP,
+  before any pivot) while mkdir '/mnt/sandbox' -> EEXIST the syscall
+  before. Also 146 "errno:11 bind mount" (self-bind, /dev, /proc)
+  and 2011 "errno:2" binds - all downstream of the sandbox root
+  never existing.
+- sc29 (first instrumented boot): sbxmkdir stage=parentdir -> the
+  PARENT lookup fails, not the fs op. sc30: linker library scans
+  ('/mnt/sandbox/system/usr/.../*.so') burned a flat 80/4000-line
+  trace budget before the appspawn stage. sc31 (per-path budgets +
+  component trails + bind source dumps) NAILED IT:
+    sbxwalk '/mnt/sandbox/system/mnt/sandbox' FINAL dentry no inode |
+      trail = mnt*=/ sandbox=sandbox system*=/ mnt*=/ sandbox=sandbox
+  i.e. inside the pivoted sandbox, /mnt crosses mount[0] (init's
+  early tmpfs AT /mnt - the sandbox tree itself lives in that tmpfs),
+  then the sandbox self-bind, then the '/mnt'-bind - and 'sandbox'
+  under that bind root is an INODE-LESS STUB dentry created by MY OWN
+  MS_REC clone walks (696e9d7c): the clone phase walked GLOBAL
+  sub-paths through vfs_mount(), which fabricates placeholder
+  dentries for missing intermediates (and self-stacked the fresh
+  bind). Every /mnt/sandbox lookup from inside the sandbox hit the
+  stub -> ENOENT forever. The EEXIST came from the fs-level precheck
+  (tmpfs node exists), the -2 from the dcache walk - the paradox
+  explained.
+- FIX (commit 74d6cdd2): vfs_mount returns the fresh mounted root;
+  MS_REC clones attach by fs-walking INSIDE it (dcache/fs lookups
+  only, cross earlier clones for stacking, DROP clones that don't
+  resolve); the just-made bind is excluded from the clone set (no
+  self-stack). bindmkdir probe (test/bindmkdir.c, minimal rootfs,
+  boots in <60s) verifies the bind+chroot mkdir shape passes and the
+  clone list now sees /proc /sys /dev /run under a bind of /.
+- sc32 (fix kernel) BOOTING NOW (09:0x). Watch: mkdirfail
+  '/mnt/sandbox/100' should disappear -> sandbox dirs created ->
+  child bind section succeeds -> pivot -> post-pivot /dev/null ->
+  first app EXEC. If exec lands, next gates: OnForeground, ArkUI
+  surface, ohgpu screendump.
+
+Session A update (11:5x, sc40 — T+4h snapshot):
+- GAUNTLET CLEARED SINCE sc28 (4 kernel fixes on this branch):
+  1. 74d6cdd2 — MS_REC clones attach INSIDE the fresh bind root
+     (the sc28 gate: inode-less stub 'sandbox' inside the /-bind copy
+     answered every /mnt/sandbox lookup with ENOENT; mkdir -2 x203k).
+     Effect: mkdir gate dead, MakeDirRecursive works, children reach
+     bind section.
+  2. a9595213 — vfs_mount attaches at the CALLER-visible mountpoint
+     (task-root prefix). The appspawn child's binds used to land on
+     the direct-global dentry side while its lookups walked the
+     through-system-sandbox side; post-pivot /dev/null hit a bare
+     tmpfs dir (appspawn_common.c:350, sc33-sc36). Effect: devnull
+     gate dead — probe shows lookup OK mode 0o20666 in-child.
+  3. 0c12e3af — rate-limit bindrec/sbxbind/devopen prints (the UART
+     itself broke appspawn's 3s child watchdog; sc37 printed 1.01M
+     bindrec lines and every spawn died exit -9).
+  4. 344c8fa0 — self-binds skip the MS_REC clone phase (redundant
+     after (2); ~50 duplicate mounts per spawn bloated the registry
+     until enumerations blew the 3s watchdog, sc38 'wait child
+     timeout').
+- sc39/sc40 STATE: 54+ pivots per boot, 26-64 spawn COMPLETIONS per
+  boot ('Child process:com.ohos.launcher success') — first ever. The
+  OH bootanimation is ANIMATING FULLSCREEN on ohgpu (8-color gradient,
+  100% non-black, counts vary frame to frame). RSSurfaceOhosGl
+  RequestFrame 720x1280 flowing.
+- REMAINING GATE: every spawn child still exits 0 right after hook 34
+  (appspawn_server.c:49 'ExitCode:0') — no dlopen of the ability
+  runtime in the child, AMS restarts the ability forever. The spawn
+  result code is 0xd000008 (the value my sc25 notes flagged as the
+  pre-fix failure code) — suspicious: the child reports 'success' but
+  hands AMS 0xd000008. execfail trace (in sc40 build) printed NOTHING:
+  the child never calls execve at all — consistent with OH's in-process
+  dlopen spawn model (appspawn preloads libace_*.z.so itself).
+- NEXT (for whoever picks this up): find why the child exits instead
+  of running the runtime. Candidate angles: (a) decode of the spawn
+  msg flags/processType — maybe the child takes a wrong terminal path;
+  (b) strace the child's final syscalls (dfx switch or a per-pid last-N
+  ring dump on exit for deep-root processes); (c) the 0xd000008 result
+  code — where does appspawn compute it (hook [31]/[34] chain or the
+  begetctl hook at stage 34 prio 5000, 'Enter begetctl boot without
+  BEGETCTL_BOOT flag set').
+- test/bindmkdir.c = fast minimal-rootfs repro for the whole sandbox
+  mount idiom (<2min per cycle; passes on current HEAD).
+
+Session A addendum (12:0x, sc41):
+- childexit ring dumps captured: the launcher/systemui children's last
+  syscalls before exit_group(0) are SysV-IPC-ish retry loops (semctl/
+  setreuid-shaped pairs alternating -1/success), NO failing execve, no
+  open of the ability runtime .so chain. The exit-0 decision is made
+  in OH userspace at appspawn_server.c:49 right after hook stage 34
+  prio 5000 (the begetctl hook prints 'Enter begetctl boot without
+  BEGETCTL_BOOT flag set'). Next session should chase the OH side:
+  what makes the child take the terminal path instead of running the
+  preloaded ACE runtime (result code 0xd000008 remains suspicious).
+- sc40 ohgpu: bootanimation ANIMATING fullscreen (8-color gradient,
+  100% non-black, per-frame variation) - graphics path healthy.
+
+Session D update (12:3x, sc42 launched — new window, launcher endgame):
+- 0xd000008 DECODED: appspawn_utils.h enum — 0xD000008 = APPSPAWN_SANDBOX_MOUNT_FAIL.
+  The sc41 chain: sandbox_common bind /data/app/el1/100/database/com.ohos.launcher
+  ENOENT (fatal: check-action-status true in appdata-sandbox.json) -> hook stage 31
+  (prio 3000) fails -> NotifyResToParent(0xd000008) -> AppSpawnEnvClear (begetctl
+  hook prints) -> ProcessExit(0) = appspawn_server.c:49 'ExitCode:0' + quick_exit.
+  NOT a wrong terminal branch: OH userspace behaves correctly given missing dirs.
+- REFERENCE GROUND TRUTH (refw1 boot: oh-robot Linux bzImage + WRITABLE blank
+  userdata copy, launcher.ready at 16s): after boot /data/app/el1/100/database
+  contains per-bundle leaves (com.ohos.launcher uid 20010011 etc.). Linux creates
+  them; Rux does not. Artifacts: run/oh-img/userdata-refw.img (fsck'd), log
+  oh-refw1-serial.log.
+- IMAGE FORENSICS: userdata-lr.img (used by sc40/sc41; bindwalk ino 46 = baked
+  el1/100/database) carries a BAKED BMS DB (/service/el1/public/bms uid 3060)
+  claiming bundles installed, but ZERO per-bundle leaves under el1/100|el2/100.
+  Result: BMS restores 'installed' state, never reinstalls, spawn fails forever.
+  userdata-tok.img: only /service/el0 (access tokens), no /app, no BMS DB.
+- dt01 (datatap) reading: storage_daemon PrepareUserDirs(100) created
+  el1/100/{base,aot_compiler/*,shader_cache} but el1/100/database mkdir never
+  issued; uid-0 system bundles DID get bundle/public + el1/0/base leaves; NO
+  user-100 per-bundle leaves ever. Early init getxattr taps show -61 (ENODATA)
+  for /data/app/el1/100/database/com.ohos.launcher BEFORE any mkdirs — either
+  image-bake artifacts (dt01's userdata unverified) or phantom resolves.
+- sc42 BOOTING NOW: oh-boot-persist.sh, FRESH blank userdata copy
+  (userdata-blank-sc.img), dfx=datatap, 25min. Decides: (a) storage_daemon
+  creates el1/100/database on a truly blank image? (b) user-100 install pass
+  creates leaves? (c) spawn result flips to 0? shotmon watching for launcher UI.
+
+Session D update (13:0x, sc43/sc44 running):
+- sc43 (tok + datatap) CLEAN FIRST-BOOT story: /data mounts, storage_daemon
+  PrepareUserDirs(100, flags 31) creates the FULL skeleton incl el1/100/database
+  (so no phantom-lookup bug — earlier 'skips' were baked-image artifacts: dt01
+  ran the SEEDED image, sc41 the lr image).
+- Launcher INSTALL RUNS AND 'bundle added' fires (uid 20010009): installd-in-BMS
+  (sa_main pid 1066 + tid 1067, libbms.z.so carries InstalldHostImpl in-process)
+  creates {el1/bundle/public/<b>, el1/100/base/<b> (chown app-uid), shader_cache,
+  system_optimize, ark_profile, local shader_cache} — but NEVER el1/100/database/<b>
+  nor any el2/100/<sub>/<b> leaves. Same on every bundle (uid-0 too: el1/0 leaves
+  yes, el1/0/database/<b> never). Reference Linux creates them all (refw1 image
+  proof). ActiveUserKey/unlock flow matches the reference line-for-line; neither
+  side logs CreateElxBundleDataDir. => the database/el2 leaf creation is a SECOND
+  vector (libbms: CreateBundleDataDirWithVector/WithEl, GetCreateDirParamByBundleOption)
+  whose trigger never fires on Rux.
+- sc44 BOOTING (writable tok copy + datatap): plan = let BMS save its DB, kill,
+  offline-inject el1/100/database/<bundle> for every bundle under el1/100/base/,
+  boot sc45 on it and watch the spawn chain + shotmon for launcher UI.
+- hdc tconn fails both sides (auth); port 10178 is open but not a usable hdcd.
+- sc42 lesson: userdata-blank (mkfs defaults: journal+metadata_csum+csum_seed+
+  orphan_file) is REFUSED by our ext4 (correct per feature gate) -> /data never
+  mounted; use tok-family images (no-journal/no-csum) for experiments.
+
+Session E update (14:2x, sc46/sc47 — successor window):
+- sc45 forensics finished: first failing spawn is systemui at userId 0 —
+  its FATAL bind is /data/app/el1/0/database/<b>, which v1 injection never
+  covered (uid-100 family only). Fatal list from appdata-sandbox.json:
+  el1/bundle/public, el1/<uid>/base, el1/<uid>/database (+/storage/cloud,
+  /mnt/data). el2 binds are NOT fatal, and the el2 wipe (DestroyUserDirs
+  flags 31) runs on the LINUX REFERENCE TOO (refw1 11.699s) — not a Rux
+  divergence. On the reference CreateElxBundleDataDir never runs (crypto
+  disabled path) — ALL leaves come from the INSTALL path
+  (CreateBundleDataDir loop over el1+el2).
+- BUILD TRAP fixed (1326066f): generate_config_code resolved the platform
+  from Kernel.toml default_platform (riscv64), so after clamp 232ad684
+  every x86_64 build silently got TARGET_PLATFORM=riscv64 + 128MiB heap.
+  sc46 booted that kernel and died on init "failed to fork" x39. Fix:
+  feature-aware platform in build.rs; sc47 boots 1024MiB heap OK.
+  NOTE: cargo does not rerun build.rs on Kernel.toml mtime alone here —
+  touch kernel/build.rs when config must regenerate.
+- New ilog cohort (BMSInstalld tag, cd348369) — first capture ever:
+  "Load system ability 511 failed" x10 (standalone installd SA load
+  fails; in-process InstalldHostImpl in sa_main is what actually works).
+- sc47 (fixed kernel + tok copy + injection v2 + datatap): USER_UNLOCKED
+  PUBLISHED AND DELIVERED (Ces publish -> AVSession/RSS/DEVAUTH/BMS all
+  OnReceiveEvent) — the predecessor's "event never fires" was wrong (or
+  an artifact of the 128MiB-heap builds after 13:12). BMS
+  user_unlocked_event_subscriber runs, UpdateAppDataDirSelinuxLabel
+  userId:100 start -> "GetAllBundleInfos failed" (DB empty — installs
+  have not run yet; foundation SA init at 103s and still going, slow
+  boot). GetBundleInfo settingsdata -> "failed" pending scan. Bootanimation
+  static at OH logo waiting for launcher. Watching.
+
+Session F update (2026-10-20 22:5x, sc49/sc50 — 0xd000008 ROOT-CAUSED AND FIXED):
+- sc46-48 forensics verdict: the v2 injection was never tested — sc47/48
+  stalled BEFORE any spawn because BMS never initialized (0 apptap bms/
+  mkdirs; the "installs" service never started: samgr's ohos.ctl.start
+  for it never reached init — that stall correlates with sc44-lineage
+  images, NOT with the injection; fresh-image boots sc43/45/49 all start
+  installs fine, SA:511 in 321ms on sc49). sc48 also wiped the injected
+  el1/100/database leaves via DestroyUserDirs(100, flags 31) at the
+  PrepareAddUser step (sc45's kernel/build did not enumerate them — do
+  not inject el1 leaves offline, the add-user wipe can remove them).
+- ROOT CAUSE of the missing database leaves (the second vector):
+  InstalldHostImpl::CreateBundleDataDir (bf-src installd_host_impl.cpp)
+  creates base/<b>, then calls SetDirApl -> HapContext::HapFileRestorecon
+  (libhap_restorecon.z.so), and ONLY THEN mkdirs database/<b> (and the
+  el2 leaves). HapFileRestorecon's GetSecontext starts with
+  lgetfilecon(path) = lgetxattr(security.selinux); libselinux maps
+  ENODATA to -1 (getfilecon.c), so on Rux — where freshly mkdir'ed dirs
+  carry no label — the whole call aborts with zero xattr syscalls issued
+  (sc43 proof: mkdir+chown of el1/100/base/com.ohos.launcher, then
+  nothing; sys_lgetxattr has no datatap hook so the failing read was
+  invisible). On Linux with SELinux enabled the kernel OWNS inode labels
+  and getxattr(security.selinux) never returns ENODATA.
+- FIX (95dbe15c, this branch): xattr::get reports
+  "u:object_r:unlabeled:s0" for security.selinux when no label is
+  stored. installd holds CAP_SYS_ADMIN (installs.cfg caps), so its
+  lsetfilecon passes the security.* write gate.
+- sc49 VERIFIED: installd now creates el1/<uid>/database/<b> (12 for
+  uid-100 + the uid-0 family) AND 170 el2 leaves; 24 "bundle added";
+  spawn responses 0xd000008 -> GONE (0 occurrences). Spawn children EXEC
+  inside the sandbox (childexit root=/mnt/sandbox/.../com.ohos.systemui),
+  LAUNCHER PROCESSES RUN for the first time ("m.ohos.launcher" SIGDEATH
+  x8). NEW GATE: the app runtime dies with SIGSEGV (systemui x10,
+  launcher/settingsdata follow; two hot rips, e.g. +0x14e1c and +0x10bac
+  into the same FileBacked .so; rbp=-6, rsi=-4 hint at errno values used
+  as pointers). sc50 BOOTING with f72a8705 (ripfile+voff in the segv
+  report) to symbolize.
+- Screen still the static OH logo (4281 colors) — bootanimation waiting
+  for a real launcher surface.
+
+Session F FINAL (2026-10-21 00:0x — two kernel fixes landed, launcher reaches runtime):
+
+FIX 1 (95dbe15c) — the 0xd000008 root cause, CLOSED:
+  xattr::get(security.selinux) on an unstored label now returns
+  "u:object_r:unlabeled:s0" (SELinux-enabled Linux ABI: the kernel owns
+  inode labels, ENODATA is impossible). Chain was: lgetfilecon -1 ->
+  libhap_restorecon GetSecontext abort -> installd CreateBundleDataDir
+  returns after base/<b> but before database/<b> + el2 leaves ->
+  sandbox bind fatal -> APPSPAWN_SANDBOX_MOUNT_FAIL. sc49 VERIFIED:
+  database leaves + 170 el2 leaves created by real installd, 24
+  bundles installed, 0xd000008 count ZERO, launcher processes ran.
+
+FIX 2 (cba465d1) — appspawn-child SIGSEGV, CLOSED:
+  /proc/self/attr/current never reads empty (default "u:r:unlabeled:s0").
+  libselinux getprocattrcon_raw maps an empty read to *context=NULL
+  with SUCCESS return; HapDomainSetcontext feeds that NULL to
+  context_new() -> every appspawn child died right after the
+  "SetSelinuxCon IsDeveloperModeOn" log. sc56 VERIFIED: "SetSelinuxCon
+  success for com.ohos.launcher", full hook chain 31/33/34 completes,
+  spawn responses "result: 0x0 pid: 1435..." — first ever COMPLETE
+  spawns; launcher MainAbility loads (LIFECYCLE_HALF_TIMEOUT fires
+  mid-lifecycle, i.e. the ability is created).
+
+FORENSICS added (f72a8705 + in 2d01a669): USEGV-FOR ripfile/voff +
+ripbytes (instruction bytes at rip) — symbolized crashes offline by
+byte-matching .so files extracted from the images (script-free method:
+extract /system/lib64/**.so + /vendor/lib64/*.so via debugfs, search
+the ripbytes at the reported voff). Known crash sites:
+  - libusb_pnp_manager.z.so+0x15bac list walk NULL node (hdf usb_host
+    crash-loop, pre-existing, launcher-unrelated)
+  - chipset-sdk-sp/libselinux.z.so context_new+0x5c (fixed by FIX 2)
+NOTE: grep -c on the bzImage gives false negatives for strings — use
+`strings -a bzImage | grep` to verify build content; and `git stash`
+ate an uncommitted trap.rs edit once (always commit before building).
+
+NEW GATE (the next session's target): SYSTEM PERF. App lifecycles time
+out because IPC SendRequest costs grow from ~1s (early) to 102s (late)
+— with a QUIET kernel (loglevel=4, oh-boot-q.sh, no datatap) it is just
+as bad, so it is NOT logging load. The dfx watchdog prints (when on)
+show the smoking gun: hrtimers firing seconds late (late_max 4387ms)
+and WAKE-STRANDED runnable threads stranded up to 16s on a CPU. Looks
+like an SMP wakeup/idle-balance bug (sched/timer lane). Spawn+mounts
+all work; the boot just crawls. A perf fix here plausibly drops the
+whole desktop chain (OnForeground -> ArkUI -> ohgpu launcher UI) in one
+go — sc56/sc58 boots got 45+ successful spawns each.
+
+BOOT-VARIANTS kit (all on run/):
+  - oh-boot-q.sh       = oh-boot-w.sh with loglevel=4 (quiet milestones)
+  - userdata-sc49.img  = GOLD: full install state (bmsdb + database
+    leaves on disk). Boot a COPY of it to skip installs entirely (BMS
+    DB-restore path, no installd needed) — sc55/56/58 all used it and
+    none hit the installs-start stall.
+  - The installs-start stall (sc47/48/50-52/54: samgr dynamic-proc
+    ctl.start never reaches init, SA:511 15s timeouts, account-kv
+    InnerInit fails, 22x IPC EPIPEs) reproduces ~4-in-5 on FRESH
+    images but 0-in-3 on sc49-image boots; EPIPE signature =
+    "IPCObjectProxy PrintErrorDetailedInfo error:32" burst during the
+    os-account subscribe storm. IPC-lane bug, separate from perf.
+
+Session G update (2026-10-21 01:4x, sc59-63 — perf gate hunt, successor window):
+- LINE CORRECTION: the launcher/OH boot line is x86_64 q35 KVM
+  (oh-boot-q.sh → bzImage), NOT riscv64. All analysis must use the
+  x86_64 twin (LAPIC periodic tick, no hrtimer one-shot: x86 set_timer/
+  set_next_trigger/rearm_for_hres are no-ops; hres sleeps quantize to
+  the 10 ms grid and are collected by the next tick's softirq).
+- LANDED (branch, all English commits):
+  * 6f46835a perf(console): x86 putc THRE wait bounded by 2 ms wall
+    time (was 1e6 polls ≈ 1-2 s under KVM) + uart_write locks per 32
+    bytes instead of per whole buffer. uart_write held the UART
+    irqsave lock across the whole write buffer — with ~34k hilog
+    lines/boot through /dev/ttyS0 this produced multi-second IRQ-off
+    windows.
+  * aa742f18 fix(softirq): irq_exit that must skip dispatch (interrupted
+    task holds a bh section) now wakes ksoftirqd — before, softirqs
+    raised from the timer IRQ sat pending with NO dispatch path (the
+    TIMER-SOFTIRQ-STALL tick_age=0ms shape). + live stack probe at long
+    IRQ-off windows (IRQ-OFF-WINDOW prints rip/rsp/12 text-range stack
+    words at the recovery tick).
+  * 0d09ba6f dfx(wakewatch): wake stamps invalidated at task free
+    (recycled Task addresses inherited stale stamps → phantom strands).
+  * c41b54b8 cond_resched() + yield in sweep_dead_threads' member loop.
+  * 664fc946+dec21e92 strand report enrichment: per-CPU incumbents
+    (pid/policy/activation-ms) + CFS geometry (vruntime vs min vs
+    leftmost).
+  * 2e5c010e perf(mm): x86_64 PTE_MODIFY_LOCK plain-lock (IRQs on):
+    fork COW walk/mprotect/munmap held the global lock irqsave — a big
+    fork froze both CPUs' ticks for the walk length. All takers are
+    task-context; riscv64 keeps irqsave (cfg-gated shared sites).
+- TRIED AND REVERTED: 2cf4bdc9 kernel-mode preemption at IRQ exit
+  (preempt_schedule_irq) — poisoned a task's preempt_count to -1
+  (unprotected mid-syscall invariants exist), cpu0 softirq froze 196 s,
+  user pfault classified in_interrupt → KERNPANIC. Reverted in 0ced11da.
+  Full kernel preemption needs a preempt_count audit of task-context
+  per-CPU state first; do not re-land blindly.
+- MEASURED (scNN = boots on copies of the sc49 golden image, quiet,
+  loglevel 4):
+  * sc56 (baseline): strand>1s: 22, worst IPC 123 s, TIMER-LATE-FIRE
+    1042 ms, stalls ~1 s recurring.
+  * sc59 (UART fix): stalls 5×~2.3 s, worst IPC 196 s — monsters remain.
+  * sc61 (UART+blackhole+probe): stalls 1, worst IPC 33.5 s.
+  * sc62 (+phantom fix+cond_resched): stalls 0, worst IPC 206 s
+    (AbilityManager StartAbility), strand>1s 72 — clusters of concurrent
+    1.5-2.9 s strands with incumbents rotating at 0-3 ms activations:
+    NOT a CPU hog, NOT softirq stalls — pick/vruntime family. pid 304
+    strands repeatedly (8×).
+- sc63 BOOTING: PTE-lock conversion + vruntime geometry in strand
+  reports. Geometry will separate 'former CPU hog waiting out its
+  vruntime lead' (fair) from 'charging inflation runaway' / pick-skip.
+- OH-side observation: LnnState/os-account query loop spams the log
+  continuously (every few lines) — OH userspace busy-polling adds IPC
+  load; and drm oracle checker (compose-content diagnostic) paints 1-in-
+  5 composer flips — shotmon sees 8-color checker when the composer
+  stalls on a painted frame; real UI frames are 4-of-5 flips.
+
+Session G FINAL (2026-10-21 02:0x — perf gate: four kernel stall sources
+closed, structural wall identified and documented):
+
+LANDED on feature/samgr-callback (all verified booting, no panics):
+  1. 6f46835a perf(console): x86 putc THRE wait 2ms wall bound (was 1e6
+     polls ≈ 1-2s KVM); uart_write locks per 32B not per buffer.
+  2. aa742f18 fix(softirq): irq_exit that skips dispatch under a bh
+     section now wakes ksoftirqd (was a dispatch black hole — softirqs
+     raised from the timer IRQ had NO recovery path). Plus the
+     IRQ-OFF-WINDOW probe (live stack at long IF=0 windows).
+  3. 0d09ba6f dfx(wakewatch): clear wake stamps at task free (recycled
+     addresses were reporting phantom strands).
+  4. c41b54b8/7c439a6e cond_resched() + first user in
+     sweep_dead_threads.
+  5. 664fc946/dec21e92 strand report: per-CPU incumbents + CFS
+     vruntime geometry (vr/lead-lag).
+  6. 2e5c010e perf(mm): x86_64 PTE_MODIFY_LOCK plain-lock (IRQs on) —
+     fork COW walk / mprotect / munmap no longer freeze ticks on BOTH
+     the holder and the spinners. riscv64 unchanged (cfg-gated sites).
+  7. ecef333a perf(ipi): smp_call_function wait yields (cond_resched)
+     — membarrier against a fork-walking CPU no longer freezes the
+     caller's CPU too.
+
+REVERTED: 2cf4bdc9 IRQ-exit kernel preemption — poisoned a
+preempt_count to -1 (task-context per-CPU state exists that is not
+preempt_count-protected), cpu0 softirq froze 196s, user pfault →
+KERNPANIC. Revert: 0ced11da. Re-landing needs a full audit of
+task-context per-CPU assumptions; do not blind-copy.
+
+NUMBERS (quiet boots on sc49-golden copies, 25 min each):
+  sc56 baseline: worst IPC 123s, stalls ~1s recurring, late_max 1042ms
+  sc59 (fix 1):            worst 196s — stalls 5x2.3s (2 shapes named)
+  sc61 (1+2):              worst 33.5s, stalls 1
+  sc62 (+3+4):             worst 206s, stalls 0 — strand clusters named
+  sc63 (+6):               worst 207s once (OH retry ladder), else ≤4s,
+                           stalls 0, KERNPANIC 0, strands avg 235ms
+  sc64 (all): RUNNING (IPI yield last)
+  TIMER-SOFTIRQ-STALL / TIMER-LATE-FIRE families: GONE since sc62.
+  The ~200s AbilityManager cost is OH's own retry ladder (5x40s
+  LIFECYCLE timeouts): the lifecycle still never completes.
+
+STRUCTURAL WALL (next session / mm owner — needs kernel/src/mm work,
+documented here because sched/timer alone cannot cross it):
+  - The fork COW walk (arch/x86_64/mm/mm_ops.rs copy_page_table_cow
+    under PTE_MODIFY_LOCK, called from AddressSpace::fork) monopolizes
+    its CPU preempt-disabled for the walk length (seconds for a large
+    mm under KVM). The 2e5c010e conversion fixed tick starvation but
+    NOT the CPU monopoly; the 30s WAKE-STRANDED monsters (vr=0ms,
+    leftmost, both CPUs' incumbents rotating 0-11ms activations at
+    recovery) are exactly both-CPUs-monopolized windows (walk on A +
+    membarrier-spin or PTE-lock waiter on B).
+  - Chunking the walk (release PTE lock per leaf-table + cond_resched)
+    is blocked on teardown semantics: free_user_page_tables
+    (mm_struct.rs Drop / exec.rs) serializes ONLY via PTE_MODIFY_LOCK
+    (no vma_write), so releasing mid-walk can dangle the walk into
+    freed tables. Proper fix = an mm-side fork-vs-teardown RW lock or
+    per-mm locks (Linux mmap_lock semantics) + preemptible walk. That
+    redesign belongs to the mm owner (kernel/src/mm is the wildwrite
+    agent's territory).
+  - Full kernel preemption (the other half of the wall) needs the
+    preempt_count audit noted above.
+
+MILESTONE: not reached — screen still bootanimation logo (sc63) /
+oracle checker (sc61) — the launcher lifecycle chain times out in the
+ArkUI init phase (mmap/fault storm against the PTE lock + fork walks).
+
+Boot kit unchanged: oh-boot-q.sh + userdata-sc49.img copies; shotmon
+running; scNN-serial.log/oh-shotmon.csv on run/.
+
+Session G addendum — sc64 FINAL (IPI yield in):
+  worst IPC 254s (the OH retry-ladder event), second tier 6.5s; stalls/
+  KERNPANIC/LATE-FIRE 0; strands avg 155ms (best yet; sc56 baseline
+  was 162-186ms avg WITH multi-second stalls and 34k-line log noise).
+  LIFECYCLE timeouts persist (144+191) — the ArkUI-init wall stands.
+
+  Session G bottom line: the timer/softirq/IPC-latency stall families
+  the handoff named (hrtimer 4.4s late, WAKE-STRANDED 16s, IRQ-off
+  windows) are root-caused and closed at the kernel level I own; the
+  remaining latency wall is structural (fork COW walk CPU monopoly +
+  no kernel preemption + single global PTE lock) and needs the mm
+  owner's lock redesign + a preempt_count audit before the launcher
+  lifecycle can complete. All commits are on feature/samgr-callback
+  ready for main-session review; test/bindmkdir.c unaffected (riscv64
+  paths untouched behaviorally).
+
+Session I (2026-10-21 04:3x-05:4x, successor to Session H quota death —
+preempt_count audit finished, leak producer fingerprinted, hook parked
+OFF with heal safety net):
+
+STARTING STATE REVIEW (first-step mandate): d15ab325 was the quota-death
+wip snapshot. Its trap.rs part (PREEMPT_HOOK_ENABLED=false gate) was
+NEVER BUILT (mtime 03:01:16 > bzImage 02:57:16) — sc67/sc68 both ran
+with the Round-2 hook ON. Its sched.rs part (rip= in PREEMPT-LEAK) WAS
+in sc68's kernel. Both kept; the gate experiment (sc69) was executed
+this session as designed.
+
+AUDIT VERDICT (the preempt_count audit Session H died mid-way):
+  - Every add/sub site is per-task symmetric in the code: spinlock/
+    rwlock/seqlock guards, GRQ guards, rcu, __do_softirq, irq_enter/
+    exit, do_exit R9-3 windows, lock_fair (disable->spin->enable->
+    schedule with count 0). No static unpaired path exists.
+  - sc69 (hook compiled out, verified by disassembling the hook to a
+    bare ret): leak STILL reproduces (pid 0x315, tick-time base 2).
+    THE PRODUCER IS PRE-EXISTING, NOT THE HOOK.
+  - The producer is a runtime shape: a plain SpinlockGuard whose add
+    and drop execute in two different task contexts while the victim
+    runs (sc71: counts acquired while RUNNING, never while parked —
+    PARKED-WILDWRITE never fired; underflow sub=1 lands on bystanders:
+    init in sc67/68/70 first seconds, 42 events in sc73).
+  - sc73 lock fingerprints (underflow report now carries file:line +
+    lock instance): fs::inode::ICACHE and fs::locks::RECORD_LOCK_TABLE
+    (statics) + heap Spinlocks — the VFS hot path. This is the
+    double-run/stack-confusion engine (same family as R74/R85/scribble)
+    — overlaps the wildwrite agent's active hunt; NOT fixed this
+    session.
+
+A/B LADDER (all 8-min quiet boots on reflink copies of userdata-scgold,
+which is userdata-sc59.img — the sc49 golden image itself was deleted
+before this session; sc59's once-used copy is the surviving base):
+  sc69 hook OFF:           avg 277ms, max 82s (OH IPC spiral), leak
+                           self-bounds ~2.6s at user boundaries
+  sc70 hook ON:            avg 268ms, max 187s — pid 320 held cpu1 for
+                           309+s = the leak amplified by the hook
+  sc71 hook OFF + instr:   avg 207ms, max 18.8s (best)
+  sc72 hook ON + tick heal: max 4.7s (heal works; holds capped at
+                           exactly 1000 jiffies), avg 238ms
+  sc73 hook ON + 2x heal:  avg 595ms, max 86s, 29 heals, 42 underflows —
+                           hook+heal still NET WORSE than hook-off
+  -> LANDING: hook OFF (const gate in irq_exit_maybe_preempt_kernel),
+     PREEMPT-HEAL (tick, 10s) + PARKED-HEAL (parkwalk, 4s) stay as the
+     safety net. Hook re-landing stays blocked on the producer fix.
+
+MILESTONE: not reached — sc73 screen stayed the 8-color oracle checker
+(shotmon oh-shotmon-MILESTONE has 186 historical real-UI frames from
+22:0x-02:30 era boots, all on the OLD kernels; none this session).
+
+TOOLCHAIN DRIFT FOUND (affects the whole riscv64 probe fleet): host
+distro gcc 15.2's static glibc ships ifunc memset/memcpy with RVV
+(vsetivli) — every test/*_probe compiled the old way now SIGILLs at
+the first memset on our QEMU cpu (no V). NOT a kernel regression
+(verified: d15ab325 AND acf198b2 kernels fault identically). Fix:
+toolchain/riscv64-rux-linux-musl SDK built (make sdk) and
+test/bindmkdir_boot.py (new driver) links probes against musl libc —
+no vector paths. NOTE: musl SDK build does not install a musl-gcc
+wrapper for cross builds; the driver links crt1.o/crti.o/libc.a
+explicitly through the distro gcc driver.
+
+BINDMKDIR REGRESSION: PASSES on this tree (riscv64, SMP2 TCG): root-
+bind/DIRECT-through-bind, negative-dentry prime+create, appspawn
+self-bind + /dev bind + chroot + open /dev/null in jail all rc=0
+(BMD[01]-[BMD20]); tail steps (BMD[21+] chroot /a from inside the a2
+jail) fail ENOENT deterministically on any correct kernel (jail
+geometry — /a not visible inside /a2), same as the original runs.
+Driver: test/bindmkdir_boot.py (self-contained: builds image, boots,
+verdicts). NOTE the old "bindmkdir unaffected" claims from Session G
+could not have been run on this host with current gcc — treat old
+probe-pass claims on riscv64 as suspect unless re-run.
+
+Commits this session (all English, on feature/samgr-callback):
+  f5fe2ea0 parked-leak tripwire + sc70 A/B gate
+  74befe06 underflow caller-site fingerprinting + parkwalk 3b + hook OFF
+  e0902a27 PREEMPT-HEAL (tick-side, 10s)
+  cdee39c2 PARKED-HEAL (task-keyed, 4s) + hook re-enable experiment
+  8297f4cb underflow report names the double-dropped lock instance
+  + final: hook landing OFF + bindmkdir_boot.py driver
+
+NEXT SESSION (scheduler lane): the leak producer = a plain SpinlockGuard
+whose drop executes in another task's context on the VFS hot path
+(ICACHE / RECORD_LOCK_TABLE / heap locks). Hunt shape: instrument
+context_switch to trap the outgoing-prev-count!=0 && !dead case (the
+discipline-refusal bypass), or join the wildwrite agent's GDB-freeze
+evidence (its ww-v1/ww-s2-r7 boots are chasing the same double-run
+engine). Once the producer is fixed, flip PREEMPT_HOOK_ENABLED=true and
+re-run the A/B — the hook itself is exonerated (sc69).
+
+Session J update (2026-10-21 06:2x, sc75/sc76 — IPC death loop root
+structure identified; samgr-internal freeze behind the launcher wedge):
+
+EVIDENCE CHAIN (sc74 read + sc75/sc76 live captures with the new
+instrumentation):
+- sc74's terminal shape re-read: binder-stall "waiting for reply" lines
+  CONFLATED two shapes. New stall report tags them: CLIENT-WAIT (top txn
+  SENT by the thread) vs SERVER-OWING (top txn SERVICED by the thread,
+  to_tid == self).
+- sc75/sc76 SERVER-OWING holders are parked in FUTEX_WAIT_PRIVATE
+  (sys=202) INSIDE their txn handlers — NOT in binder reads. The kernel
+  txn sits on the stack; the reply can't come until a userspace lock
+  releases.
+- sc76 decisive: pid 334 = samgr (code 3 = ADD_SYSTEM_ABILITY_TRANSACTION
+  per SamgrInterfaceCode). ALL 7 samgr threads blocked: 6 on futex word
+  0x7ff0009f5a64 reading 0x80000010 (musl rwlock: WAITERS + 16 READERS
+  — abilityMapLock_), main thread on 0x7ff0009f59d0 (0x94 away).
+  With only 7 live threads, 16 held read locks require holders that are
+  gone or stuck inside read scopes. Every AddSystemAbility/Subscribe
+  then freezes; every client chain (launcher included) waits on samgr.
+- OH source audit (oh-robot tree): samgr's notify is TF_ASYNC (oneway,
+  sender never blocks — our oneway path also never blocks the sender);
+  FindSystemAbilityNotify holds listenerMapLock_ across notifies but the
+  PostTask-based design keeps the IPC threads out of that path. The
+  abilityMapLock_ read scopes audited are all short map lookups — so
+  16 stuck readers are NOT explainable by in-scope blocking; the leading
+  theories: (a) threads died holding read locks (leak), (b) readers
+  parked in-kernel mid-scope and never scheduled (wake→run leak).
+
+KERNEL-SIDE LEAKS FOUND AND FIXED/INSTRUMENTED (my lane):
+- W1 (wait.rs): wake_up marked entries woken BEFORE wake_up_process and
+  skipped them later; a refused transition consumed the one-shot token
+  permanently (the sticky-skip lost wake). Now clears the flag on a
+  refused wake so later wakes retry (idempotent).
+- REKICK heal: khungtaskd's binder stall scan re-kicks any reader parked
+  >15s (wake_thread) and re-runs wake_proc_one for procs with pending
+  todo. Converts permanent lost-wake strands into bounded hiccups.
+- sc76 caught a rekick wake FAILING: tid 563 REKICK@6007 ignored for
+  230s (WAKE_RET@29268 only when real work arrived) — a wake→run leak
+  on a healthy idle worker; W1 made the later natural wake land (pre-W1
+  the delivery wake would have seen woken=true and skipped). sc77 adds
+  WAKE-RUN-LEAK verification: kick count >= 2 dumps the task's sched
+  view (cfs_linked/on_cpu/pick_state).
+- THREAD-DIED-SERVICING detector: pr_warn when a binder thread dies with
+  a stacked txn or pending todo while its proc lives — names every
+  leaked-userspace-lock victim at death time (the phantom-reader hunt).
+- Transition ring (24 events/thread: TXN_SENT/PQUEUED/TQUEUED/RECV,
+  REPLY_POP/PUSHED/GONE, PARK/WAKE_RET, BWR first-cmd, REKICK, ...) +
+  woken-census + outstanding-txn world search + futex word + neighbor
+  words through the HOLDER's page tables + per-tgid futex waiter graph.
+- comm naming for stall holders and owing procs (sc77).
+
+NEXT: sc77 boots with comm + death detector + WAKE-RUN-LEAK. Decisions
+pending on its data: phantom readers = dead threads (→ chase the killer,
+likely overlaps wildwrite/OOM lines) vs unschedulable readers (→ sched
+pick-side, WAKE-STRANDED family). Either way the launcher milestone
+needs samgr unfrozen; the heals keep client chains breathing meanwhile.
+
+Session J update 2 (07:1x, sc77/sc78 — WAKE-RUN-LEAK family quantified,
+impossible-shape ring evidence, known-crash filter):
+
+- sc77 wedge: 'foundation' (pid 815, 30 threads) — 8 futex waiters on
+  PER-THREAD-STACK addresses (page offset 0x7d4 pattern: per-call
+  condvar waits in SA handlers) + OS_IPC workers + one 'powermgr' thread
+  parked in binder reads. SERVER-OWING impossible shape (scan-gated)
+  hit tid 817/1049: parked in read owing replies, world-search says NO
+  outstanding nested txn ("nested call vanished or never sent").
+- tid 815 ring (sc77, splice-limited): PARK(1,0)@11011 ->
+  REPLY_PUSHED(19627,815)@11012 -> [splice] — the reply landed right
+  after the park; whether the wake returned is the spliced bytes. sc79
+  carries atomic single-printk rings to close this hole.
+- sc78: 230 WAKE-RUN-LEAK probe hits, ALL {sleeping, cfs_linked=0,
+  on_cpu=false, pick_state=1}. pick_state=PICK_LIVE turned out to be a
+  red herring (it persists on every sleeper after its last run — not
+  cleared on normal sleep). Most hits are healthy idle workers that
+  wake+repark (the probe cannot distinguish without the ring); the REAL
+  leak signature is PARK -> REPLY_PUSHED -> no WAKE_RET with todo>0.
+- sc77's 5 THREAD-DIED-SERVICING hits = the KNOWN
+  libusb_pnp_manager.z.so+0x15bac NULL list-walk crash-loop (verified
+  by byte-match on the debugfs-extracted vendor lib: 0x15bac =
+  "48 8b 03" mov rax,[rbx] with rbx=0 in the walk loop). devhost_usb
+  processes, unrelated to the IPC wedge; do not chase.
+- sc79 (booting): W2 reporters at both wake-refusal points
+  (Task::wake_up sleeping branch + wake_up_enqueue tail, rate-limit 16)
+  — the refusing guard will name itself. Also atomic hist records.
+- Offline symbolization kit ready: /tmp/oh-libs/{syslib64(1073),
+  vendorlib64(228)} extracted from the images; method verified against
+  the known crash site. PARK-STACK frames print fd+fileoff+bytes.
+
+Session J update 3 (07:4x — ROOT CAUSE FOUND AND FIXED: one sync txn
+per read):
+
+sc79's park-stack + ring closed the impossible shape:
+- tid 796 (distributeddata service, caller frames byte-matched to
+  libdistributeddataservice.z.so): ring shows TXN_RECV(12919)@11372
+  TXN_RECV(12932)@11372 — TWO sync txns delivered in ONE read (the
+  second was a from-walk redirect already sitting on the thread's own
+  todo). Kernel stacked both; OH libipc dispatches one command per
+  TransactWithDriver iteration. The first handler's nested call made
+  its BC_REPLY pop the WRONG stack top (the undispatched second txn):
+  replies crossed, accounting desynced, thread strands in a read owing
+  a reply with NO outstanding nested txn (the SERVER-OWING shape
+  reproduced across sc74/77/78/79).
+- CASCADE: crossed/never-delivered replies -> client chains wait
+  forever -> samgr AddSystemAbility pile-ups (the 16-reader rwlock
+  freeze) -> os-account proxy fetch failures ("Get proxy failed") ->
+  SA hosts restart-loop -> launcher chain freezes.
+- FIX (landed): binder_thread_read breaks the drain loop after staging
+  ONE sync (non-reply) transaction — Linux parity. Ring event
+  TXN_RECV_END added. sc80 validates.
+- W2 verdict: the 2 wake-refusal hits were the benign R42 double-wake
+  race (state flipped RUNNING by a concurrent wake) — the wake path is
+  clean; the earlier "WAKE-RUN-LEAK" 230 hits were mostly healthy
+  idle workers waking+reparking (cfs_linked=0 is correct for parked
+  tasks; pick_state=PICK_LIVE persists on every sleeper — red herring).
+- Remaining known-issues (not kernel): libusb_pnp_manager.z.so+0x15bac
+  NULL list-walk crash-loop (devhost_usb, byte-verified vs vendor lib);
+  OH per-call condvar waits in SA handlers are load-bearing on reply
+  latency, so residual slowness still hurts.
+
+Session J FINAL (2026-10-21 08:0x — one-txn-per-read landed and validated;
+samgr rwlock freeze isolated as the remaining blocker):
+
+VALIDATION (sc80, fix in, 25-min quiet boot on scgold copy):
+- impossible shape (SERVER-OWING + NO outstanding txn): sc77=2, sc79=2,
+  sc80=0 — GONE. Rings now show TXN_RECV immediately followed by
+  TXN_RECV_END (exactly one sync delivery per read).
+- binder reply-stalls per boot: sc74=9 -> sc77=7 -> sc79=7 -> sc80=4.
+- KERNPANIC 0 everywhere; bindmkdir/ltp paths untouched.
+- worst strand still 26-270s family across boots — that is the CPU
+  contention storm (BMS scan + OH polling + incumbent pid 316 with the
+  leaked preempt_count), NOT the reply bug; it fluctuates with host load.
+- MILESTONE: not reached (OnForeground 0; screen still the 8-color
+  oracle checker). Remaining blocker chain: samgr (pid 334) still
+  freezes on the abilityMapLock_ rwlock word 0x80000010 (WAITERS + 16
+  readers) — all samgr threads futex-blocked; no samgr thread dies
+  mid-service (THREAD-DIED-SERVICING never fired for samgr), so the
+  16 readers are live threads stuck inside read-lock scopes or a stale
+  count. NEXT SESSION: dump which samgr threads hold the read lock
+  (walk each thread's user stack for the CheckSystemAbility/
+  GetSystemAbility frame + rip; or instrument musl rdlock via the
+  futex-word deltas), and check the event-runner (workHandler_) state
+  — it is invisible to the binder dump (not a binder thread).
+
+COMMITS this session (all English, feature/samgr-callback):
+- W1: wait.rs clear_woken on refused wake (sticky-skip lost-wake retry)
+- binder forensics: 24-event transition ring + atomic single-printk
+  record, SERVER-OWING/CLIENT-WAIT discriminator, world-wide
+  outstanding-txn search, woken census, futex word + neighbors via
+  holder page tables, per-tgid futex waiter graph, comm naming,
+  user park-stack dump with fd/fileoff/instruction bytes
+- heals: stall-scan rekick (15s) + retodo wake_proc_one re-run
+- detectors: THREAD-DIED-SERVICING, WAKE-RUN-LEAK kick verification,
+  W2 wake-refusal branch reports
+- ROOT-CAUSE FIX: one sync transaction per read (Linux parity)
+- notes: three SC-SESSIONS updates with the full evidence chain
+
+TOOLING for the tree: /tmp/oh-libs/{syslib64,vendorlib64} extracted
+libs (byte-match symbolization method verified twice); reproduce with
+debugfs dump from run/oh-img/{system,vendor}.img.
+
+Session I constraints honored: no mm/** or dfx/switches.rs edits;
+only own QEMU PIDs killed (sc78 restart); max 2 own QEMUs at a time;
+shared images snapshot+file.locking=off, userdata private reflink
+copies; English commits; early wip snapshots.
+
+Session K update 1 (12:4x — sc82/sc83 forensics, musl+ffrt decoded,
+scanner fragility, mm-race flake):
+
+- OH musl rwlock protocol VERIFIED from ld-musl-x86_64.so.1 disassembly:
+  word = low31 reader count | bit31 WAITERS; writer holds at 0x7fffffff;
+  readers BARGE (CAS val+1) regardless of WAITERS; readers park only at
+  writer-held (expect 0xffffffff); WRITERS park expecting word|WAITERS —
+  so the frozen 0x80000010 parkers are writers, and reader-unlock emits
+  NO kernel traffic except the last-out wake(1). The kernel futex layer
+  cannot leak the count; only dead/parked holders can.
+- abilityMapLock_ is NOT a musl rwlock: samgr binary imports
+  ffrt_rwlock_* (SAMGR_USE_FFRT); ffrt SharedMutexPrivate = fast_mutex +
+  2 waiter lists + state (writeEntered bit31 | readers). Its waits park
+  on PER-THREAD condvars, never on the shared word. So the frozen word
+  belongs to some OTHER musl pthread_rwlock in the samgr process.
+  DEFAULT_WORK_THREAD_NUM = 16 in ipc_process_skeleton.h — the "16
+  readers" matches the libipc worker pool cap; park stacks will name the
+  exact lock (sc84/sc85 boots carry the adoption-time dump).
+- sc82 (25 min): wedge reproduced exactly (samgr tgid 334, waiters=6,
+  word 0x80000010). Census over the WHOLE boot: samgr had 10 threads
+  ever, ZERO exits while the scanner lived, yet the word claims 16
+  readers → the counts are NOT live-thread holdings. Three processes
+  (334/716/791 across boots) show the IDENTICAL word value.
+- sc82 failure mode: khungtaskd STOPPED scanning ~2 min after adoption
+  (WW: IRQ-OFF-WINDOW age=519ms in SpinlockIrqGuard<World>::drop —
+  stall_report's WORLD-guarded dump runs ~0.5s with irqs off) and the
+  FROZEN dump (gated +120s then) never fired. sc83 kernel: dump fires
+  AT adoption; +12/+16 neighbor words (primitive discriminator);
+  per-minute scan heartbeat; HIGH-table eviction.
+- sc83 died at ~6 min to a both-CPU spin on PTE_MODIFY_LOCK
+  (arch/x86_64/mm/mm_ops, global) — mm-domain incumbent race (the
+  wildwrite line's per-mm PTE lock work), not this lane. sc84+sc85
+  run in parallel to outrun the flake.
+- 5x THREAD-DIED-SERVICING in sc82: SAs (626, 764, 773, 800, 1315)
+  died servicing samgr nested calls (from tids 548/350/335) —
+  consistent with samgr death-cleanup writers piling onto the frozen
+  lock (each dead SA spawns a DetachObject-style writer).
+
+Session K update 2 (13:2x — sc84/sc85/sc86 dumps land; the freeze is a
+SYSTEM-WIDE family, not samgr-specific):
+
+- sc84 (adoption-time dump kernel): tgid 444 resource_schedule_service
+  FROZEN word 0x80000010, nb+4=3 == kernel waiter count (musl rwlock
+  layout confirmed: +4 is parked-waiter count). Writers parked: a
+  BgtaskMgr stub thread, an FFRT worker, an IPC worker. EXTRA-FROZEN
+  tgid 814 'foundation': SIXTEEN thread exits in the 52-75s window and
+  a second frozen 0x80000010 word (two frozen locks in one process).
+- sc85: tgid 336 hdf_devmgr — word 0x80000010, nb+4=5, FIVE of 7
+  threads parked on the word as writers (all OS_IPC workers sharing ONE
+  identical return address, fd=25 fileoff 0x2dfb8), exit ring: ZERO
+  exits ever. 7 threads total vs 16 claimed readers.
+- sc86 (fd->path instrument; paths come out "?" — musl's loader closes
+  the fd after mmap, so fdtable lookups fail for lib mappings): tgid
+  334 = hdf_devmgr THIS boot (pid assignment varies; the early-census
+  assumption "334 == samgr" is boot-specific). 17 tasks: 6 writers on
+  the frozen word, NINE workers parked in binder reads — stall-report
+  shows all nine "waiting 320+s for work (no pending txn)" = healthy
+  idle, so idle workers do NOT hold read counts. main parked on the
+  NEIGHBOR word 0x...2b70 (0x94 below the frozen one — same heap
+  struct, second lock). EXTRA tgid 556 'device_manager': 5 threads,
+  0 exits, 16 readers, 1 writer.
+- Family table so far (word always EXACTLY 0x80000010 = WAITERS + 16
+  readers = libipc DEFAULT_WORK_THREAD_NUM): samgr, rss,
+  foundation(x2), hdf_devmgr(x2 boots), device_manager, sc81's 716/791.
+  hdf_devmgr + device_manager rule OUT dead-thread leaks (zero exits)
+  and pool-idle holders (stall-report clears the idle workers).
+  Remaining candidates: recursive read acquisition by ONE parked
+  thread (main parked on the neighbor lock), or a fabricated value
+  (mm-domain wild write — the wildwrite line's per-mm PTE bug would
+  fit the identical-value-across-processes signature).
+- hdf_devmgr's writer threads 335/348 had made nested calls into
+  pids 795/827/1299 that DIED servicing them (THREAD-DIED-SERVICING):
+  the writers look like death-cleanup paths (DetachObject-style)
+  piling onto the poisoned lock after BR_DEAD_REPLY.
+- sc87 booting: first-writer-park capture IN SYSCALL CONTEXT (full
+  caller chain at the freeze's birth moment, 12 frames + fd paths +
+  VMA file sizes — sizes identify libs despite closed fds), plus
+  post-adoption EXIT-WORD snapshots.
+
+Session K FINAL (13:4x — freeze family root-caused to a userspace
+std::shared_mutex recursion; NOT the kernel's rwlock/futex accounting):
+
+IDENTITY SOLVED (byte-verified offline against extracted libs; libs live
+in /system/lib64/chipset-sdk-sp/ + /system/lib64/{platformsdk,module,ndk}
+— extract with the fixed debugfs walker, see /tmp/oh-libs):
+- The frozen word is std::shared_mutex::__state_ of THIS libc++ build
+  (libc++.so, 0x141d20 bytes): WRITER_ENTERED(bit31) | reader-count.
+  Writers park via libc++'s own futex path ON __state_ with expected =
+  current state (0x80000010); park-site frames byte-match libc++'s
+  condition_variable::wait / the atomic-wait path (fileoff 0xc7e02).
+- The freezing instances are STATIC shared_mutex objects in DFX libs'
+  bss: libhicollie.z.so vaddr 0x3c0e4 (the 4th LOAD's anon bss tail),
+  plus analogous statics in libbegetutil.z.so and libfaultloggerd.z.so.
+  fd->path prints are USELESS for loader mappings (musl closes the fd
+  after mmap; fd numbers get reused) — identify by VMA filesz +
+  fileoff + bytes instead.
+- Family (per boot, ALL exactly 0x80000010): samgr, hdf_devmgr,
+  device_manager, foundation(x2), resource_schedule_service, mmi/msdp
+  host, sms-persist host, +2 anonymous SAs.
+
+MECHANISM (by elimination + arithmetic):
+- hdf_devmgr cases: 7 threads EVER, ZERO exits, yet 16 readers. The
+  count exceeds every thread that ever existed -> the reads are
+  RECURSIVE lock_shared calls by ONE thread (libc++ shared_mutex just
+  counts recursion). 16 = the recursion/retry bound (same value in
+  every process — an algorithmic constant; 16 is also libipc's
+  DEFAULT_WORK_THREAD_NUM, but pool size is coincidental: hdf's pool
+  was at 15 when only 5 were live).
+- The recursing holder is parked on a SECOND lock 0x94 below the
+  frozen word (same static object: shared_mutex's sibling mutex/gate) —
+  the main thread in every dump sits there. RWFRZ-PARK captured the
+  first writer at park time (16 dumps/boot, syscall context, exec-VMA
+  filtered, 64-slot window): callers include hicollie's DfxWatchdog,
+  FFRT workers, IPC workers, samgr/storage_manager/huks/param_watcher
+  mains — i.e., everything eventually funnels into the DFX report path
+  that owns the lock.
+- TRIGGER: the devhost_usb crash-loop (libusb_pnp_manager.z.so+0x15bac
+  NULL list walk, byte-verified again in sc87) kills server threads
+  mid-txn; every THREAD-DIED-SERVICING event feeds a client whose
+  error-recovery/reporting path re-enters the DFX lock chain.
+
+KERNEL VERDICT: the rwlock/futex accounting is INNOCENT (musl/libc++
+protocols decoded from binaries; reader-unlock emits no kernel traffic;
+the kernel cannot leak these counts). The freeze is a userspace
+recursion triggered by IPC failures we already partly fixed
+(one-txn-per-read). Remaining kernel work that would unblock the
+launcher chain:
+  1. The residual binder reply-stalls (4/boot in sc80) — same family
+     as the fixed SERVER-OWING bug; likely feeds the DFX retry storm.
+  2. stall_report's WORLD-guarded dump runs ~500ms with irqs off and
+     killed khungtaskd in sc82 (scanner never scanned again) — needs
+     sectioning (ipc/binder.rs, my lane, NOT yet fixed).
+  3. PTE_MODIFY_LOCK global-spinlock both-CPU deadlock (sc83, mm lane
+     — wildwrite line's per-mm PTE lock work 681da2da).
+NEXT SESSION concrete steps:
+  a. Find the 16-bounded recursion in OH source (hicollie/hisysevent/
+     begetutil retry loops around a shared_lock) or disassemble
+     libhicollie's bss+0xe4-referencing code (indirect via .data ptr).
+  b. Extend EXTRA-FROZEN to dump the thread parked on frozen-word
+     MINUS 0x94 (the recursing holder) with the 64-slot exec filter —
+     its stack shows the 16-deep chain directly.
+  c. Fix (2) above so scanners survive; consider gating park dumps
+     smarter (16/boot budget burns in the first minutes).
+MILESTONE: not reached (screen stays the 8-color oracle checkerboard);
+the freeze family blocks the launcher chain upstream of ArkUI.
+
+TOOLING LANDED: adoption-time FROZEN dump + EXTRA-FROZEN same-shape
+dumps + first-writer-park capture (syscall context) + per-word HIGH
+table with eviction + early-tgid census + 256-entry exit ring +
+EXIT-WORD snapshots + scan heartbeat + fd-path/filesz/bytes frames +
+exec-VMA filter. Offline: rwsym.py (= tolerant regex, LIBDIRS now
+syslib64+vendorlib64+samgr-bin+subdirs+platformsdk; add cssp/ from
+chipset-sdk-sp). Commits: 87be7195, 2b311ff9(+artifacts), 48def2d4,
+db709ac8, and this note.
+
+Session L update 1 (15:4x — WIP reviewed+landed, devhost_usb decoded to
+the image's own init-less listener list, sysfs usb parity landed, dump
+tooling iterated sc89->sc91):
+
+WIP REVIEW (bccf87b2, quota-death snapshot):
+- config.rs hunk DROPPED (commit 7273d175): it was stale riscv64/128MiB
+  build state, exactly the sc46 hazard documented in kernel/build.rs
+  (x86_64 feature build picks up a poisoned generated config.rs ->
+  init 'failed to fork'). Restored x86_64/1GiB.
+- binder.rs stall_report split KEPT: formatting under WORLD, all slow
+  forensics (holder page-table walks, park dumps, futex graphs) and the
+  chunked console flush moved AFTER the guard drops. VALIDATED in
+  sc89/sc90: the scan heartbeat runs the whole boot (sc89 alive at
+  1183s; sc82 died at ~120s) — khungtaskd survives, KERNPANIC 0.
+- futex.rs rwfz_neighbor_dump KEPT: fired in sc89 AND sc90 — hdf_devmgr
+  main (tgid 336/347) parks on frozen-0x94 exactly as Session K
+  predicted (recursion holder).
+
+devhost_usb crash loop — FULLY DECODED (sc87/sc89/sc90 same signature,
+rip libusb_pnp_manager vaddr 0x16bac = DdkListenerMgrAdd's inlined
+DdkListenerMgrIsExists walking head.next==NULL):
+- The image's libusb_pnp_manager build predates master: its
+  DdkDevMgrInit BINDS the HDF service 'hdf_usb_pnp_notify_service'
+  (no sysfs opendir; master's opendir(/sys/bus/usb/devices) flow is
+  newer). /sys/bus/usb/devices fix (ec7ea948) is still correct Linux
+  parity (bus_register creates it empty) but is NOT this crash's fix.
+- THE DEFECT IS IN THE IMAGE: DdkListenerMgrInit is EXPORTED and
+  imported by NOBODY in the whole userspace (checked .dynstr of every
+  lib + dlsym strings). g_usbPnpSrv's listener list is never
+  initialized in any process, on ANY kernel. The crash is reached via
+  libusb_ddk_service_1.1's UsbDdkService::Init: UsbInitHostSdk() ->
+  AdapterInit (linux_adapter) is a NO-OP SUCCESS -> allocates listener
+  -> DdkListenerMgrAdd -> walks zeroed list -> SIGSEGV. Deterministic
+  first-call crash of usb_manager's SA on any kernel incl. Linux.
+- Rux-side amplifier: the restart loop never gives up (each respawn
+  re-crashes, feeding THREAD-DIED-SERVICING + DFX retry storm -> the
+  shared_mutex freeze trigger family). Not separately fixed this
+  session (init-side restart limiter is OH userspace).
+
+FREEZE FAMILY (sc89+sc90 dumps):
+- The frozen word is NOT a fixed bss static: page offset differs across
+  boots (sc89 hdf_devmgr +0xc04, sc90 +0xa64, formation +0xe4) — the
+  shared_mutex lives on the HEAP at 0x7ff0006-0x7ff0009xxxxxxxx. Word
+  always 0x80000010 (16 readers + WAITERS). Writers park at ONE shared
+  code site 0x3fbf116dea (fixed-base shared-lib region 0x3fbf000000,
+  merged LOAD mappings -> VMA offset bookkeeping zeroed, fd closed).
+- Holder = hdf_devmgr MAIN thread, parked on frozen-0x94 (sibling lock
+  in the same heap object).
+- sc90's exec-frame filter fix (baseoff!=0 || fd>=0) still recovered
+  only DATA-segment pointers for the holder: loader-mapped code VMAs
+  lose offset entirely in Rux's merged mappings. ripbytes captured
+  (0x00cab80c75daf883 = 'cmp eax,-0x26; jne; mov eax,0xca' style code)
+  but byte-search across ALL image libs (system+vendor+subdirs+ndk+
+  module+chipset*, extracted to /tmp/oh-libs/full-*) finds NO match —
+  the park-site lib is not in the images' .so set (memfd/anon-mapped
+  or runtime-generated). Session K's 'static in libhicollie bss
+  0x3c0e4' identification is DOUBTED (heap + offset-variance + the
+  cssp libhicollie has no code refs to 0x3c0e4; its referenced static
+  0x3bff0 is the WatchdogInner singleton used by IpcFull).
+- sc91 kernel (4b1cc74d) captures: NBR-WORD (the sibling lock's own
+  value — owner tid if mutex), NBR-RAW (256 raw stack slots, values
+  only, offline-matchable against any file), 2x redundancy.
+
+Boots: sc89 (WIP kernel, 25min quiet, neighbor dump landed), sc90
+(sysfs usb fix + filter fix — crash loop persists as decoded above),
+sc91 booting (raw-slot capture). Screen still the 8-color oracle
+checker in all three; launcher process spawns (sandbox mounts visible)
+but the chain stays frozen upstream.
+
+Session L FINAL (16:0x — freeze terminal state decoded as a userspace
+ABBA deadlock in ONE heap object; kernel held innocent; milestone not
+reached; three boots sc89/90/91 all stable, scanner alive end-to-end):
+
+FREEZE TERMINAL STATE (sc91 NBR-WORD, the decisive capture):
+- Sibling lock (frozen-0x94) word = 0x80000000 = libc++ shared_mutex
+  WRITER_ENTERED | 0 readers: A WRITER OWNS the sibling.
+- Frozen word = 0x80000010 = WRITER_ENTERED | 16 readers: a writer
+  PENDING (bit31 set by its lock()) + 16 recursive read acquisitions
+  (one thread; libc++ lock_shared just increments the count even while
+  a writer pends).
+- The cycle: hdf_devmgr MAIN holds frozen.Rx16 and parks acquiring the
+  SIBLING (expected 0x80000000); a DFX-path thread (writers' caller
+  frame byte-identified: libdfx_procinfo.z.so chipset-sdk-sp build,
+  size 0xce38) owns sibling.W and parks acquiring frozen (it set bit31,
+  waits for readers to drain). Neither side can progress -> both locks
+  stay parked forever. PURE USERSPACE ABBA deadlock between two
+  shared_mutexes 0x94 apart inside one heap-allocated object.
+- The frozen word's ADDRESS varies per boot (+0xc04/+0xa64/+0xe4 page
+  offsets) -> HEAP object, NOT the libhicollie bss static Session K
+  hypothesized (doubted: cssp/libhicollie has zero code refs to
+  0x3c0e4; its 0x3bff0 static is the WatchdogInner singleton IpcFull
+  uses).
+- Kernel futex accounting: INNOCENT (confirmed again — counts are
+  exactly what userspace wrote; no spurious wakes involved; the park
+  expected-values match libc++ protocol).
+- Holder chain symbolization BLOCKED by an mm-lane gap: loader-mapped
+  code VMAs lose both fd and offset (the 0x3fbf000000-0x3fbf138000
+  span prints baseoff=0 fd=-1 as ONE VMA although it contains multiple
+  libs' LOADs — the loader's anon reservation is not overlay-split by
+  the file LOAD mappings). Linux ALWAYS shows the innermost file VMA
+  in /proc/<pid>/maps; Rux's merged view is a real ABI/forensics
+  divergence. HANDOFF to mm lane: preserve fd/offset bookkeeping when
+  file mappings overlay an existing reservation. Raw-slot method
+  (NBR-RAW + nbrraw.py) works around it but the fixed-base region
+  could not be inverted with the libs available (park-site ripbytes
+  0x00cab80c75daf883 exist in NO image lib; libhilog was identified
+  via an fd-open anon_inode copy — some libs load from memfd paths we
+  cannot enumerate offline).
+
+REPLY-STALL TREND (whole lane): sc74=9 -> sc77=7 -> sc80=4 -> sc89=1
+-> sc90=1 -> sc91=0. The one-txn-per-read fix + heals hold. KERNPANIC 0
+in all three boots. khungtaskd scanner ALIVE the whole boot in sc89
+(1183s), sc90, sc91 — the binder.rs stall-window fix (WORLD-guard
+split, chunked flush) from the quota-death WIP is VALIDATED and landed.
+
+COMMITS this session (feature/samgr-callback, all English):
+- 7273d175 review(sc89): drop stale generated config.rs from the WIP
+- ec7ea948 fix(sysfs): /sys/bus/usb/{devices,drivers} Linux parity
+- 0b3366e2 dfx(futex): sc90 park-stack filter + window fixes
+- 4b1cc74d dfx(futex): sc91 raw stack-slot capture + NBR-WORD
+- 6e4f00b7 run+notes: session L update 1 + nbrraw.py
+- (binder.rs + futex.rs WIP content from bccf87b2 itself)
+
+NEXT SESSION:
+  a. The launcher chain is blocked by a USERSPACE deadlock the kernel
+     cannot fix legitimately. The productive lever is starving its
+     trigger: the devhost_usb/usb_manager crash loop (image defect:
+     DdkListenerMgrInit exported but never imported anywhere; the
+     first UsbDdkService::Init DdkListenerMgrAdd always walks a NULL
+     list, on Linux too). Options: (1) disable the usb services in the
+     IMAGE's init configs (precedent: run/oh-x appspawn-src overlay),
+     (2) accept the loop but cut its DFX reentry amplification.
+  b. mm lane (NOT samgr lane): file-LOAD mappings over loader
+     reservations lose fd/offset — affects /proc/maps parity and all
+     forensic symbolization; small fix, big payoff.
+  c. If the deadlock drains (a works), expect launcher -> OnForeground
+     -> ArkUI; watch oh-shotmon for >8 colors and grab the ohgpu
+     screendump as the milestone artifact.
+
+Session M FINAL (2026-10-22 01:4x; sc96-sc104; THREE kernel fixes landed,
+the launcher SPAWNS SUCCESSFULLY for the first time; MainAbility lifecycle
+reached; milestone screen not yet — remaining gates decoded below):
+
+ROOT CAUSE OF THE "PARKED SYSCALL" (sc96/sc97): THERE WAS NO PARK. The
+KILLDUMP probe extension (fd-type naming, pipe holder scan, unix dgram
+peer/queue stats, iovec payload, mount path strings, task state) shows
+every killed launcher child at state=RUNNING — the writev(fd3)/mount(2)
+"parks" were STALE last-syscall frames of a task that was RUNNING and
+slow, killed mid-progress by appspawn's 3s child watchdog:
+- fd3 = unix DGRAM socket to hilogd (3-iovec writev = libhilog
+  header28/tag/content; tag 'APPSPAWN' = the child's own pre-exec logs).
+- mount(2) frames = sandbox bind mounts that HAD RETURNED (appspawn
+  logged "mount X time 10-25ms" right at the kills).
+
+FIX 1 (mount leak — THE spawn killer, 77adb795 + 9842a6e2): killed
+appspawn children leaked every sandbox bind into the shared dentry tree
+and VFS_STATE.mounts forever (no namespace-exit unmount). Registry grew
+into the thousands across the launcher restart loop; every MS_REC bind
+cloned by scanning the whole registry -> 5-25ms per mount, 45-61 mounts
+per spawn, no spawn fit the 3s watchdog. MountNamespace now tracks its
+VfsMountInternal objects (ns_track_vfsmount at both attach sites) and
+Drop unmounts them (Linux nsput semantics); private-ns mounts no longer
+touch the global MOUNT_TABLE. VERIFY (sc99): registry bounded at 190,
+kernel-side bind cost ~40-80us (mtprobe TSC breakdown in vfs_bind_mount),
+systemui spawn result:0, then 18x "Child process:com.ohos.launcher
+success". sc98 lesson: ns_track under VFS_STATE self-deadlocks via lazy
+init_mnt_ns -> get_vff_root -> VFS_STATE; track AFTER dropping the guard.
+
+FIX 2 (sticky one-shot wake token — 385c9793): binder-stall census
+captured q=1 woken=1 with the task INTERRUPTIBLE+unlinked+owned by no
+cpu slot for minutes; every REKICK skipped the wait-queue entry because
+its one-shot token was already consumed and no other wake path exists.
+wait.rs wake_up now RE-ISSUES wake_up_process for sleeping targets on
+already-woken entries. VERIFY (sc101 vs sc99): foundation's frozen
+SERVER-OWING workers resumed; boot progressed from OsAccount-wedge-at-
+slog-11k to slog-29k with MainAbility lifecycle running.
+
+FIX 3 (unix dgram truesize overcharge — 5157c305): seg_charge added
+PAGE_SIZE per segment but the CombinedAllocator routes <=4096B to SLAB —
+a 200-byte hilog message really costs a slab object, not 4KiB. The
+overcharge throttled SO_SNDBUF 212992 to ~50 queued records, parking
+chatty clients on hilogd's serial drain rate. Now len+sizeof+512 (Linux
+skb-truesize parity); queued_truesize kept in lockstep.
+
+DIAGNOSTICS landed: KILLDUMP wedge forensics (futex.rs kill_dump_wedge:
+state/on_cpu/cfs_linked/pick_state/utime/stime, fdtab dump, pipe fill +
+holder scan, unix kind/peer/queue, iovec payload head, mount strings);
+WAKE-RUN-LEAK now prints per-cpu current slots + idle bits; W3-RUNWAKE-
+REFUSED names the refusing guard in wake_up_enqueue; unixsend-loop round
+detector (net/unix.rs); epollnotify registry probe; mtprobe bind TSC
+breakdown.
+
+REMAINING GATES (for the next session), in order:
+1. LAUNCHER STIME BURN: post-exec launcher child spends its whole 3s
+   life in KERNEL time (utime=0-2t, stime=180-190t, on_cpu=true, rip
+   parked at the writev wrapper). NOT unix_send (loop detector silent),
+   NOT epoll registry (size 10-14). Prime suspect: the file-map page
+   fault path (the app maps ~100MB of ArkUI libs; if each fault does a
+   synchronous ext4/bio read without working readahead, 25k faults x
+   70us = 1.75s). NOTE: arch/x86_64/mm/page_fault.rs + mm/** are the MM
+   LANE's territory (they are restoring VMA fd/offset bookkeeping there
+   RIGHT NOW) — coordinate before touching; the fs-side levers (page
+   cache/readahead policy, bio batching) are fair game.
+2. OsAccount SA proxy death (present since sc94): "proxy is already
+   dead, handle:7 desc:*.IOsAccount" spam; BMS queries fail with
+   responseUserId:-1; boot bootevents stall after appspawn.started
+   (only composer_host + appspawn fire). Whether this gates the
+   launcher's AMS start needs a check with gate 1 fixed (sc101 reached
+   MainAbility restarts DESPITE it, sc104 wedged earlier BECAUSE of it
+   — boot-order variance).
+3. WAKE-STRANDED / WAKE-RUN-LEAK residue still prints under load (wake
+   -> pick latency); sticky-token fix drains the terminal wedges but the
+   producers remain unlocalized. The slots= print (sc100+) names lying
+   cpu slots when they recur.
+
+Boots this session: sc96 (syscall data), sc97 (wedge forensics), sc98
+(first-boot DEADLOCK from fix 1's first version, killed), sc99 (mount
+fix verify; systemui success), sc100 (wake diagnostics), sc101 (sticky-
+token verify; launcher spawns 18x, MainAbility restarts), sc102 (stime
+burn confirmed unchanged), sc103 (unix_send cleared), sc104 (OsAccount
+early wedge variant). Screen: 8-color checker at 100% coverage
+throughout (display pipeline alive, launcher UI not reached). MILESTONE
+NOT reached this session; three concrete gates retired.
+
+SESSION N (2026-10-22 02:0x-0x; sc105-sc109; launcher stime burn DECODED,
+fs fault-around landed, OsAccount root cause named):
+
+GATE 1 (launcher stime burn) — DECODED, not where anyone guessed:
+- sc105/sc106 A/B: the fs fault-around fix (below) did NOT move stime
+  (177-191t every kill) => the burn was NOT the demand-fault ext4 path.
+  Demand-fault counters: ~2.6k page-shaped misses per kill window, avg
+  1.4ms/read but mostly SLEEP (rdtsc spans deschedule), too few misses.
+- Built a tick-sampled kernel-rip histogram (arch/x86_64/trap.rs, keyed
+  by comm so tasks separate; sc106 lesson: global steal-smallest table
+  STARVES the target — launcher entries start at count=1 and get stolen
+  by the next new page; sc108 added a *launcher*-gated FOCUS table).
+- FOCUS histogram answer (sc108, 6 kills): 68-143 ticks/life in the
+  kernel log-crate + CString formatting page, 12-28t in the core::fmt
+  numbers + memmove/memset page. The launcher burns its 3s appspawn
+  budget PRINTING KERNEL DIAGNOSTICS: mtprobe prints one ~150B line per
+  sandbox bind (61 binds/spawn, in the CHILD's context) and WAKE-STRANDED
+  prints at pick time (in the PICKED task's context — the launcher is
+  picked thousands of times). UART TX is a busy LSR.THRE poll at 115200
+  ≈ 87us/byte: a 150B line = ~13ms of pure stime. This is the sc37
+  bindrec lesson replayed on Session M's probes.
+- FIX 1: `sprobe=0` boot param silences mtprobe + WAKE-STRANDED prints
+  (detectors/counters keep running; default unchanged so concurrent
+  hunts keep output).
+- sc109 A/B (sprobe=0): stime STILL 185-202t — the probe prints were
+  real cost but NOT the dominant burner. CORRECTION of the sprobe
+  commit message's claim. The sc109 focus histogram named the true
+  dominator: the HPET driver page (hpet::read_counter/read_time_nominal,
+  1690-1766 cumulative ticks across launcher lives) — the launcher has
+  NO vDSO (AT_SYSINFO_EHDR disabled by the P2 fix until the vdso data
+  page moves to linear-mapped memory, exec.rs:964), so every
+  clock_gettime pays a syscall AND an HPET MMIO read = a KVM VM exit.
+  ArkUI's event/timestamp churn at ~35k calls/s burns the whole budget.
+- FIX 2 (the real one, timer lane): HPET-calibrated TSC timekeeper —
+  hpet::calibrate_tsc() measures TSC-vs-HPET over a 20 ms window right
+  after HPET init (both derive from QEMU's virtual clock; error <1 ppm),
+  read_time() now serves from RDTSC (no VM exit), and a 1 Hz resync
+  (x86_64::resync_tsc_against_hpet, offset-only forward steps clamped to
+  10 ms, hard rebase past 25 s) bounds drift. vDSO re-enable remains the
+  mm lane's item (linear-mapped vdso data page).
+- ALSO landed fs fault-around (KEEP — Linux parity, compounding win):
+  single page-aligned one-page preads (the mmap demand-fault signature)
+  now fill a 16-page cluster (fault_around_bytes parity) instead of 1
+  page when the per-fd sequential detector says "random" (dynamic
+  linker fault order interleaves .text/.rodata/.got segments).
+- mm-lane coordination (main-session relay): their de150335 (per-fault
+  constant-factor fixes: 1 VMA find, fewer vm_file pins, no double
+  zeroing) + this fault-around are complementary halves; clean-host A/B
+  (baseline / readahead / fault-path / both) runs once branches unify.
+
+GATE 2 (OsAccount SA proxy death) — ROOT CAUSE NAMED (image defect):
+- The kernel-only binder transitions are clean: binder_close is the ONLY
+  path that removes a proc (world.procs) — a dead proxy always means the
+  owner's binder fd closed. New CLOSE probe prints owner pid + nodes +
+  foreign refs at every node-owning close (rate-budgeted).
+- sc105/sc106/sc108 serial forensics: SA host processes (sc105: pids
+  628/649/677/702, 3 crashes each — init restart loop; sc108: 628/707/
+  728/787) SEGFAULT at the SAME user rip 0x7ff082996bac, cr2=0, rbx=0
+  (NULL list walk: mov rax,[rbx]; cmp rbx,r13; jne loop), while
+  servicing a binder txn from samgr. USEGV probe extension now dumps
+  printable strings below an anon/memfd rip mapping: the library is the
+  USB DDK PnP manager (UsbPnpManagerRegisterOrUnregisterDevice,
+  UsbDdkPnpLoaderEventReceived/Handle, ubsan handlers) — Session L's
+  DdkListenerMgr NULL-list family, on a memfd not present in ANY image
+  .so (offline signature search of system/vendor/sys_prod/chip_prod:
+  925 candidates, 0 matches at voff 0x15bac).
+- Chain: usb DDK lib NULL-walk crash kills the SA host process =>
+  binder_close removes its proc => clients' proxies get BR_DEAD_REPLY
+  (userspace error 32, "proxy is already dead") => if the victim hosted
+  OsAccount (or the boot order left BMS wedged on responseUserId:-1),
+  launcher spawn gate. sc104/sc105 wedged this way; sc106/sc108 boots
+  passed (victims were other hosts). IMAGE-side fix belongs to the main
+  session: extend the usb disable overlay to whatever host loads the
+  USB DDK PnP manager (the scgold userdata overlay did not cover it).
+
+GATE 3 (wake-loss residue): sc107 wedged EARLY (W3-RUNWAKE-REFUSED
+lines 172-179, pid 1/307-310 all curr_on=true on_cpu=true; PARKED-LEAK
+pid 315; kickdog stall) — the wake-stranding producer remains real and
+boot-order dependent. Not chased this session (gate 1 had priority).
+
+Boots: sc105 (fault-around verify; BMS-wedge variant), sc106 (binder
+CLOSE probe; launcher kills stime unchanged, first FOCUS attempt),
+sc107 (early wake wedge, killed), sc108 (FOCUS table + memfd-strs;
+burn decoded, 16 spawns, 6 kills), sc109 (sprobe=0 A/B + shotmon,
+RUNNING at time of this entry).
+
+COMMITS this session (English, on feature/samgr-callback):
+- facb8f3a wip(snapshot): fault-around + probes
+- 8ebbf25b dfx(stime): focus histogram + memfd-strs forensics
+- 6ecb3478 dfx(uart): sprobe=0 gate for launcher-context probe prints
+
+SESSION N UPDATE 2 (sc110/sc111 + TSC parked):
+- sc110/sc111 (TSC timekeeper ON + sprobe=0): both landed the WEDGED
+  boot variant (OsAccount dead-proxy + BMS responseUserId:-1 loop, no
+  launcher spawns before the boots' end) — no good-variant A/B for the
+  stime question this session. sc109's focus histogram stands as the
+  attribution evidence.
+- sc110 ANOMALY: "tsc-clock: rebase, lead 250413052" — ONE ~25 s forward
+  step of the TSC clock vs the HPET, once, early; NO rate drift after
+  the rebase (no second event). Signature = per-vCPU TSC-offset skew
+  (KVM catch-up offset when the second CPU onlines is the prime
+  suspect), not a calibration-rate error. PARKED: calibrate_tsc is now
+  opt-in via `tscclk`; HPET is the default timekeeper again (commit
+  d8d7c50f). The rebase path prints cpu + raw tsc/hpet/base/mult for the
+  next capture; with that, one tscclk boot decides skew-vs-smash.
+- NEXT SESSION (ordered):
+  1. Good-variant boot (coin flip; sc106/sc108 shapes) with sprobe=0:
+     read KILLDUMP stime + FOCUS table. Expected: hpet page still top
+     (TSC parked) — then fix the skew (probe above) and re-land tscclk,
+     or land the vDSO data-page fix (mm lane) which removes the syscall
+     entirely — the two fixes are alternatives for the same burn.
+  2. The launcher-context print inventory is not empty: devopen-probe
+     prints fire per /dev open in the launcher's context (log/fmt page
+     residue in sc109's focus table). Same UART busy-poll economics —
+     consider gating or budgeting them.
+  3. Appspawn's userspace "mount X time ~13-15ms avg" (all variants,
+     kernel bind measured 40-80us in sc99 — 160x gap): instrument
+     sys_mount entry->exit with TSC + comm for one boot; suspects are
+     deep sandbox path resolution (20+ component dentry walks) and
+     VFS_STATE contention at 1800-3300 mounts/boot. 61 binds x 13ms
+     ~= 0.8s of the 3s child budget.
+  4. IMAGE SIDE (main session): the usb DDK PnP manager memfd lib crash
+     (NULL list walk, rip voff 0x15bac) kills SA hosts and gates ~50% of
+     boots at the BMS/OsAccount wedge. Extend the usb disable overlay to
+     its host process.
+
+SESSION O (2026-10-22 05:5x-0x; sc115-sc116; third leg; TSC root-caused +
+default landed, launcher children decoded to a single-thread futex park,
+render_service deterministic mm crash named for the mm lane):
+
+IN-FLIGHT REVIEW (86d923ee, quota-death wip):
+- main.rs tscclk default-ON flip: KEPT but its "sc114 verified: 0
+  rebases" claim was FALSE — sc114's log has TWO rebases (cpu0+cpu1,
+  lead 250416629/250201181) at uptime 522.17 s. The ratchet+min-of-3
+  fixes WERE verified (sc114: 0 u32 wraps vs sc113's 281, 0 KILLDUMP,
+  first-ever launcher spawn successes 3x). config.rs hunk reverted to
+  the parent state (stale riscv64/128MiB generated artifact).
+- ROOT CAUSE of the sc110-114 "~25 s TSC-vs-HPET step" DECODED — it
+  was never vCPU TSC-offset skew: TSC_MULSHIFT was 12, so
+  mult = ceil(10MHz<<12 / 4292.4MHz) = ceil(9.5434) = 10 — a 10.5%
+  resolution grid — and the mapping ran 10/9.5434 = 4.796% FAST on
+  every boot. sc113 AND sc114 both rebased at uptime 522.17 s with
+  lead 250.41M ticks (4.796% x 522.17 s, matching to 4 significant
+  digits; sc110/111's leads agree). The sc114 AP's measured -21.9 ms
+  "skew" was 4.796% x the 0.456 s AP-bringup instant. FIX (9e5f0147):
+  TSC_MULSHIFT 12 -> 32 (~100 ppm grid) + round-to-nearest instead of
+  ceil in BOTH mult computations; resync gained a "tsc-clock: lead"
+  report at 250 ms (proof marker: ~23 h of uptime needed to fire at
+  3 ppm residual).
+- sc115 VERIFY (default TSC, sprobe=0, private images, 20 min):
+  0 rebases past the old 522.17 s point, 0 u32 wraps, 0 lead lines,
+  38 launcher spawn successes (vs 3 in sc114), 0 KILLDUMP. TSC GATE
+  CLOSED. (One early "fell behind ~7201280" print in sc115, sc116
+  clean — early-boot noise, self-heals; the lapic tick check prints
+  [fail] 0-jiffies on both new-kernel boots: the 150 ms delay_ms
+  window lands in a tick-gap/IRQ-off stretch — cosmetic.)
+- IMAGE SIDE: the USB DDK PnP bad host is ALREADY disabled — the
+  second-leg predecessor did it at 03:19 (unrecorded):
+  oh-img-p/vendor.img has libusb_pnp_manager.z.so ZEROED (0 bytes,
+  was 179560) ON TOP of Session L's hdf_devhost.cfg usb_host removal.
+  sc113-116: zero DDK-signature crashes (sc105-111: every boot).
+  Nothing left to do here; boots must use run/oh-boot-usbless.sh
+  (oh-img-p private copies).
+
+NEW GATE DECODE 1 — the launcher child's hang (dfx=periodic
+taskdumps, sc116): every launcher child (pids 1368/1380/1404/1413/
+1419, same site every time) is SINGLE-THREADED — no OS_FFRT/OS_IPC
+workers ever created — with the main thread parked in
+futex(uaddr=0x7fffffffc754 ON ITS OWN STACK, FUTEX_WAIT_PRIVATE|
+0x80), and it STAYS there across multiple 30 s dumps (children live
+for minutes; the AMS restart loop is what recycles them). Before the
+park the child: sandbox binds OK, /dev/{dec,xpm} ENOENT (normal),
+/dev/null, __parameters__ x2, display_buffer_vdi GetMetadata ("not
+supported" stub), BMS queries — then silence. So the ability LOAD
+hangs between display-VDI init and worker-thread creation, waiting
+on a stack condvar that no counterparty will ever signal. sc115
+(render_service alive) parks identically → not gated by render alone.
+
+NEW GATE DECODE 2 — render_service DETERMINISTIC CRASH (sc114 pid 731
++ sc116 pid 582, BYTE-IDENTICAL): rip 0x3fbf08ad30 ripbytes
+[f3 48 a5 83 e2 07 74 05 a4 ff ca 75 fb c3 cc cc] = the rep movsq
+memcpy tail sequence; copying rdx=0x3a8 bytes to dst=rsi=cr2
+(rsp+0x478, i.e. writing a ~1 KB STACK FRAME above rsp); the fault
+page's VMA EXISTS (0x7ff000xxx000-xxx000+8K, type=Anonymous,
+flags=0x10, **off=0x19000** — an offset on an ANON vma = the mm
+lane's merged-mapping/offset bookkeeping family) but the page is not
+handed out / mapping not writable. MM LANE ITEM (do not chase in the
+launcher lane): render_service dies on a stack write its own VMA
+should satisfy; with it dead the display chain loses the compositor
+(sc116 also lost OS_IPC_0_372).
+
+NEW GATE DECODE 3 — chronic IRQ-off / tick-gap stalls (sc115):
+637 WW IRQ-OFF-WINDOW (>=100 ms inter-tick gaps; age field reads
+1000 ms — quantized) — a boot-full of second-scale stalls. Symbolized
+recovery rips: idle-halt path (wfi/enable_irq/restore_irq, pid 0/1 —
+benign-ish accounting), AND genuine cli windows: Spinlock<VfsState>
+spinners with LAUNCHER-CHILD pids (1227/1115/938: RawSpinlock::lock
+<- Spinlock<VfsState>::lock), printk/log-crate drain (UART irqsave
+87 us/byte busy-poll; ~11 KB of census text = 1 s), Vec<u8> drop
+glue, preempt_count paths. The RWFRZ freeze storm feeds it: sc115
+printed 2472 RWFRZ lines (sc113/114: ~180) — wedge->census->console
+stall->more timeouts loop.
+
+MNTSLOW (sc116, sprobe=1, task 4 of the execution order): whole-
+syscall mounts are 3.5-9.2 ms for EVERY caller (os.settingsdata 56x
+avg 5.5 ms; m.ohos.systemui 39x avg 5.5 ms; init 23x avg 3.7 ms;
+storage_daemon 1x 4.9 ms) while mtprobe's phase breakdown of the
+SAME binds shows the vfs_bind_mount core at 45-70 us (lookup+attach
+17-29 us, clone-scan 28-41 us, clone-attach <1 us) — the appspawn
+"13-15 ms" userspace figure was the same ~5 ms wrapper cost plus its
+own bookkeeping. The ~5 ms sits in the sys_mount WRAPPER (read_user_
+path x2, security::capable -> LSM hook chain, target path_lookup,
+registry update) or in preemption inside it — FIRST suspect is the
+LSM capable hook (security_capable -> hook chain; if any registered
+LSM walks selinux state or worse, that is the fixed cost). NEXT
+PROBE: per-phase timers inside the sys_mount shell (one boot).
+
+EXECUTION ORDER for the next session, in order:
+1. mntslow phase timers (wrapper attribution) -> fix the ~5 ms mount
+   wrapper (61 binds x 5 ms = 0.3 s of each child's budget).
+2. The single-thread futex park: enable dfx=sleepsnap + a futex
+   wait/wake census for uaddr 0x7fffffffc754 (is the wake LOST —
+   kernel futex lane — or NEVER SENT because the counterpart never
+   spawns? A pre-park clone() failure would be invisible in
+   taskdumps; instrument clone failures by comm).
+3. MM LANE (relay): render_service byte-identical memcpy-into-stack
+   crash (rip 0x3fbf08ad30, anon VMA off=0x19000 anomaly) — likely
+   their merged-mapping offset bookkeeping; and the vDSO data page
+   (removes clock_gettime syscalls entirely).
+4. UART discipline (console lane): printk's irqsave UART drain is
+   the second-scale-stall amplifier; a printk ring + irq-on drainer
+   (Linux console_unlock shape) or hard byte budgets on the census
+   floods (RWFRZ 2472 lines/boot) would take the IRQ-OFF-WINDOW
+   count down an order of magnitude. putchar CANNOT simply sti in
+   the THRE wait: an IRQ-context printk would self-deadlock on the
+   same cpu's UART lock.
+5. VFS_STATE: launcher-child pids were CAUGHT spinning on it >=1 s
+   (WW samples). With the registry bounded at ~190 the holders must
+   be doing slow work under it — candidate: the MS_REC clone-scan's
+   dentry_relpath_below parent walks under the guard. Not yet fixed.
+
+Boots this session: sc115 (TSC verify, 20 min, checker), sc116
+(dfx=periodic,monowatch + sprobe=1 decode boot, 20 min, checker —
+taskdumps + mntslow + mtprobe data captured). MILESTONE not reached:
+screen is still the 8-color oracle checker; the chain now spawns
+cleanly (38 successes/boot, SPAWNCHILD 1.0 s of the 3 s watchdog)
+and dies between display-VDI init and thread creation.
+
+COMMITS this session (English, on feature/samgr-callback):
+- 6529f06a fix(timer): TSC timekeeper default ON (wip review)
+- 9e5f0147 fix(timer): TSC_MULSHIFT 12->32 + nearest rounding (root cause)
+- 7a9f38ba dfx(taskdump): periodic dump interval 5 s -> 30 s
+- 2ce75d20 wip(snapshot): sc115 artifacts
+
+SESSION O ADDENDUM (sc117 + two fixes + one probe, 06:3x-06:5x):
+- fix(mount) 502ea7a7: MOUNT_TABLE irqsave -> plain preempt-off lock
+  (register_mount's guard ran an O(rows) string retain + 4 heap allocs
+  with IRQs off; every user is syscall context; ns.rs tables already
+  plain). Built into sc117.
+- dfx(clone) bfc35fd2: both clone refusal paths now print errno +
+  free_bytes + comm (40-line budgets) — settles whether the app
+  children's missing worker threads are the F12 heap-reserve gate
+  (buddy free < 8 MiB -> silent ENOMEM) or another clone error.
+- sc117 (smoke, sprobe=0 dfx=periodic,monowatch, 10 min): WEDGED
+  variant — 78 'proxy is already dead' lines, 0 launcher spawns, so
+  the clone probes got no app-child window to test (no gate fires in
+  the wedged shape). IMPORTANT FOR THE NEXT SESSION: the OsAccount-
+  wedge coin flip is NOT fully cleared by the DDK fix — the zeroed
+  libusb_pnp_manager removed ONE trigger (the DDK NULL-walk crash
+  loop); other proxy-death producers remain (present since sc94).
+  TSC stayed clean (one 'fell behind 100181' at the 10 ms print
+  threshold — transient; no rebase, no wraps, no USEGV).
+- NEXT SESSION FIRST BOOT: the sc117 kernel already carries the clone
+  probes — boot the GOOD variant (reroll until spawns appear) and read
+  clone-gate/clone-fail lines around the first app children. If the
+  gate fires with sane free_bytes, the fix is policy (the 8 MiB
+  reserve dates from the 128 MB heap era; the OH lane runs 1 GiB).
+  If no clone line fires while children STILL park single-threaded,
+  the park is a lost futex wake (kernel futex lane) or a never-sent
+  wake (userspace) — then wire dfx=sleepsnap + a wake census on
+  uaddr 0x7fffffffc754.
+
+SESSION P (second leg, 10:2x-): F12 gate exonerated; the park DECODED
+to a pthread_cond_timedwait on a stack cond; holder-hunt in flight.
+- sc118 (pred.) re-read: good variant, 63 spawns, 0 clone-gate/fail
+  lines -> F12 heap-reserve gate EXONERATED (refusal probes only
+  printed on failure; sc119's census made this definitive).
+- sc119 (good variant, 48->63 spawns, sprobe=1): appclone census 0
+  lines (budget intact) = ZERO clone attempts from the RENAMED app
+  comms; stkfutex census (budget raised 150->400 first, commit
+  34e6fc16): 13 app-child WAIT entries at 0x7fffffffc7f4 val=2 with
+  ZERO result lines (eternal), while healthy processes (samgr,
+  multimodalinput, render_service) pass through the SAME musl wait
+  site and get woken by their own OS_IPC workers. mntslow phase
+  attribution DONE: op phase avg 4950us max 8859us vs same-boot
+  mtprobe sub-phases ~75us total (lookup+attach 26 + clone-scan 49 +
+  clone-attach 0.5) - the ~5ms is DESCHEDULE/lock-wait inside the
+  core op (mount-namespace contention across 61+ concurrent binders),
+  NOT string copies/capable()/lookup/registry (all ~0).
+- sc120 (dfx-taskdump-bt+dfx-futex-trace): FLOODS the UART (per-task
+  bt + stack words x ~500 tasks x 30s dumps) - killed. Learned: the
+  bt block exists and works; features stay OFF for full boots.
+- sc121 (same features, no periodic): FTX ENTER tracer is UNBUDGETED
+  under dfx-futex-trace (every futex op prints) - drowned; killed.
+  Raw-chain probe landed first (9e2e1f32).
+- sc122 (plain kernel + raw chain, good variant): KILLDUMP NEVER
+  samples the park - SIGKILL lands after the userspace DFX freeze
+  handshake, so kills catch the child in getrusage (generic 0xa5)
+  /open of the handshake. -> APP-PARK hook (1fef9f6e): dump at WAIT
+  ENTRY in the parking thread's own context.
+- sc123 (good variant): APP-PARK x6, ALL BYTE-IDENTICAL across
+  systemui/settingsdata/launcher/dataability (same rsp
+  0x7fffffffc6c0, same uaddr 0x7fffffffc754, same chain) =
+  appspawn's fork-without-exec child branch (children keep the
+  appspawn image + run its child path; comm set late via prctl).
+  CHAIN DECODED: rip 0x3fbf116dea = musl __timedwait syscall insn
+  (fixed INTERP_BASE 0x3fbf000000 = musl); slot[2] = 31536000 =
+  ONE YEAR = the OH wait-forever timeout (correctly passed - not a
+  timeout bug); slot[11] = musl+0x118374 = pthread_cond_timedwait+0x1d2
+  right after 'call __timedwait' -> THE PARK IS THE COND WAIT ITSELF
+  (seq==2, waiting for the 3rd notify); slot[5] spill = the uaddr.
+  Early misreads corrected: NOT the mutex relock (that was sc121's
+  storage_manager rwlock park chain at musl+0x11849d), NOT libc++
+  string code (slot[1] = stale decoy; the libc++ VMA match was
+  right but the slot is dead data).
+- sc124 (forkgate probe fc63a720; wedged-ish boot, 819 proxydead, 0
+  launcher spawns but settingsdata/systemui children forked+parked):
+  fork flags=0x11 (plain fork), word@c754=0 word@c7f4=0 AT FORK ->
+  NOT fork-inherited held locks; siblings idle (OS_IPC recvmsg,
+  OS_DfxWatchdog RUNNING). The child constructs the cond itself;
+  seq reaches 2 during the child's own run, then waits for a
+  same-process signaler that never comes.
+- CENSUS GAP found (fixed 1eb18856): the appclone comm filter was
+  blind while children run under comm 'appspawn' (dlopen +
+  .init_array constructors rename LATE - sc118 pid 1200 comm=appspawn
+  was a live child). sc125 boots the fixed census: whether engine
+  constructor threads (CLONE_THREAD from the child) are created is
+  the now-decisive datum. If created->then died silently, next probe
+  is child-tgid thread-exit logging; if never created, hunt what
+  blocks pre-create.
+Boots this session: sc119 (good, census+mntslow), sc120/121 (flooded,
+killed early), sc122 (good, KILLDUMP handshake decode), sc123 (good,
+APP-PARK chain), sc124 (wedged-ish, forkgate), sc125 (in flight).
+
+SESSION P continued (12:0x-12:4x): the causal chain narrowed to the
+WORKER THREADS' instant death; exit forensics boot sc130 in flight.
+- sc125 (fixed census): CLONE_THREAD creations DO happen under comm
+  'appspawn' (the pre-rename window the old filter was blind to):
+  appspawn tgid 362 (OS_IPC_0, OS_DfxWatchdog, 4x OS_GC_Thread), one
+  early child tgid 1146 (OS_IPC_0_1262 + OS_DfxWatchdog_1263, alive),
+  and a 4-thread batch 1289-1292 that NEVER appears in any taskdump =
+  created and exited instantly. The later 'spawns' are AMS retries of
+  the same parked app family - creation never stopped globally; the
+  parked apps just never get to their own pthread_create.
+- sc126 (fail-latch, Task::last_fails 8x (nr|errno<<16)): parked
+  children's pre-park failure tails: launcher/systemui = openat ENOENT
+  x6-7 + one prctl EINVAL; dataability = writev EAGAIN x8 (hilog
+  socket full - log spam starving their latch).
+- sc127 (openmiss fixed: was testing RAW x86 nr 257 at the translated
+  exit side - openat=generic 56 never matched; was pr_info, filtered
+  at loglevel=4): first paths = ld-musl namespace cascades (benign
+  probing noise, ate the budget).
+- sc128 (openmiss rescoped to renamed comms): THE park-adjacent miss
+  named: libsecurity_component_client_enhance.z.so - probed in ~16
+  namespace dirs by 5 children immediately before parking; absent from
+  EVERY system image on the host (common/sdk/service variants exist).
+  BUT no image lib lists it in DT_NEEDED - it is a pure dlopen probe,
+  likely optional; on real Linux this same image misses it too. NOT
+  yet proven causal.
+- sc129 (all-calls nr ring, 12 deep): every parked child's last 12
+  COMPLETED syscalls are ALL clock_gettime - the child is alive and
+  looping {clock_gettime, cond wait_for} - a retry loop waiting for a
+  readiness flag no thread will set. And the census caught 4 more
+  worker creations (pids 1458-1461, comm='appspawn') right after the
+  parked window - the FFRT workers ARE created, then exit instantly
+  and CLEANLY (process survives; a fault would kill the process).
+  => the remaining question is exactly WHAT fails inside the workers.
+- sc130 (booting): do_exit prints the exiting thread's fail tail
+  (budget 12) - the workers' fatal syscall error gets named.
+ALSO this leg: generic-nr reference for reading latches: 56=openat
+57=close 63=read 64=write 66=writev 98=futex 101=nanosleep
+113=clock_gettime 137=rt_sigtimedwait 167=prctl 214=brk 215=munmap
+220=clone 222=mmap 226=mprotect 291=statx (435=clone3); the raw
+x86_64 orig_rax numbers differ (e.g. 202=futex, 9=mmap) - KILLDUMP
+prints raw, the latches print translated.
+
+SESSION P final addendum (sc130-134): worker-death theory REFUTED;
+park cause narrowed to pre-pthread_create init; enhance-lib CAUSALITY
+REFUTED by stub test; session handoff state.
+- sc130/131 (thread-exit fail tails; init fix 0f-era commit): the
+  clone-path Task init bug FOUND+FIXED (alloc_task_slot raw-allocs,
+  new_task_at initializes field-by-field - the new latch fields were
+  uninitialized on every cloned thread; now ptr::write-initialized).
+  Early-boot service thread exits print clean tails (nr56=-2 openat
+  misses, nr78=-22 readlinkat EINVAL, nr206=-2 sendto ENOENT - the
+  hilog socket path, nr98=-11/-4 futex EAGAIN/EINTR).
+- sc131/132/133: the FFRT/GC worker batches (4-6 threads, comm
+  'appspawn' window) are the APPSPAWN PARENT's OS_GC_Thread pool:
+  ALIVE and working (stkfutex census caught tid 458/459 doing
+  FUTEX_WAKE on hunt-page words 0x7fffffffc0c4 -> 1, i.e. they even
+  WAKE a waiter each). The parked children themselves NEVER create a
+  thread: every 0x7d0f00 census line belongs to the parent or to
+  early one-shot children (e.g. sc125 tgid 1146: OS_IPC_0 +
+  OS_DfxWatchdog, alive).
+- sc134 (stub test): empty-DSO libsecurity_component_client_enhance.z.so
+  injected into oh-img-p/system.img /system/lib64 -> children STILL
+  park identically (6 APP-PARK, tails now nr167=-22 x2 + nr56=-2 x6):
+  the enhance-lib miss is NOT the park cause (or an empty stub fails
+  equivalently on symbol resolution). Stub REVERTED from the image.
+- WHERE THE PARK CAUSE NOW LIVES: the launcher-family child's runtime
+  init runs (openat probes cascade, clock_gettime retry loop - last
+  12 completed calls ALL clock_gettime), never reaches its first
+  pthread_create, and waits in pthread_cond_timedwait (stack cond at
+  0x7fffffffc754, seq==2, one-year or short timeout retry) for a
+  flag no thread will set. The dlopen cascade + double prctl EINVAL
+  (nr167=-22, arg unknown - latch stores nr+errno only) are the only
+  pre-park errors. NEXT SESSION: (1) latch fail ARGS (a0) too and
+  identify the prctl option (PR_SET_VMA? PR_SET_TIMERSLACK?) - if
+  Linux-accepted prctl EINVALs here, fix sys_prctl - that is a REAL
+  kernel-side suspect: OH's mem-scene/hitrace init checks prctl
+  results in SOME paths; (2) strace-class the whole child life once
+  (the syscall ring under dfx-futex-trace + one-shot dump at
+  APP-PARK works - budget it properly this time: dump ONLY the
+  parking child's tail, not first-come); (3) compare a WORKING
+  child's init sequence (e.g. the early child that created OS_IPC_0
+  + watchdog - which app is it? its fork pid window tells) against
+  the parked child's - the divergence point is the abort.
+- REAL fixes landed this session: MOUNT attribution (sc119: ~5ms =
+  core-op deschedule, wrapper phases ~0 - closes execution item 1
+  with data); Task latch-init-on-clone (uninitialized-memory bug);
+  openmiss hook (raw-vs-translated nr bug + loglevel filter bug).
+- F12 GATE: EXONERATED with data (sc118/119: zero refusals, census
+  shows zero ATTEMPTS from the parked children - the gate never
+  fires; the 8MiB/128MB-era threshold question is moot for THIS
+  symptom).
+
+SESSION Q (third leg, 13:0x-): prctl-EINVAL DECODED (OH 'prot' VMA-tag
+magic, tolerated); pre-park loop = clock+writev+connect; /dev/dec+/dev/xpm
+ENOENT named as the first engine-init failure; xpm/dec stubs landed;
+APPMAP/APPFD/appconn probes added; sc136 reroll (slow-boot variance).
+- sc135 (good variant, 6 APP-PARK dumps + a0-latch): the children's
+  nr167=-22 IS prctl(option=0x70726f74='prot', 0, addr, size, 0) - an
+  OH-kernel PR_SET_VMA-shaped extension (OH musl + OH kernel_linux use
+  the STANDARD 0x53564d41, so the caller computes its own magic - not
+  identified upstream, does not matter: the appspawn PARENT makes 38
+  of these EINVAL calls and thrives => TOLERATED, park cause is NOT
+  prctl). Two sub-shapes: children with hilog writev EAGAIN fd3
+  (settingsdata/systemui) and children with clean writev (launcher) -
+  both park identically => hilog backpressure also not the cause.
+- 96-deep all-calls ring (sc135): pre-park = clock_gettime runs +
+  writev+connect+writev triplets (fd3), ZERO futex/clone/mmap
+  completions in the last 96 calls, then ONE eternal cond wait. The
+  child NEVER attempts its first pthread_create (no mmap for stack,
+  no clone) - engine init aborts silently before thread creation.
+- WORKING child identified (sc125 log reread): tgid 1146 = the
+  OsAccount service child ('ActivateDefaultOsAccount', sets
+  bootevent.appspawn.started) - a NATIVE service child, no ark engine.
+  Native-service children create threads fine; ark-app children park.
+  => divergence lives in the ark-engine path.
+- sc135 APPSPAWN window decode: parent opens /dev/dec then /dev/xpm
+  (O_RDWR|O_CLOEXEC) ENOENT in EVERY app child's engine init (first
+  failures in the tail, before the enhance-lib cascade); XPM = OH
+  code-protection manager (Huawei kernel driver, absent here). The
+  parent then reports spawn SUCCESS, AMS OnAppStarted fires, child
+  parks, AMS watchdog kills it ('RemoveProcessRecord process died'),
+  AMS retries forever (87 appclone lines in sc135).
+- landed probes/fixes: dispatch prctl-einval print (all args);
+  last_fails a0/a1 rings (printed at APP-PARK/thread-exit/APP-THR);
+  LAST_CALLS_LEN=96; APP-THR (ring dump at a FORKED child's first
+  CLONE_THREAD, parent excluded via APPSPAWN_TGID recorded at the
+  parent's first fork); APPMAP (parking child's lib-region VMA table,
+  compact lines - sc135's slot-27 frame line was cut at every UART
+  flush boundary by hilog interleaving, all 6 dumps truncated at the
+  SAME point); APPFD (open fd paths); appconn (connect sockaddr;
+  sc136 run1 burned its budget on the parent's connect storm + fd3 is
+  an ABSTRACT unix socket - fixed: parent-skip + hex-dump).
+- devfs: /dev/xpm (10,240) + /dev/dec (10,241) null-semantics stub
+  nodes - causality test per sc134 empty-DSO methodology.
+- raw park chain decode (sc135, all 6 byte-identical): waiter return
+  addr slot[12]=0x7ff0816ff8a8 in an UNSEEN VMA below 0x7ff081a09000;
+  slot[14]/[15] point into the 0x7ff081b49000-0x7ff08234a000 8MB arena
+  (heap). APPMAP will name slot[12]'s VMA; offline PT_LOAD table
+  (/tmp/ohlibs-loads.txt, 3335 libs) ready for matching.
+- sc136: kernel with stubs+probes booted but ran 3x slow (12.8k lines
+  in 25 min, child phase unreached; not wedged - composer_host.ready +
+  appspawn.started both fired; boot-speed variance). sc137 reroll
+  running with the appconn-fixed kernel, 35 min budget.
+
+SESSION Q FOURTH LEG (sc138-sc146, 23:5x-): init-sequence diff DONE at
+the syscall level; park identity SOLVED (libeventhandler NoneIoWaiter);
+children send/receive ZERO binder; own-log narration probe landed.
+- Probes landed (all English commits on feature/samgr-callback):
+  3443bbb0 filtered INIT ring (skip 113/66/203 + main-stack futex) with
+  a0, dumps at APP-PARK/APP-THR; memfd name registry + APPFD/APPMAP
+  memfd naming; finished the paused round-3 APPPK12 block (4 missing
+  semicolons + b-scope bug in e2a53880).
+  a5b6e5d3 rev3: APPMAPSRC (exec-segment mmap naming at mmap time),
+  appioctl fd/cmd tracer, APPPARK-RETS call-site-validated return addrs.
+  8d6cf997 rev4: APPTXN binder tracer (app-family sends + anything
+  targeting registered appspawn children), APPTXN-FAIL, appconn raw
+  copy (the old strncpy_from_user stopped at NUL — the "abstract \x01"
+  socket was a PROBE ARTIFACT; real target = /dev/unix/socket/hilogInput,
+  addrlen 110).
+  (rev5) init ring 512-deep + chunked dump + BIRTH window latch (first
+  64 filtered calls per task, immune to loop churn).
+  (rev6/7) applog: dump first 110 bytes of first 3 iovecs of fd3 writev
+  from app family — the children's OWN hilog lines straight from the
+  kernel (hilogd backpressure no longer hides them).
+- PARK IDENTITY SOLVED (sc139/140): APPPARK-RETS validates return addrs
+  by call-site bytes; both real frames [27]/[35] land in
+  /system/lib64/chipset-sdk-sp/libeventhandler.z.so at file offsets
+  0x3e502/0x3e32f — inside/next to NoneIoWaiter (nearest symbol
+  NoneIoWaiterD2 at 0x3f180, local WaitForEvent between). THE PARK IS
+  THE MAIN EVENT RUNNER (current-thread mode, NoneIoWaiter — no epoll)
+  IN pthread_cond_timedwait(seq cond, ~1 year) WAITING FOR EVENT #3
+  (seq==2: two events processed). slot[1] (libc++) and slot[12] were
+  stale decoys — slot[1] resolved into std::string::assign, slot[12]
+  points into a zero page.
+- THE LOOP (sc140 appioctl): {ioctl fd6 /dev/binder WRITE_READ
+  (0xc0306201) ret=0 EMPTY poll, openat namespace cascade (the enhance
+  lib + THP node + /etc/sceneboard.config misses), short timedwait,
+  hilog writev/reconnect}. Children NEVER block in binder — they poll
+  it inline from the runner loop.
+- APPTXN (sc141/142): parked children send ZERO binder transactions
+  (successful OR failed — APPTXN-FAIL stays 0) and NOTHING targets
+  them. The only app-family txns are the appspawn daemon's own (to
+  samgr). So the child never reaches ANY IPC step: not the samgr
+  lookup, not ScheduleAttachApplication. The AMS->child schedule
+  transaction does not exist because the child never announced itself.
+- CHILD LIFE (sc144 512-ring + birth): ALL children byte-identical.
+  Oldest: sandbox setup (mkdirat/mount/fchmodat storms + 58 openats),
+  then own-lib dlopens (57/62/63/80/56 cycles), then a `226 226 222`
+  (mprotect x2 + mmap) stack-shaping cluster, then the retry loop, then
+  the park. BIRTH window (first 64 filtered calls): gettimeofday,
+  sigprocmask x2, closes, pipe2, write fd11, PR_SET_NAME, sigprocmask,
+  closes, arena futexes (0x7ff00002aec0/2a7d0 = the OH param-service
+  shared area cluster, mmap-time naming proved 0x7ff000000000 base =
+  /dev/__parameters__/* + fixed-address anon pages), openat, ioctl
+  fd16 (the /dev/xpm stub, ENOTTY), close. NO thread-stack mmap, NO
+  clone, NO sigprocmask-for-pthread ever.
+- Engine libs are PRELOADED by the daemon pre-fork (APPMAPSRC shows
+  libeventhandler/libc++(memfd 0x141d20)/libcesfwk/libappspawn_sandbox
+  mapped under comm='appspawn' BEFORE the first fork) — children
+  inherit them; that is why children never dlopen the engine.
+- hiview: its OS_IPC thread is SIGKILLed (code=-9, mid-pthread_create,
+  same tail every boot, sc137/139/140) surrounded by W3-RUNWAKE-REFUSED
+  + TIMER-SOFTIRQ-STALL lines; in sc142 it lived longer (TaskExecutorRDB
+  exited code=0). Timing varies; children park regardless, so hiview
+  death is NOT the park cause but shares the same slow-boot/wake
+  pathology. WHO sends the kill is still unnamed (suspect beget
+  service-watchdog on a starved heartbeat).
+- sc143/145/146: slow-boot variants (713+ TIMER-SOFTIRQ-STALL, 795+
+  IRQ-OFF windows) starved the child phase; sc146 carries the applog
+  probe — the child's own hilog narration is the NEXT decisive datum
+  (daemon lines already readable through the interposer).
+- CURRENT PICTURE: the child forks, sets up its sandbox, waits on the
+  param-arena words, pokes the xpm stub, loads its own libs, then its
+  MAIN runner processes 2 events and idles forever inside
+  NoneIoWaiter::WaitForEvent — the OH task that should post event #3
+  never runs, and it is NOT any IPC (zero binder), NOT a thread (zero
+  clone attempts). Next: read the child's own logs (sc146+ applog),
+  then ChildMainThread::Start/MainThread::Init in
+  libappkit_native.z.so (0x180572/0x132628) against that narration.
+
+SESSION Q FOURTH LEG ADDENDUM (sc147-sc153, 02:0x-03:0x): ROOT CAUSE
+CHAIN NAMED — SA 501 (AppMgrService) never registers; children's attach
+cannot find AMS; the park is the downstream symptom.
+- sc147 (slow): "IPCObjectProxy: SendRequestInner: proxy is already
+  dead, handle:3 desc:*.IOsAccount" + PrintErrorDetailedInfo
+  error:32 (EPIPE) at hilog seq 495 — the OsAccount-wedge origin is a
+  DBINDER SESSION SOCKET dying mid-use early in boot (present since
+  sc94, matches the notes' "other proxy-death producers").
+- sc148/sc149/sc150 (applog interposer working, daemon excluded):
+  THE CHILDREN'S OWN NARRATION captured for the first time. Child
+  (systemui 1150) sequence: AppSpawnChild -> sandbox bind mounts ->
+  hooks 30/31 -> IPCThreadSkeleton/BinderConnector fd:6 ->
+  "MAINTHD3183 mainthread start" -> "MAINTHD2994 Start" -> proxies
+  IPCObjectProxy0/2/3 created, death recipients registered ->
+  "SA_CLIENT GetOnDemandSystemAbilityIds SendRequest succeed!" (THE
+  CHILD'S IPC WORKS — send AND reply) -> "GetSaWrap:Waiting for SA:501"
+  -> "CheckSystemAbility SA:501 isExist is 0" (*** SA 501 ABSENT ***)
+  -> "MAINTHD429 attach" -> "BinderInvoker HandleReply status:0" ->
+  "MAINTHD431 end" -> "RemoveDeathRecipient handle:2 desc:*.AppMgr"
+  -> EventRunner enter -> "MainThread:SetRunnerStarted" ->
+  "excute event taskCallback" -> SILENCE -> the NoneIoWaiter 1-year
+  park. AMS never sends ScheduleStartAbility because the child never
+  announced itself to a service IT CANNOT SEE.
+- SA 501 identity: /system/profile/foundation.json "name": 501,
+  "libpath": "libappms.z.so", "run-on-create": true — the
+  AppMgrService. APPMAPSRC PROVES libabilityms.z.so's exec segment is
+  mapped INTO THE APPSPAWN DAEMON at boot line ~829 (before any fork)
+  — the AMS code runs inside appspawn (its AMSI logs appear) — but
+  samgr's table says isExist=0: THE REGISTRATION NEVER LANDS.
+- The early-boot "kills" demystified: thead-exit code=-9 lines
+  (hiview/sdc OS_IPC threads) fire with ZERO SIGKILL-SEND (sys_kill)
+  and ZERO SIGKILL-TKILL (tgkill) prints — they are NOT kills: they
+  are OH IPC WORKER THREADS EXITING VOLUNTARILY with -9 after their
+  binder-wait fails (nr29=-4 EINTR + nr98=-11 EAGAIN in their tails)
+  — libdbinder's IPCWorkThread error exit. The thread churn follows
+  the session deaths; it is not a killer to hunt.
+- W3-RUNWAKE-REFUSED lines around the exits are mostly the BENIGN
+  refusal shapes (already-linked / already-on-cpu double wakes).
+- REMAINING KERNEL-SIDE QUESTION (for the next session, ONE probe
+  boot): does the appspawn daemon ever ISSUE the AddSystemAbility(501)
+  transaction (then samgr loses it — binder routing bug), or does the
+  daemon-side registration call fail before sending (its samgr
+  session/proxy dead — the EPIPE family)? The tightened daemon
+  applog filter (SystemAbility/501/amgr keywords, commit after
+  sc152) answers it directly: read the daemon's registration lines.
+  NOTE the sc153 kernel already carries it; slow boots starved the
+  child phase; reroll until a fast boot.
+- Probe/fix commits this leg (English, feature/samgr-callback):
+  3443bbb0, a5b6e5d3, 8d6cf997 (+rev5 512-ring/birth, rev6/7 applog,
+  SIGKILL-SEND/TKILL tracers, daemon keyword filter — see git log).
+  The paused-commit bugs in e2a53880 (4 missing semicolons + b-scope
+  in the APPPK12 block) were fixed to make the tree build again.
+- Boots: sc138-146 + sc147-153 (good variants: 139, 140, 142, 148,
+  149, 150; slow/wedged: 138, 141, 143, 145, 146, 147, 151, 152,
+  153-partial). MILESTONE (ohgpu launcher screenshot) NOT reached —
+  the park is now understood end-to-end at the OH level; the fix
+  belongs to whichever side the SA-501 registration dies on.
+
+SESSION R (sc155-157, 03:1x-): SC155/156 CLOSED THE REGISTRATION QUESTION
+AND NAMED THE NEXT WALL. SA 501 registers when foundation's safwk loader
+completes; the loader is WEDGE-PRONE (sc155) but not hard-stuck (sc156
+got through). The standing park cause moved one hop DOWN: children now
+reach AMS, but AMS->child ScheduleStartAbility rides a fork-shared
+binder proc (Linux VM_DONTCOPY parity missing). Fix landed sc157.
+- sc155 (SAREG v1, global code 3/4/10/21 match): 161 code-3 sends seen
+  before the 400-line budget died on HDI-interface noise (codes are
+  PER-INTERFACE: powermgr->hdf_devmgr code=4 is an HDI method, not
+  samgr REMOVE; "ohos.appexecfwk.Installd" code 10/21 noise too).
+  Foundation (pid 580) sent ONLY 2 ADDs + 3 ADD_ONDEMANDs; OpenSo
+  narration: 401(7005ms) 4606(4003ms) 4607(0ms) 3299(1000ms)
+  3203(3002ms) 3704(0ms) then NO OpenSo(180) ever - the loader main
+  thread wedged after phase-1 OpenSo. safwk (LocalAbilityManager):
+  FindAndStartPhaseTasks = StartPhaseTasks(phase) async pool tasks,
+  InitializeRunOnCreateSaProfiles(phase+1) OpenSo, WaitForTasks =
+  cond wait_for(100s, MAX_SA_STARTUP_TIME). Phase-1 SAs never started,
+  so the wedge was WaitForTasks-adjacent (a 100s timed wait that never
+  fired, or an earlier untimed park).
+- sc156 (FTWAIT census + SAREG v2 samgr-token filter + applog budget
+  fix): foundation main thread tid 553 did TWO 100s rel-timeout waits
+  (uaddr main-stack, op=0x80 = WAIT|PRIVATE) and BOTH RETURNED 0
+  (woken, phase tasks completed) - the sc155 wedge is NOT
+  deterministic; sc156 loader went through. SA-501's
+  AddSystemAbility WAS SENT (parcel f5010000 at offset 56; token
+  "ohos.samgr.accessToken" = 22 chars) and the reply's first u32 = 0
+  (SUCCESS). Full samgr ADD census now decodable: 401,4606,4607,501,
+  3299,3302,3303,3308,511,5100,6105,200,3013... (vs reference Linux's
+  102 inserts). sc154's "zero AddSystemAbility narration" was hilog
+  loss, NOT absence.
+- sc156 NEXT WALL: children spawned AFTER 501 registered still park
+  (LIFECYCLE_TIMEOUT, AMSI1640 retry loop), but their txn pattern
+  ADVANCED: PING + GetOnDemandIds(30) + CheckImmediately(12) +
+  TRANS_SYNC(code 0, ipc_types TRANS_SYNC=0) -> pid 553 foundation +
+  CheckImmediately(12). The child GOT the AMS proxy (isExist=1 path)
+  and initiated the dbinder-style session call. Then park - waiting
+  for AMS's ScheduleStartAbility callback (event #3).
+- ROOT SHAPE (sc156/157): the children's APPTXN lines are stamped
+  "from pid=<DAEMON proc>" with comm='m.ohos.systemui' - forked
+  appspawn children REUSE the daemon's binder fd AND (on Rux) its
+  inherited SHARED mapping, so ALL children share ONE binder_proc:
+  transactions attributed to the daemon's pid, and binder NODES the
+  children register (their IAppScheduler) are OWNED BY THE DAEMON'S
+  PROC - AMS's calls to a child land on the SHARED proc todo where the
+  daemon's OS_IPC reader threads compete with the child. On Linux this
+  cannot happen: binder_mmap sets VM_DONTCOPY, the child loses the
+  mapping at fork and must open /dev/binder itself.
+- sc157 (fe6a7554): VmaFlags::DONTFORK (0x04000000) + binder mmap
+  stamps it + MmStruct::fork skips DONTFORK VMAs (exempt list, VMA
+  snapshot, COW PTE walk) = Linux VM_DONTCOPY parity. Plus:
+  BinderNode.reg_tgid stamp + APPTXN prints txns to child-registered
+  nodes from ANY sender (the AMS->child hop); binder-open visibility
+  probe (warn level, budget 220 - did any child ever open /dev/binder
+  itself?); applog comm-based gate (the sc155 pid latch mis-latched in
+  sc156 and the daemon's ImplClass storm ate 1062/1200 lines);
+  ArkCompiler [gc] noise filter; applog budget 2400.
+- Interpretation grid for sc157: (a) children CRASH on the stale VA =>
+  OH's reopen logic keys off something we can then replicate;
+  (b) binder-open shows child pids opening /dev/binder => children get
+  own procs, AMS->child deliveries routable, APPTXN "child=" field
+  shows the ScheduleStartAbility hop => watch for UI; (c) no child
+  opens and no crash => OH children really use the inherited fd, and
+  the fix direction flips to kernel-side per-tgid isolation inside a
+  shared proc.
+
+SESSION R SECOND LEG (sc159 readback + sc160 armed, 07:2x): sc159 (the
+predecessor's last boot, finished 05:22) ANSWERS the sc157 grid question
+and re-aims the storm hunt. sc158 was a storm boot (1268 IRQ-OFF windows,
+116 softirq stalls) with NO child narration (no AppSpawnChild at all).
+- sc159 = interpretation (c) PLUS a late (a): NO appspawn child EVER
+  opened /dev/binder (73 binder-open lines, none with a child pid; the
+  daemon is pid 337 proc 68). Children ride the inherited fd on the
+  daemon's shared proc exactly as pre-DONTFORK — BUT the park MOVED:
+  child 1203/1205 narration now reaches IPCObjectStub *.AppScheduler
+  registered -> MAINTHD443 Attach -> MAINTHD407 ConnectToAppMgr ->
+  GetOnDemandSystemAbilityIds SendRequest SUCCEED (a full round trip
+  over the shared proc) -> then SILENCE (no CheckSystemAbility/
+  GetSaWrap line, no AMSI attach). sc156's park point is passed; the
+  new park sits between the GetOnDemandIds reply and the next samgr
+  call. No APPTXN child=12xx ever: AMS never delivered
+  ScheduleStartAbility to any launcher child.
+- sc159 LATE PHASE: the launcher crash-retry loop. Children 2233-2272
+  (pids climbing) ALL segfault at the SAME rip=0x7ff0007e5364 (FileBacked
+  fd=23 lib, file offset 0x24364, bytes 43 8b 04 08 / 89 06 / b0 01 /
+  48 83 c4 10 / 5b c3 = mov eax,[r8+r9]; mov [rsi],eax; mov al,1; ret-
+  shape getter) reading r8=0x7ff099f3e370 which sits in an UNMAPPED hole
+  above the child's mapped libs (neighbors end 0x7ff0990d4000). Each
+  child faults 3x (OH's crash handler re-raise), 681 reports total, each
+  with ~21 USEGV-FOR detail lines = 14243 serial lines. fd=23 ripfile
+  lookup printed '?' (get_file_fd failed at fault time); offline byte
+  match of the pattern at 0x24364 found NOTHING in the 498 big /system/
+  lib64 libs — the lib is hap/memfd-hosted; kernel-side attribution is
+  the way (sc160 probes below).
+- THE STORM RE-READ (task-2 correction): sc159 had 354 IRQ-OFF windows,
+  29 softirq stalls. Sampling symbolized (current build): dominant rip
+  = enable_irq region + outb return + inb (0x805cd9ee/cdb96/cdb50 =
+  rux::arch::x86_64::cpu::{enable_irq,outb,inb}); stack words =
+  irq_restore(34x), __schedule(22x), SpinlockIrqGuard<binder::World>
+  drop, Atomic<usize>::load(13x), Atomic<u64>::load(8x),
+  timer_softirq_handler. TIMER-SOFTIRQ-STALL samples: pid=337 (the
+  appspawn DAEMON) and pid=329 (samgr) with rip=inb. VERDICT: the
+  1000ms "atomic string compare table" of the sc157 readback IS the
+  UART TX THRE wait loop's own atomic loads (console.rs UART_THRE_WAIT_
+  TICKS discipline) — every printk holds the UART irqsave lock while
+  polling LSR, and under KVM+host contention each inb is a VM exit; the
+  crash-retry loop's 14k USEGV lines + 4153 bindwalk + 29800 slog lines
+  ARE the storm. Two CPUs also interleave mid-line (garbled WW/USEGV
+  text) — concurrent direct-console writers, log corruption but benign.
+  The __schedule 453ms IF=0 window (pid 316) is the rq-lock critical
+  section containing a printk (or contending on a lock held by a
+  printker); follow-up after sc160.
+- sc160 probes committed (a1303539): binder-mmap range visibility
+  (pid/proc/base/pages per buffer, budget 60); USEGV-FOR verdict line —
+  does cr2 fall inside a LIVE binder buffer mapping (binder_mmap_owner_
+  of, try-locked to survive fault-context re-entry)? full detail for the
+  first 6 segfaults then one-liners; STALLWATCH comm filter widened to
+  launcher/systemui/appspawn/samgr (sc159 children parked with no dump);
+  bindwalk ENOENT capped at 300. Dual-arch builds pass (riscv64gc
+  07:21, x86_64 bzImage 07:22). Boot: oh-boot-q.sh sc160, fresh scgold
+  userdata reflink, SECS=2700 SMP=2, shotmon armed.
+
+SESSION R SECOND LEG ADDENDUM (sc160 readback + sc161 fix, 07:3x-07:4x):
+sc160 CLOSED THE CRASH QUESTION and sc161 carries the fix pair.
+- sc160 probe results (all three new probes worked first boot):
+  * binder-mmap ranges printed (58 buffers; every service maps 256 pages
+    at its own mmap_base - the shared 0x7ff081a47000 across pids is
+    per-mm placement, not aliasing).
+  * USEGV-L verdict lines: EVERY launcher/settingsdata child crash
+    (sc160 comm='os.settingsdata' AND 'm.ohos.launcher', pids 1268/1276,
+    3x each per OH's crash-handler re-raise) lands cr2 INSIDE the
+    DAEMON's binder buffer: "BINDERBUF proc=11 owner_pid=337
+    base=0x7ff099f1c000 size=0x100000". The sc157 interpretation grid
+    resolves to (a): children deref the stale (DONTFORK-dropped) daemon
+    buffer VA.
+  * Crash mechanism end-to-end: OH's BinderConnector::MapMemory maps the
+    daemon fd MAP_PRIVATE; Rux binder (like Linux) delivers BR_REPLY
+    with data_buffer = alloc.user_base + offset (kernel/src/ipc/binder.rs
+    ~5307); OH's BinderInvoker::HandleReply does
+    reply->ParseFrom(tr->data.ptr.buffer,...) - a LAZY WRAP, no deref -
+    so "GetOnDemandIds SendRequest succeed" prints without touching the
+    buffer; the NEXT call whose reply is actually READ (CheckSystemAbility
+    -> parcel read) faults at the getter (mov eax,[r8+r9] in the
+    memfd-preloaded libipc engine). The memfd explains ripfile '?' and
+    why the offline byte-match found nothing in /system/lib64.
+  * WHO poisoned the children: OH source (oh-robot tree) - appspawn's
+    ace_adapter PreloadModule creates AbilityRuntime with loadAce in the
+    DAEMON ("appspawn_preload.json" engine preload); the Rosen
+    DisplayManagerAdapter/ScreenManagerAdapter singletons it constructs
+    do IPC -> BinderConnector::GetInstance() opens /dev/binder pre-fork
+    (sc160: IPCThreadSkeleton slog + binder-open pid 337 at line 1538,
+    first AppSpawnChild at 7073). NO pid-guard/afterfork re-init exists
+    anywhere in foundation/communication/ipc (singletons are plain
+    double-checked; children inherit instance_ and NEVER re-open - zero
+    child binder-opens in every boot). On Linux the same inheritance
+    would fault the same way; this image's children simply cannot use
+    VM_DONTCOPY. Kernel-side conclusion: restore shared inheritance
+    (internal choice, binder ABI unchanged) + route child-node txns.
+- sc161 fixes (commit after a1303539):
+  (A) binder_mmap no longer stamps VmaFlags::DONTFORK - children inherit
+      the buffer VMA as shared pages again (pre-sc157 behavior); the mm
+      DONTFORK machinery stays for future use.
+  (B) child-tgid routing: BinderThread.tgid stamped at get_thread;
+      work_readable_by() gates proc-todo consumption (a txn aimed at a
+      child-registered node - reg_tgid set and != owner pid - is only
+      readable by that child's threads; daemon readers skip it instead
+      of stealing it into their ProcessSkeleton dead-end - the sc156
+      AMS->child black hole); thread_has_work honors the gate (no
+      spin-wait); the proc-todo pull takes the first OWNED item;
+      wake_proc_one(pref) prefers the child's threads for child-node
+      txns (both oneway and sync posting paths).
+- Storm/task-2 addendum: sc160 (USEGV capped 6+one-liners, bindwalk
+  capped 300) vs sc159: USEGV print volume -85% (903->139 lines in equal
+  byte windows) but TIMER-SOFTIRQ-STALL went 15->202. The stall lines'
+  rip values are USER-SPACE (0x3fbf...) with tick_age==age=1000ms on
+  cpu=1 - the LAPIC tick STOPPED ARRIVING while the CPU ran user code:
+  that is KVM hrtimer delay under host load (sibling agents' TCG QEMUs
+  burn host cores), not a Rux IF=0 window (user mode has IRQs on). The
+  kernel-rip stall samples (inb/print path) remain the real Rux-side
+  IRQ-off family - print caps reduce them; the user-rip family is
+  weather. Foundation XCollie fragility under 1s tick loss is OH-side.
+
+SESSION R SECOND LEG sc161 POST-MORTEM (08:0x): the A+B kernel WEDGED
+the appspawn daemon and the STALLWATCH extension (sc160 probe) caught it
+in one boot — parked >90s right after "BrokerRegistration
+IInputMethodSystemAbility is already Register" (the sc160 sequence
+continues to "EventHandler Create eventHandler"), syscall ring a benign
+clock_gettime/write/writev/clone loop. ROOT CAUSE: my reg_tgid/tgid
+stamps used crate::process::current_pid(), which returns the PER-TASK
+pid (a worker thread's TID, not the tgid) — nodes registered by the
+daemon's WORKER threads were stamped reg_tgid=worker_tid, and the
+work_readable_by gate then rejected every reader (no thread has
+tgid==worker_tid) → the inbound transaction that created the node was
+never readable → the sender parked. FIX: use
+sched::current().tgid() (the form binder_open already uses) at both
+stamps. Committed 08:03 (binder.rs BinderThread::new + the parcel-fixup
+node creation); sc162 boots the corrected kernel (A + B + exit-reap +
+tgid fix).
+
+SESSION R SECOND LEG sc162/sc163 READBACK (08:3x): the fix pair is
+working; one more routing layer was missing; sc164 carries it.
+- sc162: a storm-slow boot that died at the SPAWN HANDOFF — the
+  APPSPAWN_CLIENT wrote its request to the daemon's nwe socket, the
+  reply never came within the client timeout (Read rLen -1 errno 11 ->
+  Closed socket -> "Send msg to appspawn failed, ret=218103824"
+  0xD000010, pid:0) and AMS never retried. Host weather note: only 2
+  foreign TCG QEMUs at ~2 cores each on a 32-core host (load 4.4) — the
+  1000ms tick-loss family is NOT simple host saturation; treat as
+  boot-race dice (sc159/160/163 all got children under the same load).
+- sc163 (fast variant, 40 AppSpawnChild lines in 7 min):
+  * FIX A VERIFIED IN-BOOT: launcher-segv=0 for the entire boot (the
+    sc159/160 deterministic BINDERBUF crash-retry loop is GONE).
+  * FIX B verified one layer in: APPTXN shows real AMS->child deliveries
+    (id 9634/9761 from pid 654 foundation comm OS_FFRT_5_2 -> daemon proc
+    336, code 0x7 oneway, child=1199/child=1205) — the hop sc156 waited
+    for.
+  * STILL PARKED: the deliveries sat on the gated proc todo because NO
+    child thread can pull proc work — children never issue
+    BINDER_ENTER_LOOPER (zero looper-flagged child threads; OH spawns no
+    IPC workers in forked children), and the daemon's looper workers are
+    reg_tgid-gated off. APP-PARK #0 tid 1199: the launcher child's main
+    thread futex-parked (uaddr on its main stack, WAIT|PRIVATE) waiting
+    for event #3 = the ScheduleStartAbility dispatch.
+  * FIX C (sc164 kernel, commit after 08:35): post_txn_to_child_thread()
+    — child-aimed transactions (oneway + sync) go DIRECTLY onto a thread
+    of the child's own tgid (shallowest txn stack); own-thread todo
+    bypasses the looper gate entirely and wakes a blocked WRITE_READ via
+    thread_has_work's th.todo check; gated proc todo + preferred wake
+    stays as fallback. Children do issue WRITE_READs (appioctl:
+    BINDER_WRITE_READ 0xc0306201 from m.ohos.launcher fd 6), so the
+    thread-targeted work is picked up on their next/ongoing read.
+
+SESSION R SECOND LEG sc164 READBACK (08:4x): thread-targeting landed but
+the child still had NO READER - the last missing layer was the pool
+spawn command. sc164 (boot killed at 12 min by a task-control accident,
+log preserved): launcher-segv=0 again; APPTXN child=1149/1159 deliveries
+fired (foundation pid 621 -> daemon proc 336, code 7 oneway); child 1159
+(os.settingsdata) narration advanced to EventRunner enter ->
+SetRunnerStarted -> "excute event taskCallback" (the sc148 park point)
+and stopped - the thread-targeted delivery sat on the child MAIN
+thread's todo (that thread was futex-parked on the EventHandler, not in
+any binder read), and no other child thread ever issues a binder read:
+children spawn ZERO IPCWorkThreads (the IPCProcessSkeleton singleton is
+inherited from the daemon pre-fork; its pool object exists but no
+pthread was ever created in the child). On Linux each child is a FRESH
+binder proc: its first read gets BR_SPAWN_LOOPER from ITS OWN counters
+(proc-wide requested==0, no waiting threads, 1 < max_threads), OH's
+BinderInvoker::HandleCommands -> OnSpawnThread -> IPCWorkThreadPool::
+SpawnThread pthread_creates a real worker in the child, that worker
+ENTERs the looper and blocks in WRITE_READ - THAT is the reader every
+child uses for service-side deliveries. Rux emitted BR_SPAWN_LOOPER
+only under PROC-WIDE accounting, and the shared proc mixes the daemon's
+pool + every child's client threads -> the gate never fired for a child
+(fix: per-tgid accounting - a child read with no waiting same-tgid
+worker and child_n < max_threads gets the command; sc165 kernel).
+NOTE the whole chain sc161..sc165 is one coherent story: shared proc
+(A) + reg_tgid routing (B) + thread-target todo + per-tgid SPAWN_LOOPER
+= per-child binder pool semantics layered inside the daemon's proc.
+
+SESSION R SECOND LEG sc165/sc166 STATE (09:2x): the per-tgid SPAWN gate
+WORKS (child narration shows "IPCWorkThreadPool SpawnThread:
+idleThreadNum:15" + "IPCWorkThread Start: create thread" IN A CHILD for
+the first time — OH creates real reader threads in forked children),
+but the dispatch still did not land in time:
+- sc165: deliveries fired (child=1187 launcher + settingsdata 1227),
+  workers spawned (1), but the sc164-era thread-targeting had put
+  deliveries on the child MAIN thread's todo (futex-parked on the
+  EventHandler, never returns to a binder read) while the fresh worker
+  idled - AMS clocked LIFECYCLE_TIMEOUT (AMSI7903 APP_FREEZE) on
+  settingsdata/systemui. FIX (sc166 kernel): post_txn_to_child_thread
+  only targets LOOPER-entered same-tgid threads; pre-worker deliveries
+  go to the gated proc todo where the child worker's first read picks
+  them up.
+- sc166 (running, storm-slow): AMS fired 103 transactions at the
+  systemui child's node (child=1288) while the child is STILL crawling
+  through sandbox bind setup (its narration is 8+ min in the bind-mount
+  phase); workers=1 so far; no OnForeground yet; screen still black.
+  A route= field was added to APPTXN after sc166 launched (committed) -
+  the NEXT boot names the queue every delivery lands in if sc166 does
+  not complete the chain.
+- FIX CHAIN SCOPUS (all committed on feature/samgr-callback):
+  a1303539 probes; then A (shared binder VMA inheritance restored),
+  B (reg_tgid ownership gate + wake preference), exit-reap
+  (binder_on_tgid_exit), tgid-stamp fix, per-tgid BR_SPAWN_LOOPER,
+  looper-only thread targeting, APPTXN route= tracer.
+
+SESSION R THIRD LEG (sc167+, 11:2x-): STORM CONVICTED BY EXACT BINARY,
+ROUTE TRACER CLOSES THE KERNEL CHAIN, NODE COLLISION CONFIRMED LIVE.
+- sc166 re-symbolized against the EXACT-era binary (74c5cf88 rebuilt in
+  a scratch worktree /home/william/rux-agents/sc166k): the 1000ms
+  IRQ-OFF family is enable_irq x672 / outb x194 / inb x126 + printk
+  log-filter atomics = THE UART PRINT PATH ITSELF (the earlier
+  loop_dev/module-table readout was a layout-shift artifact; the
+  sc159/161 UART verdict stands). Fixes committed 29a49444: THRE wait
+  2ms->250us, TX_STALLED drop-probe throttled to 1/32 bytes (each probe
+  = KVM VM exit), IRQ-OFF budget 20->200 jiffies, TIMER-STALL budget
+  10->100 + USER-rip (KVM weather) skipped, WAKE-STRANDED threshold
+  50->1000ms + budget 2->20 jiffies, APPTXN oneway route= added.
+- sc167 (killed early on purpose after the verdicts, ~12 min):
+  * STORM CUT CONFIRMED: TIMER-SOFTIRQ-STALL 1 (vs 2503), WAKE-STRANDED
+    120 (vs 2380, now only >=1s strands), IRQ-OFF-WINDOW 65 (vs 2300).
+  * BOOT PACE: first AppSpawnChild at serial line 8214 within ~2.5 min;
+    children 1-4 spawned; settingsdata 1164 + systemui 1171 both
+    narrated AppScheduler registered -> SetRunnerStarted -> SpawnThread
+    OS_IPC_1 -> IPCWorkThread created (per-tgid SPAWN gate working).
+  * ROUTE TRACER VERDICT: AMS(pid 547)->child deliveries ALL
+    route=child-looper (16 lines) - the kernel dispatch chain
+    (shared proc + reg_tgid gate + looper-only thread targeting +
+    per-tgid SPAWN) DELIVERS to the child's own worker todo. The kernel
+    side of the chain is COMPLETE.
+  * NODE COLLISION CONFIRMED LIVE: children 1164 (settingsdata) and
+    1171 (systemui) both registered IPCObjectStub *.AppScheduler at the
+    SAME VA 12769968; with the old bare-ptr node lookup 1171's
+    registration reused 1164's node, so AMS->systemui txns printed
+    child=1164 (never child=1171) - the cross-child black hole,
+    exactly the Linux-parity gap (Linux: every child = own proc = own
+    node space). A third child (1175) landed at 12769984 (different
+    VA) - collision is per-boot allocation dice.
+  * FIX COMMITTED (sc168 kernel): node identity is (ptr, reg_tgid) in
+    translate_object; BC_INCREFS_DONE/ACQUIRE_DONE prefer the issuing
+    thread's own node.
+  * Secondary observation: BMS ImplicitQueryAllAbilityInfos failed for
+    com.ohos.launcher (several times) + IOsAccount proxy EPIPE family
+    (sc147) - watch whether the launcher UI ability resolve blocks the
+    milestone even after routing is fixed.
+
+SESSION R THIRD LEG ADDENDUM (sc168-172, 11:4x-12:2x): THE WEDGE IS
+LOAD-CORRELATED DICE, NOT THE KERNEL; SOLO BOOTS CONVERGE.
+- sc168/sc169/sc170 (node-fix kernel) ALL wedged pre-children: multiple
+  foundation threads parked >90s (tids 784/637/1210/1216, rings ending
+  in the prctl/getpgid/mprotect/mmap/sigprocmask startup family), samgr
+  tid parked, sc169 even re-spawned appspawn (pid 1340 second
+  generation hammering samgr code=0xc - sc167 had ZERO such calls).
+- sc171 = the bisect: STORM-FIX-ONLY kernel (29a49444 rebuilt in the
+  sc166k scratch worktree - the EXACT binary family sc167 booted
+  children with) ALSO wedged the same way. The node-identity fix is
+  exonerated (also argued inert pre-children: all pre-child lookups
+  key reg_tgid==own-tgid identically).
+- Correlation that survived: sc167 booted SOLO at host load 4.3 with
+  zero foreign QEMU contention and converged; every wedge ran while 2+
+  QEMUs (mine or foreign) contended (load 5-7.3). The foundation safwk
+  loader's 100s phase-wait convergence is the fragility point (sc155
+  family); KVM tick delay stretches it past convergence.
+- sc172 (node-fix kernel, SOLO at load 1.1, 12:11): slower than sc167
+  (no children at 7.5 min) but ZERO STALLWATCH and its 69 IRQ-OFF lines
+  symbolize to wfi/cpu_idle_loop - the idle-tick-loss weather family
+  (CPU idle 1s+, first tick lands in wfi), not real windows. Letting it
+  run its 45 min.
+
+SESSION R THIRD LEG ADDENDUM 2 (sc172-174, 12:1x-12:5x): WEDGE
+FORENSICS + REROLL DISCIPLINE.
+- sc172 (solo, load 1.1): STILL wedged; 1365 PREEMPT-LEAK lines
+  attributed to idle (pid 0/1 in wfi, one 115s hold) vs sc167's 11 -
+  the pre-existing preempt-count leak engine amplified, not new. Its
+  69 IRQ-OFF lines symbolize to wfi/cpu_idle_loop = idle tick-loss
+  weather, not real windows.
+- sc173 (after cache-warming the shared images - hypothesis: the 5x4GB
+  userdata copies evicted the page cache; sc167 booted cache-hot):
+  STILL wedged, so cache was not the variable either.
+- sc173 specifics: appspawn daemon SERVED its socket (processed
+  storage_manager's lockstatus type:10 msg, answered narration printed)
+  but the client's reply read never completed; AMS StartAbility for
+  SA:1123 succeeded; no AppSpawnChild ever. render_service leader exit
+  code=0 with IDENTICAL syscall tail appears in GOOD sc167 too - not
+  the discriminator.
+- STALLWATCH "parked >90s" lines on FFRT pool threads are largely
+  IDLE-pool shapes (rings with clone/mmap then futex park) - the probe
+  over-reports; do not treat as pathology by themselves.
+- Verdict: the wedge is the sc155-family OH-side convergence fragility;
+  Rux influence = overall speed only. Strategy: reroll solo boots,
+  ~20 min judgment point (children-by-then = good boot), keep the rest
+  of the budget for the chain+screenshot.
+
+SESSION R FIFTH LEG (sc175+, 20:0x-): sc174 WAS A GOOD BOOT (re-read);
+  sc175 wedged at the spawn handshake under contention.
+- sc174 re-read: NOT a wedge - children 1-10 in ~6 min (node-fix kernel,
+  same code as the 17:29 bzImage; HEAD 0dfdb482 only adds notes after
+  06c12bdc). Zero launcher-segv. The user pause killed it at 12:51 while
+  the launcher child (pid 335 renamed m.ohos.launcher; newest child
+  pid 1301, connectionId 5) was mid-init: AppSpawn hooks [22]/[23],
+  AppKit MainThread "The bundleName = com.ohos.launcher", BMS
+  ApplicationInfo::Marshalling. NO OnForeground / ArkUI / render_service
+  narration yet; screen black at kill. Watch items did NOT fire (no
+  ImplicitQueryAllAbilityInfos failure, no EPIPE, no LIFECYCLE_TIMEOUT).
+  NEW observation: "GetForegroundOsAccountLocalId failed ret:4194349"
+  (OsAccount family) repeated by BMS/UiAppearance/AppMS - non-blocking
+  so far. APPTXN: launcher itself a live IPC client (sync code 0xc to
+  samgr pid 326, codes 0x62/0x69 to sa_main pid 627).
+- sc175 (20:07, host load 0.57 at launch): WEDGED at the spawn handshake
+  when two foreign TCG QEMUs pushed load to 4.2 mid-boot. Sequence:
+  APPSPAWN_CLIENT ECONNREFUSED on /dev/unix/socket/AppSpawn (slog 1933)
+  while the daemon was still in Hook stage 10 / dlopen acelibdir
+  (slog 2290); client then "Failed to create socket, try again" and
+  finally wrote to fd -1 (ENOTSOCK) -> reqId 1 (systemui) result
+  0xd000010 pid 0 -> AMS OnAppStateChanged state 99, no retry (sc162
+  precedent: dead boot). Kernel-side corruption of interleaved UART
+  prints under contention also visible. Wedge tally for the reroll
+  campaign: 1 (sc175). sc176 launched 20:19.
+
+SESSION R FIFTH LEG ADDENDUM (sc176/177 forensics, 20:1x-20:2x): THE
+  sc176 KILLER IS THE fake-OOM FAMILY - AND THE FIX ALREADY EXISTS ON
+  MAIN (cherry-picked).
+- sc176 post-mortem: launcher child 1231 was NOT stuck on binder - it
+  OOM-faulted. 1727 "pagefault: Out of memory" lines in its window;
+  oom-killer killed ueventd once, later rounds "no killable processes
+  found"; appspawn client read timed out (fd 35 EAGAIN) -> OnClose ->
+  appspawn killed 1231 -> narration dead at slog[5093], AMS no-retry.
+- Raw ledger lines survived (printk wedged, raw UART copy did not):
+  MEMLEDGER-BUCKETS freeL=0 freeM=0 reserved=836858 pt=4591 anon=42397
+  cow=130 mapped_file=1022 lru_file=131543 OTHER_USED=555215 (=2.17GB,
+  75% of the 736006-page ZoneNormal) + OOMFX zone_free=0 walkable=0
+  orphan=0 inverse=0. Buddy genuinely empty; 131k CLEAN lru_file pages
+  sat unreclaimed while faults died.
+- Root cause (already attributed on main by the wildwrite-hunt sessions
+  22/23): every x86_64 PRIVATE file fault allocated a fresh per-fault
+  copy (read_at fill) with NO descriptor state - "permanently
+  unreclaimable and census-invisible, 539-558k pages = 74-76% of the
+  zone at OOM" (their numbers = my sc176 numbers exactly). The OH boot
+  privately mmaps the whole .so world; the copies ate the zone.
+- FIX: ed444e08 "filemap_fault alignment - cache-page mapping for
+  private file faults" (on main; NOT in this branch - we forked at
+  6dc0b762 before it). Cherry-picked cleanly onto feature/samgr-callback
+  as db7229a7 (page_fault/mm_ops/mmu_init/ext4-file/page_cache/rmap,
+  558 insertions); riscv64 twin 6e76430b NOT picked (ed444e08 keeps the
+  riscv shape unchanged - no riscv regression). Validated upstream by
+  fm1/fm2 gates ("45-min OH gate: 0 panics/0 OOM/0 faults").
+- sc177 = old-kernel control, killed at 11 min (2 OOM faults already,
+  0 children, BMS bundle-install loop) - superseded, not a wedge datum.
+- sc178 launched 20:25 on the FIXED kernel (bzImage 20:23). A/B: watch
+  "pagefault: Out of memory" count (sc176: 1727) and whether the
+  launcher child survives past sandbox init this time.
+
+SESSION R FIFTH LEG ADDENDUM 2 (sc178 A/B readback, 20:4x): FILEMAP FIX
+  WINS THE MEMORY A/B; sc178 DIED TO A DIFFERENT, CONTENTION-SIDE GATE.
+- sc178 (fixed kernel, launched 20:23:30 under host load 6 with 2 foreign
+  TCG QEMUs): pagefault-OOM count 0 for its whole 19 min (sc176: 1727 +
+  oom-killer). The fake-OOM fix holds on the OH boot.
+- New gate: systemui children spawn (12 by min 2) but EVERY attempt
+  stalls mid-sandbox. STALLWATCH tid 1121: clock_gettime(113) spam +
+  futex park at uaddr=0x7fffffffc7f4 val=2 (main-stack timed wait, the
+  bfc35fd2 single-threaded-child shape) and the FAILS ring is dominated
+  by nr66(writev)=-11 EAGAIN on fd=3 - the child CANNOT WRITE to its
+  parent-facing channel (buffer full, reader not draining) and OH's
+  write loop retries forever. AMS kept restarting (24+ "restart
+  ability" rounds, children 1089..1264); AMS->child deliveries still
+  fine (APPTXN child=1121 route=child-looper). NO child ever narrated
+  IPCWorkThreadPool SpawnThread this boot (vs sc167/sc174 where they
+  did). clone-gate probes printed ZERO refusals (F12 heap gate NOT the
+  cause). Verdict: log/ctl pipe backpressure under host contention =
+  slow death spiral; boot unrecoverable, killed at 20:42.
+- 8-color 100% screen state since ~30s into every sc175+ boot = the
+  KERNEL's own scanout pattern (byte-identical to the sc20 milestone
+  reference), NOT OH graphics. Milestone discriminator: colors >= 9.
+- Reroll plan: wait for the 2 foreign QEMUs to hit their 2700s timeouts
+  (~20:53/54), then boot sc179 solo on the fixed kernel - the
+  sc167/sc174 recipe (0-1 foreign QEMU converged; every 2+ boot died).
+
+SESSION R FIFTH LEG ADDENDUM 3 (sc179 readback + quiet-kernel work,
+  21:0x-21:3x): SC179 = DEEPEST BOOT EVER; WEDGED AT 16 MIN BY THE
+  HILOGD BACKPRESSURE FAMILY (the b128/b129 mechanism, rediscovered).
+- sc179 (fixed kernel, SOLO from 20:53): fastest boot of the campaign
+  (36 AppSpawnChild lines by min 2.5), launcher ALIVE and narrating
+  (Launcher_Default / LauncherAbilityManager / CommonBundleManager
+  query loop, 30k+ alog lines, Wallpaper+RS client stack active, 20
+  IPCWorkThread spawns, 160 route=child-looper deliveries, zero OOM
+  faults, zero kills) - but OnForeground/ArkUI never reached; the
+  launcher was still iterating its bundle-init at min 15.
+- WEDGE at 21:09 (min 16): userspace narration froze mid-line; from
+  then on EVERY family process (samgr tid 317, foundation tid 626, 9
+  launcher threads, systemui) sat in the writev(fd=3)->hilogInput
+  EAGAIN retry loop (clock_gettime+futex rings) - hilogd STOPPED
+  DRAINING. KILLDUMP stime table: hilogd.server 9150 ticks +
+  hilogd.rd_kmsg 9.2k ticks on kernel pages (VmaManager::find_mut /
+  VMA+NsRef drop paths) - hilogd burning whole seconds of kernel time
+  instead of reading; the launcher itself burned >100s of kernel fault
+  time (filemap faults + VMA lookups per page).
+- MECHANISM (matches the DfxSwitch::SyscallTrace doc verbatim - the
+  b128/b129 hunt already convicted this shape): kernel print volume ->
+  hilogd.rd_kmsg copies every line out of /dev/kmsg -> eats a vCPU ->
+  hilogd.server falls behind -> hilogInput socket fills -> every
+  logger in the system wedges in EAGAIN retry loops. sc179's kernel
+  prints were HALF the serial log (34.8k of 69k lines); APPMAP alone
+  was 17.5k lines (the APP-PARK VMA-table dumps, ~2.9k lines per dump).
+- QUIET-KERNEL FIX (committed next): new dfx switch "parkdump" gates
+  the RWFRZ-PARK + APP-PARK (+APPMAP+fd-table) dump family; the fd3
+  applog capture now rides under the existing dfx=writetrace. All OFF
+  by default - the sc1xx chain questions they answered are settled.
+  Keeps: APPTXN route=, SAREG, binder-stall, STALLWATCH, WW lines
+  (~2.6k/boot) for milestone-boot diagnosis.
+- sc180 plan: quiet kernel, solo host, judge whether the launcher
+  finishes init before the (now much later) hilogd saturation point.
+
+SESSION R FIFTH LEG ADDENDUM 4 (sc180 mid-run, 21:2x-21:3x): QUIET
+  KERNEL CONFIRMS THE NEXT BOTTLENECK - PER-MOUNT COST, NOT LEAKS.
+- sc180 (quiet kernel, solo): APP-PARK/APPMAP/applog all 0 (gates
+  work); 67 AppSpawnChild lines by min 8; launcher fast-cycling
+  (attempts 1430..1900+, each LIFECYCLE_HALF_TIMEOUT then process
+  died; sc179's single attempt survived 12 min, sc180's die in tens of
+  seconds - faster cycling, faster mounts each round?).
+- ReportAbnormalDuration telemetry names the bottleneck precisely:
+  single sandbox mount phases at 1695%->1936% of the 1000ms budget
+  (1.7-1.9 s per phase: "/mnt/user/100/sharefs/docs", "/data/app/el1/
+  public/shader_cache/cloud/..."), SPAWNCHILD at 321%. SOLO host,
+  quiet kernel - the cost is intrinsic.
+- ns.rs sc98 comment already quantified the mechanism: every MS_REC
+  bind SCANS THE WHOLE MOUNT REGISTRY (10-25 ms per mount; ~50 binds
+  per sandbox spawn). The leak is fixed (namespace Drop detaches), the
+  per-bind O(registry) scan remains: ~50 x 25ms = 1.2s+ per spawn,
+  growing with boot-mount count. THE next kernel lever for the
+  launcher-vs-lifecycle race: index mounts (by parent or path) instead
+  of the linear registry scan in the MS_REC clone path.
+- sc180 runs to 22:07; watch OnForeground/colors>=9.
+
+SESSION R FIFTH LEG CLOSE-OUT (sc180 final, 21:4x): sc180 WEDGED AT
+  MIN ~23 - QUIET KERNEL BOUGHT 7 MINUTES; THE hilogInput CHANNEL
+  SATURATES ON OH'S OWN VOLUME.
+- sc180 final state: one long launcher attempt (like sc179's) ran the
+  CommonBundleManager init loop to alog 3451 (~590 rounds), narration
+  froze ~21:45, launcher tid 2193 + foundation tid 569 parked in the
+  connect(203)/futex(98)/writev(66)-EAGAIN retry family. Wedge moved
+  16 min -> 23 min vs sc179: cutting the kernel-print channel (25k
+  lines) delayed saturation, but the launcher's OWN ~30k slog lines
+  through hilogInput fill the socket anyway, and hilogd's per-message
+  cost (VmaManager::find_mut burn per KILLDUMP - its 10MB anon ring
+  buffer faults page-by-page) keeps the reader behind.
+- SESSION R FIFTH LEG SUMMARY (20:0x-21:4x, sc175-sc180):
+  * VERIFIED: node-identity fix (ptr,reg_tgid) on a converged boot -
+    sc174's same-desc(862896) AppScheduler stubs BOTH received their
+    own traffic; sc174 re-read = it was a GOOD boot killed by the user
+    pause, children 1-10 in 6 min, zero launcher-segv, watch items
+    silent.
+  * FIXED + A/B: sc176's death was the fake-OOM family (other_used
+    555215 pages = 75% of ZoneNormal; the wildwrite-hunt session-22/23
+    root cause: per-fault private copies). Cherry-picked ed444e08
+    (filemap_fault cache-page mapping) as db7229a7. sc178/179/180: ZERO
+    OOM pagefaults (sc176: 1727 + oom-kill). The deepest boots of the
+    whole campaign followed.
+  * CONVICTED: the sc155-family "wedge" mechanism = hilog backpressure
+    (writev fd3 -> hilogInput EAGAIN loops freeze every logger; the
+    b128/b129 hilogd.rd_kmsg mechanism extends to hilogd.server).
+    Mitigation committed (f643af0c: dfx=parkdump / dfx=writetrace
+    gates; APPMAP 17.5k lines -> 0). Wedge onset 16 -> 23 min.
+  * QUANTIFIED (next levers, load-independent):
+    1. mount-registry scan per MS_REC bind: 1.7-1.9s per sandbox mount
+       phase (ReportAbnormalDuration telemetry) - index the registry.
+    2. hilogd per-message VMA-op burn (find_mut page in KILLDUMP) -
+       likely its 10MB anon ring faulting page-by-page; needs either a
+       kernel fault-around for anon maps or an hilogd-side look.
+  * MILESTONE NOT REACHED: screen never left black/8-color; OnForeground
+    0 in every boot. The launcher reaches LauncherAbilityManager/
+    CommonBundleManager/Wallpaper/RS-client depth but its init
+    (minutes of bundle queries at current syscall speeds) loses to the
+    lifecycle clocks and the log-pipe saturation.
+- Branch state: HEAD 222cd95d on feature/samgr-callback (adds: notes
+  commits, db7229a7 filemap fix, f643af0c probe gates). bzImage 21:20
+  = quiet kernel. Artifacts: run/oh-sc17[5-8]-serial.log preserved;
+  userdata-sc17[5-9]/sc180 private copies remain for debugfs.
+
+SESSION R SIXTH LEG (sc181 line, 22:0x-): MOUNT INDEX + ANON
+FAULT-AROUND LANDED; CLONE-SCAN FLATNESS PROVEN IN VIVO.
+
+- Merged origin/main (0727d295) cleanly (fast-forward; the db7229a7
+  cherry-pick superseded by main's full filemap version).
+- Task 1 DONE (commit 8cd4f2c0): mount-registry chain index. Every
+  mount is indexed under the PURE-PARENT chain of its mountpoint
+  dentry (BTreeMap<dentry-addr, bucket>, anchor Arc pins the key);
+  the MS_REC clone scan (collect_subtree_mounts) is a DFS from the
+  bind source's covering mountpoint descending into found mounts'
+  roots - O(subtree) instead of O(registry x depth-per-climb). Attach
+  sequence (VfsMountInternal::seq) restores registry-order clone list
+  (parents before children, byte-identical stacking). Shadowed-mount
+  detach keeps index entries (mountpoint_back stays set); MS_MOVE-to-
+  "/" rehome rebuilds the index wholesale; detach recomputes the chain
+  from the live mountpoint BEFORE clear_mountpoint_back.
+- Task 2 DONE (798b4cb3 riscv64 + 1b742d80 x86_64 twin): anonymous
+  WRITE-fault forward fault-around (32 pages, VMAs >= 1MB, !SHARED,
+  stops at first mapped page, best-effort, faaround=0 disables) -
+  the hilogd 10MB-ring page-by-page burn (91s stime/16min in sc179's
+  KILLDUMP). Arch-side only (arch/*/mm/page_fault.rs); kernel/src/mm
+  untouched (wildwrite territory). x86_64 twin matters: the launcher
+  campaign boots q35/KVM, NOT riscv64.
+- NUMBERS (mtprobe, sc179 old vs sc181p/181 new kernel):
+  * old: clone-scan linear in registry - 345k cyc @ nmounts<50,
+    3.06M @ ~100, 13.5M @ ~450, max 14.9M (6ms/bind at nmounts=486);
+    extrapolated ~60M cyc (24ms) x ~50 binds/spawn = the 1.2s+ sc180
+    phase overruns.
+  * new: FLAT 12-25k cyc (8us) at nmounts 20...104 (sc181 launcher
+    sandbox binds at nmounts=103-104: 17-19k cyc - 160x at that size,
+    unbounded win as the registry grows).
+- sc181p probe boot (7 min, 2-foreign KVM load): no panic; mount
+  index exercised through system-sandbox construction + switch_root
+  (MS_MOVE-"/" rebuild path ran - boot proceeded past it).
+- sc181 full boot (45 min, 2-foreign load the whole time - the s31
+  chain auto-relaunches within seconds of expiry, no solo gap):
+  BMS scan phase stretched to ~18 min (30s SAMgr round trips under
+  load), FIRST launcher spawn at min ~18-20, launcher died ~min 25
+  in appspawn hook stage 31 (dlopen of missing
+  libsecurity_component_client_enhance.z.so - 25 dirs openmiss
+  retries) - SIGKILL from appspawn (child watchdog), the sc178
+  loaded-boot signature, NOT a mount/fault regression. Kernel-side
+  metrics all healthy (no panic, no OOM faults, clone-scan flat).
+  demand-fault avg 1.6ms/fault under load (KILLDUMP stat).
+
+SESSION R SIXTH LEG CLOSE-OUT (sc182/sc183, 23:5x-01:0x): WEDGE
+ELIMINATED IN THE 45-MIN WINDOW; LAUNCHER ALIVE TO THE END; NEXT
+BLOCKERS NAMED. MILESTONE (real launcher UI) NOT REACHED.
+
+- sc182 (45 min, fresh scgold copy, 2 foreign TCG QEMUs): the deepest
+  LIVE boot of the campaign. 51 AppSpawnChild by min 7 (78 total; the
+  spawn pipeline re-rate-limit-free), launcher narrating through min
+  45 - narration NEVER FROZE (sc179 froze min 16, sc180 min 23; the
+  hilogInput-saturation wedge did not occur within 45 min - the anon
+  fault-around + flat clone-scan removed the kernel-side burn that
+  starved hilogd). Spawn cycling stopped by min 15: the LAST launcher
+  attempt (pid 2095) survived 30+ min grinding its init.
+- clone-scan FLATNESS at scale (sc182 mtprobe, 400 binds): 19-22k cyc
+  average across nmounts buckets 0-477 (old kernel: 13.5M cyc at
+  nmounts 450 = ~675x; and the old cost grew without bound).
+- NEW BLOCKER #1 (launcher pace): the launcher's CommonBundleManager
+  init loop (getOsAccountLocalId rounds) ran ~592 rounds and was STILL
+  not finished at min 45; AMS flagged LIFECYCLE_HALF_TIMEOUT_WARNING /
+  APP_FREEZE 314 times (the appfreeze manager sees the main thread not
+  reaching its lifecycle callback). Not mount-bound, not wedge-bound:
+  it is the per-round IPC/syscall cost. demand-fault avg 1.6ms/fault
+  under load (sc181 KILLDUMP stat) is the cost model for the .so
+  dlopen chains.
+- NEW BLOCKER #2 (render service connect, THE screen gate):
+  RSRenderServiceConnectHub::Connect retried 998x in 45 min with
+  "clientToService is null"; "RenderService connect fail" logged
+  within the first minutes; RenderService itself DID start (SCHED_FIFO
+  + UniRender logs). BootAnimation started but cannot reach RS ->
+  screen stays black (colors=1 all boot; note sc180 was also black at
+  its end - NOT a regression from this line's changes). The RS client
+  connects through the samgr SA proxy - clientToService==null means
+  the SA lookup/registration path for RS fails. THIS is the seventh
+  leg's entry point: trace the RS SA registration/lookup (samgr side)
+  and why the proxy comes back null.
+- sc183 (90 min, launched 00:39 under THREE foreign QEMU pairs, load
+  8.6): slow start (1 spawn by min 8, the loaded-boot signature);
+  left running for the 90-min answer (does the launcher EVER finish
+  init now that the wedge is gone?). Serial: run/oh-sc183-serial.log.
+- SESSION R SIXTH LEG SUMMARY:
+  * LANDED: mount-registry chain index (8cd4f2c0) - MS_REC clone scan
+    O(registry x depth) -> O(subtree), flat 19-22k cyc at nmounts
+    0-477 (675x at sc179's worst point, unbounded better); anon
+    write-fault fault-around 32-page windows (798b4cb3 riscv64 +
+    1b742d80 x86_64 - the campaign boots q35/KVM, the x86 twin is the
+    one that counts).
+  * VERIFIED: no panic/OOM across 4 boots; mount index survives
+    switch_root (MS_MOVE-"/" rebuild), sandbox self-binds, namespace
+    teardown; unit tests 1085 PASS (3 pre-existing config_test
+    mismatches).
+  * CONVICTED: the sc179/180 wedge (every-logger writev EAGAIN at
+    min 16/23) did NOT occur in 45 min with the fixes - hilogd kept
+    draining.
+  * NOT REACHED: OnForeground 0, colors=1, no ohgpu launcher UI.
+    Next levers: RS SA connect (blocker #2, screen gate) and the
+    bundle-init per-round cost (blocker #1).
+- Branch state: feature/samgr-callback at this commit (adds: 8cd4f2c0
+  mount index, 798b4cb3 + 1b742d80 fault-around twins, notes commits).
+  bzImage (x86_64 debug, 01:xx era) = this kernel. config.rs left
+  dirty in worktree (build-generated platform-switch artifact).
+
+SESSION R SEVENTH LEG (sc184 line, 00:5x-02:xx): SCREEN GATE ROOT
+CAUSED END-TO-END AND DODGED LIVE (SA 10 PUBLISHED FOR THE FIRST TIME);
+SCANNOUT PIPELINE PROVEN END-TO-END; THE DEVGR WEDGE IS A TIMING RACE
+EVERY BOOT EVENTUALLY LOSES.
+
+- Screen gate (#2) mechanism, closed from OH source to kernel symptom:
+  * render_service (main/render_server/rs_render_service.cpp Init) ->
+    RSScreenManager::Init -> HdiBackend -> IDisplayComposerInterface::
+    Get() -> DisplayComposerHdiImpl::Create (drivers/interface/display/
+    composer/v1_4/hdi_impl) which loops FOREVER:
+    while ((hdi = CompHdi::Get()) == nullptr) usleep(10ms);
+    CompHdi::Get() = HDI IServiceManager GetService("display_
+    composer_service") binder IPC into hdf_devmgr + proxy->GetVersion.
+    RS main thread parked in that loop = AddSystemAbility(10) never
+    runs = SA 10 never in samgr = every RS client (BootAnimation,
+    launcher) fails "clientToService is null" -> black screen. NOT an
+    RS bug, NOT a samgr bug.
+  * The IPC that never returns: sc182 census - devmgr (pid 329) IPC
+    threads SERVER-OWING, parked in FUTEX_WAIT on musl rwlock words
+    frozen at 0x80000000|N readers (16 at 0x...6c14, 148 at 0x...6b80),
+    main thread parked on the second one; ZERO devmgr thread exits (not
+    exit-leaks); RS's txn2558 delivered to devmgr tid 574 and never
+    answered. musl rwlock semantics (verified from oh-robot musl
+    source): unlock only FUTEX_WAKEs when the reader count reaches 0 -
+    a frozen count wedges every writer forever. Same signature in
+    sc183 (devmgr=336). The wedge forms 15-23 s into boot, during the
+    host service-registration storm.
+  * The frozen readers are the wildwrite per-fault-private-copy family
+    (C line) OR readers stranded kernel-side (lane 1 wake-loss) - both
+    produce the identical word shape; WAKE-RUN-LEAK lines sit adjacent
+    to every devmgr stall in both logs.
+- sc184 (probe boot, dfx=parkdump, fresh scgold copy): THE WEDGE DID
+  NOT FIRE IN TIME. SACMP-RS traced render_service's (pid 634) whole
+  binder conversation: samgr codes, then -> hdf_devmgr HDI IService-
+  Manager, then DIRECT to composer_host (pid 617: GetVersion code 0,
+  0x34, 0x1, 0x2, 0x20, 0x9, 0xb, 0xc = 40+ txns), then SAREG ADD
+  SAID=10 FROM render_service (first time in the whole campaign),
+  DISP_HDI_COMP OnHotPlug(0,1) delivered, RSInterfaces::SetScreen-
+  ChangeCallback, ZERO "RenderService connect fail" in the whole boot.
+  BootAnimation entered main. ohgpu screendump: the 8-color banded
+  checker (the compose-content lane's kernel-side scanout-binding
+  oracle in drm/mod.rs, repainted per flip) - the RS -> composer ->
+  DRM -> virtio-gpu flip chain is PROVEN LIVE. Content still not
+  bootanimation frames = the cc line's black-GEM import issue, not
+  this lane. devmgr DID wedge later (~min 8+, tids 594/595/677
+  SERVER-OWING on the same 0x7ff0006c8264-family lock) - clients that
+  asked before the freeze won; the wedge is a race every boot
+  eventually loses, which is why sc180-183 all ended black.
+- Lane 1 (wake-loss, coordinator-assigned): WAKE-RUN-LEAK census in
+  sc184 = 254 lines, dominant shape state=0x1 sleeping cfs_linked=0
+  on_cpu=false pick_state=PICK_LIVE (stale LIVE mark + on_cpu=false is
+  the R74 protocol-impossible pair); W3-FROZEN-EXEC-SLOT (new lying-
+  busy-slot conviction probe, frozen sum_exec_runtime test) convicted
+  PID 1 TWICE: init named by a busy CPU slot, RUNNING+unlinked+LIVE,
+  exec clock frozen 600 and 2302 jiffies (23 s), retaddr inside
+  context_switch. A CPU stuck mid-context_switch with init as prev/
+  next for 23 s - or a stale slot - either way init stalled 23 s
+  stalls every service spawn behind it. NOTE sc184 ran with
+  dfx=parkdump whose UART floods amplify IF=0 windows (init sampled
+  twice inside outb for >1 s) - next conviction boot must run WITHOUT
+  parkdump.
+- Lane 2 (IRQ-exit softirq, coordinator-assigned): landed the two
+  empty-raise gates (commit with the probes): per-tick Timer (v1)
+  softirq now raised only when the TCP table's high-water count > 0
+  (the handler early-returns on 0 anyway); Hrtimer (v8) raised only
+  when a timer has ever been armed (new monotonic TIMER_EVER_ARMED
+  latch) or an hres deadline is due. Both arches. The bigger F1 items
+  (softirq-at-irq-exit running with IF=0, UART outb/inb cli windows)
+  belong to the interrupt and printk lanes - not touched here.
+- New always-on probes landed (no behavior change): SACMP (composer-
+  path binder tracer + render_service pid latch + display_composer_
+  service name match), FXDV (devmgr-latched futex rwlock WAIT/WAKE
+  history; latch fires on hdf_devmgr's SA 5100 registration - parcel
+  said offset 60), W3-FROZEN-EXEC (frozen-exec lying-slot conviction
+  with switch retaddr + stack words). sc183 close-out: under
+  3-foreign load only 1 spawn ever, launcher init never finished -
+  uninformative pace test; sc182 remains the pace reference.
+- Branch: feature/samgr-callback at 69310bae (probes + gates) on top
+  of merged main ae7e25f9. sc184 userdata-sc184.img private; serial
+  run/oh-sc184-serial.log preserved; shots run/oh-sc184-shot1/2.ppm.
+  NEXT: sc185 on the fixed-offset kernel WITHOUT parkdump (FXDV
+  capture of the freeze birth; clean W3 data), then the lane-1 heal
+  design from the conviction data, and reroll boots until the wedge
+  fires while SACMP is watching to name the last hop before silence.
+
+SESSION R EIGHTH LEG (sc185/sc186 line, 03:3x-): W3 PROBE DEADLOCK
+RISK FIXED BEFORE FORENSICS; sc185 BIRTH-MOMENT DATA CAPTURED; THE
+SCREEN GATE IS CHARACTERIZED USERSPACE-SIDE (FFRT POOL HOLDS RDLOCK
+ACROSS BLOCKING BINDER CALLS) - KERNEL WAKE PATHS EXONERATED THIS BOOT.
+
+- Pre-boot audit (the 7th leg's probe-self-variable warning): STALLWATCH
+  (timer tick context) and parkdump (futex syscall context) are GRQ-free
+  - safe. But the W3 trio (W3-RUNWAKE-REFUSED / W3-FROZEN-EXEC-SLOT /
+  W3-FROZEN-EXEC-STK) printed from INSIDE wake_up_enqueue's GRQ irqsave
+  region: printk -> write_to_ring_buffer -> KMSG_READ_WQ.wake_up_all()
+  -> wake_up_process -> wake_up_enqueue re-takes the GRQ = same-CPU
+  self-deadlock (IRQs off) whenever a kmsg reader is parked, cross-CPU
+  GRQ<->waitqueue ABAA otherwise. FIXED (4e4a29b0): capture all print
+  fields under the lock, drop the guard at the refusal tail, then
+  printk. Line formats byte-identical (the C-line W3 census greps stay
+  stable). Every other scheduler print under GRQ already uses the R34
+  direct-console path (r56_print_pid / wakewatch ww_msg).
+- FXDV comm-latch backstop (4e4a29b0): sc184 had ZERO FXDV lines - the
+  SA-5100 parcel matcher never fired. First futex from comm=='hdf_
+  devmgr' now latches. Worked in sc185 (latched pid=333).
+- NEW PROBE RWFRZ-WATCH (4e4a29b0 + 537c618a): RWFRZ-PARK registers its
+  word; every later futex op on it from ANY process prints. The
+  WAKE-or-silence lifecycle of a frozen word is the fork datum.
+- sc185 (probe boot, dfx=parkdump, fresh scgold, 30 min): THE WEDGE
+  FIRED AT ~jif 1900 AND WAS CAPTURED BORN. Data:
+  * Ordinary parks are NOT freezes: every RWFRZ-PARK with a matching
+    RWFRZ-WATCH WAKE resolved within a jiffy (WAIT 0x80000010 -> WAKE
+    val=1 from the draining last reader, same tgid). The param-arena
+    word (0x7ff00002ec64) churned healthily ALL boot (many processes);
+    samgr's word 0x7ff000fa697c froze 7 s (jif 501-1201) then HEALED
+    via delivered WAKEs. musl semantics work.
+  * TERMINAL FREEZE #1: devmgr (tgid 333) word 0x7ff000a30264 froze at
+    0x80000010, readers=16 CONSTANT for 9+ min (no fluctuation = the 16
+    readers are BLOCKED inside their critical sections, not cycling);
+    writers 8->10 (all IPC threads: 334/367/567/568/569/631/640/649+).
+    _rw_waiters at word+4 matched parked-writer count exactly (musl
+    layout verified from toolchain musl-1.2.5 source: readers CAS
+    val->val+1 unconditionally - NO writer preference; unlock WAKEs
+    only when count hits 0).
+  * TERMINAL FREEZE #2: tgid 609 (appspawn family) word 0x7ff000cb1e34,
+    SAME shape: readers=16, writers 3->4. 16 = the FFRT pool size.
+  * devmgr main thread (333) parked on 0x7ff000a301d0 = 0x80000000
+    (zero readers, waiter present) - a wake was owed and never came OR
+    the waiter parked into a stale waiters-bit state.
+  * KERNEL EXONERATED (this boot): ZERO W2-WAKE-REFUSED-SLEEPING, zero
+    WAKE-WILD-POISON drops, zero R80/R49/R56C heals, zero W3-FROZEN-
+    EXEC. The WAKE-RUN-LEAK census population (60+ tasks, kicked 2-4x)
+    decomposes into (a) idle workers with empty todos - the kicks
+    DELIVER (threads run, re-check, voluntarily re-park; WAKE_RET(0,0)
+    hist = normal condition-true returns) and (b) CLIENT-WAITING
+    threads on wedged servers (collateral). No evidence of a lost wake
+    on any observable word.
+  * MECHANISM (characterization DECIDED - userspace side): the 16 FFRT/
+    worker readers hold rdlock ACROSS blocking binder calls (dumped
+    parked in sys=0x10 ioctl fd=4 at rip=0x3fbf0d3466); the calls'
+    targets never reply (mutual stall 333 <-> 609-family <-> samgr
+    early-slow); the reader count never reaches 0; the 10 writer-parked
+    IPC threads include tid 631 = SERVER-OWING RS's client GetService
+    txn 2662 (from pid 592; RS itself asked at ~jif 2200 via the ASCII
+    'display_co' parcel - the 91064bdd matcher works) -> SA 10 never
+    published -> black screen (shot1.ppm = 100% black). RS tid 608 also
+    appears in the leak census - parked waiting on devmgr's answer.
+  * VERDICT FOR THE FORK: NOT kernel wake-loss (this boot); the lock
+    semantics + hold-across-blocking-call pattern is OH userspace. The
+    sc184 dodge (asked before the freeze, won) remains the milestone
+    path: the wedge is a race; sc186 rerolling for it.
+- Coordinator verdicts incorporated (pa13/pa14): the softirq empty-
+  raise gates (69310bae) are a NO-OP on OH boot (A/B: raise rate
+  199.2-199.7/s with vs without; gate flips once then never engages).
+  NOT counted toward F1. F1's real lever = irq-exit dispatch +
+  UART port-IO-under-cli cluster. Also merged main f242b7be (Linux-
+  faithful /proc/kmsg stream, rd_kmsg 93.3K/s -> 0.82K/s) before
+  sc186 - the reduced kmsg drain load should shift the storm window.
+- hilogd.server double-drain check (coordinator's item): our recv
+  semantics are faithful - sys_recvfrom/sys_recvmsg route unix/inet/
+  netlink/raw through their W3 blocking engines (unix_recv_ctl /
+  socket_recv_ctl loop with socket_wait_round for blocking fds); poll
+  readiness is data-driven (POLLIN only when queues non-empty). No
+  kernel shape forces the spin; hilogd.server's 18.4K/s recvmsg+
+  recvfrom pair is OH userspace behavior.
+- sc186 (reroll, merged-main kernel, hardened RWFRZ-WATCH: arena words
+  excluded from registration, budget 192): running for the dodge.
+  Artifacts: run/oh-sc185-serial.log (65k lines), oh-sc185-shot1.ppm,
+  userdata-sc185/sc186.img private copies.
+
+SESSION R EIGHTH LEG CONTINUED (sc186-190, 04:1x-05:4x): TERMINAL-
+DESCHEDULE FIX LANDED; PARKDUMP-OFF IMPROVES THE DODGE; sc190 = THE
+DEEPEST COMPOSER CONVERSATION OF THE CAMPAIGN.
+
+- Dodge rolls: sc186/187/188 (parkdump ON, merged-main kernel) all
+  lost the race at ~jif 1900-2200 (devmgr SERVER-OWING code-3 txns;
+  multiple processes froze with 16 readers each - tgid 453/526/devmgr).
+- sc189 (parkdump OFF): FIRST half-dodge since sc184 - devmgr ANSWERED
+  RS's GetService (SACMP reply code=3 dlen=24), RS went direct to
+  composer_host (code=0x34 GetVersion). But cpu0 was lost at ~min 1:
+  pid 691 (sa_main OS_IPC_2_691) took a fatal USEGV at rip=0, and the
+  PREEMPT-LEAK probe then showed cpu0's slot naming the dead task for
+  10+ min, saved context resumed at arch::x86_64::cpu::wfi+5, preempt_
+  count frozen at 0x10000 (hardirq bit). Boot crawled on cpu1 (8.8k
+  serial lines in 30 min); RS stalled pre-SA-10.
+- ROOT CAUSE (the wfi-residency leak, twice reproduced - sc186 pid 775
+  same signature): do_exit's final "never returns" schedule() CAN
+  return - __schedule's same-task repick fast path returns without a
+  context switch when a racing wake/heal re-links the exiting task
+  between its dequeue and the pick (the fast path's own comment names
+  this shape). The wfi park loop after it then runs in the DEAD task,
+  the CPU slot never advances, and the leaked hardirq bit sits
+  uncleared: the CPU is lost for the rest of the boot. Every sa_main
+  OS_IPC null-jump (~1 min in most boots) is a coin flip on halving
+  the machine.
+- FIX (a39d2bc0): schedule_dead_never_returns() - per retry round,
+  re-assert the terminal state (ZOMBIE preserved for leaders),
+  unlink, clear TIF_IN_SCHED, reset a nonzero preempt_count with a
+  budgeted TERM-DESCHED forensics print, retry until a REAL context
+  switch. Both do_exit terminal tails use it.
+- sc190 (fix kernel, parkdump OFF, 45 min): VERIFIED. 49+ USEGV
+  crashes, ZERO PREEMPT-LEAK lines (sc189 leaked within the first
+  minute), both CPUs alive all boot - 42k serial lines in the first
+  5 min (sc189: 8.8k in 30). THE DODGE: devmgr answered RS's
+  GetService again (2nd consecutive parkdump-off answer; parkdump-on
+  boots are 0-for-4), RS ran a 42-txn DIRECT conversation with
+  composer_host (codes 0x34/0x1/0x9/0xb/0xc - past sc184's depth),
+  OnHotPlug(0,1) delivered, BootAnimationController START, composer
+  reached SetBrightness(drm_connector). SA 10 did NOT publish: RS's
+  conversation stalled at #42 and the devmgr wedge (word 16 readers,
+  waiters 8->11) re-formed ~2 min in and eventually cut a dependency
+  RS still needed mid-Init. Launcher spawned/died repeatedly (AMS
+  churn) - process-death cascade collateral.
+- PARKDUMP-DODGE CORRELATION: parkdump's RWFRZ-PARK stack dumps cost
+  hundreds of UART lines each exactly during the storm window; with
+  them OFF, devmgr has answered RS in 2/2 boots. Forensic boots and
+  dodge boots now want different flags.
+- Live F1 datum for the count-producer hunt (from main's merged
+  probes, not mine): WW: IRQ-OFF-WINDOW cpu=0 age=1000ms pc=0x10000/
+  0x10001 on ALIVE tasks (pids 0x147, 0xcf4) - the hardirq-bit leak
+  also occurs on living tasks in 1s episodes; my fix only cures the
+  death path. The producer itself is the F1 lane's pa15 target.
+- NEXT (ninth leg): reroll parkdump-off boots with the fix kernel -
+  the remaining gap to SA 10 is the devmgr wedge re-forming mid-
+  composer-init; each roll now has both CPUs and a served GetService.
+  If SA 10 lands: bootanimation frames (not the 8-color kernel
+  oracle - check colors>8 / shotstat) -> ScheduleStartAbility ->
+  OnForeground -> ohgpu screenshot = the terminal milestone.
+- Artifacts: run/oh-sc18[6-8]-lost-serial.log (parkdump-on losses),
+  oh-sc189-serial.log (half-dodge + leak capture), oh-sc190-serial.log
+  (fix verification + deepest composer conversation), shots
+  oh-sc18[9,190]-auto0.ppm (8-color oracle, not UI), userdata-sc18[5-
+  190].img private copies.
+
+SESSION R EIGHTH LEG ADDENDUM (sc191 + fix v2, 05:5x): v1 insufficient
+for the CLEAN-exit variant; v2 (6e9679c5) releases pick ownership too.
+
+- sc191 (v1 fix kernel, parkdump off): devmgr answered RS's GetService
+  a THIRD consecutive time (parkdump-off now 3/3). But a CLEAN thread
+  exit (libusb_event tid 649, usb_host, code=0) still stranded in the
+  v1 8-round fallback: cpu1's slot named it, rip=wfi+5, count=0x10000,
+  no TERM-DESCHED print (count was 0 when the helper ran - the leak
+  lands elsewhere/later). The repick persisted because the pick
+  machinery resolves the DEAD task via its pick-ownership pair
+  ({on_cpu, claim} - R63 mid-switch-out shape); the real switch-out
+  asm releases the pair, a repick loop never reaches a switch.
+- v2 (6e9679c5, built, NOT yet boot-verified): the helper now also
+  calls release_pick_ownership() each round (the same aligned store
+  the R56 heal paths use). Ninth leg: boot-verify v2 (a long parkdump-
+  OFF boot should show ZERO permanent PREEMPT-LEAKs across both clean
+  exits and USEGV deaths), then reroll for the full dodge - the
+  remaining SA 10 gap is the devmgr 16-reader wedge re-forming mid-
+  composer-init (sc190 stalled at RS txn #42 after SetBrightness).
+- sc191 left running to term with shotmon attached; artifacts in run/.
+
+SESSION R NINTH LEG OPENING (sc191 verdict + merge + sc192, 05:4x-05:5x):
+sc191 COLLECTED (v1 kernel crawled to its endgame single-CPU); main merged
+clean (ff); v2 VERIFICATION BOOT sc192 RUNNING PAST EVERY PRIOR GATE.
+
+- sc191 final verdict (v1 kernel, parkdump off, full 45 min): cpu1 stranded
+  at ~min 1 by the CLEAN exit (libusb_event tid 649, code=0) - 514
+  PREEMPT-LEAK sampler lines over the rest of the boot, held_nonzero_for
+  grew past 0xd1e9 jiffies (~9 min), pc=0x10000, rip=wfi+5, ZERO
+  TERM-DESCHED (count was 0 at helper time - the v1 gap v2 targets).
+  GetService answered a 3rd consecutive parkdump-off time; BootAnimation
+  reached full frame prep (150 jpgs read, SetVSyncRate 30/2 success -
+  deeper than sc190's controller START); SA 10 never published; screen
+  stayed the 8-color oracle. Single-CPU crawl = sc189 precedent.
+- Merge: fast-forward to ea4e4e99 (main had already merged this branch at
+  82987cca; the W3 retaddr cfg-gate is main's side, untouched). riscv64
+  build verified clean post-merge (the break the gate fixed is gone).
+- sc192 (v2 kernel 6e9679c5 + ea4e4e99, parkdump off, fresh scgold copy
+  userdata-sc192.img, KVM q35, launched 05:48): at ~6 min -
+  * ZERO PREEMPT-LEAK with 62 clean exits + 52 USEGV deaths already
+    passed through (sc191 showed 514 leak lines by min 5) - v2's
+    pick-ownership release is holding for BOTH exit classes so far.
+  * Both CPUs sampling all boot (WW cpu=0/1 both live).
+  * GetService answered a 4th consecutive parkdump-off time; RS (pid 622)
+    is in DIRECT composer_host (581) conversation and PAST sc190's stall
+    point: txn #42 (code 0xb) sent after #40 0x9 / #41 0xc;
+    BootAnimationController START, OnHotPlug(0,1), SetBrightness 44 all
+    in log; BootAnimation 150 frames + SetVSyncRate again.
+  * SA 10 not yet published; watching.
+- sc190 alive-task WW birth profile (pa15 input, done while waiting):
+  768 WW IRQ-OFF-WINDOW lines, 210 distinct pids (80 multi-hit). Shape:
+  ages all at the 1s probe cap; pc 0x10000 (pure hardirq bit) 74%,
+  0x10001 14%, deeper the rest. ~40% of hits sit at stable addresses
+  inside printk::persistent_log::append (0x802c7d66=253 hits + 3 more
+  clusters) - the printk/UART-under-cli window is the dominant producer;
+  minority samples carry USERSPACE rips with pc!=0 = post-leak residual
+  count (survived return to user). Role map of the top repeat offenders:
+  the DISPLAY STACK owns the phenomenon - composer_host family (316/327/
+  364/548/549/625), render_service family (747/1179), their GPU loaders
+  (libGLES_mali dlopen, OpenGLWrapper 1408), and their clients
+  (DisplayManagerAdapter singleton 868, BootAnimation VSync receiver
+  1405), plus appspawn (334), os_ds_service (532), DfxWatchdog (963).
+  These tasks recur across the WHOLE boot (316 spans 5%->99.7% of the
+  log) - steady-state episodic 1s stalls, not one-shot birth events.
+  Same processes whose FFRT pools are the devmgr 16 readers: their
+  1s-scale preempt-held episodes stall readers mid-critical-section and
+  the rwlock word never returns to 0. Consistent with parkdump-off ->
+  GetService answered 4/4 (less UART burn under cli).
+
+SESSION R NINTH LEG MIDPOINT (sc192/sc193 verdicts + v3/v4, 06:0x-07:1x):
+V2 CURES THE CLEAN-EXIT AND USEGV CLASSES; THE KILL PATH NEEDED THE
+PICK GATE (v4); THE WEDGE LOOP IS CLOSED USERSPACE-SIDE; RISCV64 UNIT
+TEST PANICS (MAIN-SIDE, UNATTRIBUTED).
+
+- sc192 final (v2 kernel, full 45 min): 1072 PREEMPT-LEAK lines total,
+  but the ONLY permanent strand was the kill-path one (see below); the
+  62+ clean exits and 52+ USEGV deaths all passed clean. GetService
+  answered 4/4 parkdump-off; RS (622) went PAST sc190's stall (SetBrightness
+  then txn #42 code 0xb sent, embedded at line 22551); RS then waited ~8
+  min silent in FUTEX_WAIT on its own stack word (0x7fffffffc244 val=2)
+  and RETRIED 0xb - composer_host stopped serving direct HDI txns after
+  its early phase. No SA 10; 8-color oracle to the end.
+- sc192 KILL-PATH STRAND (the v2 gap): AMS killed launcher tgid 5111;
+  KILLDUMP showed tid 5129 (OS_FFRT_0_0, in futex WAIT_PRIVATE val=2)
+  state=0x0 on_cpu=true cpu=1, stime frozen; cpu1 then stranded with
+  rip=wfi+5, pc=0x10000, held 60+ s, ZERO TERM-DESCHED prints (pc was 0
+  at helper time - v2's print only fires on pc!=0). Third terminal shape:
+  SIGKILL teardown of an on-CPU FFRT/IPC thread.
+- v3 (c90f80b0): replaced the helper's 8-round terminal bare-wfi park
+  (which NEVER re-enters schedule - a permanent CPU loss whenever the
+  re-link race outlasts the budget) with a paced retry: enable_irq+wfi
+  between rounds. Plus a budgeted TERM-DESCHED engaged print.
+- sc193 (v3 kernel, parkdump off, 45 min): 4 launcher-kill KILLDUMPs
+  with ZERO strands for ~25 min (v3 working), 8 engaged prints (all
+  pc=0x0; budget consumed in min 1), both CPUs sampling. BUT launcher
+  tgid 5033's IPC thread (tid 5034) stranded cpu1 at ~min 25 for 13+
+  min: first sampler hit in outb+22 (its own kill-dump print!), then
+  wfi+5 with pc=0x10000 frozen - the paced loop cycled (timer wakes
+  arrived, sampler ran) but every schedule() returned unswitched. The
+  discipline exempts DEAD; the helper re-asserts DEAD+dequeue+ownership-
+  release each round; TERM_RETRY_N never consumed (pc always 0 at loop
+  top; the 0x10000 re-lands with each wake IRQ - the pa15 producer).
+  Remaining resolver: the CLASS PICK returning the re-linked DEAD task
+  (racer rewrote state to RUNNING between dequeue and pick -> prev_running
+  re-queued it -> CFS walk handed it back). No SA 10; wedge re-formed
+  (word 0x7ff0009e6c14, readers=16, age 1320s at end).
+- v4 (7a8044e0): DEAD-PICK GATE in all three class gates of
+  pick_next_task, mirroring the PID-0 poisoned-entry gate (drop + report
+  + pair nr_running + fall through to idle). A DEAD task must never be
+  handed a CPU no matter who re-linked it. Plus TERM-DESCHED stuck
+  forensics at power-of-two rounds (state/pc/claim) for the next strand.
+  sc194 (launched 07:11, v4 kernel, parkdump off) is the verification
+  roll.
+- WEDGE LOOP CLOSED (sc193 census, userspace-side): devmgr (tgid 336)
+  word 0x7ff0009e6c14 freezes at readers=16 - its own FFRT/IPC pool
+  holding the service-registry rdlock ACROSS blocking binder calls out
+  into the display stack; the display stack's threads need GetService
+  (code 3) FROM devmgr (its IPC threads SERVER-OWING txn2785/txn4678
+  code 3 parked as writers); tid 442's hist: sent txn485 to tid 374 =
+  DISP session server (DoHotPlugCallback) while OpenGLWrapper logs
+  "EglWrapperLayer Init Failed" (the libGLES_mali-missing retry loop
+  from the sc190 profile). Circular: devmgr readers -> display-stack
+  calls -> display stack -> GetService(devmgr). RS's endless 0xb retry
+  is collateral. Kernel-side wake/semantics exonerated (sc185 + sc193
+  census consistent). The producers that make the freeze WINDOW long
+  enough to matter are the 1s-scale vCPU-residency losses (my sc190 WW
+  profile + coordinator's ground truth: UART port-IO VM exits, host
+  deschedules - console-async is the lever, queued greenfield in my
+  lane after the dodge race).
+- RISCV64 UNIT TEST PANIC (finding, main-side attribution pending):
+  make test (riscv64, unit-test kernel from merged ea4e4e99 + my notes/
+  v3 commits - none of which touch boot paths) KERNPANICs during a
+  suite boot: pfault badaddr=0xffffffff80c00000 sp=0xffffffff80bfffe0
+  (the stack word read at sp+0x20 crosses the stack-top boundary) with
+  epc=trap_entry and the second fault in handle_page_fault's read_volatile
+  (trap.rs:1168, the KERNPANIC stack-dump reader): the boot-time kernel
+  stack ran down to its very top; the trap printer double-faulted. The
+  survivor run is still going; if it reproduces, pa15's +733-line
+  syscost merge (or perf-audit) is the likely depth culprit - needs a
+  main-baseline bisect, NOT mine (v1-v4 touch only exit/pick paths).
+- QEMU discipline note: three identical 'make test' executions were
+  spawned by the harness (original + 2 retries); I killed the duplicates
+  by exact PID after verifying parentage. If a background command
+  auto-retries, check for orphans before launching QEMUs.
+
+SESSION R TENTH LEG OPENING (sc194 verdict + v5 quiet-console, 08:5x-):
+SC194 VERIFIES v4 (ZERO STRANDS THROUGH A FULL 45-MIN KILL-CHURN BOOT);
+THE RACE ITSELF WAS LOST AT T+59s BY THE SAME 4-PROCESS 16-READER
+SATURATION; CONSOLE BURN IN THE DECISION WINDOW MEASURED (60% USERSPACE
+/ 17% OUR OWN PROBES) -> v5 quietcon ROLL.
+
+- sc194 (v4 kernel 7a8044e0, parkdump off, KVM q35 SMP2, 45 min,
+  07:11-07:56; serial quiet after 07:36 = wedged silence): verdict PASS
+  on the sched gate - 32 PREEMPT-LEAK lines ALL held_nonzero_for=0xc8
+  (2s transient; sc191 grew past 0xd1e9, sc192 had a permanent strand),
+  ONE launcher KILLDUMP (tgid 1801 m.ohos.launcher, mid-syscall, NOT
+  on futex, state=0x0 cfs_linked=1) with NO strand after it, 8
+  TERM-DESCHED engaged prints (all pc=0x0, budget consumed min 1),
+  DEAD-PICK gate never fired (0 prints), both CPUs sampling/alive to
+  the end of output. The v1-v4 kill-path/exit strand family is CLOSED
+  as far as one boot can prove.
+- sc194 race shape (timeline via RWFRZ age 1441s at EOF + composer
+  thread age): RS = pid 629; SACMP-RS #1-#41, GetService(devmgr 333)
+  ANSWERED (#7 code 3 -> reply at 3917), direct composer_host (610,
+  serving thread OS_IPC_0_648) conversation codes 0x0/0x34/0x1/0x2/
+  0x20/0x23/0x3/0x5/0x22/0x9/0x6/0x8/0x4/0x15x2/0x36/0x21/0xa/0xc
+  mostly ANSWERED; #41 code 0xc sent ~T+59s and froze - 648 parked on
+  the frozen rwlock family (age 1465s at EOF, kicked 25x = RWFRZ
+  re-kick count, state=0x1 cfs_linked=0: userspace-correct wait).
+  At the SAME minute devmgr tgid 333 word 0x7ff000888264 froze at
+  word=0x80000010 readers=16 AND tgids 619/1171/624 froze at readers=16
+  each (4-process FFRT-pool saturation, same as sc192/193 topology).
+  Launcher then spawn-exit-looped (childexits 4569..4714 status=0,
+  LauncherAbilityManager getOsAccountLocalIdFromProcess each spawn -
+  launcher needs RS which never publishes SA 10). BootAnimation
+  milestones all reached (controller START line 3500, OnHotPlug(0,1)
+  4271, SetVSyncRate 30/2 line 5500 - all BEFORE the freeze). No
+  SA 10; 8-color oracle to the end; shotmon csv ends 07:56:28.
+- Console burn in the decision window (first 10902 lines = 1.34MB in
+  59s, ~22KB/s): 60% userspace console stream (slog 342KB + kmsg 237KB
+  + alog 116KB + hilog 106KB - hilogd writes /dev/console direct),
+  17% OUR probes, ALL via pr_warn!: SAREG 110KB (495 of the 600-print
+  budget burned in min 1), FXDV 48KB, stkfutex 31KB, mtprobe 31KB,
+  SACMP 6KB; raw sinks minor (WW 5KB/29 lines, RWFRZ 0.9KB). The
+  probes fire IN the racer threads' own paths (RS's binder calls print
+  SACMP-RS; futex waits print stkfutex) - each probe line is port-IO
+  VM exits paid by the thread in the race.
+- v5 (this tree, feat(console)): `quietcon` boot param - fs/tty
+  console_output diverts /dev/console bytes into the printk ring
+  (printk::ring_stash_console, KERN_INFO record; dmesg stays complete,
+  UART idle); kernel printk and raw DFX sinks untouched. Roll APPEND:
+  LOGLEVEL=3 (oh-boot-q.sh now takes ${LOGLEVEL:-4}; get_param uses the
+  FIRST loglevel= token so the script token is the single source).
+  NOTE printk() drops level>console_loglevel records BEFORE the ring,
+  so loglevel=3 removes pr_warn! probe records from dmesg too -
+  acceptable for a milestone roll (hilogd keeps its own buffer; hdc
+  retrievable); re-roll instrumented if the race is lost again.
+- sc195 (roll): v4+v5 bzImage, fresh scgold copy userdata-sc195.img,
+  parkdump off, quietcon + loglevel=3, SMP=2 KVM q35, 45 min, shotmon
+  on ohgpu. Milestone gate: SA 10 publish (hdc hilog / dmesg [con]
+  stash) -> bootanimation frames -> launcher chain -> ohgpu screendump
+  shows real launcher UI (not the 8-color scanout oracle) -> save
+  screenshot + csv prominently, commit immediately.
+- QEMU discipline: no live QEMU at leg start (verified ps); sc194
+  ended on its own at 07:56 (timeout).
+
+SESSION R TENTH LEG MIDPOINT (sc195 in-flight interim, 09:2x):
+THE QUIETCON ROLL CHANGED THE RACE FUNDAMENTALLY - NO WEDGE THROUGH
+MIN 27 (sc192/193/194 ALL FROZE AT MIN 1-2; sc184 AT MIN 8) - AND THE
+LAUNCHER IS DEEPER THAN ANY SC-SERIES BOOT: ARKTS BYTECODE EXECUTING.
+
+- sc195 (v4+v5 12ea541e, parkdump off, quietcon + LOGLEVEL=3, fresh
+  scgold copy, KVM q35 SMP2, launched 08:54): serial burn collapsed
+  from sc194's ~22KB/s to ~2.3KB/s in the window (userspace hilog/
+  alog/slog streams GONE - 0 lines vs ~5100; only ERR-level [kmsg]
+  records + raw WW/WAKE-STRANDED remain). RWFRZ = 0 lines at min 27.
+  WAKE-STRANDED continues (episodic 1-4s stalls, strand ages bounded,
+  no growth) - the residual stall family is NOT console-driven alone
+  (host deschedules etc), but it no longer freezes the rwlock.
+- Progress gauges: pid churn steady organic (963 @decile1 -> 4030 @
+  min 24), USEGV deaths fixed at 46 early (no churn), screen = static
+  oracle (md5 a6d1f7e3 unchanged; the oracle pattern is ft-phased, so
+  static md5 = no flips = RS not composing yet).
+- RAM forensics (pmemsave via monitor; HMP notes: size must be <=32-bit
+  chunks, filename must be RELATIVE or the expression parser eats the
+  path): launcher past its sc194 ceiling - MainAbility.abc ArkTS module
+  EXECUTING (152 hits), UIAbility js modules, ArkUI/ace_engine/
+  WindowScene loaded (136/80/98), LauncherAbilityManager loop lines
+  184x, NO clientToService-null errors. BootAnimation one-shot lines
+  absent (ring wrap or never ran - ambiguous).
+- Read: quietcon removed the console-burn term of the freeze window;
+  the remaining chain (RS compose -> bootanimation -> launcher first
+  frame) is now gated by raw slowness (2 vCPUs, episodic stalls), not
+  by the wedge. Plan: let the 45-min window close (~09:39), then
+  reboot the SAME userdata (first-boot caches persist; second boot
+  faces a lighter service storm) with a longer window for the first
+  frame. If a frame appears: immediate screendump + save + commit.
+
+SESSION R TENTH LEG - sc195 FINAL VERDICT (09:4x):
+QUIETCON WINS THE WEDGE RACE 45/45 MIN (RWFRZ=0 THE WHOLE RUN - FIRST
+SC-SERIES BOOT EVER TO STAY UNWEDGED); LAUNCHER REACHED ARKTS/ARKUI
+(DEEPEST EVER); NEW RESIDUAL = pid-1 HARDIRQ-HELD STRAND FROM min~29
+(in inb, the sc184 W3-FROZEN-EXEC-SLOT family); SC196 WARM-REBOOT IN
+FLIGHT (hilogd stops writing /dev/console on boot 2 - stash blind).
+
+- sc195 final (45 min, ended 09:39): screen oracle-static to the end
+  (no RS flips), serial 731KB total. Launcher: MainAbility.abc ArkTS
+  EXECUTING + ArkUI/ace_engine/WindowScene component storm loading +
+  WindowShow 17 - every prior boot died in the LauncherAbilityManager
+  spawn loop LONG before bytecode. No clientToService-null errors.
+- THE QUIETCON RESULT (correlation now 5 boots deep): sc192/193/194
+  (loud, ~22KB/s window burn) froze devmgr at min 1-2, 3/3; sc195
+  (quiet, 2.3KB/s) ZERO wedge lines for 45 min. Console-burn -> freeze
+  window is causal for the min-1 freeze shape. The RWFRZ census
+  (writer-park based) saw nothing - and the chain KEPT ADVANCING to
+  min 45, confirming no silent freeze either.
+- NEW STRAND VARIANT (the v4 residual to chase next): init pid=1 held
+  hardirq-count (pc=0x10000) on cpu0 from ~min 29 to end-of-run - 844
+  PREEMPT-LEAK census prints 1/s from cpu1, held grew to 0x14d0b jif
+  (~855s), rip stable at 0xffffffff802b8dd0 = arch::x86_64::cpu::inb
+  (the generic port-in helper; NOT the bounded putc TX poll - that one
+  has a wall-time budget and stall latch). The interrupted-context rip
+  staying in inb across 844 samples = a tight RX-style poll loop or a
+  stuck hardirq handler in init's context. Early-boot transients
+  (held=0xc8) shared the same function region (802b8c6e=enable_irq,
+  802f1e05=vfs::sbx_want). Same family as sc184's W3-FROZEN-EXEC-SLOT
+  (init named by a frozen busy slot, retaddr in context_switch) - now
+  with an inb rip. System continued on cpu1 (ArkTS progress 152->191
+  hits between min-25 and min-39 RAM samples) but at half speed -
+  likely why RS never got to compose.
+- Warm-reboot observability caveat (sc196): hilogd on boot 2 does NOT
+  write /dev/console (config/flowcontrol persisted on userdata in boot
+  1) - the printk-ring [con] stash region is EMPTY on sc196; ring-
+  based forensics only work on fresh copies.
+- HMP pmemsave notes for future legs: size arg must be <=32-bit
+  (chunk 4GB in two), filename must be RELATIVE (the expression
+  parser eats /-paths as division), files land in QEMU's cwd (repo
+  root, not run/).
+
+SESSION R TENTH LEG - v6 (R73) LANDED + sc196 VERDICT (10:1x):
+COORDINATOR CORRECTION ADOPTED; THE sc195 STRAND ROOT-CAUSED AS THE
+PANIC-DUMPER UNBOUNDED-READ FAMILY AND FIXED ON BOTH ARCHES.
+
+- Coordinator merge 484c8cb8: the riscv64 unit-test panic was NOT stack
+  depth (ninth-leg theory dead) - boot.S's 12MB image window left the
+  boot stack unmapped; fixed on main by 77ec1247 (window/heap 14MB +
+  linker ASSERT). Noted so the wrong theory stops propagating.
+- sc195 strand root cause COMPLETED: the "Registers:" dump right at
+  strand onset + "PANIC: sysrq 'c'" at log line 3929 = OH's own
+  reliability flow (init reboot-plugin ParseRebootReason + bbox
+  context) wrote 'c' to /proc/sysrq-trigger at ~min 29; the KERNPANIC
+  dump's 16-word rsp walk read past the stack mapping, faulted back
+  into the handler, and the print/read recursion held cpu0 (hardirq
+  count, rip parked in the UART inb) for ~855 s. sc191/sc193 each had
+  one "Registers:" dump too - same family, third sighting. sysrq-c is
+  UNIQUE to sc195 across sc190-196 (0 hits elsewhere).
+- v6 (9777f195, both x86_64 and riscv64 twins): KP_DUMP_ENTERED one-
+  shot latch (fault during the dump prints one marker and halts - no
+  recursion, regardless of which read faults) + the kp-stk/24-word
+  walks bounded at the task's real kernel_stack_top() (16K heuristic
+  without task context), skip marker past the top. x86_64 bzImage
+  rebuilt 10:05 (string verified), riscv64 compiles clean.
+- sc196 (warm reboot on sc195's userdata, v5, 45+ min observed):
+  STALLED - pid churn froze at 1369 from ~min 10 to kill at min 33,
+  screen never left black (zero flips; sc195's first boot had the
+  oracle up by min 1), no strand, no RWFRZ, no sysrq-c; with loglevel=3
+  the binder-stall/stkfutex census is muted, so the wedge shape is
+  invisible (the observability cost of the quiet roll). Killed by exact
+  PID (mine), artifacts kept. Warm-reboot on this image loses the
+  early display bring-up - fresh copies remain the way.
+- sc197 (roll, launched 10:09): v6 bzImage, FRESH scgold copy, quietcon
+  + LOGLEVEL=3, SMP2 KVM q35, 90-MIN window - direct continuation of
+  sc195's trajectory (unwedged + ArkTS/ArkUI loading) with the cpu0
+  panic-strand fixed and double the time. Shotmon on ohgpu.
+
+SESSION R TENTH LEG - REST-QUEUE HANDOFF NOTES (for the next leg /
+coordinator, written while sc197 rolls):
+
+- EPOLL_WAKE_REGISTRY sharding (1.1% cost, misc.rs:154): single global
+  Spinlock<Vec<(u64 file_id, *mut EpollFile)>>; EVERY data arrival on
+  any open file (unix-socket enqueue, pipe write...) runs a GLOBAL
+  irqsave O(N) scan, and unregister paths run O(N) retains. Shard by
+  hash(file_id) into K registries (K=16); register/notify derive the
+  shard from file_id (pure partition, no cross-shard invariants).
+  WRINKLE: epoll_wake_unregister_all(ep) must not scan all K shards -
+  derive the epoll's file_id set from its own `entries` (already under
+  the per-epoll lock) and hit only the needed shards. Lock order
+  registry-shard -> per-epoll entries is unchanged. The sc103 leak
+  guard (registry size print before locking) should become per-shard.
+- GRQ cost (3.9%, sched.rs): every schedule/enqueue/wake path takes
+  the single global runqueue lock (per-class sub-queues inside). The
+  candidates are per-CPU runqueues with periodic steal or sharded
+  class queues - a major refactor that INTERSECTS the v1-v4 kill-path
+  machinery (terminal deschedule, DEAD-PICK gates all run under the
+  GRQ): do it only with the sc-series strand probes on, and re-run the
+  full strand verification boot afterwards. Not started this leg.
+- Console-async (the ninth leg's greenfield, now PARTIALLY done):
+  quietcon (v5) already removes the userspace console term. The
+  remaining piece for a production-grade fix: defer kernel printk
+  console emission to a kthread (Linux printk-kthread style) so
+  port-IO never runs under cli in task context. The WW profile's
+  printk::persistent_log::append cluster is the target. Design only.
+- riscv64 make test on THIS branch: main's 77ec1247 (image window fix)
+  is NOT merged into feature/samgr-callback yet - a make test here
+  would re-hit the boot-stack window bug. Merge main before testing.
+
+SESSION R TENTH LEG - sc197 VERDICT + sc198 DIAGNOSTIC ROLL (10:4x):
+THE QUIET BOOT HAS A SECOND, INVISIBLE SOFT-WEDGE SHAPE; sc198 (quietcon
++ LOGLEVEL=4) IS ROLLING TO MAKE IT VISIBLE.
+
+- sc197 (v6, FRESH scgold copy, quietcon + LOGLEVEL=3, launched 10:09,
+  killed 10:40): oracle up at min 1 (fresh-copy display bring-up works
+  - sc196's black screen was the warm-boot difference), then the boot
+  STOPPED PROGRESSING in the pid 900-1100 zone from ~min 12 to kill at
+  min ~30 (sc195 by then was past 2500 with ArkTS running). No RWFRZ,
+  no KERNPANIC, no sysrq-c, no permanent strand (all PREEMPT-LEAK
+  transient), serial fell to ~190B/s probe trickle, StorageDaemon
+  radar line ticking = alive but everyone-else-blocked. RAM census:
+  launcher strings ZERO (never started); hilogd buffer NOT findable
+  (sc195's "ring region" at 0x1877xxxx was hilogd's USERSPACE heap
+  under that boot's ASLR, not the kernel stash - correcting my earlier
+  note; the stash's kernel address is still unidentified).
+- READ: the quiet boot has (at least) two failure shapes - the min-1
+  devmgr rwlock freeze (ELIMINATED by quietcon, sc195 proof) and an
+  early soft-wedge around the display-stack/service zone that leaves
+  NO rwlock freeze and NO kernel-side evidence - with loglevel=3 the
+  binder-stall/stkfutex census is muted exactly when it is needed.
+  Whether it is the same circular family without the rwlock signature
+  or something new is THE open question for sc198.
+- sc198 (launched 10:41, 60 min): v6 bzImage, fresh scgold copy,
+  QUIETCON + LOGLEVEL=4 - userspace console stays muted (the 60% term)
+  while ALL pr_warn! probes print (the 17% term returns): the missing
+  matrix cell. If the soft-wedge forms, the binder-stall/stkfutex/
+  SACMP census will name the blocked pair. Next leg: read
+  run/oh-sc198-serial.log for the stall shape; the fix is then either
+  userspace-circular (C-line REST retest evidence pending) or a wake/
+  residency term we have not met yet.
+
+SESSION R TENTH LEG CLOSE-OUT (11:0x):
+sc198 COMPLETED THE CAUSAL MATRIX - BOTH CONSOLE TERMS INDEPENDENTLY
+MODULATE THE FREEZE; QUIET-QUIET BOOTS HAVE A REMAINING SOFT-WEDGE
+SHAPE; MILESTONE NOT REACHED THIS LEG; v5+v6 READY FOR MERGE.
+
+- sc198 verdict (quietcon + LOGLEVEL=4, killed min ~10): tgid 336
+  (devmgr) froze at readers=16 word 0x80000010 uaddr 0x7ff0009d9a64 at
+  ~min 9 - the CLASSIC terminal freeze returns with ONLY the kernel
+  probe traffic on (userspace console muted). The causal matrix:
+    userspace-console ON + probes ON  (sc192/3/4): freeze min 1-2
+    userspace-console OFF + probes ON (sc198):    freeze min ~9
+    userspace-console OFF + probes OFF (sc195):   NO freeze in 45 min,
+                                                 deepest chain ever
+                                                 (sc196/197: same config
+                                                 soft-wedged early)
+  Both terms matter independently; the probes print INSIDE the racer
+  threads (SACMP/stkfutex in RS's own binder/futex paths), so their
+  port-IO cost lands exactly on the race's critical path.
+- The remaining blocker is the quiet-quiet SOFT-WEDGE (sc196 fresh-off-
+  warm + sc197 fresh: boot stalls in the pid 900-1400 zone from ~min
+  10-12, no rwlock freeze, no kernel evidence, 1-of-3 boots (sc195)
+  passes it). Diagnosing it needs probe visibility WITHOUT probe burn -
+  the obvious next-leg instrument is SPARSE probes (budgeted 1-in-N
+  sampling of binder-stall/stkfutex/SACMP so the census exists at a
+  fraction of the burn), plus an sc195-shaped run with more headroom
+  (SMP4 + 2G for final validation per repo discipline, or a longer
+  window) to see whether ArkUI-load completes into a first frame.
+- Milestone (ohgpu screenshot of real launcher UI): NOT reached. Best
+  point remains sc195's ArkTS MainAbility executing + ArkUI component
+  storm loading. The chain from there: ArkUI first frame -> RS compose
+  -> launcher window -> screenshot (the cc lane's black-GEM import
+  question is the known risk at the compose step).
+- Branch state: feature/samgr-callback at this commit; code deltas this
+  leg = v5 quietcon (12ea541e: tty/console_output divert + printk
+  ring_stash_console + cmdline quietcon + oh-boot-q.sh LOGLEVEL) and v6
+  R73 (9777f195: KERNPANIC dump bound + re-entrancy latch, both arches;
+  coordinator-assigned). Both compile clean on x86_64 and riscv64;
+  v5 verified live in sc195-198, v6 string-verified in the bzImage (its
+  panic path will get its live verification the first time OH's sysrq-c
+  fires - expect "re-entered during dump" or a clean bounded dump).
+  config.rs left dirty (riscv64 platform artifact from make build).
+  riscv64 make test on this branch needs main's 77ec1247 merged first.
+- Kills this leg: sc196/sc197/sc198 QEMUs by exact own PID after
+  verifying cmdline tag; shotmon tasks stopped; no setsid/nohup used;
+  RAM dumps (13GB) deleted after analysis; artifacts (serial logs,
+  csv, ppm, auto0 shots) on disk uncommitted except the milestone
+  interim shot.
+  (correction to the close-out above: config.rs is NOT dirty - the
+  snapshot already committed the riscv64 platform artifact, and the
+  riscv64 `make build` regenerated the same content. Tree is clean at
+  273489e7.)

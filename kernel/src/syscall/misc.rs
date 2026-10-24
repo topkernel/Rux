@@ -106,6 +106,10 @@ struct EpollEntry {
     /// snapshot (a new edge), and readiness going fully idle resets it
     /// so the next arrival reports again. 0 = nothing reported yet.
     last_reported: u32,
+    /// dfx=socksnap (b16 appspawn hunt): how many times a wait delivered
+    /// this entry — a readable LT entry with reports==0 while its epoll's
+    /// wait_count grows is the lost-delivery signature.
+    reports: u64,
 }
 
 /// Epoll file structure (stored as File private_data)
@@ -115,6 +119,11 @@ struct EpollFile {
     /// the re-check timer, signal delivery, or `epoll_notify_file` once
     /// fd-side producers (pipe/socket/...) are wired to call it.
     wait_queue: crate::process::wait::WaitQueueHead,
+    /// dfx=socksnap (b16): creator pid, printed by the interest dump so an
+    /// epoll line can be tied to its owning process.
+    owner_pid: u32,
+    /// dfx=socksnap (b16): total completed wait syscalls on this instance.
+    wait_count: u64,
 }
 
 // ============================================================================
@@ -159,6 +168,25 @@ static EPOLL_WAKE_REGISTRY: crate::sync::spinlock::Spinlock<EpollWakeRegistry> =
 /// in its close op, which only runs on the last Arc reference — no
 /// epoll_wait can still be blocked on the instance at that point.
 pub fn epoll_notify_file(file_id: u64) {
+    // sc103: every unix-socket enqueue runs this GLOBAL IRQ-save scan —
+    // if the registry leaks bindings (dead processes' epolls), each hilog
+    // writev pays O(registry) under one contended lock. Name the size
+    // BEFORE taking the lock (printk discipline).
+    {
+        static EPN_N: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+        let n = EPN_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        if n < 400 && (n < 40 || n % 10 == 0) {
+            // One lock pass to read the length (temporary guard drops at
+            // the statement's end), then printk lock-free.
+            let size = EPOLL_WAKE_REGISTRY.lock_irqsave().bindings.len();
+            crate::pr_warn!(
+                "epollnotify#{}: registry_size={} this_fid={:#x}",
+                n,
+                size,
+                file_id
+            );
+        }
+    }
     let registry = EPOLL_WAKE_REGISTRY.lock_irqsave();
     for (id, ep) in registry.bindings.iter() {
         if *id != file_id {
@@ -200,6 +228,148 @@ fn epoll_wake_unregister_all(ep: *mut EpollFile) {
 fn epoll_wake_unregister(file_id: u64, ep: *mut EpollFile) {
     let mut registry = EPOLL_WAKE_REGISTRY.lock_irqsave();
     registry.bindings.retain(|(id, e)| !(*id == file_id && *e == ep));
+}
+
+/// dfx=socksnap (b20 epoll wedge hunt): dump the epoll instances watching
+/// `file_id` — one line per instance with owner, completed-wait count, and
+/// the entry row (fd, events, fid, last_reported, reports). Called from the
+/// Spawn-family connect trace (net::unix) because the khungtaskd cadence
+/// that used to print epoll_interest_snapshot wedges after its FIRST pass
+/// in every OH boot — this puts the counters on the connect timeline
+/// instead. waits stuck at its pre-connect value across many connects is
+/// the parked-forever signature; rep stuck at 0 while waits grows is the
+/// never-reports signature. Lock order registry → entries (same as
+/// epoll_notify_file); collect under lock, print after release.
+pub fn epoll_dump_for_file(file_id: u64) {
+    if !crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SockSnap) {
+        return;
+    }
+    let mut out: alloc::vec::Vec<(usize, u32, u64, alloc::vec::Vec<(i32, u32, u64, u32, u64)>)> =
+        alloc::vec::Vec::new();
+    {
+        let registry = EPOLL_WAKE_REGISTRY.lock_irqsave();
+        for (id, ep) in registry.bindings.iter() {
+            if *id != file_id {
+                continue;
+            }
+            let ep_usize = *ep as usize;
+            if out.iter().any(|(p, _, _, _)| *p == ep_usize) {
+                continue; // one line per instance, not per binding
+            }
+            // SAFETY: `ep` is alive while we hold the registry lock (see
+            // epoll_interest_snapshot).
+            let epoll = unsafe { &**ep };
+            let owner = epoll.owner_pid;
+            let waits = epoll.wait_count;
+            let entries = epoll.entries.lock();
+            let mut row: alloc::vec::Vec<(i32, u32, u64, u32, u64)> = alloc::vec::Vec::new();
+            for entry in entries.iter() {
+                if row.len() >= 24 {
+                    break;
+                }
+                row.push((
+                    entry.fd,
+                    entry.events,
+                    entry.file_id,
+                    entry.last_reported,
+                    entry.reports,
+                ));
+            }
+            drop(entries);
+            out.push((ep_usize, owner, waits, row));
+        }
+    }
+    for (ep, owner, waits, row) in out.iter() {
+        let mut line: alloc::string::String = alloc::format!(
+            "socksnap: EPWATCH fid={:#x} ep={:#x} owner={} waits={}",
+            file_id,
+            ep,
+            owner,
+            waits
+        );
+        for (fd, ev, fid, lr, rep) in row.iter() {
+            line.push_str(&alloc::format!(
+                " [fd={} ev={:#x} fid={:#x} lr={:#x} rep={}]",
+                fd, ev, fid, lr, rep
+            ));
+        }
+        crate::pr_warn!("{}", line);
+    }
+}
+
+/// dfx=socksnap (appspawn wedge hunt, b15): dump the interest set of every
+/// epoll instance reachable through the wake registry — one line per
+/// instance listing up to 24 registered fds (fd number, events mask, file
+/// id, ET snapshot). Cross-reference against the AF_UNIX listener dump
+/// (net::unix::unix_listener_snapshot): a wedged server whose listener
+/// file id appears in NO interest set had its registration removed (or
+/// never made); one whose listener IS registered but never reports has a
+/// readiness bug. Lock order registry → entries matches epoll_notify_file.
+/// Formatting happens AFTER both locks drop (collect under lock, print
+/// outside). Purely diagnostic; self-gated by dfx=socksnap.
+pub fn epoll_interest_snapshot() {
+    if !crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SockSnap) {
+        return;
+    }
+    // (epoll ptr, owner pid, wait count, [(fd, events, file_id, last_reported, reports); ..])
+    // — collected under the registry + entries locks, printed after release.
+    let mut out: alloc::vec::Vec<(
+        usize,
+        u32,
+        u64,
+        alloc::vec::Vec<(i32, u32, u64, u32, u64)>,
+    )> = alloc::vec::Vec::new();
+    {
+        let registry = EPOLL_WAKE_REGISTRY.lock_irqsave();
+        for (_, ep) in registry.bindings.iter() {
+            let ep_usize = *ep as usize;
+            if out.iter().any(|(p, _, _, _)| *p == ep_usize) {
+                continue; // one line per instance, not per binding
+            }
+            // SAFETY: `ep` came from Box::into_raw in sys_epoll_create and
+            // its close op unregisters the binding before freeing, so it is
+            // alive while we hold the registry lock.
+            let epoll = unsafe { &**ep };
+            let owner = epoll.owner_pid;
+            let waits = epoll.wait_count;
+            let entries = epoll.entries.lock();
+            let mut row: alloc::vec::Vec<(i32, u32, u64, u32, u64)> = alloc::vec::Vec::new();
+            for entry in entries.iter() {
+                if row.len() >= 24 {
+                    break;
+                }
+                row.push((
+                    entry.fd,
+                    entry.events,
+                    entry.file_id,
+                    entry.last_reported,
+                    entry.reports,
+                ));
+            }
+            let total = entries.len();
+            drop(entries);
+            out.push((ep_usize, owner, waits, row));
+            if total > 24 {
+                crate::pr_warn!("socksnap: ep={:#x} has {} entries (truncated)", ep_usize, total);
+            }
+        }
+    }
+    for (ep, owner, waits, row) in out.iter() {
+        let mut line: alloc::string::String = alloc::format!(
+            "socksnap: ep={:#x} owner={} waits={} fds={}",
+            ep,
+            owner,
+            waits,
+            row.len()
+        );
+        for (fd, ev, fid, lr, rep) in row.iter() {
+            line.push_str(&alloc::format!(
+                " [fd={} ev={:#x} fid={:#x} lr={:#x} rep={}]",
+                fd, ev, fid, lr, rep
+            ));
+        }
+        crate::pr_info!("{}", line);
+    }
 }
 
 /// Epoll file close callback
@@ -1236,6 +1406,8 @@ pub fn sys_epoll_create(args: SyscallArgs) -> i64 {
     let epoll = alloc::boxed::Box::new(EpollFile {
         entries: crate::sync::spinlock::Spinlock::new(alloc::vec::Vec::new()),
         wait_queue: crate::process::wait::WaitQueueHead::new(),
+        owner_pid: crate::process::current_pid(),
+        wait_count: 0,
     });
     let epoll_ptr = alloc::boxed::Box::into_raw(epoll) as *mut u8;
 
@@ -1532,6 +1704,7 @@ pub fn sys_epoll_ctl(args: SyscallArgs) -> i64 {
                         events: event.events,
                         data: event.data,
                         last_reported: 0,
+                        reports: 0,
                     });
                     Reg::Add(file_id)
                 }
@@ -1751,6 +1924,8 @@ pub fn sys_epoll_wait(args: SyscallArgs) -> i64 {
                         file.get_ops().map_or(core::ptr::null(), |o| o as *const _ as *const ()),
                     ));
                 }
+                // dfx=socksnap (b16): count the delivery.
+                entry.reports = entry.reports.saturating_add(1);
                 ready_events.push(EPollEvent {
                     events: ep_events & report_mask,
                     data: entry.data,
@@ -1816,6 +1991,8 @@ pub fn sys_epoll_wait(args: SyscallArgs) -> i64 {
             if uncopied > 0 {
                 return -(errno::EFAULT as i64);
             }
+            // dfx=socksnap (b16): one completed wait syscall.
+            epoll.wait_count = epoll.wait_count.saturating_add(1);
             return count as i64;
         }
 
@@ -2591,6 +2768,18 @@ static SIGNALFD_WAKE_REGISTRY: crate::sync::spinlock::Spinlock<SignalfdWakeRegis
 /// instead of waiting out the poll interval.
 pub fn signalfd_notify_task(task: *mut crate::process::task::Task) {
     let registry = SIGNALFD_WAKE_REGISTRY.lock_irqsave();
+    // SFDDBG (launcher bring-up): did the wake reach a pid-1-owned fd?
+    // Zero bindings means the fd was never registered (or was closed).
+    if unsafe { (*task).pid() == 1 } {
+        static NT_N: core::sync::atomic::AtomicUsize =
+            core::sync::atomic::AtomicUsize::new(0);
+        if NT_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 100 {
+            crate::pr_info!(
+                "SFDDBG: notify pid1 registry_len={}",
+                registry.bindings.len()
+            );
+        }
+    }
     for (owner, wq) in registry.bindings.iter() {
         if *owner == task {
             // SAFETY: wq points into a boxed SignalFd alive until its close
@@ -2648,6 +2837,15 @@ fn signalfd_read(file: &crate::fs::File, buf: &mut [u8]) -> isize {
         let ready = pending & mask;
         if ready != 0 {
             let sig = ready.trailing_zeros() as i32 + 1;
+            // SFDDBG (launcher bring-up): a pid-1 signalfd consume — the
+            // moment init learns a child died (HandleSigChild follows).
+            if (*current).pid() == 1 {
+                static RD_N: core::sync::atomic::AtomicUsize =
+                    core::sync::atomic::AtomicUsize::new(0);
+                if RD_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 100 {
+                    crate::pr_info!("SFDDBG: pid1 read sfd consumed sig={}", sig);
+                }
+            }
             // Consume (sigtimedwait semantics): clear the bitmap bit and
             // take the queued info when present.
             // SAFETY: current is the running task's pointer.

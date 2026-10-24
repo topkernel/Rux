@@ -112,6 +112,16 @@ pub fn access_ok(addr: usize, size: usize) -> bool {
 
 /// Copy kernel → user. Returns the number of bytes NOT copied.
 ///
+/// A write into a COW-downgraded user page (e.g. a register-held local on
+/// the parent's stack after fork — the parent's first write to that page
+/// may be THIS kernel copy) faults under CR0.WP, resolves through the
+/// trap path, and the `rep movsb` re-executes — see exception.rs. The
+/// fault_in_write retry below is the second belt (Linux
+/// fault_in_pages_writeable + copy retry parity, ported from the riscv64
+/// twin): if the extable fixup already consumed the fault once (short
+/// copy) and the range is still resolvable, resolve it here and retry
+/// once instead of propagating EFAULT.
+///
 /// # Safety
 /// `from` must be readable for `n` bytes; `to` is validated by access_ok.
 pub unsafe fn copy_to_user(to: *mut u8, from: *const u8, n: usize) -> usize {
@@ -120,7 +130,16 @@ pub unsafe fn copy_to_user(to: *mut u8, from: *const u8, n: usize) -> usize {
     }
     // SAFETY: exception-table copy — a fault on `to` jumps to the fixup
     // and returns the remaining count instead of faulting the kernel.
-    unsafe { __x64_copy_to_user(to, from, n) }
+    let uncopied = unsafe { __x64_copy_to_user(to, from, n) };
+    if uncopied == 0 {
+        return 0;
+    }
+    // SAFETY: best-effort COW/demand resolution on the user range.
+    if unsafe { fault_in_write(to, n) } {
+        // SAFETY: retry the copy after resolution.
+        return unsafe { __x64_copy_to_user(to, from, n) };
+    }
+    uncopied
 }
 
 /// Copy user → kernel. Returns the number of bytes NOT copied.
@@ -137,6 +156,8 @@ pub unsafe fn copy_from_user(to: *mut u8, from: *const u8, n: usize) -> usize {
 
 /// Zero user memory. Returns the number of bytes NOT cleared.
 ///
+/// Same COW discipline as copy_to_user (see fault_in_write).
+///
 /// # Safety
 /// `to` is validated by access_ok; a fault lands in the exception table.
 pub unsafe fn clear_user(to: *mut u8, n: usize) -> usize {
@@ -144,7 +165,118 @@ pub unsafe fn clear_user(to: *mut u8, n: usize) -> usize {
         return n;
     }
     // SAFETY: exception-table clear (see copy_to_user).
-    unsafe { __x64_clear_user(to, n) }
+    let uncleared = unsafe { __x64_clear_user(to, n) };
+    if uncleared == 0 {
+        return 0;
+    }
+    // SAFETY: best-effort COW/demand resolution on the user range.
+    if unsafe { fault_in_write(to, n) } {
+        // SAFETY: retry the clear after resolution.
+        return unsafe { __x64_clear_user(to, n) };
+    }
+    uncleared
+}
+
+/// Fault-in a user address range for writing (COW resolution / demand
+/// mapping), best-effort: returns true if at least the first page got
+/// resolved. Only handles resolvable cases; genuinely bad ranges still
+/// return false so callers report EFAULT. Ported from the riscv64 twin
+/// (Linux fault_in_pages_writeable parity) — with CR0.WP set, a
+/// supervisor uaccess write to a COW/read-only page faults instead of
+/// silently piercing the protection (F1b), so the copy layer needs an
+/// explicit resolve-and-retry for the pages the trap path could not fix.
+unsafe fn fault_in_write(start: *mut u8, len: usize) -> bool {
+    use crate::arch::mm::PageTableEntry;
+    use crate::arch::mm::mm_ops::PageTableWalker;
+
+    let task = match crate::sched::current() {
+        Some(t) => t,
+        None => return false,
+    };
+
+    let addr_space = match task.address_space() {
+        Some(a) => a,
+        None => return false,
+    };
+
+    let root_ppn = addr_space.root_ppn();
+
+    let first_page = (start as usize) & !0xFFF;
+    let last_page = ((start as usize) + len.saturating_sub(1)) & !0xFFF;
+    let mut resolved_any = false;
+    let mut page = first_page;
+    loop {
+        // Already writable?
+        if let Some((_ppn, bits)) = PageTableWalker::walk(root_ppn, page as u64) {
+            if bits & PageTableEntry::W != 0 {
+                resolved_any = true;
+                if page == last_page { break; }
+                page += 0x1000;
+                continue;
+            }
+            // Valid but read-only: COW? (x86_64 COW software bit 9)
+            if bits & (1 << 9) != 0 {
+                match unsafe {
+                    crate::arch::mm::mm_ops::handle_cow_fault(
+                        addr_space,
+                        root_ppn,
+                        crate::arch::mm::VirtAddr::new(page as u64),
+                    )
+                } {
+                    // Retry = a sibling thread resolved the COW (or the
+                    // mapping changed) between our check and the locked
+                    // re-walk — the following write either succeeds or
+                    // faults again into the right path. Count as progress.
+                    crate::arch::mm::CowFaultResult::Resolved
+                    | crate::arch::mm::CowFaultResult::Retry => {
+                        resolved_any = true;
+                    }
+                    crate::arch::mm::CowFaultResult::OutOfMemory => {}
+                }
+            }
+            // Non-COW read-only is a genuine protection fault — give up.
+            if page == last_page { break; }
+            page += 0x1000;
+            continue;
+        }
+
+        // Not present: demand-map through the fault engine (anonymous
+        // write fault / stack growth / file page).
+        match crate::arch::mm::page_fault::handle_mm_fault(
+            &addr_space,
+            crate::arch::mm::VirtAddr::new(page as u64),
+            crate::arch::mm::page_fault::FaultFlags::WRITE,
+        ) {
+            crate::arch::mm::MmFaultResult::CowPending => {
+                // handle_cow_fault resolves it
+                // Leg-15 pace: tick after return (pte_lock released).
+                let cow_j0 = crate::drivers::timer::get_jiffies();
+                let cow_res = unsafe {
+                    crate::arch::mm::mm_ops::handle_cow_fault(
+                        addr_space,
+                        root_ppn,
+                        crate::arch::mm::VirtAddr::new(page as u64),
+                    )
+                };
+                crate::dfx::schb::note_cow(cow_j0);
+                match cow_res {
+                    crate::arch::mm::CowFaultResult::Resolved
+                    | crate::arch::mm::CowFaultResult::Retry => {
+                        resolved_any = true;
+                    }
+                    crate::arch::mm::CowFaultResult::OutOfMemory => {}
+                }
+            }
+            crate::arch::mm::MmFaultResult::Handled
+            | crate::arch::mm::MmFaultResult::AlreadyMapped => {
+                resolved_any = true;
+            }
+            _ => {}
+        }
+        if page == last_page { break; }
+        page += 0x1000;
+    }
+    resolved_any
 }
 
 /// Read one value from user memory.

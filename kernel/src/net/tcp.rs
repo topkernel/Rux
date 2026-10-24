@@ -113,6 +113,52 @@ fn tx_record_endpoints(
     }
 }
 
+/// dfx=tcptrace: sequence-level segment forensics for the hdc
+/// file-corruption hunt. Inbound lines print the receiver's post-parse
+/// view (nothing decoded yet); outbound lines print each emitted
+/// descriptor. Budget: 24000 lines per boot — enough for several full
+/// 1 MB transfers, then silent.
+fn tcp_trace_budget() -> bool {
+    static N: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+    if !crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::TcpTrace) {
+        return false;
+    }
+    N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 24000
+}
+
+fn tcp_trace_in(tcp_hdr: &TcpHdr, skb: &SkBuff, dest_port: u16) {
+    if !tcp_trace_budget() {
+        return;
+    }
+    let payload = (skb.len as usize).saturating_sub(tcp_hdr.header_len());
+    crate::pr_info!(
+        "tcp-in : {}->{} flags {:x} seq {:x} ack {:x} len {} win {}",
+        TcpPort::from_be(tcp_hdr.source),
+        dest_port,
+        tcp_hdr.flags,
+        TcpSeq::from_be(tcp_hdr.seq),
+        TcpAck::from_be(tcp_hdr.ack_seq),
+        payload,
+        tcp_hdr.window()
+    );
+}
+
+fn tcp_trace_out(d: &TcpTxDesc) {
+    if !tcp_trace_budget() {
+        return;
+    }
+    crate::pr_info!(
+        "tcp-out: {}->{} flags {:x} seq {:x} ack {:x} len {} win {}",
+        d.src_port,
+        d.dst_port,
+        d.flags,
+        d.seq,
+        d.ack,
+        d.len,
+        d.window
+    );
+}
+
 /// TCP sequence number
 pub type TcpSeq = u32;
 
@@ -694,6 +740,7 @@ impl TcpTxBatch {
     /// segment (TCP recovers via peer retransmit / our timers).
     pub fn emit_all(&mut self) {
         for d in self.descs.drain(..) {
+            tcp_trace_out(&d);
             let data = &self.arena[d.off..d.off + d.len];
             let mut skb = match crate::net::buffer::alloc_skb(1500) {
                 Some(s) => s,
@@ -2628,6 +2675,35 @@ impl TcpConnectionManager {
         let src_port = TcpPort::from_be(tcp_hdr.source);
         let dest_port = TcpPort::from_be(tcp_hdr.dest);
 
+        // b143: first 60 inbound segments — the hostfwd→hdcd path died
+        // silently (QEMU accepted host-side, the guest never answered)
+        // and nothing said whether the SYN even reached TCP. Rate-limited
+        // raw trace; delete once the inbound path is trusted.
+        {
+            static SEG_N: core::sync::atomic::AtomicUsize =
+                core::sync::atomic::AtomicUsize::new(0);
+            let n = SEG_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            if n < 60 {
+                crate::pr_info!(
+                    "tcp-in[{}]: {}.{}.{}.{}:{} -> {}.{}.{}.{}:{} flags {:#x}",
+                    n,
+                    src_ip & 0xff,
+                    (src_ip >> 8) & 0xff,
+                    (src_ip >> 16) & 0xff,
+                    (src_ip >> 24) & 0xff,
+                    src_port,
+                    dest_ip & 0xff,
+                    (dest_ip >> 8) & 0xff,
+                    (dest_ip >> 16) & 0xff,
+                    (dest_ip >> 24) & 0xff,
+                    dest_port,
+                    tcp_hdr.flags
+                );
+            }
+        }
+
+        tcp_trace_in(tcp_hdr, skb, dest_port);
+
         let is_syn = tcp_hdr.syn() && !tcp_hdr.ack();
         let mut listen_parent: Option<i32> = None;
 
@@ -3143,7 +3219,7 @@ fn tcp_find_port_conflict(port: TcpPort, self_fd: i32) -> Option<i32> {
 pub fn tcp_listen(fd: i32, backlog: u32) -> i32 {
     let _table_g = TCP_TABLE_LOCK.lock_irqsave();
     // SAFETY: TCP_SOCKET_TABLE is a global static; fd was returned by tcp_socket_alloc.
-    unsafe {
+    let ret = unsafe {
         if let Some(socket) = TCP_SOCKET_TABLE.get_mut(fd as usize) {
             match socket.listen(backlog) {
                 Ok(()) => 0,
@@ -3152,7 +3228,21 @@ pub fn tcp_listen(fd: i32, backlog: u32) -> i32 {
         } else {
             -5 // EBADF
         }
+    };
+    // b143: one line per successful listen — hdcd's TCP bridge port
+    // comes from persist.hdc.port (or a random ephemeral when unset)
+    // and nothing else names it; same for any service the host wants
+    // to reach through a QEMU hostfwd.
+    if ret == 0 {
+        if let Some(socket) = unsafe { TCP_SOCKET_TABLE.get(fd as usize) } {
+            crate::pr_info!(
+                "tcp-listen: pid {} port {}",
+                crate::process::current_pid(),
+                socket.local_port
+            );
+        }
     }
+    ret
 }
 
 /// Next ephemeral port for auto-bind on connect (review NET-M6).
@@ -3401,6 +3491,19 @@ pub fn tcp_send_ready(fd: i32) -> bool {
 /// (Blocking-accept wait condition; mirrors tcp_accept's scan.)
 pub fn tcp_accept_pending(fd: i32) -> bool {
     let _g = TCP_TABLE_LOCK.lock_irqsave();
+    // SAFETY: the guard above is held.
+    unsafe { tcp_listen_has_pending_child_locked(fd) }
+}
+
+/// Caller holds TCP_TABLE_LOCK (socket poll inlines this under its own
+/// guard — the public helper above would re-lock and deadlock).
+pub fn tcp_listen_has_pending_child(fd: i32) -> bool {
+    // SAFETY: caller holds TCP_TABLE_LOCK.
+    unsafe { tcp_listen_has_pending_child_locked(fd) }
+}
+
+/// PRECONDITION: TCP_TABLE_LOCK held.
+unsafe fn tcp_listen_has_pending_child_locked(fd: i32) -> bool {
     // SAFETY: TCP_SOCKET_TABLE is a global; protected by TCP_TABLE_LOCK.
     unsafe {
         for i in 0..TCP_SOCKET_TABLE.count {

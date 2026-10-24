@@ -21,10 +21,29 @@
 //!
 //! - **INV-HEAP-2**: `free_lists[order]` is either `EMPTY_LIST` or a valid
 //!   page index within `[0, MAX_PAGES)`.
+//!
+//! - **INV-HEAP-3** (session 5, wedge fix): the per-page FREE bit lives in
+//!   `free_bits`, a word-strided bitmap; `BlockMeta.free` is authoritative
+//!   for LIST LEADERS only (interior pages' byte stays stale). The bitmap
+//!   is the exact per-page free state and is what the R9-14 double-free
+//!   check consults. Interior pages' `order` bytes are maintained by a
+//!   tight raw-pointer fill (report fidelity for the ORDER_MISMATCH arm);
+//!   they carry the order of the block they currently belong to.
+//!
+//!   Why: the old mark-every-page loops ran `meta.get_mut()` (bounds
+//!   assert + UnsafeCell call) per page inside `add_to_free_list` /
+//!   `remove_from_free_list` / `init_block`, all under the single
+//!   irqsave heap lock. On a 1 GiB heap (2^18 pages, seeded as one
+//!   order-18 block) an order-scale add/remove walked 262144 heavy
+//!   iterations per level; gdb on the ww-v2 wedge caught cpu1 grinding
+//!   exactly that loop under tcp_timer softirq while cpu0 spun on the
+//!   same lock in the alloc path (terminal 15+ min system freeze,
+//!   session-4 record). The bitmap fill is 4096 word ops for the same
+//!   block; the order fill is a call-free byte loop.
 
 use core::alloc::{GlobalAlloc, Layout};
 use core::cell::UnsafeCell;
-use core::sync::atomic::{AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicU64, AtomicUsize, Ordering};
 use crate::sync::spinlock::Spinlock;
 
 const PAGE_SIZE: usize = 4096;
@@ -40,7 +59,7 @@ const MIN_ORDER: usize = 0;
 // x86_64: linear map at 0xffff888000000000 over phys 0; heap placed at 1GB
 // (clear of the image window 0x200000..0xa00000 and the q35 ECAM hole).
 #[cfg(feature = "riscv64")]
-const KERNEL_HEAP_PHYS: usize = 0x80C0_0000;
+const KERNEL_HEAP_PHYS: usize = 0x8100_0000;
 #[cfg(feature = "riscv64")]
 const VA_PA_OFFSET: usize = 0xffffffd600000000 - 0x80000000;
 #[cfg(feature = "x86_64")]
@@ -55,8 +74,57 @@ const HEAP_SIZE: usize = crate::config::KERNEL_HEAP_SIZE;
 /// Maximum number of pages (for metadata array size)
 const MAX_PAGES: usize = HEAP_SIZE / PAGE_SIZE;
 
+/// Words in the per-page free bitmap (INV-HEAP-3).
+const FREE_BITMAP_WORDS: usize = (MAX_PAGES + 63) / 64;
+
 /// Empty list marker (use out-of-range value)
 const EMPTY_LIST: usize = MAX_PAGES + 1;
+
+// ---------------------------------------------------------------------------
+// alloc-crash r12-16 forensics: exact page-flow accounting for the
+// "heap 100% full while the live-site ledger is nearly empty" contradiction
+// (a2: 1015808K window, 68K free; a3: 0K free, tracked-live ~13MB).
+//
+// NET_PAGES[order] counts pages HANDED OUT minus pages RETURNED at each
+// order (unconditional relaxed atomics — correctness-neutral). The sum
+// over orders is the allocator's own "used" figure; comparing it with the
+// free-list census at the ALLOCTHROW moment tells whether the pages are
+// held by live allocations or vanished from both the free lists and the
+// ledger (orphaning via the free-refuse paths below).
+//
+// FREE_REFUSED counts frees dropped on the floor by the guard rails —
+// every refusal permanently orphans that block's pages (the block never
+// returns to a free list). A refused-free count that grows with uptime IS
+// the leak when the live table is clean.
+// ---------------------------------------------------------------------------
+pub static NET_PAGES: [AtomicUsize; MAX_ORDER + 1] =
+    [const { AtomicUsize::new(0) }; MAX_ORDER + 1];
+
+/// Free-refusal breakdown, indexed by FreeRefuse kind.
+pub static FREE_REFUSED: [AtomicUsize; 8] = [const { AtomicUsize::new(0) }; 8];
+
+/// Free-refusal kinds (index into FREE_REFUSED).
+pub const FR_OUT_OF_WINDOW: usize = 0;
+pub const FR_DOUBLE_FREE: usize = 1;
+pub const FR_ORDER_MISMATCH: usize = 2;
+pub const FR_TASK_LIVE: usize = 3;
+pub const FR_ORDER_TOO_BIG: usize = 4;
+pub const FR_UNALIGNED: usize = 5;
+
+/// Last N refused frees: (addr, incoming order, meta_order, meta_free).
+pub static REFUSED_RING: [AtomicUsize; 64] = [const { AtomicUsize::new(0) }; 64];
+static REFUSED_RING_POS: AtomicUsize = AtomicUsize::new(0);
+
+fn refused_free_note(kind: usize, addr: usize, order: usize, meta_order: u8, meta_free: u8) {
+    FREE_REFUSED[kind.min(7)].fetch_add(1, Ordering::Relaxed);
+    let pos = REFUSED_RING_POS.fetch_add(1, Ordering::Relaxed) % 16;
+    let slot = pos * 4;
+    REFUSED_RING[slot].store(addr, Ordering::Relaxed);
+    REFUSED_RING[slot + 1].store(order, Ordering::Relaxed);
+    REFUSED_RING[slot + 2].store(meta_order as usize, Ordering::Relaxed);
+    REFUSED_RING[slot + 3].store(meta_free as usize, Ordering::Relaxed);
+}
+
 
 /// Block metadata (stored separately, not mixed with user data)
 #[repr(C)]
@@ -129,6 +197,12 @@ pub struct BuddyAllocator {
     initialized: AtomicUsize,
     /// Metadata area (stores metadata for each page)
     meta: MetaArray,
+    /// Per-page free bitmap (INV-HEAP-3): bit (page_idx % 64) of word
+    /// (page_idx / 64). Maintained by the same locked paths that used to
+    /// fill the per-page `BlockMeta.free` bytes; word-strided so an
+    /// order-scale fill costs 2^order/64 word RMWs instead of 2^order
+    /// per-page `get_mut` iterations under the irqsave lock.
+    free_bits: [AtomicU64; FREE_BITMAP_WORDS],
     /// Lock for buddy operations
     lock: Spinlock<()>,
 }
@@ -152,6 +226,7 @@ impl BuddyAllocator {
             free_lists: [const { AtomicUsize::new(0) }; MAX_ORDER + 1],
             initialized: AtomicUsize::new(0),
             meta: MetaArray::new(),
+            free_bits: [const { AtomicU64::new(0) }; FREE_BITMAP_WORDS],
             lock: Spinlock::new(()),
         }
     }
@@ -166,28 +241,135 @@ impl BuddyAllocator {
     /// Uses hardcoded addresses for early boot compatibility.
     /// The actual layout is tracked in mm::layout module for other components.
     pub fn init(&self) {
+        self.init_sized(HEAP_SIZE);
+    }
+
+    /// Initialize the allocator with a heap window CLAMPED to the
+    /// discovered memory map (the -m 512M panic family: `HEAP_SIZE` is the
+    /// config NOMINAL size; on machines with less RAM the window must
+    /// shrink or the buddy hands out addresses past the last DRAM page).
+    ///
+    /// Unlike the old single-block seeding (`heap_size_to_order` rounds UP
+    /// to a power of two, poking the last block past the window), the
+    /// window is seeded with the largest whole blocks that fit — the same
+    /// discipline as zone init. `size` is capped at `HEAP_SIZE` (the
+    /// metadata array bound).
+    pub fn init_sized(&self, size: usize) {
         if self.initialized.load(Ordering::Acquire) != 0 {
             return;
         }
 
         if self.initialized.compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire).is_ok() {
+            let size = size.min(HEAP_SIZE);
             // Set magic number
             self.magic.store(0xDEADBEEF, Ordering::Release);
             self.heap_start.store(HEAP_START, Ordering::Release);
-            self.heap_end.store(HEAP_START + HEAP_SIZE, Ordering::Release);
+            self.heap_end.store(HEAP_START + size, Ordering::Release);
 
             // Initialize all free lists to empty
             for i in 0..=MAX_ORDER {
                 self.free_lists[i].store(EMPTY_LIST, Ordering::Release);
             }
 
-            // Calculate maximum order
-            let max_order = self.heap_size_to_order(HEAP_SIZE);
+            if size == 0 {
+                return; // no heap window on this machine — allocations fail
+            }
 
-            // Add entire heap as a single large block to corresponding order's free list
-            // Page index 0 corresponds to HEAP_START
-            self.init_block(0, max_order, false);
-            self.add_to_free_list(0, max_order);
+            // Seed: repeatedly add the largest order that is index-aligned
+            // and fits in the remaining pages. Page 0 == HEAP_START.
+            let mut remaining = size / PAGE_SIZE;
+            let mut idx = 0usize;
+            while remaining > 0 {
+                let mut order = 0usize;
+                for o in (0..=MAX_ORDER).rev() {
+                    let block = 1usize << o;
+                    if idx % block == 0 && remaining >= block {
+                        order = o;
+                        break;
+                    }
+                }
+                self.init_block(idx, order, false);
+                self.add_to_free_list(idx, order);
+                idx += 1usize << order;
+                remaining -= 1usize << order;
+            }
+        }
+    }
+
+    /// Read the per-page free bit (INV-HEAP-3). Exact for every page of
+    /// the heap window. Callers either hold the allocator lock or tolerate
+    /// a torn watermark (same discipline as the lock-free census).
+    fn page_is_free(&self, page_idx: usize) -> bool {
+        debug_assert!(page_idx < MAX_PAGES);
+        (self.free_bits[page_idx / 64].load(Ordering::Relaxed) >> (page_idx % 64)) & 1 == 1
+    }
+
+    /// Set/clear the free bits of `npages` pages starting at `page_idx`
+    /// (INV-HEAP-3). Word-strided masked RMW: whole words take the
+    /// full-mask fast path, at most two partial edge words per call.
+    /// Order-18 (whole-heap) fill = 4096 word ops.
+    fn fill_free_bits(&self, page_idx: usize, npages: usize, free: bool) {
+        if npages == 0 {
+            return;
+        }
+        assert!(
+            page_idx + npages <= MAX_PAGES,
+            "buddy fill_free_bits out of range ({}+{} > MAX_PAGES={})",
+            page_idx,
+            npages,
+            MAX_PAGES
+        );
+        let last = page_idx + npages; // exclusive
+        let mut w = page_idx / 64;
+        let end_word = (last + 63) / 64;
+        while w < end_word {
+            let base = w * 64;
+            let lo = if page_idx > base { page_idx - base } else { 0 };
+            let hi = (last - base).min(64);
+            let mask: u64 = if hi - lo == 64 {
+                !0u64
+            } else {
+                ((1u64 << (hi - lo)) - 1) << lo
+            };
+            if free {
+                self.free_bits[w].fetch_or(mask, Ordering::Relaxed);
+            } else {
+                self.free_bits[w].fetch_and(!mask, Ordering::Relaxed);
+            }
+            w += 1;
+        }
+    }
+
+    /// Fill the INTERIOR pages' `order` bytes for a block (leader is
+    /// written by the caller). Tight raw-pointer byte loop, no per-page
+    /// bounds call — this replaces the per-page `get_mut` interior marking
+    /// that made order-scale add/remove the ww-v2 wedge grind. The order
+    /// bytes keep the R9-14 ORDER_MISMATCH arm and report fidelity for
+    /// aliased interior frees; the load-bearing free bit is the bitmap.
+    fn fill_interior_order(&self, page_idx: usize, order: usize) {
+        if order == 0 {
+            return;
+        }
+        let last = page_idx + (1usize << order); // exclusive
+        assert!(
+            last <= MAX_PAGES,
+            "buddy fill_interior_order out of range ({}+2^{} > MAX_PAGES={})",
+            page_idx,
+            order,
+            MAX_PAGES
+        );
+        // SAFETY: indices bounds-checked above; callers hold the allocator
+        // lock (or are the single-threaded init_sized seeder); only the
+        // `order` byte of each BlockMeta is written.
+        unsafe {
+            let base = self.meta.data.get() as *mut BlockMeta;
+            let mut p = base.add(page_idx + 1);
+            let end = base.add(last);
+            let o = order as u8;
+            while p < end {
+                (*p).order = o;
+                p = p.add(1);
+            }
         }
     }
 
@@ -199,16 +381,14 @@ impl BuddyAllocator {
         meta.prev = 0;
         meta.next = 0;
         // R17-A2: keep EVERY page of the block consistent — the split path
-        // calls init_block(.., false) on the retained half; leaving its
-        // interior pages at the previous add's free=1 made the R9-14
-        // tripwire swallow legitimate frees (leak → alloc failures under
-        // fork pressure: create/P2b/rename flakiness).
-        let mark: u8 = if free { 1 } else { 0 };
-        for i in 1..(1usize << order) {
-            let m2 = self.meta.get_mut(page_idx + i);
-            m2.order = order as u8;
-            m2.free = mark;
-        }
+        // calls init_block(.., false) on the retained half; stale interior
+        // marks let the R9-14 tripwire swallow legitimate frees (leak →
+        // alloc failures under fork pressure: create/P2b/rename flakiness).
+        // R17-A3 (session 5): the marking itself is now the bitmap + tight
+        // order fill (see INV-HEAP-3) — same coverage, 2^order/64 words
+        // plus a call-free byte loop instead of 2^order `get_mut` calls.
+        self.fill_interior_order(page_idx, order);
+        self.fill_free_bits(page_idx, 1usize << order, free);
     }
 
     /// Add block to free list
@@ -223,14 +403,13 @@ impl BuddyAllocator {
             meta.order = order as u8;
             meta.free = 1;
         }
-        // R17-A: mark EVERY page of the block — interior pages kept stale
-        // free=0 after merges/splits, letting second frees pass silently
-        // (heap analog of the zone OnFreelist bug).
-        for i in 1..(1usize << order) {
-            let m2 = self.meta.get_mut(page_idx + i);
-            m2.order = order as u8;
-            m2.free = 1;
-        }
+        // R17-A: mark EVERY page of the block free — interior pages kept
+        // stale free=0 after merges/splits, letting second frees pass
+        // silently (heap analog of the zone OnFreelist bug). R17-A3: the
+        // mark is the word-strided bitmap + tight order fill (INV-HEAP-3),
+        // not the per-page `get_mut` loop that ground order-scale adds.
+        self.fill_interior_order(page_idx, order);
+        self.fill_free_bits(page_idx, 1usize << order, true);
 
         // Get current free list head
         let list_head = self.free_lists[order].load(Ordering::Acquire);
@@ -256,14 +435,13 @@ impl BuddyAllocator {
             return;  // Cannot handle blocks exceeding maximum order
         }
 
-        // R17-A: clear the free mark on EVERY page of the block.
+        // R17-A: clear the free mark on EVERY page of the block
+        // (R17-A3: via the bitmap — INV-HEAP-3).
         {
             let meta = self.meta.get_mut(page_idx);
             meta.free = 0;
         }
-        for i in 1..(1usize << order) {
-            self.meta.get_mut(page_idx + i).free = 0;
-        }
+        self.fill_free_bits(page_idx, 1usize << order, false);
 
         let prev_idx = self.meta.get(page_idx).prev as usize;
         let next_idx = self.meta.get(page_idx).next as usize;
@@ -361,17 +539,26 @@ impl BuddyAllocator {
                         break;
                     }
 
-                    // Initialize buddy block and add to free list
-                    self.init_block(buddy_idx, current_order - 1, true);
+                    // Publish the buddy half at the smaller order.
+                    // add_to_free_list performs the FULL marking (leader
+                    // meta, interior order bytes, free bitmap) — the old
+                    // init_block(.., true) in front of it repeated that
+                    // marking byte-for-byte, and the retained half's
+                    // init_block(.., false) re-marked 2^(co-1) pages that
+                    // the NEXT iteration's add_to_free_list (split-off
+                    // suffixes) and the loop's final init_block (kept
+                    // prefix) fully rewrote anyway. The split loop runs
+                    // under the heap irqsave lock, so the transient stale
+                    // larger-order marks on the retained half are
+                    // unobservable (session-5 follow-up: both dead-write
+                    // fills folded out).
                     self.add_to_free_list(buddy_idx, current_order - 1);
-
-                    // Update current block to first half
-                    self.init_block(page_idx, current_order - 1, false);
                     current_order -= 1;
                 }
 
                 // Ensure final block is marked as allocated
                 self.init_block(page_idx, order, false);
+                NET_PAGES[order].fetch_add(1usize << order, Ordering::Relaxed);
 
                 let addr = self.page_idx_to_addr(page_idx);
                 // R18-1 (alloc-side handoff probe): if this page is already
@@ -424,9 +611,12 @@ impl BuddyAllocator {
         // on a free list and the next two allocations shared it (the
         // "linked Task page wiped by a zeroing allocation" corruption).
         // Refuse the free and report instead of corrupting the heap.
+        // R17-A3: the free arm consults the per-page bitmap (exact for
+        // aliased interior pages too), the order arm the `order` byte
+        // (leaders exact, interiors filled by fill_interior_order).
         {
             let meta = self.meta.get(page_idx);
-            if meta.free != 0 || meta.order != order as u8 {
+            if self.page_is_free(page_idx) || meta.order != order as u8 {
                 // R43: taint-only (SBI ecall under the heap lock was an
                 // A-form wedge ingredient — see the R18-1 note above).
                 // R69: also record the event with a caller backtrace for
@@ -442,10 +632,15 @@ impl BuddyAllocator {
                     );
                 }
                 crate::dfx::taint::add_taint(crate::dfx::taint::TaintFlags::BAD_PAGE); // R9-14 double-free/hoard
+                // R17-A3: kind follows the bitmap (the authoritative free
+                // state), not the leader-only `free` byte.
+                let kind = if self.page_is_free(page_idx) { FR_DOUBLE_FREE } else { FR_ORDER_MISMATCH };
+                refused_free_note(kind, addr, order, meta.order, meta.free);
                 return;
             }
         }
         let mut current_order = order;
+        NET_PAGES[order].fetch_sub(1usize << order, Ordering::Relaxed);
 
         loop {
             // Boundary check: order cannot exceed MAX_ORDER
@@ -495,6 +690,11 @@ unsafe impl GlobalAlloc for BuddyAllocator {
         // so walking from s0 yields [ra-into-__rust_alloc, callers...].
         let mw_s0: u64 = crate::dfx::backtrace::current_frame_pointer();
 
+        // Opportunistic reclamation of time-deferred frees (see
+        // mm/deferred_free.rs): one relaxed load on the fast path; the
+        // same allocation churn that fills the pool drains it.
+        crate::mm::deferred_free::drain_if_due();
+
         // Check magic number and initialization state
         if self.magic.load(Ordering::Acquire) != 0xDEADBEEF
             || self.initialized.load(Ordering::Acquire) == 0
@@ -518,6 +718,20 @@ unsafe impl GlobalAlloc for BuddyAllocator {
                 );
             }
             return core::ptr::null_mut();
+        }
+
+        // Small-object packing layer (alloc-crash r12-16): layouts that
+        // fit a <=1 KiB class are served from packed slab pages — one
+        // buddy page holds dozens of objects instead of one. Falls
+        // through to the plain buddy path if the layer cannot serve
+        // (uninitialized heap, out of pages).
+        if size <= crate::mm::small_alloc::SMALL_MAX
+            && align <= crate::mm::small_alloc::SMALL_MAX
+        {
+            let p = crate::mm::small_alloc::alloc(size, align);
+            if !p.is_null() {
+                return p;
+            }
         }
 
         let _guard = self.lock.lock_irqsave();
@@ -591,6 +805,78 @@ unsafe impl GlobalAlloc for BuddyAllocator {
             return;
         }
 
+        // Teardown-race guard (mm/deferred_free.rs): frees of the
+        // registered size class (the MmStruct ArcInner block) are held
+        // back briefly so unaccounted &MmStruct borrowers (procfs
+        // generators) preempted mid-syscall resume against coherent
+        // post-teardown memory instead of heap-reused garbage (the
+        // #GP-in-btree-navigate family). NOTE: this impl is the live
+        // #[global_allocator] (GLOBAL_ALLOCATOR: BuddyAllocator) — the
+        // interception must live HERE, not in CombinedAllocator.
+        if crate::mm::deferred_free::try_defer(ptr, &layout) {
+            return;
+        }
+
+        self.dealloc_untracked(ptr, layout);
+    }
+}
+
+/// Free through the live global allocator, bypassing the deferred-free
+/// interception (drainer entry point, mm/deferred_free.rs).
+pub unsafe fn dealloc_untracked_pub(ptr: *mut u8, layout: Layout) {
+    GLOBAL_ALLOCATOR.dealloc_untracked(ptr, layout);
+}
+
+impl BuddyAllocator {
+    /// Raw order-0 page for the small-object packing layer (mm/
+    /// small_alloc.rs): same accounting and locking as the GlobalAlloc
+    /// path (NET_PAGES, tripwires) but no memwatch note and no
+    /// size-to-order walk. Callers must NOT hold the buddy lock; the
+    /// small-alloc class lock MAY be held (class -> buddy order only).
+    pub unsafe fn alloc_page_raw(&self) -> *mut u8 {
+        if self.magic.load(Ordering::Acquire) != 0xDEADBEEF
+            || self.initialized.load(Ordering::Acquire) == 0
+        {
+            return core::ptr::null_mut();
+        }
+        let _guard = self.lock.lock_irqsave();
+        let ptr = self.alloc_blocks(0);
+        drop(_guard);
+        ptr
+    }
+
+    /// Raw order-0 free, the matching twin of alloc_page_raw.
+    pub unsafe fn free_page_raw(&self, ptr: *mut u8) {
+        if self.initialized.load(Ordering::Acquire) == 0 {
+            return;
+        }
+        let addr = ptr as usize;
+        let heap_start = self.heap_start.load(Ordering::Acquire);
+        let heap_end = self.heap_end.load(Ordering::Acquire);
+        if addr < heap_start || addr >= heap_end {
+            refused_free_note(FR_OUT_OF_WINDOW, addr, 0, 0, 0);
+            return;
+        }
+        let _guard = self.lock.lock_irqsave();
+        self.free_blocks(ptr, 0);
+        drop(_guard);
+    }
+}
+
+impl BuddyAllocator {
+    /// The real buddy free path, unintercepted — the deferred-free
+    /// drainer (mm/deferred_free.rs) calls this so a held-back entry can
+    /// never be re-deferred.
+    unsafe fn dealloc_untracked(&self, ptr: *mut u8, layout: Layout) {
+        // Small-object packing layer FIRST (alloc-crash r12-16): slab-page
+        // objects free through their page's freelist, never the buddy —
+        // and this must run before the R69 task-page probe, whose
+        // page-granular ownership bitmap would refuse frees of non-task
+        // objects sharing a (now packed) slab page with a live Task.
+        if crate::mm::small_alloc::free(ptr as usize) {
+            return;
+        }
+
         // R17-B withdrawn from the refuse path: the bitmap index aliases
         // for pages outside the heap's 8192-page window (stacks, page
         // tables), refusing legitimate frees and bleeding the machine to
@@ -608,6 +894,7 @@ unsafe impl GlobalAlloc for BuddyAllocator {
 
         if ptr_addr < heap_start || ptr_addr >= heap_end {
             crate::dfx::memwatch::DEALLOC_OUTSIDE.fetch_add(1, Ordering::Relaxed);
+            refused_free_note(FR_OUT_OF_WINDOW, ptr_addr, self.size_to_order(size.max(align)), 0, 0);
             return;
         }
 
@@ -635,12 +922,14 @@ unsafe impl GlobalAlloc for BuddyAllocator {
                 &frames,
             );
             crate::dfx::taint::add_taint(crate::dfx::taint::TaintFlags::BAD_PAGE); // R69 free-of-live
+            refused_free_note(FR_TASK_LIVE, ptr_addr, order, 0, 0);
             return;
         }
 
         // Check if order exceeds MAX_ORDER
         if order > MAX_ORDER {
             crate::dfx::memwatch::DEALLOC_BIGORDER.fetch_add(1, Ordering::Relaxed);
+            refused_free_note(FR_ORDER_TOO_BIG, ptr_addr, order, 0, 0);
             return;
         }
 
@@ -651,6 +940,7 @@ unsafe impl GlobalAlloc for BuddyAllocator {
         // doubly-linked freelist.
         if self.addr_to_page_idx_checked(ptr as usize).map(|idx| idx % (1usize << order) != 0).unwrap_or(true) {
             crate::dfx::memwatch::DEALLOC_MISALIGNED.fetch_add(1, Ordering::Relaxed);
+            refused_free_note(FR_UNALIGNED, ptr_addr, order, 0, 0);
             return;
         }
 
@@ -685,6 +975,13 @@ pub fn init_heap() {
     GLOBAL_ALLOCATOR.init();
 }
 
+/// init_heap with a RAM-clamped window size (see BuddyAllocator::init_sized;
+/// the -m 512M panic family). The early boot block computes the effective
+/// size from the discovered memory map.
+pub fn init_heap_sized(size: usize) {
+    GLOBAL_ALLOCATOR.init_sized(size);
+}
+
 /// Buddy allocator statistics
 #[derive(Debug, Clone, Copy, Default)]
 pub struct BuddyStats {
@@ -706,9 +1003,47 @@ pub struct BuddyStats {
     pub free_count: usize,
 }
 
+/// LOCK-FREE rough heap census for the alloc-failure (ALLOCTHROW) print.
+///
+/// `buddy_stats()` takes the allocator irqsave lock, which is exactly
+/// what the OOM-moment print must not rely on (the failure can arrive
+/// with the caller holding unrelated locks; a wedged print would lose
+/// the panic). This walks the free lists through the atomics only and
+/// tolerates concurrent mutation: bounds-check every index, cap the
+/// per-order walk, and let a torn read terminate the chain. The numbers
+/// are a watermark, not an audit.
+///
+/// Returns (heap_size, free_bytes, blocks_at_order_0..=BUDDY_MAX_ORDER
+/// truncated to u32 counts) — kept as a plain tuple to avoid any
+/// formatting on the hot path.
+pub fn buddy_free_census_lockfree() -> (usize, usize, [u32; MAX_ORDER + 1]) {
+    let mut blocks = [0u32; MAX_ORDER + 1];
+    if HEAP_ALLOCATOR.initialized.load(Ordering::Acquire) == 0 {
+        return (0, 0, blocks);
+    }
+    let start = HEAP_ALLOCATOR.heap_start.load(Ordering::Acquire);
+    let end = HEAP_ALLOCATOR.heap_end.load(Ordering::Acquire);
+    let heap_size = end.saturating_sub(start);
+    let mut free_pages = 0usize;
+    for order in 0..=MAX_ORDER {
+        let mut page_idx = HEAP_ALLOCATOR.free_lists[order].load(Ordering::Acquire);
+        let mut hops = 0usize;
+        while page_idx != EMPTY_LIST && page_idx < MAX_PAGES && hops < MAX_PAGES {
+            blocks[order] = blocks[order].saturating_add(1);
+            free_pages += 1usize << order;
+            let next = HEAP_ALLOCATOR.meta.get(page_idx).next as usize;
+            if next == u32::MAX as usize || next >= MAX_PAGES {
+                break;
+            }
+            page_idx = next;
+            hops += 1;
+        }
+    }
+    (heap_size, free_pages * PAGE_SIZE, blocks)
+}
+
 /// Get Buddy allocator statistics
-pub fn buddy_stats() -> BuddyStats {
-    let mut stats = BuddyStats::default();
+pub fn buddy_stats() -> BuddyStats {    let mut stats = BuddyStats::default();
 
     if HEAP_ALLOCATOR.initialized.load(Ordering::Acquire) == 0 {
         return stats;
@@ -744,14 +1079,468 @@ pub fn buddy_stats() -> BuddyStats {
     stats
 }
 
+// ============================================================================
+// Meta shadow audit (dfx=metawatch, wildwrite-hunt line session 13)
+//
+// The unified-engine hypothesis says the wild writer's second downstream
+// face is buddy-meta corruption (the ww-v2 order-18 grind: an impossible
+// coalescing scale with only ~229 MB in use). The gdb watchpoint chain
+// can only cover kernel STATIC victims; the buddy metadata (free-list
+// links, per-page free bitmap) is megabytes of heap-adjacent BSS and
+// cannot be watchpointed. This audit derives a shadow free bitmap from
+// the free lists and cross-checks the linkage invariants:
+//   - free_lists[order] heads are EMPTY_LIST or a valid, 2^order-aligned
+//     page index whose leader meta says (order, free=1)     (INV-HEAP-1/2)
+//   - prev/next links mirror each other along each list
+//   - the derived per-page free set equals `free_bits` exactly
+//     (INV-HEAP-3), with no page listed twice.
+//
+// Pass 1 runs LOCK-FREE from the timer cadence (racy per-field reads are
+// tolerated, same discipline as buddy_free_census_lockfree), so it can
+// observe transient mid-mutation states; any dirty pass 1 is re-audited
+// UNDER the heap irqsave lock before being reported — only a persistent
+// mismatch is corruption. Callers never print on pass-1 evidence alone.
+// ============================================================================
+
+/// One shadow-audit mismatch. `kind` classifies it; `idx`/`prev`/`next`
+/// carry the offending block's leader meta, `word`/`bits`/`derived` the
+/// offending free_bits word and the audit-derived shadow value for the
+/// bitmap kinds.
+#[derive(Clone, Copy, PartialEq)]
+pub struct MetaFinding {
+    pub kind: MetaFindKind,
+    pub order: usize,
+    pub idx: usize,
+    pub prev: u32,
+    pub next: u32,
+    pub word: usize,
+    pub bits: u64,
+    pub derived: u64,
+}
+
+/// The audit's empty finding (const constructor for stack buffers).
+pub const EMPTY_FINDING: MetaFinding = MetaFinding {
+    kind: MetaFindKind::LinkOob,
+    order: 0,
+    idx: 0,
+    prev: 0,
+    next: 0,
+    word: 0,
+    bits: 0,
+    derived: 0,
+};
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum MetaFindKind {
+    /// A list head or next-link escaped [0, MAX_PAGES), or a block's
+    /// span ran past the end of the page array.
+    LinkOob,
+    /// Listed block's leader order byte disagrees with the list order.
+    OrderMismatch,
+    /// Listed block's leader free byte is not 1.
+    FreeByteClear,
+    /// Listed block leader is not 2^order-aligned.
+    Unaligned,
+    /// prev link does not mirror the walk position.
+    PrevBroken,
+    /// free_bits has set bits where the lists say nothing is free.
+    BitmapSetUnlisted,
+    /// A listed free block's span has clear bits in free_bits.
+    BitmapClearListed,
+    /// The same page is reachable from two list positions.
+    DoubleListed,
+    /// Walk exceeded the page-count budget (list cycle / mega-list).
+    HopOverflow,
+}
+
+/// Scratch shadow bitmap for the audit, plus the single-CPU claim that
+/// makes it safe: pass 1 and its under-lock confirmation run inside one
+/// claim, so the scratch is never shared by two concurrent audits.
+static META_AUDIT_BUSY: AtomicU64 = AtomicU64::new(0);
+
+/// MetaArray-style interior-mutable scratch (see MetaArray's SAFETY
+/// comments): only touched by `meta_audit_inner`, which every caller
+/// reaches while holding the META_AUDIT_BUSY claim.
+struct AuditScratch {
+    data: UnsafeCell<[u64; FREE_BITMAP_WORDS]>,
+}
+
+// SAFETY: see `AuditScratch` doc — all access is claim-serialized.
+unsafe impl Send for AuditScratch {}
+unsafe impl Sync for AuditScratch {}
+
+static META_AUDIT_SCRATCH: AuditScratch = AuditScratch {
+    data: UnsafeCell::new([0; FREE_BITMAP_WORDS]),
+};
+
+fn record(
+    findings: &mut [MetaFinding],
+    total: &mut usize,
+    f: MetaFinding,
+) {
+    if *total < findings.len() {
+        findings[*total] = f;
+    }
+    *total = (*total).saturating_add(1);
+}
+
+/// The audit walk itself. Caller provides exclusivity over the scratch
+/// (the META_AUDIT_BUSY claim) — see buddy_meta_shadow_scan.
+///
+/// SAFETY-of-use note: reads `meta` fields without the allocator lock
+/// (census precedent — aligned u8/u32 field loads; a torn combination
+/// surfaces as a transient pass-1 finding that the under-lock pass
+/// clears). Returns the TOTAL number of findings; at most
+/// `findings.len()` are stored.
+fn meta_audit_inner(findings: &mut [MetaFinding]) -> usize {
+    let mut total = 0usize;
+    // SAFETY: caller holds the META_AUDIT_BUSY claim (single audit at a
+    // time across CPUs); the borrow lives only inside this function.
+    let scratch = unsafe { &mut (*META_AUDIT_SCRATCH.data.get()) };
+    for w in scratch.iter_mut() {
+        *w = 0;
+    }
+
+    let mut hop_budget = MAX_PAGES + MAX_ORDER + 1;
+    'orders: for order in 0..=MAX_ORDER {
+        let npages = 1usize << order;
+        let mut idx = HEAP_ALLOCATOR.free_lists[order].load(Ordering::Acquire);
+        let mut prev_link = u32::MAX as usize; // head's prev must be null
+        loop {
+            if idx == EMPTY_LIST {
+                break;
+            }
+            if idx >= MAX_PAGES || idx + npages > MAX_PAGES {
+                record(
+                    findings,
+                    &mut total,
+                    MetaFinding {
+                        kind: MetaFindKind::LinkOob,
+                        order,
+                        idx,
+                        prev: 0,
+                        next: 0,
+                        word: 0,
+                        bits: 0,
+                        derived: 0,
+                    },
+                );
+                break;
+            }
+            if hop_budget == 0 {
+                record(
+                    findings,
+                    &mut total,
+                    MetaFinding {
+                        kind: MetaFindKind::HopOverflow,
+                        order,
+                        idx,
+                        prev: 0,
+                        next: 0,
+                        word: 0,
+                        bits: 0,
+                        derived: 0,
+                    },
+                );
+                break 'orders;
+            }
+            hop_budget -= 1;
+
+            // Racy leader-meta snapshot (tolerated; see function doc).
+            let m = HEAP_ALLOCATOR.meta.get(idx);
+            let (m_order, m_free, m_prev, m_next) = (m.order, m.free, m.prev, m.next);
+
+            if m_order as usize != order {
+                record(
+                    findings,
+                    &mut total,
+                    MetaFinding {
+                        kind: MetaFindKind::OrderMismatch,
+                        order,
+                        idx,
+                        prev: m_prev,
+                        next: m_next,
+                        word: 0,
+                        bits: m_order as u64,
+                        derived: order as u64,
+                    },
+                );
+            }
+            if m_free != 1 {
+                record(
+                    findings,
+                    &mut total,
+                    MetaFinding {
+                        kind: MetaFindKind::FreeByteClear,
+                        order,
+                        idx,
+                        prev: m_prev,
+                        next: m_next,
+                        word: 0,
+                        bits: m_free as u64,
+                        derived: 1,
+                    },
+                );
+            }
+            if idx & (npages - 1) != 0 {
+                record(
+                    findings,
+                    &mut total,
+                    MetaFinding {
+                        kind: MetaFindKind::Unaligned,
+                        order,
+                        idx,
+                        prev: m_prev,
+                        next: m_next,
+                        word: 0,
+                        bits: 0,
+                        derived: 0,
+                    },
+                );
+            }
+            if m_prev as usize != prev_link {
+                record(
+                    findings,
+                    &mut total,
+                    MetaFinding {
+                        kind: MetaFindKind::PrevBroken,
+                        order,
+                        idx,
+                        prev: m_prev,
+                        next: m_next,
+                        word: 0,
+                        bits: m_prev as u64,
+                        derived: prev_link as u64,
+                    },
+                );
+            }
+
+            // Set the span's shadow bits; overlap = double listing.
+            let w0 = idx / 64;
+            let w1 = (idx + npages - 1) / 64;
+            let mut double = false;
+            for w in w0..=w1 {
+                let lo = if w == w0 { idx % 64 } else { 0 };
+                let hi = if w == w1 { (idx + npages - 1) % 64 } else { 63 };
+                let mask = if lo == 0 && hi == 63 {
+                    !0u64
+                } else {
+                    ((1u64 << (hi - lo + 1)) - 1) << lo
+                };
+                let old = scratch[w];
+                if old & mask != 0 {
+                    double = true;
+                }
+                scratch[w] = old | mask;
+            }
+            if double {
+                record(
+                    findings,
+                    &mut total,
+                    MetaFinding {
+                        kind: MetaFindKind::DoubleListed,
+                        order,
+                        idx,
+                        prev: m_prev,
+                        next: m_next,
+                        word: 0,
+                        bits: 0,
+                        derived: 0,
+                    },
+                );
+            }
+
+            prev_link = idx;
+            let next = m_next as usize;
+            if next == u32::MAX as usize {
+                break;
+            }
+            idx = next;
+        }
+    }
+
+    // Cross-check the shadow against the per-page bitmap (INV-HEAP-3).
+    for w in 0..FREE_BITMAP_WORDS {
+        let d = scratch[w];
+        let b = HEAP_ALLOCATOR.free_bits[w].load(Ordering::Relaxed);
+        if b & !d != 0 {
+            record(
+                findings,
+                &mut total,
+                MetaFinding {
+                    kind: MetaFindKind::BitmapSetUnlisted,
+                    order: MAX_ORDER + 1,
+                    idx: 0,
+                    prev: 0,
+                    next: 0,
+                    word: w,
+                    bits: b,
+                    derived: d,
+                },
+            );
+        }
+        if d & !b != 0 {
+            record(
+                findings,
+                &mut total,
+                MetaFinding {
+                    kind: MetaFindKind::BitmapClearListed,
+                    order: MAX_ORDER + 1,
+                    idx: 0,
+                    prev: 0,
+                    next: 0,
+                    word: w,
+                    bits: b,
+                    derived: d,
+                },
+            );
+        }
+    }
+
+    total
+}
+
+/// Outcome of one shadow scan: what pass 1 (lock-free) saw and what the
+/// under-lock confirmation made of it. `confirmed > 0` is corruption.
+#[derive(Clone, Copy)]
+pub struct MetaScanOutcome {
+    pub lockfree_findings: usize,
+    pub confirmed_findings: usize,
+}
+
+/// One shadow scan: lock-free pass, then — only if pass 1 was dirty —
+/// an under-lock re-audit. Returns None if another CPU's scan is in
+/// flight (the claim serializes audits; the next cadence will run).
+pub fn buddy_meta_shadow_scan(findings: &mut [MetaFinding]) -> Option<MetaScanOutcome> {
+    if HEAP_ALLOCATOR.initialized.load(Ordering::Acquire) == 0 {
+        return Some(MetaScanOutcome { lockfree_findings: 0, confirmed_findings: 0 });
+    }
+    if META_AUDIT_BUSY
+        .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return None;
+    }
+    let n_free = meta_audit_inner(findings);
+    let n_conf = if n_free > 0 {
+        // Re-audit under the heap lock, overwriting the findings buffer
+        // with the authoritative (persistent) set.
+        let _g = HEAP_ALLOCATOR.lock.lock_irqsave();
+        meta_audit_inner(findings)
+    } else {
+        0
+    };
+    META_AUDIT_BUSY.store(0, Ordering::Release);
+    Some(MetaScanOutcome {
+        lockfree_findings: n_free,
+        confirmed_findings: n_conf,
+    })
+}
+
+/// Selftest (`metawatch-selftest=1`): under claim + heap lock, clear one
+/// free_bits bit of a listed block, expect the audit to flag it, restore,
+/// and expect a clean re-audit. Proves the detector end-to-end without
+/// leaving damage (all under one irqsave section — no allocator traffic
+/// can interleave).
+pub fn buddy_meta_selftest() -> bool {
+    if HEAP_ALLOCATOR.initialized.load(Ordering::Acquire) == 0 {
+        return false;
+    }
+    if META_AUDIT_BUSY
+        .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
+        .is_err()
+    {
+        return false;
+    }
+    let mut findings = [EMPTY_FINDING; 4];
+    let _g = HEAP_ALLOCATOR.lock.lock_irqsave();
+
+    // Pre-audit must be clean.
+    if meta_audit_inner(&mut findings) != 0 {
+        META_AUDIT_BUSY.store(0, Ordering::Release);
+        return false;
+    }
+
+    // Find any listed block to corrupt.
+    let mut victim: Option<(usize, usize)> = None; // (order, idx)
+    for order in 0..=MAX_ORDER {
+        let head = HEAP_ALLOCATOR.free_lists[order].load(Ordering::Acquire);
+        if head != EMPTY_LIST && head < MAX_PAGES {
+            victim = Some((order, head));
+            break;
+        }
+    }
+    let (order, idx) = match victim {
+        Some(v) => v,
+        None => {
+            META_AUDIT_BUSY.store(0, Ordering::Release);
+            return false;
+        }
+    };
+
+    let w = idx / 64;
+    let mask = 1u64 << (idx % 64);
+    let saved = HEAP_ALLOCATOR.free_bits[w].load(Ordering::Relaxed);
+    HEAP_ALLOCATOR.free_bits[w].fetch_and(!mask, Ordering::Relaxed);
+
+    let flagged = meta_audit_inner(&mut findings);
+    let saw_kind = flagged > 0
+        && findings[..flagged.min(findings.len())]
+            .iter()
+            .any(|f| f.kind == MetaFindKind::BitmapClearListed && f.word == w);
+
+    // Restore and require a clean re-audit.
+    HEAP_ALLOCATOR.free_bits[w].fetch_or(mask, Ordering::Relaxed);
+    let clean = meta_audit_inner(&mut findings) == 0;
+
+    META_AUDIT_BUSY.store(0, Ordering::Release);
+    saw_kind && clean
+}
+
 /// Combined allocator - prioritizes Slab for small objects, falls back to Buddy for large objects
 ///
 /// This design can reduce memory fragmentation and improve small object allocation efficiency
 pub struct CombinedAllocator;
 
+/// The real (unintercepted) free path: slab-region or buddy-heap by
+/// pointer range. `CombinedAllocator::dealloc` routes here after the
+/// deferred-free check declines; the deferred-free drainer calls this
+/// directly so re-deferring is impossible.
+pub unsafe fn dealloc_direct(ptr: *mut u8, layout: Layout) {
+    if ptr.is_null() {
+        return;
+    }
+
+    let ptr_addr = ptr as usize;
+    let heap_start = HEAP_ALLOCATOR.heap_start.load(Ordering::Acquire);
+    let heap_end = HEAP_ALLOCATOR.heap_end.load(Ordering::Acquire);
+
+    // Slab-region membership uses the TRUE bounds registered by
+    // init_slab() (review 4.8) — the old `heap_end + hardcoded 4MB`
+    // duplicated the layout and silently diverged whenever the slab
+    // region moved or resized.
+    let in_slab = crate::mm::slab::slab_region()
+        .map(|(s, e)| ptr_addr >= s && ptr_addr < e)
+        .unwrap_or(false);
+
+    if in_slab {
+        // In Slab area, use kfree
+        crate::mm::kfree(ptr);
+    } else if ptr_addr >= heap_start && ptr_addr < heap_end {
+        // In Buddy heap area
+        HEAP_ALLOCATOR.dealloc(ptr, layout);
+    }
+    // Pointers in other regions are ignored
+}
+
 unsafe impl GlobalAlloc for CombinedAllocator {
     unsafe fn alloc(&self, layout: Layout) -> *mut u8 {
         let size = layout.size();
+
+        // Opportunistic reclamation of time-deferred frees (see
+        // mm/deferred_free.rs): one relaxed load on the fast path; the
+        // same allocation churn that fills the pool drains it.
+        crate::mm::deferred_free::drain_if_due();
 
         // Small objects (<= 4096 bytes) try Slab allocator. The align <= 8
         // guard is load-bearing: slab objects are at least 8-aligned (16-byte
@@ -779,25 +1568,16 @@ unsafe impl GlobalAlloc for CombinedAllocator {
             return;
         }
 
-        let ptr_addr = ptr as usize;
-        let heap_start = HEAP_ALLOCATOR.heap_start.load(Ordering::Acquire);
-        let heap_end = HEAP_ALLOCATOR.heap_end.load(Ordering::Acquire);
-
-        // Slab-region membership uses the TRUE bounds registered by
-        // init_slab() (review 4.8) — the old `heap_end + hardcoded 4MB`
-        // duplicated the layout and silently diverged whenever the slab
-        // region moved or resized.
-        let in_slab = crate::mm::slab::slab_region()
-            .map(|(s, e)| ptr_addr >= s && ptr_addr < e)
-            .unwrap_or(false);
-
-        if in_slab {
-            // In Slab area, use kfree
-            crate::mm::kfree(ptr);
-        } else if ptr_addr >= heap_start && ptr_addr < heap_end {
-            // In Buddy heap area
-            HEAP_ALLOCATOR.dealloc(ptr, layout);
+        // Teardown-race guard (mm/deferred_free.rs): frees of the
+        // registered size class (MmStruct) are held back briefly so
+        // unaccounted &MmStruct borrowers (procfs generators) that were
+        // preempted mid-syscall resume against coherent post-teardown
+        // memory instead of heap-reused garbage (the #GP-in-btree
+        // family).
+        if crate::mm::deferred_free::try_defer(ptr, &layout) {
+            return;
         }
-        // Pointers in other regions are ignored
+
+        dealloc_direct(ptr, layout);
     }
 }

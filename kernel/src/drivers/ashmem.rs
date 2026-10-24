@@ -652,18 +652,51 @@ pub fn ashmem_mmap(
     let address_space = task.address_space().ok_or(-ENOMEM)?;
     let root_ppn = address_space.root_ppn();
 
-    // Placement: honor a page-aligned hint, else find a free area.
     if addr != 0 && addr % PAGE_SIZE != 0 {
         return Err(-EINVAL);
     }
-    let placement = if addr != 0 {
-        addr
+
+    // VMA attributes FIRST (needed for the atomic reserve below).
+    let mut vma_flags = VmaFlags::new();
+    vma_flags.insert(VmaFlags::READ); // shmat discipline: mapping is readable
+    if prot & 0x2 != 0 {
+        vma_flags.insert(VmaFlags::WRITE);
+    }
+    if prot & 0x4 != 0 {
+        vma_flags.insert(VmaFlags::EXEC);
+    }
+    if map_shared {
+        vma_flags.insert(VmaFlags::SHARED);
     } else {
-        match address_space.find_free_area(length) {
-            Ok(v) => v.as_usize(),
-            Err(_) => return Err(-ENOMEM),
-        }
-    };
+        vma_flags.insert(VmaFlags::PRIVATE);
+    }
+
+    // ATOMIC RESERVE (b91 corruption fix): the old shape picked on a READ
+    // lock (or used the hint verbatim, clobbering whatever lived there),
+    // mapped the pool pages eagerly, and only then added the VMA — the
+    // add-failure "rollback" munmapped the COLLIDING mapping, and a same-mm
+    // mapper winning the range in the window lost its frames to the PTE
+    // overwrite. MmStruct::mmap picks + inserts under ONE vma_write (hint
+    // honored only when free), so the range below is exclusively ours.
+    // SHARED maps use the SysV-shm VMA type so fork inherits the frames
+    // as-is (VmaFlags::SHARED is the COW exemption key in
+    // copy_page_table_cow). file_fd stays unset — the SysV shm detach
+    // accounting keys on it and must not see ashrem VMAs.
+    let placement = address_space
+        .mmap(
+            crate::mm::page::VirtAddr::new(addr),
+            length,
+            vma_flags,
+            if map_shared {
+                VmaType::SharedMemory
+            } else {
+                VmaType::Anonymous
+            },
+            crate::mm::pagemap::Perm::ReadWrite,
+            0,
+        )
+        .map_err(|_| -ENOMEM)?
+        .as_usize();
 
     // PTE flags: MAP_SHARED maps pool pages writable (when PROT_WRITE);
     // MAP_PRIVATE maps them read-only with the COW marker so the first
@@ -691,7 +724,10 @@ pub fn ashmem_mmap(
         // caller's page-table root. Map + per-mapping reference under the
         // PTE lock (shmat discipline).
         unsafe {
-            let _pte_guard = crate::arch::mm::mm_ops::PTE_MODIFY_LOCK.lock_irqsave();
+        #[cfg(feature = "x86_64")]
+        let _pte_guard = crate::arch::mm::mm_ops::pte_lock_for(address_space).lock();
+        #[cfg(not(feature = "x86_64"))]
+        let _pte_guard = crate::arch::mm::mm_ops::pte_lock_for(address_space).lock_irqsave();
             map_user_page(
                 root_ppn,
                 MmVirtAddr::new((placement + i * PAGE_SIZE) as u64),
@@ -705,42 +741,15 @@ pub fn ashmem_mmap(
         }
     }
 
-    // VMA bookkeeping: SHARED maps use the SysV-shm VMA type so fork
-    // inherits the frames as-is (VmaFlags::SHARED is the COW exemption
-    // key in copy_page_table_cow). file_fd stays unset — the SysV shm
-    // detach accounting keys on it and must not see ashmem VMAs.
-    let mut vma_flags = VmaFlags::new();
-    vma_flags.insert(VmaFlags::READ); // shmat discipline: mapping is readable
-    if prot & 0x2 != 0 {
-        vma_flags.insert(VmaFlags::WRITE);
-    }
-    if prot & 0x4 != 0 {
-        vma_flags.insert(VmaFlags::EXEC);
-    }
-    if map_shared {
-        vma_flags.insert(VmaFlags::SHARED);
-    } else {
-        vma_flags.insert(VmaFlags::PRIVATE);
-    }
-    let mut vma = Vma::new(
-        crate::mm::page::VirtAddr::new(placement),
-        crate::mm::page::VirtAddr::new(placement + npages * PAGE_SIZE),
-        vma_flags,
-    );
-    vma.set_type(if map_shared {
-        VmaType::SharedMemory
-    } else {
-        VmaType::Anonymous
-    });
-    vma.set_file_size(size as u64);
-    vma.set_offset(offset as usize);
-    if address_space.add_vma(vma).is_err() {
-        // Roll back the eager mapping.
-        let _ = address_space.munmap(
-            crate::mm::page::VirtAddr::new(placement),
-            npages * PAGE_SIZE,
-        );
-        return Err(-ENOMEM);
+    // Preserve the backing-extent attributes the old direct-VMA path
+    // recorded (file_size/offset on a SharedMemory VMA are advisory, but
+    // keep them for parity with shmat-built VMAs).
+    {
+        let mut vmas = address_space.vma_write();
+        if let Some(v) = vmas.get_mut(crate::mm::page::VirtAddr::new(placement)) {
+            v.set_file_size(size as u64);
+            v.set_offset(offset as usize);
+        }
     }
     address_space.add_rss(npages as u64);
     // SAFETY: fresh user PTEs need a flush before first use on any hart.

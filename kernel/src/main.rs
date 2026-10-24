@@ -179,6 +179,34 @@ fn alloc_error_handler(layout: core::alloc::Layout) -> ! {
         taskdump_raw_line(b" pid=");
         taskdump_dec(task.pid() as u64);
     }
+    // Heap watermark at the failure moment (r14 family: is the 1GB heap
+    // genuinely full, or did the free lists fragment/empty some other
+    // way?). Lock-free census — see buddy_free_census_lockfree; taking
+    // the allocator lock here could wedge the very print we die on.
+    {
+        let (heap_size, free_bytes, blocks) = crate::mm::buddy_free_census_lockfree();
+        taskdump_raw_line(b"\nALLOCTHROW heap: size=");
+        taskdump_dec((heap_size / 1024) as u64);
+        taskdump_raw_line(b"K free=");
+        taskdump_dec((free_bytes / 1024) as u64);
+        taskdump_raw_line(b"K blocks[o0..]=");
+        let max_o = blocks.len().min(8);
+        for i in 0..max_o {
+            taskdump_dec(blocks[i] as u64);
+            taskdump_raw_line(b" ");
+        }
+        taskdump_raw_line(b"\n");
+    }
+    // alloc-crash r12-16: the heap ledger at the exhaustion moment — the
+    // live-per-call-site table is the evidence that names the consumer.
+    // Pure atomics and raw UART (see dump_heap_ledger): no allocator lock,
+    // no allocation, safe to print while the heap is dead full.
+    if crate::dfx::memwatch::armed() {
+        crate::dfx::memwatch::dump_heap_ledger();
+    }
+    // The packing layer's own census (object counts vs pages) — this is
+    // the line that proves the 852MB of 4KB-per-object waste is packed.
+    crate::mm::small_alloc::census_line();
     // R75-followup: the validated walk (memwatch::walk_fp_chain) stops at the
     // first frame that fails its `next > fp` plausibility check, which in the
     // paint-agent capture yielded no usable frames. Dump the chain LENIENTLY
@@ -189,14 +217,24 @@ fn alloc_error_handler(layout: core::alloc::Layout) -> ! {
     unsafe {
         let mut fp = crate::dfx::backtrace::current_frame_pointer();
         for _ in 0..16 {
-            if !(fp >= 0x8000_0000_0000_0000 && fp & 7 == 0) {
+            // plausible_fp: readable-kernel-memory only — a stale slot
+            // holding a canonical-but-unmapped value (guard region) must
+            // terminate the walk, not fault it (see memwatch::plausible_fp).
+            if !(fp >= 0x8000_0000_0000_0000
+                && fp & 7 == 0
+                && crate::dfx::memwatch::plausible_fp(fp))
+            {
                 break;
             }
             let ra = core::ptr::read_volatile((fp - 8) as *const u64);
             let next = core::ptr::read_volatile((fp - 0x10) as *const u64);
             taskdump_raw_line(b" ");
             taskdump_raw_line(format_hex(ra).as_bytes());
-            if !(next & 7 == 0 && next > fp && next < 0xffff_ffff_ffff_f000) {
+            if !(next & 7 == 0
+                && next > fp
+                && next < 0xffff_ffff_ffff_f000
+                && crate::dfx::memwatch::plausible_fp(next))
+            {
                 break;
             }
             fp = next;
@@ -256,10 +294,52 @@ fn format_hex(v: u64) -> &'static str {
 /// kernel stack via boot_stack_continuation; riscv64 calls it directly
 /// (its whole boot fits the .boot stack).
 pub fn rust_main_tail() -> ! {
-    // Initialize Slab allocator (use virtual address in linear mapping region)
-    let slab_phys = KERNEL_HEAP_PHYS + crate::config::KERNEL_HEAP_SIZE;
-    let slab_start = slab_phys + arch::mm::VA_PA_OFFSET;
-    mm::init_slab(slab_start, KERNEL_SLAB_SIZE);
+    // RUX-RISCV-LAYOUT guard (see the KERNEL_RESERVE_SIZE comment): halt
+    // loudly if the kernel image (text+data+bss incl. the boot stack) has
+    // again grown past the heap's physical base. Without this the overlap
+    // is silent: kernel statics and the first heap pages scribble each
+    // other and the failure surfaces far away as random queue/dentry/
+    // BTreeMap corruption.
+    #[cfg(feature = "riscv64")]
+    {
+        extern "C" {
+            static _end: u8;
+        }
+        // SAFETY: only the symbol's address is read.
+        let image_end_va = unsafe { core::ptr::addr_of!(_end) as usize };
+        let image_end_phys = image_end_va - 0xffff_ffff_8000_0000 + 0x8020_0000;
+        if image_end_phys > KERNEL_HEAP_PHYS {
+            unsafe {
+                use crate::console::putchar;
+                const MSG: &[u8] = b"\nFATAL: kernel image end 0x";
+                for &b in MSG { putchar(b); }
+                let mut v = image_end_phys as u64;
+                let mut buf = [0u8; 16];
+                let mut n = 0;
+                while v > 0 && n < 16 {
+                    let d = (v & 0xF) as u8;
+                    buf[n] = if d < 10 { b'0' + d } else { b'a' + d - 10 };
+                    v >>= 4; n += 1;
+                }
+                for i in (0..n).rev() { putchar(buf[i]); }
+                const MSG2: &[u8] = b" overlaps heap base - enlarge KERNEL_RESERVE_SIZE/KERNEL_HEAP_PHYS\n";
+                for &b in MSG2 { putchar(b); }
+            }
+            loop { crate::arch::cpu::wfi(); }
+        }
+    }
+
+    // Initialize Slab allocator (use virtual address in linear mapping region).
+    // RAM-clamped static regions (see the early boot block): slab follows the
+    // EFFECTIVE heap end and is skipped entirely when the machine had no room.
+    let heap_size_eff = HEAP_SIZE_EFF.load(core::sync::atomic::Ordering::Acquire);
+    let slab_phys = KERNEL_HEAP_PHYS + heap_size_eff;
+    let slab_end_eff = HEAP_SLAB_END_EFF.load(core::sync::atomic::Ordering::Acquire);
+    let slab_size_eff = slab_end_eff.saturating_sub(slab_phys);
+    if slab_size_eff > 0 {
+        let slab_start = slab_phys + arch::mm::VA_PA_OFFSET;
+        mm::init_slab(slab_start, slab_size_eff);
+    }
 
     // ========== Heap initialized, format! can be used below ==========
 
@@ -383,9 +463,32 @@ pub fn rust_main_tail() -> ! {
             print_status("mm", &format!("linear mapping {} MB",
                 total_phys_memory / (1024 * 1024)), true);
 
-            // Initialize vmemmap mapping
+            // PFN-space sizing (fake-OOM family, the "phantom drift"
+            // mechanism): descriptors/vmemmap/zone are indexed LINEARLY
+            // from MEMORY_PHYS_BASE, so the descriptor count must cover
+            // the HIGHEST PFN of the discovered map — not the SUM of
+            // region sizes. On q35 -m 4G the e820 map is 2 GiB below 4G
+            // plus 2 GiB above 4G: sizing by the sum (4095 MB) left every
+            // above-4G page outside the descriptor array (2 GiB of RAM
+            // invisible: unallocatable, and freed above-4G pages dropped
+            // as "WILD"), while the 3 GiB..4 GiB MMIO hole got phantom
+            // rc==0 descriptors that the MEMLEDGER census counted as
+            // free-page drift (b126: drift=744314 with zero runtime
+            // leaks — the entire number was phantom hole descriptors plus
+            // structurally unmanaged low memory).
+            let max_phys_end: usize = memory_regions
+                .iter()
+                .map(|r| r.base + r.size)
+                .max()
+                .unwrap_or(0);
             let start_pfn = MEMORY_PHYS_BASE / mm::PAGE_SIZE;
-            let nr_pages = total_phys_memory / mm::PAGE_SIZE;
+            let nr_pages = (max_phys_end / mm::PAGE_SIZE).saturating_sub(start_pfn);
+            let span_size = max_phys_end.saturating_sub(MEMORY_PHYS_BASE);
+            // Usable RAM (sum, holes excluded) — the honest MemTotal.
+            mm::page_desc::set_present_pages(total_phys_memory / mm::PAGE_SIZE);
+
+            // Initialize vmemmap mapping
+            // (nr_pages now covers the full PFN span including holes)
 
             if mm::vmemmap::init_vmemmap(start_pfn, nr_pages).is_ok() {
                 print_status("mm", "vmemmap mapping initialized", true);
@@ -393,15 +496,22 @@ pub fn rust_main_tail() -> ! {
                 print_status("mm", "vmemmap mapping failed", false);
             }
 
-            // Initialize kernel memory layout
-            let heap_size = crate::config::KERNEL_HEAP_SIZE;
-            let slab_start = KERNEL_HEAP_PHYS + heap_size;
-            let slab_size = KERNEL_SLAB_SIZE;
+            // Initialize kernel memory layout. phys_size is the PFN SPAN
+            // (max region end − base), NOT the sum of usable regions: the
+            // zone/descriptors/vmemmap are span-based now, and layout's
+            // phys_end feeds create_user_address_space's allocation
+            // validation — a sum-based bound (holes excluded) rejected
+            // the top-of-RAM pages the zone hands out first and every
+            // exec died with ENOMEM (the r4/r5 bisect).
             let layout = mm::layout::KernelMemoryLayout::init_from_memblock(
                 MEMORY_PHYS_BASE,
-                total_phys_memory, // phys SIZE (was phys_base+size — review 4.20)
+                span_size,
                 KERNEL_PHYS_LOAD_ADDR,
                 KERNEL_HEAP_PHYS,
+                // Contiguous-usable clamp for the heap+slab carve (holes
+                // are unmapped in the linear map — rs-egl r12/13/15);
+                // phys_size above stays the full PFN span on purpose.
+                mm::layout::heap_region_end(&memory_regions, KERNEL_HEAP_PHYS),
             );
             mm::layout::kernel_layout_init(layout);
             // Boot-time cross-check: heap/slab ranges must be reserved in
@@ -414,12 +524,26 @@ pub fn rust_main_tail() -> ! {
 
             // Initialize page descriptors
             mm::page::init_page_descriptors(start_pfn, nr_pages);
-            print_status("mm", &format!("{} page descriptors", nr_pages), true);
+            // Mark NON-RAM PFNs (MMIO holes, firmware gaps) Reserved so no
+            // descriptor in the span can be mistaken for a free page (the
+            // phantom-drift mechanism above).
+            mm::page_desc::mark_non_ram_pages(&memory_regions);
+            print_status("mm", &format!("{} page descriptors (span {} MB, present {} MB)",
+                nr_pages, span_size / (1024 * 1024), total_phys_memory / (1024 * 1024)), true);
 
-            // Initialize zone allocator
-            let kernel_end = slab_start + slab_size;
-            mm::init_zone_system(MEMORY_PHYS_BASE, total_phys_memory, kernel_end);
-            print_status("mm", "zone allocator initialized", true);
+            // Initialize zone allocator over the FULL discovered PFN span
+            // (holes stay unseeded + Reserved; the above-4G regions become
+            // allocatable; memory below the heap/slab statics is seeded
+            // too — the old kernel_end-clamped span left ~980 MB
+            // unmanaged on x86_64).
+            mm::init_zone_system(MEMORY_PHYS_BASE, span_size, 0);
+            // Managed-RAM banner (fake-OOM family): the zone span actually
+            // handed to the buddy, so a truncation (config-vs-machine size
+            // mismatch) is visible on the serial log at boot.
+            let managed = mm::page_desc::nr_descs() * mm::PAGE_SIZE;
+            print_status("mm", &alloc::format!(
+                "zone allocator initialized ({} descriptors, {} MB managed)",
+                mm::page_desc::nr_descs(), managed / (1024 * 1024)), true);
 
             // Switch to late stage (use buddy allocator for page tables)
             arch::mm::pt_ops_set_late();
@@ -441,10 +565,30 @@ pub fn rust_main_tail() -> ! {
         #[cfg(feature = "x86_64")]
         {
             let ok = drivers::timer::hpet::init();
+            // sc109: the launcher's vDSO-less clock_gettime path paid an
+            // HPET MMIO VM exit per call and burned its whole 3 s appspawn
+            // watchdog (stime focus histogram: hpet driver page). The
+            // TSC timekeeper removes that. sc114 verified: 0 u32-us
+            // wraps, 0 watchdog kills, and the FIRST EVER successful
+            // launcher spawns (3x result:0). sc110-114's "~25 s step"
+            // was the shift-12 ceil rounding running the mapping 4.796%
+            // fast (crossing the 25 s resync threshold at uptime
+            // 522.17 s, deterministic) — fixed by TSC_MULSHIFT=32 +
+            // nearest rounding. DEFAULT ON; `tscclk=0` opts back into
+            // the pure-HPET clocksource for A/B.
+            let tsc_clk = ok
+                && crate::cmdline::get_param("tscclk")
+                    .map(|v| v != "0")
+                    .unwrap_or(true)
+                && drivers::timer::hpet::calibrate_tsc();
             print_status(
                 "timer",
                 if ok {
-                    "HPET clocksource (virtual-clock exact)"
+                    if tsc_clk {
+                        "HPET-calibrated TSC timekeeper (no MMIO per read)"
+                    } else {
+                        "HPET clocksource (virtual-clock exact)"
+                    }
                 } else {
                     "HPET absent — calibrated-TSC timebase"
                 },
@@ -565,6 +709,38 @@ pub fn rust_main_tail() -> ! {
                     })
                     .is_ok();
                 print_status("fs", "sysfs mounted /sys", ok);
+            }
+
+            // debugfs at /sys/kernel/debug (Linux layout). debugfs is
+            // where the kernel exposes debug knobs that are deliberately
+            // not part of the stable userspace ABI — Rux uses it for the
+            // DFX instrument switches (see dfx/mod.rs).
+            {
+                let debugfs_init = fs::debugfs::init_debugfs();
+                let debugfs_mount = debugfs_init.and_then(|_| fs::debugfs::mount_debugfs());
+                let ok = debugfs_mount
+                    .map(|_| {
+                        // The mount point must already exist in the dentry
+                        // tree WITH an inode: vfs_mount walks the path and
+                        // creates missing components as bare dentries,
+                        // which would shadow sysfs's /sys/kernel
+                        // directory (uevent, uevent_seqnum). Resolving
+                        // the path first populates the chain properly.
+                        let _ = fs::vfs::path_lookup("/sys/kernel/debug", 0);
+                        fs::vfs::vfs_mount(
+                            "/sys/kernel/debug",
+                            fs::debugfs::create_root_inode(),
+                            fs::mount::MntFlags::new(0),
+                        );
+                        fs::mount::register_mount(
+                            "debugfs",
+                            "/sys/kernel/debug",
+                            "debugfs",
+                            "rw",
+                        );
+                    })
+                    .is_ok();
+                print_status("fs", "debugfs mounted /sys/kernel/debug", ok);
             }
 
             // cgroup v2 unified hierarchy (U1b) — systemd's hard
@@ -730,6 +906,11 @@ pub fn rust_main_tail() -> ! {
             print_status("dfx", "khungtaskd hung-task detector", true);
         }
 
+        // sc-series soft-wedge heartbeat (dfx=schb): same late-boot slot
+        // as khungtaskd — its timer wakeups need secondaries online. The
+        // switch gates everything; schbd prints its own armed line.
+        crate::dfx::schb::init();
+
         // Enable external interrupts
         {
             arch::trap::enable_external_interrupt();
@@ -774,6 +955,13 @@ pub fn rust_main_tail() -> ! {
                 match drivers::gpu::fbdev::init_fbdev() {
                     Ok(()) => print_status("driver", "/dev/fb0 registered", true),
                     Err(()) => print_status("driver", "/dev/fb0 registration failed", false),
+                }
+                // DRM/KMS nodes for the OpenHarmony display HDI (composer
+                // opens card0, the gbm gralloc opens renderD128). Needs
+                // the virtio-gpu device for the page-flip path.
+                match drivers::drm::init_drm() {
+                    Ok(()) => print_status("driver", "/dev/dri/card0 + renderD128 registered", true),
+                    Err(()) => print_status("driver", "/dev/dri registration failed", false),
                 }
             }
 
@@ -851,10 +1039,10 @@ pub fn rust_main_tail() -> ! {
         {
             // OH Phase 1: init::init() walks the Linux-ordered candidate
             // chain (rdinit= → initrd /init → init= → /sbin/init …) and
-            // reports each attempt on the console.
+            // prints the structured init lines itself (serial-clean: the
+            // "ELF loaded"/"enqueued" pair moved next to the candidate
+            // outcome so the chosen path can be folded into the line).
             init::init();
-            print_status("init", "ELF loaded to user space", true);
-            print_status("init", "init task (PID 1) enqueued", true);
 
             // Print shell welcome message after boot
             unsafe {
@@ -948,20 +1136,48 @@ global_asm!(include_str!("arch/aarch64/trap.S"));
 
 /// Kernel reservation at the RAM base (OpenSBI + kernel on riscv64; low
 /// memory + kernel on x86_64) and the heap's physical base.
+///
+/// RUX-RISCV-LAYOUT (sched-riscv): the reservation and the heap base were
+/// 12MB/0x80C00000 while boot.S's early page tables map a 6-PMD (12MB)
+/// image window ending at phys 0x80E00000 — the heap sat 2MB INSIDE the
+/// image window. The kernel image (.bss incl. the boot stack) grew past
+/// 0x80C00000 (normal build +0x1e120, unit-test build +0x5d090), so kernel
+/// statics and the boot-stack physically shared pages with the FIRST
+/// 123-362KB of heap allocations: every early heap object (root dentry,
+/// BTreeMap nodes, the first slab entries) was scribbled by static writes
+/// and vice versa. That single overlap produced the whole riscv64
+/// corruption family: "POISONED rq entry" fed by garbage queue entries,
+/// dentry-mount spinlock deadlocks (lock word stomped by a static), the
+/// sysfs-init BTreeMap panic ("range end index 204 out of range for slice
+/// of length 11" — a leaf whose len word was overwritten), and the
+/// unit-test boot panics. Move the heap base to the image-window end and
+/// extend the reservation to meet it — no free gap opens between the
+/// kernel reservation and the heap (the earlier failed 0x80E00000 attempt
+/// left [0x80C00000,0x80E00000) free, the vmemmap backing search grabbed
+/// it, and Page::init_free walked descriptors over live heap pages).
+/// RUX-RISCV-LAYOUT-2: the unit-test build later outgrew the 12MB window
+/// itself (image end 0xffffffff80c17000 on main@298b69fe; the boot stack
+/// top sat unmapped and rust_main's first stack push faulted into an
+/// infinite trap_entry frame-push recursion). Window/heap/reservation
+/// moved 12MB->14MB together; riscv64 linker.ld now ASSERTs _end against
+/// the window so the next outgrowth fails the build.
 #[cfg(feature = "riscv64")]
-const KERNEL_RESERVE_SIZE: usize = 0xC0_0000; // 12MB
+const KERNEL_RESERVE_SIZE: usize = 0x100_0000; // 16MB
 #[cfg(feature = "x86_64")]
 const KERNEL_RESERVE_SIZE: usize = 0x1E0_0000; // 30MB
+/// Effective (RAM-clamped) static-region sizes computed by the early
+/// boot block from the discovered memory map (layout.rs
+/// effective_static_regions). HEAP_SIZE_EFF feeds the heap buddy's
+/// window; HEAP_SLAB_END_EFF feeds the zone's start.
+static HEAP_SIZE_EFF: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(crate::config::KERNEL_HEAP_SIZE);
+static HEAP_SLAB_END_EFF: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+
 #[cfg(feature = "riscv64")]
-const KERNEL_HEAP_PHYS: usize = 0x80C0_0000;
+const KERNEL_HEAP_PHYS: usize = 0x8100_0000;
 #[cfg(feature = "x86_64")]
 const KERNEL_HEAP_PHYS: usize = 0x4000_0000;
-
-/// Physical size of the slab region (small-object caches for the global
-/// allocator). 16MB: the slab now serves every small kernel allocation, and
-/// the old 4MB filled under LTP fs-churn workloads before the buddy
-/// fallback kicked in.
-const KERNEL_SLAB_SIZE: usize = 16 * 1024 * 1024;
 
 /// Physical base of RAM and the kernel's physical load address, per arch.
 #[cfg(feature = "riscv64")]
@@ -1162,18 +1378,53 @@ pub extern "C" fn rust_main() -> ! {
             }
         }
 
-        // Reserve memory regions (kernel, heap, slab)
-        let heap_start = KERNEL_HEAP_PHYS;
-        let heap_size = crate::config::KERNEL_HEAP_SIZE;
-        let slab_start = heap_start + heap_size;
-        let slab_size = KERNEL_SLAB_SIZE;
+        // Reserve memory regions (kernel, heap, slab). Static regions are
+        // clamped to the discovered memory map (-m 512M panic family: the
+        // config heap window extended past RAM, reserved nonexistent DRAM
+        // in memblock, and underflowed layout init). Same helper as
+        // layout::init_from_memblock — the two must not drift apart.
+        let phys_end = memory_regions
+            .iter()
+            .map(|r| r.base + r.size)
+            .max()
+            .unwrap_or(0);
+        // Contiguous-usable clamp: the carve must not cross a memory hole
+        // (x86_64 q35 4G: usable ends 0x7ffcd000, hole to 0x80000000, more
+        // RAM above 4G — a span bound alone put the heap tail + slab in
+        // unmapped hole DRAM; writes faulted at first-frame composition,
+        // rs-egl r12/r13/r15). On hole-free machines (riscv64) the region
+        // end equals the span end and this is a no-op.
+        let heap_region_end = mm::layout::heap_region_end(&memory_regions, KERNEL_HEAP_PHYS);
+        let eff = mm::layout::effective_static_regions(
+            MEMORY_PHYS_BASE,
+            phys_end.saturating_sub(MEMORY_PHYS_BASE),
+            KERNEL_HEAP_PHYS,
+            heap_region_end,
+        );
+        let heap_start = eff.heap_start;
+        let heap_size = eff.heap_size;
+        let slab_start = eff.slab_start;
+        let slab_size = eff.slab_size;
 
         #[cfg(feature = "riscv64")]
         mm::memblock_reserve(0x80000000, KERNEL_RESERVE_SIZE).ok();  // OpenSBI + kernel
         #[cfg(feature = "x86_64")]
         mm::memblock_reserve(0, KERNEL_RESERVE_SIZE).ok(); // low memory + kernel
-        mm::memblock_reserve(heap_start, heap_size).ok(); // Heap
-        mm::memblock_reserve(slab_start, slab_size).ok(); // Slab
+        if heap_size > 0 {
+            mm::memblock_reserve(heap_start, heap_size).ok(); // Heap
+        }
+        if slab_size > 0 {
+            mm::memblock_reserve(slab_start, slab_size).ok(); // Slab
+        }
+        crate::println!(
+            "boot: static regions phys_end={:#x} heap_region_end={:#x} heap={:#x}+{:#x} slab={:#x}+{:#x}",
+            phys_end, heap_region_end, heap_start, heap_size, slab_start, slab_size
+        );
+        HEAP_SIZE_EFF.store(heap_size, core::sync::atomic::Ordering::Release);
+        HEAP_SLAB_END_EFF.store(
+            heap_start + heap_size + slab_size,
+            core::sync::atomic::Ordering::Release,
+        );
 
         // Stay in Early stage for setup_linear_mapping (static BSS arrays always accessible)
         // Don't switch to Fixmap yet — Fixmap stage uses identity mapping which
@@ -1190,8 +1441,9 @@ pub extern "C" fn rust_main() -> ! {
     }
 
     // Now linear mapping is available, phys_to_virt() works for all physical memory
-    // Initialize heap allocator
-    mm::init_heap();
+    // Initialize heap allocator (window clamped to discovered RAM — the
+    // buddy must never cover DRAM past the memory map).
+    mm::init_heap_sized(HEAP_SIZE_EFF.load(core::sync::atomic::Ordering::Acquire));
 
     // x86_64: leave the .boot stack (limited by the LMA window, ~1MB) for a
     // 4MB heap-backed kernel stack. The whole init chain — including exec's
@@ -1264,18 +1516,23 @@ fn mount_root_filesystem() {
     // vda resolves to the first PCI disk, or the MMIO boot disk when no
     // PCI virtio-blk was found; vdb..vdz resolve to the PCI slots.
     if let Some(disk) = drivers::virtio::get_pci_gen_disk_by_name(&dev_name) {
-        crate::pr_info!(
-            "root: {} -> PCI virtio-blk disk ({} sectors)",
-            root,
-            disk.get_capacity()
+        // [done]: the selection record; the capacity is on the per-disk
+        // "driver:" line and the mount verdict follows as its own
+        // "ext4 mounted /" line (serial-clean: was a raw pr_info).
+        print_status_ex(
+            "fs",
+            &format!("root {} -> {}", root, dev_name),
+            None,
         );
         mount_ext4_root_from(disk as *const drivers::blkdev::GenDisk);
         return;
     }
 
-    crate::pr_info!(
-        "root: cmdline root={} not mountable by name; trying boot disk",
-        root
+    // Unparsable root= (PARTUUID=, unknown name): first-ext4 fallback.
+    print_status_ex(
+        "fs",
+        &format!("root {} -> boot-disk fallback", root),
+        None,
     );
     mount_boot_disk_ext4();
 }

@@ -1,0 +1,10 @@
+22502 ppid=22492 et=02:58 timeout --signal=TERM --kill-after=10 2700s qemu-system-x86_64
+22503 ppid=22502 et=02:58 qemu-system-x86_64 -M q35 -accel kvm
+22545 ppid=9865 et=02:46 /bin/bash -c . '/home/william/.zcode/cli/exec/shell-snapshots/snapshot-bash-1792757151126-yzmyb2.sh' 2>/dev/null
+22556 ppid=22545 et=02:46 /bin/bash ./run/ww-chain.sh ww-s2 100 12371
+22561 ppid=22556 et=02:46 python3 /home/william/rux-agents/wildwrite-hunt/run/ww-hunt.py ww-s2-r52 2700 12371
+22562 ppid=22561 et=02:46 timeout --signal=TERM --kill-after=10 2700s qemu-system-x86_64
+22572 ppid=22562 et=02:46 qemu-system-x86_64 -M q35 -accel tcg,thread=multi
+22640 ppid=9865 et=02:25 /bin/bash -c . '/home/william/.zcode/cli/exec/shell-snapshots/snapshot-bash-1792757151126-yzmyb2.sh' 2>/dev/null
+22651 ppid=22640 et=02:25 timeout --signal=TERM --kill-after=10 2700s qemu-system-x86_64
+22663 ppid=22651 et=02:25 qemu-system-x86_64 -M q35 -accel tcg,thread=multi

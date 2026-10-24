@@ -25,6 +25,8 @@ SECTIONS
 
 	_text = .;
 	_stext = .;
+	/* x86_64-style alias consumed by dfx::hung_task's kernel-text window */
+	__stext = .;
 
 	.text : AT(KERNEL_PHYS) ALIGN(4096)
 	{
@@ -33,6 +35,7 @@ SECTIONS
 	}
 
 	_etext = .;
+	__etext = .;
 
 	. = ALIGN(4096);
 	.rodata : AT(ADDR(.rodata) - VA_OFFSET) { *(.rodata .rodata.*) }
@@ -68,6 +71,18 @@ SECTIONS
 	_stack_top = .;
 
 	_end = .;
+
+	/* RUX-RISCV-LAYOUT-2: boot.S's early page tables (trampoline_pmd and
+	 * early_pmd) map a 7-PMD (14MB) image window: KERNEL_VIRT ..
+	 * KERNEL_VIRT + 0xE00000. If the image (text+rodata+data+bss incl.
+	 * the 256K boot stack) outgrows it, the boot stack's top pages sit on
+	 * the first unmapped page and the first stack push page-faults into
+	 * an infinite trap_entry frame-push recursion - an unbootable kernel
+	 * with a truncated KERNPANIC (observed: unit-test build at 12.67MB
+	 * against the old 12MB window). Fail the BUILD instead: grow the
+	 * window in boot.S (BOTH tables) and move heap/reservation/KERNEL_SIZE
+	 * together (main.rs, memory_layout.rs, buddy_allocator.rs). */
+	ASSERT(_end <= 0xffffffff80E00000, "kernel image outgrew the boot.S 14MB early window: extend the window (both PMD tables) and move heap+reservation together")
 
 	/DISCARD/ :
 	{

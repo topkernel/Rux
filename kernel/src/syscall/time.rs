@@ -417,6 +417,11 @@ fn nanosleep_impl(req: &Timespec, rem_ptr: *mut Timespec) -> i64 {
         // early-consumption source). A failed re-arm (pool full) falls
         // through to the runnable-yield branch — never sleep waker-less.
         if timer_id != 0 && !crate::timer::timer_pending(timer_id) {
+            // Wakewatch: this branch firing means the one-shot token was
+            // consumed before the deadline (early-fire family). Counted
+            // + printed (rate-gated) so a load-dependent regression of
+            // the early-consumption bug is visible.
+            crate::timer::ww_note_rearm();
             timer_id = crate::timer::add_timer_wakeup_hres(
                 target_jiffies,
                 hres_deadline,

@@ -230,6 +230,7 @@ impl BufferHead {
                 )?;
                 self.clear_state_bit(BufferState::BH_Dirty);
             }
+            crate::dfx::fsw::note_dev_write();
         }
         Ok(())
     }
@@ -567,6 +568,9 @@ impl BlockCache {
                     let _ = flush_publications();
                 }
                 let _ = (*(*victim).bh).sync();
+                crate::dfx::fsw::note_evict(true);
+            } else {
+                crate::dfx::fsw::note_evict(false);
             }
             let _ = Box::from_raw(victim);
         }
@@ -679,6 +683,7 @@ impl BlockCache {
             ) {
                 return None;
             }
+            crate::dfx::fsw::note_dev_read();
 
             bh.set_device(device);
             bh.set_state_bit(BufferState::BH_Uptodate);
@@ -1083,6 +1088,7 @@ fn get_block_cache() -> &'static BlockCache {
 ///
 /// Read a block from cache (or disk if not cached)
 pub fn bread(device: *const blkdev::GenDisk, blocknr: u64) -> Option<*mut BufferHead> {
+    crate::dfx::fsw::note_bread();
     get_block_cache().get(device, blocknr)
 }
 
@@ -1514,8 +1520,10 @@ pub fn sync_dirty_buffer(bh: *const BufferHead) -> Result<(), i32> {
         crate::fs::ext4::namei::get_current_handle().is_some()
     };
     if journal_active {
+        crate::dfx::fsw::note_sync_dirty_skip();
         return Ok(());
     }
+    crate::dfx::fsw::note_sync_dirty();
     // Ordered-publication guard: this buffer may be a pending entry/post
     // block whose order constraints a plain sync would violate. Flush the
     // queue (which syncs it in order) first.
@@ -1542,6 +1550,7 @@ pub fn sync_buffers() -> Result<(), i32> {
     // Durability point: ordered publications must go out first (a plain
     // hash-order drain could persist an entry block before its metadata).
     let _ = flush_publications();
+    crate::dfx::fsw::note_sync_all();
     get_block_cache().sync_all()
 }
 
@@ -1796,6 +1805,7 @@ pub fn flush_publications() -> Result<(), i32> {
         if batch.is_empty() {
             return Ok(());
         }
+        crate::dfx::fsw::note_pub_flush(batch.len());
         let mut first_err: i32 = 0;
         for p in &batch {
             for &b in &p.pre {

@@ -418,6 +418,13 @@ impl VirtioGpuDevice {
 
     /// Create 2D resource
     fn create_resource_2d(&self, width: u32, height: u32) -> Option<()> {
+        self.create_resource_2d_id(self.resource_id, width, height, 2)
+    }
+
+    /// Create a 2D resource with an explicit resource id and pixel
+    /// format (DRM/KMS path: one virtio resource per GEM dumb buffer,
+    /// format matching the DRM fourcc's memory byte order).
+    pub fn create_resource_2d_id(&self, resource_id: u32, width: u32, height: u32, format: u32) -> Option<()> {
         let cmd = CmdResourceCreate2d {
             header: GpuCtrlHeader {
                 hdr_type: cmd::RESOURCE_CREATE_2D,
@@ -426,8 +433,9 @@ impl VirtioGpuDevice {
                 ctx_id: 0,
                 padding: 0,
             },
-            resource_id: self.resource_id,
-            // Format 2 = VIRTIO_GPU_FORMAT_B8G8R8X8_UNORM, which QEMU maps
+            resource_id,
+            // The fbdev boot framebuffer keeps format 2 =
+            // VIRTIO_GPU_FORMAT_B8G8R8X8_UNORM, which QEMU maps
             // to PIXMAN_BE_b8g8r8x8: memory bytes B,G,R,X — i.e. the
             // standard X TrueColor byte layout (screen R from V[23:16],
             // G from V[15:8], B from V[7:0], V[31:24] ignored). This is
@@ -444,7 +452,7 @@ impl VirtioGpuDevice {
             // blue pinned at the alpha byte's value — a full-screen
             // color rotation measured via QEMU screendump on x86_64
             // (2026-10-14, agent-paint calibration run).
-            format: 2,
+            format,
             width,
             height,
         };
@@ -471,6 +479,11 @@ impl VirtioGpuDevice {
 
     /// Attach backing storage
     fn attach_backing(&self, addr: u64, size: u32) -> Option<()> {
+        self.attach_backing_id(self.resource_id, addr, size)
+    }
+
+    /// Attach backing storage to an explicit resource id.
+    pub fn attach_backing_id(&self, resource_id: u32, addr: u64, size: u32) -> Option<()> {
         let cmd = CmdResourceAttachBacking {
             header: GpuCtrlHeader {
                 hdr_type: cmd::RESOURCE_ATTACH_BACKING,
@@ -479,7 +492,7 @@ impl VirtioGpuDevice {
                 ctx_id: 0,
                 padding: 0,
             },
-            resource_id: self.resource_id,
+            resource_id,
             nr_entries: 1,
             entry: MemEntry {
                 addr,
@@ -541,6 +554,66 @@ impl VirtioGpuDevice {
         }
 
         Some(())
+    }
+
+    /// Bind a resource to scanout 0 covering (0,0,w,h) — DRM flip path.
+    pub fn set_scanout_id(&self, scanout_id: u32, resource_id: u32, width: u32, height: u32) -> bool {
+        let rect = Rect { x: 0, y: 0, width, height };
+        self.set_scanout(scanout_id, resource_id, &rect).is_some()
+    }
+
+    /// Bind a resource to scanout 0 showing the (0,0,w,h) subrect of a
+    /// resource that is `res_w` pixels wide (pitch-aligned GEMs: the
+    /// scanout rect crops by the resource stride, so the left `w`
+    /// columns display unsheared).
+    pub fn set_scanout_rect(
+        &self,
+        scanout_id: u32,
+        resource_id: u32,
+        width: u32,
+        height: u32,
+        res_w: u32,
+    ) -> bool {
+        debug_assert!(width <= res_w);
+        let rect = Rect { x: 0, y: 0, width, height };
+        let _ = res_w; // stride comes from the resource itself on the host
+        self.set_scanout(scanout_id, resource_id, &rect).is_some()
+    }
+
+    /// Release a host-side resource (DRM GEM teardown).
+    pub fn unref_resource(&self, resource_id: u32) -> bool {
+        // RESOURCE_UNREF: header(24) + resource_id(4) + padding(4) = 32.
+        #[repr(C)]
+        struct CmdResourceUnref {
+            header: GpuCtrlHeader,
+            resource_id: u32,
+            padding: u32,
+        }
+        let cmd = CmdResourceUnref {
+            header: GpuCtrlHeader {
+                hdr_type: cmd::RESOURCE_UNREF,
+                flags: 0,
+                fence_id: 0,
+                ctx_id: 0,
+                padding: 0,
+            },
+            resource_id,
+            padding: 0,
+        };
+
+        let mut resp = RespNoData {
+            header: GpuCtrlHeader {
+                hdr_type: 0,
+                flags: 0,
+                fence_id: 0,
+                ctx_id: 0,
+                padding: 0,
+            },
+        };
+
+        self.send_command(&cmd, core::mem::size_of::<CmdResourceUnref>(),
+                         &mut resp, core::mem::size_of::<RespNoData>())
+            .is_some()
     }
 
     /// Transfer data to host
@@ -613,6 +686,20 @@ impl VirtioGpuDevice {
         }
 
         Some(())
+    }
+
+    /// Transfer an explicit resource's full (0,0,w,h) rect to host
+    /// memory — DRM flip path.
+    pub fn transfer_to_host_2d_id(&self, resource_id: u32, offset: u64, width: u32, height: u32) -> bool {
+        let rect = Rect { x: 0, y: 0, width, height };
+        self.transfer_to_host_2d(resource_id, offset, &rect).is_some()
+    }
+
+    /// Present an explicit resource's full (0,0,w,h) rect — DRM flip
+    /// path.
+    pub fn resource_flush_id(&self, resource_id: u32, width: u32, height: u32) -> bool {
+        let rect = Rect { x: 0, y: 0, width, height };
+        self.resource_flush(resource_id, &rect).is_some()
     }
 
     /// Send command to VirtIO-GPU
@@ -771,8 +858,13 @@ impl VirtioGpuDevice {
     }
 
     /// Flush display
-    pub fn flush(&self) {
-        let rect = self.display_rect;
+    /// Raw ECAM address of this function's PCI config space (for the
+    /// sysfs BDF derivation in drm::init_drm).
+    pub fn pci_ecam_addr(&self) -> u64 {
+        self.pci.pci_config.base_addr
+    }
+
+    pub fn flush(&self) {        let rect = self.display_rect;
 
         // 1. Transfer framebuffer data to device
         let _ = self.transfer_to_host_2d(self.resource_id, 0, &rect);

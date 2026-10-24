@@ -16,6 +16,7 @@ pub mod sysv_msg;
 pub mod sysv_shm;
 pub mod posix_mq;
 pub mod binder;
+pub mod access_token;
 
 // Re-export IPC constants for use by dispatch and other modules
 pub use util::*;

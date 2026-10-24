@@ -48,13 +48,25 @@ pub struct ScanControl {
 
 // ==================== Public API ====================
 
+/// Reclaim batch size (Linux SWAP_CLUSTER_MAX).
+///
+/// Reclaiming exactly the allocation size (`1 << order` = ONE page for the
+/// order-0 fault path) made every allocation under sustained pressure pay
+/// a full pass through the priority machinery per page freed: once the
+/// page cache legitimately grows to RAM scale (the dynamic page-cache
+/// cap), the allocator slowpath's 8 retry rounds moved 8 pages per
+/// allocation and the whole system crawled (OH boot: zero SA .so loads in
+/// 9 minutes, one CPU saturated in reclaim). Freeing a 32-page batch per
+/// pass is Linux's shape and amortizes the scan cost.
+const SWAP_CLUSTER_MAX: usize = 32;
+
 /// Top-level reclaim entry point.
 ///
 /// Runs a priority-loop following `balance_pgdat()` in mm/vmscan.c.
 /// Returns the number of pages reclaimed.
 pub fn balance_pgdat(order: i32) -> usize {
     let mut sc = ScanControl {
-        nr_to_reclaim: 1 << order.max(0) as usize,
+        nr_to_reclaim: core::cmp::max(1 << order.max(0) as usize, SWAP_CLUSTER_MAX),
         nr_scanned: 0,
         nr_reclaimed: 0,
         may_unmap: true,
@@ -77,7 +89,13 @@ pub fn balance_pgdat(order: i32) -> usize {
 /// Called from the page allocator when the zone is below WMARK_LOW.
 /// Returns the number of pages reclaimed.
 pub fn try_to_free_pages(order: i32) -> usize {
-    balance_pgdat(order)
+    // Leg-15 pace: cumulative round count + jiffies spent here, read by
+    // the schbd heartbeat (dfx=schb). No lock held; note_drct is a
+    // counter tick unless the switch is off.
+    let j0 = crate::drivers::timer::get_jiffies();
+    let r = balance_pgdat(order);
+    crate::dfx::schb::note_drct(j0);
+    r
 }
 
 // ==================== Internal: shrink_* ====================
@@ -154,8 +172,14 @@ fn shrink_inactive_list(
     sc: &mut ScanControl,
 ) {
     if lru == LRU_INACTIVE_FILE {
-        // Reclaim page cache pages via the shrinker interface
-        let cache_reclaimed = crate::fs::page_cache::get_page_cache().shrink(nr_to_scan);
+        // Reclaim page cache pages via the shrinker interface. Direct
+        // reclaim only (this path is the page_alloc slowpath, task
+        // context, IN_DIRECT_RECLAIM-serialized): shrink_reclaim adds
+        // dirty-frame writeback so abandoned unflushed MAP_SHARED pages
+        // become evictable instead of a permanent drain. The mmu_init
+        // PT-alloc retry must NOT use this variant (per-mm PteLock held).
+        let cache_reclaimed =
+            crate::fs::page_cache::get_page_cache().shrink_reclaim(nr_to_scan);
         sc.nr_reclaimed += cache_reclaimed;
     } else if lru == LRU_INACTIVE_ANON && sc.may_unmap && swap::nr_active_swap() {
         // Reclaim anonymous pages via swap
@@ -304,7 +328,7 @@ fn reclaim_anonymous_pages(nr_to_scan: usize, sc: &mut ScanControl) -> usize {
                     super::lru::page_remove_lru(p);
 
                     // Drop reference; free if last holder
-                    let refcount = p.put_page();
+                    let refcount = p.put_page_site(crate::dfx::driftwatch::S_VMSCAN_SWAP);
                     // R14-1 (F10): free ONLY when WE took it to zero.
                     if refcount == 0 {
                         free_page(phys);
@@ -347,7 +371,7 @@ fn reclaim_anonymous_pages(nr_to_scan: usize, sc: &mut ScanControl) -> usize {
                     super::lru::page_remove_lru(p);
 
                     // Drop reference; free if last holder
-                    let refcount = p.put_page();
+                    let refcount = p.put_page_site(crate::dfx::driftwatch::S_VMSCAN_SWAP);
                     if refcount == 0 {
                         free_page(phys);
                         reclaimed += 1;

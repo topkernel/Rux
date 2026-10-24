@@ -86,6 +86,33 @@ pub fn tty_get_fg_pgrp() -> u32 {
 /// # Returns
 /// Returns number of bytes read on success, negative error code on failure
 pub fn sys_read(args: SyscallArgs) -> i64 {
+    // perf-audit (pa5): EAGAIN-spin census — pa4 proved hilogd.rd_kmsg's
+    // 92K reads/s never hit /dev/kmsg and never EOF; the remaining shape
+    // is a nonblocking fd returning EAGAIN in a hot loop. Census the
+    // (comm, path) of EAGAIN reads once per comm.
+    let ret = sys_read_inner(args);
+    if (ret == -11 || ret == 0) && crate::dfx::syscost::on() {
+        if let Some(file) = unsafe { crate::fs::get_file_fd(args[0] as usize) } {
+            if ret == -11 {
+                crate::dfx::syscost::note_read_eagain(&file);
+            } else {
+                // Covers the pipe/ext4 fast paths the generic-loop EOF
+                // census never sees (pa5: hilogd.rd_kmsg missing there).
+                crate::dfx::syscost::note_read_eof(&file);
+            }
+        }
+    }
+    // perf-audit (pa10): failing-read census — pa9 showed hilogd.rd_kmsg
+    // issuing 15.4M reads/boot that return no data, no EOF, no EAGAIN;
+    // the remaining shape is a negative errno, and which one decides
+    // kernel-fix vs OH-behavior routing.
+    if ret < 0 && ret != -11 {
+        crate::dfx::syscost::note_read_fail(args[0] as usize, ret);
+    }
+    ret
+}
+
+fn sys_read_inner(args: SyscallArgs) -> i64 {
     use crate::fs::get_file_fd;
     let fd = args[0] as usize;
     let buf = args[1] as *mut u8;
@@ -123,7 +150,14 @@ pub fn sys_read(args: SyscallArgs) -> i64 {
                 // staging below costs an alloc + 2 copies per op; on pipes
                 // that was ~half the per-syscall time under TCG.
                 if crate::fs::pipe::is_pipe_file(&file) {
-                    return crate::fs::pipe::pipe_read_user(&file, buf, count) as i64;
+                    let n = crate::fs::pipe::pipe_read_user(&file, buf, count) as i64;
+                    // perf-audit (pa9): positive-read census — which fd
+                    // returns the 92K reads/s hilogd.rd_kmsg issues (pa4-8:
+                    // not /dev/kmsg, not EOF, not EAGAIN).
+                    if n > 0 {
+                        crate::dfx::syscost::note_read_data(&file, n as usize, fd);
+                    }
+                    return n;
                 }
                 // ext4 fast path: page cache → user memory without the
                 // staging buffer (O_DIRECT keeps the generic staged path —
@@ -131,7 +165,11 @@ pub fn sys_read(args: SyscallArgs) -> i64 {
                 if file.flags_bits() & crate::fs::file::FileFlags::O_DIRECT == 0
                     && crate::fs::ext4::file::is_ext4_file(&file)
                 {
-                    return crate::fs::ext4::file::ext4_file_read_user_vfs(&file, buf, count) as i64;
+                    let n = crate::fs::ext4::file::ext4_file_read_user_vfs(&file, buf, count) as i64;
+                    if n > 0 {
+                        crate::dfx::syscost::note_read_data(&file, n as usize, fd);
+                    }
+                    return n;
                 }
                 // Chunked read (SYSA-C1): stage at most RW_CHUNK at a time so
                 // a huge count can never OOM the kernel heap. A short chunk
@@ -154,9 +192,19 @@ pub fn sys_read(args: SyscallArgs) -> i64 {
                     }
                     let result = file.read(kernel_buf.as_mut_ptr(), chunk);
                     if result < 0 {
+                        if total > 0 {
+                            crate::dfx::syscost::note_read_data(&file, total, fd);
+                        }
                         return if total > 0 { total as i64 } else { result as i32 as i64 };
                     }
                     if result == 0 {
+                        // perf-audit (pa4): EOF-spin census — a reader
+                        // whose fd hit EOF is a spin candidate (pa3:
+                        // hilogd.rd_kmsg at 92K reads/s never touches
+                        // /dev/kmsg's counters, so it is looping on some
+                        // EOF fd). Record (comm, path) once per comm;
+                        // syscost dumps print the table.
+                        crate::dfx::syscost::note_read_eof(&file);
                         break;
                     }
                     let n = result as usize;
@@ -176,6 +224,9 @@ pub fn sys_read(args: SyscallArgs) -> i64 {
                     if n < chunk {
                         break; // short read: EOF or nothing more available now
                     }
+                }
+                if total > 0 {
+                    crate::dfx::syscost::note_read_data(&file, total, fd);
                 }
                 total as i64
             }
@@ -300,6 +351,164 @@ pub fn sys_write(args: SyscallArgs) -> i64 {
     // Check if count is reasonable
     if count == 0 {
         return 0;
+    }
+
+    // OH bring-up: dump late-boot services' short writes to OTHER fds
+    // (hilog traffic goes to the hilog socket fd — every OH service's
+    // diagnostics are invisible on serial without this). Per-PID budget:
+    // one early service retrying "GetSystemAbilityManager failed" burned
+    // the whole global 4000 budget in ~3999 lines (boot b43) and the
+    // graphics services' output stayed invisible.
+    if count <= 256 && fd != 1 && fd != 2 {
+        // 512/pid: samgr's runtime HILOGE lines (the SAMStub
+        // "PERMISSION DENIED"/"interfaceToken failed" family) arrive after
+        // its ~20 init-time frames; the old 48/pid budget cut exactly
+        // there and the AddSystemAbility(5100) failure reason stayed
+        // invisible (dfx=writetrace boots only).
+        const WTRACE_PID_MAX: usize = 512;
+        const WTRACE_SLOTS: usize = 256;
+        static WTRACE_USED: [core::sync::atomic::AtomicU8; WTRACE_SLOTS] =
+            [const { core::sync::atomic::AtomicU8::new(0) }; WTRACE_SLOTS];
+        static WTRACE_TAG: [core::sync::atomic::AtomicU32; WTRACE_SLOTS] =
+            [const { core::sync::atomic::AtomicU32::new(0) }; WTRACE_SLOTS];
+        let pid = unsafe { crate::process::current_pid() };
+        if pid >= 313 {
+            let slot = (pid as usize) % WTRACE_SLOTS;
+            let tag = WTRACE_TAG[slot].load(core::sync::atomic::Ordering::Relaxed);
+            let used = if tag == pid {
+                WTRACE_USED[slot].fetch_add(1, core::sync::atomic::Ordering::Relaxed)
+            } else {
+                WTRACE_TAG[slot].store(pid, core::sync::atomic::Ordering::Relaxed);
+                WTRACE_USED[slot].store(0, core::sync::atomic::Ordering::Relaxed);
+                0
+            };
+            if used < WTRACE_PID_MAX as u8 {
+                // 480 bytes: enough to zlib-inflate a hilog frame offline
+                // (HiLogAdapter compresses each socket message; 200 cut the
+                // stream mid-dictionary and the frames read as pure noise).
+                let len = core::cmp::min(count, 480);
+                let mut kb = [0u8; 480];
+                // SAFETY: buf/count validated by access_ok above.
+                let uncopied = unsafe {
+                    crate::arch::uaccess::copy_from_user(kb.as_mut_ptr(), buf, len)
+                };
+                if uncopied == 0 {
+                    // Hex prefix (exact bytes, first 192) for offline
+                    // zlib decoding of compressed hilog frames, plus a
+                    // printable render of the whole sample for reading.
+                    let mut hexout = alloc::string::String::with_capacity(192 * 2);
+                    for &b in kb.iter().take(192) {
+                        const HEX: &[u8; 16] = b"0123456789abcdef";
+                        hexout.push(HEX[(b >> 4) as usize] as char);
+                        hexout.push(HEX[(b & 0xf) as usize] as char);
+                    }
+                    let text = kb[..len]
+                        .iter()
+                        .map(|&b| if b.is_ascii_graphic() || b == b' ' { b } else { b'.' })
+                        .collect::<alloc::vec::Vec<u8>>();
+                    if let Ok(t) = core::str::from_utf8(&text) {
+                        // Skip binary hilog frames: require a mostly-printable
+                        // head (text logs start with '<N>[pid=..]' or words).
+                        let head: usize = t.as_bytes().iter()
+                            .take(32)
+                            .filter(|&&b| b.is_ascii_graphic() || b == b' ')
+                            .count();
+                        if head >= 24
+                            && crate::dfx::switches::enabled(
+                                crate::dfx::switches::DfxSwitch::WriteTrace,
+                            )
+                        {
+                            crate::pr_info!("w pid {} fd {} hx {}: {}", pid, fd, hexout, t);
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    // OH bring-up: dump late-boot services' stderr text (capped). The
+    // musl loader's "Error loading shared library X" / "Error relocating"
+    // diagnostics go to fd 2, which init redirects away from the UART
+    // console — without this the exact loader failure (and exit 127) is
+    // invisible on serial. Gate pid >= 300 (hdf_devmgr ~320, devhosts
+    // ~404+, render_service ~443, bootanimation later); init/ueventd
+    // stderr before that is kmsg-visible anyway.
+    if fd == 2 {
+        const STDERR_DUMP_N: usize = 200;
+        static STDERR_N: core::sync::atomic::AtomicUsize =
+            core::sync::atomic::AtomicUsize::new(0);
+        let pid = unsafe { crate::process::current_pid() };
+        // Dedupe: a fixed ring of recent (pid, first-8-bytes) keys — the
+        // hilog-adapter and selinux-restorecon loops reprint the same
+        // line forever and would eat the whole budget on the first
+        // service (observed: ueventd's restorecon spam took 34 slots,
+        // the HiLogAdapter retry loop 130+).
+        static DEDUPE: [(core::sync::atomic::AtomicU32, [core::sync::atomic::AtomicU32; 2]);
+            32] =
+            [const {
+                (
+                    core::sync::atomic::AtomicU32::new(0),
+                    [core::sync::atomic::AtomicU32::new(0), core::sync::atomic::AtomicU32::new(0)],
+                )
+            }; 32];
+        // Only late pids consume the budget (an unconditional fetch_add
+        // would let the early-boot stderr storm eat it first).
+        let n = if pid >= 300 {
+            STDERR_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed)
+        } else {
+            STDERR_N.load(core::sync::atomic::Ordering::Relaxed)
+        };
+        if n < STDERR_DUMP_N && pid >= 300 {
+            let len = core::cmp::min(count, 160);
+            let mut kb = [0u8; 160];
+            // SAFETY: buf/count validated by access_ok above; kb is a
+            // local 160-byte buffer and len <= 160.
+            let uncopied = unsafe {
+                crate::arch::uaccess::copy_from_user(kb.as_mut_ptr(), buf, len)
+            };
+            if uncopied == 0 {
+                let text = kb[..len]
+                    .iter()
+                    .map(|&b| if b.is_ascii_graphic() || b == b' ' { b } else { b'.' })
+                    .collect::<alloc::vec::Vec<u8>>();
+                // Dedupe key: pid + first 8 bytes of the text.
+                let key1 = pid;
+                let key2 = u32::from_le_bytes([
+                    kb[0], kb[1], kb[2], kb[3],
+                ]);
+                let key3 = u32::from_le_bytes([
+                    kb[4], kb[5], kb[6.min(len)], kb[7.min(len)],
+                ]);
+                let mut dup = false;
+                for slot in DEDUPE.iter() {
+                    if slot.0.load(core::sync::atomic::Ordering::Relaxed) == key1
+                        && slot.1[0].load(core::sync::atomic::Ordering::Relaxed) == key2
+                        && slot.1[1].load(core::sync::atomic::Ordering::Relaxed) == key3
+                    {
+                        dup = true;
+                        break;
+                    }
+                }
+                if !dup {
+                    let di = n % DEDUPE.len();
+                    DEDUPE[di].0.store(key1, core::sync::atomic::Ordering::Relaxed);
+                    DEDUPE[di].1[0].store(key2, core::sync::atomic::Ordering::Relaxed);
+                    DEDUPE[di].1[1].store(key3, core::sync::atomic::Ordering::Relaxed);
+                    crate::pr_info!(
+                        "stderr[{}] pid {}: {}",
+                        n,
+                        pid,
+                        core::str::from_utf8(&text).unwrap_or("<non-utf8>")
+                    );
+                } else {
+                    // Refund the budget slot: dup lines don't consume it.
+                    STDERR_N.fetch_sub(1, core::sync::atomic::Ordering::Relaxed);
+                }
+            } else {
+                // Copy failed: refund the slot too.
+                STDERR_N.fetch_sub(1, core::sync::atomic::Ordering::Relaxed);
+            }
+        }
     }
 
     // SAFETY: get_file_fd returns valid File or None; user pointers validated above.
@@ -480,6 +689,91 @@ pub fn sys_writev(args: SyscallArgs) -> i64 {
     // IOV_MAX + overflow-safe iovec array validation (review批次1 OVERFLOW)
     if let Err(e) = check_iov_array(iov_ptr, iovcnt) {
         return e;
+    }
+
+    // Datagram writev must gather (Linux semantics): one writev() on a
+    // SOCK_DGRAM/SOCK_SEQPACKET unix socket is ONE datagram built from
+    // all iovecs concatenated — never one datagram per iovec. libhilog
+    // sends every HilogMsg as writev(header28, tag, content) on its
+    // connected DGRAM; the old per-iovec loop delivered three separate
+    // datagrams, so hilogd never saw a single well-formed log record
+    // (query output stayed empty, and the kernel hilog tap only ever
+    // saw orphaned binary headers and bare tag/content fragments).
+    // SOCK_STREAM keeps the per-iov loop: a byte stream has no record
+    // boundaries, so sequential writes are indistinguishable.
+    if let Some((usock, _)) = crate::net::unix::unix_file_of(fd) {
+        if matches!(
+            usock.kind,
+            crate::net::unix::UnixKind::Dgram | crate::net::unix::UnixKind::Seqpacket
+        ) && iovcnt > 0
+        {
+            // Bound the gathered datagram like sys_sendmsg does (R7-D4
+            // heap discipline; Linux answers an oversized message with
+            // EMSGSIZE).
+            const GATHER_MAX_TOTAL: usize = RW_CHUNK.saturating_mul(4);
+            let mut gathered: alloc::vec::Vec<u8> = alloc::vec::Vec::new();
+            // SAFETY: the iovec array was range-checked by check_iov_array;
+            // each entry's buffer is validated with access_ok before copy.
+            unsafe {
+                for i in 0..iovcnt {
+                    let mut iov = Iovec { iov_base: core::ptr::null(), iov_len: 0 };
+                    let uncopied = crate::arch::uaccess::copy_from_user(
+                        &mut iov as *mut Iovec as *mut u8,
+                        iov_ptr.add(i) as *const u8,
+                        core::mem::size_of::<Iovec>(),
+                    );
+                    if uncopied > 0 {
+                        return -errno::EFAULT as i64;
+                    }
+                    let base = iov.iov_base as usize;
+                    let len = iov.iov_len;
+                    if let Err(e) = iov_len_sanity(len) {
+                        return e;
+                    }
+                    if base == 0 || len == 0 {
+                        continue;
+                    }
+                    if !crate::arch::uaccess::access_ok(base, len) {
+                        return -errno::EFAULT as i64;
+                    }
+                    if gathered.len().saturating_add(len) > GATHER_MAX_TOTAL {
+                        return -errno::EMSGSIZE as i64;
+                    }
+                    let start = gathered.len();
+                    gathered.resize(start + len, 0);
+                    let uncopied = crate::arch::uaccess::copy_from_user(
+                        gathered.as_mut_ptr().add(start),
+                        base as *const u8,
+                        len,
+                    );
+                    if uncopied > 0 {
+                        return -errno::EFAULT as i64;
+                    }
+                }
+            }
+            if gathered.is_empty() {
+                return 0;
+            }
+            use crate::fs::get_file_fd;
+            // SAFETY: fd validated by unix_file_of above; the gathered
+            // buffer is a kernel slice, so file.write needs no user copy.
+            return unsafe {
+                match get_file_fd(fd) {
+                    Some(file) => {
+                        // O_RDONLY writev fails EBADF like write (write03/04
+                        // parity; the stream path below inherits the check
+                        // from sys_write, this gathered path needs its own).
+                        let mode = file.flags.load(core::sync::atomic::Ordering::Relaxed)
+                            & crate::fs::file::FileFlags::O_ACCMODE;
+                        if mode == crate::fs::file::FileFlags::O_RDONLY {
+                            return -errno::EBADF as i64;
+                        }
+                        file.write(gathered.as_ptr(), gathered.len()) as i64
+                    }
+                    None => -errno::EBADF as i64,
+                }
+            }
+        }
     }
 
     let mut total_written: isize = 0;
@@ -748,6 +1042,31 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
         }
     }
 
+    // DRM ioctls (/dev/dri/card0 + renderD128, OH display HDI): dispatch
+    // on the File's ops identity (evdev/fbdev pattern). Prime fds
+    // (drmPrimeHandleToFD exports) carry their own ops table — only
+    // DMA_BUF_IOCTL_SYNC reaches them.
+    if fd >= 0 {
+        if let Some(file) = unsafe { crate::fs::file::get_file_fd(fd as usize) } {
+            if crate::drivers::drm::is_drm_file(&file) {
+                return crate::drivers::drm::drm_ioctl(request, arg);
+            }
+            if crate::drivers::drm::is_prime_file(&file) {
+                if let Some(ret) = crate::drivers::drm::prime_file_ioctl(&file, request, arg) {
+                    return ret;
+                }
+            }
+            // Compose-content oracle: a prime import aimed at a live but
+            // non-DRM fd (the sender's fd number leaked through a parcel)
+            // fails here with ENOTTY before any DRM code runs — silent
+            // userspace-side. Log it; fall through to the generic path.
+            crate::drivers::drm::trace_foreign_prime_ioctl(request, fd, 25 /* ENOTTY */);
+        } else {
+            // fd number closed: EBADF, same silent-userspace effect.
+            crate::drivers::drm::trace_foreign_prime_ioctl(request, fd, 9 /* EBADF */);
+        }
+    }
+
     // Binder IPC ioctls (BINDER_WRITE_READ etc. on /dev/binder): dispatch
     // on the File's ops identity (evdev/loop pattern). The driver handles
     // its own version/size checks.
@@ -755,6 +1074,11 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
     if fd >= 0 {
         if let Some(file) = unsafe { crate::fs::file::get_file_fd(fd as usize) } {
             if let Some(ret) = crate::ipc::binder::binder_file_ioctl(&file, request, arg) {
+                return ret;
+            }
+            // /dev/access_token_id ioctls (OH token registry): dispatch on
+            // the File's ops identity, same pattern as binder.
+            if let Some(ret) = crate::ipc::access_token::access_token_file_ioctl(&file, request, arg) {
                 return ret;
             }
         }
@@ -795,6 +1119,18 @@ pub fn sys_ioctl(args: SyscallArgs) -> i64 {
     if fd >= 0 {
         if let Some(file) = unsafe { crate::fs::file::get_file_fd(fd as usize) } {
             if let Some(ret) = crate::drivers::loop_dev::loop_file_ioctl(&file, request, arg) {
+                return ret;
+            }
+        }
+    }
+
+    // /dev/watchdog ioctls (WDIOC_KEEPALIVE/SETTIMEOUT/GETTIMEOUT/... —
+    // OH watchdog_service init_watchdog.c loop): dispatch on the File's
+    // ops identity (evdev/loop pattern). Non-firing softdog.
+    // SAFETY: get_file_fd returns a valid Arc<File> or None.
+    if fd >= 0 {
+        if let Some(file) = unsafe { crate::fs::file::get_file_fd(fd as usize) } {
+            if let Some(ret) = crate::drivers::watchdog::watchdog_file_ioctl(&file, request, arg) {
                 return ret;
             }
         }

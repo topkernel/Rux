@@ -26,6 +26,7 @@ pub mod stop_task;
 pub mod idle;
 pub mod fair;
 pub mod cgroup;
+pub mod wakewatch;
 
 pub use sched::{
     current,
@@ -42,6 +43,7 @@ pub use sched::{
     change_task_policy,
     init,
     schedule,
+    schedule_dead_never_returns,
     cpu_rq,
     this_cpu_rq,
     load_balance,
@@ -54,6 +56,7 @@ pub use sched::{
     // Preemptive scheduling support
     need_resched,
     set_need_resched,
+    cond_resched,
     scheduler_tick,
     // SMP multi-core support
     cpu_idle_loop,

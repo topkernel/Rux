@@ -56,6 +56,19 @@ pub fn sys_brk(args: [u64; 6]) -> i64 {
                 }
             }
 
+            // Keep the ADDRESS-SPACE brk mirror in sync with the task's
+            // authoritative break at every mutation below. The mm-side
+            // value is what MmStruct::mmap's brk-conflict guard and
+            // procfs read; without the sync it stays at the exec-time
+            // image end forever and the live heap looks empty (the
+            // MAP_FIXED live-heap guard then lets mappings land on
+            // malloc's storage — session-15 probe MF6).
+            let sync_mm_brk = |v: u64| {
+                if let Some(addr_space) = current_task.address_space() {
+                    addr_space.set_brk_val(v as usize);
+                }
+            };
+
             // Re-get current brk (may have been updated)
             let current_brk = current_task.get_brk();
 
@@ -86,10 +99,20 @@ pub fn sys_brk(args: [u64; 6]) -> i64 {
                 }
 
                 current_task.set_brk(new_brk);
+                sync_mm_brk(new_brk);
                 return new_brk as i64;
             }
 
-            // Expand heap: need to map new memory pages
+            // Expand heap: VMA surgery only — pages appear via the demand
+            // fault path (which re-checks the leaf under
+            // PTE_MODIFY_LOCK before mapping). The OLD eager
+            // alloc_and_map_user_memory here mapped a fresh zero page per
+            // address and DESTROYED any already-live leaf it landed on:
+            // render_service's musl heap churn (poll loops freeing and
+            // re-expanding the top chunk) hit it twice at 0x1f000/0x20000
+            // (PTE-OVERWRITE-LIVE data_DESTROYED, then a NULL-adjacent
+            // write fault at 0x8 killed the process — boots b86/b87).
+            // Linux sys_brk never maps: it only adjusts the brk VMA.
             if new_brk > current_brk {
                 // Upper bound: the brk must stay inside the user address
                 // space. Without this check a brk above USER_END would map
@@ -112,84 +135,68 @@ pub fn sys_brk(args: [u64; 6]) -> i64 {
                     return current_brk as i64;
                 }
 
-                // Calculate page range to map. Only FULL NEW pages may be
-                // mapped: the page containing current_brk was already
-                // mapped by the previous growth (or by exec for the bss
-                // tail). Mapping from the page FLOOR of a mid-page brk
-                // replaced that live page's PTE with a fresh zero page —
-                // glibc keeps its static TLS/TCB block in the first brk
-                // page, so the next sbrk round silently wiped pd->list and
-                // every fork() crashed in __libc_fork dereferencing NULL.
-                let brk_page_floor = current_brk & !(PAGE_SIZE as u64 - 1);
-                let brk_page_ceil = brk_page_floor + PAGE_SIZE as u64;
-                let new_page_end = (new_brk + PAGE_SIZE as u64 - 1) & !(PAGE_SIZE as u64 - 1);
+                let page = PAGE_SIZE as u64;
+                // The heap VMA covers whole pages; the page containing
+                // current_brk belongs to the previous growth (or to exec's
+                // bss tail) — start at its ceiling so the new VMA is
+                // ADJACENT to the existing one (VmaManager::add merges
+                // compatible neighbors) instead of overlapping it.
+                let vma_start = (current_brk + page - 1) & !(page - 1);
+                let new_page_end = (new_brk + page - 1) & !(page - 1);
 
-                // Get root page table of address space
-                let root_ppn = if let Some(addr_space) = current_task.address_space() {
-                    addr_space.root_ppn()
-                } else {
-                    return current_brk as i64;
-                };
-
-                // Mid-page brk: the partial page must already be mapped;
-                // verify via page-table walk so an unexpected hole still
-                // gets mapped instead of silently skipped.
-                let map_start = if current_brk == brk_page_floor {
-                    current_brk
-                } else {
-                    // SAFETY: root_ppn is the current task's page-table
-                    // root; walk is a read-only page-table inspection.
-                    let partial_mapped = unsafe {
-                        crate::arch::mm::mm_ops::PageTableWalker::walk(
-                            root_ppn,
-                            brk_page_floor as u64,
-                        )
-                    }
-                    .is_some();
-                    if partial_mapped { brk_page_ceil } else { brk_page_floor }
-                };
-
-                // If need to map new pages
-                if new_page_end > map_start {
-                    // Map new heap pages
-                    let size = new_page_end - map_start;
-
-                    // Permissions: User + Read + Write + Valid + Accessed + Dirty
-                    let pte_flags = PageTableEntry::V | PageTableEntry::R | PageTableEntry::W
-                        | PageTableEntry::U | PageTableEntry::A | PageTableEntry::D;
-
-                    // SAFETY: root_ppn is a valid page table root; alloc_and_map_user_memory
-                    // handles page allocation and mapping within user address space.
-                    unsafe {
-                        let result = alloc_and_map_user_memory(root_ppn, map_start, size, pte_flags);
-                        if result.is_none() {
+                if let Some(addr_space) = current_task.address_space() {
+                    if new_page_end > vma_start {
+                        use crate::mm::vma::{Vma, VmaFlags, VmaType};
+                        // Linux sys_brk refuses growth when any VMA
+                        // overlaps [oldbrk_page, newbrk_page + PAGE)
+                        // (find_vma_intersection(mm, oldbrk,
+                        // newbrk + PAGE_SIZE)): the break keeps a
+                        // ONE-PAGE GAP below the next mapping — brk()
+                        // to EXACTLY the neighbor's start returns the
+                        // old break. Previously the heap VMA could grow
+                        // to touch — and with compatible flags MERGE
+                        // with — a foreign neighbor, so a write past
+                        // the break's last byte could fault straight
+                        // into the neighbor's first page. The probe
+                        // only needs the first VMA starting at/after
+                        // the heap's new first page; a VMA straddling
+                        // that boundary is caught by add()'s overlap
+                        // refusal below (same keep-old-brk outcome).
+                        // Residual divergence, documented: Linux's
+                        // vm_start_gap also subtracts the 1MB stack
+                        // guard below VM_GROWSDOWN stacks; this VMA has
+                        // no guard-gap model, so the gap is exactly one
+                        // page for every neighbor. Sub-page growth
+                        // (new_page_end == vma_start) skips all VMA
+                        // work, like Linux's oldbrk == newbrk fast path.
+                        let guard_end = new_page_end + page;
+                        let mut vma_mgr = addr_space.vma_write();
+                        let next = vma_mgr.find_vma_after(
+                            crate::mm::page::VirtAddr::new(vma_start as usize),
+                        );
+                        if next.is_some_and(|v| (v.start().as_usize() as u64) < guard_end) {
+                            // Keep the old brk on failure (Linux parity:
+                            // sys_brk returns mm->brk, not an error).
                             return current_brk as i64;
                         }
-                    }
-
-                    // Register the heap growth as an anonymous VMA. Mapping
-                    // PTEs without a VMA left every access past the initial
-                    // brk page as NOVMA — glibc malloc's first sbrk region
-                    // (TCB, arenas, function pointers) faulted on touch
-                    // (observed: dash jumping through a heap pointer at
-                    // 0x1c29c with tp already in the brk heap).
-                    if let Some(addr_space) = current_task.address_space() {
-                        use crate::mm::vma::{Vma, VmaFlags, VmaType};
                         let heap_vma = Vma::new(
-                            crate::mm::page::VirtAddr::new(map_start as usize),
+                            crate::mm::page::VirtAddr::new(vma_start as usize),
                             crate::mm::page::VirtAddr::new(new_page_end as usize),
                             VmaFlags::from_bits(
                                 VmaFlags::READ | VmaFlags::WRITE | VmaFlags::PRIVATE,
                             ),
                         );
-                        // Vma::new starts with no type — set it explicitly.
                         let mut heap_vma = heap_vma;
                         heap_vma.set_type(VmaType::Anonymous);
-                        let _ = addr_space.vma_write().add(heap_vma);
+                        if vma_mgr.add(heap_vma).is_err() {
+                            // Keep the old brk on failure (Linux parity).
+                            return current_brk as i64;
+                        }
                     }
                 }
 
                 current_task.set_brk(new_brk);
+                sync_mm_brk(new_brk);
                 new_brk as i64
             } else {
                 current_brk as i64
@@ -254,6 +261,69 @@ pub fn sys_mmap(args: [u64; 6]) -> i64 {
         MMAP_RING[idx].off.store(args[5], Relaxed);
         MMAP_RING[idx].ret.store(ret as u64, Relaxed);
     }
+    // sc139/140 (Session Q): name the SOURCE of the parked children's
+    // library mappings AT MMAP TIME. The park frames ([27]/[35] in the
+    // exec VMA 0x7ff082359000, filesz=0x49500) live in a dlopen'd lib
+    // whose fd is already CLOSED at park-dump time, so APPMAP printed
+    // '?'. Print fd + path + filesz for EVERY file-backed mmap of the
+    // appspawn family — the offline map (ret -> lib -> fileoff) then
+    // symbolizes the park chain.
+    if ret > 0 {
+        let comm = crate::sched::current()
+            .map(|t| unsafe { (*t).comm() })
+            .map(|c| core::str::from_utf8(c).unwrap_or(""))
+            .unwrap_or("")
+            .trim_end_matches('\0');
+        let family = comm == "appspawn"
+            || comm.contains("launcher")
+            || comm.contains("settingsdata")
+            || comm.contains("systemui")
+            || comm.contains("dataability");
+        let in_arena = (ret as usize) >= 0x7ff000000000 && (ret as usize) < 0x7ff100000000;
+        if family {
+            let fd = args[4] as i32;
+            if fd >= 0 && args[3] & 0x20 == 0 && args[2] & 0x4 != 0 /* file-backed EXEC segment */ {
+                static NF: core::sync::atomic::AtomicUsize =
+                    core::sync::atomic::AtomicUsize::new(0);
+                if NF.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 400 {
+                    let path = crate::sched::current()
+                        .and_then(|t| unsafe {
+                            (*t).try_fdtable().and_then(|fdt| fdt.get_file(fd as usize))
+                        })
+                        .map(|f| f.path())
+                        .unwrap_or_else(|| alloc::string::String::from("?"));
+                    crate::pr_warn!(
+                        "APPMAPSRC {:?} ret={:#x} len={:#x} prot={:#x} flags={:#x} fd={} off={:#x} {}",
+                        comm,
+                        ret,
+                        args[1],
+                        args[2],
+                        args[3],
+                        fd,
+                        args[5],
+                        path
+                    );
+                }
+            } else if in_arena {
+                // keep the arena-base print for the 0x7ff000... cluster
+                // (param areas + fixed-address anon pages)
+                static NA: core::sync::atomic::AtomicUsize =
+                    core::sync::atomic::AtomicUsize::new(0);
+                if NA.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 60 {
+                    crate::pr_warn!(
+                        "APPMAPSRC {:?} ret={:#x} len={:#x} prot={:#x} flags={:#x} fd={} off={:#x} -",
+                        comm,
+                        ret,
+                        args[1],
+                        args[2],
+                        args[3],
+                        fd,
+                        args[5]
+                    );
+                }
+            }
+        }
+    }
     ret
 }
 
@@ -270,6 +340,25 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
     let map_flags = args[3] as u32;
     let mut fd = args[4] as i32;
     let offset = args[5] as u64;
+    // bring-up trace: every MAP_SHARED file mapping with the raw args —
+    // the DRM/dumb-buffer mapping failures need the kernel-side view of
+    // what userspace actually passed.
+    if fd >= 0 && map_flags & map::MAP_ANONYMOUS == 0 && map_flags & map::MAP_TYPE_MASK == map::MAP_SHARED {
+        static SHARED_FILE_MMAPS: core::sync::atomic::AtomicU32 =
+            core::sync::atomic::AtomicU32::new(0);
+        let n = SHARED_FILE_MMAPS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        if n < 32 {
+            crate::pr_warn!(
+                "mmap[{}] pid {} len={:#x} flags={:#x} fd={} off={:#x}",
+                n,
+                crate::process::current_pid(),
+                length,
+                map_flags,
+                fd,
+                offset
+            );
+        }
+    }
     // MAP_SHARED /dev/zero mapping: the ORIGINAL open file description is
     // captured here (the fd is masked out of the generic attach below) and
     // pinned onto the resulting VMA so mprotect() can enforce the
@@ -495,6 +584,24 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                 if file.get_ops().is_none() {
                     return mmap_error::ENODEV;
                 }
+                // A DIRECTORY fd has dir file ops, but Linux mmap refuses
+                // it with ENODEV (directories have no ->mmap). Accepting
+                // it created a FileBacked VMA over the (size-0) directory
+                // inode whose first touch SIGBUSed "past EOF" — b74/b75:
+                // pid 1 mapped the /dev/__parameters__ directory this way,
+                // the SIGBUS spawned a hung processdump, and its SIGALRM
+                // exit left the whole boot graph frozen. Userspace handles
+                // a clean ENODEV; it cannot handle the delayed SIGBUS.
+                let is_dir = unsafe {
+                    let inode_opt = &*file.inode.get();
+                    inode_opt
+                        .as_ref()
+                        .map(|i| i.mode.is_directory())
+                        .unwrap_or(false)
+                };
+                if is_dir {
+                    return mmap_error::ENODEV;
+                }
             }
             None => return mmap_error::EBADF,
         }
@@ -525,6 +632,26 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                         .checked_mul(page)
                         .map_or(true, |bytes| bytes > as_cur);
                     if exceeds {
+                        // sc126 (Session P): attribution — which ENOMEM
+                        // source refuses the late app children's mmaps
+                        // (the APP-PARK fail tail shows nr=9 ret=-12 but
+                        // not WHY; one line per source, budget 20).
+                        static NR: core::sync::atomic::AtomicUsize =
+                            core::sync::atomic::AtomicUsize::new(0);
+                        if NR.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 20 {
+                            let comm = crate::sched::current()
+                                .map(|t| unsafe { (*t).comm() })
+                                .map(|c| core::str::from_utf8(c).unwrap_or(""))
+                                .unwrap_or("")
+                                .trim_end_matches('\0');
+                            crate::pr_warn!(
+                                "mmap-enomem: RLIMIT_AS comm='{}' len={:#x} total_vm={:#x} limit={:#x}",
+                                comm,
+                                actual_length,
+                                total * page,
+                                as_cur
+                            );
+                        }
                         return mmap_error::ENOMEM;
                     }
                 }
@@ -537,6 +664,16 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
             // Simplification: virtual mapping length is the charge unit
             // (an RSS approximation); uncharge happens at munmap/exit.
             if !crate::sched::cgroup::cgroup_memory_charge(actual_length) {
+                static NC: core::sync::atomic::AtomicUsize =
+                    core::sync::atomic::AtomicUsize::new(0);
+                if NC.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 20 {
+                    let comm = crate::sched::current()
+                        .map(|t| unsafe { (*t).comm() })
+                        .map(|c| core::str::from_utf8(c).unwrap_or(""))
+                        .unwrap_or("")
+                        .trim_end_matches('\0');
+                    crate::sched::cgroup::dfx_report_memory_refusal(comm, actual_length);
+                }
                 return mmap_error::ENOMEM;
             }
 
@@ -668,18 +805,36 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                             if actual_length > fb_len {
                                 return mmap_error::EINVAL;
                             }
-                            let hint = if addr == 0 { None } else { Some(addr) };
-                            let placement = match hint {
-                                Some(a) => a,
-                                None => match address_space.find_free_area(actual_length) {
-                                    Ok(v) => v.as_usize(),
-                                    Err(_) => return mmap_error::ENOMEM,
-                                },
+                            // ATOMIC RESERVE first (b91 corruption fix): the
+                            // old shape picked on a READ lock (or used the
+                            // hint verbatim), eagerly map_page'd the device
+                            // frames, and only then added the VMA with `let
+                            // _` — a same-mm mapper winning the range in the
+                            // window lost its frames to the PTE overwrite,
+                            // and an add failure left device PTEs installed
+                            // under a foreign VMA. MmStruct::mmap picks +
+                            // inserts under ONE vma_write (and runs the
+                            // MAP_FIXED replace surgery + unmap_pages), so
+                            // the range below is exclusively ours.
+                            let placement = match address_space.mmap(
+                                VirtAddr::new(addr),
+                                actual_length,
+                                vma_flags,
+                                crate::mm::vma::VmaType::Device,
+                                perm,
+                                map_flags & map::MAP_FIXED,
+                            ) {
+                                Ok(v) => v.as_usize(),
+                                Err(_) => return mmap_error::ENOMEM,
                             };
                             let root = address_space.root_ppn();
                             // SAFETY: root is the task's page-table root;
                             // info.addr..+len is the linear-mapped framebuffer.
                             unsafe {
+                                crate::arch::mm::mm_ops::MM_CTX.store(
+                                    2,
+                                    core::sync::atomic::Ordering::Relaxed,
+                                );
                                 crate::arch::mm::mm_ops::map_user_region(
                                     root,
                                     placement as u64,
@@ -698,15 +853,75 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                             // Kick the auto-flush presenter awake: this
                             // mapper may be a flush-less renderer (Xorg).
                             crate::drivers::gpu::fbdev::mark_fb_user_mapped();
-                            let vma_end = placement + actual_length;
-                            let mut dv = crate::mm::vma::Vma::new(
-                                VirtAddr::new(placement),
-                                VirtAddr::new(vma_end),
-                                vma_flags,
-                            );
-                            dv.set_type(crate::mm::vma::VmaType::Device);
-                            let _ = address_space.vma_write().add(dv);
                             return placement as i64;
+                        }
+                    }
+
+                    // DRM GEM mmap (OH display HDI): prime fds map their
+                    // GEM object at offset 0 (gbm gralloc's mmap of the
+                    // exported dma-buf), and /dev/dri nodes map a dumb
+                    // buffer at the fake offset DRM_IOCTL_MODE_MAP_DUMB
+                    // returned. Same device-mapping discipline as fb0:
+                    // physical pages installed up front, Device VMA.
+                    if fd >= 0 {
+                        let drm_file = unsafe { crate::fs::file::get_file_fd(fd as usize) };
+                        if let Some(file) = drm_file {
+                            if crate::drivers::drm::is_drm_file(&file)
+                                || crate::drivers::drm::is_prime_file(&file)
+                            {
+                                let Some((phys, len)) =
+                                    crate::drivers::drm::gem_mmap_resolve(&file, offset, actual_length)
+                                else {
+                                    crate::pr_warn!(
+                                        "drm: mmap resolve failed fd={} off={:#x} len={} prime={} drm={}",
+                                        fd,
+                                        offset,
+                                        actual_length,
+                                        crate::drivers::drm::is_prime_file(&file),
+                                        crate::drivers::drm::is_drm_file(&file)
+                                    );
+                                    return mmap_error::EINVAL;
+                                };
+                                // ATOMIC RESERVE first (b91 corruption fix —
+                                // see the fb0 twin above): pick + insert via
+                                // MmStruct::mmap under ONE vma_write, with
+                                // MAP_FIXED replace surgery when requested;
+                                // only then install the GEM pages eagerly.
+                                let placement = match address_space.mmap(
+                                    VirtAddr::new(addr),
+                                    actual_length,
+                                    vma_flags,
+                                    crate::mm::vma::VmaType::Device,
+                                    perm,
+                                    map_flags & map::MAP_FIXED,
+                                ) {
+                                    Ok(v) => v.as_usize(),
+                                    Err(_) => return mmap_error::ENOMEM,
+                                };
+                                let root = address_space.root_ppn();
+                                // SAFETY: root is the task's page-table
+                                // root; phys..+len is the GEM object's
+                                // linear-mapped backing store.
+                                unsafe {
+                                    crate::arch::mm::mm_ops::MM_CTX.store(
+                                        2,
+                                        core::sync::atomic::Ordering::Relaxed,
+                                    );
+                                    crate::arch::mm::mm_ops::map_user_region(
+                                        root,
+                                        placement as u64,
+                                        phys,
+                                        len as u64,
+                                        crate::arch::mm::PageTableEntry::V
+                                            | crate::arch::mm::PageTableEntry::R
+                                            | crate::arch::mm::PageTableEntry::W
+                                            | crate::arch::mm::PageTableEntry::U
+                                            | crate::arch::mm::PageTableEntry::A
+                                            | crate::arch::mm::PageTableEntry::D,
+                                    );
+                                }
+                                return placement as i64;
+                            }
                         }
                     }
 
@@ -735,6 +950,66 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                                     Err(e) => e as i64, // already negative errno
                                 };
                             }
+                        }
+                    }
+
+                    // Unmappable-fd gate (Linux parity, the b140 SIGBUS
+                    // family). Everything with a real mmap handler is
+                    // routed by now (binder, fb0, /dev/zero, ashmem,
+                    // drm/prime). What reaches the generic path with
+                    // fd >= 0 must be fault-servable as a file: an
+                    // inode-less fd (pipes, eventfd/timerfd, epoll,
+                    // sockets — bare anon_inode) or a leftover char
+                    // device has no mmap op on Linux and mmap returns
+                    // -ENODEV there. Mapping it FileBacked anyway
+                    // built a size-0 VMA whose first touch SIGBUSed
+                    // "past EOF", and the SIGBUS cascade then ran the
+                    // victim thread into its stack guard page:
+                    // accountmgr's OS_IPC_0 (pid 938) and hdf_devmgr's
+                    // OS_IPC_1 (pid 361) died exactly so, stranding
+                    // every binder waiter on their txn stacks (the
+                    // bootevent.account.ready stall).
+                    if vma_type == VmaType::FileBacked && fd >= 0 {
+                        let unmappable = unsafe {
+                            crate::fs::file::get_file_fd(fd as usize)
+                                .map(|f| {
+                                    let inode_opt = &*f.inode.get();
+                                    match inode_opt.as_ref() {
+                                        None => true, // bare anon_inode
+                                        Some(inode) => {
+                                            // Char devices, fifos and
+                                            // sockets without an earlier
+                                            // route have no fault source
+                                            // (device/fifo size 0).
+                                            inode.mode.is_char_device()
+                                                || inode.mode.is_fifo()
+                                                || inode.mode.is_socket()
+                                        }
+                                    }
+                                })
+                                .unwrap_or(false)
+                        };
+                        if unmappable {
+                            let ops_tag = unsafe {
+                                crate::fs::file::get_file_fd(fd as usize)
+                                    .and_then(|f| f.get_ops().map(|o| o as *const _ as usize))
+                                    .unwrap_or(0)
+                            };
+                            crate::pr_info!(
+                                "MMAP-ENODEV pid {} fd {} len {:#x} prot {:#x} flags {:#x} ops {:#x} path {}",
+                                crate::process::current_pid(),
+                                fd,
+                                actual_length,
+                                prot_flags,
+                                map_flags,
+                                ops_tag,
+                                unsafe {
+                                    crate::fs::file::get_file_fd(fd as usize)
+                                        .map(|f| f.path())
+                                        .unwrap_or_default()
+                                },
+                            );
+                            return mmap_error::ENODEV;
                         }
                     }
 
@@ -845,8 +1120,14 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                                     // demand-fault discipline.
                                     unsafe {
                                         let _pte_guard =
-                                            crate::arch::mm::mm_ops::PTE_MODIFY_LOCK
+                                            crate::arch::mm::mm_ops::pte_lock_for(
+                                                address_space,
+                                            )
                                                 .lock_irqsave();
+                                        crate::arch::mm::mm_ops::MM_CTX.store(
+                                            3,
+                                            core::sync::atomic::Ordering::Relaxed,
+                                        );
                                         crate::arch::mm::map_user_page(
                                             root_ppn,
                                             crate::arch::mm::memory_layout::VirtAddr::new(
@@ -903,6 +1184,61 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                                 unsafe { crate::arch::mm::asid::flush_tlb_all(); }
                             }
 
+                            // b91-b92 forensics: attribute big anonymous
+                            // PROT_NONE mappings (musl pthread stacks are
+                            // PROT_NONE + mprotect RW; a stack that STAYS
+                            // wholly PROT_NONE after its thread runs is a
+                            // lost/reverted mprotect — the hilogd crash
+                            // family writes into exactly such a VMA).
+                            // Also every MAP_FIXED mapping (the reserve-
+                            // carve pattern: hilogd's 2GB PROT_NONE arena
+                            // at 0x7ff000b86000 is carved by fixed RW
+                            // mmaps — b93 showed the crash VMA starts
+                            // exactly at the reserve base).
+                            // dfx=syscalltrace only (see file.rs so-open
+                            // note: ungated trace volume feeds
+                            // hilogd.rd_kmsg, which eats a whole vCPU) —
+                            // EXCEPT the >=1GB reserves: those are musl's
+                            // CFI/GWP-Asan shadow reservations, a handful
+                            // per boot, and the CFI hunt needs them
+                            // visible by default.
+                            let big_reserve = prot_flags == 0
+                                && map_flags & map::MAP_ANONYMOUS != 0
+                                && actual_length >= 0x4000_0000;
+                            if big_reserve {
+                                crate::pr_info!(
+                                    "PROTNONE-MAP pid {} addr {:#x} len {:#x}",
+                                    crate::process::current_pid(),
+                                    mapped_addr.as_usize(),
+                                    actual_length
+                                );
+                            }
+                            if crate::dfx::switches::enabled(
+                                crate::dfx::switches::DfxSwitch::SyscallTrace,
+                            ) {
+                                if prot_flags == 0
+                                    && map_flags & map::MAP_ANONYMOUS != 0
+                                    && actual_length >= 0x10_0000
+                                    && !big_reserve
+                                {
+                                    crate::pr_info!(
+                                        "PROTNONE-MAP pid {} addr {:#x} len {:#x}",
+                                        crate::process::current_pid(),
+                                        mapped_addr.as_usize(),
+                                        actual_length
+                                    );
+                                }
+                                if map_flags & map::MAP_FIXED != 0 {
+                                    crate::pr_info!(
+                                        "FIXED-MAP pid {} addr {:#x} len {:#x} prot {:#x} fd {}",
+                                        crate::process::current_pid(),
+                                        mapped_addr.as_usize(),
+                                        actual_length,
+                                        prot_flags,
+                                        fd
+                                    );
+                                }
+                            }
                             mapped_addr.as_usize() as i64
                         },
                         Err(e) => {
@@ -949,6 +1285,18 @@ pub fn sys_munmap(args: [u64; 6]) -> i64 {
 
     let addr = args[0] as usize;
     let length = args[1] as usize;
+
+    // b91-b92 forensics: big munmaps are pthread-stack teardowns (musl
+    // __unmapself) or mallocng group frees — the counterparts of
+    // PROTNONE-MAP/MPROTECT-RW above.
+    if length >= 0x8_0000 {
+        crate::pr_info!(
+            "BIGMUNMAP pid {} addr {:#x} len {:#x}",
+            crate::process::current_pid(),
+            addr,
+            length
+        );
+    }
 
     // Validate arguments
     if length == 0 {
@@ -1006,6 +1354,39 @@ pub fn sys_munmap(args: [u64; 6]) -> i64 {
 /// # Description
 /// mprotect is used to change protection attributes of existing memory mapping
 pub fn sys_mprotect(args: [u64; 6]) -> i64 {
+    let ret = sys_mprotect_inner(args);
+    // CFI-shadow hunt (perm-denied lane): OH musl's cross-DSO CFI fill
+    // mprotects PROT_READ slices out of a 2GB PROT_NONE reserve and then
+    // mremap(MREMAP_FIXED)s a filled scratch over them; a failed fill
+    // leaves the slice PROT_NONE and every later indirect call into that
+    // DSO SIGSEGVs inside __cfi_slowpath. Failures are rare and always
+    // interesting: log every one ungated. PROT_READ downgrades (RELRO,
+    // the shadow's tmp before mremap) are entry/exit traced only under
+    // dfx=syscalltrace (two lines per call, same gating as MREMAP).
+    if ret != 0 {
+        crate::pr_info!(
+            "MPROTECT-FAIL pid {} addr {:#x} len {:#x} prot {:#x} -> {}",
+            crate::process::current_pid(),
+            args[0],
+            args[1],
+            args[2],
+            ret
+        );
+    } else if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SyscallTrace)
+        && (args[2] as u32) & 0x6 == 0
+    {
+        crate::pr_info!(
+            "MPROTECT-R pid {} addr {:#x} len {:#x} prot {:#x}",
+            crate::process::current_pid(),
+            args[0],
+            args[1],
+            args[2]
+        );
+    }
+    ret
+}
+
+fn sys_mprotect_inner(args: [u64; 6]) -> i64 {
     #[cfg(target_arch = "riscv64")]
     use crate::arch::mm::{PageTableEntry, PAGE_SIZE, PAGE_SHIFT, PageTable, VirtAddr};
     #[cfg(target_arch = "x86_64")]
@@ -1014,6 +1395,20 @@ pub fn sys_mprotect(args: [u64; 6]) -> i64 {
     let addr = args[0] as usize;
     let length = args[1] as usize;
     let prot = args[2] as u32;
+
+    // b91-b92 forensics: PROT_WRITE mprotects cover the pthread-stack
+    // upgrade (musl maps PROT_NONE, then mprotects RW before clone) AND
+    // the reserve-carve pattern (b93: hilogd's 2GB PROT_NONE arena carved
+    // by RW mprotects — the crash memset targets the reserve base). Log
+    // ALL of them: RELRO downgrades are PROT_READ and stay quiet.
+    if prot & 0x2 != 0 {
+        crate::pr_info!(
+            "MPROTECT-RW pid {} addr {:#x} len {:#x}",
+            crate::process::current_pid(),
+            addr,
+            length
+        );
+    }
 
     // Validate arguments
     if length == 0 {
@@ -1049,6 +1444,63 @@ pub fn sys_mprotect(args: [u64; 6]) -> i64 {
     // Get current process
     match crate::sched::current() {
         Some(current_task) => {
+            let addr_space = match current_task.address_space() {
+                Some(a) => a,
+                None => return -12_i64, // ENOMEM
+            };
+
+            // CFI-shadow forensics (perm-denied lane): OH musl reserves
+            // 2GB PROT_NONE and fills per-DSO slices with
+            // mprotect(PROT_READ) + mremap(MREMAP_FIXED). A failed fill
+            // leaves the slice PROT_NONE and every indirect call into
+            // that DSO SIGSEGVs in __cfi_slowpath. Full syscalltrace is
+            // too heavy for a boot (console wedge, see cfi2), so the
+            // shadow-shaped subset is always traced: a PROT_READ
+            // mprotect whose range intersects a >=1MB anonymous
+            // PROT_NONE VMA (RELRO downgrades are file-backed, pthread
+            // stack upgrades are PROT_WRITE — neither matches). NOTE
+            // the >=1GB threshold from cfi3 hid the main-exe/ldso
+            // slices: they sit inside the sub-1GB PROT_NONE head left
+            // after the high-DSO slices are carved out.
+            if prot == 0x1 {
+                let vma_mgr = addr_space.vma_read();
+                let end = addr.saturating_add(length);
+                let hits_big_protnone = vma_mgr.iter().any(|v| {
+                    let f = v.flags().bits();
+                    v.end().as_usize() > addr
+                        && v.start().as_usize() < end
+                        && f & 0x7 == 0
+                        && v.vma_type() == crate::mm::vma::VmaType::Anonymous
+                        && v.end().as_usize() - v.start().as_usize() >= 0x10_0000
+                });
+                if hits_big_protnone {
+                    crate::pr_info!(
+                        "MPROTECT-CFI pid {} addr {:#x} len {:#x} prot {:#x}",
+                        crate::process::current_pid(),
+                        addr,
+                        length,
+                        prot
+                    );
+                }
+            }
+
+            // ATOMIC mprotect (Linux holds mmap_lock across the whole
+            // syscall): ONE vma_write guard spans the coverage check, the
+            // shared-file EACCES decision, the PTE rewrite (PTE_MODIFY_LOCK
+            // nested inside — no code path takes a VMA lock inside a PTE
+            // section, so the nesting is one-way) and the VMA split
+            // surgery. The old shape checked coverage and EACCES under
+            // vma_read, rewrote PTEs under the PTE lock, then re-derived
+            // the overlapping set for surgery under vma_write — three
+            // separately-locked phases. A concurrent mmap/munmap between
+            // the phases left PTEs and VMAs disagreeing (e.g. the whole
+            // range's PTEs rewritten RW while the VMA surgery then found
+            // nothing to split), and the mid-surgery EACCES bail returned
+            // AFTER PTEs and earlier VMAs had already been mutated. All
+            // decisions now precede all mutations, and no same-mm thread
+            // can interleave between them.
+            let mut vma_mgr = addr_space.vma_write();
+
             // Linux mprotect: the ENTIRE [addr, addr+length) range must be
             // covered by VMAs — any gap fails the whole call with ENOMEM
             // (mprotect_fixup walks until the vma list stops covering the
@@ -1056,12 +1508,7 @@ pub fn sys_mprotect(args: [u64; 6]) -> i64 {
             // returned success for a range that was never mapped (LTP
             // mprotect01).
             {
-                let addr_space = match current_task.address_space() {
-                    Some(a) => a,
-                    None => return -12_i64, // ENOMEM
-                };
-                let mut spans: alloc::vec::Vec<(usize, usize)> = addr_space
-                    .vma_read()
+                let mut spans: alloc::vec::Vec<(usize, usize)> = vma_mgr
                     .iter()
                     .map(|v| (v.start().as_usize(), v.end().as_usize()))
                     .collect();
@@ -1088,8 +1535,12 @@ pub fn sys_mprotect(args: [u64; 6]) -> i64 {
                 // writing fails with EACCES before any PTE is touched
                 // (LTP mprotect01 case 3: mmap /dev/zero O_RDONLY
                 // PROT_READ MAP_SHARED, then mprotect PROT_WRITE).
+                // A missing vm_file pin is NOT grounds for EACCES here
+                // (only a pinned, provably read-only file is) — the old
+                // in-surgery copy of this check treated a missing pin as
+                // read-only and bailed mid-mutation.
                 if prot & 0x2 != 0 {
-                    for vma in addr_space.vma_read().iter() {
+                    for vma in vma_mgr.iter() {
                         let vs = vma.start().as_usize();
                         let ve = vma.end().as_usize();
                         if vs >= addr + length || ve <= addr {
@@ -1108,11 +1559,7 @@ pub fn sys_mprotect(args: [u64; 6]) -> i64 {
             }
 
             // Get page table root
-            let root_ppn = if let Some(addr_space) = current_task.address_space() {
-                addr_space.root_ppn()
-            } else {
-                return -12_i64;  // ENOMEM
-            };
+            let root_ppn = addr_space.root_ppn();
 
             // Calculate new PTE flags (riscv64 Sv39 encoding; the x86_64
             // path builds its flags inside mprotect_pte_range).
@@ -1144,7 +1591,8 @@ pub fn sys_mprotect(args: [u64; 6]) -> i64 {
             // rewrite (stale PPN could resurrect a freed page) — regression
             // round 6 HIGH. The loop never sleeps, so one irqsave section
             // for the whole range is safe (fork holds it likewise).
-            let _pte_guard = crate::arch::mm::mm_ops::PTE_MODIFY_LOCK.lock_irqsave();
+            let _pte_guard = crate::arch::mm::mm_ops::pte_lock_for(addr_space)
+                .lock_irqsave();
 
             #[cfg(target_arch = "x86_64")]
             {
@@ -1210,12 +1658,45 @@ pub fn sys_mprotect(args: [u64; 6]) -> i64 {
                         // (review MM-H7). Also never raise W on a page
                         // whose COW bit is set — the write fault path owns
                         // the copy.
+                        //
+                        // PCACHE (RSW bit 9, riscv64
+                        // filemap_fault port): a mapping-ownership bit,
+                        // preserved like COW — dropping it would leak the
+                        // page-cache pin forever (frame unevictable). A
+                        // PRIVATE cache-backed leaf NEVER gains W in place:
+                        // the frame is shared with the page cache, so a
+                        // W-upgrade diverts the first write through COW
+                        // (Linux writenotify; x86_64 mprotect_pte_range
+                        // twin). A SHARED cache leaf (PCACHE with no COW —
+                        // cow_flags::pte_is_shared_cache; Sv39 has no third
+                        // software bit) keeps W in place — its stores must
+                        // land in the cache frame (session 25), and gaining
+                        // W here (an RO-faulted shared leaf being upgraded)
+                        // is a W-install: mark the cache page dirty so the
+                        // later msync/fsync persists such stores.
                         let ppn = pte0.ppn();
-                        let cow_bit = pte0.bits() & (1 << 8);
+                        let cow_bit =
+                            pte0.bits() & crate::arch::mm::mm_ops::cow_flags::COW;
+                        let pcache_bit =
+                            pte0.bits() & crate::arch::mm::mm_ops::cow_flags::PCACHE;
                         let mut flags = new_flags;
                         if cow_bit != 0 {
                             flags |= cow_bit;
                             flags &= !PageTableEntry::W; // defer W to COW fault
+                        }
+                        if pcache_bit != 0 {
+                            flags |= pcache_bit;
+                            if flags & PageTableEntry::W != 0 {
+                                if crate::arch::mm::mm_ops::cow_flags::pte_is_shared_cache(
+                                    pte0.bits(),
+                                ) {
+                                    crate::fs::page_cache::get_page_cache()
+                                        .mark_dirty_pfn(ppn as usize);
+                                } else {
+                                    flags |= crate::arch::mm::mm_ops::cow_flags::COW;
+                                    flags &= !PageTableEntry::W;
+                                }
+                            }
                         }
                         let new_pte = PageTableEntry::from_bits((ppn << 10) | flags);
                         (*table0).set(vpn0, new_pte);
@@ -1240,10 +1721,15 @@ pub fn sys_mprotect(args: [u64; 6]) -> i64 {
             // between DSO segments (dl-load.c), which stripped READ from
             // the entire executable segment and killed every dynamically
             // linked binary with SIGSEGV on its first library read.
-            if let Some(addr_space) = current_task.address_space() {
+            //
+            // The EACCES-on-readonly-shared-file decision moved to the
+            // pre-checks above: this loop used to carry its own copy that
+            // ALSO fired when the vm_file pin was missing, returning
+            // EACCES after the range's PTEs had already been rewritten
+            // and earlier VMAs in the loop had already been split.
+            {
                 let range_start = addr;
                 let range_end = addr + length;
-                let mut vma_mgr = addr_space.vma_write();
 
                 // Snapshot overlapping VMAs (start addresses).
                 let mut starts: alloc::vec::Vec<crate::mm::page::VirtAddr> = alloc::vec::Vec::new();
@@ -1283,32 +1769,6 @@ pub fn sys_mprotect(args: [u64; 6]) -> i64 {
                     let old_fd = vma.file_fd();
                     let old_fsz = vma.file_size();
                     let old_off = vma.offset();
-
-                    // Escalating a SHARED FILE mapping to writable
-                    // requires the backing file to be open for writing
-                    // (Linux mprotect_fixup → vma_wants_writectory):
-                    // mprotect(PROT_WRITE) on a read-only-fd MAP_SHARED
-                    // mapping fails with EACCES (LTP mprotect01). Private
-                    // (COW) mappings are exempt — writes stay private.
-                    // (pinned_file was fetched before this loop; taking
-                    // no further VMA locks here.)
-                    if prot & 0x2 != 0
-                        && full_flags.contains(crate::mm::vma::VmaFlags::SHARED)
-                        && old_type == crate::mm::vma::VmaType::FileBacked
-                    {
-                        let writable = pinned_file
-                            .as_ref()
-                            .map(|f| {
-                                let m = f.flags().bits()
-                                    & crate::fs::file::FileFlags::O_ACCMODE;
-                                m == crate::fs::file::FileFlags::O_RDWR
-                                    || m == crate::fs::file::FileFlags::O_WRONLY
-                            })
-                            .unwrap_or(false);
-                        if !writable {
-                            return -13_i64; // EACCES
-                        }
-                    }
 
                     // Head piece [v_start, range_start): keep original flags.
                     let head = if v_start < range_start {
@@ -1503,8 +1963,13 @@ pub fn sys_msync(args: [u64; 6]) -> i64 {
         let root_ppn = address_space.root_ppn();
         let end_addr = addr + length_aligned;
 
-        // Snapshot the overlapping shared file VMAs (start, end, offset).
-        let mut spans: alloc::vec::Vec<(usize, usize, usize)> = alloc::vec::Vec::new();
+        // Snapshot the overlapping shared file VMAs (span_lo, span_hi,
+        // vma_start, vma_off). span_* are clamped to the msync range;
+        // vma_start is the VMA's own base — file offsets must be computed
+        // against it (the old code used the clamped span start as the
+        // offset base, so an msync beginning mid-VMA wrote the WRONG file
+        // offsets in the PTE-walk writeback).
+        let mut spans: alloc::vec::Vec<(usize, usize, usize, usize)> = alloc::vec::Vec::new();
         {
             let vma_mgr = address_space.vma_read();
             for v in vma_mgr.iter() {
@@ -1518,20 +1983,44 @@ pub fn sys_msync(args: [u64; 6]) -> i64 {
                     spans.push((
                         v.start().as_usize().max(addr),
                         v.end().as_usize().min(end_addr),
+                        v.start().as_usize(),
                         v.offset(),
                     ));
                 }
             }
         }
 
-        for (v_start, v_end, v_off) in spans {
+        for (span_lo, span_hi, vma_start, v_off) in spans {
             // The pinned vm_file (Linux vm_file): demand faults keep
             // reading it after the mapping fd is closed.
-            let file = match address_space.get_vma_file(v_start)
-                .or_else(|| vma_file_by_range(&address_space, v_start)) {
+            let file = match address_space.get_vma_file(vma_start)
+                .or_else(|| vma_file_by_range(&address_space, vma_start)) {
                 Some(f) => f,
                 None => continue,
             };
+
+            // Session 25: SHARED ext4 mappings alias PAGE-CACHE frames
+            // (PCACHE PTEs) — their unflushed stores live in DIRTY cache
+            // entries, process-independently. Flush the dirty entries of
+            // the span's file range through the ext4 write machinery
+            // (collect/write/complete — the page-cache lock never crosses
+            // block I/O). The PTE walk below only remains for the
+            // private-copy fallback frames (non-ext4, populate failures).
+            {
+                let off_lo = v_off + (span_lo - vma_start);
+                let off_hi = v_off + (span_hi - vma_start);
+                if off_hi > off_lo {
+                    // SAFETY: inode cell written at open time, read-only.
+                    if let Some(vinode) = unsafe { &*file.inode.get() }.as_ref() {
+                        crate::fs::ext4::file::ext4_flush_dirty_inode(
+                            vinode,
+                            (off_lo / PAGE_SIZE) as u64,
+                            ((off_hi - 1) / PAGE_SIZE) as u64,
+                        );
+                    }
+                }
+            }
+
             // i_size clamp: Linux writeback never extends past EOF — bytes
             // a MAP_SHARED mapping holds beyond the file's end are
             // silently dropped at msync (LTP mmap01 greps for a pattern
@@ -1539,8 +2028,8 @@ pub fn sys_msync(args: [u64; 6]) -> i64 {
             let file_size = unsafe {
                 (*file.inode.get()).as_ref().map(|i| i.get_size()).unwrap_or(0)
             };
-            let mut cursor = v_start;
-            while cursor < v_end {
+            let mut cursor = span_lo;
+            while cursor < span_hi {
                 // SAFETY: root_ppn is a valid page-table root; the walk
                 // only reads PTEs, the write path uses the kernel's
                 // linear map of the physical page.
@@ -1558,6 +2047,17 @@ pub fn sys_msync(args: [u64; 6]) -> i64 {
                         if !pte.is_valid() {
                             break;
                         }
+                        // PCACHE leaves (SHARED ext4, session 25): their
+                        // writeback state is the page cache's dirty bit —
+                        // flushed by ext4_flush_dirty_pages above. Writing
+                        // the frame here as well would be redundant I/O
+                        // through the slow path.
+                        if pte.bits()
+                            & crate::arch::mm::mm_ops::cow_flags::PCACHE
+                            != 0
+                        {
+                            break;
+                        }
                         let is_leaf = pte.is_readable() || pte.is_writable() || pte.is_executable();
                         if level == 0 || is_leaf {
                             if pte.is_writable() {
@@ -1572,7 +2072,7 @@ pub fn sys_msync(args: [u64; 6]) -> i64 {
                         // linear map: nothing past EOF (see i_size clamp
                         // above), full pages otherwise.
                         let page_phys = p;
-                        let file_off = (v_off + (cursor - v_start)) as u64;
+                        let file_off = (v_off + (cursor - vma_start)) as u64;
                         if file_off >= file_size {
                             cursor += PAGE_SIZE as usize;
                             continue;
@@ -1628,7 +2128,12 @@ fn vma_file_by_range(
 /// # Safety
 /// Caller must ensure both old and new ranges are valid, page-aligned, and
 /// the old range is mapped.
-unsafe fn copy_old_to_new_pages(root_ppn: u64, old_addr: usize, new_addr: usize, size: usize) {
+unsafe fn copy_old_to_new_pages(
+    mm: &crate::mm::AddressSpace,
+    old_addr: usize,
+    new_addr: usize,
+    size: usize,
+) {
     use crate::arch::mm::{
         PAGE_SIZE, PAGE_SHIFT, PhysAddr, VirtAddr, map_page, phys_to_virt, PageTableEntry,
     };
@@ -1636,9 +2141,12 @@ unsafe fn copy_old_to_new_pages(root_ppn: u64, old_addr: usize, new_addr: usize,
     use crate::mm::page_desc::{pfn_to_page_mut, PageFlag};
     use crate::mm::zone::GfpFlags;
 
+    let root_ppn = mm.root_ppn();
+    crate::arch::mm::mm_ops::MM_CTX.store(4, core::sync::atomic::Ordering::Relaxed);
+
     // R7-A5: serialize leaf-PTE mutations against fork's table walk and COW
     // faults — the same discipline as the demand-fault paths.
-    let _pte_guard = crate::arch::mm::mm_ops::PTE_MODIFY_LOCK.lock_irqsave();
+    let _pte_guard = crate::arch::mm::mm_ops::pte_lock_for(mm).lock_irqsave();
     let mut offset = 0usize;
     while offset < size {
         let old_virt = (old_addr + offset) as u64;
@@ -1648,6 +2156,35 @@ unsafe fn copy_old_to_new_pages(root_ppn: u64, old_addr: usize, new_addr: usize,
         if let Some((old_ppn, old_bits)) = crate::arch::mm::mm_ops::PageTableWalker::walk(root_ppn, old_virt) {
             let old_phys = old_ppn << PAGE_SHIFT;
             let old_kvaddr = phys_to_virt(PhysAddr::new(old_phys)).bits() as *const u8;
+
+            // DESTINATION-PRESENT: the destination range was created by
+            // mmap in this same syscall, so a present leaf can only be a
+            // racing same-mm demand fault's zero page (CLONE_VM threads
+            // touching the range between the MAP_FIXED install and this
+            // copy). Linux's mremap moves PTEs under mmap_lock and the
+            // move REPLACES the destination; skipping the page (the old
+            // b93 MREMAP-DST-LIVE guard) permanently lost the moved
+            // data. Tear the racing leaf down with full accounting and
+            // copy ours over it — never alias two frames at one VA.
+            // (b93 heap-corruption note: the hazard there was mapping a
+            // fresh frame OVER a live leaf without dropping its
+            // refcount/rmap; the teardown below is the fix for exactly
+            // that.)
+            if crate::arch::mm::mm_ops::PageTableWalker::walk(root_ppn, new_virt).is_some() {
+                static DST_HIT_N: core::sync::atomic::AtomicUsize =
+                    core::sync::atomic::AtomicUsize::new(0);
+                if DST_HIT_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 24 {
+                    crate::pr_info!(
+                        "MREMAP-DST-REPLACE pid={} va={:#x} src={:#x} — replacing racing leaf",
+                        crate::process::current_pid(),
+                        new_virt,
+                        old_virt
+                    );
+                }
+                // SAFETY: PTE_MODIFY_LOCK is held (see above) and `mm` is
+                // the current task's address space.
+                unsafe { mm.unmap_one_user_leaf_locked(new_virt as usize) };
+            }
 
             // Eagerly allocate + map the destination page (see comment above)
             let new_phys = alloc_page(GfpFlags::GFP_KERNEL);
@@ -1676,7 +2213,7 @@ unsafe fn copy_old_to_new_pages(root_ppn: u64, old_addr: usize, new_addr: usize,
                 (*page).set_flag(PageFlag::SwapBacked);
                 (*page).set_index(new_virt as usize / (PAGE_SIZE as usize));
                 (*page).inc_mapcount();
-                if let Some(mm) = crate::sched::current().and_then(|t| t.address_space()) {
+                if crate::sched::current().and_then(|t| t.address_space()).is_some() {
                     crate::mm::rmap::page_record_mapping(
                         &*page,
                         mm as *const _ as usize,
@@ -1689,6 +2226,41 @@ unsafe fn copy_old_to_new_pages(root_ppn: u64, old_addr: usize, new_addr: usize,
         offset += PAGE_SIZE as usize;
     }
     drop(_pte_guard);
+}
+
+/// Re-apply a remapped mapping's original file identity onto the VMA at
+/// `piece_start`. The remap paths in `sys_mremap_inner` reinstall the
+/// mapping through `AddressSpace::mmap`, whose fresh VMA carries the old
+/// TYPE but default fd (-1)/offset 0 — without this, a moved or grown
+/// FILE mapping loses its vm_file bookkeeping (offset shown as 0, no
+/// path in /proc/<pid>/maps, forensics unable to map a rip to a file
+/// position). fd intentionally stays -1: the identity lives on the pin
+/// (the original fd number may have been closed or reused since mmap).
+/// No-op when no VMA starts exactly at `piece_start` (an in-place
+/// anonymous extension merged into its predecessor).
+fn mremap_carry_file_attrs(
+    address_space: &crate::mm::mm_struct::MmStruct,
+    piece_start: usize,
+    piece_offset: usize,
+    fd: i32,
+    file_size: u64,
+    pinned: Option<&alloc::sync::Arc<crate::fs::file::File>>,
+) {
+    let found = {
+        let mut mgr = address_space.vma_write();
+        mgr.get_mut(crate::mm::page::VirtAddr::new(piece_start))
+            .map(|vma| {
+                vma.set_file_fd(fd);
+                vma.set_file_size(file_size);
+                vma.set_offset(piece_offset);
+            })
+            .is_some()
+    };
+    if found {
+        if let Some(f) = pinned {
+            address_space.pin_vma_file(piece_start, f.clone());
+        }
+    }
 }
 
 /// sys_mremap - Remap memory
@@ -1708,7 +2280,43 @@ unsafe fn copy_old_to_new_pages(root_ppn: u64, old_addr: usize, new_addr: usize,
 ///
 /// # Description
 /// mremap expands or shrinks existing memory mapping
+///
+/// b93 heap-corruption attribution: mremap was the only VMA-mutating
+/// syscall with no serial trace, so the split of hilogd's 2GB PROT_NONE
+/// reserve at +0x1fd000 could not be pinned on any logged operation
+/// (MPROTECT/FIXED-MAP/BIGMUNMAP were all ruled out). Every mremap now
+/// logs its identity and arguments on entry and its result on exit —
+/// one boot ties any mystery VMA surgery to its caller.
+/// dfx=syscalltrace only: ungated this is two lines per mremap, and
+/// hilogd.rd_kmsg eats a vCPU copying them (b128/b129).
 pub fn sys_mremap(args: [u64; 6]) -> i64 {
+    let ret = sys_mremap_inner(args);
+    // Failure returns are rare and always interesting (CFI-shadow hunt):
+    // log ungated, success only under dfx=syscalltrace.
+    if ret < 0 {
+        crate::pr_info!(
+            "MREMAP-FAIL pid {} old={:#x} old_sz={:#x} new_sz={:#x} flags={:#x} new={:#x} -> {}",
+            crate::process::current_pid(),
+            args[0], args[1], args[2], args[3], args[4],
+            ret
+        );
+    }
+    if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SyscallTrace) {
+        let pid = crate::process::current_pid();
+        let comm_bytes = crate::sched::current()
+            .map(|t| unsafe { (*t).comm() }.to_vec())
+            .unwrap_or_default();
+        let comm = core::str::from_utf8(&comm_bytes).unwrap_or("?");
+        crate::pr_info!(
+            "MREMAP-ENTER pid={} comm={} old={:#x} old_sz={:#x} new_sz={:#x} flags={:#x} new={:#x}",
+            pid, comm, args[0], args[1], args[2], args[3], args[4]
+        );
+        crate::pr_info!("MREMAP-EXIT pid={} -> {:#x}", pid, ret);
+    }
+    ret
+}
+
+fn sys_mremap_inner(args: [u64; 6]) -> i64 {
     use crate::mm::page::{VirtAddr, PAGE_SIZE};
     use crate::mm::vma::{VmaFlags, VmaType};
     use crate::mm::pagemap::Perm;
@@ -1767,28 +2375,80 @@ pub fn sys_mremap(args: [u64; 6]) -> i64 {
         None => return mmap_error::ENOMEM,
     };
 
-    // 1. Find VMA covering old_addr
+    // CFI-shadow forensics: musl's shadow fill is
+    // mremap(tmp, len, len, MREMAP_MAYMOVE|MREMAP_FIXED, slice). By
+    // mremap time the slice VMA is PROT_READ (the fill mprotects it
+    // first), so a VMA-shape filter can't catch the move — and MREMAP_FIXED
+    // is rare outside CFI/JIT moves anyway: always trace it.
+    if (flags & MREMAP_FIXED) != 0 {
+        crate::pr_info!(
+            "MREMAP-CFI pid {} old {:#x} len {:#x} -> new {:#x} ({})",
+            crate::process::current_pid(),
+            old_addr,
+            old_size_aligned,
+            new_addr_arg,
+            new_size_aligned
+        );
+    }
+
+    // 1. Find VMA covering old_addr (full attributes: the remap paths
+    // below reinstall the mapping through AddressSpace::mmap, which
+    // builds a fresh VMA carrying only range/flags/type — fd, file size
+    // and offset must be re-applied or a moved FILE mapping silently
+    // loses its vm_file bookkeeping, exactly like the exec-time segment
+    // flattening did).
     let vma_info = {
         let vma_mgr = address_space.vma_read();
         vma_mgr.find(VirtAddr::new(old_addr)).map(|vma| {
-            (vma.start(), vma.end(), vma.flags(), vma.vma_type())
+            (
+                vma.start(),
+                vma.end(),
+                vma.flags(),
+                vma.vma_type(),
+                vma.file_fd(),
+                vma.file_size(),
+                vma.offset(),
+            )
         })
     };
 
-    let (vma_start, vma_end, vma_flags, vma_type) = match vma_info {
+    let (vma_start, vma_end, vma_flags, vma_type, vma_fd, vma_fsz, vma_off) = match vma_info {
         Some(info) => info,
         None => return mmap_error::EFAULT,  // Address not mapped
     };
 
-    // Validate old_addr is VMA start address
-    if vma_start.as_usize() != old_addr {
-        return mmap_error::EFAULT;
-    }
+    // Pinned vm_file of the ORIGINAL mapping (None for anonymous): moved
+    // or grown file mappings re-pin it at the new piece's start so
+    // demand faults and /proc/maps path resolution survive the move.
+    let vma_pin = address_space.get_vma_file(vma_start.as_usize());
 
-    // Validate old_size is within VMA range
+    // Linux mremap semantics: old_addr may sit ANYWHERE inside a VMA
+    // (VmaManager::add merges adjacent compatible VMAs, so glibc's run of
+    // neighboring mmap'd malloc chunks is ONE VMA). Only two conditions
+    // are errors: nothing mapped at old_addr, or the old range crossing
+    // the covering VMA's end. The former start-equality check returned
+    // EFAULT for every interior chunk — glibc then fell back to its
+    // malloc+memcpy+free path (safe, but a wrong EFAULT on a live
+    // mapping), while the chunks that DID sit at a merged VMA start hit
+    // the expand path below and were grown into their NEIGHBORS' pages
+    // (silent cross-chunk heap corruption: heapstress blk canary at
+    // +0x21000, gnome-shell malloc.c:4302 assert).
     if old_addr + old_size_aligned > vma_end.as_usize() {
         return mmap_error::EFAULT;
     }
+
+    // NOTE (hilogd hunt, left as evidence for the mm lane): Linux
+    // vma_to_resize SPLITS a larger VMA at addr+old_len (the tail stays
+    // mapped as its own VMA — mremap() with old_len < mapping size does
+    // NOT truncate), and vma_expandable then still refuses in-place
+    // growth into an adjacent next VMA. A tail-TRIM variant (unmap the
+    // excess) was tried here and reverted: it made shrink-then-grow
+    // succeed but silently freed the merged neighbor's pages — data
+    // loss Linux never performs (test/mrpar.c case 2 catches it).
+    // hilogd's 66x MREMAP-FAIL storm (old_sz=4K new_sz=8K flags=0) is
+    // therefore NOT resolved by a syscall-side change; whether those
+    // calls succeed on Linux depends on VMA-merge visibility, which
+    // lives in mm/vma.rs.
 
     // 2. Decide operation type based on new_size
     if new_size_aligned == old_size_aligned {
@@ -1809,10 +2469,20 @@ pub fn sys_mremap(args: [u64; 6]) -> i64 {
             );
             match mmap_result {
                 Ok(new_addr) => {
+                    // Carry the original mapping's file identity onto the
+                    // moved VMA (Linux move_vma: vm_file/vm_pgoff follow).
+                    mremap_carry_file_attrs(
+                        address_space,
+                        new_addr_arg,
+                        vma_off + (old_addr - vma_start.as_usize()),
+                        vma_fd,
+                        vma_fsz,
+                        vma_pin.as_ref(),
+                    );
                     // Copy pages from old to new
                     let copy_size = old_size_aligned.min(new_size_aligned);
                     unsafe {
-                        copy_old_to_new_pages(root_ppn, old_addr, new_addr_arg, copy_size);
+                        copy_old_to_new_pages(address_space, old_addr, new_addr_arg, copy_size);
                     }
                     // Unmap old mapping
                     let _ = address_space.munmap(VirtAddr::new(old_addr), old_size_aligned);
@@ -1847,8 +2517,20 @@ pub fn sys_mremap(args: [u64; 6]) -> i64 {
         let extra_size = new_size_aligned - old_size_aligned;
         let new_end = old_addr + new_size_aligned;
 
+        // In-place growth is legal only when the old range covers the
+        // WHOLE VMA (Linux: `old_addr == vma->vm_start && old_end ==
+        // vm_end`). The VMA may extend past old_addr + old_size because
+        // adjacent VMAs merged — that tail belongs to OTHER mappings
+        // (glibc's neighboring mmap'd chunks), and "expanding into it"
+        // hands the caller write access to a foreign chunk's header and
+        // data. This was the heapstress/gnome-shell cross-chunk heap
+        // corruption: chunk A at a merged VMA start grew 0x21000 ->
+        // 0x22000 and its realloc memcpy clobbered chunk B at +0x21000.
+        let whole_vma = vma_start.as_usize() == old_addr
+            && vma_end.as_usize() == old_addr + old_size_aligned;
+
         // Check if can expand in place (check if next VMA would conflict)
-        let can_expand = {
+        let can_expand = whole_vma && {
             let vma_mgr = address_space.vma_read();
             if let Some(next_vma) = vma_mgr.find_vma_after(VirtAddr::new(vma_end.as_usize())) {
                 next_vma.start().as_usize() >= new_end
@@ -1868,7 +2550,23 @@ pub fn sys_mremap(args: [u64; 6]) -> i64 {
                 perm,
                 map::MAP_FIXED,  // Force at this address
             ) {
-                Ok(_) => old_addr as i64,
+                Ok(_) => {
+                    // The extension piece is a fresh VMA at vma_end when
+                    // it did not merge (file VMAs never merge here:
+                    // fd=-1 vs the incumbent's real fd); carry the file
+                    // identity onto it with a continuation offset. For a
+                    // merged (anonymous) extension there is no VMA at
+                    // vma_end and nothing to fix.
+                    mremap_carry_file_attrs(
+                        address_space,
+                        vma_end.as_usize(),
+                        vma_off + (vma_end.as_usize() - vma_start.as_usize()),
+                        vma_fd,
+                        vma_fsz,
+                        vma_pin.as_ref(),
+                    );
+                    old_addr as i64
+                }
                 Err(_) => mmap_error::ENOMEM,
             }
         } else if (flags & MREMAP_MAYMOVE) != 0 {
@@ -1883,14 +2581,24 @@ pub fn sys_mremap(args: [u64; 6]) -> i64 {
                 0,  // Don't force address
             ) {
                 Ok(new_mapping_addr) => {
+                    let new_addr_val = new_mapping_addr.as_usize();
+                    // Carry file identity onto the moved mapping (see the
+                    // MREMAP_FIXED twin above).
+                    mremap_carry_file_attrs(
+                        address_space,
+                        new_addr_val,
+                        vma_off + (old_addr - vma_start.as_usize()),
+                        vma_fd,
+                        vma_fsz,
+                        vma_pin.as_ref(),
+                    );
                     // Copy pages from old mapping to new mapping before unmapping
                     let copy_size = old_size_aligned.min(new_size_aligned);
-                    let new_addr_val = new_mapping_addr.as_usize();
                     // SAFETY: both old_addr and new_addr_val are page-aligned user addresses.
                     // copy_old_to_new_pages copies PTE contents (physical page data).
                     unsafe {
                         copy_old_to_new_pages(
-                            address_space.root_ppn(),
+                            address_space,
                             old_addr,
                             new_addr_val,
                             copy_size,
@@ -2483,7 +3191,8 @@ fn mlock_impl(raw_addr: usize, length: usize, onfault: bool) -> i64 {
                     // sysv shm attach path; p is page-aligned user memory.
                     unsafe {
                         let _pte_guard =
-                            crate::arch::mm::mm_ops::PTE_MODIFY_LOCK.lock_irqsave();
+                            crate::arch::mm::mm_ops::pte_lock_for(address_space)
+                                .lock_irqsave();
                         if let Some(phys) =
                             crate::arch::mm::mm_ops::alloc_user_phys_page()
                         {

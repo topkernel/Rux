@@ -98,6 +98,27 @@ pub unsafe fn write_cr0(value: u64) {
     unsafe { core::arch::asm!("mov cr0, {}", in(reg) value, options(nomem, nostack)) };
 }
 
+/// Set CR0.WP (write protect, bit 16) on the CURRENT cpu, idempotent.
+///
+/// F1b root-cause fix (wildwrite-hunt): without WP, ring-0 stores IGNORE
+/// page-table RW bits, so every "read-only" supervisor mapping is
+/// decorative — supervisor uaccess writes pierce COW/share protections
+/// (read() into a post-fork COW page writes the SHARED page: parent/child
+/// divergence, cross-mapper bleed, zero kernel-side trace). Linux sets WP
+/// early in boot for exactly this discipline; we now do the same,
+/// permanently, on BSP and every AP. Safe here because the kernel image,
+/// linear map, and device windows are all mapped P|RW — WP only ever
+/// bites user-side COW/RO pages (the trap path resolves those: see
+/// mm/exception.rs kernel_data_fill CowPending) and deliberately-guarded
+/// kernel statics (dfx=wildwatch).
+pub fn enable_write_protect() {
+    // SAFETY: single-bit RMW; PE/PG/PAE and the rest of CR0 are preserved.
+    unsafe {
+        let cr0 = read_cr0();
+        write_cr0(cr0 | 0x1_0000);
+    }
+}
+
 pub fn read_cr3() -> u64 {
     let value: u64;
     // SAFETY: reading CR3 is always safe.

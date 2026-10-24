@@ -13,14 +13,14 @@ pub const KERNEL_NAME: &str = "Rux";
 pub const KERNEL_VERSION: &str = "0.1.0";
 
 /// Target platform
-pub const TARGET_PLATFORM: &str = "riscv64";
+pub const TARGET_PLATFORM: &str = "x86_64";
 
 // ============================================================
 // Memory Configuration
 // ============================================================
 
 /// Kernel heap size (bytes)
-pub const KERNEL_HEAP_SIZE: usize = 134217728;
+pub const KERNEL_HEAP_SIZE: usize = 1073741824;
 
 /// Physical memory size (bytes)
 pub const PHYS_MEMORY_SIZE: usize = 2147483648;
@@ -284,10 +284,10 @@ pub const FD_SETSIZE: usize = 1024;
 // ============================================================
 
 /// Futex waiter pool size
-pub const FUTEX_WAITER_POOL_SIZE: usize = 256;
+pub const FUTEX_WAITER_POOL_SIZE: usize = 8192;
 
 /// Futex hash table size
-pub const FUTEX_HASH_SIZE: usize = 64;
+pub const FUTEX_HASH_SIZE: usize = 512;
 
 // ============================================================
 // Graphics Configuration

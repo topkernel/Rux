@@ -59,6 +59,26 @@ impl WaitQueueEntry {
         self.woken.store(true, Ordering::Release);
     }
 
+    /// Clear the woken flag (lost-wake retry window).
+    ///
+    /// W1 (sticky-skip lost wake): `wake_up` marks the entry woken BEFORE
+    /// calling `wake_up_process`, and refuses later wakes for an entry that
+    /// is already flagged. When the underlying `wake_up_process` REFUSES the
+    /// transition (target between its prepare_to_wait and its own
+    /// `__schedule` link-drop — the R42 window — or a guard divergence),
+    /// the waker's one-shot token is consumed while the task may still end
+    /// up asleep: its `__schedule` reads the still-sleeping state, dequeues
+    /// it, and no future wake retries this entry. Clearing the flag on a
+    /// refused wake keeps the entry eligible so the NEXT event re-attempts
+    /// the wake (idempotent: a genuinely running task is refused again
+    /// harmlessly). The sc74 launcher IPC wedge — binder server threads
+    /// parked >240 s owing replies with empty todos — has exactly this
+    /// signature shape, so this closes the retry path; the stall-scan
+    /// census in ipc/binder.rs still names any residual live occurrence.
+    pub fn clear_woken(&self) {
+        self.woken.store(false, Ordering::Release);
+    }
+
     /// Get associated task
     pub fn task(&self) -> *mut Task {
         self.task
@@ -171,13 +191,48 @@ impl WaitQueueHead {
 
                 let task = entry.task();
                 if !task.is_null() {
-                    crate::sched::wake_up_process(task);
+                    // W1: a refused wake must not consume the entry's
+                    // one-shot token — clear the flag so a later wake can
+                    // retry (the task may still be heading into
+                    // __schedule with a sleeping state).
+                    if !crate::sched::wake_up_process(task) {
+                        entry.clear_woken();
+                        // Do not count a refused wake as awakened: no task
+                        // transition happened. Continue scanning so other
+                        // entries on this queue still get their chance.
+                        continue;
+                    }
                 }
 
                 awakened += 1;
 
                 if entry.is_exclusive() {
                     break;
+                }
+            } else {
+                // sc100 (sticky-token lost wake): a woken-flagged entry
+                // whose task is SLEEPING is a consumed one-shot token
+                // whose wake never reached the task — the binder-stall
+                // census captured the shape live (q=1 woken=1 while the
+                // task sat INTERRUPTIBLE ∧ unlinked ∧ owned by no cpu
+                // slot for minutes; every REKICK skipped the entry and
+                // no other wake path exists). The token was spent, so
+                // this queue will never deliver the task another wake
+                // unless it is re-issued HERE. Re-issue it for sleeping
+                // targets only: a genuinely running task's refusal is
+                // benign (it either holds a live slot or the R46 heal
+                // path owns it), and a freed target is caught by
+                // wake_up_process's own poison/floor guards.
+                let task = entry.task();
+                if !task.is_null() {
+                    // SAFETY: read-only state snapshot; wake_up_process's
+                    // WP2/R15-6 guards handle stale task pointers.
+                    let st = unsafe { (*task).state() };
+                    if st.is_sleeping() || st.contains(crate::process::task::TaskState::STOPPED) {
+                        if crate::sched::wake_up_process(task) {
+                            awakened += 1;
+                        }
+                    }
                 }
             }
         }

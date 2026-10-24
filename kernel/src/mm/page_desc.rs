@@ -535,6 +535,8 @@ impl Page {
                 // Would underflow — refuse to decrement
                 // Note: intentionally no log here to avoid printk during page table
                 // teardown, which can deadlock on mm/ring buffer/ext4 locks.
+                crate::dfx::driftwatch::PUT_UNDERFLOW
+                    .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                 return -1;
             }
             match self._refcount.compare_exchange_weak(
@@ -547,6 +549,19 @@ impl Page {
                 Err(_) => continue, // CAS failed, retry
             }
         }
+    }
+
+    /// `put_page()` with drift attribution: a transition to 0 is the exact
+    /// moment a frame becomes orphan-able — count it per call site
+    /// (dfx::driftwatch) so the MEMLEDGER census can attribute drift to the
+    /// release path that dropped it. Same return contract as `put_page`.
+    #[inline]
+    pub fn put_page_site(&self, site: usize) -> i32 {
+        let r = self.put_page();
+        if r == 0 {
+            crate::dfx::driftwatch::note_zero_put(site);
+        }
+        r
     }
 
     /// Try to increment reference count (only if refcount > 0)
@@ -855,42 +870,162 @@ pub const PHYS_MEMORY_BASE: usize = 0x8000_0000;
 pub const PHYS_MEMORY_BASE: usize = 0x0000_0000;
 
 // Use physical memory size from config (Kernel.toml: memory.physical_memory)
+//
+// NOMINAL/default size only. The actual per-boot size comes from the
+// hardware memory map (riscv64 FDT / x86_64 e820) and is published as the
+// runtime descriptor count via set_nr_descs() — see nr_descs(). The config
+// value remains the pre-vmemmap fallback.
 pub const PHYS_MEMORY_SIZE: usize = crate::config::PHYS_MEMORY_SIZE;
 
-/// Maximum Page Frame Number
+/// Compile-time CEILING on managed page descriptors.
+///
+/// Fake-OOM family root cause (KVM OH rounds): MAX_PAGES used to be derived
+/// from the Kernel.toml nominal size (2 GiB = 524288 pages), so on any
+/// machine with more RAM (KVM q35 4 GiB: e820 reported 1048428 pages) both
+/// vmemmap and the zone allocator silently TRUNCATED to the first 2 GiB —
+/// every page above the line was invisible to the allocator while the boot
+/// banner happily reported the full size. The allocator then "ran out" at
+/// ~1.4 GiB usable on a 4 GiB box (allocator ENOMEM storm, fork=ENOMEM,
+/// task-context ALLOCTHROW kills at PID 485+, foundation/accountmgr era).
+///
+/// MAX_PAGES now sizes only descriptor-backed STATIC structures (the
+/// PT-ledger exact bitmaps: MAX_PAGES/64 * 8 B = 512 KiB) and the final
+/// sanity clamp; the actual runtime bound is nr_descs(), set at boot from
+/// the discovered memory map. A 16 GiB ceiling = 4 Mi descriptors = 256 MiB
+/// of vmemmap backing in the worst case (Linux pays the same memmap cost).
+pub const MAX_PAGES: usize = 16 * 1024 * 1024 * 1024 / PAGE_SIZE;
+
+/// Runtime descriptor count (0 = not yet set by init_vmemmap).
+static NR_DESCS: AtomicUsize = AtomicUsize::new(0);
+
+/// Whether the runtime descriptor count has been published (init_vmemmap
+/// done). The PT walk guards key on this so pre-init boot-time walks are
+/// never vetoed by phys_valid's config-derived fallback (a machine with
+/// more RAM than the config ceiling would otherwise fail walks above it).
+pub fn descs_published() -> bool {
+    NR_DESCS.load(Ordering::Acquire) != 0
+}
+
+/// Publish the per-boot descriptor count (clamped to MAX_PAGES).
+/// Called once from init_vmemmap after the vmemmap mapping succeeds.
+pub fn set_nr_descs(n: usize) {
+    NR_DESCS.store(n.min(MAX_PAGES), Ordering::Release);
+}
+
+/// Number of page descriptors actually instantiated this boot.
+///
+/// Before init_vmemmap runs this returns the config-derived default; the
+/// zone allocator, vmemmap bounds checks, and forensic scans all run after
+/// init, so they see the discovered value.
+#[inline]
+pub fn nr_descs() -> usize {
+    match NR_DESCS.load(Ordering::Acquire) {
+        0 => PHYS_MEMORY_SIZE / PAGE_SIZE,
+        n => n,
+    }
+}
+
+/// Maximum Page Frame Number (nominal, config-derived; runtime users
+/// should prefer max_pfn()).
 pub const MAX_PFN: usize = (PHYS_MEMORY_BASE + PHYS_MEMORY_SIZE) / PAGE_SIZE;
+
+/// Runtime last-valid-PFN + 1 (base + discovered descriptors).
+#[inline]
+pub fn max_pfn() -> usize {
+    MIN_PFN + nr_descs()
+}
 
 /// Minimum Page Frame Number (physical memory starts here)
 pub const MIN_PFN: usize = PHYS_MEMORY_BASE / PAGE_SIZE;
 
-/// Check if a Page Frame Number is valid (within physical memory range)
-/// Check if PFN is valid
+/// Check if a Page Frame Number is valid (within managed physical memory)
 #[inline]
-pub const fn pfn_valid(pfn: usize) -> bool {
-    pfn >= MIN_PFN && pfn < MAX_PFN
+pub fn pfn_valid(pfn: usize) -> bool {
+    pfn >= MIN_PFN && pfn < MIN_PFN + nr_descs()
 }
 
-/// Check if a physical address is valid (within physical memory range)
+/// Check if a physical address is valid (within managed physical memory)
 #[inline]
-pub const fn phys_valid(phys: usize) -> bool {
-    phys >= PHYS_MEMORY_BASE && phys < PHYS_MEMORY_BASE + PHYS_MEMORY_SIZE
+pub fn phys_valid(phys: usize) -> bool {
+    phys >= PHYS_MEMORY_BASE && phys < PHYS_MEMORY_BASE + nr_descs() * PAGE_SIZE
 }
 
-/// Page array size
+/// Present (usable RAM) pages this boot — the SUM of the discovered
+/// regions, holes excluded. Distinct from nr_descs(), which sizes the
+/// linear PFN span (max region end) including non-RAM holes. MemTotal and
+/// friends must use this (fake-OOM family: span-counted totals overstated
+/// RAM by the MMIO-hole size on split-map machines).
+static PRESENT_PAGES: AtomicUsize = AtomicUsize::new(0);
+
+/// Publish the present-page count (called once from boot after the
+/// memory map is parsed).
+pub fn set_present_pages(n: usize) {
+    PRESENT_PAGES.store(n, Ordering::Release);
+}
+
+/// Present (usable RAM) pages: nr_descs() if the boot never published a
+/// count (contiguous-map fallback), else the sum of usable regions.
+#[inline]
+pub fn present_pages() -> usize {
+    match PRESENT_PAGES.load(Ordering::Acquire) {
+        0 => nr_descs(),
+        n => n,
+    }
+}
+
+/// Mark every PFN in the descriptor span that is NOT covered by a usable
+/// RAM region as Reserved (fake-OOM family, the phantom-drift mechanism):
+/// descriptors are indexed linearly over the whole PFN span, so the
+/// descriptors backing MMIO holes / firmware gaps would otherwise sit at
+/// power-on zero — refcount 0, no flags — and the MEMLEDGER census would
+/// count them as free pages (b126: 524,804 phantom "free" pages inside
+/// the 3G..4G hole alone), while the free-path tripwires would not stop
+/// a forged free of them.
 ///
-/// MAX_PAGES must match the actual physical memory size configured.
-/// This is used for vmemmap bounds checking in pfn_to_page().
-///
-/// Note: MEM_MAP array size = MAX_PAGES * sizeof(Page) = MAX_PAGES * 64 bytes
-/// - 16384 pages = 64MB physical memory = 1MB descriptors
-/// - 32768 pages = 128MB physical memory = 2MB descriptors
-/// - 65536 pages = 256MB physical memory = 4MB descriptors
-/// - 262144 pages = 1GB physical memory = 16MB descriptors
-/// - 524288 pages = 2GB physical memory = 32MB descriptors
-///
-/// CRITICAL: This must match PHYS_MEMORY_SIZE for vmemmap bounds checking to work correctly.
-/// If they don't match, pfn_to_page() may return invalid pointers for PFNs beyond actual memory.
-pub const MAX_PAGES: usize = PHYS_MEMORY_SIZE / PAGE_SIZE;
+/// A page is RAM only if FULLY contained in one region (partial edge
+/// pages of unaligned regions count as non-RAM, like Linux marking
+/// partial e820 pages reserved).
+pub fn mark_non_ram_pages(regions: &[crate::cmdline::MemoryRegion]) {
+    use crate::mm::PAGE_SIZE;
+    let start_pfn = MIN_PFN;
+    let end_pfn = MIN_PFN + nr_descs();
+
+    // Regions sorted by base (e820/FDT maps come sorted; sort again —
+    // n <= 64, insertion sort is fine).
+    let mut sorted: alloc::vec::Vec<(usize, usize)> =
+        regions.iter().map(|r| (r.base, r.base + r.size)).collect();
+    sorted.sort_unstable();
+
+    let is_ram = |pfn: usize| -> bool {
+        let pa = pfn * PAGE_SIZE;
+        let pe = pa + PAGE_SIZE;
+        sorted
+            .iter()
+            .any(|&(b, e)| pa >= b && pe <= e)
+    };
+
+    let mut marked = 0usize;
+    for pfn in start_pfn..end_pfn {
+        if is_ram(pfn) {
+            continue;
+        }
+        let page = pfn_to_page(pfn);
+        if !page.is_null() {
+            // SAFETY: boot-time single-threaded init; descriptor in span.
+            unsafe {
+                (*page).init_reserved();
+            }
+            marked += 1;
+        }
+    }
+    if marked > 0 {
+        crate::println!(
+            "page_desc: marked {} non-RAM hole pages Reserved ({} MB)",
+            marked,
+            marked * PAGE_SIZE / (1024 * 1024)
+        );
+    }
+}
 
 /// Whether page array is initialized
 static MEM_MAP_INIT: AtomicUsize = AtomicUsize::new(0);
@@ -980,7 +1115,7 @@ pub fn pfn_to_page(pfn: PhysFrameNr) -> *const Page {
     }
 
     let idx = pfn - base_pfn;
-    if idx >= MAX_PAGES {
+    if idx >= nr_descs() {
         return core::ptr::null();
     }
 
@@ -1000,7 +1135,7 @@ pub fn pfn_to_page_mut(pfn: PhysFrameNr) -> *mut Page {
     }
 
     let idx = pfn - base_pfn;
-    if idx >= MAX_PAGES {
+    if idx >= nr_descs() {
         return core::ptr::null_mut();
     }
 
@@ -1051,10 +1186,10 @@ pub fn frame_to_page_mut(frame: PhysFrame) -> *mut Page {
 
 // ========== Helper functions ==========
 
-/// Get total number of pages
+/// Get total number of pages (runtime descriptor count)
 #[inline]
 pub fn total_pages() -> usize {
-    MAX_PAGES
+    nr_descs()
 }
 
 /// Get Page structure size (bytes)
@@ -1091,14 +1226,10 @@ pub fn page_desc_stats() -> PageDescStats {
     // vmemmap pages past the real RAM are unmapped, and the dfx periodic
     // dump walked straight into them (KERNPANIC pfault from
     // Page::refcount — the diagnostic killed the box it was diagnosing).
-    let live_pages = {
-        let size = crate::mm::layout::phys_memory_size();
-        if size == 0 || size > PHYS_MEMORY_SIZE {
-            MAX_PAGES
-        } else {
-            size / PAGE_SIZE
-        }
-    };
+    // Runtime descriptor count (discovered memory map; config fallback
+    // before init). F12: never scan past the descriptors vmemmap actually
+    // mapped — the min() below is the dereference-safety bound.
+    let live_pages = nr_descs();
     let mut stats = PageDescStats {
         total_pages: live_pages,
         ..Default::default()

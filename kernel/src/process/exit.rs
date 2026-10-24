@@ -345,6 +345,11 @@ pub fn sweep_dead_threads(leader: *mut Task) {
         // SAFETY: m came from the leader's dead list (DEAD, hash-removed,
         // final switch-out completed).
         unsafe { free_dead_member(m) };
+        // Perf gate (2026-10-20): the sweep frees stacks, PtRegs and Arc
+        // references per member under the OH thread-churn load; without
+        // a yield point a long sweep monopolizes this CPU (steady
+        // WAKE-STRANDED family). Safe point: no locks held here.
+        crate::sched::cond_resched();
     }
 }
 
@@ -506,6 +511,77 @@ pub fn do_exit(exit_code: i32) -> ! {
     // SAFETY: current is the raw pointer to the calling task, guaranteed valid since
     // we are the currently executing task and will never return from this function.
     unsafe {
+        // sc129 (Session P): the OH app children's FFRT worker threads are
+        // CREATED (clone CLONE_THREAD succeeds, census pid logged) and then
+        // exit instantly and CLEANLY (process survives) — the worker's own
+        // fail-latch dies with it. Print the exiting THREAD's fail tail
+        // here (leader exits excluded — those are whole-process exits with
+        // their own forensics). Budget 12.
+        if !((*current).pid() == (*current).tgid()) {
+            use core::fmt::Write;
+            let mut s = alloc::string::String::new();
+            {
+                let cur8 =
+                    (*current).last_fails_cur.load(core::sync::atomic::Ordering::Relaxed);
+                for k in 0..8 {
+                    let i = (cur8 + 8 - 1 - k) % 8; // newest first
+                    let v = (*current).last_fails[i].load(core::sync::atomic::Ordering::Relaxed);
+                    if v != 0 {
+                        // sc135 (Session Q): a0/a1 name the failing call's
+                        // leading args (prctl option et al).
+                        let a0 = (*current).last_fails_a0[i]
+                            .load(core::sync::atomic::Ordering::Relaxed);
+                        let a1 = (*current).last_fails_a1[i]
+                            .load(core::sync::atomic::Ordering::Relaxed);
+                        let _ = write!(
+                            s,
+                            " nr{}=-{} a0={:#x} a1={:#x}",
+                            v & 0xffff,
+                            v >> 16,
+                            a0,
+                            a1
+                        );
+                    }
+                }
+            }
+            // sc131 (Session P): the FFRT worker batch exits CLEANLY with
+            // ZERO failing syscalls — the fails-only print was silent for
+            // exactly the threads we hunt. Always print (threads only),
+            // now with the ALL-calls ring (96 since sc135, newest first)
+            // so the worker's whole short life is visible.
+            let mut c = alloc::string::String::new();
+            {
+                const RL: usize = crate::process::task::LAST_CALLS_LEN;
+                let cur12 =
+                    (*current).last_calls_cur.load(core::sync::atomic::Ordering::Relaxed);
+                for k in 0..RL {
+                    let i = (cur12 + RL - 1 - k) % RL; // newest first
+                    let v = (*current).last_calls[i].load(core::sync::atomic::Ordering::Relaxed);
+                    if v != 0 {
+                        let _ = write!(c, " {}", v);
+                    }
+                }
+            }
+            static NW: core::sync::atomic::AtomicUsize =
+                core::sync::atomic::AtomicUsize::new(0);
+            if NW.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 80 {
+                let nc = core::str::from_utf8((*current).comm())
+                    .unwrap_or("")
+                    .trim_end_matches('\0');
+                let lc = core::str::from_utf8((*(*current).group_leader_ptr()).comm())
+                    .unwrap_or("")
+                    .trim_end_matches('\0');
+                crate::pr_warn!(
+                    "thead-exit: tid {} comm='{}' leader='{}' code={} calls:{} fails:{}",
+                    (*current).pid(),
+                    nc,
+                    lc,
+                    exit_code,
+                    c,
+                    s
+                );
+            }
+        }
         // Linux discipline: PF_EXITING is do_exit's FIRST store, so every
         // other subsystem (the scheduler's R56/R57 harvest-steal machinery
         // in particular) can refuse to "rescue" a task whose kernel stack
@@ -582,6 +658,20 @@ pub fn do_exit(exit_code: i32) -> ! {
         // ===== Core dump (P1) =====
         // A negative exit code encodes death by signal; the core-dumping
         // signals get a core file written BEFORE any resource is torn
+        // ===== Binder pool reaping =====
+        // Threads killed by a signal never reach BINDER_THREAD_EXIT;
+        // without this their pool entries live forever, the spawner's
+        // threads.len() gate counts corpses and never replenishes, and
+        // the process's clients stall (b92: samgr proc todo depth 13,
+        // hdf_devhost waiters parked 162s). Cleanly-exiting IPC threads
+        // also route through the same reaper via the ioctl.
+        crate::ipc::binder::binder_task_died(
+            current_pid,
+            (*current).tgid(),
+            (*current).ns_pid_local(),
+        );
+
+        // ===== Core dump (P1) =====
         // down. Runs in the dying task's context (its cwd/fdtable/mm are
         // still intact). This is the single funnel for both the signal
         // default-action path (handle_default_signal -> do_exit_group)
@@ -696,34 +786,25 @@ pub fn do_exit(exit_code: i32) -> ! {
         crate::sched::cgroup::cgroup_exit(current);
 
         // ===== exit_mm: drop THIS task's mm reference =====
-        // Shared-mm teardown rules:
-        // - shm detach: only the LAST reference holder (threads must not
-        //   each decrement nattch).
+        // Linux exit_mm discipline:
+        // - shm detach (nattch) runs inside MmStruct::drop now — exactly
+        //   once per mm, when the LAST Arc reference goes away. The old
+        //   pre-drop `Arc::strong_count == 1` check here was racy against
+        //   walker-held clones (ptrace/OOM/rmap) and against concurrent
+        //   sibling exits (double detach / missed detach).
         // - satp switch to the kernel root page table: EVERY dying task on
         //   a user page table, last or not. After clear_child_tid/robust
         //   list nothing touches user memory, and a dying group member
         //   holding the last reference FREES the page tables while this
         //   task may still be spinning in wait_for_thread_group_death on
         //   another CPU — running on a freed root is the ARCH-H4 fault.
-        // is_last must be decided BEFORE any Arc clone: reading the count
-        // through address_space_arc() counts the temporary too, so a
-        // forked child — sole owner of its copied mm — read 2, looked
-        // non-last, and skipped the shm detach below (one nattch leak per
-        // forked child inheriting a shm VMA; LTP shmat01).
-        let is_last = (*current).address_space_strong_count() == Some(1);
-        if let Some(as_arc) = (*current).address_space_arc() {
-            if is_last {
-                // Iterate VMAs to detach shared memory segments (decrement nattch)
-                let vma_mgr = as_arc.vma_read();
-                for vma in vma_mgr.iter() {
-                    if vma.vma_type() == crate::mm::vma::VmaType::SharedMemory {
-                        let shmid = vma.file_fd();
-                        if shmid >= 0 {
-                            crate::ipc::sysv_shm::shm_detach_vma(shmid);
-                        }
-                    }
-                }
-            }
+        // - set_address_space(None) swaps the slot under the mm-slot lock
+        //   and drops our Arc after it; if it is the last reference the
+        //   teardown (grace wait + PT free + VMA release) runs in THIS
+        //   context, after the satp switch. SysV shm detach (nattch) runs
+        //   inside MmStruct::drop — exactly once per mm, which subsumes
+        //   the old strong_count==1 pre-check here (LTP shmat01 family).
+        if (*current).address_space_arc().is_some() {
             let kernel_ppn = crate::arch::mm::mmu_init::root_page_table_ppn();
             let current_ppn = crate::arch::mm::read_satp() as u64 & 0xF_FFFF_FFFF_FFFF;
             if current_ppn != kernel_ppn {
@@ -833,7 +914,16 @@ pub fn do_exit(exit_code: i32) -> ! {
             crate::interrupt::preempt::preempt_count_sub(1);
 
             // ===== do_task_dead: Final schedule, never returns =====
-            crate::sched::schedule();
+            // sc186/sc189 (session R eighth leg): the plain schedule()
+            // could be repicked/refused (a racing wake/heal re-links the
+            // exiting task; __schedule's same-task repick fast path then
+            // returns without switching) — the wfi park loop below would
+            // strand this CPU forever with the slot still naming the dead
+            // task and its leaked preempt bits uncleared (PREEMPT-LEAK
+            // pc=0x10000 rip=wfi+5, 10+ min, twice reproduced).
+            // schedule_dead_never_returns() re-asserts DEAD + unlinks +
+            // clears leaked preempt bits until a real context switch.
+            crate::sched::schedule_dead_never_returns();
 
             loop {
                 // SAFETY: `wfi` is a plain hint instruction with no side effects.
@@ -885,7 +975,11 @@ pub fn do_exit(exit_code: i32) -> ! {
         crate::interrupt::preempt::preempt_count_sub(1);
 
         // ===== do_task_dead: Final schedule, never returns =====
-        crate::sched::schedule();
+        // sc186/sc189: see the non-leader tail above — the terminal
+        // deschedule re-asserts ZOMBIE/DEAD + unlink + preempt-bit clear
+        // until a real context switch happens (the plain schedule() could
+        // be repicked/refused and strand this CPU in the wfi loop).
+        crate::sched::schedule_dead_never_returns();
 
         loop {
             // SAFETY: `wfi` is a plain hint instruction with no side effects.
@@ -1078,6 +1172,18 @@ unsafe fn reparent_children_to_init(dying: *mut Task) {
         // child could observe the orphaning).
         let pdeath = (*child).pdeath_signal;
         if pdeath != 0 {
+            // OH bring-up forensics: the *_host services all die of a
+            // kernel-origin SIGHUP; this print names pdeathsig as the
+            // source (or rules it out) directly on the console.
+            static PDEATH_TRACE_N: core::sync::atomic::AtomicUsize =
+                core::sync::atomic::AtomicUsize::new(0);
+            if PDEATH_TRACE_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 100 {
+                crate::pr_info!(
+                    "pdeath: pid {} tgid {} gets sig {} (parent pid {} tgid {} dying)",
+                    (*child).pid(), (*child).tgid(), pdeath,
+                    (*dying).pid(), (*dying).tgid()
+                );
+            }
             let _ = crate::signal::send_signal((*child).pid(), pdeath as i32);
         }
 
@@ -1278,11 +1384,14 @@ pub fn do_wait(pid: i32, status_ptr: *mut i32, options: i32) -> Result<Pid, i32>
                 let raw_exit = child.exit_code();
 
                 // Encode exit status per waitpid ABI:
-                // - Normal exit: status = (exit_code & 0xFF) << 8  (WIFEXITED, WEXITSTATUS)
+                // - Normal exit: exit_code IS the wait status already —
+                //   sys_exit/sys_exit_group store `(code & 0xff) << 8`
+                //   (Linux pre-shifts at the syscall boundary), so the
+                //   value is passed through with no second shift.
                 // - Killed by signal: status = |signal_number|      (WIFSIGNALED, WTERMSIG)
                 //   plus WCOREDUMP (0x80) when a core file was written.
                 let status: i32 = if raw_exit >= 0 {
-                    (((raw_exit as u32) & 0xFF) << 8) as i32
+                    (raw_exit as u32 & 0xFFFF) as i32
                 } else {
                     let mut s = (-(raw_exit as i32) as u32 & 0x7F) as i32;
                     if child.core_dumped() {
@@ -1538,7 +1647,8 @@ pub fn do_wait_nonblock(pid: i32, status_ptr: *mut i32, options: i32) -> Result<
             let raw_exit = child.exit_code();
 
             let status: i32 = if raw_exit >= 0 {
-                (((raw_exit as u32) & 0xFF) << 8) as i32
+                // Pre-shifted at sys_exit (Linux ABI) — pass through.
+                (raw_exit as u32 & 0xFFFF) as i32
             } else {
                 let mut s = (-(raw_exit as i32) as u32 & 0x7F) as i32;
                 if child.core_dumped() {
@@ -1702,7 +1812,10 @@ pub fn do_waitid(
                     let raw_exit = child.exit_code();
                     let mut was_killed = false;
                     if raw_exit >= 0 {
-                        result_code = raw_exit as i32;
+                        // si_status is the raw 0-255 exit code (Linux
+                        // WEXITSTATUS semantics); sys_exit pre-shifted it
+                        // into bits 8-15, shift back down here.
+                        result_code = ((raw_exit as u32) >> 8) as i32;
                     } else {
                         result_code = (-raw_exit) as i32;
                         was_killed = true;

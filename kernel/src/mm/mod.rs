@@ -17,6 +17,8 @@ pub mod meminfo;
 pub mod mm_struct;
 pub mod memblock;
 pub mod zone;
+/// Kernel VM statistics (the counters behind /proc/vmstat).
+pub mod vmstat;
 pub mod pglist;
 pub mod page_alloc;
 pub mod rmap;
@@ -28,6 +30,8 @@ pub mod hugepage;
 pub mod vmemmap;
 pub mod swap;
 pub mod compact;
+pub mod deferred_free;
+pub mod small_alloc;
 pub mod vdso;
 
 // pcp.rs (per-CPU pages) REMOVED (wave-6, review 4.6 / batch-4 S3): the
@@ -193,6 +197,7 @@ pub const USER_VIRT_BASE: usize = 0x0000_0000_1000_0000;
 pub const USER_VIRT_TOP: usize = 0x0000_0000_7fff_ffff;
 
 pub use allocator::init_heap;
+pub use buddy_allocator::init_heap_sized;
 pub use page_desc::{init_mem_map, pfn_to_page, pfn_to_page_mut, page_to_pfn, pfn_valid, phys_valid};
 pub use slab::{kmalloc, kfree, kzalloc, init_slab, slab_stats, slab_region, is_slab_initialized};
 pub use meminfo::{
@@ -200,6 +205,7 @@ pub use meminfo::{
     is_memory_low, should_trigger_oom, MemoryInfo, MemorySummary,
 };
 pub use buddy_allocator::buddy_stats;
+pub use buddy_allocator::buddy_free_census_lockfree;
 pub use page_desc::page_desc_stats;
 pub use memblock::{
     memblock_init, memblock_add, memblock_reserve, memblock_reserve_nomap,

@@ -215,7 +215,14 @@ fn try_expand_stack(
     // SAFETY: root_ppn is a valid page table root, fault_addr is page-aligned,
     // phys_addr is a freshly allocated physical page, and pte_flags are well-formed.
     unsafe {
-        map_page(root_ppn, fault_addr, phys_addr, pte_flags);
+        if !map_page(root_ppn, fault_addr, phys_addr, pte_flags) {
+            // PT allocation failure (fake-OOM family): free the data
+            // page, deliver OOM — the trap layer SIGKILLs the user task
+            // (Linux pagefault-OOM semantics; the old path panicked the
+            // kernel here).
+            crate::mm::page_alloc::free_page(phys_addr.bits() as usize);
+            return MmFaultResult::OutOfMemory;
+        }
 
         // Address-specific TLB flush
         let vaddr = fault_addr.bits();
@@ -262,6 +269,65 @@ fn try_expand_stack(
     addr_space.add_rss(1);
 
     MmFaultResult::Handled
+}
+
+// ==================== filemap_fault (page-cache mapping, riscv64 port) ====================
+
+/// Pin the page-cache frame for one page-shaped file offset, populating
+/// the cache on a miss through the ext4 read machinery (the fs-side
+/// readahead/fault-around detector warms the surrounding window in the
+/// same device round trips a read_at would have used). x86_64 twin (the
+/// session-23 fake-OOM fix); the riscv64 MAP_PRIVATE arm adopts the same
+/// protocol so file demand faults stop allocating one unreclaimable
+/// private copy per fault (the GNOME-image fake-OOM family).
+///
+/// Returns the PINNED physical address for direct mapping. The pin (plus
+/// the descriptor `get_page` the map path takes) is owned by the PTE for
+/// its mapping lifetime — see `cow_flags::PCACHE`.
+fn filemap_pin_cache_page(
+    file: &crate::fs::file::File,
+    file_offset: usize,
+    effective_size: usize,
+    hole_as_zero: bool,
+) -> Option<u64> {
+    if file_offset >= effective_size {
+        return None;
+    }
+    if !crate::fs::ext4::file::is_ext4_file(file) {
+        return None;
+    }
+    // SAFETY: inode cell written at open time, read-only afterwards.
+    let inode = unsafe { &*file.inode.get() }.as_ref()?;
+    let (fs_id, ino) = (inode.fs_id, inode.ino as u64);
+    let page_index = (file_offset / PAGE_SIZE_USIZE) as u64;
+    let cache = crate::fs::page_cache::get_page_cache();
+    if let Some(phys) = cache.get_phys(fs_id, ino, page_index) {
+        return Some(phys);
+    }
+    // Miss: warm the cache (ReadDst::Discard — no bounce copy), then pin.
+    // Holes never enter the page cache through the READ path (the fill
+    // skips unallocated blocks and zero-fills the destination in place),
+    // so populate can "succeed" without the page existing. For the
+    // hole_as_zero arm (SHARED mappings, session 25) that must not fall
+    // back to a private zero copy — mapper incoherence, nothing persists:
+    // insert an explicit ZERO page into the cache and alias THAT (x86_64
+    // twin). The flush path allocates the on-disk block at msync/fsync
+    // time. Private arms keep the private-copy fill.
+    let populated =
+        crate::fs::ext4::file::ext4_fault_populate_cache(file, file_offset as u64);
+    if populated {
+        if let Some(phys) = cache.get_phys(fs_id, ino, page_index) {
+            return Some(phys);
+        }
+    }
+    if !hole_as_zero {
+        return None;
+    }
+    // SAFETY: same read-only inode resolution as above.
+    let inode = unsafe { &*file.inode.get() }.as_ref()?;
+    static ZERO_PAGE: [u8; 4096] = [0; 4096];
+    cache.insert(inode.fs_id, inode.ino as u64, page_index, 0, &ZERO_PAGE);
+    cache.get_phys(fs_id, ino, page_index)
 }
 
 // ==================== Main Fault Handler ====================
@@ -315,9 +381,17 @@ pub fn handle_mm_fault(
     // Check if page is already mapped
     // SAFETY: root_ppn is the address space's valid root page table PPN.
     // PageTableWalker::walk only reads page table entries.
+    // R-WRITESTORM-2 (x86_64 twin): a V|U leaf with NO R/W/X bits is a
+    // PROT_NONE marker from mprotect(prot==0) (Sv39 keeps V set). Counting
+    // it as "already mapped" sent the fault into the permission check,
+    // which sees no R/W/X and kills the task without consulting the
+    // covering VMA. Markers now fall through to the VMA layer, which
+    // re-presents the leaf when the VMA grants the access.
     let already_mapped = unsafe {
         PageTableWalker::walk(root_ppn, fault_addr.bits() as u64).map_or(false, |(_ppn, bits)| {
-            pte_counts_as_mapped(bits, fault_addr.bits() as u64)
+            !(pte_counts_as_mapped(bits, fault_addr.bits() as u64)
+              && (bits & (PageTableEntry::R | PageTableEntry::W | PageTableEntry::X)) == 0
+              && (bits & PageTableEntry::V) != 0)
         })
     };
 
@@ -419,6 +493,10 @@ pub fn handle_mm_fault(
     let vma_file_fd = vma.file_fd();
     let vma_file_size = vma.file_size();
     let vma_offset = vma.offset();
+    // sc181: bounds for the anonymous fault-around window (see the tail
+    // and anon_faultaround_forward).
+    let vma_start = vma.start().as_usize();
+    let vma_end = vma.end().as_usize();
 
     // Verify permissions
     let is_write = flags & FaultFlags::WRITE != 0;
@@ -433,6 +511,77 @@ pub fn handle_mm_fault(
     }
     if is_read && !vma_flags.is_readable() {
         return MmFaultResult::PermissionDenied;
+    }
+
+    // R-WRITESTORM-2 (x86_64 twin): if the leaf is a PROT_NONE marker
+    // (V|U, no R/W/X, PPN preserved) and the covering VMA grants this
+    // access, RE-PRESENT the leaf with the VMA's permissions — preserving
+    // the PPN and the COW software bit (W deferred to the COW fault,
+    // INV-COW-1). Linux parity: a fault under a VMA that grants the access
+    // must succeed regardless of the region's mprotect history; the stale
+    // marker is advisory PTE state, not a protection decision.
+    {
+        let page_base = VirtAddr::new(fault_addr.bits() & !0xFFF);
+        if let Some(raw) = read_pte_raw(root_ppn, page_base) {
+            if is_protnone_marker(raw) {
+                let mut flags = PageTableEntry::V | PageTableEntry::U
+                    | PageTableEntry::A | PageTableEntry::D;
+                if vma_flags.is_readable() {
+                    flags |= PageTableEntry::R;
+                }
+                if vma_flags.is_writable() {
+                    flags |= PageTableEntry::W | PageTableEntry::R; // W requires R
+                }
+                if vma_flags.is_executable() {
+                    flags |= PageTableEntry::X;
+                }
+                let cow_bit = raw & (1 << 8); // COW software bit
+                if cow_bit != 0 {
+                    flags |= cow_bit;
+                    flags &= !PageTableEntry::W;
+                }
+                // PCACHE (RSW bit 9, filemap_fault port): the marker hides
+                // a pinned page-cache frame — the pin ownership must
+                // survive the re-present (else the later unmap leaks it).
+                // A PRIVATE cache leaf never gains W in place: a W-upgrade
+                // diverts the first write through COW like every other
+                // private file page (Linux writenotify; x86_64 twin in
+                // mprotect_pte_range). A SHARED cache leaf (PCACHE with no
+                // COW — see cow_flags::pte_is_shared_cache; Sv39 has no
+                // third RSW bit, bit 10 is the PPN field) keeps W — its
+                // stores must land in the cache frame (session 25).
+                let pcache_bit = raw & super::mm_ops::cow_flags::PCACHE;
+                if pcache_bit != 0 {
+                    flags |= pcache_bit;
+                    if flags & PageTableEntry::W != 0
+                        && !super::mm_ops::cow_flags::pte_is_shared_cache(raw)
+                    {
+                        flags |= 1 << 8; // force COW
+                        flags &= !PageTableEntry::W;
+                    }
+                }
+                let _pte_guard =
+                    crate::arch::mm::mm_ops::PTE_MODIFY_LOCK.lock_irqsave();
+                if let Some(now) = read_pte_raw(root_ppn, page_base) {
+                    if is_protnone_marker(now) {
+                        let new_pte = (now & !0x3FF) | flags;
+                        write_pte_raw(root_ppn, page_base, new_pte);
+                        // SAFETY: sfence.vma for this address; kernel ctx.
+                        unsafe {
+                            let va = page_base.bits();
+                            core::arch::asm!(
+                                "fence",
+                                "sfence.vma {0}, zero",
+                                "fence",
+                                in(reg) va,
+                                options(nostack, preserves_flags)
+                            );
+                        }
+                        return MmFaultResult::Handled;
+                    }
+                }
+            }
+        }
     }
 
     crate::pr_debug!("pagefault: map new page at {:#x}, type={:?}", fault_addr.bits(), vma_type);
@@ -474,45 +623,154 @@ pub fn handle_mm_fault(
     // below. (LTP execl01..execveat02: the child re-mmaps the IPC
     // results file after exec; with private copies the parent never saw
     // the child's TPASS bits and TBROK'd "Test haven't reported
-    // results".) COW-exemption on fork already keys off
-    // VmaFlags::SHARED regardless of VmaType, so aliased frames inherit
-    // as-is; the pin taken by get_phys keeps the frame unevictable for
-    // the mapping's lifetime (see shared_file_fault_page).
-    let shared_alias_phys: Option<u64> = if vma_type == VmaType::FileBacked
-        && vma_flags.is_shared()
+    // results".)
+    //
+    // Session 25 (writeback coherence): ext4 files migrate onto the
+    // PCACHE protocol — the SAME pin the private arm takes (get_phys /
+    // Discard-warm via filemap_pin_cache_page), released at unmap by the
+    // PTE's PCACHE bit. This retires the old PERMANENT pin (alias frames
+    // used to stay unevictable forever, bounding memory by every file
+    // ever shared-mapped instead of by live mappings), fixes write(2)
+    // divergence (the write path now updates pinned frames in place
+    // instead of invalidating the inode cache — a stale invalidated
+    // entry served the next fault from DISK, splitting mappers from the
+    // still-live alias frame), and gives the mapping W-through + dirty
+    // + msync/fsync persistence (stores land in the frame; the
+    // conservative dirty-at-install mark makes sync flush it). Non-ext4
+    // files keep the legacy permanent-pin alias.
+    let (shared_alias_phys, shared_pcache): (Option<u64>, bool) =
+        if vma_type == VmaType::FileBacked && vma_flags.is_shared() {
+            let file = addr_space
+                .get_vma_file(
+                    addr_space
+                        .vma_read()
+                        .find(page_virt_addr)
+                        .map(|v| v.start().as_usize())
+                        .unwrap_or(0),
+                )
+                .or_else(|| {
+                    if vma_file_fd >= 0 {
+                        unsafe { crate::fs::get_file_fd(vma_file_fd as usize) }
+                    } else {
+                        None
+                    }
+                });
+            let vma_start = addr_space
+                .vma_read()
+                .find(page_virt_addr)
+                .map(|v| v.start().as_usize());
+            match (file, vma_start) {
+                (Some(f), Some(vs)) => {
+                    let file_offset = vma_offset + (page_virt_addr.as_usize() - vs);
+                    if crate::fs::ext4::file::is_ext4_file(f.as_ref()) {
+                        // Effective size: CURRENT inode size (a file grown
+                        // by write(2) after the mmap must serve its new
+                        // pages), the mmap-time snapshot as fallback —
+                        // same rule as the private arm.
+                        let effective_size = unsafe { &*f.inode.get() }
+                            .as_ref()
+                            .map(|i| i.get_size())
+                            .unwrap_or(vma_file_size) as usize;
+                        match filemap_pin_cache_page(f.as_ref(), file_offset, effective_size, true)
+                        {
+                            Some(phys) => {
+                                // Conservative v1 dirty mark for a W
+                                // mapping (x86_64 twin): the store may
+                                // never come; flushing an unwritten page
+                                // is harmless I/O.
+                                if vma_flags.is_writable() {
+                                    if let Some(inode) =
+                                        unsafe { &*f.inode.get() }.as_ref()
+                                    {
+                                        crate::fs::page_cache::get_page_cache().mark_dirty(
+                                            inode.fs_id,
+                                            inode.ino as u64,
+                                            (file_offset / PAGE_SIZE_USIZE) as u64,
+                                        );
+                                    }
+                                }
+                                (Some(phys), true)
+                            }
+                            // Hole/populate failure: fall to the private
+                            // copy below (pre-existing behavior).
+                            None => (None, false),
+                        }
+                    } else {
+                        // Legacy non-ext4 alias: permanent pin, unchanged.
+                        match crate::fs::page_cache::shared_file_fault_page(
+                            &f,
+                            file_offset as u64,
+                        ) {
+                            Some(p) => (Some(p), false),
+                            None => (None, false),
+                        }
+                    }
+                }
+                _ => (None, false),
+            }
+        } else {
+            (None, false)
+        };
+
+    // MAP_PRIVATE file read/exec fault (filemap_fault port of the x86_64
+    // session-23 fix): pin the PAGE-CACHE frame and map it directly,
+    // read-only — one resident copy per file page shared by every mapper
+    // and refault, reclaimable the moment the last mapping drops its pin.
+    // The old path allocated an EXCLUSIVE private copy per fault and left
+    // it with no page-descriptor state — the fake-OOM drainer (session-22
+    // attribution; the GNOME riscv64 image's OOM-at-342MB/2G is the same
+    // family). Writable private VMAs get the COW bit instead of W (Linux
+    // writenotify/do_read_fault): the first write COWs a private copy in
+    // handle_cow_fault, which also drops this mapping's pin. Write faults
+    // and non-ext4 files/holes keep the private-copy fill below (now with
+    // proper page bookkeeping).
+    let private_cache_phys: Option<u64> = if vma_type == VmaType::FileBacked
+        && !vma_flags.is_shared()
+        && !is_write
     {
-        let file = addr_space
-            .get_vma_file(
-                addr_space
-                    .vma_read()
-                    .find(page_virt_addr)
-                    .map(|v| v.start().as_usize())
-                    .unwrap_or(0),
-            )
-            .or_else(|| {
-                if vma_file_fd >= 0 {
-                    unsafe { crate::fs::get_file_fd(vma_file_fd as usize) }
+        if let Some(aspace) = crate::sched::current().and_then(|t| t.address_space()) {
+            // R73: scope the VMA read guard to the lookup itself; the file
+            // pin table and the populate read below stay OUTSIDE it (the
+            // pin may do file I/O through the ext4 machinery — never hold
+            // a guard across it; same shape as the fill arm below and the
+            // x86_64 twin).
+            let vma_start_opt = {
+                let vmas = aspace.vma_read();
+                vmas.find(page_virt_addr).map(|v| v.start().as_usize())
+            };
+            if let Some(vs) = vma_start_opt {
+                let file = aspace.get_vma_file(vs);
+                // Effective size: CURRENT inode size (a file grown by
+                // write(2) after the mmap must serve its new pages), the
+                // mmap-time snapshot as fallback — same rule as the fill
+                // arm below.
+                let effective_size = file
+                    .as_ref()
+                    .and_then(|f| {
+                        // SAFETY: inode cell written at open time; read-only.
+                        let inode_opt = unsafe { &*f.inode.get() };
+                        inode_opt.as_ref().map(|i| i.get_size())
+                    })
+                    .unwrap_or(vma_file_size) as usize;
+                if let Some(f) = file {
+                    let file_offset = vma_offset + (page_virt_addr.as_usize() - vs);
+                    filemap_pin_cache_page(&f, file_offset, effective_size, false)
                 } else {
                     None
                 }
-            });
-        let vma_start = addr_space
-            .vma_read()
-            .find(page_virt_addr)
-            .map(|v| v.start().as_usize());
-        match (file, vma_start) {
-            (Some(f), Some(vs)) => {
-                let file_offset = vma_offset + (page_virt_addr.as_usize() - vs);
-                crate::fs::page_cache::shared_file_fault_page(&f, file_offset as u64)
+            } else {
+                None
             }
-            _ => None,
+        } else {
+            None
         }
     } else {
         None
     };
 
-    // Allocate new page (skipped when aliasing a shared cache frame)
-    let phys_addr = if let Some(p) = shared_alias_phys {
+    // Allocate new page (skipped when aliasing a shared cache frame or
+    // mapping a pinned private-cache frame)
+    let phys_addr = if let Some(p) = shared_alias_phys.or(private_cache_phys) {
         PhysAddr::new(p)
     } else {
         match alloc_user_phys_page() {
@@ -527,9 +785,10 @@ pub fn handle_mm_fault(
     // Initialize page content based on type
     // SAFETY: page_ptr is from phys_to_virt() on a freshly allocated physical page.
     // The page is PAGE_SIZE bytes and exclusively owned by this fault handler.
-    // (MAP_SHARED aliased cache frames skip this entirely — their content
-    // is the shared page-cache page and must not be reinitialized.)
-    if shared_alias_phys.is_none() {
+    // (MAP_SHARED aliased cache frames and MAP_PRIVATE pinned cache frames
+    // skip this entirely — their content is the shared page-cache page and
+    // must not be reinitialized.)
+    if shared_alias_phys.is_none() && private_cache_phys.is_none() {
     unsafe {
         match vma_type {
             VmaType::Anonymous => {
@@ -636,7 +895,7 @@ pub fn handle_mm_fault(
             }
         }
     }
-    } // shared_alias_phys.is_none()
+    } // shared_alias_phys.is_none() && private_cache_phys.is_none()
 
     // Build page table entry flags
     let mut pte_flags = PageTableEntry::V | PageTableEntry::A | PageTableEntry::D;
@@ -657,6 +916,30 @@ pub fn handle_mm_fault(
     }
     if vma_flags.is_executable() {
         pte_flags |= PageTableEntry::X;
+    }
+    if private_cache_phys.is_some() {
+        // Cache-backed leaf (filemap_fault): NEVER W in place — the frame
+        // is shared with the page cache (and possibly other mappers). A
+        // writable private VMA gets the COW bit and the first write copies
+        // (do_cow_fault parity; x86_64 twin). The PCACHE bit records that
+        // this PTE owns one cache pin (see cow_flags). Session 26: the COW
+        // bit is set on READ-ONLY installs too — "PCACHE set, COW clear"
+        // is the SHARED-leaf predicate (pte_is_shared_cache; Sv39 has no
+        // third software bit), so a private leaf must never present that
+        // combination even before any W-upgrade.
+        pte_flags &= !PageTableEntry::W;
+        pte_flags |= super::mm_ops::cow_flags::COW;
+        pte_flags |= super::mm_ops::cow_flags::PCACHE;
+    }
+    if shared_pcache {
+        // SHARED cache leaf (session 25): W stays granted IN PLACE —
+        // stores land directly in the cache frame (mapper coherence).
+        // The PCACHE bit records the PTE-owned pin (released at unmap).
+        // Deliberately NO COW bit: PCACHE-without-COW is exactly how the
+        // mprotect/marker-represent sites recognize a shared leaf and
+        // keep granting W in place (a COW divert here would detach this
+        // mapping from the file's shared state — see pte_is_shared_cache).
+        pte_flags |= super::mm_ops::cow_flags::PCACHE;
     }
 
     // Map page under the PTE-modify lock and keep it held across the rmap
@@ -681,9 +964,15 @@ pub fn handle_mm_fault(
         drop(_pte_guard);
         // Lost the race: free our exclusively-owned fresh page and let the
         // caller retry — the next entry sees the mapping present.
-        // (A MAP_SHARED cache alias is NOT exclusively owned — its pin
-        // belongs to the page cache; freeing the frame would corrupt it.)
-        if shared_alias_phys.is_none() {
+        // (A cache frame — SHARED PCACHE alias or MAP_PRIVATE pin — is NOT
+        // exclusively owned; the pin belongs to the page cache and is
+        // returned via put_by_key. Only the LEGACY non-ext4 shared alias
+        // keeps its permanent pin, released by nothing here.)
+        if private_cache_phys.is_some() || shared_pcache {
+            super::mm_ops::release_cache_mapping_pin(
+                (phys_addr.bits() >> PAGE_SHIFT) as usize,
+            );
+        } else if shared_alias_phys.is_none() {
             crate::mm::page_alloc::free_page(phys_addr.bits() as usize);
         }
         // R8-4: Handled, not AlreadyMapped — the trap handler maps
@@ -695,7 +984,21 @@ pub fn handle_mm_fault(
     // SAFETY: root_ppn is a valid page table root, fault_addr is page-aligned,
     // phys_addr is a freshly allocated physical page, and pte_flags are well-formed.
     unsafe {
-        map_page(root_ppn, fault_addr, phys_addr, pte_flags);
+        if !map_page(root_ppn, fault_addr, phys_addr, pte_flags) {
+            // PT allocation failure (fake-OOM family): release the data
+            // page, deliver OOM (trap layer SIGKILLs the user task). A
+            // private pin or SHARED PCACHE pin is returned via put_by_key;
+            // only the LEGACY alias's pin is permanent (its frame stays
+            // cache-owned).
+            if private_cache_phys.is_some() || shared_pcache {
+                super::mm_ops::release_cache_mapping_pin(
+                    (phys_addr.bits() >> PAGE_SHIFT) as usize,
+                );
+            } else if shared_alias_phys.is_none() {
+                crate::mm::page_alloc::free_page(phys_addr.bits() as usize);
+            }
+            return MmFaultResult::OutOfMemory;
+        }
 
         // Address-specific TLB flush
         let vaddr = fault_addr.bits();
@@ -728,11 +1031,33 @@ pub fn handle_mm_fault(
                 if shared_alias_phys.is_some() {
                     (*page).get_page();
                     (*page).inc_mapcount();
-                    crate::mm::rmap::page_record_mapping(
-                        unsafe { &*page },
-                        addr_space as *const _ as usize,
-                        fault_addr.bits() as usize,
-                    );
+                    if !shared_pcache {
+                        // Legacy non-ext4 alias only. A PCACHE leaf takes
+                        // NO rmap record: the descriptor's mapping/index
+                        // are the page cache's eviction keys and rmap
+                        // state would corrupt eviction (same discipline
+                        // as the private cache arm; this retires the
+                        // session-24 "unconditional page_record_mapping
+                        // on a cache frame" hazard for ext4).
+                        crate::mm::rmap::page_record_mapping(
+                            unsafe { &*page },
+                            addr_space as *const _ as usize,
+                            fault_addr.bits() as usize,
+                        );
+                    }
+                } else if private_cache_phys.is_some() {
+                    // MAP_PRIVATE pinned cache frame (filemap_fault port):
+                    // one descriptor reference (dropped by the unmap/COW
+                    // put_page) and mapcount visibility. Deliberately NO
+                    // set_index / page_record_mapping / LRU add — the
+                    // descriptor's mapping/index are the page cache's
+                    // eviction keys and the file-LRU membership belongs to
+                    // the cache (page_record_mapping's slot-0 set_index
+                    // would clobber them; the x86_64 twin has the same
+                    // rule). The pin release is keyed off the PTE's PCACHE
+                    // bit at unmap/teardown/COW.
+                    (*page).get_page();
+                    (*page).inc_mapcount();
                 } else {
                 match vma_type {
                     VmaType::Anonymous => {
@@ -767,7 +1092,30 @@ pub fn handle_mm_fault(
                         );
                     }
                     _ => {
-                        // File-backed: rmap not wired yet
+                        // Private file copy (write-fault COW fill on a
+                        // private VMA — do_cow_fault parity; also the
+                        // non-ext4/hole fallbacks). Session 24 (x86_64
+                        // session-23 twin): this arm used to leave the
+                        // page with NO descriptor state ("rmap not wired
+                        // yet") — census-invisible and unreclaimable, the
+                        // fake-OOM drainer's accounting face. An exclusive
+                        // copy IS an anonymous page from reclaim's point
+                        // of view. Device frames keep no state (they
+                        // belong to the device/foreign owners).
+                        if matches!(vma_type, VmaType::FileBacked) {
+                            (*page).set_flag(PageFlag::Anonymous);
+                            (*page).set_flag(PageFlag::SwapBacked);
+                            (*page).set_index(
+                                fault_addr.bits() as usize / (PAGE_SIZE as usize),
+                            );
+                            (*page).inc_mapcount();
+                            crate::mm::rmap::page_record_mapping(
+                                unsafe { &*page },
+                                addr_space as *const _ as usize,
+                                fault_addr.bits() as usize,
+                            );
+                            crate::mm::lru::page_add_anon_lru(unsafe { &*page });
+                        }
                         // SIGILL-stamp (gnome-sigill): record this frame as
                         // a live file-fill page owned by (pid, va) — the
                         // teardown walkers adjudicate frees against the
@@ -822,7 +1170,139 @@ pub fn handle_mm_fault(
     // resident page.
     addr_space.add_rss(1);
 
+    // sc181: forward fault-around for large anonymous VMAs (write faults
+    // only — see anon_faultaround_forward).
+    if vma_type == VmaType::Anonymous
+        && is_write
+        && !vma_flags.is_shared()
+        && vma_end - vma_start >= ANON_FAULTAROUND_MIN_VMA
+    {
+        anon_faultaround_forward(
+            addr_space,
+            root_ppn,
+            (fault_addr.as_usize() | 0xFFF) + 1,
+            vma_end,
+            pte_flags,
+        );
+    }
+
     MmFaultResult::Handled
+}
+
+// ==================== Anonymous Fault-Around (sc181) ====================
+
+/// sc181: forward fault-around window (pages) for anonymous write faults.
+const ANON_FAULTAROUND_PAGES: usize = 32;
+
+/// sc181: minimum VMA size that gets fault-around (small stacks/brk keep
+/// exact one-page semantics).
+const ANON_FAULTAROUND_MIN_VMA: usize = 1024 * 1024;
+
+/// sc181: install a FORWARD window of zero pages after a successful
+/// anonymous write fault.
+///
+/// hilogd's 10MB log ring (and every large arena) touched its pages one
+/// 4KB fault at a time — 2560 full trap/VMA-lookup/alloc/zero/map/rmap/
+/// LRU passes per ring cycle; that is the KILLDUMP stime burn behind the
+/// sc179/sc180 wedge (hilogd.server 91s of kernel time in 16 min, the
+/// VmaManager::find_mut page-by-page attribution). One trap now installs
+/// up to ANON_FAULTAROUND_PAGES pages, cutting the trap count ~32x for
+/// sequential writers.
+///
+/// Gated to stay conservative:
+/// - WRITE faults only (allocation intent; read-first anon patterns keep
+///   exact one-page semantics — mincore03's "untouched mmap reports 0
+///   resident" contract is untouched because NO fault means NO window),
+/// - VMAs >= ANON_FAULTAROUND_MIN_VMA (small stacks/heaps/brk unchanged),
+/// - forward-only, bounded by the VMA end and the window size, and it
+///   STOPS at the first already-mapped page (the sequential-writer model;
+///   a stack fault's forward window hits older frames and exits at once),
+/// - best-effort: an allocation failure or a lost race merely stops the
+///   window — the faulting page itself already succeeded.
+/// Every window page is zero-filled, SwapBacked, rmap/LRU-recorded and
+/// RSS-counted exactly like an individually faulted page (the Anonymous
+/// arm of the single-page path above). `faaround=0` on the kernel
+/// cmdline disables the whole mechanism.
+fn anon_faultaround_forward(
+    addr_space: &AddressSpace,
+    root_ppn: u64,
+    from_page: usize,
+    vma_end: usize,
+    pte_flags: u64,
+) {
+    if crate::cmdline::get_param("faaround").map(|v| v == "0").unwrap_or(false) {
+        return;
+    }
+    let window_end = (from_page + ANON_FAULTAROUND_PAGES * PAGE_SIZE_USIZE).min(vma_end);
+    let mut va = from_page;
+    while va < window_end {
+        // Stop at the first already-mapped page (see the doc comment).
+        if unsafe { PageTableWalker::walk(root_ppn, va as u64) }
+            .map_or(false, |(_p, bits)| pte_counts_as_mapped(bits, va as u64))
+        {
+            return;
+        }
+        let Some(phys) = alloc_user_phys_page() else {
+            return; // pressure: the window is best-effort
+        };
+        // SAFETY: freshly allocated page, exclusively owned here.
+        let page_ptr = phys_to_virt(PhysAddr::new(phys)).bits() as *mut u8;
+        unsafe { core::ptr::write_bytes(page_ptr, 0, PAGE_SIZE_USIZE) };
+
+        let _pte_guard = crate::arch::mm::mm_ops::PTE_MODIFY_LOCK.lock_irqsave();
+        // R7-C3 twin: re-check under the lock — a CLONE_VM sibling may
+        // have installed the page between the lock-free walk and here.
+        if unsafe { PageTableWalker::walk(root_ppn, va as u64) }
+            .map_or(false, |(_p, bits)| pte_counts_as_mapped(bits, va as u64))
+        {
+            drop(_pte_guard);
+            crate::mm::page_alloc::free_page(phys as usize);
+            return;
+        }
+        // SAFETY: root_ppn valid, va page-aligned, phys freshly allocated.
+        if unsafe { !map_page(root_ppn, VirtAddr::new(va as u64), PhysAddr::new(phys), pte_flags) }
+        {
+            drop(_pte_guard);
+            crate::mm::page_alloc::free_page(phys as usize);
+            return; // page-table allocation trouble — stop the window
+        }
+        // Address-specific TLB flush (same discipline as the single-page
+        // path).
+        unsafe {
+            core::arch::asm!(
+                "fence",
+                "sfence.vma {0}, zero",
+                "fence",
+                in(reg) va,
+                options(nostack, preserves_flags)
+            );
+        }
+        // Bookkeeping: the Anonymous arm of the single-page path.
+        {
+            use crate::mm::page_desc::{pfn_to_page_mut, PageFlag};
+            let page_pfn = (phys >> PAGE_SHIFT) as usize;
+            let page = pfn_to_page_mut(page_pfn);
+            if !page.is_null() {
+                // SAFETY: page from pfn_to_page_mut, null-checked; the
+                // frame is exclusively owned until the PTE install above.
+                unsafe {
+                    (*page).set_flag(PageFlag::Anonymous);
+                    (*page).set_flag(PageFlag::SwapBacked);
+                    (*page).set_index(va / PAGE_SIZE_USIZE);
+                    (*page).inc_mapcount();
+                    crate::mm::rmap::page_record_mapping(
+                        unsafe { &*page },
+                        addr_space as *const _ as usize,
+                        va,
+                    );
+                    crate::mm::lru::page_add_anon_lru(unsafe { &*page });
+                }
+            }
+        }
+        drop(_pte_guard);
+        addr_space.add_rss(1);
+        va += PAGE_SIZE_USIZE;
+    }
 }
 
 // ==================== Utility ====================
@@ -875,6 +1355,39 @@ pub fn get_user_phys(root_ppn: u64, vaddr: u64) -> Option<u64> {
 /// Walks the three-level page table and returns the raw bits of the
 /// leaf PTE, even if V=0 (e.g. a swap entry).  Returns None if the
 /// page table walk cannot reach the leaf level.
+/// R-WRITESTORM-2: is this leaf a PROT_NONE marker (V|U set, no R/W/X,
+/// PPN preserved) as written by sys_mprotect for prot==0? The covering
+/// VMA owns the protection decision; the fault layer re-presents the
+/// leaf when the VMA grants the access.
+pub(crate) fn is_protnone_marker(raw: u64) -> bool {
+    (raw & PageTableEntry::V) != 0
+        && (raw & PageTableEntry::U) != 0
+        && (raw & (PageTableEntry::R | PageTableEntry::W | PageTableEntry::X)) == 0
+        && (raw >> 10) != 0 // has a PPN
+}
+
+/// R-WRITESTORM-2: write one 4K leaf PTE (raw bits), same 3-level walk as
+/// read_pte_raw. Caller must hold PTE_MODIFY_LOCK and have resolved the
+/// leaf via read_pte_raw first (upper levels exist).
+pub(crate) fn write_pte_raw(root_ppn: u64, vaddr: VirtAddr, bits: u64) {
+    use super::PAGE_SHIFT;
+    let vpn2 = ((vaddr.bits() >> 30) & 0x1FF) as usize;
+    let vpn1 = ((vaddr.bits() >> 21) & 0x1FF) as usize;
+    let vpn0 = ((vaddr.bits() >> 12) & 0x1FF) as usize;
+    // SAFETY: same walk as read_pte_raw; the leaf exists (the caller just
+    // read it), so intermediate tables are present. Only the leaf changes.
+    unsafe {
+        let root_table = get_page_table_virt(root_ppn << PAGE_SHIFT);
+        let pte2 = (*root_table).get(vpn2);
+        if !pte2.is_valid() { return; }
+        let table1 = get_page_table_virt(pte2.ppn() << PAGE_SHIFT);
+        let pte1 = (*table1).get(vpn1);
+        if !pte1.is_valid() || pte1.is_leaf() { return; }
+        let table0 = get_page_table_virt(pte1.ppn() << PAGE_SHIFT);
+        (*table0).set(vpn0, PageTableEntry::from_bits(bits));
+    }
+}
+
 pub(crate) fn read_pte_raw(root_ppn: u64, vaddr: VirtAddr) -> Option<u64> {
     use super::PAGE_SHIFT;
 
@@ -1033,7 +1546,12 @@ fn handle_swap_fault(
         return MmFaultResult::Handled;
     }
     unsafe {
-        map_page(root_ppn, fault_addr, PhysAddr::new(phys_addr), pte_flags);
+        if !map_page(root_ppn, fault_addr, PhysAddr::new(phys_addr), pte_flags) {
+            // PT allocation failure (fake-OOM family): free the swap-in
+            // page, deliver OOM.
+            crate::mm::page_alloc::free_page(phys_addr as usize);
+            return MmFaultResult::OutOfMemory;
+        }
 
         // TLB flush
         let vaddr = fault_addr.bits();

@@ -117,6 +117,10 @@ pub fn pid_hash_remove(pid: u32) {
         let mut curr = BUCKET_HEAD[idx].load(Ordering::Acquire);
         while !curr.is_null() {
             if (*curr).pid() == pid {
+                // sc82 forensics: record the unlink (thread OR leader) in
+                // the global exit ring — the rwlock-freeze dump replays a
+                // frozen tgid's deaths. No behavior change.
+                crate::sync::futex::note_task_unlink(pid, (*curr).tgid() as u32);
                 // Unlink: write *prev = curr->next.  This only touches the
                 // _previous_ node's next pointer (or the bucket head), not
                 // the removed node itself — safe for concurrent RCU readers

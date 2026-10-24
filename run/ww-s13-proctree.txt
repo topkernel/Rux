@@ -1,0 +1,1 @@
+chain-pids: wrapper=2053720 chain=2053731 hunt=2361200 qemu=2361201 gdb=2361231  # s13 close 02:07, r25 15-point in flight (r24 full clean, 0 WW-HIT r1-r24)

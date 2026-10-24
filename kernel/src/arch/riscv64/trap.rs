@@ -73,6 +73,33 @@ pub fn current_pt_regs() -> *const PtRegs {
     CURRENT_PT_REGS[cpu].load(core::sync::atomic::Ordering::Relaxed) as *const PtRegs
 }
 
+/// Wakewatch: RIP-equivalent (epc) of another CPU's most recent trap
+/// frame, for the TIMER-SOFTIRQ-STALL report. Diagnostic read of a slot
+/// the target CPU owns; races live execution (worst case a torn-but-
+/// bounded value from a frame being built). 0 when no frame is live.
+pub fn pt_regs_rip_for_cpu(cpu: usize) -> u64 {
+    if cpu >= crate::config::MAX_CPUS {
+        return 0;
+    }
+    let p = CURRENT_PT_REGS[cpu].load(core::sync::atomic::Ordering::Relaxed) as *const PtRegs;
+    // High-half bound added with the pa15 lesson (x86_64 twin): user
+    // addresses are canonical too, and this slot can only hold
+    // kernel-stack frames — a low-half value is a torn read, never
+    // deref it.
+    if p.is_null()
+        || (p as u64) < 0xffff_8000_0000_0000
+        || !crate::sched::sched::kernel_ptr_canonical(p as *const u8)
+    {
+        return 0;
+    }
+    // SAFETY: the slot holds either a live trap frame on that CPU's
+    // kernel stack or a stale-but-mapped one; one volatile-ish scalar
+    // read of the epc field cannot fault (the frame page stays mapped
+    // while any task on that stack exists, and the diagnostic consumer
+    // tolerates any value).
+    unsafe { core::ptr::addr_of!((*p).epc).read() }
+}
+
 /// Initialize trap handling
 pub fn init() {
     // SAFETY: stvec and sscratch are supervisor CSRs; writing them at init time is safe
@@ -394,7 +421,13 @@ fn handle_timer_interrupt(regs: &mut PtRegs, cpu: usize) {
         return;
     }
 
-    // 0. CPU-time accounting (Linux account_process_tick): charge this
+    // 0. Per-CPU time accounting for /proc/stat (Linux
+    // account_process_tick): the idle task means the CPU had nothing to
+    // run, otherwise the tick is user time (the timer hit the task in
+    // user mode) or system time (it hit it in kernel mode).
+    crate::fs::procfs::stat::charge_tick(regs.user_mode());
+
+    // 0b. CPU-time accounting (Linux account_process_tick): charge this
     // tick to the interrupted task as user or system time depending on
     // the privilege mode the timer hit. Only user tasks are charged
     // (kthreads are born without an address space).
@@ -406,11 +439,17 @@ fn handle_timer_interrupt(regs: &mut PtRegs, cpu: usize) {
                 use core::sync::atomic::Ordering::Relaxed;
                 if regs.user_mode() {
                     (*task).utime_ticks.fetch_add(1, Relaxed);
+                    crate::dfx::syscost::tick_user();
                 } else {
                     (*task).stime_ticks.fetch_add(1, Relaxed);
+                    crate::dfx::syscost::tick_kern(regs.epc);
                 }
+            } else {
+                crate::dfx::syscost::tick_idle();
             }
         }
+    } else {
+        crate::dfx::syscost::tick_idle();
     }
 
     // 1. Update jiffies
@@ -924,6 +963,19 @@ fn sigsegv_has_handler() -> bool {
         .unwrap_or(false)
 }
 
+/// True when the CURRENT task blocks SIGSEGV (bit 10) — the thread is
+/// inside a SIGSEGV handler (delivery blocks the signal unless
+/// SA_NODEFER) or blocked it via sigprocmask. Linux force_sig_info
+/// semantics: a FORCED signal that is blocked is reset to SIG_DFL — a
+/// synchronous fault on a blocked SIGSEGV kills the task. Unblocking
+/// alone re-enters the handler and faults forever (see the x86_64 twin:
+/// OH's DFX_SignalHandler faulting inside itself starved the machine).
+fn sigsegv_blocked_current() -> bool {
+    crate::sched::current()
+        .map(|t| (*t).sigmask & (1u64 << 10) != 0)
+        .unwrap_or(false)
+}
+
 fn sigbus_has_handler() -> bool {
     crate::sched::current()
         .and_then(|t| unsafe { (*t).signal.as_ref().map(|s| s.get_action(7)) })
@@ -968,6 +1020,14 @@ pub extern "C" fn riscv_bad_user_frame(regs: *mut PtRegs) -> ! {
     }
 }
 
+/// R73: one-shot latch for the KERNPANIC raw dump — mirrors the x86_64
+/// twin. A fault DURING the dump (stack walk past the mapping, tp deref,
+/// frame walk on a wild fp) re-enters the handler; without the latch the
+/// print/read recursion never terminates (the riscv64 unit-test
+/// double-fault family). Second entry prints one marker and halts.
+static KP_DUMP_ENTERED: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
 fn handle_page_fault(regs: &mut PtRegs, access_type: u32) {    use crate::arch::mm::exception::{do_page_fault, MmFaultResult};
 
     let fault_addr = regs.badaddr;
@@ -991,12 +1051,14 @@ fn handle_page_fault(regs: &mut PtRegs, access_type: u32) {    use crate::arch::
                 // Linux semantics: route user-mode faults through normal
                 // signal delivery (force_sig_fault) — an installed
                 // SIGSEGV handler (debuggers, crash catchers, LTP mmap05)
-                // must run. With a handler: pend the signal and RETURN;
-                // do_signal delivers it on the way back to userspace.
-                // Without one: the default action kills here (and avoids
-                // a fault-retry loop when the disposition is SIG_IGN).
+                // must run. With a handler (and SIGSEGV not blocked —
+                // i.e. not already inside that handler): pend the signal
+                // and RETURN; do_signal delivers it on the way back to
+                // userspace. Without one — or with the fault happening
+                // inside the handler itself — the default action kills
+                // here (and avoids a fault-retry loop).
                 let pid = crate::process::current_pid();
-                if sigsegv_has_handler() {
+                if sigsegv_has_handler() && !sigsegv_blocked_current() {
                     let _ = crate::signal::send_signal(pid, crate::signal::Signal::SIGSEGV as i32);
                     // Synchronous fault: deliver despite a blocked mask
                     // (Linux force_sig parity — see force_unblock_current).
@@ -1013,14 +1075,16 @@ fn handle_page_fault(regs: &mut PtRegs, access_type: u32) {    use crate::arch::
             if regs.user_mode() {
                 // Same handler-first routing as Segfault: a PROT_NONE
                 // access with an installed SIGSEGV handler must run it
-                // (LTP mmap05); default disposition kills directly.
+                // (LTP mmap05); a fault inside the (blocked) handler
+                // itself, or the default disposition, kills directly.
                 let pid = crate::process::current_pid();
-                if sigsegv_has_handler() {
+                if sigsegv_has_handler() && !sigsegv_blocked_current() {
                     let _ = crate::signal::send_signal(pid, crate::signal::Signal::SIGSEGV as i32);
                     // Synchronous fault: deliver despite a blocked mask.
                     crate::signal::force_unblock_current(crate::signal::Signal::SIGSEGV as i32);
                     return;
                 }
+                let _ = crate::signal::send_signal(pid, crate::signal::Signal::SIGSEGV as i32);
                 crate::process::exit::do_exit(-(crate::signal::Signal::SIGSEGV as i32));
             }
         }
@@ -1065,15 +1129,63 @@ fn handle_page_fault(regs: &mut PtRegs, access_type: u32) {    use crate::arch::
             }
             // FORENSIC (fake-OOM family): allocator state at the kill moment.
             crate::mm::page_alloc::oom_forensic_dump("pagefault OOM");
-            // Terminate user process via do_exit (properly notifies parent)
+            // fake-OOM family: Linux pagefault_out_of_memory parity — the
+            // global OOM killer (badness-based victim selection,
+            // rate-limited) gets the chance to free the real hog before
+            // this task dies. Retry on true, die on false (struck out or
+            // nothing killable).
             if regs.user_mode() {
-                crate::process::exit::do_exit(-(crate::signal::Signal::SIGKILL as i32));
+                if !crate::mm::oom_kill::fault_oom_kill_or_retry(
+                    crate::process::current_pid(),
+                ) {
+                    // Terminate user process via do_exit (properly notifies parent)
+                    crate::process::exit::do_exit(-(crate::signal::Signal::SIGKILL as i32));
+                }
+                // true: fall through — returning to userspace re-executes
+                // the faulting instruction; the victim's freed pages serve
+                // the retry.
+            } else {
+                // Kernel mode cannot do_exit, and silently re-executing
+                // would livelock. Give the rate-limited global killer the
+                // chance to free memory for the retry; if nothing is
+                // killable there is no memory source left — die loudly
+                // (the x86_64 twin's kernel-mode policy).
+                if !crate::mm::oom_kill::kernel_fault_oom_kill() {
+                    panic!(
+                        "pagefault: OOM in kernel mode at {:#x}, epc={:#x}",
+                        fault_addr, regs.epc
+                    );
+                }
             }
         }
         MmFaultResult::KernelPanic => {
             // R9: print via SBI directly — printk can be wedged on a lock
             // this CPU holds (that is exactly how the earlier wedges lost
             // their diagnostics). Then halt.
+            //
+            // R73 (coordinator's boot.S root cause + the sc195 x86_64
+            // twin): the stack walk below used to read 24 words at sp
+            // assuming "the kernel stack is always mapped" — false for
+            // the boot stack at the image end (window fixed by 77ec1247)
+            // and for any stack-adjacent hole. A fault DURING this dump
+            // re-entered the handler and the print/read recursion never
+            // terminated (the riscv64 unit-test double-fault; on x86_64
+            // the same class wedged sc195's cpu0 for ~855 s). Two guards,
+            // mirroring the x86_64 twin: a re-entrancy latch (second
+            // entry prints one marker and halts) and a bounded walk (the
+            // task's real kernel-stack top; 16K-aligned sp heuristic
+            // otherwise).
+            if KP_DUMP_ENTERED.swap(true, core::sync::atomic::Ordering::Relaxed) {
+                let mut put = |b: u8| crate::console::putchar_no_lock(b);
+                for &b in b"trap: KERNPANIC re-entered during dump; halting\n" {
+                    put(b);
+                }
+                // SAFETY: wfi stalls until the next interrupt; safe in a
+                // halt loop.
+                loop {
+                    unsafe { core::arch::asm!("wfi") };
+                }
+            }
             unsafe {
                 let mut put = |b: u8| crate::console::putchar_no_lock(b);
                 for &b in b"trap: KERNPANIC pfault badaddr=0x" { put(b); }
@@ -1103,16 +1215,27 @@ fn handle_page_fault(regs: &mut PtRegs, access_type: u32) {    use crate::arch::
                 // words above sp — enough frames for wake-path panics
                 // (observed: epc=Task::pid ra=Task::wake_up with a wild
                 // 0xFFFFFFFF task pointer whose origin lived two frames up).
-                // The kernel stack is always mapped; words that happen to
-                // be data are simply ignored during symbolization.
                 // R73: USER-origin faults skip the dump — their sp is a
                 // USER address, and reading it with a direct kernel VA
                 // faults again (nested panic on top of panic; the r72-fire3
-                // KERNPANIC prints tripled exactly this way).
+                // KERNPANIC prints tripled exactly this way). The walk is
+                // also BOUNDED at the task's real kernel-stack top (16K-
+                // aligned sp heuristic when there is no task context):
+                // "the kernel stack is always mapped" is false for the
+                // boot stack at the image end, and a past-top read is the
+                // print/read recursion the KP_DUMP_ENTERED latch above
+                // exists to stop.
                 if regs.kernel_mode() {
+                    let kstack_top: usize = crate::sched::current()
+                        .map(|t| unsafe { (*t).kernel_stack_top() })
+                        .unwrap_or((regs.sp as usize | 0x3fff) + 1);
                     for &b in b"trap: stack:" { put(b); }
                     for i in 0..24usize {
                         let addr = regs.sp as usize + i * 8;
+                        if addr + 8 > kstack_top {
+                            for &b in b" <rest past kernel stack top>\n" { put(b); }
+                            break;
+                        }
                         let v = unsafe { core::ptr::read_volatile(addr as *const usize) };
                         put(b' ');
                         for sh in (0..64).step_by(4).rev() {

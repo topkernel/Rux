@@ -447,6 +447,14 @@ pub const PCIE_ECAM_SIZE: u64 = 0x1000;
 /// boot devices live on bus 0, while devices hot-added behind a
 /// pcie-root-port (U4 rescan) land on bus 1+. Absent functions read
 /// vendor 0xFFFF and are skipped.
+
+/// The arch ECAM base the walker uses (riscv64 virt: 0x30000000; x86_64
+/// q35 MMCONFIG: 0xb0000000). Exposed for BDF derivations from a
+/// function's config-space address (see drm::init_drm).
+pub fn ecam_base() -> u64 {
+    crate::arch::mm::memory_layout::PCIE_ECAM_BASE
+}
+
 pub fn find_ecam_devices(vendor: u16, device_ids: &[u16]) -> alloc::vec::Vec<u64> {
     {
         // Arch ECAM base (riscv64 virt: 0x30000000; x86_64 q35 MMCONFIG:

@@ -19,6 +19,7 @@ use super::page_desc::{
 use super::zone::{Zone, pfn_to_phys};
 use super::rmap::try_to_unmap_migration;
 use super::PAGE_SIZE;
+use alloc::vec::Vec;
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 // ============================================================================
@@ -327,22 +328,30 @@ unsafe fn migrate_page(src_pfn: usize, dst_pfn: usize) -> bool {
     // walk of the cleared PTE returns None (which used to silently skip the
     // remap entirely — see review MM-C2).
     let saved_flags_cell = core::cell::Cell::new(0xD7u64); // V|R|W|U|A|D fallback
+    // mm-teardown vs spinlocks: collect the pinned mm Arcs under the
+    // pid-hash bucket locks (never dropped there — a last-reference drop
+    // runs the schedulable teardown), walk them after. Cell::take: the
+    // walker takes F: Fn.
+    let flag_mm_pins = core::cell::Cell::new(Vec::<alloc::sync::Arc<crate::mm::mm_struct::MmStruct>>::new());
     crate::sched::for_each_task(|task_ptr| unsafe {
-        if saved_flags_cell.get() != 0xD7 {
-            return;
-        }
-        let task = &*task_ptr;
-        // R25-2: pin the address space (see rmap.rs note) — this loop had
-        // NO lock at all.
-        if let Some(_mm_arc) = task.address_space_arc() {
-        let mm = _mm_arc.as_ref();
-            if let Some((_ppn, bits)) = crate::arch::mm::mm_ops::PageTableWalker::walk(
-                mm.pgd(), old_vaddr as u64,
-            ) {
-                saved_flags_cell.set(bits & 0x3FF);
-            }
+        if let Some(mm_arc) = (*task_ptr).address_space_arc() {
+            let mut pins = flag_mm_pins.take();
+            pins.push(mm_arc);
+            flag_mm_pins.set(pins);
         }
     });
+    for mm_arc in flag_mm_pins.take() {
+        if saved_flags_cell.get() != 0xD7 {
+            break;
+        }
+        // R25-2: the Arc pins the address space (see rmap.rs note) — this
+        // loop had NO lock at all.
+        if let Some((_ppn, bits)) = crate::arch::mm::mm_ops::PageTableWalker::walk(
+            mm_arc.pgd(), old_vaddr as u64,
+        ) {
+            saved_flags_cell.set(bits & 0x3FF);
+        }
+    }
     let saved_pte_flags = saved_flags_cell.get();
 
     // Open the migration window: markers go into the PTEs, fault path waits.
@@ -432,16 +441,23 @@ unsafe fn remap_page(dst: &Page, old_vaddr: usize, saved_flags: u64) {
     let new_pfn = page_to_pfn(dst as *const Page);
     let new_ppn = new_pfn as u64;
 
+    // mm-teardown vs spinlocks: collect the pinned mm Arcs under the
+    // pid-hash bucket locks (an Arc dropped there could run the
+    // schedulable mm teardown under the spinlock), then remap after.
+    // Cell::take: the walker takes F: Fn.
+    let mm_pins = core::cell::Cell::new(Vec::<alloc::sync::Arc<crate::mm::mm_struct::MmStruct>>::new());
     crate::sched::for_each_task(|task_ptr| {
-        let task = &*task_ptr;
+        if let Some(mm_arc) = (*task_ptr).address_space_arc() {
+            let mut pins = mm_pins.take();
+            pins.push(mm_arc);
+            mm_pins.set(pins);
+        }
+    });
 
+    for mm_arc in mm_pins.take() {
         // Skip tasks without an address space
-        // R25-2: pin the address space (see rmap.rs note).
-        let _mm_arc = match task.address_space_arc() {
-            Some(a) => a,
-            None => return,
-        };
-        let mm = _mm_arc.as_ref();
+        // R25-2: the Arc pins the address space (see rmap.rs note).
+        let mm = mm_arc.as_ref();
 
         // Hold VMA write lock across both the VMA check and page table walk
         // to prevent concurrent mmap/munmap from invalidating the page table
@@ -453,7 +469,7 @@ unsafe fn remap_page(dst: &Page, old_vaddr: usize, saved_flags: u64) {
         });
 
         if !vma_matches {
-            return;
+            continue;
         }
         // vma_mgr still held — protects page table walk below
 
@@ -472,7 +488,7 @@ unsafe fn remap_page(dst: &Page, old_vaddr: usize, saved_flags: u64) {
         );
         let pte2 = (*root_table).get(vpn2);
         if !pte2.is_valid() {
-            return;
+            continue;
         }
 
         let table1 = crate::arch::mm::mmu_init::get_page_table_virt(
@@ -480,7 +496,7 @@ unsafe fn remap_page(dst: &Page, old_vaddr: usize, saved_flags: u64) {
         );
         let pte1 = (*table1).get(vpn1);
         if !pte1.is_valid() {
-            return;
+            continue;
         }
 
         let table0 = crate::arch::mm::mmu_init::get_page_table_virt(
@@ -488,7 +504,7 @@ unsafe fn remap_page(dst: &Page, old_vaddr: usize, saved_flags: u64) {
         );
 
         // Rebuild the leaf PTE under the PTE lock (R22-3 — §17.4 close).
-        let _pte_g = crate::arch::mm::mm_ops::PTE_MODIFY_LOCK.lock_irqsave();
+        let _pte_g = crate::arch::mm::mm_ops::pte_lock_for(mm).lock_irqsave();
         let new_pte_bits = (new_ppn << 10) | (saved_flags & 0x3FF) | 0x1 /* V */;
         (*table0).set(
             vpn0,
@@ -499,5 +515,5 @@ unsafe fn remap_page(dst: &Page, old_vaddr: usize, saved_flags: u64) {
         crate::mm::flush_tlb_page_local(old_vaddr as u64);
         drop(_pte_g);
         // vma_mgr dropped here — lock released after PTE update
-    });
+    }
 }

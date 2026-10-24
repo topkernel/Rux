@@ -132,14 +132,33 @@ fn no_context(regs: &mut PtRegs, _fault_addr: VirtAddr) -> MmFaultResult {
 /// # Returns
 /// Handling result
 pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
+    // /proc/vmstat pgfault, and the per-task counter behind
+    // /proc/[pid]/stat field 10 (minflt). Linux counts only faults
+    // taken in user mode.
+    crate::mm::vmstat::note_fault();
+    if regs.user_mode() {
+        if let Some(task) = crate::sched::current() {
+            // SAFETY: current() returned a live task pointer; this
+            // only touches a per-task atomic counter.
+            unsafe {
+                (*task).min_flt.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            }
+        }
+    }
     let cr2 = crate::arch::cpu::read_cr2();
     let fault_addr = VirtAddr::new(cr2);
 
-    crate::pr_debug!(
-        "do_page_fault: addr={:#x}, rip={:#x}, type={:#x}, mode={}",
-        fault_addr.bits(), regs.rip, access_type,
-        if regs.kernel_mode() { "kernel" } else { "user" }
-    );
+    // Per-fault line gated behind dfx=steptrace: a full OH boot takes
+    // millions of user faults (demand paging every .so page); left on,
+    // these three lines per fault dominated the serial log and slowed
+    // TCG enough to change service-start races.
+    if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::Steptrace) {
+        crate::pr_debug!(
+            "do_page_fault: addr={:#x}, rip={:#x}, type={:#x}, mode={}",
+            fault_addr.bits(), regs.rip, access_type,
+            if regs.kernel_mode() { "kernel" } else { "user" }
+        );
+    }
 
     // X3 fix: do NOT fixup uaccess-window kernel faults here. The early
     // check below intercepted EVERY kernel #PF inside copy_to/from_user
@@ -218,14 +237,43 @@ pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
                     fault_addr,
                     access_type | FaultFlags::USER,
                 );
-                if matches!(result, MmFaultResult::Handled)
-                    || matches!(result, MmFaultResult::Fixed)
-                {
-                    // Re-execute the faulting kernel load/store.
-                    return MmFaultResult::Handled;
+                match result {
+                    MmFaultResult::Handled | MmFaultResult::Fixed => {
+                        // Re-execute the faulting kernel load/store.
+                        return MmFaultResult::Handled;
+                    }
+                    MmFaultResult::CowPending => {
+                        // Kernel WRITE uaccess onto a COW page: resolve it
+                        // like the user-mode path below (retry counts as
+                        // progress — the re-executed store either succeeds
+                        // or re-faults into the right path). Mirrors the
+                        // riscv64 twin (R82 block). Without this, CR0.WP
+                        // (now permanently set — F1b fix) turns every
+                        // read()/write() into a post-fork COW buffer into
+                        // an EFAULT short-copy: the trap falls through to
+                        // the exception-table fixup, init's param reads
+                        // all fail, and the boot collapses into the
+                        // LoopEvent spin (the ww-long2/long3 F4 collapse).
+                        // Leg-15 pace: j0 captured at entry, counter ticked
+                        // after return (no lock held — handle_cow_fault's
+                        // pte_lock is released by then).
+                        let cow_j0 = crate::drivers::timer::get_jiffies();
+                        let cow_res = unsafe {
+                            handle_cow_fault(addr_space, addr_space.root_ppn(), fault_addr)
+                        };
+                        crate::dfx::schb::note_cow(cow_j0);
+                        match cow_res {
+                            crate::arch::mm::CowFaultResult::Resolved
+                            | crate::arch::mm::CowFaultResult::Retry => {
+                                return MmFaultResult::Handled;
+                            }
+                            crate::arch::mm::CowFaultResult::OutOfMemory => {}
+                        }
+                    }
+                    // Unresolvable (bad perms etc.): fall through to the
+                    // exception-table fixup so the copy reports a short copy.
+                    _ => {}
                 }
-                // Unresolvable (bad perms etc.): fall through to the
-                // exception-table fixup so the copy reports a short copy.
             }
         }
 
@@ -242,6 +290,21 @@ pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
             regs.rip,
             crate::sched::get_current_pid()
         );
+        // dfx=wildwatch (wildwrite-hunt): a write fault inside a guarded
+        // region IS the wild writer caught in the act — banner it so the
+        // serial line is unmissable, then let the normal printer below
+        // carry rip + the rbp walk into the KERNPANIC dump.
+        #[cfg(feature = "x86_64")]
+        if (access_type & FaultFlags::WRITE) != 0
+            && crate::dfx::wildwatch::is_armed(fault_addr.bits() as usize)
+        {
+            println!(
+                "WILDWRITE-CAUGHT addr={:#x} rip={:#x} pid={} — guarded region store, writer below:",
+                fault_addr.bits(),
+                regs.rip,
+                crate::sched::get_current_pid()
+            );
+        }
         // OH bring-up forensics: walk the frame-pointer chain so the
         // faulting CALLER is visible (write_volatile-style leaf frames
         // otherwise hide the driver that computed the bad address).
@@ -288,7 +351,12 @@ pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
         }
         MmFaultResult::CowPending => {
             // COW page, try copy-on-write
-            match unsafe { handle_cow_fault(addr_space.root_ppn(), fault_addr) } {
+            // Leg-15 pace: j0 at entry, tick after return (pte_lock released).
+            let cow_j0 = crate::drivers::timer::get_jiffies();
+            let cow_res =
+                unsafe { handle_cow_fault(addr_space, addr_space.root_ppn(), fault_addr) };
+            crate::dfx::schb::note_cow(cow_j0);
+            match cow_res {
                 crate::arch::mm::CowFaultResult::Resolved => {
                     MmFaultResult::Handled
                 }

@@ -1,0 +1,32 @@
+%rename cpp_options old_cpp_options
+
+*cpp_options:
+-nostdinc -isystem /home/william/rux-agents/oh-services/toolchain/x86_64-rux-linux-musl/include -isystem include%s %(old_cpp_options)
+
+*cc1:
+%(cc1_cpu) -nostdinc -isystem /home/william/rux-agents/oh-services/toolchain/x86_64-rux-linux-musl/include -isystem include%s
+
+*link_libgcc:
+-L/home/william/rux-agents/oh-services/toolchain/x86_64-rux-linux-musl/lib -L .%s
+
+*libgcc:
+libgcc.a%s %:if-exists(libgcc_eh.a%s)
+
+*startfile:
+%{!shared: /home/william/rux-agents/oh-services/toolchain/x86_64-rux-linux-musl/lib/Scrt1.o} /home/william/rux-agents/oh-services/toolchain/x86_64-rux-linux-musl/lib/crti.o crtbeginS.o%s
+
+*endfile:
+crtendS.o%s /home/william/rux-agents/oh-services/toolchain/x86_64-rux-linux-musl/lib/crtn.o
+
+*link:
+-dynamic-linker /lib/ld-musl-x86_64.so.1 -nostdlib %{shared:-shared} %{static:-static} %{rdynamic:-export-dynamic}
+
+*esp_link:
+
+
+*esp_options:
+
+
+*esp_cpp_options:
+
+

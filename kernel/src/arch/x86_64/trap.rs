@@ -673,6 +673,30 @@ pub fn current_pt_regs() -> *const PtRegs {
     CURRENT_PT_REGS[cpu].load(core::sync::atomic::Ordering::Relaxed) as *const PtRegs
 }
 
+/// Wakewatch: RIP of another CPU's most recent trap frame, for the
+/// TIMER-SOFTIRQ-STALL report. Diagnostic read of a slot the target CPU
+/// owns; races live execution (worst case a torn-but-bounded value).
+/// 0 when no frame is live or the slot holds a non-canonical pointer.
+pub fn pt_regs_rip_for_cpu(cpu: usize) -> u64 {
+    if cpu >= crate::config::MAX_CPUS {
+        return 0;
+    }
+    let p = CURRENT_PT_REGS[cpu].load(core::sync::atomic::Ordering::Relaxed) as *const PtRegs;
+    // High-half bound added with the pa15 lesson: user addresses are
+    // canonical too, and this slot can only hold kernel-stack frames —
+    // a value below the kernel-half base is a torn read, never deref it.
+    if p.is_null()
+        || (p as u64) < 0xffff_8000_0000_0000
+        || !crate::sched::sched::kernel_ptr_canonical(p as *const u8)
+    {
+        return 0;
+    }
+    // SAFETY: canonical kernel address; the frame page stays mapped
+    // (physmap/linear addresses of kernel stacks are never unmapped),
+    // so the scalar read cannot fault — any value is diagnostic-only.
+    unsafe { core::ptr::addr_of!((*p).rip).read() }
+}
+
 /// pt_regs of the current task's user frame (stack_top - sizeof(PtRegs))
 pub fn current_task_pt_regs() -> Option<&'static mut PtRegs> {
     let task = crate::sched::current()?;
@@ -906,13 +930,26 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize, vector: u64) {
 
         let regs_ref = &mut *regs;
 
-        crate::pr_debug!(
-            "trap: vector={:#x}, rip={:#x}, rsp={:#x}, mode={}",
-            vector,
-            regs_ref.rip,
-            regs_ref.rsp,
-            if regs_ref.user_mode() { "user" } else { "kernel" }
-        );
+        // OH bring-up: kernel-mode IPI/timer entries (0xE0-0xE5) are
+        // routine events — printing every one flooded the emulated UART
+        // (85% of a 400MB serial log) and slowed the whole boot enough
+        // to cost samgr the hdf_devmgr race. The remaining per-trap
+        // line (syscall entries are the overwhelming majority) is
+        // likewise UART-flooding: it now needs dfx=steptrace.
+        let routine_ipi = !regs_ref.user_mode()
+            && (0xE0..=0xE5).contains(&vector);
+        if !routine_ipi
+            && crate::dfx::switches::enabled(
+                crate::dfx::switches::DfxSwitch::Steptrace)
+        {
+            crate::pr_debug!(
+                "trap: vector={:#x}, rip={:#x}, rsp={:#x}, mode={}",
+                vector,
+                regs_ref.rip,
+                regs_ref.rsp,
+                if regs_ref.user_mode() { "user" } else { "kernel" }
+            );
+        }
 
         if vector == SYSCALL_VECTOR {
             handle_syscall(regs_ref);
@@ -947,6 +984,7 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize, vector: u64) {
                     crate::drivers::intc::apic::eoi();
                     handle_timer_tick(regs_ref, cpu_id);
                     crate::interrupt::preempt::irq_exit();
+                    irq_exit_maybe_preempt_kernel(regs_ref);
                 }
 
                 v if (crate::arch::ipi::IPI_FIRST..=crate::arch::ipi::IPI_LAST)
@@ -956,12 +994,14 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize, vector: u64) {
                     crate::drivers::intc::apic::eoi();
                     crate::arch::ipi::handle_ipi_vector(v);
                     crate::interrupt::preempt::irq_exit();
+                    irq_exit_maybe_preempt_kernel(regs_ref);
                 }
 
                 vec::IRQ0 => {
                     crate::interrupt::preempt::irq_enter();
                     handle_timer_interrupt(regs_ref, cpu_id);
                     crate::interrupt::preempt::irq_exit();
+                    irq_exit_maybe_preempt_kernel(regs_ref);
                 }
 
                 v if v > vec::IRQ0 && v <= vec::IRQ_LAST => {
@@ -979,18 +1019,262 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize, vector: u64) {
     }
 }
 
+/// Rate gate for the IRQ-OFF-WINDOW probe: at most one direct-console
+/// report per 2 s of jiffies (episodes can cluster; the log must not).
+/// sc167: the 20-jiffy (200 ms) gate let sc166 print 2300 windows, and
+/// every report is itself a ~130-char direct-console line whose THRE
+/// waits run with IF=0 — the probe was feeding the very storm it
+/// measured. 200 jiffies restores the documented 2 s cadence.
+fn ww_irqwin_budget_ok() -> bool {
+    static LAST: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+    let now = crate::drivers::timer::get_jiffies();
+    let last = LAST.load(core::sync::atomic::Ordering::Acquire);
+    if now.wrapping_sub(last) < 200 {
+        return false;
+    }
+    LAST.compare_exchange(last, now, core::sync::atomic::Ordering::AcqRel, core::sync::atomic::Ordering::Acquire)
+        .is_ok()
+}
+
+/// Kernel-mode preemption at IRQ exit (CONFIG_PREEMPT equivalent).
+///
+/// First landed as 2cf4bdc9 and reverted in 0ced11da after it poisoned a
+/// task's preempt_count to -1 (user page faults then read
+/// in_interrupt()==true → KERNPANIC, cpu0 parked, softirq starved for
+/// minutes). Root cause of that failure: the hook called schedule() with
+/// NO re-entry guard, so a timer tick landing inside __schedule's own
+/// tail — after the incoming task's saved IF was restored — re-entered
+/// schedule() on the same, half-unwound kernel stack, and the nested
+/// entry ran the prev-resolution/pick/heal machinery on frames that were
+/// still unwinding (double-run shapes; unpaired guard drops).
+///
+/// Re-landing round 1 (sc65/sc66) used a PREEMPT_ACTIVE bit inside
+/// preempt_count as the guard, Linux-style. That was falsified for this
+/// tree: residual cross-task count imbalances exist in the pick/heal
+/// machinery (sc66 strand incumbents showed init carrying 0x04000001 and
+/// 0x08000001 — leaked ACT bits plus a leaked PREEMPT_OFFSET), and every
+/// leaked count bit now has teeth: preemptible() stays false forever, so
+/// the task cannot be preempted, AND __schedule's switch-out discipline
+/// refuses to sleep it — the observed 160-291 s one-activation
+/// monopolies. Round 2 therefore keeps the count EXACTLY as it was
+/// before this work:
+///
+/// - schedule() sets the TIF_IN_SCHED ti_flags bit around __schedule.
+///   This hook refuses while the bit is set — the only re-entry point is
+///   this hook (the trap-exit asm loop, cond_resched and lock_fair all
+///   call schedule() sequentially, never from inside another one). A
+///   leaked flag, should one ever happen, only disables preemption for
+///   that task; count semantics and the sleep discipline stay exact.
+/// - sub_preempt_count clamps and reports underflow, so a residual
+///   unpaired decrement is one attributable log line, never a silent -1
+///   faking in_interrupt() for a user task.
+///
+/// Call contract (unchanged from 2cf4bdc9's analysis, still true):
+/// - Called from the timer/IPI vector paths AFTER irq_exit(), with IF=0
+///   (interrupt gate) and the hardirq count already subtracted.
+/// - User-mode frames are skipped — trap_exit's asm loop owns those.
+/// - preempt_count()==0 means the interrupted kernel context holds no
+///   spinlock (all guards add PREEMPT_OFFSET), no bh section, no RCU
+///   read side (rcu_read_lock = preempt_disable).
+/// - The switch is the same one sleeping syscalls take; mid-syscall
+///   migration already happens via blocking paths, and the per-caller
+///   IRQ-flag discipline (R54) returns each side to its own IF state.
+/// - After schedule() returns, the frame unwinds normally through
+///   trap_handler's tail and trap_exit's kernel restore.
+fn irq_exit_maybe_preempt_kernel(regs: &PtRegs) {
+    use crate::process::task::task_flags::TaskFlags;
+    // LANDING STATE after the sc69-sc73 A/B ladder:
+    // - The preempt_count leak is PRE-EXISTING (sc69: hook compiled out,
+    //   leak present; disassembly-verified) — a plain SpinlockGuard whose
+    //   add and drop execute in two different task contexts while the
+    //   victim runs. sc73's lock fingerprints name the hot instances:
+    //   fs::inode::ICACHE, fs::locks::RECORD_LOCK_TABLE (statics) plus
+    //   heap Spinlocks — the VFS-path double-run engine. Producer hunt
+    //   continues (needs the pick/heal or scribble fix; not this hook).
+    // - With the hook ON the leak is amplified: leaked tasks become
+    //   kernel-mode monopolists (sc70: 309 s; sc73 with both heals still
+    //   86 s / 29 heals). With the hook OFF the same leaks self-bound at
+    //   user-mode boundaries (~2.6 s, sc69) and the heals bound the rest.
+    // Therefore the hook stays OFF by default; PREEMPT-HEAL/PARKED-HEAL
+    // stay as the safety net either way. Flip to true only after the
+    // producer is fixed.
+    const PREEMPT_HOOK_ENABLED: bool = false;
+    if !PREEMPT_HOOK_ENABLED {
+        return;
+    }
+    // Early-boot / WFI secondaries have no current task: __schedule
+    // handles a null prev, but there is nothing to preempt either way.
+    let cur = match crate::sched::current() {
+        Some(t) => t,
+        None => return,
+    };
+    if regs.user_mode() {
+        return; // user path: trap_exit asm owns preemption
+    }
+    if !crate::sched::need_resched() {
+        return;
+    }
+    if !crate::interrupt::preempt::preemptible() {
+        return; // holds a lock / bh / RCU / nested IRQ
+    }
+    // Recursion guard: never re-enter a schedule() already in progress on
+    // this task (a tick can land in __schedule's tail after the incoming
+    // task's saved IF was restored). TIF_IN_SCHED is a task flag, not a
+    // count bit — a stale set only disables preemption for this task.
+    if cur.test_ti_flag(TaskFlags::TIF_IN_SCHED.bits()) {
+        return;
+    }
+    static FIRED: core::sync::atomic::AtomicBool =
+        core::sync::atomic::AtomicBool::new(false);
+    if !FIRED.swap(true, core::sync::atomic::Ordering::AcqRel) {
+        crate::pr_info!(
+            "sched: kernel-preempt enabled (first IRQ-exit switch, cpu={})",
+            crate::arch::cpu_id()
+        );
+    }
+    crate::sched::schedule();
+}
+
 /// Shared timer-tick body (used by both the LAPIC-timer vector and the
 /// legacy PIC IRQ0 fallback) — faithful port of the riscv64 twin.
 fn handle_timer_tick(regs: &mut PtRegs, cpu: usize) {
     // Increment interrupt counter for /proc/interrupts
     crate::fs::procfs::interrupts::timer_inc(cpu);
 
+    // Wakewatch long-IRQ-off-window probe (UART perf gate round 2,
+    // 2026-10-20): THIS tick arriving >100 ms after the previous one on
+    // this CPU is the recovery IRQ of a long IF=0 window — the frame and
+    // stack below are the culprit's, live, at the exact moment the window
+    // broke (the pending tick fired at the first sti). Direct-console
+    // print (IRQ context, R34 discipline), rate-gated to one per 2 s.
+    // Symbolize the text-range words offline with addr2line.
+    {
+        let age_ms = crate::timer::ww_tick_age_ms(cpu);
+        if age_ms > 100 && ww_irqwin_budget_ok() {
+            use crate::console::putchar_no_lock as putchar;
+            fn ph(v: u64) {
+                use crate::console::putchar_no_lock as putchar;
+                for sh in (0..16).rev() {
+                    let n = ((v >> (sh * 4)) & 0xF) as u8;
+                    putchar(if n < 10 { b'0' + n } else { b'a' + n - 10 });
+                }
+            }
+            let cur = crate::sched::current();
+            let cur_ptr = match cur {
+                Some(t) => t as *mut crate::process::task::Task as usize,
+                None => 0,
+            };
+            let (pid, pc) = unsafe {
+                if cur_ptr != 0 {
+                    let t = cur_ptr as *mut crate::process::task::Task;
+                    ((*t).pid() as u64, (*t).preempt_count() as u64)
+                } else {
+                    (0, 0)
+                }
+            };
+            // pa16 calibration (perf line, 2026-10-24): age is a WALL-CLOCK
+            // gap between timer-IRQ arrivals, which conflates three causes
+            // the in-guest clock cannot separate: a real IF=0 window, host
+            // vCPU steal (the CPU simply not scheduled — dominant under
+            // multi-QEMU host contention), and tickless-style idle (no
+            // timer due, nothing to deliver). Their EFLAGS-sampling probe
+            // measured max closed-cli 4 ms while this probe printed
+            // age=1000ms lines — steal/idle, not IRQ-off. Annotation (not
+            // silence): when the recovery tick lands on the idle task the
+            // gap was idle/steal by construction, so say so and skip the
+            // culprit walk; a real-task frame keeps the walk as a triage
+            // hint only — corroborate with an EFLAGS sampler before
+            // believing IF=0.
+            let is_idle =
+                cur_ptr != 0 && cur_ptr == crate::sched::sched::idle_task_ptr(cpu);
+            let msg: &[u8] = b"\nWW: IRQ-OFF-WINDOW cpu=";
+            for &b in msg {
+                putchar(b);
+            }
+            ph(cpu as u64);
+            let msg: &[u8] = b" age=";
+            for &b in msg {
+                putchar(b);
+            }
+            ph(age_ms);
+            let msg: &[u8] = b"ms pid=";
+            for &b in msg {
+                putchar(b);
+            }
+            ph(pid);
+            let msg: &[u8] = b" pc=";
+            for &b in msg {
+                putchar(b);
+            }
+            ph(pc);
+            let msg: &[u8] = b" rip=";
+            for &b in msg {
+                putchar(b);
+            }
+            ph(regs.rip);
+            let msg: &[u8] = b" rsp=";
+            for &b in msg {
+                putchar(b);
+            }
+            ph(regs.rsp);
+            // Stack words in kernel text — return addresses of the
+            // in-window call chain. Guarded by kernel-mode + kernel-half
+            // + canonical + text-range checks; anything else prints '.'.
+            // pa15 incident (perf line, 2026-10-24): the window can break
+            // while the CPU is already executing USER code (recovery tick
+            // interrupts a user frame), so regs.rsp is a USER stack
+            // address — and user addresses are CANONICAL on x86_64, so
+            // kernel_ptr_canonical alone let this walk read the user
+            // stack and fault on its first unmapped page (KERNPANIC
+            // pfault badaddr=user-page, rip=handle_timer_tick). A user
+            // frame carries no kernel return addresses; skip the walk.
+            // pa16: an idle recovery frame likewise implicates nobody —
+            // the gap was idle/steal, not a culprit call chain.
+            let (lo, hi) = crate::sched::sched::kernel_text_window();
+            if !regs.user_mode()
+                && !is_idle
+                && regs.rsp >= 0xffff_8000_0000_0000
+                && crate::sched::sched::kernel_ptr_canonical(regs.rsp as *const u8)
+            {
+                for i in 0..12 {
+                    let addr = regs.rsp as *const u64;
+                    // SAFETY: kernel-half canonical address; the kernel
+                    // stack stays mapped, so the scalar read cannot fault.
+                    let w = unsafe { core::ptr::addr_of!((*addr.add(i))).read_volatile() };
+                    putchar(b' ');
+                    if w >= lo && w < hi {
+                        ph(w);
+                    } else {
+                        putchar(b'.');
+                    }
+                }
+            } else if regs.user_mode() {
+                let msg: &[u8] = b" user-frame";
+                for &b in msg {
+                    putchar(b);
+                }
+            } else if is_idle {
+                let msg: &[u8] = b" idle-wake";
+                for &b in msg {
+                    putchar(b);
+                }
+            }
+            putchar(b'\n');
+        }
+    }
+
     // Skip scheduler logic during early boot (no current task).
     if crate::sched::current().is_none() {
         return;
     }
 
-    // 0. CPU-time accounting: charge the tick to the interrupted task,
+    // 0. Per-CPU time accounting for /proc/stat (Linux
+    // account_process_tick): the idle task means the CPU had nothing to
+    // run, otherwise the tick is user time (the timer hit the task in
+    // user mode) or system time (it hit it in kernel mode).
+    crate::fs::procfs::stat::charge_tick(regs.user_mode());
+
+    // 0b. CPU-time accounting: charge the tick to the interrupted task,
     // user or system time by the mode the timer hit (user tasks only).
     if let Some(task) = crate::sched::current() {
         // SAFETY: current() returned a live task pointer; we only touch
@@ -1000,15 +1284,36 @@ fn handle_timer_tick(regs: &mut PtRegs, cpu: usize) {
                 use core::sync::atomic::Ordering::Relaxed;
                 if regs.user_mode() {
                     (*task).utime_ticks.fetch_add(1, Relaxed);
+                    crate::dfx::syscost::tick_user();
                 } else {
                     (*task).stime_ticks.fetch_add(1, Relaxed);
+                    // sc105 stime-burn attribution: sample WHERE the
+                    // kernel-mode tick landed (4 KiB page bucket keyed by
+                    // task comm, so one task's burn is separable from the
+                    // boot crowd). KILLDUMP prints the table.
+                    stime_sample_rip(regs.rip, (*task).comm());
+                    crate::dfx::syscost::tick_kern(regs.rip);
                 }
+            } else {
+                crate::dfx::syscost::tick_idle();
             }
         }
+    } else {
+        crate::dfx::syscost::tick_idle();
     }
 
     // 1. Update jiffies
     crate::drivers::timer::timer_interrupt_handler();
+
+    // 1.2 sc109: 1 Hz drift discipline for the HPET-calibrated TSC
+    // timekeeper (offset-only forward steps, clamped; see
+    // x86_64::resync_tsc_against_hpet).
+    {
+        let j = crate::drivers::timer::x86_64::get_jiffies();
+        if j % crate::config::KERNEL_HZ as u64 == 0 {
+            crate::drivers::timer::x86_64::resync_tsc_against_hpet();
+        }
+    }
 
     // 1.5 Scribble hunter (dfx=scribble): GS-pairing tripwire + verify
     // quiescent tasks' tracked scheduling fields against their shadows +
@@ -1069,7 +1374,18 @@ fn handle_external_interrupt(vector: u64) {
             let f: fn() = unsafe { core::mem::transmute(h) };
             f();
         } else {
-            crate::pr_debug!("trap: unhandled IRQ line {} (vector {:#x})", line, vector);
+            // Once per line per boot: on the OH q35 boot, spurious PIC
+            // lines (2 via vectors 0x2a/0x2b) fire continuously; the
+            // per-IRQ print line was a measurable share of the serial log.
+            static LINES_SEEN: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+            let seen = LINES_SEEN.fetch_or(1u32 << line, core::sync::atomic::Ordering::Relaxed);
+            if seen & (1u32 << line) == 0 {
+                crate::pr_debug!(
+                    "trap: unhandled IRQ line {} (vector {:#x}) [once per line]",
+                    line,
+                    vector
+                );
+            }
         }
         pic_send_eoi(line);
         // PIC lines arrive through LINT0 (virtual wire) when the local
@@ -1121,10 +1437,75 @@ fn handle_illegal_instruction(regs: &mut PtRegs) {
     // x86_64 has no lazy-FPU first-use trap (the FPU is enabled at boot
     // via CR4.OSFXSR in fpu_init and never gated with CR0.TS), so there
     // is no decode-and-retry path — straight to signal delivery.
-    crate::pr_debug!("trap: #UD at rip={:#x}, mode={}",
-        regs.rip, if regs.user_mode() { "user" } else { "kernel" });
-
+    //
+    // b143 (hdcd SIGILL loop, 15+ respawns): Linux routes user #UD
+    // through force_sig_fault(SIGILL) — a process WITH a SIGILL handler
+    // (OH's processdump/CFI crash reporter) gets to run it. Exiting
+    // directly here killed hdcd before its handler could log the fault,
+    // on every respawn. Same handler-first shape as the #GP path below.
     if regs.user_mode() {
+        let pid = crate::process::current_pid();
+        // Forensics before anything can unwind: rip + the first 16
+        // instruction bytes (ud2 = 0f 0b is the compiler CFI/trap
+        // fingerprint; anything else is a wild jump into data).
+        {
+            let comm = crate::sched::current()
+                .map(|t| {
+                    let c = unsafe { (*t).comm() };
+                    let n = c.iter().position(|&b| b == 0).unwrap_or(c.len());
+                    alloc::string::String::from(
+                        core::str::from_utf8(&c[..n]).unwrap_or("?"),
+                    )
+                })
+                .unwrap_or_default();
+            let mut hex = alloc::string::String::new();
+            if let Some(aspace) =
+                crate::sched::current().and_then(|t| t.address_space())
+            {
+                let root = aspace.root_ppn();
+                const HEX: &[u8; 16] = b"0123456789abcdef";
+                for i in 0..16usize {
+                    let va = regs.rip + i as u64;
+                    let byte = (|| {
+                        let phys = unsafe {
+                            crate::arch::mm::mm_ops::PageTableWalker::walk(
+                                root,
+                                va & !0xfff,
+                            )?
+                        };
+                        let kv = crate::arch::mm::memory_layout::phys_to_virt(
+                            crate::arch::mm::memory_layout::PhysAddr::new(
+                                (phys.0 << 12) | (va & 0xfff),
+                            ),
+                        );
+                        // SAFETY: mapped user page through the linear map.
+                        Some(unsafe {
+                            core::ptr::read_volatile(kv.as_u64() as *const u8)
+                        })
+                    })();
+                    match byte {
+                        Some(b) => {
+                            hex.push(HEX[(b >> 4) as usize] as char);
+                            hex.push(HEX[(b & 0xf) as usize] as char);
+                        }
+                        None => hex.push('?'),
+                    }
+                }
+            }
+            crate::pr_info!(
+                "trap: #UD at rip={:#x} pid {} comm {} bytes {}",
+                regs.rip,
+                pid,
+                comm,
+                hex
+            );
+        }
+        if sigill_has_handler() && !sigsegv_blocked_current() {
+            let _ = crate::signal::send_signal(pid, crate::signal::Signal::SIGILL as i32);
+            crate::signal::force_unblock_current(crate::signal::Signal::SIGILL as i32);
+            return;
+        }
+        let _ = crate::signal::send_signal(pid, crate::signal::Signal::SIGILL as i32);
         crate::process::exit::do_exit(-(crate::signal::Signal::SIGILL as i32));
         // Do NOT advance rip — the task is ZOMBIE and will not resume
     } else {
@@ -1136,17 +1517,31 @@ fn handle_illegal_instruction(regs: &mut PtRegs) {
     }
 }
 
+/// SIGILL (4) disposition check for the #UD path (processdump/CFI crash
+/// catchers in OH install one).
+fn sigill_has_handler() -> bool {
+    crate::sched::current()
+        .and_then(|t| (*t).signal.as_ref().map(|s| s.get_action(4)))
+        .map(|a| a.is_some_and(|a| a.has_handler()))
+        .unwrap_or(false)
+}
+
 /// Handle #GP: user mode → SIGSEGV (Linux semantics), kernel → bug.
 fn handle_general_protection(regs: &mut PtRegs) {
-    crate::pr_debug!("trap: #GP at rip={:#x}, mode={}",
-        regs.rip, if regs.user_mode() { "user" } else { "kernel" });
+    // OH bring-up: name the faulting task — b85's repeating user #GP at
+    // ld.so+0xba256 could not be attributed to any pid.
+    crate::pr_info!("trap: #GP at rip={:#x}, mode={}, pid {}",
+        regs.rip, if regs.user_mode() { "user" } else { "kernel" },
+        crate::process::current_pid());
 
     if regs.user_mode() {
         // Handler-first routing (same as the page-fault Segfault path):
         // debuggers/crash catchers must see the SIGSEGV; the default
-        // disposition kills here.
+        // disposition kills here. A fault inside the (blocked) SIGSEGV
+        // handler itself is forced to the default action — unblocking
+        // alone would re-enter the handler and loop forever.
         let pid = crate::process::current_pid();
-        if sigsegv_has_handler() {
+        if sigsegv_has_handler() && !sigsegv_blocked_current() {
             let _ = crate::signal::send_signal(pid, crate::signal::Signal::SIGSEGV as i32);
             // Synchronous fault: deliver despite a blocked mask
             // (Linux force_sig parity — see force_unblock_current).
@@ -1319,6 +1714,21 @@ fn sigsegv_has_handler() -> bool {
         .unwrap_or(false)
 }
 
+/// True when the CURRENT task blocks SIGSEGV (bit 10) — the thread is
+/// inside a SIGSEGV handler (delivery blocks the signal unless
+/// SA_NODEFER) or blocked it via sigprocmask. Linux force_sig_info
+/// semantics: a FORCED signal that is blocked is reset to SIG_DFL and
+/// unblocked — i.e. a synchronous fault on a blocked SIGSEGV kills the
+/// task. Merely pending it and iretq-ing back to the faulting rip
+/// refaults forever: OH's DFX_SignalHandler itself faults reading past
+/// its thread-stack top, and the redelivery loop starved the whole
+/// machine (96k+ identical faults in one boot).
+fn sigsegv_blocked_current() -> bool {
+    crate::sched::current()
+        .map(|t| (*t).sigmask & (1u64 << 10) != 0)
+        .unwrap_or(false)
+}
+
 fn sigbus_has_handler() -> bool {
     crate::sched::current()
         .and_then(|t| (*t).signal.as_ref().map(|s| s.get_action(7)))
@@ -1342,9 +1752,56 @@ fn sigfpe_has_handler() -> bool {
 /// Diagnostic only: every read is checked through the page-table walk.
 fn user_segv_forensics(regs: &PtRegs, fault_addr: u64) {
     let pid = crate::sched::get_current_pid();
+    // sc112: name the crashing process — the memfd USB DDK PnP NULL-walk
+    // kills an unnamed samgr SA host; comm decides which image cfg to cut.
+    let comm = crate::sched::current()
+        .map(|t| unsafe { (*t).comm() })
+        .map(|c| core::str::from_utf8(c).unwrap_or(""))
+        .unwrap_or("")
+        .trim_end_matches('\0');
+    // sc160: the crash-retry loop (AMS respawns the launcher, every child
+    // dies at the same stale VA) turned this ~21-line report into a 14
+    // k-line serial storm — and each printk holds the UART irqsave lock,
+    // so the storm itself manufactured the 453-1000 ms IRQ-OFF windows
+    // that kill foundation via its XCollie watchdog (681 reports in
+    // sc159). Full forensics for the first 6 faults; after that a
+    // one-liner that keeps the census and adds the one attribution that
+    // matters: whether cr2 falls inside a live binder buffer mapping
+    // (the range forked children lost with VmaFlags DONTFORK in sc157).
+    let binder_hit = crate::ipc::binder::binder_mmap_owner_of(fault_addr);
+    {
+        static SEGVD_N: core::sync::atomic::AtomicUsize =
+            core::sync::atomic::AtomicUsize::new(0);
+        if SEGVD_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) >= 6 {
+            crate::pr_err!(
+                "USEGV-L pid={} comm='{}' rip={:#x} cr2={:#x} {}",
+                pid,
+                comm,
+                regs.rip,
+                fault_addr,
+                match binder_hit.as_ref() {
+                    Some((proc_id, owner_pid, base, size)) => alloc::format!(
+                        "BINDERBUF proc={} owner_pid={} base={:#x} size={:#x}",
+                        proc_id,
+                        owner_pid,
+                        base,
+                        size
+                    ),
+                    None => alloc::string::String::new(),
+                }
+            );
+            return;
+        }
+    }
+    if let Some((proc_id, owner_pid, base, size)) = binder_hit.as_ref() {
+        crate::pr_err!(
+            "USEGV-FOR: cr2 {:#x} INSIDE BINDER BUFFER of proc {} (owner pid {}) base {:#x} size {:#x} — stale daemon mapping dropped at fork (DONTFORK)",
+            fault_addr, proc_id, owner_pid, base, size
+        );
+    }
     crate::pr_err!(
-        "USEGV-FOR: pid={} rip={:#x} cr2={:#x} rsp={:#x} rbp={:#x}",
-        pid, regs.rip, fault_addr, regs.rsp, regs.rbp
+        "USEGV-FOR: pid={} comm='{}' rip={:#x} cr2={:#x} rsp={:#x} rbp={:#x}",
+        pid, comm, regs.rip, fault_addr, regs.rsp, regs.rbp
     );
     crate::pr_err!(
         "USEGV-FOR: rax={:#x} rbx={:#x} rcx={:#x} rdx={:#x} rsi={:#x} rdi={:#x}",
@@ -1372,6 +1829,130 @@ fn user_segv_forensics(regs: &PtRegs, fault_addr: u64) {
                     v.offset()
                 ),
                 None => crate::pr_err!("USEGV-FOR: vma({:#x}) = NONE", probe),
+            }
+        }
+        // File path + module-relative fault offset for the rip VMA, so a
+        // crash inside a mapped .so names the library and gives the
+        // addr2line offset directly (sc49: appspawn children die inside a
+        // FileBacked VMA and fd/offset alone leaves the crash site
+        // anonymous).
+        if let Some(v) = vmas.find(crate::mm::page::VirtAddr::new(regs.rip as usize)) {
+            let fd = v.file_fd();
+            if fd >= 0 {
+                // SAFETY: current task's fd table is alive for the
+                // duration of the fault report.
+                let path = unsafe { crate::fs::file::get_file_fd(fd as usize) }
+                    .map(|f| f.path())
+                    .unwrap_or_else(|| alloc::string::String::from("?"));
+                crate::pr_err!(
+                    "USEGV-FOR: ripfile {} voff {:#x}",
+                    path,
+                    v.offset() + (regs.rip as usize - v.start().as_usize())
+                );
+                // sc106 OsAccount hunt: the recurring SA-host crash
+                // (identical rip, NULL list walk) runs inside a memfd-
+                // hosted library the offline tooling cannot name. Its
+                // .dynstr/.rodata usually sits in the read-only segment
+                // mapped directly below the r-x segment — scan up to
+                // 64 KiB below the mapping for printable runs so the
+                // crash site names its library (unmapped gaps stop the
+                // scan safely; page-table walks never fault).
+                if path.contains("anon") {
+                    let mut line = alloc::string::String::from("USEGV-FOR: memfd-strs");
+                    use core::fmt::Write;
+                    let mut hits = 0usize;
+                    let mut run = alloc::vec::Vec::new();
+                    let start_va = (v.start().as_usize() as u64).saturating_sub(0x1_0000);
+                    let end_va = v.start().as_usize() as u64;
+                    let mut va = start_va;
+                    'scan: while va < end_va {
+                        match fore_read_u64(aspace.root_ppn(), va) {
+                            Some(w) => {
+                                for k in 0..8usize {
+                                    let b = (w >> (k * 8)) & 0xff;
+                                    if (0x20..0x7f).contains(&b) {
+                                        run.push(b as u8);
+                                    } else {
+                                        if run.len() >= 10 && hits < 8 {
+                                            let _ = write!(
+                                                line,
+                                                " [{}]",
+                                                core::str::from_utf8(&run)
+                                                    .unwrap_or("?")
+                                            );
+                                            hits += 1;
+                                        }
+                                        run.clear();
+                                        if hits >= 8 {
+                                            break 'scan;
+                                        }
+                                    }
+                                }
+                            }
+                            None => {
+                                // Unmapped gap — skip 4 KiB ahead.
+                                va = (va & !0xfff) + 0x1000;
+                                continue;
+                            }
+                        }
+                        va += 8;
+                    }
+                    crate::pr_err!("{}", line);
+                }
+            }
+        }
+        // Instruction bytes at rip: the dynamic linker CLOSES the mmap fd
+        // after mapping, so the path is often unrecoverable from the VMA —
+        // the bytes identify the exact function offline (match against the
+        // .so files extracted from the system/vendor images).
+        {
+            let mut bytes = [0u8; 16];
+            let mut ok = true;
+            for (i, b) in bytes.iter_mut().enumerate() {
+                match fore_read_u64(aspace.root_ppn(), regs.rip + i as u64) {
+                    Some(w) => *b = (w & 0xff) as u8,
+                    None => {
+                        ok = false;
+                        break;
+                    }
+                }
+            }
+            if ok {
+                crate::pr_err!(
+                    "USEGV-FOR: ripbytes {:02x?}",
+                    bytes
+                );
+            }
+        }
+        // VMA neighborhood around the fault address (render_service
+        // offset-anomaly family, session 18): the single vma(cr2) line
+        // cannot show what borders the faulting region — whether a
+        // writable stack sits directly below a mis-flagged PROT_NONE
+        // tail, a guard page, or a hole. Dump every VMA overlapping a
+        // +/-16MB window around cr2, capped at 12 entries (fatal path,
+        // rare; bounded by construction).
+        {
+            let lo = (fault_addr as usize).saturating_sub(0x100_0000);
+            let hi = (fault_addr as usize).saturating_add(0x100_0000);
+            let mut shown = 0usize;
+            for v in vmas.iter() {
+                if v.end().as_usize() <= lo || v.start().as_usize() >= hi {
+                    continue;
+                }
+                if shown >= 12 {
+                    crate::pr_err!("USEGV-FOR: nearvma ... (capped)");
+                    break;
+                }
+                crate::pr_err!(
+                    "USEGV-FOR: nearvma {:#x}-{:#x} flags={:#x} type={:?} fd={} off={:#x}",
+                    v.start().as_usize(),
+                    v.end().as_usize(),
+                    v.flags().bits(),
+                    v.vma_type(),
+                    v.file_fd(),
+                    v.offset()
+                );
+                shown += 1;
             }
         }
     }
@@ -1408,6 +1989,15 @@ fn user_segv_forensics(regs: &PtRegs, fault_addr: u64) {
 /// Handle page fault (#PF): decode the error code (in the orig_rax slot)
 /// into FaultFlags and hand off to `exception::do_page_fault`, then
 /// mirror the twin's outcome routing.
+/// R73: one-shot latch for the KERNPANIC raw dump. A fault DURING the
+/// dump (stack walk past the mapping, scribble park hook, frame walk on
+/// a wild rbp) re-enters `handle_page_fault`; without the latch that
+/// recursion prints the dump again and faults again — the print/read
+/// loop that wedged sc195's cpu0 for ~855 s (hardirq-held, rip parked
+/// in the UART `inb`). Second entry prints one marker and halts.
+static KP_DUMP_ENTERED: core::sync::atomic::AtomicBool =
+    core::sync::atomic::AtomicBool::new(false);
+
 fn handle_page_fault(regs: &mut PtRegs) {
     use crate::arch::mm::exception::do_page_fault;
     use crate::arch::mm::page_fault::MmFaultResult;
@@ -1439,13 +2029,15 @@ fn handle_page_fault(regs: &mut PtRegs) {
         );
     }
 
-    crate::pr_debug!(
-        "trap: page fault addr={:#x}, rip={:#x}, ec={:#x}, mode={}",
-        fault_addr,
-        regs.rip,
-        error_code,
-        if regs.kernel_mode() { "kernel" } else { "user" }
-    );
+    if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::Steptrace) {
+        crate::pr_debug!(
+            "trap: page fault addr={:#x}, rip={:#x}, ec={:#x}, mode={}",
+            fault_addr,
+            regs.rip,
+            error_code,
+            if regs.kernel_mode() { "kernel" } else { "user" }
+        );
+    }
 
     let result = do_page_fault(regs, access);
 
@@ -1466,9 +2058,12 @@ fn handle_page_fault(regs: &mut PtRegs) {
                 // Linux semantics: route user-mode faults through signal
                 // delivery (force_sig_fault) — an installed SIGSEGV
                 // handler must run (LTP mmap05); default kills here.
+                // A blocked SIGSEGV (fault inside its own handler) is
+                // forced to the default action instead of pended — see
+                // sigsegv_blocked_current.
                 user_segv_forensics(regs, fault_addr);
                 let pid = crate::process::current_pid();
-                if sigsegv_has_handler() {
+                if sigsegv_has_handler() && !sigsegv_blocked_current() {
                     let _ = crate::signal::send_signal(pid, crate::signal::Signal::SIGSEGV as i32);
                     return;
                 }
@@ -1490,13 +2085,15 @@ fn handle_page_fault(regs: &mut PtRegs) {
             crate::pr_err!("pagefault: Permission denied at {:#x}, rip={:#x}, pid={}",
                 fault_addr, regs.rip, crate::sched::get_current_pid());
             if regs.user_mode() {
-                // Handler-first routing like Segfault (PROT_NONE access).
+                // Handler-first routing like Segfault (PROT_NONE access);
+                // likewise force-default a blocked SIGSEGV.
                 user_segv_forensics(regs, fault_addr);
                 let pid = crate::process::current_pid();
-                if sigsegv_has_handler() {
+                if sigsegv_has_handler() && !sigsegv_blocked_current() {
                     let _ = crate::signal::send_signal(pid, crate::signal::Signal::SIGSEGV as i32);
                     return;
                 }
+                let _ = crate::signal::send_signal(pid, crate::signal::Signal::SIGSEGV as i32);
                 crate::process::exit::do_exit(-(crate::signal::Signal::SIGSEGV as i32));
             } else {
                 #[cfg(feature = "x86_64")]
@@ -1528,7 +2125,19 @@ fn handle_page_fault(regs: &mut PtRegs) {
             crate::pr_err!("pagefault: Out of memory at {:#x}", fault_addr);
             crate::mm::page_alloc::oom_forensic_dump("pagefault OOM");
             if regs.user_mode() {
-                crate::process::exit::do_exit(-(crate::signal::Signal::SIGKILL as i32));
+                // fake-OOM family: Linux pagefault_out_of_memory parity —
+                // give the global OOM killer (badness-based victim
+                // selection, rate-limited) the chance to free the real
+                // hog before this task dies. Retry on true, die on false
+                // (struck out or nothing killable).
+                if !crate::mm::oom_kill::fault_oom_kill_or_retry(
+                    crate::process::current_pid(),
+                ) {
+                    crate::process::exit::do_exit(-(crate::signal::Signal::SIGKILL as i32));
+                }
+                // true: fall through — returning to userspace re-executes
+                // the faulting instruction; the victim's freed pages serve
+                // the retry.
             } else {
                 panic!(
                     "pagefault: OOM in kernel mode at {:#x}, rip={:#x}",
@@ -1537,8 +2146,31 @@ fn handle_page_fault(regs: &mut PtRegs) {
             }
         }
         MmFaultResult::KernelPanic => {
-            // Raw serial print (printk may be wedged on a lock this CPU
-            // holds), then halt — the twin's R9 discipline.
+            // R73 (sc195 strand + the coordinator's riscv64 double-fault
+            // root cause): the dump below used to read 16 words at rsp
+            // with NO bound — a word past the real stack top (boot stack
+            // at the image end, or any stack-adjacent hole) faulted back
+            // into THIS handler, and the print/read recursion wedged the
+            // CPU forever (sc195: cpu0 hardirq-held ~855 s at a stable
+            // inb rip — the recursive dump's UART output path — while the
+            // system limped on cpu1). Two guards:
+            // - re-entrancy latch: a fault DURING the dump goes straight
+            //   to the halt loop with one marker line (no second dump, no
+            //   recursion — the class dies here regardless of which
+            //   dump read faulted);
+            // - the kp-stk walk is bounded by the task's real
+            //   kernel-stack top (16K-aligned rsp heuristic when there is
+            //   no task context), stopping at the first past-top word.
+            if KP_DUMP_ENTERED.swap(true, core::sync::atomic::Ordering::Relaxed) {
+                for &b in b"trap: KERNPANIC re-entered during dump; halting\n" {
+                    crate::console::putchar_no_lock(b);
+                }
+                // SAFETY: hlt halts until the next interrupt; safe in a
+                // halt loop.
+                loop {
+                    unsafe { core::arch::asm!("hlt") };
+                }
+            }
             // SCRIBBLE2: park hook for gdb (walk the faulting CR3's page
             // tables live from the debugger).
             #[cfg(feature = "x86_64")]
@@ -1574,6 +2206,90 @@ fn handle_page_fault(regs: &mut PtRegs) {
             }
             kp_put_hex(regs.rsp);
             crate::console::putchar_no_lock(b'\n');
+            // OH bring-up forensics: dump 16 kernel-stack words at rsp
+            // and walk the frame-pointer chain, raw. When control flow
+            // jumps through a garbage pointer (executed stack garbage,
+            // use-after-free vtable...) this is the only record of what
+            // the stack held at the jump. Words print one per line
+            // ("kp-stk"), frames as "kp-frame".
+            //
+            // R73: the walk is BOUNDED at the faulting task's real
+            // kernel-stack top (16K-aligned rsp heuristic when there is
+            // no task context). A read past the mapping would fault back
+            // into this handler — the exact print/read recursion that
+            // wedged sc195's cpu0 for ~855 s; the KP_DUMP_ENTERED latch
+            // above is the safety net if any dump read still faults.
+            let kstack_top: usize = crate::sched::current()
+                .map(|t| unsafe { (*t).kernel_stack_top() })
+                .unwrap_or(((regs.rsp as usize | 0x3fff) + 1));
+            for i in 0..16usize {
+                let addr = regs.rsp as usize + i * 8;
+                if addr + 8 > kstack_top {
+                    for &b in b"kp-stk <rest past kernel stack top>\n" {
+                        crate::console::putchar_no_lock(b);
+                    }
+                    break;
+                }
+                // SAFETY: bounded read of our own kernel stack (see the
+                // R73 comment above).
+                let v = unsafe { core::ptr::read_volatile(addr as *const u64) };
+                for &b in b"kp-stk " {
+                    crate::console::putchar_no_lock(b);
+                }
+                kp_put_hex(addr as u64);
+                crate::console::putchar_no_lock(b':');
+                crate::console::putchar_no_lock(b' ');
+                kp_put_hex(v);
+                crate::console::putchar_no_lock(b'\n');
+            }
+            // Frame-pointer walk: [rbp] = next rbp, [rbp+8] = return
+            // address. Stops at the stack top or the first bogus frame.
+            let stack_top = (regs.rsp | 0x3fff) + 1;
+            let mut rbp = regs.rbp;
+            for _ in 0..10 {
+                if rbp & 7 != 0 || rbp + 16 >= stack_top || rbp < regs.rsp {
+                    break;
+                }
+                // SAFETY: bounds-checked reads of the current kernel stack.
+                let (next, ret) = unsafe {
+                    (
+                        core::ptr::read_volatile(rbp as *const u64),
+                        core::ptr::read_volatile((rbp + 8) as *const u64),
+                    )
+                };
+                for &b in b"kp-frame " {
+                    crate::console::putchar_no_lock(b);
+                }
+                kp_put_hex(ret);
+                crate::console::putchar_no_lock(b'\n');
+                if next <= rbp || next >= stack_top {
+                    break;
+                }
+                rbp = next;
+            }
+            // Forensic ring tail: the last 12 completed syscalls before
+            // the crash (pid/nr/a0/ret), oldest first. Identifies the
+            // in-flight syscall for interrupt-time crashes.
+            {
+                use crate::syscall::dispatch::{SYSCALL_CURSOR, SYSCALL_RING};
+                let cur = SYSCALL_CURSOR.load(core::sync::atomic::Ordering::Relaxed);
+                let len = SYSCALL_RING.len();
+                for k in (0..12usize).rev() {
+                    let idx = (cur + len - 1 - k) % len;
+                    let e = &SYSCALL_RING[idx];
+                    for &b in b"kp-sys " {
+                        crate::console::putchar_no_lock(b);
+                    }
+                    kp_put_hex(e.pid.load(core::sync::atomic::Ordering::Relaxed) as u64);
+                    crate::console::putchar_no_lock(b' ');
+                    kp_put_hex(e.nr.load(core::sync::atomic::Ordering::Relaxed) as u64);
+                    crate::console::putchar_no_lock(b' ');
+                    kp_put_hex(e.a0.load(core::sync::atomic::Ordering::Relaxed));
+                    crate::console::putchar_no_lock(b' ');
+                    kp_put_hex(e.ret.load(core::sync::atomic::Ordering::Relaxed));
+                    crate::console::putchar_no_lock(b'\n');
+                }
+            }
             // SAFETY: hlt halts until the next interrupt; safe in a halt loop.
             loop {
                 unsafe { core::arch::asm!("hlt") };
@@ -1644,4 +2360,167 @@ pub extern "C" fn ret_from_fork_kernel_helper(
 ) {
     let ret = fn_ptr(fn_arg);
     crate::process::exit::do_exit(ret);
+}
+
+// ============================================================================
+// sc105: stime-burn attribution histogram
+// ============================================================================
+//
+// The OH launcher child spends its whole 3 s appspawn watchdog life in
+// kernel time (utime 0-2t, stime 183-190t, on_cpu). stime is tick-sampled
+// accounting — so sample WHERE each kernel-mode tick lands. Each slot keys
+// on (task comm, 4 KiB kernel-text page) so one task's burn is separable
+// from the ~580-task boot crowd; KILLDUMP (kill_dump_wedge) prints the
+// table when appspawn's watchdog kill fires.
+//
+// Fixed-size, no allocation, IRQ-context safe; lost updates on the
+// steal-smallest path are fine (a probe, not an accounting device).
+
+const STIME_SLOTS: usize = 24;
+
+struct StimeSample {
+    comm: [core::sync::atomic::AtomicU8; 16],
+    page: core::sync::atomic::AtomicU64,
+    count: core::sync::atomic::AtomicU64,
+}
+
+static STIME_HIST: [StimeSample; STIME_SLOTS] = {
+    const EMPTY: StimeSample = StimeSample {
+        comm: [const { core::sync::atomic::AtomicU8::new(0) }; 16],
+        page: core::sync::atomic::AtomicU64::new(0),
+        count: core::sync::atomic::AtomicU64::new(0),
+    };
+    [EMPTY; STIME_SLOTS]
+};
+
+/// Focus table (sc106): launcher-comm samples only — see stime_sample_rip.
+static STIME_FOCUS: [StimeSample; STIME_SLOTS] = {
+    const EMPTY: StimeSample = StimeSample {
+        comm: [const { core::sync::atomic::AtomicU8::new(0) }; 16],
+        page: core::sync::atomic::AtomicU64::new(0),
+        count: core::sync::atomic::AtomicU64::new(0),
+    };
+    [EMPTY; STIME_SLOTS]
+};
+
+/// Record one kernel-mode tick at `rip` for `comm`.
+fn stime_sample_rip(rip: u64, comm: &[u8; 16]) {
+    use core::sync::atomic::Ordering::{Acquire, Relaxed};
+    // Only kernel text addresses (user rip cannot be a stime sample, but
+    // vmalloc/modules would bucket misleadingly).
+    let (lo, hi) = crate::sched::sched::kernel_text_window();
+    if rip < lo || rip >= hi {
+        return;
+    }
+    let page = rip & !0xFFFu64;
+
+    // sc106 lesson: the global steal-smallest table starves the very task
+    // under investigation — the launcher child burns ~180 ticks in 3 s
+    // bursts, but every fresh (comm,page) entry starts at 1 and is stolen
+    // away by the next new page before it accumulates. Focus table: comm
+    // containing "launcher" (the killed children run comm='m.ohos.
+    // launcher', set post-exec by appspawn) never competes with the boot
+    // crowd.
+    let focus = {
+        let mut hit = false;
+        let mut run = 0u8;
+        for &b in comm.iter() {
+            if b == 0 {
+                break;
+            }
+            run = if b == b"launcher"[run as usize] {
+                run + 1
+            } else if b == b"launcher"[0] {
+                1
+            } else {
+                0
+            };
+            if run as usize == b"launcher".len() {
+                hit = true;
+                break;
+            }
+        }
+        hit
+    };
+    let hist: &[StimeSample; STIME_SLOTS] = if focus {
+        &STIME_FOCUS
+    } else {
+        &STIME_HIST
+    };
+
+    let mut min_idx = 0usize;
+    let mut min_count = u64::MAX;
+    for i in 0..STIME_SLOTS {
+        let p = hist[i].page.load(Relaxed);
+        if p == 0 {
+            // Claim the empty slot (page first — count follows only after
+            // the page store, so readers never see a stale count against
+            // a new page unless they load between the two, which the
+            // count reset below makes benign for a probe).
+            if hist[i]
+                .page
+                .compare_exchange(0, page, core::sync::atomic::Ordering::AcqRel, Acquire)
+                .is_ok()
+            {
+                for j in 0..16 {
+                    hist[i].comm[j].store(comm[j], Relaxed);
+                }
+                hist[i].count.store(1, Relaxed);
+                return;
+            }
+            continue;
+        }
+        if p == page {
+            // Same page; compare comm to keep tasks separable.
+            let same = (0..16).all(|j| hist[i].comm[j].load(Relaxed) == comm[j]);
+            if same {
+                hist[i].count.fetch_add(1, Relaxed);
+                return;
+            }
+        }
+        let c = hist[i].count.load(Relaxed);
+        if c < min_count {
+            min_count = c;
+            min_idx = i;
+        }
+    }
+    // Table full and this (comm, page) has no slot: replace the least
+    // sampled one. Single writer wins via a count swap; the loser's
+    // sample is dropped.
+    if hist[min_idx]
+        .count
+        .compare_exchange(min_count, 1, core::sync::atomic::Ordering::AcqRel, Acquire)
+        .is_ok()
+    {
+        hist[min_idx].page.store(page, Relaxed);
+        for j in 0..16 {
+            hist[min_idx].comm[j].store(comm[j], Relaxed);
+        }
+    }
+}
+
+/// Snapshot the stime histogram for KILLDUMP: (comm, page, ticks) rows,
+/// highest count first, empty slots omitted. `focus=true` returns the
+/// launcher-gated table instead of the global one.
+pub fn stime_profile_top(focus: bool) -> alloc::vec::Vec<([u8; 16], u64, u64)> {
+    use core::sync::atomic::Ordering::Relaxed;
+    let hist: &[StimeSample; STIME_SLOTS] = if focus {
+        &STIME_FOCUS
+    } else {
+        &STIME_HIST
+    };
+    let mut v = alloc::vec::Vec::new();
+    for i in 0..STIME_SLOTS {
+        let page = hist[i].page.load(Relaxed);
+        if page == 0 {
+            continue;
+        }
+        let mut comm = [0u8; 16];
+        for j in 0..16 {
+            comm[j] = hist[i].comm[j].load(Relaxed);
+        }
+        v.push((comm, page, hist[i].count.load(Relaxed)));
+    }
+    v.sort_by(|a, b| b.2.cmp(&a.2));
+    v
 }

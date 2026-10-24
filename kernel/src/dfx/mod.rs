@@ -35,12 +35,41 @@ pub mod hung_task;
 #[cfg(feature = "riscv64")]
 pub mod sbi_debug;
 pub mod switches;
+/// Runtime kernel symbol table (/proc/kallsyms, symbolized traces).
+pub mod ksyms;
 pub mod taskdump;
 pub mod memwatch;
+/// Full physical-accounting ledger (fake-OOM family): census + counters
+/// reconciliation, triggered at the OOM moment and via the UART magic.
+pub mod ledger;
+/// Zero-put / free-refusal attribution counters (freelist-drift family):
+/// which release site orphaned the census's refcount-0 pages.
+pub mod driftwatch;
 #[cfg(feature = "x86_64")]
 pub mod scribble;
 /// R83 (R74 producer hunt): live task-header audit + victim dumps.
 pub mod r83hunt;
+/// CLOCK_MONOTONIC jump tripwire (dfx=monowatch): samples the shared
+/// timebase ~1 Hz and reports backward motion or multi-second spikes
+/// with the active clocksource named.
+pub mod monowatch;
+/// Wild-write attribution tripwire (dfx=wildwatch, x86_64): RO-guards
+/// the hpet quiet-statics cluster in every page-table alias; see
+/// dfx/wildwatch.rs (wildwrite-hunt line).
+pub mod wildwatch;
+/// Buddy-meta shadow scan (dfx=metawatch): periodic lock-confirmed
+/// INV-HEAP-* audit of the buddy free lists + per-page bitmap; see
+/// dfx/metawatch.rs (wildwrite-hunt line).
+pub mod metawatch;
+/// Whole-syscall cost table + tick-mode accounting + kernel-rip page
+/// histogram (perf-audit line, cmdline `syscost=1`); see dfx/syscost.rs.
+pub mod syscost;
+/// Soft-wedge heartbeat + one-shot wedge census (sc-series quiet-quiet
+/// hunt, cmdline `dfx=schb`); see dfx/schb.rs.
+pub mod schb;
+/// ext4/bio cost-anatomy counters (perf-audit line, cmdline `fsw=1`);
+/// see dfx/fsw.rs.
+pub mod fsw;
 
 /// Initialize the DFX subsystem.
 ///
@@ -48,10 +77,78 @@ pub mod r83hunt;
 /// Starts the softlockup detector and hung task detector.
 pub fn init() {
     switches::init_from_cmdline();
+    // Wild-write tripwire arms between the timekeeper's init and
+    // start_secondaries (no TLB shootdown needed; see wildwatch.rs).
+    wildwatch::arm();
     softlockup::init();
     // hung_task detector is deferred — it requires kthread infrastructure
     // that may not be fully ready during early boot. Enable after testing.
     // hung_task::init();
+    // Publish the instrument switches in debugfs so they can be armed
+    // and disarmed while the system runs.
+    register_debugfs_knobs();
+}
+
+/// Register the DFX instrument switches in debugfs.
+///
+/// Linux keeps runtime debug knobs out of the stable userspace ABI and
+/// exposes them in debugfs instead. Rux follows the same rule and the
+/// same conventions:
+///
+/// - one file per switch, named after its `dfx=` spelling;
+/// - the file reads `Y` or `N` (Linux's `debugfs_create_bool`
+///   convention);
+/// - writing `Y`/`y`/`1` arms the instrument, `N`/`n`/`0` disarms it,
+///   anything else is `EINVAL` (Linux's `debugfs_bool_set`).
+///
+/// ```text
+/// /sys/kernel/debug/dfx/taskdump   -> Y
+/// ```
+///
+/// Returns the number of knobs registered.
+pub fn register_debugfs_knobs() -> usize {
+    use crate::fs::debugfs;
+    if !debugfs::create_dir("/dfx") {
+        return 0;
+    }
+    let mut count = 0;
+    for sw in switches::ALL {
+        let path = alloc::format!("/dfx/{}", sw.name());
+        let gen = move || {
+            // Linux debugfs bool files: "Y\n" / "N\n".
+            let mut out = alloc::vec![b'N', b'\n'];
+            if switches::enabled(sw) {
+                out[0] = b'Y';
+            }
+            out
+        };
+        let store = move |buf: &[u8]| -> i32 {
+            let text = core::str::from_utf8(buf).unwrap_or("").trim();
+            if text.is_empty() {
+                // The guest's `echo v > file` writes the value and the
+                // trailing newline as SEPARATE write() calls: the empty
+                // second write is a no-op, not an error (same convention
+                // as /proc/[pid]/oom_score_adj).
+                return 0;
+            }
+            let on = match text {
+                "Y" | "y" | "1" | "true" | "on" => true,
+                "N" | "n" | "0" | "false" | "off" => false,
+                _ => return crate::errno::Errno::InvalidArgument.as_neg_i32(),
+            };
+            switches::set(sw, on);
+            crate::pr_info!(
+                "dfx: runtime switch '{}' {}",
+                sw.name(),
+                if on { "enabled" } else { "disabled" }
+            );
+            0
+        };
+        if debugfs::create_file(&path, 0o644, gen, Some(store)) {
+            count += 1;
+        }
+    }
+    count
 }
 
 // ============================================================================

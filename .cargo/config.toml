@@ -33,7 +33,7 @@ rustflags = [
 [target.x86_64-unknown-none]
 rustflags = [
     "-C", "link-arg=-Tkernel/src/arch/x86_64/linker.ld",
-    "-C", "link-arg=-Tkernel/linker-x86-extra.ld",
+    "-C", "link-arg=-Tkernel/src/arch/x86_64/linker-extra.ld",
     "-C", "force-frame-pointers=yes",
     "-C", "code-model=kernel",
     "-C", "link-arg=--no-gc-sections",

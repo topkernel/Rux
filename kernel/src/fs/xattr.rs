@@ -32,6 +32,25 @@ use crate::fs::inode::Inode;
 const ENODATA: i32 = 61;
 const EOPNOTSUPP: i32 = 95;
 
+/// XATTR_NAME_SELINUX (UAPI): the LSM label attribute.
+const XATTR_NAME_SELINUX: &[u8] = b"security.selinux";
+
+/// The label an SELinux-enabled Linux kernel reports for an inode that was
+/// never explicitly labeled (the unlabeled fallback type; OH contexts drop
+/// the `_t` suffix, matching libhap_restorecon's DEFAULT_CONTEXT).
+///
+/// R1 (0xd000008 spawn gate): with SELinux "enabled" (selinuxfs mounted) a
+/// real kernel OWNS every inode label, so getxattr(security.selinux) never
+/// returns ENODATA. Rux stores labels lazily, so a freshly mkdir'ed dir has
+/// none — and OH's libselinux `lgetfilecon` maps ENODATA to -1, which makes
+/// libhap_restorecon's `GetSecontext` abort, which makes installd's
+/// `CreateBundleDataDir` return early AFTER creating base/<bundle> but
+/// BEFORE creating database/<bundle> — the exact sandbox bind whose absence
+/// fails every app spawn with APPSPAWN_SANDBOX_MOUNT_FAIL (0xd000008).
+/// Reporting the unlabeled fallback here is the Linux ABI; callers that
+/// compare labels then lsetfilecon their real label over it.
+const DEFAULT_SELINUX_CONTEXT: &[u8] = b"u:object_r:unlabeled:s0";
+
 /// XATTR_SIZE_MAX (Linux): 64 KiB per value.
 pub const XATTR_SIZE_MAX: usize = 65536;
 /// XATTR_NAME_MAX (Linux): 255 bytes.
@@ -176,7 +195,15 @@ pub fn get(inode: &Inode, name: &[u8], out: Option<&mut [u8]>) -> Result<usize, 
     let guard = inode.xattrs.lock();
     let value = match guard.as_ref().and_then(|m| m.get(name)) {
         Some(v) => v,
-        None => return Err(-ENODATA),
+        None => {
+            if name == XATTR_NAME_SELINUX {
+                // See DEFAULT_SELINUX_CONTEXT: an SELinux-enabled kernel
+                // never fails this read with ENODATA.
+                DEFAULT_SELINUX_CONTEXT
+            } else {
+                return Err(-ENODATA);
+            }
+        }
     };
     match out {
         None => Ok(value.len()),

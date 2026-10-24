@@ -1,0 +1,36 @@
+compose-content lane coordination (2026-10-19 22:30)
+
+Two sessions are live on this worktree (one from an earlier relaunch,
+one from the 21:45 relaunch). Serial logs and QEMU monitor sockets are
+tag-named, so keep tags distinct (cc10 = other session, cc11 = this
+one). userdata-tok.img is the shared writable disk: boots that keep it
+writable (ui-boot.sh default) must not overlap; use a reflink copy
+(userdata-cc11.img pattern) or snapshot=on.
+
+Findings from the 21:45 session (so the other session does not redo it):
+
+1. cc8 stock verification boot: reproduces cc7 exactly — every imported
+   layer GEM and every flipped GEM carries only 0xff000000 (clear
+   black), paint=0 across all flips. Screendumps stay black.
+2. The bootanimation binary decodes via
+   Drawing::Image::MakeFromEncoded(BuildFromMalloc(zipEntry)) and the
+   result is appended to the frame vector with NO null check; the zip
+   read error strings never fire. Decode failure is silent by design.
+3. bootpic.zip source is good: host decode of OH_bootAni_00040.jpg
+   shows the logo (~3-4% non-black at stride 5); md5 565db2f4...;
+   frames 0-1 are legitimately black.
+4. Guest-side file reads are CLEAN: decode_probe (test/decode_probe.c,
+   probe-as-init with the image's own lib2d_graphics + canvaskit)
+   reads logo40.jpg byte-exact and MakeFromEncoded SUCCEEDS there:
+   jpg=ok png=ok corrupt=fail (w=800 h=800). So ext4 reads, the
+   loader, dlopen and canvaskit decode all work standalone.
+5. Therefore the real-boot failure is environmental: either the
+   bootanimation's own decodes fail (memory/threads/state), or decode
+   succeeds and the DRAW path loses the image while only the canvas
+   clear lands (clear is pitch-exact 720x1280 = a working Skia raster
+   blit through the node-mapped GEM).
+6. Next instrument (in flight): system-shim.img — bootanimation.cfg
+   injects LD_PRELOAD=/system/lib64/libdecshim.so (test/decshim.c):
+   logs MakeFromEncoded results per file + glReadPixels patch at
+   eglSwapBuffers (draw-failure vs blit-failure discriminator) via
+   /dev/kmsg -> serial. Boot as cc11 with private userdata.
