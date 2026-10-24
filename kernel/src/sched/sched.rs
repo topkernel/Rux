@@ -1862,6 +1862,18 @@ pub fn schedule_dead_never_returns() {
     }
 }
 
+/// The idle task's comm as Linux shapes it: "swapper/<cpu>" (used by
+/// the sched:sched_switch tracepoint; Rux's idle Task keeps an empty
+/// comm).
+fn swapper_comm(cpu: usize) -> [u8; 16] {
+    let mut out = [0u8; 16];
+    let name = alloc::format!("swapper/{}", cpu);
+    let bytes = name.as_bytes();
+    let n = bytes.len().min(15);
+    out[..n].copy_from_slice(&bytes[..n]);
+    out
+}
+
 unsafe fn __schedule() {
     clear_need_resched();
 
@@ -2266,6 +2278,46 @@ unsafe fn __schedule() {
     // SAFETY: Runnable tasks cannot be freed while still on a CPU or runqueue.
     // IRQs remain disabled on this CPU, preventing concurrent scheduling.
     if !next.is_null() {
+        // The sched:sched_switch tracepoint (Linux records it in
+        // __schedule just before the switch). One `armed()` check when
+        // off; the prev/next fields are marshalled only when on. IRQs
+        // are off here, so the record path must not (and does not)
+        // take locks.
+        if crate::trace::EVENT_SCHED_SWITCH.armed() {
+            // SAFETY: prev is the running task and next was just
+            // picked; both are pinned by the IRQs-off window.
+            unsafe {
+                // The idle task's comm is empty; Linux names it
+                // swapper/N in the trace arguments.
+                let prev_comm = if (*prev).pid() == 0 {
+                    swapper_comm(cpu_id)
+                } else {
+                    *(*prev).comm()
+                };
+                let next_comm = if (*next).pid() == 0 {
+                    swapper_comm(cpu_id)
+                } else {
+                    *(*next).comm()
+                };
+                let prev_words = crate::trace::comm_to_words(&prev_comm);
+                let next_words = crate::trace::comm_to_words(&next_comm);
+                crate::trace::record(
+                    &crate::trace::EVENT_SCHED_SWITCH,
+                    [
+                        prev_words[0],
+                        prev_words[1],
+                        (*prev).pid() as u64,
+                        (*prev).prio() as u64,
+                        (*prev).state().bits() as u64,
+                        next_words[0],
+                        next_words[1],
+                        (*next).pid() as u64,
+                        (*next).prio() as u64,
+                        0,
+                    ],
+                );
+            }
+        }
         context_switch(&mut *prev, &mut *next);
     }
 

@@ -4,61 +4,94 @@
 //!
 //! The tracefs FILES — the filesystem side of the tracing subsystem.
 //!
-//! Linux's tracefs carries the tracing control surface:
+//! Linux's tracefs carries the tracing control surface. The file set
+//! below is the subset Rux implements, each file with Linux's name,
+//! mode and byte format (captured from this host's live
+//! /sys/kernel/tracing, Linux 7.0):
 //!
 //! ```text
-//! /sys/kernel/debug/tracing/
-//! ├── tracing_on            1        (the master switch)
-//! ├── trace                 <the collected records>
-//! ├── available_tracers     nop
-//! ├── current_tracer        nop
+//! /sys/kernel/tracing/           (Rux: /sys/kernel/debug/tracing)
+//! ├── tracing_on          0640  the master switch ("1\n"/"0\n")
+//! ├── trace               0640  the buffered records (write clears)
+//! ├── trace_pipe          0440  the records, consumed on read, no header
+//! ├── available_tracers   0440  "nop\n"
+//! ├── current_tracer      0640  "nop\n" (writing anything else: EINVAL)
+//! ├── available_events    0440  "group:name\n" per event
+//! ├── set_event           0640  the enabled events; write to (dis)arm
+//! ├── buffer_size_kb      0640  the per-CPU ring size in KiB
 //! └── events/
-//!     └── syscalls/
-//!         ├── enable                (the group switch)
-//!         └── sys_enter/
-//!             ├── enable
-//!             ├── id
-//!             └── format
+//!     ├── enable          0640  all events (1/0/X, X = mixed)
+//!     └── <group>/
+//!         ├── enable      0640  the group's events (1/0/X)
+//!         ├── filter     0640  the global-filter note (Linux's text)
+//!         └── <event>/
+//!             ├── enable  0640  1/0
+//!             ├── filter  0640  "none" (no filter engine)
+//!             ├── id      0440  the numeric event id
+//!             └── format  0440  the TRACE_EVENT field description
 //! ```
 //!
-//! Rux publishes the same layout under `/sys/kernel/debug/tracing`
-//! (the path Linux's own documentation uses for tracefs; the kernel
-//! also accepts the newer `/sys/kernel/tracing`).
+//! The X convention is Linux's: a group (or the whole tree) reads
+//! "1" when every event is enabled, "0" when none is, "X" when the
+//! set is mixed.
 
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;
 
 use crate::fs::debugfs;
-use crate::trace::{self, TraceEvent};
+use crate::trace;
 
-/// The directory the tracing files live in.
+/// The directory the tracing files live in (inside debugfs, which is
+/// mounted at /sys/kernel/debug — the path Linux's documentation has
+/// historically used for the same file set).
 const TRACING_DIR: &str = "/tracing";
 
-/// Parse a "0"/"1" (Linux's boolean file convention).
+/// Linux's group-level filter file text (events/<group>/filter).
+const GROUP_FILTER_TEXT: &str = "### global filter ###\n# Use this to set filters for multiple events.\n# Only events with the given fields will be affected.\n# If no events are modified, an error message will be displayed here\n";
+
+/// Parse a boolean knob the way Linux's tracing files do: any number
+/// is accepted, zero is off, everything else is on.
 fn parse_bool(buf: &[u8]) -> Option<bool> {
     let text = core::str::from_utf8(buf).ok()?.trim();
-    match text {
-        "0" | "N" | "n" | "false" => Some(false),
-        "1" | "Y" | "y" | "true" => Some(true),
-        _ => None,
+    if text.is_empty() {
+        return None;
+    }
+    match text.parse::<u64>() {
+        Ok(v) => Some(v != 0),
+        Err(_) => None,
     }
 }
 
-/// Publish the tracing files.
-///
-/// Returns the number of files created.
-pub fn register() -> usize {
-    let mut count = 0usize;
+/// The 1/0/X reading of a set of enable switches.
+fn set_state(on: usize, total: usize) -> char {
+    if total == 0 || on == 0 {
+        '0'
+    } else if on == total {
+        '1'
+    } else {
+        'X'
+    }
+}
 
+/// The distinct groups, in name order.
+fn groups() -> Vec<&'static str> {
+    let mut out: Vec<&'static str> = trace::EVENTS.iter().map(|e| e.group).collect();
+    out.sort_unstable();
+    out.dedup();
+    out
+}
+
+/// Publish the tracing files.
+pub fn register() {
     if !debugfs::create_dir(TRACING_DIR) {
-        return 0;
+        return;
     }
 
     // --- the master switch ------------------------------------------
-    if debugfs::create_file(
+    debugfs::create_file(
         &format!("{}/tracing_on", TRACING_DIR),
-        0o644,
+        0o640,
         || {
             let mut out = alloc::vec![b'0'];
             if trace::tracing_on() {
@@ -74,39 +107,41 @@ pub fn register() -> usize {
             }
             None => crate::errno::Errno::InvalidArgument.as_neg_i32(),
         }),
-    ) {
-        count += 1;
-    }
+    );
 
     // --- the collected records ---------------------------------------
-    if debugfs::create_file(
+    debugfs::create_file(
         &format!("{}/trace", TRACING_DIR),
-        0o644,
+        0o640,
         || trace::render_trace().into_bytes(),
         // Linux: writing to the trace file clears the buffer.
         Some(|_buf: &[u8]| {
             trace::clear();
             0
         }),
-    ) {
-        count += 1;
-    }
+    );
+
+    // --- the consuming reader ----------------------------------------
+    debugfs::create_file(
+        &format!("{}/trace_pipe", TRACING_DIR),
+        0o440,
+        || trace::render_pipe().into_bytes(),
+        None::<fn(&[u8]) -> i32>,
+    );
 
     // --- the tracers --------------------------------------------------
     // Rux has no tracer of its own: the events are the whole facility,
     // which is what Linux's "nop" tracer means — it records nothing by
     // itself, the tracepoints do.
-    if debugfs::create_file(
+    debugfs::create_file(
         &format!("{}/available_tracers", TRACING_DIR),
-        0o444,
+        0o440,
         || b"nop\n".to_vec(),
         None::<fn(&[u8]) -> i32>,
-    ) {
-        count += 1;
-    }
-    if debugfs::create_file(
+    );
+    debugfs::create_file(
         &format!("{}/current_tracer", TRACING_DIR),
-        0o644,
+        0o640,
         || b"nop\n".to_vec(),
         Some(|buf: &[u8]| {
             let text = core::str::from_utf8(buf).unwrap_or("").trim();
@@ -117,108 +152,251 @@ pub fn register() -> usize {
                 crate::errno::Errno::InvalidArgument.as_neg_i32()
             }
         }),
-    ) {
-        count += 1;
-    }
+    );
+
+    // --- the event catalog --------------------------------------------
+    debugfs::create_file(
+        &format!("{}/available_events", TRACING_DIR),
+        0o440,
+        || {
+            let mut names: Vec<String> = trace::EVENTS
+                .iter()
+                .map(|e| format!("{}:{}", e.group, e.name))
+                .collect();
+            names.sort();
+            let mut out = String::new();
+            for name in names {
+                out.push_str(&name);
+                out.push('\n');
+            }
+            out.into_bytes()
+        },
+        None::<fn(&[u8]) -> i32>,
+    );
+    // set_event: read lists the armed events; write (dis)arms by name.
+    debugfs::create_file(
+        &format!("{}/set_event", TRACING_DIR),
+        0o640,
+        || {
+            let mut out = String::new();
+            let mut names: Vec<String> = trace::EVENTS
+                .iter()
+                .filter(|e| {
+                    e.enabled
+                        .load(core::sync::atomic::Ordering::Relaxed)
+                })
+                .map(|e| format!("{}:{}", e.group, e.name))
+                .collect();
+            names.sort();
+            for name in names {
+                out.push_str(&name);
+                out.push('\n');
+            }
+            out.into_bytes()
+        },
+        Some(|buf: &[u8]| set_event_write(buf)),
+    );
+
+    // --- the ring size -------------------------------------------------
+    debugfs::create_file(
+        &format!("{}/buffer_size_kb", TRACING_DIR),
+        0o640,
+        || {
+            let kb =
+                trace::RING_CAPACITY * core::mem::size_of::<trace::TraceRecord>() / 1024;
+            alloc::format!("{}\n", kb).into_bytes()
+        },
+        // The rings are statically allocated; there is nothing to
+        // resize, so every write is refused.
+        Some(|_buf: &[u8]| crate::errno::Errno::InvalidArgument.as_neg_i32()),
+    );
 
     // --- the event tree ------------------------------------------------
-    for event in trace::EVENTS.iter() {
-        let group_dir = format!("{}/events/{}", TRACING_DIR, event.group);
-        let event_dir = format!("{}/{}", group_dir, event.name);
-        if !debugfs::create_dir(&group_dir) || !debugfs::create_dir(&event_dir) {
-            continue;
-        }
+    let events_dir = format!("{}/events", TRACING_DIR);
+    for group in groups() {
+        let group_dir = format!("{}/{}", events_dir, group);
+        for event_ref in trace::EVENTS.iter().filter(|e| e.group == group) {
+            // A 'static reference, so the closures below can own it.
+            let event: &'static trace::TraceEvent = event_ref;
+            let event_dir = format!("{}/{}", group_dir, event.name);
 
-        // The per-event switch.
-        if debugfs::create_file(
-            &format!("{}/enable", event_dir),
-            0o644,
-            || {
-                let mut out = alloc::vec![b'0'];
-                if event.enabled.load(core::sync::atomic::Ordering::Relaxed) {
-                    out[0] = b'1';
-                }
-                out.push(b'\n');
-                out
-            },
-            Some(|buf: &[u8]| match parse_bool(buf) {
-                Some(on) => {
-                    event
+            // The per-event switch.
+            debugfs::create_file(
+                &format!("{}/enable", event_dir),
+                0o640,
+                || {
+                    let mut out = alloc::vec![b'0'];
+                    if event
                         .enabled
-                        .store(on, core::sync::atomic::Ordering::Relaxed);
-                    0
-                }
-                None => crate::errno::Errno::InvalidArgument.as_neg_i32(),
-            }),
-        ) {
-            count += 1;
-        }
-
-        // The event id.
-        if debugfs::create_file(
-            &format!("{}/id", event_dir),
-            0o444,
-            || alloc::format!("{}\n", event.id).into_bytes(),
-            None::<fn(&[u8]) -> i32>,
-        ) {
-            count += 1;
-        }
-
-        // The format description.
-        if debugfs::create_file(
-            &format!("{}/format", event_dir),
-            0o444,
-            || event.format_file().into_bytes(),
-            None::<fn(&[u8]) -> i32>,
-        ) {
-            count += 1;
-        }
-
-        // The group switch (all the events of the group).
-        if debugfs::create_file(
-            &format!("{}/enable", group_dir),
-            0o644,
-            || {
-                let mut out = alloc::vec![b'0'];
-                for other in trace::EVENTS.iter() {
-                    if other.group == event.group
-                        && other.enabled.load(core::sync::atomic::Ordering::Relaxed)
+                        .load(core::sync::atomic::Ordering::Relaxed)
                     {
                         out[0] = b'1';
-                        break;
                     }
-                }
+                    out.push(b'\n');
+                    out
+                },
+                Some(|buf: &[u8]| match parse_bool(buf) {
+                    Some(on) => {
+                        event
+                            .enabled
+                            .store(on, core::sync::atomic::Ordering::Relaxed);
+                        0
+                    }
+                    None => crate::errno::Errno::InvalidArgument.as_neg_i32(),
+                }),
+            );
+
+            // The event id.
+            debugfs::create_file(
+                &format!("{}/id", event_dir),
+                0o440,
+                || alloc::format!("{}\n", event.id).into_bytes(),
+                None::<fn(&[u8]) -> i32>,
+            );
+
+            // The format description.
+            debugfs::create_file(
+                &format!("{}/format", event_dir),
+                0o440,
+                || event.format_file().into_bytes(),
+                None::<fn(&[u8]) -> i32>,
+            );
+
+            // The event filter — no filter engine, so like a Linux
+            // event with no filter set: reads "none", accepts nothing.
+            debugfs::create_file(
+                &format!("{}/filter", event_dir),
+                0o640,
+                || b"none\n".to_vec(),
+                Some(|_buf: &[u8]| crate::errno::Errno::InvalidArgument.as_neg_i32()),
+            );
+        }
+
+        // The group switch: all the events of the group (1/0/X). The
+        // closures capture only the 'static group name and re-filter
+        // the event table.
+        debugfs::create_file(
+            &format!("{}/enable", group_dir),
+            0o640,
+            move || {
+                let on = trace::EVENTS
+                    .iter()
+                    .filter(|e| {
+                        e.group == group
+                            && e.enabled
+                                .load(core::sync::atomic::Ordering::Relaxed)
+                    })
+                    .count();
+                let total = trace::EVENTS.iter().filter(|e| e.group == group).count();
+                let mut out = alloc::vec![set_state(on, total) as u8];
                 out.push(b'\n');
                 out
             },
-            Some(|buf: &[u8]| match parse_bool(buf) {
+            Some(move |buf: &[u8]| match parse_bool(buf) {
                 Some(on) => {
-                    for other in trace::EVENTS.iter() {
-                        if other.group == event.group {
-                            other
-                                .enabled
-                                .store(on, core::sync::atomic::Ordering::Relaxed);
-                        }
+                    for e in trace::EVENTS.iter().filter(|e| e.group == group) {
+                        e.enabled
+                            .store(on, core::sync::atomic::Ordering::Relaxed);
                     }
                     0
                 }
                 None => crate::errno::Errno::InvalidArgument.as_neg_i32(),
             }),
-        ) {
-            count += 1;
-        }
+        );
+
+        // The group filter — Linux's global-filter note.
+        debugfs::create_file(
+            &format!("{}/filter", group_dir),
+            0o640,
+            || GROUP_FILTER_TEXT.as_bytes().to_vec(),
+            Some(|_buf: &[u8]| crate::errno::Errno::InvalidArgument.as_neg_i32()),
+        );
     }
 
-    count
+    // The whole-tree switch (events/enable): 1/0/X across every event.
+    debugfs::create_file(
+        &format!("{}/enable", events_dir),
+        0o640,
+        || {
+            let on = trace::EVENTS
+                .iter()
+                .filter(|e| {
+                    e.enabled
+                        .load(core::sync::atomic::Ordering::Relaxed)
+                })
+                .count();
+            let mut out = alloc::vec![set_state(on, trace::EVENTS.len()) as u8];
+            out.push(b'\n');
+            out
+        },
+        Some(|buf: &[u8]| match parse_bool(buf) {
+            Some(on) => {
+                for e in trace::EVENTS.iter() {
+                    e.enabled
+                        .store(on, core::sync::atomic::Ordering::Relaxed);
+                }
+                0
+            }
+            None => crate::errno::Errno::InvalidArgument.as_neg_i32(),
+        }),
+    );
 }
 
-/// The events of one group (used by the group switch).
-pub fn group_events(group: &str) -> Vec<&'static TraceEvent> {
-    trace::EVENTS
-        .iter()
-        .filter(|e| e.group == group)
-        .copied()
-        .collect()
+/// The set_event write handler: comma- or space-separated tokens,
+/// "group:name" (or ":name" for any group, or "all"/"none"), an
+/// optional '!' prefix disarms instead of arming — Linux's grammar.
+fn set_event_write(buf: &[u8]) -> i32 {
+    let text = match core::str::from_utf8(buf) {
+        Ok(t) => t.trim(),
+        Err(_) => return crate::errno::Errno::InvalidArgument.as_neg_i32(),
+    };
+    for token in text.split(|c| c == ',' || c == ' ') {
+        let token = token.trim();
+        if token.is_empty() {
+            continue;
+        }
+        let (disarm, name) = match token.strip_prefix('!') {
+            Some(rest) => (true, rest),
+            None => (false, token),
+        };
+        let enable = |e: &trace::TraceEvent| {
+            e.enabled
+                .store(!disarm, core::sync::atomic::Ordering::Relaxed);
+        };
+        match name {
+            "all" => {
+                for e in trace::EVENTS.iter() {
+                    enable(e);
+                }
+            }
+            "none" => {
+                for e in trace::EVENTS.iter() {
+                    e.enabled
+                        .store(false, core::sync::atomic::Ordering::Relaxed);
+                }
+            }
+            _ => {
+                let (group, event) = match name.split_once(':') {
+                    Some((g, n)) => (g, n),
+                    None => return crate::errno::Errno::InvalidArgument.as_neg_i32(),
+                };
+                // ":name" (empty group) arms every group's event of
+                // that name, as in Linux.
+                let matches: Vec<&trace::TraceEvent> = trace::EVENTS
+                    .iter()
+                    .filter(|e| (group.is_empty() || e.group == group) && e.name == event)
+                    .copied()
+                    .collect();
+                if matches.is_empty() {
+                    return crate::errno::Errno::InvalidArgument.as_neg_i32();
+                }
+                for e in matches {
+                    enable(e);
+                }
+            }
+        }
+    }
+    0
 }
 
 /// The tracing files, as a listing (diagnostics).

@@ -54,43 +54,56 @@ pub fn generate() -> Vec<u8> {
     let now_ns = crate::drivers::timer::monotonic_ns_since_boot();
     out.push_str(&format!("now at {} nsecs\n\n", now_ns));
 
-    // Rux has one clock base, shared by every CPU.
-    out.push_str("cpu: 0\n");
-    out.push_str(" clock 0:\n");
-    out.push_str("  .base:       0000000000000000\n");
-    out.push_str("  .index:      0\n");
-    out.push_str("  .resolution: 1 nsecs\n");
-    out.push_str("  .offset:     0 nsecs\n");
-    out.push_str("active timers:\n");
-
+    // Linux prints one section per online CPU, each carrying all
+    // HRTIMER_MAX_CLOCK_BASES (= 8) clock bases. Rux's timers live in
+    // one global table armed on the monotonic clock — every timer is
+    // listed under cpu 0's clock 0 (the CLOCK_MONOTONIC base) and the
+    // remaining bases/CPU sections print empty, exactly as a base
+    // with no armed timer does on Linux.
+    let num_cpus = crate::arch::smp::num_started_cpus().min(crate::config::MAX_CPUS);
     let mut timers = crate::timer::snapshot_timers();
     // Linux lists the timers in expiry order.
     timers.sort_by_key(|t| if t.expires_time != 0 { t.expires_time } else { u64::MAX });
 
-    for (i, timer) in timers.iter().enumerate() {
-        let name = if timer.tfd_addr != 0 {
-            "timerfd"
-        } else if timer.signo != 0 {
-            "alarm"
-        } else if timer.wake_pid != 0 {
-            "wake"
-        } else {
-            "oneshot"
-        };
-        out.push_str(&format!(" #{}: <{:016x}>, {}, S:01\n", i, timer.id, name));
+    for cpu in 0..num_cpus {
+        out.push_str(&format!("cpu: {}\n", cpu));
+        for base in 0..8u32 {
+            out.push_str(&format!(" clock {}:\n", base));
+            out.push_str("  .base:       0000000000000000\n");
+            out.push_str(&format!("  .index:      {}\n", base));
+            out.push_str("  .resolution: 1 nsecs\n");
+            out.push_str("  .offset:     0 nsecs\n");
+            out.push_str("active timers:\n");
+            if cpu != 0 || base != 0 {
+                continue;
+            }
+            for (i, timer) in timers.iter().enumerate() {
+                let name = if timer.tfd_addr != 0 {
+                    "timerfd"
+                } else if timer.signo != 0 {
+                    "alarm"
+                } else if timer.wake_pid != 0 {
+                    "wake"
+                } else {
+                    "oneshot"
+                };
+                out.push_str(&format!(" #{}: <{:016x}>, {}, S:01\n", i, timer.id, name));
 
-        // The expiry, in nanoseconds. A jiffy-only timer has no
-        // high-resolution deadline; it is reported at the jiffy grid.
-        let expires_ns = if timer.expires_time != 0 {
-            timer.expires_time * TICKS_TO_NS
-        } else {
-            timer.expires * 1_000_000_000 / 100
-        };
-        let in_ns = expires_ns.saturating_sub(now_ns);
-        out.push_str(&format!(
-            " # expires at {}-{} nsecs [in {} to {} nsecs]\n",
-            expires_ns, expires_ns, in_ns, in_ns
-        ));
+                // The expiry, in nanoseconds. A jiffy-only timer has
+                // no high-resolution deadline; it is reported at the
+                // jiffy grid (KERNEL_HZ = 100).
+                let expires_ns = if timer.expires_time != 0 {
+                    timer.expires_time * TICKS_TO_NS
+                } else {
+                    timer.expires * 1_000_000_000 / crate::config::KERNEL_HZ as u64
+                };
+                let in_ns = expires_ns.saturating_sub(now_ns);
+                out.push_str(&format!(
+                    " # expires at {}-{} nsecs [in {} to {} nsecs]\n",
+                    expires_ns, expires_ns, in_ns, in_ns
+                ));
+            }
+        }
     }
 
     out.into_bytes()

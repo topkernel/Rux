@@ -1431,6 +1431,9 @@ unsafe fn procfs_getattr(inode: &Inode, stat: &mut crate::fs::Stat) -> i32 {
         InodeMode::S_IFDIR | 0o555  // read-only directory
     } else if node.is_symlink() {
         InodeMode::S_IFLNK | 0o777
+    } else if node.name.as_slice() == b"sysrq-trigger" {
+        // Linux: /proc/sysrq-trigger is write-only (0200, root).
+        InodeMode::S_IFREG | 0o200
     } else if node.sysctl_write.is_some()
         || node.pid_file_kind == Some(PidFileKind::OomScoreAdj)
         || matches!(
@@ -1972,6 +1975,12 @@ unsafe fn procfs_open(inode: &Inode, file: &crate::fs::File) -> i32 {
         None => return 0,
     };
     let node = &*(node_ptr as *const ProcFSNode);
+
+    // /proc/sysrq-trigger: a write-only node (Linux mode 0200) — an
+    // open for read is refused, as on the live host.
+    if node.name.as_slice() == b"sysrq-trigger" && !file.flags().is_writeonly() {
+        return errno::Errno::PermissionDenied.as_neg_i32();
+    }
 
     // /proc/kmsg stream: single-reader gate (second concurrent open
     // EBUSY, Linux fs/proc/kmsg.c), NO content snapshot — reads consume
