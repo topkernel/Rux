@@ -133,6 +133,7 @@ mod dfx;
 mod ipc;
 mod io_uring;
 mod timer;
+mod panic_policy;
 mod trace;
 mod module;
 
@@ -1628,8 +1629,8 @@ fn panic(info: &PanicInfo) -> ! {
     // Flush persistent log
     crate::printk::persistent_log_flush();
 
-    // Halt
-    loop {
-        crate::arch::cpu::wfi();
-    }
+    // What happens next is the `panic=` policy (Linux): halt by
+    // default, reboot after N seconds or immediately when the command
+    // line asks for it.
+    crate::panic_policy::apply();
 }
