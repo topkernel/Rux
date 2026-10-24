@@ -4562,3 +4562,7 @@ movsq) reading 0x3a8 bytes from 0x7ff000729000 = a PROT_NONE (0x10)
 thread-stack guard page top; source object spans past the stack top.
 Same 0x3fbf077000 module region as the launcher crash — the module is
 the DB/SharedBlock family (RDB CursorWindow-class shared memory).
+CORRECTION (06:45, coordinator): 6ba58562 + the five other leg-17
+commits (censusat, peek LIVE/v3, sweep_stale_async, both pin fixes)
+merged to MAIN as de41d5ab shortly after this section opened — my
+06:24 "NOT in main" check predates it. Branch already carries all.
