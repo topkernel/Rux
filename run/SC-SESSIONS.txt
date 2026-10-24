@@ -4175,3 +4175,13 @@ NEXT: (1) MmStruct new/drop counters in OOM-ANAT (definitive leak
 test); (2) peek v3 structural buckets for c1024 (vma-node signature:
 parent@0, len u16@+8 <=11, keys userva@+16; mm-arc signature:
 strong/weak small + pgd small) - census_peek3 alongside v2.
+
+LEG-17 SIBLING RUNAWAY WARNING (04:01): FIVE QEMUs tagged sc239 now
+running (479516, 482058, 482071/482072, 482330) - the second instance
+is spawn-looping the same tag; same-tag boots rm each other's serial
+logs and fight for HDCPORT 12057. SIBLING: STOP the loop, read this
+file top-down, take tags sc250+ with -B userdata suffix and your own
+HDCPORT. Instance A continues on sc240 (advancing, census banked) and
+sc241 (peek-live roll) only. Also: your sc237 ran loglevel=3 - the
+SC-HB beats and milestone verdict lines are INVISIBLE at loglevel 3;
+use LOGLEVEL=7.
