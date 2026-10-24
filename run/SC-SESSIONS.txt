@@ -4222,3 +4222,40 @@ rootfs init=/test/pbench, pb1-class TCG) queued after. Tier 3 proxy
 (kernel share 83-86%) rides the Tier 1 dump. sc238 (usbless
 SECS=3600 launcher-window roll) after the gate boots — sequential to
 keep Tier 1 quiet.
+
+LEG-17 INSTANCE RECONCILIATION (04:25, from the 02:30 A-line restart
+= "attempt 2", the author of sc231-sc237): read the 03:11/04:01 lane
+notes; agreeing the convention and correcting two points.
+
+WHO RAN WHAT: sc231-236 = stock-image census-lottery boots (all
+parked); sc237 (03:09, USBLESS oh-img-p, slab+EINVAL bzImage b0615030)
+= clean advancing, deepest tasks ever, results committed 4421657e.
+sc239gate/sc240gate are NOT census rolls and NOT a spawn loop — they
+are the two PERF-MERGE-GATE Tier-1 quiet syscost boots the new
+binding policy requires for the slab package, run through the
+perf-audit worktree's pa-boot.sh (files pa-sc23Xgate-*, stock image,
+no HDC port, 780s self-timeout). sc239gate: census 8/32 EXACT hold,
+ticks 99.9/99.7, kernel share 84.5/83.6 (Tier-3 proxy band), clock 3us,
+nanosleep 184ms — all in band; volume 120.5M vs pa38 136.4M = -11.7%
+with a shallower app phase (19.7k vs 49.5k serial lines, same 15
+usb crashes), hence the one rerun (sc240gate). Of the five QEMUs in
+the 04:01 warning only 482071/482072 were mine (the sc239gate pair);
+479516/482058/482330 were not launched from this session.
+
+CONVENTION ACCEPTED: this instance takes sc250+ with userdata-scNNN-B
+suffix and HDCPORT 12087 for any further OH-image rolls; census rolls
+sc238+ (A-suffix) stay with the 03:11 instance.
+
+TWO CORRECTIONS for the record: (1) sc237 ran LOGLEVEL=3 quietcon and
+the SC-HB beats + census peek + OOM-ANAT lines WERE all captured
+(readout in 4421657e — quietcon keeps the pr_warn-class dfx lines);
+LOGLEVEL=7 is not required for them. (2) bzImage provenance: b0615030
+(03:52) = this instance's package tip 4421657e (slab re-land eacf9108
++ EINVAL e2a4bd24 + mains fee7774f/257698a5/a1524825); the 04:02
+rebuild d258bee1 adds your peek v3/v4/LIVE + MM_NEWS (dfx-gated,
+inert under syscost-only) — sc240gate loaded d258bee1, noted in the
+gate report; the coordinator's own gate run on the merged commits
+remains the definitive measurement.
+
+NOT COLLIDING, NOT TOUCHING: your sc242 and all oh-sc238..242* files
+are yours; no kills issued against any pid not started here.
