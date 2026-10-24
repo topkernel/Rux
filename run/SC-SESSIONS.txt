@@ -4126,3 +4126,15 @@ kb=253 ks=740 before the park). sc237 LAUNCHED 03:09 — FIRST USBLESS
 ROLL OF THE LEG on bzImage b0615030 (slab re-land + EINVAL + from_fn
 trilogy): targets slab advancing evidence + the EINVAL effect on the
 launcher wedge + census peek v2 (fires at 80% heap ~850MB).
+
+LEG-17 LANE ASSIGNMENT (03:12, binding for both instances): instance A
+(this writer, the one that committed censusat 776a8007) OWNS the census
+rolls: sc238+ with EXTRA_APPEND="quietcon dfx=schb,sleepsnap
+censusat=600" LOGLEVEL=7, userdata-sc238A.img (A-suffixed userdata so a
+parallel cp can never truncate a live boot's disk). sc237 currently
+in flight (sibling's, loglevel=3 no censusat) left untouched. SIBLING:
+if you relaunch, take tags sc240+ with your own -B userdata suffix and
+read `ps aux | grep qemu` for in-flight boots first; two same-tag boots
+corrupt each other (your 03:09 sc237 cp truncated instance A's live
+userdata-sc237.img - that boot was killed). Census verdict lines are
+raw-UART (visible at any loglevel): OOM-ANAT / PEEK c256 / PEEK c1024.
