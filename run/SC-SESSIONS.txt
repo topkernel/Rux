@@ -4185,3 +4185,40 @@ HDCPORT. Instance A continues on sc240 (advancing, census banked) and
 sc241 (peek-live roll) only. Also: your sc237 ran loglevel=3 - the
 SC-HB beats and milestone verdict lines are INVISIBLE at loglevel 3;
 use LOGLEVEL=7.
+
+sc237 RESULTS (03:09-03:54, usbless oh-img-p, bzImage b0615030 = slab
+re-land + EINVAL + from_fn, SMP2 4G KVM, quietcon dfx=schb,sleepsnap,
+SECS=2700): THE FIRST CLEAN ADVANCING USBLESS ROLL OF THE LEG and the
+deepest tasks-ever boot on any image class:
+- t=2401s final beat: pidmax=5042 tasks=3445 heap=955MB zfree=147K
+  pages (576MB zone free) — STILL CLIMBING at the wall timeout; the
+  floor never formed in-window (sc228's floor: 831MB@5143 with 3173
+  tasks; sc237 at matched pidmax holds 300+ MORE live tasks — the
+  usbless population is real services, not crash/respawn churn).
+- ZERO usb_host crashes (stock-image boots sc231-236 + pa38 all carry
+  the storm). ZERO rd_fail lines — the EINVAL fix removed the
+  launcher's 156K-iteration EBADF spin class entirely. ZERO canary
+  hits, ZERO panics. One USEGV: render_service pid 582, ripbytes
+  48 8b 78 e0 / 48 01 df — the KNOWN RS mm-crash class (mm lane).
+- Slab live and packing: SC-ANAT kb=981 ks=2941 at t=1814 (2.998
+  slots/block = 99.9% packing; o6=62720 pages = 245MB in order-6
+  blocks vs o5 fallback 53MB early only).
+- CENSUS PEEK v2 FIRED at ~837MB: c256 sampled=30 distinct=24 (first
+  words: user-VA pointers 0x7ff0..., small ints 1/2/65535 — a mixed
+  class, NOT one type); c1024 sampled=3 distinct=3 (hdr 2, 65535, one
+  huge value) — the v2 sampler STILL under-samples c1024 (3 of 84K
+  live objects; the 32-page sample window keeps missing the class's
+  dense pages). Type attribution needs peek v3: walk the class's page
+  LIST, not the head pages. Recorded as next-leg work.
+- LESSON: every "park lottery" boot tonight was a stock-image boot;
+  usbless went through the park point at full flow. Launcher-line
+  full rolls are USBLESS from sc237 onward.
+
+PERF MERGE GATE (new binding policy, main a1524825): running the tier
+checks for the slab package now. Tier 1 (quiet syscost 780s, stock
+image, pa38-recipe pa-boot.sh, kernel b0615030) launched 03:59 as
+sc239gate in the perf-audit worktree. Tier 2 (pbench P1-P7, minimal
+rootfs init=/test/pbench, pb1-class TCG) queued after. Tier 3 proxy
+(kernel share 83-86%) rides the Tier 1 dump. sc238 (usbless
+SECS=3600 launcher-window roll) after the gate boots — sequential to
+keep Tier 1 quiet.
