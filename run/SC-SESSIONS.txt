@@ -3075,3 +3075,35 @@ coordinator, written while sc197 rolls):
 - riscv64 make test on THIS branch: main's 77ec1247 (image window fix)
   is NOT merged into feature/samgr-callback yet - a make test here
   would re-hit the boot-stack window bug. Merge main before testing.
+
+SESSION R TENTH LEG - sc197 VERDICT + sc198 DIAGNOSTIC ROLL (10:4x):
+THE QUIET BOOT HAS A SECOND, INVISIBLE SOFT-WEDGE SHAPE; sc198 (quietcon
++ LOGLEVEL=4) IS ROLLING TO MAKE IT VISIBLE.
+
+- sc197 (v6, FRESH scgold copy, quietcon + LOGLEVEL=3, launched 10:09,
+  killed 10:40): oracle up at min 1 (fresh-copy display bring-up works
+  - sc196's black screen was the warm-boot difference), then the boot
+  STOPPED PROGRESSING in the pid 900-1100 zone from ~min 12 to kill at
+  min ~30 (sc195 by then was past 2500 with ArkTS running). No RWFRZ,
+  no KERNPANIC, no sysrq-c, no permanent strand (all PREEMPT-LEAK
+  transient), serial fell to ~190B/s probe trickle, StorageDaemon
+  radar line ticking = alive but everyone-else-blocked. RAM census:
+  launcher strings ZERO (never started); hilogd buffer NOT findable
+  (sc195's "ring region" at 0x1877xxxx was hilogd's USERSPACE heap
+  under that boot's ASLR, not the kernel stash - correcting my earlier
+  note; the stash's kernel address is still unidentified).
+- READ: the quiet boot has (at least) two failure shapes - the min-1
+  devmgr rwlock freeze (ELIMINATED by quietcon, sc195 proof) and an
+  early soft-wedge around the display-stack/service zone that leaves
+  NO rwlock freeze and NO kernel-side evidence - with loglevel=3 the
+  binder-stall/stkfutex census is muted exactly when it is needed.
+  Whether it is the same circular family without the rwlock signature
+  or something new is THE open question for sc198.
+- sc198 (launched 10:41, 60 min): v6 bzImage, fresh scgold copy,
+  QUIETCON + LOGLEVEL=4 - userspace console stays muted (the 60% term)
+  while ALL pr_warn! probes print (the 17% term returns): the missing
+  matrix cell. If the soft-wedge forms, the binder-stall/stkfutex/
+  SACMP census will name the blocked pair. Next leg: read
+  run/oh-sc198-serial.log for the stall shape; the fix is then either
+  userspace-circular (C-line REST retest evidence pending) or a wake/
+  residency term we have not met yet.
