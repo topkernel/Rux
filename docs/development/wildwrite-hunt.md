@@ -3257,3 +3257,28 @@ rsp=0x7ff090410fc8" line (a USER frame). Confirmed MY lane's probe
   close-out (lock counter, census hook, A/B scripts, doc).
 - For the perf line (pa16): the magazine is on feature/wildwrite-hunt,
   validated per the ladder above; merge-window ready.
+
+### Session 35 final ledger
+
+- MAIN r63 (FULL): CLEAN — 69205 lines, 0 WW-HIT / 0 heals / 0 panics.
+- LOAD r10 (FULL): CLEAN — 164395 lines, 740 sdc cycles, 0 markers.
+- MAIN r64 (FULL): CLEAN — 0 WW-HIT / 0 heals / 0 panics, armed try 0.
+- LOAD r11 (FULL): CLEAN — 164821 lines, 793 sdc cycles, 0 markers.
+- Cumulative: **0 WW-HIT across r1-r64 complete rounds** (plus
+  partials), 0 META-SMASH. Load surface: p1 + r1-r11 = **~8267 sdc
+  exec cycles over 12 full armed load-hours**, zero fires, zero false
+  positives.
+- Standing state for the successor: chains at r65/load-r12 (started
+  10:50:10/10:50:21, budget ends ~11:35), driver roots 176512/176547
+  (reparented orphans — check liveness FIRST with ps before assuming
+  death; the s10/s34 lesson). If dead, relaunch:
+    ./run/ww-chain2.sh  ww-s2  100 12371 <next-main-round>
+    ./run/ww-loadchain.sh wwload 100 12381 <next-load-round>
+  and record new driver roots in run/ww-s35-proctree.txt's successor.
+  False-capture triage signature unchanged (badaddr user half + rip in
+  handle_timer_tick after a user-frame WW IRQ-OFF-WINDOW line = probe
+  bug; real capture = badaddr inside the guard cluster
+  0xffffffff80a7a000-0xffffffff80a7bfff with rip at the writer).
+- The allocator magazine (cb51db03 + 64156dcb) is merge-window ready;
+  the perf line's EFLAGS sampler can independently confirm the
+  wall-clock share now that the lock traffic is down ~94%.
