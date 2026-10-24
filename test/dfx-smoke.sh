@@ -17,7 +17,7 @@ set -uo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 KERNEL="${1:-$ROOT/target/riscv64gc-unknown-none-elf/debug/rux}"
 LOG="${2:-$ROOT/run/dfx-smoke-serial.log}"
-BOOT_DELAY="${BOOT_DELAY:-15}"
+BOOT_DELAY="${BOOT_DELAY:-30}"
 TIMEOUT="${TIMEOUT:-240}"
 
 mkdir -p "$ROOT/run"
@@ -98,6 +98,9 @@ rm -f "$LOG"
     echo 'echo ===SMOKE: proc self stat fields ==='
     sleep 0.3
     echo 'cat /proc/self/stat'
+    sleep 0.3
+    echo 'echo ===SMOKE: proc diskstats ==='
+    echo 'cat /proc/diskstats'
     sleep 0.3
     echo 'echo ===SMOKE: proc kallsyms ==='
     sleep 0.3

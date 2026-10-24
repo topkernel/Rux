@@ -55,6 +55,7 @@ pub mod mounts;
 pub mod loadavg;
 pub mod self_proc;
 pub mod pid;
+pub mod diskstats;
 pub mod interrupts;
 pub mod kallsyms;
 pub mod locks;
@@ -525,6 +526,8 @@ impl ProcFSSuperBlock {
         self.create_dynamic_file("kallsyms", kallsyms::generate);
         // The held file locks (Linux layout).
         self.create_dynamic_file("locks", locks::generate);
+        // The per-device I/O statistics (Linux layout).
+        self.create_dynamic_file("diskstats", diskstats::generate);
         // Memory statistics (Linux layout).
         self.create_dynamic_file("vmstat", vmstat::generate);
         self.create_dynamic_file("buddyinfo", vmstat::generate_buddyinfo);

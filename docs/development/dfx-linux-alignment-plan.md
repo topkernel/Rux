@@ -227,10 +227,17 @@ implemented in Linux's format (verified against a Linux guest:
 `1: POSIX  ADVISORY  WRITE 28848 08:12:76022103 0 EOF`), and the
 sysrq `d` command prints the same rows, as Linux's does.
 
+**Part 3 — partly done (cont).** `/proc/diskstats` is implemented in
+Linux's layout (the reference host's line:
+`   7       0 loop0 14 0 34 2 0 0 0 0 0 1 2 0 0 0 0 0 0`): the block
+layer counts reads, writes, sectors and the time spent per device
+(`drivers/blkdev/iostat.rs`, the same place Linux keeps them —
+block/genhd.c). Rux merges no requests, has no discard path and no
+separate flush path, so those columns report zero.
+
 **Part 3 — remaining.**
 
-- `/proc/sched` (per-task runqueue view), `/proc/diskstats`,
-  `/proc/timer_list`.
+- `/proc/sched` (per-task runqueue view), `/proc/timer_list`.
 - `/proc/pagetypeinfo` — the exact text differs between kernel
   versions and the reference host does not expose the file
   (`CONFIG_PROC_PAGE_MONITOR` off), so the format is not verified yet
