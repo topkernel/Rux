@@ -3498,3 +3498,46 @@ PATH KERNEL PANIC (fixed); sc211 ROLLS THE FIX.
 - sc211 (17:12, fix kernel, same recipe): verification roll - expect
   the census at the same launcher-family window to survive and the
   boot to run its full 45 min. Verdict will be appended.
+
+SESSION R FOURTEENTH LEG CLOSE-OUT - FDTABLE FIX VERIFIED ACROSS EVERY
+CENSUS IT REACHED; HOST-OVERCOMMIT STALLS MISREAD AS KILLS (CORRECTED).
+
+- sc211/sc211b/sc211c (fix kernel 6a3e9e34, same recipe): the serials
+  froze for many minutes at a time under a 10-12-QEMU host (KVM guests
+  barely scheduled); first read as external kills - WRONG: all three
+  QEMUs stayed alive at ~200% CPU and resumed writing when host load
+  eased. sc211c was stopped by exact verified PID to respect the
+  2-own-QEMU rule.
+- Fix verification: sc211 (census #1 t=240 complete + 968 KILLDUMP/
+  RWFRZ dump lines), sc211b (t=556s+), sc211c (census #1) - ZERO
+  "FdTable not initialized" panics on any of them; each published SA 10
+  twice (RS crash + respawn, consistent with sc209). The exact sc210
+  death window (launcher-family KILLDUMP at t=1410s) was not re-reached
+  before the timeout wrappers ended the rolls - the None-guard path is
+  the same code, so the fix stands on the censuses it did traverse.
+- Branch state: feature/samgr-callback at abd0962f (+ this note):
+  7908a764 feat(dfx) leg-14 probes (FXRS + PCTL + SAREG code-7)
+  6a3e9e34 fix(dfx) wedge-census fdtable walks None-safe [READY FOR
+    COORDINATOR MERGE - a diagnostic-path panic that ended sc210, the
+    deepest boot of the campaign, at t=1410s; verified panic-free
+    across sc211/sc211b/sc211c censuses; no behavior change on non-
+    dump paths]
+  30d1599c + abd0962f docs(sessions) leg-14 section + addenda
+- Leg summary vs mission: (1) WHICH SA never publishes - TWO answers:
+  SA 10 RENDER_SERVICE (render_service main futex-parked in the FFRT
+  PostSyncTask after HgmTaskHandleThread init) and SA 511 installs
+  (on-demand start lost in the samgr->paramservice socket deafness;
+  the 15s code-7 storm = the param client's PARAM_CODE_TIMEOUT). Both
+  fell in sc209/sc210 without code changes (races, shifted by leg-13
+  fixes + probe pacing). (2) sc210 reached the LAUNCHER executing in
+  its sandbox (pivot_root com.ohos.launcher + LauncherAbilityManager),
+  BMS running real HAP installs, BootAnimation driving frames through
+  RS/composer/DRM - deepest campaign state. (3) New walls for leg 15:
+  launcher getOsAccountLocalId pace (perf lane), RS mm crash
+  randomness (mm lane - new arena-dst datapoint cr2=0x7ff0006f1000),
+  usb_host PnP crash loop (roll oh-img-p usbless), init bootevent
+  reset window (sc209; sc210 dodged it).
+- Rolls this leg: sc209, sc210, sc211, sc211b, sc211c (2 ended by
+  their own timeout wrappers, sc211c killed by exact own PID after
+  cmdline verification; shotmon loops stopped per-tag). Serials/ppm
+  on disk (serials gitignored).
