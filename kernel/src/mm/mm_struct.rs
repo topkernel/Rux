@@ -119,7 +119,9 @@ impl PteLock {
 
     /// `lock()` with IRQs saved for the whole section.
     #[inline]
-    pub fn lock_irqsave(&self) -> PteIrqGuard<'_> {
+    #[track_caller]
+    pub fn lock_irqsave(&self) -> PteIrqGuard<'_> { // pa16 probe
+
         #[cfg(feature = "x86_64")]
         {
             let read = crate::arch::mm::mm_ops::PTE_MODIFY_LOCK.raw.read_irqsave();

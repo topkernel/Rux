@@ -244,14 +244,23 @@ pub fn cpuid(leaf: u32, subleaf: u32) -> (u32, u32, u32, u32) {
 
 /// Enable interrupts (STI)
 #[inline]
+#[track_caller]
 pub fn enable_irq() {
+    // pa16 probe: pre-sti edge (v3 reads the flag BEFORE the asm so the
+    // close/heal decision sees the pre-sti state).
+    crate::dfx::syscost::irq_note_on();
     // SAFETY: setting IF is safe at any point the caller wants IRQs on.
     unsafe { core::arch::asm!("sti", options(nomem, nostack)) };
 }
 
 /// Disable interrupts (CLI)
 #[inline]
+#[track_caller]
 pub fn disable_irq() {
+    // pa16 probe: pre-cli edge; Location::caller() propagates through
+    // the #[track_caller] chain (save_and_disable_irq / irq_save /
+    // lock_irq*) to the critical-section owner.
+    crate::dfx::syscost::irq_note_off(Some(core::panic::Location::caller()));
     // SAFETY: clearing IF is always safe.
     unsafe { core::arch::asm!("cli", options(nomem, nostack)) };
 }
@@ -330,6 +339,7 @@ pub fn get_interrupts_state() -> bool {
 
 /// Save interrupt state and disable interrupts
 #[inline]
+#[track_caller]
 pub fn save_and_disable_irq() -> bool {
     let enabled = get_interrupts_state();
     if enabled {
@@ -340,6 +350,7 @@ pub fn save_and_disable_irq() -> bool {
 
 /// Restore interrupt state
 #[inline]
+#[track_caller]
 pub fn restore_irq(state: bool) {
     if state {
         enable_irq();

@@ -176,6 +176,7 @@ pub fn __do_softirq() -> bool {
     crate::interrupt::preempt_count_add(
         crate::interrupt::preempt::SOFTIRQ_OFFSET
     );
+    crate::dfx::syscost::zone_softirq_enter(); // pa16 probe (splits the open IF=0 segment only on the inline irq-exit path)
 
     let mut restart_count = 0;
     let budget_t0 = crate::drivers::timer::read_time();
@@ -231,6 +232,7 @@ pub fn __do_softirq() -> bool {
     crate::interrupt::preempt_count_sub(
         crate::interrupt::preempt::SOFTIRQ_OFFSET
     );
+    crate::dfx::syscost::zone_softirq_exit(); // pa16 probe
 
     // SAFETY: per-CPU arrays accessed only by current CPU; cpu_id is correct
     unsafe { SOFTIRQ_IN_PROGRESS[cpu].store(0, Ordering::Release); }

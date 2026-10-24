@@ -157,6 +157,7 @@ pub fn preempt_count_reset() {
 #[inline]
 pub fn irq_enter() {
     preempt_count_add(HARDIRQ_OFFSET);
+    crate::dfx::syscost::zone_hardirq_enter(); // pa16 probe
 }
 
 /// Exit IRQ context — decrement hardirq count and process softirqs
@@ -201,6 +202,7 @@ pub fn irq_exit() {
             crate::interrupt::ksoftirqd::wakeup_ksoftirqd();
         }
     }
+    crate::dfx::syscost::zone_hardirq_exit(); // pa16 probe (iret frame boundary)
 }
 
 // ============================================================================

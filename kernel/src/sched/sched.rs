@@ -84,7 +84,9 @@ impl GlobalRunQueue {
 
     /// Lock the global RQ (disable interrupts + preempt + lock).
     #[inline]
-    pub fn lock_irqsave(&self) -> GrqGuard<'_> {
+    #[track_caller]
+    pub fn lock_irqsave(&self) -> GrqGuard<'_> { // pa16 probe: attribute GRQ sections to wake/pick/enqueue callers
+
         let flags = crate::arch::cpu::save_and_disable_irq();
         crate::interrupt::preempt::preempt_count_add(
             crate::interrupt::preempt::PREEMPT_OFFSET,

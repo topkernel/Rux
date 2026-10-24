@@ -337,6 +337,7 @@ impl<T> Spinlock<T> {
     /// Disable interrupts + preempt disable + lock.
     /// Guard drop: unlock + preempt enable + restore interrupts.
     #[inline]
+    #[track_caller]
     pub fn lock_irq(&self) -> SpinlockIrqGuard<'_, T> {
         let flags = irq_save();
         preempt_disable();
@@ -347,6 +348,7 @@ impl<T> Spinlock<T> {
     /// Save interrupt state + disable + preempt disable + lock.
     /// Guard drop: unlock + preempt enable + restore interrupt state.
     #[inline]
+    #[track_caller]
     pub fn lock_irqsave(&self) -> SpinlockIrqGuard<'_, T> {
         let flags = irq_save();
         preempt_disable();
@@ -377,6 +379,7 @@ impl<T> Spinlock<T> {
     }
 
     #[inline]
+    #[track_caller]
     pub fn try_lock_irqsave(&self) -> Option<SpinlockIrqGuard<'_, T>> {
         let flags = irq_save();
         preempt_disable();
@@ -576,11 +579,15 @@ fn preempt_enable() {
 }
 
 #[inline]
+#[track_caller]
 fn irq_save() -> bool {
+    // pa16 probe: track_caller so syscost's REST histogram sees the
+    // outermost lock user instead of this line.
     crate::arch::cpu::save_and_disable_irq()
 }
 
 #[inline]
+#[track_caller]
 fn irq_restore(flags: bool) {
     crate::arch::cpu::restore_irq(flags);
 }
