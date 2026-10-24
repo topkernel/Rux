@@ -4888,6 +4888,14 @@ fn binder_transaction(
         const SAMGR_REMOVE: u32 = 4;
         const SAMGR_ADD_ONDEMAND: u32 = 10;
         const SAMGR_UNLOAD: u32 = 21;
+        // sc209 (leg 14): also trace LOAD (code 7). sc208's 15 s
+        // SLOW-TXN storm was 22/24 foundation->samgr code-7 loads with
+        // exec exactly 15000/30000/89390 ms — samgr's
+        // StartDynamicSystemProcess waiting out the param client's 15 s
+        // set-ack timeout for the "installs" on-demand process (SA 511)
+        // that init never spawns. The parcel head (header + token + said)
+        // names the target of every load offline.
+        const SAMGR_LOAD: u32 = 7;
         // The samgr interface token starts UTF-16 "oh" at parcel offset
         // 12 (after the 8-byte OH parcel header + u32 string length).
         static SAREG_SAMGR_PID: core::sync::atomic::AtomicU32 =
@@ -4896,7 +4904,10 @@ fn binder_transaction(
             core::sync::atomic::AtomicUsize::new(0);
         let mut is_samgr_req = false;
         if !reply
-            && matches!(tr.code, SAMGR_ADD | SAMGR_REMOVE | SAMGR_ADD_ONDEMAND | SAMGR_UNLOAD)
+            && matches!(
+                tr.code,
+                SAMGR_ADD | SAMGR_REMOVE | SAMGR_ADD_ONDEMAND | SAMGR_UNLOAD | SAMGR_LOAD
+            )
         {
             let mut hdr = [0u8; 16];
             let ok = tr.data_buffer != 0
@@ -4919,7 +4930,11 @@ fn binder_transaction(
                 .map(|t| {
                     matches!(
                         t.code,
-                        SAMGR_ADD | SAMGR_REMOVE | SAMGR_ADD_ONDEMAND | SAMGR_UNLOAD
+                        SAMGR_ADD
+                            | SAMGR_REMOVE
+                            | SAMGR_ADD_ONDEMAND
+                            | SAMGR_UNLOAD
+                            | SAMGR_LOAD
                     )
                 })
                 .unwrap_or(false)
@@ -4932,7 +4947,9 @@ fn binder_transaction(
                     .map(|c| core::str::from_utf8(c).unwrap_or(""))
                     .unwrap_or("")
                     .trim_end_matches('\0');
-                let mut pb = [0u8; 64];
+                // sc209: 64 -> 96 bytes so LOAD parcels' SA id survives
+                // past the (longer) samgr interface token.
+                let mut pb = [0u8; 96];
                 let mut pb_ok = false;
                 if tr.data_buffer != 0 {
                     pb_ok = unsafe {
