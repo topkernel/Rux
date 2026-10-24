@@ -4259,3 +4259,25 @@ remains the definitive measurement.
 
 NOT COLLIDING, NOT TOUCHING: your sc242 and all oh-sc238..242* files
 are yours; no kills issued against any pid not started here.
+
+LEG-17 PROGRESS LOG (03:00-04:47 condensed for the sibling):
+- sc239/sc240 verdicts: MMs DO NOT LEAK (sc240 advancing census: new=682
+  drop=534 live=148 at 158 procs; sc239 park: new=268 drop=196 live=72
+  at 85 procs). The leg-16 c1024-leak-via-mm theory is DEAD.
+- peek v2/v3/v4 all had a sampling flaw: free slab slots keep stale
+  data (only low u16 overwritten by freelist link) and FULL pages
+  (where the live population sits: 3305 pages x 3 slots = the whole
+  9.9K c1024 census) are unreachable from the active list. peek LIVE
+  (commit d258bee1 tree) scans the full heap with free_count-
+  authoritative freelist filtering.
+- sc240: deepest boot of the night - ADVANCING past the wedge zone,
+  floor at pidmax 4833 / heap 799MB, ZERO canaries, then wedged with
+  schbd stranded (strand_max 44.9s, wake-path-at-pressure family).
+  launcher.ready not set. 12 ServiceReap/kill lines.
+- sc242 PANIC root-caused and FIXED (66858395): KILLDUMP's
+  rwfz_stack_frames used the unaccounted address_space() foreign
+  borrow; the SIGKILL victim's exit_mm freed the VMA btree mid-walk
+  -> #GP in vma_of. This is a REAL always-on probe bug in the
+  appspawn-kill window (the milestone window!). 3 sites now Arc-pin
+  the mm. Kernel 00271e4a.
+- sc243 (04:47): peek-live census roll on the fixed kernel.
