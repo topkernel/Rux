@@ -1265,6 +1265,14 @@ Open items filed for the next legs / other lanes:
   still short of the UI: installd `Load system ability 511 failed`
   and BMS bundle queries still running at the tail. Why the chain
   stops there is the launcher lane's territory.]
+  [LEG-15 addendum: sc207 (14:5x, rolling at patrol time, SC-HB
+  t=185 s) — no UI markers yet (no bootevent milestones at all at
+  that depth); healthy post-fix census (TERM-DESCHED 8,
+  WAKE-STRANDED 3, PREEMPT-LEAK 0, IRQ-OFF 0); the fixed clock now
+  exposes the deep-boot wait face directly: IPCObjectStub
+  SendRequestInner to *.ISystemAbilityManager at cost:29998 ms
+  (~30 s binder timeouts) and installd SA-511 load failure — the
+  post-grid blocker chain for the launcher lane.]
 
 ### 2h. FIFTEENTH LEG: the tick fix verified before merge — pa23 battery on main + the fix hunk (section 2g's correction measured)
 
