@@ -608,18 +608,31 @@ old text as the historical pre-UI reading.
 
 ### 8.5 Result tables (PLACEHOLDERS — empty until measured)
 
-Table 8a — probe grid (per side: median of 3 boots; p99 in parens):
+Table 8a — probe grid (per side: median of 3 boots; p99 in parens).
+**Linux column BANKED 2026-10-24 (leg 23, ref-r1..r4 — section 8.8);
+Rux column fills on run day.** Linux cells = median of 4 boots
+(med-of-runs; p99 = med-of-runs of per-run p99), unit us:
 
 | bench | Rux (post-UI main-class) | Linux (OHOS 6.6.101) | factor |
 |---|---|---|---|
-| P1 null syscall | PENDING | PENDING | — |
-| P1 clock_gettime | PENDING | PENDING | — |
-| P2 ctx switch (half roundtrip) | PENDING | PENDING | — |
-| P3a/b/c fault anon/COW/file | PENDING | PENDING | — |
-| P4 fork+exit / fork+exec | PENDING | PENDING | — |
-| P5 pipe / dgram pair / PEEK / stream | PENDING | PENDING | — |
-| P6 fs ops (per-op rows) | PENDING | PENDING | — |
-| P7 sleep overshoot 1 ms | PENDING | PENDING | — |
+| P1 null syscall | PENDING | 0.040 (0.050) | — |
+| P1 clock_gettime | PENDING | 0.070 (0.080) | — |
+| P2 ctx switch (half roundtrip) | PENDING | 0.090 (3.318) | — |
+| P3a fault anon | PENDING | 5.010 (15.35) med bimodal 0.38-7.15, see 8.8 | — |
+| P3b fault COW | PENDING | 0.751 (7.845) | — |
+| P3c fault file | PENDING | 0.100 (1.798) | — |
+| P4 fork+exit | PENDING | 10.88 (123.6) | — |
+| P4 fork+exec | PENDING | 22.37 (173.2) | — |
+| P5a pipe roundtrip | PENDING | 0.180 (0.245) | — |
+| P5b dgram send / recv+PEEK | PENDING | 0.155 (1.623) / 0.215 (1.648) | — |
+| P5c stream write 74 B | PENDING | 0.160 (1.803) | — |
+| P6 stat / openclose / read_cached | PENDING | 0.271 / 0.436 / 0.676 | — |
+| P6 getdents (full 1000-entry sweep) | PENDING | 88.88 (345.4) | — |
+| P6 write+fsync 4 KB | PENDING | 4754.99 (30768.9) | — |
+| P6 append 4 KB | PENDING | 0.471 (8.075) | — |
+| P6 mkdir+rmdir pair | PENDING | 40.43 (80.02) | — |
+| P6 unlink | PENDING | 26.99 (47.69) | — |
+| P7 sleep 1 ms overshoot | PENDING | 14.64 (21.22) | — |
 
 Table 8b — syscost refresh vs the pa27 flagship (one quiet post-UI
 boot): IF=0 share __, census TERM/WAKE __/__ (baseline 8/32), ticks
@@ -627,15 +640,19 @@ boot): IF=0 share __, census TERM/WAKE __/__ (baseline 8/32), ticks
 
 ### 8.6 Run-day checklist (the day UI lands on a main-class kernel)
 
+> Leg-23 update: step 4's Linux half is DONE (ref-r1..r4, section 8.8);
+> run day runs the Rux boots only, same private-image recipe.
+
 1. Confirm the milestone in a main-class serial (this lane's patrol or
    the coordinator's signal); record kernel revision.
 2. Merge main into this branch; build; run the standard quiet boot
    (pa32+: syscost=1 sprobe=0, 780 s) — fills table 1's pending row
    and table 8b.
-3. Write the probe binary per 8.2 (design is committed; the code is
-   deliberately not written yet); pick the 8.3 slot from the cfg XMLs;
-   inject into private image copies (Rux + reference).
-4. N=3 + N=3 interleaved probe boots (8.4); parse; fill table 8a.
+3. Build the probe (test/pbench.c, leg 22) and the private images per
+   8.3(A) (slot + trigger decided and validated in 8.8: key_enable
+   slot, launcher.ready param job — run/pbref-inject.sh).
+4. N=3 Rux probe boots (8.4; Linux half banked in 8.8); parse; fill
+   table 8a.
 5. Freeze v1.5: replace v1.4's "Linux norm" reference cells with
    measured pairs where they exist; write the reading paragraph.
 
@@ -712,3 +729,81 @@ quiet-boot smoke): the 8.3(A) late-service slot pick from the OH cfg
 XMLs, the debugfs swap into a private system.img copy, and the probe
 running to DONE inside the OH boot. The quiet-boot path (8.6 step 2
 shape) is fully proven.
+
+### 8.8 Linux reference side BANKED (leg 23, ref-r1..r4): the late-slot inject works — run day is Rux-only
+
+The reference kernel is the OH image's own OHOS 6.6.101 bzImage, so
+its numbers do not move when Rux main moves. Leg 23 pre-collected the
+whole Linux side; table 8a's Linux column is measured, not pending.
+
+**Delivery — 8.3(A) adapted, NOT the fallback.** Slot: `key_enable`,
+read out of the image's own cfgs (`/system/etc/init/*.cfg`, 132 files
+inspected via debugfs). It is the only clean fit for the 8.3 criteria:
+a DEDICATED exec'd binary (`/system/bin/key_enable` — every late SA
+service rides the shared `sa_main`, unusable), uid root (probe needs
+/data writes + `reboot(POWER_OFF)`), `once:1` (no respawn loop), and
+non-essential (it only sets the fs-verity signature requirement). The
+stock trigger (job `init`: ~t=2.7s, too early) is replaced with the
+image's own late-start pattern (audio_server.cfg): a param job
+conditioned on `bootevent.launcher.ready=true`, which also mkdirs
+`/data/local/pbench`. The service gains argv (workdir, results file),
+`sandbox:0`, and `console:1` — the PBENCH lines land live on serial.
+Tooling: `run/pbref-inject.sh` (private reflink system.img; e2fsck -fn
+clean after inject; binary round-trip verified) and `run/pbref-boot.sh`
+(private per-run reflink userdata-tok copy, no snapshot on that drive —
+writes persist; results extracted via debugfs post-poweroff).
+`test/run-oh-linux-ref.sh` gained CPU/SYSIMG/USERDATA_SNAP env knobs;
+its defaults (smp6/8G/-cpu host) are untouched for timeline boots.
+Because the OH userspace driving all of this is identical on both
+kernels, the same recipe transfers to the Rux side on run day — and
+the condition is the milestone itself.
+
+**Boots.** ref-r1..r4 (N=3 per protocol + a 4th for the one wide
+bench, below), machine class matched to the pa series: q35/KVM/`-cpu
+max`/SMP2/4G. All four: 25/25 lines, `PBENCH DONE rc=0`, results file
+extracted, clean `reboot: Power down` (t=32-35s kernel time; the probe
+starts at launcher.ready t=10.1-16.7s depending on host load; ~35-40s
+wall per run). Foreign-QEMU count 4-5 per run. SELinux on the image is
+permissive (avc lines logged, nothing enforced — the injected service
+runs fine in the key_enable domain; one avc line on the final
+reboot(POWER_OFF) is cosmetic).
+
+**Stability (N=3 -> 4).** Per-run med spread: <=6.4% on 18 of 21
+benches. Exceptions:
+
+- `p3a_fault_anon` med is THP-bimodal across runs (7.15 / 3.14 / 6.88
+  / 0.38 us — 70% spread triggered the protocol's 4th run). Cause:
+  Linux transparent hugepages — when a 2MB page backs the region, 511
+  of 512 per-page touches cost ~0. The per-run AVG is stable
+  (9.8-10.3 us/page); treat avg as the comparable statistic for p3a
+  and note Rux has no THP (every page faults individually), so the
+  med comparison itself is a design difference, not noise.
+- `p3c_fault_file` med 0.01-0.10 us: sub-us med = readahead maps ahead
+  of the touch (same shape as the Rux side); p99 carries the real
+  fault.
+- `p6_write_fsync` med range 4457-5208 us (+-8%): host IO load — the
+  boot overlaps other lanes' QEMUs; the range is the honest number.
+
+**Readings worth carrying to run day (Rux column still pending; the
+pb1 smoke was TCG + minimal rootfs, so NO factor is claimed yet):**
+
+- The ext4 metadata-write outlier has a Linux anchor: mkdir+rmdir pair
+  40.4 us, unlink 27.0 us, write+fsync 4.75 ms — vs pb1's Rux
+  provisional 83.2 ms / 32.8 ms / 18.1 ms (TCG). Even allowing for
+  KVM-vs-TCG, the metadata ops are the widest provisional gap in the
+  set (2-3 orders); the run-day KVM pair will size it exactly.
+- Linux's OWN outliers for context: write+fsync 4.75 ms (fsync
+  dominates — same shape as Rux) and getdents full-sweep 88.9 us/1000
+  entries. Everything else is sub-us to tens of us.
+- Sleep resolution 14.6 us overshoot at 1 ms — the post-tick-fix Rux
+  guard row has its reference.
+- The probe overlaps the BOOT_COMPLETED service wave (~10.7s+) by
+  construction — same shape on both sides; medians are robust to it
+  (p99 carries the tail, e.g. p2_ctxsw p99 3.3 us med-of-runs).
+
+Caveats recorded: GPU model 360x720 (ref harness) vs 720x1280 (pa
+harness) — no UI work happens in the probe, cosmetic. Userdata base =
+this worktree's userdata-tok reflink (not oh-robot's 16G stock that
+oh-ref-r1/r2 booted): run-day Rux boots will use the SAME base, so
+side parity holds. p7 wall backstop reads ~1.067 ms/op vs req+avg
+1.016 ms — per-iter clock-pair overhead; med/p99 remain the signal.
