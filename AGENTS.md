@@ -48,6 +48,24 @@ colleague**:
 
 ---
 
+## Merge Gate (binding for ALL kernel-code changes — user policy 2026-10-25)
+
+Every merge into `main` is reviewed on **two dimensions: functional correctness AND performance**. A change that is functionally correct but regresses performance does not merge until fixed or justified with numbers.
+
+The gate, in order (coordinator runs it; lanes pre-verify to avoid surprises):
+
+1. **Dual-arch build** (`PLATFORM=x86_64 make build`, then `rm build/.config && make build`) — rc=0 both.
+2. **riscv64 regression boot** (minimal rootfs scripted serial: cd/proc, rc=0, zero panics).
+3. **`make test`** on riscv64 — full suite green (currently 1096/1096).
+4. **Performance gate** — measured with the in-tree DFX tools (`syscost`, census probes, `test/pbench.c`), against the last-accepted baseline in `docs/development/perf-gate-baseline.md`:
+   - **Tier 1 (all kernel changes)** — one quiet syscost boot (KVM, standard machine config): census counts in band (TERM-DESCHED 8±2, WAKE-REFUSED 32±4, no 1001ms-grid strand class), ticks ≥99.5/s sustained to window end, zero new panic/OOM classes, total syscall volume within ±10% of baseline, key per-op averages (read/write/clock_gettime/nanosleep) within ±20% or improved.
+   - **Tier 2 (changes touching hot paths: mm/, sched/, fs/, ipc/, timer/, arch trap)** — additionally one `pbench` boot: P1-P7 medians within ±20% of the baseline column or improved.
+   - **Tier 3 (allocator or IRQ-path changes)** — additionally an IF=0 measurement (EFLAGS-pair probe; if the probe patch is not yet on main, tick-mode shares from syscost serve as the interim proxy).
+   - Baseline updates only via a merge that passed its own tier; regressions block the merge until fixed or justified in writing with numbers.
+   - If a change's performance effect cannot be measured with existing tools, ADD a DFX tool for it (gated off by default) — measuring is part of the change, not an afterthought.
+
+---
+
 ## Current Goals (2026-10)
 
 Two active goals, in priority order:
