@@ -57,6 +57,7 @@ pub mod self_proc;
 pub mod pid;
 pub mod interrupts;
 pub mod kallsyms;
+pub mod locks;
 pub mod stat;
 pub mod schedstat;
 pub mod softirqs;
@@ -522,6 +523,8 @@ impl ProcFSSuperBlock {
         self.create_dynamic_file("stat", stat::generate);
         // The kernel symbol table (Linux layout).
         self.create_dynamic_file("kallsyms", kallsyms::generate);
+        // The held file locks (Linux layout).
+        self.create_dynamic_file("locks", locks::generate);
         // Memory statistics (Linux layout).
         self.create_dynamic_file("vmstat", vmstat::generate);
         self.create_dynamic_file("buddyinfo", vmstat::generate_buddyinfo);

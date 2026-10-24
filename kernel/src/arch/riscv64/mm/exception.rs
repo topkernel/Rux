@@ -193,8 +193,19 @@ fn no_context(_regs: &mut PtRegs, _fault_addr: VirtAddr) -> MmFaultResult {
 /// # Returns
 /// Handling result
 pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
-    // /proc/vmstat pgfault.
+    // /proc/vmstat pgfault, and the per-task counter behind
+    // /proc/[pid]/stat field 10 (minflt). Linux counts only faults
+    // taken in user mode.
     crate::mm::vmstat::note_fault();
+    if regs.user_mode() {
+        if let Some(task) = crate::sched::current() {
+            // SAFETY: current() returned a live task pointer; this
+            // only touches a per-task atomic counter.
+            unsafe {
+                (*task).min_flt.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            }
+        }
+    }
     let fault_addr = VirtAddr::new(regs.badaddr);
 
     crate::pr_debug!("do_page_fault: addr={:#x}, epc={:#x}, type={:#x}, mode={}",

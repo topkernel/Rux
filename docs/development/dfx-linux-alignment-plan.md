@@ -218,14 +218,28 @@ and names Rux's softirq module already uses) and `/proc/schedstat`
 `yld_count` and `sched_count`). `/proc/stat` also grew Linux's
 aggregate `softirq` line.
 
+**Part 3 — partly done.** Per-task minor-fault counters (field 10 of
+`/proc/[pid]/stat`) and `starttime` (field 22) are real now: the fault
+handlers charge the task's `min_flt`, and the task's start time is
+stamped with the jiffies at which it was built. `/proc/locks` is
+implemented in Linux's format (verified against a Linux guest:
+`1: POSIX  ADVISORY  WRITE 28848 08:12:76022103 0 EOF`), and the
+sysrq `d` command prints the same rows, as Linux's does.
+
 **Part 3 — remaining.**
 
-- `/proc/sched` (per-task runqueue view), `/proc/pagetypeinfo`,
-  `/proc/locks`, `/proc/diskstats`, `/proc/timer_list`.
-- Per-task minor/major fault counters (fields 10/12 of
-  `/proc/[pid]/stat`) and `starttime` (field 22).
+- `/proc/sched` (per-task runqueue view), `/proc/diskstats`,
+  `/proc/timer_list`.
+- `/proc/pagetypeinfo` — the exact text differs between kernel
+  versions and the reference host does not expose the file
+  (`CONFIG_PROC_PAGE_MONITOR` off), so the format is not verified yet
+  and the file is not added rather than guessed.
 - `pgpgin`/`pgpgout` (block-I/O page counters) — Rux has a block layer
-  but no page accounting in it yet.
+  but no per-device I/O accounting in it yet.
+- Per-task major-fault counters (field 12): Rux populates file-backed
+  pages from the page cache instead of reading from the block device
+  inside the fault handler, so there is no fault-time disk read to
+  classify yet and the counter stays 0.
 
 Acceptance: `/proc/stat` totals track `/proc/uptime` within one tick per
 CPU; `/proc/vmstat` counters are monotonic and reconcile against the

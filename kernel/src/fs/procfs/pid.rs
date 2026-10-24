@@ -474,7 +474,8 @@ pub fn generate_stat(pid: u64) -> Vec<u8> {
     };
 
     let (name_str, ppid, state_ch, vsize_pages, rss_pages, sig_mask, exit_code,
-         utime, stime, cutime, cstime, priority, nice, threads, processor, policy) = match task {
+         utime, stime, cutime, cstime, priority, nice, threads, processor, policy,
+         min_flt, maj_flt, start_jiffies) = match task {
         Some(t) => {
             let ch = task_state_char(&t) as char;
             let vsize = t.address_space_arc().map(|mm| mm.total_vm()).unwrap_or(0);
@@ -504,11 +505,17 @@ pub fn generate_stat(pid: u64) -> Vec<u8> {
             let processor = t.ti_cpu();
             // comm (basename, like Linux), not the full exe path. Owned:
             // the Cow would borrow from the match-local binding.
+            let faults = (
+                t.min_flt.load(Relaxed),
+                t.maj_flt.load(Relaxed),
+                t.start_jiffies.load(Relaxed),
+            );
             (task_comm(&t).into_owned(), t.ppid(), ch, vsize, rss, sigmask, ec,
-             ticks.0, ticks.1, ticks.2, ticks.3, prio, nice, threads, processor, policy)
+             ticks.0, ticks.1, ticks.2, ticks.3, prio, nice, threads, processor, policy,
+             faults.0, faults.1, faults.2)
         }
         None => (alloc::string::String::from("unknown"), 0, 'X', 0, 0, 0, 0,
-                 0, 0, 0, 0, 0, 0, 0, 0, 0),
+                 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0),
     };
 
     // Linux's /proc/[pid]/stat has exactly 52 fields (verified against a
@@ -535,9 +542,9 @@ pub fn generate_stat(pid: u64) -> Vec<u8> {
     fields.push("0".into()); // 7  tty_nr
     fields.push("0".into()); // 8  tpgid
     fields.push("0".into()); // 9  flags
-    fields.push("0".into()); // 10 minflt
+    fields.push(min_flt.to_string()); // 10 minflt
     fields.push("0".into()); // 11 cminflt
-    fields.push("0".into()); // 12 majflt
+    fields.push(maj_flt.to_string()); // 12 majflt
     fields.push("0".into()); // 13 cmajflt
     fields.push(utime.to_string()); // 14 utime
     fields.push(stime.to_string()); // 15 stime
@@ -547,7 +554,7 @@ pub fn generate_stat(pid: u64) -> Vec<u8> {
     fields.push(nice.to_string()); // 19 nice
     fields.push(threads.to_string()); // 20 num_threads
     fields.push("0".into()); // 21 itrealvalue
-    fields.push("0".into()); // 22 starttime
+    fields.push(start_jiffies.to_string()); // 22 starttime
     fields.push(vsize_bytes.to_string()); // 23 vsize
     fields.push(rss_pages.to_string()); // 24 rss
     fields.push("0".into()); // 25 rsslim

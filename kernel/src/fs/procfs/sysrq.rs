@@ -33,8 +33,16 @@ fn run_command(cmd: u8) {
             crate::println!("sysrq: crashing the kernel on request");
             panic!("sysrq 'c' — deliberate crash");
         }
-        // Display every lock currently held.
-        b'd' => crate::fs::locks::dump_held_locks(),
+        // Display every lock currently held — Linux's sysrq 'd' prints
+        // the /proc/locks rows.
+        b'd' => {
+            let locks = crate::fs::procfs::locks::render();
+            if locks.is_empty() {
+                crate::println!("sysrq: no locks held");
+            } else {
+                crate::println!("{}", locks.trim_end());
+            }
+        }
         // Send SIGTERM to all processes except init.
         b'e' => signal_all_except_init(crate::signal::Signal::SIGTERM as i32),
         // Invoke the OOM killer.
