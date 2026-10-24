@@ -342,6 +342,9 @@ pub fn stallwatch_tick() {
     {
         return;
     }
+    // Report lines collect here and print AFTER the walk (see the note
+    // at the pr_warn loop below).
+    let mut reports: alloc::vec::Vec<alloc::string::String> = alloc::vec::Vec::new();
     crate::sched::for_each_task(|t| {
         // SAFETY: for_each_task pins the task (per-bucket lock); reads
         // are of stable fields.
@@ -400,7 +403,7 @@ pub fn stallwatch_tick() {
                 let _ = write!(s, " {}", v);
             }
         }
-        crate::pr_warn!("{}", s);
+        reports.push(s);
         let fcur = tk.last_fails_cur.load(Ordering::Relaxed);
         let mut s2 = alloc::string::String::new();
         let _ = write!(s2, "STALLWATCH tid {} fails:", tk.pid());
@@ -412,6 +415,15 @@ pub fn stallwatch_tick() {
                 let _ = write!(s2, " nr{}=-{} a0={:#x}", v & 0xffff, v >> 16, a0);
             }
         }
-        crate::pr_warn!("{}", s2);
+        reports.push(s2);
     });
+    // sc207 (launcher leg 13): print AFTER the walk. The closure runs
+    // under pid-hash bucket locks; a printk there can hold a bucket
+    // across console port-IO, and this scanner itself runs at softirq
+    // time - any task-context bucket holder interrupted by the tick
+    // self-deadlocks against this very walk (sc207 hard-froze both
+    // vCPUs exactly this way against the sleepsnap census printer).
+    for r in &reports {
+        crate::pr_warn!("{}", r);
+    }
 }

@@ -719,6 +719,15 @@ struct BinderTxn {
     /// Target-user address of the NUL-terminated secctx string in the sg
     /// area (0: the target node did not request a security context).
     security_ctx: u64,
+    /// sc208 (launcher leg 13, C-line cross-finding: SAMgr SendRequest
+    /// ~30 s per call once the clock was fixed): lifecycle stamps for the
+    /// SLOW-TXN probe. enq_j = jiffies at BC_TRANSACTION queue time;
+    /// pick_j = jiffies at BR_TRANSACTION delivery (server pickup), 0
+    /// until then. The reply pop computes queue-vs-exec and prints the
+    /// split for any sync txn over 5 s — where the 30 s goes (server not
+    /// picking up vs handler running long) names the next chain link.
+    enq_j: u32,
+    pick_j: core::cell::UnsafeCell<u32>,
 }
 
 impl BinderTxn {
@@ -2481,6 +2490,19 @@ pub fn sleep_snapshot() {
     if !crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SleepSnap) {
         return;
     }
+    // sc207 (launcher leg 13): NEVER print inside the for_each_task
+    // callback - it runs under the pid-hash bucket lock, and one printk
+    // per S-state task held each bucket across console port-IO for ~a
+    // second in total. A timer tick landing on that CPU mid-walk runs
+    // stallwatch_tick's own for_each_task at irq-exit softirq time,
+    // which then spins on the very bucket the interrupted walker holds
+    // (self-deadlock: the releaser is the interrupted task); the other
+    // CPU's scan spins on the same bucket and the machine hard-freezes
+    // with the serial cut mid-line (sc207: both vCPUs 100%, RIP in
+    // pid_hash::lock_bucket from stallwatch_tick). Collect lines here,
+    // print ONCE after the walk with every bucket released.
+    let mut out = alloc::string::String::new();
+    use core::fmt::Write as _;
     crate::sched::for_each_task(|task| {
         // SAFETY: callback runs under the pid-hash bucket lock (same
         // contract as hung_task's check_tasks); reads are confined to
@@ -2518,7 +2540,8 @@ pub fn sleep_snapshot() {
             let name = core::str::from_utf8(&comm[..])
                 .unwrap_or("")
                 .trim_end_matches('\0');
-            crate::pr_info!(
+            let _ = writeln!(
+                out,
                 "sleepsnap: {} tid {} state={:#x} sys={} rip={:#x} a0={:#x} a1={:#x}",
                 name,
                 tk.pid(),
@@ -2529,6 +2552,25 @@ pub fn sleep_snapshot() {
                 a1
             );        }
     });
+    // Emit with every pid-hash bucket released (see the sc207 note
+    // above). One printk for the whole snapshot: ring records have a
+    // length cap, so chunk on line boundaries at a size well under it.
+    if !out.is_empty() {
+        let mut rest = out.as_str();
+        while !rest.is_empty() {
+            let mut cut = rest.len().min(1024);
+            if cut < rest.len() {
+                // Extend to the next newline so lines stay whole.
+                match rest[cut..].find('\n') {
+                    Some(nl) => cut += nl,
+                    None => cut = rest.len(),
+                }
+            }
+            let (chunk, tail) = rest.split_at(cut);
+            crate::pr_info!("{}", chunk);
+            rest = tail;
+        }
+    }
 }
 
 /// World-wide search for queued/stacked transactions SENT by (pid, tid) —
@@ -4342,6 +4384,48 @@ fn binder_transaction(
                     return;
                 }
                 let t = thread.st().txn_stack.pop().unwrap();
+                // sc208 SLOW-TXN probe (C-line: SAMgr SendRequest ~30 s
+                // per call with the fixed clock): split the sync-txn
+                // lifecycle into QUEUE (enq -> server pickup) and EXEC
+                // (pickup -> reply) and print both for anything over 5 s.
+                // Direct console (quietcon boots drop pr_warn pre-ring at
+                // loglevel 3), rate-capped to one line per 2 s. Printed
+                // from inside the WORLD guard like the surrounding
+                // pr_info!s on this path (single short line, bounded).
+                {
+                    let now = crate::drivers::timer::get_jiffies() as u32;
+                    let total = now.wrapping_sub(t.enq_j);
+                    if total >= 500 {
+                        static LAST: core::sync::atomic::AtomicU32 =
+                            core::sync::atomic::AtomicU32::new(0);
+                        use core::sync::atomic::Ordering::Relaxed;
+                        let last = LAST.load(Relaxed);
+                        if now.wrapping_sub(last) >= 200
+                            && LAST
+                                .compare_exchange(last, now, Relaxed, Relaxed)
+                                .is_ok()
+                        {
+                            let pick = unsafe { *t.pick_j.get() };
+                            let q = if pick != 0 { pick.wrapping_sub(t.enq_j) } else { 0 };
+                            let x = if pick != 0 { now.wrapping_sub(pick) } else { total };
+                            let mut w = crate::dfx::backtrace::ConsoleWriter::new();
+                            use core::fmt::Write as _;
+                            let _ = writeln!(
+                                w,
+                                "SLOW-TXN txn{} code {} from pid {} tid {} to pid {} tid {}: total {} ms (queue {} ms, exec {} ms)",
+                                t.id,
+                                t.code,
+                                t.from_proc.as_ref().map(|p| p.pid).unwrap_or(0),
+                                t.from_tid.unwrap_or(0),
+                                t.to_proc.pid,
+                                thread.tid,
+                                total * 10,
+                                q * 10,
+                                x * 10
+                            );
+                        }
+                    }
+                }
                 let (Some(from_proc), Some(from_tid)) = (t.from_proc.clone(), t.from_tid) else {
                     *err_cmd = BR_FAILED_REPLY;
                     crate::pr_info!("binder: BC_REPLY on oneway");
@@ -4779,6 +4863,8 @@ fn binder_transaction(
         offsets_size,
         buffer_off: block_off,
         security_ctx,
+        enq_j: crate::drivers::timer::get_jiffies() as u32,
+        pick_j: core::cell::UnsafeCell::new(0),
     });
 
     // sc155/156 (Session R): SA-table mutation tracer. Session Q closed
@@ -5994,6 +6080,11 @@ fn binder_thread_read(
                             if !is_reply && t.flags & TF_ONE_WAY == 0 {
                                 // The receiver stacks it for its BC_REPLY.
                                 t.set_to_tid(thread.tid);
+                                // sc208 SLOW-TXN probe: server-pickup stamp.
+                                unsafe {
+                                    *t.pick_j.get() =
+                                        crate::drivers::timer::get_jiffies() as u32;
+                                }
                                 let recv_id = t.id as u32;
                                 thread.st().txn_stack.push(t);
                                 // sc79 ROOT CAUSE (the impossible shape):
