@@ -3566,3 +3566,72 @@ rsp=0x7ff090410fc8" line (a USER frame). Confirmed MY lane's probe
     zero variance across 21 rounds, no correlation with anything.
 - Action taken: ledger note only. Chains NOT diverted — capture
   surface unchanged, both chains continue per plan.
+
+## Session 40 (continuation agent — pure watch session: chains adopted
+## alive mid-round at r75/load-r22)
+
+### Inheritance reconstruction (claim 18:41 Oct 24)
+
+- Both chains ALIVE at claim (ps before assumption, the s10/s34 lesson):
+  driver roots 176512 (main, ww-chain2.sh — r75 in flight since
+  18:20:13) / 176547 (load, ww-loadchain.sh — load-r22 since 18:20:49),
+  the same PIDs the s36-s39 handoffs carried — FIFTH consecutive clean
+  PID handoff. Round QEMUs 310675/310685 (main r75) and 310839/310850
+  (load r22), gdb 310746 / 310926 on 12371/12381. Both rounds WW-ARMED
+  19 (GUARD=0xffffffff80a7a000, confirmed in both gdb logs), wildwatch
+  try 0 (serial, both).
+- r74 / load-r21 verdicts re-verified from raw serial logs this claim
+  (not just driver blocks): 0 WW-HIT / WILDWATCH-CANARY / META-SMASH /
+  KERNPANIC / heal / badaddr lines in either log. s39's pending verdicts
+  land CLEAN.
+- Main repo drift check: main = 14d8950d vs merged base a23cee89 —
+  kernel/ IS touched (dfx probes fsw/schb, TSC timekeeper fix 199f308c,
+  ext4/jbd2 perf-audit F4, binder/futex/sched A-line FXRS probes,
+  fdtable None-safety) but ZERO commits under kernel/src/mm/ — frozen
+  hunt pair unaffected; chains NOT rebuilt (per handoff instruction).
+- IRQ-OFF-WINDOW telemetry extensions this claim (both stay inside the
+  adjudicated benign class, but two band edges moved — recorded for the
+  next adjudication, not captures):
+  - r74: 8 lines, ages 105-1236 ms — first observations above 1 s
+    (0x4a6=1190 x2, 0x4d4=1236), 7/8 at the canonical rip
+    ffffffff80573d96, one at 0x80573ed0 (same cpu.rs I/O family).
+    Symbolized on the frozen ELF: 80573d96 = `enable_irq`,
+    80573ed0 = `inb`. Age band on the canonical rip now 101-1236 ms.
+  - load-r21: 7 lines, ages 101-955 ms, but 4/7 at NON-canonical
+    one-off rips, each seen exactly once: 8029c3c0
+    (`Task::sub_preempt_count2_at`), 8061cb5c (`hpet::r32` — the wt1
+    wedge site, as a slow-MMIO stall not a write), 805be79a
+    (`alloc::Global::grow_impl_runtime`), 80448000
+    (`atomic_compare_exchange::<u32>`). Rip diversity under a loaded
+    TCG host supports the vCPU-deschedule jitter reading (a genuine
+    kernel cli-spin would concentrate on one rip); the canonical
+    enable_irq concentration is where IF flips (the measurement point),
+    not where time went. Watch continues; no threshold change.
+  - r74 has one serial line with char-interleaved WAKE-STRANDED text
+    inside an IRQ-OFF-WINDOW line — console write race artifact, not
+    memory corruption.
+- Foreign QEMUs at claim: the samgr-callback oh-sc212 pair (A-line
+  work, off-limits per the rules).
+- Dirty files at claim: run/ww-s2-r75-gdb.cmd + run/wwload-r22-gdb.cmd
+  — the in-flight rounds' gdb command files (per-round tracked
+  artifacts per established practice); folded into this session's
+  ledger commit after their rounds completed.
+
+### Chain ledger (s40 ownership)
+
+- MAIN r74 (FULL 2700 s, closed 18:20:13 under s39's watch): CLEAN —
+  84671 lines, "budget spent" natural end, 0 WW-HIT / 0 watchpoint
+  hits / 0 heals, no panics, 0 badaddr; 8 IRQ-OFF-WINDOW lines (see
+  band note above). Chain self-advanced to r75.
+- LOAD r21 (FULL 2700 s, closed 18:20:49 under s39's watch): CLEAN —
+  170209 lines, 761 sdc exec cycles, 0 gdb hits / 0 capture markers,
+  armed try 0, 0 badaddr; 7 IRQ-OFF-WINDOW lines (see rip-diversity
+  note above). Chain self-advanced to load-r22.
+- Cumulative at claim: **0 WW-HIT across r1-r74 complete rounds** (plus
+  partials), 0 META-SMASH. Load surface: p1 + r1-r21 = **~16407 sdc
+  exec cycles over 22 full armed load-hours**, zero fires, zero false
+  positives.
+- r75 (qemu 310675, gdb 310746) / load-r22 (qemu 310839, gdb 310926)
+  in flight since 18:20:13/18:20:49, budget ends ~19:05; both WW-ARMED
+  19 with GUARD=0xffffffff80a7a000, wildwatch try 0. Driver roots
+  unchanged (176512 / 176547). Verdicts pending.
