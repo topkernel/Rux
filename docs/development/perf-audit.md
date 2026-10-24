@@ -1305,6 +1305,14 @@ Open items filed for the next legs / other lanes:
   and the trailing WAKE-STRANDED print are freeze-context, not census
   events. sc208 (14:59, rolling) is their fix roll — patrol continues
   there next leg.]
+  [LEG-16 addendum, sc208 mid-roll (62 K lines at 15:36, still live):
+  census holds for the THIRD consecutive roll — TERM-DESCHED 8 /
+  WAKE-REFUSED 32 / PREEMPT-LEAK 0; WAKE-STRANDED 12; bms.main.bundles
+  .ready AND appfwk.ready both set (sc206-parity depth), launcher 0.
+  Binder cost family DEEPENS: the 15 s (x5) and 30 s (x3) classes
+  persist and a NEW ~89 s class appears (88632/89396/89400 ms x1 each)
+  — longer-than-timeout waits now visible; recorded for the A-line
+  samgr chain, not taken over.]
 
 ### 2h. FIFTEENTH LEG: the tick fix verified before merge — pa23 battery on main + the fix hunk (section 2g's correction measured)
 
