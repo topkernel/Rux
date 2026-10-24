@@ -1882,6 +1882,85 @@ watching/documentation leg: the leg-19 pa31 serial answered the gate
 question, and the A-line's live PACE rolls answered the primary
 question. Nothing this leg needed a boot of its own.
 
+### 2n. TWENTY-FIRST LEG: waiting leg + post-UI harness prep (v1.5 draft committed)
+
+Leg start: fast-forwarded the branch to origin/main 62c2708e (the
+leg-20 merge itself; no new foreign commits — so the census-hold gate
+did NOT trigger at open).
+
+**(1) UI patrol (standing).** Round 1 at leg open (~19:31 host):
+- sc213 (A-line branch kernel fec94520, launcher trajectory, STILL
+  LIVE at t=2439 s, their QEMU untouched): com.ohos.launcher active
+  (30 mentions), account retry loop running (QueryForegroundUserId
+  failures — the known shape), launcher.ready NOT set, OnForeground 0,
+  ArkUI 0. PACE counters still clean (drct=0 slow=0 zfree 420k).
+- sc214/sc215 (ended 19:11/19:20, same kernel class): both SET
+  bootevent.bootanimation.finished (PCTL-SEND "true") — consistent
+  with the sc209-era first; launcher.ready NOT set in either; sc214
+  additionally shows appfwk.ready not set. Screen (shotmon MILESTONE)
+  full nonblack bands.
+- Verdict: the UI milestone is still userspace-gated (the RS read-lock
+  park); the perf-report post-UI row stays PENDING. Patrol continues
+  each round of this leg; no launcher.ready SET on any serial so far.
+
+**(2) Census-hold gate (standing).** origin/main == 62c2708e at open
+(the branch was 1 behind purely because the leg-20 merge commit
+postdates the branch head; the ff-only merge closed it). No A-line/
+DFX kernel commits on main since 14d8950d (pa31-validated). Gate not
+triggered; rechecked at each round; one quiet census boot fires only
+if main moves on kernel code mid-leg.
+
+**(3) POST-UI HARNESS PREP (PRIMARY, no QEMU).** The user mandated a
+full post-UI performance report with microbenchmarks and same-host
+Linux comparison. Design committed as perf-report.md section 8
+(v1.5 DRAFT — all placeholders). Grounding facts verified this leg:
+- syscost's existing surface answers the whole-boot side from ONE
+  quiet boot (milestones row, table 2/3 refresh, hold checks) —
+  section 8.1 tabulates the split.
+- The probe side needs a NEW static musl x86_64 binary (P1-P7:
+  null syscall + clock_gettime, ctx switch via affinity-pinned pipe
+  ping-pong, page-fault classes anon/COW/file, fork+exit and
+  fork+exec, pipe + unix dgram/PEEK/stream roundtrips, ext4 fs ops
+  on userdata, 1 ms sleep overshoot). Toolchain verified working:
+  toolchain/x86_64-rux-linux-musl/bin/musl-gcc = gcc 15.2.0.
+  Probe-dependency syscalls verified present on Rux:
+  sched_setaffinity (sched.rs:938), getcpu, CLOCK_MONOTONIC_RAW
+  (time.rs:16).
+- Delivery: recommended = late-service slot swap via debugfs into a
+  PRIVATE system.img copy (A-line precedent: libusb_pnp_manager
+  zeroing in oh-img-p); dual output (file on /data + /dev/console).
+  The exact slot is the one open decision, deferred to build day
+  (criteria listed in 8.3). bootanimation-slot and hdc-shell kept as
+  documented fallbacks.
+- Linux comparison protocol: oh-ref-r1/r2 keep answering the timeline
+  column only; every per-op number needs fresh probe boots on the
+  reference kernel (OHOS 6.6.101 = the image's own bzImage, confirmed
+  from oh-ref-r1 serial). Machine config MUST be aligned
+  (run-oh-linux-ref.sh defaults smp6/8G/-cpu host vs pa's 2/4G/-cpu
+  max) — recorded in 8.3/8.4. N=3 per side, interleaved, medians/p99.
+- Deliberately NOT done: no probe code written (mandate says design
+  first), no slots picked, no image copies made. Section 8.6 is the
+  run-day checklist; budget = 1 long + ~6 short boots, within the
+  2-QEMU discipline taken sequentially.
+
+**(4) QEMU ledger.** 0 of 2 self-started. Zero QEMU this leg so far;
+both standing gates remain armed (patrol + census-hold on main move).
+
+**(5) Leg close rounds.** R2 (~19:40): sc213 ended 19:36 at t=2689 s —
+launcher.ready NEVER set (final "not set" warning at close; PACE clean
+to the last beat: drct=0 slow=0 zfree 420k); sc214/sc215 unchanged
+(bootanimation.finished SET, launcher.ready not set); no sc216+
+serial exists yet; origin/main still 62c2708e — census-hold gate
+never triggered this leg. One more design fact verified while waiting:
+the "same image" claim for the Linux comparison is literal — this
+lane's run/oh-img/* symlink to launcher-route/run/oh-img/* which
+symlink to oh-robot's phone/images/* (the exact files
+run-oh-linux-ref.sh boots), so Rux pa boots and reference boots ride
+identical bytes via snapshot=on. Prep deliverable committed (345cbde8):
+perf-report.md section 8 (v1.5 draft skeleton, placeholders) + this
+leg section. No change elsewhere: honest ledger = docs only, 0 QEMU,
+no kernel code, no image copies, no probe code (design-first mandate).
+
 ## 4. Ranking table v2.8 (cost centers -> boot-time contribution)
 
 Acquittal note (leg 20, no version bump — no row reweighted): the
