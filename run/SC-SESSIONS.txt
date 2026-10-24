@@ -4039,3 +4039,31 @@ shotmon on. The census is one-shot per boot at 80% heap (~850MB —
 exactly where sc228's fired at t~1850); a parked boot never reaches
 it, so park = rekick. Park signature from sc230: pidmax<1500 flow<=1
 young=DB_TaskExecutor with bw15 flat.
+
+LEG-17 second attempt (A-line restart 02:30). Predecessor died ~02:34;
+its last acts: sc231/232 parked (pidmax ~1200-1250, census never
+fired), sc233 parked (t=240s signature), then killed sc233 + launched
+sc234 at 02:34 (old pre-revert bzImage — my re-land rebuild finished
+02:35, after QEMU load). sc234 hovering at the park boundary
+(pidmax 1350 flow 2 at t=241s).
+
+FIRST TASK (slab re-land) state at 02:45:
+- merged main fee7774f (c506aa97): the revert landed, tree back to
+  128KB-everywhere baseline.
+- re-landed ARCH-GATED as eacf9108: riscv64 (and any unmeasured arch)
+  compiles the slab OUT and keeps the 128KB Kernel.toml base
+  (kernel_stack_size = 131072); x86_64 picks up
+  kernel_stack_size_x86_64 = 81920 via a per-arch pick in
+  kernel/build.rs (same pattern as the riscv64 heap clamp) and serves
+  the three-slot order-6 packed slab; KSTACK_SLOTS*KSTACK_SIZE<=BLOCK
+  const-assert added against future config edits; kb/ks restored to
+  SC-ANAT via a non-x86_64 (0,0,0) shim (beat format arch-stable);
+  config_test.rs assertion made arch-aware.
+- builds: make build-x86 clean (bzImage 6528cdf4...), make build
+  (riscv64) clean, config.rs per-arch values verified (81920/131072).
+- VERIFICATION: riscv64 make test RUNNING (unit-test kernel, PID
+  462768); x86_64 OH roll on the new bzImage queued behind it (QEMU
+  budget: sc234 + make-test = 2 now).
+- Census note: the re-land bzImage contains peek v2 (529e9aee survived
+  the revert), so the new-bzImage OH roll doubles as the census roll
+  if it advances past 80% heap.
