@@ -61,6 +61,7 @@ impl<'a> BlockAllocator<'a> {
     /// 3. All groups from 0 (fallback)
     pub fn alloc_block(&self, goal_group: u32) -> Result<u64, i32> {
         let block_groups = self.fs.group_count;
+        crate::dfx::fsw::note_alloc_run();
 
         // Phase 1: Try goal_group first
         if goal_group < block_groups {
@@ -102,6 +103,7 @@ impl<'a> BlockAllocator<'a> {
     /// with .needs_device wedged the whole sweep.
     pub fn alloc_block_run(&self, goal_group: u32, want: u32) -> Result<Option<(u64, u32)>, i32> {
         let block_groups = self.fs.group_count;
+        crate::dfx::fsw::note_alloc_run();
 
         if let Some(run) = self.try_alloc_run_from_group(goal_group, want)? {
             return Ok(Some(run));
@@ -267,6 +269,7 @@ impl<'a> BlockAllocator<'a> {
             return Ok(());
         }
         let blocks_per_group = self.fs.blocks_per_group as u64;
+        crate::dfx::fsw::note_free_run();
 
         // A run may cross group boundaries — free it group-segment by
         // group-segment (each segment: one bitmap round trip).
