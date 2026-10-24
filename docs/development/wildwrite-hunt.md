@@ -3434,4 +3434,42 @@ rsp=0x7ff090410fc8" line (a USER frame). Confirmed MY lane's probe
   logs). Both driver roots unchanged since 08:35 (176512 / 176547).
 - Commits: d79636ea (claim record + r68/load-r15 gdb cmds), a869968d
   (r67-r68/load-r14-r15 ledger + r69/load-r16 gdb cmds), 42006402
-  (r69/load-r16 ledger + r70/load-r17 gdb cmds).
+  (r69/load-r16 ledger + r70/load-r17 gdb cmds), 4354f993 (r70/load-r17
+  ledger + r71/load-r18 gdb cmds).
+
+## Session 39 (continuation agent — pure watch session: chains adopted
+## alive mid-round at r71/load-r18)
+
+### Inheritance reconstruction (claim 15:24 Oct 24)
+
+- Both chains ALIVE at claim (ps before assumption, the s10/s34 lesson):
+  driver roots 176512 (main, ww-chain2.sh — r71 in flight since
+  15:20:12) / 176547 (load, ww-loadchain.sh — load-r18 since 15:20:38),
+  the same PIDs the s36/s37/s38 handoffs carried — fourth consecutive
+  clean PID handoff. Round QEMUs 270466/270476 (main r71) and
+  270558/270569 (load r18), gdb 270516 / 270622 on 12371/12381. Both
+  rounds WW-ARMED 19 (GUARD=0xffffffff80a7a000, confirmed in both gdb
+  logs), wildwatch try 0 (serial line 99 both), storming 3 minutes in
+  with 0 capture markers.
+- r70 / load-r17 verdicts re-verified from serial logs this claim (not
+  just driver blocks): 0 WW-HIT / WILDWATCH-CANARY / META-SMASH lines in
+  either log. s38's ledger stands.
+- Main repo drift check: main = 6aa2fc74 vs merged base 988e10c1 —
+  ZERO commits under kernel/ (docs + chore only), per the handoff.
+  Frozen hunt pair unaffected; chains NOT rebuilt.
+- Handoff noise-class adjudication accepted: the age=1000ms IRQ-OFF
+  family is gone on the fix branch, but the frozen hunt kernel predates
+  the TSC fix, so only the benign short class (age 103-771 ms, rip
+  ffffffff80573d96) can appear. At claim: r71 shows 0 IRQ-OFF-WINDOW
+  lines, load-r18 shows 1 (age 151 ms, known rip). Real capture
+  surfaces remain WW-HIT / WILDWATCH-CANARY / META-SMASH / KERNPANIC /
+  protection-cluster badaddr.
+- Foreign QEMUs at claim: two pairs (264665/264666 x86_64 q35 KVM,
+  271378/271380 riscv64 virt under timeout 240) — A/C-line work,
+  off-limits per the rules.
+
+### Chain ledger (s39 ownership)
+
+- r71 / load-r18 in flight at claim (started 15:20:12/15:20:38, budget
+  ends ~16:05; qemu 270466 / 270558, gdb 270516 / 270622, both WW-ARMED
+  19 with GUARD=0xffffffff80a7a000, wildwatch try 0). Verdicts pending.
