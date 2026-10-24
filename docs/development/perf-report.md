@@ -903,21 +903,36 @@ pagefault: Segfault at 0x0, rip=0x7ff082996bac, rsp=0x7fffffffcb10, mode=user
 - Same rip, same rsp, fault address 0x0, in EVERY appspawn'd app
   process (5 pids x 3 prints in pa38: 602/778/811/836/1401); ABC
   restarts abilities 81 times across the window (launcher 48,
-  systemui extensions 33); the wedged launcher then spins on a dead
-  fd (SYSCOST rd_fail comm=m.ohos.launcher ret=-9 n=155,991 fd=32).
+  systemui extensions 33); the wedged launcher then spun on fd 32
+  (SYSCOST rd_fail comm=m.ohos.launcher ret=-9 n=155,991).
 - PRE-EXISTING, not a from_fn regression: pa33 (pre-from_fn main,
   leg 24) carries the byte-identical signature at the same rip. What
   from_fn changed is everything AROUND it: serial volume 21.5k ->
   49.5k lines, restarts 0 -> 81, syscalls 100.9 M -> 136.4 M — the
   app phase now survives deeper and retries for the full window
   instead of stalling.
-- Rux-attributable: the SAME image under the reference OHOS 6.6.101
-  kernel reaches launcher.ready at t=10.1-16.7 s in all four ref-r
-  boots (8.8) — no crash. One kernel difference between those worlds
-  makes every spawned app deref NULL at one fixed instruction. The
-  rip is in the image's userspace (0x7ff0... arena); symbolizing it
-  against the image's libs and finding the divergent syscall is
-  launcher-lane work — the signature above is the handoff.
+- **Leg-30 attribution correction (A-line decode, applied before
+  this report freezes): the crash is an IMAGE DEFECT, not a Rux
+  crash.** The A-line's USEVG-FOR forensics names comm=usb_host
+  crashing in the image's libusb_pnp_manager.z.so
+  (DdkListenerMgrAdd deref-before-nullcheck; DdkListenerMgrInit is
+  imported by nobody in that lib build, so the listener list is never
+  initialized). Deterministic on ANY kernel, Linux included — root
+  cause banked by the launcher lane in sc87-91; the usbless image
+  (sc113-116) boots with zero DDK crashes. This leg's earlier
+  "Rux-attributable" reading was wrong in one specific way: the ref
+  boots (8.8) do NOT survive because Linux avoids the fault — the
+  same lib faults there too — they survive because the whole Linux
+  boot is ~100x faster, so the ABC restart storm never eats the boot
+  window. What IS Rux-side is the BOOT-WINDOW COST: the restart
+  storm's price only becomes fatal when the underlying boot is slow.
+  The blocker pair is therefore: image defect (usb_host DDK) +
+  Rux boot-window cost.
+- The fd-32 spin WAS a kernel bug, now fixed by the A-line (branch,
+  pending merge at leg-30 start): read/write on a VALID fd whose
+  type has no read op must return EINVAL per Linux, not EBADF —
+  EBADF reads as "fd closed", so the OH event loop spun forever
+  instead of erroring out.
 
 **3. Re-fire condition (exact).** Either arm: (a) a sc2xx-class boot
 shows launcher.ready SET / OnForeground / ArkUI on a main-class
@@ -931,12 +946,25 @@ in ~35-40 s wall; pb1 smoke on Rux: DONE at t=378 s in a SHORT
 quiet boot) — the measurement day itself is small; the blocker was
 never the harness.
 
+> **Leg-30 run-condition note (with the attribution correction):**
+> the launcher lane's default for main-class rolls is now the USBLESS
+> image (zero DDK crashes, sc113-116 onward; their sc237 usbless roll
+> already advances past the park point). When the run day's Rux
+> column is collected, record the image class in the run conditions:
+> the banked Linux column (8.8) is STOCK-image, so any stock/usbless
+> delta must be flagged next to table 8a. The probe itself (P1-P7)
+> touches no usb component, so the delta is expected to be nil for
+> the benches — but that is a claim to record, not to assume.
+
 **4. Verdict on the mandate.** The report this line was mandated to
 produce is delivered to the boundary of what the kernel can host:
-Linux side measured and final; Rux side blocked at a single
-identified, deterministic, Rux-attributable fault in the app-spawn
-path — with the full run-day apparatus staged and validated so the
-Rux column is one confirmed-milestone away. The performance findings
-that ARE measurable pre-UI (tick fix, census invariants, cost-center
-ranking, syscall tables) are final in sections 1-7 and survived six
-kernel generations unchanged.
+Linux side measured and final; Rux side blocked behind an identified
+pair — a deterministic IMAGE defect (usb_host DDK
+libusb_pnp_manager.z.so, present on Linux too) whose restart-storm
+cost eats the boot window only because Rux's boot-window cost is
+~100x the Linux ref, plus the fd-32 EBADF kernel bug (fixed on the
+launcher lane, pending merge) — with the full run-day apparatus
+staged and validated so the Rux column is one confirmed-milestone
+away. The performance findings that ARE measurable pre-UI (tick fix,
+census invariants, cost-center ranking, syscall tables) are final in
+sections 1-7 and survived six kernel generations unchanged.
