@@ -3695,3 +3695,56 @@ CONVICTED AND FIXED (361debe8)
 - sc216 (19:39, fix kernel, same full-image recipe): verification
   roll - must advance past t~580s with continuous SC-HB beats, then
   one more consecutive advancing boot completes the 2-boot rule.
+
+LEG-15 VERIFICATION + THE PACE WALL MEASURED LIVE (sc216/sc217, fix
+kernel 361debe8)
+
+- sc216 (fix kernel, full image): ADVANCED past the sc215 freeze depth
+  cleanly - heartbeats continuous to t=692s, ticks/console alive to
+  boot end, ZERO bucket-deadlock shapes; the later degradation was the
+  KNOWN userspace wall again (bootevent.launcher.ready not set -> init
+  SIGTERM appspawn). Verification boot #1 of 2: PASS. No
+  "STALLWATCH scan skipped" lines (the hazard window never hit this
+  boot - the fix is prophylactic; sc207/sc215 show it is rare but
+  total when it hits).
+- sc217 (fix kernel, full image, port 12056): VERIFICATION BOOT #2 AND
+  THE DEEPEST LAUNCHER RUN OF THE LEG:
+    * RS#1 published SA:10_61 and NEVER crashed all boot (no USEGV on
+      render_service); the HGM sync tasks completed (no cc54 park).
+    * insert SA:511, installs chain, BootAnimation RS chain, then at
+      t~500s pivot_root '/mnt/sandbox/100/com.ohos.launcher' - THE
+      LAUNCHER IN ITS SANDBOX; LauncherAbilityManager running and its
+      getOsAccountLocalId rounds now SUCCEED ("localId 100" - vs
+      sc210's crawl and sc212-214's 4194349 errors).
+    * bootevent.account.ready SET (a launcher-window bootevent landed).
+    * pidmax 4775 and rising at t=1480s, tasks 2808 - sc210-scale.
+    * THE PACE WALL, MEASURED (the predecessor's counter design paying
+      off): at t~1220s zfree 31K pages / heap 818MB with drct=0; by
+      t=1450s the sc210 regime forms EXACTLY - zfree 1254-1979 pages
+      (the floor, below wmark low 2451), heap 893-899/1015MB, and for
+      the FIRST time in the campaign: drct=90 rounds, drctJ=1836
+      jiffies, drctMaxJ=70 (0.7 s max single round), slow=36 alloc
+      slowpath entries. cowJ stays 91/341K faults (~0.27 jiffies per
+      1000 faults) - COW handling itself is cheap; the serialization
+      lives in direct-reclaim rounds on the alloc path, avg ~20
+      jiffies/round, driven by the KERNEL HEAP consuming ~900MB
+      (4775 pids + threads: task structs, fdtables, binder buffers).
+    * The known fake OOM fired at the floor: "oom: out of memory
+      (order=0)" -> "no killable processes found" (heap full, user
+      side has no victim by badness) - matches the leg-15 context
+      datapoint (fake OOM killed watchdog_service mid-loop in sc210).
+  CONCLUSION for the perf lane / coordinator: the pace wall is REAL
+  but SECONDARY - it forms only at the very deepest launcher state
+  (pidmax 4700+) as kernel-heap pressure, ~18 s of cumulative
+  serialized direct reclaim by t=1480, drctMaxJ 0.7 s - NOT the 4.6
+  s/round serialized wall of the sc210-era readout (that number was
+  read under the usb-crash-loop's heavier floor). The kernel-heap
+  growth (~900MB) is the quantity to attack next - mm lane: what
+  holds 900MB across 4775 pids (per-task footprints, fdtable sizing,
+  binder buffer accounting) - the PACE zfree/heapK columns now give a
+  continuous measurement handle for any such fix.
+- Terminal milestone (OnForeground/ArkUI/launcher.ready SET +
+  screenshot): NOT reached this leg - sc217's launcher is executing
+  rounds at press time; the remaining gate above the rounds is the
+  launcher ability chain's own progression (userspace), with the RS
+  park race and the init bootevent timeout as the per-boot lottery.
