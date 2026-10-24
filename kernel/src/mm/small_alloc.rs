@@ -787,6 +787,87 @@ pub fn census_peek3(ci: usize) {
     taskdump_raw_line(b"\n");
 }
 
+/// Leg-17 census peek v4: the v3 roll proved the c1024 population is
+/// SCATTERED (~3 live objects per held page — 9.9K live over 3.3K pages),
+/// so the 32-page walk sampled 1% of it. This walks up to 512 pages and
+/// DUMPS the first `dump_n` objects' 4 qwords per shape bucket (raw
+/// UART, allocation-free; reads under the class lock, prints after).
+pub fn census_peek4(ci: usize, dump_n: usize) {
+    use crate::dfx::taskdump::{taskdump_dec, taskdump_raw_line};
+    if ci >= CLASSES.len() {
+        return;
+    }
+    let (heap_start, _heap_end) =
+        crate::mm::buddy_allocator::GLOBAL_ALLOCATOR.heap_bounds();
+    if heap_start == 0 {
+        return;
+    }
+    let cache = &CACHES[ci];
+    let s = CLASSES[ci];
+    let fo = first_off(s);
+    let objs = (PAGE_SIZE - fo) / s;
+
+    #[inline]
+    fn is_kheap(a: u64) -> bool {
+        a >= 0xffff_8880_0000_0000
+    }
+    #[inline]
+    fn is_userva(a: u64) -> bool {
+        (0x0000_7f00_0000_0000..0x0000_8000_0000_0000).contains(&a)
+    }
+
+    let mut dumped = 0usize;
+    let mut pages = 0usize;
+    let _g = cache.lock.lock_irqsave();
+    let mut page = cache.head.load(Ordering::Relaxed) as u32;
+    'walk: while page != 0 && pages < 512 {
+        let page_addr = heap_start + page as usize * PAGE_SIZE;
+        let hdr = hdr_of(page_addr);
+        if hdr.magic != HDR_MAGIC || hdr.state != STATE_ACTIVE {
+            break;
+        }
+        let mut i = 0usize;
+        while i < objs {
+            // SAFETY: live slab page of this class; slot in bounds.
+            let p = page_addr + fo + i * s;
+            let a0 = unsafe { core::ptr::read_volatile(p as *const u64) };
+            let a1 = unsafe { core::ptr::read_volatile((p + 8) as *const u64) };
+            let a2 = unsafe { core::ptr::read_volatile((p + 16) as *const u64) };
+            let a3 = unsafe { core::ptr::read_volatile((p + 24) as *const u64) };
+            if (a0 != 0 || a1 != 0 || a2 != 0)
+                && (is_userva(a0) || (dumped & 1) == 1)
+            {
+                if dumped < dump_n {
+                    taskdump_raw_line(b"  P4 ");
+                    taskdump_dec(a0);
+                    taskdump_raw_line(b" ");
+                    taskdump_dec(a1);
+                    taskdump_raw_line(b" ");
+                    taskdump_dec(a2);
+                    taskdump_raw_line(b" ");
+                    taskdump_dec(a3);
+                    taskdump_raw_line(b"\n");
+                }
+                dumped += 1;
+            }
+            if dumped >= dump_n {
+                break 'walk;
+            }
+            i += 1;
+        }
+        page = hdr.next_page;
+        pages += 1;
+    }
+    drop(_g);
+    taskdump_raw_line(b"PEEK4 c");
+    taskdump_dec(s as u64);
+    taskdump_raw_line(b": walked=");
+    taskdump_dec(pages as u64);
+    taskdump_raw_line(b" dumped=");
+    taskdump_dec(dumped as u64);
+    taskdump_raw_line(b"\n");
+}
+
 /// One-line census for the ALLOCTHROW dump (raw UART, allocation-free).
 pub fn census_line() {
     use crate::dfx::taskdump::{taskdump_dec, taskdump_raw_line};
