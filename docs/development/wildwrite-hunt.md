@@ -3525,3 +3525,44 @@ rsp=0x7ff090410fc8" line (a USER frame). Confirmed MY lane's probe
   in flight since 17:35:12/17:35:47, budget ends ~18:20; both WW-ARMED
   19 with GUARD=0xffffffff80a7a000 (serial line 99 + gdb logs),
   wildwatch try 0. Driver roots unchanged (176512 / 176547).
+
+### Cross-lane datapoint: A-line RS mm crash vs this hunt's surface
+### (relayed ~18:00 Oct 24; A-leg-14 merged main 14d8950d)
+
+- A-line observation (theirs, attribution stays theirs): RS mm crash
+  randomness shows rip 0x3fbf08ad30 repeatedly, latest capture faulting
+  arena destination cr2=0x7ff0006f1000 right after BIGMUNMAP events
+  (large munmap sequences tearing down arenas) — hypothesis: a wild
+  write landing in a freshly unmapped region, possible cousin of the
+  kernel-side half-corruption family this hunt instruments.
+- Correlation check against THIS hunt's existing logs (no chain
+  diversion made or needed — the question is answerable from the
+  surface already running):
+  - The load chain ALREADY exercises the RS signature's scenario at
+    scale: the sdc-cycle surface emits ~700-840 BIGMUNMAP events per
+    round (sdc arena teardowns), **16640 cumulative across
+    load-r1..load-r21**, all in the same 0x7ff0xxxxx address family
+    as the RS cr2, dominated by len 0x803000 (8.4 MB) and 0x100000
+    (1 MB) tears — i.e. "big munmap tearing down an arena", repeated
+    under the live storm, under the FULL capture stack (19-point
+    watchset + RO triggers + kernel-mode COW). ZERO kernel-side fires
+    across all of it (0 WW-HIT, 0 canary, 0 heals, 0 panics).
+  - Negative-result reading: if the RS crash producer were a
+    kernel-mode wild write through this path, the hunt instruments
+    (incl. the 4 guarded alias PTEs on freshly unmapped/remapped
+    regions) have had ~16.6k opportunities to see it and have not.
+    The RS signature therefore more likely lives in userspace (RS's
+    own code at rip 0x3fbf08ad30 — a user address, faulting on its
+    own arena write) or requires RS-specific state my surface does
+    not build.
+  - Supporting texture: thousands of benign user-mode COW faults per
+    round at 0x3fbf13xxxx / 0x7ff0xxxx — the 0x3fbf load-base family
+    is shared between RS's rip and my surface's binaries (same
+    mmap-layout), so the ADDRESS-SPACE LAYOUT is exercised, but sdc
+    is not RS: the specific crashing code path is not.
+  - The only recurring segfault on the load surface is `usb_host`
+    (sig=11, exactly 5 per round since load-r1, dying mid-binder-
+    transaction, respawned by init) — constant structural churn with
+    zero variance across 21 rounds, no correlation with anything.
+- Action taken: ledger note only. Chains NOT diverted — capture
+  surface unchanged, both chains continue per plan.
