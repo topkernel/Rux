@@ -2935,3 +2935,35 @@ SATURATION; CONSOLE BURN IN THE DECISION WINDOW MEASURED (60% USERSPACE
   screenshot + csv prominently, commit immediately.
 - QEMU discipline: no live QEMU at leg start (verified ps); sc194
   ended on its own at 07:56 (timeout).
+
+SESSION R TENTH LEG MIDPOINT (sc195 in-flight interim, 09:2x):
+THE QUIETCON ROLL CHANGED THE RACE FUNDAMENTALLY - NO WEDGE THROUGH
+MIN 27 (sc192/193/194 ALL FROZE AT MIN 1-2; sc184 AT MIN 8) - AND THE
+LAUNCHER IS DEEPER THAN ANY SC-SERIES BOOT: ARKTS BYTECODE EXECUTING.
+
+- sc195 (v4+v5 12ea541e, parkdump off, quietcon + LOGLEVEL=3, fresh
+  scgold copy, KVM q35 SMP2, launched 08:54): serial burn collapsed
+  from sc194's ~22KB/s to ~2.3KB/s in the window (userspace hilog/
+  alog/slog streams GONE - 0 lines vs ~5100; only ERR-level [kmsg]
+  records + raw WW/WAKE-STRANDED remain). RWFRZ = 0 lines at min 27.
+  WAKE-STRANDED continues (episodic 1-4s stalls, strand ages bounded,
+  no growth) - the residual stall family is NOT console-driven alone
+  (host deschedules etc), but it no longer freezes the rwlock.
+- Progress gauges: pid churn steady organic (963 @decile1 -> 4030 @
+  min 24), USEGV deaths fixed at 46 early (no churn), screen = static
+  oracle (md5 a6d1f7e3 unchanged; the oracle pattern is ft-phased, so
+  static md5 = no flips = RS not composing yet).
+- RAM forensics (pmemsave via monitor; HMP notes: size must be <=32-bit
+  chunks, filename must be RELATIVE or the expression parser eats the
+  path): launcher past its sc194 ceiling - MainAbility.abc ArkTS module
+  EXECUTING (152 hits), UIAbility js modules, ArkUI/ace_engine/
+  WindowScene loaded (136/80/98), LauncherAbilityManager loop lines
+  184x, NO clientToService-null errors. BootAnimation one-shot lines
+  absent (ring wrap or never ran - ambiguous).
+- Read: quietcon removed the console-burn term of the freeze window;
+  the remaining chain (RS compose -> bootanimation -> launcher first
+  frame) is now gated by raw slowness (2 vCPUs, episodic stalls), not
+  by the wedge. Plan: let the 45-min window close (~09:39), then
+  reboot the SAME userdata (first-boot caches persist; second boot
+  faces a lighter service storm) with a longer window for the first
+  frame. If a frame appears: immediate screendump + save + commit.
