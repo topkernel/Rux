@@ -232,25 +232,11 @@ fn stack_cache_free(stack_bottom: *mut u8) {
             }
         }
     }
-    // Leg-16 anatomy (dfx=schb): high-water scan of the now-dead stack.
-    // The owner is fully off-CPU (the exit path waited for on_cpu clear +
-    // RCU before calling here), so this read-only walk is safe outside
-    // every lock. Depth = KERNEL_STACK_SIZE - offset of the first nonzero
-    // word from the bottom (skip offset 0: the canary slot).
+    // Leg-16 anatomy (dfx=schb): the high-water scan + attribution print
+    // lives in free_kernel_stack (needs self for comm/pid); this side only
+    // keeps the live count honest for the SC-ANAT kN column.
     if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::Schb) {
         KSTACK_LIVE.fetch_sub(1, Ordering::Relaxed);
-        let base = stack_bottom as usize;
-        let mut off = 8usize;
-        while off < KERNEL_STACK_SIZE {
-            // SAFETY: stack_bottom was allocated with KERNEL_STACK_SIZE
-            // bytes; off < KERNEL_STACK_SIZE keeps the read in bounds.
-            let v = unsafe { core::ptr::read_volatile((base + off) as *const u64) };
-            if v != 0 {
-                KSTACK_HW.fetch_max((KERNEL_STACK_SIZE - off) as u64, Ordering::Relaxed);
-                break;
-            }
-            off += 8;
-        }
     }
     let mut cache = STACK_CACHE.lock();
     // SAFETY: stack_bottom was allocated by stack_cache_alloc().
@@ -3967,6 +3953,72 @@ impl Task {
                     putchar(b'\n');
                     self.kernel_stack = None;
                     return;
+                }
+            }
+
+            // Leg-16 anatomy (dfx=schb): high-water scan + record
+            // attribution. The stack is dead (on_cpu cleared + RCU waited
+            // upstream), no locks held — safe to walk and print. A NEW
+            // record deeper than 60KB dumps the deepest frames' return
+            // addresses so the fat chain can be named and fixed; that is
+            // the gate for any KERNEL_STACK_SIZE reduction (a 89KB-deep
+            // chain already measured this campaign would smash a 64KB
+            // stack).
+            if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::Schb) {
+                let base = stack_bottom as usize;
+                let mut off = 8usize; // skip the canary slot
+                while off < KERNEL_STACK_SIZE {
+                    // SAFETY: bounds validated above (base..base+SIZE).
+                    let v = unsafe { core::ptr::read_volatile((base + off) as *const u64) };
+                    if v != 0 {
+                        let hw = (KERNEL_STACK_SIZE - off) as u64;
+                        let old = KSTACK_HW.load(Ordering::Relaxed);
+                        if hw > old {
+                            KSTACK_HW.store(hw, Ordering::Relaxed);
+                            if hw > 60 * 1024 {
+                                use crate::console::putchar;
+                                const MSG: &[u8] = b"KSTACK-HW depth=";
+                                for &b in MSG { putchar(b); }
+                                let mut vv = hw;
+                                if vv == 0 { putchar(b'0'); }
+                                let mut dd = [0u8; 20]; let mut kk = 0;
+                                while vv > 0 { dd[kk] = b'0' + (vv % 10) as u8; kk += 1; vv /= 10; }
+                                while kk > 0 { kk -= 1; putchar(dd[kk]); }
+                                const P: &[u8] = b" pid=";
+                                for &b in P { putchar(b); }
+                                let mut pv = self.pid() as usize;
+                                if pv == 0 { putchar(b'0'); }
+                                let mut pd = [0u8; 10]; let mut pk = 0;
+                                while pv > 0 { pd[pk] = b'0' + (pv % 10) as u8; pk += 1; pv /= 10; }
+                                while pk > 0 { pk -= 1; putchar(pd[pk]); }
+                                const C: &[u8] = b" comm='";
+                                for &b in C { putchar(b); }
+                                for &cb in self.comm() { if cb != 0 { putchar(cb); } }
+                                const T: &[u8] = b"' tail:";
+                                for &b in T { putchar(b); }
+                                let mut shown = 0;
+                                let mut o2 = 8usize;
+                                while o2 < off && shown < 40 {
+                                    // SAFETY: in-bounds per loop guard.
+                                    let ra = unsafe { core::ptr::read_volatile((base + o2) as *const u64) };
+                                    if ra >= 0xffffffff_80000000u64 && ra <= 0xffff_ffff_ffff_f000u64 {
+                                        putchar(b' ');
+                                        let mut sh2 = 64;
+                                        while sh2 > 0 {
+                                            sh2 -= 4;
+                                            let nb = ((ra >> sh2) & 0xF) as u8;
+                                            putchar(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 });
+                                        }
+                                        shown += 1;
+                                    }
+                                    o2 += 8;
+                                }
+                                putchar(b'\n');
+                            }
+                        }
+                        break;
+                    }
+                    off += 8;
                 }
             }
 
