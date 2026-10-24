@@ -642,3 +642,73 @@ boot): IF=0 share __, census TERM/WAKE __/__ (baseline 8/32), ticks
 Budget note: 1 long boot + ~6 short boots, sequential — fits the
 2-self-started-QEMUs-at-a-time discipline with the long boot alone in
 its window; this plan is the next leg's gate spec.
+
+### 8.7 Harness status (leg 22): probe built and smoke-validated — run day starts from a tested binary
+
+The 8.2 design is now code (leg 22, commit b72e0011):
+`test/pbench.c` (one static musl x86_64 binary, ~70 KB) +
+`test/pbench_boot.py` (quiet-boot driver, faultlat mkfs-d recipe).
+Every bench emits `PBENCH <name> n= med= p99= min= max= avg= wall=`
+(rdtsc med/p99 + a MONOTONIC_RAW wall backstop), a `SKIP why=` line on
+unsupported primitives instead of aborting, `PBENCH DONE rc=0` last,
+then reboot(POWER_OFF) (clean sync + powerdown, verified).
+
+Validation chain:
+
+1. Host run (Linux, same binary): 25/25 lines, med/p99 sane — caught
+   and fixed a fmt stack-overread and a pipe read/write-end swap
+   (P2/P5a) plus an echo-child EOF deadlock before any QEMU burn.
+2. Guest smoke **pb1** (kernel pa31-main-bzImage = main 62c2708e; the
+   only delta to main 9fe7cdbb is this report's docs): quiet boot,
+   init=/test/pbench, q35/-cpu max/SMP2/2G, DONE at t=378 s — the
+   whole probe fits a SHORT boot with wide margin (8.4's "seconds to
+   minutes" holds). Full set landed: 25/25 lines, aff=1 (pinning
+   works), n full on every bench.
+3. Output channel both ways: serial lines live AND
+   /test/pbench-results.txt persisted in the guest ext4, extracted
+   post-poweroff via debugfs — the file half of the 8.3(A) delivery
+   option is proven (on the quiet-boot image).
+
+Provisional smoke numbers (pb1, ONE boot, minimal-rootfs ext4, NOT the
+OH image, NOT run-day numbers — recorded so run day has a sanity anchor
+and so gross regressions in the harness itself are visible):
+
+| bench | med | p99 | note |
+|---|---|---|---|
+| p1_null | 4.57 us | 6.8 us | true entry path via syscall() |
+| p1_clock | 4.95 us | 5.4 us | cross-checks syscost clock_gettime avg 3-4 us — harness agrees with the kernel-side instrument |
+| p2_ctxsw (half rt) | 15.4 us | 437.7 us | pinned CPU0/CPU1, aff=1 |
+| p3a anon fault | 0.08 us | 583 us | med sub-us = most stores hit already-mapped pages (eager anon mapping); p99 is the fault tail |
+| p3b COW fault | 24.6 us | 52.0 us | A-line PACE healthy-regime said 3.4 us/COW on their branch kernel — same order, different kernel/boot, recheck on run day |
+| p3c file fault | 0.07 us | 1103 us | med sub-us = faultaround mapping ahead of the touch; p99 1.1 ms = cold fault |
+| p4_fork_exit | 8.32 ms | 12.0 ms | |
+| p4_fork_exec | 13.4 ms | 19.7 ms | exec target = self re-exec |
+| p5a pipe rt | 21.5 us | 32.4 us | unpinned |
+| p5b dgram send / recv+PEEK | 126 / 275 us | 462 / 479 us | hilogd protocol shape |
+| p5c stream write 74 B | 56.2 us | 568 us | |
+| p6_stat / openclose / read_cached | 128 / 310 / 367 us | 0.3-0.7 ms | |
+| p6_getdents (full 1000-entry sweep) | 9.98 ms | 13.1 ms | |
+| p6_write_fsync 4 KB | 18.1 ms | 48.7 ms | fsync dominates |
+| p6_append 4 KB | 500 us | 744 us | |
+| p6_mkdrmdir pair | **83.2 ms** | 139.7 ms | metadata writes: see below |
+| p6_unlink | **32.8 ms** | 66.5 ms | |
+| p7 sleep 1 ms overshoot | 2.09 ms | 2.25 ms | wall avg 9.98 ms is host-noise contaminated (load 10); med/p99 are the signal |
+
+Two findings worth carrying into run day regardless of UI timing:
+
+- **Metadata-write ops are the ext4 outlier, steady state.** mkdir+rmdir
+  83 ms and unlink 33 ms per op on a QUIET boot with zero boot-phase
+  mix — 2 orders over reads (stat 128 us). This pins the old table-4
+  boot-mix mkdir spread (9.6-62 ms) as real per-op cost, not phase
+  mix. The Linux pair on run day will size the gap.
+- **1G is below this kernel's early-boot heap floor.** A minimal-rootfs
+  q35 boot with -m 1G panics in ~3 s on a 4 MB kernel-heap allocation
+  (main.rs:271 OOM path) before init runs; -m 2G is the working floor
+  (faultlat precedent; Makefile default). Affects any line sizing
+  "cheap" test boots at 1G on x86_64.
+
+Still untested (run-day items, by design — QEMU budget spent on the
+quiet-boot smoke): the 8.3(A) late-service slot pick from the OH cfg
+XMLs, the debugfs swap into a private system.img copy, and the probe
+running to DONE inside the OH boot. The quiet-boot path (8.6 step 2
+shape) is fully proven.

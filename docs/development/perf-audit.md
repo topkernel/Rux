@@ -1961,6 +1961,66 @@ perf-report.md section 8 (v1.5 draft skeleton, placeholders) + this
 leg section. No change elsewhere: honest ledger = docs only, 0 QEMU,
 no kernel code, no image copies, no probe code (design-first mandate).
 
+### 2o. TWENTY-SECOND LEG: probe implemented + guest-smoked (run-day ready); both gates idle
+
+Leg start: fast-forwarded to origin/main 9fe7cdbb (the leg-21 merge;
+diff 62c2708e..9fe7cdbb is docs-only, so pa31-main-bzImage remained a
+current-main-class kernel — no rebuild needed for the smoke).
+
+**(1) UI patrol (standing).** Every round this leg:
+- sc214/215/216 all SET bootevent.bootanimation.finished ONLY;
+  launcher.ready NOT set, OnForeground 0, ArkUI 0 in all three
+  (216 ended at t~1520 s, A-line verifying their stallwatch fix
+  361debe8 after sc215's both-vCPU freeze).
+- sc217 (A-line, live at close, t=1060 s): the deepest boot this lane
+  has watched — pidmax=3898, tasks=2253 (vs 623 in sc216), flow=26,
+  PACE clean (drct=0 slow=0) — the A-line userspace work is visibly
+  moving the chain; launcher.ready still NOT set at last check.
+- Verdict: run-day trigger NOT fired. The post-UI tables stay
+  PENDING; the trigger remains "launcher.ready SET on a main-class
+  kernel + A-line merge".
+
+**(2) Census-hold gate (standing).** origin/main held at 9fe7cdbb the
+whole leg (no kernel commits since 14d8950d were merged). Gate never
+triggered; pa31 census (8/32) remains the last word.
+
+**(3) PROBE IMPLEMENTATION + SMOKE (PRIMARY).** Section 8.2's design
+is now code and is guest-validated — run day starts from a tested
+harness instead of a design doc:
+- test/pbench.c (commit b72e0011): one static musl x86_64 binary
+  (~70 KB), P1-P7 as specced, rdtsc med/p99 + MONOTONIC_RAW wall
+  backstop per bench, SKIP lines instead of aborts, self re-exec as
+  the P4 exec target (no second binary to ship), reboot(POWER_OFF)
+  finish. Host run caught 3 real bugs pre-QEMU (fmt stack-overread,
+  pipe read/write-end swap in P2/P5a, echo-child EOF deadlock) —
+  25/25 clean lines after fixes.
+- test/pbench_boot.py: quiet-boot driver (faultlat mkfs -d recipe,
+  q35/-cpu max/SMP2/2G, DONE/panic detection).
+- Guest smoke pb1 (pa31-main-bzImage): FULL PASS — PBENCH DONE at
+  t=378 s, 25/25 lines, aff=1, results file persisted in guest ext4
+  and extracted via debugfs post-poweroff (the file half of delivery
+  option 8.3(A) is proven; the OH-image slot swap itself stays a
+  run-day item). Provisional numbers + two findings recorded in
+  perf-report.md 8.7: (a) metadata-write ops are the steady-state
+  ext4 outlier — mkdir+rmdir 83 ms, unlink 33 ms per op on a quiet
+  boot, 2 orders over stat 128 us; (b) -m 1G is below this kernel's
+  early-boot heap floor (4 MB alloc panic, main.rs:271) — 2G is the
+  working minimum on x86_64 q35.
+
+**(4) QEMU ledger.** 2 of 2 self-started: pb1a (1G, kernel-heap panic
+at t=3 s — dead start, budget honest-counted) and pb1b (the full
+smoke, DONE t=378 s, powered off cleanly). No other QEMU touched; all
+foreign QEMUs (wildwrite-hunt pair, samgr-callback sc216/sc217, others)
+left alone. Artifacts: run/pb1-serial.log, run/pb1-results.txt,
+work/pbench-pb1.img (192 MB, untracked), probe source committed.
+
+**(5) Leg close.** R-final (~20:20): sc217 still 0 UI markers (but
+deepest boot yet — see (1)); main still 9fe7cdbb; nothing new to
+trigger either gate. Deliverables this leg: probe code + smoke harness
+(b72e0011), report section 8.7 (harness status + provisional numbers +
+2 findings), this ledger. Honest ledger = docs + test/ code, 0 kernel
+changes, no image copies of the OH tree, QEMU at cap.
+
 ## 4. Ranking table v2.8 (cost centers -> boot-time contribution)
 
 Acquittal note (leg 20, no version bump — no row reweighted): the
