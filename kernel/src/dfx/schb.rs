@@ -73,6 +73,17 @@ const MIN_BOOT_SECS: u64 = 240;
 /// Minimum live tasks before a census may fire (past early init).
 const MIN_TASKS: usize = 50;
 
+/// Leg-17: deterministic census timing (`censusat=<secs>` boot param).
+/// The 80%-heap trigger inside the beat cannot fire on a boot parked at
+/// the render_service lottery (heap stalls ~300MB of the ~1.1G window),
+/// and tonight 3-of-3 rolls parked — the type-attribution mission was
+/// hostage to a userspace race. This param fires the SAME one-shot
+/// `oom_anat_dump()` at a fixed boot age instead, so even a parked boot
+/// banks the census + peek histograms. u64::MAX = disabled (default);
+/// the DONE guard inside `oom_anat_dump` dedupes against the 80% trigger
+/// (whichever fires first wins).
+static CENSUS_AT_SECS: AtomicU64 = AtomicU64::new(u64::MAX);
+
 /// Ring records dumped at the census (quietcon's userspace console
 /// stream lives in the printk ring; its tail around the wedge is the
 /// userspace last-known-good).
@@ -232,6 +243,14 @@ pub fn init() {
     if !switches::enabled(DfxSwitch::Schb) {
         return;
     }
+    // Leg-17: `censusat=<secs>` — see CENSUS_AT_SECS above. Parsed here
+    // (init runs once, late boot, cmdline is stable by then).
+    if let Some(v) = crate::cmdline::get_param("censusat") {
+        if let Ok(secs) = v.trim().parse::<u64>() {
+            CENSUS_AT_SECS.store(secs, Ordering::Release);
+            crate::pr_info!("dfx: schbd census timer armed at {}s", secs);
+        }
+    }
     if RUNNING.load(Ordering::Acquire) {
         return;
     }
@@ -376,6 +395,11 @@ extern "C" fn schbd_fn(_arg: *mut core::ffi::c_void) -> i32 {
                 if st.used_bytes * 5 >= st.heap_size * 4 {
                     oom_anat_dump();
                 }
+            }
+            // Leg-17: fixed-time census (see CENSUS_AT_SECS). Whichever
+            // trigger wins first, the DONE guard makes it one-shot.
+            if t_secs >= CENSUS_AT_SECS.load(Ordering::Acquire) {
+                oom_anat_dump();
             }
             let mut w = ConsoleWriter::new();
             let _ = writeln!(
