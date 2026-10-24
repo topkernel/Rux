@@ -1,0 +1,2 @@
+e207f86e83c72cacf2688d5822e1ac9d03bebfb8
+e207f86e 2026-10-24 20:56:45 +0800 merge: feature/perf-audit leg 23 — Linux reference P1-P7 banked (ref-r1..r4 full pass, late-slot inject validated, run-day now Rux-only); census gate held on dfx merge (pa32, 4th consecutive 8/32)
