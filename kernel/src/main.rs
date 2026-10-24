@@ -906,6 +906,11 @@ pub fn rust_main_tail() -> ! {
             print_status("dfx", "khungtaskd hung-task detector", true);
         }
 
+        // sc-series soft-wedge heartbeat (dfx=schb): same late-boot slot
+        // as khungtaskd — its timer wakeups need secondaries online. The
+        // switch gates everything; schbd prints its own armed line.
+        crate::dfx::schb::init();
+
         // Enable external interrupts
         {
             arch::trap::enable_external_interrupt();

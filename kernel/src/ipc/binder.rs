@@ -1265,6 +1265,9 @@ pub fn binder_open(file: &crate::fs::File, ctx: BinderCtx) -> i32 {
         let mut w = world_lock();
         w.as_mut().unwrap().procs.push(proc.clone());
     }
+    // dfx=schb: record the new proc for the heartbeat's SC-PROC drain
+    // (no-op unless the switch is armed; never any I/O on this path).
+    crate::dfx::schb::note_proc_open(pid);
     crate::pr_info!("binder: pid {} opened the device (proc {})", pid, id);
     // sc157: device-open visibility at warn level (boot loglevel drops
     // the info line). Decides in one boot whether forked appspawn
@@ -2741,6 +2744,96 @@ fn thread_census_of(t: &Arc<BinderThread>) -> alloc::string::String {
         t.tid, total, woken, state, verdict
     );
     s
+}
+
+/// dfx=schb heartbeat counts (sc-series quiet-quiet soft-wedge hunt):
+/// cheap per-beat binder summary — live proc count, threads parked in
+/// the blocking binder read, and waiters older than 15s (the rekick
+/// threshold; a healthy boot parks readers for 1-3s at most). Read-only
+/// under WORLD; no formatting, no I/O — all output happens in schbd.
+pub fn schb_beat() -> (usize, usize, usize) {
+    let now = crate::drivers::timer::get_jiffies();
+    let hz = crate::config::KERNEL_HZ as u64;
+    let mut procs = 0usize;
+    let mut waiters = 0usize;
+    let mut waiters15 = 0usize;
+    let w = world_lock();
+    // SAFETY: read-only traversal under WORLD (pm() casts only reach
+    // each live proc's thread list).
+    unsafe {
+        if let Some(world) = w.as_ref() {
+            for p in &world.procs {
+                procs += 1;
+                let proc = pm(world, p);
+                for t in &proc.im().threads {
+                    let since = t.read_wait_since.load(core::sync::atomic::Ordering::Acquire);
+                    if since == 0 {
+                        continue;
+                    }
+                    waiters += 1;
+                    if hz != 0 && now.saturating_sub(since) >= 15 * hz {
+                        waiters15 += 1;
+                    }
+                }
+            }
+        }
+    }
+    (procs, waiters, waiters15)
+}
+
+/// dfx=schb wedge census: EVERY read-wait binder thread regardless of
+/// age. stall_report only prints waiters older than STALL_SECS (120s);
+/// the census fires at pid-plateau+60s where the wedge's waiters are
+/// younger. Formats under WORLD (no I/O); the caller emits the lines via
+/// ConsoleWriter after the guard drops (the sc89 stall_report
+/// discipline). No stall_reported latching, no rekick side effects.
+pub fn schb_waiter_census(out: &mut alloc::string::String) {
+    use core::fmt::Write as _;
+    let now = crate::drivers::timer::get_jiffies();
+    let hz = crate::config::KERNEL_HZ as u64;
+    if hz == 0 {
+        return;
+    }
+    let w = world_lock();
+    // SAFETY: read-only traversal under WORLD.
+    unsafe {
+        if let Some(world) = w.as_ref() {
+            for p in &world.procs {
+                let proc = pm(world, p);
+                for t in &proc.im().threads {
+                    let since = t.read_wait_since.load(core::sync::atomic::Ordering::Acquire);
+                    if since == 0 {
+                        continue;
+                    }
+                    let age = now.saturating_sub(since) / hz;
+                    let th = t.st();
+                    let depth = th.txn_stack.len();
+                    // Same discrimination as stall_report's stall lines:
+                    // SERVER-OWING (parked in read owing a reply — the
+                    // death-loop terminal shape) vs CLIENT-WAIT (waiting
+                    // for its own reply).
+                    let (shape, owed) = match th.txn_stack.last() {
+                        Some(txn) if txn.to_tid() == Some(t.tid) => {
+                            ("SERVER-OWING", txn.to_proc.pid)
+                        }
+                        Some(txn) => ("CLIENT-WAIT", txn.to_proc.pid),
+                        None => ("NO-TXN", 0),
+                    };
+                    let _ = writeln!(
+                        out,
+                        "SC-WEDGE-BW pid={} tid={} age={}s depth={} shape={} owed_pid={} kicks={}",
+                        proc.pid,
+                        t.tid,
+                        age,
+                        depth,
+                        shape,
+                        owed,
+                        t.rekick_count.load(core::sync::atomic::Ordering::Relaxed)
+                    );
+                }
+            }
+        }
+    }
 }
 
 pub fn stall_report() {

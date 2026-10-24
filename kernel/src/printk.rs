@@ -967,6 +967,85 @@ fn syslog_clear() {
     rb.next_seq = 0;
 }
 
+/// Newest `n` records, oldest-first, syslog-style one line each.
+///
+/// dfx=schb wedge census (sc-series quiet-quiet hunt): quietcon diverts
+/// the userspace /dev/console stream into this ring, so the tail around
+/// a soft-wedge is the userspace last-known-good boundary. Records are
+/// COPIED out under the ring lock (bounded hold) and formatted after it
+/// drops — formatting ~hundreds of records under irqsave would block
+/// every other CPU's printk for the duration.
+pub fn ring_tail(n: usize) -> alloc::string::String {
+    struct TailRec {
+        level: u8,
+        timestamp: u64,
+        pid: u32,
+        cpu_id: u16,
+        text: [u8; RECORD_TEXT_SIZE],
+        text_len: u16,
+    }
+    let mut out = alloc::string::String::new();
+    let mut recs: alloc::vec::Vec<TailRec> = alloc::vec::Vec::new();
+    {
+        let rb = RING_BUFFER.lock_irqsave();
+        if rb.next_seq == 0 {
+            return out;
+        }
+        let oldest_kept = rb.next_seq.saturating_sub(RING_BUFFER_CAPACITY as u64);
+        let start = rb.next_seq.saturating_sub(n as u64).max(oldest_kept);
+        let mut seq = start;
+        while seq < rb.next_seq {
+            let idx = (seq % RING_BUFFER_CAPACITY as u64) as usize;
+            let record = &rb.records[idx];
+            if record.text_len != 0 && record.seq == seq {
+                let mut text = [0u8; RECORD_TEXT_SIZE];
+                text[..record.text_len as usize]
+                    .copy_from_slice(&record.text[..record.text_len as usize]);
+                recs.push(TailRec {
+                    level: record.level,
+                    timestamp: record.timestamp,
+                    pid: record.pid,
+                    cpu_id: record.cpu_id,
+                    text,
+                    text_len: record.text_len,
+                });
+            }
+            seq += 1;
+        }
+    }
+    let mut header_buf = [0u8; SYSLOG_HEADER_LEN];
+    for r in &recs {
+        let hlen = format_syslog_header(
+            &mut header_buf,
+            r.level,
+            r.timestamp,
+            r.pid,
+            r.cpu_id,
+        );
+        out.push_str(unsafe { core::str::from_utf8_unchecked(&header_buf[..hlen]) });
+        // Lossy-UTF8 substitute that stays in core: kernel and console
+        // records are overwhelmingly valid UTF-8; anything else prints
+        // with invalid bytes masked rather than dropped.
+        let raw = &r.text[..r.text_len as usize];
+        match core::str::from_utf8(raw) {
+            Ok(s) => out.push_str(s),
+            Err(_) => {
+                for &b in raw {
+                    out.push(if b.is_ascii_graphic() || b == b' ' {
+                        b as char
+                    } else {
+                        '.'
+                    });
+                }
+            }
+        }
+        if out.as_bytes().last() != Some(&b'\n') {
+            out.push('\n');
+        }
+    }
+    out
+}
+
 // ==================== ProcFS /dev/kmsg Support ====================
 
 /// Generate kmsg content for /proc/kmsg.
