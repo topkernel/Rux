@@ -4018,3 +4018,24 @@ DELIVERABLES (branch feature/samgr-callback, all committed):
    advancing, deepest ever), sc229/sc230 (parked). All QEMUs and
    shotmons stopped at close (exact PIDs); userdata-sc218..230 reflink/
    full copies retained; serials on disk.
+
+LEG-17 (launcher line, census peek v2 type attribution) — RUNNING SECTION
+
+Mission: (1) run the peek v2 roll to name the c1024 84K-live/83MB and
+c256 520K-live types; (2) fix what it names (100MB-class lever on top
+of the leg-16 slab savings pushes the floor past pidmax ~6000);
+(3) verification rolls to launcher.spawn surviving appspawn's window.
+
+Setup state at leg open (02:12): main showed all 14 leg-16 commits
+(packed kstack slab c36b7ed6, peek v2 529e9aee etc.) — merged main in
+(4abb69db, content-identical: bzImage md5 370e9ea0 unchanged).
+Fleet: 4 foreign QEMUs = wildwrite-hunt (chain-bound mm lane), 1
+foreign riscv — untouched.
+
+sc231 launched 02:11 (bzImage 370e9ea0 = peek v2 kernel, the same
+binary sc229/230 parked on): fresh scgold reflink userdata-sc231.img,
+SMP2 4G KVM, dfx=schb,sleepsnap, ksprobe OFF (default), SECS=2700,
+shotmon on. The census is one-shot per boot at 80% heap (~850MB —
+exactly where sc228's fired at t~1850); a parked boot never reaches
+it, so park = rekick. Park signature from sc230: pidmax<1500 flow<=1
+young=DB_TaskExecutor with bw15 flat.
