@@ -1,8 +1,22 @@
-# Rux kernel microbench report — OH boot (v1.2, pre-UI)
+# Rux kernel microbench report — OH boot (v1.3, pre-UI)
 
 Date: 2026-10-24. Lane: `feature/perf-audit`. This is the consolidated
 deliverable of the systematic performance audit (working log with the full
 evidence trail: `docs/development/perf-audit.md`).
+
+v1.3 = v1.2 + the fifteenth session's tick-fix verification: the
+mechanism behind the "1000 ms" family is CORRECTED (it was never the
+timer IRQ's cadence — the LAPIC always fired at 100 Hz; `read_time()`
+itself stepped once per second because 9e5f0147's shift-first
+`(delta_tsc >> 32) * mult` collapses a 4.29 GHz TSC to one step per
+2^32 ticks = 1.0008 s), the launcher lane's fix (u128
+multiply-then-shift, all 4 sites) is verified by this lane on
+main+fix-hunk (pa23): tripwire green, 99.9 ticks/s/CPU sustained,
+WW/WAKE-STRANDED grids gone, nanosleep avg -21x, and the tick-mode
+kernel share re-reads 80-83% at true sampling. Limitation 8 resolves;
+per-op maxes and the nanosleep/futex tails re-baseline. Ranking v2.6
+row 2b closes as FIXED (flagship IF=0 re-run on merged main pending
+the coordinator merge at leg close).
 
 v1.2 = v1.1 + the thirteenth session's tick-cadence adjudication: the
 "1000 ms kernel-mode IRQ-OFF-WINDOW" family (A-line sc200-202 triage
@@ -37,7 +51,11 @@ milestones), to be filled when the UI milestone is reached.
 - Rux kernel: current numbers are main@988e10c1 (pa20; = launcher
   v1..v6 scheduler stack + magazine allocator) and main@9bc3a5c8
   (pa18; scheduler stack only, pre-magazine rung); the pa17 rows cite
-  main@0634bc8f. Every boot carried the lane's measurement probe
+  main@0634bc8f; the tick-fix before/after (row 2b, limitation 8
+  resolution) is pa23 = main@78460742 + the launcher lane's timer fix
+  hunk (pre-merge verification, scratch build 9a451bef — the fix
+  itself awaits the coordinator merge). Every boot carried the lane's
+  measurement probe
   (`syscost=1 sprobe=0`); each run's revision is listed in
   `perf-audit.md`'s run table. The quietcon console divert (v5) is
   boot-param-gated and deliberately NOT passed, so console behavior is
@@ -85,11 +103,12 @@ stacked on top of per-op costs — scheduler wake-loss (family F3,
 section 3 below) multiplying every dependency chain, on top of the
 per-op families. The 0.6x on the first line is real, not noise: Rux
 skips the Linux device-probe storm and reaches /init first. Leg-13
-addition: the ~1 Hz timer grid (row 2b / limitation 8) is a second
-latency multiplier on this same shape — deep-boot dependency chains
-are the phases with the most timed waits, so each wait rounds up to
-the 1 s grid; the per-phase attribution above predates the discovery
-and the F3 share of the multiplier is not yet separable from F7's.
+addition, leg-15 correction+fix: the 1 s kernel-clock grid (row 2b /
+limitation 8, RESOLVED) was a second latency multiplier on this same
+shape — deep-boot dependency chains are the phases with the most
+timed waits, so each wait rounded up to the 1 s grid. The fix is
+verified (pa23); the F3-vs-F7 multiplier split becomes measurable on
+the post-merge flagship run.
 
 Fix effect visible here. The /proc/kmsg blocking-stream fix (pa9-pa12)
 cut total syscall volume -30% and read() -113x, but milestones stayed
@@ -199,11 +218,13 @@ Before/after (fixes already in these numbers):
 
 ---
 
-## 3. Cost-center ranking v2.5 — the fix list in order
+## 3. Cost-center ranking v2.6 — the fix list in order
 
 Contribution model: 2 vCPUs, kernel mode 83-90% of ticks (pa20 t=660:
 88.1%/83.2%; user 11-14%; idle 0.5-2.5%; caveat: tick sampling itself
-is cadence-limited on this lane — limitation 8).
+is cadence-limited on this lane — limitation 8, resolved by
+the tick fix: at true 100 Hz sampling the kernel share reads
+80-83%, user 16.5-18.8%, idle 1-2.5%).
 
 | # | cost center | direct evidence (pa15-pa20, EFLAGS-exact) | share | family / lane |
 |---|---|---|---|---|
@@ -211,7 +232,7 @@ is cadence-limited on this lane — limitation 8).
 | 1b | REST bulk, by site | small-alloc **MEASURED pa18->pa20: global class-lock sections 741.7 M -> 19.7 M/boot (-97.3%); REST wall 12.2% -> 9.2% of machine — the remaining 751 M local magazine irqsave ops (136-168 ns) are the design floor; the lever left is churn volume**; schedule() GRQ 2.7-4.6% (volume-coupled; avg 5.1-6.7 us; the earlier -31% claim was single-run variance — corrected); fdtable get_file 1.9-2.2%; waitqueue family 1.9-2.3%; EPOLL_WAKE_REGISTRY 1.0-1.2% (launcher lane holds a sharding design); deferred_free 0.7-0.8% — 97-99% attributed to file:line | 20.7-23.0% | F1/F5 — the lever list |
 | 1a | Console/UART emission | per-byte cost stable 13.2-18.5 us across 5 boots (one LSR poll per byte = one inb+outb KVM-exit pair); volume swings 1.34-5.61 M bytes/boot -> machine share 1.3-6.1%; producers 2/3 OH userspace via /dev/kmsg; task-context emission 100% IF=1 | 1-6% + seconds-class stall tail | F1 — console-async = highest-latency single fix |
 | 2 | Scheduler wake-loss | WAKE-RUN-LEAK 677-678 prints / 780 s on the FULL v1..v6 stack (pa18/pa20); 31-32 refusals (25-27 lying busy slot + linked); TERM-DESCHED fires ~8/boot and every occurrence survives (acceptance demonstrated, pa17 could not test it); recvfrom max 121 s and futex avg 519 ms are this family's syscall-side face; lying slots born on another path — birth forensics continues | **large — still the wall-clock driver** | F3 (launcher lane) |
-| 2b | x86_64 timer-IRQ cadence ~1 Hz (F7, diagnosed leg 13) | WW inter-tick age pinned at exactly 1000 ms (KVM) / 1001 ms (TCG) in every quiet boot, both accels (pa13-pa22 mine, sc166-202 A-line); rate-gate saturated whole-boot in pa16-pa20; boot tripwire `lapic tick check: 0 jiffies / 150ms [fail]` fires in every x86_64 boot and is ignored; calibration print constant "LAPIC 62 MHz" across accels/hosts while effective decrement is ~625 KHz (factor ~100); recovery-tick rips land in wfi/enable_irq/idle path (incidental); WAKE-STRANDED strands quantize on the 1 s grid (sc200: 1000 ms x1488, 2001 ms x312) | latency amplifier, share unquantified: every timer-dependent wait (sleep, timeout, timed wake, lost-wake recovery) rounds up to the 1 s grid — plausibly a top wall-clock lever on this lane and a confounder for F3 latencies | F7 — fix: repair tick period (live period probe at boot; the [fail] check must gate) |
+| 2b | x86_64 kernel-clock 1 s granularity — TSC shift-first math (F7; CORRECTED+FIXED legs 13-15) | read_time stepped once per 2^32 TSC ticks = 1.0008 s (9e5f0147's `(delta>>32)*mult`); the LAPIC IRQ always fired at 100 Hz — jiffies, WW ages, WAKE-STRANDED strands and every timed wait inherited the grid. **FIXED (launcher lane's u128 multiply-then-shift) and MEASURED by pa23** (main+fix hunk): tripwire `[ok]` 16 jiffies/150 ms; 99.9 ticks/s/CPU sustained; WW prints 57 -> 2 (organic 414/251 ms); WAKE-STRANDED 100 -> 0; nanosleep avg 1.87 s -> 88.5 ms (-21x); clock_gettime max 654 ms -> 3 ms; census counts hold (TERM-DESCHED 8, WAKE-REFUSED 32) | latency amplifier REMOVED: every timer-dependent wait ran on a 1 s grid pre-fix; the F3-vs-F7 multiplier split becomes measurable on the post-merge flagship | F7 — closed pending merged-main IF=0 re-run |
 | 3 | hilogd dual-drain + retry loops | ~25% of all syscall volume (section 2.1); volume is OH userspace | medium | F2 — kernel levers small (per-call recv cost) |
 | 4 | ext4 metadata + write path | section 2.2 rows, medians 100-300x Linux | medium (~300-500 CPU-s/boot) | F4 (fs lane) |
 | 5 | Atomic/CAS contention | glue page ~16-22% of kernel ticks; RMW owners named — they ARE the 1b sections | medium — folds into 1b | F5 |
@@ -219,7 +240,7 @@ is cadence-limited on this lane — limitation 8).
 
 Reading. The gap is not one hotspot; it is four stacked layers in this
 order: (a) wake-loss stalls multiplying every dependency chain (the
-phase-timeline driver), (a') the ~1 Hz timer grid (row 2b) rounding
+phase-timeline driver), (a') the 1 s kernel-clock grid (row 2b, now FIXED) that rounded
 every timed wait of those chains up to whole seconds, (b) 1.3 M
 irqsave sections/s — allocator and lock volume, each section only
 ~140 ns to 6 us long, (c) userspace logging/retry loops amplified by
@@ -229,7 +250,7 @@ family (row 1) decomposes almost entirely into per-site work (row 1b)
 per-site (magazines DONE for the allocator; pick-path work for the
 GRQ; RCU-ish reads for fdtable).
 
-Ranking movement v1 -> v2.5 (what fixes moved). The read storm (v1's
+Ranking movement v1 -> v2.6 (what fixes moved). The read storm (v1's
 #3, ~0.5-1.0 vCPU) is gone after the kmsg fix; its slot was taken by
 the hilogd dual-drain, which was always underneath and spins faster
 now that rd_kmsg stopped competing. The launcher's v1..v6 stack
@@ -242,10 +263,11 @@ floor is per-op local irqsave and other sites grew with boot depth.
 The softirq empty-raise gates (pa14 A/B) measured NO effect on this
 workload — both latch bits flip within the first 31 s and never
 re-engage; honest negative result, the gates still pay on
-timer/TCP-sparse workloads. v2.5 adds row 2b: the tick-cadence bug was
-present-but-unread in every earlier run (its WW-age signature was
-misfiled as an IF=0-suspect family); it does not move the CPU-side
-rows, it re-attributes latency and adds a cheap high-leverage fix.
+timer/TCP-sparse workloads. v2.5 added row 2b: the tick bug was present-but-unread in every
+earlier run (its WW-age signature was misfiled as an IF=0-suspect
+family). v2.6 corrects its mechanism (read_time granularity, not IRQ
+cadence) and closes it: the launcher lane's fix verified in pa23
+with the full before/after (section 2h of the working log).
 
 Known limitations. Single-boot samples per kernel revision; shares are
 of a 1440 CPU-s machine window at t=720; console share swings with
@@ -304,13 +326,14 @@ re-fix; full table in `perf-audit.md` section 6):
 | launcher sched v3+v4 (+v6/R73) (c90f80b0, 7a8044e0, 9777f195) | — | **pa18: TERM-DESCHED fires 8x/boot and all survive (acceptance demonstrated); census population unchanged (lying slots born elsewhere); GRQ hold volume-coupled, avg flat 5.1-6.1 us — the earlier -31% wall claim was variance, corrected** | v1..v6 stack verified harmless-and-effective on its own shape; census birth forensics remains open |
 | per-CPU magazine allocator (cb51db03) | 741.7 M global class-lock sections/boot, 176.1 s REST (12.2% of machine) | **pa20: 19.7 M lock sections (-97.3%), 133.2 s REST (9.2%) — the 16.49x projection confirmed; remaining floor is per-op local irqsave (751 M ops @136-168 ns)** | holds — locking lever spent; churn volume is the allocator's next lever |
 | softirq empty-raise gates (69310bae) | (hypothesis: wasted raises) | no measurable effect on OH boot — latches flip by t=31 and never re-engage | negative result, recorded |
+| X86-TICK-CADENCE, MECHANISM CORRECTED to X86-CLOCK-GRANULARITY (diagnosed leg 13 as "IRQ ~1 Hz", corrected leg 15 — it was read_time's own step size; fix by the launcher lane: u128 multiply-then-shift at all 4 shift-first sites in `kernel/src/drivers/timer/x86_64.rs`) | tripwire `[fail]` 0 jiffies/150 ms; WW ages pinned at exactly 1000/1001 ms; WAKE-STRANDED quantized on the 1 s grid; nanosleep avg 1.87 s | **pa23 (main + fix hunk): tripwire `[ok]` 16 jiffies/150 ms; 99.9 ticks/s/CPU sustained; WW prints 57 -> 2 (organic); WAKE-STRANDED 100 -> 0; nanosleep avg 88.5 ms (-21x); clock_gettime max 654 ms -> 3 ms; tick-mode kernel share 80-83% at true sampling; census counts unchanged** | holds (pre-merge verification; merged-main flagship IF=0 re-run pending) |
 
 Candidates diagnosed but NOT yet fixed (this lane, for the fix owner's
 table):
 
 | candidate | diagnosis | measured effect when fixed | owner lane |
 |---|---|---|---|
-| X86-TICK-CADENCE (leg 13): timer IRQ ~1 Hz effective on the OH x86_64 lane (nominal 100 Hz) | ages pin at exactly 1000/1001 ms both accels; boot check `[fail]` ignored; calibration print constant "LAPIC 62 MHz" vs ~625 KHz effective (~100x); fix = probe the live period after arming and gate boot on it; suspects: calibration window (PIT ch2 OUT2) vs x2APIC divide semantics vs arm-path count | expected: sleep/timed-wake granularity 1 s -> 10 ms; WAKE-STRANDED strands stop quantizing; the 1.0 s per-op maxes collapse; nanosleep/futex averages re-baseline; wall-clock phase times should drop materially (share unquantified — retest boot required, ranking row 2b) | kernel/timer (whoever owns apic.rs); perf lane retests |
+| (none open on this lane's own list — the tick fix above closed the only candidate; allocation-churn hunt and console-async remain the roadmap items, sections 3 and 6) | | | |
 
 ---
 
@@ -376,6 +399,18 @@ table):
    stand, its latencies do not resolve below 1 s). Consumers of
    A-line rolls should read every strand=1000/2001 ms as "one tick
    late", not "measured 1000 ms".
+   **RESOLVED (v1.3, pa23):** the mechanism was read_time's shift-first
+   TSC math (one step per 2^32 TSC ticks = 1.0008 s), NOT the IRQ
+   cadence — the LAPIC always fired at 100 Hz. With the launcher
+   lane's u128 multiply-then-shift fix applied to main: tripwire green
+   (16 jiffies/150 ms), tick counters 99.9/s/CPU sustained, tick-mode
+   shares now sampled at the true rate (kernel 80-83%, user 16.5-18.8%,
+   idle ~1-2.5% — the pre-fix 86-89% kernel figure was sparse-sampling
+   phase-weighting), the per-op max cluster off the 1 s grid
+   (clock_gettime max 654 ms -> 3 ms), nanosleep/futex averages
+   re-baselined (88.5 ms / 89.6 ms at t=60 vs 1.87 s / 125.9 ms
+   pre-fix). Pre-fix strand=1000/2001 ms readings keep their "one/two
+   ticks late" interpretation; post-fix rolls measure true latencies.
 
 ---
 
