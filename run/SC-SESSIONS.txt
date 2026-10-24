@@ -3927,3 +3927,94 @@ sc224 note: verification roll of the 96KB stack ran t=0-1409s parked
 (mid-boot lottery loss, KNOWN userspace park) with ZERO STACK-OVERFLOW
 canary hits and kHW=89,368 exactly as predicted - the size reduction
 is canary-clean under real load. Killed at the plateau verdict.
+
+LEG-16 CLOSE-OUT
+
+DELIVERABLES (branch feature/samgr-callback, all committed):
+  cbb84244 fix(ext4): fill_page_cache_batch from_fn -> const-repeat
+  94082866 fix(task): Task construction/clone-path from_fn -> const-repeat
+  (fds)    fix(fs): FdTable fork_from element-wise clone
+  (slab)   feat(mm): packed kstack slab (order-6 block = 3 x 80KB slots)
+  (config) feat(config): kernel_stack_size 81920 + full rationale
+  (ksprobe) dfx(switches): ksprobe token (probe off for verification)
+  + probes: SC-ANAT beat line, SC-KREC record stash, OOM-ANAT census
+    (+80%-heap early fire), census_peek v2 (header histogram), small
+    slab live-stats, kstack anat counters.
+  READY FOR COORDINATOR MERGE: the four fix/feat commits above; the
+  probe commits are merge-neutral (dfx-gated) but recommended together.
+
+1. THE ANATOMY QUESTION, ANSWERED (mission item 1): at the launcher
+   floor (sc219 census, heap 904MB / tasks 2688 / pidmax 5056):
+   - kernel stacks: 383MB (42%) - the #1 item, NOT task structs/fd
+     tables (48MB together) - and fixed at the source this leg.
+   - small-object slab: 343MB (38%), dominated by c256 (520K live
+     objects; File=144B/dentry=160/inode=200 share the class) and
+     c1024 (84K live, 83MB, type STILL UNIDENTIFIED - peek v1
+     undersampled; peek v2 ships for the next leg).
+   - big blocks (o9/o10/o12 = 2-16MB allocs): ~82MB in ~24 objects.
+   - binder buffers are ZONE-side (exonerated); dentry/inode CACHES
+     are capped at 256 entries (not the elephant).
+
+2. THE FROM_FN TRILOGY (all three deepest stack chains of the boot
+   were array::from_fn/array-clone debug-build wrapper copies):
+   - ext4 fill_page_cache_batch [IoCompletion;128]  -> resize2fs 80,496B
+   - Task init rings [AtomicU64;512]                -> forks 65.8-76KB
+   - FdTable::fork_from fds.clone() [Option<Arc>;1024] -> forks 89,368B
+   Every fork in the boot ran 3-4 redundant array copies; forks are
+   measurably cheaper now (sc225/sc228 progression pace).
+
+3. THE STACK SIZE SAGA (the leg's main lesson):
+   - 96KB saves NOTHING: the buddy rounds to power-of-two blocks
+     (sc225 o5-block math proved each 96KB stack consumed a 128KB
+     order-5 block).
+   - 64KB is UNSAFE: sc226 measured max 62,512B canary-clean, but
+     sc227 #GP'd at t~25s - per-boot depth variance crossed the 3.1KB
+     headroom and smashed an adjacent heap page (corrupted-Vec #GP,
+     the pty-story signature). Reverted.
+   - THE ANSWER: packed kstack slab - order-6 (256KB) blocks carved
+     into three 80KB slots: per-stack footprint 85.3KB (was 128KB),
+     ~15KB real margin over the measured max. sc228 verified 99.8%
+     slot packing live (kb=291/ks=871).
+
+4. VERIFICATION STATUS (honest):
+   - sc228 (full 2700s roll, all fixes): ADVANCING boot - deepest of
+     the campaign (pidmax 5341, tasks 3173, flow alive to the end),
+     ZERO canary hits, ZERO panics, heap at matched population
+     -150MB (728MB@pidmax4474 vs sc219's ~880MB): the kstack share of
+     the floor collapsed exactly as designed. THE FLOOR STILL FORMS
+     (at heap 831MB / pidmax ~5143, drct=360) and the launcher spawn
+     still dies in appspawn's kill loop (23 kills; launcher.ready
+     never set). The window moved ~370 pids deeper but the boot's pid
+     churn reaches it.
+   - sc229/sc230: parked at the KNOWN userspace mid-boot lottery
+     (render_service ioctl park, bw15~244; 6-of-10 full boots parked
+     tonight vs 3/3 wins in leg-15 - host-load userspace variance,
+     kernel-side clean: no canary, no faults, services spawn to
+     pidmax ~1330 then park). The formal 2-consecutive-advancing rule
+     is NOT met: 1 advancing (sc228) + 2 clean-but-parked.
+   - Probe boots sc226 (420s, 64KB+ksprobe): canary-clean, kHW=62,512.
+
+5. WHAT REMAINS FOR THE WINDOW (next leg's ledger):
+   - c1024 84K-live (83MB) + c256 520K-live: peek v2 (header
+     histogram) ships in the tree - one roll answers the type
+     question; a 100MB class fix on top of the slab moves the floor
+     past pidmax ~6000 where the spawn churn cannot reach it.
+   - o9-o12 big blocks (~82MB, ~24 allocations of 2-16MB): cheap to
+     identify via NET_PAGES + a per-site tag.
+   - The zone side: sc228's floor had zfree=184 pages - the USER zone
+     also drains at the deepest state; a heap-only fix past ~600MB of
+     savings hits the zone wall next. Coordinator option: -m 6G rolls
+     (host has room) to separate the two.
+   - The mid-boot park lottery dominates boot outcomes (6/10 tonight);
+     any window verdict needs park-free boots - consider a park
+     detector auto-retry in the driver.
+
+6. Rolls this leg: sc218 (anatomy, parked), sc219 (floor census, the
+   dataset boot), sc220/221/222 (short attribution), sc223 (parked),
+   sc224 (96KB canary check, parked), sc225 (96KB full roll: floor +
+   launcher kill loop confirmed - the negative result that exposed the
+   power-of-two rounding), sc226 (64KB probe), sc227 (64KB #GP - the
+   conviction boot for the slab design), sc228 (slab verification,
+   advancing, deepest ever), sc229/sc230 (parked). All QEMUs and
+   shotmons stopped at close (exact PIDs); userdata-sc218..230 reflink/
+   full copies retained; serials on disk.
