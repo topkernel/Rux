@@ -4494,3 +4494,19 @@ population (undelivered parked oneways, pick_j==0) is untouched, as
 predicted. THE NEXT LEG'S enq_j + retirement rule IS the lever; the
 floor has NOT moved yet. Verification status unchanged: no formal
 2-advancing verdict on the final kernel (sc245 parked).
+
+LEG-17 FINAL RECONCILIATION NOTE (06:16, instance A): both instances
+of this line committed to the shared branch tonight - the interleaved
+commit chain (mine: census/probes/fixes 66858395+6ba58562+4dee194f and
+the census records; the second instance's: main merges 0587c6c0/fe79f952,
+sc250/sc251B rolls and the attempt-2 close-out 86225d02) is COHERENT:
+tree builds clean post-interleave (verified 06:16), no unstaged kernel
+changes, fleet empty. My close-out correction (463bdf71) supersedes
+the -40% claim in dca78ce2 only; the attempt-2 close-out (86225d02)
+is the FURTHEST state of the line (sc251B deepest, screen alive at
+8-color checker, next blocker = launcher lock-cmpxchg write to the
+R-only shared VMA fd40+0xa93c). Coordinator: treat 86225d02 as the
+authoritative leg-17 next-step ledger; my census/attribution chain and
+both KILLDUMP fixes feed it. All probes are dfx-gated; the three
+substantive fixes (binder reclaim 6ba58562, mm-pin 66858395, task-pin
+4dee194f) are mainline candidates subject to the merge-gate policy.
