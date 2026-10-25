@@ -1944,14 +1944,37 @@ mod persistent_log {
                 unsafe {
                     (*current).set_state(TaskState::new(TaskState::INTERRUPTIBLE));
                 }
+                // Re-check AFTER marking sleeping: the one-shot timer may
+                // have fired between arming and set_state — either its wake
+                // captured the INTERRUPTIBLE state, or the deadline is
+                // already visible.
                 if crate::drivers::timer::get_jiffies() >= target {
                     // SAFETY: see above.
                     unsafe {
                         (*current).set_state(TaskState::new(TaskState::RUNNING));
+                        // NEW-C2: a racing wake may have enqueued us while we
+                        // are still executing — take ourselves back off.
+                        crate::sched::dequeue_task(&*current);
                     }
+                    crate::timer::del_timer(timer_id);
                 } else {
+                    // Enable interrupts so the tick can reach us, then sleep
+                    // (kthread context, like syscall context, runs SIE=0 —
+                    // without this the sleeping CPU takes no ticks and the
+                    // 30 s flush never fires; the smoke saw the file stuck
+                    // at the init flush, 3 lines, forever).
+                    crate::arch::cpu::restore_irq(true);
                     crate::sched::schedule();
+                    // Spurious wake before the deadline: drop the timer and
+                    // loop (re-armed next iteration).
+                    if crate::timer::timer_pending(timer_id) {
+                        crate::timer::del_timer(timer_id);
+                    }
                 }
+            } else {
+                // Timer table full — stay runnable, yield one scheduling
+                // round and retry the arm.
+                crate::sched::schedule();
             }
             if crate::process::kthread::kthread_should_stop() {
                 break;
@@ -2033,21 +2056,34 @@ mod persistent_log {
         // period — the cursor must never pass an unwritten record.
         let mut offset = WRITE_OFFSET.load(Ordering::Relaxed);
         let mut final_seq = LAST_SEQ.load(Ordering::Relaxed);
+        let mut written = 0usize;
         for (seq, line) in &lines {
             let data = &line.buf[..line.len];
             match crate::fs::ext4::file::ext4_file_write(fs, &mut ext4_inode, offset, data) {
-                Ok(written) => {
-                    offset += written as u64;
+                Ok(written_len) => {
+                    offset += written_len as u64;
                     if offset >= MAX_LOG_SIZE {
                         offset = 0;
                     }
                     final_seq = *seq;
+                    written += 1;
                 }
                 Err(_) => break,
             }
         }
         WRITE_OFFSET.store(offset, Ordering::Relaxed);
         LAST_SEQ.store(final_seq, Ordering::Relaxed);
+        if written < lines.len() {
+            // One warn line per failing flush (the doc contract): the
+            // delta stays in the ring; without this the archive silently
+            // stops and the only symptom is a stale /var/log/kmsg.
+            crate::pr_warn!(
+                "klogd: flush wrote {}/{} records (ext4 write error at seq {}); delta stays buffered",
+                written,
+                lines.len(),
+                final_seq + 1
+            );
+        }
 
         // Keep the inode size at the high-water mark so a plain read
         // sees the full window (the wrap semantics of a rotating log).
