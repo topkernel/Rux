@@ -439,7 +439,11 @@ impl File {
 
     /// Position-invariant write at an explicit offset (pwrite(2) backing).
     ///
-    /// O_APPEND is ignored by pwrite per POSIX (the explicit offset wins).
+    /// POSIX leaves the offset/O_APPEND interaction unspecified; this ABI
+    /// resolves it the documented pwrite(2) way: on a descriptor opened
+    /// with O_APPEND the data is APPENDED regardless of the offset (LTP
+    /// pwrite04/pwrite04_64: the second pwrite at offset 0 must extend
+    /// the file from 2048 to 3072, not overwrite byte 0).
     pub unsafe fn write_at(&self, offset: u64, buf: *const u8, count: usize) -> isize {
         // Unseekable first, before the f_mode check: pwrite on a pipe
         // (even its O_RDONLY read end) fails ESPIPE, not EBADF — Linux
@@ -455,6 +459,18 @@ impl File {
         if self.flags().bits() & crate::fs::file::FileFlags::O_PATH != 0 {
             return -9; // EBADF
         }
+        // O_APPEND wins over the explicit offset: resolve the write
+        // position to the CURRENT end of file (the ext4 backend
+        // re-resolves u64::MAX under its own lock; the value here covers
+        // the set_pos/write/restore fallback and memfs paths).
+        let offset = if self.flags().bits() & crate::fs::file::FileFlags::O_APPEND != 0 {
+            match inode_opt.as_ref() {
+                Some(inode) => inode.size.load(core::sync::atomic::Ordering::Acquire) as u64,
+                None => offset,
+            }
+        } else {
+            offset
+        };
 
         // Disk-backed files (ext4) must write through their file ops;
         // inode.write_data targets the in-memory FileBuffer and would
