@@ -853,6 +853,13 @@ fn compile_boot_asm() {
         return;
     }
 
+    // Without this, cargo never reruns the build script for a riscv
+    // boot.S-only edit (the x86 branch below declares its own): boot.o
+    // stays stale while rust code relinks around it, and the mismatched
+    // early page tables boot-panic past the old image window (LAYOUT-4:
+    // pfault at the 18MB boundary with 20MB layout constants, batchA6).
+    println!("cargo:rerun-if-changed={}", boot_asm.display());
+
     let out_dir = PathBuf::from(env::var("OUT_DIR").unwrap());
     let boot_obj = out_dir.join("boot.o");
 
