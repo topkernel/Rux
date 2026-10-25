@@ -1,0 +1,35 @@
+pa41 series — leg-32 (perf-audit) L0 release-profile battery
+==============================================================
+Built from : feature/perf-audit 4f9a25cd (= main 6f7e4ac3 + docs/run +
+             snapshot d2617dee + the ret_from_fork weak-shim removal
+             4f9a25cd; kernel/ content otherwise identical to main)
+Toolchain  : rustc 1.101.0-nightly (ea137335b 2026-10-05)
+Machine    : q35, TCG thread=multi, -cpu max, SMP2, 2G (pbench_boot.py
+             defaults; the pa/pb-series class), init=/test/pbench
+
+Kernels (all same source, only the release profile differs):
+  pa41-kdbg-bzImage      debug profile (the class every pa/pb run to
+                         date has booted)
+  pa41-krelweak-bzImage  release: lto=false, codegen-units=16 (default),
+                         no strip   [branch Cargo.toml as inherited]
+  pa41-krelstrong-bzImage release: lto=true, codegen-units=1,
+                         strip=symbols [main's Cargo.toml profile,
+                         built via `make build-release-opt` env gate]
+
+Context: release builds were IMPOSSIBLE on this tree under BOTH
+profiles until 4f9a25cd (fossil .weak ret_from_fork shim in main.rs
+collided with trap.S's .globl once rustc placed both global_asm!
+blocks in one assembly unit). The leg-31 snapshot's unexplained
+weakening of the root [profile.release] was the dead predecessor's
+workaround for the cgu=1 flavour of that collision (pa39 builds 1-2
+failed strong, build 3 passed weak, pre-merge tree).
+
+Hashes:
+pa41-kdbg-bzImage  12247040 bytes  sha256:1bb0d7ba0db162ec…
+pa41-krelweak-bzImage  8937472 bytes  sha256:60b34d17ee659dfc…
+pa41-krelstrong-bzImage  8945664 bytes  sha256:986a9d525c674b3e…
+
+pa42 HEAD-verification builds (post naked-fn fix, head 2f17d663):
+pa42-headstrong-bzImage  8945664 bytes  sha256:b6073616437cd44a…
+pa42-headweak-bzImage  9003008 bytes  sha256:e501a8022807e2a2…
+pa42-headdbg-bzImage  12247040 bytes  sha256:fd217835db4bd532…

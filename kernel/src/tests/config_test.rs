@@ -35,6 +35,12 @@ pub fn test_config() {
     test_assert_eq!(KERNEL_HEAP_SIZE, 134217728, "KERNEL_HEAP_SIZE == 128MB (riscv64-clamped)");
     test_assert_eq!(PHYS_MEMORY_SIZE, 2147483648, "PHYS_MEMORY_SIZE == 2GB");
     test_assert_eq!(USER_STACK_SIZE, 8388608, "USER_STACK_SIZE == 8MB");
+    // kernel_stack_size is arch-gated since leg-17: 128KB base for
+    // riscv64/unmeasured arches (fee7774f: the 80KB slot overflowed on
+    // the riscv64 test kernel), 80KB packed-slab slots on x86_64.
+    #[cfg(target_arch = "x86_64")]
+    test_assert_eq!(KERNEL_STACK_SIZE, 81920, "KERNEL_STACK_SIZE == 80KB (x86_64 packed slab)");
+    #[cfg(not(target_arch = "x86_64"))]
     test_assert_eq!(KERNEL_STACK_SIZE, 131072, "KERNEL_STACK_SIZE == 128KB");
 
     // Test 5: Scheduler
