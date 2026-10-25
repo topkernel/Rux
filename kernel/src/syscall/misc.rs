@@ -396,15 +396,37 @@ fn epoll_file_close(file: &crate::fs::File) -> i32 {
     0
 }
 
-/// Epoll file operations
-static EPOLL_OPS: crate::fs::FileOps = crate::fs::FileOps {
-    read: None,
-    write: None,
-    lseek: None,
-    close: Some(epoll_file_close),
-    poll: None,
-    read_at: None,
-};
+/// Epoll file operations (D-6 builder form: epoll carries ONLY close —
+/// no read/write/seek/poll capability; read() on an epoll fd takes the
+/// central EINVAL path, the §1 incident's fd family).
+static EPOLL_OPS: crate::fs::FileOps = crate::fs::FileOps::builder()
+    .close(epoll_file_close)
+    .build();
+
+/// D-6 shape-test accessors: expose the (otherwise private) converted
+/// ops tables to the unit-test group `fileops-caps`
+/// (kernel/src/tests/fileops_caps.rs) without widening the runtime API.
+#[cfg(any(test, feature = "unit-test"))]
+pub mod caps_shape {
+    pub fn epoll_ops() -> &'static crate::fs::FileOps {
+        &super::EPOLL_OPS
+    }
+    pub fn eventfd_ops() -> &'static crate::fs::FileOps {
+        &super::EVENTFD_OPS
+    }
+    pub fn timerfd_ops() -> &'static crate::fs::FileOps {
+        &super::TIMERFD_OPS
+    }
+    pub fn signalfd_ops() -> &'static crate::fs::FileOps {
+        &super::SIGNALFD_OPS
+    }
+    pub fn pipe_ops() -> &'static crate::fs::FileOps {
+        &crate::fs::pipe::PIPE_OPS
+    }
+    pub fn inotify_ops() -> &'static crate::fs::FileOps {
+        &crate::fs::inotify::INOTIFY_OPS
+    }
+}
 
 /// sys_poll - I/O multiplexing (poll style)
 ///
@@ -518,36 +540,10 @@ pub fn sys_poll(args: SyscallArgs) -> i64 {
                     }
                 };
 
-                // Use per-file-type poll callback if available
-                let revents = match file.get_ops() {
-                    Some(ops) => {
-                        match ops.poll {
-                            Some(poll_fn) => poll_fn(&file, pollfd.events),
-                            None => {
-                                // No poll handler: default to always ready
-                                let mut r = 0u16;
-                                if pollfd.events & POLLIN != 0 {
-                                    r |= POLLIN | POLLRDNORM;
-                                }
-                                if pollfd.events & POLLOUT != 0 {
-                                    r |= POLLOUT | POLLWRNORM;
-                                }
-                                r
-                            }
-                        }
-                    }
-                    None => {
-                        // No ops: default to always ready
-                        let mut r = 0u16;
-                        if pollfd.events & POLLIN != 0 {
-                            r |= POLLIN | POLLRDNORM;
-                        }
-                        if pollfd.events & POLLOUT != 0 {
-                            r |= POLLOUT | POLLWRNORM;
-                        }
-                        r
-                    }
-                };
+                // Central dispatch (D-6): per-file-type poll callback
+                // when the type declared the capability, else the
+                // always-ready fallback — one place, not per-callsite.
+                let revents = file.poll_dispatch(pollfd.events);
 
                 // Linux do_pollfd(): revents are MASKED to the requested
                 // events plus the always-reportable ERR/HUP/NVAL. Drivers
@@ -643,17 +639,11 @@ pub fn sys_poll(args: SyscallArgs) -> i64 {
                             Some(f) => f,
                             None => return true, // POLLNVAL
                         };
-                        match f.get_ops() {
-                            Some(ops) => match ops.poll {
-                                Some(poll_fn) => {
-                                    if poll_fn(&f, pfd.events) & (pfd.events |
-                                        POLLERR | POLLHUP | POLLNVAL) != 0 {
-                                        return true;
-                                    }
-                                }
-                                None => return true, // default always-ready
-                            },
-                            None => return true,
+                        // Central dispatch (D-6): capability fn or the
+                        // always-ready fallback; mask + decide here.
+                        let revents = f.poll_dispatch(pfd.events);
+                        if revents & (pfd.events | POLLERR | POLLHUP | POLLNVAL) != 0 {
+                            return true;
                         }
                     }
                     false
@@ -1023,8 +1013,6 @@ pub fn sys_ppoll(args: SyscallArgs) -> i64 {
 /// # Returns
 /// Returns number of ready file descriptors on success, 0 on timeout, negative error code on failure
 pub fn sys_pselect6(args: SyscallArgs) -> i64 {
-    use poll_events::*;
-
     // pselect6's timeout is a *timespec*, not a timeval: parsing it as a
     // timeval inflated every wait 1000x (tv_nsec read as tv_usec).
     let timeout_ptr = args[4] as *const i64; // { tv_sec, tv_nsec }
@@ -1239,27 +1227,8 @@ fn pselect6_common(args: SyscallArgs, timeout_ns: i64, has_timeout: bool) -> i64
                 continue;
             }
 
-            // Call file's poll callback
-            let revents = match file.get_ops() {
-                Some(ops) => {
-                    match ops.poll {
-                        Some(poll_fn) => poll_fn(&file, poll_events),
-                        None => {
-                            // No poll handler: regular files are always ready
-                            let mut r = 0u16;
-                            if poll_events & POLLIN != 0 { r |= POLLIN | POLLRDNORM; }
-                            if poll_events & POLLOUT != 0 { r |= POLLOUT | POLLWRNORM; }
-                            r
-                        }
-                    }
-                }
-                None => {
-                    let mut r = 0u16;
-                    if poll_events & POLLIN != 0 { r |= POLLIN | POLLRDNORM; }
-                    if poll_events & POLLOUT != 0 { r |= POLLOUT | POLLWRNORM; }
-                    r
-                }
-            };
+            // Call file's poll callback (central dispatch, D-6)
+            let revents = file.poll_dispatch(poll_events);
 
             // Map poll revents back to select fd_sets
             if revents != 0 {
@@ -1882,13 +1851,10 @@ pub fn sys_epoll_wait(args: SyscallArgs) -> i64 {
             if entry.events & EPOLLIN != 0 { poll_mask |= POLLIN; }
             if entry.events & EPOLLOUT != 0 { poll_mask |= POLLOUT; }
 
-            let revents = match file.get_ops() {
-                Some(ops) => match ops.poll {
-                    Some(poll_fn) => poll_fn(&file, poll_mask),
-                    None => poll_mask,
-                },
-                None => poll_mask,
-            };
+            // Central dispatch (D-6): the capability fn or the
+            // always-ready fallback (the fallback's *NORM companions map
+            // to the same epoll event bits the old mask-echo did).
+            let revents = file.poll_dispatch(poll_mask);
 
             if revents != 0 {
                 let mut ep_events: u32 = 0;
@@ -2088,13 +2054,10 @@ pub fn sys_epoll_wait(args: SyscallArgs) -> i64 {
                 // nothing (sleeping is correct — the scan would skip it).
                 let quick_ready = || -> bool {
                     for (f, mask, et_last) in watched.iter() {
-                        let revents = match f.get_ops() {
-                            Some(ops) => match ops.poll {
-                                Some(poll_fn) => poll_fn(f, *mask),
-                                None => *mask,
-                            },
-                            None => *mask,
-                        };
+                        // Central dispatch (D-6): capability fn or the
+                        // always-ready fallback (same epoll mapping as
+                        // the old mask-echo — see the scan above).
+                        let revents = f.poll_dispatch(*mask);
                         if revents == 0 {
                             continue;
                         }
@@ -2459,15 +2422,13 @@ fn eventfd_close(file: &crate::fs::File) -> i32 {
     0
 }
 
-/// EventFd file operations
-pub static EVENTFD_OPS: crate::fs::FileOps = crate::fs::FileOps {
-    read: Some(eventfd_read),
-    write: Some(eventfd_write),
-    lseek: None,
-    close: Some(eventfd_close),
-    poll: Some(eventfd_poll),
-    read_at: None,
-};
+/// EventFd file operations (D-6 builder form)
+pub static EVENTFD_OPS: crate::fs::FileOps = crate::fs::FileOps::builder()
+    .read(eventfd_read)
+    .write(eventfd_write)
+    .close(eventfd_close)
+    .poll(eventfd_poll)
+    .build();
 
 // ==================== timerfd ====================
 
@@ -2650,16 +2611,12 @@ fn tfd_remaining(tfd: &TimerFd) -> (i64, i64) {
     }
 }
 
-/// TimerFd file operations
-/// TimerFd file operations
-static TIMERFD_OPS: crate::fs::FileOps = crate::fs::FileOps {
-    read: Some(timerfd_read),
-    write: None,
-    lseek: None,
-    close: Some(timerfd_close),
-    poll: Some(timerfd_poll),
-    read_at: None,
-};
+/// TimerFd file operations (D-6 builder form)
+static TIMERFD_OPS: crate::fs::FileOps = crate::fs::FileOps::builder()
+    .read(timerfd_read)
+    .close(timerfd_close)
+    .poll(timerfd_poll)
+    .build();
 
 // ============================================================================
 // Poll-wait registration: timerfd / signalfd (P3: event-driven poll)
@@ -2940,15 +2897,12 @@ fn signalfd_close(file: &crate::fs::File) -> i32 {
     0
 }
 
-/// SignalFd file operations
-static SIGNALFD_OPS: crate::fs::FileOps = crate::fs::FileOps {
-    read: Some(signalfd_read),
-    write: None,
-    lseek: None,
-    close: Some(signalfd_close),
-    poll: Some(signalfd_poll),
-    read_at: None,
-};
+/// SignalFd file operations (D-6 builder form)
+static SIGNALFD_OPS: crate::fs::FileOps = crate::fs::FileOps::builder()
+    .read(signalfd_read)
+    .close(signalfd_close)
+    .poll(signalfd_poll)
+    .build();
 
 /// signalfd4 core (NR 74): create a new signalfd, or re-arm the mask of an
 /// existing one (fd >= 0).
