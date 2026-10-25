@@ -101,15 +101,22 @@ fi
     # block-event check must not depend on read-cache luck.
     echo 'head -c 200000 /bin/toybox > /trace2.tmp; sync'
     sleep 3
+    # Grep the block lines NOW, before the binder phase: the closed-loop
+    # probe emits thousands of binder events over its 8 s run and wraps
+    # the per-CPU ring (1024 entries) past the block records — the
+    # first run of this smoke grepped them only after the probe and saw
+    # none while the events had recorded fine (blkdbg boot: block lines
+    # in the reference geometry, diskstats moving on the same
+    # chokepoints).
+    echo 'echo ===T2: block lines ==='
+    sleep 0.3
+    echo 'grep block_rq_ /sys/kernel/debug/tracing/trace | head -6'
+    sleep 0.5
     echo 'echo ===T2: binder traffic (closed-loop probe) ==='
     sleep 0.3
     echo '/test/binder_probe'
     sleep 8
     echo 'echo 0 > /sys/kernel/debug/tracing/tracing_on'
-    sleep 0.5
-    echo 'echo ===T2: block lines ==='
-    sleep 0.3
-    echo 'grep block_rq_ /sys/kernel/debug/tracing/trace | head -6'
     sleep 0.5
     echo 'echo ===T2: binder lines ==='
     sleep 0.3

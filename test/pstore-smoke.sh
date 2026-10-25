@@ -99,9 +99,15 @@ check() {
 
 echo "--- verdicts ---"
 check "boot1 panics (sysrq c)" 'sysrq: crashing the kernel on request'
-check "panic=3 reboots (the boot banner prints twice)" 'RISC-V 64-bit \| POSIX Compatible.*RISC-V 64-bit \| POSIX Compatible'
+banners=$(grep -c 'POSIX Compatible' "$LOG")
+if [ "${banners:-0}" -ge 2 ]; then
+    echo "  PASS: panic=3 reboots (boot banner x$banners)"
+else
+    echo "  FAIL: panic=3 reboots (banner count $banners < 2)"
+    fail=1
+fi
 check "boot2 finds the record (the pstore boot line)" 'pstore: previous boot.s panic record found'
-check "record file exists, mode 0444" 'r..r..r.. .* /sys/fs/pstore/console-ramoops-0'
+check "record file exists, mode 0444" '^-r--r--r--.*console-ramoops-0'
 check "record carries the panic identity" 'Panic: sysrq'
 check "record carries the printed banner" 'PSDBG:banner_count=[1-9]'
 check "record carries the symbolized stack header" 'PSDBG:trace_count=[1-9]'

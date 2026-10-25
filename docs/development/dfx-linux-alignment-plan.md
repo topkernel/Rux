@@ -116,12 +116,12 @@ incomplete or non-Linux shape · **--** = absent.
 | Crash | panic handler, `Call Trace:` | PART | header case differs, frames never symbolized |
 | Crash | `Oops` (non-fatal) | -- | every fault is fatal |
 | Crash | `panic=` timeout / reboot | -- | halt forever |
-| Crash | pstore / ramoops | -- | empty `/sys/fs/pstore` skeleton only |
+| Crash | pstore / ramoops | OK | Tranche 5: console-ramoops-0 across reboots (riscv64) |
 | Crash | taint flags | OK | Tranche 1: exported, Linux letters |
 | Control | SysRq / `/proc/sysrq-trigger` | OK | Tranche 1: upstream command set |
 | Control | debugfs `/sys/kernel/debug` | OK | Tranche 1: new filesystem |
-| Control | tracefs `/sys/kernel/tracing` | -- | absent |
-| Control | ftrace / kprobe / uprobe / eBPF / perf | -- | absent (`ENOSYS`) |
+| Control | tracefs `/sys/kernel/tracing` | OK | Tranche 4: 16 events, tracepoint! table, soak-verified |
+| Control | ftrace / kprobe / uprobe / eBPF / perf | PART | Tranche 4 tracepoints + nop tracer; probes/`perf` still `ENOSYS` |
 | Control | runtime-switchable knobs | OK | Tranche 1: debugfs knobs |
 | Symbols | `/proc/kallsyms` | OK | Tranche 3: full table, default-on (LAYOUT-3) |
 | Symbols | runtime backtrace symbolization | OK | Tranche 3: name+off/size, `?` for non-text |
@@ -380,13 +380,35 @@ consumption). The reference's snapshot and raw views are omitted, not
 faked: they need a second buffer and a binary record format this ring
 does not have. `trace_marker_raw` likewise omitted.
 
-**Remaining.**
+**Done (tracepoint! macro + the block-IO and binder families).** The
+`tracepoints!` table (`kernel/src/trace/mod.rs`) declares every event
+once — names, id, the verbatim print fmt and field list, the typed
+call signature and the renderer — and the macro derives the static
+table row, the typed `trace_<name>` record function (the `armed()`
+check inside) and the `format`-file renderer from that one
+declaration (divergence register D-4). All ten batch-1 events were
+converted with ids unchanged, and the two new families landed through
+it:
 
-- Block-IO events (`block:block_rq_issue` / `block_rq_complete`) and
-  the binder transaction events.
-- A `tracepoint!` macro to declare sites without hand-writing the
-  table row (the table is ten rows now; the macro pays for itself at
-  the next expansion).
+- `block:block_rq_issue` / `block:block_rq_complete` — the reference
+  tracefs field sets and print fmts captured verbatim from this host.
+  The sites sit at the two submit chokepoints `/proc/diskstats`
+  already counts (the synchronous `request_fn` path and async reads)
+  and the completion walkers; `rwbs` carries the direction only
+  (R/W/F), `cmd` renders empty, `ioprio` reports the none class.
+- `binder:binder_transaction` / `_received` / `_alloc_buf` /
+  `_buffer_release` — the reference binder trace definitions verbatim
+  (this host's tracefs has no binder group — not compiled in here);
+  at the BinderTxn construction, the BR read-out, the buffer carve and
+  the free chokepoint.
+
+Verified in-guest (`test/trace-smoke2.sh`, 12/12): the 16-event
+table, the six new format files, recorded lines in the reference
+geometry for both families, and the group 1/0/X mixed states. One
+smoke fix along the way: the block-lines grep moved before the binder
+phase — the closed-loop binder probe wraps the 1024-entry per-CPU
+ring past the block records, and the first run's greps read an
+already-overwritten ring while the events had recorded fine.
 
 **Soak acceptance (done).** `test/trace-soak.sh`: 600 s with every
 event armed, tracing on, and a rolling fork/exec/read churn. Zero
@@ -408,24 +430,56 @@ Linux's panic path reboots without touching the disks, because the panic
 may well be the storage stack itself, and a sync that hangs in a panic
 would defeat the timeout.
 
-**Part 2 — remaining.**
+**Part 2 — pstore-lite (done).** The last panic's evidence survives the
+reboot and reads back through `/sys/fs/pstore`:
 
-- Non-fatal `Oops` path for recoverable faults (Linux's `oops=panic`
-  default off).
-- pstore/ramoops-lite: keep the last panic record (registers + the tail
-  of the ring buffer) in a reserved RAM area and expose it through
-  `/sys/fs/pstore/` after the next boot.
-- Re-enable `printk::persistent_log_init()` with a size cap, so the
-  serial tail survives the reboot.
+- **Reserve.** 128 KiB anchored just below the DTB's physical base
+  (QEMU's FDT address is fixed per machine config — 2 MiB below RAM end
+  on `virt` — so the region is at the same address every boot AND clear
+  of the next boot's FDT rewrite; a naive top-of-RAM carve lands exactly
+  on the DTB at the standard `-m` sizes). `memblock_reserve` before
+  zone seeding keeps the buddy out.
+- **Capture.** The panic handler arms a staging sink first — every
+  console byte the report prints (banner, CSRs, registers, the
+  symbolized stack) is staged via `Uart::putc` (one relaxed load per
+  byte on the disarmed path). At the end of the report the record is
+  written: panic identity, the staged report, then the newest printk
+  records. The write is allocation-free end to end (the panic may be
+  the heap's own failure) and the printk tail is copied under
+  `try_lock` only — a stopped CPU may hold the ring, and the panic path
+  must still reach the `panic=` timeout (a marker line replaces the
+  tail in that case). The magic word is written last: a crash inside
+  the capture leaves no record the next boot would trust halfway.
+- **Re-expose.** After the linear map is up, a valid magic means the
+  last boot panicked; the content stays, the magic is cleared (a clean
+  next boot must not re-expose a stale record), and sysfs publishes
+  `/sys/fs/pstore/console-ramoops-0` — mode 0444, `pstore_mkfile`'s
+  shape, one record deep. No record, no file (the reference directory
+  is empty after a clean boot).
 
-The original bullets, for reference:
-- Non-fatal `Oops` path for recoverable faults (Linux's `oops=panic`
-  default off).
-- pstore/ramoops-lite: keep the last panic record (registers + the tail
-  of the ring buffer) in a reserved RAM area and expose it through
-  `/sys/fs/pstore/` after the next boot.
+Guest-verified (`test/pstore-smoke.sh`, one QEMU, two boots): sysrq
+`c` panics boot 1, `panic=3` reboots, boot 2 logs
+`pstore: previous boot's panic record found (14741 bytes)`, the file
+reads back with the panic identity, the `Kernel panic - not syncing`
+banner, the `Call Trace:` header and the console tail (boot 1's
+`boot: static regions` line).
+
+Two fixes this depended on: the cgroup boot mount had fabricated a
+bare `fs` dentry under the sysfs mount that shadowed the sysfs `fs`
+kobject — every `/sys/fs/*` lookup answered ENOENT (readdir still
+listed the children: readdir reads the inode, lookup the dentry); the
+debugfs flow's pre-lookup discipline now applies to the cgroup path
+too. And a guest reset does not clear RAM — the premise the whole
+scheme rests on, verified by the reboot cycle itself.
+
+**Remaining (Part 2).**
+
+- Non-fatal `Oops` path for recoverable faults (the reference's
+  `oops=panic` default off).
 - Re-enable `printk::persistent_log_init()` with a size cap, so the
-  serial tail survives the reboot.
+  serial tail survives even a power loss (pstore only survives resets).
+- x86_64: no fixed anchor yet (QEMU rebuilds the ACPI tables near the
+  top of low RAM every boot) — the reserve hook is riscv64-gated.
 
 Acceptance: `panic=5` reboots the guest within five seconds of a
 panic; the next boot shows the previous panic's registers.
