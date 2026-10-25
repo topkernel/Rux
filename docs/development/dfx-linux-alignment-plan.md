@@ -123,8 +123,8 @@ incomplete or non-Linux shape · **--** = absent.
 | Control | tracefs `/sys/kernel/tracing` | -- | absent |
 | Control | ftrace / kprobe / uprobe / eBPF / perf | -- | absent (`ENOSYS`) |
 | Control | runtime-switchable knobs | OK | Tranche 1: debugfs knobs |
-| Symbols | `/proc/kallsyms` | -- | absent |
-| Symbols | runtime backtrace symbolization | -- | raw PCs only |
+| Symbols | `/proc/kallsyms` | OK | Tranche 3: full table, default-on (LAYOUT-3) |
+| Symbols | runtime backtrace symbolization | OK | Tranche 3: name+off/size, `?` for non-text |
 | Symbols | ORC / DWARF unwinder | -- | frame-pointer walk only, 32 frames |
 | Perf | `/proc/stat` | -- | absent: no per-CPU time accounting at all |
 | Perf | `/proc/vmstat` | -- | absent |
@@ -266,60 +266,50 @@ CPU; `/proc/vmstat` counters are monotonic and reconcile against the
 ledger census; a busy-loop guest shows non-zero `user` and rising
 `voluntary_ctxt_switches`.
 
-### Tranche 3 — symbols and symbolized traces (code in, table off by default)
+### Tranche 3 — symbols and symbolized traces (done, default-on)
 
 Goal: a backtrace that names its frames.
 
-**Landed.** The build-time symbol pass (`build/gen-ksyms.py`): `nm` over
-the linked kernel ELF keeps the text symbols, `addr2line -C` resolves
-their DEMANGLED names (the kernel is built with Rust's v0 mangling, so
-the raw ELF names are unreadable), and the result is written as a
-compact table — one NUL-separated name blob (`ksyms.bin`, embedded with
-`include_bytes!`) plus an index of (name offset, address, size, type).
-`build/Makefile` runs the pass after the link and rebuilds; `build.rs`
-writes a placeholder so a plain `cargo build` still compiles. At runtime
+**Unblocked (RUX-RISCV-LAYOUT-3): the full table is in the default image.**
+The build-time symbol pass (`build/gen-ksyms.py`): `nm` over the linked
+kernel ELF keeps the text symbols, `addr2line -C` resolves their DEMANGLED
+names (the kernel is built with Rust's v0 mangling, so the raw ELF names
+are unreadable), and the result is written as a compact table — one
+NUL-separated name blob (`ksyms.bin`, embedded with `include_bytes!`)
+plus an index of (name offset, address, size, type). `build/Makefile`
+runs the pass after the link and rebuilds; `build.rs` writes a
+placeholder so a plain `cargo build` still compiles. At runtime
 `dfx/ksyms.rs` binary-searches the index, `/proc/kallsyms` prints
-Linux's `addr type name` lines, and `dfx/backtrace.rs` prints
-`[<addr>] rux::mod::fn+0xoff/0xsize` (Linux's classic frame format,
-with `?` for an unresolved address) under Linux's `Call Trace:`
-header.
+the standard `addr type name` lines, and `dfx/backtrace.rs` prints
+`[<addr>] rux::mod::fn+0xoff/0xsize` (the classic frame format, with
+`?` for an unresolved address) under the `Call Trace:` header.
 
-**Blocked: the table is OFF by default (`KSYMS_ENABLE=1` turns it on).**
-Embedding it grows the kernel image, and the image's address space is
-budgeted by hardcoded constants that the image has already outgrown:
+The table was originally OFF by default (`KSYMS_ENABLE=1` turned it on,
+capped at 1MiB of names): the image's address space is budgeted by
+hardcoded constants, and the full table (~2.4MB of names + ~0.7MB of
+index at ~22.6k text symbols) did not fit the 1.45MB left under the
+14MB boot window — worse, the 1MiB cap covered only the first ~1.7MB of
+`.text`, so sched/trap/syscall hot-path frames symbolized to `?`.
 
-- `memory_layout.rs:130` — `KERNEL_SIZE = 0xC00000` (12MB): the
-  boot-time MMU maps exactly this much of the image
-  (`mmu_init.rs`, both the early identity map and the real map).
-- `boot.S` — the trampoline maps 5 PMDs and the early table 6 PMDs
-  (10MB / 12MB windows).
-- the heap base is the fixed physical `0x80E00000`
-  (`memory_layout.rs:139`, `main.rs:1167`, `buddy_allocator.rs:62`).
+The fix is the boot-path budget change the layout notes prescribe
+(RUX-RISCV-LAYOUT-3 in `main.rs` / `memory_layout.rs`): the image
+window grew 14MB→18MB (boot.S PMD tables extended to 9 PMDs each, the
+linker ASSERT moved with them) and the heap base, RAM reservation and
+`KERNEL_SIZE` moved TOGETHER — reservation-end == heap-start, the
+monotone topology the vmemmap backing search requires. Measured on the
+merged tree: image 12.55MB→16.0MB with the table embedded, 4.1MB slack
+under the new window. The generator now defaults ON (opt out with
+`KSYMS_ENABLE=0`) with a 4MiB name budget; the linker ASSERT is the
+hard backstop that turns the next outgrowth into a build error.
 
-Measured on the current tree: the image (text+rodata+data+bss+boot
-stack) ends at phys `0x80C31000` — already **195KB past the 12MB
-window**, so the tail of `.bss` and the boot stack are unmapped TODAY
-(latent hole, harmless only because nothing touches them). The symbol
-table needs ~2.3MB of names; a 1MB table moves the image end to
-`0x80D31000`, and the first early-touched `.bss` object (the syscall
-ring) lands in the hole: the kernel panics in `trap_entry` with
-`KERNPANIC pfault badaddr=0xffffffff80c00008` — the first byte past the
-old window.
-
-The fix is the memory-layout one the project's own notes describe
-(RUX-RISCV-LAYOUT in `main.rs` / `memory_layout.rs`): derive the image
-extent from the linker (`_end - _stext`) instead of `KERNEL_SIZE`,
-extend the `boot.S` windows to match, and move the heap base and the
-kernel reservation TOGETHER (the vmemmap backing search treats the gap
-between the image end and the heap base as free space — moving the
-image end without moving the heap base is what produced the documented
-riscv64 corruption family). That change touches the boot path and the
-memory map, so it belongs to a deliberate, verified change rather than
-to a DFX side-quest.
-
-Acceptance (once the image budget is enlarged): a WARN in the kernel
-prints a frame with the Rust function name; `/proc/kallsyms` lists the
-same names.
+Guest-verified (`test/kallsyms-smoke.sh`, minimal rootfs): boot reaches
+the shell with the heap at the new base (`heap region 128MB @
+0x81400000`); `/proc/kallsyms` lists 22,636 lines — the full table;
+coverage reaches the end of `.text` (`__etext` resolves at the table's
+top); the sched/trap/syscall families resolve by name; sysrq `l`
+prints `Call Trace:` with `rux::dfx::backtrace::dump_stack+0x1c/0xdc`.
+The two-pass build converges (the table's max text address equals the
+final ELF's `_etext`; only `.rodata` grows, `.text` never moves).
 
 ### Tranche 4 — tracepoint framework and tracefs
 
@@ -343,16 +333,68 @@ Every call site marshals arguments only behind event.armed() (two
 relaxed loads), so the disabled path is one branch. Verified from a
 guest shell by test/tracefs-smoke.sh.
 
+**Done (event expansion, guest-verified).** Seven more events from the
+same shapes, each with the live host's field set and print fmt
+verbatim:
+
+- `sched:sched_waking` / `sched:sched_wakeup` — around the enqueue in
+  `Task::wake_up` (waking before the attempt, wakeup after it
+  succeeded): `comm=%s pid=%d prio=%d target_cpu=%03d`.
+- `sched:sched_wakeup_new` — the fork path's first enqueue of the
+  built child (`process/fork.rs`).
+- `sched:sched_process_fork` — at the child's successful enqueue:
+  `comm=%s pid=%d child_comm=%s child_pid=%d`.
+- `sched:sched_process_exit` — at do_exit entry, `group_dead` =
+  the exit takes the thread group to its last live thread.
+- `exceptions:page_fault_user` / `exceptions:page_fault_kernel` — at
+  fault entry on both arches (riscv64 `trap.rs`, x86_64 `trap.rs`):
+  `address=%ps ip=%ps error_code=0x%lx`. The `%ps` rendering is
+  symbolic through the kernel symbol table (Tranche 3's table — the
+  two tranches compose), falling back to raw hex exactly as `%ps`
+  does when no symbol covers the address. On x86_64 error_code is the
+  hardware #PF error word; on riscv64 it is the access-type bits
+  (read 0x1 / write 0x2 / exec 0x4) — the arch's fault kind, not the
+  x86 error-word layout.
+
+All sites marshal behind `armed()`; every record line renders in the
+reference geometry (verified in-guest: `sched_wakeup: comm=sh pid=1
+prio=120 target_cpu=000`, `sched_process_fork: comm=sh pid=1
+child_comm=sh child_pid=357`, `sched_process_exit: comm=ls pid=356
+prio=120 group_dead=true`, `page_fault_user: address=0x3fffffe744
+ip=0x28170 error_code=0x2`).
+
+**Done (trace_marker + per_cpu views).** `trace_marker` — the
+write-only 0220 file the reference carries: a write records the text
+(80-byte cap) whenever `tracing_on` is set, with no event switch
+(markers are not enable-gated), rendered as a
+`tracing_mark_write: <text>` line in the reference's geometry. Reading
+it is refused by the file mode (the reference answers EINVAL to a read
+of its write-only file — the same refusal at a different errno).
+`per_cpu/cpuN/{trace,trace_pipe,stats,buffer_size_kb}` — per-CPU
+slices of the same ring: the trace view carries the header with that
+CPU's entries/written counts and that CPU's records only; trace_pipe
+consumes one CPU's ring; stats reports the reference's eight fields
+(entries, overrun = pushes beyond live capacity, commit overrun (0),
+bytes, oldest-event/now timestamps, dropped (0), read events = pipe
+consumption). The reference's snapshot and raw views are omitted, not
+faked: they need a second buffer and a binary record format this ring
+does not have. `trace_marker_raw` likewise omitted.
+
 **Remaining.**
 
-- More events from the same ring shapes: page fault, block I/O
-  completion, binder transaction, scheduler pick/wakeup.
-- `trace_marker` (write-only marker events) and the per_cpu/cpuN/
-  {trace,trace_pipe,stats} views.
+- Block-IO events (`block:block_rq_issue` / `block_rq_complete`) and
+  the binder transaction events.
 - A `tracepoint!` macro to declare sites without hand-writing the
-  table row (the table is three rows today; a macro pays off when the
-  event count grows).
-- The 10-minute soak acceptance run for the ring.
+  table row (the table is ten rows now; the macro pays for itself at
+  the next expansion).
+
+**Soak acceptance (done).** `test/trace-soak.sh`: 600 s with every
+event armed, tracing on, and a rolling fork/exec/read churn. Zero
+panics; cpu0's ring wrapped 1.56 M times at capacity (entries 1024,
+overrun 1,559,409, entries-written 1,560,433) with readers
+interleaved; the trace, per-CPU and pipe views all rendered coherent
+lines afterwards, and the pipe consumption accounting matched (cpu1:
+read events 1024, then empty).
 
 ### Tranche 5 — crash policy and persistent evidence
 

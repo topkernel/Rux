@@ -182,11 +182,150 @@ pub static EVENT_SCHED_SWITCH: TraceEvent = TraceEvent {
 };
 
 /// Every event, in id order.
-pub static EVENTS: [&TraceEvent; 3] = [
+pub static EVENTS: [&TraceEvent; 10] = [
     &EVENT_SYS_ENTER,
     &EVENT_SYS_EXIT,
     &EVENT_SCHED_SWITCH,
+    &EVENT_SCHED_WAKING,
+    &EVENT_SCHED_WAKEUP,
+    &EVENT_SCHED_WAKEUP_NEW,
+    &EVENT_SCHED_PROCESS_FORK,
+    &EVENT_SCHED_PROCESS_EXIT,
+    &EVENT_PAGE_FAULT_USER,
+    &EVENT_PAGE_FAULT_KERNEL,
 ];
+
+/// sched:sched_waking — a task is about to be woken (emitted before the
+/// enqueue attempt). The reference host's events/sched/sched_waking;
+/// the fields and print fmt are the live file's, identical to
+/// sched_wakeup's.
+pub static EVENT_SCHED_WAKING: TraceEvent = TraceEvent {
+    group: "sched",
+    name: "sched_waking",
+    id: 4,
+    print_fmt: "\"comm=%s pid=%d prio=%d target_cpu=%03d\", REC->comm, REC->pid, REC->prio, REC->target_cpu",
+    fields: "\tfield:char comm[16];\toffset:8;\tsize:16;\tsigned:0;\n\
+             \tfield:pid_t pid;\toffset:24;\tsize:4;\tsigned:1;\n\
+             \tfield:int prio;\toffset:28;\tsize:4;\tsigned:1;\n\
+             \tfield:int target_cpu;\toffset:32;\tsize:4;\tsigned:1;\n",
+    enabled: AtomicBool::new(false),
+    fmt_args: fmt_sched_wakeup,
+};
+
+/// sched:sched_wakeup — a task left the wait queue and was enqueued
+/// (recorded after the enqueue succeeded). The reference host's
+/// events/sched/sched_wakeup.
+pub static EVENT_SCHED_WAKEUP: TraceEvent = TraceEvent {
+    group: "sched",
+    name: "sched_wakeup",
+    id: 5,
+    print_fmt: "\"comm=%s pid=%d prio=%d target_cpu=%03d\", REC->comm, REC->pid, REC->prio, REC->target_cpu",
+    fields: "\tfield:char comm[16];\toffset:8;\tsize:16;\tsigned:0;\n\
+             \tfield:pid_t pid;\toffset:24;\tsize:4;\tsigned:1;\n\
+             \tfield:int prio;\toffset:28;\tsize:4;\tsigned:1;\n\
+             \tfield:int target_cpu;\toffset:32;\tsize:4;\tsigned:1;\n",
+    enabled: AtomicBool::new(false),
+    fmt_args: fmt_sched_wakeup,
+};
+
+/// sched:sched_wakeup_new — the FIRST enqueue of a freshly built task
+/// (the fork path's enqueue). The reference host's
+/// events/sched/sched_wakeup_new; fields identical to sched_wakeup's.
+pub static EVENT_SCHED_WAKEUP_NEW: TraceEvent = TraceEvent {
+    group: "sched",
+    name: "sched_wakeup_new",
+    id: 6,
+    print_fmt: "\"comm=%s pid=%d prio=%d target_cpu=%03d\", REC->comm, REC->pid, REC->prio, REC->target_cpu",
+    fields: "\tfield:char comm[16];\toffset:8;\tsize:16;\tsigned:0;\n\
+             \tfield:pid_t pid;\toffset:24;\tsize:4;\tsigned:1;\n\
+             \tfield:int prio;\toffset:28;\tsize:4;\tsigned:1;\n\
+             \tfield:int target_cpu;\toffset:32;\tsize:4;\tsigned:1;\n",
+    enabled: AtomicBool::new(false),
+    fmt_args: fmt_sched_wakeup,
+};
+
+/// sched:sched_process_fork — a child task was built. The reference
+/// host's events/sched/sched_process_fork; the __data_loc char[]
+/// fields are the live file's (a dynamic string carries its blob
+/// offset in the field word; Rux records the comms inline instead and
+/// renders them the same way).
+pub static EVENT_SCHED_PROCESS_FORK: TraceEvent = TraceEvent {
+    group: "sched",
+    name: "sched_process_fork",
+    id: 7,
+    print_fmt: "\"comm=%s pid=%d child_comm=%s child_pid=%d\", __get_str(parent_comm), REC->parent_pid, __get_str(child_comm), REC->child_pid",
+    fields: "\tfield:__data_loc char[] parent_comm;\toffset:8;\tsize:4;\tsigned:0;\n\
+             \tfield:pid_t parent_pid;\toffset:12;\tsize:4;\tsigned:1;\n\
+             \tfield:__data_loc char[] child_comm;\toffset:16;\tsize:4;\tsigned:0;\n\
+             \tfield:pid_t child_pid;\toffset:20;\tsize:4;\tsigned:1;\n",
+    enabled: AtomicBool::new(false),
+    fmt_args: fmt_sched_process_fork,
+};
+
+/// sched:sched_process_exit — a task entered do_exit. The reference
+/// host's events/sched/sched_process_exit.
+pub static EVENT_SCHED_PROCESS_EXIT: TraceEvent = TraceEvent {
+    group: "sched",
+    name: "sched_process_exit",
+    id: 8,
+    print_fmt: "\"comm=%s pid=%d prio=%d group_dead=%s\", REC->comm, REC->pid, REC->prio, REC->group_dead ? \"true\" : \"false\"",
+    fields: "\tfield:char comm[16];\toffset:8;\tsize:16;\tsigned:0;\n\
+             \tfield:pid_t pid;\toffset:24;\tsize:4;\tsigned:1;\n\
+             \tfield:int prio;\toffset:28;\tsize:4;\tsigned:1;\n\
+             \tfield:bool group_dead;\toffset:32;\tsize:1;\tsigned:0;\n",
+    enabled: AtomicBool::new(false),
+    fmt_args: fmt_sched_process_exit,
+};
+
+/// exceptions:page_fault_user — a page fault taken from user mode. The
+/// reference host does not carry the exceptions group (it is the
+/// architecture fault-trace family); the field set and print fmt are
+/// the generic definition's (address/ip/error_code, %ps symbolic
+/// rendering). On riscv64 the error_code carries the access-type bits
+/// (read=0x1 write=0x2 exec=0x4) rather than the x86 error-word, and
+/// ip is the faulting epc.
+pub static EVENT_PAGE_FAULT_USER: TraceEvent = TraceEvent {
+    group: "exceptions",
+    name: "page_fault_user",
+    id: 9,
+    print_fmt: "\"address=%ps ip=%ps error_code=0x%lx\", (void *)REC->address, (void *)REC->ip, REC->error_code",
+    fields: "\tfield:unsigned long address;\toffset:8;\tsize:8;\tsigned:0;\n\
+             \tfield:unsigned long ip;\toffset:16;\tsize:8;\tsigned:0;\n\
+             \tfield:unsigned long error_code;\toffset:24;\tsize:8;\tsigned:0;\n",
+    enabled: AtomicBool::new(false),
+    fmt_args: fmt_page_fault,
+};
+
+/// exceptions:page_fault_kernel — a page fault taken from kernel mode
+/// (a vmalloc-style fault or a kernel bug). Same shape as
+/// page_fault_user's.
+pub static EVENT_PAGE_FAULT_KERNEL: TraceEvent = TraceEvent {
+    group: "exceptions",
+    name: "page_fault_kernel",
+    id: 10,
+    print_fmt: "\"address=%ps ip=%ps error_code=0x%lx\", (void *)REC->address, (void *)REC->ip, REC->error_code",
+    fields: "\tfield:unsigned long address;\toffset:8;\tsize:8;\tsigned:0;\n\
+             \tfield:unsigned long ip;\toffset:16;\tsize:8;\tsigned:0;\n\
+             \tfield:unsigned long error_code;\toffset:24;\tsize:8;\tsigned:0;\n",
+    enabled: AtomicBool::new(false),
+    fmt_args: fmt_page_fault,
+};
+
+/// The trace_marker pseudo-event. NOT in EVENTS on purpose: a marker
+/// is not an enable-gated tracepoint (the reference records marker
+/// writes whenever tracing is on, with no event switch), so it does
+/// not appear in available_events or the events tree. The reference
+/// renders the line's FUNCTION column with the writing function's
+/// symbol (tracing_mark_write); Rux names the event exactly that.
+pub static EVENT_TRACE_MARKER: TraceEvent = TraceEvent {
+    group: "ftrace",
+    name: "tracing_mark_write",
+    id: 11,
+    print_fmt: "\"%s\", REC->buf",
+    fields: "\tfield:char buf[];\toffset:8;\tsize:0;\tsigned:0;\n",
+    enabled: AtomicBool::new(true),
+    fmt_args: fmt_trace_marker,
+};
 
 /// Find an event by group and name.
 pub fn find_event(group: &str, name: &str) -> Option<&'static TraceEvent> {
@@ -259,6 +398,9 @@ pub struct TraceRing {
     pub head: AtomicUsize,
     /// How many records are stored.
     pub count: AtomicUsize,
+    /// How many records a trace_pipe reader has consumed (the stats
+    /// file's "read events" column).
+    pub read_events: AtomicU64,
 }
 
 // SAFETY: the ring's mutable state is behind atomics.
@@ -280,6 +422,7 @@ impl TraceRing {
             }; RING_CAPACITY],
             head: AtomicUsize::new(0),
             count: AtomicUsize::new(0),
+            read_events: AtomicU64::new(0),
         }
     }
 
@@ -408,18 +551,47 @@ pub fn clear() {
     }
 }
 
+/// Drop one CPU's buffered records (per_cpu/cpuN/trace's write).
+pub fn clear_cpu(cpu: usize) {
+    if cpu < RINGS.len() {
+        RINGS[cpu].head.store(0, Ordering::Relaxed);
+        RINGS[cpu].count.store(0, Ordering::Relaxed);
+    }
+}
+
+/// Record a trace_marker write (the write-only tracefs file): markers
+/// are gated by tracing_on alone, never by an event switch — the
+/// reference's marker path has no enable file. The text is capped at
+/// what the argument slots carry (80 bytes).
+pub fn record_marker(text: &[u8]) -> bool {
+    if !TRACING_ON.load(Ordering::Relaxed) {
+        return false;
+    }
+    let cpu = crate::arch::cpu_id() as usize;
+    if cpu >= crate::config::MAX_CPUS {
+        return false;
+    }
+    let bytes = &text[..text.len().min(TRACE_ARGS * 8)];
+    let mut args = [0u64; TRACE_ARGS];
+    for (i, word) in args.iter_mut().enumerate() {
+        let off = i * 8;
+        if off >= bytes.len() {
+            break;
+        }
+        let end = (off + 8).min(bytes.len());
+        let mut chunk = [0u8; 8];
+        chunk[..end - off].copy_from_slice(&bytes[off..end]);
+        *word = u64::from_le_bytes(chunk);
+    }
+    record(&EVENT_TRACE_MARKER, args)
+}
+
 /// The records of every CPU, in sequence order, without consuming
 /// them (the `trace` file).
 pub fn snapshot() -> Vec<TraceRecord> {
     let mut out: Vec<TraceRecord> = Vec::new();
     for ring in RINGS.iter() {
-        let count = ring.count.load(Ordering::Acquire).min(RING_CAPACITY);
-        let head = ring.head.load(Ordering::Acquire);
-        let start = (head + RING_CAPACITY - count) % RING_CAPACITY;
-        for i in 0..count {
-            let idx = (start + i) % RING_CAPACITY;
-            out.push(ring.records[idx]);
-        }
+        collect_ring(ring, &mut out);
     }
     out.sort_by_key(|r| r.seq);
     out
@@ -430,21 +602,86 @@ pub fn snapshot() -> Vec<TraceRecord> {
 pub fn drain() -> Vec<TraceRecord> {
     let mut out: Vec<TraceRecord> = Vec::new();
     for ring in RINGS.iter() {
-        let count = ring.count.load(Ordering::Acquire).min(RING_CAPACITY);
-        let head = ring.head.load(Ordering::Acquire);
-        let start = (head + RING_CAPACITY - count) % RING_CAPACITY;
-        for i in 0..count {
-            let idx = (start + i) % RING_CAPACITY;
-            out.push(ring.records[idx]);
-        }
+        let taken = collect_ring(ring, &mut out) as u64;
         // Consume: a racing writer may land one record into the slots
         // we just read; it is dropped with the reset — the same
         // spool-and-reset contract the reference host's pipe reader has.
         ring.head.store(0, Ordering::Release);
         ring.count.store(0, Ordering::Release);
+        ring.read_events.fetch_add(taken, Ordering::Relaxed);
     }
     out.sort_by_key(|r| r.seq);
     out
+}
+
+/// One CPU's buffered records, unconsumed (per_cpu/cpuN/trace).
+pub fn snapshot_cpu(cpu: usize) -> Vec<TraceRecord> {
+    let mut out: Vec<TraceRecord> = Vec::new();
+    if cpu < RINGS.len() {
+        collect_ring(&RINGS[cpu], &mut out);
+    }
+    out
+}
+
+/// Take and consume one CPU's records (per_cpu/cpuN/trace_pipe).
+pub fn drain_cpu(cpu: usize) -> Vec<TraceRecord> {
+    let mut out: Vec<TraceRecord> = Vec::new();
+    if cpu < RINGS.len() {
+        let ring = &RINGS[cpu];
+        collect_ring(ring, &mut out);
+        ring.head.store(0, Ordering::Release);
+        ring.count.store(0, Ordering::Release);
+        ring.read_events
+            .fetch_add(out.len() as u64, Ordering::Relaxed);
+    }
+    out
+}
+
+/// The per_cpu/cpuN/stats file text, in the reference's eight-field
+/// shape. Mapping: entries = buffered count; overrun = records
+/// overwritten by newer ones (pushes minus live count); commit
+/// overrun = 0 (no commit-overrun concept in this ring); bytes =
+/// entries x the fixed record size; oldest event ts / now ts in the
+/// reference's seconds.6-digit shape; dropped events = 0 (nothing but
+/// overwrites drops records here); read events = the pipe readers'
+/// consumption.
+pub fn cpu_stats(cpu: usize) -> String {
+    if cpu >= RINGS.len() {
+        return String::new();
+    }
+    let ring = &RINGS[cpu];
+    let count = ring.count.load(Ordering::Acquire).min(RING_CAPACITY);
+    let head = ring.head.load(Ordering::Acquire);
+    let overrun = head.saturating_sub(count);
+    let record_bytes = core::mem::size_of::<TraceRecord>();
+    let start = (head + RING_CAPACITY - count) % RING_CAPACITY;
+    let oldest = (0..count)
+        .map(|i| ring.records[(start + i) % RING_CAPACITY].ts_ns)
+        .min()
+        .unwrap_or(0);
+    let now = crate::drivers::timer::monotonic_ns_since_boot();
+    let secs = |ns: u64| format!("{}.{:06}", ns / 1_000_000_000, (ns % 1_000_000_000) / 1000);
+    format!(
+        "entries: {}\noverrun: {}\ncommit overrun: 0\nbytes: {}\noldest event ts: {}\nnow ts: {}\ndropped events: 0\nread events: {}\n",
+        count,
+        overrun,
+        count * record_bytes,
+        secs(oldest),
+        secs(now),
+        ring.read_events.load(Ordering::Relaxed),
+    )
+}
+
+/// Copy one ring's live records out in ring order; returns how many
+/// were taken.
+fn collect_ring(ring: &TraceRing, out: &mut Vec<TraceRecord>) -> usize {
+    let count = ring.count.load(Ordering::Acquire).min(RING_CAPACITY);
+    let head = ring.head.load(Ordering::Acquire);
+    let start = (head + RING_CAPACITY - count) % RING_CAPACITY;
+    for i in 0..count {
+        out.push(ring.records[(start + i) % RING_CAPACITY]);
+    }
+    count
 }
 
 // ============================================================================
@@ -479,7 +716,11 @@ fn trace_header() -> String {
 /// One record line, the reference host's `%16s-%-7d [%03d] %c%c%c%c%c %5lu.%06lu:
 /// %s: %s` shape.
 fn render_record(record: &TraceRecord) -> String {
-    let event = EVENTS.iter().find(|e| e.id == record.event_id).copied();
+    let event = if record.event_id == EVENT_TRACE_MARKER.id {
+        Some(&EVENT_TRACE_MARKER)
+    } else {
+        EVENTS.iter().find(|e| e.id == record.event_id).copied()
+    };
     let Some(event) = event else {
         return String::new();
     };
@@ -523,6 +764,47 @@ pub fn render_trace() -> String {
 pub fn render_pipe() -> String {
     let mut out = String::new();
     for record in drain().iter() {
+        out.push_str(&render_record(record));
+    }
+    out
+}
+
+/// per_cpu/cpuN/trace: the same header shape with that CPU's counts,
+/// then that CPU's records only.
+pub fn render_trace_cpu(cpu: usize) -> String {
+    let mut out = String::new();
+    if cpu < RINGS.len() {
+        let ring = &RINGS[cpu];
+        let count = ring.count.load(Ordering::Acquire).min(RING_CAPACITY);
+        let written = ring.head.load(Ordering::Acquire);
+        out.push_str("# tracer: nop\n");
+        out.push_str("#\n");
+        out.push_str(&format!(
+            "# entries-in-buffer/entries-written: {}/{}   #P:{}\n",
+            count,
+            written,
+            crate::arch::smp::num_started_cpus().min(crate::config::MAX_CPUS)
+        ));
+        out.push_str("#\n");
+        out.push_str("#                                _-----=> irqs-off/BH-disabled\n");
+        out.push_str("#                               / _----=> need-resched\n");
+        out.push_str("#                              | / _---=> hardirq/softirq\n");
+        out.push_str("#                              || / _--=> preempt-depth\n");
+        out.push_str("#                              ||| / _-=> migrate-disable\n");
+        out.push_str("#                              |||| /     delay\n");
+        out.push_str("#           TASK-PID     CPU#  |||||  TIMESTAMP  FUNCTION\n");
+        out.push_str("#              | |         |   |||||     |         |\n");
+        for record in snapshot_cpu(cpu).iter() {
+            out.push_str(&render_record(record));
+        }
+    }
+    out
+}
+
+/// per_cpu/cpuN/trace_pipe: consume that CPU's records, no header.
+pub fn render_pipe_cpu(cpu: usize) -> String {
+    let mut out = String::new();
+    for record in drain_cpu(cpu).iter() {
         out.push_str(&render_record(record));
     }
     out
@@ -604,5 +886,86 @@ fn fmt_sched_switch(args: &[u64; TRACE_ARGS]) -> String {
         comm(&next_comm),
         args[7] as u32,
         args[8] as i32,
+    )
+}
+
+/// sched_waking / sched_wakeup / sched_wakeup_new share one field set:
+/// comm (two slots), pid, prio, target_cpu.
+fn fmt_sched_wakeup(args: &[u64; TRACE_ARGS]) -> String {
+    let comm = comm_from_words(args[0], args[1]);
+    let end = comm.iter().position(|&b| b == 0).unwrap_or(COMM_LEN);
+    format!(
+        "comm={} pid={} prio={} target_cpu={:03}",
+        String::from_utf8_lossy(&comm[..end]),
+        args[2] as u32,
+        args[3] as i32,
+        args[4] as i32,
+    )
+}
+
+/// sched_process_fork: parent comm (two slots), parent pid, child comm
+/// (two slots), child pid.
+fn fmt_sched_process_fork(args: &[u64; TRACE_ARGS]) -> String {
+    let comm = |bytes: &[u8; COMM_LEN]| -> String {
+        let end = bytes.iter().position(|&b| b == 0).unwrap_or(COMM_LEN);
+        String::from_utf8_lossy(&bytes[..end]).into_owned()
+    };
+    let parent = comm_from_words(args[0], args[1]);
+    let child = comm_from_words(args[3], args[4]);
+    format!(
+        "comm={} pid={} child_comm={} child_pid={}",
+        comm(&parent),
+        args[2] as u32,
+        comm(&child),
+        args[5] as u32,
+    )
+}
+
+/// sched_process_exit: comm (two slots), pid, prio, group_dead.
+fn fmt_sched_process_exit(args: &[u64; TRACE_ARGS]) -> String {
+    let comm = comm_from_words(args[0], args[1]);
+    let end = comm.iter().position(|&b| b == 0).unwrap_or(COMM_LEN);
+    format!(
+        "comm={} pid={} prio={} group_dead={}",
+        String::from_utf8_lossy(&comm[..end]),
+        args[2] as u32,
+        args[3] as i32,
+        if args[4] != 0 { "true" } else { "false" },
+    )
+}
+
+/// The trace_marker record's text: the argument slots unpacked back
+/// to bytes (the marker writes zero-fill the tail).
+fn fmt_trace_marker(args: &[u64; TRACE_ARGS]) -> String {
+    let mut bytes = [0u8; TRACE_ARGS * 8];
+    for (i, word) in args.iter().enumerate() {
+        bytes[i * 8..i * 8 + 8].copy_from_slice(&word.to_le_bytes());
+    }
+    let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+    String::from_utf8_lossy(&bytes[..end]).into_owned()
+}
+
+/// page_fault_user / page_fault_kernel: address, ip, error_code. The
+/// `%ps` rendering is symbolic — the symbol table resolves the address
+/// to name+off/size and falls back to the raw hex exactly as the
+/// reference's %ps does when no symbol covers the address.
+fn fmt_page_fault(args: &[u64; TRACE_ARGS]) -> String {
+    let ps = |addr: u64| -> String {
+        match crate::dfx::ksyms::lookup(addr) {
+            Some((name, sym, size)) => {
+                if size > 0 {
+                    format!("{}+0x{:x}/0x{:x}", name, addr - sym, size)
+                } else {
+                    format!("{}+0x{:x}", name, addr - sym)
+                }
+            }
+            None => format!("{:#x}", addr),
+        }
+    };
+    format!(
+        "address={} ip={} error_code=0x{:x}",
+        ps(args[0]),
+        ps(args[1]),
+        args[2]
     )
 }

@@ -2987,6 +2987,30 @@ impl Task {
                     crate::sched::steer_task_cpu(task, target_cpu);
                 }
 
+                // The sched:sched_waking / sched:sched_wakeup tracepoints
+                // (the reference emits waking before the enqueue attempt
+                // and wakeup only after it succeeded). One `armed()`
+                // check each when off; the comm copy sits behind the
+                // gate, so the disabled wake path marshals nothing.
+                if crate::trace::EVENT_SCHED_WAKING.armed() {
+                    let words = crate::trace::comm_to_words(&*(*task).comm());
+                    crate::trace::record(
+                        &crate::trace::EVENT_SCHED_WAKING,
+                        [
+                            words[0],
+                            words[1],
+                            pid as u64,
+                            (*task).prio() as u64,
+                            target_cpu as u64,
+                            0,
+                            0,
+                            0,
+                            0,
+                            0,
+                        ],
+                    );
+                }
+
                 // R33 (A-family wedge — dead-task resurrection): transition to
                 // RUNNING + enqueue ATOMICICALLY under the GRQ lock
                 // (sched::wake_up_enqueue). The old unlocked sequence raced
@@ -3022,6 +3046,28 @@ impl Task {
 
                 // Set need_resched flag on target CPU and send IPI if cross-CPU
                 crate::sched::resched_cpu(target_cpu as usize);
+
+                // sched:sched_wakeup — the enqueue succeeded, the task is
+                // runnable on target_cpu (the reference's post-enqueue
+                // record; see the sched_waking note above for the gating).
+                if crate::trace::EVENT_SCHED_WAKEUP.armed() {
+                    let words = crate::trace::comm_to_words(&*(*task).comm());
+                    crate::trace::record(
+                        &crate::trace::EVENT_SCHED_WAKEUP,
+                        [
+                            words[0],
+                            words[1],
+                            pid as u64,
+                            (*task).prio() as u64,
+                            target_cpu as u64,
+                            0,
+                            0,
+                            0,
+                            0,
+                            0,
+                        ],
+                    );
+                }
 
                 true
             } else {
