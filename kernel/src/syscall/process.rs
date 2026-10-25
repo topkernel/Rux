@@ -5251,6 +5251,22 @@ pub fn sys_riscv_hwprobe(args: SyscallArgs) -> i64 {
     const KEY_IMA_EXT_0: u64 = 4;
     const IMA_EXT_FD: u64 = 1 << 0;
     const IMA_EXT_C: u64 = 1 << 1;
+    const IMA_EXT_V: u64 = 1 << 2;
+
+    // The V bit follows the boot-primed hart capability (DTB riscv,isa):
+    // on a V-capable hart the kernel lazily enables RVV for user tasks
+    // and the bit is honestly set; on the standard -cpu rv64 model it is
+    // clear. The other letters are what the kernel itself runs on
+    // (rv64gc). x86_64 compiles this handler too (the dispatch table is
+    // shared); no riscv64 hart there, so the bit is a constant 0.
+    #[cfg(feature = "riscv64")]
+    let v_bit = if crate::arch::riscv64::vext::hart_has_v() {
+        IMA_EXT_V
+    } else {
+        0
+    };
+    #[cfg(feature = "x86_64")]
+    let v_bit = 0;
 
     // SAFETY: pairs_ptr validated with access_ok; get_user/put_user are the
     // exception-table copy paths (SUM=0 safe).
@@ -5266,16 +5282,18 @@ pub fn sys_riscv_hwprobe(args: SyscallArgs) -> i64 {
                 KEY_MMU => 1, // sv39
                 // Base behavior: IMA, the one defined bit.
                 KEY_BASE_BEHAVIOR => BASE_BEHAVIOR_IMA,
-                // The ISA-extension bitmap: report what the kernel itself
-                // runs on (rv64gc — IMAFD + C), with NO V bit. The
-                // catch-all u64::MAX this key used to return advertised
-                // every extension, and a current glibc's ifunc resolver
-                // read the phantom V bit, selected its vector
-                // memset/memcpy variants and SIGILLed on the -cpu rv64
-                // model of the standard flows (observed 2026-10: vsetivli
-                // inside glibc __memset after the toolchain moved to GCC
-                // 15, whose default march carries V).
-                KEY_IMA_EXT_0 => IMA_EXT_FD | IMA_EXT_C,
+                // The ISA-extension bitmap: the letters the kernel runs
+                // on (rv64gc — IMAFD + C) plus the V bit when this hart
+                // has V (the lazy-enable makes RVV user code executable,
+                // so the bit is then true). The catch-all u64::MAX this
+                // key used to return advertised EVERY extension, and a
+                // current glibc's ifunc resolver read the phantom V bit,
+                // selected its vector memset/memcpy variants and SIGILLed
+                // on the -cpu rv64 model of the standard flows (observed
+                // 2026-10: vsetivli inside glibc __memset after the
+                // toolchain moved to GCC 15, whose default march carries
+                // V).
+                KEY_IMA_EXT_0 => IMA_EXT_FD | IMA_EXT_C | v_bit,
                 _ => u64::MAX,
             };
             let _ = crate::arch::uaccess::put_user(pairs_ptr.add(i * 2 + 1), value);
