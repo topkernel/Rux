@@ -30,7 +30,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 KERNEL="${1:-$ROOT/target/riscv64gc-unknown-none-elf/debug/rux}"
 LOG="${2:-$ROOT/run/oops-smoke-serial.log}"
 BOOT_DELAY="${BOOT_DELAY:-30}"
-TIMEOUT="${TIMEOUT:-420}"
+TIMEOUT="${TIMEOUT:-480}"
 
 IMG="$ROOT/work/oops-smoke.img"
 
@@ -53,11 +53,14 @@ cp "$ROOT/test/rootfs.img" "$IMG"
     echo 'echo OSDBG:klog_tail=$(tail -1 /var/log/kmsg)'
     sleep 0.5
     # The periodic flush: klogd's init flush landed at ~1.4 s; its first
-    # 30 s wake lands at ~31.4 s + kthread start lag — past the checks
-    # above. Wait past it and re-count: the file must grow (the boot log
-    # has hundreds of records by now, the 512-per-flush cap is not the
-    # binding constraint at this depth).
-    sleep 12
+    # 30 s wake lands at ~31.4 s GUEST time. Host-side sleeps measure
+    # wall time, and under a loaded host the TCG guest runs slower than
+    # realtime — the first run's sleep 12 missed the wake (r4: file
+    # still 3 lines at host t~44 s while a concurrent smoke showed the
+    # flush landing later; klogd-probe2 confirmed the flush itself is
+    # clean). Two periods of host-side margin make the check
+    # load-robust.
+    sleep 60
     echo 'echo OSDBG:klog_lines2=$(wc -l < /var/log/kmsg)'
     sleep 0.5
     # (3) per-task schedstat
