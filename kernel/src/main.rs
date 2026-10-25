@@ -758,6 +758,17 @@ pub fn rust_main_tail() -> ! {
                 let cg_init = fs::cgroup::init_cgroupfs();
                 print_status("cgroup", "v2 unified hierarchy init", cg_init.is_ok());
                 if cg_init.is_ok() {
+                    // The mount point chain must already exist in the
+                    // dentry tree WITH inodes (the debugfs precedent
+                    // above): vfs_mount walks the path and creates
+                    // missing components as bare dentries, and the bare
+                    // "fs" dentry under the sysfs mount shadowed the
+                    // sysfs /sys/fs kobject — every /sys/fs/* lookup
+                    // answered ENOENT afterwards (readdir still listed
+                    // the children: readdir reads the inode, lookup the
+                    // dentry). Resolving the path first populates the
+                    // chain through sysfs_lookup.
+                    let _ = fs::vfs::path_lookup("/sys/fs/cgroup", 0);
                     let cg_mount = fs::cgroup::mount_cgroupfs("/sys/fs/cgroup");
                     print_status("cgroup", "cgroup2 mounted /sys/fs/cgroup", cg_mount.is_ok());
                 }
@@ -1624,7 +1635,10 @@ fn mount_ext4_root_from(disk: *const drivers::blkdev::GenDisk) {
     }
 
     // Re-link cgroup2 after ext4 overlay (U1b, same defensive re-mount
-    // as procfs above).
+    // as procfs above). Pre-lookup first: the boot-time mount already
+    // populated the chain, but this re-mount must not fabricate bare
+    // dentries if the overlay reset it.
+    let _ = fs::vfs::path_lookup("/sys/fs/cgroup", 0);
     let _ = fs::cgroup::mount_cgroupfs("/sys/fs/cgroup");
 }
 
