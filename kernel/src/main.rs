@@ -4,6 +4,10 @@
 //!
 #![no_std]
 #![no_main]
+// The trace event table is declared through the `tracepoints!`
+// token-muncher (kernel/src/trace/mod.rs): one recursion level per
+// event, so the default 128 needs headroom for the growing table.
+#![recursion_limit = "512"]
 #![feature(lang_items, alloc_error_handler, linkage)]
 
 extern crate log;
