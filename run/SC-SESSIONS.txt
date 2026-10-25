@@ -4813,3 +4813,77 @@ IApplicationStateObserver registration to pids 434/411(mmi_service)/509
 alive). sc258 launched LOGLEVEL=7 dfx=schb,sleepsnap SECS=1800 to
 capture the frozen call graph + (if spawn survives) the launcher-crash
 decider probes in one roll.
+
+LEG-22 (OH UI lane, leg-21 successor) — OPENED post-quota-death.
+
+SESSION START: HEAD 8574f447 + uncommitted hc-hunt.py tweak (committed
+291cdbc7). Merged origin/main (now b332d08a, 12 commits past the e6a172d8
+the handoff named; ubuntu-gnome lane + getcwd ABI fix + trap segv-vma
+lines). ONE semantic conflict in sched.rs tick PREEMPT-HEAL: our leg-19
+round-3e pure-hardirq-phantom trigger (whole-word zero) vs main's fleet-
+session-3 base-bits-only fix (the whole-word zero underflowed irq_exit).
+Unified as ti_preempt_count_keep_tick_nesting(): fetch_and(HARDIRQ_OFFSET
+| NMI_MASK) — bit-identical to clear_base when there is no extra hardirq
+nesting, and also drops the phantom extra hardirq bits for the round-3e
+shape. PARKED-HEAL + R74 negative-reset keep the full zero. 635c28e8.
+
+THREAD 2 (brkseq do_exit-hang) — CLOSED on current main.
+brksegv_shell.py (the exact ltp wedge shape, mrsh as init, 6 runs x 12
+deaths) against the merged build: BRKSH-PASS, 0 wedges. The W3-budget
+fix + terminal-desched machinery hold on b332d08a. The ltp TIMEOUT
+families fed by this shape are free to re-triage.
+(brksegv-leg22-main-r1.log)
+
+THREAD 1 (launcher crash-loop) — sc258's KILLED ROLL HELD THE FULL
+DECIDER DATASET (read offline, no new roll needed for the first cut):
+- 4 identical launcher crashes (pids 2061/2139/2699/3041), all
+  m.ohos.launcher, rip=ld-musl+0x1187d2, SAME cr2/rsp/rbp every time.
+- cr2fd-pin NAMES THE MODULE: /mnt/sandbox/system/system/lib64/
+  chipset-sdk-sp/libhicollie.z.so (memfd fd 40). Extracted from
+  system.img (inode 2543); phdrs match the cr2elf dump exactly.
+- cr2bytes: the fault target page is CORRECT module rodata (strings
+  readable). Not a dirty target page.
+- Full musl apply() decode (disassembled the image's ld-musl): fault =
+  lock cmpxchg [w+0x10] in the waiter walk, w = rcx = *(c+0x28) =
+  _c_head, c = r9 = module+0x3c108, r15 = c-0x118 = module+0x3bff0.
+- libhicollie disassembly: 0x3bff0 is the watchdog thread's C++ object
+  (function-local static; guard byte 0x3c388; __cxa_atexit dtor).
+  Layout: mutex@+0xf0, pthread_cond_t@+0x118 (the crash condvar),
+  strings at +0x20/+0xc8/+0x148, deadline field +0x308. The watchdog
+  thread (pthread_setname'd at entry 0x1ac81) loops clockwait on
+  cond@+0x118.
+- THE HEAD VALUE IS A STRING POINTER: module+0xa92c is EXACTLY the
+  first byte of the .rodata literal "thread DfxWatchdog: Current
+  scenario is task name: " (used at 0x1a864 to build the watchdog event
+  string). _c_head can legally hold only 0 or a waiter STACK address —
+  never module rodata.
+- GEOMETRIC KILL of the stale-waiter/dlclose-reuse family: a waiter
+  node is stack-allocated (musl enqueue: rbp-0x50); for head to equal
+  module_base+0xa92c, a stack must have covered that VA; but any
+  process generation that owns this condvar has libhicollie mapped at
+  that same deterministic base (fork inheritance), covering the VA with
+  the R-only ph1. In-process dlclose+re-dlopen moves the base but also
+  DESTROYS the .bss carrying the stale head. No stale-waiter sequence
+  is geometrically consistent. Also killed: kernel-futex wild write
+  (kernel/src/sync/futex.rs has ZERO user-memory writes).
+- SURVIVING candidates: (a) KERNEL dirty anon-page recycle — the .bss
+  page arrives carrying a previous process's bytes (constructor ran
+  over most fields, but the condvar/mutex/never-written globals keep
+  the stale pattern); (b) userspace wild write into obj+0x140 in an
+  appspawn ancestor, inherited COW by every launcher child (4 identical
+  crashes = one corruption, fork-inherited).
+- DECIDER PROBES LANDED (x86_64 trap.rs, dfx-gated apply()-shape):
+  cv (condvar words via r9: tail/waiters/seq/lock/head), obj (watchdog
+  object fields), bssslack (THE SMOKING GUN: ph4 memsz ends at
+  module+0x3c51c; the anon bss VMA spans +0x3c000..+0x40000; slack
+  0x3c520..+0x3d000 and the whole +0x3d000 page are addressed by
+  NOTHING in the module — any nonzero word there = the page arrived
+  dirty from the recycler = kernel bug).
+- INFRA NOTE: run/oh-img symlink was re-pointed (01:37, cross-lane)
+  to a broken perf-audit path and killed the ramdisk-x64.img link;
+  repointed to ui-sprint's intact copy (md5-matched oh-display's).
+
+sc259 ROLLING: sc258 recipe (LOGLEVEL=7 dfx=schb,sleepsnap, SMP2 KVM
+4G, fresh scgold reflink userdata, SECS=1800) + shotmon; goal = the
+condvar/bssslack deciders on the launcher crash + (if spawn survives
+longer) OnForeground/launcher.ready + screenshot.
