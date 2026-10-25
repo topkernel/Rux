@@ -329,8 +329,22 @@ pub fn sys_mmap(args: [u64; 6]) -> i64 {
                         break;
                     }
                 }
-                let budget_ok = slot != usize::MAX
+                let mut budget_ok = slot != usize::MAX
                     && COMM_N[slot].fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 48;
+                // leg-21 hunt: the hicollie module's mapping lines are
+                // the trigger the watchpoint hunt keys on (its condvar
+                // is the launcher crash-loop victim) — never budget-gate
+                // them; a boot maps the file a handful of times.
+                let path_early = crate::sched::current().and_then(|t| unsafe {
+                    (*t).try_fdtable().and_then(|fdt| fdt.get_file(fd as usize))
+                });
+                if path_early
+                    .as_ref()
+                    .map(|f| f.path().contains("hicollie"))
+                    .unwrap_or(false)
+                {
+                    budget_ok = true;
+                }
                 if budget_ok {
                     let (path, accmode) = crate::sched::current()
                         .and_then(|t| unsafe {
