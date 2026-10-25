@@ -343,3 +343,40 @@ check: only the two heal sites touch count semantics; probe prints,
 parkwalk, spinlock guards, irq brackets all unchanged (the
 IRQ-BRACKET-LEAK counter remains the hunt instrument for the remaining
 producer class).
+
+## Session 3 close-out (2026-10-25 11:15)
+
+Fleet state at close (v7 rollout in progress via detached
+run/fleet/rollout-v7.sh — members cycle as their rounds end):
+- chains ww-s2 (r96 in flight) + wwload (r43 in flight): adopted,
+  frozen kernel, UNTOUCHED — do not restart; 0 armed hits through r95.
+- ltp-a: v7 (merged) since r22; r22 storm-evidence round (474k lines,
+  PREEMPT-LEAK 4658, no panics) — the storm itself is the next hunt's
+  data.
+- ltp-b/c/d, memstorm, fsfuzz: cycling onto v7 (KIMG override).
+- monkey-a/b: restart onto v7-x86 (KILLDUMP pin fixes land on the x86
+  surface — monkey-b-r8's panic class).
+- ltpm: STOPPED by design (control result banked: main panics with the
+  csrrw signature under LTP sweeps; relaunch only after main takes the
+  csrr read fix 52abd2ea-class, then as the main-class arm).
+- Host floor: free-vs-available interpretation logged (verify-launch
+  scripts accept free>=10G OR available>=12G; page-cache pressure from
+  other lanes' QEMUs kept free at 1-9G with available 26-32G all
+  session).
+
+Next-session queue (priority order):
+1. v7 rollout completion check (rollout-v7.log) + first full v7 rounds
+   verdicts on all members.
+2. In-bracket tp-switch hunt: discriminator live fleet-wide on v7 —
+   grep 'IRQ-BRACKET-LEAK' in member serials; `when=in` = the producer
+   ran between irq_enter/irq_exit (count-migration source),
+   `when=pre` = stale tp formed earlier. epc_ctx names the interrupted
+   site. 12 occurrences on v5 (ltp-a r20) to re-correlate.
+3. The 10 s-held spinlock sections the heal now names per-task
+   (sub=0x1 reports name the drop site at spinlock.rs): quantify which
+   lock/section (PROCESS_TREE_LOCK hypothesis from the v5 stuck
+   episodes) and whether v7's merged tree changed the rate.
+4. oom01-wedge family: v7 carries the KILLDUMP pin fixes — compare
+   wedge rate (v5: roughly half of ltp-b/c/d rounds) on v7.
+5. Fake-OOM open item: instrumentation (dfx=memwatch,periodic) keeps
+   accumulating on monkey rounds; root-cause per ledger OPEN items.
