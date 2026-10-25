@@ -1593,14 +1593,7 @@ fn oops_show_regs(w: &mut crate::dfx::backtrace::ConsoleWriter, regs: &PtRegs) {
             if i > 0 {
                 let _ = w.write_str(" ");
             }
-            // The reference's first row is the literal "epc : " (a
-            // hardcoded format string, 4 columns before the colon);
-            // the other names justify in 3 (" ra : ", "s10: ").
-            if *name == "epc" {
-                let _ = write!(w, "epc : {:016x}", val);
-            } else {
-                let _ = write!(w, "{:<3}: {:016x}", name, val);
-            }
+            let _ = write!(w, "{:<3}: {:016x}", name, val);
         }
         let _ = w.write_str("\n");
     }
