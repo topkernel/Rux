@@ -112,6 +112,62 @@ mutter + gsd) visible and stable on the Ubuntu 22.04 riscv64 image.
   gnome-session-failed's dialog (kernel sysv-shm suspicion);
   "sh: 0: getcwd() failed: Success" (errno-0 getcwd) seen twice.
 
+## Session 3 (2026-10-25 afternoon, leg-3 after 11:42 quota death)
+
+- Merged main ddb3ed01 (kallsyms + trace events + panic=, 8 commits).
+  Kernel rebuilt clean; fire.py runs now arm tracing via runit
+  (runit-trace=0 knob to disable; runit dumps the trace tail on every
+  session-child death).
+- runs/gnome-r2trace (BASELINE, merged kernel, getcwd bug still in,
+  session mode, smp2/2G, 1800s): M2 gsd @61s, M3 shell @61s,
+  M4_screen_lit @210s, screen HELD 99% for the full 30 min (nonblack
+  1023986/1024000, wallpaper #002080/#202000). gnome-session survived
+  the whole window (the old "gnome-session died @47s" is GONE on the
+  merged kernel). But 192 "getcwd() failed: Success" lines and 14
+  UsbProtection SIGSEGVs — the residual crash family.
+- ROOT CAUSE of "getcwd() failed: Success" (kernel ABI bug, FIXED in
+  a2278150): sys_getcwd returned the buffer POINTER; the ABI is to
+  return the path LENGTH. glibc's __getcwd keeps the raw syscall
+  result in an `int retval` and treats it as a length: our pointer
+  (0x2aaaa_xxxx0000-class heap/PIE addresses, bit 31 of the low word
+  set) truncated to a negative int made glibc classify the successful
+  call as an unclassifiable failure and return NULL with errno left
+  at 0. dash then printed "Success" and crashed on the NULL cwd (the
+  epc=0x2aaaaae2b6 addr=0x8 family). Fix: return cwd_len+1.
+- runs/gnome-r3fix (FIXED kernel): getcwd failures 192 -> 0. But the
+  session COLLAPSED into the "Oh no" error screen (lit @1260s,
+  #e0e0c0): gsd-usb-protection SEGV-looped 33x (NULL GError deref on
+  its "Failed to connect to screensaver service" warning path — gsd
+  42.9 assumes error != NULL), and the respawn load blew 84 gsd
+  register deadlines. Interpretation: with getcwd broken the helpers
+  died instantly (cheap); fixed, they do real work, so the load the
+  crash loop generates is no longer masked. Fix order matters: kill
+  the crash loop (image-side, e5be15c1: UsbProtection dropped from
+  RequiredComponents + Hidden=true; no UPower/usbguard on the image
+  anyway), then the deadlines should be met like baseline.
+- The dash-family SEGV epc=0x2aaaaae2b6 was NEVER dash: PIE base is
+  constant 0x2aaaaaa000 (no ASLR observed for [exe]), and 0xe2b6 in
+  dash is pre-.text (non-exec). It is gsd-usb-protection's own
+  `ld a3,8(a5)` (error->message with error==NULL) at its +0x42b6.
+- PREEMPT-LEAK pid=0 pc=0x10000 rip=wfi: DEMOTED to reporter artifact
+  — the periodic reporter reads preempt_count inside its own in-flight
+  hardirq bracket (irq_enter charges +0x10000 to the interrupted task
+  = idle, the read happens before irq_exit drops it). The heal path
+  already masks HARDIRQ (base = pc & !HARDIRQ_MASK) so only the print
+  is noisy. diag1 proved the system stays responsive through the
+  "flood" (all scripted commands ran on schedule; poweroff clean).
+- run/diag1+diag2 spawncrash probe (posix_spawn=clone(CLONE_VM|
+  CLONE_VFORK) vs fork+exec, 100x each of /bin/sh -c 'exit 0'/'pwd',
+  quiet boot init=/bin/sh): 400/400 ok, ZERO crashes, getcwd fix
+  works end-to-end in dash (100/100 'pwd'). The spawn/COW/exec paths
+  are clean in a quiet system — the session-storm crashes need the
+  full-session concurrency context. Toolchain trap repeated: host
+  cross-gcc default march SIGILLs under -cpu rv64; probes need
+  -march=rv64gc (diag1's first run died this way).
+- Fake-OOM re-verification: pages u=133k-135k (~525MB of 2G) under
+  the full gsd storm — the old ~342MB wall is gone on the merged
+  kernel; no OOM kills in any of the three session runs.
+
 ## Session 2b (2026-10-25 late) — DESKTOP VISIBLE, vision-verified
 
 - Rebuilt image with: EGL pin (libEGL_mesa 20.0.4 — the gles helper
