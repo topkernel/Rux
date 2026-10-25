@@ -363,12 +363,27 @@ child_comm=sh child_pid=357`, `sched_process_exit: comm=ls pid=356
 prio=120 group_dead=true`, `page_fault_user: address=0x3fffffe744
 ip=0x28170 error_code=0x2`).
 
+**Done (trace_marker + per_cpu views).** `trace_marker` — the
+write-only 0220 file the reference carries: a write records the text
+(80-byte cap) whenever `tracing_on` is set, with no event switch
+(markers are not enable-gated), rendered as a
+`tracing_mark_write: <text>` line in the reference's geometry. Reading
+it is refused by the file mode (the reference answers EINVAL to a read
+of its write-only file — the same refusal at a different errno).
+`per_cpu/cpuN/{trace,trace_pipe,stats,buffer_size_kb}` — per-CPU
+slices of the same ring: the trace view carries the header with that
+CPU's entries/written counts and that CPU's records only; trace_pipe
+consumes one CPU's ring; stats reports the reference's eight fields
+(entries, overrun = pushes beyond live capacity, commit overrun (0),
+bytes, oldest-event/now timestamps, dropped (0), read events = pipe
+consumption). The reference's snapshot and raw views are omitted, not
+faked: they need a second buffer and a binary record format this ring
+does not have. `trace_marker_raw` likewise omitted.
+
 **Remaining.**
 
 - Block-IO events (`block:block_rq_issue` / `block_rq_complete`) and
   the binder transaction events.
-- `trace_marker` (write-only marker events) and the per_cpu/cpuN/
-  {trace,trace_pipe,stats} views.
 - A `tracepoint!` macro to declare sites without hand-writing the
   table row (the table is ten rows now; the macro pays for itself at
   the next expansion).

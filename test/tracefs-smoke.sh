@@ -18,6 +18,8 @@
 #      exceptions:page_fault_user/page_fault_kernel — format files,
 #      set_event arming, recorded lines (page faults render %ps
 #      symbolically through the kernel symbol table)
+#  10. trace_marker (mode 0220, read refused, tracing_mark_write
+#      lines) and the per_cpu/cpuN views (trace/stats shapes)
 #
 # Usage: test/tracefs-smoke.sh [kernel] [logfile]
 # Env:   BOOT_DELAY (default 30), TIMEOUT (default 300)
@@ -144,6 +146,30 @@ rm -f "$LOG"
     echo 'grep page_fault_user: /sys/kernel/debug/tracing/trace | head -4'
     sleep 0.5
     echo 'echo 0 > /sys/kernel/debug/tracing/events/enable'
+    sleep 0.5
+    echo 'echo ===MARK: trace_marker write and render ==='
+    sleep 0.3
+    echo 'ls -l /sys/kernel/debug/tracing/trace_marker'
+    sleep 0.3
+    echo 'echo 1 > /sys/kernel/debug/tracing/tracing_on'
+    sleep 0.3
+    echo 'echo "PHASE-ONE-BEGIN" > /sys/kernel/debug/tracing/trace_marker'
+    sleep 0.3
+    echo 'cat /sys/kernel/debug/tracing/trace_marker'
+    sleep 0.3
+    echo 'grep tracing_mark_write /sys/kernel/debug/tracing/trace | head -2'
+    sleep 0.5
+    echo 'echo ===MARK: per_cpu views ==='
+    sleep 0.3
+    echo 'ls /sys/kernel/debug/tracing/per_cpu'
+    sleep 0.3
+    echo 'ls /sys/kernel/debug/tracing/per_cpu/cpu0'
+    sleep 0.3
+    echo 'head -5 /sys/kernel/debug/tracing/per_cpu/cpu0/stats'
+    sleep 0.5
+    echo 'head -5 /sys/kernel/debug/tracing/per_cpu/cpu0/trace'
+    sleep 0.5
+    echo 'echo 0 > /sys/kernel/debug/tracing/tracing_on'
     sleep 0.5
     echo 'echo ===TRACE: timer_list shape ==='
     sleep 0.3
