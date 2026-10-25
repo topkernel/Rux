@@ -1340,3 +1340,72 @@ ran the full capture clean. Side observation for the DFX lane: T4
 record path under MTTCG + churn held overrun=0 at three-event
 production — the single-threaded soak's coverage is extended, not
 contradicted.
+
+### 8.10.6 Leg 36 (2026-10-25/26): Tier-1 rows re-banked, procfile cols form, wake/epoll empty fast paths
+
+**Volume + nanosleep re-bank: DONE (the leg-35 armed decider fired).**
+pa50main ran 16:45-16:58 at load1=0/qemus=1 (the tightest window of
+any banked volume reading; pa38's 136M seed was a load-~5.5 boot whose
+app phase ran 81 ABC restarts — a deeper workload mix). All other
+enforced rows PASS: census 8/32 exact, ticks 100.00/99.57, 0 panics/OOM,
+clock_gettime 3 us, GRQ 5092 ns, small_alloc REST 5.8%. Banked: volume
+107.5M (+-10%, enforcement stays load-gated: pa41gate 77.1M at 14-19
+foreign QEMUs, pa46main 93.2M at load1 11-17), nanosleep 203 ms
+n=26,945 (band <=244 ms; cross-run range 174-222 ms fits) — perf-gate.sh
+now enforces the row and actually uses NANOAVG_MS_MAX (was INFO-only).
+Same-commit constant refresh per the baseline rule; fully green re-parse
+run/perf-gate-pa50rebank2-parse.txt.
+
+**procfile! cols form (track-1, conversions 3-4): /proc/stat +
+/proc/schedstat.** The stat-family row shape (label prefix, N
+space-separated counters) had no macro form; /proc/stat hand-wrote
+three format! variants of the same 10-column jiffy row. The cols form
+derives the row function's ARGUMENT LIST from the column declaration —
+a call site cannot swap two counters without the names disagreeing at
+the call. /proc/stat keeps its dynamic-arity intr/softirq sum lines
+explicit and renders the kv tail through render_kv; whole-file LINE
+ORDER pinned by stat_file_tests::line_order_check (no per-line test
+can see order). Unit suite (riscv64, pa53-maketest.log): group [13]
+procfile-shape runs the three new checks, All tests passed. DFX note
+§8 records the form + remaining candidates (interrupts/softirqs/
+diskstats, dynamic-arity).
+
+**Wake/epoll lock-free empty fast paths (track-2 first lever toward
+the p5 residual): implemented, functionally verified, measurement
+PENDING a quiet window.** The p5b residual after b3757d92 decomposes
+into per-event costs shared box-wide; two are unconditional irqsave
+lock/unlock pairs taken even when there is nothing to do:
+(1) WaitQueueHead::wake_up locked the entry Vec before discovering it
+is empty — on a box where consumers poll instead of sleep (hilogd
+drains, pbench pairs, most pipe traffic) that empty-wake lock ran on
+EVERY event; Linux checks wq_has_sleeper() (one load) first. Now a
+waiters AtomicUsize moved only inside the list lock's critical
+sections (add/prepare_to_wait increment, remove/finish_wait decrement
+by exactly what retain dropped); wake_up returns after one Acquire
+load on 0. (2) epoll_notify_file took the shard lock and scanned it
+even with no epoll bound in the shard; EPOLL_SHARD_N[64] counts live
+bindings per shard under the same lock; notify returns after one
+Acquire load on 0. Lost-wake safety is the standard recheck argument,
+documented on both fields; every wait site in the tree re-checks its
+condition after prepare_to_wait (wait_event macro, unix_wait_round,
+the virtio completion path — audited this leg).
+
+Functional evidence: unit suite green with the change (pa54-maketest.log,
+All tests passed); 3 full pbench boots on the lever kernel (pa55 B arm)
+DONE rc=0, 0 panics; branch Tier-1 census boot pa56branch (this leg).
+Measurement: the pa55 A/B series (6 boots, orders A,B,B,A,A,B,
+release-strong, protocol = 8.10.4) is DRIFT-BLOCKED — boot 1 (A) read
+p5b send 5.6 us, then a host regime change pushed every later boot of
+BOTH arms to 40-73 us (boot 4 A = 69.8 vs B boots 67.5/70.1); adjacent
+same-window pairs scatter both directions (5A/6B: p5c/p5a/p1 favor B,
+send favors A). No bankable number; re-run run/pa55-ab.sh in a quiet
+window before any merge claim (expected effect single-digit %: the
+fast path fires only for genuinely-empty queues, which the blocking
+p5b pair rarely has — the boot-wide wake volume is where this pays).
+
+**F4-R2 carry: unchanged.** a5af759c (RVV enable) touches riscv64 +
+fork.rs/cmdline/main, not ext4; the 8.10.3 READY claim stands as
+banked. **Census gate on a5af759c: pending window** (fork-path commit
+→ real check); decider run/pa52-census.sh armed 21:45, two-stage gate
+9/8 then 13/10, deadline 6 h. sc2xx launcher.ready trigger NOT FIRED
+(newest boot sc241, no event; pa39-watch standing).
