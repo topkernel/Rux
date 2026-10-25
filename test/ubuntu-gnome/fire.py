@@ -201,6 +201,9 @@ PATTERNS = [
     (re.compile(rb"comm=(gsd-[\w-]+) pid=(\d+)"), "gsd"),
     (re.compile(rb"pid=\d+ tgid=\d+ state=\w+[^\n]*comm=(gsd-[\w-]+) "), "gsd"),
     (re.compile(rb"comm=mutter"), "mutter_wm"),
+    (re.compile(rb"GNOME Shell started at"), "shell_started"),
+    (re.compile(rb"comm=xterm"), "xterm_probe"),
+    (re.compile(rb"comm=(gnome-session-failed)"), "session_failed"),
     (re.compile(rb"KERNPANIC|Kernel panic"), "kernpanic"),
     (re.compile(rb"SIGDEATH: (\S+) sig=(\d+)"), "sigdeath"),
     (re.compile(rb"alloc_pages.*[Oo][Mm]|Out of memory|oom-kill"), "oom"),
@@ -236,7 +239,8 @@ def serial_reader():
                     note(f"SIGDEATH {g[0] if g else '?'} sig={g[1] if len(g)>1 else '?'}")
                 elif name in ("gnome_shell", "gsd", "mutter_wm", "xorg_banner",
                               "session_bus", "start_gnome", "kernpanic", "oom",
-                              "gnome_session_died", "fallback_gs"):
+                              "gnome_session_died", "fallback_gs",
+                              "shell_started", "xterm_probe", "session_failed"):
                     note(f"{name} {detail}".rstrip())
                     if name == "gnome_shell":
                         mark("M3_gnome_shell", detail)

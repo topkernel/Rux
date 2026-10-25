@@ -80,7 +80,17 @@ EOS
 # (49 deaths per 30-min boot observed, each trip risking the "Oh no"
 # error screen). upowerd is dbus-activatable, so no runit change is
 # needed — the system bus starts it on first StartServiceByName.
-PKGS="dash bash xserver-xorg-core xserver-xorg-video-fbdev x11-xserver-utils dbus dbus-x11 libgl1-mesa-dri libgl1-mesa-glx gnome-session-bin gnome-session gnome-shell gnome-settings-daemon librsvg2-common xterm fonts-dejavu-core util-linux coreutils procps upower"
+# ibus: gnome-shell's IBusManager launches ibus-daemon itself at
+# startup; without the binary every boot logs "Failed to launch
+# ibus-daemon: No such file or directory" and the input-method
+# plumbing never comes up (leg-6 adds it).
+# libnotify-bin: notify-send for the deterministic notification-banner
+# probe (leg-6). at-spi2-core: org.a11y.Bus — every GTK app and every
+# gsd plugin retries the missing a11y bus for the whole session
+# ("AT-SPI: Error retrieving accessibility bus address" spam); with the
+# service present those retries stop and gsd's a11y plugins get a real
+# proxy (leg-6).
+PKGS="dash bash xserver-xorg-core xserver-xorg-video-fbdev x11-xserver-utils dbus dbus-x11 libgl1-mesa-dri libgl1-mesa-glx gnome-session-bin gnome-session gnome-shell gnome-settings-daemon librsvg2-common xterm fonts-dejavu-core util-linux coreutils procps upower ibus libnotify-bin at-spi2-core"
 
 AOPTS=(-o Dir::Etc::sourcelist="$APT_SRC" -o Dir::Etc::sourceparts=-
        -o Dir::State::lists="$APT_LIST" -o Dir::State::status=/dev/null
@@ -262,6 +272,59 @@ PWRDE="$ROOT/etc/xdg/autostart/org.gnome.SettingsDaemon.Power.desktop"
 if [ -f "$PWRDE" ]; then
     printf 'Hidden=true\n' >> "$PWRDE"
 fi
+
+# --- leg-6 window + notification probes --------------------------------
+# The honest desktop gap list after r9fix/stab: panel+clock+Activities
+#+cursor paint, but no app window ever appears (gnome-session-failed
+# ran for whole sessions without a visible pixel) and no notification
+# banner has ever been shown. Two deterministic probes:
+#
+# (1) xterm window probe: a stock /etc/xdg/autostart entry, so
+# gnome-session launches it in the Applications phase exactly like the
+# gsd entries (those demonstrably spawn). White bg / black fg pinned on
+# the command line so the expected screen signature is exact: a large
+# bright rectangle below the panel. If the window maps+manages (see
+# runit's xwininfo probe) but no rectangle paints, the frontier moves
+# to mutter's compositing (GLX texture-from-pixmap) — kernel-side hunt.
+mkdir -p "$ROOT/etc/xdg/autostart"
+cat > "$ROOT/etc/xdg/autostart/rux-xterm-probe.desktop" <<'EOX'
+[Desktop Entry]
+Type=Application
+Name=Rux Window Probe
+Exec=xterm -title rux-window-probe -bg white -fg black -geometry 90x28+140+90
+OnlyShowIn=GNOME;
+X-GNOME-Autostart-enabled=true
+EOX
+
+# (2) notification banner probe: waits for the shell to own its bus
+# name, then keeps a CRITICAL notification resident (critical banners
+# do not auto-dismiss; re-send with a fixed ID replaces in place, so
+# the banner is on screen whenever a screenshot lands).
+cat > "$ROOT/usr/local/bin/rux-notify-probe.sh" <<'EON'
+#!/bin/sh
+# Deterministic notification-banner probe (leg-6). Loops forever:
+# once gnome-shell owns org.gnome.Shell on the session bus, (re)send a
+# critical-urgency notification with a fixed replace-id so a banner is
+# resident on screen. No-op until the shell is up.
+while :; do
+    if gdbus call --session --dest org.gnome.Shell \
+         --object-path /org/gnome/Shell \
+         --method org.freedesktop.DBus.Peer.Ping >/dev/null 2>&1; then
+        notify-send -u critical -r 424242 \
+            "Rux leg-6" "notification banner probe"
+    fi
+    sleep 60
+done
+EON
+chmod 0755 "$ROOT/usr/local/bin/rux-notify-probe.sh"
+cat > "$ROOT/etc/xdg/autostart/rux-notify-probe.desktop" <<'EON'
+[Desktop Entry]
+Type=Application
+Name=Rux Notification Probe
+Exec=/usr/local/bin/rux-notify-probe.sh
+OnlyShowIn=GNOME;
+X-GNOME-Autostart-enabled=true
+EOX
 
 # Xorg fbdev config (software rendering, no KMS/DRM — Rux has fbdev only)
 mkdir -p "$ROOT/etc/X11"

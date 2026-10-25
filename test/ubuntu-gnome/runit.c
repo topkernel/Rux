@@ -112,6 +112,40 @@ static void dump_log(const char *path) {
     dump_log_prefix(path, 40);
 }
 
+// X-state probe: ground truth for the "windows never paint" hunt
+// (leg-6). Clients like gnome-session-failed run for the whole session
+// yet no window ever appears on screen — the shell's own chrome
+// (panel/wallpaper/cursor) paints fine, so the open question is
+// whether client windows ever MAP and get MANAGED before blaming the
+// compositing (GLX texture-from-pixmap) path. xwininfo -tree -root
+// lists every window with map state and geometry; xprop then shows
+// which windows the WM reports as its clients (_NET_CLIENT_LIST).
+// x11-xserver-utils ships both. Console-only, ~30 lines when idle.
+static void dump_xstate(void) {
+    static const char *const probes[][4] = {
+        { "== dump X tree (xwininfo -root -tree) ==",
+          "/usr/bin/xwininfo", "-root", "-tree" },
+        { "== dump X clients (xprop _NET_CLIENT_LIST) ==",
+          "/usr/bin/xprop", "-root", "_NET_CLIENT_LIST _NET_SUPPORTING_WM_CHECK" },
+    };
+    for (unsigned i = 0; i < sizeof probes / sizeof probes[0]; i++) {
+        printf("%s\n", probes[i][0]);
+        fflush(stdout);
+        pid_t d = fork();
+        if (d == 0) {
+            int con = open("/dev/console", O_WRONLY);
+            if (con >= 0) { dup2(con, STDOUT_FILENO); dup2(con, STDERR_FILENO); }
+            setenv("DISPLAY", ":0", 1);
+            execl(probes[i][1], "probe", probes[i][2], probes[i][3],
+                  (char *)NULL);
+            _exit(127);
+        }
+        int st; waitpid(d, &st, 0);
+        if (st != 0)
+            printf("[runit] xprobe %s exited st=%d\n", probes[i][1], st);
+    }
+}
+
 // --- kernel trace forensics (merged-main tracing subsystem) ---
 // /sys/kernel/debug/tracing is auto-mounted by the kernel. Arm the
 // sched + page-fault events before the session chain starts so any
@@ -338,6 +372,12 @@ int main(void) {
                     // run) during long stalls like the slow Shell boot.
                     dump_log_prefix(TRACE_BASE "/trace", 24);
                 }
+                // X window-state snapshot every minute: window map/
+                // manage ground truth (see dump_xstate). Once the
+                // desktop is up this is ~20 lines; before X starts the
+                // probes just fail fast on connect.
+                if ((cyc % 3) == 0)
+                    dump_xstate();
             }
             _exit(0);
         }
