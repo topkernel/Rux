@@ -5047,3 +5047,65 @@ SHARED unpatched oh-img — killed at ~30s, userdata reflink recreated
 fresh before the real launch (oh-boot-usbless.sh = the oh-img-p
 variant; 30s of churn from the aborted run never touched the new
 reflink).
+
+LEG-23 ROLL-1 VERDICT (sc261, completed 07:52 after the predecessor
+died; second attempt picked it up mid-run) + KERNEL BUG #3 FIXED.
+
+sc261 OUTCOME (45 min roll, patched ld-musl image, survived to the
+timeout for the first time in this family):
+- The account chain held: bootevent.account.ready set early (line
+  45914, ActivateDefaultOsAccount at 41652), and the launcher's own
+  queries succeed ("getOsAccountLocalId localId 100" to the tail).
+- The launcher crash-loop stayed dead: exactly ONE SIGSEGV leader
+  death (pid 1413, line 100454) — the fork-residual condvar variant
+  leg-22 predicted: the timeout-walk CAS'd a waiter node at
+  0x7ff08204a92c+0x10 that landed inside the child's OWN binder
+  buffer mapping (base 0x7ff082006000, fd=40 anon_inode, flags 0x11
+  R-only) inherited stale in the condvar queue at fork (DONTFORK
+  drops the parent's mapping; the child's binder mmap re-covered the
+  VA read-only). rbx=0xffffffff (timeout dequeue), ripbytes = LOCK
+  CMPXCHG [rcx+0x10]. Enqueue-zeroing cannot cover nodes inherited
+  FROM the parent's queue — needs the fork-time condvar reinit
+  (musl-side pthread_atfork or image patch); still open, ONE crash
+  per 45 min is survivable.
+- KERNEL BUG #3 (fix 73e2ad1e): pid 1421's exit_group ->
+  kill_other_threads -> kill_dump_tgid page-faulted the KERNEL (no
+  fixup, "kernel fault addr=0x13fd0 rip=<u64 as LowerHex>::fmt
+  entry") while formatting an EXITED sibling's saved syscall: the
+  thread's kernel stack was already back in the stack cache
+  (kernel_stack_bottom zeroed at task.rs free path) while the PINNED
+  Task survived; kernel_stack_top() = 0x14000 and &regs.orig_rax =
+  0x14000 - 0xa8 + 0x78 = 0x13fd0 EXACTLY. The SAFETY comments
+  ("the kernel stack stays mapped while the Task lives") were wrong.
+  Fix: Task::owns_kernel_stack() (bottom != 0) gating every
+  foreign-task entry-frame reader — kill_dump_tgid (the crash site),
+  the APPPK12 walk, apppark_rets, rwfz_stack_frames, both RWFRZ
+  censuses (futex.rs), holder_forensics + owner-chase,
+  sleep_snapshot, user_park_stack_dump (binder.rs). x86_64+riscv64
+  build. NOTE: the boot did NOT die at the KERNPANIC — the other
+  CPU kept running (149k log lines after), but 1 CPU down =
+  degraded; the fix removes the fault entirely.
+- The post-fault tail: KILLDUMP cap (8/boot) was already spent, so
+  no dump took the risk again; the system limped on 1 CPU.
+
+THE LIVE BLOCKER after all of the above: the AMS LIFECYCLE_TIMEOUT
+restart loop. Every launcher instance dies the same death: spawn ->
+AbilityScheduler attach ("AtomicServiceAbilityManager getInstance",
+ProcessSkeleton AttachObject desc:*.AbilityScheduler) -> SILENCE ->
+LIFECYCLE_HALF_TIMEOUT -> LIFECYCLE_TIMEOUT ("load" phase) -> AMS
+"restart ability" -> respawn. The same load-phase timeout hits
+settingsdata's DataExtAbility. The parked launcher looks HEALTHY at
+kill time (KILLDUMP tgid 1413: main thread poll(2), OS_IPC_1/2 in
+binder ioctl read on /dev/binder fd6 — a textbook IDLE app waiting
+for binder work). hilog logs NO ability-schedule event at all, so
+"AMS never sent ScheduleLoadAbility" vs "sent but the wake/read was
+lost in the kernel" is indistinguishable from the log alone.
+DECIDER for sc262 (600e9be9): SLTX tracer (binder_transaction
+enqueue: latch launcher tgid by comm, print every txn to/from it,
+500/boot) + SLRD (binder_thread_read: every txn the launcher's own
+threads actually read, 600/boot). in-without-read = kernel wake/read
+loss; no-in-at-all = AMS-side stall (trace AMS next).
+
+sc262 ROLLING: new kernel (merge 859f2adc + fixes 73e2ad1e, 600e9be9),
+same recipe (oh-img-p patched system, fresh scgold reflink userdata,
+KVM SMP2 4G, loglevel=7 dfx=schb,sleepsnap, SECS=2700, shotmon on).
