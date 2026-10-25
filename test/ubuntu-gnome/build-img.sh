@@ -132,6 +132,30 @@ if command -v glib-compile-schemas >/dev/null; then
 fi
 
 # ---------------------------------------------------------------------------
+# swrast DRI driver: pin the 20.0.4 riscv64 build.
+#
+# The jammy (and focal-updates) riscv64 mesa builds have a broken drisw
+# path: __driDriverGetExtensions_swrast + createNewScreen2 with the
+# xserver's stock DRI_SWRastLoader v1 returns NULL before any syscall
+# (Xorg: "(EE) IGLX error: Calling driver entry point failed / GLX:
+# could not load software renderer"; verified kernel-independent —
+# identical under the Oct-14 painting kernel and under qemu-user on the
+# host). The 20.0.4 riscv64 driver (softpipe, no LLVM dep) passes the
+# same probe (glnit: screen created). amd64 is unaffected (its builds
+# expose the legacy DRI interface — the x86 mirror image works).
+# ---------------------------------------------------------------------------
+SW20_DEB="$DL/libgl1-mesa-dri_20.0.4-2ubuntu1_riscv64.deb"
+SW20_URL="http://ports.ubuntu.com/ubuntu-ports/pool/main/m/mesa/libgl1-mesa-dri_20.0.4-2ubuntu1_riscv64.deb"
+if [ ! -s "$SW20_DEB" ]; then
+    echo "== fetching mesa 20.0.4 swrast driver (see comment above)"
+    curl -fL --retry 3 -o "$SW20_DEB" "$SW20_URL"
+fi
+rm -rf "$WORK/sw20" && mkdir -p "$WORK/sw20"
+dpkg-deb -x "$SW20_DEB" "$WORK/sw20"
+cp "$WORK/sw20/usr/lib/riscv64-linux-gnu/dri/swrast_dri.so" \
+   "$ROOT/usr/lib/riscv64-linux-gnu/dri/swrast_dri.so"
+
+# ---------------------------------------------------------------------------
 # /sbin/runit — the session bootstrap (clear stale X locks, both dbus
 # daemons, Xorg on fbdev, then the full gnome-session chain).
 # ---------------------------------------------------------------------------

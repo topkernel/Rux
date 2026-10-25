@@ -48,4 +48,25 @@ mutter + gsd) visible and stable on the Ubuntu 22.04 riscv64 image.
 
 - Created worktree from main 5e498453.
 - Kernel build: rc=0, target/riscv64gc-unknown-none-elf/debug/rux.
-- Image build: work/gnome-riscv64.img (in progress at this writing).
+- Image build: work/gnome-riscv64.img (693 pkgs, full stock gnome chain,
+  runit default mode=session session=gnome).
+- Run repro1 (smp2/2G, dfx=watchdog,periodic,taskdump): boot to runit
+  clean, both dbus up, Xorg 1.21.1.4 fbdev up, session chain launched.
+  WALL: Xorg GLX "(EE) IGLX error: Calling driver entry point failed /
+  GLX: could not load software renderer" -> gnome-shell mutter "no
+  available drivers found" -> shell exits. Screen stays 100% black.
+  Also noted: PREEMPT-LEAK flood (idle wfi, rip=cpu::wfi, holds ~2-8s)
+  from the current kernel — separate issue, kernel-side.
+- A/B with the Oct-14 painting kernel (be8817dc, built in
+  /home/william/rux-agents/gnome-oldk): IDENTICAL GL failure on my
+  image => NOT a main-kernel regression; my image differs from the lost
+  gp3i image (or gp3i never had working swrast server-side either and
+  painted via a client-side path).
+- glnit probe (test/ubuntu-gnome/glnit.c, -march=rv64gc!): reproduced
+  WITHOUT Xorg: dlopen swrast OK, extensions walk clean (DRI_Core v2,
+  DRI_Mesa v1, DRI_SWRast v4, DRI_CopySubBuffer v1, DRI_ConfigOptions
+  v2), createNewScreen2(loader v1) returns NULL. Host-toolchain trap:
+  cross gcc defaults to RVA23-class march -> SIGILL under -cpu rv64;
+  compile probes with -march=rv64gc.
+- Host qemu-user A/B of the same probe+libs: RUNNING (decides
+  kernel-side vs image-side for the NULL).
