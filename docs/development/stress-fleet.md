@@ -300,3 +300,31 @@ Rollout order after v6 verification passes:
 4. ltpm stays stopped: its control result is banked (csrrw panics on
    main@47d96961 — verified again r7/r8); relaunch only after main
    takes the csrr read fix, then as the main-class arm.
+
+### Heal-fix verification result (10:30-11:00)
+
+A/B across three kernels, same discriminators (HEAL count vs
+UNDERFLOW sub=0x10000 count on the healed pids):
+
+- v5 (fleet-rv64-rux): memstorm-r11 — HEAL(pid=1) 14x,
+  UNDERFLOW(pid=1, sub=0x10000) 14x. Exact 1:1: every heal destroyed
+  the in-flight tick hardirq bit and the irq_exit sub underflowed.
+- v6 (pre-merge + fix only, isolated): memstorm-surface verify boot —
+  HEAL 5x, sub=0x10000 underflow 0x.
+- v7 (merged with main + fix): ltp-a r22 storm — HEAL(pid=0x78a) 22x,
+  sub=0x10000 underflow 0x. The 22 underflows present are sub=0x1 at
+  spinlock.rs guard-drop on the healed pid — the heal's DOCUMENTED
+  "later unpairing sub clamps and reports" path (a 10 s-held spinlock
+  section healed; the hold itself is the pathology — the hunt's next
+  lever, now named at task granularity).
+
+Verdict: PASS. The self-inflicted count-loss class is gone on both the
+isolated and merged kernels; the hardirq nesting now survives heals and
+pairs at irq_exit. LTP-surface verify boots wedge at oom01 (~2/2
+attempts, same v5 wedge family — see evidence addendum), so the
+memstorm surface carries the isolated gate.
+
+Fleet refresh: rollout-v7.sh (detached) gates on ltp-a r22's
+panic-free verdict, then rolls v7 to ltp-b/c/d + memstorm + fsfuzz
+(KIMG), swaps the default rv64/x86 images, restarts monkey-a/b on the
+v7 x86 kernel (carries the KILLDUMP pin fixes).
