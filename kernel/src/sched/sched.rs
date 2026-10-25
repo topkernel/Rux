@@ -761,12 +761,13 @@ pub fn switching_out_mask(task: *mut Task) -> u32 {
 }
 
 /// R85: pick-side time confirmation for a stale-ownership adjudication.
-/// Wraps the harvester's orphan watch (same table, same 60-jiffy re-record
-/// discipline): a mid-switch-out transient or a briefly descheduled
-/// picker re-records and never matures; a shape that persists for
-/// `threshold` jiffies is by definition stale. The owner-based
-/// pick_owner_live check already excludes every legitimate owner, so this
-/// is defense in depth against an out-of-tree divergence window.
+/// Wraps the harvester's orphan watch (same table, same exec-frozen
+/// refresh discipline — R81): a mid-switch-out transient or a briefly
+/// descheduled picker advances its exec clock and re-records, never
+/// maturing; a shape whose exec clock stays frozen for `threshold`
+/// jiffies is by definition stale. The owner-based pick_owner_live
+/// check already excludes every legitimate owner, so this is defense in
+/// depth against an out-of-tree divergence window.
 pub fn stale_mark_confirm(task: *mut Task, pid: u32, threshold: u64) -> bool {
     orphan_watch_confirm(task, pid, crate::drivers::timer::get_jiffies(), threshold)
 }
@@ -2851,6 +2852,60 @@ unsafe fn enqueue_task_locked(grq: &mut GlobalRunQueue, task: *mut Task) -> bool
             let deadline = dl.deadline.load(core::sync::atomic::Ordering::Acquire);
             if dl.dl_throttled.load(core::sync::atomic::Ordering::Acquire) && now < deadline {
                 arm_dl_replenish_timer(task);
+                // R82 (silent-refusal attribution, the sc252/sc253
+                // wake-leak hunt): this branch is the ONLY wake refusal
+                // for a sleeping task that prints nothing anywhere. If
+                // the replenish timer keeps failing to re-link (timer
+                // table full / timer lost), the task parks forever in
+                // exactly the census shape (INTERRUPTIBLE ∧ unlinked ∧
+                // slotless, "kicked Nx" forever). Name each refusal
+                // live, rate-limited. R34 discipline: GRQ is held, so
+                // the report uses the direct console path (no printk
+                // wake under GRQ).
+                static DLDEF_N: core::sync::atomic::AtomicU32 =
+                    core::sync::atomic::AtomicU32::new(0);
+                if DLDEF_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 24 {
+                    use crate::console::putchar_no_lock as putchar;
+                    fn pdec(mut v: u64) {
+                        use crate::console::putchar_no_lock as putchar;
+                        let mut buf = [0u8; 20];
+                        let mut n = 0;
+                        if v == 0 {
+                            putchar(b'0');
+                            return;
+                        }
+                        while v > 0 {
+                            buf[n] = b'0' + (v % 10) as u8;
+                            v /= 10;
+                            n += 1;
+                        }
+                        while n > 0 {
+                            n -= 1;
+                            putchar(buf[n]);
+                        }
+                    }
+                    for &b in b"DL-ENQ-DEFERRED pid=" {
+                        putchar(b);
+                    }
+                    pdec((*task).pid() as u64);
+                    for &b in b" delta_ms=" {
+                        putchar(b);
+                    }
+                    pdec((deadline.saturating_sub(now)) / 1_000_000);
+                    let id = dl.replenish_timer.load(core::sync::atomic::Ordering::Acquire);
+                    for &b in b" timer=" {
+                        putchar(b);
+                    }
+                    pdec(id);
+                    let tail: &[u8] = if id != 0 && crate::timer::timer_pending(id) {
+                        b" pending\n"
+                    } else {
+                        b" LOST\n"
+                    };
+                    for &b in tail {
+                        putchar(b);
+                    }
+                }
                 return false;
             }
             // Drop any stale timer so a late wake cannot double-enqueue.
@@ -3367,10 +3422,11 @@ pub fn wake_up_enqueue(task: *mut Task) -> bool {
                     ) {
                         return false;
                     }
-                    // (Threshold 50 jiffies: the watch table re-records a
-                    // sighting once it ages past 60, so longer thresholds
-                    // would never mature. 500 ms is still two orders above
-                    // every legitimate in-flight window.)
+                    // (Threshold 50 jiffies = 500 ms, two orders above
+                    // every legitimate in-flight window. R81: conviction
+                    // is the frozen exec clock, so the threshold matures
+                    // at ANY observer cadence — the old [50,60]-jiffy
+                    // window could never open for 15-s-apart rekicks.)
                     r56_print_pid(
                         b"R80-LIVE-PHANTOM-CLEARED pid=",
                         (*task).pid(),
@@ -5066,12 +5122,15 @@ struct OrphanWatchSlot {
     task: core::sync::atomic::AtomicU64,
     pid: core::sync::atomic::AtomicU32,
     seen_at: core::sync::atomic::AtomicU64,
+    /// sum_exec_runtime at the sighting (R81 progress-conviction).
+    exec: core::sync::atomic::AtomicU64,
 }
 
 const EMPTY_ORPHAN_WATCH: OrphanWatchSlot = OrphanWatchSlot {
     task: core::sync::atomic::AtomicU64::new(0),
     pid: core::sync::atomic::AtomicU32::new(0),
     seen_at: core::sync::atomic::AtomicU64::new(0),
+    exec: core::sync::atomic::AtomicU64::new(0),
 };
 
 static ORPHAN_WATCH: [OrphanWatchSlot; 16] =
@@ -5081,9 +5140,32 @@ static ORPHAN_WATCH: [OrphanWatchSlot; 16] =
 /// recorded at least `threshold` jiffies ago; records/refreshes the
 /// sighting otherwise. The caller clears the entry (orphan_watch_clear)
 /// once it acts on a confirmed orphan.
+///
+/// R81 (progress-conviction, the sc252/sc253 wake-leak cadence bug): the
+/// old freshness rule re-recorded the sighting whenever two observations
+/// were more than 60 jiffies apart, so confirmation required a second
+/// look 50..60 jiffies after the first. The idle-loop harvester feeds
+/// the watch at that cadence, but on a BUSY box (the OH boot: both CPUs
+/// pegged by ETIMEDOUT/EAGAIN futex spin loops) the only observers are
+/// the binder-stall rekicks — REKICK_SECS=15 = 1500 jiffies apart at
+/// HZ=100. Every rekick found a >60-jiffy-stale record, re-recorded, and
+/// returned false: the R80 phantom heal could NEVER mature while both
+/// CPUs stayed busy (sc252: 1359 WAKE-RUN-LEAK lines, zero R80 heals;
+/// sc253: 2050, zero). The conviction channel is now the exec clock: a
+/// task executing ANYWHERE is charged by update_curr on every tick (and
+/// at switch-out), so `sum_exec_runtime` frozen across two sightings
+/// `threshold` jiffies apart proves nobody ran it — persistence without
+/// a freshness assumption, at ANY observer cadence. An ADVANCING exec
+/// clock refreshes the record (the shape is fresh again; a healthy
+/// mid-switch-out transient ran between sightings and must not pre-age a
+/// later genuine orphan), replacing the 60-jiffy re-record rule.
 fn orphan_watch_confirm(task: *mut Task, pid: u32, now: u64, threshold: u64) -> bool {
     use core::sync::atomic::Ordering;
     let raw = task as u64;
+    // SAFETY: read-only sched-entity word; the task is pinned by the
+    // caller's context (wake path holds the GRQ, harvester holds the
+    // bucket lock).
+    let exec = unsafe { (*task).sched_entity().sum_exec_runtime.load(Ordering::Relaxed) };
     let mut free_idx: usize = usize::MAX;
     let mut oldest_idx = 0usize;
     let mut oldest_at = u64::MAX;
@@ -5093,14 +5175,20 @@ fn orphan_watch_confirm(task: *mut Task, pid: u32, now: u64, threshold: u64) -> 
         if t == raw {
             if s.pid.load(Ordering::Acquire) == pid {
                 let first = s.seen_at.load(Ordering::Acquire);
-                if first != 0 && now >= first && now - first >= threshold {
+                let first_exec = s.exec.load(Ordering::Acquire);
+                if first != 0
+                    && now >= first
+                    && now - first >= threshold
+                    && exec == first_exec
+                {
                     return true;
                 }
-                // Re-record when the record is stale (the shape was absent
-                // between sightings — a healthy mid-switch-out transient
-                // must not pre-age a later genuine orphan).
-                if first == 0 || now < first || now - first > 60 {
+                // Re-record when the task RAN between sightings (exec
+                // advanced: the shape is fresh, aging restarts) or the
+                // record is empty/inverted.
+                if first == 0 || now < first || exec != first_exec {
                     s.seen_at.store(now, Ordering::Release);
+                    s.exec.store(exec, Ordering::Release);
                 }
                 return false;
             }
@@ -5108,6 +5196,7 @@ fn orphan_watch_confirm(task: *mut Task, pid: u32, now: u64, threshold: u64) -> 
             // reused. Re-record under the new identity.
             s.pid.store(pid, Ordering::Release);
             s.seen_at.store(now, Ordering::Release);
+            s.exec.store(exec, Ordering::Release);
             return false;
         }
         if t == 0 && free_idx == usize::MAX {
@@ -5123,6 +5212,7 @@ fn orphan_watch_confirm(task: *mut Task, pid: u32, now: u64, threshold: u64) -> 
     ORPHAN_WATCH[i].task.store(raw, Ordering::Release);
     ORPHAN_WATCH[i].pid.store(pid, Ordering::Release);
     ORPHAN_WATCH[i].seen_at.store(now, Ordering::Release);
+    ORPHAN_WATCH[i].exec.store(exec, Ordering::Release);
     false
 }
 
@@ -5448,9 +5538,11 @@ pub fn harvest_relink(task: *mut Task) -> bool {
                         50,
                     ) {
                         // First (or recent) sighting — come back after the
-                        // shape has persisted half a second. (Threshold must
-                        // stay below the watch table's 60-jiffy re-record
-                        // guard, which would otherwise reset the aging.)
+                        // shape has persisted half a second with a frozen
+                        // exec clock (R81: the exec-frozen rule convicts at
+                        // any observer cadence; a task genuinely resuming
+                        // here is charged by its first tick and refreshes
+                        // the watch instead).
                         return false;
                     }
                     (*task).release_pick_ownership();
