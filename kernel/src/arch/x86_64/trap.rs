@@ -2096,6 +2096,26 @@ fn handle_page_fault(regs: &mut PtRegs) {
         );
     }
 
+    // The exceptions:page_fault_user / exceptions:page_fault_kernel
+    // tracepoints, recorded at fault entry before the handler runs (the
+    // reference's record point). On this arch error_code IS the
+    // hardware #PF error word (regs.orig_rax); ip is the faulting rip.
+    // One armed() check selects the mode's event; the record marshals
+    // three words.
+    if crate::trace::EVENT_PAGE_FAULT_USER.armed() || crate::trace::EVENT_PAGE_FAULT_KERNEL.armed() {
+        let event = if regs.kernel_mode() {
+            &crate::trace::EVENT_PAGE_FAULT_KERNEL
+        } else {
+            &crate::trace::EVENT_PAGE_FAULT_USER
+        };
+        if event.armed() {
+            crate::trace::record(
+                event,
+                [fault_addr, regs.rip, error_code, 0, 0, 0, 0, 0, 0, 0],
+            );
+        }
+    }
+
     let result = do_page_fault(regs, access);
 
     match result {

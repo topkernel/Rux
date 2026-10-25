@@ -914,6 +914,50 @@ pub fn do_clone(args: CloneArgs) -> Result<Pid, i32> {
             return Err(enomem());
         }
 
+        // The sched:sched_process_fork and sched:sched_wakeup_new
+        // tracepoints: the child is fully built and linked, exactly the
+        // reference's record points (fork at creation, wakeup_new at
+        // the first enqueue — the wake_up_new_task record). Gated
+        // behind armed(); the comm copies happen only when an event is
+        // on.
+        if crate::trace::EVENT_SCHED_PROCESS_FORK.armed() {
+            let parent_words = crate::trace::comm_to_words(&*(*current_ptr).comm());
+            let child_words = crate::trace::comm_to_words(&*(*task_ptr).comm());
+            crate::trace::record(
+                &crate::trace::EVENT_SCHED_PROCESS_FORK,
+                [
+                    parent_words[0],
+                    parent_words[1],
+                    (*current_ptr).pid() as u64,
+                    child_words[0],
+                    child_words[1],
+                    pid as u64,
+                    0,
+                    0,
+                    0,
+                    0,
+                ],
+            );
+        }
+        if crate::trace::EVENT_SCHED_WAKEUP_NEW.armed() {
+            let words = crate::trace::comm_to_words(&*(*task_ptr).comm());
+            crate::trace::record(
+                &crate::trace::EVENT_SCHED_WAKEUP_NEW,
+                [
+                    words[0],
+                    words[1],
+                    pid as u64,
+                    (*task_ptr).prio() as u64,
+                    (*task_ptr).ti_cpu() as u64,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                ],
+            );
+        }
+
         if is_vfork {
             crate::pr_debug!("vfork: parent={} blocked, child={}",
                 (*current_ptr).pid(), pid);            (*current).set_state(TaskState::new(TaskState::UNINTERRUPTIBLE));

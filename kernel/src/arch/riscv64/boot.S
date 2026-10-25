@@ -197,14 +197,21 @@ _start:
     or t4, t4, t5
     sd t4, 48(t3)
 
-    // PMD[7]: VA -> PA eighth 2MB (window 16MB; see early_pmd PMD[7],
-    // RUX-RISCV-LAYOUT-3)
+    // PMD[7]: VA -> PA eighth 2MB (window 16MB; see early_pmd PMD[7])
     li t4, KERNEL_PHYS
     li t6, 0xE00000              // 14MB
     add t4, t4, t6
     srli t4, t4, 2
     or t4, t4, t5
     sd t4, 56(t3)
+
+    // PMD[8]: VA -> PA ninth 2MB (window 18MB; see early_pmd PMD[8])
+    li t4, KERNEL_PHYS
+    li t6, 0x1000000             // 16MB
+    add t4, t4, t6
+    srli t4, t4, 2
+    or t4, t4, t5
+    sd t4, 64(t3)
 
     // --- Create early page table (full kernel mapping) ---
     // early_pg_dir: same as trampoline but points to early_pmd
@@ -305,18 +312,32 @@ _start:
     sd t4, 48(t3)
 
     // PMD[7]: VA 0xFFFFFFFF80E00000 -> PA 0x81000000 (eighth 2MB)
-    // RUX-RISCV-LAYOUT-3: the merged main+ltp-fix-b image (static
-    // BlockMeta/free-bitmap buddy arrays in .data) grew past the 14MB
-    // window (linker ASSERT, ~350KB over). Window is now 16MB; the heap
-    // base, RAM reservation and memory-map KERNEL_SIZE moved with it
-    // (main.rs, memory_layout.rs, buddy_allocator.rs) per the
-    // RUX-RISCV-LAYOUT-2 recipe.
+    // PMD[8]: VA 0xFFFFFFFF81000000 -> PA 0x81200000 (ninth 2MB)
+    // RUX-RISCV-LAYOUT-3 (dfx): the kernel symbol table (ksyms, the
+    // backing store for /proc/kallsyms and symbolized stack traces)
+    // became part of the default image: the full table is ~3.1MB of
+    // .rodata (2.4MB names + 0.7MB index at ~22.6k text symbols), which
+    // did not fit the 1.45MB left under the 14MB window — the table was
+    // either disabled outright or capped at 1MiB of names, which covers
+    // only the first ~1.7MB of .text (sched/trap/syscall hot paths
+    // symbolized to '?'). Window, heap, reservation and KERNEL_SIZE move
+    // 14MB->18MB together, same rule as LAYOUT-2. (An intermediate
+    // branch-local bump 14MB->16MB for the static buddy BlockMeta/free
+    // bitmap arrays in .data — ~350KB over the linker ASSERT — was
+    // subsumed by this larger move.)
     li t4, KERNEL_PHYS
     li t6, 0xE00000              // 14MB
     add t4, t4, t6
     srli t4, t4, 2
     or t4, t4, t5
     sd t4, 56(t3)
+
+    li t4, KERNEL_PHYS
+    li t6, 0x1000000             // 16MB
+    add t4, t4, t6
+    srli t4, t4, 2
+    or t4, t4, t5
+    sd t4, 64(t3)
 
     // --- MMIO identity mapping (UART at 0x10000000) ---
     // early_pg_dir[0] -> early_pmd_io (non-leaf, identity maps first 1GB)
