@@ -1427,6 +1427,24 @@ pub extern "C" fn rust_main() -> ! {
         if slab_size > 0 {
             mm::memblock_reserve(slab_start, slab_size).ok(); // Slab
         }
+
+        // pstore-lite (riscv64): the 128 KiB below the DTB — the FDT
+        // address is fixed per machine config (2 MiB below RAM end on
+        // virt), so the region is at the same physical address every
+        // boot and the next boot's firmware rewrite of the DTB cannot
+        // touch it. Reserved BEFORE the zone allocator seeds (only
+        // memblock-free pages reach the buddy). x86_64 has no fixed-DTB
+        // anchor (QEMU rebuilds the ACPI tables near the top of low RAM
+        // every boot) — no pstore there yet.
+        #[cfg(feature = "riscv64")]
+        {
+            let dtb_phys = arch::boot::get_dtb_pointer();
+            if let Some((base, size)) =
+                dfx::pstore::reserve(dtb_phys as usize, heap_start + heap_size + slab_size)
+            {
+                mm::memblock_reserve(base, size).ok();
+            }
+        }
         crate::println!(
             "boot: static regions phys_end={:#x} heap_region_end={:#x} heap={:#x}+{:#x} slab={:#x}+{:#x}",
             phys_end, heap_region_end, heap_start, heap_size, slab_start, slab_size
@@ -1455,6 +1473,14 @@ pub extern "C" fn rust_main() -> ! {
     // Initialize heap allocator (window clamped to discovered RAM — the
     // buddy must never cover DRAM past the memory map).
     mm::init_heap_sized(HEAP_SIZE_EFF.load(core::sync::atomic::Ordering::Acquire));
+
+    // pstore-lite: with the linear map up, look for the previous boot's
+    // panic record in the reserved region (a guest reset does not clear
+    // RAM). A valid magic means the last boot panicked; the record is
+    // remembered for sysfs to publish as /sys/fs/pstore/console-ramoops-0
+    // and the magic is cleared so a clean next boot does not re-expose it.
+    #[cfg(feature = "riscv64")]
+    dfx::pstore::early_scan();
 
     // x86_64: leave the .boot stack (limited by the LMA window, ~1MB) for a
     // 4MB heap-backed kernel stack. The whole init chain — including exec's
@@ -1606,6 +1632,13 @@ fn mount_ext4_root_from(disk: *const drivers::blkdev::GenDisk) {
 #[panic_handler]
 fn panic(info: &PanicInfo) -> ! {
     use core::fmt::Write;
+
+    // pstore-lite: arm the capture sink FIRST — from here on, every
+    // console byte the panic report prints is staged for the persistent
+    // record (one relaxed load per byte on the disarmed path of every
+    // other boot).
+    crate::dfx::pstore::arm_sink();
+
     let mut w = dfx::backtrace::ConsoleWriter::new();
 
     // Header
@@ -1638,8 +1671,13 @@ fn panic(info: &PanicInfo) -> ! {
     // Flush persistent log
     crate::printk::persistent_log_flush();
 
-    // What happens next is the `panic=` policy (Linux): halt by
-    // default, reboot after N seconds or immediately when the command
-    // line asks for it.
+    // pstore-lite: write the record (staged sink + console tail) into
+    // the reserved RAM region — after the report, before the `panic=`
+    // policy fires, so the reboot still finds the bytes in place.
+    crate::dfx::pstore::panic_capture(info);
+
+    // What happens next is the `panic=` policy (the reference kernel):
+    // halt by default, reboot after N seconds or immediately when the
+    // command line asks for it.
     crate::panic_policy::apply();
 }

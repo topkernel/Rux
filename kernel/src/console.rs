@@ -272,6 +272,12 @@ impl Uart {
     /// Write single character to UART
     #[inline(never)]
     pub fn putc(&self, c: u8) {
+        // pstore-lite: while the panic sink is armed, every console byte
+        // is staged for the persistent record. One relaxed load on the
+        // disarmed path (the UART store dominates this function either
+        // way).
+        crate::dfx::pstore::sink(c);
+
         #[cfg(feature = "aarch64")]
         // SAFETY: UART0_BASE is a valid MMIO address for the UART data register.
         unsafe {
