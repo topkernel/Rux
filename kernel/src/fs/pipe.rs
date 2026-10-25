@@ -274,6 +274,27 @@ impl PipeBuffer {
         }
     }
 
+    /// Peek (tee(2) source side): copy up to buf.len() buffered bytes out
+    /// in FIFO order WITHOUT advancing read_pos. Same split-segment bulk
+    /// copy as read(); returns bytes copied.
+    pub fn peek(&self, buf: &mut [u8]) -> usize {
+        let read_pos = self.read_pos.load(Ordering::Acquire);
+        let write_pos = self.write_pos.load(Ordering::Acquire);
+        if read_pos == write_pos {
+            return 0;
+        }
+        let to_read = core::cmp::min(self.available_read(), buf.len());
+        if to_read == 0 {
+            return 0;
+        }
+        let first_len = core::cmp::min(to_read, self.size - read_pos);
+        buf[..first_len].copy_from_slice(&self.data[read_pos..read_pos + first_len]);
+        if to_read > first_len {
+            buf[first_len..to_read].copy_from_slice(&self.data[0..to_read - first_len]);
+        }
+        to_read
+    }
+
     /// Get available write space
     pub fn available_write(&self) -> usize {
         let read_pos = self.read_pos.load(Ordering::Acquire);
@@ -391,6 +412,51 @@ impl Pipe {
     /// Get read wait queue
     pub fn read_queue(&self) -> &WaitQueueHead {
         &self.read_queue
+    }
+
+    /// Buffered bytes currently readable (tee(2) EAGAIN check and
+    /// diag_snapshot share this).
+    pub fn fill_bytes(&self) -> usize {
+        self.buffer.lock().available_read()
+    }
+
+    /// tee(2) core: duplicate up to `len` buffered bytes of `self` into
+    /// `dst` WITHOUT consuming them from `self`. The two pipes' locks are
+    /// taken SEQUENTIALLY (source staged into a kernel buffer, then
+    /// released before dst is locked) — never nested, so no ABBA class is
+    /// introduced between pipe locks. Returns the number of bytes
+    /// duplicated (may be less than len if dst is full; 0 if self is
+    /// empty).
+    pub fn tee_into(&self, dst: &Pipe, len: usize) -> usize {
+        if len == 0 {
+            return 0;
+        }
+        // Stage the oldest bytes out without consuming.
+        let staged: alloc::vec::Vec<u8> = {
+            let src = self.buffer.lock();
+            let n = core::cmp::min(len, src.available_read());
+            if n == 0 {
+                return 0;
+            }
+            let mut v = alloc::vec![0u8; n];
+            let got = src.peek(&mut v);
+            v.truncate(got);
+            v
+        };
+        if staged.is_empty() {
+            return 0;
+        }
+        // Push into the destination ring; write() copies what fits.
+        let written = {
+            let mut d = dst.buffer.lock();
+            d.write(&staged)
+        };
+        if written > 0 {
+            // New data readable in dst: wake its readers (tee01's second
+            // splice drains it immediately).
+            dst.read_queue.wake_up_all();
+        }
+        written
     }
 
     /// Get write wait queue

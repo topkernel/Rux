@@ -73,12 +73,14 @@ pub fn generate() -> Vec<u8> {
 
     for cpu in 0..num_cpus {
         let yld = YLD_COUNT[cpu].load(Ordering::Relaxed);
-        // Field 2 is a literal "0" in the format string, like Linux's
-        // "cpu%d %u 0 %u %u %u %u %llu %llu %lu".
-        out.push_str(&format!(
-            "cpu{} {} 0 {} {} {} {} {} {} {}\n",
-            cpu,
+        // leg-36: row derived by `procfile!`'s `cols` form — the
+        // column list and the argument order are one declaration
+        // (fourth conversion). `alias0` is Linux's literal middle
+        // zero; unimplemented counters pass 0 at the call.
+        out.push_str(&schedstat_cpu_row(
+            &format!("cpu{}", cpu),
             yld,                                      // yld_count
+            0,                                        // alias0 (Linux literal)
             SCHED_COUNT[cpu].load(Ordering::Relaxed), // sched_count
             0,                                        // sched_goidle
             0,                                        // ttwu_count
@@ -90,4 +92,23 @@ pub fn generate() -> Vec<u8> {
     }
 
     out.into_bytes()
+}
+
+crate::procfile! {
+    /// /proc/schedstat cpu rows — Linux kernel/sched/stats.c
+    /// `"cpu%d %u 0 %u %u %u %u %llu %llu %lu"` shape; `alias0` is the
+    /// literal middle zero, kept as a named column so the rendered
+    /// order stays pinned by the declaration.
+    rowfn schedstat_cpu_row(label: &str) columns SCHEDSTAT_CPU_COLUMNS
+        test schedstat_row_shape -> alloc::string::String cols {
+        "yld_count"    => yld_count,
+        "alias0"       => alias0,
+        "sched_count"  => sched_count,
+        "sched_goidle" => sched_goidle,
+        "ttwu_count"   => ttwu_count,
+        "ttwu_local"   => ttwu_local,
+        "rq_cpu_time"  => rq_cpu_time,
+        "run_delay"    => run_delay,
+        "pcount"       => pcount,
+    }
 }

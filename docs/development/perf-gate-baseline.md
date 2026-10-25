@@ -15,9 +15,9 @@ main lands, do not cherry-pick rows.
 | WAKE-STRANDED | 0–7 organic (~1–1.5s) | no 1001ms-grid class |
 | tick rate per CPU | 99.74–99.98 /s | ≥99.5 sustained (quiet window; one-CPU marginal misses under heavy foreign-QEMU load are the documented flake class) |
 | kernel panics / new OOM classes | 0 | 0 |
-| total syscall volume (780s boot) | ~136M (pa38) | ±10% IN A COMPARABLE HOST-LOAD WINDOW — row is pace-coupled: pa41gate (leg 32) proved a flat −35% pace deficit from the first checkpoint under 14–19 foreign QEMUs (77.1M, per-op costs held); re-bank from a passing quiet-window gate run before enforcing |
+| total syscall volume (780s boot) | ~107.5M (pa50main, 2026-10-25) | ±10% IN A COMPARABLE HOST-LOAD WINDOW — re-banked 2026-10-25 from the pa50main quiet-window run (PURE main ddb3ed01, x86_64 debug, load1=0/qemus=1 at launch, all other enforced rows PASS); the old 136M seed was the pa38 boot at host load ~5.5 with the app phase running 81 ABC restarts (a deeper workload mix) — superseded. Pace-coupling stands: pa41gate (leg 32) proved a flat −35% pace deficit under 14–19 foreign QEMUs (77.1M, per-op costs held); pa46main at load1 11–17 read 93.2M. Enforce only in a load-gated window (load1 ≤9, qemus ≤8 — run/pa50-rebank.sh gate) |
 | clock_gettime avg | 3–4 µs | ±20% or better |
-| nanosleep avg | UNBANKED (was seeded ~221 ms — inconsistent: the seed boot pa38 itself read 333 ms; observed range across pa38/sc239/pa41gate is 174–333 ms, workload-mix dependent) | re-bank from a passing quiet-window gate run; until then INFO-only (run/perf-gate.sh already treats it so) |
+| nanosleep avg | 203 ms (pa50main, n=26,945) | ≤244 ms (203 ms ±20%; enforced 2026-10-25 — observed cross-run range 174–222 ms across pa41gate/pa46main/pa46f4r2/pa27, workload-mix dependent but the mix is stable in this image class; the old ~221/333 ms seeds predate the tick-fix-era steady state) |
 
 ## Tier 2 — pbench P1-P7 medians (main-class kernel, usbless image)
 

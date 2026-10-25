@@ -43,6 +43,20 @@ pub const NMI_OFFSET: i32 = 1 << 20;
 // Context query functions
 // ============================================================================
 
+/// Per-CPU snapshot of the interrupted task's own preempt_count, taken at
+/// timer-trap ENTRY — before irq_enter() books the tick's own
+/// HARDIRQ_OFFSET on the current task (fleet s2 session-6 discriminator).
+/// The PREEMPT-LEAK probe prints it (pctick=) so an observed pc=0x10001
+/// splits into its two producers: pctick=0x1 is a leaked PREEMPT bit
+/// (the 0x10000 is the tick's own in-flight offset), while
+/// pctick>=0x10001 is a stranded hardirq bit carried from an earlier
+/// bracket. Written only from the timer trap path on the owning CPU;
+/// read from the tick probe on the same CPU.
+pub static TICK_ENTRY_PC: [core::sync::atomic::AtomicU32;
+    crate::config::MAX_CPUS] =
+    [const { core::sync::atomic::AtomicU32::new(0) };
+        crate::config::MAX_CPUS];
+
 /// Read current task's preempt_count
 #[inline]
 pub fn preempt_count() -> i32 {

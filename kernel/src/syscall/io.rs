@@ -2318,16 +2318,65 @@ unsafe fn writeback_and_return(
     ret
 }
 
-/// sys_tee - Copy data between pipes
+/// sys_tee - Duplicate pipe content into another pipe without consuming
+///
+/// Contract (tee(2)): fd_in and fd_out must both refer to pipes (EINVAL
+/// otherwise, LTP tee02), and must not be two ends of the SAME pipe
+/// (EINVAL). Up to len bytes are duplicated from fd_in's ring into
+/// fd_out's ring; the source bytes stay readable. SPLICE_F_NONBLOCK
+/// (0x2) makes an empty source EAGAIN instead of a 0-return; unknown
+/// flags are EINVAL.
 ///
 /// # Arguments
 /// - args[0]: fd_in - input pipe fd
 /// - args[1]: fd_out - output pipe fd
 /// - args[2]: len - number of bytes to copy
-/// - args[3]: flags - unused
-pub fn sys_tee(_args: SyscallArgs) -> i64 {
-    // TODO: requires pipe buffer management
-    -errno::ENOSYS as i64
+/// - args[3]: flags - SPLICE_F_* flags
+pub fn sys_tee(args: SyscallArgs) -> i64 {
+    let fd_in = args[0] as i32;
+    let fd_out = args[1] as i32;
+    let len = args[2] as usize;
+    let flags = args[3] as u32;
+
+    const SPLICE_F_MOVE: u32 = 1;
+    const SPLICE_F_NONBLOCK: u32 = 2;
+    const SPLICE_F_MORE: u32 = 4;
+    const SPLICE_F_GIFT: u32 = 8;
+    if flags & !(SPLICE_F_MOVE | SPLICE_F_NONBLOCK | SPLICE_F_MORE | SPLICE_F_GIFT) != 0 {
+        return -errno::EINVAL as i64;
+    }
+
+    use crate::fs::get_file_fd;
+    // SAFETY: get_file_fd returns valid File references for the fds.
+    unsafe {
+        let in_file = match get_file_fd(fd_in as usize) {
+            Some(f) => f,
+            None => return -errno::EBADF as i64,
+        };
+        let out_file = match get_file_fd(fd_out as usize) {
+            Some(f) => f,
+            None => return -errno::EBADF as i64,
+        };
+
+        let ipipe = crate::fs::pipe::pipe_of_file(&in_file);
+        let opipe = crate::fs::pipe::pipe_of_file(&out_file);
+
+        // Both ends must be pipes (tee02: file fd on either side EINVAL).
+        let (src, dst) = match (ipipe, opipe) {
+            (Some(s), Some(d)) => (s, d),
+            _ => return -errno::EINVAL as i64,
+        };
+        // Same pipe on both sides is EINVAL (tee02 case 3).
+        if core::ptr::eq(src as *const _, dst as *const _) {
+            return -errno::EINVAL as i64;
+        }
+
+        let n = src.tee_into(dst, len) as isize;
+        if n == 0 && (flags & SPLICE_F_NONBLOCK) != 0 && src.fill_bytes() == 0 {
+            return -errno::EAGAIN as i64;
+        }
+        n as i64
+    }
 }
 
 /// sys_vmsplice - Map user pages into a pipe
