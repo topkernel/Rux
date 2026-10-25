@@ -2828,8 +2828,12 @@ pub fn vfs_unlink(pathname: &str) -> Result<(), i32> {
                     }
                 }
 
-                // IN_DELETE goes to the parent watch (named); a direct
-                // watch on the file gets IN_DELETE_SELF below.
+                // IN_DELETE goes to the parent watch (named); the inode
+                // itself first gets IN_ATTRIB — unlink(2) drops its link
+                // count, and that metadata change is reported to the
+                // file's own watch (LTP inotify04: an unlinked watched
+                // file must see IN_ATTRIB before IN_DELETE_SELF) — then
+                // IN_DELETE_SELF when the last link went away.
                 crate::fs::inotify::notify(
                     Some(parent_inode),
                     None,
@@ -2837,6 +2841,9 @@ pub fn vfs_unlink(pathname: &str) -> Result<(), i32> {
                     Some(name.as_bytes()),
                     0,
                 );
+                if let Some(ref ti) = target_inode {
+                    crate::fs::inotify::notify(None, Some(ti), ino::IN_ATTRIB, None, 0);
+                }
                 if last_link {
                     if let Some(ref ti) = target_inode {
                         crate::fs::inotify::notify(
@@ -3287,9 +3294,16 @@ pub fn vfs_chmod(pathname: &str, mode: u32) -> Result<(), i32> {
 
     let result = inode.op_setattr(setattr_attr::ATTR_MODE, mode as u64, 0);
     if result == 0 {
-        // inotify: mode change → IN_ATTRIB.
+        // inotify: mode change → IN_ATTRIB. The subject's ISDIR modifier
+        // rides on BOTH the parent's named record and the inode's own
+        // record (reference fsnotify_change) — LTP inotify10 expects
+        // IN_ATTRIB|IN_ISDIR from a chmod on a watched directory.
+        let mut ev_mask = ino::IN_ATTRIB;
+        if inode.mode.is_directory() {
+            ev_mask |= ino::IN_ISDIR;
+        }
         let name = vpath.dentry.as_ref().map(|d| d.get_name().into_bytes());
-        notify_about(vpath.dentry.as_ref(), Some(inode), ino::IN_ATTRIB, name.as_deref(), 0);
+        notify_about(vpath.dentry.as_ref(), Some(inode), ev_mask, name.as_deref(), 0);
         Ok(())
     } else {
         Err(result)
@@ -3389,9 +3403,14 @@ pub fn vfs_chown(pathname: &str, uid: u32, gid: u32, follow: bool) -> Result<(),
 
     let result = inode.op_setattr(setattr_attr::ATTR_UID_GID, actual_uid as u64, actual_gid as u64);
     if result == 0 {
-        // inotify: owner change → IN_ATTRIB.
+        // inotify: owner change → IN_ATTRIB (ISDIR modifier when the
+        // subject is a directory, same as chmod above).
+        let mut ev_mask = ino::IN_ATTRIB;
+        if inode.mode.is_directory() {
+            ev_mask |= ino::IN_ISDIR;
+        }
         let name = vpath.dentry.as_ref().map(|d| d.get_name().into_bytes());
-        notify_about(vpath.dentry.as_ref(), Some(inode), ino::IN_ATTRIB, name.as_deref(), 0);
+        notify_about(vpath.dentry.as_ref(), Some(inode), ev_mask, name.as_deref(), 0);
         Ok(())
     } else {
         Err(result)
