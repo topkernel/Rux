@@ -254,6 +254,17 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize) {
                 // fault then classifies as in_interrupt() and dies through
                 // the no_context → KERNPANIC path (r72-fire6 family).
                 let tp_entry = crate::arch::cpu::get_thread_id() as usize;
+                // Session-3 discriminator (fleet ltp-a r18-r20): capture
+                // cpu_state's current at ENTRY too, so the print can tell
+                // a tp/cpu_state divergence that ALREADY existed before the
+                // bracket (stale tp — the switch happened in an earlier
+                // window) from one that formed INSIDE this bracket (a
+                // schedule ran between irq_enter and irq_exit — the
+                // count-migration producer class). epc_ctx names where the
+                // tick landed on the entry task.
+                let cs_entry = crate::sched::sched::cpu_state(cpu_id).current
+                    as usize;
+                let epc_ctx = regs_ref.epc;
                 crate::interrupt::preempt::irq_enter();
                 handle_timer_interrupt(regs_ref, cpu_id);
                 crate::interrupt::preempt::irq_exit();
@@ -264,13 +275,24 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize) {
                     let (pa, pb) = unsafe {
                         ((*a).preempt_count(), (*b).preempt_count())
                     };
+                    let cs_pid = if cs_entry != 0 {
+                        unsafe { (*(cs_entry as *mut crate::process::task::Task)).pid() }
+                    } else {
+                        0
+                    };
+                    // "pre" = divergence predates the bracket (stale tp at
+                    // entry); "in" = formed inside it. Direct console —
+                    // this can print from deep inside scheduler paths.
                     use core::fmt::Write;
                     let mut w = crate::dfx::backtrace::ConsoleWriter::new();
                     let _ = write!(w,
-                        "IRQ-BRACKET-LEAK timer cpu={} entry_tp={:#x} (pid={} preempt={:#x}) exit_tp={:#x} (pid={} preempt={:#x})\n",
+                        "IRQ-BRACKET-LEAK timer cpu={} entry_tp={:#x} (pid={} preempt={:#x}) exit_tp={:#x} (pid={} preempt={:#x}) cs_entry_pid={} when={} epc_ctx={:#x}\n",
                         cpu_id, tp_entry,
                         unsafe { (*a).pid() }, pa,
-                        tp_exit, unsafe { (*b).pid() }, pb);
+                        tp_exit, unsafe { (*b).pid() }, pb,
+                        cs_pid,
+                        if cs_entry != tp_entry { "pre" } else { "in" },
+                        epc_ctx);
                 }
             }
 
