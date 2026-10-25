@@ -821,9 +821,14 @@ pub fn rust_main_tail() -> ! {
             );
         }
 
-        // Initialize persistent kernel log (write kmsg to /var/log/kmsg on disk)
-        // Disabled: ext4 write operations corrupt filesystem
-        // printk::persistent_log_init();
+        // Persistent kernel log — /var/log/kmsg, the console tail on
+        // disk (klogd kernel thread, 30 s flush period, 256 KiB cap;
+        // zero cost on the printk hot path — the flusher walks the
+        // ring, the write path no longer does). Covers what pstore
+        // cannot: a power loss (RAM contents die) and early-boot
+        // deaths before pstore arms. The disk is NEVER written from
+        // the panic path — the panic may be the storage stack itself.
+        printk::persistent_log_init();
 
         // Initialize network devices
         {
@@ -1682,8 +1687,11 @@ fn panic(info: &PanicInfo) -> ! {
         }
     }
 
-    // Flush persistent log
-    crate::printk::persistent_log_flush();
+    // NOTE: no disk flush here. The old persistent_log_flush call is
+    // gone by design: the panic may BE the storage stack, and a sync
+    // that waits on a dead virtio queue would never reach the panic=
+    // timeout. pstore (RAM) owns the panic record; /var/log/kmsg owns
+    // steady state with a 30 s staleness bound.
 
     // pstore-lite: write the record (staged sink + console tail) into
     // the reserved RAM region — after the report, before the `panic=`
