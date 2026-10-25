@@ -964,10 +964,10 @@ never the harness.
 produce is delivered to the boundary of what the kernel can host:
 Reference side measured and final; Rux side blocked behind an identified
 pair — a deterministic IMAGE defect (usb_host DDK
-libusb_pnp_manager.z.so, present under the reference kernel too) whose restart-storm
-cost eats the boot window only because Rux's boot-window cost is
-~100x the reference boot, plus the fd-32 EBADF kernel bug (fixed on the
-launcher lane, pending merge) — with the full run-day apparatus
+libusb_pnp_manager.z.so, present under the reference kernel too) whose
+restart-storm cost eats the boot window only because Rux's boot-window
+cost is ~100x the reference boot, plus the fd-32 EBADF kernel bug (fixed
+on the launcher lane, pending merge) — with the full run-day apparatus
 staged and validated so the Rux column is one confirmed-milestone
 away. The performance findings that ARE measurable pre-UI (tick fix,
 census invariants, cost-center ranking, syscall tables) are final in
