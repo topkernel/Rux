@@ -3587,11 +3587,140 @@ pub fn sys_userfaultfd(_args: SyscallArgs) -> i64 {
 
 /// sys_kcmp - Compare two processes
 ///
-/// Minimal stub (U2): returns 0 ("identical"). Nothing in Rux shares
-/// kernel objects that kcmp could distinguish; callers (systemd's
-/// PID reuse detection, ltrace) treat 0 as "same resource" and proceed.
-pub fn sys_kcmp(_args: SyscallArgs) -> i64 {
-    0
+/// Compares the kernel-resource identity the two tasks hold for `type`:
+/// 0 = "identical resource", 1/2 = "differs" (ordering by address, the
+/// same information kernel kcmp exposes; callers must treat any nonzero
+/// as "different"). Error contracts (man 2 kcmp, kernel/kcmp.c):
+/// ESRCH unknown pid, EINVAL type out of [0, KCMP_TYPES), EBADF bad fd
+/// for KCMP_FILE, EPERM caller may not ptrace either task.
+///
+/// Identity sources mirror clone's sharing decisions, so the answers
+/// track what the task actually shares:
+/// - KCMP_VM      address_space Arc (shared exactly on CLONE_VM)
+/// - KCMP_FILES   fdtable Arc       (shared exactly on CLONE_FILES)
+/// - KCMP_FS      fs Arc            (shared exactly on CLONE_FS)
+/// - KCMP_SIGHAND signal Arc        (shared exactly on CLONE_SIGHAND)
+/// - KCMP_FILE    the Arc<File> behind each fd (dup/fork keep the same
+///                file object — Linux compares struct file pointers)
+/// - KCMP_IO / KCMP_SYSVSEM: no task in Rux owns an io_context or a
+///                private sem-undo list, so both sides hold the same
+///                (absent) resource — Linux's NULL==NULL case, 0.
+/// - KCMP_EPOLL:  not backed by a kernel-wide epoll registry — ENOSYS.
+/// - KCMP_CAN:    no socketcan domain — ENOSYS.
+pub fn sys_kcmp(args: SyscallArgs) -> i64 {
+    use alloc::sync::Arc;
+
+    // uapi/linux/kcmp.h enum kcmp_type — FILE is 0 (an LTP build with a
+    // shifted enum made kcmp01's KCMP_FILE calls compare ADDRESS SPACES
+    // instead: fork'd children differ there, so every cross-process
+    // same-file case returned 1).
+    const KCMP_FILE: i64 = 0;
+    const KCMP_VM: i64 = 1;
+    const KCMP_FILES: i64 = 2;
+    const KCMP_FS: i64 = 3;
+    const KCMP_SIGHAND: i64 = 4;
+    const KCMP_IO: i64 = 5;
+    const KCMP_SYSVSEM: i64 = 6;
+    const KCMP_EPOLL: i64 = 7;
+    const KCMP_TYPES: i64 = 8;
+
+    let pid1 = args[0] as u32;
+    let pid2 = args[1] as u32;
+    // int in the ABI: the type is validated as SIGNED so -1/INT_MIN/INT_MAX
+    // all land in the EINVAL arm (kcmp02).
+    let ktype = args[2] as i64;
+    let idx1 = args[3] as usize;
+    let idx2 = args[4] as usize;
+
+    // Pid lookup first (kernel kcmp: ESRCH precedes type validation).
+    let (t1, t2) = match (
+        crate::process::find_task_by_pid(pid1),
+        crate::process::find_task_by_pid(pid2),
+    ) {
+        (Some(a), Some(b)) => (
+            a as *const crate::process::task::Task,
+            b as *const crate::process::task::Task,
+        ),
+        _ => return -(errno::ESRCH as i64),
+    };
+    let (t1, t2) = unsafe { (&*t1, &*t2) };
+
+    if ktype < 0 || ktype >= KCMP_TYPES {
+        return -(errno::EINVAL as i64);
+    }
+
+    // PTRACE_MODE_ATTACH_REALCREDS parity: the caller must be able to
+    // ptrace BOTH tasks. Rux has no capability sets per se; the root uid
+    // is the capability stand-in (every LTP kcmp case runs as root).
+    if let Some(cur) = crate::sched::current() {
+        let cur_euid = unsafe { (*cur).cred().euid };
+        if cur_euid != 0 && (cur_euid != t1.cred().euid || cur_euid != t2.cred().euid) {
+            return -(errno::EPERM as i64);
+        }
+    }
+
+    // Pointer ordering — kernel kcmp's (a<b)?1:(a>b)?2:0 over the two
+    // resource addresses.
+    fn cmp_usize(a: usize, b: usize) -> i64 {
+        if a == b {
+            0
+        } else if a < b {
+            1
+        } else {
+            2
+        }
+    }
+
+    match ktype {
+        KCMP_FILE => {
+            let f1 = t1.fdtable_arc().and_then(|ft| ft.get_file(idx1));
+            let f2 = t2.fdtable_arc().and_then(|ft| ft.get_file(idx2));
+            match (f1, f2) {
+                (Some(a), Some(b)) => {
+                    let (pa, pb) = (Arc::as_ptr(&a) as usize, Arc::as_ptr(&b) as usize);
+                    drop(a);
+                    drop(b);
+                    cmp_usize(pa, pb)
+                }
+                _ => -(errno::EBADF as i64),
+            }
+        }
+        KCMP_VM => {
+            let (a, b) = (t1.address_space_arc(), t2.address_space_arc());
+            match (a, b) {
+                (Some(x), Some(y)) => cmp_usize(Arc::as_ptr(&x) as usize, Arc::as_ptr(&y) as usize),
+                _ => 0, // both absent (kernel thread): Linux NULL==NULL
+            }
+        }
+        KCMP_FILES => {
+            let (a, b) = (t1.fdtable_arc(), t2.fdtable_arc());
+            match (a, b) {
+                (Some(x), Some(y)) => cmp_usize(Arc::as_ptr(&x) as usize, Arc::as_ptr(&y) as usize),
+                _ => 0,
+            }
+        }
+        KCMP_FS => {
+            let (a, b) = (t1.fs_arc(), t2.fs_arc());
+            match (a, b) {
+                (Some(x), Some(y)) => cmp_usize(Arc::as_ptr(&x) as usize, Arc::as_ptr(&y) as usize),
+                _ => 0,
+            }
+        }
+        KCMP_SIGHAND => {
+            let (a, b) = (t1.signal_arc(), t2.signal_arc());
+            match (a, b) {
+                (Some(x), Some(y)) => cmp_usize(Arc::as_ptr(&x) as usize, Arc::as_ptr(&y) as usize),
+                _ => 0,
+            }
+        }
+        // No io_context / sem-undo ownership exists in Rux; both sides
+        // hold the same absent resource (kernel NULL==NULL → 0).
+        KCMP_IO | KCMP_SYSVSEM => 0,
+        // Would need the epoll interest list keyed by (epfd, file); no
+        // such registry exists yet. Untested by the LTP list in use.
+        KCMP_EPOLL => -(errno::ENOSYS as i64),
+        _ => -(errno::EINVAL as i64),
+    }
 }
 
 /// sys_finit_module - Load kernel module from file descriptor
