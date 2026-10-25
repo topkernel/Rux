@@ -1,0 +1,104 @@
+x=2810ms
+WW: fires=13079 late_max=2554ms pidmiss=0 rearm=0 wheel=0/2 hres_next=23ms
+WW2: si_runs=120 si_busy=21ms ticks=[0,0] vec=[0,120,0,0,0,0,0,0,120,0]
+WW3: grq=1 cfs=1 idle=0x0 nr=1 cpu0=(pid=3535 st=0x0 pc=2) cpu1=(pid=3534 st=0x0 pc=256)
+WW: wakes=2867829 picks=2853310 avg_run=0ms stranded=4 strand_max=2810ms
+WW: fires=13089 late_max=2554ms pidmiss=0 rearm=0 wheel=0/2 hres_next=34ms
+WW2: si_runs=119 si_busy=22ms ticks=[0,0] vec=[0,119,0,0,0,0,0,0,119,0]
+WW3: grq=1 cfs=1 idle=0x0 nr=1 cpu0=(pid=3535 st=0x0 pc=2) cpu1=(pid=3534 st=0x0 pc=256)
+WW: wakes=2900988 picks=2886469 avg_run=0ms stranded=4 strand_max=2810ms
+
+PREEMPT-LEAK cpu=0000000000000001 pid=0000000000000dce pc=0000000000010000 held_nonzero_for=00000000000000c8jiffies rip=ffffffff801d2906 pctick=0000000000000000
+
+PREEMPT-LEAK cpu=0000000000000001 pid=0000000000000dce pc=0000000000010000 held_nonzero_for=00000000000000dcjiffies rip=ffffffff801d2906 pctick=0000000000000000
+WW: fires=13099 late_max=2554ms pidmiss=0 rearm=0 wheel=0/2 hres_next=44ms
+WW2: si_runs=120 si_busy=20ms ticks=[0,0] vec=[0,120,0,0,0,0,0,0,120,0]
+WW3: grq=1 cfs=1 idle=0x0 nr=1 cpu0=(pid=3535 st=0x0 pc=2) cpu1=(pid=3534 st=0x0 pc=256)
+WW: wakes=2932849 picks=2918330 avg_run=0ms stranded=4 strand_max=2810ms
+
+PREEMPT-LEAK cpu=0000000000000001 pid=0000000000000dce pc=0000000000010000 held_nonzero_for=00000000000000f0jiffies rip=ffffffff801d2906 pctick=0000000000000000
+
+PREEMPT-LEAK cpu=0000000000000001 pid=0000000000000dce pc=0000000000010000 held_nonzero_for=0000000000000104jiffies rip=ffffffff801d2906 pctick=0000000000000000
+
+PREEMPT-LEAK cpu=0000000000000001 pid=0000000000000dce pc=0000000000010000 held_nonzero_for=0000000000000118jiffies rip=ffffffff801d2906 pctick=0000000000000000
+
+PREEMPT-LEAK cpu=0000000000000001 pid=0000000000000dce pc=0000000000010000 held_nonzero_for=000000000000012cjiffies rip=ffffffff801d2906 pctick=0000000000000000
+
+PREEMPT-LEAK cpu=0000000000000001 pid=0000000000000dce pc=0000000000010000 held_nonzero_for=0000000000000140jiffies rip=ffffffff801d2906 pctick=0000000000000000
+WW: fires=13109 late_max=2554ms pidmiss=0 rearm=0 wheel=0/2 hres_next=58ms
+WW2: si_runs=119 si_busy=27ms ticks=[0,0] vec=[0,119,0,0,0,0,0,0,119,0]
+WW3: grq=1 cfs=1 idle=0x0 nr=1 cpu0=(pid=3535 st=0x0 pc=2) cpu1=(pid=3534 st=0x0 pc=256)
+WW: wakes=2958712 picks=2944193 avg_run=0ms stranded=4 strand_max=2810ms
+
+PREEMPT-LEAK cpu=0000000000000001 pid=0000000000000dce pc=0000000000010000 held_nonzero_for=0000000000000154jiffies rip=ffffffff801d2906 pctick=0000000000000000
+WW: fires=13119 late_max=2554ms pidmiss=0 rearm=0 wheel=0/2 hres_next=74ms
+WW2: si_runs=119 si_busy=48ms ticks=[0,0] vec=[0,119,0,0,0,0,0,0,119,0]
+WW3: grq=1 cfs=1 idle=0x0 nr=1 cpu0=(pid=3535 st=0x0 pc=2) cpu1=(pid=3534 st=0x0 pc=256)
+WW: wakes=2979338 picks=2964819 avg_run=0ms stranded=4 strand_max=2810ms
+WW: fires=13129 late_max=2554ms pidmiss=0 rearm=0 wheel=0/2 hres_next=87ms
+WW2: si_runs=119 si_busy=31ms ticks=[0,0] vec=[0,119,0,0,0,0,0,0,119,0]
+WW3: grq=1 cfs=1 idle=0x0 nr=1 cpu0=(pid=3535 st=0x0 pc=2) cpu1=(pid=3534 st=0x0 pc=256)
+WW: wakes=3005135 picks=2990616 avg_run=0ms stranded=4 strand_max=2810ms
+
+PREEMPT-LEAK cpu=0000000000000001 pid=0000000000000dce pc=0000000000010000 held_nonzero_for=00000000000000c8jiffies rip=ffffffff801d2906 pctick=0000000000000000
+
+PREEMPT-LEAK cpu=0000000000000001 pid=0000000000000dce pc=0000000000010000 held_nonzero_for=00000000000000dcjiffies rip=ffffffff801d2906 pctick=0000000000000000
+
+PREEMPT-LEAK cpu=0000000000000001 pid=0000000000000dce pc=0000000000010000 held_nonzero_for=00000000000000f0jiffies rip=ffffffff801d2906 pctick=0000000000000000
+
+PREEMPT-LEAK cpu=0000000000000001 pid=0000000000000dce pc=0000000000010000 held_nonzero_for=0000000000000104jiffies rip=ffffffff801d2906 pctick=0000000000000000
+
+PREEMPT-LEAK cpu=0000000000000001 pid=0000000000000dce pc=0000000000010000 held_nonzero_for=0000000000000118jiffies rip=ffffffff801d2906 pctick=0000000000000000
+WW: fires=13138 late_max=2554ms pidmiss=0 rearm=0 wheel=0/2 hres_next=2ms
+WW2: si_runs=116 si_busy=30ms ticks=[0,0] vec=[0,116,0,0,0,0,0,0,116,0]
+WW3: grq=1 cfs=1 idle=0x0 nr=1 cpu0=(pid=3535 st=0x0 pc=2) cpu1=(pid=3534 st=0x0 pc=256)
+WW: wakes=3032904 picks=3018385 avg_run=0ms stranded=4 strand_max=2810ms
+
+PREEMPT-LEAK cpu=0000000000000001 pid=0000000000000dce pc=0000000000010000 held_nonzero_for=000000000000012cjiffies rip=ffffffff801d2906 pctick=0000000000000000
+
+PREEMPT-LEAK cpu=0000000000000001 pid=0000000000000dce pc=0000000000010000 held_nonzero_for=0000000000000140jiffies rip=ffffffff801d2906 pctick=0000000000000000
+
+PREEMPT-LEAK cpu=0000000000000001 pid=0000000000000dce pc=0000000000010000 held_nonzero_for=0000000000000154jiffies rip=ffffffff801d2906 pctick=0000000000000000
+
+PREEMPT-LEAK cpu=0000000000000001 pid=0000000000000dce pc=0000000000010000 held_nonzero_for=0000000000000168jiffies rip=ffffffff801d2906 pctick=0000000000000000
+
+PREEMPT-LEAK cpu=0000000000000001 pid=0000000000000dce pc=0000000000010000 held_nonzero_for=000000000000017cjiffies rip=ffffffff801d2906 pctick=0000000000000000
+WW: fires=13148 late_max=2554ms pidmiss=0 rearm=0 wheel=0/2 hres_next=17ms
+WW2: si_runs=118 si_busy=22ms ticks=[0,0] vec=[0,118,0,0,0,0,0,0,118,0]
+WW3: grq=1 cfs=1 idle=0x0 nr=1 cpu0=(pid=3535 st=0x0 pc=2) cpu1=(pid=3534 st=0x0 pc=256)
+WW: wakes=3064765 picks=3050246 avg_run=0ms stranded=4 strand_max=2810ms
+
+PREEMPT-LEAK cpu=0000000000000001 pid=0000000000000dce pc=0000000000010000 held_nonzero_for=0000000000000190jiffies rip=ffffffff801d2906 pctick=0000000000000000
+WW: fires=13158 late_max=2554ms pidmiss=0 rearm=0 wheel=0/2 hres_next=27ms
+WW2: si_runs=119 si_busy=20ms ticks=[0,0] vec=[0,119,0,0,0,0,0,0,119,0]
+WW3: grq=1 cfs=1 idle=0x0 nr=1 cpu0=(pid=3535 st=0x0 pc=2) cpu1=(pid=3534 st=0x0 pc=256)
+WW: wakes=3097365 picks=3082846 avg_run=0ms stranded=4 strand_max=2810ms
+WW: fires=13168 late_max=2554ms pidmiss=0 rearm=0 wheel=0/2 hres_next=39ms
+WW2: si_runs=120 si_busy=20ms ticks=[0,0] vec=[0,120,0,0,0,0,0,0,120,0]
+WW3: grq=1 cfs=1 idle=0x0 nr=1 cpu0=(pid=3535 st=0x0 pc=2) cpu1=(pid=3534 st=0x0 pc=256)
+WW: wakes=3128933 picks=3114414 avg_run=0ms stranded=4 strand_max=2810ms
+WW: fires=13178 late_max=2554ms pidmiss=0 rearm=0 wheel=0/2 hres_next=49ms
+WW2: si_runs=118 si_busy=21ms ticks=[0,0] vec=[0,118,0,0,0,0,0,0,118,0]
+WW3: grq=1 cfs=1 idle=0x0 nr=1 cpu0=(pid=3535 st=0x0 pc=2) cpu1=(pid=3534 st=0x0 pc=256)
+WW: wakes=3159237 picks=3144718 avg_run=0ms stranded=4 strand_max=2810ms
+
+PREEMPT-LEAK cpu=0000000000000001 pid=0000000000000dce pc=0000000000010000 held_nonzero_for=00000000000000c8jiffies rip=ffffffff801d2906 pctick=0000000000000000
+
+PREEMPT-LEAK cpu=0000000000000001 pid=0000000000000dce pc=0000000000010000 held_nonzero_for=00000000000000dcjiffies rip=ffffffff801d2906 pctick=0000000000000000
+
+PREEMPT-LEAK cpu=0000000000000001 pid=0000000000000dce pc=0000000000010000 held_nonzero_for=00000000000000f0jiffies rip=ffffffff801d2906 pctick=0000000000000000
+WW: fires=13188 late_max=2554ms pidmiss=0 rearm=0 wheel=0/2 hres_next=62ms
+WW2: si_runs=119 si_busy=25ms ticks=[0,0] vec=[0,119,0,0,0,0,0,0,119,0]
+WW3: grq=1 cfs=1 idle=0x0 nr=1 cpu0=(pid=3535 st=0x0 pc=2) cpu1=(pid=3534 st=0x0 pc=256)
+WW: wakes=3187445 picks=3172926 avg_run=0ms stranded=4 strand_max=2810ms
+WW: fires=13198 late_max=2554ms pidmiss=0 rearm=0 wheel=0/2 hres_next=73ms
+WW2: si_runs=120 si_busy=22ms ticks=[0,0] vec=[0,120,0,0,0,0,0,0,120,0]
+WW3: grq=1 cfs=1 idle=0x0 nr=1 cpu0=(pid=3535 st=0x0 pc=2) cpu1=(pid=3534 st=0x0 pc=256)
+WW: wakes=3218258 picks=3203739 avg_run=0ms stranded=4 strand_max=2810ms
+WW: fires=13208 late_max=2554ms pidmiss=0 rearm=0 wheel=0/2 hres_next=84ms
+WW2: si_runs=119 si_busy=21ms ticks=[0,0] vec=[0,119,0,0,0,0,0,0,119,0]
+WW3: grq=1 cfs=1 idle=0x0 nr=1 cpu0=(pid=3535 st=0x0 pc=2) cpu1=(pid=3534 st=0x0 pc=256)
+WW: wakes=3251134 picks=3236615 avg_run=0ms stranded=4 strand_max=2810ms
+KILLTRACE: pid=1(sweep) -> pid=3529(oom01) tgid=3529 ppid=1 sig=9 origin=0x0
+KILLTRACE: pid=1(sweep) -> pid=3529(oom01) tgid=3529 ppid=1 sig=9 origin=0x0
+SIGDEATH: pid=3529 tgid=3529 comm=Ok("oom01") sig=9 ppid=1 si_pid=1 si_code=0x0
