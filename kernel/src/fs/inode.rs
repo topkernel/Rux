@@ -443,6 +443,33 @@ impl Inode {
         }
     }
 
+    /// Append data at the current end of the file, atomically with
+    /// respect to other appenders.
+    ///
+    /// Linux takes the O_APPEND position under the inode lock
+    /// (generic_write_checks), so two writers on DIFFERENT open file
+    /// descriptions cannot pick the same offset. The generic path read
+    /// the size and then wrote without holding one lock across both, so
+    /// two appenders could land on the same offset and the second write
+    /// would overwrite the first.
+    ///
+    /// Returns the offset the data was written at and the byte count.
+    pub fn append_data(&self, buf: &[u8]) -> (u64, usize) {
+        let mut data_guard = self.data.lock();
+        if data_guard.is_none() {
+            *data_guard = Some(FileBuffer::new());
+        }
+        let Some(ref mut data) = *data_guard else {
+            return (0, 0);
+        };
+        let end = data.len();
+        let written = data.write(end, buf);
+        // Update file size
+        let new_size = data.len() as u64;
+        self.size.store(new_size, Ordering::Release);
+        (end as u64, written)
+    }
+
     /// Write file data
     pub fn write_data(&self, offset: usize, buf: &[u8]) -> usize {
         let mut data_guard = self.data.lock();

@@ -1122,20 +1122,25 @@ fn reg_file_write(file: &File, buf: &[u8]) -> isize {
         // (Also against reg_file_read now — see the io_lock field note.)
         let _write_guard = file.io_lock.guard();
 
-        // O_APPEND: position at end of file for every write
-        let offset = if file.flags.load(Ordering::Acquire) & FileFlags::O_APPEND != 0 {
-            let end = inode.get_size();
-            file.set_pos(end);
-            end as usize
+        // O_APPEND: the offset is taken under the inode's data lock, so
+        // two appenders on different open descriptions cannot pick the
+        // same offset (Linux: generic_write_checks takes the position
+        // under the inode lock). The ext4 path does the same under the
+        // filesystem lock; this is the in-memory-file twin.
+        let bytes_written = if file.flags.load(Ordering::Acquire) & FileFlags::O_APPEND != 0 {
+            let (end, written) = inode.append_data(buf);
+            file.set_pos(end + written as u64);
+            written
         } else {
-            file.get_pos() as usize
+            let offset = file.get_pos() as usize;
+
+            // Write data to inode (buf.length handles automatically)
+            let written = inode.write_data(offset, buf);
+
+            // Update file position
+            file.set_pos((offset + written) as u64);
+            written
         };
-
-        // Write data to inode (buf.length handles automatically)
-        let bytes_written = inode.write_data(offset, buf);
-
-        // Update file position
-        file.set_pos((offset + bytes_written) as u64);
 
         bytes_written as isize
     } else {
