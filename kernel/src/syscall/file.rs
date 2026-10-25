@@ -4552,10 +4552,48 @@ pub fn sys_vhangup(_args: SyscallArgs) -> i64 {
 
 /// sys_sync_file_range - Sync file range to disk (NR 84)
 pub fn sys_sync_file_range(args: SyscallArgs) -> i64 {
-    let _fd = args[0] as i32;
-    let _offset = args[1] as i64;
-    let _nbytes = args[2] as i64;
-    let _flags = args[3] as u32;
+    let fd = args[0] as i32;
+    let offset = args[1] as i64;
+    let nbytes = args[2] as i64;
+    let flags = args[3] as u32;
+
+    // Argument validation (sync_file_range(2)): offset and nbytes must be
+    // non-negative and flags a subset of WAIT_BEFORE|WRITE|WAIT_AFTER
+    // (LTP sync_file_range01: nbytes=-1 and flags=8 EINVAL). flags==0 is
+    // LEGAL (a no-op sync) — rejecting it made the test's availability
+    // probe sync_file_range(-1,0,0,0) see EINVAL and TCONF the test.
+    const SYNC_FILE_RANGE_WAIT_BEFORE: u32 = 1;
+    const SYNC_FILE_RANGE_WRITE: u32 = 2;
+    const SYNC_FILE_RANGE_WAIT_AFTER: u32 = 4;
+    let valid = SYNC_FILE_RANGE_WAIT_BEFORE
+        | SYNC_FILE_RANGE_WRITE
+        | SYNC_FILE_RANGE_WAIT_AFTER;
+    if offset < 0 || nbytes < 0 || flags & !valid != 0 {
+        return -(errno::EINVAL as i64);
+    }
+
+    // fd must exist and be open for writing (EBADF otherwise).
+    // SAFETY: get_file_fd returns a valid Arc<File> or None.
+    let file = match unsafe { crate::fs::get_file_fd(fd as usize) } {
+        Some(f) => f,
+        None => return -(errno::EBADF as i64),
+    };
+    if file.flags().is_readonly() {
+        return -(errno::EBADF as i64);
+    }
+    // Only regular files are syncable: a character device (/dev/null in
+    // LTP sync_file_range01) or a pipe fails ESPIPE (sync_file_range(2);
+    // the check is on the file type, not on seekability of the fd).
+    // SAFETY: inode is written once at open; reading it here races no
+    // writer.
+    let is_regular = unsafe { &*file.inode.get() }
+        .as_ref()
+        .map(|inode| inode.mode.is_regular_file())
+        .unwrap_or(false);
+    if !is_regular {
+        return -(errno::ESPIPE as i64);
+    }
+
     // Simplified: sync all buffers
     let _ = crate::fs::bio::sync_buffers();
     0
@@ -5370,6 +5408,15 @@ pub fn sys_renameat2(args: SyscallArgs) -> i64 {
         return -(errno::EINVAL as i64);
     }
     if flags & RENAME_WHITEOUT != 0 {
+        return -(errno::EINVAL as i64);
+    }
+    // RENAME_NOREPLACE and RENAME_EXCHANGE are mutually exclusive by
+    // definition (NOREPLACE requires the destination to be absent,
+    // EXCHANGE requires it to exist). The combination check PRECEDES any
+    // path lookup (renameat2(2) EINVAL; LTP renameat201 case 5 runs it
+    // with a source that an earlier case already moved away — ENOENT
+    // there is the wrong errno).
+    if flags & RENAME_NOREPLACE != 0 && flags & RENAME_EXCHANGE != 0 {
         return -(errno::EINVAL as i64);
     }
 
