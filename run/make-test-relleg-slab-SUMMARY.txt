@@ -1,0 +1,6 @@
+
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+
+WW: wakes=12 picks=3 avg_run=1631ms stranded=3 strand_max=1670ms
+
+qemu-system-riscv64: terminating on signal 15 from pid 467564 (/bin/bash)

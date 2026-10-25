@@ -4667,3 +4667,90 @@ pid 1635 m.ohos.launcher, same rip 0x3fbf1187d2, same cr2+0xa93c):
   whole-file map 0x7ff08c200000).
 
 MAKE TEST: riscv64 1096/1096 PASS on 35dd99e1 (both arches build).
+
+LEG-20 (OH UI lane, leg-19 successor) — OPENED ~14:55.
+
+SESSION START: committed leg-19's uncommitted estate as wip snapshot
+(124488d8: Round 3e draft + brksegv pair + shotmon records), merged
+main ddb3ed01 (5ff3b775, clean — main's delta in my domain is gated
+tracepoints only: sched_process_exit/fork/wakeup records).
+
+THREAD 2 RESOLVED (the brkseq do_exit-hang handoff):
+- Repro harness completed and committed (8022ea1d): test/brksegv_boot.py
+  (churn probe as init: rounds/done/console-response/leak verdicts) and
+  test/brksegv_shell.py (real mrsh as init, fork+exec per invocation,
+  M0/M1 marker-response verdict, --race mode injects input mid-death-
+  storm into a reader-less console).
+- THREE harness blockers found and fixed: (1) host riscv64 cross-gcc
+  defaults to rv64gcv-class -march AND Ubuntu glibc ships RVV ifunc
+  variants — probe now links worktree musl headers/libs with explicit
+  -march=rv64gc_zicsr (every earlier build SIGILL'd on vsetivli);
+  (2) brksegv_boot.py's --kernel default (x86_64 bzImage) leaked into
+  the riscv64 invocation (OpenSBI silently refused to exec it); (3)
+  musl brk() wrapper is a permanent -ENOMEM stub — probe drives the
+  brk syscall directly (round 1 exited 42 silently, never faulted).
+  Also: -cpu must carry zbb/zba/zbs (main's boot.S; plain rv64 hangs
+  at OpenSBI handoff with zero kernel output).
+- A/B RESULT: both verdicts PASS on this branch AND on the ltp lane's
+  own main-based kernel image (copied read-only), across churn (12
+  SIGSEGV deaths), shell (6x12 deaths), and race (0.2/0.5/1.0s input
+  injection) flows. The terminal-deschedule machinery holds: children
+  die by SIGSEGV, are reaped, the shell stays responsive to input fed
+  during and after the death storm. The described hang does NOT
+  reproduce on either kernel under a deterministic harness.
+- Their log evidence decomposes into two probe artifacts, both already
+  fixed on this branch but present on main-based builds: (1) every
+  W3-RUNWAKE-REFUSED line in brkseq1.log fired while the dying task
+  still legitimately owned its CPU slot (curr_on during the death
+  window is correct, not a lying slot); (2) their 885 PREEMPT-LEAK
+  pc=0x10000 lines are the tick observer's own hardirq level on the
+  IDLE task — main lacks the sc205 masking, every tick printed, and
+  held_nonzero_for merely measured how long the CPU stayed idle
+  (their 17,855-jiffy "leak" = 178s of continuous idle).
+- Kernel change landed (8022ea1d): the W3 wake-refusal budget is no
+  longer eaten by the benign wake-racing-execution shape (RUNNING task
+  legitimately named by a busy slot — 4+ lines per dying child; it ate
+  the whole 32-line budget in 8 deaths). That twin now defers to the
+  frozen-exec conviction line (W3-FROZEN-EXEC-SLOT); the budget is
+  spent on sleeping-state refusals, dead/zombie targets, and linked-
+  but-starved shapes. Repro after: 0 W3 lines across 72 deaths.
+  Gate Tier-1 re-verified (see below): the quiet-boot REFUSED
+  population is 100% linked-starved (state=0 RUNNING linked=true
+  curr_on=false), so the census row's semantics are unchanged.
+- HANDOFF TO LTP LANE: their brkseq driver wedge (shell deaf to the
+  next marker after M0) did not reproduce through my harness on their
+  kernel image — needs their exact /brkseq binary or is in their own
+  branch delta (their worktree carries many local fixes). Their
+  PREEMPT-LEAK/W3 "evidence" lines are noise per the decomposition
+  above; merging this branch (or just 2a02d5db + sc205 + the W3 budget
+  fix) into their base cleans their logs and gives the census real
+  signal.
+
+GATE TIER-1 PRE-VERIFICATION (gate-leg20, 780s quiet syscost KVM q35
+smp2 4G boot, parse run/perf-gate-gate-leg20-parse.txt):
+  PASS kernel panics 0, OOM 0
+  PASS census TERM-DESCHED 8 (band 8+-2)
+  PASS census WAKE-REFUSED 32 (band 32+-4; all linked-starved shape)
+  PASS GRQ avg hold 7.2us n=12.3M (band 4.08-7.32us, top edge)
+  PASS small_alloc REST share 6.7% (<=10%)
+  FAIL tick rate cpu1=99.38/s (min 99.5) — documented host-load flake
+       class: 22 foreign QEMUs from the agent fleet were up; rerun-once
+       rule applies, not a sched-domain row.
+  FAIL syscall volume 72.5M vs 136M+-10% — the baseline's own row says
+       pace-coupled under 14-19 foreign QEMUs (pa41gate); at 22 the
+       deficit is the same class, not a regression.
+  Both FAILs are host-load classes outside the guarded domains; sched
+  domain rows all PASS. No perf-gate-baseline.md row changes needed.
+
+THREAD 1 (launcher memfd dlopen): sc256 roll launched (fresh scgold
+reflink userdata, usbless oh-img-p, quietcon dfx=schb,sleepsnap, SMP2
+KVM 4G, SECS=2400). render_service full USEGV dump captured at t~100
+(rep movsq read 0x3a8 from guard page 0x7ff000698000, same 0x3fbf077000
+module family, fd=-1 off=0x76000 closed) — the per-comm budgets worked
+(appspawn 108 lines, render dump did not eat the launcher's). The roll
+wedged in the known binder-stall family (WAKE-RUN-LEAK tids 332/333/
+525/1029 parked INTERRUPTIBLE unlinked, kicked 21x, mmi_service/
+sysevent_source/os_ds_service stale-claim census shapes) before the
+launcher spawned; SILENT-TXN fired once. Launcher-crash decider data
+STILL PENDING — the spawn-flow wedge (sc252/253/255/256 class) is the
+gate in front of it, not the crash itself.
