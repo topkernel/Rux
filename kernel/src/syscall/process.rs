@@ -429,7 +429,9 @@ pub fn sys_clone(args: SyscallArgs) -> i64 {
                                 }
                             }
                         }
-                        pid as i64
+                        // Parent-namespace view, same as the main return.
+                        let parent_ns = crate::sched::current().and_then(|t| unsafe { (*t).ns_pid.clone() });
+                        crate::process::ns::translate_sender_pid_ns(pid, parent_ns.as_ref()) as i64
                     }
                     Err(e) => {
                         crate::pr_warn!(
@@ -445,8 +447,15 @@ pub fn sys_clone(args: SyscallArgs) -> i64 {
         }
     }
 
+    // fork returns the child's pid in the PARENT's pid namespace (a
+    // container task's fork must hand back the ns-local pid — LTP pidns17
+    // forks 10 children in-namespace and waitpid()s them by that value;
+    // the global pid made every wait fail ECHILD).
     match do_clone(clone_args) {
-        Ok(pid) => pid as i64,
+        Ok(pid) => {
+            let parent_ns = crate::sched::current().and_then(|t| unsafe { (*t).ns_pid.clone() });
+            crate::process::ns::translate_sender_pid_ns(pid, parent_ns.as_ref()) as i64
+        }
         Err(e) => {
             // sc116 probe (see the reserve-gate comment): any other
             // clone failure is equally invisible to the taskdump — the
@@ -1486,11 +1495,28 @@ pub fn sys_kill(args: SyscallArgs) -> i64 {
         // kill(-getpgrp(), SIGKILL) must SIGKILL the caller itself so
         // the parent observes WIFSIGNALED/WTERMSIG==SIGKILL).
         let skip_self_group = pid == -1;
+        // Broadcast scope is the CALLER'S PID NAMESPACE (reference
+        // group_send_sig_info iterates the namespace's task list): a
+        // container's kill(-1) reaches only container members — hitting
+        // ancestor-namespace tasks killed the LTP runner itself (pidns10
+        // expected ESRCH from an empty namespace; pidns17's parent died
+        // by the container's own SIGUSR1 broadcast).
+        let caller_ns = crate::sched::current().and_then(|t| unsafe { (*t).ns_pid.clone() });
         // pid_hash_for_each_task covers sleeping tasks too (unlike the
         // per-CPU for_each_task which only sees running/idle tasks) — and
         // every THREAD is its own hash entry, so each live member of a
         // multithreaded group receives its own copy.
         crate::process::pid_hash::pid_hash_for_each_task(|task| unsafe {
+            if let Some(ref ns) = caller_ns {
+                let same_ns = (*task)
+                    .ns_pid
+                    .as_ref()
+                    .map(|a| alloc::sync::Arc::ptr_eq(a, ns))
+                    .unwrap_or(false);
+                if !same_ns {
+                    return;
+                }
+            }
             let tp = (*task).pid();
             if tp == 1 {
                 return; // kill(-1) skips init
@@ -5720,7 +5746,11 @@ pub fn sys_clone3(args: SyscallArgs) -> i64 {
     }
 
     match do_clone(clone_args) {
-        Ok(pid) => pid as i64,
+        Ok(pid) => {
+            // Parent-namespace view, same as sys_clone's return.
+            let parent_ns = crate::sched::current().and_then(|t| unsafe { (*t).ns_pid.clone() });
+            crate::process::ns::translate_sender_pid_ns(pid, parent_ns.as_ref()) as i64
+        }
         Err(e) => e as i64,
     }
 }
