@@ -4996,3 +4996,54 @@ OFFLINE FORENSICS (sc260 log + image binaries, no roll needed) — THE
 - CAUTION for the lane: sc217's lucky boot had getOsAccountLocalId
   (a different call) succeed; that does NOT prove the foreground map
   was populated.
+
+LEG-23 ROLL-1 (sc261) + THE ACCOUNT-CHAIN VERDICT.
+
+ACCOUNT CHAIN: RESOLVED (no kernel bug; the handoff's premise was a
+misread of the error storm):
+- The 88 "QueryForegroundUserId ... 4194349" lines are DISTRIBUTEDDATA's
+  retry loop (not the launcher), and they all sit in a ~20s window
+  (t~60-80s): accountmgr starts t~55s, publishes SA:200, init runs, and
+  ActivateDefaultOsAccount (PrepareForDefaultAccount ->
+  SendMsgForAccountActivate -> SetParameter("bootevent.account.ready",
+  "true")) completes at t~80s — sc260 line 46738 PCTL-SEND pid=891
+  key=bootevent.account.ready true, AFTER the last error (46364).
+  From then on the launcher's own queries succeed: "LauncherAbility-
+  Manager --> getOsAccountLocalId localId 100" repeats to the log tail.
+  The 4194349 storm is the pre-activation window (foreground set at
+  inner+0x168 empty -> IsOsAccountForeground miss 0x400026 -> fallback
+  miss -> 0x40002d). POSIX-clean: replies land, values are domain
+  errors. sc212's t~1083s "OnStateChanged state 7" was the same
+  activation, just slower.
+- IPC transport itself healthy for this chain: tx 0x4d send+reply fast.
+  The "unanswered" SAREG code=4 IAccount sends need the oneway bit to
+  adjudicate (trace events now on main can do it next roll if it
+  matters).
+
+THE REAL KILLER OF sc258/259/260 (found in all three tails): KERNEL
+PANIC inside the user-SEGV forensics — "PANIC: attempt to subtract
+with overflow, trap.rs:2340". The leg-21 rbp-locals probe computed
+regs.rbp - 0x58 on a fault frame with rbp=0xb (pid 526's adjudicated
+ld-musl rep-movsq crash). The debug overflow check fired inside the
+page-fault handler and took the kernel down. leg-22's "4 shutdown-tail
+OS_IPC worker crashes (same family as sc258/259 tails)" WAS this
+panic trigger — every roll in this family died at the first tail
+crash, so nothing past it was ever observed.
+FIX (1d5a6744): rbp window only opens for canonical user rbp
+(wrapping_sub), stack/rbp word walks checked_add, r15+0x118 shape
+compare wrapping_add. Probe output formats unchanged. The fault is
+now delivered to the task instead of killing the kernel.
+
+sc261 ROLLING (launched 07:07, KVM SMP2 4G, oh-img-p PATCHED system +
+fresh scgold reflink userdata, loglevel=7 dfx=schb,sleepsnap, SECS=
+2700, shotmon on): goals — (1) survive the tail-crash family for the
+first time, (2) launcher window past t~30min: OnForeground /
+launcher.ready / screenshot, (3) sleepsnap+STALLWATCH census of the
+launcher park (x86_64 dispatch here: 113=clock_gettime, 98=futex,
+66=writev; "nr66=-11 a0=3" = launcher writev(fd3) EAGAIN — hilog
+socket full, consistent with dead/flow-controlled hilogd).
+NOTE: first sc261 launch used oh-boot-w.sh which points at the
+SHARED unpatched oh-img — killed at ~30s, userdata reflink recreated
+fresh before the real launch (oh-boot-usbless.sh = the oh-img-p
+variant; 30s of churn from the aborted run never touched the new
+reflink).
