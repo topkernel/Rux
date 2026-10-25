@@ -461,6 +461,15 @@ struct BufBlock {
     /// async slot is released when the receiver frees the buffer (Linux
     /// buffer->transaction). Sync buffers rely on the reply path instead.
     txn: Option<Arc<BinderTxn>>,
+    /// sc243 (leg-17): the sync txn this buffer carried has been
+    /// REPLIED — the request data is protocol-dead and only the
+    /// receiver's contractual BC_FREE_BUFFER remains. The OHOS
+    /// cc54-family services never issue that BC_FREE, so their allocs
+    /// filled with delivered-but-unfreed blocks (sc243 census: 329K
+    /// live BinderTxn arcs, every one pinned by such a block; at the
+    /// launcher floor this is ~210MB of the 831MB heap). On alloc
+    /// pressure these blocks are reclaimed (see alloc_new_buf).
+    reply_done: bool,
 }
 
 struct BinderAlloc {
@@ -471,6 +480,10 @@ struct BinderAlloc {
     user_base: u64,
     blocks: Vec<BufBlock>,
     free_async_space: usize,
+    /// sc243 (leg-17): jiffies of the last stale-async sweep (see
+    /// sweep_stale_async) — rate-limits the O(blocks) scan to one per
+    /// second per allocator.
+    last_sweep_j: u32,
 }
 
 impl BinderAlloc {
@@ -525,6 +538,7 @@ impl BinderAlloc {
                 offsets_size,
                 extra_size,
                 txn: None,
+                reply_done: false,
             });
             self.blocks.sort_by_key(|b| b.off);
             self.free_async_space -= need;
@@ -558,6 +572,7 @@ impl BinderAlloc {
                     offsets_size: 0,
                     extra_size: 0,
                     txn: None,
+                    reply_done: false,
                 };
                 b.len = need;
                 self.blocks.push(rest);
@@ -592,7 +607,12 @@ impl BinderAlloc {
         if was_async {
             self.free_async_space += Self::block_need(ds, os, es);
         }
-        // Coalesce (blocks stay sorted by offset).
+        self.coalesce();
+        Some(txn)
+    }
+
+    /// Merge adjacent free blocks (blocks stay sorted by offset).
+    fn coalesce(&mut self) {
         let mut i = 0;
         while i + 1 < self.blocks.len() {
             if self.blocks[i].free
@@ -605,7 +625,6 @@ impl BinderAlloc {
                 i += 1;
             }
         }
-        Some(txn)
     }
 }
 
@@ -624,6 +643,89 @@ enum Work {
     /// BINDER_WORK_CLEAR_DEATH_NOTIFICATION: deliver
     /// BR_CLEAR_DEATH_NOTIFICATION_DONE (cookie).
     ClearDeathDone { cookie: u64 },
+}
+
+
+/// sc243 (leg-17): reclaim DELIVERED-but-never-freed binder buffers of a
+/// receiver that went silent. The cc54-family OHOS services leak their
+/// BC_FREE_BUFFER duty (render_service RW-leak victims): every oneway
+/// txn's buffer stays `!free` pinning its Arc, the node's async slot
+/// never hands onward, and parked txns pile on node.async_todo — the
+/// sc243 census measured 329K live BinderTxn arcs at the 10-minute park
+/// (at the launcher floor this family is ~210MB of the 831MB heap:
+/// c256 = the txns, c1024+o9-o12 = the Vec<BufBlock> arrays).
+///
+/// The sweep (rate-limited to 1/s per allocator, called on the buffer
+/// alloc path) frees blocks whose txn was delivered (pick_j != 0) more
+/// than 30s ago, or whose sync txn was replied (reply_done), and hands
+/// the async slot onward exactly like BC_FREE_BUFFER's drain — which
+/// also UNWEDGES nodes parked behind a receiver that stopped freeing.
+/// A late userspace BC_FREE for an already-reclaimed block is a no-op
+/// (free_buf's position check fails benignly).
+///
+/// SAFETY: caller holds WORLD. Returns the number of blocks reclaimed.
+unsafe fn sweep_stale_async(world: &World, target: &Arc<BinderProc>) -> usize {
+    const GRACE_J: u32 = (crate::config::KERNEL_HZ as u32).saturating_mul(30);
+    let min_gap: u32 = (crate::config::KERNEL_HZ as u32).max(1);
+    let now = crate::drivers::timer::get_jiffies() as u32;
+    let Some(alloc) = pm(world, target).im().alloc.as_mut() else {
+        return 0;
+    };
+    if alloc.last_sweep_j != 0 && now.wrapping_sub(alloc.last_sweep_j) < min_gap {
+        return 0;
+    }
+    alloc.last_sweep_j = now;
+    let mut reclaimed = 0usize;
+    let mut slot_holders: Vec<Arc<BinderTxn>> = Vec::new();
+    for b in alloc.blocks.iter_mut() {
+        if b.free {
+            continue;
+        }
+        let stale = match b.txn.as_ref() {
+            Some(t) => {
+                // SAFETY: WORLD held; pick_j is written under WORLD.
+                let pj = unsafe { *t.pick_j.get() };
+                pj != 0 && now.wrapping_sub(pj) > GRACE_J
+            }
+            None => b.reply_done,
+        };
+        if !stale {
+            continue;
+        }
+        if let Some(t) = b.txn.take() {
+            if t.holds_async_slot() {
+                slot_holders.push(t);
+            }
+        }
+        if b.async_block {
+            alloc.free_async_space +=
+                BinderAlloc::block_need(b.data_size, b.offsets_size, b.extra_size);
+        }
+        b.free = true;
+        b.allow_user_free = false;
+        b.reply_done = false;
+        reclaimed += 1;
+    }
+    for t in slot_holders {
+        if let Some(node) = &t.target_node {
+            let ns = node.st();
+            // SAFETY: WORLD held (set_holds_async_slot requires it).
+            match ns.async_todo.pop_front() {
+                Some(h) => {
+                    unsafe { h.set_holds_async_slot(true) };
+                    let tp = h.to_proc.clone();
+                    pm(world, &tp).im().todo.push_back(Work::Transaction(h));
+                }
+                None => {
+                    ns.has_async_transaction = false;
+                }
+            }
+        }
+    }
+    if reclaimed > 0 {
+        alloc.coalesce();
+    }
+    reclaimed
 }
 
 // sc140 (Session Q): registry of forked appspawn child pids (written by
@@ -719,6 +821,15 @@ struct BinderTxn {
     /// Target-user address of the NUL-terminated secctx string in the sg
     /// area (0: the target node did not request a security context).
     security_ctx: u64,
+    /// sc208 (launcher leg 13, C-line cross-finding: SAMgr SendRequest
+    /// ~30 s per call once the clock was fixed): lifecycle stamps for the
+    /// SLOW-TXN probe. enq_j = jiffies at BC_TRANSACTION queue time;
+    /// pick_j = jiffies at BR_TRANSACTION delivery (server pickup), 0
+    /// until then. The reply pop computes queue-vs-exec and prints the
+    /// split for any sync txn over 5 s — where the 30 s goes (server not
+    /// picking up vs handler running long) names the next chain link.
+    enq_j: u32,
+    pick_j: core::cell::UnsafeCell<u32>,
 }
 
 impl BinderTxn {
@@ -1265,6 +1376,9 @@ pub fn binder_open(file: &crate::fs::File, ctx: BinderCtx) -> i32 {
         let mut w = world_lock();
         w.as_mut().unwrap().procs.push(proc.clone());
     }
+    // dfx=schb: record the new proc for the heartbeat's SC-PROC drain
+    // (no-op unless the switch is armed; never any I/O on this path).
+    crate::dfx::schb::note_proc_open(pid);
     crate::pr_info!("binder: pid {} opened the device (proc {})", pid, id);
     // sc157: device-open visibility at warn level (boot loglevel drops
     // the info line). Decides in one boot whether forked appspawn
@@ -1975,6 +2089,7 @@ pub fn binder_mmap_handler(
         user_base: vaddr as u64,
         blocks: Vec::new(),
         free_async_space: size / 2,
+        last_sweep_j: 0,
     };
     alloc.blocks.push(BufBlock {
         off: 0,
@@ -1986,6 +2101,7 @@ pub fn binder_mmap_handler(
         offsets_size: 0,
         extra_size: 0,
         txn: None,
+        reply_done: false,
     });
     {
         let mut w = world_lock();
@@ -2478,6 +2594,19 @@ pub fn sleep_snapshot() {
     if !crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SleepSnap) {
         return;
     }
+    // sc207 (launcher leg 13): NEVER print inside the for_each_task
+    // callback - it runs under the pid-hash bucket lock, and one printk
+    // per S-state task held each bucket across console port-IO for ~a
+    // second in total. A timer tick landing on that CPU mid-walk runs
+    // stallwatch_tick's own for_each_task at irq-exit softirq time,
+    // which then spins on the very bucket the interrupted walker holds
+    // (self-deadlock: the releaser is the interrupted task); the other
+    // CPU's scan spins on the same bucket and the machine hard-freezes
+    // with the serial cut mid-line (sc207: both vCPUs 100%, RIP in
+    // pid_hash::lock_bucket from stallwatch_tick). Collect lines here,
+    // print ONCE after the walk with every bucket released.
+    let mut out = alloc::string::String::new();
+    use core::fmt::Write as _;
     crate::sched::for_each_task(|task| {
         // SAFETY: callback runs under the pid-hash bucket lock (same
         // contract as hung_task's check_tasks); reads are confined to
@@ -2515,7 +2644,8 @@ pub fn sleep_snapshot() {
             let name = core::str::from_utf8(&comm[..])
                 .unwrap_or("")
                 .trim_end_matches('\0');
-            crate::pr_info!(
+            let _ = writeln!(
+                out,
                 "sleepsnap: {} tid {} state={:#x} sys={} rip={:#x} a0={:#x} a1={:#x}",
                 name,
                 tk.pid(),
@@ -2526,6 +2656,25 @@ pub fn sleep_snapshot() {
                 a1
             );        }
     });
+    // Emit with every pid-hash bucket released (see the sc207 note
+    // above). One printk for the whole snapshot: ring records have a
+    // length cap, so chunk on line boundaries at a size well under it.
+    if !out.is_empty() {
+        let mut rest = out.as_str();
+        while !rest.is_empty() {
+            let mut cut = rest.len().min(1024);
+            if cut < rest.len() {
+                // Extend to the next newline so lines stay whole.
+                match rest[cut..].find('\n') {
+                    Some(nl) => cut += nl,
+                    None => cut = rest.len(),
+                }
+            }
+            let (chunk, tail) = rest.split_at(cut);
+            crate::pr_info!("{}", chunk);
+            rest = tail;
+        }
+    }
 }
 
 /// World-wide search for queued/stacked transactions SENT by (pid, tid) —
@@ -2741,6 +2890,96 @@ fn thread_census_of(t: &Arc<BinderThread>) -> alloc::string::String {
         t.tid, total, woken, state, verdict
     );
     s
+}
+
+/// dfx=schb heartbeat counts (sc-series quiet-quiet soft-wedge hunt):
+/// cheap per-beat binder summary — live proc count, threads parked in
+/// the blocking binder read, and waiters older than 15s (the rekick
+/// threshold; a healthy boot parks readers for 1-3s at most). Read-only
+/// under WORLD; no formatting, no I/O — all output happens in schbd.
+pub fn schb_beat() -> (usize, usize, usize) {
+    let now = crate::drivers::timer::get_jiffies();
+    let hz = crate::config::KERNEL_HZ as u64;
+    let mut procs = 0usize;
+    let mut waiters = 0usize;
+    let mut waiters15 = 0usize;
+    let w = world_lock();
+    // SAFETY: read-only traversal under WORLD (pm() casts only reach
+    // each live proc's thread list).
+    unsafe {
+        if let Some(world) = w.as_ref() {
+            for p in &world.procs {
+                procs += 1;
+                let proc = pm(world, p);
+                for t in &proc.im().threads {
+                    let since = t.read_wait_since.load(core::sync::atomic::Ordering::Acquire);
+                    if since == 0 {
+                        continue;
+                    }
+                    waiters += 1;
+                    if hz != 0 && now.saturating_sub(since) >= 15 * hz {
+                        waiters15 += 1;
+                    }
+                }
+            }
+        }
+    }
+    (procs, waiters, waiters15)
+}
+
+/// dfx=schb wedge census: EVERY read-wait binder thread regardless of
+/// age. stall_report only prints waiters older than STALL_SECS (120s);
+/// the census fires at pid-plateau+60s where the wedge's waiters are
+/// younger. Formats under WORLD (no I/O); the caller emits the lines via
+/// ConsoleWriter after the guard drops (the sc89 stall_report
+/// discipline). No stall_reported latching, no rekick side effects.
+pub fn schb_waiter_census(out: &mut alloc::string::String) {
+    use core::fmt::Write as _;
+    let now = crate::drivers::timer::get_jiffies();
+    let hz = crate::config::KERNEL_HZ as u64;
+    if hz == 0 {
+        return;
+    }
+    let w = world_lock();
+    // SAFETY: read-only traversal under WORLD.
+    unsafe {
+        if let Some(world) = w.as_ref() {
+            for p in &world.procs {
+                let proc = pm(world, p);
+                for t in &proc.im().threads {
+                    let since = t.read_wait_since.load(core::sync::atomic::Ordering::Acquire);
+                    if since == 0 {
+                        continue;
+                    }
+                    let age = now.saturating_sub(since) / hz;
+                    let th = t.st();
+                    let depth = th.txn_stack.len();
+                    // Same discrimination as stall_report's stall lines:
+                    // SERVER-OWING (parked in read owing a reply — the
+                    // death-loop terminal shape) vs CLIENT-WAIT (waiting
+                    // for its own reply).
+                    let (shape, owed) = match th.txn_stack.last() {
+                        Some(txn) if txn.to_tid() == Some(t.tid) => {
+                            ("SERVER-OWING", txn.to_proc.pid)
+                        }
+                        Some(txn) => ("CLIENT-WAIT", txn.to_proc.pid),
+                        None => ("NO-TXN", 0),
+                    };
+                    let _ = writeln!(
+                        out,
+                        "SC-WEDGE-BW pid={} tid={} age={}s depth={} shape={} owed_pid={} kicks={}",
+                        proc.pid,
+                        t.tid,
+                        age,
+                        depth,
+                        shape,
+                        owed,
+                        t.rekick_count.load(core::sync::atomic::Ordering::Relaxed)
+                    );
+                }
+            }
+        }
+    }
 }
 
 pub fn stall_report() {
@@ -4249,6 +4488,48 @@ fn binder_transaction(
                     return;
                 }
                 let t = thread.st().txn_stack.pop().unwrap();
+                // sc208 SLOW-TXN probe (C-line: SAMgr SendRequest ~30 s
+                // per call with the fixed clock): split the sync-txn
+                // lifecycle into QUEUE (enq -> server pickup) and EXEC
+                // (pickup -> reply) and print both for anything over 5 s.
+                // Direct console (quietcon boots drop pr_warn pre-ring at
+                // loglevel 3), rate-capped to one line per 2 s. Printed
+                // from inside the WORLD guard like the surrounding
+                // pr_info!s on this path (single short line, bounded).
+                {
+                    let now = crate::drivers::timer::get_jiffies() as u32;
+                    let total = now.wrapping_sub(t.enq_j);
+                    if total >= 500 {
+                        static LAST: core::sync::atomic::AtomicU32 =
+                            core::sync::atomic::AtomicU32::new(0);
+                        use core::sync::atomic::Ordering::Relaxed;
+                        let last = LAST.load(Relaxed);
+                        if now.wrapping_sub(last) >= 200
+                            && LAST
+                                .compare_exchange(last, now, Relaxed, Relaxed)
+                                .is_ok()
+                        {
+                            let pick = unsafe { *t.pick_j.get() };
+                            let q = if pick != 0 { pick.wrapping_sub(t.enq_j) } else { 0 };
+                            let x = if pick != 0 { now.wrapping_sub(pick) } else { total };
+                            let mut w = crate::dfx::backtrace::ConsoleWriter::new();
+                            use core::fmt::Write as _;
+                            let _ = writeln!(
+                                w,
+                                "SLOW-TXN txn{} code {} from pid {} tid {} to pid {} tid {}: total {} ms (queue {} ms, exec {} ms)",
+                                t.id,
+                                t.code,
+                                t.from_proc.as_ref().map(|p| p.pid).unwrap_or(0),
+                                t.from_tid.unwrap_or(0),
+                                t.to_proc.pid,
+                                thread.tid,
+                                total * 10,
+                                q * 10,
+                                x * 10
+                            );
+                        }
+                    }
+                }
                 let (Some(from_proc), Some(from_tid)) = (t.from_proc.clone(), t.from_tid) else {
                     *err_cmd = BR_FAILED_REPLY;
                     crate::pr_info!("binder: BC_REPLY on oneway");
@@ -4372,21 +4653,57 @@ fn binder_transaction(
             let _ = is_async;
 
             sg_total += secctx_space;
+            // sc243 (leg-17): rate-limited stale-buffer reclaim BEFORE
+            // the allocation — see sweep_stale_async. Keeps a silent
+            // receiver's never-freed buffers from pinning txn arcs and
+            // wedging the node's async slot forever. The handoff txns
+            // land on their proc todo; no wake is issued (the receivers
+            // this heals are silent by definition — they pick the todo
+            // up on their next read).
+            let swept = unsafe { sweep_stale_async(world, tp) };
+            if swept > 0 {
+                crate::pr_info!(
+                    "binder: reclaimed {} stale buffer(s) of pid {}",
+                    swept,
+                    tp.pid
+                );
+            }
             let off = pm(world, tp)
                 .im()
                 .alloc
                 .as_mut()
                 .unwrap()
                 .new_buf(data_size, offsets_size, sg_total, is_async);
-            let Some(off) = off else {
-                *err_cmd = BR_FAILED_REPLY;
-                crate::pr_info!(
-                    "binder: buffer alloc failed (need {}+{}+{})",
-                    align8(data_size),
-                    align8(offsets_size),
-                    align8(sg_size)
-                );
-                return;
+            let off = match off {
+                Some(o) => o,
+                None => {
+                    // One forced retry: the 1/s rate stamp may have
+                    // skipped the sweep above on this exact call.
+                    if let Some(a) = pm(world, tp).im().alloc.as_mut() {
+                        a.last_sweep_j = 0;
+                    }
+                    let swept2 = unsafe { sweep_stale_async(world, tp) };
+                    match (swept2 > 0).then(|| {
+                        pm(world, tp)
+                            .im()
+                            .alloc
+                            .as_mut()
+                            .unwrap()
+                            .new_buf(data_size, offsets_size, sg_total, is_async)
+                    }) {
+                        Some(Some(o)) => o,
+                        _ => {
+                            *err_cmd = BR_FAILED_REPLY;
+                            crate::pr_info!(
+                                "binder: buffer alloc failed (need {}+{}+{})",
+                                align8(data_size),
+                                align8(offsets_size),
+                                align8(sg_size)
+                            );
+                            return;
+                        }
+                    }
+                }
             };
             block_off = off;
 
@@ -4686,6 +5003,8 @@ fn binder_transaction(
         offsets_size,
         buffer_off: block_off,
         security_ctx,
+        enq_j: crate::drivers::timer::get_jiffies() as u32,
+        pick_j: core::cell::UnsafeCell::new(0),
     });
 
     // sc155/156 (Session R): SA-table mutation tracer. Session Q closed
@@ -4709,6 +5028,14 @@ fn binder_transaction(
         const SAMGR_REMOVE: u32 = 4;
         const SAMGR_ADD_ONDEMAND: u32 = 10;
         const SAMGR_UNLOAD: u32 = 21;
+        // sc209 (leg 14): also trace LOAD (code 7). sc208's 15 s
+        // SLOW-TXN storm was 22/24 foundation->samgr code-7 loads with
+        // exec exactly 15000/30000/89390 ms — samgr's
+        // StartDynamicSystemProcess waiting out the param client's 15 s
+        // set-ack timeout for the "installs" on-demand process (SA 511)
+        // that init never spawns. The parcel head (header + token + said)
+        // names the target of every load offline.
+        const SAMGR_LOAD: u32 = 7;
         // The samgr interface token starts UTF-16 "oh" at parcel offset
         // 12 (after the 8-byte OH parcel header + u32 string length).
         static SAREG_SAMGR_PID: core::sync::atomic::AtomicU32 =
@@ -4717,7 +5044,10 @@ fn binder_transaction(
             core::sync::atomic::AtomicUsize::new(0);
         let mut is_samgr_req = false;
         if !reply
-            && matches!(tr.code, SAMGR_ADD | SAMGR_REMOVE | SAMGR_ADD_ONDEMAND | SAMGR_UNLOAD)
+            && matches!(
+                tr.code,
+                SAMGR_ADD | SAMGR_REMOVE | SAMGR_ADD_ONDEMAND | SAMGR_UNLOAD | SAMGR_LOAD
+            )
         {
             let mut hdr = [0u8; 16];
             let ok = tr.data_buffer != 0
@@ -4740,7 +5070,11 @@ fn binder_transaction(
                 .map(|t| {
                     matches!(
                         t.code,
-                        SAMGR_ADD | SAMGR_REMOVE | SAMGR_ADD_ONDEMAND | SAMGR_UNLOAD
+                        SAMGR_ADD
+                            | SAMGR_REMOVE
+                            | SAMGR_ADD_ONDEMAND
+                            | SAMGR_UNLOAD
+                            | SAMGR_LOAD
                     )
                 })
                 .unwrap_or(false)
@@ -4753,7 +5087,9 @@ fn binder_transaction(
                     .map(|c| core::str::from_utf8(c).unwrap_or(""))
                     .unwrap_or("")
                     .trim_end_matches('\0');
-                let mut pb = [0u8; 64];
+                // sc209: 64 -> 96 bytes so LOAD parcels' SA id survives
+                // past the (longer) samgr interface token.
+                let mut pb = [0u8; 96];
                 let mut pb_ok = false;
                 if tr.data_buffer != 0 {
                     pb_ok = unsafe {
@@ -5009,6 +5345,20 @@ fn binder_transaction(
                     // The original transaction is finished: unpin its node.
                     if let Some(orig) = &in_reply_to {
                         unpin_txn_node(world, orig);
+                        // sc243 (leg-17): the replied txn's request
+                        // buffer in the replier's alloc is
+                        // protocol-dead — mark it reclaimable for
+                        // sweep_stale_async (the receiver's BC_FREE may
+                        // never come; cc54 family).
+                        if let Some(a) = pm(world, &orig.to_proc).im().alloc.as_mut() {
+                            if let Some(b) = a
+                                .blocks
+                                .iter_mut()
+                                .find(|b| b.off == orig.buffer_off && !b.free)
+                            {
+                                b.reply_done = true;
+                            }
+                        }
                     }
                     wakes.push(tproc.clone());
                     wakes.push(proc.clone());
@@ -5901,6 +6251,11 @@ fn binder_thread_read(
                             if !is_reply && t.flags & TF_ONE_WAY == 0 {
                                 // The receiver stacks it for its BC_REPLY.
                                 t.set_to_tid(thread.tid);
+                                // sc208 SLOW-TXN probe: server-pickup stamp.
+                                unsafe {
+                                    *t.pick_j.get() =
+                                        crate::drivers::timer::get_jiffies() as u32;
+                                }
                                 let recv_id = t.id as u32;
                                 thread.st().txn_stack.push(t);
                                 // sc79 ROOT CAUSE (the impossible shape):

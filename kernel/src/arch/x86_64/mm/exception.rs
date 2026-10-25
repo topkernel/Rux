@@ -132,6 +132,19 @@ fn no_context(regs: &mut PtRegs, _fault_addr: VirtAddr) -> MmFaultResult {
 /// # Returns
 /// Handling result
 pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
+    // /proc/vmstat pgfault, and the per-task counter behind
+    // /proc/[pid]/stat field 10 (minflt). Linux counts only faults
+    // taken in user mode.
+    crate::mm::vmstat::note_fault();
+    if regs.user_mode() {
+        if let Some(task) = crate::sched::current() {
+            // SAFETY: current() returned a live task pointer; this
+            // only touches a per-task atomic counter.
+            unsafe {
+                (*task).min_flt.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            }
+        }
+    }
     let cr2 = crate::arch::cpu::read_cr2();
     let fault_addr = VirtAddr::new(cr2);
 
@@ -241,9 +254,15 @@ pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
                         // the exception-table fixup, init's param reads
                         // all fail, and the boot collapses into the
                         // LoopEvent spin (the ww-long2/long3 F4 collapse).
-                        match unsafe {
+                        // Leg-15 pace: j0 captured at entry, counter ticked
+                        // after return (no lock held — handle_cow_fault's
+                        // pte_lock is released by then).
+                        let cow_j0 = crate::drivers::timer::get_jiffies();
+                        let cow_res = unsafe {
                             handle_cow_fault(addr_space, addr_space.root_ppn(), fault_addr)
-                        } {
+                        };
+                        crate::dfx::schb::note_cow(cow_j0);
+                        match cow_res {
                             crate::arch::mm::CowFaultResult::Resolved
                             | crate::arch::mm::CowFaultResult::Retry => {
                                 return MmFaultResult::Handled;
@@ -332,7 +351,12 @@ pub fn do_page_fault(regs: &mut PtRegs, access_type: u32) -> MmFaultResult {
         }
         MmFaultResult::CowPending => {
             // COW page, try copy-on-write
-            match unsafe { handle_cow_fault(addr_space, addr_space.root_ppn(), fault_addr) } {
+            // Leg-15 pace: j0 at entry, tick after return (pte_lock released).
+            let cow_j0 = crate::drivers::timer::get_jiffies();
+            let cow_res =
+                unsafe { handle_cow_fault(addr_space, addr_space.root_ppn(), fault_addr) };
+            crate::dfx::schb::note_cow(cow_j0);
+            match cow_res {
                 crate::arch::mm::CowFaultResult::Resolved => {
                     MmFaultResult::Handled
                 }

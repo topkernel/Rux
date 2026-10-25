@@ -23,12 +23,24 @@ pub fn test_config() {
     test_assert_eq!(MAX_TASKS, 256, "MAX_TASKS == 256");
 
     // Test 4: Memory sizes
-    // Kernel heap grew 32MB -> 128MB -> 512MB (distro-scale userspace,
-    // then the OH/GNOME service set); kernel stacks doubled again
-    // (64KB -> 128KB) after the r19 stack fix.
-    test_assert_eq!(KERNEL_HEAP_SIZE, 536870912, "KERNEL_HEAP_SIZE == 512MB");
+    // Kernel heap grew 32MB -> 128MB -> 512MB -> 1024MB (distro-scale
+    // userspace, then the OH/GNOME service set, then the OH sandbox
+    // workload); kernel stacks doubled again (64KB -> 128KB) after the
+    // r19 stack fix. The unit-test suite runs on riscv64 only (run.sh
+    // test mode hardcodes qemu-system-riscv64), and build.rs clamps
+    // kernel_heap_size to 128MB on riscv64 (Kernel.toml's 1024MB is
+    // the x86_64 value; a 1GB heap overruns the riscv64 memory map —
+    // merge gate 2026-10-19), so the runtime constant here is always
+    // the clamped 128MB, never the raw Kernel.toml value.
+    test_assert_eq!(KERNEL_HEAP_SIZE, 134217728, "KERNEL_HEAP_SIZE == 128MB (riscv64-clamped)");
     test_assert_eq!(PHYS_MEMORY_SIZE, 2147483648, "PHYS_MEMORY_SIZE == 2GB");
     test_assert_eq!(USER_STACK_SIZE, 8388608, "USER_STACK_SIZE == 8MB");
+    // kernel_stack_size is arch-gated since leg-17: 128KB base for
+    // riscv64/unmeasured arches (fee7774f: the 80KB slot overflowed on
+    // the riscv64 test kernel), 80KB packed-slab slots on x86_64.
+    #[cfg(target_arch = "x86_64")]
+    test_assert_eq!(KERNEL_STACK_SIZE, 81920, "KERNEL_STACK_SIZE == 80KB (x86_64 packed slab)");
+    #[cfg(not(target_arch = "x86_64"))]
     test_assert_eq!(KERNEL_STACK_SIZE, 131072, "KERNEL_STACK_SIZE == 128KB");
 
     // Test 5: Scheduler
@@ -60,6 +72,6 @@ pub fn test_config() {
     test_assert_eq!(PIPE_BUFFER_SIZE, 16384, "PIPE_BUFFER_SIZE == 16384");
 
     // Test 12: Futex
-    test_assert_eq!(FUTEX_WAITER_POOL_SIZE, 256, "FUTEX_WAITER_POOL_SIZE == 256");
-    test_assert_eq!(FUTEX_HASH_SIZE, 64, "FUTEX_HASH_SIZE == 64");
+    test_assert_eq!(FUTEX_WAITER_POOL_SIZE, 8192, "FUTEX_WAITER_POOL_SIZE == 8192");
+    test_assert_eq!(FUTEX_HASH_SIZE, 512, "FUTEX_HASH_SIZE == 512");
 }

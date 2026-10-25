@@ -482,6 +482,7 @@ impl Ext4FileSystem {
 
     /// Read inode
     pub fn read_inode(&self, ino: u32) -> Result<inode::Ext4Inode, i32> {
+        crate::dfx::fsw::note_read_inode();
         if ino == 0 {
             return Err(errno::Errno::InvalidArgument.as_neg_i32());
         }
@@ -564,6 +565,7 @@ impl Ext4FileSystem {
         unsafe {
             // Traverse directory's data blocks
             let blocks = dir.get_data_blocks(self)?;
+            crate::dfx::fsw::note_dir_lookup(blocks.len());
 
             for block in blocks.iter() {
                 if *block == 0 {
@@ -626,6 +628,7 @@ impl Ext4FileSystem {
 
             // Traverse directory's data blocks
             let blocks = dir.get_data_blocks(self)?;
+            crate::dfx::fsw::note_list_dir();
 
             for block in blocks.iter() {
                 if *block == 0 {
@@ -2514,6 +2517,7 @@ impl Ext4BigLock {
     /// Acquire (sleep on contention, recursive per task).
     pub fn lock_fair(&'static self) -> Ext4BigGuard {
         let pid = crate::process::current_pid();
+        crate::dfx::fsw::note_biglock();
 
         // Adaptive: a short spin first covers the common case of a holder
         // that is on-CPU and about to release (boot-time short sections
@@ -2540,6 +2544,7 @@ impl Ext4BigLock {
         // can still take its ticks and release us.
         let can_sleep = crate::sched::current().is_some()
             && crate::interrupt::preempt::preempt_count() == 0;
+        crate::dfx::fsw::note_biglock_contend();
         let cur = match crate::sched::current() {
             Some(t) if can_sleep => t,
             _ => {

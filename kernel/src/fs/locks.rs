@@ -44,6 +44,98 @@ use crate::fs::inode::Inode;
 use crate::process::wait::WaitQueueHead;
 use crate::sync::spinlock::Spinlock;
 
+/// One held lock, as /proc/locks reports it.
+#[derive(Clone, Copy)]
+pub struct LockSnapshot {
+    /// 0 = POSIX record lock, 1 = flock(2) lock.
+    pub class: u8,
+    /// The owner's pid (0 for an OFD lock — it has no process owner).
+    pub pid: u32,
+    /// The inode the lock covers.
+    pub ino: u64,
+    /// The first byte of the locked range.
+    pub start: u64,
+    /// The last byte of the locked range (u64::MAX = to EOF).
+    pub end: u64,
+    /// Write lock (exclusive) or read lock (shared).
+    pub exclusive: bool,
+    /// The lock is blocked, waiting for the holder to release it.
+    pub waiting: bool,
+}
+
+/// A snapshot of every held lock (flock and POSIX record locks), plus
+/// the blocked waiters.
+///
+/// The rows are copied out under their table locks so the caller never
+/// holds a lock table while printing.
+pub fn snapshot_locks() -> Vec<LockSnapshot> {
+    let mut out: Vec<LockSnapshot> = Vec::new();
+
+    let flock_rows: Vec<(u64, u32, bool)> = {
+        let table = FILE_LOCK_TABLE.lock();
+        table
+            .iter()
+            .map(|e| (e.key.1, e.owner_pid, e.exclusive))
+            .collect()
+    };
+    for (ino, pid, exclusive) in flock_rows {
+        out.push(LockSnapshot {
+            class: 1,
+            pid,
+            ino,
+            start: 0,
+            end: u64::MAX,
+            exclusive,
+            waiting: false,
+        });
+    }
+
+    let record_rows: Vec<(u64, u32, u64, u64, bool)> = {
+        let table = RECORD_LOCK_TABLE.lock();
+        table
+            .iter()
+            .map(|e| (e.key.1, e.owner.report_pid(), e.start, e.end, e.exclusive))
+            .collect()
+    };
+    for (ino, pid, start, end, exclusive) in record_rows {
+        out.push(LockSnapshot {
+            class: 0,
+            pid,
+            ino,
+            start,
+            end,
+            exclusive,
+            waiting: false,
+        });
+    }
+
+    // The waiters: a blocked lock request, which Linux marks with a
+    // "->" prefix.
+    let wait_rows: Vec<(u64, u32, u64, u64)> = {
+        let table = RECORD_WAIT_FOR.lock();
+        table
+            .iter()
+            .map(|(owner, key, start, end)| (key.1, owner.report_pid(), *start, *end))
+            .collect()
+    };
+    for (ino, pid, start, end) in wait_rows {
+        out.push(LockSnapshot {
+            class: 0,
+            pid,
+            ino,
+            start,
+            end,
+            // A waiter does not record whether it wants a shared or an
+            // exclusive lock; Linux shows the request's mode, and Rux
+            // keeps the holder's mode for the blocked row.
+            exclusive: true,
+            waiting: true,
+        });
+    }
+
+    out
+}
+
 /// Print every lock currently held (Linux sysrq 'd').
 ///
 /// Same tables a /proc/locks would report; printed to the console for

@@ -73,6 +73,8 @@ macro_rules! dfx_switch_table {
             WildWatch => "wildwatch",
             MetaWatch => "metawatch",
             ParkDump => "parkdump",
+            Schb => "schb",
+            KsProbe => "ksprobe",
         }
     };
 }
@@ -260,9 +262,28 @@ pub enum DfxSwitch {
     /// questions these probes answered (routing, park sites, fd
     /// identities) are settled; OFF unless a park needs re-diagnosing.
     ParkDump,
+    /// Soft-wedge heartbeat (sc-series quiet-quiet hunt, session R): the
+    /// `schbd` kthread prints one ~90-byte heartbeat line every 10s
+    /// straight to the UART (pid frontier, task/binder waiter counts),
+    /// names each new binder process, and on a 60s pid-flow plateau fires
+    /// a one-shot census (all binder read-waiters regardless of age,
+    /// runnable/D-state scheduler views, stall_report with the loglevel
+    /// briefly lifted, and the printk-ring tail that carries quietcon's
+    /// diverted userspace console stream). At loglevel=3 every pr_warn!
+    /// census record is dropped BEFORE the ring (printk_bytes pre-filter),
+    /// so the quiet-quiet soft-wedge leaves no kernel evidence by design;
+    /// this switch is the budgeted replacement. See dfx/schb.rs.
+    Schb,
+    /// Leg-16 kstack high-water probe: zero-every-fresh-kernel-stack at
+    /// alloc + scan-at-free + the SC-KREC record stash. Adds a ~size-of-
+    /// stack memset to EVERY spawn — the anatomy is banked and the
+    /// sc218-224 pattern (probe-on boots lost the mid-boot RS lottery
+    /// 3-of-4, leg-15's probe-off boots won 3/3) argues it modulates the
+    /// race, so verification rolls run dfx=schb WITHOUT this token.
+    KsProbe,
 }
 
-const SWITCH_COUNT: usize = 29;
+const SWITCH_COUNT: usize = 31;
 
 static SWITCHES: [AtomicBool; SWITCH_COUNT] = [const { AtomicBool::new(false) }; SWITCH_COUNT];
 
@@ -328,6 +349,8 @@ impl DfxSwitch {
             DfxSwitch::WildWatch => 26,
             DfxSwitch::MetaWatch => 27,
             DfxSwitch::ParkDump => 28,
+            DfxSwitch::Schb => 29,
+            DfxSwitch::KsProbe => 30,
         }
     }
 

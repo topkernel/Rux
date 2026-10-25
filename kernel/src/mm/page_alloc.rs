@@ -81,6 +81,9 @@ fn alloc_pages_inner(gfp_flags: GfpFlags, order: usize) -> usize {
                 if !zone.watermark_ok(order, WMARK_LOW) {
                     super::kswapd::wakeup_kswapd(order as i32);
                 }
+                // Leg-15 pace: one tick per slowpath entry (zone fastpath
+                // failed), dfx=schb-gated counter only.
+                crate::dfx::schb::note_slow();
 
                 // Synchronous direct reclaim (Linux __alloc_pages_slowpath):
                 // waking kswapd alone loses the race — the faulting task

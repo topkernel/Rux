@@ -177,11 +177,24 @@ pub fn dump_stack() {
     // Print current ra first
     let ra: u64 = caller_return_address();
 
-    let _ = w.write_str("Call trace:\n");
-    let _ = write!(w, "  [<{:016x}>] (current)\n", ra);
+    // Linux's classic frame format: the address, then the function name
+    // with the offset and the function size (Linux 4.x and still what
+    // most people read); "?" when the address resolves to no symbol.
+    let _ = w.write_str("Call Trace:\n");
+    let _ = write!(
+        w,
+        "  [<{:016x}>] {} (current)\n",
+        ra,
+        crate::dfx::ksyms::format_symbol(ra)
+    );
 
     walk_stack_trace(&mut |pc, _fp| {
-        let _ = write!(w, "  [<{:016x}>]\n", pc);
+        let _ = write!(
+            w,
+            "  [<{:016x}>] {}\n",
+            pc,
+            crate::dfx::ksyms::format_symbol(pc)
+        );
     });
 
     let _ = w.write_str("\n");

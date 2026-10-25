@@ -119,6 +119,50 @@ impl TimerAction {
     };
 }
 
+/// A pending timer, as /proc/timer_list reports it.
+#[derive(Clone, Copy)]
+pub struct TimerSnapshot {
+    /// The timer id (the map key).
+    pub id: u64,
+    /// The absolute expiry in time-CSR ticks (100ns each); 0 for a
+    /// jiffy-only timer.
+    pub expires_time: u64,
+    /// The expiry in jiffies.
+    pub expires: u64,
+    /// The action: target pid (0 = none).
+    pub pid: u32,
+    /// The action: signal number (0 = none).
+    pub signo: i32,
+    /// The action: repeat interval in jiffies (0 = one-shot).
+    pub interval_jiffies: u64,
+    /// The action: the pid to wake on expiry (0 = none).
+    pub wake_pid: u32,
+    /// The action: the timerfd address (0 = not a timerfd).
+    pub tfd_addr: u64,
+}
+
+/// A snapshot of the pending timers, copied out under the timer table
+/// locks so the caller never prints while they are held.
+pub fn snapshot_timers() -> alloc::vec::Vec<TimerSnapshot> {
+    let timers = TIMERS.lock();
+    let actions = ACTIONS.lock();
+    let mut out = alloc::vec::Vec::with_capacity(timers.len());
+    for (id, entry) in timers.iter() {
+        let action = actions.get(id).copied().unwrap_or(TimerAction::EMPTY);
+        out.push(TimerSnapshot {
+            id: *id,
+            expires_time: entry.expires_time,
+            expires: entry.expires,
+            pid: action.pid,
+            signo: action.signo,
+            interval_jiffies: action.interval_jiffies,
+            wake_pid: action.wake_pid,
+            tfd_addr: action.tfd_addr,
+        });
+    }
+    out
+}
+
 /// Active timers: timer_id → TimerEntry.
 static TIMERS: Spinlock<BTreeMap<u64, TimerEntry>> = Spinlock::new(BTreeMap::new());
 
@@ -757,6 +801,10 @@ pub fn timer_softirq_handler(_nr: usize) {
     // tick-mode accounting + kernel-rip histogram dump every 60 s from
     // this softirq. Own cmdline key — no dfx=switches.rs bit consumed.
     crate::dfx::syscost::tick(current);
+
+    // perf-audit line (cmdline `fsw=1`): ext4/bio cost-anatomy counters
+    // (F4 diagnosis), same 60 s cadence.
+    crate::dfx::fsw::tick(current);
 
     // dfx=monowatch: ~1 Hz timebase jump tripwire (backward motion or
     // multi-second spikes, clocksource named) — same printk discipline

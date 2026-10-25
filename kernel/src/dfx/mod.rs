@@ -35,6 +35,8 @@ pub mod hung_task;
 #[cfg(feature = "riscv64")]
 pub mod sbi_debug;
 pub mod switches;
+/// Runtime kernel symbol table (/proc/kallsyms, symbolized traces).
+pub mod ksyms;
 pub mod taskdump;
 pub mod memwatch;
 /// Full physical-accounting ledger (fake-OOM family): census + counters
@@ -62,6 +64,12 @@ pub mod metawatch;
 /// Whole-syscall cost table + tick-mode accounting + kernel-rip page
 /// histogram (perf-audit line, cmdline `syscost=1`); see dfx/syscost.rs.
 pub mod syscost;
+/// Soft-wedge heartbeat + one-shot wedge census (sc-series quiet-quiet
+/// hunt, cmdline `dfx=schb`); see dfx/schb.rs.
+pub mod schb;
+/// ext4/bio cost-anatomy counters (perf-audit line, cmdline `fsw=1`);
+/// see dfx/fsw.rs.
+pub mod fsw;
 
 /// Initialize the DFX subsystem.
 ///
@@ -79,6 +87,8 @@ pub fn init() {
     // Publish the instrument switches in debugfs so they can be armed
     // and disarmed while the system runs.
     register_debugfs_knobs();
+    // Publish the tracepoint control surface (tracefs).
+    crate::trace::files::register();
 }
 
 /// Register the DFX instrument switches in debugfs.

@@ -277,7 +277,14 @@ impl File {
                 return result;
             }
         }
-        -9  // EBADF
+        // Valid fd, readable mode, but the type carries no read op
+        // (epoll, binder, access_token, io_uring). The reference
+        // kernel's vfs_read returns EINVAL here, NOT EBADF — returning EBADF makes an
+        // OH event loop read its own epoll fd (pa38: launcher fd 32,
+        // 156K iterations) look like "fd closed", and the loop spins
+        // on it instead of taking its EINVAL error path. The O_WRONLY
+        // EBADF above is the ABI-correct direction check and stays.
+        -22 // EINVAL
     }
 
     /// Write file
@@ -297,7 +304,9 @@ impl File {
                 return result;
             }
         }
-        -9  // EBADF
+        // Valid fd, writable mode, but the type carries no write op —
+        // the reference kernel's vfs_write returns EINVAL here (see read()'s note).
+        -22 // EINVAL
     }
 
     /// Seek file position
@@ -345,7 +354,19 @@ impl File {
         let inode_opt = &*self.inode.get();
         let inode = match inode_opt.as_ref() {
             Some(i) => i,
-            None => return -9,
+            None => {
+                // No inode AND no read op anywhere = an unreadable type
+                // (epoll/binder/access_token/io_uring): EINVAL like
+                // read() above. A pipe/socket (read op, no inode) keeps
+                // the old -9 so the ESPIPE decision below stays reachable
+                // for whatever carries an inode-less seekable state.
+                if let Some(ops) = *self.ops.get() {
+                    if ops.read.is_none() && ops.read_at.is_none() {
+                        return -22; // EINVAL
+                    }
+                }
+                return -9;
+            }
         };
 
         // Disk-backed files (ext4) serve reads through their file ops;
@@ -588,7 +609,18 @@ impl FdTable {
             count: 0,
         });
         let g = parent.entry.lock_irqsave();
-        child_entry.fds = g.fds.clone();
+        // Leg-16 stack-depth fix (the 89,368B KSTACK-HW chain, comm
+        // 'usb_host'): the old `child_entry.fds = g.fds.clone()` array
+        // clone went through SpecArrayClone/try_from_fn's wrapper copies
+        // — several full [Option<Arc<File>>; 1024] temporaries on the
+        // kernel stack, and this runs in the FORK path (the deepest
+        // calling contexts in the boot). Element-wise clone-into-place
+        // moves nothing larger than one slot.
+        let mut i = 0usize;
+        while i < MAX_FDS {
+            child_entry.fds[i] = g.fds[i].clone();
+            i += 1;
+        }
         child_entry.cloexec_bits = g.cloexec_bits;
         child_entry.count = g.count;
         child_entry.next_fd = g.next_fd;

@@ -438,7 +438,17 @@ fn fill_page_cache_batch(
 ) {
     const MAX_BATCH: usize = MAX_BATCH_DRAIN; // requests per sleep/wake cycle
 
-    let mut completions: [IoCompletion; MAX_BATCH] = core::array::from_fn(|_| IoCompletion::new());
+    // Stack-depth fix (leg-16 KSTACK-HW attribution, resize2fs chain):
+    // `core::array::from_fn` in the DEBUG build materialises the array
+    // through try_from_fn's NeverShortCircuit/erased wrapper layers —
+    // several full copies of the [IoCompletion; 128] batch alive at once,
+    // a measured ~80KB kernel-stack span (the deepest chain in the boot,
+    // the reason KERNEL_STACK_SIZE is 128KB, and ~358MB of heap at the
+    // launcher floor). The inline-const repeat constructs each element
+    // in place: no intermediate array copies. Same values, one codegen
+    // change; verified by the KSTACK-HW probe on the next roll.
+    let mut completions: [IoCompletion; MAX_BATCH] =
+        [const { IoCompletion::new() }; MAX_BATCH];
     let mut bh_ptrs = [core::ptr::null_mut::<bio::BufferHead>(); MAX_BATCH];
     // Per submitted request: first file page index, first physical block,
     // and block count (skipped/sparse pages must not shift insert indices —

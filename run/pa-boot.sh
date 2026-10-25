@@ -60,6 +60,11 @@ ACCEL_ARGS="${ACCEL:-kvm}"
 python3 "$RUN/patstamp.py" "$SERIAL" "$STAMPED" "$((SECS + 120))" &
 echo $! > "$STAMPID"
 
+# `|| rc=$?` keeps `set -e` from aborting at the horizon kill: timeout
+# returns 124 when it TERMs QEMU at SECS, and the tail below (the .done
+# marker + stamper kill) must still run — pa30smoke caught the script
+# dying at the qemu line, leaving the stamper alive and no .done file.
+rc=0
 # shellcheck disable=SC2086
 timeout --signal=TERM --kill-after=10 "${SECS}s" qemu-system-x86_64 \
     -M q35 -accel "$ACCEL_ARGS" -cpu max -m 4096M -smp "$SMPN" \
@@ -74,8 +79,8 @@ timeout --signal=TERM --kill-after=10 "${SECS}s" qemu-system-x86_64 \
     $DISKS \
     -drive "if=none,id=ohd5,format=raw,file.locking=off,file=$UD" -device virtio-blk-pci,drive=ohd5 \
     -nic user,model=virtio-net-pci \
-    -device virtio-keyboard-pci -device virtio-tablet-pci
-rc=$?
+    -device virtio-keyboard-pci -device virtio-tablet-pci \
+    || rc=$?
 
 touch "$SERIAL.done"
 sleep 2

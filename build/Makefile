@@ -58,6 +58,8 @@ endif
 build:
 	@echo "Building Rux kernel (platform=$(PLATFORM))..."
 	@cd $(PROJECT_ROOT) && cargo build --target $(CARGO_TARGET) $(CARGO_FEATURE_FLAGS)
+	@cd $(PROJECT_ROOT) && python3 build/gen-ksyms.py $(KERNEL_BIN) $(CARGO_TARGET) kernel/src/dfx/ksyms_generated.rs
+	@cd $(PROJECT_ROOT) && cargo build --target $(CARGO_TARGET) $(CARGO_FEATURE_FLAGS)
 ifeq ($(PLATFORM),x86_64)
 	@cd $(PROJECT_ROOT) && python3 build/mkbzimage.py $(KERNEL_BIN) $(PROJECT_ROOT)/target/$(CARGO_TARGET)/debug/bzImage
 endif
@@ -65,6 +67,24 @@ endif
 # Release build (without debug logs, per active configuration)
 build-release:
 	@echo "Building Rux kernel (Release, platform=$(PLATFORM))..."
+	@cd $(PROJECT_ROOT) && cargo build --target $(CARGO_TARGET) $(CARGO_FEATURE_FLAGS) --release
+ifeq ($(PLATFORM),x86_64)
+	@cd $(PROJECT_ROOT) && python3 build/mkbzimage.py $(PROJECT_ROOT)/target/$(CARGO_TARGET)/release/rux $(PROJECT_ROOT)/target/$(CARGO_TARGET)/release/bzImage
+endif
+
+# Fully-optimized release build: same as build-release but forces the
+# strong profile (lto=true, codegen-units=1, strip) via cargo env
+# overrides, independent of what [profile.release] in the root
+# Cargo.toml currently says. This is the build-option gate for perf-lane
+# L0 measurements (perf-report.md 8.10): the default release profile is
+# untouched; run this target to produce the strong-profile kernel and
+# copy the bzImage out before/after any other release build (they share
+# target/$(CARGO_TARGET)/release/bzImage).
+build-release-opt: export CARGO_PROFILE_RELEASE_LTO := true
+build-release-opt: export CARGO_PROFILE_RELEASE_CODEGEN_UNITS := 1
+build-release-opt: export CARGO_PROFILE_RELEASE_STRIP := symbols
+build-release-opt:
+	@echo "Building Rux kernel (Release-opt LTO/CGU1/strip, platform=$(PLATFORM))..."
 	@cd $(PROJECT_ROOT) && cargo build --target $(CARGO_TARGET) $(CARGO_FEATURE_FLAGS) --release
 ifeq ($(PLATFORM),x86_64)
 	@cd $(PROJECT_ROOT) && python3 build/mkbzimage.py $(PROJECT_ROOT)/target/$(CARGO_TARGET)/release/rux $(PROJECT_ROOT)/target/$(CARGO_TARGET)/release/bzImage

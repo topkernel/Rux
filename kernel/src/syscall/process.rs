@@ -1028,6 +1028,13 @@ fn do_execve(pathname: &str, argv: &[alloc::string::String], envp: &[alloc::stri
                     crate::drivers::timer::get_jiffies().wrapping_sub(xt_now)
                 );
             }
+            // sc209 (leg 14): latch render_service's tgid for the FXRS
+            // futex lifecycle tracer (SA 10 publish-wall forensics; see
+            // the FXRS block in sync/futex.rs). The exec'ing task is the
+            // group leader, so pid == tgid here.
+            if full_path.as_ref().ends_with("/system/bin/render_service") {
+                crate::sync::futex::fxrs_latch(crate::process::current_pid());
+            }
             crate::pr_debug!("exec: pid={} path={}", crate::process::current_pid(), full_path.as_ref());
             0
         }
@@ -4840,6 +4847,35 @@ pub fn init_exited_fallback_cascade() {
     crate::println!("kernel: init exited — powering system down");
     shutdown_cascade(LINUX_REBOOT_CMD_POWER_OFF);
     // shutdown_cascade returns only on total SBI failure — park.
+    loop {
+        core::hint::spin_loop();
+    }
+}
+
+/// Reboot the machine from the panic path (Linux's panic ->
+/// kernel_restart).
+///
+/// Unlike the reboot(2) path this neither signals init nor syncs the
+/// filesystems: Linux's panic path reboots without touching the disks,
+/// because the panic may well be the storage stack itself. A sync that
+/// hangs in a panic would defeat the whole point of the timeout.
+pub fn panic_reboot() -> ! {
+    #[cfg(feature = "riscv64")]
+    {
+        // SBI SRST warm reset (QEMU supports it); fall back to the
+        // legacy shutdown ecall when the SBI lacks SRST.
+        if !crate::sbi::sbi_system_reset(
+            crate::sbi::srst_type::WARM_REBOOT,
+            crate::sbi::srst_reason::NONE,
+        ) {
+            sbi_legacy_shutdown();
+        }
+    }
+    #[cfg(feature = "x86_64")]
+    {
+        // No 8259/ACPI reset yet — park with interrupts waiting.
+        machine_park();
+    }
     loop {
         core::hint::spin_loop();
     }

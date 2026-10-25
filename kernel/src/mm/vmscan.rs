@@ -89,7 +89,13 @@ pub fn balance_pgdat(order: i32) -> usize {
 /// Called from the page allocator when the zone is below WMARK_LOW.
 /// Returns the number of pages reclaimed.
 pub fn try_to_free_pages(order: i32) -> usize {
-    balance_pgdat(order)
+    // Leg-15 pace: cumulative round count + jiffies spent here, read by
+    // the schbd heartbeat (dfx=schb). No lock held; note_drct is a
+    // counter tick unless the switch is off.
+    let j0 = crate::drivers::timer::get_jiffies();
+    let r = balance_pgdat(order);
+    crate::dfx::schb::note_drct(j0);
+    r
 }
 
 // ==================== Internal: shrink_* ====================

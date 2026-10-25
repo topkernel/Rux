@@ -119,7 +119,8 @@ impl PteLock {
 
     /// `lock()` with IRQs saved for the whole section.
     #[inline]
-    pub fn lock_irqsave(&self) -> PteIrqGuard<'_> {
+    #[track_caller]
+    pub fn lock_irqsave(&self) -> PteIrqGuard<'_> { // track_caller: syscost site attribution
         #[cfg(feature = "x86_64")]
         {
             let read = crate::arch::mm::mm_ops::PTE_MODIFY_LOCK.raw.read_irqsave();
@@ -344,6 +345,12 @@ impl MmStruct {
         crate::mm::deferred_free::register_deferred_size(
             (2 * core::mem::size_of::<usize>()) + core::mem::size_of::<MmStruct>(),
         );
+
+        // Leg-17 leak census: creation-side twin of memwatch::MM_DROPS —
+        // both gated on User spaces so live_mm = MM_NEWS - MM_DROPS.
+        if space_type == PageTableType::User {
+            crate::dfx::memwatch::MM_NEWS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        }
 
         let vma_manager = VmaManager::new();
         let brk_default = if space_type == PageTableType::User {

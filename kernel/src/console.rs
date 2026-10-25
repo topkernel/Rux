@@ -298,49 +298,84 @@ impl Uart {
 
         #[cfg(feature = "x86_64")]
         {
-            // Fast path while a stall is latched: probe at most once per
-            // 32 bytes (each probe is a VM exit; see TX_SINCE_PROBE); if
-            // THRE is back, unlatch and fall through to the normal write;
-            // if not, drop the byte immediately (bounded cost per stall
-            // episode).
-            if TX_STALLED.load(Ordering::Acquire) {
-                if TX_SINCE_PROBE.fetch_add(1, Ordering::Relaxed) < 32 {
-                    TX_DROPPED.fetch_add(1, Ordering::Relaxed);
-                    return;
-                }
-                TX_SINCE_PROBE.store(0, Ordering::Relaxed);
-                if read_reg(COM1_BASE, UART_LSR) & LSR_THRE != 0 {
-                    TX_STALLED.store(false, Ordering::Release);
-                    TX_RECOVERY_PENDING.store(true, Ordering::Release);
-                } else {
-                    TX_DROPPED.fetch_add(1, Ordering::Relaxed);
-                    return;
-                }
+            // syscost probe (default OFF — one load + branch per byte;
+            // armed by syscost=1): per-byte UART cost + IF=0 zone
+            // attribution. v3 gates the zone push/pop on the REAL flag
+            // (EFLAGS): an IF=1 putc must not touch the zone stack (it
+            // is preemptible and can migrate); an IF=0 putc cannot
+            // migrate, so the push/pop pair is balanced by construction.
+            let probe = crate::dfx::syscost::on();
+            let t0 = if probe {
+                crate::arch::cpu::read_counter()
+            } else {
+                0
+            };
+            let if0 = probe && !crate::arch::cpu::get_interrupts_state();
+            if if0 {
+                crate::dfx::syscost::zone_uart_push();
             }
-            // Poll LSR bit 5 (THR Empty) before writing THR — the 8250
-            // drops characters written while the shift register is busy.
-            // BOUNDED by WALL TIME (UART perf gate, 2026-10-20): the old
-            // 1e6-try budget was 1-2 s of IRQ-off/lock-held spin under
-            // KVM when the chardev stalled (one `inb` = one VM exit).
-            // The wait runs with the UART irqsave lock held (or from
-            // IRQ-context printk with IF=0), so those spins were exactly
-            // the TIMER-SOFTIRQ-STALL / TIMER-LATE-FIRE episodes. Give
-            // up after UART_THRE_WAIT_TICKS of read_time(), latch the
-            // stall, and drop the byte.
-            let start = crate::arch::cpu::read_time();
-            while read_reg(COM1_BASE, UART_LSR) & LSR_THRE == 0 {
-                if crate::arch::cpu::read_time().saturating_sub(start)
-                    >= UART_THRE_WAIT_TICKS
-                {
-                    TX_STALLED.store(true, Ordering::Release);
+            let mut polls: u64 = 0;
+            'putc: {
+                // Fast path while a stall is latched: probe at most once per
+                // 32 bytes (each probe is a VM exit; see TX_SINCE_PROBE); if
+                // THRE is back, unlatch and fall through to the normal write;
+                // if not, drop the byte immediately (bounded cost per stall
+                // episode).
+                if TX_STALLED.load(Ordering::Acquire) {
+                    if TX_SINCE_PROBE.fetch_add(1, Ordering::Relaxed) < 32 {
+                        TX_DROPPED.fetch_add(1, Ordering::Relaxed);
+                        break 'putc;
+                    }
                     TX_SINCE_PROBE.store(0, Ordering::Relaxed);
-                    TX_DROPPED.fetch_add(1, Ordering::Relaxed);
-                    return;
+                    if probe {
+                        polls += 1;
+                    }
+                    if read_reg(COM1_BASE, UART_LSR) & LSR_THRE != 0 {
+                        TX_STALLED.store(false, Ordering::Release);
+                        TX_RECOVERY_PENDING.store(true, Ordering::Release);
+                    } else {
+                        TX_DROPPED.fetch_add(1, Ordering::Relaxed);
+                        break 'putc;
+                    }
                 }
-                core::hint::spin_loop();
+                // Poll LSR bit 5 (THR Empty) before writing THR — the 8250
+                // drops characters written while the shift register is busy.
+                // BOUNDED by WALL TIME (UART perf gate, 2026-10-20): the old
+                // 1e6-try budget was 1-2 s of IRQ-off/lock-held spin under
+                // KVM when the chardev stalled (one `inb` = one VM exit).
+                // The wait runs with the UART irqsave lock held (or from
+                // IRQ-context printk with IF=0), so those spins were exactly
+                // the TIMER-SOFTIRQ-STALL / TIMER-LATE-FIRE episodes. Give
+                // up after UART_THRE_WAIT_TICKS of read_time(), latch the
+                // stall, and drop the byte.
+                let start = crate::arch::cpu::read_time();
+                if probe {
+                    polls += 1;
+                }
+                while read_reg(COM1_BASE, UART_LSR) & LSR_THRE == 0 {
+                    if probe {
+                        polls += 1;
+                    }
+                    if crate::arch::cpu::read_time().saturating_sub(start)
+                        >= UART_THRE_WAIT_TICKS
+                    {
+                        TX_STALLED.store(true, Ordering::Release);
+                        TX_SINCE_PROBE.store(0, Ordering::Relaxed);
+                        TX_DROPPED.fetch_add(1, Ordering::Relaxed);
+                        break 'putc;
+                    }
+                    core::hint::spin_loop();
+                }
+                // SAFETY: COM1 THR is the standard 8250 data port.
+                unsafe { write_reg(COM1_BASE, UART_THR, c) };
             }
-            // SAFETY: COM1 THR is the standard 8250 data port.
-            unsafe { write_reg(COM1_BASE, UART_THR, c) };
+            if if0 {
+                crate::dfx::syscost::zone_uart_pop();
+            }
+            if probe {
+                let dt = crate::arch::cpu::read_counter().saturating_sub(t0);
+                crate::dfx::syscost::uart_putc_note(dt, polls, if0);
+            }
         }
     }
 }

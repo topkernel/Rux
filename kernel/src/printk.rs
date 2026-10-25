@@ -204,6 +204,7 @@ pub fn printk(level: u8, args: fmt::Arguments) {
     // Perf: filter BEFORE formatting (same rationale as printk_ln below —
     // discarded messages must not pay the fmt pass).
     if level > CONSOLE_LOGLEVEL.load(Ordering::Relaxed) {
+        crate::dfx::syscost::note_printk_filtered(); // syscost probe
         return;
     }
     printk_ring_always(level, args);
@@ -296,6 +297,17 @@ static CONSOLE_EMIT_LOCK: AtomicBool = AtomicBool::new(false);
 /// remain in the ring buffer).
 static CONSOLE_EMIT_SKIPPED: AtomicU64 = AtomicU64::new(0);
 
+/// Read-only view of CONSOLE_EMIT_SKIPPED for probes: the fsw dump prints
+/// it (`es=`) so a console round that vanished from the serial is
+/// attributable from a surviving line alone — es climbing by the number of
+/// lost lines means emit-lock loss (softirq's 100µs budget losing the
+/// race); es flat means the records never reached the console path at all
+/// (level-filter drop or dead probe — the two pa28 failure classes looked
+/// identical from serial and cost two boot iterations to separate).
+pub fn console_emit_skipped() -> u64 {
+    CONSOLE_EMIT_SKIPPED.load(Ordering::Relaxed)
+}
+
 /// Acquire budget in interrupt context (hardirq/NMI/softirq): 100µs of
 /// read_time() units. Interrupt context must not spin long — the holder
 /// may itself be an interrupt-context emitter on another CPU or a
@@ -357,12 +369,16 @@ fn emit_to_console(text: &[u8]) {
         CONSOLE_EMIT_SKIPPED.fetch_add(1, Ordering::Relaxed);
         return; // record is in the ring buffer; console line skipped
     }
+    let mut emitted = 0usize; // syscost probe
     for &b in text {
         if b == b'\n' {
             crate::console::putchar_no_lock(b'\r');
+            emitted += 1;
         }
         crate::console::putchar_no_lock(b);
+        emitted += 1;
     }
+    crate::dfx::syscost::note_printk_con(emitted); // syscost probe
     CONSOLE_EMIT_LOCK.store(false, Ordering::Release);
 }
 
@@ -454,6 +470,7 @@ fn printk_bytes(level: u8, text: &[u8]) {
 // ==================== Ring Buffer Write ====================
 
 fn write_to_ring_buffer(level: u8, text: &[u8], timestamp: u64) {
+    crate::dfx::syscost::note_printk_ring(text.len()); // syscost probe
     let pid = crate::process::current_pid() as u32;
     // Real CPU id (review批次8: hard-coded 0 attributed every message to
     // CPU 0, hiding cross-CPU issues in the logs).
@@ -965,6 +982,85 @@ fn syslog_clear() {
     rb.write_idx = 0;
     rb.read_seq = 0;
     rb.next_seq = 0;
+}
+
+/// Newest `n` records, oldest-first, syslog-style one line each.
+///
+/// dfx=schb wedge census (sc-series quiet-quiet hunt): quietcon diverts
+/// the userspace /dev/console stream into this ring, so the tail around
+/// a soft-wedge is the userspace last-known-good boundary. Records are
+/// COPIED out under the ring lock (bounded hold) and formatted after it
+/// drops — formatting ~hundreds of records under irqsave would block
+/// every other CPU's printk for the duration.
+pub fn ring_tail(n: usize) -> alloc::string::String {
+    struct TailRec {
+        level: u8,
+        timestamp: u64,
+        pid: u32,
+        cpu_id: u16,
+        text: [u8; RECORD_TEXT_SIZE],
+        text_len: u16,
+    }
+    let mut out = alloc::string::String::new();
+    let mut recs: alloc::vec::Vec<TailRec> = alloc::vec::Vec::new();
+    {
+        let rb = RING_BUFFER.lock_irqsave();
+        if rb.next_seq == 0 {
+            return out;
+        }
+        let oldest_kept = rb.next_seq.saturating_sub(RING_BUFFER_CAPACITY as u64);
+        let start = rb.next_seq.saturating_sub(n as u64).max(oldest_kept);
+        let mut seq = start;
+        while seq < rb.next_seq {
+            let idx = (seq % RING_BUFFER_CAPACITY as u64) as usize;
+            let record = &rb.records[idx];
+            if record.text_len != 0 && record.seq == seq {
+                let mut text = [0u8; RECORD_TEXT_SIZE];
+                text[..record.text_len as usize]
+                    .copy_from_slice(&record.text[..record.text_len as usize]);
+                recs.push(TailRec {
+                    level: record.level,
+                    timestamp: record.timestamp,
+                    pid: record.pid,
+                    cpu_id: record.cpu_id,
+                    text,
+                    text_len: record.text_len,
+                });
+            }
+            seq += 1;
+        }
+    }
+    let mut header_buf = [0u8; SYSLOG_HEADER_LEN];
+    for r in &recs {
+        let hlen = format_syslog_header(
+            &mut header_buf,
+            r.level,
+            r.timestamp,
+            r.pid,
+            r.cpu_id,
+        );
+        out.push_str(unsafe { core::str::from_utf8_unchecked(&header_buf[..hlen]) });
+        // Lossy-UTF8 substitute that stays in core: kernel and console
+        // records are overwhelmingly valid UTF-8; anything else prints
+        // with invalid bytes masked rather than dropped.
+        let raw = &r.text[..r.text_len as usize];
+        match core::str::from_utf8(raw) {
+            Ok(s) => out.push_str(s),
+            Err(_) => {
+                for &b in raw {
+                    out.push(if b.is_ascii_graphic() || b == b' ' {
+                        b as char
+                    } else {
+                        '.'
+                    });
+                }
+            }
+        }
+        if out.as_bytes().last() != Some(&b'\n') {
+            out.push('\n');
+        }
+    }
+    out
 }
 
 // ==================== ProcFS /dev/kmsg Support ====================

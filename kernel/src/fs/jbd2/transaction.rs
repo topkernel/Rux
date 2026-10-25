@@ -137,6 +137,7 @@ pub fn jbd2_journal_start(journal: &Arc<Journal>, nblocks: i32) -> Result<Handle
     if journal.is_aborted() {
         return Err(EROFS);
     }
+    crate::dfx::fsw::note_j_start();
 
     // Check for nested handle
     // Check current journal info
@@ -182,6 +183,7 @@ pub fn jbd2__journal_start(
 /// buffer credits to the transaction. On single-core, we always
 /// commit synchronously when the last handle stops.
 pub fn jbd2_journal_stop(handle: &mut Handle) -> Result<(), i32> {
+    crate::dfx::fsw::note_j_stop();
     // Decrement reference count
     if handle.h_ref > 1 {
         handle.h_ref -= 1;
@@ -244,6 +246,7 @@ pub fn jbd2_journal_stop(handle: &mut Handle) -> Result<(), i32> {
         if dirty_len < LAZY_COMMIT_MAX_BUFFERS && !revokes_pending {
             // Leave j_running_transaction in place: the next
             // start_this_handle joins this transaction.
+            crate::dfx::fsw::note_j_lazy();
             handle.h_transaction = None;
             return Ok(());
         }

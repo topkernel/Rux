@@ -84,6 +84,19 @@ impl StackCache {
 
     fn push(&mut self, stack_bottom: *mut u8) {
         if self.count >= Self::MAX_CACHED_STACKS {
+            // Leg-17: on x86_64 route through the packed slab (slot map
+            // + empty-block reclaim); the plain GlobalAlloc dealloc is
+            // the non-slab path (every other arch) and the fallback for
+            // exhaustion-allocated stacks. We hold STACK_CACHE;
+            // KSTACK_BLOCKS nests BELOW it (leaf) and the buddy free
+            // inside runs outside KSTACK_BLOCKS — same STACK_CACHE ->
+            // BUDDY nesting the old dealloc had.
+            #[cfg(target_arch = "x86_64")]
+            {
+                if kstack_slab_free(stack_bottom) {
+                    return;
+                }
+            }
             // SAFETY: stack_bottom was allocated by stack_cache_alloc() with the same
             // layout (size=KERNEL_STACK_SIZE, align=16), and we hold STACK_CACHE_LOCK.
             unsafe {
@@ -111,9 +124,208 @@ unsafe impl Send for StackCache {}
 /// Global stack cache instance (wrapped in Spinlock, no separate lock needed).
 static STACK_CACHE: Spinlock<StackCache> = Spinlock::new(StackCache::new());
 
+// ===== Leg-17 packed kstack slab — x86_64 ONLY =====
+//
+// The buddy only serves power-of-two blocks, so a bare 80KB (or 96KB)
+// stack request still consumes a whole 128KB order-5 block — sc225's
+// o5-block math showed the interim 96KB attempt saved NOTHING. On
+// x86_64 (where KERNEL_STACK_SIZE is 81920 via kernel_stack_size_x86_64
+// in Kernel.toml + build.rs) this carver takes 256KB order-6 blocks and
+// slices three KERNEL_STACK_SIZE slots (3 x 80KB = 240KB; the 16KB tail
+// per block is the only waste, 6.7% vs the 60% padding of an unpadded
+// request). Per-stack footprint 85.3KB (was 128KB): ~-115MB at the
+// launcher-floor population of ~2690 stacks, which is the point of the
+// whole exercise (the floor is what kills the launcher spawn inside
+// appspawn's window).
+//
+// ARCH GATE (fee7774f lesson, leg-17 re-land): the 80KB slot's ~15KB
+// margin over the 62.5KB measured max is an x86_64-OH figure only. The
+// riscv64 kernel nests deeper in kernel mode — under its LTP test
+// kernel the slot overflowed and corrupted adjacent heap data
+// (getpriority PRIO_PGRP read nice=-120 → 140). riscv64 keeps 128KB
+// (config.rs gets the Kernel.toml base there), where this slab is
+// compiled out entirely: a power-of-two request is already perfectly
+// packed in one order-5 buddy block, so packing buys nothing.
+//
+// Slot state lives in a side table under KSTACK_BLOCKS — the stack
+// pages themselves stay pure (R18-2 canary still sits at each SLOT
+// bottom). Lock order: KSTACK_BLOCKS is a leaf; the buddy block
+// alloc/free runs OUTSIDE it (take the lock, pick/insert, drop, then
+// touch the buddy). Fully-empty blocks return to the buddy.
+#[cfg(target_arch = "x86_64")]
+const KSTACK_BLOCK: usize = 262144; // order-6, 64 pages
+#[cfg(target_arch = "x86_64")]
+const KSTACK_SLOTS: usize = 3;
+// The slot carve must fit the block (compile-time guard against a
+// future kernel_stack_size_x86_64 edit, e.g. 96KB would need 288KB).
+#[cfg(target_arch = "x86_64")]
+const _: () = assert!(KSTACK_SLOTS * KERNEL_STACK_SIZE <= KSTACK_BLOCK);
+
+#[cfg(target_arch = "x86_64")]
+struct KstackBlocks {
+    bases: alloc::vec::Vec<*mut u8>,
+    maps: alloc::vec::Vec<u8>,
+}
+
+// SAFETY: the raw block bases are only ever dereferenced as stack
+// storage handed out one slot at a time under the KSTACK_BLOCKS lock —
+// same contract as StackCache's raw pointers behind their lock.
+#[cfg(target_arch = "x86_64")]
+unsafe impl Send for KstackBlocks {}
+
+#[cfg(target_arch = "x86_64")]
+static KSTACK_BLOCKS: Spinlock<KstackBlocks> = Spinlock::new(KstackBlocks {
+    bases: alloc::vec::Vec::new(),
+    maps: alloc::vec::Vec::new(),
+});
+
+/// Carve one stack out of a packed block (or fall back to a whole
+/// order-5 buddy block when the slab cannot grow — keeps booting on
+/// heap exhaustion instead of dying).
+#[cfg(target_arch = "x86_64")]
+fn kstack_slab_alloc() -> *mut u8 {
+    // Fast path: existing block with a free slot.
+    {
+        let mut g = KSTACK_BLOCKS.lock();
+        for bi in 0..g.maps.len() {
+            if g.maps[bi] == 0b111 {
+                continue;
+            }
+            for s in 0..KSTACK_SLOTS {
+                if g.maps[bi] & (1 << s) == 0 {
+                    g.maps[bi] |= 1 << s;
+                    // SAFETY: block base is a live allocation of
+                    // KSTACK_BLOCK bytes; slot s fits (const assert above).
+                    return unsafe { g.bases[bi].add(s * KERNEL_STACK_SIZE) };
+                }
+            }
+        }
+    }
+    // Slow path: new order-6 block from the buddy (OUTSIDE the slab
+    // lock — no lock nesting with BUDDY).
+    // SAFETY: layout is a valid power-of-two-multiple of PAGE_SIZE.
+    let block = unsafe {
+        alloc(
+            Layout::from_size_align(KSTACK_BLOCK, 4096)
+                .unwrap_or(Layout::new::<[u8; KSTACK_BLOCK]>()),
+        )
+    };
+    if block.is_null() {
+        return core::ptr::null_mut();
+    }
+    {
+        let mut g = KSTACK_BLOCKS.lock();
+        g.bases.push(block);
+        g.maps.push(0b001); // slot 0 taken by this allocation
+    }
+    block
+}
+
+/// Return a slot to its block; a fully-empty block goes back to the
+/// buddy. Returns false when the address is not a slab slot (the
+/// fallback path allocated it as a plain order-5 block — caller frees
+/// it through the normal GlobalAlloc path).
+#[cfg(target_arch = "x86_64")]
+fn kstack_slab_free(bottom: *mut u8) -> bool {
+    let addr = bottom as usize;
+    let mut free_block: *mut u8 = core::ptr::null_mut();
+    {
+        let mut g = KSTACK_BLOCKS.lock();
+        let mut bi = 0usize;
+        let mut found = false;
+        while bi < g.bases.len() {
+            let base = g.bases[bi] as usize;
+            if addr >= base && addr < base + KSTACK_BLOCK {
+                found = true;
+                let off = addr - base;
+                if off % KERNEL_STACK_SIZE != 0 {
+                    return true; // foreign pointer inside a slab block:
+                    // consume it (do NOT touch the slot map)
+                }
+                let s = off / KERNEL_STACK_SIZE;
+                if s >= KSTACK_SLOTS || g.maps[bi] & (1 << s) == 0 {
+                    return true; // double free / not allocated: consume
+                }
+                g.maps[bi] &= !(1 << s);
+                if g.maps[bi] == 0 {
+                    free_block = g.bases[bi];
+                    g.bases.swap_remove(bi);
+                    g.maps.swap_remove(bi);
+                }
+                break;
+            }
+            bi += 1;
+        }
+        if !found {
+            return false; // not our memory: plain buddy allocation
+        }
+    }
+    if !free_block.is_null() {
+        // Buddy free OUTSIDE the slab lock.
+        // SAFETY: block was allocated by kstack_slab_alloc with the
+        // same layout and is now fully empty.
+        unsafe {
+            dealloc(
+                free_block,
+                Layout::from_size_align(KSTACK_BLOCK, 4096)
+                    .unwrap_or(Layout::new::<[u8; KSTACK_BLOCK]>()),
+            );
+        }
+    }
+    true
+}
+
+/// Packed-slab state for the SC-ANAT beat line (dfx=schb):
+/// (blocks, live slots, fallback note). x86_64 only — every other arch
+/// keeps the plain power-of-two buddy allocation and reports zeros.
+#[cfg(target_arch = "x86_64")]
+pub fn kstack_slab_stats() -> (u64, u64, u64) {
+    let g = KSTACK_BLOCKS.lock();
+    let mut live: u64 = 0;
+    for bm in g.maps.iter() {
+        live += bm.count_ones() as u64;
+    }
+    (g.bases.len() as u64, live, 0)
+}
+
+/// Non-x86_64 shim: no packed slab — the beat line stays format-stable
+/// across arches (kb=0 ks=0 reads as "no slab", which is the truth).
+#[cfg(not(target_arch = "x86_64"))]
+pub fn kstack_slab_stats() -> (u64, u64, u64) {
+    (0, 0, 0)
+}
+
+// Leg-16 kernel-heap anatomy (dfx=schb): live kernel-stack count and the
+// boot-max stack high-water in bytes. The high-water probe ZEROES each
+// fresh stack at alloc (outside every lock) and scans for the first
+// nonzero word from the bottom at free time — the depth distribution is
+// the evidence for any KERNEL_STACK_SIZE reduction, which at pidmax ~4800
+// is 128KB x ~2860 live tasks = ~358MB of the ~900MB heap floor (the
+// single largest per-task item; see SC-SESSIONS leg-15 close-out).
+static KSTACK_LIVE: AtomicU64 = AtomicU64::new(0);
+static KSTACK_HW: AtomicU64 = AtomicU64::new(0);
+
+/// Leg-16 anatomy: (live kernel-stack count, boot-max high-water bytes).
+/// Both stay 0 unless dfx=schb armed the probe at alloc time.
+pub fn kstack_anat() -> (u64, u64) {
+    (KSTACK_LIVE.load(Ordering::Relaxed), KSTACK_HW.load(Ordering::Relaxed))
+}
+
+/// Plain buddy allocation of one kernel stack (the pre-slab path).
+/// On x86_64 this is only the packed-slab exhaustion fallback (the
+/// 80KB request rounds up to a 128KB order-5 block inside GlobalAlloc);
+/// elsewhere it is THE allocation path.
+fn plain_kstack_alloc() -> *mut u8 {
+    // SAFETY: Layout is valid; null check follows.
+    unsafe {
+        let layout = Layout::from_size_align(KERNEL_STACK_SIZE, 16)
+            .unwrap_or_else(|_| Layout::new::<[u8; KERNEL_STACK_SIZE]>());
+        alloc(layout)
+    }
+}
+
 /// Allocate a kernel stack (with caching)
 fn stack_cache_alloc() -> *mut u8 {
-    let mut cache = STACK_CACHE.lock();
     // Reuse is DISABLED: freed stacks re-enter the cache while the dying
     // task can still be executing its final sret/exit path on that stack
     // (reaper/sweep races), and a pop hands the SAME memory to a new task —
@@ -124,19 +336,44 @@ fn stack_cache_alloc() -> *mut u8 {
     // written by the new owner of the reused stack. Cost of disabling:
     // bounded memory (cache grows with peak task churn); cost of enabling
     // with the early-free unfixed: cross-task context corruption.
-    let _ = &mut cache;
-    // fresh alloc also gets a canary
-    // fresh alloc also gets a canary
-    // SAFETY: Layout is valid; null check follows.
-    unsafe {
-        let layout = Layout::from_size_align(KERNEL_STACK_SIZE, 16)
-            .unwrap_or(Layout::new::<[u8; KERNEL_STACK_SIZE]>());
-        let bottom = alloc(layout);
-        if !bottom.is_null() {
-            core::ptr::write_volatile(bottom as *mut u64, StackCache::STACK_CANARY);
-        }
-        return bottom;
+    //
+    // With reuse disabled the lock guards nothing on this path, so the
+    // heap allocation (BUDDY nest) and the leg-16 probe zeroing run
+    // OUTSIDE it — no 128KB memset under a spinlock.
+    {
+        let mut cache = STACK_CACHE.lock();
+        let _ = &mut cache;
     }
+    // Leg-17: on x86_64 stacks come from the packed slab first (three
+    // 80KB slots per 256KB order-6 block — see the slab block comment);
+    // a whole order-5 buddy block is only the exhaustion fallback.
+    // Every other arch keeps the plain power-of-two allocation, where
+    // 128KB is already one perfectly-packed order-5 block.
+    #[cfg(target_arch = "x86_64")]
+    let bottom = {
+        let mut b = kstack_slab_alloc();
+        if b.is_null() {
+            b = plain_kstack_alloc();
+        }
+        b
+    };
+    #[cfg(not(target_arch = "x86_64"))]
+    let bottom = plain_kstack_alloc();
+    if !bottom.is_null() {
+        if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::Schb)
+            && crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::KsProbe)
+        {
+            // Fresh stack is visible to nobody else yet: zero it so the
+            // free-side scan can measure the true high-water, and count it.
+            // ~3 spawns/s x 128KB of memset across the OH boot — negligible
+            // next to the fork itself.
+            unsafe { core::ptr::write_bytes(bottom, 0, KERNEL_STACK_SIZE) };
+            KSTACK_LIVE.fetch_add(1, Ordering::Relaxed);
+        }
+        // fresh alloc also gets a canary
+        unsafe { core::ptr::write_volatile(bottom as *mut u64, StackCache::STACK_CANARY) };
+    }
+    bottom
 }
 
 /// Free a kernel stack (with caching)
@@ -202,6 +439,14 @@ fn stack_cache_free(stack_bottom: *mut u8) {
                 putchar(b'\n');
             }
         }
+    }
+    // Leg-16 anatomy (dfx=schb,ksprobe): the high-water scan + record
+    // stash lives in free_kernel_stack (needs self for comm/pid); this
+    // side only keeps the live count honest for the SC-ANAT kN column.
+    if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::Schb)
+        && crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::KsProbe)
+    {
+        KSTACK_LIVE.fetch_sub(1, Ordering::Relaxed);
     }
     let mut cache = STACK_CACHE.lock();
     // SAFETY: stack_bottom was allocated by stack_cache_alloc().
@@ -1003,6 +1248,24 @@ pub struct Task {
     pub stime_ticks: AtomicU64,
     pub cutime_ticks: AtomicU64,
     pub cstime_ticks: AtomicU64,
+    /// Context-switch counters (Linux's task->nvcsw / task->nivcsw).
+    /// A voluntary switch is one where the task went to sleep; an
+    /// involuntary one is where the task was preempted while still
+    /// runnable. Counted in the scheduler's context_switch and read by
+    /// /proc/[pid]/status (voluntary_ctxt_switches /
+    /// nonvoluntary_ctxt_switches).
+    pub nvcsw: AtomicU64,
+    pub nivcsw: AtomicU64,
+    /// Page faults taken by this task in user mode (Linux's minflt).
+    /// Rux has no minor/major distinction — file-backed pages come
+    /// from the page cache, not from a fault-time disk read — so every
+    /// user fault is counted here and the major counter stays 0.
+    pub min_flt: AtomicU64,
+    /// Major page faults (Linux's majflt). Always 0 on Rux, see above.
+    pub maj_flt: AtomicU64,
+    /// The task's start time in jiffies since boot (Linux's starttime,
+    /// field 22 of /proc/[pid]/stat).
+    pub start_jiffies: AtomicU64,
     /// RUSAGE_CHILDREN ru_maxrss (KB): max of reaped children's resident
     /// set at exit (Linux signal->cmaxrss). LTP getrusage03 requires the
     /// propagation (initial.children ~= 100MB after a 100MB consumer
@@ -1226,17 +1489,24 @@ impl Task {
             ti_a1: core::sync::atomic::AtomicU64::new(0),
             ti_a2: core::sync::atomic::AtomicU64::new(0),
             last_syscall_nr: core::sync::atomic::AtomicU32::new(0),
-            last_fails: core::array::from_fn(|_| AtomicU32::new(0)),
+            // Stack-depth fix (leg-16 KSTACK-HW: check_module_up 65.8KB,
+            // hiview 76KB — both the Task-construction frame): from_fn
+            // materialises these arrays through try_from_fn's wrapper
+            // copies (several x 4KB for init_a0 alone). The inline-const
+            // repeat writes each element in place — same values, and the
+            // per-fork stack depth drops by the copy multiplier (the
+            // measured gate for any KERNEL_STACK_SIZE reduction).
+            last_fails: [const { AtomicU32::new(0) }; 8],
             last_fails_cur: core::sync::atomic::AtomicUsize::new(0),
-            last_fails_a0: core::array::from_fn(|_| AtomicU64::new(0)),
-            last_fails_a1: core::array::from_fn(|_| AtomicU64::new(0)),
-            last_calls: core::array::from_fn(|_| AtomicU32::new(0)),
+            last_fails_a0: [const { AtomicU64::new(0) }; 8],
+            last_fails_a1: [const { AtomicU64::new(0) }; 8],
+            last_calls: [const { AtomicU32::new(0) }; crate::process::task::LAST_CALLS_LEN],
             last_calls_cur: core::sync::atomic::AtomicUsize::new(0),
-            init_calls: core::array::from_fn(|_| AtomicU32::new(0)),
-            init_a0: core::array::from_fn(|_| AtomicU64::new(0)),
+            init_calls: [const { AtomicU32::new(0) }; crate::process::task::INIT_CALLS_LEN],
+            init_a0: [const { AtomicU64::new(0) }; crate::process::task::INIT_CALLS_LEN],
             init_calls_cur: core::sync::atomic::AtomicUsize::new(0),
-            birth_calls: core::array::from_fn(|_| AtomicU32::new(0)),
-            birth_a0: core::array::from_fn(|_| AtomicU64::new(0)),
+            birth_calls: [const { AtomicU32::new(0) }; crate::process::task::BIRTH_CALLS_LEN],
+            birth_a0: [const { AtomicU64::new(0) }; crate::process::task::BIRTH_CALLS_LEN],
             birth_done: core::sync::atomic::AtomicBool::new(false),
             last_syscall_a0: AtomicU64::new(0),
             last_syscall_a1: AtomicU64::new(0),
@@ -1322,6 +1592,11 @@ impl Task {
             stime_ticks: AtomicU64::new(0),
             cutime_ticks: AtomicU64::new(0),
             cstime_ticks: AtomicU64::new(0),
+            nvcsw: AtomicU64::new(0),
+            nivcsw: AtomicU64::new(0),
+            min_flt: AtomicU64::new(0),
+            maj_flt: AtomicU64::new(0),
+            start_jiffies: AtomicU64::new(crate::drivers::timer::get_jiffies()),
             cmaxrss_kb: AtomicU64::new(0),
             exit_maxrss_kb: AtomicU64::new(0),
             tracer_pid: AtomicU32::new(0),
@@ -1752,6 +2027,34 @@ impl Task {
             (ptr as usize + offset_of!(Task, cstime_ticks)) as *mut AtomicU64,
             AtomicU64::new(0),
         );
+        // Context-switch counters (Linux nvcsw/nivcsw): same non-zeroing
+        // discipline — /proc/[pid]/status reads them, so they must be
+        // initialized here or they carry allocator garbage.
+        ptr::write(
+            (ptr as usize + offset_of!(Task, nvcsw)) as *mut AtomicU64,
+            AtomicU64::new(0),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, nivcsw)) as *mut AtomicU64,
+            AtomicU64::new(0),
+        );
+        // Fault counters + the start time: the buddy allocator does not
+        // zero Task pages, so /proc/[pid]/stat would otherwise read
+        // allocator garbage for fields 10/12/22.
+        ptr::write(
+            (ptr as usize + offset_of!(Task, min_flt)) as *mut AtomicU64,
+            AtomicU64::new(0),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, maj_flt)) as *mut AtomicU64,
+            AtomicU64::new(0),
+        );
+        // The task's start time (Linux's starttime, field 22 of
+        // /proc/[pid]/stat): the jiffies at which the task was built.
+        ptr::write(
+            (ptr as usize + offset_of!(Task, start_jiffies)) as *mut AtomicU64,
+            AtomicU64::new(crate::drivers::timer::get_jiffies()),
+        );
         // Ptrace + coredump state (P1 wave 3): same R9-1 discipline — the
         // buddy allocator does not zero Task pages, so every new field
         // read by the signal/exit paths must be explicitly initialized
@@ -1881,7 +2184,7 @@ impl Task {
         // thread-exit forensics printed garbage nrs).
         ptr::write(
             (ptr as usize + offset_of!(Task, last_fails)) as *mut [AtomicU32; 8],
-            core::array::from_fn(|_| AtomicU32::new(0)),
+            [const { AtomicU32::new(0) }; 8],
         );
         ptr::write(
             (ptr as usize + offset_of!(Task, last_fails_cur))
@@ -1890,15 +2193,15 @@ impl Task {
         );
         ptr::write(
             (ptr as usize + offset_of!(Task, last_fails_a0)) as *mut [AtomicU64; 8],
-            core::array::from_fn(|_| AtomicU64::new(0)),
+            [const { AtomicU64::new(0) }; 8],
         );
         ptr::write(
             (ptr as usize + offset_of!(Task, last_fails_a1)) as *mut [AtomicU64; 8],
-            core::array::from_fn(|_| AtomicU64::new(0)),
+            [const { AtomicU64::new(0) }; 8],
         );
         ptr::write(
             (ptr as usize + offset_of!(Task, last_calls)) as *mut [AtomicU32; LAST_CALLS_LEN],
-            core::array::from_fn(|_| AtomicU32::new(0)),
+            [const { AtomicU32::new(0) }; LAST_CALLS_LEN],
         );
         ptr::write(
             (ptr as usize + offset_of!(Task, last_calls_cur))
@@ -1910,11 +2213,11 @@ impl Task {
         ptr::write(
             (ptr as usize + offset_of!(Task, init_calls))
                 as *mut [AtomicU32; INIT_CALLS_LEN],
-            core::array::from_fn(|_| AtomicU32::new(0)),
+            [const { AtomicU32::new(0) }; INIT_CALLS_LEN],
         );
         ptr::write(
             (ptr as usize + offset_of!(Task, init_a0)) as *mut [AtomicU64; INIT_CALLS_LEN],
-            core::array::from_fn(|_| AtomicU64::new(0)),
+            [const { AtomicU64::new(0) }; INIT_CALLS_LEN],
         );
         ptr::write(
             (ptr as usize + offset_of!(Task, init_calls_cur))
@@ -1924,12 +2227,12 @@ impl Task {
         ptr::write(
             (ptr as usize + offset_of!(Task, birth_calls))
                 as *mut [AtomicU32; BIRTH_CALLS_LEN],
-            core::array::from_fn(|_| AtomicU32::new(0)),
+            [const { AtomicU32::new(0) }; BIRTH_CALLS_LEN],
         );
         ptr::write(
             (ptr as usize + offset_of!(Task, birth_a0))
                 as *mut [AtomicU64; BIRTH_CALLS_LEN],
-            core::array::from_fn(|_| AtomicU64::new(0)),
+            [const { AtomicU64::new(0) }; BIRTH_CALLS_LEN],
         );
         ptr::write(
             (ptr as usize + offset_of!(Task, birth_done))
@@ -2307,6 +2610,34 @@ impl Task {
         ptr::write(
             (ptr as usize + offset_of!(Task, cstime_ticks)) as *mut AtomicU64,
             AtomicU64::new(0),
+        );
+        // Context-switch counters (Linux nvcsw/nivcsw): same non-zeroing
+        // discipline — /proc/[pid]/status reads them, so they must be
+        // initialized here or they carry allocator garbage.
+        ptr::write(
+            (ptr as usize + offset_of!(Task, nvcsw)) as *mut AtomicU64,
+            AtomicU64::new(0),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, nivcsw)) as *mut AtomicU64,
+            AtomicU64::new(0),
+        );
+        // Fault counters + the start time: the buddy allocator does not
+        // zero Task pages, so /proc/[pid]/stat would otherwise read
+        // allocator garbage for fields 10/12/22.
+        ptr::write(
+            (ptr as usize + offset_of!(Task, min_flt)) as *mut AtomicU64,
+            AtomicU64::new(0),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, maj_flt)) as *mut AtomicU64,
+            AtomicU64::new(0),
+        );
+        // The task's start time (Linux's starttime, field 22 of
+        // /proc/[pid]/stat): the jiffies at which the task was built.
+        ptr::write(
+            (ptr as usize + offset_of!(Task, start_jiffies)) as *mut AtomicU64,
+            AtomicU64::new(crate::drivers::timer::get_jiffies()),
         );
         // Ptrace + coredump state (P1 wave 3): see new_idle_at — non-zeroing
         // buddy allocator, init every enforcement-read field.
@@ -3863,6 +4194,81 @@ impl Task {
                     putchar(b'\n');
                     self.kernel_stack = None;
                     return;
+                }
+            }
+
+            // Leg-16 anatomy (dfx=schb,ksprobe): high-water scan + record
+            // stash. The stack is dead (on_cpu cleared + RCU waited
+            // upstream), no locks held — safe to walk. Records stash the
+            // surviving return addresses for the next schbd beat (the
+            // in-context print was eaten by early-boot UART storms twice).
+            if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::Schb)
+                && crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::KsProbe)
+            {
+                let base = stack_bottom as usize;
+                let mut off = 8usize; // skip the canary slot
+                while off < KERNEL_STACK_SIZE {
+                    // SAFETY: bounds validated above (base..base+SIZE).
+                    let v = unsafe { core::ptr::read_volatile((base + off) as *const u64) };
+                    if v != 0 {
+                        let hw = (KERNEL_STACK_SIZE - off) as u64;
+                        let old = KSTACK_HW.load(Ordering::Relaxed);
+                        if hw > old {
+                            KSTACK_HW.store(hw, Ordering::Relaxed);
+                            if hw > 40 * 1024 {
+                                use crate::console::putchar;
+                                const MSG: &[u8] = b"KSTACK-HW depth=";
+                                for &b in MSG { putchar(b); }
+                                let mut vv = hw;
+                                if vv == 0 { putchar(b'0'); }
+                                let mut dd = [0u8; 20]; let mut kk = 0;
+                                while vv > 0 { dd[kk] = b'0' + (vv % 10) as u8; kk += 1; vv /= 10; }
+                                while kk > 0 { kk -= 1; putchar(dd[kk]); }
+                                const P: &[u8] = b" pid=";
+                                for &b in P { putchar(b); }
+                                let mut pv = self.pid() as usize;
+                                if pv == 0 { putchar(b'0'); }
+                                let mut pd = [0u8; 10]; let mut pk = 0;
+                                while pv > 0 { pd[pk] = b'0' + (pv % 10) as u8; pk += 1; pv /= 10; }
+                                while pk > 0 { pk -= 1; putchar(pd[pk]); }
+                                const C: &[u8] = b" comm='";
+                                for &b in C { putchar(b); }
+                                for &cb in self.comm() { if cb != 0 { putchar(cb); } }
+                                // sc218 lesson: the region BELOW the first
+                                // nonzero word is a zeroed span (a memset'd
+                                // local or zero-initialised frames) — by
+                                // construction it carries no return
+                                // addresses. The surviving frames of the
+                                // deep chain sit just ABOVE `off`; walk
+                                // upward and print the first kernel-range
+                                // words (deepest surviving return
+                                // addresses, symbolisable with addr2line).
+                                const T: &[u8] = b"' tail:";
+                                for &b in T { putchar(b); }
+                                let mut shown = 0;
+                                let mut o2 = off;
+                                let o_end = off + 4096;
+                                while o2 < o_end && o2 < KERNEL_STACK_SIZE && shown < 40 {
+                                    // SAFETY: in-bounds per loop guard.
+                                    let ra = unsafe { core::ptr::read_volatile((base + o2) as *const u64) };
+                                    if ra >= 0xffffffff_80000000u64 && ra <= 0xffff_ffff_ffff_f000u64 {
+                                        putchar(b' ');
+                                        let mut sh2 = 64;
+                                        while sh2 > 0 {
+                                            sh2 -= 4;
+                                            let nb = ((ra >> sh2) & 0xF) as u8;
+                                            putchar(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 });
+                                        }
+                                        shown += 1;
+                                    }
+                                    o2 += 8;
+                                }
+                                putchar(b'\n');
+                            }
+                        }
+                        break;
+                    }
+                    off += 8;
                 }
             }
 
