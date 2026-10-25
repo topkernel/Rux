@@ -128,7 +128,14 @@ static void write_file_text(const char *path, const char *text) {
 
 static void arm_tracing(int on) {
     if (!on) return;
-    write_file_text(TRACE_BASE "/events/enable", "1");
+    // Focused set: scheduling + page faults only. Arming every event
+    // (the old events/enable=1) included sys_enter/sys_exit, which
+    // floods the per-CPU rings on every syscall — under the gsd storm
+    // the buffer held only ~160ms of history (1.5M+ overwrites/10min),
+    // far too little to see a stall. sched+exceptions keeps enough
+    // history to name where the chain stalls.
+    write_file_text(TRACE_BASE "/events/sched/enable", "1");
+    write_file_text(TRACE_BASE "/events/exceptions/enable", "1");
     write_file_text(TRACE_BASE "/tracing_on", "1");
 }
 
@@ -250,6 +257,21 @@ int main(void) {
         printf("[runit] session bus capture FAILED (%s); clients will dbus-launch\n", addr);
     }
 
+    // upowerd from PID1 instead of dbus activation: gsd-power exits(1)
+    // and gnome-session respawn-loops it when org.freedesktop.UPower is
+    // missing. The daemon IS activatable via the (now-fixed) setuid
+    // helper, but a cold upowerd start takes ~20s even on a QUIET boot
+    // (measured, run/upowerd-probe) — dbus's 25s service_start_timeout
+    // loses that race under the session storm and activation times out.
+    // Starting it here removes the race entirely.
+    {
+        pid_t u = launch_logged("/tmp/upowerd.log", "/usr/libexec/upowerd",
+                                "upowerd",
+                                (const char *const []){ "upowerd", NULL });
+        (void)u;
+        printf("[runit] upowerd started (pid %d)\n", (int)u);
+    }
+
     printf("[runit] starting Xorg (fbdev)\n");
     // gdk-pixbuf loaders cache: dpkg -x skips the postinst that writes
     // it, and without the cache every pixbuf load beyond the built-ins
@@ -309,8 +331,13 @@ int main(void) {
                     if (stat(logs[i], &st) != 0) continue;
                     dump_log_prefix(logs[i], 150);
                 }
-                if (TRACE && (cyc % 3) == 0)
+                if (TRACE && (cyc % 3) == 0) {
                     dump_log_prefix(TRACE_BASE "/per_cpu/cpu0/stats", 4);
+                    // Short scheduling snapshot every minute: names the
+                    // tasks the CPUs are actually running (or failing to
+                    // run) during long stalls like the slow Shell boot.
+                    dump_log_prefix(TRACE_BASE "/trace", 24);
+                }
             }
             _exit(0);
         }
