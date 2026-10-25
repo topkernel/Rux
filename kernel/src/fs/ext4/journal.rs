@@ -167,11 +167,32 @@ impl Ext4FileSystem {
 // ext4 journal wrapper functions
 // ============================================================================
 
-/// Start a journal transaction on the ext4 filesystem
+/// Start a journal transaction on the ext4 filesystem.
+///
+/// Route-1 (F4, the no-journal lazy write path): when the filesystem has
+/// no journal, this returns a NULL-JOURNAL handle instead of EINVAL. The
+/// handle carries no transaction and no journal, so `jbd2_journal_stop`
+/// returns early without committing — but while it is armed on the task
+/// slot it does everything the deferral machinery needs:
+/// - `bio::sync_dirty_buffer` defers (the buffer stays BH_Dirty), so the
+///   3-8 inline synchronous metadata writes per mkdir/create/unlink on
+///   the no-journal path stop happening; persistence moves to the batch
+///   points (fsync/sync, buffer-cache eviction), exactly like Linux's
+///   no-journal ext4 write-back mode;
+/// - the PRE/POST publication capture windows arm, so every deferred
+///   write keeps the crash ordering the ghost-file fix established
+///   (pre blocks before the entry block, post frees after it) —
+///   `bio::flush_publications` at each drain point enforces it.
+/// Crash consistency class: a crash mid-batch loses recent metadata to
+/// the same degree a write-back mount of the reference kernel does;
+/// recovery is e2fsck (documented F4-R2 stance).
 pub fn ext4_journal_start(fs: &Ext4FileSystem, nblocks: i32) -> Result<jbd2::Handle, i32> {
     let journal_arc = match &fs.journal {
         Some(j) => j.clone(),
-        None => return Err(EINVAL),
+        // Route-1 null-journal handle (see comment above). new_handle()
+        // leaves h_transaction/h_journal None; stop() takes its early
+        // return for that shape.
+        None => return Ok(jbd2::new_handle(nblocks)),
     };
 
     jbd2::jbd2_journal_start(&journal_arc, nblocks)
