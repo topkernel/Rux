@@ -1055,6 +1055,85 @@ fn handle_page_fault(regs: &mut PtRegs, access_type: u32) {    use crate::arch::
                 crate::sched::get_current_pid(),
                 if regs.kernel_mode() { "kernel" } else { "user" });
             if regs.user_mode() {
+                // User-fault VMA forensics: name the mappings the fault
+                // address and epc fall in. The GNOME bring-up had
+                // recurring shell deaths at a fixed address deep inside
+                // the bottom-up mapping region (0x300785a2xx) that the
+                // bare epc could not name; this pins the crashing
+                // library/executable directly. Best-effort — resolution
+                // failures still print the range and perms.
+                if let Some(task) = crate::sched::current() {
+                    // SAFETY: current is the faulting task itself;
+                    // address_space_arc clones the Arc out of it.
+                    if let Some(mm) = unsafe { (*task).address_space_arc() } {
+                        for a in [fault_addr, regs.epc] {
+                            match mm.find_vma(
+                                crate::mm::VirtAddr::new(a as usize)) {
+                                None => crate::pr_err!(
+                                    "  segv vma[{:#x}]: unmapped", a),
+                                Some(v) => {
+                                    let f = v.flags();
+                                    let perms: alloc::string::String = [
+                                        (f.is_readable(), 'r'),
+                                        (f.is_writable(), 'w'),
+                                        (f.is_executable(), 'x'),
+                                        (f.is_shared(), 's'),
+                                    ]
+                                    .iter()
+                                    .map(|&(on, c)| if on { c } else { '-' })
+                                    .collect();
+                                    let name = if f.contains(
+                                        crate::mm::vma::VmaFlags::GROWSDOWN)
+                                    {
+                                        alloc::string::String::from("[stack]")
+                                    } else if f.contains(
+                                        crate::mm::vma::VmaFlags::EXECUTABLE)
+                                    {
+                                        alloc::string::String::from("[exe]")
+                                    } else if v.vma_type()
+                                        == crate::mm::vma::VmaType::FileBacked
+                                    {
+                                        let mut path =
+                                            alloc::string::String::new();
+                                        if let Some(file) = mm.get_vma_file(
+                                            v.start().as_usize())
+                                        {
+                                            // SAFETY: read-only dentry access.
+                                            let d = unsafe { &*file.dentry.get() };
+                                            if let Some(d) = d.as_ref() {
+                                                path = crate::fs::vfs::dentry_user_path(d);
+                                            }
+                                        }
+                                        if path.is_empty() && v.file_fd() >= 0 {
+                                            if let Some(ft) = task.try_fdtable() {
+                                                // SAFETY: read-only access on
+                                                // the fdtable file.
+                                                let file = unsafe {
+                                                    ft.get_file(v.file_fd() as usize)
+                                                };
+                                                if let Some(file) = file {
+                                                    // SAFETY: read-only dentry access.
+                                                    let d = unsafe { &*file.dentry.get() };
+                                                    if let Some(d) = d.as_ref() {
+                                                        path = crate::fs::vfs::dentry_user_path(d);
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        path
+                                    } else {
+                                        alloc::string::String::from("anon")
+                                    };
+                                    crate::pr_err!(
+                                        "  segv vma[{:#x}]: {:x}-{:x} {} off={:#x} {}",
+                                        a, v.start().as_usize(),
+                                        v.end().as_usize(), perms,
+                                        v.offset(), name);
+                                }
+                            }
+                        }
+                    }
+                }
                 // Linux semantics: route user-mode faults through normal
                 // signal delivery (force_sig_fault) — an installed
                 // SIGSEGV handler (debuggers, crash catchers, LTP mmap05)
