@@ -1041,6 +1041,26 @@ fn handle_page_fault(regs: &mut PtRegs, access_type: u32) {    use crate::arch::
 
     let fault_addr = regs.badaddr;
 
+    // The exceptions:page_fault_user / exceptions:page_fault_kernel
+    // tracepoints, recorded at fault entry before the handler runs (the
+    // reference's record point). error_code carries the access-type
+    // bits (read=0x1 write=0x2 exec=0x4 — the fault kind; this is not
+    // the x86 error word); ip is the faulting epc. One armed() check
+    // selects the mode's event; the record marshals three words.
+    if crate::trace::EVENT_PAGE_FAULT_USER.armed() || crate::trace::EVENT_PAGE_FAULT_KERNEL.armed() {
+        let event = if regs.kernel_mode() {
+            &crate::trace::EVENT_PAGE_FAULT_KERNEL
+        } else {
+            &crate::trace::EVENT_PAGE_FAULT_USER
+        };
+        if event.armed() {
+            crate::trace::record(
+                event,
+                [fault_addr, regs.epc, access_type as u64, 0, 0, 0, 0, 0, 0, 0],
+            );
+        }
+    }
+
     crate::pr_debug!("trap: page fault addr={:#x}, epc={:#x}, type={}, mode={}",
         fault_addr, regs.epc, access_type,
         if regs.kernel_mode() { "kernel" } else { "user" });

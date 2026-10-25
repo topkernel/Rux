@@ -348,6 +348,67 @@ pub fn register() {
             })
         }),
     );
+
+    // --- trace_marker: the write-only marker file ----------------------
+    // Mode 0220 and write-only, exactly the reference file. Markers are
+    // gated by tracing_on alone (no event switch); the write body
+    // records the text as a tracing_mark_write event. The read closure
+    // never runs through the mode gate — the reference answers a read
+    // of the write-only file with EINVAL; the mode refusal here is the
+    // same refusal at a different errno.
+    debugfs::create_file(
+        &format!("{}/trace_marker", TRACING_DIR),
+        0o220,
+        || Vec::new(),
+        Some(|buf: &[u8]| {
+            trace::record_marker(buf);
+            0
+        }),
+    );
+
+    // --- the per-CPU views ---------------------------------------------
+    // per_cpu/cpuN/{trace,trace_pipe,stats,buffer_size_kb}: the
+    // reference dir also carries the snapshot and raw views; those
+    // need a second buffer / a binary record format this ring does not
+    // have, so they are omitted rather than faked (the plan doc's
+    // do-not-invent rule).
+    for cpu in 0..crate::config::MAX_CPUS {
+        let cpu_dir = format!("{}/per_cpu/cpu{}", TRACING_DIR, cpu);
+        debugfs::create_file(
+            &format!("{}/trace", cpu_dir),
+            0o640,
+            move || trace::render_trace_cpu(cpu).into_bytes(),
+            Some(move |_buf: &[u8]| {
+                // Writing the per-CPU trace file clears that CPU's
+                // ring, the global file's convention.
+                trace::clear_cpu(cpu);
+                0
+            }),
+        );
+        debugfs::create_file(
+            &format!("{}/trace_pipe", cpu_dir),
+            0o440,
+            move || trace::render_pipe_cpu(cpu).into_bytes(),
+            None::<fn(&[u8]) -> i32>,
+        );
+        debugfs::create_file(
+            &format!("{}/stats", cpu_dir),
+            0o440,
+            move || trace::cpu_stats(cpu).into_bytes(),
+            None::<fn(&[u8]) -> i32>,
+        );
+        debugfs::create_file(
+            &format!("{}/buffer_size_kb", cpu_dir),
+            0o640,
+            || {
+                let kb = trace::RING_CAPACITY
+                    * core::mem::size_of::<trace::TraceRecord>()
+                    / 1024;
+                alloc::format!("{}\n", kb).into_bytes()
+            },
+            None::<fn(&[u8]) -> i32>,
+        );
+    }
 }
 
 /// The set_event write handler: comma- or space-separated tokens,

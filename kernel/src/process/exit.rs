@@ -508,6 +508,33 @@ pub fn do_exit(exit_code: i32) -> ! {
         }
     };
 
+    // The sched:sched_process_exit tracepoint, recorded at do_exit entry
+    // (the reference's record point). group_dead: this exit takes the
+    // thread group to its last live thread — nr_threads has not been
+    // decremented yet, so 1 means this is it. Gated behind armed().
+    if crate::trace::EVENT_SCHED_PROCESS_EXIT.armed() {
+        // SAFETY: current is the exiting task, pinned by being the
+        // running context.
+        unsafe {
+            let words = crate::trace::comm_to_words(&*(*current).comm());
+            crate::trace::record(
+                &crate::trace::EVENT_SCHED_PROCESS_EXIT,
+                [
+                    words[0],
+                    words[1],
+                    (*current).pid() as u64,
+                    (*current).prio() as u64,
+                    ((*current).nr_threads() <= 1) as u64,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                ],
+            );
+        }
+    }
+
     // SAFETY: current is the raw pointer to the calling task, guaranteed valid since
     // we are the currently executing task and will never return from this function.
     unsafe {
