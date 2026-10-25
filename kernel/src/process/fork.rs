@@ -134,6 +134,17 @@ fn copy_thread(task: &mut Task, args: &CloneArgs, parent_regs: &PtRegs) -> Optio
                     let ct = task.thread_mut();
                     ct.fpu.copy_from_slice(&pfpu);
                     ct.mark_fpu_clean();
+                    // Vector state inherits the same way (POSIX: the
+                    // child observes the parent's vector values).
+                    (*parent_task).thread_mut().save_vstate();
+                    let pvs = (*parent_task).thread().vstate_valid;
+                    let pvcsrs = (*parent_task).thread().vcsrs;
+                    let pvregs = (*parent_task).thread().vregs;
+                    let ct = task.thread_mut();
+                    ct.vstate_valid = pvs;
+                    ct.vcsrs.copy_from_slice(&pvcsrs);
+                    ct.vregs.copy_from_slice(&pvregs);
+                    ct.mark_vstate_clean();
                 }
                 #[cfg(feature = "x86_64")]
                 {
