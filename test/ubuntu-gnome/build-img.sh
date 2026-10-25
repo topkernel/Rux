@@ -18,7 +18,8 @@ WT="$(cd "$(dirname "$0")/../.." && pwd)"
 DL="$WT/work/downloads"
 WORK="$WT/work"
 ROOT="$WORK/gnome-root-riscv64"
-IMG="$WORK/gnome-riscv64.img"
+# Overridable so successive images can coexist (GNOME_IMG=work/gnome-r3.img ...)
+IMG="${GNOME_IMG:-$WORK/gnome-riscv64.img}"
 SRC_TGZ="$DL/ubuntu-base-22.04.3-base-riscv64.tar.gz"
 SRC_URL="http://cdimage.ubuntu.com/ubuntu-base/releases/22.04.3/release/ubuntu-base-22.04.3-base-riscv64.tar.gz"
 
@@ -74,7 +75,12 @@ cat > "$APT_SRC" <<'EOS'
 deb [trusted=yes] http://mirrors.aliyun.com/ubuntu-ports/ jammy main restricted universe multiverse
 deb [trusted=yes] http://mirrors.aliyun.com/ubuntu-ports/ jammy-updates main restricted universe multiverse
 EOS
-PKGS="dash bash xserver-xorg-core xserver-xorg-video-fbdev x11-xserver-utils dbus dbus-x11 libgl1-mesa-dri libgl1-mesa-glx gnome-session-bin gnome-session gnome-shell gnome-settings-daemon librsvg2-common xterm fonts-dejavu-core util-linux coreutils procps"
+# upower: gsd-power needs a live org.freedesktop.UPower on the system
+# bus or it exits(1) on plugin init and gnome-session respawn-loops it
+# (49 deaths per 30-min boot observed, each trip risking the "Oh no"
+# error screen). upowerd is dbus-activatable, so no runit change is
+# needed — the system bus starts it on first StartServiceByName.
+PKGS="dash bash xserver-xorg-core xserver-xorg-video-fbdev x11-xserver-utils dbus dbus-x11 libgl1-mesa-dri libgl1-mesa-glx gnome-session-bin gnome-session gnome-shell gnome-settings-daemon librsvg2-common xterm fonts-dejavu-core util-linux coreutils procps upower"
 
 AOPTS=(-o Dir::Etc::sourcelist="$APT_SRC" -o Dir::Etc::sourceparts=-
        -o Dir::State::lists="$APT_LIST" -o Dir::State::status=/dev/null
@@ -264,9 +270,35 @@ EOX
 # ---------------------------------------------------------------------------
 # Pack the image (Rux ext4 constraints: 4K blocks, no metadata_csum).
 # The full GNOME chain unpacks to ~2.5G — give the fs 3.5G.
+#
+# fakeroot pass: dpkg-deb -x runs as a plain user, so the staging tree
+# is 1000:1000 throughout and mkfs -d would bake that into the image.
+# Two things break downstream: (a) system-bus activation refuses to
+# exec the setuid launch helper unless it is root-owned with the suid
+# bit — every StartServiceByName(org.freedesktop.*) died with "The
+# permission of the setuid helper is not correct" (83-191 lines per
+# boot; gsd-power/keyboard/media-keys all affected); (b) nothing on
+# the image is root-owned at all, which no stock rootfs does. Fix by
+# re-owning the tree 0:0 under fakeroot and setting the helper to its
+# stock Ubuntu mode 4754 root:messagebus, then packing inside the same
+# fakeroot session so mkfs -d records the faked ownership.
 # ---------------------------------------------------------------------------
-echo "== packing $IMG (mkfs -d, no loop mounts needed)"
-mkfs.ext4 -b 4096 -O ^metadata_csum -d "$ROOT" "$IMG" 3500M >/dev/null
+HELPER=""
+for c in "$ROOT/usr/lib/dbus-1.0/dbus-daemon-launch-helper" \
+         "$ROOT/usr/lib/dbus-1/dbus-daemon-launch-helper"; do
+    [ -f "$c" ] && HELPER="${c#"$ROOT"}"
+done
+[ -n "$HELPER" ] || { echo "dbus launch helper not found in staging tree" >&2; exit 1; }
+command -v fakeroot >/dev/null || { echo "missing fakeroot" >&2; exit 1; }
+
+echo "== packing $IMG (fakeroot: root-owned tree, $HELPER 4754 root:messagebus)"
+export ROOT IMG HELPER
+fakeroot -- sh -c '
+    chown -R 0:0 "$ROOT"
+    chown 0:105 "$ROOT$HELPER"
+    chmod 4754 "$ROOT$HELPER"
+    mkfs.ext4 -b 4096 -O ^metadata_csum -d "$ROOT" "$IMG" 3500M >/dev/null
+'
 
 # e2fsck gate: mkfs -d's hardlink bookkeeping can, on a surgically
 # modified root, pack a dirent whose inode the bitmap never marks
