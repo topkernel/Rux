@@ -1359,7 +1359,14 @@ pub fn sys_sendto(args: SyscallArgs) -> i64 {
     };
     let nonblock = file_nonblock || (_flags & MSG_DONTWAIT) != 0;
     let deadline = socket.sndtimeo_deadline();
-    match crate::net::socket::socket_send_ctl(&socket, data, dest_addr, nonblock, deadline) {
+    match crate::net::socket::socket_send_ctl(
+        &socket,
+        data,
+        dest_addr,
+        nonblock,
+        deadline,
+        _flags & MSG_MORE != 0,
+    ) {
         Ok(bytes_sent) => bytes_sent as i64,
         Err(e) => e as i64,
     }
@@ -2939,7 +2946,14 @@ pub fn sys_sendmsg(args: SyscallArgs) -> i64 {
             }
             let nonblock = file_nonblock || (flags & MSG_DONTWAIT) != 0;
             let deadline = socket.sndtimeo_deadline();
-            match crate::net::socket::socket_send_ctl(&socket, &buf, dest_addr, nonblock, deadline) {
+            match crate::net::socket::socket_send_ctl(
+                &socket,
+                &buf,
+                dest_addr,
+                nonblock,
+                deadline,
+                flags & MSG_MORE != 0,
+            ) {
                 Ok(n) => n as i64,
                 Err(e) => e as i64,
             }
@@ -2950,6 +2964,9 @@ pub fn sys_sendmsg(args: SyscallArgs) -> i64 {
 
 /// W3: MSG_DONTWAIT (recvfrom/sendto/recvmsg/sendmsg).
 const MSG_DONTWAIT: i32 = 0x40;
+/// MSG_MORE (send02): hold the payload on the socket (cork) instead of
+/// delivering it; the next flagless send flushes the concatenation.
+const MSG_MORE: i32 = 0x8000;
 /// W3: MSG_TRUNC (reported in recvmsg's msg_flags).
 const MSG_TRUNC: i32 = 0x20;
 /// MSG_PEEK: receive without consuming (AF_UNIX — hilogd's datagram
@@ -3660,6 +3677,7 @@ pub fn sys_sendmmsg(args: SyscallArgs) -> i64 {
             dest_addr,
             nonblock,
             deadline,
+            flags & MSG_MORE != 0,
         ) {
             Ok(n) => n,
             // W3: first failure with nothing sent returns the errno.
