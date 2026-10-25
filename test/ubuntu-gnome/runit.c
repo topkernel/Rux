@@ -213,6 +213,24 @@ int main(void) {
     }
 
     printf("[runit] starting Xorg (fbdev)\n");
+    // gdk-pixbuf loaders cache: dpkg -x skips the postinst that writes
+    // it, and without the cache every pixbuf load beyond the built-ins
+    // fails ("Could not load a pixbuf from icon theme" — the shell's
+    // SVG icons need the librsvg loader registered). Generate it once,
+    // guest-side, before anything paints.
+    {
+        pid_t q = fork();
+        if (q == 0) {
+            const char *cachepath =
+                "/usr/lib/riscv64-linux-gnu/gdk-pixbuf-2.0/2.10.0/loaders.cache";
+            int out = open(cachepath, O_WRONLY | O_CREAT | O_TRUNC, 0644);
+            if (out >= 0) { dup2(out, STDOUT_FILENO); close(out); }
+            execl("/usr/lib/riscv64-linux-gnu/gdk-pixbuf-2.0/gdk-pixbuf-query-loaders",
+                  "gdk-pixbuf-query-loaders", (char *)NULL);
+            _exit(127);
+        }
+        if (q > 0) { int st; waitpid(q, &st, 0); }
+    }
     // Xorg output goes to the serial console (console=ttyS0) for
     // headless bring-up diagnosis; the log file copy stays as well.
     pid_t xpid = fork();

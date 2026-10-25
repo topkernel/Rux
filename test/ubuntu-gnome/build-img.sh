@@ -74,7 +74,7 @@ cat > "$APT_SRC" <<'EOS'
 deb [trusted=yes] http://mirrors.aliyun.com/ubuntu-ports/ jammy main restricted universe multiverse
 deb [trusted=yes] http://mirrors.aliyun.com/ubuntu-ports/ jammy-updates main restricted universe multiverse
 EOS
-PKGS="dash bash xserver-xorg-core xserver-xorg-video-fbdev x11-xserver-utils dbus dbus-x11 libgl1-mesa-dri libgl1-mesa-glx gnome-session-bin gnome-session gnome-shell gnome-settings-daemon xterm fonts-dejavu-core util-linux coreutils procps"
+PKGS="dash bash xserver-xorg-core xserver-xorg-video-fbdev x11-xserver-utils dbus dbus-x11 libgl1-mesa-dri libgl1-mesa-glx gnome-session-bin gnome-session gnome-shell gnome-settings-daemon librsvg2-common xterm fonts-dejavu-core util-linux coreutils procps"
 
 AOPTS=(-o Dir::Etc::sourcelist="$APT_SRC" -o Dir::Etc::sourceparts=-
        -o Dir::State::lists="$APT_LIST" -o Dir::State::status=/dev/null
@@ -200,6 +200,19 @@ for lib in libGLX_mesa.so.0.0.0 libglapi.so.0.0.0 libEGL_mesa.so.0.0.0; do
     install -m 0644 "$WORK/sw20client/usr/lib/riscv64-linux-gnu/$lib" \
         "$ROOT/usr/lib/riscv64-linux-gnu/$lib"
 done
+
+# Accept software GL for the stock session: gnome-session-check-accelerated
+# matches the renderer against hardware-compatibility and the stock file
+# ends with "-softpipe" (upstream enables llvmpipe only). The pinned
+# 20.0.4 riscv64 driver IS softpipe (built without LLVM), so the last
+# rule must whitelist it or the session refuses to start ("No hardware
+# 3D support" -> gnome-session-failed dialog -> fallback shell without
+# gsd). Rules apply in order with last-match-wins: append +softpipe.
+cat >> "$ROOT/usr/share/gnome-session/hardware-compatibility" <<'EOH'
+
+# Rux bring-up: softpipe is the only swrast on this platform
++softpipe
+EOH
 
 # ---------------------------------------------------------------------------
 # /sbin/runit — the session bootstrap (clear stale X locks, both dbus
