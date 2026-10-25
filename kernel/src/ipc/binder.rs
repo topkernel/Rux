@@ -755,6 +755,130 @@ unsafe fn sweep_stale_async(world: &World, target: &Arc<BinderProc>) -> usize {
     reclaimed
 }
 
+/// Leg-19: the enq_j silence rule — leg-17's banked design, the dominant
+/// floor population's lever. The delivered-stale sweep (pick_j+30s)
+/// cannot free UNDELIVERED parked oneways: a txn with pick_j==0 that
+/// has sat on a todo for longer than any plausible retry ladder (OH's
+/// own ladder tops out at 40 s) is dead by the same silence proof — its
+/// receiver's readers are all parked (the WAKE-RUN-LEAK census shape)
+/// and no BR_TRANSACTION will ever deliver it. Retirement mirrors the
+/// node-death pattern (binder_on_tgid_exit): the txn drops its async
+/// slot, sync senders get BR_DEAD_REPLY (unstacking them from
+/// WaitForReply), finish_work frees the buffer and unpins the node, and
+/// the drained work is simply not re-queued. The async-slot handoff
+/// after a front-of-node retirement matches sweep_stale_async, so the
+/// next live parked txn stays deliverable.
+///
+/// Sync txns parked undelivered get a longer silence window than
+/// oneways: a sync sender is parked waiting and BR_DEAD_REPLY unwedges
+/// it (the b139 hdf_devmgr shape), but losing a sync call that a
+/// merely-slow receiver would have picked up is costlier, so the bar is
+/// 60 s.
+///
+/// Returns (retired count, procs whose readers must be re-checked for
+/// wake AFTER WORLD is released — same contract as
+/// binder_on_tgid_exit).
+///
+/// SAFETY: caller holds WORLD.
+unsafe fn sweep_silent_txns(world: &World) -> (usize, Vec<Arc<BinderProc>>) {
+    const ONEWAY_SILENCE_J: u32 = (crate::config::KERNEL_HZ as u32).saturating_mul(30);
+    const SYNC_SILENCE_J: u32 = (crate::config::KERNEL_HZ as u32).saturating_mul(60);
+    let now = crate::drivers::timer::get_jiffies() as u32;
+    let mut retired = 0usize;
+    let mut wakes: Vec<Arc<BinderProc>> = Vec::new();
+    let procs = world.procs.clone();
+    for p in &procs {
+        // 1. Proc todo: retire silent parked transactions.
+        let queued: Vec<Work> = pm(world, p).im().todo.drain(..).collect();
+        for wk in queued {
+            let retire = match &wk {
+                Work::Transaction(t) => {
+                    // SAFETY: WORLD held; pick_j is written under WORLD.
+                    let pj = unsafe { *t.pick_j.get() };
+                    if pj != 0 {
+                        false
+                    } else {
+                        let age = now.wrapping_sub(t.enq_j);
+                        if t.flags & TF_ONE_WAY != 0 {
+                            age > ONEWAY_SILENCE_J
+                        } else {
+                            age > SYNC_SILENCE_J
+                        }
+                    }
+                }
+                _ => false,
+            };
+            if retire {
+                let Work::Transaction(t) = &wk else {
+                    unreachable!("retire only set for Transaction");
+                };
+                // SAFETY: WORLD held.
+                unsafe { t.set_holds_async_slot(false) };
+                if t.flags & TF_ONE_WAY == 0 {
+                    // SAFETY: WORLD held.
+                    wakes.extend(unsafe { dead_reply_to_sender(world, p, t) });
+                }
+                // SAFETY: WORLD held; frees the buffer + unpins the node.
+                unsafe { finish_work(world, p, wk) };
+                retired += 1;
+            } else {
+                pm(world, p).im().todo.push_back(wk);
+            }
+        }
+        // 2. Node async_todo: the oneway parking lot. Retire the silent
+        //    ones, keep delivery order, hand the async slot onward when a
+        //    slot holder retires.
+        let nodes = pm(world, p).im().nodes.clone();
+        for n in &nodes {
+            // SAFETY: WORLD held.
+            let parked: Vec<Arc<BinderTxn>> = unsafe { n.st().async_todo.drain(..).collect() };
+            if parked.is_empty() {
+                continue;
+            }
+            let mut keep: Vec<Arc<BinderTxn>> = Vec::with_capacity(parked.len());
+            let mut slot_vacated = false;
+            for t in parked {
+                // SAFETY: WORLD held; pick_j is written under WORLD.
+                let pj = unsafe { *t.pick_j.get() };
+                let silent = pj == 0 && now.wrapping_sub(t.enq_j) > ONEWAY_SILENCE_J;
+                if !silent {
+                    keep.push(t);
+                    continue;
+                }
+                // SAFETY: WORLD held.
+                if unsafe { t.holds_async_slot() } {
+                    slot_vacated = true;
+                }
+                // SAFETY: WORLD held.
+                unsafe { t.set_holds_async_slot(false) };
+                // SAFETY: WORLD held; frees the buffer + unpins the node.
+                unsafe { finish_work(world, p, Work::Transaction(t)) };
+                retired += 1;
+            }
+            for t in keep {
+                // SAFETY: WORLD held.
+                unsafe { n.st().async_todo.push_back(t) };
+            }
+            if slot_vacated {
+                // SAFETY: WORLD held (set_holds_async_slot requires it).
+                unsafe {
+                    match n.st().async_todo.pop_front() {
+                        Some(h) => {
+                            h.set_holds_async_slot(true);
+                            let tp = h.to_proc.clone();
+                            pm(world, &tp).im().todo.push_back(Work::Transaction(h));
+                        }
+                        None => {
+                            n.st().has_async_transaction = false;
+                        }
+                    }
+                }
+            }
+        }
+    }
+    (retired, wakes)
+}
+
 // sc140 (Session Q): registry of forked appspawn child pids (written by
 // the clone census at each appspawn fork, first 128 per boot). The
 // APPTXN tracer prints any binder transaction whose TARGET is one of
@@ -980,6 +1104,13 @@ struct BinderThread {
     /// kick failed to run the task (wake→run leak); the scheduler view is
     /// dumped then (WAKE-RUN-LEAK line).
     rekick_count: core::sync::atomic::AtomicU32,
+    /// sc252/sc253 attribution (leg 19): outcome counters for this
+    /// thread's OWN wait-queue kicks, read by the WAKE-RUN-LEAK dump —
+    /// wok>=1 with the task still parked means the wake linked the task
+    /// and the PICK side never ran it; wno-only means every kick was
+    /// silently refused (the R82 DL-ENQ-DEFERRED / R80-phantom families).
+    kick_wake_ok: core::sync::atomic::AtomicU32,
+    kick_wake_refused: core::sync::atomic::AtomicU32,
 }
 
 impl BinderThread {
@@ -992,6 +1123,8 @@ impl BinderThread {
             stall_reported: core::sync::atomic::AtomicBool::new(false),
             rekicked: core::sync::atomic::AtomicBool::new(false),
             rekick_count: core::sync::atomic::AtomicU32::new(0),
+            kick_wake_ok: core::sync::atomic::AtomicU32::new(0),
+            kick_wake_refused: core::sync::atomic::AtomicU32::new(0),
             st: core::cell::UnsafeCell::new(ThreadState {
                 looper: 0,
                 todo: VecDeque::new(),
@@ -1258,7 +1391,17 @@ fn proc_alive(world: &World, p: &Arc<BinderProc>) -> bool {
 }
 
 fn wake_thread(t: &BinderThread) {
-    t.wait.wake_up(crate::process::wait::WakeUpHint::Normal, 0);
+    let n = t.wait.wake_up(crate::process::wait::WakeUpHint::Normal, 0);
+    // sc252/sc253 attribution: wake_up counts entries it transitioned (a
+    // refused wake is not counted — see WaitQueueHead::wake_up's W1
+    // clear-and-continue). 0 therefore means "no entry transitioned":
+    // either the queue is empty (the thread parks elsewhere — a futex)
+    // or every attempt was refused.
+    if n > 0 {
+        t.kick_wake_ok.fetch_add(n as u32, core::sync::atomic::Ordering::Relaxed);
+    } else {
+        t.kick_wake_refused.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    }
 }
 
 /// sc163: post a transaction aimed at a forked-child node directly onto
@@ -3059,6 +3202,7 @@ pub fn stall_report() {
         threads: Vec<Arc<BinderThread>>, // for deferred holder forensics
     }
     let mut owner_dumps: Vec<OwnerDump> = Vec::new();
+    let mut retire_wakes: Vec<Arc<BinderProc>> = Vec::new();
     {
         let w = world_lock();
         // SAFETY: read-only traversal under WORLD (pm() casts are only used
@@ -3068,6 +3212,20 @@ pub fn stall_report() {
                 Some(world) => world,
                 None => return,
             };
+            // Leg-19: the enq_j silence rule (leg-17's banked design) —
+            // retire undelivered transactions whose receivers have been
+            // silent past any plausible retry ladder. Frees the dominant
+            // floor population (parked oneways, pick_j==0) and unstacks
+            // the senders of parked sync calls.
+            let (retired, mut rw) = sweep_silent_txns(world);
+            retire_wakes.append(&mut rw);
+            if retired > 0 {
+                let _ = writeln!(
+                    out,
+                    "binder-stall: SILENT-TXN-RETIRE retired {} txn(s) this scan",
+                    retired
+                );
+            }
             for p in &world.procs {
                 let proc = pm(world, p);
                 if !proc.im().todo.is_empty() {
@@ -3124,9 +3282,31 @@ pub fn stall_report() {
                                         if *cur == task { "/OWNER" } else { "" },
                                     );
                                 }
+                                // Leg-19 attribution: policy/on_rq/dl + the
+                                // kick outcome counters — decider between
+                                // "wake linked it, pick never ran it"
+                                // (wok>=1, on_rq=1) and "wake silently
+                                // refused" (wno-only — R82 DL defer or an
+                                // empty queue: the thread parks on a
+                                // futex, not on the binder waitqueue).
+                                let pol = tk.policy() as u8;
+                                let onrq = match tk.policy() {
+                                    crate::process::task::SchedPolicy::Fifo
+                                    | crate::process::task::SchedPolicy::Rr => {
+                                        tk.rt_entity().is_on_rq()
+                                    }
+                                    crate::process::task::SchedPolicy::Deadline => {
+                                        tk.dl_entity().is_on_rq()
+                                    }
+                                    _ => tk.sched_entity().is_on_rq(),
+                                };
+                                let dlthr = tk
+                                    .dl_entity()
+                                    .dl_throttled
+                                    .load(core::sync::atomic::Ordering::Acquire);
                                 let _ = writeln!(
                                     out,
-                                    "binder-stall: WAKE-RUN-LEAK tid {} kicked {}x age {}s state={:#x} cfs_linked={} on_cpu={} pick_state={} cpu={}",
+                                    "binder-stall: WAKE-RUN-LEAK tid {} kicked {}x age {}s state={:#x} cfs_linked={} on_cpu={} pick_state={} cpu={} pol={} on_rq={} dl_thr={} wok={} wno={}",
                                     t.tid,
                                     kicks + 1,
                                     age / hz,
@@ -3134,7 +3314,12 @@ pub fn stall_report() {
                                     linked,
                                     tk.on_cpu(),
                                     tk.pick_state(),
-                                    tk.ti_cpu()
+                                    tk.ti_cpu(),
+                                    pol,
+                                    onrq,
+                                    if dlthr { 1 } else { 0 },
+                                    t.kick_wake_ok.load(core::sync::atomic::Ordering::Relaxed),
+                                    t.kick_wake_refused.load(core::sync::atomic::Ordering::Relaxed),
                                 );
                                 let _ = writeln!(out, "binder-stall:{}", slots);
                             }
@@ -3283,6 +3468,9 @@ pub fn stall_report() {
         wake_thread(&t);
     }
     for p in retodo {
+        wake_proc_one(&p, 0);
+    }
+    for p in retire_wakes.drain(..) {
         wake_proc_one(&p, 0);
     }
     // ---- sc89: slow forensics + output, all with irqs on, WORLD free ----
@@ -6079,6 +6267,8 @@ fn binder_thread_read(
             thread.stall_reported.store(false, core::sync::atomic::Ordering::Release);
             thread.rekicked.store(false, core::sync::atomic::Ordering::Release);
             thread.rekick_count.store(0, core::sync::atomic::Ordering::Release);
+            thread.kick_wake_ok.store(0, core::sync::atomic::Ordering::Release);
+            thread.kick_wake_refused.store(0, core::sync::atomic::Ordering::Release);
             let r = crate::wait_event_interruptible!(&thread.wait, {
                 let w = world_lock();
                 // SAFETY: under WORLD.

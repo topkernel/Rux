@@ -118,7 +118,7 @@ pub const KERNEL_ENTRY: u64 = 0x80200000;
 /// later outgrew 10MB — its boot-stack top page faulted at
 /// 0xffffffff80a00000 during the first trap (see boot.S PMD[5]).
 ///
-/// The heap now starts at the window end (0x81000000, HEAP_START below)
+/// The heap now starts at the window end (0x81200000, HEAP_START below)
 /// with the RAM-base reservation extended to meet it. The earlier note
 /// that "moving the heap one PMD past the window breaks the vmemmap
 /// backing search" described a move that left [0x80C00000,0x80E00000)
@@ -141,17 +141,22 @@ pub const KERNEL_ENTRY: u64 = 0x80200000;
 /// the 14MB window. A 1MiB name cap made the table worse than useless —
 /// it covered only the first ~1.7MB of .text, so every sched/trap/syscall
 /// hot-path frame symbolized to '?'. Window, heap, reservation and this
-/// entry all moved 14MB->18MB together (same rule as LAYOUT-2).
-pub const KERNEL_SIZE: u64 = 0x1200000;
+/// entry all moved 14MB->18MB together (same rule as LAYOUT-2). (An
+/// intermediate branch-local bump 14MB->16MB for the static buddy
+/// BlockMeta/free-bitmap arrays in .data was subsumed by this move.)
+/// RUX-RISCV-LAYOUT-4: the LTP lane's syscall-contract batch (tee,
+/// process_vm, socket entry validation) outgrew 18MB; the same set
+/// moved 18MB->20MB.
+pub const KERNEL_SIZE: u64 = 0x1400000;
 
 /// Heap start address (after kernel)
 /// RUX-RISCV-LAYOUT: must stay at/above the boot.S image-window end
-/// (entry 0x80200000 + KERNEL_SIZE 18MB = 0x81400000) and must match
+/// (entry 0x80200000 + KERNEL_SIZE 20MB = 0x81600000) and must match
 /// KERNEL_RESERVE_SIZE/KERNEL_HEAP_PHYS in main.rs and buddy_allocator.rs.
 /// When it sat at 0x80C00000 (2MB inside the window) the grown kernel
 /// image overlapped the first heap pages — see main.rs
 /// RUX-RISCV-LAYOUT for the corruption family that produced.
-pub const HEAP_START: u64 = 0x81400000;
+pub const HEAP_START: u64 = 0x81600000;
 
 /// Slab start address (after heap)
 /// Note: Actual address depends on KERNEL_HEAP_SIZE config

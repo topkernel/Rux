@@ -1193,3 +1193,49 @@ pub fn attr_label_get(pid: u64, exec: bool) -> Vec<u8> {
 pub fn attr_label_set(pid: u64, exec: bool, buf: &[u8]) {
     attr_set(pid, if exec { ATTR_EXEC } else { ATTR_CURRENT }, buf);
 }
+
+/// Generate /proc/[pid]/fdinfo/<fd> content (fdinfo(5)).
+///
+/// Generic header (pos/flags/mnt_id) plus per-descriptor-type lines; the
+/// inotify table carries one "inotify wd:..." record per watch — LTP
+/// inotify12 parses the mask back out of it.
+pub fn generate_fdinfo(pid: u64, fd: u32) -> Vec<u8> {
+    use crate::process::{current_task, current_pid, find_task_by_pid};
+
+    let task = if current_pid() as u64 == pid {
+        current_task()
+    } else {
+        find_task_by_pid(pid as u32)
+    };
+
+    let task = match task {
+        Some(t) => t,
+        None => return Vec::new(),
+    };
+
+    let fdtable = match task.try_fdtable() {
+        Some(ft) => ft,
+        None => return Vec::new(),
+    };
+
+    let file = match fdtable.get_file(fd as usize) {
+        Some(f) => f,
+        None => return Vec::new(),
+    };
+
+    let mut out = alloc::string::String::new();
+    out.push_str(&alloc::format!("pos:\t{}\n", file.get_pos()));
+    out.push_str(&alloc::format!("flags:\t{:o}\n", file.flags_bits()));
+    out.push_str("mnt_id:\t0\n");
+
+    if let Some(watches) = crate::fs::inotify::fdinfo_watches(&file) {
+        for (wd, sdev, ino, mask) in watches {
+            out.push_str(&alloc::format!(
+                "inotify wd:{:x} ino:{:x} sdev:{:x} mask:{:x} ignored_mask:0 \n",
+                wd, ino, sdev, mask
+            ));
+        }
+    }
+
+    out.into_bytes()
+}

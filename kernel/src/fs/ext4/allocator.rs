@@ -387,10 +387,12 @@ impl<'a> BlockAllocator<'a> {
                 .ok_or(errno::Errno::IOError.as_neg_i32())?;
             let free_blocks_ptr = (*bh).b_data.as_mut_ptr().add(desc_offset + BG_FREE_BLOCKS_OFF) as *mut u16;
             free_blocks_ptr.write_volatile(free_blocks);
+            // F4-R2 (leg-31, f4-ext4-route-map.md route 2): group-desc
+            // free-BLOCKS counter — durability-deferred like the superblock
+            // counters (order-unconstrained; e2fsck class on crash).
+            // Bitmaps and inode tables keep their inline syncs.
             (*bh).set_state_bit(crate::fs::bio::BufferState::BH_Dirty);
-            let sync_res = bio::sync_dirty_buffer(bh);
             bio::brelse(bh);
-            sync_res?;
             Ok(())
         }
     }
@@ -407,10 +409,10 @@ impl<'a> BlockAllocator<'a> {
             let current = free_blocks_ptr.read_volatile();
             let new_count = (current as i64 + delta as i64) as u32;
             free_blocks_ptr.write_volatile(new_count);
+            // F4-R2 (leg-31): superblock free-BLOCKS counter,
+            // durability-deferred (see update_group_desc_free_blocks).
             (*bh).set_state_bit(crate::fs::bio::BufferState::BH_Dirty);
-            let sync_res = bio::sync_dirty_buffer(bh);
             bio::brelse(bh);
-            sync_res?;
             Ok(())
         }
     }
@@ -783,12 +785,10 @@ impl<'a> InodeAllocator<'a> {
             let free_inodes_ptr = data.as_mut_ptr().add(desc_offset + 14) as *mut u16;
             free_inodes_ptr.write_volatile(free_inodes);
 
+            // F4-R2 (leg-31): group-desc free-INODES counter,
+            // durability-deferred (order-unconstrained; e2fsck class).
             (*bh).set_state_bit(crate::fs::bio::BufferState::BH_Dirty);
-            let sync_res = bio::sync_dirty_buffer(bh);
-
             bio::brelse(bh);
-
-            sync_res?;
 
             Ok(())
         }
@@ -815,12 +815,10 @@ impl<'a> InodeAllocator<'a> {
             let new = (current as i32 + delta) as u32;
             free_inodes_ptr.write_volatile(new);
 
+            // F4-R2 (leg-31): superblock free-INODES counter,
+            // durability-deferred (see update_group_desc_free_blocks).
             (*bh).set_state_bit(crate::fs::bio::BufferState::BH_Dirty);
-            let sync_res = bio::sync_dirty_buffer(bh);
-
             bio::brelse(bh);
-
-            sync_res?;
 
             Ok(())
         }

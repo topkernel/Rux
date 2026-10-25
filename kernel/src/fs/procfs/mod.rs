@@ -65,6 +65,7 @@ pub mod softirqs;
 pub mod sysctl;
 pub mod sysrq;
 pub mod timer_list;
+pub mod procfile;
 pub mod vmstat;
 pub mod net;
 pub mod configgz;
@@ -102,10 +103,35 @@ pub(crate) fn attr_file_kind_of(ino: u64) -> Option<(u64, u8)> {
 
 /// /proc/[pid]/task subdirectory (thread IDs). The per-tid directories
 /// alias the tid's own PID directory (same ino = tid), so
-/// /proc/self/task/<tid>/attr/<file> resolves through the regular
+/// /proc/self/task/<tid>/attr/... resolves through the regular
 /// /proc/[pid] machinery — libselinux addresses attr files through the
 /// task path, not /proc/<pid>.
 pub(crate) const TASK_DIR_INO_OFF: u64 = 620;
+
+/// /proc/[pid]/fdinfo subdirectory: per-fd status files (fdinfo(5)).
+/// Offsets stay clear of the fd-link range (300..1324) and of the
+/// PidFileKind range (100..200).
+pub(crate) const FDINFO_DIR_INO_OFF: u64 = 1400;
+/// pid * 10000 + FDINFO_FILE_INO_OFF + fd — the "fdinfo/<N>" files.
+pub(crate) const FDINFO_FILE_INO_OFF: u64 = 1500;
+
+/// Is this ino the /proc/[pid]/fdinfo subdirectory?
+pub(crate) fn is_fdinfo_dir(ino: u64) -> bool {
+    let pid_val = ino / 10000;
+    pid::is_valid_pid(pid_val) && ino % 10000 == FDINFO_DIR_INO_OFF
+}
+
+/// Decode a fdinfo file ino into (pid, fd).
+pub(crate) fn fdinfo_file_of(ino: u64) -> Option<(u64, u32)> {
+    let pid_val = ino / 10000;
+    let rem = ino % 10000;
+    let fd = rem.checked_sub(FDINFO_FILE_INO_OFF)?;
+    if pid::is_valid_pid(pid_val) && (fd as usize) < crate::fs::file::MAX_FDS {
+        Some((pid_val, fd as u32))
+    } else {
+        None
+    }
+}
 
 /// Is this ino the /proc/[pid]/task subdirectory?
 pub(crate) fn is_task_dir(ino: u64) -> bool {
@@ -207,6 +233,9 @@ pub struct ProcFSNode {
     /// upgrades the stat mode from 0444 to 0644 so the DAC write check
     /// passes for root.
     pub sysctl_write: Option<fn(&[u8]) -> i32>,
+    /// fd of /proc/[pid]/fdinfo/<fd> nodes (content is generated per fd;
+    /// pid + fd address the descriptor, see pid::generate_fdinfo).
+    pub fdinfo_fd: Option<u32>,
 }
 
 impl ProcFSNode {
@@ -226,6 +255,7 @@ impl ProcFSNode {
             pid: None,
             pid_file_kind: None,
             sysctl_write: None,
+            fdinfo_fd: None,
         }
     }
 
@@ -245,6 +275,7 @@ impl ProcFSNode {
             pid: None,
             pid_file_kind: None,
             sysctl_write: None,
+            fdinfo_fd: None,
         }
     }
 
@@ -265,6 +296,7 @@ impl ProcFSNode {
             pid: None,
             pid_file_kind: None,
             sysctl_write: None,
+            fdinfo_fd: None,
         }
     }
 
@@ -284,6 +316,7 @@ impl ProcFSNode {
             pid: None,
             pid_file_kind: None,
             sysctl_write: None,
+            fdinfo_fd: None,
         }
     }
 
@@ -309,6 +342,7 @@ impl ProcFSNode {
             pid: None,
             pid_file_kind: None,
             sysctl_write: Some(write),
+            fdinfo_fd: None,
         }
     }
 
@@ -329,6 +363,7 @@ impl ProcFSNode {
             pid: None,
             pid_file_kind: None,
             sysctl_write: None,
+            fdinfo_fd: None,
         }
     }
 
@@ -349,6 +384,13 @@ impl ProcFSNode {
 
     /// Get file content
     pub fn get_content(&self) -> Vec<u8> {
+        // /proc/[pid]/fdinfo/<fd>: per-descriptor status (fdinfo(5)).
+        if let (Some(pid), Some(fd)) = (self.pid, self.fdinfo_fd) {
+            let content = pid::generate_fdinfo(pid, fd);
+            self.cached_size.store(content.len() as u64, Ordering::Relaxed);
+            return content;
+        }
+
         // Dispatch per-PID files
         if let (Some(pid), Some(kind)) = (self.pid, self.pid_file_kind) {
             let content = match kind {
@@ -1196,6 +1238,10 @@ unsafe fn procfs_lookup(dir: &Inode, name: &[u8]) -> Result<Ino, i32> {
                 if name == b"fd" {
                     return Ok(pid_val * 10000 + FD_DIR_INO_OFF);
                 }
+                // /proc/[pid]/fdinfo — per-descriptor status files.
+                if name == b"fdinfo" {
+                    return Ok(pid_val * 10000 + FDINFO_DIR_INO_OFF);
+                }
                 // /proc/[pid]/ns — the namespace magic-link directory (U1c).
                 if name == b"ns" {
                     return Ok(pid_val * 10000 + NS_DIR_INO_OFF);
@@ -1251,6 +1297,21 @@ unsafe fn procfs_lookup(dir: &Inode, name: &[u8]) -> Result<Ino, i32> {
         if let Some(tid) = pid::parse_pid(name) {
             if pid::is_valid_pid(tid) {
                 return Ok(tid);
+            }
+        }
+        return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
+    }
+
+    // /proc/[pid]/fdinfo directory: a numeric entry is an fd of the
+    // target task (content generated per fd, see generate_fdinfo).
+    if dir.private_data.is_none() && is_fdinfo_dir(dir.ino) {
+        let pid_val = dir.ino / 10000;
+        if !name.is_empty() && name.iter().all(|b| b.is_ascii_digit()) {
+            let fd_num: u64 = name
+                .iter()
+                .fold(0u64, |acc, b| acc * 10 + (b - b'0') as u64);
+            if (fd_num as usize) < crate::fs::file::MAX_FDS {
+                return Ok(pid_val * 10000 + FDINFO_FILE_INO_OFF + fd_num);
             }
         }
         return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
@@ -1580,6 +1641,15 @@ unsafe fn procfs_iget(parent: &Inode, name: &[u8], ino: Ino) -> Result<Arc<Inode
                     // and readdir below.
                     return Ok(Arc::new(inode));
                 }
+                // /proc/[pid]/fdinfo directory: per-descriptor status
+                // files; private_data None + is_fdinfo_dir(ino) drives
+                // lookups/readdir below.
+                if name == b"fdinfo" && ino == pid_val * 10000 + FDINFO_DIR_INO_OFF {
+                    let mut inode = Inode::new(ino, InodeMode::new(InodeMode::S_IFDIR | 0o555));
+                    inode.fs_id = crate::fs::inode::FS_ID_PROCFS;
+                    inode.ops = Some(&PROCFS_INODE_OPS);
+                    return Ok(Arc::new(inode));
+                }
                 // /proc/[pid]/ns directory (U1c): synthetic directory whose
                 // children are the six namespace magic links; lookups and
                 // readdir run through PROCFS_NS_DIR_OPS.
@@ -1632,6 +1702,7 @@ unsafe fn procfs_iget(parent: &Inode, name: &[u8], ino: Ino) -> Result<Arc<Inode
             pid: Some(pid_val),
             pid_file_kind: Some(kind),
             sysctl_write: None,
+            fdinfo_fd: None,
         });
         let raw_ptr = Arc::into_raw(proc_node) as *mut u8;
 
@@ -1688,6 +1759,7 @@ unsafe fn procfs_iget(parent: &Inode, name: &[u8], ino: Ino) -> Result<Arc<Inode
             pid: Some(parent.ino / 10000),
             pid_file_kind: Some(kind),
             sysctl_write: None,
+            fdinfo_fd: None,
         });
         let raw_ptr = Arc::into_raw(proc_node) as *mut u8;
         let mut inode = Inode::new(ino, InodeMode::new(InodeMode::S_IFREG | 0o644));
@@ -1708,6 +1780,37 @@ unsafe fn procfs_iget(parent: &Inode, name: &[u8], ino: Ino) -> Result<Arc<Inode
             let uid = unsafe { (*t).cred().uid };
             inode.uid.store(uid, core::sync::atomic::Ordering::Release);
         }
+        return Ok(Arc::new(inode));
+    }
+
+    // Parent is the /proc/[pid]/fdinfo directory: build the per-fd status
+    // file. The fd is encoded in the ino (fdinfo_file_of); content is
+    // generated on read through the ProcFSNode's fdinfo_fd.
+    if parent.private_data.is_none() && is_fdinfo_dir(parent.ino) {
+        let Some((_, fd)) = fdinfo_file_of(ino) else {
+            return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
+        };
+        let proc_node = Arc::new(ProcFSNode {
+            name: name.to_vec(),
+            node_type: ProcFSType::RegularFile,
+            content_generator: None,
+            static_content: None,
+            link_generator: None,
+            link_target: None,
+            children: Spinlock::new(Vec::new()),
+            ref_count: AtomicU64::new(1),
+            ino,
+            cached_size: AtomicU64::new(0),
+            pid: Some(parent.ino / 10000),
+            pid_file_kind: None,
+            sysctl_write: None,
+            fdinfo_fd: Some(fd),
+        });
+        let raw_ptr = Arc::into_raw(proc_node) as *mut u8;
+        let mut inode = Inode::new(ino, InodeMode::new(InodeMode::S_IFREG | 0o444));
+        inode.fs_id = crate::fs::inode::FS_ID_PROCFS;
+        inode.ops = Some(&PROCFS_INODE_OPS);
+        inode.private_data = Some(raw_ptr);
         return Ok(Arc::new(inode));
     }
 
@@ -2040,6 +2143,7 @@ unsafe fn generate_pid_dir_entries(pid: u64) -> alloc::vec::Vec<crate::fs::inode
         (b"exe", file_type::DT_LNK),
         (b"cwd", file_type::DT_LNK),
         (b"fd", file_type::DT_DIR),
+        (b"fdinfo", file_type::DT_DIR),
         (b"ns", file_type::DT_DIR),
         (b"attr", file_type::DT_DIR),
         (b"oom_score", file_type::DT_REG),
@@ -2090,6 +2194,21 @@ unsafe fn procfs_readdir(inode: &Inode) -> Option<alloc::vec::Vec<crate::fs::ino
                 ino: tid,
                 name: alloc::format!("{}", tid).into_bytes(),
                 file_type: file_type::DT_DIR,
+            })
+            .collect();
+        return Some(entries);
+    }
+
+    // /proc/[pid]/fdinfo directory: one status file per open fd.
+    if inode.private_data.is_none() && is_fdinfo_dir(inode.ino) {
+        use crate::fs::inode::file_type;
+        let pid_val = inode.ino / 10000;
+        let entries = crate::fs::procfs::pid::list_fds(pid_val)
+            .into_iter()
+            .map(|(fd, _)| crate::fs::inode::VfsDirEntry {
+                ino: pid_val * 10000 + FDINFO_FILE_INO_OFF + fd as u64,
+                name: alloc::format!("{}", fd).into_bytes(),
+                file_type: file_type::DT_REG,
             })
             .collect();
         return Some(entries);
