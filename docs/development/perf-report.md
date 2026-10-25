@@ -1213,8 +1213,10 @@ within 2%); p1_null scatters both directions (pure load noise).
 Functional: 4 pbench boots complete (no skips, no short runs), OH
 smoke boot 420 s clean (0 panics/OOM, hilog taps fire 3000x under the
 cached flags, PCTL-SEND/RECV both print, unixsend-loop 0, census
-TERM-DESCHED 8 EXACT on the smoke). med-of-3 per arm owed at
-merge-claim time.
+TERM-DESCHED 8 EXACT on the smoke). med-of-3 per arm COMPLETE
+(a3/b3, balanced orders A,B,B,A,A,B): p5b_dgram_send A med 5.862 vs
+B med 4.739 (-19.1%), recv_peek A 6.824 vs B 4.246 (-37.8%), B lower
+in all three adjacent comparisons; controls p5a_pipe/p5c flat.
 
 What this does NOT close: the family remains ~30x the 2x target
 (0.078/0.108 us) — the residual per-send cost is the syscall floor +
