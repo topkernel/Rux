@@ -100,3 +100,16 @@ Call trace:
 WW: wakes=45223 picks=41316 avg_run=14ms stranded=9 strand_max=125120ms
 WW: fires=6624 late_max=3ms pidmiss=0 rearm=1 wheel=0/1 hres_next=1844674406074324ms
 WW: wakes=45223 picks=41316 avg_run=14ms stranded=9 strand_max=125120ms
+
+## Addendum (10:30): the ltp WEDGE family correlates with LTP oom01
+v6 verification boot (verify-v6heal) wedged at serial 2748 the same
+shape as v5 wedged rounds: WW3 frozen with cpu0=(pid=533 pc=256)
+cpu1=(idle pc=256), wakes frozen at 11810 — immediately after
+KILLTRACE/SIGDEATH of oom01 by pid=1(sweep) [sig=9].
+v5 comparison: ltp-b r18 wedgetail identical (cpu0 pc=256, cpu1 pc=2,
+wakes frozen, oom01 sig=9); ltp-c r18 tail shows the same oom01
+KILLTRACE sequence. The OOM-kill path (kill dump) is in the wedge's
+blast radius — connects to the count-migration family (softirq counts
+stuck on both CPUs incl. the IDLE task) and to the fake-OOM open item.
+v7 (merged with main) carries the KILLDUMP pin fixes — watch whether
+the oom01 wedge rate drops after the refresh.
