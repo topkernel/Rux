@@ -25,11 +25,17 @@ oosp=$(grep -ciE "kernel oops|BUG: (soft|hard)|Unable to handle|page fault in (k
 canary=$(grep -c "WILDWATCH-CANARY" "$SERIAL" 2>/dev/null)
 heal=$(grep -cE "hpet: clock (base|div|offset) healed" "$SERIAL" 2>/dev/null)
 wdog=$(grep -ciE "watchdog.*trip|deadlock detected|spinlock.*stuck" "$SERIAL" 2>/dev/null)
+# s4 (V-extension fix): user SIGILLs are now always anomalous — the
+# fleet strings carry zcb+v and the kernel lazily enables sstatus.VS,
+# so no member binary should hit an illegal instruction anymore (the
+# execsig member's old SIGILL-every-round is the regression canary).
+usigill=$(grep -c "trap: user SIGILL" "$SERIAL" 2>/dev/null)
 [ "$kernpanic" -gt 0 ] 2>/dev/null && CRIT="${CRIT}KERNPANIC=$kernpanic "
 [ "$oosp" -gt 0 ] 2>/dev/null && CRIT="${CRIT}OOPS=$oosp "
 [ "$canary" -gt 0 ] 2>/dev/null && CRIT="${CRIT}CANARY=$canary "
 [ "$heal" -gt 0 ] 2>/dev/null && CRIT="${CRIT}SCRIBBLE-HEAL=$heal "
 [ "$wdog" -gt 0 ] 2>/dev/null && CRIT="${CRIT}WATCHDOG=$wdog "
+[ "$usigill" -gt 0 ] 2>/dev/null && CRIT="${CRIT}USIGILL=$usigill "
 
 # --- WARN: anomaly candidates ------------------------------------------
 # OOM lines, excluding the image-side known class (init userspace write

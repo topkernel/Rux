@@ -380,3 +380,88 @@ Next-session queue (priority order):
    wedge rate (v5: roughly half of ltp-b/c/d rounds) on v7.
 5. Fake-OOM open item: instrumentation (dfx=memwatch,periodic) keeps
    accumulating on monkey rounds; root-cause per ledger OPEN items.
+
+## Session 4 (2026-10-25 15:00-...) — sweep of the 11:42-14:48 unattended window
+
+### Chains: the first-ever WW-HITs landed at 10:50/10:51 — adjudicated benign
+
+Both armed-capture chains self-stopped (by design) within a minute of
+each other: ww-s2 r96 + wwload r43, byte-identical rip
+(core::sync::atomic::atomic_compare_exchange+921), watchpoint 1 =
+hpet::heal_report::LAST, first-fire shape (LAST==0, jiffies CAS).
+Root cause: HEAL_LAST is the rate-gate static SHARED by all four
+heal_report callers, including the documented-benign "clock corrected
+backward" jitter clamp. r96 PROVEN benign by its own serial (line
+58631, 268ms backward step immediately after a TIMER-LATE-FIRE 252ms —
+the host-contention family); r43 same class (~10:20 host event during
+session-3's build+sweep; print lost to serial buffering at the stall).
+The wild-write engine remains uncaught: 0 real hits in 96+43 armed
+rounds. Fix: chain stop-checks (ww-chain2.sh / ww-loadchain.sh) now
+self-adjudicate HEAL_LAST-only hits via the serial line; chains
+relaunched r97 / load-r45. Full evidence:
+run/fleet/evidence/2026-10-25-heallast-hit-evidence.txt.
+
+### Unattended-window fleet verdicts (rounds through ~14:48)
+
+- oom01-wedge family: UNCHANGED on v7 — the KILLDUMP pin fixes did
+  not fix it. Every round that reaches sweep position ~837-847 wedges
+  (ltp-b r22-25, ltp-c r22/25, ltp-d r22-26/28, ltp-a r24/26/30);
+  signature: sweep SIGKILLs oom01 main, children (pid 4702/4704 class)
+  survive holding memory, guest stops progressing. This is the
+  fake-OOM/open-reclaim class with a DETERMINISTIC 100% repro —
+  priority target for the reclaim hunt (same family as the GNOME
+  blocker: allocator reports OOM while reclaimable memory exists).
+- Soft-lockup class (BUG: soft lockup 10s, OOPS counter in the
+  classifier): ltp-a r29/r30, ltp-b r27, ltp-c r27 — the known
+  non-preemptible-monopolization downstream family, timer_irq flowing.
+- memstorm v7 (r15-r21): PREEMPT-LEAK pc=0x10001 steady ~390/round,
+  784/786 observed at rip=enable_irq (cpu.rs:76) — one dominant
+  observation site. UNDERFLOW all sub=0x1 (documented guard-unpair);
+  ZERO sub=0x10000 — the heal fix holds under storm on v7. NOTE:
+  IRQ-BRACKET-LEAK never fires on v7 across millions of storm lines
+  while the 0x10001 rate is unchanged: the timer/soft/ext bracket tp
+  switch is NOT the producer; the missing instrument is a bracket
+  around SOFTIRQ PROCESSING itself (do_softirq at irq_exit). That is
+  the next discriminator for the count-migration hunt.
+- monkey v7-x86 (r14-r19, 12 round-hours): ZERO OOM/OOMFX/KILLDUMP —
+  the fake-OOM class has not recurred on v7; PREEMPT-LEAK dropped
+  31-54/round (v1-x86) to 6-14/round. HEAP-GROW instrumentation
+  continues (resets on reboot).
+- fsfuzz v7 r184-189: clean. r180-182 gap unadjudicated (rotation
+  ate the serials; classification lines absent = clean-class).
+- ltpm: stays STOPPED by design (main still lacks the csrr read fix
+  at ddb3ed01 — verified by grep; relaunch when main takes it).
+- execsig member: 1365 rounds on v7, ALL with the SIGILL (the
+  classifier just never counted it — now it does, USIGILL=). See
+  next block: the anomaly was NOT corruption at all.
+
+### The "exec text-page corruption" REVERSED: missing V-extension support; fixed
+
+The execsig binary's faulting page was byte-exact file content —
+objdump decodes the "garbage" at text+0x1b8 as a valid RVV sequence
+(vsetvli + a vectorized compare loop; the musl toolchain
+auto-vectorizes ordinary loops). The kernel never wrote sstatus.VS:
+with VS=Off every vector instruction (and every vector-CSR access,
+vlenb included) traps illegal-instruction, so RVV binaries SIGILL on
+V-capable harts. That dissolves session-3's evidence class: the
+v6pre 3300/3300 child-exec SIGILLs, the ~0.5% small-binary sweep
+hits, and the "PID-1 exec clean" control (that probe just had no
+vectorized loop). The kernel-side suspects (read_exec_file
+short-read, partial-fill reader) are exonerated; the SHORTREAD line
+is normal EOF on the last 12384-byte window.
+
+Fix (commit 8e54f35e): lazy VS enable + per-task vstate context
+switch mirroring the FS discipline — capability primed from the DTB
+riscv,isa string (misa is NOT S-mode readable; a misa probe traps —
+caught on the first verify boot), vector-CSRs-are-VS-gated ordering
+(enable before the vlenb probe; VLEN!=128 harts keep VS=Off + notice),
+fork inherits, execve resets, switch save/restore Dirty-gated, raw
+.word encodings verified against the toolchain assembler. The
+deterministic repro (SIGILL on every one of 1365+ rounds) now runs
+the full read+child-exec walk and powers down cleanly
+(EXECSIG-CHILD sum=4868770075288); minimal-rootfs smoke unchanged.
+
+Harness lesson (twice bitten): NEVER stage a fleet kernel image while
+`make test` is rebuilding the same target — the first v8 image was a
+test-suite kernel (the member "wedge" was the in-kernel suite running
+under TCG). Stage images only from a fresh `make build`.
