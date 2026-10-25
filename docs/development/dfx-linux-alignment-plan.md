@@ -510,8 +510,16 @@ owns most /proc additions):
 
 - Every NEW /proc key-value file uses `procfile!` — no new hand-written
   `"<key> {}\n"` format strings.
-- Existing files convert opportunistically when touched (meminfo and
-  the stat-family need the `pad`/`render_pad` shape — extend the macro
-  there when the first one converts; don't derive unused shapes).
+- Existing files convert opportunistically when touched. The `pad`
+  form exists since leg-35 (meminfo shape: `%-16s` key+colon, `%8lu`
+  right-justified value, ` <unit>`; a `!`-suffixed key renders
+  unitless — Linux's HugePages_* rows carry no `kB`). Second
+  conversion: `/proc/meminfo` (declaration order preserved; the
+  conversion intentionally REPLACED the old lines' four different key
+  paddings and left-flowed values with the reference kernel's exact
+  column layout — verified against the live reference /proc/meminfo;
+  order+shape pinned by `meminfo_file_tests`, no exact-bytes snapshot
+  because the values are live). The stat-family files convert the
+  same way when next touched.
 - The declaration ORDER is the file's byte order; treat reordering as
   a Linux-observable change and snapshot-test it.

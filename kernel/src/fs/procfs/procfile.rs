@@ -43,9 +43,11 @@
 //! The snapshot is the author's conscious act; the macro's shape test
 //! is the mechanical floor.
 //!
-//! A `pad` form (meminfo's `MemTotal:<pad>123 kB` shape) is planned
-//! alongside `render_pad` once the first padded file converts; until
-//! then only the `kv` form derives (don't derive what nothing uses).
+//! A `pad` form (meminfo's `MemTotal:<pad>123 kB` shape) renders with
+//! `render_pad`: key+colon left-justified to a width (16 on Linux),
+//! value right-justified to 8, ` <unit>` suffix; a `!`-suffixed key
+//! renders unitless (meminfo's HugePages_* rows). First padded
+//! conversion: /proc/meminfo (leg-35).
 
 use alloc::string::String;
 
@@ -61,10 +63,14 @@ pub fn render_kv(rows: &[(&'static str, &dyn core::fmt::Display)]) -> String {
     out
 }
 
-/// Pure `pad` renderer (meminfo shape): key with colon left-justified
-/// to `width`, then the value, then ` <unit>` and newline. Not yet
-/// wired into `procfile!` (no padded file has converted); exported so
-/// a hand-rendered file can at least share the one width discipline.
+/// Pure `pad` renderer (Linux meminfo shape, verified against this
+/// host's live /proc/meminfo): key with colon left-justified to
+/// `width` (16 on Linux), value right-justified to width 8 (wider
+/// values flow, matching C's `%8lu`), then ` <unit>` and newline.
+/// A key ending in `!` renders UNITLESS — meminfo's HugePages_* rows
+/// carry no `kB` (the marker is stripped at render time; it exists so
+/// one declaration list can hold both shapes without a second list to
+/// drift against).
 pub fn render_pad(
     rows: &[(&'static str, &dyn core::fmt::Display)],
     width: usize,
@@ -72,11 +78,16 @@ pub fn render_pad(
 ) -> String {
     let mut out = String::with_capacity(rows.len() * 28);
     for (k, v) in rows {
-        let key = alloc::format!("{}:", k.strip_suffix(':').unwrap_or(k));
-        out.push_str(&alloc::format!("{:<width$}", key, width = width));
-        out.push_str(&alloc::format!("{}", v));
-        out.push(' ');
-        out.push_str(unit);
+        let (key, with_unit) = match k.strip_suffix('!') {
+            Some(stripped) => (stripped, false),
+            None => (*k, true),
+        };
+        let key = alloc::format!("{}:", key.strip_suffix(':').unwrap_or(key));
+        out.push_str(&alloc::format!("{:<width$}{:>8}", key, v, width = width));
+        if with_unit {
+            out.push(' ');
+            out.push_str(unit);
+        }
         out.push('\n');
     }
     out
@@ -105,13 +116,15 @@ macro_rules! procfile {
         #[doc = concat!("Declared field order of [`", stringify!($fname), "`].")]
         pub const $fields: &[&str] = &[ $( $key ),* ];
 
-        #[cfg(test)]
-        mod $tmod {
+        #[cfg(any(test, feature = "unit-test"))]
+        pub mod $tmod {
             /// Mechanical drift floor: each declared key renders as
             /// exactly `"<key> <digits>\n"` — one space, no padding,
-            /// no trailing space, newline-terminated.
-            #[test]
-            fn shape_kv_lines() {
+            /// no trailing space, newline-terminated. `shape_check` is
+            /// the callable body (the in-kernel `unit-test` suite runs
+            /// it via tests/mod.rs — a bare `#[cfg(test)]` never joins
+            /// that build); the `#[test]` wrapper covers cargo test.
+            pub fn shape_check() {
                 let keys: &[&str] = &[ $( $key ),* ];
                 for k in keys {
                     let got = $crate::fs::procfs::procfile::render_kv(&[(k, &0u64)]);
@@ -135,6 +148,65 @@ macro_rules! procfile {
                     keys.iter().map(|k| (*k, &0u64 as &dyn core::fmt::Display))
                         .collect::<alloc::vec::Vec<_>>().as_slice()),
                     expect);
+            }
+
+            #[cfg(test)]
+            #[test]
+            fn shape_kv_lines() {
+                shape_check();
+            }
+        }
+    };
+
+    (
+        $(#[$doc:meta])*
+        $fname:ident () fields $fields:ident test $tmod:ident
+            -> Vec<u8> pad $width:literal unit $unit:literal {
+            $( $key:literal => $val:expr ),* $(,)?
+        }
+    ) => {
+        $(#[$doc])*
+        pub fn $fname() -> alloc::vec::Vec<u8> {
+            #[allow(unused_variables)]
+            let rows: &[(&'static str, &dyn core::fmt::Display)] = &[
+                $( ($key, &$val) ),*
+            ];
+            $crate::fs::procfs::procfile::render_pad(rows, $width, $unit).into_bytes()
+        }
+
+        /// Declared field order of the padded file. Keys carrying the
+        /// unitless marker keep it here (so the const and the renderer
+        /// describe the same file); strip `!` when matching against
+        /// rendered output.
+        pub const $fields: &[&str] = &[ $( $key ),* ];
+
+        #[cfg(any(test, feature = "unit-test"))]
+        pub mod $tmod {
+            /// Mechanical drift floor for the pad shape (Linux meminfo
+            /// layout): key+colon left-justified to width, `0`
+            /// right-justified at width+8, space, unit, newline — and
+            /// `!`-marked keys render unitless. Callable body for the
+            /// in-kernel unit-test suite (see the kv form's note).
+            pub fn shape_check() {
+                let keys: &[&str] = &[ $( $key ),* ];
+                for k in keys {
+                    let got = $crate::fs::procfs::procfile::render_pad(&[(k, &0u64)], $width, $unit);
+                    let (key, unit_suffix) = if let Some(s) = k.strip_suffix('!') {
+                        (s, alloc::string::String::from("\n"))
+                    } else {
+                        (*k, alloc::format!(" {}\n", $unit))
+                    };
+                    let key = alloc::format!("{}:", key);
+                    let expect = alloc::format!(
+                        "{:<w$}{:>8}{}", key, 0u64, unit_suffix, w = $width);
+                    assert_eq!(got, expect, "pad shape drifted for {}", k);
+                }
+            }
+
+            #[cfg(test)]
+            #[test]
+            fn shape_pad_lines() {
+                shape_check();
             }
         }
     };
