@@ -104,6 +104,95 @@ pub struct FileOps {
     pub read_at: Option<fn(&File, u64, &mut [u8]) -> isize>,
 }
 
+/// Capability-checked FileOps construction (rust-design-headroom §1,
+/// divergence D-6). A file TYPE declares exactly the capabilities it
+/// carries; each builder method installs one op slot and refuses a
+/// duplicate install — in a `static` initializer the duplicate is a
+/// COMPILE error (const evaluation of the panic), so a table cannot
+/// claim a capability twice, and an absent slot is a declared absence,
+/// not an omission the reader must infer from a wall of `None` fields.
+///
+/// Migration is opportunistic (D-4 procfile precedent): struct-literal
+/// tables still compile; converted types carry a capability-matrix
+/// shape test (tests group `fileops-caps`) pinning which slots exist.
+impl FileOps {
+    pub const fn builder() -> FileOpsBuilder {
+        FileOpsBuilder {
+            ops: FileOps {
+                read: None,
+                write: None,
+                lseek: None,
+                close: None,
+                poll: None,
+                read_at: None,
+            },
+        }
+    }
+}
+
+pub struct FileOpsBuilder {
+    ops: FileOps,
+}
+
+impl FileOpsBuilder {
+    pub const fn read(mut self, f: fn(&File, &mut [u8]) -> isize) -> Self {
+        assert!(self.ops.read.is_none(), "FileOps: duplicate read capability");
+        self.ops.read = Some(f);
+        self
+    }
+    pub const fn write(mut self, f: fn(&File, &[u8]) -> isize) -> Self {
+        assert!(self.ops.write.is_none(), "FileOps: duplicate write capability");
+        self.ops.write = Some(f);
+        self
+    }
+    pub const fn lseek(mut self, f: fn(&File, isize, i32) -> isize) -> Self {
+        assert!(self.ops.lseek.is_none(), "FileOps: duplicate lseek capability");
+        self.ops.lseek = Some(f);
+        self
+    }
+    pub const fn close(mut self, f: fn(&File) -> i32) -> Self {
+        assert!(self.ops.close.is_none(), "FileOps: duplicate close capability");
+        self.ops.close = Some(f);
+        self
+    }
+    pub const fn poll(mut self, f: fn(&File, u16) -> u16) -> Self {
+        assert!(self.ops.poll.is_none(), "FileOps: duplicate poll capability");
+        self.ops.poll = Some(f);
+        self
+    }
+    pub const fn read_at(mut self, f: fn(&File, u64, &mut [u8]) -> isize) -> Self {
+        assert!(self.ops.read_at.is_none(), "FileOps: duplicate read_at capability");
+        self.ops.read_at = Some(f);
+        self
+    }
+    pub const fn build(self) -> FileOps {
+        self.ops
+    }
+}
+
+/// The operation kinds the File dispatchers route. The errno a caller
+/// observes when a file type lacks the capability is decided in ONE
+/// place — `File::missing_op_errno` below — with the ABI reasoning
+/// attached; dispatch sites stop re-deriving per-callsite conventions.
+/// (The §1 paid incident: read() on a valid epoll fd once returned EBADF
+/// because the read slot was NULL — an OH event loop treated it as
+/// "fd closed" and spun 155,991 times instead of taking its EINVAL
+/// error path.)
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum FileOpKind {
+    Read,
+    Write,
+    LSeek,
+    /// Explicit-position read (pread(2)). The errno depends on WHY the
+    /// object is not positional (stream type vs op-less type), so the
+    /// decision consults the ops table, not just the one slot.
+    ReadAt,
+    /// Poll has no errno on the syscall path — the missing-poll
+    /// fallback is the always-ready mask (`File::poll_dispatch`). The
+    /// kind exists so the capability matrix is nameable per op.
+    Poll,
+}
+
 /// R36-B1: monotonically increasing open-file-description generation.
 /// Epoll registrations record this instead of the Arc's heap address: the
 /// slab allocator hands a freed File's address back to the NEXT same-size
@@ -259,6 +348,68 @@ impl File {
         *self.cloexec.lock() = cloexec;
     }
 
+    /// The single missing-capability errno table (§1 / D-6). Direction
+    /// and O_PATH checks (EBADF) are ABI f_mode rules and stay at the
+    /// top of each dispatcher; THIS function owns the "valid fd, right
+    /// direction, but the type carries no such op" decision, with the
+    /// reasoning written once:
+    ///
+    /// - Read/Write: EINVAL. The reference kernel's vfs_read/vfs_write
+    ///   return EINVAL for a NULL op — NOT EBADF. Returning EBADF made
+    ///   an OH event loop reading its own epoll fd (pa38: launcher fd
+    ///   32, 155,991 iterations) see "fd closed" and spin instead of
+    ///   taking its EINVAL error path.
+    /// - LSeek: ESPIPE. POSIX for unseekable objects (pipe, socket,
+    ///   fifo) — review SYSA-M11; EBADF here was the old bug.
+    /// - ReadAt: EINVAL when the type carries no read capability at all
+    ///   (op-less fds: epoll/binder/access_token/io_uring — the same
+    ///   EINVAL read() returns for them), ESPIPE for stream types that
+    ///   DO read but have no seek state (pipes/sockets/fifos — Linux
+    ///   rw_verify_area's FMODE_STREAM rejection; LTP preadv202:
+    ///   ESPIPE even on an O_WRONLY pipe write end).
+    pub fn missing_op_errno(&self, op: FileOpKind) -> isize {
+        match op {
+            FileOpKind::Read | FileOpKind::Write => -22, // EINVAL
+            FileOpKind::LSeek => -29,                    // ESPIPE
+            FileOpKind::ReadAt => {
+                let ops = unsafe { *self.ops.get() };
+                match ops {
+                    Some(o) if o.read.is_none() && o.read_at.is_none() => -22, // EINVAL (op-less type)
+                    _ => -29, // ESPIPE (stream type)
+                }
+            }
+            // poll_dispatch's fallback is the always-ready mask, not an
+            // errno; included so every FileOpKind has exactly one
+            // documented disposition in one place.
+            FileOpKind::Poll => 0,
+        }
+    }
+
+    /// Central poll dispatch (§1 / D-6): the per-file-type poll callback
+    /// when the type declared the capability, else the always-ready
+    /// fallback (regular-file semantics: requested readable -> POLLIN |
+    /// POLLRDNORM, writable -> POLLOUT | POLLWRNORM). This fallback was
+    /// previously re-derived at four call sites with two different
+    /// shapes; consumers reduce both to the same event bits, but the
+    /// convention now lives here once.
+    pub fn poll_dispatch(&self, events: u16) -> u16 {
+        use crate::syscall::misc::poll_events::*;
+        let ops = unsafe { *self.ops.get() };
+        match ops.and_then(|o| o.poll) {
+            Some(poll_fn) => poll_fn(self, events),
+            None => {
+                let mut r = 0u16;
+                if events & POLLIN != 0 {
+                    r |= POLLIN | POLLRDNORM;
+                }
+                if events & POLLOUT != 0 {
+                    r |= POLLOUT | POLLWRNORM;
+                }
+                r
+            }
+        }
+    }
+
     /// Read file
     pub unsafe fn read(&self, buf: *mut u8, count: usize) -> isize {
         // f_mode enforcement: read on an O_WRONLY fd is EBADF (Linux)
@@ -282,13 +433,9 @@ impl File {
             }
         }
         // Valid fd, readable mode, but the type carries no read op
-        // (epoll, binder, access_token, io_uring). The reference
-        // kernel's vfs_read returns EINVAL here, NOT EBADF — returning EBADF makes an
-        // OH event loop read its own epoll fd (pa38: launcher fd 32,
-        // 156K iterations) look like "fd closed", and the loop spins
-        // on it instead of taking its EINVAL error path. The O_WRONLY
-        // EBADF above is the ABI-correct direction check and stays.
-        -22 // EINVAL
+        // (epoll, binder, access_token, io_uring) — see
+        // missing_op_errno(FileOpKind::Read) for why EINVAL, not EBADF.
+        self.missing_op_errno(FileOpKind::Read)
     }
 
     /// Write file
@@ -313,8 +460,9 @@ impl File {
             }
         }
         // Valid fd, writable mode, but the type carries no write op —
-        // the reference kernel's vfs_write returns EINVAL here (see read()'s note).
-        -22 // EINVAL
+        // see missing_op_errno(FileOpKind::Write) (EINVAL, matching the
+        // reference kernel's vfs_write).
+        self.missing_op_errno(FileOpKind::Write)
     }
 
     /// Seek file position
@@ -324,9 +472,9 @@ impl File {
                 return lseek_fn(self, offset, whence);
             }
         }
-        // No seek op = unseekable object (pipe, socket, fifo): POSIX says
-        // ESPIPE, not EBADF (review SYSA-M11).
-        -29 // ESPIPE
+        // No seek op = unseekable object (pipe, socket, fifo) — see
+        // missing_op_errno(FileOpKind::LSeek) for the POSIX reasoning.
+        self.missing_op_errno(FileOpKind::LSeek)
     }
 
     /// Position-invariant read at an explicit offset (pread(2) backing).
@@ -348,22 +496,11 @@ impl File {
         // O_WRONLY pipe write end is also ESPIPE, not EBADF).
         let inode_opt = &*self.inode.get();
         if !self.positional_capable() {
-            // Two non-seekable classes must be told apart here, because
-            // positional_capable() lumps them together. Pipes/sockets/
-            // fifos carry a read op but no seek state: ESPIPE (Linux
-            // rw_verify_area's FMODE_STREAM rejection — LTP preadv202
-            // expects ESPIPE on a pipe read end, and pread on an
-            // O_WRONLY pipe write end is also ESPIPE, not EBADF).
-            // Op-less fd types (epoll/binder/access_token/io_uring: no
-            // read op, no read_at, no seek state, no inode) get EINVAL —
-            // the same value read() returns for them (vfs_read's
-            // no-read-op fallback).
-            if let Some(ops) = *self.ops.get() {
-                if ops.read.is_none() && ops.read_at.is_none() {
-                    return -22; // EINVAL
-                }
-            }
-            return -29; // ESPIPE
+            // Two non-seekable classes must be told apart — the decision
+            // and its ABI reasoning live in missing_op_errno(ReadAt):
+            // stream types (pipes/sockets/fifos) get ESPIPE, op-less fd
+            // types (epoll/binder/access_token/io_uring) get EINVAL.
+            return self.missing_op_errno(FileOpKind::ReadAt);
         }
         // f_mode enforcement, same as read().
         if self.flags().is_writeonly() {
