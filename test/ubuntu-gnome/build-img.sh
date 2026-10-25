@@ -132,6 +132,76 @@ if command -v glib-compile-schemas >/dev/null; then
 fi
 
 # ---------------------------------------------------------------------------
+# swrast DRI driver: pin the 20.0.4 riscv64 build.
+#
+# The jammy (and focal-updates) riscv64 mesa builds have a broken drisw
+# path: __driDriverGetExtensions_swrast + createNewScreen2 with the
+# xserver's stock DRI_SWRastLoader v1 returns NULL before any syscall
+# (Xorg: "(EE) IGLX error: Calling driver entry point failed / GLX:
+# could not load software renderer"; verified kernel-independent —
+# identical under the Oct-14 painting kernel and under qemu-user on the
+# host). The 20.0.4 riscv64 driver (softpipe, no LLVM dep) passes the
+# same probe (glnit: screen created). amd64 is unaffected (its builds
+# expose the legacy DRI interface — the x86 mirror image works).
+#
+# Replacement must UNLINK first: the jammy deb's dri/ drivers arrive as
+# one hardlink group, and an in-place cp over a member mutates every
+# name in the group and can leave mkfs -d's hardlink bookkeeping in a
+# state where the packed image references an inode the bitmap never
+# marks allocated (observed on the hand-built m20 image: dirent ->
+# ino 42784, bitmap bit clear, i_nlink 0 — the first mkdir of the boot
+# then allocated 42784 as /tmp/xdg and swrast_dri.so resolved to a
+# directory; dlopen's header pread got EISDIR and AIGLX died — see
+# GNOME-SESSIONS.txt session 2). The e2fsck gate below is the safety
+# net that refuses to ship such an image.
+# ---------------------------------------------------------------------------
+SW20_LOCAL="$DL/swrast_dri.so-20.0.4-riscv64"
+SW20_DEB="$DL/libgl1-mesa-dri_20.0.4-2ubuntu1_riscv64.deb"
+if [ ! -s "$SW20_LOCAL" ]; then
+    echo "== obtaining mesa 20.0.4 swrast driver"
+    for u in \
+        "http://mirrors.aliyun.com/ubuntu-ports/pool/main/m/mesa/libgl1-mesa-dri_20.0.4-2ubuntu1_riscv64.deb" \
+        "http://ports.ubuntu.com/ubuntu-ports/pool/main/m/mesa/libgl1-mesa-dri_20.0.4-2ubuntu1_riscv64.deb"; do
+        curl -fL --retry 2 -o "$SW20_DEB" "$u" && break
+        rm -f "$SW20_DEB"
+    done
+    [ -s "$SW20_DEB" ] || { echo "swrast 20.0.4 deb unobtainable" >&2; exit 1; }
+    rm -rf "$WORK/sw20" && mkdir -p "$WORK/sw20"
+    dpkg-deb -x "$SW20_DEB" "$WORK/sw20"
+    cp "$WORK/sw20/usr/lib/riscv64-linux-gnu/dri/swrast_dri.so" "$SW20_LOCAL"
+fi
+rm -f "$ROOT/usr/lib/riscv64-linux-gnu/dri/swrast_dri.so" \
+      "$ROOT/usr/lib/riscv64-linux-gnu/dri/kms_swrast_dri.so"
+install -m 0644 "$SW20_LOCAL" "$ROOT/usr/lib/riscv64-linux-gnu/dri/swrast_dri.so"
+install -m 0644 "$SW20_LOCAL" "$ROOT/usr/lib/riscv64-linux-gnu/dri/kms_swrast_dri.so"
+
+# Client side must match the driver era: the jammy libGLX_mesa/libEGL_mesa
+# (23.2) walk the driver's extension table and die with "did not find
+# extension DRI_Mesa version 1 / failed to load driver: swrast" against
+# the 20.0.4 swrast (the XSERVER's stock DRI loader accepts the same
+# driver fine — AIGLX initializes). Pin libGLX_mesa.so.0, libEGL_mesa.so.0
+# and libglapi.so.0 from the same 20.0.4 riscv64 builds (GLVND discovers
+# vendor libs by soname, so only these files change). EGL matters for
+# gnome-session-check-accelerated-gles-helper ("libEGL fatal: did not
+# find extension DRI_Mesa version 1" kills the helper before it can
+# report the renderer).
+for d in libglx-mesa0_20.0.4-2ubuntu1_riscv64.deb libglapi-mesa_20.0.4-2ubuntu1_riscv64.deb libegl-mesa0_20.0.4-2ubuntu1_riscv64.deb; do
+    if [ ! -s "$DL/$d" ]; then
+        curl -fL --retry 2 -o "$DL/$d" \
+            "http://mirrors.aliyun.com/ubuntu-ports/pool/main/m/mesa/$d"
+    fi
+done
+rm -rf "$WORK/sw20client" && mkdir -p "$WORK/sw20client"
+dpkg-deb -x "$DL/libglx-mesa0_20.0.4-2ubuntu1_riscv64.deb" "$WORK/sw20client"
+dpkg-deb -x "$DL/libglapi-mesa_20.0.4-2ubuntu1_riscv64.deb" "$WORK/sw20client"
+dpkg-deb -x "$DL/libegl-mesa0_20.0.4-2ubuntu1_riscv64.deb" "$WORK/sw20client"
+for lib in libGLX_mesa.so.0.0.0 libglapi.so.0.0.0 libEGL_mesa.so.0.0.0; do
+    rm -f "$ROOT/usr/lib/riscv64-linux-gnu/$lib"
+    install -m 0644 "$WORK/sw20client/usr/lib/riscv64-linux-gnu/$lib" \
+        "$ROOT/usr/lib/riscv64-linux-gnu/$lib"
+done
+
+# ---------------------------------------------------------------------------
 # /sbin/runit — the session bootstrap (clear stale X locks, both dbus
 # daemons, Xorg on fbdev, then the full gnome-session chain).
 # ---------------------------------------------------------------------------
@@ -169,5 +239,19 @@ EOX
 # ---------------------------------------------------------------------------
 echo "== packing $IMG (mkfs -d, no loop mounts needed)"
 mkfs.ext4 -b 4096 -O ^metadata_csum -d "$ROOT" "$IMG" 3500M >/dev/null
+
+# e2fsck gate: mkfs -d's hardlink bookkeeping can, on a surgically
+# modified root, pack a dirent whose inode the bitmap never marks
+# allocated (see the swrast comment above — the running system's first
+# create then aliases onto the live file). e2fsck reallocates the
+# referenced inode and fixes nlink; exit codes 0/1 are success, anything
+# else aborts the build rather than shipping a self-corrupting image.
+echo "== e2fsck gate"
+FSCK_RC=0
+e2fsck -fy "$IMG" >/dev/null 2>&1 || FSCK_RC=$?
+if [ "$FSCK_RC" -gt 1 ]; then
+    echo "e2fsck rc=$FSCK_RC — image NOT shippable" >&2
+    exit 1
+fi
 
 echo "image ready: $IMG ($(du -h "$IMG" | cut -f1))"

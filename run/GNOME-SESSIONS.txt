@@ -48,4 +48,66 @@ mutter + gsd) visible and stable on the Ubuntu 22.04 riscv64 image.
 
 - Created worktree from main 5e498453.
 - Kernel build: rc=0, target/riscv64gc-unknown-none-elf/debug/rux.
-- Image build: work/gnome-riscv64.img (in progress at this writing).
+- Image build: work/gnome-riscv64.img (693 pkgs, full stock gnome chain,
+  runit default mode=session session=gnome).
+- Run repro1 (smp2/2G, dfx=watchdog,periodic,taskdump): boot to runit
+  clean, both dbus up, Xorg 1.21.1.4 fbdev up, session chain launched.
+  WALL: Xorg GLX "(EE) IGLX error: Calling driver entry point failed /
+  GLX: could not load software renderer" -> gnome-shell mutter "no
+  available drivers found" -> shell exits. Screen stays 100% black.
+  Also noted: PREEMPT-LEAK flood (idle wfi, rip=cpu::wfi, holds ~2-8s)
+  from the current kernel — separate issue, kernel-side.
+- A/B with the Oct-14 painting kernel (be8817dc, built in
+  /home/william/rux-agents/gnome-oldk): IDENTICAL GL failure on my
+  image => NOT a main-kernel regression; my image differs from the lost
+  gp3i image (or gp3i never had working swrast server-side either and
+  painted via a client-side path).
+- glnit probe (test/ubuntu-gnome/glnit.c, -march=rv64gc!): reproduced
+  WITHOUT Xorg: dlopen swrast OK, extensions walk clean (DRI_Core v2,
+  DRI_Mesa v1, DRI_SWRast v4, DRI_CopySubBuffer v1, DRI_ConfigOptions
+  v2), createNewScreen2(loader v1) returns NULL. Host-toolchain trap:
+  cross gcc defaults to RVA23-class march -> SIGILL under -cpu rv64;
+  compile probes with -march=rv64gc.
+- Host qemu-user A/B of the same probe+libs: RUNNING (decides
+  kernel-side vs image-side for the NULL).
+
+## Session 2 (2026-10-25, leg-2 after 06:55 quota death)
+
+- Merged main 47d96961 (timer/stack/binder/panic= etc., 27 commits).
+  Note: riscv64 kernel heap is CLAMPED to 128 MiB by build.rs (a 1 GiB
+  heap region overruns the riscv64 memory map pre-console — documented
+  in-tree); Kernel.toml's 1024 only applies to x86_64.
+- m20 EISDIR autopsy (the "Is a directory" AIGLX dlopen failure):
+  NOT a kernel bug. The hand-built m20 image was malformed: the swrast
+  direntry pointed at ino 42784 whose bitmap bit was never set and
+  i_nlink==0 (mkfs -d hardlink bookkeeping confused by the in-place cp
+  surgery over the deb's hardlinked dri/ group). debugfs "testi <42784>"
+  says "not in use"; any create then takes 42784 — during boot the
+  first mkdir (/tmp/xdg) aliased onto it, so the swrast path resolved
+  to a DIRECTORY -> dlopen header pread EISDIR. Proven twice: stat/dd
+  as quiet PID1 read the file fine; debugfs -w write onto a copy
+  allocated 42784 over the driver.
+- build-img.sh fixes: (1) swrast replace now unlink-first (install),
+  (2) e2fsck -fy GATE after mkfs (refuses to ship an image whose
+  dirent/bitmaps disagree), (3) driver banked at
+  work/downloads/swrast_dri.so-20.0.4-riscv64, aliyun mirror first.
+- Client-side GL pin: jammy libGLX_mesa/libEGL_mesa (23.2) reject the
+  20.0.4 driver ("did not find extension DRI_Mesa version 1"); the
+  XSERVER's stock loader accepts it. Pinned libGLX_mesa.so.0.0.0 +
+  libglapi.so.0.0.0 (and libEGL_mesa.so.0.0.0 for the gles helper)
+  from the focal 20.0.4 riscv64 debs.
+- swfix-gs2 (mode=gs, merged kernel, pinned image): GL wall GONE —
+  "IGLX: Loaded and initialized swrast", mutter runs as compositing
+  manager, gnome-shell alive ~45s, then SEGV (epc 0x300040cf32 —
+  unymbolized; low priority vs session mode which stays up).
+- swfix-sess1 (mode=session): M4_screen_lit @121s (nonblack 0.99+,
+  GNOME wallpaper colors #002080/#202000) — first screen-lit boot of
+  this lane. gnome-session died @47s (its accelerated-check helpers
+  failed: GLX helper "No hardware 3D support", GLES helper "libEGL
+  fatal: did not find extension DRI_Mesa version 1" -> EGL pin queued)
+  -> runit fallback gnome-shell --replace is UP and stable (calendar
+  server spawned, ppoll idle). Open items: panel not yet rendered at
+  t=500s (SVG pixbuf loaders + loaders.cache missing from image —
+  PNG is built-in but icons are SVG; MIT-SHM BadAccess killed
+  gnome-session-failed's dialog (kernel sysv-shm suspicion);
+  "sh: 0: getcwd() failed: Success" (errno-0 getcwd) seen twice.
