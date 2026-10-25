@@ -78,6 +78,52 @@ domain (Tier 1 census/ticks, Tier 2 fork rows).
 
 ---
 
+## D-4: Derived proc-file formatters (procfile! macro)
+
+**Design.** /proc text formats derive from one field-declaration list
+(kv/pad/cols forms) instead of hand-written format strings; the
+declaration mints the renderer, an ordered FIELDS/COLUMNS const, and a
+shape test; the cols form derives the row function's argument list from
+the column list.
+
+**Advantage.** Kills the format-drift class (five byte-format defects
+survived review into a merged tree once); format and data become one
+artifact; call sites cannot swap columns.
+
+**Compatibility evidence.** vmstat byte-identical snapshot; meminfo
+column-exact vs the live host reference; stat/schedstat line order
+unit-pinned; full suite green; three full pbench boots DONE rc=0.
+
+**Known cost.** Opportunistic conversion — ~20 hand-written files
+remain; dynamic-arity lines (interrupts/intr/softirqs) stay explicit
+by design.
+
+**Guard.** procfile-shape unit-test group + per-file order/snapshot
+pins; the DFX plan's adoption rule requires the macro for new files.
+
+---
+
+## D-5: tracepoint! declaration macro (T4 event table)
+
+**Design.** One tracepoints! table row per event derives the static
+row, the typed record function (armed() check inside), and the
+format-file renderer; ids stable across conversions.
+
+**Advantage.** Event declaration is a single site; the format file and
+the record code cannot drift apart; block-IO/binder/sched/page-fault
+families all declared uniformly.
+
+**Compatibility evidence.** trace-smoke2 12/12 after conversion (16
+events, all format files, recorded lines); 600s armed soak prior,
+re-verified post-macro.
+
+**Known cost.** Macro indirection for new event authors.
+
+**Guard.** trace-smoke2 + the shape tests; hot-path cost is the
+armed() single-branch check measured by syscost per the merge gate.
+
+---
+
 <!-- Pending entries (register when they land on main):
      - packed kernel-stack slab (order-6 blocks carved into 80KB slots,
        vs plain buddy order-power allocation) — on the launcher lane branch,
