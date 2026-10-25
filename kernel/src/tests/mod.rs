@@ -191,6 +191,8 @@ pub mod path;
 #[cfg(feature = "unit-test")]
 pub mod file_flags;
 #[cfg(feature = "unit-test")]
+pub mod fileops_caps;
+#[cfg(feature = "unit-test")]
 pub mod fdtable;
 #[cfg(feature = "unit-test")]
 pub mod signal;
@@ -427,6 +429,11 @@ pub fn run_all_tests() {
 
     test_group_start("file_flags");
     file_flags::test_file_flags();
+
+    // D-6 (§1 capability declarations): capability-matrix pins for the
+    // builder-converted ops tables + the central missing-op errno map.
+    test_group_start("fileops-caps");
+    fileops_caps::test_fileops_caps();
 
     test_group_start("fdtable");
     fdtable::test_fdtable();
