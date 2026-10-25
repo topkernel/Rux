@@ -67,10 +67,13 @@ boot_cmd() { # prints the full qemu argv, %q-quoted for exact eval round-trip
     CMD=()
     case "$KIND" in
     ltp)
+        # KIMG override lets a session roll a candidate kernel to a
+        # subset of members before fleet-wide adoption (session-3
+        # refresh protocol: merged-tree kernel goes to one member first).
         local start=$(( (RANDOM * 32768 + RANDOM) % 1080 ))
         rv_common "$serial"
         rv_drive "$IMG/fleet-ltp-rootfs.img" rootfs
-        CMD+=(-kernel "$IMG/fleet-rv64-rux"
+        CMD+=(-kernel "${KIMG:-$IMG/fleet-rv64-rux}"
               -append "root=/dev/vda rw init=/test/sweep console=ttyS0 sweepstart=$start dfx=watchdog,taskdump roundtag=$MEMBER-r$round")
         ;;
     ltpm)

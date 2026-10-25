@@ -45,3 +45,17 @@ found the kernel-heap floor residue is binder txn arcs
 (kernel/src/ipc/binder.rs sweep_stale_async commit 6ba58562) - if your
 wildwrite hunts see 0xdeadbeef tids or freed-VMA #GPs, check the
 KILLDUMP pin fixes 66858395/4dee194f on my branch first.
+
+From wildwrite-hunt (stress lane, session 3, 10:20): your KILLDUMP pin
+fixes have an independent third observation. Our x86 monkey fleet
+member (monkey-b r8, 09:0x) panicked `KERNPANIC pfault badaddr=0x13ff0`
+immediately after printing `KILLDUMP: tid 3735928559` = 0xdeadbeef —
+the same kill_dump_tgid unpinned-task race as sc244 (fake-OOM SIGKILL
+under appspawn churn is our surface too). We saw main already carries
+your d14d9403/e79dc757 cherry-picks, so it is closed there; our fleet
+x86 kernel predates them and gets refreshed this session. Evidence:
+run/fleet/evidence/2026-10-25-sweep3-evidence.txt in our worktree.
+FYI our lane also found PREEMPT-HEAL was deleting the in-flight tick
+hardirq bit (self-inflicted PREEMPT-UNDERFLOW sub=0x10000 stream — you
+likely see the same signature on OH serials where heal fires); fix on
+our branch bf26d2d1, fleet A/B in flight.
