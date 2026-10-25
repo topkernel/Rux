@@ -1,6 +1,6 @@
 #!/bin/bash
 # run-oh-linux-ref.sh — boot the OpenHarmony x86_64_virt phone image on the
-# REFERENCE Linux kernel (oh-robot's own bzImage) under QEMU/KVM, serial to a
+# REFERENCE kernel (oh-robot's own bzImage) under QEMU/KVM, serial to a
 # file, headless, read-only for the shared images.
 #
 # This is the analysis-lane counterpart of test/run-oh.sh: machine/device/

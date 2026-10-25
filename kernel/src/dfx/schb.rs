@@ -73,6 +73,17 @@ const MIN_BOOT_SECS: u64 = 240;
 /// Minimum live tasks before a census may fire (past early init).
 const MIN_TASKS: usize = 50;
 
+/// Leg-17: deterministic census timing (`censusat=<secs>` boot param).
+/// The 80%-heap trigger inside the beat cannot fire on a boot parked at
+/// the render_service lottery (heap stalls ~300MB of the ~1.1G window),
+/// and tonight 3-of-3 rolls parked — the type-attribution mission was
+/// hostage to a userspace race. This param fires the SAME one-shot
+/// `oom_anat_dump()` at a fixed boot age instead, so even a parked boot
+/// banks the census + peek histograms. u64::MAX = disabled (default);
+/// the DONE guard inside `oom_anat_dump` dedupes against the 80% trigger
+/// (whichever fires first wins).
+static CENSUS_AT_SECS: AtomicU64 = AtomicU64::new(u64::MAX);
+
 /// Ring records dumped at the census (quietcon's userspace console
 /// stream lives in the printk ring; its tail around the wedge is the
 /// userspace last-known-good).
@@ -204,6 +215,20 @@ pub fn oom_anat_dump() {
             + 128,
     );
     taskdump_raw_line(b"\nOOM-ANAT buddy live pages by order:\n");
+    // Leg-17 leak test: live user mms = creations - drops. If live_mm
+    // >> live procs at the census moment, every spawn strands its
+    // AddressSpace (and its VMA tree + vma_files pins ride along).
+    {
+        let mn = crate::dfx::memwatch::MM_NEWS.load(Ordering::Relaxed) as u64;
+        let md = crate::dfx::memwatch::MM_DROPS.load(Ordering::Relaxed) as u64;
+        taskdump_raw_line(b"OOM-ANAT mm: new=");
+        taskdump_dec(mn);
+        taskdump_raw_line(b" drop=");
+        taskdump_dec(md);
+        taskdump_raw_line(b" live=");
+        taskdump_dec(mn.saturating_sub(md));
+        taskdump_raw_line(b"\n");
+    }
     let np = &crate::mm::buddy_allocator::NET_PAGES;
     let mut o = 0usize;
     while o < np.len() {
@@ -223,6 +248,10 @@ pub fn oom_anat_dump() {
     // the active slab pages; vtables/magic are symbolisable offline.
     crate::mm::small_alloc::census_peek(5, 8);
     crate::mm::small_alloc::census_peek(7, 8);
+    // Leg-17: structural buckets (the v2 histogram alone cannot name a
+    // pointer-first heterogeneous population).
+    crate::mm::small_alloc::census_peek3(5);
+    crate::mm::small_alloc::census_peek3(7);
 }
 
 /// Start the schbd kthread. Gated on the `dfx=schb` switch; called from
@@ -231,6 +260,14 @@ pub fn oom_anat_dump() {
 pub fn init() {
     if !switches::enabled(DfxSwitch::Schb) {
         return;
+    }
+    // Leg-17: `censusat=<secs>` — see CENSUS_AT_SECS above. Parsed here
+    // (init runs once, late boot, cmdline is stable by then).
+    if let Some(v) = crate::cmdline::get_param("censusat") {
+        if let Ok(secs) = v.trim().parse::<u64>() {
+            CENSUS_AT_SECS.store(secs, Ordering::Release);
+            crate::pr_info!("dfx: schbd census timer armed at {}s", secs);
+        }
     }
     if RUNNING.load(Ordering::Acquire) {
         return;
@@ -377,6 +414,11 @@ extern "C" fn schbd_fn(_arg: *mut core::ffi::c_void) -> i32 {
                     oom_anat_dump();
                 }
             }
+            // Leg-17: fixed-time census (see CENSUS_AT_SECS). Whichever
+            // trigger wins first, the DONE guard makes it one-shot.
+            if t_secs >= CENSUS_AT_SECS.load(Ordering::Acquire) {
+                oom_anat_dump();
+            }
             let mut w = ConsoleWriter::new();
             let _ = writeln!(
                 w,
@@ -394,13 +436,18 @@ extern "C" fn schbd_fn(_arg: *mut core::ffi::c_void) -> i32 {
         // pages (o5 = the 128KB kernel-stack class on this config).
         {
             let (kn, khw) = crate::process::task::kstack_anat();
+            // kb/ks = packed-slab blocks/live slots (x86_64 only; 0/0
+            // reads as "no slab" on arches that keep plain order-5
+            // stacks — see process/task.rs).
+            let (kb, ks, _fb) = crate::process::task::kstack_slab_stats();
             let (small_k, small_pg_k) = crate::mm::small_alloc::live_stats_kib();
             let np = &crate::mm::buddy_allocator::NET_PAGES;
             let mut w = ConsoleWriter::new();
             let _ = writeln!(
                 w,
-                "SC-ANAT t={}s procs={} kN={} kK={} kHW={} smallK={} smallPgK={} o0={} o1={} o2={} o3={} o4={} o5={} o6={} o7={} o8={}",
+                "SC-ANAT t={}s procs={} kN={} kK={} kHW={} kb={} ks={} smallK={} smallPgK={} o0={} o1={} o2={} o3={} o4={} o5={} o6={} o7={} o8={}",
                 t_secs, n_procs, kn, kn * (crate::config::KERNEL_STACK_SIZE as u64) / 1024, khw,
+                kb, ks,
                 small_k, small_pg_k,
                 np[0].load(Ordering::Relaxed), np[1].load(Ordering::Relaxed),
                 np[2].load(Ordering::Relaxed), np[3].load(Ordering::Relaxed),

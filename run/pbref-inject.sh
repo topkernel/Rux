@@ -1,6 +1,6 @@
 #!/bin/bash
 # pbref-inject.sh — build the private system.img that carries the pbench
-# probe into the OH boot (perf-report.md 8.3(A) delivery, Linux-reference
+# probe into the OH boot (perf-report.md 8.3(A) delivery, reference-kernel
 # side; the same recipe transfers to the Rux side on run day).
 #
 # Slot: key_enable — chosen from /system/etc/init/*.cfg because it is

@@ -1,0 +1,92 @@
+=== last dump t=720s ===
+ticks: c0=9636/61451/721 c1=10482/59817/1511
+cpu0: user 13.4% kernel 85.6% idle 1.0% (n=71808)
+cpu1: user 14.6% kernel 83.3% idle 2.1% (n=71810)
+
+=== syscall table (top 40 by total wall) ===
+nr     name                    n     avg_us       max_ms       tot_ms
+202    futex              278031     231363       299991     64326153
+281    epoll_pwait       2048624       9055       200632     18551980
+16     ioctl              135010      99828       300013     13477911
+35     nanosleep           30900     174086       295005      5379271
+7      ?                    1224    2336174       300009      2859477
+45     recvfrom         11910806         67        22691       798960
+0      read               392964       1838        10010       722542
+20     writev           11626623         31          444       366902
+228    clock_gettime    32391464          4            5       146047
+47     recvmsg          11932952          9            8       115668
+11     munmap             514656        184          372        95110
+2      open               288857        288          517        83364
+262    newfstatat         178694        355          360        63610
+18     pwrite64             1511      29358         1018        44360
+17     pread64             10877       4071         1358        44285
+23     ?                       1   38538615        38538        38538
+217    getdents64          27939       1104         3038        30845
+83     mkdir                 820      31207          380        25590
+9      mmap               588226         40            6        23553
+1      write              945751         13          625        12407
+75     fdatasync             399      26735         1268        10667
+268    fchmodat           144314         47           39         6840
+61     wait4                 723       9398         1908         6795
+87     unlink                 99      66216          294         6555
+42     connect             55297        112            3         6231
+90     chmod                1258       4944          537         6220
+92     chown                 550       9227          749         5075
+128    rt_sigtimedwait        639       7599           59         4855
+89     readlink            23736        153           20         3645
+257    openat              12786        282           14         3612
+10     mprotect            33023        105            3         3475
+77     ftruncate             179      16239          280         2906
+57     fork                  139      14123          550         1963
+21     access               6332        264          500         1675
+59     execve                123      13419          275         1650
+3      close               99501         16            0         1627
+267    readlinkat           8649        168            8         1458
+102    getuid            2402117          0            0         1397
+44     sendto               8924        135            3         1210
+74     fsync                  58      18250           95         1058
+
+=== kernel-rip pages (top 20) ===
+0xffffffff805a6000 n=31413   27% 
+0xffffffff8046d000 n=24667   21% 
+0xffffffff8079c000 n=7978     6% 
+0xffffffff8065e000 n=6153     5% 
+0xffffffff802d4000 n=4060     3% 
+0xffffffff8079b000 n=3541     3% 
+0xffffffff80222000 n=2445     2% 
+0xffffffff80660000 n=2158     1% 
+0xffffffff802d5000 n=1766     1% 
+0xffffffff807a7000 n=1762     1% 
+0xffffffff8046e000 n=1759     1% 
+0xffffffff807bd000 n=1698     1% 
+0xffffffff807bb000 n=1455     1% 
+0xffffffff80791000 n=753      0% 
+0xffffffff80482000 n=727      0% 
+0xffffffff805fb000 n=655      0% 
+0xffffffff806ba000 n=537      0% 
+0xffffffff80446000 n=509      0% 
+0xffffffff80417000 n=487      0% 
+0xffffffff802c3000 n=471      0% 
+
+=== IF=0 zones (latest dump) ===
+cpu0: tot=187812ms rest=164533ms hard=15629ms soft=5821ms uart=1827ms nseg=319166565/2269406/201007/103681 max=5ms/3ms/4ms/30ms heal=95528n/872ms miss=0n
+cpu1: tot=186428ms rest=165470ms hard=10844ms soft=8235ms uart=1876ms nseg=319549108/2013381/169920/110670 max=6ms/3ms/4ms/3ms heal=88868n/831ms miss=0n OPEN zone=soft age=0ms
+
+=== REST call sites (latest dump, top 20 by tot) ===
+file:line                                               n     tot_ms     avg_ns     max_ms
+kernel/src/sched/sched.rs:2151                   12272731      84170       6858          6
+kernel/src/mm/small_alloc.rs:413                210044314      45784        217          3
+kernel/src/fs/file.rs:708                        92917514      41818        449          3
+kernel/src/mm/small_alloc.rs:247                210805973      38135        180          3
+kernel/src/process/wait.rs:161                   23841997      32291       1354          3
+kernel/src/syscall/misc.rs:190                   11517670      21727       1886          0
+kernel/src/mm/small_alloc.rs:266                  9920196      11660       1175          2
+kernel/src/mm/deferred_free.rs:126               20443964       9252        452          1
+kernel/src/mm/small_alloc.rs:495                 10504967       7931        754          2
+kernel/src/process/wait.rs:319                    6418268       7917       1233          3
+kernel/src/process/wait.rs:287                    6413344       4688        731          1
+kernel/src/timer.rs:217                           2139441       4243       1983          1
+kernel/src/ipc/binder.rs:1079                      396790       1046       2636          2
+kernel/src/timer.rs:361                            230026        452       1968          0
+site-table sum: 311114 ms across 14 sites
+overflow row: n=1289748 tot=2103ms avg=1631ns max=3ms (table-full + missed-edge opens)
