@@ -111,3 +111,40 @@ mutter + gsd) visible and stable on the Ubuntu 22.04 riscv64 image.
   PNG is built-in but icons are SVG; MIT-SHM BadAccess killed
   gnome-session-failed's dialog (kernel sysv-shm suspicion);
   "sh: 0: getcwd() failed: Success" (errno-0 getcwd) seen twice.
+
+## Session 2b (2026-10-25 late) — DESKTOP VISIBLE, vision-verified
+
+- Rebuilt image with: EGL pin (libEGL_mesa 20.0.4 — the gles helper
+  died on the 23.2 lib), hardware-compatibility "+softpipe" append
+  (the stock file ends "-softpipe"; last-match-wins, so the stock
+  session refused software GL: "No hardware 3D support" ->
+  gnome-session-failed dialog), librsvg2-common in PKGS, and runit now
+  generates the gdk-pixbuf loaders.cache guest-side before Xorg
+  (dpkg -x skips the postinst; without the cache SVG icons fail).
+- runs/gnome-full1 (STOCK session): gnome-session + gsd family UP
+  (gsd-color/keyboard/sound/sharing/print-notif/smartcard/usb-probe/
+  media-keys/xsettings/a11y... — first time M2-class state on this
+  lane). Shell slow under the gsd storm (WAKE-STRANDED kernel warnings
+  under 2-vCPU TCG load), M4_screen_lit @751s.
+- runs/gnome-full1-gs (gs mode on same image): M4_screen_lit @91s.
+- DESKTOP PROOF (runs/gnome-full1-gs/desktop-proof.png +
+  runs/gnome-full1/desktop-proof.png, vision-verified): GNOME Shell
+  top panel rendered — "Activities" button top-left, "Starting gn…"
+  status/clock area top-center, system indicators, a real notification
+  banner ("Logged in as a privileged user"), blue window region
+  (workspace/snapshot content), white mouse cursor. This is a live
+  compositing Shell desktop, not just a painted background.
+- M5 (fire.py's 4-sigcolor proxy) does not fit GNOME 42's dark
+  aesthetic: the desktop is #232323 shell background + blue accents +
+  white text = 3 quantized color buckets at >=0.5% coverage; the panel
+  and notification are demonstrably present. M4 is the banked pixel
+  milestone; M5-as-written is a color-diversity proxy, not a presence
+  test.
+- Session-path residue (kernel-side, queued): recurring user SEGV
+  epc=0x2aaaaae2b6 addr=0x8 in gsd-spawned helpers, each preceded by
+  "sh: 0: getcwd() failed: Success" (getcwd returning failure with
+  errno 0 — dash then dies on a null deref; needs a controlled repro
+  in a quiet boot); MIT-SHM BadAccess (request 130 minor 1) killed
+  gnome-session-failed's dialog in swfix-sess1 — Xorg-side shmat
+  failure path, unverified; PREEMPT-LEAK flood (idle wfi, ~2s holds)
+  on every boot — kernel-side, likely another lane's active area.
