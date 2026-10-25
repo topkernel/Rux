@@ -306,3 +306,52 @@ mutter + gsd) visible and stable on the Ubuntu 22.04 riscv64 image.
   (SEGV_MAPERR). The trap printer fires correctly on real faults.
 - runs/gnome-r8final: the r5 image roll (Power dropped) — final
   stability validation for the merge set; results below.
+
+## Session 7 (2026-10-26 early, leg-5 after the 23:23 quota death)
+
+- r8final RESULT (from preserved serials; leg-4 died before appending):
+  KERNEL_PANIC @515s — "PANIC: index out of bounds: the len is 16 but
+  the index is 16" at kernel/src/mm/small_alloc.rs:445, mid gsd-storm.
+  M2 @441s, M3/M4 never reached. So the gsd-power drop did NOT get its
+  validation on leg-4's kernel.
+- Root cause (fixed in 65f35f47): the small-object allocator's
+  per-CPU magazine row was found with len == 17 (MAG_DEPTH is 16). Two
+  racing pushes that both passed the len<16 check at len==15 — possible
+  only when two CPUs transiently resolve cpu_id() to the same row
+  (tp->ti_cpu divergence window; the scheduler R55/R74 hunt family —
+  every in-tree steer is gated but residual windows remain) or a wild
+  write into the row. The next free-path drain then read buf[16], one
+  past the row, and killed the kernel. Fix is allocator-local defense
+  in depth: alloc pops only when 0 < len <= MAG_DEPTH; the free-path
+  drain is bounded on both sides (indices >= MAG_DEPTH were never
+  written by any push, so dropping them is safe; flush_batch
+  re-validates every surviving entry against the page header); a len
+  beyond 2x depth is dropped wholesale so a wild-written len can never
+  stall a CPU under IF=0; every heal bumps MAG_ALIAS_EVENTS (printed
+  as mag-alias-heals in the census line) + BAD_PAGE taint, so the
+  scheduler/wild-write hunt lanes get a named counter instead of a
+  dead desktop. No row atomics by design — that would mask the
+  producer.
+- Evidence the r5 image itself is fine: leg-4's second QEMU
+  (run/stall-repro, r5 image, 2.5h, found as a dead-session leftover
+  and killed this leg) reached "GNOME Shell started" +
+  "Registering session with GDM" with zero panics — the r8final panic
+  is an intermittent race (1 in ~6 session-hours), not deterministic
+  breakage from dropping Power.
+- Merged main (b332d08a = the 12-commit merge set incl. desktop
+  evidence; add/add conflicts on GNOME-SESSIONS.txt / build-img.sh /
+  glnit.c resolved to this branch's newer side, which adds the r7
+  autopsy + Power drop on top of main's cherry-picks) -> 9c52de85.
+- runs/gnome-r9fix (fixed kernel 65f35f47 + r5 image, session mode,
+  smp2/2G, 1800s, host load ~16-20): M2 @577s, M4_screen_lit @1081s,
+  best nonblack 1.0000, screen HELD 99% to the end, ZERO kernel
+  panics, ZERO user SEGVs. The gsd-power drop (024e51c5) now has its
+  gate evidence and joins the next merge set. (Known load shape seen
+  again: gsd MediaKeys/Keyboard missed their registration deadlines
+  ~650s in -> gnome-session-failed spawned, the fallback chain still
+  lit and held — same recoverable shape as r7upower.)
+- Stability phase (mission: multiple consecutive boots to desktop, no
+  manual intervention): run/stability-series.sh runs fire.py 3x
+  back-to-back, same config, series log runs/gnome-stab-series.log.
+  Results appended below.
+
