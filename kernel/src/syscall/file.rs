@@ -1782,7 +1782,18 @@ pub fn sys_getcwd(args: SyscallArgs) -> i64 {
             }
         }
 
-        return buf as i64;
+        // The syscall ABI returns the number of bytes copied (path + NUL),
+        // never the buffer pointer. glibc's __getcwd keeps the raw result
+        // in an `int retval` and treats it as a length: a returned pointer
+        // whose low 32 bits have bit 31 set (the usual PIE/heap placement
+        // around 0x2aaaa_xxxx0000) truncated to a negative int made glibc
+        // classify the successful call as an unclassifiable failure and
+        // return NULL with errno left at 0 — dash then printed
+        // "getcwd() failed: Success" and crashed on the NULL cwd, and the
+        // gsd-helper chain (each helper re-derives its cwd) died with it.
+        // The length also feeds glibc's buf==NULL realloc-shrink: with the
+        // pointer it re-allocated to a multi-GB size.
+        return (cwd_len + 1) as i64;
     }
 
     -(errno::ENOENT as i64)

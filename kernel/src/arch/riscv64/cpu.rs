@@ -46,14 +46,19 @@ pub fn get_counter_freq() -> u64 {
 #[inline]
 pub fn read_counter() -> u64 {
     let time: u64;
-    // SAFETY: csrrs with source x0 is the canonical CSR READ (no write
-    // side effect). The previous form used csrrw with source zero, which
-    // QEMU executes as a WRITE to a read-only CSR -> illegal instruction
-    // the first time the function ever ran (the mntslow sys_mount probe:
-    // mount01/access04 panicked deterministically). csrr / `csrrs rd,time,x0`
-    // is the privileged-architecture read idiom for time.
+    // SAFETY: time is a read-only supervisor CSR; reading it is always safe.
+    // Stress-fleet fix (2026-10-25): this used `csrrw {}, time, zero`,
+    // the WRITE-flavored form — csrrw with a non-x0 rs1 performs a write
+    // attempt on the CSR, and `time` is read-only per the privileged
+    // spec, so the whole instruction is an illegal-instruction candidate
+    // whenever the platform enforces read-only CSR writes (fleet
+    // evidence: sustained mount(2) load trapped here within ~100 s on
+    // every kernel build tried; the trap's stval is this very
+    // instruction word, 0xc0101573). The canonical read form is `csrr`
+    // (csrrs rd, csr, x0): no write attempt, value-identical result —
+    // the same read semantics the reference kernel's timing helpers use.
     unsafe {
-        core::arch::asm!("csrrs {}, time, zero", out(reg) time, options(nomem, nostack, pure));
+        core::arch::asm!("csrr {}, time", out(reg) time, options(nomem, nostack, pure));
     }
     time
 }

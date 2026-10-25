@@ -160,37 +160,23 @@ fn strace1_line(nr: u32, args: &SyscallArgs, result: i64) {
 pub extern "C" fn syscall_handler(regs: &mut PtRegs) {
     let sc_nr = syscall_get_nr(regs) as usize;
     let sc_t0 = crate::dfx::syscost::enter();
-    // The raw_syscalls:sys_enter / sys_exit tracepoints. The disabled
-    // path is one `armed()` check (two relaxed loads on words that are
-    // now cache-hot); the six register arguments are marshalled only
-    // when the event is armed, so tracing off costs nothing extra on
-    // the syscall path.
-    if crate::trace::EVENT_SYS_ENTER.armed() {
-        let trace_args = syscall_get_arguments(regs);
-        crate::trace::record(
-            &crate::trace::EVENT_SYS_ENTER,
-            [
-                sc_nr as u64,
-                trace_args[0],
-                trace_args[1],
-                trace_args[2],
-                trace_args[3],
-                trace_args[4],
-                trace_args[5],
-                0,
-                0,
-                0,
-            ],
-        );
-    }
+    // The raw_syscalls:sys_enter / sys_exit tracepoints, recorded
+    // through the generated typed call functions (the `armed()` check
+    // is inside, so the disabled path marshals nothing beyond the six
+    // already-live register arguments).
+    let trace_args = syscall_get_arguments(regs);
+    crate::trace::trace_sys_enter(
+        sc_nr as i64,
+        trace_args[0],
+        trace_args[1],
+        trace_args[2],
+        trace_args[3],
+        trace_args[4],
+        trace_args[5],
+    );
     syscall_handler_inner(regs);
-    if crate::trace::EVENT_SYS_EXIT.armed() {
-        // The return value: a0 (riscv64) / rax (x86_64).
-        crate::trace::record(
-            &crate::trace::EVENT_SYS_EXIT,
-            [sc_nr as u64, syscall_get_return(regs) as u64, 0, 0, 0, 0, 0, 0, 0, 0],
-        );
-    }
+    // The return value: a0 (riscv64) / rax (x86_64).
+    crate::trace::trace_sys_exit(sc_nr as i64, syscall_get_return(regs) as i64);
     crate::dfx::syscost::exit(sc_nr, sc_t0);
     // pa15 recv-family fd census (hilogd.server dual-drain evidence for
     // the ipc lane; fd/flags/ret profile per (comm, nr), zero cost when

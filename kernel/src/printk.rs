@@ -1081,6 +1081,93 @@ pub fn ring_tail(n: usize) -> alloc::string::String {
     out
 }
 
+/// The newest printk records that fit in `dst`, oldest-first,
+/// syslog-formatted — the console tail of the pstore panic record.
+///
+/// Two properties `ring_tail` does not have, both for the panic context
+/// the pstore capture runs in:
+///
+/// - **No allocation.** Headers format into a stack buffer, record text
+///   copies straight into `dst` — the panic being captured may be the
+///   heap's own failure, so the heap is trusted with nothing.
+/// - **No waiting.** The ring lock is taken with `try_lock_irqsave`
+///   only — a stopped CPU may own it after `smp_send_stop`, and the
+///   panic path must still reach the `panic=` timeout. When the lock is
+///   held, a marker line is written instead of the tail.
+///
+/// Returns the number of bytes written.
+pub fn ring_tail_into(dst: &mut [u8]) -> usize {
+    fn push(dst: &mut [u8], at: &mut usize, bytes: &[u8]) {
+        let room = dst.len().saturating_sub(*at);
+        let n = bytes.len().min(room);
+        dst[*at..*at + n].copy_from_slice(&bytes[..n]);
+        *at += n;
+    }
+
+    let mut at = 0usize;
+    let Some(rb) = RING_BUFFER.try_lock_irqsave() else {
+        push(
+            dst,
+            &mut at,
+            b"[pstore: printk ring lock held by a stopped CPU - console tail skipped]\n",
+        );
+        return at;
+    };
+    if rb.next_seq == 0 || dst.is_empty() {
+        return at;
+    }
+
+    // Pass 1 (still under the guard — the other CPUs are stopped and
+    // this hold is bounded by the copy below): walk newest-first until
+    // the formatted records no longer fit, remembering the first seq
+    // the tail starts from.
+    let oldest_kept = rb.next_seq.saturating_sub(RING_BUFFER_CAPACITY as u64);
+    let mut first = rb.next_seq;
+    let mut used = 0usize;
+    let mut seq = rb.next_seq;
+    while seq > oldest_kept {
+        seq -= 1;
+        let idx = (seq % RING_BUFFER_CAPACITY as u64) as usize;
+        let record = &rb.records[idx];
+        if record.text_len == 0 || record.seq != seq {
+            continue;
+        }
+        let cost = record.text_len as usize + SYSLOG_HEADER_LEN + 1;
+        if used + cost > dst.len() {
+            break;
+        }
+        used += cost;
+        first = seq;
+    }
+
+    // Pass 2: emit oldest-first.
+    let mut header_buf = [0u8; SYSLOG_HEADER_LEN];
+    for seq in first..rb.next_seq {
+        let idx = (seq % RING_BUFFER_CAPACITY as u64) as usize;
+        let record = &rb.records[idx];
+        if record.text_len == 0 || record.seq != seq {
+            continue;
+        }
+        let hlen = format_syslog_header(
+            &mut header_buf,
+            record.level,
+            record.timestamp,
+            record.pid,
+            record.cpu_id,
+        );
+        push(dst, &mut at, &header_buf[..hlen]);
+        push(dst, &mut at, &record.text[..record.text_len as usize]);
+        // One record per line, the ring_tail convention.
+        if at == 0 || dst[at - 1] != b'\n' {
+            push(dst, &mut at, b"\n");
+        }
+        if at == dst.len() {
+            break;
+        }
+    }
+    at
+}
+
 // ==================== ProcFS /dev/kmsg Support ====================
 
 /// Generate kmsg content for /proc/kmsg.

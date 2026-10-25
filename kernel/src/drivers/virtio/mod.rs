@@ -966,6 +966,10 @@ impl VirtIOBlkDevice {
             head_desc: 0,
             ordinal: 0,
             timed_out: false,
+            // block:block_rq_complete geometry for the walker below.
+            trace_dev: ((self.disk.major << 20) | self.disk.first_minor) as u32,
+            trace_sector: sector,
+            trace_nr_sector: (buf.len() / 512) as u32,
         };
         VIRTIO_MMIO_PENDING.lock_irqsave()[slot] = Some(pending);
 
@@ -1428,6 +1432,13 @@ struct PendingIo {
     /// increment — leaked_chains then tracks only chains whose completion
     /// has genuinely not landed yet, instead of accumulating forever.
     timed_out: bool,
+    /// block:block_rq_complete geometry (dev as major<<20|minor, first
+    /// sector, sector count), stored at async submit so the completion
+    /// walker can record the event without any lookup. Zero on
+    /// tombstones and every non-async chain (nothing to report).
+    trace_dev: u32,
+    trace_sector: u64,
+    trace_nr_sector: u32,
 }
 
 // SAFETY: PendingIo is stored in a Spinlock-protected table and only accessed
@@ -1760,6 +1771,9 @@ pub fn pci_publish_sync_chain(disk: usize, queue_size: u32, ordinal: u16, head_d
         head_desc: head_desc as u32,
         ordinal,
         timed_out: false,
+        trace_dev: 0,
+        trace_sector: 0,
+        trace_nr_sector: 0,
     });
 }
 
@@ -1846,6 +1860,9 @@ pub fn abandon_pending_completion(
                         head_desc: p.head_desc,
                         ordinal: p.ordinal,
                         timed_out: true,
+                        trace_dev: 0,
+                        trace_sector: 0,
+                        trace_nr_sector: 0,
                     });
                     // io_buf intentionally leaked (see above).
                     abandoned += 1;
@@ -1892,6 +1909,9 @@ pub fn abandon_pending_completion(
                         head_desc: p.head_desc,
                         ordinal: p.ordinal,
                         timed_out: false,
+                        trace_dev: 0,
+                        trace_sector: 0,
+                        trace_nr_sector: 0,
                     });
                     // header + resp intentionally leaked (same discipline).
                     abandoned += 1;
@@ -2082,6 +2102,10 @@ unsafe fn pci_submit_read_async(
                         head_desc: header_desc_idx as u32,
                         ordinal: prev_expected,
                         timed_out: false,
+                        // block:block_rq_complete geometry for the walker.
+                        trace_dev: (((*disk).major << 20) | (*disk).first_minor) as u32,
+                        trace_sector: sector,
+                        trace_nr_sector: (buf.len() / 512) as u32,
                     });
 
                     submitted = true;
@@ -2608,6 +2632,19 @@ pub fn pci_process_async_completions_slot(slot: usize) -> usize {
             // (resp_layout == base).
             unsafe {
                 alloc::alloc::dealloc(pending.header_ptr, pending.header_layout);
+            }
+            // block:block_rq_complete — the async read's IRQ-side
+            // completion, with the geometry stored at submit time
+            // (tombstones and sync chains carry zeros and skip).
+            if pending.trace_dev != 0 {
+                crate::trace::trace_block_rq_complete(
+                    pending.trace_dev,
+                    pending.trace_sector,
+                    pending.trace_nr_sector as u32,
+                    io_status,
+                    0,
+                    "R",
+                );
             }
             // SAFETY: the delivering-protocol count taken under the table
             // lock keeps the waiter (and its stack) alive across this call
@@ -3236,6 +3273,19 @@ pub fn block_bh_handler(_vec: usize) {
                     alloc::alloc::dealloc(
                         pending.resp_ptr, pending.resp_layout,
                     );
+
+                    // block:block_rq_complete — the async read's
+                    // softirq-side completion, geometry from submit.
+                    if pending.trace_dev != 0 {
+                        crate::trace::trace_block_rq_complete(
+                            pending.trace_dev,
+                            pending.trace_sector,
+                            pending.trace_nr_sector,
+                            io_status,
+                            0,
+                            "R",
+                        );
+                    }
 
                     // Signal completion
                     (*pending.completion).complete(io_status);

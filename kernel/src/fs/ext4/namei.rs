@@ -351,10 +351,17 @@ fn update_superblock_free_inodes(fs: &Ext4FileSystem, delta: i32) -> Result<(), 
         let current = ptr.read_volatile();
         ptr.write_volatile((current as i32 + delta) as u32);
 
+        // F4-R2 (leg-31, f4-ext4-route-map.md route 2): the free-inode
+        // COUNTER is durability-deferred, not inline-synced. A counter is
+        // order-unconstrained (a crash leaves a stale count — an
+        // e2fsck-class inconsistency, the same class a write-back mount of
+        // the reference kernel tolerates); the identity-carrying blocks of
+        // an allocation (inode table, bitmaps) keep their inline syncs, so
+        // the ghost-empty-file publication order is untouched.
+        // Persistence happens at the standing drain points (fsync /
+        // sync_buffers, eviction of the dirty buffer).
         (*bh).set_state_bit(BufferState::BH_Dirty);
-        let sync_res = bio::sync_dirty_buffer(bh);
         bio::brelse(bh);
-        sync_res?;
     }
 
     Ok(())

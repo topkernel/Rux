@@ -65,6 +65,7 @@ pub mod softirqs;
 pub mod sysctl;
 pub mod sysrq;
 pub mod timer_list;
+pub mod procfile;
 pub mod vmstat;
 pub mod net;
 pub mod configgz;
