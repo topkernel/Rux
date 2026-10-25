@@ -109,21 +109,20 @@ def main() -> int:
     names = demangle(addr2line, elf, [a for a, _s, _n, _t in syms])
 
     # The kernel image has a hard budget: the image must end before the
-    # heap base (0x80E00000 on riscv64), and the boot-time MMU window is
-    # a fixed 12MB. The full table (2.3MB of names alone) does not fit,
-    # so the generator embeds as much as the budget allows and says how
-    # much was dropped.
-    budget = int(os.environ.get("KSYMS_BUDGET_BYTES", str(1024 * 1024)))
+    # heap base (0x81400000 on riscv64), and the boot-time MMU window is
+    # a fixed 18MB (RUX-RISCV-LAYOUT-3). The full table (~2.4MB of names
+    # + ~0.7MB of index at ~22.6k text symbols) fits that window with
+    # room to spare; the riscv64 linker.ld ASSERTs _end against the
+    # window, so an image that outgrows it fails the BUILD with a clear
+    # message instead of producing an unbootable kernel.
+    budget = int(os.environ.get("KSYMS_BUDGET_BYTES", str(4 * 1024 * 1024)))
 
-    # The table is OPT-IN. Embedding it grows the kernel image by the
-    # table size, and the image's address space is budgeted: the heap
-    # base sits at a fixed physical address and the vmemmap backing
-    # search treats the gap between the image end and the heap base as
-    # free space (moving the image end moves that gap — see the
-    # RUX-RISCV-LAYOUT notes in main.rs and memory_layout.rs). A full
-    # table does not fit in the current budget, so it stays OFF until
-    # the image budget is enlarged deliberately.
-    enabled = os.environ.get("KSYMS_ENABLE", "0") in ("1", "yes", "true")
+    # The table is ON by default (RUX-RISCV-LAYOUT-3): symbolization
+    # (/proc/kallsyms, symbolized stack traces) serves every debugging
+    # lane, and the 18MB window holds image + full table. Set
+    # KSYMS_ENABLE=0 to build a table-free image (the runtime lookup
+    # then answers '?' everywhere, as before).
+    enabled = os.environ.get("KSYMS_ENABLE", "1") not in ("0", "no", "false")
 
     # Compact form: one NUL-separated name blob plus an index of
     # (name offset, address). The symbol SIZE is derived from the next

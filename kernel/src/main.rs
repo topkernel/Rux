@@ -1158,8 +1158,14 @@ global_asm!(include_str!("arch/aarch64/trap.S"));
 /// infinite trap_entry frame-push recursion). Window/heap/reservation
 /// moved 12MB->14MB together; riscv64 linker.ld now ASSERTs _end against
 /// the window so the next outgrowth fails the build.
+/// RUX-RISCV-LAYOUT-3 (dfx): the full kernel symbol table (~3.1MB of
+/// .rodata) entered the default image and did not fit the 1.45MB left
+/// under the 14MB window (a 1MiB name cap covered only the first ~1.7MB
+/// of .text — hot-path frames symbolized to '?'). Window/heap/reservation
+/// moved 14MB->18MB together (boot.S both PMD tables, linker.ld ASSERT,
+/// memory_layout.rs, buddy_allocator.rs).
 #[cfg(feature = "riscv64")]
-const KERNEL_RESERVE_SIZE: usize = 0x100_0000; // 16MB
+const KERNEL_RESERVE_SIZE: usize = 0x140_0000; // 20MB
 #[cfg(feature = "x86_64")]
 const KERNEL_RESERVE_SIZE: usize = 0x1E0_0000; // 30MB
 /// Effective (RAM-clamped) static-region sizes computed by the early
@@ -1172,7 +1178,7 @@ static HEAP_SLAB_END_EFF: core::sync::atomic::AtomicUsize =
     core::sync::atomic::AtomicUsize::new(0);
 
 #[cfg(feature = "riscv64")]
-const KERNEL_HEAP_PHYS: usize = 0x8100_0000;
+const KERNEL_HEAP_PHYS: usize = 0x8140_0000;
 #[cfg(feature = "x86_64")]
 const KERNEL_HEAP_PHYS: usize = 0x4000_0000;
 

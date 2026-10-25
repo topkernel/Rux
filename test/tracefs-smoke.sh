@@ -13,6 +13,13 @@
 #   6. trace_pipe consumes the buffer
 #   7. /proc/timer_list: all 8 clock bases, per-CPU sections
 #   8. /proc/sysrq-trigger: mode 0200, read refused
+#   9. the expanded event set: sched_waking/sched_wakeup/
+#      sched_wakeup_new/sched_process_fork/sched_process_exit and
+#      exceptions:page_fault_user/page_fault_kernel — format files,
+#      set_event arming, recorded lines (page faults render %ps
+#      symbolically through the kernel symbol table)
+#  10. trace_marker (mode 0220, read refused, tracing_mark_write
+#      lines) and the per_cpu/cpuN views (trace/stats shapes)
 #
 # Usage: test/tracefs-smoke.sh [kernel] [logfile]
 # Env:   BOOT_DELAY (default 30), TIMEOUT (default 300)
@@ -104,6 +111,66 @@ rm -f "$LOG"
     sleep 0.3
     echo 'cat /sys/kernel/debug/tracing/events/sched/sched_switch/filter /sys/kernel/debug/tracing/events/sched/filter'
     sleep 0.3
+    echo 'echo ===EVENTS: new event set ==='
+    sleep 0.3
+    echo 'cat /sys/kernel/debug/tracing/available_events'
+    sleep 0.5
+    echo 'echo ===EVENTS: sched_wakeup format ==='
+    sleep 0.3
+    echo 'cat /sys/kernel/debug/tracing/events/sched/sched_wakeup/format'
+    sleep 0.5
+    echo 'echo ===EVENTS: page_fault_user format ==='
+    sleep 0.3
+    echo 'cat /sys/kernel/debug/tracing/events/exceptions/page_fault_user/format'
+    sleep 0.5
+    echo 'echo ===EVENTS: arm and generate ==='
+    sleep 0.3
+    echo 'echo sched:sched_waking sched:sched_wakeup sched:sched_wakeup_new sched:sched_process_fork sched:sched_process_exit exceptions:page_fault_user exceptions:page_fault_kernel > /sys/kernel/debug/tracing/set_event'
+    sleep 0.3
+    echo 'echo 1 > /sys/kernel/debug/tracing/tracing_on'
+    sleep 0.3
+    echo 'ls / >/dev/null; ls /proc >/dev/null; cat /proc/self/maps >/dev/null'
+    sleep 1
+    echo 'echo 0 > /sys/kernel/debug/tracing/tracing_on'
+    sleep 0.5
+    echo 'echo ===EVENTS: wakeup family lines ==='
+    sleep 0.3
+    echo 'grep sched_wakeup: /sys/kernel/debug/tracing/trace | head -4'
+    sleep 0.5
+    echo 'echo ===EVENTS: fork and exit lines ==='
+    sleep 0.3
+    echo 'grep sched_process_fork: /sys/kernel/debug/tracing/trace | head -2; grep sched_process_exit: /sys/kernel/debug/tracing/trace | head -2'
+    sleep 0.5
+    echo 'echo ===EVENTS: page fault lines ==='
+    sleep 0.3
+    echo 'grep page_fault_user: /sys/kernel/debug/tracing/trace | head -4'
+    sleep 0.5
+    echo 'echo 0 > /sys/kernel/debug/tracing/events/enable'
+    sleep 0.5
+    echo 'echo ===MARK: trace_marker write and render ==='
+    sleep 0.3
+    echo 'ls -l /sys/kernel/debug/tracing/trace_marker'
+    sleep 0.3
+    echo 'echo 1 > /sys/kernel/debug/tracing/tracing_on'
+    sleep 0.3
+    echo 'echo "PHASE-ONE-BEGIN" > /sys/kernel/debug/tracing/trace_marker'
+    sleep 0.3
+    echo 'cat /sys/kernel/debug/tracing/trace_marker'
+    sleep 0.3
+    echo 'grep tracing_mark_write /sys/kernel/debug/tracing/trace | head -2'
+    sleep 0.5
+    echo 'echo ===MARK: per_cpu views ==='
+    sleep 0.3
+    echo 'ls /sys/kernel/debug/tracing/per_cpu'
+    sleep 0.3
+    echo 'ls /sys/kernel/debug/tracing/per_cpu/cpu0'
+    sleep 0.3
+    echo 'head -5 /sys/kernel/debug/tracing/per_cpu/cpu0/stats'
+    sleep 0.5
+    echo 'head -5 /sys/kernel/debug/tracing/per_cpu/cpu0/trace'
+    sleep 0.5
+    echo 'echo 0 > /sys/kernel/debug/tracing/tracing_on'
+    sleep 0.5
     echo 'echo ===TRACE: timer_list shape ==='
     sleep 0.3
     echo 'head -22 /proc/timer_list'

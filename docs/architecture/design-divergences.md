@@ -82,3 +82,43 @@ domain (Tier 1 census/ticks, Tier 2 fork rows).
      - packed kernel-stack slab (order-6 blocks carved into 80KB slots,
        vs plain buddy order-power allocation) — on the launcher lane branch,
        arch-gated, register at merge with its sc228-class evidence. -->
+
+## D-3: Build-time kernel symbol table in .rodata (two-pass convergence)
+
+**Design.** The runtime symbol table (the backing store for
+`/proc/kallsyms` and symbolized stack traces) is generated at BUILD
+time — `nm` + `addr2line -C` over the linked ELF, demangled, compacted
+into a NUL-separated name blob plus a (offset, address, size, type)
+index — and embedded in the kernel image's `.rodata`, instead of being
+carried in a separate file loaded at boot or read back from the ELF
+headers at runtime. Only TEXT symbols are recorded, which is what
+makes the two-pass build converge: the table lives in `.rodata`, and
+`.rodata` sits after `.text` in the link order, so embedding the table
+never moves `.text` — the addresses the table records for pass 1 stay
+valid in pass 2 (verified: the table's max text address equals the
+final ELF's `_etext`).
+
+**Advantage.**
+- Zero boot-time setup and no runtime dependency on the boot loader or
+  a debug-info channel: symbolization works from the first panic
+  printer frame, on every image, by default.
+- One compact representation (2.4MB of names + 0.7MB of index at ~22.6k
+  symbols) shared by every consumer (kallsyms, backtraces, `%ps`
+  rendering in trace events, sysrq dumps).
+- The generated artifacts are gitignored; `build.rs` writes a
+  placeholder so a plain `cargo build` (no symbol pass) still compiles.
+
+**Cost.** The image grows ~3.1MB; the boot window, heap base and RAM
+reservation moved 14MB->18MB together for it (RUX-RISCV-LAYOUT-3;
+x86_64 needs no move — its mapping derives from `__kernel_end` at
+runtime and the heap sits at 1GB phys).
+
+**Compatibility evidence.** `/proc/kallsyms` prints the standard
+`addr type name` lines (22,636 lines, coverage through `_etext`);
+`Call Trace:` frames render `name+0xoff/0xsize` with `?` for
+non-text addresses; unit suite 1096/1096 with the table embedded;
+minimal-rootfs boot verified with the moved layout.
+
+**Guard.** The riscv64 linker.ld `ASSERT(_end <= window)` — the next
+outgrowth fails the build, not the boot; `test/kallsyms-smoke.sh`
+checks the count, the end-of-text coverage and a symbolized backtrace.
