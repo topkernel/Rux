@@ -61,11 +61,22 @@ pub struct ThreadStruct {
     /// Values: SR_FS_OFF, SR_FS_INITIAL, SR_FS_CLEAN, SR_FS_DIRTY
     pub fs: u32,
 
-    /// Vector extension state (V extension)
+    /// Vector extension state (V extension, RVV 1.0)
     ///
-    /// TODO: Implement V extension support
-    /// struct __riscv_v_ext_state
+    /// Mirrors the FPU discipline (see arch/riscv64/vext.rs): VS stays
+    /// Off until the task's first vector instruction traps and is
+    /// lazily enabled; the state is saved on switch-out when the
+    /// hardware marks it Dirty and reloaded on switch-in.
     pub vstate_valid: bool,
+
+    /// Saved sstatus.VS field (Off/Initial/Clean/Dirty)
+    pub vs: u32,
+
+    /// Saved vector CSRs: [vl, vtype, vstart, vcsr]
+    pub vcsrs: [u64; 4],
+
+    /// Saved vector registers v0..v31, VLEN/8 bytes each (VLEN=128)
+    pub vregs: [u8; super::vext::VREGS_BYTES],
 
     // ==================== Other state ====================
 
@@ -99,6 +110,9 @@ impl ThreadStruct {
             // their first FP instruction trapping as illegal.
             fs: SR_FS_INITIAL as u32,
             vstate_valid: false,
+            vs: super::vext::SR_VS_OFF as u32,
+            vcsrs: [0; 4],
+            vregs: [0; super::vext::VREGS_BYTES],
 
             // Other state
             tp_value: 0,
@@ -187,6 +201,114 @@ impl ThreadStruct {
     #[inline]
     pub fn get_fs(&self) -> u32 {
         self.fs
+    }
+
+    // ==================== Vector extension (RVV) ====================
+    //
+    // Same discipline as the FPU methods above; see arch/riscv64/vext.rs
+    // for the rationale (sstatus.VS lazy enable + Dirty-gated saves).
+
+    /// Save the live vector state before a context switch.
+    ///
+    /// Records the live sstatus.VS field, saves the registers/CSRs only
+    /// when the hardware marks them Dirty, then drops VS to Off for the
+    /// outgoing task (its first vector use after switch-in will trap
+    /// and lazily re-enable — or its saved state is restored instead).
+    ///
+    /// # Safety
+    /// Must run on the task's own hart inside the (IRQs-disabled)
+    /// switch path, exactly like [`Self::fpu_save_for_switch`].
+    #[inline]
+    pub unsafe fn vstate_save_for_switch(&mut self) {
+        let sstatus: u64;
+        asm!("csrr {}, sstatus", out(reg) sstatus);
+
+        let vs = sstatus & super::vext::SR_VS;
+        self.vs = vs as u32;
+
+        if vs == super::vext::SR_VS_DIRTY {
+            super::vext::vstate_save(
+                self.vcsrs.as_mut_ptr(),
+                self.vregs.as_mut_ptr(),
+            );
+        }
+
+        // Disable the vector unit for the outgoing task
+        let new_sstatus = sstatus & !super::vext::SR_VS;
+        asm!("csrw sstatus, {}", in(reg) new_sstatus);
+    }
+
+    /// Restore the task's vector state on switch-in.
+    ///
+    /// Tasks that never used vectors (vstate_valid == false) keep
+    /// VS=Off; their first vector instruction goes through the lazy
+    /// enable in the illegal-instruction handler. Tasks with a saved
+    /// image are reloaded and recorded Clean (live == buffer).
+    ///
+    /// # Safety
+    /// Must run on the incoming task's hart right after the register
+    /// switch, exactly like [`Self::restore_fpu`].
+    #[inline]
+    pub unsafe fn restore_vstate(&mut self) {
+        if self.vstate_valid {
+            super::vext::vstate_restore(
+                self.vcsrs.as_ptr(),
+                self.vregs.as_ptr(),
+            );
+            // Live state now equals the buffer: record Clean.
+            let sstatus: u64;
+            asm!("csrr {}, sstatus", out(reg) sstatus);
+            let new_sstatus =
+                (sstatus & !super::vext::SR_VS) | super::vext::SR_VS_CLEAN;
+            asm!("csrw sstatus, {}", in(reg) new_sstatus);
+        }
+    }
+
+    /// Save the live vector state WITHOUT disabling the unit (fork
+    /// path): the parent keeps running with its registers loaded; only
+    /// the Dirty flag drops to Clean. Mirrors [`Self::save_fpu`].
+    ///
+    /// # Safety
+    /// Must be called on the current task's hart.
+    #[inline]
+    pub unsafe fn save_vstate(&mut self) {
+        let sstatus: u64;
+        asm!("csrr {}, sstatus", out(reg) sstatus);
+
+        if (sstatus & super::vext::SR_VS) == super::vext::SR_VS_DIRTY {
+            super::vext::vstate_save(
+                self.vcsrs.as_mut_ptr(),
+                self.vregs.as_mut_ptr(),
+            );
+            // vstate_save leaves live == buffer: record Clean.
+            let new_sstatus =
+                (sstatus & !super::vext::SR_VS) | super::vext::SR_VS_CLEAN;
+            asm!("csrw sstatus, {}", in(reg) new_sstatus);
+        }
+    }
+
+    /// First vector use on this task (illegal-instruction trap with
+    /// VS=Off): initialize the hart's vector state to a defined
+    /// initial image, mark the buffer valid, and report success so the
+    /// trap handler enables VS in the saved sstatus and retries.
+    ///
+    /// # Safety
+    /// Must be called from the current task's trap context.
+    #[inline]
+    pub unsafe fn vstate_first_use(&mut self) -> bool {
+        if super::vext::vstate_first_use_init() {
+            self.vstate_valid = true;
+            self.vs = super::vext::SR_VS_INITIAL as u32;
+            true
+        } else {
+            false
+        }
+    }
+
+    /// Mark the saved vector state Clean (post-fork inheritance).
+    #[inline]
+    pub fn mark_vstate_clean(&mut self) {
+        self.vs = super::vext::SR_VS_CLEAN as u32;
     }
 
     /// Internal FPU save implementation

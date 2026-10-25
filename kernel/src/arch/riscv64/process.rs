@@ -181,8 +181,13 @@ pub fn flush_thread() {
             thread.fcsr = 0;
             thread.fs = crate::arch::pt_regs::SR_FS_OFF as u32;
 
-            // Clear vector state (TODO: implement when V extension is supported)
+            // Clear vector state: the new image starts from the
+            // initial vector state (vstate_valid=false keeps VS=Off;
+            // its first vector instruction lazily re-initializes).
             thread.vstate_valid = false;
+            thread.vs = 0;
+            thread.vcsrs = [0; 4];
+            thread.vregs = [0; crate::arch::riscv64::vext::VREGS_BYTES];
 
             // Drop the LIVE FPU as well (review ARCH, FP residue): without
             // this, the next context switch-out would record the live FS
@@ -193,7 +198,7 @@ pub fn flush_thread() {
             // path (zeroed registers).
             let sstatus: u64;
             asm!("csrr {}, sstatus", out(reg) sstatus);
-            let new_sstatus = sstatus & !SR_FS_MASK;
+            let new_sstatus = sstatus & !SR_FS_MASK & !crate::arch::riscv64::vext::SR_VS;
             asm!("csrw sstatus, {}", in(reg) new_sstatus);
         }
     }

@@ -667,6 +667,50 @@ fn handle_illegal_instruction(regs: &mut PtRegs) {
             is_fp_csr                             // fflags/frm/fcsr via SYSTEM opcode
         };
 
+        // V-extension first use: while sstatus.VS = Off, EVERY vector
+        // instruction traps illegal-instruction (any privilege mode).
+        // Same lazy-enable as the FP path above: enable VS, zero the
+        // live vector state (initial-state semantics), retry. Without
+        // this, toolchain-auto-vectorized static binaries SIGILL on
+        // V-capable harts even though the hardware can run them
+        // (reference-kernel semantics: RVV code executes when the ISA
+        // advertises V; see arch/riscv64/vext.rs).
+        const SR_VS_FIELD: u64 = 0x3 << 9;
+        const SR_VS_INITIAL_VAL: u64 = 0x1 << 9;
+        if (regs.status & SR_VS_FIELD) == 0
+            && super::vext::hart_has_v()
+            && !is_compressed
+            && instr_size == 4
+        {
+            // Fetch the full word (only the first halfword was read
+            // above); the FP branch below re-fetches it harmlessly.
+            let _ = unsafe {
+                super::uaccess::copy_from_user(
+                    insn_buf.as_mut_ptr(),
+                    epc as *const u8,
+                    4,
+                )
+            };
+            let instr32: u32 = u32::from_ne_bytes(insn_buf);
+            if super::vext::is_vector_instr32(instr32) {
+                let mut ok = false;
+                if let Some(task) = crate::sched::current() {
+                    // SAFETY: task is the current task; the trap path
+                    // holds it on this hart with IRQs disabled.
+                    unsafe {
+                        ok = (*task).thread_mut().vstate_first_use();
+                    }
+                }
+                if ok {
+                    // Enable V in the SAVED status too, so sret does
+                    // not undo it; retry the instruction.
+                    regs.status = (regs.status & !SR_VS_FIELD)
+                        | SR_VS_INITIAL_VAL;
+                    return;
+                }
+            }
+        }
+
         if is_fp {
             // First FP use: enable the FPU AND zero the FP registers/fcsr.
             // FS=Initial means the registers architecturally read as zero;
