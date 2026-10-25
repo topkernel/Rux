@@ -106,7 +106,7 @@ else
     echo "  FAIL: panic=3 reboots (banner count $banners < 2)"
     fail=1
 fi
-check "boot2 finds the record (the pstore boot line)" 'pstore: previous boot.s panic record found'
+check "boot2 finds the record (the pstore boot line)" 'pstore: previous boot.s console record found'
 check "record file exists, mode 0444" '^-r--r--r--.*console-ramoops-0'
 check "record carries the panic identity" 'Panic: sysrq'
 check "record carries the printed banner" 'PSDBG:banner_count=[1-9]'
