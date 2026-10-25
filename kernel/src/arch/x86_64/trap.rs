@@ -2320,7 +2320,13 @@ fn user_segv_forensics(regs: &PtRegs, fault_addr: u64) {
         let base = (regs.rsp & !0xf) as u64;
         let mut line = alloc::string::String::new();
         for i in 0..8usize {
-            let va = base + (i * 8) as u64;
+            // sc260 (leg-23): the walk addition is checked — a garbage
+            // rsp near u64::MAX must not overflow-panic the fault
+            // handler. forensics may report garbage, never die on it.
+            let va = match base.checked_add((i * 8) as u64) {
+                Some(v) => v,
+                None => break,
+            };
             let val = fore_read_u64(root, va)
                 .map(|v| alloc::format!("{:#x}", v))
                 .unwrap_or(alloc::string::String::from("????????????????"));
@@ -2337,20 +2343,34 @@ fn user_segv_forensics(regs: &PtRegs, fault_addr: u64) {
     // state the queue walk followed.
     if let Some(aspace) = addr_space.as_ref() {
         let root = aspace.root_ppn();
-        if let Some(w) = fore_read_u64(root, regs.rbp - 0x58) {
-            let mut line = alloc::string::String::new();
-            use core::fmt::Write;
-            let _ = write!(line, "USEGV-FOR: frame rbp-0x58={:#x}", w);
-            if w > 0x1000 && w < 0x0000_8000_0000_0000 {
-                for i in 0..6usize {
-                    let va = w + (i * 8) as u64;
-                    let _ = match fore_read_u64(root, va) {
-                        Some(v) => write!(line, " {:#x}:{:#x}", va, v),
-                        None => write!(line, " {:#x}:????", va),
-                    };
+        // sc260 (leg-23): the probe runs on ARBITRARY user register
+        // garbage. This exact boot died at the tail: pid 526's memcpy
+        // crash carried rbp=0xb, `rbp - 0x58` underflowed, and the
+        // debug-overflow panic turned an adjudicated userspace SEGV
+        // into a kernel death (PANIC: attempt to subtract with
+        // overflow, trap.rs:2340). The window only opens when rbp is
+        // a canonical user pointer — an rbp too small to subtract
+        // 0x58 from (or a kernel-space rbp, which the user-root walk
+        // could never read anyway) simply has no frame to dump.
+        if regs.rbp > 0x1000 && regs.rbp < 0x0000_8000_0000_0000 {
+            if let Some(w) = fore_read_u64(root, regs.rbp.wrapping_sub(0x58)) {
+                let mut line = alloc::string::String::new();
+                use core::fmt::Write;
+                let _ = write!(line, "USEGV-FOR: frame rbp-0x58={:#x}", w);
+                if w > 0x1000 && w < 0x0000_8000_0000_0000 {
+                    for i in 0..6usize {
+                        let va = match w.checked_add((i * 8) as u64) {
+                            Some(v) => v,
+                            None => break,
+                        };
+                        let _ = match fore_read_u64(root, va) {
+                            Some(v) => write!(line, " {:#x}:{:#x}", va, v),
+                            None => write!(line, " {:#x}:????", va),
+                        };
+                    }
                 }
+                crate::pr_err!("{}", line);
             }
-            crate::pr_err!("{}", line);
         }
     }
 
@@ -2392,11 +2412,14 @@ fn user_segv_forensics(regs: &PtRegs, fault_addr: u64) {
             }
             crate::pr_err!("{}", line);
             // obj window: the hicollie watchdog object is at c-0x118
-            // (r15 usually already holds it).
-            let obj = if is_user_ptr(regs.r15) && regs.r15 + 0x118 == regs.r9 {
+            // (r15 usually already holds it). wrapping_add: r15 is
+            // register garbage on non-apply shapes and may sit near
+            // u64::MAX (leg-23 hardening — same class as the sc260
+            // rbp-0x58 underflow panic).
+            let obj = if is_user_ptr(regs.r15) && regs.r15.wrapping_add(0x118) == regs.r9 {
                 regs.r15
             } else {
-                regs.r9 - 0x118
+                regs.r9.wrapping_sub(0x118)
             };
             let mut line = alloc::string::String::new();
             let _ = write!(line, "USEGV-FOR: obj {:#x}", obj);
