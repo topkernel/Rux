@@ -301,7 +301,10 @@ fn v(c: &AtomicU64) -> u64 {
 pub fn dump() {
     let secs = crate::drivers::timer::get_jiffies() / crate::config::KERNEL_HZ as u64;
     crate::pr_warn!(
-        "FSW1 t={}s br={} rd={} wr={} sd={}{} ev={}/{} sa={} pb={}.{} lvl={} es={}",
+        // sd: sync_dirty calls / deferred-skips — the separator matters:
+        // two concatenated u64s are unreadable (the pa59 route-1/control
+        // pair had to guess the split: read 31765|408 vs 70770|0).
+        "FSW1 t={}s br={} rd={} wr={} sd={}/{} ev={}/{} sa={} pb={}.{} lvl={} es={}",
         secs,
         v(&BREAD), v(&DEV_READ), v(&DEV_WRITE),
         v(&SYNC_DIRTY), v(&SYNC_DIRTY_SKIP),

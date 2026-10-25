@@ -1409,3 +1409,77 @@ banked. **Census gate on a5af759c: pending window** (fork-path commit
 → real check); decider run/pa52-census.sh armed 21:45, two-stage gate
 9/8 then 13/10, deadline 6 h. sc2xx launcher.ready trigger NOT FIRED
 (newest boot sc241, no event; pa39-watch standing).
+
+### 8.10.7 Leg 37 (2026-10-26): D-6 capability file-ops landed on-branch, F4 route-1 first slice, census re-targeted to the merge tree
+
+**Census gate: re-armed on the CURRENT main tip (the owed roll moves
+target).** Leg-36's pa52 decider (a5af759c) never fired — the host
+held load1 17-27 with 12-19 foreign QEMUs all night — and main moved
+51 commits past a5af759c in the meantime (35 kernel commits: the OH
+sched/binder package + this lane's merge set at e6a172d8 + the GNOME
+lanes' commits). The census + binder SLOW-TXN check is owed on the
+tree the branch will merge INTO, so the stale decider was killed and
+run/pa57-census.sh re-armed on PURE main b332d08a (x86 debug, built
+in pa52-main): same two-stage gate (9/8 for 2 h, then 13/10, 6 h
+deadline), then the gate parse + pa46-slowtxn.sh (which also
+adjudicates the pa56branch code-14 open question — a code-14 row in
+this PURE-main boot clears the branch; absence keeps the branch
+under a targeted look), then — same window, serialized — the owed
+pa55 A/B re-run of the wake/epoll levers (6fdada6b) on the CURRENT
+MERGE SHAPE: A = run/pa57-a-ctl-bzImage (pure main release-strong),
+B = run/pa57-b-fast-bzImage (branch HEAD strong; the branch's kernel
+diff vs main is exactly 6fdada6b's two files, so the A/B is clean AND
+its A-arm rows re-measure the p5b/p5c socket family on the
+post-p5-merge main class — the track-2 re-measure debt).
+
+**The oh-img trap (hit and fixed locally):** origin/main carries a
+TRACKED run/oh-img SYMLINK whose target is the perf-audit worktree's
+own run/oh-img (a self-referential loop — it came in with the dfx
+lane's wip commits and resolves nowhere). The leg-36->37 merge
+replaced this worktree's real image directory with that loop, which
+would have killed the census boot at its userdata copy. Fixed on
+disk (points at oh-display's oh-img); the symlink change stays
+UNCOMMITTED deliberately — REPORTED to the main session for an
+untrack decision (it breaks every worktree that merges it).
+
+**Track-1 (§1 capability file-ops): landed on-branch as D-6.**
+FileOps::builder() (const; duplicate capability install = const
+panic = compile error at every static initializer), the one-place
+missing-op dispatch (File::missing_op_errno — Read/Write EINVAL,
+LSeek ESPIPE, ReadAt EINVAL-op-less/ESPIPE-stream, with the incident
+comments consolidated; File::poll_dispatch — capability fn or the
+always-ready mask that four misc.rs call sites used to re-derive in
+two shapes), six conversions of the incident family (epoll/eventfd/
+timerfd/signalfd/pipe/inotify), and the fileops-caps unit group
+pinning each matrix + the errno map. Suite 1103/1103
+(pa58-maketest.log incl. the group); OH smoke boot pa58d6 (420 s,
+syscost) 0 panics, foundation/appspawn event loops alive — the §1
+kernel is functionally clean. Registered as D-6 in
+design-divergences.md (be92af7c).
+
+**Track-2 (next-biggest rows): F4 route-1 first slice landed
+(22452d60).** The post-L0 ladder's top rows after the socket family
+are p6_mkdrmdir (1890x) / p6_unlink (1085x) — ext4 metadata, whose
+route map puts route 1 (lazy no-journal write path) as the big
+lever, de-risked by reusing the publication queue. The slice:
+ext4_journal_start returns a NULL-JOURNAL handle on journal-less
+filesystems (was EINVAL), and all eight namei dispatch sites bracket
+unconditionally — so on the no-journal userdata class the per-op
+inline metadata syncs defer into the SAME ordered publication queue
+the journaled path uses (pre-before-entry-before-post at every
+drain: fsync/sync, eviction, forced commit); jbd2_journal_stop's
+existing early return makes the null shape a pure defer. Linux's
+no-journal ext4 is write-back the same way; crash class = e2fsck
+(F4-R2 stance). Suite 1103/1103 (pa59-maketest2.log). Mechanism boot
+pa59r1 (fsw=1, 480 s, 0 panics): publications flow (pb=683), dirty
+evictions rise 5 -> 26 (write-back behavior, expected); the
+same-day control boot (pure main b332d08a, same image/window class)
+lands pa59ctl — the honest sync-write pair and the phase-A
+comparison go in the table below when it completes. NOT READY FOR
+MERGE until: the fsw pair is read, one LTP creat05/fork09-class spot
+run (the create-loop regression class the publication queue history
+warns about), and the pbench mkdrmdir/unlink medians in a quiet
+window.
+
+**sc2xx launcher.ready trigger: NOT FIRED** (sc258 newest, zero
+events; pa39-watch standing). Run day stays pending.
