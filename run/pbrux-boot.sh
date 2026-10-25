@@ -1,6 +1,6 @@
 #!/bin/bash
 # pbrux-boot.sh — ONE Rux-side pbench probe boot (perf-report.md 8.4/8.6
-# run day, Rux half; the Linux half is banked in 8.8 via pbref-boot.sh).
+# run day, Rux half; the reference half is banked in 8.8 via pbref-boot.sh).
 # Boots the OH image on a POST-UI main-class RUX kernel with the private
 # pbench-injected system image (pbref-inject.sh — same recipe both sides:
 # key_enable slot, start conditioned on bootevent.launcher.ready=true)

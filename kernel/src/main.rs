@@ -133,6 +133,8 @@ mod dfx;
 mod ipc;
 mod io_uring;
 mod timer;
+mod panic_policy;
+mod trace;
 mod module;
 
 #[cfg(feature = "unit-test")]
@@ -1111,21 +1113,16 @@ extern "C" fn boot_stack_continuation() -> ! {
     crate::rust_main_tail()
 }
 
-// x86_64 link shim for the trap-entry symbol generic process code
-// references. arch/x86_64/trap.S is not written yet (X86-TODO agent
-// x86-trap pins `ret_from_fork` in its contract); this WEAK definition
-// only satisfies the link — the trap.S global definition overrides it
-// automatically once that file lands.
-#[cfg(feature = "x86_64")]
-core::arch::global_asm!(
-    r#"
-.section .text.x86_trampoline_shim, "ax"
-.weak ret_from_fork
-ret_from_fork:
-    hlt
-    jmp ret_from_fork
-"#
-);
+// (The x86_64 "link shim" that lived here — a .weak ret_from_fork
+// hlt-loop satisfying the link while arch/x86_64/trap.S did not exist
+// yet — is removed: trap.S defines the real .globl ret_from_fork, and a
+// .weak definition in the SAME assembly unit as the .globl one is an
+// assembler error ("ret_from_fork changed binding to STB_GLOBAL").
+// Whether rustc places the two global_asm! blocks into one unit depends
+// on codegen-unit partitioning, which shifted when the crate grew
+// (main 6f7e4ac3 era): release builds then failed under BOTH lto
+// configs until the shim was deleted. Debug builds only passed by
+// CGU-placement luck. x86_64 release becomes buildable again.)
 
 // Include platform-specific assembly code
 #[cfg(feature = "aarch64")]
@@ -1627,8 +1624,8 @@ fn panic(info: &PanicInfo) -> ! {
     // Flush persistent log
     crate::printk::persistent_log_flush();
 
-    // Halt
-    loop {
-        crate::arch::cpu::wfi();
-    }
+    // What happens next is the `panic=` policy (Linux): halt by
+    // default, reboot after N seconds or immediately when the command
+    // line asks for it.
+    crate::panic_policy::apply();
 }

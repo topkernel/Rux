@@ -99,6 +99,28 @@ rm -f "$LOG"
     sleep 0.3
     echo 'cat /proc/self/stat'
     sleep 0.3
+    echo 'echo ===SMOKE: tracing ==='
+    echo 'ls /sys/kernel/debug/tracing'
+    sleep 0.3
+    echo 'ls /sys/kernel/debug/tracing/events'
+    sleep 0.3
+    echo 'ls /sys/kernel/debug/tracing/events/raw_syscalls'
+    sleep 0.3
+    echo 'cat /sys/kernel/debug/tracing/available_tracers'
+    sleep 0.3
+    echo 'echo 1 > /sys/kernel/debug/tracing/events/raw_syscalls/sys_enter/enable'
+    sleep 0.3
+    echo 'echo 1 > /sys/kernel/debug/tracing/tracing_on'
+    sleep 0.3
+    echo 'ls /proc > /dev/null'
+    sleep 0.3
+    echo 'head -8 /sys/kernel/debug/tracing/trace'
+    sleep 0.3
+    echo 'echo 0 > /sys/kernel/debug/tracing/tracing_on'
+    sleep 0.3
+    echo 'echo ===SMOKE: proc timer_list ==='
+    echo 'cat /proc/timer_list'
+    sleep 0.3
     echo 'echo ===SMOKE: proc diskstats ==='
     echo 'cat /proc/diskstats'
     sleep 0.3
