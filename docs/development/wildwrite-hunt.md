@@ -3883,3 +3883,30 @@ its PARKED-WILDWRITE/PARKED-LEAK/PREEMPT-LEAK(pc=0x10000) lines are
 adjudicated known-noise. The chain round verdicts' "0 WW-HIT" counts
 remain correct: they count armed-capture hits, which are the ground
 truth.
+
+## Session 3 chain sweep (2026-10-25 ~10:10, rounds accumulated through the 06:55 quota window)
+
+All verdicts from raw serial + gdb logs (same criteria as prior
+sessions: WW-HIT and watchpoint hits are the armed-capture ground
+truth; PARKED-WILDWRITE/PARKED-LEAK/PREEMPT-LEAK lines on the FROZEN
+kernel remain adjudicated probe-race noise — see the s2 adjudication
+note above).
+
+- MAIN r89-r95 (FULL 2700 s each): CLEAN — 78553-93806 lines, 0 WW-HIT
+  / 0 watchpoint hits / 0 heals, no panics, 0 badaddr. IRQ-OFF-WINDOW
+  20-60 lines/round, all within the known canonical/hpet/memcpy
+  families, max under 1700 ms. CAVEAT r89: the gdb capture failed to
+  attach ("could not connect: connection timeout" in
+  ww-s2-r89-gdb.log) — that ONE round ran with serial-only coverage,
+  no armed watchpoints; r90+ re-armed normally (WW-ARMED 19,
+  GUARD=0xffffffff80a7a000).
+- LOAD r36-r42 (FULL 2700 s each): CLEAN — 134899-151857 lines,
+  407-664 sdc exec cycles per round (~3758 added), 0 WW-HIT / 0
+  watchpoint hits / 0 heals, no panics, 0 badaddr; IRQ-OFF-WINDOW
+  13-75 lines/round, known families.
+- Cumulative: **0 WW-HIT across r1-r95 complete rounds** (plus
+  partials), 0 META-SMASH. Load surface: p1 + r1-r42 = **~30k sdc
+  exec cycles over 43 full armed load-hours**, zero fires, zero false
+  positives.
+- r96 / load-r43 in flight since ~10:05/10:06, self-advanced by the
+  drivers; driver roots unchanged (176512 / 176547).

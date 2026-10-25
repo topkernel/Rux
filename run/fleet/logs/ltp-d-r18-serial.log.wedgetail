@@ -1,0 +1,126 @@
+S|1148|signal05|PASS|0|0
+signal06    1  [1;33mTCONF[0m  :  signal06.c:171: Only test on x86_64.
+signal06    2  [1;33mTCONF[0m  :  signal06.c:171: Remaining cases not appropriate for configuration
+SWEEP RES|1149|signal06|TCONF|32|0
+signalfd01    1  [1;32mTPASS[0m  :  signalfd is created successfully
+signalfd01    2  [1;32mTPASS[0m  :  signalfd is successfully reassigned
+SWEEP RES|1150|signalfd01|PASS|0|0
+signalfd4_01    1  [1;32mTPASS[0m  :  signalfd4(SFD_CLOEXEC) Passed
+SWEEP RES|1151|signalfd4_01|PASS|0|0
+signalfd4_02    1  [1;32mTPASS[0m  :  signalfd4(SFD_NONBLOCK) PASSED
+SWEEP RES|1152|signalfd4_02|PASS|0|0
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+sigpending02.c:25: [1;34mTINFO: [0mTesting libc sigpending()
+sigpending02.c:118: [1;32mTPASS: [0mbasic sigpending test successful
+sigpending02.c:148: [1;32mTPASS: [0mexpected failure: EFAULT (14)
+sigpending02.c:28: [1;34mTINFO: [0mTesting __NR_sigpending syscall
+sigpending02.c:47: [1;33mTCONF: [0msyscall(-1) __NR_sigpending not supported on your arch
+sigpending02.c:31: [1;34mTINFO: [0mTesting __NR_rt_sigpending syscall
+sigpending02.c:118: [1;32mTPASS: [0mbasic sigpending test successful
+sigpending02.c:148: [1;32mTPASS: [0mexpected failure: EFAULT (14)
+
+Summary:
+passed   4
+failed   0
+broken   0
+skipped  1
+warnings 0
+SWEEP RES|1153|sigpending02|PASS|0|0
+sigprocmask01    1  [1;32mTPASS[0m  :  Functionality of sigprocmask() Successful
+SWEEP RES|1154|sigprocmask01|PASS|0|0
+sigrelse01    1  [1;31mTBROK[0m  :  sigrelse01.c:245: signal() failed for signal 34. error:22 Invalid argument.
+sigrelse01    2  [1;31mTBROK[0m  :  sigrelse01.c:245: Remaining cases broken
+KILLTRACE: pid=1928(sigrelse01) -> pid=1929(sigrelse01) tgid=1929 ppid=1928 sig=9 origin=0x0
+SIGDEATH: pid=1929 tgid=1929 comm=Ok("sigrelse01") sig=9 ppid=1928 si_pid=1928 si_code=0x0
+WW: fires=6702 late_max=1158ms pidmiss=0 rearm=0 wheel=0/2 hres_next=14ms
+WW2: si_runs=340 si_busy=49ms ticks=[0,0] vec=[0,233,0,0,107,0,0,0,233,0]
+WW3: grq=0 cfs=0 idle=0x3 nr=1 cpu0=(pid=0 st=0x0 pc=256) cpu1=(pid=0 st=0x0 pc=65536)
+WW: wakes=58125 picks=53868 avg_run=8ms stranded=0 strand_max=0ms
+SWEEP RES|1155|sigrelse01|CRASH|0|9
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+WW: fires=6712 late_max=1158ms pidmiss=0 rearm=0 wheel=0/4 hres_next=40ms
+WW2: si_runs=240 si_busy=42ms ticks=[0,0] vec=[0,239,0,0,1,0,0,0,239,0]
+WW3: grq=0 cfs=0 idle=0x3 nr=2 cpu0=(pid=0 st=0x0 pc=65536) cpu1=(pid=0 st=0x0 pc=256)
+WW: wakes=58148 picks=53891 avg_run=8ms stranded=0 strand_max=0ms
+sigsuspend01.c:60: [1;32mTPASS: [0msigsuspend() succeeded
+
+Summary:
+passed   1
+failed   0
+broken   0
+skipped  0
+warnings 0
+SWEEP RES|1156|sigsuspend01|PASS|0|0
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+WW: fires=6728 late_max=1158ms pidmiss=0 rearm=0 wheel=0/4 hres_next=68ms
+WW2: si_runs=264 si_busy=49ms ticks=[0,0] vec=[0,263,0,0,1,0,0,0,263,0]
+WW3: grq=0 cfs=0 idle=0x3 nr=1 cpu0=(pid=0 st=0x0 pc=256) cpu1=(pid=0 st=0x0 pc=65536)
+WW: wakes=58195 picks=53937 avg_run=8ms stranded=0 strand_max=0ms
+WW: fires=6747 late_max=1158ms pidmiss=0 rearm=0 wheel=1/4 hres_next=0ms
+WW2: si_runs=272 si_busy=45ms ticks=[0,0] vec=[0,272,0,0,0,0,0,0,272,0]
+WW3: grq=0 cfs=0 idle=0x3 nr=1 cpu0=(pid=0 st=0x0 pc=256) cpu1=(pid=0 st=0x0 pc=65536)
+WW: wakes=58227 picks=53969 avg_run=8ms stranded=0 strand_max=0ms
+WW: fires=6767 late_max=1158ms pidmiss=0 rearm=0 wheel=0/4 hres_next=8ms
+WW2: si_runs=279 si_busy=44ms ticks=[0,0] vec=[0,279,0,0,0,0,0,0,279,0]
+WW3: grq=0 cfs=0 idle=0x3 nr=1 cpu0=(pid=0 st=0x0 pc=256) cpu1=(pid=0 st=0x0 pc=65536)
+WW: wakes=58260 picks=54002 avg_run=8ms stranded=0 strand_max=0ms
+WW: fires=6786 late_max=1158ms pidmiss=0 rearm=0 wheel=0/4 hres_next=1ms
+WW2: si_runs=275 si_busy=43ms ticks=[0,0] vec=[0,275,0,0,0,0,0,0,275,0]
+WW3: grq=0 cfs=0 idle=0x3 nr=2 cpu0=(pid=0 st=0x0 pc=65536) cpu1=(pid=0 st=0x0 pc=256)
+WW: wakes=58294 picks=54036 avg_run=8ms stranded=0 strand_max=0ms
+WW: fires=6806 late_max=1158ms pidmiss=0 rearm=0 wheel=0/4 hres_next=11ms
+WW2: si_runs=278 si_busy=40ms ticks=[0,0] vec=[0,278,0,0,0,0,0,0,278,0]
+WW3: grq=0 cfs=0 idle=0x3 nr=2 cpu0=(pid=0 st=0x0 pc=65536) cpu1=(pid=0 st=0x0 pc=256)
+WW: wakes=58325 picks=54067 avg_run=8ms stranded=0 strand_max=0ms
+WW: fires=6826 late_max=1158ms pidmiss=0 rearm=0 wheel=0/4 hres_next=21ms
+WW2: si_runs=277 si_busy=40ms ticks=[0,0] vec=[0,277,0,0,0,0,0,0,277,0]
+WW3: grq=0 cfs=0 idle=0x3 nr=1 cpu0=(pid=0 st=0x0 pc=256) cpu1=(pid=0 st=0x0 pc=65536)
+WW: wakes=58361 picks=54103 avg_run=8ms stranded=0 strand_max=0ms
+WW: fires=6846 late_max=1158ms pidmiss=0 rearm=0 wheel=0/4 hres_next=31ms
+WW2: si_runs=276 si_busy=42ms ticks=[0,0] vec=[0,276,0,0,0,0,0,0,276,0]
+WW3: grq=0 cfs=0 idle=0x3 nr=2 cpu0=(pid=0 st=0x0 pc=65536) cpu1=(pid=0 st=0x0 pc=256)
+WW: wakes=58396 picks=54138 avg_run=8ms stranded=0 strand_max=0ms
+WW: fires=6866 late_max=1158ms pidmiss=0 rearm=0 wheel=0/4 hres_next=41ms
+WW2: si_runs=278 si_busy=42ms ticks=[0,0] vec=[0,278,0,0,0,0,0,0,278,0]
+WW3: grq=0 cfs=0 idle=0x3 nr=1 cpu0=(pid=0 st=0x0 pc=256) cpu1=(pid=0 st=0x0 pc=65536)
+WW: wakes=58429 picks=54171 avg_run=8ms stranded=0 strand_max=0ms
+WW: fires=6885 late_max=1158ms pidmiss=0 rearm=0 wheel=0/4 hres_next=7ms
+WW2: si_runs=274 si_busy=45ms ticks=[0,0] vec=[0,274,0,0,0,0,0,0,274,0]
+WW3: grq=0 cfs=0 idle=0x3 nr=2 cpu0=(pid=0 st=0x0 pc=65536) cpu1=(pid=0 st=0x0 pc=256)
+WW: wakes=58464 picks=54206 avg_run=8ms stranded=0 strand_max=0ms
+WW: fires=6905 late_max=1158ms pidmiss=0 rearm=0 wheel=0/4 hres_next=23ms
+WW2: si_runs=278 si_busy=43ms ticks=[0,0] vec=[0,278,0,0,0,0,0,0,278,0]
+WW3: grq=0 cfs=0 idle=0x3 nr=2 cpu0=(pid=0 st=0x0 pc=65536) cpu1=(pid=0 st=0x0 pc=256)
+WW: wakes=58498 picks=54240 avg_run=8ms stranded=0 strand_max=0ms
+WW: fires=6925 late_max=1158ms pidmiss=0 rearm=0 wheel=0/4 hres_next=41ms
+WW2: si_runs=276 si_busy=43ms ticks=[0,0] vec=[0,276,0,0,0,0,0,0,276,0]
+WW3: grq=0 cfs=0 idle=0x3 nr=2 cpu0=(pid=0 st=0x0 pc=65536) cpu1=(pid=0 st=0x0 pc=256)
+WW: wakes=58536 picks=54278 avg_run=8ms stranded=0 strand_max=0ms
+WW: fires=6945 late_max=1158ms pidmiss=0 rearm=0 wheel=0/4 hres_next=58ms
+WW2: si_runs=276 si_busy=40ms ticks=[0,0] vec=[0,276,0,0,0,0,0,0,276,0]
+WW3: grq=0 cfs=0 idle=0x3 nr=2 cpu0=(pid=0 st=0x0 pc=65536) cpu1=(pid=0 st=0x0 pc=256)
+WW: wakes=58573 picks=54315 avg_run=8ms stranded=0 strand_max=0ms
+WW: fires=6964 late_max=1158ms pidmiss=0 rearm=0 wheel=1/4 hres_next=0ms
+WW2: si_runs=271 si_busy=44ms ticks=[0,0] vec=[0,271,0,0,0,0,0,0,271,0]
+WW3: grq=0 cfs=0 idle=0x3 nr=2 cpu0=(pid=0 st=0x0 pc=65536) cpu1=(pid=0 st=0x0 pc=256)
+WW: wakes=58606 picks=54348 avg_run=8ms stranded=0 strand_max=0ms
+RWFRZ: scan alive at 480s
+WW: fires=6984 late_max=1158ms pidmiss=0 rearm=0 wheel=0/3 hres_next=11ms
+WW2: si_runs=277 si_busy=48ms ticks=[0,0] vec=[0,277,0,0,0,0,0,0,277,0]
+WW3: grq=1 cfs=1 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=256) cpu1=(pid=0 st=0x0 pc=65536)
+WW: wakes=58641 picks=54382 avg_run=8ms stranded=0 strand_max=0ms
+WW: fires=7003 late_max=1158ms pidmiss=0 rearm=0 wheel=0/4 hres_next=17ms
+WW2: si_runs=137 si_busy=27ms ticks=[0,0] vec=[0,137,0,0,0,0,0,0,137,0]
+WW3: grq=0 cfs=0 idle=0x2 nr=3 cpu0=(pid=0 st=0x0 pc=256) cpu1=(pid=0 st=0x0 pc=256)
+WW: wakes=58681 picks=54423 avg_run=8ms stranded=0 strand_max=0ms
+WW: fires=7023 late_max=1158ms pidmiss=0 rearm=0 wheel=0/4 hres_next=31ms
+WW2: si_runs=137 si_busy=30ms ticks=[0,0] vec=[0,137,0,0,0,0,0,0,137,0]
+WW3: grq=0 cfs=0 idle=0x2 nr=3 cpu0=(pid=0 st=0x0 pc=256) cpu1=(pid=0 st=0x0 pc=256)
+WW: wakes=58721 picks=54463 avg_run=8ms stranded=0 strand_max=0ms
+WW: fires=7043 late_max=1158ms pidmiss=0 rearm=0 wheel=0/4 hres_next=46ms
+WW2: si_runs=139 si_busy=26ms ticks=[0,0] vec=[0,139,0,0,0,0,0,0,139,0]
+WW3: grq=0 cfs=0 idle=0x2 nr=3 cpu0=(pid=0 st=0x0 pc=256) cpu1=(pid=0 st=0x0 pc=256)
+WW: wakes=58761 picks=54503 avg_run=8ms stranded=0 strand_max=0ms

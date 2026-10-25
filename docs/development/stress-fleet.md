@@ -189,3 +189,94 @@ OPEN items:
   then v5) ran clean. Merge-gate evidence: main carries the
   read_counter bug fixed by 52abd2ea. ltpm continues rotating (each
   panic round auto-restarts per the member driver).
+
+## Session 3 central sweep (2026-10-25 ~10:00-10:30, after the 06:55 quota window)
+
+3 h of unattended fleet data adjudicated. Evidence pack:
+`run/fleet/evidence/2026-10-25-sweep3-evidence.txt`.
+
+Verdicts:
+
+- **monkey-b r8 KERNPANIC — KNOWN, already fixed on main.** Panic:
+  `pfault badaddr=0x13ff0 rip=...8075085e` immediately after
+  `KILLDUMP: tid 3735928559 fdtab:` — 3735928559 = 0xdeadbeef, the
+  free_task_slot pid poison. This is the kill_dump_tgid unpinned-task
+  race (sc244 shape): the fake-OOM SIGKILL dump walked a victim thread
+  that exited concurrently. Fixes d14d9403 + e79dc757 (originally
+  samgr-callback 4dee194f/66858395) are IN current main; the fleet x86
+  kernel (v1, 04:26) predates them. Independent third observation of
+  that bug (sc242/sc244/monkey-b-r8). No action here beyond evidence
+  preservation; goes away with the kernel refresh.
+- **ltpm r1-r8 — KNOWN control result.** Every panic is
+  `illegal instruction ... badaddr=0xc0101573` (the read_counter
+  csrrw-time instruction word) — main still carries it at 47d96961;
+  merge-gate evidence for 52abd2ea, not an anomaly. Its
+  PREEMPT-LEAK=2000+/round counts are the un-gated main kernel printing
+  the old shapes (known there). r6 WEDGE: post-panic quiet serial,
+  watchdog silence — same class.
+- **PREEMPT-LEAK pc=0x10001 on riscv members — NEW family, root-caused
+  this session (see below), producer split into two classes.**
+- **PARKED-LEAK on riscv members (pc=0x10000 x3626, 0x100/0x101/0x102
+  x573, 0x1 x8 in current serials) — the fleet-ledger promotion rule
+  fired: the class had "never been seen on NON-OH members"; it is now
+  seen there. Same family as the PREEMPT-LEAK splits below.**
+- **WATCHDOG=NNN rounds (ltp-c r14: 201, ltp-d r14: 228, monkey-b r4:
+  323, ltp-a r18-r20: 745 lines) — ALL one signature:
+  `DEADLOCK: spinlock stuck cpu=N lock=0xffffffff8080c840` =
+  PROCESS_TREE_LOCK, ra=RawSpinlock::lock backoff. Guest keeps
+  progressing through the episodes (sweep results continue), so this is
+  extreme contention, not a deadlock. Amplifier chain: leaked-count
+  holders strand (WAKE-STRANDED h0 pc=0x10001 run=176 s,
+  strand_max=125 s) and everyone else piles on the global tree lock
+  under fork storms. NOT load-only noise (ticks flow, timer_irq counts
+  high) — treated as downstream of the count-leak family + a fairness
+  question on PROCESS_TREE_LOCK sections; re-check after the count fix.
+- **BUG: soft lockup 10 s (ltp-a r1, ltp-b r16/r17, ltp-c r18,
+  timer_irq=257k-265k flowing)** — same downstream family: a
+  non-preemptible task monopolizes a CPU for 10+ s. Call trace
+  fragment: current=0xffffffff802c5ae2.
+- **IRQ-OFF-WINDOW**: all samples in the 103-1677 ms known families;
+  nothing over 2000 ms. memstorm/monkey HEAP-GROW lines: the OH heap
+  grows to ~320 MB/round and resets on reboot — the fake-OOM OPEN item's
+  instrumentation, still accumulating; no new anomaly class.
+- **fsfuzz r172-r179: clean** (post-93a18d53 EINVAL fix, zero panics,
+  beats continuous).
+- **Chains (s2 ledger cross-ref): MAIN r89-r95 + LOAD r36-r42 all
+  CLEAN** — 0 WW-HIT / 0 watchpoint hits / 0 heals / 0 panics / 0
+  badaddr; WW-ARMED every round EXCEPT r89, whose gdb log shows a
+  connection timeout ("could not connect") — one blind round for the
+  armed capture, serial-side evidence still clean. LOAD r36-r42 added
+  407-664 sdc exec cycles each (~3758 cycles).
+
+### NEW family root-cause split (count migration), and the fix landed
+
+The PREEMPT-UNDERFLOW / PARKED-LEAK / PREEMPT-LEAK(0x10001) trio is one
+phenomenon — preempt-count bits migrating between tasks — with TWO
+producers, split by fleet data:
+
+1. **Self-inflicted by PREEMPT-HEAL (FIXED this session).** The heal
+   runs INSIDE the timer IRQ bracket, so the observed task always
+   carries the tick's own in-flight HARDIRQ_OFFSET; the old whole-word
+   `ti_preempt_count_zero()` deleted it, and the irq_exit sub then
+   landed on a zeroed count — one guaranteed
+   `PREEMPT-UNDERFLOW sub=0x10000 count_was=0` per heal firing.
+   Correlation: pid-1 HEAL 31x vs UNDERFLOW 40x, pid-0x683 HEAL 2x vs
+   UNDERFLOW 5x. Fix: `ti_preempt_count_clear_base()` — clear only
+   PREEMPT+SOFTIRQ bits, preserve HARDIRQ/NMI so the pending subs pair.
+   PARKED-HEAL keeps the full zero (a task current on no CPU has no
+   in-flight nesting by definition). Verification A/B in flight.
+2. **tp switch inside an IRQ bracket (the deep class — HUNTING).**
+   Direct observations: 12x `IRQ-BRACKET-LEAK timer cpu=1
+   entry_tp=task(1530) exit_tp=idle-task` in ltp-a r20 — a context
+   switch happens between irq_enter and irq_exit, so the exit sub books
+   on the switched-in task (idle/0x5fa underflows; 0x5fa shows 91
+   underflows vs only 1 heal — heal cannot explain it) and the
+   switched-out task parks with +0x10000 (the PARKED-LEAK pc=0x10000
+   stream; the parked task later resumes non-preemptible, monopolizes,
+   strands wakers — the schedule_dead_never_returns comment at
+   sched.rs:1740 documents this exact end-state on the OH side). The
+   in-tick switch site is not yet identified: handle_timer_interrupt's
+   own schedule gate is preemptibility-checked and cannot fire with the
+   hardirq bit held. NEXT: instrument the bracket print with the
+   interrupted-frame ra/pc to name the switch path; keep the frozen
+   chains' armed capture as ground truth.
