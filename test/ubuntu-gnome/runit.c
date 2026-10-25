@@ -112,6 +112,38 @@ static void dump_log(const char *path) {
     dump_log_prefix(path, 40);
 }
 
+// --- kernel trace forensics (merged-main tracing subsystem) ---
+// /sys/kernel/debug/tracing is auto-mounted by the kernel. Arm the
+// sched + page-fault events before the session chain starts so any
+// stall or crash has a scheduling/fault trail. Knob runit-trace=0 on
+// the kernel cmdline disables (default on).
+#define TRACE_BASE "/sys/kernel/debug/tracing"
+
+static void write_file_text(const char *path, const char *text) {
+    int fd = open(path, O_WRONLY);
+    if (fd < 0) return;
+    write(fd, text, strlen(text));
+    close(fd);
+}
+
+static void arm_tracing(int on) {
+    if (!on) return;
+    write_file_text(TRACE_BASE "/events/enable", "1");
+    write_file_text(TRACE_BASE "/tracing_on", "1");
+}
+
+// Tail of the buffered trace records + per-CPU stats, to the console.
+// Called when a session child dies (and periodically by the tailer) so
+// the serial log carries the last scheduled events before the death.
+static void dump_trace(int lines) {
+    struct stat st;
+    if (stat(TRACE_BASE "/trace", &st) != 0) return;
+    printf("== trace tail (last events before death) ==\n");
+    fflush(stdout);
+    dump_log_prefix(TRACE_BASE "/trace", lines);
+    dump_log_prefix(TRACE_BASE "/per_cpu/cpu0/stats", 4);
+}
+
 // Read a one-line knob file (/etc/runit-mode, /etc/runit-session).
 // Falls back to the kernel cmdline (/proc/cmdline) knob of the same
 // name: "runit-mode=gs runit-session=rux" on the qemu -append line
@@ -176,6 +208,12 @@ int main(void) {
     // register deadline). Default "session" = full gnome-session chain.
     const char *MODE = (modebuf[0] == 'g') ? "gs" : "session";
     printf("[runit] mode=%s\n", MODE);
+
+    char tracebuf[8] = "";
+    read_knob("/etc/runit-trace", tracebuf, sizeof tracebuf);
+    int TRACE = (tracebuf[0] == '0') ? 0 : 1;
+    arm_tracing(TRACE);
+    printf("[runit] trace armed=%d\n", TRACE);
 
     char sessbuf[32] = "";
     read_knob("/etc/runit-session", sessbuf, sizeof sessbuf);
@@ -259,8 +297,10 @@ int main(void) {
     {
         pid_t tp = fork();
         if (tp == 0) {
+            int cyc = 0;
             for (;;) {
                 sleep(20);
+                cyc++;
                 const char *logs[3] = { "/tmp/gnome-session.log",
                                         "/tmp/gnome-shell.log",
                                         "/tmp/Xorg.log" };
@@ -269,6 +309,8 @@ int main(void) {
                     if (stat(logs[i], &st) != 0) continue;
                     dump_log_prefix(logs[i], 150);
                 }
+                if (TRACE && (cyc % 3) == 0)
+                    dump_log_prefix(TRACE_BASE "/per_cpu/cpu0/stats", 4);
             }
             _exit(0);
         }
@@ -286,7 +328,10 @@ int main(void) {
             pid_t p = wait(&st);
             if (p > 0) {
                 printf("[runit] child %d exited st=%d\n", (int)p, st);
-                if (p == gpid) { dump_log("/tmp/gnome-shell.log"); dump_log("/tmp/Xorg.log"); }
+                if (p == gpid) {
+                    if (TRACE) dump_trace(40);
+                    dump_log("/tmp/gnome-shell.log"); dump_log("/tmp/Xorg.log");
+                }
             } else {
                 sleep(2);
             }
@@ -309,6 +354,7 @@ int main(void) {
                 gs_dead = 1;
                 printf("[runit] gnome-session died st=%d after %lds\n",
                        st, (long)(time(NULL) - t0));
+                if (TRACE) dump_trace(40);
                 dump_log("/tmp/gnome-session.log");
                 dump_log("/tmp/gnome-shell.log");
                 if ((long)(time(NULL) - t0) < 150) break; // early death -> fallback
