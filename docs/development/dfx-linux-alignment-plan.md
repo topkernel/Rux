@@ -387,7 +387,14 @@ does not have. `trace_marker_raw` likewise omitted.
 - A `tracepoint!` macro to declare sites without hand-writing the
   table row (the table is ten rows now; the macro pays for itself at
   the next expansion).
-- The 10-minute soak acceptance run for the ring.
+
+**Soak acceptance (done).** `test/trace-soak.sh`: 600 s with every
+event armed, tracing on, and a rolling fork/exec/read churn. Zero
+panics; cpu0's ring wrapped 1.56 M times at capacity (entries 1024,
+overrun 1,559,409, entries-written 1,560,433) with readers
+interleaved; the trace, per-CPU and pipe views all rendered coherent
+lines afterwards, and the pipe consumption accounting matched (cpu1:
+read events 1024, then empty).
 
 ### Tranche 5 — crash policy and persistent evidence
 
