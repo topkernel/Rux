@@ -124,6 +124,32 @@ armed() single-branch check measured by syscost per the merge gate.
 
 ---
 
+## D-6: Capability-checked FileOps builder
+
+**Design.** File operations tables are built through a const builder
+(`FileOps::builder().read(..).poll(..).close(..).build()`) where each
+capability installs exactly once — a duplicate install is a const
+panic, i.e. a compile error in every static initializer. A file type's
+capability matrix becomes a declared fact instead of an
+inferred-from-None wall. Missing-capability behavior lives in ONE
+place (`File::missing_op_errno`: Read/Write→EINVAL, LSeek→ESPIPE,
+ReadAt split by type) plus a single poll fallback; the per-type errno
+incident class (read() on a valid epoll fd once returned EBADF and an
+OH event loop spun 155,991 iterations) is structurally closed.
+
+**Compatibility evidence.** Suite 1103/1103 with the new
+fileops-caps unit group pinning each converted table's capability
+matrix and errno mapping; first conversions (epoll/eventfd/timerfd/
+signalfd/pipe/inotify) compile identically; struct-literal tables
+still compile (opportunistic migration).
+
+**Known cost.** Opportunistic migration — remaining tables convert
+incrementally.
+
+**Guard.** fileops-caps unit group + the perf gate's fs domain rows.
+
+---
+
 <!-- Pending entries (register when they land on main):
      - packed kernel-stack slab (order-6 blocks carved into 80KB slots,
        vs plain buddy order-power allocation) — on the launcher lane branch,
