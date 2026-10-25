@@ -710,6 +710,13 @@ impl ProcFSSuperBlock {
             sysctl::generate_tainted,
             self.alloc_ino(),
         )));
+        // panic_on_oops — the oops policy knob (seeded from oops=panic).
+        kernel.add_child(Arc::new(ProcFSNode::new_sysctl_file(
+            b"panic_on_oops".to_vec(),
+            sysctl::generate_panic_on_oops,
+            sysctl::write_panic_on_oops,
+            self.alloc_ino(),
+        )));
         // Highest supported capability number (read by libcap-ng init()).
         kernel.add_child(Arc::new(ProcFSNode::new_dynamic_file(
             b"cap_last_cap".to_vec(),

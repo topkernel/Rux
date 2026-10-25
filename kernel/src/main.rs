@@ -821,10 +821,6 @@ pub fn rust_main_tail() -> ! {
             );
         }
 
-        // Initialize persistent kernel log (write kmsg to /var/log/kmsg on disk)
-        // Disabled: ext4 write operations corrupt filesystem
-        // printk::persistent_log_init();
-
         // Initialize network devices
         {
             let device_count = drivers::probe::init_network_devices();
@@ -892,6 +888,31 @@ pub fn rust_main_tail() -> ! {
         {
             dfx::init();
             print_status("dfx", "diagnostic subsystem", true);
+        }
+
+        // Persistent kernel log — /var/log/kmsg, the console tail on
+        // disk (klogd kernel thread, 30 s flush period, 256 KiB cap;
+        // zero cost on the printk hot path — the flusher walks the
+        // ring, the write path no longer does). Covers what pstore
+        // cannot: a power loss (RAM contents die) and early-boot
+        // deaths before pstore arms. The disk is NEVER written from
+        // the panic path — the panic may be the storage stack itself.
+        // (After sched::init — the klogd kthread enqueues onto the
+        // GRQ; the ext4 root has been up since mount_root_filesystem.)
+        {
+            printk::persistent_log_init();
+            print_status(
+                "printk",
+                &format!(
+                    "persistent log /var/log/kmsg ({})",
+                    if printk::persistent_log_running() {
+                        "klogd"
+                    } else {
+                        "off — klogd failed"
+                    }
+                ),
+                printk::persistent_log_running(),
+            );
         }
 
         // Initialize IPC subsystem
@@ -1444,9 +1465,7 @@ pub extern "C" fn rust_main() -> ! {
         // virt), so the region is at the same physical address every
         // boot and the next boot's firmware rewrite of the DTB cannot
         // touch it. Reserved BEFORE the zone allocator seeds (only
-        // memblock-free pages reach the buddy). x86_64 has no fixed-DTB
-        // anchor (QEMU rebuilds the ACPI tables near the top of low RAM
-        // every boot) — no pstore there yet.
+        // memblock-free pages reach the buddy).
         #[cfg(feature = "riscv64")]
         {
             let dtb_phys = arch::boot::get_dtb_pointer();
@@ -1454,6 +1473,28 @@ pub extern "C" fn rust_main() -> ! {
                 dfx::pstore::reserve(dtb_phys as usize, heap_start + heap_size + slab_size)
             {
                 mm::memblock_reserve(base, size).ok();
+            }
+        }
+        // pstore-lite (x86_64): no firmware block sits at a fixed low
+        // address (QEMU rebuilds the ACPI tables near the top of low
+        // RAM every boot) — the deterministic anchor is the kernel
+        // image itself: loaded at its link-time physical address, size
+        // a build constant, so kernel_image_phys_end() (the mapping's
+        // own authority) names the same address every boot. The carve
+        // [image end, +128 KiB) sits inside the dead window the 30 MB
+        // KERNEL_RESERVE already keeps from the buddy; skipped when an
+        // -initrd boot placed its image there (the zero page named the
+        // range above). Design note: Tranche 5 in
+        // docs/development/dfx-linux-alignment-plan.md.
+        #[cfg(feature = "x86_64")]
+        {
+            let base = arch::mm::kernel_image_phys_end() as usize;
+            let overlaps_initrd = crate::initrd::region()
+                .is_some_and(|(s, e)| s < base + dfx::pstore::PSTORE_RAM_SIZE && e > base);
+            if !overlaps_initrd {
+                if let Some((base, size)) = dfx::pstore::reserve_at(base) {
+                    mm::memblock_reserve(base, size).ok();
+                }
             }
         }
         crate::println!(
@@ -1486,11 +1527,11 @@ pub extern "C" fn rust_main() -> ! {
     mm::init_heap_sized(HEAP_SIZE_EFF.load(core::sync::atomic::Ordering::Acquire));
 
     // pstore-lite: with the linear map up, look for the previous boot's
-    // panic record in the reserved region (a guest reset does not clear
-    // RAM). A valid magic means the last boot panicked; the record is
-    // remembered for sysfs to publish as /sys/fs/pstore/console-ramoops-0
-    // and the magic is cleared so a clean next boot does not re-expose it.
-    #[cfg(feature = "riscv64")]
+    // record in the reserved region (a guest reset does not clear
+    // RAM). A valid magic means the last boot panicked or oopsed; the
+    // record is remembered for sysfs to publish as
+    // /sys/fs/pstore/{console,dmesg}-ramoops-0 and the magic is cleared
+    // so a clean next boot does not re-expose it.
     dfx::pstore::early_scan();
 
     // x86_64: leave the .boot stack (limited by the LMA window, ~1MB) for a
@@ -1682,8 +1723,11 @@ fn panic(info: &PanicInfo) -> ! {
         }
     }
 
-    // Flush persistent log
-    crate::printk::persistent_log_flush();
+    // NOTE: no disk flush here. The old persistent_log_flush call is
+    // gone by design: the panic may BE the storage stack, and a sync
+    // that waits on a dead virtio queue would never reach the panic=
+    // timeout. pstore (RAM) owns the panic record; /var/log/kmsg owns
+    // steady state with a 30 s staleness bound.
 
     // pstore-lite: write the record (staged sink + console tail) into
     // the reserved RAM region — after the report, before the `panic=`

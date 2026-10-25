@@ -458,6 +458,37 @@ pub fn generate_cmdline(pid: u64) -> Vec<u8> {
 ///
 /// Format: (pid) (comm) (state) (ppid) (pgrp) (session) (tty_nr) (tpgid) ...
 /// 52 fields total, matching the format of /proc/[pid]/stat.
+/// /proc/[pid]/schedstat — the per-task scheduler statistics triple
+/// (Documentation/filesystems/proc.rst): "time spent on the cpu (in
+/// nanoseconds), time spent waiting on a runqueue (in ns), # of
+/// timeslices run on this cpu" — one line, three space-separated
+/// numbers. The counters are maintained by the scheduler's schedstat
+/// edges (sched/stats.rs gates them; /proc/sys/kernel/sched_schedstats
+/// is the runtime knob, default off like the reference's). With the
+/// gate off the file still renders — zeros, the honest value of never
+/// having been counted.
+pub fn generate_schedstat(pid: u64) -> Vec<u8> {
+    use crate::process::{current_pid, current_task};
+
+    let task = if current_pid() as u64 == pid {
+        current_task()
+    } else {
+        match PinnedTask::lookup(pid as u32) {
+            Some(mut g) => Some(g.get()),
+            None => return Vec::new(),
+        }
+    };
+    let Some(task) = task else { return Vec::new() };
+    use core::sync::atomic::Ordering::Relaxed;
+    alloc::format!(
+        "{} {} {}\n",
+        task.schedstat_runtime_ns.load(Relaxed),
+        task.schedstat_wait_ns.load(Relaxed),
+        task.schedstat_timeslices.load(Relaxed)
+    )
+    .into_bytes()
+}
+
 pub fn generate_stat(pid: u64) -> Vec<u8> {
     use crate::process::{current_task, current_pid, find_task_by_pid};
     use alloc::string::ToString;

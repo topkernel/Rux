@@ -827,11 +827,12 @@ pub fn ext4_mkdir(
     name: &[u8],
     mode: u16,
 ) -> Result<u32, i32> {
-    // Wrap in journal transaction if journal is available
-    if fs.journal.is_some() {
-        return ext4_mkdir_inner(fs, dir_ino, name, mode);
-    }
-    ext4_mkdir_no_journal(fs, dir_ino, name, mode)
+    // Route-1 (F4 no-journal lazy write path): the journal bracket runs
+    // unconditionally — on a journal-less fs ext4_journal_start returns a
+    // null-journal handle whose only role is to defer this operation's
+    // inline metadata syncs into the ordered publication queue (see the
+    // comment in ext4/journal.rs). The worker below is unchanged.
+    ext4_mkdir_inner(fs, dir_ino, name, mode)
 }
 
 fn ext4_mkdir_no_journal(
@@ -843,16 +844,16 @@ fn ext4_mkdir_no_journal(
     // Check name length (NAME_MAX; Linux returns ENAMETOOLONG — review 5.5:
     // name_len u8 截断无检查, the u8 field would silently truncate)
     if name.is_empty() {
-        return Err(errno::Errno::InvalidArgument.as_neg_i32());
+    return Err(errno::Errno::InvalidArgument.as_neg_i32());
     }
     if name.len() > 255 {
-        return Err(-(crate::syscall::errno::ENAMETOOLONG as i32));
+    return Err(-(crate::syscall::errno::ENAMETOOLONG as i32));
     }
 
     // Check if parent link count would overflow
     let parent_inode = super::inode::read_inode(fs, dir_ino)?;
     if parent_inode.i_links_count >= EXT4_LINK_MAX {
-        return Err(errno::Errno::TooManyLinks.as_neg_i32());
+    return Err(errno::Errno::TooManyLinks.as_neg_i32());
     }
 
     // Allocate new inode
@@ -883,7 +884,7 @@ fn ext4_mkdir_no_journal(
     // Write directory block
     // SAFETY: fs.device is a valid GenDisk pointer; block numbers come from block group descriptors or inode metadata; bio::bread returns valid BufferHeads.
     unsafe {
-        write_block_from_vec(fs.device, block_nr, &block_data)?;
+    write_block_from_vec(fs.device, block_nr, &block_data)?;
     }
 
     // Update new inode's block mapping. New inodes are EXTENT-based (see
@@ -892,26 +893,26 @@ fn ext4_mkdir_no_journal(
     // overwrote the extent HEADER with the block number, corrupting the
     // tree before the directory was ever read.
     if (new_inode.i_flags & 0x80000) != 0 {
-        use super::extent::{Ext4ExtentHeader, Ext4Extent, EXT4_EXT_MAGIC};
-        // SAFETY: i_block is 60 bytes — a 12-byte header plus one
-        // 12-byte extent entry fits with room to spare.
-        unsafe {
-            let hdr = new_inode.i_block.as_mut_ptr() as *mut Ext4ExtentHeader;
-            (*hdr).eh_magic = EXT4_EXT_MAGIC;
-            (*hdr).eh_entries = 1;
-            (*hdr).eh_max = 4;
-            (*hdr).eh_depth = 0;
-            (*hdr).eh_generation = 0;
-            let e = (new_inode.i_block.as_mut_ptr() as *mut u8)
-                .add(core::mem::size_of::<Ext4ExtentHeader>())
-                as *mut Ext4Extent;
-            (*e).ee_block = 0;
-            (*e).ee_len = 1; // written
-            (*e).ee_start_hi = (block_nr >> 32) as u16;
-            (*e).ee_start_lo = block_nr as u32;
-        }
+    use super::extent::{Ext4ExtentHeader, Ext4Extent, EXT4_EXT_MAGIC};
+    // SAFETY: i_block is 60 bytes — a 12-byte header plus one
+    // 12-byte extent entry fits with room to spare.
+    unsafe {
+        let hdr = new_inode.i_block.as_mut_ptr() as *mut Ext4ExtentHeader;
+        (*hdr).eh_magic = EXT4_EXT_MAGIC;
+        (*hdr).eh_entries = 1;
+        (*hdr).eh_max = 4;
+        (*hdr).eh_depth = 0;
+        (*hdr).eh_generation = 0;
+        let e = (new_inode.i_block.as_mut_ptr() as *mut u8)
+            .add(core::mem::size_of::<Ext4ExtentHeader>())
+            as *mut Ext4Extent;
+        (*e).ee_block = 0;
+        (*e).ee_len = 1; // written
+        (*e).ee_start_hi = (block_nr >> 32) as u16;
+        (*e).ee_start_lo = block_nr as u32;
+    }
     } else {
-        new_inode.i_block[0] = block_nr as u32;
+    new_inode.i_block[0] = block_nr as u32;
     }
     new_inode.i_size = block_size as u32;
     new_inode.i_blocks = (block_size / 512) as u32;
@@ -943,7 +944,7 @@ fn ext4_mkdir_no_journal(
     // via fsync/sync, never through the creating syscall (the r8 mkdtemp
     // ENXIO storm: mkdir inherited a dead loop's -6 from here).
     if let Err(e) = bio::sync_buffers() {
-        crate::pr_warn!("ext4: post-mkdir buffer sync failed (errno {})", e);
+    crate::pr_warn!("ext4: post-mkdir buffer sync failed (errno {})", e);
     }
 
     Ok(new_ino)
@@ -1011,19 +1012,20 @@ pub fn ext4_create(
     name: &[u8],
     mode: u16,
 ) -> Result<u32, i32> {
-    if fs.journal.is_some() {
-        let mut handle = super::journal::ext4_journal_start(fs, 8)?;
-        // SAFETY: handle is a local variable from ext4_journal_start; set_current_handle stores it in a thread-local for jbd2 metadata journaling during this operation.
-        unsafe { set_current_handle(&mut handle); }
-        // PRE-capture window (see defer_entry_publication).
-        handle.begin_pre_capture(crate::fs::bio::dev_key_of(fs.device));
-        let result = ext4_create_inner(fs, dir_ino, name, mode);
-        // SAFETY: clear_current_handle resets the thread-local journal handle to None; no other references to handle exist after this point.
-        unsafe { clear_current_handle(); }
-        super::journal::ext4_journal_stop(&mut handle)?;
-        return result;
-    }
-    ext4_create_inner(fs, dir_ino, name, mode)
+    // Route-1 (F4 no-journal lazy write path): the bracket runs
+    // unconditionally — a journal-less fs gets a null-journal handle
+    // that only defers this operation's metadata syncs into the
+    // ordered publication queue (see ext4/journal.rs).
+    let mut handle = super::journal::ext4_journal_start(fs, 8)?;
+    // SAFETY: handle is a local variable from ext4_journal_start; set_current_handle stores it in a thread-local for jbd2 metadata journaling during this operation.
+    unsafe { set_current_handle(&mut handle); }
+    // PRE-capture window (see defer_entry_publication).
+    handle.begin_pre_capture(crate::fs::bio::dev_key_of(fs.device));
+    let result = ext4_create_inner(fs, dir_ino, name, mode);
+    // SAFETY: clear_current_handle resets the thread-local journal handle to None; no other references to handle exist after this point.
+    unsafe { clear_current_handle(); }
+    super::journal::ext4_journal_stop(&mut handle)?;
+    result
 }
 
 fn ext4_create_inner(
@@ -1079,18 +1081,19 @@ pub fn ext4_mknod(
     mode: u16,
     dev: u64,
 ) -> Result<u32, i32> {
-    if fs.journal.is_some() {
-        let mut handle = super::journal::ext4_journal_start(fs, 8)?;
-        // SAFETY: handle is a local variable from ext4_journal_start; set_current_handle stores it in a thread-local for jbd2 metadata journaling during this operation.
-        unsafe { set_current_handle(&mut handle); }
-        handle.begin_pre_capture(crate::fs::bio::dev_key_of(fs.device));
-        let result = ext4_mknod_inner(fs, dir_ino, name, mode, dev);
-        // SAFETY: clear_current_handle resets the thread-local journal handle to None; no other references to handle exist after this point.
-        unsafe { clear_current_handle(); }
-        super::journal::ext4_journal_stop(&mut handle)?;
-        return result;
-    }
-    ext4_mknod_inner(fs, dir_ino, name, mode, dev)
+    // Route-1 (F4 no-journal lazy write path): the bracket runs
+    // unconditionally — a journal-less fs gets a null-journal handle
+    // that only defers this operation's metadata syncs into the
+    // ordered publication queue (see ext4/journal.rs).
+    let mut handle = super::journal::ext4_journal_start(fs, 8)?;
+    // SAFETY: handle is a local variable from ext4_journal_start; set_current_handle stores it in a thread-local for jbd2 metadata journaling during this operation.
+    unsafe { set_current_handle(&mut handle); }
+    handle.begin_pre_capture(crate::fs::bio::dev_key_of(fs.device));
+    let result = ext4_mknod_inner(fs, dir_ino, name, mode, dev);
+    // SAFETY: clear_current_handle resets the thread-local journal handle to None; no other references to handle exist after this point.
+    unsafe { clear_current_handle(); }
+    super::journal::ext4_journal_stop(&mut handle)?;
+    result
 }
 
 fn ext4_mknod_inner(
@@ -1149,19 +1152,20 @@ pub fn ext4_symlink(
     name: &[u8],
     target: &[u8],
 ) -> Result<u32, i32> {
-    if fs.journal.is_some() {
-        let mut handle = super::journal::ext4_journal_start(fs, 8)?;
-        // SAFETY: handle is a local variable from ext4_journal_start; set_current_handle stores it in a thread-local for jbd2 metadata journaling during this operation.
-        unsafe { set_current_handle(&mut handle); }
-        // PRE-capture window (see defer_entry_publication).
-        handle.begin_pre_capture(crate::fs::bio::dev_key_of(fs.device));
-        let result = ext4_symlink_inner(fs, dir_ino, name, target);
-        // SAFETY: clear_current_handle resets the thread-local journal handle to None; no other references to handle exist after this point.
-        unsafe { clear_current_handle(); }
-        super::journal::ext4_journal_stop(&mut handle)?;
-        return result;
-    }
-    ext4_symlink_inner(fs, dir_ino, name, target)
+    // Route-1 (F4 no-journal lazy write path): the bracket runs
+    // unconditionally — a journal-less fs gets a null-journal handle
+    // that only defers this operation's metadata syncs into the
+    // ordered publication queue (see ext4/journal.rs).
+    let mut handle = super::journal::ext4_journal_start(fs, 8)?;
+    // SAFETY: handle is a local variable from ext4_journal_start; set_current_handle stores it in a thread-local for jbd2 metadata journaling during this operation.
+    unsafe { set_current_handle(&mut handle); }
+    // PRE-capture window (see defer_entry_publication).
+    handle.begin_pre_capture(crate::fs::bio::dev_key_of(fs.device));
+    let result = ext4_symlink_inner(fs, dir_ino, name, target);
+    // SAFETY: clear_current_handle resets the thread-local journal handle to None; no other references to handle exist after this point.
+    unsafe { clear_current_handle(); }
+    super::journal::ext4_journal_stop(&mut handle)?;
+    result
 }
 
 fn ext4_symlink_inner(
@@ -1241,19 +1245,20 @@ pub fn ext4_link(
     target_ino: u32,
     name: &[u8],
 ) -> Result<(), i32> {
-    if fs.journal.is_some() {
-        let mut handle = super::journal::ext4_journal_start(fs, 6)?;
-        // SAFETY: handle is a local variable from ext4_journal_start; set_current_handle stores it in a thread-local for jbd2 metadata journaling during this operation.
-        unsafe { set_current_handle(&mut handle); }
-        // PRE-capture window (see defer_entry_publication).
-        handle.begin_pre_capture(crate::fs::bio::dev_key_of(fs.device));
-        let result = ext4_link_inner(fs, dir_ino, target_ino, name);
-        // SAFETY: clear_current_handle resets the thread-local journal handle to None; no other references to handle exist after this point.
-        unsafe { clear_current_handle(); }
-        super::journal::ext4_journal_stop(&mut handle)?;
-        return result;
-    }
-    ext4_link_inner(fs, dir_ino, target_ino, name)
+    // Route-1 (F4 no-journal lazy write path): the bracket runs
+    // unconditionally — a journal-less fs gets a null-journal handle
+    // that only defers this operation's metadata syncs into the
+    // ordered publication queue (see ext4/journal.rs).
+    let mut handle = super::journal::ext4_journal_start(fs, 6)?;
+    // SAFETY: handle is a local variable from ext4_journal_start; set_current_handle stores it in a thread-local for jbd2 metadata journaling during this operation.
+    unsafe { set_current_handle(&mut handle); }
+    // PRE-capture window (see defer_entry_publication).
+    handle.begin_pre_capture(crate::fs::bio::dev_key_of(fs.device));
+    let result = ext4_link_inner(fs, dir_ino, target_ino, name);
+    // SAFETY: clear_current_handle resets the thread-local journal handle to None; no other references to handle exist after this point.
+    unsafe { clear_current_handle(); }
+    super::journal::ext4_journal_stop(&mut handle)?;
+    result
 }
 
 fn ext4_link_inner(
@@ -1578,17 +1583,18 @@ pub fn ext4_unlink(
     dir_ino: u32,
     name: &[u8],
 ) -> Result<(), i32> {
-    if fs.journal.is_some() {
-        let mut handle = super::journal::ext4_journal_start(fs, 8)?;
-        // SAFETY: handle is a local variable from ext4_journal_start; set_current_handle stores it in a thread-local for jbd2 metadata journaling during this operation.
-        unsafe { set_current_handle(&mut handle); }
-        let result = ext4_unlink_inner(fs, dir_ino, name);
-        // SAFETY: clear_current_handle resets the thread-local journal handle to None; no other references to handle exist after this point.
-        unsafe { clear_current_handle(); }
-        super::journal::ext4_journal_stop(&mut handle)?;
-        return result;
-    }
-    ext4_unlink_inner(fs, dir_ino, name)
+    // Route-1 (F4 no-journal lazy write path): the bracket runs
+    // unconditionally — a journal-less fs gets a null-journal handle
+    // that only defers this operation's metadata syncs into the
+    // ordered publication queue (see ext4/journal.rs).
+    let mut handle = super::journal::ext4_journal_start(fs, 8)?;
+    // SAFETY: handle is a local variable from ext4_journal_start; set_current_handle stores it in a thread-local for jbd2 metadata journaling during this operation.
+    unsafe { set_current_handle(&mut handle); }
+    let result = ext4_unlink_inner(fs, dir_ino, name);
+    // SAFETY: clear_current_handle resets the thread-local journal handle to None; no other references to handle exist after this point.
+    unsafe { clear_current_handle(); }
+    super::journal::ext4_journal_stop(&mut handle)?;
+    result
 }
 
 fn ext4_unlink_inner(
@@ -1722,17 +1728,18 @@ pub fn ext4_rmdir(
     dir_ino: u32,
     name: &[u8],
 ) -> Result<(), i32> {
-    if fs.journal.is_some() {
-        let mut handle = super::journal::ext4_journal_start(fs, 10)?;
-        // SAFETY: handle is a local variable from ext4_journal_start; set_current_handle stores it in a thread-local for jbd2 metadata journaling during this operation.
-        unsafe { set_current_handle(&mut handle); }
-        let result = ext4_rmdir_inner(fs, dir_ino, name);
-        // SAFETY: clear_current_handle resets the thread-local journal handle to None; no other references to handle exist after this point.
-        unsafe { clear_current_handle(); }
-        super::journal::ext4_journal_stop(&mut handle)?;
-        return result;
-    }
-    ext4_rmdir_inner(fs, dir_ino, name)
+    // Route-1 (F4 no-journal lazy write path): the bracket runs
+    // unconditionally — a journal-less fs gets a null-journal handle
+    // that only defers this operation's metadata syncs into the
+    // ordered publication queue (see ext4/journal.rs).
+    let mut handle = super::journal::ext4_journal_start(fs, 10)?;
+    // SAFETY: handle is a local variable from ext4_journal_start; set_current_handle stores it in a thread-local for jbd2 metadata journaling during this operation.
+    unsafe { set_current_handle(&mut handle); }
+    let result = ext4_rmdir_inner(fs, dir_ino, name);
+    // SAFETY: clear_current_handle resets the thread-local journal handle to None; no other references to handle exist after this point.
+    unsafe { clear_current_handle(); }
+    super::journal::ext4_journal_stop(&mut handle)?;
+    result
 }
 
 fn ext4_rmdir_inner(
@@ -2062,22 +2069,23 @@ pub fn ext4_rename(
     new_dir_ino: u32,
     new_name: &[u8],
 ) -> Result<(), i32> {
-    if fs.journal.is_some() {
-        let mut handle = super::journal::ext4_journal_start(fs, 16)?;
-        // SAFETY: handle is a local variable from ext4_journal_start; set_current_handle stores it in a thread-local for jbd2 metadata journaling during this operation.
-        unsafe { set_current_handle(&mut handle); }
-        // PRE-capture window for the new-name publication (see
-        // defer_entry_publication). A replace of an existing target
-        // separately arms the POST window (PostCaptureGuard) after this
-        // pre record has been published — the two never overlap.
-        handle.begin_pre_capture(crate::fs::bio::dev_key_of(fs.device));
-        let result = ext4_rename_inner(fs, old_dir_ino, old_name, new_dir_ino, new_name);
-        // SAFETY: clear_current_handle resets the thread-local journal handle to None; no other references to handle exist after this point.
-        unsafe { clear_current_handle(); }
-        super::journal::ext4_journal_stop(&mut handle)?;
-        return result;
-    }
-    ext4_rename_inner(fs, old_dir_ino, old_name, new_dir_ino, new_name)
+    // Route-1 (F4 no-journal lazy write path): the bracket runs
+    // unconditionally — a journal-less fs gets a null-journal handle
+    // that only defers this operation's metadata syncs into the
+    // ordered publication queue (see ext4/journal.rs).
+    let mut handle = super::journal::ext4_journal_start(fs, 16)?;
+    // SAFETY: handle is a local variable from ext4_journal_start; set_current_handle stores it in a thread-local for jbd2 metadata journaling during this operation.
+    unsafe { set_current_handle(&mut handle); }
+    // PRE-capture window for the new-name publication (see
+    // defer_entry_publication). A replace of an existing target
+    // separately arms the POST window (PostCaptureGuard) after this
+    // pre record has been published — the two never overlap.
+    handle.begin_pre_capture(crate::fs::bio::dev_key_of(fs.device));
+    let result = ext4_rename_inner(fs, old_dir_ino, old_name, new_dir_ino, new_name);
+    // SAFETY: clear_current_handle resets the thread-local journal handle to None; no other references to handle exist after this point.
+    unsafe { clear_current_handle(); }
+    super::journal::ext4_journal_stop(&mut handle)?;
+    result
 }
 
 fn ext4_rename_inner(

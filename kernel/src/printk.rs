@@ -508,8 +508,13 @@ fn write_to_ring_buffer(level: u8, text: &[u8], timestamp: u64) {
     // IRQ-context safe (irqsave discipline inside).
     KMSG_READ_WQ.wake_up_all();
 
-    // Write to persistent log file (if initialized)
-    persistent_log::append(level, text, seq, pid, cpu_id, timestamp);
+    // NOTE (klogd redesign): the persistent /var/log/kmsg copy is NO
+    // LONGER taken here. The old per-record synchronous ext4 write ran
+    // on every printk — a disk write on the logging hot path (and the
+    // disabled era's "ext4 write corrupts filesystem" comment). The
+    // record itself already lives in this ring; the klogd kernel thread
+    // (persistent_log::init) walks the ring every 30 s and appends the
+    // delta to /var/log/kmsg with the size cap, from task context.
 }
 
 // ==================== syslog Syscall ====================
@@ -1765,191 +1770,359 @@ pub fn init_logger() {
 
 // ==================== Persistent Log (kmsg to disk) ====================
 
-/// Persistent kernel log module.
+/// The persistent kernel log — /var/log/kmsg, the console tail on disk.
 ///
-/// Writes every printk message to `/var/log/kmsg` on the ext4 filesystem.
-/// Uses ring buffer behavior: fixed max size (256KB), wraps around to overwrite
-/// oldest data. This ensures that after a panic/reboot, the most recent kernel
-/// messages can be recovered from disk.
+/// Why it exists: the pstore record survives a RESET (RAM keeps its
+/// bytes) but not a power loss, and it only captures what the panic
+/// handler arms — an early-boot death or a hard hang leaves nothing.
+/// The disk copy covers both: everything the printk ring held at the
+/// last flush survives the power cut.
+///
+/// Design (the klogd redesign — the old per-printk synchronous ext4
+/// write is gone):
+///
+/// - **Zero hot-path cost.** No code runs on the printk write path any
+///   more. The records already live in the printk ring; the flusher is
+///   the only reader of them (a private cursor — it never touches the
+///   syslog(2) sequential-read cursor).
+/// - **klogd kernel thread.** A kthread (the khungtaskd pattern: a
+///   one-shot timer as the waker, INTERRUPTIBLE sleep between) wakes
+///   every 30 s and appends the ring delta (records newer than the
+///   last flushed seq, newest-bound 512 records per flush) to
+///   /var/log/kmsg. ext4 writes run in task context only — sync block
+///   I/O from a timer softirq is not allowed.
+/// - **Size cap.** The file wraps at 256 KiB: the offset restarts at 0
+///   when it passes the cap, keeping the NEWEST ~256 KiB (the inode
+///   size stays at the high-water mark so a plain read sees the whole
+///   window; after the first wrap the file is a torn window — old tail
+///   then new head, the usual rotating-log artifact).
+/// - **Early-boot coverage.** init() flushes once immediately, so the
+///   whole boot log up to that point lands on disk in one write;
+///   after that the staleness bound is the 30 s period (plus whatever
+///   the ring still holds — the ring is the real buffer, the disk the
+///   archive).
+/// - **No disk writes on panic/oops.** The panic path never touches
+///   the storage stack (the panic may BE the storage stack — the same
+///   reason the reference kernel's panic path does not sync). pstore
+///   owns the panic moment; this file owns steady state.
 mod persistent_log {
-    use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
+    use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
-    /// Maximum log file size (1MB)
-    const MAX_LOG_SIZE: u64 = 1024 * 1024;
+    use super::{RING_BUFFER, RING_BUFFER_CAPACITY};
 
-    /// Path to the persistent log file
+    /// The file's size cap — the newest 256 KiB of console tail.
+    const MAX_LOG_SIZE: u64 = 256 * 1024;
+
+    /// Flush period in seconds.
+    const FLUSH_PERIOD_SECS: u64 = 30;
+
+    /// Upper bound on records per flush (bounds the work and the
+    /// write size; a busy 30 s window can outgrow the cap anyway).
+    const MAX_RECORDS_PER_FLUSH: u64 = 512;
+
+    /// Path to the persistent log file.
     const LOG_PATH: &str = "/var/log/kmsg";
 
-    /// Whether the persistent log has been initialized (ext4 mounted)
-    static INITIALIZED: AtomicBool = AtomicBool::new(false);
+    /// The kthread is running.
+    static RUNNING: AtomicBool = AtomicBool::new(false);
 
-    /// Cached inode number for the log file (0 = not yet resolved)
-    static FILE_INO: AtomicU32 = AtomicU32::new(0);
+    /// Cached inode number for the log file (0 = not yet resolved).
+    static FILE_INO: AtomicU64 = AtomicU64::new(0);
 
-    /// Current write offset in the log file (ring buffer style)
+    /// Current write offset in the log file (wraps at the cap).
     static WRITE_OFFSET: AtomicU64 = AtomicU64::new(0);
 
-    /// Log level name strings
-    const LEVEL_NAMES: &[&str] = &[
-        "emerg", "alert", "crit", "err", "warn", "notice", "info", "debug",
-    ];
+    /// The seq of the last record written to disk (the flush cursor —
+    /// private to this module; the syslog(2) cursor is untouched).
+    static LAST_SEQ: AtomicU64 = AtomicU64::new(0);
 
-    /// Initialize persistent logging.
+    /// One log line, staged for the file: "<seq> <timestamp_us> <level>
+    /// <pid> <cpu> <text>". Pre-rendered because ext4_file_write takes
+    /// one contiguous slice and the record text lives in the printk
+    /// ring's fixed arrays.
+    struct Line {
+        buf: [u8; 320],
+        len: usize,
+    }
+
+    impl Line {
+        fn push(&mut self, bytes: &[u8]) {
+            let n = bytes.len().min(self.buf.len() - self.len);
+            self.buf[self.len..self.len + n].copy_from_slice(&bytes[..n]);
+            self.len += n;
+        }
+        fn push_dec(&mut self, mut v: u64) {
+            let mut digs = [0u8; 20];
+            let mut k = 0;
+            if v == 0 {
+                digs[0] = b'0';
+                k = 1;
+            }
+            while v > 0 {
+                digs[k] = b'0' + (v % 10) as u8;
+                k += 1;
+                v /= 10;
+            }
+            let mut tmp = [0u8; 20];
+            tmp[..k].copy_from_slice(&digs[..k]);
+            tmp[..k].reverse();
+            self.push(&tmp[..k]);
+        }
+    }
+
+    /// Is klogd running?
+    pub fn is_running() -> bool {
+        RUNNING.load(Ordering::Acquire)
+    }
+
+    /// Initialize the persistent log and start the klogd thread.
     ///
-    /// Must be called after ext4 filesystem is mounted.
-    /// Safe to call multiple times.
+    /// Must be called after the ext4 root is mounted (main boot, right
+    /// where the old disabled call sat). The immediate first flush
+    /// archives the boot log; the thread keeps it current afterwards.
     pub fn init() {
-        // Pre-create the log file so it exists before first append
-        if let Some(fs_ptr) = crate::fs::ext4::get_ext4_fs() {
-            if !fs_ptr.is_null() {
-                // SAFETY: fs_ptr is a valid pointer returned by get_ext4_fs() when non-null.
-                let fs = unsafe { &*fs_ptr };
-                if let Ok((ino, _inode)) = fs.lookup_path(LOG_PATH) {
-                    FILE_INO.store(ino, Ordering::Relaxed);
-                } else if crate::fs::ext4::create_file(LOG_PATH, 0o644).is_ok() {
-                    // File created, inode will be resolved on first write
+        if RUNNING.load(Ordering::Acquire) {
+            return;
+        }
+        // Resolve or create the file before the first flush so the
+        // flush path never creates.
+        resolve_file();
+        if crate::process::kthread::kthread_run(
+            klogd_fn,
+            core::ptr::null_mut(),
+            "klogd",
+        )
+        .is_some()
+        {
+            RUNNING.store(true, Ordering::Release);
+            // Seed the archive with the boot log now (the thread's
+            // first wake is a full period away).
+            flush_once();
+        } else {
+            crate::pr_warn!("printk: klogd failed to start (no persistent log)");
+        }
+    }
+
+    /// Resolve or create the log file; returns the inode or None.
+    fn resolve_file() -> Option<u32> {
+        let fs_ptr = match crate::fs::ext4::get_ext4_fs() {
+            Some(ptr) if !ptr.is_null() => ptr,
+            _ => return None,
+        };
+        // SAFETY: fs_ptr is a valid pointer returned by get_ext4_fs()
+        // when non-null.
+        let fs = unsafe { &*fs_ptr };
+        let cached = FILE_INO.load(Ordering::Relaxed);
+        if cached != 0 {
+            // Still alive? A deleted file's inode read fails; reset and
+            // fall through to re-create next time.
+            match fs.read_inode(cached as u32) {
+                Ok(_) => return Some(cached as u32),
+                Err(_) => {
+                    FILE_INO.store(0, Ordering::Relaxed);
+                    return None;
                 }
             }
         }
-        INITIALIZED.store(true, Ordering::Relaxed);
+        if let Ok((ino, _inode)) = fs.lookup_path(LOG_PATH) {
+            FILE_INO.store(ino as u64, Ordering::Relaxed);
+            return Some(ino);
+        }
+        match crate::fs::ext4::create_file(LOG_PATH, 0o644) {
+            Ok(vfs_inode) => {
+                FILE_INO.store(vfs_inode.ino, Ordering::Relaxed);
+                WRITE_OFFSET.store(0, Ordering::Relaxed);
+                Some(vfs_inode.ino as u32)
+            }
+            Err(_) => None,
+        }
     }
 
-    /// Append a log message to the persistent log file.
-    ///
-    /// Called from `write_to_ring_buffer()` after the ring buffer lock is dropped.
-    /// All errors are silently ignored — persistent logging must not affect normal operation.
-    pub fn append(level: u8, text: &[u8], seq: u64, pid: u32, cpu_id: u16, timestamp: u64) {
-        if !INITIALIZED.load(Ordering::Relaxed) {
-            return;
+    /// klogd main loop: sleep one period, flush, repeat (the khungtaskd
+    /// wake discipline — a one-shot timer as the waker so the sleep is
+    /// real, not wake-by-luck).
+    extern "C" fn klogd_fn(_arg: *mut core::ffi::c_void) -> i32 {
+        use crate::process::task::TaskState;
+        let interval_jiffies =
+            (FLUSH_PERIOD_SECS * crate::config::KERNEL_HZ as u64).max(1);
+        loop {
+            if crate::process::kthread::kthread_should_stop() {
+                break;
+            }
+            let current = match crate::sched::current() {
+                Some(t) => t as *mut crate::process::task::Task,
+                None => break,
+            };
+            // SAFETY: current is this kthread's own task pointer.
+            let my_pid = unsafe { (*current).pid() };
+            let target = crate::drivers::timer::get_jiffies() + interval_jiffies;
+            let timer_id = crate::timer::add_timer_wakeup(target, my_pid);
+            if timer_id != 0 {
+                // SAFETY: current is the running task's pointer.
+                unsafe {
+                    (*current).set_state(TaskState::new(TaskState::INTERRUPTIBLE));
+                }
+                // Re-check AFTER marking sleeping: the one-shot timer may
+                // have fired between arming and set_state — either its wake
+                // captured the INTERRUPTIBLE state, or the deadline is
+                // already visible.
+                if crate::drivers::timer::get_jiffies() >= target {
+                    // SAFETY: see above.
+                    unsafe {
+                        (*current).set_state(TaskState::new(TaskState::RUNNING));
+                        // NEW-C2: a racing wake may have enqueued us while we
+                        // are still executing — take ourselves back off.
+                        crate::sched::dequeue_task(&*current);
+                    }
+                    crate::timer::del_timer(timer_id);
+                } else {
+                    // Enable interrupts so the tick can reach us, then sleep
+                    // (kthread context, like syscall context, runs SIE=0 —
+                    // without this the sleeping CPU takes no ticks and the
+                    // 30 s flush never fires; the smoke saw the file stuck
+                    // at the init flush, 3 lines, forever).
+                    crate::arch::cpu::restore_irq(true);
+                    crate::sched::schedule();
+                    // Spurious wake before the deadline: drop the timer and
+                    // loop (re-armed next iteration).
+                    if crate::timer::timer_pending(timer_id) {
+                        crate::timer::del_timer(timer_id);
+                    }
+                }
+            } else {
+                // Timer table full — stay runnable, yield one scheduling
+                // round and retry the arm.
+                crate::sched::schedule();
+            }
+            if crate::process::kthread::kthread_should_stop() {
+                break;
+            }
+            flush_once();
         }
+        0
+    }
 
-        // Get ext4 filesystem
+    /// One flush: append every ring record newer than LAST_SEQ (bounded
+    /// by MAX_RECORDS_PER_FLUSH) to the file. Errors are silent except
+    /// for one warn line — the persistent log must never affect normal
+    /// operation, and a transient ext4 failure just means the delta
+    /// stays buffered in the ring until the next period.
+    pub fn flush_once() {
+        let Some(ino) = resolve_file() else {
+            return;
+        };
         let fs_ptr = match crate::fs::ext4::get_ext4_fs() {
             Some(ptr) if !ptr.is_null() => ptr,
             _ => return,
         };
-        // SAFETY: fs_ptr is a valid pointer returned by get_ext4_fs() when non-null.
+        // SAFETY: same provenance as resolve_file.
         let fs = unsafe { &*fs_ptr };
-
-        // Resolve or create the log file
-        let file_ino = FILE_INO.load(Ordering::Relaxed);
-        let file_ino = if file_ino != 0 {
-            file_ino
-        } else {
-            // Try to lookup existing file
-            match fs.lookup_path(LOG_PATH) {
-                Ok((ino, _inode)) => {
-                    FILE_INO.store(ino, Ordering::Relaxed);
-                    ino
-                }
-                Err(_) => {
-                    // File doesn't exist, try to create it
-                    match crate::fs::ext4::create_file(LOG_PATH, 0o644) {
-                        Ok(vfs_inode) => {
-                            let ino = vfs_inode.ino as u32;
-                            FILE_INO.store(ino, Ordering::Relaxed);
-                            WRITE_OFFSET.store(0, Ordering::Relaxed);
-                            ino
-                        }
-                        Err(_) => return, // Cannot create file, give up silently
-                    }
-                }
-            }
-        };
-
-        // Read current inode to get file size
-        let mut ext4_inode = match fs.read_inode(file_ino) {
+        let mut ext4_inode = match fs.read_inode(ino) {
             Ok(inode) => inode,
             Err(_) => {
-                // Inode may have been deleted, reset and retry next time
                 FILE_INO.store(0, Ordering::Relaxed);
                 return;
             }
         };
 
-        // Format log line: "[seq] [timestamp_us] level: pid(N) cpu(M): text\n"
-        let level_name = if (level as usize) < LEVEL_NAMES.len() {
-            LEVEL_NAMES[level as usize]
-        } else {
-            "unk"
-        };
-        let timestamp_us = timestamp / 10; // cycles to microseconds (10MHz clock)
-
-        let mut line_buf = [0u8; 300];
-        let mut pos = 0;
-
-        // Write header: [seq] [timestamp_us] level: pid(N) cpu(M):
-        let header = alloc::format!("[{}] [{}] {}: pid({}) cpu({}): ", seq, timestamp_us, level_name, pid, cpu_id);
-        let header_bytes = header.as_bytes();
-        let header_len = header_bytes.len().min(line_buf.len());
-        line_buf[..header_len].copy_from_slice(&header_bytes[..header_len]);
-        pos = header_len;
-
-        // Write message text
-        let text_len = text.len().min(line_buf.len() - pos - 1);
-        line_buf[pos..pos + text_len].copy_from_slice(&text[..text_len]);
-        pos += text_len;
-
-        // Ensure newline
-        if pos > 0 && line_buf[pos - 1] != b'\n' {
-            if pos < line_buf.len() {
-                line_buf[pos] = b'\n';
-                pos += 1;
-            }
-        }
-
-        let data = &line_buf[..pos];
-
-        // Get write offset
-        let mut offset = WRITE_OFFSET.load(Ordering::Relaxed);
-
-        // Write data
-        match crate::fs::ext4::file::ext4_file_write(fs, &mut ext4_inode, offset, data) {
-            Ok(written) => {
-                offset += written as u64;
-
-                // If we exceeded max size, wrap around
-                if offset >= MAX_LOG_SIZE {
-                    offset = 0;
+        // Stage the delta: records with seq > LAST_SEQ, oldest-first,
+        // at most MAX_RECORDS_PER_FLUSH of the newest ones.
+        let mut lines: alloc::vec::Vec<(u64, Line)> = alloc::vec::Vec::new();
+        {
+            let rb = RING_BUFFER.lock_irqsave();
+            let oldest_kept = rb.next_seq.saturating_sub(RING_BUFFER_CAPACITY as u64);
+            let start = (LAST_SEQ.load(Ordering::Relaxed) + 1).max(oldest_kept);
+            let end = rb.next_seq.saturating_sub(0);
+            // Bound the count (newest-bound): if the window is huge,
+            // skip to the newest MAX_RECORDS_PER_FLUSH records.
+            let start = start.max(end.saturating_sub(MAX_RECORDS_PER_FLUSH));
+            let mut seq = start;
+            while seq < end {
+                let idx = (seq % RING_BUFFER_CAPACITY as u64) as usize;
+                let record = &rb.records[idx];
+                if record.text_len != 0 && record.seq == seq {
+                    let mut line = Line { buf: [0; 320], len: 0 };
+                    let timestamp_us = record.timestamp / 10; // 10 MHz ticks -> us
+                    line.push_dec(record.seq);
+                    line.push(b" ");
+                    line.push_dec(timestamp_us);
+                    line.push(b" ");
+                    line.push_dec(record.level as u64);
+                    line.push(b" ");
+                    line.push_dec(record.pid as u64);
+                    line.push(b" ");
+                    line.push_dec(record.cpu_id as u64);
+                    line.push(b" ");
+                    line.push(&record.text[..record.text_len as usize]);
+                    if line.buf[line.len - 1] != b'\n' {
+                        line.push(b"\n");
+                    }
+                    lines.push((seq, line));
                 }
-
-                WRITE_OFFSET.store(offset, Ordering::Relaxed);
-
-                // Update inode size (for ring buffer, size = max of current offset and previous size)
-                let new_size = if offset == 0 {
-                    MAX_LOG_SIZE // Wrapped: file is full
-                } else {
-                    offset.max(ext4_inode.get_size())
-                };
-                ext4_inode.size = new_size;
-
-                // Write back inode
-                let _ = crate::fs::ext4::inode::write_inode(fs, file_ino, &ext4_inode);
-            }
-            Err(_) => {
-                // Write failed, reset inode cache
-                FILE_INO.store(0, Ordering::Relaxed);
+                seq += 1;
             }
         }
-    }
 
-    /// Flush any pending log data.
-    ///
-    /// ext4_file_write already writes synchronously to disk, so this is a no-op.
-    /// Provided for API completeness (called from panic handler).
-    pub fn flush() {
-        // No-op: ext4 writes are synchronous
+        if lines.is_empty() {
+            return;
+        }
+
+        // Write each line, advancing the rolling offset (wraps at the
+        // cap) and the flush cursor (the seq of the last line that
+        // actually landed). A failed write stops the flush: the
+        // remaining records stay buffered in the ring for the next
+        // period — the cursor must never pass an unwritten record.
+        let mut offset = WRITE_OFFSET.load(Ordering::Relaxed);
+        let mut final_seq = LAST_SEQ.load(Ordering::Relaxed);
+        let mut written = 0usize;
+        for (seq, line) in &lines {
+            let data = &line.buf[..line.len];
+            match crate::fs::ext4::file::ext4_file_write(fs, &mut ext4_inode, offset, data) {
+                Ok(written_len) => {
+                    offset += written_len as u64;
+                    if offset >= MAX_LOG_SIZE {
+                        offset = 0;
+                    }
+                    final_seq = *seq;
+                    written += 1;
+                }
+                Err(_) => break,
+            }
+        }
+        WRITE_OFFSET.store(offset, Ordering::Relaxed);
+        LAST_SEQ.store(final_seq, Ordering::Relaxed);
+        if written < lines.len() {
+            // One warn line per failing flush (the doc contract): the
+            // delta stays in the ring; without this the archive silently
+            // stops and the only symptom is a stale /var/log/kmsg.
+            crate::pr_warn!(
+                "klogd: flush wrote {}/{} records (ext4 write error at seq {}); delta stays buffered",
+                written,
+                lines.len(),
+                final_seq + 1
+            );
+        }
+
+        // Keep the inode size at the high-water mark so a plain read
+        // sees the full window (the wrap semantics of a rotating log).
+        let new_size = if offset == 0 {
+            MAX_LOG_SIZE
+        } else {
+            offset.max(ext4_inode.get_size())
+        };
+        ext4_inode.size = new_size;
+        let _ = crate::fs::ext4::inode::write_inode(fs, ino, &ext4_inode);
     }
 }
 
-/// Initialize persistent kernel log.
+/// Initialize the persistent log (start klogd + archive the boot log).
 ///
-/// Must be called after ext4 filesystem is mounted.
+/// Must be called after the ext4 root is mounted.
 pub fn persistent_log_init() {
     persistent_log::init();
 }
 
-/// Flush persistent log to disk (no-op since ext4 writes are synchronous).
-pub fn persistent_log_flush() {
-    persistent_log::flush();
+/// Is the persistent log running? (reporting/diagnostics)
+pub fn persistent_log_running() -> bool {
+    persistent_log::is_running()
 }

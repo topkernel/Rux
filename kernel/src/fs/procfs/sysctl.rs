@@ -130,6 +130,28 @@ pub fn generate_tainted() -> Vec<u8> {
 }
 
 
+/// /proc/sys/kernel/panic_on_oops — dies on oops instead of killing the
+/// faulting task (kernel/panic.c's oops=panic seed, sysctl runtime
+/// knob). Default 0, like the reference; the DFX lane's oops path reads
+/// it through dfx::oops::panic_on_oops().
+pub fn generate_panic_on_oops() -> Vec<u8> {
+    alloc::format!(
+        "{}\n",
+        if crate::dfx::oops::panic_on_oops() { 1 } else { 0 }
+    )
+    .into_bytes()
+}
+
+pub fn write_panic_on_oops(input: &[u8]) -> i32 {
+    match parse_u64(input) {
+        Ok(v @ 0..=1) => {
+            crate::dfx::oops::set_panic_on_oops(v == 1);
+            0
+        }
+        _ => -(crate::errno::constants::EINVAL as i32),
+    }
+}
+
 /// /proc/sys/kernel/cap_last_cap — highest supported capability number
 /// (read by libcap-ng init() to size the capability bounding set).
 pub fn generate_cap_last_cap() -> Vec<u8> {
