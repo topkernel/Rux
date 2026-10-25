@@ -472,19 +472,71 @@ debugfs flow's pre-lookup discipline now applies to the cgroup path
 too. And a guest reset does not clear RAM — the premise the whole
 scheme rests on, verified by the reboot cycle itself.
 
-**Remaining (Part 2).**
+**Remaining (Part 2) — all done, batch 4 (2026-10-26).**
 
-- Non-fatal `Oops` path for recoverable faults (the reference's
-  `oops=panic` default off).
-- Re-enable `printk::persistent_log_init()` with a size cap, so the
-  serial tail survives even a power loss (pstore only survives resets).
-- x86_64: no fixed anchor yet (QEMU rebuilds the ACPI tables near the
-  top of low RAM every boot) — the reserve hook is riscv64-gated.
+- **Non-fatal Oops path (done).** `dfx/oops.rs`: the kernel fault sites
+  that used to take the whole machine down (kernel page fault with no
+  exception-table fixup, kernel-mode illegal instruction, unhandled
+  kernel exceptions — both arches) now run the reference's contract.
+  The report's head line and die banner are Linux 5.15's wording
+  verbatim (`Unable to handle kernel paging request at virtual
+  address …` / `Oops - illegal instruction` + `Oops [#N]` on riscv64,
+  `BUG: unable to handle kernel …` + `Oops: 0000 [#N] PREEMPT SMP` on
+  x86_64), the register block is the faulting trap frame in the arch
+  `__show_regs` row layout (not a `save_regs` artifact — the SR-PROBE
+  lesson), and `Call Trace:` comes from the Tranche-3 symbolized
+  walker. Policy = `oops_end`/`make_task_dead`: interrupt context or
+  `panic_on_oops` → real panic (pstore + `panic=` apply); idle/early
+  boot → panic; otherwise the faulting task dies with SIGSEGV and the
+  machine keeps running — the trade the reference makes (whatever the
+  task held stays held; the limp-wedge is more diagnosable than the
+  halt). `oops=panic` (boot) and `/proc/sys/kernel/panic_on_oops`
+  (runtime) restore the loud policy. The recoverable oops is captured
+  into the pstore region as the reference's dmesg flavor —
+  `/sys/fs/pstore/dmesg-ramoops-0` next boot (the panic record keeps
+  `console-ramoops-0`; last writer owns the one region). Taint D and
+  the `[#N]` counter land before the report's own `Tainted:` line.
+  The old KERNPANIC raw SBI dump and re-entrancy latches stay in front
+  of the oops on every site; `/sys/kernel/debug/dfx/provoke-oops`
+  (LKDTM's discipline) faults on purpose so the path is exercisable
+  from a shell.
+- **Persistent log (done).** `/var/log/kmsg` is written again — by a
+  klogd kernel thread (khungtaskd's wake pattern), not by the printk
+  path. The old per-record synchronous ext4 write (the disabled era's
+  filesystem corruption and an unmeasurable hot path) is gone: the
+  printk write path now costs nothing extra, the thread walks the ring
+  every 30 s with a private seq cursor (the syslog(2) cursor is
+  untouched) and appends the delta, newest 512 records per flush, into
+  a 256 KiB rotating file (offset wraps, inode size pins the
+  high-water mark). `init()` flushes once immediately, so the boot log
+  is archived as soon as ext4 is up — early-boot coverage pstore
+  cannot give (pstore arms at the panic only, and dies with the power
+  like all RAM). The panic/oops paths never write disk: the crash may
+  be the storage stack itself, and a sync waiting on a dead queue
+  would defeat the `panic=` timeout (the reference kernel's rule).
+- **x86_64 pstore anchor (done — the design first).** No firmware
+  block sits at a fixed low address there: QEMU rebuilds and relocates
+  the ACPI tables near the top of low RAM every boot, so the riscv64
+  DTB trick has no twin. The anchor that IS deterministic is the
+  kernel image itself: QEMU loads the ELF/bzImage at the link-time
+  physical address (0x200000) and the image size is a build constant,
+  so `kernel_image_phys_end()` — the same function the mapping treats
+  as authoritative — names the same address every boot of the same
+  build. The carve sits at [image end, +128 KiB): inside the dead
+  window the 30 MB KERNEL_RESERVE already keeps from the buddy (so
+  the explicit `memblock_reserve` is belt-and-braces for the day the
+  image window grows past it), below every early-boot writer that
+  matters (the boot page tables come from a static BSS pool inside the
+  image; fixmap-stage tables allocate from memblock AFTER the reserve
+  runs and honor it; the boot stack is in the image), and far from the
+  ACPI zone. One hazard: an `-initrd` boot — QEMU's linuxboot ROM
+  places the initrd at an address that moves with its size, and the
+  zero page names the range before any reserve runs, so the carve is
+  skipped when the initrd overlaps it (the same no-initrd caveat the
+  riscv64 side documents).
 
 Acceptance: `panic=5` reboots the guest within five seconds of a
-panic; the next boot shows the previous panic's registers.
-
-### Tranche 6 — correctness and lock instrumentation
+panic; the next boot shows the previous panic's registers.### Tranche 6 — correctness and lock instrumentation
 
 - lockdep-lite: per-lock-class acquisition order recording with a cycle
   report (`INFO: possible circular locking dependency detected`).
