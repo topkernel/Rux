@@ -48,6 +48,8 @@ p.add_argument("--thread", default="multi", choices=["multi", "single"])
 p.add_argument("--dfx", default="")
 p.add_argument("--extra-append", default="")
 p.add_argument("--dump-every", type=int, default=30)
+p.add_argument("--keyprobe", default="",
+               help="comma list of elapsed seconds for a single QMP 'a' keypress")
 args = p.parse_args()
 
 OUT = os.path.join(WT, "runs", f"gnome-{args.tag}")
@@ -272,6 +274,7 @@ threading.Thread(target=serial_reader, daemon=True).start()
 
 best_nonblack = 0.0
 dump_i = 0
+keyprobe = [int(x) for x in args.keyprobe.split(",") if x.strip()]
 qmp = None
 exit_reason = "timeout"
 try:
@@ -289,6 +292,30 @@ try:
                 print("[fire] qmp connected", flush=True)
             except Exception as e:
                 print(f"[fire] qmp connect: {e}", flush=True)
+        # --keyprobe 300,900: one 'a' keypress (press+release) via QMP
+        # send-key at each listed elapsed second. Deterministic positive
+        # control for dfx=inputtrace: the kernel INPTRC lines MUST show
+        # exactly these events (kbd code 30) at these times; any other
+        # INPTRC line in a hands-off window is a phantom event.
+        while keyprobe and el >= keyprobe[0]:
+            kt = keyprobe.pop(0)
+            if qmp:
+                try:
+                    try:
+                        qmp.cmd("send-key", {
+                            "keys": [{"type": "qcode", "data": {"name": "a"}}],
+                            "hold-time": 50})
+                    except Exception:
+                        # send-key is deprecated; input-send-event is the
+                        # supported form (explicit down+up pair)
+                        qmp.cmd("input-send-event", {"events": [
+                            {"type": "key", "data": {"down": True,
+                             "key": {"type": "qcode", "data": "a"}}},
+                            {"type": "key", "data": {"down": False,
+                             "key": {"type": "qcode", "data": "a"}}}]})
+                    print(f"[fire] t={el}s keyprobe 'a' sent", flush=True)
+                except Exception as e:
+                    print(f"[fire] t={el}s keyprobe error: {e}", flush=True)
         if qmp and el >= (dump_i + 1) * args.dump_every:
             dump_i += 1
             shot = os.path.join(OUT, f"shot-{el:04d}s.ppm")

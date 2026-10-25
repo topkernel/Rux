@@ -71,9 +71,19 @@ def check(path):
         and (win_bbox[3] - win_bbox[1]) >= 150
     ban_rows_ok = sum(1 for n in ban_rows.values() if n >= 300)
     banner = ban_rows_ok >= 24 and ban_glyphs >= 25
+    # cursor centroid: only meaningful while no large bright body has
+    # painted (window body would swamp it). Phantom-input hunt: a moving
+    # centroid across shots with no host input = real pointer motion;
+    # a fixed centroid with changing px count = sprite-image change.
+    if len(body_bright) < 500 and body_bright:
+        cx = sum(p[0] for p in body_bright) // len(body_bright)
+        cy = sum(p[1] for p in body_bright) // len(body_bright)
+        cur_pos = f"({cx},{cy})"
+    else:
+        cur_pos = "n/a(window?)" if body_bright else "-"
     print(f"{path}: panel={'YES' if panel else 'NO'} bar_occupancy={occ:.2f} "
           f"glyph_clusters(x80px)={clusters} right_side={right_clusters or 'none'} "
-          f"cursor_px={len(body_bright)} "
+          f"cursor_px={len(body_bright)} cursor_at={cur_pos} "
           f"window={'YES bbox=' + str(win_bbox) + ' px=' + str(win_px) if win else 'NO px=' + str(win_px)} "
           f"banner={'YES rows>=300:' + str(ban_rows_ok) + ' glyphs=' + str(ban_glyphs) if banner else 'NO rows=' + str(ban_rows_ok) + ' glyphs=' + str(ban_glyphs)}")
     return panel

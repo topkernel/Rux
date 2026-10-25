@@ -90,7 +90,12 @@ EOS
 # ("AT-SPI: Error retrieving accessibility bus address" spam); with the
 # service present those retries stop and gsd's a11y plugins get a real
 # proxy (leg-6).
-PKGS="dash bash xserver-xorg-core xserver-xorg-video-fbdev x11-xserver-utils x11-utils mesa-utils dbus dbus-x11 libgl1-mesa-dri libgl1-mesa-glx gnome-session-bin gnome-session gnome-shell gnome-settings-daemon librsvg2-common xterm fonts-dejavu-core xfonts-base util-linux coreutils procps upower ibus libnotify-bin at-spi2-core"
+# adwaita-icon-theme + hicolor-icon-theme: without an installed icon
+# theme every pixbuf load fails ("Could not load a pixbuf from icon
+# theme", r6win serial) — shell chrome sprites, panel status-area
+# indicators and notification banner icons are all SVG icon loads, so
+# the theme IS the right-side-indicator/banner fix (leg-6).
+PKGS="dash bash xserver-xorg-core xserver-xorg-video-fbdev x11-xserver-utils x11-utils mesa-utils dbus dbus-x11 libgl1-mesa-dri libgl1-mesa-glx gnome-session-bin gnome-session gnome-shell gnome-settings-daemon librsvg2-common adwaita-icon-theme hicolor-icon-theme xterm fonts-dejavu-core xfonts-base util-linux coreutils procps upower ibus libnotify-bin at-spi2-core"
 
 AOPTS=(-o Dir::Etc::sourcelist="$APT_SRC" -o Dir::Etc::sourceparts=-
        -o Dir::State::lists="$APT_LIST" -o Dir::State::status=/dev/null
@@ -306,21 +311,30 @@ EOX
 # for the GLX_EXT_texture_from_pixmap check if windows still refuse to
 # paint.
 # (2) notification banner probe: waits for the shell to own its bus
-# name, then keeps a CRITICAL notification resident (critical banners
-# do not auto-dismiss; re-send with a fixed ID replaces in place, so
-# the banner is on screen whenever a screenshot lands).
+# name, then sends ONE critical-urgency notification — critical banners
+# do not auto-dismiss, so a single success leaves the banner resident.
+# Do NOT use notify-send -r/--replace-id: jammy ships libnotify 0.7.9
+# whose notify-send lacks the option ("Unknown option -r" — the r6win
+# serial shows the probe failing exactly there; zero banners ever
+# sent), and without -r an unconditional re-send stacks a new banner
+# every 60s. Latch on the first successful send instead.
 cat > "$ROOT/usr/local/bin/rux-notify-probe.sh" <<'EON'
 #!/bin/sh
-# Deterministic notification-banner probe (leg-6). Loops forever:
-# once gnome-shell owns org.gnome.Shell on the session bus, (re)send a
-# critical-urgency notification with a fixed replace-id so a banner is
-# resident on screen. No-op until the shell is up.
+# Deterministic notification-banner probe (leg-6). Loop until the
+# shell owns org.gnome.Shell on the session bus AND notify-send
+# succeeds (it fails while the shell's notification daemon is not
+# listening); the critical banner then stays on screen, no re-sends.
 while :; do
+    [ -e /tmp/xdg/banner-sent ] && break
     if gdbus call --session --dest org.gnome.Shell \
          --object-path /org/gnome/Shell \
          --method org.freedesktop.DBus.Peer.Ping >/dev/null 2>&1; then
-        notify-send -u critical -r 424242 \
-            "Rux leg-6" "notification banner probe"
+        if notify-send -u critical \
+                "Rux leg-6" "notification banner probe"; then
+            mkdir -p /tmp/xdg
+            : > /tmp/xdg/banner-sent
+            echo "[runit] notify-probe banner sent"
+        fi
     fi
     sleep 60
 done
