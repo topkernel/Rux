@@ -1825,13 +1825,107 @@ fn user_segv_forensics(regs: &PtRegs, fault_addr: u64) {
     // one-liner that keeps the census and adds the one attribution that
     // matters: whether cr2 falls inside a live binder buffer mapping
     // (the range forked children lost with VmaFlags DONTFORK in sc157).
+    //
+    // sc254 (leg-19): the one-liner also names the fault VMA's fd/path/
+    // accmode when it is FileBacked (one VMA lookup + one fdtable read —
+    // no register dump, no nearvma walk), and the FULL-dump budget is
+    // PER-COMM (first 2 per comm, 8 comm slots) AFTER the global 8: the
+    // global budget was eaten by the settingsdata crash family before
+    // any launcher instance faulted, so the launcher's fd-40-class VMA
+    // never got its dump in sc254.
     let binder_hit = crate::ipc::binder::binder_mmap_owner_of(fault_addr);
     {
         static SEGVD_N: core::sync::atomic::AtomicUsize =
             core::sync::atomic::AtomicUsize::new(0);
-        if SEGVD_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) >= 8 {
+        // Per-comm budget table (leg-19): cheap FNV-1a of the first 8
+        // comm bytes; a match counts against that comm's 2-dump budget.
+        static COMM_H: [core::sync::atomic::AtomicU64; 8] =
+            [const { core::sync::atomic::AtomicU64::new(0) }; 8];
+        static COMM_N: [core::sync::atomic::AtomicUsize; 8] =
+            [const { core::sync::atomic::AtomicUsize::new(0) }; 8];
+        let mut ch: u64 = 0xcbf29ce484222325;
+        for &b in comm.as_bytes().iter().take(8) {
+            ch ^= b as u64;
+            ch = ch.wrapping_mul(0x100000001b3);
+        }
+        if ch == 0 {
+            ch = 1;
+        }
+        let mut slot = usize::MAX;
+        for i in 0..8 {
+            let s = COMM_H[i].load(core::sync::atomic::Ordering::Relaxed);
+            if s == ch {
+                slot = i;
+                break;
+            }
+            if s == 0
+                && slot == usize::MAX
+                && COMM_H[i]
+                    .compare_exchange(
+                        0,
+                        ch,
+                        core::sync::atomic::Ordering::Relaxed,
+                        core::sync::atomic::Ordering::Relaxed,
+                    )
+                    .is_ok()
+            {
+                slot = i;
+                break;
+            }
+        }
+        let per_comm_ok = slot != usize::MAX
+            && COMM_N[slot].fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 2;
+        if SEGVD_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) >= 8 && !per_comm_ok {
+            // Fault-VMA fd attribution (leg-19): works at ANY budget
+            // depth, so the launcher crash-loop names its fd on every
+            // instance.
+            let mut fdline = alloc::string::String::new();
+            if let Some(aspace) =
+                crate::sched::current().and_then(|t| t.address_space()).as_ref()
+            {
+                let vmas = aspace.vma_read();
+                if let Some(v) =
+                    vmas.find(crate::mm::page::VirtAddr::new(fault_addr as usize))
+                {
+                    let fd = v.file_fd();
+                    if fd >= 0 {
+                        // SAFETY: diagnostic read of the fd's file.
+                        match unsafe { crate::fs::file::get_file_fd(fd as usize) } {
+                            Some(f) => {
+                                use core::fmt::Write;
+                                let _ = write!(
+                                    fdline,
+                                    " fdVMA fd={} acc={:#x} off={:#x} flags={:#x} {}",
+                                    fd,
+                                    f.flags().bits() & 0o3,
+                                    v.offset(),
+                                    v.flags().bits(),
+                                    f.path()
+                                );
+                            }
+                            None => {
+                                // fd closed: name the VMA's pinned file.
+                                if let Some(f) =
+                                    aspace.get_vma_file(v.start().as_usize())
+                                {
+                                    use core::fmt::Write;
+                                    let _ = write!(
+                                        fdline,
+                                        " fdVMA fd={} closed pin={} acc={:#x} off={:#x} flags={:#x}",
+                                        fd,
+                                        f.path(),
+                                        f.flags().bits() & 0o3,
+                                        v.offset(),
+                                        v.flags().bits()
+                                    );
+                                }
+                            }
+                        }
+                    }
+                }
+            }
             crate::pr_err!(
-                "USEGV-L pid={} comm='{}' rip={:#x} cr2={:#x} {}",
+                "USEGV-L pid={} comm='{}' rip={:#x} cr2={:#x} {}{}",
                 pid,
                 comm,
                 regs.rip,
@@ -1845,7 +1939,8 @@ fn user_segv_forensics(regs: &PtRegs, fault_addr: u64) {
                         size
                     ),
                     None => alloc::string::String::new(),
-                }
+                },
+                fdline
             );
             return;
         }

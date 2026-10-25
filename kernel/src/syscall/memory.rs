@@ -289,9 +289,49 @@ pub fn sys_mmap(args: [u64; 6]) -> i64 {
         if family {
             let fd = args[4] as i32;
             if fd >= 0 && args[3] & 0x20 == 0 {
-                static NF: core::sync::atomic::AtomicUsize =
-                    core::sync::atomic::AtomicUsize::new(0);
-                if NF.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 150 {
+                // sc254 (leg-19): the budget is PER-COMM — the appspawn
+                // daemon's own boot-time library maps ate the global 150
+                // before any launcher instance exec'd, so the launcher's
+                // mappings (the fd-40 crash VMA family) were never
+                // recorded. Each tracked comm gets its own 48-line
+                // budget (FNV-1a of the first 8 comm bytes, 8 slots).
+                static COMM_H: [core::sync::atomic::AtomicU64; 8] =
+                    [const { core::sync::atomic::AtomicU64::new(0) }; 8];
+                static COMM_N: [core::sync::atomic::AtomicUsize; 8] =
+                    [const { core::sync::atomic::AtomicUsize::new(0) }; 8];
+                let mut ch: u64 = 0xcbf29ce484222325;
+                for &b in comm.as_bytes().iter().take(8) {
+                    ch ^= b as u64;
+                    ch = ch.wrapping_mul(0x100000001b3);
+                }
+                if ch == 0 {
+                    ch = 1;
+                }
+                let mut slot = usize::MAX;
+                for i in 0..8 {
+                    let s = COMM_H[i].load(core::sync::atomic::Ordering::Relaxed);
+                    if s == ch {
+                        slot = i;
+                        break;
+                    }
+                    if s == 0
+                        && slot == usize::MAX
+                        && COMM_H[i]
+                            .compare_exchange(
+                                0,
+                                ch,
+                                core::sync::atomic::Ordering::Relaxed,
+                                core::sync::atomic::Ordering::Relaxed,
+                            )
+                            .is_ok()
+                    {
+                        slot = i;
+                        break;
+                    }
+                }
+                let budget_ok = slot != usize::MAX
+                    && COMM_N[slot].fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 48;
+                if budget_ok {
                     let (path, accmode) = crate::sched::current()
                         .and_then(|t| unsafe {
                             (*t).try_fdtable().and_then(|fdt| fdt.get_file(fd as usize))
