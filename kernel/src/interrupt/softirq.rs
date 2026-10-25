@@ -214,8 +214,32 @@ pub fn __do_softirq() -> bool {
         let t0 = crate::drivers::timer::read_time();
 
         // Process each set bit from LSB (highest priority) to MSB
+        //
+        // Linux checks the 2 ms budget BEFORE every vector
+        // (kernel/softirq.c: "Stop at the budget time — the softirq
+        // might run for long") and clears only the bit it is about to
+        // run, so the vectors it did not reach stay pending for the next
+        // entry. Rux used to clear the whole snapshot up front and
+        // check the budget only after the batch: a batch of slow
+        // handlers could therefore overrun the budget by the time of
+        // every vector left in the batch, and the interrupted context
+        // (the idle loop or a user task) lost exactly that much CPU —
+        // the outcome the budget exists to prevent (the WT4 collapse
+        // shape). Linux's placement bounds the overrun to a single
+        // handler.
         let mut remaining = pending;
         while remaining != 0 {
+            if crate::drivers::timer::read_time().saturating_sub(budget_t0)
+                >= MAX_SOFTIRQ_TIME_TICKS
+            {
+                // Leave the vectors we did not reach pending (Linux
+                // leaves them in local_softirq_pending); the caller
+                // then wakes ksoftirqd to run them.
+                unsafe {
+                    SOFTIRQ_PENDING[cpu].fetch_or(remaining, Ordering::Release);
+                }
+                break 'outer;
+            }
             let bit = remaining.trailing_zeros() as usize;
             remaining &= !(1u32 << bit);
 
