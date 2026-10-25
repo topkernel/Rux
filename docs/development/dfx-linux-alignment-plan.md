@@ -520,6 +520,18 @@ owns most /proc additions):
   column layout — verified against the live reference /proc/meminfo;
   order+shape pinned by `meminfo_file_tests`, no exact-bytes snapshot
   because the values are live). The stat-family files convert the
-  same way when next touched.
+  same way when next touched. The `cols` form exists since leg-36
+  (stat-family ROW shape: label prefix, then one space-separated u64
+  per declared column — the derived row function's ARGUMENT LIST is
+  the column list, so a call site cannot swap two counters without
+  the names disagreeing at the call). Third conversion: `/proc/stat`
+  (aggregate `"cpu "` + per-cpu rows via `stat_cpu_row`; the kv tail
+  through `render_kv`; the dynamic-arity `intr`/`softirq` sum lines
+  stay explicit — no fixed field list to derive; whole-file LINE
+  ORDER pinned by `stat_file_tests::line_order_check`). Fourth:
+  `/proc/schedstat` (`schedstat_cpu_row`; Linux's literal middle zero
+  kept as the named `alias0` column). Remaining hand-written stat-
+  family candidates: `/proc/interrupts`, `/proc/softirqs`,
+  `/proc/diskstats` (dynamic-arity row tails, like `intr`).
 - The declaration ORDER is the file's byte order; treat reordering as
   a Linux-observable change and snapshot-test it.
