@@ -2977,11 +2977,58 @@ fn vfs_rename_locked(oldpath: &str, newpath: &str) -> Result<(), i32> {
     // requires owning the replaced entry (if any) — mirrors Linux
     // may_delete() on both ends (review 5.1 high).
     let source_vpath = path_lookup(oldpath, 0).ok();
-    check_sticky(old_parent, source_vpath.as_ref().and_then(|vp| vp.inode.as_ref().map(|a| a.as_ref())))?;
+    // The source must exist (ENOENT) — checked before any no-op logic so
+    // rename(missing, x) reports ENOENT (rename13's control case).
+    let src_inode = source_vpath
+        .as_ref()
+        .and_then(|vp| vp.inode.as_ref())
+        .ok_or(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())?
+        .clone();
+    check_sticky(old_parent, Some(src_inode.as_ref()))?;
     let replaced_vpath = path_lookup(newpath, 0).ok();
+    let replaced_inode = replaced_vpath
+        .as_ref()
+        .and_then(|vp| vp.inode.as_ref())
+        .map(|a| a.clone());
     if replaced_vpath.is_some() {
-        check_sticky(new_parent, replaced_vpath.as_ref().and_then(|vp| vp.inode.as_ref().map(|a| a.as_ref())))?;
+        check_sticky(
+            new_parent,
+            replaced_vpath.as_ref().and_then(|vp| vp.inode.as_ref()).map(|a| a.as_ref()),
+        )?;
     }
+
+    // Final-component length: a destination name over NAME_MAX would be
+    // uncreatable (rename10: a 256-char single component must fail
+    // ENAMETOOLONG even when the total path is short).
+    const NAME_MAX: usize = 255;
+    if new_name.len() > NAME_MAX || old_name.len() > NAME_MAX {
+        return Err(-(errno::constants::ENAMETOOLONG));
+    }
+
+    // Renaming onto the same entry (identical path or hard link) is a
+    // successful no-op (rename(2): "If oldpath and newpath are ... hard
+    // links referring to the same file, rename() does nothing and returns
+    // success" — rename13).
+    if let Some(ref ri) = replaced_inode {
+        if Arc::ptr_eq(&ri, &src_inode) {
+            return Ok(());
+        }
+    }
+
+    // Type clash (may_delete/may_create parity): a non-directory cannot
+    // replace an existing directory (EISDIR — rename05), and a directory
+    // cannot replace an existing non-directory (ENOTDIR — rename07).
+    if let Some(ref ri) = replaced_inode {
+        let src_is_dir = src_inode.mode.is_directory();
+        let dst_is_dir = ri.mode.is_directory();
+        if !src_is_dir && dst_is_dir {
+            return Err(errno::Errno::IsADirectory.as_neg_i32());
+        }
+        if src_is_dir && !dst_is_dir {
+            return Err(errno::Errno::NotADirectory.as_neg_i32());
+        }
+    }
+
 
     // Rename a directory into itself or its own subdirectory would create a
     // ".." cycle — check the ancestor chain of the new parent (review 5.5:
@@ -3334,6 +3381,17 @@ pub fn vfs_truncate(pathname: &str, new_size: i64) -> Result<(), i32> {
         return Err(errno::Errno::InvalidArgument.as_neg_i32());
     }
 
+    // RLIMIT_FSIZE: growing the file past the soft limit fails EFBIG
+    // before any lookup work (Linux do_truncate checks in
+    // truncate_setsize's callers; LTP truncate03 sets the limit in
+    // setup and expects the 32MiB truncate to fail EFBIG).
+    if let Some(task) = crate::sched::current() {
+        let (fsz_cur, _) = task.rlimit(crate::process::task::rlimit_res::FSIZE);
+        if fsz_cur != u64::MAX && new_size as u64 > fsz_cur {
+            return Err(errno::Errno::FileTooLarge.as_neg_i32());
+        }
+    }
+
     let vpath = path_lookup(pathname, 0)?;
     let inode = vpath.inode.as_ref()
         .ok_or(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())?;
@@ -3384,6 +3442,14 @@ pub fn vfs_truncate(pathname: &str, new_size: i64) -> Result<(), i32> {
 pub fn vfs_ftruncate(fd: usize, new_size: i64) -> Result<(), i32> {
     if new_size < 0 {
         return Err(errno::Errno::InvalidArgument.as_neg_i32());
+    }
+
+    // RLIMIT_FSIZE parity with vfs_truncate (Linux do_ftruncate path).
+    if let Some(task) = crate::sched::current() {
+        let (fsz_cur, _) = task.rlimit(crate::process::task::rlimit_res::FSIZE);
+        if fsz_cur != u64::MAX && new_size as u64 > fsz_cur {
+            return Err(errno::Errno::FileTooLarge.as_neg_i32());
+        }
     }
 
     // SAFETY: get_file_fd returns a valid Arc<File> for the given fd

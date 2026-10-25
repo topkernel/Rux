@@ -468,6 +468,10 @@ pub fn do_clone(args: CloneArgs) -> Result<Pid, i32> {
         // Copy signal mask
         (*task_ptr).sigmask = (*current_ptr).sigmask;
 
+        // personality(2) inherits across fork (Linux clone semantics;
+        // LTP personality01 sets it in a forked child and reads it back).
+        (*task_ptr).personality = (*current_ptr).personality;
+
         // Exit signal for the parent (clone CSIGNAL byte / clone3 field).
         // Threads never notify a parent this way, but record it anyway —
         // the notify path reads the field uniformly (LTP clone301:

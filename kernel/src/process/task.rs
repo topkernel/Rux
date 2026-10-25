@@ -1093,6 +1093,15 @@ pub struct Task {
     /// Used for sigprocmask syscall
     pub sigmask: u64,
 
+    /// Process execution domain (personality(2)).
+    ///
+    /// Store-and-readback semantics: personality(x) stores x and returns
+    /// the previous value; personality(0xffffffff) is the query sentinel
+    /// (returns the current value unchanged). Inherited across fork,
+    /// kept across execve (exec domains like setarch --addr-no-randomize
+    /// rely on the flag surviving exec). 0 = PER_LINUX.
+    pub personality: u32,
+
     /// Signal stack (sigaltstack)
     pub sigstack: crate::signal::SignalStack,
 
@@ -1555,6 +1564,7 @@ impl Task {
             signal,
             pending,
             sigmask: 0,  // Initial signal mask is empty
+            personality: 0, // PER_LINUX
             sigstack,
             sigframe_addr: 0,
             sigframe: None,

@@ -4296,10 +4296,26 @@ pub fn sys_capset(args: SyscallArgs) -> i64 {
 }
 
 /// sys_personality - Set process execution domain
+///
+/// Store-and-readback contract: personality(x) stores x and returns the
+/// PREVIOUS personality; personality(0xffffffff) is the query sentinel —
+/// the value is returned unchanged with nothing stored. The stored value
+/// inherits across fork and survives execve (setarch-style flag
+/// personalities like ADDR_NO_RANDOMIZE depend on the exec survival).
+/// 0 = PER_LINUX. No validation: the execution-domain table semantics
+/// were retired upstream, so any value stores and reads back verbatim.
 pub fn sys_personality(args: SyscallArgs) -> i64 {
-    let _persona = args[0] as u64;
-    // Return current personality (0 = PER_LINUX)
-    0
+    let new = args[0] as u32;
+    match crate::sched::current() {
+        Some(current) => {
+            let old = unsafe { (*current).personality };
+            if new != 0xffffffff {
+                unsafe { (*current).personality = new; }
+            }
+            old as i64
+        }
+        None => 0,
+    }
 }
 
 /// sys_pivot_root - Change root filesystem (NR 41, U1c)
