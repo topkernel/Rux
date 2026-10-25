@@ -2129,26 +2129,38 @@ pub fn sys_futex_handler(args: &[u64; 6]) -> i64 {
                             // offline; the first 8 bytes of the
                             // containing VMA separate memfd-lib (ELF
                             // magic) from a JIT arena.
-                            {
-                                let top = tk.kernel_stack_top();
-                                #[cfg(feature = "x86_64")]
-                                let rsp = unsafe {
-                                    let regs = (top.wrapping_sub(
-                                        crate::arch::x86_64::pt_regs::PT_REGS_SIZE,
-                                    ))
-                                        as *const crate::arch::x86_64::pt_regs::PtRegs;
-                                    (*regs).rsp as usize
-                                };
-                                #[cfg(feature = "riscv64")]
-                                let rsp = unsafe {
-                                    let regs = (top.wrapping_sub(
-                                        crate::arch::riscv64::pt_regs::PT_REGS_SIZE,
-                                    ))
-                                        as *const crate::arch::riscv64::pt_regs::PtRegs;
-                                    (*regs).sp as usize
-                                };
-                                #[cfg(not(any(feature = "x86_64", feature = "riscv64")))]
-                                let rsp = 0usize;
+            {
+                // sc261: an exited thread's frame is gone (stack
+                // returned to the cache) — rsp=0 skips the walk.
+                let top = if tk.owns_kernel_stack() {
+                    tk.kernel_stack_top()
+                } else {
+                    0
+                };
+                #[cfg(feature = "x86_64")]
+                let rsp = if top == 0 {
+                    0
+                } else {
+                    unsafe {
+                        let regs = (top.wrapping_sub(
+                            crate::arch::x86_64::pt_regs::PT_REGS_SIZE,
+                        )) as *const crate::arch::x86_64::pt_regs::PtRegs;
+                        (*regs).rsp as usize
+                    }
+                };
+                #[cfg(feature = "riscv64")]
+                let rsp = if top == 0 {
+                    0
+                } else {
+                    unsafe {
+                        let regs = (top.wrapping_sub(
+                            crate::arch::riscv64::pt_regs::PT_REGS_SIZE,
+                        )) as *const crate::arch::riscv64::pt_regs::PtRegs;
+                        (*regs).sp as usize
+                    }
+                };
+                #[cfg(not(any(feature = "x86_64", feature = "riscv64")))]
+                let rsp = 0usize;
                                 if rsp != 0 {
                                     let rd64 = |va: usize| -> Option<u64> {
                                         let lo = unsafe {
@@ -2657,6 +2669,21 @@ pub fn kill_dump_tgid(tgid: u32) {
         // this names the wait primitive outright (read/epoll/ioctl and
         // WHICH fd). Fd-like args (< 64) are resolved to paths.
         {
+            // sc261 (leg-23): the SIGKILL teardown dumps threads that
+            // are CONCURRENTLY exiting — a thread that already
+            // returned its kernel stack to the cache has
+            // kernel_stack_bottom == 0 and kernel_stack_top() then
+            // reports KERNEL_STACK_SIZE, so the entry-frame read below
+            // computed 0x14000 - 0xa8 + offsetof(orig_rax) = 0x13fd0
+            // and page-faulted the kernel (no fixup) inside the printk
+            // value load. Skip the frame for exited threads.
+            if !tk.owns_kernel_stack() {
+                crate::pr_warn!(
+                    "KILLDUMP: tid {} syscall - (thread exited; kernel stack returned to cache)",
+                    tk.pid()
+                );
+                continue;
+            }
             let top = tk.kernel_stack_top();
             #[cfg(feature = "x86_64")]
             {
@@ -3144,6 +3171,10 @@ fn probe_file_path(f: &crate::fs::file::File) -> alloc::string::String {
 /// frames. SAFETY: `task` live; diagnostic reads through its tables.
 unsafe fn apppark_rets(task: *const Task) {
     let tk = unsafe { &*task };
+    // sc261: exited thread — frame gone (stack returned to cache).
+    if !tk.owns_kernel_stack() {
+        return;
+    }
     let top = tk.kernel_stack_top();
     #[cfg(feature = "x86_64")]
     let rsp = unsafe {
@@ -3229,6 +3260,11 @@ unsafe fn rwfz_stack_frames(
     scan_slots: u64,
 ) {
     let tk = unsafe { &*task };
+    // sc261: exited thread — the frame (and the stack it lived on) is
+    // gone; nothing to walk.
+    if !tk.owns_kernel_stack() {
+        return;
+    }
     let top = tk.kernel_stack_top();
     #[cfg(feature = "x86_64")]
     let (rsp, rip) = {
@@ -3782,6 +3818,10 @@ fn rwfz_neighbor_dump(tgid: u32, frozen_uaddr: usize) {
         if tk.tgid() as u32 != tgid {
             return;
         }
+        // sc261: exited thread — frame gone (stack returned to cache).
+        if !tk.owns_kernel_stack() {
+            return;
+        }
         let top = tk.kernel_stack_top();
         #[cfg(feature = "x86_64")]
         let (sys, a0) = {
@@ -3917,6 +3957,10 @@ fn rwfz_dump_tgid(tgid: u32, max_tasks: usize) -> usize {
             return;
         }
         count_cell.set(count_cell.get() + 1);
+        // sc261: exited thread — frame gone (stack returned to cache).
+        if !tk.owns_kernel_stack() {
+            return;
+        }
         let top = tk.kernel_stack_top();
         #[cfg(feature = "x86_64")]
         let (rip, sys, a0) = {

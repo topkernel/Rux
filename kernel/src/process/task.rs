@@ -4414,6 +4414,24 @@ impl Task {
         self.kernel_stack_bottom + KERNEL_STACK_SIZE
     }
 
+    /// sc261 (leg-23): a thread's kernel stack is returned to the
+    /// stack cache and kernel_stack_bottom zeroed at exit time (see
+    /// free_kernel_stack), while the Task struct itself survives until
+    /// its last pin drops — kernel_stack_top() then reports
+    /// KERNEL_STACK_SIZE and every entry-frame reader computes a small
+    /// bogus address. sc261: kill_dump_tgid dereferenced 0x13fd0
+    /// (= 0x14000 - PT_REGS_SIZE + offsetof(PtRegs, orig_rax)) on an
+    /// exited-but-pinned thread and took the boot down with an
+    /// unfixable kernel fault inside the SIGKILL teardown
+    /// (rip = <u64 as LowerHex>::fmt entry, load of the format value,
+    /// pid 1421). Foreign-task entry-frame diagnostics MUST check this
+    /// first; false means the thread has exited and its pt_regs frame
+    /// is gone. (A task's own current thread always passes.)
+    #[inline]
+    pub fn owns_kernel_stack(&self) -> bool {
+        self.kernel_stack_bottom != 0
+    }
+
     /// Check if address is within kernel stack range (for overflow detection)
     ///
     /// # Arguments

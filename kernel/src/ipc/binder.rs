@@ -2583,9 +2583,23 @@ unsafe fn holder_forensics(t: &Arc<BinderThread>, out: &mut alloc::string::Strin
             .unwrap_or("")
             .trim_end_matches('\0')
     };
-    let top = tk.kernel_stack_top();
+    // sc261: an exited thread's kernel stack is back in the cache and
+    // kernel_stack_top() reports KERNEL_STACK_SIZE — an entry-frame
+    // read then page-faults the kernel (sc261, the kill_dump path
+    // died exactly so). The old SAFETY claim "the kernel stack stays
+    // mapped while the Task lives" was wrong: the stack is freed at
+    // thread exit while the Task struct survives until its last pin.
+    // top = 0 wraps to a noncanonical address on purpose-never-deref:
+    // the guards below skip the read instead.
+    let top = if tk.owns_kernel_stack() {
+        tk.kernel_stack_top()
+    } else {
+        0
+    };
     #[cfg(feature = "x86_64")]
-    let (rip, sys, a0, a1) = {
+    let (rip, sys, a0, a1) = if top == 0 {
+        (0, 0, 0, 0)
+    } else {
         let regs = (top.wrapping_sub(
             crate::arch::x86_64::pt_regs::PT_REGS_SIZE,
         )) as *const crate::arch::x86_64::pt_regs::PtRegs;
@@ -2595,7 +2609,9 @@ unsafe fn holder_forensics(t: &Arc<BinderThread>, out: &mut alloc::string::Strin
         unsafe { ((*regs).rip, (*regs).orig_rax, (*regs).rdi, (*regs).rsi) }
     };
     #[cfg(feature = "riscv64")]
-    let (rip, sys, a0, a1) = {
+    let (rip, sys, a0, a1) = if top == 0 {
+        (0, 0, 0, 0)
+    } else {
         let regs = (top.wrapping_sub(
             crate::arch::riscv64::pt_regs::PT_REGS_SIZE,
         )) as *const crate::arch::riscv64::pt_regs::PtRegs;
@@ -2699,9 +2715,17 @@ unsafe fn holder_forensics(t: &Arc<BinderThread>, out: &mut alloc::string::Strin
                     let owner = unsafe { crate::sched::find_task_by_pid(v) };
                     if !owner.is_null() {
                         let ot = unsafe { &*owner };
-                        let otop = ot.kernel_stack_top();
+                        // sc261: skip the frame read for an exited
+                        // owner (stack back in the cache).
+                        let otop = if ot.owns_kernel_stack() {
+                            ot.kernel_stack_top()
+                        } else {
+                            0
+                        };
                         #[cfg(feature = "x86_64")]
-                        let (osys, orip) = {
+                        let (osys, orip) = if otop == 0 {
+                            (0, 0)
+                        } else {
                             let regs = (otop.wrapping_sub(
                                 crate::arch::x86_64::pt_regs::PT_REGS_SIZE,
                             )) as *const crate::arch::x86_64::pt_regs::PtRegs;
@@ -2710,7 +2734,9 @@ unsafe fn holder_forensics(t: &Arc<BinderThread>, out: &mut alloc::string::Strin
                             unsafe { ((*regs).orig_rax, (*regs).rip) }
                         };
                         #[cfg(feature = "riscv64")]
-                        let (osys, orip) = {
+                        let (osys, orip) = if otop == 0 {
+                            (0, 0)
+                        } else {
                             let regs = (otop.wrapping_sub(
                                 crate::arch::riscv64::pt_regs::PT_REGS_SIZE,
                             )) as *const crate::arch::riscv64::pt_regs::PtRegs;
@@ -2792,18 +2818,29 @@ pub fn sleep_snapshot() {
             if !state.contains(crate::process::task::TaskState::INTERRUPTIBLE) {
                 return;
             }
-            let top = tk.kernel_stack_top();
+            // sc261: an exited thread's INTERRUPTIBLE residue can still
+            // read true here while its kernel stack is back in the
+            // cache — skip the frame read (top = 0 guards the deref).
+            let top = if tk.owns_kernel_stack() {
+                tk.kernel_stack_top()
+            } else {
+                0
+            };
             #[cfg(feature = "x86_64")]
-            let (rip, sys, a0, a1) = {
+            let (rip, sys, a0, a1) = if top == 0 {
+                (0, 0, 0, 0)
+            } else {
                 let regs = (top.wrapping_sub(
                     crate::arch::x86_64::pt_regs::PT_REGS_SIZE,
                 )) as *const crate::arch::x86_64::pt_regs::PtRegs;
                 // SAFETY: diagnostic read of this task's own entry frame;
-                // the kernel stack stays mapped while the Task lives.
+                // owns_kernel_stack checked above (sc261).
                 unsafe { ((*regs).rip, (*regs).orig_rax, (*regs).rdi, (*regs).rsi) }
             };
             #[cfg(feature = "riscv64")]
-            let (rip, sys, a0, a1) = {
+            let (rip, sys, a0, a1) = if top == 0 {
+                (0, 0, 0, 0)
+            } else {
                 let regs = (top.wrapping_sub(
                     crate::arch::riscv64::pt_regs::PT_REGS_SIZE,
                 )) as *const crate::arch::riscv64::pt_regs::PtRegs;
@@ -2980,16 +3017,25 @@ unsafe fn user_park_stack_dump(t: &Arc<BinderThread>) {
         // SAFETY: one volatile u64 in the holder's mapped user page.
         Some(core::ptr::read_volatile(kv as *const u64))
     };
-    let top = tk.kernel_stack_top();
+    // sc261: exited holder — frame gone (stack returned to the cache).
+    let top = if tk.owns_kernel_stack() {
+        tk.kernel_stack_top()
+    } else {
+        0
+    };
     #[cfg(feature = "x86_64")]
-    let (rsp, rip) = {
+    let (rsp, rip) = if top == 0 {
+        (0, 0)
+    } else {
         let regs = (top.wrapping_sub(crate::arch::x86_64::pt_regs::PT_REGS_SIZE))
             as *const crate::arch::x86_64::pt_regs::PtRegs;
         // SAFETY: diagnostic read of the holder's entry frame.
         unsafe { ((*regs).rsp, (*regs).rip) }
     };
     #[cfg(feature = "riscv64")]
-    let (rsp, rip) = {
+    let (rsp, rip) = if top == 0 {
+        (0, 0)
+    } else {
         let regs = (top.wrapping_sub(crate::arch::riscv64::pt_regs::PT_REGS_SIZE))
             as *const crate::arch::riscv64::pt_regs::PtRegs;
         // SAFETY: same contract, riscv64.
