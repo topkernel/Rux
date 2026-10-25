@@ -224,6 +224,21 @@ CC "$ROOT/sbin/runit" "$WT/test/ubuntu-gnome/runit.c"
 echo session > "$ROOT/etc/runit-mode"
 echo gnome > "$ROOT/etc/runit-session"
 
+# gsd-usb-protection crash-loop mitigation. The daemon dereferences a
+# NULL GError on its "Failed to connect to screensaver service" warning
+# path (gsd 42.9 gsd-usb-protection.c assumes error != NULL from
+# g_dbus_proxy_new_for_bus_finish) and takes SIGSEGV; X-GNOME-AutoRestart
+# then respawns it every few seconds for the whole session (27+ crashes
+# per boot observed). USB protection needs UPower/usbguard which this
+# image does not ship anyway — drop it from the session's required
+# components and hide its autostart entry.
+SESS="$ROOT/usr/share/gnome-session/sessions/gnome.session"
+sed -i 's/org\.gnome\.SettingsDaemon\.UsbProtection;//' "$SESS"
+USBDE="$ROOT/etc/xdg/autostart/org.gnome.SettingsDaemon.UsbProtection.desktop"
+if [ -f "$USBDE" ]; then
+    printf 'Hidden=true\n' >> "$USBDE"
+fi
+
 # Xorg fbdev config (software rendering, no KMS/DRM — Rux has fbdev only)
 mkdir -p "$ROOT/etc/X11"
 cat > "$ROOT/etc/X11/xorg-fbdev.conf" <<'EOX'
