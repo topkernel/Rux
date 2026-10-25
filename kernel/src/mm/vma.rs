@@ -605,6 +605,11 @@ impl VmaManager {
     }
 
     /// Get iterator over all VMAs
+    /// Read-only view of the BTreeMap (keyed by VMA start).
+    pub fn vmas(&self) -> &BTreeMap<VirtAddr, Vma> {
+        &self.vmas
+    }
+
     pub fn iter(&self) -> impl Iterator<Item = &Vma> {
         self.vmas.values()
     }
