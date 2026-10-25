@@ -1,30 +1,26 @@
-================ stress-fleet sweep 2026-10-25 15:52:14 ================
+================ stress-fleet sweep 2026-10-25 16:22:15 ================
 --- host ---
                total        used        free      shared  buff/cache   available
-内存：            59          23          13           0          23          36
- 15:52:14 up 1 day, 22:43,  1 user,  load average: 21.80, 21.88, 21.96
+内存：            59          27          10           0          21          31
+ 16:22:15 up 1 day, 23:13,  1 user,  load average: 23.06, 23.86, 23.95
 --- members (driver procs) ---
 . alive=no rounds=0 last: 
-execsig alive=yes rounds=1368 last: [execsig] done after 1365 rounds
-fsfuzz alive=yes rounds=198 last:   serial: /home/william/rux-agents/wildwrite-hunt/run/fleet/logs/fsfuzz-r190-serial.log (preserve for sweep)
-ltp-a alive=yes rounds=66 last:   serial: /home/william/rux-agents/wildwrite-hunt/run/fleet/logs/ltp-a-r32-serial.log (preserve for sweep)
-ltp-b alive=yes rounds=60 last:   serial: /home/william/rux-agents/wildwrite-hunt/run/fleet/logs/ltp-b-r29-serial.log (preserve for sweep)
-ltp-c alive=yes rounds=63 last:   serial: /home/william/rux-agents/wildwrite-hunt/run/fleet/logs/ltp-c-r30-serial.log (preserve for sweep)
-ltp-d alive=yes rounds=61 last:   serial: /home/william/rux-agents/wildwrite-hunt/run/fleet/logs/ltp-d-r30-serial.log (preserve for sweep)
+execsig alive=yes rounds=1481 last: [execsig] round 1477: R1477 clean lines=170 rc=0 wedge=no beats=0 sweepRES=0 sweepWEDGE=0 noise:usb=0,samgr=0,park=0 heap:-> KiB
+fsfuzz alive=yes rounds=199 last: [fsfuzz] round 191: R191 clean lines=7551 rc=124 wedge=no beats=1 sweepRES=0 sweepWEDGE=0 noise:usb=0,samgr=0,park=0 heap:-> KiB
+ltp-a alive=yes rounds=68 last:   serial: /home/william/rux-agents/wildwrite-hunt/run/fleet/logs/ltp-a-r33-serial.log (preserve for sweep)
+ltp-b alive=yes rounds=64 last:   serial: /home/william/rux-agents/wildwrite-hunt/run/fleet/logs/ltp-b-r31-serial.log (preserve for sweep)
+ltp-c alive=yes rounds=65 last:   serial: /home/william/rux-agents/wildwrite-hunt/run/fleet/logs/ltp-c-r31-serial.log (preserve for sweep)
+ltp-d alive=yes rounds=63 last:   serial: /home/william/rux-agents/wildwrite-hunt/run/fleet/logs/ltp-d-r31-serial.log (preserve for sweep)
 ltpm alive=no rounds=16 last: [ltpm] done after 8 rounds
-memstorm alive=yes rounds=47 last:   serial: /home/william/rux-agents/wildwrite-hunt/run/fleet/logs/memstorm-r22-serial.log (preserve for sweep)
-monkey-a alive=yes rounds=42 last:   serial: /home/william/rux-agents/wildwrite-hunt/run/fleet/logs/monkey-a-r20-serial.log (preserve for sweep)
-monkey-b alive=yes rounds=43 last:   serial: /home/william/rux-agents/wildwrite-hunt/run/fleet/logs/monkey-b-r20-serial.log (preserve for sweep)
+memstorm alive=yes rounds=52 last: [memstorm] done after 24 rounds
+monkey-a alive=yes rounds=44 last:   serial: /home/william/rux-agents/wildwrite-hunt/run/fleet/logs/monkey-a-r21-serial.log (preserve for sweep)
+monkey-b alive=yes rounds=45 last:   serial: /home/william/rux-agents/wildwrite-hunt/run/fleet/logs/monkey-b-r21-serial.log (preserve for sweep)
 verify-v6heal alive=no rounds=2 last: [10:33:21] relaunch w2: free=4G avail=30G
 verify-v6ms alive=no rounds=1 last: [v6ms] rc=124 lines=12837 beats=56 HEAL=18 UNDERFLOW=18 parkedleak=0
 --- adopted chains (frozen-kernel wildwrite capture) ---
 ww-s2 ALIVE current: ww-s2-r98-serial.log
 wwload ALIVE current: wwload-r46-serial.log
 --- flagged rounds (last 50 across fleet) ---
-[memstorm] round 12: R12 WARN lines=15509 rc=124 wedge=no beats=77 sweepRES=0 sweepWEDGE=0 PREEMPT-LEAK=387 PARKED-LEAK-RV=1 noise:usb=0,samgr=0,park=1 heap:12700->26500 KiB
-[memstorm] round 13: R13 WARN lines=15338 rc=124 wedge=no beats=68 sweepRES=0 sweepWEDGE=0 PREEMPT-LEAK=355 noise:usb=0,samgr=0,park=0 heap:13680->31100 KiB
-[memstorm] round 14: R14 WARN lines=15457 rc=124 wedge=no beats=73 sweepRES=0 sweepWEDGE=0 PREEMPT-LEAK=370 noise:usb=0,samgr=0,park=0 heap:12116->11808 KiB
-[memstorm] round 15: R15 WARN lines=15710 rc=124 wedge=no beats=90 sweepRES=0 sweepWEDGE=0 PREEMPT-LEAK=403 noise:usb=0,samgr=0,park=0 heap:12424->18764 KiB
 [memstorm] round 16: R16 WARN lines=15753 rc=124 wedge=no beats=91 sweepRES=0 sweepWEDGE=0 PREEMPT-LEAK=395 noise:usb=0,samgr=0,park=0 heap:12648->24404 KiB
 [memstorm] round 17: R17 WARN lines=15701 rc=124 wedge=no beats=93 sweepRES=0 sweepWEDGE=0 PREEMPT-LEAK=397 PARKED-LEAK-RV=1 noise:usb=0,samgr=0,park=1 heap:12220->37344 KiB
 [memstorm] round 18: R18 WARN lines=15741 rc=124 wedge=no beats=92 sweepRES=0 sweepWEDGE=0 PREEMPT-LEAK=395 noise:usb=0,samgr=0,park=0 heap:12396->36508 KiB
@@ -32,6 +28,8 @@ wwload ALIVE current: wwload-r46-serial.log
 [memstorm] round 20: R20 WARN lines=15740 rc=124 wedge=no beats=94 sweepRES=0 sweepWEDGE=0 PREEMPT-LEAK=395 noise:usb=0,samgr=0,park=0 heap:12948->11832 KiB
 [memstorm] round 21: R21 WARN lines=15686 rc=124 wedge=no beats=91 sweepRES=0 sweepWEDGE=0 PREEMPT-LEAK=390 noise:usb=0,samgr=0,park=0 heap:12472->49592 KiB
 [memstorm] round 22: R22 WARN lines=15313 rc=124 wedge=no beats=66 sweepRES=0 sweepWEDGE=0 PREEMPT-LEAK=365 PARKED-LEAK-RV=2 noise:usb=0,samgr=0,park=2 heap:12204->11912 KiB
+[memstorm] round 23: R23 WARN lines=15370 rc=124 wedge=no beats=69 sweepRES=0 sweepWEDGE=0 PREEMPT-LEAK=364 PARKED-LEAK-RV=1 noise:usb=0,samgr=0,park=1 heap:10800->12248 KiB
+[memstorm] round 24: R24 WARN lines=1506 rc=124 wedge=no beats=5 sweepRES=0 sweepWEDGE=0 PREEMPT-LEAK=22 noise:usb=0,samgr=0,park=0 heap:11160->13784 KiB
 [monkey-a] round 2: R2 WARN lines=60832 rc=124 wedge=no beats=1115 sweepRES=0 sweepWEDGE=0 HEAP-GROW=173412KiB PREEMPT-LEAK=42 noise:usb=0,samgr=0,park=78 heap:139716->313128 KiB
 [monkey-a] round 3: R3 WARN lines=66907 rc=124 wedge=no beats=1230 sweepRES=0 sweepWEDGE=0 HEAP-GROW=82692KiB PREEMPT-LEAK=45 noise:usb=0,samgr=0,park=109 heap:239068->321760 KiB
 [monkey-a] round 4: R4 WARN lines=67069 rc=124 wedge=no beats=1260 sweepRES=0 sweepWEDGE=0 PREEMPT-LEAK=48 noise:usb=0,samgr=0,park=97 heap:301652->322076 KiB
@@ -51,6 +49,7 @@ wwload ALIVE current: wwload-r46-serial.log
 [monkey-a] round 18: R18 WARN lines=55249 rc=124 wedge=no beats=1469 sweepRES=0 sweepWEDGE=0 HEAP-GROW=140564KiB PREEMPT-LEAK=10 PARKED-LEAK-RV=53 noise:usb=0,samgr=0,park=53 heap:153872->294436 KiB
 [monkey-a] round 19: R19 CRITICAL lines=162968 rc=124 wedge=no beats=821 sweepRES=0 sweepWEDGE=0 KERNPANIC=1 OOPS=1 HEAP-GROW=625180KiB PREEMPT-LEAK=45 noise:usb=0,samgr=0,park=10 heap:139632->764812 KiB
 [monkey-a] round 20: R20 WARN lines=59978 rc=124 wedge=no beats=1362 sweepRES=0 sweepWEDGE=0 HEAP-GROW=161296KiB PREEMPT-LEAK=16 PARKED-LEAK-RV=37 noise:usb=0,samgr=0,park=37 heap:138192->299488 KiB
+[monkey-a] round 21: R21 WARN lines=68198 rc=124 wedge=no beats=1282 sweepRES=0 sweepWEDGE=0 HEAP-GROW=202416KiB PREEMPT-LEAK=11 noise:usb=0,samgr=0,park=31 heap:124196->326612 KiB
 [monkey-b] round 1: R1 CRITICAL lines=71771 rc=124 wedge=no beats=0 sweepRES=0 sweepWEDGE=0 OOPS=1 OOM=11 PREEMPT-LEAK=1133 noise:usb=0,samgr=0,park=23 heap:-> KiB
 [monkey-b] round 2: R2 WARN lines=59747 rc=124 wedge=no beats=0 sweepRES=0 sweepWEDGE=0 PREEMPT-LEAK=31 PARKED-LEAK-RV=24 noise:usb=0,samgr=0,park=24 heap:-> KiB
 [monkey-b] round 3: R3 WARN lines=52029 rc=124 wedge=no beats=1271 sweepRES=0 sweepWEDGE=0 HEAP-GROW=153152KiB PREEMPT-LEAK=43 noise:usb=0,samgr=0,park=98 heap:140780->293932 KiB
@@ -71,6 +70,7 @@ wwload ALIVE current: wwload-r46-serial.log
 [monkey-b] round 18: R18 WARN lines=67221 rc=124 wedge=no beats=1296 sweepRES=0 sweepWEDGE=0 HEAP-GROW=189284KiB PREEMPT-LEAK=6 noise:usb=0,samgr=0,park=44 heap:140568->329852 KiB
 [monkey-b] round 19: R19 WARN lines=72172 rc=124 wedge=no beats=1255 sweepRES=0 sweepWEDGE=0 HEAP-GROW=93748KiB PREEMPT-LEAK=11 noise:usb=0,samgr=0,park=44 heap:236776->330524 KiB
 [monkey-b] round 20: R20 CRITICAL lines=160635 rc=124 wedge=no beats=734 sweepRES=0 sweepWEDGE=0 KERNPANIC=1 OOPS=1 HEAP-GROW=519128KiB PREEMPT-LEAK=1506 noise:usb=1,samgr=0,park=3 heap:126560->645688 KiB
-flagged: 201/1967 rounds
+[monkey-b] round 21: R21 WARN lines=54292 rc=124 wedge=no beats=1416 sweepRES=0 sweepWEDGE=0 HEAP-GROW=75260KiB PREEMPT-LEAK=11 PARKED-LEAK-RV=42 noise:usb=0,samgr=0,park=42 heap:214264->289524 KiB
+flagged: 210/2100 rounds
 --- qemu inventory (mine) ---
-fleet-owned qemu count: 22
+fleet-owned qemu count: 20
