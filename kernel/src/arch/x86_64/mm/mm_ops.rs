@@ -2191,6 +2191,28 @@ pub unsafe fn handle_cow_fault(
     root_ppn: u64,
     fault_addr: VirtAddr,
 ) -> CowFaultResult {
+    // S7-oom01wedge (x86 twin of the riscv64 fix): the private-copy
+    // alloc_pages(GFP_USER) used to run INSIDE this PTE section — the
+    // allocator slowpath under the PTE epoch starves global PTE writers
+    // and same-mm sections on the other hart for the slowpath's full
+    // duration (fleet s2 dump: 100+ s strands; riscv64 twin carried the
+    // observed wedges). Linux discipline (wp_page_copy): allocate the
+    // private copy BEFORE the PTE lock; every no-copy outcome here
+    // already returns Retry/Resolved, so a wasted page is just freed.
+    let spec_phys = match alloc_user_phys_page() {
+        Some(p) => p,
+        None => return CowFaultResult::OutOfMemory,
+    };
+    struct SpecPage(Option<u64>);
+    impl Drop for SpecPage {
+        fn drop(&mut self) {
+            if let Some(p) = self.0.take() {
+                crate::mm::page_alloc::free_pages(p as usize, 0);
+            }
+        }
+    }
+    let mut spec = SpecPage(Some(spec_phys));
+
     let _pte_guard = pte_lock_for(mm).lock();
     use crate::mm::page_desc::pfn_to_page_mut;
 
@@ -2282,8 +2304,10 @@ pub unsafe fn handle_cow_fault(
     // copying, then exec and free the page — all before this side finishes
     // copying from it.
 
-    // Allocate new page and copy content
-    let new_phys = match alloc_user_phys_page() {
+    // Allocate new page and copy content. The page came from the
+    // speculative pre-lock alloc (S7-oom01wedge): the allocator slowpath
+    // must never run inside this PTE section. Sole consumer.
+    let new_phys = match spec.0.take() {
         Some(p) => p,
         None => {
             return CowFaultResult::OutOfMemory;

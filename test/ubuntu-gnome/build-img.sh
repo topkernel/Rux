@@ -245,6 +245,24 @@ if [ -f "$USBDE" ]; then
     printf 'Hidden=true\n' >> "$USBDE"
 fi
 
+# gsd-power: same treatment, different mechanism. With upowerd now
+# running from runit the UPower half is satisfied, but power-plugin
+# start also creates an org.freedesktop.login1 proxy; with no logind
+# the bus's StartServiceByName(login1) runs the systemd wrapper (which
+# exits 1 — no systemd on this image), proxy creation fails, and gsd
+# treats it as fatal: "Failed to start: ... login1 ... Launch helper
+# exited with unknown return code 1" then exit(1), respawn, repeat
+# (5+ exits per 30-min boot, each risking the register-deadline cascade
+# into the "Oh no" screen). gsd-media-keys hits the same missing login1
+# and merely warns; power is the only fatal one. No suspend/inhibit on
+# this platform anyway — drop it like UsbProtection. (A future stub
+# login1 owner could bring it back; see GNOME-SESSIONS.txt.)
+sed -i 's/org\.gnome\.SettingsDaemon\.Power;//' "$SESS"
+PWRDE="$ROOT/etc/xdg/autostart/org.gnome.SettingsDaemon.Power.desktop"
+if [ -f "$PWRDE" ]; then
+    printf 'Hidden=true\n' >> "$PWRDE"
+fi
+
 # Xorg fbdev config (software rendering, no KMS/DRM — Rux has fbdev only)
 mkdir -p "$ROOT/etc/X11"
 cat > "$ROOT/etc/X11/xorg-fbdev.conf" <<'EOX'
