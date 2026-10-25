@@ -4055,8 +4055,20 @@ pub fn scheduler_tick() {
                         // producer is still being hunted.
                         let base = pc & !crate::interrupt::preempt::HARDIRQ_MASK;
                         if base != 0 && now.wrapping_sub(t0) >= 1000 {
+                            // Fleet session 3 (2026-10-25): clear base bits
+                            // ONLY. This heal runs inside the timer IRQ
+                            // bracket, so cur's count at this exact moment
+                            // carries the tick's own in-flight
+                            // HARDIRQ_OFFSET — the old whole-word zero
+                            // deleted it and the irq_exit sub a few frames
+                            // up then underflowed (count_was=0 sub=0x10000;
+                            // one guaranteed PREEMPT-UNDERFLOW per heal
+                            // firing — see ltp-a r18-r20 fleet evidence).
+                            // PARKED-HEAL below keeps the full zero: a task
+                            // current on NO CPU has no in-flight nesting by
+                            // definition.
                             unsafe {
-                                (*cur).ti_preempt_count_zero();
+                                (*cur).ti_preempt_count_clear_base();
                             }
                             // Re-arm: next nonzero observation starts a
                             // fresh window instead of re-healing each

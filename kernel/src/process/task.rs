@@ -3514,6 +3514,30 @@ impl Task {
         self.ti_preempt_count.store(0, core::sync::atomic::Ordering::Release);
     }
 
+    /// Stress-fleet session 3 (2026-10-25): clear ONLY the task-context
+    /// base bits (PREEMPT + SOFTIRQ), preserving HARDIRQ and NMI nesting.
+    ///
+    /// The tick-side PREEMPT-HEAL runs inside the timer IRQ bracket, so
+    /// the observed task's count ALWAYS carries the tick's own in-flight
+    /// HARDIRQ_OFFSET at heal time. The old whole-word zero deleted that
+    /// bit too, and the irq_exit sub a few frames up then landed on a
+    /// zeroed count — one guaranteed PREEMPT-UNDERFLOW (sub=0x10000,
+    /// count_was=0) per heal firing. Fleet correlation (ltp-a r18-r20 +
+    /// memstorm r9/r10): pid-1 HEAL 31x against UNDERFLOW 40x, with the
+    /// underflow report landing at preempt.rs's irq_exit sub. Keeping the
+    /// interrupt-nesting bits lets the still-pending irq_exit/nmi_exit
+    /// subs pair exactly; only the phantom guard bits the heal adjudicated
+    /// (base != 0 held 10 s) are dropped.
+    #[inline]
+    pub fn ti_preempt_count_clear_base(&self) {
+        use core::sync::atomic::Ordering;
+        self.ti_preempt_count.fetch_and(
+            crate::interrupt::preempt::HARDIRQ_MASK
+                | crate::interrupt::preempt::NMI_MASK,
+            Ordering::Release,
+        );
+    }
+
     /// Get kernel stack pointer (thread_info.kernel_sp)
     #[inline]
     pub fn ti_kernel_sp(&self) -> u64 {
