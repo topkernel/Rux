@@ -52,6 +52,14 @@ cp "$ROOT/test/rootfs.img" "$IMG"
     sleep 0.5
     echo 'echo OSDBG:klog_tail=$(tail -1 /var/log/kmsg)'
     sleep 0.5
+    # The periodic flush: klogd's init flush landed at ~1.4 s; its first
+    # 30 s wake lands at ~31.4 s + kthread start lag — past the checks
+    # above. Wait past it and re-count: the file must grow (the boot log
+    # has hundreds of records by now, the 512-per-flush cap is not the
+    # binding constraint at this depth).
+    sleep 12
+    echo 'echo OSDBG:klog_lines2=$(wc -l < /var/log/kmsg)'
+    sleep 0.5
     # (3) per-task schedstat
     echo 'echo ===OS: schedstat ==='
     sleep 0.3
@@ -140,6 +148,7 @@ echo "--- verdicts ---"
 # boot 1
 check "klogd wrote /var/log/kmsg (non-empty)" 'OSDBG:klog_lines=[1-9]'
 check "/var/log/kmsg line shape" 'OSDBG:klog_tail=[0-9]+ [0-9]+ [0-9]+ [0-9]+ [0-9] '
+check "klogd's 30 s periodic flush grew the file" 'OSDBG:klog_lines2=[1-9][0-9]+'
 check "schedstat gate reads 0 before arming" 'OSDBG:gate0=0'
 check "schedstat gate arms" 'OSDBG:gate=1'
 check "schedstat triple renders (nonzero timeslices)" 'OSDBG:schedstat=\[[0-9]+ [0-9]+ [1-9]'
