@@ -4528,7 +4528,7 @@ pub fn file_fcntl(fd: usize, cmd: usize, arg: usize) -> Result<usize, i32> {
                 file.set_flags(crate::fs::file::FileFlags::new(new_flags));
                 // O_ASYNC bit changed: refresh the pipe fasync registration
                 // (registering enables SIGIO delivery, clearing disables).
-                crate::fs::pipe::oasync_register_pipe(&file);
+                crate::fs::pipe::oasync_register_pipe(&file, fd as i32);
 
                 Ok(0)  // Return 0 on success
             }
@@ -4705,47 +4705,96 @@ pub fn file_fcntl(fd: usize, cmd: usize, arg: usize) -> Result<usize, i32> {
                 };
                 let argi = arg as i32;
                 if argi != 0 {
-                    // Validate the target exists (Linux: ESRCH).
                     let (kind, id) = if argi < 0 {
                         (2u8, -argi)
                     } else {
                         (1u8, argi)
                     };
-                    let exists = if kind == 1 {
-                        crate::process::find_task_by_pid(id as u32).is_some()
+                    // The pid/pgid argument is written in the CALLER's pid
+                    // namespace (a container task passes its ns-local pid);
+                    // resolve to the global id the O_ASYNC machinery signals
+                    // (reference f_setown stores a struct pid resolved in
+                    // the caller's ns — LTP pidns13 F_SETOWN(getpid()==1)).
+                    let caller_ns = crate::sched::current()
+                        .and_then(|t| t.ns_pid.clone());
+                    let resolved = if kind == 1 {
+                        crate::process::ns::resolve_local_pid_to_global(
+                            id as u32,
+                            caller_ns.as_ref(),
+                        )
+                        .map(|g| g as i32)
                     } else {
-                        // Any task in the process group?
-                        let pgid = id as u32;
-                        let found = core::cell::Cell::new(false);
-                        crate::process::pid_hash::pid_hash_for_each_task(|task| unsafe {
-                            if (*task).pgid() == pgid {
-                                found.set(true);
-                            }
-                        });
-                        found.get()
+                        // Process group: the number is the group LEADER's
+                        // pid in the caller's ns (pgid convention).
+                        // Resolve the leader, store its global pgid.
+                        if caller_ns.is_none() {
+                            Some(id)
+                        } else {
+                            crate::process::ns::resolve_local_pid_to_global(
+                                id as u32,
+                                caller_ns.as_ref(),
+                            )
+                            .and_then(|leader| {
+                                crate::process::find_task_by_pid(leader)
+                                    .map(|t| t.pgid() as i32)
+                            })
+                        }
+                    };
+                    // Validate the target exists (Linux: ESRCH).
+                    let exists = match resolved {
+                        Some(gid) if kind == 1 => {
+                            crate::process::find_task_by_pid(gid as u32).is_some()
+                        }
+                        Some(gid) => {
+                            let pgid = gid as u32;
+                            let found = core::cell::Cell::new(false);
+                            crate::process::pid_hash::pid_hash_for_each_task(|task| unsafe {
+                                if (*task).pgid() == pgid {
+                                    found.set(true);
+                                }
+                            });
+                            found.get()
+                        }
+                        None => false,
                     };
                     if !exists {
                         return Err(errno::Errno::NoSuchProcess.as_neg_i32());
                     }
-                    *file.f_owner.lock() = crate::fs::file::FileOwner { kind, id };
+                    *file.f_owner.lock() = crate::fs::file::FileOwner {
+                        kind,
+                        id: resolved.unwrap_or(id),
+                    };
                 } else {
                     *file.f_owner.lock() = crate::fs::file::FileOwner::none();
                 }
-                crate::fs::pipe::oasync_register_pipe(&file);
+                crate::fs::pipe::oasync_register_pipe(&file, fd as i32);
                 Ok(0)
             }
 
-            // F_GETOWN (9): positive pid / negative pgid / 0 (none).
+            // F_GETOWN (9): positive pid / negative pgid / 0 (none). The
+            // number is reported in the READER's pid namespace.
             fcntl::F_GETOWN => {
                 let file = match get_file_fd(fd) {
                     Some(f) => f,
                     None => return Err(errno::Errno::BadFileNumber.as_neg_i32()),
                 };
                 let o = *file.f_owner.lock();
-                Ok(match o.kind {
-                    2 => -(o.id) as usize,
-                    _ => o.id as usize,
-                })
+                let shown = if o.kind == 2 {
+                    -(o.id)
+                } else if o.id > 0 {
+                    crate::sched::current()
+                        .and_then(|t| t.ns_pid.clone())
+                        .map(|ns| {
+                            crate::process::ns::translate_sender_pid_ns(
+                                o.id as u32,
+                                Some(&ns),
+                            ) as i32
+                        })
+                        .unwrap_or(o.id)
+                } else {
+                    o.id
+                };
+                Ok(shown as usize)
             }
 
             // F_SETSIG (10): O_ASYNC signal number (0 = default SIGIO).
@@ -4759,7 +4808,7 @@ pub fn file_fcntl(fd: usize, cmd: usize, arg: usize) -> Result<usize, i32> {
                     return Err(errno::Errno::InvalidArgument.as_neg_i32());
                 }
                 file.f_signum.store(sig, core::sync::atomic::Ordering::Relaxed);
-                crate::fs::pipe::oasync_register_pipe(&file);
+                crate::fs::pipe::oasync_register_pipe(&file, fd as i32);
                 Ok(0)
             }
 
@@ -4807,23 +4856,52 @@ pub fn file_fcntl(fd: usize, cmd: usize, arg: usize) -> Result<usize, i32> {
                 if opid <= 0 {
                     return Err(errno::Errno::InvalidArgument.as_neg_i32());
                 }
-                // Validate the target exists (Linux: ESRCH).
-                let exists = if kind == 2 {
-                    let found = core::cell::Cell::new(false);
-                    crate::process::pid_hash::pid_hash_for_each_task(|task| unsafe {
-                        if (*task).pgid() == opid as u32 {
-                            found.set(true);
-                        }
-                    });
-                    found.get()
+                // The pid argument is caller-ns-relative; resolve to the
+                // global id (same as F_SETOWN above).
+                let caller_ns =
+                    crate::sched::current().and_then(|t| t.ns_pid.clone());
+                let resolved = if caller_ns.is_none() {
+                    Some(opid)
+                } else if kind == 2 {
+                    crate::process::ns::resolve_local_pid_to_global(
+                        opid as u32,
+                        caller_ns.as_ref(),
+                    )
+                    .and_then(|leader| {
+                        crate::process::find_task_by_pid(leader)
+                            .map(|t| t.pgid() as i32)
+                    })
                 } else {
-                    crate::process::find_task_by_pid(opid as u32).is_some()
+                    crate::process::ns::resolve_local_pid_to_global(
+                        opid as u32,
+                        caller_ns.as_ref(),
+                    )
+                    .map(|g| g as i32)
+                };
+                // Validate the target exists (Linux: ESRCH).
+                let exists = match resolved {
+                    Some(gid) if kind == 2 => {
+                        let found = core::cell::Cell::new(false);
+                        crate::process::pid_hash::pid_hash_for_each_task(|task| unsafe {
+                            if (*task).pgid() == gid as u32 {
+                                found.set(true);
+                            }
+                        });
+                        found.get()
+                    }
+                    Some(gid) => {
+                        crate::process::find_task_by_pid(gid as u32).is_some()
+                    }
+                    None => false,
                 };
                 if !exists {
                     return Err(errno::Errno::NoSuchProcess.as_neg_i32());
                 }
-                *file.f_owner.lock() = crate::fs::file::FileOwner { kind, id: opid };
-                crate::fs::pipe::oasync_register_pipe(&file);
+                *file.f_owner.lock() = crate::fs::file::FileOwner {
+                    kind,
+                    id: resolved.unwrap_or(opid),
+                };
+                crate::fs::pipe::oasync_register_pipe(&file, fd as i32);
                 Ok(0)
             }
 

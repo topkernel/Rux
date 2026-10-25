@@ -688,8 +688,11 @@ pub mod si_code {
     pub const SI_QUEUE: i32 = -1;
     /// Signal sent by POSIX timer expiry
     pub const SI_TIMER: i32 = -2;
-    /// Signal sent by POSIX message queue notification (mq_notify)
-    pub const SI_MESGQ: i32 = -4;
+    /// Signal sent by POSIX message queue notification (mq_notify).
+    /// UAPI value is -3 (asm-generic/siginfo.h); -4 is SI_ASYNCIO — the
+    /// mixup failed every SA_SIGINFO check of mq notify payloads (LTP
+    /// pidns30/pidns31 compare si_code against SI_MESGQ).
+    pub const SI_MESGQ: i32 = -3;
     /// Child process exited
     pub const CLD_EXITED: i32 = 1;
     /// Child process killed
@@ -1124,12 +1127,29 @@ pub fn do_signal(regs: *mut crate::arch::pt_regs::PtRegs) -> bool {
         // (block SIGCHLD + read it via signalfd, no handler installed)
         // depends on exactly that. Kernel-forced kills of a crashing init
         // bypass do_signal (trap path calls do_exit directly).
-        if (*current).pid() == 1 && (*current).tgid() == 1 {
+        if is_unkillable_init(&*current) {
             let handled = action
                 .as_ref()
                 .map(|a| a.action() == SigActionKind::Handler)
                 .unwrap_or(false);
-            if !handled {
+            // Only kernel-forced SIGKILL and user SIGKILLs from OUTSIDE
+            // the receiver's namespace pierce the rule (reference
+            // __send_signal's from_ancestor_ns: same-namespace user kills
+            // of a pid-namespace init are discarded — LTP pidns04's
+            // kill(1, SIGKILL) — while an ancestor-namespace user kill
+            // DOES take the init down — LTP pidns05's parent kill). The
+            // queue-time si_pid translation already encodes the sender's
+            // visibility: a cross-namespace sender's pid reads 0.
+            let same_ns_user_kill = (*current)
+                .pending
+                .peek_info(sig)
+                .map(|i| {
+                    (i.si_code == si_code::SI_USER || i.si_code == si_code::SI_TKILL)
+                        && i.si_pid != 0
+                })
+                .unwrap_or(false);
+            let forced_kill = sig == Signal::SIGKILL as i32 && !same_ns_user_kill;
+            if !handled && !forced_kill {
                 // Discard without running a disposition. No handler frame
                 // is built, so convert any syscall-restart sentinel now
                 // (else the raw -512 could leak to userspace as a bogus
@@ -2176,6 +2196,29 @@ unsafe fn send_signal_locked_info(
 
     let task = &*task_ptr;
 
+    // Namespace view of the sender: the receiver must read si_pid as the
+    // sender's pid INSIDE ITS OWN pid namespace (0 when the sender has no
+    // pid there — a kill from an ancestor namespace, LTP pidns16/pidns30).
+    // Kernel info-carrying sends stamp the GLOBAL pid; translate once
+    // here so every queue below stores the receiver-local value
+    // (reference __send_signal copies through task_pid_nr_ns).
+    let si = si.map(|mut info| {
+        // Only pid-bearing layouts translate: the kill/rt classes
+        // (si_code <= 0: SI_USER/SI_TKILL/SI_QUEUE/SI_MESGQ...) and
+        // SIGCHLD (CLD_* codes are positive but the layout still carries
+        // the child pid at 16). POLL_IN/POLL_OUT SIGIO payloads reuse
+        // that offset for si_band and must pass through untouched.
+        let pid_layout =
+            info.si_code <= 0 || info.si_signo == Signal::SIGCHLD as i32;
+        if pid_layout && info.si_pid > 0 {
+            info.si_pid = crate::process::ns::translate_sender_pid_ns(
+                info.si_pid as u32,
+                task.ns_pid.as_ref(),
+            ) as i32;
+        }
+        info
+    });
+
     // sc93 launcher gate: a cross-process SIGKILL to a wedged launcher
     // means the AMS lifecycle timeout fired AND the userspace DFX dumper
     // already failed on this process (every LIFECYCLE_TIMEOUT freeze
@@ -2456,6 +2499,16 @@ impl SigInfo {
         self._rest[0..8].copy_from_slice(&sival.to_ne_bytes());
         self
     }
+
+    /// Fill the _sigpoll layout (SIGIO from O_ASYNC/fasync delivery):
+    /// si_band at offset 16 (8 bytes, overlapping si_pid/si_uid) and
+    /// si_fd at offset 24. Consumers (sigtimedwait, SA_SIGINFO handlers)
+    /// decode both to identify the ready descriptor.
+    pub fn set_band_fd(&mut self, band: &[u8; 8], fd: i32) {
+        self.si_pid = i32::from_ne_bytes(band[0..4].try_into().unwrap());
+        self.si_uid = u32::from_ne_bytes(band[4..8].try_into().unwrap());
+        self._rest[0..4].copy_from_slice(&fd.to_ne_bytes());
+    }
 }
 
 /// Send a signal carrying a fully-formed kernel SigInfo.
@@ -2538,6 +2591,18 @@ pub unsafe fn park_stopped_task(task: *mut crate::process::task::Task) {
         }
         break;
     }
+}
+
+/// SIGNAL_UNKILLABLE test: global init (pid 1) AND the init of any
+/// non-initial pid namespace (ns-local pid 1). The reference sets
+/// SIGNAL_UNKILLABLE on every pid-namespace init — a container's pid 1
+/// survives kill(1, SIGKILL) from INSIDE the namespace just like the
+/// global init survives broadcast kills (LTP pidns04).
+fn is_unkillable_init(t: &crate::process::task::Task) -> bool {
+    if t.pid() == 1 && t.tgid() == 1 {
+        return true;
+    }
+    t.ns_pid.is_some() && t.ns_local_pid == 1
 }
 
 /// Check and process signals (called before kernel returns to user space)

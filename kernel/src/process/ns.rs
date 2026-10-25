@@ -368,6 +368,77 @@ pub fn is_init_pid_ns(ns: &Arc<PidNamespace>) -> bool {
     Arc::ptr_eq(ns, &init_pid_ns())
 }
 
+/// Reverse of [`translate_sender_pid_ns`]: resolve a pid NUMBER written
+/// by a caller living in `caller_ns` (e.g. fcntl F_SETOWN's argument) to
+/// the GLOBAL pid of the task it names. None when no task matches —
+/// callers map that to ESRCH-style failure.
+pub fn resolve_local_pid_to_global(local: u32, caller_ns: Option<&Arc<PidNamespace>>) -> Option<u32> {
+    match caller_ns {
+        None => {
+            let t = crate::process::find_task_by_pid(local)?;
+            Some(t.pid())
+        }
+        Some(ns) => {
+            let mut found = None;
+            crate::process::pid_hash::pid_hash_for_each_task(|task| unsafe {
+                let t = &*task;
+                if found.is_none()
+                    && t
+                        .ns_pid
+                        .as_ref()
+                        .map(|a| Arc::ptr_eq(a, ns))
+                        .unwrap_or(false)
+                    && t.ns_local_pid == local
+                {
+                    found = Some(t.pid());
+                }
+            });
+            found
+        }
+    }
+}
+
+/// Translate a sender's GLOBAL pid into the pid the RECEIVER sees:
+/// the sender's pid inside `receiver_ns`, or 0 when the sender has no
+/// pid there (reference task_pid_nr_ns — the pid the signal's siginfo
+/// must carry). Two namespaces have a shared view only when they are
+/// the same instance; a task in an ANCESTOR namespace (typically the
+/// init namespace, ns_pid == None) has no pid in a descendant, and a
+/// nested task's init-namespace pid is its global pid. Deeper than one
+/// level the per-level projections are not tracked; the global pid is
+/// reported for any strict-ancestor receiver (documented approximation
+/// — no LTP coverage goes deeper).
+pub fn translate_sender_pid_ns(sender_global_pid: u32, receiver_ns: Option<&Arc<PidNamespace>>) -> u32 {
+    // SAFETY: pinned lookup keeps the sender Task alive across the call.
+    unsafe {
+        let sender_ptr = crate::process::pid_hash::pid_hash_lookup_pinned(sender_global_pid);
+        if sender_ptr.is_null() {
+            return sender_global_pid;
+        }
+        let sender = &*sender_ptr;
+        let out = match (&sender.ns_pid, receiver_ns) {
+            (Some(sa), Some(rb)) => {
+                if Arc::ptr_eq(sa, rb) {
+                    sender.ns_local_pid
+                } else if rb.level < sa.level {
+                    // Receiver in an ancestor of the sender's namespace:
+                    // the sender's pid there (global == init-ns pid).
+                    sender.pid()
+                } else {
+                    0
+                }
+            }
+            // Sender in the init namespace: visible only to init-ns receivers.
+            (None, None) => sender.pid(),
+            (None, Some(_)) => 0,
+            // Nested sender, init-ns receiver: the global pid.
+            (Some(_), None) => sender.pid(),
+        };
+        crate::process::task::Task::task_put(sender_ptr);
+        out
+    }
+}
+
 // ============================================================================
 // Current-task accessors (None slot == initial namespace)
 // ============================================================================
