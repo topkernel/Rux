@@ -2950,12 +2950,41 @@ fn vfs_rename_locked(oldpath: &str, newpath: &str) -> Result<(), i32> {
     // Use old_parent's inode ops for rename
     let result = old_parent.op_rename(old_name.as_bytes(), new_parent, new_name.as_bytes());
     if result == 0 {
-        // Invalidate stale dentries at both old and new paths
-        if let Some(ref old_pd) = old_parent_vpath.dentry {
-            old_pd.remove_child(&old_name);
-        }
+        // Keep the dentry cache in step with the on-disk rename by MOVING
+        // the renamed entry's cached dentry (reference d_move): the dentry
+        // — with its whole cached subtree — is re-attached under the new
+        // parent/name. The old invalidate-both code dropped it, which left
+        // detached-but-still-linked chains behind: any task holding a
+        // dentry reference INTO the renamed subtree (cwd/root recorded as
+        // a dentry) kept building the OLD path from the stale chain, so
+        // every relative lookup under that prefix failed with ENOENT (LTP
+        // inotify02 renames its own working directory; the following
+        // relative unlink() broke).
         if let Some(ref new_pd) = new_parent_vpath.dentry {
-            new_pd.remove_child(&new_name);
+            // The replaced entry (if any) was deleted by the rename:
+            // invalidate its cached dentry so the moved one can take the
+            // name slot.
+            if let Some(replaced) = new_pd.lookup_child(&new_name) {
+                replaced.set_negative();
+                *replaced.inode.lock() = None;
+                new_pd.remove_child(&new_name);
+            }
+        }
+        if let Some(ref old_pd) = old_parent_vpath.dentry {
+            if let Some(child) = old_pd.lookup_child(&old_name) {
+                old_pd.remove_child(&old_name);
+                *child.name.lock() = new_name.clone();
+                if let Some(ref new_pd) = new_parent_vpath.dentry {
+                    child.set_parent(new_pd.clone());
+                    new_pd.add_child(new_name.clone(), child);
+                } else {
+                    // New parent has no cached dentry to hang the moved
+                    // subtree from — fall back to plain invalidation (the
+                    // entry is reachable again through a fresh lookup).
+                    child.set_negative();
+                    *child.inode.lock() = None;
+                }
+            }
         }
 
         // inotify: IN_MOVED_FROM on the old parent and IN_MOVED_TO on the
