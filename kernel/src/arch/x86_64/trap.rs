@@ -2049,6 +2049,118 @@ fn user_segv_forensics(regs: &PtRegs, fault_addr: u64) {
                     }
                 }
             }
+            // leg-21 probe (cr2elf): the launcher crash-loop writes a
+            // refcount lock into the first PT_LOAD of a memfd-backed
+            // module. The one comparison that decides "kernel VMA
+            // construction vs broken module content" is the module's OWN
+            // program headers: if the file marks the faulting file-offset
+            // writable, our mmap dropped a requested prot bit; if the file
+            // itself marks it read-only, the pointer is wrong on the
+            // userspace side (generator layout or relocation base). The
+            // offset-0 mapping of the same fd carries the ELF header and
+            // phdrs at mapping start — read them through the page-table
+            // walk (present pages of a read-only segment are the file's
+            // own bytes; ld.so never COWs them).
+            if let Some(v0) = if v.offset() == 0 {
+                Some(v)
+            } else {
+                vmas
+                    .iter()
+                    .find(|sv| sv.file_fd() == fd && sv.offset() == 0)
+            } {
+                let base0 = v0.start().as_usize() as u64;
+                let word = |o: u64| fore_read_u64(aspace.root_ppn(), base0 + o);
+                let foff = (v.offset() + (fault_addr as usize - v.start().as_usize())) as u64;
+                if let Some(w0) = word(0) {
+                    if w0 & 0xffff_ffff == 0x464c_457f && (w0 >> 32) & 0xff == 2 {
+                        let e_type = (word(16).unwrap_or(0)) & 0xffff;
+                        let phoff = word(32).unwrap_or(0);
+                        let e_phentsize = ((word(48).unwrap_or(0)) >> 48) & 0xffff;
+                        let e_phnum = ((word(56).unwrap_or(0)) & 0xffff) as usize;
+                        let entsz = if e_phentsize == 0 { 56 } else { e_phentsize as u64 };
+                        crate::pr_err!(
+                            "USEGV-FOR: cr2elf type={:#x} phoff={:#x} phnum={} foff={:#x} (fault file offset)",
+                            e_type, phoff, e_phnum, foff
+                        );
+                        for i in 0..e_phnum.min(12) {
+                            let po = phoff + (i as u64) * entsz;
+                            let (pt, pf) = match word(po) {
+                                Some(w) => (w & 0xffff_ffff, (w >> 32) & 0xffff_ffff),
+                                None => break,
+                            };
+                            let p_off = word(po + 8).unwrap_or(0);
+                            let p_va = word(po + 16).unwrap_or(0);
+                            let p_fsz = word(po + 32).unwrap_or(0);
+                            let p_msz = word(po + 40).unwrap_or(0);
+                            // PT_LOAD(1) / PT_DYNAMIC(2) / PT_GNU_RELRO.
+                            if pt == 1 || pt == 2 || pt == 0x6474_e552 {
+                                let covers = pt == 1
+                                    && p_off <= foff
+                                    && foff < p_off.saturating_add(p_fsz);
+                                crate::pr_err!(
+                                    "USEGV-FOR: cr2elf ph{} type={:#x} flags={:#x} off={:#x} vaddr={:#x} filesz={:#x} memsz={:#x}{}",
+                                    i, pt, pf, p_off, p_va, p_fsz, p_msz,
+                                    if covers { " <= FAULT" } else { "" }
+                                );
+                            }
+                        }
+                    }
+                }
+                // 32 bytes around the fault address: an initialized
+                // refcount control block vs zeros vs garbage.
+                {
+                    let mut line = alloc::string::String::from("USEGV-FOR: cr2bytes");
+                    use core::fmt::Write;
+                    for k in 0..4u64 {
+                        let va = (fault_addr as u64 & !0xf) + k * 8;
+                        let _ = match fore_read_u64(aspace.root_ppn(), va) {
+                            Some(w) => write!(line, " {:#x}:{:016x}", va, w),
+                            None => write!(line, " {:#x}:????", va),
+                        };
+                    }
+                    crate::pr_err!("{}", line);
+                }
+                // Printable runs in the module's first pages: .dynstr
+                // SONAME/symbol names name the module even when the fd is
+                // an anonymous memfd (compare against the on-disk .so to
+                // decide copy-vs-generated).
+                {
+                    let mut line = alloc::string::String::from("USEGV-FOR: cr2strs");
+                    use core::fmt::Write;
+                    let mut hits = 0usize;
+                    let mut run = alloc::vec::Vec::new();
+                    let mut va = base0;
+                    let end = base0 + 0x8000;
+                    'scan: while va < end {
+                        match fore_read_u64(aspace.root_ppn(), va) {
+                            Some(w) => {
+                                for k in 0..8usize {
+                                    let b = (w >> (k * 8)) & 0xff;
+                                    if (0x20..0x7f).contains(&b) {
+                                        run.push(b as u8);
+                                    } else {
+                                        if run.len() >= 10 && hits < 10 {
+                                            let _ = write!(
+                                                line,
+                                                " [{}]",
+                                                core::str::from_utf8(&run).unwrap_or("?")
+                                            );
+                                            hits += 1;
+                                        }
+                                        run.clear();
+                                        if hits >= 10 {
+                                            break 'scan;
+                                        }
+                                    }
+                                }
+                            }
+                            None => break 'scan,
+                        }
+                        va += 8;
+                    }
+                    crate::pr_err!("{}", line);
+                }
+            }
         }
         // File path + module-relative fault offset for the rip VMA, so a
         // crash inside a mapped .so names the library and gives the
@@ -2216,6 +2328,30 @@ fn user_segv_forensics(regs: &PtRegs, fault_addr: u64) {
             let _ = write!(line, " {}:{}", i, val);
         }
         crate::pr_err!("USEGV-FOR: stack@rsp:{}", line);
+    }
+    // leg-21 probe: the launcher crash family dies inside the dynamic
+    // linker's pthread_cond walk, whose frame parks the condvar pointer
+    // at rbp-0x58. Dump the rbp locals window plus a dereference of the
+    // rbp-0x58 slot when it holds a canonical user pointer — the
+    // condvar's own words (queue head/tail/lock/seq) are the corrupted
+    // state the queue walk followed.
+    if let Some(aspace) = addr_space.as_ref() {
+        let root = aspace.root_ppn();
+        if let Some(w) = fore_read_u64(root, regs.rbp - 0x58) {
+            let mut line = alloc::string::String::new();
+            use core::fmt::Write;
+            let _ = write!(line, "USEGV-FOR: frame rbp-0x58={:#x}", w);
+            if w > 0x1000 && w < 0x0000_8000_0000_0000 {
+                for i in 0..6usize {
+                    let va = w + (i * 8) as u64;
+                    let _ = match fore_read_u64(root, va) {
+                        Some(v) => write!(line, " {:#x}:{:#x}", va, v),
+                        None => write!(line, " {:#x}:????", va),
+                    };
+                }
+            }
+            crate::pr_err!("{}", line);
+        }
     }
 }
 
