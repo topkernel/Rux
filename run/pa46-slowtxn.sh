@@ -16,7 +16,10 @@
 #   FAIL conditions: (a) any queue >= 50 ms (a queueing class, the
 #   thing a broken reclaim could introduce by stalling the buffer
 #   pool), or (b) a total outside the known exec bands (code 1/64:
-#   4.5-9 s; code 7 -> Init: 13-95 s), or (c) an unknown code.
+#   4.5-9 s; code 7 -> Init: 13-140 s — leg-36: pa50main quiet shows
+#   133.6 s, see BANDS note), or (c) an unknown code (leg-36 saw ONE
+#   code-14 row, 40.7 s exec queue 0 ms, pa56branch at host load 30 —
+#   adjudicate against the pending a5af759c pure-main census boot).
 # Usage: pa46-slowtxn.sh <serial-log>
 set -u
 LOG="${1:?usage: pa46-slowtxn.sh <serial-log>}"
@@ -25,7 +28,12 @@ import re, sys
 # Known exec-side bands, keyed by binder code: code 1/64 (5-8 s
 # exec, foundation->samgr cohort) and code 7 (-> Init, load-elastic
 # 15 s intrinsics stretching to ~90 s under load1 13-19).
-BANDS = {"1": (4_500, 8_999), "64": (4_500, 8_999), "7": (13_000, 95_000)}
+# leg-36: code-7 top widened 95s -> 140s on PURE-MAIN quiet evidence:
+# the accepted pa50main re-bank boot (load1=0) itself shows one
+# code-7 row at 133,630 ms exec (queue 0 ms) — the old 13-95 s band
+# was fit to loaded boots only and FAILED the quiet baseline by
+# construction. queue>=50ms stays the operative regression signal.
+BANDS = {"1": (4_500, 8_999), "64": (4_500, 8_999), "7": (13_000, 140_000)}
 rows = []
 for line in open(sys.argv[1], errors="replace"):
     m = re.search(r"SLOW-TXN txn\d+ code (\d+) from pid (\d+) tid (\d+) to pid (\d+) tid (\d+): total (\d+) ms \(queue (\d+) ms, exec (\d+) ms\)", line)
