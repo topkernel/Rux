@@ -308,6 +308,9 @@ pub fn do_clone(args: CloneArgs) -> Result<Pid, i32> {
         return Err(einval());
     }
     // Unknown flag bits (excluding the low CSIGNAL byte) → EINVAL.
+    // (The legacy-clone sign-extension garbage is already discarded by
+    // sys_clone's lower_32_bits mask — Linux parity — so this check only
+    // ever sees real flag bits.)
     if args.flags & !CLONE_KNOWN_FLAGS & !0xff != 0 {
         crate::pr_warn!("clone: unknown flags {:#x}", args.flags);
         return Err(einval());
@@ -520,7 +523,14 @@ pub fn do_clone(args: CloneArgs) -> Result<Pid, i32> {
         // (Xorg's input_mutex around the xkbcomp System() call — the
         // permanent futex_wait(2) wedge).
         if args.flags & CLONE_PARENT_SETTID != 0 && !args.parent_tid.is_null() {
-            let tid_val = pid as i32;
+            // The stored TID is the child's pid in the PARENT's pid
+            // namespace — the same value clone(2) returns (a container
+            // task's fork() must hand back the ns-local pid, not the
+            // global one).
+            let tid_val = crate::process::ns::translate_sender_pid_ns(
+                pid,
+                (*current_ptr).ns_pid.as_ref(),
+            ) as i32;
             if crate::arch::uaccess::copy_to_user(
                 args.parent_tid as *mut u8,
                 &tid_val as *const i32 as *const u8,

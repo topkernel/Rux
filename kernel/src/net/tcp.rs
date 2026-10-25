@@ -2990,6 +2990,25 @@ impl TcpSocketTable {
         }
         // No freed slots; append if room
         if self.count >= TCP_SOCKET_TABLE_SIZE {
+            // TIME_WAIT reclamation under pressure (Linux evicts the
+            // oldest tw buckets when the table fills): a TIME_WAIT slot
+            // with no fd pin has no future — its only purpose is to
+            // remember the 4-tuple until the timewait deadline, and a
+            // fresh connection outranks that memory. Without this, a
+            // connect-churning workload (LTP send02: ~1000 short-lived
+            // loopback connections against a 64-slot table, 60 s tw
+            // timeout) exhausts the table and every later SOCK_STREAM
+            // socket() fails EMFILE.
+            for i in 0..self.count {
+                if let Some(sk) = &self.sockets[i] {
+                    if sk.state == TcpState::TCP_TIME_WAIT
+                        && sk.user_refs.load(core::sync::atomic::Ordering::Acquire) == 0
+                    {
+                        self.sockets[i] = Some(TcpSocket::new());
+                        return Ok(i);
+                    }
+                }
+            }
             return Err(());
         }
         let fd = self.count;

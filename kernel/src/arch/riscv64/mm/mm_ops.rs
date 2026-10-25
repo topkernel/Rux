@@ -2159,6 +2159,33 @@ pub unsafe fn handle_cow_fault(
     root_ppn: u64,
     fault_addr: VirtAddr,
 ) -> CowFaultResult {
+    // S7-oom01wedge (fleet s2, live gdb strand dump 2026-10-26 02:16):
+    // the private-copy alloc_pages(GFP_USER) used to run INSIDE the PTE
+    // section, entered with lock_irqsave — this hart's IRQs off and the
+    // PTE epoch held across the FULL allocator slowpath. Under memory
+    // pressure that slowpath (reclaim retry / OOM-kill wait / free-list
+    // churn) ground for 100+ s while every global PTE writer and every
+    // same-mm PTE section on the other hart starved (ltp-a r40/r41,
+    // ltp-b r38/r39 oom01 wedges: the stuck task sampled pc=0x100 for
+    // minutes; dump: hart0 spinning in GlobalPteLock write vs hart1 in
+    // Zone::remove_from_free_list). Linux discipline (wp_page_copy):
+    // allocate the private copy BEFORE the PTE lock. The section's
+    // re-checks already return Retry/Resolved for every no-copy-needed
+    // outcome, so a wasted speculative page is simply freed by Drop.
+    let spec_phys = match alloc_user_phys_page() {
+        Some(p) => p,
+        None => return CowFaultResult::OutOfMemory,
+    };
+    struct SpecPage(Option<u64>);
+    impl Drop for SpecPage {
+        fn drop(&mut self) {
+            if let Some(p) = self.0.take() {
+                crate::mm::page_alloc::free_pages(p as usize, 0);
+            }
+        }
+    }
+    let mut spec = SpecPage(Some(spec_phys));
+
     let _pte_guard = pte_lock_for(mm).lock_irqsave();
     use crate::mm::page_desc::pfn_to_page_mut;
 
@@ -2267,8 +2294,12 @@ pub unsafe fn handle_cow_fault(
     // see refcount drop to 1, re-enable W without copying, then exec and free
     // the page — all before the parent finishes copying from it.
 
-    // Allocate new page and copy content
-    let new_phys = match alloc_user_phys_page() {
+    // Allocate new page and copy content. The page came from the
+    // speculative pre-lock alloc (S7-oom01wedge): the allocator slowpath
+    // must never run inside this PTE section. Sole consumer: `take()`
+    // cannot fail here; the None arm keeps the type honest if a future
+    // edit adds a second consumer.
+    let new_phys = match spec.0.take() {
         Some(p) => p,
         None => {
             return CowFaultResult::OutOfMemory;
