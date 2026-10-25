@@ -2234,6 +2234,42 @@ unsafe fn __schedule() {
     // Clear idle bit since we're about to run something
     grq().clear_idle(cpu_id);
 
+    // Per-task schedstat accounting (T7 perf-support slice,
+    // /proc/[pid]/schedstat): one sched_clock read serves both edges,
+    // gated by one relaxed load when off (the tracepoint discipline).
+    // A same-task repick (next == prev, the CPU-bound tick case) is NOT
+    // a new timeslice — Linux counts switches-to — so only an open wait
+    // window closes in that case; the exec stamp keeps running.
+    if crate::sched::stats::enabled() {
+        let now = crate::sched::fair::sched_clock();
+        let same = next == prev;
+        if !prev.is_null() && (*prev).pid() != 0 {
+            if same {
+                // Repick: close a wait window a wake may have opened,
+                // keep the exec stamp.
+                let ws = (*prev).schedstat_wait_start.swap(0, core::sync::atomic::Ordering::Relaxed);
+                if ws != 0 && now > ws {
+                    (*prev).schedstat_wait_ns.fetch_add(now - ws, core::sync::atomic::Ordering::Relaxed);
+                }
+            } else {
+                // PUT: accumulate prev's on-cpu time since its pick.
+                let stamp = (*prev).schedstat_exec_start.swap(0, core::sync::atomic::Ordering::Relaxed);
+                if stamp != 0 && now > stamp {
+                    (*prev).schedstat_runtime_ns.fetch_add(now - stamp, core::sync::atomic::Ordering::Relaxed);
+                }
+            }
+        }
+        if !same && !next.is_null() && (*next).pid() != 0 {
+            // PICK: a new timeslice, and the wait window closes.
+            (*next).schedstat_timeslices.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            let ws = (*next).schedstat_wait_start.swap(0, core::sync::atomic::Ordering::Relaxed);
+            if ws != 0 && now > ws {
+                (*next).schedstat_wait_ns.fetch_add(now - ws, core::sync::atomic::Ordering::Relaxed);
+            }
+            (*next).schedstat_exec_start.store(now, core::sync::atomic::Ordering::Relaxed);
+        }
+    }
+
     // R63: publish the switch-out ownership BEFORE releasing the GRQ (a
     // waker serialized by this lock must see it), so wake_up_enqueue's
     // phantom heal cannot clear prev's on_cpu mark while prev's context
@@ -2951,6 +2987,14 @@ unsafe fn enqueue_task_locked(grq: &mut GlobalRunQueue, task: *mut Task) -> bool
         // Wakewatch forensics: stamp every successful link (wake, fork,
         // heal re-insert) so the pick side can measure wake→run latency.
         crate::sched::wakewatch::note_wake(task);
+        // Per-task schedstat (T7): open the wait window — the pick edge
+        // in __schedule closes it into schedstat_wait_ns. GRQ is held
+        // here and there, so the stamp needs no lock of its own.
+        if crate::sched::stats::enabled() && (*task).pid() != 0 {
+            (*task)
+                .schedstat_wait_start
+                .store(crate::sched::fair::sched_clock(), core::sync::atomic::Ordering::Relaxed);
+        }
     }
     inserted
 }

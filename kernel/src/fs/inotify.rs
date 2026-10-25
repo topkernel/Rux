@@ -759,15 +759,12 @@ fn inotify_close(file: &File) -> i32 {
     0
 }
 
-/// FileOps for inotify instance fds.
-pub static INOTIFY_OPS: FileOps = FileOps {
-    read: Some(inotify_read),
-    write: None,
-    lseek: None,
-    close: Some(inotify_close),
-    poll: Some(inotify_poll),
-    read_at: None,
-};
+/// FileOps for inotify instance fds (D-6 builder form).
+pub static INOTIFY_OPS: FileOps = FileOps::builder()
+    .read(inotify_read)
+    .close(inotify_close)
+    .poll(inotify_poll)
+    .build();
 
 // ============================================================================
 // Poll-wait registration (P3: event-driven poll/select)

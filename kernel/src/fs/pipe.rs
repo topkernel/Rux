@@ -1250,15 +1250,14 @@ fn pipe_file_close(file: &File) -> i32 {
 }
 
 /// Pipe file operations (module-level so other subsystems can identity-check
-/// a File against it — FIONREAD etc.).
-pub static PIPE_OPS: FileOps = FileOps {
-    read: Some(pipe_file_read),
-    write: Some(pipe_file_write),
-    lseek: None,  // Pipe doesn't support lseek
-    close: Some(pipe_file_close),
-    poll: Some(pipe_file_poll),
-    read_at: None,
-};
+/// a File against it — FIONREAD etc.; D-6 builder form: the pipe is the
+/// canonical STREAM capability set — read/write/poll/close, no seek).
+pub static PIPE_OPS: FileOps = FileOps::builder()
+    .read(pipe_file_read)
+    .write(pipe_file_write)
+    .close(pipe_file_close)
+    .poll(pipe_file_poll)
+    .build();
 
 /// Real readable byte count for FIONREAD on a pipe File.
 /// Returns None when `file` is not a pipe (identity-checked against
