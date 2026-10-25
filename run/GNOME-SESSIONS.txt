@@ -1,0 +1,150 @@
+# GNOME-SESSIONS.txt — Ubuntu->GNOME lane handoff log (like OH lane's SC-SESSIONS.txt)
+
+Lane: Ubuntu-GNOME ("Ubuntu see GNOME"), worktree
+/home/william/rux-agents/gnome-bringup, branch feature/gnome-bringup
+(base = main 5e498453). Mission: real GNOME Shell desktop (gnome-shell +
+mutter + gsd) visible and stable on the Ubuntu 22.04 riscv64 image.
+
+## Asset situation (surveyed at lane start)
+
+- The old GNOME verification image (/home/william/rux-agents/gnome-img/
+  gnome.img + fire6.py) and the gnome-int worktree are LOST (deleted).
+  The riscv-gnome worktree survives with run evidence under runs/
+  (fire-r84, fire-r85, bigalloc1..11) but no image and no builder.
+- The recipe survives in-tree as the x86 mirror: test/gnome-x86/
+  {build-img.sh, runit.c, fire.py} on main. Kernel-side fixes from the
+  GNOME campaign ARE on main (merge be8817dc: R83/R84/R85 trap.S +
+  sched fixes; plus later: 40920349 fake-OOM survivable PT alloc,
+  kernel_heap_size=1024, allocator magazines, from_fn stack fixes).
+- riscv64 ubuntu-base 22.04.3 rootfs cached at main repo
+  work/ubuntu-base-rootfs/22.04.3 (68M, RISC-V ELF verified).
+- riscv64 GNOME chain resolvable from mirrors.aliyun.com/ubuntu-ports
+  jammy: gnome-shell 42.9-0ubuntu2.3 + gnome-settings-daemon + mutter
+  (libmutter) closure = 693 packages.
+
+## Last known GNOME state before image loss (riscv-gnome/runs/fire-r85/v1, kernel = gnome-int = pre-R84)
+
+- M1 migrations @248s, M3 gnome-shell @233s (pid 369 RUNNING),
+  mutter_wm @316s, xterm x-ok @344s, M2 gsd @353s (gsd-wwan pid 391),
+  M4 screen_lit NOT reached (best nonblack 0.006), kernel panic @452s.
+- So the chain reached gsd + gnome-shell but never lit the screen on
+  that kernel; the 2026-10-13 roadmap milestone (M4 @601s, M5 @901s,
+  2100s clean) was on the same lost-worktree kernel family.
+
+## Lane plan
+
+1. test/ubuntu-gnome/{build-img.sh,runit.c,fire.py} — riscv64 rebuild
+   of the chain (full stock gnome session incl. gsd, /etc/runit-mode
+   knob for the minimal gs path). DONE (committed).
+2. Reproduce on current main kernel: smp2/1G first, then smp4/2G full
+   chain. Compare against fire-r85 milestones.
+3. Attack whatever blocks NOW (candidates per AGENTS.md: fake-OOM
+   ~342MB/2G [kernel much healthier now — re-verify], gsd->shell chain
+   stability, mutter/EGL on llvmpipe).
+4. Merge package needs the two-dimension gate (AGENTS.md Merge Gate):
+   pre-verify syscost/pbench tiers before declaring ready.
+
+## Session 1 (2026-10-25)
+
+- Created worktree from main 5e498453.
+- Kernel build: rc=0, target/riscv64gc-unknown-none-elf/debug/rux.
+- Image build: work/gnome-riscv64.img (693 pkgs, full stock gnome chain,
+  runit default mode=session session=gnome).
+- Run repro1 (smp2/2G, dfx=watchdog,periodic,taskdump): boot to runit
+  clean, both dbus up, Xorg 1.21.1.4 fbdev up, session chain launched.
+  WALL: Xorg GLX "(EE) IGLX error: Calling driver entry point failed /
+  GLX: could not load software renderer" -> gnome-shell mutter "no
+  available drivers found" -> shell exits. Screen stays 100% black.
+  Also noted: PREEMPT-LEAK flood (idle wfi, rip=cpu::wfi, holds ~2-8s)
+  from the current kernel — separate issue, kernel-side.
+- A/B with the Oct-14 painting kernel (be8817dc, built in
+  /home/william/rux-agents/gnome-oldk): IDENTICAL GL failure on my
+  image => NOT a main-kernel regression; my image differs from the lost
+  gp3i image (or gp3i never had working swrast server-side either and
+  painted via a client-side path).
+- glnit probe (test/ubuntu-gnome/glnit.c, -march=rv64gc!): reproduced
+  WITHOUT Xorg: dlopen swrast OK, extensions walk clean (DRI_Core v2,
+  DRI_Mesa v1, DRI_SWRast v4, DRI_CopySubBuffer v1, DRI_ConfigOptions
+  v2), createNewScreen2(loader v1) returns NULL. Host-toolchain trap:
+  cross gcc defaults to RVA23-class march -> SIGILL under -cpu rv64;
+  compile probes with -march=rv64gc.
+- Host qemu-user A/B of the same probe+libs: RUNNING (decides
+  kernel-side vs image-side for the NULL).
+
+## Session 2 (2026-10-25, leg-2 after 06:55 quota death)
+
+- Merged main 47d96961 (timer/stack/binder/panic= etc., 27 commits).
+  Note: riscv64 kernel heap is CLAMPED to 128 MiB by build.rs (a 1 GiB
+  heap region overruns the riscv64 memory map pre-console — documented
+  in-tree); Kernel.toml's 1024 only applies to x86_64.
+- m20 EISDIR autopsy (the "Is a directory" AIGLX dlopen failure):
+  NOT a kernel bug. The hand-built m20 image was malformed: the swrast
+  direntry pointed at ino 42784 whose bitmap bit was never set and
+  i_nlink==0 (mkfs -d hardlink bookkeeping confused by the in-place cp
+  surgery over the deb's hardlinked dri/ group). debugfs "testi <42784>"
+  says "not in use"; any create then takes 42784 — during boot the
+  first mkdir (/tmp/xdg) aliased onto it, so the swrast path resolved
+  to a DIRECTORY -> dlopen header pread EISDIR. Proven twice: stat/dd
+  as quiet PID1 read the file fine; debugfs -w write onto a copy
+  allocated 42784 over the driver.
+- build-img.sh fixes: (1) swrast replace now unlink-first (install),
+  (2) e2fsck -fy GATE after mkfs (refuses to ship an image whose
+  dirent/bitmaps disagree), (3) driver banked at
+  work/downloads/swrast_dri.so-20.0.4-riscv64, aliyun mirror first.
+- Client-side GL pin: jammy libGLX_mesa/libEGL_mesa (23.2) reject the
+  20.0.4 driver ("did not find extension DRI_Mesa version 1"); the
+  XSERVER's stock loader accepts it. Pinned libGLX_mesa.so.0.0.0 +
+  libglapi.so.0.0.0 (and libEGL_mesa.so.0.0.0 for the gles helper)
+  from the focal 20.0.4 riscv64 debs.
+- swfix-gs2 (mode=gs, merged kernel, pinned image): GL wall GONE —
+  "IGLX: Loaded and initialized swrast", mutter runs as compositing
+  manager, gnome-shell alive ~45s, then SEGV (epc 0x300040cf32 —
+  unymbolized; low priority vs session mode which stays up).
+- swfix-sess1 (mode=session): M4_screen_lit @121s (nonblack 0.99+,
+  GNOME wallpaper colors #002080/#202000) — first screen-lit boot of
+  this lane. gnome-session died @47s (its accelerated-check helpers
+  failed: GLX helper "No hardware 3D support", GLES helper "libEGL
+  fatal: did not find extension DRI_Mesa version 1" -> EGL pin queued)
+  -> runit fallback gnome-shell --replace is UP and stable (calendar
+  server spawned, ppoll idle). Open items: panel not yet rendered at
+  t=500s (SVG pixbuf loaders + loaders.cache missing from image —
+  PNG is built-in but icons are SVG; MIT-SHM BadAccess killed
+  gnome-session-failed's dialog (kernel sysv-shm suspicion);
+  "sh: 0: getcwd() failed: Success" (errno-0 getcwd) seen twice.
+
+## Session 2b (2026-10-25 late) — DESKTOP VISIBLE, vision-verified
+
+- Rebuilt image with: EGL pin (libEGL_mesa 20.0.4 — the gles helper
+  died on the 23.2 lib), hardware-compatibility "+softpipe" append
+  (the stock file ends "-softpipe"; last-match-wins, so the stock
+  session refused software GL: "No hardware 3D support" ->
+  gnome-session-failed dialog), librsvg2-common in PKGS, and runit now
+  generates the gdk-pixbuf loaders.cache guest-side before Xorg
+  (dpkg -x skips the postinst; without the cache SVG icons fail).
+- runs/gnome-full1 (STOCK session): gnome-session + gsd family UP
+  (gsd-color/keyboard/sound/sharing/print-notif/smartcard/usb-probe/
+  media-keys/xsettings/a11y... — first time M2-class state on this
+  lane). Shell slow under the gsd storm (WAKE-STRANDED kernel warnings
+  under 2-vCPU TCG load), M4_screen_lit @751s.
+- runs/gnome-full1-gs (gs mode on same image): M4_screen_lit @91s.
+- DESKTOP PROOF (runs/gnome-full1-gs/desktop-proof.png +
+  runs/gnome-full1/desktop-proof.png, vision-verified): GNOME Shell
+  top panel rendered — "Activities" button top-left, "Starting gn…"
+  status/clock area top-center, system indicators, a real notification
+  banner ("Logged in as a privileged user"), blue window region
+  (workspace/snapshot content), white mouse cursor. This is a live
+  compositing Shell desktop, not just a painted background.
+- M5 (fire.py's 4-sigcolor proxy) does not fit GNOME 42's dark
+  aesthetic: the desktop is #232323 shell background + blue accents +
+  white text = 3 quantized color buckets at >=0.5% coverage; the panel
+  and notification are demonstrably present. M4 is the banked pixel
+  milestone; M5-as-written is a color-diversity proxy, not a presence
+  test.
+- Session-path residue (kernel-side, queued): recurring user SEGV
+  epc=0x2aaaaae2b6 addr=0x8 in gsd-spawned helpers, each preceded by
+  "sh: 0: getcwd() failed: Success" (getcwd returning failure with
+  errno 0 — dash then dies on a null deref; needs a controlled repro
+  in a quiet boot); MIT-SHM BadAccess (request 130 minor 1) killed
+  gnome-session-failed's dialog in swfix-sess1 — Xorg-side shmat
+  failure path, unverified; PREEMPT-LEAK flood (idle wfi, ~2s holds)
+  on every boot — kernel-side, likely another lane's active area.

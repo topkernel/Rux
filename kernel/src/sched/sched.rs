@@ -4158,6 +4158,21 @@ pub fn scheduler_tick() {
                                         ph(unsafe { (*pr).instruction_pointer() });
                                     }
                                 }
+                                // pctick: the interrupted task's own count
+                                // at tick ENTRY (snapshot taken in the
+                                // timer trap path before irq_enter books
+                                // the tick's offset) — 0x1 means the
+                                // reportable bit is a leaked PREEMPT
+                                // disable; >=0x10000 means a hardirq bit
+                                // was already stranded on the task.
+                                const M6: &[u8] = b" pctick=";
+                                for &b in M6 {
+                                    putchar(b);
+                                }
+                                ph(crate::interrupt::preempt::TICK_ENTRY_PC
+                                    [cpu_id]
+                                    .load(core::sync::atomic::Ordering::Relaxed)
+                                    as u64);
                                 putchar(b'\n');
                             }
                         }
@@ -4201,8 +4216,28 @@ pub fn scheduler_tick() {
                         if (base != 0 || nest_extra_now > 0)
                             && now.wrapping_sub(t0) >= 1000
                         {
+                            // Fleet session 3 (2026-10-25): this heal runs
+                            // inside the timer IRQ bracket, so cur's count
+                            // at this exact moment carries the tick's own
+                            // in-flight HARDIRQ_OFFSET — the old whole-word
+                            // zero deleted it and the irq_exit sub a few
+                            // frames up then underflowed (count_was=0
+                            // sub=0x10000; one guaranteed PREEMPT-UNDERFLOW
+                            // per heal firing — see ltp-a r18-r20 fleet
+                            // evidence). PARKED-HEAL below keeps the full
+                            // zero: a task current on NO CPU has no
+                            // in-flight nesting by definition. The merged
+                            // action keeps exactly ONE HARDIRQ_OFFSET (plus
+                            // NMI nesting) so the pending irq_exit still
+                            // pairs; when the phantom is base-only
+                            // (nest_extra_now == 0) that mask is
+                            // bit-identical to clear_base, and for the
+                            // leg-19 round-3e PURE-HARDIRQ phantom
+                            // (base == 0, extra hardirq nesting held 10 s)
+                            // it also drops the phantom hardirq bits that
+                            // clear_base alone would keep.
                             unsafe {
-                                (*cur).ti_preempt_count_zero();
+                                (*cur).ti_preempt_count_keep_tick_nesting();
                             }
                             // Re-arm: next nonzero observation starts a
                             // fresh window instead of re-healing each

@@ -132,44 +132,197 @@ impl TraceEvent {
 }
 
 // ============================================================================
-// The event table
+// One declaration site per event — the tracepoint! table
 // ============================================================================
+//
+// Every event is declared ONCE, in the `tracepoints!` invocation below:
+// its names, its id, the verbatim "print fmt" and field list, the typed
+// call signature and the renderer. From that one declaration the macro
+// derives the three artifacts a hand-written site used to carry:
+//
+// 1. the `static` table row (group/name/id/print_fmt/fields/enabled);
+// 2. the record-call function `trace_<name>(field, field, ...) -> bool`
+//    that packs the typed arguments into the argument slots and records
+//    — the `armed()` check is inside, so a call site pays nothing but
+//    the argument evaluation when the event is off;
+// 3. the renderer `<name>_fmt` used by the text output and the format
+//    file.
+//
+// This is the §4 derive pattern of docs/architecture/rust-design-headroom.md
+// (one declaration derives every artifact, so the format and the data can
+// no longer drift apart — the table row, the call signature and the file
+// shapes are all one edit).
 
-/// raw_syscalls:sys_enter — every syscall entry, with the raw (native)
-/// number and the six register arguments. the reference host's
-/// events/raw_syscalls/sys_enter, format captured from the live file.
-pub static EVENT_SYS_ENTER: TraceEvent = TraceEvent {
-    group: "raw_syscalls",
-    name: "sys_enter",
-    id: 1,
-    print_fmt: "\"NR %ld (%lx, %lx, %lx, %lx, %lx, %lx)\", REC->id, REC->args[0], REC->args[1], REC->args[2], REC->args[3], REC->args[4], REC->args[5]",
+/// How a typed call argument packs into the argument slots.
+pub trait PackArg {
+    /// How many slots this argument occupies.
+    const SLOTS: usize;
+    /// Pack into `slots` starting at `*at`, advancing `at`.
+    fn pack(&self, slots: &mut [u64; TRACE_ARGS], at: &mut usize);
+}
+
+macro_rules! pack_impl_scalar {
+    ($($t:ty),*) => {$(
+        impl PackArg for $t {
+            const SLOTS: usize = 1;
+            #[inline]
+            fn pack(&self, slots: &mut [u64; TRACE_ARGS], at: &mut usize) {
+                if *at < TRACE_ARGS {
+                    slots[*at] = *self as u64;
+                    *at += 1;
+                }
+            }
+        }
+    )*};
+}
+
+pack_impl_scalar!(u64, i64, u32, i32, u16, i16, u8, i8, usize, isize, bool);
+
+/// A 16-byte comm occupies two slots (little-endian words — the mirror
+/// of `comm_from_words`).
+impl PackArg for &[u8; COMM_LEN] {
+    const SLOTS: usize = 2;
+    #[inline]
+    fn pack(&self, slots: &mut [u64; TRACE_ARGS], at: &mut usize) {
+        let words = comm_to_words(self);
+        for w in words {
+            if *at < TRACE_ARGS {
+                slots[*at] = w;
+                *at += 1;
+            }
+        }
+    }
+}
+
+/// A short ASCII tag (the rwbs column: "R", "W", ...) packs into one
+/// slot as up to 8 little-endian bytes.
+impl PackArg for &str {
+    const SLOTS: usize = 1;
+    #[inline]
+    fn pack(&self, slots: &mut [u64; TRACE_ARGS], at: &mut usize) {
+        let mut chunk = [0u8; 8];
+        let n = self.len().min(8);
+        chunk[..n].copy_from_slice(&self.as_bytes()[..n]);
+        if *at < TRACE_ARGS {
+            slots[*at] = u64::from_le_bytes(chunk);
+            *at += 1;
+        }
+    }
+}
+
+/// Declare the trace event table. One item per event:
+///
+/// ```text
+/// EVENT_STATIC / name_fmt / trace_name : "group", "name", id,
+///     print:  "<verbatim print fmt>",
+///     fields: "<verbatim field lines>",
+///     call    (field: ty, ...),
+///     render |args: &[u64; TRACE_ARGS]| { <expr using `args`> } ;
+/// ```
+///
+/// `EVENT_STATIC / name_fmt / trace_name` are the three derived names
+/// (the table row, the renderer, the call function) — written out
+/// because macro_rules cannot concatenate identifiers; every other
+/// artifact is derived. The event table `EVENTS` is emitted from the
+/// same list, in declaration order.
+macro_rules! tracepoints {
+    // Munch one event; emit its three artifacts; accumulate the static.
+    // (The @-marked arms must precede the catch-all entry arm below —
+    // macro_rules tries arms in order and the entry arm matches any
+    // token sequence, including an @tbl form.)
+    (
+        @tbl [$($acc:ident)*]
+        $(#[$doc:meta])*
+        $ev:ident / $fmt:ident / $call:ident : $group:literal, $name:literal, $id:literal,
+        print: $print:literal,
+        fields: $fields:literal,
+        call ($($pn:ident : $pt:ty),* $(,)?),
+        render $render:expr
+        ; $($rest:tt)*
+    ) => {
+        $(#[$doc])*
+        pub static $ev: TraceEvent = TraceEvent {
+            group: $group,
+            name: $name,
+            id: $id,
+            print_fmt: $print,
+            fields: $fields,
+            enabled: AtomicBool::new(false),
+            fmt_args: $fmt,
+        };
+
+        #[allow(unused_variables)]
+        fn $fmt(args: &[u64; TRACE_ARGS]) -> String {
+            // `render |args| ...`: the renderer is a closure written at
+            // the declaration site, so `args` binds there (macro_rules
+            // hygiene would otherwise hide the parameter from it).
+            ($render)(args)
+        }
+
+        /// Record this event; the typed arguments are packed into the
+        /// argument slots. The `armed()` check is FIRST, so a call site
+        /// pays nothing but its argument evaluation when the event is
+        /// off — the same contract the hand-written sites have.
+        #[inline]
+        pub fn $call($($pn: $pt),*) -> bool {
+            const _: () = assert!(0 $(+ <$pt as PackArg>::SLOTS)* <= TRACE_ARGS);
+            if !$ev.armed() {
+                return false;
+            }
+            let mut slots = [0u64; TRACE_ARGS];
+            let mut at = 0usize;
+            $($pn.pack(&mut slots, &mut at);)*
+            record(&$ev, slots)
+        }
+
+        tracepoints!(@tbl [$($acc)* $ev] $($rest)*);
+    };
+
+    // Base case: every event declared — emit the table.
+    (@tbl [$($acc:ident)+]) => {
+        /// Every event, in declaration (id) order.
+        pub static EVENTS: &[&TraceEvent] = &[$(&$acc),*];
+    };
+
+    // Entry (last on purpose — it matches any token sequence): start
+    // the table walk with an empty accumulator.
+    ($($item:tt)*) => {
+        tracepoints!(@tbl [] $($item)*);
+    };
+}
+
+tracepoints! {
+    /// raw_syscalls:sys_enter — every syscall entry, with the raw
+    /// (native) number and the six register arguments. the reference
+    /// host's events/raw_syscalls/sys_enter, format captured from the
+    /// live file.
+    EVENT_SYS_ENTER / sys_enter_fmt / trace_sys_enter : "raw_syscalls", "sys_enter", 1,
+    print: "\"NR %ld (%lx, %lx, %lx, %lx, %lx, %lx)\", REC->id, REC->args[0], REC->args[1], REC->args[2], REC->args[3], REC->args[4], REC->args[5]",
     fields: "\tfield:long id;\toffset:8;\tsize:8;\tsigned:1;\n\
              \tfield:unsigned long args[6];\toffset:16;\tsize:48;\tsigned:0;\n",
-    enabled: AtomicBool::new(false),
-    fmt_args: fmt_sys_enter,
-};
+    call (id: i64, arg0: u64, arg1: u64, arg2: u64, arg3: u64, arg4: u64, arg5: u64),
+    render |args: &[u64; TRACE_ARGS]| {
+        format!(
+            "NR {} ({:x}, {:x}, {:x}, {:x}, {:x}, {:x})",
+            args[0] as i64, args[1], args[2], args[3], args[4], args[5], args[6]
+        )
+    };
 
-/// raw_syscalls:sys_exit — every syscall return, with the raw number
-/// and the return value. the reference host's events/raw_syscalls/sys_exit.
-pub static EVENT_SYS_EXIT: TraceEvent = TraceEvent {
-    group: "raw_syscalls",
-    name: "sys_exit",
-    id: 2,
-    print_fmt: "\"NR %ld = %ld\", REC->id, REC->ret",
+    /// raw_syscalls:sys_exit — every syscall return, with the raw number
+    /// and the return value. the reference host's
+    /// events/raw_syscalls/sys_exit.
+    EVENT_SYS_EXIT / sys_exit_fmt / trace_sys_exit : "raw_syscalls", "sys_exit", 2,
+    print: "\"NR %ld = %ld\", REC->id, REC->ret",
     fields: "\tfield:long id;\toffset:8;\tsize:8;\tsigned:1;\n\
              \tfield:long ret;\toffset:16;\tsize:8;\tsigned:1;\n",
-    enabled: AtomicBool::new(false),
-    fmt_args: fmt_sys_exit,
-};
+    call (id: i64, ret: i64),
+    render |args: &[u64; TRACE_ARGS]| { format!("NR {} = {}", args[0] as i64, args[1] as i64) };
 
-/// sched:sched_switch — a context switch. the reference host's
-/// events/sched/sched_switch; the print fmt is the live file's blob
-/// verbatim (the __print_flags expression for prev_state).
-pub static EVENT_SCHED_SWITCH: TraceEvent = TraceEvent {
-    group: "sched",
-    name: "sched_switch",
-    id: 3,
-    print_fmt: "\"prev_comm=%s prev_pid=%d prev_prio=%d prev_state=%s%s ==> next_comm=%s next_pid=%d next_prio=%d\", REC->prev_comm, REC->prev_pid, REC->prev_prio, (REC->prev_state & ((((0x00000000 | 0x00000001 | 0x00000002 | 0x00000004 | 0x00000008 | 0x00000010 | 0x00000020 | 0x00000040) + 1) << 1) - 1)) ? __print_flags(REC->prev_state & ((((0x00000000 | 0x00000001 | 0x00000002 | 0x00000004 | 0x00000008 | 0x00000010 | 0x00000020 | 0x00000040) + 1) << 1) - 1), \"|\", { 0x00000001, \"S\" }, { 0x00000002, \"D\" }, { 0x00000004, \"T\" }, { 0x00000008, \"t\" }, { 0x00000010, \"X\" }, { 0x00000020, \"Z\" }, { 0x00000040, \"P\" }, { 0x00000080, \"I\" }) : \"R\", REC->prev_state & (((0x00000000 | 0x00000001 | 0x00000002 | 0x00000004 | 0x00000008 | 0x00000010 | 0x00000020 | 0x00000040) + 1) << 1) ? \"+\" : \"\", REC->next_comm, REC->next_pid, REC->next_prio",
+    /// sched:sched_switch — a context switch. the reference host's
+    /// events/sched/sched_switch; the print fmt is the live file's blob
+    /// verbatim (the __print_flags expression for prev_state).
+    EVENT_SCHED_SWITCH / sched_switch_fmt / trace_sched_switch : "sched", "sched_switch", 3,
+    print: "\"prev_comm=%s prev_pid=%d prev_prio=%d prev_state=%s%s ==> next_comm=%s next_pid=%d next_prio=%d\", REC->prev_comm, REC->prev_pid, REC->prev_prio, (REC->prev_state & ((((0x00000000 | 0x00000001 | 0x00000002 | 0x00000004 | 0x00000008 | 0x00000010 | 0x00000020 | 0x00000040) + 1) << 1) - 1)) ? __print_flags(REC->prev_state & ((((0x00000000 | 0x00000001 | 0x00000002 | 0x00000004 | 0x00000008 | 0x00000010 | 0x00000020 | 0x00000040) + 1) << 1) - 1), \"|\", { 0x00000001, \"S\" }, { 0x00000002, \"D\" }, { 0x00000004, \"T\" }, { 0x00000008, \"t\" }, { 0x00000010, \"X\" }, { 0x00000020, \"Z\" }, { 0x00000040, \"P\" }, { 0x00000080, \"I\" }) : \"R\", REC->prev_state & (((0x00000000 | 0x00000001 | 0x00000002 | 0x00000004 | 0x00000008 | 0x00000010 | 0x00000020 | 0x00000040) + 1) << 1) ? \"+\" : \"\", REC->next_comm, REC->next_pid, REC->next_prio",
     fields: "\tfield:char prev_comm[16];\toffset:8;\tsize:16;\tsigned:0;\n\
              \tfield:pid_t prev_pid;\toffset:24;\tsize:4;\tsigned:1;\n\
              \tfield:int prev_prio;\toffset:28;\tsize:4;\tsigned:1;\n\
@@ -177,139 +330,256 @@ pub static EVENT_SCHED_SWITCH: TraceEvent = TraceEvent {
              \tfield:char next_comm[16];\toffset:40;\tsize:16;\tsigned:0;\n\
              \tfield:pid_t next_pid;\toffset:56;\tsize:4;\tsigned:1;\n\
              \tfield:int next_prio;\toffset:60;\tsize:4;\tsigned:1;\n",
-    enabled: AtomicBool::new(false),
-    fmt_args: fmt_sched_switch,
-};
+    call (prev_comm: &[u8; COMM_LEN], prev_pid: u32, prev_prio: i32, prev_state: u64,
+          next_comm: &[u8; COMM_LEN], next_pid: u32, next_prio: i32),
+    render |args: &[u64; TRACE_ARGS]| {
+        let comm = |bytes: &[u8; COMM_LEN]| -> String {
+            let end = bytes.iter().position(|&b| b == 0).unwrap_or(COMM_LEN);
+            String::from_utf8_lossy(&bytes[..end]).into_owned()
+        };
+        let pc = comm_from_words(args[0], args[1]);
+        let nc = comm_from_words(args[5], args[6]);
+        format!(
+            "prev_comm={} prev_pid={} prev_prio={} prev_state={} ==> next_comm={} next_pid={} next_prio={}",
+            comm(&pc),
+            args[2] as u32,
+            args[3] as i32,
+            task_state_str(args[4]),
+            comm(&nc),
+            args[7] as u32,
+            args[8] as i32,
+        )
+    };
 
-/// Every event, in id order.
-pub static EVENTS: [&TraceEvent; 10] = [
-    &EVENT_SYS_ENTER,
-    &EVENT_SYS_EXIT,
-    &EVENT_SCHED_SWITCH,
-    &EVENT_SCHED_WAKING,
-    &EVENT_SCHED_WAKEUP,
-    &EVENT_SCHED_WAKEUP_NEW,
-    &EVENT_SCHED_PROCESS_FORK,
-    &EVENT_SCHED_PROCESS_EXIT,
-    &EVENT_PAGE_FAULT_USER,
-    &EVENT_PAGE_FAULT_KERNEL,
-];
-
-/// sched:sched_waking — a task is about to be woken (emitted before the
-/// enqueue attempt). The reference host's events/sched/sched_waking;
-/// the fields and print fmt are the live file's, identical to
-/// sched_wakeup's.
-pub static EVENT_SCHED_WAKING: TraceEvent = TraceEvent {
-    group: "sched",
-    name: "sched_waking",
-    id: 4,
-    print_fmt: "\"comm=%s pid=%d prio=%d target_cpu=%03d\", REC->comm, REC->pid, REC->prio, REC->target_cpu",
+    /// sched:sched_waking — a task is about to be woken (emitted before the
+    /// enqueue attempt). The reference host's events/sched/sched_waking;
+    /// the fields and print fmt are the live file's, identical to
+    /// sched_wakeup's.
+    EVENT_SCHED_WAKING / sched_waking_fmt / trace_sched_waking : "sched", "sched_waking", 4,
+    print: "\"comm=%s pid=%d prio=%d target_cpu=%03d\", REC->comm, REC->pid, REC->prio, REC->target_cpu",
     fields: "\tfield:char comm[16];\toffset:8;\tsize:16;\tsigned:0;\n\
              \tfield:pid_t pid;\toffset:24;\tsize:4;\tsigned:1;\n\
              \tfield:int prio;\toffset:28;\tsize:4;\tsigned:1;\n\
              \tfield:int target_cpu;\toffset:32;\tsize:4;\tsigned:1;\n",
-    enabled: AtomicBool::new(false),
-    fmt_args: fmt_sched_wakeup,
-};
+    call (comm: &[u8; COMM_LEN], pid: u32, prio: i32, target_cpu: i32),
+    render |args: &[u64; TRACE_ARGS]| { fmt_sched_wakeup(args) };
 
-/// sched:sched_wakeup — a task left the wait queue and was enqueued
-/// (recorded after the enqueue succeeded). The reference host's
-/// events/sched/sched_wakeup.
-pub static EVENT_SCHED_WAKEUP: TraceEvent = TraceEvent {
-    group: "sched",
-    name: "sched_wakeup",
-    id: 5,
-    print_fmt: "\"comm=%s pid=%d prio=%d target_cpu=%03d\", REC->comm, REC->pid, REC->prio, REC->target_cpu",
+    /// sched:sched_wakeup — a task left the wait queue and was enqueued
+    /// (recorded after the enqueue succeeded). The reference host's
+    /// events/sched/sched_wakeup.
+    EVENT_SCHED_WAKEUP / sched_wakeup_fmt / trace_sched_wakeup : "sched", "sched_wakeup", 5,
+    print: "\"comm=%s pid=%d prio=%d target_cpu=%03d\", REC->comm, REC->pid, REC->prio, REC->target_cpu",
     fields: "\tfield:char comm[16];\toffset:8;\tsize:16;\tsigned:0;\n\
              \tfield:pid_t pid;\toffset:24;\tsize:4;\tsigned:1;\n\
              \tfield:int prio;\toffset:28;\tsize:4;\tsigned:1;\n\
              \tfield:int target_cpu;\toffset:32;\tsize:4;\tsigned:1;\n",
-    enabled: AtomicBool::new(false),
-    fmt_args: fmt_sched_wakeup,
-};
+    call (comm: &[u8; COMM_LEN], pid: u32, prio: i32, target_cpu: i32),
+    render |args: &[u64; TRACE_ARGS]| { fmt_sched_wakeup(args) };
 
-/// sched:sched_wakeup_new — the FIRST enqueue of a freshly built task
-/// (the fork path's enqueue). The reference host's
-/// events/sched/sched_wakeup_new; fields identical to sched_wakeup's.
-pub static EVENT_SCHED_WAKEUP_NEW: TraceEvent = TraceEvent {
-    group: "sched",
-    name: "sched_wakeup_new",
-    id: 6,
-    print_fmt: "\"comm=%s pid=%d prio=%d target_cpu=%03d\", REC->comm, REC->pid, REC->prio, REC->target_cpu",
+    /// sched:sched_wakeup_new — the FIRST enqueue of a freshly built task
+    /// (the fork path's enqueue). The reference host's
+    /// events/sched/sched_wakeup_new; fields identical to sched_wakeup's.
+    EVENT_SCHED_WAKEUP_NEW / sched_wakeup_new_fmt / trace_sched_wakeup_new : "sched", "sched_wakeup_new", 6,
+    print: "\"comm=%s pid=%d prio=%d target_cpu=%03d\", REC->comm, REC->pid, REC->prio, REC->target_cpu",
     fields: "\tfield:char comm[16];\toffset:8;\tsize:16;\tsigned:0;\n\
              \tfield:pid_t pid;\toffset:24;\tsize:4;\tsigned:1;\n\
              \tfield:int prio;\toffset:28;\tsize:4;\tsigned:1;\n\
              \tfield:int target_cpu;\toffset:32;\tsize:4;\tsigned:1;\n",
-    enabled: AtomicBool::new(false),
-    fmt_args: fmt_sched_wakeup,
-};
+    call (comm: &[u8; COMM_LEN], pid: u32, prio: i32, target_cpu: i32),
+    render |args: &[u64; TRACE_ARGS]| { fmt_sched_wakeup(args) };
 
-/// sched:sched_process_fork — a child task was built. The reference
-/// host's events/sched/sched_process_fork; the __data_loc char[]
-/// fields are the live file's (a dynamic string carries its blob
-/// offset in the field word; Rux records the comms inline instead and
-/// renders them the same way).
-pub static EVENT_SCHED_PROCESS_FORK: TraceEvent = TraceEvent {
-    group: "sched",
-    name: "sched_process_fork",
-    id: 7,
-    print_fmt: "\"comm=%s pid=%d child_comm=%s child_pid=%d\", __get_str(parent_comm), REC->parent_pid, __get_str(child_comm), REC->child_pid",
+    /// sched:sched_process_fork — a child task was built. The reference
+    /// host's events/sched/sched_process_fork; the __data_loc char[]
+    /// fields are the live file's (a dynamic string carries its blob
+    /// offset in the field word; Rux records the comms inline instead and
+    /// renders them the same way).
+    EVENT_SCHED_PROCESS_FORK / sched_process_fork_fmt / trace_sched_process_fork : "sched", "sched_process_fork", 7,
+    print: "\"comm=%s pid=%d child_comm=%s child_pid=%d\", __get_str(parent_comm), REC->parent_pid, __get_str(child_comm), REC->child_pid",
     fields: "\tfield:__data_loc char[] parent_comm;\toffset:8;\tsize:4;\tsigned:0;\n\
              \tfield:pid_t parent_pid;\toffset:12;\tsize:4;\tsigned:1;\n\
              \tfield:__data_loc char[] child_comm;\toffset:16;\tsize:4;\tsigned:0;\n\
              \tfield:pid_t child_pid;\toffset:20;\tsize:4;\tsigned:1;\n",
-    enabled: AtomicBool::new(false),
-    fmt_args: fmt_sched_process_fork,
-};
+    call (parent_comm: &[u8; COMM_LEN], parent_pid: u32, child_comm: &[u8; COMM_LEN], child_pid: u32),
+    render |args: &[u64; TRACE_ARGS]| { fmt_sched_process_fork(args) };
 
-/// sched:sched_process_exit — a task entered do_exit. The reference
-/// host's events/sched/sched_process_exit.
-pub static EVENT_SCHED_PROCESS_EXIT: TraceEvent = TraceEvent {
-    group: "sched",
-    name: "sched_process_exit",
-    id: 8,
-    print_fmt: "\"comm=%s pid=%d prio=%d group_dead=%s\", REC->comm, REC->pid, REC->prio, REC->group_dead ? \"true\" : \"false\"",
+    /// sched:sched_process_exit — a task entered do_exit. The reference
+    /// host's events/sched/sched_process_exit.
+    EVENT_SCHED_PROCESS_EXIT / sched_process_exit_fmt / trace_sched_process_exit : "sched", "sched_process_exit", 8,
+    print: "\"comm=%s pid=%d prio=%d group_dead=%s\", REC->comm, REC->pid, REC->prio, REC->group_dead ? \"true\" : \"false\"",
     fields: "\tfield:char comm[16];\toffset:8;\tsize:16;\tsigned:0;\n\
              \tfield:pid_t pid;\toffset:24;\tsize:4;\tsigned:1;\n\
              \tfield:int prio;\toffset:28;\tsize:4;\tsigned:1;\n\
              \tfield:bool group_dead;\toffset:32;\tsize:1;\tsigned:0;\n",
-    enabled: AtomicBool::new(false),
-    fmt_args: fmt_sched_process_exit,
-};
+    call (comm: &[u8; COMM_LEN], pid: u32, prio: i32, group_dead: bool),
+    render |args: &[u64; TRACE_ARGS]| { fmt_sched_process_exit(args) };
 
-/// exceptions:page_fault_user — a page fault taken from user mode. The
-/// reference host does not carry the exceptions group (it is the
-/// architecture fault-trace family); the field set and print fmt are
-/// the generic definition's (address/ip/error_code, %ps symbolic
-/// rendering). On riscv64 the error_code carries the access-type bits
-/// (read=0x1 write=0x2 exec=0x4) rather than the x86 error-word, and
-/// ip is the faulting epc.
-pub static EVENT_PAGE_FAULT_USER: TraceEvent = TraceEvent {
-    group: "exceptions",
-    name: "page_fault_user",
-    id: 9,
-    print_fmt: "\"address=%ps ip=%ps error_code=0x%lx\", (void *)REC->address, (void *)REC->ip, REC->error_code",
+    /// exceptions:page_fault_user — a page fault taken from user mode. The
+    /// reference host does not carry the exceptions group (it is the
+    /// architecture fault-trace family); the field set and print fmt are
+    /// the generic definition's (address/ip/error_code, %ps symbolic
+    /// rendering). On riscv64 the error_code carries the access-type bits
+    /// (read=0x1 write=0x2 exec=0x4) rather than the x86 error-word, and
+    /// ip is the faulting epc.
+    EVENT_PAGE_FAULT_USER / page_fault_user_fmt / trace_page_fault_user : "exceptions", "page_fault_user", 9,
+    print: "\"address=%ps ip=%ps error_code=0x%lx\", (void *)REC->address, (void *)REC->ip, REC->error_code",
     fields: "\tfield:unsigned long address;\toffset:8;\tsize:8;\tsigned:0;\n\
              \tfield:unsigned long ip;\toffset:16;\tsize:8;\tsigned:0;\n\
              \tfield:unsigned long error_code;\toffset:24;\tsize:8;\tsigned:0;\n",
-    enabled: AtomicBool::new(false),
-    fmt_args: fmt_page_fault,
-};
+    call (address: u64, ip: u64, error_code: u64),
+    render |args: &[u64; TRACE_ARGS]| { fmt_page_fault(args) };
 
-/// exceptions:page_fault_kernel — a page fault taken from kernel mode
-/// (a vmalloc-style fault or a kernel bug). Same shape as
-/// page_fault_user's.
-pub static EVENT_PAGE_FAULT_KERNEL: TraceEvent = TraceEvent {
-    group: "exceptions",
-    name: "page_fault_kernel",
-    id: 10,
-    print_fmt: "\"address=%ps ip=%ps error_code=0x%lx\", (void *)REC->address, (void *)REC->ip, REC->error_code",
+    /// exceptions:page_fault_kernel — a page fault taken from kernel mode
+    /// (a vmalloc-style fault or a kernel bug). Same shape as
+    /// page_fault_user's.
+    EVENT_PAGE_FAULT_KERNEL / page_fault_kernel_fmt / trace_page_fault_kernel : "exceptions", "page_fault_kernel", 10,
+    print: "\"address=%ps ip=%ps error_code=0x%lx\", (void *)REC->address, (void *)REC->ip, REC->error_code",
     fields: "\tfield:unsigned long address;\toffset:8;\tsize:8;\tsigned:0;\n\
              \tfield:unsigned long ip;\toffset:16;\tsize:8;\tsigned:0;\n\
              \tfield:unsigned long error_code;\toffset:24;\tsize:8;\tsigned:0;\n",
-    enabled: AtomicBool::new(false),
-    fmt_args: fmt_page_fault,
-};
+    call (address: u64, ip: u64, error_code: u64),
+    render |args: &[u64; TRACE_ARGS]| { fmt_page_fault(args) };
+
+    /// block:block_rq_issue — a block request was handed to the device.
+    /// The reference host's events/block/block_rq_issue; the field set
+    /// and print fmt are the live file's verbatim. Rux merges no
+    /// requests: every buffer-head transfer IS one request. `cmd` is the
+    /// SCSI command bytes the reference attaches — virtio-blk carries
+    /// none, so the dynamic string is empty and renders as `()`. Rux has
+    /// no ioprio; the field reports 0, which the reference's
+    /// __print_symbolic renders as the `none` class. `rwbs` carries the
+    /// transfer direction only (R read / W write / F flush) — the
+    /// reference's sync/meta bits have no counterpart here.
+    EVENT_BLOCK_RQ_ISSUE / block_rq_issue_fmt / trace_block_rq_issue : "block", "block_rq_issue", 12,
+    print: "\"%d,%d %s %u (%s) %llu + %u %s,%u,%u [%s]\", ((unsigned int) ((REC->dev) >> 20)), ((unsigned int) ((REC->dev) & ((1U << 20) - 1))), REC->rwbs, REC->bytes, __get_str(cmd), (unsigned long long)REC->sector, REC->nr_sector, __print_symbolic((((REC->ioprio) >> 13) & (8 - 1)), { IOPRIO_CLASS_NONE, \"none\" }, { IOPRIO_CLASS_RT, \"rt\" }, { IOPRIO_CLASS_BE, \"be\" }, { IOPRIO_CLASS_IDLE, \"idle\" }, { IOPRIO_CLASS_INVALID, \"invalid\"}), (((REC->ioprio) >> 3) & ((1 << 10) - 1)), ((REC->ioprio) & ((1 << 3) - 1)), REC->comm",
+    fields: "\tfield:dev_t dev;\toffset:8;\tsize:4;\tsigned:0;\n\
+             \tfield:sector_t sector;\toffset:16;\tsize:8;\tsigned:0;\n\
+             \tfield:unsigned int nr_sector;\toffset:24;\tsize:4;\tsigned:0;\n\
+             \tfield:unsigned int bytes;\toffset:28;\tsize:4;\tsigned:0;\n\
+             \tfield:unsigned short ioprio;\toffset:32;\tsize:2;\tsigned:0;\n\
+             \tfield:char rwbs[10];\toffset:34;\tsize:10;\tsigned:0;\n\
+             \tfield:char comm[16];\toffset:44;\tsize:16;\tsigned:0;\n\
+             \tfield:__data_loc char[] cmd;\toffset:60;\tsize:4;\tsigned:0;\n",
+    call (dev: u32, sector: u64, nr_sector: u32, bytes: u32, ioprio: u16,
+          rwbs: &str, comm: &[u8; COMM_LEN]),
+    render |args: &[u64; TRACE_ARGS]| {
+        let comm = comm_from_words(args[6], args[7]);
+        let cend = comm.iter().position(|&b| b == 0).unwrap_or(COMM_LEN);
+        format!(
+            "{},{} {} {} () {} + {} {},{},{} [{}]",
+            (args[0] >> 20) as u32,
+            (args[0] & 0xfffff) as u32,
+            ascii_from_word(args[5]),
+            args[3] as u32,
+            args[1],
+            args[2] as u32,
+            ioprio_class(args[4] as u16),
+            (args[4] >> 3) & 0x3ff,
+            args[4] & 7,
+            String::from_utf8_lossy(&comm[..cend]),
+        )
+    };
+
+    /// block:block_rq_complete — a block request finished at the device.
+    /// The reference host's events/block/block_rq_complete; field set and
+    /// print fmt verbatim from the live file. The complete fires from
+    /// the completion path (softirq for the async reads), so the
+    /// TASK-PID column shows the delivering context, not the issuer —
+    /// the reference behaves the same way.
+    EVENT_BLOCK_RQ_COMPLETE / block_rq_complete_fmt / trace_block_rq_complete : "block", "block_rq_complete", 13,
+    print: "\"%d,%d %s (%s) %llu + %u %s,%u,%u [%d]\", ((unsigned int) ((REC->dev) >> 20)), ((unsigned int) ((REC->dev) & ((1U << 20) - 1))), REC->rwbs, __get_str(cmd), (unsigned long long)REC->sector, REC->nr_sector, __print_symbolic((((REC->ioprio) >> 13) & (8 - 1)), { IOPRIO_CLASS_NONE, \"none\" }, { IOPRIO_CLASS_RT, \"rt\" }, { IOPRIO_CLASS_BE, \"be\" }, { IOPRIO_CLASS_IDLE, \"idle\" }, { IOPRIO_CLASS_INVALID, \"invalid\"}), (((REC->ioprio) >> 3) & ((1 << 10) - 1)), ((REC->ioprio) & ((1 << 3) - 1)), REC->error",
+    fields: "\tfield:dev_t dev;\toffset:8;\tsize:4;\tsigned:0;\n\
+             \tfield:sector_t sector;\toffset:16;\tsize:8;\tsigned:0;\n\
+             \tfield:unsigned int nr_sector;\toffset:24;\tsize:4;\tsigned:0;\n\
+             \tfield:int error;\toffset:28;\tsize:4;\tsigned:1;\n\
+             \tfield:unsigned short ioprio;\toffset:32;\tsize:2;\tsigned:0;\n\
+             \tfield:char rwbs[10];\toffset:34;\tsize:10;\tsigned:0;\n\
+             \tfield:__data_loc char[] cmd;\toffset:44;\tsize:4;\tsigned:0;\n",
+    call (dev: u32, sector: u64, nr_sector: u32, error: i32, ioprio: u16, rwbs: &str),
+    render |args: &[u64; TRACE_ARGS]| {
+        format!(
+            "{},{} {} () {} + {} {},{},{} {}",
+            (args[0] >> 20) as u32,
+            (args[0] & 0xfffff) as u32,
+            ascii_from_word(args[5]),
+            args[1],
+            args[2] as u32,
+            ioprio_class(args[4] as u16),
+            (args[4] >> 3) & 0x3ff,
+            args[4] & 7,
+            args[3] as i32,
+        )
+    };
+
+    /// binder:binder_transaction — a transaction was queued to its
+    /// target. The reference kernel's drivers/android binder trace
+    /// definitions (this host's tracefs has no binder group — the
+    /// binder family is not compiled in here — so the field set and
+    /// print fmt are the reference definitions' verbatim). `to_thread`
+    /// is 0 at this point (the reference records the same: the
+    /// receiving thread is only chosen at delivery).
+    EVENT_BINDER_TRANSACTION / binder_transaction_fmt / trace_binder_transaction : "binder", "binder_transaction", 14,
+    print: "\"transaction=%d dest_node=%d dest_proc=%d dest_thread=%d reply=%d flags=0x%x code=0x%x\", __entry->debug_id, __entry->target_node, __entry->to_proc, __entry->to_thread, __entry->reply, __entry->flags, __entry->code",
+    fields: "\tfield:int debug_id;\toffset:8;\tsize:4;\tsigned:1;\n\
+             \tfield:int target_node;\toffset:12;\tsize:4;\tsigned:1;\n\
+             \tfield:int to_proc;\toffset:16;\tsize:4;\tsigned:1;\n\
+             \tfield:int to_thread;\toffset:20;\tsize:4;\tsigned:1;\n\
+             \tfield:int reply;\toffset:24;\tsize:4;\tsigned:1;\n\
+             \tfield:unsigned int code;\toffset:28;\tsize:4;\tsigned:0;\n\
+             \tfield:unsigned int flags;\toffset:32;\tsize:4;\tsigned:0;\n",
+    call (debug_id: u64, target_node: u64, to_proc: u32, to_thread: u32,
+          reply: bool, code: u32, flags: u32),
+    render |args: &[u64; TRACE_ARGS]| {
+        format!(
+            "transaction={} dest_node={} dest_proc={} dest_thread={} reply={} flags={:#x} code={:#x}",
+            args[0], args[1], args[2], args[3], args[4], args[6], args[5]
+        )
+    };
+
+    /// binder:binder_transaction_received — a transaction was handed to
+    /// its receiving thread (the BR_TRANSACTION/BR_REPLY read-out). Same
+    /// provenance as binder_transaction.
+    EVENT_BINDER_TRANSACTION_RECEIVED / binder_transaction_received_fmt / trace_binder_transaction_received : "binder", "binder_transaction_received", 15,
+    print: "\"transaction=%d\", __entry->debug_id",
+    fields: "\tfield:int debug_id;\toffset:8;\tsize:4;\tsigned:1;\n",
+    call (debug_id: u64),
+    render |args: &[u64; TRACE_ARGS]| { format!("transaction={}", args[0]) };
+
+    /// binder:binder_transaction_alloc_buf — the target's mmap buffer was
+    /// carved for a transaction. The reference's binder_buffer class
+    /// (shared by the alloc/release family): debug id, data size,
+    /// offsets size, extra (scatter-gather) size.
+    EVENT_BINDER_TRANSACTION_ALLOC_BUF / binder_transaction_alloc_buf_fmt / trace_binder_transaction_alloc_buf : "binder", "binder_transaction_alloc_buf", 16,
+    print: "\"transaction=%d data_size=%zd offsets_size=%zd extra_buffers_size=%zd\", __entry->debug_id, __entry->data_size, __entry->offsets_size, __entry->extra_buffers_size",
+    fields: "\tfield:int debug_id;\toffset:8;\tsize:4;\tsigned:1;\n\
+             \tfield:size_t data_size;\toffset:16;\tsize:8;\tsigned:0;\n\
+             \tfield:size_t offsets_size;\toffset:24;\tsize:8;\tsigned:0;\n\
+             \tfield:size_t extra_buffers_size;\toffset:32;\tsize:8;\tsigned:0;\n",
+    call (debug_id: u64, data_size: u64, offsets_size: u64, extra_buffers_size: u64),
+    render |args: &[u64; TRACE_ARGS]| {
+        format!(
+            "transaction={} data_size={} offsets_size={} extra_buffers_size={}",
+            args[0], args[1], args[2], args[3]
+        )
+    };
+
+    /// binder:binder_transaction_buffer_release — a delivered buffer was
+    /// released (the receiver's BC_FREE_BUFFER, or the teardown paths
+    /// that free through the same chokepoint). Same field set as
+    /// alloc_buf's.
+    EVENT_BINDER_TRANSACTION_BUFFER_RELEASE / binder_transaction_buffer_release_fmt / trace_binder_transaction_buffer_release : "binder", "binder_transaction_buffer_release", 17,
+    print: "\"transaction=%d data_size=%zd offsets_size=%zd extra_buffers_size=%zd\", __entry->debug_id, __entry->data_size, __entry->offsets_size, __entry->extra_buffers_size",
+    fields: "\tfield:int debug_id;\toffset:8;\tsize:4;\tsigned:1;\n\
+             \tfield:size_t data_size;\toffset:16;\tsize:8;\tsigned:0;\n\
+             \tfield:size_t offsets_size;\toffset:24;\tsize:8;\tsigned:0;\n\
+             \tfield:size_t extra_buffers_size;\toffset:32;\tsize:8;\tsigned:0;\n",
+    call (debug_id: u64, data_size: u64, offsets_size: u64, extra_buffers_size: u64),
+    render |args: &[u64; TRACE_ARGS]| {
+        format!(
+            "transaction={} data_size={} offsets_size={} extra_buffers_size={}",
+            args[0], args[1], args[2], args[3]
+        )
+    };
+}
 
 /// The trace_marker pseudo-event. NOT in EVENTS on purpose: a marker
 /// is not an enable-gated tracepoint (the reference records marker
@@ -317,10 +587,11 @@ pub static EVENT_PAGE_FAULT_KERNEL: TraceEvent = TraceEvent {
 /// not appear in available_events or the events tree. The reference
 /// renders the line's FUNCTION column with the writing function's
 /// symbol (tracing_mark_write); Rux names the event exactly that.
+/// The id is deliberately out of the table's range.
 pub static EVENT_TRACE_MARKER: TraceEvent = TraceEvent {
     group: "ftrace",
     name: "tracing_mark_write",
-    id: 11,
+    id: 0xfff,
     print_fmt: "\"%s\", REC->buf",
     fields: "\tfield:char buf[];\toffset:8;\tsize:0;\tsigned:0;\n",
     enabled: AtomicBool::new(true),
@@ -859,34 +1130,26 @@ fn task_state_str(bits: u64) -> String {
     }
 }
 
-fn fmt_sys_enter(args: &[u64; TRACE_ARGS]) -> String {
-    format!(
-        "NR {} ({:x}, {:x}, {:x}, {:x}, {:x}, {:x})",
-        args[0] as i64, args[1], args[2], args[3], args[4], args[5], args[6]
-    )
+/// The one-slot ASCII tag packed by `PackArg for &str` back to text (the
+/// rwbs column of the block events).
+fn ascii_from_word(word: u64) -> String {
+    let bytes = word.to_le_bytes();
+    let end = bytes.iter().position(|&b| b == 0).unwrap_or(bytes.len());
+    String::from_utf8_lossy(&bytes[..end]).into_owned()
 }
 
-fn fmt_sys_exit(args: &[u64; TRACE_ARGS]) -> String {
-    format!("NR {} = {}", args[0] as i64, args[1] as i64)
-}
-
-fn fmt_sched_switch(args: &[u64; TRACE_ARGS]) -> String {
-    let comm = |bytes: &[u8; COMM_LEN]| -> String {
-        let end = bytes.iter().position(|&b| b == 0).unwrap_or(COMM_LEN);
-        String::from_utf8_lossy(&bytes[..end]).into_owned()
-    };
-    let prev_comm = comm_from_words(args[0], args[1]);
-    let next_comm = comm_from_words(args[5], args[6]);
-    format!(
-        "prev_comm={} prev_pid={} prev_prio={} prev_state={} ==> next_comm={} next_pid={} next_prio={}",
-        comm(&prev_comm),
-        args[2] as u32,
-        args[3] as i32,
-        task_state_str(args[4]),
-        comm(&next_comm),
-        args[7] as u32,
-        args[8] as i32,
-    )
+/// The ioprio class name — the reference's __print_symbolic table over
+/// the class bits (IOPRIO_CLASS_NONE..INVALID); a value outside the
+/// table prints as hex, exactly as __print_symbolic does.
+fn ioprio_class(ioprio: u16) -> String {
+    match (ioprio >> 13) & 7 {
+        0 => "none".to_string(),
+        1 => "rt".to_string(),
+        2 => "be".to_string(),
+        3 => "idle".to_string(),
+        4 => "invalid".to_string(),
+        v => format!("{:#x}", v),
+    }
 }
 
 /// sched_waking / sched_wakeup / sched_wakeup_new share one field set:

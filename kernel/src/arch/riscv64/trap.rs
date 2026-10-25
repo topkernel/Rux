@@ -254,6 +254,29 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize) {
                 // fault then classifies as in_interrupt() and dies through
                 // the no_context → KERNPANIC path (r72-fire6 family).
                 let tp_entry = crate::arch::cpu::get_thread_id() as usize;
+                // Session-3 discriminator (fleet ltp-a r18-r20): capture
+                // cpu_state's current at ENTRY too, so the print can tell
+                // a tp/cpu_state divergence that ALREADY existed before the
+                // bracket (stale tp — the switch happened in an earlier
+                // window) from one that formed INSIDE this bracket (a
+                // schedule ran between irq_enter and irq_exit — the
+                // count-migration producer class). epc_ctx names where the
+                // tick landed on the entry task.
+                let cs_entry = crate::sched::sched::cpu_state(cpu_id).current
+                    as usize;
+                let epc_ctx = regs_ref.epc;
+                // Session-6 discriminator: snapshot the interrupted
+                // task's own count BEFORE the tick books its
+                // HARDIRQ_OFFSET. pctick=0x1 vs >=0x10001 at the LEAK
+                // print splits the observed 0x10001 shape into
+                // leaked-PREEMPT-bit vs stranded-hardirq-bit producers.
+                if cpu_id < crate::config::MAX_CPUS {
+                    if let Some(t) = crate::sched::current() {
+                        crate::interrupt::preempt::TICK_ENTRY_PC[cpu_id]
+                            .store(t.preempt_count() as u32,
+                                   core::sync::atomic::Ordering::Relaxed);
+                    }
+                }
                 crate::interrupt::preempt::irq_enter();
                 handle_timer_interrupt(regs_ref, cpu_id);
                 crate::interrupt::preempt::irq_exit();
@@ -264,13 +287,24 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize) {
                     let (pa, pb) = unsafe {
                         ((*a).preempt_count(), (*b).preempt_count())
                     };
+                    let cs_pid = if cs_entry != 0 {
+                        unsafe { (*(cs_entry as *mut crate::process::task::Task)).pid() }
+                    } else {
+                        0
+                    };
+                    // "pre" = divergence predates the bracket (stale tp at
+                    // entry); "in" = formed inside it. Direct console —
+                    // this can print from deep inside scheduler paths.
                     use core::fmt::Write;
                     let mut w = crate::dfx::backtrace::ConsoleWriter::new();
                     let _ = write!(w,
-                        "IRQ-BRACKET-LEAK timer cpu={} entry_tp={:#x} (pid={} preempt={:#x}) exit_tp={:#x} (pid={} preempt={:#x})\n",
+                        "IRQ-BRACKET-LEAK timer cpu={} entry_tp={:#x} (pid={} preempt={:#x}) exit_tp={:#x} (pid={} preempt={:#x}) cs_entry_pid={} when={} epc_ctx={:#x}\n",
                         cpu_id, tp_entry,
                         unsafe { (*a).pid() }, pa,
-                        tp_exit, unsafe { (*b).pid() }, pb);
+                        tp_exit, unsafe { (*b).pid() }, pb,
+                        cs_pid,
+                        if cs_entry != tp_entry { "pre" } else { "in" },
+                        epc_ctx);
                 }
             }
 
@@ -646,11 +680,70 @@ fn handle_illegal_instruction(regs: &mut PtRegs) {
                 instr16 as u32
             };
             let opcode = instr32 & 0x7F;
+            // FP-state CSR accesses also require FS != Off: csrrw/csrrs/
+            // csrrc to fflags(0x001)/frm(0x002)/fcsr(0x003) — the frrm/
+            // frflags/fsrm... assembler forms — trap illegal exactly like
+            // compute FP when FS=Off. compiler-rt's __multf3/__udivti3
+            // (i128 emulation, so any shell/libc integer arithmetic that
+            // widens) reads the rounding mode with `frrm` before touching
+            // the FP registers, so this class is reachable from binaries
+            // that never execute an explicit FP instruction (repro: mrsh
+            // SIGILL at a deterministic __multf3+frrm under the pa49
+            // trace-capture boot).
+            let is_fp_csr = opcode == 0x73 && {
+                let csr = instr32 >> 20;
+                csr == 0x001 || csr == 0x002 || csr == 0x003
+            };
             opcode == 0x07 || opcode == 0x27 ||   // FLW/FLD, FSW/FSD
             opcode == 0x05 || opcode == 0x09 ||   // FMADD, FMSUB
             opcode == 0x0D || opcode == 0x0E ||   // FNMSUB, FNMADD
-            opcode == 0x53                         // FP ops (FADD, FSUB, FMUL, FDIV, etc.)
+            opcode == 0x53 ||                     // FP ops (FADD, FSUB, FMUL, FDIV, etc.)
+            is_fp_csr                             // fflags/frm/fcsr via SYSTEM opcode
         };
+
+        // V-extension first use: while sstatus.VS = Off, EVERY vector
+        // instruction traps illegal-instruction (any privilege mode).
+        // Same lazy-enable as the FP path above: enable VS, zero the
+        // live vector state (initial-state semantics), retry. Without
+        // this, toolchain-auto-vectorized static binaries SIGILL on
+        // V-capable harts even though the hardware can run them
+        // (reference-kernel semantics: RVV code executes when the ISA
+        // advertises V; see arch/riscv64/vext.rs).
+        const SR_VS_FIELD: u64 = 0x3 << 9;
+        const SR_VS_INITIAL_VAL: u64 = 0x1 << 9;
+        if (regs.status & SR_VS_FIELD) == 0
+            && super::vext::hart_has_v()
+            && !is_compressed
+            && instr_size == 4
+        {
+            // Fetch the full word (only the first halfword was read
+            // above); the FP branch below re-fetches it harmlessly.
+            let _ = unsafe {
+                super::uaccess::copy_from_user(
+                    insn_buf.as_mut_ptr(),
+                    epc as *const u8,
+                    4,
+                )
+            };
+            let instr32: u32 = u32::from_ne_bytes(insn_buf);
+            if super::vext::is_vector_instr32(instr32) {
+                let mut ok = false;
+                if let Some(task) = crate::sched::current() {
+                    // SAFETY: task is the current task; the trap path
+                    // holds it on this hart with IRQs disabled.
+                    unsafe {
+                        ok = (*task).thread_mut().vstate_first_use();
+                    }
+                }
+                if ok {
+                    // Enable V in the SAVED status too, so sret does
+                    // not undo it; retry the instruction.
+                    regs.status = (regs.status & !SR_VS_FIELD)
+                        | SR_VS_INITIAL_VAL;
+                    return;
+                }
+            }
+        }
 
         if is_fp {
             // First FP use: enable the FPU AND zero the FP registers/fcsr.
@@ -1055,6 +1148,85 @@ fn handle_page_fault(regs: &mut PtRegs, access_type: u32) {    use crate::arch::
                 crate::sched::get_current_pid(),
                 if regs.kernel_mode() { "kernel" } else { "user" });
             if regs.user_mode() {
+                // User-fault VMA forensics: name the mappings the fault
+                // address and epc fall in. The GNOME bring-up had
+                // recurring shell deaths at a fixed address deep inside
+                // the bottom-up mapping region (0x300785a2xx) that the
+                // bare epc could not name; this pins the crashing
+                // library/executable directly. Best-effort — resolution
+                // failures still print the range and perms.
+                if let Some(task) = crate::sched::current() {
+                    // SAFETY: current is the faulting task itself;
+                    // address_space_arc clones the Arc out of it.
+                    if let Some(mm) = unsafe { (*task).address_space_arc() } {
+                        for a in [fault_addr, regs.epc] {
+                            match mm.find_vma(
+                                crate::mm::VirtAddr::new(a as usize)) {
+                                None => crate::pr_err!(
+                                    "  segv vma[{:#x}]: unmapped", a),
+                                Some(v) => {
+                                    let f = v.flags();
+                                    let perms: alloc::string::String = [
+                                        (f.is_readable(), 'r'),
+                                        (f.is_writable(), 'w'),
+                                        (f.is_executable(), 'x'),
+                                        (f.is_shared(), 's'),
+                                    ]
+                                    .iter()
+                                    .map(|&(on, c)| if on { c } else { '-' })
+                                    .collect();
+                                    let name = if f.contains(
+                                        crate::mm::vma::VmaFlags::GROWSDOWN)
+                                    {
+                                        alloc::string::String::from("[stack]")
+                                    } else if f.contains(
+                                        crate::mm::vma::VmaFlags::EXECUTABLE)
+                                    {
+                                        alloc::string::String::from("[exe]")
+                                    } else if v.vma_type()
+                                        == crate::mm::vma::VmaType::FileBacked
+                                    {
+                                        let mut path =
+                                            alloc::string::String::new();
+                                        if let Some(file) = mm.get_vma_file(
+                                            v.start().as_usize())
+                                        {
+                                            // SAFETY: read-only dentry access.
+                                            let d = unsafe { &*file.dentry.get() };
+                                            if let Some(d) = d.as_ref() {
+                                                path = crate::fs::vfs::dentry_user_path(d);
+                                            }
+                                        }
+                                        if path.is_empty() && v.file_fd() >= 0 {
+                                            if let Some(ft) = task.try_fdtable() {
+                                                // SAFETY: read-only access on
+                                                // the fdtable file.
+                                                let file = unsafe {
+                                                    ft.get_file(v.file_fd() as usize)
+                                                };
+                                                if let Some(file) = file {
+                                                    // SAFETY: read-only dentry access.
+                                                    let d = unsafe { &*file.dentry.get() };
+                                                    if let Some(d) = d.as_ref() {
+                                                        path = crate::fs::vfs::dentry_user_path(d);
+                                                    }
+                                                }
+                                            }
+                                        }
+                                        path
+                                    } else {
+                                        alloc::string::String::from("anon")
+                                    };
+                                    crate::pr_err!(
+                                        "  segv vma[{:#x}]: {:x}-{:x} {} off={:#x} {}",
+                                        a, v.start().as_usize(),
+                                        v.end().as_usize(), perms,
+                                        v.offset(), name);
+                                }
+                            }
+                        }
+                    }
+                }
                 // Linux semantics: route user-mode faults through normal
                 // signal delivery (force_sig_fault) — an installed
                 // SIGSEGV handler (debuggers, crash catchers, LTP mmap05)

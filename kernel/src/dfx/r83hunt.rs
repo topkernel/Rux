@@ -440,7 +440,14 @@ pub fn sched_tick_audit() {
         }
     }
     // (3) Heap fingerprint scan every 64 jiffies: 2 MiB per pass.
+    // Opt-in (dfx=r83scan): the sweep read_volatile-walks the heap from
+    // timer context and two verification boots faulted inside it (one
+    // past the mapped window, one on a corrupted va_pa_offset read) —
+    // diagnostics default OFF per the dfx convention.
     {
+        if !crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::R83HeapScan) {
+            return;
+        }
         static LAST: AtomicU64 = AtomicU64::new(0);
         static NEXT_OFF: AtomicU64 = AtomicU64::new(0);
         let now = crate::drivers::timer::get_jiffies();
@@ -458,18 +465,28 @@ pub fn sched_tick_audit() {
 
 /// Scan one 2 MiB slice of the kernel heap for the producer's
 /// fingerprint. The slice start cycles through the whole heap so the
-/// full 128 MiB is covered roughly every 40 s.
+/// full heap is covered roughly every 40 s.
 fn magic_scan(next_off: &AtomicU64) {
     const SLICE: u64 = 2 * 1024 * 1024;
-    let base_phys = crate::arch::mm::memory_layout::HEAP_START;
-    let heap_len = crate::config::KERNEL_HEAP_SIZE as u64;
+    // Bounds come from the ALLOCATOR's runtime window, not the nominal
+    // KERNEL_HEAP_SIZE: where the heap was clamped to the discovered
+    // memory map, the nominal span runs past the mapped direct map and
+    // the scan's read_volatile takes a kernel page fault in timer
+    // context (observed: KERNPANIC pfault badaddr=0xffffffd640000000
+    // epc=magic_scan, halting the machine ~5 min into an LTP boot).
+    let (heap_start, heap_end) =
+        crate::mm::buddy_allocator::GLOBAL_ALLOCATOR.heap_bounds();
+    if heap_end <= heap_start {
+        return;
+    }
+    let heap_len = (heap_end - heap_start) as u64;
     let mut off = next_off.load(Ordering::Relaxed);
     if off >= heap_len {
         off = 0;
     }
     next_off.store(off + SLICE, Ordering::Relaxed);
     let start = crate::arch::mm::memory_layout::phys_to_virt(
-        crate::arch::mm::memory_layout::PhysAddr(base_phys + off),
+        crate::arch::mm::memory_layout::PhysAddr(heap_start as u64 + off),
     )
     .0 as usize;
     let end = start + SLICE.min(heap_len - off) as usize;

@@ -1081,9 +1081,21 @@ pub(crate) fn do_execve_elf(
     // Add stack VMA with GROWSDOWN flag
     {
         use crate::mm::vma::{Vma, VmaFlags, VmaType};
+        // `stack_top` here is the argv-slop-adjusted value (raw top - 256,
+        // NOT page aligned). VirtAddr::new SILENTLY FLOORS to page
+        // granularity, so the VMA used to end one page below the mapped
+        // stack top: the top page (mapped at exec, holding argv/env/auxv
+        // and the entry frame) was left mapped-but-VMA-less. Userspace
+        // never noticed (present pages do not fault), but every VMA-based
+        // query on that page was wrong — process_vm_writev into a stack
+        // VLA crossing the boundary stopped one page short (LTP
+        // process_vm_writev02: 97632 of 100000 bytes). Round the VMA end
+        // UP to cover the whole mapped stack.
+        let stack_top_page =
+            (stack_top + PAGE_SIZE as u64 - 1) & !(PAGE_SIZE as u64 - 1);
         let stack_vma = Vma::new(
             crate::mm::page::VirtAddr::new(stack_bottom as usize),
-            crate::mm::page::VirtAddr::new(stack_top as usize),
+            crate::mm::page::VirtAddr::new(stack_top_page as usize),
             VmaFlags::from_bits(VmaFlags::READ | VmaFlags::WRITE | VmaFlags::GROWSDOWN),
         );
         let mut vma_mgr = new_addr_space.vma_write();

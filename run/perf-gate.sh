@@ -23,9 +23,9 @@
 #   --skip-boot --log X   re-parse an existing serial log (no QEMU)
 #   --pbench-baseline     a pbench results file whose medians are the
 #                         anchor (default: the pb1 smoke column below)
-# Env: SMP ACCEL (passed to pa-boot.sh), VOLUME_BASE=136000000,
+# Env: SMP ACCEL (passed to pa-boot.sh), VOLUME_BASE=107500000,
 #      TERM_BASE=8 TERM_BAND=2, REFUSED_BASE=32 REFUSED_BAND=4,
-#      TICK_MIN=99.5, CGAVG_US_BAND="3 4.8", NANOAVG_MS_MAX=265
+#      TICK_MIN=99.5, CGAVG_US_BAND="3 4.8", NANOAVG_MS_MAX=244
 #
 # Boots are sequential and this script runs at most one QEMU at a
 # time; it refuses to start when 2+ foreign QEMUs are already up
@@ -62,13 +62,13 @@ while [ $# -gt 0 ]; do
 done
 
 # ---- baseline constants (docs/development/perf-gate-baseline.md) ----
-VOLUME_BASE="${VOLUME_BASE:-136000000}"     # pa38 780s boot, +-10%
+VOLUME_BASE="${VOLUME_BASE:-107500000}"     # pa50main quiet re-bank (load1=0/qemus=1), +-10%
 TERM_BASE="${TERM_BASE:-8}"; TERM_BAND="${TERM_BAND:-2}"
 REFUSED_BASE="${REFUSED_BASE:-32}"; REFUSED_BAND="${REFUSED_BAND:-4}"
 TICK_MIN="${TICK_MIN:-99.5}"                # ticks/s/CPU sustained
 CGAVG_US_MIN="${CGAVG_US_MIN:-3}"           # clock_gettime avg band
 CGAVG_US_MAX="${CGAVG_US_MAX:-4.8}"         # 3-4us +-20%
-NANOAVG_MS_MAX="${NANOAVG_MS_MAX:-265}"     # nanosleep 221ms +-20%
+NANOAVG_MS_MAX="${NANOAVG_MS_MAX:-244}"     # nanosleep 203ms (pa50main) +-20%
 GRQ_AVG_NS_MIN="${GRQ_AVG_NS_MIN:-4080}"    # GRQ hold 5.1-6.1us +-20%
 GRQ_AVG_NS_MAX="${GRQ_AVG_NS_MAX:-7320}"
 SMALL_ALLOC_SHARE_MAX="${SMALL_ALLOC_SHARE_MAX:-10}"  # % of machine
@@ -157,10 +157,11 @@ EOF
     else verdict SKIP "syscall volume" "no summary line" "needs syscost=1 boot"; fi
 
     # per-op avgs from the last syscall dump (by name, arch-independent)
-    python3 - "$log" "$CGAVG_US_MIN" "$CGAVG_US_MAX" <<'EOF'
+    python3 - "$log" "$CGAVG_US_MIN" "$CGAVG_US_MAX" "$NANOAVG_MS_MAX" <<'EOF'
 import re, sys
 log = sys.argv[1]
 cg_min, cg_max = float(sys.argv[2]), float(sys.argv[3])
+nano_max_ms = float(sys.argv[4])
 rows = {}
 for line in open(log, errors="replace"):
     m = re.search(r"SYSCOST t=(\d+)s nr=(\d+) n=(\d+) avg=(\d+)us", line)
@@ -185,11 +186,14 @@ else:
     print("SKIP clock_gettime avg  no row  needs syscost=1 boot")
 if nano:
     t, n, avg = nano
-    # Workload-dependent: the seed boot itself (pa38) reads 333 ms at its
-    # last table dump vs the 221 ms pa27 figure in the baseline doc, so
-    # this row is informational until the baseline is re-banked.
-    print("INFO nanosleep avg", "%dus n=%d t=%ds" % (avg, n, t),
-          "doc band 221ms +-20% (workload-dependent; seed boot reads 333ms)")
+    # Banked from pa50main (quiet window, load1=0/qemus=1, PURE main
+    # ddb3ed01): 203 ms avg, n=26,945. Band 203ms +-20% (163-244 ms);
+    # observed cross-run range 174-222 ms (pa41gate/pa46main/pa46f4r2/
+    # pa27), workload-mix dependent but the mix is stable across boots
+    # of this image class.
+    ok = avg / 1000.0 <= nano_max_ms
+    print(("PASS" if ok else "FAIL"), "nanosleep avg", "%dus n=%d t=%ds" % (avg, n, t),
+          "<=%.0fms (pa50main 203ms +-20%%)" % nano_max_ms)
 else:
     print("SKIP nanosleep avg  no row  needs syscost=1 boot")
 EOF

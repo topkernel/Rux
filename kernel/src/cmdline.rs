@@ -382,6 +382,111 @@ pub unsafe fn parse_memory_regions(dtb_ptr: u64) -> [MemoryRegion; MAX_MEMORY_RE
 ///
 /// OH Phase 1: the OpenHarmony ramdisk (`-initrd ramdisk.img`, cmdline
 /// `root=/dev/ram0`) lands through this path.
+/// True when the first /cpus/cpu@* node's "riscv,isa" property lists
+/// the V extension. The ISA string looks like "rv64imafdcvh" (with
+/// optional _multi_letter names after): the base prefix "rv" + width
+/// digits is skipped, then any single-letter extension 'v' counts.
+/// Used to prime the V-extension capability cache at boot (vext.rs).
+pub unsafe fn parse_cpu_isa_has_v(dtb_ptr: u64) -> bool {
+    let fdt = dtb_ptr as *const u8;
+
+    // SAFETY: mirrors parse_memory_regions — the bootloader-provided
+    // DTB is mapped at its physical address by boot.S's early tables.
+    unsafe fn read_u32(p: *const u8) -> u32 {
+        let b0 = *p as u32;
+        let b1 = *p.offset(1) as u32;
+        let b2 = *p.offset(2) as u32;
+        let b3 = *p.offset(3) as u32;
+        (b0 << 24) | (b1 << 16) | (b2 << 8) | b3
+    }
+
+    if unsafe { read_u32(fdt) } != 0xd00dfeed {
+        return false;
+    }
+    let off_dt_struct = unsafe { read_u32(fdt.offset(0x08)) } as usize;
+    let off_dt_strings = unsafe { read_u32(fdt.offset(0x0C)) } as usize;
+    let size_dt_struct = unsafe { read_u32(fdt.offset(0x24)) } as usize;
+
+    let mut ptr = fdt.offset(off_dt_struct as isize);
+    let end = fdt.offset((off_dt_struct + size_dt_struct) as isize);
+    let strings = fdt.offset(off_dt_strings as isize);
+
+    let mut in_cpu = false;
+    while ptr < end {
+        let token = unsafe { read_u32(ptr) };
+        ptr = ptr.offset(4);
+        match token {
+            FDT_BEGIN_NODE => {
+                let mut name = [0u8; 32];
+                let mut i = 0;
+                while unsafe { *ptr } != 0 && i < 32 {
+                    name[i] = unsafe { *ptr };
+                    ptr = ptr.offset(1);
+                    i += 1;
+                }
+                while unsafe { *ptr } != 0 {
+                    ptr = ptr.offset(1);
+                }
+                ptr = ptr.offset(1); // NUL
+                // Align to 4
+                let pad = (4 - (ptr as usize & 3)) & 3;
+                ptr = ptr.offset(pad as isize);
+                let n = &name[..i];
+                in_cpu = n.starts_with(b"cpu@") || n == b"cpu";
+            }
+            FDT_PROP => {
+                let len = unsafe { read_u32(ptr) } as usize;
+                let nameoff = unsafe { read_u32(ptr.offset(4)) } as usize;
+                ptr = ptr.offset(8);
+                let val = ptr;
+                // Property block is 4-aligned already (len padded).
+                let mut name = [0u8; 32];
+                let mut i = 0;
+                while i < 32 {
+                    let c = unsafe { *strings.offset((nameoff + i) as isize) };
+                    if c == 0 {
+                        break;
+                    }
+                    name[i] = c;
+                    i += 1;
+                }
+                let pname = &name[..i];
+                if in_cpu && (pname == b"riscv,isa" || pname == b"isa") && len > 0 {
+                    // Parse "rv{32,64}<letters>[_name...]"
+                    let mut j = 0usize;
+                    let v = val as *const u8;
+                    // skip base "rv"
+                    if j + 1 < len && unsafe { *v.add(j) } == b'r' && unsafe { *v.add(j + 1) } == b'v' {
+                        j += 2;
+                        // skip width digits
+                        while j < len && unsafe { *v.add(j) }.is_ascii_digit() {
+                            j += 1;
+                        }
+                        // single-letter extensions until separator
+                        while j < len {
+                            let c = unsafe { *v.add(j) };
+                            if c == 0 || c == b'_' {
+                                break;
+                            }
+                            if c == b'v' {
+                                return true;
+                            }
+                            j += 1;
+                        }
+                    }
+                }
+                let pad = (4 - (len & 3)) & 3;
+                ptr = ptr.offset((len + pad) as isize);
+            }
+            FDT_END_NODE => {
+                in_cpu = false;
+            }
+            _ => {}
+        }
+    }
+    false
+}
+
 pub unsafe fn parse_initrd_region(dtb_ptr: u64) -> Option<(usize, usize)> {
     let (start, end) = parse_chosen_u64_pair(dtb_ptr, "linux,initrd-start", "linux,initrd-end")?;
     if end > start && start != 0 {

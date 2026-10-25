@@ -10,6 +10,22 @@ use super::*;
 use super::SyscallArgs;
 use crate::arch::mm::{get_page_table_virt, PAGE_SHIFT, PAGE_SIZE, PageTableEntry, VirtAddr};
 
+/// Page-round a user-supplied length, checked (stress-fleet fix,
+/// 2026-10-25). The unchecked form `(len + PAGE_SIZE - 1) & !...` wraps
+/// for lengths near usize::MAX — under overflow checks that is a kernel
+/// panic directly triggerable by madvise/mprotect/msync/mremap/mincore/
+/// mlock/munlock with a hostile length (fsfuzz hit madvise(addr, -1));
+/// in release builds it silently wraps into a tiny/bogus range.
+/// Reference-kernel semantics: these calls compute end = start + len
+/// and reject any range whose rounding or end computation wraps
+/// (madvise/mprotect's `end < start` family of guards) — EINVAL, never
+/// a wrap, never a panic.
+#[inline]
+fn round_up_pages_checked(len: usize) -> Option<usize> {
+    const PS: usize = crate::mm::page::PAGE_SIZE; // usize (arch::mm's is u64)
+    len.checked_add(PS - 1).map(|r| r & !(PS - 1))
+}
+
 /// sys_brk - Change data segment size
 ///
 ///
@@ -1494,6 +1510,13 @@ fn sys_mprotect_inner(args: [u64; 6]) -> i64 {
         return -22_i64;  // EINVAL
     }
 
+    // Hostile length guard: a length near usize::MAX wraps the page
+    // round-up in the PTE walk below (num_pages) — EINVAL like the
+    // reference kernel's wrapped-end check.
+    if round_up_pages_checked(length).is_none() {
+        return -22_i64;  // EINVAL
+    }
+
     // Unknown protection bits are EINVAL. PROT_GROWSDOWN/GROWSUP are
     // mprotect *flags* living in the high bits — accepted (and ignored,
     // since we operate on the exact range passed).
@@ -2011,8 +2034,11 @@ pub fn sys_msync(args: [u64; 6]) -> i64 {
         return mmap_error::EINVAL;
     }
 
-    // Align length
-    let length_aligned = (length + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+    // Align length (checked: wrap = EINVAL, see round_up_pages_checked)
+    let length_aligned = match round_up_pages_checked(length) {
+        Some(v) => v,
+        None => return mmap_error::EINVAL,
+    };
 
     // Get current process
     let current_task = match crate::sched::current() {
@@ -2463,9 +2489,15 @@ fn sys_mremap_inner(args: [u64; 6]) -> i64 {
         return mmap_error::EINVAL;
     }
 
-    // Align sizes
-    let old_size_aligned = (old_size + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
-    let new_size_aligned = (new_size + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+    // Align sizes (checked: wrap = EINVAL, see round_up_pages_checked)
+    let old_size_aligned = match round_up_pages_checked(old_size) {
+        Some(v) => v,
+        None => return mmap_error::EINVAL,
+    };
+    let new_size_aligned = match round_up_pages_checked(new_size) {
+        Some(v) => v,
+        None => return mmap_error::EINVAL,
+    };
 
     // Get current process
     let current_task = match crate::sched::current() {
@@ -2790,8 +2822,11 @@ pub fn sys_madvise(args: [u64; 6]) -> i64 {
         }
     }
 
-    // Align length
-    let length_aligned = (length + PAGE_SIZE - 1) & !(PAGE_SIZE - 1);
+    // Align length (checked: wrap = EINVAL, see round_up_pages_checked)
+    let length_aligned = match round_up_pages_checked(length) {
+        Some(v) => v,
+        None => return mmap_error::EINVAL,
+    };
 
     // Get current process
     let current_task = match crate::sched::current() {
@@ -2985,8 +3020,12 @@ pub fn sys_mincore(args: [u64; 6]) -> i64 {
         return mmap_error::EINVAL;
     }
 
-    // Calculate needed page count
-    let page_count = (length + PAGE_SIZE - 1) / PAGE_SIZE;
+    // Calculate needed page count (checked: wrap = EINVAL, see
+    // round_up_pages_checked)
+    let page_count = match round_up_pages_checked(length) {
+        Some(v) => v / crate::mm::page::PAGE_SIZE,
+        None => return mmap_error::EINVAL,
+    };
 
     // Linux mincore order of checks: range validity FIRST (overflow past
     // TASK_SIZE or a VMA gap → ENOMEM), only then the vec EFAULT — LTP
@@ -3149,8 +3188,10 @@ fn mlock_impl(raw_addr: usize, length: usize, onfault: bool) -> i64 {
     // unaligned addr is legal (LTP mlock01 locks one byte past a page
     // boundary).
     let addr = raw_addr & !(crate::mm::page::PAGE_SIZE - 1);
-    let length_aligned = (length + crate::mm::page::PAGE_SIZE - 1)
-        & !(crate::mm::page::PAGE_SIZE - 1);
+    let length_aligned = match round_up_pages_checked(length) {
+        Some(v) => v,
+        None => return -22_i64,
+    };
     let end = match addr.checked_add(length_aligned) {
         Some(e) => e,
         None => return -22_i64,
@@ -3349,8 +3390,10 @@ pub fn sys_munlock(args: [u64; 6]) -> i64 {
     // Round to page boundaries like mlock (Linux mlock/munlock never
     // require the caller to align).
     let addr = addr & !(crate::mm::page::PAGE_SIZE - 1);
-    let length_aligned = (length + crate::mm::page::PAGE_SIZE - 1)
-        & !(crate::mm::page::PAGE_SIZE - 1);
+    let length_aligned = match round_up_pages_checked(length) {
+        Some(v) => v,
+        None => return -22_i64,
+    };
     let end = match addr.checked_add(length_aligned) {
         Some(e) => e,
         None => return -22_i64,

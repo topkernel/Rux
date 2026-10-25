@@ -40,7 +40,7 @@ use alloc::collections::VecDeque;
 use alloc::string::String;
 use alloc::sync::{Arc, Weak};
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 
 use crate::fs::file::{File, FileFlags, FileOps};
 use crate::net::socket::{SocketOptions, SOCK_CLOEXEC_FLAG, SOCK_NONBLOCK_FLAG, SOCK_TYPE_MASK};
@@ -112,9 +112,40 @@ pub struct UnixSeg {
     pub files: Vec<Arc<File>>,
     /// SCM_CREDENTIALS payload — same first-touch delivery as `files`.
     pub cred: Option<UnixCred>,
-    /// Sender's bound name (for recvfrom address reporting)
-    pub src: Option<String>,
+    /// Sender's bound name (for recvfrom address reporting). Arc, not
+    /// String: the enqueue hot path stamps every segment with the
+    /// sender's name and the MSG_PEEK hot path clones it — a
+    /// per-segment String was a heap alloc per send plus another per
+    /// peek on the p5 socket family (leg-34 fast path).
+    pub src: Option<Arc<str>>,
+    /// Flow-control charge this segment was admitted under
+    /// (seg_charge at push time). Kept per segment so pops and partial
+    /// stream drains decrement RecvQueue::charge by exactly what the
+    /// push added, even if the charge formula later changes.
+    pub charge: usize,
 }
+
+/// Receive queue with its running flow-control charge (leg-34 fast
+/// path). INVARIANT (guarded by the recv_queue Spinlock): `charge` ==
+/// Σ seg.charge over `segs`. The enqueue gate and target_has_room read
+/// the counter instead of walking the queue — the walk was O(queue
+/// depth) under the lock on EVERY unix send (and again per blocked-
+/// sender recheck), which priced the p5 socket family ~200x over the
+/// reference on flow-controlled pairs.
+pub struct RecvQueue {
+    pub segs: VecDeque<UnixSeg>,
+    pub charge: usize,
+}
+
+/// Per-send diagnostic-tap classification of bound_name, cached at
+/// bind time (leg-34 fast path). The send hot path previously locked
+/// bound_name and string-scanned it (ends_with) up to three times per
+/// send for the hilog / param / spawn taps; now it loads this bitmask.
+/// Recomputed by refresh_name_caches() at every bound_name assignment
+/// (bind / connect-inherit / autobind — all cold paths).
+pub const TAP_HILOG: u8 = 1; // .../hilogInput or .../hilogd.server
+pub const TAP_PARAM: u8 = 2; // .../paramservice listener
+pub const TAP_SPAWN: u8 = 4; // .../<x>Spawn listener
 
 /// AF_UNIX socket
 pub struct UnixSocket {
@@ -125,6 +156,14 @@ pub struct UnixSocket {
     /// Bound name (display/reporting: the sun_path given at bind for
     /// filesystem sockets; the registry key itself for abstract names).
     pub bound_name: Spinlock<Option<String>>,
+    /// Cached Arc copy of bound_name for segment src stamping — the
+    /// enqueue hot path clones this (refcount bump) instead of
+    /// allocating a String per segment. Maintained by
+    /// refresh_name_caches() alongside tap_class.
+    src_arc: Spinlock<Option<Arc<str>>>,
+    /// Cached tap classification (TAP_* bits). Maintained by
+    /// refresh_name_caches().
+    tap_class: AtomicU8,
     /// Name-table registration key. For abstract sockets this is the
     /// abstract name (== bound_name); for filesystem sockets it is the
     /// socket node's inode identity "#<fs_id>:<ino>" (see fs_reg_key) —
@@ -145,8 +184,8 @@ pub struct UnixSocket {
     accept_queue: Spinlock<VecDeque<Arc<UnixSocket>>>,
     /// listen() backlog cap
     backlog: Spinlock<usize>,
-    /// Receive queue (segments)
-    recv_queue: Spinlock<VecDeque<UnixSeg>>,
+    /// Receive queue (segments + running flow-control charge)
+    recv_queue: Spinlock<RecvQueue>,
     /// STREAM-only parking for ancillary data (SCM_RIGHTS/SCM_CREDENTIALS)
     /// sent with a ZERO-length payload. A byte stream has no record
     /// boundaries, so Linux associates ancillary data with the first byte
@@ -192,13 +231,18 @@ impl UnixSocket {
             kind,
             state: Spinlock::new(UnixState::Unconnected),
             bound_name: Spinlock::new(None),
+            src_arc: Spinlock::new(None),
+            tap_class: AtomicU8::new(0),
             reg_name: Spinlock::new(None),
             node_inode: Spinlock::new(None),
             peer: Spinlock::new(None),
             dgram_peer: Spinlock::new(None),
             accept_queue: Spinlock::new(VecDeque::new()),
             backlog: Spinlock::new(16),
-            recv_queue: Spinlock::new(VecDeque::new()),
+            recv_queue: Spinlock::new(RecvQueue {
+                segs: VecDeque::new(),
+                charge: 0,
+            }),
             pending_anc: Spinlock::new(Vec::new()),
             eof: Spinlock::new(false),
             dead: Spinlock::new(false),
@@ -231,7 +275,7 @@ impl UnixSocket {
     /// Bytes currently queued for the receiver.
     fn queued_bytes(&self) -> usize {
         let q = self.recv_queue.lock();
-        q.iter().map(|s| s.data.len()).sum()
+        q.segs.iter().map(|s| s.data.len()).sum()
     }
 
     /// sc97 KILLDUMP support: flow-control snapshot for the
@@ -241,8 +285,8 @@ impl UnixSocket {
         let (qb, ql) = {
             let q = self.recv_queue.lock();
             (
-                q.iter().map(|s| s.data.len()).sum(),
-                q.len(),
+                q.segs.iter().map(|s| s.data.len()).sum(),
+                q.segs.len(),
             )
         };
         let cap = self.options.lock().sndbuf as usize;
@@ -265,11 +309,10 @@ impl UnixSocket {
         // sc101: keep this in lockstep with seg_charge (proportional slab
         // cost — see its comment); divergent formulas made the enqueue
         // gate and target_has_room disagree.
-        const SEG_OVERHEAD: usize = core::mem::size_of::<UnixSeg>() + 512;
-        let q = self.recv_queue.lock();
-        q.iter()
-            .map(|s| s.data.len() + SEG_OVERHEAD)
-            .sum()
+        // leg-34: O(1) — the running RecvQueue::charge counter replaces
+        // the per-call queue walk (the walk ran under the lock on every
+        // send and every blocked-sender room recheck).
+        self.recv_queue.lock().charge
     }
 
     /// Resolve the connected peer to a strong Arc (None = peer gone).
@@ -277,9 +320,31 @@ impl UnixSocket {
         self.peer.lock().as_ref().and_then(|w| w.upgrade())
     }
 
+    /// Recompute the hot-path name caches (src_arc, tap_class) from
+    /// bound_name. MUST be called at every bound_name assignment
+    /// (unix_bind, the connect() child inherit, autobind). Cold path —
+    /// one lock, one Arc allocation when a name exists.
+    fn refresh_name_caches(&self) {
+        let name = self.bound_name.lock().clone();
+        let mut cls: u8 = 0;
+        if let Some(n) = name.as_ref() {
+            if n.ends_with("hilogInput") || n.ends_with("hilogd.server") {
+                cls |= TAP_HILOG;
+            }
+            if n.ends_with("paramservice") {
+                cls |= TAP_PARAM;
+            }
+            if n.ends_with("Spawn") {
+                cls |= TAP_SPAWN;
+            }
+        }
+        *self.src_arc.lock() = name.map(|n| Arc::from(n.as_str()));
+        self.tap_class.store(cls, Ordering::Release);
+    }
+
     /// Would recv() return data / EOF (anything but EAGAIN)?
     fn recv_ready(&self) -> bool {
-        if !self.recv_queue.lock().is_empty() {
+        if !self.recv_queue.lock().segs.is_empty() {
             return true;
         }
         // EOF (peer closed) is a readable condition — read returns 0.
@@ -538,7 +603,7 @@ pub fn registry_snapshot() -> alloc::vec::Vec<alloc::string::String> {
             UnixKind::Seqpacket => "seqpkt",
             UnixKind::Dgram => "dgram",
         };
-        let rxq = sock.recv_queue.lock().len();
+        let rxq = sock.recv_queue.lock().segs.len();
         let accq = sock.accept_queue.lock().len();
         let peer = sock
             .peer
@@ -797,6 +862,7 @@ pub fn unix_bind(sock: &Arc<UnixSocket>, addr: &UnixAddr) -> Result<(), i32> {
     // bound_name stays the sun_path the caller gave (display/reporting);
     // the registration key is separate for filesystem sockets.
     *sock.bound_name.lock() = Some(addr.key.clone());
+    sock.refresh_name_caches();
     *sock.reg_name.lock() = Some(key.clone());
     table.insert(key, sock.clone());
     Ok(())
@@ -971,6 +1037,7 @@ pub fn unix_connect(
             // The child inherits the server's bound name for
             // getsockname/recvfrom reporting.
             *child.bound_name.lock() = server.bound_name.lock().clone();
+            child.refresh_name_caches();
             // SO_PEERCRED: the child IS the server endpoint, so clients
             // asking for the peer's creds must see the server's, not the
             // connecting client's (the child was allocated inside the
@@ -1077,6 +1144,7 @@ fn autobind(sock: &Arc<UnixSocket>) {
             table.insert(key.clone(), sock.clone());
             // Abstract names ARE their own registration key.
             *sock.bound_name.lock() = Some(key.clone());
+            sock.refresh_name_caches();
             *sock.reg_name.lock() = Some(key);
             return;
         }
@@ -1259,12 +1327,9 @@ pub fn unix_send(
         if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SockSnap)
             && !data.is_empty()
         {
-            let is_spawn = target
-                .bound_name
-                .lock()
-                .as_ref()
-                .map(|n| n.ends_with("Spawn"))
-                .unwrap_or(false);
+            // leg-34: the Spawn classification is cached in tap_class at
+            // bind time — no bound_name lock/scan per send.
+            let is_spawn = target.tap_class.load(Ordering::Acquire) & TAP_SPAWN != 0;
             if is_spawn {
                 let n = data.len().min(64);
                 let mut hex = alloc::string::String::new();
@@ -1312,12 +1377,10 @@ pub fn unix_send(
         // header, then tag: content, and only fall back to the smear for
         // records that do not parse.
         {
-            let is_hilog = target
-                .bound_name
-                .lock()
-                .as_ref()
-                .map(|n| n.ends_with("hilogInput") || n.ends_with("hilogd.server"))
-                .unwrap_or(false);
+            // leg-34: hilog/param listener classification cached in
+            // tap_class at bind time — previously a bound_name lock plus
+            // up to three ends_with scans on EVERY unix send.
+            let is_hilog = target.tap_class.load(Ordering::Acquire) & TAP_HILOG != 0;
             // sc209 (leg 14): param-service control tap. sc208's crawl is
             // samgr's on-demand loads timing out: "Start dynamic proc:
             // installs,511,105_14991ms" x24 — ServiceControlWithExtra =
@@ -1334,12 +1397,8 @@ pub fn unix_send(
             // socket/wake loss; a pid-1 response with no matching request
             // = the duplicated-reply conviction.
             if !data.is_empty() && data.len() >= 12 {
-                let is_param_listener = target
-                    .bound_name
-                    .lock()
-                    .as_ref()
-                    .map(|n| n.ends_with("paramservice"))
-                    .unwrap_or(false);
+                let is_param_listener =
+                    target.tap_class.load(Ordering::Acquire) & TAP_PARAM != 0;
                 let sender_pid = crate::process::current_pid();
                 // type: 0 SET / 1 WAIT / 2 ADD_WATCHER / 3 DEL_WATCHER /
                 // 4 NOTIFY / 5 SAVE. Plausibility gate: type <= 5 and
@@ -1653,9 +1712,13 @@ pub fn unix_send(
             // charge the segment's HEAP cost, or 1-byte datagram fills
             // exhaust the buddy heap one page at a time before the byte
             // cap is ever reached (r8 ALLOCTHROW family).
-            let queued: usize = q.iter().map(|s| seg_charge(s.data.len())).sum();
+            // leg-34: the running RecvQueue::charge replaces the
+            // O(depth) walk that used to run here on every send.
+            let queued: usize = q.charge;
             if queued == 0 || queued + seg_charge(data.len()) <= cap {
-                let src = sock.bound_name.lock().clone();
+                // leg-34: Arc clone of the bind-time cache (refcount
+                // bump), not a per-segment String allocation.
+                let src = sock.src_arc.lock().clone();
                 // Drain parked ancillary data onto the front of the new
                 // segment: first-touch delivery with the first bytes that
                 // were queued AFTER the (files, cred) arrived.
@@ -1685,11 +1748,14 @@ pub fn unix_send(
                 if cred.is_none() {
                     cred = Some(current_unix_cred());
                 }
-                q.push_back(UnixSeg {
+                let charge = seg_charge(data.len());
+                q.charge += charge;
+                q.segs.push_back(UnixSeg {
                     data: data.to_vec(),
                     files,
                     cred,
                     src,
+                    charge,
                 });
                 drop(q);
                 target.wait_queue.wake_up_all();
@@ -1722,7 +1788,7 @@ pub fn unix_send(
 pub struct UnixRecvResult {
     pub len: usize,
     pub orig_len: usize,
-    pub src: Option<String>,
+    pub src: Option<Arc<str>>,
     pub files: Vec<Arc<File>>,
     pub cred: Option<UnixCred>,
     pub truncated: bool,
@@ -1753,7 +1819,7 @@ pub fn unix_recv(
 ) -> Result<UnixRecvResult, i32> {
     let mut q = sock.recv_queue.lock();
     if peek {
-        if let Some(front) = q.front() {
+        if let Some(front) = q.segs.front() {
             match sock.kind {
                 UnixKind::Dgram | UnixKind::Seqpacket => {
                     // One record, boundaries visible through the peek.
@@ -1781,8 +1847,8 @@ pub fn unix_recv(
                     let mut orig_total = 0usize;
                     let mut files = Vec::new();
                     let mut cred: Option<UnixCred> = None;
-                    let mut src: Option<String> = None;
-                    for seg in q.iter() {
+                    let mut src: Option<Arc<str>> = None;
+                    for seg in q.segs.iter() {
                         orig_total += seg.data.len();
                         let take = seg.data.len().min(buf.len() - copied);
                         buf[copied..copied + take].copy_from_slice(&seg.data[..take]);
@@ -1816,10 +1882,16 @@ pub fn unix_recv(
     }
     match sock.kind {
         UnixKind::Stream => {
-            if let Some(mut seg) = q.pop_front() {
+            if let Some(mut seg) = {
+                let seg = q.segs.pop_front();
+                if let Some(sg) = seg.as_ref() {
+                    q.charge -= sg.charge;
+                }
+                seg
+            } {
                 let mut files = Vec::new();
                 let mut cred: Option<UnixCred> = None;
-                let mut src: Option<String> = None;
+                let mut src: Option<Arc<str>> = None;
                 let mut copied = 0usize;
                 let mut orig_total = 0usize;
                 // Drain this segment (and any following ones) into buf.
@@ -1841,11 +1913,20 @@ pub fn unix_recv(
                         // for the next recv.
                         if take < seg.data.len() {
                             seg.data.drain(..take);
-                            q.push_front(seg);
+                            let rest = seg_charge(seg.data.len());
+                            seg.charge = rest;
+                            q.charge += rest;
+                            q.segs.push_front(seg);
                         }
                         break;
                     }
-                    match q.pop_front() {
+                    match {
+                        let next = q.segs.pop_front();
+                        if let Some(sg) = next.as_ref() {
+                            q.charge -= sg.charge;
+                        }
+                        next
+                    } {
                         Some(next) => seg = next,
                         None => break,
                     }
@@ -1912,7 +1993,13 @@ pub fn unix_recv(
         UnixKind::Dgram | UnixKind::Seqpacket => {
             // One record per recv (boundaries preserved); a short buffer
             // truncates and reports MSG_TRUNC.
-            if let Some(seg) = q.pop_front() {
+            if let Some(seg) = {
+                let seg = q.segs.pop_front();
+                if let Some(sg) = seg.as_ref() {
+                    q.charge -= sg.charge;
+                }
+                seg
+            } {
                 let orig_len = seg.data.len();
                 let take = orig_len.min(buf.len());
                 buf[..take].copy_from_slice(&seg.data[..take]);

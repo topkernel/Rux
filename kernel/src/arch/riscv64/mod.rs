@@ -18,6 +18,7 @@ pub mod smp;
 pub mod ipi;
 pub mod process;
 pub mod thread;
+pub mod vext;
 pub mod uaccess;
 
 use crate::println;
