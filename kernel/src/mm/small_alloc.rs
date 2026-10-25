@@ -216,6 +216,13 @@ struct Magazine {
 static mut MAGAZINES: [[Magazine; 8]; crate::config::MAX_CPUS] =
     [[Magazine { buf: [0; MAG_DEPTH], len: 0 }; 8]; crate::config::MAX_CPUS];
 
+/// r8final forensics: times a magazine row was found with len >
+/// MAG_DEPTH (transient two-CPU entry via a cpu_id()/ti_cpu divergence,
+/// or a wild write into the row) and healed by the bounded drain. Zero
+/// on a healthy boot; every nonzero value names a real divergence event
+/// for the scheduler/wild-write hunt lanes. Printed by census_line().
+static MAG_ALIAS_EVENTS: AtomicUsize = AtomicUsize::new(0);
+
 /// Pointer to this CPU's class-ci magazine row. Callers must have IF=0
 /// (own irq-off window or the class irqsave hold), making the row
 /// private to this CPU for the duration of the access.
@@ -243,12 +250,24 @@ pub fn alloc(size: usize, align: usize) -> *mut u8 {
     // Fast path: pop from THIS CPU's magazine. cpu_id() is read inside
     // the irq-off window — with IF=0 the task cannot be preempted and
     // migrated between the read and the row access.
+    //
+    // r8final guard (2026-10-25): runs/gnome-r8final died at t=515s in
+    // "index out of bounds: the len is 16 but the index is 16" here and
+    // in the free() snapshot loop. len > MAG_DEPTH means the row was
+    // entered by two CPUs at once (a transient cpu_id()/ti_cpu
+    // divergence — the R55/R74 scheduler hunt family; every in-tree
+    // steer is gated but residual windows remain), and the racing
+    // check-then-increment pushes both ran with len == 15, leaving len
+    // == 17 with no out-of-bounds write at push time. A pop at 17 would
+    // read buf[16], one past the row. Survive it: skip the fast path
+    // (the locked body still serves), and let free()'s bounded drain
+    // heal the row. Counted + tainted there, once per heal.
     {
         let flags = crate::arch::cpu::save_and_disable_irq();
         let cpu = crate::arch::cpu_id() as usize;
         if cpu < crate::config::MAX_CPUS {
             let mag = unsafe { &mut *mag_ptr(cpu, ci) };
-            if mag.len > 0 {
+            if mag.len > 0 && mag.len <= MAG_DEPTH {
                 mag.len -= 1;
                 let ptr = mag.buf[mag.len];
                 crate::arch::cpu::restore_irq(flags);
@@ -438,12 +457,46 @@ pub fn free(addr: usize) -> bool {
             // window (no row pointer survives the window), then flush
             // the snapshot and push addr after — the batch flush below
             // empties the row, so the push always has room.
+            //
+            // r8final guard (2026-10-25): the drain is bounded on BOTH
+            // sides. A row raced to len == MAG_DEPTH+1 (two pushes that
+            // both saw len == 15 — see the alloc() fast-path comment)
+            // would otherwise read buf[MAG_DEPTH] here and panic the
+            // kernel; a wild-written len (any value) would read past
+            // the row outright. Indices >= MAG_DEPTH are fictitious
+            // entries that were never written by any push (a push
+            // would have panicked at its own store first) — dropping
+            // them is always safe, and flush_batch re-validates every
+            // surviving entry against the page header anyway. The heal
+            // is counted and tainted so the divergence is named, not
+            // silently absorbed.
+            if mag.len > 2 * MAG_DEPTH {
+                // A racing double-entry adds single increments past the
+                // cap; anything beyond 2x the depth is a scribble, not a
+                // race product. Draining it one decrement at a time under
+                // IF=0 would stall the CPU for billions of iterations —
+                // drop the row wholesale instead. Up to MAG_DEPTH pending
+                // frees leak (bounded); every surviving entry the row ever
+                // hands out is page-header-validated at flush time.
+                mag.len = 0;
+                MAG_ALIAS_EVENTS.fetch_add(1, Ordering::Relaxed);
+                crate::dfx::taint::add_taint(crate::dfx::taint::TaintFlags::BAD_PAGE);
+            }
             let mut snap: [usize; MAG_DEPTH] = [0; MAG_DEPTH];
             let mut n = 0usize;
-            while mag.len > 0 {
+            let mut dropped = 0usize;
+            while mag.len > 0 && n < MAG_DEPTH {
                 mag.len -= 1;
-                snap[n] = mag.buf[mag.len];
-                n += 1;
+                if mag.len < MAG_DEPTH {
+                    snap[n] = mag.buf[mag.len];
+                    n += 1;
+                } else {
+                    dropped += 1;
+                }
+            }
+            if dropped > 0 {
+                MAG_ALIAS_EVENTS.fetch_add(1, Ordering::Relaxed);
+                crate::dfx::taint::add_taint(crate::dfx::taint::TaintFlags::BAD_PAGE);
             }
             crate::arch::cpu::restore_irq(flags);
             flush_batch(&snap[..n], ci_guess, heap_start);
@@ -1012,6 +1065,12 @@ pub fn census_peek_live(ci: usize, dump_n: usize) {
 pub fn census_line() {
     use crate::dfx::taskdump::{taskdump_dec, taskdump_raw_line};
     taskdump_raw_line(b"SMALLALLOC cls objs-alloc objs-free pages-made pages-reclaimed\n");
+    let alias = MAG_ALIAS_EVENTS.load(Ordering::Relaxed);
+    if alias > 0 {
+        taskdump_raw_line(b" mag-alias-heals=");
+        taskdump_dec(alias as u64);
+        taskdump_raw_line(b"\n");
+    }
     for ci in 0..8 {
         let c = &CACHES[ci];
         let a = c.obj_allocs.load(Ordering::Relaxed);
