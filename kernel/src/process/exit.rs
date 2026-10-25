@@ -965,6 +965,43 @@ pub fn do_exit(exit_code: i32) -> ! {
             wait_for_thread_group_death(current);
         }
 
+        // ===== pid-namespace init exit: tear the namespace down =====
+        // zap_pid_ns_processes parity: when a container's init dies, every
+        // task left in that namespace — and in DESCENDANT namespaces (they
+        // hold pids in it too) — receives a kernel-forced SIGKILL. Without
+        // the cascade the survivors lingered under an unreachable pid-1
+        // (LTP pidns05: the whole nested chain must die with the outer
+        // init). Kernel-origin SIGKILL pierces the unkillable-init rule in
+        // do_signal (the SEND_SIG_PRIV force exception), so nested
+        // container inits die too.
+        if (*current).ns_pid.is_some() && (*current).ns_local_pid == 1 {
+            let dying_ns = (*current).ns_pid.clone();
+            crate::process::pid_hash::pid_hash_for_each_task(|task| unsafe {
+                let t = &*task;
+                if t.pid() == current_pid {
+                    return;
+                }
+                let hit = dying_ns.as_ref().map(|d| {
+                    // Same namespace or any descendant: walk the target's
+                    // parent chain looking for the dying namespace.
+                    let mut ns = t.ns_pid.clone();
+                    while let Some(n) = ns {
+                        if alloc::sync::Arc::ptr_eq(&n, d) {
+                            return true;
+                        }
+                        ns = n.parent.clone();
+                    }
+                    false
+                }).unwrap_or(false);
+                if hit {
+                    let _ = crate::signal::send_signal(
+                        t.pid(),
+                        crate::signal::Signal::SIGKILL as i32,
+                    );
+                }
+            });
+        }
+
         // ===== PID 1 exit: power the machine down =====
         // No orphan is ever reaped or respawned without init — the
         // shutdown(8) init-signal path lands here (init kills every user

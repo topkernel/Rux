@@ -343,6 +343,16 @@ impl SigPending {
         queue.iter().find(|i| i.si_signo == sig).copied()
     }
 
+    /// Queued real-time signal count (Linux's per-sigqueue-alloc
+    /// sigpending accounting, approximated per task). Consulted by the
+    /// send path against RLIMIT_SIGPENDING before queueing an RT signal
+    /// with a user-class si_code (LTP tgkill02: rlimit 0 + blocked
+    /// SIGRTMIN must yield EAGAIN).
+    pub fn rt_queued_count(&self) -> usize {
+        let queue = self.queue.inner.lock();
+        queue.iter().filter(|i| i.si_signo >= SIGRTMIN).count()
+    }
+
     /// Remove signal (from bitmap and queue)
     pub fn remove(&self, sig: i32) {
         if sig < 1 || sig > 64 {
@@ -439,6 +449,13 @@ pub struct SignalStruct {
     pub mask: AtomicU64,
     /// Whether this process is a child subreaper (init-style reaper)
     pub is_child_subreaper: core::sync::atomic::AtomicBool,
+    /// exit_group in progress: every member of the group must die with
+    /// THIS status (Linux signal_group_exit). Without it, the SIGKILL
+    /// that exit_group uses to stop siblings makes the group LEADER die
+    /// as "killed by signal 9" — a clean exit(0) from a non-leader
+    /// thread then reported TBROK "Test killed!" (LTP mq_notify03).
+    pub group_exiting: core::sync::atomic::AtomicBool,
+    pub group_exit_code: core::sync::atomic::AtomicI32,
 }
 
 impl SignalStruct {
@@ -457,6 +474,8 @@ impl SignalStruct {
             action: RwSpinlock::new(actions),
             mask: AtomicU64::new(0),
             is_child_subreaper: core::sync::atomic::AtomicBool::new(false),
+            group_exiting: core::sync::atomic::AtomicBool::new(false),
+            group_exit_code: core::sync::atomic::AtomicI32::new(0),
         }
     }
 
@@ -564,6 +583,8 @@ impl Clone for SignalStruct {
             is_child_subreaper: core::sync::atomic::AtomicBool::new(
                 self.is_child_subreaper.load(Ordering::Acquire),
             ),
+            group_exiting: core::sync::atomic::AtomicBool::new(false),
+            group_exit_code: core::sync::atomic::AtomicI32::new(0),
         }
     }
 }
@@ -667,6 +688,11 @@ pub mod si_code {
     pub const SI_QUEUE: i32 = -1;
     /// Signal sent by POSIX timer expiry
     pub const SI_TIMER: i32 = -2;
+    /// Signal sent by POSIX message queue notification (mq_notify).
+    /// UAPI value is -3 (asm-generic/siginfo.h); -4 is SI_ASYNCIO — the
+    /// mixup failed every SA_SIGINFO check of mq notify payloads (LTP
+    /// pidns30/pidns31 compare si_code against SI_MESGQ).
+    pub const SI_MESGQ: i32 = -3;
     /// Child process exited
     pub const CLD_EXITED: i32 = 1;
     /// Child process killed
@@ -1101,12 +1127,29 @@ pub fn do_signal(regs: *mut crate::arch::pt_regs::PtRegs) -> bool {
         // (block SIGCHLD + read it via signalfd, no handler installed)
         // depends on exactly that. Kernel-forced kills of a crashing init
         // bypass do_signal (trap path calls do_exit directly).
-        if (*current).pid() == 1 && (*current).tgid() == 1 {
+        if is_unkillable_init(&*current) {
             let handled = action
                 .as_ref()
                 .map(|a| a.action() == SigActionKind::Handler)
                 .unwrap_or(false);
-            if !handled {
+            // Only kernel-forced SIGKILL and user SIGKILLs from OUTSIDE
+            // the receiver's namespace pierce the rule (reference
+            // __send_signal's from_ancestor_ns: same-namespace user kills
+            // of a pid-namespace init are discarded — LTP pidns04's
+            // kill(1, SIGKILL) — while an ancestor-namespace user kill
+            // DOES take the init down — LTP pidns05's parent kill). The
+            // queue-time si_pid translation already encodes the sender's
+            // visibility: a cross-namespace sender's pid reads 0.
+            let same_ns_user_kill = (*current)
+                .pending
+                .peek_info(sig)
+                .map(|i| {
+                    (i.si_code == si_code::SI_USER || i.si_code == si_code::SI_TKILL)
+                        && i.si_pid != 0
+                })
+                .unwrap_or(false);
+            let forced_kill = sig == Signal::SIGKILL as i32 && !same_ns_user_kill;
+            if !handled && !forced_kill {
                 // Discard without running a disposition. No handler frame
                 // is built, so convert any syscall-restart sentinel now
                 // (else the raw -512 could leak to userspace as a bogus
@@ -1958,7 +2001,24 @@ fn handle_default_signal(sig: i32) {
             // This releases mm, fdtable, kernel stack, removes from run
             // queue, etc. Store negative signal number (do_wait encodes
             // as waitpid status).
-            crate::process::exit::do_exit_group(-(sig as i32));
+            //
+            // EXCEPT when the group is already exiting cleanly: the
+            // SIGKILL came from exit_group's sibling stop — the member
+            // must report the group's exit STATUS, not its own signal
+            // death (Linux do_group_exit reads signal_group_exit).
+            let group_code = crate::sched::current()
+                .and_then(|c| (*c).signal_arc())
+                .and_then(|ss| {
+                if ss.group_exiting.load(core::sync::atomic::Ordering::Acquire) {
+                    Some(ss.group_exit_code.load(core::sync::atomic::Ordering::Acquire))
+                } else {
+                    None
+                }
+            });
+            match group_code {
+                Some(code) => crate::process::exit::do_exit_group(code),
+                None => crate::process::exit::do_exit_group(-(sig as i32)),
+            }
         }
         _ => {
             // Unknown signal, default ignore
@@ -2135,6 +2195,29 @@ unsafe fn send_signal_locked_info(
     use crate::signal::Signal;
 
     let task = &*task_ptr;
+
+    // Namespace view of the sender: the receiver must read si_pid as the
+    // sender's pid INSIDE ITS OWN pid namespace (0 when the sender has no
+    // pid there — a kill from an ancestor namespace, LTP pidns16/pidns30).
+    // Kernel info-carrying sends stamp the GLOBAL pid; translate once
+    // here so every queue below stores the receiver-local value
+    // (reference __send_signal copies through task_pid_nr_ns).
+    let si = si.map(|mut info| {
+        // Only pid-bearing layouts translate: the kill/rt classes
+        // (si_code <= 0: SI_USER/SI_TKILL/SI_QUEUE/SI_MESGQ...) and
+        // SIGCHLD (CLD_* codes are positive but the layout still carries
+        // the child pid at 16). POLL_IN/POLL_OUT SIGIO payloads reuse
+        // that offset for si_band and must pass through untouched.
+        let pid_layout =
+            info.si_code <= 0 || info.si_signo == Signal::SIGCHLD as i32;
+        if pid_layout && info.si_pid > 0 {
+            info.si_pid = crate::process::ns::translate_sender_pid_ns(
+                info.si_pid as u32,
+                task.ns_pid.as_ref(),
+            ) as i32;
+        }
+        info
+    });
 
     // sc93 launcher gate: a cross-process SIGKILL to a wedged launcher
     // means the AMS lifecycle timeout fired AND the userspace DFX dumper
@@ -2336,7 +2419,20 @@ unsafe fn send_signal_locked_info(
 
     // Add signal to pending set BEFORE checking mask.
     // Masked signals stay pending and will be delivered when unmasked.
+    //
+    // Linux __send_signal(): real-time signals with a user-class si_code
+    // (SI_TKILL/SI_QUEUE/... — si_code < 0) allocate a sigqueue that is
+    // charged against RLIMIT_SIGPENDING; when the limit is exhausted the
+    // send fails EAGAIN (kill()-originated SI_USER is exempt — kill is
+    // not allowed to fail EAGAIN). Standard signals coalesce in the
+    // bitmap and never take this path.
     if let Some(info) = si {
+        if info.si_signo >= SIGRTMIN && info.si_code < 0 {
+            let limit = task.rlimits.lock()[crate::process::task::rlimit_res::SIGPENDING].0;
+            if limit != u64::MAX && task.pending.rt_queued_count() as u64 >= limit {
+                return Err(crate::errno::Errno::TryAgain.as_neg_i32());
+            }
+        }
         task.pending.add_info(info);
     } else {
         task.pending.add(sig);
@@ -2391,6 +2487,28 @@ pub fn send_signal_info(pid: u32, sig: i32, si_code: i32) -> Result<(), i32> {
     };
     let info = SigInfo::new(sig, si_code, my_pid, my_uid);
     send_signal_with_info(pid, info)
+}
+
+impl SigInfo {
+    /// Attach an rt-payload (si_value) to this SigInfo.
+    ///
+    /// The _rt/_mesgq sifields layout is si_pid@16, si_uid@20, then the
+    /// 8-byte sigval union at offset 24 — the first 8 bytes of `_rest`.
+    /// Consumed by SA_SIGINFO handlers (mq_notify SIGEV_* delivery).
+    pub fn with_sigval(mut self, sival: u64) -> Self {
+        self._rest[0..8].copy_from_slice(&sival.to_ne_bytes());
+        self
+    }
+
+    /// Fill the _sigpoll layout (SIGIO from O_ASYNC/fasync delivery):
+    /// si_band at offset 16 (8 bytes, overlapping si_pid/si_uid) and
+    /// si_fd at offset 24. Consumers (sigtimedwait, SA_SIGINFO handlers)
+    /// decode both to identify the ready descriptor.
+    pub fn set_band_fd(&mut self, band: &[u8; 8], fd: i32) {
+        self.si_pid = i32::from_ne_bytes(band[0..4].try_into().unwrap());
+        self.si_uid = u32::from_ne_bytes(band[4..8].try_into().unwrap());
+        self._rest[0..4].copy_from_slice(&fd.to_ne_bytes());
+    }
 }
 
 /// Send a signal carrying a fully-formed kernel SigInfo.
@@ -2473,6 +2591,18 @@ pub unsafe fn park_stopped_task(task: *mut crate::process::task::Task) {
         }
         break;
     }
+}
+
+/// SIGNAL_UNKILLABLE test: global init (pid 1) AND the init of any
+/// non-initial pid namespace (ns-local pid 1). The reference sets
+/// SIGNAL_UNKILLABLE on every pid-namespace init — a container's pid 1
+/// survives kill(1, SIGKILL) from INSIDE the namespace just like the
+/// global init survives broadcast kills (LTP pidns04).
+fn is_unkillable_init(t: &crate::process::task::Task) -> bool {
+    if t.pid() == 1 && t.tgid() == 1 {
+        return true;
+    }
+    t.ns_pid.is_some() && t.ns_local_pid == 1
 }
 
 /// Check and process signals (called before kernel returns to user space)

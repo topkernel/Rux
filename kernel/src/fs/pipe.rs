@@ -1074,6 +1074,9 @@ struct OAsyncEntry {
     owner_kind: u8,
     owner_id: i32,
     signum: i32,
+    /// The owner's fd number for this description (siginfo si_fd —
+    /// SIGIO consumers like sigwaitinfo decode which fd became ready).
+    owner_fd: i32,
 }
 
 static PIPE_OASYNC: crate::sync::spinlock::Spinlock<alloc::vec::Vec<OAsyncEntry>> =
@@ -1081,7 +1084,8 @@ static PIPE_OASYNC: crate::sync::spinlock::Spinlock<alloc::vec::Vec<OAsyncEntry>
 
 /// Refresh (or remove) this description's O_ASYNC registration after an
 /// fcntl touched f_owner/f_signum/O_ASYNC. No-op for non-pipe files.
-pub fn oasync_register_pipe(file: &File) {
+/// `fd` is the owner's descriptor number (carried in the SIGIO siginfo).
+pub fn oasync_register_pipe(file: &File, fd: i32) {
     let ops = match file.get_ops() {
         Some(o) => o,
         None => return,
@@ -1112,6 +1116,7 @@ pub fn oasync_register_pipe(file: &File) {
             } else {
                 signum
             },
+            owner_fd: fd,
         });
     }
 }
@@ -1124,19 +1129,28 @@ pub fn oasync_unregister_file(file_id: u64) {
 
 /// Send the configured signal to an owner: process (1), process group
 /// (2, id negative in F_SETOWN terms — stored positive here) or thread
-/// (3). Best-effort, like Linux's kill_fasync.
-fn oasync_signal_owner(kind: u8, id: i32, sig: i32) {
+/// (3). Best-effort, like Linux's kill_fasync. Carries a _sigpoll
+/// payload (POLL_IN/POLL_OUT + band + fd) so sigtimedwait/SA_SIGINFO
+/// consumers can identify the ready descriptor — a bare SI_KERNEL signal
+/// left them blind (LTP pidns13 waits SIGUSR1 and checks si_fd/si_code).
+fn oasync_signal_owner(kind: u8, id: i32, sig: i32, poll_code: i32, band: i32, fd: i32) {
+    // _sigpoll layout: si_band @16 (i64), si_fd @24 (i32).
+    let mut info = crate::signal::SigInfo::new(sig, poll_code, 0, 0);
+    let band64 = band as i64;
+    // si_band occupies the 8 bytes at offset 16 (si_pid + si_uid fields).
+    let b = band64.to_ne_bytes();
+    info.set_band_fd(&b, fd);
     match kind {
         1 | 3 => {
             if id > 0 {
-                let _ = crate::signal::send_signal(id as u32, sig);
+                let _ = crate::signal::send_signal_with_info(id as u32, info);
             }
         }
         2 => {
             let pgid = id.unsigned_abs();
             crate::process::pid_hash::pid_hash_for_each_task(|task| unsafe {
                 if (*task).pgid() == pgid {
-                    let _ = crate::signal::send_signal((*task).pid(), sig);
+                    let _ = crate::signal::send_signal_with_info((*task).pid(), info);
                 }
             });
         }
@@ -1147,10 +1161,20 @@ fn oasync_signal_owner(kind: u8, id: i32, sig: i32) {
 /// Notify O_ASYNC owners on `pipe_addr`: readable events signal read-end
 /// owners, writable events signal write-end owners.
 fn oasync_notify(pipe_addr: usize, readable: bool) {
+    // siginfo constants (asm-generic/siginfo.h + poll.h): POLL_IN=1,
+    // POLL_OUT=2; band bits POLLIN|POLLRDNORM (read) and
+    // POLLOUT|POLLWRNORM (write).
+    const POLL_IN_CODE: i32 = 0x0001;
+    const POLL_OUT_CODE: i32 = 0x0002;
+    let (code, band) = if readable {
+        (POLL_IN_CODE, 0x0040 | 0x0100)
+    } else {
+        (POLL_OUT_CODE, 0x0004 | 0x0100)
+    };
     let reg = PIPE_OASYNC.lock();
     for e in reg.iter() {
         if e.pipe_addr == pipe_addr && e.read_end == readable {
-            oasync_signal_owner(e.owner_kind, e.owner_id, e.signum);
+            oasync_signal_owner(e.owner_kind, e.owner_id, e.signum, code, band, e.owner_fd);
         }
     }
 }
