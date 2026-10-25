@@ -75,6 +75,7 @@ macro_rules! dfx_switch_table {
             ParkDump => "parkdump",
             Schb => "schb",
             KsProbe => "ksprobe",
+            R83HeapScan => "r83scan",
         }
     };
 }
@@ -281,9 +282,17 @@ pub enum DfxSwitch {
     /// 3-of-4, leg-15's probe-off boots won 3/3) argues it modulates the
     /// race, so verification rolls run dfx=schb WITHOUT this token.
     KsProbe,
+    /// R83/R74 wild-write hunt: the periodic 2MiB-slice kernel-heap
+    /// fingerprint scan (dfx/r83hunt.rs magic_scan). Runs read_volatile
+    /// sweeps over the heap from timer context; two boots were lost to
+    /// faults inside the sweep (including one read of a corrupted
+    /// va_pa_offset mid-scan), so the scan is opt-in like every other
+    /// dfx instrument. The cheap per-tick header audits stay
+    /// unconditional.
+    R83HeapScan,
 }
 
-const SWITCH_COUNT: usize = 31;
+const SWITCH_COUNT: usize = 32;
 
 static SWITCHES: [AtomicBool; SWITCH_COUNT] = [const { AtomicBool::new(false) }; SWITCH_COUNT];
 
@@ -351,6 +360,7 @@ impl DfxSwitch {
             DfxSwitch::ParkDump => 28,
             DfxSwitch::Schb => 29,
             DfxSwitch::KsProbe => 30,
+            DfxSwitch::R83HeapScan => 31,
         }
     }
 
