@@ -38,7 +38,7 @@ pub use transaction::{
     jbd2_journal_start, jbd2_journal_stop, jbd2_journal_extend,
     jbd2_journal_get_write_access, jbd2_journal_get_create_access,
     jbd2_journal_dirty_metadata, jbd2_journal_forget,
-    is_handle_aborted,
+    is_handle_aborted, new_handle,
 };
 pub use recovery::jbd2_journal_recover;
 pub use revoke::{jbd2_journal_revoke, jbd2_journal_test_revoke};
