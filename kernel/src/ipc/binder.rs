@@ -461,6 +461,15 @@ struct BufBlock {
     /// async slot is released when the receiver frees the buffer (Linux
     /// buffer->transaction). Sync buffers rely on the reply path instead.
     txn: Option<Arc<BinderTxn>>,
+    /// sc243 (leg-17): the sync txn this buffer carried has been
+    /// REPLIED — the request data is protocol-dead and only the
+    /// receiver's contractual BC_FREE_BUFFER remains. The OHOS
+    /// cc54-family services never issue that BC_FREE, so their allocs
+    /// filled with delivered-but-unfreed blocks (sc243 census: 329K
+    /// live BinderTxn arcs, every one pinned by such a block; at the
+    /// launcher floor this is ~210MB of the 831MB heap). On alloc
+    /// pressure these blocks are reclaimed (see alloc_new_buf).
+    reply_done: bool,
 }
 
 struct BinderAlloc {
@@ -471,6 +480,10 @@ struct BinderAlloc {
     user_base: u64,
     blocks: Vec<BufBlock>,
     free_async_space: usize,
+    /// sc243 (leg-17): jiffies of the last stale-async sweep (see
+    /// sweep_stale_async) — rate-limits the O(blocks) scan to one per
+    /// second per allocator.
+    last_sweep_j: u32,
 }
 
 impl BinderAlloc {
@@ -525,6 +538,7 @@ impl BinderAlloc {
                 offsets_size,
                 extra_size,
                 txn: None,
+                reply_done: false,
             });
             self.blocks.sort_by_key(|b| b.off);
             self.free_async_space -= need;
@@ -558,6 +572,7 @@ impl BinderAlloc {
                     offsets_size: 0,
                     extra_size: 0,
                     txn: None,
+                    reply_done: false,
                 };
                 b.len = need;
                 self.blocks.push(rest);
@@ -592,7 +607,12 @@ impl BinderAlloc {
         if was_async {
             self.free_async_space += Self::block_need(ds, os, es);
         }
-        // Coalesce (blocks stay sorted by offset).
+        self.coalesce();
+        Some(txn)
+    }
+
+    /// Merge adjacent free blocks (blocks stay sorted by offset).
+    fn coalesce(&mut self) {
         let mut i = 0;
         while i + 1 < self.blocks.len() {
             if self.blocks[i].free
@@ -605,7 +625,6 @@ impl BinderAlloc {
                 i += 1;
             }
         }
-        Some(txn)
     }
 }
 
@@ -624,6 +643,89 @@ enum Work {
     /// BINDER_WORK_CLEAR_DEATH_NOTIFICATION: deliver
     /// BR_CLEAR_DEATH_NOTIFICATION_DONE (cookie).
     ClearDeathDone { cookie: u64 },
+}
+
+
+/// sc243 (leg-17): reclaim DELIVERED-but-never-freed binder buffers of a
+/// receiver that went silent. The cc54-family OHOS services leak their
+/// BC_FREE_BUFFER duty (render_service RW-leak victims): every oneway
+/// txn's buffer stays `!free` pinning its Arc, the node's async slot
+/// never hands onward, and parked txns pile on node.async_todo — the
+/// sc243 census measured 329K live BinderTxn arcs at the 10-minute park
+/// (at the launcher floor this family is ~210MB of the 831MB heap:
+/// c256 = the txns, c1024+o9-o12 = the Vec<BufBlock> arrays).
+///
+/// The sweep (rate-limited to 1/s per allocator, called on the buffer
+/// alloc path) frees blocks whose txn was delivered (pick_j != 0) more
+/// than 30s ago, or whose sync txn was replied (reply_done), and hands
+/// the async slot onward exactly like BC_FREE_BUFFER's drain — which
+/// also UNWEDGES nodes parked behind a receiver that stopped freeing.
+/// A late userspace BC_FREE for an already-reclaimed block is a no-op
+/// (free_buf's position check fails benignly).
+///
+/// SAFETY: caller holds WORLD. Returns the number of blocks reclaimed.
+unsafe fn sweep_stale_async(world: &World, target: &Arc<BinderProc>) -> usize {
+    const GRACE_J: u32 = (crate::config::KERNEL_HZ as u32).saturating_mul(30);
+    let min_gap: u32 = (crate::config::KERNEL_HZ as u32).max(1);
+    let now = crate::drivers::timer::get_jiffies() as u32;
+    let Some(alloc) = pm(world, target).im().alloc.as_mut() else {
+        return 0;
+    };
+    if alloc.last_sweep_j != 0 && now.wrapping_sub(alloc.last_sweep_j) < min_gap {
+        return 0;
+    }
+    alloc.last_sweep_j = now;
+    let mut reclaimed = 0usize;
+    let mut slot_holders: Vec<Arc<BinderTxn>> = Vec::new();
+    for b in alloc.blocks.iter_mut() {
+        if b.free {
+            continue;
+        }
+        let stale = match b.txn.as_ref() {
+            Some(t) => {
+                // SAFETY: WORLD held; pick_j is written under WORLD.
+                let pj = unsafe { *t.pick_j.get() };
+                pj != 0 && now.wrapping_sub(pj) > GRACE_J
+            }
+            None => b.reply_done,
+        };
+        if !stale {
+            continue;
+        }
+        if let Some(t) = b.txn.take() {
+            if t.holds_async_slot() {
+                slot_holders.push(t);
+            }
+        }
+        if b.async_block {
+            alloc.free_async_space +=
+                BinderAlloc::block_need(b.data_size, b.offsets_size, b.extra_size);
+        }
+        b.free = true;
+        b.allow_user_free = false;
+        b.reply_done = false;
+        reclaimed += 1;
+    }
+    for t in slot_holders {
+        if let Some(node) = &t.target_node {
+            let ns = node.st();
+            // SAFETY: WORLD held (set_holds_async_slot requires it).
+            match ns.async_todo.pop_front() {
+                Some(h) => {
+                    unsafe { h.set_holds_async_slot(true) };
+                    let tp = h.to_proc.clone();
+                    pm(world, &tp).im().todo.push_back(Work::Transaction(h));
+                }
+                None => {
+                    ns.has_async_transaction = false;
+                }
+            }
+        }
+    }
+    if reclaimed > 0 {
+        alloc.coalesce();
+    }
+    reclaimed
 }
 
 // sc140 (Session Q): registry of forked appspawn child pids (written by
@@ -1987,6 +2089,7 @@ pub fn binder_mmap_handler(
         user_base: vaddr as u64,
         blocks: Vec::new(),
         free_async_space: size / 2,
+        last_sweep_j: 0,
     };
     alloc.blocks.push(BufBlock {
         off: 0,
@@ -1998,6 +2101,7 @@ pub fn binder_mmap_handler(
         offsets_size: 0,
         extra_size: 0,
         txn: None,
+        reply_done: false,
     });
     {
         let mut w = world_lock();
@@ -4549,21 +4653,57 @@ fn binder_transaction(
             let _ = is_async;
 
             sg_total += secctx_space;
+            // sc243 (leg-17): rate-limited stale-buffer reclaim BEFORE
+            // the allocation — see sweep_stale_async. Keeps a silent
+            // receiver's never-freed buffers from pinning txn arcs and
+            // wedging the node's async slot forever. The handoff txns
+            // land on their proc todo; no wake is issued (the receivers
+            // this heals are silent by definition — they pick the todo
+            // up on their next read).
+            let swept = unsafe { sweep_stale_async(world, tp) };
+            if swept > 0 {
+                crate::pr_info!(
+                    "binder: reclaimed {} stale buffer(s) of pid {}",
+                    swept,
+                    tp.pid
+                );
+            }
             let off = pm(world, tp)
                 .im()
                 .alloc
                 .as_mut()
                 .unwrap()
                 .new_buf(data_size, offsets_size, sg_total, is_async);
-            let Some(off) = off else {
-                *err_cmd = BR_FAILED_REPLY;
-                crate::pr_info!(
-                    "binder: buffer alloc failed (need {}+{}+{})",
-                    align8(data_size),
-                    align8(offsets_size),
-                    align8(sg_size)
-                );
-                return;
+            let off = match off {
+                Some(o) => o,
+                None => {
+                    // One forced retry: the 1/s rate stamp may have
+                    // skipped the sweep above on this exact call.
+                    if let Some(a) = pm(world, tp).im().alloc.as_mut() {
+                        a.last_sweep_j = 0;
+                    }
+                    let swept2 = unsafe { sweep_stale_async(world, tp) };
+                    match (swept2 > 0).then(|| {
+                        pm(world, tp)
+                            .im()
+                            .alloc
+                            .as_mut()
+                            .unwrap()
+                            .new_buf(data_size, offsets_size, sg_total, is_async)
+                    }) {
+                        Some(Some(o)) => o,
+                        _ => {
+                            *err_cmd = BR_FAILED_REPLY;
+                            crate::pr_info!(
+                                "binder: buffer alloc failed (need {}+{}+{})",
+                                align8(data_size),
+                                align8(offsets_size),
+                                align8(sg_size)
+                            );
+                            return;
+                        }
+                    }
+                }
             };
             block_off = off;
 
@@ -5205,6 +5345,20 @@ fn binder_transaction(
                     // The original transaction is finished: unpin its node.
                     if let Some(orig) = &in_reply_to {
                         unpin_txn_node(world, orig);
+                        // sc243 (leg-17): the replied txn's request
+                        // buffer in the replier's alloc is
+                        // protocol-dead — mark it reclaimable for
+                        // sweep_stale_async (the receiver's BC_FREE may
+                        // never come; cc54 family).
+                        if let Some(a) = pm(world, &orig.to_proc).im().alloc.as_mut() {
+                            if let Some(b) = a
+                                .blocks
+                                .iter_mut()
+                                .find(|b| b.off == orig.buffer_off && !b.free)
+                            {
+                                b.reply_done = true;
+                            }
+                        }
                     }
                     wakes.push(tproc.clone());
                     wakes.push(proc.clone());

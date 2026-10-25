@@ -204,6 +204,7 @@ pub fn printk(level: u8, args: fmt::Arguments) {
     // Perf: filter BEFORE formatting (same rationale as printk_ln below —
     // discarded messages must not pay the fmt pass).
     if level > CONSOLE_LOGLEVEL.load(Ordering::Relaxed) {
+        crate::dfx::syscost::note_printk_filtered(); // syscost probe
         return;
     }
     printk_ring_always(level, args);
@@ -368,12 +369,16 @@ fn emit_to_console(text: &[u8]) {
         CONSOLE_EMIT_SKIPPED.fetch_add(1, Ordering::Relaxed);
         return; // record is in the ring buffer; console line skipped
     }
+    let mut emitted = 0usize; // syscost probe
     for &b in text {
         if b == b'\n' {
             crate::console::putchar_no_lock(b'\r');
+            emitted += 1;
         }
         crate::console::putchar_no_lock(b);
+        emitted += 1;
     }
+    crate::dfx::syscost::note_printk_con(emitted); // syscost probe
     CONSOLE_EMIT_LOCK.store(false, Ordering::Release);
 }
 
@@ -465,6 +470,7 @@ fn printk_bytes(level: u8, text: &[u8]) {
 // ==================== Ring Buffer Write ====================
 
 fn write_to_ring_buffer(level: u8, text: &[u8], timestamp: u64) {
+    crate::dfx::syscost::note_printk_ring(text.len()); // syscost probe
     let pid = crate::process::current_pid() as u32;
     // Real CPU id (review批次8: hard-coded 0 attributed every message to
     // CPU 0, hiding cross-CPU issues in the logs).

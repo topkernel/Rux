@@ -544,6 +544,10 @@ pub const PSITE_SLOTS: usize = 256;
 pub static PGFREE_TOTAL: AtomicUsize = AtomicUsize::new(0);
 /// MmStruct::drop invocations (user address spaces fully released).
 pub static MM_DROPS: AtomicUsize = AtomicUsize::new(0);
+/// MmStruct user-space creations — the creation-side twin of MM_DROPS
+/// so a census can state live_mm = MM_NEWS - MM_DROPS directly
+/// (leg-17 spawn-residue leak test on the c1024 population).
+pub static MM_NEWS: AtomicUsize = AtomicUsize::new(0);
 /// free_user_page_tables entries (teardown walks started).
 pub static FUT_CALLS: AtomicUsize = AtomicUsize::new(0);
 /// page-table pages actually returned by free_page_table_checked.

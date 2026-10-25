@@ -281,7 +281,14 @@ impl File {
                 return result;
             }
         }
-        -9  // EBADF
+        // Valid fd, readable mode, but the type carries no read op
+        // (epoll, binder, access_token, io_uring). The reference
+        // kernel's vfs_read returns EINVAL here, NOT EBADF — returning EBADF makes an
+        // OH event loop read its own epoll fd (pa38: launcher fd 32,
+        // 156K iterations) look like "fd closed", and the loop spins
+        // on it instead of taking its EINVAL error path. The O_WRONLY
+        // EBADF above is the ABI-correct direction check and stays.
+        -22 // EINVAL
     }
 
     /// Write file
@@ -305,7 +312,9 @@ impl File {
                 return result;
             }
         }
-        -9  // EBADF
+        // Valid fd, writable mode, but the type carries no write op —
+        // the reference kernel's vfs_write returns EINVAL here (see read()'s note).
+        -22 // EINVAL
     }
 
     /// Seek file position
@@ -339,6 +348,21 @@ impl File {
         // O_WRONLY pipe write end is also ESPIPE, not EBADF).
         let inode_opt = &*self.inode.get();
         if !self.positional_capable() {
+            // Two non-seekable classes must be told apart here, because
+            // positional_capable() lumps them together. Pipes/sockets/
+            // fifos carry a read op but no seek state: ESPIPE (Linux
+            // rw_verify_area's FMODE_STREAM rejection — LTP preadv202
+            // expects ESPIPE on a pipe read end, and pread on an
+            // O_WRONLY pipe write end is also ESPIPE, not EBADF).
+            // Op-less fd types (epoll/binder/access_token/io_uring: no
+            // read op, no read_at, no seek state, no inode) get EINVAL —
+            // the same value read() returns for them (vfs_read's
+            // no-read-op fallback).
+            if let Some(ops) = *self.ops.get() {
+                if ops.read.is_none() && ops.read_at.is_none() {
+                    return -22; // EINVAL
+                }
+            }
             return -29; // ESPIPE
         }
         // f_mode enforcement, same as read().

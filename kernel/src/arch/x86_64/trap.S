@@ -566,53 +566,12 @@ user_iret_label:
     jmp 1b
 
 /* ============================================================================
- * ret_from_fork — first instruction of a forked child
- *
- * fork sets child.thread.sp = stack_top - 168 (the complete user frame)
- * and child.thread.callee.ret_addr = ret_from_fork; __switch_to's final
- * `push ret_addr; ret` lands here with RSP at the frame and RBP holding
- * callee.rbp from the child's thread struct (zero for a fresh child).
- *
- * Runs schedule_tail first (finish the switch bookkeeping — deferred
- * exit notification etc.), then returns through the common exit path so
- * the child gets the same signal/resched checks as any trap return.
+ * ret_from_fork / ret_from_fork_kernel now live in trap.rs as Rust naked
+ * fns (leg-31): their addresses are taken from Rust code, and any LTO
+ * setting instantiated this include_str!'d global_asm! unit more than
+ * once, double-defining the address-taken symbols and failing the
+ * release-profile link. Contracts unchanged — see the naked fns' block
+ * comment for the fork/kthread entry protocol (frame layout, callee
+ * registers, the schedule_tail-then-trap_exit sequence).
  * ============================================================================
  */
-.global ret_from_fork
-.hidden ret_from_fork
-ret_from_fork:
-    movq %rsp, %rbp
-    andq $-16, %rsp
-    call get_prev_task           /* RAX = prev task (set by context_switch) */
-    movq %rax, %rdi
-    call schedule_tail
-    movq %rbp, %rsp
-    jmp trap_exit
-
-/* ============================================================================
- * ret_from_fork_kernel — first instruction of a kernel thread
- *
- * Convention (mirrors the riscv64 twin's s0/s1 protocol): kthread setup
- * stores fn in thread.callee.r12 and fn_arg in thread.callee.r13, and
- * thread.sp points at a scratch pt_regs-sized region at the top of the
- * kthread stack.  After __switch_to restores the callee registers:
- *   R12 = fn, R13 = fn_arg, RSP = scratch regs.
- * The helper never returns (it calls do_exit).
- * ============================================================================
- */
-.global ret_from_fork_kernel
-.hidden ret_from_fork_kernel
-ret_from_fork_kernel:
-    movq %rsp, %rbp
-    andq $-16, %rsp
-    call get_prev_task
-    movq %rax, %rdi
-    call schedule_tail
-    movq %r13, %rdi              /* fn_arg */
-    movq %r12, %rsi              /* fn_ptr */
-    movq %rbp, %rdx              /* regs  */
-    call ret_from_fork_kernel_helper
-    /* unreachable — helper calls do_exit */
-1:  cli
-    hlt
-    jmp 1b

@@ -235,9 +235,21 @@ layer counts reads, writes, sectors and the time spent per device
 block/genhd.c). Rux merges no requests, has no discard path and no
 separate flush path, so those columns report zero.
 
+**Part 3 — partly done (cont).** `/proc/timer_list` is implemented in
+Linux's structure (verified against a Linux guest: "Timer List Version:
+v0.10", the "now at <ns> nsecs" line, the per-CPU clock section and
+the "active timers" entries with their expiry). Rux has no hrtimer
+clock bases and no per-timer callback, so the two fields with no
+counterpart are filled with what the kernel knows — the timer id
+instead of the hrtimer struct address, and the action's kind
+(alarm/wake/timerfd/oneshot) instead of a callback function name.
+
 **Part 3 — remaining.**
 
-- `/proc/sched` (per-task runqueue view), `/proc/timer_list`.
+- `/proc/sched` (the per-task runqueue view). Its layout is a ~50
+  field per-task block; the reference host does not expose the file
+  (`CONFIG_SCHEDSTATS` off), so there is no format to copy — it is
+  left alone rather than invented.
 - `/proc/pagetypeinfo` — the exact text differs between kernel
   versions and the reference host does not expose the file
   (`CONFIG_PROC_PAGE_MONITOR` off), so the format is not verified yet
@@ -313,26 +325,58 @@ same names.
 
 Goal: a general-purpose event facility to replace the ad-hoc rings.
 
-- `tracepoint!` macro with a per-event id table, enabled/disabled at
-  runtime.
-- Per-CPU lockless ring buffers with a global sequence, drained by a
-  reader.
-- `/sys/kernel/tracing` (tracefs) with `available_tracers`, `trace`,
-  `events/<group>/<event>/{enable,id,format}`, `trace_pipe` — the Linux
-  layout, including the `tracing_on` master switch.
-- Reuse the existing ring shapes as the first events: syscall entry/exit,
-  scheduler pick/switch, page fault, block I/O completion, binder
-  transaction.
-- `trace-cmd`-style text output so the same tooling reads Rux and Linux.
+**Done (core, guest-verified).** `kernel/src/trace/` implements the
+event table (raw_syscalls:sys_enter, raw_syscalls:sys_exit,
+sched:sched_switch), per-CPU ring buffers with one global sequence
+counter, and the text renderer byte-shaped after this host's live
+tracefs (header block, `%16s-%-7d [%03d] <5 flags> %5lu.%06lu` record
+lines). The tracefs side (published under /sys/kernel/debug/tracing)
+carries tracing_on, trace, trace_pipe (consuming, no header),
+available_tracers/current_tracer (nop), available_events, set_event
+(the standard grammar incl. '!' disable and all/none), buffer_size_kb,
+the events tree with per-event enable/id/format/filter, per-group and
+whole-tree enable with the 1/0/X mixed-state convention, at the
+reference file modes. The sched_switch site lives in __schedule just
+before context_switch (swapper/N for the idle comm); the syscall pair
+brackets syscall_handler_inner with the return read from a0/rax.
+Every call site marshals arguments only behind event.armed() (two
+relaxed loads), so the disabled path is one branch. Verified from a
+guest shell by test/tracefs-smoke.sh.
 
-Acceptance: enabling `sched:sched_switch` produces a switch trace
-readable from a guest shell; the trace ring survives a 10-minute soak
-without losing the first events.
+**Remaining.**
+
+- More events from the same ring shapes: page fault, block I/O
+  completion, binder transaction, scheduler pick/wakeup.
+- `trace_marker` (write-only marker events) and the per_cpu/cpuN/
+  {trace,trace_pipe,stats} views.
+- A `tracepoint!` macro to declare sites without hand-writing the
+  table row (the table is three rows today; a macro pays off when the
+  event count grows).
+- The 10-minute soak acceptance run for the ring.
 
 ### Tranche 5 — crash policy and persistent evidence
 
-- `panic=` timeout (`panic=N`, `panic=o`, `panic=immediate`): reboot
-  after N seconds instead of halting in `wfi` forever.
+**Part 1 — done.** The `panic=` kernel parameter (Linux's
+Documentation/admin-guide/kernel-parameters.txt): `panic=N` reboots N
+seconds after the panic, `panic=o` / `panic=O` / `panic=immediate`
+reboot at once, and with no `panic=` (or `panic=0`) the kernel halts —
+Linux's default, and Rux's behaviour until now. The reboot path
+deliberately does NOT signal init and does NOT sync the filesystems:
+Linux's panic path reboots without touching the disks, because the panic
+may well be the storage stack itself, and a sync that hangs in a panic
+would defeat the timeout.
+
+**Part 2 — remaining.**
+
+- Non-fatal `Oops` path for recoverable faults (Linux's `oops=panic`
+  default off).
+- pstore/ramoops-lite: keep the last panic record (registers + the tail
+  of the ring buffer) in a reserved RAM area and expose it through
+  `/sys/fs/pstore/` after the next boot.
+- Re-enable `printk::persistent_log_init()` with a size cap, so the
+  serial tail survives the reboot.
+
+The original bullets, for reference:
 - Non-fatal `Oops` path for recoverable faults (Linux's `oops=panic`
   default off).
 - pstore/ramoops-lite: keep the last panic record (registers + the tail

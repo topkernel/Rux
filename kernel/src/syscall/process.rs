@@ -4956,6 +4956,35 @@ pub fn init_exited_fallback_cascade() {
     }
 }
 
+/// Reboot the machine from the panic path (Linux's panic ->
+/// kernel_restart).
+///
+/// Unlike the reboot(2) path this neither signals init nor syncs the
+/// filesystems: Linux's panic path reboots without touching the disks,
+/// because the panic may well be the storage stack itself. A sync that
+/// hangs in a panic would defeat the whole point of the timeout.
+pub fn panic_reboot() -> ! {
+    #[cfg(feature = "riscv64")]
+    {
+        // SBI SRST warm reset (QEMU supports it); fall back to the
+        // legacy shutdown ecall when the SBI lacks SRST.
+        if !crate::sbi::sbi_system_reset(
+            crate::sbi::srst_type::WARM_REBOOT,
+            crate::sbi::srst_reason::NONE,
+        ) {
+            sbi_legacy_shutdown();
+        }
+    }
+    #[cfg(feature = "x86_64")]
+    {
+        // No 8259/ACPI reset yet — park with interrupts waiting.
+        machine_park();
+    }
+    loop {
+        core::hint::spin_loop();
+    }
+}
+
 /// Restart the machine now (Linux sysrq 'b': "immediately restarts the
 /// computer without syncing disks or unmounting them").
 ///

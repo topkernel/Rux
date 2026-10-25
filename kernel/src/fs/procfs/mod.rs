@@ -64,6 +64,7 @@ pub mod schedstat;
 pub mod softirqs;
 pub mod sysctl;
 pub mod sysrq;
+pub mod timer_list;
 pub mod vmstat;
 pub mod net;
 pub mod configgz;
@@ -528,6 +529,8 @@ impl ProcFSSuperBlock {
         self.create_dynamic_file("locks", locks::generate);
         // The per-device I/O statistics (Linux layout).
         self.create_dynamic_file("diskstats", diskstats::generate);
+        // The pending kernel timers (Linux layout).
+        self.create_dynamic_file("timer_list", timer_list::generate);
         // Memory statistics (Linux layout).
         self.create_dynamic_file("vmstat", vmstat::generate);
         self.create_dynamic_file("buddyinfo", vmstat::generate_buddyinfo);
@@ -1458,6 +1461,9 @@ unsafe fn procfs_getattr(inode: &Inode, stat: &mut crate::fs::Stat) -> i32 {
         InodeMode::S_IFDIR | 0o555  // read-only directory
     } else if node.is_symlink() {
         InodeMode::S_IFLNK | 0o777
+    } else if node.name.as_slice() == b"sysrq-trigger" {
+        // /proc/sysrq-trigger is write-only (0200, root; host-verified).
+        InodeMode::S_IFREG | 0o200
     } else if node.sysctl_write.is_some()
         || node.pid_file_kind == Some(PidFileKind::OomScoreAdj)
         || matches!(
@@ -1999,6 +2005,12 @@ unsafe fn procfs_open(inode: &Inode, file: &crate::fs::File) -> i32 {
         None => return 0,
     };
     let node = &*(node_ptr as *const ProcFSNode);
+
+    // /proc/sysrq-trigger: a write-only node (mode 0200) — an
+    // open for read is refused, as on the live host.
+    if node.name.as_slice() == b"sysrq-trigger" && !file.flags().is_writeonly() {
+        return errno::Errno::PermissionDenied.as_neg_i32();
+    }
 
     // /proc/kmsg stream: single-reader gate (second concurrent open
     // EBUSY, Linux fs/proc/kmsg.c), NO content snapshot — reads consume

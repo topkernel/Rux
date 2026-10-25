@@ -16,8 +16,14 @@ This is the **highest guiding principle** for Rux kernel development. All design
 - **ELF Format Compatible**: Executable format identical to Linux
 
 **Design Philosophy**:
-- **External interfaces must be 100% compatible** with Linux
-- **Internal implementation can be improved** when it doesn't affect external compatibility
+- **External interfaces must be 100% compatible** with the target ABI
+- **Advantageous internal design divergences are kept, not apologized for**:
+  where Rux's internal design differs from the mainstream approach and
+  holds an advantage, keep our design as long as (1) external compatibility
+  is intact, (2) LTP passes the affected families, (3) no upper-layer
+  software breaks. Record every such divergence in
+  `docs/architecture/design-divergences.md` (template inside; first entry:
+  the global run queue).
 
 **Reference Resources**:
 - Linux man pages (`man 2 syscall`) - for interface specifications

@@ -13,19 +13,35 @@ main lands, do not cherry-pick rows.
 | TERM-DESCHED census | 8 | 6–10 |
 | WAKE-REFUSED census | 32 | 28–36 |
 | WAKE-STRANDED | 0–7 organic (~1–1.5s) | no 1001ms-grid class |
-| tick rate per CPU | 99.74–99.98 /s | ≥99.5 sustained |
+| tick rate per CPU | 99.74–99.98 /s | ≥99.5 sustained (quiet window; one-CPU marginal misses under heavy foreign-QEMU load are the documented flake class) |
 | kernel panics / new OOM classes | 0 | 0 |
-| total syscall volume (780s boot) | ~136M (pa38) | ±10% |
+| total syscall volume (780s boot) | ~136M (pa38) | ±10% IN A COMPARABLE HOST-LOAD WINDOW — row is pace-coupled: pa41gate (leg 32) proved a flat −35% pace deficit from the first checkpoint under 14–19 foreign QEMUs (77.1M, per-op costs held); re-bank from a passing quiet-window gate run before enforcing |
 | clock_gettime avg | 3–4 µs | ±20% or better |
-| nanosleep avg | ~221 ms post-tick-fix | ±20% or better |
+| nanosleep avg | UNBANKED (was seeded ~221 ms — inconsistent: the seed boot pa38 itself read 333 ms; observed range across pa38/sc239/pa41gate is 174–333 ms, workload-mix dependent) | re-bank from a passing quiet-window gate run; until then INFO-only (run/perf-gate.sh already treats it so) |
 
 ## Tier 2 — pbench P1-P7 medians (main-class kernel, usbless image)
 
 Banked Rux guest run: pb1 (pa31-class kernel, DONE t=378s, 25/25 lines).
 Compare medians only (p99 is host-noise-dominated on a loaded host).
-Banked Linux reference column (same image, OHOS 6.6.11 kernel, med-of-4):
-perf-report.md §8.5. Rux medians must stay within ±20% of the pb1 column
-per metric or improve.
+Banked reference-kernel column (same image, OHOS 6.6.101 kernel,
+med-of-4): perf-report.md §8.5. Rux medians must stay within ±20% of
+the pb1 column per metric or improve.
+
+ANCHOR PROVENANCE (leg 32, commit 2f17d663): four cells of the Tier-2
+anchor in run/perf-gate.sh had been transcribed from the REFERENCE
+column (p6_write_fsync 4754.99, p6_mkdir_rmdir 40.43, p6_unlink 26.99,
+p6_append 0.471) instead of pb1's own medians (18124.666, 83191.968,
+32815.925, 500.378) — those rows failed by construction on every run
+and produced the phantom "p6_unlink +22.4% marginal-out" bookkeeping
+(leg 32 rerun: +1.8%, in band). The anchor now reads pb1 medians; keep
+it that way — the reference column never belongs in a Rux gate anchor.
+
+PROFILE-CLASS NOTE (leg 32, perf-report 8.10.1): Tier-2 rows are only
+comparable within one build profile. The pb1 anchor column is a DEBUG
+kernel; debug-class gate runs compare against it unchanged. A
+release-strong kernel reads 10-30x lower on the floor families — its
+gate anchor is the pa41-strong column (perf-report 8.10.1), and
+cross-class comparison is meaningless.
 
 ## Guarded hot-path domains (user mandate: allocation/reclaim, scheduling, filesystem)
 
