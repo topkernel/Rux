@@ -454,6 +454,10 @@ struct BufBlock {
     allow_user_free: bool,
     data_size: usize,
     offsets_size: usize,
+    /// Per-allocation id (the reference's buffer->debug_id): assigned
+    /// by new_buf when a block is carved, 0 while free. Carried by the
+    /// binder_transaction_alloc_buf / buffer_release trace events.
+    buf_id: u64,
     /// sg (extra) area size: BINDER_TYPE_PTR payload copies (layout:
     /// [data][offsets][extra], each u64-aligned).
     extra_size: usize,
@@ -484,6 +488,8 @@ struct BinderAlloc {
     /// sweep_stale_async) — rate-limits the O(blocks) scan to one per
     /// second per allocator.
     last_sweep_j: u32,
+    /// Monotone buffer-id source (see BufBlock::buf_id).
+    next_buf_id: u64,
 }
 
 impl BinderAlloc {
@@ -528,6 +534,8 @@ impl BinderAlloc {
             let i = hit?;
             let cand = self.blocks[i].off + self.blocks[i].len - need;
             self.blocks[i].len -= need;
+            let buf_id = self.next_buf_id;
+            self.next_buf_id += 1;
             self.blocks.push(BufBlock {
                 off: cand,
                 len: need,
@@ -537,11 +545,15 @@ impl BinderAlloc {
                 data_size,
                 offsets_size,
                 extra_size,
+                buf_id,
                 txn: None,
                 reply_done: false,
             });
             self.blocks.sort_by_key(|b| b.off);
             self.free_async_space -= need;
+            crate::trace::trace_binder_transaction_alloc_buf(
+                buf_id, data_size as u64, offsets_size as u64, extra_size as u64,
+            );
             return Some(cand);
         }
         // Sync: first-fit from the low end.
@@ -554,6 +566,8 @@ impl BinderAlloc {
             break;
         }
         let o = off?;
+        let buf_id = self.next_buf_id;
+        self.next_buf_id += 1;
         if let Some(b) = self.blocks.iter_mut().find(|b| b.off == o) {
             b.free = false;
             b.async_block = false;
@@ -561,6 +575,7 @@ impl BinderAlloc {
             b.data_size = data_size;
             b.offsets_size = offsets_size;
             b.extra_size = extra_size;
+            b.buf_id = buf_id;
             if b.len > need {
                 let rest = BufBlock {
                     off: o + need,
@@ -571,6 +586,7 @@ impl BinderAlloc {
                     data_size: 0,
                     offsets_size: 0,
                     extra_size: 0,
+                    buf_id: 0,
                     txn: None,
                     reply_done: false,
                 };
@@ -579,6 +595,9 @@ impl BinderAlloc {
                 self.blocks.sort_by_key(|b| b.off);
             }
         }
+        crate::trace::trace_binder_transaction_alloc_buf(
+            buf_id, data_size as u64, offsets_size as u64, extra_size as u64,
+        );
         Some(o)
     }
 
@@ -601,12 +620,20 @@ impl BinderAlloc {
         let ds = self.blocks[idx].data_size;
         let os = self.blocks[idx].offsets_size;
         let es = self.blocks[idx].extra_size;
+        let buf_id = self.blocks[idx].buf_id;
         let txn = self.blocks[idx].txn.take();
         self.blocks[idx].free = true;
         self.blocks[idx].allow_user_free = false;
+        self.blocks[idx].buf_id = 0;
         if was_async {
             self.free_async_space += Self::block_need(ds, os, es);
         }
+        // binder:binder_transaction_buffer_release — the free chokepoint
+        // every release path (BC_FREE_BUFFER, teardown, stale reclaim)
+        // funnels through.
+        crate::trace::trace_binder_transaction_buffer_release(
+            buf_id, ds as u64, os as u64, es as u64,
+        );
         self.coalesce();
         Some(txn)
     }
@@ -2090,6 +2117,7 @@ pub fn binder_mmap_handler(
         blocks: Vec::new(),
         free_async_space: size / 2,
         last_sweep_j: 0,
+        next_buf_id: 1,
     };
     alloc.blocks.push(BufBlock {
         off: 0,
@@ -2100,6 +2128,7 @@ pub fn binder_mmap_handler(
         data_size: 0,
         offsets_size: 0,
         extra_size: 0,
+        buf_id: 0,
         txn: None,
         reply_done: false,
     });
@@ -5007,6 +5036,20 @@ fn binder_transaction(
         pick_j: core::cell::UnsafeCell::new(0),
     });
 
+    // binder:binder_transaction — the transaction was built and is about
+    // to land on its target. to_thread is 0 here (the receiving thread
+    // is only chosen at delivery, the same value the reference records
+    // at this point).
+    crate::trace::trace_binder_transaction(
+        txn.id,
+        target_node.as_ref().map(|n| n.id).unwrap_or(0),
+        target.pid as u32,
+        0,
+        reply,
+        tr.code,
+        tr.flags,
+    );
+
     // sc155/156 (Session R): SA-table mutation tracer. Session Q closed
     // the park cause to "SA 501 (AppMgrService) never lands in samgr's
     // table" but could not see WHO fails to register it: APPTXN covers
@@ -6192,6 +6235,10 @@ fn binder_thread_read(
                                     t.from_proc.as_ref().map(|p| p.pid).unwrap_or(0),
                                 );
                             }
+                            // binder:binder_transaction_received — the
+                            // transaction is being read out to its
+                            // receiving thread (BR_TRANSACTION/BR_REPLY).
+                            crate::trace::trace_binder_transaction_received(t.id);
                             let (tptr, tcookie) = match &t.target_node {
                                 Some(n) => (n.ptr, n.cookie),
                                 None => (0, 0),
