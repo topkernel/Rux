@@ -4566,3 +4566,104 @@ CORRECTION (06:45, coordinator): 6ba58562 + the five other leg-17
 commits (censusat, peek LIVE/v3, sweep_stale_async, both pin fixes)
 merged to MAIN as de41d5ab shortly after this section opened — my
 06:24 "NOT in main" check predates it. Branch already carries all.
+
+LEG-19 (OH UI lane, leg-18 successor) — OPENED ~10:15.
+
+SESSION START: merged main 47d96961 into feature/samgr-callback (838f3b53;
+conflicts: config.rs take main's deletion [generated], census_peek4/LIVE +
+schb call keep branch [leg-17 probes not in main's de41d5ab merge]).
+
+LEG-18 ESTATE READ (sc252 + leg-18's sc253, both timeout-ended):
+- EACCES THEORY DEAD: zero MMAP-EACCES/MPROTECT-EACCES in sc252 AND
+  sc253; every family file-backed mmap in APPMAPSRC is normal ld.so
+  PROT_READ/MAP_PRIVATE or read-only param files. No read-only-fd
+  downgrade story exists.
+- sc253 (5MB serial): ZERO crashes; wedged with binder-stall slots
+  [pid303][pid758] + WAKE-RUN-LEAK census 2050 lines, tids parked
+  INTERRUPTIBLE unlinked slotless pick_state=PICK_LIVE(1), kicked
+  30-40x each, never "running".
+- sc252's only fault: DB_TaskExecutor (pid 1156) rep-movsq memcpy READ
+  of 0x3a8 bytes from 0x7ff000729000 = the 8KB PROT_NONE GUARD BELOW a
+  musl thread stack block (rsp on the adjacent block's stack top);
+  source object pointer points into a guard page. Downstream of the
+  same disturbed state, not an independent bug.
+- WEDGE RECONSTRUCTION (pre-fix): pid303-class spinner (futex
+  FUTEX_WAIT val=2 -> ETIMEDOUT tight loop, FXRS #2908+; also
+  param_watcher tid329 FUTEX_WAIT -> -11 EAGAIN loop on its main
+  stack) pegs CPUs -> idle-loop harvester never runs -> frozen
+  userspace rwlocks (RWFRZ-HIGH: tgids 377/466/572/681/730/732 word=2
+  readers frozen d+0) pile up behind stranded holders.
+
+LEG-19 ANALYSIS (code reading + log forensics, before any fix):
+1. R80 orphan-watch CADENCE BUG confirmed: confirmation required a
+   second sighting 50..60 jiffies after the first (re-record rule
+   reset anything older than 60), but the only observers on a busy box
+   are binder rekicks (REKICK_SECS=15 = 1500 jiffies at HZ=100). The
+   R80 LIVE-phantom heal could NEVER mature while CPUs stayed busy.
+   sc252/253: zero R80 heals vs 1359/2050 leak lines.
+2. sc254 attribution (see below) later killed the DL-throttle theory:
+   census tids are pol=0 (SCHED_NORMAL), dl_thr=0, and wok>=1 with the
+   task still parked: the kicks DO wake them (wake->link->run->recheck-
+   cond->re-park loop inside wait_event_interruptible; read_wait_since
+   is stored once per ENTERING binder read, so the census cannot tell a
+   re-parked cycler from a stranded task). The census shape is mostly
+   HEALTHY cycling, not wake loss.
+
+FIXES LANDED (35dd99e1):
+- R81: orphan_watch gains an exec-clock word; confirmation = same
+  (task,pid) sighting >=threshold jiffies apart with sum_exec_runtime
+  FROZEN (a task executing anywhere is charged by update_curr every
+  tick; frozen exec = provably not running, at ANY observer cadence).
+  An advancing exec clock refreshes the record (replaces the 60-jiffy
+  re-record rule). Direct-console DL-ENQ-DEFERRED print (R82) on the
+  only silent sleeping-wake refusal.
+- WAKE-RUN-LEAK census: +pol/on_rq/dl_thr and per-episode kick outcome
+  counters (wok/wno; wake_thread records wake_up result; reset at
+  park).
+- enq_j SILENCE RULE (leg-17's banked design): sweep_silent_txns in
+  stall_report's WORLD walk retires undelivered txns (pick_j==0) older
+  than 30s oneway / 60s sync via the node-death pattern
+  (set_holds_async_slot(false) + dead_reply_to_sender for sync +
+  finish_work; async-slot handoff mirrors sweep_stale_async). Frees the
+  dominant parked-oneway floor population; senders of parked sync calls
+  get BR_DEAD_REPLY.
+
+SC254 RESULT (old kernel + R81/probes/retire, usbless, KVM SMP2 4G,
+quietcon dfx=schb,sleepsnap, SECS=2100, timeout end, ZERO KERNPANIC):
+DEEPEST AND HEALTHIEST ROLL OF THE LANE: pidmax 5432 / tasks 3144 /
+heap 847MB at t=1981 (sc251B record 5254/2986/846 wedged; sc252/253
+wedged at 1531/1407). Spawn flow NEVER stalled (flow 1-58 throughout);
+direct reclaim engaged late (drct=198 drctJ=7897) and held. Launcher
+spawned at t~166 (sc252 never got there); its ability manager ran
+(LauncherAbilityManager/CommonBundleManager/osaccount loops). SILENT-
+TXN-RETIRE fired once (4 txns) - conservative as designed. schbd
+heartbeat stranded t=187..1245 (a park/wake victim itself) then
+RESUMED to the end. Screen stayed black (composer never surfaced; the
+launcher crash-loop below keeps resetting it).
+
+LAUNCHER CRASH NAMED (sc254 full dump, pid 1630 honydataability ==
+pid 1635 m.ohos.launcher, same rip 0x3fbf1187d2, same cr2+0xa93c):
+- vma(cr2) 0x7ff081bc0000-0x7ff081bd2000 flags=0x11 FileBacked fd=40
+  off=0x0; cr2fd: path=anon_inode accmode=0x2 (O_RDWR) rawflags=0x2.
+- Siblings of fd 40: off=0x11000 R|X, off=0x37000 R, off=0x38000 RW,
+  plus a second whole-file R map at 0x7ff08c200000. => fd 40 is a
+  MEMFD-backed dlopen'd library; the fault VMA is its FIRST PT_LOAD
+  (R-only, 72KB); rip module 0x3fbf077000 (fd closed, off=0x76000) is
+  the same module family's text at the fixed base.
+- ripbytes f0 0f b1 51 10 ... = lock cmpxchg [rcx+0x10],edx; refcount
+  op writing at PT_LOAD0+0xa93c (R-only). The lock should live in
+  writable memory; relocations/pointer point into the rodata segment.
+- NEXT DECIDER (sc255, rolling): per-comm APPMAPSRC budget (48/comm;
+  the appspawn daemon ate the global 150 before any launcher instance
+  exec'd in sc254) + USEGV-L one-liner now prints fdVMA fd/path/acc/
+  off/flags at ANY budget depth + per-comm full-dump budget (first 2
+  per comm). Scenarios: (a) ld.so requested PROT_READ for the segment
+  containing +0xa93c and the memfd ELF itself puts a lock in rodata ->
+  the memfd CONTENT was corrupted at write time (our write path? the
+  module generator?) or the generator is layout-broken only under our
+  ABI; (b) the app mapped an RW twin we lost (no evidence yet); (c)
+  relocations resolved against the wrong of the TWO mappings of the
+  same file (0x7ff081bc0000 vs fixed-base 0x3fbf077000 vs second
+  whole-file map 0x7ff08c200000).
+
+MAKE TEST: riscv64 1096/1096 PASS on 35dd99e1 (both arches build).
