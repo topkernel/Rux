@@ -2353,6 +2353,119 @@ fn user_segv_forensics(regs: &PtRegs, fault_addr: u64) {
             crate::pr_err!("{}", line);
         }
     }
+
+    // leg-22 probes (sc258 verdict: libhicollie.z.so, condvar at
+    // module+0x3c108 inside the watchdog static at module+0x3bff0, its
+    // _c_head slot (obj+0x140) holds a pointer to the module's own
+    // .rodata string at module+0xa92c). In musl's cond apply() the
+    // condvar arrives in rdi and survives in r9; r15 carries the
+    // hicollie object base (c-0x118). Three dumps decide the fix
+    // direction:
+    //   cv       — the condvar's own words (tail@+8, waiters@+0xc,
+    //              seq@+0x10, lock@+0x20, head@+0x28): a single stale
+    //              field vs whole-object garbage.
+    //   obj      — watchdog-object fields around the condvar
+    //              (+0x100..+0x170, plus +0x2f0..+0x320): fresh
+    //              constructor values vs foreign patterns.
+    //   bssslack — the anon .bss page's tail PAST the segment end
+    //              (ph4 memsz ends at module+0x3c51c; the page runs to
+    //              0x3c600). Nothing in the module addresses that
+    //              slack, so ANY nonzero word there means the page
+    //              arrived dirty from the recycler — the kernel-bug
+    //              smoking gun. module base = cr2 - 0xa93c (the fault
+    //              foff for this exact crash family).
+    if let Some(aspace) = addr_space.as_ref() {
+        let root = aspace.root_ppn();
+        let is_user_ptr = |p: u64| p > 0x1000 && p < 0x0000_8000_0000_0000;
+        // cv words via r9 (condvar) when it is the apply()-shape:
+        // rdi == r9 + 0x20 (the re-lock slot).
+        if is_user_ptr(regs.r9) && regs.rdi == regs.r9 + 0x20 {
+            let mut line = alloc::string::String::new();
+            use core::fmt::Write;
+            let _ = write!(line, "USEGV-FOR: cv r9={:#x}", regs.r9);
+            for i in 0..8usize {
+                let va = regs.r9 + (i * 8) as u64;
+                let _ = match fore_read_u64(root, va) {
+                    Some(v) => write!(line, " +{:#x}:{:#x}", i * 8, v),
+                    None => write!(line, " +{:#x}:????", i * 8),
+                };
+            }
+            crate::pr_err!("{}", line);
+            // obj window: the hicollie watchdog object is at c-0x118
+            // (r15 usually already holds it).
+            let obj = if is_user_ptr(regs.r15) && regs.r15 + 0x118 == regs.r9 {
+                regs.r15
+            } else {
+                regs.r9 - 0x118
+            };
+            let mut line = alloc::string::String::new();
+            let _ = write!(line, "USEGV-FOR: obj {:#x}", obj);
+            const OFFS: &[u64] = &[
+                0x100, 0x108, 0x110, 0x148, 0x150, 0x158, 0x160, 0x168, 0x300, 0x308, 0x310,
+            ];
+            for &off in OFFS {
+                let _ = match fore_read_u64(root, obj + off) {
+                    Some(v) => write!(line, " +{:#x}:{:#x}", off, v),
+                    None => write!(line, " +{:#x}:????", off),
+                };
+            }
+            crate::pr_err!("{}", line);
+            // bss slack: needs the module base. The hicollie R-only
+            // ph1 VMA starts at module base with offset 0 — when the
+            // fault lands in that exact VMA, base = its start.
+            if let Some(v) = aspace.vma_read().find(
+                crate::mm::page::VirtAddr::new(fault_addr as usize),
+            ) {
+                if v.vma_type() == crate::mm::vma::VmaType::FileBacked
+                    && v.offset() == 0
+                    && v.start().as_usize() & 0xfff == 0
+                {
+                    let base = v.start().as_usize() as u64;
+                    let mut line = alloc::string::String::new();
+                    let _ = write!(
+                        line,
+                        "USEGV-FOR: bssslack base={:#x} (page {:#x})",
+                        base,
+                        base + 0x3c000
+                    );
+                    let mut nz = 0u32;
+                    for i in 0..14usize {
+                        let va = base + 0x3c520 + (i * 8) as u64;
+                        let _ = match fore_read_u64(root, va) {
+                            Some(w) => {
+                                if w != 0 {
+                                    nz += 1;
+                                }
+                                write!(line, " {:#x}:{:#x}", va, w)
+                            }
+                            None => write!(line, " {:#x}:????", va),
+                        };
+                    }
+                    crate::pr_err!("{} nonzero={}", line, nz);
+                    // second window: the fully-slack page at +0x3d000
+                    // (the anon bss VMA spans +0x3c000..+0x40000 but
+                    // ph4 memsz ends at +0x3c51c — pages +0x3d000,
+                    // +0x3e000, +0x3f000 are addressed by nothing).
+                    let mut line2 = alloc::string::String::new();
+                    let _ = write!(line2, "USEGV-FOR: bssslack2 base={:#x}", base);
+                    let mut nz2 = 0u32;
+                    for i in 0..8usize {
+                        let va = base + 0x3d000 + (i * 8) as u64;
+                        let _ = match fore_read_u64(root, va) {
+                            Some(w) => {
+                                if w != 0 {
+                                    nz2 += 1;
+                                }
+                                write!(line2, " {:#x}:{:#x}", va, w)
+                            }
+                            None => write!(line2, " {:#x}:????", va),
+                        };
+                    }
+                    crate::pr_err!("{} nonzero={}", line2, nz2);
+                }
+            }
+        }
+    }
 }
 
 /// Handle page fault (#PF): decode the error code (in the orig_rax slot)
