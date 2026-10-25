@@ -1567,10 +1567,16 @@ fn handle_illegal_instruction(regs: &mut PtRegs) {
         // Do NOT advance rip — the task is ZOMBIE and will not resume
     } else {
         // A kernel-mode #UD is always a kernel bug; skipping it would
-        // corrupt execution.  Die loudly (twin discipline).
+        // corrupt execution. The Oops path prints the report and
+        // applies the policy (Tranche 5, the riscv64 twin's).
         #[cfg(feature = "x86_64")]
         crate::dfx::scribble::crash_report(b"#UD", regs);
-        panic!("trap: illegal instruction in kernel mode at rip={:#x}", regs.rip);
+        crate::dfx::oops::oops(
+            crate::dfx::oops::Kind::IllegalInstruction,
+            &|w: &mut crate::dfx::backtrace::ConsoleWriter| {
+                oops_show_regs(w, regs);
+            },
+        );
     }
 }
 
@@ -2152,9 +2158,14 @@ fn handle_page_fault(regs: &mut PtRegs) {
                 // The riscv64 mm layer returns KernelPanic for kernel
                 // faults; until the x86 twin grows that, do NOT silently
                 // iretq back into the faulting rip (infinite fault loop).
-                panic!(
-                    "pagefault: Segfault in kernel mode at {:#x}, rip={:#x}",
-                    fault_addr, regs.rip
+                // The Oops path prints the report and applies the policy
+                // (panic in interrupt context / oops=panic / idle, task
+                // death otherwise — Tranche 5).
+                crate::dfx::oops::oops(
+                    crate::dfx::oops::Kind::PageFault { addr: fault_addr },
+                    &|w: &mut crate::dfx::backtrace::ConsoleWriter| {
+                        oops_show_regs(w, regs);
+                    },
                 );
             }
         }
@@ -2175,9 +2186,13 @@ fn handle_page_fault(regs: &mut PtRegs) {
             } else {
                 #[cfg(feature = "x86_64")]
                 crate::dfx::scribble::crash_report(b"#PF-perm", regs);
-                panic!(
-                    "pagefault: PermissionDenied in kernel mode at {:#x}, rip={:#x}",
-                    fault_addr, regs.rip
+                // Oops path (Tranche 5): report + policy, like the
+                // Segfault arm above.
+                crate::dfx::oops::oops(
+                    crate::dfx::oops::Kind::PageFault { addr: fault_addr },
+                    &|w: &mut crate::dfx::backtrace::ConsoleWriter| {
+                        oops_show_regs(w, regs);
+                    },
                 );
             }
         }
@@ -2192,9 +2207,13 @@ fn handle_page_fault(regs: &mut PtRegs) {
             } else {
                 #[cfg(feature = "x86_64")]
                 crate::dfx::scribble::crash_report(b"#PF-bus", regs);
-                panic!(
-                    "pagefault: BusError in kernel mode at {:#x}, rip={:#x}",
-                    fault_addr, regs.rip
+                // Oops path (Tranche 5): report + policy, like the
+                // Segfault arm above.
+                crate::dfx::oops::oops(
+                    crate::dfx::oops::Kind::PageFault { addr: fault_addr },
+                    &|w: &mut crate::dfx::backtrace::ConsoleWriter| {
+                        oops_show_regs(w, regs);
+                    },
                 );
             }
         }
@@ -2367,12 +2386,69 @@ fn handle_page_fault(regs: &mut PtRegs) {
                     crate::console::putchar_no_lock(b'\n');
                 }
             }
-            // SAFETY: hlt halts until the next interrupt; safe in a halt loop.
-            loop {
-                unsafe { core::arch::asm!("hlt") };
-            }
+            // The old terminal was an unconditional hlt loop — every
+            // kernel page fault with no fixup entry died with the whole
+            // machine, captured into nothing. The Oops policy (Tranche
+            // 5, the riscv64 twin's) decides instead: Linux-shaped
+            // report, pstore capture, then either a real panic
+            // (interrupt context / oops=panic / idle) or the faulting
+            // task dies with SIGSEGV and the machine keeps running.
+            crate::dfx::oops::oops(
+                crate::dfx::oops::Kind::PageFault { addr: fault_addr },
+                &|w: &mut crate::dfx::backtrace::ConsoleWriter| {
+                    oops_show_regs(w, regs);
+                },
+            );
         }
         _ => {}
+    }
+}
+
+/// The oops register block — the FAULTING frame in the reference's
+/// show_regs layout (arch/x86/kernel/process_64.c + fault.c, Linux
+/// 5.15): the RIP line with the symbolized ip, the RSP/EFLAGS line,
+/// then the GPRs three per row. The CS column prints 0010/0018 from
+/// the frame's segment selectors.
+fn oops_show_regs(w: &mut crate::dfx::backtrace::ConsoleWriter, regs: &PtRegs) {
+    use core::fmt::Write;
+    let _ = write!(
+        w,
+        "RIP: {:04x}:{}\n",
+        regs.cs & 0xffff,
+        crate::dfx::ksyms::format_symbol(regs.rip)
+    );
+    let _ = write!(
+        w,
+        "RSP: {:04x}:{:016x} EFLAGS: {:016x}\n",
+        regs.ss & 0xffff,
+        regs.rsp,
+        regs.rflags
+    );
+    let cells: [(&str, u64); 15] = [
+        ("RAX", regs.rax),
+        ("RBX", regs.rbx),
+        ("RCX", regs.rcx),
+        ("RDX", regs.rdx),
+        ("RSI", regs.rsi),
+        ("RDI", regs.rdi),
+        ("RBP", regs.rbp),
+        ("R8", regs.r8),
+        ("R9", regs.r9),
+        ("R10", regs.r10),
+        ("R11", regs.r11),
+        ("R12", regs.r12),
+        ("R13", regs.r13),
+        ("R14", regs.r14),
+        ("R15", regs.r15),
+    ];
+    for row in cells.chunks(3) {
+        for (i, (name, val)) in row.iter().enumerate() {
+            if i > 0 {
+                let _ = w.write_str(" ");
+            }
+            let _ = write!(w, "{:<3}: {:016x}", name, val);
+        }
+        let _ = w.write_str("\n");
     }
 }
 
@@ -2390,10 +2466,13 @@ fn handle_unknown_exception(regs: &mut PtRegs, vector: u64) {
         crate::process::exit::do_exit(-(crate::signal::Signal::SIGKILL as i32));
     } else {
         // Kernel-mode unknown exceptions indicate a kernel bug; skipping
-        // the instruction corrupts state.
-        panic!(
-            "trap: unknown exception {:#x} in kernel mode at rip={:#x}",
-            vector, regs.rip
+        // the instruction corrupts state. The Oops path prints the
+        // report and applies the policy (Tranche 5).
+        crate::dfx::oops::oops(
+            crate::dfx::oops::Kind::UnknownException { cause: vector },
+            &|w: &mut crate::dfx::backtrace::ConsoleWriter| {
+                oops_show_regs(w, regs);
+            },
         );
     }
 }
