@@ -3206,8 +3206,25 @@ pub fn wake_up_enqueue(task: *mut Task) -> bool {
                 // as before (the W3 census greps stay stable).
                 static W3_N: core::sync::atomic::AtomicU32 =
                     core::sync::atomic::AtomicU32::new(0);
-                let w3_print_refused =
-                    W3_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 32;
+                // Budget guard (brkseq repro, leg-20): a refusal of a
+                // RUNNING task that a non-idle slot legitimately names
+                // (a wake racing the task's own execution — the brkseq
+                // death window produced 4+ per SIGSEGV child) is the
+                // BENIGN form of curr_on; printed unconditionally it ate
+                // the whole 32-line budget in 8 deaths and blinded the
+                // census for the shapes it exists for. The pathological
+                // RUNNING+curr_on twin is exactly what the frozen-exec
+                // conviction below distinguishes, so defer this shape's
+                // plain refusal to the W3-FROZEN-EXEC-SLOT line and
+                // spend the budget on everything else (sleeping-state
+                // refusals, dead/zombie targets, linked-but-starved).
+                let w3_benign_running =
+                    st == TaskState::new(TaskState::RUNNING) && curr_on;
+                let mut w3_print_refused = false;
+                if !w3_benign_running {
+                    w3_print_refused =
+                        W3_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 32;
+                }
                 let w3_pid = (*task).pid();
                 let w3_st_bits = st.bits();
                 let w3_on_cpu = (*task).on_cpu();
