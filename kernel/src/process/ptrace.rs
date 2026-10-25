@@ -82,7 +82,7 @@ const EINVAL: i64 = 22;
 // ==================== permission helpers ====================
 
 /// ptrace_may_access (minimal): same-uid credentials or CAP_SYS_PTRACE.
-fn ptrace_may_access(target_cred: &crate::process::task::Cred) -> bool {
+pub fn ptrace_may_access(target_cred: &crate::process::task::Cred) -> bool {
     if let Some(cur) = crate::sched::current() {
         // SAFETY: current is the running task; cred() is immutable.
         let cred = unsafe { (*cur).cred() };
@@ -248,6 +248,105 @@ pub fn write_target_word(task: *mut Task, addr: u64, value: u64) -> bool {
         flush_icache_range(addr);
         true
     }
+}
+
+/// process_vm_readv/writev core: copy `len` bytes between a KERNEL buffer
+/// `kbuf` and the TARGET task's user address `remote` (`to_remote` picks
+/// the direction). Returns the number of bytes moved for this call; a
+/// short count means the first unmapped/protected page stopped the copy.
+/// Err(EFAULT) when nothing at all could be moved (bad start address,
+/// PROT_NONE VMA, or a fault-in that did not resolve).
+///
+/// Shares the PEEK/POKE machinery: translate() walks the target's page
+/// table, absent pages fault in through the target's own mm (demand-paged
+/// text works), and the data path is the kernel linear map. The VMA
+/// permission gate runs FIRST for every page: a PROT_NONE mapping keeps
+/// a present V-only PTE (see handle_mm_fault), so the page walk alone
+/// would happily copy through it.
+pub fn process_vm_copy(
+    task: *mut Task,
+    remote: u64,
+    kbuf: *mut u8,
+    len: usize,
+    to_remote: bool,
+) -> Result<usize, i32> {
+    use crate::arch::mm::{phys_to_virt, PhysAddr};
+
+    if len == 0 {
+        return Ok(0);
+    }
+    // SAFETY: task is pinned by the caller for the whole call; the mm Arc
+    // keeps the address space alive even if the target exits mid-copy.
+    let mm = match unsafe { (*task).address_space_arc() } {
+        Some(m) => m,
+        None => return Err(14), // EFAULT: kernel-thread style target
+    };
+    // SAFETY: root_ppn is the target mm's valid root PPN.
+    let root_ppn = mm.root_ppn();
+
+    let mut done = 0usize;
+    let mut r = remote;
+    let mut k = kbuf;
+    let mut remaining = len;
+    while remaining > 0 {
+        // VMA gate: the covering mapping must permit this direction.
+        let vma = mm.find_vma(crate::mm::page::VirtAddr::new(r as usize));
+        let permitted = match vma.as_ref() {
+            Some(v) => {
+                if to_remote {
+                    v.flags().is_writable()
+                } else {
+                    v.flags().is_readable()
+                }
+            }
+            None => false,
+        };
+        if !permitted {
+            break;
+        }
+        let page = r & !0xFFFu64;
+        // SAFETY: translate only reads the target's page tables.
+        if unsafe { translate(root_ppn, page) }.is_none() {
+            let fl = if to_remote {
+                crate::arch::mm::FaultFlags::WRITE
+            } else {
+                crate::arch::mm::FaultFlags::READ
+            };
+            let res = crate::arch::mm::handle_mm_fault(
+                &mm,
+                crate::arch::mm::VirtAddr::new(page),
+                fl,
+            );
+            if !matches!(res, crate::arch::mm::MmFaultResult::Handled) {
+                break;
+            }
+        }
+        // SAFETY: translate only reads the target's page tables.
+        let (phys, page_len) = match unsafe { translate(root_ppn, r) } {
+            Some(v) => v,
+            None => break,
+        };
+        let off = (r & (page_len - 1)) as usize;
+        let chunk = core::cmp::min(remaining, page_len as usize - off);
+        // SAFETY: dst points into the kernel linear map of the target's
+        // user page; kbuf is a kernel buffer supplied by the caller.
+        let lin = phys_to_virt(PhysAddr::new(phys + off as u64)).0 as *mut u8;
+        unsafe {
+            if to_remote {
+                core::ptr::copy_nonoverlapping(k as *const u8, lin, chunk);
+            } else {
+                core::ptr::copy_nonoverlapping(lin as *const u8, k, chunk);
+            }
+        }
+        r += chunk as u64;
+        k = unsafe { k.add(chunk) };
+        done += chunk;
+        remaining -= chunk;
+    }
+    if done == 0 {
+        return Err(14); // EFAULT
+    }
+    Ok(done)
 }
 
 /// Make a text write coherent before subsequent execution (breakpoints).

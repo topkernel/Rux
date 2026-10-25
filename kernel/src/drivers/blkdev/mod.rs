@@ -240,6 +240,24 @@ pub fn blkdev_read_async(
             let minor = gd.first_minor;
             let sectors = (buf.len() / 512) as u64;
             let t0 = crate::drivers::timer::read_time();
+            // block:block_rq_issue (async read): the completion lands
+            // later in the device's IRQ walker, which carries the
+            // geometry the submit stores in the pending entry.
+            if crate::trace::EVENT_BLOCK_RQ_ISSUE.armed() {
+                // SAFETY: current task's comm is read for the record only.
+                let comm = crate::sched::current().map(|cur| (*cur).comm());
+                if let Some(comm) = comm {
+                    crate::trace::trace_block_rq_issue(
+                        (major << 20) | minor,
+                        sector,
+                        sectors as u32,
+                        buf.len() as u32,
+                        0,
+                        "R",
+                        comm,
+                    );
+                }
+            }
             let ret = async_fn(disk, sector, buf, completion as *const _ as *mut _);
             let elapsed_ns = crate::drivers::timer::read_time().saturating_sub(t0) * 100
                 / crate::config::TIMER_CLOCK_FREQ_HZ;
@@ -276,12 +294,58 @@ pub fn submit_request(disk: *const GenDisk, req: &mut Request) -> i32 {
     let sectors = (req.buffer.len() / 512) as u64;
     let t0 = crate::drivers::timer::read_time();
     iostat::note_start(major, minor);
+    // block:block_rq_issue / block_rq_complete — the synchronous
+    // request path: the registered request_fn completes the transfer
+    // before it returns, so issue is recorded at entry and complete
+    // right after the device status is known. Both record calls carry
+    // their armed() check inside; the comm copy is marshalled only
+    // behind the issue event's own check.
+    if crate::trace::EVENT_BLOCK_RQ_ISSUE.armed() {
+        // SAFETY: current task's comm is read for the record only.
+        let comm = crate::sched::current().map(|cur| unsafe { (*cur).comm() });
+        if let Some(comm) = comm {
+            crate::trace::trace_block_rq_issue(
+                (major << 20) | minor,
+                req.sector,
+                sectors as u32,
+                req.buffer.len() as u32,
+                0,
+                req_rwbs(&req.cmd_type),
+                comm,
+            );
+        }
+    }
     let ret = BLOCK_MANAGER.submit_request(disk, req);
+    if crate::trace::EVENT_BLOCK_RQ_COMPLETE.armed() {
+        // The device status (R8-M2: submit_request returns 0 whenever a
+        // request_fn is registered — the real completion status is the
+        // request's error word).
+        let error = req.error.load(core::sync::atomic::Ordering::Acquire);
+        crate::trace::trace_block_rq_complete(
+            (major << 20) | minor,
+            req.sector,
+            sectors as u32,
+            error,
+            0,
+            req_rwbs(&req.cmd_type),
+        );
+    }
     iostat::note_end(major, minor);
     let elapsed_ns = crate::drivers::timer::read_time().saturating_sub(t0) * 100
         / crate::config::TIMER_CLOCK_FREQ_HZ;
     iostat::note_io(major, minor, is_write, sectors, elapsed_ns);
     ret
+}
+
+/// The rwbs column of the block events: the transfer direction only
+/// (the reference's sync/meta bits have no counterpart here — Rux
+/// merges no requests and passes no write hints).
+fn req_rwbs(cmd: &ReqCmd) -> &'static str {
+    match cmd {
+        ReqCmd::Read => "R",
+        ReqCmd::Write => "W",
+        ReqCmd::Flush => "F",
+    }
 }
 
 pub fn blkdev_read(disk: *const GenDisk, sector: u64, buf: &mut [u8]) -> Result<usize, i32> {

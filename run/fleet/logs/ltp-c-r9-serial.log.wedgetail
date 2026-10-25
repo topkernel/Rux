@@ -1,0 +1,182 @@
+ied!
+tst_kconfig.c:477: [1;34mTINFO: [0mVariables:
+tst_kconfig.c:486: [1;34mTINFO: [0m CONFIG_NETFILTER_XT_MATCH_STATE Undefined
+tst_kconfig.c:531: [1;34mTINFO: [0mConstraint 'CONFIG_IP_NF_TARGET_REJECT' not satisfied!
+tst_kconfig.c:477: [1;34mTINFO: [0mVariables:
+tst_kconfig.c:486: [1;34mTINFO: [0m CONFIG_IP_NF_TARGET_REJECT Undefined
+tst_kconfig.c:531: [1;34mTINFO: [0mConstraint 'CONFIG_USER_NS=y' not satisfied!
+tst_kconfig.c:477: [1;34mTINFO: [0mVariables:
+tst_kconfig.c:486: [1;34mTINFO: [0m CONFIG_USER_NS Undefined
+tst_kconfig.c:531: [1;34mTINFO: [0mConstraint 'CONFIG_NET_NS=y' not satisfied!
+tst_kconfig.c:477: [1;34mTINFO: [0mVariables:
+tst_kconfig.c:486: [1;34mTINFO: [0m CONFIG_NET_NS Undefined
+tst_test.c:1192: [1;33mTCONF: [0mAborting due to unsuitable kernel config, see above!
+SWEEP RES|1106|setsockopt08|TCONF|32|0
+tst_kconfig.c:88: [1;34mTINFO: [0mParsing kernel config '/proc/config.gz'
+tst_kconfig.c:531: [1;34mTINFO: [0mConstraint 'CONFIG_USER_NS=y' not satisfied!
+tst_kconfig.c:477: [1;34mTINFO: [0mVariables:
+tst_kconfig.c:486: [1;34mTINFO: [0m CONFIG_USER_NS Undefined
+tst_kconfig.c:531: [1;34mTINFO: [0mConstraint 'CONFIG_NET_NS=y' not satisfied!
+tst_kconfig.c:477: [1;34mTINFO: [0mVariables:
+tst_kconfig.c:486: [1;34mTINFO: [0m CONFIG_NET_NS Undefined
+tst_test.c:1192: [1;33mTCONF: [0mAborting due to unsuitable kernel config, see above!
+WW: fires=3999 late_max=10ms pidmiss=0 rearm=2 wheel=0/2 hres_next=46ms
+WW2: si_runs=229 si_busy=58ms ticks=[0,0] vec=[0,226,0,0,3,0,0,0,226,0]
+WW3: grq=0 cfs=0 idle=0x3 nr=1 cpu0=(pid=0 st=0x0 pc=256) cpu1=(pid=0 st=0x0 pc=0)
+WW: wakes=26775 picks=26192 avg_run=16ms stranded=0 strand_max=0ms
+SWEEP RES|1107|setsockopt09|TCONF|32|0
+tst_kconfig.c:88: [1;34mTINFO: [0mParsing kernel config '/proc/config.gz'
+tst_kconfig.c:531: [1;34mTINFO: [0mConstraint 'CONFIG_TLS' not satisfied!
+tst_kconfig.c:477: [1;34mTINFO: [0mVariables:
+tst_kconfig.c:486: [1;34mTINFO: [0m CONFIG_TLS Undefined
+tst_test.c:1192: [1;33mTCONF: [0mAborting due to unsuitable kernel config, see above!
+SWEEP RES|1108|setsockopt10|TCONF|32|0
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+settimeofday01.c:57: [1;32mTPASS: [0msettimeofday() pass
+
+Summary:
+passed   1
+failed   0
+broken   0
+skipped  0
+warnings 0
+SWEEP RES|1109|settimeofday01|PASS|0|0
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+tst_capability.c:29: [1;34mTINFO: [0mDropping CAP_SYS_TIME(25)
+settimeofday02.c:34: [1;34mTINFO: [0mtv.tv_sec is negative
+settimeofday02.c:35: [1;31mTFAIL: [0msettimeofday(&tc->tv, NULL) expected EINVAL: EPERM (1)
+settimeofday02.c:34: [1;34mTINFO: [0mtv.tv_usec is outside the range [0..999,999]
+settimeofday02.c:35: [1;32mTPASS: [0msettimeofday(&tc->tv, NULL) : EINVAL (22)
+settimeofday02.c:34: [1;34mTINFO: [0mcalling process without CAP_SYS_TIME capability
+settimeofday02.c:35: [1;32mTPASS: [0msettimeofday(&tc->tv, NULL) : EPERM (1)
+
+Summary:
+passed   2
+failed   1
+broken   0
+skipped  0
+warnings 0
+SWEEP RES|1110|settimeofday02|FAIL|1|0
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+setuid01.c:27: [1;32mTPASS: [0msetuid(0) passed
+
+Summary:
+passed   1
+failed   0
+broken   0
+skipped  0
+warnings 0
+SWEEP RES|1111|setuid01|PASS|0|0
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+/home/william/rux-agents/ltp-fix-b/userspace/linux-ltp/ltp-full-20240524/testcases/kernel/syscalls/setuid/../utils/compat_tst_16.h:84: [1;33mTCONF: [0m16-bit version of setuid() is not supported on your platform
+
+Summary:
+passed   0
+failed   0
+broken   0
+skipped  1
+warnings 0
+SWEEP RES|1112|setuid01_16|TCONF|32|0
+WW: fires=4008 late_max=10ms pidmiss=0 rearm=2 wheel=0/2 hres_next=57ms
+WW2: si_runs=237 si_busy=75ms ticks=[0,0] vec=[0,231,0,0,6,0,0,0,231,0]
+WW3: grq=0 cfs=0 idle=0x2 nr=3 cpu0=(pid=917 st=0x0 pc=65537) cpu1=(pid=0 st=0x0 pc=256)
+WW: wakes=26856 picks=26272 avg_run=16ms stranded=0 strand_max=0ms
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+setuid03.c:25: [1;32mTPASS: [0mSETUID(ROOT_USER) : EPERM (1)
+
+Summary:
+passed   1
+failed   0
+broken   0
+skipped  0
+warnings 0
+SWEEP RES|1113|setuid03|PASS|0|0
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+/home/william/rux-agents/ltp-fix-b/userspace/linux-ltp/ltp-full-20240524/testcases/kernel/syscalls/setuid/../utils/compat_tst_16.h:84: [1;33mTCONF: [0m16-bit version of setuid() is not supported on your platform
+
+Summary:
+passed   0
+failed   0
+broken   0
+skipped  1
+warnings 0
+SWEEP RES|1114|setuid03_16|TCONF|32|0
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+setuid04.c:49: [1;32mTPASS: [0setuid04.c:49: [1;32mTPASS: [0mopen() returned errno EACCES
+mopen() returned errno EACCES
+
+Summary:
+passed   2
+failed   0
+broken   0
+skipped  0
+warnings 0
+SWEEP RES|1115|setuid04|PASS|0|0
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+/home/william/rux-agents/ltp-fix-b/userspace/linux-ltp/ltp-full-20240524/testcases/kernel/syscalls/setuid/../utils/compat_tst_16.h:84: [1;33mTCONF: [0m16-bit version of setuid() is not supported on your platform
+
+Summary:
+passed   0
+failed   0
+broken   0
+skipped  1
+warnings 0
+SWEEP RES|1116|setuid04_16|TCONF|32|0
+tst_device.c:96: [1;34mTINFO: [0mFound free device 0 '/dev/loop0'
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+WW: fires=4017 late_max=10ms pidmiss=0 rearm=2 wheel=0/2 hres_next=31ms
+WW2: si_runs=347 si_busy=65ms ticks=[0,0] vec=[0,234,0,0,113,0,0,0,233,0]
+WW3: grq=0 cfs=0 idle=0x2 nr=3 cpu0=(pid=926 st=0x0 pc=258) cpu1=(pid=0 st=0x0 pc=256)
+WW: wakes=26988 picks=26378 avg_run=16ms stranded=0 strand_max=0ms
+SR-REGS:
+  epc=0xffffffff800dc9ae ra=0xffffffff8023d3c2 sp=0xffffffd602519fd0
+  tp=0xffffffd602528000 s0=0xffffffd602519ff0 s1=0x3e5f8 gp=0x4e108
+  a0=0xffffffd60251b948 a1=0xffffffd60251b588 a2=0x0 a3=0x28
+  a4=0x3fffffd8c8 a5=0xffffffffffffffff a6=0x42a48 a7=0x28
+  t0=0x4 t1=0x28128 t2=0x0 t3=0x8
+SR-STACK (ra chain via s0):
+  fp=0xffffffd602519ff0 ra=0xffffffd602626e10
+
+
+Kernel panic - not syncing:
+
+PANIC: trap: illegal instruction in kernel mode at epc=0xffffffff800dc9ae badaddr=0xc0101573
+  Location: kernel/src/arch/riscv64/trap.rs: 370
+
+---[ end Kernel panic - not syncing ]---
+
+Sstatus: 8000000200006120
+Scause : 0000000000000002
+Stval  : 00000000c0101573
+Sepc   : ffffffff800dc9ae
+
+Registers:
+  ra  : ffffffff80206ae2  sp  : ffffffd6025190f0  gp  : 000000000004e108  tp  : ffffffd602528000  
+  t0  : 0000000000000008  t1  : 000000000000000a  t2  : 00000000c0101573  s0  : ffffffd602519220  
+  s1  : 000000000003e5f8  a0  : ffffffd602519228  a1  : ffffffd602519108  a2  : 00000000000000f8  
+  a3  : ffffffd602519108  a4  : ffffffd602519200  a5  : 0000000000000000  a6  : 0000000000000000  
+  a7  : ffffffd6025191ce  s2  : 0000000000069338  s3  : 000000000004cd88  s4  : 0000000000000000  
+  s5  : 0000000000000000  s6  : 00000000000692b0  s7  : 0000000000000000  s8  : 0000000000000000  
+  s9  : ffffffffffffffff  s10 : 0000000000000000  s11 : 0000003fffffe9f0  t3  : 0000000000000002  
+  t4  : 0000000000000000  t5  : 0000003fffffd8d8  t6  : 0000000000000020  
+
+Call trace:
+  [<ffffffff802065a6>] (current)
+  [<ffffffd6025192f0>]
+
+BUG: soft lockup - CPU#0 stuck for 10s! timer_irq=27783
+  CPU: 0 PID: 926
+Call trace:
+  [<ffffffff802065a6>] (current)
+  [<ffffffff803d9b80>]
+
+WAKE-STRANDED pid=1 cpu=1 strand=1921ms policy=0 h0=(926/p0/0ms/pc=0) h1=(303/p0/2002ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=6ms

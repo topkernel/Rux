@@ -3510,20 +3510,234 @@ pub fn sys_kexec_load(_args: SyscallArgs) -> i64 {
     -(errno::ENOSYS as i64)
 }
 
+/// iovec as passed by process_vm_readv/writev (repr(C), same layout as
+/// readv/writev iovecs).
+#[repr(C)]
+#[derive(Clone, Copy)]
+struct PvmIovec {
+    iov_base: *mut u8,
+    iov_len: usize,
+}
+
 /// sys_process_vm_readv - Read from another process memory
 ///
-/// Minimal stub (U2): EOPNOTSUPP rather than ENOSYS. Tools probe the
-/// errno to decide whether the operation is unsupported (and fall back
-/// to /proc/[pid]/mem or ptrace) versus the syscall being absent.
-pub fn sys_process_vm_readv(_args: SyscallArgs) -> i64 {
-    -(errno::EOPNOTSUPP as i64)
+/// process_vm_readv(2): `lvec` (caller memory) receives the bytes at
+/// `rvec` (same struct layout, but its addresses live in the TARGET's
+/// address space). Returns the byte count moved; a short count is legal
+/// when a later segment faults; -errno when nothing moved.
+pub fn sys_process_vm_readv(args: SyscallArgs) -> i64 {
+    process_vm_rw(args, false)
 }
 
 /// sys_process_vm_writev - Write to another process memory
 ///
-/// Minimal stub (U2): see sys_process_vm_readv.
-pub fn sys_process_vm_writev(_args: SyscallArgs) -> i64 {
-    -(errno::EOPNOTSUPP as i64)
+/// process_vm_writev(2): the mirror of readv; see process_vm_rw.
+pub fn sys_process_vm_writev(args: SyscallArgs) -> i64 {
+    process_vm_rw(args, true)
+}
+
+/// Shared process_vm_readv/writev body (`to_remote` selects direction).
+///
+/// Contract order (LTP process_vm01):
+///   flags != 0                     -> EINVAL (no flags are defined yet)
+///   liovcnt/riovcnt > IOV_MAX      -> EINVAL
+///   iov_len sums overflowing       -> EINVAL
+///   bad lvec/rvec ARRAY pointer    -> EFAULT
+///   no such pid                    -> ESRCH
+///   credentials do not grant       -> EPERM (ptrace_may_access rule:
+///                                     same uid, or CAP_SYS_PTRACE)
+///   bad local/remote iov_base      -> EFAULT (short count if partial)
+fn process_vm_rw(args: SyscallArgs, to_remote: bool) -> i64 {
+    use crate::arch::uaccess::{copy_from_user, copy_to_user};
+
+    const IOV_MAX: usize = 1024;
+    // Matches readv/writev's MAX_RW_COUNT clamp source.
+    const MAX_RW_COUNT: usize = i32::MAX as usize & !0xFFF;
+
+    let pid = args[0] as u32;
+    let lvec = args[1] as *const PvmIovec;
+    let liovcnt = args[2] as usize;
+    let rvec = args[3] as *const PvmIovec;
+    let riovcnt = args[4] as usize;
+    let flags = args[5] as u32;
+
+    if flags != 0 {
+        return -(errno::EINVAL as i64);
+    }
+    if liovcnt == 0 || riovcnt == 0 {
+        return 0;
+    }
+    if liovcnt > IOV_MAX || riovcnt > IOV_MAX {
+        return -(errno::EINVAL as i64);
+    }
+
+    // Copy both iovec arrays in from the caller (bad array pointer is
+    // EFAULT before any pid/permission work, matching the documented
+    // argument-validation order).
+    // SAFETY: lvec/rvec point at caller-supplied arrays of liovcnt /
+    // riovcnt PvmIovecs; copy_from_user faults safely on bad pointers.
+    let mut liovs: alloc::vec::Vec<PvmIovec> =
+        alloc::vec![PvmIovec { iov_base: core::ptr::null_mut(), iov_len: 0 }; liovcnt];
+    let mut riovs: alloc::vec::Vec<PvmIovec> =
+        alloc::vec![PvmIovec { iov_base: core::ptr::null_mut(), iov_len: 0 }; riovcnt];
+    unsafe {
+        if copy_from_user(
+            liovs.as_mut_ptr() as *mut u8,
+            lvec as *const u8,
+            liovcnt * core::mem::size_of::<PvmIovec>(),
+        ) != 0
+        {
+            return -(errno::EFAULT as i64);
+        }
+        if copy_from_user(
+            riovs.as_mut_ptr() as *mut u8,
+            rvec as *const u8,
+            riovcnt * core::mem::size_of::<PvmIovec>(),
+        ) != 0
+        {
+            return -(errno::EFAULT as i64);
+        }
+    }
+    // iov_len sanity: each length and both totals must stay bounded
+    // (LTP test_iov_len_overflow passes iov_len = -1 and expects EINVAL).
+    let mut ltotal = 0usize;
+    for iov in &liovs {
+        if iov.iov_len > MAX_RW_COUNT {
+            return -(errno::EINVAL as i64);
+        }
+        ltotal = match ltotal.checked_add(iov.iov_len) {
+            Some(t) if t <= MAX_RW_COUNT => t,
+            _ => return -(errno::EINVAL as i64),
+        };
+    }
+    let mut rtotal = 0usize;
+    for iov in &riovs {
+        if iov.iov_len > MAX_RW_COUNT {
+            return -(errno::EINVAL as i64);
+        }
+        rtotal = match rtotal.checked_add(iov.iov_len) {
+            Some(t) if t <= MAX_RW_COUNT => t,
+            _ => return -(errno::EINVAL as i64),
+        };
+    }
+
+    // Target lookup. pid 0 / unused pid -> ESRCH.
+    // SAFETY: the pin keeps the Task alive until task_put below.
+    let target = unsafe { crate::process::pid_hash::pid_hash_lookup_pinned(pid) };
+    if target.is_null() {
+        return -(errno::ESRCH as i64);
+    }
+    let ret = process_vm_rw_locked(target, &liovs, &riovs, to_remote);
+    // SAFETY: release the pin taken above.
+    unsafe { crate::process::task::Task::task_put(target) };
+    ret
+}
+
+/// Body with the target pinned: permission gate, then the segment walk.
+fn process_vm_rw_locked(
+    target: *mut crate::process::task::Task,
+    liovs: &[PvmIovec],
+    riovs: &[PvmIovec],
+    to_remote: bool,
+) -> i64 {
+    use crate::arch::uaccess::{copy_from_user, copy_to_user};
+
+    // SAFETY: current() returns the running task or None; target is
+    // pinned by the caller.
+    let current = match crate::sched::current() {
+        Some(c) => c as *mut crate::process::task::Task,
+        None => return -(errno::ESRCH as i64),
+    };
+    if target != current {
+        // SAFETY: cred() is immutable after task creation.
+        let target_cred = unsafe { (*target).cred() };
+        if !crate::process::ptrace::ptrace_may_access(target_cred) {
+            return -(errno::EPERM as i64);
+        }
+    }
+
+    // Walk the local/remote iovec lists together, transferring
+    // min(local-left, remote-left) per step through a kernel staging
+    // buffer (the local side is the CALLER's user memory — uaccess only).
+    let mut total = 0usize;
+    let (mut li, mut ri) = (0usize, 0usize);
+    let (mut loff, mut roff) = (0usize, 0usize);
+    while li < liovs.len() && ri < riovs.len() {
+        let ln = liovs[li].iov_len.saturating_sub(loff);
+        let rn = riovs[ri].iov_len.saturating_sub(roff);
+        if ln == 0 {
+            li += 1;
+            loff = 0;
+            continue;
+        }
+        if rn == 0 {
+            ri += 1;
+            roff = 0;
+            continue;
+        }
+        let n = core::cmp::min(core::cmp::min(ln, rn), 256 * 1024usize);
+        let lptr = unsafe { liovs[li].iov_base.add(loff) };
+        let raddr = riovs[ri].iov_base as u64 + roff as u64;
+
+        let mut stage: alloc::vec::Vec<u8> = alloc::vec![0u8; n];
+        if to_remote {
+            // SAFETY: lptr is a caller user pointer; copy_from_user
+            // returns the uncopied tail.
+            let bad = unsafe {
+                copy_from_user(stage.as_mut_ptr(), lptr, n)
+            };
+            if bad == n {
+                return if total == 0 { -(errno::EFAULT as i64) } else { total as i64 };
+            }
+            let got = n - bad;
+            match crate::process::ptrace::process_vm_copy(
+                target, raddr, stage.as_mut_ptr(), got, true,
+            ) {
+                Ok(moved) => {
+                    total += moved;
+                    if moved < got {
+                        return total as i64;
+                    }
+                }
+                Err(_) => {
+                    return if total == 0 { -(errno::EFAULT as i64) } else { total as i64 };
+                }
+            }
+        } else {
+            match crate::process::ptrace::process_vm_copy(
+                target, raddr, stage.as_mut_ptr(), n, false,
+            ) {
+                Ok(moved) => {
+                    if moved > 0 {
+                        // SAFETY: lptr is a caller user pointer.
+                        let bad = unsafe {
+                            copy_to_user(lptr, stage.as_ptr(), moved)
+                        };
+                        total += moved - bad;
+                        if bad > 0 || moved < n {
+                            return if total == 0 { -(errno::EFAULT as i64) } else { total as i64 };
+                        }
+                    } else {
+                        return if total == 0 { -(errno::EFAULT as i64) } else { total as i64 };
+                    }
+                }
+                Err(_) => {
+                    return if total == 0 { -(errno::EFAULT as i64) } else { total as i64 };
+                }
+            }
+        }
+        loff += n;
+        roff += n;
+        if loff >= liovs[li].iov_len {
+            li += 1;
+            loff = 0;
+        }
+        if roff >= riovs[ri].iov_len {
+            ri += 1;
+            roff = 0;
+        }
+    }
+    total as i64
 }
 
 /// sys_perf_event_open - Open performance event
@@ -5246,7 +5460,27 @@ pub fn sys_riscv_hwprobe(args: SyscallArgs) -> i64 {
     const KEY_MVENDORID: u64 = 0;
     const KEY_MARCHID: u64 = 1;
     const KEY_IMPID: u64 = 2;
-    const KEY_MMU: u64 = 6;
+    const KEY_BASE_BEHAVIOR: u64 = 3;
+    const BASE_BEHAVIOR_IMA: u64 = 1 << 0;
+    const KEY_IMA_EXT_0: u64 = 4;
+    const IMA_EXT_FD: u64 = 1 << 0;
+    const IMA_EXT_C: u64 = 1 << 1;
+    const IMA_EXT_V: u64 = 1 << 2;
+
+    // The V bit follows the boot-primed hart capability (DTB riscv,isa):
+    // on a V-capable hart the kernel lazily enables RVV for user tasks
+    // and the bit is honestly set; on the standard -cpu rv64 model it is
+    // clear. The other letters are what the kernel itself runs on
+    // (rv64gc). x86_64 compiles this handler too (the dispatch table is
+    // shared); no riscv64 hart there, so the bit is a constant 0.
+    #[cfg(feature = "riscv64")]
+    let v_bit = if crate::arch::riscv64::vext::hart_has_v() {
+        IMA_EXT_V
+    } else {
+        0
+    };
+    #[cfg(feature = "x86_64")]
+    let v_bit = 0;
 
     // SAFETY: pairs_ptr validated with access_ok; get_user/put_user are the
     // exception-table copy paths (SUM=0 safe).
@@ -5260,6 +5494,20 @@ pub fn sys_riscv_hwprobe(args: SyscallArgs) -> i64 {
                 KEY_MARCHID => 0,
                 KEY_IMPID => 0,
                 KEY_MMU => 1, // sv39
+                // Base behavior: IMA, the one defined bit.
+                KEY_BASE_BEHAVIOR => BASE_BEHAVIOR_IMA,
+                // The ISA-extension bitmap: the letters the kernel runs
+                // on (rv64gc — IMAFD + C) plus the V bit when this hart
+                // has V (the lazy-enable makes RVV user code executable,
+                // so the bit is then true). The catch-all u64::MAX this
+                // key used to return advertised EVERY extension, and a
+                // current glibc's ifunc resolver read the phantom V bit,
+                // selected its vector memset/memcpy variants and SIGILLed
+                // on the -cpu rv64 model of the standard flows (observed
+                // 2026-10: vsetivli inside glibc __memset after the
+                // toolchain moved to GCC 15, whose default march carries
+                // V).
+                KEY_IMA_EXT_0 => IMA_EXT_FD | IMA_EXT_C | v_bit,
                 _ => u64::MAX,
             };
             let _ = crate::arch::uaccess::put_user(pairs_ptr.add(i * 2 + 1), value);

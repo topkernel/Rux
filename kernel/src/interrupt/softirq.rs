@@ -189,6 +189,16 @@ pub fn __do_softirq() -> bool {
     // SAFETY: per-CPU arrays accessed only by current CPU; cpu_id is correct
     unsafe { SOFTIRQ_IN_PROGRESS[cpu].store(1, Ordering::Release); }
 
+    // Session-6 discriminator (fleet s2): bracket the SOFTIRQ PROCESSING
+    // window itself. The timer/soft/ext TRAP brackets are silent on v7
+    // while the count-migration leak rate is unchanged — this window
+    // books SOFTIRQ_OFFSET on the entry task around handler dispatch,
+    // and a context switch between the add and the sub migrates the
+    // offset to the switched-in task (the exit sub underflows there, the
+    // entry task strands +SOFTIRQ_OFFSET). Same entry_tp/exit_tp shape
+    // as IRQ-BRACKET-LEAK; first_pending names the vector class that ran.
+    let tp_entry = crate::arch::cpu::get_thread_id() as usize;
+
     // Enter softirq context in preempt_count
     crate::interrupt::preempt_count_add(
         crate::interrupt::preempt::SOFTIRQ_OFFSET
@@ -199,6 +209,8 @@ pub fn __do_softirq() -> bool {
 
     let mut restart_count = 0;
     let budget_t0 = crate::drivers::timer::read_time();
+    // First non-zero pending snapshot of this window (bracket print only).
+    let mut first_pending: u32 = 0;
 
     'outer: loop {
         // Atomically snapshot and clear pending bits
@@ -209,13 +221,40 @@ pub fn __do_softirq() -> bool {
         if pending == 0 {
             break;
         }
+        if first_pending == 0 {
+            first_pending = pending;
+        }
 
         WW_SOFTIRQ_RUNS.fetch_add(1, Ordering::Relaxed);
         let t0 = crate::drivers::timer::read_time();
 
         // Process each set bit from LSB (highest priority) to MSB
+        //
+        // Linux checks the 2 ms budget BEFORE every vector
+        // (kernel/softirq.c: "Stop at the budget time — the softirq
+        // might run for long") and clears only the bit it is about to
+        // run, so the vectors it did not reach stay pending for the next
+        // entry. Rux used to clear the whole snapshot up front and
+        // check the budget only after the batch: a batch of slow
+        // handlers could therefore overrun the budget by the time of
+        // every vector left in the batch, and the interrupted context
+        // (the idle loop or a user task) lost exactly that much CPU —
+        // the outcome the budget exists to prevent (the WT4 collapse
+        // shape). Linux's placement bounds the overrun to a single
+        // handler.
         let mut remaining = pending;
         while remaining != 0 {
+            if crate::drivers::timer::read_time().saturating_sub(budget_t0)
+                >= MAX_SOFTIRQ_TIME_TICKS
+            {
+                // Leave the vectors we did not reach pending (Linux
+                // leaves them in local_softirq_pending); the caller
+                // then wakes ksoftirqd to run them.
+                unsafe {
+                    SOFTIRQ_PENDING[cpu].fetch_or(remaining, Ordering::Release);
+                }
+                break 'outer;
+            }
             let bit = remaining.trailing_zeros() as usize;
             remaining &= !(1u32 << bit);
 
@@ -251,6 +290,26 @@ pub fn __do_softirq() -> bool {
     crate::interrupt::preempt_count_sub(
         crate::interrupt::preempt::SOFTIRQ_OFFSET
     );
+
+    // Session-6 discriminator exit side (see entry comment): print when
+    // the task switched inside the processing window. Direct console —
+    // this can print from deep inside the irq-exit/ksoftirqd paths.
+    let tp_exit = crate::arch::cpu::get_thread_id() as usize;
+    if tp_entry != tp_exit {
+        let a = tp_entry as *mut crate::process::task::Task;
+        let b = tp_exit as *mut crate::process::task::Task;
+        let (pa, pb) = unsafe {
+            ((*a).preempt_count(), (*b).preempt_count())
+        };
+        use core::fmt::Write;
+        let mut w = crate::dfx::backtrace::ConsoleWriter::new();
+        let _ = write!(w,
+            "SOFTIRQ-BRACKET-LEAK cpu={} entry_tp={:#x} (pid={} preempt={:#x}) exit_tp={:#x} (pid={} preempt={:#x}) first_pending={:#x}\n",
+            cpu, tp_entry,
+            unsafe { (*a).pid() }, pa,
+            tp_exit, unsafe { (*b).pid() }, pb,
+            first_pending);
+    }
     crate::dfx::syscost::zone_softirq_exit(); // syscost probe
 
     // SAFETY: per-CPU arrays accessed only by current CPU; cpu_id is correct
