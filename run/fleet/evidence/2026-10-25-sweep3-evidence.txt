@@ -113,3 +113,14 @@ blast radius — connects to the count-migration family (softirq counts
 stuck on both CPUs incl. the IDLE task) and to the fake-OOM open item.
 v7 (merged with main) carries the KILLDUMP pin fixes — watch whether
 the oom01 wedge rate drops after the refresh.
+
+## Heal-fix verification (10:50, in flight)
+A-side (v5, memstorm-r11): HEAL(pid=1) 14x / UNDERFLOW(pid=1,
+sub=0x10000) 14x — exact 1:1, the self-inflicted irq_exit sub.
+B-side-1 (v7 merged, ltp-a r22 storm): HEAL(pid=0x78a) 6x /
+UNDERFLOW(sub=0x10000) 0x — hardirq-loss class GONE. The 6 underflows
+present are sub=0x1 at spinlock.rs guard-drop on the healed pid — the
+heal's documented "unpairing sub clamps and reports" path (a 10 s-held
+spinlock section healed; the hold itself is the pathology). Count
+bookkeeping now pairs; PASS direction confirmed, awaiting memstorm-surface
+B-side (verify-v6ms, isolates the fix from the merge).

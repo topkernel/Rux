@@ -1,0 +1,167 @@
+c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+sched_rr_get_interval03.c:59: [1;34mTINFO: [0mTesting variant: vDSO or syscall with libc spec
+sched_rr_get_interval03.c:87: [1;32mTPASS: [0msched_rr_get_interval(-1, 0x4d888) : EINVAL (22)
+sched_rr_get_interval03.c:87: [1;32mTPASS: [0msched_rr_get_interval(32768, 0x4d888) : ESRCH (3)
+sched_rr_get_interval03.c:78: [1;33mTCONF: [0mEFAULT skipped for libc_variant
+sched_rr_get_interval03.c:59: [1;34mTINFO: [0mTesting variant: syscall with old kernel spec
+sched_rr_get_interval03.c:87: [1;32mTPASS: [0msched_rr_get_interval(-1, 0x4d888) : EINVAL (22)
+sched_rr_get_interval03.c:87: [1;32mTPASS: [0msched_rr_get_interval(32768, 0x4d888) : ESRCH (3)
+sched_rr_get_interval03.c:87: [1;32mTPASS: [0msched_rr_get_interval(0, 0x3000002000) : EFAULT (14)
+
+Summary:
+passed   5
+failed   0
+broken   0
+skipped  1
+warnings 0
+SWEEP RES|934|sched_rr_get_interval03|PASS|0|0
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+sched_setparam01.c:30: [1;34mTINFO: [0mTesting libc variant
+../../../../include/tst_sched.h:43: [1;33mTCONF: [0msched_setparam not supported
+sched_setparam01.c:30: [1;34mTINFO: [0mTesting syscall variant
+sched_setparam01.c:25: [1;32mTPASS: [0msched_setparam(0, 0) passed
+
+Summary:
+passed   1
+failed   0
+broken   0
+skipped  1
+warnings 0
+SWEEP RES|935|sched_setparam01|PASS|0|0
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+sched_setparam02.c:59: [1;34mTINFO: [0mTesting libc variant
+../../../../include/tst_sched.h:53: [1;33mTCONF: [0msched_setscheduler not supported
+sched_setparam02.c:59: [1;34mTINFO: [0mTesting syscall variant
+sched_setparam02.c:50: [1;32mTPASS: [0mgot expected priority 5
+sched_setparam02.c:50: [1;32mTPASS: [0mgot expected priority 5
+sched_setparam02.c:50: [1;32mTPASS: [0mgot expected priority 0
+
+Summary:
+passed   3
+failed   0
+broken   0
+skipped  1
+warnings 0
+SWEEP RES|936|sched_setparam02|PASS|0|0
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+sched_setparam03.c:49: [1;34mTINFO: [0mTesting libc variant
+../../../../include/tst_sched.h:53: [1;33mTCONF: [0msched_setscheduler not supported
+sched_setparam03.c:49: [1;34mTINFO: [0mTesting syscall variant
+sched_setparam03.c:39: [1;32mTPASS: [0mgot expected priority 5
+
+Summary:
+passed   1
+failed   0
+broken   0
+skipped  1
+warnings 0
+SWEEP RES|937|sched_setparam03|PASS|0|0
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+sched_setparam04.c:49: [1;34mTINFO: [0mTesting libc variant
+../../../../include/tst_sched.h:43: [1;33mTCONF: [0msched_setparam not supported
+sched_setparam04.c:49: [1;34mTINFO: [0mTesting syscall variant
+sched_setparam04.c:59: [1;32mTPASS: [0mtest with non-existing pid : ESRCH (3)
+sched_setparam04.c:59: [1;32mTPASS: [0mtest invalid pid value : EINVAL (22)
+sched_setparam04.c:59: [1;32mTPASS: [0mtest with invalid address for p : EINVAL (22)
+sched_setparam04.c:59: [1;32mTPASS: [0mtest with invalid p.sched_priority : EINVAL (22)
+
+Summary:
+passed   4
+failed   0
+broken   0
+skipped  1
+warnings 0
+WW: fires=2693 late_max=3ms pidmiss=0 rearm=1 wheel=0/2 hres_next=6ms
+WW2: si_runs=239 si_busy=56ms ticks=[0,0] vec=[0,234,0,0,5,0,0,0,234,0]
+WW3: grq=0 cfs=0 idle=0x3 nr=3 cpu0=(pid=0 st=0x0 pc=256) cpu1=(pid=0 st=0x0 pc=256)
+WW: wakes=23663 picks=21586 avg_run=1ms stranded=0 strand_max=0ms
+SWEEP RES|938|sched_setparam04|PASS|0|0
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+sched_setparam05.c:42: [1;34mTINFO: [0mTesting libc variant
+../../../../include/tst_sched.h:43: [1;33mTCONF: [0msched_setparam not supported
+sched_setparam05.c:42: [1;34mTINFO: [0mTesting syscall variant
+sched_setparam05.c:31: [1;31mTFAIL: [0msched_setparam(1194, 0) succeeded
+
+Summary:
+passed   0
+failed   1
+broken   0
+skipped  1
+warnings 0
+SWEEP RES|939|sched_setparam05|TCONF|33|0
+STALE-CLAIM-RESET by_cpu=0 pid=1 from_claim=1
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+sched_getscheduler01.c:58: [1;34mTINFO: [0mTesting libc variant
+../../../../include/tst_sched.h:53: [1;33mTCONF: [0msched_setscheduler not supported
+sched_getscheduler01.c:58: [1;34mTINFO: [0mTesting syscall variant
+sched_getscheduler01.c:51: [1;32mTPASS: [0mgot expected policy 2
+sched_getscheduler01.c:51: [1;32mTPASS: [0mgot expected policy 0
+sched_getscheduler01.c:51: [1;32mTPASS: [0mgot expected policy 1
+
+Summary:
+passed   3
+failed   0
+broken   0
+skipped  1
+warnings 0
+SWEEP RES|940|sched_getscheduler01|PASS|0|0
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+sched_getscheduler02.c:23: [1;34mTINFO: [0mTesting libc variant
+../../../../include/tst_sched.h:58: [1;33mTCONF: [0msched_getscheduler not supported
+sched_getscheduler02.c:23: [1;34mTINFO: [0mTesting syscall variant
+sched_getscheduler02.c:32: [1;32mTPASS: [0msched_getscheduler(32768) : ESRCH (3)
+
+Summary:
+passed   1
+failed   0
+broken   0
+skipped  1
+warnings 0
+SWEEP RES|941|sched_getscheduler02|PASS|0|0
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+sched_setscheduler01.c:59: [1;34mTINFO: [0mTesting libc variant
+../../../../include/tst_sched.h:53: [1;33mTCONF: [0msched_setscheduler not supported
+sched_setscheduler01.c:59: [1;34mTINFO: [0mTesting syscall variant
+sched_setscheduler01.c:69: [1;32mTPASS: [0msched_setscheduler(32768, 0, 0x4d8e8) : ESRCH (3)
+sched_setscheduler01.c:69: [1;32mTPASS: [0msched_setscheduler(1, 99, 0x4d8e8) : EINVAL (22)
+sched_setscheduler01.c:69: [1;32mTPASS: [0msched_setscheduler(1, 0, 0xffffffffffffffff) : EFAULT (14)
+sched_setscheduler01.c:69: [1;32mTPASS: [0msched_setscheduler(0, 0, 0x4d008) : EINVAL (22)
+
+Summary:
+passed   4
+failed   0
+broken   0
+skipped  1
+warnings 0
+SWEEP RES|942|sched_setscheduler01|PASS|0|0
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+sched_setscheduler02.c:34: [1;34mTINFO: [0mTesting libc variant
+WW: fires=2702 late_max=3ms pidmiss=0 rearm=1 wheel=1/3 hres_next=0ms
+WW2: si_runs=235 si_busy=59ms ticks=[0,0] vec=[0,230,0,0,5,0,0,0,231,0]
+WW3: grq=0 cfs=0 idle=0x0 nr=2 cpu0=(pid=1205 st=0x1 pc=258) cpu1=(pid=1206 st=0x0 pc=256)
+WW: wakes=23783 picks=21700 avg_run=1ms stranded=0 strand_max=0ms
+WW: TIMER-SOFTIRQ-STALL cpu=1 age=1006ms tick_age=0ms n=30157 pid=1206 pc=0x100 rip=0xffffffff800e4678
+WW: fires=2703 late_max=3ms pidmiss=0 rearm=1 wheel=0/2 hres_next=1844674407116254ms
+WW2: si_runs=102 si_busy=25ms ticks=[0,0] vec=[0,102,0,0,0,0,0,0,102,0]
+WW3: grq=1 cfs=1 idle=0x0 nr=3 cpu0=(pid=1205 st=0x1 pc=256) cpu1=(pid=1206 st=0x0 pc=256)
+WW: wakes=23783 picks=21700 avg_run=1ms stranded=0 strand_max=0ms
+WW: TIMER-SOFTIRQ-STALL cpu=1 age=2006ms tick_age=0ms n=30157 pid=1206 pc=0x100 rip=0xffffffff800e4678
+WW: fires=2703 late_max=3ms pidmiss=0 rearm=1 wheel=0/2 hres_next=1844674407115254ms
+WW2: si_runs=100 si_busy=21ms ticks=[0,0] vec=[0,100,0,0,0,0,0,0,100,0]
+WW3: grq=1 cfs=1 idle=0x0 nr=3 cpu0=(pid=1205 st=0x1 pc=256) cpu1=(pid=1206 st=0x0 pc=256)
+WW: wakes=23783 picks=21700 avg_run=1ms stranded=0 strand_max=0ms
+WW: TIMER-SOFTIRQ-STALL cpu=1 age=3006ms tick_age=0ms n=30157 pid=1206 pc=0x100 rip=0xffffffff800e4678
+WW: fires=2703 late_max=3ms pidmiss=0 rearm=1 wheel=0/2 hres_next=1844674407114254ms
+WW2: si_runs=100 si_busy=14ms ticks=[0,0] vec=[0,100,0,0,0,0,0,0,100,0]
+WW3: grq=1 cfs=1 idle=0x0 nr=3 cpu0=(pid=1205 st=0x1 pc=256) cpu1=(pid=1206 st=0x0 pc=256)
+WW: wakes=23783 picks=21700 avg_run=1ms stranded=0 strand_max=0ms
