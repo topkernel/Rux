@@ -1,4 +1,4 @@
-316 len=0x1000 flags=0x1 fd=3 off=0x0
+0x1 fd=3 off=0x0
 stderr[24] pid 316: tst_test.c:1733: .[1;34mTINFO: .[0mLTP version: 20240524.
 tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
 tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
@@ -17,7 +17,6 @@ link04.c:90: [1;32mTPASS: [0mlink(<regfile>, <path contains a regular file>): 
 link04.c:90: [1;32mTPASS: [0mlink(<regfile>, <pathname too long>): ENAMETOOLONG (36)
 EFAULTTRAC: pid=317 nr=37 a0=0xffffffffffffff9c a1=0x3b030
 link04.c:90: [1;32mTPASS: [0mlink(<regfile>, <invalid address>): EFAULT (14)
-W3-RUNWAKE-REFUSED pid=316 state=0x0 linked=false curr_on=true on_cpu=true pk=1 cpu=0
 link04.c:90: [1;32mTPASS: [0mlink(<regfile>, <regfile2>): EEXIST (17)
 link04.c:90: [1;32mTPASS: [0mlink(<Write access diretory>, <newpath>): EACCES (13)
 link04.c:90: [1;32mTPASS: [0mlink(<Search access diretory>, <dir2/testdir_1/new_tfile_2>): EACCES (13)
@@ -37,23 +36,24 @@ stderr[31] pid 316: warnings 0.
 warnings 0
 missstat: ret=-20 nr=56 a0=0xffffffffffffff9c path='-' a2=0x38000 pid=316
 missstat: ret=-20 nr=56 a0=0xffffffffffffff9c path='-' a2=0x38000 pid=316
+WW: fires=48 late_max=0ms pidmiss=0 rearm=0 wheel=0/2 hres_next=17ms
+WW2: si_runs=532 si_busy=21ms ticks=[0,0] vec=[0,0,0,0,298,0,0,0,234,0]
+WW3: grq=0 cfs=0 idle=0x2 nr=3 cpu0=(pid=316 st=0x0 pc=256) cpu1=(pid=0 st=0x0 pc=256)
+WW: wakes=936 picks=754 avg_run=0ms stranded=0 strand_max=0ms
 missstat: ret=-20 nr=56 a0=0xffffffffffffff9c path='-' a2=0x38000 pid=316
 missstat: ret=-20 nr=56 a0=0xffffffffffffff9c path='-' a2=0x38000 pid=316
-W3-RUNWAKE-REFUSED pid=316 state=0x0 linked=false curr_on=true on_cpu=true pk=1 cpu=1
+W3-RUNWAKE-REFUSED pid=316 state=0x0 linked=false curr_on=true on_cpu=true pk=1 cpu=0
 SFDDBG: send->pid1 sig=17 disp=IGN blocked=false pending=0x0
 SWEEP RES|534|link04|PASS|0|0
 mmap[4] pid 318 len=0x1000 flags=0x1 fd=3 off=0x0
 stderr[32] pid 318: tst_test.c:1733: .[1;34mTINFO: .[0mLTP version: 20240524.
 tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
 tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
-WW: fires=67 late_max=0ms pidmiss=0 rearm=0 wheel=0/3 hres_next=37ms
-WW2: si_runs=479 si_busy=29ms ticks=[0,0] vec=[0,0,0,0,245,0,0,0,234,0]
-WW3: grq=0 cfs=0 idle=0x2 nr=1 cpu0=(pid=319 st=0x0 pc=256) cpu1=(pid=0 st=0x0 pc=0)
-WW: wakes=1226 picks=1086 avg_run=0ms stranded=0 strand_max=0ms
-WW: fires=77 late_max=0ms pidmiss=0 rearm=0 wheel=0/3 hres_next=49ms
-WW2: si_runs=238 si_busy=10ms ticks=[0,0] vec=[0,0,0,0,0,0,0,0,238,0]
-WW3: grq=0 cfs=0 idle=0x2 nr=3 cpu0=(pid=319 st=0x0 pc=256) cpu1=(pid=0 st=0x0 pc=256)
-WW: wakes=1343 picks=1203 avg_run=0ms stranded=0 strand_max=0ms
+W3-RUNWAKE-REFUSED pid=318 state=0x0 linked=true curr_on=false on_cpu=false pk=1 cpu=0
+WW: fires=58 late_max=0ms pidmiss=0 rearm=0 wheel=0/3 hres_next=39ms
+WW2: si_runs=362 si_busy=14ms ticks=[0,0] vec=[0,0,0,0,123,0,0,0,239,0]
+WW3: grq=0 cfs=0 idle=0x2 nr=2 cpu0=(pid=319 st=0x0 pc=65537) cpu1=(pid=0 st=0x0 pc=256)
+WW: wakes=1090 picks=895 avg_run=0ms stranded=0 strand_max=0ms
 missstat: ret=-2 nr=79 a0=0xffffffffffffff9c path='lkfile_319_171' a2=0x3fffffe380 pid=319
 stderr[33] pid 319: link05.c:43: .[1;31mTBROK: .[0mstat(lkfile_319_171,0x3fffffe4c8) failed: ENOENT (2).
 link05.c:43: [1;31mTBROK: [0mstat(lkfile_319_171,0x3fffffe4c8) failed: ENOENT (2)
@@ -89,29 +89,33 @@ missstat: ret=-20 nr=56 a0=0xffffffffffffff9c path='-' a2=0x38000 pid=318
 missstat: ret=-20 nr=56 a0=0xffffffffffffff9c path='-' a2=0x38000 pid=318
 missstat: ret=-20 nr=56 a0=0xffffffffffffff9c path='-' a2=0x38000 pid=318
 missstat: ret=-20 nr=56 a0=0xffffffffffffff9c path='-' a2=0x38000 pid=318
-WW: fires=87 late_max=0ms pidmiss=0 rearm=0 wheel=0/2 hres_next=58ms
-WW2: si_runs=240 si_busy=9ms ticks=[0,0] vec=[0,0,0,0,0,0,0,0,241,0]
-WW3: grq=0 cfs=0 idle=0x2 nr=3 cpu0=(pid=318 st=0x0 pc=256) cpu1=(pid=0 st=0x0 pc=258)
-WW: wakes=1459 picks=1319 avg_run=0ms stranded=0 strand_max=0ms
-stderr[40] pid 318: tst_tmpdir.c:342: .[1;35mTWARN: .[0mtst_rmdir: rmobj(/tmp/LTP_linLIFOOP) failed: remove(/tmp/LTP_linLIFOOP) failed; errno=39: ENOTEMPTY.
-tst_tmpdir.c:342: [1;35mTWARN: [0mtst_rmdir: rmobj(/tmp/LTP_linLIFOOP) failed: remove(/tmp/LTP_linLIFOOP) failed; errno=39: ENOTEMPTY
-W3-RUNWAKE-REFUSED pid=318 state=0x0 linked=false curr_on=true on_cpu=true pk=1 cpu=0
+WW: fires=68 late_max=0ms pidmiss=0 rearm=0 wheel=0/2 hres_next=48ms
+WW2: si_runs=238 si_busy=9ms ticks=[0,0] vec=[0,0,0,0,0,0,0,0,238,0]
+WW3: grq=0 cfs=0 idle=0x2 nr=2 cpu0=(pid=318 st=0x0 pc=65536) cpu1=(pid=0 st=0x0 pc=256)
+WW: wakes=1207 picks=1012 avg_run=0ms stranded=0 strand_max=0ms
+stderr[40] pid 318: tst_tmpdir.c:342: .[1;35mTWARN: .[0mtst_rmdir: rmobj(/tmp/LTP_linkGBIaM) failed: remove(/tmp/LTP_linkGBIaM) failed; errno=39: ENOTEMPTY.
+tst_tmpdir.c:342: [1;35mTWARN: [0mtst_rmdir: rmobj(/tmp/LTP_linkGBIaM) failed: remove(/tmp/LTP_linkGBIaM) failed; errno=39: ENOTEMPTY
+W3-RUNWAKE-REFUSED pid=318 state=0x0 linked=false curr_on=true on_cpu=true pk=1 cpu=1
 SFDDBG: send->pid1 sig=17 disp=IGN blocked=false pending=0x0
 SWEEP RES|535|link05|FAIL|2|0
+WW: fires=78 late_max=0ms pidmiss=0 rearm=0 wheel=0/2 hres_next=74ms
+WW2: si_runs=239 si_busy=9ms ticks=[0,0] vec=[0,0,0,0,1,0,0,0,238,0]
+WW3: grq=0 cfs=0 idle=0x2 nr=1 cpu0=(pid=320 st=0x0 pc=256) cpu1=(pid=0 st=0x0 pc=0)
+WW: wakes=1312 picks=1117 avg_run=0ms stranded=0 strand_max=0ms
 mmap[5] pid 320 len=0x1000 flags=0x1 fd=3 off=0x0
 SR-REGS:
-  epc=0xffffffff800dc9ae ra=0xffffffff8023d3c2 sp=0xffffffd6015f9fd0
-  tp=0xffffffd60142c000 s0=0xffffffd6015f9ff0 s1=0x0 gp=0x4ef98
-  a0=0xffffffd6015fb948 a1=0xffffffd6015fb588 a2=0x0 a3=0x28
+  epc=0xffffffff802ec898 ra=0xffffffff802663a8 sp=0xffffffd6015d9ef0
+  tp=0xffffffd60140c000 s0=0xffffffd6015d9f10 s1=0x0 gp=0x4ef98
+  a0=0xffffffd6015db868 a1=0xffffffd6015db4a8 a2=0x0 a3=0x28
   a4=0x3aee0 a5=0xffffffffffffffff a6=0x0 a7=0x28
   t0=0x4 t1=0x2802c t2=0x0 t3=0x8
 SR-STACK (ra chain via s0):
-  fp=0xffffffd6015f9ff0 ra=0xffffffd6015db300
+  fp=0xffffffd6015d9f10 ra=0xffffffd6016613e0
 
 
 Kernel panic - not syncing:
 
-PANIC: trap: illegal instruction in kernel mode at epc=0xffffffff800dc9ae badaddr=0xc0101573
+PANIC: trap: illegal instruction in kernel mode at epc=0xffffffff802ec898 badaddr=0xc0101573
   Location: kernel/src/arch/riscv64/trap.rs: 370
 
 ---[ end Kernel panic - not syncing ]---
@@ -119,26 +123,19 @@ PANIC: trap: illegal instruction in kernel mode at epc=0xffffffff800dc9ae badadd
 Sstatus: 0000000200000120
 Scause : 0000000000000002
 Stval  : 00000000c0101573
-Sepc   : ffffffff800dc9ae
+Sepc   : ffffffff802ec898
 
 Registers:
-  ra  : ffffffff80206ae2  sp  : ffffffd6015f90f0  gp  : 000000000004ef98  tp  : ffffffd60142c000  
-  t0  : 0000000000000008  t1  : 000000000000000a  t2  : 00000000c0101573  s0  : ffffffd6015f9220  
-  s1  : 0000000000000000  a0  : ffffffd6015f9228  a1  : ffffffd6015f9108  a2  : 00000000000000f8  
-  a3  : ffffffd6015f9108  a4  : ffffffd6015f9200  a5  : 0000000000000000  a6  : 0000000000000000  
-  a7  : ffffffd6015f91ce  s2  : 0000000000000003  s3  : 000000000004f8b0  s4  : 0000000000000000  
+  ra  : ffffffff800d53fc  sp  : ffffffd6015d9010  gp  : 000000000004ef98  tp  : ffffffd60140c000  
+  t0  : 0000000000000008  t1  : 000000000000000a  t2  : 00000000c0101573  s0  : ffffffd6015d9140  
+  s1  : 0000000000000000  a0  : ffffffd6015d9148  a1  : ffffffd6015d9028  a2  : 00000000000000f8  
+  a3  : ffffffd6015d9028  a4  : ffffffd6015d9120  a5  : 0000000000000000  a6  : 0000000000000000  
+  a7  : ffffffd6015d90ee  s2  : 0000000000000003  s3  : 000000000004f8b0  s4  : 0000000000000000  
   s5  : 0000003fffffea38  s6  : 0000003fffffeb08  s7  : 0000000000000001  s8  : 0000000000000000  
   s9  : ffffffffffffffff  s10 : 0000000000000000  s11 : 0000003fffffea00  t3  : 0000000000000002  
   t4  : 0000000000000000  t5  : 0000003000001050  t6  : 0000003000001030  
 
-Call trace:
-  [<ffffffff802065a6>] (current)
-  [<ffffffd6015f92f0>]
+Call Trace:
+  [<ffffffff800d4e90>] ? (current)
+  [<ffffffd6015d91d0>] ?
 
-BUG: soft lockup - CPU#0 stuck for 10s! timer_irq=1175
-  CPU: 0 PID: 320
-Call trace:
-  [<ffffffff802065a6>] (current)
-  [<ffffffff803d9b80>]
-
-WAKE-STRANDED pid=1 cpu=1 strand=1919ms policy=0 h0=(320/p0/0ms/pc=0) h1=(303/p0/2004ms/pc=1) h2=(nil) h3=(nil) vr=0ms lead-lag=6ms

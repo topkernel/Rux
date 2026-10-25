@@ -1,0 +1,170 @@
+max=4057ms
+SWEEP RES|1007|setdomainname02|FAIL|1|0
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+setdomainname.h:36: [1;34mTINFO: [0mTesting libc setdomainname()
+setdomainname03.c:32: [1;32mTPASS: [0mexpected failure: EPERM (1)
+setdomainname.h:39: [1;34mTINFO: [0mTesting __NR_setdomainname syscall
+setdomainname03.c:32: [1;32mTPASS: [0mexpected failure: EPERM (1)
+
+Summary:
+passed   2
+failed   0
+broken   0
+skipped  0
+warnings 0
+SWEEP RES|1008|setdomainname03|PASS|0|0
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+setfsgid01.c:39: [1;32mTPASS: [0mSETFSGID(nobody_gid) passed
+setfsgid01.c:40: [1;32mTPASS: [0mSETFSGID(-1) passed
+setfsgid01.c:41: [1;31mTFAIL: [0mSETFSGID(gid) retval -1 != 65534: SUCCESS (0)
+
+Summary:
+passed   2
+failed   1
+broken   0
+skipped  0
+warnings 0
+SWEEP RES|1009|setfsgid01|FAIL|1|0
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+/home/william/rux-agents/ltp-fix-b/userspace/linux-ltp/ltp-full-20240524/testcases/kernel/syscalls/setfsgid/../utils/compat_tst_16.h:119: [1;33mTCONF: [0m16-bit version of setfsgid() is not supported on your platform
+
+Summary:
+passed   0
+failed   0
+broken   0
+skipped  1
+warnings 0
+SWEEP RES|1010|setfsgid01_16|TCONF|32|0
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+setfsgid02.c:49: [1;32mTPASS: [0mEUID 65534: setfsgid() returned expected value: 0
+setfsgid02.c:49: [1;32mTPASS: [0mEUID 65534: setfsgid() returned expected value: 0
+setfsgid02.c:49: [1;32mTPASS: [0mEUID 0: setfsgid() returned expected value: 0
+setfsgid02.c:49: [1;32mTPASS: [0mEUID 0: setfsgid() returned expected value: 1
+
+Summary:
+passed   4
+failed   0
+broken   0
+skipped  0
+warnings 0
+SWEEP RES|1011|setfsgid02|PASS|0|0
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+W2-WAKE-REFUSED-SLEEPING pid=1757 state=0x0 on_cpu=true pk=1 cpu=1
+/home/william/rux-agents/ltp-fix-b/userspace/linux-ltp/ltp-full-20240524/testcases/kernel/syscalls/setfsgid/../utils/compat_tst_16.h:119: [1;33mTCONF: [0m16-bit version of setfsgid() is not supported on your platform
+
+Summary:
+passed   0
+failed   0
+broken   0
+skipped  1
+warnings 0
+SWEEP RES|1012|setfsgid02_16|TCONF|32|0
+setfsgid03    1  [1;32mTPASS[0m  :  setfsgid() returned expected value : 0
+SWEEP RES|1013|setfsgid03|PASS|0|0
+setfsgid03_16    1  [1;33mTCONF[0m  :  /home/william/rux-agents/ltp-fix-b/userspace/linux-ltp/ltp-full-20240524/testcases/kernel/syscalls/setfsgid/../utils/compat_16.h:122: 16-bit version of setfsgid() is not supported on your platform
+setfsgid03_16    2  [1;33mTCONF[0m  :  /home/william/rux-agents/ltp-fix-b/userspace/linux-ltp/ltp-full-20240524/testcases/kernel/syscalls/setfsgid/../utils/compat_16.h:122: Remaining cases not appropriate for configuration
+WW: fires=109216 late_max=4ms pidmiss=0 rearm=2 wheel=0/2 hres_next=57ms
+WW2: si_runs=243 si_busy=32ms ticks=[0,0] vec=[0,235,0,0,9,0,0,0,234,0]
+WW3: grq=1 cfs=1 idle=0x0 nr=3 cpu0=(pid=1760 st=0x0 pc=256) cpu1=(pid=0 st=0x0 pc=256)
+WW: wakes=266447 picks=201496 avg_run=101ms stranded=962 strand_max=4057ms
+SWEEP RES|1014|setfsgid03_16|TCONF|32|0
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+setfsuid01.c:37: [1;32mTPASS: [0msetfsuid(65534) passed
+setfsuid01.c:38: [1;32mTPASS: [0mSETFSUID(-1) passed
+
+Summary:
+passed   2
+failed   0
+broken   0
+skipped  0
+warnings 0
+SWEEP RES|1015|setfsuid01|PASS|0|0
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+/home/william/rux-agents/ltp-fix-b/userspace/linux-ltp/ltp-full-20240524/testcases/kernel/syscalls/setfsuid/../utils/compat_tst_16.h:114: [1;33mTCONF: [0m16-bit version of setfsuid() is not supported on your platform
+
+Summary:
+passed   0
+failed   0
+broken   0
+skipped  1
+warnings 0
+SWEEP RES|1016|setfsuid01_16|TCONF|32|0
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+setfsuid02.c:29: [1;31mTFAIL: [0msetfsuid(invalid_fsuid) test for expected failure: retval -1 != 0: SUCCESS (0)
+
+Summary:
+passed   0
+failed   1
+broken   0
+skipped  0
+warnings 0
+SWEEP RES|1017|setfsuid02|FAIL|1|0
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+/home/william/rux-agents/ltp-fix-b/userspace/linux-ltp/ltp-full-20240524/testcases/kernel/syscalls/setfsuid/../utils/compat_tst_16.h:114: [1;33mTCONF: [0m16-bit version of setfsuid() is not supported on your platform
+
+Summary:
+passed   0
+failed   0
+broken   0
+skipped  1
+warnings 0
+SWEEP RES|1018|setfsuid02_16|TCONF|32|0
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+setfsuid03.c:40: [1;32mTPASS: [0msetfsuid(fsuid) by non-root user: passed
+
+Summary:
+passed   1
+failed   0
+broken   0
+skipped  0
+warnings 0
+SWEEP RES|1019|setfsuid03|PASS|0|0
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+/home/william/rux-agents/ltp-fix-b/userspace/linux-ltp/ltp-full-20240524/testcases/kernel/syscalls/setfsuid/../utils/compat_tst_16.h:114: [1;33mTCONF: [0m16-bit version of setfsuid() is not supported on your platform
+
+Summary:
+passed   0
+failed   0
+broken   0
+skipped  1
+warnings 0
+SWEEP RES|1020|setfsuid03_16|TCONF|32|0
+setfsuid04    1  [1;31mTBROK[0m  :  tst_tmpdir.c:276: tst_tmpdir: mkdtemp(/tmp/LTP_setXXXXXX) failed: errno=ENOSPC(28): No space left on device
+setfsuid04    2  [1;31mTBROK[0m  :  tst_tmpdir.c:276: Remaining cases broken
+SWEEP RES|1021|setfsuid04|FAIL|2|0
+setfsuid04_16    1  [1;31mTBROK[0m  :  tst_tmpdir.c:276: tst_tmpdir: mkdtemp(/tmp/LTP_setXXXXXX) failed: errno=ENOSPC(28): No space left on device
+setfsuid04_16    2  [1;31mTBROK[0m  :  tst_tmpdir.c:276: Remaining cases broken
+SWEEP RES|1022|setfsuid04_16|FAIL|2|0
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+setgid01.c:21: [1;32mTPASS: [0mSETGID(gid) passed
+WW: fires=109225 late_max=4ms pidmiss=0 rearm=2 wheel=0/3 hres_next=35ms
+WW2: si_runs=244 si_busy=39ms ticks=[0,0] vec=[0,233,0,0,11,0,0,0,234,0]
+WW3: grq=1 cfs=1 idle=0x0 nr=0 cpu0=(pid=1775 st=0x1 pc=256) cpu1=(pid=1776 st=0x0 pc=65536)
+WW: wakes=266558 picks=201604 avg_run=101ms stranded=962 strand_max=4057ms
+WW: TIMER-SOFTIRQ-STALL cpu=0 age=1000ms tick_age=0ms n=230885 pid=1775 pc=0x100 rip=0xffffffff800e6f74
+WW: fires=109226 late_max=4ms pidmiss=0 rearm=2 wheel=0/2 hres_next=1844674406354274ms
+WW2: si_runs=103 si_busy=14ms ticks=[0,0] vec=[0,103,0,0,0,0,0,0,103,0]
+WW3: grq=3 cfs=3 idle=0x0 nr=3 cpu0=(pid=1775 st=0x0 pc=256) cpu1=(pid=1776 st=0x0 pc=256)
+WW: wakes=266561 picks=201605 avg_run=101ms stranded=962 strand_max=4057ms
+WW: TIMER-SOFTIRQ-STALL cpu=0 age=2000ms tick_age=0ms n=230885 pid=1775 pc=0x100 rip=0xffffffff800e6f74
+WW: fires=109226 late_max=4ms pidmiss=0 rearm=2 wheel=0/2 hres_next=1844674406353274ms
+WW2: si_runs=100 si_busy=21ms ticks=[0,0] vec=[0,100,0,0,0,0,0,0,100,0]
+WW3: grq=3 cfs=3 idle=0x0 nr=3 cpu0=(pid=1775 st=0x0 pc=256) cpu1=(pid=1776 st=0x0 pc=256)
+WW: wakes=266561 picks=201605 avg_run=101ms stranded=962 strand_max=4057ms
+WW: TIMER-SOFTIRQ-STALL cpu=0 age=3000ms tick_age=0ms n=230885 pid=1775 pc=0x100 rip=0xffffffff800e6f74
+WW: fires=109226 late_max=4ms pidmiss=0 rearm=2 wheel=0/2 hres_next=1844674406352274ms
+WW2: si_runs=100 si_busy=13ms ticks=[0,0] vec=[0,100,0,0,0,0,0,0,100,0]
+WW3: grq=3 cfs=3 idle=0x0 nr=3 cpu0=(pid=1775 st=0x0 pc=256) cpu1=(pid=1776 st=0x0 pc=256)
+WW: wakes=266561 picks=201605 avg_run=101ms stranded=962 strand_max=4057ms

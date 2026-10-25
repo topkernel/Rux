@@ -1,0 +1,102 @@
+# Evidence pack 2026-10-25 ~10:10 (session 3 sweep of the 06:55-09:50 unattended window)
+
+## monkey-b-r8 KERNPANIC (KILLDUMP deadbeef-tid race = samgr-callback 4dee194f family)
+76537:KILLDUMP: tid 3735928559 fdtab:
+76538:trap: KERNPANIC pfault badaddr=0x0000000000013ff0 rip=0xffffffff8075085e rsp=0xffff88806c3fa050
+76539-kp-stk ffff88806c3fa050: 0000010080b16798
+76540-kp-stk ffff88806c3fa058: ffff88806c368004
+76541-kp-stk ffff88806c3fa060: 01ff888000000100
+76542-kp-stk ffff88806c3fa068: ffff88806c368004
+76543-kp-stk ffff88806c3fa070: ffff88806c3fa0c0
+76544-kp-stk ffff88806c3fa078: ffffffff8029e2ec
+76545-kp-stk ffff88806c3fa080: 0000000000000060
+76546-kp-stk ffff88806c3fa088: 000000000000000a
+76547-kp-stk ffff88806c3fa090: ffff888067ce0000
+76548-kp-stk ffff88806c3fa098: ffff888067ce0000
+76549-kp-stk ffff88806c3fa0a0: ffffffff80798bc8
+76550-kp-stk ffff88806c3fa0a8: 0000000000000008
+76551-kp-stk ffff88806c3fa0b0: 0000000000000002
+76552-kp-stk ffff88806c3fa0b8: 0000000000000001
+76553-kp-stk ffff88806c3fa0c0: ffffffff80bf980c
+76554-kp-stk ffff88806c3fa0c8: 02ffffff00000000
+76555-kp-frame ffffffff8074c515
+76556-kp-frame ffffffff80202eff
+76557-kp-frame ffffffff80201cb9
+76558-kp-frame ffffffff80201a12
+76559-kp-frame ffffffff80731875
+76560-kp-frame ffffffff80730d83
+76561-kp-frame ffffffff802029fe
+76562-kp-frame ffffffff802049ba
+76563-kp-frame ffffffff80204d4c
+76564-kp-frame ffffffff8069f987
+76565-kp-sys 0000000000000140 000000000000003f 0000000000000007 0000000000000076
+76566-kp-sys 0000000000000140 0000000000000071 0000000000000000 ffffffffffffffff
+76567-kp-sys 0000000000000140 000000000000003f 0000000000000007 000000000000007e
+76568-kp-sys 0000000000000140 0000000000000071 0000000000000000 ffffffffffffffff
+76569-kp-sys 0000000000000140 000000000000003f 0000000000000007 0000000000000070
+76570-kp-sys 0000000000000140 0000000000000071 0000000000000000 ffffffffffffffff
+
+## ltp-a r18-r20 PROCESS_TREE_LOCK stuck episode (745 lines, guest progressing)
+run/fleet/logs/ltp-a-r18-serial.log:318
+run/fleet/logs/ltp-a-r20-serial.log:191
+run/fleet/logs/ltp-a-r19-serial.log:268
+DEADLOCK: spinlock stuck cpu=1 lock=0xffffffff8080c840 ra=0xffffffff80053eca
+DEADLOCK: spinlock stuck cpu=1 lock=0xffffffff8080c840 ra=0xffffffff80053eca
+DEADLOCK: spinlock stuck cpu=1 lock=0xffffffff8080c840 ra=0xffffffff80053eca
+
+## PREEMPT-LEAK reportable shapes pc=0x10001 (riscv fleet kernel v5, gated)
+PREEMPT-LEAK cpu=0000000000000000 pid=0000000000000683 pc=0000000000010001 held_nonzero_for=00000000000000c8jiffies rip=ffffffff80079ed2
+PREEMPT-LEAK cpu=0000000000000000 pid=0000000000000683 pc=0000000000010001 held_nonzero_for=00000000000000e0jiffies rip=ffffffff802d7f3c
+PREEMPT-LEAK cpu=0000000000000000 pid=0000000000000683 pc=0000000000010001 held_nonzero_for=00000000000000f4jiffies rip=ffffffff800e4d78
+PREEMPT-LEAK cpu=0000000000000000 pid=0000000000000683 pc=0000000000010001 held_nonzero_for=0000000000000108jiffies rip=ffffffff800723c6
+PREEMPT-LEAK cpu=0000000000000000 pid=0000000000000683 pc=0000000000010001 held_nonzero_for=000000000000011ejiffies rip=ffffffff800e48d0
+PREEMPT-LEAK cpu=0000000000000000 pid=0000000000000683 pc=0000000000010001 held_nonzero_for=0000000000000135jiffies rip=ffffffff800d5530
+PREEMPT-LEAK cpu=0000000000000000 pid=0000000000000683 pc=0000000000010001 held_nonzero_for=000000000000014ejiffies rip=ffffffff80300d9c
+PREEMPT-LEAK cpu=0000000000000000 pid=0000000000000683 pc=0000000000010001 held_nonzero_for=0000000000000164jiffies rip=ffffffff80053eca
+
+## PREEMPT-HEAL was=0x10001 held=0x3e8+
+PREEMPT-HEAL cpu=0000000000000000 pid=0000000000000683 was=0000000000010001 held_jiffies=00000000000003e8
+PREEMPT-HEAL cpu=0000000000000000 pid=0000000000000683 was=0000000000010001 held_jiffies=00000000000003e9
+PREEMPT-HEAL cpu=0000000000000001 pid=0000000000000001 was=0000000000010001 held_jiffies=00000000000003e8
+PREEMPT-HEAL cpu=0000000000000000 pid=0000000000000682 was=0000000000010001 held_jiffies=00000000000003e8
+PREEMPT-HEAL cpu=0000000000000001 pid=0000000000000001 was=0000000000010001 held_jiffies=00000000000003f5
+PREEMPT-HEAL cpu=0000000000000001 pid=0000000000000001 was=0000000000010001 held_jiffies=000000000000052e
+
+## PREEMPT-UNDERFLOW unpaired subs
+     82 PREEMPT-UNDERFLOW pid=000005fa count_was=00000000 sub=00010000 (unpaired decrement clamped to 0) at kernel/src/interrupt/preempt.rs:000000a8
+     10 PREEMPT-UNDERFLOW pid=00000001 count_was=00000000 sub=00010000 (unpaired decrement clamped to 0) at kernel/src/interrupt/preempt.rs:000000a8
+      5 PREEMPT-UNDERFLOW pid=00000683 count_was=00000000 sub=00010000 (unpaired decrement clamped to 0) at kernel/src/interrupt/preempt.rs:000000a8
+      2 PREEMPT-UNDERFLOW pid=000005fa count_was=00000000 sub=00000100 (unpaired decrement clamped to 0) at kernel/src/interrupt/softirq.rs:000000e7
+      1 PREEMPT-UNDERFLOW pid=00000682 count_was=00000000 sub=00010000 (unpaired decrement clamped to 0) at kernel/src/interrupt/preempt.rs:000000a8
+      1 PREEMPT-UNDERFLOW pid=000005f9 count_was=00000000 sub=00010000 (unpaired decrement clamped to 0) at kernel/src/interrupt/preempt.rs:000000a8
+      1 PREEMPT-UNDERFLOW pid=00000589 count_was=00000000 sub=00010000 (unpaired decrement clamped to 0) at kernel/src/interrupt/preempt.rs:000000a8
+
+## PARKED-LEAK pc histogram (riscv, all current serials)
+   3904 pc=0000000000010000 state=0000000000000001
+    296 pc=0000000000000100 state=0000000000000001
+    206 pc=0000000000000101 state=0000000000000001
+     84 pc=0000000000000102 state=0000000000000001
+     78 pc=0000000000010001 state=0000000000000001
+      3 pc=0000000000000001 state=0000000000000001
+      2 pc=0000000000000001 state=0000000000000000
+      1 pc=0000000000010000 state=00000000000
+      1 pc=0000000000000001 state=0000000000000002
+
+## soft lockups (ticks flowing)
+BUG: soft lockup - CPU#0 stuck for 10s! timer_irq=265208
+  CPU: 0 PID: 4131
+Call trace:
+  [<ffffffff802c5ae2>] (current)
+BUG: soft lockup - CPU#1 stuck for 10s! timer_irq=257328
+  CPU: 1 PID: 4079
+Call trace:
+  [<ffffffff802c5ae2>] (current)
+BUG: soft lockup - CPU#1 stuck for 10s! timer_irq=258606
+  CPU: 1 PID: 4318
+Call trace:
+  [<ffffffff802c5ae2>] (current)
+
+## WW strand_max outlier
+WW: wakes=45223 picks=41316 avg_run=14ms stranded=9 strand_max=125120ms
+WW: fires=6624 late_max=3ms pidmiss=0 rearm=1 wheel=0/1 hres_next=1844674406074324ms
+WW: wakes=45223 picks=41316 avg_run=14ms stranded=9 strand_max=125120ms

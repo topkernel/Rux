@@ -4210,14 +4210,37 @@ pub fn scheduler_tick() {
                     {
                         return;
                     }
-                    let pc = (*task).preempt_count();
-                    let mut running = false;
+                    // Parkwalk race fix (2026-10-25, fleet s2): the old
+                    // order sampled pc BEFORE the parked check, so a task
+                    // that released its guard and legally parked between
+                    // the two loads was recorded parked-with-nonzero —
+                    // the false PARKED-WILDWRITE "proof" shape (armed
+                    // EFLAGS/watchpoint capture never corroborated one
+                    // across 88+ chain rounds; the shape fires every
+                    // round at pc=1 exactly). Double-check parking around
+                    // the pc load: the wildwrite shape now requires the
+                    // task parked at BOTH edges of the load, and a false
+                    // positive additionally needs a full park->run->
+                    // guard->park excursion inside one visit's two
+                    // adjacent loads. Real wild writes into a parked
+                    // task's thread_info are unaffected (the task stays
+                    // parked through both checks).
+                    let mut running_a = false;
                     for c in 0..crate::config::MAX_CPUS {
                         if cpu_state(c).current == task {
-                            running = true;
+                            running_a = true;
                             break;
                         }
                     }
+                    let pc = (*task).preempt_count();
+                    let mut running_b = false;
+                    for c in 0..crate::config::MAX_CPUS {
+                        if cpu_state(c).current == task {
+                            running_b = true;
+                            break;
+                        }
+                    }
+                    let running = running_a || running_b;
                     // Sample up to 128 tasks per walk, biased to the
                     // interesting ones (nonzero count) so the table sees
                     // leak transitions even under heavy task churn.

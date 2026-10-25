@@ -1,0 +1,123 @@
+(22)
+msgstress01.c:144: [1;31mTBROK: [0mmsgrcv() failed: EINVAL (22)
+msgstress01.c:120: [1;31mTBROK: [0mmsgsnd() failed: EINVAL (22)
+msgstress01.c:120: [1;31mTBROK: [0mmsgsnd() failed: EINVAL (22)
+msgstress01.c:144: [1;31mTBROK: [0mmsgrcv() failed: EINVAL (22)
+msgstress01.c:144: [1;31mTBROK: [0mmsgrcv() failed: EINVAL (22)
+msgstress01.c:120: [1;31mTBROK: [0mmsgsnd() failed: EINVAL (22msgstress01.c:120: [1;31mTBROK:)
+ [0mmsgsnd() failed: EINVAL (22)
+msgstress01.c:120: [1;31mTBROK: [0mmsgsnd() failed: EINVAL (22)
+msgstress01.c:144: [1;31mTBROK: [0mmsgrcv() failed: EINVAL (22)
+msgstress01.c:120: [1;31mTBROK: [0mmsgsnd() failed: EINVAL (22)
+msgstress01.c:120: [1;31mTBROK: [0mmsgsnd() failed: EINVAL (22)
+msgstress01.c:144: [1;31mTBROK: [0mmsgrcv() failed: EINVAL (22)
+msgstress01.c:144: [1;31mTBROK: [0mmsgrcv() failed: EINVAL (22)
+msgstress01.c:120: [1;31mTBROK: [0mmsgsnd() failed: EINVAL (22)
+msgstress01.c:144: [1;31mTBROK: [0mmsgrcv() failed: EINVAL (22)
+msgstress01.c:144: [1;31mTBROK: [0mmsgrcv() failed: EINVAL (22)
+msgstress01.c:144: [1;31mTBROK: [0mmsgrcv() failed: EINVAL (22)
+msgstress01.c:144: [1;31mTBROK: [0mmsgrcv() failed: EINVAL (22)
+msgstress01.c:144: [1;31mTBROK: [0mmsgrcv() failed: EINVAL (22)
+msgstress01.c:144: [1;31mTBROK: [0mmsgrcv() failed: EINVAL (22)
+msgstress01.c:120: [1;31mTBROK: [0mmsgsnd() failed: EINVAL (22)
+msgstress01.c:120: [1;31mTBROK: [0mmsgsnd() failed: EINVAL (22)
+msgstress01.c:144: [1;31mTBROK: [0mmsgrcv() failed: EINVAL (22)
+tst_kconfig.c:88: [1;34mTINFO: [0mParsing kernel config '/proc/config.gz'
+msgstress01.c:120: [1;31mTBROK: [0mmsgsnd() failed: EINVAL (22)
+msgstress01.c:120: [1;31mTBROK: [0mmsgsnd() failed: EINVAL (22)
+msgstress01.c:144: [1;31mTBROK: [0mmsgrcv() failed: EINVAL (22)
+msgstress01.c:120: [1;31mTBROK: [0mmsgsnd() failed: EINVAL (22)
+msgstress01.c:120: [1;31mTBROK: [0mmsgsnd() failed: EINVAL (22)
+msgstress01.c:144: [1;31mTBROK: [0mmsgrcv() failed: EINVAL (22)
+msgstress01.c:144: [1;31mTBROK: [0mmsgrcv() failed: EINVAL (22)
+msgstress01.c:144: [1;31mTBROK: [0mmsgrcv() failed: EINVAL (22)
+msgstress01.c:144: [1;31mTBROK: [0mmsgrcv() failed: EINVAL (22)
+msgstress01.c:120: [1;31mTBROK: [0mmsgsnd() failed: EINVAL (22)
+msgstress01.c:120: [1;31mTBROK: [0mmsgsnd() failed: EINVAL (22)
+msgstress01.c:144: [1;31mTBROK: [0mmsgrcv() failed: EINVAL (22)
+msgstress01.c:144: [1;31mTBROK: [0mmsgrcv() failed: EINVAL (22)
+msgstress01.c:120: [1;31mTBROK: [0mmsgsnd() failed: EINVAL (22)
+msgstress01.c:120: [1;31mTBROK: [0mmsgsnd() failed: EINVAL (22)
+msgstress01.c:144: [1;31mTBROK: [0mmsgrcv() failed: EINVAL (22)
+msgstress01.c:120: [1;31mTBROK: [0mmsgsnd() failed: EINVAL (22)
+msgstress01.c:120: [1;31mTBROK: [0mmsgsnd() failed: EINVAL (22)
+msgstress01.c:120: [1;31mTBROK: [0mmsgsnd() failed: EINVAL (22)
+msgstress01.c:120: [1;31mTBROK: [0mmsgsnd() failed: EINVAL (22)
+msgstress01.c:144: [1;31mTBROK: [0mmsgrcv() failed: EINVAL (22)
+msgstress01.c:144: [1;31mTBROK: [0mmsgrcv() failed: EINVAL (22)
+msgstress01.c:144: [1;31mTBROK: [0mmsgrcv() failed: EINVAL (22)
+msgstress01.c:120: [1;31mTBROK: [0mmsgsnd() failed: EINVAL (22)
+msgstress01.c:120: [1;31mTBROK: [0mmsgsnd() failed: EINVAL (22)
+msgstress01.c:144: [1;31mTBROK: [0mmsgrcv() failed: EINVAL (22)
+msgstress01.c:144: [1;31mTBROK: [0mmsgrcv() failed: EINVAL (22)
+msgstress01.c:144: [1;31mTBROK: [0mmsgrcv() failed: EINVAL (22)
+msgstress01.c:144: [1;31mTBROK: [0mmsgrcv() failed: EINVAL (22)
+msgstress01.c:120: [1;31mTBROK: [0mmsgsnd() failed: EINVAL (22)
+msgstress01.c:144: [1;31mTBROK: [0mmsgrcv() failed: EINVAL (22)
+msgstress01.c:120: [1;31mTBROK: [0mmsgsnd() failed: EINVAL (22)
+SFDDBG: send->pid1 sig=17 disp=IGN blocked=false pending=0x0
+SFDDBG: send->pid1 sig=17 disp=IGN blocked=false pending=0x0
+SFDDBG: send->pid1 sig=17 disp=IGN blocked=false pending=0x0
+SFDDBG: send->pid1 sig=17 disp=IGN blocked=false pending=0x0
+SFDDBG: send->pid1 sig=17 disp=IGN blocked=false pending=0x0
+SFDDBG: send->pid1 sig=17 disp=IGN blocked=false pending=0x0
+SFDDBG: send->pid1 sig=17 disp=IGN blocked=false pending=0x0
+SFDDBG: send->pid1 sig=17 disp=IGN blocked=false pending=0x0
+SFDDBG: send->pid1 sig=17 disp=IGN blocked=false pending=0x0
+SFDDBG: send->pid1 sig=17 disp=IGN blocked=false pending=0x0
+SFDDBG: send->pid1 sig=17 disp=IGN blocked=false pending=0x0
+SFDDBG: send->pid1 sig=17 disp=IGN blocked=false pending=0x0
+SFDDBG: send->pid1 sig=17 disp=IGN blocked=false pending=0x0
+SFDDBG: send->pid1 sig=17 disp=IGN blocked=false pending=0x0
+SFDDBG: send->pid1 sig=17 disp=IGN blocked=false pending=0x0
+SFDDBG: send->pid1 sig=17 disp=IGN blocked=false pending=0x0
+SFDDBG: send->pid1 sig=17 disp=IGN blocked=false pending=0x0
+SFDDBG: send->pid1 sig=17 disp=IGN blocked=false pending=0x0
+SFDDBG: send->pid1 sig=17 disp=IGN blocked=false pending=0x0
+SFDDBG: send->pid1 sig=17 disp=IGN blocked=false pending=0x0
+SFDDBG: send->pid1 sig=17 disp=IGN blocked=false pending=0x0
+SFDDBG: send->pid1 sig=17 disp=IGN blocked=false pending=0x0
+SFDDBG: send->pid1 sig=17 disp=IGN blocked=false pending=0x0
+SFDDBG: send->pid1 sig=17 disp=IGN blocked=false pending=0x0
+SFDDBG: send->pid1 sig=17 disp=IGN blocked=false pending=0x0
+SFDDBG: send->pid1 sig=17 disp=IGN blocked=false pending=0x0
+SFDDBG: send->pid1 sig=17 disp=IGN blocked=false pending=0x0
+SFDDBG: send->pid1 sig=17 disp=IGN blocked=false pending=0x0
+SFDDBG: send->pid1 sig=17 disp=IGN blocked=false pending=0x0
+SFDDBG: send->pid1 sig=17 disp=IGN blocked=false pending=0x0
+SFDDBG: send->pid1 sig=17 disp=IGN blocked=false pending=0x0
+SFDDBG: send->pid1 sig=17 disp=IGN blocked=false pending=0x0
+SFDDBG: send->pid1 sig=17 disp=IGN blocked=false pending=0x0
+SFDDBG: send->pid1 sig=17 disp=IGN blocked=false pending=0x0
+SFDDBG: send->pid1 sig=17 disp=IGN blocked=false pending=0x0
+SFDDBG: send->pid1 sig=17 disp=IGN blocked=false pending=0x0
+SFDDBG: send->pid1 sig=17 disp=IGN blocked=false pending=0x0
+SFDDBG: send->pid1 sig=17 disp=IGN blocked=false pending=0x0
+SFDDBG: send->pid1 sig=17 disp=IGN blocked=false pending=0x0
+SFDDBG: send->pid1 sig=17 disp=IGN blocked=false pending=0x0
+SFDDBG: send->pid1 sig=17 disp=IGN blocked=false pending=0x0
+SFDDBG: send->pid1 sig=17 disp=IGN blocked=false pending=0x0
+SFDDBG: send->pid1 sig=17 disp=IGN blocked=false pending=0x0
+SFDDBG: send->pid1 sig=17 disp=IGN blocked=false pending=0x0
+SFDDBG: send->pid1 sig=17 disp=IGN blocked=false pending=0x0
+msgstress01.c:120: [1;31mTBROK: [0mmsgsnd() failed: EINVAL (22)
+msgstress01.c:144: [1;31mTBROK: [0mmsgrcv() failed: EINVAL (22)
+msgstress01.c:144: [1;31mTBROK: [0mmsgrcv() failed: EINVAL (22)
+WW: fires=65999 late_max=3ms pidmiss=0 rearm=28 wheel=0/2 hres_next=72ms
+WW2: si_runs=751 si_busy=32ms ticks=[0,0] vec=[0,0,0,0,1,0,0,0,750,0]
+WW3: grq=0 cfs=0 idle=0x1 nr=2 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=947 st=0x0 pc=256)
+WW: wakes=101286 picks=72320 avg_run=161ms stranded=186 strand_max=2885ms
+WW: fires=66009 late_max=3ms pidmiss=0 rearm=28 wheel=0/2 hres_next=85ms
+WW2: si_runs=120 si_busy=6ms ticks=[0,0] vec=[0,0,0,0,0,0,0,0,120,0]
+WW3: grq=0 cfs=0 idle=0x1 nr=3 cpu0=(pid=0 st=0x0 pc=256) cpu1=(pid=947 st=0x0 pc=256)
+WW: wakes=101296 picks=72330 avg_run=161ms stranded=186 strand_max=2885ms
+WW: TIMER-SOFTIRQ-STALL cpu=1 age=1009ms tick_age=0ms n=120148 pid=947 pc=0x100 rip=0xffffffff800797fa
+WW: fires=66018 late_max=3ms pidmiss=0 rearm=28 wheel=1/2 hres_next=0ms
+WW2: si_runs=117 si_busy=6ms ticks=[0,0] vec=[0,0,0,0,0,0,0,0,117,0]
+WW3: grq=0 cfs=0 idle=0x1 nr=3 cpu0=(pid=0 st=0x0 pc=256) cpu1=(pid=947 st=0x0 pc=256)
+WW: wakes=101305 picks=72339 avg_run=161ms stranded=186 strand_max=2885ms
+WW: TIMER-SOFTIRQ-STALL cpu=1 age=2009ms tick_age=0ms n=120148 pid=947 pc=0x100 rip=0xffffffff800797fa
+WW: fires=66028 late_max=3ms pidmiss=0 rearm=28 wheel=0/2 hres_next=9ms
+WW2: si_runs=119 si_busy=5ms ticks=[0,0] vec=[0,0,0,0,0,0,0,0,119,0]
+WW3: grq=0 cfs=0 idle=0x1 nr=3 cpu0=(pid=0 st=0x0 pc=256) cpu1=(pid=947 st=0x0 pc=256)
+WW: wakes=101315 picks=72349 avg_run=161ms stranded=186 strand_max=2885ms

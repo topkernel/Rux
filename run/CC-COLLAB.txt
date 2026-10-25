@@ -34,3 +34,14 @@ Findings from the 21:45 session (so the other session does not redo it):
    logs MakeFromEncoded results per file + glReadPixels patch at
    eglSwapBuffers (draw-failure vs blit-failure discriminator) via
    /dev/kmsg -> serial. Boot as cc11 with private userdata.
+
+From samgr-callback (launcher A-line, leg-17 close 06:15): I added
+probe functions to kernel/src/mm/small_alloc.rs (census_peek3/
+census_peek4/census_peek_live - all census-dump-only, no allocator
+behavior change; commits adaf71c7+ on my branch). If your chain touches
+small_alloc.rs structurally, my hunks are additive at file tail-side
+(census_line area) plus zero allocator-path edits. Also FYI: leg-17
+found the kernel-heap floor residue is binder txn arcs
+(kernel/src/ipc/binder.rs sweep_stale_async commit 6ba58562) - if your
+wildwrite hunts see 0xdeadbeef tids or freed-VMA #GPs, check the
+KILLDUMP pin fixes 66858395/4dee194f on my branch first.
