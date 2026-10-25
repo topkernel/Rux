@@ -185,8 +185,11 @@ def note(text):
         print(f"[fire] marker @{el:.0f}s {text}", flush=True)
 
 
-# Patterns that mark chain progress. taskdump comm listings look like
-#   "  pid=369 comm=gnome-shell state=RUNNING"
+# Patterns that mark chain progress. taskdump comm listings come in two
+# formats: the old "comm=gnome-shell pid=369 state=RUNNING" and the
+# current dump's "pid=369 tgid=369 state=RUNNING ... comm=gnome-shell
+# lastsys=..." (comm follows the state fields, no adjacency) — match
+# both or reached milestones are silently under-reported.
 PATTERNS = [
     (re.compile(rb"X\.Org X Server"), "xorg_banner"),
     (re.compile(rb"\[runit\] session bus: (unix:\S+)"), "session_bus"),
@@ -194,7 +197,9 @@ PATTERNS = [
     (re.compile(rb"\[runit\] gnome-session died st=(\d+) after (\d+)s"), "gnome_session_died"),
     (re.compile(rb"\[runit\] falling back to minimal path"), "fallback_gs"),
     (re.compile(rb"comm=gnome-shell pid=(\d+) state=(\w+)"), "gnome_shell"),
+    (re.compile(rb"pid=\d+ tgid=\d+ state=(\w+)[^\n]*comm=gnome-shell "), "gnome_shell"),
     (re.compile(rb"comm=(gsd-[\w-]+) pid=(\d+)"), "gsd"),
+    (re.compile(rb"pid=\d+ tgid=\d+ state=\w+[^\n]*comm=(gsd-[\w-]+) "), "gsd"),
     (re.compile(rb"comm=mutter"), "mutter_wm"),
     (re.compile(rb"KERNPANIC|Kernel panic"), "kernpanic"),
     (re.compile(rb"SIGDEATH: (\S+) sig=(\d+)"), "sigdeath"),
