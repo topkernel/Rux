@@ -54,7 +54,7 @@
 //! same last-panic contract the reference's console backend has.
 
 use core::mem::size_of;
-use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicUsize, Ordering};
 
 /// The reserved region's size. 128 KiB: the panic report (≤ the staging
 /// sink) plus ~110 KiB of console tail — several full screens of
@@ -65,8 +65,8 @@ pub const PSTORE_RAM_SIZE: usize = 128 * 1024;
 /// registers, stack — is captured here as it prints).
 const SINK_SIZE: usize = 16 * 1024;
 
-/// The record magic: "RUXPST01".
-const MAGIC: u64 = u64::from_le_bytes(*b"RUXPST01");
+/// The record magic: "RUXPST02".
+const MAGIC: u64 = u64::from_le_bytes(*b"RUXPST02");
 
 /// The record header, 32 bytes, at the region start.
 #[repr(C)]
@@ -75,18 +75,30 @@ struct RecordHeader {
     version: u32,
     /// Payload length in bytes (after this header).
     length: u32,
-    /// jiffies at the panic (the record's timestamp).
+    /// jiffies at the capture (the record's timestamp).
     jiffies: u32,
-    _reserved: [u32; 3],
+    /// Record kind: 0 = console (the panic report, exposed as
+    /// console-ramoops-0), 1 = dmesg (the oops report, exposed as
+    /// dmesg-ramoops-0) — the reference pstore's two ramoops flavors.
+    kind: u32,
+    _reserved: [u32; 2],
 }
 
-const VERSION: u32 = 1;
+const VERSION: u32 = 2;
+
+/// Console flavor — the panic report (`console-ramoops-0`).
+pub const KIND_CONSOLE: u32 = 0;
+/// Dmesg flavor — the oops report (`dmesg-ramoops-0`).
+pub const KIND_DMESG: u32 = 1;
 
 /// The region's physical base (0 until `reserve()` ran).
 static REGION_BASE: AtomicUsize = AtomicUsize::new(0);
 
 /// A record from the previous boot was found by `early_scan()`.
 static HAS_RECORD: AtomicBool = AtomicBool::new(false);
+
+/// The found record's kind (valid only while HAS_RECORD).
+static RECORD_KIND: AtomicU32 = AtomicU32::new(KIND_CONSOLE);
 
 /// The staging sink: the panic report's bytes, ring-buffered (the write
 /// index wraps; the newest SINK_SIZE bytes survive).
@@ -136,9 +148,9 @@ fn region_virt() -> Option<*mut u8> {
 
 /// After the linear map is up: look for the previous boot's record.
 ///
-/// A valid magic means the last boot panicked (the panic path is the
-/// only writer). Remember it, clear the magic — the content stays
-/// readable until the next panic overwrites the region.
+/// A valid magic means the last boot panicked or oopsed (those paths
+/// are the only writers). Remember it, clear the magic — the content
+/// stays readable until the next capture overwrites the region.
 pub fn early_scan() {
     let Some(virt) = region_virt() else {
         return;
@@ -151,16 +163,35 @@ pub fn early_scan() {
         return;
     }
     let length = (hdr.length as usize).min(PSTORE_RAM_SIZE - size_of::<RecordHeader>());
+    let kind = if hdr.kind == KIND_DMESG {
+        KIND_DMESG
+    } else {
+        KIND_CONSOLE
+    };
     HAS_RECORD.store(true, Ordering::Release);
+    RECORD_KIND.store(kind, Ordering::Release);
     // SAFETY: same region; this boot now owns it. Clear only the magic.
     unsafe {
         core::ptr::write_volatile(virt as *mut u64, 0);
     }
     crate::pr_info!(
-        "pstore: previous boot's panic record found ({} bytes) — /sys/fs/pstore/console-ramoops-0, jiffies {}",
+        "pstore: previous boot's {} record found ({} bytes) — /sys/fs/pstore/{}, jiffies {}",
+        if kind == KIND_DMESG { "dmesg" } else { "console" },
         length,
+        record_name(),
         hdr.jiffies
     );
+}
+
+/// The file name the found record publishes as — the reference's
+/// `<type>-<backend>-<id>`: the console flavor is console-ramoops-0,
+/// the dmesg flavor (an oops) is dmesg-ramoops-0.
+pub fn record_name() -> &'static str {
+    if RECORD_KIND.load(Ordering::Acquire) == KIND_DMESG {
+        "dmesg-ramoops-0"
+    } else {
+        "console-ramoops-0"
+    }
 }
 
 /// Did this boot find a record? (sysfs asks before publishing the file.)
@@ -207,9 +238,9 @@ pub fn sink(byte: u8) {
     SINK[at].0.store(byte, Ordering::Relaxed);
 }
 
-/// Write the record into the region. Called at the very end of the
-/// panic report (after the stack dump, before the `panic=` policy), so
-/// the staged sink holds the whole report.
+/// Write the panic record into the region. Called at the very end of
+/// the panic report (after the stack dump, before the `panic=` policy),
+/// so the staged sink holds the whole report.
 ///
 /// Allocation-free by construction: the head is formatted into a stack
 /// buffer, the sink is a static array, and the console tail is
@@ -217,6 +248,30 @@ pub fn sink(byte: u8) {
 /// the panic being captured may well be the heap's own failure, so the
 /// capture path must not trust the heap with anything.
 pub fn panic_capture(info: &core::panic::PanicInfo<'_>) {
+    use core::fmt::Write as _;
+    let mut hw = HeadWriter { buf: [0; 512], len: 0 };
+    let _ = core::write!(hw, "\nPanic: {}\n", info.message());
+    if let Some(loc) = info.location() {
+        let _ = core::write!(hw, "Location: {}:{}\n", loc.file(), loc.line());
+    }
+    write_record(KIND_CONSOLE, &hw);
+}
+
+/// Write the oops record into the region (the dmesg flavor). Called
+/// from `dfx::oops` after the report printed and the policy decided
+/// the oops is recoverable — the record then survives a reboot the
+/// task death would otherwise hide. Same allocation-free construction
+/// as the panic capture.
+pub fn oops_capture(count: u32) {
+    use core::fmt::Write as _;
+    let mut hw = HeadWriter { buf: [0; 512], len: 0 };
+    let _ = core::write!(hw, "\nOops: non-fatal kernel fault [#{}], task killed\n", count);
+    write_record(KIND_DMESG, &hw);
+}
+
+/// The record writer shared by both captures: head bytes, then the
+/// staged sink (the report as printed), then the printk tail.
+fn write_record(kind: u32, hw: &HeadWriter) {
     let Some(virt) = region_virt() else {
         return;
     };
@@ -226,7 +281,7 @@ pub fn panic_capture(info: &core::panic::PanicInfo<'_>) {
 
     // SAFETY: reserved, mapped RAM owned by this dying boot; nothing
     // else touches it (the other CPUs are already stopped or on their
-    // way; a racing panic on another CPU at worst interleaves bytes —
+    // way; a racing capture on another CPU at worst interleaves bytes —
     // the record is a forensic artifact, not a protocol).
     unsafe {
         let budget = PSTORE_RAM_SIZE - size_of::<RecordHeader>();
@@ -238,31 +293,13 @@ pub fn panic_capture(info: &core::panic::PanicInfo<'_>) {
             dst = dst.add(take);
         };
 
-        // 1. The identity: message + location, via a stack buffer.
-        use core::fmt::Write as _;
-        struct HeadWriter {
-            buf: [u8; 512],
-            len: usize,
-        }
-        impl core::fmt::Write for HeadWriter {
-            fn write_str(&mut self, s: &str) -> core::fmt::Result {
-                let n = s.len().min(self.buf.len() - self.len);
-                self.buf[self.len..self.len + n].copy_from_slice(&s.as_bytes()[..n]);
-                self.len += n;
-                Ok(())
-            }
-        }
-        let mut hw = HeadWriter { buf: [0; 512], len: 0 };
-        let _ = core::write!(hw, "\nPanic: {}\n", info.message());
-        if let Some(loc) = info.location() {
-            let _ = core::write!(hw, "Location: {}:{}\n", loc.file(), loc.line());
-        }
+        // 1. The identity head.
         write(&hw.buf[..hw.len]);
 
-        // 2. The staged panic report — the static sink, copied ring-wise
-        // (atomic loads; byte s ever sunk sits at SINK[s % SINK_SIZE],
-        // the newest SINK_SIZE bytes are kept, oldest-first).
-        write(b"--- panic report (as printed) ---\n");
+        // 2. The staged report — the static sink, copied ring-wise
+        // (atomic loads; every byte ever sunk sits at SINK[s %
+        // SINK_SIZE], the newest SINK_SIZE bytes are kept, oldest-first).
+        write(b"--- report (as printed) ---\n");
         let at = SINK_AT.load(Ordering::Relaxed);
         let first = at.saturating_sub(SINK_SIZE);
         for s in first..at {
@@ -293,9 +330,25 @@ pub fn panic_capture(info: &core::panic::PanicInfo<'_>) {
             &mut (*hdr).jiffies,
             crate::drivers::timer::get_jiffies() as u32,
         );
+        core::ptr::write_volatile(&mut (*hdr).kind, kind);
+        core::ptr::write_volatile(&mut (*hdr)._reserved, [0; 2]);
         core::ptr::write_volatile(&mut (*hdr).length, length as u32);
-        core::ptr::write_volatile(&mut (*hdr)._reserved, [0; 3]);
         core::ptr::write_volatile(&mut (*hdr).magic, MAGIC);
+    }
+}
+
+/// Stack-buffer fmt sink for the record head (no allocation).
+struct HeadWriter {
+    buf: [u8; 512],
+    len: usize,
+}
+
+impl core::fmt::Write for HeadWriter {
+    fn write_str(&mut self, s: &str) -> core::fmt::Result {
+        let n = s.len().min(self.buf.len() - self.len);
+        self.buf[self.len..self.len + n].copy_from_slice(&s.as_bytes()[..n]);
+        self.len += n;
+        Ok(())
     }
 }
 
