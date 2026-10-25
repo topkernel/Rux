@@ -1300,3 +1300,43 @@ recvmsg03) — flaky tests, not branch behavior. The five CRASH|0|9
 rows (recv01/recvfrom01/send01/sendmsg01/sendto01) crash on
 main-class kernels too. No NEW failure class: the socket fast path
 is LTP-clean for the merge claim.
+
+### 8.10.5 First trace-event deliverable: wake-latency distribution under churn (leg 35, pa49)
+
+The DFX batch's T4 sched events make wake-latency measurement a ONE-
+QEMU capture instead of an A-B syscost pair. Channel: minimal rootfs,
+init=/bin/mrsh, TCG MTTCG smp2/1G; only sched_waking + sched_wakeup +
+sched_switch armed (three events per wake cycle keeps the 1024-entry
+per-CPU ring lossless at churn rate); two fork/exec churn loops; 45 s
+of trace_pipe drained to a guest file; host-side parse
+(run/pa49-wakelat.sh + run/pa49-wakelat-parse.sh, log
+run/pa-pa49wl3-serial.log, result run/pa49-wakelat-result.txt).
+
+Wake->run under churn (n=1421 matched pairs, ring overrun 0 on both
+CPUs, 9965 records captured):
+- from sched_wakeup (post-enqueue): p50 154 us, p90 504 us,
+  p99 13.3 ms, max 33.1 ms.
+- from sched_waking (includes the enqueue attempt): p50 234 us,
+  p90 618 us — the waking->wakeup gap is ~80 us at p50: the enqueue
+  attempt under contention costs more than the schedule-in itself for
+  the median wake.
+- Shape: the bulk sits at 100-250 us (76% of pairs) — the wait for
+  the running task's preemption point on the second vCPU; the tail is
+  two classes, 1-5 ms (5.3%) and >5 ms (2.6%, max 33 ms) — the long-
+  timeslice/no-preemption-point class the syscost rows sample
+  coarsely. No pair landed under 50 us at this churn level (the
+  second vCPU is always busy; a wake never finds an idle CPU).
+
+Cross-check value: the census's WAKE-REFUSED 32 / GRQ-hold 5.6 us rows
+measure the enqueue path only; this adds the end-to-end schedule-in
+distribution on the same kernel class. The unmatched-switch count
+(5663) is preempt-continuation (a task switching back in without a new
+wake) — with overrun 0 it is not data loss.
+
+The capture also VERIFIED the ff48bbf3 frrm fix end to end: the two
+pre-fix attempts died deterministically (mrsh SIGILL in __multf3's
+`frrm` under the capture loop's shell arithmetic); the fixed kernel
+ran the full capture clean. Side observation for the DFX lane: T4
+record path under MTTCG + churn held overrun=0 at three-event
+production — the single-threaded soak's coverage is extended, not
+contradicted.
