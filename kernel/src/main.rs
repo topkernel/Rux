@@ -1165,7 +1165,7 @@ global_asm!(include_str!("arch/aarch64/trap.S"));
 /// moved 14MB->18MB together (boot.S both PMD tables, linker.ld ASSERT,
 /// memory_layout.rs, buddy_allocator.rs).
 #[cfg(feature = "riscv64")]
-const KERNEL_RESERVE_SIZE: usize = 0x140_0000; // 20MB
+const KERNEL_RESERVE_SIZE: usize = 0x160_0000; // 22MB
 #[cfg(feature = "x86_64")]
 const KERNEL_RESERVE_SIZE: usize = 0x1E0_0000; // 30MB
 /// Effective (RAM-clamped) static-region sizes computed by the early
@@ -1178,7 +1178,7 @@ static HEAP_SLAB_END_EFF: core::sync::atomic::AtomicUsize =
     core::sync::atomic::AtomicUsize::new(0);
 
 #[cfg(feature = "riscv64")]
-const KERNEL_HEAP_PHYS: usize = 0x8140_0000;
+const KERNEL_HEAP_PHYS: usize = 0x8160_0000;
 #[cfg(feature = "x86_64")]
 const KERNEL_HEAP_PHYS: usize = 0x4000_0000;
 

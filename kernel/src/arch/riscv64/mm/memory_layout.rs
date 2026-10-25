@@ -144,16 +144,19 @@ pub const KERNEL_ENTRY: u64 = 0x80200000;
 /// entry all moved 14MB->18MB together (same rule as LAYOUT-2). (An
 /// intermediate branch-local bump 14MB->16MB for the static buddy
 /// BlockMeta/free-bitmap arrays in .data was subsumed by this move.)
-pub const KERNEL_SIZE: u64 = 0x1200000;
+/// RUX-RISCV-LAYOUT-4: the LTP lane's syscall-contract batch (tee,
+/// process_vm, socket entry validation) outgrew 18MB; the same set
+/// moved 18MB->20MB.
+pub const KERNEL_SIZE: u64 = 0x1400000;
 
 /// Heap start address (after kernel)
 /// RUX-RISCV-LAYOUT: must stay at/above the boot.S image-window end
-/// (entry 0x80200000 + KERNEL_SIZE 18MB = 0x81400000) and must match
+/// (entry 0x80200000 + KERNEL_SIZE 20MB = 0x81600000) and must match
 /// KERNEL_RESERVE_SIZE/KERNEL_HEAP_PHYS in main.rs and buddy_allocator.rs.
 /// When it sat at 0x80C00000 (2MB inside the window) the grown kernel
 /// image overlapped the first heap pages — see main.rs
 /// RUX-RISCV-LAYOUT for the corruption family that produced.
-pub const HEAP_START: u64 = 0x81400000;
+pub const HEAP_START: u64 = 0x81600000;
 
 /// Slab start address (after heap)
 /// Note: Actual address depends on KERNEL_HEAP_SIZE config

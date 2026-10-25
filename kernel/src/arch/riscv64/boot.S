@@ -213,6 +213,15 @@ _start:
     or t4, t4, t5
     sd t4, 64(t3)
 
+    // PMD[9]: VA -> PA tenth 2MB (window 20MB; see early_pmd PMD[9],
+    // RUX-RISCV-LAYOUT-4)
+    li t4, KERNEL_PHYS
+    li t6, 0x1200000             // 18MB
+    add t4, t4, t6
+    srli t4, t4, 2
+    or t4, t4, t5
+    sd t4, 72(t3)
+
     // --- Create early page table (full kernel mapping) ---
     // early_pg_dir: same as trampoline but points to early_pmd
     la t2, early_pg_dir
@@ -338,6 +347,18 @@ _start:
     srli t4, t4, 2
     or t4, t4, t5
     sd t4, 64(t3)
+
+    // PMD[9]: VA 0xFFFFFFFF81200000 -> PA 0x81400000 (tenth 2MB)
+    // RUX-RISCV-LAYOUT-4: the LTP lane's syscall-contract work (tee,
+    // process_vm, socket entry validation) pushed the debug image past
+    // the 18MB window (linker ASSERT). Window, heap, reservation and
+    // KERNEL_SIZE move 18MB->20MB together, same rule as LAYOUT-2/3.
+    li t4, KERNEL_PHYS
+    li t6, 0x1200000             // 18MB
+    add t4, t4, t6
+    srli t4, t4, 2
+    or t4, t4, t5
+    sd t4, 72(t3)
 
     // --- MMIO identity mapping (UART at 0x10000000) ---
     // early_pg_dir[0] -> early_pmd_io (non-leaf, identity maps first 1GB)

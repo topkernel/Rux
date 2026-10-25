@@ -59,7 +59,7 @@ const MIN_ORDER: usize = 0;
 // x86_64: linear map at 0xffff888000000000 over phys 0; heap placed at 1GB
 // (clear of the image window 0x200000..0xa00000 and the q35 ECAM hole).
 #[cfg(feature = "riscv64")]
-const KERNEL_HEAP_PHYS: usize = 0x8140_0000;
+const KERNEL_HEAP_PHYS: usize = 0x8160_0000;
 #[cfg(feature = "riscv64")]
 const VA_PA_OFFSET: usize = 0xffffffd600000000 - 0x80000000;
 #[cfg(feature = "x86_64")]
