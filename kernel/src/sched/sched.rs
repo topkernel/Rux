@@ -4070,6 +4070,21 @@ pub fn scheduler_tick() {
                                         ph(unsafe { (*pr).instruction_pointer() });
                                     }
                                 }
+                                // pctick: the interrupted task's own count
+                                // at tick ENTRY (snapshot taken in the
+                                // timer trap path before irq_enter books
+                                // the tick's offset) — 0x1 means the
+                                // reportable bit is a leaked PREEMPT
+                                // disable; >=0x10000 means a hardirq bit
+                                // was already stranded on the task.
+                                const M6: &[u8] = b" pctick=";
+                                for &b in M6 {
+                                    putchar(b);
+                                }
+                                ph(crate::interrupt::preempt::TICK_ENTRY_PC
+                                    [cpu_id]
+                                    .load(core::sync::atomic::Ordering::Relaxed)
+                                    as u64);
                                 putchar(b'\n');
                             }
                         }

@@ -265,6 +265,18 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize) {
                 let cs_entry = crate::sched::sched::cpu_state(cpu_id).current
                     as usize;
                 let epc_ctx = regs_ref.epc;
+                // Session-6 discriminator: snapshot the interrupted
+                // task's own count BEFORE the tick books its
+                // HARDIRQ_OFFSET. pctick=0x1 vs >=0x10001 at the LEAK
+                // print splits the observed 0x10001 shape into
+                // leaked-PREEMPT-bit vs stranded-hardirq-bit producers.
+                if cpu_id < crate::config::MAX_CPUS {
+                    if let Some(t) = crate::sched::current() {
+                        crate::interrupt::preempt::TICK_ENTRY_PC[cpu_id]
+                            .store(t.preempt_count() as u32,
+                                   core::sync::atomic::Ordering::Relaxed);
+                    }
+                }
                 crate::interrupt::preempt::irq_enter();
                 handle_timer_interrupt(regs_ref, cpu_id);
                 crate::interrupt::preempt::irq_exit();

@@ -189,6 +189,16 @@ pub fn __do_softirq() -> bool {
     // SAFETY: per-CPU arrays accessed only by current CPU; cpu_id is correct
     unsafe { SOFTIRQ_IN_PROGRESS[cpu].store(1, Ordering::Release); }
 
+    // Session-6 discriminator (fleet s2): bracket the SOFTIRQ PROCESSING
+    // window itself. The timer/soft/ext TRAP brackets are silent on v7
+    // while the count-migration leak rate is unchanged — this window
+    // books SOFTIRQ_OFFSET on the entry task around handler dispatch,
+    // and a context switch between the add and the sub migrates the
+    // offset to the switched-in task (the exit sub underflows there, the
+    // entry task strands +SOFTIRQ_OFFSET). Same entry_tp/exit_tp shape
+    // as IRQ-BRACKET-LEAK; first_pending names the vector class that ran.
+    let tp_entry = crate::arch::cpu::get_thread_id() as usize;
+
     // Enter softirq context in preempt_count
     crate::interrupt::preempt_count_add(
         crate::interrupt::preempt::SOFTIRQ_OFFSET
@@ -199,6 +209,8 @@ pub fn __do_softirq() -> bool {
 
     let mut restart_count = 0;
     let budget_t0 = crate::drivers::timer::read_time();
+    // First non-zero pending snapshot of this window (bracket print only).
+    let mut first_pending: u32 = 0;
 
     'outer: loop {
         // Atomically snapshot and clear pending bits
@@ -208,6 +220,9 @@ pub fn __do_softirq() -> bool {
 
         if pending == 0 {
             break;
+        }
+        if first_pending == 0 {
+            first_pending = pending;
         }
 
         WW_SOFTIRQ_RUNS.fetch_add(1, Ordering::Relaxed);
@@ -275,6 +290,26 @@ pub fn __do_softirq() -> bool {
     crate::interrupt::preempt_count_sub(
         crate::interrupt::preempt::SOFTIRQ_OFFSET
     );
+
+    // Session-6 discriminator exit side (see entry comment): print when
+    // the task switched inside the processing window. Direct console —
+    // this can print from deep inside the irq-exit/ksoftirqd paths.
+    let tp_exit = crate::arch::cpu::get_thread_id() as usize;
+    if tp_entry != tp_exit {
+        let a = tp_entry as *mut crate::process::task::Task;
+        let b = tp_exit as *mut crate::process::task::Task;
+        let (pa, pb) = unsafe {
+            ((*a).preempt_count(), (*b).preempt_count())
+        };
+        use core::fmt::Write;
+        let mut w = crate::dfx::backtrace::ConsoleWriter::new();
+        let _ = write!(w,
+            "SOFTIRQ-BRACKET-LEAK cpu={} entry_tp={:#x} (pid={} preempt={:#x}) exit_tp={:#x} (pid={} preempt={:#x}) first_pending={:#x}\n",
+            cpu, tp_entry,
+            unsafe { (*a).pid() }, pa,
+            tp_exit, unsafe { (*b).pid() }, pb,
+            first_pending);
+    }
     crate::dfx::syscost::zone_softirq_exit(); // syscost probe
 
     // SAFETY: per-CPU arrays accessed only by current CPU; cpu_id is correct
