@@ -106,6 +106,14 @@ struct EpollEntry {
     /// snapshot (a new edge), and readiness going fully idle resets it
     /// so the next arrival reports again. 0 = nothing reported yet.
     last_reported: u32,
+    /// EPOLLONESHOT state: once an oneshot registration has reported, it
+    /// stays silent — even for EPOLLERR/EPOLLHUP — until EPOLL_CTL_MOD
+    /// re-arms it (epoll_ctl(2): the target is "disabled ... and the
+    /// user needs to rearm it ... with EPOLL_CTL_MOD"). Without the flag
+    /// honored, a second arrival re-reported a fired oneshot watch
+    /// (LTP epoll_wait07: "Write channel for the 2nd time. No events
+    /// expected").
+    oneshot_fired: bool,
     /// dfx=socksnap (b16 appspawn hunt): how many times a wait delivered
     /// this entry — a readable LT entry with reports==0 while its epoll's
     /// wait_count grows is the lost-delivery signature.
@@ -1695,6 +1703,7 @@ pub fn sys_epoll_ctl(args: SyscallArgs) -> i64 {
                     existing.events = event.events;
                     existing.data = event.data;
                     existing.last_reported = 0;
+                    existing.oneshot_fired = false;
                     Reg::Rebind(old_id, file_id)
                 }
                 None => {
@@ -1704,6 +1713,7 @@ pub fn sys_epoll_ctl(args: SyscallArgs) -> i64 {
                         events: event.events,
                         data: event.data,
                         last_reported: 0,
+                        oneshot_fired: false,
                         reports: 0,
                     });
                     Reg::Add(file_id)
@@ -1746,8 +1756,10 @@ pub fn sys_epoll_ctl(args: SyscallArgs) -> i64 {
                 entry.events = event.events;
                 entry.data = event.data;
                 // Re-arming via MOD resets the edge-triggered snapshot
-                // (Linux: MOD re-injects the fd into the ready list).
+                // (Linux: MOD re-injects the fd into the ready list) and
+                // re-arms a fired EPOLLONESHOT registration.
                 entry.last_reported = 0;
+                entry.oneshot_fired = false;
             } else {
                 return -(errno::ENOENT as i64);
             }
@@ -1882,6 +1894,13 @@ pub fn sys_epoll_wait(args: SyscallArgs) -> i64 {
             if entry.events & EPOLLIN != 0 { poll_mask |= POLLIN; }
             if entry.events & EPOLLOUT != 0 { poll_mask |= POLLOUT; }
 
+            // EPOLLONESHOT: a registration that has already reported is
+            // disabled until EPOLL_CTL_MOD re-arms it — report nothing,
+            // not even EPOLLERR/EPOLLHUP.
+            if entry.events & EPOLLONESHOT != 0 && entry.oneshot_fired {
+                continue;
+            }
+
             let revents = match file.get_ops() {
                 Some(ops) => match ops.poll {
                     Some(poll_fn) => poll_fn(&file, poll_mask),
@@ -1909,6 +1928,11 @@ pub fn sys_epoll_wait(args: SyscallArgs) -> i64 {
                         continue; // same edge — already reported
                     }
                     entry.last_reported = ep_events;
+                }
+                // EPOLLONESHOT: this delivery disables the registration
+                // until EPOLL_CTL_MOD re-arms it.
+                if entry.events & EPOLLONESHOT != 0 {
+                    entry.oneshot_fired = true;
                 }
 
                 // Linux always reports EPOLLERR/EPOLLHUP even when the

@@ -311,6 +311,24 @@ fn nanosleep_impl(req: &Timespec, rem_ptr: *mut Timespec) -> i64 {
     // is NEVER woken early (LTP clock_nanosleep02: any early sample is a
     // failure). The jiffy wheel alone truncates and wakes up to one tick
     // (10 ms) short.
+    //
+    // PR_SET_TIMERSLACK: Linux hrtimer rounds the sleep deadline up to a
+    // multiple of the caller's timer slack (range_round_up in hrtimer.c)
+    // before arming — a slack of N ns delays the wake by at most N ns.
+    // LTP's tst_timer_test reads PR_GET_TIMERSLACK and widens its
+    // precision threshold accordingly.
+    let timer_slack_ns = crate::sched::current()
+        .and_then(|t| unsafe { (*t).signal.as_ref() })
+        .map(|s| s.timer_slack_ns.load(core::sync::atomic::Ordering::Relaxed))
+        .unwrap_or(50_000)
+        .max(1);
+    // total_nanos is validated non-negative above; do the round-up in u64.
+    let total_nanos = {
+        let ns = total_nanos as u64;
+        let rem = ns % timer_slack_ns;
+        let add = (timer_slack_ns - rem) % timer_slack_ns;
+        (ns + add) as i64
+    };
     let freq_hz = crate::config::TIMER_CLOCK_FREQ_HZ;
     let now0 = timer::read_time();
     let ns_to_ticks = ((total_nanos as u64).saturating_mul(freq_hz) / 1_000_000_000).saturating_add(1);

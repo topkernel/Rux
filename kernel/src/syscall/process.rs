@@ -2713,6 +2713,30 @@ pub fn sys_prctl(args: SyscallArgs) -> i64 {
                 }
             }
         }
+        29 => {
+            // PR_SET_TIMERSLACK: nanoseconds; 0 resets to the 50 us default
+            // (Linux kernel/sys.c stores the value unbounded and only uses
+            // it to round hrtimer sleep deadlines up to a slack boundary).
+            let slack_ns = if arg2 == 0 { 50_000 } else { arg2 };
+            // SAFETY: current is a valid task pointer; signal field is an Option.
+            unsafe {
+                if let Some(ref sig) = (*current).signal {
+                    sig.timer_slack_ns.store(slack_ns, core::sync::atomic::Ordering::Relaxed);
+                }
+            }
+            0
+        }
+        30 => {
+            // PR_GET_TIMERSLACK
+            // SAFETY: current is a valid task pointer; signal field is an Option.
+            unsafe {
+                if let Some(ref sig) = (*current).signal {
+                    sig.timer_slack_ns.load(core::sync::atomic::Ordering::Relaxed) as i64
+                } else {
+                    50_000
+                }
+            }
+        }
         21 => {
             // PR_GET_SECCOMP (U1c): current seccomp mode.
             // SAFETY: current is a valid task pointer.
