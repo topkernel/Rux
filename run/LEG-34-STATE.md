@@ -51,3 +51,15 @@ Their bzImages are copied into run/ (pa46-*, pa47-*). Remove with
   the branch kernel (fleet covers main only) — run before merge.
 - sc2xx launcher.ready trigger: NOT fired as of 11:00 (sc252 shows
   "launcher.ready not set" warning).
+
+## Boot-wall metric calibration (pa38 vs pa41gate, both main-class 780s)
+
+- wall at SYSCOST kernel-t checkpoints: +0.2-0.3s across all 8 — the
+  checkpoint-wall noise floor is sub-second (ticks are wall-driven;
+  this metric tracks host pacing, NOT kernel speed).
+- userspace milestones (foundation exit 44 vs 85s, first SIGKILL 43
+  vs 85s): THE signal for stall-time changes — but load-sensitive
+  (pa38 quiet vs pa41gate load-14-19 differ 2x), so the F4-R2 verdict
+  reads from pa46main vs pa46f4r2 same-gate boots only.
+- volume at equal t is load-coupled (136.4M vs 77.1M at t=720) —
+  secondary signal only.
