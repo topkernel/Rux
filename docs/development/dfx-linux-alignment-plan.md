@@ -114,21 +114,21 @@ incomplete or non-Linux shape · **--** = absent.
 | Logging | `printk` ring buffer, log levels, `/dev/kmsg` | PART | `/proc/kmsg` format wrong; persistent log disabled |
 | Logging | `dmesg -w`, `syslog(2)`, `console_loglevel` | PART | no runtime console level knob from userspace |
 | Crash | panic handler, `Call Trace:` | PART | header case differs, frames never symbolized |
-| Crash | `Oops` (non-fatal) | -- | every fault is fatal |
+| Crash | `Oops` (non-fatal) | OK | T5b: Linux-shaped report, task-death policy, pstore dmesg flavor |
 | Crash | `panic=` timeout / reboot | -- | halt forever |
-| Crash | pstore / ramoops | -- | empty `/sys/fs/pstore` skeleton only |
+| Crash | pstore / ramoops | OK | Tranche 5: console-ramoops-0 (panic) + dmesg-ramoops-0 (oops), both arches |
 | Crash | taint flags | OK | Tranche 1: exported, Linux letters |
 | Control | SysRq / `/proc/sysrq-trigger` | OK | Tranche 1: upstream command set |
 | Control | debugfs `/sys/kernel/debug` | OK | Tranche 1: new filesystem |
-| Control | tracefs `/sys/kernel/tracing` | -- | absent |
-| Control | ftrace / kprobe / uprobe / eBPF / perf | -- | absent (`ENOSYS`) |
+| Control | tracefs `/sys/kernel/tracing` | OK | Tranche 4: 16 events, tracepoint! table, soak-verified |
+| Control | ftrace / kprobe / uprobe / eBPF / perf | PART | Tranche 4 tracepoints + nop tracer; probes/`perf` still `ENOSYS` |
 | Control | runtime-switchable knobs | OK | Tranche 1: debugfs knobs |
 | Symbols | `/proc/kallsyms` | OK | Tranche 3: full table, default-on (LAYOUT-3) |
 | Symbols | runtime backtrace symbolization | OK | Tranche 3: name+off/size, `?` for non-text |
 | Symbols | ORC / DWARF unwinder | -- | frame-pointer walk only, 32 frames |
 | Perf | `/proc/stat` | -- | absent: no per-CPU time accounting at all |
 | Perf | `/proc/vmstat` | -- | absent |
-| Perf | `/proc/schedstat`, `/proc/sched` | -- | absent |
+| Perf | `/proc/schedstat`, `/proc/sched` | PART | per-CPU schedstat rows + per-task /proc/[pid]/schedstat triple (T7 slice); /proc/sched still absent |
 | Perf | `/proc/softirqs` | -- | absent |
 | Perf | `/proc/[pid]/stat` ctxt switches | PART | fields present but always `0` |
 | Perf | PSI `/proc/pressure/*` | -- | absent |
@@ -380,13 +380,35 @@ consumption). The reference's snapshot and raw views are omitted, not
 faked: they need a second buffer and a binary record format this ring
 does not have. `trace_marker_raw` likewise omitted.
 
-**Remaining.**
+**Done (tracepoint! macro + the block-IO and binder families).** The
+`tracepoints!` table (`kernel/src/trace/mod.rs`) declares every event
+once — names, id, the verbatim print fmt and field list, the typed
+call signature and the renderer — and the macro derives the static
+table row, the typed `trace_<name>` record function (the `armed()`
+check inside) and the `format`-file renderer from that one
+declaration (divergence register D-4). All ten batch-1 events were
+converted with ids unchanged, and the two new families landed through
+it:
 
-- Block-IO events (`block:block_rq_issue` / `block_rq_complete`) and
-  the binder transaction events.
-- A `tracepoint!` macro to declare sites without hand-writing the
-  table row (the table is ten rows now; the macro pays for itself at
-  the next expansion).
+- `block:block_rq_issue` / `block:block_rq_complete` — the reference
+  tracefs field sets and print fmts captured verbatim from this host.
+  The sites sit at the two submit chokepoints `/proc/diskstats`
+  already counts (the synchronous `request_fn` path and async reads)
+  and the completion walkers; `rwbs` carries the direction only
+  (R/W/F), `cmd` renders empty, `ioprio` reports the none class.
+- `binder:binder_transaction` / `_received` / `_alloc_buf` /
+  `_buffer_release` — the reference binder trace definitions verbatim
+  (this host's tracefs has no binder group — not compiled in here);
+  at the BinderTxn construction, the BR read-out, the buffer carve and
+  the free chokepoint.
+
+Verified in-guest (`test/trace-smoke2.sh`, 12/12): the 16-event
+table, the six new format files, recorded lines in the reference
+geometry for both families, and the group 1/0/X mixed states. One
+smoke fix along the way: the block-lines grep moved before the binder
+phase — the closed-loop binder probe wraps the 1024-entry per-CPU
+ring past the block records, and the first run's greps read an
+already-overwritten ring while the events had recorded fine.
 
 **Soak acceptance (done).** `test/trace-soak.sh`: 600 s with every
 event armed, tracing on, and a rolling fork/exec/read churn. Zero
@@ -408,29 +430,113 @@ Linux's panic path reboots without touching the disks, because the panic
 may well be the storage stack itself, and a sync that hangs in a panic
 would defeat the timeout.
 
-**Part 2 — remaining.**
+**Part 2 — pstore-lite (done).** The last panic's evidence survives the
+reboot and reads back through `/sys/fs/pstore`:
 
-- Non-fatal `Oops` path for recoverable faults (Linux's `oops=panic`
-  default off).
-- pstore/ramoops-lite: keep the last panic record (registers + the tail
-  of the ring buffer) in a reserved RAM area and expose it through
-  `/sys/fs/pstore/` after the next boot.
-- Re-enable `printk::persistent_log_init()` with a size cap, so the
-  serial tail survives the reboot.
+- **Reserve.** 128 KiB anchored just below the DTB's physical base
+  (QEMU's FDT address is fixed per machine config — 2 MiB below RAM end
+  on `virt` — so the region is at the same address every boot AND clear
+  of the next boot's FDT rewrite; a naive top-of-RAM carve lands exactly
+  on the DTB at the standard `-m` sizes). `memblock_reserve` before
+  zone seeding keeps the buddy out.
+- **Capture.** The panic handler arms a staging sink first — every
+  console byte the report prints (banner, CSRs, registers, the
+  symbolized stack) is staged via `Uart::putc` (one relaxed load per
+  byte on the disarmed path). At the end of the report the record is
+  written: panic identity, the staged report, then the newest printk
+  records. The write is allocation-free end to end (the panic may be
+  the heap's own failure) and the printk tail is copied under
+  `try_lock` only — a stopped CPU may hold the ring, and the panic path
+  must still reach the `panic=` timeout (a marker line replaces the
+  tail in that case). The magic word is written last: a crash inside
+  the capture leaves no record the next boot would trust halfway.
+- **Re-expose.** After the linear map is up, a valid magic means the
+  last boot panicked; the content stays, the magic is cleared (a clean
+  next boot must not re-expose a stale record), and sysfs publishes
+  `/sys/fs/pstore/console-ramoops-0` — mode 0444, `pstore_mkfile`'s
+  shape, one record deep. No record, no file (the reference directory
+  is empty after a clean boot).
 
-The original bullets, for reference:
-- Non-fatal `Oops` path for recoverable faults (Linux's `oops=panic`
-  default off).
-- pstore/ramoops-lite: keep the last panic record (registers + the tail
-  of the ring buffer) in a reserved RAM area and expose it through
-  `/sys/fs/pstore/` after the next boot.
-- Re-enable `printk::persistent_log_init()` with a size cap, so the
-  serial tail survives the reboot.
+Guest-verified (`test/pstore-smoke.sh`, one QEMU, two boots): sysrq
+`c` panics boot 1, `panic=3` reboots, boot 2 logs
+`pstore: previous boot's panic record found (14741 bytes)`, the file
+reads back with the panic identity, the `Kernel panic - not syncing`
+banner, the `Call Trace:` header and the console tail (boot 1's
+`boot: static regions` line).
+
+Two fixes this depended on: the cgroup boot mount had fabricated a
+bare `fs` dentry under the sysfs mount that shadowed the sysfs `fs`
+kobject — every `/sys/fs/*` lookup answered ENOENT (readdir still
+listed the children: readdir reads the inode, lookup the dentry); the
+debugfs flow's pre-lookup discipline now applies to the cgroup path
+too. And a guest reset does not clear RAM — the premise the whole
+scheme rests on, verified by the reboot cycle itself.
+
+**Remaining (Part 2) — all done, batch 4 (2026-10-26).**
+
+- **Non-fatal Oops path (done).** `dfx/oops.rs`: the kernel fault sites
+  that used to take the whole machine down (kernel page fault with no
+  exception-table fixup, kernel-mode illegal instruction, unhandled
+  kernel exceptions — both arches) now run the reference's contract.
+  The report's head line and die banner are Linux 5.15's wording
+  verbatim (`Unable to handle kernel paging request at virtual
+  address …` / `Oops - illegal instruction` + `Oops [#N]` on riscv64,
+  `BUG: unable to handle kernel …` + `Oops: 0000 [#N] PREEMPT SMP` on
+  x86_64), the register block is the faulting trap frame in the arch
+  `__show_regs` row layout (not a `save_regs` artifact — the SR-PROBE
+  lesson), and `Call Trace:` comes from the Tranche-3 symbolized
+  walker. Policy = `oops_end`/`make_task_dead`: interrupt context or
+  `panic_on_oops` → real panic (pstore + `panic=` apply); idle/early
+  boot → panic; otherwise the faulting task dies with SIGSEGV and the
+  machine keeps running — the trade the reference makes (whatever the
+  task held stays held; the limp-wedge is more diagnosable than the
+  halt). `oops=panic` (boot) and `/proc/sys/kernel/panic_on_oops`
+  (runtime) restore the loud policy. The recoverable oops is captured
+  into the pstore region as the reference's dmesg flavor —
+  `/sys/fs/pstore/dmesg-ramoops-0` next boot (the panic record keeps
+  `console-ramoops-0`; last writer owns the one region). Taint D and
+  the `[#N]` counter land before the report's own `Tainted:` line.
+  The old KERNPANIC raw SBI dump and re-entrancy latches stay in front
+  of the oops on every site; `/sys/kernel/debug/dfx/provoke-oops`
+  (LKDTM's discipline) faults on purpose so the path is exercisable
+  from a shell.
+- **Persistent log (done).** `/var/log/kmsg` is written again — by a
+  klogd kernel thread (khungtaskd's wake pattern), not by the printk
+  path. The old per-record synchronous ext4 write (the disabled era's
+  filesystem corruption and an unmeasurable hot path) is gone: the
+  printk write path now costs nothing extra, the thread walks the ring
+  every 30 s with a private seq cursor (the syslog(2) cursor is
+  untouched) and appends the delta, newest 512 records per flush, into
+  a 256 KiB rotating file (offset wraps, inode size pins the
+  high-water mark). `init()` flushes once immediately, so the boot log
+  is archived as soon as ext4 is up — early-boot coverage pstore
+  cannot give (pstore arms at the panic only, and dies with the power
+  like all RAM). The panic/oops paths never write disk: the crash may
+  be the storage stack itself, and a sync waiting on a dead queue
+  would defeat the `panic=` timeout (the reference kernel's rule).
+- **x86_64 pstore anchor (done — the design first).** No firmware
+  block sits at a fixed low address there: QEMU rebuilds and relocates
+  the ACPI tables near the top of low RAM every boot, so the riscv64
+  DTB trick has no twin. The anchor that IS deterministic is the
+  kernel image itself: QEMU loads the ELF/bzImage at the link-time
+  physical address (0x200000) and the image size is a build constant,
+  so `kernel_image_phys_end()` — the same function the mapping treats
+  as authoritative — names the same address every boot of the same
+  build. The carve sits at [image end, +128 KiB): inside the dead
+  window the 30 MB KERNEL_RESERVE already keeps from the buddy (so
+  the explicit `memblock_reserve` is belt-and-braces for the day the
+  image window grows past it), below every early-boot writer that
+  matters (the boot page tables come from a static BSS pool inside the
+  image; fixmap-stage tables allocate from memblock AFTER the reserve
+  runs and honor it; the boot stack is in the image), and far from the
+  ACPI zone. One hazard: an `-initrd` boot — QEMU's linuxboot ROM
+  places the initrd at an address that moves with its size, and the
+  zero page names the range before any reserve runs, so the carve is
+  skipped when the initrd overlaps it (the same no-initrd caveat the
+  riscv64 side documents).
 
 Acceptance: `panic=5` reboots the guest within five seconds of a
-panic; the next boot shows the previous panic's registers.
-
-### Tranche 6 — correctness and lock instrumentation
+panic; the next boot shows the previous panic's registers.### Tranche 6 — correctness and lock instrumentation
 
 - lockdep-lite: per-lock-class acquisition order recording with a cycle
   report (`INFO: possible circular locking dependency detected`).
@@ -446,6 +552,37 @@ microbench report: syscall latency per class, fork/exec, fault paths,
 context switch, futex/pipe/binder round trip, TLB shootdown cost,
 mmap/brk/mprotect, IO path — with the same QEMU configuration compared
 against a Linux guest.
+
+**Perf-support slice (done, batch 4 2026-10-26).** The mandate's
+"perf 支持": the smallest useful per-task counter surface the perf
+lane's pbench can consume in-guest. The choice:
+
+- **What**: `/proc/[pid]/schedstat` — Linux's CONFIG_SCHEDSTATS
+  per-task triple (on-cpu ns, runqueue-wait ns, timeslices), the file
+  that turns a bench's wall time into on-cpu vs waiting per task
+  (P2 ctxsw, P4 fork/exec). pbench reads it with a plain file read.
+- **What not**: `perf_event_open` stays ENOSYS this batch — the
+  attr/ring/ioctl ABI is a tranche of its own, and nothing pbench runs
+  today needs it. The matrix line stays PART.
+- **The gate**: `/proc/sys/kernel/sched_schedstats` (0/1, default 0 —
+  the reference's own knob, static-key-backed there since 4.10).
+  Rux's static-key equivalent is one relaxed atomic load at each
+  schedule edge (the tracepoint discipline); when armed, ONE
+  `sched_clock()` read per switch serves both edges — the put (prev's
+  on-cpu delta, its exec stamp set at pick) and the pick (next's
+  timeslice++, wait window closed — the window opened at
+  `enqueue_task_locked`, under the same GRQ lock that guards the pick
+  side). A same-task repick (the CPU-bound tick case) is NOT a new
+  timeslice — Linux counts switches-to. Counter cost when armed is
+  measured by the pbench P2 A-B (off vs on); the disabled cost is the
+  one load, covered by the quiet-boot census rows.
+- **File shape**: one line, three space-separated decimal numbers,
+  `"%llu %llu %lu\n"` — proc.rst's documented triple. The file renders
+  (zeros) with the gate off — the honest value of never counted.
+
+The rest of Tranche 7 (the full microbench comparison report) belongs
+to the perf lane; the DFX lane's remaining stake is whatever counter
+surface that report finds missing.
 
 ## 5. Explicit non-goals
 

@@ -398,12 +398,17 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize) {
                             fp = next;
                         }
                     }
-                    // A kernel-mode illegal instruction is always a kernel bug
-                    // (e.g., an M-mode CSR executed in S-mode). Skipping it
-                    // corrupts execution; die loudly instead.
-                    panic!(
-                        "trap: illegal instruction in kernel mode at epc={:#x} badaddr={:#x}",
-                        regs_ref.epc, regs_ref.badaddr
+                    // A kernel-mode illegal instruction is a kernel bug
+                    // (e.g., an M-mode CSR executed in S-mode). The Oops
+                    // path prints the report and decides the policy —
+                    // panic (interrupt context / oops=panic / idle) or
+                    // task death (Tranche 5); skipping the instruction
+                    // was never an option either way.
+                    crate::dfx::oops::oops(
+                        crate::dfx::oops::Kind::IllegalInstruction,
+                        &|w: &mut crate::dfx::backtrace::ConsoleWriter| {
+                            oops_show_regs(w, regs_ref);
+                        },
                     );
                 }
             }
@@ -1520,17 +1525,83 @@ fn handle_page_fault(regs: &mut PtRegs, access_type: u32) {    use crate::arch::
                     }
                 }
             }
-            // R9-7: unconditional — in release builds the debug-only loop
-            // compiled out and the handler sret'd straight back into the
-            // faulting kernel epc: an unbounded fault/print storm with the
-            // locks still held.
-            // SAFETY: wfi halts the hart until an interrupt; safe in a panic halt loop.
-            loop {
-                unsafe { core::arch::asm!("wfi") };
-            }
+            // R9-7: the old unconditional terminal was a wfi halt —
+            // every kernel page fault with no fixup entry died with the
+            // whole machine, captured into nothing. The Oops policy
+            // (Tranche 5) decides instead: the Linux-shaped report
+            // prints here (after this raw forensic block, which stays
+            // first for the wedged-console case), the record is
+            // captured to pstore, and either the policy escalates to a
+            // real panic (interrupt context, oops=panic, idle task —
+            // pstore + panic= apply) or the faulting task dies with
+            // SIGSEGV and the machine keeps running.
+            crate::dfx::oops::oops(
+                crate::dfx::oops::Kind::PageFault { addr: fault_addr },
+                &|w: &mut crate::dfx::backtrace::ConsoleWriter| {
+                    oops_show_regs(w, regs);
+                },
+            );
         }
         _ => {}
     }
+}
+
+/// The oops register block — the FAULTING frame in the reference's
+/// `__show_regs` layout (arch/riscv/kernel/traps.c, Linux 5.15): rows
+/// of three `%s: %016lx` cells, epc/ra/sp first, then the GPRs in
+/// x-order, then the status/badaddr/cause line. Rendered from the trap
+/// frame, not `save_regs()` — the SR-PROBE lesson: a save_regs capture
+/// shows the printer's frame, not the faulting one.
+fn oops_show_regs(w: &mut crate::dfx::backtrace::ConsoleWriter, regs: &PtRegs) {
+    use core::fmt::Write;
+    let cells: [(&str, u64); 32] = [
+        ("epc", regs.epc),
+        ("ra", regs.ra),
+        ("sp", regs.sp),
+        ("gp", regs.gp),
+        ("tp", regs.tp),
+        ("t0", regs.t0),
+        ("t1", regs.t1),
+        ("t2", regs.t2),
+        ("s0", regs.s0),
+        ("s1", regs.s1),
+        ("a0", regs.a0),
+        ("a1", regs.a1),
+        ("a2", regs.a2),
+        ("a3", regs.a3),
+        ("a4", regs.a4),
+        ("a5", regs.a5),
+        ("a6", regs.a6),
+        ("a7", regs.a7),
+        ("s2", regs.s2),
+        ("s3", regs.s3),
+        ("s4", regs.s4),
+        ("s5", regs.s5),
+        ("s6", regs.s6),
+        ("s7", regs.s7),
+        ("s8", regs.s8),
+        ("s9", regs.s9),
+        ("s10", regs.s10),
+        ("s11", regs.s11),
+        ("t3", regs.t3),
+        ("t4", regs.t4),
+        ("t5", regs.t5),
+        ("t6", regs.t6),
+    ];
+    for row in cells.chunks(3) {
+        for (i, (name, val)) in row.iter().enumerate() {
+            if i > 0 {
+                let _ = w.write_str(" ");
+            }
+            let _ = write!(w, "{:<3}: {:016x}", name, val);
+        }
+        let _ = w.write_str("\n");
+    }
+    let _ = write!(
+        w,
+        "status: {:016x} badaddr: {:016x} cause: {:016x}\n",
+        regs.status, regs.badaddr, regs.cause
+    );
 }
 
 /// Handle unknown exception
@@ -1544,11 +1615,16 @@ fn handle_unknown_exception(regs: &mut PtRegs, cause: Cause) {
         crate::process::exit::do_exit(-(crate::signal::Signal::SIGKILL as i32));
         // Do NOT advance epc — the task is now ZOMBIE and will not resume
     } else {
-        // Kernel-mode unknown exceptions (misaligned access, access fault,
-        // ...) indicate a kernel bug; skipping the instruction corrupts state.
-        panic!(
-            "trap: unknown exception {:?} in kernel mode at epc={:#x} badaddr={:#x}",
-            cause, regs.epc, regs.badaddr
+        // Kernel-mode unknown exceptions (misaligned access, access
+        // fault, ...) indicate a kernel bug; skipping the instruction
+        // corrupts state. The Oops path prints the report and applies
+        // the policy (panic in interrupt context / oops=panic / idle;
+        // task death otherwise — Tranche 5).
+        crate::dfx::oops::oops(
+            crate::dfx::oops::Kind::UnknownException { cause: cause as u64 },
+            &|w: &mut crate::dfx::backtrace::ConsoleWriter| {
+                oops_show_regs(w, regs);
+            },
         );
     }
 }

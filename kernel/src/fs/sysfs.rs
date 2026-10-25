@@ -1349,16 +1349,21 @@ fn build_tree() -> Arc<KObject> {
     mk_dir(&sys_fs, "cgroup", KType::Fs);
     let pstore_fs = mk_dir(&sys_fs, "pstore", KType::Fs);
 
-    // pstore-lite: when this boot found the previous boot's panic
-    // record in the reserved RAM region, publish it exactly like the
-    // reference's ramoops console backend: one file named
-    // <type>-<backend>-<id> (console-ramoops-0), mode 0444
-    // (pstore_mkfile's S_IFREG | 0444), one record deep — the next
-    // panic overwrites the region and the boot after that sees the new
-    // record. No record, no file (the reference's directory is empty
-    // after a clean boot).
+    // pstore-lite: when this boot found the previous boot's record
+    // in the reserved RAM region, publish it exactly like the
+    // reference's ramoops backends: one file named
+    // <type>-<backend>-<id> — console-ramoops-0 for the panic record,
+    // dmesg-ramoops-0 for the oops record (the reference's two
+    // flavors) — mode 0444 (pstore_mkfile's S_IFREG | 0444), one
+    // record deep: the next capture overwrites the region and the
+    // boot after that sees the new record. No record, no file (the
+    // reference's directory is empty after a clean boot).
     if crate::dfx::pstore::has_record() {
-        attr_ro(&pstore_fs, "console-ramoops-0", crate::dfx::pstore::read_record);
+        attr_ro(
+            &pstore_fs,
+            crate::dfx::pstore::record_name(),
+            crate::dfx::pstore::read_record,
+        );
     }
 
     mk_dir(&root, "firmware", KType::Firmware);
