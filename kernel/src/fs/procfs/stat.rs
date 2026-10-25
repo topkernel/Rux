@@ -175,11 +175,22 @@ fn btime() -> u64 {
 }
 
 /// Generate /proc/stat content (Linux layout).
+///
+/// leg-36: the fixed-shape cpu rows are derived by `procfile!`'s
+/// `cols` form (rust-design-headroom §4, track-1 third conversion) —
+/// the column list, the row function's argument order and the
+/// rendered byte order are one declaration (`stat_cpu_row`,
+/// `STAT_CPU_COLUMNS`, shape-tested). The two DYNAMIC-arity lines
+/// (`intr`, `softirq` — sums over live IRQ/vector tables) and the
+/// kv tail (`render_kv`, keys listed once, in order) stay explicit:
+/// they have no fixed field list to derive.
 pub fn generate() -> Vec<u8> {
     let mut out = String::new();
     let num_cpus = crate::arch::smp::num_started_cpus().min(crate::config::MAX_CPUS);
 
-    // Aggregate line: the sum over all CPUs.
+    // Aggregate line: the sum over all CPUs. Linux prints the label
+    // as "cpu  " (two spaces) so the columns align under the cpu0
+    // rows — the trailing space belongs to the label passed here.
     let mut user = 0u64;
     let mut nice = 0u64;
     let mut system = 0u64;
@@ -202,16 +213,15 @@ pub fn generate() -> Vec<u8> {
         guest += CPU_TIME[cpu].guest.load(Ordering::Relaxed);
         guest_nice += CPU_TIME[cpu].guest_nice.load(Ordering::Relaxed);
     }
-    out.push_str(&format!(
-        "cpu  {} {} {} {} {} {} {} {} {} {}\n",
-        user, nice, system, idle, iowait, irq, softirq, steal, guest, guest_nice
+    out.push_str(&stat_cpu_row(
+        "cpu ",
+        user, nice, system, idle, iowait, irq, softirq, steal, guest, guest_nice,
     ));
 
     // Per-CPU lines.
     for cpu in 0..num_cpus {
-        out.push_str(&format!(
-            "cpu{} {} {} {} {} {} {} {} {} {} {}\n",
-            cpu,
+        out.push_str(&stat_cpu_row(
+            &format!("cpu{}", cpu),
             CPU_TIME[cpu].user.load(Ordering::Relaxed),
             CPU_TIME[cpu].nice.load(Ordering::Relaxed),
             CPU_TIME[cpu].system.load(Ordering::Relaxed),
@@ -266,13 +276,19 @@ pub fn generate() -> Vec<u8> {
         out.push_str(&line);
     }
     out.push('\n');
-    out.push_str(&format!("ctxt {}\n", total_context_switches()));
-    out.push_str(&format!("btime {}\n", btime()));
-    out.push_str(&format!("processes {}\n", total_forks()));
-    out.push_str(&format!("procs_running {}\n", procs_running()));
-    out.push_str(&format!("procs_blocked {}\n", procs_blocked()));
+    // kv tail: Linux order ctxt/btime/processes/procs_running/
+    // procs_blocked (fs/proc/stat.c show_stat); keys and order are one
+    // list here — same drift floor as the macro's kv form.
+    out.push_str(&super::procfile::render_kv(&[
+        ("ctxt", &total_context_switches()),
+        ("btime", &btime()),
+        ("processes", &total_forks()),
+        ("procs_running", &procs_running()),
+        ("procs_blocked", &procs_blocked()),
+    ]));
     // Linux's aggregate softirq line: one total per vector, in the
-    // kernel's vector order.
+    // kernel's vector order. Dynamic arity (NR_SOFTIRQS sums), so it
+    // stays explicit — see the generate() doc note.
     out.push_str("softirq");
     for vec in 0..crate::interrupt::softirq::NR_SOFTIRQS {
         let mut total = 0u64;
@@ -284,4 +300,64 @@ pub fn generate() -> Vec<u8> {
     out.push('\n');
 
     out.into_bytes()
+}
+
+crate::procfile! {
+    /// /proc/stat cpu rows — fixed 10-column jiffy lines (Linux
+    /// fs/proc/stat.c show_stat order; user..guest_nice). The argument
+    /// order IS the column order; the aggregate row passes `"cpu "` as
+    /// the label (Linux's two-space alignment, see generate()).
+    rowfn stat_cpu_row(label: &str) columns STAT_CPU_COLUMNS test stat_row_shape
+        -> alloc::string::String cols {
+        "user"        => user,
+        "nice"        => nice,
+        "system"      => system,
+        "idle"        => idle,
+        "iowait"      => iowait,
+        "irq"         => irq,
+        "softirq"     => softirq,
+        "steal"       => steal,
+        "guest"       => guest,
+        "guest_nice"  => guest_nice,
+    }
+}
+
+/// Conversion pins for /proc/stat (leg-36): the macro's shape floor
+/// covers the row form; this module pins the whole-file LINE ORDER —
+/// the fixed prefixes must appear in Linux's order, which no per-line
+/// test can see. Callable bodies for the in-kernel unit-test suite.
+#[cfg(any(test, feature = "unit-test"))]
+pub mod stat_file_tests {
+    /// Byte order of /proc/stat's structural line prefixes.
+    pub const LINE_PREFIXES: &[&str] = &[
+        "cpu ", "cpu0", "\nintr ", "\nctxt ", "\nbtime ", "\nprocesses ",
+        "\nprocs_running ", "\nprocs_blocked ", "\nsoftirq",
+    ];
+
+    pub fn line_order_check() {
+        let bytes = super::generate();
+        let text =
+            alloc::string::String::from_utf8(bytes).expect("/proc/stat must be UTF-8");
+        let mut last = 0usize;
+        for p in LINE_PREFIXES {
+            let at = text.find(p).unwrap_or_else(|| {
+                panic!("/proc/stat line order: missing prefix {:?} after byte {}", p, last)
+            });
+            assert!(at >= last, "/proc/stat prefix {:?} out of order ({} < {})", p, at, last);
+            last = at;
+        }
+        // The cpu row shape itself is pinned by stat_row_shape; here
+        // also pin that no per-cpu row leaked a trailing space.
+        for line in text.lines() {
+            if line.starts_with("cpu") {
+                assert_eq!(line.trim_end(), line, "trailing space on cpu row");
+            }
+        }
+    }
+
+    #[cfg(test)]
+    #[test]
+    fn stat_line_order() {
+        line_order_check();
+    }
 }

@@ -2772,8 +2772,12 @@ pub fn vfs_unlink(pathname: &str) -> Result<(), i32> {
                     }
                 }
 
-                // IN_DELETE goes to the parent watch (named); a direct
-                // watch on the file gets IN_DELETE_SELF below.
+                // IN_DELETE goes to the parent watch (named); the inode
+                // itself first gets IN_ATTRIB — unlink(2) drops its link
+                // count, and that metadata change is reported to the
+                // file's own watch (LTP inotify04: an unlinked watched
+                // file must see IN_ATTRIB before IN_DELETE_SELF) — then
+                // IN_DELETE_SELF when the last link went away.
                 crate::fs::inotify::notify(
                     Some(parent_inode),
                     None,
@@ -2781,6 +2785,9 @@ pub fn vfs_unlink(pathname: &str) -> Result<(), i32> {
                     Some(name.as_bytes()),
                     0,
                 );
+                if let Some(ref ti) = target_inode {
+                    crate::fs::inotify::notify(None, Some(ti), ino::IN_ATTRIB, None, 0);
+                }
                 if last_link {
                     if let Some(ref ti) = target_inode {
                         crate::fs::inotify::notify(
@@ -2950,12 +2957,41 @@ fn vfs_rename_locked(oldpath: &str, newpath: &str) -> Result<(), i32> {
     // Use old_parent's inode ops for rename
     let result = old_parent.op_rename(old_name.as_bytes(), new_parent, new_name.as_bytes());
     if result == 0 {
-        // Invalidate stale dentries at both old and new paths
-        if let Some(ref old_pd) = old_parent_vpath.dentry {
-            old_pd.remove_child(&old_name);
-        }
+        // Keep the dentry cache in step with the on-disk rename by MOVING
+        // the renamed entry's cached dentry (reference d_move): the dentry
+        // — with its whole cached subtree — is re-attached under the new
+        // parent/name. The old invalidate-both code dropped it, which left
+        // detached-but-still-linked chains behind: any task holding a
+        // dentry reference INTO the renamed subtree (cwd/root recorded as
+        // a dentry) kept building the OLD path from the stale chain, so
+        // every relative lookup under that prefix failed with ENOENT (LTP
+        // inotify02 renames its own working directory; the following
+        // relative unlink() broke).
         if let Some(ref new_pd) = new_parent_vpath.dentry {
-            new_pd.remove_child(&new_name);
+            // The replaced entry (if any) was deleted by the rename:
+            // invalidate its cached dentry so the moved one can take the
+            // name slot.
+            if let Some(replaced) = new_pd.lookup_child(&new_name) {
+                replaced.set_negative();
+                *replaced.inode.lock() = None;
+                new_pd.remove_child(&new_name);
+            }
+        }
+        if let Some(ref old_pd) = old_parent_vpath.dentry {
+            if let Some(child) = old_pd.lookup_child(&old_name) {
+                old_pd.remove_child(&old_name);
+                *child.name.lock() = new_name.clone();
+                if let Some(ref new_pd) = new_parent_vpath.dentry {
+                    child.set_parent(new_pd.clone());
+                    new_pd.add_child(new_name.clone(), child);
+                } else {
+                    // New parent has no cached dentry to hang the moved
+                    // subtree from — fall back to plain invalidation (the
+                    // entry is reachable again through a fresh lookup).
+                    child.set_negative();
+                    *child.inode.lock() = None;
+                }
+            }
         }
 
         // inotify: IN_MOVED_FROM on the old parent and IN_MOVED_TO on the
@@ -3155,9 +3191,16 @@ pub fn vfs_chmod(pathname: &str, mode: u32) -> Result<(), i32> {
 
     let result = inode.op_setattr(setattr_attr::ATTR_MODE, mode as u64, 0);
     if result == 0 {
-        // inotify: mode change → IN_ATTRIB.
+        // inotify: mode change → IN_ATTRIB. The subject's ISDIR modifier
+        // rides on BOTH the parent's named record and the inode's own
+        // record (reference fsnotify_change) — LTP inotify10 expects
+        // IN_ATTRIB|IN_ISDIR from a chmod on a watched directory.
+        let mut ev_mask = ino::IN_ATTRIB;
+        if inode.mode.is_directory() {
+            ev_mask |= ino::IN_ISDIR;
+        }
         let name = vpath.dentry.as_ref().map(|d| d.get_name().into_bytes());
-        notify_about(vpath.dentry.as_ref(), Some(inode), ino::IN_ATTRIB, name.as_deref(), 0);
+        notify_about(vpath.dentry.as_ref(), Some(inode), ev_mask, name.as_deref(), 0);
         Ok(())
     } else {
         Err(result)
@@ -3257,9 +3300,14 @@ pub fn vfs_chown(pathname: &str, uid: u32, gid: u32, follow: bool) -> Result<(),
 
     let result = inode.op_setattr(setattr_attr::ATTR_UID_GID, actual_uid as u64, actual_gid as u64);
     if result == 0 {
-        // inotify: owner change → IN_ATTRIB.
+        // inotify: owner change → IN_ATTRIB (ISDIR modifier when the
+        // subject is a directory, same as chmod above).
+        let mut ev_mask = ino::IN_ATTRIB;
+        if inode.mode.is_directory() {
+            ev_mask |= ino::IN_ISDIR;
+        }
         let name = vpath.dentry.as_ref().map(|d| d.get_name().into_bytes());
-        notify_about(vpath.dentry.as_ref(), Some(inode), ino::IN_ATTRIB, name.as_deref(), 0);
+        notify_about(vpath.dentry.as_ref(), Some(inode), ev_mask, name.as_deref(), 0);
         Ok(())
     } else {
         Err(result)

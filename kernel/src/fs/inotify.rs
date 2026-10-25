@@ -76,6 +76,9 @@ pub mod inotify_events {
     pub const IN_ISDIR: u32 = 0x4000_0000;
     /// Add to the existing mask instead of replacing it.
     pub const IN_MASK_ADD: u32 = 0x2000_0000;
+    /// Don't report events for children after they were unlinked from the
+    /// watched directory.
+    pub const IN_EXCL_UNLINK: u32 = 0x0400_0000;
     /// Remove the watch after one event.
     pub const IN_ONESHOT: u32 = 0x8000_0000;
 
@@ -159,13 +162,30 @@ impl InotifyInstance {
     /// selects it (IN_ISDIR/IN_IGNORED/IN_Q_OVERFLOW/IN_UNMOUNT are
     /// delivered with the event regardless of the mask). Handles
     /// IN_ONESHOT removal and queue-overflow marking, then wakes readers.
-    fn enqueue(&self, wd: i32, raw_mask: u32, cookie: u32, name: Option<Vec<u8>>) {
+    ///
+    /// `subject_unlinked`: the named subject was unlinked from its parent
+    /// before this event — IN_EXCL_UNLINK watches drop such events
+    /// (inotify(7): events on children after the unlink are not reported).
+    fn enqueue(
+        &self,
+        wd: i32,
+        raw_mask: u32,
+        cookie: u32,
+        name: Option<Vec<u8>>,
+        subject_unlinked: bool,
+    ) {
         {
             let mut inner = self.inner.lock();
             let watch_mask = match inner.watches.iter().find(|w| w.wd == wd) {
                 Some(w) => w.mask,
                 None => return,
             };
+            if subject_unlinked
+                && name.is_some()
+                && watch_mask & IN_EXCL_UNLINK != 0
+            {
+                return;
+            }
             let effective = raw_mask
                 & (watch_mask | IN_ISDIR | IN_IGNORED | IN_Q_OVERFLOW | IN_UNMOUNT);
             // Linux never queues an event whose only surviving bit is the
@@ -184,6 +204,26 @@ impl InotifyInstance {
             if inner.queue.len() >= MAX_QUEUED_EVENTS {
                 inner.overflow = true;
                 return;
+            }
+            // Coalesce with the LAST queued event when wd, mask, cookie
+            // and name all match (reference fsnotify_add_event merge for
+            // inotify: a duplicate of the most recent event is dropped,
+            // so e.g. two back-to-back renames of the same directory
+            // surface as ONE IN_MOVE_SELF — LTP inotify02's final
+            // rename-away/rename-back pair). IN_IGNORED / IN_Q_OVERFLOW /
+            // IN_UNMOUNT records never merge.
+            if let Some(back) = inner.queue.back() {
+                let mergeable = back.mask
+                    & (IN_IGNORED | IN_Q_OVERFLOW | IN_UNMOUNT)
+                    == 0;
+                if mergeable
+                    && back.wd == wd
+                    && back.mask == effective
+                    && back.cookie == cookie
+                    && back.name == name
+                {
+                    return;
+                }
             }
             inner.queue.push_back(QueuedEvent {
                 wd,
@@ -252,6 +292,23 @@ pub fn notify(
     name: Option<&[u8]>,
     cookie: u32,
 ) {
+    notify_ex(parent, inode, mask, name, cookie, false);
+}
+
+/// [`notify`] with the unlinked-subject flag: named events for a child
+/// that has been unlinked from the watched directory are dropped for
+/// watches created with IN_EXCL_UNLINK (inotify(7)); every other watch
+/// still sees them (an open descriptor on the unlinked file keeps
+/// producing events — LTP inotify12's no-EXCL_UNLINK case reads the
+/// second IN_MODIFY).
+pub fn notify_ex(
+    parent: Option<&Inode>,
+    inode: Option<&Inode>,
+    mask: u32,
+    name: Option<&[u8]>,
+    cookie: u32,
+    subject_unlinked: bool,
+) {
     if WATCH_COUNT.load(Ordering::Acquire) == 0 {
         return;
     }
@@ -280,13 +337,17 @@ pub fn notify(
         (inode_targets, parent_targets)
     };
 
-    for (instance, wd) in inode_targets {
-        instance.enqueue(wd, mask, cookie, None);
-    }
+    // Delivery order mirrors the reference helpers (fsnotify_dentry and
+    // friends): the PARENT's named record goes out before the inode's own
+    // record — LTP inotify10 reads the parent's IN_ATTRIB|ISDIR for a
+    // chmod'd subdirectory before the subdirectory watch's own event.
     if let Some(n) = name {
         for (instance, wd) in parent_targets {
-            instance.enqueue(wd, mask, cookie, Some(Vec::from(n)));
+            instance.enqueue(wd, mask, cookie, Some(Vec::from(n)), subject_unlinked);
         }
+    }
+    for (instance, wd) in inode_targets {
+        instance.enqueue(wd, mask, cookie, None, subject_unlinked);
     }
 
     // Automatic watch removal: the watched inode itself was deleted.
@@ -297,7 +358,7 @@ pub fn notify(
             let victims: Vec<Arc<InotifyInstance>> = {
                 let registry = WATCH_REGISTRY.lock();
                 for r in registry.iter().filter(|r| r.key == ik) {
-                    r.instance.enqueue(r.wd, IN_IGNORED, 0, None);
+                    r.instance.enqueue(r.wd, IN_IGNORED, 0, None, false);
                 }
                 registry
                     .iter()
@@ -335,18 +396,21 @@ pub fn notify_file(file: &File, mask: u32) {
     if inode.mode.is_directory() {
         mask |= IN_ISDIR;
     }
-    let (parent, name): (Option<Arc<Inode>>, Option<Vec<u8>>) = match &dentry {
+    let (parent, name, unlinked): (Option<Arc<Inode>>, Option<Vec<u8>>, bool) = match &dentry {
         Some(d) => {
             let name = d.get_name();
             let parent_inode = d.parent.lock().clone().and_then(|p| p.get_inode());
             (
                 parent_inode,
                 if name.is_empty() { None } else { Some(name.into_bytes()) },
+                // A negative dentry on an OPEN File means the entry was
+                // unlinked after the open — IN_EXCL_UNLINK material.
+                d.is_negative(),
             )
         }
-        None => (None, None),
+        None => (None, None, false),
     };
-    notify(parent.as_deref(), Some(&inode), mask, name.as_deref(), 0);
+    notify_ex(parent.as_deref(), Some(&inode), mask, name.as_deref(), 0, unlinked);
 }
 
 /// Close-time event for a File (IN_CLOSE_WRITE / IN_CLOSE_NOWRITE).
@@ -390,10 +454,24 @@ pub fn inotify_init1(flags: u32) -> Result<usize, i32> {
     }
 }
 
+/// fdinfo(5) view of an inotify fd's watch table, for
+/// /proc/[pid]/fdinfo/<fd>: one (wd, sdev, ino, mask) tuple per watch.
+/// Returns None when `file` is not an inotify instance.
+pub fn fdinfo_watches(file: &File) -> Option<alloc::vec::Vec<(i32, u64, u64, u32)>> {
+    let instance = instance_of(file)?;
+    let inner = instance.inner.lock();
+    Some(
+        inner
+            .watches
+            .iter()
+            .map(|w| (w.wd, w.key.0, w.key.1, w.mask))
+            .collect(),
+    )
+}
+
 /// Recover the Arc<InotifyInstance> from a File's private_data without
 /// consuming the stored reference (identity-checked against INOTIFY_OPS).
-fn instance_of(file: &File) -> Option<Arc<InotifyInstance>> {
-    let ops = file.get_ops()?;
+fn instance_of(file: &File) -> Option<Arc<InotifyInstance>> {    let ops = file.get_ops()?;
     if !core::ptr::eq(ops as *const _, &INOTIFY_OPS as *const _) {
         return None;
     }
@@ -425,7 +503,11 @@ pub fn inotify_add_watch(fd: usize, path: &str, mask: u32) -> Result<i32, i32> {
         .ok_or(-crate::errno::constants::ENOENT)?;
     let key = inode_key(&inode);
 
-    let effective_mask = mask & (IN_ALL_EVENTS | IN_MASK_ADD | IN_ONESHOT);
+    // Store the user mask verbatim minus IN_MASK_ADD (fdinfo(5) reports the
+    // raw mask back — LTP inotify12 expects IN_ONESHOT/IN_EXCL_UNLINK bits
+    // to survive; IN_EXCL_UNLINK additionally gates named child events on
+    // unlinked subjects, see notify_ex).
+    let effective_mask = mask & !IN_MASK_ADD;
 
     // Per-instance watch list: existing watch on the same inode keeps its
     // wd; IN_MASK_ADD ORs into it, otherwise the mask is replaced.

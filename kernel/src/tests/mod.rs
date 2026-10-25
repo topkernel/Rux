@@ -396,6 +396,21 @@ pub fn run_all_tests() {
     test_group_start("tmpfs-mknod");
     tmpfs_mknod::test_tmpfs_mknod();
 
+    // procfile! shape floors + conversion pins (leg-35 wiring: the
+    // bare #[cfg(test)] forms never join the unit-test feature build,
+    // so leg-34's suite run did not execute them — the macro now emits
+    // pub shape_check bodies gated on any(test, unit-test)).
+    test_group_start("procfile-shape");
+    crate::fs::procfs::vmstat::vmstat_shape::shape_check();
+    crate::fs::procfs::vmstat::vmstat_file_tests::snapshot_check();
+    crate::fs::procfs::meminfo::meminfo_shape::shape_check();
+    crate::fs::procfs::meminfo::meminfo_file_tests::keys_shape_check();
+    // leg-36: the cols (stat-family rows) form — /proc/stat cpu rows
+    // + whole-file line order, /proc/schedstat cpu rows.
+    crate::fs::procfs::stat::stat_row_shape::shape_check();
+    crate::fs::procfs::stat::stat_file_tests::line_order_check();
+    crate::fs::procfs::schedstat::schedstat_row_shape::shape_check();
+
     // tmpfs page-budget tests (mount option size=). Implemented in
     // fs::tmpfs itself (needs private TmpfsSuperBlock access).
     crate::fs::tmpfs::run_budget_tests();
