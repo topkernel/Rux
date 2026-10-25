@@ -26,7 +26,7 @@ while true; do
   git fetch -q origin 2>>"$LOG" || echo "$ts fetch-failed (dns/auth) — watching local main" >> "$LOG"
   om=$(git rev-parse --short origin/main 2>/dev/null)
   lm=$(git rev-parse --short main 2>/dev/null)
-  kc=$(git log --oneline 6f7e4ac3..main -- kernel/ 2>/dev/null | wc -l)
+  kc=$(git log --oneline de41d5ab..main -- kernel/ 2>/dev/null | wc -l)
   ms=none; hits=0; newest=-
   for f in $(find /home/william/rux-agents/samgr-callback/run \
                      /home/william/rux-agents/sc166k/run \
