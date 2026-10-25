@@ -22,6 +22,8 @@
 #include <string.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include <sys/syscall.h>
+#include <errno.h>
 
 #ifndef ROUNDS
 #define ROUNDS 12
@@ -34,13 +36,23 @@ static void one_death(void) {
     }
     if (pid == 0) {
         // Child: grow, touch, shrink, then write through the freed page.
+        // NOTE: brk(2) is driven via the raw syscall with its raw return
+        // (the new break). musl's brk() LIBC WRAPPER is a permanent
+        // -ENOMEM stub, and glibc's returns 0/-1 — neither can express
+        // "did the kernel move the break where I asked" (round 1 of this
+        // probe exited 42 on every child through the musl stub and never
+        // faulted). SYS_brk = 214 on riscv64.
         uintptr_t b0 = (uintptr_t)sbrk(0);
         uintptr_t top = b0 + 0x3000;
-        if ((uintptr_t)brk((void *)top) != top) {
+        uintptr_t got = (uintptr_t)syscall(214, top);
+        if (got != top) {
+            printf("BRKSEQ-GROW-FAIL b0=%p want=%p got=%p\n",
+                   (void *)b0, (void *)top, (void *)got);
             _exit(42);
         }
         *(volatile char *)top = 1;   // touch the new page
-        if ((uintptr_t)brk((void *)(b0 + 0x1000)) != b0 + 0x1000) {
+        got = (uintptr_t)syscall(214, b0 + 0x1000);
+        if (got != b0 + 0x1000) {
             _exit(43);               // shrink below it
         }
         // Deterministic SIGSEGV: write above the shrunk break. This is
@@ -62,6 +74,29 @@ int main(void) {
         usleep(300 * 1000);
     }
     printf("BRKSEQ-CHURN-DONE\n");
+    if (getpid() != 1) {
+        // Running as a SHELL child (pid != 1; note the shell itself can BE
+        // pid 1 under init=/bin/sh, so ppid is not a discriminator): exit
+        // immediately — parking on stdin here would deadlock the
+        // shell's sequential command list. The console-park stage is
+        // for the init context only.
+        printf("BRKSEQ-EXIT\n");
+        return 0;
+    }
+    // The ltp lane's wedge shape: after the SIGSEGV deaths, /bin/sh
+    // parks reading the console and NEVER responds to the driver's next
+    // input line. Park on stdin exactly like the shell's read loop; the
+    // driver feeds a line after CHURN-DONE and the verdict wants the
+    // echoed response within the window.
+    printf("BRKSEQ-READY-FOR-INPUT\n");
+    char line[64];
+    while (fgets(line, sizeof(line), stdin) != NULL) {
+        printf("BRKSEQ-GOT: %s", line);
+        if (strncmp(line, "quit", 4) == 0) {
+            break;
+        }
+    }
+    printf("BRKSEQ-CONSOLE-CLOSED\n");
     // Park so the kernel's tick-side leak tripwire has its observation
     // window; the driver verdicts from the serial stream.
     for (;;) {
