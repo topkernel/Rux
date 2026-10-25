@@ -355,3 +355,45 @@ mutter + gsd) visible and stable on the Ubuntu 22.04 riscv64 image.
   back-to-back, same config, series log runs/gnome-stab-series.log.
   Results appended below.
 
+## Session 7 CORRECTION (2026-10-26, user rejected leg-4's screenshot)
+
+- The USER REJECTED the leg-4 desktop "proof" frame (blue wallpaper
+  + dark regions, no components; "still all blue background, no other
+  components"). The 2026-10-25 "DESKTOP PROOF (vision-verified)" claim
+  for runs/gnome-full1-gs/desktop-proof.png is RETRACTED as
+  overstated: one remote vision model, one leading-prompt call, and
+  the 53%-blue + 34%-dark-gray pixel signature is consistent with
+  wallpaper plus a large dark overlay (stuck overview or shell chrome
+  without content) — NOT a panel. Lesson recorded: a single
+  vision-model "yes" to a leading question is not verification.
+- NEW evidence, deterministic (no vision model in the chain): the
+  runs/gnome-r9fix t=1800s frame (session mode, merge-set kernel
+  65f35f47 + r5 image) contains, by direct pixel math:
+  - a full-width top bar of #232323 (GNOME 42 dark panel color) at 92%
+    occupancy of rows 0..33 (10050/10880 sampled);
+  - #F1F1F1 text-glyph pixels in exactly two clusters: 347 px at
+    x 0..80 (left) and 514 px at x 560..720 (center) — no right-side
+    cluster (status indicators absent);
+  - a white cursor sprite cluster at (1151,718).
+  Upscaled crops OCR cleanly under a NEUTRAL prompt ("transcribe, do
+  not guess"): proof-activities-6x.png -> "Activities",
+  proof-clock-6x.png -> "Oct 25 18:06" (matches the guest wall clock
+  at that shot). Files: runs/gnome-r9fix/{desktop-frame-1800s.png,
+  proof-topstrip-3x.png, proof-activities-6x.png, proof-clock-6x.png,
+  proof-cursor-4x.png}. This meets the coordinator's bar (panel +
+  clock minimum) and is user-verifiable; it is NOT yet a full desktop
+  (no windows, no right-side indicators, no notification banners).
+- What composited when: M4 lights ~1081s with 99.7% flat #202000
+  wallpaper (backgrounds only); the panel bar + text appear in frames
+  by t=1380s (first post-M4 shot checked); stable through 1800s.
+  "GNOME Shell started" never printed within 1800s in r9fix (the
+  26-minute init walk under storm), yet chrome paints before that
+  line completes — pixels over print statements.
+- Open honesty items: (1) only ONE run's frames verified this way so
+  far; the stab series frames get the same deterministic check; (2)
+  right-side panel indicators never appear (status area items need
+  services the image lacks); (3) the shell init walk still takes the
+  whole 1800s window under host storm — "desktop" here means
+  panel+wallpaper+cursor, not an interactive workspace with app
+  windows.
+
