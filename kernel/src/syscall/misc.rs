@@ -183,14 +183,36 @@ static EPOLL_WAKE_SHARDED: [crate::sync::spinlock::Spinlock<EpollWakeShard>; EPO
         })
     }; EPOLL_WAKE_SHARDS];
 
+// Live bindings per shard (leg-36 notify fast path), index-matched to
+// EPOLL_WAKE_SHARDED. Moved ONLY inside the shard lock's critical
+// sections (register increments, unregister_* decrement), exactly like
+// WaitQueueHead::waiters: a 0 read with Acquire proves the shard has
+// no bindings, so epoll_notify_file — which runs on EVERY unix-socket
+// enqueue and EOF in the system — returns after one load instead of
+// taking the shard's irqsave lock and scanning it. Lost-notification
+// safety mirrors the waitqueue argument: a notify that reads 0 runs
+// before a concurrent epoll_ctl ADD's in-lock increment publishes, and
+// whether an entry being added right now catches an arrival happening
+// right now is already racy in the reference kernel (the watch begins
+// at ctl return). False positives (count > 0 while the shard is empty
+// between an unregister and the load) just take the lock and find
+// nothing, as before.
+static EPOLL_SHARD_N: [core::sync::atomic::AtomicUsize; EPOLL_WAKE_SHARDS] =
+    [const { core::sync::atomic::AtomicUsize::new(0) }; EPOLL_WAKE_SHARDS];
+
 static EPOLL_WAKE_TOTAL: core::sync::atomic::AtomicUsize =
     core::sync::atomic::AtomicUsize::new(0);
 
 #[inline]
-fn epoll_wake_shard(file_id: u64) -> &'static crate::sync::spinlock::Spinlock<EpollWakeShard> {
+fn epoll_shard_index(file_id: u64) -> usize {
     // file_id starts at 1 and increments; mask is even because
     // EPOLL_WAKE_SHARDS is a power of two.
-    &EPOLL_WAKE_SHARDED[(file_id as usize) & (EPOLL_WAKE_SHARDS - 1)]
+    (file_id as usize) & (EPOLL_WAKE_SHARDS - 1)
+}
+
+#[inline]
+fn epoll_wake_shard(file_id: u64) -> &'static crate::sync::spinlock::Spinlock<EpollWakeShard> {
+    &EPOLL_WAKE_SHARDED[epoll_shard_index(file_id)]
 }
 
 /// Data arrived on (or readiness otherwise rose for) an open file
@@ -205,6 +227,16 @@ fn epoll_wake_shard(file_id: u64) -> &'static crate::sync::spinlock::Spinlock<Ep
 /// in its close op, which only runs on the last Arc reference — no
 /// epoll_wait can still be blocked on the instance at that point.
 pub fn epoll_notify_file(file_id: u64) {
+    // leg-36 lock-free empty-shard fast path: with no epoll bound in
+    // this file's shard (pbench pairs, pipe-only processes, most
+    // one-shot tools — and every producer before the first epoll_ctl
+    // on the box), one Acquire load replaces the shard irqsave
+    // lock/unlock pair and the scan below.
+    if EPOLL_SHARD_N[epoll_shard_index(file_id)]
+        .load(core::sync::atomic::Ordering::Acquire) == 0
+    {
+        return;
+    }
     // sc103: every unix-socket enqueue runs this IRQ-save scan —
     // sharded since leg-31 (L3), so the scan is O(bindings in THIS
     // shard), not O(total registry); the leak symptom the original hunt
@@ -248,10 +280,15 @@ pub fn epoll_notify_file(file_id: u64) {
 
 /// Bind (file_id → epoll instance). Idempotent per pair.
 fn epoll_wake_register(file_id: u64, ep: *mut EpollFile) {
-    let mut registry = epoll_wake_shard(file_id).lock_irqsave();
+    let shard = epoll_shard_index(file_id);
+    let mut registry = EPOLL_WAKE_SHARDED[shard].lock_irqsave();
     if !registry.bindings.iter().any(|(id, e)| *id == file_id && *e == ep) {
         registry.bindings.push((file_id, ep));
         EPOLL_WAKE_TOTAL.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        // In-section publish (see EPOLL_SHARD_N): before the lock
+        // release, so a concurrent notify's fast-path load pairs with
+        // this increment.
+        EPOLL_SHARD_N[shard].fetch_add(1, core::sync::atomic::Ordering::Release);
     }
 }
 
@@ -259,25 +296,28 @@ fn epoll_wake_register(file_id: u64, ep: *mut EpollFile) {
 /// watch many file_ids across shards, so sweep them all (cold path: runs
 /// once per epoll close).
 fn epoll_wake_unregister_all(ep: *mut EpollFile) {
-    for shard in EPOLL_WAKE_SHARDED.iter() {
-        let mut registry = shard.lock_irqsave();
+    for (shard, registry) in EPOLL_WAKE_SHARDED.iter().enumerate() {
+        let mut registry = registry.lock_irqsave();
         let before = registry.bindings.len();
         registry.bindings.retain(|(_, e)| *e != ep);
         let dropped = before - registry.bindings.len();
         if dropped > 0 {
             EPOLL_WAKE_TOTAL.fetch_sub(dropped, core::sync::atomic::Ordering::Relaxed);
+            EPOLL_SHARD_N[shard].fetch_sub(dropped, core::sync::atomic::Ordering::Release);
         }
     }
 }
 
 /// Drop bindings for (file_id, ep) (epoll_ctl DEL).
 fn epoll_wake_unregister(file_id: u64, ep: *mut EpollFile) {
-    let mut registry = epoll_wake_shard(file_id).lock_irqsave();
+    let shard = epoll_shard_index(file_id);
+    let mut registry = EPOLL_WAKE_SHARDED[shard].lock_irqsave();
     let before = registry.bindings.len();
     registry.bindings.retain(|(id, e)| !(*id == file_id && *e == ep));
     let dropped = before - registry.bindings.len();
     if dropped > 0 {
         EPOLL_WAKE_TOTAL.fetch_sub(dropped, core::sync::atomic::Ordering::Relaxed);
+        EPOLL_SHARD_N[shard].fetch_sub(dropped, core::sync::atomic::Ordering::Release);
     }
 }
 
