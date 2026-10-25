@@ -1483,3 +1483,83 @@ window.
 
 **sc2xx launcher.ready trigger: NOT FIRED** (sc258 newest, zero
 events; pa39-watch standing). Run day stays pending.
+
+### 8.10.8 Leg 38 (2026-10-26): D-7 typed per-CPU landed, main b4da2106 merged, census re-armed on the new tip
+
+**Main merge:** b4da2106 merged clean (920c7b3e). Kernel-relevant
+new commits since the b332d08a census target: 2968ad13 (mm/COW
+private-copy alloc out of the PTE section — oom01-wedge root cause,
+a GUARDED-DOMAIN mm change), 3e7186b6+84743e84 (net batch:
+MSG_MORE cork + TIME_WAIT reclamation — IPC/socket domain),
+7a6e1bf4 (small_alloc magazine two-CPU entry — mm domain), 4c0e6c67
+(pidns), 49635573 (kcmp), cfbd7588 (clone ABI). The census + domain
+checks are owed on THIS class: run/pa60-census.sh armed (pure main
+b4da2106 x86 debug built in pa52-main, BUILD_RC=0), two-stage gate
+9/8 then 13/10, 6 h deadline, then perf-gate parse + slowtxn parse,
+then the adjacent pbench pair M,B,B,M (M = pure main strong; B =
+branch HEAD strong) — the route-1 p6_mkdrmdir/p6_unlink medians debt
+AND the p5 socket-family re-measure on the net-batch class in one
+pair. run/pa61-route1.sh chains after it: the LTP
+creat05/fork09-class spot run (17 metadata/create rows) + the fsw
+pair re-run WITH the FSW1 sd separator fix.
+
+**The pa57 census (b332d08a, booted 06:10 at load 15-18):** census
+rows all green (TERM 8, REFUSED 32, 0 panic/OOM, GRQ 6230ns PASS,
+small_alloc REST 6.4% PASS, clock_gettime 4us PASS, nanosleep
+183ms PASS). Two FAIL rows pending the b4da2106 quiet adjudication:
+tick cpu0 99.43/s (min 99.5 — marginal), volume 85.8M vs 107.5M+-10%
+(rerun-once rule; the boot was load-class 15-18, not quiet). The
+slowtxn parse FAILED on ONE code-1 row at 11770 ms exec (band
+4.5-8.999 s, queue 0 ms): the code-1 historical max is 7730 ms
+(pa41gate, load era); 11.77 s at load 15-18 reads as load-elastic
+stretch beyond the recorded range — adjudication rule identical to
+the leg-36 code-7 widening: only QUIET-class evidence moves the
+band, and the pa60 census boot is that evidence (quiet code-1 <=8 s
+confirms load; quiet >9 s widens the band). NO code 14 in this
+pure-main boot: the pa56branch code-14 question stays on the branch
+under targeted look.
+
+**pa57 A/B: never fired.** The pre-gate (load1<=13/qemus<=10,
+deadline 90 min) held load 14-30 with 10-16 foreign QEMUs the whole
+morning; the chain exits A/B-skipped and the 6fdada6b wake/epoll
+lever measurement debt rolls to the NEXT quiet window — the pa60
+pbench pair's B arm carries the branch levers, but the CLEAN A/B
+(6fdada6b alone) still owes its own window (kernels stay banked:
+run/pa57-a-ctl-bzImage / run/pa57-b-fast-bzImage).
+
+**Track-1 (§3 typed per-CPU): landed as D-7 (d8d23064).**
+CpuLocal<T,N> — cache-line-padded per-cpu rows reachable only
+through with(f), which hands the closure a !Send guard whose Drop
+restores the saved IRQ state: the interrupt-disabled window a
+per-CPU access depends on is the guard's lifetime, a type-level
+fact. First conversion: the small_alloc magazine bank — the incident
+site itself (r8final two-CPU row entry; 7a6e1bf4's transient entry
+on main the same week). alloc fast path, locked refill, and the free
+fast path (incl. the full-row snapshot/flush/post-push sequence)
+converted; every manual save/restore flag pair at those sites is now
+the guard's acquire/drop; all r8final len/MAG_DEPTH guards kept
+verbatim (they defend against row corruption, which the type cannot
+prevent). Two tripwires as data: out-of-range cpu id -> None (locked
+fallback, the survive-and-taint stance); same-slot re-entry refused
++ counted + tainted. percpu-shape unit group (6 rows) added; suite
+1110/1110 (run/pa62-maketest3.log). Registered as D-7; the GRQ
+typed lock key is the §3 follow-on slice. Functional smoke rides
+the pa60/pa61 branch boots (pbench B arm, fsw mech, LTP spot) —
+all re-banked post-D-7.
+
+**Track-2 (F4 route-1): mechanism confirmed firing, honest pair
+re-run chained.** From the leg-37 pa59 pair: mech pb=683.880 vs
+control pb=0.0 — the publication queue never engages on the
+no-journal class without route-1 and engages with it (the null-
+journal handle brackets make namei metadata publication-constrained,
+exactly the mechanism). Dirty evictions 26 vs 5 (write-back
+behavior, expected). The QUANTITATIVE sync-write split stays
+ambiguous in the old logs (the pre-separator sd concatenation —
+31765408 could split as 31765|408 or 317654|08, and control's 70770
+as 7077|0 or 70770|0); pa61's pair re-runs both sides with the
+separator fix (3750e17c). Merge claim still open on: the fsw pair
+read, the LTP spot run, the p6 medians (both in the chains).
+
+**sc2xx launcher.ready trigger: NOT FIRED** (sc258 newest, zero
+events; pa39-watch standing, kept this leg per the leg-36
+convention). Run day stays pending.
