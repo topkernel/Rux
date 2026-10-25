@@ -124,6 +124,57 @@ armed() single-branch check measured by syscost per the merge gate.
 
 ---
 
+## D-6: Capability-checked file-ops declaration (§1 builder + one-place missing-op dispatch)
+
+**Design.** A file type declares its operations as capabilities
+through a const `FileOps::builder()` — each builder method installs
+exactly one op slot and refuses duplicates (a duplicate is a const
+panic, i.e. a compile error in every `static` initializer), so the
+capability matrix of a type is a stated fact instead of an
+inferred-from-`None` wall. The behavior of a MISSING capability is
+decided in one place, not per call site: `File::missing_op_errno`
+(Read/Write → EINVAL, LSeek → ESPIPE, ReadAt → EINVAL for op-less
+types vs ESPIPE for streams) and `File::poll_dispatch` (per-type poll
+callback or the always-ready mask) own the whole mapping; the
+mainstream approach (function-pointer struct, null checks, errno
+convention at each dispatch site) re-derives it everywhere and gets it
+wrong under load — the paid incident: read() on a valid epoll fd
+returned EBADF because the read slot was NULL, and an OH event loop
+spun 155,991 iterations on the wrong errno before the semantics were
+fixed by hand, per-site.
+
+**Advantage.**
+- The errno/fallback mapping exists once; a new fd type cannot pick a
+  wrong convention by copying the wrong neighbor call site.
+- The capability matrix is pinned per type by the `fileops-caps`
+  unit-test group — adding a slot (e.g. giving epoll a read op) fails
+  a shape test before it can drift into the tree.
+- Duplicate capability installs are compile errors; absent slots are
+  declared absences.
+- Hot path unchanged: same fn-pointer indirect calls, same slots; the
+  dispatch helpers inline to the same loads/branches.
+
+**Compatibility evidence.** Unit suite 1103/1103 with the new group
+(run/pa58-maketest.log); errno matrix pinned to the ABI-documented
+values (EINVAL/ESPIPE classes above); poll/select/epoll call sites in
+misc.rs all route through the one dispatcher with
+behavior-preserving fallbacks (both old fallback shapes reduce to the
+same event bits). First conversions: the §1 incident family
+(epoll/eventfd/timerfd/signalfd/pipe/inotify).
+
+**Known cost.** Opportunistic migration — ~40 struct-literal tables
+remain and still compile (D-4 procfile precedent); they convert as
+their areas are touched. The builder does not yet catch a FIRST
+install of a capability a type should not have — that guard is the
+shape test, per converted type.
+
+**Guard.** `fileops-caps` unit-test group (capability matrix + errno
+matrix); Tier-1 census and the p5 family rows of the perf gate cover
+the poll/epoll hot paths (any change touching this dispatch reports
+them).
+
+---
+
 <!-- Pending entries (register when they land on main):
      - packed kernel-stack slab (order-6 blocks carved into 80KB slots,
        vs plain buddy order-power allocation) — on the launcher lane branch,
