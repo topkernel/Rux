@@ -308,6 +308,9 @@ pub fn do_clone(args: CloneArgs) -> Result<Pid, i32> {
         return Err(einval());
     }
     // Unknown flag bits (excluding the low CSIGNAL byte) → EINVAL.
+    // (The legacy-clone sign-extension garbage is already discarded by
+    // sys_clone's lower_32_bits mask — Linux parity — so this check only
+    // ever sees real flag bits.)
     if args.flags & !CLONE_KNOWN_FLAGS & !0xff != 0 {
         crate::pr_warn!("clone: unknown flags {:#x}", args.flags);
         return Err(einval());
