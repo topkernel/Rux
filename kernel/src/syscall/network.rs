@@ -1120,6 +1120,20 @@ pub fn sys_sendto(args: SyscallArgs) -> i64 {
     let _flags = args[3] as i32;
     let addr_ptr = args[4] as *const u8;
     let _addrlen = args[5] as u32;
+
+    // Entry fd classification (sendto(2)): not-open is EBADF, open but
+    // not a socket is ENOTSOCK (LTP sendto01 cases 1-2; the ENOTSOCK
+    // side falls out of the family probes + get_socket_from_fd below).
+    // SAFETY: fdtable read only; the Arc is dropped immediately.
+    if unsafe { crate::fs::get_file_fd(fd) }.is_none() {
+        return -(errno::EBADF as i64);
+    }
+    // Destination length contract (move_addr_to_kernel): a tolen that
+    // is negative or larger than sockaddr_storage is EINVAL (LTP
+    // sendto01 "invalid to buffer length" passes -1).
+    if !addr_ptr.is_null() && (_addrlen as u64) > 128 {
+        return -(errno::EINVAL as i64);
+    }
     // Check buffer pointer validity
     if buf_ptr.is_null() {
         return -(errno::EFAULT as i64);
@@ -1247,6 +1261,15 @@ pub fn sys_sendto(args: SyscallArgs) -> i64 {
         None => return -(errno::ENOTSOCK as i64),
     };
 
+    // Out-of-band data is not supported on datagram sockets: MSG_OOB on a
+    // UDP send is EOPNOTSUPP (send01/sendto01 invalid-flags cases).
+    const MSG_OOB_TX: i32 = 0x01;
+    if _flags & MSG_OOB_TX != 0
+        && socket.sock_type == crate::net::socket::SocketType::Udp
+    {
+        return -(errno::EOPNOTSUPP as i64);
+    }
+
     // R35: copy the user payload into a kernel buffer BEFORE the protocol
     // path. The old raw `from_raw_parts(buf_ptr, len)` deref ran INSIDE
     // Socket::send → send_reliable while holding TCP_TABLE_LOCK — user
@@ -1288,8 +1311,17 @@ pub fn sys_sendto(args: SyscallArgs) -> i64 {
     }
     let data = kbuf.as_slice();
 
-    // Parse destination address (if provided)
-    let dest_addr = if !addr_ptr.is_null() {
+    // Parse destination address (if provided). A stream socket that is
+    // already connected IGNORES the supplied destination — the peer is
+    // the connection and the address bytes are never even parsed (LTP
+    // sendto01 "connected TCP" sends to an uninitialized sockaddr and
+    // must succeed). Unconnected TCP keeps the parse so the error paths
+    // below stay reachable.
+    let tcp_connected = socket.sock_type == crate::net::socket::SocketType::Tcp
+        && *socket.state.lock() == crate::net::socket::SocketState::Connected;
+    let dest_addr = if tcp_connected {
+        None
+    } else if !addr_ptr.is_null() {
         // R35-fix: parse through the exception-table copy — the old raw
         // from_raw_parts deref of the USER pointer faulted with SUM=0 in
         // syscall context (deterministic KERNPANIC at SockAddrIn::addr,
@@ -2951,6 +2983,15 @@ pub fn sys_recvmsg(args: SyscallArgs) -> i64 {
         return -(errno::EFAULT as i64);
     }
 
+    // Entry fd classification (recvmsg(2)): a descriptor that is not
+    // open is EBADF (LTP recvmsg01 "bad file descriptor" uses fd 400);
+    // an open descriptor that is not a socket stays ENOTSOCK via the
+    // get_socket_from_fd gate further down.
+    // SAFETY: fdtable read only; the Arc is dropped immediately.
+    if unsafe { crate::fs::get_file_fd(fd as usize) }.is_none() {
+        return -(errno::EBADF as i64);
+    }
+
     // Linux ABI: on return, msg_controllen holds the number of control
     // bytes ACTUALLY written — 0 when the message carries no cmsgs. Every
     // success path below that does not deliver a cmsg chain must zero the
@@ -2986,6 +3027,12 @@ pub fn sys_recvmsg(args: SyscallArgs) -> i64 {
     // iovecs (Linux UIO_MAXIOV limit).
     if msg_iovlen > 1024 {
         return -(errno::EMSGSIZE as i64);
+    }
+    // A NULL iov ARRAY with a nonzero count is EFAULT — the kernel
+    // faults reading the iovec itself (LTP recvmsg01 "invalid iovec
+    // buffer" passes msg_iov = NULL with iovcnt 1).
+    if msg_iovlen > 0 && msg_iov_ptr == 0 {
+        return -(errno::EFAULT as i64);
     }
     // R20-3: range-check the iovec array before raw deref (see sys_sendmsg).
     if !crate::arch::uaccess::access_ok(msg_iov_ptr as usize, msg_iovlen * 16) {
@@ -3246,6 +3293,16 @@ pub fn sys_recvmsg(args: SyscallArgs) -> i64 {
         Some(s) => s,
         None => return -(errno::ENOTSOCK as i64),
     };
+    // Receive-flag gates (recvmsg01): MSG_OOB unsupported here (EINVAL);
+    // MSG_ERRQUEUE on a never-queued error socket is EAGAIN.
+    const MSG_OOB_MSG: i32 = 0x01;
+    const MSG_ERRQUEUE_MSG: i32 = 0x2000;
+    if flags & MSG_OOB_MSG != 0 {
+        return -(errno::EINVAL as i64);
+    }
+    if flags & MSG_ERRQUEUE_MSG != 0 {
+        return -(errno::EAGAIN as i64);
+    }
     let nonblock = file_nonblock || (flags & MSG_DONTWAIT) != 0;
     let deadline = socket.rcvtimeo_deadline();
 
@@ -3864,6 +3921,16 @@ pub fn sys_recvfrom(args: SyscallArgs) -> i64 {
     let addr_ptr = args[4] as *mut u8;
     let addrlen_ptr = args[5] as *mut u32;
 
+    // Entry fd classification (recvfrom(2)): a descriptor that is not
+    // open is EBADF; an open descriptor that is not a socket is ENOTSOCK
+    // (LTP recvfrom01 cases 1-2). The address pointers are deliberately
+    // NOT validated here — the source address is written back only after
+    // a successful receive (see the write-back block at the end).
+    // SAFETY: fdtable read only; the Arc is dropped immediately.
+    if unsafe { crate::fs::get_file_fd(fd) }.is_none() {
+        return -(errno::EBADF as i64);
+    }
+
     // Check buffer pointer validity
     if buf_ptr.is_null() {
         return -(errno::EFAULT as i64);
@@ -3871,14 +3938,6 @@ pub fn sys_recvfrom(args: SyscallArgs) -> i64 {
 
     // Validate user buffer pointer
     if !crate::arch::uaccess::access_ok(buf_ptr as usize, len) {
-        return -(errno::EFAULT as i64);
-    }
-
-    // Validate optional address pointers
-    if !addr_ptr.is_null() && !crate::arch::uaccess::access_ok(addr_ptr as usize, 16) {
-        return -(errno::EFAULT as i64);
-    }
-    if !addrlen_ptr.is_null() && !crate::arch::uaccess::access_ok(addrlen_ptr as usize, 4) {
         return -(errno::EFAULT as i64);
     }
 
@@ -4033,6 +4092,19 @@ pub fn sys_recvfrom(args: SyscallArgs) -> i64 {
         None => return -(errno::ENOTSOCK as i64),
     };
 
+    // Receive-flag gates (recvfrom01): MSG_OOB is not supported by this
+    // TCP receive path (EINVAL); MSG_ERRQUEUE with an empty error queue is
+    // EAGAIN (no socket errors are ever queued, so it is always EAGAIN —
+    // the queue can never drain).
+    const MSG_OOB_RX: i32 = 0x01;
+    const MSG_ERRQUEUE_RX: i32 = 0x2000;
+    if flags & MSG_OOB_RX != 0 {
+        return -(errno::EINVAL as i64);
+    }
+    if flags & MSG_ERRQUEUE_RX != 0 {
+        return -(errno::EAGAIN as i64);
+    }
+
     // W3: blocking / MSG_DONTWAIT / O_NONBLOCK semantics (the socket used
     // to be permanently non-blocking — recvfrom returned EAGAIN forever).
     let file_nonblock = {
@@ -4085,13 +4157,70 @@ pub fn sys_recvfrom(args: SyscallArgs) -> i64 {
             return -(errno::EFAULT as i64);
         }
     }
-    // If address pointer is provided, write source address
-    if let Some((addr, port)) = src_addr {
-        if !addr_ptr.is_null() && !addrlen_ptr.is_null() {
-            // SAFETY: addr_ptr/addrlen_ptr validated with access_ok; exception-table copy.
-            // P1 IPv6: family-aware shape (v6 sockets get sockaddr_in6).
-            unsafe {
-                put_sockaddr_family(&socket, addr_ptr, addrlen_ptr, port, addr);
+    // Source-address write-back (recvfrom(2) / move_addr_to_user
+    // contract): runs AFTER a successful receive. The user *fromlen is
+    // read — a negative value is EINVAL even though the data was
+    // already consumed (LTP recvfrom01 "invalid socket addr length") —
+    // clamped to what the protocol reports, written back (EFAULT if
+    // unreadable/unwritable), and only a NONZERO clamped length copies
+    // address bytes. TCP reports no per-recv source (the peer IS the
+    // connection), so on a TCP socket a bad `from` pointer never
+    // faults and the receive itself stands (LTP "invalid socket
+    // buffer" expects exactly that).
+    if !addr_ptr.is_null() {
+        let klen: usize = match src_addr {
+            Some(_) => {
+                if socket.is_ipv6() {
+                    28
+                } else {
+                    16
+                }
+            }
+            None => 0,
+        };
+        if addrlen_ptr.is_null() {
+            // A NULL fromlen with a non-NULL from copies the full
+            // address (move_addr_to_user with ulen == NULL).
+            if let Some((addr, port)) = src_addr {
+                // SAFETY: bounded, family-shaped copy; the kernel source
+                // buffer is well-formed.
+                unsafe {
+                    put_sockaddr_family(&socket, addr_ptr, core::ptr::null_mut(), port, addr);
+                }
+            }
+        } else {
+            // SAFETY: exception-table read of the user length word.
+            let ulen =
+                unsafe { crate::arch::uaccess::get_user(addrlen_ptr as *const u32) };
+            match ulen {
+                None => return -(errno::EFAULT as i64),
+                Some(u) => {
+                    if (u as i32) < 0 {
+                        return -(errno::EINVAL as i64);
+                    }
+                    let clamped = (u as usize).min(klen);
+                    // SAFETY: exception-table write of the clamped length.
+                    if !unsafe {
+                        crate::arch::uaccess::put_user(
+                            addrlen_ptr as *mut u32,
+                            clamped as u32,
+                        )
+                    } {
+                        return -(errno::EFAULT as i64);
+                    }
+                    if clamped > 0 {
+                        if let Some((addr, port)) = src_addr {
+                            // SAFETY: length word proven writable above;
+                            // the family-shaped copy below is bounded by
+                            // the same clamp via the stored length.
+                            unsafe {
+                                put_sockaddr_family(
+                                    &socket, addr_ptr, addrlen_ptr, port, addr,
+                                );
+                            }
+                        }
+                    }
+                }
             }
         }
     }
