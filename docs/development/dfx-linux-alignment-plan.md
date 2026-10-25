@@ -114,9 +114,9 @@ incomplete or non-Linux shape · **--** = absent.
 | Logging | `printk` ring buffer, log levels, `/dev/kmsg` | PART | `/proc/kmsg` format wrong; persistent log disabled |
 | Logging | `dmesg -w`, `syslog(2)`, `console_loglevel` | PART | no runtime console level knob from userspace |
 | Crash | panic handler, `Call Trace:` | PART | header case differs, frames never symbolized |
-| Crash | `Oops` (non-fatal) | -- | every fault is fatal |
+| Crash | `Oops` (non-fatal) | OK | T5b: Linux-shaped report, task-death policy, pstore dmesg flavor |
 | Crash | `panic=` timeout / reboot | -- | halt forever |
-| Crash | pstore / ramoops | OK | Tranche 5: console-ramoops-0 across reboots (riscv64) |
+| Crash | pstore / ramoops | OK | Tranche 5: console-ramoops-0 (panic) + dmesg-ramoops-0 (oops), both arches |
 | Crash | taint flags | OK | Tranche 1: exported, Linux letters |
 | Control | SysRq / `/proc/sysrq-trigger` | OK | Tranche 1: upstream command set |
 | Control | debugfs `/sys/kernel/debug` | OK | Tranche 1: new filesystem |
@@ -128,7 +128,7 @@ incomplete or non-Linux shape · **--** = absent.
 | Symbols | ORC / DWARF unwinder | -- | frame-pointer walk only, 32 frames |
 | Perf | `/proc/stat` | -- | absent: no per-CPU time accounting at all |
 | Perf | `/proc/vmstat` | -- | absent |
-| Perf | `/proc/schedstat`, `/proc/sched` | -- | absent |
+| Perf | `/proc/schedstat`, `/proc/sched` | PART | per-CPU schedstat rows + per-task /proc/[pid]/schedstat triple (T7 slice); /proc/sched still absent |
 | Perf | `/proc/softirqs` | -- | absent |
 | Perf | `/proc/[pid]/stat` ctxt switches | PART | fields present but always `0` |
 | Perf | PSI `/proc/pressure/*` | -- | absent |
@@ -552,6 +552,37 @@ microbench report: syscall latency per class, fork/exec, fault paths,
 context switch, futex/pipe/binder round trip, TLB shootdown cost,
 mmap/brk/mprotect, IO path — with the same QEMU configuration compared
 against a Linux guest.
+
+**Perf-support slice (done, batch 4 2026-10-26).** The mandate's
+"perf 支持": the smallest useful per-task counter surface the perf
+lane's pbench can consume in-guest. The choice:
+
+- **What**: `/proc/[pid]/schedstat` — Linux's CONFIG_SCHEDSTATS
+  per-task triple (on-cpu ns, runqueue-wait ns, timeslices), the file
+  that turns a bench's wall time into on-cpu vs waiting per task
+  (P2 ctxsw, P4 fork/exec). pbench reads it with a plain file read.
+- **What not**: `perf_event_open` stays ENOSYS this batch — the
+  attr/ring/ioctl ABI is a tranche of its own, and nothing pbench runs
+  today needs it. The matrix line stays PART.
+- **The gate**: `/proc/sys/kernel/sched_schedstats` (0/1, default 0 —
+  the reference's own knob, static-key-backed there since 4.10).
+  Rux's static-key equivalent is one relaxed atomic load at each
+  schedule edge (the tracepoint discipline); when armed, ONE
+  `sched_clock()` read per switch serves both edges — the put (prev's
+  on-cpu delta, its exec stamp set at pick) and the pick (next's
+  timeslice++, wait window closed — the window opened at
+  `enqueue_task_locked`, under the same GRQ lock that guards the pick
+  side). A same-task repick (the CPU-bound tick case) is NOT a new
+  timeslice — Linux counts switches-to. Counter cost when armed is
+  measured by the pbench P2 A-B (off vs on); the disabled cost is the
+  one load, covered by the quiet-boot census rows.
+- **File shape**: one line, three space-separated decimal numbers,
+  `"%llu %llu %lu\n"` — proc.rst's documented triple. The file renders
+  (zeros) with the gate off — the honest value of never counted.
+
+The rest of Tranche 7 (the full microbench comparison report) belongs
+to the perf lane; the DFX lane's remaining stake is whatever counter
+surface that report finds missing.
 
 ## 5. Explicit non-goals
 
