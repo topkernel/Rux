@@ -15,7 +15,7 @@ mkdir -p "$LOGS"
 
 ROSTER_DEFAULT="ltp-a ltp-b ltp-c ltp-d monkey-a monkey-b memstorm fsfuzz"
 
-kind_of() { case "$1" in ltpm) echo ltpm;; ltp-*) echo ltp;; monkey-*) echo monkey;; memstorm*) echo memstorm;; fsfuzz*) echo fsfuzz;; *) echo "";; esac; }
+kind_of() { case "$1" in ltpm) echo ltpm;; ltp-*) echo ltp;; monkey-*) echo monkey;; memstorm*) echo memstorm;; fsfuzz*) echo fsfuzz;; execsig*) echo execsig;; *) echo "";; esac; }
 
 start_member() {
     local m="$1" kind

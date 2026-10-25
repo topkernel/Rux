@@ -101,6 +101,17 @@ boot_cmd() { # prints the full qemu argv, %q-quoted for exact eval round-trip
         CMD+=(-kernel "$IMG/fleet-rv64-rux"
               -append "root=/dev/vda rw init=/test/fsfuzz console=ttyS0 dfx=watchdog,taskdump roundtag=$MEMBER-r$round")
         ;;
+    execsig)
+        # Static-exec page-fill repro (coordinator relay 2026-10-25:
+        # large static binaries SIGILL on garbage text fill ~72KB in).
+        # Private reflink rootfs with the 742KB static chain-walker
+        # probe (/test/execsig); any garbage-filled exec page either
+        # SIGILLs at a named step or corrupts g_sum visibly.
+        rv_common "$serial"
+        rv_drive "$IMG/fleet-execsig-rootfs.img" rootfs
+        CMD+=(-kernel "${KIMG:-$IMG/fleet-rv64-rux}"
+              -append "root=/dev/vda rw init=/test/execsig console=ttyS0 dfx=watchdog,taskdump roundtag=$MEMBER-r$round")
+        ;;
     monkey)
         local OH=/home/william/rux-agents/oh-display/run/oh-img
         local ACC=tcg,thread=multi

@@ -124,3 +124,38 @@ heal's documented "unpairing sub clamps and reports" path (a 10 s-held
 spinlock section healed; the hold itself is the pathology). Count
 bookkeeping now pairs; PASS direction confirmed, awaiting memstorm-surface
 B-side (verify-v6ms, isolates the fix from the merge).
+
+## NEW (11:25): deterministic exec text-page corruption on v7 (merged main)
+Reproducer: fleet member "execsig" (kind execsig, v7 kernel, private
+reflink rootfs, /test/execsig = 763KB static musl chain-walker probe,
+fork+exec loop). EVERY child exec SIGILLs (3300+/3300) at epc=0x101c6
+(text+0x1c6, inside musl's vectorized memcmp/memcpy).
+Forensics per event: page at 0x10000 has the CORRECT ELF header at
+offset 0 but garbage from ~+0x1b6 (epc-16 window bytes do not match the
+binary); epc-frame NOT text-stamped (exec uses eager copy into private
+anon frames — expected unstamped); VMA 0x10000-0x72000 r-x file
+/test/execsig. Host-side file in the image is byte-identical to the
+built binary (debugfs cat + cmp). readelf: single RX LOAD, file offset
+0 -> vaddr 0x10000, filesz 0x61ae4; entry 0x102ec.
+Cross-checks:
+- PID-1 exec of the SAME-size probe (v1 chain-walker as init) ran
+  43150 rounds CORRECTLY — init.rs's exec read path is fine; the bug
+  is in the sys_execve path (read_exec_file VFS loop + readers).
+- ltp-a r23 (v7, small LTP binaries): 2 SIGILL/SIGDEATH sig=4 in ~384
+  execs — the sweep hits the same class at ~0.5%; large static
+  binaries hit it 100%. Matches the LTP lane's relayed anomaly (650KB
+  glibc probe, garbage at ~72KB into text) — same family, size/load
+  dependent.
+Suspects (kernel/src/syscall/process.rs:515 read_exec_file):
+1. `if (n as usize) < chunk.len() { break; }` — treats ANY short read
+   as EOF; a legal short count truncates the image (returns
+   Some(prefix) — downstream should ENOEXEC, yet execs succeed with
+   full-length garbage, so also:)
+2. A reader that signals a FULL chunk (n == chunk.len()) while filling
+   only a prefix of the buffer (bio batch read short completion?) —
+   produces exactly the full-length-but-garbage-tail image.
+Next session: instrument file.read return-vs-fill for >64KB reads on
+the ext4 path; test size ladder (8KB/64KB/128KB/763KB) via execsig
+variants; check whether v5 fleet kernel (pre-merge) shows the same
+(the sweep ran 1800s rounds x all members with ZERO SIGILL — v5 likely
+clean: regression window = the merged main's fs/bio/exec changes).

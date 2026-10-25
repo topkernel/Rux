@@ -67,7 +67,7 @@ tres=$(grep -c "SWEEP RES" "$SERIAL" 2>/dev/null)
 twedge=$(grep -cE "SWEEP RES\|[^|]*\|[^|]*\|(WEDGE|HANG)" "$SERIAL" 2>/dev/null)
 
 # monkey/ltp progress heartbeat
-beat=$(grep -cE "MONKEY-BEAT|MEMSTORM-BEAT|FSFUZZ-BEAT" "$SERIAL" 2>/dev/null)
+beat=$(grep -cE "MONKEY-BEAT|MEMSTORM-BEAT|FSFUZZ-BEAT|EXECSIG-BEAT" "$SERIAL" 2>/dev/null)
 
 # known image-side noise tally (context only, never WARN)
 noise_usb=$(grep -ciE "usb_host.*(crash|died)|CrashDumpEntry.*usb_host" "$SERIAL" 2>/dev/null)
