@@ -1330,6 +1330,10 @@ pub extern "C" fn rust_main() -> ! {
         let dtb_phys = arch::boot::get_dtb_pointer();
         #[cfg(feature = "riscv64")]
         let memory_regions = unsafe { cmdline::parse_memory_regions(dtb_phys) };
+        // Prime the V-extension capability from the same DTB (vext.rs):
+        // misa is not S-mode readable, so the ISA string is the source.
+        #[cfg(feature = "riscv64")]
+        arch::riscv64::vext::prime_hart_has_v(dtb_phys);
         #[cfg(feature = "x86_64")]
         let memory_regions = x86_boot_memory_regions();
         #[cfg(feature = "x86_64")]
