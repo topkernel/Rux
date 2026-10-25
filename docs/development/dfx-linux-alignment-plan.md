@@ -449,3 +449,27 @@ Every tranche is verified in the guest, not by inspection:
 | page allocator | `kernel/src/mm/page_alloc.rs` |
 | scheduler | `kernel/src/sched/sched.rs` |
 | timer | `kernel/src/timer.rs` |
+
+## 8. procfile! adoption (format-drift class, added leg-34 2026-10-25)
+
+The five byte-format defects that survived review (column order,
+trailing spaces, wrong-unit timestamps, prefix pollution, shifted
+columns) were all hand-written `format!` drift. The fix is now in the
+tree: `kernel/src/fs/procfs/procfile.rs` provides the `procfile!`
+macro — one field declaration list derives the renderer, the ordered
+`*_FIELDS` const, and a mechanical shape test; the converted file also
+keeps an exact-bytes snapshot test (the author's conscious update point).
+First conversion: `/proc/vmstat` (byte-identical to the hand-written
+version, snapshot-pinned).
+
+ADOPTION RULE for this lane's files (this is the coordination point
+between the perf lane, which owns the macro, and the DFX lane, which
+owns most /proc additions):
+
+- Every NEW /proc key-value file uses `procfile!` — no new hand-written
+  `"<key> {}\n"` format strings.
+- Existing files convert opportunistically when touched (meminfo and
+  the stat-family need the `pad`/`render_pad` shape — extend the macro
+  there when the first one converts; don't derive unused shapes).
+- The declaration ORDER is the file's byte order; treat reordering as
+  a Linux-observable change and snapshot-test it.
