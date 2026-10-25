@@ -280,3 +280,23 @@ producers, split by fleet data:
    hardirq bit held. NEXT: instrument the bracket print with the
    interrupted-frame ra/pc to name the switch path; keep the frozen
    chains' armed capture as ground truth.
+
+### Session-3 refresh plan (post-verification rollout)
+
+Branch merged with main (d5c642cb, main@47d96961 + 37 lane commits);
+the merged tree carries main's binder reclaim, slab work, KILLDUMP pin
+fixes, panic= parameter — plus this lane's parkwalk double-sample,
+csrr read, madvise EINVAL round-ups, PREEMPT-HEAL base-clear fix, and
+the IRQ-BRACKET-LEAK discriminator. Images frozen:
+`images/fleet-rv64-v6-rux` (pre-merge + heal fix, verification A/B
+kernel), `images/fleet-rv64-v7-merged-rux`, `images/fleet-x86-v7-merged-bzImage`.
+Rollout order after v6 verification passes:
+1. ltp-a relaunch with KIMG=v7 (the refresh member, one full round
+   clean before wider rollout).
+2. ltp-c/ltp-d/memstorm/fsfuzz: stop-file + relaunch with KIMG=v7.
+3. Swap images/fleet-rv64-rux := v7 and images/fleet-x86-bzImage :=
+   v7-x86, then restart monkey-a/b so the x86 surface gets the KILLDUMP
+   pin fixes (monkey-b-r8's panic class).
+4. ltpm stays stopped: its control result is banked (csrrw panics on
+   main@47d96961 — verified again r7/r8); relaunch only after main
+   takes the csrr read fix, then as the main-class arm.
