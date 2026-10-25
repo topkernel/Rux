@@ -69,9 +69,21 @@ try:
         if os.path.exists(serial):
             with open(serial, "r", errors="replace") as f:
                 for line in f:
+                    if "hicollie" not in line:
+                        continue
                     m = base_re.search(line)
-                    if m and (int(m.group(2), 16) & 0x10):
-                        cand = int(m.group(1), 16)
+                    if m:
+                        ret_s, flags_s = m.group(1), m.group(2)
+                    else:
+                        # Interleaved consoles can inject text mid-line;
+                        # fall back to independent token extraction.
+                        mr = re.search(r"ret=(0x[0-9a-f]+)", line)
+                        mf = re.search(r"flags=(0x[0-9a-f]+)", line)
+                        if not (mr and mf):
+                            continue
+                        ret_s, flags_s = mr.group(1), mf.group(1)
+                    if int(flags_s, 16) & 0x10:  # MAP_FIXED segment load
+                        cand = int(ret_s, 16)
                         # segment 1 (R, off=0) is the lowest MAP_FIXED ret
                         base = cand if base is None else min(base, cand)
         if base is not None:
