@@ -274,6 +274,15 @@ pub struct Socket {
     pub wait_queue: WaitQueueHead,
     /// W3: stored socket options (SO_RCVTIMEO/SO_ERROR/SO_REUSEADDR/...)
     pub options: Spinlock<SocketOptions>,
+    /// MSG_MORE coalescing (send02): send/sendto/sendmsg with MSG_MORE
+    /// appends the payload here WITHOUT delivering it; the next flagless
+    /// send (or write) prepends the held bytes to its own payload and
+    /// delivers the concatenation. Linux calls this corking (UDP) /
+    /// TCP_CORK-equivalent tail holding; a UDP datagram therefore grows
+    /// until the flush, which is what send02 asserts — recv on the peer
+    /// must see EAGAIN while data is held, then one datagram of
+    /// held+flush bytes. Best-effort flushed on close.
+    pub more_stage: Spinlock<alloc::vec::Vec<u8>>,
 }
 
 // SAFETY: Socket uses Spinlocks for all mutable shared state.
@@ -304,7 +313,21 @@ impl Socket {
             table_slot: Spinlock::new(None),
             wait_queue: WaitQueueHead::new(),
             options: Spinlock::new(SocketOptions::new()),
+            more_stage: Spinlock::new(alloc::vec::Vec::new()),
         }
+    }
+
+    /// MSG_MORE: append `data` to the cork staging, returning the total
+    /// held (the send syscall reports its own payload length, like Linux).
+    pub fn more_append(&self, data: &[u8]) -> usize {
+        let mut st = self.more_stage.lock();
+        st.extend_from_slice(data);
+        st.len()
+    }
+
+    /// MSG_MORE: take the held bytes (empty Vec when nothing staged).
+    pub fn more_take(&self) -> alloc::vec::Vec<u8> {
+        core::mem::take(&mut *self.more_stage.lock())
     }
 
     /// P1 IPv6: is this an AF_INET6 socket?
@@ -1268,7 +1291,48 @@ fn socket_read(file: &File, buf: &mut [u8]) -> isize {
 /// W3: shared send engine — accepts as much as the window allows per call
 /// and (blocking mode) retries the remainder until the whole buffer is
 /// written, bounded by SO_SNDTIMEO. Returns bytes accepted.
+///
+/// MSG_MORE (`more == true`, send02): the payload is staged on the socket
+/// and NOT delivered — the call reports success for its own bytes while
+/// the peer sees nothing (recv EAGAIN). A later flagless call drains the
+/// staging, prefixes it to its own payload, delivers the concatenation
+/// as one datagram (UDP) / stream segment run (TCP), and still reports
+/// only its OWN byte count — the held bytes were already reported when
+/// they were staged (Linux cork accounting). Divergence, documented:
+/// Linux validates that a second sendto while corked names the SAME
+/// destination (ip_append_data cork check) — here the flush call's dest
+/// wins; nothing in the LTP list exercises a mixed-dest cork.
 pub fn socket_send_ctl(
+    socket: &Socket,
+    buf: &[u8],
+    dest: Option<(crate::net::ipv6::IpAddr, u16)>,
+    nonblock: bool,
+    deadline: Option<u64>,
+    more: bool,
+) -> Result<usize, i32> {
+    if more {
+        socket.more_append(buf);
+        return Ok(buf.len());
+    }
+    let held = socket.more_take();
+    if held.is_empty() {
+        return socket_send_flush(socket, buf, dest, nonblock, deadline);
+    }
+    let held_len = held.len();
+    let mut joined = held;
+    joined.extend_from_slice(buf);
+    match socket_send_flush(socket, &joined, dest, nonblock, deadline) {
+        // The whole concatenation went out; report only THIS call's
+        // bytes (the held prefix was reported at its own send()).
+        Ok(n) => Ok(n.saturating_sub(held_len)),
+        // A partial delivery of the joined buffer maps back the same way.
+        Err(e) => Err(e),
+    }
+}
+
+/// The pre-MSG_MORE engine body: window-bounded send loop with blocking
+/// retry (SO_SNDTIMEO) — byte counts here are of the buffer passed in.
+fn socket_send_flush(
     socket: &Socket,
     buf: &[u8],
     dest: Option<(crate::net::ipv6::IpAddr, u16)>,
@@ -1324,7 +1388,7 @@ fn socket_write(file: &File, buf: &[u8]) -> isize {
     // cut short by O_NONBLOCK (partial write is POSIX-legal).
     let nonblock = (file.flags().bits() & FileFlags::O_NONBLOCK) != 0;
     let deadline = socket.sndtimeo_deadline();
-    match socket_send_ctl(socket, buf, None, nonblock, deadline) {
+    match socket_send_ctl(socket, buf, None, nonblock, deadline, false) {
         Ok(n) => n as isize,
         Err(e) => e as isize,
     }
@@ -1344,6 +1408,15 @@ fn socket_close(file: &File) -> i32 {
     // sys_socket_create, so it is a valid Arc with a +1 strong count.
     unsafe { *file.private_data.get() = None; }
     let socket_arc = unsafe { Arc::from_raw(ptr as *const Socket) };
+
+    // MSG_MORE cork release (Linux inet_release/ip_cork_release): data
+    // held by send(MSG_MORE) is flushed, best-effort and nonblocking,
+    // before the teardown — dropping it silently would lose bytes the
+    // caller was told were accepted.
+    let held = socket_arc.more_take();
+    if !held.is_empty() {
+        let _ = socket_send_ctl(&socket_arc, &held, None, true, None, false);
+    }
 
     socket_arc.close();
 
