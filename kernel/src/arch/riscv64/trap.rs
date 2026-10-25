@@ -680,10 +680,25 @@ fn handle_illegal_instruction(regs: &mut PtRegs) {
                 instr16 as u32
             };
             let opcode = instr32 & 0x7F;
+            // FP-state CSR accesses also require FS != Off: csrrw/csrrs/
+            // csrrc to fflags(0x001)/frm(0x002)/fcsr(0x003) — the frrm/
+            // frflags/fsrm... assembler forms — trap illegal exactly like
+            // compute FP when FS=Off. compiler-rt's __multf3/__udivti3
+            // (i128 emulation, so any shell/libc integer arithmetic that
+            // widens) reads the rounding mode with `frrm` before touching
+            // the FP registers, so this class is reachable from binaries
+            // that never execute an explicit FP instruction (repro: mrsh
+            // SIGILL at a deterministic __multf3+frrm under the pa49
+            // trace-capture boot).
+            let is_fp_csr = opcode == 0x73 && {
+                let csr = instr32 >> 20;
+                csr == 0x001 || csr == 0x002 || csr == 0x003
+            };
             opcode == 0x07 || opcode == 0x27 ||   // FLW/FLD, FSW/FSD
             opcode == 0x05 || opcode == 0x09 ||   // FMADD, FMSUB
             opcode == 0x0D || opcode == 0x0E ||   // FNMSUB, FNMADD
-            opcode == 0x53                         // FP ops (FADD, FSUB, FMUL, FDIV, etc.)
+            opcode == 0x53 ||                     // FP ops (FADD, FSUB, FMUL, FDIV, etc.)
+            is_fp_csr                             // fflags/frm/fcsr via SYSTEM opcode
         };
 
         // V-extension first use: while sstatus.VS = Off, EVERY vector
