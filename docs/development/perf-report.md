@@ -1223,3 +1223,60 @@ What this does NOT close: the family remains ~30x the 2x target
 fdtable + wake-path work shared with every family, and the flow-
 control/wake design of a blocking pair. Next levers for the row stay
 behind the floor levers (fork+exec tail, ext4 metadata) in priority.
+
+### 8.10.3 F4-R2 verdict: merge-safe, measured-neutral (leg 35, 2026-10-25, pa46)
+
+The dead leg-34's load-gated two-boot queue fired before the quota
+window closed: pa46main (main-class 47d96961 debug) 12:00-12:13 at
+load1 11->17, pa46f4r2 (47d96961 + fd23662a) 12:21-12:34 at load1
+13->15 — same-gate adjacent windows, both rc=0 (run/pa46-decider.log;
+serial logs run/pa-pa46main/f4r2-serial.log, parses
+run/perf-gate-pa46{main,f4r2}-parse.txt). This closes the two census
+debts the fd23662a commit message carried.
+
+**Tier-1 census, F4-R2 kernel: PASS every enforced row** — panics 0,
+OOM 0, TERM-DESCHED 8 EXACT, WAKE-REFUSED 32 EXACT, WAKE-STRANDED 0,
+tick 99.53/99.98 (the main-class twin missed cpu0 at 98.28 — the
+documented one-CPU marginal flake class under foreign-QEMU load),
+clock_gettime 3 us, GRQ hold 5572ns, small_alloc REST 6.5%. Volume
+92.2M vs A's 93.2M: -1.1%, both FAIL the 136M quiet-window base
+(load-coupled row, see baseline doc). nanosleep 221.8ms vs A's
+220.3ms — both inside the unbanked seed band.
+
+**Boot wall: NEUTRAL — the "-30-60 s boot wall" route-2 estimate is
+refuted at the noise floor.** pa46-bootwall.sh over the two stamped
+logs: wall delta at all 9 SYSCOST checkpoints -0.1..+0.0s (mean
+-0.0s), milestones identical (foundation exit 65s both, appfwk.ready
+65s both, first SIGKILL 63 vs 64s). Volume-at-t runs -1.0..-2.4M
+consistently ahead for A — inside the load swing that moves this row
+44% between quiet and loaded windows, and fd23662a removes kernel
+waits, not syscalls. Consistent with pa43's pbench finding (no
+median movement; per-op cost is dominated by the identity-block
+syncs that remain): route 2 alone moves nothing measurable — the
+boot-wall and per-op wins the route map estimated live behind
+routes 1+3 (lazy write path, fsync scope), and route 2 folds into
+route 1 as originally listed.
+
+**Claim: fd23662a is READY FOR MERGE** — census PASS on both kernels,
+no regression in any channel (pa43 pbench, pa46 census, boot wall),
+semantics documented in its own commit (stale free counts after a
+crash = e2fsck class, same as a write-back mount of the reference
+kernel; allocation publication order untouched). Mechanism-level
+sync-write count (the -4K prediction) is NOT verified — these census
+kernels do not carry the fsw=1 instrument; if the fs lane wants that
+row it needs one fsw boot on the F4-R2 kernel, not a re-run of this
+gate.
+
+**Binder domain (sweep_stale_async stability): STABLE, and the
+family model is corrected — the code-7->Init exec class is
+load-elastic.** pa46main n=30 / pa46f4r2 n=32, queue>=50ms = 0 in
+both, max queue 10ms — same as every pre-reclaim boot (pa40 n=2,
+pa41gate n=4). The raw totals exposed that the checker's discrete
+families (15/30/89s) were one class stretched: pa47smoke under light
+load clusters code-7->Init tight at 15.0-15.1s (20 rows), while the
+load1-13-17 pa46 boots spread the same class over 18.8-77.1s, all
+queue<=10ms, all dst=Init (pid 325). The checker (run/pa46-slowtxn.sh)
+now keys known exec bands by binder code — {1,64}: 4.5-9s, {7}: 13-95s
+— and FAILs on queue>=50ms, out-of-band totals, or an unknown code;
+it re-validates PASS on all five boots spanning the reclaim
+(pa40/pa41gate pre, pa47smoke/pa46main/pa46f4r2 post).

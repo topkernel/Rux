@@ -61,7 +61,7 @@ cross-class comparison is meaningless.
 | interrupts | SOFTIRQ share of IF=0 | 3.1% | ±2pp |
 | IPC | pipe roundtrip (pbench P5) | pb1 column | ±20% |
 | IPC | unix writev/truesize avg | 24 µs class | ±20% |
-| binder | SLOW-TXN classes | queue=0 ms; image-side 15/30/89 s family only | no new class. leg-34 reality refresh (validated on pa41gate/pa45/pa47smoke): an exec-side 5-8 s family (code 1/64) and queue blips <=20 ms are part of the recorded distribution on BOTH sides of the de41d5ab sweep_stale_async reclaim — operative FAIL conditions: queue >= 50 ms, or any total outside {5-8, 15, 30, 89} s; machine check: `run/pa46-slowtxn.sh <serial-log>` |
+| binder | SLOW-TXN classes | queue <= 10 ms everywhere; exec-side bands keyed by code: {1,64} 4.5-9 s, {7}->Init 13-95 s | leg-35 correction: the old "15/30/89 s family" was ONE code-7->Init exec class stretched by host load (pa47smoke light-load: tight 15.0-15.1 s cluster; load1 13-17 boots: same class 18.8-77.1 s, queue still <=10 ms). Operative FAIL: queue >= 50 ms (a queueing class — what a broken reclaim would introduce), a total outside the code-keyed bands, or an unknown code. Machine check: `run/pa46-slowtxn.sh <serial-log>` (validates PASS on pa40/pa41gate/pa47smoke/pa46main/pa46f4r2, spanning the de41d5ab reclaim) |
 
 General principle (user mandate): any subsystem that can affect system
 performance gets gate-code guardianship — not measured yet means "add the
