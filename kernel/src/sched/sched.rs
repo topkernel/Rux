@@ -4160,8 +4160,30 @@ pub fn scheduler_tick() {
                         // the safety net that lets IRQ-exit kernel
                         // preemption stay enabled while the leak's
                         // producer is still being hunted.
+                        //
+                        // Round 3e (leg-19, the brkseq deterministic
+                        // repro): a PURE-HARDIRQ phantom — task bits
+                        // zero, nest_extra > 0 (pc = 0x10000-class) —
+                        // escaped the base != 0 gate forever: the ltp
+                        // lane's repro held cpu1's IDLE at pc=0x10000
+                        // for 17,855 jiffies with 885 PREEMPT-LEAK lines
+                        // and no heal (base == 0 skips), and the OH boots
+                        // show the same shape on real tasks (sc254:
+                        // pid 1188 monopolizing cpu0 AT A USERSPACE rip
+                        // with pc=0x10002). A hardirq level held for 10 s
+                        // is as impossible as a 10 s guard section (real
+                        // nesting lasts microseconds; the probe's own
+                        // level is already excluded), so the same
+                        // time-confirmed zero applies.
                         let base = pc & !crate::interrupt::preempt::HARDIRQ_MASK;
-                        if base != 0 && now.wrapping_sub(t0) >= 1000 {
+                        let nest_extra_now = (pc
+                            & crate::interrupt::preempt::HARDIRQ_MASK)
+                            .saturating_sub(
+                                crate::interrupt::preempt::HARDIRQ_OFFSET,
+                            );
+                        if (base != 0 || nest_extra_now > 0)
+                            && now.wrapping_sub(t0) >= 1000
+                        {
                             unsafe {
                                 (*cur).ti_preempt_count_zero();
                             }
