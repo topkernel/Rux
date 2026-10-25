@@ -17,8 +17,11 @@ CRIT=""
 WARN=""
 
 # --- CRITICAL: kernel-side failure signatures -------------------------
+# (session-3 tightening: bare "page fault" matched thread-exit diagnostic
+# dumps' fault counters — e.g. ltp-a r22's writev03 dump — producing a
+# phantom OOPS=1 on clean v5/v7 rounds. Require kernel-mode phrasing.)
 kernpanic=$(grep -c "KERNPANIC" "$SERIAL" 2>/dev/null)
-oosp=$(grep -ciE "kernel oops|BUG:|Unable to handle|page fault" "$SERIAL" 2>/dev/null)
+oosp=$(grep -ciE "kernel oops|BUG: (soft|hard)|Unable to handle|page fault in (kernel|supervisor)|PANIC: trap" "$SERIAL" 2>/dev/null)
 canary=$(grep -c "WILDWATCH-CANARY" "$SERIAL" 2>/dev/null)
 heal=$(grep -cE "hpet: clock (base|div|offset) healed" "$SERIAL" 2>/dev/null)
 wdog=$(grep -ciE "watchdog.*trip|deadlock detected|spinlock.*stuck" "$SERIAL" 2>/dev/null)

@@ -328,3 +328,18 @@ Fleet refresh: rollout-v7.sh (detached) gates on ltp-a r22's
 panic-free verdict, then rolls v7 to ltp-b/c/d + memstorm + fsfuzz
 (KIMG), swaps the default rv64/x86 images, restarts monkey-a/b on the
 v7 x86 kernel (carries the KILLDUMP pin fixes).
+
+### Heal-fix final gate (11:15) — PASS, ready-for-merge
+
+Single-variable A/B on the identical surface and pid (memstorm,
+pid=1): v5 memstorm-r11 HEAL 14 / sub=0x10000 UNDERFLOW 14 (every heal
+lost the in-flight hardirq bit). v6 (same tree + fix only) verify run:
+HEAL 18 / sub=0x10000 UNDERFLOW 0 — 18 heals, zero hardirq losses; the
+18 sub=0x1 reports are the documented guard-unpair path (healed 10 s
+spinlock holds, drop-site named). v7 (merged) confirms under the LTP
+storm (22/0). Fix commit bf26d2d1 on this branch; the healed-pid
+hardirq nesting now survives and pairs at irq_exit. Guarded-domain
+check: only the two heal sites touch count semantics; probe prints,
+parkwalk, spinlock guards, irq brackets all unchanged (the
+IRQ-BRACKET-LEAK counter remains the hunt instrument for the remaining
+producer class).
