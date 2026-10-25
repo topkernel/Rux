@@ -122,3 +122,52 @@ minimal-rootfs boot verified with the moved layout.
 **Guard.** The riscv64 linker.ld `ASSERT(_end <= window)` — the next
 outgrowth fails the build, not the boot; `test/kallsyms-smoke.sh`
 checks the count, the end-of-text coverage and a symbolized backtrace.
+
+---
+
+## D-4: Single-declaration tracepoint table (tracepoints! macro)
+
+**Design.** Every trace event is declared exactly once, as one row in
+the `tracepoints!` table at `kernel/src/trace/mod.rs`: group, name,
+id, the verbatim `print fmt` and field list, the typed call signature
+and the renderer. A declarative macro derives the three artifacts a
+hand-written site used to carry — the static `EVENTS` table row, the
+typed `trace_<name>(...)` record function (the `armed()` check inside,
+so call sites marshal nothing when the event is off), and the
+`<name>_fmt` renderer behind the `format` file. The mainstream approach
+spreads this over a `TRACE_EVENT()` class macro plus generated
+codepaths plus a codegen-time format file; here one Rust macro is the
+single source the compiler checks, in-tree.
+
+**Advantage.**
+- The `format` file, the record call and the table row cannot drift
+  apart: they are three expansions of one declaration (the derive
+  pattern of `docs/architecture/rust-design-headroom.md` §4). A new
+  event is one table row plus its call sites — the six-event batch-2
+  expansion (block-IO + binder families) needed no new table
+  scaffolding.
+- Typed call sites: field types are checked at the call, so a wrong
+  argument order is a compile error, not a malformed trace line.
+- The disabled path stays one branch: `armed()` is two relaxed loads
+  inlined into the generated call function, arguments marshal only
+  behind it.
+
+**Cost.** Ten u64 argument slots per record cap the per-event payload
+(a comm costs two slots) — events wider than ten slots need a wider
+slot array, not a new mechanism. The renderer is a closure per event,
+so render bugs surface at the trace reader, not the record site (the
+smoke greps catch them).
+
+**Compatibility evidence.** The tracefs surface stays byte-shaped
+after the live host: `available_events`, the per-event `format` files
+(verbatim field sets and print fmts, captured from
+`/sys/kernel/tracing/events/` on this machine) and the record lines
+verified in-guest for all 16 events (`test/tracefs-smoke.sh`,
+`test/trace-smoke2.sh` — block_rq_issue/complete and the four binder
+events, 12/12 checks); 600 s armed soak with zero panics and coherent
+views after 1.56 M ring overwrites (`test/trace-soak.sh`).
+
+**Guard.** Perf-gate Tier-1/Tier-2 (the record sites sit on the
+syscall dispatch, scheduler and block-IO paths): per-op syscall
+averages and pbench rows must hold band with every event disabled —
+the disabled cost is the thing the gate watches.
