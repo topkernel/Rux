@@ -465,6 +465,9 @@ pub unsafe fn context_switch(prev: &mut Task, next: &mut Task) {
 
     // Step 1: Save prev FPU state
     prev.thread_mut().fpu_save_for_switch();
+    // RVV state rides the same switch discipline (vext.rs): Dirty-gated
+    // save, VS dropped to Off for the outgoing task.
+    prev.thread_mut().vstate_save_for_switch();
 
     // Store prev task for ret_from_fork
     set_prev_task(prev as *mut Task);
@@ -533,6 +536,7 @@ pub unsafe fn context_switch(prev: &mut Task, next: &mut Task) {
         // SAFETY: cur is the task now running on this CPU.
         unsafe {
             (*cur).thread_mut().restore_fpu();
+            (*cur).thread_mut().restore_vstate();
         }
     }
 }
