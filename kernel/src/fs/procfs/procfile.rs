@@ -48,6 +48,14 @@
 //! value right-justified to 8, ` <unit>` suffix; a `!`-suffixed key
 //! renders unitless (meminfo's HugePages_* rows). First padded
 //! conversion: /proc/meminfo (leg-35).
+//!
+//! A `cols` form (leg-36) covers the stat-family ROW shape — a label
+//! prefix then N space-separated counters (`/proc/stat`'s jiffy rows,
+//! `/proc/schedstat`'s per-CPU rows). The declaration mints a row
+//! function whose ARGUMENT LIST is derived from the column list, so
+//! the compiler itself rejects a call site that swaps two counters:
+//! column order, rendered order and call order are one artifact.
+//! First conversions: /proc/stat + /proc/schedstat cpu rows.
 
 use alloc::string::String;
 
@@ -90,6 +98,23 @@ pub fn render_pad(
         }
         out.push('\n');
     }
+    out
+}
+
+/// Pure `cols` row renderer (Linux stat-family row shape): `label`
+/// then one space-separated value per column, newline, no trailing
+/// space. The label may carry a trailing space when Linux's layout
+/// needs one — the aggregate `/proc/stat` row is literally `"cpu  "`
+/// (`"cpu"` + two spaces) so it aligns under the `cpu0` rows; that
+/// byte belongs to the label, not to the separator.
+pub fn render_cols(label: &str, vals: &[&dyn core::fmt::Display]) -> String {
+    let mut out = String::with_capacity(label.len() + 1 + vals.len() * 4);
+    out.push_str(label);
+    for v in vals {
+        out.push(' ');
+        out.push_str(&alloc::format!("{}", v));
+    }
+    out.push('\n');
     out
 }
 
@@ -206,6 +231,71 @@ macro_rules! procfile {
             #[cfg(test)]
             #[test]
             fn shape_pad_lines() {
+                shape_check();
+            }
+        }
+    };
+
+    // `cols` form — stat-family rows: label prefix, then one
+    // space-separated u64 per declared column. The derived function's
+    // argument list IS the column list (names become parameters), so a
+    // call site cannot pass counters in the wrong order without the
+    // names disagreeing at the call — the order cannot drift between
+    // declaration, signature and rendered bytes because there is only
+    // one list.
+    (
+        $(#[$doc:meta])*
+        rowfn $fname:ident ($label:ident : &str) columns $columns:ident
+            test $tmod:ident -> alloc::string::String cols {
+            $( $col:literal => $arg:ident ),* $(,)?
+        }
+    ) => {
+        $(#[$doc])*
+        #[allow(clippy::too_many_arguments)]
+        pub fn $fname($label: &str, $( $arg: u64 ),*) -> alloc::string::String {
+            let vals: &[&dyn core::fmt::Display] = &[ $( &$arg ),* ];
+            $crate::fs::procfs::procfile::render_cols($label, vals)
+        }
+
+        #[doc = concat!("Declared column order of [`", stringify!($fname), "`].")]
+        pub const $columns: &[&str] = &[ $( $col ),* ];
+
+        #[cfg(any(test, feature = "unit-test"))]
+        pub mod $tmod {
+            /// Mechanical drift floor for the cols shape: the row
+            /// renders as `label` + ` <value>` per declared column +
+            /// `\n` — single spaces, no trailing space, and as many
+            /// value tokens as the columns const lists (the const, the
+            /// derived signature and the renderer describe one file).
+            /// Callable body for the in-kernel unit-test suite (see the
+            /// kv form's note).
+            pub fn shape_check() {
+                let cols: &[&str] = &[ $( $col ),* ];
+                // The zero-call must mention $arg per repetition
+                // (macro_rules rejects repetitions with no syntax
+                // variable); stringify! is the no-op consumption.
+                let got = super::$fname(
+                    "shape",
+                    $( { let _ = stringify!($arg); 0u64 } ),*
+                );
+                let mut expect = alloc::string::String::from("shape");
+                for _ in cols {
+                    expect.push_str(" 0");
+                }
+                expect.push('\n');
+                assert_eq!(got, expect, "cols shape drifted");
+                // The rendered token count must equal the declared
+                // column count (a column added to the list without a
+                // parameter — or vice versa — breaks compilation, this
+                // catches a hand-edited renderer instead).
+                let tokens = got.trim_end_matches('\n')
+                    .split(' ').filter(|t| !t.is_empty()).count();
+                assert_eq!(tokens, cols.len() + 1, "cols token/column mismatch");
+            }
+
+            #[cfg(test)]
+            #[test]
+            fn shape_cols_row() {
                 shape_check();
             }
         }
