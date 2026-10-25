@@ -1,0 +1,29 @@
+[build] /home/william/rux-agents/perf-audit/work/pbench (70 KB)
+[boot] tag=pa552B accel=tcg,thread=multi smp=2 mem=2G foreign_qemus=15
+[probe] PBENCH START self=/test/pbench work=/test
+[probe] PBENCH CAL tsc_hz=4292169137
+[probe] PBENCH p1_null n=1000000 med=1.012 p99=1.092 min=0.621 max=2235.251 avg=0.991 wall=1.013
+[probe] PBENCH p1_clock n=1000000 med=1.012 p99=1.212 min=0.701 max=19047.548 avg=0.967 wall=0.986
+[probe] PBENCH p2_ctxsw n=100000 med=2.139 p99=58.902 min=1.202 max=891.689 avg=6.345 wall=6.419 aff=1
+[probe] PBENCH p3a_fault_anon n=16384 med=0.090 p99=53.177 min=0.080 max=5580.543 avg=2.273 wall=2.287
+[probe] PBENCH p3b_fault_cow n=8192 med=4.488 p99=8.726 min=2.995 max=932.198 avg=4.675 wall=4.710 measured_by=child
+[probe] PBENCH p3c_fault_file n=4096 med=0.120 p99=278.387 min=0.090 max=10059.309 avg=16.413 wall=16.516
+[probe] PBENCH p4_fork_exit n=1000 med=518.975 p99=1186.160 min=456.642 max=1928.592 avg=650.387 wall=656.133
+[probe] PBENCH p4_fork_exec n=1000 med=2596.959 p99=3106.638 min=1648.993 max=3670.444 avg=2381.322 wall=2388.320 exec_target=self
+[probe] PBENCH p5a_pipe n=100000 med=3.857 p99=4.438 min=2.484 max=10254.074 avg=7.744 wall=7.822
+[probe] PBENCH p5b_dgram_send n=20000 med=70.088 p99=84.935 min=3.376 max=3102.740 avg=59.235 wall=59.629
+[probe] PBENCH p5b_dgram_recv_peek n=20000 med=69.587 p99=86.307 min=6.412 max=3135.921 avg=60.289 wall=0.000 measured_by=child peek+consume
+[probe] PBENCH p5c_stream_write n=100000 med=66.972 p99=112.254 min=2.555 max=5548.374 avg=59.254 wall=59.661
+[probe] PBENCH PREP tree=1000files wall_ms=1044
+[probe] PBENCH p6_stat n=10000 med=28.121 p99=62.033 min=20.778 max=294.386 avg=33.610 wall=42.021
+[probe] PBENCH p6_openclose n=10000 med=73.093 p99=128.234 min=38.079 max=839.950 avg=69.054 wall=82.518
+[probe] PBENCH p6_getdents n=1000 med=2708.072 p99=3160.476 min=1669.530 max=4979.799 avg=2611.153 wall=2699.942 per_sample=full_dir_sweep
+[probe] PBENCH p6_read_cached n=10000 med=39.863 p99=66.301 min=37.218 max=295.678 avg=45.983 wall=520.762 per_sample=open_read_close
+[probe] PBENCH p6_write_fsync n=1000 med=12602.060 p99=2869933.234 min=11273.390 max=9499191.051 avg=165591.503 wall=165600.458 per_sample=write4k_plus_fsync
+[probe] PBENCH p6_append n=1000 med=182.322 p99=2263.252 min=114.739 max=6317.114 avg=261.158 wall=261.633
+[probe] PBENCH p6_mkdrmdir n=1000 med=69843.414 p99=130087.186 min=46356.652 max=479811.470 avg=70780.371 wall=76398.081 per_sample=mkdir_plus_rmdir
+[probe] PBENCH p6_unlink n=1000 med=30540.809 p99=78262.687 min=25388.396 max=119527.295 avg=36346.952 wall=36383.491
+[probe] PBENCH p7_sleep1ms n=10000 med=926.897 p99=2097.914 min=13.536 max=16277.248 avg=957.149 wall=5112.698 req=1ms val=overshoot
+[probe] PBENCH DONE rc=0
+[boot] DONE marker at t=394s
+[boot] serial log: /home/william/rux-agents/perf-audit/work/pbench-pa552B-serial.log
