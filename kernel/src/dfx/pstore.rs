@@ -108,15 +108,29 @@ impl AtomicU8Cell {
 /// Compute and remember the region: the `PSTORE_RAM_SIZE` bytes that end
 /// at `avoid`'s page boundary (the DTB's physical base — see the module
 /// doc for why the carve anchors there instead of the top of RAM).
-/// Returns None when the carve would reach below `floor` (the end of the
-/// kernel's static regions) or below the start of RAM — a memory map too
-/// small to carve from gets no pstore rather than a pstore over the
+/// Returns None when the carve would reach below `floor` (the end of
+/// the kernel's static regions) or below the start of RAM — a memory map
+/// too small to carve from gets no pstore rather than a pstore over the
 /// kernel.
 pub fn reserve(avoid: usize, floor: usize) -> Option<(usize, usize)> {
     const PAGE: usize = 4096;
     let avoid_page = avoid & !(PAGE - 1);
     let base = avoid_page.saturating_sub(PSTORE_RAM_SIZE);
     if avoid_page <= PSTORE_RAM_SIZE || base <= floor {
+        return None;
+    }
+    REGION_BASE.store(base, Ordering::Release);
+    Some((base, PSTORE_RAM_SIZE))
+}
+
+/// Remember the region at an explicit base (the x86_64 anchor: the
+/// bytes just above the kernel image's physical end — same address
+/// every boot of the same build, unlike anything the firmware places;
+/// see the plan doc's Tranche-5 design note). Returns None when `base`
+/// is not page-aligned — the caller's anchor arithmetic, not a memory
+/// map, decides the address here.
+pub fn reserve_at(base: usize) -> Option<(usize, usize)> {
+    if base % 4096 != 0 {
         return None;
     }
     REGION_BASE.store(base, Ordering::Release);
