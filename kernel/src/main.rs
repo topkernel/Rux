@@ -821,15 +821,6 @@ pub fn rust_main_tail() -> ! {
             );
         }
 
-        // Persistent kernel log — /var/log/kmsg, the console tail on
-        // disk (klogd kernel thread, 30 s flush period, 256 KiB cap;
-        // zero cost on the printk hot path — the flusher walks the
-        // ring, the write path no longer does). Covers what pstore
-        // cannot: a power loss (RAM contents die) and early-boot
-        // deaths before pstore arms. The disk is NEVER written from
-        // the panic path — the panic may be the storage stack itself.
-        printk::persistent_log_init();
-
         // Initialize network devices
         {
             let device_count = drivers::probe::init_network_devices();
@@ -897,6 +888,31 @@ pub fn rust_main_tail() -> ! {
         {
             dfx::init();
             print_status("dfx", "diagnostic subsystem", true);
+        }
+
+        // Persistent kernel log — /var/log/kmsg, the console tail on
+        // disk (klogd kernel thread, 30 s flush period, 256 KiB cap;
+        // zero cost on the printk hot path — the flusher walks the
+        // ring, the write path no longer does). Covers what pstore
+        // cannot: a power loss (RAM contents die) and early-boot
+        // deaths before pstore arms. The disk is NEVER written from
+        // the panic path — the panic may be the storage stack itself.
+        // (After sched::init — the klogd kthread enqueues onto the
+        // GRQ; the ext4 root has been up since mount_root_filesystem.)
+        {
+            printk::persistent_log_init();
+            print_status(
+                "printk",
+                &format!(
+                    "persistent log /var/log/kmsg ({})",
+                    if printk::persistent_log_running() {
+                        "klogd"
+                    } else {
+                        "off — klogd failed"
+                    }
+                ),
+                printk::persistent_log_running(),
+            );
         }
 
         // Initialize IPC subsystem
