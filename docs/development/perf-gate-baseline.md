@@ -61,7 +61,7 @@ cross-class comparison is meaningless.
 | interrupts | SOFTIRQ share of IF=0 | 3.1% | ±2pp |
 | IPC | pipe roundtrip (pbench P5) | pb1 column | ±20% |
 | IPC | unix writev/truesize avg | 24 µs class | ±20% |
-| binder | SLOW-TXN classes | queue=0 ms; image-side 15/30/89 s family only | no new class |
+| binder | SLOW-TXN classes | queue=0 ms; image-side 15/30/89 s family only | no new class. leg-34 reality refresh (validated on pa41gate/pa45/pa47smoke): an exec-side 5-8 s family (code 1/64) and queue blips <=20 ms are part of the recorded distribution on BOTH sides of the de41d5ab sweep_stale_async reclaim — operative FAIL conditions: queue >= 50 ms, or any total outside {5-8, 15, 30, 89} s; machine check: `run/pa46-slowtxn.sh <serial-log>` |
 
 General principle (user mandate): any subsystem that can affect system
 performance gets gate-code guardianship — not measured yet means "add the
