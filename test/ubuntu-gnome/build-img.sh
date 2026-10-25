@@ -90,7 +90,7 @@ EOS
 # ("AT-SPI: Error retrieving accessibility bus address" spam); with the
 # service present those retries stop and gsd's a11y plugins get a real
 # proxy (leg-6).
-PKGS="dash bash xserver-xorg-core xserver-xorg-video-fbdev x11-xserver-utils dbus dbus-x11 libgl1-mesa-dri libgl1-mesa-glx gnome-session-bin gnome-session gnome-shell gnome-settings-daemon librsvg2-common xterm fonts-dejavu-core util-linux coreutils procps upower ibus libnotify-bin at-spi2-core"
+PKGS="dash bash xserver-xorg-core xserver-xorg-video-fbdev x11-xserver-utils x11-utils mesa-utils dbus dbus-x11 libgl1-mesa-dri libgl1-mesa-glx gnome-session-bin gnome-session gnome-shell gnome-settings-daemon librsvg2-common xterm fonts-dejavu-core xfonts-base util-linux coreutils procps upower ibus libnotify-bin at-spi2-core"
 
 AOPTS=(-o Dir::Etc::sourcelist="$APT_SRC" -o Dir::Etc::sourceparts=-
        -o Dir::State::lists="$APT_LIST" -o Dir::State::status=/dev/null
@@ -286,16 +286,25 @@ fi
 # bright rectangle below the panel. If the window maps+manages (see
 # runit's xwininfo probe) but no rectangle paints, the frontier moves
 # to mutter's compositing (GLX texture-from-pixmap) — kernel-side hunt.
+# -fa "DejaVu Sans Mono": the first r6 probe died with "cannot load
+# font -misc-fixed..." (no bitmap fonts on a minimal image); the
+# antialias face uses fontconfig + fonts-dejavu-core, which ships.
+# xfonts-base joins PKGS anyway so the stock "fixed" alias exists.
 mkdir -p "$ROOT/etc/xdg/autostart"
 cat > "$ROOT/etc/xdg/autostart/rux-xterm-probe.desktop" <<'EOX'
 [Desktop Entry]
 Type=Application
 Name=Rux Window Probe
-Exec=xterm -title rux-window-probe -bg white -fg black -geometry 90x28+140+90
+Exec=xterm -title rux-window-probe -bg white -fg black -fa "DejaVu Sans Mono" -fs 12 -geometry 90x28+140+90
 OnlyShowIn=GNOME;
 X-GNOME-Autostart-enabled=true
 EOX
 
+# x11-utils: xwininfo/xprop/xdpyinfo/xev — the runit X-state probe
+# needs them (jammy moved xwininfo out of x11-xserver-utils) and they
+# are the window map/manage ground-truth tools. mesa-utils: glxinfo,
+# for the GLX_EXT_texture_from_pixmap check if windows still refuse to
+# paint.
 # (2) notification banner probe: waits for the shell to own its bus
 # name, then keeps a CRITICAL notification resident (critical banners
 # do not auto-dismiss; re-send with a fixed ID replaces in place, so
@@ -324,7 +333,7 @@ Name=Rux Notification Probe
 Exec=/usr/local/bin/rux-notify-probe.sh
 OnlyShowIn=GNOME;
 X-GNOME-Autostart-enabled=true
-EOX
+EON
 
 # Xorg fbdev config (software rendering, no KMS/DRM — Rux has fbdev only)
 mkdir -p "$ROOT/etc/X11"

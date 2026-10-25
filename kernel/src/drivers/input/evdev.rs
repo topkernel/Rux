@@ -923,22 +923,56 @@ fn fill_capabilities(
 pub fn push_input_event(is_pointer: bool, event: InputEvent) {
     // dfx=inputtrace: payload trace to hunt phantom event streams. Prints
     // every event with a monotonically increasing ordinal so serial-log
-    // frequency analysis works; rate-limited (first 200, then every 1000th)
-    // so a flooding stream cannot wedge the serial console; gated by a
-    // runtime switch (default OFF).
+    // frequency analysis works; rate-limited so a flooding stream cannot
+    // wedge the serial console; gated by a runtime switch (default OFF).
+    // Writes go through the raw console path (putchar_no_lock), NOT
+    // pr_info!: session boots run loglevel=3, and printk's pre-ring
+    // filter drops KERN_INFO whole — the first deployment of this trace
+    // (leg-6 r6win/r8win runs, kernel with b3af8cfc) silently produced
+    // zero INPTRC lines for exactly that reason. Raw bytes are the same
+    // convention as sched/wakewatch's ww_msg. EV_SYN (type 0) is the
+    // high-rate filler: first 200 then 1-in-1000. Payload events
+    // (type != 0) carry the actual signal: first 500 then 1-in-100,
+    // enough to survive a phantom flood while keeping full detail in
+    // the common case (a quiet -display none boot has no events at
+    // all, so anything printed here IS the anomaly).
     if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::InputTrace) {
         use core::sync::atomic::{AtomicU64, Ordering};
         static TRACE_SEQ: AtomicU64 = AtomicU64::new(0);
-        let seq = TRACE_SEQ.fetch_add(1, Ordering::Relaxed);
-        if seq < 200 || seq % 1000 == 0 {
-            crate::pr_info!(
-                "INPTRC[{}] dev={} type={:#04x} code={:#04x} value={}",
-                seq,
-                if is_pointer { "ptr" } else { "kbd" },
-                event.type_,
-                event.code,
-                event.value
-            );
+        static TRACE_SYN_SEQ: AtomicU64 = AtomicU64::new(0);
+        let is_syn = event.type_ == 0;
+        let print = if is_syn {
+            let n = TRACE_SYN_SEQ.fetch_add(1, Ordering::Relaxed);
+            n < 200 || n % 1000 == 0
+        } else {
+            let n = TRACE_SEQ.fetch_add(1, Ordering::Relaxed);
+            n < 500 || n % 100 == 0
+        };
+        if print {
+            let tag = if is_syn { "syn" } else if is_pointer { "ptr" } else { "kbd" };
+            let n = if is_syn {
+                TRACE_SYN_SEQ.load(Ordering::Relaxed)
+            } else {
+                TRACE_SEQ.load(Ordering::Relaxed)
+            };
+            // Hand-rolled formatting on the raw console path (same shape
+            // as sched/wakewatch's ww_msg/ww_u64): this can fire from the
+            // virtio-input IRQ context and must not touch printk locks.
+            it_msg(b"INPTRC[");
+            it_u64(n);
+            it_msg(b"] dev=");
+            it_msg(match tag {
+                "syn" => b"syn",
+                "ptr" => b"ptr",
+                _ => b"kbd",
+            });
+            it_msg(b" type=");
+            it_u64(event.type_ as u64);
+            it_msg(b" code=");
+            it_u64(event.code as u64);
+            it_msg(b" value=");
+            it_i64(event.value as i64);
+            it_msg(b"\n");
         }
     }
     // Keyboard events feed the Ctrl-Alt-Del detector (SA_CAD semantics):
@@ -961,6 +995,43 @@ pub fn push_input_event(is_pointer: bool, event: InputEvent) {
                 dev.push_event(event);
             }
         }
+    }
+}
+
+// Raw-console writers for the dfx=inputtrace path (same shape as
+// sched/wakewatch's ww_msg/ww_u64): printk is unusable here because the
+// trace must survive loglevel=3 boots, and the callers can be in IRQ
+// context, so no printk locks.
+fn it_msg(msg: &[u8]) {
+    for &b in msg {
+        crate::console::putchar_no_lock(b);
+    }
+}
+
+fn it_u64(mut v: u64) {
+    let mut buf = [0u8; 20];
+    let mut n = 0;
+    if v == 0 {
+        buf[0] = b'0';
+        n = 1;
+    } else {
+        while v > 0 && n < buf.len() {
+            buf[n] = b'0' + (v % 10) as u8;
+            v /= 10;
+            n += 1;
+        }
+    }
+    for i in (0..n).rev() {
+        crate::console::putchar_no_lock(buf[i]);
+    }
+}
+
+fn it_i64(v: i64) {
+    if v < 0 {
+        it_msg(b"-");
+        it_u64(v.unsigned_abs());
+    } else {
+        it_u64(v as u64);
     }
 }
 

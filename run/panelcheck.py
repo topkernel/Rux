@@ -62,7 +62,10 @@ def check(path):
                     win_bbox[2] = max(win_bbox[2], x); win_bbox[3] = max(win_bbox[3], y)
     occ = strip_ok / strip if strip else 0
     clusters = {k: len(v) for k, v in sorted(glyphs.items()) if len(v) >= 30}
-    right_clusters = {k: v for k, v in clusters.items() if k >= 13}
+    # right-side status indicators are small sprites (aggregate/power
+    # chevron ~15-25px) — report anything >= 12px there separately
+    right_clusters = {k: len(v) for k, v in sorted(glyphs.items())
+                      if k >= 13 and len(v) >= 12}
     panel = occ >= 0.85 and len(clusters) >= 2
     win = win_px >= 15000 and win_bbox and (win_bbox[2] - win_bbox[0]) >= 300 \
         and (win_bbox[3] - win_bbox[1]) >= 150
