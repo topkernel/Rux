@@ -3086,7 +3086,7 @@ pub fn sys_recvmsg(args: SyscallArgs) -> i64 {
                         crate::net::unix::put_sockaddr_un(
                             msg_name_ptr,
                             msg_namelen_ptr,
-                            Some(&src),
+                            Some(src.as_ref()),
                         );
                     }
                 }
@@ -3922,7 +3922,7 @@ pub fn sys_recvfrom(args: SyscallArgs) -> i64 {
                                 crate::net::unix::put_sockaddr_un(
                                     addr_ptr,
                                     addrlen_ptr,
-                                    Some(&src),
+                                    Some(src.as_ref()),
                                 );
                             }
                         }
