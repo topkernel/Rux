@@ -1189,3 +1189,35 @@ PASSING quiet-window gate run — nanosleep readings across boots now
 span 174-333 ms (pa41gate 174, sc239 184, seed 221, pa38 333), which
 proves the single-point 221 ms seed was workload-mix artifact; the
 baseline doc marks the row unbanked pending that window (below).
+
+### 8.10.2 L3/socket-family first lever (leg 34, 2026-10-25, pa47)
+
+The post-L0 gap table's socket-family outlier (p5b/p5c ~190-260x on
+release-strong) got its first cost-center lever: the AF_UNIX send hot
+path (commit b3757d92 on feature/perf-audit) removes three per-send
+costs — the O(queue-depth) flow-control walk under the recv_queue lock
+on every send and every blocked-sender recheck (now a running
+RecvQueue::charge counter), the up-to-3x bound_name lock+string-scan
+for the hilog/param/socksnap diagnostic taps (now a bind-time cached
+AtomicU8 tap_class), and the per-segment String allocation for the
+sender name (now an Arc cloned from a bind-time cache; MSG_PEEK
+clones become refcount bumps).
+
+Measurement (quick gate, med-of-2 per arm, BOTH boot orders to cancel
+the host-load drift that a single back-to-back pair suffers — pa47
+series, release-strong, TCG): p5b_dgram_send A{5.262, 8.405} vs
+B{4.687, 5.019} us and p5b_dgram_recv_peek A{4.660, 7.514} vs
+B{4.246, 4.328} — B lower in both orderings (~-25-30% on family
+means); controls flat (p5a_pipe — no unix sockets — and p5c unchanged
+within 2%); p1_null scatters both directions (pure load noise).
+Functional: 4 pbench boots complete (no skips, no short runs), OH
+smoke boot 420 s clean (0 panics/OOM, hilog taps fire 3000x under the
+cached flags, PCTL-SEND/RECV both print, unixsend-loop 0, census
+TERM-DESCHED 8 EXACT on the smoke). med-of-3 per arm owed at
+merge-claim time.
+
+What this does NOT close: the family remains ~30x the 2x target
+(0.078/0.108 us) — the residual per-send cost is the syscall floor +
+fdtable + wake-path work shared with every family, and the flow-
+control/wake design of a blocking pair. Next levers for the row stay
+behind the floor levers (fork+exec tail, ext4 metadata) in priority.
