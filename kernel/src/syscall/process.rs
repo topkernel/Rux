@@ -79,6 +79,13 @@ pub fn sys_clone(args: SyscallArgs) -> i64 {
     }
 
     let flags = args[0];
+    // Legacy clone takes `int flags` in every libc wrapper; a flag with
+    // bit 31 set (CLONE_IO 0x80000000) arrives sign-extended to
+    // 0xffffffff_80000000. Linux's SYSCALL_DEFINE5(clone) builds
+    // kernel_clone_args with lower_32_bits(clone_flags) — the upper word
+    // is DISCARDED, never validated (only clone3 rejects bad high bits).
+    // kcmp03's clone(CLONE_IO|SIGCHLD) was refused EINVAL before the mask.
+    let flags = flags & 0xffff_ffff;
     let stack = args[1];
     let parent_tid = args[2] as *mut i32;
     // clone syscall argument ORDER differs by arch (verified against
