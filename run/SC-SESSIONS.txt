@@ -4960,3 +4960,39 @@ sc260 (patched, same recipe): 30 min roll.
 Session close: probes (cv/obj/bssslack/bssslack2) committed; patch
 script committed; forensics (hicollie.asm, ld-musl disassembly,
 libhicollie extract) in run/forensics-leg22/.
+
+LEG-23 (OH UI lane, leg-22 successor) — OPENED. Mission: the account
+chain (QueryForegroundUserId 4194349).
+
+OFFLINE FORENSICS (sc260 log + image binaries, no roll needed) — THE
+4194349 DECODE, END TO END:
+- The printer of "AccountDelegateNormalImpl: QueryForegroundUserId" is
+  DISTRIBUTEDDATA (libdistributeddatasvc.z.so — the ONLY image file
+  containing that string, inode 3072; DistributedData's own account
+  delegate, NOT appexecfwk's). All 88 sc260 prints are the
+  distributeddata family retry loop (~5s), NOT the launcher process.
+- Client: OsAccountManager::GetForegroundOsAccountLocalId -> OsAccount::
+  GetForegroundOsAccountLocalId (libos_account_innerkits.z.so 0x3bd10):
+  null proxy -> 0x400012; proxy vcall -> OsAccountProxy::GetForeground-
+  OsAccountLocalId (0x5a670): SendRequest tx code **0x4d** (SAREG does
+  NOT see it — its code filter is {3,4,7,10,21}), then reply.ReadInt32
+  = status. 4194349 = 0x40002d was read FROM THE REPLY PARCEL.
+- Server (libaccountmgr.z.so, OsAccountManagerService::GetForeground-
+  OsAccountLocalId 0x1943aa): appId = IPCSkeleton::GetCallingUid()/1000;
+  inner->IsOsAccountForeground(appId) [vt+0x1e0 @0x1564ae] = membership
+  lookup in the container at inner+0x168 (activated/foreground set,
+  written by SendMsgForAccountActivate @0x15dd9c); miss -> 0x400026;
+  fallback inner->[vt+0x1d8](0) miss -> maps 0x400026 to **0x40002d**.
+- VERDICT: the IPC reply LANDS (fast, well-formed domain error, not a
+  kernel loss and not a no-reply). The value means "calling app is in
+  no activated/foreground account". The blocker is UPSTREAM: the
+  activated/foreground set at inner+0x168 stays empty in sc260-class
+  boots — either account activation never completes, or the kernel
+  reports a callingUid that maps to no account. Deciders for sc261:
+  (a) binder trace events on main: tx 0x4d timeline + caller uid;
+  (b) accountmgr activation logs (OnStateChanged state 7 family);
+  (c) whether the IAccount code=4 "unanswered" SAREG sends are oneway
+  (no reply expected — probe cannot distinguish) or real losses.
+- CAUTION for the lane: sc217's lucky boot had getOsAccountLocalId
+  (a different call) succeed; that does NOT prove the foreground map
+  was populated.
