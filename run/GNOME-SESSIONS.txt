@@ -204,3 +204,85 @@ mutter + gsd) visible and stable on the Ubuntu 22.04 riscv64 image.
   gnome-session-failed's dialog in swfix-sess1 — Xorg-side shmat
   failure path, unverified; PREEMPT-LEAK flood (idle wfi, ~2s holds)
   on every boot — kernel-side, likely another lane's active area.
+
+## Sessions 4-5 (2026-10-25 late, leg-3 pre-pause; reconstructed by
+## leg-4 from runs/ — undocumented at the user pause af77736e)
+
+- runs/gnome-r4val (kernel = merged + a2278150 getcwd fix + a8da458b
+  segv-vma trap printer; image gnome-r2 with e5be15c1 usb-protection
+  dropped; session mode, smp2/2G, trace armed): ZERO user SEGVs, zero
+  kernel panics, M4_screen_lit @721s (nonblack 1.000), screen held to
+  the 1275s cutoff. The whole SEGV family (getcwd/usb-protection) is
+  dead on the fixed lineage.
+- runs/gnome-r5forensic (same kernel+image, 1800s): again ZERO SEGVs;
+  M4 @1411s (nonblack 0.893) then held 99% (1023986/1024000) to
+  t=1800s. Milestone timing is host-load sensitive (210s -> 721s ->
+  1411s across r2trace/r4val/r5forensic; r5 ran during the afternoon
+  agent storm).
+- What the 30-min window still shows (r5forensic counts):
+  - gsd-power respawn loop: 49 "Power.desktop' exited with code 1"
+    (no UPower on the image; up_client_new fails -> plugin init exits).
+    Each cycle risks the r3fix-style "Oh no" collapse.
+  - 191x "The permission of the setuid helper is not correct" —
+    system-bus activation is dead for EVERY org.freedesktop.* service
+    (login1, locale1, UPower...). Root cause is IMAGE-side, proven via
+    debugfs: dpkg-deb -x runs as uid 1000, so the whole tree (and
+    /usr/lib/dbus-1.0/dbus-daemon-launch-helper, mode 0100755 uid 1000)
+    is 1000:1000 in the image; the activation path requires uid 0 +
+    setuid bit. Not a kernel bug.
+  - Shell FULL startup takes ~26 min: "GNOME Shell started at
+    <boot+2s>" prints at boot+1560s, "Registering session with GDM"
+    right after — the shell mainloop only completes its init walk
+    after every gsd dbus timeout (25s each, service_start_timeout)
+    serializes through the storm. This is the stall the forensics
+    must name, not a crash.
+  - Forensics gap: the trace tail only dumps on gnome-session death
+    (never happened); the periodic tailer only dumped per-CPU stats.
+    And runit armed events/enable=1 — sys_enter/sys_exit flood the
+    rings (160ms of history under storm; 1.5M+ overwrites) so even a
+    dumped tail would show nothing. WAKE-STRANDED (157x, strand
+    1.7-1.8s) already names the symptom: wake-to-run latency under
+    the 2-vCPU TCG storm. PARKED-LEAK pc=1 = preempt_count 1 on a
+    parked task (same hunt family as PREEMPT-LEAK, demoted to
+    reporter noise; another lane's area).
+
+## Session 6 (2026-10-25 evening, leg-4)
+
+- Merged main a5af759c (RVV 1.0 lazy enable for user tasks) cleanly
+  (a55068bb); kernel rebuilt, vext symbols verified in the binary.
+- Image fixes for the two dead-activation blockers (build-img.sh):
+  (1) fakeroot pack pass: chown -R 0:0 the staging tree inside one
+  fakeroot session with mkfs, and set the launch helper to its stock
+  4754 root:messagebus — the image is now root-owned everywhere, so
+  system-bus setuid activation can work at all;
+  (2) upower added to PKGS: gsd-power gets a real org.freedesktop.UPower
+  to talk to (dbus-activatable, no runit change) instead of exit(1)
+  looping. Both changes gate on the existing e2fsck pass.
+- runit.c trace forensics fixed for real: arm only sched+exceptions
+  groups (not sys_enter/exit — the ring flood), and the periodic
+  tailer now dumps a 24-line scheduling snapshot every 60s, so a
+  stall leaves a named trail even when nothing dies.
+- GNOME_IMG env override added to build-img.sh so r2/r3 coexist.
+- runs/gnome-r6setuid (merged kernel a55068bb incl. RVV, image r3,
+  session mode, smp2/2G, 1800s, evening host storm load ~24/30 QEMUs):
+  M2 gsd @204s, M4_screen_lit @1350s (nonblack 1.000), screen HELD to
+  the end (99%+nonblack, wallpaper #002080/#202000), ZERO user SEGVs,
+  zero kernel panics. "setuid helper" errors: 191 -> 0 (the fakeroot
+  fix works — system-bus activation now spawns; org.freedesktop.systemd1
+  attempts now correctly report Spawn.ChildExited instead of the
+  permission error). gsd-power exits 27 — the loop STILL runs, cause
+  narrowed by the quiet-boot probe below.
+- run/upowerd-probe (quiet init=/bin/sh boot on r3, system bus by
+  hand): upowerd works — acquires org.freedesktop.UPower after 20s on
+  a QUIET boot (cold TCG start of the glib stack). dbus's
+  service_start_timeout is 25s, so activation under the session storm
+  loses the race -> StartServiceByName times out -> gsd-power exits(1)
+  -> respawn loop. Not a kernel bug; a race. Fix: runit now starts
+  upowerd at boot (PID1-managed, no activation race) — image r4.
+- Forensics now real: the periodic 60s trace snapshots show the
+  pre-M4 stall is a throughput wall, not a deadlock — a dense
+  dconf/gdbus/gmain worker churn (glib mainloop IPC) saturating 2
+  TCG vCPUs, with WAKE-STRANDED strands 1.5-4.3s. No blocked task,
+  no lock holder; tasks switch healthily, just slowly.
+- runs/gnome-r7upower: the r4 image roll (runit-started upowerd) —
+  results appended below.
