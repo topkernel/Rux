@@ -465,3 +465,51 @@ Harness lesson (twice bitten): NEVER stage a fleet kernel image while
 `make test` is rebuilding the same target — the first v8 image was a
 test-suite kernel (the member "wedge" was the in-kernel suite running
 under TCG). Stage images only from a fresh `make build`.
+
+### Session 4 close-out (16:10)
+
+- V-extension fix VERIFIED three ways: (1) deterministic repro — the
+  execsig binary that SIGILL'd on 1365 consecutive v7 rounds now runs
+  its full read+child-exec walk and powers down (EXECSIG-CHILD
+  sum=4868770075288, zero SIGILL); (2) in-kernel suite on the merged
+  tree: make test 1096/1096 PASS, 0 FAIL; (3) minimal-rootfs smoke
+  reaches the mrsh prompt unchanged. The first fleet-rv64-v8-rux
+  staging was a contaminated test-suite kernel (cp raced the make-test
+  rebuild — the member "wedge" was the in-kernel suite running under
+  TCG); re-staged from a fresh plain build (md5 37f0a336...) and
+  re-verified with the member's exact append line.
+- Fleet refresh: execsig member on fleet-rv64-v8-rux (main ddb3ed01 +
+  lane fixes + V support) — rounds r1367+ clean, ~11s each, regression
+  canary via the new USIGILL classifier counter. memstorm rolled to
+  v8 at r25 as the heavy-switch-path soak (the V diff touches the
+  switch path for every task; memstorm is the highest switch-rate
+  surface). Rest of the fleet stays on v7 until the v8 soak reads
+  clean.
+- Branch: merged origin/main ddb3ed01 (kallsyms full table + trace
+  events — addr2line symbolization used live this session; the trace
+  events are the next tool for the oom01 reclaim hunt).
+
+Fleet map at close:
+- chains ww-s2 (r98 in flight) + wwload (r46 in flight): frozen hunt
+  kernel, armed, patched HEAL_LAST self-adjudication.
+- execsig: v8 (merged main-class + V) — the main-class refresh member.
+- memstorm: v8 since r25 (soak in flight).
+- ltp-a/b/c/d, fsfuzz: v7. monkey-a/b: v7-x86. ltpm: stopped (banked;
+  relaunch when main takes the csrr read fix).
+
+Next-session queue (priority order):
+1. v8 soak verdicts: memstorm r25+ panics / sub=0x10000 (must stay 0)
+   / PREEMPT-LEAK rate vs v7; execsig USIGILL must stay 0. If clean:
+   roll v8 to the ltp members + monkeys, and propose the branch merge
+   (V fix + chain adjudication + classifier) to main.
+2. oom01-wedge: the deterministic fake-OOM-family repro (100% at sweep
+   position ~837-847, children hold memory after SIGKILL of the test
+   main, no reclaim progress). Instrument with dfx=memwatch + the new
+   trace events; root-cause the reclaim path. Same class as the GNOME
+   blocker (OOM at reclaimable state).
+3. SOFTIRQ-bracket discriminator for the pc=0x10001 count-migration
+   producer (timer/soft/ext brackets are silent on v7 while the leak
+   rate is unchanged; instrument the do_softirq processing bracket
+   with the same entry_tp/exit_tp shape).
+4. Chains continue; HEAL_LAST-only hits now self-adjudicate (expect
+   ~1 per 50-80 boot-hours under host load).
