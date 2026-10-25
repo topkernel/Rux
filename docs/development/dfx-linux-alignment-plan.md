@@ -333,15 +333,45 @@ Every call site marshals arguments only behind event.armed() (two
 relaxed loads), so the disabled path is one branch. Verified from a
 guest shell by test/tracefs-smoke.sh.
 
+**Done (event expansion, guest-verified).** Seven more events from the
+same shapes, each with the live host's field set and print fmt
+verbatim:
+
+- `sched:sched_waking` / `sched:sched_wakeup` — around the enqueue in
+  `Task::wake_up` (waking before the attempt, wakeup after it
+  succeeded): `comm=%s pid=%d prio=%d target_cpu=%03d`.
+- `sched:sched_wakeup_new` — the fork path's first enqueue of the
+  built child (`process/fork.rs`).
+- `sched:sched_process_fork` — at the child's successful enqueue:
+  `comm=%s pid=%d child_comm=%s child_pid=%d`.
+- `sched:sched_process_exit` — at do_exit entry, `group_dead` =
+  the exit takes the thread group to its last live thread.
+- `exceptions:page_fault_user` / `exceptions:page_fault_kernel` — at
+  fault entry on both arches (riscv64 `trap.rs`, x86_64 `trap.rs`):
+  `address=%ps ip=%ps error_code=0x%lx`. The `%ps` rendering is
+  symbolic through the kernel symbol table (Tranche 3's table — the
+  two tranches compose), falling back to raw hex exactly as `%ps`
+  does when no symbol covers the address. On x86_64 error_code is the
+  hardware #PF error word; on riscv64 it is the access-type bits
+  (read 0x1 / write 0x2 / exec 0x4) — the arch's fault kind, not the
+  x86 error-word layout.
+
+All sites marshal behind `armed()`; every record line renders in the
+reference geometry (verified in-guest: `sched_wakeup: comm=sh pid=1
+prio=120 target_cpu=000`, `sched_process_fork: comm=sh pid=1
+child_comm=sh child_pid=357`, `sched_process_exit: comm=ls pid=356
+prio=120 group_dead=true`, `page_fault_user: address=0x3fffffe744
+ip=0x28170 error_code=0x2`).
+
 **Remaining.**
 
-- More events from the same ring shapes: page fault, block I/O
-  completion, binder transaction, scheduler pick/wakeup.
+- Block-IO events (`block:block_rq_issue` / `block_rq_complete`) and
+  the binder transaction events.
 - `trace_marker` (write-only marker events) and the per_cpu/cpuN/
   {trace,trace_pipe,stats} views.
 - A `tracepoint!` macro to declare sites without hand-writing the
-  table row (the table is three rows today; a macro pays off when the
-  event count grows).
+  table row (the table is ten rows now; the macro pays for itself at
+  the next expansion).
 - The 10-minute soak acceptance run for the ring.
 
 ### Tranche 5 — crash policy and persistent evidence

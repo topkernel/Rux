@@ -182,11 +182,134 @@ pub static EVENT_SCHED_SWITCH: TraceEvent = TraceEvent {
 };
 
 /// Every event, in id order.
-pub static EVENTS: [&TraceEvent; 3] = [
+pub static EVENTS: [&TraceEvent; 10] = [
     &EVENT_SYS_ENTER,
     &EVENT_SYS_EXIT,
     &EVENT_SCHED_SWITCH,
+    &EVENT_SCHED_WAKING,
+    &EVENT_SCHED_WAKEUP,
+    &EVENT_SCHED_WAKEUP_NEW,
+    &EVENT_SCHED_PROCESS_FORK,
+    &EVENT_SCHED_PROCESS_EXIT,
+    &EVENT_PAGE_FAULT_USER,
+    &EVENT_PAGE_FAULT_KERNEL,
 ];
+
+/// sched:sched_waking — a task is about to be woken (emitted before the
+/// enqueue attempt). The reference host's events/sched/sched_waking;
+/// the fields and print fmt are the live file's, identical to
+/// sched_wakeup's.
+pub static EVENT_SCHED_WAKING: TraceEvent = TraceEvent {
+    group: "sched",
+    name: "sched_waking",
+    id: 4,
+    print_fmt: "\"comm=%s pid=%d prio=%d target_cpu=%03d\", REC->comm, REC->pid, REC->prio, REC->target_cpu",
+    fields: "\tfield:char comm[16];\toffset:8;\tsize:16;\tsigned:0;\n\
+             \tfield:pid_t pid;\toffset:24;\tsize:4;\tsigned:1;\n\
+             \tfield:int prio;\toffset:28;\tsize:4;\tsigned:1;\n\
+             \tfield:int target_cpu;\toffset:32;\tsize:4;\tsigned:1;\n",
+    enabled: AtomicBool::new(false),
+    fmt_args: fmt_sched_wakeup,
+};
+
+/// sched:sched_wakeup — a task left the wait queue and was enqueued
+/// (recorded after the enqueue succeeded). The reference host's
+/// events/sched/sched_wakeup.
+pub static EVENT_SCHED_WAKEUP: TraceEvent = TraceEvent {
+    group: "sched",
+    name: "sched_wakeup",
+    id: 5,
+    print_fmt: "\"comm=%s pid=%d prio=%d target_cpu=%03d\", REC->comm, REC->pid, REC->prio, REC->target_cpu",
+    fields: "\tfield:char comm[16];\toffset:8;\tsize:16;\tsigned:0;\n\
+             \tfield:pid_t pid;\toffset:24;\tsize:4;\tsigned:1;\n\
+             \tfield:int prio;\toffset:28;\tsize:4;\tsigned:1;\n\
+             \tfield:int target_cpu;\toffset:32;\tsize:4;\tsigned:1;\n",
+    enabled: AtomicBool::new(false),
+    fmt_args: fmt_sched_wakeup,
+};
+
+/// sched:sched_wakeup_new — the FIRST enqueue of a freshly built task
+/// (the fork path's enqueue). The reference host's
+/// events/sched/sched_wakeup_new; fields identical to sched_wakeup's.
+pub static EVENT_SCHED_WAKEUP_NEW: TraceEvent = TraceEvent {
+    group: "sched",
+    name: "sched_wakeup_new",
+    id: 6,
+    print_fmt: "\"comm=%s pid=%d prio=%d target_cpu=%03d\", REC->comm, REC->pid, REC->prio, REC->target_cpu",
+    fields: "\tfield:char comm[16];\toffset:8;\tsize:16;\tsigned:0;\n\
+             \tfield:pid_t pid;\toffset:24;\tsize:4;\tsigned:1;\n\
+             \tfield:int prio;\toffset:28;\tsize:4;\tsigned:1;\n\
+             \tfield:int target_cpu;\toffset:32;\tsize:4;\tsigned:1;\n",
+    enabled: AtomicBool::new(false),
+    fmt_args: fmt_sched_wakeup,
+};
+
+/// sched:sched_process_fork — a child task was built. The reference
+/// host's events/sched/sched_process_fork; the __data_loc char[]
+/// fields are the live file's (a dynamic string carries its blob
+/// offset in the field word; Rux records the comms inline instead and
+/// renders them the same way).
+pub static EVENT_SCHED_PROCESS_FORK: TraceEvent = TraceEvent {
+    group: "sched",
+    name: "sched_process_fork",
+    id: 7,
+    print_fmt: "\"comm=%s pid=%d child_comm=%s child_pid=%d\", __get_str(parent_comm), REC->parent_pid, __get_str(child_comm), REC->child_pid",
+    fields: "\tfield:__data_loc char[] parent_comm;\toffset:8;\tsize:4;\tsigned:0;\n\
+             \tfield:pid_t parent_pid;\toffset:12;\tsize:4;\tsigned:1;\n\
+             \tfield:__data_loc char[] child_comm;\toffset:16;\tsize:4;\tsigned:0;\n\
+             \tfield:pid_t child_pid;\toffset:20;\tsize:4;\tsigned:1;\n",
+    enabled: AtomicBool::new(false),
+    fmt_args: fmt_sched_process_fork,
+};
+
+/// sched:sched_process_exit — a task entered do_exit. The reference
+/// host's events/sched/sched_process_exit.
+pub static EVENT_SCHED_PROCESS_EXIT: TraceEvent = TraceEvent {
+    group: "sched",
+    name: "sched_process_exit",
+    id: 8,
+    print_fmt: "\"comm=%s pid=%d prio=%d group_dead=%s\", REC->comm, REC->pid, REC->prio, REC->group_dead ? \"true\" : \"false\"",
+    fields: "\tfield:char comm[16];\toffset:8;\tsize:16;\tsigned:0;\n\
+             \tfield:pid_t pid;\toffset:24;\tsize:4;\tsigned:1;\n\
+             \tfield:int prio;\toffset:28;\tsize:4;\tsigned:1;\n\
+             \tfield:bool group_dead;\toffset:32;\tsize:1;\tsigned:0;\n",
+    enabled: AtomicBool::new(false),
+    fmt_args: fmt_sched_process_exit,
+};
+
+/// exceptions:page_fault_user — a page fault taken from user mode. The
+/// reference host does not carry the exceptions group (it is the
+/// architecture fault-trace family); the field set and print fmt are
+/// the generic definition's (address/ip/error_code, %ps symbolic
+/// rendering). On riscv64 the error_code carries the access-type bits
+/// (read=0x1 write=0x2 exec=0x4) rather than the x86 error-word, and
+/// ip is the faulting epc.
+pub static EVENT_PAGE_FAULT_USER: TraceEvent = TraceEvent {
+    group: "exceptions",
+    name: "page_fault_user",
+    id: 9,
+    print_fmt: "\"address=%ps ip=%ps error_code=0x%lx\", (void *)REC->address, (void *)REC->ip, REC->error_code",
+    fields: "\tfield:unsigned long address;\toffset:8;\tsize:8;\tsigned:0;\n\
+             \tfield:unsigned long ip;\toffset:16;\tsize:8;\tsigned:0;\n\
+             \tfield:unsigned long error_code;\toffset:24;\tsize:8;\tsigned:0;\n",
+    enabled: AtomicBool::new(false),
+    fmt_args: fmt_page_fault,
+};
+
+/// exceptions:page_fault_kernel — a page fault taken from kernel mode
+/// (a vmalloc-style fault or a kernel bug). Same shape as
+/// page_fault_user's.
+pub static EVENT_PAGE_FAULT_KERNEL: TraceEvent = TraceEvent {
+    group: "exceptions",
+    name: "page_fault_kernel",
+    id: 10,
+    print_fmt: "\"address=%ps ip=%ps error_code=0x%lx\", (void *)REC->address, (void *)REC->ip, REC->error_code",
+    fields: "\tfield:unsigned long address;\toffset:8;\tsize:8;\tsigned:0;\n\
+             \tfield:unsigned long ip;\toffset:16;\tsize:8;\tsigned:0;\n\
+             \tfield:unsigned long error_code;\toffset:24;\tsize:8;\tsigned:0;\n",
+    enabled: AtomicBool::new(false),
+    fmt_args: fmt_page_fault,
+};
 
 /// Find an event by group and name.
 pub fn find_event(group: &str, name: &str) -> Option<&'static TraceEvent> {
@@ -604,5 +727,75 @@ fn fmt_sched_switch(args: &[u64; TRACE_ARGS]) -> String {
         comm(&next_comm),
         args[7] as u32,
         args[8] as i32,
+    )
+}
+
+/// sched_waking / sched_wakeup / sched_wakeup_new share one field set:
+/// comm (two slots), pid, prio, target_cpu.
+fn fmt_sched_wakeup(args: &[u64; TRACE_ARGS]) -> String {
+    let comm = comm_from_words(args[0], args[1]);
+    let end = comm.iter().position(|&b| b == 0).unwrap_or(COMM_LEN);
+    format!(
+        "comm={} pid={} prio={} target_cpu={:03}",
+        String::from_utf8_lossy(&comm[..end]),
+        args[2] as u32,
+        args[3] as i32,
+        args[4] as i32,
+    )
+}
+
+/// sched_process_fork: parent comm (two slots), parent pid, child comm
+/// (two slots), child pid.
+fn fmt_sched_process_fork(args: &[u64; TRACE_ARGS]) -> String {
+    let comm = |bytes: &[u8; COMM_LEN]| -> String {
+        let end = bytes.iter().position(|&b| b == 0).unwrap_or(COMM_LEN);
+        String::from_utf8_lossy(&bytes[..end]).into_owned()
+    };
+    let parent = comm_from_words(args[0], args[1]);
+    let child = comm_from_words(args[3], args[4]);
+    format!(
+        "comm={} pid={} child_comm={} child_pid={}",
+        comm(&parent),
+        args[2] as u32,
+        comm(&child),
+        args[5] as u32,
+    )
+}
+
+/// sched_process_exit: comm (two slots), pid, prio, group_dead.
+fn fmt_sched_process_exit(args: &[u64; TRACE_ARGS]) -> String {
+    let comm = comm_from_words(args[0], args[1]);
+    let end = comm.iter().position(|&b| b == 0).unwrap_or(COMM_LEN);
+    format!(
+        "comm={} pid={} prio={} group_dead={}",
+        String::from_utf8_lossy(&comm[..end]),
+        args[2] as u32,
+        args[3] as i32,
+        if args[4] != 0 { "true" } else { "false" },
+    )
+}
+
+/// page_fault_user / page_fault_kernel: address, ip, error_code. The
+/// `%ps` rendering is symbolic — the symbol table resolves the address
+/// to name+off/size and falls back to the raw hex exactly as the
+/// reference's %ps does when no symbol covers the address.
+fn fmt_page_fault(args: &[u64; TRACE_ARGS]) -> String {
+    let ps = |addr: u64| -> String {
+        match crate::dfx::ksyms::lookup(addr) {
+            Some((name, sym, size)) => {
+                if size > 0 {
+                    format!("{}+0x{:x}/0x{:x}", name, addr - sym, size)
+                } else {
+                    format!("{}+0x{:x}", name, addr - sym)
+                }
+            }
+            None => format!("{:#x}", addr),
+        }
+    };
+    format!(
+        "address={} ip={} error_code=0x{:x}",
+        ps(args[0]),
+        ps(args[1]),
+        args[2]
     )
 }
