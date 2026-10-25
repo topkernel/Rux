@@ -5403,6 +5403,71 @@ fn binder_transaction(
         }
     }
 
+    // sc262 (leg-23): launcher lifecycle-path tracer. Every sc261-class
+    // boot ends in the AMS restart loop — LIFECYCLE_TIMEOUT for
+    // com.ohos.launcher.MainAbility ("load" phase, the same timeout
+    // that hits settingsdata's DataExtAbility) while the parked
+    // launcher looks healthy: main thread in poll, OS_IPC threads in
+    // binder read, and hilog never logs a single ability-schedule
+    // event. This prints BOTH directions of the launcher's binder
+    // traffic at ENQUEUE time — its own sends and every transaction
+    // queued TO it. Offline adjudication: an in-line printed here
+    // while the app still times out = delivery/wake loss (kernel
+    // read path); no in-line during the load window = AMS never sent
+    // (AMS-side stall). Latch by sender comm prefix "m.ohos.launcher"
+    // (each restart re-latches and resets the counter); 500/boot.
+    {
+        static SLTX_PID: core::sync::atomic::AtomicU32 =
+            core::sync::atomic::AtomicU32::new(0);
+        static SLTX_N: core::sync::atomic::AtomicUsize =
+            core::sync::atomic::AtomicUsize::new(0);
+        if !reply {
+            if let Some(cur) = crate::sched::current() {
+                let name = core::str::from_utf8(unsafe { (*cur).comm() })
+                    .unwrap_or("")
+                    .trim_end_matches('\0');
+                if name.starts_with("m.ohos.launcher") {
+                    let prev =
+                        SLTX_PID.swap(proc.pid, core::sync::atomic::Ordering::Relaxed);
+                    if prev != proc.pid {
+                        crate::pr_warn!("SLTX latch tgid={}", proc.pid);
+                        SLTX_N.store(0, core::sync::atomic::Ordering::Relaxed);
+                    }
+                }
+            }
+        }
+        let lp = SLTX_PID.load(core::sync::atomic::Ordering::Relaxed);
+        if lp != 0
+            && (proc.pid == lp || target.pid == lp)
+            && SLTX_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 500
+        {
+            let mut pb = [0u8; 32];
+            let hex: alloc::string::String = if tr.data_buffer != 0
+                && unsafe {
+                    crate::arch::uaccess::copy_from_user(
+                        pb.as_mut_ptr(),
+                        tr.data_buffer as *const u8,
+                        pb.len(),
+                    ) == 0
+                }
+            {
+                pb.iter().map(|b| alloc::format!("{:02x}", b)).collect()
+            } else {
+                alloc::string::String::from("-")
+            };
+            crate::pr_warn!(
+                "SLTX {} pid={} -> pid={} code={:#x} oneway={} dlen={} parcel={}",
+                if proc.pid == lp { "out" } else { "in " },
+                proc.pid,
+                target.pid,
+                tr.code,
+                oneway,
+                data_size,
+                hex
+            );
+        }
+    }
+
     // sc184 (session R, the screen gate): composer-path tracer. The render
     // service never publishes SA 10 because its Init blocks in
     // DisplayComposerHdiImpl::Create's wait loop — the GetService("display_
@@ -6475,6 +6540,41 @@ fn binder_thread_read(
                             // transaction is being read out to its
                             // receiving thread (BR_TRANSACTION/BR_REPLY).
                             crate::trace::trace_binder_transaction_received(t.id);
+                            // sc262 (leg-23): SLTX read-side — the
+                            // launcher's thread picked this transaction
+                            // up out of its queue. An enqueue-side "SLTX
+                            // in" line with no matching read here, while
+                            // the app still parks in binder read, names
+                            // the wake/read path as the loss point.
+                            if let Some(cur) = crate::sched::current() {
+                                let tg = unsafe { (*cur).tgid() as u32 };
+                                if tg == proc.pid {
+                                    let name = core::str::from_utf8(unsafe { (*cur).comm() })
+                                        .unwrap_or("")
+                                        .trim_end_matches('\0');
+                                    if name.starts_with("m.ohos.launcher")
+                                        || name.starts_with("OS_IPC")
+                                        || name.starts_with("OS_FFRT")
+                                    {
+                                        static SLRD_N: core::sync::atomic::AtomicUsize =
+                                            core::sync::atomic::AtomicUsize::new(0);
+                                        if SLRD_N
+                                            .fetch_add(1, core::sync::atomic::Ordering::Relaxed)
+                                            < 600
+                                        {
+                                            crate::pr_warn!(
+                                                "SLRD tgid={} tid={} comm='{}' read txn id={} code={:#x} reply={}",
+                                                proc.pid,
+                                                thread.tid,
+                                                name,
+                                                t.id,
+                                                t.code,
+                                                t.target_node.is_none()
+                                            );
+                                        }
+                                    }
+                                }
+                            }
                             let (tptr, tcookie) = match &t.target_node {
                                 Some(n) => (n.ptr, n.cookie),
                                 None => (0, 0),
