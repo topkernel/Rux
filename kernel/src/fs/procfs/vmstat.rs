@@ -143,13 +143,12 @@ pub fn generate() -> Vec<u8> {
 /// the pre-conversion renderer's output for all-zero counters plus a
 /// known free count, pinned so any future field/width/order edit that
 /// changes bytes fails here and forces a deliberate snapshot update.
-#[cfg(any(test, feature = "unit-test"))]
-pub mod vmstat_file_tests {
+#[cfg(test)]
+mod vmstat_file_tests {
     use super::*;
 
-    /// Callable body (the in-kernel unit-test suite runs this via
-    /// tests/mod.rs; the #[test] wrapper covers cargo test).
-    pub fn snapshot_check() {
+    #[test]
+    fn snapshot_zero_counters() {
         // Rendering with every value 0 through the same declaration:
         // build the rows from VMSTAT_FIELDS (order included).
         let zero: u64 = 0;
@@ -168,12 +167,6 @@ pub mod vmstat_file_tests {
         assert_eq!(lines.last(), Some(&"pswpout 0"));
         assert_eq!(lines.len(), VMSTAT_FIELDS.len());
         assert!(VMSTAT_FIELDS.len() == 60, "field count changed: {} — update this snapshot deliberately", VMSTAT_FIELDS.len());
-    }
-
-    #[cfg(test)]
-    #[test]
-    fn snapshot_zero_counters() {
-        snapshot_check();
     }
 }
 
