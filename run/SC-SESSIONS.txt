@@ -4887,3 +4887,76 @@ sc259 ROLLING: sc258 recipe (LOGLEVEL=7 dfx=schb,sleepsnap, SMP2 KVM
 4G, fresh scgold reflink userdata, SECS=1800) + shotmon; goal = the
 condvar/bssslack deciders on the launcher crash + (if spawn survives
 longer) OnForeground/launcher.ready + screenshot.
+
+LEG-22 ROLLS AND VERDICT.
+
+sc259 (unpatched, LOGLEVEL=7, probes): the deciders landed on a live
+instance (honydataability pid 1683, apply()-shape):
+- cv via r9: +0x8 tail == +0x28 head == 0x7ff09b051680 (ONE waiter on
+  a fork-COW'd stack; the "pagefault: cow" line at w+0x10 right before
+  the fatal one = the walk's CAS succeeding on the dead waiter),
+  +0x10 seq=1, +0x20 lock=1 (held by the crashing apply itself).
+- Crash regs: rbx=0xffffffff — the walk ran with nwaiters=-1 (the
+  clockwait TIMEOUT dequeue mode, which follows the whole chain), CAS'd
+  the real waiter, then followed w->next = 0x7ff08290a92c (module rodata
+  string) and faulted writing w->state there.
+- obj fields around the condvar: sane constructor values (deadline
+  +0x308 = real ms). bssslack (page 0x3c000 tail past memsz): ALL ZERO
+  — the condvar's own page is clean.
+- bssslack2 (page module+0x3d000, beyond ph4 memsz 0x3c51c, addressed
+  by nothing in the module): NONZERO — string fragments + pointer
+  0x7ff083e1eb30. DIRTY ANON PAGE HANDED OUT BY THE RECYCLER.
+  => KERNEL BUG #2 confirmed, independent of the launcher crash.
+  HANDOFF (mm lane): the page recycler/allocator gives out dirty pages
+  for fresh anon mappings somewhere between free and alloc.
+
+MUSL DECODE (image's ld-musl-x86_64.so.1, disassembled):
+- pthread_cond_timedwait entry DOES zero the node (movaps at 0x1181da,
+  rbp-0x50..-0x30) — the old "enqueue never inits next" first cut was
+  wrong at the micro level. The poison is LATER:
+- The queue's next links are sound while threads live, BUT a fork
+  child inherits the condvar WITH the parent's queued waiter node on
+  the parent's (now dead) thread stack (COW). POSIX: condvars with
+  waiters are UB across fork; OHOS appspawn forks without exec, so
+  every child inherits hicollie's watchdog condvar in that state.
+- The child's own threads then REUSE the dead stack (musl stack cache
+  hands the same VA to a new thread); the new thread's frames write
+  the "thread DfxWatchdog: Current scenario..." literal pointer
+  (materialized at 0x1a864 in the event-string builder) into the dead
+  node's next slot. The next timeout/signal walk follows it into the
+  R-only ph1 → SIGSEGV. The walk's fixup (head = last walked node,
+  0x118830) also propagates garbage into c->head — the sc258 shape
+  (head = string directly).
+- KERNEL VERDICT: SEGV delivery is CORRECT; the launcher crash-loop is
+  a userspace (image) bug family. Kernel-side dirty-recycle is real
+  but orthogonal (bssslack2).
+
+IMAGE PATCH (patch-ldmusl-zeronext.sh): zeros the waiter node's next
+link at enqueue (movq $0,(%rcx) via two .text pad caves, hijack at
+0x1182ea). Collapses the in-process garbage-next family. Applied to
+this worktree's private system.img (raw bmap'd block writes, inode
+2447; image copy verified byte-identical to the patched build).
+
+sc260 (patched, same recipe): 30 min roll.
+- Launcher crash-loop DEAD: 1 condvar crash total (pid 4695, t~25min —
+  the fork+stack-reuse residual variant, which enqueue-zeroing cannot
+  cover by design) vs sc258's 4-in-15min loop. Launcher instances
+  stay alive (STALLWATCH: tid 1281 parked >90s in a futex/clock poll,
+  NOT crash-cycling; later instance 4695 alive to the tail).
+- The other 12 SEGVs: 8x usb_host NULL (known noise) + 4 shutdown-tail
+  OS_IPC worker crashes (same family as sc258/259 tails).
+- OnForeground/launcher.ready: still NOT reached. The live blocker is
+  now the Account chain: "AccountDelegateNormalImpl:
+  QueryForegroundUserId: GetForegroundOsAccountLocalId failed, status:
+  4194349" — the launcher parks in a futex/clock retry loop waiting on
+  the osa/account services (the sc257 SAREG census shape: registration
+  re-sends with no replies). Screenshot stays the GPU probe gradient.
+- NEXT for this lane: (1) the account/osa IPC chain (why
+  GetForegroundOsAccountLocalId fails — status 4194349), (2) the
+  fork-residual condvar variant needs a musl-side fork-time condvar
+  reinit (pthread_atfork in libhicollie init, or an image patch on
+  fork) — next leg's call, (3) mm lane: dirty anon page recycle.
+
+Session close: probes (cv/obj/bssslack/bssslack2) committed; patch
+script committed; forensics (hicollie.asm, ld-musl disassembly,
+libhicollie extract) in run/forensics-leg22/.
