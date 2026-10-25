@@ -35,7 +35,20 @@ while [ "$i" -le "$LAST" ]; do
     S="$ROOT/run/${TAG}-r${i}-serial.log"
     HIT=""
     # gdb watchpoint surface (rip + regs + stack in the gdb log).
+    # HEAL_LAST adjudication (s4, 2026-10-25, after r96/load-r43):
+    # HEAL_LAST is heal_report's rate-gate static, shared by ALL FOUR
+    # callers — three scribble classes AND the benign "clock corrected
+    # backward" jitter/correction clamp. A HEAL_LAST-ONLY hit whose
+    # serial carries "corrected backward" (and no scribble line) is the
+    # benign caller: log it and CONTINUE. Anything else still stops.
+    # (HEAL_LAST-only with NO heal line at all still stops — manual
+    # adjudication; the print can be lost to serial buffering.)
+    HEAL_ONLY="no"
     if [ -f "$G" ] && grep -q "WW-HIT" "$G"; then
+        OTHER=$(grep "WW-HIT" "$G" | grep -cv "WW-HIT HEAL_LAST" || true)
+        if [ "$OTHER" = "0" ] && grep -q "WW-HIT HEAL_LAST" "$G"; then
+            HEAL_ONLY="yes"
+        fi
         HIT="WW-HIT"
         echo "[chain] WW-HIT in run $i — CAPTURE. gdb log: $G" >&2
         grep "WW-HIT" "$G" | head -5 >&2
@@ -64,6 +77,16 @@ while [ "$i" -le "$LAST" ]; do
         # Anomaly note (non-fatal): the tripwire must be armed every boot.
         grep -m1 "wildwatch armed" "$S" >&2 || \
             echo "[chain] NOTE: no wildwatch-armed line in run $i (arm failed?)" >&2
+    fi
+    # Benign HEAL_LAST adjudication: only-HEAL_LAST gdb hit + "corrected
+    # backward" in the serial + NO scribble/canary/panic marker => the
+    # jitter-clamp caller; demote the hit and keep hunting.
+    if [ "$HEAL_ONLY" = "yes" ] && [ -f "$S" ] \
+       && grep -q "clock corrected backward" "$S" \
+       && ! grep -qE "hpet: clock (base|div|offset) healed" "$S" \
+       && [ "$HIT" = "WW-HIT" ]; then
+        echo "[chain] WW-HIT HEAL_LAST adjudicated BENIGN-JITTER (clock corrected backward in serial, no scribble) — continuing" >&2
+        HIT=""
     fi
     if [ -n "$HIT" ]; then
         echo "[chain] CAPTURE markers ($HIT) in run $i — stopping chain." >&2

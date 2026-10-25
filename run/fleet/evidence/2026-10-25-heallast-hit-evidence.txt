@@ -1,0 +1,62 @@
+HEAL_LAST WW-HIT adjudication — chains ww-s2 r96 + wwload r43 (2026-10-25 ~10:20)
+================================================================================
+
+Both armed-capture chains self-stopped on their FIRST-EVER WW-HIT at
+10:50/10:52 (auto-stop by design). Adjudicated BENIGN (false positive of
+the HEAL_LAST watchpoint via the shared rate-gate static). The wild-write
+engine remains uncaught: 0 real hits in 96+43 armed rounds.
+
+Captures (identical shape, byte-identical rip):
+  gdb: WW-HIT HEAL_LAST rip=0xffffffff80448779 rsp=.../rbp=...
+       = core::sync::atomic::atomic_compare_exchange::<u64>+921
+       rdi=rcx=0xffffffff80fc88b0 (watchpoint 1 = hpet::heal_report::LAST)
+       rsi(old)=0, rdx(new)=88265 [r96] / 75065 [r43]  (jiffies, HZ=100)
+  => CAS(LAST, 0, now): the FIRST heal_report() call of each boot
+     (LAST boots at 0), rate gate now-last>=25 passed.
+
+Producer (hpet.rs heal_report, frozen ELF source read):
+  heal_report() is called by FOUR paths; three are scribble classes
+  (clock base/div/offset healed) and one is the documented BENIGN
+  jitter/correction clamp: "hpet: clock corrected backward" — a LARGE
+  backward clock step honored as a correction. All four share the
+  rate-gate static LAST, so the watchpoint fires for all four.
+
+ww-s2 r96 — PROVEN benign by its own serial (line 58631 of 91179):
+  WW: TIMER-LATE-FIRE pid=549 late=252ms (timer fired late; softirq starvation?)
+  hpet: clock corrected backward 00000002112c70a5->0000000211037c05
+  Step = 0x1C2F4A0 ticks = 268.4 ms backward at last_good=887.8s;
+  the 252ms timer-late-fire on the PREVIOUS line is the same host-stall
+  event (documented TCG host-contention family, kernel R57 comment).
+  Hit at jiffies 88265 = 882.65s into the round started 10:05:34
+  => wall clock ~10:20:30.
+
+wwload r43 — same class (no confirmatory serial line):
+  Same rip, same static, same first-fire (old=0). jiffies 75065 = 750.65s
+  into the round started 10:06:57 => wall clock ~10:19:35. Both chains
+  fired within ~1 minute — one host-storm event ~10:20 (session-3's
+  central sweep + v7 merge build were running). The 50-byte print was
+  lost to QEMU serial stdio buffering at that stall moment.
+  No scribble evidence anywhere in r43: no "clock base/div/offset
+  healed" line, no WILDWATCH-CANARY, no KERNPANIC (guard cluster RO
+  would have trapped a cluster scribble at the writer), and no other
+  watchpoint fired (HPET_BASE / TSC_* — the non-cluster victim
+  geometries — stayed silent). Only the shared rate-gate static fired.
+
+Root cause of the false positive (hunt-surface design):
+  qs2 qualified HEAL_LAST as "storm-quiet" on a 15.5-min probe; the
+  backward-correction class fires roughly once per ~50-80 armed
+  boot-hours under host-storm load, so the probe window missed it.
+  r1-r95 + load-r1-r42 (~80 armed boot-hours) stayed quiet; the ~10:20
+  host event fired it on both chains simultaneously.
+
+Fix (this session, run/ww-chain2.sh + run/ww-loadchain.sh stop-check):
+  A WW-HIT whose ONLY label is HEAL_LAST is now adjudicated by the
+  serial: "clock corrected backward" present (and no scribble line) =>
+  BENIGN-JITTER, logged, chain CONTINUES (no stop). HEAL_LAST with a
+  scribble line ("clock base|div|offset healed"), any other watchpoint
+  label, WILDWATCH-CANARY, or KERNPANIC => still an immediate stop.
+  HEAL_LAST-only with NO serial heal line at all => still a stop +
+  manual adjudication (the r43 case — conservative; ground truth over
+  automation).
+
+Chains relaunched from r97 / load-r44 after the patch.

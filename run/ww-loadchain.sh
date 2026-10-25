@@ -33,7 +33,16 @@ while [ "$i" -le "$LAST" ]; do
     G="$ROOT/run/${TAG}-r${i}-gdb.log"
     S="$ROOT/run/${TAG}-r${i}-serial.log"
     HIT=""
+    # HEAL_LAST adjudication (s4, 2026-10-25 — see ww-chain2.sh and
+    # run/fleet/evidence/2026-10-25-heallast-hit-evidence.txt):
+    # HEAL_LAST-ONLY gdb hit + "clock corrected backward" in the serial
+    # and no scribble line => benign jitter-clamp caller, keep hunting.
+    HEAL_ONLY="no"
     if [ -f "$G" ] && grep -q "WW-HIT" "$G"; then
+        OTHER=$(grep "WW-HIT" "$G" | grep -cv "WW-HIT HEAL_LAST" || true)
+        if [ "$OTHER" = "0" ] && grep -q "WW-HIT HEAL_LAST" "$G"; then
+            HEAL_ONLY="yes"
+        fi
         HIT="WW-HIT"
         echo "[lchain] WW-HIT in run $i — CAPTURE. gdb log: $G" >&2
         grep "WW-HIT" "$G" | head -5 >&2
@@ -63,6 +72,13 @@ while [ "$i" -le "$LAST" ]; do
         if [ "${n:-0}" -lt 50 ]; then
             echo "[lchain] NOTE: sdc cycle count low ($n) — load not running?" >&2
         fi
+    fi
+    if [ "$HEAL_ONLY" = "yes" ] && [ -f "$S" ] \
+       && grep -q "clock corrected backward" "$S" \
+       && ! grep -qE "hpet: clock (base|div|offset) healed" "$S" \
+       && [ "$HIT" = "WW-HIT" ]; then
+        echo "[lchain] WW-HIT HEAL_LAST adjudicated BENIGN-JITTER (clock corrected backward in serial, no scribble) — continuing" >&2
+        HIT=""
     fi
     if [ -n "$HIT" ]; then
         echo "[lchain] CAPTURE markers ($HIT) in run $i — stopping chain." >&2
