@@ -1280,3 +1280,23 @@ now keys known exec bands by binder code — {1,64}: 4.5-9s, {7}: 13-95s
 — and FAILs on queue>=50ms, out-of-band totals, or an unknown code;
 it re-validates PASS on all five boots spanning the reclaim
 (pa40/pa41gate pre, pa47smoke/pa46main/pa46f4r2 post).
+
+### 8.10.4 LTP socket-family subset on the branch kernel (leg 35, pa48)
+
+The merge-blocking debt on b3757d92 (socket fast path was med-of-3
+measured but never LTP-run; the fleet covers main-class only) is
+cleared: private copy of the fleet LTP rootfs with /test/sweep.list
+replaced by the 32 socket-family rows (indices preserved from the
+fleet's 1081-row list), swept from 0 on the merged branch kernel
+(ddb3ed01 + b3757d92 + procfile!, debug, TCG smp2/2G, run
+run/pa48-ltpsock.sh, log run/pa-pa48sock-r1-serial.log).
+
+Result: all 32 tests ran, SWEEP DONE, clean power-down, 0 panics.
+30/32 states identical to the fleet's latest main-class result;
+the two differences (recv01 CRASH-vs-FAIL, recvmsg03 TCONF-vs-FAIL)
+are both states the fleet's own main-class history already shows
+(fleet-all includes CRASH for recv01 and both FAIL/TCONF for
+recvmsg03) — flaky tests, not branch behavior. The five CRASH|0|9
+rows (recv01/recvfrom01/send01/sendmsg01/sendto01) crash on
+main-class kernels too. No NEW failure class: the socket fast path
+is LTP-clean for the merge claim.
