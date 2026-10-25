@@ -4754,3 +4754,62 @@ sysevent_source/os_ds_service stale-claim census shapes) before the
 launcher spawned; SILENT-TXN fired once. Launcher-crash decider data
 STILL PENDING — the spawn-flow wedge (sc252/253/255/256 class) is the
 gate in front of it, not the crash itself.
+
+LEG-21 (OH UI lane, leg-20 successor) — OPENED (post-pause).
+
+SESSION START: pause snapshot d60a8c84 was HEAD; tree clean besides ppm
+shots. Thread 2 (brkseq do_exit-hang) was RESOLVED by leg-20 (repro
+harness PASS on both kernels; handoff documented) — no further work.
+Thread 1 (launcher crash-loop) = the active lane.
+
+LAUNCHER CRASH SITE FULLY NAMED (offline forensics, no new roll needed):
+- The rip pattern f0 0f b1 51 10 85 c0 74 15 ff 45 ec 48 89 71 18
+  occurs at EXACTLY ONE offset in the whole system image: file offset
+  0x1177d2 of /system/lib/ld-musl-x86_64.so.1 (raw grep + debugfs
+  icheck/ncheck -> inode 2447). Load bias = 0x3fbf000000: the rip VMA
+  (0x3fbf077000, off=0x76000) is ld-musl's own PT_LOAD1. THE CRASHING
+  CODE IS THE DYNAMIC LINKER ITSELF.
+- Disassembly: fault = pthread_cond_timedwait+0x620 (0x1187d2), the
+  a_cas(w->state, WAITING, SIGNALED) claim step of the waiter-queue
+  walk in the apply() helper at 0x118700 (callers: signal/broadcast/
+  leaver paths at 116f44/116fd4/118018/118198).
+- OHOS musl waiter node: struct waiter { link@0, link@8, state@0x10,
+  barrier@0x14, ret@0x18 }, STACK-ALLOCATED at rbp-0x50 of the waiting
+  thread (enqueue at 0x1182d4). Queue fields live in the condvar:
+  tail@c+0x8, waiters@c+0xc, seq@c+0x10, lock@c+0x20, head@c+0x28.
+  rcx at the fault = *(c+0x28) = _c_head; rdi-0x20 gives c =
+  0x7ff081bfc108 = the memfd module's .bss+0x108 (global condvar).
+- So _c_head = module_base+0xa92c = INSIDE the module's R-only first
+  PT_LOAD. Enqueue only ever stores waiter STACK addresses => the head
+  is a STALE pointer: the node address stopped being a stack and became
+  the module's rodata (unmap + dlopen reuse of the hole), or the .bss
+  page is a dirty recycled anon page carrying the OLD instance's
+  corrupted condvar (fresh bss must be zero — dirty recycle = kernel
+  mm bug). Every appspawn fork inherits condvar+module at the same
+  base => identical crash in every child. render_service's memcpy twin
+  (guard-page read of 0x3a8 bytes) = same stale-per-thread-state
+  family. NOT a VMA-construction bug: the mapping faithfully follows
+  the file's phdrs; the pointer is wrong on the userspace side.
+- EACCES/read-only-fd lead: CLOSED for good (fd 40 was O_RDWR memfd;
+  zero MMAP/MPROTECT-EACCES in every roll).
+
+PROBES LANDED (bb274328, x86_64 trap.rs, dfx-gated): cr2elf (module's
+own ELF header+phdrs via page-table read of its offset-0 mapping; tags
+the PT_LOAD covering the fault file offset), cr2bytes (32B around cr2),
+cr2strs (.dynstr names the module even for anon memfd), frame (rbp-0x58
+deref: this frame parks the condvar pointer there; dumps the condvar's
+own words — stale-head vs whole-condvar-garbage decider).
+
+QUIETCON DISCOVERY: sleep_snapshot prints at pr_info; ALL sc25x rolls
+ran loglevel 4 => the wedge's parked-syscall call graph was loglevel-
+filtered in every roll so far (the "sleepsnap never fires" mystery).
+sc257 (same recipe as sc254, probes aboard) wedged pre-spawn at the
+usual ~t290s: 2208 WAKE-RUN-LEAK lines all wok>=kicks wno=0 (healthy
+cycling shapes, conversations frozen QUIET — FXRS global count ~3700
+ops in 25min rules out CPU-pegging spinners for this class), SAREG
+shows pid 757 (tgid 1094, OS_FFRT_5_1) endlessly re-sending
+IApplicationStateObserver registration to pids 434/411(mmi_service)/509
+— replies never arrive, enq_j silence rule can't fire (target nodes
+alive). sc258 launched LOGLEVEL=7 dfx=schb,sleepsnap SECS=1800 to
+capture the frozen call graph + (if spawn survives) the launcher-crash
+decider probes in one roll.
