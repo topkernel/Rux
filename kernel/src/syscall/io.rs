@@ -574,6 +574,14 @@ pub fn sys_write(args: SyscallArgs) -> i64 {
                 if crate::fs::pipe::is_pipe_file(&file) {
                     return crate::fs::pipe::pipe_write_user(&file, buf, count) as i64;
                 }
+                // dfx=txnhunt (leg-29A): name the file when a regular-
+                // file write later draws a TXN-HANG (sc303's storage
+                // family parked in a write(9) loop; entry frame shows
+                // only the raw fd). Pipes/sockets skipped above.
+                crate::dfx::pathstash::stash_file(
+                    crate::dfx::pathstash::OP_WRITE,
+                    &file.path(),
+                );
                 // Chunked write (SYSA-C1): bounded staging buffer so a huge
                 // count cannot OOM the kernel heap; a partial chunk write
                 // ends the loop and returns what was accepted (POSIX

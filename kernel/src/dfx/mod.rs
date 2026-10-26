@@ -83,6 +83,16 @@ pub mod fsw;
 /// preempt_count — names the producer of the leaked-count wake-strand
 /// family; see dfx/leakorigin.rs.
 pub mod leakorigin;
+/// Last-open path stash for TXN-HANG (dfx=txnhunt): sys_openat stashes
+/// the resolved path at entry so the 1 Hz audit can name the file a
+/// hung server thread is stuck opening (leg-28 item 2: storage_daemon
+/// D-state open family); see dfx/pathstash.rs.
+pub mod pathstash;
+/// Process-tree invariant validator (dfx=treehunt, leg-29A): catches a
+/// live task whose parent pointer names released memory — the E8-REPAR
+/// "unlinked snapshot" class that produced the sc304 signal-Arc Oops —
+/// plus stale thread-group parent snapshots; see dfx/treehunt.rs.
+pub mod treehunt;
 
 /// Initialize the DFX subsystem.
 ///

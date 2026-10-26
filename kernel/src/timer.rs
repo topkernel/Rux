@@ -497,6 +497,10 @@ pub fn timer_softirq_handler(_nr: usize) {
             // self-gated + rate-capped inside). Runs on the same ~1 Hz
             // heartbeat slot; zero cost when off.
             crate::ipc::binder::txn_hang_audit();
+            // leg-29A: process-tree invariant validator (dfx=treehunt,
+            // self-gated + rate-capped inside) — E8-REPAR unlinked-
+            // snapshot root-cause hunt.
+            crate::dfx::treehunt::tick();
         }
     }
 

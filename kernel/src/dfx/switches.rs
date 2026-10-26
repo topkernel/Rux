@@ -79,6 +79,7 @@ macro_rules! dfx_switch_table {
             LeakHunt => "leakhunt",
             WwCensus => "wwcensus",
             TxnHang => "txnhunt",
+            TreeHunt => "treehunt",
         }
     };
 }
@@ -317,9 +318,16 @@ pub enum DfxSwitch {
     /// spend its time on" without waiting for the 60 s khungtaskd
     /// cadence. Purely diagnostic; OFF by default.
     TxnHang,
+    /// dfx=treehunt (leg-29A): ~1 Hz process-tree invariant validator —
+    /// flags live tasks whose parent pointer names implausible (freed/
+    /// recycled) memory and thread-group members whose parent snapshot
+    /// diverged from the leader's maintained parent. The E8-REPAR
+    /// "unlinked snapshot" family root-cause hunt (sc304 signal-Arc
+    /// Oops walked such a chain). Purely diagnostic; OFF by default.
+    TreeHunt,
 }
 
-const SWITCH_COUNT: usize = 35;
+const SWITCH_COUNT: usize = 36;
 
 static SWITCHES: [AtomicBool; SWITCH_COUNT] = [const { AtomicBool::new(false) }; SWITCH_COUNT];
 
@@ -391,6 +399,7 @@ impl DfxSwitch {
             DfxSwitch::LeakHunt => 32,
             DfxSwitch::WwCensus => 33,
             DfxSwitch::TxnHang => 34,
+            DfxSwitch::TreeHunt => 35,
         }
     }
 
