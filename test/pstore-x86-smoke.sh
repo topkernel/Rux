@@ -15,7 +15,13 @@
 # staging dir holding the static probe).
 #
 # Usage: test/pstore-x86-smoke.sh [bzImage] [logfile]
-# Env:   BOOT_DELAY (default 25), TIMEOUT (default 300)
+# Env:   BOOT_DELAY (default 25), TIMEOUT (default 420)
+#
+# -m 2G, not 1G: the x86 layout's kernel heap starts at the 1 GiB mark,
+# so a 1 GiB guest panics during early boot (ALLOCTHROW at main.rs:277,
+# the same failure pbench_boot.py documents for --mem 1G). TIMEOUT 420
+# (was 300): two boots (panic + reboot + read-back) under a loaded host
+# need the same margin the riscv smoke carries.
 
 set -uo pipefail
 
@@ -23,7 +29,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BZIMAGE="${1:-$ROOT/target/x86_64-unknown-none/debug/bzImage}"
 LOG="${2:-$ROOT/run/pstore-x86-serial.log}"
 BOOT_DELAY="${BOOT_DELAY:-25}"
-TIMEOUT="${TIMEOUT:-300}"
+TIMEOUT="${TIMEOUT:-420}"
 
 MUSL_CC="$ROOT/toolchain/x86_64-rux-linux-musl/bin/musl-gcc"
 MKFS=/usr/sbin/mkfs.ext4
@@ -59,7 +65,7 @@ rm -f "$LOG"
     -M q35 \
     -accel tcg,thread=multi \
     -cpu max \
-    -m 1G \
+    -m 2G \
     -smp 2 \
     -display none \
     -serial stdio \
