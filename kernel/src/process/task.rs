@@ -3425,6 +3425,14 @@ impl Task {
         }
     }
 
+    /// Raw parent-children-list head pointer (dfx=treehunt reads it to
+    /// distinguish linked leaders from unlinked snapshot members; null
+    /// for members by design). Diagnostic use only.
+    #[inline]
+    pub fn parent_children_head_ptr(&self) -> *mut core::ffi::c_void {
+        self.parent_children_head as *mut core::ffi::c_void
+    }
+
     /// Raw group_leader field (no healing) — for re-init during teardown.
     #[inline]
     pub fn group_leader_raw(&self) -> *mut Task {
@@ -4983,6 +4991,32 @@ impl Task {
         (*child)
             .sibling
             .add_tail(&(*dest).children as *const _ as *mut ListHead);
+        // E8-REPAR root cause (leg-29A): the moved child's thread-group
+        // MEMBERS carry parent SNAPSHOTS (thread_group_join copies the
+        // leader's parent verbatim; nothing maintained them), so a
+        // reparented group left every member naming the OLD parent —
+        // memory that gets reaped and recycled while the members live.
+        // The member's own exit then walks release_task's
+        // parent_ptr()/remove_child through freed memory (the sc304
+        // signal-Arc Oops family; reproduced by dfx=treehunt +
+        // test/subreap_churn.c as TREE-SNAP-STALE). Refresh every
+        // member's snapshot to the new dest under this same lock hold —
+        // the ring walk is the same bounded pattern the reparent member
+        // scan uses, and members can't join/leave concurrently (both
+        // take PROCESS_TREE_LOCK).
+        let mut m = (*child).next_thread_ptr();
+        let mut guard = 0u32;
+        while (m as *const Task) != (child as *const Task)
+            && !m.is_null()
+            && guard < 65536
+        {
+            if (*m).group_leader == child {
+                (*m).parent = Some(dest as *const Task);
+                (*m).parent_children_head = ptr::null_mut();
+            }
+            m = (*m).next_thread_ptr();
+            guard += 1;
+        }
         true
     }
 
