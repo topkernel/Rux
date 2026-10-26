@@ -3963,6 +3963,24 @@ impl Task {
         );
     }
 
+    /// Tick-side PREEMPT-HEAL, unified form: keep exactly ONE
+    /// HARDIRQ_OFFSET (the observer's own in-flight timer IRQ level,
+    /// so the still-pending irq_exit sub pairs) plus NMI nesting, and
+    /// drop everything else — phantom base bits AND phantom extra
+    /// hardirq nesting (leg-19 round-3e pure-hardirq phantom,
+    /// base == 0 with hardirq extra held 10 s). When there is no
+    /// extra hardirq nesting the result is bit-identical to
+    /// `ti_preempt_count_clear_base`.
+    #[inline]
+    pub fn ti_preempt_count_keep_tick_nesting(&self) {
+        use core::sync::atomic::Ordering;
+        self.ti_preempt_count.fetch_and(
+            crate::interrupt::preempt::HARDIRQ_OFFSET
+                | crate::interrupt::preempt::NMI_MASK,
+            Ordering::Release,
+        );
+    }
+
     /// Get kernel stack pointer (thread_info.kernel_sp)
     #[inline]
     pub fn ti_kernel_sp(&self) -> u64 {
@@ -4396,6 +4414,24 @@ impl Task {
         self.kernel_stack_bottom + KERNEL_STACK_SIZE
     }
 
+    /// sc261 (leg-23): a thread's kernel stack is returned to the
+    /// stack cache and kernel_stack_bottom zeroed at exit time (see
+    /// free_kernel_stack), while the Task struct itself survives until
+    /// its last pin drops — kernel_stack_top() then reports
+    /// KERNEL_STACK_SIZE and every entry-frame reader computes a small
+    /// bogus address. sc261: kill_dump_tgid dereferenced 0x13fd0
+    /// (= 0x14000 - PT_REGS_SIZE + offsetof(PtRegs, orig_rax)) on an
+    /// exited-but-pinned thread and took the boot down with an
+    /// unfixable kernel fault inside the SIGKILL teardown
+    /// (rip = <u64 as LowerHex>::fmt entry, load of the format value,
+    /// pid 1421). Foreign-task entry-frame diagnostics MUST check this
+    /// first; false means the thread has exited and its pt_regs frame
+    /// is gone. (A task's own current thread always passes.)
+    #[inline]
+    pub fn owns_kernel_stack(&self) -> bool {
+        self.kernel_stack_bottom != 0
+    }
+
     /// Diagnostic-safe kernel stack top (KILLDUMP census family).
     ///
     /// free_kernel_stack() clears kernel_stack_bottom to 0, but the Task
@@ -4419,7 +4455,6 @@ impl Task {
             return None;
         }
         Some(self.kernel_stack_bottom + KERNEL_STACK_SIZE)
-    }
 
     /// Check if address is within kernel stack range (for overflow detection)
     ///
