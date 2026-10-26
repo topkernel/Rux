@@ -1299,6 +1299,7 @@ pub static TMPFS_INODE_OPS: INodeOps = INodeOps {
     readlink: Some(tmpfs_readlink),
     get_file_ops: Some(tmpfs_get_file_ops),
     readdir: Some(tmpfs_readdir),
+    readdir_cacheable: true,
     open: None,
     permission: None, // default: allow all (DAC via generic path)
     getattr: Some(tmpfs_getattr),
