@@ -6048,3 +6048,46 @@ OH-B holds 12201/12202):
   sys=20 writev RUNNING texture (hilog-socket family). Storage
   D-state and hiview-fdatasync families: not drawn yet; adjudication
   when the wave lands.
+
+LEG-29A ADDENDUM 1 (05:20) — SECOND KERNEL BUG FOUND AND FIXED WHILE
+THE WAVE RAN: ext4 dir-entry split panic, deterministic.
+  All three wave boots (and sc308/sc310 before me — pre-existing, the
+  leg-28 ox tally only counted paging oops so it was invisible) drew:
+  `PANIC: range end index 4139 out of range for slice of length 4096`
+  at ext4/namei.rs add_entry_to_block. Root cause: ext4 dir blocks are
+  read-clone-modify-write with NO per-inode lock; two CPUs mutating the
+  SAME directory both cloned the block, found the same free space,
+  split the same entry, and the loser's whole-block write clobbered the
+  winner's — the interleaved rec_len chain ran past the block end and
+  the next splitter panicked. Silent shapes of the same race: lost
+  entries, corrupt rec_len chains. Fix 6dc0ae06: ENTRY_MUTEX (global
+  sleeping mutex) serializes every entry mutation, taken BEFORE the
+  journal bracket in mkdir/create/mknod/symlink/link/unlink/rmdir/
+  rename (nobody sleeps on the mutex holding an open journal handle —
+  commit-waits-for-handles cannot deadlock against it; public add/
+  delete keep their own guard, inner bodies use _locked variants);
+  find_entry_space now treats a rec_len claiming space past the block
+  end as no-space (fresh-block allocation) instead of panicking.
+  make-test rerun on the fixed tree is queued behind a FOREIGN
+  make-test QEMU holding test/rootfs.img (pid 572289, `./test/run.sh
+  test`, not mine — left alone per own-PID discipline).
+
+WAVE INTERIM (sc313A/314A/315A, kernel bzImage-29A-treefix2):
+  - The sync-write family HAS A NAME now (file-op=sync probe): pid 479
+    accesstoken_ser's handler parked INTERRUPTIBLE 1.2-1.4 s in
+    fdatasync of /mnt/sandbox/system/data/service/el1/public/
+    access_token/access_token_slave.db{,-wal} (SQLite WAL syncs) under
+    txns from foundation tid 1161. That is the short-stall texture of
+    the same family sc310's hiview sat in for 43 min; the
+    90 ms-class fsync claim is 13x off under load. The storage_daemon
+    O_CREAT|O_TRUNC D-state family itself: 0x2 states still zero so far.
+  - TXN-HANG-STK symbolization gap found and fixed: sp-up window (80
+    words) only caught switch/IRQ plumbing above the saved sp for deep
+    parkers; widened to 384 words (c3e89b4f) for the NEXT boots
+    (bzImage-29A-dirlock2 = dirlock fix + widened window).
+  - sc314A's 92 'open /dev/access_token_id' labels were carried stashes
+    on writev-hung threads (pipe writes never refreshed the stash);
+    4b7c1ab5 makes the print family-matched and stashes pipe writes too.
+NEXT: when sc313A-315A end, fire sc316A/sc317A on bzImage-29A-dirlock2
+(dfx=txnhunt,fsw) — verifies the dirlock fix kills the panic family
+AND redraws the storage/hiview families with the widened stack window.
