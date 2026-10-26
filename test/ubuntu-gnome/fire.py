@@ -52,6 +52,8 @@ p.add_argument("--keyprobe", default="",
                help="comma list of elapsed seconds for a single QMP 'a' keypress")
 p.add_argument("--mousemove", default="",
                help="comma list of elapsed seconds for QMP abs pointer moves")
+p.add_argument("--qtrace", default="",
+               help="comma list of QEMU trace events (simple backend, file in run dir)")
 args = p.parse_args()
 
 OUT = os.path.join(WT, "runs", f"gnome-{args.tag}")
@@ -82,6 +84,16 @@ qemu_cmd = [
     "-kernel", args.kernel,
     "-append", append,
 ]
+# --qtrace ev1,ev2: enable QEMU simple-trace backend events (e.g.
+# virtio_input_queue_full,virtqueue_pop) and log them to the run dir —
+# used for the virtio-input eventq delivery hunt (leg-7): the device
+# drops input events SILENTLY when it cannot pop an avail buffer, and
+# these events name that exact condition.
+if args.qtrace:
+    for ev in args.qtrace.split(","):
+        if ev.strip():
+            qemu_cmd += ["-trace", f"enable={ev.strip()}"]
+    qemu_cmd += ["-trace", f"file={os.path.join(OUT, 'qemu.trace')}"]
 with open(os.path.join(OUT, "cmdline.txt"), "w") as f:
     f.write(" ".join(qemu_cmd) + "\n")
 print("[fire] qemu:", " ".join(qemu_cmd), flush=True)
@@ -304,22 +316,22 @@ try:
             kt = keyprobe.pop(0)
             if qmp:
                 try:
-                    try:
-                        # Qmp.cmd is keyword-only; hyphenated QMP arg
-                        # names go through ** expansion
-                        qmp.cmd("send-key",
-                                **{"keys": [{"type": "qcode",
-                                             "data": {"name": "a"}}],
+                    # QAPI shape: KeyValue-qcode is {type:"qcode", data:"a"}
+                    # — data is a PLAIN STRING. The original probe sent
+                    # data:{"name":"a"} and QEMU rejected every send with
+                    # "Invalid parameter type for 'keys[0].data', expected:
+                    # string" — while fire.py still printed "sent" (the
+                    # error rode the response dict, not an exception), so
+                    # EVERY keyprobe since leg-6 was a no-op (leg-7 finding,
+                    # /tmp host A/B). Response errors are checked now.
+                    r = qmp.cmd("send-key",
+                                **{"keys": [{"type": "qcode", "data": "a"}],
                                    "hold-time": 50})
-                    except Exception:
-                        # send-key is deprecated; input-send-event is the
-                        # supported form (explicit down+up pair)
-                        qmp.cmd("input-send-event", events=[
-                            {"type": "key", "data": {"down": True,
-                             "key": {"type": "qcode", "data": "a"}}},
-                            {"type": "key", "data": {"down": False,
-                             "key": {"type": "qcode", "data": "a"}}}])
-                    print(f"[fire] t={el}s keyprobe 'a' sent", flush=True)
+                    if isinstance(r, dict) and "error" in r:
+                        print(f"[fire] t={el}s keyprobe QMP error: "
+                              f"{r['error'].get('desc')}", flush=True)
+                    else:
+                        print(f"[fire] t={el}s keyprobe 'a' sent", flush=True)
                 except Exception as e:
                     print(f"[fire] t={el}s keyprobe error: {e}", flush=True)
         # --mousemove 600: absolute pointer positioning via QMP
@@ -337,17 +349,23 @@ try:
             mt = mousemove.pop(0)
             if qmp:
                 try:
-                    qmp.cmd("input-send-event", events=[
+                    r = qmp.cmd("input-send-event", events=[
                         {"type": "abs", "data": {"axis": "x",
                                                  "value": 16384}},
                         {"type": "abs", "data": {"axis": "y",
                                                  "value": 16384}}])
+                    if isinstance(r, dict) and "error" in r:
+                        print(f"[fire] t={el}s mousemove QMP error(1): "
+                              f"{r['error'].get('desc')}", flush=True)
                     time.sleep(2)
-                    qmp.cmd("input-send-event", events=[
+                    r = qmp.cmd("input-send-event", events=[
                         {"type": "abs", "data": {"axis": "x",
                                                  "value": 26214}},
                         {"type": "abs", "data": {"axis": "y",
                                                  "value": 21299}}])
+                    if isinstance(r, dict) and "error" in r:
+                        print(f"[fire] t={el}s mousemove QMP error(2): "
+                              f"{r['error'].get('desc')}", flush=True)
                     print(f"[fire] t={el}s mousemove abs center+rightdown sent",
                           flush=True)
                 except Exception as e:
