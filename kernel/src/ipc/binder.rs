@@ -3222,7 +3222,12 @@ pub fn txn_hang_audit() {
                     let p = thsp as *const u64;
                     let mut shown = 0;
                     let _ = write!(line, " sp-up:");
-                    for k in 0..80usize {
+                    // 384-word window: deep waits (journal commit, bio
+                    // completion) park far below the syscall frames; the
+                    // original 80-word window caught only the switch/IRQ
+                    // plumbing above the saved sp (sc315A's parked
+                    // fdatasync chains symbolized to context_switch).
+                    for k in 0..384usize {
                         // SAFETY: diagnostic read inside the task's own
                         // kernel-stack window; bounds checked above.
                         let v = unsafe { core::ptr::read_volatile(p.add(k)) };
