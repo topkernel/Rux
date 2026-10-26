@@ -1700,3 +1700,12 @@ forward). Boot-level wall effect is modest by construction (the map's
 own tot-11.4s estimate); the win is per-op latency + allocation churn.
 Collateral clean: read_inode -4%, other fsw volumes in class; pb
 (route-1) flows on both arms (main carries it).
+
+**Route-4 LTP mutation-family spot (17 rows, pa63ltp-r4 on the branch
+riscv64 debug kernel, run/pa-pa63ltp-r4-serial.log): 14 PASS / 3 FAIL,
+ZERO NEW failures.** The three FAILs (rmdir02, rmdir03, rename05) all
+FAIL in the fleet baseline for the same indices (rename05 recorded
+FAIL in every fleet round); my run additionally PASSES rename01/03/04,
+rmdir01, unlink05/07/08 — rows a stressed fleet round (keep-ltp-a-r59)
+had failed — the mutation+epoch-bump paths (mkdir/mknod/unlink/rename/
+creat) and fork09's fdtable walk all hold with the cache in play.
