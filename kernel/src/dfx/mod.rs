@@ -68,6 +68,9 @@ pub mod syscost;
 /// /sys/fs/pstore/console-ramoops-0 after the reboot (Tranche 5); see
 /// dfx/pstore.rs.
 pub mod pstore;
+/// The non-fatal Oops path: Linux-shaped report, pstore dmesg capture,
+/// task-death policy (Tranche 5); see dfx/oops.rs.
+pub mod oops;
 /// Soft-wedge heartbeat + one-shot wedge census (sc-series quiet-quiet
 /// hunt, cmdline `dfx=schb`); see dfx/schb.rs.
 pub mod schb;
@@ -81,6 +84,8 @@ pub mod fsw;
 /// Starts the softlockup detector and hung task detector.
 pub fn init() {
     switches::init_from_cmdline();
+    // oops=panic seeds panic_on_oops (the sysctl can flip it later).
+    oops::init_from_cmdline();
     // Wild-write tripwire arms between the timekeeper's init and
     // start_secondaries (no TLB shootdown needed; see wildwatch.rs).
     wildwatch::arm();
@@ -151,6 +156,60 @@ pub fn register_debugfs_knobs() -> usize {
             0
         };
         if debugfs::create_file(&path, 0o644, gen, Some(store)) {
+            count += 1;
+        }
+    }
+
+    // The oops provoquer — LKDTM's provoke-crash discipline: a debugfs
+    // write that faults in kernel mode on purpose, so the Oops path
+    // (report, pstore capture, task-death policy) is exercisable from
+    // a guest shell instead of waiting for a real kernel bug. The
+    // faulting read sits on no lock path: the write handler itself
+    // performs it, so the recoverable oops kills only the writer.
+    // Kinds: "pagefault" (the default) — a NULL-adjacent kernel read
+    // with no exception-table entry; "illegal" — an M-mode CSR in
+    // S-mode (riscv64) / ud2 (x86_64).
+    {
+        let gen = || {
+            b"write: pagefault | illegal\n".to_vec()
+        };
+        let store = |buf: &[u8]| -> i32 {
+            let text = core::str::from_utf8(buf).unwrap_or("").trim();
+            match text {
+                "" => 0, // the trailing-newline write, same convention
+                "pagefault" | "1" => {
+                    crate::pr_info!("dfx: provoking kernel page fault oops");
+                    // SAFETY: deliberate fault — read address 0x10 (a
+                    // NULL-adjacent page with no mapping and no fixup
+                    // entry on this instruction).
+                    let p = 0x10usize as *const u64;
+                    let _ = unsafe { core::ptr::read_volatile(p) };
+                    // Unreachable when the oops policy runs; if the
+                    // fault was fixed up somehow, report it.
+                    crate::pr_err!("dfx: provoke-oops fault did not fire");
+                    crate::errno::Errno::IOError.as_neg_i32()
+                }
+                "illegal" => {
+                    crate::pr_info!("dfx: provoking kernel illegal-instruction oops");
+                    #[cfg(feature = "riscv64")]
+                    // SAFETY: deliberate fault — machine-mode CSR access
+                    // from S-mode traps IllegalInstruction.
+                    unsafe {
+                        core::arch::asm!("csrr x0, 0x300", options(nomem, nostack));
+                    }
+                    #[cfg(feature = "x86_64")]
+                    // SAFETY: deliberate fault — ud2 is reserved for
+                    // traps (the BUG instruction).
+                    unsafe {
+                        core::arch::asm!("ud2", options(nomem, nostack));
+                    }
+                    crate::pr_err!("dfx: provoke-oops illegal did not fire");
+                    crate::errno::Errno::IOError.as_neg_i32()
+                }
+                _ => crate::errno::Errno::InvalidArgument.as_neg_i32(),
+            }
+        };
+        if debugfs::create_file("/dfx/provoke-oops", 0o644, gen, Some(store)) {
             count += 1;
         }
     }

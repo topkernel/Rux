@@ -1256,6 +1256,18 @@ pub struct Task {
     /// nonvoluntary_ctxt_switches).
     pub nvcsw: AtomicU64,
     pub nivcsw: AtomicU64,
+    /// Per-task scheduler statistics (the /proc/[pid]/schedstat
+    /// triple — T7 perf-support slice). runtime_ns accumulates on-cpu
+    /// time at every switch-away, wait_ns the runqueue wait at every
+    /// pick, timeslices counts real picks (a same-task repick after a
+    /// tick is NOT a new timeslice — Linux counts switches-to). The
+    /// two stamps (wait_start, exec_start) are written only under the
+    /// GRQ lock; the three counters are readable lock-free.
+    pub schedstat_runtime_ns: AtomicU64,
+    pub schedstat_wait_ns: AtomicU64,
+    pub schedstat_timeslices: AtomicU64,
+    pub schedstat_wait_start: AtomicU64,
+    pub schedstat_exec_start: AtomicU64,
     /// Page faults taken by this task in user mode (Linux's minflt).
     /// Rux has no minor/major distinction — file-backed pages come
     /// from the page cache, not from a fault-time disk read — so every
@@ -1596,6 +1608,16 @@ impl Task {
             nivcsw: AtomicU64::new(0),
             min_flt: AtomicU64::new(0),
             maj_flt: AtomicU64::new(0),
+            // Per-task scheduler statistics (T7 perf-support slice,
+            // /proc/[pid]/schedstat): on-cpu runtime ns, wait-on-rq ns,
+            // timeslices granted — plus the two GRQ-locked stamps the
+            // __schedule edges maintain (0 = window closed). All
+            // atomics: the file reads them without the GRQ lock.
+            schedstat_runtime_ns: AtomicU64::new(0),
+            schedstat_wait_ns: AtomicU64::new(0),
+            schedstat_timeslices: AtomicU64::new(0),
+            schedstat_wait_start: AtomicU64::new(0),
+            schedstat_exec_start: AtomicU64::new(0),
             start_jiffies: AtomicU64::new(crate::drivers::timer::get_jiffies()),
             cmaxrss_kb: AtomicU64::new(0),
             exit_maxrss_kb: AtomicU64::new(0),
@@ -2049,6 +2071,19 @@ impl Task {
             (ptr as usize + offset_of!(Task, maj_flt)) as *mut AtomicU64,
             AtomicU64::new(0),
         );
+        // Per-task schedstat counters (the /proc/[pid]/schedstat triple,
+        // T7): same non-zeroing discipline — the file reads them
+        // lock-free, so a cloned Task must start from zero like a
+        // fresh one (children do not inherit CPU time).
+        for f in [
+            offset_of!(Task, schedstat_runtime_ns),
+            offset_of!(Task, schedstat_wait_ns),
+            offset_of!(Task, schedstat_timeslices),
+            offset_of!(Task, schedstat_wait_start),
+            offset_of!(Task, schedstat_exec_start),
+        ] {
+            ptr::write((ptr as usize + f) as *mut AtomicU64, AtomicU64::new(0));
+        }
         // The task's start time (Linux's starttime, field 22 of
         // /proc/[pid]/stat): the jiffies at which the task was built.
         ptr::write(
@@ -2633,6 +2668,19 @@ impl Task {
             (ptr as usize + offset_of!(Task, maj_flt)) as *mut AtomicU64,
             AtomicU64::new(0),
         );
+        // Per-task schedstat counters (the /proc/[pid]/schedstat triple,
+        // T7): same non-zeroing discipline — the file reads them
+        // lock-free, so a cloned Task must start from zero like a
+        // fresh one (children do not inherit CPU time).
+        for f in [
+            offset_of!(Task, schedstat_runtime_ns),
+            offset_of!(Task, schedstat_wait_ns),
+            offset_of!(Task, schedstat_timeslices),
+            offset_of!(Task, schedstat_wait_start),
+            offset_of!(Task, schedstat_exec_start),
+        ] {
+            ptr::write((ptr as usize + f) as *mut AtomicU64, AtomicU64::new(0));
+        }
         // The task's start time (Linux's starttime, field 22 of
         // /proc/[pid]/stat): the jiffies at which the task was built.
         ptr::write(
