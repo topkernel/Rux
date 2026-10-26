@@ -2981,6 +2981,7 @@ pub static EXT4_INODE_OPS: INodeOps = INodeOps {
     readlink: Some(ext4_readlink),
     get_file_ops: Some(ext4_get_file_ops),
     readdir: Some(ext4_readdir),
+    readdir_cacheable: true,
     open: None,
     permission: None,   // Default: allow all
     getattr: Some(ext4_getattr),

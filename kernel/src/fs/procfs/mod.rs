@@ -2326,6 +2326,7 @@ pub static PROCFS_INODE_OPS: INodeOps = INodeOps {
     readlink: Some(procfs_readlink),
     get_file_ops: Some(procfs_get_file_ops),
     readdir: Some(procfs_readdir),
+    readdir_cacheable: false,
     open: Some(procfs_open),
     permission: None,  // Default: allow all
     getattr: Some(procfs_getattr),
@@ -2471,6 +2472,7 @@ static PROCFS_NS_DIR_OPS: INodeOps = INodeOps {
     readlink: None, // handled on the ns-link inodes (PROCFS_INODE_OPS)
     get_file_ops: None,
     readdir: Some(procfs_ns_dir_readdir),
+    readdir_cacheable: false,
     open: None,
     permission: None,
     getattr: Some(procfs_ns_dir_getattr),

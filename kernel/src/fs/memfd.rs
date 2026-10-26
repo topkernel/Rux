@@ -222,6 +222,7 @@ static MEMFD_INODE_OPS: INodeOps = INodeOps {
     readlink: None,
     get_file_ops: None,
     readdir: None,
+    readdir_cacheable: false,
     open: None,
     permission: None,
     getattr: None,

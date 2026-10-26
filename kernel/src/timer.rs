@@ -487,7 +487,12 @@ pub fn timer_softirq_handler(_nr: usize) {
             .compare_exchange(hb_last, current, Ordering::AcqRel, Ordering::Acquire)
             .is_ok()
         {
-            ww_heartbeat(now_time);
+            // Hunt instrument (serial-noise policy): the WW/WW2/WW3 census
+            // lines print only on dfx=wwcensus boots; ordinary boots keep
+            // a clean serial prompt.
+            if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::WwCensus) {
+                ww_heartbeat(now_time);
+            }
         }
     }
 
