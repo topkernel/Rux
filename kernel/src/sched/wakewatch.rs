@@ -205,6 +205,31 @@ pub fn check_picked(task: *mut crate::process::Task, cpu: usize) {
             ww_msg(b"@");
             ww_u64(jif as u64);
         }
+        // leg-26: the victim's own ownership words + who names it now —
+        // a lying slot (owner mask != 0 while the victim waits linked)
+        // or a stale SWITCHING_OUT are the pick-refusal producers.
+        {
+            // SAFETY: diagnostic reads of stable Task fields (the task
+            // is being picked; GRQ held pins it).
+            let (oncpu, claim, pk) = unsafe {
+                (
+                    (*task).on_cpu() as u64,
+                    (*task).running_on_cpu.load(Ordering::Relaxed)
+                        as i64 as u64,
+                    (*task).pick_state() as u64,
+                )
+            };
+            ww_msg(b" own=0x");
+            ww_u64(oncpu);
+            ww_msg(b"/");
+            ww_u64(claim);
+            ww_msg(b"/pk");
+            ww_u64(pk);
+            ww_msg(b" slot=0x");
+            ww_u64(crate::sched::sched::owner_slot_mask(task) as u64);
+            ww_msg(b" swout=0x");
+            ww_u64(crate::sched::sched::switching_out_mask(task) as u64);
+        }
         ww_msg(b"\n");
         for c in 0..crate::config::MAX_CPUS {
             crate::sched::sched::ran_ring_dump(c);
