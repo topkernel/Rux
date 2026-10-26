@@ -3128,19 +3128,45 @@ pub fn txn_hang_audit() {
         // sys_openat; regular-file writes: sys_write; fsync family:
         // sys_fsync — sc310's hiview handler sat in fdatasync 43 min
         // with only the raw fd visible).
+        // Family must MATCH the stash op: a writev to a pipe/socket
+        // never re-stashes (pipe fast path), so the slot would still
+        // hold an older open's path — printing it against a writev
+        // entry frame mislabels the file (seen on sc314A wave-1).
         #[cfg(feature = "x86_64")]
-        let is_file_syscall = matches!(sys, 2 | 257 | 437 | 1 | 20 | 74 | 75);
+        let fam = if matches!(sys, 2 | 257 | 437) {
+            Some(crate::dfx::pathstash::OP_OPEN)
+        } else if matches!(sys, 1 | 20) {
+            Some(crate::dfx::pathstash::OP_WRITE)
+        } else if matches!(sys, 74 | 75) {
+            Some(crate::dfx::pathstash::OP_SYNC)
+        } else {
+            None
+        };
         #[cfg(feature = "riscv64")]
-        let is_file_syscall = matches!(sys, 56 | 24 | 64 | 66 | 82 | 83);
-        if is_file_syscall {
+        let fam = if matches!(sys, 56 | 24) {
+            Some(crate::dfx::pathstash::OP_OPEN)
+        } else if matches!(sys, 64 | 66) {
+            Some(crate::dfx::pathstash::OP_WRITE)
+        } else if matches!(sys, 82 | 83) {
+            Some(crate::dfx::pathstash::OP_SYNC)
+        } else {
+            None
+        };
+        if let Some(want) = fam {
             if let Some((op, p)) = crate::dfx::pathstash::lookup_file(h.stid) {
-                let opn = match op {
-                    crate::dfx::pathstash::OP_OPEN => "open",
-                    crate::dfx::pathstash::OP_WRITE => "write",
-                    crate::dfx::pathstash::OP_SYNC => "sync",
-                    _ => "?",
-                };
-                let _ = writeln!(w, "TXN-HANG txn{} file-op={} path='{}'", h.id, opn, p);
+                if op == want {
+                    let opn = match op {
+                        crate::dfx::pathstash::OP_OPEN => "open",
+                        crate::dfx::pathstash::OP_WRITE => "write",
+                        crate::dfx::pathstash::OP_SYNC => "sync",
+                        _ => "?",
+                    };
+                    let _ = writeln!(
+                        w,
+                        "TXN-HANG txn{} file-op={} path='{}'",
+                        h.id, opn, p
+                    );
+                }
             }
         }
         // Leg-29A stuck-site probe: kernel-text words off the hung
