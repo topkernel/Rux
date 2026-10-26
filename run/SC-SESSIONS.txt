@@ -5654,3 +5654,125 @@ now on plain boots too); the LIFECYCLE->0 acceptance needs that
 userspace chain, not more sched fixes. Minimal-rootfs schedrepro
 infra + the ran-ring/STALL-HOG/STRAND-DETAIL instrument set stay
 in-tree for the next legs (all dfx-gated, zero-cost off).
+
+LEG-27 (OH UI lane; leg-26 successor; solo-host mandate, 10-QEMU
+budget) — merged main 8009a84d first (one conflict pair: generated
+config.rs deleted on main — took the deletion; SC-SESSIONS took ours;
+merge 600fa2a4 is a semantic no-op vs sc293's kernel). FIRED ALL
+EXPERIMENTS IN ONE WAVE per the user's parallelization order: 8 boots
+at 23:21 (sc294-301, lvl4 plain KVM SMP2 45min, fresh scgold copies,
+HDC ports must be UNIQUE — the first attempt died 7/8 on port 12057),
+plus sc302 (txnhunt probe kernel) and sc303 (patched-image A/B) in
+flight. Memory hit the 10G floor at 23:41 (9 QEMUs grown to RSS 2-2.5G
+each): killed sc295/296/297/298 (their question was already answered)
+to make room — recorded as the first floor event of the leg.
+
+NEW INSTRUMENTS (both committed, print-path only, dfx-gated):
+- TXN-HANG / TXN-HANG-OUT (dfx=txnhunt, binder.rs txn_hang_audit at
+  the 1 Hz timer heartbeat): any server-side txn-stack entry picked-
+  but-unreplied >= 1s prints the server thread's task state + entry-
+  frame syscall/rip/a0/a1 (sleepsnap read contract, task forensics
+  OUTSIDE the WORLD guard per the sc89/sc207 lessons) plus every
+  in-flight txn FROM the hung servers' processes (the handler's
+  synchronous fan-out chain). Rate-capped 1 burst/5s, 8+8 lines bound.
+- USEGV-FOR vma(rax) + vma(rsp): the CFI-callee target and the stack
+  VMA at perm faults (sc293's render_service fault had rsp INSIDE a
+  file-backed R-only segment claim — see below, it was actually a
+  memcpy from a PROT_NONE page, rsp was one page below it).
+
+MISSION ITEM 1 — THE 15s SAMGR TXN, NAMED END-TO-END (from sc293 logs,
+  no new boot needed): the code-7 SLOW-TXN family (95 of 110 lines:
+  foundation tids 1236/1362/1548 -> samgr 328 tids 328/333, queue=0)
+  is LoadSystemAbility(SA 511 = "installs", the bundle-installer
+  service): samgr logs "SAMGR: Start dynamic proc:installs,511,105_
+  15978ms" (105 = its timeout error code) immediately before every
+  SLOW-TXN reply; exec=14990-15001ms ~65 times, some 30/45s. Chain:
+  (1) first boot spawn SUCCEEDS in 242ms (SA:511 registered, 174ms);
+  (2) init SIGKILLs installs (KILLTRACE on sc294: pid=1(init) ->
+  pid=1048(installs) + threads; preceded by "reset resource_schedule_
+  service" + "ServiceStart pathArgs is NULL: device_usage_stats_
+  service" job churn; no ctl.stop, no kernel OOM print); init's SIGCHLD
+  reports it as "Unknown(pid 1015)" — the pid->service map entry was
+  already gone; (3) every later `ohos.ctl.start installs|511#...` from
+  samgr gets paramservice reply result=131073 with NO ServiceStart
+  attempt logged — init never restarts it; (4) samgr's StartDynamicProc
+  times out at exactly 15.0s per LoadSystemAbility(511); (5) BMS/
+  foundation blocks -> ability lifecycle stalls -> LIFECYCLE_TIMEOUT
+  loop. Upstream producer on sc293: render_service died first
+  (SIGSEGV, rip=ld-musl+0x8ad30 = INSIDE memcpy — copying 0x3a8 bytes
+  FROM a 2-page PROT_NONE anon VMA directly above the faulting
+  thread's stack; kernel ACCERR is correct POSIX; image-side bug),
+  after which init killed the foundation tree too.
+  KERNEL VERDICT: no kernel defect in the 15s txn itself — samgr's
+  synchronous 15s on-demand-spawn wait and init's refusal to restart
+  installs are image-side. The kernel's binder/paramservice/kill-wait
+  surface behaved. TXN-HANG on sc302/sc303 confirms samgr handler
+  threads park INTERRUPTIBLE in binder ioctl while waiting (expected).
+
+IMAGE CONFUSION FOUND AND FIXED IN FLIGHT: oh-boot-w.sh boots
+  run/oh-img/system.img which is a SYMLINK to the UNPATCHED oh-robot
+  build output — leg-26's sc290-293 AND wave-1 ran WITHOUT the ld-musl
+  patches; the patched private image is run/oh-img-p (verified: 33
+  differing bytes = the leg-22 waiter-next-zero patch, inode 2447).
+  oh-img-p-era boots (sc261-278) ran the loop WITHOUT the loud installs
+  family (1-2 spawns, 4-6 SLOW-TXN/boot vs 110) — the loud family is
+  unpatched-image-shaped. Created run/oh-boot-p.sh (IMGDIR=oh-img-p);
+  sc303 = main kernel + PATCHED image + txnhunt.
+
+MISSION ITEM 2 — sc291 ANOMALY: NOT REPRODUCIBLE AS DETERMINISTIC.
+  Identical dfx=leakhunt boots: sc295 LC=15, sc296 LC=17 (killed at
+  the memory-floor event, trend clear), sc297 LC=306, sc298 (combo
+  wwcensus+leakhunt) LC=296 — full loops. sc294 (plain CONTROL, no
+  leakhunt) also drew LC=0 for its whole 45 min. The loop-forms-or-not
+  split is a boot lottery (which early crash/fork race lands), not a
+  leakhunt effect; sc291 was a lottery draw, same class as sc270/sc277
+  quiet boots with LC=0.
+
+MISSION ITEM 3 — BMS/DISTRIBUTEDDB WALL: partially re-framed. sc301
+  (quietcon+schb+sleepsnap) ENTERED the loop this time (LC=272 — first
+  quietcon boot to do so; lottery again). Its sleepsnap census (1774
+  lines) shows the usual parked population (futex 1040, binder ioctl
+  479, epoll 206) with no D-state storage pile. sc303 (patched image)
+  instead exposed a NEW slow family via TXN-HANG: storage_manager tid
+  641 -> storage_daemon tid 325 code 37, exec 5.5s (server
+  UNINTERRUPTIBLE in open()) growing to 26.4s (server RUNNING in a
+  write(9,...) loop) — the data-layer family has a D-state open()
+  inside it, worth a bio/ext4 stall probe next leg (fsw/bio census was
+  quiet on sc303: 1 line).
+
+WAVE TALLY (45 min boots, lvl4 plain unless noted; lines = serial
+  volume, installs = StartDynamicProc:installs count, pf = perm
+  faults, rs = render_service SIGSEGV):
+  - sc294 control (wwcensus, UNPATCHED img): LC=0@80k — never started.
+  - sc295/296 leakhunt: LC=15/17 @20min (killed at floor event).
+  - sc297/298 leakhunt(+wwcensus): LC=306/296 @200k — full loops.
+  - sc299 wwcensus+sleepsnap: LC=288, installs=1 (!), pf=6, rs=0.
+  - sc300 sleepsnap: LC=189, installs=2, pf=6, rs=1.
+  - sc301 quietcon+schb+sleepsnap: LC=272, installs=1, pf=11.
+  - sc302 txnhunt (UNPATCHED): LC=0@62k through 35min (lottery no-loop
+    draw), TXN-HANG 1076 lines (working: named mutual-wait pairs like
+    power_host<->pid335 and the parked-handler population).
+  - sc303 txnhunt + PATCHED oh-img-p: LC=252@221k@35min, installs=1,
+    pf=1, rs=0 — loop forms on the patched image too, sustained by the
+    storage_manager->storage_daemon + distributeddata families instead
+    of installs.
+  => THE LOOP IS MULTI-CAUSE: installs-hole (unpatched image, loud),
+    storage/D-state family (patched image), distributeddata chain, the
+    launcher ld-musl crash-loop (rip=ld-musl+0x1187d2, `lock cmpxchg
+    %edx,0x10(%rcx)` in pthread_cond_timedwait's waiter walk writing
+    through a garbage node pointer — PERSISTS on the patched image:
+    sc261/269/278/278 show m.ohos.launcher dying to it repeatedly,
+    identical regs every time = deterministic site, next ld-musl
+    patch candidate), and sometimes nothing forms at all.
+
+LEG-27 VERDICT: the 15s txn question is answered end-to-end (image-
+side spawn-timeout chain, kernel clean); the sc291 anomaly is a
+lottery artifact; the unpatched-image confound is identified and the
+patched-image A/B (sc303) shows the loop survives on quieter drivers.
+Next levers, in value order: (1) the ld-musl 0x1187d2 launcher crash
+site (same pad-cave patch workflow as leg-22; kills the launcher
+restart feed), (2) the storage_daemon D-state open (bio/ext4 stall
+probe), (3) init's 131073 no-restart of installs (image-side init
+bookkeeping after "Unknown" pid exits), (4) render_service's memcpy-
+from-PROT_NONE (find the caller via the new vma(rax) dump on the next
+fault).
