@@ -5173,3 +5173,116 @@ HANDOFF (priority order):
 3. Fork-residual condvar variant (musl): 1 SIGSEGV per ~45min boot —
    needs the image-side fork-time condvar reinit.
 4. mm lane: dirty anon page recycle (sc259 bssslack2) still open.
+
+LEG-24 (OH UI lane, leg-23 successor; leg-23 died in the 08:41-08:49
+quota window) — OPENED 12:02. Main 94c670da verified already merged
+(859f2adc; origin/main unmoved). sc263 (leg-23's armed roll) had RUN
+DETACHED through the quota window and completed 09:22 — triaged first.
+
+LEG-24 TRIAGE (sc263, 30MB log):
+- No KERNPANIC, no mid-run launcher leader SIGSEGV (the fork-residual
+  dice held). LIFECYCLE_TIMEOUT restart loop: 251 (sc262 class).
+- The live blocker family quantified: WAKE-STRANDED incumbents carry
+  pc=1/2/258 (0x102 = bh + 2x preempt) across BOTH cpus; victims are
+  the fork-heavy daemons — appspawn (320, 37 strand-slot appearances;
+  338), mmi_service (594), os_ds_service (622), os.settingsdata
+  (1238), render_service (736) — plus spawn-era children (pids
+  4813-5163, the PREEMPT-LEAK running-victim storm at the log tail)
+  and even pid 1. PARKED-LEAK: sleeping tasks (state=1) carrying
+  pc=1 — appspawn 4x. Zero PREEMPT-UNDERFLOW (no double-drops), zero
+  SWITCH-COUNT-LEAK (round 3f: no park-through-switch with a live
+  count), zero PARKED-WILDWRITE.
+- Found dead: TICK_ENTRY_PC is written only on riscv64 — the pctick
+  discriminator printed a permanent 0 on x86_64 (the OH arch).
+
+LEAK-ORIGIN PROBE (eac5db5e v1, f66d8cd3 v2, dab9f6f3 v3; dfx=leakhunt):
+- preempt_count_add is now #[track_caller]; when armed, every
+  PREEMPT_OFFSET acquire records (task, file:line, jiffies, count-after)
+  in a side-table shadow (last wins, no Task layout change).
+- User-return tripwire at both trap tails (a frame returning to user
+  must carry count 0), parked/incumbent site prints appended to
+  PARKED-LEAK / PREEMPT-LEAK, x86_64 now writes TICK_ENTRY_PC too.
+- v2: instant catch when a booking lands on a task with !on_cpu or
+  non-RUNNING state, printing slot/tp/claim/SLOT_WRITER attribution.
+- v3: parkwalk's "parked" classification adjudicated against the arch
+  tp slots (new current_task_ptr_of/get_thread_id_of both arches);
+  WAKE-STRANDED incumbents now also print the arch-tp identity.
+
+ROLLS sc264 (v1/v2) + sc265 (v2) + sc266 (v3 baseline):
+- sc264 conviction: every PARKED-LEAK victim's recorded site is
+  sched.rs:2152 — __schedule's own GRQ acquire — later shown to be the
+  WEAK signature (the last acquire of any parking task is the schedule-
+  path GRQ guard). One small_alloc.rs:548 cnt_after=2 inner site.
+- sc265 v2 verdict: all 118 instant catches are the LEGITIMATE
+  pre-sleep window (tp_state=INTERRUPTIBLE, slot==tp==victim, on_cpu=1,
+  claim=cpu, slotw=own pick): a task between set_current_state and
+  schedule() taking the GRQ guard. ZERO catches on on_cpu=0 tasks —
+  no guard is EVER booked on a parked task. Zero user-return trips.
+- sc266 v3 ADJUDICATION (the two-line answer): (a) WAKE-STRANDED
+  incumbents show tp==slot with MATCHING counts (h0=(329/p0/0ms/pc=258)
+  tp=329/pc=258) — the incumbents genuinely execute with leaked counts;
+  not a stale-slot artifact. (b) parked-adjacent tp=-1 for the pid-320
+  PARKED-LEAK — genuinely parked on no CPU with pc=1. The +1 lands on
+  parked tasks OUTSIDE every instrumented channel (no booking, no
+  park-with-count switch) — the wild-write/bracket family (b77/b81/
+  x86-scribble3 engine, the wildwrite-hunt lane's live hunt).
+
+LEG-24 ROLLS + THE FIX PAIR + THE CHAOS VERDICT.
+
+sc267 (v3 probe + RELIEF): ZERO relief fires in 10 min while the strand
+census ran the same family — FALSIFIED the poll-loop theory: the
+leaked-count incumbents never call schedule() (kernel IPC loops); the
+refusal-side relief cannot reach them. Kept as the complement for
+schedule-polling shapes (cd4e5a38).
+
+THE BOUND FIX (a336568f): tick-side PREEMPT-HEAL threshold 1000 ->
+200 jiffies — the same evidence bar the PREEMPT-LEAK report already
+treats as conviction (200 consecutive nonzero tick samples); bounds
+every leaked-count monopoly to ~2 s (was 10 s). Round-3e pure-hardirq
+phantom takes the same tightened bound; round-3d PARKED-HEAL (4 s)
+unchanged.
+
+sc268 (CLEAN kernel: heal-2s + relief, NO probe, same OH recipe):
+- stranded=13 @18.2M wakes (sc263: 1063 @19.5M; sc266 w/probe: 264
+  @18.1M) — the census is BOOT-CHAOTIC (6..1063 per boot class); with
+  n=1 per cell no A/B attribution is honest. HEAL=0, RELIEF=0 on this
+  boot: no leak episodes formed, nothing to bound.
+- BUT strand_max=389 s: monster strands (pid 304/305, 42-241 s) whose
+  era coincides with WW IRQ-OFF-WINDOW lines of 107-677 ms at
+  pc=0x10000, rips symbolized to cpu::outb/enable_irq/restore_irq —
+  THE UART 115200 THRE POLL: loglevel-7 console traffic with IF=0 is
+  the monster-strand producer ON THESE HUNT BOOTS (the sc108 lesson at
+  boot scale). Production boots (loglevel 3-4) run quiet — the
+  baseline's 0-7 organic strands stand. The hunt recipe pays this tax;
+  the LIFECYCLE budget numbers from sc262-class logs are PARTLY this
+  self-inflicted class, worth re-measuring at loglevel 4 next roll.
+
+STRAND-REPORT CONTAMINANT (documented for every future reader of
+WAKE-STRANDED lines): the h-slot for the PICKING cpu reads the slot's
+prev DURING __schedule's pick — prev legally carries the picking
+context's own GRQ guard (acquired sched.rs:2152, released :2283 AFTER
+the pick), so that slot's pc=1 is an ARTIFACT BY CONSTRUCTION (and the
+v3 tp print reads the same task pre-switch — tp pc matches for the
+same reason). Only the OTHER cpu's h-slot is a clean incumbent read.
+The genuinely-leaked incumbent evidence stands on the other-slot reads
+(pc=2/pc=258) and the PREEMPT-LEAK/PARKED-LEAK census.
+
+LEG-24 VERDICT / HANDOFF:
+1. launcher.ready/OnForeground: NOT reached. The LIFECYCLE_TIMEOUT
+   restart loop persists; its 2-7 s IPC round trips have chaotic
+   per-boot contributions from (a) leaked-count monopolies — now
+   bounded at 2 s by a336568f when they form, (b) the loglevel-7
+   console IRQ-off windows — self-inflicted on hunt boots, re-measure
+   at loglevel=4, (c) the upstream wild-write/bracket producer.
+2. The parked-with-pc=1 + running-with-pc!=0 counts are REAL (sc266:
+   66 PREEMPT-LEAK reports, tp-adjudicated) but land OUTSIDE every
+   instrumented channel: no booking on parked tasks (118 catches all
+   legit pre-sleep), no park-through-switch (round 3f silent), no
+   underflow. => The producer is the byte-level Task-thread_info write
+   family (b77/b81/x86-scribble3) — WILDWRITE-HUNT LANE, with the
+   leakhunt probe (dfx=leakhunt) now banked as the conviction tool
+   (acquire-site shadow + instant booked-on-nonrunning catch +
+   tp-vs-slot adjudication, both arches).
+3. Merge-gate status for cd4e5a38+a336568f (sched guarded domain):
+   dual-arch builds green; make test + riscv smoke + syscost noted in
+   the leg-24 tail below.
