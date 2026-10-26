@@ -887,6 +887,17 @@ unsafe fn sweep_silent_txns(world: &World) -> (usize, Vec<Arc<BinderProc>>) {
 static APP_CHILD_PIDS: [core::sync::atomic::AtomicU32; 128] =
     [const { core::sync::atomic::AtomicU32::new(0) }; 128];
 
+// leg-25: module-visible mirror of the SAREG probe's latched samgr pid,
+// so the SLRD read-side tracer can cover samgr's own reads (its leader
+// comm 'samgr' matches no app prefix) — the Add/Remove (code 3/4)
+// delivery record for the on-demand unload question.
+static SAREG_SAMGR_PID_PUB: core::sync::atomic::AtomicU32 =
+    core::sync::atomic::AtomicU32::new(0);
+
+pub(crate) fn binder_sareg_samgr_pid() -> u32 {
+    SAREG_SAMGR_PID_PUB.load(core::sync::atomic::Ordering::Relaxed)
+}
+
 pub fn register_app_child_pid(pid: u32) {
     for slot in APP_CHILD_PIDS.iter() {
         let s = slot.load(core::sync::atomic::Ordering::Relaxed);
@@ -2583,9 +2594,23 @@ unsafe fn holder_forensics(t: &Arc<BinderThread>, out: &mut alloc::string::Strin
             .unwrap_or("")
             .trim_end_matches('\0')
     };
-    let top = tk.kernel_stack_top();
+    // sc261: an exited thread's kernel stack is back in the cache and
+    // kernel_stack_top() reports KERNEL_STACK_SIZE — an entry-frame
+    // read then page-faults the kernel (sc261, the kill_dump path
+    // died exactly so). The old SAFETY claim "the kernel stack stays
+    // mapped while the Task lives" was wrong: the stack is freed at
+    // thread exit while the Task struct survives until its last pin.
+    // top = 0 wraps to a noncanonical address on purpose-never-deref:
+    // the guards below skip the read instead.
+    let top = if tk.owns_kernel_stack() {
+        tk.kernel_stack_top()
+    } else {
+        0
+    };
     #[cfg(feature = "x86_64")]
-    let (rip, sys, a0, a1) = {
+    let (rip, sys, a0, a1) = if top == 0 {
+        (0, 0, 0, 0)
+    } else {
         let regs = (top.wrapping_sub(
             crate::arch::x86_64::pt_regs::PT_REGS_SIZE,
         )) as *const crate::arch::x86_64::pt_regs::PtRegs;
@@ -2595,7 +2620,9 @@ unsafe fn holder_forensics(t: &Arc<BinderThread>, out: &mut alloc::string::Strin
         unsafe { ((*regs).rip, (*regs).orig_rax, (*regs).rdi, (*regs).rsi) }
     };
     #[cfg(feature = "riscv64")]
-    let (rip, sys, a0, a1) = {
+    let (rip, sys, a0, a1) = if top == 0 {
+        (0, 0, 0, 0)
+    } else {
         let regs = (top.wrapping_sub(
             crate::arch::riscv64::pt_regs::PT_REGS_SIZE,
         )) as *const crate::arch::riscv64::pt_regs::PtRegs;
@@ -2808,16 +2835,20 @@ pub fn sleep_snapshot() {
                 return;
             };
             #[cfg(feature = "x86_64")]
-            let (rip, sys, a0, a1) = {
+            let (rip, sys, a0, a1) = if top == 0 {
+                (0, 0, 0, 0)
+            } else {
                 let regs = (top.wrapping_sub(
                     crate::arch::x86_64::pt_regs::PT_REGS_SIZE,
                 )) as *const crate::arch::x86_64::pt_regs::PtRegs;
                 // SAFETY: diagnostic read of this task's own entry frame;
-                // the kernel stack stays mapped while the Task lives.
+                // owns_kernel_stack checked above (sc261).
                 unsafe { ((*regs).rip, (*regs).orig_rax, (*regs).rdi, (*regs).rsi) }
             };
             #[cfg(feature = "riscv64")]
-            let (rip, sys, a0, a1) = {
+            let (rip, sys, a0, a1) = if top == 0 {
+                (0, 0, 0, 0)
+            } else {
                 let regs = (top.wrapping_sub(
                     crate::arch::riscv64::pt_regs::PT_REGS_SIZE,
                 )) as *const crate::arch::riscv64::pt_regs::PtRegs;
@@ -3000,14 +3031,18 @@ unsafe fn user_park_stack_dump(t: &Arc<BinderThread>) {
         return;
     };
     #[cfg(feature = "x86_64")]
-    let (rsp, rip) = {
+    let (rsp, rip) = if top == 0 {
+        (0, 0)
+    } else {
         let regs = (top.wrapping_sub(crate::arch::x86_64::pt_regs::PT_REGS_SIZE))
             as *const crate::arch::x86_64::pt_regs::PtRegs;
         // SAFETY: diagnostic read of the holder's entry frame.
         unsafe { ((*regs).rsp, (*regs).rip) }
     };
     #[cfg(feature = "riscv64")]
-    let (rsp, rip) = {
+    let (rsp, rip) = if top == 0 {
+        (0, 0)
+    } else {
         let regs = (top.wrapping_sub(crate::arch::riscv64::pt_regs::PT_REGS_SIZE))
             as *const crate::arch::riscv64::pt_regs::PtRegs;
         // SAFETY: same contract, riscv64.
@@ -5336,6 +5371,13 @@ fn binder_transaction(
             if ok && &hdr[12..16] == &[0x6f, 0x00, 0x68, 0x00] {
                 is_samgr_req = true;
                 SAREG_SAMGR_PID.store(target.pid as u32, core::sync::atomic::Ordering::Relaxed);
+                // leg-25 mirror for the SLRD read-side gate (see
+                // binder_sareg_samgr_pid): samgr's leader comm matches
+                // no app prefix, so the tracer keys on the pid.
+                SAREG_SAMGR_PID_PUB.store(
+                    target.pid as u32,
+                    core::sync::atomic::Ordering::Relaxed,
+                );
             }
         }
         let reply_to_mutation = reply
@@ -5356,9 +5398,6 @@ fn binder_transaction(
                 == SAREG_SAMGR_PID.load(core::sync::atomic::Ordering::Relaxed);
         if is_samgr_req || reply_to_mutation {
             if SAREG_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 600 {
-                // leg-25: the enqueued txn's id, so the send line pairs
-                // 1:1 with the SLRD read line (offline delivery audit).
-                let t_id = txn.id;
                 let comm = crate::sched::current()
                     .map(|t| unsafe { (*t).comm() })
                     .map(|c| core::str::from_utf8(c).unwrap_or(""))
@@ -5385,9 +5424,8 @@ fn binder_transaction(
                         alloc::string::String::from("unmapped")
                     };
                 crate::pr_warn!(
-                    "SAREG {} txn{} code={} from pid={} tgid={} comm='{}' -> pid={} dlen={} parcel={}",
+                    "SAREG {} code={} from pid={} tgid={} comm='{}' -> pid={} dlen={} parcel={}",
                     if reply { "reply" } else { "send " },
-                    t_id,
                     if reply {
                         in_reply_to.as_ref().map(|t| t.code).unwrap_or(0)
                     } else {
@@ -5401,6 +5439,91 @@ fn binder_transaction(
                     hex
                 );
             }
+        }
+    }
+
+    // sc262 (leg-23): launcher lifecycle-path tracer. Every sc261-class
+    // boot ends in the AMS restart loop — LIFECYCLE_TIMEOUT for
+    // com.ohos.launcher.MainAbility ("load" phase, the same timeout
+    // that hits settingsdata's DataExtAbility) while the parked
+    // launcher looks healthy: main thread in poll, OS_IPC threads in
+    // binder read, and hilog never logs a single ability-schedule
+    // event. This prints BOTH directions of the launcher's binder
+    // traffic at ENQUEUE time — its own sends and every transaction
+    // queued TO it. Offline adjudication: an in-line printed here
+    // while the app still times out = delivery/wake loss (kernel
+    // read path); no in-line during the load window = AMS never sent
+    // (AMS-side stall).
+    //
+    // sc262 READBACK CORRECTED THE LATCH: appspawn children NEVER open
+    // /dev/binder — they send through the daemon's INHERITED fd, so
+    // proc.pid is the DAEMON's (329) for every child, and the first
+    // latch burned the 500-line budget on the daemon's whole proc.
+    // v2: gate by the SENDER's tgid-leader comm (app-family child),
+    // not by proc identity; in-lines additionally print the target
+    // node's reg_tgid (the intended child, already known to APPTXN).
+    // 1500/boot.
+    {
+        static SLTX_N: core::sync::atomic::AtomicUsize =
+            core::sync::atomic::AtomicUsize::new(0);
+        // App-family child gate: the tgid LEADER's comm (OS_IPC/OS_FFRT
+        // are generic worker names present in every service — matching
+        // the reading thread's comm burned the read-side budget in one
+        // boot).
+        fn sltx_app_child(tgid: u32) -> bool {
+            if tgid == 0 {
+                return false;
+            }
+            let t = unsafe { crate::sched::find_task_by_pid(tgid) };
+            if t.is_null() {
+                return false;
+            }
+            let name = core::str::from_utf8(unsafe { (*t).comm() })
+                .unwrap_or("")
+                .trim_end_matches('\0');
+            name.starts_with("m.ohos.")
+                || name.starts_with("os.")
+                || name.starts_with("com.")
+                || name.starts_with("tonelibrarydata")
+        }
+        let sender_tgid = crate::sched::current()
+            .map(|t| unsafe { (*t).tgid() as u32 })
+            .unwrap_or(0);
+        let sender_is_app = sltx_app_child(sender_tgid);
+        let target_child = target_node
+            .as_ref()
+            .map(|n| n.reg_tgid)
+            .filter(|&g| g != 0 && g != target.pid)
+            .unwrap_or(0);
+        if (sender_is_app || target_child != 0)
+            && SLTX_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 1500
+        {
+            let mut pb = [0u8; 32];
+            let hex: alloc::string::String = if tr.data_buffer != 0
+                && unsafe {
+                    crate::arch::uaccess::copy_from_user(
+                        pb.as_mut_ptr(),
+                        tr.data_buffer as *const u8,
+                        pb.len(),
+                    ) == 0
+                }
+            {
+                pb.iter().map(|b| alloc::format!("{:02x}", b)).collect()
+            } else {
+                alloc::string::String::from("-")
+            };
+            crate::pr_warn!(
+                "SLTX {} tgid={} pid={} -> pid={} child={} code={:#x} oneway={} dlen={} parcel={}",
+                if sender_is_app { "out" } else { "in " },
+                sender_tgid,
+                proc.pid,
+                target.pid,
+                target_child,
+                tr.code,
+                oneway,
+                data_size,
+                hex
+            );
         }
     }
 
@@ -6476,6 +6599,65 @@ fn binder_thread_read(
                             // transaction is being read out to its
                             // receiving thread (BR_TRANSACTION/BR_REPLY).
                             crate::trace::trace_binder_transaction_received(t.id);
+                            // sc262 (leg-23): SLTX read-side — an
+                            // app-family child's thread picked this
+                            // transaction up out of its queue. An
+                            // enqueue-side "SLTX in child=X" line with
+                            // no matching read here, while the app
+                            // still parks, names the wake/read path as
+                            // the loss point. sc262 v1 burned its budget
+                            // on samgr/OS_IPC noise (OS_IPC/OS_FFRT are
+                            // generic worker names in EVERY service)
+                            // and required tgid == proc.pid, which can
+                            // never hold for children reading through
+                            // the daemon's INHERITED fd; v2 gates on
+                            // the tgid LEADER's comm only.
+                            // leg-25 (sc276): samgr's own reads were
+                            // invisible (comm 'samgr' matches no app
+                            // prefix) exactly where the on-demand
+                            // unload question lives — samgr killing
+                            // services 13 ms after releases while
+                            // clients are mid-call needs the
+                            // Add/Remove (SAREG code 3/4) delivery
+                            // record on samgr's side. Gate on the
+                            // SAREG-known samgr pid too.
+                            if let Some(cur) = crate::sched::current() {
+                                let tg = unsafe { (*cur).tgid() as u32 };
+                                if tg != 0 {
+                                    let lt = unsafe { crate::sched::find_task_by_pid(tg) };
+                                    if !lt.is_null() {
+                                        let lname = core::str::from_utf8(unsafe { (*lt).comm() })
+                                            .unwrap_or("")
+                                            .trim_end_matches('\0');
+                                        let samgr_pid = binder_sareg_samgr_pid();
+                                        if lname.starts_with("m.ohos.")
+                                            || lname.starts_with("os.")
+                                            || lname.starts_with("com.")
+                                            || (samgr_pid != 0 && tg == samgr_pid)
+                                        {
+                                            static SLRD_N: core::sync::atomic::AtomicUsize =
+                                                core::sync::atomic::AtomicUsize::new(0);
+                                            if SLRD_N
+                                                .fetch_add(1, core::sync::atomic::Ordering::Relaxed)
+                                                < 1500
+                                            {
+                                                let name = core::str::from_utf8(unsafe { (*cur).comm() })
+                                                    .unwrap_or("")
+                                                    .trim_end_matches('\0');
+                                                crate::pr_warn!(
+                                                    "SLRD tgid={} tid={} comm='{}' read txn id={} code={:#x} reply={}",
+                                                    tg,
+                                                    thread.tid,
+                                                    name,
+                                                    t.id,
+                                                    t.code,
+                                                    t.target_node.is_none()
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                             let (tptr, tcookie) = match &t.target_node {
                                 Some(n) => (n.ptr, n.cookie),
                                 None => (0, 0),
