@@ -1610,3 +1610,69 @@ green, 9 rc=0 boots, 0 panics; measured: p2_ctxsw -40% with
 arm-aligned clusters across regimes, p5a_pipe/p4_fork_exec
 consistent small wins; no row regresses with the same consistency).
 Kernels stay banked (run/pa57-a-ctl-bzImage / run/pa57-b-fast-bzImage).
+
+### 8.10.10 Leg 39 (2026-10-26): main 94c670da merged, the pa63 chain re-arms every owed measurement, route-4 + D-6 follow-on land on-branch
+
+**The quiet window closed before it opened.** The leg opened at load
+0.74 / 0 QEMU (the host rebooted ~11:06; leg-38's pa60/pa61 deciders
+died unfired — gate-blocked all morning by 11-17 foreign QEMUs, then
+killed by the reboot with zero boots run). All six kernels were built
+and banked in the first 15 minutes (census main-dbg, M/B strong pair,
+ab-fast, fswm, LTP; every build RC=0), but the foreign agent queue
+auto-resumed at ~11:35 (7 QEMUs, load 15 -> 29 by 12:24), so
+run/pa63-chain.sh — one serialized chain carrying census -> parses ->
+pbench pair M,B,B,M -> LTP spot -> fsw pair -> wake/epoll A/B — runs
+under the pa60 two-stage gate (9/8 for 2 h, then 13/10, 5 h deadline)
+instead of firing immediately. The chain class is main 94c670da (the
+tree the branch merges INTO: COW fix + net batch + F4 route-1 + D-6
+FileOps all landed there since the last census target b4da2106).
+
+**The A/B debt, restated honestly:** 8.10.9 already measured the
+wake/epoll lever set (6fdada6b) clean on the b332d08a class. The pa63
+A/B stage re-runs it on the MERGE SHAPE — and on this class the clean
+lever kernel is main + the branch's EXACT two-file delta (wait.rs +
+misc.rs), because 6fdada6b's epoll half presupposes the L3 sharding
+((leg-31, still branch-only — main carries the UNSHARDED registry), so
+a cherry-pick of 6fdada6b alone onto 94c670da does not exist; the
+merge-relevant comparison IS pure main vs main+two-files (f735ffcc in
+the pa55-a worktree).
+
+**Track-2 (route 4, the map's next row after route-1): getdents64
+listing cache — landed on-branch (20f64449).** The old path
+re-materialized the whole directory on EVERY call (ext4 list_dir: read
+every block + clone every entry; the map's 27.6K full re-scans/boot,
+getdents avg 407 us). New: a per-open-file snapshot
+(File::dirent_cache, Arc so the hit path is one refcount bump) keyed
+by (inode identity, VFS_DIR_EPOCH); every successful mutation dispatch
+in vfs.rs (mkdir, mknod, symlink, rmdir, unlink, link, create-via-open,
+rename — rename_exchange rides vfs_rename_locked) bumps the epoch, so
+any mutation invalidates every cached listing. One global epoch, not
+per-inode: the invalidation story stays airtight at the cost of
+over-invalidation (a re-scan, not a wrong answer). Caching is GATED on
+the new INodeOps::readdir_cacheable — true only where directory
+content changes exclusively through those mutation entry points (ext4,
+tmpfs); the dynamic filesystems (procfs, devfs, sysfs, debugfs,
+cgroupfs, selinuxfs) and memfd/rootfs stay per-call. A mutation racing
+the materializing scan is handled seqlock-style: the listing is served
+for that call (the same race the old path had) but not pinned if the
+epoch moved during the scan. Dot-entry synthesis moved into the
+materializer (ran per call before). Suite: getdents-cache group (10
+rows: dot-helper shapes, 40-entry multi-call walk stability incl.
+no-duplicates, same-fd mid-stream create visibility, unlink
+invalidation) — the first suite run caught the test itself leaking 40
+create-fds, which flipped a LATER row (closed-fd ioctl reads ENOTTY on
+the live fd); fixed, and the full suite reads ALL TESTS PASSED
+(run/pa63-maketest2.log). The mechanism proof (fsw list_dir volume
+collapse) and the p6_getdents median ride the re-built branch debug
+kernels (fswm/LTP re-banked post-route-4) + the next pbench pair.
+
+**Track-1 (D-6 follow-on conversions): EXT4_FILE_OPS and
+TMPFS_FILE_OPS now build through the capability builder (dfca01e8),
+with fileops-caps rows pinning both matrices (full positional set
+read/write/lseek/close/read_at; poll deliberately absent — regular
+files go through the always-ready fallback). ~49 struct-literal
+FileOps tables remain (opportunistic migration continues).**
+
+**sc2xx launcher.ready trigger: NOT FIRED** (watcher restarted
+post-reboot, pid 43214; newest oh-sc264, zero events). Run day stays
+pending.
