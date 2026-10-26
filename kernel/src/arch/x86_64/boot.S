@@ -142,6 +142,28 @@ mode64_low:
     movw %ax, %fs
     movw %ax, %gs
 
+    /* Zero .bss BEFORE the first kernel instruction can touch a
+     * static. The Linux boot protocol makes this the kernel's job:
+     * QEMU's linuxboot ROM reloads only the file-backed bytes on a
+     * guest reset, so the NOBITS tail keeps the PREVIOUS boot's
+     * statics (EARLY_TABLE_NEXT, ALLOC_STAGE, memblock state) —
+     * observed as the panic=3 reboot storm where every boot >= 2
+     * died in early mm. A first power-on boot only works because
+     * QEMU starts RAM zeroed, which holds exactly once. Linux's
+     * own startup_64 zeroes BSS for the same reason; the riscv64
+     * boot.S has always done it. The handoff words below live in
+     * .boot.data (not .bss), and the bootstrap higher-half map
+     * already covers the whole image through __kernel_lma_end.
+     * Section ends are page-aligned (linker ALIGN(4096)), so the
+     * 8-byte stosq loop covers it exactly. */
+    cld
+    leaq __sbss(%rip), %rdi
+    leaq __ebss(%rip), %rcx
+    subq %rdi, %rcx
+    shrq $3, %rcx
+    xorl %eax, %eax
+    rep stosq
+
     /* Jump to the first byte of the kernel image (.text.boot64) */
     movabsq $KERNEL_IMAGE_VMA, %rax
     jmp *%rax

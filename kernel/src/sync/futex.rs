@@ -2130,25 +2130,36 @@ pub fn sys_futex_handler(args: &[u64; 6]) -> i64 {
                             // containing VMA separate memfd-lib (ELF
                             // magic) from a JIT arena.
                             {
-                                let top = tk.kernel_stack_top();
-                                #[cfg(feature = "x86_64")]
-                                let rsp = unsafe {
-                                    let regs = (top.wrapping_sub(
-                                        crate::arch::x86_64::pt_regs::PT_REGS_SIZE,
-                                    ))
-                                        as *const crate::arch::x86_64::pt_regs::PtRegs;
-                                    (*regs).rsp as usize
+                                // Stack-freed guard (KILLDUMP census race
+                                // class — see kernel_stack_top_checked):
+                                // rsp=0 falls into the existing skip.
+                                let rsp = match tk.kernel_stack_top_checked() {
+                                    Some(top) => {
+                                        #[cfg(feature = "x86_64")]
+                                        {
+                                            unsafe {
+                                                let regs = (top.wrapping_sub(
+                                                    crate::arch::x86_64::pt_regs::PT_REGS_SIZE,
+                                                ))
+                                                    as *const crate::arch::x86_64::pt_regs::PtRegs;
+                                                (*regs).rsp as usize
+                                            }
+                                        }
+                                        #[cfg(feature = "riscv64")]
+                                        {
+                                            unsafe {
+                                                let regs = (top.wrapping_sub(
+                                                    crate::arch::riscv64::pt_regs::PT_REGS_SIZE,
+                                                ))
+                                                    as *const crate::arch::riscv64::pt_regs::PtRegs;
+                                                (*regs).sp as usize
+                                            }
+                                        }
+                                        #[cfg(not(any(feature = "x86_64", feature = "riscv64")))]
+                                        { 0usize }
+                                    }
+                                    None => 0usize,
                                 };
-                                #[cfg(feature = "riscv64")]
-                                let rsp = unsafe {
-                                    let regs = (top.wrapping_sub(
-                                        crate::arch::riscv64::pt_regs::PT_REGS_SIZE,
-                                    ))
-                                        as *const crate::arch::riscv64::pt_regs::PtRegs;
-                                    (*regs).sp as usize
-                                };
-                                #[cfg(not(any(feature = "x86_64", feature = "riscv64")))]
-                                let rsp = 0usize;
                                 if rsp != 0 {
                                     let rd64 = |va: usize| -> Option<u64> {
                                         let lo = unsafe {
@@ -2656,8 +2667,25 @@ pub fn kill_dump_tgid(tgid: u32) {
         // — orig_rax (syscall nr) + args. For a task parked mid-syscall
         // this names the wait primitive outright (read/epoll/ioctl and
         // WHICH fd). Fd-like args (< 64) are resolved to paths.
+        //
+        // Stack-freed guard (KILLDUMP census race, monkey-b r38 +
+        // monkey-a r32, identical badaddr 0x13ff0 on v9-x86 and v10-x86):
+        // the pinned Task can outlive its own exit's free_kernel_stack()
+        // by an unbounded window (reaping is asynchronous), and a
+        // stackless task's kernel_stack_top() == KERNEL_STACK_SIZE — the
+        // pt_regs read below then faults INSIDE the printer and panics
+        // the boot. Skip the whole per-thread dump (entry frame, wedge
+        // dump, frame walk) for such tasks; the header line already
+        // counted them, so say why their lines are missing.
+        let Some(_top) = tk.kernel_stack_top_checked() else {
+            crate::pr_warn!(
+                "KILLDUMP: tid {} stack-freed (exited mid-census; entry-frame/wedge/frame-walk skipped)",
+                tk.pid()
+            );
+            continue;
+        };
         {
-            let top = tk.kernel_stack_top();
+            let top = _top;
             #[cfg(feature = "x86_64")]
             {
                 let regs = (top.wrapping_sub(crate::arch::x86_64::pt_regs::PT_REGS_SIZE))
@@ -3144,7 +3172,11 @@ fn probe_file_path(f: &crate::fs::file::File) -> alloc::string::String {
 /// frames. SAFETY: `task` live; diagnostic reads through its tables.
 unsafe fn apppark_rets(task: *const Task) {
     let tk = unsafe { &*task };
-    let top = tk.kernel_stack_top();
+    // Stack-freed guard (KILLDUMP census race class): nothing to walk
+    // without a live stack.
+    let Some(top) = tk.kernel_stack_top_checked() else {
+        return;
+    };
     #[cfg(feature = "x86_64")]
     let rsp = unsafe {
         let regs = (top.wrapping_sub(crate::arch::x86_64::pt_regs::PT_REGS_SIZE))
@@ -3229,7 +3261,14 @@ unsafe fn rwfz_stack_frames(
     scan_slots: u64,
 ) {
     let tk = unsafe { &*task };
-    let top = tk.kernel_stack_top();
+    // Stack-freed guard (same class as the KILLDUMP census skip above):
+    // rwfz_stack_frames runs on FOREIGN tasks that may have exited and
+    // freed their kernel stack — a stackless top is KERNEL_STACK_SIZE and
+    // the entry-frame read faults (monkey-b r38 panicked exactly here,
+    // rip inside rwfz_stack_frames). Nothing to walk without a stack.
+    let Some(top) = tk.kernel_stack_top_checked() else {
+        return;
+    };
     #[cfg(feature = "x86_64")]
     let (rsp, rip) = {
         let regs = (top.wrapping_sub(crate::arch::x86_64::pt_regs::PT_REGS_SIZE))
@@ -3782,7 +3821,11 @@ fn rwfz_neighbor_dump(tgid: u32, frozen_uaddr: usize) {
         if tk.tgid() as u32 != tgid {
             return;
         }
-        let top = tk.kernel_stack_top();
+        // Stack-freed guard (KILLDUMP census race class): the pid-hash
+        // walk can visit a task whose exit already freed its stack.
+        let Some(top) = tk.kernel_stack_top_checked() else {
+            return;
+        };
         #[cfg(feature = "x86_64")]
         let (sys, a0) = {
             let regs = (top.wrapping_sub(
@@ -3845,12 +3888,14 @@ fn rwfz_neighbor_dump(tgid: u32, frozen_uaddr: usize) {
             // sit right after `call` opcodes in exec LOADs).
             use core::fmt::Write;
             let sp = {
+                // `top` is the guarded value from the closure head
+                // (kernel_stack_top_checked) — never raw here.
                 #[cfg(feature = "x86_64")]
-                let regs = (tk.kernel_stack_top().wrapping_sub(
+                let regs = (top.wrapping_sub(
                     crate::arch::x86_64::pt_regs::PT_REGS_SIZE,
                 )) as *const crate::arch::x86_64::pt_regs::PtRegs;
                 #[cfg(feature = "riscv64")]
-                let regs = (tk.kernel_stack_top().wrapping_sub(
+                let regs = (top.wrapping_sub(
                     crate::arch::riscv64::pt_regs::PT_REGS_SIZE,
                 )) as *const crate::arch::riscv64::pt_regs::PtRegs;
                 // SAFETY: diagnostic read of this task's entry frame.
@@ -3917,7 +3962,11 @@ fn rwfz_dump_tgid(tgid: u32, max_tasks: usize) -> usize {
             return;
         }
         count_cell.set(count_cell.get() + 1);
-        let top = tk.kernel_stack_top();
+        // Stack-freed guard (KILLDUMP census race class): the pid-hash
+        // walk can visit a task whose exit already freed its stack.
+        let Some(top) = tk.kernel_stack_top_checked() else {
+            return;
+        };
         #[cfg(feature = "x86_64")]
         let (rip, sys, a0) = {
             let regs = (top.wrapping_sub(

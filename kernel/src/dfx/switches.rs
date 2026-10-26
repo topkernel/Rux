@@ -76,6 +76,7 @@ macro_rules! dfx_switch_table {
             Schb => "schb",
             KsProbe => "ksprobe",
             R83HeapScan => "r83scan",
+            WwCensus => "wwcensus",
         }
     };
 }
@@ -290,9 +291,16 @@ pub enum DfxSwitch {
     /// dfx instrument. The cheap per-tick header audits stay
     /// unconditional.
     R83HeapScan,
+    /// The ~1 Hz wakewatch/timer census heartbeat lines (WW/WW2/WW3 and
+    /// the wakewatch wake/pick line) plus the periodic PREEMPT-LEAK
+    /// reporter. These are hunt instruments: they made the serial
+    /// unusable for interactive work when always on, so they are now
+    /// opt-in via `dfx=wwcensus` (census/forensics boots keep them by
+    /// passing the token; ordinary boots get a clean prompt).
+    WwCensus,
 }
 
-const SWITCH_COUNT: usize = 32;
+const SWITCH_COUNT: usize = 33;
 
 static SWITCHES: [AtomicBool; SWITCH_COUNT] = [const { AtomicBool::new(false) }; SWITCH_COUNT];
 
@@ -361,6 +369,7 @@ impl DfxSwitch {
             DfxSwitch::Schb => 29,
             DfxSwitch::KsProbe => 30,
             DfxSwitch::R83HeapScan => 31,
+            DfxSwitch::WwCensus => 32,
         }
     }
 

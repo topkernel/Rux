@@ -232,6 +232,7 @@ pub(crate) static SELINUXFS_INODE_OPS: INodeOps = INodeOps {
     readlink: None,
     get_file_ops: Some(selinuxfs_get_file_ops),
     readdir: Some(selinuxfs_readdir),
+    readdir_cacheable: false,
     open: None,
     permission: None,
     getattr: None,

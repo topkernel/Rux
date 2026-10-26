@@ -2699,34 +2699,44 @@ unsafe fn holder_forensics(t: &Arc<BinderThread>, out: &mut alloc::string::Strin
                     let owner = unsafe { crate::sched::find_task_by_pid(v) };
                     if !owner.is_null() {
                         let ot = unsafe { &*owner };
-                        let otop = ot.kernel_stack_top();
-                        #[cfg(feature = "x86_64")]
-                        let (osys, orip) = {
-                            let regs = (otop.wrapping_sub(
-                                crate::arch::x86_64::pt_regs::PT_REGS_SIZE,
-                            )) as *const crate::arch::x86_64::pt_regs::PtRegs;
-                            // SAFETY: diagnostic read of the
-                            // owner's entry frame.
-                            unsafe { ((*regs).orig_rax, (*regs).rip) }
-                        };
-                        #[cfg(feature = "riscv64")]
-                        let (osys, orip) = {
-                            let regs = (otop.wrapping_sub(
-                                crate::arch::riscv64::pt_regs::PT_REGS_SIZE,
-                            )) as *const crate::arch::riscv64::pt_regs::PtRegs;
-                            // SAFETY: same contract, riscv64.
-                            unsafe { ((*regs).a7, (*regs).epc) }
-                        };
-                        #[cfg(not(any(feature = "x86_64", feature = "riscv64")))]
-                        let (osys, orip) = (0u64, 0u64);
-                        let _ = writeln!(
-                            out,
-                            "   owner tid {} state={:#x} sys={:#x} rip={:#x}",
-                            v,
-                            ot.state().bits(),
-                            osys,
-                            orip
-                        );
+                        // Stack-freed guard (KILLDUMP census race class):
+                        // the owner may have exited and freed its stack
+                        // before this lookup — skip, never fault.
+                        if let Some(otop) = ot.kernel_stack_top_checked() {
+                            #[cfg(feature = "x86_64")]
+                            let (osys, orip) = {
+                                let regs = (otop.wrapping_sub(
+                                    crate::arch::x86_64::pt_regs::PT_REGS_SIZE,
+                                )) as *const crate::arch::x86_64::pt_regs::PtRegs;
+                                // SAFETY: diagnostic read of the
+                                // owner's entry frame.
+                                unsafe { ((*regs).orig_rax, (*regs).rip) }
+                            };
+                            #[cfg(feature = "riscv64")]
+                            let (osys, orip) = {
+                                let regs = (otop.wrapping_sub(
+                                    crate::arch::riscv64::pt_regs::PT_REGS_SIZE,
+                                )) as *const crate::arch::riscv64::pt_regs::PtRegs;
+                                // SAFETY: same contract, riscv64.
+                                unsafe { ((*regs).a7, (*regs).epc) }
+                            };
+                            #[cfg(not(any(feature = "x86_64", feature = "riscv64")))]
+                            let (osys, orip) = (0u64, 0u64);
+                            let _ = writeln!(
+                                out,
+                                "   owner tid {} state={:#x} sys={:#x} rip={:#x}",
+                                v,
+                                ot.state().bits(),
+                                osys,
+                                orip
+                            );
+                        } else {
+                            let _ = writeln!(
+                                out,
+                                "   owner tid {} stack-freed (dump skipped)",
+                                v
+                            );
+                        }
                     } else {
                         let _ = writeln!(
                             out,
@@ -2792,7 +2802,11 @@ pub fn sleep_snapshot() {
             if !state.contains(crate::process::task::TaskState::INTERRUPTIBLE) {
                 return;
             }
-            let top = tk.kernel_stack_top();
+            // Stack-freed guard (KILLDUMP census race class): the walk
+            // can visit a task whose exit already freed its stack.
+            let Some(top) = tk.kernel_stack_top_checked() else {
+                return;
+            };
             #[cfg(feature = "x86_64")]
             let (rip, sys, a0, a1) = {
                 let regs = (top.wrapping_sub(
@@ -2980,7 +2994,11 @@ unsafe fn user_park_stack_dump(t: &Arc<BinderThread>) {
         // SAFETY: one volatile u64 in the holder's mapped user page.
         Some(core::ptr::read_volatile(kv as *const u64))
     };
-    let top = tk.kernel_stack_top();
+    // Stack-freed guard (KILLDUMP census race class): the holder may
+    // have exited and freed its stack — skip, never fault.
+    let Some(top) = tk.kernel_stack_top_checked() else {
+        return;
+    };
     #[cfg(feature = "x86_64")]
     let (rsp, rip) = {
         let regs = (top.wrapping_sub(crate::arch::x86_64::pt_regs::PT_REGS_SIZE))
