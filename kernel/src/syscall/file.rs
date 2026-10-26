@@ -2779,6 +2779,31 @@ pub fn sys_fchownat(args: SyscallArgs) -> i64 {
         return -(errno::EINVAL as i64);
     }
 
+    // Magic-link shortcut (see sys_fchmodat / sys_fstatat): musl's fchown()
+    // falls back to fchownat(AT_FDCWD, "/proc/self/fd/<n>") when the direct
+    // SYS_fchown returns EBADF — for an O_PATH fd that fallback must hit
+    // the SAME fd-based O_PATH rejection (LTP open13's fchown case), not
+    // re-resolve the link to the real file and succeed.
+    if !crate::fs::vfs::chrooted() && flags & AT_SYMLINK_NOFOLLOW == 0 {
+        let mut probe = [0u8; 64];
+        if !pathname_ptr.is_null()
+            && crate::arch::uaccess::access_ok(pathname_ptr as usize, probe.len())
+            && unsafe {
+                crate::arch::uaccess::copy_from_user(
+                    probe.as_mut_ptr(), pathname_ptr, probe.len())
+            } == 0
+        {
+            let len = probe.iter().position(|&b| b == 0).unwrap_or(probe.len());
+            if let Ok(p) = core::str::from_utf8(&probe[..len]) {
+                if let Some((_, fd)) = proc_fd_magic(p) {
+                    return sys_fchown([
+                        fd as u64, uid as u64, gid as u64, 0, 0, 0,
+                    ]);
+                }
+            }
+        }
+    }
+
     // AT_EMPTY_PATH: operate on the dirfd's own file (Linux; musl maps
     // fchown() to fchownat(fd, "", AT_EMPTY_PATH) on the generic 64-bit
     // syscall table, which has no fchown). Delegating to sys_fchown keeps
