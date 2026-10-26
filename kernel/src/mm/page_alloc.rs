@@ -274,6 +274,55 @@ pub fn oom_forensic_dump(site: &str) {
         if l0 == 0 {
             crate::println!("OOM-FORENSIC: all LRU lists empty");
         }
+        // session-9 (r51/r58 follow-up): clean/dirty breakdown of the
+        // FILE LRUs. ~200MB of UNMAPPED file cache sits on these lists
+        // at the OOM point (free_cnt=13, mapped ~= anon) while direct
+        // reclaim OOMs — the split decides between "reclaim never
+        // reached them" (mostly CLEAN here -> scan/index drift or
+        // pinned-by-refcount) and "dirty and unwriteable" (mostly
+        // DIRTY/WRITEBACK here -> writeback starved under pressure).
+        // Best-effort walk WITHOUT lru_lock (OOM forensic context;
+        // single-page races acceptable — counters, not invariants).
+        // Bound: 300k pages (~1.2G, more than any list can hold).
+        for lru_i in [super::pglist::LRU_INACTIVE_FILE, super::pglist::LRU_ACTIVE_FILE] {
+            let mut pfn = node.lru_heads[lru_i].load(Ordering::Relaxed);
+            let (mut n, mut dirty, mut wb, mut refd, mut unev, mut locked) =
+                (0usize, 0usize, 0usize, 0usize, 0usize, 0usize);
+            while pfn != 0 && n < 300_000 {
+                // SAFETY: forensic read-only flag access via the
+                // descriptor array; pfn came off an LRU link chain.
+                let page = super::page_desc::pfn_to_page(pfn);
+                if page.is_null() {
+                    break;
+                }
+                let p = unsafe { &*page };
+                if p.test_flag(super::page_desc::PageFlag::Dirty) {
+                    dirty += 1;
+                }
+                if p.test_flag(super::page_desc::PageFlag::Writeback) {
+                    wb += 1;
+                }
+                if p.test_flag(super::page_desc::PageFlag::Referenced) {
+                    refd += 1;
+                }
+                if p.test_flag(super::page_desc::PageFlag::Unevictable) {
+                    unev += 1;
+                }
+                if p.is_locked() {
+                    locked += 1;
+                }
+                n += 1;
+                let next = p.lru_next();
+                if next == pfn {
+                    break; // self-loop guard (torn concurrent unlink)
+                }
+                pfn = next;
+            }
+            crate::println!(
+                "OOM-FORENSIC: file-lru[{}] walked={} dirty={} writeback={} referenced={} unevictable={} locked={}",
+                lru_i, n, dirty, wb, refd, unev, locked
+            );
+        }
     }
 
     // Page-descriptor census
