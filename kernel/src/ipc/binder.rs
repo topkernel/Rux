@@ -5414,32 +5414,50 @@ fn binder_transaction(
     // queued TO it. Offline adjudication: an in-line printed here
     // while the app still times out = delivery/wake loss (kernel
     // read path); no in-line during the load window = AMS never sent
-    // (AMS-side stall). Latch by sender comm prefix "m.ohos.launcher"
-    // (each restart re-latches and resets the counter); 500/boot.
+    // (AMS-side stall).
+    //
+    // sc262 READBACK CORRECTED THE LATCH: appspawn children NEVER open
+    // /dev/binder — they send through the daemon's INHERITED fd, so
+    // proc.pid is the DAEMON's (329) for every child, and the first
+    // latch burned the 500-line budget on the daemon's whole proc.
+    // v2: gate by the SENDER's tgid-leader comm (app-family child),
+    // not by proc identity; in-lines additionally print the target
+    // node's reg_tgid (the intended child, already known to APPTXN).
+    // 1500/boot.
     {
-        static SLTX_PID: core::sync::atomic::AtomicU32 =
-            core::sync::atomic::AtomicU32::new(0);
         static SLTX_N: core::sync::atomic::AtomicUsize =
             core::sync::atomic::AtomicUsize::new(0);
-        if !reply {
-            if let Some(cur) = crate::sched::current() {
-                let name = core::str::from_utf8(unsafe { (*cur).comm() })
-                    .unwrap_or("")
-                    .trim_end_matches('\0');
-                if name.starts_with("m.ohos.launcher") {
-                    let prev =
-                        SLTX_PID.swap(proc.pid, core::sync::atomic::Ordering::Relaxed);
-                    if prev != proc.pid {
-                        crate::pr_warn!("SLTX latch tgid={}", proc.pid);
-                        SLTX_N.store(0, core::sync::atomic::Ordering::Relaxed);
-                    }
-                }
+        // App-family child gate: the tgid LEADER's comm (OS_IPC/OS_FFRT
+        // are generic worker names present in every service — matching
+        // the reading thread's comm burned the read-side budget in one
+        // boot).
+        fn sltx_app_child(tgid: u32) -> bool {
+            if tgid == 0 {
+                return false;
             }
+            let t = unsafe { crate::sched::find_task_by_pid(tgid) };
+            if t.is_null() {
+                return false;
+            }
+            let name = core::str::from_utf8(unsafe { (*t).comm() })
+                .unwrap_or("")
+                .trim_end_matches('\0');
+            name.starts_with("m.ohos.")
+                || name.starts_with("os.")
+                || name.starts_with("com.")
+                || name.starts_with("tonelibrarydata")
         }
-        let lp = SLTX_PID.load(core::sync::atomic::Ordering::Relaxed);
-        if lp != 0
-            && (proc.pid == lp || target.pid == lp)
-            && SLTX_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 500
+        let sender_tgid = crate::sched::current()
+            .map(|t| unsafe { (*t).tgid() as u32 })
+            .unwrap_or(0);
+        let sender_is_app = sltx_app_child(sender_tgid);
+        let target_child = target_node
+            .as_ref()
+            .map(|n| n.reg_tgid)
+            .filter(|&g| g != 0 && g != target.pid)
+            .unwrap_or(0);
+        if (sender_is_app || target_child != 0)
+            && SLTX_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 1500
         {
             let mut pb = [0u8; 32];
             let hex: alloc::string::String = if tr.data_buffer != 0
@@ -5456,10 +5474,12 @@ fn binder_transaction(
                 alloc::string::String::from("-")
             };
             crate::pr_warn!(
-                "SLTX {} pid={} -> pid={} code={:#x} oneway={} dlen={} parcel={}",
-                if proc.pid == lp { "out" } else { "in " },
+                "SLTX {} tgid={} pid={} -> pid={} child={} code={:#x} oneway={} dlen={} parcel={}",
+                if sender_is_app { "out" } else { "in " },
+                sender_tgid,
                 proc.pid,
                 target.pid,
+                target_child,
                 tr.code,
                 oneway,
                 data_size,
@@ -6540,37 +6560,50 @@ fn binder_thread_read(
                             // transaction is being read out to its
                             // receiving thread (BR_TRANSACTION/BR_REPLY).
                             crate::trace::trace_binder_transaction_received(t.id);
-                            // sc262 (leg-23): SLTX read-side — the
-                            // launcher's thread picked this transaction
-                            // up out of its queue. An enqueue-side "SLTX
-                            // in" line with no matching read here, while
-                            // the app still parks in binder read, names
-                            // the wake/read path as the loss point.
+                            // sc262 (leg-23): SLTX read-side — an
+                            // app-family child's thread picked this
+                            // transaction up out of its queue. An
+                            // enqueue-side "SLTX in child=X" line with
+                            // no matching read here, while the app
+                            // still parks, names the wake/read path as
+                            // the loss point. sc262 v1 burned its budget
+                            // on samgr/OS_IPC noise (OS_IPC/OS_FFRT are
+                            // generic worker names in EVERY service)
+                            // and required tgid == proc.pid, which can
+                            // never hold for children reading through
+                            // the daemon's INHERITED fd; v2 gates on
+                            // the tgid LEADER's comm only.
                             if let Some(cur) = crate::sched::current() {
                                 let tg = unsafe { (*cur).tgid() as u32 };
-                                if tg == proc.pid {
-                                    let name = core::str::from_utf8(unsafe { (*cur).comm() })
-                                        .unwrap_or("")
-                                        .trim_end_matches('\0');
-                                    if name.starts_with("m.ohos.launcher")
-                                        || name.starts_with("OS_IPC")
-                                        || name.starts_with("OS_FFRT")
-                                    {
-                                        static SLRD_N: core::sync::atomic::AtomicUsize =
-                                            core::sync::atomic::AtomicUsize::new(0);
-                                        if SLRD_N
-                                            .fetch_add(1, core::sync::atomic::Ordering::Relaxed)
-                                            < 600
+                                if tg != 0 {
+                                    let lt = unsafe { crate::sched::find_task_by_pid(tg) };
+                                    if !lt.is_null() {
+                                        let lname = core::str::from_utf8(unsafe { (*lt).comm() })
+                                            .unwrap_or("")
+                                            .trim_end_matches('\0');
+                                        if lname.starts_with("m.ohos.")
+                                            || lname.starts_with("os.")
+                                            || lname.starts_with("com.")
                                         {
-                                            crate::pr_warn!(
-                                                "SLRD tgid={} tid={} comm='{}' read txn id={} code={:#x} reply={}",
-                                                proc.pid,
-                                                thread.tid,
-                                                name,
-                                                t.id,
-                                                t.code,
-                                                t.target_node.is_none()
-                                            );
+                                            static SLRD_N: core::sync::atomic::AtomicUsize =
+                                                core::sync::atomic::AtomicUsize::new(0);
+                                            if SLRD_N
+                                                .fetch_add(1, core::sync::atomic::Ordering::Relaxed)
+                                                < 1500
+                                            {
+                                                let name = core::str::from_utf8(unsafe { (*cur).comm() })
+                                                    .unwrap_or("")
+                                                    .trim_end_matches('\0');
+                                                crate::pr_warn!(
+                                                    "SLRD tgid={} tid={} comm='{}' read txn id={} code={:#x} reply={}",
+                                                    tg,
+                                                    thread.tid,
+                                                    name,
+                                                    t.id,
+                                                    t.code,
+                                                    t.target_node.is_none()
+                                                );
+                                            }
                                         }
                                     }
                                 }
