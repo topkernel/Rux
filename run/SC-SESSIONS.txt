@@ -5467,3 +5467,24 @@ are print-path-only probes (budgeted, rate-capped, no hot-path cost
 when unarmed). The leg-24 sched pair (cd4e5a38+a336568f) has its gate
 evidence in the leg-24 tail; sc269/278 confirm the 2s bound engages
 as designed (and quantify its per-spawn underflow tail).
+
+LEG-25 CLOSE-OUT (19:27) — sc280 (heal-50) FALSIFIES THE PER-SPAWN-
+PENALTY THEORY: final A/B at equal loop volume — sc278 (heal-200):
+25 heals/24 underflows/294 LC; sc279 (heal-200): 28/23/349; sc280
+(heal-50): 1 heal (the ONE firing is the IF=0 variant: held=0x2e8=744
+jiffies — tick delivery itself was blocked ~7.4s, so even the heal
+was delayed; the phantom family has a tick-blocked shape beyond the
+threshold-bounded one), 1 underflow, 340 LC, 404 SLTX. The spawn-band
+phantom (Signature A) simply did not form on sc280's boot — boot-
+chaotic per-boot variance (the leg-24 census lesson again), and with
+it ABSENT the restart loop ran at the SAME rate: Signature A is NOT
+the loop's driver. The loop's driver stays the exec-stall family
+(SLOW-TXN census: queue=0, exec 1.5-10s across unrelated servers) on
+top of the strand lottery — both owned by the sched/wildwrite hunts.
+THE MILESTONE POSITION after 12 boots: transport exonerated end to
+end; account chain answered; the two boot-family walls are (1) plain
+boots: multi-second handler exec stalls -> LIFECYCLE restart loop;
+(2) quietcon boots: bootanimation.finished then the BMS/distributeddb
+bundle-query wall (n=4). Next levers live OUTSIDE this lane's binder
+domain: the sched/wildwrite starvation producers, and the OH image's
+data layer on quiet boots.
