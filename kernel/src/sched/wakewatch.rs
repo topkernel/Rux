@@ -188,6 +188,23 @@ pub fn check_picked(task: *mut crate::process::Task, cpu: usize) {
                 .unwrap_or(0);
             ww_u64(left_pid as u64);
         }
+        // leg-26: enqueue-time geometry from the wake stamp's slot, and
+        // the victim's last recorded pick-scan refusal (reasons: 1
+        // on_cpu, 2 foreign claim, 3 affinity, 4 throttled, 5 healed).
+        {
+            let slot = slot_of(task);
+            ww_msg(b" enq_lead=");
+            ww_u64(slot.enq_lead.load(Ordering::Relaxed));
+            ww_msg(b"ms enq_lag=");
+            ww_u64(slot.enq_lag.load(Ordering::Relaxed));
+            ww_msg(b"ms");
+        }
+        if let Some((reason, jif)) = crate::sched::fair::last_skip_of(pid) {
+            ww_msg(b" lastskip=");
+            ww_u64(reason as u64);
+            ww_msg(b"@");
+            ww_u64(jif as u64);
+        }
         ww_msg(b"\n");
         for c in 0..crate::config::MAX_CPUS {
             crate::sched::sched::ran_ring_dump(c);
