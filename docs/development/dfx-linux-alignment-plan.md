@@ -550,6 +550,22 @@ scheme rests on, verified by the reboot cycle itself.
   zero page names the range before any reserve runs, so the carve is
   skipped when the initrd overlaps it (the same no-initrd caveat the
   riscv64 side documents).
+- **x86_64 reboots need BSS zeroing (batch 6, 2026-10-26).** The
+  first end-to-end reboot attempt (pstore-x86 smoke r4) storm-looped:
+  every boot >= 2 died in early mm (the first boot-time page-table
+  allocation failing, then ALLOCTHROWs on inherited heap state), 92
+  banners in one window. Root cause: QEMU's linuxboot ROM reloads
+  only the file-backed bytes on a guest reset — the NOBITS `.bss`
+  tail keeps the previous boot's statics (EARLY_TABLE_NEXT,
+  ALLOC_STAGE, memblock state). The first power-on boot only ever
+  worked because QEMU starts RAM zeroed, which holds exactly once.
+  Fix: `__x86_64_start` zeroes `__sbss..__ebss` before
+  `early_boot_init` (rep stosq; the boot.S handoff words live in
+  `.boot.data`, not `.bss`). This is the kernel's own job on the
+  Linux boot protocol — Linux `startup_64` does the same — and the
+  riscv64 `boot.S` has always done it. Every x86_64 reboot path
+  (`panic=`, sysrq b, kreset) was broken by the stale BSS, not just
+  pstore.
 
 Acceptance: `panic=5` reboots the guest within five seconds of a
 panic; the next boot shows the previous panic's registers.### Tranche 6 — correctness and lock instrumentation
