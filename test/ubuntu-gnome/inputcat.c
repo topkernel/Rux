@@ -25,6 +25,7 @@
 #include <poll.h>
 #include <string.h>
 #include <sys/wait.h>
+#include <sys/epoll.h>
 
 struct input_event {
     long sec, usec;
@@ -34,7 +35,27 @@ struct input_event {
 
 int main(void)
 {
-    printf("[inputcat] spawning reader\n");
+    printf("[inputcat] spawning readers\n");
+    pid_t e = fork();
+    if (e == 0) {
+        int fd = open("/dev/input/event0", O_RDONLY | O_NONBLOCK);
+        printf("[epollr] open rc %d\n", fd);
+        if (fd < 0) _exit(1);
+        int ep = epoll_create1(0);
+        struct epoll_event ev = { .events = EPOLLIN, .data.fd = fd };
+        epoll_ctl(ep, EPOLL_CTL_ADD, fd, &ev);
+        struct epoll_event out;
+        for (;;) {
+            int rc = epoll_wait(ep, &out, 1, 5000);
+            if (rc < 0) { printf("[epollr] rc=%d\n", rc); continue; }
+            if (rc == 0) { printf("[epollr] idle\n"); fflush(stdout); continue; }
+            struct input_event ie;
+            while (read(fd, &ie, sizeof ie) == (int)sizeof ie)
+                printf("[epollr] KBD type=%u code=%u val=%d\n", ie.type, ie.code, ie.value);
+            fflush(stdout);
+        }
+    }
+
     fflush(stdout);
     pid_t r = fork();
     if (r == 0) {
