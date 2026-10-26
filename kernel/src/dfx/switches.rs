@@ -78,6 +78,7 @@ macro_rules! dfx_switch_table {
             R83HeapScan => "r83scan",
             LeakHunt => "leakhunt",
             WwCensus => "wwcensus",
+            TxnHang => "txnhunt",
         }
     };
 }
@@ -307,9 +308,18 @@ pub enum DfxSwitch {
     /// opt-in via `dfx=wwcensus` (census/forensics boots keep them by
     /// passing the token; ordinary boots get a clean prompt).
     WwCensus,
+    /// dfx=txnhunt (leg-27): in-flight binder transaction audit at ~1 Hz
+    /// — any sync txn picked up by its server but unreplied for >= 1 s
+    /// gets a TXN-HANG line naming the server thread's task state, the
+    /// syscall/rip of its entry frame, and every other in-flight txn
+    /// issued from that server's process (the synchronous fan-out chain
+    /// inside the handler). Answers "what does the 15 s samgr handler
+    /// spend its time on" without waiting for the 60 s khungtaskd
+    /// cadence. Purely diagnostic; OFF by default.
+    TxnHang,
 }
 
-const SWITCH_COUNT: usize = 34;
+const SWITCH_COUNT: usize = 35;
 
 static SWITCHES: [AtomicBool; SWITCH_COUNT] = [const { AtomicBool::new(false) }; SWITCH_COUNT];
 
@@ -380,6 +390,7 @@ impl DfxSwitch {
             DfxSwitch::R83HeapScan => 31,
             DfxSwitch::LeakHunt => 32,
             DfxSwitch::WwCensus => 33,
+            DfxSwitch::TxnHang => 34,
         }
     }
 

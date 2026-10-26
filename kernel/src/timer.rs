@@ -501,6 +501,10 @@ pub fn timer_softirq_handler(_nr: usize) {
             if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::WwCensus) {
                 ww_heartbeat(now_time);
             }
+            // leg-27: in-flight binder txn hang audit (dfx=txnhunt,
+            // self-gated + rate-capped inside). Runs on the same ~1 Hz
+            // heartbeat slot; zero cost when off.
+            crate::ipc::binder::txn_hang_audit();
         }
     }
 
