@@ -48,7 +48,7 @@ $vb" | grep -c "KERNPANIC")
         break
     fi
     if [ "$(date +%s)" -ge "$deadline" ]; then
-        echo "[$(date '+%H:%M:%S)] 90-min deadline reached (big_a=$big_a big_b=$big_b); swapping anyway" >> "$LOG"
+        echo "[$(date '+%H:%M:%S')] 90-min deadline reached (big_a=$big_a big_b=$big_b); swapping anyway" >> "$LOG"
         break
     fi
     sleep 60
