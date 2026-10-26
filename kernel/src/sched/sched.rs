@@ -806,8 +806,119 @@ fn slot_tag_write(cpu: usize, tag: u32, task: *mut Task) {
     if cpu < MAX_CPUS {
         SLOT_WRITER[cpu].store(tag, core::sync::atomic::Ordering::Relaxed);
         SLOT_WRITER_TASK[cpu].store(task as u64, core::sync::atomic::Ordering::Relaxed);
+        // leg-26 ran-ring (dfx=wwcensus): one entry per current-slot
+        // publish so a later stall report can name the monopolist
+        // RETROACTIVELY — the entries before the stall show the rotation
+        // cadence, the stalled entry pins the incumbent. Single writer
+        // per CPU (every caller holds the GRQ), readers tolerate tearing
+        // (diagnostic only). Cost when the switch is off: one relaxed
+        // load + branch per publish.
+        if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::WwCensus)
+            && !task.is_null()
+        {
+            let h = RAN_HEAD[cpu].fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            let e = ran_entry(cpu, h as usize);
+            // SAFETY: diagnostic record of stable Task fields; the task
+            // is being published as current under the GRQ.
+            unsafe {
+                (*e).pid = (*task).pid() as u64;
+                (*e).pc = (*task).preempt_count() as u32 as u64;
+                (*e).jiffies = crate::drivers::timer::get_jiffies();
+                (*e).tag = tag as u64;
+            }
+        }
     }
 }
+
+// ---- leg-26 stall forensics (ran-ring + tick counters + detectors) ----
+pub const RAN_RING_N: usize = 32;
+pub struct RanEntry {
+    pub pid: u64,
+    pub jiffies: u64,
+    pub tag: u64,
+    pub pc: u64,
+}
+pub struct RanCell(core::cell::UnsafeCell<RanEntry>);
+unsafe impl Sync for RanCell {}
+const fn ran_zero() -> RanCell {
+    RanCell(core::cell::UnsafeCell::new(RanEntry {
+        pid: 0,
+        jiffies: 0,
+        tag: 0,
+        pc: 0,
+    }))
+}
+pub static RAN_RING: [RanCell; RAN_RING_N * MAX_CPUS] =
+    [const { ran_zero() }; RAN_RING_N * MAX_CPUS];
+
+#[inline]
+fn ran_entry(cpu: usize, idx: usize) -> *mut RanEntry {
+    RAN_RING[cpu * RAN_RING_N + (idx & (RAN_RING_N - 1))].0.get()
+}
+pub static RAN_HEAD: [core::sync::atomic::AtomicU64; MAX_CPUS] =
+    [const { core::sync::atomic::AtomicU64::new(0) }; MAX_CPUS];
+/// Per-CPU delivered-tick counter (incremented in scheduler_tick when
+/// wwcensus is armed). Frozen deltas on a stalled CPU = tick loss (the
+/// IF=0 monopoly variant), advancing deltas with a stale incumbent =
+/// preemption refusal (the wake->pick starvation side).
+pub static RAN_TICKS: [core::sync::atomic::AtomicU64; MAX_CPUS] =
+    [const { core::sync::atomic::AtomicU64::new(0) }; MAX_CPUS];
+
+/// Dump `cpu`'s ran-ring (newest first, 8 entries) + tick counter over
+/// the direct console. Callable from any tick context; reads tolerate
+/// concurrent writers (diagnostic only).
+pub fn ran_ring_dump(cpu: usize) {
+    use crate::console::putchar_no_lock as putchar;
+    fn pdec(mut v: u64) {
+        use crate::console::putchar_no_lock as putchar;
+        let mut b = [0u8; 20];
+        let mut n = 0;
+        if v == 0 {
+            putchar(b'0');
+            return;
+        }
+        while v > 0 && n < 20 {
+            b[n] = b'0' + (v % 10) as u8;
+            v /= 10;
+            n += 1;
+        }
+        while n > 0 {
+            n -= 1;
+            putchar(b[n]);
+        }
+    }
+    const M: &[u8] = b" RAN[cpu";
+    for &c in M {
+        putchar(c);
+    }
+    pdec(cpu as u64);
+    putchar(b']');
+    putchar(b' ');
+    let head = RAN_HEAD[cpu].load(core::sync::atomic::Ordering::Relaxed);
+    let now = crate::drivers::timer::get_jiffies();
+    for k in 0..8u64 {
+        let e = ran_entry(cpu, (head.wrapping_sub(1 + k)) as usize);
+        // SAFETY: diagnostic read of a ring entry.
+        let e = unsafe { &*e };
+        if e.pid == 0 {
+            continue;
+        }
+        putchar(b'p');
+        pdec(e.pid);
+        putchar(b'@');
+        pdec(now.wrapping_sub(e.jiffies));
+        putchar(b'j');
+        putchar(b'/');
+        pdec(e.tag);
+        putchar(b' ');
+    }
+    const M2: &[u8] = b"ticks=";
+    for &c in M2 {
+        putchar(c);
+    }
+    pdec(RAN_TICKS[cpu].load(core::sync::atomic::Ordering::Relaxed));
+}
+
 
 // ==================== Deferred Exit Notification ====================
 //
@@ -4337,6 +4448,18 @@ pub fn scheduler_tick() {
                                     putchar(b);
                                 }
                                 ph(unsafe { (*cur).pid() } as u64);
+                                // leg-26: name the incumbent (the strand
+                                // census only ever saw numeric pids).
+                                const MC: &[u8] = b" comm=";
+                                for &b in MC {
+                                    putchar(b);
+                                }
+                                for &b in unsafe { (*cur).comm() } {
+                                    if b == 0 {
+                                        break;
+                                    }
+                                    putchar(b);
+                                }
                                 const M3: &[u8] = b" pc=";
                                 for &b in M3 {
                                     putchar(b);
@@ -5150,6 +5273,136 @@ pub fn scheduler_tick() {
                     dl_throttle(current);
                     set_need_resched();
                 }
+            }
+        }
+    }
+
+    // ==================== leg-26 exec-stall detector (dfx=wwcensus) ===
+    //
+    // Discriminates the two starvation suspects on the minimal-rootfs
+    // reproducer (and on OH boots):
+    //   STALL-HOG   — the SAME task has been this CPU's current for
+    //                 >= 100 jiffies while ticks keep DELIVERED
+    //                 (RAN_TICKS advancing): preemption is being refused
+    //                 or the pick path skips everyone else (suspect A,
+    //                 the wake->pick family).
+    //   STALL-TICKLOSS — handled cross-CPU by timer.rs's TIMER-SOFTIRQ-
+    //                 STALL (its own tick is dead, so this detector —
+    //                 which runs in the tick — can never fire there);
+    //                 that report now also dumps the ran-ring, whose
+    //                 frozen head names the incumbent (suspect B).
+    // One report per incident window (re-arms when the incumbent
+    // changes), plus a ran-ring + tick-counter dump. Direct console
+    // (tick IRQ context), same discipline as the LEAK tripwire above.
+    {
+        static HOG_TASK: [core::sync::atomic::AtomicU64; MAX_CPUS] =
+            [const { core::sync::atomic::AtomicU64::new(0) }; MAX_CPUS];
+        static HOG_SINCE: [core::sync::atomic::AtomicU64; MAX_CPUS] =
+            [const { core::sync::atomic::AtomicU64::new(0) }; MAX_CPUS];
+        static HOG_TICKS0: [core::sync::atomic::AtomicU64; MAX_CPUS] =
+            [const { core::sync::atomic::AtomicU64::new(0) }; MAX_CPUS];
+        static HOG_PRINTED: [core::sync::atomic::AtomicU64; MAX_CPUS] =
+            [const { core::sync::atomic::AtomicU64::new(0) }; MAX_CPUS];
+        if cpu_id < crate::config::MAX_CPUS
+            && crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::WwCensus)
+        {
+            use crate::console::putchar_no_lock as putchar;
+            let now = crate::drivers::timer::get_jiffies();
+            RAN_TICKS[cpu_id].fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+            let cur = cpu_state(cpu_id).current;
+            // The idle task legitimately holds the CPU for >100 jiffies
+            // on a quiet box; only a REAL task can monopolize.
+            if !cur.is_null() && unsafe { (*cur).pid() } != 0 {
+                let cur_word = cur as usize as u64;
+                let slot = &HOG_TASK[cpu_id];
+                if slot.load(core::sync::atomic::Ordering::Relaxed) == cur_word {
+                    let since =
+                        HOG_SINCE[cpu_id].load(core::sync::atomic::Ordering::Relaxed);
+                    let age = now.wrapping_sub(since);
+                    if age >= 100
+                        && HOG_PRINTED[cpu_id]
+                            .swap(1, core::sync::atomic::Ordering::Relaxed)
+                            == 0
+                    {
+                        const M: &[u8] = b"\nSTALL-HOG cpu=";
+                        for &b in M {
+                            putchar(b);
+                        }
+                        fn pdec(mut v: u64) {
+                            use crate::console::putchar_no_lock as putchar;
+                            let mut buf = [0u8; 20];
+                            let mut n = 0;
+                            if v == 0 {
+                                putchar(b'0');
+                                return;
+                            }
+                            while v > 0 && n < 20 {
+                                buf[n] = b'0' + (v % 10) as u8;
+                                v /= 10;
+                                n += 1;
+                            }
+                            while n > 0 {
+                                n -= 1;
+                                putchar(buf[n]);
+                            }
+                        }
+                        pdec(cpu_id as u64);
+                        const M2: &[u8] = b" pid=";
+                        for &b in M2 {
+                            putchar(b);
+                        }
+                        // SAFETY: diagnostic reads of stable Task fields;
+                        // the task is current on this CPU (tick context).
+                        unsafe {
+                            pdec((*cur).pid() as u64);
+                            const M3: &[u8] = b" comm=";
+                            for &b in M3 {
+                                putchar(b);
+                            }
+                            for &b in (*cur).comm() {
+                                if b == 0 {
+                                    break;
+                                }
+                                putchar(b);
+                            }
+                            const M4: &[u8] = b" pc=";
+                            for &b in M4 {
+                                putchar(b);
+                            }
+                            pdec((*cur).preempt_count() as u32 as u64);
+                        }
+                        const M5: &[u8] = b" age_jiffies=";
+                        for &b in M5 {
+                            putchar(b);
+                        }
+                        pdec(age);
+                        const M6: &[u8] = b" ticks_win=";
+                        for &b in M6 {
+                            putchar(b);
+                        }
+                        pdec(
+                            RAN_TICKS[cpu_id]
+                                .load(core::sync::atomic::Ordering::Relaxed)
+                                .saturating_sub(
+                                    HOG_TICKS0[cpu_id]
+                                        .load(core::sync::atomic::Ordering::Relaxed),
+                                ),
+                        );
+                        ran_ring_dump(cpu_id);
+                        putchar(b'\n');
+                    }
+                } else {
+                    slot.store(cur_word, core::sync::atomic::Ordering::Relaxed);
+                    HOG_SINCE[cpu_id].store(now, core::sync::atomic::Ordering::Relaxed);
+                    HOG_TICKS0[cpu_id].store(
+                        RAN_TICKS[cpu_id].load(core::sync::atomic::Ordering::Relaxed),
+                        core::sync::atomic::Ordering::Relaxed,
+                    );
+                    HOG_PRINTED[cpu_id].store(0, core::sync::atomic::Ordering::Relaxed);
+                }
+            } else {
+                HOG_TASK[cpu_id].store(0, core::sync::atomic::Ordering::Relaxed);
+                HOG_PRINTED[cpu_id].store(0, core::sync::atomic::Ordering::Relaxed);
             }
         }
     }

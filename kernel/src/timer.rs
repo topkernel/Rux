@@ -477,6 +477,14 @@ pub fn timer_softirq_handler(_nr: usize) {
                             pc,
                             rip
                         );
+                        // leg-26: suspect-B forensics — the stalled CPU's
+                        // ran-ring names the incumbent that froze its
+                        // ticks, and its tick counter proves the loss.
+                        if crate::dfx::switches::enabled(
+                            crate::dfx::switches::DfxSwitch::WwCensus,
+                        ) {
+                            crate::sched::sched::ran_ring_dump(c);
+                        }
                     }
                 }
             }
