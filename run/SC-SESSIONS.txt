@@ -5382,3 +5382,22 @@ The 10.4s x2 class + i18n SIGKILL suggest a userspace ~10s timeout
 cascade compounding on top. No NEW kernel bug surfaced in this lane's
 domain (binder/ipc); the SLOW-TXN v2 census (02cb1e9b) is the tool
 that names server+comm for every >1.5s sync txn from now on.
+
+LEG-25 ADDENDUM — THE MONSTER-INCUMBENT IDENTIFICATION (304/305):
+sc270's sleepsnap dumps name the 30x kthread band: klogd=301,
+ksoftirqd/0=302, ksoftirqd/1=303, schbd=305 ("sleepsnap: schbd tid
+305 state=0x1 sys=0 rip=0x0" — tid 304 NEVER appears in any dump) —
+by spawn order 304 = khungtaskd. THE sc268 MONSTER-STRAND INCUMBENTS
+(42-241 s, both h-slots) AND sc271's dual-CPU wedge incumbents are
+khungtaskd + schbd — OUR OWN DFX KTHREADS, not OH daemons. Both walk
+task lists (for_each_task / pid-hash buckets — the sc207
+stallwatch_tick self-deadlock topology). sc271's post-census 300 s
+SC-HB gap (t=240 census -> next beat t=541) says the census wedged
+the heartbeat kthread itself for 5 minutes on the quietcon cell.
+=> The hunt-boot interference model gains its third term: (1) lvl7
+kernel printk flood, (2) userspace console UART writes, (3) the
+census kthreads' own monopolies. NEXT CELL (sc273, armed): LOGLEVEL=4
++ quietcon + NO dfx tokens (no khungtaskd snapshot cadence via
+sleepsnap, no schbd, no wwcensus) — always-on SAREG/PCTL/SLTX/SLRD/
+SLOW-TXN only. Adjudicates: census-kthread interference vs the
+organic restart loop on the quietest achievable boot.
