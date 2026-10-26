@@ -73,6 +73,18 @@ fn slot_of(task: *mut crate::process::Task) -> &'static LoSlot {
 
 /// Record a PREEMPT_OFFSET acquire (last wins). Called from
 /// `preempt_count_add` when the probe is armed.
+///
+/// v2 instant tripwire: an acquire booked on a task that owns no CPU
+/// (`!on_cpu`) or is not in RUNNING state is a CROSS-TASK BOOKING — the
+/// producer of the parked-leak family (sc264: every parked victim's
+/// recorded site is __schedule's own GRQ acquire, sched.rs:2152 — an
+/// execution context whose `current()` resolves to a task that is
+/// simultaneously parked). At catch time we print the booking CPU's
+/// sched-slot vs tp divergence, the slot's last writer tag, and the
+/// victim's ownership state — the live adjudicator between stale-tp and
+/// double-run shapes. Skips pid 0 (idle protocol), PF_EXITING tasks
+/// (exit-path bare adds park by design) and the first 500 jiffies
+/// (pre-sched boot task).
 #[inline]
 pub fn note_acquire(
     task: *mut crate::process::Task,
@@ -86,6 +98,161 @@ pub fn note_acquire(
         .store(crate::drivers::timer::get_jiffies(), Ordering::Release);
     slot.cnt_after.store(cnt_after, Ordering::Release);
     slot.reported.store(false, Ordering::Release);
+    // SAFETY: diagnostic reads of stable Task fields.
+    let (pid, on_cpu, st_running, exiting) = unsafe {
+        (
+            (*task).pid(),
+            (*task).on_cpu(),
+            (*task).state().is_running(),
+            (*task).ti_flags()
+                & crate::process::task::task_flags::TaskFlags::PF_EXITING
+                    .bits()
+                != 0,
+        )
+    };
+    if pid != 0 && !exiting && (!on_cpu || !st_running) {
+        catch_booked_on_nonrunning(task, loc, cnt_after, on_cpu, st_running);
+    }
+}
+
+/// Rate gate for the booked-on-nonrunning catch: one per 20 jiffies.
+fn catch_budget_ok() -> bool {
+    static LAST: AtomicU64 = AtomicU64::new(0);
+    static N: AtomicU32 = AtomicU32::new(0);
+    if N.load(Ordering::Acquire) >= 200 {
+        return false;
+    }
+    let now = crate::drivers::timer::get_jiffies();
+    if now < 500 {
+        return false; // pre-sched boot phase
+    }
+    let last = LAST.load(Ordering::Acquire);
+    if now.wrapping_sub(last) < 20 {
+        return false;
+    }
+    LAST.compare_exchange(last, now, Ordering::AcqRel, Ordering::Acquire)
+        .is_ok()
+        && N.fetch_add(1, Ordering::AcqRel) < 200
+}
+
+fn catch_booked_on_nonrunning(
+    task: *mut crate::process::Task,
+    loc: &'static Location,
+    cnt_after: i32,
+    on_cpu: bool,
+    st_running: bool,
+) {
+    if !catch_budget_ok() {
+        return;
+    }
+    use crate::console::putchar_no_lock as putchar;
+    fn ph(mut v: u64) {
+        use crate::console::putchar_no_lock as putchar;
+        for sh in (0..16).rev() {
+            let n = ((v >> (sh * 4)) & 0xF) as u8;
+            putchar(if n < 10 { b'0' + n } else { b'a' + n - 10 });
+        }
+    }
+    fn pd(mut v: u64) {
+        use crate::console::putchar_no_lock as putchar;
+        let mut buf = [0u8; 20];
+        let mut n = 0;
+        if v == 0 {
+            buf[0] = b'0';
+        } else {
+            while v > 0 && n < buf.len() {
+                buf[n] = b'0' + (v % 10) as u8;
+                v /= 10;
+                n += 1;
+            }
+        }
+        for i in (0..n).rev() {
+            putchar(buf[i]);
+        }
+    }
+    const M: &[u8] = b"\nLEAK-ORIGIN booked-on-nonrunning cpu=";
+    for &c in M {
+        putchar(c);
+    }
+    let cpu = crate::arch::cpu_id() as usize;
+    ph(cpu as u64);
+    // SAFETY: diagnostic reads of stable Task fields.
+    unsafe {
+        const M2: &[u8] = b" victim_pid=";
+        for &c in M2 {
+            putchar(c);
+        }
+        pd((*task).pid() as u64);
+        const M3: &[u8] = b" tp_state=";
+        for &c in M3 {
+            putchar(c);
+        }
+        ph((*task).state().bits() as u64);
+        const M4: &[u8] = b" on_cpu=";
+        for &c in M4 {
+            putchar(c);
+        }
+        pd(on_cpu as u64);
+        const M5: &[u8] = b" running=";
+        for &c in M5 {
+            putchar(c);
+        }
+        pd(st_running as u64);
+        const M6: &[u8] = b" claim=";
+        for &c in M6 {
+            putchar(c);
+        }
+        // Negative claims encode pick state; print the raw word.
+        ph((*task).running_on_cpu.load(Ordering::Acquire) as u32 as u64);
+        const M7: &[u8] = b" pick_st=";
+        for &c in M7 {
+            putchar(c);
+        }
+        ph((*task).pick_state() as u64);
+    }
+    // The booking CPU's sched slot vs the tp task — the R55 divergence
+    // at catch time — plus the slot's last writer tag (1=pick 2=R56d
+    // 3=R56c 4=steal 5=abort-republish).
+    const M8: &[u8] = b" slot_pid=";
+    for &c in M8 {
+        putchar(c);
+    }
+    let sl = crate::sched::sched::cpu_state(cpu).current;
+    if sl.is_null() {
+        for &c in b"nil" {
+            putchar(c);
+        }
+    } else {
+        // SAFETY: init-time valid slot pointer; scalar field read.
+        pd(unsafe { (*sl).pid() } as u64);
+    }
+    const M9: &[u8] = b" slotw=";
+    for &c in M9 {
+        putchar(c);
+    }
+    ph(crate::sched::sched::SLOT_WRITER[cpu]
+        .load(Ordering::Relaxed) as u64);
+    const M9B: &[u8] = b" slotw_task=";
+    for &c in M9B {
+        putchar(c);
+    }
+    ph(crate::sched::sched::SLOT_WRITER_TASK[cpu]
+        .load(Ordering::Relaxed));
+    const M10: &[u8] = b" cnt_after=";
+    for &c in M10 {
+        putchar(c);
+    }
+    ph(cnt_after as u32 as u64);
+    const M11: &[u8] = b" site=";
+    for &c in M11 {
+        putchar(c);
+    }
+    for &c in loc.file().as_bytes() {
+        putchar(c);
+    }
+    putchar(b':');
+    pd(loc.line() as u64);
+    putchar(b'\n');
 }
 
 /// User-mode return tripwire. Call at the trap-handler tail when the
