@@ -5959,3 +5959,92 @@ and defensively fixed; the storage D-state open now has its
 path-naming instrument armed; init's 131073 is confirmed kernel-clean
 and low-priority on the patched image; the post-crash-feeds wall is
 the BMS/distributeddata spawn-wait family (image-side).
+
+LEG-29A (OH lane, kernel-side hunts; OH-B shares this worktree on the
+image-side BMS wall — leg-29B commits 84699ce8/95000a3c are theirs;
+my commits 1e5ba07d/6f5e397a/4b7c1ab5) — opened with main 5f1ac865
+already merged by OH-B; dual-arch builds green on the merged tree.
+
+MISSION ITEM 3 — LIVE-CHAIN-NODE-WITH-RELEASED-PARENT: ROOT-CAUSED,
+REPRODUCED, FIXED, VERIFIED.
+  Reproducer (new): test/subreap_churn.c + test/subreap_boot.py —
+  threaded groups under a PR_SET_CHILD_SUBREAPER root, member-forked
+  children, both leader-first and member-first exit orders, zombie
+  pressure, 30 s x86_64 KVM boots (exitwalk_boot.py pattern; NOTE for
+  all users of that pattern: the RAM-clamped static heap base sits at
+  physical 1 GiB, so --mem must be >= 2G or boot panics ALLOCTHROW
+  4MiB with heap +0x0).
+  Detector (new): dfx=treehunt — 1 Hz process-tree validator;
+  TREE-PARENT-DEAD prints the holder shape (member/leader, leader pid,
+  state) and the target page's first word: 0xc3c3c3c3... = TASK_POISON
+  = freed Task page, every draw.
+  Reproduction: pre-fix kernel draws TREE-PARENT-DEAD 10+ times per
+  30 s run; victims are whole thread groups (a leader AND its members
+  all naming the same freed page). Mechanism: do_exit sets PF_EXITING
+  first but runs reparent_children_to_init mid-exit, so a sibling
+  member PAST its own reparent could still be picked as a reparent
+  DESTINATION (state pre-ZOMBIE) — children moved onto it after its
+  collect were never moved again, and its reap freed the page under
+  them. This is the sc304 signal-Arc ancestor class, closed at the
+  source.
+  Fix (6f5e397a): (1) the member walk and the subreaper ancestor walk
+  skip PF_EXITING candidates (an exiting subreaper no longer ends the
+  walk — it continues to the next ancestor); (2) move_child refreshes
+  the moved child's members' parent snapshots (thread_group_join
+  copies the leader's parent and nothing maintained it — a second,
+  independent rot path, caught as TREE-SNAP-STALE on the first run);
+  (3) release_task moves any still-linked children to init before the
+  Task page is freed and prints TREE-RELEASE-HEAL when it acts —
+  always-on hole detector.
+  Verification: 4/4 clean SUBREAP-PASS runs (741/729/739 cycles,
+  ~2200 reaps each), zero TREE-* lines, zero heals; pre-fix kernels
+  drew on every run. Gate so far on the fixed tree: x86_64 + riscv64
+  builds rc=0, riscv64 scripted regression boot rc=0 zero panics
+  (dfx=treehunt armed, silent), make test "All tests passed".
+  Remaining for merge: Tier-1 quiet syscost boot + pbench P4
+  (fork/exit rows — move_child/release_task gained a bounded ring walk
+  and an extra usually-empty collect) once the host quiets down.
+
+MISSION ITEM 2 — sc310 "sendto-stall family": MISLABELED, SPLIT.
+  x86_64 native 75 is fdatasync, not sendto (74=fsync). sc310's 512
+  sys=75 lines are ONE txn (appspawn tid1276 FFRT -> hiview tid578)
+  hung 2569 s to end-of-boot INSIDE fdatasync(fd=41), server state=0x0
+  (RUNNING) throughout — the entry-frame read means the syscall frame
+  was live the whole time; kernel-side. Same substrate as the
+  storage_daemon sync-write family (also seen: accountmgr->huks_service
+  5.7 s fsync, sys=74). This family is MINE now: the wave below arms
+  the stuck-site probe for it.
+  The other 43-min hang in sc310 (515 lines) is device_manager ->
+  distributeddata tid 557, whose handler sits INTERRUPTIBLE in a
+  NESTED binder ioctl (a1=0xc0306201 = _IOWR('b',1,48) =
+  BINDER_WRITE_READ) with the nested txn QUEUED on foundation pid 764
+  at tid 0 (no thread picking up). That is the BMS wall from the
+  kernel side: distributeddata waits on foundation, foundation's BMS
+  waits on distributeddata (sc294's 119 ImplicitQueryAllAbilityInfos
+  queries) — a cross-service wait cycle, image-side service logic,
+  NOT a unix-socket kernel bug. FOR OH-B (leg-29B): your wall's
+  kernel-side shape is "foundation not draining its incoming txn
+  queue while distributeddata's main thread is parked in a nested
+  call INTO foundation" — if you break the cycle image-side, both
+  hangs should collapse together.
+
+NEW PROBES (1e5ba07d, 4b7c1ab5): TXN-HANG-STK prints kernel-text
+words off a hung server thread's stack (sp-up = parked chain when
+sleeping; top-dn = newest frames when RUNNING cross-CPU) — symbolizes
+offline against target/x86_64-unknown-none/debug/rux. file-op=
+pathstash now covers open, regular-file write, AND fsync/fdatasync
+entry (op-tagged, family-matched print). Live in the wave boots.
+
+LEG-29A WAVE-1 (fired 04:48, 45-min boots, KVM SMP2 4G, oh-img-p
+alignguard system + fresh scgold userdata each, kernel run/
+bzImage-29A-treefix2 = probes + tree fix, HDCPORTs 12203-12205;
+OH-B holds 12201/12202):
+  - sc313A dfx=txnhunt,fsw        (loop-drawing by 12 min: LIFECYCLE_
+    TIMEOUT lines present)
+  - sc314A dfx=txnhunt,fsw,sleepsnap
+  - sc315A dfx=txnhunt,fsw
+  Early: file-op probe live — sc314A's first named family is open
+  '/dev/access_token_id' hangs (92 lines by minute 12) plus the wide
+  sys=20 writev RUNNING texture (hilog-socket family). Storage
+  D-state and hiview-fdatasync families: not drawn yet; adjudication
+  when the wave lands.
