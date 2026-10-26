@@ -6442,3 +6442,28 @@ dumps the VMA map):
   fork-copies-PTEs-and-VMAs-in-two-phases race called out in
   page_fault.rs)? Needs a VMA-origin stamp (who created the 0x10 VMA:
   exec, mmap, or mprotect) — a cheap origin field on Vma + one print.
+
+LEG-30B CLOSE-OUT (07:55) — FINAL WAVE TALLIES (5 draws, 45 min each).
+  draw    ENQ READ FREE resident radar spawn_req rs_exit LC    shape
+  sc315B    1   1    1     0        2     1        0       202   advanced to launcher-load wall
+  sc316B    1   1    0     0        0     0        1(SEGV) 0     handler thread killed mid-StartUser
+  sc317B    0   0    0     0        0     0        1(ABRT) 0     accountmgr killed pre-activation
+  sc318B    1   1    1    11        2     2        1       0     advanced (RS crash late, restarted)
+  sc319B    1   1    1    14        2     0        0      273    advanced to launcher-load wall
+  AMS46 SWEEP/RETIRED/PARKED(code-46): 0 on every draw — none of the
+  kernel loss paths ever engaged for the traced txn. Kernel code-46
+  delivery: 4/4 activating draws clean end-to-end.
+  Timing is the lottery: render_service's crash relative to the
+  activation window decides sub-variant B (before: no activation),
+  handler-kill (during: buffer+slot leak, FREE=0), or advance (after/
+  never: resident abilities + launcher chain run, then the old
+  sc262 launcher-load wall: settingsdata LIFECYCLE_TIMEOUT 202-273,
+  launcher spawn requests sent, appspawn child deliveries flowing).
+  GATES for f46c6ad9 on this branch: dual-arch builds rc=0; riscv64
+  smoke boot 0 panics, shell prompt + /proc reached
+  (run/rv-smoke-leg30.sh); make test "All tests passed". Perf tiers
+  not re-measured (print-only, dfx-gated OFF by default; the OH draws
+  above ran with it ON voluntarily).
+  launcher.ready NOT reached — the terminal milestone's next blocker
+  is the render_service crash (see ADDENDUM), then the launcher-load
+  family. Serials sc315B-319B untracked per .gitignore.
