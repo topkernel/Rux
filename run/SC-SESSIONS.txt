@@ -5602,3 +5602,55 @@ OH SIDE (sc290/sc291, lvl4 plain KVM SMP2, dfx=wwcensus[+leakhunt]):
 NEXT: sc290/sc291 to completion => incumbent comm+RIP census at
 PREEMPT-LEAK (leakhunt gives acquire sites on sc291); then the fix
 decision (heal-bound tightening vs producer hunt) + OH verify.
+
+LEG-26 PASS 3 — THE PRODUCER NAMED AND KILLED; THE LOOP'S REMAINING
+DRIVER IS NOT THE KERNEL MONOPOLIES (sc290-sc293 four-boot A/B, all
+lvl4 plain KVM SMP2, fresh scgold, dfx=wwcensus unless noted):
+- sc290 (baseline kernel, 45 min): LC=295, 770 WAKE-STRANDED events
+  behind leaked-pc incumbents (pc=1 x728, pc=2, pc=257), 32 PREEMPT-
+  LEAK lines whose COMM names (new this leg): 26x processdump, 4x
+  appspawn, 2x usage_report — pctick=1/2, held=200j (heal bound),
+  rips in the page-cache/VMA btree walk family.
+  => THE MONOPOLIST IS PROCESSDUMP: every LIFECYCLE_TIMEOUT spawns it,
+  it reads /proc/<pid>/maps for every process, and generate_maps held
+  addr_space.vma_read() — read lock + PREEMPT_DISABLE — across the
+  WHOLE VMA walk + per-VMA dentry path resolution (OH processes carry
+  500+ VMAs). Self-feeding: loop -> processdump -> 2s un-preemptible
+  monopolies -> more timeouts.
+- FIX 2 (the decisive one): /proc/<pid>/maps chunking — at most 32
+  VMAs per vma_read() hold, guard dropped between chunks (preemption
+  re-enabled), walk resumed via VmaManager::iter_after (range scan
+  from the last VMA's start). Linux seq_file discipline.
+- sc293 (maps-chunked + PICK-PC-ZERO kernel): leaked-pc strand
+  events 770 -> 5 (-99.4%), PREEMPT-LEAK 32 -> 0, SLOW-TXN 66 -> 42;
+  boot reaches 43k serial lines vs sc292's 27k before the loop
+  engages. BUT the LIFECYCLE loop still runs at the same rate
+  (LC=212@28min vs 295@45min baseline): the loop's sustaining driver
+  at this depth is the samgr 15.0s txns (SLOW-TXN code 7 to samgr
+  tids 328/333, queue=0 exec=15020ms — the KNOWN image-side 15/30/89s
+  family) + the ability-load chain, NOT the kernel monopolies.
+- sc292 (PICK-PC-ZERO only): LC=138@25k lines — the pick-time phantom
+  zero never fires on OH (the phantom holders never park — they
+  cannot sleep with pc!=0, which is the point); fix is a no-op for
+  the loop, kept as hardening (pickzero=0 on minimal repro too).
+- sc291 (baseline kernel + dfx=leakhunt): LC=0 at 38k lines — the
+  restart loop NEVER STARTED; boot passed bootanimation.finished and
+  wedged at the BMS/distributeddb wall (ImplicitQuery 1512x, the
+  quietcon Signature B wall, on a PLAIN boot) with a WAKE-RUN-LEAK
+  cohort (tid 1309 kicked 20x) and slots [pid304][pid591]. Probe-
+  timing confound (leg-25's variance lesson) but the deepest plain
+  boot of the family.
+- sc291's suppression + sweep3 (fixed kernel, 8 cells): PARKED-LEAK
+  8-9/boot -> 0-1; pickzero=0 everywhere (the parked phantoms do not
+  resurrect through picks on this kernel).
+
+VERDICT (leg-26): the mission's starvation-producer question is
+ANSWERED for the monopoly family — processdump's unchunked maps walks
+(held preempt-disabling reader lock), named by comm at the scene,
+killed by chunking, verified -99.4% on the strand census with make
+test + dual-arch green. The restart loop itself survives on the
+image-side samgr-15s/data-layer chain (leg-25's Signature B wall,
+now on plain boots too); the LIFECYCLE->0 acceptance needs that
+userspace chain, not more sched fixes. Minimal-rootfs schedrepro
+infra + the ran-ring/STALL-HOG/STRAND-DETAIL instrument set stay
+in-tree for the next legs (all dfx-gated, zero-cost off).
