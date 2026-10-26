@@ -1563,3 +1563,50 @@ read, the LTP spot run, the p6 medians (both in the chains).
 **sc2xx launcher.ready trigger: NOT FIRED** (sc258 newest, zero
 events; pa39-watch standing, kept this leg per the leg-36
 convention). Run day stays pending.
+
+### 8.10.9 The pa57 A/B measured: 6fdada6b wake/epoll levers are merge-ready (leg 38)
+
+The re-run fired 07:53-08:27 (6 boots, orders A,B,B,A,A,B, release-
+strong, TCG thread=multi smp2/2G, adjacent pairs (1A,2B) (3B,4A)
+(5A,6B); A = pure main b332d08a strong, B = 2196ce2d strong — the
+branch kernel's diff vs main is exactly 6fdada6b's two files). All
+6 boots rc=0, 0 panics (9 clean pbench boots on the lever kernel
+total, incl. the pa55 B arm).
+
+**The lever's target rows answer cleanly:**
+- **p2_ctxsw (aff=1 ping-pong): B wins ~40%, and the split is by
+  ARM, not regime** — A boots read a tight 3.27-3.33 us, B boots a
+  tight 1.96-2.06 us, and the clusters hold across TWO different
+  host regimes (2B/3B rode the fast window; 6B ran right after 5A in
+  the slow window and still read 1.957 vs 5A's 3.330). Every
+  ping-pong switch takes a wake on a genuinely-empty queue — the
+  one-Acquire-load fast path is exactly this row.
+- **p5a_pipe: B faster in the two interpretable pairs** (0.930,
+  0.817; the (3B,4A) pair is drift-destroyed, 4A is a p5a outlier
+  boot at 6.47 us).
+- **p4_fork_exec: B faster 2-3% consistently** (0.968/0.977/0.991) —
+  the exec wake volume benefits at the margin.
+
+**The p5b/p5c socket rows CANNOT adjudicate the lever — and that is
+their own conclusion:** the family is HOST-REGIME-BIMODAL on this
+box (a fast regime reads p5b_dgram 5-8 us, a slow regime 45-76 us),
+the switch is not arm-correlated (2B/3B fast, 6B slow; 1A slow-mid,
+4A/5A slow), and adjacent same-window pairs swing 0.1-0.9x in BOTH
+directions. The post-b3757d92 "p5 residual" the track-2 ladder
+chased was this host regime noise, not kernel time. Bank: p5b
+medians are only comparable within a single regime window; the
+regime itself is named (p5b bimodal) and the ladder moves to rows
+with a single regime (p6 metadata family, route-1).
+
+**Code-14 targeted look (closed):** the SLOW-TXN `code` field is
+`tr.code` — the USERSPACE RPC op number (codes 1/7/64 are service
+call numbers), not a kernel message class. pa56branch's single
+code-14 row (40.7 s exec, queue 0 ms, host load 30) was a
+CPU-starved server thread for some op 14, not a lost wake (a lost
+wake presents as queue>=50 ms or a growing queue). Branch is clear.
+
+**Verdict: 6fdada6b READY for the merge set** (functional: suite
+green, 9 rc=0 boots, 0 panics; measured: p2_ctxsw -40% with
+arm-aligned clusters across regimes, p5a_pipe/p4_fork_exec
+consistent small wins; no row regresses with the same consistency).
+Kernels stay banked (run/pa57-a-ctl-bzImage / run/pa57-b-fast-bzImage).
