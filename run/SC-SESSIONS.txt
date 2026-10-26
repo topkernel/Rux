@@ -5810,3 +5810,152 @@ LEG-27 NEXT LEVERS (value order, for leg-28): (1) ld-musl+0x1187d2
   "Unknown(pid) exit" (image-side init bookkeeping); (4) render_service
   memcpy-from-PROT_NONE (vma(rax)/vma(rsp) dumps now armed for the
   next occurrence).
+
+LEG-28 (OH UI lane; leg-27 successor; solo-host mandate, 10-QEMU
+budget, waves not queues) — merged main f19382d9 first (one add/add
+conflict on kernel/src/dfx/leakorigin.rs: main carries LEAK-ORIGIN v1
+(e17fb73b), the branch carries v2+v3 on top — diffed and took the
+branch's strict superset; merge 65f8fcf2). Dual-arch builds green on
+the merged tree before any experiment fired.
+
+MISSION ITEM 1 — LD-MUSL 0x1187d2 COND-WALK UAF: PAD-CAVE PATCH LANDED
+  AND VERIFIED (run/patch-ldmusl-alignguard.sh, applied INSIDE
+  oh-img-p/system.img inode 2447 on top of the leg-22 zeronext patch;
+  idempotent, byte-verified by re-extract + cmp + disasm).
+  Design: every legit cond waiter node is rbp-0x50 of a 16-aligned
+  frame (x86-64 ABI), while ALL 8 logged crash nodes sat at
+  <binder-base>+0xa92c = 12 mod 16 (cr2 ...a93c, 8/8 samples across
+  sc261/262/269/278/279/300/301/303, different pids and comms:
+  m.ohos.launcher, honydataability, tonelibrarydata). A misaligned
+  "node" can never be a real waiter — the walk reaches one only
+  through list corruption. Patch routes the walk loop head through
+  three int3 caves (same mechanics as leg-22):
+    site 0x1187d0: `xor %eax,%eax; jmp GUARD` (7 original bytes)
+    GUARD 0x118143 (13B cave, tail padding of pthread_cond_init):
+      `test $0xf,%cl; jne T; jmp CAS`
+    T 0x11814d: `jmp BAIL`;  BAIL 0x1181a6 (10B cave before
+      pthread_cond_timedwait): `xor %ecx,%ecx; jmp 0x118825` — the
+      walk's OWN list-empty split path: cond head(+8)/tail(+0x28)
+      zeroed, lock released via the original epilogue (xchg + futex
+      wake), already-marked waiters still woken and acked, the
+      corrupt remainder dropped instead of dereferenced.
+    CAS 0x118d94 (12B cave): replays `lock cmpxchg %edx,0x10(%rcx)`
+      then `jmp 0x1187d7` — aligned nodes take the original path with
+      identical semantics and zero added instructions on the hot CAS.
+  VERIFICATION:
+  - Host functional smoke (toolchain/x86_64-rux-linux-musl): 50
+    rounds x 16 timedwaiters + broadcast driven through the patched
+    loader directly: hits=800/800, rc=0 — identical to the unpatched
+    loader. Normal condvar semantics intact.
+  - Boots: 0x1187d2 faults = 0 on ALL SEVEN wave boots (sc304-310:
+    plain / txnhunt / txnhunt+fsw / txnhunt+sleepsnap, loop draws AND
+    quiet draws), vs guaranteed repeats on every active unpatched
+    boot. Perm faults overall dropped to 0-1 per boot (2-11 on the
+    unpatched-image boots of leg-27).
+  - Launcher churn: sc304 (loop draw, LIFECYCLE=558) made 32 spawn
+    requests in the first ~20 min — that churn is the APP_FREEZE/
+    LIFECYCLE_TIMEOUT family (zero launcher SIGSEGV; the ONE
+    KILLTRACE kill was appspawn SIGKILL on the first instance), then
+    spawning STOPPED and the final instance held (sandbox children
+    exit status=0x0 = clean). The UAF crash feed is dead; what
+    remains of the churn is the image-side freeze family.
+  - Note: the guard is silent by design (ld-musl cannot printk), so
+    "0 faults" cannot distinguish guard-fired from never-corrupted;
+    acceptance is survival, which holds on every draw.
+
+NEW KERNEL BUG FOUND AND FIXED — REPART SIGNAL-ARC OOPS (sc304,
+  first-ever draw; family never seen in any earlier OH boot log):
+  `BUG: unable to handle kernel paging request at 7ff08b80f820`,
+  RIP atomic_load<u8>, stack = sys_exit -> do_exit ->
+  reparent_children_to_init -> Option::map closure. An ancestor hop
+  passed is_plausible_task_ptr but the freed-and-recycled Task's
+  `signal` Arc slot held a USER-range pointer, so the subreaper
+  check's `is_child_subreaper.load()` faulted — INSIDE the
+  PROCESS_TREE_LOCK hold, so the Oops-killed task wedged the whole
+  boot (serial frozen at 28.8MB from 01:46:49, monitor gone).
+  Plausibly drawn NOW because alignguard keeps launcher instances
+  alive long enough for exotic exit trees. Fix (kernel/src/process/
+  exit.rs, commit on branch): range-validate the Arc<SignalStruct>
+  pointer against the linear-map window (same bounds as the task
+  check) BEFORE the atomic load; garbage hop => walk stops, dest
+  stays init. Every hop's field reads now stay inside plausibility-
+  checked memory. sc309/sc310 (fix kernel): no oops through 25+ min
+  (both draws). ROOT CAUSE remains open for the process-tree owners:
+  a LIVE chain node carried a parent_ptr to an already-released task
+  (the E8-REPAR "unlinked snapshot" class); the fix is defensive.
+
+MISSION ITEM 2 — STORAGE_DAEMON D-STATE OPEN: INSTRUMENT LANDED,
+  FAMILY DID NOT REDRAW THIS SESSION.
+  - New probe (committed): dfx/pathstash.rs — sys_openat stashes the
+    resolved full path per tid at entry (8 slots, tid-keyed, arm-
+    gated on TxnHang); binder.rs's TXN-HANG now prints
+    `TXN-HANG txnN open-path='...'` when the hung server thread's
+    entry syscall is the open family (x86: 2/257/437, riscv: 56/24).
+    This names the file when the family draws. Print-path only, zero
+    cost when off (fsw=1 counters confirmed flowing on sc305/307:
+    FSW1/FSW2 every 60 s, sd~1.5M sync-dirty in provisioning).
+  - Four txnhunt boots (sc305/306/307/308) drew no D-state storage
+    entry (all hung threads INTERRUPTIBLE: sys=202 futex / 16 ioctl /
+    35 nanosleep / 45 brk; sc308 in the loop drew the same census
+    with zero 0x2 states). The sc303 baseline stands: open() flags
+    0x8241 (O_WRONLY|O_CREAT|O_TRUNC|LARGEFILE) D-state 5.5s growing
+    to a write(9) loop at 26.4s — a data-file CREATE stall. The
+    pathstash answer will land on the next boot that draws it.
+
+MISSION ITEM 3 — INIT'S 131073 NO-RESTART: KERNEL DELIVERY VERIFIED
+  CORRECT FROM EXISTING LOGS (no new boot needed). sc303's PCTL tap
+  shows the full pair both ways: `PCTL-SEND pid=328 -> paramservice
+  msgId=13 key=ohos.ctl.start installs|511#0#load##-1#` then
+  `PCTL-RECV pid=1 msgId=13` then the reply `PCTL-SEND pid=1 ->
+  client msgId=13` — samgr's request reaches init, init's answer
+  reaches samgr. The result VALUE (131073 = 0x20001 on the
+  startup.service.ctl.installs GET after the death, in sc293's
+  unpatched loud family) is init's own bookkeeping answer. KERNEL
+  CLEAN, image-side verdict per leg-27. On the patched image the
+  family is nearly absent (installs=1/boot on all seven boots), so
+  an init.cfg/paramservice workaround is LOW VALUE now; revisit only
+  if installs deaths reappear on the alignguard image.
+
+MISSION ITEM 4 — BMS/DISTRIBUTEDDATA WALL RECON (existing logs):
+  sc294's wall shape = `ImplicitQueryAllAbilityInfos failed
+  responseUserId:-1` per bundle (119 queries) — BMS's data layer
+  (distributeddata-backed) not answering. sc303's TXN-HANG names the
+  feed: distributeddata tid630 -> samgr OS_IPC_1_346 code7
+  LoadSystemAbility waits (2.5s/13.1s/5.2s, server parked in
+  sys=45 brk = allocating) plus the telephony->foundation code7
+  family (267 lines). After the crash feeds die, this wall is the
+  remaining gate; it is the same image-side on-demand-spawn wait
+  family leg-27 named (samgr synchronous 15s + wide exec-stall
+  substrate), not a kernel defect.
+  render_service memcpy-from-PROT_NONE (leg-27 lever 4) documented
+  by the new vma dumps on sc306: memcpy(dst=RW anon, src=0x7ff000730000
+  = first page of the 2-page PROT_NONE guard above the thread stack,
+  len 0x3a8), caller frame already corrupt (rbp=0x16) — image-side
+  caller bug, 3 faults/boot, occasionally fatal. Pad-cave clamp
+  needs the caller's frame; deferred.
+
+WAVE TALLY (45-min boots, lvl4 KVM SMP2 4096M, oh-img-p ALIGNGUARD
+image, post-merge kernel; MB = serial volume, pf = perm faults,
+LC = LIFECYCLE lines, sp = launcher spawn requests, ox = kernel
+paging oops):
+  - sc304 plain:            27MB, installs=1, pf=0,  LC=558, sp=32, ox=1 (reparent; pre-fix kernel)
+  - sc305 txnhunt,fsw:       6MB, installs=1, pf=1,  LC=0,   sp=4,  ox=0
+  - sc306 txnhunt:           5MB, installs=1, pf=1,  LC=0,   sp=0,  ox=0
+  - sc307 txnhunt,fsw:       4MB, installs=1, pf=0,  LC=0,   sp=0,  ox=0
+  - sc308 txnhunt,sleepsnap:10MB, installs=2, pf=0,  LC=345,  sp=28, ox=0
+  - sc309 plain REPARENT-FIX kernel:        5MB, installs=1, pf=0, LC=0,   sp=0,  ox=0
+  - sc310 txnhunt REPARENT-FIX kernel:       7MB, installs=1, pf=0, LC=33,  sp=13, ox=0
+    (sc310's new documented family: server pid 556's handler busy
+    RUNNING in sys=75 sendto >1s x189 under txns from pid 337's
+    FFRT thread — a downstream unix-socket stall inside a binder
+    handler; not the storage D-state family)
+  Launcher 0x1187d2 faults: 0/7 boots. Compare unpatched-image leg-27:
+  every active boot drew the family repeatedly.
+
+LEG-28 VERDICT: the launcher ld-musl crash-loop feed is dead (patch
+landed in the private image, host-smoked, boot-verified on 7 draws);
+a first-ever kernel Oops in the reparent walk was found, root-named
+and defensively fixed; the storage D-state open now has its
+path-naming instrument armed; init's 131073 is confirmed kernel-clean
+and low-priority on the patched image; the post-crash-feeds wall is
+the BMS/distributeddata spawn-wait family (image-side).
