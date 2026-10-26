@@ -609,6 +609,17 @@ impl VmaManager {
         self.vmas.values()
     }
 
+    /// Iterate VMAs whose start is strictly greater than `after`
+    /// (leg-26 maps chunking: resume a chunked walk after dropping and
+    /// re-taking the reader lock between batches).
+    pub fn iter_after(
+        &self,
+        after: VirtAddr,
+    ) -> impl Iterator<Item = &Vma> {
+        use core::ops::Bound::{Excluded, Unbounded};
+        self.vmas.range((Excluded(after), Unbounded)).map(|(_, v)| v)
+    }
+
     /// True if any VMA starts within [start, end) — used by add() to
     /// reject forward merges that would swallow a successor VMA (R7-5).
     fn has_vma_starting_within(&self, start: VirtAddr, end: VirtAddr) -> bool {
