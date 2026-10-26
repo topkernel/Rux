@@ -595,6 +595,17 @@ lane's pbench can consume in-guest. The choice:
 - **File shape**: one line, three space-separated decimal numbers,
   `"%llu %llu %lu\n"` — proc.rst's documented triple. The file renders
   (zeros) with the gate off — the honest value of never counted.
+- **Armed cost, measured (batch 5, 2026-10-26).** The A-B ran:
+  `pbench_boot.py --arm-schedstat` (init=/test/arm arms the gate then
+  execs the probe) vs the stock boot, same kernel, same image. p2_ctxsw
+  med 26.369 → 23.202 µs unarmed: **+13.6% (~3.2 µs/switch)** with the
+  gate armed; the fork pair +2.5%; every non-scheduling probe inside
+  the ±8% loaded-host noise band (p1_null −8.2% with no edge at all is
+  the band reference). Loaded-host numbers (load1 ~30 — the quiet gate
+  window never opened that batch); not comparable to the pb1 anchor
+  column. Evidence: `run/evidence/2026-10-26-b5-schedstat-ab.txt`. The
+  disabled cost (one relaxed load per edge) rides the Tier-1 quiet-boot
+  census rows.
 
 The rest of Tranche 7 (the full microbench comparison report) belongs
 to the perf lane; the DFX lane's remaining stake is whatever counter
