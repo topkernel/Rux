@@ -4455,6 +4455,7 @@ impl Task {
             return None;
         }
         Some(self.kernel_stack_bottom + KERNEL_STACK_SIZE)
+    }
 
     /// Check if address is within kernel stack range (for overflow detection)
     ///
