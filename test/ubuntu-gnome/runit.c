@@ -144,6 +144,36 @@ static void dump_xstate(void) {
         if (st != 0)
             printf("[runit] xprobe %s exited st=%d\n", probes[i][1], st);
     }
+    // Composited-content probe (leg-7): XGetImage the root window where
+    // the xterm probe window should be (its geometry has been 904x536 at
+    // +140+90 or +140+127 — sample the interior so either placement is
+    // covered), plus the panel strip. If XREGION shows the window body
+    // in the root but the QMP screendump of the same area does not, the
+    // break is Xorg->scanout; if the root lacks it too, mutter never
+    // composited the client (GLX texture-from-pixmap hunt).
+    {
+        static const char *const rects[][4] = {
+            { "window-body", "200", "200", "700", "300" },
+            { "panel-strip", "0", "0", "1280", "30" },
+        };
+        for (unsigned i = 0; i < sizeof rects / sizeof rects[0]; i++) {
+            printf("== dump XREGION %s ==\n", rects[i][0]);
+            fflush(stdout);
+            pid_t d = fork();
+            if (d == 0) {
+                int con = open("/dev/console", O_WRONLY);
+                if (con >= 0) { dup2(con, STDOUT_FILENO); dup2(con, STDERR_FILENO); }
+                setenv("DISPLAY", ":0", 1);
+                execl("/usr/local/bin/xregion", "xregion",
+                      rects[i][1], rects[i][2], rects[i][3], rects[i][4],
+                      (char *)NULL);
+                _exit(127);
+            }
+            int st; waitpid(d, &st, 0);
+            if (st != 0)
+                printf("[runit] xregion %s exited st=%d\n", rects[i][0], st);
+        }
+    }
 }
 
 // --- kernel trace forensics (merged-main tracing subsystem) ---
@@ -271,6 +301,14 @@ int main(void) {
     setenv("XDG_CURRENT_DESKTOP", "GNOME", 1);
     setenv("LIBGL_ALWAYS_SOFTWARE", "1", 1);
     setenv("GALLIUM_DRIVER", "llvmpipe", 1);
+    // NO_AT_BRIDGE: every GTK app and gsd plugin retries the missing
+    // org.a11y.Bus for the whole session ("AT-SPI: Error retrieving
+    // accessibility bus address" — dozens of dbind warnings per boot,
+    // each potentially costing a serialized dbus round trip in the
+    // 25s-timeout shell init walk). GTK respects this env by skipping
+    // the a11y bridge entirely. Cheaper than shipping at-spi correctly
+    // and removes a whole timeout class from the init walk (leg-7).
+    setenv("NO_AT_BRIDGE", "1", 1);
     mkdir("/tmp/xdg", 0700);
 
     // auto-clear stale X locks (an unclean prior run would wedge Xorg)
@@ -304,6 +342,24 @@ int main(void) {
                                 (const char *const []){ "upowerd", NULL });
         (void)u;
         printf("[runit] upowerd started (pid %d)\n", (int)u);
+    }
+
+    // accounts-daemon from PID1, same reasoning as upowerd (leg-7): the
+    // shell's ActUserManager and gsd-xsettings talk to
+    // org.freedesktop.Accounts on the SYSTEM bus. With the service
+    // absent every proxy creation runs the activator, times out or
+    // errors ("ActUserManager: user (null) has no username", the
+    // accountsservice-CRITICAL spam in every serial so far), and the
+    // per-plugin waits serialize into the shell init walk. The daemon
+    // is small and idles quietly once up.
+    {
+        pid_t a = launch_logged("/tmp/accounts-daemon.log",
+                                "/usr/lib/accountsservice/accounts-daemon",
+                                "accounts-daemon",
+                                (const char *const []){ "accounts-daemon",
+                                                        NULL });
+        (void)a;
+        printf("[runit] accounts-daemon started (pid %d)\n", (int)a);
     }
 
     printf("[runit] starting Xorg (fbdev)\n");

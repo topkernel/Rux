@@ -95,7 +95,17 @@ EOS
 # theme", r6win serial) — shell chrome sprites, panel status-area
 # indicators and notification banner icons are all SVG icon loads, so
 # the theme IS the right-side-indicator/banner fix (leg-6).
-PKGS="dash bash xserver-xorg-core xserver-xorg-video-fbdev x11-xserver-utils x11-utils mesa-utils dbus dbus-x11 libgl1-mesa-dri libgl1-mesa-glx gnome-session-bin gnome-session gnome-shell gnome-settings-daemon librsvg2-common adwaita-icon-theme hicolor-icon-theme xterm fonts-dejavu-core xfonts-base util-linux coreutils procps upower ibus libnotify-bin at-spi2-core"
+# xserver-xorg-input-libinput + -evdev (leg-7): the image has no udev,
+# so Xorg's device auto-add can never enumerate anything ("failed to
+# pre-init udev", r10win serial) and the session runs on Xorg's dummy
+# core devices — NO keyboard/pointer path exists at all. Both drivers
+# accept an explicit Option "Device" (libinput via its path context,
+# evdev directly), which works without udev; the static InputDevice
+# sections below wire /dev/input/event{0,1} in.
+# accountsservice (leg-7): org.freedesktop.Accounts on the system bus
+# for the shell's ActUserManager and gsd-xsettings (started by runit,
+# like upowerd, to dodge the 25s activation-timeout race).
+PKGS="dash bash xserver-xorg-core xserver-xorg-video-fbdev x11-xserver-utils x11-utils mesa-utils dbus dbus-x11 libgl1-mesa-dri libgl1-mesa-glx gnome-session-bin gnome-session gnome-shell gnome-settings-daemon librsvg2-common adwaita-icon-theme hicolor-icon-theme xterm fonts-dejavu-core xfonts-base util-linux coreutils procps upower ibus libnotify-bin at-spi2-core xserver-xorg-input-libinput xserver-xorg-input-evdev accountsservice"
 
 AOPTS=(-o Dir::Etc::sourcelist="$APT_SRC" -o Dir::Etc::sourceparts=-
        -o Dir::State::lists="$APT_LIST" -o Dir::State::status=/dev/null
@@ -349,9 +359,22 @@ OnlyShowIn=GNOME;
 X-GNOME-Autostart-enabled=true
 EON
 
-# Xorg fbdev config (software rendering, no KMS/DRM — Rux has fbdev only)
+# Xorg fbdev config (software rendering, no KMS/DRM — Rux has fbdev only).
+# Input (leg-7): the image has no udev, so device auto-add cannot work
+# ("failed to pre-init udev" every boot so far) and Xorg silently falls
+# back to dummy core devices — nothing in the guest reads /dev/input,
+# which is also why every INPTRC keyprobe produced zero lines (the trace
+# fires when the evdev read/poll path DRAINS the virtqueue; no reader =
+# no drain). Static InputDevice sections with explicit Device paths use
+# libinput's path context (no udev needed) and evdev as the fallback
+# driver; /dev/input/event0 = kernel's VirtIO Keyboard, event1 = VirtIO
+# Tablet (kernel evdev registration order, see evdev.rs init_evdev).
+# AutoAddDevices=off stops the udev probe failure spam.
 mkdir -p "$ROOT/etc/X11"
 cat > "$ROOT/etc/X11/xorg-fbdev.conf" <<'EOX'
+Section "ServerFlags"
+    Option "AutoAddDevices" "off"
+EndSection
 Section "Device"
     Identifier "RuxFbdev"
     Driver     "fbdev"
@@ -369,7 +392,53 @@ Section "Screen"
         Modes "1280x800"
     EndSubSection
 EndSection
+Section "InputDevice"
+    Identifier "RuxKbd"
+    Driver "libinput"
+    Option "Device" "/dev/input/event0"
+EndSection
+Section "InputDevice"
+    Identifier "RuxPtr"
+    Driver "libinput"
+    Option "Device" "/dev/input/event1"
+EndSection
+Section "ServerLayout"
+    Identifier "Layout0"
+    Screen "Screen0"
+    InputDevice "RuxKbd" "CoreKeyboard"
+    InputDevice "RuxPtr" "CorePointer"
+EndSection
 EOX
+
+# xregion probe (leg-7): XGetImage stats of a root-window rect, called
+# from runit's periodic dump_xstate. Dynamic link against the staging
+# tree's libX11 (it runs long after the rootfs is up); -march=rv64gc
+# pins the ISA below what QEMU -cpu rv64 provides (the cross-gcc
+# default march SIGILLs under -cpu rv64 — the diag1 lesson).
+if [ -f "$ROOT/usr/lib/riscv64-linux-gnu/libX11.so" ] || \
+   [ -f "$ROOT/usr/lib/riscv64-linux-gnu/libX11.so.6" ]; then
+    riscv64-linux-gnu-gcc -O2 -march=rv64gc \
+        -o "$ROOT/usr/local/bin/xregion" "$WT/test/ubuntu-gnome/xregion.c" \
+        -I"$ROOT/usr/include" -L"$ROOT/usr/lib/riscv64-linux-gnu" \
+        -Wl,-rpath,/usr/lib/riscv64-linux-gnu -lX11 || \
+        echo "warn: xregion build failed (dump_xstate will show st=127)"
+else
+    echo "warn: staging libX11 missing — xregion not installed"
+fi
+
+# fonts.dir (leg-7): dpkg -x skips the postinst that runs mkfontdir, so
+# Xorg drops /usr/share/fonts/X11/misc from the font path every boot
+# ("fonts.dir not found" WW) and xterm has no bitmap-font fallback if
+# the fontconfig face ever fails. xfonts-utils ships mkfontdir (pulled
+# in by xfonts-base).
+if command -v mkfontdir >/dev/null; then
+    for d in "$ROOT"/usr/share/fonts/X11/*; do
+        [ -d "$d" ] || continue
+        mkfontdir "$d" 2>/dev/null || true
+    done
+    # refresh the top-level fonts.alias-driven dir list
+    mkfontdir "$ROOT/usr/share/fonts/X11" 2>/dev/null || true
+fi
 
 # ---------------------------------------------------------------------------
 # Pack the image (Rux ext4 constraints: 4K blocks, no metadata_csum).

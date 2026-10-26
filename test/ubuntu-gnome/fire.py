@@ -50,6 +50,8 @@ p.add_argument("--extra-append", default="")
 p.add_argument("--dump-every", type=int, default=30)
 p.add_argument("--keyprobe", default="",
                help="comma list of elapsed seconds for a single QMP 'a' keypress")
+p.add_argument("--mousemove", default="",
+               help="comma list of elapsed seconds for QMP abs pointer moves")
 args = p.parse_args()
 
 OUT = os.path.join(WT, "runs", f"gnome-{args.tag}")
@@ -275,6 +277,7 @@ threading.Thread(target=serial_reader, daemon=True).start()
 best_nonblack = 0.0
 dump_i = 0
 keyprobe = [int(x) for x in args.keyprobe.split(",") if x.strip()]
+mousemove = [int(x) for x in args.mousemove.split(",") if x.strip()]
 qmp = None
 exit_reason = "timeout"
 try:
@@ -302,20 +305,53 @@ try:
             if qmp:
                 try:
                     try:
-                        qmp.cmd("send-key", {
-                            "keys": [{"type": "qcode", "data": {"name": "a"}}],
-                            "hold-time": 50})
+                        # Qmp.cmd is keyword-only; hyphenated QMP arg
+                        # names go through ** expansion
+                        qmp.cmd("send-key",
+                                **{"keys": [{"type": "qcode",
+                                             "data": {"name": "a"}}],
+                                   "hold-time": 50})
                     except Exception:
                         # send-key is deprecated; input-send-event is the
                         # supported form (explicit down+up pair)
-                        qmp.cmd("input-send-event", {"events": [
+                        qmp.cmd("input-send-event", events=[
                             {"type": "key", "data": {"down": True,
                              "key": {"type": "qcode", "data": "a"}}},
                             {"type": "key", "data": {"down": False,
-                             "key": {"type": "qcode", "data": "a"}}}]})
+                             "key": {"type": "qcode", "data": "a"}}}])
                     print(f"[fire] t={el}s keyprobe 'a' sent", flush=True)
                 except Exception as e:
                     print(f"[fire] t={el}s keyprobe error: {e}", flush=True)
+        # --mousemove 600: absolute pointer positioning via QMP
+        # input-send-event at the listed second. The virtio-tablet is an
+        # ABS device (kernel advertises 0..32767 per set_absinfo), so
+        # axis values are device coords: 16384 = center -> screen
+        # center ~ (640,400); the second pair jumps right-down to
+        # 26214/21299 -> ~ (1024,520). With the leg-7 static Xorg input
+        # sections the on-screen cursor sprite MUST appear near those
+        # spots in the following screendumps and INPTRC must show the
+        # ptr ABS_X/ABS_Y pushes — the end-to-end input positive
+        # control (the pre-input cursor idled at (1154,728), far from
+        # both targets).
+        while mousemove and el >= mousemove[0]:
+            mt = mousemove.pop(0)
+            if qmp:
+                try:
+                    qmp.cmd("input-send-event", events=[
+                        {"type": "abs", "data": {"axis": "x",
+                                                 "value": 16384}},
+                        {"type": "abs", "data": {"axis": "y",
+                                                 "value": 16384}}])
+                    time.sleep(2)
+                    qmp.cmd("input-send-event", events=[
+                        {"type": "abs", "data": {"axis": "x",
+                                                 "value": 26214}},
+                        {"type": "abs", "data": {"axis": "y",
+                                                 "value": 21299}}])
+                    print(f"[fire] t={el}s mousemove abs center+rightdown sent",
+                          flush=True)
+                except Exception as e:
+                    print(f"[fire] t={el}s mousemove error: {e}", flush=True)
         if qmp and el >= (dump_i + 1) * args.dump_every:
             dump_i += 1
             shot = os.path.join(OUT, f"shot-{el:04d}s.ppm")
