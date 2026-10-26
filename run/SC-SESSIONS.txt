@@ -5552,3 +5552,53 @@ config via `schedrepro=` cmdline):
 NEXT: sweep2 minimization (which ingredients are required) + per-hop
 pong stamps (hop1 = wake syscall + side1 pick; hop2 = side0 pick) to
 name the stalling hop.
+
+LEG-26 PASS 2 — MINIMIZATION + PER-HOP + GEOMETRY + OWNERSHIP (the
+standalone mechanism NAMED, 10 more probe boots srA-srH/srE-srH):
+- Minimization (sweep2, 10 cells): pong+pipe+fork@SMP2 = REPRO
+  (1194ms); +fork4 = 1304ms; full-mix = 1576ms; pong+pipe WITHOUT
+  fork = 52ms CLEAN; fork-only = 314ms; SMP1 = 163ms. FORK CHURN +
+  BOTH blocking-IPC families + SMP2 is the minimal trigger; the
+  borderline cells all sit in a 700-1000ms band (same degradation,
+  >1s crossing is stochastic). Repro stability: every srA-config boot
+  (7/7) showed the >250ms class; verdict REPRO on most.
+- Per-hop pong stamps: hop1 (wake+peer-pick) and hop2 (own pick) are
+  FAST (us) in the biggest stalls — the time sits between the peer's
+  resume and its next move: a RUNNING USERSPACE THREAD descheduled
+  ~1s mid-turn, i.e. runnable-task starvation, pure.
+- Ran-ring dumps at strand time: BOTH CPUs rotate frantically among
+  the same cohort (8 distinct tasks per ring, all @0j), tick counters
+  advancing. NOT idle-harvest failure, NOT monopoly, NOT tick loss.
+- Geometry: at pick time every victim is vr=0/lag=0 (leftmost, at
+  min); last-skip table: most victims NEVER skipped (no ownership
+  screen ever refused them); ownership words CLEAN (on_cpu=0,
+  claim=-1, pk=LIVE), no slot, no SWITCHING_OUT names them.
+- Enqueue-time geometry: EVERY stranded victim entered the queue
+  +29..39ms of virtual runtime AHEAD of min (enq_lag=0).
+=> THE MINIMAL-REPRO STALL CLASS IS FAIR-QUEUE WAIT AMPLIFICATION:
+  the victim's accumulated vruntime lead (~35ms) is worked off under
+  ~10x oversubscription (16 wakeable threads / 2 TCG CPUs + fork
+  churn) => 300-400ms typical, >1s tail. Marks, ticks, monopolies all
+  clean. Linux running this shape shows the same math; wakeup
+  preemption exists and correctly does not fire for an AHEAD task.
+  The >250ms SREPRO class on the minimal rootfs is NOT the OH
+  pathology — it is the benign cousin.
+- PARKED-LEAK (pc=1 on parked waiters) + STALE-CLAIM-RESET (26-42/
+  boot) reproduce in exactly the stalling cells — the ownership/pc
+  corruption SEEDS are present, but srL1 (leakhunt) REPRO'd with ZERO
+  parked-leak: not necessary for the tail.
+OH SIDE (sc290/sc291, lvl4 plain KVM SMP2, dfx=wwcensus[+leakhunt]):
+- sc290: LIFECYCLE_TIMEOUT loop at full rate (182 in ~20 min); OH
+  WAKE-STRANDED lines name the incumbents with RAW pc=1/2 OUTSIDE
+  tick context = GENUINE leaked PREEMPT_OFFSET bits: h0=(316/pc=1)
+  repeat, h1=(1/pc=1) INIT ITSELF, 328/pc=2, 492, 577/pc=2...
+  victims strand 1-3.7s behind them. THE OH PRODUCER IS THE LEAKED-pc
+  INCUMBENT FAMILY (init included), as leg-25 suspected; the
+  minimal-rootfs workload does not form them (needs OH's userspace).
+- STALL-HOG fired on init and m.ohos.launcher with pc=0x10000 — my
+  probe's raw-pc bug (tick's own in-flight offset), fixed in-tree
+  (masked base/nestx/pctick); their 100j monopolies were clean-pc
+  userspace busy loops.
+NEXT: sc290/sc291 to completion => incumbent comm+RIP census at
+PREEMPT-LEAK (leakhunt gives acquire sites on sc291); then the fix
+decision (heal-bound tightening vs producer hunt) + OH verify.
