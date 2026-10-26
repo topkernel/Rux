@@ -5398,6 +5398,9 @@ fn binder_transaction(
                 == SAREG_SAMGR_PID.load(core::sync::atomic::Ordering::Relaxed);
         if is_samgr_req || reply_to_mutation {
             if SAREG_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 600 {
+                // leg-25: the enqueued txn's id, so the send line pairs
+                // 1:1 with the SLRD read line (offline delivery audit).
+                let t_id = txn.id;
                 let comm = crate::sched::current()
                     .map(|t| unsafe { (*t).comm() })
                     .map(|c| core::str::from_utf8(c).unwrap_or(""))
@@ -5424,8 +5427,9 @@ fn binder_transaction(
                         alloc::string::String::from("unmapped")
                     };
                 crate::pr_warn!(
-                    "SAREG {} code={} from pid={} tgid={} comm='{}' -> pid={} dlen={} parcel={}",
+                    "SAREG {} txn{} code={} from pid={} tgid={} comm='{}' -> pid={} dlen={} parcel={}",
                     if reply { "reply" } else { "send " },
+                    t_id,
                     if reply {
                         in_reply_to.as_ref().map(|t| t.code).unwrap_or(0)
                     } else {
