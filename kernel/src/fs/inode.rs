@@ -218,6 +218,19 @@ pub struct INodeOps {
     /// Returns a vector of VfsDirEntry on success, None if not a directory / error.
     pub readdir: Option<unsafe fn(&Inode) -> Option<alloc::vec::Vec<VfsDirEntry>>>,
 
+    /// F4 route-4 (getdents64 cache): whether this filesystem's
+    /// directory listings may be cached across getdents64 calls on one
+    /// open file description. True is ONLY safe for filesystems whose
+    /// directory content changes exclusively through the INodeOps
+    /// mutation entry points above (create/link/unlink/symlink/mkdir/
+    /// rmdir/mknod/rename) — every successful dispatch bumps the global
+    /// VFS directory epoch (vfs::VFS_DIR_EPOCH), and the cache re-checks
+    /// that epoch, so any mutation invalidates every cached listing.
+    /// Dynamic filesystems whose content changes WITHOUT a mutation op
+    /// (procfs: process spawn/exit; devfs: device registration; sysfs/
+    /// debugfs/cgroupfs/selinuxfs: live state) MUST set false.
+    pub readdir_cacheable: bool,
+
     /// Called when a file is opened. Allows FS to set up file.private_data.
     /// Returns 0 on success, negative errno on failure.
     pub open: Option<unsafe fn(&Inode, &crate::fs::File) -> i32>,

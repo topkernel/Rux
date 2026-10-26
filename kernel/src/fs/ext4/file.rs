@@ -1827,14 +1827,13 @@ fn ext4_file_close(file: &File) -> i32 {
 }
 
 /// Ext4 file operations structure
-pub static EXT4_FILE_OPS: FileOps = FileOps {
-    read: Some(ext4_file_read_vfs),
-    write: Some(ext4_file_write_vfs),
-    lseek: Some(reg_file_lseek),
-    close: Some(ext4_file_close),
-    poll: None,
-    read_at: Some(ext4_file_read_at_vfs),
-};
+pub static EXT4_FILE_OPS: FileOps = FileOps::builder()
+    .read(ext4_file_read_vfs)
+    .write(ext4_file_write_vfs)
+    .lseek(reg_file_lseek)
+    .close(ext4_file_close)
+    .read_at(ext4_file_read_at_vfs)
+    .build();
 
 /// ext4 positional read (R71): serve an explicit-offset read without
 /// touching the shared file position at all.

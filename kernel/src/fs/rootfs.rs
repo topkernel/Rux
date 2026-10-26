@@ -1873,6 +1873,7 @@ pub static ROOTFS_INODE_OPS: INodeOps = INodeOps {
     readlink: Some(rootfs_readlink),
     get_file_ops: Some(rootfs_get_file_ops),
     readdir: Some(rootfs_readdir),
+    readdir_cacheable: false,
     open: None,
     permission: None,  // Default: allow all
     getattr: Some(rootfs_getattr),

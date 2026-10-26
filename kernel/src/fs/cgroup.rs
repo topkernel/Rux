@@ -753,6 +753,7 @@ pub static CGROUP_INODE_OPS: INodeOps = INodeOps {
     readlink: None,
     get_file_ops: Some(cgroupfs_get_file_ops),
     readdir: Some(cgroupfs_readdir),
+    readdir_cacheable: false,
     open: Some(cgroupfs_open),
     permission: None,  // default mode-bit DAC
     getattr: Some(cgroupfs_getattr),

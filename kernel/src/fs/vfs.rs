@@ -2345,6 +2345,32 @@ fn lookup_parent_dir(pathname: &str) -> Result<(VfsPath, String), i32> {
     Ok((parent_vpath, name))
 }
 
+/// F4 route-4 (getdents64 cache): global directory-content epoch.
+/// Every SUCCESSFUL directory mutation dispatch below (mkdir, mknod,
+/// symlink, rmdir, unlink, link, create via open(O_CREAT), rename,
+/// rename_exchange) bumps this counter; a cached getdents64 listing
+/// (File::dirent_cache) records the epoch observed when it was
+/// materialized and is dropped the moment the epoch moves. One global
+/// counter rather than a per-inode epoch: the invalidation story stays
+/// airtight (no mutation path can forget to bump a per-inode field it
+/// does not know about) at the cost of over-invalidation — a mkdir in
+/// one directory also drops unrelated cached listings, which is just a
+/// re-scan on a box whose getdents bursts run between mutations.
+/// Dynamic filesystems (procfs/devfs/...) never populate the cache, so
+/// their un-bumped content changes cannot be served stale.
+static VFS_DIR_EPOCH: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+
+/// Read the directory-content epoch (getdents64 cache key part).
+pub fn vfs_dir_epoch() -> u64 {
+    VFS_DIR_EPOCH.load(core::sync::atomic::Ordering::Acquire)
+}
+
+/// Bump the directory-content epoch — call on EVERY successful
+/// directory mutation dispatch (see VFS_DIR_EPOCH above).
+fn vfs_dir_epoch_bump() {
+    VFS_DIR_EPOCH.fetch_add(1, core::sync::atomic::Ordering::Release);
+}
+
 /// Create directory - unified implementation using inode_operations
 ///
 /// This function works across all filesystem types by:
@@ -2427,6 +2453,7 @@ pub fn vfs_mkdir(pathname: &str, mode: u32) -> Result<(), i32> {
                     return Err(e);
                 }
             };
+            vfs_dir_epoch_bump();
 
             // inode_init_owner (Linux): a new entry gets the caller's fsuid,
             // and when the PARENT directory has S_ISGID set the child
@@ -2542,6 +2569,7 @@ pub fn vfs_mknod(pathname: &str, mode: u32, dev: u64) -> Result<(), i32> {
                 let inode_mode =
                     crate::fs::inode::InodeMode::new(mode & 0o170000 | (mode & 0o7777));
                 mknod_fn(parent_inode.as_ref(), name.as_bytes(), inode_mode, dev)?;
+                vfs_dir_epoch_bump();
 
                 // Invalidate any stale (negative) dentry, the same
                 // discipline as vfs_mkdir. The mknod callback returns no
@@ -2594,6 +2622,7 @@ pub fn vfs_symlink(pathname: &str, target: &str) -> Result<(), i32> {
     unsafe {
         if let Some(symlink_fn) = ops.symlink {
             let new_inode = symlink_fn(parent_inode.as_ref(), name.as_bytes(), target.as_bytes())?;
+            vfs_dir_epoch_bump();
 
             // Invalidate negative dentry and cache the new one
             if let Some(ref parent_dentry) = parent_vpath.dentry {
@@ -2675,6 +2704,7 @@ pub fn vfs_rmdir(pathname: &str) -> Result<(), i32> {
         if let Some(rmdir_fn) = ops.rmdir {
             let result = rmdir_fn(parent_inode.as_ref(), name.as_bytes());
             if result == 0 {
+                vfs_dir_epoch_bump();
                 // Invalidate icache entry for the removed directory
                 if let Some((ino, fs_id)) = target_ino_and_fs_id {
                     crate::fs::inode::icache_remove(ino, fs_id);
@@ -2787,6 +2817,7 @@ pub fn vfs_unlink(pathname: &str) -> Result<(), i32> {
         if let Some(unlink_fn) = ops.unlink {
             let result = unlink_fn(parent_inode.as_ref(), name.as_bytes());
             if result == 0 {
+                vfs_dir_epoch_bump();
                 // inotify: capture the target inode before the caches drop
                 // it — IN_DELETE on the parent (named); IN_DELETE_SELF on
                 // the inode itself only when the last link went away.
@@ -2913,6 +2944,7 @@ pub fn vfs_link(oldpath: &str, newpath: &str) -> Result<(), i32> {
         if let Some(link_fn) = ops.link {
             let result = link_fn(parent_inode.as_ref(), name.as_bytes(), src_inode.as_ref());
             if result == 0 {
+                vfs_dir_epoch_bump();
                 // Invalidate stale/negative dentry at new path
                 if let Some(ref parent_dentry) = parent_vpath.dentry {
                     parent_dentry.remove_child(&name);
@@ -3060,6 +3092,7 @@ fn vfs_rename_locked(oldpath: &str, newpath: &str) -> Result<(), i32> {
     // Use old_parent's inode ops for rename
     let result = old_parent.op_rename(old_name.as_bytes(), new_parent, new_name.as_bytes());
     if result == 0 {
+        vfs_dir_epoch_bump();
         // Keep the dentry cache in step with the on-disk rename by MOVING
         // the renamed entry's cached dentry (reference d_move): the dentry
         // — with its whole cached subtree — is re-attached under the new
@@ -3896,6 +3929,7 @@ pub fn file_open(filename: &str, flags: u32, mode: u32) -> Result<usize, i32> {
                     // gid to everything created inside it (LTP creat09,
                     // CVE-2018-13405 family).
                     inherit_setgid_dir_gid(&parent_inode, &new_inode);
+                    vfs_dir_epoch_bump();
                     new_inode
                 };
                 // Cache new dentry (replace stale/negative dentry)
@@ -5128,6 +5162,40 @@ pub fn file_opendir(pathname: &str, flags: u32) -> Result<usize, i32> {
     }
 }
 
+/// F4 route-4 helper: the per-filesystem readdir listing plus the "."
+/// and ".." synthesis that used to live inline in file_getdents64 (and
+/// re-ran on every call).
+///
+/// POSIX/Linux: every directory's readdir stream starts with "." and
+/// ".." (d_ino "." = the directory itself, ".." = its parent). The
+/// per-filesystem readdir callbacks list only real children, so the
+/// two dot entries are synthesized here. Tests and userland (find,
+/// tar, rsync) rely on their presence.
+pub fn getdents_with_dots(
+    mut entries: alloc::vec::Vec<VfsDirEntry>,
+    dir_ino: Ino,
+    parent_ino: u64,
+) -> alloc::vec::Vec<VfsDirEntry> {
+    let has_dot = entries.iter().any(|e| e.name == b".");
+    if has_dot {
+        entries
+    } else {
+        let mut with_dots = alloc::vec::Vec::with_capacity(entries.len() + 2);
+        with_dots.push(VfsDirEntry {
+            ino: dir_ino,
+            name: alloc::vec![b'.'],
+            file_type: crate::fs::inode::file_type::DT_DIR,
+        });
+        with_dots.push(VfsDirEntry {
+            ino: parent_ino,
+            name: alloc::vec![b'.', b'.'],
+            file_type: crate::fs::inode::file_type::DT_DIR,
+        });
+        with_dots.extend(entries);
+        with_dots
+    }
+}
+
 /// Read directory entries (getdents64)
 ///
 /// # Arguments
@@ -5168,50 +5236,83 @@ pub fn file_getdents64(fd: usize, buf: &mut [u8], count: usize) -> Result<usize,
             return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
         }
 
-        // Call readdir through inode.ops
-        let mut entries = if let Some(ops) = inode.ops {
-            if let Some(readdir_fn) = ops.readdir {
-                readdir_fn(&*inode)
-                    .ok_or(errno::Errno::IOError.as_neg_i32())?
-            } else {
-                return Err(errno::Errno::NotADirectory.as_neg_i32());
-            }
-        } else {
-            return Err(errno::Errno::BadFileNumber.as_neg_i32());
+        // Call readdir through inode.ops.
+        let ops = match inode.ops {
+            Some(ops) => ops,
+            None => return Err(errno::Errno::BadFileNumber.as_neg_i32()),
+        };
+        let readdir_fn = match ops.readdir {
+            Some(f) => f,
+            None => return Err(errno::Errno::NotADirectory.as_neg_i32()),
         };
 
-        // POSIX/Linux: every directory's readdir stream starts with "." and
-        // ".." (d_ino "." = the directory itself, ".." = its parent). The
-        // per-filesystem readdir callbacks list only real children, so the
-        // two dot entries are synthesized here, once, for all filesystems.
-        // Tests and userland (find, tar, rsync) rely on their presence.
-        {
-            let has_dot = entries.iter().any(|e| e.name == b".");
-            if !has_dot {
-                let mut with_dots = alloc::vec::Vec::with_capacity(entries.len() + 2);
-                let parent_ino = {
-                    // SAFETY: dentry is written once at open time and never mutated
-                    let dentry_opt = unsafe { (*file.dentry.get()).clone() };
-                    dentry_opt
-                        .and_then(|d| d.parent.lock().clone())
-                        .and_then(|p| p.inode.lock().clone())
-                        .map(|pi| pi.ino)
-                        .unwrap_or(inode.ino)
-                };
-                with_dots.push(crate::fs::inode::VfsDirEntry {
-                    ino: inode.ino,
-                    name: alloc::vec![b'.'],
-                    file_type: crate::fs::inode::file_type::DT_DIR,
-                });
-                with_dots.push(crate::fs::inode::VfsDirEntry {
-                    ino: parent_ino,
-                    name: alloc::vec![b'.', b'.'],
-                    file_type: crate::fs::inode::file_type::DT_DIR,
-                });
-                with_dots.extend(entries);
-                entries = with_dots;
+        // F4 route-4: cacheable filesystems (INodeOps::readdir_cacheable
+        // — ext4, tmpfs: content changes ONLY through the mutation entry
+        // points, each of which bumps VFS_DIR_EPOCH) serve repeat calls
+        // from a per-open-file snapshot instead of re-materializing the
+        // whole directory every call (the old path's 27.6K full
+        // re-scans per boot, getdents avg 407 us). Dynamic filesystems
+        // (procfs et al.) keep the per-call materialization.
+        let epoch_now = if ops.readdir_cacheable {
+            Some(vfs_dir_epoch())
+        } else {
+            None
+        };
+        let inode_id = Arc::as_ptr(inode) as usize;
+
+        // Hit path: one lock, one Arc clone — no allocation, no readdir.
+        let mut cache_hit: Option<alloc::sync::Arc<crate::fs::file::DirentCacheSnapshot>> = None;
+        if let Some(epoch) = epoch_now {
+            let guard = file.dirent_cache.lock();
+            if let Some(snap) = guard.as_ref() {
+                if snap.inode_id == inode_id && snap.epoch == epoch {
+                    cache_hit = Some(alloc::sync::Arc::clone(snap));
+                }
             }
         }
+
+        // Miss path (and every call on a non-cacheable fs): materialize.
+        // readdir may sleep in block I/O — no spinlock is held here.
+        let fresh_snap: Option<alloc::sync::Arc<crate::fs::file::DirentCacheSnapshot>>;
+        if cache_hit.is_none() {
+            // SAFETY: readdir is a VFS callback; the Arc<Inode> backing
+            // `inode` outlives this call (the open File holds it).
+            let base = unsafe { readdir_fn(&*inode) }
+                .ok_or(errno::Errno::IOError.as_neg_i32())?;
+            let parent_ino = {
+                // SAFETY: dentry is written once at open time and never mutated
+                let dentry_opt = unsafe { (*file.dentry.get()).clone() };
+                dentry_opt
+                    .and_then(|d| d.parent.lock().clone())
+                    .and_then(|p| p.inode.lock().clone())
+                    .map(|pi| pi.ino)
+                    .unwrap_or(inode.ino)
+            };
+            let entries = getdents_with_dots(base, inode.ino, parent_ino);
+            let snap = alloc::sync::Arc::new(crate::fs::file::DirentCacheSnapshot {
+                inode_id,
+                epoch: epoch_now.unwrap_or(0),
+                entries,
+            });
+            // Store only when the epoch held still through the scan: a
+            // mutation racing the readdir means this listing may be a
+            // torn mix — serve it for THIS call (the same race the old
+            // per-call path had) but do not pin it at a post-mutation
+            // epoch, where it would be served stale forever.
+            if let Some(e0) = epoch_now {
+                if vfs_dir_epoch() == e0 {
+                    *file.dirent_cache.lock() = Some(alloc::sync::Arc::clone(&snap));
+                }
+            }
+            fresh_snap = Some(snap);
+        } else {
+            fresh_snap = None;
+        }
+
+        let entries: &alloc::vec::Vec<VfsDirEntry> = cache_hit
+            .as_ref()
+            .map(|s| &s.entries)
+            .unwrap_or_else(|| &fresh_snap.as_ref().unwrap().entries);
 
         let start_pos = file.get_pos() as usize;
         let mut bytes_written = 0usize;
@@ -5529,6 +5630,7 @@ pub(crate) static PROCFS_DIR_OPS: INodeOps = INodeOps {
     readlink: None,
     get_file_ops: None,
     readdir: Some(procfs_dir_readdir),
+    readdir_cacheable: false,
     open: None,
     permission: None,
     getattr: None,

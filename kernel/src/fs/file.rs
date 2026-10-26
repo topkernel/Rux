@@ -203,6 +203,31 @@ pub enum FileOpKind {
 /// description's lifetime without pinning the Arc.
 static FILE_ID_GENERATION: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(1);
 
+/// F4 route-4: one getdents64 listing cached per open file description.
+/// `file_getdents64` used to re-materialize the WHOLE directory on every
+/// call (ext4 list_dir: read every block + clone every entry; 27.6K full
+/// re-scans per boot, getdents avg 407 us — the f4 route map's route 4).
+/// A cacheable filesystem (INodeOps::readdir_cacheable) stores its
+/// listing here keyed by (inode identity, VFS_DIR_EPOCH); any successful
+/// directory mutation bumps the epoch, so the next call re-materializes.
+/// The entries include the synthesized "." and ".." (the synthesis runs
+/// once at materialization instead of per call). `epoch` is the epoch
+/// observed BEFORE materialization; the store additionally verifies the
+/// epoch did not move DURING materialization (a mutation racing the scan
+/// means the listing is a torn mix — serve it for this call as the old
+/// path did, but do not pin it in the cache).
+pub struct DirentCacheSnapshot {
+    /// Identity of the listed inode (Arc target address; the File's
+    /// inode slot is written once at open — if it ever changes, this
+    /// mismatch forces a re-materialization).
+    pub inode_id: usize,
+    /// VFS_DIR_EPOCH when materialization started.
+    pub epoch: u64,
+    /// Full ordered listing WITH the dot entries synthesized.
+    pub entries: alloc::vec::Vec<crate::fs::inode::VfsDirEntry>,
+}
+
+
 #[repr(C, align(16))]
 pub struct File {
     /// R31-B3: set by close_fd when the slot was removed but an in-flight
@@ -241,8 +266,14 @@ pub struct File {
     /// O_ASYNC signal destination (F_SETOWN / F_SETOWN_EX). kind 0 none,
     /// 1 process, 2 process group, 3 thread (F_OWNER_TID).
     pub f_owner: Spinlock<FileOwner>,
-    /// O_ASYNC signal number (F_SETSIG); 0 = default SIGIO.
+    /// O_ASYNC signal signal number (F_SETSIG); 0 = default SIGIO.
     pub f_signum: core::sync::atomic::AtomicI32,
+    /// F4 route-4: cached getdents64 listing (see DirentCacheSnapshot).
+    /// Arc so the hit path is one refcount bump — cloning the Vec per
+    /// call would reintroduce the per-call allocation the cache removes.
+    /// Materialization (readdir) may sleep in block I/O and runs OUTSIDE
+    /// this lock; only the slot swap is under it.
+    pub dirent_cache: Spinlock<Option<alloc::sync::Arc<DirentCacheSnapshot>>>,
 }
 
 /// fasync owner set via F_SETOWN/F_SETOWN_EX (kept on the open file
@@ -289,6 +320,7 @@ impl File {
             io_lock: crate::sync::semaphore::Mutex::new(),
             f_owner: Spinlock::new(FileOwner::none()),
             f_signum: core::sync::atomic::AtomicI32::new(0),
+            dirent_cache: Spinlock::new(None),
         }
     }
 
