@@ -2549,6 +2549,16 @@ pub fn sys_prlimit64(args: SyscallArgs) -> i64 {
             return -(errno::EINVAL as i64);
         }
 
+        // RLIMIT_NOFILE hard-limit ceiling (Linux do_prlimit): raising
+        // rlim_max above the fs.nr_open sysctl default (1024*1024) is
+        // EPERM even for root. musl's setrlimit() maps to prlimit64 on
+        // the generic 64-bit syscall table (no setrlimit there), so this
+        // check must live HERE as well (LTP setrlimit03 sets
+        // rlim_max = nr_open+1 as root and requires EPERM).
+        if resource == rlimit_res::NOFILE && req_max > 1024 * 1024 {
+            return -(errno::EPERM as i64);
+        }
+
         // Raising the hard limit — or the soft above the old hard —
         // needs CAP_SYS_RESOURCE (kernel/fork.c / do_prlimit).
         let (_, old_max) = old_vals[resource];

@@ -2779,11 +2779,34 @@ pub fn sys_fchownat(args: SyscallArgs) -> i64 {
         return -(errno::EINVAL as i64);
     }
 
+    // AT_EMPTY_PATH: operate on the dirfd's own file (Linux; musl maps
+    // fchown() to fchownat(fd, "", AT_EMPTY_PATH) on the generic 64-bit
+    // syscall table, which has no fchown). Delegating to sys_fchown keeps
+    // one implementation of the ownership rules — including the O_PATH
+    // EBADF rejection (LTP open13's fchown case runs through here).
+    if flags & AT_EMPTY_PATH != 0 {
+        let mut probe = [0u8; 1];
+        let empty = unsafe {
+            pathname_ptr.is_null()
+                || (crate::arch::uaccess::access_ok(pathname_ptr as usize, 1)
+                    && crate::arch::uaccess::copy_from_user(
+                        probe.as_mut_ptr(), pathname_ptr, 1) == 0
+                    && probe[0] == 0)
+        };
+        if empty {
+            if dirfd < 0 {
+                return -(errno::EBADF as i64);
+            }
+            return sys_fchown([
+                dirfd as u64, uid as u64, gid as u64, 0, 0, 0,
+            ]);
+        }
+    }
+
     let full_path = match resolve_user_path(dirfd, pathname_ptr) {
         Ok(p) => p,
         Err(e) => return e as i64,
     };
-
     // AT_SYMLINK_NOFOLLOW: lchown(2) semantics — the ownership change
     // applies to the SYMBOLIC LINK itself, never the target. musl maps
     // lchown() to fchownat(..., AT_SYMLINK_NOFOLLOW), so ignoring the flag

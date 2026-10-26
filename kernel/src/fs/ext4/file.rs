@@ -1509,6 +1509,35 @@ pub fn ext4_file_write_vfs(file: &File, buf: &[u8]) -> isize {
             file.get_pos()
         };
 
+        // RLIMIT_FSIZE (Linux generic_write_checks — ext4 files carry their
+        // own write op, so the reg_file_write twin is not enough): a write
+        // starting at/after the soft limit fails EFBIG with SIGXFSZ; a
+        // write that would CROSS the limit is silently truncated to the
+        // boundary (LTP setrlimit01 case 2 sets the limit to 10, writes 26
+        // and requires write() to return exactly 10).
+        let mut buf = buf;
+        if let Some(task) = crate::sched::current() {
+            let (fsz_cur, _) = task.rlimit(crate::process::task::rlimit_res::FSIZE);
+            if fsz_cur != u64::MAX {
+                let start = if offset == u64::MAX {
+                    inode.size.load(core::sync::atomic::Ordering::Acquire)
+                } else {
+                    offset
+                };
+                if start >= fsz_cur {
+                    let _ = crate::signal::send_signal(
+                        task.pid() as u32,
+                        crate::signal::Signal::SIGXFSZ as i32,
+                    );
+                    return crate::errno::Errno::FileTooLarge.as_neg_i32() as isize;
+                }
+                let allowed = (fsz_cur - start) as usize;
+                if buf.len() > allowed {
+                    buf = &buf[..allowed];
+                }
+            }
+        }
+
         // SAFETY: fs/inode resolution above; buf is the caller's slice.
         let written = unsafe { ext4_write_at_core(fs, ext4_ino, inode, offset, buf, 0) };
         if written > 0 {
