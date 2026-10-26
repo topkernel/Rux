@@ -720,6 +720,17 @@ unsafe fn sweep_stale_async(world: &World, target: &Arc<BinderProc>) -> usize {
             continue;
         }
         if let Some(t) = b.txn.take() {
+            // leg-30B AMS46: the 30 s stale-buffer reclaim acted on a
+            // traced txn — the receiver read it but never BC_FREE'd it
+            // (userspace leak shape), or it held the slot the traced
+            // StartUser needs.
+            if ams46_on() && ams46_txns_contains(t.id) {
+                crate::pr_warn!(
+                    "AMS46 SWEEP-RECLAIM txn{} code={} (delivered but never freed)",
+                    t.id,
+                    t.code
+                );
+            }
             if t.holds_async_slot() {
                 slot_holders.push(t);
             }
@@ -741,7 +752,14 @@ unsafe fn sweep_stale_async(world: &World, target: &Arc<BinderProc>) -> usize {
                 Some(h) => {
                     unsafe { h.set_holds_async_slot(true) };
                     let tp = h.to_proc.clone();
-                    pm(world, &tp).im().todo.push_back(Work::Transaction(h));
+                    pm(world, &tp).im().todo.push_back(Work::Transaction(h.clone()));
+                    if ams46_on() && ams46_txns_contains(h.id) {
+                        crate::pr_warn!(
+                            "AMS46 SWEEP slot txn{} -> txn{} (parked code-46 DELIVERED by sweep drain)",
+                            t.id,
+                            h.id
+                        );
+                    }
                 }
                 None => {
                     ns.has_async_transaction = false;
@@ -812,6 +830,16 @@ unsafe fn sweep_silent_txns(world: &World) -> (usize, Vec<Arc<BinderProc>>) {
                 let Work::Transaction(t) = &wk else {
                     unreachable!("retire only set for Transaction");
                 };
+                // leg-30B AMS46: the traced StartUser sat UNDELIVERED on
+                // the proc todo past the 30 s silence window — the
+                // kernel-side drop shape for Gate 1.
+                if ams46_on() && ams46_txns_contains(t.id) {
+                    crate::pr_warn!(
+                        "AMS46 RETIRED(proc-todo) txn{} age={}js — DROPPED undelivered",
+                        t.id,
+                        now.wrapping_sub(t.enq_j)
+                    );
+                }
                 // SAFETY: WORLD held.
                 unsafe { t.set_holds_async_slot(false) };
                 if t.flags & TF_ONE_WAY == 0 {
@@ -849,6 +877,15 @@ unsafe fn sweep_silent_txns(world: &World) -> (usize, Vec<Arc<BinderProc>>) {
                 if unsafe { t.holds_async_slot() } {
                     slot_vacated = true;
                 }
+                // leg-30B AMS46: parked past the silence window without
+                // ever being delivered — the other kernel-side drop.
+                if ams46_on() && ams46_txns_contains(t.id) {
+                    crate::pr_warn!(
+                        "AMS46 RETIRED(async-park) txn{} age={}js — DROPPED parked behind slot holder",
+                        t.id,
+                        now.wrapping_sub(t.enq_j)
+                    );
+                }
                 // SAFETY: WORLD held.
                 unsafe { t.set_holds_async_slot(false) };
                 // SAFETY: WORLD held; frees the buffer + unpins the node.
@@ -866,6 +903,13 @@ unsafe fn sweep_silent_txns(world: &World) -> (usize, Vec<Arc<BinderProc>>) {
                         Some(h) => {
                             h.set_holds_async_slot(true);
                             let tp = h.to_proc.clone();
+                            let hid = h.id;
+                            if ams46_on() && ams46_txns_contains(hid) {
+                                crate::pr_warn!(
+                                    "AMS46 slot -> txn{} (retire handoff DELIVERED parked code-46)",
+                                    hid
+                                );
+                            }
                             pm(world, &tp).im().todo.push_back(Work::Transaction(h));
                         }
                         None => {
@@ -897,6 +941,80 @@ static SAREG_SAMGR_PID_PUB: core::sync::atomic::AtomicU32 =
 pub(crate) fn binder_sareg_samgr_pid() -> u32 {
     SAREG_SAMGR_PID_PUB.load(core::sync::atomic::Ordering::Relaxed)
 }
+
+// ============================================================================
+// leg-30B: AMS46 — the Gate-1 arsenal (dfx=ams46).
+//
+// The wall (sc306/307/309/311B/312B/313B): accountmgr's
+// AbilityManagerAdapter::StartUser sends IAbilityManager code 46
+// (interface token "ohos.aafwk.AbilityManager", MessageOption(1, 8) =
+// TF_ASYNC + 8 s wait — binder flags 0x11, oneway + ACCEPT_FDS) to
+// foundation, SendRequest returns 0, yet SwitchToUser never executes
+// inside foundation (zero StartResidentAbility lines), with no error
+// log, no hang, no TXN-HANG on the pair. This tracer follows EVERY
+// matched transaction through the kernel lifecycle, so a walled draw
+// names the exact loss point:
+//
+//   AMS46 latch  — first token-matched send latches the AMS node id +
+//                  foundation pid
+//   AMS46 ENQ    — code-46 send accepted (flags, sender, parcel head)
+//   AMS46 Q      — queueing verdict: proc todo / child looper / PARKED
+//                  on node.async_todo behind an un-freed earlier oneway
+//   AMS46 READ   — a foundation thread read it out (BR_TRANSACTION) —
+//                  kernel delivery COMPLETED; anything lost past this
+//                  point is foundation userspace (deferred-task drop)
+//   AMS46 FREE   — receiver freed the buffer; async slot released or
+//                  handed to the next parked txn
+//   AMS46 SWEEP  — stale-buffer reclaim handed the slot onward (>30 s)
+//   AMS46 RETIRED— the enq_j silence rule DROPPED it undelivered
+//                  (>30 s parked) — the kernel-side loss shape
+//   AMS46 census — ~5 s node/proc state: async slot held, parked depth,
+//                  foundation proc todo depth, waiting readers
+//
+// All prints budget-capped; zero cost when dfx=ams46 is off.
+// ============================================================================
+
+static AMS46_NODE_ID: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static AMS46_TPID: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+static AMS46_TXNS: [core::sync::atomic::AtomicU64; 16] =
+    [const { core::sync::atomic::AtomicU64::new(0) }; 16];
+static AMS46_ENQ_N: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+fn ams46_on() -> bool {
+    crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::Ams46)
+}
+
+fn ams46_txns_contains(id: u64) -> bool {
+    AMS46_TXNS
+        .iter()
+        .any(|s| s.load(core::sync::atomic::Ordering::Relaxed) == id)
+}
+
+fn ams46_txns_push(id: u64) {
+    for s in AMS46_TXNS.iter() {
+        if s.load(core::sync::atomic::Ordering::Relaxed) == 0 {
+            s.store(id, core::sync::atomic::Ordering::Relaxed);
+            return;
+        }
+    }
+}
+
+fn ams46_node_id() -> u64 {
+    AMS46_NODE_ID.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+/// Does this sender parcel head carry the IAbilityManager interface
+/// token? OH parcel layout: [8B header][u32 string len][UTF-16LE chars];
+/// "ohos.aafwk.Abil..." starts at offset 12.
+fn ams46_token_match(head: &[u8]) -> bool {
+    // UTF-16LE of "ohos.aafwk.Abil" at parcel offset 12 (14 chars).
+    const PAT: [u8; 28] = [
+        0x6f, 0x00, 0x68, 0x00, 0x6f, 0x00, 0x73, 0x00, 0x2e, 0x00, 0x61, 0x00, 0x61, 0x00,
+        0x66, 0x00, 0x77, 0x00, 0x6b, 0x00, 0x2e, 0x00, 0x41, 0x00, 0x62, 0x00, 0x69, 0x00,
+    ];
+    head.len() >= 12 + PAT.len() && head[12..12 + PAT.len()] == PAT
+}
+
 
 pub fn register_app_child_pid(pid: u32) {
     for slot in APP_CHILD_PIDS.iter() {
@@ -3297,6 +3415,94 @@ pub fn txn_hang_audit() {
     }
 }
 
+/// dfx=ams46 (leg-30B): ~5 s census of the latched AMS node + its
+/// foundation process. Prints ONLY while there is pending work on the
+/// node/proc (async slot held, txns parked, or proc todo non-empty), so
+/// a healthy quiesced draw costs zero lines. The census is the
+/// adjudication backdrop for the traced code-46 txn: parked>0 with a
+/// held slot names slot starvation (the holder's buffer never freed);
+/// todo>0 with waiting==0 names a reader-less foundation (no eligible
+/// looper thread to wake); everything zero with no READ line after ENQ
+/// means the txn already vanished (retire — see the RETIRED prints).
+pub fn ams46_audit() {
+    if !ams46_on() {
+        return;
+    }
+    let now = crate::drivers::timer::get_jiffies() as u32;
+    // One census per 5 s (500 jiffies at HZ=100); first call fires.
+    static LAST: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+    use core::sync::atomic::Ordering::Relaxed;
+    let last = LAST.load(Relaxed);
+    if last != 0 && now.wrapping_sub(last) < 500 {
+        return;
+    }
+    if LAST.compare_exchange(last, now, Relaxed, Relaxed).is_err() {
+        return;
+    }
+    let latched = ams46_node_id();
+    if latched == 0 {
+        return;
+    }
+    let tpid = AMS46_TPID.load(Relaxed);
+    let mut todo_d = 0usize;
+    let mut waiting = 0usize;
+    let mut threads_n = 0usize;
+    let mut parked = 0usize;
+    let mut async_held = false;
+    let mut found = false;
+    {
+        let w = world_lock();
+        // SAFETY: read-only traversal under WORLD (pm() casts only reach
+        // the foundation proc's thread/node/todo lists; POD snapshot
+        // only — sc89).
+        unsafe {
+            let world = match w.as_ref() {
+                Some(world) => world,
+                None => return,
+            };
+            if let Some(p) = world.procs.iter().find(|p| p.pid == tpid) {
+                let pim = pm(world, p).im();
+                todo_d = pim.todo.len();
+                threads_n = pim.threads.len();
+                waiting = pim
+                    .threads
+                    .iter()
+                    .filter(|t| {
+                        let th = t.st();
+                        th.waiting_for_proc_work && th.todo.is_empty() && th.txn_stack.is_empty()
+                    })
+                    .count();
+                if let Some(n) = pim.nodes.iter().find(|n| n.id == latched) {
+                    let ns = n.st();
+                    async_held = ns.has_async_transaction;
+                    parked = ns.async_todo.len();
+                }
+                found = true;
+            }
+        }
+    }
+    if !found {
+        return;
+    }
+    if async_held || parked > 0 || todo_d > 0 {
+        static CEN_N: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+        if CEN_N.fetch_add(1, Relaxed) < 240 {
+            crate::pr_warn!(
+                "AMS46 census j={} pid={} todo={} waiting={} thr={} node{} async={} parked={}",
+                now / 100,
+                tpid,
+                todo_d,
+                waiting,
+                threads_n,
+                latched,
+                async_held,
+                parked
+            );
+        }
+    }
+}
+
+
 /// World-wide search for queued/stacked transactions SENT by (pid, tid) —
 /// the sc74 discriminator: a SERVER-OWING thread (parked owing a reply,
 /// top txn to_tid == self) either has a nested sync txn outstanding
@@ -4672,6 +4878,35 @@ fn binder_thread_write(
                                     // async slot to the next parked txn or
                                     // free it (Linux drains node->async_todo
                                     // in binder_free_buf).
+                                    // leg-30B AMS46: the receiver's BC_FREE
+                                    // for a traced/AMS-node txn — slot
+                                    // release or handoff, the (c) leg of the
+                                    // adjudication.
+                                    {
+                                        static AMS46_FR_N: core::sync::atomic::AtomicUsize =
+                                            core::sync::atomic::AtomicUsize::new(0);
+                                        let latched = ams46_node_id();
+                                        let is_ams = latched != 0
+                                            && t.target_node.as_ref().map(|n| n.id)
+                                                == Some(latched);
+                                        if ams46_on()
+                                            && (ams46_txns_contains(t.id) || is_ams)
+                                            && AMS46_FR_N
+                                                .fetch_add(
+                                                    1,
+                                                    core::sync::atomic::Ordering::Relaxed,
+                                                )
+                                                < 96
+                                        {
+                                            crate::pr_warn!(
+                                                "AMS46 FREE txn{} code={} by pid={} held_slot={}",
+                                                t.id,
+                                                t.code,
+                                                proc.pid,
+                                                t.holds_async_slot()
+                                            );
+                                        }
+                                    }
                                     if t.holds_async_slot() {
                                         let mut next: Option<Arc<BinderTxn>> = None;
                                         if let Some(node) = &t.target_node {
@@ -4679,6 +4914,14 @@ fn binder_thread_write(
                                             next = ns.async_todo.pop_front();
                                             if next.is_none() {
                                                 ns.has_async_transaction = false;
+                                                if ams46_on()
+                                                    && ams46_txns_contains(t.id)
+                                                {
+                                                    crate::pr_warn!(
+                                                        "AMS46 slot released by txn{}",
+                                                        t.id
+                                                    );
+                                                }
                                             }
                                         }
                                         if let Some(h) = next {
@@ -4688,6 +4931,12 @@ fn binder_thread_write(
                                             let tpid = tp.pid;
                                             pm(world, &tp).im().todo.push_back(Work::Transaction(h));
                                             drain_wake = Some(tp);
+                                            if ams46_on() && ams46_txns_contains(tid) {
+                                                crate::pr_warn!(
+                                                    "AMS46 slot -> txn{} (parked code-46 DELIVERED by drain)",
+                                                    tid
+                                                );
+                                            }
                                             crate::pr_info!(
                                                 "binder: oneway txn {} drained to proc {}",
                                                 tid,
@@ -5849,6 +6098,54 @@ fn binder_transaction(
         }
     }
 
+    // leg-30B (dfx=ams46): Gate-1 arsenal ENQ hook. Match the
+    // IAbilityManager interface token on the sender's parcel head,
+    // latch the AMS node id + foundation pid on first sight, and ring
+    // every code-46 (StartUser) send for read/free/retire correlation.
+    if ams46_on() && !reply {
+        let mut hb = [0u8; 64];
+        let tok_ok = tr.data_buffer != 0
+            && unsafe {
+                crate::arch::uaccess::copy_from_user(
+                    hb.as_mut_ptr(),
+                    tr.data_buffer as *const u8,
+                    hb.len(),
+                ) == 0
+            };
+        if tok_ok && ams46_token_match(&hb) {
+            let nid = target_node.as_ref().map(|n| n.id).unwrap_or(0);
+            if ams46_node_id() == 0 && nid != 0 {
+                AMS46_NODE_ID.store(nid, core::sync::atomic::Ordering::Relaxed);
+                AMS46_TPID.store(target.pid, core::sync::atomic::Ordering::Relaxed);
+                crate::pr_warn!("AMS46 latch node={} pid={}", nid, target.pid);
+            }
+            if tr.code == 46 {
+                ams46_txns_push(txn.id);
+                if AMS46_ENQ_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 32 {
+                    let comm = crate::sched::current()
+                        .map(|t| unsafe { (*t).comm() })
+                        .map(|c| core::str::from_utf8(c).unwrap_or(""))
+                        .unwrap_or("")
+                        .trim_end_matches('\0');
+                    let hex: alloc::string::String = hb[..48]
+                        .iter()
+                        .map(|b| alloc::format!("{:02x}", b))
+                        .collect();
+                    crate::pr_warn!(
+                        "AMS46 ENQ txn{} from pid={} tid={} comm='{}' flags={:#x} dlen={} parcel={}",
+                        txn.id,
+                        proc.pid,
+                        thread.tid,
+                        comm,
+                        tr.flags,
+                        data_size,
+                        hex
+                    );
+                }
+            }
+        }
+    }
+
     // sc262 (leg-23): launcher lifecycle-path tracer. Every sc261-class
     // boot ends in the AMS restart loop — LIFECYCLE_TIMEOUT for
     // com.ohos.launcher.MainAbility ("load" phase, the same timeout
@@ -6210,6 +6507,18 @@ fn binder_transaction(
                             node.id,
                             ns.async_todo.len()
                         );
+                        // leg-30B AMS46: the traced StartUser parked
+                        // behind an un-freed earlier oneway — delivery
+                        // deferred indefinitely until the slot holder's
+                        // buffer is freed (or the 30 s sweeps act).
+                        if ams46_on() && ams46_txns_contains(txn.id) {
+                            crate::pr_warn!(
+                                "AMS46 Q txn{} PARKED on node{} qlen={} (slot held by earlier oneway)",
+                                txn.id,
+                                node.id,
+                                ns.async_todo.len()
+                            );
+                        }
                     } else {
                         ns.has_async_transaction = true;
                     }
@@ -6252,6 +6561,15 @@ fn binder_transaction(
                                 wakes.push(target.clone());
                             }
                         }
+                    }
+                    // leg-30B AMS46: the traced StartUser took the async
+                    // slot and is queued for delivery.
+                    if ams46_on() && ams46_txns_contains(txn.id) {
+                        crate::pr_warn!(
+                            "AMS46 Q txn{} route={} (slot taken)",
+                            txn.id,
+                            txn_route_label
+                        );
                     }
                     // sc140: oneway half of the APPTXN tracer (see the
                     // sync branch below for the rationale).
@@ -6419,6 +6737,16 @@ fn binder_transaction(
                             );
                         }
                     }
+                }
+                // leg-30B AMS46: defensive sync-side trace (the StartUser
+                // send is TF_ASYNC-shaped; a twoway variant would land
+                // here and its sender would park for the reply).
+                if ams46_on() && ams46_txns_contains(txn.id) {
+                    crate::pr_warn!(
+                        "AMS46 Q txn{} SYNC route={}",
+                        txn.id,
+                        txn_route_label
+                    );
                 }
             }
         }
@@ -7006,6 +7334,27 @@ fn binder_thread_read(
                             // transaction is being read out to its
                             // receiving thread (BR_TRANSACTION/BR_REPLY).
                             crate::trace::trace_binder_transaction_received(t.id);
+                            // leg-30B (dfx=ams46): read-side trace — a
+                            // foundation thread picked up the traced
+                            // code-46 StartUser. This line is the
+                            // kernel-delivery-COMPLETE marker: everything
+                            // lost past it is foundation userspace.
+                            if ams46_on() && ams46_txns_contains(t.id) {
+                                let name = crate::sched::current()
+                                    .map(|ct| unsafe { (*ct).comm() })
+                                    .map(|c| core::str::from_utf8(c).unwrap_or(""))
+                                    .unwrap_or("")
+                                    .trim_end_matches('\0');
+                                crate::pr_warn!(
+                                    "AMS46 READ txn{} by pid={} tid={} comm='{}' code={} reply={}",
+                                    t.id,
+                                    proc.pid,
+                                    thread.tid,
+                                    name,
+                                    t.code,
+                                    is_reply
+                                );
+                            }
                             // sc262 (leg-23): SLTX read-side — an
                             // app-family child's thread picked this
                             // transaction up out of its queue. An
