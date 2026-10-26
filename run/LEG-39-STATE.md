@@ -33,7 +33,8 @@ Head at time of writing: 36e34336 (all leg work COMMITTED).
    UNSHARDED registry — worth flagging to the main session when the
    wake/epoll set merges: the sharding comes with it).
 
-3. **Track-2 route-4 LANDED (20f64449): getdents64 listing cache.**
+3. **Track-2 route-4 LANDED (20f64449): getdents64 listing cache —
+   mechanism + LTP evidence BANKED this leg.**
    Per-open-file snapshot keyed by (inode id, VFS_DIR_EPOCH); all 9
    mutation dispatch sites bump the epoch; gated to filesystems whose
    content changes only via those ops (ext4+tmpfs cacheable; the
