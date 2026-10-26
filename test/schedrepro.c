@@ -81,6 +81,8 @@ static long gettid_(void) { return syscall(SYS_gettid); }
 static uint64_t *samples_wake, *samples_pong, *samples_pipe, *samples_wd;
 static uint32_t n_wake, n_pong_s, n_pipe_s, n_wd;
 static volatile int stop_all;
+static volatile long wake_overruns;
+static volatile uint64_t pong1_max, pong2_max;
 
 static void add_sample(uint64_t **buf, uint32_t *n, uint64_t v)
 {
@@ -139,8 +141,9 @@ static void *waker_fn(void *arg)
             FX_WAKE((volatile uint32_t *)&s->seq, 1);
             rr++;
         }
-        /* pace: one burst per ~2 ms so wakeups stay the dominant event */
-        struct timespec ts = {0, 2 * 1000 * 1000};
+        /* pace: one burst per ~20 ms so an 8-deep stamp ring covers
+         * ~160 ms of wake latency without aliasing */
+        struct timespec ts = {0, 20 * 1000 * 1000};
         clock_nanosleep(CLOCK_MONOTONIC, 0, &ts, 0);
     }
     return 0;
@@ -158,12 +161,19 @@ static void *worker_fn(void *arg)
         __sync_synchronize();
         uint64_t myseq = s->seq;
         if (myseq != seq) {
-            /* read the stamp for the round we actually observed */
+            /* read the stamp for the round we observed; a negative delta
+             * means the waker wrapped the 8-slot ring past us (wake
+             * latency > 8 pacing periods) — count it, do not let it
+             * poison the distribution with 2^64 values. */
             uint64_t d = now_us() - s->stamps[myseq & 7];
-            add_sample(&samples_wake, &n_wake, d);
-            if (d >= 250000)
-                printf("SREPRO wake-lat %lluus tid %ld\n",
-                       (unsigned long long)d, gettid_());
+            if (d & 0x8000000000000000ull) {
+                wake_overruns++;
+            } else {
+                add_sample(&samples_wake, &n_wake, d);
+                if (d >= 250000)
+                    printf("SREPRO wake-lat %lluus tid %ld\n",
+                           (unsigned long long)d, gettid_());
+            }
         }
     }
     return 0;
@@ -172,8 +182,12 @@ static void *worker_fn(void *arg)
 /* ---- futex pong ---- */
 struct pslot {
     volatile uint64_t seq; /* hop counter; low 32 bits = futex word */
-    volatile uint64_t tstamp;
-    char pad[64 - 16];
+    char pad0[56];
+    /* leg-26 per-hop stamps: hop1 = side0's move -> side1's resume
+     * (wake syscall + side1 pick); hop2 = side1's move -> side0's
+     * resume. Splitting the RTT names WHICH hop stalls. */
+    volatile uint64_t t_move0, t_resume1, t_move1, t_resume0;
+    char pad1[32];
 };
 static struct pslot pslots[MAXW];
 static int n_pong = 4;
@@ -203,7 +217,7 @@ static void *pong_pair(void *arg)
             }
             if (stop_all)
                 break;
-            s->tstamp = now_us();
+            s->t_move0 = now_us();
             __sync_synchronize();
             s->seq = t + 1;
             FX_WAKE((volatile uint32_t *)&s->seq, 1);
@@ -212,8 +226,20 @@ static void *pong_pair(void *arg)
                 FX_WAIT((volatile uint32_t *)&s->seq, (uint32_t)t);
                 t = s->seq;
             }
+            s->t_resume0 = now_us();
             if (!stop_all && !(t & 1)) {
-                uint64_t d = now_us() - s->tstamp;
+                uint64_t d = s->t_resume0 - s->t_move0;
+                uint64_t h1 = s->t_resume1 - s->t_move0;
+                uint64_t h2 = s->t_resume0 - s->t_move1;
+                if (d >= 250000)
+                    printf("SREPRO pong-lat %lluus pair %d (hop1 %llu hop2 %llu tid0 %ld tid1 %d)\n",
+                           (unsigned long long)d, a->pair,
+                           (unsigned long long)h1, (unsigned long long)h2,
+                           gettid_(), a->pair);
+                if (h1 >= 250000)
+                    pong1_max = h1 > pong1_max ? h1 : pong1_max;
+                if (h2 >= 250000)
+                    pong2_max = h2 > pong2_max ? h2 : pong2_max;
                 add_sample(&samples_pong, &n_pong_s, d);
                 if (d >= 250000)
                     printf("SREPRO pong-lat %lluus pair %d\n",
@@ -226,7 +252,9 @@ static void *pong_pair(void *arg)
             }
             if (stop_all)
                 break;
+            s->t_resume1 = now_us();
             __sync_synchronize();
+            s->t_move1 = now_us();
             s->seq = t + 1;
             FX_WAKE((volatile uint32_t *)&s->seq, 1);
         }
@@ -459,6 +487,10 @@ int main(int argc, char **argv)
 
     uint64_t mx = 0;
     report("wake", samples_wake, n_wake, &mx);
+    printf("SREPRO wake_ovrrun=%ld (wake latency exceeded 8x20ms ring)\n",
+           wake_overruns);
+    printf("SREPRO pong_hop_max hop1=%lluus hop2=%lluus\n",
+           (unsigned long long)pong1_max, (unsigned long long)pong2_max);
     report("pong", samples_pong, n_pong_s, &mx);
     report("pipe", samples_pipe, n_pipe_s, &mx);
     report("wd", samples_wd, n_wd, &mx);
