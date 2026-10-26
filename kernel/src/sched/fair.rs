@@ -366,6 +366,34 @@ pub(crate) struct SkipTrackEntry {
     count: core::sync::atomic::AtomicU32,
     dumped_at: core::sync::atomic::AtomicU32,
 }
+/// leg-26: last pick-scan refusal per pid (see the skip branch).
+pub struct LastSkipEntry {
+    pub pid: core::sync::atomic::AtomicU32,
+    pub reason: core::sync::atomic::AtomicU32,
+    pub jiffies: core::sync::atomic::AtomicU32,
+}
+static LAST_SKIP: [LastSkipEntry; 64] = [
+    const {
+        LastSkipEntry {
+            pid: core::sync::atomic::AtomicU32::new(0),
+            reason: core::sync::atomic::AtomicU32::new(0),
+            jiffies: core::sync::atomic::AtomicU32::new(0),
+        }
+    };
+    64
+];
+
+/// leg-26: read a pid's last recorded skip reason (None if never
+/// skipped). Diagnostic read for the STRAND-DETAIL report.
+pub fn last_skip_of(pid: u32) -> Option<(u32, u32)> {
+    let e = &LAST_SKIP[(pid as usize) & (LAST_SKIP.len() - 1)];
+    use core::sync::atomic::Ordering::Relaxed;
+    if e.pid.load(Relaxed) != pid {
+        return None;
+    }
+    Some((e.reason.load(Relaxed), e.jiffies.load(Relaxed)))
+}
+
 static SKIP_TRACK: [SkipTrackEntry; 64] = [
     const {
         SkipTrackEntry {
@@ -1097,6 +1125,21 @@ impl CfsRunQueue {
 
             // Not allowed — remove temporarily and stash
             self.tasks_timeline.remove(&key);
+            // leg-26 last-skip side table (dfx=wwcensus): record WHY this
+            // candidate was refused, so a later STRAND-DETAIL at its pick
+            // names the refusal that ate its wait. Keyed by pid (64 slots,
+            // direct-mapped, last-wins); written under this GRQ hold.
+            if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::WwCensus) {
+                use core::sync::atomic::Ordering as Rel;
+                let pid = unsafe { (*task).pid() } as usize;
+                let e = &LAST_SKIP[pid & (LAST_SKIP.len() - 1)];
+                e.pid.store(pid as u32, Rel::Relaxed);
+                e.reason.store(skip_reason, Rel::Relaxed);
+                e.jiffies.store(
+                    crate::drivers::timer::get_jiffies() as u32,
+                    Rel::Relaxed,
+                );
+            }
             if skip_count < skipped.len() {
                 skipped[skip_count] = (key, task, skip_reason);
                 skip_count += 1;
