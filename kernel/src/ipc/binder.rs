@@ -4726,15 +4726,20 @@ fn binder_transaction(
                 // sc208 SLOW-TXN probe (C-line: SAMgr SendRequest ~30 s
                 // per call with the fixed clock): split the sync-txn
                 // lifecycle into QUEUE (enq -> server pickup) and EXEC
-                // (pickup -> reply) and print both for anything over 5 s.
-                // Direct console (quietcon boots drop pr_warn pre-ring at
-                // loglevel 3), rate-capped to one line per 2 s. Printed
-                // from inside the WORLD guard like the surrounding
-                // pr_info!s on this path (single short line, bounded).
+                // (pickup -> reply) and print both for anything over the
+                // threshold. sc269 (leg-25): 5 s hid the launcher-load
+                // family (IOsAccount ~2 s, IDisplayComposer ~3 s,
+                // AbilityManager 4-6 s, all client-visible in hilog's
+                // BlockMonitor); threshold 150 jiffies (1.5 s), sender +
+                // server comm named inline. Direct console (quietcon
+                // boots drop pr_warn pre-ring at loglevel 3), rate-capped
+                // to one line per 2 s. Printed from inside the WORLD
+                // guard like the surrounding pr_info!s on this path
+                // (single short line, bounded).
                 {
                     let now = crate::drivers::timer::get_jiffies() as u32;
                     let total = now.wrapping_sub(t.enq_j);
-                    if total >= 500 {
+                    if total >= 150 {
                         static LAST: core::sync::atomic::AtomicU32 =
                             core::sync::atomic::AtomicU32::new(0);
                         use core::sync::atomic::Ordering::Relaxed;
@@ -4747,17 +4752,37 @@ fn binder_transaction(
                             let pick = unsafe { *t.pick_j.get() };
                             let q = if pick != 0 { pick.wrapping_sub(t.enq_j) } else { 0 };
                             let x = if pick != 0 { now.wrapping_sub(pick) } else { total };
+                            let from_pid =
+                                t.from_proc.as_ref().map(|p| p.pid).unwrap_or(0);
+                            let from_comm = crate::sched::find_task_by_pid(
+                                t.from_tid.unwrap_or(0),
+                            );
+                            let to_comm = crate::sched::find_task_by_pid(
+                                t.to_tid().unwrap_or(t.to_proc.pid),
+                            );
+                            let comm_of = |p: *mut crate::process::Task| -> &str {
+                                if p.is_null() {
+                                    return "?";
+                                }
+                                // SAFETY: diagnostic comm read of a live task.
+                                let c = unsafe { (*p).comm() };
+                                core::str::from_utf8(&c[..])
+                                    .unwrap_or("?")
+                                    .trim_end_matches('\0')
+                            };
                             let mut w = crate::dfx::backtrace::ConsoleWriter::new();
                             use core::fmt::Write as _;
                             let _ = writeln!(
                                 w,
-                                "SLOW-TXN txn{} code {} from pid {} tid {} to pid {} tid {}: total {} ms (queue {} ms, exec {} ms)",
+                                "SLOW-TXN txn{} code {} from pid {} tid {} ({}) to pid {} tid {} ({}): total {} ms (queue {} ms, exec {} ms)",
                                 t.id,
                                 t.code,
-                                t.from_proc.as_ref().map(|p| p.pid).unwrap_or(0),
+                                from_pid,
                                 t.from_tid.unwrap_or(0),
+                                comm_of(from_comm),
                                 t.to_proc.pid,
                                 thread.tid,
+                                comm_of(to_comm),
                                 total * 10,
                                 q * 10,
                                 x * 10
