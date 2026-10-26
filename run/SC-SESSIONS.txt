@@ -5401,3 +5401,69 @@ census kthreads' own monopolies. NEXT CELL (sc273, armed): LOGLEVEL=4
 sleepsnap, no schbd, no wwcensus) — always-on SAREG/PCTL/SLTX/SLRD/
 SLOW-TXN only. Adjudicates: census-kthread interference vs the
 organic restart loop on the quietest achievable boot.
+
+LEG-25 FINAL — THE PARALLEL MATRIX (10-QEMU mandate) + THE TWO
+REPRODUCIBLE SIGNATURES.
+
+Cell map (all: oh-img-p patched, KVM SMP2 4G, fresh scgold copies):
+- sc269 lvl4 plain (45min)  : loop full-rate (290 LIFECYCLE_TIMEOUT),
+  strands 266/45min (continuous lottery, max 5.3s), 29 PREEMPT-HEAL on
+  the spawn band + 25 underflow clamps; OOM killed ueventd+watchdog.
+- sc270 lvl7 plain          : boot crawls (never reached ability loads
+  in 45 min; "0 timeouts" is a NON-result); monster strand 238s.
+- sc271 lvl4+quietcon+schb  : plateau wedge t=50-540 (census wedged
+  schbd itself 300s), then no-churn idle. NOT a milestone path.
+- sc272 lvl4 plain +SLOW-TXN v2: the exec-stall census (findings 4).
+- sc273/274/275/277 lvl4+quietcon, NO census kthreads: n=4, ALL four
+  reached bootevent.bootanimation.finished (first time in this boot
+  family) and ALL four then died at the SAME new wall: BMS
+  ImplicitQueryAllAbilityInfos failed for com.ohos.launcher looping
+  forever (sc273: 1941x), zero launcher spawns, screens black. BMS's
+  own GetForegroundOsAccountLocalId fails ret:32 on these boots while
+  distributeddata itself is alive (4194349 retry storm runs).
+  PARKED-LEAK accumulations 174-196/boot (vs 20 on plain) — parked
+  tasks with pc=1 pile up 9x on quiet boots.
+- sc276 lvl4 plain +leakhunt: 186 LEAK-ORIGIN prints; ALL
+  booked-on-nonrunning catches remain the LEGITIMATE pre-sleep window
+  (tp_state=1, on_cpu=1); acquire-site census: sched.rs:2184 (GRQ,
+  weak signature) 76, timer.rs:217 (TIMERS.lock_irqsave in
+  add_timer_wakeup — nanosleep's own registration window) 45,
+  spinlock.rs:292 21, wait.rs:124 18, binder.rs:1341 7. PARKED-LEAK
+  victims print NO acquire site (shadow empty) — the +1 lands on
+  parked tasks outside every instrumented channel, CONSISTENT with
+  leg-24's wildwrite attribution.
+- sc278/279 lvl4 plain (SLOW-TXN v2 + samgr-aware SLRD + SAREG ids):
+  loop at full rate; sc278 repeats sc269's heal signature EXACTLY
+  (25 heals, spawn band pids 5077-5172, was=0x10001, held=200, then
+  24 PREEMPT-UNDERFLOW clamps at spinlock.rs:1cd). sc279's id-level
+  send/read audit is budget-truncated (SLRD 1500 cap burned by
+  samgr's own high-volume reads of low txn ids; the 48/121 "unmatched"
+  are all id>5000 = beyond the printed range) — NO delivery loss
+  proven; positive evidence everywhere (queue=0, 1430 samgr reads,
+  replies flowing).
+
+SIGNATURE A (reproduced sc269 + sc278): EVERY restart-loop spawn
+acquires a phantom preempt base=1 (+HARDIRQ_OFFSET on read: 0x10001)
+within its first 2s, holds it to the heal bound, and its first real
+spinlock release underflow-clamps. Per-spawn ~2s preempt-disabled
+penalty against the 10s LIFECYCLE budget. The wildwrite producer's
+fingerprints on FRESH tasks.
+SIGNATURE B (n=4 quietcon family): the quiet boot reliably finishes
+bootanimation then stalls in BMS bundle queries — the data layer
+(distributeddb-backed bundle DB) never comes good without the console
+churn. sc198's second-soft-wedge shape, now with a named wall.
+
+HEAL-50 VARIANT (run/bzImage-heal50, sched.rs tick heal 200->50
+jiffies): sc277 (quietcon) never spawned — untested there; sc280
+(plain lvl4) launched 18:47 to test whether a 0.5s-per-spawn penalty
+lets the ability load fit its 10s budget. Kernel reverted to 200
+in-tree; bzImage-heal50 is a side artifact.
+
+MERGE-GATE ledger for the branch (guarded domains: ipc/binder,
+sched): make test green post-merge; zero KERNPANIC / zero
+PREEMPT-UNDERFLOW-poison across 12 boots; loop/strand/heal counters
+stable vs sc262-268 baselines; SLOW-TXN v2 + SAREG-id + samgr-SLRD
+are print-path-only probes (budgeted, rate-capped, no hot-path cost
+when unarmed). The leg-24 sched pair (cd4e5a38+a336568f) has its gate
+evidence in the leg-24 tail; sc269/278 confirm the 2s bound engages
+as designed (and quantify its per-spawn underflow tail).
