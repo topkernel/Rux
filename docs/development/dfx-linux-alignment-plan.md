@@ -112,11 +112,11 @@ incomplete or non-Linux shape · **--** = absent.
 
 | Family | Linux facility | Rux | Gap |
 |---|---|---|---|
-| Logging | `printk` ring buffer, log levels, `/dev/kmsg` | PART | `/proc/kmsg` format wrong; persistent log disabled |
+| Logging | `printk` ring buffer, log levels, `/dev/kmsg` | PART | `/proc/kmsg` format wrong; persistent log RESTORED (klogd thread, Tranche 5) |
 | Logging | `dmesg -w`, `syslog(2)`, `console_loglevel` | PART | no runtime console level knob from userspace |
-| Crash | panic handler, `Call Trace:` | PART | header case differs, frames never symbolized |
+| Crash | panic handler, `Call Trace:` | PART | banner is Linux's (`Kernel panic - not syncing`); the message sits on its own `PANIC:` line instead of inline; frames symbolized since Tranche 3 |
 | Crash | `Oops` (non-fatal) | OK | T5b: Linux-shaped report, task-death policy, pstore dmesg flavor |
-| Crash | `panic=` timeout / reboot | -- | halt forever |
+| Crash | `panic=` timeout / reboot | OK | Tranche 5 Part 1 (`panic=N`/`immediate`, both arches reboot) |
 | Crash | pstore / ramoops | OK | Tranche 5: console-ramoops-0 (panic) + dmesg-ramoops-0 (oops), both arches |
 | Crash | taint flags | OK | Tranche 1: exported, Linux letters |
 | Control | SysRq / `/proc/sysrq-trigger` | OK | Tranche 1: upstream command set |
@@ -131,7 +131,7 @@ incomplete or non-Linux shape · **--** = absent.
 | Perf | `/proc/vmstat` | -- | absent |
 | Perf | `/proc/schedstat`, `/proc/sched` | PART | per-CPU schedstat rows + per-task /proc/[pid]/schedstat triple (T7 slice); /proc/sched still absent |
 | Perf | `/proc/softirqs` | -- | absent |
-| Perf | `/proc/[pid]/stat` ctxt switches | PART | fields present but always `0` |
+| Perf | `/proc/[pid]/stat` ctxt switches | OK | Tranche 2 Part 1: `note_switch` charges nvcsw/nivcsw in `context_switch`, surfaced in `/proc/[pid]/status` |
 | Perf | PSI `/proc/pressure/*` | -- | absent |
 | Perf | `/proc/buddyinfo`, `/proc/pagetypeinfo`, `/proc/slabinfo` | -- | absent (`print_buddyinfo` is dead code) |
 | Perf | `/proc/diskstats`, `/proc/timer_list`, `/proc/lockstat` | -- | absent |
@@ -568,7 +568,9 @@ scheme rests on, verified by the reboot cycle itself.
   pstore.
 
 Acceptance: `panic=5` reboots the guest within five seconds of a
-panic; the next boot shows the previous panic's registers.### Tranche 6 — correctness and lock instrumentation
+panic; the next boot shows the previous panic's registers.
+
+### Tranche 6 — correctness and lock instrumentation
 
 - lockdep-lite: per-lock-class acquisition order recording with a cycle
   report (`INFO: possible circular locking dependency detected`).
