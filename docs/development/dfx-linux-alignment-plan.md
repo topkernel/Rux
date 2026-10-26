@@ -97,12 +97,13 @@ These are cheap to fix and actively mislead:
 - `/proc/interrupts` hardcodes the IRQ list to `1..=15` + `32..=47`
   instead of walking the irq descriptor registry.
 - `readdir` on `/proc/[pid]` omits `smaps` and `task`.
-- `printk::persistent_log_init()` is **commented out** at `main.rs`, so
-  the persistent log the DFX plan claims exists never runs.
-- The panic handler halts in a `wfi` loop; there is no `panic=` timeout
-  policy and no reboot-after-panic.
-- There is no non-fatal "Oops" path: every fault goes straight to
-  `panic!`.
+- `printk::persistent_log_init()` was **commented out** at `main.rs`, so
+  the persistent log the DFX plan claims existed never ran. **Fixed in
+  Tranche 5** — re-enabled as the klogd thread (see §Tranche 5).
+- The panic handler halted in a `wfi` loop; no `panic=` timeout policy
+  and no reboot-after-panic. **Fixed in Tranche 5 Part 1** (`panic=N`).
+- There was no non-fatal "Oops" path: every fault went straight to
+  `panic!`. **Fixed in Tranche 5** (the Oops path, both arches).
 
 ## 3. Linux DFX capability matrix
 
@@ -514,6 +515,21 @@ scheme rests on, verified by the reboot cycle itself.
   like all RAM). The panic/oops paths never write disk: the crash may
   be the storage stack itself, and a sync waiting on a dead queue
   would defeat the `panic=` timeout (the reference kernel's rule).
+  Batch-5 fix (2026-10-26): the flush writes through
+  `ext4_kernel_write_at` — the write(2) core (big lock + journal +
+  cache-coherence tail), added for exactly this caller. The first
+  implementation called the low-level `ext4_file_write` directly,
+  which updates the buffer cache and the on-disk inode but none of the
+  three surfaces write(2) keeps coherent (the VFS dentry inode's size,
+  the sb-boxed Ext4Inode copy that bounds cached reads, the page-cache
+  write-through) — every periodic flush LANDED on disk (probe-printed
+  offsets advancing) while userspace read the pre-flush cached view
+  forever, the "stuck at the init flush" family that two sessions
+  misdiagnosed as a wake-path bug (the wakes were on time all along:
+  instrumented runs showed all four 30 s deliveries exact). Rule for
+  kernel-side writers: a write that bypasses write(2)'s core is
+  invisible to userspace until an icache miss — route it through
+  `ext4_kernel_write_at`.
 - **x86_64 pstore anchor (done — the design first).** No firmware
   block sits at a fixed low address there: QEMU rebuilds and relocates
   the ACPI tables near the top of low RAM every boot, so the riscv64
