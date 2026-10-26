@@ -5109,3 +5109,67 @@ loss; no-in-at-all = AMS-side stall (trace AMS next).
 sc262 ROLLING: new kernel (merge 859f2adc + fixes 73e2ad1e, 600e9be9),
 same recipe (oh-img-p patched system, fresh scgold reflink userdata,
 KVM SMP2 4G, loglevel=7 dfx=schb,sleepsnap, SECS=2700, shotmon on).
+
+LEG-23 ROLL-2 (sc262) + THE LIFECYCLE_TIMEOUT CHAIN, END TO END.
+
+sc262 (same recipe as sc261 + the new kernel: merge 859f2adc, entry-
+frame guard 73e2ad1e, SLTX/SLRD v1 tracers 600e9be9): ZERO KERNPANIC
+(sc261 had the 0x13fd0 one), ZERO launcher leader SIGSEGVs mid-run
+(fork-residual dice held), the restart loop continued as expected.
+
+THE ADJUDICATION THE TRACERS BOUGHT (v1 data + APPTXN + wakewatch):
+- AMS DOES send the load: "SLTX in pid=801 -> 329 code=0x7 oneway=true
+  dlen=2364-4672" (IAbilityScheduler ScheduleLoadAbility; also code
+  0x5 Schedule*Transaction, 93 sends in the first window) — the sends
+  land at enqueue with parcel token ohos.appexec.. (28 chars).
+- APPTXN (320 lines): EVERY child-aimed delivery routes
+  route=child-looper with a direct thread wake (post_txn_to_child_
+  thread + wake_ths) — the sc161-168 kernel chain (shared proc +
+  reg_tgid routing + looper-only targeting + per-tgid SPAWN_LOOPER +
+  (ptr,reg_tgid) node identity) all still holds.
+- No binder-stall ever fired (no reader parked >120s; the 15s re-kick
+  heal had nothing to heal). The launcher MAIN thread is ALIVE —
+  STALLWATCH rings show clock_gettime/futex/writev loops (not a park),
+  and its own alog narration runs (getOsAccountLocalId localId 100
+  pairs, LauncherAbilityManager/CommonBundleManager).
+- WHY THE LOAD NEVER FINISHES, then: hilog's own DFX_BlockMonitor
+  names the killer — three DETERMINISTIC multi-second binder round
+  trips per boot, same three in sc261 AND sc262:
+    SendRequest cost 3038-3177ms code=1  desc:*.IDisplayComposer
+    SendRequest cost 4188-6496ms code=1034 desc:*.AbilityManager
+    SendRequest cost 2090-2070ms code=14  desc:*.IOsAccount
+  (plus XCollie BlockMonitor "GetOsAccountLocalIdFromProcessInner
+  Duration 2070ms" — the launcher's JS init loop burns ~2s PER
+  osAccount query; the ability-load sequence contains several such
+  hops and cannot fit the LIFECYCLE window).
+- The kernel-side source of seconds-long latencies: WAKE-STRANDED
+  outliers — 140 wakes/boot (>1s each, max 26986ms on pid 305) while
+  the cumulative wake path is healthy (15.4M wakes, avg <1ms). The
+  strand reports show incumbent tasks with preempt_count=1/2 (pid
+  318, a thread of early service 315, pc=1 in EVERY strand line) —
+  the wakewatch header's own "vsync-starvation family" (cc13: a 16ms
+  usleep takes 0.5-0.7s, one ~41s dead stop per boot). The launcher
+  LIFECYCLE_TIMEOUT is this family biting the app-start path.
+- TRACER V1 FLAWS, FIXED IN v2 (f4c7d54a): appspawn children NEVER
+  open /dev/binder (76 opens, zero child pids — they send through the
+  daemon's INHERITED fd; proc.pid == the daemon for every child), so
+  v1's latch caught the daemon's whole proc and burned 500 lines in
+  ~5 min; the read side was worse (OS_IPC/OS_FFRT are generic worker
+  names — samgr alone ate 337/600 — and tgid==proc.pid can never hold
+  for children on the inherited fd). v2 gates on the tgid LEADER's
+  comm (m.ohos./os./com.), prints sender tgid + target node reg_tgid,
+  budgets 1500/boot each side. NEXT ROLL (sc263, armed) pairs
+  "SLTX in child=X" with "SLRD tgid=X read" for the final delivery
+  confirmation, + dfx=memwatch for the restart-loop leak curve.
+
+HANDOFF (priority order):
+1. WAKE-STRANDED / preempt_count-leak family (sched lane): 140
+   strands/boot >1s (max 27s), incumbents with leaked PREEMPT_OFFSET
+   (pc=1: pid 318 thread of service 315). This is THE system-level
+   blocker for the UI milestone now — it directly produces the 2-7s
+   IPC round trips that blow the LIFECYCLE budget.
+2. The composer GetService stall (IDisplayComposer 3s, sc184 family)
+   persists — RS still polls hdf_devmgr code 0x35 x80/boot.
+3. Fork-residual condvar variant (musl): 1 SIGSEGV per ~45min boot —
+   needs the image-side fork-time condvar reinit.
+4. mm lane: dirty anon page recycle (sc259 bssslack2) still open.
