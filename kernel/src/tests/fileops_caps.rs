@@ -133,5 +133,22 @@ pub fn test_fileops_caps() {
         Expect { read: true, write: false, lseek: false, close: true, poll: true, read_at: false },
     );
 
+    // D-6 follow-on conversions (leg-39): the two hot-path regular-file
+    // tables. ext4 and tmpfs carry the full positional file set minus
+    // poll — poll on a regular file goes through the always-ready
+    // fallback (a regular file is always readable/writable per the
+    // reference behavior), pinned here so adding a poll slot to either
+    // table is a deliberate act that fails this shape first.
+    check(
+        "ext4 file caps",
+        &crate::fs::ext4::file::EXT4_FILE_OPS,
+        Expect { read: true, write: true, lseek: true, close: true, poll: false, read_at: true },
+    );
+    check(
+        "tmpfs file caps",
+        &crate::fs::tmpfs::TMPFS_FILE_OPS,
+        Expect { read: true, write: true, lseek: true, close: true, poll: false, read_at: true },
+    );
+
     check_errno_matrix();
 }

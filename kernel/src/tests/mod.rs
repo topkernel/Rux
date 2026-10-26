@@ -314,6 +314,10 @@ pub mod initrd;
 #[cfg(feature = "unit-test")]
 pub mod tmpfs_mknod;
 
+// ===== getdents64 listing cache (F4 route-4) =====
+#[cfg(feature = "unit-test")]
+pub mod getdents_cache;
+
 // ===== System call interface =====
 #[cfg(feature = "unit-test")]
 pub mod syscall_file;
@@ -397,6 +401,9 @@ pub fn run_all_tests() {
 
     test_group_start("tmpfs-mknod");
     tmpfs_mknod::test_tmpfs_mknod();
+
+    // getdents64 listing cache (F4 route-4): stability + invalidation.
+    getdents_cache::test_getdents_cache();
 
     // procfile! shape floors + conversion pins (leg-35 wiring: the
     // bare #[cfg(test)] forms never join the unit-test feature build,
