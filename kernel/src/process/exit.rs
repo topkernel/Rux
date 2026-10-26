@@ -1169,7 +1169,26 @@ unsafe fn reparent_children_to_init(dying: *mut Task) {
             let is_reaper = (*pp)
                 .signal
                 .as_ref()
-                .map(|s| s.is_child_subreaper.load(core::sync::atomic::Ordering::Acquire))
+                .and_then(|s| {
+                    // E8-REPAR follow-up (sc304 Oops): a recycled
+                    // ancestor's Task passed is_plausible_task_ptr but
+                    // its `signal` Arc slot held a USER-range garbage
+                    // pointer — AtomicBool::load faulted at
+                    // 0x7ff08b80f820 under this lock and the Oops-killed
+                    // task wedged the boot holding PROCESS_TREE_LOCK.
+                    // Validate the SignalStruct pointer's RANGE (same
+                    // linear-map window as the task check; SignalStruct
+                    // is heap-allocated inside it) before the atomic
+                    // load; garbage => treat the hop as non-reaper and
+                    // stop the walk here (dest stays init).
+                    const MAP_BASE: usize = crate::arch::mm::memory_layout::PAGE_OFFSET;
+                    const MAP_SPAN: usize = 0x10_0000_0000; // 64 GiB
+                    let raw = alloc::sync::Arc::as_ptr(s) as usize;
+                    if raw < MAP_BASE || raw >= MAP_BASE + MAP_SPAN {
+                        return None;
+                    }
+                    Some(s.is_child_subreaper.load(core::sync::atomic::Ordering::Acquire))
+                })
                 .unwrap_or(false);
             if is_reaper {
                 dest = pp;
