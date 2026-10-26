@@ -3159,3 +3159,2446 @@ SHAPE; MILESTONE NOT REACHED THIS LEG; v5+v6 READY FOR MERGE.
   snapshot already committed the riscv64 platform artifact, and the
   riscv64 `make build` regenerated the same content. Tree is clean at
   273489e7.)
+
+SESSION R ELEVENTH LEG - OPENING + THE SOFT-WEDGE IS SOLVED: IT IS THE
+CLASSIC DEVMGR RWLOCK FREEZE, DELAYED AND INVISIBLE AT LOGLEVEL=3
+(sc199/200/201/202, schb probe line, 2026-10-24 ~12:15):
+
+- Opening: merged main 9bc3a5c8 (fast-forward, brings perf-audit +
+  my v3..v6). sc199 = pristine v6 quietcon+loglevel3 reroll (90min,
+  KVM SMP2, fresh scgold copy, shotmon): soft-wedged at ~200B/s
+  trickle, oracle black, killed at ~t=35min after RAM dump.
+- ROOT FINDING #1 (why "no kernel evidence"): printk_bytes drops
+  every record above CONSOLE_LOGLEVEL BEFORE the ring buffer. At
+  loglevel=3 all pr_warn! census output (SACMP/binder-stall/stkfutex/
+  RWFRZ) NEVER EXISTED - not muted, never recorded. The tenth leg's
+  "quiet-quiet soft-wedge with no rwlock freeze" was a visibility
+  artifact of this pre-filter. (printk.rs printk()/printk_bytes level
+  gate; kmsg writes bypass it via printk_ring_always - pa9.)
+- TOOL BUILT (v7-equivalent, committed): dfx=schb - schbd kthread,
+  10s heartbeat (one ~90B SC-HB line via ConsoleWriter, off every
+  racer path: pid frontier/flow, youngest task, R/M/S/D, binder
+  proc/waiter/waiter>15s counts; M = state-clear AND on_cpu cohort -
+  sc202 measured M=2 = no orphaned-mark cohort), SC-PROC drain ring
+  fed by binder_open, and a one-shot wedge census firing on
+  flow<=5 OR bw15>=150 sustained 120s past t>=240s: all binder
+  read-waiters regardless of age (SERVER-OWING/CLIENT-WAIT + owed
+  pid + kicks), runnable/D-state scheduler views, ONE stall_report +
+  freeze_scan pass with the console loglevel lifted 3->4 for its
+  duration, binder::sleep_snapshot (with dfx=schb,sleepsnap), and a
+  printk-ring tail dump (quietcon's diverted userspace console
+  stream = userspace last-known-good boundary). for_each_task
+  widened Fn->FnMut; printk::ring_tail(n) helper added. Census
+  re-arms on flow>=20 (sc202 lesson: bw15 never drains after heal).
+- ROOT FINDING #2 (the wedge identity): sc202's census caught it
+  live - RWFRZ: FROZEN tgid 331 comm='hdf_devmgr' uaddr=0x7ff000859a64
+  word=0x80000010 readers=16 waiters=7 (nb+4=0x7) - THE classic
+  terminal freeze (sc198 shape, delayed from min 1-2 to t~100-250s by
+  quietcon). CLIENT-WAIT chains owed to 331 (devmgr) + 644; samgr's
+  installs retries + APPSPAWN "App enable -1" + foundation's 75-136s
+  SA loads are all downstream of devmgr not answering GetService.
+  Deterministic fingerprint (sc199==sc200 within seconds: App enable
+  -1 at t~25s, installs retry from t~93.5s, foundation SA:401 spend
+  75053/75057ms, t~150s burst-drain, then freeze).
+- ROOT FINDING #3 (a kernel-side MITIGATION works): the census's
+  stall_report pass (rekick heals) BROKE the freeze - sc202 flow went
+  6-8/beat -> 27-54/beat right after the t=260 census and the boot
+  went to depths NO prior quiet boot reached (pid 3345 > sc195's
+  2500; bootanimation 8-color oracle 100% non-black from ~t=540s;
+  still rolling at t=1223). Periodic (re-arming) census passes may
+  carry quiet-quiet boots THROUGH the freeze window - candidate
+  follow-up: a bounded auto-rekick in freeze_scan when a frozen word
+  persists (the census already proves the rekick unwedges it).
+- Method artifacts committed: run/sc-ring-parse.py (offline printk-
+  ring extraction from QEMU ELF guest dumps, signature-scan locating
+  for symbol-less old kernels; LogRecord real stride is 288 not 280 -
+  repr(C) pads seq to 16). QEMU monitor dump-guest-memory + ring walk
+  = the standing no-rebuild census substitute for loglevel-3 boots.
+- sc200 extras: ONE TIMER-SOFTIRQ-STALL 14009ms episode (cpu1,
+  ticks arriving - dispatch skipped; transient, not the engine; both
+  CPUs healthy at dump time) and ONE foundation USEGV executing at
+  rip inside an R|X|SHARED /dev/binder-file VMA (binder_mmap_handler
+  only creates RW|SHARED - the RX exec mapping is an mmap/VMA file-
+  association anomaly; foundation was reaped+restarted by init and
+  was NOT required for the wedge - sc199 wedged with no foundation
+  crash. Filed for a later lane).
+- sc201 was killed ~t=10min by my own error: a grep -c tool call
+  returned EMPTY output (glitch) and I misread schb as dead - the
+  census HAD fired (224 lines, all data banked in its serial).
+  Lesson recorded: verify kills against wc/grep with visible echo.
+- sc203 (12:02, TCG, quietcon+loglevel3+dfx=schb,sleepsnap) was
+  launched by the coordinator in this worktree - not touched.
+
+SESSION R THIRTEENTH LEG - sc205 VERDICT + sc206 ROLL + THE CENSUS
+RE-ARM DEAD-CODE FIX (13:3x-15:xx):
+
+- OPENING: inherited leg 12's TSC multiply-before-shift fix (wip
+  1e54319f) + sc205's unread 60-min serial. Split the wip into clean
+  commits: 675095c0 fix(timer) TSC multiply-before-shift, 852d0cf2
+  diag(timer) TICKPROBE, 2a02d5db dfx(sched) tripwire (below); all
+  pushed to origin (0dfdb482..b634a615). READY FOR COORDINATOR MERGE:
+  675095c0 is the high-value one (corrects ALL x86_64 timing; riscv64
+  untouched - reads the time CSR directly; coordinator runs dual-arch
+  build + riscv64 regression as usual).
+
+- sc205 VERDICT (the "PREEMPT-LEAK storm" is post-panic weather, NOT
+  a leak, NOT terminal-deschedule, NOT the sc190 producer):
+  * sc205's userdata (copy of userdata-blank-sc.img) carries
+    has_journal + orphan_file + metadata_csum_seed; Rux ext4 refuses:
+    "ext4: unsupported incompat features 0x2000" (= CSUM_SEED; the
+    driver's message lists feature names generically). Mount vdf->/data
+    ENODEV x3; sc204's userdata (old-style, no journal - userdata-tok
+    lineage) mounted fine. Template trap: blank-sc is NEW-style, tok
+    is OLD-style; sc203 (coordinator's) also used new-style.
+  * init finished its script with /data dead, ran beget's reboot path
+    (ParseRebootReason / reboot_misc / bbox kmsgs), which ended in a
+    sysrq 'c' write -> panic!("sysrq 'c'") -> panic park. pid 1 stayed
+    current on cpu 0 parked in wfi for 3560 s; the tick kept firing
+    into the park and the PREEMPT-LEAK tripwire printed 17,906 lines
+    (5/s at the 20-jiffy gate; 102 more = benign cpu 1 idle weather).
+    SC-HB stopped at t=30s (panic froze scheduling); ppm pure black
+    (died pre-display). R73/v6 KERNPANIC dump got its live
+    verification: bounded register/trace dump, no re-entry flood.
+  * WHY pc=0x10000 on every line: the LOCAL_TIMER trap path does
+    irq_enter() BEFORE handle_timer_tick, so the tripwire always
+    observes +1 HARDIRQ_OFFSET it added itself. Its true semantic was
+    "task monopolized CPU >= 2s", not "leaked count". Fix 2a02d5db:
+    report only task-context bits or nesting >= 2.
+  * sc206 therefore used a fresh copy of userdata-tok.img (old-style).
+
+- sc206 (KVM quiet-quiet, quietcon+loglevel3+dfx=schb,sleepsnap,
+  fixed clock + tripwire fix, 13:48, 45 min): TICKPROBE dt=20021/20038
+  (clock fix live again); 0 panic, 0 PREEMPT-LEAK, WW IRQ-OFF-WINDOW 2,
+  WAKE-STRANDED 5 (vs sc204's thousands); bootanimation 8-color oracle
+  UP from 13:53 and sustained; pid 485@t=40s -> 1121@t=290s (census
+  fired there: ALL binder waiters shape=NO-TXN owed_pid=0 - NO
+  server-debt chain this time; sleepsnap shows the whole graphics
+  stack instantiated - render_service tid 982, llvmpipe-0..3,
+  CompThreads, RSColorPicker - asleep in futex/ioctl) -> flow=80
+  burst at t=537 -> then a 940 s CRAWL at pid 1237-1269 (flow 0-2,
+  R=38-40 runnable, bw15 parked 223-244, M<=3). Launcher markers NOT
+  reached (no MainAbility/ArkUI/sceneboard strings).
+
+- sc206's crawl exposed the census re-arm bug (b634a615): the re-arm
+  branch (flow>=20) was an else-if under 'flow<=5 || bw15>=150' -
+  after the first census the parked cohort keeps bw15>=150 forever,
+  so the re-arm was DEAD CODE (same defect 19068d5a meant to fix, via
+  branch order). sc206's t=537 flow=80 never re-armed; the 410+ s
+  qualifying plateau got no second census. Fix: test the recovery arm
+  FIRST. sc207 (same config as sc206) rolls to verify: with a
+  re-arming census every crawl plateau gets its census+rekick ~2 min
+  in - the sc202-proven unwedge, now periodic.
+
+- Noted for later lanes: (1) Rux ext4 lacks metadata_csum_seed /
+  orphan_file support (Linux mounts these fine) - real compat gap,
+  hit by the new-style userdata template; (2) OH beget's reboot path
+  lands on sysrq 'c' = panic-park in Rux (no machine reset) - a
+  quiet boot that loses /data dies as a panic park; (3) idle-loop
+  hlt + tick = the documented benign LEAK weather, now silenced by
+  2a02d5db.
+
+SESSION R THIRTEENTH LEG ADDENDUM - sc207 HARD-FREEZE ROOT CAUSE,
+THE PRINT-UNDER-BUCKET-LOCK SELF-DEADLOCK; sc208 ROLLS THE FIX +
+SLOW-TXN PROBE (14:2x-15:xx):
+
+- sc207 (re-arm fix kernel) boot was FAST (pid 1106 @ t=185 vs sc206's
+  1121 @ t=290), then HARD-FROZE at ~t=190-240: serial cut MID-LINE,
+  both vCPUs at 100% host CPU, no panic, no beats, no tick prints.
+  Forensics via QEMU monitor (no gdb on this launch): CPU0 RIP in a
+  CAS loop; stack walk symbolized to
+    stallwatch_tick -> for_each_task closure ->
+    pid_hash::pid_hash_for_each_task -> pid_hash::lock_bucket (SPIN)
+  The census was mid-sleepsnap when it died (serial tail = raw
+  sleepsnap lines + one interleaved WAKE-STRANDED tick-path report).
+- ROOT CAUSE: sleep_snapshot() printed one pr_info! PER TASK inside
+  for_each_task - the callback runs under the pid-hash bucket lock, so
+  the census held each bucket across console port-IO (~1 s total over
+  the ~590-task walk). stallwatch_tick (softirq at irq-exit, 2.5 s
+  cadence) runs its own for_each_task: a tick landing on the walking
+  CPU self-deadlocks (the softirq spins on the bucket only the
+  interrupted task can release), and the other CPU's scan spins on the
+  same bucket. sc206 survived its census by luck (its census at t=290
+  dodged the 2.5 s scan); sc207's earlier census collided. This also
+  explains why ordinary forks never hit it: they hold buckets for
+  microseconds, the census opened a second-scale window.
+- FIX (d43c8753): sleep_snapshot collects lines into a String, prints
+  once after the walk (chunked on line boundaries for the ring record
+  cap); stallwatch_tick buffers its two report lines identically (its
+  pr_warn!s were inside the bucket-locked closure too). Every other
+  walker already buffer-then-printed - these two were the outliers.
+- d43c8753 also carries the SLOW-TXN probe (coordinator cross-finding,
+  C-line leg 15: SAMgr SendRequest = ~30 s per call with the fixed
+  clock; sc206 was the deepest roll ever - first
+  bootevent.boot.completed): BinderTxn gains enq_j/pick_j stamps; the
+  BC_REPLY pop prints "SLOW-TXN ... total/queue/exec" for sync txns
+  over 5 s, direct console, rate-capped 1/2 s. sc208 rolls it.
+- Coordinator notes folded in: the perf line pre-verified the timer
+  hunk on main+exact-hunk (pa23/24/25: 99.9 ticks/s sustained,
+  nanosleep -21x, clock_gettime max 3 ms, WAKE-STRANDED 100->0, census
+  counts hold - perf-audit.md 2h); diff-verified their scratch/tickfix
+  9a451bef vs my 675095c0 hunk: BYTE-IDENTICAL.
+
+SESSION R THIRTEENTH LEG CLOSE-OUT - sc208 VERDICT: BOTH FIXES
+VERIFIED LIVE; THE PRE-LAUNCHER TIME SINK IS NAMED (foundation ->
+samgr code-7, exact 15 s server-side exec); READY FOR MERGE.
+
+- sc208 (deadlock fix + re-arm fix + SLOW-TXN probe, 14:59, 45 min):
+  census fired TWICE (t=350 and t=654) and the machine survived BOTH
+  (the sc207 freeze shape is gone); re-arm path structurally proven
+  (sc206 never got a second census). Boot: pid 1106@t=185 (fastest
+  quiet boot yet), oracle up, 0 panic, 0 PREEMPT-LEAK; ends in the
+  familiar crawl at pid 1233 (flow 0-2, bw15 ~237) - the crawl is NOT
+  the devmgr freeze and the census rekick does not heal it: it is the
+  exec-latency chain below.
+- THE SAMGR COST, ANSWERED (coordinator C-line cross-finding): 24
+  SLOW-TXN lines, ALL with queue = 0 ms - the binder machinery queues
+  nothing. 22/24 are ONE shape: foundation (pid 830, tids 830/884/
+  1054; once 467) -> samgr (pid 328, tids 328/335/345/358), code 7,
+  exec EXACTLY 15000 ms (x17), 30000 ms (x3), one 89390 ms. Exact-
+  15.000 s quantization = a deliberate 15 s timeout the samgr handler
+  waits out before replying (samgr waiting for an SA to publish that
+  never lands; foundation retries). Every SA-dependent call = 15 s
+  serial -> the pid-1100-1250 crawl. Next leg's first question: WHICH
+  SA never publishes - correlate samgr's not-found/retry hilog in the
+  printk-ring tail with the code-7 storm (census #2's ring tail +
+  SC-WEDGE-BW CLIENT-WAIT owed_pid=334/781 chains are in the sc208
+  serial).
+- Branch state: feature/samgr-callback at f5e0346a (pushed):
+  675095c0 fix(timer) TSC multiply-before-shift  [READY FOR MERGE -
+    byte-identical to the perf line's 9a451bef scratch; perf-audit.md
+    2h battery passed on main+exact-hunk; live-proven sc205/sc206/
+    sc207/sc208 TICKPROBE; corrects ALL x86_64 timing; riscv64
+    unaffected]
+  852d0cf2 diag(timer) TICKPROBE (one-shot, BSP-gated)
+  2a02d5db dfx(sched) tripwire discounts its own hardirq level
+  b634a615 fix(dfx) census re-arm dead code (verified in sc208)
+  d43c8753 fix(dfx) print-under-bucket-lock self-deadlock (verified
+    in sc208) + SLOW-TXN probe
+  + wip artifact/notes commits (ea8b9d1d, f5e0346a and the close-out
+    snapshot)
+- Rolls this leg: sc206 (45 min, crawled), sc207 (wedges -> root-
+  caused + fixed), sc208 (fixes verified). sc205-208 serials/ppm on
+  disk (serials gitignored). QEMUs ended by their own timeout
+  wrappers or killed by exact own PID after cmdline verification;
+  shotmon loops stopped per-tag; no setsid herds left behind.
+
+SESSION R FOURTEENTH LEG - THE PRE-LAUNCHER WALL DECODED (WHICH SA
+NEVER PUBLISHES: TWO OF THEM, BOTH NOW FALLEN); sc210 = LAUNCHER APP
+EXECUTING IN ITS SANDBOX (16:0x-17:xx):
+
+- STEP 1 (offline, sc208 serial + OH source; no boot needed):
+  * CODE 7 = LOAD_SYSTEM_ABILITY (samgr_ipc_interface_code.h). The
+    15s storm = foundation asking samgr to LOAD SA 511 "installs"
+    (BMS installer; on-demand sa_main, installs.cfg/installs.json).
+    samgr's StartDynamicSystemProcess -> ServiceControlWithExtra =
+    SystemSetParameter("ohos.ctl.start", "installs|511#...") over the
+    paramservice AF_UNIX socket. The sc208 serial prints
+    "Start dynamic proc:installs,511,0_0ms" ONCE (result 0 in 0ms
+    with NO server-side "Handle set param" line) then "511,105_14991ms"
+    x24: 105 = PARAM_CODE_TIMEOUT (init_param.h enum), 14991ms = the
+    param client's 15s reply-ack window. pid 339 (samgr's param-setter
+    thread) had logged msgIds 2..5 on that connection (samgr.cache.sa,
+    bootevent.samgr.ready, wifi ctl, deviceprofile ctl) and NOTHING
+    ever again - the client socket went deaf: sends never arrive at
+    the server, and the first installs attempt got an instant bogus
+    "0" reply (stale/duplicated-reply anomaly). Kernel suspects: AF_
+    UNIX stream reply duplication + server-side reader wake loss.
+  * SA 10 (RENDER_SERVICE, system_ability_definition.h) never
+    published in sc208 because render_service main parked in a futex
+    right after hilog "HgmTaskHandleThread init" (hgm_context.cpp:60).
+    The very next statement is InitHgmTaskHandleThread's PostSyncTask
+    (an FFRT queue->wait(handle)) and AddSystemAbility(10) never ran
+    (no "insert SA:10" all boot; the next expected logs
+    "UpdateGpuContextCacheSize"/"RSLuminanceControl init" never
+    appear). Census sleepsnap: RS's FFRT workers (OS_FFRT_5_0/_1,
+    spawned exactly at the HGM window) alive but asleep; main waits on
+    a stack futex (sys=202) no one ever wakes. Foundation's tid 1010
+    (DisplayManagerService) then polled GetSystemAbility(10) forever:
+    1207x "RSRenderServiceConnectHub::Connect ... failed to get render
+    service proxy" across the whole boot - THE screen-gate symptom.
+  * Census #2 CLIENT-WAIT owed_pid=334 chains decoded: powermgr 781
+    (depth 2; txn55405 code 3 TXN_PQUEUED to hdf_devmgr since jif
+    39026, 43 rekicks, never consumed), drm_service 837, usb_host
+    1142 - the devmgr debt (separate wall, rekick-resistant in sc208).
+- PROBES (commit 7908a764): FXRS (latch render_service tgid at exec;
+    every futex WAIT/WAKE/REQUEUE of that process, entry+return,
+    budget 4000 ops - the original 600 died inside RS's own init
+    chatter two dozen ops short of the HGM window); PCTL (paramservice
+    socket duplex tap: ParamMessage type/msgId/key/value on sends to
+    the listener, on pid-1 responses, on pid-1 receives); SAREG gains
+    code 7 + 96-byte parcel head (decodes the load target SA id past
+    the samgr interface token - "c2120000"=4802 device_manager etc).
+- sc209 (16:16, probes, same recipe as sc208): BOTH WALLS FELL. SA 10
+    published ("insert SA:10_60" - first time in the campaign);
+    installs loaded ONCE, 0_1ms, and SPAWNED (pid 1034, BMSInstalld
+    serving bmsdb Reset ops); only ONE "RenderService connect fail"
+    the whole boot. BootAnimation went all the way: RSSurfaceNode
+    BootAnimationNode, EGL context, 150 jpg frames read, SetVSyncRate
+    30, RSComposerAdapter::CreateBufferLayer repeatedly - the RS ->
+    composer -> DRM chain serving bootanimation frames. Then RS 851
+    hit the KNOWN deterministic mm crash (Session O GATE 2: rip
+    0x3fbf08ad30 rep-movsq memcpy tail) - but with a NEW datapoint:
+    cr2=0x7ff0006f1000 (malloc-arena window) not the old stack dst,
+    right after two 0x3c0000 BIGMUNMAPs in pid 851. init respawned RS
+    (1115) which published again (SA:10_65). No HGM park: FXRS shows
+    the FFRT workers WAITing, main's WAKEs returning ret=1 (delivered)
+    and the sync task completing -> the sc208 park was a race, not a
+    hard gate (probe pacing may have shifted it).
+  * sc209's mid-boot tear-down: init's bootevent timeout fired
+    ("bootevent.lockscreen/launcher/bms.main.bundles.ready not set")
+    and SIGKILLed the service tree (foundation x2, appspawn,
+    accountmgr...) - a reset, not a wedge. Post-reset world re-parked
+    (bw15=240) but with only 2 SLOW-TXN the whole boot (vs sc208's
+    24) and the remaining code-7 loads = device_manager 4802 x11 from
+    distributeddata/softbus, resolving without 15s costs.
+  * usb_host (hdf_devhost) crash-loops at the KNOWN usb DDK PnP
+    NULL-walk (rip voff 0x15bac, cr2=0) - THIS worktree's oh-img
+    still carries libusb_pnp_manager.z.so; the zeroed copy lives in
+    oh-img-p (oh-boot-usbless.sh). Next rolls should go usbless.
+- sc210 (16:33, FXRS budget 4000, same recipe): SA 10 published at
+    t~3min, installs spawned, RS NEVER crashed (no USEGV on 840 all
+    boot), NO bootevent reset, and the boot kept climbing past every
+    previous depth: BMS ran the real HAP install flow (MainAbility.abc
+    entries through BMSInstalld), AMS StartResidentAbility
+    com.ohos.settingsdata + com.ohos.systemui statusbar, AppSpawnChild
+    ids up to 40+, and at ~t=10min the LAUNCHER app entered its
+    sandbox: pivot_root '/mnt/sandbox/100/com.ohos.launcher' and
+    Launcher_Default LauncherAbilityManager executing - THE deepest
+    point of the campaign, past the pre-launcher wall. Remaining pace
+    wall there: the launcher's getOsAccountLocalId loop (322+ rounds
+    at ~13/min at t=24min - the known per-round IPC-cost blocker #1,
+    perf lane). pidmax 4900+ and rising, flow 19-24 (the old crawl was
+    flow 0-2 at pid 1255).
+- VERDICT FOR THE MERGE: two consecutive boots (sc209, sc210) advanced
+  past the sc208 crawl wall with SA 10 publishing and SA 511 loading;
+  sc210 reached launcher execution. The probes are no-behavior-change
+  diagnostics (all prints at syscall boundary, none under locks).
+  Leg-15 entry points: (a) launcher getOsAccountLocalId pace (perf
+  lane, blocker #1), (b) RS mm crash randomness (mm lane, new
+  arena-dst datapoint), (c) roll usbless (oh-img-p) to kill the
+  usb_host churn, (d) the sc209-only param-socket deafness did not
+  recur in sc210 - PCTL stays armed to catch it if it does.
+
+SESSION R FOURTEENTH LEG ADDENDUM - sc210's TERMINAL EVENT = A DIAGNOSTIC-
+PATH KERNEL PANIC (fixed); sc211 ROLLS THE FIX.
+
+- sc210's end (t=1410s, serial line 464278): the wedge census fired on
+  the launcher family and KILLDUMP walked pid 4902 (com.ohos.launcher,
+  fdtab shown fine) then a task whose fdtable was NOT initialized:
+  "Kernel panic - not syncing: PANIC: FdTable not initialized
+  (kernel/src/process/task.rs:3958)" twice, then CPU#1 soft lockup,
+  panic park, serial frozen at 0% CPU until the timeout wrapper ended
+  it. The diagnostic walk killed the deepest boot of the campaign.
+- FIX (6a3e9e34): every task-walking dump site now uses try_fdtable()
+  and skips when None - kill_dump_wedge's fdtab line + primary-fd block
+  + pipe-holder for_each_task scan + syscall fd notes, the APP-PARK
+  APPMAP/APPFD decode, the RWFRZ path_of cache (all sync/futex.rs),
+  and the APPMAPSRC tap (syscall/memory.rs). No behavior change on the
+  non-dump paths.
+- sc211 (17:12, fix kernel, same recipe): verification roll - expect
+  the census at the same launcher-family window to survive and the
+  boot to run its full 45 min. Verdict will be appended.
+
+SESSION R FOURTEENTH LEG CLOSE-OUT - FDTABLE FIX VERIFIED ACROSS EVERY
+CENSUS IT REACHED; HOST-OVERCOMMIT STALLS MISREAD AS KILLS (CORRECTED).
+
+- sc211/sc211b/sc211c (fix kernel 6a3e9e34, same recipe): the serials
+  froze for many minutes at a time under a 10-12-QEMU host (KVM guests
+  barely scheduled); first read as external kills - WRONG: all three
+  QEMUs stayed alive at ~200% CPU and resumed writing when host load
+  eased. sc211c was stopped by exact verified PID to respect the
+  2-own-QEMU rule.
+- Fix verification: sc211 (census #1 t=240 complete + 968 KILLDUMP/
+  RWFRZ dump lines), sc211b (t=556s+), sc211c (census #1) - ZERO
+  "FdTable not initialized" panics on any of them; each published SA 10
+  twice (RS crash + respawn, consistent with sc209). The exact sc210
+  death window (launcher-family KILLDUMP at t=1410s) was not re-reached
+  before the timeout wrappers ended the rolls - the None-guard path is
+  the same code, so the fix stands on the censuses it did traverse.
+- Branch state: feature/samgr-callback at abd0962f (+ this note):
+  7908a764 feat(dfx) leg-14 probes (FXRS + PCTL + SAREG code-7)
+  6a3e9e34 fix(dfx) wedge-census fdtable walks None-safe [READY FOR
+    COORDINATOR MERGE - a diagnostic-path panic that ended sc210, the
+    deepest boot of the campaign, at t=1410s; verified panic-free
+    across sc211/sc211b/sc211c censuses; no behavior change on non-
+    dump paths]
+  30d1599c + abd0962f docs(sessions) leg-14 section + addenda
+- Leg summary vs mission: (1) WHICH SA never publishes - TWO answers:
+  SA 10 RENDER_SERVICE (render_service main futex-parked in the FFRT
+  PostSyncTask after HgmTaskHandleThread init) and SA 511 installs
+  (on-demand start lost in the samgr->paramservice socket deafness;
+  the 15s code-7 storm = the param client's PARAM_CODE_TIMEOUT). Both
+  fell in sc209/sc210 without code changes (races, shifted by leg-13
+  fixes + probe pacing). (2) sc210 reached the LAUNCHER executing in
+  its sandbox (pivot_root com.ohos.launcher + LauncherAbilityManager),
+  BMS running real HAP installs, BootAnimation driving frames through
+  RS/composer/DRM - deepest campaign state. (3) New walls for leg 15:
+  launcher getOsAccountLocalId pace (perf lane), RS mm crash
+  randomness (mm lane - new arena-dst datapoint cr2=0x7ff0006f1000),
+  usb_host PnP crash loop (roll oh-img-p usbless), init bootevent
+  reset window (sc209; sc210 dodged it).
+- Rolls this leg: sc209, sc210, sc211, sc211b, sc211c (2 ended by
+  their own timeout wrappers, sc211c killed by exact own PID after
+  cmdline verification; shotmon loops stopped per-tag). Serials/ppm
+  on disk (serials gitignored).
+- FINAL sc211/sc211b verdict: sc211 ran THREE full wedge censuses
+  (t=240/594/1039) to completion and stayed healthy to guest t=2521s -
+  1111s PAST the t=1410s point where sc210's census panicked; sc211b
+  two censuses, healthy at t=1982s. Both zero panics, zero
+  "FdTable not initialized". The fdtable fix is verified at the exact
+  depth that killed sc210. (This pair re-crawled at pidmax ~1370 - the
+  sc210 launcher trajectory is a per-boot race; see the leg summary.)
+  Both ended by exact verified PID at close-out; no QEMU or shotmon
+  of this leg remains.
+
+SESSION R FIFTEENTH LEG - PACE COUNTERS ACQUIT THE RECLAIM PATH; THE
+USBLESS WALL IS THE RS PARK (userspace RW leak, kernel futex
+exonerated); SC212 ROLLED, SC213 = RACE RETRY
+
+- Launcher line second attempt (predecessor died of quota ~21 min in;
+  sc212 roll survived it under the timeout wrapper). Branch state at
+  take-over: fec94520 (PACE counters on the SC-HB beat) on top of the
+  main-merge ac15059a; bzImage stamped 18:13 = commit time, so the
+  running kernel HAS the PACE counters (verified live in the serial).
+
+- sc212 (18:16, KVM q35 usbless oh-img-p, userdata-sc213-class private
+  reflink, loglevel=7, dfx=schb,sleepsnap, SMP2 4G, SECS=2700):
+  the pace data lands and ACQUITS the whole reclaim family:
+    * zfree never left the ~436-437K page band (of 4G) all boot; no
+      memory floor. heapK plateaus 319MB (vs sc210's 907/1015MB).
+    * drct=0 drctJ=0 drctMaxJ=0 slow=0 for the WHOLE boot - zero
+      direct-reclaim rounds, zero page-alloc slowpath entries.
+    * COW: 20032 faults cumulative, cowJ=7 jiffies total. The two
+      post-boot COW bursts (t=961 +255, t=1261 +255) are the
+      getOsAccountLocalId retry rounds (AccountDelegateNormalImpl
+      "QueryForegroundUserId ... 4194349" every ~5s from t=970):
+      each round now costs ~255 faults and no measurable jiffies.
+  CONCLUSION: the sc210 pace wall (zone floor free~100-190,
+    in_direct_reclaim=1, 4.6s/round) was a DOWNSTREAM effect of the
+    usb_host crash loop (5 sig=11/round drove forks+COW+heap to the
+    floor). The usbless roll removes the entire regime. Nothing in
+    reclaim/page-alloc is left to fix for this trajectory; the
+    predecessor's "fix the reclaim slowpath" mission item is closed
+    by measurement, not by code change.
+
+- The sc212 wall (bw15=247/594, screen frozen at BootAnimation's
+  first color-pattern frame, no launcher spawn) = the RS park, now
+  fully decoded end-to-end:
+    * render_service tid 734 main parked t~? on PRIVATE stack futex
+      uaddr=0x7fffffffcc54 val=2 (stkfutex + sleepsnap sys=202 all
+      census cycles) - the leg-14 PostSyncTask park after
+      HgmTaskHandleThread init.
+    * FXRS (live long past the park, #2071/4000 budget) shows ZERO
+      wakes ever targeting cc54 from ANY RS thread: per the probe's
+      own decision rule that is a userspace chain, not kernel wake
+      loss.
+    * NEW final hop (leg-15): the FFRT worker OS_FFRT_5_0 tid 958
+      that should run the synced task is itself frozen on an RW-lock
+      word - RWFRZ-HIGH uaddr=0x7ff093d11754 waiters=1 word=0x2
+      readers=2, word d+0 forever; main's last act (#559) was a WAKE
+      on that word (delivered, worker woke, re-read the true 0x2,
+      re-parked) - the futex/wake path is CORRECT; two RS readers
+      leaked the lock and never released it. Same shape frozen in
+      many other tgids (RWFRZ scan: 378/317/667/496/721 all d+0).
+      RS internal read-lock leak = userspace; adjudicated family, no
+      kernel hunt.
+    * WAKE-RUN-LEAK tid 966 (RS IPC thread, kicked 5x age 241s) is
+      the benign idle-binder shape ("no pending txn") - not a leak.
+  Downstream symptoms all consistent: RSRenderServiceConnectHub
+    Connect failed x5 loops, boot.completed reached, SA 10 never
+    inserted, screen frozen at the 4-color test pattern (sampled
+    RGBW 789/789/786/785 cells of the ppm).
+
+- SA 511 installs loop, sc212 datapoint (updates sc208's "socket
+  deafness" frame): 23 ctl.start installs sends, ALL received AND
+  ACKed by paramservice (msgIds 26-32, 37-41 round-trip in the PCTL
+  tap). The deafness is GONE in this boot; the service still never
+  registers (no "insert SA:511"; SELinux init error "Unknown class
+  parameter_service" nearby). Failure is downstream of paramservice
+  (init service-control / policy, userspace). sc210 proved installs
+  CAN spawn (full image, race won) - per-boot race like SA 10.
+
+- osaccount 4194349: QueryForegroundUserId calls DO reach accountmgr
+  (SAREG code=4 send/reply pairs pid762->784, reply dlen=4 = an
+  error int). Native osaccount layer created+activated account 100
+  at t~1083-1095 (OnStateChanged state 7). accountmgr returns an
+  error for the FOREGROUND query - consistent with display/WM state
+  never coming up behind the parked RS. Userspace chain.
+
+- Play for the race: sc213 same kernel (fec94520 bzImage), same
+  recipe, fresh scgold reflink - target the sc210-style trajectory
+  (SA 10 published ~t3min, installs spawn, launcher sandbox) with
+  PACE counters live for the first usbless launcher run.
+
+LEG-15 CONTINUED (second launcher attempt) - sc213/sc214 usbless
+replication, sc215 FULL-image launcher roll, THE BOTH-VCPU FREEZE
+CONVICTED AND FIXED (361debe8)
+
+- sc213 (18:51, same kernel as sc212, usbless, KVM): BOTH races WON -
+  insert SA:10_61 t~50s, installs spawned 0_60ms + insert SA:511_65,
+  BootAnimation ran its RS chain (RSSurfaceNode/InitRsSurface/
+  CreateBufferLayer) and ENDED, BMS/AMS chains ran (StartResidentAbility
+  systemui x4). Then: RS#1 (tgid 812) hit the ADJUDICATED deterministic
+  mm crash at t~60-100s (USEGV-FOR rip=0x3fbf08ad30, cr2=0x7ff000693000
+  - Session O GATE 2 rep-movsq memcpy tail, arena window), respawn
+  RS#2 (tgid 1147) published SA:10_65 and then PARKED the sc212 way
+  (cc54 progression); a sa_main (pid 418) txn sat SERVER-OWING on
+  RS#2 tid 1290; init's bootevent timeout fired (launcher.ready /
+  lockscreen.ready not set) and SIGTERM'd appspawn (KILLTRACE sig=15).
+  Boot crawled to its timeout with young=DB_TaskExecutor.
+- sc214 (19:07, usbless replicate): IDENTICAL outcome - RS#1 publish,
+  crash at the SAME rip, RS#2 publish + cc54 park. Three-for-three:
+  on the usbless image the RS outcome is deterministic (crash-then-
+  park); the usbless roll can never reach the launcher window.
+  sc214 stopped by exact PID once the park was census-confirmed.
+- PACE across sc213/214/215: drct=0 drctJ=0 slow=0 ENTIRE boots;
+  zfree 415-423K pages; cowJ<=10; the getOsAccountLocalId rounds now
+  ~255 COW faults each with no measurable jiffies. Reclaim acquittal
+  confirmed on three independent boots (perf lane adjudicated the
+  same from merged main).
+- sc215 (19:11, FULL image oh-img + userdata-tok reflink via
+  oh-boot-m3g.sh - the sc209/210 launcher recipe): RS#1 (839)
+  published, exited SIGABRT (-6, new crash-family datapoint - not
+  the adjudicated SEGV); RS#2 (1151) published SA:10_64 and its HGM
+  PostSyncTask parks RETURNED (ce04->0, cc54->0 - the sc209 shape,
+  sync task completes). BootAnimation drove CreateBufferLayer frames;
+  44 getOsAccountLocalId-family retries; pivot_root /mnt/sandbox/
+  system seen. LAUNCHER trajectory live at t~560s.
+- THEN sc215 HARD-FROZE at t~580s: serial cut mid-RWFRZ line, zero
+  ticks, both vCPUs 100% host CPU. MONITOR CONVICTION (QEMU monitor
+  via unix sock): CPU0 RIP in pid_hash::lock_bucket retry loop, its
+  stack symbolized ww_heartbeat -> wakewatch::stallwatch_tick ->
+  sched::for_each_task -> pid_hash_for_each_task (the BLOCKING walk);
+  CPU0's frame slot idx=0x60; CPU1 RDI=&BUCKET_LOCK[96]; BUCKET_LOCK
+  array (phys 0xed7a50, RW-segment mapping - NOT the text-segment
+  base) shows exactly bucket 96 stuck at 1; WW_TICK_IRQ frozen
+  across two samples 4s apart (0xdc37 both).
+  ROOT CAUSE: stallwatch_tick runs in the timer tick (softirq) via
+  ww_heartbeat and walked tasks with the BLOCKING pid_hash_for_each_
+  task, which takes per-bucket spinlocks. Any task-context bucket
+  holder (fork insert / exit remove / kill for_each - all hold
+  buckets with IRQs ON) interrupted by the tick self-deadlocks: the
+  handler spins for the bucket its own interrupted owner holds; the
+  other CPU's scan reaches the same stuck bucket and joins. Total
+  IRQ death, console dies mid-line. The sc207 fix ("print after the
+  walk") had removed only the printk-under-bucket half of the hazard.
+  THIS is also the likely truth behind older "serial cut mid-line"
+  hard freezes attributed to the console: same walk, same shape.
+- FIX (361debe8): stallwatch_tick switched to
+  pid_hash_for_each_task_try (the wedge-safe variant that skips held
+  buckets; a skipped round misses tasks for one ~5s scan). A
+  post-walk line names nonzero skipped-bucket counts (near-miss
+  observability; recurring high counts would argue for irqsave
+  bucket locks - RECOMMENDED to the coordinator as the class-level
+  follow-up, since pid_hash lock_bucket is still plain TAS and the
+  IRQ-context blocking hazard remains for any future IRQ-side user).
+- sc216 (19:39, fix kernel, same full-image recipe): verification
+  roll - must advance past t~580s with continuous SC-HB beats, then
+  one more consecutive advancing boot completes the 2-boot rule.
+
+LEG-15 VERIFICATION + THE PACE WALL MEASURED LIVE (sc216/sc217, fix
+kernel 361debe8)
+
+- sc216 (fix kernel, full image): ADVANCED past the sc215 freeze depth
+  cleanly - heartbeats continuous to t=692s, ticks/console alive to
+  boot end, ZERO bucket-deadlock shapes; the later degradation was the
+  KNOWN userspace wall again (bootevent.launcher.ready not set -> init
+  SIGTERM appspawn). Verification boot #1 of 2: PASS. No
+  "STALLWATCH scan skipped" lines (the hazard window never hit this
+  boot - the fix is prophylactic; sc207/sc215 show it is rare but
+  total when it hits).
+- sc217 (fix kernel, full image, port 12056): VERIFICATION BOOT #2 AND
+  THE DEEPEST LAUNCHER RUN OF THE LEG:
+    * RS#1 published SA:10_61 and NEVER crashed all boot (no USEGV on
+      render_service); the HGM sync tasks completed (no cc54 park).
+    * insert SA:511, installs chain, BootAnimation RS chain, then at
+      t~500s pivot_root '/mnt/sandbox/100/com.ohos.launcher' - THE
+      LAUNCHER IN ITS SANDBOX; LauncherAbilityManager running and its
+      getOsAccountLocalId rounds now SUCCEED ("localId 100" - vs
+      sc210's crawl and sc212-214's 4194349 errors).
+    * bootevent.account.ready SET (a launcher-window bootevent landed).
+    * pidmax 4775 and rising at t=1480s, tasks 2808 - sc210-scale.
+    * THE PACE WALL, MEASURED (the predecessor's counter design paying
+      off): at t~1220s zfree 31K pages / heap 818MB with drct=0; by
+      t=1450s the sc210 regime forms EXACTLY - zfree 1254-1979 pages
+      (the floor, below wmark low 2451), heap 893-899/1015MB, and for
+      the FIRST time in the campaign: drct=90 rounds, drctJ=1836
+      jiffies, drctMaxJ=70 (0.7 s max single round), slow=36 alloc
+      slowpath entries. cowJ stays 91/341K faults (~0.27 jiffies per
+      1000 faults) - COW handling itself is cheap; the serialization
+      lives in direct-reclaim rounds on the alloc path, avg ~20
+      jiffies/round, driven by the KERNEL HEAP consuming ~900MB
+      (4775 pids + threads: task structs, fdtables, binder buffers).
+    * The known fake OOM fired at the floor: "oom: out of memory
+      (order=0)" -> "no killable processes found" (heap full, user
+      side has no victim by badness) - matches the leg-15 context
+      datapoint (fake OOM killed watchdog_service mid-loop in sc210).
+  CONCLUSION for the perf lane / coordinator: the pace wall is REAL
+  but SECONDARY - it forms only at the very deepest launcher state
+  (pidmax 4700+) as kernel-heap pressure, ~18 s of cumulative
+  serialized direct reclaim by t=1480, drctMaxJ 0.7 s - NOT the 4.6
+  s/round serialized wall of the sc210-era readout (that number was
+  read under the usb-crash-loop's heavier floor). The kernel-heap
+  growth (~900MB) is the quantity to attack next - mm lane: what
+  holds 900MB across 4775 pids (per-task footprints, fdtable sizing,
+  binder buffer accounting) - the PACE zfree/heapK columns now give a
+  continuous measurement handle for any such fix.
+- Terminal milestone (OnForeground/ArkUI/launcher.ready SET +
+  screenshot): NOT reached this leg - sc217's launcher is executing
+  rounds at press time; the remaining gate above the rounds is the
+  launcher ability chain's own progression (userspace), with the RS
+  park race and the init bootevent timeout as the per-boot lottery.
+
+LEG-15 CLOSE-OUT (second attempt, quota-survived)
+
+Deliverables on the branch (feature/samgr-callback, ready for
+coordinator merge):
+  fec94520 wip(dfx): PACE counters on the SC-HB beat (predecessor)
+  3593c9d2 wip(sessions): sc212 readout
+  361debe8 fix(sched): stallwatch_tick must not block on pid-hash
+           bucket locks [READY FOR COORDINATOR MERGE]
+  ff3c9031 + 8b49e2c4 docs(sessions)
+  (+ this note)
+
+1. FIX VERIFIED (2 consecutive advancing boots, the leg rule):
+   sc216 (t=692s heartbeat, ticks/console to boot end) and sc217
+   (heartbeat to t=1530s, ticks alive to the 45-min timeout end) both
+   passed the sc215 freeze depth (t~580s) with zero bucket-deadlock
+   shapes. Both boots degraded afterward via the KNOWN userspace
+   walls (bootevent timeout), NOT the freeze. sc207's identical
+   freeze is explained by the same root cause (its fix had only
+   removed the printk-under-lock half).
+
+2. PACE verdict (the mission's primary question): the reclaim family
+   is ACQUITTED for everything up to the deepest launcher state - and
+   then measured precisely when the floor forms (sc217: zfree 31K
+   pages/heap 818MB still drct=0 at t=1220; floor + drct=90-127
+   rounds / drctJ 1836-3395j / drctMaxJ 70-209j / slow 36-50 only
+   after heap ~900MB at pidmax ~4800). COW handling is never the cost
+   (cowJ 91j/341K faults). The wall = kernel-heap pressure at very
+   high pid counts; the next lever is per-pid kernel footprint (mm
+   lane), for which the PACE zfree/heapK columns are the continuous
+   gauge.
+
+3. Launcher chain state (terminal milestone NOT reached this leg):
+   the deepest run (sc217) had RS alive all boot, launcher IN its
+   sandbox, LauncherAbilityManager rounds SUCCEEDING (localId 100),
+   bootevent.account.ready SET, pidmax 4853 - then appspawn's spawn
+   timeout SIGKILLed m.ohos.launcher (pid 5147, KILLTRACE sig=9 from
+   appspawn 336) at the floor: the launcher's fork/init is too slow
+   under the heap floor, appspawn kills+respawns it in a loop,
+   launcher.ready never sets before init's bootevent timeout. Both
+   timers (appspawn spawn window, init bootevent window) are image/
+   userspace constants - NOT kernel-adjustable within this leg's
+   rules. The path to the screenshot milestone: (a) win the RS-park
+   race (usbless deterministically loses it: RS#1 crashes at
+   rip=0x3fbf08ad30 then RS#2 parks - 3/3; full image won it 3/3 this
+   leg), so stay on the FULL image via oh-boot-m3g.sh + userdata-tok
+   reflink copies; (b) reduce kernel-heap footprint so the launcher's
+   spawn completes inside appspawn's window before the floor forms.
+
+4. Rolls this leg: sc212, sc213, sc214 (usbless, timeouts/exact-PID),
+   sc215 (full image, froze - the conviction boot; monitor evidence
+   in the sections above), sc216, sc217 (fix verification, full
+   image, both ended by their own timeout wrappers). All QEMUs and
+   shotmon loops stopped; sc202-210 orphan shotmon loops from dead
+   predecessor sessions also cleaned (exact PIDs, cmdline-verified).
+   Serials/ppm on disk (gitignored); userdata-sc212..217 private
+   reflink copies retained.
+
+LEG-16 (launcher line, per-pid kernel-heap footprint) — RUNNING SECTION
+
+Mission: reduce per-pid kernel footprint so the heap floor forms past
+appspawn's launcher-spawn window (leg-15 verdict: floor at heap ~900MB,
+pidmax ~4800; launcher fork too slow under it, appspawn SIGKILL loop).
+
+Tooling built this leg (all dfx=schb-gated where hot, committed):
+- SC-ANAT beat line: procs (tgid leaders), kN/kK (live kstacks), kHW
+  (boot-max stack high-water), smallK/smallPgK (live small-object
+  estimate vs slab pages held), buddy NET_PAGES per order o0..o8.
+- kstack high-water probe: zero-at-alloc, scan-at-free (in
+  free_kernel_stack, outside every lock), KSTACK-HW record print with
+  comm/pid + UP-walking return-address tail (the down-walk was a bug:
+  the zeroed span below the first nonzero word has no addresses by
+  construction - fixed after sc218/sc220).
+- OOM-ANAT: one-shot dump at the fake-OOM no-killable path AND early
+  at 80% heap on the beat: kstack live/hw, sizeof Task + vma/file/
+  dentry/inode/mm/ptregs/fdte, full NET_PAGES order table, SMALLALLOC
+  per-class census (allocs/frees/pages), census_peek of c256/c1024
+  object headers (buffer-then-print under the class lock).
+
+Rolls:
+- sc218 (full-image anatomy probe roll): LOST the mid-boot RS lottery
+  (render_service tid 1063 parked at ioctl sys=281, the cc54-family
+  userspace RW leak; wedge census + rekick did not unwedge). Probes
+  verified; mid-boot anatomy banked. heapK STABLE at 341MB for 500+s
+  while parked - the small-object population is a stable live set, not
+  a leak. kstack floor relevance: kN=611 kstacks = 88MB at 620 tasks.
+- sc219 (full roll, attribution-era kernel): HEALTHY boot, deepest
+  dataset of the campaign - reached the floor (heap 904MB, pidmax
+  5149, tasks 2729) where the fake-OOM fired WITH the full census:
+    * kstack (o5): 383MB = 42% - kstack live 2688 x 128KB
+    * small-object slab (o0): 343MB = 38%
+      - c256: 520,363 live (File=144B / dentry=160 / inode=200 all
+        class 256) = 128MB live, the single biggest class
+      - c1024: 84,415 live = 83MB
+      - c128: 185K live but 524 MILLION allocs (350K/s churn)
+      - c8/c16/c32: ~520K live (name-sized strings)
+    * Task (14080B -> 16KB blocks, o2): 2688 + fdtables ~48MB
+    * big blocks o9+o10+o12: ~82MB; sum tracks heapK within ~5%
+  At the floor: launcher spawn died exactly as leg-15 said - appspawn
+  crash #4 -> init ServiceReap ExecReboot panic -> deliberate sysrq-c.
+  bproc 66->15 (services dying under floor pressure).
+- sc220/sc221/sc222 (short 300-420s attribution boots):
+  * sc220: fixed tail-walk named the deepest chain: resize2fs (BEGET's
+    early-boot userdata resize) depth 80,496 with the tail INSIDE
+    array::from_fn wrappers constructing [IoCompletion; 128].
+  * sc221 (ext4 fix in): resize2fs GONE from records; new records
+    check_module_up 65,824 + hiview 76,000 - tail inside Task
+    construction from_fn (init_a0 [AtomicU64; 512] x wrapper copies).
+  * sc222 (both fixes in): records resize2fs 61,064 / e2fsck 62,416 /
+    check_module_up 69,712 / mv 69,800; the 69.8KB chain = fork ->
+    CFS enqueue -> BTreeMap insert_recursing debug frames (structural).
+    kHW still reached 89,368 via ONE unprinted record ~t=30-40s (UART
+    storm ate the print - proven lossy window). Max depth is 89,368,
+    deterministic across sc218/219/222.
+- sc223 (full roll, both from_fn fixes + census peek + early census):
+  running at press time. No KSTACK-HW record >40KB in the first 120s
+  (previous boots printed 61-80K by then) - the fixes are holding.
+
+FIXES LANDED (committed on feature/samgr-callback):
+- cbb84244 fix(ext4): fill_page_cache_batch from_fn -> const-repeat
+  (resize2fs chain 80.5K -> 61K)
+- 94082866 fix(task): Task construction + clone-path from_fn ->
+  const-repeat (fork-family chains 65.8-76K -> unprinted, <69.7K)
+- probes: 7df82c8f (anatomy), attribution fix + OOM-ANAT type sizes +
+  o7/o8, slab census peek + 80%-heap early dump (see git log for ids)
+
+PENDING DECISION (sc223's census peek): c256 520K live and c1024 84K
+live = ~283MB of the 904MB floor. Candidates: Arc<File>, BinderTxn
+(200B, churn-leak?), timer nodes, inotify. The peek dumps object
+headers (vtables symbolisable) at 80% heap ~t=1400s. Reduction levers
+shortlisted: (a) type-targeted fix once identified; (b) kstack
+128->96KB = -74MB at floor (89.4K max vs 96K = 8.9K headroom, canary
+guarded, deterministic max across boots - acceptable for a probe roll,
+not yet for the verified-fix roll); (c) both.
+
+LEG-16 ADDENDUM (reduction set complete, sc225 verification in flight)
+
+THE 89,368B MYSTERY CHAIN IDENTIFIED AND FIXED:
+- sc224 (96KB-stack kernel + SC-KREC beat-deferred record stash — the
+  in-context print had been eaten by the early-boot UART storm in
+  sc218/sc222) delivered the record: comm='usb_host' pid=674, 7
+  surviving return addresses, all inside [Option<Arc<File>>; 1024]'s
+  array-clone machinery (SpecArrayClone::clone::<1024> ->
+  try_from_fn_erased -> NeverShortCircuit wrappers).
+- Source: FdTable::fork_from's `child_entry.fds = g.fds.clone()` —
+  several 8KB stack copies on EVERY process fork. Fixed with an
+  element-wise clone-into-place loop (commit on branch).
+- That closes the from_fn trilogy: ext4 batch [IoCompletion;128]
+  (resize2fs 80.5K), Task init rings (forks 65.8-76K), FdTable
+  fds[1024] (forks 89.4K). All three were debug-build try_from_fn
+  wrapper copies of big arrays ON THE KERNEL STACK.
+
+REDUCTION SET NOW ON THE BRANCH (all committed):
+1. cbb84244 fix(ext4): fill_page_cache_batch const-repeat
+2. 94082866 fix(task): Task construction/clone-path const-repeat
+3. (fds fix) fix(fs): FdTable fork_from element-wise clone
+4. feat(config): KERNEL_STACK_SIZE 128KB -> 96KB (~-84MB at floor;
+   max measured depth 89,368B pre-fds-fix, 8.9KB headroom then; with
+   the fds fix the fork-family chains drop further)
+5. dfx(switches): ksprobe token - the kstack zero/scan/stash probe is
+   OFF by default now: tonight's probe-on boots lost the mid-boot RS
+   lottery 3-of-4 (sc218/223/224 parked at pidmax ~1300) while
+   leg-15's probe-off boots won 3/3 - the ~100-200us added to every
+   spawn (memset + scan) plausibly modulates the render_service race.
+   sc219 (probe-on) DID win once, so it is a nudge, not a wall.
+
+EXPECTED PHYSICS for sc225+ (dfx=schb,sleepsnap, no ksprobe):
+- kstack floor share: 2688 x 96KB = 249MB (was 383MB) -> floor forms
+  at heap ~904-84 = 820MB-equivalent population, i.e. ~10% later in
+  pidmax/time; if the launcher chain reaches its spawn before that,
+  launcher.ready sets INSIDE appspawn's window.
+- Forks are also CHEAPER now (no 4x array copies at Task/FdTable
+  construction) - spawn latency itself drops, which also helps the
+  3s appspawn child watchdog directly.
+
+sc224 note: verification roll of the 96KB stack ran t=0-1409s parked
+(mid-boot lottery loss, KNOWN userspace park) with ZERO STACK-OVERFLOW
+canary hits and kHW=89,368 exactly as predicted - the size reduction
+is canary-clean under real load. Killed at the plateau verdict.
+
+LEG-16 CLOSE-OUT
+
+DELIVERABLES (branch feature/samgr-callback, all committed):
+  cbb84244 fix(ext4): fill_page_cache_batch from_fn -> const-repeat
+  94082866 fix(task): Task construction/clone-path from_fn -> const-repeat
+  (fds)    fix(fs): FdTable fork_from element-wise clone
+  (slab)   feat(mm): packed kstack slab (order-6 block = 3 x 80KB slots)
+  (config) feat(config): kernel_stack_size 81920 + full rationale
+  (ksprobe) dfx(switches): ksprobe token (probe off for verification)
+  + probes: SC-ANAT beat line, SC-KREC record stash, OOM-ANAT census
+    (+80%-heap early fire), census_peek v2 (header histogram), small
+    slab live-stats, kstack anat counters.
+  READY FOR COORDINATOR MERGE: the four fix/feat commits above; the
+  probe commits are merge-neutral (dfx-gated) but recommended together.
+
+1. THE ANATOMY QUESTION, ANSWERED (mission item 1): at the launcher
+   floor (sc219 census, heap 904MB / tasks 2688 / pidmax 5056):
+   - kernel stacks: 383MB (42%) - the #1 item, NOT task structs/fd
+     tables (48MB together) - and fixed at the source this leg.
+   - small-object slab: 343MB (38%), dominated by c256 (520K live
+     objects; File=144B/dentry=160/inode=200 share the class) and
+     c1024 (84K live, 83MB, type STILL UNIDENTIFIED - peek v1
+     undersampled; peek v2 ships for the next leg).
+   - big blocks (o9/o10/o12 = 2-16MB allocs): ~82MB in ~24 objects.
+   - binder buffers are ZONE-side (exonerated); dentry/inode CACHES
+     are capped at 256 entries (not the elephant).
+
+2. THE FROM_FN TRILOGY (all three deepest stack chains of the boot
+   were array::from_fn/array-clone debug-build wrapper copies):
+   - ext4 fill_page_cache_batch [IoCompletion;128]  -> resize2fs 80,496B
+   - Task init rings [AtomicU64;512]                -> forks 65.8-76KB
+   - FdTable::fork_from fds.clone() [Option<Arc>;1024] -> forks 89,368B
+   Every fork in the boot ran 3-4 redundant array copies; forks are
+   measurably cheaper now (sc225/sc228 progression pace).
+
+3. THE STACK SIZE SAGA (the leg's main lesson):
+   - 96KB saves NOTHING: the buddy rounds to power-of-two blocks
+     (sc225 o5-block math proved each 96KB stack consumed a 128KB
+     order-5 block).
+   - 64KB is UNSAFE: sc226 measured max 62,512B canary-clean, but
+     sc227 #GP'd at t~25s - per-boot depth variance crossed the 3.1KB
+     headroom and smashed an adjacent heap page (corrupted-Vec #GP,
+     the pty-story signature). Reverted.
+   - THE ANSWER: packed kstack slab - order-6 (256KB) blocks carved
+     into three 80KB slots: per-stack footprint 85.3KB (was 128KB),
+     ~15KB real margin over the measured max. sc228 verified 99.8%
+     slot packing live (kb=291/ks=871).
+
+4. VERIFICATION STATUS (honest):
+   - sc228 (full 2700s roll, all fixes): ADVANCING boot - deepest of
+     the campaign (pidmax 5341, tasks 3173, flow alive to the end),
+     ZERO canary hits, ZERO panics, heap at matched population
+     -150MB (728MB@pidmax4474 vs sc219's ~880MB): the kstack share of
+     the floor collapsed exactly as designed. THE FLOOR STILL FORMS
+     (at heap 831MB / pidmax ~5143, drct=360) and the launcher spawn
+     still dies in appspawn's kill loop (23 kills; launcher.ready
+     never set). The window moved ~370 pids deeper but the boot's pid
+     churn reaches it.
+   - sc229/sc230: parked at the KNOWN userspace mid-boot lottery
+     (render_service ioctl park, bw15~244; 6-of-10 full boots parked
+     tonight vs 3/3 wins in leg-15 - host-load userspace variance,
+     kernel-side clean: no canary, no faults, services spawn to
+     pidmax ~1330 then park). The formal 2-consecutive-advancing rule
+     is NOT met: 1 advancing (sc228) + 2 clean-but-parked.
+   - Probe boots sc226 (420s, 64KB+ksprobe): canary-clean, kHW=62,512.
+
+5. WHAT REMAINS FOR THE WINDOW (next leg's ledger):
+   - c1024 84K-live (83MB) + c256 520K-live: peek v2 (header
+     histogram) ships in the tree - one roll answers the type
+     question; a 100MB class fix on top of the slab moves the floor
+     past pidmax ~6000 where the spawn churn cannot reach it.
+   - o9-o12 big blocks (~82MB, ~24 allocations of 2-16MB): cheap to
+     identify via NET_PAGES + a per-site tag.
+   - The zone side: sc228's floor had zfree=184 pages - the USER zone
+     also drains at the deepest state; a heap-only fix past ~600MB of
+     savings hits the zone wall next. Coordinator option: -m 6G rolls
+     (host has room) to separate the two.
+   - The mid-boot park lottery dominates boot outcomes (6/10 tonight);
+     any window verdict needs park-free boots - consider a park
+     detector auto-retry in the driver.
+
+6. Rolls this leg: sc218 (anatomy, parked), sc219 (floor census, the
+   dataset boot), sc220/221/222 (short attribution), sc223 (parked),
+   sc224 (96KB canary check, parked), sc225 (96KB full roll: floor +
+   launcher kill loop confirmed - the negative result that exposed the
+   power-of-two rounding), sc226 (64KB probe), sc227 (64KB #GP - the
+   conviction boot for the slab design), sc228 (slab verification,
+   advancing, deepest ever), sc229/sc230 (parked). All QEMUs and
+   shotmons stopped at close (exact PIDs); userdata-sc218..230 reflink/
+   full copies retained; serials on disk.
+
+LEG-17 (launcher line, census peek v2 type attribution) — RUNNING SECTION
+
+Mission: (1) run the peek v2 roll to name the c1024 84K-live/83MB and
+c256 520K-live types; (2) fix what it names (100MB-class lever on top
+of the leg-16 slab savings pushes the floor past pidmax ~6000);
+(3) verification rolls to launcher.spawn surviving appspawn's window.
+
+Setup state at leg open (02:12): main showed all 14 leg-16 commits
+(packed kstack slab c36b7ed6, peek v2 529e9aee etc.) — merged main in
+(4abb69db, content-identical: bzImage md5 370e9ea0 unchanged).
+Fleet: 4 foreign QEMUs = wildwrite-hunt (chain-bound mm lane), 1
+foreign riscv — untouched.
+
+sc231 launched 02:11 (bzImage 370e9ea0 = peek v2 kernel, the same
+binary sc229/230 parked on): fresh scgold reflink userdata-sc231.img,
+SMP2 4G KVM, dfx=schb,sleepsnap, ksprobe OFF (default), SECS=2700,
+shotmon on. The census is one-shot per boot at 80% heap (~850MB —
+exactly where sc228's fired at t~1850); a parked boot never reaches
+it, so park = rekick. Park signature from sc230: pidmax<1500 flow<=1
+young=DB_TaskExecutor with bw15 flat.
+
+LEG-17 second attempt (A-line restart 02:30). Predecessor died ~02:34;
+its last acts: sc231/232 parked (pidmax ~1200-1250, census never
+fired), sc233 parked (t=240s signature), then killed sc233 + launched
+sc234 at 02:34 (old pre-revert bzImage — my re-land rebuild finished
+02:35, after QEMU load). sc234 hovering at the park boundary
+(pidmax 1350 flow 2 at t=241s).
+
+FIRST TASK (slab re-land) state at 02:45:
+- merged main fee7774f (c506aa97): the revert landed, tree back to
+  128KB-everywhere baseline.
+- re-landed ARCH-GATED as eacf9108: riscv64 (and any unmeasured arch)
+  compiles the slab OUT and keeps the 128KB Kernel.toml base
+  (kernel_stack_size = 131072); x86_64 picks up
+  kernel_stack_size_x86_64 = 81920 via a per-arch pick in
+  kernel/build.rs (same pattern as the riscv64 heap clamp) and serves
+  the three-slot order-6 packed slab; KSTACK_SLOTS*KSTACK_SIZE<=BLOCK
+  const-assert added against future config edits; kb/ks restored to
+  SC-ANAT via a non-x86_64 (0,0,0) shim (beat format arch-stable);
+  config_test.rs assertion made arch-aware.
+- builds: make build-x86 clean (bzImage 6528cdf4...), make build
+  (riscv64) clean, config.rs per-arch values verified (81920/131072).
+- VERIFICATION: riscv64 make test RUNNING (unit-test kernel, PID
+  462768); x86_64 OH roll on the new bzImage queued behind it (QEMU
+  budget: sc234 + make-test = 2 now).
+- Census note: the re-land bzImage contains peek v2 (529e9aee survived
+  the revert), so the new-bzImage OH roll doubles as the census roll
+  if it advances past 80% heap.
+
+LEG-17 MID-LEG NOTE (03:0x, session collision detected): an sc236 boot
+appeared in this worktree at 02:52 launched by a second instance of
+this line (quota auto-resume) - quietcon + loglevel=3 + dfx=schb,
+sleepsnap, NO censusat, loglevel 3 hides SC-HB beats. sc235 (mine,
+censusat=600) was killed by the resume teardown at ~02:50 (TERM from
+the dying tool shell). Coordination: censusat lever is commit 776a8007
+(bzImage 67b861f3); the census roll needs `censusat=<secs>` in
+EXTRA_APPEND and LOGLEVEL=7 for beat visibility. This instance runs
+sc237 (censusat=600) in parallel - do NOT kill sc236 if you are alive;
+the worktree state is shared, coordinate via this file. Park census
+fact banked so far: wedges at t~241-244s pidmax 1148-1350 in
+sc231/232/234 (kernel-clean, RS lottery; 0-for-4 tonight, host load
+~11 with 2 foreign TCG QEMUs).
+
+LEG-17 attempt-2 mid-leg (03:10) — coordinator handoff decoded, both
+blockers resolved from THIS lane's own history + one new kernel fix:
+
+COORDINATOR HANDOFF (perf lane leg-29, main 257698a5): with the
+from_fn trilogy on main the fake-OOM is GONE from the main-class
+boot; the UI chain now dies on (1) a deterministic user NULL-deref
+rip=0x7ff082996bac in every "appspawn child", (2) a wedged launcher
+spinning read() EBADF on fd 32, n=155,991.
+
+(1) DECODED — NOT appspawn children, and NOT a new bug: pa38's
+USEGV-FOR forensics names comm='usb_host' (pids 602/778/811/836/
+1401) at a memfd-hosted lib whose .dynstr scan reads UsbPnpManager-*
+UsbDdkPnpLoader* __cfi_check — THE sc87-91 libusb_pnp_manager NULL
+list-walk (rip voff 0x15bac, DdkListenerMgrIsExists inlined in
+DdkListenerMgrAdd; image lib predates master, DdkListenerMgrInit
+imported by nobody, g_usbPnpSrv list never initialized on ANY
+kernel incl. Linux; ripbytes 48 8b 03 / 48 39 eb / 75 ec = deref-
+before-nullcheck loop). MITIGATION EXISTS AND IS VERIFIED:
+oh-img-p usbless image (libusb_pnp_manager.z.so zeroed + Session L
+hdf_devhost.cfg usb_host removal) — sc113-116 ran ZERO DDK crashes.
+Every leg-17 roll so far (sc231-236, and the perf lane's pa38) used
+the STOCK image. Lesson recorded: launcher-line full rolls go
+USBLESS by default.
+
+(2) REAL KERNEL BUG — FIXED (this leg, commit "fix(fs): read/write/
+pread ... EINVAL not EBADF"): pa38's rd_fail line shows fd 32
+RESOLVES at first failure (fd_state=1, ops=0xffffffff807a0b18 =
+syscall::misc::EPOLL_OPS, path=<no-dentry>) — the launcher was
+read()ing its own EPOLL fd and File::read returned -EBADF for the
+missing read handler. Linux vfs_read/vfs_write return EINVAL for a
+valid fd whose type has no read op; EBADF reads as "fd was closed"
+and the OH event loop spins instead of taking its EINVAL path.
+Fixed in fs/file.rs: read/write missing-handler -> -22 (O_WRONLY/
+O_RDONLY direction checks keep EBADF per Linux; read_at inode-less
+guard maps only truly unreadable types (epoll/binder/access_token/
+io_uring) to EINVAL, pipes keep ESPIPE). riscv64 + x86_64 build
+clean.
+
+VERIFICATION STATE: make test riscv64 1096/1096 GREEN post-re-land
+(run/make-test-relleg-slab.log); slab live on x86_64 (sc236 SC-ANAT
+kb=253 ks=740 before the park). sc237 LAUNCHED 03:09 — FIRST USBLESS
+ROLL OF THE LEG on bzImage b0615030 (slab re-land + EINVAL + from_fn
+trilogy): targets slab advancing evidence + the EINVAL effect on the
+launcher wedge + census peek v2 (fires at 80% heap ~850MB).
+
+LEG-17 LANE ASSIGNMENT (03:12, binding for both instances): instance A
+(this writer, the one that committed censusat 776a8007) OWNS the census
+rolls: sc238+ with EXTRA_APPEND="quietcon dfx=schb,sleepsnap
+censusat=600" LOGLEVEL=7, userdata-sc238A.img (A-suffixed userdata so a
+parallel cp can never truncate a live boot's disk). sc237 currently
+in flight (sibling's, loglevel=3 no censusat) left untouched. SIBLING:
+if you relaunch, take tags sc240+ with your own -B userdata suffix and
+read `ps aux | grep qemu` for in-flight boots first; two same-tag boots
+corrupt each other (your 03:09 sc237 cp truncated instance A's live
+userdata-sc237.img - that boot was killed). Census verdict lines are
+raw-UART (visible at any loglevel): OOM-ANAT / PEEK c256 / PEEK c1024.
+
+LEG-17 CENSUS RESULT (sc238, parked boot, censusat=600 fired at t=608s
+- THE FIXED-TIME TRIGGER WORKS, first census ever banked on a parked
+boot; park state: pidmax 1398, procs 85, heap 324MB):
+
+SMALLALLOC live (a-f) at park: c8 61.6K c16 114.3K c32 152.7K
+c64 36.0K c128 161.9K c256 340,736 c512 60.6K c1024 9,895.
+smallK 155MB - at 85 PROCS. Per-SPAWN (1398 spawns): c256 244,
+c1024 7.1.
+
+PEEK v2 histograms:
+- c256 (90 sampled): DOMINANT 0x4b524f57_00000098 x35 (39%!) =
+  {u32 152, tag "WORK"} magic records - NOT any kernel magic greppable
+  in kernel/src; + 0x49564948 "HIVI"(hiview) x1; + timestamp-first
+  family 0x2612d98xxxx (~2616.1e9 units, monotonic clock reads) x20;
+  + refcounts 1/2 x16; + 1 userva. So the park-stage c256 is ~40%
+  "WORK"-tagged 152B-ish records + event/timestamp records + the known
+  File/dentry/inode trio.
+- c1024 (50 sampled): NO dominant constant - 0xffff88807cfcffff x11
+  (kheap-range END marker, ptr|0xffff), 0xffff x6 (u16 at capacity),
+  userva x4, PIE 0x555555557000 x1, rest unique kheap/userva ptrs =
+  POINTER-FIRST HETEROGENEOUS population (BTree parents, Vec buffers,
+  range descriptors) - exactly what per-spawn leaked mm residue would
+  look like (mm + VMA trees + auxv/buffers).
+
+ARITHMETIC CONVICTION: c1024 live scales with SPAWNS not procs
+(9,895 at 85 procs/1,398 spawns = 7.1/spawn; floor: 84K at ~5.3K
+spawns = 15.8/spawn - residue grows with churn stage). c256 at park
+244/spawn. Hypothesis: exited processes strand their AddressSpace
+(via some clone) -> each pins ArcInner<MmStruct>(664B c1024) + VMA
+LeafNode(632)/InternalNode(728) + vma_files Arc<File> pins (File 144
++ dentry 160 + inode 200 = 3x c256 per mapped DSO).
+
+NEXT: (1) MmStruct new/drop counters in OOM-ANAT (definitive leak
+test); (2) peek v3 structural buckets for c1024 (vma-node signature:
+parent@0, len u16@+8 <=11, keys userva@+16; mm-arc signature:
+strong/weak small + pgd small) - census_peek3 alongside v2.
+
+LEG-17 SIBLING RUNAWAY WARNING (04:01): FIVE QEMUs tagged sc239 now
+running (479516, 482058, 482071/482072, 482330) - the second instance
+is spawn-looping the same tag; same-tag boots rm each other's serial
+logs and fight for HDCPORT 12057. SIBLING: STOP the loop, read this
+file top-down, take tags sc250+ with -B userdata suffix and your own
+HDCPORT. Instance A continues on sc240 (advancing, census banked) and
+sc241 (peek-live roll) only. Also: your sc237 ran loglevel=3 - the
+SC-HB beats and milestone verdict lines are INVISIBLE at loglevel 3;
+use LOGLEVEL=7.
+
+sc237 RESULTS (03:09-03:54, usbless oh-img-p, bzImage b0615030 = slab
+re-land + EINVAL + from_fn, SMP2 4G KVM, quietcon dfx=schb,sleepsnap,
+SECS=2700): THE FIRST CLEAN ADVANCING USBLESS ROLL OF THE LEG and the
+deepest tasks-ever boot on any image class:
+- t=2401s final beat: pidmax=5042 tasks=3445 heap=955MB zfree=147K
+  pages (576MB zone free) — STILL CLIMBING at the wall timeout; the
+  floor never formed in-window (sc228's floor: 831MB@5143 with 3173
+  tasks; sc237 at matched pidmax holds 300+ MORE live tasks — the
+  usbless population is real services, not crash/respawn churn).
+- ZERO usb_host crashes (stock-image boots sc231-236 + pa38 all carry
+  the storm). ZERO rd_fail lines — the EINVAL fix removed the
+  launcher's 156K-iteration EBADF spin class entirely. ZERO canary
+  hits, ZERO panics. One USEGV: render_service pid 582, ripbytes
+  48 8b 78 e0 / 48 01 df — the KNOWN RS mm-crash class (mm lane).
+- Slab live and packing: SC-ANAT kb=981 ks=2941 at t=1814 (2.998
+  slots/block = 99.9% packing; o6=62720 pages = 245MB in order-6
+  blocks vs o5 fallback 53MB early only).
+- CENSUS PEEK v2 FIRED at ~837MB: c256 sampled=30 distinct=24 (first
+  words: user-VA pointers 0x7ff0..., small ints 1/2/65535 — a mixed
+  class, NOT one type); c1024 sampled=3 distinct=3 (hdr 2, 65535, one
+  huge value) — the v2 sampler STILL under-samples c1024 (3 of 84K
+  live objects; the 32-page sample window keeps missing the class's
+  dense pages). Type attribution needs peek v3: walk the class's page
+  LIST, not the head pages. Recorded as next-leg work.
+- LESSON: every "park lottery" boot tonight was a stock-image boot;
+  usbless went through the park point at full flow. Launcher-line
+  full rolls are USBLESS from sc237 onward.
+
+PERF MERGE GATE (new binding policy, main a1524825): running the tier
+checks for the slab package now. Tier 1 (quiet syscost 780s, stock
+image, pa38-recipe pa-boot.sh, kernel b0615030) launched 03:59 as
+sc239gate in the perf-audit worktree. Tier 2 (pbench P1-P7, minimal
+rootfs init=/test/pbench, pb1-class TCG) queued after. Tier 3 proxy
+(kernel share 83-86%) rides the Tier 1 dump. sc238 (usbless
+SECS=3600 launcher-window roll) after the gate boots — sequential to
+keep Tier 1 quiet.
+
+LEG-17 INSTANCE RECONCILIATION (04:25, from the 02:30 A-line restart
+= "attempt 2", the author of sc231-sc237): read the 03:11/04:01 lane
+notes; agreeing the convention and correcting two points.
+
+WHO RAN WHAT: sc231-236 = stock-image census-lottery boots (all
+parked); sc237 (03:09, USBLESS oh-img-p, slab+EINVAL bzImage b0615030)
+= clean advancing, deepest tasks ever, results committed 4421657e.
+sc239gate/sc240gate are NOT census rolls and NOT a spawn loop — they
+are the two PERF-MERGE-GATE Tier-1 quiet syscost boots the new
+binding policy requires for the slab package, run through the
+perf-audit worktree's pa-boot.sh (files pa-sc23Xgate-*, stock image,
+no HDC port, 780s self-timeout). sc239gate: census 8/32 EXACT hold,
+ticks 99.9/99.7, kernel share 84.5/83.6 (Tier-3 proxy band), clock 3us,
+nanosleep 184ms — all in band; volume 120.5M vs pa38 136.4M = -11.7%
+with a shallower app phase (19.7k vs 49.5k serial lines, same 15
+usb crashes), hence the one rerun (sc240gate). Of the five QEMUs in
+the 04:01 warning only 482071/482072 were mine (the sc239gate pair);
+479516/482058/482330 were not launched from this session.
+
+CONVENTION ACCEPTED: this instance takes sc250+ with userdata-scNNN-B
+suffix and HDCPORT 12087 for any further OH-image rolls; census rolls
+sc238+ (A-suffix) stay with the 03:11 instance.
+
+TWO CORRECTIONS for the record: (1) sc237 ran LOGLEVEL=3 quietcon and
+the SC-HB beats + census peek + OOM-ANAT lines WERE all captured
+(readout in 4421657e — quietcon keeps the pr_warn-class dfx lines);
+LOGLEVEL=7 is not required for them. (2) bzImage provenance: b0615030
+(03:52) = this instance's package tip 4421657e (slab re-land eacf9108
++ EINVAL e2a4bd24 + mains fee7774f/257698a5/a1524825); the 04:02
+rebuild d258bee1 adds your peek v3/v4/LIVE + MM_NEWS (dfx-gated,
+inert under syscost-only) — sc240gate loaded d258bee1, noted in the
+gate report; the coordinator's own gate run on the merged commits
+remains the definitive measurement.
+
+NOT COLLIDING, NOT TOUCHING: your sc242 and all oh-sc238..242* files
+are yours; no kills issued against any pid not started here.
+
+LEG-17 PROGRESS LOG (03:00-04:47 condensed for the sibling):
+- sc239/sc240 verdicts: MMs DO NOT LEAK (sc240 advancing census: new=682
+  drop=534 live=148 at 158 procs; sc239 park: new=268 drop=196 live=72
+  at 85 procs). The leg-16 c1024-leak-via-mm theory is DEAD.
+- peek v2/v3/v4 all had a sampling flaw: free slab slots keep stale
+  data (only low u16 overwritten by freelist link) and FULL pages
+  (where the live population sits: 3305 pages x 3 slots = the whole
+  9.9K c1024 census) are unreachable from the active list. peek LIVE
+  (commit d258bee1 tree) scans the full heap with free_count-
+  authoritative freelist filtering.
+- sc240: deepest boot of the night - ADVANCING past the wedge zone,
+  floor at pidmax 4833 / heap 799MB, ZERO canaries, then wedged with
+  schbd stranded (strand_max 44.9s, wake-path-at-pressure family).
+  launcher.ready not set. 12 ServiceReap/kill lines.
+- sc242 PANIC root-caused and FIXED (66858395): KILLDUMP's
+  rwfz_stack_frames used the unaccounted address_space() foreign
+  borrow; the SIGKILL victim's exit_mm freed the VMA btree mid-walk
+  -> #GP in vma_of. This is a REAL always-on probe bug in the
+  appspawn-kill window (the milestone window!). 3 sites now Arc-pin
+  the mm. Kernel 00271e4a.
+- sc243 (04:47): peek-live census roll on the fixed kernel.
+
+LEG-17 PERF-GATE RESULTS (04:50, package branch pkg/slab-einval in
+worktree ../pkg-slab = main 50429710 + 4e9fe329 slab + c36c325a EINVAL,
+wording-clean, both arches build):
+- TIER 1 run 1 (sc239gate, quiet host): TERM-DESCHED 8 / WAKE-REFUSED
+  32 / STRANDED 0 (EIGHTH consecutive exact hold), ticks 99.91/99.74,
+  kernel share 84.5/83.6 (Tier-3 proxy band 83-86), clock_gettime 3us
+  (hold), nanosleep 184ms (band 177-265; pa38 itself read 333ms),
+  volume 120.5M vs pa38 136.4M (-11.7%, shallower app phase: 19.7k vs
+  49.5k serial lines, same 15 usb-host segfaults).
+- TIER 1 run 2 (sc240gate, sibling sc242 rolling concurrently): census
+  8/32/0 exact again; clock 3us; volume 114.8M (37.3k lines); ticks
+  99.3/99.1 under load (run-1 quiet-host numbers are the clean ones).
+  Verdict: no kernel-cost regression signal; volume deltas track the
+  stock-image app-phase lottery, per-op costs hold.
+- TIER 2 (pbench pb-slab, package kernel, pb1 class TCG/minimal-rootfs,
+  DONE rc=0 t=339s): p1_null 4.23 (-7%) p1_clock 4.70 (-5%) p2 12.38
+  (-19.6% IMPROVED) p3a 0.08 (0) p3b 26.45 (+7.5%) p3c 0.07 (0)
+  p4_fork_exit 8624 (+3.7%) p4_fork_exec 13589 (+1.4%) p5a 21.17
+  (-1.5%) p5b send 66.4 (-47%) recv 54.4 (-80%) p5c 54.6 (-3%)
+  p6 stat/openclose/read/getdents/fsync/append/mkdrmdir ALL within
+  +/-7%; p6_unlink 33047 (+22.4% MARGINAL-OUT, p99 1.8s = host noise
+  under the sibling's concurrent KVM roll — rerun-able per flake rule).
+  18/19 in band or improved.
+- sc250-B LAUNCHED 04:46 (usbless, package kernel, LOGLEVEL=4 no
+  quietcon for milestone visibility, SECS=3600, HDCPORT=12107): the
+  launcher-window attempt + second advancing boot. Report follows.
+
+LEG-17 ATTRIBUTION COMPLETE (sc243 peek-live census, 04:57):
+- c1024 live=8823: uv=5642 (64%) = binder ALLOC BLOCK arrays
+  (Vec<BufBlock> buffers; records = (user_va_start, user_va_end,
+  off, size) of the mmap'd binder buffers, ~66/proc) + small=2565 =
+  ArcInner<BinderThread> ([strong,weak,tid|tgid<<32]) + kh=280.
+- c256 live=336,661: small=329,265 (98%) = ArcInner<BinderTxn>
+  ([1, 1, from_proc_ptr(CONSTANT = one daemon proc), sequential id
+  56025..56032...]) - EVERY binder transaction strands its Arc.
+  mmArc=2090, kh=4235 minor.
+- Both classes = THE BINDER SUBSYSTEM. At the floor: c256 520K +
+  c1024 ~90K ~= 210MB - the mission's 100MB-class lever, twice over.
+- mms do NOT leak (counters). Leg-16's File/dentry/inode c256 theory
+  was wrong for the LIVE population (File 144/dentry 160/inode 200
+  exist but the 98% live share is BinderTxn).
+NEXT: binder txn lifecycle audit - which clone of the txn Arc never
+drops (txn_stack pop? tcomplete finish? dead_reply queues?).
+
+LEG-17 FIX VERIFICATION (sc244, fix kernel c5c62bd5, 05:5x):
+- The reclaim mechanism WORKS: 89 "reclaimed stale buffer(s)" lines
+  by t=537s across services (pids 328/374/335...), boot ADVANCING
+  (pidmax 2845@t537, sc240-class pace), zero panics/canaries.
+- Census (t=660, pidmax ~3000, heap 590MB): c256 live 441,451 =
+  147/spawn vs sc243-park's 247/spawn (-40% per spawn at a DEEPER
+  state). NOTE: parts of the SMALLALLOC census print garbled by WW
+  watchdog lines interleaving on the raw UART (census prints from
+  schbd race softirq WW prints) - future censuses need interleave
+  protection or the WW printer muzzled during census.
+- THE REMAINING GAP: the dominant population is UNDELIVERED parked
+  oneways (pick_j==0, sitting on node.async_todo + proc todo of
+  silent receivers). The delivered-stale rule (pick_j+30s) cannot
+  free them. NEXT RULE (for the next roll): txns enqueued (enq_j)
+  >30s ago and never picked up are dead by the same silence proof;
+  freeing their BLOCKS requires RETIRING the txn itself (the node-
+  death pattern: set_holds_async_slot(false) + dead_reply_to_sender
+  + finish_work) so no BR_TRANSACTION ever hands out a reclaimed
+  buffer. Sweep then drains async_todo wholesale instead of 1/s.
+
+LEG-17 CLOSE-OUT (06:05)
+
+MISSION ITEM 1 (census peek roll) - DONE, with a tooling detour that
+became the leg's real story:
+- censusat=<secs> boot param (776a8007): fixed-time census fire -
+  parked boots bank censuses now (the 80%-heap trigger never fired at
+  the 300MB park plateau; 3-of-3 first rolls parked).
+- peek v2/v3 (adaf71c7) had a sampling flaw: free slots keep stale
+  data (freelist link overwrites only the low u16) and FULL pages
+  (where the live population sits) are unreachable from the active
+  list. peek LIVE (full-heap magic+cls scan, free_count-authoritative
+  freelist filter) fixed both.
+
+THE ANSWER (mission item 2 - what the peek named):
+- c256 (341K live at park / 520K at floor): 98% = ArcInner<BinderTxn>
+  {strong=1, weak=1, from_proc=ONE daemon, sequential ids} - every
+  oneway txn whose receiver never issues BC_FREE_BUFFER pins its Arc
+  via the alloc block (cc54-family services).
+- c1024 (8.8K park / 84-95K floor): userva-first = Vec<BufBlock>
+  binder-alloc arrays + small = ArcInner<BinderThread> (2.5K at park).
+- MMs DO NOT LEAK (MM_NEWS/MM_DROPS counters: live 72@85 procs, 148@
+  158, 161@sc244 - tracks procs exactly). The leg-16 leak-via-mm
+  theory is dead. Total binder-family footprint at the floor ~=210MB
+  of 831MB - the mission's 100MB-class lever, twice over.
+
+FIXES LANDED (all on feature/samgr-callback):
+1. 6ba58562 fix(binder): sweep_stale_async - reclaims delivered-but-
+   never-freed txn buffers (30s grace past pick_j, 1/s per alloc,
+   BC_FREE-equivalent async-slot handoff that also unwedges parked
+   nodes) + reply_done marking + forced retry on alloc failure.
+   VERIFIED LIVE in sc244: 89 reclaims by t=537, c256 147/spawn vs
+   247/spawn pre-fix (-40%) at deeper state, zero canaries/panics
+   from the fix itself.
+   REMAINING (next leg, first item): the dominant population is
+   UNDELIVERED parked oneways (pick_j==0 on async_todo) - needs the
+   enq_j silence rule + txn retirement (node-death pattern:
+   set_holds_async_slot(false) + dead_reply_to_sender + finish_work)
+   so blocks free without ever handing a reclaimed buffer to
+   BR_TRANSACTION.
+2. 66858395 fix(dfx): KILLDUMP/RWFRZ foreign-task mm walks pin the mm
+   with address_space_arc (sc242 #GP: victim's exit_mm freed the VMA
+   btree mid-walk - the documented /proc-maps family, 3 sites).
+3. 4dee194f fix(dfx): kill_dump_tgid pins the victim's tasks with
+   try_pin/task_put (sc244 KERNPANIC at the launcher floor t=1466
+   pidmax 4834: freed task printed tid 0xdeadbeef then faulted).
+   Both #2 and #3 are ALWAYS-ON probes that killed exactly the
+   milestone-window boots - they were milestone blockers.
+4. Probes (dfx-gated, merge-neutral): censusat, peek v3/v4/LIVE,
+   MM_NEWS counter + live-mm OOM-ANAT line.
+
+ROLLS: sc231-235 (lottery losses + telemetry lessons + censusat),
+sc238/239 (park censuses), sc240 (advancing, floor pidmax 4833/heap
+799MB, wedged with schbd stranded - wake-path family), sc242 (#GP ->
+fix 2), sc243 (attribution census), sc244 (fix verification, floor
+pidmax 4834/793MB, panicked at the kill window -> fix 3), sc245 in
+flight (kernel bb830109 = all fixes, SECS=2700, shotmon on).
+
+SESSION COLLISIONS: a second instance of this line ran tonight
+(sc236/sc237 + a sc239 spawn-loop burst); coordinated via this file,
+lane rules recorded at 03:12/04:01. No foreign instance touched.
+Host: load 8-11 with 4-8 foreign QEMUs (wildwrite-hunt TCG pair +
+siblings); all my QEMUs/shotmons stopped by exact PID at close
+(sc245 finishes at its timeout ~06:31 - NEXT SESSION: check
+oh-sc245-serial.log for the census at t=600, KERNPANIC count, and
+launcher.ready/OnForeground; kill 557069 + its shotmon if still up).
+
+HONEST VERIFICATION STATUS: the 2-consecutive-advancing rule is NOT
+formally met on the final kernel (sc245 pending at close). The floor
+did NOT visibly move yet (sc244: 793MB@4738 ~ sc240's 799@4833) -
+expected, since the enq_j rule (the dominant population) is still
+open. What IS proven: the reclaim mechanism fires and reduces per-
+spawn residue 40%; both probe panics that killed milestone-window
+boots are fixed; the attribution is complete and quantitative.
+
+LEG-17 ATTEMPT-2 CLOSE-OUT (06:10). SUMMARY OF THE LEG:
+
+MERGED: the slab+EINVAL package landed on main as 2c7a21fc (pkg/
+slab-einval = 4e9fe329 arch-gated packed kstack slab + c36c325a
+EINVAL errno fix), D-2 registered, gate pre-verified (Tier1 census
+8/32 EXACT x2, clock 3us, kernel share 84.5/83.6; Tier2 pbench 18/19
+in-band-or-improved incl. p2 -19.6% and dgram -47/-80; volume + unlink
+rows flagged for perf-lane quiet-window confirmation). riscv64 make
+test 1096/1096 (the ungated attempt's corruption is the gate's own
+regression test).
+
+DECODED THIS LEG (both handed-off blockers):
+- pa38 "appspawn-child NULL-deref" = usb_host + the KNOWN image
+  libusb_pnp_manager defect; mitigation usbless (oh-img-p), now the
+  launcher-line default. sc231-236 all parked on the STOCK image;
+  usbless boots advance (sc237, sc251B).
+- launcher rd_fail EBADF spin = OUR errno bug (EPOLL read -> EBADF
+  instead of EINVAL) — fixed, merged, VERIFIED GONE (sc237/sc251B
+  zero rd_fail lines).
+
+sc251B FINAL (usbless, pkg kernel, quietcon dfx=schb,sleepsnap,
+SECS=3600, ended 06:03 by timeout): FASTEST deep trajectory of the
+campaign (pidmax 2654 at t=403 — sc237 hit that at t=650), reached
+pidmax 5254 / tasks 2986 / heap 846MB with the ZONE DRAINING (zfree
+15853 pages = 62MB, drct=298 direct reclaim, slow=204) at t=1873;
+last 28 minutes in floor thrash (cpu0 preempt-off churn at
+enable_irq+6-class rip under the reclaim storm, beats stopped, other
+cpu alive, screen LIVE). SCREEN: 100% non-black 8-color checker from
+t~1900 to the end = composer/DRM pushing frames — the display chain
+is drawing; not yet launcher UI.
+- CENSUS PEEK at 847MB with real sampling this time (480 c256 / 93
+  c1024): c256 dominated by small state ints (1x212, 2x98, 3x32,
+  4x34 = txn/state records) + c1024 dominated by 0x7ff0... user
+  pointers (spawn-residue block arrays) — MATCHES the sibling's
+  peek-LIVE attribution; main's merged binder fix 6ba58562 (~210MB
+  at the floor) targets exactly these classes.
+
+NEW BLOCKER FOR THE NEXT LEG (the launcher's own death, now that
+EBADF and usb storms are gone): m.ohos.launcher crash-loops at
+rip=0x3fbf1187d2 (fixed-base 790KB merged module, module vaddr
+0x1177d2, fd-less FileBacked VMA — byte-search across system/vendor
+libs and the extracted /data service tree finds NO match; the module
+is NOT in the images' static .so set): instruction = lock cmpxchg
+[rcx+0x10],edx / test / je / inc [rbp-0x14] / mov [rcx+0x18],rsi (a
+refcount/lock op), faulting WRITE at cr2=0x7ff081eca93c which IS
+INSIDE a live VMA 0x7ff081ec0000-0x7ff081ed2000 flags=0x11 (R-only)
+type=FileBacked fd=40 off=0x0 — the launcher atomically WRITES an
+R-only SHARED file mapping. mmap-time EACCES validation audited
+correct (memfd O_RDWR correct; mprotect-upgrade EACCES handles the
+closed-fd case correctly). NEXT-LEG PROBES: (1) dfx log of every
+mmap/mprotect EACCES return + fd/path (which open path made fd 40
+read-only, if any), (2) mmap-fault probe printing the cr2 VMA's
+backing path via the vma_files pin, (3) if the fd was opened O_RDWR
+and mapped PROT_WRITE but the VMA came back R-only, THAT is the
+kernel bug — chase the VMA flag construction for shared file maps.
+TWO boots of evidence: sc250B (parked, loglevel-4 serial weight —
+avoid), sc251B (2 full forensic dumps in-log).
+
+Rolls this leg: sc231-236 (stock, parked), sc237 (usbless clean
+advancing, deepest tasks), sc239gate/sc240gate (perf-gate Tier-1),
+pb-slab (Tier-2), sc250B (parked), sc251B (deepest pidmax+floor).
+All QEMUs and shotmons stopped by exact own PID (verified cmdlines).
+
+LEG-17 CLOSE-OUT CORRECTION (06:14, sc245 park census landed): the
+clean A/B at the MATCHED park state (pidmax ~1350, heap ~301MB) shows
+c256 live sc245(fix) 339,885 vs sc243(pre-fix) 336,661 - NO
+reduction. The earlier "-40%/spawn" from sc244 was a state-
+composition artifact (churn boot vs park boot), NOT a fix effect -
+withdrawn. The delivered-stale reclaim is correct and useful (102
+reclaims in sc245, zero panics, unwedges nodes) but the dominant
+population (undelivered parked oneways, pick_j==0) is untouched, as
+predicted. THE NEXT LEG'S enq_j + retirement rule IS the lever; the
+floor has NOT moved yet. Verification status unchanged: no formal
+2-advancing verdict on the final kernel (sc245 parked).
+
+LEG-17 FINAL RECONCILIATION NOTE (06:16, instance A): both instances
+of this line committed to the shared branch tonight - the interleaved
+commit chain (mine: census/probes/fixes 66858395+6ba58562+4dee194f and
+the census records; the second instance's: main merges 0587c6c0/fe79f952,
+sc250/sc251B rolls and the attempt-2 close-out 86225d02) is COHERENT:
+tree builds clean post-interleave (verified 06:16), no unstaged kernel
+changes, fleet empty. My close-out correction (463bdf71) supersedes
+the -40% claim in dca78ce2 only; the attempt-2 close-out (86225d02)
+is the FURTHEST state of the line (sc251B deepest, screen alive at
+8-color checker, next blocker = launcher lock-cmpxchg write to the
+R-only shared VMA fd40+0xa93c). Coordinator: treat 86225d02 as the
+authoritative leg-17 next-step ledger; my census/attribution chain and
+both KILLDUMP fixes feed it. All probes are dfx-gated; the three
+substantive fixes (binder reclaim 6ba58562, mm-pin 66858395, task-pin
+4dee194f) are mainline candidates subject to the merge-gate policy.
+
+LEG-18 (launcher line: R-only VMA fd40 write blocker — probe roll) —
+OPENED 06:30.
+
+Mission (from 86225d02): the launcher + honydataability crash-loop
+writes (lock cmpxchg, a refcount/lock op) into a READ-only file-backed
+VMA (fd 40, off 0, 72KB at 0x7ff081ec0000). Ordered leads: (1) DFX
+probe roll to name fd 40's path + open mode at fault time and every
+mmap/mprotect EACCES; (2) if the fd WAS O_RDWR and asked PROT_WRITE
+yet the VMA came back R-only, audit VMA flag construction.
+
+PRE-ROLL AUDIT RESULT (code reading, no roll needed):
+- VmaFlags bits decoded: 0x1 READ, 0x2 WRITE, 0x4 EXEC, 0x8 SHARED,
+  0x10 PRIVATE. The faulting VMA flags=0x11 = READ|PRIVATE (leg-17's
+  "R-only SHARED" shorthand was wrong on the SHARED bit: it is a
+  PRIVATE mapping). The rip module VMA 0x15 = R|X|PRIVATE.
+- sys_mmap_inner constructs VmaFlags exactly from (prot, map_flags) —
+  WRITE iff PROT_WRITE, no silent downgrade; EACCES paths return
+  errors, they never create a downgraded VMA.
+- MAP_FIXED replacement surgery preserves overlapped pieces' flags
+  verbatim (mm_ops.rs x86_64 mmap); mprotect rewrites only on request;
+  fork copies flags; binder translate_fd_into and unix-socket
+  SCM_RIGHTS install the SAME Arc<File> (open mode preserved);
+  memfd_create is always O_RDWR; ashmem_mmap builds SharedMemory/
+  Anonymous VMA types, NOT FileBacked — so the fd-40 VMA came from the
+  GENERIC file path, i.e. an actual mmap(PROT_READ, MAP_PRIVATE) call
+  succeeded there. Leading theory: the app's intended RW|SHARED mmap
+  failed (EACCES: read-only fd) and a read-only fallback mapping
+  stayed; probes decide.
+- LOCATION VERIFIED: 6ba58562 (binder reclaim, the ~210MB floor lever)
+  is on feature/samgr-callback ONLY, NOT in main — the leg-17
+  close-out line "main's merged binder fix 6ba58562" is wrong; it is a
+  branch commit / mainline candidate.
+
+PROBES LANDED (commit 4554da7a): MMAP-EACCES + MPROTECT-EACCES
+attribution lines (fd/path/accmode/prot/flags), APPMAPSRC broadened to
+every family file-backed mmap with accmode (budget 150), USEGV-FOR
+cr2fd line (fault VMA's fd path/raw flags/inode mode+size + same-fd
+sibling VMAs + vma_files-pin fallback), nearvma dump now prints the 12
+entries NEAREST cr2 (sc251B's ascending walk burned the budget 2.5MB
+below the fault), full-forensics budget 6->8.
+
+sc252 ROLLING (launched 06:24): usbless oh-img-p, fresh scgold reflink
+userdata-sc252.img, quietcon LOGLEVEL=4 dfx=schb,sleepsnap, SMP2 KVM
+4G, SECS=1200, HDCPORT=12108, shotmon 30s. QEMU pid in
+run/oh-sc252-qemu.pid (own-PID discipline).
+EARLY sc252 OBSERVATION (t~150s): first crash is a NEW variant —
+DB_TaskExecutor thread (settingsdata family, pid 1156) memcpy (rep
+movsq) reading 0x3a8 bytes from 0x7ff000729000 = a PROT_NONE (0x10)
+thread-stack guard page top; source object spans past the stack top.
+Same 0x3fbf077000 module region as the launcher crash — the module is
+the DB/SharedBlock family (RDB CursorWindow-class shared memory).
+CORRECTION (06:45, coordinator): 6ba58562 + the five other leg-17
+commits (censusat, peek LIVE/v3, sweep_stale_async, both pin fixes)
+merged to MAIN as de41d5ab shortly after this section opened — my
+06:24 "NOT in main" check predates it. Branch already carries all.
+
+LEG-19 (OH UI lane, leg-18 successor) — OPENED ~10:15.
+
+SESSION START: merged main 47d96961 into feature/samgr-callback (838f3b53;
+conflicts: config.rs take main's deletion [generated], census_peek4/LIVE +
+schb call keep branch [leg-17 probes not in main's de41d5ab merge]).
+
+LEG-18 ESTATE READ (sc252 + leg-18's sc253, both timeout-ended):
+- EACCES THEORY DEAD: zero MMAP-EACCES/MPROTECT-EACCES in sc252 AND
+  sc253; every family file-backed mmap in APPMAPSRC is normal ld.so
+  PROT_READ/MAP_PRIVATE or read-only param files. No read-only-fd
+  downgrade story exists.
+- sc253 (5MB serial): ZERO crashes; wedged with binder-stall slots
+  [pid303][pid758] + WAKE-RUN-LEAK census 2050 lines, tids parked
+  INTERRUPTIBLE unlinked slotless pick_state=PICK_LIVE(1), kicked
+  30-40x each, never "running".
+- sc252's only fault: DB_TaskExecutor (pid 1156) rep-movsq memcpy READ
+  of 0x3a8 bytes from 0x7ff000729000 = the 8KB PROT_NONE GUARD BELOW a
+  musl thread stack block (rsp on the adjacent block's stack top);
+  source object pointer points into a guard page. Downstream of the
+  same disturbed state, not an independent bug.
+- WEDGE RECONSTRUCTION (pre-fix): pid303-class spinner (futex
+  FUTEX_WAIT val=2 -> ETIMEDOUT tight loop, FXRS #2908+; also
+  param_watcher tid329 FUTEX_WAIT -> -11 EAGAIN loop on its main
+  stack) pegs CPUs -> idle-loop harvester never runs -> frozen
+  userspace rwlocks (RWFRZ-HIGH: tgids 377/466/572/681/730/732 word=2
+  readers frozen d+0) pile up behind stranded holders.
+
+LEG-19 ANALYSIS (code reading + log forensics, before any fix):
+1. R80 orphan-watch CADENCE BUG confirmed: confirmation required a
+   second sighting 50..60 jiffies after the first (re-record rule
+   reset anything older than 60), but the only observers on a busy box
+   are binder rekicks (REKICK_SECS=15 = 1500 jiffies at HZ=100). The
+   R80 LIVE-phantom heal could NEVER mature while CPUs stayed busy.
+   sc252/253: zero R80 heals vs 1359/2050 leak lines.
+2. sc254 attribution (see below) later killed the DL-throttle theory:
+   census tids are pol=0 (SCHED_NORMAL), dl_thr=0, and wok>=1 with the
+   task still parked: the kicks DO wake them (wake->link->run->recheck-
+   cond->re-park loop inside wait_event_interruptible; read_wait_since
+   is stored once per ENTERING binder read, so the census cannot tell a
+   re-parked cycler from a stranded task). The census shape is mostly
+   HEALTHY cycling, not wake loss.
+
+FIXES LANDED (35dd99e1):
+- R81: orphan_watch gains an exec-clock word; confirmation = same
+  (task,pid) sighting >=threshold jiffies apart with sum_exec_runtime
+  FROZEN (a task executing anywhere is charged by update_curr every
+  tick; frozen exec = provably not running, at ANY observer cadence).
+  An advancing exec clock refreshes the record (replaces the 60-jiffy
+  re-record rule). Direct-console DL-ENQ-DEFERRED print (R82) on the
+  only silent sleeping-wake refusal.
+- WAKE-RUN-LEAK census: +pol/on_rq/dl_thr and per-episode kick outcome
+  counters (wok/wno; wake_thread records wake_up result; reset at
+  park).
+- enq_j SILENCE RULE (leg-17's banked design): sweep_silent_txns in
+  stall_report's WORLD walk retires undelivered txns (pick_j==0) older
+  than 30s oneway / 60s sync via the node-death pattern
+  (set_holds_async_slot(false) + dead_reply_to_sender for sync +
+  finish_work; async-slot handoff mirrors sweep_stale_async). Frees the
+  dominant parked-oneway floor population; senders of parked sync calls
+  get BR_DEAD_REPLY.
+
+SC254 RESULT (old kernel + R81/probes/retire, usbless, KVM SMP2 4G,
+quietcon dfx=schb,sleepsnap, SECS=2100, timeout end, ZERO KERNPANIC):
+DEEPEST AND HEALTHIEST ROLL OF THE LANE: pidmax 5432 / tasks 3144 /
+heap 847MB at t=1981 (sc251B record 5254/2986/846 wedged; sc252/253
+wedged at 1531/1407). Spawn flow NEVER stalled (flow 1-58 throughout);
+direct reclaim engaged late (drct=198 drctJ=7897) and held. Launcher
+spawned at t~166 (sc252 never got there); its ability manager ran
+(LauncherAbilityManager/CommonBundleManager/osaccount loops). SILENT-
+TXN-RETIRE fired once (4 txns) - conservative as designed. schbd
+heartbeat stranded t=187..1245 (a park/wake victim itself) then
+RESUMED to the end. Screen stayed black (composer never surfaced; the
+launcher crash-loop below keeps resetting it).
+
+LAUNCHER CRASH NAMED (sc254 full dump, pid 1630 honydataability ==
+pid 1635 m.ohos.launcher, same rip 0x3fbf1187d2, same cr2+0xa93c):
+- vma(cr2) 0x7ff081bc0000-0x7ff081bd2000 flags=0x11 FileBacked fd=40
+  off=0x0; cr2fd: path=anon_inode accmode=0x2 (O_RDWR) rawflags=0x2.
+- Siblings of fd 40: off=0x11000 R|X, off=0x37000 R, off=0x38000 RW,
+  plus a second whole-file R map at 0x7ff08c200000. => fd 40 is a
+  MEMFD-backed dlopen'd library; the fault VMA is its FIRST PT_LOAD
+  (R-only, 72KB); rip module 0x3fbf077000 (fd closed, off=0x76000) is
+  the same module family's text at the fixed base.
+- ripbytes f0 0f b1 51 10 ... = lock cmpxchg [rcx+0x10],edx; refcount
+  op writing at PT_LOAD0+0xa93c (R-only). The lock should live in
+  writable memory; relocations/pointer point into the rodata segment.
+- NEXT DECIDER (sc255, rolling): per-comm APPMAPSRC budget (48/comm;
+  the appspawn daemon ate the global 150 before any launcher instance
+  exec'd in sc254) + USEGV-L one-liner now prints fdVMA fd/path/acc/
+  off/flags at ANY budget depth + per-comm full-dump budget (first 2
+  per comm). Scenarios: (a) ld.so requested PROT_READ for the segment
+  containing +0xa93c and the memfd ELF itself puts a lock in rodata ->
+  the memfd CONTENT was corrupted at write time (our write path? the
+  module generator?) or the generator is layout-broken only under our
+  ABI; (b) the app mapped an RW twin we lost (no evidence yet); (c)
+  relocations resolved against the wrong of the TWO mappings of the
+  same file (0x7ff081bc0000 vs fixed-base 0x3fbf077000 vs second
+  whole-file map 0x7ff08c200000).
+
+MAKE TEST: riscv64 1096/1096 PASS on 35dd99e1 (both arches build).
+
+LEG-20 (OH UI lane, leg-19 successor) — OPENED ~14:55.
+
+SESSION START: committed leg-19's uncommitted estate as wip snapshot
+(124488d8: Round 3e draft + brksegv pair + shotmon records), merged
+main ddb3ed01 (5ff3b775, clean — main's delta in my domain is gated
+tracepoints only: sched_process_exit/fork/wakeup records).
+
+THREAD 2 RESOLVED (the brkseq do_exit-hang handoff):
+- Repro harness completed and committed (8022ea1d): test/brksegv_boot.py
+  (churn probe as init: rounds/done/console-response/leak verdicts) and
+  test/brksegv_shell.py (real mrsh as init, fork+exec per invocation,
+  M0/M1 marker-response verdict, --race mode injects input mid-death-
+  storm into a reader-less console).
+- THREE harness blockers found and fixed: (1) host riscv64 cross-gcc
+  defaults to rv64gcv-class -march AND Ubuntu glibc ships RVV ifunc
+  variants — probe now links worktree musl headers/libs with explicit
+  -march=rv64gc_zicsr (every earlier build SIGILL'd on vsetivli);
+  (2) brksegv_boot.py's --kernel default (x86_64 bzImage) leaked into
+  the riscv64 invocation (OpenSBI silently refused to exec it); (3)
+  musl brk() wrapper is a permanent -ENOMEM stub — probe drives the
+  brk syscall directly (round 1 exited 42 silently, never faulted).
+  Also: -cpu must carry zbb/zba/zbs (main's boot.S; plain rv64 hangs
+  at OpenSBI handoff with zero kernel output).
+- A/B RESULT: both verdicts PASS on this branch AND on the ltp lane's
+  own main-based kernel image (copied read-only), across churn (12
+  SIGSEGV deaths), shell (6x12 deaths), and race (0.2/0.5/1.0s input
+  injection) flows. The terminal-deschedule machinery holds: children
+  die by SIGSEGV, are reaped, the shell stays responsive to input fed
+  during and after the death storm. The described hang does NOT
+  reproduce on either kernel under a deterministic harness.
+- Their log evidence decomposes into two probe artifacts, both already
+  fixed on this branch but present on main-based builds: (1) every
+  W3-RUNWAKE-REFUSED line in brkseq1.log fired while the dying task
+  still legitimately owned its CPU slot (curr_on during the death
+  window is correct, not a lying slot); (2) their 885 PREEMPT-LEAK
+  pc=0x10000 lines are the tick observer's own hardirq level on the
+  IDLE task — main lacks the sc205 masking, every tick printed, and
+  held_nonzero_for merely measured how long the CPU stayed idle
+  (their 17,855-jiffy "leak" = 178s of continuous idle).
+- Kernel change landed (8022ea1d): the W3 wake-refusal budget is no
+  longer eaten by the benign wake-racing-execution shape (RUNNING task
+  legitimately named by a busy slot — 4+ lines per dying child; it ate
+  the whole 32-line budget in 8 deaths). That twin now defers to the
+  frozen-exec conviction line (W3-FROZEN-EXEC-SLOT); the budget is
+  spent on sleeping-state refusals, dead/zombie targets, and linked-
+  but-starved shapes. Repro after: 0 W3 lines across 72 deaths.
+  Gate Tier-1 re-verified (see below): the quiet-boot REFUSED
+  population is 100% linked-starved (state=0 RUNNING linked=true
+  curr_on=false), so the census row's semantics are unchanged.
+- HANDOFF TO LTP LANE: their brkseq driver wedge (shell deaf to the
+  next marker after M0) did not reproduce through my harness on their
+  kernel image — needs their exact /brkseq binary or is in their own
+  branch delta (their worktree carries many local fixes). Their
+  PREEMPT-LEAK/W3 "evidence" lines are noise per the decomposition
+  above; merging this branch (or just 2a02d5db + sc205 + the W3 budget
+  fix) into their base cleans their logs and gives the census real
+  signal.
+
+GATE TIER-1 PRE-VERIFICATION (gate-leg20, 780s quiet syscost KVM q35
+smp2 4G boot, parse run/perf-gate-gate-leg20-parse.txt):
+  PASS kernel panics 0, OOM 0
+  PASS census TERM-DESCHED 8 (band 8+-2)
+  PASS census WAKE-REFUSED 32 (band 32+-4; all linked-starved shape)
+  PASS GRQ avg hold 7.2us n=12.3M (band 4.08-7.32us, top edge)
+  PASS small_alloc REST share 6.7% (<=10%)
+  FAIL tick rate cpu1=99.38/s (min 99.5) — documented host-load flake
+       class: 22 foreign QEMUs from the agent fleet were up; rerun-once
+       rule applies, not a sched-domain row.
+  FAIL syscall volume 72.5M vs 136M+-10% — the baseline's own row says
+       pace-coupled under 14-19 foreign QEMUs (pa41gate); at 22 the
+       deficit is the same class, not a regression.
+  Both FAILs are host-load classes outside the guarded domains; sched
+  domain rows all PASS. No perf-gate-baseline.md row changes needed.
+
+THREAD 1 (launcher memfd dlopen): sc256 roll launched (fresh scgold
+reflink userdata, usbless oh-img-p, quietcon dfx=schb,sleepsnap, SMP2
+KVM 4G, SECS=2400). render_service full USEGV dump captured at t~100
+(rep movsq read 0x3a8 from guard page 0x7ff000698000, same 0x3fbf077000
+module family, fd=-1 off=0x76000 closed) — the per-comm budgets worked
+(appspawn 108 lines, render dump did not eat the launcher's). The roll
+wedged in the known binder-stall family (WAKE-RUN-LEAK tids 332/333/
+525/1029 parked INTERRUPTIBLE unlinked, kicked 21x, mmi_service/
+sysevent_source/os_ds_service stale-claim census shapes) before the
+launcher spawned; SILENT-TXN fired once. Launcher-crash decider data
+STILL PENDING — the spawn-flow wedge (sc252/253/255/256 class) is the
+gate in front of it, not the crash itself.
+
+LEG-21 (OH UI lane, leg-20 successor) — OPENED (post-pause).
+
+SESSION START: pause snapshot d60a8c84 was HEAD; tree clean besides ppm
+shots. Thread 2 (brkseq do_exit-hang) was RESOLVED by leg-20 (repro
+harness PASS on both kernels; handoff documented) — no further work.
+Thread 1 (launcher crash-loop) = the active lane.
+
+LAUNCHER CRASH SITE FULLY NAMED (offline forensics, no new roll needed):
+- The rip pattern f0 0f b1 51 10 85 c0 74 15 ff 45 ec 48 89 71 18
+  occurs at EXACTLY ONE offset in the whole system image: file offset
+  0x1177d2 of /system/lib/ld-musl-x86_64.so.1 (raw grep + debugfs
+  icheck/ncheck -> inode 2447). Load bias = 0x3fbf000000: the rip VMA
+  (0x3fbf077000, off=0x76000) is ld-musl's own PT_LOAD1. THE CRASHING
+  CODE IS THE DYNAMIC LINKER ITSELF.
+- Disassembly: fault = pthread_cond_timedwait+0x620 (0x1187d2), the
+  a_cas(w->state, WAITING, SIGNALED) claim step of the waiter-queue
+  walk in the apply() helper at 0x118700 (callers: signal/broadcast/
+  leaver paths at 116f44/116fd4/118018/118198).
+- OHOS musl waiter node: struct waiter { link@0, link@8, state@0x10,
+  barrier@0x14, ret@0x18 }, STACK-ALLOCATED at rbp-0x50 of the waiting
+  thread (enqueue at 0x1182d4). Queue fields live in the condvar:
+  tail@c+0x8, waiters@c+0xc, seq@c+0x10, lock@c+0x20, head@c+0x28.
+  rcx at the fault = *(c+0x28) = _c_head; rdi-0x20 gives c =
+  0x7ff081bfc108 = the memfd module's .bss+0x108 (global condvar).
+- So _c_head = module_base+0xa92c = INSIDE the module's R-only first
+  PT_LOAD. Enqueue only ever stores waiter STACK addresses => the head
+  is a STALE pointer: the node address stopped being a stack and became
+  the module's rodata (unmap + dlopen reuse of the hole), or the .bss
+  page is a dirty recycled anon page carrying the OLD instance's
+  corrupted condvar (fresh bss must be zero — dirty recycle = kernel
+  mm bug). Every appspawn fork inherits condvar+module at the same
+  base => identical crash in every child. render_service's memcpy twin
+  (guard-page read of 0x3a8 bytes) = same stale-per-thread-state
+  family. NOT a VMA-construction bug: the mapping faithfully follows
+  the file's phdrs; the pointer is wrong on the userspace side.
+- EACCES/read-only-fd lead: CLOSED for good (fd 40 was O_RDWR memfd;
+  zero MMAP/MPROTECT-EACCES in every roll).
+
+PROBES LANDED (bb274328, x86_64 trap.rs, dfx-gated): cr2elf (module's
+own ELF header+phdrs via page-table read of its offset-0 mapping; tags
+the PT_LOAD covering the fault file offset), cr2bytes (32B around cr2),
+cr2strs (.dynstr names the module even for anon memfd), frame (rbp-0x58
+deref: this frame parks the condvar pointer there; dumps the condvar's
+own words — stale-head vs whole-condvar-garbage decider).
+
+QUIETCON DISCOVERY: sleep_snapshot prints at pr_info; ALL sc25x rolls
+ran loglevel 4 => the wedge's parked-syscall call graph was loglevel-
+filtered in every roll so far (the "sleepsnap never fires" mystery).
+sc257 (same recipe as sc254, probes aboard) wedged pre-spawn at the
+usual ~t290s: 2208 WAKE-RUN-LEAK lines all wok>=kicks wno=0 (healthy
+cycling shapes, conversations frozen QUIET — FXRS global count ~3700
+ops in 25min rules out CPU-pegging spinners for this class), SAREG
+shows pid 757 (tgid 1094, OS_FFRT_5_1) endlessly re-sending
+IApplicationStateObserver registration to pids 434/411(mmi_service)/509
+— replies never arrive, enq_j silence rule can't fire (target nodes
+alive). sc258 launched LOGLEVEL=7 dfx=schb,sleepsnap SECS=1800 to
+capture the frozen call graph + (if spawn survives) the launcher-crash
+decider probes in one roll.
+
+LEG-22 (OH UI lane, leg-21 successor) — OPENED post-quota-death.
+
+SESSION START: HEAD 8574f447 + uncommitted hc-hunt.py tweak (committed
+291cdbc7). Merged origin/main (now b332d08a, 12 commits past the e6a172d8
+the handoff named; ubuntu-gnome lane + getcwd ABI fix + trap segv-vma
+lines). ONE semantic conflict in sched.rs tick PREEMPT-HEAL: our leg-19
+round-3e pure-hardirq-phantom trigger (whole-word zero) vs main's fleet-
+session-3 base-bits-only fix (the whole-word zero underflowed irq_exit).
+Unified as ti_preempt_count_keep_tick_nesting(): fetch_and(HARDIRQ_OFFSET
+| NMI_MASK) — bit-identical to clear_base when there is no extra hardirq
+nesting, and also drops the phantom extra hardirq bits for the round-3e
+shape. PARKED-HEAL + R74 negative-reset keep the full zero. 635c28e8.
+
+THREAD 2 (brkseq do_exit-hang) — CLOSED on current main.
+brksegv_shell.py (the exact ltp wedge shape, mrsh as init, 6 runs x 12
+deaths) against the merged build: BRKSH-PASS, 0 wedges. The W3-budget
+fix + terminal-desched machinery hold on b332d08a. The ltp TIMEOUT
+families fed by this shape are free to re-triage.
+(brksegv-leg22-main-r1.log)
+
+THREAD 1 (launcher crash-loop) — sc258's KILLED ROLL HELD THE FULL
+DECIDER DATASET (read offline, no new roll needed for the first cut):
+- 4 identical launcher crashes (pids 2061/2139/2699/3041), all
+  m.ohos.launcher, rip=ld-musl+0x1187d2, SAME cr2/rsp/rbp every time.
+- cr2fd-pin NAMES THE MODULE: /mnt/sandbox/system/system/lib64/
+  chipset-sdk-sp/libhicollie.z.so (memfd fd 40). Extracted from
+  system.img (inode 2543); phdrs match the cr2elf dump exactly.
+- cr2bytes: the fault target page is CORRECT module rodata (strings
+  readable). Not a dirty target page.
+- Full musl apply() decode (disassembled the image's ld-musl): fault =
+  lock cmpxchg [w+0x10] in the waiter walk, w = rcx = *(c+0x28) =
+  _c_head, c = r9 = module+0x3c108, r15 = c-0x118 = module+0x3bff0.
+- libhicollie disassembly: 0x3bff0 is the watchdog thread's C++ object
+  (function-local static; guard byte 0x3c388; __cxa_atexit dtor).
+  Layout: mutex@+0xf0, pthread_cond_t@+0x118 (the crash condvar),
+  strings at +0x20/+0xc8/+0x148, deadline field +0x308. The watchdog
+  thread (pthread_setname'd at entry 0x1ac81) loops clockwait on
+  cond@+0x118.
+- THE HEAD VALUE IS A STRING POINTER: module+0xa92c is EXACTLY the
+  first byte of the .rodata literal "thread DfxWatchdog: Current
+  scenario is task name: " (used at 0x1a864 to build the watchdog event
+  string). _c_head can legally hold only 0 or a waiter STACK address —
+  never module rodata.
+- GEOMETRIC KILL of the stale-waiter/dlclose-reuse family: a waiter
+  node is stack-allocated (musl enqueue: rbp-0x50); for head to equal
+  module_base+0xa92c, a stack must have covered that VA; but any
+  process generation that owns this condvar has libhicollie mapped at
+  that same deterministic base (fork inheritance), covering the VA with
+  the R-only ph1. In-process dlclose+re-dlopen moves the base but also
+  DESTROYS the .bss carrying the stale head. No stale-waiter sequence
+  is geometrically consistent. Also killed: kernel-futex wild write
+  (kernel/src/sync/futex.rs has ZERO user-memory writes).
+- SURVIVING candidates: (a) KERNEL dirty anon-page recycle — the .bss
+  page arrives carrying a previous process's bytes (constructor ran
+  over most fields, but the condvar/mutex/never-written globals keep
+  the stale pattern); (b) userspace wild write into obj+0x140 in an
+  appspawn ancestor, inherited COW by every launcher child (4 identical
+  crashes = one corruption, fork-inherited).
+- DECIDER PROBES LANDED (x86_64 trap.rs, dfx-gated apply()-shape):
+  cv (condvar words via r9: tail/waiters/seq/lock/head), obj (watchdog
+  object fields), bssslack (THE SMOKING GUN: ph4 memsz ends at
+  module+0x3c51c; the anon bss VMA spans +0x3c000..+0x40000; slack
+  0x3c520..+0x3d000 and the whole +0x3d000 page are addressed by
+  NOTHING in the module — any nonzero word there = the page arrived
+  dirty from the recycler = kernel bug).
+- INFRA NOTE: run/oh-img symlink was re-pointed (01:37, cross-lane)
+  to a broken perf-audit path and killed the ramdisk-x64.img link;
+  repointed to ui-sprint's intact copy (md5-matched oh-display's).
+
+sc259 ROLLING: sc258 recipe (LOGLEVEL=7 dfx=schb,sleepsnap, SMP2 KVM
+4G, fresh scgold reflink userdata, SECS=1800) + shotmon; goal = the
+condvar/bssslack deciders on the launcher crash + (if spawn survives
+longer) OnForeground/launcher.ready + screenshot.
+
+LEG-22 ROLLS AND VERDICT.
+
+sc259 (unpatched, LOGLEVEL=7, probes): the deciders landed on a live
+instance (honydataability pid 1683, apply()-shape):
+- cv via r9: +0x8 tail == +0x28 head == 0x7ff09b051680 (ONE waiter on
+  a fork-COW'd stack; the "pagefault: cow" line at w+0x10 right before
+  the fatal one = the walk's CAS succeeding on the dead waiter),
+  +0x10 seq=1, +0x20 lock=1 (held by the crashing apply itself).
+- Crash regs: rbx=0xffffffff — the walk ran with nwaiters=-1 (the
+  clockwait TIMEOUT dequeue mode, which follows the whole chain), CAS'd
+  the real waiter, then followed w->next = 0x7ff08290a92c (module rodata
+  string) and faulted writing w->state there.
+- obj fields around the condvar: sane constructor values (deadline
+  +0x308 = real ms). bssslack (page 0x3c000 tail past memsz): ALL ZERO
+  — the condvar's own page is clean.
+- bssslack2 (page module+0x3d000, beyond ph4 memsz 0x3c51c, addressed
+  by nothing in the module): NONZERO — string fragments + pointer
+  0x7ff083e1eb30. DIRTY ANON PAGE HANDED OUT BY THE RECYCLER.
+  => KERNEL BUG #2 confirmed, independent of the launcher crash.
+  HANDOFF (mm lane): the page recycler/allocator gives out dirty pages
+  for fresh anon mappings somewhere between free and alloc.
+
+MUSL DECODE (image's ld-musl-x86_64.so.1, disassembled):
+- pthread_cond_timedwait entry DOES zero the node (movaps at 0x1181da,
+  rbp-0x50..-0x30) — the old "enqueue never inits next" first cut was
+  wrong at the micro level. The poison is LATER:
+- The queue's next links are sound while threads live, BUT a fork
+  child inherits the condvar WITH the parent's queued waiter node on
+  the parent's (now dead) thread stack (COW). POSIX: condvars with
+  waiters are UB across fork; OHOS appspawn forks without exec, so
+  every child inherits hicollie's watchdog condvar in that state.
+- The child's own threads then REUSE the dead stack (musl stack cache
+  hands the same VA to a new thread); the new thread's frames write
+  the "thread DfxWatchdog: Current scenario..." literal pointer
+  (materialized at 0x1a864 in the event-string builder) into the dead
+  node's next slot. The next timeout/signal walk follows it into the
+  R-only ph1 → SIGSEGV. The walk's fixup (head = last walked node,
+  0x118830) also propagates garbage into c->head — the sc258 shape
+  (head = string directly).
+- KERNEL VERDICT: SEGV delivery is CORRECT; the launcher crash-loop is
+  a userspace (image) bug family. Kernel-side dirty-recycle is real
+  but orthogonal (bssslack2).
+
+IMAGE PATCH (patch-ldmusl-zeronext.sh): zeros the waiter node's next
+link at enqueue (movq $0,(%rcx) via two .text pad caves, hijack at
+0x1182ea). Collapses the in-process garbage-next family. Applied to
+this worktree's private system.img (raw bmap'd block writes, inode
+2447; image copy verified byte-identical to the patched build).
+
+sc260 (patched, same recipe): 30 min roll.
+- Launcher crash-loop DEAD: 1 condvar crash total (pid 4695, t~25min —
+  the fork+stack-reuse residual variant, which enqueue-zeroing cannot
+  cover by design) vs sc258's 4-in-15min loop. Launcher instances
+  stay alive (STALLWATCH: tid 1281 parked >90s in a futex/clock poll,
+  NOT crash-cycling; later instance 4695 alive to the tail).
+- The other 12 SEGVs: 8x usb_host NULL (known noise) + 4 shutdown-tail
+  OS_IPC worker crashes (same family as sc258/259 tails).
+- OnForeground/launcher.ready: still NOT reached. The live blocker is
+  now the Account chain: "AccountDelegateNormalImpl:
+  QueryForegroundUserId: GetForegroundOsAccountLocalId failed, status:
+  4194349" — the launcher parks in a futex/clock retry loop waiting on
+  the osa/account services (the sc257 SAREG census shape: registration
+  re-sends with no replies). Screenshot stays the GPU probe gradient.
+- NEXT for this lane: (1) the account/osa IPC chain (why
+  GetForegroundOsAccountLocalId fails — status 4194349), (2) the
+  fork-residual condvar variant needs a musl-side fork-time condvar
+  reinit (pthread_atfork in libhicollie init, or an image patch on
+  fork) — next leg's call, (3) mm lane: dirty anon page recycle.
+
+Session close: probes (cv/obj/bssslack/bssslack2) committed; patch
+script committed; forensics (hicollie.asm, ld-musl disassembly,
+libhicollie extract) in run/forensics-leg22/.
+
+LEG-23 (OH UI lane, leg-22 successor) — OPENED. Mission: the account
+chain (QueryForegroundUserId 4194349).
+
+OFFLINE FORENSICS (sc260 log + image binaries, no roll needed) — THE
+4194349 DECODE, END TO END:
+- The printer of "AccountDelegateNormalImpl: QueryForegroundUserId" is
+  DISTRIBUTEDDATA (libdistributeddatasvc.z.so — the ONLY image file
+  containing that string, inode 3072; DistributedData's own account
+  delegate, NOT appexecfwk's). All 88 sc260 prints are the
+  distributeddata family retry loop (~5s), NOT the launcher process.
+- Client: OsAccountManager::GetForegroundOsAccountLocalId -> OsAccount::
+  GetForegroundOsAccountLocalId (libos_account_innerkits.z.so 0x3bd10):
+  null proxy -> 0x400012; proxy vcall -> OsAccountProxy::GetForeground-
+  OsAccountLocalId (0x5a670): SendRequest tx code **0x4d** (SAREG does
+  NOT see it — its code filter is {3,4,7,10,21}), then reply.ReadInt32
+  = status. 4194349 = 0x40002d was read FROM THE REPLY PARCEL.
+- Server (libaccountmgr.z.so, OsAccountManagerService::GetForeground-
+  OsAccountLocalId 0x1943aa): appId = IPCSkeleton::GetCallingUid()/1000;
+  inner->IsOsAccountForeground(appId) [vt+0x1e0 @0x1564ae] = membership
+  lookup in the container at inner+0x168 (activated/foreground set,
+  written by SendMsgForAccountActivate @0x15dd9c); miss -> 0x400026;
+  fallback inner->[vt+0x1d8](0) miss -> maps 0x400026 to **0x40002d**.
+- VERDICT: the IPC reply LANDS (fast, well-formed domain error, not a
+  kernel loss and not a no-reply). The value means "calling app is in
+  no activated/foreground account". The blocker is UPSTREAM: the
+  activated/foreground set at inner+0x168 stays empty in sc260-class
+  boots — either account activation never completes, or the kernel
+  reports a callingUid that maps to no account. Deciders for sc261:
+  (a) binder trace events on main: tx 0x4d timeline + caller uid;
+  (b) accountmgr activation logs (OnStateChanged state 7 family);
+  (c) whether the IAccount code=4 "unanswered" SAREG sends are oneway
+  (no reply expected — probe cannot distinguish) or real losses.
+- CAUTION for the lane: sc217's lucky boot had getOsAccountLocalId
+  (a different call) succeed; that does NOT prove the foreground map
+  was populated.
+
+LEG-23 ROLL-1 (sc261) + THE ACCOUNT-CHAIN VERDICT.
+
+ACCOUNT CHAIN: RESOLVED (no kernel bug; the handoff's premise was a
+misread of the error storm):
+- The 88 "QueryForegroundUserId ... 4194349" lines are DISTRIBUTEDDATA's
+  retry loop (not the launcher), and they all sit in a ~20s window
+  (t~60-80s): accountmgr starts t~55s, publishes SA:200, init runs, and
+  ActivateDefaultOsAccount (PrepareForDefaultAccount ->
+  SendMsgForAccountActivate -> SetParameter("bootevent.account.ready",
+  "true")) completes at t~80s — sc260 line 46738 PCTL-SEND pid=891
+  key=bootevent.account.ready true, AFTER the last error (46364).
+  From then on the launcher's own queries succeed: "LauncherAbility-
+  Manager --> getOsAccountLocalId localId 100" repeats to the log tail.
+  The 4194349 storm is the pre-activation window (foreground set at
+  inner+0x168 empty -> IsOsAccountForeground miss 0x400026 -> fallback
+  miss -> 0x40002d). POSIX-clean: replies land, values are domain
+  errors. sc212's t~1083s "OnStateChanged state 7" was the same
+  activation, just slower.
+- IPC transport itself healthy for this chain: tx 0x4d send+reply fast.
+  The "unanswered" SAREG code=4 IAccount sends need the oneway bit to
+  adjudicate (trace events now on main can do it next roll if it
+  matters).
+
+THE REAL KILLER OF sc258/259/260 (found in all three tails): KERNEL
+PANIC inside the user-SEGV forensics — "PANIC: attempt to subtract
+with overflow, trap.rs:2340". The leg-21 rbp-locals probe computed
+regs.rbp - 0x58 on a fault frame with rbp=0xb (pid 526's adjudicated
+ld-musl rep-movsq crash). The debug overflow check fired inside the
+page-fault handler and took the kernel down. leg-22's "4 shutdown-tail
+OS_IPC worker crashes (same family as sc258/259 tails)" WAS this
+panic trigger — every roll in this family died at the first tail
+crash, so nothing past it was ever observed.
+FIX (1d5a6744): rbp window only opens for canonical user rbp
+(wrapping_sub), stack/rbp word walks checked_add, r15+0x118 shape
+compare wrapping_add. Probe output formats unchanged. The fault is
+now delivered to the task instead of killing the kernel.
+
+sc261 ROLLING (launched 07:07, KVM SMP2 4G, oh-img-p PATCHED system +
+fresh scgold reflink userdata, loglevel=7 dfx=schb,sleepsnap, SECS=
+2700, shotmon on): goals — (1) survive the tail-crash family for the
+first time, (2) launcher window past t~30min: OnForeground /
+launcher.ready / screenshot, (3) sleepsnap+STALLWATCH census of the
+launcher park (x86_64 dispatch here: 113=clock_gettime, 98=futex,
+66=writev; "nr66=-11 a0=3" = launcher writev(fd3) EAGAIN — hilog
+socket full, consistent with dead/flow-controlled hilogd).
+NOTE: first sc261 launch used oh-boot-w.sh which points at the
+SHARED unpatched oh-img — killed at ~30s, userdata reflink recreated
+fresh before the real launch (oh-boot-usbless.sh = the oh-img-p
+variant; 30s of churn from the aborted run never touched the new
+reflink).
+
+LEG-23 ROLL-1 VERDICT (sc261, completed 07:52 after the predecessor
+died; second attempt picked it up mid-run) + KERNEL BUG #3 FIXED.
+
+sc261 OUTCOME (45 min roll, patched ld-musl image, survived to the
+timeout for the first time in this family):
+- The account chain held: bootevent.account.ready set early (line
+  45914, ActivateDefaultOsAccount at 41652), and the launcher's own
+  queries succeed ("getOsAccountLocalId localId 100" to the tail).
+- The launcher crash-loop stayed dead: exactly ONE SIGSEGV leader
+  death (pid 1413, line 100454) — the fork-residual condvar variant
+  leg-22 predicted: the timeout-walk CAS'd a waiter node at
+  0x7ff08204a92c+0x10 that landed inside the child's OWN binder
+  buffer mapping (base 0x7ff082006000, fd=40 anon_inode, flags 0x11
+  R-only) inherited stale in the condvar queue at fork (DONTFORK
+  drops the parent's mapping; the child's binder mmap re-covered the
+  VA read-only). rbx=0xffffffff (timeout dequeue), ripbytes = LOCK
+  CMPXCHG [rcx+0x10]. Enqueue-zeroing cannot cover nodes inherited
+  FROM the parent's queue — needs the fork-time condvar reinit
+  (musl-side pthread_atfork or image patch); still open, ONE crash
+  per 45 min is survivable.
+- KERNEL BUG #3 (fix 73e2ad1e): pid 1421's exit_group ->
+  kill_other_threads -> kill_dump_tgid page-faulted the KERNEL (no
+  fixup, "kernel fault addr=0x13fd0 rip=<u64 as LowerHex>::fmt
+  entry") while formatting an EXITED sibling's saved syscall: the
+  thread's kernel stack was already back in the stack cache
+  (kernel_stack_bottom zeroed at task.rs free path) while the PINNED
+  Task survived; kernel_stack_top() = 0x14000 and &regs.orig_rax =
+  0x14000 - 0xa8 + 0x78 = 0x13fd0 EXACTLY. The SAFETY comments
+  ("the kernel stack stays mapped while the Task lives") were wrong.
+  Fix: Task::owns_kernel_stack() (bottom != 0) gating every
+  foreign-task entry-frame reader — kill_dump_tgid (the crash site),
+  the APPPK12 walk, apppark_rets, rwfz_stack_frames, both RWFRZ
+  censuses (futex.rs), holder_forensics + owner-chase,
+  sleep_snapshot, user_park_stack_dump (binder.rs). x86_64+riscv64
+  build. NOTE: the boot did NOT die at the KERNPANIC — the other
+  CPU kept running (149k log lines after), but 1 CPU down =
+  degraded; the fix removes the fault entirely.
+- The post-fault tail: KILLDUMP cap (8/boot) was already spent, so
+  no dump took the risk again; the system limped on 1 CPU.
+
+THE LIVE BLOCKER after all of the above: the AMS LIFECYCLE_TIMEOUT
+restart loop. Every launcher instance dies the same death: spawn ->
+AbilityScheduler attach ("AtomicServiceAbilityManager getInstance",
+ProcessSkeleton AttachObject desc:*.AbilityScheduler) -> SILENCE ->
+LIFECYCLE_HALF_TIMEOUT -> LIFECYCLE_TIMEOUT ("load" phase) -> AMS
+"restart ability" -> respawn. The same load-phase timeout hits
+settingsdata's DataExtAbility. The parked launcher looks HEALTHY at
+kill time (KILLDUMP tgid 1413: main thread poll(2), OS_IPC_1/2 in
+binder ioctl read on /dev/binder fd6 — a textbook IDLE app waiting
+for binder work). hilog logs NO ability-schedule event at all, so
+"AMS never sent ScheduleLoadAbility" vs "sent but the wake/read was
+lost in the kernel" is indistinguishable from the log alone.
+DECIDER for sc262 (600e9be9): SLTX tracer (binder_transaction
+enqueue: latch launcher tgid by comm, print every txn to/from it,
+500/boot) + SLRD (binder_thread_read: every txn the launcher's own
+threads actually read, 600/boot). in-without-read = kernel wake/read
+loss; no-in-at-all = AMS-side stall (trace AMS next).
+
+sc262 ROLLING: new kernel (merge 859f2adc + fixes 73e2ad1e, 600e9be9),
+same recipe (oh-img-p patched system, fresh scgold reflink userdata,
+KVM SMP2 4G, loglevel=7 dfx=schb,sleepsnap, SECS=2700, shotmon on).
+
+LEG-23 ROLL-2 (sc262) + THE LIFECYCLE_TIMEOUT CHAIN, END TO END.
+
+sc262 (same recipe as sc261 + the new kernel: merge 859f2adc, entry-
+frame guard 73e2ad1e, SLTX/SLRD v1 tracers 600e9be9): ZERO KERNPANIC
+(sc261 had the 0x13fd0 one), ZERO launcher leader SIGSEGVs mid-run
+(fork-residual dice held), the restart loop continued as expected.
+
+THE ADJUDICATION THE TRACERS BOUGHT (v1 data + APPTXN + wakewatch):
+- AMS DOES send the load: "SLTX in pid=801 -> 329 code=0x7 oneway=true
+  dlen=2364-4672" (IAbilityScheduler ScheduleLoadAbility; also code
+  0x5 Schedule*Transaction, 93 sends in the first window) — the sends
+  land at enqueue with parcel token ohos.appexec.. (28 chars).
+- APPTXN (320 lines): EVERY child-aimed delivery routes
+  route=child-looper with a direct thread wake (post_txn_to_child_
+  thread + wake_ths) — the sc161-168 kernel chain (shared proc +
+  reg_tgid routing + looper-only targeting + per-tgid SPAWN_LOOPER +
+  (ptr,reg_tgid) node identity) all still holds.
+- No binder-stall ever fired (no reader parked >120s; the 15s re-kick
+  heal had nothing to heal). The launcher MAIN thread is ALIVE —
+  STALLWATCH rings show clock_gettime/futex/writev loops (not a park),
+  and its own alog narration runs (getOsAccountLocalId localId 100
+  pairs, LauncherAbilityManager/CommonBundleManager).
+- WHY THE LOAD NEVER FINISHES, then: hilog's own DFX_BlockMonitor
+  names the killer — three DETERMINISTIC multi-second binder round
+  trips per boot, same three in sc261 AND sc262:
+    SendRequest cost 3038-3177ms code=1  desc:*.IDisplayComposer
+    SendRequest cost 4188-6496ms code=1034 desc:*.AbilityManager
+    SendRequest cost 2090-2070ms code=14  desc:*.IOsAccount
+  (plus XCollie BlockMonitor "GetOsAccountLocalIdFromProcessInner
+  Duration 2070ms" — the launcher's JS init loop burns ~2s PER
+  osAccount query; the ability-load sequence contains several such
+  hops and cannot fit the LIFECYCLE window).
+- The kernel-side source of seconds-long latencies: WAKE-STRANDED
+  outliers — 140 wakes/boot (>1s each, max 26986ms on pid 305) while
+  the cumulative wake path is healthy (15.4M wakes, avg <1ms). The
+  strand reports show incumbent tasks with preempt_count=1/2 (pid
+  318, a thread of early service 315, pc=1 in EVERY strand line) —
+  the wakewatch header's own "vsync-starvation family" (cc13: a 16ms
+  usleep takes 0.5-0.7s, one ~41s dead stop per boot). The launcher
+  LIFECYCLE_TIMEOUT is this family biting the app-start path.
+- TRACER V1 FLAWS, FIXED IN v2 (f4c7d54a): appspawn children NEVER
+  open /dev/binder (76 opens, zero child pids — they send through the
+  daemon's INHERITED fd; proc.pid == the daemon for every child), so
+  v1's latch caught the daemon's whole proc and burned 500 lines in
+  ~5 min; the read side was worse (OS_IPC/OS_FFRT are generic worker
+  names — samgr alone ate 337/600 — and tgid==proc.pid can never hold
+  for children on the inherited fd). v2 gates on the tgid LEADER's
+  comm (m.ohos./os./com.), prints sender tgid + target node reg_tgid,
+  budgets 1500/boot each side. NEXT ROLL (sc263, armed) pairs
+  "SLTX in child=X" with "SLRD tgid=X read" for the final delivery
+  confirmation, + dfx=memwatch for the restart-loop leak curve.
+
+HANDOFF (priority order):
+1. WAKE-STRANDED / preempt_count-leak family (sched lane): 140
+   strands/boot >1s (max 27s), incumbents with leaked PREEMPT_OFFSET
+   (pc=1: pid 318 thread of service 315). This is THE system-level
+   blocker for the UI milestone now — it directly produces the 2-7s
+   IPC round trips that blow the LIFECYCLE budget.
+2. The composer GetService stall (IDisplayComposer 3s, sc184 family)
+   persists — RS still polls hdf_devmgr code 0x35 x80/boot.
+3. Fork-residual condvar variant (musl): 1 SIGSEGV per ~45min boot —
+   needs the image-side fork-time condvar reinit.
+4. mm lane: dirty anon page recycle (sc259 bssslack2) still open.
+
+LEG-24 (OH UI lane, leg-23 successor; leg-23 died in the 08:41-08:49
+quota window) — OPENED 12:02. Main 94c670da verified already merged
+(859f2adc; origin/main unmoved). sc263 (leg-23's armed roll) had RUN
+DETACHED through the quota window and completed 09:22 — triaged first.
+
+LEG-24 TRIAGE (sc263, 30MB log):
+- No KERNPANIC, no mid-run launcher leader SIGSEGV (the fork-residual
+  dice held). LIFECYCLE_TIMEOUT restart loop: 251 (sc262 class).
+- The live blocker family quantified: WAKE-STRANDED incumbents carry
+  pc=1/2/258 (0x102 = bh + 2x preempt) across BOTH cpus; victims are
+  the fork-heavy daemons — appspawn (320, 37 strand-slot appearances;
+  338), mmi_service (594), os_ds_service (622), os.settingsdata
+  (1238), render_service (736) — plus spawn-era children (pids
+  4813-5163, the PREEMPT-LEAK running-victim storm at the log tail)
+  and even pid 1. PARKED-LEAK: sleeping tasks (state=1) carrying
+  pc=1 — appspawn 4x. Zero PREEMPT-UNDERFLOW (no double-drops), zero
+  SWITCH-COUNT-LEAK (round 3f: no park-through-switch with a live
+  count), zero PARKED-WILDWRITE.
+- Found dead: TICK_ENTRY_PC is written only on riscv64 — the pctick
+  discriminator printed a permanent 0 on x86_64 (the OH arch).
+
+LEAK-ORIGIN PROBE (eac5db5e v1, f66d8cd3 v2, dab9f6f3 v3; dfx=leakhunt):
+- preempt_count_add is now #[track_caller]; when armed, every
+  PREEMPT_OFFSET acquire records (task, file:line, jiffies, count-after)
+  in a side-table shadow (last wins, no Task layout change).
+- User-return tripwire at both trap tails (a frame returning to user
+  must carry count 0), parked/incumbent site prints appended to
+  PARKED-LEAK / PREEMPT-LEAK, x86_64 now writes TICK_ENTRY_PC too.
+- v2: instant catch when a booking lands on a task with !on_cpu or
+  non-RUNNING state, printing slot/tp/claim/SLOT_WRITER attribution.
+- v3: parkwalk's "parked" classification adjudicated against the arch
+  tp slots (new current_task_ptr_of/get_thread_id_of both arches);
+  WAKE-STRANDED incumbents now also print the arch-tp identity.
+
+ROLLS sc264 (v1/v2) + sc265 (v2) + sc266 (v3 baseline):
+- sc264 conviction: every PARKED-LEAK victim's recorded site is
+  sched.rs:2152 — __schedule's own GRQ acquire — later shown to be the
+  WEAK signature (the last acquire of any parking task is the schedule-
+  path GRQ guard). One small_alloc.rs:548 cnt_after=2 inner site.
+- sc265 v2 verdict: all 118 instant catches are the LEGITIMATE
+  pre-sleep window (tp_state=INTERRUPTIBLE, slot==tp==victim, on_cpu=1,
+  claim=cpu, slotw=own pick): a task between set_current_state and
+  schedule() taking the GRQ guard. ZERO catches on on_cpu=0 tasks —
+  no guard is EVER booked on a parked task. Zero user-return trips.
+- sc266 v3 ADJUDICATION (the two-line answer): (a) WAKE-STRANDED
+  incumbents show tp==slot with MATCHING counts (h0=(329/p0/0ms/pc=258)
+  tp=329/pc=258) — the incumbents genuinely execute with leaked counts;
+  not a stale-slot artifact. (b) parked-adjacent tp=-1 for the pid-320
+  PARKED-LEAK — genuinely parked on no CPU with pc=1. The +1 lands on
+  parked tasks OUTSIDE every instrumented channel (no booking, no
+  park-with-count switch) — the wild-write/bracket family (b77/b81/
+  x86-scribble3 engine, the wildwrite-hunt lane's live hunt).
+
+LEG-24 ROLLS + THE FIX PAIR + THE CHAOS VERDICT.
+
+sc267 (v3 probe + RELIEF): ZERO relief fires in 10 min while the strand
+census ran the same family — FALSIFIED the poll-loop theory: the
+leaked-count incumbents never call schedule() (kernel IPC loops); the
+refusal-side relief cannot reach them. Kept as the complement for
+schedule-polling shapes (cd4e5a38).
+
+THE BOUND FIX (a336568f): tick-side PREEMPT-HEAL threshold 1000 ->
+200 jiffies — the same evidence bar the PREEMPT-LEAK report already
+treats as conviction (200 consecutive nonzero tick samples); bounds
+every leaked-count monopoly to ~2 s (was 10 s). Round-3e pure-hardirq
+phantom takes the same tightened bound; round-3d PARKED-HEAL (4 s)
+unchanged.
+
+sc268 (CLEAN kernel: heal-2s + relief, NO probe, same OH recipe):
+- stranded=13 @18.2M wakes (sc263: 1063 @19.5M; sc266 w/probe: 264
+  @18.1M) — the census is BOOT-CHAOTIC (6..1063 per boot class); with
+  n=1 per cell no A/B attribution is honest. HEAL=0, RELIEF=0 on this
+  boot: no leak episodes formed, nothing to bound.
+- BUT strand_max=389 s: monster strands (pid 304/305, 42-241 s) whose
+  era coincides with WW IRQ-OFF-WINDOW lines of 107-677 ms at
+  pc=0x10000, rips symbolized to cpu::outb/enable_irq/restore_irq —
+  THE UART 115200 THRE POLL: loglevel-7 console traffic with IF=0 is
+  the monster-strand producer ON THESE HUNT BOOTS (the sc108 lesson at
+  boot scale). Production boots (loglevel 3-4) run quiet — the
+  baseline's 0-7 organic strands stand. The hunt recipe pays this tax;
+  the LIFECYCLE budget numbers from sc262-class logs are PARTLY this
+  self-inflicted class, worth re-measuring at loglevel 4 next roll.
+
+STRAND-REPORT CONTAMINANT (documented for every future reader of
+WAKE-STRANDED lines): the h-slot for the PICKING cpu reads the slot's
+prev DURING __schedule's pick — prev legally carries the picking
+context's own GRQ guard (acquired sched.rs:2152, released :2283 AFTER
+the pick), so that slot's pc=1 is an ARTIFACT BY CONSTRUCTION (and the
+v3 tp print reads the same task pre-switch — tp pc matches for the
+same reason). Only the OTHER cpu's h-slot is a clean incumbent read.
+The genuinely-leaked incumbent evidence stands on the other-slot reads
+(pc=2/pc=258) and the PREEMPT-LEAK/PARKED-LEAK census.
+
+LEG-24 VERDICT / HANDOFF:
+1. launcher.ready/OnForeground: NOT reached. The LIFECYCLE_TIMEOUT
+   restart loop persists; its 2-7 s IPC round trips have chaotic
+   per-boot contributions from (a) leaked-count monopolies — now
+   bounded at 2 s by a336568f when they form, (b) the loglevel-7
+   console IRQ-off windows — self-inflicted on hunt boots, re-measure
+   at loglevel=4, (c) the upstream wild-write/bracket producer.
+2. The parked-with-pc=1 + running-with-pc!=0 counts are REAL (sc266:
+   66 PREEMPT-LEAK reports, tp-adjudicated) but land OUTSIDE every
+   instrumented channel: no booking on parked tasks (118 catches all
+   legit pre-sleep), no park-through-switch (round 3f silent), no
+   underflow. => The producer is the byte-level Task-thread_info write
+   family (b77/b81/x86-scribble3) — WILDWRITE-HUNT LANE, with the
+   leakhunt probe (dfx=leakhunt) now banked as the conviction tool
+   (acquire-site shadow + instant booked-on-nonrunning catch +
+   tp-vs-slot adjudication, both arches).
+3. Merge-gate status for cd4e5a38+a336568f (sched guarded domain):
+   dual-arch builds green; make test + riscv smoke + syscost noted in
+   the leg-24 tail below.
+
+LEG-25 (OH UI lane, leg-24 successor; leg-24 died in the 13:39 quota
+window ~2.2h in, snapshot bee11cdd) — OPENED 16:46 on the SOLO-ALL-IN
+mandate (host exclusively ours, 4-QEMU budget). Main b7276078 merged
+first (7f479e80).
+
+MERGE (b7276078 -> feature/samgr-callback, 7f479e80):
+- switches.rs: BOTH new switches kept (branch LeakHunt + main WwCensus;
+  indices 32/33, SWITCH_COUNT 34).
+- task.rs: BOTH stack guards kept — branch owns_kernel_stack() (bool)
+  + main kernel_stack_top_checked() (Option; 9e02a03b). Same bug fixed
+  twice by two lanes (sc261 0x13fd0 kill_dump fault vs monkey r32/38
+  census faults); Option API is canonical.
+- binder.rs 3 hunks: took main's checked-guard shape everywhere
+  (holder_forensics now prints "stack-freed (dump skipped)").
+- futex.rs: took MAIN's file wholesale — main's guard set is a strict
+  superset of the branch's duplicate (same 6 sites + 1 extra at 3845).
+- Dual-arch builds green (x86 bzImage 16:50, rv64 40k-line compile
+  16:51); make test riscv64 GREEN ("All tests passed!", leg25 log).
+
+ROLL MATRIX (all oh-img-p PATCHED system — ld-musl patch re-verified
+idempotent ("VERIFY OK: image copy == patched") — fresh scgold copies
+(full cp; reflink unsupported on this ext3), KVM SMP2 4G, SECS=2700,
+shotmon 30s, dfx=schb,wwcensus unless noted):
+- sc269 LOGLEVEL=4 (the leg-24 handoff's re-measure).
+- sc270 LOGLEVEL=7 +sleepsnap (classic verdict recipe, now on an IDLE
+  host — the chaos-variable A/B).
+- sc271 LOGLEVEL=4 +quietcon (kills the userspace console term too).
+- sc272 LOGLEVEL=4, kernel with SLOW-TXN v2 (02cb1e9b).
+
+FINDING 1 — THE ACCOUNT CHAIN (mission premise) RE-CONFIRMED RESOLVED
+ON THE QUIET HOST AT LVL4 (sc269): bootevent.account.ready set via PCTL
+early (pid 333 -> paramservice, ack to init); the launcher's own
+queries succeed ("getOsAccountLocalId localId 100" x152); the 4194349
+lines (46) are distributeddata's pre-activation retry window only.
+QueryForegroundUserId is ANSWERED; the blocker is strictly downstream.
+
+FINDING 2 — LIFECYCLE_TIMEOUT IS NOT THE CONSOLE TAX, NOT HOST CHAOS:
+sc269 (lvl4, idle host) ran the restart loop at FULL rate (54
+com.ohos.launcher.MainAbility timeouts in the first ~15 min, plus the
+systemui ext-ability family + settingsdata DataExtAbility). The
+leg-24 suspicion (self-inflicted loglevel-7 UART tax) is hereby
+adjudicated: the loop is INTRINSIC to the boot.
+
+FINDING 3 — TRANSPORT EXONERATED, END TO END: SLTX shows AMS (tgid
+1176) enqueue ScheduleLoadAbility code=0x7 to every spawned child;
+SLRD shows the children READ them (e.g. tgid=1437 tid=1438 OS_IPC
+read code=0x7; tgid=1431 tid=1432 likewise). queue=0 on EVERY slow
+txn (see F4). Kernel binder transport send->wake->read: COMPLETE.
+
+FINDING 4 — THE BLOCKER QUANTIFIED: HANDLER EXEC STALLS (SLOW-TXN,
+queue=0/exec=N s, sync-txn reply path):
+- sc269 (5s gate): hdf_devmgr->battery-host 6.2s; update-host->
+  foundation 10.4s; SA801-host->powermgr 10.4s (two 10.4s = one
+  deterministic ~10s userspace wait class, not a lottery).
+- sc272 (SLOW-TXN v2 1.5s gate + comms): AbilityManager (foundation
+  pid 777) code=1034 2.05s (the sc261/262 4-6s family, low sample);
+  foundation->i18n_service 4.07/2.91s (pid 1058 then DIED: init
+  SIGCHLD "Service warning Unknown pid:1058 uid:3013 status:9" —
+  killed mid-conversation); ->powermgr 8.34s; hdf power_host 6.06s;
+  media_service 2.47s x2.
+- Widespread across UNRELATED servers with queue=0 => the common
+  factor is scheduler starvation of the handler thread mid-exec, not
+  per-server logic.
+
+FINDING 5 — WHO STARVES THE HANDLERS (sched-lane families, measured
+in these same boots): sc269 strands 6 (max 5283ms) with leaked-preempt
+clean-slot incumbents (pc=1/2 — the wildwrite producer ACTIVE at lvl4
+idle host; pid 317 repeat incumbent, also STALE-CLAIM-RESET twice);
+foundation itself a strand victim (2128ms). sc272: samgr's OWN tgid
+threads (tid 329/326) WAKE-RUN-LEAK repeat victims (5x kicks) — every
+ability load routes through samgr+foundation; both starve for
+seconds. PREEMPT-HEAL: 0 firings in ALL cells (the leaked counts
+never trip the 200-tick window — consistent with leg-24's parked
+landing channel).
+
+FINDING 6 — QUIETCON A/B: sc271 (lvl4+quietcon) = ZERO IRQ-OFF-WINDOW
+prints vs sc269's 161/352/525ms (all rip=outb, userspace console
+writes; sc270 lvl7 adds the kernel-pr_info term + monster strands —
+strand_max 238s with pid 304/305 incumbents). BUT the quietcon cell
+soft-wedged at plateau t=50-240s (SC-HB gap 240->541; census at 541:
+WAKE-RUN-LEAK cohort tids 326..1223 ages 176-510s, several
+state=0x0 cfs_linked=1 pick_state=1 — RUNNABLE+LINKED, kicked 5-7x,
+NEVER PICKED; both h-slots pinned pid304/pid305). The sc198-class
+"quiet boot second soft-wedge shape" is CONFIRMED on the merged
+kernel: quietcon is NOT a free milestone route — the wake->pick loss
+family owns the quiet boot.
+
+VERDICT (leg-25 midpoint): the UI milestone's kernel-side chain is
+fully mapped: transport healthy; the load path dies inside multi-
+second handler exec stalls produced by the wake->pick-loss /
+leaked-preempt strand families (sched + wildwrite lanes' live hunts).
+The 10.4s x2 class + i18n SIGKILL suggest a userspace ~10s timeout
+cascade compounding on top. No NEW kernel bug surfaced in this lane's
+domain (binder/ipc); the SLOW-TXN v2 census (02cb1e9b) is the tool
+that names server+comm for every >1.5s sync txn from now on.
+
+LEG-25 ADDENDUM — THE MONSTER-INCUMBENT IDENTIFICATION (304/305):
+sc270's sleepsnap dumps name the 30x kthread band: klogd=301,
+ksoftirqd/0=302, ksoftirqd/1=303, schbd=305 ("sleepsnap: schbd tid
+305 state=0x1 sys=0 rip=0x0" — tid 304 NEVER appears in any dump) —
+by spawn order 304 = khungtaskd. THE sc268 MONSTER-STRAND INCUMBENTS
+(42-241 s, both h-slots) AND sc271's dual-CPU wedge incumbents are
+khungtaskd + schbd — OUR OWN DFX KTHREADS, not OH daemons. Both walk
+task lists (for_each_task / pid-hash buckets — the sc207
+stallwatch_tick self-deadlock topology). sc271's post-census 300 s
+SC-HB gap (t=240 census -> next beat t=541) says the census wedged
+the heartbeat kthread itself for 5 minutes on the quietcon cell.
+=> The hunt-boot interference model gains its third term: (1) lvl7
+kernel printk flood, (2) userspace console UART writes, (3) the
+census kthreads' own monopolies. NEXT CELL (sc273, armed): LOGLEVEL=4
++ quietcon + NO dfx tokens (no khungtaskd snapshot cadence via
+sleepsnap, no schbd, no wwcensus) — always-on SAREG/PCTL/SLTX/SLRD/
+SLOW-TXN only. Adjudicates: census-kthread interference vs the
+organic restart loop on the quietest achievable boot.
+
+LEG-25 FINAL — THE PARALLEL MATRIX (10-QEMU mandate) + THE TWO
+REPRODUCIBLE SIGNATURES.
+
+Cell map (all: oh-img-p patched, KVM SMP2 4G, fresh scgold copies):
+- sc269 lvl4 plain (45min)  : loop full-rate (290 LIFECYCLE_TIMEOUT),
+  strands 266/45min (continuous lottery, max 5.3s), 29 PREEMPT-HEAL on
+  the spawn band + 25 underflow clamps; OOM killed ueventd+watchdog.
+- sc270 lvl7 plain          : boot crawls (never reached ability loads
+  in 45 min; "0 timeouts" is a NON-result); monster strand 238s.
+- sc271 lvl4+quietcon+schb  : plateau wedge t=50-540 (census wedged
+  schbd itself 300s), then no-churn idle. NOT a milestone path.
+- sc272 lvl4 plain +SLOW-TXN v2: the exec-stall census (findings 4).
+- sc273/274/275/277 lvl4+quietcon, NO census kthreads: n=4, ALL four
+  reached bootevent.bootanimation.finished (first time in this boot
+  family) and ALL four then died at the SAME new wall: BMS
+  ImplicitQueryAllAbilityInfos failed for com.ohos.launcher looping
+  forever (sc273: 1941x), zero launcher spawns, screens black. BMS's
+  own GetForegroundOsAccountLocalId fails ret:32 on these boots while
+  distributeddata itself is alive (4194349 retry storm runs).
+  PARKED-LEAK accumulations 174-196/boot (vs 20 on plain) — parked
+  tasks with pc=1 pile up 9x on quiet boots.
+- sc276 lvl4 plain +leakhunt: 186 LEAK-ORIGIN prints; ALL
+  booked-on-nonrunning catches remain the LEGITIMATE pre-sleep window
+  (tp_state=1, on_cpu=1); acquire-site census: sched.rs:2184 (GRQ,
+  weak signature) 76, timer.rs:217 (TIMERS.lock_irqsave in
+  add_timer_wakeup — nanosleep's own registration window) 45,
+  spinlock.rs:292 21, wait.rs:124 18, binder.rs:1341 7. PARKED-LEAK
+  victims print NO acquire site (shadow empty) — the +1 lands on
+  parked tasks outside every instrumented channel, CONSISTENT with
+  leg-24's wildwrite attribution.
+- sc278/279 lvl4 plain (SLOW-TXN v2 + samgr-aware SLRD + SAREG ids):
+  loop at full rate; sc278 repeats sc269's heal signature EXACTLY
+  (25 heals, spawn band pids 5077-5172, was=0x10001, held=200, then
+  24 PREEMPT-UNDERFLOW clamps at spinlock.rs:1cd). sc279's id-level
+  send/read audit is budget-truncated (SLRD 1500 cap burned by
+  samgr's own high-volume reads of low txn ids; the 48/121 "unmatched"
+  are all id>5000 = beyond the printed range) — NO delivery loss
+  proven; positive evidence everywhere (queue=0, 1430 samgr reads,
+  replies flowing).
+
+SIGNATURE A (reproduced sc269 + sc278): EVERY restart-loop spawn
+acquires a phantom preempt base=1 (+HARDIRQ_OFFSET on read: 0x10001)
+within its first 2s, holds it to the heal bound, and its first real
+spinlock release underflow-clamps. Per-spawn ~2s preempt-disabled
+penalty against the 10s LIFECYCLE budget. The wildwrite producer's
+fingerprints on FRESH tasks.
+SIGNATURE B (n=4 quietcon family): the quiet boot reliably finishes
+bootanimation then stalls in BMS bundle queries — the data layer
+(distributeddb-backed bundle DB) never comes good without the console
+churn. sc198's second-soft-wedge shape, now with a named wall.
+
+HEAL-50 VARIANT (run/bzImage-heal50, sched.rs tick heal 200->50
+jiffies): sc277 (quietcon) never spawned — untested there; sc280
+(plain lvl4) launched 18:47 to test whether a 0.5s-per-spawn penalty
+lets the ability load fit its 10s budget. Kernel reverted to 200
+in-tree; bzImage-heal50 is a side artifact.
+
+MERGE-GATE ledger for the branch (guarded domains: ipc/binder,
+sched): make test green post-merge; zero KERNPANIC / zero
+PREEMPT-UNDERFLOW-poison across 12 boots; loop/strand/heal counters
+stable vs sc262-268 baselines; SLOW-TXN v2 + SAREG-id + samgr-SLRD
+are print-path-only probes (budgeted, rate-capped, no hot-path cost
+when unarmed). The leg-24 sched pair (cd4e5a38+a336568f) has its gate
+evidence in the leg-24 tail; sc269/278 confirm the 2s bound engages
+as designed (and quantify its per-spawn underflow tail).
+
+LEG-25 CLOSE-OUT (19:27) — sc280 (heal-50) FALSIFIES THE PER-SPAWN-
+PENALTY THEORY: final A/B at equal loop volume — sc278 (heal-200):
+25 heals/24 underflows/294 LC; sc279 (heal-200): 28/23/349; sc280
+(heal-50): 1 heal (the ONE firing is the IF=0 variant: held=0x2e8=744
+jiffies — tick delivery itself was blocked ~7.4s, so even the heal
+was delayed; the phantom family has a tick-blocked shape beyond the
+threshold-bounded one), 1 underflow, 340 LC, 404 SLTX. The spawn-band
+phantom (Signature A) simply did not form on sc280's boot — boot-
+chaotic per-boot variance (the leg-24 census lesson again), and with
+it ABSENT the restart loop ran at the SAME rate: Signature A is NOT
+the loop's driver. The loop's driver stays the exec-stall family
+(SLOW-TXN census: queue=0, exec 1.5-10s across unrelated servers) on
+top of the strand lottery — both owned by the sched/wildwrite hunts.
+THE MILESTONE POSITION after 12 boots: transport exonerated end to
+end; account chain answered; the two boot-family walls are (1) plain
+boots: multi-second handler exec stalls -> LIFECYCLE restart loop;
+(2) quietcon boots: bootanimation.finished then the BMS/distributeddb
+bundle-query wall (n=4). Next levers live OUTSIDE this lane's binder
+domain: the sched/wildwrite starvation producers, and the OH image's
+data layer on quiet boots.
+
+LEG-26 (OH UI lane; leg-25 successor) — OPENED on the solo-host mandate
+(10-QEMU budget, direct user order), after a mid-quota merge repair:
+the worktree held a corrupted half-merge (index conflicts staged,
+MERGE_HEAD gone). Reset + fresh `git merge main` (94309ad8) auto-
+resolved EXCEPT task.rs (the auto-merge dropped 94309ad8's closing
+brace — the branch's rewrite won that hunk); took main's task.rs
+wholesale (9368b996). Dual-arch builds + make test GREEN on the merged
+tree. stash@{1} (shotmon csv) left in place; stash@{0} is foreign-junk.
+
+LEG-26 EVIDENCE PASS 1 — OLD LOGS MINED BEFORE ANY NEW BOOT:
+- All 81 PREEMPT-LEAK lines from sc269/278/279/280 symbolized: the
+  leaked-pc incumbents' interrupted RIPs are ~60% PAGE-CACHE BTree
+  scans (Iter/next_kv/evict_one/InodePageCache walks), plus TIMERS/
+  fair-tree/deadline-tree LazyLeafRange scans, RawSpinlock::lock
+  polling and memmove — long BTree critical sections under global
+  locks (page cache, TIMERS lock_irqsave, GRQ), with spinners queueing
+  behind (the pc=1 "leak" readings at spin-waits may be LEGIT held
+  guards, not phantom bits — every report fires exactly at the 200-tick
+  bound, i.e. sections still in flight, and the heal's zeroing of
+  legitimate guards is what pairs with the 24 underflow clamps/boot).
+- PARKED-LEAK pile on quietcon boots = a handful of pids re-printed
+  (~0x13c 99x, 0x21c 52x...), not hundreds of victims.
+
+USER REDIRECT (mid-leg): standalone workload reproduction FIRST —
+"write scheduler workloads ourselves, construct complex multi-tests,
+mainly to reproduce this problem quickly and stably, doesn't have to
+be on OH". Leg restructured to: repro -> name via DFX -> fix on the
+minimal rootfs -> one OH verification roll.
+
+STANDALONE REPRO (test/schedrepro.c + test/schedrepro_boot.py, musl
+static via the in-tree riscv64 toolchain — glibc-static SIGILLs on
+ifunc vector variants; tiny-ext4 quiet boots, init=/test/schedrepro,
+config via `schedrepro=` cmdline):
+- Classes: W wake-storm (waker->parked workers, per-round stamp ring),
+  P futex pong pairs (turn protocol), H userspace hogs, F fork churn,
+  R pipe req/reply pairs, D 50ms watchdog. Verdict line + p50/p99/max/
+  gt250ms/gt1s per class; REPRO iff any sample >= 1s.
+- NEW KERNEL DFX (all dfx=wwcensus-gated, zero-cost when off):
+  RAN_RING (per-CPU current-publish ring, 32 entries: pid@age/tag/pc),
+  RAN_TICKS per-CPU tick counters, STALL-HOG self detector (>=100j
+  incumbent with comm/pc/tick-window + ring dump; idle excluded),
+  TIMER-SOFTIRQ-STALL now dumps the stalled CPU's ring (suspect-B
+  side), comm added to PREEMPT-LEAK.
+- sweep1 (10 cells, TCG SMP2/4): FULL MIX (W8,x2 P4 R4 F2) = REPRO
+  class: pong RTT p99 24ms, max 1005ms, 69 samples >250ms; pipe max
+  930ms (129 >250ms); wake storm max 314ms; watchdog p99 94ms (<100ms).
+  Single classes CLEAN (<=314ms): hogs-only 53ms, wake-only 51ms,
+  fork-only 314ms, pong+pipe-only 60ms. STALL-HOG: 0 firings anywhere.
+  TIMER-SOFTIRQ-STALL: 0. TIMER-LATE-FIRE: one 30ms. => NO incumbent
+  monopoly, NO tick loss: the stall is pure wake/pick latency on the
+  blocking-IPC pairs (suspect A), not suspect B.
+- PARKED-LEAK (parked futex waiters with pc=1) reproduced in exactly
+  the sweep1 REPRO cells (8-9/boot, same shape as OH quietcon boots)
+  and PARKED-WILDWRITE convictions — but srL1 (full mix + dfx=leakhunt)
+  REPRO'd (1005ms) with ZERO parked-leak lines: the phantom pc
+  correlates with the stalling load but is NOT necessary for the >250ms
+  stalls. Consistent with sc280's falsification; leakhunt's
+  booked-on-nonrunning adds remain the known benign pre-sleep window.
+- W3-RUNWAKE-REFUSED 32/cell = the fork-churn threads' benign
+  already-runnable refusals (budget-capped), not the stall.
+NEXT: sweep2 minimization (which ingredients are required) + per-hop
+pong stamps (hop1 = wake syscall + side1 pick; hop2 = side0 pick) to
+name the stalling hop.
+
+LEG-26 PASS 2 — MINIMIZATION + PER-HOP + GEOMETRY + OWNERSHIP (the
+standalone mechanism NAMED, 10 more probe boots srA-srH/srE-srH):
+- Minimization (sweep2, 10 cells): pong+pipe+fork@SMP2 = REPRO
+  (1194ms); +fork4 = 1304ms; full-mix = 1576ms; pong+pipe WITHOUT
+  fork = 52ms CLEAN; fork-only = 314ms; SMP1 = 163ms. FORK CHURN +
+  BOTH blocking-IPC families + SMP2 is the minimal trigger; the
+  borderline cells all sit in a 700-1000ms band (same degradation,
+  >1s crossing is stochastic). Repro stability: every srA-config boot
+  (7/7) showed the >250ms class; verdict REPRO on most.
+- Per-hop pong stamps: hop1 (wake+peer-pick) and hop2 (own pick) are
+  FAST (us) in the biggest stalls — the time sits between the peer's
+  resume and its next move: a RUNNING USERSPACE THREAD descheduled
+  ~1s mid-turn, i.e. runnable-task starvation, pure.
+- Ran-ring dumps at strand time: BOTH CPUs rotate frantically among
+  the same cohort (8 distinct tasks per ring, all @0j), tick counters
+  advancing. NOT idle-harvest failure, NOT monopoly, NOT tick loss.
+- Geometry: at pick time every victim is vr=0/lag=0 (leftmost, at
+  min); last-skip table: most victims NEVER skipped (no ownership
+  screen ever refused them); ownership words CLEAN (on_cpu=0,
+  claim=-1, pk=LIVE), no slot, no SWITCHING_OUT names them.
+- Enqueue-time geometry: EVERY stranded victim entered the queue
+  +29..39ms of virtual runtime AHEAD of min (enq_lag=0).
+=> THE MINIMAL-REPRO STALL CLASS IS FAIR-QUEUE WAIT AMPLIFICATION:
+  the victim's accumulated vruntime lead (~35ms) is worked off under
+  ~10x oversubscription (16 wakeable threads / 2 TCG CPUs + fork
+  churn) => 300-400ms typical, >1s tail. Marks, ticks, monopolies all
+  clean. Linux running this shape shows the same math; wakeup
+  preemption exists and correctly does not fire for an AHEAD task.
+  The >250ms SREPRO class on the minimal rootfs is NOT the OH
+  pathology — it is the benign cousin.
+- PARKED-LEAK (pc=1 on parked waiters) + STALE-CLAIM-RESET (26-42/
+  boot) reproduce in exactly the stalling cells — the ownership/pc
+  corruption SEEDS are present, but srL1 (leakhunt) REPRO'd with ZERO
+  parked-leak: not necessary for the tail.
+OH SIDE (sc290/sc291, lvl4 plain KVM SMP2, dfx=wwcensus[+leakhunt]):
+- sc290: LIFECYCLE_TIMEOUT loop at full rate (182 in ~20 min); OH
+  WAKE-STRANDED lines name the incumbents with RAW pc=1/2 OUTSIDE
+  tick context = GENUINE leaked PREEMPT_OFFSET bits: h0=(316/pc=1)
+  repeat, h1=(1/pc=1) INIT ITSELF, 328/pc=2, 492, 577/pc=2...
+  victims strand 1-3.7s behind them. THE OH PRODUCER IS THE LEAKED-pc
+  INCUMBENT FAMILY (init included), as leg-25 suspected; the
+  minimal-rootfs workload does not form them (needs OH's userspace).
+- STALL-HOG fired on init and m.ohos.launcher with pc=0x10000 — my
+  probe's raw-pc bug (tick's own in-flight offset), fixed in-tree
+  (masked base/nestx/pctick); their 100j monopolies were clean-pc
+  userspace busy loops.
+NEXT: sc290/sc291 to completion => incumbent comm+RIP census at
+PREEMPT-LEAK (leakhunt gives acquire sites on sc291); then the fix
+decision (heal-bound tightening vs producer hunt) + OH verify.
