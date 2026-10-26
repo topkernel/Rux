@@ -57,6 +57,12 @@ const STRAND_THRESHOLD_MS: u64 = 1000;
 struct WwSlot {
     task: AtomicU64,
     stamp: AtomicU64,
+    /// leg-26: enqueue-time geometry (vr - min_vruntime and the lag
+    /// behind the then-leftmost), so a strand report can tell whether
+    /// the victim entered the queue already deep-right (fair wait)
+    /// or at/left-of the pack (picked-late pathology).
+    enq_lead: AtomicU64,
+    enq_lag: AtomicU64,
 }
 
 static TABLE: [WwSlot; SLOTS] = {
@@ -65,6 +71,8 @@ static TABLE: [WwSlot; SLOTS] = {
     const ZERO: WwSlot = WwSlot {
         task: AtomicU64::new(0),
         stamp: AtomicU64::new(0),
+        enq_lead: AtomicU64::new(0),
+        enq_lag: AtomicU64::new(0),
     };
     [ZERO; SLOTS]
 };
@@ -105,6 +113,14 @@ fn slot_of(task: *mut crate::process::Task) -> &'static WwSlot {
 pub fn note_wake(task: *mut crate::process::Task) {
     let slot = slot_of(task);
     slot.stamp.store(now_ticks(), Ordering::Release);
+    // leg-26: enqueue-time geometry (GRQ held by the caller).
+    {
+        let (vr, minv, leftv) = crate::sched::sched::ww_cfs_geometry(task);
+        slot.enq_lead
+            .store(vr.saturating_sub(minv) / 1_000_000, Ordering::Relaxed);
+        slot.enq_lag
+            .store(leftv.saturating_sub(vr) / 1_000_000, Ordering::Relaxed);
+    }
     slot.task.store(task as usize as u64, Ordering::Release);
     WAKE_N.fetch_add(1, Ordering::Relaxed);
 }
