@@ -1771,8 +1771,14 @@ pub fn schedule_dead_never_returns() {
                 // next strand can distinguish "helper never ran" from
                 // "helper ran silently with pc==0" — sc191/sc192 both
                 // stranded with ZERO TERM-DESCHED lines and the two were
-                // indistinguishable in the log.
-                if rounds == 0 {
+                // indistinguishable in the log. Serial-cleanliness:
+                // census boots only (dfx=wwcensus); ordinary boots fire
+                // this on every exiting child.
+                if rounds == 0
+                    && crate::dfx::switches::enabled(
+                        crate::dfx::switches::DfxSwitch::WwCensus,
+                    )
+                {
                     let n = TERM_ENGAGE_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                     if n < 8 {
                         crate::pr_warn!(
@@ -3310,7 +3316,13 @@ pub fn wake_up_enqueue(task: *mut Task) -> bool {
                 let w3_benign_running =
                     st == TaskState::new(TaskState::RUNNING) && curr_on;
                 let mut w3_print_refused = false;
-                if !w3_benign_running {
+                // Serial-cleanliness: the W3 refusal census joins the
+                // wwcensus family — ordinary boots stay clean.
+                if !w3_benign_running
+                    && crate::dfx::switches::enabled(
+                        crate::dfx::switches::DfxSwitch::WwCensus,
+                    )
+                {
                     w3_print_refused =
                         W3_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 32;
                 }
