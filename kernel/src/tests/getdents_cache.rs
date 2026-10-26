@@ -77,10 +77,14 @@ pub fn test_getdents_cache() {
     // ---- 2. fresh tmpfs with 40 entries; one fd, 512-byte buffer -------
     let mp = "/tmp/getdcachetest";
     let _ = crate::fs::mount::do_mount("none", mp, "tmpfs", 0, None);
+    // Create via open, but CLOSE every create-fd: a later suite row
+    // (syscall_io "ioctl on closed fd") asserts fd 10 is CLOSED in this
+    // task's fdtable — leaking 40 fds here flips it to a live tmpfs file
+    // and that row reads ENOTTY instead of EBADF.
     for i in 0..40u32 {
         let p = alloc::format!("{}/a{:02}", mp, i);
-        if let Err(e) = crate::fs::vfs::file_open(&p, crate::fs::FileFlags::O_WRONLY | crate::fs::FileFlags::O_CREAT, 0o644) {
-            let _ = e;
+        if let Ok(cfd) = crate::fs::vfs::file_open(&p, crate::fs::FileFlags::O_WRONLY | crate::fs::FileFlags::O_CREAT, 0o644) {
+            crate::fs::vfs::file_close(cfd).ok();
         }
     }
     let fd = match crate::fs::vfs::file_opendir(mp, 0) {
