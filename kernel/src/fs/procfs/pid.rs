@@ -841,9 +841,33 @@ pub fn generate_maps(pid: u64) -> Vec<u8> {
     let heap_start = addr_space.start_brk();
 
     let mut content = String::new();
-    let vma_mgr = addr_space.vma_read();
-
-    for vma in vma_mgr.iter() {
+    // leg-26 (maps chunking): vma_read() disables preemption for the
+    // guard's whole life. Walking EVERY VMA (OH processes carry 500+,
+    // each with dentry path resolution) under one hold produced the
+    // multi-hundred-ms un-preemptible sections behind the leaked-pc
+    // monopoly family (processdump reads /proc/<pid>/maps for every
+    // process on every LIFECYCLE_TIMEOUT). Linux's seq_file discipline
+    // drops mmap_lock between read chunks; do the same: at most
+    // MAPS_CHUNK VMAs per lock hold, guard dropped (preemption
+    // re-enabled) between chunks, walk resumed from the last VMA's
+    // start via a range scan.
+    const MAPS_CHUNK: usize = 32;
+    let mut resume: Option<crate::mm::vma::VirtAddr> = None;
+    'chunks: loop {
+        let vma_mgr = addr_space.vma_read();
+        let mut produced = 0usize;
+        let iter: alloc::boxed::Box<dyn Iterator<Item = &crate::mm::vma::Vma>> = match resume {
+            None => alloc::boxed::Box::new(vma_mgr.iter()),
+            Some(k) => alloc::boxed::Box::new(vma_mgr.iter_after(k)),
+        };
+        for vma in iter {
+            if produced >= MAPS_CHUNK {
+                resume = Some(vma.start());
+                continue 'chunks;
+            }
+            produced += 1;
+            #[allow(unused_assignments)]
+            {
         let start = vma.start().as_usize();
         let end = vma.end().as_usize();
         let flags = vma.flags();
@@ -942,6 +966,10 @@ pub fn generate_maps(pid: u64) -> Vec<u8> {
                 start, end, r, w, x, s, offset, inode, pathname
             ));
         }
+            }
+        }
+        // Natural end of the walk (fewer than a full chunk produced).
+        break 'chunks;
     }
 
     content.into_bytes()
