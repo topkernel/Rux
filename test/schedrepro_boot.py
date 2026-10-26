@@ -49,8 +49,8 @@ def build_probe(out):
     return True
 
 
-def build_image(img, probe):
-    staging = os.path.join(WORK, "root")
+def build_image(img, probe, tag="root"):
+    staging = os.path.join(WORK, "root-" + tag)
     if os.path.exists(staging):
         shutil.rmtree(staging)
     os.makedirs(os.path.join(staging, "test"))
@@ -83,7 +83,7 @@ def main():
     if not build_probe(probe):
         return 4
     img = os.path.join(WORK, "rootfs-%s.img" % args.tag)
-    if not build_image(img, probe):
+    if not build_image(img, probe, args.tag):
         return 4
 
     serial = os.path.join(WORK, "%s-serial.log" % args.tag)

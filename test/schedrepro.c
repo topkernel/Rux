@@ -117,8 +117,9 @@ static void report(const char *cls, uint64_t *buf, uint32_t n, uint64_t *max_out
 #define MAXW 64
 struct wslot {
     volatile uint64_t seq;   /* futex word lives in the low 32 bits */
-    volatile uint64_t tstamp;
-    char pad[64 - 16];
+    char pad0[56];
+    volatile uint64_t stamps[8]; /* ring indexed by seq & 7 */
+    char pad1[64 - 8 * 8];
 };
 static struct wslot wslots[MAXW];
 static int n_workers = 8, n_wakers = 2;
@@ -132,7 +133,7 @@ static void *waker_fn(void *arg)
         for (int k = 0; k < n_workers; k++) {
             struct wslot *s = &wslots[(rr + k) & (MAXW - 1)];
             uint64_t seq = s->seq + 1;
-            s->tstamp = now_us();
+            s->stamps[seq & 7] = now_us();
             __sync_synchronize();
             s->seq = seq;
             FX_WAKE((volatile uint32_t *)&s->seq, 1);
@@ -155,8 +156,10 @@ static void *worker_fn(void *arg)
         long r = FX_WAIT((volatile uint32_t *)&s->seq, (uint32_t)seq);
         (void)r;
         __sync_synchronize();
-        if (s->seq != seq) {
-            uint64_t d = now_us() - s->tstamp;
+        uint64_t myseq = s->seq;
+        if (myseq != seq) {
+            /* read the stamp for the round we actually observed */
+            uint64_t d = now_us() - s->stamps[myseq & 7];
             add_sample(&samples_wake, &n_wake, d);
             if (d >= 250000)
                 printf("SREPRO wake-lat %lluus tid %ld\n",
@@ -334,15 +337,15 @@ static void parse_cfg(const char *s)
         switch (tok[0]) {
         case 'W':
             v = atoi(tok + 1);
-            if (v > 0) n_workers = v < MAXW ? v : MAXW;
+            if (v >= 0) n_workers = v < MAXW ? v : MAXW;
             if ((comma = strchr(tok, ',')) && comma[1] == 'x') {
                 v = atoi(comma + 2);
-                if (v > 0) n_wakers = v < 8 ? v : 8;
+                if (v >= 0) n_wakers = v < 8 ? v : 8;
             }
             break;
         case 'P':
             v = atoi(tok + 1);
-            if (v > 0) n_pong = v < MAXW ? v : MAXW;
+            if (v >= 0) n_pong = v < MAXW ? v : MAXW;
             break;
         case 'H':
             v = atoi(tok + 1);
