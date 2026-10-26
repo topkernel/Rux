@@ -6091,3 +6091,97 @@ WAVE INTERIM (sc313A/314A/315A, kernel bzImage-29A-treefix2):
 NEXT: when sc313A-315A end, fire sc316A/sc317A on bzImage-29A-dirlock2
 (dfx=txnhunt,fsw) — verifies the dirlock fix kills the panic family
 AND redraws the storage/hiview families with the widened stack window.
+
+LEG-29B (OH image-side lane; BMS/distributeddata wall; 05:20) —
+merged main 5f1ac865 first (clean), dual-build green, boots on the
+merged kernel + oh-img-p alignguard image, fresh scgold userdata
+copies, plain recipe (no dfx), HDCPORT 12201/12202.
+
+MISSION REFRAME — THE NAMED BMS WALL IS DEAD ON THE CURRENT TREE.
+  Zero ImplicitQueryAllAbilityInfos failures on EVERY boot since the
+  alignguard+reparent wave (sc305-310, sc311B/312B below; the wall's
+  last draws were sc294 x119 and sc273-277 x1941). The wall moved.
+  For the record, the old wall's mechanism is now fully decoded from
+  the image (no new boot needed):
+  - BMS bundle_data_mgr:1798 "ImplicitQueryAllAbilityInfos failed,
+    bundleName:X, responseUserId:-1" and render_service's
+    AccountDelegateNormalImpl "QueryForegroundUserId ... status:
+    4194349" are the SAME root: libaccountmgr
+    OsAccountManagerService::GetForegroundOsAccountLocalId (0x1943aa)
+    computes userId=callingUid/200000, looks up IInnerOsAccount-
+    Manager's foreground-record map (this+0x168); miss => inner
+    returns 0x400026, service maps to 0x40002D = 4194349 (mov at
+    0x194442). The foreground record only lands when a UI session
+    reaches the foreground, so the failures persist on EVERY boot
+    (incl. advancing ones) until UI comes up — they are a SYMPTOM,
+    not the gate. BMS imports the same API (libbms "GetForeground-
+    OsAccountLocalId failed ret:%d").
+
+THE CURRENT QUIET WALL (named end-to-end, image side): the launcher
+  never STARTS. Perfect 100% split across 10 boots (sc294-312B):
+  - advancing draws (sc305 12x, sc308 13x, sc310 13x resident starts;
+    sc294 partial): accountmgr ActivateDefaultOsAccount -> SendToAMS-
+    AccountStart -> AbilityManagerAdapter::StartUser (libaccountmgr
+    0x1ea160: GetAbilityManager, parcel token+userId+displayId+
+    callback, SendRequest code 0x2e=46, rc checked) -> AMS::StartUser
+    (libabilityms 0x2c1d3e) -> UserController::SetForegroundUserId ->
+    SwitchToUser (0x34137e) -> StartUserApps (resident abilities:
+    "StartResidentAbility bundleName:..." lines) AND StartHighest-
+    PriorityAbility (0x341df0; the "start highest priority extension
+    ability ... queryTime:15ms" radar) -> launcher spawn -> UI.
+  - walled draws (sc306/307/309/311B/312B): activation completes
+    (State:7 toId:100, storage user-start+quota+hmdfs mount all
+    normal), SendToAMSAccountStart returns 0 (its ERROR-level
+    failure logs "ability manager proxy is nullptr" 0x40000c and
+    "Failed to call SendToAMSAccountStart" 4194349 never print),
+    YET ZERO StartResidentAbility lines — SwitchToUser NEVER RAN
+    inside foundation. No hang (no SLOW-TXN/TXN-HANG on the pair,
+    incl. the txnhunt boots sc306/307), no error log, no spawn, no
+    launcher query — the code-46 task completes at the binder level
+    and its continuation simply never executes in foundation.
+  - sub-variant B (sc307, sc311B): accountmgr never even enters
+    ActivateDefaultOsAccount (SA:200 init finished in 997/793ms vs
+    15.2-15.5s on activating boots; the 15s wait inside init is the
+    samgr-15s family, target not yet named).
+
+IMAGE PATCH TRIED AND ADJUDICATED INERT: run/patch-foundation-
+  180first.sh (commit 4e132216) moved SA 180 (libabilityms) to the
+  head of foundation.json (same-size in-place byte patch, verified).
+  Verdict: SA loads in foundation are DEMAND-DRIVEN ("SAMGR: SA:x
+  OpenSo Nms" fires when a client first LoadSystemAbility(x)); the
+  profile list order does not set the load schedule. sc312B (patched
+  image) still published SA:180 only at the activation's own request
+  and walled identically. The patch is harmless (kept; idempotent
+  script in-tree) but is NOT a fix. sc311B's no-activation draw
+  matches pre-patch sc307 — not a regression.
+
+FIX-TRIAL WAVE (45min, KVM SMP2 4G, plain, oh-img-p+180first):
+  - sc311B: 65k lines, 5MB, activate=0, State7=0, pubs180=0,
+    resident=0, launcher=0, spawn=0, LC=0, fgfail=39, IQfail=0.
+    Screen frozen on the bootanimation color-bar pattern.
+  - sc312B: 68k lines, 5MB, activate=1 (x2 echo), State7=2,
+    pubs180=1 (at the activation request), resident=0, launcher=0,
+    spawn=1 (storage_manager native-spawn only), LC=0, fgfail=45,
+    IQfail=0. Same screen state.
+  Both walled; consistent with the 60/40 wall lottery.
+
+NEXT LEVERS (leg-30B, value order):
+  1. VISIBILITY inside foundation: the three AMS entry logs exist in
+     libabilityms but never print anywhere (StartUser entry
+     "startUser in service:%d, displayId:%lu" @0x2c1df0 fmt 0x126b4e
+     level args 3/4; SwitchToUser entry @0x341432 fmt 0x141349;
+     StartHighestPriorityAbility failure strings) — domain 0xd001336
+     appears flow-controlled off. Image-side byte patch: retarget
+     those HiLogPrint domains to one that prints (0xd001b00 prints
+     E0) or raise levels to 6; then one quiet boot names the exact
+     bail point between SendRequest(code 46) and SwitchToUser.
+  2. accountmgr's ~15s init wait (the A/B init split) — name the SA
+     it waits for (SAREG budget is exhausted by then; needs either a
+     budget bump or the SLRD gate extended) — that wait delays
+     activation into the window where its AMS continuation gets lost.
+  3. Kernel-side (OH-A's call): a dfx print for code-46 txns to
+     foundation + their pickup, OR extend SAREG beyond 600 lines —
+     adjudicates delivered-but-never-executed vs never-delivered for
+     the oneway-shaped StartUser.
+  4. The old BMS wall's KvStore-side noise (4194349) is confirmed
+    cosmetic-on-this-image; do not chase it.
