@@ -5286,3 +5286,99 @@ LEG-24 VERDICT / HANDOFF:
 3. Merge-gate status for cd4e5a38+a336568f (sched guarded domain):
    dual-arch builds green; make test + riscv smoke + syscost noted in
    the leg-24 tail below.
+
+LEG-25 (OH UI lane, leg-24 successor; leg-24 died in the 13:39 quota
+window ~2.2h in, snapshot bee11cdd) — OPENED 16:46 on the SOLO-ALL-IN
+mandate (host exclusively ours, 4-QEMU budget). Main b7276078 merged
+first (7f479e80).
+
+MERGE (b7276078 -> feature/samgr-callback, 7f479e80):
+- switches.rs: BOTH new switches kept (branch LeakHunt + main WwCensus;
+  indices 32/33, SWITCH_COUNT 34).
+- task.rs: BOTH stack guards kept — branch owns_kernel_stack() (bool)
+  + main kernel_stack_top_checked() (Option; 9e02a03b). Same bug fixed
+  twice by two lanes (sc261 0x13fd0 kill_dump fault vs monkey r32/38
+  census faults); Option API is canonical.
+- binder.rs 3 hunks: took main's checked-guard shape everywhere
+  (holder_forensics now prints "stack-freed (dump skipped)").
+- futex.rs: took MAIN's file wholesale — main's guard set is a strict
+  superset of the branch's duplicate (same 6 sites + 1 extra at 3845).
+- Dual-arch builds green (x86 bzImage 16:50, rv64 40k-line compile
+  16:51); make test riscv64 GREEN ("All tests passed!", leg25 log).
+
+ROLL MATRIX (all oh-img-p PATCHED system — ld-musl patch re-verified
+idempotent ("VERIFY OK: image copy == patched") — fresh scgold copies
+(full cp; reflink unsupported on this ext3), KVM SMP2 4G, SECS=2700,
+shotmon 30s, dfx=schb,wwcensus unless noted):
+- sc269 LOGLEVEL=4 (the leg-24 handoff's re-measure).
+- sc270 LOGLEVEL=7 +sleepsnap (classic verdict recipe, now on an IDLE
+  host — the chaos-variable A/B).
+- sc271 LOGLEVEL=4 +quietcon (kills the userspace console term too).
+- sc272 LOGLEVEL=4, kernel with SLOW-TXN v2 (02cb1e9b).
+
+FINDING 1 — THE ACCOUNT CHAIN (mission premise) RE-CONFIRMED RESOLVED
+ON THE QUIET HOST AT LVL4 (sc269): bootevent.account.ready set via PCTL
+early (pid 333 -> paramservice, ack to init); the launcher's own
+queries succeed ("getOsAccountLocalId localId 100" x152); the 4194349
+lines (46) are distributeddata's pre-activation retry window only.
+QueryForegroundUserId is ANSWERED; the blocker is strictly downstream.
+
+FINDING 2 — LIFECYCLE_TIMEOUT IS NOT THE CONSOLE TAX, NOT HOST CHAOS:
+sc269 (lvl4, idle host) ran the restart loop at FULL rate (54
+com.ohos.launcher.MainAbility timeouts in the first ~15 min, plus the
+systemui ext-ability family + settingsdata DataExtAbility). The
+leg-24 suspicion (self-inflicted loglevel-7 UART tax) is hereby
+adjudicated: the loop is INTRINSIC to the boot.
+
+FINDING 3 — TRANSPORT EXONERATED, END TO END: SLTX shows AMS (tgid
+1176) enqueue ScheduleLoadAbility code=0x7 to every spawned child;
+SLRD shows the children READ them (e.g. tgid=1437 tid=1438 OS_IPC
+read code=0x7; tgid=1431 tid=1432 likewise). queue=0 on EVERY slow
+txn (see F4). Kernel binder transport send->wake->read: COMPLETE.
+
+FINDING 4 — THE BLOCKER QUANTIFIED: HANDLER EXEC STALLS (SLOW-TXN,
+queue=0/exec=N s, sync-txn reply path):
+- sc269 (5s gate): hdf_devmgr->battery-host 6.2s; update-host->
+  foundation 10.4s; SA801-host->powermgr 10.4s (two 10.4s = one
+  deterministic ~10s userspace wait class, not a lottery).
+- sc272 (SLOW-TXN v2 1.5s gate + comms): AbilityManager (foundation
+  pid 777) code=1034 2.05s (the sc261/262 4-6s family, low sample);
+  foundation->i18n_service 4.07/2.91s (pid 1058 then DIED: init
+  SIGCHLD "Service warning Unknown pid:1058 uid:3013 status:9" —
+  killed mid-conversation); ->powermgr 8.34s; hdf power_host 6.06s;
+  media_service 2.47s x2.
+- Widespread across UNRELATED servers with queue=0 => the common
+  factor is scheduler starvation of the handler thread mid-exec, not
+  per-server logic.
+
+FINDING 5 — WHO STARVES THE HANDLERS (sched-lane families, measured
+in these same boots): sc269 strands 6 (max 5283ms) with leaked-preempt
+clean-slot incumbents (pc=1/2 — the wildwrite producer ACTIVE at lvl4
+idle host; pid 317 repeat incumbent, also STALE-CLAIM-RESET twice);
+foundation itself a strand victim (2128ms). sc272: samgr's OWN tgid
+threads (tid 329/326) WAKE-RUN-LEAK repeat victims (5x kicks) — every
+ability load routes through samgr+foundation; both starve for
+seconds. PREEMPT-HEAL: 0 firings in ALL cells (the leaked counts
+never trip the 200-tick window — consistent with leg-24's parked
+landing channel).
+
+FINDING 6 — QUIETCON A/B: sc271 (lvl4+quietcon) = ZERO IRQ-OFF-WINDOW
+prints vs sc269's 161/352/525ms (all rip=outb, userspace console
+writes; sc270 lvl7 adds the kernel-pr_info term + monster strands —
+strand_max 238s with pid 304/305 incumbents). BUT the quietcon cell
+soft-wedged at plateau t=50-240s (SC-HB gap 240->541; census at 541:
+WAKE-RUN-LEAK cohort tids 326..1223 ages 176-510s, several
+state=0x0 cfs_linked=1 pick_state=1 — RUNNABLE+LINKED, kicked 5-7x,
+NEVER PICKED; both h-slots pinned pid304/pid305). The sc198-class
+"quiet boot second soft-wedge shape" is CONFIRMED on the merged
+kernel: quietcon is NOT a free milestone route — the wake->pick loss
+family owns the quiet boot.
+
+VERDICT (leg-25 midpoint): the UI milestone's kernel-side chain is
+fully mapped: transport healthy; the load path dies inside multi-
+second handler exec stalls produced by the wake->pick-loss /
+leaked-preempt strand families (sched + wildwrite lanes' live hunts).
+The 10.4s x2 class + i18n SIGKILL suggest a userspace ~10s timeout
+cascade compounding on top. No NEW kernel bug surfaced in this lane's
+domain (binder/ipc); the SLOW-TXN v2 census (02cb1e9b) is the tool
+that names server+comm for every >1.5s sync txn from now on.
