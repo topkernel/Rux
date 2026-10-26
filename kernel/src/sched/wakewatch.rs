@@ -228,16 +228,6 @@ pub fn check_picked(task: *mut crate::process::Task, cpu: usize) {
                         ww_u64((*tp).preempt_count() as u32 as u64);
                     }
                 }
-                // leg-33B incumbent attribution: the interrupted kernel
-                // instruction from this CPU's LAST tick — for a
-                // preempt-off incumbent this names the loop it spins in
-                // (addr2line-able), which pid/pc alone never could
-                // (sc329B residuals 565/564 and 376/377).
-                ww_msg(b"/tickrip=");
-                ww_hex(
-                    crate::interrupt::preempt::TICK_ENTRY_RIP[c]
-                        .load(core::sync::atomic::Ordering::Relaxed),
-                );
             }
         }
         // vruntime geometry (round 4): the victim's lead/lag against
