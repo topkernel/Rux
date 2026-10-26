@@ -412,18 +412,27 @@ EOX
 
 # xregion probe (leg-7): XGetImage stats of a root-window rect, called
 # from runit's periodic dump_xstate. Dynamic link against the staging
-# tree's libX11 (it runs long after the rootfs is up); -march=rv64gc
-# pins the ISA below what QEMU -cpu rv64 provides (the cross-gcc
-# default march SIGILLs under -cpu rv64 — the diag1 lesson).
-if [ -f "$ROOT/usr/lib/riscv64-linux-gnu/libX11.so" ] || \
-   [ -f "$ROOT/usr/lib/riscv64-linux-gnu/libX11.so.6" ]; then
+# tree's libX11 (it runs long after the rootfs is up); link the
+# VERSIONED soname directly — the runtime lib is always there while the
+# libX11.so -dev symlink depends on which -dev packages the resolver
+# pulled this roll. Headers: expose ONLY staging's X11/ subdir — mixing
+# the staging glibc headers with the cross toolchain's own breaks
+# feature-test macros (L_tmpnam/fortify decl errors, first r10 build).
+# -march=rv64gc pins the ISA below what QEMU -cpu rv64 provides (the
+# cross-gcc default march SIGILLs under -cpu rv64 — the diag1 lesson).
+if [ -f "$ROOT/usr/lib/riscv64-linux-gnu/libX11.so.6" ] && \
+   [ -d "$ROOT/usr/include/X11" ]; then
+    XRINC="$WORK/xregion-include"
+    rm -rf "$XRINC" && mkdir -p "$XRINC"
+    ln -s "$ROOT/usr/include/X11" "$XRINC/X11"
     riscv64-linux-gnu-gcc -O2 -march=rv64gc \
         -o "$ROOT/usr/local/bin/xregion" "$WT/test/ubuntu-gnome/xregion.c" \
-        -I"$ROOT/usr/include" -L"$ROOT/usr/lib/riscv64-linux-gnu" \
-        -Wl,-rpath,/usr/lib/riscv64-linux-gnu -lX11 || \
+        -I"$XRINC" \
+        -Wl,-rpath-link,"$ROOT/usr/lib/riscv64-linux-gnu" \
+        "$ROOT/usr/lib/riscv64-linux-gnu/libX11.so.6" || \
         echo "warn: xregion build failed (dump_xstate will show st=127)"
 else
-    echo "warn: staging libX11 missing — xregion not installed"
+    echo "warn: staging libX11/headers missing — xregion not installed"
 fi
 
 # fonts.dir (leg-7): dpkg -x skips the postinst that runs mkfontdir, so

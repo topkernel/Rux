@@ -127,6 +127,15 @@ static void dump_xstate(void) {
           "/usr/bin/xwininfo", "-root", "-tree" },
         { "== dump X clients (xprop _NET_CLIENT_LIST) ==",
           "/usr/bin/xprop", "-root", "_NET_CLIENT_LIST _NET_SUPPORTING_WM_CHECK" },
+        // GLX capabilities as seen by a CLIENT on this stack (mesa-utils
+        // joined the image in r8): server glX extensions string incl.
+        // GLX_EXT_texture_from_pixmap — the capability mutter's X11
+        // compositing needs. Windows map+frame but never paint; if TFP
+        // is missing from this string the silent-drop hypothesis is
+        // settled image-side, if present the hunt moves to
+        // glXCreatePixmap texturing (leg-7).
+        { "== dump GLX caps (glxinfo -B) ==",
+          "/usr/bin/glxinfo", "-B", "" },
     };
     for (unsigned i = 0; i < sizeof probes / sizeof probes[0]; i++) {
         printf("%s\n", probes[i][0]);
@@ -136,8 +145,11 @@ static void dump_xstate(void) {
             int con = open("/dev/console", O_WRONLY);
             if (con >= 0) { dup2(con, STDOUT_FILENO); dup2(con, STDERR_FILENO); }
             setenv("DISPLAY", ":0", 1);
-            execl(probes[i][1], "probe", probes[i][2], probes[i][3],
-                  (char *)NULL);
+            if (probes[i][3][0])
+                execl(probes[i][1], "probe", probes[i][2], probes[i][3],
+                      (char *)NULL);
+            else
+                execl(probes[i][1], "probe", probes[i][2], (char *)NULL);
             _exit(127);
         }
         int st; waitpid(d, &st, 0);
@@ -152,7 +164,7 @@ static void dump_xstate(void) {
     // break is Xorg->scanout; if the root lacks it too, mutter never
     // composited the client (GLX texture-from-pixmap hunt).
     {
-        static const char *const rects[][4] = {
+        static const char *const rects[][5] = {
             { "window-body", "200", "200", "700", "300" },
             { "panel-strip", "0", "0", "1280", "30" },
         };
@@ -351,15 +363,20 @@ int main(void) {
     // errors ("ActUserManager: user (null) has no username", the
     // accountsservice-CRITICAL spam in every serial so far), and the
     // per-plugin waits serialize into the shell init walk. The daemon
-    // is small and idles quietly once up.
+    // is small and idles quietly once up. jammy ships it under
+    // /usr/libexec; the legacy /usr/lib/accountsservice path is the
+    // fallback.
     {
-        pid_t a = launch_logged("/tmp/accounts-daemon.log",
-                                "/usr/lib/accountsservice/accounts-daemon",
+        const char *acct = "/usr/libexec/accounts-daemon";
+        if (access(acct, X_OK) != 0)
+            acct = "/usr/lib/accountsservice/accounts-daemon";
+        pid_t a = launch_logged("/tmp/accounts-daemon.log", acct,
                                 "accounts-daemon",
                                 (const char *const []){ "accounts-daemon",
                                                         NULL });
         (void)a;
-        printf("[runit] accounts-daemon started (pid %d)\n", (int)a);
+        printf("[runit] accounts-daemon started (pid %d, %s)\n",
+               (int)a, acct);
     }
 
     printf("[runit] starting Xorg (fbdev)\n");
