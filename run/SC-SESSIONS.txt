@@ -6265,3 +6265,58 @@ Lane state: branch tip 573bd104 + this addendum; oh-img-p now carries
 alignguard + 180first (inert, kept) + logdom (4 sites, kept); scripts
 run/patch-foundation-180first.sh and run/patch-abilityms-logdom.sh
 are idempotent and in-tree. Serials sc311B-314B committed.
+
+LEG-29A CLOSE-OUT (07:10).
+WAVE-2 VERDICT (dirlock kernel bzImage-29A-dirlock2): the ext4
+  dir-entry split panic is DEAD under the heaviest draws — sc316A
+  (22MB serial, LC=669 loop-drawing) and sc317A (LC=418): namei
+  range-end panics 0/0 (wave-1 pre-fix: 2 per boot, deterministic;
+  sc308/310 pre-date). sc316A's two "Kernel panic" lines are a
+  DELIBERATE in-guest sysrq-c crashdump (fs/procfs/sysrq.rs:34), not a
+  defect. TREE-*=0 and TREE-RELEASE-HEAL=0 on BOTH — the reparent fix
+  holds on the OH image too (5/5 boots total). Storage D-state 0x2
+  family: did not draw in any of this session's 5 boots; the instrument
+  (file-op + TXN-HANG-STK) is proven live and will name file+site on
+  the next natural draw; the sync-write substrate is adjudicated
+  kernel-side (flush_publications drains the whole deferred queue
+  inside every durability point — see addendum 2).
+GATE ON THE FINAL TREE (tip c3e89b4f, kernel run/bzImage-29A-dirlock2):
+  - x86_64 build rc=0, riscv64 build rc=0.
+  - riscv64 scripted regression boot rc=0, zero panics (dfx=treehunt
+    armed, silent).
+  - make test: ALL TESTS PASSED (twice — pre-dirlock and final tree).
+  - Tier 1 quiet syscost boot: ALL PASS — census TERM 8 / REFUSED 33
+    (bands 8±2 / 32±4), ticks 99.53/100.00/s, volume 106.1M (base
+    107.5M ±10%), clock_gettime 3us, nanosleep 185.5ms (<=244ms),
+    GRQ hold 5073ns (4080-7320), small_alloc REST 5.4% (<=10%),
+    zero panics/OOM. Exit/fs changes cost nothing on the standard
+    boot.
+  - Tier 2 pbench: the run completed (PBENCH DONE rc=0, t=321s) but
+    the perf-gate script's results-glob missed it (driver writes
+    work/pbench-<tag>-serial.log; ls looks for work/pbench-results*)
+    and the medians compare ran by hand: fs/exit rows CLEAN —
+    p4_fork_exit -1.6%, p4_fork_exec -8.2%, p6_write_fsync -78%
+    (improved, F4 lazy write), p3b cow -0.1%, p6_read_cached +0.2%,
+    p6_append 0.0% — but floor rows read OUT (p2_ctxsw +142%,
+    p5b_dgram +380/486%, p6_stat +434%, p5a_pipe +31%) with
+    foreign_qemus=4 DURING the run (OH-B's wave was up; those are the
+    host-noise-dominated floor families per perf-report 8.5). RERUN
+    IN ISOLATION pending host quiet — appended below when done.
+COMMITS THIS LEG (branch feature/samgr-callback, on top of OH-B's
+  merge 95000a3c):
+  - 1e5ba07d dfx(txnhunt,treehunt) probes + subreap reproducer/driver
+  - 6f5e397a fix(exit) PF_EXITING dest skip + member snapshot refresh
+    + release-time heal  [THE sc304-class root-cause fix]
+  - 4b7c1ab5 dfx(txnhunt) file-op family-match + pipe-write stash
+  - 6dc0ae06 fix(ext4) entry-mutation mutex + block-end split refusal
+    [THE deterministic namei panic fix]
+  - c3e89b4f dfx(txnhunt) STK sp-up window 384 words
+  - 0c5781ea/634972ba session notes
+HANDOFF: (1) storage D-state redraw — instrument armed and proven;
+  next natural draw names file+stuck-site in one line. (2) The
+  flush_publications whole-queue drain is the fsync-latency ceiling —
+  per-handle publication waiting is the fix project (needs its own
+  gate work; touches the crash-safety ordering contract). (3) OH-B:
+  the distributeddata<->foundation queue cycle persists on every boot
+  (pid 565/857-class main threads parked in nested BINDER_WRITE_READ,
+  foundation not draining) — your wall, kernel-clean from this side.
