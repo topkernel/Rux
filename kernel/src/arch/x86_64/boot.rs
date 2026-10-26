@@ -224,6 +224,8 @@ core::arch::global_asm!(
 __x86_64_start:
     /* We arrive here from boot.S with:
      *   - long mode + higher-half mapping active
+     *   - .bss already zeroed by boot.S (mode64_low) — the Linux boot
+     *     protocol makes BSS zeroing the kernel's job; see boot.S
      *   - rsp on the low boot stack (still identity-mapped)
      *   - selectors already loaded (0x08/0x10) */
     xor rbp, rbp

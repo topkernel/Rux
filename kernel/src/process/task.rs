@@ -4396,6 +4396,31 @@ impl Task {
         self.kernel_stack_bottom + KERNEL_STACK_SIZE
     }
 
+    /// Diagnostic-safe kernel stack top (KILLDUMP census family).
+    ///
+    /// free_kernel_stack() clears kernel_stack_bottom to 0, but the Task
+    /// itself stays alive (pinned / unreaped) and the KILLDUMP and wedge
+    /// censuses walk FOREIGN tasks that may have exited CONCURRENTLY:
+    /// their thread-list snapshot can contain a task whose stack is
+    /// already freed. kernel_stack_top() then "returns" 0 + KERNEL_STACK
+    /// _SIZE (0x14000 on x86_64) and the census's entry-frame read
+    /// faults at top-PT_REGS_SIZE+off (badaddr 0x13ff0/0x13ff8, monkey-b
+    /// r38 + monkey-a r32 — identical on v9 and v10, deterministic),
+    /// taking the whole boot down from inside a PRINTER. Same shape for
+    /// a task collected between Task creation and alloc_kernel_stack.
+    ///
+    /// Every diagnostic reader of a FOREIGN task's stack must use this
+    /// and skip on None. The scheduler/context-switch paths keep the raw
+    /// kernel_stack_top(): they only ever run on tasks that own a live
+    /// stack.
+    #[inline]
+    pub fn kernel_stack_top_checked(&self) -> Option<usize> {
+        if self.kernel_stack_bottom == 0 {
+            return None;
+        }
+        Some(self.kernel_stack_bottom + KERNEL_STACK_SIZE)
+    }
+
     /// Check if address is within kernel stack range (for overflow detection)
     ///
     /// # Arguments

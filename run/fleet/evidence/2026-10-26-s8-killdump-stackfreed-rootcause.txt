@@ -1,0 +1,54 @@
+Session-8: KILLDUMP census KERNPANIC — ROOT CAUSE (stack-freed task walk)
+==========================================================================
+Class: recurring CRITICAL on the x86 monkey members ("every round reaching
+HEAP-GROW >500MB ends in this panic class" — session-7). Evidence:
+  - monkey-a r32 (v9-x86):  KILLDUMP ... fdtab -> KERNPANIC pfault
+    badaddr=0x13ff0 rip=0xffffffff8078be9e   [serial rotated away]
+  - monkey-b r38 (v10-x86): same shape, "KILLDUMP: tid 6333 fdtab:" is the
+    last complete line, then
+    trap: KERNPANIC pfault badaddr=0x13ff0 rip=0xffffffff8079b04e
+    (keep-monkey-b-r38-serial-tail.log; SIGKILL appspawn->6399 precedes)
+
+Symbolization (target/x86_64-unknown-none/debug/rux == v10, build time
+01:46 matches fleet-x86-v10-bzImage):
+  rip            = rux::sync::futex::rwfz_stack_frames
+  frame 0x...796cb8 = rux::sync::futex::kill_dump_tgid
+  frames 0x...202xxx = send_signal_locked_info/locked/send_signal
+  frames 0x...77a275/779783 = exit::kill_other_threads / do_exit_group
+  -> signal delivery (SIGKILL to a dying launcher) triggers the KILLDUMP
+     census INSIDE send_signal.
+
+Faulting instruction (0xffffffff8079b04e): mov 0x98(%rax),%rcx with
+rax = kernel_stack_top() - 0xa8 (PT_REGS_SIZE)  =>  reads the task's
+saved entry frame. badaddr 0x13ff0 = rax+0x98 => kernel_stack_top()
+returned 0x14000.
+
+0x14000 == KERNEL_STACK_SIZE (config.rs: 81920 == 0x14000) — i.e.
+kernel_stack_bottom was 0. free_kernel_stack() (task.rs) clears
+kernel_stack_bottom to 0 when a task exits, but the Task object stays
+alive (pinned/unreaped) and remains visible to for_each_task. The
+KILLDUMP thread census pins the Task (task_get) but takes NO reference
+on the kernel stack: a thread that exited between census collection and
+its walk has bottom=0, and kernel_stack_top() = 0 + 0x14000. The pt_regs
+read at 0x14000-0xa8 (+0x98 = 0x13ff0) faults => KERNPANIC from inside
+a PRINTER. badaddr is deterministic (same value on v9 and v10 builds) —
+structural, not memory-content dependent.
+
+Fix (this commit): Task::kernel_stack_top_checked() -> Option<usize>
+(None when kernel_stack_bottom == 0) + guards at every diagnostic reader
+of a FOREIGN task's stack:
+  futex.rs: kill_dump_tgid census (skip + "stack-freed" note),
+           rwfz_stack_frames (return), apppark_rets (return),
+           park census arm (rsp=0 -> existing skip),
+           nbr raw-slot window (uses guarded top),
+           rwfz_dump_tgid (skip),
+  binder.rs: mutex-owner chase (skip + note), stallwatch walk (skip),
+           holder forensics (return).
+Scheduler/context-switch paths keep raw kernel_stack_top() (they only
+run on tasks owning a live stack). trap.rs stack-dump bound uses
+sched::current() (live by construction) — unchanged.
+
+Verification: v12-x86 (merged b4da2106 + this fix) builds clean; monkey
+roll decides: the class fired on EVERY >500MB-heap-growth round on
+v9-x86 and v10-x86, so a monkey pair surviving multiple such rounds
+without the panic is the decisive negative.

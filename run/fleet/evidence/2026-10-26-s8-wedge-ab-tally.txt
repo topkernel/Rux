@@ -1,0 +1,23 @@
+Session-8 wedge A/B tally at the oom01 position (sweepRES >= 830)
+=================================================================
+Kernel eras: ltp-a v9<=r42 / v10>=r43; ltp-c v9<=r40 / v10>=r41;
+ltp-b/ltp-d v9 throughout; ltpm = pure main d16571e8 throughout.
+Source: run/fleet/logs/<member>-rounds.log (each "round N:" line,
+res>=830 only; wedge=yes = serial stalled 300s, leader at pc=256).
+
+v9   (ltp-a 10 + ltp-b 20 + ltp-c 11 + ltp-d 20 rounds): 61 rounds, 49 wedges  (80%)
+v10  (ltp-a 4  + ltp-c 3  rounds, post-roll):             7 rounds,  4 wedges  (57%)
+main (ltpm 6 rounds):                                    6 rounds,  3 wedges  (50%)
+
+Readings:
+- The oom01 pc=256 wedge fires on BOTH arms AND pure main at comparable
+  rates; survival runs exist on every kernel (v9: ltp-a r36/37,
+  ltp-b r41/42, ltp-d r21/33/34/41). Load-timing dominated.
+- The softirq budget fix (v10) gets NO wedge-prevention credit from
+  this data (n=7 vs n=61 is also too small to claim improvement;
+  session-7's "first v9 survival at 841" already hinted timing).
+- Post-session-7 recurrences on the SAME class: ltp-a r50 (v10),
+  ltp-b r48 (v9), ltp-c r49/r50 (v10), ltp-d r47/r48/r49 (v9),
+  ltpm r16/r18 (main) — the wedge keeps firing ~50-80% of 830+
+  crossings fleet-wide, so the COW pre-lock fix (v11, 994cbc60) is the
+  root-cause candidate; the ltp-c v11 canary (r51+) is the decider.
