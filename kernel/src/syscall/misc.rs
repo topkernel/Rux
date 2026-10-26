@@ -31,6 +31,9 @@ pub mod poll_events {
     pub const POLLRDBAND: u16 = 0x0080;
     pub const POLLWRNORM: u16 = 0x0100;
     pub const POLLWRBAND: u16 = 0x0200;
+    /// POLLRDHUP (Linux _POLLRDHUP; the epoll EPOLLRDHUP bit has the same
+    /// 0x2000 value). Maskable, like the other readiness bits.
+    pub const POLLRDHUP: u16 = 0x2000;
 }
 
 /// epoll_event structure
@@ -1862,6 +1865,7 @@ pub fn sys_epoll_wait(args: SyscallArgs) -> i64 {
             let mut poll_mask: u16 = 0;
             if entry.events & EPOLLIN != 0 { poll_mask |= POLLIN; }
             if entry.events & EPOLLOUT != 0 { poll_mask |= POLLOUT; }
+            if entry.events & EPOLLRDHUP != 0 { poll_mask |= POLLRDHUP; }
 
             // EPOLLONESHOT: a registration that has already reported is
             // disabled until EPOLL_CTL_MOD re-arms it — report nothing,
@@ -1879,6 +1883,7 @@ pub fn sys_epoll_wait(args: SyscallArgs) -> i64 {
                 let mut ep_events: u32 = 0;
                 if revents & (POLLIN | POLLRDNORM | POLLHUP) != 0 { ep_events |= EPOLLIN; }
                 if revents & (POLLOUT | POLLWRNORM) != 0 { ep_events |= EPOLLOUT; }
+                if revents & POLLRDHUP != 0 { ep_events |= EPOLLRDHUP; }
                 if revents & POLLERR != 0 { ep_events |= EPOLLERR; }
                 if revents & POLLHUP != 0 { ep_events |= EPOLLHUP; }
 

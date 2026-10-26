@@ -2806,6 +2806,13 @@ pub fn sys_prctl(args: SyscallArgs) -> i64 {
             if arg2 > 0xff {
                 return -(errno::EINVAL as i64);
             }
+            // Capability gate (prctl(2)): raising securebits requires
+            // CAP_SETPCAP, else EPERM. Root init holds every capability;
+            // LTP prctl02 case #16 drops CAP_SETPCAP+CAP_SYS_ADMIN and
+            // requires EPERM where we used to succeed.
+            if !crate::security::capable(crate::security::CAP_SETPCAP) {
+                return -(errno::EPERM as i64);
+            }
             // SAFETY: current is a valid task pointer; cred_mut returns
             // the task's own credential structure.
             unsafe {
@@ -2871,6 +2878,13 @@ pub fn sys_prctl(args: SyscallArgs) -> i64 {
                     0
                 }
                 PR_CAP_AMBIENT_CLEAR_ALL => {
+                    // Linux validates the unused arguments: arg3/arg4/arg5
+                    // must be zero for CLEAR_ALL (kernel/sys.c PR_CAP_AMBIENT
+                    // arg validation; LTP prctl02 case #13 passes arg3=1 and
+                    // requires EINVAL where we used to succeed).
+                    if arg3 != 0 || arg4 != 0 || _arg5 != 0 {
+                        return -(errno::EINVAL as i64);
+                    }
                     // SAFETY: current is a valid task pointer.
                     unsafe { (*current).cred_mut().cap_ambient = crate::security::capability::Cap::EMPTY; }
                     0
@@ -4179,6 +4193,18 @@ pub fn sys_seccomp(args: SyscallArgs) -> i64 {
                 });
             }
 
+            // Privilege gate at attach time (Linux order: program
+            // copy/validation above reports EFAULT/EINVAL first; the
+            // capability check happens when the filter attaches).
+            // prctl(2)/seccomp(2): installing a filter requires
+            // no_new_privs OR CAP_SYS_ADMIN; PR_SET_NO_NEW_PRIVS is not
+            // implemented in this kernel, so the gate is CAP_SYS_ADMIN
+            // alone → EACCES otherwise. LTP prctl02 case #5 drops
+            // CAP_SYS_ADMIN/CAP_SETPCAP and requires EACCES.
+            if !crate::security::capable(crate::security::CAP_SYS_ADMIN) {
+                return -(errno::EACCES as i64);
+            }
+
             match seccomp_set_filter(filter) {
                 Ok(()) => 0,
                 Err(e) => e as i64,
@@ -5005,6 +5031,15 @@ pub fn sys_setrlimit(args: SyscallArgs) -> i64 {
 
     if rlim_cur > rlim_max {
         return -(errno::EINVAL as i64);
+    }
+
+    // RLIMIT_NOFILE hard-limit ceiling (Linux do_prlimit): raising
+    // rlim_max above the fs.nr_open sysctl default (1024*1024) is EPERM
+    // even for root — the kernel refuses descriptors beyond the fdtable
+    // encoding. LTP setrlimit03 sets rlim_max = nr_open+1 as root and
+    // requires EPERM, not success.
+    if resource == rlimit_res::NOFILE && rlim_max > 1024 * 1024 {
+        return -(errno::EPERM as i64);
     }
 
     let current = match crate::sched::current() {

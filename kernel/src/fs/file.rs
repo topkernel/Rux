@@ -1332,6 +1332,31 @@ fn reg_file_write(file: &File, buf: &[u8]) -> isize {
             file.get_pos() as usize
         };
 
+        // RLIMIT_FSIZE (Linux generic_write_checks): a write whose start
+        // position is at/after the soft limit fails EFBIG with SIGXFSZ; a
+        // write that would CROSS the limit is silently truncated to the
+        // boundary (no signal) — LTP setrlimit01 case 2 sets the limit to
+        // 10, writes 26 bytes and requires write() to return exactly 10.
+        // Regular files only: pipes/sockets never enter reg_file_write,
+        // matching Linux (only regular-file write paths check).
+        let mut buf = buf;
+        if let Some(task) = crate::sched::current() {
+            let (fsz_cur, _) = task.rlimit(crate::process::task::rlimit_res::FSIZE);
+            if fsz_cur != u64::MAX {
+                if offset as u64 >= fsz_cur {
+                    let _ = crate::signal::send_signal(
+                        task.pid() as u32,
+                        crate::signal::Signal::SIGXFSZ as i32,
+                    );
+                    return crate::errno::Errno::FileTooLarge.as_neg_i32() as isize;
+                }
+                let allowed = (fsz_cur - offset as u64) as usize;
+                if buf.len() > allowed {
+                    buf = &buf[..allowed];
+                }
+            }
+        }
+
         // Write data to inode (buf.length handles automatically)
         let bytes_written = inode.write_data(offset, buf);
 

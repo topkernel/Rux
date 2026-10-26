@@ -2791,9 +2791,13 @@ pub fn sys_madvise(args: [u64; 6]) -> i64 {
             }
         }
 
-        // For MADV_DONTNEED and MADV_REMOVE, need entire range to be in VMA
-        if advice == MADV_DONTNEED || advice == MADV_REMOVE {
-            // Find VMA covering entire range
+        // The ENTIRE range must be mapped for EVERY advice (Linux
+        // madvise_walk_vmas: a hole inside the range returns -ENOMEM).
+        // The old code only enforced this for DONTNEED/REMOVE, so
+        // MADV_NORMAL/MADV_WILLNEED over a partially unmapped file
+        // succeeded (LTP madvise02 cases 7/8 expect ENOMEM over the
+        // last-page-unmapped file2).
+        {
             let mut check_addr = addr;
             while check_addr < addr + length_aligned {
                 match vma_mgr.find(VirtAddr::new(check_addr)) {

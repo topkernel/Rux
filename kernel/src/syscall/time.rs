@@ -1188,7 +1188,11 @@ pub fn sys_timer_settime(args: SyscallArgs) -> i64 {
         None => return -(errno::EINVAL as i64),
     };
 
-    // Write old_value (the CURRENT settings — real values, not zeros)
+    // Write old_value (the CURRENT settings — real values, not zeros).
+    // A bad old_value pointer fails the WHOLE call with EFAULT (Linux
+    // sys_timer_settime checks access_ok on old_value before arming;
+    // LTP timer_settime02's last case passes tst_get_bad_addr and
+    // requires EFAULT, not a silent zero-filled old_value).
     if !old_value.is_null() {
         if !crate::arch::uaccess::access_ok(old_value as usize, 32) {
             return -(errno::EFAULT as i64);
@@ -1199,10 +1203,10 @@ pub fn sys_timer_settime(args: SyscallArgs) -> i64 {
         unsafe {
             let p = old_value as *mut i64;
             let put = crate::arch::uaccess::put_user;
-            let _ = put(p, oi);
-            let _ = put(p.add(1), on);
-            let _ = put(p.add(2), ov);
-            let _ = put(p.add(3), vn);
+            let ok = put(p, oi) & put(p.add(1), on) & put(p.add(2), ov) & put(p.add(3), vn);
+            if !ok {
+                return -(errno::EFAULT as i64);
+            }
         }
     }
 
@@ -1241,10 +1245,17 @@ pub fn sys_timer_settime(args: SyscallArgs) -> i64 {
             .sched_entity()
             .sum_exec_runtime
             .load(core::sync::atomic::Ordering::Acquire);
-        timer.cputime_deadline_ns.store(
-            now_cpu_ns.saturating_add(total_nsec as u64),
-            core::sync::atomic::Ordering::Release,
-        );
+        // TIMER_ABSTIME targets the CPU-time clock directly: the test
+        // passes clock_gettime(cputime)+delta, which must be taken as an
+        // absolute deadline — adding it to "now" again re-based a ~1 s
+        // absolute target ~1 s into the future (LTP timer_settime01's
+        // TIMER_ABSTIME tcase on both CPU clocks). Relative is now+delta.
+        let deadline_ns = if flags & 1 != 0 {
+            total_nsec as u64
+        } else {
+            now_cpu_ns.saturating_add(total_nsec as u64)
+        };
+        timer.cputime_deadline_ns.store(deadline_ns, core::sync::atomic::Ordering::Release);
         timer.overrun_count = 0;
         return 0;
     }

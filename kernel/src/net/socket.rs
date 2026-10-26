@@ -283,6 +283,11 @@ pub struct Socket {
     /// must see EAGAIN while data is held, then one datagram of
     /// held+flush bytes. Best-effort flushed on close.
     pub more_stage: Spinlock<alloc::vec::Vec<u8>>,
+    /// shutdown(SHUT_RD / SHUT_RDWR) ran on this socket (Linux
+    /// sk_shutdown & RCV_SHUTDOWN). poll(2)-level: a poll/epoll asking
+    /// for POLLRDHUP/EPOLLRDHUP must see it (LTP epoll_wait05 shuts the
+    /// read side and expects the RDHUP event).
+    pub shut_rd: core::sync::atomic::AtomicBool,
 }
 
 // SAFETY: Socket uses Spinlocks for all mutable shared state.
@@ -314,6 +319,7 @@ impl Socket {
             wait_queue: WaitQueueHead::new(),
             options: Spinlock::new(SocketOptions::new()),
             more_stage: Spinlock::new(alloc::vec::Vec::new()),
+            shut_rd: core::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -1516,6 +1522,17 @@ fn socket_file_poll(file: &File, events: u16) -> u16 {
         if state == SocketState::Connected {
             ready |= POLLOUT | POLLWRNORM;
         }
+    }
+
+    // shutdown(SHUT_RD/SHUT_RDWR) read-hangup (Linux sk_shutdown &
+    // RCV_SHUTDOWN → tcp_poll's EPOLLRDHUP). Maskable: reported only when
+    // the poll asked for POLLRDHUP (LTP epoll_wait05).
+    if events & POLLRDHUP != 0
+        && socket
+            .shut_rd
+            .load(core::sync::atomic::Ordering::Acquire)
+    {
+        ready |= POLLRDHUP;
     }
 
     ready
