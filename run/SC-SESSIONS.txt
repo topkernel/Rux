@@ -5488,3 +5488,67 @@ boots: multi-second handler exec stalls -> LIFECYCLE restart loop;
 bundle-query wall (n=4). Next levers live OUTSIDE this lane's binder
 domain: the sched/wildwrite starvation producers, and the OH image's
 data layer on quiet boots.
+
+LEG-26 (OH UI lane; leg-25 successor) — OPENED on the solo-host mandate
+(10-QEMU budget, direct user order), after a mid-quota merge repair:
+the worktree held a corrupted half-merge (index conflicts staged,
+MERGE_HEAD gone). Reset + fresh `git merge main` (94309ad8) auto-
+resolved EXCEPT task.rs (the auto-merge dropped 94309ad8's closing
+brace — the branch's rewrite won that hunk); took main's task.rs
+wholesale (9368b996). Dual-arch builds + make test GREEN on the merged
+tree. stash@{1} (shotmon csv) left in place; stash@{0} is foreign-junk.
+
+LEG-26 EVIDENCE PASS 1 — OLD LOGS MINED BEFORE ANY NEW BOOT:
+- All 81 PREEMPT-LEAK lines from sc269/278/279/280 symbolized: the
+  leaked-pc incumbents' interrupted RIPs are ~60% PAGE-CACHE BTree
+  scans (Iter/next_kv/evict_one/InodePageCache walks), plus TIMERS/
+  fair-tree/deadline-tree LazyLeafRange scans, RawSpinlock::lock
+  polling and memmove — long BTree critical sections under global
+  locks (page cache, TIMERS lock_irqsave, GRQ), with spinners queueing
+  behind (the pc=1 "leak" readings at spin-waits may be LEGIT held
+  guards, not phantom bits — every report fires exactly at the 200-tick
+  bound, i.e. sections still in flight, and the heal's zeroing of
+  legitimate guards is what pairs with the 24 underflow clamps/boot).
+- PARKED-LEAK pile on quietcon boots = a handful of pids re-printed
+  (~0x13c 99x, 0x21c 52x...), not hundreds of victims.
+
+USER REDIRECT (mid-leg): standalone workload reproduction FIRST —
+"write scheduler workloads ourselves, construct complex multi-tests,
+mainly to reproduce this problem quickly and stably, doesn't have to
+be on OH". Leg restructured to: repro -> name via DFX -> fix on the
+minimal rootfs -> one OH verification roll.
+
+STANDALONE REPRO (test/schedrepro.c + test/schedrepro_boot.py, musl
+static via the in-tree riscv64 toolchain — glibc-static SIGILLs on
+ifunc vector variants; tiny-ext4 quiet boots, init=/test/schedrepro,
+config via `schedrepro=` cmdline):
+- Classes: W wake-storm (waker->parked workers, per-round stamp ring),
+  P futex pong pairs (turn protocol), H userspace hogs, F fork churn,
+  R pipe req/reply pairs, D 50ms watchdog. Verdict line + p50/p99/max/
+  gt250ms/gt1s per class; REPRO iff any sample >= 1s.
+- NEW KERNEL DFX (all dfx=wwcensus-gated, zero-cost when off):
+  RAN_RING (per-CPU current-publish ring, 32 entries: pid@age/tag/pc),
+  RAN_TICKS per-CPU tick counters, STALL-HOG self detector (>=100j
+  incumbent with comm/pc/tick-window + ring dump; idle excluded),
+  TIMER-SOFTIRQ-STALL now dumps the stalled CPU's ring (suspect-B
+  side), comm added to PREEMPT-LEAK.
+- sweep1 (10 cells, TCG SMP2/4): FULL MIX (W8,x2 P4 R4 F2) = REPRO
+  class: pong RTT p99 24ms, max 1005ms, 69 samples >250ms; pipe max
+  930ms (129 >250ms); wake storm max 314ms; watchdog p99 94ms (<100ms).
+  Single classes CLEAN (<=314ms): hogs-only 53ms, wake-only 51ms,
+  fork-only 314ms, pong+pipe-only 60ms. STALL-HOG: 0 firings anywhere.
+  TIMER-SOFTIRQ-STALL: 0. TIMER-LATE-FIRE: one 30ms. => NO incumbent
+  monopoly, NO tick loss: the stall is pure wake/pick latency on the
+  blocking-IPC pairs (suspect A), not suspect B.
+- PARKED-LEAK (parked futex waiters with pc=1) reproduced in exactly
+  the sweep1 REPRO cells (8-9/boot, same shape as OH quietcon boots)
+  and PARKED-WILDWRITE convictions — but srL1 (full mix + dfx=leakhunt)
+  REPRO'd (1005ms) with ZERO parked-leak lines: the phantom pc
+  correlates with the stalling load but is NOT necessary for the >250ms
+  stalls. Consistent with sc280's falsification; leakhunt's
+  booked-on-nonrunning adds remain the known benign pre-sleep window.
+- W3-RUNWAKE-REFUSED 32/cell = the fork-churn threads' benign
+  already-runnable refusals (budget-capped), not the stall.
+NEXT: sweep2 minimization (which ingredients are required) + per-hop
+pong stamps (hop1 = wake syscall + side1 pick; hop2 = side0 pick) to
+name the stalling hop.
