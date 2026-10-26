@@ -6217,3 +6217,51 @@ LEG-29A ADDENDUM 2 (05:50) — FS-SLOWNESS ADJUDICATION + WAVE NOTES.
   (dirlock fix + widened STK window), dfx=txnhunt,fsw, HDCPORT
   12206/12207. Early: sc316A past the wave-1 panic point with ZERO
   panics — dirlock fix holding so far.
+
+LEG-29B ADDENDUM (06:25) — VISIBILITY PATCH + THE TWO-GATE MODEL.
+
+Visibility patch (commit 115ddf3a): 4 AMS HiLog sites retargeted to a
+printing domain (run/patch-abilityms-logdom.sh). VERDICT: the four
+sites sit on branches the real flow does not take — they printed on
+NO draw, including sc314B where StartUser demonstrably executed
+(resident=12). Their silence is not evidence; resident-ability lines
+remain the reliable SwitchToUser marker. The domain-0xd001336
+silencing stands (4791 sites never print; only the radar sub-domain
+does) but selective retarget of those 4 sites does not yield signal.
+
+  - sc313B (plain, visibility image): 61k lines/5MB, activate=1,
+    resident=0, launcher=0, AMS entry logs=0. Walled draw (killed
+    early at the parked phase).
+  - sc314B (dfx=txnhunt, visibility image): 84k lines/7MB,
+    activate=1, State:7=1, resident=12 (SwitchToUser RAN),
+    launcher=0, launcher spawns=0, LC=20, fgfail=149, TXN-HANG=1864,
+    and — decisive — ImplicitQueryAllAbilityInfos failures = 836.
+
+TWO-GATE MODEL (final for this leg, supersedes "the wall is dead"):
+  GATE 1 (quiet draws: sc306/307/309/311B/312B/313B): the chain dies
+    before/at AMS StartUser's continuation — accountmgr's
+    SendToAMSAccountStart returns 0 (SendRequest code 46,
+    MessageOption(1,8) — TF_ASYNC-shaped), no error logs, no hang,
+    no TXN-HANG on the pair, yet SwitchToUser never executes in
+    foundation (resident=0). Kernel-vs-image fork for OH-A: either
+    the oneway's async-todo delivery/wake is lost in our binder, or
+    foundation's handler defers the task (wait flag in parcel) and
+    its userspace loop drops it. Discriminator for next leg: a
+    code-46-specific kernel print (delivery + read + slot release),
+    or bump SAREG's 600-line budget past the activation.
+  GATE 2 (churn draws: sc314B now, sc273-277 then): SwitchToUser
+    runs, resident abilities start, but the launcher's ability start
+    hits the ImplicitQuery wall (836 fails on sc314B) — the decoded
+    foreground-user failure (0x40002D; accountmgr's foreground map
+    unpopulated because no UI session ever reaches foreground — the
+    loop feeds itself). sc310-class lucky draws squeak through when
+    the explicit userId=100 query path answers first.
+  => launcher.ready NOT reached this leg (0 launcher spawns on all
+    three B boots). The milestone needs BOTH gates broken; they are
+    independent failures with different owners (gate 1 likely
+    kernel-side, gate 2 image-side accountmgr/UI-session ordering).
+
+Lane state: branch tip 573bd104 + this addendum; oh-img-p now carries
+alignguard + 180first (inert, kept) + logdom (4 sites, kept); scripts
+run/patch-foundation-180first.sh and run/patch-abilityms-logdom.sh
+are idempotent and in-tree. Serials sc311B-314B committed.
