@@ -83,6 +83,11 @@ pub mod fsw;
 /// preempt_count — names the producer of the leaked-count wake-strand
 /// family; see dfx/leakorigin.rs.
 pub mod leakorigin;
+/// Last-open path stash for TXN-HANG (dfx=txnhunt): sys_openat stashes
+/// the resolved path at entry so the 1 Hz audit can name the file a
+/// hung server thread is stuck opening (leg-28 item 2: storage_daemon
+/// D-state open family); see dfx/pathstash.rs.
+pub mod pathstash;
 
 /// Initialize the DFX subsystem.
 ///

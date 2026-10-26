@@ -3122,6 +3122,18 @@ pub fn txn_hang_audit() {
             a0,
             a1
         );
+        // Leg-28 item 2: name the file when the hung server thread is
+        // stuck in the open family — the pathstash entry was written by
+        // this tid's own sys_openat at entry (dfx/pathstash.rs).
+        #[cfg(feature = "x86_64")]
+        let is_open_syscall = sys == 2 || sys == 257 || sys == 437;
+        #[cfg(feature = "riscv64")]
+        let is_open_syscall = sys == 56 || sys == 24;
+        if is_open_syscall {
+            if let Some(p) = crate::dfx::pathstash::lookup_open(h.stid) {
+                let _ = writeln!(w, "TXN-HANG txn{} open-path='{}'", h.id, p);
+            }
+        }
     }
     for o in &outs {
         let _ = writeln!(

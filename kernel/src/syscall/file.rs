@@ -97,6 +97,11 @@ pub fn sys_openat(args: SyscallArgs) -> i64 {
         }
     };
 
+    // dfx=txnhunt only: stash the resolved path so the 1 Hz TXN-HANG
+    // audit can name the file when a server thread later parks in
+    // D-state inside this open (leg-28 item 2: storage_daemon family).
+    crate::dfx::pathstash::stash_open(&full_path);
+
     // OH bring-up: trace O_PATH opens (musl's fchmodat fallback opens
     // the target O_PATH then fstatat(fd,"",AT_EMPTY_PATH)s it).
     {
