@@ -442,6 +442,19 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize) {
         // Restore previous PtRegs pointer (handles nested interrupt case)
         CURRENT_PT_REGS[cpu_id].store(prev_pt_regs, core::sync::atomic::Ordering::Relaxed);
     }
+
+    // Leak-origin tripwire (dfx=leakhunt): this frame returns to
+    // userspace, so the task's preempt_count must be exactly 0 (no
+    // in-flight IRQ, every syscall-path guard dropped). A nonzero count
+    // here is a leaked PREEMPT_OFFSET caught at the earliest possible
+    // moment; the probe's per-task acquire-site shadow names the guard
+    // construction that never balanced. Disabled-path cost: one relaxed
+    // load. (Coroutine note: after an in-handler schedule() this tail
+    // runs in the incoming task's own frozen frame with its own regs, so
+    // the check validates whichever task actually returns to user.)
+    if unsafe { (*regs).user_mode() } {
+        crate::dfx::leakorigin::check_user_return();
+    }
 }
 
 /// Handle timer interrupt

@@ -77,6 +77,12 @@ pub mod schb;
 /// ext4/bio cost-anatomy counters (perf-audit line, cmdline `fsw=1`);
 /// see dfx/fsw.rs.
 pub mod fsw;
+/// Leak-origin probe (cmdline `dfx=leakhunt`): records the call site of
+/// every task's OUTERMOST PREEMPT_OFFSET acquire and reports it the
+/// moment a task returns to userspace (or is seen parked) with a nonzero
+/// preempt_count — names the producer of the leaked-count wake-strand
+/// family; see dfx/leakorigin.rs.
+pub mod leakorigin;
 
 /// Initialize the DFX subsystem.
 ///

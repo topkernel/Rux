@@ -1034,6 +1034,20 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize, vector: u64) {
                 }
 
                 LOCAL_TIMER => {
+                    // Fleet s2 session-6 discriminator, x86_64 twin: the
+                    // interrupted task's OWN preempt_count at tick entry,
+                    // before irq_enter books the tick's HARDIRQ_OFFSET.
+                    // Lets a tick-side PREEMPT-LEAK pc=0x10001 split into
+                    // "task already carried the bit" (pctick!=0) vs "the
+                    // bit landed during the tick" (pctick==0). The riscv64
+                    // twin has written this since fleet s2; the x86 side
+                    // (the OH lane's arch) read a dead 0 until now.
+                    crate::interrupt::preempt::TICK_ENTRY_PC[cpu_id].store(
+                        crate::sched::current()
+                            .map(|t| t.preempt_count())
+                            .unwrap_or(0) as u32,
+                        core::sync::atomic::Ordering::Relaxed,
+                    );
                     crate::interrupt::preempt::irq_enter();
                     // LAPIC EOI FIRST (same discipline as the PIC path):
                     // the scheduler call below can switch tasks, and the
@@ -1073,6 +1087,19 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize, vector: u64) {
 
         // Restore previous PtRegs pointer (handles nested interrupt case)
         CURRENT_PT_REGS[cpu_id].store(prev_pt_regs, core::sync::atomic::Ordering::Relaxed);
+    }
+
+    // Leak-origin tripwire (dfx=leakhunt): this frame returns to
+    // userspace, so the task's preempt_count must be exactly 0 (no
+    // in-flight IRQ, every syscall-path guard dropped). A nonzero count
+    // here is a leaked PREEMPT_OFFSET caught at the earliest possible
+    // moment; the probe's per-task acquire-site shadow names the guard
+    // construction that never balanced. Disabled-path cost: one relaxed
+    // load. (Coroutine note: after an in-handler schedule() this tail
+    // runs in the incoming task's own frozen frame with its own regs, so
+    // the check validates whichever task actually returns to user.)
+    if unsafe { (*regs).user_mode() } {
+        crate::dfx::leakorigin::check_user_return();
     }
 }
 

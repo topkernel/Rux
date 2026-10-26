@@ -77,8 +77,6 @@ macro_rules! dfx_switch_table {
             KsProbe => "ksprobe",
             R83HeapScan => "r83scan",
             LeakHunt => "leakhunt",
-            WwCensus => "wwcensus",
-            TxnHang => "txnhunt",
         }
     };
 }
@@ -301,25 +299,9 @@ pub enum DfxSwitch {
     /// armed: one side-table store per outermost guard acquire plus one
     /// count load per user-mode trap return. OFF by default.
     LeakHunt,
-    /// The ~1 Hz wakewatch/timer census heartbeat lines (WW/WW2/WW3 and
-    /// the wakewatch wake/pick line) plus the periodic PREEMPT-LEAK
-    /// reporter. These are hunt instruments: they made the serial
-    /// unusable for interactive work when always on, so they are now
-    /// opt-in via `dfx=wwcensus` (census/forensics boots keep them by
-    /// passing the token; ordinary boots get a clean prompt).
-    WwCensus,
-    /// dfx=txnhunt (leg-27): in-flight binder transaction audit at ~1 Hz
-    /// — any sync txn picked up by its server but unreplied for >= 1 s
-    /// gets a TXN-HANG line naming the server thread's task state, the
-    /// syscall/rip of its entry frame, and every other in-flight txn
-    /// issued from that server's process (the synchronous fan-out chain
-    /// inside the handler). Answers "what does the 15 s samgr handler
-    /// spend its time on" without waiting for the 60 s khungtaskd
-    /// cadence. Purely diagnostic; OFF by default.
-    TxnHang,
 }
 
-const SWITCH_COUNT: usize = 35;
+const SWITCH_COUNT: usize = 33;
 
 static SWITCHES: [AtomicBool; SWITCH_COUNT] = [const { AtomicBool::new(false) }; SWITCH_COUNT];
 
@@ -389,8 +371,6 @@ impl DfxSwitch {
             DfxSwitch::KsProbe => 30,
             DfxSwitch::R83HeapScan => 31,
             DfxSwitch::LeakHunt => 32,
-            DfxSwitch::WwCensus => 33,
-            DfxSwitch::TxnHang => 34,
         }
     }
 
