@@ -397,3 +397,123 @@ mutter + gsd) visible and stable on the Ubuntu 22.04 riscv64 image.
   panel+wallpaper+cursor, not an interactive workspace with app
   windows.
 
+## Session 8 (2026-10-26 midday, leg-7 after the 08:44 quota death)
+
+### Leg-6 harvest (all preserved runs, deterministic panelcheck on end
+### frames — no vision model anywhere in this chain)
+
+- STAB SERIES (3x1800s, r5 image, zero panics — the gsd-power drop now
+  has 3-boot stability evidence): stab1 NEVER LIT (M2@1010s, host
+  storm); stab2 M4@1441s; stab3 M4@901s. "GNOME Shell started"
+  printed in stab3 ONLY (shell start 19:17:09, marker at 19:31:48 —
+  ~888s init walk), right before the overview opened at ~1365s.
+- r6win/r8win/r9in/r10win (2400s): panel YES everywhere (occupancy
+  .92-.93, glyphs at x0 Activities + x1 + x7/x8 clock), cursor
+  BYTE-IDENTICAL at (1154,728) in EVERY frame of EVERY run — zero
+  phantom pointer motion at the pixel level. "GNOME Shell started"
+  NEVER printed in any 2400s run; no banner ever (the shell's
+  org.freedesktop.Notifications daemon only registers at the END of
+  the init walk). Right-side indicators: none in any run.
+- WINDOW FRONTIER SHARPENED (from runit's periodic xwininfo -tree,
+  r10win): the xterm probe window MAPS and is MANAGED+FRAMED by mutter
+  ("rux-window-probe" 904x536+10+45 inside frame 924x591+130+82) and
+  gnome-session-failed's 1280x800 fullscreen window also maps — yet
+  NEITHER ever paints a pixel while the shell's own chrome
+  (panel/wallpaper/cursor) paints fine. So window management works;
+  the break is downstream: mutter child compositing (GLX
+  texture-from-pixmap) or the Xorg->scanout path. glxinfo -B (r10full
+  dump): GL 2.1 compat ONLY (max core profile 0.0), softpipe 20.0.4 —
+  the shell runs on the same GL, so TFP presence/behavior is the open
+  question; XREGION (below) is the instrument that splits
+  composited-root vs scanout.
+
+### The input chain: root cause found, input PROVEN end-to-end
+
+- kprobe1-3 re-analysis: INPTRC traces in push_input_event, which is
+  only reached when a userspace reader drains the virtqueues via
+  evdev read/poll (pull model). Xorg never opened /dev/input at all —
+  the image has no udev and Xorg's auto-add cannot enumerate ("failed
+  to pre-init udev"). kprobe3's guest-side cat failed because the
+  debugfs-installed script was mode 0644 (debugfs write default) and
+  the kernel init path cannot exec #! scripts anyway ("ELF load
+  fail" — verified again by r10pathprobe).
+- r10 image roll: static InputDevice sections (AutoAddDevices=off).
+  Driver libinput FAILED inside Xorg: "client bug: Invalid path
+  /dev/input/event0" — libinput's realpath() fails IN THE XORG
+  PROCESS, although the identical realpath/stat/readlink/open+read
+  sequence succeeds in a quiet-boot shell on the same kernel+image
+  (runs/gnome-r10pp2, static pathprobe wrapper). KERNEL-HUNT ITEM:
+  something about the Xorg process context breaks glibc realpath;
+  evidence banked, not root-caused.
+- r11 roll: Driver evdev instead (no realpath; opens the node and
+  ioctls it). Xorg then FULLY enumerated both devices via the kernel
+  evdev ioctl surface — "Found keys, Configuring as keyboard" +
+  "Found 9 mouse buttons / absolute axes / absolute touchpad",
+  XINPUT devices added (r11ev serial). The kernel EVIOCG* surface
+  passes a real X input driver's probe.
+- ROOT CAUSE OF EVERY "probe sent but nothing happened" SINCE LEG-6:
+  fire.py's QMP send-key payload was data:{name:"a"}; QAPI wants
+  data:"a" (plain string). QEMU rejected EVERY send ("Invalid
+  parameter type for 'keys[0].data', expected: string") while fire.py
+  printed "sent" (error rode the response dict, not an exception).
+  Found via QEMU host-side A/B + -trace virtio_input_queue_full after
+  the trace showed the input eventqs never popped.
+- PROOF (runs/gnome-r11cat2, quiet boot, init=/inputcat static
+  reader, dfx=inputtrace, FIXED probes): [reader] KBD type=1 code=30
+  val=1/0 + SYN at BOTH probe times; INPTRC[1..4] kbd lines 1:1;
+  INPTRC[5..8] ptr EV_ABS for both abs moves; ZERO unexplained events
+  between probes. The kernel virtio-input eventq delivery WORKS and
+  always did; leg-6's raw-console INPTRC trace WORKS; PHANTOM INPUT
+  IS CLOSED with working positive controls (the stab3 overview-open
+  is guest-internal, as suspected).
+
+### Service fixes verified (r10full, storm-trapped but serial-verdicts hold)
+
+- NO_AT_BRIDGE=1 (runit env): 0 AT-SPI dbind warnings (every prior
+  run: dozens).
+- accounts-daemon from PID1 (jammy path /usr/libexec/accounts-daemon,
+  access() fallback): 0 accountsservice-CRITICAL/ActUserManager
+  warnings (every prior run: many).
+- mkfontdir pass: the "fonts.dir not found" Xorg WW is gone; xterm
+  bitmap fallback available.
+- r10full and r11ev both STORM-TRAPPED (2400s, 0% nonblack; host ran
+  30-34 QEMUs all afternoon — stab1-class conditions), so no window/
+  banner/indicator PIXEL verdict from this leg yet; the r11final boot
+  (fixed probes) carries that question.
+
+### Instrumentation added this leg (all committed)
+
+- xregion.c: XGetImage root-region stats (white/black counts + top-4
+  quantized colors) wired into runit's dump_xstate (window-body +
+  panel-strip rects) — splits composited-root vs scanout for the
+  window hunt. Built against the staging tree's own glibc (crt1/crti/
+  crtn + libc.so.6 + image dynamic loader, -fno-pie; max symbol
+  GLIBC_2.34) after the first two builds died on host-glibc links
+  (GLIBC_2.38 vs jammy 2.35) and header mixing.
+- fire.py: --mousemove (QMP abs positioning: 16384/16384 then
+  26214/21299 — deterministic screen targets far from the idle cursor
+  position), --qtrace (QEMU simple/log trace passthrough; one -trace
+  enable= per event — comma is QEMU's option separator), and BOTH
+  probes now log QMP response errors instead of printing "sent".
+- inputcat.c + pathprobe.c: static musl init wrappers (quiet-boot
+  probes; the kernel init path cannot exec #! scripts).
+- runit.c: glxinfo -B joins dump_xstate; accounts-daemon start;
+  NO_AT_BRIDGE; xregion calls.
+
+### Merge-batch status for the coordinator
+
+- Kernel diff vs main: ONLY kernel/src/drivers/input/evdev.rs (the
+  dfx=inputtrace INPTRC block; DFX-gated, default OFF). The three
+  real kernel fixes of this lane (getcwd a2278150, segv-vma a8da458b,
+  small_alloc 65f35f47) are ALREADY on main (ebd60dbb/86526157/
+  7a6e1bf4) — cherry-picked by the coordinator.
+- test/ubuntu-gnome + run/panelcheck.py etc.: image builder (r11),
+  fire.py (FIXED probes — note: any lane re-running keyprobes must
+  take this fix or the stimulus silently no-ops), probes, runit.
+- Pre-verified: x86_64 build rc=0 (config.rs reverted to main's side
+  in the batch; it is a generated file). riscv64 boots all session
+  (make test / regression-boot / syscost Tier-1 NOT re-run this leg —
+  host storm; the evdev diff is print-only DFX and cannot change unit
+  tests, but the coordinator's gate should run them).
+
+

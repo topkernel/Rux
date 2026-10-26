@@ -19,6 +19,7 @@
  * silence indicts it (kernel/QEMU side, not Xorg).
  */
 #include <stdio.h>
+#include <stdlib.h>
 #include <unistd.h>
 #include <fcntl.h>
 #include <poll.h>
@@ -76,8 +77,31 @@ int main(void)
             fflush(stdout);
         }
     }
-    int st;
-    waitpid(r, &st, 0);
-    printf("[inputcat] reader exited st=%d\n", st);
-    return 0;
+    // Hand PID 1 over to runit after the cat-phase window so the SAME
+    // boot exercises both reader regimes (bisect variable: Xorg's
+    // takeover). The forked reader keeps running as an orphan (two
+    // openers on one evdev node are legal; the queue distributes pops
+    // between readers, but INPTRC prints at PUSH time, before any pop,
+    // so its counts are reader-independent ground truth).
+    // INPUTCAT_HANDOFF_SECS gates the exec (default 150s; 0 disables)
+    printf("[inputcat] cat-phase window open\n");
+    fflush(stdout);
+    for (int waited = 0;;) {
+        int st;
+        pid_t p = waitpid(-1, &st, WNOHANG);
+        if (p < 0)
+            sleep(5);
+        else
+            sleep(1);
+        waited += 5;
+        const char *hs = getenv("INPUTCAT_HANDOFF_SECS");
+        int limit = hs ? atoi(hs) : 150;
+        if (limit > 0 && waited >= limit) {
+            printf("[inputcat] handoff: exec /sbin/runit\n");
+            fflush(stdout);
+            execl("/sbin/runit", "runit", (char *)0);
+            perror("[inputcat] exec runit");
+            return 1;
+        }
+    }
 }
