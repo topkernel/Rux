@@ -5373,11 +5373,67 @@ pub fn scheduler_tick() {
                                 }
                                 putchar(b);
                             }
-                            const M4: &[u8] = b" pc=";
+                            // Masked preempt words (the sc290 lesson: the
+                            // raw word at tick time always carries the
+                            // probe's own in-flight HARDIRQ_OFFSET —
+                            // task_bits != 0 or nest_extra > 0 is the
+                            // leak signature; both zero = a clean-pc
+                            // monopoly, a different family).
+                            let pc = (*cur).preempt_count();
+                            let task_bits =
+                                (pc & !crate::interrupt::preempt::HARDIRQ_MASK)
+                                    as u32 as u64;
+                            let nest_extra = ((pc
+                                & crate::interrupt::preempt::HARDIRQ_MASK)
+                                .saturating_sub(
+                                    crate::interrupt::preempt::HARDIRQ_OFFSET,
+                                )) as u32 as u64;
+                            const M4: &[u8] = b" pc=0x";
                             for &b in M4 {
                                 putchar(b);
                             }
-                            pdec((*cur).preempt_count() as u32 as u64);
+                            let mut v = pc as u32 as u64;
+                            for sh in (0..16u32).rev() {
+                                let n = ((v >> (sh * 4)) & 0xF) as u8;
+                                putchar(if n < 10 {
+                                    b'0' + n
+                                } else {
+                                    b'a' + n - 10
+                                });
+                            }
+                            const M4b: &[u8] = b" base=0x";
+                            for &b in M4b {
+                                putchar(b);
+                            }
+                            v = task_bits;
+                            for sh in (0..8u32).rev() {
+                                let n = ((v >> (sh * 4)) & 0xF) as u8;
+                                putchar(if n < 10 {
+                                    b'0' + n
+                                } else {
+                                    b'a' + n - 10
+                                });
+                            }
+                            const M4c: &[u8] = b" nestx=";
+                            for &b in M4c {
+                                putchar(b);
+                            }
+                            pdec(nest_extra);
+                            const M4d: &[u8] = b" pctick=0x";
+                            for &b in M4d {
+                                putchar(b);
+                            }
+                            v = crate::interrupt::preempt::TICK_ENTRY_PC[cpu_id]
+                                .load(core::sync::atomic::Ordering::Relaxed)
+                                as u64;
+                            for sh in (0..8u32).rev() {
+                                let n = ((v >> (sh * 4)) & 0xF) as u8;
+                                putchar(if n < 10 {
+                                    b'0' + n
+                                } else {
+                                    b'a' + n - 10
+                                });
+                            }
                         }
                         const M5: &[u8] = b" age_jiffies=";
                         for &b in M5 {
