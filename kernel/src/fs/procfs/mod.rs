@@ -1242,7 +1242,6 @@ unsafe fn procfs_lookup(dir: &Inode, name: &[u8]) -> Result<Ino, i32> {
             b"status" => PidFileKind::Status,
             b"stat" => PidFileKind::Stat,
             b"schedstat" => PidFileKind::Schedstat,
-            b"schedstat" => PidFileKind::Schedstat,
             b"cmdline" => PidFileKind::Cmdline,
             b"exe" => PidFileKind::Exe,
             b"cwd" => PidFileKind::Cwd,
@@ -1615,7 +1614,6 @@ unsafe fn procfs_iget(parent: &Inode, name: &[u8], ino: Ino) -> Result<Arc<Inode
         let kind = match name {
             b"status" => PidFileKind::Status,
             b"stat" => PidFileKind::Stat,
-            b"schedstat" => PidFileKind::Schedstat,
             b"schedstat" => PidFileKind::Schedstat,
             b"cmdline" => PidFileKind::Cmdline,
             b"exe" => PidFileKind::Exe,
