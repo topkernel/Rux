@@ -88,6 +88,11 @@ pub mod leakorigin;
 /// hung server thread is stuck opening (leg-28 item 2: storage_daemon
 /// D-state open family); see dfx/pathstash.rs.
 pub mod pathstash;
+/// Process-tree invariant validator (dfx=treehunt, leg-29A): catches a
+/// live task whose parent pointer names released memory — the E8-REPAR
+/// "unlinked snapshot" class that produced the sc304 signal-Arc Oops —
+/// plus stale thread-group parent snapshots; see dfx/treehunt.rs.
+pub mod treehunt;
 
 /// Initialize the DFX subsystem.
 ///

@@ -3122,16 +3122,132 @@ pub fn txn_hang_audit() {
             a0,
             a1
         );
-        // Leg-28 item 2: name the file when the hung server thread is
-        // stuck in the open family — the pathstash entry was written by
-        // this tid's own sys_openat at entry (dfx/pathstash.rs).
+        // Leg-28 item 2 + leg-29A: name the FILE when the hung server
+        // thread is stuck in a file syscall family — the pathstash
+        // entry was written by this tid's own entry path (open family:
+        // sys_openat; regular-file writes: sys_write; fsync family:
+        // sys_fsync — sc310's hiview handler sat in fdatasync 43 min
+        // with only the raw fd visible).
         #[cfg(feature = "x86_64")]
-        let is_open_syscall = sys == 2 || sys == 257 || sys == 437;
+        let is_file_syscall = matches!(sys, 2 | 257 | 437 | 1 | 20 | 74 | 75);
         #[cfg(feature = "riscv64")]
-        let is_open_syscall = sys == 56 || sys == 24;
-        if is_open_syscall {
-            if let Some(p) = crate::dfx::pathstash::lookup_open(h.stid) {
-                let _ = writeln!(w, "TXN-HANG txn{} open-path='{}'", h.id, p);
+        let is_file_syscall = matches!(sys, 56 | 24 | 64 | 66 | 82 | 83);
+        if is_file_syscall {
+            if let Some((op, p)) = crate::dfx::pathstash::lookup_file(h.stid) {
+                let opn = match op {
+                    crate::dfx::pathstash::OP_OPEN => "open",
+                    crate::dfx::pathstash::OP_WRITE => "write",
+                    crate::dfx::pathstash::OP_SYNC => "sync",
+                    _ => "?",
+                };
+                let _ = writeln!(w, "TXN-HANG txn{} file-op={} path='{}'", h.id, opn, p);
+            }
+        }
+        // Leg-29A stuck-site probe: kernel-text words off the hung
+        // thread's kernel stack, so the serial log names WHERE in the
+        // kernel the handler is parked (sc310's RUNNING 43-min
+        // fdatasync vs sc303's D-state open need the stuck function,
+        // not just the syscall). Two windows:
+        //   sp-up   from thread().sp upward — the exact parked chain
+        //           when the thread SLEEPS (context-switch-fresh sp;
+        //           same contract as khungtaskd's HUNG-STK).
+        //   top-dn  from just under the entry pt_regs downward — the
+        //           newest frames when the thread is RUNNING on
+        //           another CPU (thread().sp is then stale; the live
+        //           frames sit between the entry frame and the current
+        //           sp, so scanning from the top catches them plus
+        //           dead-frame noise).
+        // Cross-CPU reads are diagnostic-only (sc261 sleep_snapshot
+        // contract); symbolize offline with addr2line.
+        if !srv.is_null() {
+            // SAFETY: diagnostic reads of the task's fields and its
+            // pinned kernel-stack pages (the Task exists).
+            let tk = unsafe { &*srv };
+            if let Some(top) = tk.kernel_stack_top_checked() {
+                #[cfg(feature = "x86_64")]
+                extern "C" {
+                    static __stext: u8;
+                    static __etext: u8;
+                }
+                #[cfg(not(feature = "x86_64"))]
+                extern "C" {
+                    static _stext: u8;
+                    static _etext: u8;
+                }
+                #[cfg(feature = "x86_64")]
+                let (lo, hi) = (
+                    core::ptr::addr_of!(__stext) as u64,
+                    core::ptr::addr_of!(__etext) as u64,
+                );
+                #[cfg(not(feature = "x86_64"))]
+                let (lo, hi) = (
+                    core::ptr::addr_of!(_stext) as u64,
+                    core::ptr::addr_of!(_etext) as u64,
+                );
+                let is_text = |v: u64| v >= lo && v < hi && (v & 1) == 0;
+                let base = top - crate::config::KERNEL_STACK_SIZE;
+                let thsp = tk.thread().sp;
+                let mut line = alloc::string::String::new();
+                // Window (a): parked-chain words upward from sp.
+                if thsp as usize >= base
+                    && thsp as usize + 8 <= top
+                    && (thsp & 7) == 0
+                {
+                    let p = thsp as *const u64;
+                    let mut shown = 0;
+                    let _ = write!(line, " sp-up:");
+                    for k in 0..80usize {
+                        // SAFETY: diagnostic read inside the task's own
+                        // kernel-stack window; bounds checked above.
+                        let v = unsafe { core::ptr::read_volatile(p.add(k)) };
+                        if is_text(v) {
+                            let _ = write!(line, " {v:#x}");
+                            shown += 1;
+                            if shown >= 8 {
+                                break;
+                            }
+                        }
+                    }
+                    if shown == 0 {
+                        line.truncate(0);
+                    }
+                }
+                // Window (b): newest frames downward from the entry frame.
+                #[cfg(feature = "x86_64")]
+                let entry_sz = crate::arch::x86_64::pt_regs::PT_REGS_SIZE;
+                #[cfg(feature = "riscv64")]
+                let entry_sz = crate::arch::riscv64::pt_regs::PT_REGS_SIZE;
+                let start = (top - entry_sz).saturating_sub(8) & !7usize;
+                let mut bline = alloc::string::String::new();
+                let _ = write!(bline, " top-dn:");
+                let mut shown = 0;
+                let mut k = 0usize;
+                while shown < 10 && k < 0x600 / 8 {
+                    let addr = start - k * 8;
+                    if addr < base + 8 {
+                        break;
+                    }
+                    // SAFETY: diagnostic read inside the task's own
+                    // kernel-stack window; bounds checked above.
+                    let v = unsafe { core::ptr::read_volatile(addr as *const u64) };
+                    if is_text(v) {
+                        let _ = write!(bline, " {v:#x}");
+                        shown += 1;
+                    }
+                    k += 1;
+                }
+                if shown > 0 {
+                    let _ = writeln!(
+                        w,
+                        "TXN-HANG-STK txn{} tid{} state={:#x} thsp={:#x}{}{}",
+                        h.id,
+                        h.stid,
+                        state,
+                        thsp,
+                        line,
+                        bline
+                    );
+                }
             }
         }
     }

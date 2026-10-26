@@ -24,6 +24,7 @@ const CAP: usize = 128;
 
 struct Slot {
     tid: AtomicU32,
+    op: AtomicU32,
     len: AtomicU32,
     buf: [u8; CAP],
 }
@@ -31,14 +32,29 @@ struct Slot {
 static mut SLOTS: [Slot; N] = [const {
     Slot {
         tid: AtomicU32::new(0),
+        op: AtomicU32::new(0),
         len: AtomicU32::new(0),
         buf: [0; CAP],
     }
 }; N];
 
+/// Stash op tags (leg-29A): the syscall family that recorded the path.
+pub const OP_OPEN: u32 = 1;
+pub const OP_WRITE: u32 = 2;
+pub const OP_SYNC: u32 = 3;
+
 /// Record the current task's last resolved open path. Called from
 /// sys_openat after resolution; arm-gated.
 pub fn stash_open(path: &str) {
+    stash_file(OP_OPEN, path);
+}
+
+/// Record the current task's last file path with the syscall-family
+/// tag (open / regular-file write / fsync-fdatasync). Each family
+/// re-stashes at ITS entry, so a thread parked inside one of them
+/// always shows its own file. Arm-gated on TxnHang (leg-29A: sc310's
+/// hiview handler sat in fdatasync 43 min with only a raw fd known).
+pub fn stash_file(op: u32, path: &str) {
     if !crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::TxnHang) {
         return;
     }
@@ -55,13 +71,14 @@ pub fn stash_open(path: &str) {
     let s = unsafe { &mut *core::ptr::addr_of_mut!(SLOTS[(tid as usize) % N]) };
     s.tid.store(0, Ordering::Release);
     s.buf[..n].copy_from_slice(&bytes[..n]);
+    s.op.store(op, Ordering::Release);
     s.len.store(n as u32, Ordering::Release);
     s.tid.store(tid, Ordering::Release);
 }
 
-/// Look up the last open path stashed by `tid`. Returns None when the
+/// Look up the last (op, path) stashed by `tid`. Returns None when the
 /// slot is empty, owned by another tid, or the path was never written.
-pub fn lookup_open(tid: u32) -> Option<&'static str> {
+pub fn lookup_file(tid: u32) -> Option<(u32, &'static str)> {
     let i = (tid as usize) % N;
     // SAFETY: diagnostic read of the static slot table; the 'static
     // borrow is derived from the static itself and bytes are
@@ -74,5 +91,12 @@ pub fn lookup_open(tid: u32) -> Option<&'static str> {
     if n == 0 || n > CAP {
         return None;
     }
-    core::str::from_utf8(&s.buf[..n]).ok()
+    let op = s.op.load(Ordering::Acquire);
+    let p = core::str::from_utf8(&s.buf[..n]).ok()?;
+    Some((op, p))
+}
+
+/// Backward-compatible open-only lookup (leg-28 print).
+pub fn lookup_open(tid: u32) -> Option<&'static str> {
+    lookup_file(tid).map(|(_, p)| p)
 }
