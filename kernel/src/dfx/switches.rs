@@ -80,6 +80,7 @@ macro_rules! dfx_switch_table {
             WwCensus => "wwcensus",
             TxnHang => "txnhunt",
             TreeHunt => "treehunt",
+            Ams46 => "ams46",
         }
     };
 }
@@ -325,9 +326,20 @@ pub enum DfxSwitch {
     /// "unlinked snapshot" family root-cause hunt (sc304 signal-Arc
     /// Oops walked such a chain). Purely diagnostic; OFF by default.
     TreeHunt,
+    /// dfx=ams46 (leg-30B): the Gate-1 arsenal — full lifecycle trace of
+    /// IAbilityManager::StartUser (code 46, interface token
+    /// "ohos.aafwk.AbilityManager") binder transactions: enqueue + route
+    /// (proc todo / child looper / async-slot park), read by which
+    /// foundation thread, buffer free + async-slot release, stale-sweep
+    /// reclaim, silence-rule retire, and a ~5 s node census (async slot
+    /// held, async_todo depth, target proc todo depth, waiting readers).
+    /// Adjudicates kernel-delivered vs foundation-dropped for the
+    /// accountmgr→AMS StartUser oneway that returns 0 but never executes
+    /// SwitchToUser inside foundation on walled draws. OFF by default.
+    Ams46,
 }
 
-const SWITCH_COUNT: usize = 36;
+const SWITCH_COUNT: usize = 37;
 
 static SWITCHES: [AtomicBool; SWITCH_COUNT] = [const { AtomicBool::new(false) }; SWITCH_COUNT];
 
@@ -400,6 +412,7 @@ impl DfxSwitch {
             DfxSwitch::WwCensus => 33,
             DfxSwitch::TxnHang => 34,
             DfxSwitch::TreeHunt => 35,
+            DfxSwitch::Ams46 => 36,
         }
     }
 
