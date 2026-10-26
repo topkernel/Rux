@@ -6185,3 +6185,35 @@ NEXT LEVERS (leg-30B, value order):
      the oneway-shaped StartUser.
   4. The old BMS wall's KvStore-side noise (4194349) is confirmed
     cosmetic-on-this-image; do not chase it.
+
+LEG-29A ADDENDUM 2 (05:50) — FS-SLOWNESS ADJUDICATION + WAVE NOTES.
+  The sync-write stall substrate is KERNEL-SIDE by mechanism, now read
+  from the code: ext4_sync_file step 1 and sync_buffers both call
+  bio::flush_publications(), which drains the ENTIRE deferred
+  publication queue synchronously (mem::take, then pre/entry/post
+  block syncs for EVERY record, in a loop for racing publishers).
+  Every fsync/fdatasync/create-side durability point therefore pays
+  for ALL outstanding entry publications from ALL creators — under
+  provisioning churn the queue grows faster than drains, and fdatasync
+  latency becomes O(pending publications): the observed 1.2-1.4 s
+  accesstoken WAL syncs, 5.7 s huks_service fsync, sc303's 5.5->26 s
+  storage open/write shape, plausibly up to the 43-min hiview draw if
+  a write retry path (5x10 s deadline) stacked on top. Fix DIRECTION
+  (next leg, needs its own gate work): drain publications in a
+  background context and make durability points wait for THEIR OWN
+  records (per-handle tagging), not the world's. NOT patched tonight —
+  it touches the crash-safety ordering contract deliberately.
+  GOTCHA for future boots: fsw counters arm via the SEPARATE cmdline
+  param `fsw=1` (fsw::on() reads get_param("fsw")=="1"), NOT the
+  dfx= token list — sc313A-317A ran txnhunt-only. Use
+  EXTRA_APPEND="dfx=txnhunt fsw=1" (space, not comma).
+  WAVE-1 final: sc313A 4MB LC=17 pf=0; sc314A 7MB LC=9 pf=0; sc315A
+  7MB LC=13 pf=31; panics=2 each (the pre-dirlock namei split panic),
+  TREE=0/0/0 HEAL=0/0/0 (tree fix holding on the OH image too),
+  storage D-state 0x2 family did NOT draw (0 in all three). The
+  dominant hang target again: distributeddata pid 565 (412 lines in
+  sc315A) — the BMS wall family persists on the alignguard image.
+  WAVE-2 (fired 05:36): sc316A/sc317A on run/bzImage-29A-dirlock2
+  (dirlock fix + widened STK window), dfx=txnhunt,fsw, HDCPORT
+  12206/12207. Early: sc316A past the wave-1 panic point with ZERO
+  panics — dirlock fix holding so far.
