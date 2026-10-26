@@ -4297,6 +4297,12 @@ pub fn scheduler_tick() {
                         let t0 = since.load(core::sync::atomic::Ordering::Relaxed);
                         if t0 != 0
                             && now.wrapping_sub(t0) >= 200
+                            // Serial-noise policy: the periodic PREEMPT-LEAK
+                            // reporter is a hunt instrument (dfx=wwcensus),
+                            // not default output — idle-task word residue on
+                            // quiet boots made the serial unusable.
+                            && crate::dfx::switches::enabled(
+                                crate::dfx::switches::DfxSwitch::WwCensus)
                         {
                             let lp = LEAK_LAST_PRINT.load(
                                 core::sync::atomic::Ordering::Acquire);

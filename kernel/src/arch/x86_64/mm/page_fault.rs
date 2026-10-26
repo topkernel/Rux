@@ -1381,17 +1381,27 @@ pub fn handle_mm_fault(
                                 bytes_to_read,
                             );
 
-                            if will_full_read && bytes_read == 0 {
-                                // Read failed outright on a page we did
-                                // not pre-zero: provide the zero base
-                                // the pre-zero path would have.
-                                core::ptr::write_bytes(page_ptr, 0, PAGE_SIZE_USIZE);
-                            }
-                            // Zero remaining bytes after file data (partial last page)
-                            if bytes_read > 0 && (bytes_read as usize) < PAGE_SIZE_USIZE {
+                            // Any read that does not verifiably cover the
+                            // whole page — short tail, 0, or a NEGATIVE
+                            // errno return — must leave the uncovered
+                            // bytes zero. `will_full_read` skipped the
+                            // pre-zero, so without this a failed read maps
+                            // recycled-buddy content (a previous owner's
+                            // bytes) into user space — the OH leg-22
+                            // dirty-bss-slack-page evidence class. The old
+                            // `bytes_read == 0` check missed negative
+                            // returns (riscv64 twin: fill_file_page; the
+                            // riscv64 single-page path always pre-zeroes).
+                            let good = if bytes_read > 0 {
+                                bytes_read as usize
+                            } else {
+                                0
+                            };
+                            if will_full_read && good < PAGE_SIZE_USIZE {
                                 core::ptr::write_bytes(
-                                    page_ptr.add(bytes_read as usize), 0,
-                                    PAGE_SIZE_USIZE - bytes_read as usize,
+                                    page_ptr.add(good),
+                                    0,
+                                    PAGE_SIZE_USIZE - good,
                                 );
                             }
                         }

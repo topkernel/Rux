@@ -253,6 +253,11 @@ pub fn check_picked(task: *mut crate::process::Task, cpu: usize) {
 /// from timer.rs; printk, not direct console, so it cannot interleave
 /// with GRQ-held prints.
 pub fn heartbeat() {
+    // Serial-noise policy: hunt instrument, prints only on dfx=wwcensus
+    // boots; ordinary boots keep a clean serial prompt.
+    if !crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::WwCensus) {
+        return;
+    }
     let wake_n = WAKE_N.load(Ordering::Relaxed);
     let pick_n = PICK_N.load(Ordering::Relaxed);
     let sum_ms = ticks_to_ms(DELTA_SUM_TICKS.load(Ordering::Relaxed));

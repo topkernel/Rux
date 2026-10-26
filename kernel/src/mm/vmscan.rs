@@ -303,9 +303,15 @@ fn reclaim_anonymous_pages(nr_to_scan: usize, sc: &mut ScanControl) -> usize {
             if single_mapping {
                 // Install the swap entry in the PTE (page becomes unreachable
                 // for user stores), mark the slot write-in-flight, then write.
+                // The pending mark MUST precede the PTE install: the window
+                // [entry-installed, mark-set] let a racing fault swap-in the
+                // slot's PREVIOUS device content (another page's bytes — a
+                // fresh anon page arriving dirty with foreign data, the OH
+                // leg-22 recycler evidence class). Paths that do not reach
+                // the write must clear the mark (swap slot leak arms below).
+                swap::swap_mark_pending(swap_type, swap_offset);
                 let unmapped = try_to_unmap_with_swap(p, swap_entry);
                 if unmapped > 0 && !p.is_mapped() {
-                    swap::swap_mark_pending(swap_type, swap_offset);
                     let write_ok = swap::swap_write_page(swap_type, swap_offset, phys).is_ok();
                     swap::swap_clear_pending(swap_type, swap_offset);
 
@@ -341,11 +347,16 @@ fn reclaim_anonymous_pages(nr_to_scan: usize, sc: &mut ScanControl) -> usize {
                     }
                 } else if unmapped == 0 {
                     // No PTE was replaced: the entry was never installed,
-                    // so the slot is genuinely unused — free it.
+                    // so the slot is genuinely unused — clear the pre-set
+                    // in-flight mark and free it.
+                    swap::swap_clear_pending(swap_type, swap_offset);
                     swap::swap_free_slot(swap_type, swap_offset);
                 } else {
                     // Partial unmap: at least one PTE now references the swap
-                    // entry — freeing the slot would be a UAF. Leak it instead.
+                    // entry — freeing the slot would be a UAF. Leak it (and
+                    // clear the in-flight mark: the write never happened, so
+                    // a swap-in must not wait on it).
+                    swap::swap_clear_pending(swap_type, swap_offset);
                     crate::pr_warn!(
                         "vmscan: partial unmap during swap-out (slot leaked)"
                     );

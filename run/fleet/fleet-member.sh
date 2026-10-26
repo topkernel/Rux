@@ -67,16 +67,36 @@ boot_cmd() { # prints the full qemu argv, %q-quoted for exact eval round-trip
     CMD=()
     case "$KIND" in
     ltp)
+        # KIMG override lets a session roll a candidate kernel to a
+        # subset of members before fleet-wide adoption (session-3
+        # refresh protocol: merged-tree kernel goes to one member first).
         local start=$(( (RANDOM * 32768 + RANDOM) % 1080 ))
         rv_common "$serial"
         rv_drive "$IMG/fleet-ltp-rootfs.img" rootfs
-        CMD+=(-kernel "$IMG/fleet-rv64-rux"
+        CMD+=(-kernel "${KIMG:-$IMG/fleet-rv64-rux}"
+              -append "root=/dev/vda rw init=/test/sweep console=ttyS0 sweepstart=$start dfx=watchdog,taskdump roundtag=$MEMBER-r$round")
+        ;;
+    ltpm)
+        # current-main kernel member: same LTP sweep surface, kernel
+        # built from origin/main (worktree /home/william/rux-agents/
+        # wwh-main-kernel) — control arm for worktree-vs-main drift.
+        # NOTE pre-merge main still carries the csrrw-time read_counter
+        # bug: mount-heavy sweeps are expected to panic it inside
+        # minutes — that is the demonstration, not a new anomaly.
+        local start=$(( (RANDOM * 32768 + RANDOM) % 1080 ))
+        rv_common "$serial"
+        rv_drive "$IMG/fleet-ltp-rootfs.img" rootfs
+        CMD+=(-kernel "$IMG/fleet-rv64-main-rux"
               -append "root=/dev/vda rw init=/test/sweep console=ttyS0 sweepstart=$start dfx=watchdog,taskdump roundtag=$MEMBER-r$round")
         ;;
     memstorm)
+        # KIMG override: session-4 rolled memstorm to v8 as the
+        # heavy-switch-path soak member (V state is in the switch path —
+        # memstorm is the highest switch-rate surface); same staged-rollout
+        # convention as ltp/execsig.
         rv_common "$serial"
         rv_drive "$IMG/fleet-ltp-rootfs.img" rootfs
-        CMD+=(-kernel "$IMG/fleet-rv64-rux"
+        CMD+=(-kernel "${KIMG:-$IMG/fleet-rv64-rux}"
               -append "root=/dev/vda rw init=/test/memstorm console=ttyS0 dfx=periodic,memwatch,watchdog roundtag=$MEMBER-r$round")
         ;;
     fsfuzz)
@@ -84,6 +104,50 @@ boot_cmd() { # prints the full qemu argv, %q-quoted for exact eval round-trip
         rv_drive "$IMG/fleet-ltp-rootfs.img" rootfs
         CMD+=(-kernel "$IMG/fleet-rv64-rux"
               -append "root=/dev/vda rw init=/test/fsfuzz console=ttyS0 dfx=watchdog,taskdump roundtag=$MEMBER-r$round")
+        ;;
+    dirtyscan)
+        # Dirty-page-recycler hunter (session 8; OH leg-22 handoff: a
+        # fresh anon bss page arrived carrying foreign strings + a
+        # pointer — recycler handed out a dirty frame, or a frame was
+        # double-mapped). Private reflink rootfs with test/dirtyscan.c:
+        # fresh-anon zero scans, MAP_FIXED/MADV_DONTNEED/remap replace
+        # checks, ASCII-tagged churn children feeding the recycler, COW
+        # churn, and a persistent magic guard region (any drift = the
+        # wild writer's user-memory face). 1G to keep real allocator
+        # pressure on. DIRTYHIT/GUARDHIT lines = CRITICAL.
+        MEM=1G rv_common "$serial"
+        rv_drive "$IMG/fleet-dirtyscan-rootfs.img" rootfs
+        CMD+=(-kernel "${KIMG:-$IMG/fleet-rv64-rux}"
+              -append "root=/dev/vda rw init=/test/dirtyscan console=ttyS0 dfx=watchdog,taskdump roundtag=$MEMBER-r$round")
+        ;;
+    modchurn)
+        # Module-load/unload churn hunter (session 9; OH leg-22
+        # bssslack2: foreign strings + a live pointer in a dlopen'd
+        # module's bss slack page, beyond phdr memsz, addressed by
+        # nothing in the module). Dynamic binary + shared lib on a
+        # reflink of the dirtyscan rootfs: dlopen/dlclose churn of a
+        # lib whose ctor writes only page 0 of a 256KiB bss; untouched
+        # interior + maps-derived slack scanned every load; donor-tag
+        # fork waves feed the recycler identifiable frames; swap
+        # roundtrip (24MiB pattern region pushed out by hog children,
+        # read back) = the swap-pending fix's standing negative test;
+        # MADV_DONTNEED re-zero check. 1G guest + 256MB swap tail.
+        # MODDIRTYHIT/SWAPHIT lines = CRITICAL.
+        MEM=1G rv_common "$serial"
+        rv_drive "$IMG/fleet-modchurn-rootfs.img" rootfs
+        CMD+=(-kernel "${KIMG:-$IMG/fleet-rv64-rux}"
+              -append "root=/dev/vda rw init=/test/modchurn console=ttyS0 dfx=watchdog,taskdump roundtag=$MEMBER-r$round")
+        ;;
+    execsig)
+        # Static-exec page-fill repro (coordinator relay 2026-10-25:
+        # large static binaries SIGILL on garbage text fill ~72KB in).
+        # Private reflink rootfs with the 742KB static chain-walker
+        # probe (/test/execsig); any garbage-filled exec page either
+        # SIGILLs at a named step or corrupts g_sum visibly.
+        rv_common "$serial"
+        rv_drive "$IMG/fleet-execsig-rootfs.img" rootfs
+        CMD+=(-kernel "${KIMG:-$IMG/fleet-rv64-rux}"
+              -append "root=/dev/vda rw init=/test/execsig console=ttyS0 dfx=watchdog,taskdump roundtag=$MEMBER-r$round")
         ;;
     monkey)
         local OH=/home/william/rux-agents/oh-display/run/oh-img
@@ -163,6 +227,18 @@ while [ "$i" -le "$LAST" ]; do
     [ -f "$S.wedge" ] && WEDGE="yes"
     OUT=$("$FLEET/fleet-classify-round.sh" "$MEMBER" "$i" "$S" "$RC" "$WEDGE")
     echo "[$MEMBER] round $i: $OUT" | tee -a "$LOGS/${MEMBER}-rounds.log"
+
+    # Session-7 harness fix: CRITICAL rounds' serials rotated away before
+    # anyone could adjudicate them (monkey-b KERNPANIC r8/r20/r24/r26 —
+    # signatures lost). Preserve the last 3 MB of every CRITICAL round
+    # under a keep- name the rotation glob does not match; prune to the
+    # 8 newest per member for disk discipline.
+    case "$OUT" in
+    *CRITICAL*)
+        tail -c 3000000 "$S" > "$LOGS/keep-${MEMBER}-r${i}-serial-tail.log" 2>/dev/null
+        ls -t "$LOGS"/keep-"${MEMBER}"-*-serial-tail.log 2>/dev/null | tail -n +9 | xargs -r rm -f
+        ;;
+    esac
 
     i=$((i+1))
     sleep 5

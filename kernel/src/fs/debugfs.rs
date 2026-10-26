@@ -488,6 +488,7 @@ pub static DEBUGFS_INODE_OPS: INodeOps = INodeOps {
     readlink: None,
     get_file_ops: Some(debugfs_get_file_ops),
     readdir: Some(debugfs_readdir),
+    readdir_cacheable: false,
     open: Some(debugfs_open),
     permission: None, // default DAC path
     getattr: Some(debugfs_getattr),

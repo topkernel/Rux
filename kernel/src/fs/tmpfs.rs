@@ -1221,14 +1221,13 @@ fn tmpfs_file_close(_file: &crate::fs::File) -> i32 {
 }
 
 /// tmpfs file operations table (directories use the shared DIR_FILE_OPS).
-pub static TMPFS_FILE_OPS: crate::fs::FileOps = crate::fs::FileOps {
-    read: Some(tmpfs_file_read),
-    write: Some(tmpfs_file_write),
-    lseek: Some(tmpfs_file_lseek),
-    close: Some(tmpfs_file_close),
-    poll: None,
-    read_at: Some(tmpfs_file_read_at),
-};
+pub static TMPFS_FILE_OPS: crate::fs::FileOps = crate::fs::FileOps::builder()
+    .read(tmpfs_file_read)
+    .write(tmpfs_file_write)
+    .lseek(tmpfs_file_lseek)
+    .close(tmpfs_file_close)
+    .read_at(tmpfs_file_read_at)
+    .build();
 
 /// tmpfs positional read (R71): explicit offset, shared file position
 /// untouched — the generic set_pos/read/restore fallback races against
@@ -1299,6 +1298,7 @@ pub static TMPFS_INODE_OPS: INodeOps = INodeOps {
     readlink: Some(tmpfs_readlink),
     get_file_ops: Some(tmpfs_get_file_ops),
     readdir: Some(tmpfs_readdir),
+    readdir_cacheable: true,
     open: None,
     permission: None, // default: allow all (DAC via generic path)
     getattr: Some(tmpfs_getattr),

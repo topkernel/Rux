@@ -77,6 +77,7 @@ macro_rules! dfx_switch_table {
             KsProbe => "ksprobe",
             R83HeapScan => "r83scan",
             LeakHunt => "leakhunt",
+            WwCensus => "wwcensus",
         }
     };
 }
@@ -299,9 +300,16 @@ pub enum DfxSwitch {
     /// armed: one side-table store per outermost guard acquire plus one
     /// count load per user-mode trap return. OFF by default.
     LeakHunt,
+    /// The ~1 Hz wakewatch/timer census heartbeat lines (WW/WW2/WW3 and
+    /// the wakewatch wake/pick line) plus the periodic PREEMPT-LEAK
+    /// reporter. These are hunt instruments: they made the serial
+    /// unusable for interactive work when always on, so they are now
+    /// opt-in via `dfx=wwcensus` (census/forensics boots keep them by
+    /// passing the token; ordinary boots get a clean prompt).
+    WwCensus,
 }
 
-const SWITCH_COUNT: usize = 33;
+const SWITCH_COUNT: usize = 34;
 
 static SWITCHES: [AtomicBool; SWITCH_COUNT] = [const { AtomicBool::new(false) }; SWITCH_COUNT];
 
@@ -371,6 +379,7 @@ impl DfxSwitch {
             DfxSwitch::KsProbe => 30,
             DfxSwitch::R83HeapScan => 31,
             DfxSwitch::LeakHunt => 32,
+            DfxSwitch::WwCensus => 33,
         }
     }
 
