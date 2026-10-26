@@ -6423,3 +6423,22 @@ alignguard + 180first + logdom(v1) + userctl-logdom(v2). Kernel gates
 for f46c6ad9: dual-arch builds rc=0 (print-only, dfx-gated, off by
 default); riscv64 regression + make test queued after the boot wave.
 Serials sc315B-319B stay untracked per .gitignore.
+
+LEG-30B ADDENDUM — RENDER_SERVICE FAULT FULLY DECODED FROM EXISTING
+USEGV-FOR DATA (sc316B; no new probe needed — the trap printer already
+dumps the VMA map):
+  USEGV-FOR: pid=798 rip=0x3fbf08ad30 cr2=0x7ff000683000 rsp=0x7ff000682b88 rbp=0x16
+  rsi=0x7ff000683000 rdx=0x3a8 rcx=0x2a (a ~936-byte copy/write TO cr2)
+  vma(cr2)     = 0x7ff000683000-0x7ff000685000 flags=0x10 Anonymous  <- READ-ONLY, 2 pages
+  vma(rsp)     = 0x7ff00067c000-0x7ff000683000 flags=0x13 Anonymous  <- RW stack, ends AT cr2
+  vma(rip)     = 0x3fbf077000-0x3fbf138000 flags=0x15 FileBacked (librender_service .text)
+  The fault is a large write starting exactly at the boundary page of a
+  2-page READ-ONLY anonymous VMA that sits immediately ON TOP of the
+  thread's RW stack VMA, with rbp holding a small integer (0x16) —
+  corrupted frame/target state, then a bulk write past the stack top.
+  Open fork for next leg: is the RO-top VMA layout legitimate (an
+  mprotect'd guard the image violated => image bug) or did OUR VMA
+  snapshot split/mis-flag what should be one RW mapping (the
+  fork-copies-PTEs-and-VMAs-in-two-phases race called out in
+  page_fault.rs)? Needs a VMA-origin stamp (who created the 0x10 VMA:
+  exec, mmap, or mprotect) — a cheap origin field on Vma + one print.
