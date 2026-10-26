@@ -1676,3 +1676,27 @@ FileOps tables remain (opportunistic migration continues).**
 **sc2xx launcher.ready trigger: NOT FIRED** (watcher restarted
 post-reboot, pid 43214; newest oh-sc264, zero events). Run day stays
 pending.
+
+**Route-4 mechanism pair (same image, same window class, both 480 s,
+fsw=1, load ~26-33 host noise irrelevant to volume counters):**
+ext4 list_dir materialization volume (FSW2 ls=) — control (pure main
+94c670da debug, pa63r4c) vs branch-with-route-4 (pa63r4m):
+
+| t | ctl ls | r4 ls | delta |
+|---|---|---|---|
+| 210 | 30180 | 15677 | -48% |
+| 270 | 32883 | 17312 | -47% |
+| 330 | 32883 | 17506 | -47% |
+| 450 | 32883 | 19076 | -42% |
+
+The cache eliminates the RE-materializations (repeat calls on one open
+fd — the OH boot's scanner class); the surviving volume is
+first-call-per-fd, which materializes once by design. The f4 map's
+"10x on getdents avg" is the per-call claim on repeated-call rows —
+pbench p6_getdents loops one fd, so that row is where the collapse
+should show (rides the next pbench pair; the pa63 chain's B arm was
+banked PRE-route-4, so the route-4 median debt explicitly rolls
+forward). Boot-level wall effect is modest by construction (the map's
+own tot-11.4s estimate); the win is per-op latency + allocation churn.
+Collateral clean: read_inode -4%, other fsw volumes in class; pb
+(route-1) flows on both arms (main carries it).
