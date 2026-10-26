@@ -4383,21 +4383,34 @@ pub fn scheduler_tick() {
                             }
                         }
                         // PREEMPT-HEAL (round 3c): a TASK-context base
-                        // count held for 10 s continuously is a phantom
+                        // count held for seconds continuously is a phantom
                         // — every real guard section is microseconds, and
-                        // the only 10 s holds in task context are the
-                        // unsleepable-monopoly wedges themselves. Zero it
-                        // (this runs in the tick IRQ on the task's own
+                        // the only multi-second holds in task context are
+                        // the unsleepable-monopoly wedges themselves. Zero
+                        // it (this runs in the tick IRQ on the task's own
                         // CPU, so the task cannot be concurrently inside
                         // a count mutation; other CPUs only ever add via
                         // current()). The leaked task immediately becomes
-                        // sleepable/preemptible again. A legit 10 s-held
+                        // sleepable/preemptible again. A legit seconds-held
                         // section (if one ever exists) is already a
                         // wedge; its later unpairing sub will underflow,
                         // clamp and REPORT rather than poison. This is
                         // the safety net that lets IRQ-exit kernel
                         // preemption stay enabled while the leak's
                         // producer is still being hunted.
+                        //
+                        // leg-24 bound tightened 1000 -> 200 jiffies: the
+                        // sc263-266 OH boots strand 140-300 wakes/boot
+                        // >1 s (max 27-32 s) behind incumbents running
+                        // with leaked counts (pc=1/2/258) that never call
+                        // schedule() — the SCHED-DISCIPLINE-RELIEF cannot
+                        // reach them, and the 10 s bound left the 2-7 s
+                        // IPC round trips (SendRequest 2090-6496 ms) that
+                        // blow the launcher LIFECYCLE budget fully alive.
+                        // 200 consecutive nonzero tick samples is the
+                        // SAME evidence bar the PREEMPT-LEAK report
+                        // already treats as conviction; healing there
+                        // bounds every leaked monopoly to ~2 s.
                         //
                         // Round 3e (leg-19, the brkseq deterministic
                         // repro): a PURE-HARDIRQ phantom — task bits
@@ -4408,11 +4421,11 @@ pub fn scheduler_tick() {
                         // and no heal (base == 0 skips), and the OH boots
                         // show the same shape on real tasks (sc254:
                         // pid 1188 monopolizing cpu0 AT A USERSPACE rip
-                        // with pc=0x10002). A hardirq level held for 10 s
-                        // is as impossible as a 10 s guard section (real
-                        // nesting lasts microseconds; the probe's own
-                        // level is already excluded), so the same
-                        // time-confirmed zero applies.
+                        // with pc=0x10002). A hardirq level held for
+                        // seconds is as impossible as a seconds-held
+                        // guard section (real nesting lasts microseconds;
+                        // the probe's own level is already excluded), so
+                        // the same time-confirmed zero applies.
                         let base = pc & !crate::interrupt::preempt::HARDIRQ_MASK;
                         let nest_extra_now = (pc
                             & crate::interrupt::preempt::HARDIRQ_MASK)
@@ -4420,7 +4433,7 @@ pub fn scheduler_tick() {
                                 crate::interrupt::preempt::HARDIRQ_OFFSET,
                             );
                         if (base != 0 || nest_extra_now > 0)
-                            && now.wrapping_sub(t0) >= 1000
+                            && now.wrapping_sub(t0) >= 200
                         {
                             // Fleet session 3 (2026-10-25): this heal runs
                             // inside the timer IRQ bracket, so cur's count
