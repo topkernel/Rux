@@ -2128,12 +2128,44 @@ unsafe fn __schedule() {
     // check needs no masking. (Round 1 used a PREEMPT_ACTIVE count bit;
     // leaked count bits here would make sleepers unswitchable — see the
     // sc65/sc66 one-activation monopolies.)
+    //
+    // Bounded refusal (leg-24, the wake-strand launcher family): a poll
+    // loop is "correct for a lock holder" only for the microseconds a
+    // real guard section lasts. The sc263-266 OH boots show tasks whose
+    // count NEVER returns to zero (leaked PREEMPT/bh bits — the
+    // wild-write/bracket family under hunt elsewhere): the refusal makes
+    // each such task unpreemptible AND unsleepable for the whole heal
+    // window, and the resulting multi-second CPU monopolies are the
+    // 2-7 s IPC round trips that blow the launcher LIFECYCLE budget
+    // (sc262: SendRequest cost 2090-6496ms on exactly this shape).
+    // Linux parity: __schedule with preemption disabled WARN_ONCEs and
+    // SLEEPS ANYWAY in production builds — a leaked count is reported,
+    // never a reason to burn a CPU. Same bargain here, time-bounded to
+    // stay conservative for genuinely-held long sections: a task refused
+    // for >= SCHED_DISCIPLINE_RELIEF_JIFFIES (1 s) gets the phantom-zero
+    // (the PREEMPT-HEAL semantics: keep exactly one HARDIRQ_OFFSET plus
+    // NMI nesting so a pending irq_exit still pairs), one loud report,
+    // and the switch proceeds normally. A real 1 s-held guard section is
+    // already a wedge the report names; the 10 s tick-side
+    // PREEMPT-HEAL/round-3e machinery stays as the backstop for tasks
+    // that never call schedule().
     {
         let prev_state = (*prev).state();
         if !prev_state.is_dead() && (*prev).preempt_count() != 0 {
-            (*prev).set_state(TaskState::new(TaskState::RUNNING));
-            crate::sched::dequeue_if_enqueued(&*prev);
-            return;
+            if sched_discipline_relief_due(prev) {
+                // SAFETY: prev is the running task in this context; the
+                // phantom-zero keeps the tick's own in-flight nesting so
+                // the pending irq_exit sub still pairs (fleet session 3).
+                unsafe {
+                    (*prev).ti_preempt_count_keep_tick_nesting();
+                }
+                // Fall through to the normal switch path below; the
+                // report already fired inside relief_due.
+            } else {
+                (*prev).set_state(TaskState::new(TaskState::RUNNING));
+                crate::sched::dequeue_if_enqueued(&*prev);
+                return;
+            }
         }
     }
 
@@ -4081,6 +4113,132 @@ pub fn dequeue_if_enqueued(task: &Task) {
 }
 
 // ==================== Scheduler Tick ====================
+
+/// Bounded-discipline side table (leg-24): per-task first-refusal stamp
+/// for the __schedule preempt-discipline relief. Keyed by Task pointer
+/// (wakewatch pattern; no Task layout change).
+struct DisciplineSlot {
+    task: core::sync::atomic::AtomicUsize,
+    since: core::sync::atomic::AtomicU64,
+    /// One relief report per episode (re-armed on each relief).
+    reported: core::sync::atomic::AtomicU64,
+}
+
+static DISCIPLINE: [DisciplineSlot; 128] = {
+    #[allow(clippy::declare_interior_mutable_const)]
+    const Z: DisciplineSlot = DisciplineSlot {
+        task: core::sync::atomic::AtomicUsize::new(0),
+        since: core::sync::atomic::AtomicU64::new(0),
+        reported: core::sync::atomic::AtomicU64::new(0),
+    };
+    [Z; 128]
+};
+
+/// How long the same task may be refused sleep by a nonzero count before
+/// the discipline relieves it (1 s at HZ=100 — an order below the 10 s
+/// tick-side PREEMPT-HEAL backstop, two orders below the launcher
+/// LIFECYCLE budget the monopolies blow).
+const SCHED_DISCIPLINE_RELIEF_JIFFIES: u64 = 100;
+
+/// Called from __schedule's discipline refusal branch: true when `prev`
+/// has been refused sleep for >= SCHED_DISCIPLINE_RELIEF_JIFFIES — the
+/// caller then applies the phantom-zero (PREEMPT-HEAL semantics) and
+/// lets the switch proceed. Prints one direct-console report per
+/// episode, rate-gated to one per 20 jiffies, budgeted to 100/boot.
+///
+/// Episode bookkeeping: the stamp arms on the FIRST refusal of a task
+/// and clears on relief; a task that drains its count and sleeps in
+/// between is NOT explicitly cleared (that would cost the schedule()
+/// happy path a store) — a repeat leak of the same task inside the same
+/// window can therefore relieve faster than 1 s. Repeat offenders
+/// relieving fast is the intended direction; each relief still reports.
+fn sched_discipline_relief_due(prev: *mut Task) -> bool {
+    let a = prev as usize;
+    let slot = &DISCIPLINE[(a >> 6 ^ a >> 12) & 127];
+    let now = crate::drivers::timer::get_jiffies();
+    let key = slot.task.load(core::sync::atomic::Ordering::Relaxed);
+    if key != a {
+        // Stale slot (previous occupant of this hash bucket) or fresh
+        // episode: arm the stamp. Collisions overwrite at worst — the
+        // relieved task is always reported with its own pid.
+        slot.task.store(a, core::sync::atomic::Ordering::Relaxed);
+        slot.since.store(now, core::sync::atomic::Ordering::Relaxed);
+        slot.reported.store(0, core::sync::atomic::Ordering::Relaxed);
+        return false;
+    }
+    let since = slot.since.load(core::sync::atomic::Ordering::Relaxed);
+    if now.wrapping_sub(since) < SCHED_DISCIPLINE_RELIEF_JIFFIES {
+        return false;
+    }
+    // Re-arm first so concurrent CPUs cannot double-fire the relief.
+    slot.task.store(0, core::sync::atomic::Ordering::Relaxed);
+    slot.since.store(0, core::sync::atomic::Ordering::Relaxed);
+    // SAFETY: prev is the running task in the caller's context; scalar
+    // field reads for the report.
+    let pid = unsafe { (*prev).pid() };
+    let pc = unsafe { (*prev).preempt_count() };
+    static RELIEF_N: core::sync::atomic::AtomicU64 =
+        core::sync::atomic::AtomicU64::new(0);
+    static LAST: core::sync::atomic::AtomicU64 =
+        core::sync::atomic::AtomicU64::new(0);
+    let n = RELIEF_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    let lp = LAST.load(core::sync::atomic::Ordering::Acquire);
+    if n < 100 && now.wrapping_sub(lp) >= 20 {
+        if LAST
+            .compare_exchange(
+                lp,
+                now,
+                core::sync::atomic::Ordering::AcqRel,
+                core::sync::atomic::Ordering::Acquire,
+            )
+            .is_ok()
+        {
+            use crate::console::putchar_no_lock as putchar;
+            fn pd(mut v: u64) {
+                use crate::console::putchar_no_lock as putchar;
+                let mut buf = [0u8; 20];
+                let mut k = 0;
+                if v == 0 {
+                    buf[0] = b'0';
+                    k = 1;
+                } else {
+                    while v > 0 && k < buf.len() {
+                        buf[k] = b'0' + (v % 10) as u8;
+                        v /= 10;
+                        k += 1;
+                    }
+                }
+                for i in (0..k).rev() {
+                    putchar(buf[i]);
+                }
+            }
+            const M: &[u8] = b"\nSCHED-DISCIPLINE-RELIEF pid=";
+            for &c in M {
+                putchar(c);
+            }
+            pd(pid as u64);
+            const M2: &[u8] = b" pc=";
+            for &c in M2 {
+                putchar(c);
+            }
+            pd(pc as u32 as u64);
+            const M3: &[u8] = b" held_jif=";
+            for &c in M3 {
+                putchar(c);
+            }
+            pd(now.wrapping_sub(since));
+            // dfx=leakhunt bonus: the recorded acquire site of the
+            // offending count.
+            if crate::dfx::leakorigin::ENABLED
+                .load(core::sync::atomic::Ordering::Relaxed)
+            {
+                crate::dfx::leakorigin::report_incumbent_site(prev);
+            }
+            putchar(b'\n');
+        }
+    }
+    true
+}
 
 pub fn scheduler_tick() {
     let cpu_id = crate::arch::cpu_id() as u64 as usize;
