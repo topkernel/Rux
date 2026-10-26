@@ -2001,7 +2001,11 @@ fn user_segv_forensics(regs: &PtRegs, fault_addr: u64) {
     let addr_space = crate::sched::current().and_then(|t| t.address_space());
     if let Some(aspace) = addr_space.as_ref() {
         let vmas = aspace.vma_read();
-        for &probe in &[regs.rip, fault_addr] {
+        // leg-27: also name the INDIRECT-CALL TARGET (rax at a CFI
+        // slowpath fault = the callee whose shadow slice was touched)
+        // and the stack VMA (rsp inside a file-backed read-only segment
+        // would name a clobbered stack). Print-path only.
+        for &probe in &[regs.rip, fault_addr, regs.rax, regs.rsp] {
             match vmas.find(crate::mm::page::VirtAddr::new(probe as usize)) {
                 Some(v) => crate::pr_err!(
                     "USEGV-FOR: vma({:#x}) = {:#x}-{:#x} flags={:#x} type={:?} fd={} off={:#x}",
