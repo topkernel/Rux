@@ -437,6 +437,14 @@ impl CfsRunQueue {
 
     /// Wakewatch: the leftmost queued entity's vruntime (None when the
     /// timeline is empty). Diagnostic read; callers hold the GRQ lock.
+    /// leg-26: the leftmost candidate's pid (STRAND-DETAIL geometry).
+    pub fn leftmost_task_pid(&self) -> Option<u32> {
+        self.tasks_timeline
+            .iter()
+            .next()
+            .map(|(_, &ptr)| unsafe { (*ptr).pid() })
+    }
+
     pub fn leftmost_vruntime(&self) -> Option<u64> {
         self.tasks_timeline.iter().next().map(|(&k, _)| k.vruntime)
     }

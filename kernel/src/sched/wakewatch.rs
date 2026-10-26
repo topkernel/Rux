@@ -87,6 +87,12 @@ fn ticks_to_ms(t: u64) -> u64 {
     t * 1000 / TIMER_CLOCK_FREQ_HZ
 }
 
+/// leg-26: `delta < threshold_ms` without the rounding of ticks_to_ms.
+#[inline]
+fn ms_lt(delta_ticks: u64, threshold_ms: u64) -> bool {
+    delta_ticks * 1000 < threshold_ms * TIMER_CLOCK_FREQ_HZ
+}
+
 #[inline]
 fn slot_of(task: *mut crate::process::Task) -> &'static WwSlot {
     let a = task as usize;
@@ -132,6 +138,45 @@ pub fn check_picked(task: *mut crate::process::Task, cpu: usize) {
     let delta = now_ticks().saturating_sub(stamp);
     DELTA_SUM_TICKS.fetch_add(delta, Ordering::Relaxed);
     if delta * 1000 <= STRAND_THRESHOLD_MS * TIMER_CLOCK_FREQ_HZ {
+        // leg-26: sub-threshold forensics — the minimal-rootfs repro
+        // (schedrepro) shows runnable-task starvation in the 250-1000 ms
+        // band, UNDER the 1 s strand classification. From 300 ms, dump
+        // every CPU's ran-ring retroactively: the rings name what the
+        // CPUs ran while this victim waited (idle harvest failures show
+        // idle-filled rings; pick-screen skips show rotation that keeps
+        // missing the victim). Rate-gated with the strand printer.
+        if ms_lt(delta, 300) {
+            return;
+        }
+        if !print_budget_ok() || !probe_prints_on() {
+            return;
+        }
+        let pid = unsafe { (*task).pid() };
+        ww_msg(b"STRAND-DETAIL pid=");
+        ww_u64(pid as u64);
+        ww_msg(b" strand=");
+        ww_u64(ticks_to_ms(delta));
+        ww_msg(b"ms");
+        // leg-26: vruntime geometry — the victim's own lead/lag against
+        // min_vruntime and the leftmost candidate, plus the leftmost's
+        // pid, splits "frozen-vruntime leftmost hog" (leftmost pinned)
+        // from "victim ran ahead" (big lead) at a glance.
+        {
+            let (vr, minv, leftv) = crate::sched::sched::ww_cfs_geometry(task);
+            ww_msg(b" vr=");
+            ww_u64(vr.saturating_sub(minv) / 1_000_000);
+            ww_msg(b"ms lag=");
+            ww_u64(leftv.saturating_sub(vr) / 1_000_000);
+            ww_msg(b"ms left=");
+            let left_pid = crate::sched::sched::ww_leftmost_pid()
+                .unwrap_or(0);
+            ww_u64(left_pid as u64);
+        }
+        ww_msg(b"\n");
+        for c in 0..crate::config::MAX_CPUS {
+            crate::sched::sched::ran_ring_dump(c);
+            ww_msg(b"\n");
+        }
         return;
     }
     let ms = ticks_to_ms(delta);

@@ -1250,6 +1250,14 @@ pub fn idle_task_ptr(cpu: usize) -> usize {
 /// vruntime, the queue's min_vruntime, and the leftmost queued vruntime
 /// (all raw ns; caller computes deltas). Diagnostic reads under the GRQ
 /// lock (check_picked holds it).
+/// leg-26: the leftmost CFS candidate's pid (for the STRAND-DETAIL
+/// geometry line — a pinned leftmost pid across reports is the
+/// frozen-vruntime hog signature). GRQ-held caller.
+pub fn ww_leftmost_pid() -> Option<u32> {
+    let g = grq();
+    g.cfs_rq.leftmost_task_pid()
+}
+
 pub fn ww_cfs_geometry(task: *mut Task) -> (u64, u64, u64) {
     let g = grq();
     // SAFETY: scalar sched-entity read of the task being picked (GRQ
