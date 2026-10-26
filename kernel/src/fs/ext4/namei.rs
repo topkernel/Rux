@@ -461,6 +461,19 @@ pub fn ext4_add_entry(
     new_ino: u32,
     file_type: u8,
 ) -> Result<(), i32> {
+    // Serialize against every other entry mutation (see ENTRY_MUTEX).
+    let _entry_guard = ENTRY_MUTEX.guard();
+    ext4_add_entry_locked(fs, dir_ino, name, new_ino, file_type)
+}
+
+/// Unlocked body of ext4_add_entry — caller holds ENTRY_MUTEX.
+fn ext4_add_entry_locked(
+    fs: &Ext4FileSystem,
+    dir_ino: u32,
+    name: &[u8],
+    new_ino: u32,
+    file_type: u8,
+) -> Result<(), i32> {
     // Read directory inode
     let dir = super::inode::read_inode(fs, dir_ino)?;
 
@@ -545,6 +558,22 @@ pub fn ext4_add_entry(
     Ok(())
 }
 
+/// Serializes directory-entry mutations (add / delete / rename).
+///
+/// Leg-29A: ext4 dir blocks are read-clone-modify-write with no
+/// per-inode lock — two CPUs creating (or deleting) entries in the SAME
+/// directory both cloned the block, found the SAME free space, split
+/// the same entry and wrote the whole block back; the loser's write
+/// clobbered the winner's, and the interleaved rec_len chain landed
+/// past the block end, panicking add_entry_to_block ("range end index
+/// 4139 out of range for slice of length 4096", namei.rs split write)
+/// on 5/5 provisioning-heavy boots (sc308, sc310 pre-date this fix).
+/// One global sleeping mutex is coarse but correct: entry mutations
+/// are rare next to data I/O, and the lock is leaf-level in the lock
+/// order (journal / buffer locks are taken INSIDE, never the reverse).
+static ENTRY_MUTEX: crate::sync::semaphore::Mutex =
+    crate::sync::semaphore::Mutex::new();
+
 /// Find space for new entry in directory block
 ///
 /// Checks both free space within existing entries and deleted entries
@@ -557,6 +586,13 @@ fn find_entry_space(block_data: &[u8], name_len: usize, block_size: usize) -> Op
         let rec_len = u16::from_le_bytes([block_data[offset + 4], block_data[offset + 5]]);
 
         if rec_len == 0 || rec_len < 8 {
+            break;
+        }
+        // Corrupt/oversized record: an entry may never claim space past
+        // the block end. Treat as no-space (the caller falls through to
+        // allocating a fresh block) instead of splitting past 4096 and
+        // panicking the kernel.
+        if offset + rec_len as usize > block_size {
             break;
         }
 
@@ -922,7 +958,7 @@ fn ext4_mkdir_no_journal(
     super::inode::write_inode_disk(fs, new_ino, &new_inode)?;
 
     // Add entry to parent directory
-    ext4_add_entry(fs, dir_ino, name, new_ino, file_type::EXT4_FT_DIR)?;
+    ext4_add_entry_locked(fs, dir_ino, name, new_ino, file_type::EXT4_FT_DIR)?;
 
     // Update parent link count. RE-READ the parent: ext4_add_entry above may
     // have grown the directory (new block, i_size/i_block updates written
@@ -956,6 +992,9 @@ fn ext4_mkdir_inner(
     name: &[u8],
     mode: u16,
 ) -> Result<u32, i32> {
+    // Serialize entry mutations BEFORE the journal bracket (see
+    // ENTRY_MUTEX): nobody sleeps on the mutex holding an open handle.
+    let _entry_guard = ENTRY_MUTEX.guard();
     let mut handle = super::journal::ext4_journal_start(fs, 12)?;
     // SAFETY: handle is a local variable from ext4_journal_start; set_current_handle stores it in a thread-local for jbd2 metadata journaling during this operation.
     unsafe { set_current_handle(&mut handle); }
@@ -1016,6 +1055,9 @@ pub fn ext4_create(
     // unconditionally — a journal-less fs gets a null-journal handle
     // that only defers this operation's metadata syncs into the
     // ordered publication queue (see ext4/journal.rs).
+    // Serialize entry mutations BEFORE the journal bracket (see
+    // ENTRY_MUTEX): nobody sleeps on the mutex holding an open handle.
+    let _entry_guard = ENTRY_MUTEX.guard();
     let mut handle = super::journal::ext4_journal_start(fs, 8)?;
     // SAFETY: handle is a local variable from ext4_journal_start; set_current_handle stores it in a thread-local for jbd2 metadata journaling during this operation.
     unsafe { set_current_handle(&mut handle); }
@@ -1051,7 +1093,7 @@ fn ext4_create_inner(
     super::inode::write_inode_disk(fs, new_ino, &new_inode)?;
 
     // Add entry to parent directory
-    ext4_add_entry(fs, dir_ino, name, new_ino, file_type::EXT4_FT_REG_FILE)?;
+    ext4_add_entry_locked(fs, dir_ino, name, new_ino, file_type::EXT4_FT_REG_FILE)?;
 
     // Parent directory timestamps (review 5.5)
     touch_parent_dir(fs, dir_ino);
@@ -1085,6 +1127,9 @@ pub fn ext4_mknod(
     // unconditionally — a journal-less fs gets a null-journal handle
     // that only defers this operation's metadata syncs into the
     // ordered publication queue (see ext4/journal.rs).
+    // Serialize entry mutations BEFORE the journal bracket (see
+    // ENTRY_MUTEX): nobody sleeps on the mutex holding an open handle.
+    let _entry_guard = ENTRY_MUTEX.guard();
     let mut handle = super::journal::ext4_journal_start(fs, 8)?;
     // SAFETY: handle is a local variable from ext4_journal_start; set_current_handle stores it in a thread-local for jbd2 metadata journaling during this operation.
     unsafe { set_current_handle(&mut handle); }
@@ -1124,7 +1169,7 @@ fn ext4_mknod_inner(
 
     // Add directory entry with the device file type
     let ft = file_type_from_mode(file_mode);
-    ext4_add_entry(fs, dir_ino, name, new_ino, ft)?;
+    ext4_add_entry_locked(fs, dir_ino, name, new_ino, ft)?;
 
     touch_parent_dir(fs, dir_ino);
 
@@ -1156,6 +1201,9 @@ pub fn ext4_symlink(
     // unconditionally — a journal-less fs gets a null-journal handle
     // that only defers this operation's metadata syncs into the
     // ordered publication queue (see ext4/journal.rs).
+    // Serialize entry mutations BEFORE the journal bracket (see
+    // ENTRY_MUTEX): nobody sleeps on the mutex holding an open handle.
+    let _entry_guard = ENTRY_MUTEX.guard();
     let mut handle = super::journal::ext4_journal_start(fs, 8)?;
     // SAFETY: handle is a local variable from ext4_journal_start; set_current_handle stores it in a thread-local for jbd2 metadata journaling during this operation.
     unsafe { set_current_handle(&mut handle); }
@@ -1216,7 +1264,7 @@ fn ext4_symlink_inner(
     super::inode::write_inode_disk(fs, new_ino, &new_inode)?;
 
     // Add directory entry
-    ext4_add_entry(fs, dir_ino, name, new_ino, file_type::EXT4_FT_SYMLINK)?;
+    ext4_add_entry_locked(fs, dir_ino, name, new_ino, file_type::EXT4_FT_SYMLINK)?;
 
     // Parent directory timestamps (review 5.5)
     touch_parent_dir(fs, dir_ino);
@@ -1249,6 +1297,9 @@ pub fn ext4_link(
     // unconditionally — a journal-less fs gets a null-journal handle
     // that only defers this operation's metadata syncs into the
     // ordered publication queue (see ext4/journal.rs).
+    // Serialize entry mutations BEFORE the journal bracket (see
+    // ENTRY_MUTEX): nobody sleeps on the mutex holding an open handle.
+    let _entry_guard = ENTRY_MUTEX.guard();
     let mut handle = super::journal::ext4_journal_start(fs, 6)?;
     // SAFETY: handle is a local variable from ext4_journal_start; set_current_handle stores it in a thread-local for jbd2 metadata journaling during this operation.
     unsafe { set_current_handle(&mut handle); }
@@ -1307,7 +1358,7 @@ fn ext4_link_inner(
     // Add directory entry with the TARGET's real file type — a hard link
     // to a symlink/device used to be recorded as a regular file
     // (review 5.5 sibling: rename 保留原 file_type).
-    ext4_add_entry(fs, dir_ino, name, target_ino, file_type_from_mode(target_inode.i_mode))?;
+    ext4_add_entry_locked(fs, dir_ino, name, target_ino, file_type_from_mode(target_inode.i_mode))?;
 
     // Parent directory timestamps (review 5.5: 父目录时间戳更新补全)
     touch_parent_dir(fs, dir_ino);
@@ -1330,6 +1381,17 @@ fn ext4_link_inner(
 /// * Ok(deleted_inode_number) on success
 /// * Err(i32) on failure
 pub fn ext4_delete_entry(
+    fs: &Ext4FileSystem,
+    dir_ino: u32,
+    name: &[u8],
+) -> Result<u32, i32> {
+    // Serialize against every other entry mutation (see ENTRY_MUTEX).
+    let _entry_guard = ENTRY_MUTEX.guard();
+    ext4_delete_entry_locked(fs, dir_ino, name)
+}
+
+/// Unlocked body of ext4_delete_entry — caller holds ENTRY_MUTEX.
+fn ext4_delete_entry_locked(
     fs: &Ext4FileSystem,
     dir_ino: u32,
     name: &[u8],
@@ -1564,6 +1626,9 @@ pub fn ext4_unlink(
     // unconditionally — a journal-less fs gets a null-journal handle
     // that only defers this operation's metadata syncs into the
     // ordered publication queue (see ext4/journal.rs).
+    // Serialize entry mutations BEFORE the journal bracket (see
+    // ENTRY_MUTEX): nobody sleeps on the mutex holding an open handle.
+    let _entry_guard = ENTRY_MUTEX.guard();
     let mut handle = super::journal::ext4_journal_start(fs, 8)?;
     // SAFETY: handle is a local variable from ext4_journal_start; set_current_handle stores it in a thread-local for jbd2 metadata journaling during this operation.
     unsafe { set_current_handle(&mut handle); }
@@ -1602,7 +1667,7 @@ fn ext4_unlink_inner(
     }
 
     // Delete directory entry
-    let entry_ino = ext4_delete_entry(fs, dir_ino, name)?;
+    let entry_ino = ext4_delete_entry_locked(fs, dir_ino, name)?;
 
     // CRASH-SAFETY (delete side, deferred): the entry REMOVAL must be
     // persisted BEFORE any of the frees below (dead inode, data blocks,
@@ -1715,6 +1780,9 @@ pub fn ext4_rmdir(
     // unconditionally — a journal-less fs gets a null-journal handle
     // that only defers this operation's metadata syncs into the
     // ordered publication queue (see ext4/journal.rs).
+    // Serialize entry mutations BEFORE the journal bracket (see
+    // ENTRY_MUTEX): nobody sleeps on the mutex holding an open handle.
+    let _entry_guard = ENTRY_MUTEX.guard();
     let mut handle = super::journal::ext4_journal_start(fs, 10)?;
     // SAFETY: handle is a local variable from ext4_journal_start; set_current_handle stores it in a thread-local for jbd2 metadata journaling during this operation.
     unsafe { set_current_handle(&mut handle); }
@@ -1756,7 +1824,7 @@ fn ext4_rmdir_inner(
     }
 
     // Delete directory entry from parent
-    ext4_delete_entry(fs, dir_ino, name)?;
+    ext4_delete_entry_locked(fs, dir_ino, name)?;
 
     // CRASH-SAFETY (delete side, deferred): the entry removal must be
     // persisted BEFORE the inode/bitmap/block frees below (see
@@ -2052,6 +2120,10 @@ pub fn ext4_rename(
     new_dir_ino: u32,
     new_name: &[u8],
 ) -> Result<(), i32> {
+    // Serialize against every other entry mutation (see ENTRY_MUTEX).
+    // Taken BEFORE the journal bracket: lock order is ENTRY_MUTEX ->
+    // journal/buffer, and no path takes them in reverse.
+    let _entry_guard = ENTRY_MUTEX.guard();
     // Route-1 (F4 no-journal lazy write path): the bracket runs
     // unconditionally — a journal-less fs gets a null-journal handle
     // that only defers this operation's metadata syncs into the
@@ -2136,7 +2208,7 @@ fn ext4_rename_inner(
         }
 
         // Delete existing target entry
-        ext4_delete_entry(fs, new_dir_ino, new_name)?;
+        ext4_delete_entry_locked(fs, new_dir_ino, new_name)?;
 
         // CRASH-SAFETY (delete side, rename-replace, deferred): the target
         // entry's removal must be persisted BEFORE the inode/bitmap/block
@@ -2190,10 +2262,10 @@ fn ext4_rename_inner(
     }
 
     // Add new directory entry
-    ext4_add_entry(fs, new_dir_ino, new_name, old_ino, new_file_type)?;
+    ext4_add_entry_locked(fs, new_dir_ino, new_name, old_ino, new_file_type)?;
 
     // Delete old directory entry
-    ext4_delete_entry(fs, old_dir_ino, old_name)?;
+    ext4_delete_entry_locked(fs, old_dir_ino, old_name)?;
 
     // Update timestamp on renamed inode
     let sec = crate::drivers::rtc::wall_secs() as u32;
