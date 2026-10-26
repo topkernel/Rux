@@ -365,11 +365,17 @@ EON
 # back to dummy core devices — nothing in the guest reads /dev/input,
 # which is also why every INPTRC keyprobe produced zero lines (the trace
 # fires when the evdev read/poll path DRAINS the virtqueue; no reader =
-# no drain). Static InputDevice sections with explicit Device paths use
-# libinput's path context (no udev needed) and evdev as the fallback
-# driver; /dev/input/event0 = kernel's VirtIO Keyboard, event1 = VirtIO
-# Tablet (kernel evdev registration order, see evdev.rs init_evdev).
-# AutoAddDevices=off stops the udev probe failure spam.
+# no drain). Static InputDevice sections with explicit Device paths need
+# no udev. Driver is EVDEV, not libinput: xf86-input-libinput calls
+# realpath() on the Device path inside the Xorg process and fails with
+# "client bug: Invalid path /dev/input/event0" (r10full serial) even
+# though the identical realpath succeeds in a quiet-boot shell on the
+# same kernel+image (r10pp2 pathprobe: rc=0; stat/readlink/open+read
+# all fine) — kernel-hunt item, evidence recorded. xf86-evdev opens the
+# node directly and ioctls it (EVIOCGVERSION/ID/BIT/ABS all implemented
+# kernel-side). /dev/input/event0 = kernel's VirtIO Keyboard, event1 =
+# VirtIO Tablet (kernel evdev registration order, see evdev.rs
+# init_evdev). AutoAddDevices=off stops the udev probe failure spam.
 mkdir -p "$ROOT/etc/X11"
 cat > "$ROOT/etc/X11/xorg-fbdev.conf" <<'EOX'
 Section "ServerFlags"
@@ -394,13 +400,14 @@ Section "Screen"
 EndSection
 Section "InputDevice"
     Identifier "RuxKbd"
-    Driver "libinput"
+    Driver "evdev"
     Option "Device" "/dev/input/event0"
 EndSection
 Section "InputDevice"
     Identifier "RuxPtr"
-    Driver "libinput"
+    Driver "evdev"
     Option "Device" "/dev/input/event1"
+    Option "Mode" "Absolute"
 EndSection
 Section "ServerLayout"
     Identifier "Layout0"
@@ -411,28 +418,38 @@ EndSection
 EOX
 
 # xregion probe (leg-7): XGetImage stats of a root-window rect, called
-# from runit's periodic dump_xstate. Dynamic link against the staging
-# tree's libX11 (it runs long after the rootfs is up); link the
-# VERSIONED soname directly — the runtime lib is always there while the
-# libX11.so -dev symlink depends on which -dev packages the resolver
-# pulled this roll. Headers: expose ONLY staging's X11/ subdir — mixing
-# the staging glibc headers with the cross toolchain's own breaks
-# feature-test macros (L_tmpnam/fortify decl errors, first r10 build).
-# -march=rv64gc pins the ISA below what QEMU -cpu rv64 provides (the
-# cross-gcc default march SIGILLs under -cpu rv64 — the diag1 lesson).
+# from runit's periodic dump_xstate. Built against the STAGING tree's
+# own glibc (explicit crt1/crti/crtn + libc.so.6 + the image's dynamic
+# loader): linking with the cross toolchain's default sysroot drags in
+# the host's newer glibc (first r10 build died at runtime with
+# "GLIBC_2.38 not found" — the image runs jammy's 2.35; the linked
+# binary needs at most GLIBC_2.34). -fno-pie + crt1 (not Scrt1) because
+# the cross-gcc defaults to PIE. libX11 is linked by VERSIONED soname —
+# the -dev .so symlink depends on which dev packages the resolver
+# pulled. Headers: expose ONLY staging's X11/ subdir — mixing staging
+# glibc headers with the toolchain's breaks feature-test macros.
+# xr_atoi in the source avoids the host headers' __isoc23_strtol
+# redirect (glibc 2.38-only). -march=rv64gc pins the ISA below what
+# QEMU -cpu rv64 provides.
 if [ -f "$ROOT/usr/lib/riscv64-linux-gnu/libX11.so.6" ] && \
+   [ -f "$ROOT/usr/lib/riscv64-linux-gnu/crt1.o" ] && \
    [ -d "$ROOT/usr/include/X11" ]; then
     XRINC="$WORK/xregion-include"
     rm -rf "$XRINC" && mkdir -p "$XRINC"
     ln -s "$ROOT/usr/include/X11" "$XRINC/X11"
-    riscv64-linux-gnu-gcc -O2 -march=rv64gc \
-        -o "$ROOT/usr/local/bin/xregion" "$WT/test/ubuntu-gnome/xregion.c" \
+    SL="$ROOT/usr/lib/riscv64-linux-gnu"
+    riscv64-linux-gnu-gcc -O2 -march=rv64gc -fno-pie -no-pie -nostdlib \
+        -Wl,-dynamic-linker,/lib/ld-linux-riscv64-lp64d.so.1 \
         -I"$XRINC" \
-        -Wl,-rpath-link,"$ROOT/usr/lib/riscv64-linux-gnu" \
-        "$ROOT/usr/lib/riscv64-linux-gnu/libX11.so.6" || \
+        "$SL/crt1.o" "$SL/crti.o" \
+        "$WT/test/ubuntu-gnome/xregion.c" \
+        "$SL/libX11.so.6" "$SL/libc.so.6" "$SL/crtn.o" \
+        -Wl,-rpath-link,"$SL" \
+        $(riscv64-linux-gnu-gcc -print-libgcc-file-name) \
+        -o "$ROOT/usr/local/bin/xregion" || \
         echo "warn: xregion build failed (dump_xstate will show st=127)"
 else
-    echo "warn: staging libX11/headers missing — xregion not installed"
+    echo "warn: staging libX11/crt/headers missing — xregion not installed"
 fi
 
 # fonts.dir (leg-7): dpkg -x skips the postinst that runs mkfontdir, so

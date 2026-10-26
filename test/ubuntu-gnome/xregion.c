@@ -26,14 +26,28 @@
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
 
+/* Local decimal parse: the host cross-gcc's glibc headers redirect
+ * atoi/strtol to __isoc23_* (glibc 2.38) while the image runs jammy's
+ * 2.35 — the plain digit loop keeps the binary loadable there. */
+static int xr_atoi(const char *s)
+{
+    int v = 0, neg = 0;
+    while (*s == ' ' || *s == '\t')
+        s++;
+    if (*s == '-') { neg = 1; s++; }
+    while (*s >= '0' && *s <= '9')
+        v = v * 10 + (*s++ - '0');
+    return neg ? -v : v;
+}
+
 int main(int argc, char **argv)
 {
     if (argc < 5) {
         fprintf(stderr, "usage: xregion X Y W H\n");
         return 2;
     }
-    int rx = atoi(argv[1]), ry = atoi(argv[2]);
-    int rw = atoi(argv[3]), rh = atoi(argv[4]);
+    int rx = xr_atoi(argv[1]), ry = xr_atoi(argv[2]);
+    int rw = xr_atoi(argv[3]), rh = xr_atoi(argv[4]);
 
     Display *d = XOpenDisplay(NULL);
     if (!d) {
