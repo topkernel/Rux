@@ -887,6 +887,17 @@ unsafe fn sweep_silent_txns(world: &World) -> (usize, Vec<Arc<BinderProc>>) {
 static APP_CHILD_PIDS: [core::sync::atomic::AtomicU32; 128] =
     [const { core::sync::atomic::AtomicU32::new(0) }; 128];
 
+// leg-25: module-visible mirror of the SAREG probe's latched samgr pid,
+// so the SLRD read-side tracer can cover samgr's own reads (its leader
+// comm 'samgr' matches no app prefix) — the Add/Remove (code 3/4)
+// delivery record for the on-demand unload question.
+static SAREG_SAMGR_PID_PUB: core::sync::atomic::AtomicU32 =
+    core::sync::atomic::AtomicU32::new(0);
+
+pub(crate) fn binder_sareg_samgr_pid() -> u32 {
+    SAREG_SAMGR_PID_PUB.load(core::sync::atomic::Ordering::Relaxed)
+}
+
 pub fn register_app_child_pid(pid: u32) {
     for slot in APP_CHILD_PIDS.iter() {
         let s = slot.load(core::sync::atomic::Ordering::Relaxed);
@@ -5360,6 +5371,13 @@ fn binder_transaction(
             if ok && &hdr[12..16] == &[0x6f, 0x00, 0x68, 0x00] {
                 is_samgr_req = true;
                 SAREG_SAMGR_PID.store(target.pid as u32, core::sync::atomic::Ordering::Relaxed);
+                // leg-25 mirror for the SLRD read-side gate (see
+                // binder_sareg_samgr_pid): samgr's leader comm matches
+                // no app prefix, so the tracer keys on the pid.
+                SAREG_SAMGR_PID_PUB.store(
+                    target.pid as u32,
+                    core::sync::atomic::Ordering::Relaxed,
+                );
             }
         }
         let reply_to_mutation = reply
@@ -6594,6 +6612,15 @@ fn binder_thread_read(
                             // never hold for children reading through
                             // the daemon's INHERITED fd; v2 gates on
                             // the tgid LEADER's comm only.
+                            // leg-25 (sc276): samgr's own reads were
+                            // invisible (comm 'samgr' matches no app
+                            // prefix) exactly where the on-demand
+                            // unload question lives — samgr killing
+                            // services 13 ms after releases while
+                            // clients are mid-call needs the
+                            // Add/Remove (SAREG code 3/4) delivery
+                            // record on samgr's side. Gate on the
+                            // SAREG-known samgr pid too.
                             if let Some(cur) = crate::sched::current() {
                                 let tg = unsafe { (*cur).tgid() as u32 };
                                 if tg != 0 {
@@ -6602,9 +6629,11 @@ fn binder_thread_read(
                                         let lname = core::str::from_utf8(unsafe { (*lt).comm() })
                                             .unwrap_or("")
                                             .trim_end_matches('\0');
+                                        let samgr_pid = binder_sareg_samgr_pid();
                                         if lname.starts_with("m.ohos.")
                                             || lname.starts_with("os.")
                                             || lname.starts_with("com.")
+                                            || (samgr_pid != 0 && tg == samgr_pid)
                                         {
                                             static SLRD_N: core::sync::atomic::AtomicUsize =
                                                 core::sync::atomic::AtomicUsize::new(0);
