@@ -5776,3 +5776,37 @@ probe), (3) init's 131073 no-restart of installs (image-side init
 bookkeeping after "Unknown" pid exits), (4) render_service's memcpy-
 from-PROT_NONE (find the caller via the new vma(rax) dump on the next
 fault).
+
+LEG-27 CLOSE-OUT (00:30) — final tallies (45-min boots, natural ends):
+  sc294 control LC=0@90k (full 45 min, never entered the loop; reached
+  bootanimation.finished then the BMS/ImplicitQuery wall — 119 queries,
+  bootevent.launcher.ready NOT set; second lottery no-loop draw of the
+  leg after sc291). sc299 LC=288, sc300 LC=189, sc301(quietcon) LC=272.
+  sc302 (txnhunt, unpatched img) LC=0@74k — TXN-HANG 2936 lines of
+  pre-loop texture: persistent 1-5s handler hangs spread wide
+  (foundation code24, usb_host/powermgr/drm_service code3 families),
+  NO 15s monopolies when the installs hole is absent.
+  sc303 (txnhunt + PATCHED oh-img-p) LC=252@525k, installs=1, perm-
+  faults 1 (vs 2-11 on unpatched boots), TXN-HANG 579: loop-phase
+  texture = telephony->worker code7 (267) + FFRT->foundation code59
+  (266) + the storage_manager->storage_daemon D-state family — the
+  wide exec-stall substrate across unrelated servers (leg-25's family)
+  is the loop's sustaining driver on the patched image, NOT a single
+  choke point.
+  make test GREEN on the final tree (rootfs.img was held by a foreign
+  make-test QEMU 22:51-00:0x; suite now 1116 checks, "All tests
+  passed"). Dual-arch builds green. Branch: 600fa2a4 (merge) + 9125dade
+  (TXN-HANG) + 3066f41d (USEGV vma(rax/rsp)) + this wip.
+  Boot-artifact note for next legs: wave-1's first launch died 7/8 on
+  the shared HDCPORT — oh-boot-w.sh boots MUST get unique HDCPORTs.
+LEG-27 NEXT LEVERS (value order, for leg-28): (1) ld-musl+0x1187d2
+  launcher/ability crash site — cond-walk `lock cmpxchg %edx,0x10(%rcx)`
+  writing through a stale waiter node whose memory was recycled into a
+  read-only fd-40 file mapping (use-after-free of an unlinked timeout
+  waiter; disassembly + the extracted ld-musl are in
+  run/forensics-leg27/ for the pad-cave patch); (2) storage_daemon
+  D-state open() (5.5s->26s under the code-37 handler) — needs a
+  bio/ext4 stall probe; (3) init's 131073 no-restart of installs after
+  "Unknown(pid) exit" (image-side init bookkeeping); (4) render_service
+  memcpy-from-PROT_NONE (vma(rax)/vma(rsp) dumps now armed for the
+  next occurrence).
