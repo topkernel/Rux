@@ -4218,6 +4218,10 @@ pub fn scheduler_tick() {
                                     .load(core::sync::atomic::Ordering::Relaxed)
                                     as u64);
                                 putchar(b'\n');
+                                // dfx=leakhunt: the acquire site of the
+                                // leaked count (last PREEMPT_OFFSET
+                                // acquire on the incumbent).
+                                crate::dfx::leakorigin::report_incumbent_site(cur);
                             }
                         }
                         // PREEMPT-HEAL (round 3c): a TASK-context base
@@ -4636,6 +4640,9 @@ pub fn scheduler_tick() {
                     }
                     ph(unsafe { (**task).ti_cpu() } as u32 as u64);
                     putchar(b'\n');
+                    // dfx=leakhunt: name the acquire site of the leaked
+                    // count (last PREEMPT_OFFSET acquire on this task).
+                    crate::dfx::leakorigin::report_parked_site(*task);
                 }
             }
             // Lazily reclaim slots whose tasks missed 2+ walks.

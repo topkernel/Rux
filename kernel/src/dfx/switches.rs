@@ -76,6 +76,7 @@ macro_rules! dfx_switch_table {
             Schb => "schb",
             KsProbe => "ksprobe",
             R83HeapScan => "r83scan",
+            LeakHunt => "leakhunt",
         }
     };
 }
@@ -290,9 +291,17 @@ pub enum DfxSwitch {
     /// dfx instrument. The cheap per-tick header audits stay
     /// unconditional.
     R83HeapScan,
+    /// Leak-origin probe (dfx/leakorigin.rs): records every task's
+    /// OUTERMOST PREEMPT_OFFSET acquire site and trips a report when a
+    /// task returns to userspace (or is seen parked, PREEMPT-LEAK class)
+    /// with a nonzero preempt_count — the producer of the leaked-count
+    /// wake-strand family, named at its acquire site. Hot-path cost when
+    /// armed: one side-table store per outermost guard acquire plus one
+    /// count load per user-mode trap return. OFF by default.
+    LeakHunt,
 }
 
-const SWITCH_COUNT: usize = 32;
+const SWITCH_COUNT: usize = 33;
 
 static SWITCHES: [AtomicBool; SWITCH_COUNT] = [const { AtomicBool::new(false) }; SWITCH_COUNT];
 
@@ -361,6 +370,7 @@ impl DfxSwitch {
             DfxSwitch::Schb => 29,
             DfxSwitch::KsProbe => 30,
             DfxSwitch::R83HeapScan => 31,
+            DfxSwitch::LeakHunt => 32,
         }
     }
 
@@ -381,6 +391,9 @@ pub fn set(switch: DfxSwitch, on: bool) {
     SWITCHES[switch.index()].store(on, Ordering::Relaxed);
     if let DfxSwitch::MemWatch = switch {
         super::memwatch::ENABLED.store(on, Ordering::Relaxed);
+    }
+    if let DfxSwitch::LeakHunt = switch {
+        super::leakorigin::ENABLED.store(on, Ordering::Relaxed);
     }
     if let DfxSwitch::Scribble = switch {
         #[cfg(feature = "x86_64")]

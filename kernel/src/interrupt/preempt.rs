@@ -102,9 +102,28 @@ pub fn preemptible() -> bool {
 // ============================================================================
 
 /// Add value to current task's preempt_count
+///
+/// #[track_caller] + the leakorigin hook (dfx=leakhunt): when val is
+/// PREEMPT_OFFSET, record the acquire site in the per-task shadow (last
+/// acquire wins). The disabled-path cost is one register compare plus
+/// one relaxed load. At a leak, the shadow names the most recent guard
+/// acquire — outer leaks (settled count 1) name the outer site, inner
+/// leaks (an inner scope abandoned between its acquire and drop) name
+/// the inner site; `cnt_after` in the report separates the two.
 #[inline]
+#[track_caller]
 pub fn preempt_count_add(val: i32) {
     if let Some(task) = crate::sched::current() {
+        if val == PREEMPT_OFFSET
+            && crate::dfx::leakorigin::ENABLED.load(core::sync::atomic::Ordering::Relaxed)
+        {
+            let c0 = task.preempt_count();
+            crate::dfx::leakorigin::note_acquire(
+                task,
+                core::panic::Location::caller(),
+                c0.wrapping_add(1),
+            );
+        }
         task.add_preempt_count(val);
     }
 }
