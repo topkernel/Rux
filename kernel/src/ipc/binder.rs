@@ -2894,6 +2894,250 @@ pub fn sleep_snapshot() {
     }
 }
 
+/// dfx=txnhunt (leg-27): in-flight sync-txn hang audit, called at the
+/// ~1 Hz timer heartbeat. The 15 s samgr code-7 family (SLOW-TXN census,
+/// queue=0 exec=15020ms) only becomes visible at REPLY time — 15 s too
+/// late to see what the server was doing — and the 60 s khungtaskd
+/// cadence of sleep_snapshot/stall_report usually misses the window.
+/// This audit walks every thread's txn stack under WORLD, collects
+/// (only) server-side entries (to_tid == owning thread) picked up but
+/// unreplied for >= 1 s, then — with the guard released (sc89/sc207
+/// lessons: no task lookups, stack reads or prints under WORLD) —
+/// snapshots each hung server thread's task state and entry-frame
+/// syscall/rip (same read contract as sleep_snapshot) and prints one
+/// TXN-HANG line per txn. It also collects every other in-flight txn
+/// (queued on any todo, or stacked sender-side elsewhere) issued from
+/// the hung servers' PROCESSES, printed as TXN-HANG-OUT lines — the
+/// synchronous fan-out chain the handler is stuck behind, named
+/// end-to-end. Rate-capped to one burst per 5 s; bounded (8 + 8 lines);
+/// zero cost when dfx=txnhunt is off.
+pub fn txn_hang_audit() {
+    if !crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::TxnHang) {
+        return;
+    }
+    let now = crate::drivers::timer::get_jiffies() as u32;
+    // One burst per 5 s (500 jiffies at HZ=100); first call fires.
+    static LAST: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+    use core::sync::atomic::Ordering::Relaxed;
+    let last = LAST.load(Relaxed);
+    if last != 0 && now.wrapping_sub(last) < 500 {
+        return;
+    }
+    if LAST
+        .compare_exchange(last, now, Relaxed, Relaxed)
+        .is_err()
+    {
+        return;
+    }
+
+    struct Hung {
+        id: u64,
+        code: u32,
+        spid: u32,
+        stid: u32,
+        cpid: u32,
+        ctid: u32,
+        exec_ms: u32,
+        total_ms: u32,
+    }
+    struct Out {
+        id: u64,
+        code: u32,
+        fpid: u32,
+        tpid: u32,
+        ttid: u32,
+        queued: bool,
+        ms: u32,
+    }
+    let mut hung: alloc::vec::Vec<Hung> = alloc::vec::Vec::new();
+    let mut outs: alloc::vec::Vec<Out> = alloc::vec::Vec::new();
+    let mut hung_pids: [u32; 4] = [0; 4];
+    let mut hung_n = 0usize;
+    {
+        let w = world_lock();
+        // SAFETY: read-only traversal under WORLD (pm() casts only reach
+        // each live proc's thread/todo lists; snapshot POD only — sc89).
+        unsafe {
+            let world = match w.as_ref() {
+                Some(world) => world,
+                None => return,
+            };
+            fn is_hung_proc(pids: &[u32], pid: u32) -> bool {
+                pids.iter().any(|&p| p == pid)
+            }
+            // Pass 1: server-side txn-stack entries executing >= 1 s.
+            for p in &world.procs {
+                let proc = pm(world, p);
+                for t in &proc.im().threads {
+                    for x in &t.st().txn_stack {
+                        // SAFETY: pick_j/to_tid read under WORLD.
+                        let pick = unsafe { *x.pick_j.get() };
+                        let mine = unsafe { x.to_tid() } == Some(t.tid);
+                        if !mine || pick == 0 {
+                            continue;
+                        }
+                        let exec = now.wrapping_sub(pick);
+                        if exec >= 100 && hung.len() < 8 {
+                            hung.push(Hung {
+                                id: x.id,
+                                code: x.code,
+                                spid: proc.pid,
+                                stid: t.tid,
+                                cpid: x.from_proc.as_ref().map(|f| f.pid).unwrap_or(0),
+                                ctid: x.from_tid.unwrap_or(0),
+                                exec_ms: exec.saturating_mul(10),
+                                total_ms: now.wrapping_sub(x.enq_j).saturating_mul(10),
+                            });
+                            if hung_n < 4 {
+                                hung_pids[hung_n] = proc.pid;
+                                hung_n += 1;
+                            }
+                        }
+                    }
+                }
+            }
+            if hung.is_empty() {
+                return;
+            }
+            // Pass 2 (same guard): every in-flight txn FROM a hung
+            // server's process — stacked sender-side anywhere (its
+            // threads included) or still queued on any todo. That is
+            // the handler's synchronous fan-out chain.
+            for p in &world.procs {
+                let proc = pm(world, p);
+                let mut scan = |x: &BinderTxn, tpid: u32, ttid: u32| {
+                    let fpid = x.from_proc.as_ref().map(|f| f.pid).unwrap_or(0);
+                    if fpid == 0 || !is_hung_proc(&hung_pids[..hung_n], fpid) || outs.len() >= 8 {
+                        return;
+                    }
+                    // SAFETY: pick_j read under WORLD.
+                    let pick = unsafe { *x.pick_j.get() };
+                    let queued = pick == 0;
+                    let ms = if queued {
+                        now.wrapping_sub(x.enq_j)
+                    } else {
+                        now.wrapping_sub(pick)
+                    };
+                    outs.push(Out {
+                        id: x.id,
+                        code: x.code,
+                        fpid,
+                        tpid,
+                        ttid,
+                        queued,
+                        ms: ms.saturating_mul(10),
+                    });
+                };
+                for wk in &proc.im().todo {
+                    if let Work::Transaction(x) = wk {
+                        // SAFETY: to_tid read under WORLD.
+                        let ttid = unsafe { x.to_tid() }.unwrap_or(0);
+                        scan(x, proc.pid, ttid);
+                    }
+                }
+                for t in &proc.im().threads {
+                    for wk in &t.st().todo {
+                        if let Work::Transaction(x) = wk {
+                            // SAFETY: to_tid read under WORLD.
+                            let ttid = unsafe { x.to_tid() }.unwrap_or(0);
+                            scan(x, proc.pid, ttid);
+                        }
+                    }
+                    for x in &t.st().txn_stack {
+                        // Skip the hung server-side entries themselves
+                        // (pass 1 already reported them).
+                        // SAFETY: to_tid read under WORLD.
+                        if unsafe { x.to_tid() } == Some(t.tid) {
+                            continue;
+                        }
+                        // SAFETY: to_tid read under WORLD.
+                        let ttid = unsafe { x.to_tid() }.unwrap_or(0);
+                        scan(x, x.to_proc.pid, ttid);
+                    }
+                }
+            }
+        }
+    }
+    // WORLD released — task forensics + prints happen here (sc207).
+    let comm_of = |p: *mut crate::process::Task| -> &str {
+        if p.is_null() {
+            return "?";
+        }
+        // SAFETY: diagnostic comm read of a live task.
+        let c = unsafe { (*p).comm() };
+        core::str::from_utf8(&c[..])
+            .unwrap_or("?")
+            .trim_end_matches('\0')
+    };
+    let mut w = crate::dfx::backtrace::ConsoleWriter::new();
+    use core::fmt::Write as _;
+    for h in &hung {
+        let srv = unsafe { crate::sched::find_task_by_pid(h.stid) };
+        let (state, sys, rip, a0, a1) = if srv.is_null() {
+            (0u64, 0u64, 0u64, 0u64, 0u64)
+        } else {
+            // SAFETY: diagnostic reads of the task's own fields and its
+            // mapped kernel stack (sleep_snapshot contract, sc261).
+            let tk = unsafe { &*srv };
+            let state = tk.state().bits() as u64;
+            match tk.kernel_stack_top_checked() {
+                None => (state, 0, 0, 0, 0),
+                Some(top) => {
+                    #[cfg(feature = "x86_64")]
+                    let (sys, rip, a0, a1) = {
+                        let regs = (top.wrapping_sub(
+                            crate::arch::x86_64::pt_regs::PT_REGS_SIZE,
+                        )) as *const crate::arch::x86_64::pt_regs::PtRegs;
+                        // SAFETY: entry-frame read of this task's own stack.
+                        unsafe { ((*regs).orig_rax, (*regs).rip, (*regs).rdi, (*regs).rsi) }
+                    };
+                    #[cfg(feature = "riscv64")]
+                    let (sys, rip, a0, a1) = {
+                        let regs = (top.wrapping_sub(
+                            crate::arch::riscv64::pt_regs::PT_REGS_SIZE,
+                        )) as *const crate::arch::riscv64::pt_regs::PtRegs;
+                        // SAFETY: entry-frame read of this task's own stack.
+                        unsafe { ((*regs).a7, (*regs).epc, (*regs).a0, (*regs).a1) }
+                    };
+                    (state, sys as u64, rip as u64, a0 as u64, a1 as u64)
+                }
+            }
+        };
+        let _ = writeln!(
+            w,
+            "TXN-HANG txn{} code{} from pid {} tid {} ({}) to pid {} tid {} ({}): exec {} ms (total {} ms): server state={:#x} sys={} rip={:#x} a0={:#x} a1={:#x}",
+            h.id,
+            h.code,
+            h.cpid,
+            h.ctid,
+            comm_of(unsafe { crate::sched::find_task_by_pid(h.ctid) }),
+            h.spid,
+            h.stid,
+            comm_of(srv),
+            h.exec_ms,
+            h.total_ms,
+            state,
+            sys,
+            rip,
+            a0,
+            a1
+        );
+    }
+    for o in &outs {
+        let _ = writeln!(
+            w,
+            "TXN-HANG-OUT txn{} code{} from pid {} -> pid {} tid {}: {} {} ms",
+            o.id,
+            o.code,
+            o.fpid,
+            o.tpid,
+            o.ttid,
+            if o.queued { "queue" } else { "exec" },
+            o.ms
+        );
+    }
+}
+
 /// World-wide search for queued/stacked transactions SENT by (pid, tid) —
 /// the sc74 discriminator: a SERVER-OWING thread (parked owing a reply,
 /// top txn to_tid == self) either has a nested sync txn outstanding
