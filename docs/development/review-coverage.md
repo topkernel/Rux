@@ -31,9 +31,9 @@ when the tree gains a file the map does not know about.
 
 | commit | file | defect |
 |---|---|---|
-| `ddfa8abc` | `kernel/src/interrupt/softirq.rs` | The 2ms softirq budget was checked once per batch of pending vectors, so a batch of slow handlers could overrun it by the time of every vector left in the batch. Linux checks the budget before every vector and leaves the unreached ones pending. |
-| `327b4a52` | `kernel/src/fs/inode.rs, kernel/src/fs/file.rs` | The generic O_APPEND write read the file size, released the lock and only then took the data lock to write — two appenders on different open descriptions could pick the same offset, and the second write overwrote the first. Linux takes the append position under the inode lock. |
-| `ff6fc39b` | `kernel/src/syscall/memory.rs` | msync had no 'addr + len' wrap check (Linux's mm/msync.c has one). A near-max length wrapped the page-aligned length to 0, so msync reported success without syncing anything; Linux returns EINVAL. |
+| `ddfa8abc` | `kernel/src/interrupt/softirq.rs` | The 2ms softirq budget was checked once per batch of pending vectors, so a batch of slow handlers could overrun it by the time of every vector left in the batch. the reference kernel checks the budget before every vector and leaves the unreached ones pending. |
+| `327b4a52` | `kernel/src/fs/inode.rs, kernel/src/fs/file.rs` | The generic O_APPEND write read the file size, released the lock and only then took the data lock to write — two appenders on different open descriptions could pick the same offset, and the second write overwrote the first. the reference kernel takes the append position under the inode lock. |
+| `ff6fc39b` | `kernel/src/syscall/memory.rs` | msync had no 'addr + len' wrap check (the reference kernel's mm/msync.c has one). A near-max length wrapped the page-aligned length to 0, so msync reported success without syncing anything; the reference kernel returns EINVAL. |
 | `e47b155a` | `kernel/src/ipc/posix_mq.rs` | mq_timedreceive/mq_timedsend take an ABSOLUTE CLOCK_REALTIME deadline (abs_timeout), but Rux read the value as RELATIVE — a caller passing an absolute deadline waited twice as long, and an already-expired deadline blocked for the full timeout instead of returning ETIMEDOUT at once. |
 
 ## Per-file status
@@ -184,7 +184,7 @@ when the tree gains a file the map does not know about.
 | `softlockup.rs` | 222 | 🔶 | soft lockup detector |
 | `switches.rs` | 433 | ✅ | switch table refactored to one macro |
 | `syscost.rs` | 2041 | 🔶 | per-syscall cost table |
-| `taint.rs` | 123 | ✅ | Linux taint letters |
+| `taint.rs` | 123 | ✅ | the reference kernel taint letters |
 | `taskdump.rs` | 748 | 🔶 | task dump format |
 | `wildwatch.rs` | 479 | 🔶 | RO-guard tripwire |
 

@@ -57,7 +57,7 @@ STATUS = {
     "kernel/src/dfx/softlockup.rs": ("part", "soft lockup detector"),
     "kernel/src/dfx/switches.rs": ("done", "switch table refactored to one macro"),
     "kernel/src/dfx/syscost.rs": ("part", "per-syscall cost table"),
-    "kernel/src/dfx/taint.rs": ("done", "Linux taint letters"),
+    "kernel/src/dfx/taint.rs": ("done", "the reference kernel taint letters"),
     "kernel/src/dfx/taskdump.rs": ("part", "task dump format"),
     "kernel/src/dfx/wildwatch.rs": ("part", "RO-guard tripwire"),
     "kernel/src/drivers/blkdev/iostat.rs": ("done", "written by this review"),
@@ -445,17 +445,17 @@ STATUS = {
 BUGS = [
     ("ddfa8abc", "kernel/src/interrupt/softirq.rs",
      "The 2ms softirq budget was checked once per batch of pending vectors, so a batch of "
-     "slow handlers could overrun it by the time of every vector left in the batch. Linux "
+     "slow handlers could overrun it by the time of every vector left in the batch. the reference kernel "
      "checks the budget before every vector and leaves the unreached ones pending."),
     ("327b4a52", "kernel/src/fs/inode.rs, kernel/src/fs/file.rs",
      "The generic O_APPEND write read the file size, released the lock and only then took "
      "the data lock to write — two appenders on different open descriptions could pick the "
-     "same offset, and the second write overwrote the first. Linux takes the append "
+     "same offset, and the second write overwrote the first. the reference kernel takes the append "
      "position under the inode lock."),
     ("ff6fc39b", "kernel/src/syscall/memory.rs",
-     "msync had no 'addr + len' wrap check (Linux's mm/msync.c has one). A near-max length "
+     "msync had no 'addr + len' wrap check (the reference kernel's mm/msync.c has one). A near-max length "
      "wrapped the page-aligned length to 0, so msync reported success without syncing "
-     "anything; Linux returns EINVAL."),
+     "anything; the reference kernel returns EINVAL."),
     ("e47b155a", "kernel/src/ipc/posix_mq.rs",
      "mq_timedreceive/mq_timedsend take an ABSOLUTE CLOCK_REALTIME deadline (abs_timeout), "
      "but Rux read the value as RELATIVE — a caller passing an absolute deadline waited "
