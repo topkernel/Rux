@@ -723,6 +723,56 @@ static void b_p5c23(int use_send, int child_recv)
 static void b_p5c2(void) { b_p5c23(1, 0); }
 static void b_p5c3(void) { b_p5c23(1, 1); }
 
+/* p5d (leg 44): in-process socketpair round trip, no second task.
+ * sendto then drain on sv[1] with EITHER read(2) (p5d_rt_read) or
+ * recvfrom(2) (p5d_rt_recv) in the SAME loop iteration. This isolates
+ * the read(2)-on-socket kernel path from the child-process drain
+ * dynamics the p5c/p5c2/p5c3 rows couple through flow control.
+ * Reading: p5d_rt_read ~p5d_rt_recv => the read(2) wrapper is fixed
+ *           (the p5c gap lives in the cross-process coupling);
+ *           p5d_rt_read - p5d_rt_recv >> 0 => the wrapper is still
+ *           slow (dispatch bug). */
+static void b_p5d_rt(int use_recv)
+{
+    const char *tag = use_recv ? "p5d_rt_recv" : "p5d_rt_read";
+    int sv[2];
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) < 0) {
+        skip_line(tag, "socketpair-stream-errno");
+        return;
+    }
+    u64 *t = xmalloc_samples(P5C_N);
+    if (!t) { close(sv[0]); close(sv[1]); return; }
+    char rec[REC_BYTES];
+    char buf[REC_BYTES * 2];
+    memset(rec, 0xa5, sizeof(rec));
+    for (int i = 0; i < 2000; i++) {
+        if (sendto(sv[0], rec, REC_BYTES, 0, 0, 0) != REC_BYTES) break;
+        ssize_t r = use_recv ? recvfrom(sv[1], buf, sizeof(buf), 0, 0, 0)
+                             : read(sv[1], buf, sizeof(buf));
+        if (r != REC_BYTES) break;
+    }
+    size_t n = 0;
+    s64 w = mnr_ns();
+    for (int i = 0; i < P5C_N; i++) {
+        u64 t0 = rdtsc_();
+        ssize_t s = sendto(sv[0], rec, REC_BYTES, 0, 0, 0);
+        ssize_t r = s == REC_BYTES
+            ? (use_recv ? recvfrom(sv[1], buf, sizeof(buf), 0, 0, 0)
+                        : read(sv[1], buf, sizeof(buf)))
+            : -1;
+        u64 t1 = rdtsc_();
+        if (s != REC_BYTES || r != REC_BYTES) break;
+        t[n++] = t1 - t0;
+    }
+    w = mnr_ns() - w;
+    close(sv[0]); close(sv[1]);
+    report_ticks(tag, t, n, w, n < (size_t)P5C_N ? "short=1" : "");
+    free(t);
+}
+
+static void b_p5d_read(void) { b_p5d_rt(0); }
+static void b_p5d_recv(void) { b_p5d_rt(1); }
+
 /* ---------------- P6: fs ops on an identical tree ---------------- */
 static void p6_path(char *out, size_t outsz, const char *fmt, long i)
 {
@@ -1039,6 +1089,8 @@ int main(int argc, char **argv)
     b_p5c();
     b_p5c2();
     b_p5c3();
+    b_p5d_read();
+    b_p5d_recv();
     b_p6();
     b_p7();
 
