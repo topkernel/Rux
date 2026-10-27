@@ -1396,7 +1396,16 @@ pub fn bread_async(
                     // our I/O has finished and the entry was never published.
                     let _ = Box::from_raw(entry_ptr);
                 }
-                let _ = wait_buffer_io_done(existing_bh);
+                let settle = wait_buffer_io_done(existing_bh);
+                // Re-settle the completion as an INTERNAL signal carrying the
+                // existing buffer's settled status: the token on it names OUR
+                // redundant buffer, but the caller's bread_wait() will check
+                // it against the EXISTING buffer we return — without this
+                // re-settle the zero-serve guard would reject every dup-path
+                // handback as misattributed. complete() stamps token 0
+                // (always accepted); done is already set and no waiter can be
+                // racing (wait() drained deliveries above).
+                completion.complete(settle);
                 // The caller's bread_wait() sees the completion our I/O
                 // signaled; the winning buffer is settled either way.
                 return Some(existing_bh);
@@ -1438,6 +1447,29 @@ pub fn bread_wait(bh: *mut BufferHead, completion: &crate::fs::io_completion::Io
     unsafe {
         let status = completion.wait();
         if status == 0 {
+            // Zero-serve guard (the no-journal ext4 root-lookup family): a
+            // device completion walker delivers with a token proving WHICH
+            // buffer's chain completed. A token mismatch means the delivery
+            // was misattributed — the waiter's own DMA may not have landed,
+            // and b_data is still the new_uninit heap contents (all zeros on
+            // a fresh page). Publishing that as BH_Uptodate caches silent
+            // zeros for the block (every later lookup of the root directory
+            // failed after "init: /test/pbench not found"). Refuse instead:
+            // report EIO, leave the buffer !Uptodate (the failed-async
+            // residue discipline re-reads it on the next miss) and make the
+            // misattribution loud. Token 0 = internal signal (cache hit,
+            // in-flight branch, dup-path re-settle) — always accept.
+            let token = completion.delivered_token();
+            if token != 0 && token != (*bh).b_data.as_ptr() as usize {
+                crate::pr_err!(
+                    "bio: misattributed completion for block {} (token {:x} != buffer {:x}) — refusing to publish, reporting EIO",
+                    (*bh).b_blocknr,
+                    token,
+                    (*bh).b_data.as_ptr() as usize
+                );
+                (*bh).clear_state_bit(BufferState::BH_Req);
+                return -5;
+            }
             (*bh).set_state_bit(BufferState::BH_Uptodate);
         }
         (*bh).clear_state_bit(BufferState::BH_Req);
