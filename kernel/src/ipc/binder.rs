@@ -1009,6 +1009,25 @@ fn ams46_on() -> bool {
     crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::Ams46)
 }
 
+// ============================================================================
+// POOL CENSUS (leg-33B, dfx=poolcensus) — reader-exhaustion adjudication
+//
+// One line per binder proc with queued todo: todo depth, max_threads,
+// requested_threads, and the worker-pool shape (looper-flag workers split
+// into waiting / busy-client stacks, plus client-only threads that must
+// NOT consume the max_threads budget — the sc329B gate-pollution shape).
+// The POOL-SPAWN line (read path, above) proves the done:-shaped spawn
+// emission firing live. Together they decide kernel-issued vs
+// image-refused at the exact moment a proc stops draining.
+// ============================================================================
+
+static POOL_SPAWN_EVENTS: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+
+fn pool_census_on() -> bool {
+    crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::PoolCensus)
+}
+
 fn ams46_txns_contains(id: u64) -> bool {
     AMS46_TXNS
         .iter()
@@ -3397,34 +3416,44 @@ pub fn txn_hang_audit() {
                 let base = top - crate::config::KERNEL_STACK_SIZE;
                 let thsp = tk.thread().sp;
                 let mut line = alloc::string::String::new();
+                // leg-33B: continuation record for the deepened sp-up
+                // window (words 9-24) — printk records cap at 256 bytes.
+                let mut extra = alloc::string::String::new();
                 // Window (a): parked-chain words upward from sp.
                 if thsp as usize >= base
                     && thsp as usize + 8 <= top
                     && (thsp & 7) == 0
                 {
-                    let p = thsp as *const u64;
-                    let mut shown = 0;
-                    let _ = write!(line, " sp-up:");
-                    // 384-word window: deep waits (journal commit, bio
-                    // completion) park far below the syscall frames; the
-                    // original 80-word window caught only the switch/IRQ
-                    // plumbing above the saved sp (sc315A's parked
-                    // fdatasync chains symbolized to context_switch).
-                    for k in 0..384usize {
-                        // SAFETY: diagnostic read inside the task's own
-                        // kernel-stack window; bounds checked above.
-                        let v = unsafe { core::ptr::read_volatile(p.add(k)) };
-                        if is_text(v) {
+                let p = thsp as *const u64;
+                let mut shown = 0;
+                let _ = write!(line, " sp-up:");
+                // 640-word window, leg-33B deepened: the sc329B 8-word
+                // capture stopped inside the scheduler plumbing above
+                // the saved sp (context_switch / irq_restore) and never
+                // reached the wait-site frames of deep fs waits
+                // (journal commit, bio completion). Capture up to 24
+                // kernel-text words and split across a second record —
+                // printk records cap at 256 bytes.
+                for k in 0..640usize {
+                    // SAFETY: diagnostic read inside the task's own
+                    // kernel-stack window; bounds checked above.
+                    let v = unsafe { core::ptr::read_volatile(p.add(k)) };
+                    if is_text(v) {
+                        if shown < 8 {
                             let _ = write!(line, " {v:#x}");
-                            shown += 1;
-                            if shown >= 8 {
-                                break;
-                            }
+                        } else {
+                            let _ = write!(extra, " {v:#x}");
+                        }
+                        shown += 1;
+                        if shown >= 24 {
+                            break;
                         }
                     }
-                    if shown == 0 {
-                        line.truncate(0);
-                    }
+                }
+                if shown == 0 {
+                    line.truncate(0);
+                    extra.truncate(0);
+                }
                 }
                 // Window (b): newest frames downward from the entry frame.
                 #[cfg(feature = "x86_64")]
@@ -3461,6 +3490,9 @@ pub fn txn_hang_audit() {
                         line,
                         bline
                     );
+                    if !extra.is_empty() {
+                        let _ = writeln!(w, "TXN-HANG-STK2 txn{}{}", h.id, extra);
+                    }
                 }
             }
         }
@@ -3564,6 +3596,148 @@ pub fn ams46_audit() {
                 parked
             );
         }
+    }
+}
+
+/// POOL CENSUS (leg-33B, dfx=poolcensus): every ~5 s, one line per
+/// binder proc that has queued todo work — the reader-exhaustion
+/// adjudication backdrop (sc329B: foundation proc todo grew while every
+/// OS_IPC reader was parked as a client and the pool never grew).
+/// Line shape (compact, one printk record):
+///   POOL pid={} todo={} max={} req={} st={} thr={} w={} wwait={} wstk={} clients={}"
+/// plus, for the proc with the deepest todo, one detail line naming each
+/// worker thread's state (waiting / stacked / loitering without flags).
+pub fn pool_census_audit() {
+    if !pool_census_on() {
+        return;
+    }
+    let now = crate::drivers::timer::get_jiffies() as u32;
+    static LAST: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+    use core::sync::atomic::Ordering::Relaxed;
+    let last = LAST.load(Relaxed);
+    if last != 0 && now.wrapping_sub(last) < 500 {
+        return;
+    }
+    if LAST.compare_exchange(last, now, Relaxed, Relaxed).is_err() {
+        return;
+    }
+
+    // Snapshot under WORLD: (pid, todo, max, req, thr, workers, waiting,
+    // stacked, clients, worst-thread detail for the deepest-todo proc).
+    struct Snap {
+        pid: u32,
+        todo: usize,
+        max_t: i32,
+        req: i32,
+        started: i32,
+        thr: usize,
+        workers: usize,
+        wwait: usize,
+        wstk: usize,
+        clients: usize,
+    }
+    let mut snaps: alloc::vec::Vec<Snap> = alloc::vec::Vec::new();
+    // Deepest-todo proc's per-thread states: (tid, waiting, stacked).
+    let mut detail: alloc::vec::Vec<(u32, bool, bool)> = alloc::vec::Vec::new();
+    let mut detail_pid = 0u32;
+    {
+        let w = world_lock();
+        // SAFETY: read-only POD snapshot under WORLD (sc89 discipline —
+        // no prints or task walks under the lock).
+        unsafe {
+            let Some(world) = w.as_ref() else { return };
+            let mut deepest_pid = 0u32;
+            let mut deepest_todo = 0usize;
+            for p in &world.procs {
+                let pim = p.im();
+                let todo = pim.todo.len();
+                if todo == 0 {
+                    continue;
+                }
+                if todo > deepest_todo {
+                    deepest_todo = todo;
+                    deepest_pid = p.pid;
+                }
+                let mut workers = 0usize;
+                let mut wwait = 0usize;
+                let mut wstk = 0usize;
+                let mut clients = 0usize;
+                for t in pim.threads.iter() {
+                    let st = t.st();
+                    let is_worker = (st.looper & (LOOPER_ENTERED | LOOPER_REGISTERED)) != 0;
+                    if is_worker {
+                        workers += 1;
+                        if st.waiting_for_proc_work {
+                            wwait += 1;
+                        }
+                        if !st.txn_stack.is_empty() {
+                            wstk += 1;
+                        }
+                    } else if !st.txn_stack.is_empty() || !st.todo.is_empty() {
+                        clients += 1;
+                    }
+                }
+                if snaps.len() < 12 {
+                    snaps.push(Snap {
+                        pid: p.pid,
+                        todo,
+                        max_t: pim.max_threads,
+                        req: pim.requested_threads,
+                        started: pim.requested_threads_started,
+                        thr: pim.threads.len(),
+                        workers,
+                        wwait,
+                        wstk,
+                        clients,
+                    });
+                }
+            }
+            if deepest_pid != 0 {
+                if let Some(p) = world.procs.iter().find(|p| p.pid == deepest_pid) {
+                    let pim = p.im();
+                    for t in pim.threads.iter().take(16) {
+                        let st = t.st();
+                        detail.push((t.tid, st.waiting_for_proc_work, !st.txn_stack.is_empty()));
+                    }
+                    detail_pid = deepest_pid;
+                }
+            }
+        }
+    }
+    snaps.sort_by(|a, b| b.todo.cmp(&a.todo));
+    for s in snaps.iter().take(6) {
+        crate::pr_warn!(
+            "POOL pid={} todo={} max={} req={} st={} thr={} w={} wwait={} wstk={} clients={}",
+            s.pid,
+            s.todo,
+            s.max_t,
+            s.req,
+            s.started,
+            s.thr,
+            s.workers,
+            s.wwait,
+            s.wstk,
+            s.clients
+        );
+    }
+    if !detail.is_empty() {
+        let mut line = alloc::string::String::new();
+        use core::fmt::Write as _;
+        for (tid, waiting, stacked) in detail.iter() {
+            let _ = write!(
+                line,
+                " {}{}",
+                tid,
+                if *waiting {
+                    "W"
+                } else if *stacked {
+                    "S"
+                } else {
+                    "L"
+                }
+            );
+        }
+        crate::pr_warn!("POOL-THR pid={}{}", detail_pid, line);
     }
 }
 
@@ -7226,7 +7400,11 @@ fn binder_thread_read(
         stage_cmd!(BR_NOOP);
     }
 
-    let mut got_transaction = false;
+    // Pool-census note (dfx-gated, leg-33B): whether any iteration's
+    // done:-shaped spawn emission fired, for the rate-capped POOL-SPAWN
+    // proof print after the WORLD guard drops.
+    let mut pool_spawn_fired = false;
+
     loop {
         // ---- wait for work (binder_wait_for_work) ------------------------
         let has_work = {
@@ -7449,7 +7627,6 @@ fn binder_thread_read(
                             stage_u64!(cookie);
                         }
                         Work::Transaction(t) => {
-                            got_transaction = true;
                             let is_reply = t.target_node.is_none();
                             if is_reply {
                                 thread.hist(EV_REPLY_RECV, t.id as u32, 0);
@@ -7637,9 +7814,33 @@ fn binder_thread_read(
                         }
                     }
                 }
-                // Linux done: BR_SPAWN_LOOPER when no transaction was read
-                // and more threads are allowed and none are ready.
-                if !got_transaction {
+                // Linux done: BR_SPAWN_LOOPER rides on EVERY returning
+                // read — including reads that delivered a transaction or
+                // a reply (binder_thread_read's done: label in 5.15 has
+                // no "no work" gate). sc329B root-cause: the old
+                // `!got_transaction` gate meant the request could only be
+                // issued from an idle no-work return, which by definition
+                // happens only when threads are idle — under nested-call
+                // load every read returns WITH work (or parks as a
+                // client), so the pool never grew past its boot-time size
+                // while it was being consumed; when the last reader
+                // parked as a client, proc todo grew unboundedly
+                // (TXN-HANG 91.5 s family into foundation pid 799).
+                //
+                // The pool gate mirrors the Linux done: condition exactly
+                // (5.15 binder.c ~4204): requested_threads == 0, no
+                // waiting worker (waiting_threads empty), and
+                // requested_threads_started < max_threads — the STARTED
+                // count (spawned-and-REGISTERED loopers), never
+                // `threads.len()`: every client-only thread of the proc
+                // owns a BinderThread entry (BC_TRANSACTION from an FFRT
+                // worker, a spawned child, ...) and those must not
+                // consume the service's max_threads budget. Linux never
+                // decrements started on thread exit; Rux matches. The
+                // returning thread must itself be a looper
+                // (REGISTERED | ENTERED) as in Linux — a client thread's
+                // reply-return does not request spawns there.
+                {
                     let pim = pm(world, proc).im();
                     // waiting_for_proc_work now implies the full
                     // availability predicate (todo/txn_stack empty +
@@ -7656,23 +7857,38 @@ fn binder_thread_read(
                     // child thread ever blocks in a binder read and
                     // AMS->child deliveries have no reader).
                     let is_child = thread.tgid != 0 && thread.tgid != proc.pid as u32;
+                    let looper_worker = |t: &Arc<BinderThread>| {
+                        (t.st().looper & (LOOPER_ENTERED | LOOPER_REGISTERED)) != 0
+                    };
                     let emit_spawn = if is_child && pim.max_threads > 0 {
                         let child_ready = pim
                             .threads
                             .iter()
                             .any(|t| t.tgid == thread.tgid && t.st().waiting_for_proc_work);
-                        let child_n = pim.threads.iter().filter(|t| t.tgid == thread.tgid).count();
+                        let child_n = pim
+                            .threads
+                            .iter()
+                            .filter(|t| t.tgid == thread.tgid && looper_worker(t))
+                            .count();
                         !child_ready && child_n < pim.max_threads as usize
                     } else {
                         pim.requested_threads == 0
                             && !ready
                             && pim.max_threads > 0
-                            && pim.threads.len() < pim.max_threads as usize
+                            && pim.requested_threads_started < pim.max_threads
+                            && (thread.st().looper & (LOOPER_ENTERED | LOOPER_REGISTERED)) != 0
                     };
+                    // sc79 discipline: BR_SPAWN_LOOPER is a no-payload
+                    // command — riding it AFTER the (at most one) sync
+                    // transaction never stacks a second userspace-
+                    // pending command, unlike the double-BR_TRANSACTION
+                    // shape that crossed replies in sc79.
                     if emit_spawn && staged.len() + 4 <= read_size {
                         if !is_child {
                             pim.requested_threads += 1;
                         }
+                        POOL_SPAWN_EVENTS.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                        pool_spawn_fired = true;
                         stage_cmd!(BR_SPAWN_LOOPER);
                     }
                 }
@@ -7687,6 +7903,24 @@ fn binder_thread_read(
         }
         // Only the leading BR_NOOP staged and no work found: retry the wait
         // (Linux "goto retry").
+    }
+
+    // POOL-SPAWN proof print (dfx=poolcensus): one line per emission,
+    // rate-capped, OUTSIDE the WORLD guard. Names the proc whose read
+    // carried the BR_SPAWN_LOOPER request — the live counterpart of the
+    // census lines.
+    if pool_spawn_fired && pool_census_on() {
+        static SPAWN_PRINTED: core::sync::atomic::AtomicU32 =
+            core::sync::atomic::AtomicU32::new(0);
+        use core::sync::atomic::Ordering::Relaxed;
+        if SPAWN_PRINTED.fetch_add(1, Relaxed) < 40 {
+            crate::pr_warn!(
+                "POOL-SPAWN pid {} tid {} carried BR_SPAWN_LOOPER (events {})",
+                proc.pid,
+                thread.tid,
+                POOL_SPAWN_EVENTS.load(Relaxed)
+            );
+        }
     }
 
     // Copy the staged commands out to user memory.
