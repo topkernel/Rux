@@ -714,6 +714,53 @@ tracepoints! {
             args[9] as i16,
         )
     };
+
+    /// kmem:kmalloc — one kernel heap allocation, with the ORIGIN
+    /// (call_site, `%pS`-symbolized) the heap-leak hunts want: every
+    /// Box/Vec/String build flows through the one GlobalAlloc
+    /// chokepoint, so this single event names the allocating function.
+    /// The reference host's events/kmem/kmalloc, field list and print
+    /// fmt verbatim (the `accounted` column is DERIVED from
+    /// __GFP_ACCOUNT there — no field row — and the same derivation
+    /// runs here). Field honesty: Rux's allocator takes no gfp mask;
+    /// the sites pass GFP_KERNEL (the analog of a plain kernel
+    /// allocation), so gfp_flags renders "GFP_KERNEL" and accounted
+    /// renders false — the reference's rendering of that mask. node is
+    /// NUMA_NO_NODE (-1): Rux has no NUMA policy.
+    EVENT_KMALLOC / kmalloc_fmt / trace_kmalloc : "kmem", "kmalloc", 23,
+    print: "\"call_site=%pS ptr=%p bytes_req=%zu bytes_alloc=%zu gfp_flags=%s node=%d accounted=%s\", (void *)REC->call_site, REC->ptr, REC->bytes_req, REC->bytes_alloc, (REC->gfp_flags) ? __print_flags(REC->gfp_flags, \"|\", {( unsigned long)(((((((( gfp_t)(((((1UL))) << (10))|((((1UL))) << (11)))) | (( gfp_t)((((1UL))) << (6))) | (( gfp_t)((((1UL))) << (7))) | (( gfp_t)((((1UL))) << (20)))) | (( gfp_t)((((1UL))) << (1)))) | (( gfp_t)((((1UL))) << (3))) | (( gfp_t)0)) | (( gfp_t)((((1UL))) << (18))) | (( gfp_t)((((1UL))) << (19))) | (( gfp_t)((((1UL))) << (13)))) & ~(( gfp_t)(((((1UL))) << (10))|((((1UL))) << (11))))) | (( gfp_t)((((1UL))) << (10)))), \"GFP_TRANSHUGE\"}, {( unsigned long)((((((( gfp_t)(((((1UL))) << (10))|((((1UL))) << (11)))) | (( gfp_t)((((1UL))) << (6))) | (( gfp_t)((((1UL))) << (7))) | (( gfp_t)((((1UL))) << (20)))) | (( gfp_t)((((1UL))) << (1)))) | (( gfp_t)((((1UL))) << (3))) | (( gfp_t)0)) | (( gfp_t)((((1UL))) << (18))) | (( gfp_t)((((1UL))) << (19))) | (( gfp_t)((((1UL))) << (13)))) & ~(( gfp_t)(((((1UL))) << (10))|((((1UL))) << (11))))), \"GFP_TRANSHUGE_LIGHT\"}, {( unsigned long)((((( gfp_t)(((((1UL))) << (10))|((((1UL))) << (11)))) | (( gfp_t)((((1UL))) << (6))) | (( gfp_t)((((1UL))) << (7))) | (( gfp_t)((((1UL))) << (20)))) | (( gfp_t)((((1UL))) << (1)))) | (( gfp_t)((((1UL))) << (3))) | (( gfp_t)0)), \"GFP_HIGHUSER_MOVABLE\"}, {( unsigned long)(((( gfp_t)(((((1UL))) << (10))|((((1UL))) << (11)))) | (( gfp_t)((((1UL))) << (6))) | (( gfp_t)((((1UL))) << (7))) | (( gfp_t)((((1UL))) << (20)))) | (( gfp_t)((((1UL))) << (1)))), \"GFP_HIGHUSER\"}, {( unsigned long)((( gfp_t)(((((1UL))) << (10))|((((1UL))) << (11)))) | (( gfp_t)((((1UL))) << (6))) | (( gfp_t)((((1UL))) << (7))) | (( gfp_t)((((1UL))) << (20)))), \"GFP_USER\"}, {( unsigned long)(((( gfp_t)(((((1UL))) << (10))|((((1UL))) << (11)))) | (( gfp_t)((((1UL))) << (6))) | (( gfp_t)((((1UL))) << (7)))) | (( gfp_t)((((1UL))) << (22)))), \"GFP_KERNEL_ACCOUNT\"}, {( unsigned long)((( gfp_t)(((((1UL))) << (10))|((((1UL))) << (11)))) | (( gfp_t)((((1UL))) << (6))) | (( gfp_t)((((1UL))) << (7)))), \"GFP_KERNEL\"}, {( unsigned long)((( gfp_t)(((((1UL))) << (10))|((((1UL))) << (11)))) | (( gfp_t)((((1UL))) << (6)))), \"GFP_NOFS\"}, {( unsigned long)((( gfp_t)((((1UL))) << (5)))|(( gfp_t)((((1UL))) << (11)))), \"GFP_ATOMIC\"}, {( unsigned long)((( gfp_t)(((((1UL))) << (10))|((((1UL))) << (11))))), \"GFP_NOIO\"}, {( unsigned long)((( gfp_t)((((1UL))) << (11))) | (( gfp_t)((((1UL))) << (13)))), \"GFP_NOWAIT\"}, {( unsigned long)(( gfp_t)((((1UL))) << (0))), \"GFP_DMA\"}, {( unsigned long)(( gfp_t)((((1UL))) << (2))), \"GFP_DMA32\"}, {( unsigned long)(( gfp_t)(((((1UL))) << (10))|((((1UL))) << (11)))), \"__GFP_RECLAIM\"}, {( unsigned long)(( gfp_t)((((1UL))) << (0))), \"__GFP_DMA\"}, {( unsigned long)(( gfp_t)((((1UL))) << (1))), \"__GFP_HIGHMEM\"}, {( unsigned long)(( gfp_t)((((1UL))) << (2))), \"__GFP_DMA32\"}, {( unsigned long)(( gfp_t)((((1UL))) << (3))), \"__GFP_MOVABLE\"}, {( unsigned long)(( gfp_t)((((1UL))) << (4))), \"__GFP_RECLAIMABLE\"}, {( unsigned long)(( gfp_t)((((1UL))) << (5))), \"__GFP_HIGH\"}, {( unsigned long)(( gfp_t)((((1UL))) << (6))), \"__GFP_IO\"}, {( unsigned long)(( gfp_t)((((1UL))) << (7))), \"__GFP_FS\"}, {( unsigned long)(( gfp_t)((((1UL))) << (8))), \"__GFP_ZERO\"}, {( unsigned long)(( gfp_t)((((1UL))) << (10))), \"__GFP_DIRECT_RECLAIM\"}, {( unsigned long)(( gfp_t)((((1UL))) << (11))), \"__GFP_KSWAPD_RECLAIM\"}, {( unsigned long)(( gfp_t)((((1UL))) << (12))), \"__GFP_WRITE\"}, {( unsigned long)(( gfp_t)((((1UL))) << (13))), \"__GFP_NOWARN\"}, {( unsigned long)(( gfp_t)((((1UL))) << (14))), \"__GFP_RETRY_MAYFAIL\"}, {( unsigned long)(( gfp_t)((((1UL))) << (15))), \"__GFP_NOFAIL\"}, {( unsigned long)(( gfp_t)((((1UL))) << (16))), \"__GFP_NORETRY\"}, {( unsigned long)(( gfp_t)((((1UL))) << (17))), \"__GFP_MEMALLOC\"}, {( unsigned long)(( gfp_t)((((1UL))) << (18))), \"__GFP_COMP\"}, {( unsigned long)(( gfp_t)((((1UL))) << (19))), \"__GFP_NOMEMALLOC\"}, {( unsigned long)(( gfp_t)((((1UL))) << (20))), \"__GFP_HARDWALL\"}, {( unsigned long)(( gfp_t)((((1UL))) << (21))), \"__GFP_THISNODE\"}, {( unsigned long)(( gfp_t)((((1UL))) << (22))), \"__GFP_ACCOUNT\"}, {( unsigned long)(( gfp_t)((((1UL))) << (23))), \"__GFP_ZEROTAGS\"}, {( unsigned long)(( gfp_t)((((1UL))) << (24))), \"__GFP_NO_OBJ_EXT\"}, { 0, ((void *)0) } ) : \"none\", REC->node, (1 && (REC->gfp_flags & ( unsigned long)(( gfp_t)((((1UL))) << (22))))) ? \"true\" : \"false\"",
+    fields: "\tfield:unsigned long call_site;\toffset:8;\tsize:8;\tsigned:0;\n\
+             \tfield:const void *ptr;\toffset:16;\tsize:8;\tsigned:0;\n\
+             \tfield:size_t bytes_req;\toffset:24;\tsize:8;\tsigned:0;\n\
+             \tfield:size_t bytes_alloc;\toffset:32;\tsize:8;\tsigned:0;\n\
+             \tfield:unsigned long gfp_flags;\toffset:40;\tsize:8;\tsigned:0;\n\
+             \tfield:int node;\toffset:48;\tsize:4;\tsigned:1;\n",
+    call (call_site: u64, ptr: u64, bytes_req: u64, bytes_alloc: u64,
+          gfp_flags: u64, node: i32, accounted: bool),
+    render |args: &[u64; TRACE_ARGS]| {
+        format!(
+            "call_site={} ptr={:#x} bytes_req={} bytes_alloc={} gfp_flags={} node={} accounted={}",
+            ps_render(args[0]),
+            args[1],
+            args[2],
+            args[3],
+            gfp_flags_str(args[4]),
+            args[5] as i32,
+            if args[6] != 0 { "true" } else { "false" },
+        )
+    };
+
+    /// kmem:kfree — one kernel heap free, same origin discipline. The
+    /// reference host's events/kmem/kfree, field list and print fmt
+    /// verbatim: call_site and ptr, nothing else.
+    EVENT_KFREE / kfree_fmt / trace_kfree : "kmem", "kfree", 24,
+    print: "\"call_site=%pS ptr=%p\", (void *)REC->call_site, REC->ptr",
+    fields: "\tfield:unsigned long call_site;\toffset:8;\tsize:8;\tsigned:0;\n\
+             \tfield:const void *ptr;\toffset:16;\tsize:8;\tsigned:0;\n",
+    call (call_site: u64, ptr: u64),
+    render |args: &[u64; TRACE_ARGS]| {
+        format!("call_site={} ptr={:#x}", ps_render(args[0]), args[1])
+    };
 }
 
 /// The trace_marker pseudo-event. NOT in EVENTS on purpose: a marker
@@ -1343,27 +1390,127 @@ fn fmt_trace_marker(args: &[u64; TRACE_ARGS]) -> String {
     String::from_utf8_lossy(&bytes[..end]).into_owned()
 }
 
+/// `%ps`/`%pS` rendering — the symbol table resolves the address to
+/// name+off/size and falls back to the raw hex exactly as the
+/// reference's %ps does when no symbol covers the address. Shared by
+/// the page_fault pair and the kmem origin column.
+pub fn ps_render(addr: u64) -> String {
+    match crate::dfx::ksyms::lookup(addr) {
+        Some((name, sym, size)) => {
+            if size > 0 {
+                format!("{}+0x{:x}/0x{:x}", name, addr - sym, size)
+            } else {
+                format!("{}+0x{:x}", name, addr - sym)
+            }
+        }
+        None => format!("{:#x}", addr),
+    }
+}
+
+/// gfp_flags rendered the print fmt's way: 0 is "none", otherwise the
+/// named mask (the reference's __print_flags; Rux sites pass
+/// GFP_KERNEL-class masks today, and the table covers the reference's
+/// common set).
+fn gfp_flags_str(gfp: u64) -> &'static str {
+    match gfp {
+        0 => "none",
+        0xcc0 => "GFP_KERNEL",
+        0xca0 => "GFP_NOFS",
+        0xc20 => "GFP_ATOMIC",
+        0xc00 => "GFP_NOIO",
+        0x220 => "GFP_HIGHUSER_MOVABLE",
+        0x200 => "GFP_HIGHUSER",
+        0x140 => "GFP_USER",
+        _ => "GFP_KERNEL",
+    }
+}
+
+/// Pick the kmalloc/kfree `call_site` out of a frame walk done at the
+/// GlobalAlloc boundary: the first frame ABOVE the allocation plumbing.
+/// The reference's `_RET_IP_` names the caller of kmalloc — which is
+/// inline at the interesting site — while a Rust GlobalAlloc hop adds
+/// TWO OR THREE shim frames (current_frame_pointer's own frame, the
+/// GlobalAlloc impl, `__rust_alloc`, the alloc crate's wrapper), and
+/// the shims are not always in the symbol table (an address inside
+/// `__rust_alloc` then resolves to the closest-below symbol — the
+/// GlobalAlloc impl itself). The skip table names every frame the walk
+/// can legitimately pass through while still inside the allocator; the
+/// first frame resolving elsewhere is the allocating kernel function —
+/// the address the heap-leak hunt needs. Falls back to the first
+/// non-zero frame when nothing resolves (early boot, no table).
+pub fn alloc_call_site(frames: &[u64]) -> u64 {
+    /// Is a resolved name part of the allocation plumbing the walk must
+    /// climb past?
+    fn is_plumbing(name: &str) -> bool {
+        name.contains("mm::buddy_allocator")      // the GlobalAlloc impl + the trace helpers
+            || name.contains("mm::small_alloc")   // the packing layer
+            || name.contains("dfx::memwatch")     // the walker itself
+            || name.contains("dfx::backtrace")    // current_frame_pointer
+            // The compiler shims demangle inside the __rustc module
+            // namespace ("__rustc::__rust_alloc+0x.."): substring, not
+            // prefix, or the origin lands one frame too low.
+            || name.contains("__rust_alloc")
+            || name.contains("__rust_dealloc")
+            || name.contains("__rust_realloc")
+            // The WHOLE alloc crate is allocation machinery (raw_vec's
+            // grow/deallocate, vec's push/reserve, boxed's new — and
+            // their trait impls render as "<alloc::string::String as
+            // ...>", so a starts_with test misses them). No kernel
+            // allocating site lives there; stopping early would name
+            // the growth, not the caller.
+            || name.contains("alloc::alloc::")
+            || name.contains("alloc::raw_vec")
+            || name.contains("alloc::vec")
+            || name.contains("alloc::string")
+            || name.contains("alloc::boxed")
+            || name.contains("alloc::fmt")
+            || name.contains("alloc::collections")
+            || name.contains("alloc::sync")
+    }
+
+    // One pass, two candidates: the best origin is a frame in the
+    // kernel's own rux:: namespace (trait impls render as "<rux::...")
+    // that is not itself plumbing — the GlobalAlloc impl IS a rux::
+    // frame, so the plumbing test runs first. A non-rux frame that is
+    // not plumbing (early boot, foreign code) serves as the fallback
+    // when no kernel frame is within the walk.
+    let mut fallback = 0u64;
+    for &f in frames {
+        if f == 0 {
+            break;
+        }
+        let (name, is_rux) = match crate::dfx::ksyms::lookup(f) {
+            Some((name, _, _)) => {
+                let rux = name.starts_with("rux::") || name.starts_with("<rux::");
+                (name, rux)
+            }
+            None => ("", false),
+        };
+        if !name.is_empty() && is_plumbing(name) {
+            continue;
+        }
+        if is_rux {
+            return f;
+        }
+        if fallback == 0 {
+            fallback = f;
+        }
+    }
+    if fallback != 0 {
+        return fallback;
+    }
+    frames.iter().copied().find(|&f| f != 0).unwrap_or(0)
+}
+
 /// page_fault_user / page_fault_kernel: address, ip, error_code. The
 /// `%ps` rendering is symbolic — the symbol table resolves the address
 /// to name+off/size and falls back to the raw hex exactly as the
 /// reference's %ps does when no symbol covers the address.
 fn fmt_page_fault(args: &[u64; TRACE_ARGS]) -> String {
-    let ps = |addr: u64| -> String {
-        match crate::dfx::ksyms::lookup(addr) {
-            Some((name, sym, size)) => {
-                if size > 0 {
-                    format!("{}+0x{:x}/0x{:x}", name, addr - sym, size)
-                } else {
-                    format!("{}+0x{:x}", name, addr - sym)
-                }
-            }
-            None => format!("{:#x}", addr),
-        }
-    };
     format!(
         "address={} ip={} error_code=0x{:x}",
-        ps(args[0]),
-        ps(args[1]),
+        ps_render(args[0]),
+        ps_render(args[1]),
         args[2]
     )
 }
