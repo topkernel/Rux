@@ -1176,13 +1176,14 @@ pub mod tests {
         // Default (fmt 0): the count alone.
         ev.read_format = 0;
         let n = read_counter(&ev, &mut buf);
-        let mut ok = n == 8 && u64::from_le_bytes(buf[0..8].try_into().unwrap()) == 1_500_000;
+        let mut ok = n == Some(8)
+            && u64::from_le_bytes(buf[0..8].try_into().unwrap()) == 1_500_000;
         // Both TIME bits: count, enabled (0 — never stamped), running
         // (== the charged count).
         ev.read_format =
             PERF_FORMAT_TOTAL_TIME_ENABLED | PERF_FORMAT_TOTAL_TIME_RUNNING | PERF_FORMAT_ID;
         let n = read_counter(&ev, &mut buf);
-        ok &= n == 32;
+        ok &= n == Some(32);
         let count = u64::from_le_bytes(buf[0..8].try_into().unwrap());
         let enabled = u64::from_le_bytes(buf[8..16].try_into().unwrap());
         let running = u64::from_le_bytes(buf[16..24].try_into().unwrap());
