@@ -595,9 +595,16 @@ impl Clone for SignalStruct {
         Self {
             action: RwSpinlock::new(*actions),
             mask: AtomicU64::new(self.mask.load(Ordering::Acquire)),
-            is_child_subreaper: core::sync::atomic::AtomicBool::new(
-                self.is_child_subreaper.load(Ordering::Acquire),
-            ),
+            // Linux copy_signal() does NOT inherit the subreaper flag at
+            // fork — only the cached has_child_subreaper bit derives from
+            // the parent (fork.c: p->signal->has_child_subreaper =
+            // real_parent's has_child_subreaper || is_child_subreaper).
+            // Our reparent walk checks each ancestor's is_child_subreaper
+            // directly (exit.rs), so leaving the child's flag clear keeps
+            // both semantics: the child is not itself a subreaper, but its
+            // orphans still climb to the subreaper ancestor — LTP prctl03
+            // expects GET to return 0 in a forked child.
+            is_child_subreaper: core::sync::atomic::AtomicBool::new(false),
             timer_slack_ns: core::sync::atomic::AtomicU64::new(
                 self.timer_slack_ns.load(Ordering::Acquire),
             ),

@@ -2713,13 +2713,30 @@ pub fn sys_prctl(args: SyscallArgs) -> i64 {
             0
         }
         37 => {
-            // PR_GET_CHILD_SUBREAPER
+            // PR_GET_CHILD_SUBREAPER: the value is WRITTEN to the (int *)
+            // in arg2 and the syscall returns 0 (Linux kernel/sys.c:
+            // put_user(!!sig->is_child_subreaper, (int __user *)arg2)).
+            // Returning the flag itself left the caller's variable
+            // uninitialized — LTP prctl03's final check read stack garbage
+            // (0) after a successful PR_SET, and the check that expected 0
+            // passed only by luck.
             // SAFETY: current is a valid task pointer; signal field is an Option.
             unsafe {
-                if let Some(ref sig) = (*current).signal {
-                    sig.is_child_subreaper.load(core::sync::atomic::Ordering::Relaxed) as i64
+                let val: i32 = if let Some(ref sig) = (*current).signal {
+                    sig.is_child_subreaper.load(core::sync::atomic::Ordering::Relaxed) as i32
                 } else {
                     0
+                };
+                // Returns uncopied byte count (0 = success).
+                if crate::arch::uaccess::copy_to_user(
+                    arg2 as *mut u8,
+                    val.to_ne_bytes().as_ptr(),
+                    4,
+                ) == 0
+                {
+                    0
+                } else {
+                    -14  // EFAULT
                 }
             }
         }
