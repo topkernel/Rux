@@ -891,7 +891,7 @@ fn pipe_write_common(file: &File, src: *const u8, count: usize, user: bool) -> i
         if pipe.is_read_closed() {
             // Write to pipe with no readers -> SIGPIPE + EPIPE
             if let Some(current) = crate::sched::current() {
-                let _ = crate::signal::send_signal((*current).pid(), crate::signal::Signal::SIGPIPE as i32);
+                let _ = crate::signal::send_signal_directed((*current).pid(), crate::signal::Signal::SIGPIPE as i32);
             }
             return -(crate::errno::constants::EPIPE) as isize;
         }
@@ -1038,7 +1038,7 @@ fn pipe_write_common(file: &File, src: *const u8, count: usize, user: bool) -> i
                         return total_written as isize;
                     }
                     if let Some(current) = crate::sched::current() {
-                        let _ = crate::signal::send_signal((*current).pid(), crate::signal::Signal::SIGPIPE as i32);
+                        let _ = crate::signal::send_signal_directed((*current).pid(), crate::signal::Signal::SIGPIPE as i32);
                     }
                     return -(crate::errno::constants::EPIPE) as isize;
                 }
@@ -1143,14 +1143,16 @@ fn oasync_signal_owner(kind: u8, id: i32, sig: i32, poll_code: i32, band: i32, f
     match kind {
         1 | 3 => {
             if id > 0 {
-                let _ = crate::signal::send_signal_with_info(id as u32, info);
+                // Directed (PIDTYPE_PID): the reference's send_sigio_to_task
+                // delivers SIGIO to the one owning task.
+                let _ = crate::signal::send_signal_with_info_directed(id as u32, info);
             }
         }
         2 => {
             let pgid = id.unsigned_abs();
             crate::process::pid_hash::pid_hash_for_each_task(|task| unsafe {
                 if (*task).pgid() == pgid {
-                    let _ = crate::signal::send_signal_with_info((*task).pid(), info);
+                    let _ = crate::signal::send_signal_with_info_directed((*task).pid(), info);
                 }
             });
         }

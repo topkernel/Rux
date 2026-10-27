@@ -1272,13 +1272,13 @@ fn handle_page_fault(regs: &mut PtRegs, access_type: u32) {    use crate::arch::
                 // here (and avoids a fault-retry loop).
                 let pid = crate::process::current_pid();
                 if sigsegv_has_handler() && !sigsegv_blocked_current() {
-                    let _ = crate::signal::send_signal(pid, crate::signal::Signal::SIGSEGV as i32);
+                    let _ = crate::signal::send_signal_directed(pid, crate::signal::Signal::SIGSEGV as i32);
                     // Synchronous fault: deliver despite a blocked mask
                     // (Linux force_sig parity — see force_unblock_current).
                     crate::signal::force_unblock_current(crate::signal::Signal::SIGSEGV as i32);
                     return;
                 }
-                let _ = crate::signal::send_signal(pid, crate::signal::Signal::SIGSEGV as i32);
+                let _ = crate::signal::send_signal_directed(pid, crate::signal::Signal::SIGSEGV as i32);
                 crate::process::exit::do_exit(-(crate::signal::Signal::SIGSEGV as i32));
             }
         }
@@ -1292,12 +1292,12 @@ fn handle_page_fault(regs: &mut PtRegs, access_type: u32) {    use crate::arch::
                 // itself, or the default disposition, kills directly.
                 let pid = crate::process::current_pid();
                 if sigsegv_has_handler() && !sigsegv_blocked_current() {
-                    let _ = crate::signal::send_signal(pid, crate::signal::Signal::SIGSEGV as i32);
+                    let _ = crate::signal::send_signal_directed(pid, crate::signal::Signal::SIGSEGV as i32);
                     // Synchronous fault: deliver despite a blocked mask.
                     crate::signal::force_unblock_current(crate::signal::Signal::SIGSEGV as i32);
                     return;
                 }
-                let _ = crate::signal::send_signal(pid, crate::signal::Signal::SIGSEGV as i32);
+                let _ = crate::signal::send_signal_directed(pid, crate::signal::Signal::SIGSEGV as i32);
                 crate::process::exit::do_exit(-(crate::signal::Signal::SIGSEGV as i32));
             }
         }
@@ -1308,7 +1308,7 @@ fn handle_page_fault(regs: &mut PtRegs, access_type: u32) {    use crate::arch::
                 // a SIGBUS handler and must catch it; the default action
                 // kills with SIGBUS.
                 let pid = crate::process::current_pid();
-                let _ = crate::signal::send_signal(pid, crate::signal::Signal::SIGBUS as i32);
+                let _ = crate::signal::send_signal_directed(pid, crate::signal::Signal::SIGBUS as i32);
                 if !sigbus_has_handler() {
                     crate::process::exit::do_exit(-(crate::signal::Signal::SIGBUS as i32));
                 } else {

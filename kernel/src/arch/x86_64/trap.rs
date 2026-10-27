@@ -1585,11 +1585,11 @@ fn handle_illegal_instruction(regs: &mut PtRegs) {
             );
         }
         if sigill_has_handler() && !sigsegv_blocked_current() {
-            let _ = crate::signal::send_signal(pid, crate::signal::Signal::SIGILL as i32);
+            let _ = crate::signal::send_signal_directed(pid, crate::signal::Signal::SIGILL as i32);
             crate::signal::force_unblock_current(crate::signal::Signal::SIGILL as i32);
             return;
         }
-        let _ = crate::signal::send_signal(pid, crate::signal::Signal::SIGILL as i32);
+        let _ = crate::signal::send_signal_directed(pid, crate::signal::Signal::SIGILL as i32);
         crate::process::exit::do_exit(-(crate::signal::Signal::SIGILL as i32));
         // Do NOT advance rip — the task is ZOMBIE and will not resume
     } else {
@@ -1632,13 +1632,13 @@ fn handle_general_protection(regs: &mut PtRegs) {
         // alone would re-enter the handler and loop forever.
         let pid = crate::process::current_pid();
         if sigsegv_has_handler() && !sigsegv_blocked_current() {
-            let _ = crate::signal::send_signal(pid, crate::signal::Signal::SIGSEGV as i32);
+            let _ = crate::signal::send_signal_directed(pid, crate::signal::Signal::SIGSEGV as i32);
             // Synchronous fault: deliver despite a blocked mask
             // (Linux force_sig parity — see force_unblock_current).
             crate::signal::force_unblock_current(crate::signal::Signal::SIGSEGV as i32);
             return;
         }
-        let _ = crate::signal::send_signal(pid, crate::signal::Signal::SIGSEGV as i32);
+        let _ = crate::signal::send_signal_directed(pid, crate::signal::Signal::SIGSEGV as i32);
         crate::process::exit::do_exit(-(crate::signal::Signal::SIGSEGV as i32));
     } else {
         #[cfg(feature = "x86_64")]
@@ -1657,7 +1657,7 @@ fn handle_arith_exception(regs: &mut PtRegs, vector: u64) {
         // Linux delivers SIGFPE (catchable — fenv/overflow tests install
         // handlers); only the default disposition kills the task.
         let pid = crate::process::current_pid();
-        let _ = crate::signal::send_signal(pid, crate::signal::Signal::SIGFPE as i32);
+        let _ = crate::signal::send_signal_directed(pid, crate::signal::Signal::SIGFPE as i32);
         if !sigfpe_has_handler() {
             crate::process::exit::do_exit(-(crate::signal::Signal::SIGFPE as i32));
         }
@@ -1670,7 +1670,7 @@ fn handle_arith_exception(regs: &mut PtRegs, vector: u64) {
 fn handle_alignment_check(regs: &mut PtRegs) {
     if regs.user_mode() {
         let pid = crate::process::current_pid();
-        let _ = crate::signal::send_signal(pid, crate::signal::Signal::SIGBUS as i32);
+        let _ = crate::signal::send_signal_directed(pid, crate::signal::Signal::SIGBUS as i32);
         if !sigbus_has_handler() {
             crate::process::exit::do_exit(-(crate::signal::Signal::SIGBUS as i32));
         }
@@ -2263,10 +2263,10 @@ fn handle_page_fault(regs: &mut PtRegs) {
                 user_segv_forensics(regs, fault_addr);
                 let pid = crate::process::current_pid();
                 if sigsegv_has_handler() && !sigsegv_blocked_current() {
-                    let _ = crate::signal::send_signal(pid, crate::signal::Signal::SIGSEGV as i32);
+                    let _ = crate::signal::send_signal_directed(pid, crate::signal::Signal::SIGSEGV as i32);
                     return;
                 }
-                let _ = crate::signal::send_signal(pid, crate::signal::Signal::SIGSEGV as i32);
+                let _ = crate::signal::send_signal_directed(pid, crate::signal::Signal::SIGSEGV as i32);
                 crate::process::exit::do_exit(-(crate::signal::Signal::SIGSEGV as i32));
             } else {
                 #[cfg(feature = "x86_64")]
@@ -2294,10 +2294,10 @@ fn handle_page_fault(regs: &mut PtRegs) {
                 user_segv_forensics(regs, fault_addr);
                 let pid = crate::process::current_pid();
                 if sigsegv_has_handler() && !sigsegv_blocked_current() {
-                    let _ = crate::signal::send_signal(pid, crate::signal::Signal::SIGSEGV as i32);
+                    let _ = crate::signal::send_signal_directed(pid, crate::signal::Signal::SIGSEGV as i32);
                     return;
                 }
-                let _ = crate::signal::send_signal(pid, crate::signal::Signal::SIGSEGV as i32);
+                let _ = crate::signal::send_signal_directed(pid, crate::signal::Signal::SIGSEGV as i32);
                 crate::process::exit::do_exit(-(crate::signal::Signal::SIGSEGV as i32));
             } else {
                 #[cfg(feature = "x86_64")]
@@ -2316,7 +2316,7 @@ fn handle_page_fault(regs: &mut PtRegs) {
             crate::pr_err!("pagefault: Bus error (past EOF) at {:#x}", fault_addr);
             if regs.user_mode() {
                 let pid = crate::process::current_pid();
-                let _ = crate::signal::send_signal(pid, crate::signal::Signal::SIGBUS as i32);
+                let _ = crate::signal::send_signal_directed(pid, crate::signal::Signal::SIGBUS as i32);
                 if !sigbus_has_handler() {
                     crate::process::exit::do_exit(-(crate::signal::Signal::SIGBUS as i32));
                 }

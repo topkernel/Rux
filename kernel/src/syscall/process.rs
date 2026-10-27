@@ -3048,7 +3048,7 @@ pub fn sys_rt_tgsigqueueinfo(args: SyscallArgs) -> i64 {
     );
     info.set_value_bytes(&payload);
 
-    crate::signal::send_signal_with_info(tid, info)
+    crate::signal::send_signal_with_info_directed(tid, info)
         .map(|_| 0)
         .unwrap_or(-(errno::EINVAL as i64))
 }
