@@ -100,9 +100,16 @@ boot_cmd() { # prints the full qemu argv, %q-quoted for exact eval round-trip
               -append "root=/dev/vda rw init=/test/memstorm console=ttyS0 dfx=periodic,memwatch,watchdog roundtag=$MEMBER-r$round")
         ;;
     fsfuzz)
+        # s10: PRIVATE rootfs — the fixed probe (saved-stdout fd +
+        # bounded epoll_pwait timeouts) lives in fleet-fsfuzz-rootfs,
+        # not in the LTP-shared image. The stock probe self-parked
+        # deterministically ~2 s in (close(0) -> epoll_create1 lands on
+        # fd 0 -> close(1) blinds stdout -> epoll_pwait on the empty
+        # epoll with an unbounded timeout draw; see evidence/
+        # 2026-10-27-s10-fsfuzz-selfpark-rootcause.txt).
         rv_common "$serial"
-        rv_drive "$IMG/fleet-ltp-rootfs.img" rootfs
-        CMD+=(-kernel "$IMG/fleet-rv64-rux"
+        rv_drive "$IMG/fleet-fsfuzz-rootfs.img" rootfs
+        CMD+=(-kernel "${KIMG:-$IMG/fleet-rv64-rux}"
               -append "root=/dev/vda rw init=/test/fsfuzz console=ttyS0 dfx=watchdog,taskdump roundtag=$MEMBER-r$round")
         ;;
     dirtyscan)
