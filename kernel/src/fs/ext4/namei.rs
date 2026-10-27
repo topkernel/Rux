@@ -973,14 +973,20 @@ fn ext4_mkdir_no_journal(
     parent.i_ctime = sec;
     super::inode::write_inode_disk(fs, dir_ino, &parent)?;
 
-    // Best-effort full-cache flush for durability. NOT fatal to the
-    // syscall: sync_buffers drains EVERY device's dirty buffers, and a
-    // foreign device's writeback error (e.g. a loop whose backing-file
-    // write failed) must not fail this mkdir — Linux reports such errors
-    // via fsync/sync, never through the creating syscall (the r8 mkdtemp
-    // ENXIO storm: mkdir inherited a dead loop's -6 from here).
-    if let Err(e) = bio::sync_buffers() {
-    crate::pr_warn!("ext4: post-mkdir buffer sync failed (errno {})", e);
+    // Best-effort publication of THIS mkdir's own deferred entry record
+    // (per-cookie scoped flush: the new inode's table/bitmap blocks,
+    // then the directory entry block). NOT fatal to the syscall. The old
+    // whole-cache sync_buffers here made every mkdir pay the WORLD's
+    // dirty buffers plus the global publication backlog — the
+    // storage-daemon D-state family under provisioning churn (leg-29A
+    // adjudication). Foreign records and unrelated dirty blocks ride the
+    // buffer-cache write-back as on any write-back mount; the per-block
+    // guards keep their ordering whenever they do reach disk. Foreign
+    // devices are never touched, so the r8 mkdtemp ENXIO storm shape
+    // (mkdir inheriting a dead loop device's writeback error) cannot
+    // recur here either.
+    if let Err(e) = bio::flush_publications_scoped() {
+        crate::pr_warn!("ext4: post-mkdir publication flush failed (errno {})", e);
     }
 
     Ok(new_ino)

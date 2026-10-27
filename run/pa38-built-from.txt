@@ -1,0 +1,2 @@
+fee7774fc4685d8bf23d61ca40fb2f8c4d87c2e6
+fee7774f 2026-10-25 02:28:24 +0800 revert: kstack 96KB/64KB config + packed 80KB slab (3a673c25, 466cde69, f793c63f) — the 80KB slot's 15KB margin was measured on x86_64 OH loads only; the riscv64 test kernel nests deeper in kernel mode and the overflow corrupted adjacent data (getpriority PRIO_PGRP read nice=-120, 140 returned; suite 1094/1096). With the revert: 1096/1096 all passed. The stack campaign returns to the launcher lane for cfg-gating (riscv64 keeps 128KB) and re-verification

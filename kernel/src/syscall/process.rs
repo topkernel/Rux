@@ -5463,7 +5463,41 @@ pub fn panic_reboot() -> ! {
     }
     #[cfg(feature = "x86_64")]
     {
-        // No 8259/ACPI reset yet — park with interrupts waiting.
+        // The PC reset repertoire Linux's emergency_restart walks:
+        // pulse the 8042 keyboard-controller reset line (port 0x64,
+        // 0xFE — the classic hardware reset QEMU's q35 honours), then,
+        // if the platform ignores it, force a triple fault through a
+        // NULL IDT (the architectural last resort: every reboot path
+        // ends in a reset). Before this, the x86 panic path only
+        // parked — `panic=` timed out into machine_park and the pstore
+        // guest-cycle smoke could never reach its boot-2 read.
+        // SAFETY: bare port I/O on the reset port and a deliberate
+        // faulting instruction; neither returns.
+        unsafe {
+            // Drain the 8042 input buffer first (writing the command
+            // while it is full is dropped on real hardware).
+            for _ in 0..100_000 {
+                if crate::arch::cpu::inb(0x64) & 0x02 == 0 {
+                    break;
+                }
+                core::hint::spin_loop();
+            }
+            crate::arch::cpu::outb(0x64, 0xFE);
+            // Give the pulse time to land.
+            for _ in 0..10_000_000 {
+                core::hint::spin_loop();
+            }
+            // Triple fault: load a null/limit-0 IDT and int3 — the
+            // vector lookup must fail, the double fault must fail the
+            // same way, and the CPU (QEMU included) resets.
+            static NULL_IDT: [u64; 2] = [0; 2];
+            core::arch::asm!(
+                "lidt [{}]",
+                in(reg) &NULL_IDT,
+                options(nomem, nostack)
+            );
+            core::arch::asm!("int3", options(nomem, nostack));
+        }
         machine_park();
     }
     loop {

@@ -30,7 +30,7 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 KERNEL="${1:-$ROOT/target/riscv64gc-unknown-none-elf/debug/rux}"
 LOG="${2:-$ROOT/run/oops-smoke-serial.log}"
 BOOT_DELAY="${BOOT_DELAY:-30}"
-TIMEOUT="${TIMEOUT:-420}"
+TIMEOUT="${TIMEOUT:-480}"
 
 IMG="$ROOT/work/oops-smoke.img"
 
@@ -51,6 +51,17 @@ cp "$ROOT/test/rootfs.img" "$IMG"
     echo 'echo OSDBG:klog_lines=$(wc -l < /var/log/kmsg)'
     sleep 0.5
     echo 'echo OSDBG:klog_tail=$(tail -1 /var/log/kmsg)'
+    sleep 0.5
+    # The periodic flush: klogd's init flush landed at ~1.4 s; its first
+    # 30 s wake lands at ~31.4 s GUEST time. Host-side sleeps measure
+    # wall time, and under a loaded host the TCG guest runs slower than
+    # realtime — the first run's sleep 12 missed the wake (r4: file
+    # still 3 lines at host t~44 s while a concurrent smoke showed the
+    # flush landing later; klogd-probe2 confirmed the flush itself is
+    # clean). Two periods of host-side margin make the check
+    # load-robust.
+    sleep 60
+    echo 'echo OSDBG:klog_lines2=$(wc -l < /var/log/kmsg)'
     sleep 0.5
     # (3) per-task schedstat
     echo 'echo ===OS: schedstat ==='
@@ -140,6 +151,7 @@ echo "--- verdicts ---"
 # boot 1
 check "klogd wrote /var/log/kmsg (non-empty)" 'OSDBG:klog_lines=[1-9]'
 check "/var/log/kmsg line shape" 'OSDBG:klog_tail=[0-9]+ [0-9]+ [0-9]+ [0-9]+ [0-9] '
+check "klogd's 30 s periodic flush grew the file" 'OSDBG:klog_lines2=[1-9][0-9]+'
 check "schedstat gate reads 0 before arming" 'OSDBG:gate0=0'
 check "schedstat gate arms" 'OSDBG:gate=1'
 check "schedstat triple renders (nonzero timeslices)" 'OSDBG:schedstat=\[[0-9]+ [0-9]+ [1-9]'

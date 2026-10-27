@@ -150,6 +150,9 @@ pub(crate) fn is_attr_dir(ino: u64) -> bool {
 pub enum PidFileKind {
     Status,
     Stat,
+    /// /proc/[pid]/schedstat — the per-task scheduler-statistics triple
+    /// (T7 perf-support slice; sched/stats.rs).
+    Schedstat,
     Cmdline,
     Exe,
     Cwd,
@@ -396,6 +399,7 @@ impl ProcFSNode {
             let content = match kind {
                 PidFileKind::Status => pid::generate_status(pid),
                 PidFileKind::Stat => pid::generate_stat(pid),
+                PidFileKind::Schedstat => pid::generate_schedstat(pid),
                 PidFileKind::Cmdline => pid::generate_cmdline(pid),
                 PidFileKind::Maps => pid::generate_maps(pid),
                 PidFileKind::Smaps => pid::generate_smaps(pid),
@@ -715,6 +719,14 @@ impl ProcFSSuperBlock {
             b"panic_on_oops".to_vec(),
             sysctl::generate_panic_on_oops,
             sysctl::write_panic_on_oops,
+            self.alloc_ino(),
+        )));
+        // sched_schedstats — per-task scheduler-statistics runtime gate
+        // (the /proc/[pid]/schedstat triple).
+        kernel.add_child(Arc::new(ProcFSNode::new_sysctl_file(
+            b"sched_schedstats".to_vec(),
+            sysctl::generate_sched_schedstats,
+            sysctl::write_sched_schedstats,
             self.alloc_ino(),
         )));
         // Highest supported capability number (read by libcap-ng init()).
@@ -1067,6 +1079,7 @@ pub fn read_file(path: &str) -> Option<Vec<u8>> {
                 "status" => Some(pid::generate_status(pid)),
                 "cmdline" => Some(pid::generate_cmdline(pid)),
                 "stat" => Some(pid::generate_stat(pid)),
+                "schedstat" => Some(pid::generate_schedstat(pid)),
                 "maps" => Some(pid::generate_maps(pid)),
                 "smaps" => Some(pid::generate_smaps(pid)),
                 "exe" => Some(pid::generate_exe_link(pid)),
@@ -1121,6 +1134,7 @@ pub fn read_file(path: &str) -> Option<Vec<u8>> {
                 "status" => Some(pid::generate_status(pid)),
                 "cmdline" => Some(pid::generate_cmdline(pid)),
                 "stat" => Some(pid::generate_stat(pid)),
+                "schedstat" => Some(pid::generate_schedstat(pid)),
                 "maps" => Some(pid::generate_maps(pid)),
                 "smaps" => Some(pid::generate_smaps(pid)),
                 "exe" => Some(pid::generate_exe_link(pid)),
@@ -1250,6 +1264,7 @@ unsafe fn procfs_lookup(dir: &Inode, name: &[u8]) -> Result<Ino, i32> {
         let kind = match name {
             b"status" => PidFileKind::Status,
             b"stat" => PidFileKind::Stat,
+            b"schedstat" => PidFileKind::Schedstat,
             b"cmdline" => PidFileKind::Cmdline,
             b"exe" => PidFileKind::Exe,
             b"cwd" => PidFileKind::Cwd,
@@ -1629,6 +1644,7 @@ unsafe fn procfs_iget(parent: &Inode, name: &[u8], ino: Ino) -> Result<Arc<Inode
         let kind = match name {
             b"status" => PidFileKind::Status,
             b"stat" => PidFileKind::Stat,
+            b"schedstat" => PidFileKind::Schedstat,
             b"cmdline" => PidFileKind::Cmdline,
             b"exe" => PidFileKind::Exe,
             b"cwd" => PidFileKind::Cwd,
@@ -2173,6 +2189,7 @@ unsafe fn generate_pid_dir_entries(pid: u64) -> alloc::vec::Vec<crate::fs::inode
         (b"cmdline", file_type::DT_REG),
     (b"mounts", file_type::DT_REG),
         (b"stat", file_type::DT_REG),
+        (b"schedstat", file_type::DT_REG),
         (b"maps", file_type::DT_REG),
         (b"environ", file_type::DT_REG),
         (b"comm", file_type::DT_REG),
