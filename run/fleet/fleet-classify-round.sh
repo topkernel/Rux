@@ -110,6 +110,13 @@ noise_samgr=$(grep -cE "SAMgr.*(15|30|89)s|samgr.*cost" "$SERIAL" 2>/dev/null)
 pleak=$(grep -c "PREEMPT-LEAK" "$SERIAL" 2>/dev/null)
 [ "$pleak" -gt 5 ] 2>/dev/null && WARN="${WARN}PREEMPT-LEAK=$pleak "
 
+# PREEMPT-UNDERFLOW (session-12 class from the origin/main delta
+# 488528dc->979fde80, D-7 percpu territory; perf lane triages): the
+# print is clamp-to-0 — count per round for the sighting watch (any
+# volume >=5 gets WARN so the tail is preserved for pid/lock rows).
+puflow=$(grep -c "PREEMPT-UNDERFLOW" "$SERIAL" 2>/dev/null)
+[ "$puflow" -ge 5 ] 2>/dev/null && WARN="${WARN}PREEMPT-UNDERFLOW=$puflow "
+
 # SOFTIRQ-BRACKET-LEAK (session-6 discriminator): a context switch
 # inside the do_softirq processing window — count-migration producer
 # candidate. ANY occurrence is signal (the window should never switch).
