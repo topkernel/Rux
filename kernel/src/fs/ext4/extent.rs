@@ -390,7 +390,58 @@ pub fn ext4_ext_get_block(
         return Err(errno::Errno::IOError.as_neg_i32());
     }
 
-    find_block_in_extent_tree(fs, i_block, logical_block, 0)
+    let r = find_block_in_extent_tree(fs, i_block, logical_block, 0);
+    // dfx=exthunt: a read-side miss on a DEEP tree (depth >= 1) — the
+    // reader is about to serve a hole for a file that grew past its
+    // root. Print the root view so a stale cached root (old depth /
+    // fewer entries) is distinguishable from a broken index block.
+    if header.eh_depth >= 1
+        && (r.is_err() || *r.as_ref().unwrap_or(&0) == 0)
+        && crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::ExtHunt)
+    {
+        use core::sync::atomic::{AtomicUsize, Ordering};
+        static MISSES: AtomicUsize = AtomicUsize::new(0);
+        if MISSES.fetch_add(1, Ordering::Relaxed) < 60 {
+            crate::pr_info!(
+                "EXT-HUNT-MISS logical={} root[magic={:x} depth={} entries={} max={}] -> {:?}",
+                logical_block,
+                header.eh_magic,
+                header.eh_depth,
+                header.eh_entries,
+                header.eh_max,
+                r
+            );
+        }
+    }
+    r
+}
+
+/// dfx=exthunt read-side companion to EXT-HUNT-MISS: call wherever a read
+/// path concludes "hole" (mapping 0) and is about to zero-fill — the page
+/// cache batch fill, the synchronous fallback, and the O_DIRECT reader all
+/// map through the CACHED inode's root, NOT through ext4_ext_get_block,
+/// so EXT-HUNT-MISS alone cannot see the reader's verdict. Prints the
+/// reader's root view so a stale/reverted cached root is distinguishable
+/// from a legitimately sparse file: a file that already grew past its
+/// root (see EXT-HUNT-GROW) should never again report a shallow root.
+pub fn exthunt_read_hole(i_block: &[u32; 15], logical_block: u64) {
+    if !crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::ExtHunt) {
+        return;
+    }
+    use core::sync::atomic::{AtomicUsize, Ordering};
+    static HOLES: AtomicUsize = AtomicUsize::new(0);
+    if HOLES.fetch_add(1, Ordering::Relaxed) >= 80 {
+        return;
+    }
+    let header = get_extent_header(i_block);
+    crate::pr_info!(
+        "EXT-HUNT-READHOLE logical={} root[magic={:x} depth={} entries={} max={}]",
+        logical_block,
+        header.eh_magic,
+        header.eh_depth,
+        header.eh_entries,
+        header.eh_max
+    );
 }
 
 /// Find logical block in extent tree
@@ -489,13 +540,43 @@ fn find_block_in_external_extent_ex(
             .ok_or(errno::Errno::IOError.as_neg_i32())?;
         let data = &(*bh).b_data;
         let header = &*(data.as_ptr() as *const Ext4ExtentHeader);
-        if header.eh_magic != EXT4_EXT_MAGIC {
+        if header.eh_magic != EXT4_EXT_MAGIC
+            || header.eh_entries > header.eh_max
+        {
+            // dfx=exthunt: the walk below the root just failed — the
+            // reader will turn this Err into a hole (zeros). Dump the
+            // block header + first bytes so zeros / foreign data / a
+            // reverted header are distinguishable.
+            if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::ExtHunt) {
+                use core::sync::atomic::{AtomicUsize, Ordering};
+                static BADS: AtomicUsize = AtomicUsize::new(0);
+                if BADS.fetch_add(1, Ordering::Relaxed) < 40 {
+                    let mut hex = [0u8; 48];
+                    let mut n = 0usize;
+                    for b in data.iter().take(16) {
+                        let hi = b >> 4;
+                        let lo = b & 0xf;
+                        hex[n] = if hi < 10 { b'0' + hi } else { b'a' + hi - 10 };
+                        hex[n + 1] = if lo < 10 { b'0' + lo } else { b'a' + lo - 10 };
+                        n += 2;
+                    }
+                    crate::pr_info!(
+                        "EXT-HUNT-IDXBAD block={} hdr[magic={:x} depth={} entries={} max={}] first16={}",
+                        block_num,
+                        header.eh_magic,
+                        header.eh_depth,
+                        header.eh_entries,
+                        header.eh_max,
+                        core::str::from_utf8(&hex[..n]).unwrap_or("??")
+                    );
+                }
+            }
             bio::brelse(bh);
             return Err(errno::Errno::IOError.as_neg_i32());
         }
         let max_slots = (fs.block_size as usize - core::mem::size_of::<Ext4ExtentHeader>())
             / core::mem::size_of::<Ext4Extent>();
-        if header.eh_entries > header.eh_max || header.eh_max as usize > max_slots {
+        if header.eh_max as usize > max_slots {
             bio::brelse(bh);
             return Err(errno::Errno::IOError.as_neg_i32());
         }
@@ -986,6 +1067,21 @@ pub fn ext4_ext_append(
                 slot2.ei_unused = 0;
             }
             node_header_mut(&mut root).eh_entries = 2;
+            // dfx=exthunt: the tree just grew one level — the event the
+            // ftest04/zzprobe4 all-zeros family correlates with.
+            if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::ExtHunt) {
+                use core::sync::atomic::{AtomicUsize, Ordering};
+                static GROWS: AtomicUsize = AtomicUsize::new(0);
+                if GROWS.fetch_add(1, Ordering::Relaxed) < 20 {
+                    crate::pr_info!(
+                        "EXT-HUNT-GROW new_depth={} down={} split_child={} split_ei_block={}",
+                        new_depth,
+                        down,
+                        split.child,
+                        split.ei_block
+                    );
+                }
+            }
         }
     }
 

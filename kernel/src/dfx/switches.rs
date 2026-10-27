@@ -83,6 +83,7 @@ macro_rules! dfx_switch_table {
             SfdDbg => "sfddbg",
             Ams46 => "ams46",
             VmaProbe => "vmap",
+            ExtHunt => "exthunt",
         }
     };
 }
@@ -355,9 +356,17 @@ pub enum DfxSwitch {
     /// permission-shape faults (render_service's 2-page PROT_NONE piece
     /// on top of a thread stack). OFF by default.
     VmaProbe,
+    /// dfx=exthunt (ltp-fix-b leg-8): extent-tree lookup misses under
+    /// fire — every read-side walk that concludes "hole" or error for a
+    /// depth>=1 tree prints the root header and the first index block's
+    /// header bytes, and every root promotion (depth growth) prints the
+    /// new depth + down/split blocks. Adjudicates stale-reader vs
+    /// lost-index-block for the ftest04 all-zeros readback family.
+    /// OFF by default.
+    ExtHunt,
 }
 
-const SWITCH_COUNT: usize = 39;
+const SWITCH_COUNT: usize = 40;
 
 static SWITCHES: [AtomicBool; SWITCH_COUNT] = [const { AtomicBool::new(false) }; SWITCH_COUNT];
 
@@ -433,6 +442,7 @@ impl DfxSwitch {
             DfxSwitch::SfdDbg => 36,
             DfxSwitch::Ams46 => 37,
             DfxSwitch::VmaProbe => 38,
+            DfxSwitch::ExtHunt => 39,
         }
     }
 

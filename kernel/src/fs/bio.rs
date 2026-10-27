@@ -606,6 +606,59 @@ impl BlockCache {
                         continue;
                     }
                     if entry.key == (device_major, device_minor, blocknr) {
+                        // dfx=exthunt: a SECOND live entry for the same
+                        // block forks the buffer-cache view — writers and
+                        // readers can land on different copies (the
+                        // zzprobe4/ftest04 extent-revert family). Count
+                        // same-key entries in the chain and report via
+                        // the no-lock console (bucket spinlock held, same
+                        // discipline as the dead-bh tripwire below).
+                        if crate::dfx::switches::enabled(
+                            crate::dfx::switches::DfxSwitch::ExtHunt,
+                        ) {
+                            let mut dup = 0usize;
+                            let mut c2 = bucket.head;
+                            while let Some(cp2) = c2 {
+                                if unsafe { !(*cp2).bh.is_null() }
+                                    && (*cp2).key
+                                        == (device_major, device_minor, blocknr)
+                                {
+                                    dup += 1;
+                                }
+                                c2 = unsafe { (*cp2).hash_next };
+                            }
+                            if dup >= 2 {
+                                use core::sync::atomic::{
+                                    AtomicUsize, Ordering,
+                                };
+                                static DUPR: AtomicUsize = AtomicUsize::new(0);
+                                if DUPR.fetch_add(1, Ordering::Relaxed) < 20 {
+                                    let msg = b"EXT-HUNT-BHDUP blk=";
+                                    unsafe {
+                                        for &b in msg {
+                                            crate::console::putchar_no_lock(b);
+                                        }
+                                        let mut v = blocknr;
+                                        let mut digs = [0u8; 20];
+                                        let mut n = 0;
+                                        if v == 0 {
+                                            digs[0] = b'0';
+                                            n = 1;
+                                        }
+                                        while v > 0 {
+                                            digs[n] = b'0' + (v % 10) as u8;
+                                            n += 1;
+                                            v /= 10;
+                                        }
+                                        while n > 0 {
+                                            n -= 1;
+                                            crate::console::putchar_no_lock(digs[n]);
+                                        }
+                                        crate::console::putchar_no_lock(b'\n');
+                                    }
+                                }
+                            }
+                        }
                         // R9 tripwire: hand out only intact buffers. A len-0
                         // b_data is freed-and-reused memory (BufferHead::new
                         // always allocates block_size bytes); serving it

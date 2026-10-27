@@ -76,6 +76,8 @@ pub fn ext4_file_read(
         // block 0 (superblock-backup garbage) — review 5.5 (稀疏洞读盘块 0,
         // 非缓存路径).
         if blocks[block_index] == 0 {
+            // dfx=exthunt: O_DIRECT hole verdict — see exthunt_read_hole.
+            crate::fs::ext4::extent::exthunt_read_hole(&inode.block, block_index as u64);
             let remaining = to_read - total_read;
             let available_in_block = block_size - block_offset;
             let zero_len = core::cmp::min(remaining, available_in_block);
@@ -372,6 +374,7 @@ fn ext4_file_read_cached_dst(
                 return Err(errno::Errno::IOError.as_neg_i32());
             }
             // True hole: zero-fill in place.
+            crate::fs::ext4::extent::exthunt_read_hole(&inode.block, page_index);
             let avail = block_size_usize - page_offset;
             let zero_len = core::cmp::min(remaining, avail);
             // SAFETY: dst validity documented on ReadDst::put_zeroes.
@@ -477,6 +480,9 @@ fn fill_page_cache_batch(
             Err(_) => break, // metadata failure: stop extending the batch
         };
         if block_nr == 0 {
+            // dfx=exthunt: the reader just verdict "hole" from the cached
+            // root — see exthunt_read_hole.
+            crate::fs::ext4::extent::exthunt_read_hole(&inode.block, idx);
             idx += 1;
             continue;
         }
