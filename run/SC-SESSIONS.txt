@@ -5602,3 +5602,992 @@ OH SIDE (sc290/sc291, lvl4 plain KVM SMP2, dfx=wwcensus[+leakhunt]):
 NEXT: sc290/sc291 to completion => incumbent comm+RIP census at
 PREEMPT-LEAK (leakhunt gives acquire sites on sc291); then the fix
 decision (heal-bound tightening vs producer hunt) + OH verify.
+
+LEG-26 PASS 3 — THE PRODUCER NAMED AND KILLED; THE LOOP'S REMAINING
+DRIVER IS NOT THE KERNEL MONOPOLIES (sc290-sc293 four-boot A/B, all
+lvl4 plain KVM SMP2, fresh scgold, dfx=wwcensus unless noted):
+- sc290 (baseline kernel, 45 min): LC=295, 770 WAKE-STRANDED events
+  behind leaked-pc incumbents (pc=1 x728, pc=2, pc=257), 32 PREEMPT-
+  LEAK lines whose COMM names (new this leg): 26x processdump, 4x
+  appspawn, 2x usage_report — pctick=1/2, held=200j (heal bound),
+  rips in the page-cache/VMA btree walk family.
+  => THE MONOPOLIST IS PROCESSDUMP: every LIFECYCLE_TIMEOUT spawns it,
+  it reads /proc/<pid>/maps for every process, and generate_maps held
+  addr_space.vma_read() — read lock + PREEMPT_DISABLE — across the
+  WHOLE VMA walk + per-VMA dentry path resolution (OH processes carry
+  500+ VMAs). Self-feeding: loop -> processdump -> 2s un-preemptible
+  monopolies -> more timeouts.
+- FIX 2 (the decisive one): /proc/<pid>/maps chunking — at most 32
+  VMAs per vma_read() hold, guard dropped between chunks (preemption
+  re-enabled), walk resumed via VmaManager::iter_after (range scan
+  from the last VMA's start). Linux seq_file discipline.
+- sc293 (maps-chunked + PICK-PC-ZERO kernel): leaked-pc strand
+  events 770 -> 5 (-99.4%), PREEMPT-LEAK 32 -> 0, SLOW-TXN 66 -> 42;
+  boot reaches 43k serial lines vs sc292's 27k before the loop
+  engages. BUT the LIFECYCLE loop still runs at the same rate
+  (LC=212@28min vs 295@45min baseline): the loop's sustaining driver
+  at this depth is the samgr 15.0s txns (SLOW-TXN code 7 to samgr
+  tids 328/333, queue=0 exec=15020ms — the KNOWN image-side 15/30/89s
+  family) + the ability-load chain, NOT the kernel monopolies.
+- sc292 (PICK-PC-ZERO only): LC=138@25k lines — the pick-time phantom
+  zero never fires on OH (the phantom holders never park — they
+  cannot sleep with pc!=0, which is the point); fix is a no-op for
+  the loop, kept as hardening (pickzero=0 on minimal repro too).
+- sc291 (baseline kernel + dfx=leakhunt): LC=0 at 38k lines — the
+  restart loop NEVER STARTED; boot passed bootanimation.finished and
+  wedged at the BMS/distributeddb wall (ImplicitQuery 1512x, the
+  quietcon Signature B wall, on a PLAIN boot) with a WAKE-RUN-LEAK
+  cohort (tid 1309 kicked 20x) and slots [pid304][pid591]. Probe-
+  timing confound (leg-25's variance lesson) but the deepest plain
+  boot of the family.
+- sc291's suppression + sweep3 (fixed kernel, 8 cells): PARKED-LEAK
+  8-9/boot -> 0-1; pickzero=0 everywhere (the parked phantoms do not
+  resurrect through picks on this kernel).
+
+VERDICT (leg-26): the mission's starvation-producer question is
+ANSWERED for the monopoly family — processdump's unchunked maps walks
+(held preempt-disabling reader lock), named by comm at the scene,
+killed by chunking, verified -99.4% on the strand census with make
+test + dual-arch green. The restart loop itself survives on the
+image-side samgr-15s/data-layer chain (leg-25's Signature B wall,
+now on plain boots too); the LIFECYCLE->0 acceptance needs that
+userspace chain, not more sched fixes. Minimal-rootfs schedrepro
+infra + the ran-ring/STALL-HOG/STRAND-DETAIL instrument set stay
+in-tree for the next legs (all dfx-gated, zero-cost off).
+
+LEG-27 (OH UI lane; leg-26 successor; solo-host mandate, 10-QEMU
+budget) — merged main 8009a84d first (one conflict pair: generated
+config.rs deleted on main — took the deletion; SC-SESSIONS took ours;
+merge 600fa2a4 is a semantic no-op vs sc293's kernel). FIRED ALL
+EXPERIMENTS IN ONE WAVE per the user's parallelization order: 8 boots
+at 23:21 (sc294-301, lvl4 plain KVM SMP2 45min, fresh scgold copies,
+HDC ports must be UNIQUE — the first attempt died 7/8 on port 12057),
+plus sc302 (txnhunt probe kernel) and sc303 (patched-image A/B) in
+flight. Memory hit the 10G floor at 23:41 (9 QEMUs grown to RSS 2-2.5G
+each): killed sc295/296/297/298 (their question was already answered)
+to make room — recorded as the first floor event of the leg.
+
+NEW INSTRUMENTS (both committed, print-path only, dfx-gated):
+- TXN-HANG / TXN-HANG-OUT (dfx=txnhunt, binder.rs txn_hang_audit at
+  the 1 Hz timer heartbeat): any server-side txn-stack entry picked-
+  but-unreplied >= 1s prints the server thread's task state + entry-
+  frame syscall/rip/a0/a1 (sleepsnap read contract, task forensics
+  OUTSIDE the WORLD guard per the sc89/sc207 lessons) plus every
+  in-flight txn FROM the hung servers' processes (the handler's
+  synchronous fan-out chain). Rate-capped 1 burst/5s, 8+8 lines bound.
+- USEGV-FOR vma(rax) + vma(rsp): the CFI-callee target and the stack
+  VMA at perm faults (sc293's render_service fault had rsp INSIDE a
+  file-backed R-only segment claim — see below, it was actually a
+  memcpy from a PROT_NONE page, rsp was one page below it).
+
+MISSION ITEM 1 — THE 15s SAMGR TXN, NAMED END-TO-END (from sc293 logs,
+  no new boot needed): the code-7 SLOW-TXN family (95 of 110 lines:
+  foundation tids 1236/1362/1548 -> samgr 328 tids 328/333, queue=0)
+  is LoadSystemAbility(SA 511 = "installs", the bundle-installer
+  service): samgr logs "SAMGR: Start dynamic proc:installs,511,105_
+  15978ms" (105 = its timeout error code) immediately before every
+  SLOW-TXN reply; exec=14990-15001ms ~65 times, some 30/45s. Chain:
+  (1) first boot spawn SUCCEEDS in 242ms (SA:511 registered, 174ms);
+  (2) init SIGKILLs installs (KILLTRACE on sc294: pid=1(init) ->
+  pid=1048(installs) + threads; preceded by "reset resource_schedule_
+  service" + "ServiceStart pathArgs is NULL: device_usage_stats_
+  service" job churn; no ctl.stop, no kernel OOM print); init's SIGCHLD
+  reports it as "Unknown(pid 1015)" — the pid->service map entry was
+  already gone; (3) every later `ohos.ctl.start installs|511#...` from
+  samgr gets paramservice reply result=131073 with NO ServiceStart
+  attempt logged — init never restarts it; (4) samgr's StartDynamicProc
+  times out at exactly 15.0s per LoadSystemAbility(511); (5) BMS/
+  foundation blocks -> ability lifecycle stalls -> LIFECYCLE_TIMEOUT
+  loop. Upstream producer on sc293: render_service died first
+  (SIGSEGV, rip=ld-musl+0x8ad30 = INSIDE memcpy — copying 0x3a8 bytes
+  FROM a 2-page PROT_NONE anon VMA directly above the faulting
+  thread's stack; kernel ACCERR is correct POSIX; image-side bug),
+  after which init killed the foundation tree too.
+  KERNEL VERDICT: no kernel defect in the 15s txn itself — samgr's
+  synchronous 15s on-demand-spawn wait and init's refusal to restart
+  installs are image-side. The kernel's binder/paramservice/kill-wait
+  surface behaved. TXN-HANG on sc302/sc303 confirms samgr handler
+  threads park INTERRUPTIBLE in binder ioctl while waiting (expected).
+
+IMAGE CONFUSION FOUND AND FIXED IN FLIGHT: oh-boot-w.sh boots
+  run/oh-img/system.img which is a SYMLINK to the UNPATCHED oh-robot
+  build output — leg-26's sc290-293 AND wave-1 ran WITHOUT the ld-musl
+  patches; the patched private image is run/oh-img-p (verified: 33
+  differing bytes = the leg-22 waiter-next-zero patch, inode 2447).
+  oh-img-p-era boots (sc261-278) ran the loop WITHOUT the loud installs
+  family (1-2 spawns, 4-6 SLOW-TXN/boot vs 110) — the loud family is
+  unpatched-image-shaped. Created run/oh-boot-p.sh (IMGDIR=oh-img-p);
+  sc303 = main kernel + PATCHED image + txnhunt.
+
+MISSION ITEM 2 — sc291 ANOMALY: NOT REPRODUCIBLE AS DETERMINISTIC.
+  Identical dfx=leakhunt boots: sc295 LC=15, sc296 LC=17 (killed at
+  the memory-floor event, trend clear), sc297 LC=306, sc298 (combo
+  wwcensus+leakhunt) LC=296 — full loops. sc294 (plain CONTROL, no
+  leakhunt) also drew LC=0 for its whole 45 min. The loop-forms-or-not
+  split is a boot lottery (which early crash/fork race lands), not a
+  leakhunt effect; sc291 was a lottery draw, same class as sc270/sc277
+  quiet boots with LC=0.
+
+MISSION ITEM 3 — BMS/DISTRIBUTEDDB WALL: partially re-framed. sc301
+  (quietcon+schb+sleepsnap) ENTERED the loop this time (LC=272 — first
+  quietcon boot to do so; lottery again). Its sleepsnap census (1774
+  lines) shows the usual parked population (futex 1040, binder ioctl
+  479, epoll 206) with no D-state storage pile. sc303 (patched image)
+  instead exposed a NEW slow family via TXN-HANG: storage_manager tid
+  641 -> storage_daemon tid 325 code 37, exec 5.5s (server
+  UNINTERRUPTIBLE in open()) growing to 26.4s (server RUNNING in a
+  write(9,...) loop) — the data-layer family has a D-state open()
+  inside it, worth a bio/ext4 stall probe next leg (fsw/bio census was
+  quiet on sc303: 1 line).
+
+WAVE TALLY (45 min boots, lvl4 plain unless noted; lines = serial
+  volume, installs = StartDynamicProc:installs count, pf = perm
+  faults, rs = render_service SIGSEGV):
+  - sc294 control (wwcensus, UNPATCHED img): LC=0@80k — never started.
+  - sc295/296 leakhunt: LC=15/17 @20min (killed at floor event).
+  - sc297/298 leakhunt(+wwcensus): LC=306/296 @200k — full loops.
+  - sc299 wwcensus+sleepsnap: LC=288, installs=1 (!), pf=6, rs=0.
+  - sc300 sleepsnap: LC=189, installs=2, pf=6, rs=1.
+  - sc301 quietcon+schb+sleepsnap: LC=272, installs=1, pf=11.
+  - sc302 txnhunt (UNPATCHED): LC=0@62k through 35min (lottery no-loop
+    draw), TXN-HANG 1076 lines (working: named mutual-wait pairs like
+    power_host<->pid335 and the parked-handler population).
+  - sc303 txnhunt + PATCHED oh-img-p: LC=252@221k@35min, installs=1,
+    pf=1, rs=0 — loop forms on the patched image too, sustained by the
+    storage_manager->storage_daemon + distributeddata families instead
+    of installs.
+  => THE LOOP IS MULTI-CAUSE: installs-hole (unpatched image, loud),
+    storage/D-state family (patched image), distributeddata chain, the
+    launcher ld-musl crash-loop (rip=ld-musl+0x1187d2, `lock cmpxchg
+    %edx,0x10(%rcx)` in pthread_cond_timedwait's waiter walk writing
+    through a garbage node pointer — PERSISTS on the patched image:
+    sc261/269/278/278 show m.ohos.launcher dying to it repeatedly,
+    identical regs every time = deterministic site, next ld-musl
+    patch candidate), and sometimes nothing forms at all.
+
+LEG-27 VERDICT: the 15s txn question is answered end-to-end (image-
+side spawn-timeout chain, kernel clean); the sc291 anomaly is a
+lottery artifact; the unpatched-image confound is identified and the
+patched-image A/B (sc303) shows the loop survives on quieter drivers.
+Next levers, in value order: (1) the ld-musl 0x1187d2 launcher crash
+site (same pad-cave patch workflow as leg-22; kills the launcher
+restart feed), (2) the storage_daemon D-state open (bio/ext4 stall
+probe), (3) init's 131073 no-restart of installs (image-side init
+bookkeeping after "Unknown" pid exits), (4) render_service's memcpy-
+from-PROT_NONE (find the caller via the new vma(rax) dump on the next
+fault).
+
+LEG-27 CLOSE-OUT (00:30) — final tallies (45-min boots, natural ends):
+  sc294 control LC=0@90k (full 45 min, never entered the loop; reached
+  bootanimation.finished then the BMS/ImplicitQuery wall — 119 queries,
+  bootevent.launcher.ready NOT set; second lottery no-loop draw of the
+  leg after sc291). sc299 LC=288, sc300 LC=189, sc301(quietcon) LC=272.
+  sc302 (txnhunt, unpatched img) LC=0@74k — TXN-HANG 2936 lines of
+  pre-loop texture: persistent 1-5s handler hangs spread wide
+  (foundation code24, usb_host/powermgr/drm_service code3 families),
+  NO 15s monopolies when the installs hole is absent.
+  sc303 (txnhunt + PATCHED oh-img-p) LC=252@525k, installs=1, perm-
+  faults 1 (vs 2-11 on unpatched boots), TXN-HANG 579: loop-phase
+  texture = telephony->worker code7 (267) + FFRT->foundation code59
+  (266) + the storage_manager->storage_daemon D-state family — the
+  wide exec-stall substrate across unrelated servers (leg-25's family)
+  is the loop's sustaining driver on the patched image, NOT a single
+  choke point.
+  make test GREEN on the final tree (rootfs.img was held by a foreign
+  make-test QEMU 22:51-00:0x; suite now 1116 checks, "All tests
+  passed"). Dual-arch builds green. Branch: 600fa2a4 (merge) + 9125dade
+  (TXN-HANG) + 3066f41d (USEGV vma(rax/rsp)) + this wip.
+  Boot-artifact note for next legs: wave-1's first launch died 7/8 on
+  the shared HDCPORT — oh-boot-w.sh boots MUST get unique HDCPORTs.
+LEG-27 NEXT LEVERS (value order, for leg-28): (1) ld-musl+0x1187d2
+  launcher/ability crash site — cond-walk `lock cmpxchg %edx,0x10(%rcx)`
+  writing through a stale waiter node whose memory was recycled into a
+  read-only fd-40 file mapping (use-after-free of an unlinked timeout
+  waiter; disassembly + the extracted ld-musl are in
+  run/forensics-leg27/ for the pad-cave patch); (2) storage_daemon
+  D-state open() (5.5s->26s under the code-37 handler) — needs a
+  bio/ext4 stall probe; (3) init's 131073 no-restart of installs after
+  "Unknown(pid) exit" (image-side init bookkeeping); (4) render_service
+  memcpy-from-PROT_NONE (vma(rax)/vma(rsp) dumps now armed for the
+  next occurrence).
+
+LEG-28 (OH UI lane; leg-27 successor; solo-host mandate, 10-QEMU
+budget, waves not queues) — merged main f19382d9 first (one add/add
+conflict on kernel/src/dfx/leakorigin.rs: main carries LEAK-ORIGIN v1
+(e17fb73b), the branch carries v2+v3 on top — diffed and took the
+branch's strict superset; merge 65f8fcf2). Dual-arch builds green on
+the merged tree before any experiment fired.
+
+MISSION ITEM 1 — LD-MUSL 0x1187d2 COND-WALK UAF: PAD-CAVE PATCH LANDED
+  AND VERIFIED (run/patch-ldmusl-alignguard.sh, applied INSIDE
+  oh-img-p/system.img inode 2447 on top of the leg-22 zeronext patch;
+  idempotent, byte-verified by re-extract + cmp + disasm).
+  Design: every legit cond waiter node is rbp-0x50 of a 16-aligned
+  frame (x86-64 ABI), while ALL 8 logged crash nodes sat at
+  <binder-base>+0xa92c = 12 mod 16 (cr2 ...a93c, 8/8 samples across
+  sc261/262/269/278/279/300/301/303, different pids and comms:
+  m.ohos.launcher, honydataability, tonelibrarydata). A misaligned
+  "node" can never be a real waiter — the walk reaches one only
+  through list corruption. Patch routes the walk loop head through
+  three int3 caves (same mechanics as leg-22):
+    site 0x1187d0: `xor %eax,%eax; jmp GUARD` (7 original bytes)
+    GUARD 0x118143 (13B cave, tail padding of pthread_cond_init):
+      `test $0xf,%cl; jne T; jmp CAS`
+    T 0x11814d: `jmp BAIL`;  BAIL 0x1181a6 (10B cave before
+      pthread_cond_timedwait): `xor %ecx,%ecx; jmp 0x118825` — the
+      walk's OWN list-empty split path: cond head(+8)/tail(+0x28)
+      zeroed, lock released via the original epilogue (xchg + futex
+      wake), already-marked waiters still woken and acked, the
+      corrupt remainder dropped instead of dereferenced.
+    CAS 0x118d94 (12B cave): replays `lock cmpxchg %edx,0x10(%rcx)`
+      then `jmp 0x1187d7` — aligned nodes take the original path with
+      identical semantics and zero added instructions on the hot CAS.
+  VERIFICATION:
+  - Host functional smoke (toolchain/x86_64-rux-linux-musl): 50
+    rounds x 16 timedwaiters + broadcast driven through the patched
+    loader directly: hits=800/800, rc=0 — identical to the unpatched
+    loader. Normal condvar semantics intact.
+  - Boots: 0x1187d2 faults = 0 on ALL SEVEN wave boots (sc304-310:
+    plain / txnhunt / txnhunt+fsw / txnhunt+sleepsnap, loop draws AND
+    quiet draws), vs guaranteed repeats on every active unpatched
+    boot. Perm faults overall dropped to 0-1 per boot (2-11 on the
+    unpatched-image boots of leg-27).
+  - Launcher churn: sc304 (loop draw, LIFECYCLE=558) made 32 spawn
+    requests in the first ~20 min — that churn is the APP_FREEZE/
+    LIFECYCLE_TIMEOUT family (zero launcher SIGSEGV; the ONE
+    KILLTRACE kill was appspawn SIGKILL on the first instance), then
+    spawning STOPPED and the final instance held (sandbox children
+    exit status=0x0 = clean). The UAF crash feed is dead; what
+    remains of the churn is the image-side freeze family.
+  - Note: the guard is silent by design (ld-musl cannot printk), so
+    "0 faults" cannot distinguish guard-fired from never-corrupted;
+    acceptance is survival, which holds on every draw.
+
+NEW KERNEL BUG FOUND AND FIXED — REPART SIGNAL-ARC OOPS (sc304,
+  first-ever draw; family never seen in any earlier OH boot log):
+  `BUG: unable to handle kernel paging request at 7ff08b80f820`,
+  RIP atomic_load<u8>, stack = sys_exit -> do_exit ->
+  reparent_children_to_init -> Option::map closure. An ancestor hop
+  passed is_plausible_task_ptr but the freed-and-recycled Task's
+  `signal` Arc slot held a USER-range pointer, so the subreaper
+  check's `is_child_subreaper.load()` faulted — INSIDE the
+  PROCESS_TREE_LOCK hold, so the Oops-killed task wedged the whole
+  boot (serial frozen at 28.8MB from 01:46:49, monitor gone).
+  Plausibly drawn NOW because alignguard keeps launcher instances
+  alive long enough for exotic exit trees. Fix (kernel/src/process/
+  exit.rs, commit on branch): range-validate the Arc<SignalStruct>
+  pointer against the linear-map window (same bounds as the task
+  check) BEFORE the atomic load; garbage hop => walk stops, dest
+  stays init. Every hop's field reads now stay inside plausibility-
+  checked memory. sc309/sc310 (fix kernel): no oops through 25+ min
+  (both draws). ROOT CAUSE remains open for the process-tree owners:
+  a LIVE chain node carried a parent_ptr to an already-released task
+  (the E8-REPAR "unlinked snapshot" class); the fix is defensive.
+
+MISSION ITEM 2 — STORAGE_DAEMON D-STATE OPEN: INSTRUMENT LANDED,
+  FAMILY DID NOT REDRAW THIS SESSION.
+  - New probe (committed): dfx/pathstash.rs — sys_openat stashes the
+    resolved full path per tid at entry (8 slots, tid-keyed, arm-
+    gated on TxnHang); binder.rs's TXN-HANG now prints
+    `TXN-HANG txnN open-path='...'` when the hung server thread's
+    entry syscall is the open family (x86: 2/257/437, riscv: 56/24).
+    This names the file when the family draws. Print-path only, zero
+    cost when off (fsw=1 counters confirmed flowing on sc305/307:
+    FSW1/FSW2 every 60 s, sd~1.5M sync-dirty in provisioning).
+  - Four txnhunt boots (sc305/306/307/308) drew no D-state storage
+    entry (all hung threads INTERRUPTIBLE: sys=202 futex / 16 ioctl /
+    35 nanosleep / 45 brk; sc308 in the loop drew the same census
+    with zero 0x2 states). The sc303 baseline stands: open() flags
+    0x8241 (O_WRONLY|O_CREAT|O_TRUNC|LARGEFILE) D-state 5.5s growing
+    to a write(9) loop at 26.4s — a data-file CREATE stall. The
+    pathstash answer will land on the next boot that draws it.
+
+MISSION ITEM 3 — INIT'S 131073 NO-RESTART: KERNEL DELIVERY VERIFIED
+  CORRECT FROM EXISTING LOGS (no new boot needed). sc303's PCTL tap
+  shows the full pair both ways: `PCTL-SEND pid=328 -> paramservice
+  msgId=13 key=ohos.ctl.start installs|511#0#load##-1#` then
+  `PCTL-RECV pid=1 msgId=13` then the reply `PCTL-SEND pid=1 ->
+  client msgId=13` — samgr's request reaches init, init's answer
+  reaches samgr. The result VALUE (131073 = 0x20001 on the
+  startup.service.ctl.installs GET after the death, in sc293's
+  unpatched loud family) is init's own bookkeeping answer. KERNEL
+  CLEAN, image-side verdict per leg-27. On the patched image the
+  family is nearly absent (installs=1/boot on all seven boots), so
+  an init.cfg/paramservice workaround is LOW VALUE now; revisit only
+  if installs deaths reappear on the alignguard image.
+
+MISSION ITEM 4 — BMS/DISTRIBUTEDDATA WALL RECON (existing logs):
+  sc294's wall shape = `ImplicitQueryAllAbilityInfos failed
+  responseUserId:-1` per bundle (119 queries) — BMS's data layer
+  (distributeddata-backed) not answering. sc303's TXN-HANG names the
+  feed: distributeddata tid630 -> samgr OS_IPC_1_346 code7
+  LoadSystemAbility waits (2.5s/13.1s/5.2s, server parked in
+  sys=45 brk = allocating) plus the telephony->foundation code7
+  family (267 lines). After the crash feeds die, this wall is the
+  remaining gate; it is the same image-side on-demand-spawn wait
+  family leg-27 named (samgr synchronous 15s + wide exec-stall
+  substrate), not a kernel defect.
+  render_service memcpy-from-PROT_NONE (leg-27 lever 4) documented
+  by the new vma dumps on sc306: memcpy(dst=RW anon, src=0x7ff000730000
+  = first page of the 2-page PROT_NONE guard above the thread stack,
+  len 0x3a8), caller frame already corrupt (rbp=0x16) — image-side
+  caller bug, 3 faults/boot, occasionally fatal. Pad-cave clamp
+  needs the caller's frame; deferred.
+
+WAVE TALLY (45-min boots, lvl4 KVM SMP2 4096M, oh-img-p ALIGNGUARD
+image, post-merge kernel; MB = serial volume, pf = perm faults,
+LC = LIFECYCLE lines, sp = launcher spawn requests, ox = kernel
+paging oops):
+  - sc304 plain:            27MB, installs=1, pf=0,  LC=558, sp=32, ox=1 (reparent; pre-fix kernel)
+  - sc305 txnhunt,fsw:       6MB, installs=1, pf=1,  LC=0,   sp=4,  ox=0
+  - sc306 txnhunt:           5MB, installs=1, pf=1,  LC=0,   sp=0,  ox=0
+  - sc307 txnhunt,fsw:       4MB, installs=1, pf=0,  LC=0,   sp=0,  ox=0
+  - sc308 txnhunt,sleepsnap:10MB, installs=2, pf=0,  LC=345,  sp=28, ox=0
+  - sc309 plain REPARENT-FIX kernel:        5MB, installs=1, pf=0, LC=0,   sp=0,  ox=0
+  - sc310 txnhunt REPARENT-FIX kernel:       7MB, installs=1, pf=0, LC=33,  sp=13, ox=0
+    (sc310's new documented family: server pid 556's handler busy
+    RUNNING in sys=75 sendto >1s x189 under txns from pid 337's
+    FFRT thread — a downstream unix-socket stall inside a binder
+    handler; not the storage D-state family)
+  Launcher 0x1187d2 faults: 0/7 boots. Compare unpatched-image leg-27:
+  every active boot drew the family repeatedly.
+
+LEG-28 VERDICT: the launcher ld-musl crash-loop feed is dead (patch
+landed in the private image, host-smoked, boot-verified on 7 draws);
+a first-ever kernel Oops in the reparent walk was found, root-named
+and defensively fixed; the storage D-state open now has its
+path-naming instrument armed; init's 131073 is confirmed kernel-clean
+and low-priority on the patched image; the post-crash-feeds wall is
+the BMS/distributeddata spawn-wait family (image-side).
+
+LEG-29A (OH lane, kernel-side hunts; OH-B shares this worktree on the
+image-side BMS wall — leg-29B commits 84699ce8/95000a3c are theirs;
+my commits 1e5ba07d/6f5e397a/4b7c1ab5) — opened with main 5f1ac865
+already merged by OH-B; dual-arch builds green on the merged tree.
+
+MISSION ITEM 3 — LIVE-CHAIN-NODE-WITH-RELEASED-PARENT: ROOT-CAUSED,
+REPRODUCED, FIXED, VERIFIED.
+  Reproducer (new): test/subreap_churn.c + test/subreap_boot.py —
+  threaded groups under a PR_SET_CHILD_SUBREAPER root, member-forked
+  children, both leader-first and member-first exit orders, zombie
+  pressure, 30 s x86_64 KVM boots (exitwalk_boot.py pattern; NOTE for
+  all users of that pattern: the RAM-clamped static heap base sits at
+  physical 1 GiB, so --mem must be >= 2G or boot panics ALLOCTHROW
+  4MiB with heap +0x0).
+  Detector (new): dfx=treehunt — 1 Hz process-tree validator;
+  TREE-PARENT-DEAD prints the holder shape (member/leader, leader pid,
+  state) and the target page's first word: 0xc3c3c3c3... = TASK_POISON
+  = freed Task page, every draw.
+  Reproduction: pre-fix kernel draws TREE-PARENT-DEAD 10+ times per
+  30 s run; victims are whole thread groups (a leader AND its members
+  all naming the same freed page). Mechanism: do_exit sets PF_EXITING
+  first but runs reparent_children_to_init mid-exit, so a sibling
+  member PAST its own reparent could still be picked as a reparent
+  DESTINATION (state pre-ZOMBIE) — children moved onto it after its
+  collect were never moved again, and its reap freed the page under
+  them. This is the sc304 signal-Arc ancestor class, closed at the
+  source.
+  Fix (6f5e397a): (1) the member walk and the subreaper ancestor walk
+  skip PF_EXITING candidates (an exiting subreaper no longer ends the
+  walk — it continues to the next ancestor); (2) move_child refreshes
+  the moved child's members' parent snapshots (thread_group_join
+  copies the leader's parent and nothing maintained it — a second,
+  independent rot path, caught as TREE-SNAP-STALE on the first run);
+  (3) release_task moves any still-linked children to init before the
+  Task page is freed and prints TREE-RELEASE-HEAL when it acts —
+  always-on hole detector.
+  Verification: 4/4 clean SUBREAP-PASS runs (741/729/739 cycles,
+  ~2200 reaps each), zero TREE-* lines, zero heals; pre-fix kernels
+  drew on every run. Gate so far on the fixed tree: x86_64 + riscv64
+  builds rc=0, riscv64 scripted regression boot rc=0 zero panics
+  (dfx=treehunt armed, silent), make test "All tests passed".
+  Remaining for merge: Tier-1 quiet syscost boot + pbench P4
+  (fork/exit rows — move_child/release_task gained a bounded ring walk
+  and an extra usually-empty collect) once the host quiets down.
+
+MISSION ITEM 2 — sc310 "sendto-stall family": MISLABELED, SPLIT.
+  x86_64 native 75 is fdatasync, not sendto (74=fsync). sc310's 512
+  sys=75 lines are ONE txn (appspawn tid1276 FFRT -> hiview tid578)
+  hung 2569 s to end-of-boot INSIDE fdatasync(fd=41), server state=0x0
+  (RUNNING) throughout — the entry-frame read means the syscall frame
+  was live the whole time; kernel-side. Same substrate as the
+  storage_daemon sync-write family (also seen: accountmgr->huks_service
+  5.7 s fsync, sys=74). This family is MINE now: the wave below arms
+  the stuck-site probe for it.
+  The other 43-min hang in sc310 (515 lines) is device_manager ->
+  distributeddata tid 557, whose handler sits INTERRUPTIBLE in a
+  NESTED binder ioctl (a1=0xc0306201 = _IOWR('b',1,48) =
+  BINDER_WRITE_READ) with the nested txn QUEUED on foundation pid 764
+  at tid 0 (no thread picking up). That is the BMS wall from the
+  kernel side: distributeddata waits on foundation, foundation's BMS
+  waits on distributeddata (sc294's 119 ImplicitQueryAllAbilityInfos
+  queries) — a cross-service wait cycle, image-side service logic,
+  NOT a unix-socket kernel bug. FOR OH-B (leg-29B): your wall's
+  kernel-side shape is "foundation not draining its incoming txn
+  queue while distributeddata's main thread is parked in a nested
+  call INTO foundation" — if you break the cycle image-side, both
+  hangs should collapse together.
+
+NEW PROBES (1e5ba07d, 4b7c1ab5): TXN-HANG-STK prints kernel-text
+words off a hung server thread's stack (sp-up = parked chain when
+sleeping; top-dn = newest frames when RUNNING cross-CPU) — symbolizes
+offline against target/x86_64-unknown-none/debug/rux. file-op=
+pathstash now covers open, regular-file write, AND fsync/fdatasync
+entry (op-tagged, family-matched print). Live in the wave boots.
+
+LEG-29A WAVE-1 (fired 04:48, 45-min boots, KVM SMP2 4G, oh-img-p
+alignguard system + fresh scgold userdata each, kernel run/
+bzImage-29A-treefix2 = probes + tree fix, HDCPORTs 12203-12205;
+OH-B holds 12201/12202):
+  - sc313A dfx=txnhunt,fsw        (loop-drawing by 12 min: LIFECYCLE_
+    TIMEOUT lines present)
+  - sc314A dfx=txnhunt,fsw,sleepsnap
+  - sc315A dfx=txnhunt,fsw
+  Early: file-op probe live — sc314A's first named family is open
+  '/dev/access_token_id' hangs (92 lines by minute 12) plus the wide
+  sys=20 writev RUNNING texture (hilog-socket family). Storage
+  D-state and hiview-fdatasync families: not drawn yet; adjudication
+  when the wave lands.
+
+LEG-29A ADDENDUM 1 (05:20) — SECOND KERNEL BUG FOUND AND FIXED WHILE
+THE WAVE RAN: ext4 dir-entry split panic, deterministic.
+  All three wave boots (and sc308/sc310 before me — pre-existing, the
+  leg-28 ox tally only counted paging oops so it was invisible) drew:
+  `PANIC: range end index 4139 out of range for slice of length 4096`
+  at ext4/namei.rs add_entry_to_block. Root cause: ext4 dir blocks are
+  read-clone-modify-write with NO per-inode lock; two CPUs mutating the
+  SAME directory both cloned the block, found the same free space,
+  split the same entry, and the loser's whole-block write clobbered the
+  winner's — the interleaved rec_len chain ran past the block end and
+  the next splitter panicked. Silent shapes of the same race: lost
+  entries, corrupt rec_len chains. Fix 6dc0ae06: ENTRY_MUTEX (global
+  sleeping mutex) serializes every entry mutation, taken BEFORE the
+  journal bracket in mkdir/create/mknod/symlink/link/unlink/rmdir/
+  rename (nobody sleeps on the mutex holding an open journal handle —
+  commit-waits-for-handles cannot deadlock against it; public add/
+  delete keep their own guard, inner bodies use _locked variants);
+  find_entry_space now treats a rec_len claiming space past the block
+  end as no-space (fresh-block allocation) instead of panicking.
+  make-test rerun on the fixed tree is queued behind a FOREIGN
+  make-test QEMU holding test/rootfs.img (pid 572289, `./test/run.sh
+  test`, not mine — left alone per own-PID discipline).
+
+WAVE INTERIM (sc313A/314A/315A, kernel bzImage-29A-treefix2):
+  - The sync-write family HAS A NAME now (file-op=sync probe): pid 479
+    accesstoken_ser's handler parked INTERRUPTIBLE 1.2-1.4 s in
+    fdatasync of /mnt/sandbox/system/data/service/el1/public/
+    access_token/access_token_slave.db{,-wal} (SQLite WAL syncs) under
+    txns from foundation tid 1161. That is the short-stall texture of
+    the same family sc310's hiview sat in for 43 min; the
+    90 ms-class fsync claim is 13x off under load. The storage_daemon
+    O_CREAT|O_TRUNC D-state family itself: 0x2 states still zero so far.
+  - TXN-HANG-STK symbolization gap found and fixed: sp-up window (80
+    words) only caught switch/IRQ plumbing above the saved sp for deep
+    parkers; widened to 384 words (c3e89b4f) for the NEXT boots
+    (bzImage-29A-dirlock2 = dirlock fix + widened window).
+  - sc314A's 92 'open /dev/access_token_id' labels were carried stashes
+    on writev-hung threads (pipe writes never refreshed the stash);
+    4b7c1ab5 makes the print family-matched and stashes pipe writes too.
+NEXT: when sc313A-315A end, fire sc316A/sc317A on bzImage-29A-dirlock2
+(dfx=txnhunt,fsw) — verifies the dirlock fix kills the panic family
+AND redraws the storage/hiview families with the widened stack window.
+
+LEG-29B (OH image-side lane; BMS/distributeddata wall; 05:20) —
+merged main 5f1ac865 first (clean), dual-build green, boots on the
+merged kernel + oh-img-p alignguard image, fresh scgold userdata
+copies, plain recipe (no dfx), HDCPORT 12201/12202.
+
+MISSION REFRAME — THE NAMED BMS WALL IS DEAD ON THE CURRENT TREE.
+  Zero ImplicitQueryAllAbilityInfos failures on EVERY boot since the
+  alignguard+reparent wave (sc305-310, sc311B/312B below; the wall's
+  last draws were sc294 x119 and sc273-277 x1941). The wall moved.
+  For the record, the old wall's mechanism is now fully decoded from
+  the image (no new boot needed):
+  - BMS bundle_data_mgr:1798 "ImplicitQueryAllAbilityInfos failed,
+    bundleName:X, responseUserId:-1" and render_service's
+    AccountDelegateNormalImpl "QueryForegroundUserId ... status:
+    4194349" are the SAME root: libaccountmgr
+    OsAccountManagerService::GetForegroundOsAccountLocalId (0x1943aa)
+    computes userId=callingUid/200000, looks up IInnerOsAccount-
+    Manager's foreground-record map (this+0x168); miss => inner
+    returns 0x400026, service maps to 0x40002D = 4194349 (mov at
+    0x194442). The foreground record only lands when a UI session
+    reaches the foreground, so the failures persist on EVERY boot
+    (incl. advancing ones) until UI comes up — they are a SYMPTOM,
+    not the gate. BMS imports the same API (libbms "GetForeground-
+    OsAccountLocalId failed ret:%d").
+
+THE CURRENT QUIET WALL (named end-to-end, image side): the launcher
+  never STARTS. Perfect 100% split across 10 boots (sc294-312B):
+  - advancing draws (sc305 12x, sc308 13x, sc310 13x resident starts;
+    sc294 partial): accountmgr ActivateDefaultOsAccount -> SendToAMS-
+    AccountStart -> AbilityManagerAdapter::StartUser (libaccountmgr
+    0x1ea160: GetAbilityManager, parcel token+userId+displayId+
+    callback, SendRequest code 0x2e=46, rc checked) -> AMS::StartUser
+    (libabilityms 0x2c1d3e) -> UserController::SetForegroundUserId ->
+    SwitchToUser (0x34137e) -> StartUserApps (resident abilities:
+    "StartResidentAbility bundleName:..." lines) AND StartHighest-
+    PriorityAbility (0x341df0; the "start highest priority extension
+    ability ... queryTime:15ms" radar) -> launcher spawn -> UI.
+  - walled draws (sc306/307/309/311B/312B): activation completes
+    (State:7 toId:100, storage user-start+quota+hmdfs mount all
+    normal), SendToAMSAccountStart returns 0 (its ERROR-level
+    failure logs "ability manager proxy is nullptr" 0x40000c and
+    "Failed to call SendToAMSAccountStart" 4194349 never print),
+    YET ZERO StartResidentAbility lines — SwitchToUser NEVER RAN
+    inside foundation. No hang (no SLOW-TXN/TXN-HANG on the pair,
+    incl. the txnhunt boots sc306/307), no error log, no spawn, no
+    launcher query — the code-46 task completes at the binder level
+    and its continuation simply never executes in foundation.
+  - sub-variant B (sc307, sc311B): accountmgr never even enters
+    ActivateDefaultOsAccount (SA:200 init finished in 997/793ms vs
+    15.2-15.5s on activating boots; the 15s wait inside init is the
+    samgr-15s family, target not yet named).
+
+IMAGE PATCH TRIED AND ADJUDICATED INERT: run/patch-foundation-
+  180first.sh (commit 4e132216) moved SA 180 (libabilityms) to the
+  head of foundation.json (same-size in-place byte patch, verified).
+  Verdict: SA loads in foundation are DEMAND-DRIVEN ("SAMGR: SA:x
+  OpenSo Nms" fires when a client first LoadSystemAbility(x)); the
+  profile list order does not set the load schedule. sc312B (patched
+  image) still published SA:180 only at the activation's own request
+  and walled identically. The patch is harmless (kept; idempotent
+  script in-tree) but is NOT a fix. sc311B's no-activation draw
+  matches pre-patch sc307 — not a regression.
+
+FIX-TRIAL WAVE (45min, KVM SMP2 4G, plain, oh-img-p+180first):
+  - sc311B: 65k lines, 5MB, activate=0, State7=0, pubs180=0,
+    resident=0, launcher=0, spawn=0, LC=0, fgfail=39, IQfail=0.
+    Screen frozen on the bootanimation color-bar pattern.
+  - sc312B: 68k lines, 5MB, activate=1 (x2 echo), State7=2,
+    pubs180=1 (at the activation request), resident=0, launcher=0,
+    spawn=1 (storage_manager native-spawn only), LC=0, fgfail=45,
+    IQfail=0. Same screen state.
+  Both walled; consistent with the 60/40 wall lottery.
+
+NEXT LEVERS (leg-30B, value order):
+  1. VISIBILITY inside foundation: the three AMS entry logs exist in
+     libabilityms but never print anywhere (StartUser entry
+     "startUser in service:%d, displayId:%lu" @0x2c1df0 fmt 0x126b4e
+     level args 3/4; SwitchToUser entry @0x341432 fmt 0x141349;
+     StartHighestPriorityAbility failure strings) — domain 0xd001336
+     appears flow-controlled off. Image-side byte patch: retarget
+     those HiLogPrint domains to one that prints (0xd001b00 prints
+     E0) or raise levels to 6; then one quiet boot names the exact
+     bail point between SendRequest(code 46) and SwitchToUser.
+  2. accountmgr's ~15s init wait (the A/B init split) — name the SA
+     it waits for (SAREG budget is exhausted by then; needs either a
+     budget bump or the SLRD gate extended) — that wait delays
+     activation into the window where its AMS continuation gets lost.
+  3. Kernel-side (OH-A's call): a dfx print for code-46 txns to
+     foundation + their pickup, OR extend SAREG beyond 600 lines —
+     adjudicates delivered-but-never-executed vs never-delivered for
+     the oneway-shaped StartUser.
+  4. The old BMS wall's KvStore-side noise (4194349) is confirmed
+    cosmetic-on-this-image; do not chase it.
+
+LEG-29A ADDENDUM 2 (05:50) — FS-SLOWNESS ADJUDICATION + WAVE NOTES.
+  The sync-write stall substrate is KERNEL-SIDE by mechanism, now read
+  from the code: ext4_sync_file step 1 and sync_buffers both call
+  bio::flush_publications(), which drains the ENTIRE deferred
+  publication queue synchronously (mem::take, then pre/entry/post
+  block syncs for EVERY record, in a loop for racing publishers).
+  Every fsync/fdatasync/create-side durability point therefore pays
+  for ALL outstanding entry publications from ALL creators — under
+  provisioning churn the queue grows faster than drains, and fdatasync
+  latency becomes O(pending publications): the observed 1.2-1.4 s
+  accesstoken WAL syncs, 5.7 s huks_service fsync, sc303's 5.5->26 s
+  storage open/write shape, plausibly up to the 43-min hiview draw if
+  a write retry path (5x10 s deadline) stacked on top. Fix DIRECTION
+  (next leg, needs its own gate work): drain publications in a
+  background context and make durability points wait for THEIR OWN
+  records (per-handle tagging), not the world's. NOT patched tonight —
+  it touches the crash-safety ordering contract deliberately.
+  GOTCHA for future boots: fsw counters arm via the SEPARATE cmdline
+  param `fsw=1` (fsw::on() reads get_param("fsw")=="1"), NOT the
+  dfx= token list — sc313A-317A ran txnhunt-only. Use
+  EXTRA_APPEND="dfx=txnhunt fsw=1" (space, not comma).
+  WAVE-1 final: sc313A 4MB LC=17 pf=0; sc314A 7MB LC=9 pf=0; sc315A
+  7MB LC=13 pf=31; panics=2 each (the pre-dirlock namei split panic),
+  TREE=0/0/0 HEAL=0/0/0 (tree fix holding on the OH image too),
+  storage D-state 0x2 family did NOT draw (0 in all three). The
+  dominant hang target again: distributeddata pid 565 (412 lines in
+  sc315A) — the BMS wall family persists on the alignguard image.
+  WAVE-2 (fired 05:36): sc316A/sc317A on run/bzImage-29A-dirlock2
+  (dirlock fix + widened STK window), dfx=txnhunt,fsw, HDCPORT
+  12206/12207. Early: sc316A past the wave-1 panic point with ZERO
+  panics — dirlock fix holding so far.
+
+LEG-29B ADDENDUM (06:25) — VISIBILITY PATCH + THE TWO-GATE MODEL.
+
+Visibility patch (commit 115ddf3a): 4 AMS HiLog sites retargeted to a
+printing domain (run/patch-abilityms-logdom.sh). VERDICT: the four
+sites sit on branches the real flow does not take — they printed on
+NO draw, including sc314B where StartUser demonstrably executed
+(resident=12). Their silence is not evidence; resident-ability lines
+remain the reliable SwitchToUser marker. The domain-0xd001336
+silencing stands (4791 sites never print; only the radar sub-domain
+does) but selective retarget of those 4 sites does not yield signal.
+
+  - sc313B (plain, visibility image): 61k lines/5MB, activate=1,
+    resident=0, launcher=0, AMS entry logs=0. Walled draw (killed
+    early at the parked phase).
+  - sc314B (dfx=txnhunt, visibility image): 84k lines/7MB,
+    activate=1, State:7=1, resident=12 (SwitchToUser RAN),
+    launcher=0, launcher spawns=0, LC=20, fgfail=149, TXN-HANG=1864,
+    and — decisive — ImplicitQueryAllAbilityInfos failures = 836.
+
+TWO-GATE MODEL (final for this leg, supersedes "the wall is dead"):
+  GATE 1 (quiet draws: sc306/307/309/311B/312B/313B): the chain dies
+    before/at AMS StartUser's continuation — accountmgr's
+    SendToAMSAccountStart returns 0 (SendRequest code 46,
+    MessageOption(1,8) — TF_ASYNC-shaped), no error logs, no hang,
+    no TXN-HANG on the pair, yet SwitchToUser never executes in
+    foundation (resident=0). Kernel-vs-image fork for OH-A: either
+    the oneway's async-todo delivery/wake is lost in our binder, or
+    foundation's handler defers the task (wait flag in parcel) and
+    its userspace loop drops it. Discriminator for next leg: a
+    code-46-specific kernel print (delivery + read + slot release),
+    or bump SAREG's 600-line budget past the activation.
+  GATE 2 (churn draws: sc314B now, sc273-277 then): SwitchToUser
+    runs, resident abilities start, but the launcher's ability start
+    hits the ImplicitQuery wall (836 fails on sc314B) — the decoded
+    foreground-user failure (0x40002D; accountmgr's foreground map
+    unpopulated because no UI session ever reaches foreground — the
+    loop feeds itself). sc310-class lucky draws squeak through when
+    the explicit userId=100 query path answers first.
+  => launcher.ready NOT reached this leg (0 launcher spawns on all
+    three B boots). The milestone needs BOTH gates broken; they are
+    independent failures with different owners (gate 1 likely
+    kernel-side, gate 2 image-side accountmgr/UI-session ordering).
+
+Lane state: branch tip 573bd104 + this addendum; oh-img-p now carries
+alignguard + 180first (inert, kept) + logdom (4 sites, kept); scripts
+run/patch-foundation-180first.sh and run/patch-abilityms-logdom.sh
+are idempotent and in-tree. Serials sc311B-314B committed.
+
+LEG-29A CLOSE-OUT (07:10).
+WAVE-2 VERDICT (dirlock kernel bzImage-29A-dirlock2): the ext4
+  dir-entry split panic is DEAD under the heaviest draws — sc316A
+  (22MB serial, LC=669 loop-drawing) and sc317A (LC=418): namei
+  range-end panics 0/0 (wave-1 pre-fix: 2 per boot, deterministic;
+  sc308/310 pre-date). sc316A's two "Kernel panic" lines are a
+  DELIBERATE in-guest sysrq-c crashdump (fs/procfs/sysrq.rs:34), not a
+  defect. TREE-*=0 and TREE-RELEASE-HEAL=0 on BOTH — the reparent fix
+  holds on the OH image too (5/5 boots total). Storage D-state 0x2
+  family: did not draw in any of this session's 5 boots; the instrument
+  (file-op + TXN-HANG-STK) is proven live and will name file+site on
+  the next natural draw; the sync-write substrate is adjudicated
+  kernel-side (flush_publications drains the whole deferred queue
+  inside every durability point — see addendum 2).
+GATE ON THE FINAL TREE (tip c3e89b4f, kernel run/bzImage-29A-dirlock2):
+  - x86_64 build rc=0, riscv64 build rc=0.
+  - riscv64 scripted regression boot rc=0, zero panics (dfx=treehunt
+    armed, silent).
+  - make test: ALL TESTS PASSED (twice — pre-dirlock and final tree).
+  - Tier 1 quiet syscost boot: ALL PASS — census TERM 8 / REFUSED 33
+    (bands 8±2 / 32±4), ticks 99.53/100.00/s, volume 106.1M (base
+    107.5M ±10%), clock_gettime 3us, nanosleep 185.5ms (<=244ms),
+    GRQ hold 5073ns (4080-7320), small_alloc REST 5.4% (<=10%),
+    zero panics/OOM. Exit/fs changes cost nothing on the standard
+    boot.
+  - Tier 2 pbench: the run completed (PBENCH DONE rc=0, t=321s) but
+    the perf-gate script's results-glob missed it (driver writes
+    work/pbench-<tag>-serial.log; ls looks for work/pbench-results*)
+    and the medians compare ran by hand: fs/exit rows CLEAN —
+    p4_fork_exit -1.6%, p4_fork_exec -8.2%, p6_write_fsync -78%
+    (improved, F4 lazy write), p3b cow -0.1%, p6_read_cached +0.2%,
+    p6_append 0.0% — but floor rows read OUT (p2_ctxsw +142%,
+    p5b_dgram +380/486%, p6_stat +434%, p5a_pipe +31%) with
+    foreign_qemus=4 DURING the run (OH-B's wave was up; those are the
+    host-noise-dominated floor families per perf-report 8.5). RERUN
+    IN ISOLATION pending host quiet — appended below when done.
+COMMITS THIS LEG (branch feature/samgr-callback, on top of OH-B's
+  merge 95000a3c):
+  - 1e5ba07d dfx(txnhunt,treehunt) probes + subreap reproducer/driver
+  - 6f5e397a fix(exit) PF_EXITING dest skip + member snapshot refresh
+    + release-time heal  [THE sc304-class root-cause fix]
+  - 4b7c1ab5 dfx(txnhunt) file-op family-match + pipe-write stash
+  - 6dc0ae06 fix(ext4) entry-mutation mutex + block-end split refusal
+    [THE deterministic namei panic fix]
+  - c3e89b4f dfx(txnhunt) STK sp-up window 384 words
+  - 0c5781ea/634972ba session notes
+HANDOFF: (1) storage D-state redraw — instrument armed and proven;
+  next natural draw names file+stuck-site in one line. (2) The
+  flush_publications whole-queue drain is the fsync-latency ceiling —
+  per-handle publication waiting is the fix project (needs its own
+  gate work; touches the crash-safety ordering contract). (3) OH-B:
+  the distributeddata<->foundation queue cycle persists on every boot
+  (pid 565/857-class main threads parked in nested BINDER_WRITE_READ,
+  foundation not draining) — your wall, kernel-clean from this side.
+
+LEG-30B (OH-B second leg; Gate-1 adjudication; 06:30-08:00) — opened on
+branch tip c89fd362 (main still 5f1ac865 at open).
+
+MISSION ITEM 1 — THE CODE-46 ARSENAL: BUILT, COMMITTED f46c6ad9.
+  dfx=ams46 (switch idx 36): full kernel lifecycle trace of
+  IAbilityManager code-46 StartUser oneways, latched by the interface
+  token "ohos.aafwk.AbilityManager" (UTF-16 at parcel offset 12) —
+  AMS46 latch/ENQ/Q/READ/FREE/SWEEP/RETIRED lines + a ~5 s node census
+  (async slot held, async_todo depth, foundation proc todo depth,
+  waiting readers; prints only while pending work exists). Budgets:
+  32/96/240. MessageOption(1,8) decoded exactly: constructor
+  MessageOption(flags=1, waitTime=8) = TF_ASYNC + 8 s; libipc maps it
+  to binder tr.flags = 0x11 (TF_ONE_WAY|TF_ACCEPT_FDS), and oneway
+  SendRequest only waits for BR_TRANSACTION_COMPLETE — confirmed live
+  by the ENQ line's flags=0x11.
+
+GATE 1 ADJUDICATED — KERNEL SIDE CLEAN; THE WALL WAS NEVER A KERNEL
+ONEWAY-DELIVERY LOSS. 5 draws (sc315B-319B, KVM SMP2 4G, oh-img-p +
+fresh scgold, dfx=ams46,txnhunt, HDC 12211-12215):
+  - Every activation (5/5 activating draws): ENQ -> Q route=proctodo
+    (slot taken) -> READ by a foundation OS_IPC thread -> FREE -> slot
+    released. No PARKED, no SWEEP-RECLAIM, no RETIRED, no slot leak.
+    The census confirms quiesce (async=false, todo drains).
+  - The handler provably ENTERS AbilityManagerService::StartUser and
+    runs long (25 s+ on sc318B): its nested CheckUserParam
+    IsOsAccountExists(100) call (ohos.accountfwk.IOsAccount proxy,
+    reply (0,true)) is visible from the reading thread in every
+    activating draw.
+  - sc316B names the actual quiet-draw loss: render_service (pid 798)
+    SIGSEGVs (pagefault: Permission denied at 0x7ff000683000,
+    rip=0x3fbf08ad30, rsp=0x7ff000682b88, rbp=0x16), init runs its
+    stop-all sweep and kills foundation THREAD BY THREAD — including
+    the exact OS_IPC_0_810 thread holding the code-46 txn (buffer +
+    async slot leak with it; later AMS oneways park on node 8267
+    forever). The StartUser continuation died with its thread.
+  - sc317B decodes sub-variant B the same way: render_service SIGABRT
+    -> sweep -> accountmgr killed BEFORE it ever activates
+    (ActivateDefaultOsAccount never runs).
+  - When render_service survives (sc315B/318B/319B), the chain
+    COMPLETES: sc318B resident=11 + launcher radar x2 + appspawn
+    CreateAppSpawnReqMsg(com.ohos.launcher); sc319B resident=14;
+    sc315B resident=0 but the launcher radar fired and 63
+    IsAbilityEnabled(com.ohos.launcher) queries + settingsdata
+    LIFECYCLE_TIMEOUT x202 (the old sc262 launcher-load family).
+    leg-29B's "SwitchToUser never executes" was the sweep race, not a
+    delivery loss.
+  => The two-gate model is superseded by ONE root ahead of both:
+     render_service's crash. It gates UI (dead RS = no sceneboard =
+     empty foreground map = the 4194349 noise) AND races the
+     activation/StartUser window via init's stop-all sweep.
+
+MISSION ITEM 2 — A/B INIT SPLIT: CLOSED (mislabel). The 15.2-15.5 s
+  accountmgr init was sc310-only (an outlier under load: SLOW-TXN to
+  render_service 3.5 s, clients retrying "failed to get os account
+  service" while SA 200 publishes). Typical inits are 0.6-1.8 s on
+  BOTH advancing (sc305 1213 ms, sc308 1218 ms) and walled draws
+  (sc311B-314B 0.6-1.8 s). Every draw restarts accountmgr once (the
+  sweep kills instance 1; instance 2 never re-activates — the trigger
+  fired once). No 15 s waiter exists.
+
+MISSION ITEM 3 — GATE 2 PREP (image side): the foreground-record map
+  (IInnerOsAccountManager this+0x168) is sceneboard-tied — libaccountmgr
+  carries "com.ohos.sceneboard" and "Maintenance account missing
+  sceneboard app" strings; the map populates only when the UI root
+  reaches foreground. With render_service crashing there is no path to
+  populate it. Fix order: render_service crash FIRST; the fg-map noise
+  (4194349) then either self-heals (sceneboard foreground) or needs the
+  image-side pre-populate at ActivateDefaultOsAccount.
+
+VISIBILITY PATCH v2 (commit after f46c6ad9): run/patch-userctl-logdom.sh
+  — libuser_controller.z.so domain 0xd001364 (5 sites, incl
+  IsForegroundUser "foregroundUserId:%d" and the CheckUserParam
+  TAG_LOGEs) retargeted to 0xd001b00 with INFO/DEBUG raised to ERROR;
+  the two leg-29B AMS entry sites raised to ERROR. NOTE: even at E the
+  "startUser in service" entry never printed on draws where the handler
+  demonstrably ran (CheckUserParam's IPC visible) — hilogd is dropping
+  these lines despite tag-AMS INFO lines (ABMS7918/resident_process_manager)
+  printing mid-boot; do not use that entry log as a flow marker.
+
+NEXT-LEG TARGETS (value order):
+  1. render_service crash: SIGSEGV "Permission denied" fault on a page
+     0x478 ABOVE rsp inside the thread stack region (0x7ff000683000;
+     rsp 0x7ff000682b88) + a SIGABRT variant. Occurs ~3-5 min in, on
+     5/7 draws this leg and every leg-29B walled draw. Suspects: our
+     PROT_NONE-marker/VMA disagree handling (page_fault.rs has prior
+     art for exactly this family), pthread guard sizing, or a genuine
+     image fault — needs a VMA/PTE dump at the fault (add the faulting
+     region's VMA flags to the USEGV-FOR print).
+  2. Behind it: the launcher-load family (settingsdata DataExtAbility
+     LIFECYCLE_TIMEOUT x202-273; launcher appspawn request sent, child
+     delivery via child-looper route flowing per APPTXN).
+  3. The sweep itself: init killing foundation THREAD-wise (thread
+     tids as kill targets) is worth a look — even a legit stop-all
+     should target tgids; the thread-wise kill is what leaks the
+     handler's buffer+slot.
+
+Lane state: probe commit f46c6ad9 + patch script + this note on
+feature/samgr-callback (tip after this commit); oh-img-p now carries
+alignguard + 180first + logdom(v1) + userctl-logdom(v2). Kernel gates
+for f46c6ad9: dual-arch builds rc=0 (print-only, dfx-gated, off by
+default); riscv64 regression + make test queued after the boot wave.
+Serials sc315B-319B stay untracked per .gitignore.
+
+LEG-30B ADDENDUM — RENDER_SERVICE FAULT FULLY DECODED FROM EXISTING
+USEGV-FOR DATA (sc316B; no new probe needed — the trap printer already
+dumps the VMA map):
+  USEGV-FOR: pid=798 rip=0x3fbf08ad30 cr2=0x7ff000683000 rsp=0x7ff000682b88 rbp=0x16
+  rsi=0x7ff000683000 rdx=0x3a8 rcx=0x2a (a ~936-byte copy/write TO cr2)
+  vma(cr2)     = 0x7ff000683000-0x7ff000685000 flags=0x10 Anonymous  <- READ-ONLY, 2 pages
+  vma(rsp)     = 0x7ff00067c000-0x7ff000683000 flags=0x13 Anonymous  <- RW stack, ends AT cr2
+  vma(rip)     = 0x3fbf077000-0x3fbf138000 flags=0x15 FileBacked (librender_service .text)
+  The fault is a large write starting exactly at the boundary page of a
+  2-page READ-ONLY anonymous VMA that sits immediately ON TOP of the
+  thread's RW stack VMA, with rbp holding a small integer (0x16) —
+  corrupted frame/target state, then a bulk write past the stack top.
+  Open fork for next leg: is the RO-top VMA layout legitimate (an
+  mprotect'd guard the image violated => image bug) or did OUR VMA
+  snapshot split/mis-flag what should be one RW mapping (the
+  fork-copies-PTEs-and-VMAs-in-two-phases race called out in
+  page_fault.rs)? Needs a VMA-origin stamp (who created the 0x10 VMA:
+  exec, mmap, or mprotect) — a cheap origin field on Vma + one print.
+
+LEG-30B CLOSE-OUT (07:55) — FINAL WAVE TALLIES (5 draws, 45 min each).
+  draw    ENQ READ FREE resident radar spawn_req rs_exit LC    shape
+  sc315B    1   1    1     0        2     1        0       202   advanced to launcher-load wall
+  sc316B    1   1    0     0        0     0        1(SEGV) 0     handler thread killed mid-StartUser
+  sc317B    0   0    0     0        0     0        1(ABRT) 0     accountmgr killed pre-activation
+  sc318B    1   1    1    11        2     2        1       0     advanced (RS crash late, restarted)
+  sc319B    1   1    1    14        2     0        0      273    advanced to launcher-load wall
+  AMS46 SWEEP/RETIRED/PARKED(code-46): 0 on every draw — none of the
+  kernel loss paths ever engaged for the traced txn. Kernel code-46
+  delivery: 4/4 activating draws clean end-to-end.
+  Timing is the lottery: render_service's crash relative to the
+  activation window decides sub-variant B (before: no activation),
+  handler-kill (during: buffer+slot leak, FREE=0), or advance (after/
+  never: resident abilities + launcher chain run, then the old
+  sc262 launcher-load wall: settingsdata LIFECYCLE_TIMEOUT 202-273,
+  launcher spawn requests sent, appspawn child deliveries flowing).
+  GATES for f46c6ad9 on this branch: dual-arch builds rc=0; riscv64
+  smoke boot 0 panics, shell prompt + /proc reached
+  (run/rv-smoke-leg30.sh); make test "All tests passed". Perf tiers
+  not re-measured (print-only, dfx-gated OFF by default; the OH draws
+  above ran with it ON voluntarily).
+  launcher.ready NOT reached — the terminal milestone's next blocker
+  is the render_service crash (see ADDENDUM), then the launcher-load
+  family. Serials sc315B-319B untracked per .gitignore.
+
+LEG-31B (OH-B third leg; VMA-origin adjudication; 08:00-11:00) — opened on
+branch tip 6ec578f7. Kernel commit da74c5c0 (origin stamp + dfx=vmap +
+stkva dump; gates green), follow-up x86-only dump extension in-tree.
+
+MISSION ITEM 1 — VMA ORIGIN STAMP: BUILT AND DELIVERED THE VERDICT.
+  Vma now carries a 1-byte origin stamp (mm/vma.rs: VmaOrigin — exec,
+  exec-stack, mmap, mprotect, brk, mremap, shm, binder, other + FORKED
+  modifier). Splits propagate; mprotect's covered piece carries
+  'mprotect' while head/tail keep the original; fork's snapshot tuple
+  carries the parent stamp and marks FORKED in the child; munmap/
+  MAP_FIXED-preserved pieces inherit. The fault-only USEGV-FOR vma()
+  lines, the nearvma walk, and the riscv64 segv line print origin=.
+  New dfx=vmap (idx 37, default OFF, 600-line budget) traces the
+  PROT_NONE-establishing syscalls: MPROTECT-DN (prot==0 sub-1MB) and
+  PROTNONE-MAP-S. No new always-on prints anywhere.
+
+THE VERDICT (sc321B, pid 802 render_service, fault at serial 46646):
+  USEGV-FOR: pid=802 rip=0x3fbf08ad30 cr2=0x7ff000694000 rsp=0x7ff000693b88 rbp=0x16
+  vma(cr2) = 0x7ff000694000-0x7ff000696000 flags=0x10 origin=mprotect  <- the 2-page PROT_NONE guard
+  vma(rsp) = 0x7ff00068d000-0x7ff000694000 flags=0x13 origin=mmap      <- the 7-page RW thread stack
+  nearvma  0x7ff00068b000-0x7ff00068d000 flags=0x10 origin=mprotect   <- the guard below (next stack's)
+  => IMAGE-SIDE. The guard VMA was created by an mprotect(prot=0) the
+  image itself issued; the stack pieces are the image's own RW mmaps.
+  All neighborhood pieces share one original arena base (continuous
+  VMA offsets 0x44000/0x46000/0x4d000/0x4f000 from base 0x7ff000647000):
+  one big RW mmap, guards carved out by 2-page mprotect(PROT_NONE)
+  calls. NO +FORK on any piece — fork/exec/brk paths clean. The leg-30B
+  "fork two-phase VMA race" fork of the question is CLOSED.
+  Corroboration: MPROTECT-DN (tight filter) shows the SAME 2-page
+  PROT_NONE guard construction in EVERY process (pids 1, 306, 307,
+  337, 363-366... — 62 lines by mid-boot on sc323B) — an image-runtime
+  pattern, not a render_service quirk. The FFRT 8MB stacks use the
+  OTHER pattern (mmap PROT_NONE + mprotect RW 0x801000 — stack
+  origin=mprotect, seen on the sc322B pid-1150 dump); our stamp
+  distinguishes the two constructions exactly.
+
+FAULT MECHANISM (refined decode; leg-30B's "librender_service .text"
+  attribution corrected): rip 0x3fbf08ad30 = ld-musl memcpy+0x1c (file
+  offset 0x89d30 = VMA 0x8ad30; interp_base 0x3FBF000000 — the
+  FileBacked fd=-1 off=0x76000 VMA is the INTERPRETER's R+X segment,
+  verified against the extracted ramdisk/system ld-musl). The fault is
+  a READ: memcpy(dst=heap, src=stack_top, 936) with rsi=cr2 — 936
+  bytes read starting exactly at the faulting thread's stack VMA end
+  (rsp sits 0x478 below that top). The caller's frame holds another
+  pointer at guard+0x150. rbp=0xb/0x16 are small GPR values (optimized
+  code), not necessarily corrupt frames. Same signature every draw
+  (rsp-to-cr2 delta exactly 0x478; caller return-address delta 0x34a).
+  sc324B CAUGHT THE CALLER: stkva[1]/[3] name an 11-page r-x FileBacked
+  VMA (origin=mmap) present in every process, return sites at VMA+0x6845
+  and VMA+0x33b1 (file off 0xb845/0x83b1). No on-disk lib in
+  /system/lib64 matches the shape (scan of 1073 .so files: zero hits)
+  => the caller is a MEMFD-LOADED library (OH's memory-loaded module
+  mechanism; the separate pid-1150 null-deref family faults in a memfd
+  lib too — "ripfile anon_inode voff 0x64257" with IPC/skeleton
+  strings on its stack). stkva now also prints the pinned vm_file path
+  + qwords at the return site (bzImage-31B-stkname); sc325B is running
+  to name it. MITIGATION (next step, recipe fixed): once named, patch
+  the memfd source or the loader entry in the private oh-img-p the
+  alignguard way (guard at the call site: skip the copy when src is
+  inside a PROT_NONE piece / equal to a stack top) — document in run/,
+  keep reversible. NOT done blind this leg: 3 of 4 draws did not fault
+  (see tallies), so the bug is probabilistic; a blind patch without
+  the caller named risks breaking the 3-in-4 good boots.
+
+DRAW TALLIES (KVM SMP2 4G, oh-img-p + fresh scgold, dfx=txnhunt,ams46[,vmap]):
+  draw   ENQ READ FREE rsfault shape
+  sc320B   -   -    -    0    render_service WEDGED not crashed: OS_IPC threads futex-parked
+                        20min+ (TXN-HANG exec 1216s, WAKE-RUN-LEAK tid1191 kicked 3x);
+                        no activation completed this draw (killed at 40min to recycle)
+  sc321B   1   1    0    1(SEGV) RS crashed mid-StartUser (the sc316B kill shape) — VERDICT draw
+  sc322B   1   1    1    0    SURVIVOR-ADVANCE: code-46 clean end-to-end, launcher process
+                        pid 1141 SPAWNED AND RUNNING (Launcher_Default x416 lines,
+                        AbilityScheduler IPC object registered, sandbox built), wall =
+                        launcher-load family (LC x255) + late new fault family (pid
+                        1150/1157 OS_IPC threads null-deref cr2=-0x20 in a memfd lib)
+  sc323B   1   1    1    0    survivor-advance again (LC x177 by 15min), late
+                        WAKE-RUN-LEAK wedge (tids 917/958/968 kicked 19-21x)
+  sc324B   -   -    -    1(SEGV)+ RS crashed at 5min WITH stkva (caller named, see above);
+                        same fault also in pid 518 OS_IPC (after a -0x20 null-deref)
+  sc325B  running (bzImage-31B-stkname: stkva path+code dump)
+  RS-fault lottery today: 2/5 draws. Kernel code-46 delivery clean on
+  every activating draw (3/3 ENQ->READ->FREE).
+
+MISSION ITEM 2 (downstream chain on survivor draws): the chain now
+  reliably reaches the LAUNCHER PROCESS (com.ohos.launcher spawned,
+  its LauncherAbilityManager/CommonBundleManager run, AbilityScheduler
+  registers). launcher.ready NOT set; no UI frame (screen state not
+  sampled this leg — the draws park in the load wall). Gate 2
+  (foreground map) untested behind the load wall.
+
+MISSION ITEM 3 (launcher-load family NAMED, sc322B decode): the
+  LIFECYCLE_TIMEOUT x255 chain = AMS waits for settingsdata's
+  DataExtAbility "load" completion; the child (pid 1146, appclone of
+  appspawn) spawns fine, then APPSPAWN closes its listen fd mid-load
+  ("appspawn_service.c:422 OnListenFdClose listen fd: 12", "OnClose
+  socket fd 20", "DeleteAppSpawnMgr 337 1146") — the ability-load
+  handshake never completes and every retry times out. The close
+  itself (why appspawn drops the connection) is the next sub-question;
+  no kernel-side hang on the pair (no TXN-HANG on 1146).
+
+NEW FAMILY (both legs' late draws): WAKE-RUN-LEAK wedges — waiters
+  kicked 19-21x over 1100-1270s that never run (binder-stall probe),
+  rendering render_service frozen-but-alive (sc320B) — same terminal
+  effect as the crash but WITHOUT the SEGV. Distinct from the
+  guard-read bug; kernel wake-path suspect (leakorigin/wwcensus
+  instruments exist, not armed this leg).
+
+GATES for da74c5c0 + the in-tree x86 dump extension (final tree):
+  - dual-arch builds rc=0 (x86_64, riscv64, re-verified after every
+    edit batch).
+  - riscv64 minimal-rootfs scripted boot: panics=0, shell prompt,
+    /proc mounted (run/rv-smoke-leg31.sh, r2 and r3 runs).
+  - make test: "All tests passed" on the origin-stamp tree AND on the
+    final tree (the vma-origin unit test included).
+  - Perf tiers not triggered: print/cold-path-only changes, dfx-gated
+    OFF by default (vmap armed only on voluntary hunt boots).
+
+Lane state: commit da74c5c0 on feature/samgr-callback (origin stamp +
+vmap + stkva v1); the stkva v2 (backing path + return-site qwords) is
+built and running (bzImage-31B-stkname) — commit after sc325B reads
+out. bzImages tagged in run/ (vmaorigin, vmaorigin2, vmaorigin3, final,
+stkname). ld-musl extract for the memcpy decode in
+run/forensics-leg31B/. Serials sc320B-325B untracked per .gitignore.
