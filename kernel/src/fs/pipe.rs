@@ -1402,6 +1402,40 @@ pub fn pipe_file_stat(file: &File, stat: &mut crate::fs::Stat) -> Option<i32> {
     Some(0)
 }
 
+/// Abort ONE never-installed pipe end: run the close op on it before its
+/// Arc drops.
+///
+/// create_pipe() stores the entire Arc<Pipe> ownership as two raw
+/// pointers inside the end Files' private_data; those refs are consumed
+/// ONLY by the PIPE_OPS close op (pipe_file_close), and File::drop runs
+/// that op solely once a close_fd committed it (close_pending). A syscall
+/// error return that drops an uninstalled Arc<File> therefore leaked its
+/// raw ref and with it the shared Pipe + 64 KiB ring — a whole 128 KiB
+/// buddy block per failed call. The s11 fsfuzz kernel-heap exhaustion
+/// (evidence 2026-10-27-s11-heapexhaustion-fsfuzz.txt) was ~800 such
+/// EMFILE pipe() calls per round filling the 128 MB heap;
+/// test/forkwait_leak.c leg 2 shows it minimal: 100 EMFILE pipes leave
+/// live=100 ring sites, frees=0.
+pub fn abort_uninstalled_end(file: &mut Arc<File>) {
+    // The abort paths hold the only reference to the freshly created end
+    // (no fdtable slot ever existed), so get_mut is Some; if a future
+    // caller breaks that, leave the op to that reference's drop instead
+    // of racing it.
+    if let Some(f) = Arc::get_mut(file) {
+        // SAFETY: exclusive &mut from get_mut — we are the sole owner and
+        // close() runs at most this once (File::drop sees close_pending
+        // == false and will not run it again).
+        unsafe { f.close() };
+    }
+}
+
+/// Abort a pipe creation whose descriptors were never installed: close
+/// BOTH ends (see abort_uninstalled_end for why the op must run).
+pub fn abort_pipe_creation(read: &mut Arc<File>, write: &mut Arc<File>) {
+    abort_uninstalled_end(read);
+    abort_uninstalled_end(write);
+}
+
 pub fn create_pipe() -> (Arc<File>, Arc<File>) {
     // Create pipe wrapped in Arc so both ends share ownership.
     // The Pipe is freed when the last Arc drops.
