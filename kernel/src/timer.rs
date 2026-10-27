@@ -1002,6 +1002,22 @@ fn ww_heartbeat(now_time: u64) {
         LAST_IRQ[c].store(cur, Ordering::Relaxed);
     }
 
+    // s15 (A2 idle-mark/WFI hunt): idle-loop phase stamps + tp-vs-slot
+    // mismatch deltas. phase codes: 0=not-idle-loop 1=entering-schedule
+    // 2=marked+recheck 3=pre-WFI 4=inside-WFI 5=post-WFI-accounting;
+    // slotmm = per-second delta of tick-entry samples where the hardware
+    // tp register disagreed with cpu_state.current (lying slot).
+    static LAST_MM: [AtomicU64; crate::config::MAX_CPUS] =
+        [const { AtomicU64::new(0) }; crate::config::MAX_CPUS];
+    let mm = crate::sched::sched::ww_slot_mismatch_counters();
+    let mut mm_d = [0u64; 2];
+    for c in 0..2 {
+        mm_d[c] = mm[c].saturating_sub(LAST_MM[c].load(Ordering::Relaxed));
+        LAST_MM[c].store(mm[c], Ordering::Relaxed);
+    }
+    let phase0 = crate::sched::sched::WW_IDLE_PHASE[0].load(Ordering::Acquire);
+    let phase1 = crate::sched::sched::WW_IDLE_PHASE[1].load(Ordering::Acquire);
+
     // Wheel census (short lock; heartbeat is 1 Hz and holds no timer
     // locks at this point).
     let (wheel_len, overdue) = {
@@ -1019,7 +1035,7 @@ fn ww_heartbeat(now_time: u64) {
     let sched = crate::sched::sched::ww_sched_snapshot();
 
     crate::pr_info!(
-        "WW: fires={} late_max={}ms pidmiss={} rearm={} wheel={}/{} hres_next={}ms\nWW2: si_runs={} si_busy={}ms ticks=[{},{}] vec=[{},{},{},{},{},{},{},{},{},{}]\nWW3: grq={} cfs={} idle={:#x} nr={} cpu0=(pid={} st={:#x} pc={}) cpu1=(pid={} st={:#x} pc={})",
+        "WW: fires={} late_max={}ms pidmiss={} rearm={} wheel={}/{} hres_next={}ms\nWW2: si_runs={} si_busy={}ms ticks=[{},{}] vec=[{},{},{},{},{},{},{},{},{},{}]\nWW3: grq={} cfs={} idle={:#x} nr={} cpu0=(pid={} st={:#x} pc={}) cpu1=(pid={} st={:#x} pc={})\nWW4: phase=[{},{}] slotmm=[{},{}]",
         fire_n,
         late_max,
         pidmiss,
@@ -1035,7 +1051,11 @@ fn ww_heartbeat(now_time: u64) {
         vecs[5], vecs[6], vecs[7], vecs[8], vecs[9],
         sched[0], sched[1], sched[2], sched[3],
         sched[4], sched[5], sched[6],
-        sched[7], sched[8], sched[9]
+        sched[7], sched[8], sched[9],
+        phase0,
+        phase1,
+        mm_d[0],
+        mm_d[1]
     );
     crate::sched::wakewatch::heartbeat();
     // sc158 (Session R): one-shot park dump for wedged foundation/sa_main
