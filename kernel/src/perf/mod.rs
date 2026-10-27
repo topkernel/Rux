@@ -52,12 +52,24 @@
 //! (10 ms at KERNEL_HZ=100) coalesces to tick-rate samples rather
 //! than being lost. The counter arithmetic itself is exact ns.
 //!
-//! ## Lock order (INV: registry → event.inner)
+//! ## Lock order and the no-allocation rule (INV: registry → event.inner)
 //!
 //! `REGISTRY` (irqsave) is the outer lock; an event's `inner` is
 //! taken under it by the charging path. `read`/`poll` take `inner`
 //! alone. All REGISTRY takes are `lock_irqsave()` uniformly, so no
 //! holder can ever be interrupted into a path that wants it.
+//!
+//! **No allocation under any spinlock reachable from softirq/irq
+//! context** (the stress fleet's session-13 both-CPU deadlock: the
+//! timer softirq's first `to_wake.push` allocated under REGISTRY and
+//! the record ring grew under `inner`; under heap pressure the
+//! allocator slowpath inside those sections stalled both CPUs — 67/67
+//! DEADLOCK rows). Enforced structurally now: REGISTRY is a
+//! fixed-capacity array (never grows), the wake list is a per-CPU
+//! fixed array, and each event's record ring reserves its full budget
+//! at construction (process context, no locks) so the charging path's
+//! `push_back` can never allocate. The debugfs drain allocates its
+//! output buffer BEFORE taking REGISTRY.
 
 use alloc::boxed::Box;
 use alloc::collections::VecDeque;
@@ -285,19 +297,64 @@ struct PerfInner {
     /// Total ns charged since enable — the counter value read(2)
     /// reports (never decremented by sampling).
     total: u64,
-    /// Pending record bytes (whole records, little-endian).
+    /// Pending record bytes (whole records, little-endian). The
+    /// capacity is RESERVED at event construction (RING_CAP): pushes
+    /// are bounded by the same RING_CAP check, so push_back can never
+    /// grow the buffer — no allocation ever happens under `inner`
+    /// (the stress fleet's session-13 registry deadlock: an allocator
+    /// slowpath inside a spinlocked section reached from the timer
+    /// softirq stalled both CPUs under heap pressure).
     ring: VecDeque<u8>,
     /// Samples dropped because the ring was full (reported as
     /// PERF_RECORD_LOST on the next record drain).
     lost: u64,
 }
 
-/// id → event. Every take is lock_irqsave (module lock-order doc).
-static REGISTRY: Spinlock<alloc::vec::Vec<(u64, usize)>> =
-    Spinlock::new(alloc::vec::Vec::new());
+/// The registry: a FIXED-CAPACITY array — no allocation under its
+/// lock, ever (session-13: register()'s Vec growth under REGISTRY was
+/// one leg of the both-CPU deadlock). 128 simultaneous events; a full
+/// registry answers EMFILE at open (the fd-exhaustion errno class).
+const MAX_EVENTS: usize = 128;
+
+struct Registry {
+    slots: [(u64, usize); MAX_EVENTS],
+    used: usize,
+}
+
+const fn new_registry() -> Registry {
+    Registry {
+        slots: [(0, 0); MAX_EVENTS],
+        used: 0,
+    }
+}
+
+impl Registry {
+    /// Insert (id, ptr). Returns false when full.
+    fn insert(&mut self, id: u64, ptr: usize) -> bool {
+        if self.used == MAX_EVENTS {
+            return false;
+        }
+        self.slots[self.used] = (id, ptr);
+        self.used += 1;
+        true
+    }
+
+    /// Remove by id (swap with last). Returns the pointer, or None.
+    fn remove(&mut self, id: u64) -> Option<usize> {
+        let idx = self.slots[..self.used].iter().position(|&(i, _)| i == id)?;
+        let entry = self.slots[idx];
+        self.used -= 1;
+        self.slots[idx] = self.slots[self.used];
+        Some(entry.1)
+    }
+}
+
+/// id → event. Every take is lock_irqsave (module lock-order doc);
+/// with the fixed array, no code path allocates while holding it.
+static REGISTRY: Spinlock<Registry> = Spinlock::new(new_registry());
 static NEXT_ID: AtomicU64 = AtomicU64::new(1);
 
-fn register(ev: *mut PerfEvent, starts_armed: bool) -> u64 {
+fn register(ev: *mut PerfEvent, starts_armed: bool) -> bool {
     let id = NEXT_ID.fetch_add(1, Ordering::Relaxed);
     // SAFETY: caller built the box; the registry keeps the pointer
     // valid until unregister.
@@ -305,31 +362,44 @@ fn register(ev: *mut PerfEvent, starts_armed: bool) -> u64 {
         (*ev).id = id;
     }
     let mut reg = REGISTRY.lock_irqsave();
-    reg.push((id, ev as usize));
+    let ok = reg.insert(id, ev as usize);
     drop(reg);
+    if !ok {
+        return false;
+    }
     if starts_armed {
         ARMED.fetch_add(1, Ordering::Release);
     }
-    id
+    true
 }
 
-/// Remove `id` from the registry. Returns true if it was armed (the
-/// caller adjusts ARMED).
-fn unregister(id: u64) -> bool {
+/// Remove `id` from the registry. Returns the event pointer (the
+/// caller reclaims the box), or None when absent.
+fn unregister(id: u64) -> Option<usize> {
     let mut reg = REGISTRY.lock_irqsave();
-    let was_armed = match reg.iter().position(|&(i, _)| i == id) {
-        Some(idx) => {
-            let (_, p) = reg.swap_remove(idx);
-            // SAFETY: pointer came from register, still valid.
-            let armed = unsafe { (*(p as *mut PerfEvent)).enabled.load(Ordering::Acquire) };
-            drop(reg);
-            return armed;
-        }
-        None => false,
-    };
-    drop(reg);
-    was_armed
+    reg.remove(id)
 }
+
+/// The per-CPU wake list: a FIXED array, not a Vec — softirq_tick
+/// used to push into a Vec while holding REGISTRY (irqsave), and the
+/// first push's allocation was one leg of the session-13 deadlock.
+/// Only softirq_tick on the owning CPU touches its buffer, and the
+/// same softirq vector cannot nest on one CPU, so plain relaxed
+/// atomics serialize it against nothing.
+struct WakeBuf {
+    n: AtomicUsize,
+    ptrs: [AtomicUsize; MAX_EVENTS],
+}
+
+const fn new_wake_buf() -> WakeBuf {
+    WakeBuf {
+        n: AtomicUsize::new(0),
+        ptrs: [const { AtomicUsize::new(0) }; MAX_EVENTS],
+    }
+}
+
+static WAKE: [WakeBuf; crate::config::MAX_CPUS] =
+    [const { new_wake_buf() }; crate::config::MAX_CPUS];
 
 /// Charge pending ticks and emit samples. Called from the Hrtimer
 /// softirq on the CPU whose stash is being charged.
@@ -352,13 +422,18 @@ pub fn softirq_tick() {
     let mode = s.mode.load(Ordering::Relaxed);
     let tid = s.tid.load(Ordering::Relaxed);
 
-    let mut to_wake: alloc::vec::Vec<*mut PerfEvent> = alloc::vec::Vec::new();
+    // The wake list is this CPU's FIXED buffer — nothing in the
+    // charging path allocates (no-alloc-under-lock, session 13).
+    let wake = &WAKE[c];
+    let mut nwake = 0usize;
     {
         let reg = REGISTRY.lock_irqsave();
-        for &(_, p) in reg.iter() {
+        for idx in 0..reg.used {
+            let (event_id, p) = reg.slots[idx];
             // SAFETY: registry membership guarantees validity (close
             // unregisters before freeing).
             let ev = unsafe { &*(p as *const PerfEvent) };
+            let _ = event_id;
             if !ev.enabled.load(Ordering::Relaxed) {
                 continue;
             }
@@ -421,15 +496,23 @@ pub fn softirq_tick() {
                 }
                 emitted
             };
-            if emitted > 0 {
-                to_wake.push(p as *mut PerfEvent);
+            if emitted > 0 && nwake < MAX_EVENTS {
+                wake.ptrs[nwake].store(p, Ordering::Relaxed);
+                nwake += 1;
             }
         }
     }
+    wake.n.store(nwake, Ordering::Relaxed);
     // Wakes with no locks held (timerfd expire-notify discipline).
-    for p in to_wake {
-        // SAFETY: as above.
-        unsafe { (*p).wait_queue.wake_up_all() };
+    for i in 0..nwake {
+        // SAFETY: entries were registry members under the lock above;
+        // close unregisters (and so skips) before freeing, and the
+        // registry cannot have been re-locked between store and wake
+        // on this CPU — the wake list is private to this softirq pass.
+        let p = wake.ptrs[i].load(Ordering::Relaxed) as *mut PerfEvent;
+        if !p.is_null() {
+            unsafe { (*p).wait_queue.wake_up_all() };
+        }
     }
 }
 
@@ -576,21 +659,29 @@ fn records_pending(ev: &PerfEvent) -> bool {
 /// irqsave section short.
 fn drain_records_by_id(id: u64) -> alloc::vec::Vec<u8> {
     const DRAIN_BUDGET: usize = 8 * 1024;
+    // The output buffer is allocated BEFORE the registry is taken —
+    // nothing allocates under REGISTRY (session 13's rule).
+    let mut out = alloc::vec![0u8; DRAIN_BUDGET + SAMPLE_REC_MAX];
     let reg = REGISTRY.lock_irqsave();
-    let ptr = match reg.iter().find(|&&(i, _)| i == id) {
+    let ptr = match reg.slots[..reg.used].iter().find(|&&(i, _)| i == id) {
         Some(&(_, p)) => p as *const PerfEvent,
-        None => return alloc::vec::Vec::new(),
+        None => {
+            out.clear();
+            return out;
+        }
     };
     // SAFETY: registry membership guarantees validity (close
     // unregisters before freeing, and cannot while REGISTRY is held).
     let ev = unsafe { &*ptr };
-    let mut out = alloc::vec![0u8; DRAIN_BUDGET + SAMPLE_REC_MAX];
     match drain_records(ev, &mut out) {
         Ok(n) => {
             out.truncate(n);
             out
         }
-        Err(()) => alloc::vec::Vec::new(),
+        Err(()) => {
+            out.clear();
+            out
+        }
     }
 }
 
@@ -699,7 +790,8 @@ fn perf_close(file: &crate::fs::File) -> i32 {
     let ev = unsafe { &*(ptr as *const PerfEvent) };
     let id = ev.id;
     let wants_chain = ev.wants_callchain;
-    let was_armed = unregister(id);
+    let was_armed = ev.enabled.load(Ordering::Acquire);
+    let _ = unregister(id);
     if was_armed {
         ARMED.fetch_sub(1, Ordering::Release);
     }
@@ -921,13 +1013,24 @@ pub fn sys_perf_event_open(args: crate::syscall::SyscallArgs) -> i64 {
         inner: Spinlock::new(PerfInner {
             counter: 0,
             total: 0,
-            ring: VecDeque::new(),
+            // Capacity reserved at construction (process context, no
+            // locks held): the charging path's push_back can then
+            // never allocate under `inner` (session 13's rule).
+            ring: VecDeque::with_capacity(RING_CAP),
             lost: 0,
         }),
         wait_queue: WaitQueueHead::new(),
     });
     let ev_ptr = Box::into_raw(ev);
-    register(ev_ptr, starts_armed);
+    if !register(ev_ptr, starts_armed) {
+        // Registry full — the fd-exhaustion errno class. No ARMED or
+        // CALLCHAIN_ARMED adjustments: register refused before them.
+        // SAFETY: reclaim the box.
+        unsafe {
+            let _ = Box::from_raw(ev_ptr);
+        }
+        return -(crate::errno::constants::EMFILE as i64);
+    }
     if wants_callchain {
         // The hard-IRQ hook walks chains only while a live event asks.
         CALLCHAIN_ARMED.fetch_add(1, Ordering::Release);
@@ -943,16 +1046,7 @@ pub fn sys_perf_event_open(args: crate::syscall::SyscallArgs) -> i64 {
     let fd = match fdtable.alloc_fd() {
         Some(fd) => fd,
         None => {
-            // Undo the registration (the id was stored in the event).
-            let was_armed = unregister(unsafe { (*ev_ptr).id });
-            if was_armed {
-                ARMED.fetch_sub(1, Ordering::Release);
-            }
-            if unsafe { (*ev_ptr).wants_callchain } {
-                CALLCHAIN_ARMED.fetch_sub(1, Ordering::Release);
-            }
-            // SAFETY: reclaim the box.
-            unsafe { let _ = Box::from_raw(ev_ptr); }
+            abort_event(ev_ptr, starts_armed, wants_callchain);
             return -(crate::errno::constants::EMFILE as i64);
         }
     };
@@ -982,17 +1076,27 @@ pub fn sys_perf_event_open(args: crate::syscall::SyscallArgs) -> i64 {
             fd as i64
         }
         Err(_) => {
-            let was_armed = unregister(unsafe { (*ev_ptr).id });
-            if was_armed {
-                ARMED.fetch_sub(1, Ordering::Release);
-            }
-            if unsafe { (*ev_ptr).wants_callchain } {
-                CALLCHAIN_ARMED.fetch_sub(1, Ordering::Release);
-            }
-            // SAFETY: reclaim the box.
-            unsafe { let _ = Box::from_raw(ev_ptr); }
+            abort_event(ev_ptr, starts_armed, wants_callchain);
             -(crate::errno::constants::EMFILE as i64)
         }
+    }
+}
+
+/// Undo a successful open that failed at the fd layer: unregister,
+/// unwind the armed counters, reclaim the box.
+fn abort_event(ev_ptr: *mut PerfEvent, was_armed: bool, wants_chain: bool) {
+    // SAFETY: the caller built the box and owns it again.
+    let id = unsafe { (*ev_ptr).id };
+    let _ = unregister(id);
+    if was_armed {
+        ARMED.fetch_sub(1, Ordering::Release);
+    }
+    if wants_chain {
+        CALLCHAIN_ARMED.fetch_sub(1, Ordering::Release);
+    }
+    // SAFETY: reclaim the box.
+    unsafe {
+        let _ = Box::from_raw(ev_ptr);
     }
 }
 
@@ -1029,7 +1133,9 @@ pub mod tests {
             inner: Spinlock::new(PerfInner {
                 counter: 0,
                 total: 0,
-                ring: VecDeque::new(),
+                // Reserved like the real construction — the tests push
+                // under `inner`, so the same no-alloc rule applies.
+                ring: VecDeque::with_capacity(RING_CAP),
                 lost,
             }),
             wait_queue: WaitQueueHead::new(),

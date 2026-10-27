@@ -788,6 +788,21 @@ shapes folded into `test/perf-smoke.sh`:
   open, removed at close; the generator resolves the event through
   the registry by id under the documented registry→inner lock order,
   so close cannot race it). poll(2) still reports record readiness.
+- **REGISTRY allocation deadlock (correctness, merge-blocking)**: the
+  same fleet session caught the timer softirq allocating under
+  spinlocks — the wake list's first `push` under REGISTRY (irqsave),
+  the record ring's `push_back` growth under `inner`, and
+  `register()`'s Vec growth under REGISTRY; under heap pressure the
+  allocator slowpath inside those sections stalled both CPUs in
+  timer-softirq context (67/67 DEADLOCK rows, machine wedged). Fix is
+  structural, not discipline: REGISTRY is a fixed-capacity array of
+  128 slots (full registry → EMFILE at open, the fd-exhaustion
+  class), the wake list is a per-CPU fixed array of pointers, each
+  event's record ring reserves its full 64 KiB budget at construction
+  (process context, no locks held) so the charging path can never
+  allocate, and the drain generator allocates its output buffer
+  BEFORE taking the registry. The module doc states the rule:
+  no allocation under any spinlock reachable from softirq/irq.
 
 The rest of Tranche 7 (the full microbench comparison report) belongs
 to the perf lane; the DFX lane's remaining stake is whatever counter
