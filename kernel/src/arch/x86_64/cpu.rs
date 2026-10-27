@@ -180,6 +180,12 @@ pub fn get_core_id() -> u64 {
     super::cpu_id()
 }
 
+/// Read ANOTHER CPU's current-task pointer slot (leakorigin v3).
+#[inline]
+pub fn get_thread_id_of(cpu: usize) -> u64 {
+    super::smp::current_task_ptr_of(cpu)
+}
+
 /// Get the current-task pointer slot value.
 ///
 /// On riscv64 the equivalent reads `tp`; x86_64 keeps the current task
