@@ -1,0 +1,81 @@
+LEG-37A (OH sprint, kernel-side lane; worktree
+/home/william/rux-agents/oh-kernel, branch feature/oh-kernel, opened on
+6e6970c3 after the leg-36A quota kill).
+
+MISSION 0 — the leg-36A perf watcher NEVER FIRED, cause established:
+its calm window (foreign qemu < 2 AND load1 < 9) never occurred between
+03:12 and its kill at 06:43 (log file was never created because the
+script only writes at calm-hit or give-up). OH-B's leg-38b watcher
+similarly gave up 05:36 ("no quiet window in 2 h"). The stress fleet
+(memstorm/ltp-a/ltp-b/fsfuzz lanes) plus other agents' make-test boots
+kept 8-12 QEMUs up all night. The stale watcher was killed (own-lane
+PID) and REPLACED, not just re-armed: run/perf-gate-leg37a-watch.sh.
+
+MISSION 0.5 — MERGE OF origin/main 584c1105: DONE as fb27b8ff. One
+content conflict, kernel/src/ipc/binder.rs, resolved semantically:
+the spawnfix set (our ab4ca01c vs main's landed 884d2f26+9a7bc7d4) —
+main's landed form kept everywhere it collides; our side's unique
+survivors are the TXN-POOL census instrument (52535c72) and comments
+documenting predicates main now carries in code. Verified post-merge:
+git diff origin/main shows binder.rs differing ONLY by TXN-POOL +
+comments; sched.rs/fair.rs/wakewatch.rs carry exactly the
+wake-placement reservation set (main touched none of them except
+wakewatch census lines, auto-merged intact).
+
+FUNCTIONAL GATES ON THE MERGED TIP fb27b8ff — ALL GREEN:
+- x86_64 build rc=0 (run/build-leg37A-x86.log).
+- riscv64 build rc=0 (build-leg37A-rv.log; rebuilt after make test
+  overwrote the target ELF with the test-featured kernel — the known
+  leg-35A hazard, first regression-boot attempt consumed by it,
+  rerun clean).
+- make test: 1122 passed / 0 failed (maketest-leg37A.log; 68 SKIPs =
+  the same test-context class as leg-36A's run).
+- riscv64 scripted regression boot (smp2 1G, dfx=wwcensus,
+  rv-regress-leg37A.sh): 0 panics, 0 PREEMPT-UNDERFLOW, 0 strands,
+  shell prompt reached, hint tail onor=6 steal=0 exp=0 — instrument
+  live, zero steals, same shape as leg-36A's onor=9 steal=0.
+
+PERF TIERS 1,2 (the binding check): watcher
+run/perf-gate-leg37a-watch.sh (detached, PID in ps; poll 3 min;
+conditions: foreign qemu < 2 AND load1 < 9 AND MemAvailable >= 12G —
+the last added because the Tier-1 boot is a 4G q35 KVM guest and the
+host free floor 10G is hard; 5 h deadline from 07:08). Gate kernel
+SNAPSHOTTED at run/bzImage-leg37A-tip (md5 3236b48b7946992664b3faacf
+66619ce, = the fb27b8ff x86_64 build) so a later rebuild can never
+swap the image under the gate. rc=3 (another lane took the window)
+keeps polling instead of exiting. Verdicts land in
+run/perf-gate-leg37a.log ("gate rc=" line in perf-gate-leg37a-watch.log
+is the completion marker).
+
+VERDICT CONSUMPTION (mission rule, from the 35A decision): the
+multi-thread reading decides —
+  any of p2_ctxsw / p5a_pipe / p5b_dgram_send / p5b_dgram_recv_peek /
+  p5c_stream_write median > +20% vs run/pb1-results.txt
+    => FALLBACK: register the pick-order placement race as an inherent
+       D-1 consequence in docs/architecture/design-divergences.md and
+       band the unpinned p5 rows for both regimes (write-up material:
+       run/SCHED-35A-SAMECPU.txt).
+  within band or improved
+    => ready-for-merge message; add the D-1 register consequence note
+       with before/after steal counts.
+pb1 +20% ceilings for the five binding rows: p2_ctxsw 18.491,
+p5a_pipe 25.820, p5b_dgram_send 151.508, p5b_dgram_recv_peek 330.534,
+p5c_stream_write 67.468. Extract with:
+  grep -E 'pbench (p2_ctxsw|p5a_pipe|p5b_dgram_send|p5b_dgram_recv_peek|p5c_stream_write) ' \
+    run/perf-gate-leg37a.log
+Before/after steal counts for the note (leg-36A confirmator,
+ww-confirm-leg36a.sh): thread=single matched pair — BEFORE (wresv=0)
+onor=211 steal=2 (99.1% idle-picked); AFTER onor=160 steal=0 (100%).
+thread=multi BEFORE onor=274 steal=0 (window already shut by the idle
+vCPU's host thread). Merge-order tip: main may move; if a new main
+lands before this branch merges, re-merge and RE-RUN the tier gate on
+the new tip (the reservation touches the pick hot path).
+
+MISSION 3 — OH-B Family-B aftermath asks: NONE for this lane. Family B
+(foundation-main ftruncate loop) was root-caused ext4-biglock-side
+and fixed on THEIR branch (their leg-38B; their tier gate also
+pending a calm window — their watcher gave up 05:36, re-arm is their
+item). Family A (mutual-ABBA/early-reply) is adjudicated image-side;
+the user-stack parkdump extension is on their own next-leg list, not
+an ask to us. No sched/mm cooperation requested anywhere in
+CC-COLLAB.txt (last entry remains our leg-35A message).
