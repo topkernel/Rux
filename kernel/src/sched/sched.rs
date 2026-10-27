@@ -687,6 +687,28 @@ static RQ_INITIALIZED: [core::sync::atomic::AtomicBool; MAX_CPUS] = [
 static SWITCHING_OUT: [core::sync::atomic::AtomicU64; MAX_CPUS] =
     [const { core::sync::atomic::AtomicU64::new(0) }; MAX_CPUS];
 
+/// Per-CPU pick-pass sequence (wake-placement reservation, leg-36A).
+/// Bumped at the top of every pick_next_task — which always runs under
+/// the GRQ lock — so a reservation stamped under the same lock is
+/// provably either before or after any given pass, never mid-pass. A
+/// reservation names (cpu, seq-at-stamp); it stays live while this
+/// counter is unchanged, i.e. until the hinted CPU's next pick pass
+/// (the pass the wake's resched IPI asked for). See wakewatch.rs.
+static PICK_PASS_SEQ: [core::sync::atomic::AtomicU64; MAX_CPUS] =
+    [const { core::sync::atomic::AtomicU64::new(0) }; MAX_CPUS];
+
+/// Read a CPU's pick-pass sequence (Relaxed: every reader/writer site
+/// holds the GRQ lock, which provides the ordering; this is the
+/// wake-placement reservation's validity clock).
+#[inline]
+pub fn pick_pass_seq(cpu: usize) -> u64 {
+    if cpu < MAX_CPUS {
+        PICK_PASS_SEQ[cpu].load(core::sync::atomic::Ordering::Relaxed)
+    } else {
+        0
+    }
+}
+
 /// R63: whether `task` is the prev of a context switch in flight on any
 /// CPU. Called with the GRQ lock held (same discipline as the R49
 /// current-slot scan).
@@ -2435,6 +2457,12 @@ unsafe fn __schedule() {
 unsafe fn pick_next_task(grq: &mut GlobalRunQueue, cpu_id: usize, prev: *mut Task) -> *mut Task {
     let pcpu = cpu_state(cpu_id);
 
+    // Wake-placement reservation clock (leg-36A): one bump per pick
+    // pass, under this lock, invalidates every reservation naming this
+    // CPU — the pass this bump opens is the "chance" the reservation
+    // was holding the task for.
+    PICK_PASS_SEQ[cpu_id].fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+
     // 1. Stop task (per-CPU, highest priority)
     // TODO: Stop task support - need has_work() check when implemented
     // if !pcpu.stop.is_null() {
@@ -3123,6 +3151,28 @@ pub fn enqueue_task(task: &'static mut Task) -> bool {
         }
     }
 
+    // Wake-placement reservation (leg-36A, the GRQ pick-order placement
+    // race — classification in run/SCHED-35A-SAMECPU.txt): decide the
+    // idle-CPU nudge while STILL HOLDING the GRQ, and stamp the
+    // placement hint next to the enqueue, so the hint and the pick-pass
+    // sequence it is validated against are ordered with the link. The
+    // CFS pick then leaves the task for the IPI'd idle CPU until that
+    // CPU's next pick pass (wakewatch::placement_reserved_for_other) —
+    // the waker, already inside __schedule on its block path, can no
+    // longer win the race and serialize the pair onto one CPU. The
+    // resched IPI itself stays outside the lock (unchanged discipline).
+    let mut nudge_cpu: usize = usize::MAX;
+    if inserted {
+        if let Some(idle_cpu) = grq().find_idle_cpu(cpus_allowed) {
+            grq().clear_idle(idle_cpu);
+            crate::sched::wakewatch::note_placement(task_ptr, idle_cpu);
+            nudge_cpu = idle_cpu;
+        } else {
+            // No idle CPU found: this wake makes no placement promise,
+            // and must also drop any older one still on the task.
+            crate::sched::wakewatch::clear_placement(task_ptr);
+        }
+    }
     drop(grq_guard);
 
     if !inserted {
@@ -3131,10 +3181,10 @@ pub fn enqueue_task(task: &'static mut Task) -> bool {
         return false;
     }
 
-    // Try to wake an idle CPU
-    if let Some(idle_cpu) = grq().find_idle_cpu(cpus_allowed) {
-        grq().clear_idle(idle_cpu);
-        resched_cpu(idle_cpu);
+    // Try to wake an idle CPU (decision made under the lock above; the
+    // IPI itself is sent here, outside it).
+    if nudge_cpu != usize::MAX {
+        resched_cpu(nudge_cpu);
     } else if cpus_allowed & (1u32 << this_cpu) == 0 {
         // Task can't run on this CPU — IPI a CPU that can
         let target = cpus_allowed.trailing_zeros() as usize;
@@ -3763,7 +3813,7 @@ pub fn wake_up_enqueue(task: *mut Task) -> bool {
         // branch ensure_linked_locked's re-insert already set RUNNING;
         // for the poison/dead refusal it returned false and we pass that
         // through untouched.
-        if enqueue_task_locked(&mut *grq_guard, task) {
+        let linked_ok = if enqueue_task_locked(&mut *grq_guard, task) {
             true
         } else if ensure_linked_locked(&mut *grq_guard, task) {
             (*task).set_state(TaskState::new(TaskState::RUNNING));
@@ -3791,7 +3841,31 @@ pub fn wake_up_enqueue(task: *mut Task) -> bool {
                 putchar(b'\n');
             }
             false
+        };
+        // Wake-placement reservation (leg-36A, this wake path's half —
+        // see the enqueue_task tail for the fork-path half): the caller
+        // (Task::wake_up) resched-IPIs the task's ti_cpu right after we
+        // return. If that CPU is idle-marked, this wake just asked an
+        // idle CPU to run the task — stamp the reservation so the CFS
+        // pick leaves the task for it (the waker's own __schedule can no
+        // longer win the pick race). We hold the GRQ: the idle-bit read
+        // and the pick_pass_seq stamp are ordered with every pick pass.
+        // A busy or unnamed ti_cpu makes no idle promise — drop any
+        // stale reservation instead.
+        if linked_ok {
+            let ipi_cpu = (*task).ti_cpu();
+            let ipi_idle = ipi_cpu >= 0
+                && (ipi_cpu as usize) < MAX_CPUS
+                && grq().idle_cpus.load(core::sync::atomic::Ordering::Acquire)
+                    & (1u32 << ipi_cpu)
+                    != 0;
+            if ipi_idle {
+                crate::sched::wakewatch::note_placement(task, ipi_cpu as usize);
+            } else {
+                crate::sched::wakewatch::clear_placement(task);
+            }
         }
+        linked_ok
     }
 }
 

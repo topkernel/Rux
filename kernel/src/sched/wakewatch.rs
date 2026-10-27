@@ -33,9 +33,9 @@
 //! - Overhead per wake: two atomic stores + one hash. Per pick: one
 //!   atomic load on the happy path.
 
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicU64, AtomicU8, Ordering};
 
-use crate::config::TIMER_CLOCK_FREQ_HZ;
+use crate::config::{MAX_CPUS, TIMER_CLOCK_FREQ_HZ};
 
 /// Side-table slots (power of two; hash-masked).
 const SLOTS: usize = 1024;
@@ -57,6 +57,12 @@ const STRAND_THRESHOLD_MS: u64 = 1000;
 struct WwSlot {
     task: AtomicU64,
     stamp: AtomicU64,
+    /// Wake-placement reservation (leg-36A): packed
+    /// `(pick_pass_seq << 8) | (cpu + 1)`; 0 = none. Set at wake time
+    /// when the wake found an idle CPU (the one the resched IPI targets),
+    /// under the GRQ lock. Consumed at pick (check_picked) and consulted
+    /// by the CFS pick scan (placement_reserved_for_other).
+    hint: AtomicU64,
 }
 
 static TABLE: [WwSlot; SLOTS] = {
@@ -65,6 +71,7 @@ static TABLE: [WwSlot; SLOTS] = {
     const ZERO: WwSlot = WwSlot {
         task: AtomicU64::new(0),
         stamp: AtomicU64::new(0),
+        hint: AtomicU64::new(0),
     };
     [ZERO; SLOTS]
 };
@@ -76,6 +83,121 @@ static PICK_N: AtomicU64 = AtomicU64::new(0);
 static DELTA_SUM_TICKS: AtomicU64 = AtomicU64::new(0);
 static STRAND_N: AtomicU64 = AtomicU64::new(0);
 static STRAND_MAX_MS: AtomicU64 = AtomicU64::new(0);
+
+// ---- wake-placement reservation counters (leg-36A confirmator) ----
+/// Picks that consumed a still-live reservation ON the hinted CPU
+/// (spread outcome: the IPI'd idle CPU got the task).
+static HINT_HONOR_N: AtomicU64 = AtomicU64::new(0);
+/// Picks that consumed a still-live reservation on a DIFFERENT CPU
+/// (the waker/another CPU took a task the idle CPU was promised —
+/// the steal shape the pick-side skip exists to prevent).
+static HINT_STEAL_N: AtomicU64 = AtomicU64::new(0);
+/// Picks whose reservation had already expired (the hinted CPU ran a
+/// pick pass and chose someone else) — normal expiry, no signal.
+static HINT_EXPIRE_N: AtomicU64 = AtomicU64::new(0);
+
+// ============================================================================
+// Wake-placement reservation (leg-36A — the GRQ pick-order placement race
+// fix; classification in run/SCHED-35A-SAMECPU.txt).
+//
+// Race being closed: a wake enqueues the task globally and IPIs an idle
+// CPU, but in a global run queue nothing binds the task to the IPI'd CPU.
+// The WAKER, already inside __schedule() on its send-path block, can win
+// the GRQ and pick the wakee first — the ping-pong pair then alternates
+// on ONE CPU (2 switches per roundtrip, the 40us class) instead of
+// spreading. Linux does not have this shape because placement is decided
+// at WAKE time (select_task_rq + ttwu onto a per-CPU rq).
+//
+// Reservation protocol (all under the GRQ lock, so it is ordered with the
+// enqueue and with every pick pass):
+//   * stamp:   wake path, on find_idle_cpu success — hint word
+//              (hinted_cpu, hinted_cpu's pick_pass_seq at stamp time).
+//   * skip:    a CFS pick on CPU P skips a candidate whose hint names
+//              another CPU whose pick_pass_seq is UNCHANGED since the
+//              stamp (that CPU's pick pass — the one the resched IPI
+//              asked for — has not happened yet). Bounded skip, same
+//              32-entry stash as the affinity/ownership skips.
+//   * expiry:  the hinted CPU's next pick_next_task bumps its seq —
+//              the reservation goes inert after that CPU has had its
+//              chance (whether or not it picked the candidate). No
+//              timer, no scan, no clearing pass needed.
+//   * clear:   consumed at pick (check_picked) and on task free.
+// The hinted CPU never skips its own reservation, and an idle-marked
+// CPU never sleeps while nr_running > 0 (the R20-2 recheck), so a
+// hinted task cannot strand: the hinted CPU always runs its pass.
+// ============================================================================
+
+/// Stamp a wake-placement reservation: `task`'s wake just chose
+/// `cpu` (find_idle_cpu success — the CPU the resched IPI targets).
+/// Called with the GRQ lock held; the seq read is stable under it
+/// (every bump also happens under the lock).
+pub fn note_placement(task: *mut crate::process::Task, cpu: usize) {
+    let slot = slot_of(task);
+    // Collisions: if another task's stamp overwrote the slot, the hint
+    // would be misattributed — drop it (advisory instrument).
+    if slot.task.load(Ordering::Acquire) != task as usize as u64 {
+        return;
+    }
+    let packed = (crate::sched::sched::pick_pass_seq(cpu) << 8) | (cpu as u64 + 1);
+    slot.hint.store(packed, Ordering::Release);
+}
+
+/// Drop any reservation on `task` (a re-wake that found NO idle CPU makes
+/// no new promise, so an older promise must not keep steering picks).
+/// Called with the GRQ lock held.
+pub fn clear_placement(task: *mut crate::process::Task) {
+    let slot = slot_of(task);
+    if slot.task.load(Ordering::Acquire) != task as usize as u64 {
+        return;
+    }
+    slot.hint.store(0, Ordering::Release);
+}
+
+/// Pick-side skip predicate (CFS pick scan): true when `task` carries a
+/// still-live reservation for a CPU other than `picking_cpu`. The
+/// hinted CPU itself returns false (it must be able to pick its own
+/// reservation). Called under the GRQ lock.
+#[inline]
+pub fn placement_reserved_for_other(
+    task: *mut crate::process::Task,
+    picking_cpu: usize,
+) -> bool {
+    if !reservation_enabled() {
+        return false;
+    }
+    let slot = slot_of(task);
+    if slot.task.load(Ordering::Acquire) != task as usize as u64 {
+        return false;
+    }
+    let packed = slot.hint.load(Ordering::Acquire);
+    if packed == 0 {
+        return false;
+    }
+    let hint_cpu = ((packed & 0xff) - 1) as usize;
+    if hint_cpu >= MAX_CPUS || hint_cpu == picking_cpu {
+        return false;
+    }
+    crate::sched::sched::pick_pass_seq(hint_cpu) == (packed >> 8)
+}
+
+/// `wresv=0` on the kernel cmdline disables ONLY the pick-side skip —
+/// stamps and counters keep running, so a single kernel image can A/B
+/// the fix (before = wresv=0, after = default) with the same instrument.
+/// Default: enabled.
+fn reservation_enabled() -> bool {
+    static STATE: AtomicU8 = AtomicU8::new(0);
+    match STATE.load(Ordering::Acquire) {
+        1 => true,
+        2 => false,
+        _ => {
+            let on = crate::cmdline::get_param("wresv")
+                .map(|v| v != "0")
+                .unwrap_or(true);
+            STATE.store(if on { 1 } else { 2 }, Ordering::Release);
+            on
+        }
+    }
+}
 
 #[inline]
 fn now_ticks() -> u64 {
@@ -112,6 +234,7 @@ pub fn note_wake(task: *mut crate::process::Task) {
 pub fn note_task_freed(task: *mut crate::process::Task) {
     let slot = slot_of(task);
     slot.stamp.store(0, Ordering::Release);
+    slot.hint.store(0, Ordering::Release);
     slot.task.store(0, Ordering::Release);
 }
 
@@ -122,6 +245,26 @@ pub fn check_picked(task: *mut crate::process::Task, cpu: usize) {
     let slot = slot_of(task);
     if slot.task.load(Ordering::Acquire) != task as usize as u64 {
         return;
+    }
+    // Consume the wake-placement reservation and classify the pick
+    // (leg-36A confirmator): honored = the hinted CPU picked it while
+    // the reservation was live (spread); steal = a different CPU picked
+    // it while live (the race shape — impossible for CFS picks once the
+    // skip is active, so a live count there names RT/DL overrides or the
+    // wresv=0 A/B side); expire = the hinted CPU had already passed.
+    let hint = slot.hint.swap(0, Ordering::AcqRel);
+    if hint != 0 {
+        let hint_cpu = ((hint & 0xff) - 1) as usize;
+        if hint_cpu < MAX_CPUS {
+            let live = crate::sched::sched::pick_pass_seq(hint_cpu) == (hint >> 8);
+            if !live {
+                HINT_EXPIRE_N.fetch_add(1, Ordering::Relaxed);
+            } else if hint_cpu == cpu {
+                HINT_HONOR_N.fetch_add(1, Ordering::Relaxed);
+            } else {
+                HINT_STEAL_N.fetch_add(1, Ordering::Relaxed);
+            }
+        }
     }
     let stamp = slot.stamp.swap(0, Ordering::AcqRel);
     if stamp == 0 {
@@ -241,12 +384,15 @@ pub fn heartbeat() {
     let sum_ms = ticks_to_ms(DELTA_SUM_TICKS.load(Ordering::Relaxed));
     let avg = if pick_n > 0 { sum_ms / pick_n } else { 0 };
     crate::pr_info!(
-        "WW: wakes={} picks={} avg_run={}ms stranded={} strand_max={}ms",
+        "WW: wakes={} picks={} avg_run={}ms stranded={} strand_max={}ms hint=onor={} steal={} exp={}",
         wake_n,
         pick_n,
         avg,
         STRAND_N.load(Ordering::Relaxed),
-        STRAND_MAX_MS.load(Ordering::Relaxed)
+        STRAND_MAX_MS.load(Ordering::Relaxed),
+        HINT_HONOR_N.load(Ordering::Relaxed),
+        HINT_STEAL_N.load(Ordering::Relaxed),
+        HINT_EXPIRE_N.load(Ordering::Relaxed)
     );
 }
 

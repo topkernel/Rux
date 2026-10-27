@@ -959,10 +959,12 @@ impl CfsRunQueue {
             // affinity-style skip machinery above).
             // R76: skip_reason is written at DECISION time (see the array
             // comment above) — 0 = none, 1 = on_cpu, 2 = foreign live
-            // claim, 3 = affinity, 4 = cgroup throttled, 5 = stale claim
-            // healed (pickable on the NEXT pass).
+            // claim, 3 = affinity mask, 4 = cgroup throttled, 5 = stale claim
+            // healed (pickable on the NEXT pass), 6 = wake-placement
+            // reservation (leg-36A: hinted to an idle CPU that has not
+            // yet run its pick pass — see wakewatch.rs).
             let mut skip_reason = 0u32;
-            let allowed = unsafe {
+            let mut allowed = unsafe {
                 // R65-pick (probe-slow): the dual-bit ownership test reads
                 // the whole qword in one load (Task::ownership_pickable) —
                 // same e87a8b40 semantics, half the loads per candidate.
@@ -1068,6 +1070,23 @@ impl CfsRunQueue {
                 }
                 affinity_ok && ownership_ok && !throttled
             };
+            // Wake-placement reservation (leg-36A): skip a candidate
+            // reserved to an idle CPU whose pick pass (the one the wake's
+            // resched IPI requested) has not happened yet — the waker
+            // must not steal it back and serialize the pair onto one
+            // CPU. Bounded by the same 32-entry stash as every other
+            // skip reason; expires automatically at the hinted CPU's
+            // next pick pass; the hinted CPU itself never skips here
+            // (placement_reserved_for_other returns false for it), and
+            // an idle CPU never sleeps while nr_running > 0, so a
+            // hinted task cannot strand. `wresv=0` disables the skip
+            // (A/B side for the confirmator census).
+            if allowed
+                && crate::sched::wakewatch::placement_reserved_for_other(task, cpu_id)
+            {
+                skip_reason = 6;
+                allowed = false;
+            }
             if allowed {
                 // Found a match — remove and return it
                 self.tasks_timeline.remove(&key);
