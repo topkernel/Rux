@@ -213,7 +213,11 @@ This must be fixed (fs lane) before route-1's expected-effect anchor
 can be measured, and it is a compat hole in its own right
 (mkfs.ext4 -O ^has_journal + use is a real-world pattern). Repro:
 `python3 test/pbench_boot.py --bzimage <kernel> --tag nj
---nojournal`.
+--nojournal`. Feature-bisect (pa71ob1, journal + ^orphan_file via
+`--mkfs-features "^metadata_csum,^orphan_file"`): that image boots
+and runs the full probe — orphan_file absence is exonerated; the
+trigger is has_journal absence itself (mount succeeds, journal_ino==0
+skips init_journal, but no mkfs-written path resolves afterward).
 
 **Arm-2 semantics note (leg 44) — what must be true before a lazy
 revoke can be coded.** Current state, with the exact shapes:

@@ -2056,6 +2056,11 @@ orphan_file. The OH userdata image (userdata-mine, same feature set)
 works on OH boots — but everything ever read from it was written by
 the kernel itself; reading mkfs-written no-journal metadata appears
 never to have been exercised. Repro: pbench_boot.py --nojournal.
+Feature-bisect (pa71ob1, journal + ^orphan_file via the new
+--mkfs-features passthrough): that image BOOTS AND RUNS —
+orphan_file absence is exonerated; the trigger is has_journal
+absence itself (mount ok, journal_ino==0 skips init_journal per
+journal.rs, but no mkfs-written path resolves afterward).
 Consequence: the J-vs-NJ p6 row comparison (route-1's expected-effect
 anchor) waits on this fix; the --nojournal flag stays in the tree as
 the repro. The arm-2 revoke semantics note (leg 44's other dirty

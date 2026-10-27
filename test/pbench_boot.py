@@ -56,7 +56,7 @@ def build_probe(out, src=None):
     return True
 
 
-def build_image(img, probe, arm=None, nojournal=False):
+def build_image(img, probe, arm=None, nojournal=False, mkfs_features=None):
     staging = os.path.join(WORK, "pbench_root")
     if os.path.exists(staging):
         shutil.rmtree(staging)
@@ -71,7 +71,14 @@ def build_image(img, probe, arm=None, nojournal=False):
     # deferral) — the OH/GNOME userdata image class. The standing
     # protocol (journal image) is unchanged; this flag exists only for
     # the journal-vs-nojournal A/B.
-    feats = "^metadata_csum,^has_journal" if nojournal else "^metadata_csum"
+    # --mkfs-features (leg 45): generic passthrough for feature-bisect
+    # repros (e.g. "^metadata_csum,^orphan_file" localizes the
+    # no-journal root-lookup failure to a feature bit). Takes precedence
+    # over --nojournal when both are given.
+    if mkfs_features:
+        feats = mkfs_features
+    else:
+        feats = "^metadata_csum,^has_journal" if nojournal else "^metadata_csum"
     r = subprocess.run([MKFS, "-q", "-F", "-O", feats,
                         "-d", staging, img, "%dM" % SIZE_MB],
                        capture_output=True, text=True)
@@ -99,6 +106,10 @@ def main():
                     help="F4 arm-1 (leg 44): mkfs the probe rootfs WITHOUT "
                          "has_journal so the fs rows run the no-journal "
                          "path (route-1 deferral) — OH/GNOME image class")
+    ap.add_argument("--mkfs-features", default=None,
+                    help="leg 45: full -O feature string for the probe "
+                         "rootfs (feature-bisect repros; overrides "
+                         "--nojournal when given)")
     args = ap.parse_args()
 
     os.makedirs(WORK, exist_ok=True)
@@ -116,7 +127,8 @@ def main():
         if not build_probe(arm, src=os.path.join(HERE, "pbench_arm.c")):
             return 2
         init_path = "/test/arm"
-    if not build_image(img, probe, arm, nojournal=args.nojournal):
+    if not build_image(img, probe, arm, nojournal=args.nojournal,
+                       mkfs_features=args.mkfs_features):
         return 2
 
     serial = os.path.join(WORK, "pbench-%s-serial.log" % args.tag)
