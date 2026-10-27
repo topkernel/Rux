@@ -93,6 +93,11 @@ pub mod pathstash;
 /// "unlinked snapshot" class that produced the sc304 signal-Arc Oops —
 /// plus stale thread-group parent snapshots; see dfx/treehunt.rs.
 pub mod treehunt;
+/// Slow-kernel-entry audit (dfx=slowtask, leg-33B): tasks stuck on the
+/// same syscall entry for >= 8 s get a line with args and the parked
+/// kernel-stack chain — attributes the leaf of nested-call cascades
+/// (fs stalls behind binder reader exhaustion). See dfx/slowtask.rs.
+pub mod slowtask;
 
 /// Initialize the DFX subsystem.
 ///

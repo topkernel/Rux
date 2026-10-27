@@ -276,6 +276,11 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize) {
                             .store(t.preempt_count() as u32,
                                    core::sync::atomic::Ordering::Relaxed);
                     }
+                    // leg-33B incumbent attribution: the interrupted
+                    // epc rides the same slot (TICK_ENTRY_RIP twin).
+                    crate::interrupt::preempt::TICK_ENTRY_RIP[cpu_id]
+                        .store(epc_ctx,
+                               core::sync::atomic::Ordering::Relaxed);
                 }
                 crate::interrupt::preempt::irq_enter();
                 handle_timer_interrupt(regs_ref, cpu_id);
