@@ -3030,8 +3030,12 @@ pub fn sleep_snapshot() {
 /// (queued on any todo, or stacked sender-side elsewhere) issued from
 /// the hung servers' PROCESSES, printed as TXN-HANG-OUT lines — the
 /// synchronous fan-out chain the handler is stuck behind, named
-/// end-to-end. Rate-capped to one burst per 5 s; bounded (8 + 8 lines);
-/// zero cost when dfx=txnhunt is off.
+/// end-to-end. Leg-33A: each hung proc also prints one TXN-POOL
+/// reader-pool census line (threads, parked readers, eligible readers,
+/// requested/started/max, proc todo depth, per-child pools) — the
+/// reader-exhaustion instrument for the foundation wall. Rate-capped
+/// to one burst per 5 s; bounded (8 + 8 + 4 lines); zero cost when
+/// dfx=txnhunt is off.
 pub fn txn_hang_audit() {
     if !crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::TxnHang) {
         return;
@@ -3074,6 +3078,34 @@ pub fn txn_hang_audit() {
     let mut outs: alloc::vec::Vec<Out> = alloc::vec::Vec::new();
     let mut hung_pids: [u32; 4] = [0; 4];
     let mut hung_n = 0usize;
+    // Leg-33A: reader-pool census per hung proc (POD, printed after WORLD
+    // release). The OS_IPC reader-exhaustion instrument OH-B named for the
+    // foundation wall (sc329B: every reader parked in its read as a client,
+    // proc todo grows, pool never grows) — rd = threads currently blocked
+    // in binder_thread_read, wr = of those, eligible for proc work
+    // (waiting_threads membership), so rd-wr = parked-as-client readers;
+    // per-child (sc164 forked-child pool) breakdown tgid:th/rd/wr.
+    #[derive(Copy, Clone)]
+    struct PoolChild {
+        tgid: u32,
+        th: u32,
+        rd: u32,
+        wr: u32,
+    }
+    struct PoolSnap {
+        pid: u32,
+        th: u32,
+        loop_n: u32,
+        rd: u32,
+        wr: u32,
+        req: i32,
+        started: i32,
+        max: i32,
+        todo: u32,
+        child_n: u32,
+        children: [PoolChild; 4],
+    }
+    let mut pools: alloc::vec::Vec<PoolSnap> = alloc::vec::Vec::new();
     {
         let w = world_lock();
         // SAFETY: read-only traversal under WORLD (pm() casts only reach
@@ -3177,6 +3209,65 @@ pub fn txn_hang_audit() {
                     }
                 }
             }
+            // Pass 3 (leg-33A): reader-pool census for each hung proc.
+            // Same contract as passes 1-2: POD snapshot only, no prints
+            // under WORLD.
+            for p in &world.procs {
+                let proc = pm(world, p);
+                if !is_hung_proc(&hung_pids[..hung_n], proc.pid) || pools.len() >= 4 {
+                    continue;
+                }
+                let mut snap = PoolSnap {
+                    pid: proc.pid,
+                    th: proc.im().threads.len() as u32,
+                    loop_n: 0,
+                    rd: 0,
+                    wr: 0,
+                    req: proc.im().requested_threads,
+                    started: proc.im().requested_threads_started,
+                    max: proc.im().max_threads,
+                    todo: proc.im().todo.len() as u32,
+                    child_n: 0,
+                    children: [PoolChild { tgid: 0, th: 0, rd: 0, wr: 0 }; 4],
+                };
+                for t in &proc.im().threads {
+                    let th = t.st();
+                    if (th.looper & (LOOPER_ENTERED | LOOPER_REGISTERED)) != 0 {
+                        snap.loop_n += 1;
+                    }
+                    let parked =
+                        t.read_wait_since.load(core::sync::atomic::Ordering::Acquire) != 0;
+                    if parked {
+                        snap.rd += 1;
+                        if th.waiting_for_proc_work {
+                            snap.wr += 1;
+                        }
+                    }
+                    // sc164: forked children sharing the proc are their own
+                    // pool — their reader counts must not hide behind the
+                    // daemon's.
+                    if t.tgid != 0 && t.tgid != proc.pid as u32 {
+                        let mut ci = snap.children.iter().position(|c| c.tgid == t.tgid);
+                        if ci.is_none() && (snap.child_n as usize) < 4 {
+                            let i = snap.child_n as usize;
+                            snap.children[i] = PoolChild { tgid: t.tgid, th: 0, rd: 0, wr: 0 };
+                            ci = Some(i);
+                            snap.child_n += 1;
+                        }
+                        if let Some(i) = ci {
+                            let c = &mut snap.children[i];
+                            c.th += 1;
+                            if parked {
+                                c.rd += 1;
+                                if th.waiting_for_proc_work {
+                                    c.wr += 1;
+                                }
+                            }
+                        }
+                    }
+                }
+                pools.push(snap);
+            }
         }
     }
     // WORLD released — task forensics + prints happen here (sc207).
@@ -3192,6 +3283,20 @@ pub fn txn_hang_audit() {
     };
     let mut w = crate::dfx::backtrace::ConsoleWriter::new();
     use core::fmt::Write as _;
+    // Leg-33A: pool census first — context for the TXN-HANG burst below.
+    // rd-wr = readers parked as clients (the exhaustion signature is
+    // rd>0 wr=0 with todo growing and th static).
+    for ps in &pools {
+        let _ = write!(
+            w,
+            "TXN-POOL pid={} th={} loop={} rd={} wr={} req={} started={} max={} todo={}",
+            ps.pid, ps.th, ps.loop_n, ps.rd, ps.wr, ps.req, ps.started, ps.max, ps.todo
+        );
+        for c in ps.children.iter().take(ps.child_n as usize) {
+            let _ = write!(w, " c{}:{}/{}/{}", c.tgid, c.th, c.rd, c.wr);
+        }
+        let _ = writeln!(w);
+    }
     for h in &hung {
         let srv = unsafe { crate::sched::find_task_by_pid(h.stid) };
         let (state, sys, rip, a0, a1) = if srv.is_null() {
