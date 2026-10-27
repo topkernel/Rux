@@ -229,7 +229,77 @@ pub fn register_debugfs_knobs() -> usize {
             count += 1;
         }
     }
+
+    // The panic-reset method selector (x86_64 only). `panic_reboot`
+    // walks the PC reset repertoire — 8042 pulse, then triple fault.
+    // The pstore survival smoke needs each path driven IN ISOLATION
+    // (a record must survive whichever reset the panic policy takes),
+    // so this knob pins the method: "8042" = pulse only (park if the
+    // platform ignores it — a silent fallback would defeat the point),
+    // "triplefault" = NULL-IDT fault only, "cascade" = the default
+    // repertoire. The panic path reads a static (one atomic load), not
+    // the debugfs file.
+    #[cfg(feature = "x86_64")]
+    {
+        let gen = || {
+            crate::dfx::reset_method::name(crate::dfx::reset_method::get())
+                .as_bytes()
+                .to_vec()
+        };
+        let store = |buf: &[u8]| -> i32 {
+            let text = core::str::from_utf8(buf).unwrap_or("").trim();
+            let method = match text {
+                "" => return 0,
+                "8042" | "pulse" => crate::dfx::reset_method::PULSE_8042_ONLY,
+                "triplefault" | "triple" => crate::dfx::reset_method::TRIPLE_FAULT_ONLY,
+                "cascade" | "auto" => crate::dfx::reset_method::CASCADE,
+                _ => return crate::errno::Errno::InvalidArgument.as_neg_i32(),
+            };
+            crate::dfx::reset_method::set(method);
+            0
+        };
+        if debugfs::create_file("/dfx/reset-method", 0o644, gen, Some(store)) {
+            count += 1;
+        }
+    }
     count
+}
+
+/// The x86_64 panic-reset method (the debugfs knob's backing static).
+/// Isolating the reset paths is what lets the pstore smoke prove a
+/// record survives EACH of them, not just "some reset".
+#[cfg(feature = "x86_64")]
+pub mod reset_method {
+    use core::sync::atomic::{AtomicU8, Ordering};
+
+    /// The full repertoire: 8042 pulse, then triple fault (default).
+    pub const CASCADE: u8 = 0;
+    /// Only the 8042 keyboard-controller pulse (port 0x64, 0xFE).
+    pub const PULSE_8042_ONLY: u8 = 1;
+    /// Only the triple fault through a NULL IDT.
+    pub const TRIPLE_FAULT_ONLY: u8 = 2;
+
+    static METHOD: AtomicU8 = AtomicU8::new(CASCADE);
+
+    pub fn get() -> u8 {
+        METHOD.load(Ordering::Relaxed)
+    }
+
+    pub fn set(method: u8) {
+        METHOD.store(method, Ordering::Relaxed);
+        crate::pr_info!(
+            "dfx: panic reset method pinned to {}",
+            name(method)
+        );
+    }
+
+    pub fn name(method: u8) -> &'static str {
+        match method {
+            PULSE_8042_ONLY => "8042\n",
+            TRIPLE_FAULT_ONLY => "triplefault\n",
+            _ => "cascade\n",
+        }
+    }
 }
 
 // ============================================================================

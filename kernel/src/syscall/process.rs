@@ -5261,32 +5261,50 @@ pub fn panic_reboot() -> ! {
         // ends in a reset). Before this, the x86 panic path only
         // parked — `panic=` timed out into machine_park and the pstore
         // guest-cycle smoke could never reach its boot-2 read.
+        //
+        // The dfx reset-method knob (/sys/kernel/debug/dfx/reset-method)
+        // can pin ONE path: "8042" parks instead of falling through
+        // (a silent fallback would defeat the isolation), "triplefault"
+        // skips the pulse — the pstore smoke proves the record survives
+        // each reset path separately.
+        let method = crate::dfx::reset_method::get();
+        let pulse = method != crate::dfx::reset_method::TRIPLE_FAULT_ONLY;
+        let triple = method != crate::dfx::reset_method::PULSE_8042_ONLY;
         // SAFETY: bare port I/O on the reset port and a deliberate
         // faulting instruction; neither returns.
         unsafe {
-            // Drain the 8042 input buffer first (writing the command
-            // while it is full is dropped on real hardware).
-            for _ in 0..100_000 {
-                if crate::arch::cpu::inb(0x64) & 0x02 == 0 {
-                    break;
+            if pulse {
+                // Drain the 8042 input buffer first (writing the command
+                // while it is full is dropped on real hardware).
+                for _ in 0..100_000 {
+                    if crate::arch::cpu::inb(0x64) & 0x02 == 0 {
+                        break;
+                    }
+                    core::hint::spin_loop();
                 }
-                core::hint::spin_loop();
+                crate::arch::cpu::outb(0x64, 0xFE);
+                // Give the pulse time to land.
+                for _ in 0..10_000_000 {
+                    core::hint::spin_loop();
+                }
             }
-            crate::arch::cpu::outb(0x64, 0xFE);
-            // Give the pulse time to land.
-            for _ in 0..10_000_000 {
-                core::hint::spin_loop();
+            if triple {
+                // Triple fault: load a null/limit-0 IDT and int3 — the
+                // vector lookup must fail, the double fault must fail the
+                // same way, and the CPU (QEMU included) resets.
+                static NULL_IDT: [u64; 2] = [0; 2];
+                core::arch::asm!(
+                    "lidt [{}]",
+                    in(reg) &NULL_IDT,
+                    options(nomem, nostack)
+                );
+                core::arch::asm!("int3", options(nomem, nostack));
             }
-            // Triple fault: load a null/limit-0 IDT and int3 — the
-            // vector lookup must fail, the double fault must fail the
-            // same way, and the CPU (QEMU included) resets.
-            static NULL_IDT: [u64; 2] = [0; 2];
-            core::arch::asm!(
-                "lidt [{}]",
-                in(reg) &NULL_IDT,
-                options(nomem, nostack)
-            );
-            core::arch::asm!("int3", options(nomem, nostack));
+        }
+        // 8042-only with a pulse the platform ignored: park loudly
+        // instead of silently taking the other path.
+        if method == crate::dfx::reset_method::PULSE_8042_ONLY {
+            crate::pr_err!("panic: 8042 reset pulse did not fire; parking");
         }
         machine_park();
     }
