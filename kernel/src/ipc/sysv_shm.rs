@@ -892,6 +892,9 @@ pub fn sys_shmat(args: [u64; 6]) -> i64 {
         vma_flags,
     );
     vma.set_type(VmaType::SharedMemory);
+    vma.set_origin(crate::mm::vma::VmaOrigin::from_bits(
+        crate::mm::vma::VmaOrigin::SHM,
+    ));
     vma.set_file_fd(shmid);
     vma.set_file_size(segsz);
 

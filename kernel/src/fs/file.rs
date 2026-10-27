@@ -1355,45 +1355,57 @@ fn reg_file_write(file: &File, buf: &[u8]) -> isize {
         // (Also against reg_file_read now — see the io_lock field note.)
         let _write_guard = file.io_lock.guard();
 
-        // O_APPEND: position at end of file for every write
-        let offset = if file.flags.load(Ordering::Acquire) & FileFlags::O_APPEND != 0 {
-            let end = inode.get_size();
-            file.set_pos(end);
-            end as usize
-        } else {
-            file.get_pos() as usize
-        };
-
         // RLIMIT_FSIZE (Linux generic_write_checks): a write whose start
         // position is at/after the soft limit fails EFBIG with SIGXFSZ; a
         // write that would CROSS the limit is silently truncated to the
         // boundary (no signal) — LTP setrlimit01 case 2 sets the limit to
         // 10, writes 26 bytes and requires write() to return exactly 10.
-        // Regular files only: pipes/sockets never enter reg_file_write,
-        // matching Linux (only regular-file write paths check).
+        // For O_APPEND the effective start is the file size (the position
+        // append_data takes under the inode data lock). Regular files
+        // only: pipes/sockets never enter reg_file_write, matching Linux
+        // (only regular-file write paths check).
         let mut buf = buf;
         if let Some(task) = crate::sched::current() {
             let (fsz_cur, _) = task.rlimit(crate::process::task::rlimit_res::FSIZE);
             if fsz_cur != u64::MAX {
-                if offset as u64 >= fsz_cur {
+                let start = if file.flags.load(Ordering::Acquire) & FileFlags::O_APPEND != 0 {
+                    inode.get_size()
+                } else {
+                    file.get_pos()
+                };
+                if start >= fsz_cur {
                     let _ = crate::signal::send_signal(
                         task.pid() as u32,
                         crate::signal::Signal::SIGXFSZ as i32,
                     );
                     return crate::errno::Errno::FileTooLarge.as_neg_i32() as isize;
                 }
-                let allowed = (fsz_cur - offset as u64) as usize;
+                let allowed = (fsz_cur - start) as usize;
                 if buf.len() > allowed {
                     buf = &buf[..allowed];
                 }
             }
         }
 
-        // Write data to inode (buf.length handles automatically)
-        let bytes_written = inode.write_data(offset, buf);
+        // O_APPEND: the offset is taken under the inode's data lock, so
+        // that two appenders on different open descriptions cannot pick the
+        // same offset (Linux: generic_write_checks takes the position
+        // under the inode lock). The ext4 path does the same under the
+        // filesystem lock; this is the in-memory-file twin.
+        let bytes_written = if file.flags.load(Ordering::Acquire) & FileFlags::O_APPEND != 0 {
+            let (end, written) = inode.append_data(buf);
+            file.set_pos(end + written as u64);
+            written
+        } else {
+            let offset = file.get_pos() as usize;
 
-        // Update file position
-        file.set_pos((offset + bytes_written) as u64);
+            // Write data to inode (buf.length handles automatically)
+            let written = inode.write_data(offset, buf);
+
+            // Update file position
+            file.set_pos((offset + written) as u64);
+            written
+        };
 
         bytes_written as isize
     } else {

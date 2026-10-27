@@ -3440,6 +3440,14 @@ impl Task {
         }
     }
 
+    /// Raw parent-children-list head pointer (dfx=treehunt reads it to
+    /// distinguish linked leaders from unlinked snapshot members; null
+    /// for members by design). Diagnostic use only.
+    #[inline]
+    pub fn parent_children_head_ptr(&self) -> *mut core::ffi::c_void {
+        self.parent_children_head as *mut core::ffi::c_void
+    }
+
     /// Raw group_leader field (no healing) — for re-init during teardown.
     #[inline]
     pub fn group_leader_raw(&self) -> *mut Task {
@@ -3978,6 +3986,24 @@ impl Task {
         );
     }
 
+    /// Tick-side PREEMPT-HEAL, unified form: keep exactly ONE
+    /// HARDIRQ_OFFSET (the observer's own in-flight timer IRQ level,
+    /// so the still-pending irq_exit sub pairs) plus NMI nesting, and
+    /// drop everything else — phantom base bits AND phantom extra
+    /// hardirq nesting (leg-19 round-3e pure-hardirq phantom,
+    /// base == 0 with hardirq extra held 10 s). When there is no
+    /// extra hardirq nesting the result is bit-identical to
+    /// `ti_preempt_count_clear_base`.
+    #[inline]
+    pub fn ti_preempt_count_keep_tick_nesting(&self) {
+        use core::sync::atomic::Ordering;
+        self.ti_preempt_count.fetch_and(
+            crate::interrupt::preempt::HARDIRQ_OFFSET
+                | crate::interrupt::preempt::NMI_MASK,
+            Ordering::Release,
+        );
+    }
+
     /// Get kernel stack pointer (thread_info.kernel_sp)
     #[inline]
     pub fn ti_kernel_sp(&self) -> u64 {
@@ -4409,6 +4435,24 @@ impl Task {
     #[inline]
     pub fn kernel_stack_top(&self) -> usize {
         self.kernel_stack_bottom + KERNEL_STACK_SIZE
+    }
+
+    /// sc261 (leg-23): a thread's kernel stack is returned to the
+    /// stack cache and kernel_stack_bottom zeroed at exit time (see
+    /// free_kernel_stack), while the Task struct itself survives until
+    /// its last pin drops — kernel_stack_top() then reports
+    /// KERNEL_STACK_SIZE and every entry-frame reader computes a small
+    /// bogus address. sc261: kill_dump_tgid dereferenced 0x13fd0
+    /// (= 0x14000 - PT_REGS_SIZE + offsetof(PtRegs, orig_rax)) on an
+    /// exited-but-pinned thread and took the boot down with an
+    /// unfixable kernel fault inside the SIGKILL teardown
+    /// (rip = <u64 as LowerHex>::fmt entry, load of the format value,
+    /// pid 1421). Foreign-task entry-frame diagnostics MUST check this
+    /// first; false means the thread has exited and its pt_regs frame
+    /// is gone. (A task's own current thread always passes.)
+    #[inline]
+    pub fn owns_kernel_stack(&self) -> bool {
+        self.kernel_stack_bottom != 0
     }
 
     /// Diagnostic-safe kernel stack top (KILLDUMP census family).
@@ -4974,6 +5018,32 @@ impl Task {
         (*child)
             .sibling
             .add_tail(&(*dest).children as *const _ as *mut ListHead);
+        // E8-REPAR root cause (leg-29A): the moved child's thread-group
+        // MEMBERS carry parent SNAPSHOTS (thread_group_join copies the
+        // leader's parent verbatim; nothing maintained them), so a
+        // reparented group left every member naming the OLD parent —
+        // memory that gets reaped and recycled while the members live.
+        // The member's own exit then walks release_task's
+        // parent_ptr()/remove_child through freed memory (the sc304
+        // signal-Arc Oops family; reproduced by dfx=treehunt +
+        // test/subreap_churn.c as TREE-SNAP-STALE). Refresh every
+        // member's snapshot to the new dest under this same lock hold —
+        // the ring walk is the same bounded pattern the reparent member
+        // scan uses, and members can't join/leave concurrently (both
+        // take PROCESS_TREE_LOCK).
+        let mut m = (*child).next_thread_ptr();
+        let mut guard = 0u32;
+        while (m as *const Task) != (child as *const Task)
+            && !m.is_null()
+            && guard < 65536
+        {
+            if (*m).group_leader == child {
+                (*m).parent = Some(dest as *const Task);
+                (*m).parent_children_head = ptr::null_mut();
+            }
+            m = (*m).next_thread_ptr();
+            guard += 1;
+        }
         true
     }
 

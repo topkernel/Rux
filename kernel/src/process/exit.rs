@@ -439,6 +439,63 @@ pub(crate) unsafe fn release_task(task: *mut Task) {
         }
     }
 
+    // Leg-29A release-time heal: every child still linked on this dying
+    // task's children list at release was missed by every earlier
+    // reparent (the PF_EXITING-dest race's residue, or any future hole).
+    // Its Task page is about to be poisoned and reused — move the
+    // survivors to init NOW or their parent pointers dangle into freed
+    // memory forever (the TREE-PARENT-DEAD / sc304 chain class). Should
+    // stay empty on a fixed kernel; a TREE-RELEASE-HEAL line is the
+    // always-on detector that a hole reopened.
+    {
+        let mut stranded: alloc::vec::Vec<*mut Task> = alloc::vec::Vec::new();
+        (*task).collect_children_pinned(&mut stranded);
+        if !stranded.is_empty() {
+            let init = crate::sched::find_task_by_pid(1);
+            if !init.is_null() {
+                static HEAL_N: core::sync::atomic::AtomicUsize =
+                    core::sync::atomic::AtomicUsize::new(0);
+                if HEAL_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 64 {
+                    crate::pr_info!(
+                        "TREE-RELEASE-HEAL: pid {} released with {} children still linked; moved to init",
+                        (*task).pid(),
+                        stranded.len()
+                    );
+                }
+                for child in stranded {
+                    let ok = (*task).move_child(child, init);
+                    if !ok {
+                        Task::task_put(child);
+                        continue;
+                    }
+                    // A healed ZOMBIE child must be signalled so init
+                    // reaps it (same contract as the reparent mover:
+                    // full child_exit siginfo, child's exit_signal).
+                    if (*child).state()
+                        == crate::process::task::TaskState::new(
+                            crate::process::task::TaskState::ZOMBIE,
+                        )
+                    {
+                        let mut info = crate::signal::SigInfo::child_exit(
+                            (*child).pid(),
+                            (*child).cred().uid,
+                            (*child).exit_code(),
+                            (*child).core_dumped(),
+                        );
+                        let orphan_sig = (*child).get_exit_signal();
+                        if orphan_sig != 0 {
+                            if orphan_sig != crate::signal::Signal::SIGCHLD as u8 {
+                                info.si_signo = orphan_sig as i32;
+                            }
+                            let _ = crate::signal::send_signal_with_info(1, info);
+                        }
+                    }
+                    Task::task_put(child);
+                }
+            }
+        }
+    }
+
     // R9 (NEW2 engine #2): do_exit sets ZOMBIE BEFORE its final schedule(),
     // so a reaping parent could scan the early ZOMBIE and free this task's
     // kernel stack and Task while it is STILL EXECUTING its exit tail on
@@ -1129,9 +1186,24 @@ unsafe fn reparent_children_to_init(dying: *mut Task) {
         {
             // Skip members that are already gone from the scheduler's
             // view; anything still linked in the ring is pre-leave and
-            // therefore valid memory.
+            // therefore valid memory. ALSO skip PF_EXITING members
+            // (leg-29A root cause): do_exit sets PF_EXITING FIRST but
+            // runs reparent_children_to_init mid-exit — a member past
+            // its own reparent, still pre-ZOMBIE, accepted children
+            // moved here that its already-run reparent would never move
+            // again. The freed-then-reaped dest left every moved child
+            // (and its thread-group members) naming freed memory — the
+            // TREE-PARENT-DEAD draws of dfx=treehunt +
+            // test/subreap_churn.c, and the ancestor sc304's subreaper
+            // walk faulted into.
             let st = (*member).state();
-            if !st.is_dead() && !st.contains(crate::process::task::TaskState::ZOMBIE) {
+            let member_exiting = (*member).ti_flags()
+                & crate::process::task::task_flags::TaskFlags::PF_EXITING.bits()
+                != 0;
+            if !member_exiting
+                && !st.is_dead()
+                && !st.contains(crate::process::task::TaskState::ZOMBIE)
+            {
                 // Pin INSIDE the lock hold: the member cannot leave the
                 // ring (thread_group_leave takes this lock) and a pinned
                 // member cannot be freed after leaving, so this fetch_add
@@ -1185,9 +1257,31 @@ unsafe fn reparent_children_to_init(dying: *mut Task) {
             let is_reaper = (*pp)
                 .signal
                 .as_ref()
-                .map(|s| s.is_child_subreaper.load(core::sync::atomic::Ordering::Acquire))
+                .and_then(|s| {
+                    // E8-REPAR follow-up (sc304 Oops): a recycled
+                    // ancestor's Task passed is_plausible_task_ptr but
+                    // its `signal` Arc slot held a USER-range garbage
+                    // pointer — AtomicBool::load faulted at
+                    // 0x7ff08b80f820 under this lock and the Oops-killed
+                    // task wedged the boot holding PROCESS_TREE_LOCK.
+                    // Validate the SignalStruct pointer's RANGE (same
+                    // linear-map window as the task check; SignalStruct
+                    // is heap-allocated inside it) before the atomic
+                    // load; garbage => treat the hop as non-reaper and
+                    // stop the walk here (dest stays init).
+                    const MAP_BASE: usize = crate::arch::mm::memory_layout::PAGE_OFFSET;
+                    const MAP_SPAN: usize = 0x10_0000_0000; // 64 GiB
+                    let raw = alloc::sync::Arc::as_ptr(s) as usize;
+                    if raw < MAP_BASE || raw >= MAP_BASE + MAP_SPAN {
+                        return None;
+                    }
+                    Some(s.is_child_subreaper.load(core::sync::atomic::Ordering::Acquire))
+                })
                 .unwrap_or(false);
-            if is_reaper {
+            let pp_exiting = (*pp).ti_flags()
+                & crate::process::task::task_flags::TaskFlags::PF_EXITING.bits()
+                != 0;
+            if is_reaper && !pp_exiting {
                 dest = pp;
                 // Pin the subreaper dest under the same lock hold (same
                 // argument as the member pin above).

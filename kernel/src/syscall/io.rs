@@ -582,6 +582,16 @@ pub fn sys_write(args: SyscallArgs) -> i64 {
                 }
 
                 // Regular file or redirected output
+                // dfx=txnhunt (leg-29A): name the file when this write
+                // later draws a TXN-HANG (sc303's storage family parked
+                // in a write(9) loop; entry frame shows only the raw
+                // fd). Stash BEFORE the pipe fast path so a hang in a
+                // pipe/socket writev labels the pipe, not the previous
+                // regular-file write's path.
+                crate::dfx::pathstash::stash_file(
+                    crate::dfx::pathstash::OP_WRITE,
+                    &file.path(),
+                );
                 // Pipe fast path: transfer directly user↔ring (see the
                 // matching branch in sys_read).
                 if crate::fs::pipe::is_pipe_file(&file) {

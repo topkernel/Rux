@@ -1771,8 +1771,14 @@ pub fn schedule_dead_never_returns() {
                 // next strand can distinguish "helper never ran" from
                 // "helper ran silently with pc==0" — sc191/sc192 both
                 // stranded with ZERO TERM-DESCHED lines and the two were
-                // indistinguishable in the log.
-                if rounds == 0 {
+                // indistinguishable in the log. Serial-cleanliness:
+                // census boots only (dfx=wwcensus); ordinary boots fire
+                // this on every exiting child.
+                if rounds == 0
+                    && crate::dfx::switches::enabled(
+                        crate::dfx::switches::DfxSwitch::WwCensus,
+                    )
+                {
                     let n = TERM_ENGAGE_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
                     if n < 8 {
                         crate::pr_warn!(
@@ -2648,6 +2654,51 @@ unsafe fn mark_picked_on_cpu(task: *mut Task, is_repick: bool) {
                 r56_print_pid(b"", (*task).pid(), b"\n");
             }
         }
+        // leg-26 (PICK-PC-ZERO): a task being picked FRESH (not live on
+        // this CPU) provably executes nowhere at this instant — the
+        // ownership screens just passed — so by the same invariant the
+        // parkwalk trusts (guards exist only on the executing task;
+        // preemption requires count 0; __schedule refuses to sleep a
+        // nonzero-count task) it holds NO legal preempt_count bits.
+        // Any residue is phantom (the parked-pc=1 pile, the Signature-A
+        // spawn phantoms, the leaked-pc incumbents that strand every
+        // wake behind an un-preemptible monopoly until the 200-tick
+        // heal). Zero it AT the pick — the one race-free point — so a
+        // resurrected phantom runs preemptible from its first
+        // instruction instead of monopolizing for up to 2 s first.
+        // A legitimately-open guard across a park cannot exist (the
+        // invariant above); if one ever does, its drop underflow-clamps
+        // and REPORTS rather than poisoning. Rate-gated one line per 2 j.
+        if !live {
+            let pc = (*task).preempt_count();
+            let base = pc & !crate::interrupt::preempt::HARDIRQ_MASK;
+            let nest_extra = (pc & crate::interrupt::preempt::HARDIRQ_MASK)
+                .saturating_sub(crate::interrupt::preempt::HARDIRQ_OFFSET);
+            if base != 0 || nest_extra > 0 || (pc & crate::interrupt::preempt::NMI_MASK) != 0 {
+                (*task).ti_preempt_count_zero();
+                static PICKZERO_LAST: core::sync::atomic::AtomicU64 =
+                    core::sync::atomic::AtomicU64::new(0);
+                let now = crate::drivers::timer::get_jiffies();
+                let last = PICKZERO_LAST.load(core::sync::atomic::Ordering::Relaxed);
+                if now.wrapping_sub(last) >= 20
+                    && PICKZERO_LAST
+                        .compare_exchange(
+                            last,
+                            now,
+                            core::sync::atomic::Ordering::AcqRel,
+                            core::sync::atomic::Ordering::Acquire,
+                        )
+                        .is_ok()
+                {
+                    r56_print_pid(
+                        b"PICK-PC-ZERO pid=",
+                        (*task).pid(),
+                        b" was=0x",
+                    );
+                    r56_print_pid(b"", pc as u32, b"\n");
+                }
+            }
+        }
         (*task).publish_pick_ownership(crate::arch::cpu_id() as i32, live);
     }
 }
@@ -3265,7 +3316,13 @@ pub fn wake_up_enqueue(task: *mut Task) -> bool {
                 let w3_benign_running =
                     st == TaskState::new(TaskState::RUNNING) && curr_on;
                 let mut w3_print_refused = false;
-                if !w3_benign_running {
+                // Serial-cleanliness: the W3 refusal census joins the
+                // wwcensus family — ordinary boots stay clean.
+                if !w3_benign_running
+                    && crate::dfx::switches::enabled(
+                        crate::dfx::switches::DfxSwitch::WwCensus,
+                    )
+                {
                     w3_print_refused =
                         W3_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 32;
                 }
@@ -4209,6 +4266,10 @@ pub fn scheduler_tick() {
                                     .load(core::sync::atomic::Ordering::Relaxed)
                                     as u64);
                                 putchar(b'\n');
+                                // dfx=leakhunt: the acquire site of the
+                                // leaked count (last PREEMPT_OFFSET
+                                // acquire on the incumbent).
+                                crate::dfx::leakorigin::report_incumbent_site(cur);
                             }
                         }
                         // PREEMPT-HEAL (round 3c): a TASK-context base
@@ -4597,6 +4658,9 @@ pub fn scheduler_tick() {
                     }
                     ph(unsafe { (**task).ti_cpu() } as u32 as u64);
                     putchar(b'\n');
+                    // dfx=leakhunt: name the acquire site of the leaked
+                    // count (last PREEMPT_OFFSET acquire on this task).
+                    crate::dfx::leakorigin::report_parked_site(*task);
                 }
             }
             // Lazily reclaim slots whose tasks missed 2+ walks.

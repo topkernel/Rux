@@ -493,6 +493,18 @@ pub fn timer_softirq_handler(_nr: usize) {
             if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::WwCensus) {
                 ww_heartbeat(now_time);
             }
+            // leg-27: in-flight binder txn hang audit (dfx=txnhunt,
+            // self-gated + rate-capped inside). Runs on the same ~1 Hz
+            // heartbeat slot; zero cost when off.
+            crate::ipc::binder::txn_hang_audit();
+            // leg-30B: AMS46 node/proc census (dfx=ams46, self-gated +
+            // rate-capped inside) — the Gate-1 delivery adjudication
+            // backdrop for the accountmgr->AMS StartUser oneway.
+            crate::ipc::binder::ams46_audit();
+            // leg-29A: process-tree invariant validator (dfx=treehunt,
+            // self-gated + rate-capped inside) — E8-REPAR unlinked-
+            // snapshot root-cause hunt.
+            crate::dfx::treehunt::tick();
         }
     }
 

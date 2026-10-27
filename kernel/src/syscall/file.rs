@@ -3898,6 +3898,14 @@ pub fn sys_fsync(args: SyscallArgs) -> i64 {
                     if !inode.mode.is_regular_file() {
                         return -(errno::EINVAL as i64);
                     }
+                    // dfx=txnhunt (leg-29A): name the file when this
+                    // fsync/fdatasync later draws a TXN-HANG — sc310's
+                    // hiview handler sat in fdatasync(fd) for 43 min
+                    // and the entry frame showed only the raw fd.
+                    crate::dfx::pathstash::stash_file(
+                        crate::dfx::pathstash::OP_SYNC,
+                        &file.path(),
+                    );
                     // ext4 files: flush data blocks + journal commit via the
                     // W2-exposed ext4_sync_file. Other filesystems (rootfs,
                     // pipes, ...) have no fsync op — flush the shared buffer
