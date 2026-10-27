@@ -76,6 +76,21 @@ pub fn stash_file(op: u32, path: &str) {
     s.tid.store(tid, Ordering::Release);
 }
 
+/// Lazy-path variant for call sites that would have to CONSTRUCT the
+/// path per call: `stash_file(OP_WRITE, &file.path())` evaluates
+/// `File::path()` (dentry walk + String formatting) on every write(2)
+/// BEFORE stash_file's switch check discards it — a probe cost paid on
+/// the serial-clean family with the switch off (p5c decomposition,
+/// leg 44). The switch check runs BEFORE `f`; with TxnHang off this is
+/// one atomic load and no allocation.
+pub fn stash_file_lazy(op: u32, f: impl FnOnce() -> alloc::string::String) {
+    if !crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::TxnHang) {
+        return;
+    }
+    let path = f();
+    stash_file(op, &path);
+}
+
 /// Look up the last (op, path) stashed by `tid`. Returns None when the
 /// slot is empty, owned by another tid, or the path was never written.
 pub fn lookup_file(tid: u32) -> Option<(u32, &'static str)> {
