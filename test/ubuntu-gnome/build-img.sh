@@ -9,7 +9,7 @@
 # Cross-arch safe: no chroot. apt resolves the riscv64 closure from
 # ubuntu-ports with APT::Architecture=riscv64, packages are unpacked
 # with dpkg-deb -x, runit is cross-compiled with the repo musl
-# toolchain. Output: work/gnome-riscv64.img
+# toolchain. Output: $GNOME_IMG (default work/gnome-r13.img)
 #
 # Boot: python3 test/ubuntu-gnome/fire.py (headless ignition driver).
 set -euo pipefail

@@ -38,7 +38,7 @@ WT = os.path.dirname(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 p = argparse.ArgumentParser()
 p.add_argument("--tag", default="run")
 p.add_argument("--seconds", type=int, default=2400)
-p.add_argument("--img", default=os.path.join(WT, "work/gnome-riscv64.img"))
+p.add_argument("--img", default=os.path.join(WT, "work/gnome-r13.img"))
 p.add_argument("--kernel", default=os.path.join(
     WT, "target/riscv64gc-unknown-none-elf/debug/rux"))
 p.add_argument("--init", default="/sbin/runit")
@@ -49,7 +49,10 @@ p.add_argument("--dfx", default="")
 p.add_argument("--extra-append", default="")
 p.add_argument("--dump-every", type=int, default=30)
 p.add_argument("--keyprobe", default="",
-               help="comma list of elapsed seconds for a single QMP 'a' keypress")
+               help="comma list of elapsed seconds for a single QMP 'a' keypress; "
+                    "an entry may be time:KEY with KEY a QMP qcode name "
+                    "(e.g. 1520:a,1530:ret) so a click-then-type set can "
+                    "include Enter — a shell cannot execute a line without it")
 p.add_argument("--mousemove", default="",
                help="comma list of elapsed seconds for QMP abs pointer moves")
 p.add_argument("--clickprobe", default="",
@@ -59,6 +62,12 @@ p.add_argument("--clickprobe", default="",
                     "--mousemove then --keyprobe for click-then-type)")
 p.add_argument("--qtrace", default="",
                help="comma list of QEMU trace events (simple backend, file in run dir)")
+p.add_argument("--jiggle", default="",
+               help="FROM,EVERY,UNTIL: alternate the pointer between two "
+                    "corner positions every EVERY s from FROM to UNTIL — "
+                    "defeats the gsd-power idle blank (~120-150 s after "
+                    "the last input the session blanks to wallpaper), the "
+                    "same thing a human wiggling the mouse does")
 args = p.parse_args()
 
 OUT = os.path.join(WT, "runs", f"gnome-{args.tag}")
@@ -318,7 +327,25 @@ best_nonblack = 0.0
 dump_i = 0
 burst_until = -1     # banner-shot burst window (see notify_burst)
 last_burst = -100
-keyprobe = [int(x) for x in args.keyprobe.split(",") if x.strip()]
+keyprobe = []
+for x in args.keyprobe.split(","):
+    x = x.strip()
+    if not x:
+        continue
+    if ":" in x:
+        t, k = x.split(":", 1)
+        keyprobe.append((int(t), k))
+    else:
+        keyprobe.append((int(x), "a"))
+keyprobe.sort(key=lambda e: e[0])
+# --jiggle FROM,EVERY,UNTIL parsed into a tuple + mutable loop state
+jiggle = ()
+if args.jiggle:
+    parts = [int(x) for x in args.jiggle.split(",") if x.strip()]
+    if len(parts) != 3:
+        p.error("--jiggle needs FROM,EVERY,UNTIL")
+    jiggle = tuple(parts)
+jiggle_state = [jiggle[0] if jiggle else 1 << 30, False]
 mousemove = [int(x) for x in args.mousemove.split(",") if x.strip()]
 clickprobe = [int(x) for x in args.clickprobe.split(",") if x.strip()]
 qmp = None
@@ -338,13 +365,15 @@ try:
                 print("[fire] qmp connected", flush=True)
             except Exception as e:
                 print(f"[fire] qmp connect: {e}", flush=True)
-        # --keyprobe 300,900: one 'a' keypress (press+release) via QMP
-        # send-key at each listed elapsed second. Deterministic positive
-        # control for dfx=inputtrace: the kernel INPTRC lines MUST show
-        # exactly these events (kbd code 30) at these times; any other
-        # INPTRC line in a hands-off window is a phantom event.
-        while keyprobe and el >= keyprobe[0]:
-            kt = keyprobe.pop(0)
+        # --keyprobe 300,900[,1500:ret]: one keypress (press+release) via
+        # QMP send-key at each listed elapsed second (default key 'a',
+        # time:KEY overrides — 'ret' is the QAPI qcode for Enter).
+        # Deterministic positive control for dfx=inputtrace: the kernel
+        # INPTRC lines MUST show exactly these events (kbd code 30 for
+        # 'a', code 28 for 'ret') at these times; any other INPTRC line
+        # in a hands-off window is a phantom event.
+        while keyprobe and el >= keyprobe[0][0]:
+            kt, kk = keyprobe.pop(0)
             if qmp:
                 try:
                     # QAPI shape: KeyValue-qcode is {type:"qcode", data:"a"}
@@ -356,13 +385,13 @@ try:
                     # EVERY keyprobe since leg-6 was a no-op (leg-7 finding,
                     # /tmp host A/B). Response errors are checked now.
                     r = qmp.cmd("send-key",
-                                **{"keys": [{"type": "qcode", "data": "a"}],
+                                **{"keys": [{"type": "qcode", "data": kk}],
                                    "hold-time": 50})
                     if isinstance(r, dict) and "error" in r:
                         print(f"[fire] t={el}s keyprobe QMP error: "
                               f"{r['error'].get('desc')}", flush=True)
                     else:
-                        print(f"[fire] t={el}s keyprobe 'a' sent", flush=True)
+                        print(f"[fire] t={el}s keyprobe '{kk}' sent", flush=True)
                 except Exception as e:
                     print(f"[fire] t={el}s keyprobe error: {e}", flush=True)
         # --mousemove 600: absolute pointer positioning via QMP
@@ -431,6 +460,30 @@ try:
                               f"press+release sent", flush=True)
                 except Exception as e:
                     print(f"[fire] t={ct}s click error: {e}", flush=True)
+        # --jiggle FROM,EVERY,UNTIL: alternate the pointer between two
+        # bottom-right corner positions (clear of the probe xterm at
+        # (150,172)-(1054,708)) — keeps gsd-power's idle monitor fed so
+        # the session does not blank to wallpaper mid-probe. Observed
+        # blanking: ~120-150 s after the last input (r14live ~1620s,
+        # r15stab ~1350s), and a later keystroke did not visibly unblank
+        # it — an interactive user wiggles the mouse instead; this does.
+        if qmp and jiggle and jiggle[0] <= el <= jiggle[2] \
+                and el >= jiggle_state[0]:
+            jiggle_state[0] = el + jiggle[1]
+            jx = 28157 if jiggle_state[1] else 28669
+            jiggle_state[1] = not jiggle_state[1]
+            try:
+                r = qmp.cmd("input-send-event", events=[
+                    {"type": "abs", "data": {"axis": "x", "value": jx}},
+                    {"type": "abs", "data": {"axis": "y", "value": 31948}}])
+                if isinstance(r, dict) and "error" in r:
+                    print(f"[fire] t={el}s jiggle QMP error: "
+                          f"{r['error'].get('desc')}", flush=True)
+                else:
+                    print(f"[fire] t={el}s jiggle abs "
+                          f"(~{jx * 1280 // 32767},{780}) sent", flush=True)
+            except Exception as e:
+                print(f"[fire] t={el}s jiggle error: {e}", flush=True)
         if qmp and el >= (dump_i + 1) * args.dump_every:
             dump_i += 1
             shot = os.path.join(OUT, f"shot-{el:04d}s.ppm")
