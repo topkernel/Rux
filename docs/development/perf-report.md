@@ -2252,11 +2252,34 @@ stress lane's (their instrument, their hunt — now with a kernel-free
 fingerprint on 488528dc).
 
 **(6) AF_UNIX read(2) direct user-drain (leg 46's lever, WIP
-2f66b0b8)**: verified intact post-merge, compiles riscv64 + x86_64
-strong (run/pa74-{main,branch}-strong-bzImage, distinct hashes).
-A/B pair (M,B,B,M interleaved pbench, run/pa74-pair.sh) launched
-this leg; results and the IPC-domain gate (P5 rows +-20% or
-improved) to be banked in the follow-up entry.
+2f66b0b8): A/B banked — PARTIAL WIN, gate PASS.** Kernels:
+run/pa74-{main,branch}-strong-bzImage (0f806d8b vs +drain, distinct
+hashes). (a) Deterministic samecpu pin windows (p5longpin, the
+leg-46 discriminators): pin_r64 42.051 -> 35.793 us (-14.9%) and
+pin_r4k 42.521 -> 35.783 (-15.9%) — the serialized read-drain class
+IMPROVED and the pin_r4k chunk-multiplier warning did NOT
+materialize; pin_recv64 5.708 -> 4.668 and spread_r64 4.236 -> 4.668
+(untouched paths, noise band). The leg-46 hoped regime FLIP to the
+5-8 us class did NOT happen: removing the staged alloc + double copy
+buys exactly that share (~6 us) of the receiver's cycle; the residual
+~36 us is the wake->drain->re-block handoff cycle itself — that
+floor belongs to the sched lane's regime-flipper thread, not to
+receive-path staging. (b) Board pairs (M,B,B,M interleaved at load
+17-21 — REJECTED: a host spike spanned both B boots, proven by the
+untouched p5c3_stream_wrecv reading +44% on B; then two clean pairs
+5M/6B and 7M/8B at load ~12): every P5 row within +-20% or improved —
+p5c2_stream_send -1.2%/-8.4%, p5d_rt_read -7.7%/-7.7% (consistent),
+p5c3 +3.2%/-4.2%, p5a +2.5%/-4.5%, p5b -1.6..-7.7%, p5e +6.7%/-2.7%,
+p5f -2.7%/-9.9%. Non-IPC scatter rows (p2_ctxsw +39.7%/+14.6%,
+p6_append +49.2%/-2.8%, p6_unlink +39.6%/-13.6%) flip sign across
+pairs and execute no socket code — adjudicated host noise per the
+session-11/stress-s12 interleaving method; p1_clock ran -7%/-14%
+FASTER on B in the same windows. IPC-domain gate: PASS.
+Correctness gates: dual-arch build rc=0; riscv64 smoke boot 0 panics
+(run/rv-smoke-leg47.sh); `make test` ALL TESTS PASSED on the drain
+kernel; dgram one-record-per-read and O_NONBLOCK/EAGAIN/EOF
+semantics preserved by construction (same unix_recv_ctl engine,
+nonblocking continuations after the first byte).
 
 Gates so far this leg: dual-arch build rc=0 (riscv64 debug + x86_64
 strong on both range ends and the branch tip); QEMU discipline held
