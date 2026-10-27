@@ -720,6 +720,17 @@ unsafe fn sweep_stale_async(world: &World, target: &Arc<BinderProc>) -> usize {
             continue;
         }
         if let Some(t) = b.txn.take() {
+            // leg-30B AMS46: the 30 s stale-buffer reclaim acted on a
+            // traced txn — the receiver read it but never BC_FREE'd it
+            // (userspace leak shape), or it held the slot the traced
+            // StartUser needs.
+            if ams46_on() && ams46_txns_contains(t.id) {
+                crate::pr_warn!(
+                    "AMS46 SWEEP-RECLAIM txn{} code={} (delivered but never freed)",
+                    t.id,
+                    t.code
+                );
+            }
             if t.holds_async_slot() {
                 slot_holders.push(t);
             }
@@ -741,7 +752,14 @@ unsafe fn sweep_stale_async(world: &World, target: &Arc<BinderProc>) -> usize {
                 Some(h) => {
                     unsafe { h.set_holds_async_slot(true) };
                     let tp = h.to_proc.clone();
-                    pm(world, &tp).im().todo.push_back(Work::Transaction(h));
+                    pm(world, &tp).im().todo.push_back(Work::Transaction(h.clone()));
+                    if ams46_on() && ams46_txns_contains(h.id) {
+                        crate::pr_warn!(
+                            "AMS46 SWEEP slot txn{} -> txn{} (parked code-46 DELIVERED by sweep drain)",
+                            t.id,
+                            h.id
+                        );
+                    }
                 }
                 None => {
                     ns.has_async_transaction = false;
@@ -812,6 +830,16 @@ unsafe fn sweep_silent_txns(world: &World) -> (usize, Vec<Arc<BinderProc>>) {
                 let Work::Transaction(t) = &wk else {
                     unreachable!("retire only set for Transaction");
                 };
+                // leg-30B AMS46: the traced StartUser sat UNDELIVERED on
+                // the proc todo past the 30 s silence window — the
+                // kernel-side drop shape for Gate 1.
+                if ams46_on() && ams46_txns_contains(t.id) {
+                    crate::pr_warn!(
+                        "AMS46 RETIRED(proc-todo) txn{} age={}js — DROPPED undelivered",
+                        t.id,
+                        now.wrapping_sub(t.enq_j)
+                    );
+                }
                 // SAFETY: WORLD held.
                 unsafe { t.set_holds_async_slot(false) };
                 if t.flags & TF_ONE_WAY == 0 {
@@ -849,6 +877,15 @@ unsafe fn sweep_silent_txns(world: &World) -> (usize, Vec<Arc<BinderProc>>) {
                 if unsafe { t.holds_async_slot() } {
                     slot_vacated = true;
                 }
+                // leg-30B AMS46: parked past the silence window without
+                // ever being delivered — the other kernel-side drop.
+                if ams46_on() && ams46_txns_contains(t.id) {
+                    crate::pr_warn!(
+                        "AMS46 RETIRED(async-park) txn{} age={}js — DROPPED parked behind slot holder",
+                        t.id,
+                        now.wrapping_sub(t.enq_j)
+                    );
+                }
                 // SAFETY: WORLD held.
                 unsafe { t.set_holds_async_slot(false) };
                 // SAFETY: WORLD held; frees the buffer + unpins the node.
@@ -866,6 +903,13 @@ unsafe fn sweep_silent_txns(world: &World) -> (usize, Vec<Arc<BinderProc>>) {
                         Some(h) => {
                             h.set_holds_async_slot(true);
                             let tp = h.to_proc.clone();
+                            let hid = h.id;
+                            if ams46_on() && ams46_txns_contains(hid) {
+                                crate::pr_warn!(
+                                    "AMS46 slot -> txn{} (retire handoff DELIVERED parked code-46)",
+                                    hid
+                                );
+                            }
                             pm(world, &tp).im().todo.push_back(Work::Transaction(h));
                         }
                         None => {
@@ -886,6 +930,91 @@ unsafe fn sweep_silent_txns(world: &World) -> (usize, Vec<Arc<BinderProc>>) {
 // behind the launcher-family park.
 static APP_CHILD_PIDS: [core::sync::atomic::AtomicU32; 128] =
     [const { core::sync::atomic::AtomicU32::new(0) }; 128];
+
+// leg-25: module-visible mirror of the SAREG probe's latched samgr pid,
+// so the SLRD read-side tracer can cover samgr's own reads (its leader
+// comm 'samgr' matches no app prefix) — the Add/Remove (code 3/4)
+// delivery record for the on-demand unload question.
+static SAREG_SAMGR_PID_PUB: core::sync::atomic::AtomicU32 =
+    core::sync::atomic::AtomicU32::new(0);
+
+pub(crate) fn binder_sareg_samgr_pid() -> u32 {
+    SAREG_SAMGR_PID_PUB.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+// ============================================================================
+// leg-30B: AMS46 — the Gate-1 arsenal (dfx=ams46).
+//
+// The wall (sc306/307/309/311B/312B/313B): accountmgr's
+// AbilityManagerAdapter::StartUser sends IAbilityManager code 46
+// (interface token "ohos.aafwk.AbilityManager", MessageOption(1, 8) =
+// TF_ASYNC + 8 s wait — binder flags 0x11, oneway + ACCEPT_FDS) to
+// foundation, SendRequest returns 0, yet SwitchToUser never executes
+// inside foundation (zero StartResidentAbility lines), with no error
+// log, no hang, no TXN-HANG on the pair. This tracer follows EVERY
+// matched transaction through the kernel lifecycle, so a walled draw
+// names the exact loss point:
+//
+//   AMS46 latch  — first token-matched send latches the AMS node id +
+//                  foundation pid
+//   AMS46 ENQ    — code-46 send accepted (flags, sender, parcel head)
+//   AMS46 Q      — queueing verdict: proc todo / child looper / PARKED
+//                  on node.async_todo behind an un-freed earlier oneway
+//   AMS46 READ   — a foundation thread read it out (BR_TRANSACTION) —
+//                  kernel delivery COMPLETED; anything lost past this
+//                  point is foundation userspace (deferred-task drop)
+//   AMS46 FREE   — receiver freed the buffer; async slot released or
+//                  handed to the next parked txn
+//   AMS46 SWEEP  — stale-buffer reclaim handed the slot onward (>30 s)
+//   AMS46 RETIRED— the enq_j silence rule DROPPED it undelivered
+//                  (>30 s parked) — the kernel-side loss shape
+//   AMS46 census — ~5 s node/proc state: async slot held, parked depth,
+//                  foundation proc todo depth, waiting readers
+//
+// All prints budget-capped; zero cost when dfx=ams46 is off.
+// ============================================================================
+
+static AMS46_NODE_ID: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+static AMS46_TPID: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+static AMS46_TXNS: [core::sync::atomic::AtomicU64; 16] =
+    [const { core::sync::atomic::AtomicU64::new(0) }; 16];
+static AMS46_ENQ_N: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+fn ams46_on() -> bool {
+    crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::Ams46)
+}
+
+fn ams46_txns_contains(id: u64) -> bool {
+    AMS46_TXNS
+        .iter()
+        .any(|s| s.load(core::sync::atomic::Ordering::Relaxed) == id)
+}
+
+fn ams46_txns_push(id: u64) {
+    for s in AMS46_TXNS.iter() {
+        if s.load(core::sync::atomic::Ordering::Relaxed) == 0 {
+            s.store(id, core::sync::atomic::Ordering::Relaxed);
+            return;
+        }
+    }
+}
+
+fn ams46_node_id() -> u64 {
+    AMS46_NODE_ID.load(core::sync::atomic::Ordering::Relaxed)
+}
+
+/// Does this sender parcel head carry the IAbilityManager interface
+/// token? OH parcel layout: [8B header][u32 string len][UTF-16LE chars];
+/// "ohos.aafwk.Abil..." starts at offset 12.
+fn ams46_token_match(head: &[u8]) -> bool {
+    // UTF-16LE of "ohos.aafwk.Abil" at parcel offset 12 (14 chars).
+    const PAT: [u8; 28] = [
+        0x6f, 0x00, 0x68, 0x00, 0x6f, 0x00, 0x73, 0x00, 0x2e, 0x00, 0x61, 0x00, 0x61, 0x00,
+        0x66, 0x00, 0x77, 0x00, 0x6b, 0x00, 0x2e, 0x00, 0x41, 0x00, 0x62, 0x00, 0x69, 0x00,
+    ];
+    head.len() >= 12 + PAT.len() && head[12..12 + PAT.len()] == PAT
+}
+
 
 pub fn register_app_child_pid(pid: u32) {
     for slot in APP_CHILD_PIDS.iter() {
@@ -2174,11 +2303,14 @@ pub fn binder_mmap_handler(
             base = Some(b);
         }
         let b = base.unwrap();
-        let vma = Vma::new(
+        let mut vma = Vma::new(
             crate::mm::page::VirtAddr::new(b),
             crate::mm::page::VirtAddr::new(b + size),
             vma_flags,
         );
+        vma.set_origin(crate::mm::vma::VmaOrigin::from_bits(
+            crate::mm::vma::VmaOrigin::BINDER,
+        ));
         if let Err(_overlap) = vmas.add(vma) {
             drop(vmas);
             free_pages(phys, order);
@@ -2583,9 +2715,23 @@ unsafe fn holder_forensics(t: &Arc<BinderThread>, out: &mut alloc::string::Strin
             .unwrap_or("")
             .trim_end_matches('\0')
     };
-    let top = tk.kernel_stack_top();
+    // sc261: an exited thread's kernel stack is back in the cache and
+    // kernel_stack_top() reports KERNEL_STACK_SIZE — an entry-frame
+    // read then page-faults the kernel (sc261, the kill_dump path
+    // died exactly so). The old SAFETY claim "the kernel stack stays
+    // mapped while the Task lives" was wrong: the stack is freed at
+    // thread exit while the Task struct survives until its last pin.
+    // top = 0 wraps to a noncanonical address on purpose-never-deref:
+    // the guards below skip the read instead.
+    let top = if tk.owns_kernel_stack() {
+        tk.kernel_stack_top()
+    } else {
+        0
+    };
     #[cfg(feature = "x86_64")]
-    let (rip, sys, a0, a1) = {
+    let (rip, sys, a0, a1) = if top == 0 {
+        (0, 0, 0, 0)
+    } else {
         let regs = (top.wrapping_sub(
             crate::arch::x86_64::pt_regs::PT_REGS_SIZE,
         )) as *const crate::arch::x86_64::pt_regs::PtRegs;
@@ -2595,7 +2741,9 @@ unsafe fn holder_forensics(t: &Arc<BinderThread>, out: &mut alloc::string::Strin
         unsafe { ((*regs).rip, (*regs).orig_rax, (*regs).rdi, (*regs).rsi) }
     };
     #[cfg(feature = "riscv64")]
-    let (rip, sys, a0, a1) = {
+    let (rip, sys, a0, a1) = if top == 0 {
+        (0, 0, 0, 0)
+    } else {
         let regs = (top.wrapping_sub(
             crate::arch::riscv64::pt_regs::PT_REGS_SIZE,
         )) as *const crate::arch::riscv64::pt_regs::PtRegs;
@@ -2808,16 +2956,20 @@ pub fn sleep_snapshot() {
                 return;
             };
             #[cfg(feature = "x86_64")]
-            let (rip, sys, a0, a1) = {
+            let (rip, sys, a0, a1) = if top == 0 {
+                (0, 0, 0, 0)
+            } else {
                 let regs = (top.wrapping_sub(
                     crate::arch::x86_64::pt_regs::PT_REGS_SIZE,
                 )) as *const crate::arch::x86_64::pt_regs::PtRegs;
                 // SAFETY: diagnostic read of this task's own entry frame;
-                // the kernel stack stays mapped while the Task lives.
+                // owns_kernel_stack checked above (sc261).
                 unsafe { ((*regs).rip, (*regs).orig_rax, (*regs).rdi, (*regs).rsi) }
             };
             #[cfg(feature = "riscv64")]
-            let (rip, sys, a0, a1) = {
+            let (rip, sys, a0, a1) = if top == 0 {
+                (0, 0, 0, 0)
+            } else {
                 let regs = (top.wrapping_sub(
                     crate::arch::riscv64::pt_regs::PT_REGS_SIZE,
                 )) as *const crate::arch::riscv64::pt_regs::PtRegs;
@@ -2862,6 +3014,497 @@ pub fn sleep_snapshot() {
         }
     }
 }
+
+/// dfx=txnhunt (leg-27): in-flight sync-txn hang audit, called at the
+/// ~1 Hz timer heartbeat. The 15 s samgr code-7 family (SLOW-TXN census,
+/// queue=0 exec=15020ms) only becomes visible at REPLY time — 15 s too
+/// late to see what the server was doing — and the 60 s khungtaskd
+/// cadence of sleep_snapshot/stall_report usually misses the window.
+/// This audit walks every thread's txn stack under WORLD, collects
+/// (only) server-side entries (to_tid == owning thread) picked up but
+/// unreplied for >= 1 s, then — with the guard released (sc89/sc207
+/// lessons: no task lookups, stack reads or prints under WORLD) —
+/// snapshots each hung server thread's task state and entry-frame
+/// syscall/rip (same read contract as sleep_snapshot) and prints one
+/// TXN-HANG line per txn. It also collects every other in-flight txn
+/// (queued on any todo, or stacked sender-side elsewhere) issued from
+/// the hung servers' PROCESSES, printed as TXN-HANG-OUT lines — the
+/// synchronous fan-out chain the handler is stuck behind, named
+/// end-to-end. Rate-capped to one burst per 5 s; bounded (8 + 8 lines);
+/// zero cost when dfx=txnhunt is off.
+pub fn txn_hang_audit() {
+    if !crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::TxnHang) {
+        return;
+    }
+    let now = crate::drivers::timer::get_jiffies() as u32;
+    // One burst per 5 s (500 jiffies at HZ=100); first call fires.
+    static LAST: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+    use core::sync::atomic::Ordering::Relaxed;
+    let last = LAST.load(Relaxed);
+    if last != 0 && now.wrapping_sub(last) < 500 {
+        return;
+    }
+    if LAST
+        .compare_exchange(last, now, Relaxed, Relaxed)
+        .is_err()
+    {
+        return;
+    }
+
+    struct Hung {
+        id: u64,
+        code: u32,
+        spid: u32,
+        stid: u32,
+        cpid: u32,
+        ctid: u32,
+        exec_ms: u32,
+        total_ms: u32,
+    }
+    struct Out {
+        id: u64,
+        code: u32,
+        fpid: u32,
+        tpid: u32,
+        ttid: u32,
+        queued: bool,
+        ms: u32,
+    }
+    let mut hung: alloc::vec::Vec<Hung> = alloc::vec::Vec::new();
+    let mut outs: alloc::vec::Vec<Out> = alloc::vec::Vec::new();
+    let mut hung_pids: [u32; 4] = [0; 4];
+    let mut hung_n = 0usize;
+    {
+        let w = world_lock();
+        // SAFETY: read-only traversal under WORLD (pm() casts only reach
+        // each live proc's thread/todo lists; snapshot POD only — sc89).
+        unsafe {
+            let world = match w.as_ref() {
+                Some(world) => world,
+                None => return,
+            };
+            fn is_hung_proc(pids: &[u32], pid: u32) -> bool {
+                pids.iter().any(|&p| p == pid)
+            }
+            // Pass 1: server-side txn-stack entries executing >= 1 s.
+            for p in &world.procs {
+                let proc = pm(world, p);
+                for t in &proc.im().threads {
+                    for x in &t.st().txn_stack {
+                        // SAFETY: pick_j/to_tid read under WORLD.
+                        let pick = unsafe { *x.pick_j.get() };
+                        let mine = unsafe { x.to_tid() } == Some(t.tid);
+                        if !mine || pick == 0 {
+                            continue;
+                        }
+                        let exec = now.wrapping_sub(pick);
+                        if exec >= 100 && hung.len() < 8 {
+                            hung.push(Hung {
+                                id: x.id,
+                                code: x.code,
+                                spid: proc.pid,
+                                stid: t.tid,
+                                cpid: x.from_proc.as_ref().map(|f| f.pid).unwrap_or(0),
+                                ctid: x.from_tid.unwrap_or(0),
+                                exec_ms: exec.saturating_mul(10),
+                                total_ms: now.wrapping_sub(x.enq_j).saturating_mul(10),
+                            });
+                            if hung_n < 4 {
+                                hung_pids[hung_n] = proc.pid;
+                                hung_n += 1;
+                            }
+                        }
+                    }
+                }
+            }
+            if hung.is_empty() {
+                return;
+            }
+            // Pass 2 (same guard): every in-flight txn FROM a hung
+            // server's process — stacked sender-side anywhere (its
+            // threads included) or still queued on any todo. That is
+            // the handler's synchronous fan-out chain.
+            for p in &world.procs {
+                let proc = pm(world, p);
+                let mut scan = |x: &BinderTxn, tpid: u32, ttid: u32| {
+                    let fpid = x.from_proc.as_ref().map(|f| f.pid).unwrap_or(0);
+                    if fpid == 0 || !is_hung_proc(&hung_pids[..hung_n], fpid) || outs.len() >= 8 {
+                        return;
+                    }
+                    // SAFETY: pick_j read under WORLD.
+                    let pick = unsafe { *x.pick_j.get() };
+                    let queued = pick == 0;
+                    let ms = if queued {
+                        now.wrapping_sub(x.enq_j)
+                    } else {
+                        now.wrapping_sub(pick)
+                    };
+                    outs.push(Out {
+                        id: x.id,
+                        code: x.code,
+                        fpid,
+                        tpid,
+                        ttid,
+                        queued,
+                        ms: ms.saturating_mul(10),
+                    });
+                };
+                for wk in &proc.im().todo {
+                    if let Work::Transaction(x) = wk {
+                        // SAFETY: to_tid read under WORLD.
+                        let ttid = unsafe { x.to_tid() }.unwrap_or(0);
+                        scan(x, proc.pid, ttid);
+                    }
+                }
+                for t in &proc.im().threads {
+                    for wk in &t.st().todo {
+                        if let Work::Transaction(x) = wk {
+                            // SAFETY: to_tid read under WORLD.
+                            let ttid = unsafe { x.to_tid() }.unwrap_or(0);
+                            scan(x, proc.pid, ttid);
+                        }
+                    }
+                    for x in &t.st().txn_stack {
+                        // Skip the hung server-side entries themselves
+                        // (pass 1 already reported them).
+                        // SAFETY: to_tid read under WORLD.
+                        if unsafe { x.to_tid() } == Some(t.tid) {
+                            continue;
+                        }
+                        // SAFETY: to_tid read under WORLD.
+                        let ttid = unsafe { x.to_tid() }.unwrap_or(0);
+                        scan(x, x.to_proc.pid, ttid);
+                    }
+                }
+            }
+        }
+    }
+    // WORLD released — task forensics + prints happen here (sc207).
+    let comm_of = |p: *mut crate::process::Task| -> &str {
+        if p.is_null() {
+            return "?";
+        }
+        // SAFETY: diagnostic comm read of a live task.
+        let c = unsafe { (*p).comm() };
+        core::str::from_utf8(&c[..])
+            .unwrap_or("?")
+            .trim_end_matches('\0')
+    };
+    let mut w = crate::dfx::backtrace::ConsoleWriter::new();
+    use core::fmt::Write as _;
+    for h in &hung {
+        let srv = unsafe { crate::sched::find_task_by_pid(h.stid) };
+        let (state, sys, rip, a0, a1) = if srv.is_null() {
+            (0u64, 0u64, 0u64, 0u64, 0u64)
+        } else {
+            // SAFETY: diagnostic reads of the task's own fields and its
+            // mapped kernel stack (sleep_snapshot contract, sc261).
+            let tk = unsafe { &*srv };
+            let state = tk.state().bits() as u64;
+            match tk.kernel_stack_top_checked() {
+                None => (state, 0, 0, 0, 0),
+                Some(top) => {
+                    #[cfg(feature = "x86_64")]
+                    let (sys, rip, a0, a1) = {
+                        let regs = (top.wrapping_sub(
+                            crate::arch::x86_64::pt_regs::PT_REGS_SIZE,
+                        )) as *const crate::arch::x86_64::pt_regs::PtRegs;
+                        // SAFETY: entry-frame read of this task's own stack.
+                        unsafe { ((*regs).orig_rax, (*regs).rip, (*regs).rdi, (*regs).rsi) }
+                    };
+                    #[cfg(feature = "riscv64")]
+                    let (sys, rip, a0, a1) = {
+                        let regs = (top.wrapping_sub(
+                            crate::arch::riscv64::pt_regs::PT_REGS_SIZE,
+                        )) as *const crate::arch::riscv64::pt_regs::PtRegs;
+                        // SAFETY: entry-frame read of this task's own stack.
+                        unsafe { ((*regs).a7, (*regs).epc, (*regs).a0, (*regs).a1) }
+                    };
+                    (state, sys as u64, rip as u64, a0 as u64, a1 as u64)
+                }
+            }
+        };
+        let _ = writeln!(
+            w,
+            "TXN-HANG txn{} code{} from pid {} tid {} ({}) to pid {} tid {} ({}): exec {} ms (total {} ms): server state={:#x} sys={} rip={:#x} a0={:#x} a1={:#x}",
+            h.id,
+            h.code,
+            h.cpid,
+            h.ctid,
+            comm_of(unsafe { crate::sched::find_task_by_pid(h.ctid) }),
+            h.spid,
+            h.stid,
+            comm_of(srv),
+            h.exec_ms,
+            h.total_ms,
+            state,
+            sys,
+            rip,
+            a0,
+            a1
+        );
+        // Leg-28 item 2 + leg-29A: name the FILE when the hung server
+        // thread is stuck in a file syscall family — the pathstash
+        // entry was written by this tid's own entry path (open family:
+        // sys_openat; regular-file writes: sys_write; fsync family:
+        // sys_fsync — sc310's hiview handler sat in fdatasync 43 min
+        // with only the raw fd visible).
+        // Family must MATCH the stash op: a writev to a pipe/socket
+        // never re-stashes (pipe fast path), so the slot would still
+        // hold an older open's path — printing it against a writev
+        // entry frame mislabels the file (seen on sc314A wave-1).
+        #[cfg(feature = "x86_64")]
+        let fam = if matches!(sys, 2 | 257 | 437) {
+            Some(crate::dfx::pathstash::OP_OPEN)
+        } else if matches!(sys, 1 | 20) {
+            Some(crate::dfx::pathstash::OP_WRITE)
+        } else if matches!(sys, 74 | 75) {
+            Some(crate::dfx::pathstash::OP_SYNC)
+        } else {
+            None
+        };
+        #[cfg(feature = "riscv64")]
+        let fam = if matches!(sys, 56 | 24) {
+            Some(crate::dfx::pathstash::OP_OPEN)
+        } else if matches!(sys, 64 | 66) {
+            Some(crate::dfx::pathstash::OP_WRITE)
+        } else if matches!(sys, 82 | 83) {
+            Some(crate::dfx::pathstash::OP_SYNC)
+        } else {
+            None
+        };
+        if let Some(want) = fam {
+            if let Some((op, p)) = crate::dfx::pathstash::lookup_file(h.stid) {
+                if op == want {
+                    let opn = match op {
+                        crate::dfx::pathstash::OP_OPEN => "open",
+                        crate::dfx::pathstash::OP_WRITE => "write",
+                        crate::dfx::pathstash::OP_SYNC => "sync",
+                        _ => "?",
+                    };
+                    let _ = writeln!(
+                        w,
+                        "TXN-HANG txn{} file-op={} path='{}'",
+                        h.id, opn, p
+                    );
+                }
+            }
+        }
+        // Leg-29A stuck-site probe: kernel-text words off the hung
+        // thread's kernel stack, so the serial log names WHERE in the
+        // kernel the handler is parked (sc310's RUNNING 43-min
+        // fdatasync vs sc303's D-state open need the stuck function,
+        // not just the syscall). Two windows:
+        //   sp-up   from thread().sp upward — the exact parked chain
+        //           when the thread SLEEPS (context-switch-fresh sp;
+        //           same contract as khungtaskd's HUNG-STK).
+        //   top-dn  from just under the entry pt_regs downward — the
+        //           newest frames when the thread is RUNNING on
+        //           another CPU (thread().sp is then stale; the live
+        //           frames sit between the entry frame and the current
+        //           sp, so scanning from the top catches them plus
+        //           dead-frame noise).
+        // Cross-CPU reads are diagnostic-only (sc261 sleep_snapshot
+        // contract); symbolize offline with addr2line.
+        if !srv.is_null() {
+            // SAFETY: diagnostic reads of the task's fields and its
+            // pinned kernel-stack pages (the Task exists).
+            let tk = unsafe { &*srv };
+            if let Some(top) = tk.kernel_stack_top_checked() {
+                #[cfg(feature = "x86_64")]
+                extern "C" {
+                    static __stext: u8;
+                    static __etext: u8;
+                }
+                #[cfg(not(feature = "x86_64"))]
+                extern "C" {
+                    static _stext: u8;
+                    static _etext: u8;
+                }
+                #[cfg(feature = "x86_64")]
+                let (lo, hi) = (
+                    core::ptr::addr_of!(__stext) as u64,
+                    core::ptr::addr_of!(__etext) as u64,
+                );
+                #[cfg(not(feature = "x86_64"))]
+                let (lo, hi) = (
+                    core::ptr::addr_of!(_stext) as u64,
+                    core::ptr::addr_of!(_etext) as u64,
+                );
+                let is_text = |v: u64| v >= lo && v < hi && (v & 1) == 0;
+                let base = top - crate::config::KERNEL_STACK_SIZE;
+                let thsp = tk.thread().sp;
+                let mut line = alloc::string::String::new();
+                // Window (a): parked-chain words upward from sp.
+                if thsp as usize >= base
+                    && thsp as usize + 8 <= top
+                    && (thsp & 7) == 0
+                {
+                    let p = thsp as *const u64;
+                    let mut shown = 0;
+                    let _ = write!(line, " sp-up:");
+                    // 384-word window: deep waits (journal commit, bio
+                    // completion) park far below the syscall frames; the
+                    // original 80-word window caught only the switch/IRQ
+                    // plumbing above the saved sp (sc315A's parked
+                    // fdatasync chains symbolized to context_switch).
+                    for k in 0..384usize {
+                        // SAFETY: diagnostic read inside the task's own
+                        // kernel-stack window; bounds checked above.
+                        let v = unsafe { core::ptr::read_volatile(p.add(k)) };
+                        if is_text(v) {
+                            let _ = write!(line, " {v:#x}");
+                            shown += 1;
+                            if shown >= 8 {
+                                break;
+                            }
+                        }
+                    }
+                    if shown == 0 {
+                        line.truncate(0);
+                    }
+                }
+                // Window (b): newest frames downward from the entry frame.
+                #[cfg(feature = "x86_64")]
+                let entry_sz = crate::arch::x86_64::pt_regs::PT_REGS_SIZE;
+                #[cfg(feature = "riscv64")]
+                let entry_sz = crate::arch::riscv64::pt_regs::PT_REGS_SIZE;
+                let start = (top - entry_sz).saturating_sub(8) & !7usize;
+                let mut bline = alloc::string::String::new();
+                let _ = write!(bline, " top-dn:");
+                let mut shown = 0;
+                let mut k = 0usize;
+                while shown < 10 && k < 0x600 / 8 {
+                    let addr = start - k * 8;
+                    if addr < base + 8 {
+                        break;
+                    }
+                    // SAFETY: diagnostic read inside the task's own
+                    // kernel-stack window; bounds checked above.
+                    let v = unsafe { core::ptr::read_volatile(addr as *const u64) };
+                    if is_text(v) {
+                        let _ = write!(bline, " {v:#x}");
+                        shown += 1;
+                    }
+                    k += 1;
+                }
+                if shown > 0 {
+                    let _ = writeln!(
+                        w,
+                        "TXN-HANG-STK txn{} tid{} state={:#x} thsp={:#x}{}{}",
+                        h.id,
+                        h.stid,
+                        state,
+                        thsp,
+                        line,
+                        bline
+                    );
+                }
+            }
+        }
+    }
+    for o in &outs {
+        let _ = writeln!(
+            w,
+            "TXN-HANG-OUT txn{} code{} from pid {} -> pid {} tid {}: {} {} ms",
+            o.id,
+            o.code,
+            o.fpid,
+            o.tpid,
+            o.ttid,
+            if o.queued { "queue" } else { "exec" },
+            o.ms
+        );
+    }
+}
+
+/// dfx=ams46 (leg-30B): ~5 s census of the latched AMS node + its
+/// foundation process. Prints ONLY while there is pending work on the
+/// node/proc (async slot held, txns parked, or proc todo non-empty), so
+/// a healthy quiesced draw costs zero lines. The census is the
+/// adjudication backdrop for the traced code-46 txn: parked>0 with a
+/// held slot names slot starvation (the holder's buffer never freed);
+/// todo>0 with waiting==0 names a reader-less foundation (no eligible
+/// looper thread to wake); everything zero with no READ line after ENQ
+/// means the txn already vanished (retire — see the RETIRED prints).
+pub fn ams46_audit() {
+    if !ams46_on() {
+        return;
+    }
+    let now = crate::drivers::timer::get_jiffies() as u32;
+    // One census per 5 s (500 jiffies at HZ=100); first call fires.
+    static LAST: core::sync::atomic::AtomicU32 = core::sync::atomic::AtomicU32::new(0);
+    use core::sync::atomic::Ordering::Relaxed;
+    let last = LAST.load(Relaxed);
+    if last != 0 && now.wrapping_sub(last) < 500 {
+        return;
+    }
+    if LAST.compare_exchange(last, now, Relaxed, Relaxed).is_err() {
+        return;
+    }
+    let latched = ams46_node_id();
+    if latched == 0 {
+        return;
+    }
+    let tpid = AMS46_TPID.load(Relaxed);
+    let mut todo_d = 0usize;
+    let mut waiting = 0usize;
+    let mut threads_n = 0usize;
+    let mut parked = 0usize;
+    let mut async_held = false;
+    let mut found = false;
+    {
+        let w = world_lock();
+        // SAFETY: read-only traversal under WORLD (pm() casts only reach
+        // the foundation proc's thread/node/todo lists; POD snapshot
+        // only — sc89).
+        unsafe {
+            let world = match w.as_ref() {
+                Some(world) => world,
+                None => return,
+            };
+            if let Some(p) = world.procs.iter().find(|p| p.pid == tpid) {
+                let pim = pm(world, p).im();
+                todo_d = pim.todo.len();
+                threads_n = pim.threads.len();
+                waiting = pim
+                    .threads
+                    .iter()
+                    .filter(|t| {
+                        let th = t.st();
+                        th.waiting_for_proc_work && th.todo.is_empty() && th.txn_stack.is_empty()
+                    })
+                    .count();
+                if let Some(n) = pim.nodes.iter().find(|n| n.id == latched) {
+                    let ns = n.st();
+                    async_held = ns.has_async_transaction;
+                    parked = ns.async_todo.len();
+                }
+                found = true;
+            }
+        }
+    }
+    if !found {
+        return;
+    }
+    if async_held || parked > 0 || todo_d > 0 {
+        static CEN_N: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+        if CEN_N.fetch_add(1, Relaxed) < 240 {
+            crate::pr_warn!(
+                "AMS46 census j={} pid={} todo={} waiting={} thr={} node{} async={} parked={}",
+                now / 100,
+                tpid,
+                todo_d,
+                waiting,
+                threads_n,
+                latched,
+                async_held,
+                parked
+            );
+        }
+    }
+}
+
 
 /// World-wide search for queued/stacked transactions SENT by (pid, tid) —
 /// the sc74 discriminator: a SERVER-OWING thread (parked owing a reply,
@@ -3000,14 +3643,18 @@ unsafe fn user_park_stack_dump(t: &Arc<BinderThread>) {
         return;
     };
     #[cfg(feature = "x86_64")]
-    let (rsp, rip) = {
+    let (rsp, rip) = if top == 0 {
+        (0, 0)
+    } else {
         let regs = (top.wrapping_sub(crate::arch::x86_64::pt_regs::PT_REGS_SIZE))
             as *const crate::arch::x86_64::pt_regs::PtRegs;
         // SAFETY: diagnostic read of the holder's entry frame.
         unsafe { ((*regs).rsp, (*regs).rip) }
     };
     #[cfg(feature = "riscv64")]
-    let (rsp, rip) = {
+    let (rsp, rip) = if top == 0 {
+        (0, 0)
+    } else {
         let regs = (top.wrapping_sub(crate::arch::riscv64::pt_regs::PT_REGS_SIZE))
             as *const crate::arch::riscv64::pt_regs::PtRegs;
         // SAFETY: same contract, riscv64.
@@ -4234,6 +4881,35 @@ fn binder_thread_write(
                                     // async slot to the next parked txn or
                                     // free it (Linux drains node->async_todo
                                     // in binder_free_buf).
+                                    // leg-30B AMS46: the receiver's BC_FREE
+                                    // for a traced/AMS-node txn — slot
+                                    // release or handoff, the (c) leg of the
+                                    // adjudication.
+                                    {
+                                        static AMS46_FR_N: core::sync::atomic::AtomicUsize =
+                                            core::sync::atomic::AtomicUsize::new(0);
+                                        let latched = ams46_node_id();
+                                        let is_ams = latched != 0
+                                            && t.target_node.as_ref().map(|n| n.id)
+                                                == Some(latched);
+                                        if ams46_on()
+                                            && (ams46_txns_contains(t.id) || is_ams)
+                                            && AMS46_FR_N
+                                                .fetch_add(
+                                                    1,
+                                                    core::sync::atomic::Ordering::Relaxed,
+                                                )
+                                                < 96
+                                        {
+                                            crate::pr_warn!(
+                                                "AMS46 FREE txn{} code={} by pid={} held_slot={}",
+                                                t.id,
+                                                t.code,
+                                                proc.pid,
+                                                t.holds_async_slot()
+                                            );
+                                        }
+                                    }
                                     if t.holds_async_slot() {
                                         let mut next: Option<Arc<BinderTxn>> = None;
                                         if let Some(node) = &t.target_node {
@@ -4241,6 +4917,14 @@ fn binder_thread_write(
                                             next = ns.async_todo.pop_front();
                                             if next.is_none() {
                                                 ns.has_async_transaction = false;
+                                                if ams46_on()
+                                                    && ams46_txns_contains(t.id)
+                                                {
+                                                    crate::pr_warn!(
+                                                        "AMS46 slot released by txn{}",
+                                                        t.id
+                                                    );
+                                                }
                                             }
                                         }
                                         if let Some(h) = next {
@@ -4250,6 +4934,12 @@ fn binder_thread_write(
                                             let tpid = tp.pid;
                                             pm(world, &tp).im().todo.push_back(Work::Transaction(h));
                                             drain_wake = Some(tp);
+                                            if ams46_on() && ams46_txns_contains(tid) {
+                                                crate::pr_warn!(
+                                                    "AMS46 slot -> txn{} (parked code-46 DELIVERED by drain)",
+                                                    tid
+                                                );
+                                            }
                                             crate::pr_info!(
                                                 "binder: oneway txn {} drained to proc {}",
                                                 tid,
@@ -4726,15 +5416,20 @@ fn binder_transaction(
                 // sc208 SLOW-TXN probe (C-line: SAMgr SendRequest ~30 s
                 // per call with the fixed clock): split the sync-txn
                 // lifecycle into QUEUE (enq -> server pickup) and EXEC
-                // (pickup -> reply) and print both for anything over 5 s.
-                // Direct console (quietcon boots drop pr_warn pre-ring at
-                // loglevel 3), rate-capped to one line per 2 s. Printed
-                // from inside the WORLD guard like the surrounding
-                // pr_info!s on this path (single short line, bounded).
+                // (pickup -> reply) and print both for anything over the
+                // threshold. sc269 (leg-25): 5 s hid the launcher-load
+                // family (IOsAccount ~2 s, IDisplayComposer ~3 s,
+                // AbilityManager 4-6 s, all client-visible in hilog's
+                // BlockMonitor); threshold 150 jiffies (1.5 s), sender +
+                // server comm named inline. Direct console (quietcon
+                // boots drop pr_warn pre-ring at loglevel 3), rate-capped
+                // to one line per 2 s. Printed from inside the WORLD
+                // guard like the surrounding pr_info!s on this path
+                // (single short line, bounded).
                 {
                     let now = crate::drivers::timer::get_jiffies() as u32;
                     let total = now.wrapping_sub(t.enq_j);
-                    if total >= 500 {
+                    if total >= 150 {
                         static LAST: core::sync::atomic::AtomicU32 =
                             core::sync::atomic::AtomicU32::new(0);
                         use core::sync::atomic::Ordering::Relaxed;
@@ -4747,17 +5442,37 @@ fn binder_transaction(
                             let pick = unsafe { *t.pick_j.get() };
                             let q = if pick != 0 { pick.wrapping_sub(t.enq_j) } else { 0 };
                             let x = if pick != 0 { now.wrapping_sub(pick) } else { total };
+                            let from_pid =
+                                t.from_proc.as_ref().map(|p| p.pid).unwrap_or(0);
+                            let from_comm = crate::sched::find_task_by_pid(
+                                t.from_tid.unwrap_or(0),
+                            );
+                            let to_comm = crate::sched::find_task_by_pid(
+                                t.to_tid().unwrap_or(t.to_proc.pid),
+                            );
+                            let comm_of = |p: *mut crate::process::Task| -> &str {
+                                if p.is_null() {
+                                    return "?";
+                                }
+                                // SAFETY: diagnostic comm read of a live task.
+                                let c = unsafe { (*p).comm() };
+                                core::str::from_utf8(&c[..])
+                                    .unwrap_or("?")
+                                    .trim_end_matches('\0')
+                            };
                             let mut w = crate::dfx::backtrace::ConsoleWriter::new();
                             use core::fmt::Write as _;
                             let _ = writeln!(
                                 w,
-                                "SLOW-TXN txn{} code {} from pid {} tid {} to pid {} tid {}: total {} ms (queue {} ms, exec {} ms)",
+                                "SLOW-TXN txn{} code {} from pid {} tid {} ({}) to pid {} tid {} ({}): total {} ms (queue {} ms, exec {} ms)",
                                 t.id,
                                 t.code,
-                                t.from_proc.as_ref().map(|p| p.pid).unwrap_or(0),
+                                from_pid,
                                 t.from_tid.unwrap_or(0),
+                                comm_of(from_comm),
                                 t.to_proc.pid,
                                 thread.tid,
+                                comm_of(to_comm),
                                 total * 10,
                                 q * 10,
                                 x * 10
@@ -5311,6 +6026,13 @@ fn binder_transaction(
             if ok && &hdr[12..16] == &[0x6f, 0x00, 0x68, 0x00] {
                 is_samgr_req = true;
                 SAREG_SAMGR_PID.store(target.pid as u32, core::sync::atomic::Ordering::Relaxed);
+                // leg-25 mirror for the SLRD read-side gate (see
+                // binder_sareg_samgr_pid): samgr's leader comm matches
+                // no app prefix, so the tracer keys on the pid.
+                SAREG_SAMGR_PID_PUB.store(
+                    target.pid as u32,
+                    core::sync::atomic::Ordering::Relaxed,
+                );
             }
         }
         let reply_to_mutation = reply
@@ -5331,6 +6053,9 @@ fn binder_transaction(
                 == SAREG_SAMGR_PID.load(core::sync::atomic::Ordering::Relaxed);
         if is_samgr_req || reply_to_mutation {
             if SAREG_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 600 {
+                // leg-25: the enqueued txn's id, so the send line pairs
+                // 1:1 with the SLRD read line (offline delivery audit).
+                let t_id = txn.id;
                 let comm = crate::sched::current()
                     .map(|t| unsafe { (*t).comm() })
                     .map(|c| core::str::from_utf8(c).unwrap_or(""))
@@ -5357,8 +6082,9 @@ fn binder_transaction(
                         alloc::string::String::from("unmapped")
                     };
                 crate::pr_warn!(
-                    "SAREG {} code={} from pid={} tgid={} comm='{}' -> pid={} dlen={} parcel={}",
+                    "SAREG {} txn{} code={} from pid={} tgid={} comm='{}' -> pid={} dlen={} parcel={}",
                     if reply { "reply" } else { "send " },
+                    t_id,
                     if reply {
                         in_reply_to.as_ref().map(|t| t.code).unwrap_or(0)
                     } else {
@@ -5372,6 +6098,139 @@ fn binder_transaction(
                     hex
                 );
             }
+        }
+    }
+
+    // leg-30B (dfx=ams46): Gate-1 arsenal ENQ hook. Match the
+    // IAbilityManager interface token on the sender's parcel head,
+    // latch the AMS node id + foundation pid on first sight, and ring
+    // every code-46 (StartUser) send for read/free/retire correlation.
+    if ams46_on() && !reply {
+        let mut hb = [0u8; 64];
+        let tok_ok = tr.data_buffer != 0
+            && unsafe {
+                crate::arch::uaccess::copy_from_user(
+                    hb.as_mut_ptr(),
+                    tr.data_buffer as *const u8,
+                    hb.len(),
+                ) == 0
+            };
+        if tok_ok && ams46_token_match(&hb) {
+            let nid = target_node.as_ref().map(|n| n.id).unwrap_or(0);
+            if ams46_node_id() == 0 && nid != 0 {
+                AMS46_NODE_ID.store(nid, core::sync::atomic::Ordering::Relaxed);
+                AMS46_TPID.store(target.pid, core::sync::atomic::Ordering::Relaxed);
+                crate::pr_warn!("AMS46 latch node={} pid={}", nid, target.pid);
+            }
+            if tr.code == 46 {
+                ams46_txns_push(txn.id);
+                if AMS46_ENQ_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 32 {
+                    let comm = crate::sched::current()
+                        .map(|t| unsafe { (*t).comm() })
+                        .map(|c| core::str::from_utf8(c).unwrap_or(""))
+                        .unwrap_or("")
+                        .trim_end_matches('\0');
+                    let hex: alloc::string::String = hb[..48]
+                        .iter()
+                        .map(|b| alloc::format!("{:02x}", b))
+                        .collect();
+                    crate::pr_warn!(
+                        "AMS46 ENQ txn{} from pid={} tid={} comm='{}' flags={:#x} dlen={} parcel={}",
+                        txn.id,
+                        proc.pid,
+                        thread.tid,
+                        comm,
+                        tr.flags,
+                        data_size,
+                        hex
+                    );
+                }
+            }
+        }
+    }
+
+    // sc262 (leg-23): launcher lifecycle-path tracer. Every sc261-class
+    // boot ends in the AMS restart loop — LIFECYCLE_TIMEOUT for
+    // com.ohos.launcher.MainAbility ("load" phase, the same timeout
+    // that hits settingsdata's DataExtAbility) while the parked
+    // launcher looks healthy: main thread in poll, OS_IPC threads in
+    // binder read, and hilog never logs a single ability-schedule
+    // event. This prints BOTH directions of the launcher's binder
+    // traffic at ENQUEUE time — its own sends and every transaction
+    // queued TO it. Offline adjudication: an in-line printed here
+    // while the app still times out = delivery/wake loss (kernel
+    // read path); no in-line during the load window = AMS never sent
+    // (AMS-side stall).
+    //
+    // sc262 READBACK CORRECTED THE LATCH: appspawn children NEVER open
+    // /dev/binder — they send through the daemon's INHERITED fd, so
+    // proc.pid is the DAEMON's (329) for every child, and the first
+    // latch burned the 500-line budget on the daemon's whole proc.
+    // v2: gate by the SENDER's tgid-leader comm (app-family child),
+    // not by proc identity; in-lines additionally print the target
+    // node's reg_tgid (the intended child, already known to APPTXN).
+    // 1500/boot.
+    {
+        static SLTX_N: core::sync::atomic::AtomicUsize =
+            core::sync::atomic::AtomicUsize::new(0);
+        // App-family child gate: the tgid LEADER's comm (OS_IPC/OS_FFRT
+        // are generic worker names present in every service — matching
+        // the reading thread's comm burned the read-side budget in one
+        // boot).
+        fn sltx_app_child(tgid: u32) -> bool {
+            if tgid == 0 {
+                return false;
+            }
+            let t = unsafe { crate::sched::find_task_by_pid(tgid) };
+            if t.is_null() {
+                return false;
+            }
+            let name = core::str::from_utf8(unsafe { (*t).comm() })
+                .unwrap_or("")
+                .trim_end_matches('\0');
+            name.starts_with("m.ohos.")
+                || name.starts_with("os.")
+                || name.starts_with("com.")
+                || name.starts_with("tonelibrarydata")
+        }
+        let sender_tgid = crate::sched::current()
+            .map(|t| unsafe { (*t).tgid() as u32 })
+            .unwrap_or(0);
+        let sender_is_app = sltx_app_child(sender_tgid);
+        let target_child = target_node
+            .as_ref()
+            .map(|n| n.reg_tgid)
+            .filter(|&g| g != 0 && g != target.pid)
+            .unwrap_or(0);
+        if (sender_is_app || target_child != 0)
+            && SLTX_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 1500
+        {
+            let mut pb = [0u8; 32];
+            let hex: alloc::string::String = if tr.data_buffer != 0
+                && unsafe {
+                    crate::arch::uaccess::copy_from_user(
+                        pb.as_mut_ptr(),
+                        tr.data_buffer as *const u8,
+                        pb.len(),
+                    ) == 0
+                }
+            {
+                pb.iter().map(|b| alloc::format!("{:02x}", b)).collect()
+            } else {
+                alloc::string::String::from("-")
+            };
+            crate::pr_warn!(
+                "SLTX {} tgid={} pid={} -> pid={} child={} code={:#x} oneway={} dlen={} parcel={}",
+                if sender_is_app { "out" } else { "in " },
+                sender_tgid,
+                proc.pid,
+                target.pid,
+                target_child,
+                tr.code,
+                oneway,
+                data_size,
+                hex
+            );
         }
     }
 
@@ -5651,6 +6510,18 @@ fn binder_transaction(
                             node.id,
                             ns.async_todo.len()
                         );
+                        // leg-30B AMS46: the traced StartUser parked
+                        // behind an un-freed earlier oneway — delivery
+                        // deferred indefinitely until the slot holder's
+                        // buffer is freed (or the 30 s sweeps act).
+                        if ams46_on() && ams46_txns_contains(txn.id) {
+                            crate::pr_warn!(
+                                "AMS46 Q txn{} PARKED on node{} qlen={} (slot held by earlier oneway)",
+                                txn.id,
+                                node.id,
+                                ns.async_todo.len()
+                            );
+                        }
                     } else {
                         ns.has_async_transaction = true;
                     }
@@ -5693,6 +6564,15 @@ fn binder_transaction(
                                 wakes.push(target.clone());
                             }
                         }
+                    }
+                    // leg-30B AMS46: the traced StartUser took the async
+                    // slot and is queued for delivery.
+                    if ams46_on() && ams46_txns_contains(txn.id) {
+                        crate::pr_warn!(
+                            "AMS46 Q txn{} route={} (slot taken)",
+                            txn.id,
+                            txn_route_label
+                        );
                     }
                     // sc140: oneway half of the APPTXN tracer (see the
                     // sync branch below for the rationale).
@@ -5860,6 +6740,16 @@ fn binder_transaction(
                             );
                         }
                     }
+                }
+                // leg-30B AMS46: defensive sync-side trace (the StartUser
+                // send is TF_ASYNC-shaped; a twoway variant would land
+                // here and its sender would park for the reply).
+                if ams46_on() && ams46_txns_contains(txn.id) {
+                    crate::pr_warn!(
+                        "AMS46 Q txn{} SYNC route={}",
+                        txn.id,
+                        txn_route_label
+                    );
                 }
             }
         }
@@ -6447,6 +7337,86 @@ fn binder_thread_read(
                             // transaction is being read out to its
                             // receiving thread (BR_TRANSACTION/BR_REPLY).
                             crate::trace::trace_binder_transaction_received(t.id);
+                            // leg-30B (dfx=ams46): read-side trace — a
+                            // foundation thread picked up the traced
+                            // code-46 StartUser. This line is the
+                            // kernel-delivery-COMPLETE marker: everything
+                            // lost past it is foundation userspace.
+                            if ams46_on() && ams46_txns_contains(t.id) {
+                                let name = crate::sched::current()
+                                    .map(|ct| unsafe { (*ct).comm() })
+                                    .map(|c| core::str::from_utf8(c).unwrap_or(""))
+                                    .unwrap_or("")
+                                    .trim_end_matches('\0');
+                                crate::pr_warn!(
+                                    "AMS46 READ txn{} by pid={} tid={} comm='{}' code={} reply={}",
+                                    t.id,
+                                    proc.pid,
+                                    thread.tid,
+                                    name,
+                                    t.code,
+                                    is_reply
+                                );
+                            }
+                            // sc262 (leg-23): SLTX read-side — an
+                            // app-family child's thread picked this
+                            // transaction up out of its queue. An
+                            // enqueue-side "SLTX in child=X" line with
+                            // no matching read here, while the app
+                            // still parks, names the wake/read path as
+                            // the loss point. sc262 v1 burned its budget
+                            // on samgr/OS_IPC noise (OS_IPC/OS_FFRT are
+                            // generic worker names in EVERY service)
+                            // and required tgid == proc.pid, which can
+                            // never hold for children reading through
+                            // the daemon's INHERITED fd; v2 gates on
+                            // the tgid LEADER's comm only.
+                            // leg-25 (sc276): samgr's own reads were
+                            // invisible (comm 'samgr' matches no app
+                            // prefix) exactly where the on-demand
+                            // unload question lives — samgr killing
+                            // services 13 ms after releases while
+                            // clients are mid-call needs the
+                            // Add/Remove (SAREG code 3/4) delivery
+                            // record on samgr's side. Gate on the
+                            // SAREG-known samgr pid too.
+                            if let Some(cur) = crate::sched::current() {
+                                let tg = unsafe { (*cur).tgid() as u32 };
+                                if tg != 0 {
+                                    let lt = unsafe { crate::sched::find_task_by_pid(tg) };
+                                    if !lt.is_null() {
+                                        let lname = core::str::from_utf8(unsafe { (*lt).comm() })
+                                            .unwrap_or("")
+                                            .trim_end_matches('\0');
+                                        let samgr_pid = binder_sareg_samgr_pid();
+                                        if lname.starts_with("m.ohos.")
+                                            || lname.starts_with("os.")
+                                            || lname.starts_with("com.")
+                                            || (samgr_pid != 0 && tg == samgr_pid)
+                                        {
+                                            static SLRD_N: core::sync::atomic::AtomicUsize =
+                                                core::sync::atomic::AtomicUsize::new(0);
+                                            if SLRD_N
+                                                .fetch_add(1, core::sync::atomic::Ordering::Relaxed)
+                                                < 1500
+                                            {
+                                                let name = core::str::from_utf8(unsafe { (*cur).comm() })
+                                                    .unwrap_or("")
+                                                    .trim_end_matches('\0');
+                                                crate::pr_warn!(
+                                                    "SLRD tgid={} tid={} comm='{}' read txn id={} code={:#x} reply={}",
+                                                    tg,
+                                                    thread.tid,
+                                                    name,
+                                                    t.id,
+                                                    t.code,
+                                                    t.target_node.is_none()
+                                                );
+                                            }
+                                        }
+                                    }
+                                }
+                            }
                             let (tptr, tcookie) = match &t.target_node {
                                 Some(n) => (n.ptr, n.cookie),
                                 None => (0, 0),

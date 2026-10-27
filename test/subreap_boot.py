@@ -1,0 +1,176 @@
+#!/usr/bin/env python3
+"""subreap_boot.py — boot the x86_64 Rux kernel with subreap_churn as
+init (musl static binary) and judge the E8-REPAR "unlinked snapshot"
+root-cause hunt (leg-29A).
+
+Verdict discipline (exitwalk_boot.py family):
+  SUBREAP-PASS                          -> rc 0
+  SUBREAPFAIL-*                         -> rc 2 (probe-level fail)
+  TREE-PARENT-DEAD / TREE-SNAP-STALE /
+  TREE-UNLINKED (dfx=treehunt)          -> rc 2 (forensic: the
+                                           invariant violation drew)
+  kernel panic / Oops / wedge           -> rc 2
+  timeout (no PASS line)                -> rc 3
+
+Usage:
+  ./subreap_boot.py [--smp 2] [--secs 30] [--mem 512M]
+      [--kernel bzImage] [--accel kvm|tcg] [--show]
+"""
+import argparse
+import os
+import re
+import shutil
+import subprocess
+import sys
+import tempfile
+import time
+
+HERE = os.path.dirname(os.path.abspath(__file__))
+WT = os.path.dirname(HERE)
+QEMU = "qemu-system-x86_64"
+MKFS = "/usr/sbin/mkfs.ext4"
+MUSL_CC = os.path.join(WT, "toolchain", "x86_64-rux-linux-musl", "bin",
+                       "musl-gcc")
+
+PASS_LINE = re.compile(rb"SUBREAP-PASS")
+FAIL_LINE = re.compile(rb"SUBREAPFAIL-")
+FORENSIC_LINE = re.compile(rb"TREE-PARENT-DEAD|TREE-SNAP-STALE|TREE-UNLINKED")
+WEDGE_LINE = re.compile(
+    rb"Kernel panic|panic: |BUG: |Oops: |unable to handle kernel|"
+    rb"DEADLOCK: spinlock stuck|BUG: soft lockup|trap: #GP|trap: #PF|"
+    rb"general protection fault")
+
+
+def build_image(img, probe_bin, name):
+    staging = tempfile.mkdtemp(prefix="subreap_root")
+    os.makedirs(os.path.join(staging, "test"))
+    shutil.copy(probe_bin, os.path.join(staging, "test", name))
+    r = subprocess.run([MKFS, "-q", "-F", "-O", "^metadata_csum,^64bit",
+                        "-d", staging, img, "64M"],
+                       capture_output=True)
+    shutil.rmtree(staging)
+    if r.returncode != 0:
+        print("mkfs failed:", r.stderr.decode(), file=sys.stderr)
+        sys.exit(4)
+
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--smp", default="2")
+    ap.add_argument("--secs", default="30")
+    ap.add_argument("--mem", default="2G")
+    ap.add_argument("--kernel", default=os.path.join(
+        WT, "target/x86_64-unknown-none/debug/bzImage"))
+    ap.add_argument("--accel", default="kvm",
+                    help="kvm (default; falls back to tcg) or tcg")
+    ap.add_argument("--dfx", default="dfx=treehunt")
+    ap.add_argument("--keep-img", action="store_true")
+    ap.add_argument("--show", action="store_true",
+                    help="stream raw serial to stdout too")
+    args = ap.parse_args()
+
+    src = os.path.join(HERE, "subreap_churn.c")
+    binp = os.path.join(WT, "work", "subreap_churn-x86")
+    os.makedirs(os.path.join(WT, "work"), exist_ok=True)
+    env = dict(os.environ)
+    env.setdefault("REALGCC", "gcc")
+    subprocess.run([MUSL_CC, "-static", "-O1", "-Wall",
+                    f"-DPROBE_SECS={args.secs}",
+                    "-o", binp, src],
+                   check=True, env=env)
+
+    img = os.path.join(WT, "work", "subreap_churn-x86.img")
+    build_image(img, binp, "subreap_churn")
+
+    accel = ["-accel", "kvm", "-accel", "tcg"] if args.accel == "kvm" else \
+        ["-accel", "tcg,thread=multi"]
+    cmd = [QEMU, "-M", "q35", *accel,
+           "-cpu", "max", "-m", args.mem, "-smp", args.smp,
+           "-display", "none", "-serial", "stdio", "-monitor", "none",
+           "-no-reboot", "-snapshot",
+           "-drive", f"file={img},if=none,id=rootfs,format=raw,file.locking=off",
+           "-device", "virtio-blk-pci,disable-legacy=on,drive=rootfs",
+           "-kernel", args.kernel,
+           "-append", f"root=/dev/vda rw init=/test/subreap_churn "
+                      f"console=ttyS0 {args.dfx}"]
+    print("[boot]", " ".join(cmd[1:]), flush=True)
+    p = subprocess.Popen(cmd, stdout=subprocess.PIPE,
+                         stderr=subprocess.STDOUT)
+
+    deadline = time.time() + float(args.secs) + 300
+    out = bytearray()
+    wedge = None
+    forensic = None
+    verdict = None
+    logp = os.path.join(WT, "runs",
+                        f"subreap-x86-{int(time.time())}-{os.getpid()}.log")
+    os.makedirs(os.path.join(WT, "runs"), exist_ok=True)
+    logf = open(logp, "wb")
+    try:
+        while time.time() < deadline:
+            line = p.stdout.readline()
+            if not line:
+                if p.poll() is not None:
+                    break
+                continue
+            out += line
+            logf.write(line)
+            logf.flush()
+            if args.show:
+                sys.stdout.write(line.decode("latin1"))
+                sys.stdout.flush()
+            if FAIL_LINE.search(line):
+                verdict = "probe-fail"
+            elif WEDGE_LINE.search(line):
+                wedge = line.decode("latin1").strip()
+                verdict = "wedge"
+            elif FORENSIC_LINE.search(line):
+                forensic = line.decode("latin1").strip()
+                verdict = "forensic"
+            elif PASS_LINE.search(line):
+                verdict = "pass"
+            if verdict is not None:
+                if verdict != "pass":
+                    drain_until = time.time() + 12
+                    while time.time() < drain_until:
+                        line = p.stdout.readline()
+                        if not line:
+                            if p.poll() is not None:
+                                break
+                            continue
+                        out += line
+                        logf.write(line)
+                        logf.flush()
+                        if args.show:
+                            sys.stdout.write(line.decode("latin1"))
+                break
+    finally:
+        logf.close()
+        if p.poll() is None:
+            p.terminate()
+            try:
+                p.wait(10)
+            except subprocess.TimeoutExpired:
+                p.kill()
+    if not args.keep_img:
+        try:
+            os.unlink(img)
+        except OSError:
+            pass
+
+    tail = out[-4000:].decode("latin1")
+    print(f"--- verdict: {verdict} (log: {logp}) ---")
+    if forensic:
+        print("forensic line:", forensic)
+    if wedge:
+        print("wedge line:", wedge)
+    print(tail[-1500:])
+    if verdict == "pass":
+        return 0
+    if verdict in ("probe-fail", "wedge", "forensic"):
+        return 2
+    return 3
+
+
+if __name__ == "__main__":
+    sys.exit(main())

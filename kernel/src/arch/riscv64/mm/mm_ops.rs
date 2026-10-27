@@ -40,7 +40,7 @@ use super::mmu_init::*;
 use super::pagetable::*;
 use crate::mm::page::{PAGE_SIZE as PAGE_SIZE_USIZE, VirtAddr as PageVirtAddr};
 use crate::mm::pagemap::{MapError, Perm, PageTableType};
-use crate::mm::vma::{Vma, VmaFlags, VmaType};
+use crate::mm::vma::{Vma, VmaFlags, VmaOrigin, VmaType};
 use crate::mm::{MmStruct, alloc_pages, GfpFlags};
 
 // Re-export AddressSpace for backward compatibility
@@ -269,11 +269,12 @@ impl MmStruct {
                     let mut vma_mgr = self.vma_write();
                     let mut vma_flags = VmaFlags::new();
                     vma_flags.insert(VmaFlags::READ | VmaFlags::WRITE | VmaFlags::GROWSUP);
-                    let vma = Vma::new(
+                    let mut vma = Vma::new(
                         PageVirtAddr::new(addr),
                         PageVirtAddr::new(addr + PAGE_SIZE_USIZE),
                         vma_flags,
                     );
+                    vma.set_origin(VmaOrigin::from_bits(VmaOrigin::BRK));
                     let _ = vma_mgr.add(vma);
                 }
                 addr += PAGE_SIZE_USIZE;
@@ -414,6 +415,7 @@ impl MmStruct {
             let vend = PageVirtAddr::new(chosen.as_usize() + aligned_size);
             let mut vma = Vma::new(chosen, vend, flags);
             vma.set_type(vma_type);
+            vma.set_origin(VmaOrigin::from_bits(VmaOrigin::MMAP));
             vma_mgr
                 .add(vma)
                 .map_err(|_| MapError::Invalid)?;
@@ -479,6 +481,8 @@ impl MmStruct {
                     let mut tail =
                         Vma::new(fixed_end, vma.end(), vma.flags());
                     tail.set_type(vma.vma_type());
+                    // Preserved piece: keep the original VMA's origin.
+                    tail.set_origin(vma.origin());
                     tail.set_file_fd(vma.file_fd());
                     tail.set_file_size(vma.file_size());
                     tail.set_offset(
@@ -513,6 +517,7 @@ impl MmStruct {
             let end = PageVirtAddr::new(start.as_usize() + aligned_size);
             let mut vma = Vma::new(start, end, flags);
             vma.set_type(vma_type);
+            vma.set_origin(VmaOrigin::from_bits(VmaOrigin::MMAP));
             vma_mgr.add(vma).map_err(|_| MapError::Invalid)?;
             drop(vma_mgr);
             self.add_total_vm((aligned_size / PAGE_SIZE_USIZE) as u64);
@@ -526,6 +531,7 @@ impl MmStruct {
             let end = PageVirtAddr::new(start.as_usize() + aligned_size);
             let mut vma = Vma::new(start, end, flags);
             vma.set_type(vma_type);
+            vma.set_origin(VmaOrigin::from_bits(VmaOrigin::MMAP));
             self.map_vma(vma, perm)?;
         }
         Ok(start)
@@ -647,6 +653,8 @@ impl MmStruct {
                         vma.flags(),
                     );
                     head.set_type(vma.vma_type());
+                    // Split-preserved piece: keep the original origin.
+                    head.set_origin(vma.origin());
                     head.set_file_fd(vma.file_fd());
                     head.set_file_size(vma.file_size());
                     head.set_offset(vma.offset());
@@ -659,6 +667,8 @@ impl MmStruct {
                         vma.flags(),
                     );
                     tail.set_type(vma.vma_type());
+                    // Split-preserved piece: keep the original origin.
+                    tail.set_origin(vma.origin());
                     tail.set_file_fd(vma.file_fd());
                     tail.set_file_size(vma.file_size());
                     tail.set_offset(vma.offset() + (end_addr - vs));
@@ -1038,7 +1048,8 @@ impl MmStruct {
 
         let mut flags = VmaFlags::new();
         flags.insert(VmaFlags::READ | VmaFlags::WRITE | VmaFlags::GROWSDOWN);
-        let vma = Vma::new(stack_start, stack_top, flags);
+        let mut vma = Vma::new(stack_start, stack_top, flags);
+        vma.set_origin(VmaOrigin::from_bits(VmaOrigin::EXEC_STACK));
         self.map_vma(vma, Perm::ReadWrite)?;
 
         self.setup_stack(stack_top.as_usize(), stack_size);
@@ -1095,9 +1106,9 @@ impl MmStruct {
             // Snapshot VMA data under the SAME parent read-guard held
             // since before the PTE copy (R-WRITESTORM-3). The child
             // write-lock below is a different lock (the child's manager).
-            let vma_snapshot: Vec<(PageVirtAddr, PageVirtAddr, VmaFlags, VmaType, i32, u64, usize)> =
+            let vma_snapshot: Vec<(PageVirtAddr, PageVirtAddr, VmaFlags, VmaType, i32, u64, usize, VmaOrigin)> =
                 parent_vma_guard.iter().map(|vma| {
-                    (vma.start(), vma.end(), vma.flags(), vma.vma_type(), vma.file_fd(), vma.file_size(), vma.offset())
+                    (vma.start(), vma.end(), vma.flags(), vma.vma_type(), vma.file_fd(), vma.file_size(), vma.offset(), vma.origin())
                 }).collect();
             // Parent read-lock released here: only the child's manager is
             // touched below.
@@ -1105,9 +1116,15 @@ impl MmStruct {
 
             if !vma_snapshot.is_empty() {
                 let mut new_vma_mgr = new_space.vma_write();
-                for (start, end, flags, vma_type, file_fd, file_size, offset) in vma_snapshot {
+                for (start, end, flags, vma_type, file_fd, file_size, offset, origin) in vma_snapshot {
                     let mut new_vma = Vma::new(start, end, flags);
                     new_vma.set_type(vma_type);
+                    // Fork copy: inherit the parent's origin stamp and add
+                    // the FORKED modifier (adjudication: "mprotect+FORK"
+                    // = an mprotect established the shape pre-fork).
+                    let mut o = origin;
+                    o.mark_forked();
+                    new_vma.set_origin(o);
                     new_vma.set_file_fd(file_fd);
                     new_vma.set_file_size(file_size);
                     // File-offset continuity across fork (P1: also needed by
