@@ -1248,3 +1248,128 @@ blocking-wait syscalls in a raw pool need bounded timeout draws.
 - fsfuzz r109+ rounds classify CRITICAL (ALLOCTHROW) under the fixed
   classifier — the member doubles as the standing repro for the heap
   exhaustion until that bug is fixed.
+
+## Session 12 (2026-10-27 20:0x-23:1x) — succession restart; heap-exhaustion ROOT-CAUSED and FIXED (sys_pipe2 abort leak); PREEMPT-UNDERFLOW class adjudicated to the main delta
+
+### Succession intake
+
+- The 20:00 quota kill left 7 dirty files: TEMP-DIAG refcnt/dealloc
+  counters in exit.rs/task.rs/sched.rs (reverted — the hunt was already
+  concluded by the on-disk fwl boot logs), 4 stale wedge-log deletions
+  (kept, housekeeping), test/forkwait_leak.c untracked (committed as
+  the standing repro), and 5 fwl boot logs that carried the whole
+  case. Nothing was lost mid-air; the predecessor's last boot
+  (fwl-cnt, 3000 forks) was the decisive one.
+
+### ROOT CAUSE of the s11 heap exhaustion (evidence/
+2026-10-27-s12-pipe2-abort-leak-rootcause.txt)
+
+- The 65537B site is the pipe ring (PipeBuffer::new: capacity+1).
+  Rings are 128KB-aligned buddy blocks — each leaked ring pins 128KB,
+  and the fsfuzz death census (785 live rings ~= 98.8MB) IS the
+  exhausted 128MB heap.
+- Mechanism: create_pipe() puts ALL Arc<Pipe> ownership into two raw
+  private_data pointers, consumed only by the PIPE_OPS close op, which
+  File::drop runs solely after close_fd committed (close_pending).
+  sys_pipe2 allocated the pipe BEFORE any fd work; every error return
+  before install (alloc_fd EMFILE x2 — the fsfuzz ODD storm, fdtable
+  gone, install_fd failure) dropped the Arc<File>s without the op:
+  both raw refs + ring leaked per call. Deterministic: fwl leg-2 shows
+  live=100 a=100 f=0 on every pre-fix boot. Sibling creators were
+  audited: epoll/signalfd/eventfd/timerfd reclaim on alloc_fd failure,
+  unix_socketpair unwinds via close_file_fd — only sys_pipe2 had the
+  gap (supersedes the s11 "audited clean" note, written before the
+  ring site was isolated).
+- Fix (de891155): abort_uninstalled_end()/abort_pipe_creation() in
+  fs/pipe.rs run the close op on never-installed ends via Arc::get_mut;
+  sys_pipe2 routes all four pre-install aborts through it; the
+  install_fd(write) failure keeps its correct read-end unwind and
+  aborts the write end. Data path and success path untouched.
+- The Task(11064B)/SignalStruct(2088B) "live" fingerprint is a memwatch
+  ACCOUNTING ARTIFACT, not a leak: packed sub-page blocks share
+  PAGE_SITE marks, neighbor frees clear them, later frees drop
+  attribution (frees counted 782 of 3000 while TSLOT-DEALLOC ran
+  3000/3000, RLS-EXTRA-REF 0; page-aligned sites attribute exactly —
+  stacks f=624 + 64 baseline = a=688 perfect arithmetic). forkwait_leak
+  leg 1 stays as the standing task-leak watch.
+
+### Fix verification (kernel 140acd4b; rebuilt same-source 914e2f4b after the A/B checkout dance)
+
+- fwl-fix1: ring site live=0 a=100 in every MEMLIVE dump (was
+  live=100 f=0), 3000 forks + 100 EMFILE pipes, 0 panics, FWL-PASS,
+  clean powerdown.
+- fsfuzz-fix1 (fixed probe, 1800s): 130816 beats, sustained EMFILE
+  storms, ZERO ALLOCTHROW/panic — pre-fix f75a24b2 died EVERY round.
+- Unit suite: 1125 PASS / 0 FAIL (rv-smoke boot of the same build);
+  `make test` guest banner "ALL TESTS PASSED" (wrapper SIGTERMed in
+  teardown post-banner, host load ~20).
+- Regression boot: minimal rootfs to mrsh prompt, /proc mounted,
+  0 panics. Dual-arch build rc=0 (rv64 140acd4b, x86 bzImage 16.2MB).
+
+### NEW FINDING (not this branch's bug): PREEMPT-UNDERFLOW class from the origin/main delta
+
+- ltp-fix2 (fixed kernel, sweepstart=1005) printed 329
+  PREEMPT-UNDERFLOW (spinlock.rs:461 SpinlockGuard::drop, lock =
+  PROCESS_TREE_LOCK, 2 distinct pids) around the waitid06/07 rows;
+  fleet-kernel rounds r11/r12 (f75a24b2 = main 488528dc + madvise)
+  show ZERO.
+- A/B boot at exactly 51a7a6c7 (main delta, NO pipe fix): same class
+  (320 prints), and the LTP failure set is byte-identical to the fixed
+  kernel (25 files; TPASS 1131 vs 1127, TFAIL 81 vs 80). The class
+  entered via the 51a7a6c7 merge of origin/main 979fde80 — kernel
+  delta vs the fleet kernel: D-7 percpu/small_alloc rework (55d65114
+  chain), virtio input IRQ delivery (6ae8c8fb), posix_mq deadline
+  (7564083f), madvise wrap (70d614e7). Suspects by mechanism: the D-7
+  per-CPU preempt-count carrier rework around PROCESS_TREE_LOCK
+  guards in the ptrace-stop/continue path. Report handed to the
+  coordinator/perf-audit lane; the print is clamp-to-0 (no observed
+  corruption), and 19 of the 25 failing rows are standing failures on
+  the fleet kernel too; the other 6 (setpgid03, setxattr01-03,
+  tkill02, truncate03) were mid-run in r12 at session close — both my
+  kernels fail them identically, so they ride with the main delta
+  either way.
+- FOR THE COORDINATOR: main 979fde80 (488528dc -> 979fde80) carries a
+  preempt-count-underflow producer visible on the LTP waitid/ptrace
+  rows. Not blocking this merge (identical with/without the pipe fix;
+  clamp-to-0 diagnostic), but it should not ship to the fleet baseline
+  untriaged.
+
+### Gate numbers (this branch = 51a7a6c7 + de891155)
+
+- Tier 1 (pa-boot sf2g2, KVM, 780s, host load ~17-20): PASS panics=0,
+  OOM=0, TERM-DESCHED=8 (band 6-10), WAKE-REFUSED=32 (28-36),
+  clock_gettime 4us, nanosleep 185.5ms, GRQ hold 6586ns (4080-7320),
+  small_alloc REST 1.1% (<=10%). FAIL tick cpu0=97.07 (documented
+  one-CPU marginal class under foreign-QEMU load), FAIL volume
+  85.99M vs 107.5M +-10% (load-gated row; pa41gate precedent, per-op
+  costs all held). Volume re-bank still owed a load1<=9/qemus<=8
+  window (carried over from sf2g1).
+- Tier 2 (pbench, TCG, interleaved A/B x2 vs the 51a7a6c7 control —
+  the control differs from the fixed kernel ONLY by this change):
+  p5a_pipe (the touched family) +2.3%/-0.9% — statistically
+  identical. Every first-boot anchor miss collapses or reverses in
+  pair 2 (p6_append +22.3% -> -2.0%, p6_openclose -29.3% -> -2.8%,
+  p6_stat -28.2% -> -6.4%, p7_sleep1ms +67.9% -> -11.6% — the known
+  jitter row). p2_ctxsw (+13.0/+12.2%) and p1_clock (+12.8/+38.8%)
+  stayed positive across pairs; neither executes any code from this
+  change (error-returns only), and a concurrent foreign pbench
+  (pa72f) ran inside pair 2 — adjudicated host noise per the
+  session-11 interleaving method. VERDICT: Tier-2 PASS (A/B).
+- LTP (sweepstart=1005 tail rows, x2 rounds): failure set IDENTICAL
+  with and without the fix (25 files), zero panics, heap-free ~105MB
+  throughout (the 15 ALLOCTHROW lines per round are the standing
+  garbage-size ENOMEM class; pre-fix rounds showed 21 — same class).
+
+### Fleet posture
+
+- Members continue on f75a24b2 through this session (the standing
+  repro duty ended with the fix). Working-tree fleet-rv64-rux updated
+  to the fixed kernel (914e2f4b-class build, same source as de891155)
+  AFTER its gates passed; NOT committed (session rule: no big
+  binaries) — next sessions' members boot the fix from the working
+  tree; the coordinator's staged-image commit can pick it up at merge
+  time. fsfuzz member becomes the leak-fix watch (expect CRITICAL
+  count to drop to zero).
+- Monkeys stay deferred (host load 17-21 all session; floor never
+  threatened, avail >=40G). The vmscan Referenced-flag question
+  (file-lru 93% referenced at OOM) stays queued from s11.
