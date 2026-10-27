@@ -5668,8 +5668,22 @@ pub fn sys_unshare(args: SyscallArgs) -> i64 {
         return -(errno::EINVAL as i64);
     }
 
-    // CLONE_FS/CLONE_FILES unsharing is not implemented (the fs struct and
-    // fd table are already per-fork); accept as a no-op.
+    // CLONE_FILES: copy the fd table away from any CLONE_FILES sharers
+    // (Linux unshare_fdtable) — a thread that unshares must not close the
+    // group's descriptors. CLONE_FS stays a no-op (the fs struct is
+    // per-fork here; nothing shares it).
+    if flags & 0x00000400 != 0 {
+        if let Some(task) = crate::sched::current() {
+            unsafe {
+                if let Some(arc) = (*task).fdtable_arc() {
+                    if alloc::sync::Arc::strong_count(&arc) > 2 {
+                        let copy = alloc::sync::Arc::new(crate::fs::FdTable::fork_from(&*arc));
+                        (*task).set_fdtable(Some(copy));
+                    }
+                }
+            }
+        }
+    }
 
     match crate::process::ns::unshare_namespaces(flags) {
         Ok(()) => 0,
@@ -6126,6 +6140,27 @@ pub fn sys_close_range(args: SyscallArgs) -> i64 {
     }
     if flags & !(CLOSE_RANGE_CLOEXEC | CLOSE_RANGE_UNSHARE) != 0 {
         return -(errno::EINVAL as i64);
+    }
+
+    // CLOSE_RANGE_UNSHARE: copy the fd table before closing when it is
+    // shared with CLONE_FILES siblings (Linux unshare_fdtable_221b8ba —
+    // the close must not reach the sharers' table). LTP close_range01/02:
+    // a CLONE_FILES child doing close_range(..., UNSHARE) must leave the
+    // parent's descriptors open; without the copy the child closed the
+    // shared table and the parent's very next fcntl died EBADF.
+    if flags & CLOSE_RANGE_UNSHARE != 0 {
+        if let Some(task) = crate::sched::current() {
+            unsafe {
+                if let Some(arc) = (*task).fdtable_arc() {
+                    // fdtable_arc() itself holds one reference: >2 means a
+                    // real sharer exists beyond the caller's own.
+                    if alloc::sync::Arc::strong_count(&arc) > 2 {
+                        let copy = alloc::sync::Arc::new(crate::fs::FdTable::fork_from(&*arc));
+                        (*task).set_fdtable(Some(copy));
+                    }
+                }
+            }
+        }
     }
 
     let fdtable = match crate::sched::get_current_fdtable() {
