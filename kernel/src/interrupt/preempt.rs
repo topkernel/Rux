@@ -114,15 +114,25 @@ pub fn preemptible() -> bool {
 #[track_caller]
 pub fn preempt_count_add(val: i32) {
     if let Some(task) = crate::sched::current() {
-        if val == PREEMPT_OFFSET
+        if (val == PREEMPT_OFFSET || val == HARDIRQ_OFFSET)
             && crate::dfx::leakorigin::ENABLED.load(core::sync::atomic::Ordering::Relaxed)
         {
             let c0 = task.preempt_count();
-            crate::dfx::leakorigin::note_acquire(
-                task,
-                core::panic::Location::caller(),
-                c0.wrapping_add(1),
-            );
+            if val == PREEMPT_OFFSET {
+                crate::dfx::leakorigin::note_acquire(
+                    task,
+                    core::panic::Location::caller(),
+                    c0.wrapping_add(1),
+                );
+            } else {
+                // s14 hardirq shadow: with irq_enter #[track_caller],
+                // Location::caller() names the trap dispatch site.
+                crate::dfx::leakorigin::note_hardirq_acquire(
+                    task,
+                    core::panic::Location::caller(),
+                    c0.wrapping_add(HARDIRQ_OFFSET),
+                );
+            }
         }
         task.add_preempt_count(val);
     }
@@ -187,11 +197,44 @@ pub fn preempt_count_reset() {
 ///
 /// Called at the beginning of hardware interrupt handling.
 /// IRQ entry path.
+///
+/// #[track_caller] (s14): under dfx=leakhunt the leakorigin hardirq
+/// shadow records `Location::caller()` — without this attribute every
+/// acquire would name this line; with it, the trap dispatch site
+/// (timer/soft/ext bracket) is recorded.
 #[inline]
+#[track_caller]
 pub fn irq_enter() {
     preempt_count_add(HARDIRQ_OFFSET);
+    // s14 IRQ-PAIR booking check (dfx=leakhunt): remember which task
+    // THIS cpu's bracket booked +HARDIRQ_OFFSET on; irq_exit verifies
+    // the paired sub lands on the same task. RISC-V S-mode hardirqs
+    // cannot nest on one cpu (SIE cleared for the handler), so the
+    // token is strictly outermost per bracket — no nesting bookkeeping.
+    // Bookings resolve through sched::current() == the tp register, so
+    // a split means tp changed between enter and exit: a switch ran
+    // inside the hardirq bracket (the only shape that can strand a
+    // 0x10000 bit on the enter task).
+    if crate::dfx::leakorigin::ENABLED.load(core::sync::atomic::Ordering::Relaxed) {
+        if let Some(task) = crate::sched::current() {
+            let cpu = crate::arch::cpu_id() as usize;
+            if cpu < crate::config::MAX_CPUS {
+                IRQ_PAIR_TASK[cpu].store(
+                    task as *mut _ as usize,
+                    core::sync::atomic::Ordering::Release,
+                );
+            }
+        }
+    }
     crate::dfx::syscost::zone_hardirq_enter(); // syscost probe (no-op when off)
 }
+
+/// Per-CPU token of the task the in-flight outermost hardirq bracket
+/// booked +HARDIRQ_OFFSET on (s14 IRQ-PAIR probe; see irq_enter).
+static IRQ_PAIR_TASK: [core::sync::atomic::AtomicUsize;
+    crate::config::MAX_CPUS] =
+    [const { core::sync::atomic::AtomicUsize::new(0) };
+        crate::config::MAX_CPUS];
 
 /// Exit IRQ context — decrement hardirq count and process softirqs
 ///
@@ -199,6 +242,23 @@ pub fn irq_enter() {
 /// IRQ exit path with softirq invocation.
 #[inline]
 pub fn irq_exit() {
+    // s14 IRQ-PAIR check BEFORE the sub: fire while both counts are
+    // still observable. Direct console, budgeted (60 lines/boot): a
+    // split is the stranded-0x10000 producer, not weather.
+    if crate::dfx::leakorigin::ENABLED.load(core::sync::atomic::Ordering::Relaxed) {
+        let cpu = crate::arch::cpu_id() as usize;
+        if cpu < crate::config::MAX_CPUS {
+            let booked = IRQ_PAIR_TASK[cpu].swap(0, core::sync::atomic::Ordering::AcqRel);
+            if booked != 0 {
+                if let Some(cur) = crate::sched::current() {
+                    let cur_ptr = cur as *mut crate::process::task::Task as usize;
+                    if cur_ptr != booked {
+                        irq_pair_report(cpu, booked, cur_ptr);
+                    }
+                }
+            }
+        }
+    }
     preempt_count_sub(HARDIRQ_OFFSET);
 
     // If we are no longer in hardirq context (outermost irq_exit),
@@ -276,4 +336,65 @@ pub fn irqentry_nmi_enter() {
 #[inline]
 pub fn irqentry_nmi_exit() {
     nmi_exit();
+}
+
+/// s14 IRQ-PAIR split report: the outermost hardirq bracket booked
+/// +HARDIRQ_OFFSET on `enter` but irq_exit's -HARDIRQ_OFFSET resolves to
+/// `exit` — the tp register changed inside the bracket (a switch ran
+/// there). This is the booking-time producer of the stranded-0x10000
+/// face, measured where it happens (no trap-boundary sampling hole).
+/// Direct console; budget 60 per boot.
+fn irq_pair_report(cpu: usize, enter: usize, exit: usize) {
+    use crate::console::putchar_no_lock as putchar;
+    static BUDGET: core::sync::atomic::AtomicU32 =
+        core::sync::atomic::AtomicU32::new(60);
+    let b = BUDGET.load(core::sync::atomic::Ordering::Acquire);
+    if b == 0 {
+        return;
+    }
+    BUDGET
+        .compare_exchange(b, b - 1, core::sync::atomic::Ordering::AcqRel, core::sync::atomic::Ordering::Acquire)
+        .ok();
+    fn phex(mut v: u64) {
+        use crate::console::putchar_no_lock as putchar;
+        for sh in (0..16).rev() {
+            let n = ((v >> (sh * 4)) & 0xF) as u8;
+            putchar(if n < 10 { b'0' + n } else { b'a' + n - 10 });
+        }
+    }
+    // SAFETY: diagnostic scalar reads of stable Task fields; both tasks
+    // were current on this cpu moments ago (pinned by execution).
+    let pid_e = unsafe { (*(enter as *mut crate::process::task::Task)).pid() };
+    let pid_x = unsafe { (*(exit as *mut crate::process::Task)).pid() };
+    let pc_e = unsafe { (*(enter as *mut crate::process::task::Task)).preempt_count() };
+    let pc_x = unsafe { (*(exit as *mut crate::process::task::Task)).preempt_count() };
+    for &c in b"\nIRQ-PAIR-SPLIT cpu=" {
+        putchar(c);
+    }
+    phex(cpu as u64);
+    for &c in b" enter_pid=" {
+        putchar(c);
+    }
+    phex(pid_e as u64);
+    for &c in b" pc=" {
+        putchar(c);
+    }
+    phex(pc_e as u32 as u64);
+    for &c in b" exit_pid=" {
+        putchar(c);
+    }
+    phex(pid_x as u64);
+    for &c in b" pc=" {
+        putchar(c);
+    }
+    phex(pc_x as u32 as u64);
+    for &c in b" enter_tp=" {
+        putchar(c);
+    }
+    phex(enter as u64);
+    for &c in b" exit_tp=" {
+        putchar(c);
+    }
+    phex(exit as u64);
+    putchar(b'\n');
 }

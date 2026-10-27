@@ -1,5 +1,8 @@
 //! Leak-origin probe (dfx=leakhunt) — names the acquire site of a leaked
-//! PREEMPT_OFFSET.
+//! PREEMPT_OFFSET (and, since s14, of a stranded HARDIRQ_OFFSET — the
+//! pc=0x10000/0x10001 incumbent face of the fleet's four-faced wedge
+//! family; `hsite=` in every report names the trap bracket that booked
+//! it).
 //!
 //! The sc261-263 OH boots (and the fleet's riscv monkey lanes) show tasks
 //! carrying a leaked preempt_count of exactly 1 across park/wake cycles
@@ -49,6 +52,14 @@ struct LoSlot {
     jif: AtomicU64,
     /// preempt_count value immediately AFTER that acquire (1 = outermost).
     cnt_after: AtomicI32,
+    /// `&'static Location` of the most recent HARDIRQ_OFFSET acquire
+    /// (s14: the stranded-0x10000 face — pc=0x10000/0x10001 incumbents
+    /// and the 0x10000-grid strand family). With `irq_enter` marked
+    /// #[track_caller] this names the trap dispatch site (timer/soft/
+    /// ext), so a leaked hardirq bit reports WHICH bracket booked it.
+    hsite: AtomicUsize,
+    /// jiffies at that HARDIRQ acquire.
+    hjif: AtomicU64,
     /// One report per leak episode (cleared on each new acquire).
     reported: AtomicBool,
 }
@@ -60,6 +71,8 @@ static TABLE: [LoSlot; SLOTS] = {
         site: AtomicUsize::new(0),
         jif: AtomicU64::new(0),
         cnt_after: AtomicI32::new(0),
+        hsite: AtomicUsize::new(0),
+        hjif: AtomicU64::new(0),
         reported: AtomicBool::new(false),
     };
     [ZERO; SLOTS]
@@ -83,6 +96,25 @@ pub fn note_acquire(
     slot.task.store(task as usize, Ordering::Release);
     slot.site.store(loc as *const Location as usize, Ordering::Release);
     slot.jif
+        .store(crate::drivers::timer::get_jiffies(), Ordering::Release);
+    slot.cnt_after.store(cnt_after, Ordering::Release);
+    slot.reported.store(false, Ordering::Release);
+}
+
+/// Record a HARDIRQ_OFFSET acquire (last wins; s14 extension — the
+/// stranded-0x10000 face). `loc` is the trap dispatch site when
+/// `irq_enter` is #[track_caller]. Kept separate from the PREEMPT
+/// shadow so a 0x10001 leak names BOTH producers independently.
+#[inline]
+pub fn note_hardirq_acquire(
+    task: *mut crate::process::Task,
+    loc: &'static Location,
+    cnt_after: i32,
+) {
+    let slot = slot_of(task);
+    slot.task.store(task as usize, Ordering::Release);
+    slot.hsite.store(loc as *const Location as usize, Ordering::Release);
+    slot.hjif
         .store(crate::drivers::timer::get_jiffies(), Ordering::Release);
     slot.cnt_after.store(cnt_after, Ordering::Release);
     slot.reported.store(false, Ordering::Release);
@@ -193,6 +225,25 @@ fn emit(tag: &[u8], task: *mut crate::process::Task, pc: i32) {
         for &c in b" site=?" {
             putchar(c);
         }
+    }
+    // s14: the HARDIRQ acquire shadow — names which trap bracket
+    // booked the stranded 0x10000 bit on this task, and when.
+    let hsite = slot.hsite.load(Ordering::Acquire) as *const Location;
+    if slot.task.load(Ordering::Acquire) == task as usize && !hsite.is_null() {
+        // SAFETY: stored from a &'static Location (see note_hardirq_acquire).
+        let loc = unsafe { &*hsite };
+        for &c in b" hsite=" {
+            putchar(c);
+        }
+        for &c in loc.file().as_bytes() {
+            putchar(c);
+        }
+        putchar(b':');
+        put_i64(loc.line() as i64);
+        for &c in b" hage_jif=" {
+            putchar(c);
+        }
+        put_i64(now.wrapping_sub(slot.hjif.load(Ordering::Acquire)) as i64);
     }
     for &c in b" cnt_after=" {
         putchar(c);
