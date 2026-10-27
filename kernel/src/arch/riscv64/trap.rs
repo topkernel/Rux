@@ -265,6 +265,21 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize) {
                 let cs_entry = crate::sched::sched::cpu_state(cpu_id).current
                     as usize;
                 let epc_ctx = regs_ref.epc;
+                // s15 (A2 idle-mark/WFI hunt): the x86_64 tick path's twin
+                // was missing here — WW2's ticks=[0,0] on riscv64 was a
+                // probe gap, not tick silence. Also sample tp against the
+                // cpu_state slot at tick entry: a divergence is the
+                // lying-slot shape (R56 steal rewrite / abort republish),
+                // measured per-CPU at the CPU's own tick. Unconditional:
+                // two relaxed atomics, matching the x86 twin's cost.
+                if cpu_id < crate::config::MAX_CPUS {
+                    crate::timer::WW_TICK_IRQ[cpu_id]
+                        .fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+                    crate::timer::ww_note_tick_arrival(cpu_id);
+                    if tp_entry != cs_entry {
+                        crate::sched::sched::ww_note_slot_mismatch(cpu_id);
+                    }
+                }
                 // Session-6 discriminator: snapshot the interrupted
                 // task's own count BEFORE the tick books its
                 // HARDIRQ_OFFSET. pctick=0x1 vs >=0x10001 at the LEAK

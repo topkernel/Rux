@@ -780,6 +780,54 @@ static mut NEED_RESCHED: [core::sync::atomic::AtomicBool; MAX_CPUS] = [
     core::sync::atomic::AtomicBool::new(false),
 ];
 
+// Wakewatch (s15 A2 idle-mark/WFI hunt): per-CPU idle-loop phase stamp,
+// written by the idle loop itself at each phase transition, read by the
+// 1 Hz heartbeat. The A2 strand shape (victims linked, SKIPHIST empty,
+// idle mask empty, ~1s resolution) needs to know WHERE the actually-idle
+// CPU sits while the strand runs: the phases split "inside WFI with a
+// cleared mark" (lost-mark producer) from "stuck pre-WFI" (recheck/uart
+// window) from "stuck in schedule()" (GRQ contention) from "post-WFI
+// accounting" — each names a different producer family.
+// Codes: 0 = not in the idle loop, 1 = entering schedule(), 2 = idle
+// post-schedule, idle-marked, R20-2 recheck window, 3 = pre-WFI (uart
+// poll), 4 = inside WFI, 5 = post-WFI accounting/mark clear.
+pub static WW_IDLE_PHASE: [core::sync::atomic::AtomicU32; MAX_CPUS] = [
+    core::sync::atomic::AtomicU32::new(0),
+    core::sync::atomic::AtomicU32::new(0),
+    core::sync::atomic::AtomicU32::new(0),
+    core::sync::atomic::AtomicU32::new(0),
+];
+
+// Wakewatch (s15): per-CPU count of timer-tick-entry samples where the
+// hardware tp register disagreed with cpu_state.current (the lying-slot
+// shape the R56 steal / abort-republish slot rewrites can produce).
+// Sampled by each CPU's own tick (trap.rs) — no cross-CPU register
+// reads; printed as a per-second delta next to the phase stamp.
+static WW_SLOT_MISMATCH: [core::sync::atomic::AtomicU64; MAX_CPUS] = [
+    core::sync::atomic::AtomicU64::new(0),
+    core::sync::atomic::AtomicU64::new(0),
+    core::sync::atomic::AtomicU64::new(0),
+    core::sync::atomic::AtomicU64::new(0),
+];
+
+/// Wakewatch (s15): count one tp-vs-slot divergence observed at tick
+/// entry on `cpu` (called from the riscv64 timer trap path).
+pub fn ww_note_slot_mismatch(cpu: usize) {
+    if cpu < MAX_CPUS {
+        WW_SLOT_MISMATCH[cpu].fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    }
+}
+
+/// Wakewatch (s15): heartbeat read of the per-CPU mismatch counters
+/// (absolute values; the heartbeat computes the delta itself).
+pub fn ww_slot_mismatch_counters() -> [u64; MAX_CPUS] {
+    let mut out = [0u64; MAX_CPUS];
+    for c in 0..MAX_CPUS {
+        out[c] = WW_SLOT_MISMATCH[c].load(core::sync::atomic::Ordering::Relaxed);
+    }
+    out
+}
+
 // R76 (slot-divergence producer hunt): tag + task id of the LAST writer of
 // each per-CPU current slot. full1/full2's terminal shape (R74-SLOTLESS-TP:
 // hardware tp executing a real task while its slot names idle or a third
@@ -6223,6 +6271,9 @@ pub fn cpu_idle_loop() -> ! {
         // 1. Try to pick a task from the global RQ
         // SAFETY: called from idle task context; schedule() handles its own locking.
         let my_cpu = crate::arch::cpu_id() as usize;
+        // WW_IDLE_PHASE 1: about to enter schedule() (may switch away and
+        // back; the stamp survives until the next phase write).
+        WW_IDLE_PHASE[cpu_id].store(1, core::sync::atomic::Ordering::Release);
         unsafe {
             schedule();
         }
@@ -6237,6 +6288,8 @@ pub fn cpu_idle_loop() -> ! {
         if is_idle {
             grq().mark_idle(cpu_id);
             crate::sync::rcu::rcu_note_context_switch();
+            // WW_IDLE_PHASE 2: idle-marked, inside the R20-2 recheck window.
+            WW_IDLE_PHASE[cpu_id].store(2, core::sync::atomic::Ordering::Release);
 
             // R20-2: a task may have been enqueued between schedule()'s
             // nr_running==0 fast-path read and mark_idle — enqueue_task's
@@ -6251,6 +6304,8 @@ pub fn cpu_idle_loop() -> ! {
             }
 
             // Poll UART for pending data before entering WFI.
+            // WW_IDLE_PHASE 3: recheck passed, pre-WFI (uart poll window).
+            WW_IDLE_PHASE[cpu_id].store(3, core::sync::atomic::Ordering::Release);
             if crate::console::uart_has_data() {
                 crate::console::read_waitq().wake_up_one();
             }
@@ -6260,7 +6315,13 @@ pub fn cpu_idle_loop() -> ! {
             // Charge the WFI residency to the per-CPU idle accounting that
             // feeds /proc/uptime's second column (P2: real idle stats).
             let idle_t0 = crate::arch::cpu::read_time();
+            // WW_IDLE_PHASE 4: about to WFI (the mark is set here — a
+            // strand heartbeat reading phase=4 with idle bit CLEAR is the
+            // lost-mark shape directly).
+            WW_IDLE_PHASE[cpu_id].store(4, core::sync::atomic::Ordering::Release);
             unsafe { crate::arch::cpu::wfi(); }
+            // WW_IDLE_PHASE 5: WFI returned, idle accounting + mark clear.
+            WW_IDLE_PHASE[cpu_id].store(5, core::sync::atomic::Ordering::Release);
             crate::fs::procfs::uptime::account_idle_cycles(
                 cpu_id,
                 crate::arch::cpu::read_time().wrapping_sub(idle_t0),
