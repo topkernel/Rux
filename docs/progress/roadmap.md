@@ -19,7 +19,14 @@
   with sleeping waiters is a deadlock by design (Xorg's InputThread
   EPSCAN'd twice then slept forever). Now IRQ-driven delivery
   (shared-INTx top half + input tasklet BH, collect-under-lock /
-  deliver-outside) — merged. Interactivity probes in flight.
+  deliver-outside) — merged. Interactivity probes: injected pointer/keyboard
+  events land 1:1 in every run, and a typed key now renders in the focused
+  terminal (echoed glyph, advanced cursor — per-window XGetImage evidence,
+  reproduced across boots); the full typed-shell conversation (key echoed,
+  command answered, fresh prompt) is pixel-verified on one run so far — the
+  GNOME "something has gone wrong" dialog still collapses some sessions
+  around injected input, which is the current blocker for the ≥2-boot
+  interactive claim.
 - Standing: LTP r15 = **1,005 / 1,869 (53.8%)**, trend 35 → 524 → 801 →
   945 → 1,005.
 

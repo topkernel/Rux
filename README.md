@@ -26,22 +26,24 @@ riscv64 and x86_64.**
 | | |
 |---|---|
 | ![Ubuntu GNOME login](docs/images/ubuntu-gnome-login-2026-10-15.png) | ![GNOME Shell desktop frame](docs/images/ubuntu-gnome-shell-frame-2026-10-27.png) |
-| *Ubuntu GNOME login screen on Rux (riscv64) — verify.py 23/23 PASS* | *GNOME Shell desktop on Rux (riscv64) — run gnome-r13walk2: panel with Activities + clock, a gsd → shell notification banner, and an X client window (xterm) painting its prompt. The frame is verified by deterministic pixel analysis (frame diffing plus a per-window XGetImage walk), reproduced across 6 boots; an attribution A/B (older kernel, same image, calm host: screen never lit) pins the unblock to the kernel merge-set. Pointer input is interactive: an injected absolute-positioning event moves the on-screen cursor to the exact commanded coordinates, and injected keyboard/pointer events are delivered to the live session 1:1. Sessions hold 2700 s with zero panics.* |
+| *Ubuntu GNOME login screen on Rux (riscv64) — verify.py 23/23 PASS* | *GNOME Shell desktop on Rux (riscv64) — run gnome-r13walk2: panel with Activities + clock, a gsd → shell notification banner, and an X client window (xterm) painting its prompt. The frame is verified by deterministic pixel analysis (frame diffing plus a per-window XGetImage walk), reproduced across 8 boots; an attribution A/B (older kernel, same image, calm host: the screen stayed dark) pins the unblock to the kernel merge-set. Pointer input is interactive: an injected absolute-positioning event moves the on-screen cursor to the exact commanded coordinates, and injected keyboard/pointer events are delivered to the live session 1:1. Sessions hold 2700 s with zero panics.* |
 
 What runs, end to end:
 
 - **Ubuntu 22.04 rootfs** with glibc, `ld.so`, and dynamic ELF loading
 - **GNOME Shell desktop frames, reproducible across boots** — panel, clock,
   notification banners, and readable window content, verified by deterministic
-  pixel analysis on riscv64; pointer input moves the on-screen cursor to the
-  exact commanded coordinates, and injected keyboard/pointer events are
+  pixel analysis on riscv64; injected pointer input moves the on-screen cursor
+  to the exact commanded coordinates, and injected keyboard/pointer events are
   delivered to the live session 1:1 (the [Roadmap](docs/progress/roadmap.md)
   tracks the interactivity milestone)
 - **Xorg completes full initialization** and serves X clients through
   `/tmp/.X11-unix/X0`; X client windows render to the screen
-- **Interactive xterm** (pty + real bash/dash inside); pointer and keyboard
-  events delivered to the live session 1:1 via virtio-input → evdev with
-  IRQ-driven delivery
+- **Interactive xterm** (pty + real bash/dash inside); injected pointer and
+  keyboard events are delivered to the live session 1:1 via virtio-input →
+  evdev with IRQ-driven delivery, and a typed key renders in the focused
+  terminal window (echoed glyph, advanced cursor) — verified by per-window
+  XGetImage pixel analysis across boots
 - **D-Bus (system + session), POSIX signals with full nesting semantics,
   SysV IPC, 4-CPU SMP** with cross-core TLB shootdowns
 - **Linux ABI by design**: `uname` and `/proc/version` intentionally report
@@ -133,7 +135,7 @@ GLM-5.3).**
 | **Linux LTP** | **1,005 / 1,869** (r15; trend 35 → 524 → 801 → 945 → 1,005) | [Roadmap](docs/progress/roadmap.md) |
 | **Platform Support** | RISC-V 64-bit + x86_64 (q35), 4-CPU SMP | [Roadmap](docs/progress/roadmap.md) |
 | **Syscall Numbers** | 345+ dispatched | [Roadmap](docs/progress/roadmap.md) |
-| **Ubuntu Userland** | GNOME Shell desktop frames reproducible across 6 boots on riscv64, pointer-interactive at exact coordinates; Xorg + xterm + D-Bus | [Screenshots](#️-rux-runs-ubuntu) |
+| **Ubuntu Userland** | GNOME Shell desktop frames reproducible across 8 boots on riscv64, pointer-interactive at exact coordinates, typed keys echo in the focused terminal; Xorg + xterm + D-Bus | [Screenshots](#️-rux-runs-ubuntu) |
 | **Memory** | Swap active: 2,064 MiB anonymous working set paged through 256 MB swap, verified | [Roadmap](docs/progress/roadmap.md) |
 | **Boot Performance** | MTTCG default (`thread=multi`): boot-to-login ~4.5s | [Roadmap](docs/progress/roadmap.md) |
 

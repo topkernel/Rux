@@ -832,3 +832,62 @@ were storm-inflated):
   schedule, after the 02:31 QEMU hold lifts. Caption raise to the
   interactive level only if a second boot reproduces the
   [P,A,P,A,P+cursor] conversation signature.
+
+### Session 12 continued — r19type/r20type (post-merge kernel, the
+### >=2-boot reproduction attempt)
+
+#### r19type (03:13-03:58, kernel = merged tree incl. d73e3387):
+#### ECHO REPRODUCED, CONVERSATION NOT — Oh-no collapse after set 1
+- M4 @871, M5 @960 (9th M5-class boot, FIRST on the merged tree). The
+  desktop plateau color class matches r18type exactly (#e0e0c0 465455 /
+  #202000 430095 / #002080 68241 at t=1050-1080 — r18's 840-1380 class).
+- Boot was slow under the storm (launched at load 18-20; screen lit only
+  after the 03:26 load window) but completed the chain.
+- Kernel delivery 1:1 for ALL 3 sets (kbd30 3/3, kbd28 3/3, btn272 3/3,
+  click-moves 3, phantoms 0). Kernel side stays perfect under input.
+- TYPED-GLYPH ECHO: XWALK xterm black-samples 9 -> 17 (+8, IDENTICAL to
+  r18type's 10 -> 18) exactly at set 1 — the echo is now a 2-boot
+  deterministic fact. After the collapse the count reverts to 9 (the
+  dialog/xterm redraw wipes it).
+- Session COLLAPSED to the Oh-no dialog between shots 1410->1500 (the
+  fullscreen 0x1800003 Gnome-session-failed window, content 100.0%
+  white, per XWALK; 159 failed-dialog serial marks). Sets 2/3 hit the
+  dialog; final-shot text bands at rows 363-370/386-395 = the dialog's
+  own text (same geometry class the r15type retraction identified).
+- convcheck: NOT-REPRODUCED (as expected). 2700s, 0 panics, 0 OOM,
+  0 SIGDEATH, 1 PREEMPT-UNDERFLOW (known origin/main-delta class).
+
+#### r20type (03:30-04:15): NO-LIGHT boot
+- Chain passed keyring ("Running GNOME Shell" in serial) but the shell
+  did not finish init: screen dark the whole run (best nonblack 0.0001),
+  probes fired into the void. Load was calm (12-15) — this boot class
+  is not load-correlated. Final: 2700s, 0 panics, 0 OOM, 0 SIGDEATH,
+  466 PREEMPT-UNDERFLOW (the known clamped class — the wedged shell
+  spun in its region; kernel stayed up). INPTRC still delivered all 3
+  sets 1:1 with 0 phantoms — kernel-side input stays perfect even into
+  a dead screen.
+- Boot-class census at this point: lit 8 of 11 (r13-era 6, r18, r19;
+  no-light r16/r17/r20) + collapse-to-Oh-no on input: r15type, r19type
+  (2 of 3 interactive lit boots) vs r18type survived.
+
+#### Verdict on the >=2-boot interactive reproduction: NOT MET tonight
+- What IS >=2-boot deterministic now: desktop frame class (8 M5 boots),
+  kernel 1:1 delivery (every run), typed-glyph echo in the focused
+  xterm (r18 + r19, identical +8 XGetImage deltas).
+- The full conversation ([P,A,P,A,P+cursor]) remains a 1-boot fact
+  (r18type). README caption raised ONLY to the echo level + 8-boot
+  count; the conversation stays in the session notes and roadmap until
+  a second boot reproduces it (next attempt: r21type pattern, calm
+  window, same schedule).
+
+#### README delta (this leg, honest level)
+- Desktop caption: 6 -> 8 boots; "screen never lit" reworded to "the
+  screen stayed dark" (banned-word scrub in the touched sentence).
+- GNOME bullet + xterm bullet + status row: typed-key echo added
+  ("echoed glyph, advanced cursor — per-window XGetImage pixel analysis
+  across boots"); no conversation claim.
+- Roadmap interactivity line updated to the same level.
+- Right-side panel indicators (mission 4): panelcheck right_side=none
+  on every frame class this lane has produced — the quick-settings
+  indicator area paints nothing; consistent with the gsd subset that
+  runs. No work this leg (low priority per dispatch).
