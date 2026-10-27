@@ -281,7 +281,21 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize) {
                 handle_timer_interrupt(regs_ref, cpu_id);
                 crate::interrupt::preempt::irq_exit();
                 let tp_exit = crate::arch::cpu::get_thread_id() as usize;
-                if tp_entry != tp_exit {
+                // s13 producer discriminator: preempt-count add/sub both
+                // resolve through cpu_state.current, but this print
+                // historically compared only the tp register. The slot is
+                // NOT immutable: the wake-path orphan heal rewrites a
+                // REMOTE CPU's slot to idle (sched.rs, the curr_on loop)
+                // and republish_current_after_abort republishes the local
+                // slot while the hardware keeps running a different task.
+                // A bracket opened/closed across such a rewrite books
+                // +0x10000 on one task and the -0x10000 on another (the
+                // stranded-hardirq-bit face) with tp UNCHANGED — invisible
+                // to the tp compare. Compare the slot too; when=slot
+                // names exactly that producer.
+                let cs_exit = crate::sched::sched::cpu_state(cpu_id).current
+                    as usize;
+                if tp_entry != tp_exit || cs_entry != cs_exit {
                     let a = tp_entry as *mut crate::process::task::Task;
                     let b = tp_exit as *mut crate::process::task::Task;
                     let (pa, pb) = unsafe {
@@ -292,18 +306,26 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize) {
                     } else {
                         0
                     };
+                    let csx_pid = if cs_exit != 0 {
+                        unsafe { (*(cs_exit as *mut crate::process::task::Task)).pid() }
+                    } else {
+                        0
+                    };
                     // "pre" = divergence predates the bracket (stale tp at
-                    // entry); "in" = formed inside it. Direct console —
-                    // this can print from deep inside scheduler paths.
+                    // entry); "in" = formed inside it; "slot" = tp never
+                    // changed but the cpu_state slot did (the s13 producer
+                    // signature — bookings split across two tasks).
                     use core::fmt::Write;
                     let mut w = crate::dfx::backtrace::ConsoleWriter::new();
                     let _ = write!(w,
-                        "IRQ-BRACKET-LEAK timer cpu={} entry_tp={:#x} (pid={} preempt={:#x}) exit_tp={:#x} (pid={} preempt={:#x}) cs_entry_pid={} when={} epc_ctx={:#x}\n",
+                        "IRQ-BRACKET-LEAK timer cpu={} entry_tp={:#x} (pid={} preempt={:#x}) exit_tp={:#x} (pid={} preempt={:#x}) cs_entry={:#x} (pid={}) cs_exit={:#x} (pid={}) when={} epc_ctx={:#x}\n",
                         cpu_id, tp_entry,
                         unsafe { (*a).pid() }, pa,
                         tp_exit, unsafe { (*b).pid() }, pb,
-                        cs_pid,
-                        if cs_entry != tp_entry { "pre" } else { "in" },
+                        cs_entry, cs_pid,
+                        cs_exit, csx_pid,
+                        if tp_entry == tp_exit && cs_entry != cs_exit { "slot" }
+                        else if cs_entry != tp_entry { "pre" } else { "in" },
                         epc_ctx);
                 }
             }
@@ -311,11 +333,15 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize) {
             // Software interrupt (IPI)
             Cause::SupervisorSoft => {
                 let tp_entry = crate::arch::cpu::get_thread_id() as usize;
+                let cs_entry = crate::sched::sched::cpu_state(cpu_id).current
+                    as usize;
                 crate::interrupt::preempt::irq_enter();
                 handle_software_interrupt(regs_ref, cpu_id);
                 crate::interrupt::preempt::irq_exit();
                 let tp_exit = crate::arch::cpu::get_thread_id() as usize;
-                if tp_entry != tp_exit {
+                let cs_exit = crate::sched::sched::cpu_state(cpu_id).current
+                    as usize;
+                if tp_entry != tp_exit || cs_entry != cs_exit {
                     let a = tp_entry as *mut crate::process::task::Task;
                     let b = tp_exit as *mut crate::process::task::Task;
                     let (pa, pb) = unsafe {
@@ -324,21 +350,28 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize) {
                     use core::fmt::Write;
                     let mut w = crate::dfx::backtrace::ConsoleWriter::new();
                     let _ = write!(w,
-                        "IRQ-BRACKET-LEAK soft cpu={} entry_tp={:#x} (pid={} preempt={:#x}) exit_tp={:#x} (pid={} preempt={:#x})\n",
+                        "IRQ-BRACKET-LEAK soft cpu={} entry_tp={:#x} (pid={} preempt={:#x}) exit_tp={:#x} (pid={} preempt={:#x}) cs_entry={:#x} cs_exit={:#x} when={}\n",
                         cpu_id, tp_entry,
                         unsafe { (*a).pid() }, pa,
-                        tp_exit, unsafe { (*b).pid() }, pb);
+                        tp_exit, unsafe { (*b).pid() }, pb,
+                        cs_entry, cs_exit,
+                        if tp_entry == tp_exit && cs_entry != cs_exit { "slot" }
+                        else if cs_entry != tp_entry { "pre" } else { "in" });
                 }
             }
 
             // External interrupt
             Cause::SupervisorExternal => {
                 let tp_entry = crate::arch::cpu::get_thread_id() as usize;
+                let cs_entry = crate::sched::sched::cpu_state(cpu_id).current
+                    as usize;
                 crate::interrupt::preempt::irq_enter();
                 handle_external_interrupt(regs_ref, cpu_id);
                 crate::interrupt::preempt::irq_exit();
                 let tp_exit = crate::arch::cpu::get_thread_id() as usize;
-                if tp_entry != tp_exit {
+                let cs_exit = crate::sched::sched::cpu_state(cpu_id).current
+                    as usize;
+                if tp_entry != tp_exit || cs_entry != cs_exit {
                     let a = tp_entry as *mut crate::process::task::Task;
                     let b = tp_exit as *mut crate::process::task::Task;
                     let (pa, pb) = unsafe {
@@ -347,10 +380,13 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize) {
                     use core::fmt::Write;
                     let mut w = crate::dfx::backtrace::ConsoleWriter::new();
                     let _ = write!(w,
-                        "IRQ-BRACKET-LEAK ext cpu={} entry_tp={:#x} (pid={} preempt={:#x}) exit_tp={:#x} (pid={} preempt={:#x})\n",
+                        "IRQ-BRACKET-LEAK ext cpu={} entry_tp={:#x} (pid={} preempt={:#x}) exit_tp={:#x} (pid={} preempt={:#x}) cs_entry={:#x} cs_exit={:#x} when={}\n",
                         cpu_id, tp_entry,
                         unsafe { (*a).pid() }, pa,
-                        tp_exit, unsafe { (*b).pid() }, pb);
+                        tp_exit, unsafe { (*b).pid() }, pb,
+                        cs_entry, cs_exit,
+                        if tp_entry == tp_exit && cs_entry != cs_exit { "slot" }
+                        else if cs_entry != tp_entry { "pre" } else { "in" });
                 }
             }
 
