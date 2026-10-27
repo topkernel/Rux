@@ -6805,3 +6805,90 @@ Lane state: branch tip ab97a866; serials sc328B/sc329B untracked per
 .gitignore; /tmp/leg32b holds the extracted appspawn binary + libipc
 for reference. Quiet-window discipline kept (no draw launched until
 foreign QEMU count <= 1; all my QEMUs killed by pidfile/cmdline match).
+
+LEG-35B (OH-B sixth leg; 34B in-flight edit finished; pool-growth fix
+committed and first-clean-draw verified; 19:35 close-out) — opened on
+branch tip 8d2ef240 with binder.rs + timer.rs uncommitted (34B's
+provider-outage mid-edit). Commits: 635c4502 (BR_SPAWN_LOOPER Linux
+done: shape + poolcensus), 133a2fc5 (POOL-TODO item print), 39c098c4
+(POOL-TODO non-Transaction kinds).
+
+MISSION ITEM 1 — 34B'S EDIT: FINISHED, NOT DISCARDED. The diff was
+(a) TXN-HANG-STK2 (640-word window, 24 text words split over two
+records), (b) dfx=poolcensus census + timer hook, (c) a spawn-semantics
+change. Adjudicated (c) against Linux 5.15 binder.c done: label
+(verbatim, /tmp/binder-5.15.c): Linux emits BR_SPAWN_LOOPER on EVERY
+returning looper read gated on requested_threads==0 &&
+waiting_threads empty && requested_threads_started < max_threads &&
+returning thread is REGISTERED|ENTERED. Rux had THREE divergences: the
+!got_transaction gate, the threads.len() cap (client-only BinderThread
+entries ate the budget), and no returning-thread looper check. Fixed
+to the exact Linux shape (started-count cap; Rux matches Linux in
+never decrementing started on exit; the sc164 child path keeps live
+worker counts — children never REGISTER). sc330B forensics (the 14:07
+draw already ran 33B's earlier workers-count variant live — POOL-SPAWN
+lines prove it) showed pools growing/full but the wedge moving; my
+exact-shape commit went into sc331B.
+
+MISSION ITEM 2 — PERF GATE (32B pair, branch tip): Tier 1 ALL PASS on
+the early calm window (launched 17:56): census 8/32 dead-center bands,
+no grid strands, ticks 99.50-99.98/s, volume 103.5M (-3.7%), GRQ 5.5us
+in band, REST 5.3%, zero panic/OOM. Tier 2 (18:1x): p1 PASS,
+p2_ctxsw/p6_append/p6_write_fsync FAIL +38..102%, p6_unlink -22% —
+measured as 10+ foreign TCG QEMUs piled on mid-run, anchor is the pb1
+TCG smoke column; rerun-once watcher queued (run/perf-gate-leg35b-
+t2retry.sh, 3h window). Coordinator ruling: Tier-1 is the primary
+signal; merge HOLD until the tier-2 rerun verdicts.
+
+MISSION ITEM 3 — READER-EXHAUSTION WALL: ADJUDICATED KERNEL-SIDE AND
+FIXED (see item 1). The sc331B census evidence: POOL-SPAWN events
+across many procs (samgr, bootstrap procs), foundation pool grows on
+demand (st=3 w=5 wwait=5), proc todo stays EMPTY at census instants
+(POOL-TODO never fired — no stranded-queue wall remains), and the
+systemic LC family is GONE: LIFECYCLE_TIMEOUT 181 (sc330B) -> 0,
+SIGABRT 0, render_service survived (re-registered as late as the log
+tail). The residual (9 distinct wedged txns) is nested-call deadlocks:
+composer_host <-> hdf_devmgr mutual sync pair (txn11694/11696 — devmgr
+tid 357 handling composer's call calls back INTO composer main 1196;
+delivery to the waiting sender is Linux's in-line nesting protocol, so
+the ABBA is an image-side lock inversion), the parallel power_host <->
+hdf_devmgr pair (txn2052/2068), powermgr slow (txn18549/26487), and
+foundation tid-1209 stuck 824 s on a RegisterBuffer@display_buffer_vdi
+chain (hilog[1209] DISP RegisterBuffer line) = downstream victim of
+the composer cycle. hdf_devmgr is the hub of both mutual pairs. This
+heads to the image-side doc; one census gap closed for the next leg
+(non-Transaction todo items now named, 39c098c4).
+
+MISSION ITEM 4 — DRAW sc331B (SMP2 4G KVM, oh-img-p + fresh scgold,
+dfx=txnhunt,wwcensus,leakhunt,slowtask,ams46,poolcensus, 40 min):
+89 services; foundation started, killed by the first bootevent-timeout
+sweep (init SIGKILL wave, KILLTRACE 134), restarted as pid 1206.
+launcher MainAbility attempted (ABMS7918 x17) but launcher.ready NOT
+set, OnForeground 0 — milestone not reached. NEW: bootanimation lights
+the ohgpu scanout at 60 s and HOLDS it the full draw (8 colors, 100%
+non-black, oh-sc331B-auto0.ppm) — the userspace display pipeline
+(bootanimation -> fbdev -> virtio-gpu -> scanout) works end-to-end.
+Boot tally: KERNPANIC 0, SIGABRT 0, LC 0, TXN-HANG 449 lines/9 distinct
+txns (the 153-line family is ONE txn14230), WAKE-STRANDED 20.
+
+MISSION ITEM 5 — RESIDUAL PREEMPT-OFF INCUMBENTS (tickrip): 20 strand
+events, incumbents 8/20 in uart outb/enable_irq (the serial-mirror
+residual; ab97a866 already removed the hilogd monopoly), the rest
+one-offs (memcmp, StrSearcher — string scans inside locked sections;
+atomic_load; gs_cpu_id). sc329B's 565/564, 376/377 families did not
+reappear. SLOWTASK: dominated by OS_IPC/ioctl sleepers (nested-call
+waiters) + lock-family (futex) rounds — userspace-side waits.
+
+GATES (tree 39c098c4): x86 build rc=0, riscv build rc=0 (relinked
+after make test), make test "All tests passed", riscv smoke
+(rv-smoke-leg35b.sh) panics=0 + shell + /proc. Kernel ELF for
+symbolization saved as run/rux-sc331B-symbols.
+
+NEXT LEG: (1) tier-2 rerun verdicts -> merge message to coordinator;
+(2) the composer_host <-> hdf_devmgr / power_host <-> hdf_devmgr ABBA
+pairs (hdf_devmgr hub) — image-side unless a wake fault is proven; the
+foundation-1209 824 s RegisterBuffer chain unwedges when composer
+does; (3) launcher chain after HDF unwedges.
+Lane state: branch tip 39c098c4 (4 commits ahead of 8d2ef240 lineage);
+serial sc331B + userdata untracked per .gitignore; my QEMUs all dead
+by timeout; shotmon CSV appended.
