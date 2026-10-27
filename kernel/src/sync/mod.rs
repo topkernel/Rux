@@ -17,7 +17,6 @@ pub mod spinlock;
 pub mod rwlock;
 pub mod seqlock;
 pub mod rcu;
-pub mod percpu;
 
 pub use semaphore::Mutex;
 pub use futex::{futex_wait, futex_wake, do_futex, sys_futex_handler};
@@ -28,5 +27,4 @@ pub use rwlock::{
     RwSpinlockBhReadGuard, RwSpinlockBhWriteGuard,
 };
 pub use rcu::{RcuHead, RcuCallback, rcu_read_lock, rcu_read_unlock, call_rcu, synchronize_rcu};
-pub use percpu::{CpuLocal, CpuLocalRef};
 pub use seqlock::{SeqLock, SeqLockWriteGuard, RawSeqLock};

@@ -213,16 +213,8 @@ struct Magazine {
     len: usize,
 }
 
-// D-7 (rust-design-headroom §3): the magazine bank is the first
-// CpuLocal conversion. The raw `static mut` + review-enforced "caller
-// must have IF=0" discipline (the r8final and 7a6e1bf4 incident
-// family) is now type-enforced: rows are reachable only through
-// CpuLocal::with, whose guard exists exactly inside the closure and
-// restores the saved IRQ state at drop. The r8final len/MAG_DEPTH
-// guards stay — they defend against row CORRUPTION, which the type
-// cannot prevent — but the aliasing-by-construction hazard is gone.
-static MAGAZINES: crate::sync::percpu::CpuLocal<[Magazine; 8], { crate::config::MAX_CPUS }> =
-    crate::sync::percpu::CpuLocal::new([Magazine { buf: [0; MAG_DEPTH], len: 0 }; 8]);
+static mut MAGAZINES: [[Magazine; 8]; crate::config::MAX_CPUS] =
+    [[Magazine { buf: [0; MAG_DEPTH], len: 0 }; 8]; crate::config::MAX_CPUS];
 
 /// r8final forensics: times a magazine row was found with len >
 /// MAG_DEPTH (transient two-CPU entry via a cpu_id()/ti_cpu divergence,
@@ -230,6 +222,17 @@ static MAGAZINES: crate::sync::percpu::CpuLocal<[Magazine; 8], { crate::config::
 /// on a healthy boot; every nonzero value names a real divergence event
 /// for the scheduler/wild-write hunt lanes. Printed by census_line().
 static MAG_ALIAS_EVENTS: AtomicUsize = AtomicUsize::new(0);
+
+/// Pointer to this CPU's class-ci magazine row. Callers must have IF=0
+/// (own irq-off window or the class irqsave hold), making the row
+/// private to this CPU for the duration of the access.
+#[inline]
+fn mag_ptr(cpu: usize, ci: usize) -> *mut Magazine {
+    // SAFETY: addr_of_mut on the static avoids taking a reference to a
+    // static mut; the flat index matches the [[Magazine; 8]; MAX_CPUS]
+    // row-major layout. Aliasing is impossible under the caller's IF=0.
+    unsafe { core::ptr::addr_of_mut!(MAGAZINES).cast::<Magazine>().add(cpu * 8 + ci) }
+}
 
 /// Allocate a small object. Returns null when the layout does not fit
 /// this layer OR the backing page could not be created — the caller
@@ -244,9 +247,8 @@ pub fn alloc(size: usize, align: usize) -> *mut u8 {
     }
     let ci = class_of(size, align);
 
-    // Fast path: pop from THIS CPU's magazine. The CpuLocal guard (D-7)
-    // disables IRQs for exactly the closure body and reads cpu_id
-    // inside the window — with IF=0 the task cannot be preempted and
+    // Fast path: pop from THIS CPU's magazine. cpu_id() is read inside
+    // the irq-off window — with IF=0 the task cannot be preempted and
     // migrated between the read and the row access.
     //
     // r8final guard (2026-10-25): runs/gnome-r8final died at t=515s in
@@ -260,29 +262,31 @@ pub fn alloc(size: usize, align: usize) -> *mut u8 {
     // read buf[16], one past the row. Survive it: skip the fast path
     // (the locked body still serves), and let free()'s bounded drain
     // heal the row. Counted + tainted there, once per heal.
-    if let Some(ptr) = MAGAZINES
-        .with(|mut row| {
-            let mag = &mut row[ci];
-            (mag.len > 0 && mag.len <= MAG_DEPTH).then(|| {
-                mag.len -= 1;
-                mag.buf[mag.len]
-            })
-        })
-        .flatten()
     {
-        return ptr as *mut u8;
+        let flags = crate::arch::cpu::save_and_disable_irq();
+        let cpu = crate::arch::cpu_id() as usize;
+        if cpu < crate::config::MAX_CPUS {
+            let mag = unsafe { &mut *mag_ptr(cpu, ci) };
+            if mag.len > 0 && mag.len <= MAG_DEPTH {
+                mag.len -= 1;
+                let ptr = mag.buf[mag.len];
+                crate::arch::cpu::restore_irq(flags);
+                return ptr as *mut u8;
+            }
+        }
+        crate::arch::cpu::restore_irq(flags);
     }
 
     // Slow path: ONE class-lock hold refills the magazine in batch and
     // returns the first object. The irqsave guard has IF=0 + preemption
-    // disabled; the nested CpuLocal::with is flag-correct under it (the
-    // saved state has IRQs already off) and its re-entry tripwire is
-    // vacuous here — no outer with() is live.
+    // disabled, so the cpu_id() read below is stable for the hold.
     let cache = &CACHES[ci];
     let mut first: *mut u8 = core::ptr::null_mut();
     let _g = cache.lock.lock_irqsave();
     cache.lock_holds.fetch_add(1, Ordering::Relaxed);
-    let mut refill = |mag: &mut Magazine| -> bool {
+    let cpu = crate::arch::cpu_id() as usize;
+    if cpu < crate::config::MAX_CPUS {
+        let mag = unsafe { &mut *mag_ptr(cpu, ci) }; // private: IF=0
         while mag.len < MAG_DEPTH {
             let p = alloc_locked(ci, heap_start);
             if p.is_null() {
@@ -295,11 +299,7 @@ pub fn alloc(size: usize, align: usize) -> *mut u8 {
                 mag.len += 1;
             }
         }
-        true
-    };
-    if MAGAZINES.with(|mut row| refill(&mut row[ci])).is_none() {
-        // cpu id out of bank range (divergence family): serve one
-        // object directly under the lock, no row touched.
+    } else {
         first = alloc_locked(ci, heap_start);
     }
     drop(_g);
@@ -424,46 +424,39 @@ pub fn free(addr: usize) -> bool {
     }
 
     // Fast path: screen the pointer against the page header INSIDE the
-    // CpuLocal window (D-7: the guard IS the irq-off window — fresh
-    // magic/cls read, alignment, free_count head room), then push into
-    // THIS CPU's magazine. Anything the locked body would
-    // consume-and-taint is routed there instead — a bad pointer must
-    // never park in a magazine, because a later alloc pop on this CPU
-    // would hand it out as a live object.
-    enum Step {
-        Pushed,
-        SnapFlush { snap: [usize; MAG_DEPTH], n: usize },
-        Locked,
-    }
-    let step = MAGAZINES
-        .with(|mut row| {
-            let s = CLASSES[ci_guess];
-            let fo = first_off(s);
-            let objs_per_page = (PAGE_SIZE - fo) / s;
-            let off = addr - page - fo;
-            let h = hdr_of(page); // re-read under IF=0: another CPU may have
-            // changed the header since the peek; the flush re-validates
-            // under the class lock regardless.
-            let screen = h.magic == HDR_MAGIC
-                && h.cls as usize == ci_guess
-                && addr != page
-                && off % s == 0
-                && off / s < objs_per_page
-                && (h.free_count as usize) < objs_per_page;
-            if !screen {
-                return Step::Locked;
-            }
-            let mag = &mut row[ci_guess];
+    // irq-off window (fresh magic/cls read, alignment, free_count head
+    // room), then push into THIS CPU's magazine. Anything the locked
+    // body would consume-and-taint is routed there instead — a bad
+    // pointer must never park in a magazine, because a later alloc pop
+    // on this CPU would hand it out as a live object.
+    let flags = crate::arch::cpu::save_and_disable_irq();
+    let cpu = crate::arch::cpu_id() as usize;
+    if cpu < crate::config::MAX_CPUS {
+        let s = CLASSES[ci_guess];
+        let fo = first_off(s);
+        let objs_per_page = (PAGE_SIZE - fo) / s;
+        let off = addr - page - fo;
+        let h = hdr_of(page); // re-read under IF=0: another CPU may have
+        // changed the header since the peek; the flush re-validates
+        // under the class lock regardless.
+        if h.magic == HDR_MAGIC
+            && h.cls as usize == ci_guess
+            && addr != page
+            && off % s == 0
+            && off / s < objs_per_page
+            && (h.free_count as usize) < objs_per_page
+        {
+            let mag = unsafe { &mut *mag_ptr(cpu, ci_guess) };
             if mag.len < MAG_DEPTH {
                 mag.buf[mag.len] = addr;
                 mag.len += 1;
-                return Step::Pushed;
+                crate::arch::cpu::restore_irq(flags);
+                return true;
             }
             // Magazine full: snapshot the whole row out under THIS
-            // window (the guard ends with the closure — no row pointer
-            // survives it), then flush the snapshot and push addr
-            // after — the batch flush below empties the row, so the
-            // push always has room.
+            // window (no row pointer survives the window), then flush
+            // the snapshot and push addr after — the batch flush below
+            // empties the row, so the push always has room.
             //
             // r8final guard (2026-10-25): the drain is bounded on BOTH
             // sides. A row raced to len == MAG_DEPTH+1 (two pushes that
@@ -505,36 +498,31 @@ pub fn free(addr: usize) -> bool {
                 MAG_ALIAS_EVENTS.fetch_add(1, Ordering::Relaxed);
                 crate::dfx::taint::add_taint(crate::dfx::taint::TaintFlags::BAD_PAGE);
             }
-            Step::SnapFlush { snap, n }
-        })
-        .unwrap_or(Step::Locked); // cpu id out of bank range or refused re-entry
-    match step {
-        Step::Pushed => return true,
-        Step::SnapFlush { snap, n } => {
+            crate::arch::cpu::restore_irq(flags);
             flush_batch(&snap[..n], ci_guess, heap_start);
-            // Push addr into the (now empty) row. A FRESH CpuLocal
-            // window reads cpu_id again: the task may have been
-            // preempted and migrated during the flush, and must not
-            // touch a stale row. An IRQ-context free that ran meanwhile
-            // leaves the row with fewer than MAG_DEPTH entries — the
-            // check still guards; the locked fallback covers the
-            // impossible rest.
-            let pushed = MAGAZINES
-                .with(|mut row| {
-                    let mag = &mut row[ci_guess];
-                    (mag.len < MAG_DEPTH).then(|| {
-                        mag.buf[mag.len] = addr;
-                        mag.len += 1;
-                    })
-                })
-                .unwrap_or(None);
-            if pushed.is_none() {
-                flush_batch(core::slice::from_ref(&addr), ci_guess, heap_start);
+            // Push addr into the (now empty) row. cpu_id re-read inside
+            // the new window: the task may have been preempted and
+            // migrated during the flush, and must not touch a stale
+            // row. An IRQ-context free that ran meanwhile leaves the
+            // row with fewer than MAG_DEPTH entries — the check still
+            // guards; the locked fallback covers the impossible rest.
+            let f2 = crate::arch::cpu::save_and_disable_irq();
+            let c2 = crate::arch::cpu_id() as usize;
+            if c2 < crate::config::MAX_CPUS {
+                let mag = unsafe { &mut *mag_ptr(c2, ci_guess) };
+                if mag.len < MAG_DEPTH {
+                    mag.buf[mag.len] = addr;
+                    mag.len += 1;
+                    crate::arch::cpu::restore_irq(f2);
+                    return true;
+                }
             }
+            crate::arch::cpu::restore_irq(f2);
+            flush_batch(core::slice::from_ref(&addr), ci_guess, heap_start);
             return true;
         }
-        Step::Locked => {}
     }
+    crate::arch::cpu::restore_irq(flags);
     // Screen failed or cpu id out of range: the pre-magazine locked
     // body (consume-and-taint semantics preserved exactly).
     flush_batch(core::slice::from_ref(&addr), ci_guess, heap_start);
