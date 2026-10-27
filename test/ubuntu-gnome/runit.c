@@ -156,6 +156,51 @@ static void dump_xstate(void) {
         if (st != 0)
             printf("[runit] xprobe %s exited st=%d\n", probes[i][1], st);
     }
+    // Server GLX extension string (leg-8): glxinfo -B prints only the
+    // brief block; the full run's "server glx extensions" list is where
+    // GLX_EXT_texture_from_pixmap (mutter's X11 composite texture path)
+    // appears or does not. sh -c so the pipe lives guest-side.
+    {
+        printf("== dump GLX server extensions (TFP check) ==\n");
+        fflush(stdout);
+        pid_t d = fork();
+        if (d == 0) {
+            int con = open("/dev/console", O_WRONLY);
+            if (con >= 0) { dup2(con, STDOUT_FILENO); dup2(con, STDERR_FILENO); }
+            setenv("DISPLAY", ":0", 1);
+            execl("/bin/sh", "sh", "-c",
+                  "/usr/bin/glxinfo 2>/dev/null | "
+                  "sed -n '/server glx extensions/,+8p'; "
+                  "/usr/bin/glxinfo 2>/dev/null | grep -c texture_from_pixmap "
+                  "| sed 's/^/tfp-lines=/'; "
+                  "/usr/bin/glxinfo 2>/dev/null | grep -m2 'GLX visual\\|GLX fbconfig'",
+                  (char *)NULL);
+            _exit(127);
+        }
+        int st; waitpid(d, &st, 0);
+    }
+    // Per-window content walk (leg-8): XGetImage every sizable window's
+    // own content. An xterm body with white-with-glyph pixels in its own
+    // window (absent from scanout) convicts the mutter composite path;
+    // an all-black xterm window convicts client drawing. Replaces the
+    // hard-coded rects as the primary frontier instrument (the two rect
+    // probes stay for root-vs-scanout continuity).
+    {
+        printf("== dump XWALK (per-window content) ==\n");
+        fflush(stdout);
+        pid_t d = fork();
+        if (d == 0) {
+            int con = open("/dev/console", O_WRONLY);
+            if (con >= 0) { dup2(con, STDOUT_FILENO); dup2(con, STDERR_FILENO); }
+            setenv("DISPLAY", ":0", 1);
+            execl("/usr/local/bin/xregion", "xregion", "-w", "100",
+                  (char *)NULL);
+            _exit(127);
+        }
+        int st; waitpid(d, &st, 0);
+        if (st != 0)
+            printf("[runit] xregion -w exited st=%d\n", st);
+    }
     // Composited-content probe (leg-7): XGetImage the root window where
     // the xterm probe window should be (its geometry has been 904x536 at
     // +140+90 or +140+127 — sample the interior so either placement is
@@ -266,6 +311,49 @@ static void read_knob(const char *path, char *buf, size_t cap) {
                 if (buf[i] == '\n' || buf[i] == '\r') buf[i] = 0;
         }
     }
+}
+
+// --- notification-banner probe (leg-8) ---
+// The shell's org.freedesktop.Notifications daemon registers at the END
+// of the JS init walk ("GNOME Shell started"), so a banner can only be
+// tested once that line appears. Watch /tmp/gnome-shell.log for the
+// marker; on first sight (then every 200s) fire a Notify call with a
+// long expire-time and print NOTIFY-SENT — fire.py sees the marker and
+// takes a burst of screendumps timed to the banner lifetime, so the
+// banner check does not depend on the 30s idle shot cadence.
+static int shell_started(void)
+{
+    // Cheap tail scan: the marker is printed by the shell itself and
+    // also mirrored by the periodic log tailer, so the last 8 KiB is
+    // enough.
+    int fd = open("/tmp/gnome-shell.log", O_RDONLY);
+    if (fd < 0) return 0;
+    char buf[8192];
+    ssize_t n = read(fd, buf, sizeof buf - 1);
+    close(fd);
+    if (n <= 0) return 0;
+    buf[n] = 0;
+    return strstr(buf, "GNOME Shell started") != NULL;
+}
+
+static void fire_notify_banner(void)
+{
+    pid_t d = fork();
+    if (d == 0) {
+        int con = open("/dev/console", O_WRONLY);
+        if (con >= 0) { dup2(con, STDOUT_FILENO); dup2(con, STDERR_FILENO); }
+        execl("/usr/bin/gdbus", "gdbus", "call", "--session",
+              "--dest", "org.freedesktop.Notifications",
+              "--object-path", "/org/freedesktop/Notifications",
+              "--method", "org.freedesktop.Notifications.Notify",
+              "rux-probe", "0", "", "Rux banner probe",
+              "banner body alpha 24680", "[]", "{}", "45000",
+              (char *)NULL);
+        _exit(127);
+    }
+    int st; waitpid(d, &st, 0);
+    printf("[runit] NOTIFY-SENT gdbus st=%d\n", st);
+    fflush(stdout);
 }
 
 int main(void) {
@@ -427,6 +515,7 @@ int main(void) {
         pid_t tp = fork();
         if (tp == 0) {
             int cyc = 0;
+            int notified = 0;
             for (;;) {
                 sleep(20);
                 cyc++;
@@ -437,6 +526,15 @@ int main(void) {
                     struct stat st;
                     if (stat(logs[i], &st) != 0) continue;
                     dump_log_prefix(logs[i], 150);
+                }
+                // notification-banner probe (leg-8): fire on the shell
+                // marker, re-fire every 10 cycles so at least one lands
+                // in a calm window (each call prints NOTIFY-SENT).
+                if (shell_started()) {
+                    if (!notified || (cyc % 10) == 0) {
+                        notified = 1;
+                        fire_notify_banner();
+                    }
                 }
                 if (TRACE && (cyc % 3) == 0) {
                     dump_log_prefix(TRACE_BASE "/per_cpu/cpu0/stats", 4);

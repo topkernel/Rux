@@ -101,6 +101,11 @@ logf = open(os.path.join(OUT, "serial.log"), "wb")
 vm = subprocess.Popen(qemu_cmd, stdout=logf, stderr=subprocess.STDOUT)
 
 stop = threading.Event()
+# set by the serial reader when runit prints NOTIFY-SENT (a
+# notification banner is on screen right now, expire 45s); the main
+# loop responds with a burst of timed screendumps so the banner check
+# does not depend on the 30s idle shot cadence
+notify_burst = threading.Event()
 t0 = time.time()
 milestones = {}   # name -> (t_seconds, detail)
 markers = []      # (t, text) raw events of interest
@@ -220,6 +225,7 @@ PATTERNS = [
     (re.compile(rb"GNOME Shell started at"), "shell_started"),
     (re.compile(rb"comm=xterm"), "xterm_probe"),
     (re.compile(rb"comm=(gnome-session-failed)"), "session_failed"),
+    (re.compile(rb"\[runit\] NOTIFY-SENT gdbus st=(\d+)"), "notify_sent"),
     (re.compile(rb"KERNPANIC|Kernel panic"), "kernpanic"),
     (re.compile(rb"SIGDEATH: (\S+) sig=(\d+)"), "sigdeath"),
     (re.compile(rb"alloc_pages.*[Oo][Mm]|Out of memory|oom-kill"), "oom"),
@@ -256,7 +262,8 @@ def serial_reader():
                 elif name in ("gnome_shell", "gsd", "mutter_wm", "xorg_banner",
                               "session_bus", "start_gnome", "kernpanic", "oom",
                               "gnome_session_died", "fallback_gs",
-                              "shell_started", "xterm_probe", "session_failed"):
+                              "shell_started", "xterm_probe", "session_failed",
+                              "notify_sent"):
                     note(f"{name} {detail}".rstrip())
                     if name == "gnome_shell":
                         mark("M3_gnome_shell", detail)
@@ -266,6 +273,12 @@ def serial_reader():
                         mark("KERNEL_PANIC", detail)
                     elif name == "oom":
                         mark("OOM_LINE", detail)
+                    elif name == "notify_sent":
+                        # banner-burst trigger: runit just fired a
+                        # notification (expire 45s); take timed shots so
+                        # the banner check does not depend on the idle
+                        # 30s cadence.
+                        notify_burst.set()
         # consume scanned window to avoid re-matching every poll
         serial_buf = serial_buf[-4000:] if len(serial_buf) > 160_000 else serial_buf
 
@@ -288,6 +301,8 @@ threading.Thread(target=serial_reader, daemon=True).start()
 
 best_nonblack = 0.0
 dump_i = 0
+burst_until = -1     # banner-shot burst window (see notify_burst)
+last_burst = -100
 keyprobe = [int(x) for x in args.keyprobe.split(",") if x.strip()]
 mousemove = [int(x) for x in args.mousemove.split(",") if x.strip()]
 qmp = None
@@ -394,6 +409,34 @@ try:
                     print(f"[fire] t={el}s screendump never materialized", flush=True)
             except Exception as e:
                 print(f"[fire] t={el}s screendump error: {e}", flush=True)
+        # notification-banner burst: NOTIFY-SENT just crossed the serial
+        # stream; the banner is up for 45s (expire-time). Take extra
+        # shots every 5s for the next 40s, kept under a banner- prefix
+        # so they are distinguishable from cadence shots even when
+        # fully black (a banner diff vs the neighboring cadence shots
+        # is the deterministic check; run/panelcheck.py).
+        if notify_burst.is_set():
+            notify_burst.clear()
+            burst_until = el + 40
+            print(f"[fire] t={el}s notify burst armed until +{burst_until}s",
+                  flush=True)
+        if qmp and el <= burst_until and el - last_burst >= 5:
+            last_burst = el
+            bshot = os.path.join(OUT, f"banner-{el:04d}s.ppm")
+            try:
+                if qmp.screendump(bshot):
+                    st = ppm_stats(bshot)
+                    if st:
+                        w, h, nb, tot, top, sig = st
+                        print(f"[fire] t={el}s banner {w}x{h} nonblack={nb}/{tot} "
+                              f"({100*nb//tot}%) sigcolors={sig} top={top}", flush=True)
+                        if nb == 0:
+                            os.unlink(bshot)
+                else:
+                    print(f"[fire] t={el}s banner screendump never materialized",
+                          flush=True)
+            except Exception as e:
+                print(f"[fire] t={el}s banner screendump error: {e}", flush=True)
 finally:
     print("[fire] stopping", flush=True)
     stop.set()
