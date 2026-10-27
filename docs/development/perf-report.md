@@ -1189,3 +1189,998 @@ PASSING quiet-window gate run — nanosleep readings across boots now
 span 174-333 ms (pa41gate 174, sc239 184, seed 221, pa38 333), which
 proves the single-point 221 ms seed was workload-mix artifact; the
 baseline doc marks the row unbanked pending that window (below).
+
+### 8.10.2 L3/socket-family first lever (leg 34, 2026-10-25, pa47)
+
+The post-L0 gap table's socket-family outlier (p5b/p5c ~190-260x on
+release-strong) got its first cost-center lever: the AF_UNIX send hot
+path (commit b3757d92 on feature/perf-audit) removes three per-send
+costs — the O(queue-depth) flow-control walk under the recv_queue lock
+on every send and every blocked-sender recheck (now a running
+RecvQueue::charge counter), the up-to-3x bound_name lock+string-scan
+for the hilog/param/socksnap diagnostic taps (now a bind-time cached
+AtomicU8 tap_class), and the per-segment String allocation for the
+sender name (now an Arc cloned from a bind-time cache; MSG_PEEK
+clones become refcount bumps).
+
+Measurement (quick gate, med-of-2 per arm, BOTH boot orders to cancel
+the host-load drift that a single back-to-back pair suffers — pa47
+series, release-strong, TCG): p5b_dgram_send A{5.262, 8.405} vs
+B{4.687, 5.019} us and p5b_dgram_recv_peek A{4.660, 7.514} vs
+B{4.246, 4.328} — B lower in both orderings (~-25-30% on family
+means); controls flat (p5a_pipe — no unix sockets — and p5c unchanged
+within 2%); p1_null scatters both directions (pure load noise).
+Functional: 4 pbench boots complete (no skips, no short runs), OH
+smoke boot 420 s clean (0 panics/OOM, hilog taps fire 3000x under the
+cached flags, PCTL-SEND/RECV both print, unixsend-loop 0, census
+TERM-DESCHED 8 EXACT on the smoke). med-of-3 per arm COMPLETE
+(a3/b3, balanced orders A,B,B,A,A,B): p5b_dgram_send A med 5.862 vs
+B med 4.739 (-19.1%), recv_peek A 6.824 vs B 4.246 (-37.8%), B lower
+in all three adjacent comparisons; controls p5a_pipe/p5c flat.
+
+What this does NOT close: the family remains ~30x the 2x target
+(0.078/0.108 us) — the residual per-send cost is the syscall floor +
+fdtable + wake-path work shared with every family, and the flow-
+control/wake design of a blocking pair. Next levers for the row stay
+behind the floor levers (fork+exec tail, ext4 metadata) in priority.
+
+### 8.10.3 F4-R2 verdict: merge-safe, measured-neutral (leg 35, 2026-10-25, pa46)
+
+The dead leg-34's load-gated two-boot queue fired before the quota
+window closed: pa46main (main-class 47d96961 debug) 12:00-12:13 at
+load1 11->17, pa46f4r2 (47d96961 + fd23662a) 12:21-12:34 at load1
+13->15 — same-gate adjacent windows, both rc=0 (run/pa46-decider.log;
+serial logs run/pa-pa46main/f4r2-serial.log, parses
+run/perf-gate-pa46{main,f4r2}-parse.txt). This closes the two census
+debts the fd23662a commit message carried.
+
+**Tier-1 census, F4-R2 kernel: PASS every enforced row** — panics 0,
+OOM 0, TERM-DESCHED 8 EXACT, WAKE-REFUSED 32 EXACT, WAKE-STRANDED 0,
+tick 99.53/99.98 (the main-class twin missed cpu0 at 98.28 — the
+documented one-CPU marginal flake class under foreign-QEMU load),
+clock_gettime 3 us, GRQ hold 5572ns, small_alloc REST 6.5%. Volume
+92.2M vs A's 93.2M: -1.1%, both FAIL the 136M quiet-window base
+(load-coupled row, see baseline doc). nanosleep 221.8ms vs A's
+220.3ms — both inside the unbanked seed band.
+
+**Boot wall: NEUTRAL — the "-30-60 s boot wall" route-2 estimate is
+refuted at the noise floor.** pa46-bootwall.sh over the two stamped
+logs: wall delta at all 9 SYSCOST checkpoints -0.1..+0.0s (mean
+-0.0s), milestones identical (foundation exit 65s both, appfwk.ready
+65s both, first SIGKILL 63 vs 64s). Volume-at-t runs -1.0..-2.4M
+consistently ahead for A — inside the load swing that moves this row
+44% between quiet and loaded windows, and fd23662a removes kernel
+waits, not syscalls. Consistent with pa43's pbench finding (no
+median movement; per-op cost is dominated by the identity-block
+syncs that remain): route 2 alone moves nothing measurable — the
+boot-wall and per-op wins the route map estimated live behind
+routes 1+3 (lazy write path, fsync scope), and route 2 folds into
+route 1 as originally listed.
+
+**Claim: fd23662a is READY FOR MERGE** — census PASS on both kernels,
+no regression in any channel (pa43 pbench, pa46 census, boot wall),
+semantics documented in its own commit (stale free counts after a
+crash = e2fsck class, same as a write-back mount of the reference
+kernel; allocation publication order untouched). Mechanism-level
+sync-write count (the -4K prediction) is NOT verified — these census
+kernels do not carry the fsw=1 instrument; if the fs lane wants that
+row it needs one fsw boot on the F4-R2 kernel, not a re-run of this
+gate.
+
+**Binder domain (sweep_stale_async stability): STABLE, and the
+family model is corrected — the code-7->Init exec class is
+load-elastic.** pa46main n=30 / pa46f4r2 n=32, queue>=50ms = 0 in
+both, max queue 10ms — same as every pre-reclaim boot (pa40 n=2,
+pa41gate n=4). The raw totals exposed that the checker's discrete
+families (15/30/89s) were one class stretched: pa47smoke under light
+load clusters code-7->Init tight at 15.0-15.1s (20 rows), while the
+load1-13-17 pa46 boots spread the same class over 18.8-77.1s, all
+queue<=10ms, all dst=Init (pid 325). The checker (run/pa46-slowtxn.sh)
+now keys known exec bands by binder code — {1,64}: 4.5-9s, {7}: 13-95s
+— and FAILs on queue>=50ms, out-of-band totals, or an unknown code;
+it re-validates PASS on all five boots spanning the reclaim
+(pa40/pa41gate pre, pa47smoke/pa46main/pa46f4r2 post).
+
+### 8.10.4 LTP socket-family subset on the branch kernel (leg 35, pa48)
+
+The merge-blocking debt on b3757d92 (socket fast path was med-of-3
+measured but never LTP-run; the fleet covers main-class only) is
+cleared: private copy of the fleet LTP rootfs with /test/sweep.list
+replaced by the 32 socket-family rows (indices preserved from the
+fleet's 1081-row list), swept from 0 on the merged branch kernel
+(ddb3ed01 + b3757d92 + procfile!, debug, TCG smp2/2G, run
+run/pa48-ltpsock.sh, log run/pa-pa48sock-r1-serial.log).
+
+Result: all 32 tests ran, SWEEP DONE, clean power-down, 0 panics.
+30/32 states identical to the fleet's latest main-class result;
+the two differences (recv01 CRASH-vs-FAIL, recvmsg03 TCONF-vs-FAIL)
+are both states the fleet's own main-class history already shows
+(fleet-all includes CRASH for recv01 and both FAIL/TCONF for
+recvmsg03) — flaky tests, not branch behavior. The five CRASH|0|9
+rows (recv01/recvfrom01/send01/sendmsg01/sendto01) crash on
+main-class kernels too. No NEW failure class: the socket fast path
+is LTP-clean for the merge claim.
+
+### 8.10.5 First trace-event deliverable: wake-latency distribution under churn (leg 35, pa49)
+
+The DFX batch's T4 sched events make wake-latency measurement a ONE-
+QEMU capture instead of an A-B syscost pair. Channel: minimal rootfs,
+init=/bin/mrsh, TCG MTTCG smp2/1G; only sched_waking + sched_wakeup +
+sched_switch armed (three events per wake cycle keeps the 1024-entry
+per-CPU ring lossless at churn rate); two fork/exec churn loops; 45 s
+of trace_pipe drained to a guest file; host-side parse
+(run/pa49-wakelat.sh + run/pa49-wakelat-parse.sh, log
+run/pa-pa49wl3-serial.log, result run/pa49-wakelat-result.txt).
+
+Wake->run under churn (n=1421 matched pairs, ring overrun 0 on both
+CPUs, 9965 records captured):
+- from sched_wakeup (post-enqueue): p50 154 us, p90 504 us,
+  p99 13.3 ms, max 33.1 ms.
+- from sched_waking (includes the enqueue attempt): p50 234 us,
+  p90 618 us — the waking->wakeup gap is ~80 us at p50: the enqueue
+  attempt under contention costs more than the schedule-in itself for
+  the median wake.
+- Shape: the bulk sits at 100-250 us (76% of pairs) — the wait for
+  the running task's preemption point on the second vCPU; the tail is
+  two classes, 1-5 ms (5.3%) and >5 ms (2.6%, max 33 ms) — the long-
+  timeslice/no-preemption-point class the syscost rows sample
+  coarsely. No pair landed under 50 us at this churn level (the
+  second vCPU is always busy; a wake never finds an idle CPU).
+
+Cross-check value: the census's WAKE-REFUSED 32 / GRQ-hold 5.6 us rows
+measure the enqueue path only; this adds the end-to-end schedule-in
+distribution on the same kernel class. The unmatched-switch count
+(5663) is preempt-continuation (a task switching back in without a new
+wake) — with overrun 0 it is not data loss.
+
+The capture also VERIFIED the ff48bbf3 frrm fix end to end: the two
+pre-fix attempts died deterministically (mrsh SIGILL in __multf3's
+`frrm` under the capture loop's shell arithmetic); the fixed kernel
+ran the full capture clean. Side observation for the DFX lane: T4
+record path under MTTCG + churn held overrun=0 at three-event
+production — the single-threaded soak's coverage is extended, not
+contradicted.
+
+### 8.10.6 Leg 36 (2026-10-25/26): Tier-1 rows re-banked, procfile cols form, wake/epoll empty fast paths
+
+**Volume + nanosleep re-bank: DONE (the leg-35 armed decider fired).**
+pa50main ran 16:45-16:58 at load1=0/qemus=1 (the tightest window of
+any banked volume reading; pa38's 136M seed was a load-~5.5 boot whose
+app phase ran 81 ABC restarts — a deeper workload mix). All other
+enforced rows PASS: census 8/32 exact, ticks 100.00/99.57, 0 panics/OOM,
+clock_gettime 3 us, GRQ 5092 ns, small_alloc REST 5.8%. Banked: volume
+107.5M (+-10%, enforcement stays load-gated: pa41gate 77.1M at 14-19
+foreign QEMUs, pa46main 93.2M at load1 11-17), nanosleep 203 ms
+n=26,945 (band <=244 ms; cross-run range 174-222 ms fits) — perf-gate.sh
+now enforces the row and actually uses NANOAVG_MS_MAX (was INFO-only).
+Same-commit constant refresh per the baseline rule; fully green re-parse
+run/perf-gate-pa50rebank2-parse.txt.
+
+**procfile! cols form (track-1, conversions 3-4): /proc/stat +
+/proc/schedstat.** The stat-family row shape (label prefix, N
+space-separated counters) had no macro form; /proc/stat hand-wrote
+three format! variants of the same 10-column jiffy row. The cols form
+derives the row function's ARGUMENT LIST from the column declaration —
+a call site cannot swap two counters without the names disagreeing at
+the call. /proc/stat keeps its dynamic-arity intr/softirq sum lines
+explicit and renders the kv tail through render_kv; whole-file LINE
+ORDER pinned by stat_file_tests::line_order_check (no per-line test
+can see order). Unit suite (riscv64, pa53-maketest.log): group [13]
+procfile-shape runs the three new checks, All tests passed. DFX note
+§8 records the form + remaining candidates (interrupts/softirqs/
+diskstats, dynamic-arity).
+
+**Wake/epoll lock-free empty fast paths (track-2 first lever toward
+the p5 residual): implemented, functionally verified, measurement
+PENDING a quiet window.** The p5b residual after b3757d92 decomposes
+into per-event costs shared box-wide; two are unconditional irqsave
+lock/unlock pairs taken even when there is nothing to do:
+(1) WaitQueueHead::wake_up locked the entry Vec before discovering it
+is empty — on a box where consumers poll instead of sleep (hilogd
+drains, pbench pairs, most pipe traffic) that empty-wake lock ran on
+EVERY event; Linux checks wq_has_sleeper() (one load) first. Now a
+waiters AtomicUsize moved only inside the list lock's critical
+sections (add/prepare_to_wait increment, remove/finish_wait decrement
+by exactly what retain dropped); wake_up returns after one Acquire
+load on 0. (2) epoll_notify_file took the shard lock and scanned it
+even with no epoll bound in the shard; EPOLL_SHARD_N[64] counts live
+bindings per shard under the same lock; notify returns after one
+Acquire load on 0. Lost-wake safety is the standard recheck argument,
+documented on both fields; every wait site in the tree re-checks its
+condition after prepare_to_wait (wait_event macro, unix_wait_round,
+the virtio completion path — audited this leg).
+
+Functional evidence: unit suite green with the change (pa54-maketest.log,
+All tests passed); 3 full pbench boots on the lever kernel (pa55 B arm)
+DONE rc=0, 0 panics; branch Tier-1 census boot pa56branch (this leg).
+Measurement: the pa55 A/B series (6 boots, orders A,B,B,A,A,B,
+release-strong, protocol = 8.10.4) is DRIFT-BLOCKED — boot 1 (A) read
+p5b send 5.6 us, then a host regime change pushed every later boot of
+BOTH arms to 40-73 us (boot 4 A = 69.8 vs B boots 67.5/70.1); adjacent
+same-window pairs scatter both directions (5A/6B: p5c/p5a/p1 favor B,
+send favors A). No bankable number; re-run run/pa55-ab.sh in a quiet
+window before any merge claim (expected effect single-digit %: the
+fast path fires only for genuinely-empty queues, which the blocking
+p5b pair rarely has — the boot-wide wake volume is where this pays).
+
+**F4-R2 carry: unchanged.** a5af759c (RVV enable) touches riscv64 +
+fork.rs/cmdline/main, not ext4; the 8.10.3 READY claim stands as
+banked. **Census gate on a5af759c: pending window** (fork-path commit
+→ real check); decider run/pa52-census.sh armed 21:45, two-stage gate
+9/8 then 13/10, deadline 6 h. sc2xx launcher.ready trigger NOT FIRED
+(newest boot sc241, no event; pa39-watch standing).
+
+### 8.10.7 Leg 37 (2026-10-26): D-6 capability file-ops landed on-branch, F4 route-1 first slice, census re-targeted to the merge tree
+
+**Census gate: re-armed on the CURRENT main tip (the owed roll moves
+target).** Leg-36's pa52 decider (a5af759c) never fired — the host
+held load1 17-27 with 12-19 foreign QEMUs all night — and main moved
+51 commits past a5af759c in the meantime (35 kernel commits: the OH
+sched/binder package + this lane's merge set at e6a172d8 + the GNOME
+lanes' commits). The census + binder SLOW-TXN check is owed on the
+tree the branch will merge INTO, so the stale decider was killed and
+run/pa57-census.sh re-armed on PURE main b332d08a (x86 debug, built
+in pa52-main): same two-stage gate (9/8 for 2 h, then 13/10, 6 h
+deadline), then the gate parse + pa46-slowtxn.sh (which also
+adjudicates the pa56branch code-14 open question — a code-14 row in
+this PURE-main boot clears the branch; absence keeps the branch
+under a targeted look), then — same window, serialized — the owed
+pa55 A/B re-run of the wake/epoll levers (6fdada6b) on the CURRENT
+MERGE SHAPE: A = run/pa57-a-ctl-bzImage (pure main release-strong),
+B = run/pa57-b-fast-bzImage (branch HEAD strong; the branch's kernel
+diff vs main is exactly 6fdada6b's two files, so the A/B is clean AND
+its A-arm rows re-measure the p5b/p5c socket family on the
+post-p5-merge main class — the track-2 re-measure debt).
+
+**The oh-img trap (hit and fixed locally):** origin/main carries a
+TRACKED run/oh-img SYMLINK whose target is the perf-audit worktree's
+own run/oh-img (a self-referential loop — it came in with the dfx
+lane's wip commits and resolves nowhere). The leg-36->37 merge
+replaced this worktree's real image directory with that loop, which
+would have killed the census boot at its userdata copy. Fixed on
+disk (points at oh-display's oh-img); the symlink change stays
+UNCOMMITTED deliberately — REPORTED to the main session for an
+untrack decision (it breaks every worktree that merges it).
+
+**Track-1 (§1 capability file-ops): landed on-branch as D-6.**
+FileOps::builder() (const; duplicate capability install = const
+panic = compile error at every static initializer), the one-place
+missing-op dispatch (File::missing_op_errno — Read/Write EINVAL,
+LSeek ESPIPE, ReadAt EINVAL-op-less/ESPIPE-stream, with the incident
+comments consolidated; File::poll_dispatch — capability fn or the
+always-ready mask that four misc.rs call sites used to re-derive in
+two shapes), six conversions of the incident family (epoll/eventfd/
+timerfd/signalfd/pipe/inotify), and the fileops-caps unit group
+pinning each matrix + the errno map. Suite 1103/1103
+(pa58-maketest.log incl. the group); OH smoke boot pa58d6 (420 s,
+syscost) 0 panics, foundation/appspawn event loops alive — the §1
+kernel is functionally clean. Registered as D-6 in
+design-divergences.md (be92af7c).
+
+**Track-2 (next-biggest rows): F4 route-1 first slice landed
+(22452d60).** The post-L0 ladder's top rows after the socket family
+are p6_mkdrmdir (1890x) / p6_unlink (1085x) — ext4 metadata, whose
+route map puts route 1 (lazy no-journal write path) as the big
+lever, de-risked by reusing the publication queue. The slice:
+ext4_journal_start returns a NULL-JOURNAL handle on journal-less
+filesystems (was EINVAL), and all eight namei dispatch sites bracket
+unconditionally — so on the no-journal userdata class the per-op
+inline metadata syncs defer into the SAME ordered publication queue
+the journaled path uses (pre-before-entry-before-post at every
+drain: fsync/sync, eviction, forced commit); jbd2_journal_stop's
+existing early return makes the null shape a pure defer. Linux's
+no-journal ext4 is write-back the same way; crash class = e2fsck
+(F4-R2 stance). Suite 1103/1103 (pa59-maketest2.log). Mechanism boot
+pa59r1 (fsw=1, 480 s, 0 panics): publications flow (pb=683), dirty
+evictions rise 5 -> 26 (write-back behavior, expected); the
+same-day control boot (pure main b332d08a, same image/window class)
+lands pa59ctl — the honest sync-write pair and the phase-A
+comparison go in the table below when it completes. NOT READY FOR
+MERGE until: the fsw pair is read, one LTP creat05/fork09-class spot
+run (the create-loop regression class the publication queue history
+warns about), and the pbench mkdrmdir/unlink medians in a quiet
+window.
+
+**sc2xx launcher.ready trigger: NOT FIRED** (sc258 newest, zero
+events; pa39-watch standing). Run day stays pending.
+
+### 8.10.8 Leg 38 (2026-10-26): D-7 typed per-CPU landed, main b4da2106 merged, census re-armed on the new tip
+
+**Main merge:** b4da2106 merged clean (920c7b3e). Kernel-relevant
+new commits since the b332d08a census target: 2968ad13 (mm/COW
+private-copy alloc out of the PTE section — oom01-wedge root cause,
+a GUARDED-DOMAIN mm change), 3e7186b6+84743e84 (net batch:
+MSG_MORE cork + TIME_WAIT reclamation — IPC/socket domain),
+7a6e1bf4 (small_alloc magazine two-CPU entry — mm domain), 4c0e6c67
+(pidns), 49635573 (kcmp), cfbd7588 (clone ABI). The census + domain
+checks are owed on THIS class: run/pa60-census.sh armed (pure main
+b4da2106 x86 debug built in pa52-main, BUILD_RC=0), two-stage gate
+9/8 then 13/10, 6 h deadline, then perf-gate parse + slowtxn parse,
+then the adjacent pbench pair M,B,B,M (M = pure main strong; B =
+branch HEAD strong) — the route-1 p6_mkdrmdir/p6_unlink medians debt
+AND the p5 socket-family re-measure on the net-batch class in one
+pair. run/pa61-route1.sh chains after it: the LTP
+creat05/fork09-class spot run (17 metadata/create rows) + the fsw
+pair re-run WITH the FSW1 sd separator fix.
+
+**The pa57 census (b332d08a, booted 06:10 at load 15-18):** census
+rows all green (TERM 8, REFUSED 32, 0 panic/OOM, GRQ 6230ns PASS,
+small_alloc REST 6.4% PASS, clock_gettime 4us PASS, nanosleep
+183ms PASS). Two FAIL rows pending the b4da2106 quiet adjudication:
+tick cpu0 99.43/s (min 99.5 — marginal), volume 85.8M vs 107.5M+-10%
+(rerun-once rule; the boot was load-class 15-18, not quiet). The
+slowtxn parse FAILED on ONE code-1 row at 11770 ms exec (band
+4.5-8.999 s, queue 0 ms): the code-1 historical max is 7730 ms
+(pa41gate, load era); 11.77 s at load 15-18 reads as load-elastic
+stretch beyond the recorded range — adjudication rule identical to
+the leg-36 code-7 widening: only QUIET-class evidence moves the
+band, and the pa60 census boot is that evidence (quiet code-1 <=8 s
+confirms load; quiet >9 s widens the band). NO code 14 in this
+pure-main boot: the pa56branch code-14 question stays on the branch
+under targeted look.
+
+**pa57 A/B: never fired.** The pre-gate (load1<=13/qemus<=10,
+deadline 90 min) held load 14-30 with 10-16 foreign QEMUs the whole
+morning; the chain exits A/B-skipped and the 6fdada6b wake/epoll
+lever measurement debt rolls to the NEXT quiet window — the pa60
+pbench pair's B arm carries the branch levers, but the CLEAN A/B
+(6fdada6b alone) still owes its own window (kernels stay banked:
+run/pa57-a-ctl-bzImage / run/pa57-b-fast-bzImage).
+
+**Track-1 (§3 typed per-CPU): landed as D-7 (d8d23064).**
+CpuLocal<T,N> — cache-line-padded per-cpu rows reachable only
+through with(f), which hands the closure a !Send guard whose Drop
+restores the saved IRQ state: the interrupt-disabled window a
+per-CPU access depends on is the guard's lifetime, a type-level
+fact. First conversion: the small_alloc magazine bank — the incident
+site itself (r8final two-CPU row entry; 7a6e1bf4's transient entry
+on main the same week). alloc fast path, locked refill, and the free
+fast path (incl. the full-row snapshot/flush/post-push sequence)
+converted; every manual save/restore flag pair at those sites is now
+the guard's acquire/drop; all r8final len/MAG_DEPTH guards kept
+verbatim (they defend against row corruption, which the type cannot
+prevent). Two tripwires as data: out-of-range cpu id -> None (locked
+fallback, the survive-and-taint stance); same-slot re-entry refused
++ counted + tainted. percpu-shape unit group (6 rows) added; suite
+1110/1110 (run/pa62-maketest3.log). Registered as D-7; the GRQ
+typed lock key is the §3 follow-on slice. Functional smoke rides
+the pa60/pa61 branch boots (pbench B arm, fsw mech, LTP spot) —
+all re-banked post-D-7.
+
+**Track-2 (F4 route-1): mechanism confirmed firing, honest pair
+re-run chained.** From the leg-37 pa59 pair: mech pb=683.880 vs
+control pb=0.0 — the publication queue never engages on the
+no-journal class without route-1 and engages with it (the null-
+journal handle brackets make namei metadata publication-constrained,
+exactly the mechanism). Dirty evictions 26 vs 5 (write-back
+behavior, expected). The QUANTITATIVE sync-write split stays
+ambiguous in the old logs (the pre-separator sd concatenation —
+31765408 could split as 31765|408 or 317654|08, and control's 70770
+as 7077|0 or 70770|0); pa61's pair re-runs both sides with the
+separator fix (3750e17c). Merge claim still open on: the fsw pair
+read, the LTP spot run, the p6 medians (both in the chains).
+
+**sc2xx launcher.ready trigger: NOT FIRED** (sc258 newest, zero
+events; pa39-watch standing, kept this leg per the leg-36
+convention). Run day stays pending.
+
+### 8.10.9 The pa57 A/B measured: 6fdada6b wake/epoll levers are merge-ready (leg 38)
+
+The re-run fired 07:53-08:27 (6 boots, orders A,B,B,A,A,B, release-
+strong, TCG thread=multi smp2/2G, adjacent pairs (1A,2B) (3B,4A)
+(5A,6B); A = pure main b332d08a strong, B = 2196ce2d strong — the
+branch kernel's diff vs main is exactly 6fdada6b's two files). All
+6 boots rc=0, 0 panics (9 clean pbench boots on the lever kernel
+total, incl. the pa55 B arm).
+
+**The lever's target rows answer cleanly:**
+- **p2_ctxsw (aff=1 ping-pong): B wins ~40%, and the split is by
+  ARM, not regime** — A boots read a tight 3.27-3.33 us, B boots a
+  tight 1.96-2.06 us, and the clusters hold across TWO different
+  host regimes (2B/3B rode the fast window; 6B ran right after 5A in
+  the slow window and still read 1.957 vs 5A's 3.330). Every
+  ping-pong switch takes a wake on a genuinely-empty queue — the
+  one-Acquire-load fast path is exactly this row.
+- **p5a_pipe: B faster in the two interpretable pairs** (0.930,
+  0.817; the (3B,4A) pair is drift-destroyed, 4A is a p5a outlier
+  boot at 6.47 us).
+- **p4_fork_exec: B faster 2-3% consistently** (0.968/0.977/0.991) —
+  the exec wake volume benefits at the margin.
+
+**The p5b/p5c socket rows CANNOT adjudicate the lever — and that is
+their own conclusion:** the family is HOST-REGIME-BIMODAL on this
+box (a fast regime reads p5b_dgram 5-8 us, a slow regime 45-76 us),
+the switch is not arm-correlated (2B/3B fast, 6B slow; 1A slow-mid,
+4A/5A slow), and adjacent same-window pairs swing 0.1-0.9x in BOTH
+directions. The post-b3757d92 "p5 residual" the track-2 ladder
+chased was this host regime noise, not kernel time. Bank: p5b
+medians are only comparable within a single regime window; the
+regime itself is named (p5b bimodal) and the ladder moves to rows
+with a single regime (p6 metadata family, route-1).
+
+**Code-14 targeted look (closed):** the SLOW-TXN `code` field is
+`tr.code` — the USERSPACE RPC op number (codes 1/7/64 are service
+call numbers), not a kernel message class. pa56branch's single
+code-14 row (40.7 s exec, queue 0 ms, host load 30) was a
+CPU-starved server thread for some op 14, not a lost wake (a lost
+wake presents as queue>=50 ms or a growing queue). Branch is clear.
+
+**Verdict: 6fdada6b READY for the merge set** (functional: suite
+green, 9 rc=0 boots, 0 panics; measured: p2_ctxsw -40% with
+arm-aligned clusters across regimes, p5a_pipe/p4_fork_exec
+consistent small wins; no row regresses with the same consistency).
+Kernels stay banked (run/pa57-a-ctl-bzImage / run/pa57-b-fast-bzImage).
+
+### 8.10.10 Leg 39 (2026-10-26): main 94c670da merged, the pa63 chain re-arms every owed measurement, route-4 + D-6 follow-on land on-branch
+
+**The quiet window closed before it opened.** The leg opened at load
+0.74 / 0 QEMU (the host rebooted ~11:06; leg-38's pa60/pa61 deciders
+died unfired — gate-blocked all morning by 11-17 foreign QEMUs, then
+killed by the reboot with zero boots run). All six kernels were built
+and banked in the first 15 minutes (census main-dbg, M/B strong pair,
+ab-fast, fswm, LTP; every build RC=0), but the foreign agent queue
+auto-resumed at ~11:35 (7 QEMUs, load 15 -> 29 by 12:24), so
+run/pa63-chain.sh — one serialized chain carrying census -> parses ->
+pbench pair M,B,B,M -> LTP spot -> fsw pair -> wake/epoll A/B — runs
+under the pa60 two-stage gate (9/8 for 2 h, then 13/10, 5 h deadline)
+instead of firing immediately. The chain class is main 94c670da (the
+tree the branch merges INTO: COW fix + net batch + F4 route-1 + D-6
+FileOps all landed there since the last census target b4da2106).
+
+**The A/B debt, restated honestly:** 8.10.9 already measured the
+wake/epoll lever set (6fdada6b) clean on the b332d08a class. The pa63
+A/B stage re-runs it on the MERGE SHAPE — and on this class the clean
+lever kernel is main + the branch's EXACT two-file delta (wait.rs +
+misc.rs), because 6fdada6b's epoll half presupposes the L3 sharding
+((leg-31, still branch-only — main carries the UNSHARDED registry), so
+a cherry-pick of 6fdada6b alone onto 94c670da does not exist; the
+merge-relevant comparison IS pure main vs main+two-files (f735ffcc in
+the pa55-a worktree).
+
+**Track-2 (route 4, the map's next row after route-1): getdents64
+listing cache — landed on-branch (20f64449).** The old path
+re-materialized the whole directory on EVERY call (ext4 list_dir: read
+every block + clone every entry; the map's 27.6K full re-scans/boot,
+getdents avg 407 us). New: a per-open-file snapshot
+(File::dirent_cache, Arc so the hit path is one refcount bump) keyed
+by (inode identity, VFS_DIR_EPOCH); every successful mutation dispatch
+in vfs.rs (mkdir, mknod, symlink, rmdir, unlink, link, create-via-open,
+rename — rename_exchange rides vfs_rename_locked) bumps the epoch, so
+any mutation invalidates every cached listing. One global epoch, not
+per-inode: the invalidation story stays airtight at the cost of
+over-invalidation (a re-scan, not a wrong answer). Caching is GATED on
+the new INodeOps::readdir_cacheable — true only where directory
+content changes exclusively through those mutation entry points (ext4,
+tmpfs); the dynamic filesystems (procfs, devfs, sysfs, debugfs,
+cgroupfs, selinuxfs) and memfd/rootfs stay per-call. A mutation racing
+the materializing scan is handled seqlock-style: the listing is served
+for that call (the same race the old path had) but not pinned if the
+epoch moved during the scan. Dot-entry synthesis moved into the
+materializer (ran per call before). Suite: getdents-cache group (10
+rows: dot-helper shapes, 40-entry multi-call walk stability incl.
+no-duplicates, same-fd mid-stream create visibility, unlink
+invalidation) — the first suite run caught the test itself leaking 40
+create-fds, which flipped a LATER row (closed-fd ioctl reads ENOTTY on
+the live fd); fixed, and the full suite reads ALL TESTS PASSED
+(run/pa63-maketest2.log). The mechanism proof (fsw list_dir volume
+collapse) and the p6_getdents median ride the re-built branch debug
+kernels (fswm/LTP re-banked post-route-4) + the next pbench pair.
+
+**Track-1 (D-6 follow-on conversions): EXT4_FILE_OPS and
+TMPFS_FILE_OPS now build through the capability builder (dfca01e8),
+with fileops-caps rows pinning both matrices (full positional set
+read/write/lseek/close/read_at; poll deliberately absent — regular
+files go through the always-ready fallback). ~49 struct-literal
+FileOps tables remain (opportunistic migration continues).**
+
+**sc2xx launcher.ready trigger: NOT FIRED** (watcher restarted
+post-reboot, pid 43214; newest oh-sc264, zero events). Run day stays
+pending.
+
+**Route-4 mechanism pair (same image, same window class, both 480 s,
+fsw=1, load ~26-33 host noise irrelevant to volume counters):**
+ext4 list_dir materialization volume (FSW2 ls=) — control (pure main
+94c670da debug, pa63r4c) vs branch-with-route-4 (pa63r4m):
+
+| t | ctl ls | r4 ls | delta |
+|---|---|---|---|
+| 210 | 30180 | 15677 | -48% |
+| 270 | 32883 | 17312 | -47% |
+| 330 | 32883 | 17506 | -47% |
+| 450 | 32883 | 19076 | -42% |
+
+The cache eliminates the RE-materializations (repeat calls on one open
+fd — the OH boot's scanner class); the surviving volume is
+first-call-per-fd, which materializes once by design. The f4 map's
+"10x on getdents avg" is the per-call claim on repeated-call rows —
+pbench p6_getdents loops one fd, so that row is where the collapse
+should show (rides the next pbench pair; the pa63 chain's B arm was
+banked PRE-route-4, so the route-4 median debt explicitly rolls
+forward). Boot-level wall effect is modest by construction (the map's
+own tot-11.4s estimate); the win is per-op latency + allocation churn.
+Collateral clean: read_inode -4%, other fsw volumes in class; pb
+(route-1) flows on both arms (main carries it).
+
+**Route-4 LTP mutation-family spot (17 rows, pa63ltp-r4 on the branch
+riscv64 debug kernel, run/pa-pa63ltp-r4-serial.log): 14 PASS / 3 FAIL,
+ZERO NEW failures.** The three FAILs (rmdir02, rmdir03, rename05) all
+FAIL in the fleet baseline for the same indices (rename05 recorded
+FAIL in every fleet round); my run additionally PASSES rename01/03/04,
+rmdir01, unlink05/07/08 — rows a stressed fleet round (keep-ltp-a-r59)
+had failed — the mutation+epoch-bump paths (mkdir/mknod/unlink/rename/
+creat) and fork09's fdtable walk all hold with the cache in play.
+
+### 8.10.11 Leg 42 (2026-10-27): the branch-strong channel died at D-7 and is reborn — route-4's strong numbers banked off MAIN
+
+**The pa64 B-arm panic was the lane's own D-7 commit, and the fix is a
+revert.** Every release-profile branch kernel since d8d23064 (Oct 26
+07:23) panicked at t=3s: pa63-pair B arm twice, pa64 B arm twice. The
+signature is identical in every repro and in BOTH release shapes
+(strong LTO/CGU1: pa65d7; weak lto=false/cgu=16: pa65d7w2):
+`ALLOCTHROW size=48` at the alloc-error handler, c64 `a=15934402 f=0
+made=252928`, heap free=0K, last console line "slab allocator 4MB [ok]",
+death inside `cmdline::init_from`'s one String allocation. pages-made
+(252928) spans essentially the whole 1GB heap window; the panic (not the
+handler's task-SIGKILL arm) puts the failure in pre-task early boot;
+`-smp 1` panics identically (pa65d7s1), so it is not the AP path. A
+tight refill loop CAN account for 15.9M objects under TCG (the earlier
+"time-infeasible" first read was wrong — MTTCG runs a tight loop at
+near-native speed), so the leading model is: the magazine refill loop
+runs unbounded in release-opt builds, filling the heap with c64 objects
+before the first post-slab allocation. Debug boots clean and the suite
+passed (the D-7 verification ran debug-only — the hole this leg closes
+procedurally, below). Controls: parent 2a54e42c boots strong the FULL
+board (pa65d7p), pure main b7276078 boots strong the full board
+(pa65m1). Exact codegen mechanism unrooted (objdump follow-up queued on
+the non-LTO artifact run/pa64-d7weak-bzImage); evidence file
+run/pa64-d7-strong-break-evidence.txt; REVERTED as 95b0015f. Main is
+unaffected (D-7 was never harvested).
+
+**Protocol consequence (binding for this lane from now): any change
+touching mm/, sched/, sync/ primitives, or anything that runs pre-task
+gets ONE release-strong pbench boot before it is called verified.**
+Debug-only verification is exactly the hole D-7 fell through — opt-level
+0 masks the codegen-dependent behavior and every census/LTP/`make test`
+channel is debug-class.
+
+**Route-4's strong-profile numbers are banked off MAIN, closing the
+debt the pa64 pair was armed for.** Same-day adjacent windows, same
+channel (pbench_boot TCG MTTCG smp2/2G, minimal rootfs): 94c670da
+strong (pa64pb4A, load1=8) vs b7276078 strong (pa65m1, load1=13-14) —
+p6_getdents **1351.9 -> 570.9 us = -57.8%**; guards p6_write_fsync
+12598.9 -> 12808.3 (+1.7% at higher load), p6_append 77.2 -> 81.6
+(+5.7%), p6_mkdrmdir 65582 -> 71239 (+8.6%), p6_unlink 26912 -> 27653
+(+2.8%) — all guard deltas inside the load-noise class, and the LTP
+mutation-family spot (leg 39) already holds the correctness side. The
+route-4 cache delivers on the strong profile at the same magnitude the
+mechanism pair measured in volume (-42..-48% materializations).
+
+**Quiet-window confirmations (pa65main, launched at load1=2.4/qemus=1,
+window ended loaded ~11):** census TERM 8 / REFUSED 33 EXACT-class, ticks
+100.00/99.52, clock_gettime 3us, GRQ 5083ns, small_alloc REST 6.6% —
+all in band. **nanosleep avg 185.2 ms (n=26,901) IN BAND** — the second
+quiet-window reading after pa50main's 203 ms seed; the 174-333 ms
+cross-boot spread that made the row unbankable is resolved (both quiet
+windows land mid-band; the row stays enforced at 203 ms +-20%).
+**Syscall volume read 92.7M vs the 107.5M quiet band — third data
+point on the load-pace model** (107.5M at load1=0 throughout; 93.2M at
+load1 11-17; 92.7M quiet-launch->loaded-window; 77.1M under 14-19
+foreign QEMUs): volume-in-window stays load-gated-only, never enforced
+outside a quiet window.
+
+**D-6 slice 2 (83fe7e58):** the generic VFS tables (REG_FILE_OPS,
+REG_RO_FILE_OPS, DIR_FILE_OPS) convert to the capability builder with
+fileops-caps rows pinning all three matrices (1125 suite rows PASS).
+~49 struct-literal tables remain; opportunistic migration continues.
+
+**main 57e44a90 merged (8be8a315)** after the revert: dual-arch builds
+rc=0, suite 1119 PASS, rv64 minimal-rootfs shell smoke 0 panics.
+Main-side deltas now riding the branch: O_APPEND write atomicity
+(57e44a90 — the p6_append re-verify row), msync-wrap EINVAL (ec87f42b),
+ext4 dir-entry serialize (81fa78af — carries a potential mkdrmdir
+cost), PICK-PC-ZERO sched fix, exit/reparent fixes. The pa66 pair
+(A = 57e44a90 strong vs B = branch strong, interleaved A,B,B,A) armed
+at run/pa66-pair.sh; B arm completes a full board again — the
+branch-strong channel is RESTORED. [Pair medians table appended at
+completion below.]
+
+**Scoped-publication draining landed on main (0cd29a75) DURING this
+leg**: the fsync whole-queue drain collapse is now measurable — merge
++ one fsync-focused strong pair queued next (write_fsync is the closest
+L1 row at 2.7x; re-bank the row per the standing instruction).
+
+**pa66 pair medians (leg 42, 2026-10-27, 4/4 boots rc=0, TCG MTTCG
+smp2/2G, loads 11-17; A = pure main 57e44a90 strong, B = branch
+8be8a315 strong):**
+
+| row | A{1,4} | B{2,3} | verdict |
+|---|---|---|---|
+| p1_null | 0.661, 0.671 | 0.611, 0.671 | flat |
+| p2_ctxsw | 1.548, 2.625 | 1.634, 1.602 | A bimodal across its own boots; B tight — p2 re-verify: all readings in the pa41-strong 1.383 +-load class, row verified |
+| p3b_fault_cow | 3.127, 3.106 | 3.117, 2.974 | flat |
+| p4_fork_exit | 444.4, 458.2 | 662.9, 649.9 | OPEN ITEM (below) |
+| p4_fork_exec | 1616, 1650 | 1941, 1827 | same shape as fork_exit, +15% |
+| p5a_pipe | 3.067, 3.177 | 3.007, 2.844 | flat |
+| p5b_dgram_send | 41.14, 7.10 | 5.29, 5.12 | regime-split (see text) |
+| p5b_recv_peek | 41.25, 7.27 | 4.82, 4.73 | regime-split |
+| p5c_stream_write | 41.91, 44.74 | 40.72, 40.76 | flat |
+| p6_stat | 15.67, 16.50 | 15.61, 16.62 | flat |
+| p6_openclose | 26.98, 28.64 | 27.10, 27.76 | flat |
+| p6_getdents | 576.1, 560.9 | 566.3, 587.9 | flat — route-4 guard holds on the branch stack |
+| p6_read_cached | 37.49, 37.91 | 37.03, 39.57 | flat |
+| p6_write_fsync | 14667, 13398 | 12752, 13763 | flat in the 12.7-14.7ms spread |
+| p6_append | 91.5, 105.2 | 95.2, 139.1 | A spread covers B2; B3 the outlier — pa67 pair adjudicates against the O_APPEND/bio deltas |
+| p6_mkdrmdir | 72968, 68646 | 60286, 73118 | flat inside the +-10% class |
+| p6_unlink | 27838, 28342 | 27911, 29074 | flat |
+
+p5b verdict (direction, not magnitude): B read the 5-class in BOTH
+boots (5.1-5.3 send / 4.7-4.8 recv) while A spanned the documented
+host-regime bimodality (41.1 then 7.1); with pa65m1 (main, 5.03) and
+pa64pb4A (main, 39.7) both regimes exist main-side too, so today's
+-87% magnitude is regime-confounded — the bankable statement is "the
+socket-lever branch is consistently in the fast regime (4 boots
+incl. pa47's med-of-3), main flips". Focused regime-matched rerun
+stays queued.
+
+p4_fork_exit OPEN ITEM: B reads 650-663 in both boots vs A's 444-458
+(4-of-4 ordered) — but main WITH route-4 (pa65m1) reads 429 and the
+branch PARENT 2a54e42c (pre-route-4/D-6 branch stack) reads 420.9, so
+the same patches read low on main and high only on the full branch
+stack: an interaction (route-4's per-File cache meets the fork fd-copy
+path? wake/epoll empty-fast-path on the exit wake?) or a two-boot
+regime coincidence. 2 boots/arm is under the verdict bar — focused
+pair queued (main 57e44a90 vs main+route-4-only vs branch), not
+merge-blocking (the levers reach main individually, each with its own
+pair).
+
+### 8.10.12 Leg 42 (2026-10-27): scoped-publication draining re-banks three fs rows at once (pa67 pair)
+
+The OH line's scoped publication draining landed on main as 0cd29a75
+mid-leg; the owed re-measure ran as the pa67 interleaved pair (A = pure
+main 0cd29a75 strong, B = pure main 57e44a90 strong = pre-bio control,
+orders A,B,B,A, loads 13-17, 4/4 boots rc=0; kernels
+run/pa67-c-bio-bzImage / run/pa66-a-main57-bzImage, script
+run/pa67-pair.sh):
+
+| row | A (bio) {1,4} | B (pre-bio) {2,3} | delta |
+|---|---|---|---|
+| p6_write_fsync | 10123, 9767 | 13281, 13325 | **-25.8%** |
+| p6_mkdrmdir | 55457, 56173 | 72089, 69436 | **-21.7%** |
+| p6_unlink | 16326, 16091 | 28693, 27738 | **-42.4%** |
+| p6_append | 89.4, 122.9 | 118.8, — | within-noise both directions |
+
+Every adjacent A-B comparison is ordered on all three moved rows (A1-B2
+and A4-B3). **The write_fsync strong-class reference re-banks from the
+12.7-14.7 ms class to 9.8-10.1 ms** (vs the reference kernel's 4755 us
+median: 2.7x -> 2.05x); unlink's strong column drops 29.3 -> 16.1 ms
+(1085x -> ~596x vs the 27 us reference median); mkdrmdir 76.4 -> 5.6e4
+class (-22%; the f4 map's identity-block syncs remain the dominant
+residual). The bio fix did what the whole-queue-drain model predicted:
+durability points now pay for their own writes, not the queue's. The
+p6_append row is NOT moved by bio (both arms carry O_APPEND atomicity
+57e44a90; today's append spread 89-123 us straddles both arms in both
+directions — the atomicity change is performance-neutral in this
+channel, as intended: correctness hardening).
+
+Boot-1 board of the bio kernel also re-anchors two ladder facts:
+p4_fork_exit reads 441 on main-class (the branch-only 650-660 class
+from the pa66 pair stays branch-side, strengthening the interaction
+hypothesis), and p5b read the 41-class in the same window the pa66 A
+boot did (the regime is environmental, both kernels visit it).
+
+Standing after this leg: (1) D-7 codegen root-cause (objdump on
+run/pa64-d7weak-bzImage) before any re-land of typed per-CPU storage;
+(2) p4_fork_exit branch-vs-main focused pair; (3) p5b regime-matched
+socket rerun; (4) the strong-class gate anchor columns in this report
+are the working reference — the Tier-2 GATE anchor in
+perf-gate-baseline.md stays the pb1 DEBUG column per the profile-class
+note (no baseline-doc change until a main-class debug pbench re-anchors
+it).
+
+### 8.10.13 Leg 43 (2026-10-27): D-7 root-caused to a deleted-store family and re-landed behind UnsafeCell; the fork_exit 650-class is the old-bio draining cost, fixed on main
+
+**D-7 (the release-break) is root-caused, machine-verified, and
+re-landed (b3278ad5). Evidence: run/pa68-d7-rootcause.txt; artifact
+perf-audit-pa68 (d8d23064 weak, symbols).** The mechanism, in one
+line: the conversion moved the magazine bank from `static mut` to a
+non-mut `static MAGAZINES: CpuLocal<...>` whose type had NO interior
+mutability (`[Row<T>; N]` + `unsafe impl Sync` — the Sync impl does
+not confer it), so rustc emitted the LLVM global as `constant` and it
+linked into .rodata (readelf: 0xffffffff805039c0, 4608 B). The image
+maps P|RW (cpu.rs WP note), which hid it from hardware — debug builds
+emitted the stores and passed the suite; under opt>=1 LLVM deleted
+every store into the bank and hoisted the loads. The objdump of the
+refill loop (0xffffffff802b87c0) shows ZERO stores and a len pinned in
+registers: `cmovne r15,r13` sets len+1=1 once, `cmp r15,0x10/jb` spins
+forever — one refill call carved 15.9M c64 objects across 252928
+pages (99% of the heap, tilting exactly heap_start→region end — the
+8.10.11 "heap start garbage" model was wrong), returned its first
+object, and the SECOND refill (locks=2) returned null into the
+cmdline String: ALLOCTHROW size=48, t=3s, both release shapes. Fix:
+`rows: UnsafeCell<[Row<T>; N]>` (+ raw-pointer row access, no
+`&`-paths). Post-fix codegen verified on a weak-sym build: MAGAZINES
+in .bss (0xffffffff80edeec0), buf store + len reload/inc/store +
+bounded loop exit all present (0xffffffff802c62e9). Verification per
+the binding protocol: unit suite ALL TESTS PASSED (percpu-shape
+group), release-strong pbench boot pa68d7fix DONE rc=0 full board
+clean power-down — the channel/profile that killed every boot since
+d8d23064. (Forensics note, paid for once: check the target/ artifact
+mtime before reading it — a profile-matched stale ELF answers for the
+new build.) The D-7 divergence entry now carries the incident + rule.
+
+**The p4_fork_exit open item closes: the 650-class was the OLD
+whole-queue-draining bio's cost on the fork/exit path — fixed on main
+by scoped-publication draining (0cd29a75); the branch levers are
+exonerated.** The pa68 pair (M = main 488528dc strong — the FIRST
+main tip carrying the wake/epoll + socket + procfile levers; B8 =
+branch 8be8a315 strong re-run, the kernel that read 662.9/649.9 in
+pa66; interleaved M,B8,B8,M, 4/4 boots rc=0, loads 6→23):
+
+| boot | kernel | load1 | p4_fork_exit | p4_fork_exec |
+|---|---|---|---|---|
+| pa68pb1M | main488 | 6 | **447.6** | 1579 |
+| pa68pb2B8 | branch8b | 20 | 753.4 | 2014 |
+| pa68pb3B8 | branch8b | 22 | 1011.7 | 2594 |
+| pa68pb4M | main488 | 23 | 723.7 | 1695 |
+
+Reading: (1) main WITH all levers reads the 429-458 reference class at
+quiet load (447.6@6) — a fixed lever cost would show there; the levers
+are out. (2) M4's 723.7 came through a uniformly inflated window (its
+p1_null 1.041 vs 0.631, p5a 3.9 vs 2.8, openclose 46 vs 29 — all
++40-60% vs M1): fork_exit is load-coupled on BOTH kernels, ratio
+B8/main ≈ 1.45x at every matched load (pa66: 655/445 at 11-17; today:
+1012/723 at 22-23). (3) So the pa66 delta was real and is B8-stack
+specific: B8's unique kernel delta vs main is the PRE-c3e5a314
+bio.rs/ext4/jbd2 family — every exit-path durability touch paid the
+whole-queue drain. Main is clean at every load observed (429-723
+tracks load; D-7 re-land kernel read 496 at load 25+). NOT
+merge-blocking, nothing owed: verdict = old-bio cost, fixed on main,
+levers exonerated, row is load-coupled (state load1 with any future
+fork_exit number).
+
+**p5b regime: the adjudication stays open, sharpened by a new
+convergence clue.** Today's fast-regime readings: M 4.9/4.6 (load 6)
+and 8.3/8.3 (load 23, uniformly inflated), B8 5.5/5.0 and 5.5/6.3 —
+B8-class stays 4.7-6.3 across all six lever-kernel boots; but the
+D-7fix boot (main-class, load 25+) read the SLOW regime 44.5/44.4 —
+the third main-class slow reading (pa66 A1 41.1, pa64pb4A 39.7).
+New clue: in that boot p5b (44.5) converged exactly onto p5c's
+standing value (44.5) — p5c_stream_write reads 41-44 in EVERY boot of
+every kernel at every load while p5a_pipe reads 2.7-3.9. The
+hypothesis for the next socket-family leg: p5c's unconditional ~38µs
+delta vs pipe IS the regime flipper's cost, and the regime question
+and the p5c lever are one decomposition (14x stream-vs-pipe gap;
+prime suspects: per-write segment alloc/copy under the recvq lock,
+wake shape, and whatever the stream path does that dgram only
+sometimes pays). Regime-matched rerun stays queued on that
+decomposition, not on more unlabeled boots.
+
+**Standing after this leg:** (1) the socket-family lever is
+DECOMPOSED — the p5c2/p5c3 rows (d07930f1) put the 35 µs in the
+CHILD'S read(2)-on-socket wrapper, not the send side or the stream
+transport (pa68p5c: p5c2 send+read-child 39.15/min 37.3 vs p5c3
+send+recv-child 4.77/min 2.4; phase wall 40.1 vs 20.2 s — half
+throughput with the read wrapper in the drain path). The fix lever is
+armed: pipe-style direct fast path for socket read/write in
+sys_read/sys_write + gating the always-built File::path() format that
+feeds pathstash (stash_file discards it when the switch is off, but
+the String is constructed per call before the check); same question
+applies to the p5b regime flipper (slow-regime p5b converges onto the
+p5c class); (2) L1 F4 two designs armed in f4-ext4-route-map.md —
+no-journal identity-block deferral (route 1; GNOME-side, journal
+dormant j=0 there) and the journaled mkdrmdir residual (per-rmdir
+revoke-forced synchronous commit; needs per-transaction revokes +
+reallocation cancel before it can go lazy); (3) Tier-2 gate anchor
+unchanged (pb1 DEBUG column).
+
+### 8.10.14 Leg 44+45 (2026-10-27): leg-44 salvage — the wrapper verdict is WITHDRAWN (p5d control row), socket fast path reverted, pathstash lazy gate kept; F4 arm-1 blocked by a no-journal root-lookup failure
+
+Leg 44 died in the 20:00 quota window mid-verification, leaving three
+dirty files (f4 route-map arm-2 note, pbench p5d rows, pbench_boot
+--nojournal) and an unbanked pa69 pair. Salvage verdicts, all on
+strong-profile x86 q35 tcg-multi SMP2/2G pbench boots:
+
+**(1) The leg-43 "wrapper owns the 35 us" verdict is withdrawn — the
+p5d control row kills it.** pa70 ran the p5d rows (in-process
+socketpair round trip: sendto then read(2) vs recvfrom(2) in the SAME
+loop iteration — no second task, no flow control) on BOTH kernels in
+one parallel window: control A = pa68-d7fix strong (pre-fix),
+branch B = pa69-b strong (base + pathstash gate 632d38ff + socket
+fast path b99b70f8):
+
+| row | A (pre-fix) | B (with fix) |
+|---|---|---|
+| p5d_rt_read (read(2)) | **4.776** | 4.909 |
+| p5d_rt_recv (recvfrom(2)) | **4.766** | 5.219 |
+| p5c2_stream_send (read-child) | 42.153 | 42.938 |
+| p5c3_stream_wrecv (recv-child) | 5.016 | 5.380 |
+
+The read(2)-on-socket wrapper was ALREADY fast before the fix — the
+generic staging path never owned a 35 us class in-process. b99b70f8
+fixed a cost that does not exist (p5d_rt_read A vs B: +0.13 us, and
+the untouched p5d_rt_recv twin moved +0.45 us in the same window —
+the noise scale of these rows), and the p5c2 row it targeted is
+unchanged A→B. Reverted as 8c5cd3e2 with this evidence; a zero-benefit
+parallel read/write path beside the generic engine is risk without
+return.
+
+**(2) 632d38ff (pathstash write/sync stashes build File::path()
+lazily) is kept — the mechanism fit is exact.** Same pa70 window,
+rows whose sender uses write(2) improved, rows whose sender uses
+sendto(2) (which never had the stash cost) did not:
+
+| row | A | B | delta | sender syscall |
+|---|---|---|---|---|
+| p5a_pipe | 2.804 | 2.464 | **-12.1%** | write(2) |
+| p5c_stream_write | 43.425 | 39.732 | **-8.5%** | write(2) |
+| p6_append | 98.695 | 93.559 | -5.2% | write(2) |
+| p5c2_stream_send | 42.153 | 42.938 | +1.9% | sendto(2) |
+| p6_write_fsync | 13823.9 | 13831.3 | +0.1% | write+fsync (I/O-bound) |
+
+The IPC-gate pair (pa69, interleaved A,B,B,A, 4/4 rc=0, loads 15-19)
+had already shown every P5 row within ±20% or improved; pa70's
+parallel-window A/B pins the win on the stash removal. The pa69 pair
+also re-read p5b in the SLOW regime (41.7-44.2 both arms) — regime
+question unchanged.
+
+**(3) The 40-44 us class is cross-process flow-control/wake dynamics,
+not any per-call wrapper.** Corrected fact base: in-process stream
+send+read/recv = 4.8-5.2 us on every kernel; STREAM + recvfrom-child
+(p5c3) = 4.77-5.40 in every boot ever recorded; STREAM + read-child
+(p5c2) = 39-43 in every boot ever recorded; DGRAM + peek/consume
+child (p5b) = 41-44 slow-regime / 4.9-8.3 fast-regime. The p5c2
+child's read path on kernel B is byte-for-byte unix_recv_ctl (the
+same engine the p5c3 child uses — unix_file_read and unix_read_user
+both drain greedily through it), yet the parent's sendto reads 8x
+higher median with a read-draining child. The class survives the
+wrapper fix, appears in dgram rows, and flips with regime only in
+p5b. Armed discriminators for the next socket leg: p5e
+(O_NONBLOCK spin-drain child — separates child sleep/wake from queue
+depth), p5f (parent MSG_DONTWAIT + EAGAIN retry — separates
+sender-side block from receiver-side wake), and a syscost
+TERM-DESCHED/WAKE-REFUSED census window around a p5c2 loop. Prime
+suspect: the sender's wake→pick latency when it blocks on the
+enqueue gate (sndbuf cap), which only the recv-child's drain rate
+avoids ever hitting.
+
+**(4) F4 arm-1 (no-journal pbench rootfs) is BLOCKED by a kernel
+failure worth the fs lane's attention: a clean mkfs-created
+no-journal ext4 root mounts but every path lookup fails.** pa71nj1
+(serial work/pbench-pa71nj1-serial.log): "fs: ext4 mounted / [ok]"
+then "/test/pbench not found" for all init candidates →
+"no init program loadable" → park. The image is well-formed: fresh
+mkfs -O ^metadata_csum,^has_journal -d staging passes e2fsck -fn
+clean, debugfs lists /test/pbench (inode 13); the only superblock
+feature deltas vs the working journal image are has_journal and
+orphan_file. The OH userdata image (userdata-mine, same feature set)
+works on OH boots — but everything ever read from it was written by
+the kernel itself; reading mkfs-written no-journal metadata appears
+never to have been exercised. Repro: pbench_boot.py --nojournal.
+Feature-bisect (pa71ob1, journal + ^orphan_file via the new
+--mkfs-features passthrough): that image BOOTS AND RUNS —
+orphan_file absence is exonerated; the trigger is has_journal
+absence itself (mount ok, journal_ino==0 skips init_journal per
+journal.rs, but no mkfs-written path resolves afterward).
+Consequence: the J-vs-NJ p6 row comparison (route-1's expected-effect
+anchor) waits on this fix; the --nojournal flag stays in the tree as
+the repro. The arm-2 revoke semantics note (leg 44's other dirty
+file) is banked in f4-ext4-route-map.md (R1-R6 checklist).
+
+**Gates (post-revert tip 3d30bd28: base + 632d38ff + revert +
+probes):** dual-arch build rc=0 (riscv64 debug + x86_64 debug +
+x86_64 strong); riscv64 minimal-rootfs regression boot 0 panics,
+shell up; make test ALL TESTS PASSED; IPC guarded-domain pair pa69
+(4 boots) + pa70 parallel A/B — all P5 rows within ±20% or improved.
+The post-revert kernel's own pbench (pa71 j1/j2, journal protocol):
+p6_write_fsync 10120/9853 us, p6_mkdrmdir 67281/57018, p6_unlink
+17047/18782, p6_append 136/114 — every fs row inside the standing
+strong classes, no regression from the net kernel change.
+
+**Standing after this leg:** (1) socket-family residual = the
+cross-process rendezvous decomposition (p5e/p5f armed above); (2) F4:
+no-journal root-lookup failure to the fs lane (repro --nojournal),
+arm-2 revoke checklist banked, route-1 measurement re-queued behind
+the fix; (3) D-7/p5b regime questions unchanged (no quiet window
+this leg — load 10-20 throughout); (4) Tier-2 gate anchor unchanged
+(pb1 DEBUG column).
+
+### 8.10.15 Leg 46 (2026-10-27): the 40-44 us socket class is DECOMPOSED — same-CPU serialization onto a sleeping receiver's drain cycle; lever named (direct user-drain), regime flipper armed for the sched lane
+
+Main 129a41fa merged (fast-forward, 43 commits). Five boots on the
+merged-main strong kernel (run/pa72-main-strong-bzImage, x86 q35
+tcg-multi SMP2/2G), all rc=0, loads 14-24.
+
+**(1) The armed discriminators killed every send-side/wake-loss
+hypothesis.** pa72b (full board + new rows):
+
+| row | med (us) | reading |
+|---|---|---|
+| p5c2 (sendto + read-child) | 38.937 | slow class, unimodal (min 37.5) |
+| p5f (parent MSG_DONTWAIT + read-child) | 38.867 | **eagain=0** — gate never closed |
+| p5e (sendto + O_NONBLOCK spin-read child) | **4.690** | spin child => fast |
+| p5c3 (sendto + recvfrom-child) | 6.374 | p99 82, avg 24 — bimodal |
+| p5d in-process pair (control) | 4.851/4.981 | leg-43 withdrawal stands |
+
+p5f's eagain=0 (sys_sendto DOES pass MSG_DONTWAIT through to
+unix_send's nonblock) proves the class is paid on NEVER-GATED sends:
+flow control is exonerated. The wake machinery is exonerated by the
+census (dfx=wwcensus, 1 Hz WW heartbeat between serial markers):
+every window, slow or fast, shows wakes==picks to +-1 (direct
+handoff per wake, no refusal, no stranding); one benign early-boot
+W3-RUNWAKE-REFUSED in 454 heartbeats; zero unixsend-loop prints.
+
+**(2) Same-CPU pinning reproduces the class ON DEMAND; the receiver's
+syscall choice decides.** pa72e/pa72f duration windows (12 s each,
+exact p5c2 shapes, markers for the census):
+
+| window | pinning | child | med (us) | sends/s | census |
+|---|---|---|---|---|---|
+| p5c2long (pa72e) | none | read 64K | 8.4 | 104K | wakes 20-57K/s |
+| p5c2long_spread | 0/1 | read 64K | 7.8 | 101K | wakes>picks (concurrent) |
+| p5c2long_samecpu | 0/0 | read 64K | **59.4** | 18.8K | wakes==picks ~40K/s |
+| pin_r64 (pa72f) | 0/0 | read 64K | **39.7** | 18.1K | wakes==picks ~33K/s |
+| pin_r4k | 0/0 | read 4K | **64.9** | 14.6K | wakes==picks ~28K/s |
+| pin_recv64 | 0/0 | recvfrom 64K | **8.0** | 27.2K | wakes==picks ~22K/s, avg 36.6 p99 78 |
+| spread_r64 | 0/1 | read 64K | 7.1 | 131K | — |
+
+Same CPU + sleeping receiver (read-child) = the class; same CPU +
+never-sleeping receiver (recvfrom-child, its zero-fill-paced 64K
+staging keeps the queue non-empty at every poll) = 8.0 med with a
+gate-block tail. pin_r4k (16x smaller staging) got WORSE, not better
+— the staged-buffer SIZE is exonerated too (and the 4K chunk-loop
+shape multiplies sleep cycles; see the p5long window comments).
+
+**(3) Verdict.** The 40-44 us cross-process class is per-send
+SERIALIZATION onto a sleeping receiver's drain cycle: it appears
+exactly when (a) the receiving task sleeps on an empty queue —
+receivers whose per-call cycle outpaces the sender (the read(2)
+wrapper shape, the dgram peek+consume protocol; p5b's slow regime is
+the same mechanism, same values) — and (b) sender and receiver
+effectively share one CPU. The parent's sendto median then equals
+the receiver's wake->drain->re-block cycle (~35-40 us on this TCG
+class): every send wakes the child, hands the CPU over (wakes==picks
+census), and waits out the child's whole receive syscall before
+sending again. In the concurrent regime (2 effective CPUs) the same
+cycle runs beside the sender and the parent pays only the enqueue
+(4.5-8.4 us). NOT the enqueue gate, NOT wake loss/refusal, NOT the
+handoff itself (pin_recv64 handoffs at 22K/s at 8.0 us), NOT the
+staging size, NOT the wrapper dispatch (leg-43 withdrawal stands).
+
+**(4) Levers.** (i) Socket-side, real but partial: DIRECT USER-DRAIN
+for AF_UNIX receive (pipe_read_user-style: drain the recvq straight
+into the user buffer, zero staging) — expected end state is the
+p5c3/pin_recv64 regime (med 5-8 us) because a receiver that drains
+faster stops sleeping and decouples through the queue; residual =
+the gate-block tail (p99 ~80 us class). pin_r4k's warning: the lever
+is DIRECTNESS, not staging size — shrinking the staged buffer alone
+multiplies sleep cycles and worsens the class. (ii) Regime-side
+(sched lane, armed as a question, no code lever this leg): WHY the
+pair intermittently shares one effective CPU on a 2-vCPU GRQ guest
+during board runs — the p5b/p5c2 regime flipper (pa72b/pa72d slow vs
+pa72c/pa72e-windows fast, same kernel, load 14-24 throughout). The
+repro + census method are now standing: samecpu pinning, WW
+heartbeat, p5e/p5f/pin windows in pbench (longp5/longp5warm/
+longp5pin modes via test/p5long.c staging).
+
+**(5) F4 arm-1 status: STILL BLOCKED** — the fs lane's no-journal
+root-lookup fix has not landed on main as of 129a41fa; the J-vs-NJ
+p6 re-comparison stays queued on their fix; arm-2 stays design-only
+(checklist in f4-ext4-route-map.md).
+
+**Gates (test-only leg: no kernel source changes; probe + docs +
+run scripts only):** dual-arch build rc=0 (riscv64 debug + x86_64
+strong on merged main); riscv64 boot 0 panics (unit-test rootfs,
+ALL TESTS PASSED); make test green; five x86 pbench boots rc=0
+(pa72b/c/d/e/f), zero panics; host discipline held (<=2 lane QEMUs
+at a time, own PIDs only, mem floor >=10G).
+
+**Standing after this leg:** (1) socket family: the lever (direct
+user-drain) is named with a measured target class; implementation
+belongs to the next socket leg behind this verdict; (2) regime
+flipper (effective same-CPU pairing under load) armed for the sched
+lane with repro + census; (3) D-7 re-anchor: no quiet window in this
+leg's first half (load 18-24, 12-16 foreign QEMUs throughout; the
+load-gated watcher run/pa72-reanchor.sh holds the board unbanked —
+bank only if load1<=9 AND qemus<=8 opens before the leg ends);
+(4) F4 arm-1 re-queued behind the fs fix (unchanged); (5) Tier-2
+gate anchor unchanged (pb1 DEBUG column).

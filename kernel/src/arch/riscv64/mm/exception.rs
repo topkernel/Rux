@@ -132,7 +132,7 @@ fn send_signal(sig: i32, code: i32, _addr: u64, _epc: u64, _access_type: u32, _r
     // instead of the indistinguishable 0/0 of the info-less bitmap path.
     if let Some(current) = crate::sched::current() {
         let pid = current.pid();
-        crate::signal::send_signal_with_info(
+        crate::signal::send_signal_with_info_directed(
             pid,
             crate::signal::SigInfo::new(sig, code, 0, 0),
         )

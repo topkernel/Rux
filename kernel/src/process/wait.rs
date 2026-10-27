@@ -11,7 +11,7 @@
 //! - When the condition is met, wake_up() wakes waiting processes
 
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicBool, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use crate::sync::spinlock::Spinlock;
 
 use super::Task;
@@ -95,6 +95,26 @@ pub struct WaitQueueHead {
     /// Wait queue list
     /// Uses Vec to store waiting processes
     list: Spinlock<Vec<WaitQueueEntry>>,
+    /// Entries currently on the list (leg-36 wake fast path).
+    ///
+    /// Maintained ONLY inside the list lock's critical sections
+    /// (insertions increment, retains decrement by what they removed),
+    /// so `0` is a lock-free proof that the list is empty — the same
+    /// contract as Linux's `wq_has_sleeper()` reading `head->next`
+    /// before taking the wait-queue lock. `wake_up` loads it with
+    /// Acquire FIRST and returns without touching the irqsave lock
+    /// when it reads 0: on a box where the consumer polls instead of
+    /// sleeping (hilogd's drain loops, pbench socket pairs), that
+    /// empty-wake lock was paid on every single event.
+    ///
+    /// Lost-wake safety (same argument as Linux's): a waker that
+    /// reads 0 runs strictly before the sleeper's in-lock increment
+    /// becomes visible; the sleeper's condition re-check AFTER
+    /// prepare_to_wait (every wait site in this kernel re-checks —
+    /// see wait_event and unix_wait_round) then observes the waker's
+    /// condition mutation, which precedes its wake call. Either the
+    /// waker sees the waiter, or the waiter sees the event.
+    waiters: AtomicUsize,
 }
 
 // Safety: WaitQueueHead uses internal Mutex for synchronization.
@@ -107,6 +127,7 @@ impl WaitQueueHead {
     pub const fn new() -> Self {
         Self {
             list: Spinlock::new(Vec::new()),
+            waiters: AtomicUsize::new(0),
         }
     }
 
@@ -128,6 +149,8 @@ impl WaitQueueHead {
         } else {
             list.insert(0, entry);
         }
+        // In-section (see `waiters`): published before the lock release.
+        self.waiters.fetch_add(1, Ordering::Release);
     }
 
     /// Remove from wait queue
@@ -136,7 +159,12 @@ impl WaitQueueHead {
     /// * `task` - Task to remove
     pub fn remove(&self, task: *mut Task) {
         let mut list = self.list.lock_irqsave();
+        let before = list.len();
         list.retain(|entry| entry.task() != task);
+        let dropped = before - list.len();
+        if dropped > 0 {
+            self.waiters.fetch_sub(dropped, Ordering::Release);
+        }
     }
 
     /// Wake up processes in wait queue
@@ -157,6 +185,16 @@ impl WaitQueueHead {
     /// froze GNOME final6 with timer IRQs stopped. Drivers collect completed
     /// work under their locks and wake OUTSIDE them (timer.rs R12-3 pattern).
     pub fn wake_up(&self, _mode: WakeUpHint, nr: usize) -> usize {
+        // Lock-free empty fast path (leg-36): one Acquire load instead
+        // of an irqsave lock/unlock pair for every wake of a queue
+        // nobody sleeps on — the common case for polling consumers.
+        // `waiters` is only moved inside the list lock's critical
+        // sections, so 0 means the list is (or was, microseconds of
+        // coherence ago, in which case the sleeper's condition
+        // re-check owns the event) empty. See the field's doc block.
+        if self.waiters.load(Ordering::Acquire) == 0 {
+            return 0;
+        }
         // Use lock_irqsave: this is called from interrupt handlers.
         let list = self.list.lock_irqsave();
         let mut awakened = 0;
@@ -308,6 +346,10 @@ impl WaitQueueHead {
         } else {
             list.insert(0, entry);
         }
+        // In-section (see `waiters`): the increment must be published
+        // before the lock release so a waker's fast-path load pairs
+        // with it (the lost-wake argument in the field's doc block).
+        self.waiters.fetch_add(1, Ordering::Release);
         // Lock released here — now waker can see consistent state
     }
 
@@ -317,7 +359,12 @@ impl WaitQueueHead {
     /// already met after prepare_to_wait.
     pub fn finish_wait(&self, task: *mut Task) {
         let mut list = self.list.lock_irqsave();
+        let before = list.len();
         list.retain(|entry| entry.task() != task);
+        let dropped = before - list.len();
+        if dropped > 0 {
+            self.waiters.fetch_sub(dropped, Ordering::Release);
+        }
 
         // If task is still sleeping (condition met before schedule, or
         // called from finish path), restore to RUNNING.

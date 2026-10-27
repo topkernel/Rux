@@ -891,7 +891,7 @@ fn pipe_write_common(file: &File, src: *const u8, count: usize, user: bool) -> i
         if pipe.is_read_closed() {
             // Write to pipe with no readers -> SIGPIPE + EPIPE
             if let Some(current) = crate::sched::current() {
-                let _ = crate::signal::send_signal((*current).pid(), crate::signal::Signal::SIGPIPE as i32);
+                let _ = crate::signal::send_signal_directed((*current).pid(), crate::signal::Signal::SIGPIPE as i32);
             }
             return -(crate::errno::constants::EPIPE) as isize;
         }
@@ -1038,7 +1038,7 @@ fn pipe_write_common(file: &File, src: *const u8, count: usize, user: bool) -> i
                         return total_written as isize;
                     }
                     if let Some(current) = crate::sched::current() {
-                        let _ = crate::signal::send_signal((*current).pid(), crate::signal::Signal::SIGPIPE as i32);
+                        let _ = crate::signal::send_signal_directed((*current).pid(), crate::signal::Signal::SIGPIPE as i32);
                     }
                     return -(crate::errno::constants::EPIPE) as isize;
                 }
@@ -1143,14 +1143,16 @@ fn oasync_signal_owner(kind: u8, id: i32, sig: i32, poll_code: i32, band: i32, f
     match kind {
         1 | 3 => {
             if id > 0 {
-                let _ = crate::signal::send_signal_with_info(id as u32, info);
+                // Directed (PIDTYPE_PID): the reference's send_sigio_to_task
+                // delivers SIGIO to the one owning task.
+                let _ = crate::signal::send_signal_with_info_directed(id as u32, info);
             }
         }
         2 => {
             let pgid = id.unsigned_abs();
             crate::process::pid_hash::pid_hash_for_each_task(|task| unsafe {
                 if (*task).pgid() == pgid {
-                    let _ = crate::signal::send_signal_with_info((*task).pid(), info);
+                    let _ = crate::signal::send_signal_with_info_directed((*task).pid(), info);
                 }
             });
         }
@@ -1400,6 +1402,40 @@ pub fn pipe_file_stat(file: &File, stat: &mut crate::fs::Stat) -> Option<i32> {
     stat.set_fifo();
     stat.st_mode |= 0o600;
     Some(0)
+}
+
+/// Abort ONE never-installed pipe end: run the close op on it before its
+/// Arc drops.
+///
+/// create_pipe() stores the entire Arc<Pipe> ownership as two raw
+/// pointers inside the end Files' private_data; those refs are consumed
+/// ONLY by the PIPE_OPS close op (pipe_file_close), and File::drop runs
+/// that op solely once a close_fd committed it (close_pending). A syscall
+/// error return that drops an uninstalled Arc<File> therefore leaked its
+/// raw ref and with it the shared Pipe + 64 KiB ring — a whole 128 KiB
+/// buddy block per failed call. The s11 fsfuzz kernel-heap exhaustion
+/// (evidence 2026-10-27-s11-heapexhaustion-fsfuzz.txt) was ~800 such
+/// EMFILE pipe() calls per round filling the 128 MB heap;
+/// test/forkwait_leak.c leg 2 shows it minimal: 100 EMFILE pipes leave
+/// live=100 ring sites, frees=0.
+pub fn abort_uninstalled_end(file: &mut Arc<File>) {
+    // The abort paths hold the only reference to the freshly created end
+    // (no fdtable slot ever existed), so get_mut is Some; if a future
+    // caller breaks that, leave the op to that reference's drop instead
+    // of racing it.
+    if let Some(f) = Arc::get_mut(file) {
+        // SAFETY: exclusive &mut from get_mut — we are the sole owner and
+        // close() runs at most this once (File::drop sees close_pending
+        // == false and will not run it again).
+        unsafe { f.close() };
+    }
+}
+
+/// Abort a pipe creation whose descriptors were never installed: close
+/// BOTH ends (see abort_uninstalled_end for why the op must run).
+pub fn abort_pipe_creation(read: &mut Arc<File>, write: &mut Arc<File>) {
+    abort_uninstalled_end(read);
+    abort_uninstalled_end(write);
 }
 
 pub fn create_pipe() -> (Arc<File>, Arc<File>) {

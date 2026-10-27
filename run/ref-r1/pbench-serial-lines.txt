@@ -1,0 +1,25 @@
+PBENCH START self=/system/bin/key_enable work=/data/local/pbench
+PBENCH CAL tsc_hz=4291943103
+PBENCH p1_null n=1000000 med=0.040 p99=0.050 min=0.030 max=5759.862 avg=0.114 wall=0.123
+PBENCH p1_clock n=1000000 med=0.070 p99=0.080 min=0.060 max=3525.676 avg=0.121 wall=0.131
+PBENCH p2_ctxsw n=100000 med=0.085 p99=2.364 min=0.080 max=503.554 avg=0.180 wall=0.185 aff=1
+PBENCH p3a_fault_anon n=16384 med=7.153 p99=16.791 min=0.200 max=10161.610 avg=9.834 wall=9.853
+PBENCH p3b_fault_cow n=8192 med=0.671 p99=7.775 min=0.371 max=99.476 avg=0.959 wall=0.968 measured_by=child
+PBENCH p3c_fault_file n=4096 med=0.100 p99=1.503 min=0.000 max=23.795 avg=0.168 wall=0.177
+PBENCH p4_fork_exit n=1000 med=10.830 p99=111.078 min=9.257 max=2635.819 avg=21.355 wall=21.610
+PBENCH p4_fork_exec n=1000 med=22.232 p99=104.997 min=19.226 max=230.903 avg=27.486 wall=27.735 exec_target=self
+PBENCH p5a_pipe n=100000 med=0.180 p99=0.210 min=0.170 max=2161.129 avg=0.387 wall=0.396
+PBENCH p5b_dgram_send n=20000 med=0.160 p99=1.874 min=0.140 max=221.255 avg=0.638 wall=0.648
+PBENCH p5b_dgram_recv_peek n=20000 med=0.220 p99=1.893 min=0.190 max=86.091 avg=0.608 wall=0.000 measured_by=child peek+consume
+PBENCH p5c_stream_write n=100000 med=0.160 p99=1.813 min=0.150 max=222.376 avg=0.468 wall=0.477
+PBENCH PREP tree=1000files wall_ms=9
+PBENCH p6_stat n=10000 med=0.271 p99=0.361 min=0.260 max=12.243 avg=0.279 wall=0.569
+PBENCH p6_openclose n=10000 med=0.431 p99=0.791 min=0.401 max=339.366 avg=0.512 wall=0.847
+PBENCH p6_getdents n=1000 med=88.436 p99=705.191 min=85.059 max=3623.479 avg=118.307 wall=122.468 per_sample=full_dir_sweep
+PBENCH p6_read_cached n=10000 med=0.671 p99=1.513 min=0.551 max=279.143 avg=0.818 wall=1.250 per_sample=open_read_close
+PBENCH p6_write_fsync n=1000 med=4484.202 p99=29804.084 min=3576.862 max=130935.273 avg=5798.169 wall=5798.193 per_sample=write4k_plus_fsync
+PBENCH p6_append n=1000 med=0.471 p99=1.182 min=0.361 max=86.121 avg=0.608 wall=0.616
+PBENCH p6_mkdrmdir n=1000 med=40.366 p99=86.993 min=36.679 max=304.420 avg=42.739 wall=44.106 per_sample=mkdir_plus_rmdir
+PBENCH p6_unlink n=1000 med=26.239 p99=48.591 min=25.468 max=284.152 avg=28.132 wall=29.279
+PBENCH p7_sleep1ms n=10000 med=14.607 p99=21.470 min=2.856 max=1202.790 avg=15.633 wall=1067.326 req=1ms val=overshoot
+PBENCH DONE rc=0

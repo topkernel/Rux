@@ -7258,6 +7258,19 @@ fn binder_thread_read(
                 return -(EAGAIN as i64);
             }
             {
+                // The binder:binder_wait_for_work tracepoint's three
+                // availability words, captured under the same WORLD
+                // lock that sets the park state (the reference reads
+                // them under binder_inner_proc_lock):
+                //   proc_work        = binder_available_for_proc_work_
+                //                     ilocked (empty txn stack + empty
+                //                     todo + entered/registered looper)
+                //   transaction_stack = a txn is stacked on this thread
+                //   thread_todo       = work sits on the thread's list
+                let mut t_proc_work = false;
+                let mut t_txn_stack = false;
+                let mut t_thread_todo = false;
+                let t_armed = crate::trace::EVENT_BINDER_WAIT_FOR_WORK.armed();
                 let _w = world_lock();
                 // SAFETY: under WORLD.
                 unsafe {
@@ -7270,7 +7283,33 @@ fn binder_thread_read(
                     th.waiting_for_proc_work = th.todo.is_empty()
                         && th.txn_stack.is_empty()
                         && (th.looper & (LOOPER_ENTERED | LOOPER_REGISTERED)) != 0;
+                    if t_armed {
+                        t_proc_work = th.waiting_for_proc_work;
+                        t_txn_stack = !th.txn_stack.is_empty();
+                        t_thread_todo = !th.todo.is_empty();
+                    }
                     thread.hist(EV_PARK, th.txn_stack.len() as u32, 0);
+                }
+                drop(_w);
+                // Recorded outside WORLD (the ring takes its own locks);
+                // the reference records before the blocking wait, which
+                // this is.
+                if t_armed {
+                    crate::trace::record(
+                        &crate::trace::EVENT_BINDER_WAIT_FOR_WORK,
+                        [
+                            t_proc_work as u64,
+                            t_txn_stack as u64,
+                            t_thread_todo as u64,
+                            0,
+                            0,
+                            0,
+                            0,
+                            0,
+                            0,
+                            0,
+                        ],
+                    );
                 }
             }
             thread

@@ -1,0 +1,110 @@
+D-7 release-panic root cause — machine-verified (leg 43, 2026-10-27)
+=====================================================================
+
+Commit under analysis: d8d23064 "typed per-CPU storage" (reverted as
+95b0015f). Panic: ALLOCTHROW size=48 at first post-slab allocation,
+every release shape (strong LTO/CGU1 pa65d7, weak lto=false/cgu=16
+pa65d7w2), t=3s, debug clean. Repro logs:
+work/pbench-pa65d7-serial.log, work/pbench-pa65d7w2-serial.log.
+
+ROOT CAUSE (one line): the conversion moved the magazine bank from
+`static mut MAGAZINES` to `static MAGAZINES: CpuLocal<[Magazine; 8], N>`
+— a non-mut static whose type has NO interior mutability (plain
+[Row<T>; N] + `unsafe impl Sync`). rustc therefore marks the LLVM
+global `constant` and the linker places it in .rodata; under opt>=1
+LLVM deletes every store into it and keeps the loads, so the magazine
+row can never change. `unsafe impl Sync` does NOT create interior
+mutability — the missing piece was UnsafeCell.
+
+Evidence chain (artifact: perf-audit-pa68 d8d23064 weak build with
+symbols, target/x86_64-unknown-none/release/rux, built from clean
+d8d23064 checkout; log run/pa68-build-d7weak-sym.log):
+
+1. SECTION PLACEMENT. readelf -sW: MAGAZINES at 0xffffffff805039c0,
+   size 4608 (4 CPUs x 1152-byte Rows), section index 4 = .rodata
+   [0xffffffff804f7000..0xffffffff8052c000). The parent's `static mut`
+   bank lived in .bss (CACHES, which contains atomics, still does:
+   section 6). PROGBITS in a read-only section = the optimizer is
+   allowed to treat the contents as immutable.
+
+2. NO HARDWARE FAULT HIDES IT. The kernel maps the whole image P|RW
+   (kernel/src/arch/x86_64/cpu.rs, enable_write_protect comment: "the
+   kernel image, linear map, and device windows are all mapped P|RW"),
+   so ring-0 stores to .rodata bytes complete fine. Debug builds
+   (opt=0) emit every store and re-load every field: they boot and
+   pass the suite BY LUCK of the P|RW mapping.
+
+3. CODEGEN, fast path (alloc, 0xffffffff802b8480):
+     0xffffffff802b85e4  mov  rcx,[rax+rdx-0x7fafc5c0]  ; len LOAD survives
+     0xffffffff802b85ec  lea  r13,[rcx-0x1]             ; len-1 -> register
+     ... no store of r13 anywhere                        ; len -= 1 DELETED
+   The pop load remains, the len store is gone — the fast path pops
+   from a row that never shrinks (harmlessly: it also never grows).
+
+4. CODEGEN, refill loop (the boot killer), 0xffffffff802b87c0:
+     loop: mov rdi,ci ; mov rsi,heap_start
+           call alloc_locked
+           test rax,rax        ; p == null -> exit
+           je   exit
+           test r12,r12        ; first.is_null()?
+           cmove r12,rax       ; first = p        (once)
+           cmovne r15,r13      ; "len = len+1" IN A REGISTER, r13 computed
+                                ; ONCE before the loop from the loaded len
+           cmp  r15,0x10       ; len < MAG_DEPTH?
+           jb   loop
+   ZERO stores to MAGAZINES in the loop body: `mag.buf[len] = p` and
+   `mag.len += 1` were deleted as stores to constant memory; the len
+   load was hoisted before the loop. r15 is pinned to len+1 = 1 from
+   iteration 2 on, 1 < 16 forever -> the loop runs until alloc_locked
+   returns null.
+
+5. COUNTER ARITHMETIC MATCHES (pa65d7w2 serial):
+   c64 a=15934402 made=252928 locks=2. 252928 pages x 63 objs/page
+   (64-byte objects, one slot for the page header) = 15,934,464 ~ a:
+   every carved object was handed out once and DROPPED (never stored).
+   One refill call loops until the heap is exhausted (252928 pages =
+   99% of the 0x3e000000 window), returns its first object, alloc
+   succeeds; the NEXT c64 allocation enters refill #2 (locks=2),
+   alloc_locked returns null immediately, alloc returns null ->
+   ALLOCTHROW size=48 (the cmdline::init_from String). made=252928
+   pages tile heap_start 0x40000000 up to 0x7dc00000 = exactly the
+   region boundary: heap_start was NEVER garbage (the 8.10.11 first
+   model was wrong); only the magazine stores died.
+
+6. WHY EVERY RELEASE SHAPE AND NO DEBUG SHAPE: store deletion is an
+   opt>=1 decision (same in LTO and non-LTO); debug emits stores, and
+   the P|RW mapping lets them land. make test (debug class) can never
+   catch this family — hence the binding release-strong boot rule.
+
+FIX (re-land): the bank needs real interior mutability:
+  rows: UnsafeCell<[Row<T>; N]>
+so the static lands in writable memory (.bss) and LLVM keeps every
+store. The `unsafe impl Sync` justification is unchanged (rows are
+cpu-private under the guard's IF=0 window); UnsafeCell is the piece
+that makes the mutation legitimate to the compiler instead of
+invisible to it.
+
+POST-FIX VERIFICATION (weak lto=false/cgu=16/symbols build of the
+re-land, same profile as step 1-4 above):
+  - placement: objdump -t ... MAGAZINES -> ".bss" at
+    0xffffffff80edeec0, size 0x1200 (4 CPUs x 1152). (Cross-checked
+    with a minimal rustc 1.101.0-nightly repro: a plain-type static
+    lands in .rodata.*, an UnsafeCell-wrapped one in .data/.bss.)
+  - refill loop 0xffffffff802c62e9 (alloc +0x359):
+      call alloc_locked
+      test rax,rax ; je exit
+      test r12,r12 ; je first-object arm
+      mov QWORD PTR [r13+r15*8],rax      ; mag.buf[len] = p   PRESENT
+      mov r15,QWORD PTR [r13+0x80]       ; reload mag.len     PRESENT
+      inc r15
+      mov QWORD PTR [r13+0x80],r15       ; mag.len = len      PRESENT
+      cmp r15,0x10 ; jb loop             ; bounded at MAG_DEPTH
+    (r13 = 0xffffffff80edeec0 + cpu*1152 + ci*136; buf at +0, len
+    at +0x80). The in_use byte set/clear (`mov BYTE PTR [rcx],1` /
+    `mov BYTE PTR [rax],0`) also present — the guard survives.
+  - release-strong pbench boot: see the re-land commit / ledger.
+
+NOTE for future codegen forensics: verify the artifact mtime before
+reading target/ output — a profile-matched stale rux in target/ can
+silently answer for the new build (cost one false "fix failed"
+reading this leg).

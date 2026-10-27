@@ -1,0 +1,4 @@
+FAIL binder SLOW-TXN  n=31  queue>=50ms=0  out-of-band=1
+  classes: {'code14 OUT(40680ms)': 1, 'code1 in-band': 1, 'code7 in-band': 29}
+  max queue ms: 10
+  offending: SLOW-TXN txn88 code 14 from pid 367 tid 367 to pid 324 tid 324: total 40680 ms (queue 0 ms, exec 40680 ms)

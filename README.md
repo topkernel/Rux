@@ -7,9 +7,8 @@
 [![Rust](https://img.shields.io/badge/Rust-stable-orange.svg)](https://www.rust-lang.org/)
 [![License](https://img.shields.io/badge/License-MIT-blue.svg)](LICENSE)
 [![Platform](https://img.shields.io/badge/platform-riscv64%20%7C%20x86__64-informational.svg)](https://github.com/rust-osdev/rust-embedded)
-[![Tests](https://img.shields.io/badge/tests-4%2C115%20cases-brightgreen.svg)](#-test-status)
-[![Verification](https://img.shields.io/badge/verification-4%20tools-brightgreen.svg)](#-formal-verification)
-[![Code](https://img.shields.io/badge/code-165%2C000%20lines-blue.svg)](docs/architecture/structure.md)
+[![Tests](https://img.shields.io/badge/tests-4%2C250%20cases-brightgreen.svg)](#-test-status)
+[![Code](https://img.shields.io/badge/code-~250%2C000%20lines-blue.svg)](docs/architecture/structure.md)
 
 **Platforms: RISC-V 64-bit (RV64GC, primary) · x86_64 (q35)**
 
@@ -19,168 +18,85 @@
 
 ## 🖥️ Rux Runs Ubuntu
 
-**A complete Ubuntu 22.04 userland — glibc dynamic binaries, real shells, D-Bus, Xorg rendering X client windows, an interactive xterm, and a real GNOME Shell desktop (gnome-shell + mutter compositing, the gsd settings daemons) — boots on the Rux kernel today, on both riscv64 and x86_64 (amd64).**
+**A complete Ubuntu 22.04 userland — glibc dynamic binaries, real shells, D-Bus,
+Xorg with client windows, an interactive xterm, and a real GNOME Shell desktop
+(gnome-shell + mutter compositing) — boots on the Rux kernel today, on both
+riscv64 and x86_64.**
 
 | | |
 |---|---|
 | ![Ubuntu GNOME login](docs/images/ubuntu-gnome-login-2026-10-15.png) | ![Ubuntu GNOME desktop](docs/images/ubuntu-gnome-desktop-2026-10-15.png) |
 | *Ubuntu GNOME login screen on Rux (riscv64) — verify.py 23/23 PASS* | *Ubuntu GNOME desktop on Rux (riscv64) — the full udesk session with dock, panel, and apps* |
 
-### OpenHarmony — support status
+What runs, end to end:
 
-| | |
-|---|---|
-| ![OH services](docs/images/oh-servicestart-2026-10-15.png) | ![OH bootanimation](docs/images/oh-bootanimation-2026-10-24.png) |
-| *OpenHarmony x86_64_virt — ~80 system services (samgr, foundation, render_service, bootanimation…) start and stay up* | *OpenHarmony's own bootanimation rendering on the Rux kernel (720×1280 virtio-GPU, ohgpu screendump) — BootAnimationController verified at 150 frames* |
-
-**Where OpenHarmony stands today** (the boot chain, milestone by milestone):
-
-- **Boots with ~80 system services up** (samgr, foundation, render_service,
-  bootanimation, hilogd, appspawn, hdf devhosts, ...), `hdc shell` reaches the
-  live guest
-- **OH's own bootanimation renders fullscreen** on the kernel's virtio-GPU
-  DRM path (the screenshot above; `BootAnimationController START`, 150+
-  frames, SetVSyncRate delivered)
-- **The launcher process runs and works** — spawn completes end to end
-  (result 0 + pid), `LauncherAbilityManager`, `CommonBundleManager`,
-  `WallpaperExtAbility` and the render-service client all run and narrate
-  for 20+ minutes per boot
-- **Not yet on screen: the launcher UI.** render_service's SA-10 publish is
-  blocked by a userspace lock cascade in hdf_devmgr (a 16-reader FFRT pool
-  rwlock held across blocking binder calls freezes the composer service
-  mid-init); the devmgr→composer handshake (`OnHotPlug`, `SetBrightness`,
-  `SetVSyncRate`) is the deepest it has ever reached. Root-caused; fix in
-  flight.
-
-What is running in these screenshots, all on the Rux kernel:
-
-- **Real Ubuntu 22.04 rootfs** (glibc, ld.so, dynamic ELF loading with PT_INTERP)
-- **Graphical session** on the virtio-GPU framebuffer (`/dev/fb0` mmap), with
-  keyboard and mouse input through virtio-input → evdev — the desktop is
-  operable directly from the emulator window (click fields, dock, title bars,
-  close boxes; type in the terminal)
-- **A real shell** executing real commands inside the Terminal window
-  (fork / exec / pipes / wait on Ubuntu's own `/bin/dash`)
-- **Interactive bash, D-Bus (system + session bus) end to end**, pty, SysV IPC,
-  POSIX signals with full nesting semantics, 4-CPU SMP with cross-core TLB
-  shootdowns
+- **Ubuntu 22.04 rootfs** with glibc, `ld.so`, and dynamic ELF loading
+- **GNOME Shell desktop frames, reproducible across boots** — panel, clock,
+  notification banners, and readable window content, verified by deterministic
+  pixel math on riscv64 (the [Roadmap](docs/progress/roadmap.md) tracks the
+  interactivity milestone)
+- **Xorg completes full initialization** and serves X clients through
+  `/tmp/.X11-unix/X0`; X client windows render to the screen
+- **Interactive xterm** (pty + real bash/dash inside), keyboard and pointer
+  input reaching X clients via virtio-input → evdev with IRQ-driven delivery
+- **D-Bus (system + session), POSIX signals with full nesting semantics,
+  SysV IPC, 4-CPU SMP** with cross-core TLB shootdowns
 - **Linux ABI by design**: `uname` and `/proc/version` intentionally report
   Linux-compatible strings — that identity is what lets unmodified
-  Ubuntu/glibc binaries run without patches; the desktop's System Info
-  panel surfaces the Rux identity over the same data
-  (`Rux 0.1.0-rux (buildd@rux) (rustc …) #1 SMP`)
-- **Xorg runs**: the X server completes full initialization on Rux —
-  screen, all extensions, evdev keyboard/mouse devices, InputThread, and
-  the `/tmp/.X11-unix/X0` socket (3/3 cold boots) — and the X client ↔
-  Xorg request path is fully working (`XOpenDisplay(:0)` + `XSync`
-  succeed). One `recvmsg` ABI fix unlocked the dispatch path: the kernel
-  now zeroes `msg_controllen` when a message carries no control data —
-  previously the caller's buffer capacity was left in the msghdr, and
-  Xorg walked garbage cmsgs in a non-advancing, 100%-CPU loop
-- **Input reaches X clients end to end**: keyboard, pointer and button
-  events injected through QEMU reach a raw X11 protocol client as the
-  exact KeyPress/KeyRelease, MotionNotify and ButtonPress sequence
-  (verified by `test/xinput_probe.c` against Xorg 1.21 with
-  xf86-input-evdev)
-- **xterm is a working interactive terminal**: it opens its pty through
-  `/dev/ptmx` and the shell inside — bash and dash — stays alive
-  (unlocked by Linux-exact pty semantics: TIOCGPTPEER, the
-  corrected TIOCGPTN ioctl number, TIOCGPGRP foreground-pgrp rules,
-  ENOTTY for unknown ioctls)
-- **X client windows render to the screen**: a self-written X client maps
-  a window and its pixels reach the display, verified by an fbmap probe
-  counting non-black framebuffer pixels (21,384, stable across 2 runs)
-- **A full GNOME session survives**: gnome-session, gnome-shell, the
-  gsd settings daemons, gnome-keyring-d and dconf-service all stay
-  alive through the session — after the D-Bus system-bus blocker was
-  fixed (filesystem AF_UNIX sockets are now keyed by inode identity,
-  so `/run` / `/var/run` aliases name the same socket, and a full
-  listen backlog blocks like Linux instead of returning ECONNREFUSED).
-  On-screen GNOME bring-up continues (see the
-  [Roadmap](docs/progress/roadmap.md))
-
-### Try it
+  Ubuntu/glibc binaries run without patches
 
 ```bash
-make ubuntu-image    # build the Ubuntu GUI disk image (work/ubuntu-gui.img)
+make ubuntu-image    # build the Ubuntu 22.04 GUI disk image (work/ubuntu-gui.img)
 make ubuntu-run      # boot it: native SDL window + keyboard + mouse, 4 CPUs, MTTCG
-                     # boot-to-login ~4.5s (THREAD=single restores the deterministic mode)
-                     # login: root / rux   (Ctrl-S SysInfo, Ctrl-A About, Tab focus, Ctrl-W close)
-```
-
-Automated pixel-level verification (23 checks per boot: login → wrong password
-→ desktop → apps → real command execution → window close → panic scan):
-
-```bash
-python3 test/ubuntu-gui/verify.py --runs 2 --smp 4
+                     # boot-to-login ~4.5s; login: root / rux
+python3 test/ubuntu-gui/verify.py --runs 2 --smp 4   # 23 pixel-level checks per boot
 ```
 
 ---
 
 ## 📱 Rux Runs OpenHarmony
 
-**Status: the OpenHarmony x86_64_virt emulator boots on the Rux kernel
-with ~80 system services up, OH's own bootanimation rendering on the
-kernel DRM path (screenshot above), and the launcher process running
-end to end — spawn completes, the ability managers narrate real work.
-The launcher UI is not on screen yet: render_service's composer
-publish is blocked by a userspace rwlock cascade in hdf_devmgr
-(root-caused, fix in flight).** The kernel display path itself is
-proven end to end in a real boot — `CREATE_DUMB → ADDFB2 → first
-page flip → ATOMIC flips` from a seat at the bootanimation position
-(drive by `test/egl_painter`), and now by OH's own animation.
+**The OpenHarmony x86_64_virt emulator boots with ~80 system services up
+(samgr, foundation, render_service, hilogd, appspawn, hdf devhosts, …),
+`hdc shell` reaches the live guest, and OH's own bootanimation renders
+fullscreen on the kernel's virtio-GPU DRM path. The launcher chain has
+reached MainAbility loading — spawn completes end to end, the ability
+managers narrate real work — the launcher UI is not on screen yet.**
 
-The kernel-side fixes that made this work (the full campaign log is in
-git history; the load-bearing ones):
+| | |
+|---|---|
+| ![OH services](docs/images/oh-servicestart-2026-10-15.png) | ![OH bootanimation](docs/images/oh-bootanimation-2026-10-24.png) |
+| *OpenHarmony x86_64_virt — ~80 system services start and stay up* | *OH's own bootanimation on the Rux DRM path (720×1280 virtio-GPU) — BootAnimationController verified at 150 frames* |
 
-- **Binder + token plumbing**: single access-token store (a devfs double
-  registration shadowed the real registry), OH token type-bit layout,
-  `binder_handle_cookie` packed to 12 bytes (OH `__packed`), death
-  notification words, `BR_DEAD_REPLY` on transactions racing their
-  target's death (was a kernel panic)
-- **`SO_PEERSEC` on AF_UNIX**: init's parameter service checks
-  `getpeercon()` on every `bootevent.*` set — without it every set was
-  FORBIDDEN and bootanimation waited forever
-- **PIE load bias (ELF_ET_DYN_BASE parity)**: at bias 0, OH musl's CFI
-  shadow logic treats the main exe as "no data" and skips its shadow
-  fill → every cross-DSO indirect call SIGSEGV'd
-- **Memory model**: PFN span now sized by the max region end (2 GiB of
-  q35 DRAM above 4G was invisible; the MMIO hole got phantom
-  descriptors), zone seeds the full map, page cache scales to RAM with a
-  real LRU (was: anti-LRU eviction + a 32 MiB hard cap — a 509 s fault
-  storm, now 58 s)
-- **ext4**: recursive biglock (alloc-under-lock self-deadlock) and
-  HANDOFF fairness (barging starvation at ~1.5 s/page-fault)
-- **mmap ENODEV for unmappable fds**: inode-less fds (pipes/eventfd)
-  built size-0 file VMAs whose first touch SIGBUS'd — killed accountmgr's
-  and hdf_devmgr's binder threads
-- **x86_64 AVX/XSAVE**: the kernel never set CR4.OSXSAVE/XCR0 while
-  CPUID advertised AVX — every VEX instruction SIGILL'd (hdcd died 15+
-  times per boot)
-- **TCP poll parity**: a listening socket never reported readable with a
-  pending child — libuv servers (hdcd) could never `accept()`
-- **virtio 64-bit BAR mapping** (above-4G ioremap arena), **musl
-  MAP_32BIT**, **ext4 metadata_csum**, **switch_root/MS_MOVE**,
-  **devfs with devtmpfs semantics** (`/dev/__parameters__` shared
-  workspaces with coherent MAP_SHARED pages)
+The kernel work behind it (full campaign in git history and the
+[Roadmap](docs/progress/roadmap.md); the iconic few):
+
+- **Binder with OH semantics**: packed token/cookie layouts, death
+  notification, thread-pool growth (`BR_SPAWN_LOOPER`) and child-thread
+  drain routing matching the reference protocol
+- **SELinux-adjacent surfaces**: `SO_PEERSEC` on AF_UNIX (init's
+  parameter service gates every `bootevent.*` set on it)
+- **Memory model**: PFN span sized by the max region end, full-map zone
+  seeding, page cache with a real LRU scaling to RAM
+- **ext4**: recursive biglock, HANDOFF fairness, directory-entry
+  mutation serialization
 
 ```bash
-# Boot the OH emulator on Rux:
 ./test/run-oh.sh ~/oh-images console     # serial console
-./test/run-oh.sh ~/oh-images gui        # virtio-gpu at 720×1280
-# The animation-on-screen boot (egl_painter from the bootanimation seat):
-#   see test/egl_probe*, run/ui-boot.sh SYSTEMIMG=… in the ui-sprint lineage
+./test/run-oh.sh ~/oh-images gui         # virtio-gpu at 720×1280
 ```
 
 ---
 
 ## 🤖 AI Generation Statement
 
-**This project's code is developed with AI assistance (Claude Code + Opus4.6/GLM5.1/Minimax2.7).**
+**This project's code is developed with AI assistance (Claude Code +
+GLM-5.3).**
 
-- Uses Anthropic Claude Code CLI tool for assisted development
+- Uses AI coding agents for assisted development
 - Follows POSIX standards and maintains 100% Linux ABI compatibility
-- Aims to explore the possibilities and limitations of **AI-assisted OS kernel development**
+- Aims to explore the possibilities and limitations of **AI-assisted OS
+  kernel development**
 
 ---
 
@@ -198,8 +114,9 @@ git history; the load-bearing ones):
 
 **Design Philosophy**:
 - External interfaces must be 100% compatible with Linux
-- Internal implementation can use better designs when it doesn't affect compatibility
-- Welcoming improvements that maintain Linux ecosystem compatibility
+- Internal implementation can use better designs when they don't affect
+  compatibility — advantageous divergences are recorded in the
+  [design-divergence register](docs/architecture/design-divergences.md)
 
 ---
 
@@ -207,37 +124,15 @@ git history; the load-bearing ones):
 
 | Metric | Value | Details |
 |--------|-------|---------|
-| **Lines of Code** | ~164,900 lines | [Code Structure](docs/architecture/structure.md) |
-| **Source Files** | 306 files (303 Rust + 3 ASM) | [Project Structure](docs/architecture/structure.md) |
-| **Kernel Unit Tests** | 60 files, 985 cases (985/985 green after suite repair) | [Unit Test Report](docs/test/unit-test-report.md) |
+| **Source Lines** | ~249,500 lines in kernel/src (399 files) | [Review Coverage Map](docs/development/review-coverage.md) |
+| **Kernel Unit Tests** | 1,122 cases, all green | `make test` |
 | **Formal Verification** | 4 tools, 1,116+ test functions; 157 Kani proofs | [Verification Design](docs/development/formal-verification.md) |
-| **Smoke Tests** | 15 tests (all passing) | [Testing Guide](docs/test/testing.md) |
-| **Linux LTP** | 1,838 official tests; 6 fix rounds (~90 files, ~4,000 lines) | [Testing Guide](docs/test/testing.md) |
-| **LTP Full Sweeps** | PASS 35 → 524 → 659 → 677 → 602 (r1–r5, 1,869 tests each); round-6 rescan in progress | [Roadmap](docs/progress/roadmap.md) |
+| **Linux LTP** | **1,005 / 1,869** (r15; trend 35 → 524 → 801 → 945 → 1,005) | [Roadmap](docs/progress/roadmap.md) |
 | **Platform Support** | RISC-V 64-bit + x86_64 (q35), 4-CPU SMP | [Roadmap](docs/progress/roadmap.md) |
-| **Syscall Numbers** | 345 dispatched | [Roadmap](docs/progress/roadmap.md) |
-| **Ubuntu Userland** | Ubuntu 22.04 riscv64 boots: graphical session, Xorg + X client windows, interactive xterm, bash, D-Bus | [Screenshots](#️-rux-runs-ubuntu) |
+| **Syscall Numbers** | 345+ dispatched | [Roadmap](docs/progress/roadmap.md) |
+| **Ubuntu Userland** | GNOME Shell desktop frames reproducible on riscv64; Xorg + xterm + D-Bus | [Screenshots](#️-rux-runs-ubuntu) |
 | **Memory** | Swap active: 2,064 MiB anonymous working set paged through 256 MB swap, verified | [Roadmap](docs/progress/roadmap.md) |
-| **Boot Performance** | MTTCG default (`thread=multi`): boot-to-login ~4.5s, 2.1x faster | [Roadmap](docs/progress/roadmap.md) |
-
-**Module Distribution**:
-- Filesystem (fs/): 39,951 lines (24.2%)
-- System Calls (syscall/): 24,204 lines (14.7%)
-- Network Stack (net/): 16,214 lines (9.8%)
-- Architecture (arch/): 11,999 lines (7.3%)
-- Device Drivers (drivers/): 11,981 lines (7.3%)
-- Memory Management (mm/): 11,513 lines (7.0%)
-- Process Management (process/): 10,857 lines (6.6%)
-- Unit Tests (tests/): 9,814 lines (6.0%)
-- Top-level: 7,468 lines (4.5%)
-- Process Scheduling (sched/): 6,392 lines (3.9%)
-- IPC (ipc/): 4,385 lines (2.7%)
-- Sync Primitives (sync/): 3,504 lines (2.1%)
-- Diagnostics (dfx/): 2,595 lines (1.6%)
-- Interrupt (interrupt/): 1,802 lines (1.1%)
-- IO_uring (io_uring/): 1,167 lines (0.7%)
-- Security (security/): 559 lines (0.3%)
-- Module Loader (module/): 476 lines (0.3%)
+| **Boot Performance** | MTTCG default (`thread=multi`): boot-to-login ~4.5s | [Roadmap](docs/progress/roadmap.md) |
 
 ---
 
@@ -268,113 +163,20 @@ make ubuntu-image    # build the Ubuntu 22.04 GUI disk image
 make ubuntu-run      # boot Ubuntu in a native window (4 CPUs, keyboard + mouse)
 
 # === Musl/minimal userland ===
-# Build kernel
-make build
+make build           # build kernel
+make user            # build userspace programs (shell, apps, toybox)
+make rootfs          # build rootfs image
+make run             # boot to shell
 
-# Build userspace programs (shell, apps, toybox)
-make user
-
-# Build Rootfs image
-make rootfs
-
-# Run kernel (default shell)
-make run
-
-# Run unit tests
-make test
-
-# Run formal verification (sync check + proptest)
-make verify
-
-# Run Kani symbolic verification (all inputs, SAT/SMT)
-make kani
-
-# Run Miri UB detection
-make miri
-
-# Run SPIN concurrency model checking
-make spin
+# === Verification ===
+make test            # in-kernel unit tests (QEMU)
+make verify          # proptest invariant checks
+make kani            # Kani symbolic verification
+make miri            # Miri UB detection
+make spin            # SPIN concurrency model checking
 ```
 
 For detailed instructions: [Getting Started Guide](docs/guides/getting-started.md)
-
----
-
-## 🏆 Boot Log (Ubuntu desktop, `-smp 4`)
-
-```
-Module            Description                        Status
-----------------  --------------------------------   --------
-console:          UART ns16550a driver               [ok]
-trap:             stvec handler installed            [ok]
-trap:             ecall syscall handler              [ok]
-mm:               Sv39 3-level page table            [ok]
-mm:               satp CSR configured                [ok]
-mm:               buddy allocator order 0-12         [ok]
-mm:               heap region 128MB @ 0x80a00000     [ok]
-mm:               slab allocator 4MB                 [ok]
-boot:             FDT/DTB parsed                     [ok]
-boot:             cmd: root=/dev/vda rw init=...     [ok]
-mm:               linear mapping 2048 MB             [ok]
-mm:               vmemmap mapping initialized        [ok]
-mm:               layout: kernel=0x80200000-0x80a0   [ok]
-mm:               layout: heap=0x80a00000-0x88a000   [ok]
-mm:               524288 page descriptors            [ok]
-mm:               zone allocator initialized         [ok]
-memblock:         total 2048MB, available 1841MB     [ok]
-mm:               device mappings created            [ok]
-irq:              irq_desc array initialized         [ok]
-intc:             PLIC @ 0x0C000000                  [ok]
-intc:             IRQ domain + chip registered       [ok]
-ipi:              SSIP software IRQ + bitmap multi   [ok]
-console:          UART interrupt-driven RX           [ok]
-bio:              buffer cache layer                 [ok]
-fs:               ext4 driver loaded                 [ok]
-fs:               ramfs mounted /                    [ok]
-fs:               procfs initialized                 [ok]
-fs:               procfs mounted /proc               [ok]
-cgroup:           v2 unified hierarchy init          [ok]
-cgroup:           cgroup2 mounted /sys/fs/cgroup     [ok]
-driver:           virtio-blk PCI x1                  [ok]
-driver:           GenDisk registered                 [ok]
-fs:               ext4 mounted /                     [ok]
-fs:               procfs remounted /proc             [ok]
-mm:               swap 256 MB tail carve             [done]
-driver:           virtio-net x1                      [ok]
-vdso:             clock_gettime fast path            [ok]
-security:         capability LSM initialized         [ok]
-sched:            CFS scheduler v1                   [ok]
-sched:            runqueue per-CPU                   [ok]
-sched:            PID allocator init                 [ok]
-sched:            idle task (PID 0)                  [ok]
-mm:               kswapd reclaim thread              [ok]
-dfx:              diagnostic subsystem               [ok]
-ipc:              System V + POSIX MQ                [ok]
-smp:              4 CPUs online (boot hart 0)        [ok]
-softirq:          ksoftirqd per-CPU threads          [ok]
-dfx:              khungtaskd hung-task detector      [ok]
-trap:             sie.SEIE enabled                   [ok]
-driver:           virtio-gpu probed                  [ok]
-gpu:              1280x800 32bpp framebuffer         [ok]
-fs:               devfs mounted /dev                 [ok]
-driver:           /dev/fb0 registered                [ok]
-fs:               tmpfs mounted /dev/shm             [ok]
-fs:               tmpfs mounted /run                 [ok]
-driver:           evdev /dev/input/event0            [ok]
-driver:           evdev /dev/input/event1            [ok]
-driver:           virtio-keyboard                    [ok]
-driver:           virtio-tablet                      [ok]
-init:             loading /sbin/init                 [ok]
-init:             ELF loaded to user space           [ok]
-init:             init task (PID 1) enqueued         [ok]
-Welcome to Rux OS (RISC-V 64)
-- mrsh (POSIX shell) | A minimal POSIX-compatible shell
-
-udesk-init: boot ok
-udesk-init: warmup st=0
-[udesk] fb 1280x800
-[udesk] login screen up
-```
 
 ---
 
@@ -382,50 +184,26 @@ udesk-init: warmup st=0
 
 ```
 Rux/
-├── kernel/                 # Kernel source (~164,900 lines)
+├── kernel/                 # Kernel source (~249,500 lines in src/)
 │   ├── src/
-│   │   ├── fs/           # Filesystem (39,951 lines)
-│   │   │   ├── ext4/     # ext4 filesystem
-│   │   │   ├── jbd2/     # JBD2 journaling layer
-│   │   │   ├── devfs/    # devfs device filesystem
-│   │   │   └── procfs/   # procfs process filesystem
-│   │   ├── arch/         # Architectures: riscv64 + x86_64
-│   │   │   ├── mm/       # Arch-specific MM (pt, fixmap, ASID, page fault)
-│   │   │   ├── boot.S    # MMU trampoline, VMA/LMA linking
-│   │   │   ├── trap.S    # PtRegs save/restore, ret_from_fork
-│   │   │   └── uaccess.S # User memory access assembly
-│   │   ├── drivers/      # Device drivers (11,981 lines)
-│   │   │   ├── gpu/      # GPU/framebuffer drivers
-│   │   │   ├── input/    # Input device drivers
-│   │   │   ├── virtio/   # VirtIO devices (blk/net/gpu/input)
-│   │   │   └── net/      # Network devices
-│   │   ├── mm/           # Memory management (11,513 lines)
-│   │   │   ├── Zone allocator (DMA/DMA32/NORMAL/MOVABLE)
-│   │   │   ├── vmemmap, buddy, slab, PCP, memblock
-│   │   │   ├── VMA, mm_struct, page fault, COW
-│   │   │   └── rmap, hugepage, meminfo
-│   │   ├── tests/        # Unit tests (60 files, 985 cases)
-│   │   ├── syscall/      # System calls (24,204 lines, 345 syscalls)
-│   │   ├── ipc/          # IPC (4,385 lines) — System V, POSIX MQ
-│   │   ├── net/          # Network stack (16,214 lines)
-│   │   ├── sched/        # Process scheduling (6,392 lines)
-│   │   │   ├── CFS, RT (FIFO/RR), Deadline (EDF+CBS), Idle
-│   │   ├── process/      # Process management (10,857 lines)
-│   │   ├── sync/         # Sync primitives (3,504 lines)
-│   │   ├── interrupt/    # Interrupt subsystem (1,802 lines)
-│   │   └── dfx/          # Diagnostics/DFX (2,595 lines)
-│   └── build.rs          # Build script
-├── userspace/            # Userspace programs
-│   ├── mrsh/             # mrsh (minimal POSIX shell, musl libc)
-│   ├── apps/             # GUI applications (desktop, calculator, clock, vshell)
-│   ├── libs/             # Userspace libraries (gui)
-│   ├── tests/smoke_test/ # Smoke tests (15 tests, all passing)
-│   ├── linux-ltp/        # Official LTP tests (1,838)
-│   └── toybox/           # Toybox (200+ command line tools)
-├── toolchain/            # Toolchain (musl libc)
+│   │   ├── fs/           # Filesystem: ext4, jbd2, devfs, procfs, tmpfs, sysfs
+│   │   ├── arch/         # riscv64 + x86_64 (MM, boot, trap, uaccess)
+│   │   ├── drivers/      # virtio (blk/net/gpu/input), GPU, evdev, PCI
+│   │   ├── mm/           # zone/vmemmap/buddy/slab, VMA, page fault, COW, swap
+│   │   ├── syscall/      # 345+ system calls
+│   │   ├── ipc/          # System V, POSIX MQ, pipes, binder
+│   │   ├── net/          # TCP/UDP/IPv4 stack, sockets, netlink
+│   │   ├── sched/        # CFS, RT (FIFO/RR), Deadline (EDF+CBS), SMP
+│   │   ├── process/      # tasks, exec, signals, coredump
+│   │   ├── sync/         # futex, wait queues, rwlock, condvar
+│   │   ├── dfx/          # kallsyms, tracepoint!, pstore, perf_event_open,
+│   │   │                 #   syscost, oops/panic policy, per-switch probes
+│   │   └── tests/        # in-kernel unit tests (1,122 cases)
+│   └── build.rs
+├── userspace/            # mrsh, GUI apps, smoke tests, LTP, toybox
+├── toolchain/            # musl toolchains
 ├── docs/                 # 📚 Documentation center
-├── test/                 # Test scripts
-└── Cargo.toml            # Workspace configuration
+└── test/                 # test programs and drivers
 ```
 
 Detailed structure: [Project Structure Documentation](docs/architecture/structure.md)
@@ -434,154 +212,77 @@ Detailed structure: [Project Structure Documentation](docs/architecture/structur
 
 ## ✨ Key Features
 
-### Implemented Features
-
 - **Process Management**: fork/execve/wait4/signal handling/CFS scheduler/clone flags/gettid
-- **Memory Management**: Sv39 page table/Zone allocator/vmemmap/PCP/COW/Demand paging/ASID/MAP_PRIVATE COW/Swap (active, >2 GiB verified)/LRU page cache/OOM killer
-- **Filesystem**: ext4/procfs/devfs/ramfs/sysfs (mdev-compatible)/JBD2 journaling/crash recovery
-- **IPC**: System V semaphores/message queues/shared memory, POSIX message queues
-- **Device Drivers**: VirtIO-blk/net/gpu/input, framebuffer, evdev, goldfish RTC, PCI ECAM rescan/hotplug
-- **Network Stack**: TCP/UDP/IPv4/ARP/Socket API/AF_PACKET + raw sockets/netlink/udhcpc bring-up/IO_uring
+- **Memory Management**: Sv39 page tables/zone allocator/vmemmap/PCP/COW/demand paging/ASID/MAP_PRIVATE COW/swap (>2 GiB verified)/LRU page cache/OOM killer
+- **Filesystem**: ext4 (metadata_csum, journaling, crash recovery)/procfs/devfs/tmpfs/sysfs
+- **IPC**: System V semaphores/message queues/shared memory, POSIX message queues, pipes, epoll/select/poll/eventfd, futex
+- **Binder**: the OH binder protocol — transactions, node ownership, thread pools, async slots — running the full OH service stack
+- **Device Drivers**: virtio-blk/net/gpu/input, framebuffer, evdev with IRQ-driven delivery, PCI ECAM rescan/hotplug
+- **Network Stack**: TCP/UDP/IPv4/ARP/socket API/AF_PACKET/netlink/udhcpc bring-up/io_uring
 - **SMP Multi-core**: 4-core support/load balancing/IPI/per-CPU idle tasks
-- **Linux-Style Boot**: MMU trampoline/VMA-LMA linking/PtRegs at stack top
-- **System Lifecycle**: reboot(2) with CAD semantics, shutdown(8) cascade, Ctrl-Alt-Del, SBI poweroff
-- **Diagnostics**: core dumps readable by host gdb, dfx memwatch heap/page call-site accounting
-- **Security**: Capabilities/LSM framework/signal/file/IPC permission checks
-- **POSIX Timers**: timer_create/settime/gettime/delete, setitimer/getitimer, timerfd
-
-### System Calls
-
-Supports 345 Linux system calls, including:
-- File: openat/close/read/write/readv/writev/pread64/pwrite64/lseek/fstat/getdents64/mkdirat/rmdir/unlinkat/sendfile/statfs/copy_file_range/statx
-- Process: fork/execve/wait4/exit/getpid/getppid/gettid/kill/clone/sched_yield/prctl/getrusage
-- Memory: brk (expand+shrink)/mmap/munmap (MAP_PRIVATE COW)/mprotect/mremap/madvise/msync
-- Signal: sigaction/sigprocmask/sigreturn/sigaltstack/sigpending/sigtimedwait
-- Network: socket/bind/listen/accept/connect/sendto/recvfrom/sendmsg/recvmsg
-- IPC: pipe/pipe2/dup/dup3/select/poll/epoll/eventfd/futex/shmget/shmat/shmdt/msgget/msgsnd/msgrcv/semget/semop/mq_open/mq_send/mq_receive
-- Async I/O: io_uring_setup/io_uring_enter/io_uring_register
-- Timers: timer_create/timer_settime/timer_gettime/timer_delete/timer_getoverrun/timerfd_create/timerfd_settime/timerfd_gettime/setitimer/getitimer
+- **Observability (DFX)**: kallsyms, tracepoint!-based tracefs events, pstore (console/dmesg ramoops), perf_event_open (software events, IP samples), oops/panic= policy, syscost accounting, per-switch probes — reference-kernel interface shapes throughout
+- **Security**: capabilities/LSM framework/signal/file/IPC permission checks
+- **POSIX Timers**: timer_create family, timerfd, setitimer/getitimer
 
 ---
 
 ## 📚 Documentation
 
-### Core Documentation
-
 - **[Getting Started](docs/guides/getting-started.md)** - Up and running in 5 minutes
-- **[Roadmap](docs/progress/roadmap.md)** - Phase planning and current status (X11 milestone: Xorg, X client windows, interactive xterm)
-- **[Project Structure](docs/architecture/structure.md)** - Source code organization
-- **[Design Principles](docs/architecture/design.md)** - POSIX compatibility and Linux ABI alignment
-
-### Architecture Documentation
-
-- **[RISC-V Architecture](docs/architecture/riscv64.md)** - RV64GC support details
-- **[Boot Process](docs/architecture/boot.md)** - MMU trampoline, VMA/LMA linking, page table init
-- **[Memory Management](docs/architecture/memory.md)** - Zone allocator, vmemmap, COW, demand paging
-- **[Lock Ordering](docs/architecture/lock-ordering.md)** - Kernel lock hierarchy and nesting rules
-- **[Changelog](docs/progress/changelog.md)** - Version history and update records
-
-### Development Guides
-
-- **[Development Workflow](docs/guides/development.md)** - Contributing code and development standards
-- **[Boot Process](docs/architecture/boot.md)** - From OpenSBI to kernel boot
-- **[User Programs](docs/archive/user-programs.md)** - ELF loading and execve (archived)
+- **[Roadmap](docs/progress/roadmap.md)** - Milestones and current status
+- **[Design Divergences](docs/architecture/design-divergences.md)** - advantageous internal divergences from the mainstream, kept under the compatibility gate
+- **[Lock Ordering](docs/architecture/lock-ordering.md)** - kernel lock hierarchy and nesting rules
+- **[Review Coverage Map](docs/development/review-coverage.md)** - code-review coverage across kernel/src
+- **[Changelog](docs/progress/changelog.md)** - version history
+- **[Development Workflow](docs/guides/development.md)** - code standards
 - **[Formal Verification](docs/development/formal-verification.md)** - 4-layer verification strategy
-
-### Test Reports
-
-- **[Unit Test Report](docs/test/unit-test-report.md)** - Kernel unit test cases (60 files, 985/985 green after the suite repair)
-- **[Formal Verification Report](docs/test/formal-verification-report.md)** - proptest-based invariant tests
 
 ---
 
 ## 🧪 Test Status
 
-**Total: 4,115 test cases + 161 formal verification proofs**
+**Total: ~4,250 test cases + formal verification proofs**
 
 | Test Suite | Cases | Run Command | Environment |
 |------------|-------|-------------|-------------|
-| **Kernel Unit Tests** | 985 | `make test` | QEMU (no_std, custom harness) |
+| **Kernel Unit Tests** | 1,122 | `make test` | QEMU (no_std, custom harness) |
 | **Formal Verification** | 1,116 | `make verify` | Host (std, proptest) |
-| **Linux LTP** | 1,838 | `make run` → `/test/linux-ltp/run_ltp.sh` | QEMU |
+| **Linux LTP** | 1,869 | guest-side runner | QEMU |
 | **Smoke Tests** | 15 | `make run` → `/test/smoke_test` | QEMU |
 | **Kani Proofs** | 157 | `make kani` | Host (Kani/CBMC, all-input symbolic) |
 | **SPIN Models** | 4 | `make spin` | Host (SPIN/Promela, concurrency) |
 | **Miri UB Detection** | - | `make miri` | Host (Miri, undefined behavior) |
 
-### Kernel Unit Tests (985 cases, 60 files — 985/985 green after the suite repair)
-- **Framework**: Custom `no_std` harness (`test_pass`, `test_fail`, `test_assert!`)
-- **Coverage**: Memory management, process management, filesystem, network, drivers, syscalls, IPC, scheduler, synchronization
-- **Report**: [Unit Test Report](docs/test/unit-test-report.md)
+### Linux LTP (1,869-test list, guest-side runner)
 
-### Formal Verification
+Full sweeps, newest first: **1,005 (r15)** ← 945 (r14) ← 801 ← 795 ← 771 ← 721
+← 673 ← 659 ← 524 ← 35. Each round's fix batches are in git history; the
+residual failures are feature gaps (hugemmap/fanotify/quotactl families) and
+musl-artifact families, tracked in the [Roadmap](docs/progress/roadmap.md).
 
-A 4-layer verification strategy covering ~15% of the kernel's unsafe TCB:
+### Formal Verification (4 layers)
 
 | Layer | Tool | What It Verifies | Cases |
-|-------|------|-----------------|-------|
+|-------|------|------------------|-------|
 | **L1: Property Testing** | proptest | Data structure invariants (randomized) | 1,088 |
 | **L2: Symbolic Verification** | Kani | Core unsafe safety (all inputs, SAT/SMT) | 157 harnesses |
 | **L3: Concurrency** | SPIN/Promela | Deadlock-free, no lost wakeup, preempt balance | 4 models |
 | **L4: UB Detection** | Miri | Undefined behavior in test code | CI gate |
 
-- **Design**: [Formal Verification Design](docs/development/formal-verification.md)
-- **proptest Report**: [Formal Verification Report](docs/test/formal-verification-report.md)
-
-#### Kani Symbolic Verification (157 harnesses, 22 modules)
-
-Proves properties hold for ALL possible inputs via SAT/SMT solvers:
-- **mm** (18): slab, page_flags, buddy_alloc, refcount, vma
-- **sync** (2): spinlock try_lock/unlock
-- **arch** (17): pt_regs, memory_layout, asid
-- **process** (16): exit_status, pid, task_state, cred
-- **signal** (17): signal bitmap, sigpending
-- **drivers** (17): pci, virtio, netdev, input
-- **ipc** (5): ipc_id
-- **fs** (20): dev_t, permission, stat, inode
-- **net** (15): checksum, ethernet, tcp_state
-- **sched** (12): rt_bitmap, class
-- **interrupt** (12): preempt, softirq
-- **security** (9): capability bitmask
-- **errno** (5): enum consistency
-
-#### SPIN Concurrency Models (4 models, 8 LTL properties)
-
-Verifies lock ordering and concurrency safety:
-- **futex_wait_wake**: No lost wakeup, no spurious sleep
-- **lock_ordering**: No deadlock cycle across 5 lock levels
-- **interrupt_preempt**: preempt_count bounded, no underflow
-- **sched_enqueue_dequeue**: nr_running consistency
-
-#### proptest (1,088 cases, 98 modules)
-- **Framework**: [proptest](https://crates.io/crates/proptest) 1.5 (property-based, randomized, 256 cases per test)
-- **Subsystems**: mm (252), fs (240), net (123), security (38), interrupt (38), sync (50), sched (70), signal (30), drivers (34), ipc (22), process (39), arch (13), errno (8)
-- **Report**: [Formal Verification Report](docs/test/formal-verification-report.md)
-
-### Smoke Tests (15 tests, all passing)
-- **Coverage**: File I/O, process management, memory, signals, O_CLOEXEC, sendfile, wait4, process groups, setsid, credentials, readv/writev, gettid, pwrite64, dup3, kill, statfs, sched_yield
-
-### Linux LTP Test Suite (1,838 tests)
-- **LTP Version**: 20240524
-- **Compile Rate**: 101% (musl libc cross-compilation)
-- **Coverage**: Syscalls (1,378), memory (108), containers (46), filesystem (29), security (24), scheduler (23), IO (19)
-- **Full sweeps**: 1,869-test guest-side runner, five scans so far — PASS 35 → 524 → 659 → 677 → 602 (r1–r5); the r5 dip (+72 TIMEOUTs, tmpfs `/tmp` exhaustion) drove the round-6 fix batch (~90 files, ~4,000 lines total across rounds), rescan in progress
+Details: [Formal Verification Design](docs/development/formal-verification.md)
 
 ---
 
 ## 🤝 Contributing
 
-Contributions are welcome! Please check the [Roadmap](docs/progress/roadmap.md) for tasks that need help.
-
-### Development Standards
-
-- Follow [Conventional Commits](https://www.conventionalcommits.org/) specification
-- Refer to [Development Workflow](docs/guides/development.md) for development standards
+Contributions are welcome! Please check the [Roadmap](docs/progress/roadmap.md)
+for tasks that need help, and the
+[Development Workflow](docs/guides/development.md) for standards.
 
 **Core Principles**:
 - ✅ Strictly follow POSIX standards and Linux ABI
 - ✅ External interfaces must be 100% compatible with Linux
 - ✅ Internal implementation can use any design approach
-- ✅ Welcoming any improvements that maintain compatibility
 
 ---
 
