@@ -1537,3 +1537,95 @@ engine (mm/lru.rs, mm/vmscan.rs, fs/page_cache.rs, mm/page_alloc.rs):
   kernel, same D-7 delta): 13 rows same shape. Class persists on
   0f806d8b at low volume on the fork/mmap-storm surface; perf lane
   owns the producer triage.
+
+### PRODUCER NAMED (code-level, s13): the mutable current-slot — bookings split across two tasks
+
+The perf lane's leg-47 refutation (pre-delta kernel shows the class
+at the same rate; the s12 attribution withdrawn) handed the producer
+hunt here with the pa73c leak-origin fingerprint (pid 593 stuck
+RUNNING at pc=0x10000, heal/underflow 64/64). Code-level analysis:
+
+- The stuck bit in pa73c is the HARDIRQ bit (offsets: PREEMPT=1,
+  SOFTIRQ=0x100, HARDIRQ=0x10000) — the reported "acquire sites"
+  (sched.rs do_wait/grq guards, wait.rs finish_wait, spinlock.rs) are
+  the LEAKORIGIN shadow's last PREEMPT_OFFSET acquire = noise for a
+  hardirq leak; they only name where the victim was spinning.
+- irq_enter() is called ONLY from the three trap brackets, all
+  instrumented with tp_entry != tp_exit discriminators — and pa73c
+  shows ZERO bracket prints, ZERO SWITCH-COUNT-LEAK (the
+  context_switch discipline-bypass tripwire), while bits still
+  migrate. tp never changes during the leak.
+- THE GAP: preempt_count_add/sub resolve through
+  sched::current() = cpu_state[cpu].current — the MUTABLE SLOT —
+  while every discriminator watches the tp register. The slot has
+  writers that run while the hardware keeps executing a different
+  task: (a) the wake-path orphan heal rewrites a REMOTE CPU's slot to
+  idle (sched.rs curr_on loop, "heal the lying slots"); (b)
+  republish_current_after_abort (arch switch-abort repair) — its own
+  comment: "the task actually continuing here is prev"; (c) the
+  slot-capture steal / harvest_relink machinery the R56 family
+  documents. A bracket (or guard scope) opened before such a rewrite
+  and closed after it books +offset on one task and -offset on the
+  slot task — stranding one (pa73c's 0x10000-on-593; dirstorm's
+  parked pc=1 workers) and underflowing the other (idle 0x5fa in s3;
+  memstorm's pid-1 sub=1 at rwlock preempt_enable). One mechanism,
+  both bit classes, both faces; tp unchanged explains every silent
+  discriminator. __schedule's own R85 block ("tp != prev ... booking
+  the physical truth: prev = tp") proves slot-vs-tp divergence is a
+  recurring live event, not theory.
+- INSTRUMENT LANDED (commit on this branch): all three trap brackets
+  now compare the SLOT across the bracket (cs_entry/cs_exit pointers
+  + pids in the print; when=slot = tp-unchanged-slot-changed = the
+  producer signature). Canary kernel e80e92f0 rolled to a NEW ltp-b
+  member (ltp-a stays the clean-kernel control); smoke 406 TPASS /
+  0 panics. Watch: grep 'IRQ-BRACKET-LEAK.*when=slot' in ltp-b
+  serials — a hit directly witnesses a slot rewrite inside a live
+  bracket.
+- FIX DIRECTION (for the sched owner, once captured): bookings should
+  resolve against the hardware truth (tp) — or the slot rewrites must
+  be bracketed so no add/sub can straddle them. Not changed here:
+  semantics touch on the switch machinery needs the capture first.
+
+### Monkey verdict (s8/s11 queue: KILLDUMP at >500MB HEAP-GROW)
+
+- monkey-a r1 (29be66a7 x86): HEAP-GROW 619684KiB (605MB, past the
+  historical >500MB panic trigger), heap 708MB/1GB, 1548 KILLDUMP
+  census lines INCLUDING the exact old death-site shape (tgid 2074
+  m.ohos.launcher fdtab walk) — and ZERO KERNPANIC; 795 beats, normal
+  timeout. The fb643799-class census fix HOLDS under the heap-pressure
+  trigger on this kernel. monkey-b r1: 188MB growth, clean (WARN for
+  growth alone). Formal "both monkeys >500MB panic-free" still open
+  (monkey-b has not crossed 500MB yet); monkeys keep accumulating.
+  The heap GROWTH itself (OH image-side) remains its own standing
+  item. OOPS=1 = the known 10s soft-lockup residual.
+
+### Fleet map at session-13 close (03:1x)
+
+- Default rv64 image = 527656b2 (main 0f806d8b): ltp-a (r17+),
+  memstorm (r15+), fsfuzz (r268+ on probe v3), dirstorm (r32+),
+  dirtyscan (r17+), modchurn (r14+). x86 = 29be66a7: monkey-a/b (r1+).
+- ltp-b: NEW instrument canary on e80e92f0 (0f806d8b + the slot
+  bracket discriminator), KIMG-pinned.
+- Sweeper live. Host floor: free 3-10G / avail 33-42G under the s3
+  page-cache reading all session; load peaked ~20 during member boot
+  transients.
+- Chains (ww-s2/wwload): down since the s10 home move, not restarted
+  (no mission item; old-home artifacts preserved untouched).
+
+### Next-session queue
+
+1. ltp-b instrument: grep 'when=slot' — a capture names the producer
+   directly; cross-read the harvest/abort/heal state around the
+   timestamp. Zero prints over several rounds = the slot-rewrite
+   window is NOT the producer; next candidate is a per-CPU count
+   mirror divergence (extend leakorigin to shadow HARDIRQ acquires).
+2. PREEMPT-UNDERFLOW volumes on ltp-a (clean kernel) vs ltp-b
+   (instrument) — rate comparison; the memstorm rwlock face and
+   dirstorm parked face continue as wide capture.
+3. fsfuzz perf arm: first full-day accumulation (PERF census, chaos
+   classes); perf ABI divergences await the perf lane's call
+   (flag-bit encoding + blocking read).
+4. Monkeys: monkey-b past 500MB growth panic-free closes the formal
+   criterion; heap-growth curve continues.
+5. modchurn/dirstorm soft-lockup + PARKED-LEAK recurrence watch at
+   load1 < 10 (kernel-lead test).
