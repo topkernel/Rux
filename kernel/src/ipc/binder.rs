@@ -7138,7 +7138,6 @@ fn binder_thread_read(
         stage_cmd!(BR_NOOP);
     }
 
-    let mut got_transaction = false;
     loop {
         // ---- wait for work (binder_wait_for_work) ------------------------
         let has_work = {
@@ -7322,7 +7321,6 @@ fn binder_thread_read(
                             stage_u64!(cookie);
                         }
                         Work::Transaction(t) => {
-                            got_transaction = true;
                             let is_reply = t.target_node.is_none();
                             if is_reply {
                                 thread.hist(EV_REPLY_RECV, t.id as u32, 0);
@@ -7510,9 +7508,18 @@ fn binder_thread_read(
                         }
                     }
                 }
-                // Linux done: BR_SPAWN_LOOPER when no transaction was read
-                // and more threads are allowed and none are ready.
-                if !got_transaction {
+                // Linux done: BR_SPAWN_LOOPER fires at the binder_thread_read
+                // exit (v6.1 `done:` site) BOTH when the read delivered a
+                // transaction AND when it returns without one — gated on
+                // requested_threads==0 && waiting_threads empty && pool
+                // below max_threads. leg-31A: our emission ran only on the
+                // idle path, so a busy pool stayed static under nested-call
+                // load — every reader re-parks as a client right after
+                // delivery, idle reads never happen, and the proc never
+                // grows its pool (leg-32B's foundation reader exhaustion:
+                // all OS_IPC readers parked as clients, proc todo grows, no
+                // thread-pool growth; systemui load wedged behind it).
+                {
                     let pim = pm(world, proc).im();
                     // waiting_for_proc_work now implies the full
                     // availability predicate (todo/txn_stack empty +
