@@ -6591,3 +6591,98 @@ built and running (bzImage-31B-stkname) — commit after sc325B reads
 out. bzImages tagged in run/ (vmaorigin, vmaorigin2, vmaorigin3, final,
 stkname). ld-musl extract for the memcpy decode in
 run/forensics-leg31B/. Serials sc320B-325B untracked per .gitignore.
+
+LEG-31B CLOSE-OUT (11:15) — MITIGATION APPLIED AND VERIFIED; PROVENANCE.
+
+VERIFICATION DRAWS (patched oh-img-p, kernel bzImage-31B-stkname):
+  sc326B: FULL 45-min draw, 463k serial lines, render_service faults=0,
+          deaths=0 (every pre-patch faulting draw crashed RS by ~60-100k
+          lines); code-46 ENQ->READ->FREE clean; launcher process alive
+          and grinding (Launcher_Default x364); wall = launcher-load
+          family, LC=302. launcher.ready not reached.
+  sc327B: second patched draw, 55k lines when stopped at the wave
+          boundary (coordinator arbitration: 25-min quiet window for
+          OH-A's perf gate), RS faults=0 through the early window where
+          sc324B (59.6k) and sc325B (42.3k) both crashed.
+  => guardread patch holds: 0 RS faults on 2/2 patched draws vs 1 RS
+  crash on each of the 3 pre-patch faulting draws (sc321B/324B/325B).
+
+PROVENANCE (for the divergence register + eventual image-maintainer
+  report; all file offsets in the image's own bytes):
+  - Caller library: libdfx_signalhandler.z.so (71,264 bytes), loaded
+    from /system/lib64/platformsdk/, seen mapped at
+    /mnt/sandbox/system/system/lib64/platformsdk/... (sc325B stkva).
+    Segments: R file 0x0-0x5f74; R+X file 0x5f74 vaddr 0x6f74 len
+    0x9e6c; RW file 0xfde0 vaddr 0x11de0; RW file 0x105b0 vaddr 0x135b0.
+  - memcpy wrapper (the crashing call): VMA 0xc839 / file 0xb839:
+      53                    push %rbx-family (push rax)
+      48 89 d6              mov %rdx,%rsi
+      48 89 ca              mov %rcx,%rdx
+      e8 5b 45 00 00        call memcpy@plt        <- fault returns to 0xc845
+      31 c0                 xor %eax,%eax
+      59                    pop %rcx
+      c3                    ret
+  - Call site: VMA 0x93a4 / file 0x83a4:
+      b9 a8 03 00 00        mov $0x3a8,%ecx        ; 936 bytes
+      4c 89 fa              mov %r15,%rdx          ; src = frame address
+      e8 4f 34 00 00        call 0xc800            <- returns 0x93b1
+      41 b4 01              mov $0x1,%r12b
+      41 83 fd 2a           cmp $0x2a,%r13d        ; signal 42 (dfx dump request)
+      ... cmp $0x6,%r13d                            ; SIGABRT path nearby
+    The 936-byte copy saves the interrupted context inside the dfx
+    signal handler (watchdog signal-42 stack sampling); when the
+    sampled thread sits at its entry sp (top - 0x478, directly below
+    musl's struct pthread at the stack top), src+936 crosses the stack
+    top into the image's own 2-page mprotect(PROT_NONE) guard.
+  - Guard creator (ld-musl-x86_64.so.1, inode 2447 in oh-img-p
+    system.img; function near `log_print`): VMA 0x118a94:
+      be 00 90 00 00        mov $0x9000,%esi        ; 36KB = 2pg guard + 7pg stack
+      31 ff                 xor %edi,%edi
+      ba 03 00 00 00        mov $0x3,%edx           ; PROT_READ|PROT_WRITE
+      b9 22 00 00 00        mov $0x22,%ecx          ; MAP_PRIVATE|MAP_ANON
+      41 b8 ff ff ff ff     mov $0xffffffff,%r8d
+      45 31 c9              xor %r9d,%r9d
+      e8 ...                call mmap
+      8b 35 e2 33 02 00     mov 0x233e2(%rip),%esi  ; guard size global = 0x2000
+      4c 89 f7              mov %r14,%rdi
+      31 d2                 xor %edx,%edx           ; PROT_NONE   <- PATCHED
+      e8 ...                call mprotect
+  - Mitigation (run/patch-ldmusl-guardread.sh, idempotent, reversible):
+      ld-musl file 0x117ac9 (VMA 0x118ac9): 31 d2 -> b2 01
+      ("xor %edx,%edx" -> "mov $0x1,%dl"; edx provably holds 3 there —
+      the mmap prot argument, preserved across musl's mmap wrapper via
+      its r13d save/restore — so the result is exactly edx=1).
+      Effect: small-stack guards become PROT_READ instead of PROT_NONE.
+      Stack-overflow WRITES still fault (the guard's protective
+      purpose is intact); the dfx context READ across the stack top
+      now returns bytes (the next mapping up is the sibling stack's
+      PROT_READ guard or RW pages) instead of killing the process.
+  - Kernel side: adjudicated clean and CLOSED. Guard VMA origin=
+    mprotect (image's own syscall), stack origin=mmap, no +FORK on any
+    piece; SA_ONSTACK/sigaltstack parity confirmed implemented
+    (signal.rs deliver path) — the image chose to run its handler on
+    the interrupted thread's stack. No kernel fix required; kernel
+    change this leg is instrumentation only (da74c5c0 + c526e568).
+
+HANDOFF for the next leg (in value order):
+  1. launcher-load wall: appspawn closes its listen fd mid-child-load
+     (sc322B: "appspawn_service.c:422 OnListenFdClose listen fd: 12",
+     "OnClose socket fd 20", "DeleteAppSpawnMgr 337 1146") so the
+     settingsdata DataExtAbility load handshake never completes ->
+     LIFECYCLE_TIMEOUT x255-302, launcher process runs but its ability
+     never reaches foreground, launcher.ready never sets. WHY appspawn
+     drops the connection is the next question (image-side most
+     likely; no kernel TXN-HANG on the pair).
+  2. WAKE-RUN-LEAK wedge family (sc320B render_service wedged-not-
+     crashed, sc323B late tids 917/958/968 kicked 19-21x over 1100s+):
+     waiters repeatedly woken that never run. Kernel wake-path
+     suspect; leakorigin/wwcensus instruments exist, not armed this
+     leg. Distinct from the (now patched) dfx guard-read crash.
+  3. pid-1150-class null-deref (cr2=-0x20) in a memfd-loaded lib with
+     IPC/skeleton strings — secondary family, appeared on survivor
+     draws late; did not kill the boot.
+Lane state: branch tip c526e568 (da74c5c0 origin+vmap, c526e568 stkva
+v2, 81c23bc9 notes + patch script). oh-img-p now carries alignguard +
+180first + logdom(v1) + userctl-logdom(v2) + guardread. bzImages tagged
+in run/. Serials sc320B-327B untracked per .gitignore. Quiet window
+for OH-A's perf gate opened 11:15 as arbitrated.
