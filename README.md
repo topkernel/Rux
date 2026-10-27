@@ -25,20 +25,26 @@ riscv64 and x86_64.**
 
 | | |
 |---|---|
-| ![Ubuntu GNOME login](docs/images/ubuntu-gnome-login-2026-10-15.png) | ![Ubuntu GNOME desktop](docs/images/ubuntu-gnome-desktop-2026-10-15.png) |
-| *Ubuntu GNOME login screen on Rux (riscv64) — verify.py 23/23 PASS* | *Ubuntu GNOME desktop on Rux (riscv64) — the full udesk session with dock, panel, and apps* |
+| ![Ubuntu GNOME login](docs/images/ubuntu-gnome-login-2026-10-15.png) | ![Interactive GNOME Shell desktop with a typed xterm conversation](docs/images/ubuntu-gnome-xterm-conversation-2026-10-28.png) |
+| *Ubuntu GNOME login screen on Rux (riscv64) — verify.py 23/23 PASS* | *Interactive GNOME Shell desktop on Rux (riscv64) — run gnome-r21type, t=2700 s. Top: the live desktop — panel with Activities + clock, the focused xterm holding a typed shell conversation. Bottom (3x zoom of the xterm text area): an echoed `a`, bash's answer, a fresh prompt — twice — ending in a block cursor. Every claim is deterministic pixel evidence (frame diffing, a per-window XGetImage walk, a line-band decoder — no vision model in the chain): the desktop frame class reproduces across 9 boots, the typed conversation across 2 boots with identical line geometry and cursor cell, and injected keyboard/pointer events are delivered to the live session 1:1 in every run. An attribution A/B (older kernel, same image, calm host: the screen stayed dark) pins the unblock to the kernel merge-set. Sessions hold 2700 s with zero panics.* |
 
 What runs, end to end:
 
 - **Ubuntu 22.04 rootfs** with glibc, `ld.so`, and dynamic ELF loading
 - **GNOME Shell desktop frames, reproducible across boots** — panel, clock,
   notification banners, and readable window content, verified by deterministic
-  pixel math on riscv64 (the [Roadmap](docs/progress/roadmap.md) tracks the
-  interactivity milestone)
+  pixel analysis on riscv64 (9 boots); injected pointer input moves the
+  on-screen cursor to the exact commanded coordinates, and injected
+  keyboard/pointer events are delivered to the live session 1:1 (the
+  [Roadmap](docs/progress/roadmap.md) tracks the interactivity milestone)
 - **Xorg completes full initialization** and serves X clients through
   `/tmp/.X11-unix/X0`; X client windows render to the screen
-- **Interactive xterm** (pty + real bash/dash inside), keyboard and pointer
-  input reaching X clients via virtio-input → evdev with IRQ-driven delivery
+- **Interactive xterm** (pty + real bash/dash inside); injected pointer and
+  keyboard events are delivered to the live session 1:1 via virtio-input →
+  evdev with IRQ-driven delivery, and typing works as a conversation: the
+  key echoes, the shell answers, a fresh prompt appears with a block
+  cursor — verified by per-window XGetImage pixel analysis and reproduced
+  across 2 boots
 - **D-Bus (system + session), POSIX signals with full nesting semantics,
   SysV IPC, 4-CPU SMP** with cross-core TLB shootdowns
 - **Linux ABI by design**: `uname` and `/proc/version` intentionally report
@@ -130,7 +136,7 @@ GLM-5.3).**
 | **Linux LTP** | **1,005 / 1,869** (r15; trend 35 → 524 → 801 → 945 → 1,005) | [Roadmap](docs/progress/roadmap.md) |
 | **Platform Support** | RISC-V 64-bit + x86_64 (q35), 4-CPU SMP | [Roadmap](docs/progress/roadmap.md) |
 | **Syscall Numbers** | 345+ dispatched | [Roadmap](docs/progress/roadmap.md) |
-| **Ubuntu Userland** | GNOME Shell desktop frames reproducible on riscv64; Xorg + xterm + D-Bus | [Screenshots](#️-rux-runs-ubuntu) |
+| **Ubuntu Userland** | GNOME Shell desktop frames reproducible across 9 boots on riscv64, pointer-interactive at exact coordinates, typed keys hold a shell conversation in the focused terminal (2 boots); Xorg + xterm + D-Bus | [Screenshots](#️-rux-runs-ubuntu) |
 | **Memory** | Swap active: 2,064 MiB anonymous working set paged through 256 MB swap, verified | [Roadmap](docs/progress/roadmap.md) |
 | **Boot Performance** | MTTCG default (`thread=multi`): boot-to-login ~4.5s | [Roadmap](docs/progress/roadmap.md) |
 

@@ -55,6 +55,7 @@ macro_rules! dfx_switch_table {
             ScribbleSweep => "scribblesweep",
             InputTrace => "inputtrace",
             EpollTrace => "epolltrace",
+            EpollScan => "epollscan",
             ClaimInject => "claiminject",
             Strace1 => "strace1",
             SchedTrace => "schedtrace",
@@ -133,6 +134,10 @@ pub enum DfxSwitch {
     /// pid/comm plus each ready fd's number and event bits — hunts
     /// permanently ready fds that spin epoll_pwait/ppoll callers.
     EpollTrace,
+    /// epoll SCAN trace (leg-9): one raw-console line per epoll_wait
+    /// interest scan (pid, entries seen, ready collected) — splits
+    /// "the scan never ran" from "the scan ran and found nothing".
+    EpollScan,
     /// Adjudication injector (GNOME-wedge hunt): every 50 jiffies the
     /// timer softirq leaks a claim of CPU 7 (nonexistent on any board we
     /// boot) onto every LINKED CFS task that shows {on_cpu=false,
@@ -378,7 +383,7 @@ pub enum DfxSwitch {
     VmaProbe,
 }
 
-const SWITCH_COUNT: usize = 41;
+const SWITCH_COUNT: usize = 42;
 
 static SWITCHES: [AtomicBool; SWITCH_COUNT] = [const { AtomicBool::new(false) }; SWITCH_COUNT];
 
@@ -454,8 +459,13 @@ impl DfxSwitch {
             DfxSwitch::SfdDbg => 36,
             DfxSwitch::Ams46 => 37,
             DfxSwitch::VmaProbe => 38,
+            // Index renumbering note (merge of 584c1105): main claimed
+            // 39/40 for poolcensus/slowtask; EpollScan (perf-audit lane)
+            // moves 39 -> 41. Cmdline lookup is by name, so the shift is
+            // invisible to users; indices only key the SWITCHES array.
             DfxSwitch::PoolCensus => 39,
             DfxSwitch::SlowTask => 40,
+            DfxSwitch::EpollScan => 41,
         }
     }
 
