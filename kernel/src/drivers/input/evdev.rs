@@ -286,8 +286,11 @@ fn sleep_ms_interruptible(ms: u64) -> bool {
     // SAFETY: current is the running task (we are it); pid() is a const read.
     let pid = unsafe { (*current).pid() };
 
-    // One-shot timer is the only waker (no IRQ path is registered for the
-    // input queues), so registration failure means we must NOT sleep.
+    // The input tasklet BH (IRQ-driven delivery) takes the INPUT_* locks
+    // with IRQs disabled, so every task-context taker must too — a plain
+    // holder interrupted by the device IRQ would deadlock against the BH
+    // at irq_exit on this CPU. Registration failure means we must NOT
+    // sleep.
     let timer_id = crate::timer::add_timer_wakeup(target, pid);
     if timer_id == 0 {
         return false;
@@ -334,9 +337,9 @@ fn sleep_ms_interruptible(ms: u64) -> bool {
 ///
 /// Linux semantics: a blocking fd sleeps until at least one event is
 /// available (returning exactly one input_event per read); O_NONBLOCK
-/// returns -EAGAIN when the queue is empty. Events are drained from the
-/// virtio queues before every check because the input path has no IRQ —
-/// the reader itself is the poller.
+/// returns -EAGAIN when the queue is empty. The IRQ-driven tasklet BH
+/// pushes events and wakes the poll_waitq; the drain here is the backstop
+/// for events that raced the BH (the reader-side re-check is free).
 fn evdev_file_read(file: &File, buf: &mut [u8]) -> isize {
     // SAFETY: private_data contains a valid DevNo pointer set during device
     // open; the EVDEV_* statics are initialized by init_evdev() before any
@@ -412,9 +415,9 @@ fn evdev_file_close(file: &File) -> i32 {
 
 /// evdev poll function
 ///
-/// Report readable whenever the queue holds an event (drain the virtio
-/// queues first so a keystroke that has not raised an IRQ yet still wakes
-/// the poller).
+/// Report readable whenever the queue holds an event. The virtqueues are
+/// drained first so events that raced the tasklet BH still count (and so
+/// a poll-only client — no blocking read — keeps receiving).
 fn evdev_file_poll(file: &File, events: u16) -> u16 {
     use crate::syscall::misc::poll_events::*;
 
@@ -1100,11 +1103,15 @@ fn cad_detect(event: InputEvent) {
 }
 
 /// Poll VirtIO input devices
+///
+/// irqsave on both device locks: the input tasklet BH drains the same
+/// queues from softirq context, and a task-context holder interrupted by
+/// the device IRQ must not deadlock against it.
 fn poll_virtio_events() {
     use crate::drivers::input::{INPUT_KEYBOARD, INPUT_POINTER};
 
     // Poll keyboard
-    if let Some(ref mut kb) = *INPUT_KEYBOARD.lock() {
+    if let Some(ref mut kb) = *INPUT_KEYBOARD.lock_irqsave() {
         while kb.has_event() {
             if let Some(event) = kb.read_event() {
                 push_input_event(false, event);
@@ -1113,7 +1120,7 @@ fn poll_virtio_events() {
     }
 
     // Poll pointer device
-    if let Some(ref mut ptr) = *INPUT_POINTER.lock() {
+    if let Some(ref mut ptr) = *INPUT_POINTER.lock_irqsave() {
         while ptr.has_event() {
             if let Some(event) = ptr.read_event() {
                 push_input_event(true, event);
