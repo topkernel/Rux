@@ -1,4 +1,0 @@
-qemu-system-x86_64: terminating on signal 15 from pid 1173226 (timeout)
-patstamp: 21644 lines stamped
-pa-boot: qemu exited rc=124 after 780s (raw: /home/william/rux-agents/perf-audit/run/pa-pa56branch-serial.log, stamped: /home/william/rux-agents/perf-audit/run/pa-pa56branch-stamped.log)
-BOOT_RC=0

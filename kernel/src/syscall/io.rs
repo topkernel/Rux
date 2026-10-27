@@ -574,10 +574,14 @@ pub fn sys_write(args: SyscallArgs) -> i64 {
                 // in a write(9) loop; entry frame shows only the raw
                 // fd). Stash BEFORE the pipe fast path so a hang in a
                 // pipe/socket writev labels the pipe, not the previous
-                // regular-file write's path.
-                crate::dfx::pathstash::stash_file(
+                // regular-file write's path. Lazy form (leg 44): the
+                // old `&file.path()` built the String on EVERY write(2)
+                // even with the switch off — File::path() walks the
+                // dentry and formats, a per-call probe cost on the
+                // write hot path.
+                crate::dfx::pathstash::stash_file_lazy(
                     crate::dfx::pathstash::OP_WRITE,
-                    &file.path(),
+                    || file.path(),
                 );
                 // Pipe fast path: transfer directly user↔ring (see the
                 // matching branch in sys_read).
@@ -2018,28 +2022,48 @@ pub fn sys_pipe2(args: SyscallArgs) -> i64 {
     // Get current process fdtable
     let fdtable = match crate::sched::get_current_fdtable() {
         Some(ft) => ft,
-        None => return -errno::EMFILE as i64,
+        None => {
+            // The pipe ends were never installed: run their close op or
+            // the raw Arc<Pipe> refs (and the 64 KiB ring) leak.
+            crate::fs::pipe::abort_pipe_creation(&mut read_file, &mut write_file);
+            return -errno::EMFILE as i64;
+        }
     };
 
-    // Allocate file descriptors
+    // Allocate file descriptors. A failure here must abort the creation
+    // through abort_pipe_creation — a bare return drops the Arc<File>s
+    // without the pipe close op and leaks a 128 KiB buddy block per call
+    // (the s11 fsfuzz heap-exhaustion repro; see abort_uninstalled_end).
     let read_fd = match fdtable.alloc_fd() {
         Some(fd) => fd,
-        None => return -errno::EMFILE as i64,
+        None => {
+            crate::fs::pipe::abort_pipe_creation(&mut read_file, &mut write_file);
+            return -errno::EMFILE as i64;
+        }
     };
 
     let write_fd = match fdtable.alloc_fd() {
         Some(fd) => fd,
-        None => return -errno::EMFILE as i64,
+        None => {
+            crate::fs::pipe::abort_pipe_creation(&mut read_file, &mut write_file);
+            return -errno::EMFILE as i64;
+        }
     };
 
     // Install files to fdtable
     if fdtable.install_fd(read_fd, read_file.clone()).is_err() {
+        // Neither end made it into the table.
+        crate::fs::pipe::abort_pipe_creation(&mut read_file, &mut write_file);
         return -errno::EMFILE as i64;
     }
     if fdtable.install_fd(write_fd, write_file.clone()).is_err() {
-        // Close read_fd on write_fd install failure
+        // Close read_fd on write_fd install failure. read_fd IS installed:
+        // unwind it through the real close path (close_fd runs the op on
+        // the last ref); the write end never made it in, so abort it
+        // directly — dropping it without the op would leak the Pipe.
         drop(read_file);
         fdtable.close_fd(read_fd as usize);
+        crate::fs::pipe::abort_uninstalled_end(&mut write_file);
         return -errno::EMFILE as i64;
     }
 
