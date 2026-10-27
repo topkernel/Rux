@@ -252,11 +252,19 @@ pub fn check_picked(task: *mut crate::process::Task, cpu: usize) {
     // it while live (the race shape — impossible for CFS picks once the
     // skip is active, so a live count there names RT/DL overrides or the
     // wresv=0 A/B side); expire = the hinted CPU had already passed.
+    //
+    // The +1 attribution: pick_pass_seq bumps at the TOP of pick_next_task,
+    // BEFORE the class scans that lead here — so the hinted CPU's own
+    // in-flight pass reads stamped_seq + 1. Under the GRQ (held across
+    // the whole pass) that shape can only be this very pass, so it is
+    // "live, honored", not expired.
     let hint = slot.hint.swap(0, Ordering::AcqRel);
     if hint != 0 {
         let hint_cpu = ((hint & 0xff) - 1) as usize;
         if hint_cpu < MAX_CPUS {
-            let live = crate::sched::sched::pick_pass_seq(hint_cpu) == (hint >> 8);
+            let seq_now = crate::sched::sched::pick_pass_seq(hint_cpu);
+            let live = seq_now == (hint >> 8)
+                || (hint_cpu == cpu && seq_now == (hint >> 8) + 1);
             if !live {
                 HINT_EXPIRE_N.fetch_add(1, Ordering::Relaxed);
             } else if hint_cpu == cpu {
