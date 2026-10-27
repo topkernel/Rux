@@ -1057,3 +1057,38 @@ dirstorm r17+ (ENTRY_MUTEX surface), dirtyscan r2+ (the wwh
 dirty-page-recycler hunt on the new true-LRU/demotion reclaim code),
 fsfuzz r1+ (broad syscall+fs fuzz). Staggered launches per the
 resource discipline; ramp gated on a 10 min hold + floor check.
+
+### Session 10 continued — fsfuzz chase: one kernel bug fixed, one probe defect exposed
+
+- fsfuzz rounds on main froze at 231 lines deterministically. gdb +
+  dfx=periodic taskdump on a repro: pid 1 INTERRUPTIBLE-parked in
+  epoll_pwait(0, 0x1000, ...) with the machine otherwise healthy (both
+  CPUs idle, kthreads parked, RWFRZ alive).
+- printf-per-call trace variant decoded the deterministic seed-7 stream:
+  close(0) -> epoll_create1 reuses fd 0 (valid EMPTY epoll) -> close(1)
+  blinds the probe's own stdout -> epoll_pwait on fd 0 with an
+  unbounded timeout draw (Linux blocks identically). Every historical
+  "clean" 7.5k-line fsfuzz round in the old home was wwcensus
+  heartbeats over this parked machine — the member has contributed ~5 s
+  of fuzzing per round since the v4 era. NOT a kernel defect.
+- Probe hardening: all marker prints through a saved fd dup'd ABOVE the
+  fuzz fd pool (F_DUPFD 900; a fd-3 dup variant wedged the same way),
+  epoll_pwait timeout draws clamped to <=200 ms, private rootfs image.
+- THE REAL CATCH hiding behind the park: once the stream could run
+  past it, seq_madvise(0x7ffffffff000, huge) PANICKED the kernel —
+  'attempt to add with overflow' at syscall/memory.rs:2813
+  (`addr + length_aligned`, unchecked; the 66bd3736 page-round fix
+  checked the length only). Fixed with checked_add -> EINVAL (msync
+  twin ec87f42b; mlock/munlock/mremask verified already guarded).
+  eex4 trace boot = the panic capture; eex5 on the fix = full stream,
+  0 panics. Commit ec68f275. Tier-1/2 gate owed before main merge.
+- ltp-a r1 CRITICAL adjudicated: known classes (10-12 s soft-lockup
+  residual CPU#1, PREEMPT-UNDERFLOW count-migration family, LTP OOM
+  output strings). memstorm r1 clean (87 beats, heap flat). dirtyscan
+  r3 clean. modchurn r1 clean (dh=0 through 36 loads/84 donors).
+- Main merged: 0cd29a75 (scoped-publication draining + DFX batch
+  edf22c33); dual-arch rebuilt (a46464fb/654ca5df), 150 s LTP smoke
+  397 TPASS 0 panics; members pick the new kernel on round rollover.
+- OPEN: the fixed fsfuzz member still reaches a deep park (~255 lines,
+  ~1 beat in, past all prior points); member-argv repro with gdbstub
+  (fsfuzz-repro3) running for a last_syscall read on the frozen guest.
