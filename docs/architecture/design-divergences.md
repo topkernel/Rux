@@ -175,6 +175,74 @@ them).
 
 ---
 
+## D-7: Typed per-CPU storage (§3 CpuLocal — the irq discipline moves from review to type)
+
+**Design.** A per-CPU bank `CpuLocal<T, N>` holds one cache-line-
+aligned row per cpu and is reachable ONLY through `with(f)`, which
+disables interrupts, reads the cpu id, and hands `f` a `CpuLocalRef`
+guard; the guard is `!Send` (cannot migrate to another cpu), cannot
+outlive the closure, and its `Drop` restores the saved IRQ state — so
+the interrupt-disabled window a per-CPU access depends on is exactly
+the guard's lifetime, a type-level fact. The mainstream approach this
+replaces is a `static mut` array indexed by a raw cpu id with a
+review-enforced "callers must have IF=0" comment; the paid incident
+family is the small_alloc magazine divergences — r8final (t=515 s,
+two-CPU row entry via a cpu_id()/ti_cpu divergence, kernel panic at
+the row) and the 2026-10-26 transient two-CPU entry fixed on main
+(7a6e1bf4) — both were that convention failing silently. Two
+tripwires survive as DATA, not review notes: an out-of-range cpu id
+takes the `None` arm (callers fall back to their locked bodies — the
+r8final survive-and-taint stance), and a same-slot re-entry is refused
+(counted + tainted; the outer window stays flag-correct).
+
+**Advantage.**
+- The aliasing-by-construction hazard (two raw `&mut` into one row)
+  is gone; the re-entry tripwire turns a would-be r8final into a
+  counted, tainted refusal.
+- Rows are cache-line padded — the old flat `[T; MAX_CPUS]` let
+  adjacent CPUs' magazine rows share lines on every fast-path op.
+- Every `save_and_disable_irq`/`restore_irq` pair at a converted site
+  is the guard's acquire/drop — no manual flag juggling to audit.
+
+**Compatibility evidence.** First conversion: the small_alloc
+magazine bank (the incident site itself) — alloc fast path, locked
+refill, free fast path incl. the full-row snapshot/flush/post-push
+sequence; all r8final len/MAG_DEPTH guards kept verbatim (they defend
+against row CORRUPTION, which the type cannot prevent). Unit suite
+green with the new `percpu-shape` group (round-trip, window = irq-off
+window, nested different slots, re-entry refused+counted+tainted,
+zero-bank None arm, guard cpu identity).
+
+**Known cost.** `T: Copy` for the const row initializer (per-row
+constructors later); the in_use check is one plain load+branch on a
+line the cpu already owns (measured by the perf gate when a converted
+site is hot — small_alloc rides the Tier-1 domain rows). The GRQ
+typed lock key, the other §3 item, is the follow-on slice.
+
+**Guard.** `percpu-shape` unit-test group; the small_alloc REST-share
+domain row and Tier-1 census rows of the perf gate cover the
+converted allocator hot paths; and — binding since the incident
+below — a release-strong pbench boot before any re-land/extension of
+this type (debug-only verification cannot see the codegen family).
+
+**Incident and fix (2026-10-26/27, run/pa68-d7-rootcause.txt).** The
+first landing placed the bank in a non-mut `static` whose type had no
+interior mutability (`[Row<T>; N]` + `unsafe impl Sync` — the Sync
+impl does NOT confer mutability), so rustc emitted the LLVM global as
+`constant` (.rodata). The kernel image maps P|RW, which hid it from
+hardware: debug builds emitted the stores and booted; under opt>=1
+LLVM deleted every store into the bank and hoisted the loads — the
+magazine refill loop never terminated and every release-profile boot
+died at the first c64 miss (ALLOCTHROW t=3 s, 15.9 M objects carved
+across 2 lock holds, 99% of the heap). Reverted as 95b0015f; re-landed
+with `rows: UnsafeCell<[Row<T>; N]>` — interior mutability is the
+piece that makes the mutation legitimate to the compiler instead of
+invisible to it. Post-fix artifacts verified: MAGAZINES in .bss,
+refill-loop stores present in the opt>=1 disassembly, release-strong
+boot clean.
+
+---
+
 <!-- Pending entries (register when they land on main):
      - packed kernel-stack slab (order-6 blocks carved into 80KB slots,
        vs plain buddy order-power allocation) — on the launcher lane branch,
