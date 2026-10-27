@@ -7614,15 +7614,17 @@ fn binder_thread_read(
                     }
                 }
                 // Linux done: BR_SPAWN_LOOPER fires at the binder_thread_read
-                // exit (v6.1 `done:` site) BOTH when the read delivered a
-                // transaction AND when it returns without one — gated on
-                // requested_threads==0 && waiting_threads empty && pool
-                // below max_threads. leg-31A: our emission ran only on the
-                // idle path, so a busy pool stayed static under nested-call
-                // load — every reader re-parks as a client right after
-                // delivery, idle reads never happen, and the proc never
-                // grows its pool (leg-32B's foundation reader exhaustion:
-                // all OS_IPC readers parked as clients, proc todo grows, no
+                // exit (the `done:` label, verbatim-identical in 5.10 /
+                // 5.15 / 6.1) BOTH when the read delivered a transaction
+                // AND when it returns without one — gated on
+                // requested_threads==0 && waiting_threads empty &&
+                // started < max_threads && returning thread is a looper.
+                // leg-31A: our emission ran only on the idle path, so a
+                // busy pool stayed static under nested-call load — every
+                // reader re-parks as a client right after delivery, idle
+                // reads never happen, and the proc never grows its pool
+                // (leg-32B's foundation reader exhaustion: all OS_IPC
+                // readers parked as clients, proc todo grows, no
                 // thread-pool growth; systemui load wedged behind it).
                 {
                     let pim = pm(world, proc).im();
@@ -7641,18 +7643,50 @@ fn binder_thread_read(
                     // child thread ever blocks in a binder read and
                     // AMS->child deliveries have no reader).
                     let is_child = thread.tgid != 0 && thread.tgid != proc.pid as u32;
+                    let looper_worker = |t: &Arc<BinderThread>| {
+                        (t.st().looper & (LOOPER_ENTERED | LOOPER_REGISTERED)) != 0
+                    };
                     let emit_spawn = if is_child && pim.max_threads > 0 {
                         let child_ready = pim
                             .threads
                             .iter()
                             .any(|t| t.tgid == thread.tgid && t.st().waiting_for_proc_work);
-                        let child_n = pim.threads.iter().filter(|t| t.tgid == thread.tgid).count();
+                        // leg-35A reconciliation with OH-B 635c4502: count
+                        // only looper WORKERS toward the child pool — a
+                        // child's client-only threads must not eat the
+                        // child's max_threads budget, same principle as
+                        // the started-count cap below.
+                        let child_n = pim
+                            .threads
+                            .iter()
+                            .filter(|t| t.tgid == thread.tgid && looper_worker(t))
+                            .count();
                         !child_ready && child_n < pim.max_threads as usize
                     } else {
+                        // leg-35A reconciliation with OH-B 635c4502 (the
+                        // canonical form, verified verbatim against the
+                        // Linux `done:` label): the pool cap is
+                        // requested_threads_started — the spawned-and-
+                        // REGISTERED loopers — NEVER threads.len():
+                        // client-only BinderThread entries (FFRT workers,
+                        // spawned children acting as clients) own thread
+                        // entries without consuming max_threads in Linux,
+                        // and our threads.len() cap permanently blocked
+                        // spawn for polluted procs (sc333A2 census: pid
+                        // 1533 th=25 started=5 max=16, pid 803 th=18
+                        // started=8 max=16 — 25>=16 means the old
+                        // predicate could never fire again while Linux
+                        // still offers 11 more spawns). Linux never
+                        // decrements started on thread exit; Rux matches
+                        // (BC_REGISTER_LOOPER is the only increment
+                        // site). The returning thread must itself be a
+                        // looper (REGISTERED | ENTERED) — a client
+                        // thread's reply-return does not request spawns.
                         pim.requested_threads == 0
                             && !ready
                             && pim.max_threads > 0
-                            && pim.threads.len() < pim.max_threads as usize
+                            && pim.requested_threads_started < pim.max_threads
+                            && (thread.st().looper & (LOOPER_ENTERED | LOOPER_REGISTERED)) != 0
                     };
                     if emit_spawn && staged.len() + 4 <= read_size {
                         if !is_child {
