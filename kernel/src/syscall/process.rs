@@ -2724,13 +2724,21 @@ pub fn sys_prctl(args: SyscallArgs) -> i64 {
             }
         }
         29 => {
-            // PR_SET_TIMERSLACK: nanoseconds; 0 resets to the 50 us default
-            // (Linux kernel/sys.c stores the value unbounded and only uses
-            // it to round hrtimer sleep deadlines up to a slack boundary).
-            let slack_ns = if arg2 == 0 { 50_000 } else { arg2 };
+            // PR_SET_TIMERSLACK: nanoseconds; 0 resets to the process's
+            // DEFAULT slack (Linux kernel/sys.c PR_SET_TIMERSLACK). The
+            // default is set at fork to the parent's CURRENT value
+            // (kernel/fork.c copy_process), so a forked child that resets
+            // lands on the inherited value, not the boot 50 us — LTP
+            // prctl08 "Child process" case.
             // SAFETY: current is a valid task pointer; signal field is an Option.
             unsafe {
                 if let Some(ref sig) = (*current).signal {
+                    let slack_ns = if arg2 == 0 {
+                        sig.timer_slack_default_ns
+                            .load(core::sync::atomic::Ordering::Relaxed)
+                    } else {
+                        arg2
+                    };
                     sig.timer_slack_ns.store(slack_ns, core::sync::atomic::Ordering::Relaxed);
                 }
             }
