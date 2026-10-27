@@ -152,6 +152,24 @@ fn sys_read_inner(args: SyscallArgs) -> i64 {
                     }
                     return n;
                 }
+                // AF_UNIX fast path (leg 46, ledger 8.10.15): read(2) on a
+                // unix socket drains the receive queue directly into the
+                // user buffer with an on-stack bounce — no per-call heap
+                // staging. Inside a serialized sender/receiver cycle (the
+                // same-CPU regime), the generic path's staged alloc +
+                // double copy were the kernel-owned share of the 40-44 us
+                // cross-process class; the dispatch itself was proven free
+                // (p5d control row), so only the staging goes.
+                if crate::net::unix::is_unix_file(&file) {
+                    // SAFETY: buf was access_ok-validated against count at
+                    // sys_read entry (same contract as the pipe path).
+                    let n =
+                        unsafe { crate::net::unix::unix_read_user(&file, buf, count) } as i64;
+                    if n > 0 {
+                        crate::dfx::syscost::note_read_data(&file, n as usize, fd);
+                    }
+                    return n;
+                }
                 // ext4 fast path: page cache → user memory without the
                 // staging buffer (O_DIRECT keeps the generic staged path —
                 // it serves straight from the block layer).
