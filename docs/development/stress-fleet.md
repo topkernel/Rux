@@ -1609,6 +1609,10 @@ RUNNING at pc=0x10000, heal/underflow 64/64). Code-level analysis:
 - Sweeper live. Host floor: free 3-10G / avail 33-42G under the s3
   page-cache reading all session; load peaked ~20 during member boot
   transients.
+- Housekeeping: the 6bb7f396 merge had accidentally committed
+  fleet-x86-bzImage (16MB); untracked (kept in working tree, 29be66a7)
+  — the coordinator may want to squash that out of the merge at
+  main-merge time.
 - Chains (ww-s2/wwload): down since the s10 home move, not restarted
   (no mission item; old-home artifacts preserved untouched).
 
