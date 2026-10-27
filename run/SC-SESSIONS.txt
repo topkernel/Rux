@@ -6467,3 +6467,127 @@ LEG-30B CLOSE-OUT (07:55) — FINAL WAVE TALLIES (5 draws, 45 min each).
   launcher.ready NOT reached — the terminal milestone's next blocker
   is the render_service crash (see ADDENDUM), then the launcher-load
   family. Serials sc315B-319B untracked per .gitignore.
+
+LEG-31B (OH-B third leg; VMA-origin adjudication; 08:00-11:00) — opened on
+branch tip 6ec578f7. Kernel commit da74c5c0 (origin stamp + dfx=vmap +
+stkva dump; gates green), follow-up x86-only dump extension in-tree.
+
+MISSION ITEM 1 — VMA ORIGIN STAMP: BUILT AND DELIVERED THE VERDICT.
+  Vma now carries a 1-byte origin stamp (mm/vma.rs: VmaOrigin — exec,
+  exec-stack, mmap, mprotect, brk, mremap, shm, binder, other + FORKED
+  modifier). Splits propagate; mprotect's covered piece carries
+  'mprotect' while head/tail keep the original; fork's snapshot tuple
+  carries the parent stamp and marks FORKED in the child; munmap/
+  MAP_FIXED-preserved pieces inherit. The fault-only USEGV-FOR vma()
+  lines, the nearvma walk, and the riscv64 segv line print origin=.
+  New dfx=vmap (idx 37, default OFF, 600-line budget) traces the
+  PROT_NONE-establishing syscalls: MPROTECT-DN (prot==0 sub-1MB) and
+  PROTNONE-MAP-S. No new always-on prints anywhere.
+
+THE VERDICT (sc321B, pid 802 render_service, fault at serial 46646):
+  USEGV-FOR: pid=802 rip=0x3fbf08ad30 cr2=0x7ff000694000 rsp=0x7ff000693b88 rbp=0x16
+  vma(cr2) = 0x7ff000694000-0x7ff000696000 flags=0x10 origin=mprotect  <- the 2-page PROT_NONE guard
+  vma(rsp) = 0x7ff00068d000-0x7ff000694000 flags=0x13 origin=mmap      <- the 7-page RW thread stack
+  nearvma  0x7ff00068b000-0x7ff00068d000 flags=0x10 origin=mprotect   <- the guard below (next stack's)
+  => IMAGE-SIDE. The guard VMA was created by an mprotect(prot=0) the
+  image itself issued; the stack pieces are the image's own RW mmaps.
+  All neighborhood pieces share one original arena base (continuous
+  VMA offsets 0x44000/0x46000/0x4d000/0x4f000 from base 0x7ff000647000):
+  one big RW mmap, guards carved out by 2-page mprotect(PROT_NONE)
+  calls. NO +FORK on any piece — fork/exec/brk paths clean. The leg-30B
+  "fork two-phase VMA race" fork of the question is CLOSED.
+  Corroboration: MPROTECT-DN (tight filter) shows the SAME 2-page
+  PROT_NONE guard construction in EVERY process (pids 1, 306, 307,
+  337, 363-366... — 62 lines by mid-boot on sc323B) — an image-runtime
+  pattern, not a render_service quirk. The FFRT 8MB stacks use the
+  OTHER pattern (mmap PROT_NONE + mprotect RW 0x801000 — stack
+  origin=mprotect, seen on the sc322B pid-1150 dump); our stamp
+  distinguishes the two constructions exactly.
+
+FAULT MECHANISM (refined decode; leg-30B's "librender_service .text"
+  attribution corrected): rip 0x3fbf08ad30 = ld-musl memcpy+0x1c (file
+  offset 0x89d30 = VMA 0x8ad30; interp_base 0x3FBF000000 — the
+  FileBacked fd=-1 off=0x76000 VMA is the INTERPRETER's R+X segment,
+  verified against the extracted ramdisk/system ld-musl). The fault is
+  a READ: memcpy(dst=heap, src=stack_top, 936) with rsi=cr2 — 936
+  bytes read starting exactly at the faulting thread's stack VMA end
+  (rsp sits 0x478 below that top). The caller's frame holds another
+  pointer at guard+0x150. rbp=0xb/0x16 are small GPR values (optimized
+  code), not necessarily corrupt frames. Same signature every draw
+  (rsp-to-cr2 delta exactly 0x478; caller return-address delta 0x34a).
+  sc324B CAUGHT THE CALLER: stkva[1]/[3] name an 11-page r-x FileBacked
+  VMA (origin=mmap) present in every process, return sites at VMA+0x6845
+  and VMA+0x33b1 (file off 0xb845/0x83b1). No on-disk lib in
+  /system/lib64 matches the shape (scan of 1073 .so files: zero hits)
+  => the caller is a MEMFD-LOADED library (OH's memory-loaded module
+  mechanism; the separate pid-1150 null-deref family faults in a memfd
+  lib too — "ripfile anon_inode voff 0x64257" with IPC/skeleton
+  strings on its stack). stkva now also prints the pinned vm_file path
+  + qwords at the return site (bzImage-31B-stkname); sc325B is running
+  to name it. MITIGATION (next step, recipe fixed): once named, patch
+  the memfd source or the loader entry in the private oh-img-p the
+  alignguard way (guard at the call site: skip the copy when src is
+  inside a PROT_NONE piece / equal to a stack top) — document in run/,
+  keep reversible. NOT done blind this leg: 3 of 4 draws did not fault
+  (see tallies), so the bug is probabilistic; a blind patch without
+  the caller named risks breaking the 3-in-4 good boots.
+
+DRAW TALLIES (KVM SMP2 4G, oh-img-p + fresh scgold, dfx=txnhunt,ams46[,vmap]):
+  draw   ENQ READ FREE rsfault shape
+  sc320B   -   -    -    0    render_service WEDGED not crashed: OS_IPC threads futex-parked
+                        20min+ (TXN-HANG exec 1216s, WAKE-RUN-LEAK tid1191 kicked 3x);
+                        no activation completed this draw (killed at 40min to recycle)
+  sc321B   1   1    0    1(SEGV) RS crashed mid-StartUser (the sc316B kill shape) — VERDICT draw
+  sc322B   1   1    1    0    SURVIVOR-ADVANCE: code-46 clean end-to-end, launcher process
+                        pid 1141 SPAWNED AND RUNNING (Launcher_Default x416 lines,
+                        AbilityScheduler IPC object registered, sandbox built), wall =
+                        launcher-load family (LC x255) + late new fault family (pid
+                        1150/1157 OS_IPC threads null-deref cr2=-0x20 in a memfd lib)
+  sc323B   1   1    1    0    survivor-advance again (LC x177 by 15min), late
+                        WAKE-RUN-LEAK wedge (tids 917/958/968 kicked 19-21x)
+  sc324B   -   -    -    1(SEGV)+ RS crashed at 5min WITH stkva (caller named, see above);
+                        same fault also in pid 518 OS_IPC (after a -0x20 null-deref)
+  sc325B  running (bzImage-31B-stkname: stkva path+code dump)
+  RS-fault lottery today: 2/5 draws. Kernel code-46 delivery clean on
+  every activating draw (3/3 ENQ->READ->FREE).
+
+MISSION ITEM 2 (downstream chain on survivor draws): the chain now
+  reliably reaches the LAUNCHER PROCESS (com.ohos.launcher spawned,
+  its LauncherAbilityManager/CommonBundleManager run, AbilityScheduler
+  registers). launcher.ready NOT set; no UI frame (screen state not
+  sampled this leg — the draws park in the load wall). Gate 2
+  (foreground map) untested behind the load wall.
+
+MISSION ITEM 3 (launcher-load family NAMED, sc322B decode): the
+  LIFECYCLE_TIMEOUT x255 chain = AMS waits for settingsdata's
+  DataExtAbility "load" completion; the child (pid 1146, appclone of
+  appspawn) spawns fine, then APPSPAWN closes its listen fd mid-load
+  ("appspawn_service.c:422 OnListenFdClose listen fd: 12", "OnClose
+  socket fd 20", "DeleteAppSpawnMgr 337 1146") — the ability-load
+  handshake never completes and every retry times out. The close
+  itself (why appspawn drops the connection) is the next sub-question;
+  no kernel-side hang on the pair (no TXN-HANG on 1146).
+
+NEW FAMILY (both legs' late draws): WAKE-RUN-LEAK wedges — waiters
+  kicked 19-21x over 1100-1270s that never run (binder-stall probe),
+  rendering render_service frozen-but-alive (sc320B) — same terminal
+  effect as the crash but WITHOUT the SEGV. Distinct from the
+  guard-read bug; kernel wake-path suspect (leakorigin/wwcensus
+  instruments exist, not armed this leg).
+
+GATES for da74c5c0 + the in-tree x86 dump extension (final tree):
+  - dual-arch builds rc=0 (x86_64, riscv64, re-verified after every
+    edit batch).
+  - riscv64 minimal-rootfs scripted boot: panics=0, shell prompt,
+    /proc mounted (run/rv-smoke-leg31.sh, r2 and r3 runs).
+  - make test: "All tests passed" on the origin-stamp tree AND on the
+    final tree (the vma-origin unit test included).
+  - Perf tiers not triggered: print/cold-path-only changes, dfx-gated
+    OFF by default (vmap armed only on voluntary hunt boots).
+
+Lane state: commit da74c5c0 on feature/samgr-callback (origin stamp +
+vmap + stkva v1); the stkva v2 (backing path + return-site qwords) is
+built and running (bzImage-31B-stkname) — commit after sc325B reads
+out. bzImages tagged in run/ (vmaorigin, vmaorigin2, vmaorigin3, final,
+stkname). ld-musl extract for the memcpy decode in
+run/forensics-leg31B/. Serials sc320B-325B untracked per .gitignore.
