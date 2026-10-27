@@ -591,3 +591,76 @@ were storm-inflated):
 - /tmp/rux-oldk = kernel 65f35f47 built (r10win-era) for the
   attribution A/B: old kernel + r13 image + calm host -> windows paint
   or not. Decides calm-host vs merge-set as the unblocking variable.
+
+## Session 10 (2026-10-27 evening, leg-10 — succession after the 13:50
+## quota death + 17:0x provider-outage resume; worktree was CLEAN at
+## 348e2a92)
+
+### Quota-window harvest (all on disk, nothing rerun)
+- REPRODUCTION HELD: r13repro M5 @691s (1800s, 0 panics) and r13live
+  M5 @1111s (1500s, 0 panics) — with r13walk2 M5 @480s that is THREE
+  full-form desktop boots on merged-kernel a3d6d6b4 + r13 image.
+- A/B ATTRIBUTION DECIDED: gnome-oldk-win (kernel 65f35f47 r10win-era +
+  r13 image + calm host, 2700s) — screen NEVER lit (nonblack 0.0001,
+  no M2/M4/M5). gnome-ab-oldk was NOT the real A/B (old image, 600s).
+  Verdict: the KERNEL MERGE-SET unblocked the desktop, not host calm.
+- r13ep2/ep3/ep4: input-diagnostic boots (init=/inputcat, image
+  gnome-r13ep2.img), stopped by their own drivers — all delivered
+  14/14 events by poll AND epoll (the "starved" read was the analysis
+  error 348e2a92 already retracts).
+
+### INPUT -> SCREEN: root cause found and FIXED (kernel-side)
+- r13live evidence: INPTRC=0 for the whole live session (1500s) while
+  the desktop rendered; INPPL fired exactly 8x, all during Xorg's
+  device-add; Xorg's InputThread EPSCAN'd exactly TWICE then slept
+  forever. Timeout-loop readers get events (each expiry re-dispatches
+  evdev_file_poll, which drains); an infinite-timeout waiter never
+  does. Xorg's input thread is exactly that waiter (epoll_wait, no
+  timeout, registered on the evdev poll_waitq by the P3 wait path).
+- Mechanism: the event flow was pull-only — events move off the
+  virtqueues ONLY inside evdev read/poll dispatches; push_event (the
+  poll_waitq's only waker) runs at drain time; nobody drains because
+  the only poller is asleep. Deadlock by design, exposed when P3
+  (95796982, 2026-10-13) made epoll_wait sleep on producer wakes.
+- FIX (99f0ef49, merged to main as 6ae8c8fb by the coordinator):
+  IRQ-driven delivery — riscv64 gpex shared-INTx handler (ISR read =
+  device-side EOI) + x86_64 shared INTx dispatch, deferring to an
+  input tasklet BH that drains both queues with a collect-under-lock /
+  deliver-outside split (INV-LOCK-6, block_bh_handler shape); INPUT_*
+  guards in the evdev read/poll drain are now lock_irqsave; IRQ
+  registration moved to the end of init_virtio_input. Gates: dual-arch
+  rc=0, rv smoke 0 panics, suite 1112/1112 (controlled boot; the
+  duplicate official make-test run was killed after the same binary
+  passed — see maketest-fix2 notes re the image-lock collision).
+
+### r14live (fixed kernel, r13 image, dfx=watchdog,inputtrace):
+### POINTER-INTERACTIVE, first ever
+- M4 @1141s, M5 @1502s (4th M5 boot), 0 panics, 1800s.
+- mousemove @1250: INPTRC ptr ABS 16384/16384 + 26214/21299 IN SESSION
+  (first live-session deliveries ever), and the cursor sprite MOVED:
+  deterministic pixel analysis puts it at (1024,522) in shot-1260s —
+  the exact commanded target (26214/32767*1280=1024.0,
+  21299/32767*800=520.1). Idle-spot cluster (1157,729) gone.
+- keyprobe 'a' @1350/@1650: kbd events kernel-delivered (INPTRC), no
+  glyph — expected: GNOME is click-to-focus and nothing clicked; also
+  the session idle-blanked to wallpaper ~1620 (gsd-power idle
+  behavior, ~120s after last input; a real-keypress unblank did not
+  happen — noted, not root-caused).
+- fire.py --clickprobe added (abs-move + left press/release in ONE
+  input-send-event; QEMU applies the list in order) for the
+  click-then-type claim.
+
+### README swap (b6dce524) — gates held, done at the proven level
+- Desktop cell now ubuntu-gnome-shell-frame-2026-10-27.png (r13walk2
+  shot-0570s) with the deterministic-evidence caption; GNOME bullet
+  refreshed (shell composites on riscv64, pointer-interactive, zero
+  panics in 2700s runs). Old udesk asset kept in-tree (c0dc511e
+  precedent: swap the cell, keep the file).
+
+### In flight at note-time
+- r15type (2100s): click-then-type — mousemove 1430/1810, clickprobe
+  1470/1840 (abs 480,380 inside the xterm body), keyprobe
+  1540/1610/1700/1900. Decides the "type in the terminal" claim.
+- r15stab (2700s, dfx=watchdog,taskdump): panic/OOM read on the fixed
+  kernel + mid-session input exercise (mousemove 900/1800, keyprobe
+  1200/2100).
