@@ -2397,16 +2397,60 @@ fn user_segv_forensics(regs: &PtRegs, fault_addr: u64) {
                         // Only code-looking mappings (r-x / rwx).
                         let f = v.flags();
                         if f.is_executable() {
+                            // Name the backing: fd or the pinned vm_file
+                            // (memfd-loaded libraries are FileBacked with
+                            // an anon_inode path — the pin is the only
+                            // name they have).
+                            let mut backing =
+                                alloc::string::String::new();
+                            if let Some(fl) = aspace.get_vma_file(
+                                v.start().as_usize(),
+                            ) {
+                                use core::fmt::Write;
+                                let _ = write!(
+                                    backing,
+                                    " path={}",
+                                    fl.path()
+                                );
+                            } else if v.file_fd() >= 0 {
+                                use core::fmt::Write;
+                                let _ = write!(
+                                    backing,
+                                    " fd={}",
+                                    v.file_fd()
+                                );
+                            }
                             crate::pr_err!(
-                                "USEGV-FOR: stkva[{}] {:#x} = {:#x}-{:#x} r-x off={:#x} origin={}{}",
+                                "USEGV-FOR: stkva[{}] {:#x} = {:#x}-{:#x} r-x off={:#x}{} origin={}{}",
                                 i,
                                 val,
                                 v.start().as_usize(),
                                 v.end().as_usize(),
                                 v.offset(),
+                                backing,
                                 v.origin().creator_name(),
                                 if v.origin().is_forked() { "+FORK" } else { "" }
                             );
+                            // sc324 follow-up: code bytes at the return
+                            // site (16 before, 8 after) read through the
+                            // page-table walk — fingerprints the caller
+                            // even for memfd-backed libraries with no
+                            // on-disk copy to compare against.
+                            let mut cb = alloc::string::String::new();
+                            use core::fmt::Write;
+                            let _ = write!(cb, "USEGV-FOR: stkcode[{}]", i);
+                            let lo = (val - 16) & !7;
+                            for k in 0..3u64 {
+                                match fore_read_u64(root, lo + k * 8) {
+                                    Some(w) => {
+                                        let _ = write!(cb, " {:#x}", w);
+                                    }
+                                    None => {
+                                        let _ = write!(cb, " :?");
+                                    }
+                                }
+                            }
+                            crate::pr_err!("{}", cb);
                         }
                     }
                 }
