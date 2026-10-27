@@ -3500,7 +3500,9 @@ pub fn freeze_scan(now: u64, hz: u64) {
     // sc83: scanner liveness heartbeat — one line per minute. sc82 lost
     // khungtaskd silently ~2 min after adoption (stall_report's 500 ms
     // irq-off WORLD window); without this line that death is invisible.
-    {
+    // Serial-cleanliness: the heartbeat joins the wwcensus family so
+    // ordinary boots print nothing periodic.
+    if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::WwCensus) {
         static BEAT: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
         let last = BEAT.load(core::sync::atomic::Ordering::Relaxed);
         if now.saturating_sub(last) >= 60 * hz {

@@ -2727,7 +2727,10 @@ pub fn signalfd_notify_task(task: *mut crate::process::task::Task) {
     let registry = SIGNALFD_WAKE_REGISTRY.lock_irqsave();
     // SFDDBG (launcher bring-up): did the wake reach a pid-1-owned fd?
     // Zero bindings means the fd was never registered (or was closed).
-    if unsafe { (*task).pid() == 1 } {
+    // Serial-cleanliness: opt-in via dfx=sfddbg.
+    if unsafe { (*task).pid() == 1 }
+        && crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SfdDbg)
+    {
         static NT_N: core::sync::atomic::AtomicUsize =
             core::sync::atomic::AtomicUsize::new(0);
         if NT_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 100 {

@@ -304,7 +304,10 @@ tier2_check() {
         --timeout 1200 > "$ROOT/run/perf-gate-$pbtag.log" 2>&1
     local rc=$?
     local res
-    res=$(ls -t "$ROOT/work"/pbench-results* 2>/dev/null | head -1)
+    # pbench_boot.py writes the PBENCH rows into the boot's serial log
+    # (work/pbench-<tag>-serial.log); there is no separate results file,
+    # so globbing pbench-results* always missed them (false FAIL).
+    res="$ROOT/work/pbench-${pbtag}-serial.log"
     if [ $rc -ne 0 ] || [ -z "$res" ]; then
         verdict FAIL "pbench run" "rc=$rc" "PBENCH DONE rc=0 required"
         return

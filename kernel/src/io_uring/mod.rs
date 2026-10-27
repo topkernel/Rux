@@ -569,11 +569,14 @@ pub fn io_uring_mmap_handler(
     vma_flags.insert(VmaFlags::WRITE);
     vma_flags.insert(VmaFlags::SHARED);
 
-    let vma = Vma::new(
+    let mut vma = Vma::new(
         PageVirtAddr::new(vaddr),
         PageVirtAddr::new(vaddr + region.size),
         vma_flags,
     );
+    vma.set_origin(crate::mm::vma::VmaOrigin::from_bits(
+        crate::mm::vma::VmaOrigin::OTHER,
+    ));
     if addr_space.vma_write().add(vma).is_err() {
         return Err(-12);
     }
