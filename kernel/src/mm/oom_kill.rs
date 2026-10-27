@@ -274,6 +274,34 @@ fn oom_kill_process(oc: &mut OomControl) {
             victim_pid, name_str, oc.chosen_points
         );
 
+        // The oom:mark_victim tracepoint — the reference records it when
+        // the kill decision is final (mm/oom_kill.c's trace_mark_victim).
+        // Field honesty: Rux's mm keeps ONE resident-page counter; it
+        // lands in anon_rss. file/shmem/pgtables have no per-mm
+        // counterpart and report 0. Marshals only behind armed().
+        if crate::trace::EVENT_MARK_VICTIM.armed() {
+            let words = crate::trace::comm_to_words(&*victim_name);
+            let (total_vm, anon_rss) = (*victim)
+                .address_space_arc()
+                .map(|mm| (mm.total_vm(), mm.rss()))
+                .unwrap_or((0, 0));
+            crate::trace::record(
+                &crate::trace::EVENT_MARK_VICTIM,
+                [
+                    victim_pid as u64,
+                    words[0],
+                    words[1],
+                    total_vm,
+                    anon_rss,
+                    0,
+                    0,
+                    (*victim).cred().uid as u64,
+                    0,
+                    (*victim).oom_score_adj() as i16 as u64,
+                ],
+            );
+        }
+
         // Step 1: Send SIGKILL to victim
         let _ = crate::signal::send_signal(
             victim_pid,

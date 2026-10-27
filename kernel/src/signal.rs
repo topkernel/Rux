@@ -2114,7 +2114,7 @@ pub fn send_signal_from_user_tkill(tid: u32, sig: i32) -> Result<(), i32> {
             );
         }
     }
-    send_signal_with_info(tid, SigInfo::new(sig, si_code::SI_TKILL, sender_pid, sender_uid))
+    send_signal_with_info_directed(tid, SigInfo::new(sig, si_code::SI_TKILL, sender_pid, sender_uid))
 }
 
 /// Force-unblock a SYNCHRONOUS signal in the current task (Linux
@@ -2142,6 +2142,18 @@ pub fn force_unblock_current(sig: i32) {
 }
 
 pub fn send_signal(pid: u32, sig: i32) -> Result<(), i32> {    // Check if signal number is valid
+    send_signal_g(pid, sig, 1)
+}
+
+/// The DIRECTED twin of send_signal (the reference's PIDTYPE_PID):
+/// synchronous fault forces (the trap paths' SIGSEGV/SIGILL/SIGFPE/
+/// SIGBUS to the faulting task itself) — the signal_generate `grp`
+/// word is 0.
+pub fn send_signal_directed(pid: u32, sig: i32) -> Result<(), i32> {
+    send_signal_g(pid, sig, 0)
+}
+
+fn send_signal_g(pid: u32, sig: i32, group: i32) -> Result<(), i32> {
     if sig < 1 || sig > 64 {
         return Err(crate::errno::Errno::InvalidArgument.as_neg_i32());
     }
@@ -2161,7 +2173,7 @@ pub fn send_signal(pid: u32, sig: i32) -> Result<(), i32> {    // Check if signa
             return Err(crate::errno::Errno::NoSuchProcess.as_neg_i32());
         }
 
-        let result = send_signal_locked(task_ptr, pid, sig);
+        let result = send_signal_locked(task_ptr, pid, sig, group);
 
         // Release the pin taken by the lookup above.
         crate::process::task::Task::task_put(task_ptr);
@@ -2173,14 +2185,24 @@ pub fn send_signal(pid: u32, sig: i32) -> Result<(), i32> {    // Check if signa
 ///
 /// SAFETY: `task_ptr` is pinned (task_refcnt held by the caller); it cannot
 /// be freed for the duration of this call.
-unsafe fn send_signal_locked(task_ptr: *mut crate::process::task::Task, _pid: u32, sig: i32) -> Result<(), i32> {
-    send_signal_locked_info(task_ptr, sig, None)
+unsafe fn send_signal_locked(
+    task_ptr: *mut crate::process::task::Task,
+    _pid: u32,
+    sig: i32,
+    group: i32,
+) -> Result<(), i32> {
+    send_signal_locked_info(task_ptr, sig, None, group)
 }
 
 /// Signal-sending core with optional siginfo (rt_sigqueueinfo family and
 /// kernel-generated signals like SIGCHLD that carry a payload).
 /// `si: Option<SigInfo>` — queued (RT: appended, standard: coalesced) so
 /// SA_SIGINFO handlers and sigtimedwait readers see the real fields.
+///
+/// `group` is the reference's `type != PIDTYPE_PID` word for the
+/// signal:signal_generate tracepoint: 1 = directed at the thread group
+/// (kill/SIGCHLD/sigqueue family), 0 = directed at this one thread
+/// (tkill/tgsigqueueinfo/force_sig fault paths/SIGPIPE).
 ///
 /// The mask check uses the TARGET TASK's per-thread sigmask (Linux
 /// wants_signal): the shared SignalStruct's mask field is not per-thread,
@@ -2191,10 +2213,49 @@ unsafe fn send_signal_locked_info(
     task_ptr: *mut crate::process::task::Task,
     sig: i32,
     si: Option<SigInfo>,
+    group: i32,
 ) -> Result<(), i32> {
     use crate::signal::Signal;
 
     let task = &*task_ptr;
+
+    // The signal:signal_generate tracepoint — the reference fires it
+    // once per __send_signal at the outcome (its `ret:` label) with the
+    // result code: 0 delivered, 1 ignored, 2 already pending (standard
+    // signals coalesce in the bitmap), 4 overflow-fail. Emission is a
+    // closure over the outcome so every return path records with the
+    // same field set; armed() gates the whole thing to two relaxed
+    // loads when off. `already_std` (the reference's legacy_queue) is
+    // read BEFORE the first queue mutation and reused by every later
+    // outcome.
+    let si_errno = si.as_ref().map(|i| i.si_errno).unwrap_or(0);
+    let si_code = si.as_ref().map(|i| i.si_code).unwrap_or(0);
+    let emit = |result: i32| {
+        if crate::trace::EVENT_SIGNAL_GENERATE.armed() {
+            let words = crate::trace::comm_to_words(&*task.comm());
+            crate::trace::record(
+                &crate::trace::EVENT_SIGNAL_GENERATE,
+                [
+                    sig as u64,
+                    si_errno as u64,
+                    si_code as u64,
+                    words[0],
+                    words[1],
+                    task.pid() as u64,
+                    group as u64,
+                    result as u64,
+                    0,
+                    0,
+                ],
+            );
+        }
+    };
+    // legacy_queue(): a STANDARD signal already pending coalesces — the
+    // second send does not queue a new instance (result 2 below). RT
+    // signals always queue, so they stay "delivered".
+    let already_std = sig >= 1
+        && sig < SIGRTMIN
+        && (task.pending.get_all() >> (sig - 1)) & 1 == 1;
 
     // Namespace view of the sender: the receiver must read si_pid as the
     // sender's pid INSIDE ITS OWN pid namespace (0 when the sender has no
@@ -2342,6 +2403,7 @@ unsafe fn send_signal_locked_info(
         signal_wake_up(task_ptr);
         // P1 signalfd hook: wake signalfd readers of this task.
         crate::syscall::misc::signalfd_notify_task(task_ptr);
+        emit(if already_std { 2 } else { 0 });
         return Ok(());
     }
 
@@ -2353,6 +2415,7 @@ unsafe fn send_signal_locked_info(
             signal_wake_up(task_ptr);
             // P1 signalfd hook: wake signalfd readers of this task.
             crate::syscall::misc::signalfd_notify_task(task_ptr);
+            emit(if already_std { 2 } else { 0 });
             return Ok(());
         }
     };
@@ -2416,6 +2479,7 @@ unsafe fn send_signal_locked_info(
     if !sig_blocked {
         if let Some(action) = signal_ref.get_action(sig) {
             if action.action() == SigActionKind::Ignore && task.tracer_pid() == 0 {
+                emit(1);
                 return Ok(());
             }
         }
@@ -2434,6 +2498,7 @@ unsafe fn send_signal_locked_info(
         if info.si_signo >= SIGRTMIN && info.si_code < 0 {
             let limit = task.rlimits.lock()[crate::process::task::rlimit_res::SIGPENDING].0;
             if limit != u64::MAX && task.pending.rt_queued_count() as u64 >= limit {
+                emit(4);
                 return Err(crate::errno::Errno::TryAgain.as_neg_i32());
             }
         }
@@ -2462,6 +2527,7 @@ unsafe fn send_signal_locked_info(
             // no handler path will run, so this wake is the only thing
             // that unblocks a read(sfd) on this signal.
             crate::syscall::misc::signalfd_notify_task(task_ptr);
+            emit(if already_std { 2 } else { 0 });
             return Ok(());
         }
     }
@@ -2473,6 +2539,7 @@ unsafe fn send_signal_locked_info(
     // signals are typically blocked, so they stay pending and are only
     // observable through the fd — this wake is what unblocks read(sfd)).
     crate::syscall::misc::signalfd_notify_task(task_ptr);
+    emit(if already_std { 2 } else { 0 });
     Ok(())
 }
 
@@ -2521,7 +2588,22 @@ impl SigInfo {
 /// (SIGCHLD si_code/si_status from child exit is the canonical case:
 /// SA_SIGINFO handlers — toybox timeout, glib's child reaper, systemd —
 /// decode the child's outcome from these fields).
+///
+/// Thread-group-directed (the reference's PIDTYPE_TGID): kill(2)/SIGCHLD/
+/// sigqueue family — the signal_generate `grp` word is 1.
 pub fn send_signal_with_info(pid: u32, info: SigInfo) -> Result<(), i32> {
+    send_signal_with_info_g(pid, info, 1)
+}
+
+/// The DIRECTED twin of send_signal_with_info (the reference's
+/// PIDTYPE_PID): tkill/tgsigqueueinfo, synchronous fault forces
+/// (SIGSEGV/SIGBUS on the faulting thread), SIGPIPE from a pipe write —
+/// the signal_generate `grp` word is 0.
+pub fn send_signal_with_info_directed(pid: u32, info: SigInfo) -> Result<(), i32> {
+    send_signal_with_info_g(pid, info, 0)
+}
+
+fn send_signal_with_info_g(pid: u32, info: SigInfo, group: i32) -> Result<(), i32> {
     let sig = info.si_signo;
     if sig < 1 || sig > 64 {
         return Err(crate::errno::Errno::InvalidArgument.as_neg_i32());
@@ -2532,7 +2614,7 @@ pub fn send_signal_with_info(pid: u32, info: SigInfo) -> Result<(), i32> {
         if task_ptr.is_null() {
             return Err(crate::errno::Errno::NoSuchProcess.as_neg_i32());
         }
-        let result = send_signal_locked_info(task_ptr, sig, Some(info));
+        let result = send_signal_locked_info(task_ptr, sig, Some(info), group);
         crate::process::task::Task::task_put(task_ptr);
         result
     }

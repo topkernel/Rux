@@ -579,6 +579,141 @@ tracepoints! {
             args[0], args[1], args[2], args[3]
         )
     };
+
+    /// sched:sched_process_free — the LAST reference to a task dropped
+    /// and its slot is about to be freed (the reference's
+    /// delayed_put_task_struct → free_task, recorded at the final put).
+    /// Closes the fork→exit→free lifecycle: a task that exits but never
+    /// frees is the leak-hunt signature. Same template as
+    /// sched_process_exit (the reference's sched_process_template).
+    EVENT_SCHED_PROCESS_FREE / sched_process_free_fmt / trace_sched_process_free : "sched", "sched_process_free", 18,
+    print: "\"comm=%s pid=%d prio=%d\", __get_str(comm), REC->pid, REC->prio",
+    fields: "\tfield:__data_loc char[] comm;\toffset:8;\tsize:4;\tsigned:0;\n\
+             \tfield:pid_t pid;\toffset:12;\tsize:4;\tsigned:1;\n\
+             \tfield:int prio;\toffset:16;\tsize:4;\tsigned:1;\n",
+    call (comm: &[u8; COMM_LEN], pid: u32, prio: i32),
+    render |args: &[u64; TRACE_ARGS]| {
+        let comm = comm_from_words(args[0], args[1]);
+        let end = comm.iter().position(|&b| b == 0).unwrap_or(COMM_LEN);
+        format!(
+            "comm={} pid={} prio={}",
+            String::from_utf8_lossy(&comm[..end]),
+            args[2] as u32,
+            args[3] as i32,
+        )
+    };
+
+    /// sched:sched_process_wait — a task entered do_wait. The reference
+    /// records the WAITER's comm/prio with the REQUESTED pid (the
+    /// wait4/waitid pid argument, -1 for any child), at do_wait entry.
+    EVENT_SCHED_PROCESS_WAIT / sched_process_wait_fmt / trace_sched_process_wait : "sched", "sched_process_wait", 19,
+    print: "\"comm=%s pid=%d prio=%d\", __get_str(comm), REC->pid, REC->prio",
+    fields: "\tfield:__data_loc char[] comm;\toffset:8;\tsize:4;\tsigned:0;\n\
+             \tfield:pid_t pid;\toffset:12;\tsize:4;\tsigned:1;\n\
+             \tfield:int prio;\toffset:16;\tsize:4;\tsigned:1;\n",
+    call (comm: &[u8; COMM_LEN], pid: i32, prio: i32),
+    render |args: &[u64; TRACE_ARGS]| {
+        let comm = comm_from_words(args[0], args[1]);
+        let end = comm.iter().position(|&b| b == 0).unwrap_or(COMM_LEN);
+        format!(
+            "comm={} pid={} prio={}",
+            String::from_utf8_lossy(&comm[..end]),
+            args[2] as i32,
+            args[3] as i32,
+        )
+    };
+
+    /// binder:binder_wait_for_work — a binder reader thread is about to
+    /// park waiting for work. The reference's drivers/android/binder.c
+    /// binder_thread_read records it just before the blocking wait with
+    /// the three availability words (this host has no binder tracefs
+    /// group; the definition is binder_trace.h's, 5.15). The wedge
+    /// forensics pair: a wait_for_work with no matching work arrival
+    /// afterwards names the parked thread that never woke.
+    EVENT_BINDER_WAIT_FOR_WORK / binder_wait_for_work_fmt / trace_binder_wait_for_work : "binder", "binder_wait_for_work", 20,
+    print: "\"proc_work=%d transaction_stack=%d thread_todo=%d\", REC->proc_work, REC->transaction_stack, REC->thread_todo",
+    fields: "\tfield:bool proc_work;\toffset:8;\tsize:1;\tsigned:0;\n\
+             \tfield:bool transaction_stack;\toffset:9;\tsize:1;\tsigned:0;\n\
+             \tfield:bool thread_todo;\toffset:10;\tsize:1;\tsigned:0;\n",
+    call (proc_work: bool, transaction_stack: bool, thread_todo: bool),
+    render |args: &[u64; TRACE_ARGS]| {
+        format!(
+            "proc_work={} transaction_stack={} thread_todo={}",
+            args[0], args[1], args[2]
+        )
+    };
+
+    /// signal:signal_generate — a signal was sent to a task, with the
+    /// disposition outcome. The reference fires it once per __send_signal
+    /// with result: 0 delivered, 1 ignored, 2 already pending (standard
+    /// signals coalesce), 3 overflow-info, 4 overflow-fail (EAGAIN,
+    /// RLIMIT_SIGPENDING), 5 lose-info. group: 1 = thread-group-directed
+    /// (kill/SIGCHLD family), 0 = directed at the one thread
+    /// (tkill/force_sig/SIGPIPE/timer). The kill-storm forensics event:
+    /// every OOM SIGKILL and teardown kill lands here with both ends
+    /// named.
+    EVENT_SIGNAL_GENERATE / signal_generate_fmt / trace_signal_generate : "signal", "signal_generate", 21,
+    print: "\"sig=%d errno=%d code=%d comm=%s pid=%d grp=%d res=%d\", REC->sig, REC->errno, REC->code, REC->comm, REC->pid, REC->group, REC->result",
+    fields: "\tfield:int sig;\toffset:8;\tsize:4;\tsigned:1;\n\
+             \tfield:int errno;\toffset:12;\tsize:4;\tsigned:1;\n\
+             \tfield:int code;\toffset:16;\tsize:4;\tsigned:1;\n\
+             \tfield:char comm[16];\toffset:20;\tsize:16;\tsigned:0;\n\
+             \tfield:pid_t pid;\toffset:36;\tsize:4;\tsigned:1;\n\
+             \tfield:int group;\toffset:40;\tsize:4;\tsigned:1;\n\
+             \tfield:int result;\toffset:44;\tsize:4;\tsigned:1;\n",
+    call (sig: i32, errno: i32, code: i32, comm: &[u8; COMM_LEN], pid: u32, group: i32, result: i32),
+    render |args: &[u64; TRACE_ARGS]| {
+        let comm = comm_from_words(args[3], args[4]);
+        let end = comm.iter().position(|&b| b == 0).unwrap_or(COMM_LEN);
+        format!(
+            "sig={} errno={} code={} comm={} pid={} grp={} res={}",
+            args[0] as i32,
+            args[1] as i32,
+            args[2] as i32,
+            String::from_utf8_lossy(&comm[..end]),
+            args[5] as u32,
+            args[6] as i32,
+            args[7] as i32,
+        )
+    };
+
+    /// oom:mark_victim — the OOM killer committed to a victim. The
+    /// reference's mm/oom_kill.c records it when the kill decision is
+    /// final. Field honesty: Rux's mm keeps ONE resident-page counter
+    /// (fault-in inc / unmap dec, anon + file together); it lands in
+    /// anon_rss (the dominant class for victims). file_rss, shmem_rss
+    /// and pgtables have no per-mm counterpart and report 0 — the split
+    /// is not tracked per-mm yet. The print keeps the reference's
+    /// literal `file-rss:` colon quirk verbatim.
+    EVENT_MARK_VICTIM / mark_victim_fmt / trace_mark_victim : "oom", "mark_victim", 22,
+    print: "\"pid=%d comm=%s total-vm=%lukB anon-rss=%lukB file-rss:%lukB shmem-rss=%lukB uid=%u pgtables=%lukB oom_score_adj=%hd\", REC->pid, __get_str(comm), REC->total_vm, REC->anon_rss, REC->file_rss, REC->shmem_rss, REC->uid, REC->pgtables, REC->oom_score_adj",
+    fields: "\tfield:int pid;\toffset:8;\tsize:4;\tsigned:1;\n\
+             \tfield:__data_loc char[] comm;\toffset:12;\tsize:4;\tsigned:0;\n\
+             \tfield:unsigned long total_vm;\toffset:16;\tsize:8;\tsigned:0;\n\
+             \tfield:unsigned long anon_rss;\toffset:24;\tsize:8;\tsigned:0;\n\
+             \tfield:unsigned long file_rss;\toffset:32;\tsize:8;\tsigned:0;\n\
+             \tfield:unsigned long shmem_rss;\toffset:40;\tsize:8;\tsigned:0;\n\
+             \tfield:uid_t uid;\toffset:48;\tsize:4;\tsigned:0;\n\
+             \tfield:unsigned long pgtables;\toffset:56;\tsize:8;\tsigned:0;\n\
+             \tfield:short oom_score_adj;\toffset:64;\tsize:2;\tsigned:1;\n",
+    call (pid: u32, comm: &[u8; COMM_LEN], total_vm: u64, anon_rss: u64, file_rss: u64,
+          shmem_rss: u64, uid: u32, pgtables: u64, oom_score_adj: i16),
+    render |args: &[u64; TRACE_ARGS]| {
+        let comm = comm_from_words(args[1], args[2]);
+        let end = comm.iter().position(|&b| b == 0).unwrap_or(COMM_LEN);
+        format!(
+            "pid={} comm={} total-vm={}kB anon-rss={}kB file-rss:{}kB shmem-rss={}kB uid={} pgtables={}kB oom_score_adj={}",
+            args[0] as u32,
+            String::from_utf8_lossy(&comm[..end]),
+            args[3],
+            args[4],
+            args[5],
+            args[6],
+            args[7] as u32,
+            args[8],
+            args[9] as i16,
+        )
+    };
 }
 
 /// The trace_marker pseudo-event. NOT in EVENTS on purpose: a marker

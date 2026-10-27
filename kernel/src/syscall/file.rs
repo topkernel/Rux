@@ -3650,9 +3650,11 @@ pub fn sys_fsync(args: SyscallArgs) -> i64 {
                     // fsync/fdatasync later draws a TXN-HANG — sc310's
                     // hiview handler sat in fdatasync(fd) for 43 min
                     // and the entry frame showed only the raw fd.
-                    crate::dfx::pathstash::stash_file(
+                    // Lazy form (leg 44): skip the per-call File::path()
+                    // construction when the switch is off.
+                    crate::dfx::pathstash::stash_file_lazy(
                         crate::dfx::pathstash::OP_SYNC,
-                        &file.path(),
+                        || file.path(),
                     );
                     // ext4 files: flush data blocks + journal commit via the
                     // W2-exposed ext4_sync_file. Other filesystems (rootfs,

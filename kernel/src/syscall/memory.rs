@@ -2904,6 +2904,19 @@ pub fn sys_madvise(args: [u64; 6]) -> i64 {
         None => return mmap_error::EINVAL,
     };
 
+    // Range wrap = EINVAL, exactly like sys_msync (ec87f42b) and Linux's
+    // do_madvise. fsfuzz caught this on main 57e44a90: addr at the top of
+    // the user range + a huge aligned length wrapped the
+    // `addr + length_aligned` end computation below into a debug-build
+    // add-overflow PANIC (memory.rs:2813, eex4 trace boot 2026-10-27).
+    // The Oct-25 page-round fix checked the LENGTH rounding only — the
+    // subsequent addition stayed unchecked in madvise (msync got its
+    // guard in ec87f42b; this is the madvise twin).
+    let end_of_range = match addr.checked_add(length_aligned) {
+        Some(v) => v,
+        None => return mmap_error::EINVAL,
+    };
+
     // Get current process
     let current_task = match crate::sched::current() {
         Some(task) => task,
@@ -2919,7 +2932,7 @@ pub fn sys_madvise(args: [u64; 6]) -> i64 {
     {
         let vma_mgr = address_space.vma_read();
         let start = VirtAddr::new(addr);
-        let end = VirtAddr::new(addr + length_aligned);
+        let end = VirtAddr::new(end_of_range);
 
         // Check if starting address has VMA
         if vma_mgr.find(start).is_none() {
@@ -2937,7 +2950,7 @@ pub fn sys_madvise(args: [u64; 6]) -> i64 {
         {
             let mut check = addr;
             let mut rejected = false;
-            while check < addr + length_aligned {
+            while check < end_of_range {
                 match vma_mgr.find(VirtAddr::new(check)) {
                     Some(vma) => {
                         let locked = vma
@@ -2974,7 +2987,7 @@ pub fn sys_madvise(args: [u64; 6]) -> i64 {
         if advice == MADV_DONTNEED || advice == MADV_REMOVE {
             // Find VMA covering entire range
             let mut check_addr = addr;
-            while check_addr < addr + length_aligned {
+            while check_addr < end_of_range {
                 match vma_mgr.find(VirtAddr::new(check_addr)) {
                     Some(vma) => {
                         check_addr = vma.end().as_usize();

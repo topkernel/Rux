@@ -65,6 +65,10 @@ static TIMER_EVER_ARMED: core::sync::atomic::AtomicBool =
 pub fn timer_softirq_work_pending() -> bool {
     TIMER_EVER_ARMED.load(Ordering::Acquire)
         || HRES_NEXT.load(Ordering::Acquire) <= timer::read_time()
+        // perf events: an armed sampler needs this softirq every tick
+        // to charge the IRQ-stashed samples (perf::softirq_tick). One
+        // relaxed load when nothing is armed (the sc184 discipline).
+        || crate::perf::any_armed()
 }
 
 fn mark_timer_armed() {
@@ -834,6 +838,11 @@ pub fn timer_softirq_handler(_nr: usize) {
     // tick-mode accounting + kernel-rip histogram dump every 60 s from
     // this softirq. Own cmdline key — no dfx=switches.rs bit consumed.
     crate::dfx::syscost::tick(current);
+
+    // perf events (PERF_TYPE_SOFTWARE sampling): charge the tick stash
+    // captured by the hard IRQ into the armed events and emit sample
+    // records. Bails on one relaxed load when nothing is armed.
+    crate::perf::softirq_tick();
 
     // perf-audit line (cmdline `fsw=1`): ext4/bio cost-anatomy counters
     // (F4 diagnosis), same 60 s cadence.

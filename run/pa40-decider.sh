@@ -1,16 +1,16 @@
 #!/bin/bash
-# pa40-decider.sh — leg-31 gate-row deciding runs, load-gated.
-#   Row (b): pbench TCG quiet boot (test/pbench_boot.py) on the
-#            main-class kernel run/pa40-main-bzImage; p6_unlink med vs
-#            pb1 32815.925us +-20% (26252.7-39379.1) — flake-rule rerun.
-#   Row (a): quiet syscost 780s boot (pa-boot.sh pa40b) same kernel;
-#            volume vs pa38 136.4M +-10% + census/tick/per-op rows.
-#            (First read pa40: 76.6M under load ~19 with a constant -40%
-#            pace deficit at every checkpoint incl. pre-app phases —
-#            host-load-dominated, not a decider; per-op rows held.)
-# Gate before EACH boot: load1 <= GATE_LOAD (13) AND qemu count <=
-#   GATE_QEMU (10). Deadline 4h from arm -> exit 4/5 (no window; verdict
-#   then rests on per-op holds + series-spread re-attribution).
+# pa40-decider.sh — leg-31 census-cycle deciding boot, load-gated.
+# (Restarted 06:52 after the leg-32 session killed the 06:01 instance
+# believing its owner dead — see run/DUAL-SESSION-NOTE-2026-10-25.md.
+# Row (b) is CLOSED: in band (+1.8%, pa41-dbg; banked in 53503189).
+# Row (a) verdict = pace-coupled, per-op held (pa40 76.6M / pa41gate
+# 77.1M under load, census 8/32 exact on both); this boot re-banks the
+# volume row + runs the Tier-1 census gate on the NEW main class
+# de41d5ab — 6 kernel commits: dfx census-peek v3 + censusat=, KILLDUMP
+# task/mm pinning fixes x2, binder stale-async txn reclaim.)
+#   Boot: quiet syscost 780s (pa-boot.sh pa44) on run/pa44-main-bzImage.
+# Gate before the boot: load1 <= GATE_LOAD (13) AND qemu count <=
+#   GATE_QEMU (10). Deadline 4h from arm -> exit 4 (no window).
 # One QEMU at a time; results to run/pa40-decider.log.
 cd /home/william/rux-agents/perf-audit || exit 1
 LOG=run/pa40-decider.log
@@ -34,25 +34,15 @@ wait_gate() {
   return 1
 }
 
-echo "=== pa40-decider armed $(date '+%F %T') load-gate=${GATE_LOAD} qemu-gate=${GATE_QEMU} ===" >> "$LOG"
+echo "=== pa40-decider (pa44 census boot) armed $(date '+%F %T') load-gate=${GATE_LOAD} qemu-gate=${GATE_QEMU} ===" >> "$LOG"
 
 if wait_gate; then
-  echo "$(date '+%F %T') window open: row (b) pbench boot start" >> "$LOG"
-  python3 test/pbench_boot.py --bzimage run/pa40-main-bzImage \
-      --tag pa40t2 --timeout 1200 >> "$LOG" 2>&1
-  echo "$(date '+%F %T') row (b) pbench rc=$?" >> "$LOG"
+  echo "$(date '+%F %T') window open: census boot (pa44, main de41d5ab) start" >> "$LOG"
+  APPEND_EXTRA="syscost=1 sprobe=0" bash run/pa-boot.sh pa44 \
+      run/pa44-main-bzImage 780 >> "$LOG" 2>&1
+  echo "$(date '+%F %T') census boot rc=$?" >> "$LOG"
 else
-  echo "$(date '+%F %T') NO WINDOW within deadline (row b)" >> "$LOG"
+  echo "$(date '+%F %T') NO WINDOW within deadline (pa44 census boot)" >> "$LOG"
   exit 4
 fi
-
-if wait_gate; then
-  echo "$(date '+%F %T') window open: row (a) syscost rerun start" >> "$LOG"
-  APPEND_EXTRA="syscost=1 sprobe=0" bash run/pa-boot.sh pa40b \
-      run/pa40-main-bzImage 780 >> "$LOG" 2>&1
-  echo "$(date '+%F %T') row (a) syscost rc=$?" >> "$LOG"
-else
-  echo "$(date '+%F %T') NO WINDOW within deadline (row a rerun)" >> "$LOG"
-  exit 5
-fi
-echo "=== pa40-decider complete $(date '+%F %T') ===" >> "$LOG"
+echo "=== pa40-decider (pa44 census boot) complete $(date '+%F %T') ===" >> "$LOG"

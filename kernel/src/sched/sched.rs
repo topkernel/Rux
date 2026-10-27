@@ -1601,6 +1601,36 @@ pub fn free_task_slot(task_ptr: *mut Task) {
     if task_ptr.is_null() {
         return;
     }
+    // The sched:sched_process_free tracepoint — the reference records
+    // it at the final put (delayed_put_task_struct → trace →
+    // put_task_struct), i.e. right here at the last-reference free,
+    // before the page is poisoned/unlinked. Closes the
+    // fork→exit→free lifecycle: exit-without-free is the leak
+    // signature. Marshals only behind armed().
+    if crate::trace::EVENT_SCHED_PROCESS_FREE.armed() {
+        // SAFETY: task_ptr is non-null and still a valid Task — the
+        // caller's last task_put guarantees this call owns the final
+        // reference, so no concurrent reader can be freeing it too.
+        unsafe {
+            let words = crate::trace::comm_to_words(&*(*task_ptr).comm());
+            crate::trace::record(
+                &crate::trace::EVENT_SCHED_PROCESS_FREE,
+                [
+                    words[0],
+                    words[1],
+                    (*task_ptr).pid() as u64,
+                    (*task_ptr).prio() as u64,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                    0,
+                ],
+            );
+        }
+    }
+
         // FREED-WHILE-LINKED UNLINK (oh-display b61-b66 family): a Task
         // page returned to the heap while still linked on a class queue
         // gets recycled (new Tasks, BTreeMap nodes, kernel stacks), and
