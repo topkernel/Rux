@@ -197,3 +197,118 @@ mkdrmdir row (p6 median 55-58 ms strong class, min ~33 ms) is this
 row's measurement handle; the fsw jcommit_fast counter (today 0 on OH,
 should read ≈ rmdir count on pbench) is the mechanism probe.
 
+**Arm-1 measurement status (leg 45): BLOCKED by a kernel failure —
+no-journal root lookup.** The A/B instrument exists
+(pbench_boot.py --nojournal: mkfs the probe rootfs with
+^has_journal,^metadata_csum) but the boot dies at init selection:
+ext4 mounts ("ext4 mounted / [ok]") yet every init candidate reads
+"not found" (work/pbench-pa71nj1-serial.log). The image itself is
+clean: a fresh mkfs passes e2fsck -fn, debugfs lists /test/pbench
+(inode 13), and the only feature deltas vs the working journal image
+are has_journal and orphan_file. The OH userdata image has the same
+no-journal feature set and works on OH boots — but everything ever
+read from it was written by the kernel itself; reading MKFS-WRITTEN
+no-journal metadata appears never to have been exercised anywhere.
+This must be fixed (fs lane) before route-1's expected-effect anchor
+can be measured, and it is a compat hole in its own right
+(mkfs.ext4 -O ^has_journal + use is a real-world pattern). Repro:
+`python3 test/pbench_boot.py --bzimage <kernel> --tag nj
+--nojournal`. Feature-bisect (pa71ob1, journal + ^orphan_file via
+`--mkfs-features "^metadata_csum,^orphan_file"`): that image boots
+and runs the full probe — orphan_file absence is exonerated; the
+trigger is has_journal absence itself (mount succeeds, journal_ino==0
+skips init_journal, but no mkfs-written path resolves afterward).
+
+**Arm-2 semantics note (leg 44) — what must be true before a lazy
+revoke can be coded.** Current state, with the exact shapes:
+
+- Storage: revokes live in `journal.revoke_records: Spinlock<Vec<(u64
+  blocknr, Tid)>>` — JOURNAL-GLOBAL, not per-transaction
+  (jbd2/revoke.rs insert_revoke_hash; jbd2_journal_revoke stamps the
+  ISSUING transaction's tid but stores into the global table).
+- Commit forcing: `jbd2_journal_stop` (transaction.rs ~line 247) skips
+  the lazy-commit fast path when `!journal.revoke_records.is_empty()`
+  — so ANY pending revoke, from ANY operation, forces a synchronous
+  commit at the NEXT stop. That is the per-rmdir cost: unlink/rmdir
+  issue revokes (frees of the inode/bitmap/dir blocks), and their
+  stop commits descriptor + revoke blocks + write-through of every
+  registered buffer synchronously.
+- Commit drains the GLOBAL table: commit.rs calls take_revoke_records
+  (mem::take of the whole vec) and writes all of it as revoke blocks
+  of the COMMITTING transaction. A revoke issued by an operation
+  still running in a LATER transaction can therefore be logged early
+  (conservative: an early revoke only suppresses records at older log
+  positions — recovery replays in tid order and `block_is_revoked_for
+  (b, tid)` skips when revoke.tid >= descriptor tid).
+- Cancel is a NO-OP STUB: jbd2_journal_cancel_revoke has no code (the
+  "remove from hash table" body is empty), and the on-disk format has
+  no cancel entry (write_one_revoke_record/flush_descriptor are also
+  stubs). Nothing today un-revokes a block.
+
+The hazard a lazy revoke introduces — reallocation of a revoked block
+before its revoke reaches the log:
+
+1. Op A (rmdir) frees block B and records revoke(B, tid_A), deferred
+   (not yet logged). The free itself is order-protected by the
+   publication machinery (post-capture: B's free persists after the
+   entry removal) — that part is independent and stays.
+2. Op B reallocates B for new content and journals a descriptor for it
+   in transaction T2. Linux here CANCELS the pending revoke
+   (revoke_cancel): same-transaction reuse cancels in memory;
+   cross-transaction reuse (or an already-logged revoke) writes a
+   CANCEL record (the revoke entry's high bit, JBD2_FLAG_REVOKE_CANCEL
+   semantics) so recovery stops suppressing replays of B.
+   Without cancel: crash after T2 commits but before A's revoke is
+   logged leaves recovery replaying OLD records for B up to the revoke
+   point and NEW records after — with a stale revoke tid arithmetic
+   (`revoke.tid >= tid`) the OLD records for B that sit between the
+   free and the revoke... specifically, the records written by any
+   transaction with tid >= tid_A for OTHER purposes do not protect B,
+   and the pre-free records for B (tid < tid_A, correct to suppress)
+   stay suppressed — the DANGEROUS window is the reverse: A's revoke
+   landing AFTER T2's new-content descriptor, suppressing T2's replay
+   of B's new content (revoke.tid_A >= tid_T2 is false when tid_A <
+   tid_T2, so with strictly increasing tids this direction is safe);
+   the actual exposure is (i) B's new content never replayed while the
+   allocation metadata IS replayed → leaked/lost block, and (ii) with
+   the current GLOBAL drain, A's revoke may be written by an EARLIER
+   committing transaction than tid_A — legal (early revoke suppresses
+   only older records) — but once revokes are per-transaction this
+   early-write disappears and the cancel obligation becomes real.
+
+Requirements before any code move (the review checklist):
+
+R1. Move revoke storage to per-transaction sets (issued-tid preserved);
+    the commit writes only ITS transaction's set (plus, optionally,
+    inherited unresolved ones — decide and document).
+R2. Implement cancel: (a) in-memory cancel when the revoked block is
+    re-registered in the SAME transaction; (b) an on-disk cancel entry
+    (high-bit scheme) when a revoke already logged or issued by an
+    earlier OPEN transaction must be undone — requires extending
+    write_revoke_records AND scan_revoke_block (recovery must process
+    cancels, not just revokes).
+R3. Stop-condition change: drop the global `revokes_pending` force;
+    replace with nothing (pure lazy, relies on R1+R2) or a bounded
+    revoke-batch high-water like LAZY_COMMIT_MAX_BUFFERS. The forcing
+    condition must NOT read other transactions' pending revokes.
+R4. Recovery ordering audit: replay pass must interleave descriptor
+    and revoke blocks in log order (it does today — scan is
+    sequential); cancels processed at their log position; the final
+    table answer for "replay B?" is the LAST log entry for B
+    (revoke or cancel wins by position).
+R5. Reallocation-cancel trigger site: allocator free→alloc reuse
+    paths that journal a previously revoked block must route through
+    the cancel (today the allocation goes through
+    jbd2_journal_get_create_access — the cancel hook belongs there,
+    where the buffer's JournalHead state is known).
+R6. Verification plan: pbench mkdrmdir row (expect 55-58 ms → the
+    low-ms class if the force was the whole residual), fsw
+    jcommit_fast ≈ 0 under rmdir load (was ≈ rmdir count), crash-
+    consistency spot: kill -9 mid-mkdrmdir-loop + e2fsck -n clean
+    (the standing F4-R2 stance: recovery is e2fsck).
+
+Expected effect if the whole residual is the forced commit:
+mkdrmdir median 55-58 ms strong class → single-digit ms (the commit's
+3-6 synchronous I/Os vanish; what remains is the scoped drain of the
+op's own publication records).
+

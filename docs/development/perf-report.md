@@ -1972,3 +1972,114 @@ dormant j=0 there) and the journaled mkdrmdir residual (per-rmdir
 revoke-forced synchronous commit; needs per-transaction revokes +
 reallocation cancel before it can go lazy); (3) Tier-2 gate anchor
 unchanged (pb1 DEBUG column).
+
+### 8.10.14 Leg 44+45 (2026-10-27): leg-44 salvage — the wrapper verdict is WITHDRAWN (p5d control row), socket fast path reverted, pathstash lazy gate kept; F4 arm-1 blocked by a no-journal root-lookup failure
+
+Leg 44 died in the 20:00 quota window mid-verification, leaving three
+dirty files (f4 route-map arm-2 note, pbench p5d rows, pbench_boot
+--nojournal) and an unbanked pa69 pair. Salvage verdicts, all on
+strong-profile x86 q35 tcg-multi SMP2/2G pbench boots:
+
+**(1) The leg-43 "wrapper owns the 35 us" verdict is withdrawn — the
+p5d control row kills it.** pa70 ran the p5d rows (in-process
+socketpair round trip: sendto then read(2) vs recvfrom(2) in the SAME
+loop iteration — no second task, no flow control) on BOTH kernels in
+one parallel window: control A = pa68-d7fix strong (pre-fix),
+branch B = pa69-b strong (base + pathstash gate 632d38ff + socket
+fast path b99b70f8):
+
+| row | A (pre-fix) | B (with fix) |
+|---|---|---|
+| p5d_rt_read (read(2)) | **4.776** | 4.909 |
+| p5d_rt_recv (recvfrom(2)) | **4.766** | 5.219 |
+| p5c2_stream_send (read-child) | 42.153 | 42.938 |
+| p5c3_stream_wrecv (recv-child) | 5.016 | 5.380 |
+
+The read(2)-on-socket wrapper was ALREADY fast before the fix — the
+generic staging path never owned a 35 us class in-process. b99b70f8
+fixed a cost that does not exist (p5d_rt_read A vs B: +0.13 us, and
+the untouched p5d_rt_recv twin moved +0.45 us in the same window —
+the noise scale of these rows), and the p5c2 row it targeted is
+unchanged A→B. Reverted as 8c5cd3e2 with this evidence; a zero-benefit
+parallel read/write path beside the generic engine is risk without
+return.
+
+**(2) 632d38ff (pathstash write/sync stashes build File::path()
+lazily) is kept — the mechanism fit is exact.** Same pa70 window,
+rows whose sender uses write(2) improved, rows whose sender uses
+sendto(2) (which never had the stash cost) did not:
+
+| row | A | B | delta | sender syscall |
+|---|---|---|---|---|
+| p5a_pipe | 2.804 | 2.464 | **-12.1%** | write(2) |
+| p5c_stream_write | 43.425 | 39.732 | **-8.5%** | write(2) |
+| p6_append | 98.695 | 93.559 | -5.2% | write(2) |
+| p5c2_stream_send | 42.153 | 42.938 | +1.9% | sendto(2) |
+| p6_write_fsync | 13823.9 | 13831.3 | +0.1% | write+fsync (I/O-bound) |
+
+The IPC-gate pair (pa69, interleaved A,B,B,A, 4/4 rc=0, loads 15-19)
+had already shown every P5 row within ±20% or improved; pa70's
+parallel-window A/B pins the win on the stash removal. The pa69 pair
+also re-read p5b in the SLOW regime (41.7-44.2 both arms) — regime
+question unchanged.
+
+**(3) The 40-44 us class is cross-process flow-control/wake dynamics,
+not any per-call wrapper.** Corrected fact base: in-process stream
+send+read/recv = 4.8-5.2 us on every kernel; STREAM + recvfrom-child
+(p5c3) = 4.77-5.40 in every boot ever recorded; STREAM + read-child
+(p5c2) = 39-43 in every boot ever recorded; DGRAM + peek/consume
+child (p5b) = 41-44 slow-regime / 4.9-8.3 fast-regime. The p5c2
+child's read path on kernel B is byte-for-byte unix_recv_ctl (the
+same engine the p5c3 child uses — unix_file_read and unix_read_user
+both drain greedily through it), yet the parent's sendto reads 8x
+higher median with a read-draining child. The class survives the
+wrapper fix, appears in dgram rows, and flips with regime only in
+p5b. Armed discriminators for the next socket leg: p5e
+(O_NONBLOCK spin-drain child — separates child sleep/wake from queue
+depth), p5f (parent MSG_DONTWAIT + EAGAIN retry — separates
+sender-side block from receiver-side wake), and a syscost
+TERM-DESCHED/WAKE-REFUSED census window around a p5c2 loop. Prime
+suspect: the sender's wake→pick latency when it blocks on the
+enqueue gate (sndbuf cap), which only the recv-child's drain rate
+avoids ever hitting.
+
+**(4) F4 arm-1 (no-journal pbench rootfs) is BLOCKED by a kernel
+failure worth the fs lane's attention: a clean mkfs-created
+no-journal ext4 root mounts but every path lookup fails.** pa71nj1
+(serial work/pbench-pa71nj1-serial.log): "fs: ext4 mounted / [ok]"
+then "/test/pbench not found" for all init candidates →
+"no init program loadable" → park. The image is well-formed: fresh
+mkfs -O ^metadata_csum,^has_journal -d staging passes e2fsck -fn
+clean, debugfs lists /test/pbench (inode 13); the only superblock
+feature deltas vs the working journal image are has_journal and
+orphan_file. The OH userdata image (userdata-mine, same feature set)
+works on OH boots — but everything ever read from it was written by
+the kernel itself; reading mkfs-written no-journal metadata appears
+never to have been exercised. Repro: pbench_boot.py --nojournal.
+Feature-bisect (pa71ob1, journal + ^orphan_file via the new
+--mkfs-features passthrough): that image BOOTS AND RUNS —
+orphan_file absence is exonerated; the trigger is has_journal
+absence itself (mount ok, journal_ino==0 skips init_journal per
+journal.rs, but no mkfs-written path resolves afterward).
+Consequence: the J-vs-NJ p6 row comparison (route-1's expected-effect
+anchor) waits on this fix; the --nojournal flag stays in the tree as
+the repro. The arm-2 revoke semantics note (leg 44's other dirty
+file) is banked in f4-ext4-route-map.md (R1-R6 checklist).
+
+**Gates (post-revert tip 3d30bd28: base + 632d38ff + revert +
+probes):** dual-arch build rc=0 (riscv64 debug + x86_64 debug +
+x86_64 strong); riscv64 minimal-rootfs regression boot 0 panics,
+shell up; make test ALL TESTS PASSED; IPC guarded-domain pair pa69
+(4 boots) + pa70 parallel A/B — all P5 rows within ±20% or improved.
+The post-revert kernel's own pbench (pa71 j1/j2, journal protocol):
+p6_write_fsync 10120/9853 us, p6_mkdrmdir 67281/57018, p6_unlink
+17047/18782, p6_append 136/114 — every fs row inside the standing
+strong classes, no regression from the net kernel change.
+
+**Standing after this leg:** (1) socket-family residual = the
+cross-process rendezvous decomposition (p5e/p5f armed above); (2) F4:
+no-journal root-lookup failure to the fs lane (repro --nojournal),
+arm-2 revoke checklist banked, route-1 measurement re-queued behind
+the fix; (3) D-7/p5b regime questions unchanged (no quiet window
+this leg — load 10-20 throughout); (4) Tier-2 gate anchor unchanged
+(pb1 DEBUG column).
