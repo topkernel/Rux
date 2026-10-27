@@ -692,8 +692,10 @@ fn drain_records_by_id(id: u64) -> alloc::vec::Vec<u8> {
 /// (per attr.read_format) u64 total_time_enabled, u64 total_time_running,
 /// u64 id. For these software clock events the counter is the ns
 /// charged while the event was counting; running is the same charged
-/// ns (the software clock only advances while charging); enabled is
-/// the wall ns since open while armed. Sample records are NOT read(2)
+/// ns clamped to the measured enabled ns (the charge is nominal —
+/// ticks × TICK_NS — and may drift just above the measured wall time,
+/// while running ≤ enabled holds by definition); enabled is the wall
+/// ns since open while armed. Sample records are NOT read(2)
 /// output — the reference delivers samples through the mmap ring
 /// (unimplemented here); the stopgap record channel is the per-event
 /// debugfs drain file /sys/kernel/debug/perf/<id>/records.
@@ -744,7 +746,14 @@ fn read_counter(ev: &PerfEvent, buf: &mut [u8]) -> Option<usize> {
         } else {
             0
         };
-        (inner.total, enabled, inner.total, ev.id)
+        // The charge is nominal (pending ticks × TICK_NS), so the
+        // charged total can drift a hair ABOVE the measured wall ns
+        // since open — the b8 smoke caught run=200000000 > en=199586800.
+        // total_time_running can never exceed total_time_enabled by
+        // definition, so the read clamps both to the measured enabled
+        // (both sides stay monotone: min of two monotone quantities).
+        let running = inner.total.min(enabled);
+        (running, enabled, running, ev.id)
     };
     let mut at = 0usize;
     let mut put = |v: u64| {
@@ -800,10 +809,16 @@ fn perf_close(file: &crate::fs::File) -> i32 {
     }
     // Drop the drain file first (after the unregister above, its
     // generator already answers empty; removing the name ends new
-    // opens). Stale opens keep their snapshot — debugfs nodes are Arc'd.
+    // opens — a lookup of the missing leaf is ENOENT, the contract
+    // the b8 smoke pins). Then drop the now-empty per-event directory
+    // so the namespace does not accumulate one dir per event ever
+    // opened. Stale opens keep their snapshot — debugfs nodes are
+    // Arc'd.
     {
-        let path = alloc::format!("/perf/{}", id);
-        crate::fs::debugfs::remove_file(&path);
+        let leaf = alloc::format!("/perf/{}/records", id);
+        crate::fs::debugfs::remove_file(&leaf);
+        let dir = alloc::format!("/perf/{}", id);
+        crate::fs::debugfs::remove_dir_if_empty(&dir);
     }
     // Residual race (mirrors timerfd_close): a reader still inside
     // perf_read holds &File via its own reference; close runs on the
@@ -1057,20 +1072,29 @@ pub fn sys_perf_event_open(args: crate::syscall::SyscallArgs) -> i64 {
                 crate::fs::set_cloexec_fd(fd, true);
             }
             // The stopgap sample channel: one drain file per event
-            // under /sys/kernel/debug/perf/. Removed at close. A
-            // creation failure (debugfs not mounted) leaves the event
-            // fully functional — the drain channel is optional, the
-            // ABI (read/poll) does not depend on it.
+            // under /sys/kernel/debug/perf/<id>/records (the documented
+            // contract — a per-event directory holding the records
+            // leaf; the b8 smoke caught the leaf created AS /perf/<id>,
+            // so every records open walked a file component and got
+            // ENOTDIR). Removed at close. A creation failure (debugfs
+            // not mounted) leaves the event fully functional — the
+            // drain channel is optional, the ABI (read/poll) does not
+            // depend on it.
             {
                 let id = unsafe { (*ev_ptr).id };
+                // create_dir answers true for an existing directory,
+                // so the plain sequence is idempotent across opens.
                 if crate::fs::debugfs::create_dir("/perf") {
-                    let path = alloc::format!("/perf/{}", id);
-                    crate::fs::debugfs::create_file(
-                        &path,
-                        0o400,
-                        move || drain_records_by_id(id),
-                        None::<fn(&[u8]) -> i32>,
-                    );
+                    let dir = alloc::format!("/perf/{}", id);
+                    if crate::fs::debugfs::create_dir(&dir) {
+                        let path = alloc::format!("/perf/{}/records", id);
+                        crate::fs::debugfs::create_file(
+                            &path,
+                            0o400,
+                            move || drain_records_by_id(id),
+                            None::<fn(&[u8]) -> i32>,
+                        );
+                    }
                 }
             }
             fd as i64
@@ -1162,11 +1186,17 @@ pub mod tests {
     }
 
     /// read(2)'s counter layout: 8/16/24/32 bytes per read_format, the
-    /// count first, then enabled/running/id — and it is computed from
+    /// count first, then enabled/running/id — computed from
     /// PerfInner.total (never decremented by sampling), not the
-    /// sample-phase residual.
+    /// sample-phase residual; running clamps to the measured enabled
+    /// (the charge is nominal tick ns and may exceed wall ns).
     pub fn test_read_layout() {
         let mut ev = test_event(77, false, 0);
+        // Stamp the event 3 ms in the past: measured enabled is then
+        // >= 3_000_000 ns and dominates the 1.5 ms charge, so the
+        // unclamped shape (count == running == charged total) is what
+        // the read reports.
+        ev.enabled_at = crate::sched::fair::sched_clock().saturating_sub(3_000_000);
         {
             let mut inner = ev.inner.lock();
             inner.total = 1_500_000;
@@ -1178,8 +1208,8 @@ pub mod tests {
         let n = read_counter(&ev, &mut buf);
         let mut ok = n == Some(8)
             && u64::from_le_bytes(buf[0..8].try_into().unwrap()) == 1_500_000;
-        // Both TIME bits: count, enabled (0 — never stamped), running
-        // (== the charged count).
+        // Both TIME bits: count, enabled (>= 3 ms), running (== the
+        // charged count, still under enabled).
         ev.read_format =
             PERF_FORMAT_TOTAL_TIME_ENABLED | PERF_FORMAT_TOTAL_TIME_RUNNING | PERF_FORMAT_ID;
         let n = read_counter(&ev, &mut buf);
@@ -1188,7 +1218,20 @@ pub mod tests {
         let enabled = u64::from_le_bytes(buf[8..16].try_into().unwrap());
         let running = u64::from_le_bytes(buf[16..24].try_into().unwrap());
         let id = u64::from_le_bytes(buf[24..32].try_into().unwrap());
-        ok &= count == 1_500_000 && enabled == 0 && running == 1_500_000 && id == 77;
+        ok &= count == 1_500_000 && enabled >= 3_000_000 && running == 1_500_000
+            && running <= enabled && id == 77;
+        // The clamp shape: a nominal charge drifting above the measured
+        // wall ns (b8 smoke: run=200000000 > en=199586800) reports
+        // running == enabled, never above it.
+        {
+            let mut inner = ev.inner.lock();
+            inner.total = enabled.saturating_add(4_000_000); // above the wall clock
+        }
+        let n = read_counter(&ev, &mut buf);
+        ok &= n == Some(32);
+        let running2 = u64::from_le_bytes(buf[16..24].try_into().unwrap());
+        let enabled2 = u64::from_le_bytes(buf[8..16].try_into().unwrap());
+        ok &= running2 == enabled2;
         if ok {
             crate::tests::test_pass("perf-read-layout");
         } else {

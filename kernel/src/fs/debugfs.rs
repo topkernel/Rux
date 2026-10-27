@@ -232,6 +232,50 @@ pub fn remove_file(path: &str) -> bool {
     }
 }
 
+/// Remove an EMPTY directory by absolute path inside debugfs (rmdir
+/// semantics as a bool: false when absent, not a directory, or still
+/// carrying children). The perf event drain directories are the
+/// remover use case — close drops /perf/<id>/records and then the
+/// now-empty /perf/<id> so the namespace does not accumulate one
+/// directory per event ever opened. Lock order matches the other
+/// walkers (parent's children, then the child's children — never the
+/// reverse).
+pub fn remove_dir_if_empty(path: &str) -> bool {
+    let root = match debugfs_root() {
+        Some(r) => r,
+        None => return false,
+    };
+    let mut components: Vec<&str> = path.split('/').filter(|c| !c.is_empty()).collect();
+    let dir_name = match components.pop() {
+        Some(n) => n,
+        None => return false,
+    };
+    let mut current = root;
+    for component in components {
+        let existing = {
+            let children = current.children.lock();
+            children.get(component).cloned()
+        };
+        match existing {
+            Some(existing) if existing.is_dir => current = existing,
+            _ => return false,
+        }
+    }
+    let mut children = current.children.lock();
+    match children.get(dir_name) {
+        Some(node) if node.is_dir => {
+            let empty = node.children.lock().is_empty();
+            if empty {
+                children.remove(dir_name);
+                true
+            } else {
+                false
+            }
+        }
+        _ => false,
+    }
+}
+
 // ============================================================================
 // Superblock / mount
 // ============================================================================

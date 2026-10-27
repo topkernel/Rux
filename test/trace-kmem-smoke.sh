@@ -84,7 +84,7 @@ cp "$ROOT/test/rootfs.img" "$IMG"
     sleep 0.5
     echo 'echo ===KMEM: origin symbolized ==='
     sleep 0.3
-    echo 'echo KMEMDBG:origin_count=$(grep -c "call_site=rux::" /sys/kernel/debug/tracing/trace)'
+    echo 'echo KMEMDBG:origin_count=$(grep -c "call_site=.*rux::" /sys/kernel/debug/tracing/trace)'
     sleep 0.5
     echo 'echo ===KMEM: done ==='
     sleep 2
@@ -124,10 +124,14 @@ check "kmalloc format: bytes_alloc field row" 'field:size_t bytes_alloc'
 check "kmalloc format: print fmt head" 'call_site=%pS ptr=%p bytes_req=%zu bytes_alloc=%zu'
 check "kfree format: name and id" 'name: kfree'
 check "kfree format: print fmt" 'call_site=%pS ptr=%p'
+# The origin column may be a Rust generic impl symbol — %pS demangles
+# "<T as Trait>::f", which CONTAINS SPACES around "as"; a C-style
+# [^ ]+ class rejects those rows (the b8 rerun caught kmalloc's
+# BuddyAllocator-as-GlobalAlloc origin). ".+" accepts both shapes.
 check "kmalloc line in the reference geometry" \
-    'kmalloc: call_site=[^ ]+ ptr=0x[0-9a-f]+ bytes_req=[0-9]+ bytes_alloc=[0-9]+ gfp_flags=GFP_KERNEL node=-1 accounted=false'
+    'kmalloc: call_site=.+ ptr=0x[0-9a-f]+ bytes_req=[0-9]+ bytes_alloc=[0-9]+ gfp_flags=GFP_KERNEL node=-1 accounted=false'
 check "kfree line in the reference geometry" \
-    'kfree: call_site=[^ ]+ ptr=0x[0-9a-f]+'
+    'kfree: call_site=.+ ptr=0x[0-9a-f]+'
 check "the origin column is symbolized (not a raw address)" 'KMEMDBG:origin_count=[1-9]'
 check "the group state lines printed" 'KMEM: group state after'
 
