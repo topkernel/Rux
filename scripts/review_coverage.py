@@ -465,6 +465,26 @@ BUGS = [
 
 MARKS = {"done": "✅", "fixed": "🔧", "part": "🔶", "todo": "⬜"}
 
+# The mainline commit the statuses above were recorded against. A file
+# that mainline has changed since then keeps its mark but gains a "needs
+# re-read" flag: the code I read is no longer the code that is there.
+# The mainline commit the reviews were done against (the branch base at
+# the time). Everything mainline touched since then needs a re-read.
+REVIEW_BASE = "47d96961"
+
+
+def changed_since_base():
+    """The kernel/src files mainline touched after REVIEW_BASE."""
+    import subprocess
+    try:
+        out = subprocess.run(
+            ["git", "diff", "--name-only", REVIEW_BASE + "..main", "--", "kernel/src"],
+            cwd=ROOT, check=True, capture_output=True, text=True,
+        ).stdout
+    except (OSError, subprocess.CalledProcessError):
+        return set()
+    return {line for line in out.split() if line}
+
 
 def collect():
     """Every source file under kernel/src with its line count."""
@@ -508,10 +528,14 @@ def main():
         d = os.path.dirname(rel)
         groups.setdefault(d, []).append((rel, lines))
 
+    changed = changed_since_base()
     counts = {"done": 0, "part": 0, "todo": 0, "fixed": 0}
+    stale = 0
     for rel, _lines in files:
         status = STATUS.get(rel, ("todo", ""))[0]
         counts[status] = counts.get(status, 0) + 1
+        if status in ("done", "fixed", "part") and rel in changed:
+            stale += 1
 
     total_lines = sum(lines for _rel, lines in files)
     reviewed_lines = 0
@@ -537,6 +561,7 @@ def main():
     out.append("| 🔧 fixed | read end to end, a defect was found and fixed (see below) |")
     out.append("| 🔶 part | read in part; the note says what was covered |")
     out.append("| ⬜ todo | not read yet |")
+    out.append("| 🔁 | reviewed, but mainline changed the file since the review base — re-read needed |")
     out.append("")
     out.append("## Progress")
     out.append("")
@@ -548,6 +573,7 @@ def main():
     out.append(f"| files partially reviewed | {counts.get('part', 0)} |")
     out.append(f"| files not yet reviewed | {counts.get('todo', 0)} |")
     out.append(f"| lines in fully reviewed files | {reviewed_lines:,} |")
+    out.append(f"| reviewed files mainline changed since `{REVIEW_BASE}` (need re-read) | {stale} |")
     out.append("")
     out.append("## Defects found and fixed")
     out.append("")
@@ -566,6 +592,9 @@ def main():
         for rel, lines in groups[d]:
             status, note = STATUS.get(rel, ("todo", ""))
             mark = MARKS.get(status, "⬜")
+            if status in ("done", "fixed", "part") and rel in changed:
+                mark += "🔁"
+                note = (note + "; " if note else "") + "主线已改动，需重读"
             out.append(f"| `{os.path.basename(rel)}` | {lines} | {mark} | {note} |")
         out.append("")
 

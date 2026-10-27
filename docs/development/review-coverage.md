@@ -15,17 +15,19 @@ when the tree gains a file the map does not know about.
 | 🔧 fixed | read end to end, a defect was found and fixed (see below) |
 | 🔶 part | read in part; the note says what was covered |
 | ⬜ todo | not read yet |
+| 🔁 | reviewed, but mainline changed the file since the review base — re-read needed |
 
 ## Progress
 
 | metric | value |
 |---|---|
-| source files in kernel/src | 399 |
-| source lines in kernel/src | 249,453 |
+| source files in kernel/src | 412 |
+| source lines in kernel/src | 261,568 |
 | files fully reviewed | 20 |
 | files partially reviewed | 78 |
-| files not yet reviewed | 301 |
-| lines in fully reviewed files | 4,676 |
+| files not yet reviewed | 314 |
+| lines in fully reviewed files | 5,737 |
+| reviewed files mainline changed since `47d96961` (need re-read) | 51 |
 
 ## Defects found and fixed
 
@@ -38,24 +40,24 @@ when the tree gains a file the map does not know about.
 
 ## Per-file status
 
-### kernel/src (11456 lines)
+### kernel/src (12178 lines)
 
 | file | lines | status | note |
 |---|---:|---|---|
-| `cmdline.rs` | 874 | 🔶 | parameter parsing |
+| `cmdline.rs` | 979 | 🔶🔁 | parameter parsing; 主线已改动，需重读 |
 | `config.rs` | 307 | ⬜ |  |
-| `console.rs` | 1024 | ⬜ |  |
+| `console.rs` | 1030 | ⬜ |  |
 | `errno.rs` | 224 | ⬜ |  |
 | `init.rs` | 489 | ⬜ |  |
 | `initrd.rs` | 781 | ⬜ |  |
 | `list.rs` | 273 | ⬜ |  |
-| `main.rs` | 1631 | 🔶 | boot sequence, panic handler, layout constants |
+| `main.rs` | 1742 | 🔶🔁 | boot sequence, panic handler, layout constants; 主线已改动，需重读 |
 | `panic_policy.rs` | 94 | ✅ | written by this review (panic= parameter) |
 | `print.rs` | 73 | ⬜ |  |
-| `printk.rs` | 1850 | 🔶 | ring buffer, console level |
+| `printk.rs` | 2108 | 🔶🔁 | ring buffer, console level; 主线已改动，需重读 |
 | `sbi.rs` | 134 | ⬜ |  |
-| `signal.rs` | 2665 | 🔶 | flush_handlers 处置重置语义 |
-| `timer.rs` | 1037 | ⬜ |  |
+| `signal.rs` | 2881 | 🔶🔁 | flush_handlers 处置重置语义; 主线已改动，需重读 |
+| `timer.rs` | 1063 | ⬜ |  |
 
 ### kernel/src/arch (60 lines)
 
@@ -93,45 +95,46 @@ when the tree gains a file the map does not know about.
 | `page_fault.rs` | 7 | ⬜ |  |
 | `pagetable.rs` | 7 | ⬜ |  |
 
-### kernel/src/arch/riscv64 (7014 lines)
+### kernel/src/arch/riscv64 (7914 lines)
 
 | file | lines | status | note |
 |---|---:|---|---|
-| `boot.S` | 592 | ⬜ |  |
+| `boot.S` | 654 | ⬜ |  |
 | `boot.rs` | 32 | ⬜ |  |
-| `context.rs` | 583 | ⬜ |  |
-| `cpu.rs` | 161 | ⬜ |  |
+| `context.rs` | 587 | ⬜ |  |
+| `cpu.rs` | 171 | ⬜ |  |
 | `ipi.rs` | 487 | ⬜ |  |
-| `mod.rs` | 131 | ⬜ |  |
-| `process.rs` | 320 | ⬜ |  |
+| `mod.rs` | 132 | ⬜ |  |
+| `process.rs` | 325 | ⬜ |  |
 | `pt_regs.rs` | 454 | ⬜ |  |
 | `smp.rs` | 345 | ⬜ |  |
-| `thread.rs` | 403 | ⬜ |  |
+| `thread.rs` | 525 | ⬜ |  |
 | `trap.S` | 1215 | ⬜ |  |
-| `trap.rs` | 1455 | 🔶 | tick accounting, trap entry |
+| `trap.rs` | 1765 | 🔶🔁 | tick accounting, trap entry; 主线已改动，需重读 |
 | `uaccess.S` | 385 | ⬜ |  |
 | `uaccess.rs` | 451 | ⬜ |  |
+| `vext.rs` | 386 | ⬜ |  |
 
-### kernel/src/arch/riscv64/mm (8416 lines)
+### kernel/src/arch/riscv64/mm (8478 lines)
 
 | file | lines | status | note |
 |---|---:|---|---|
 | `asid.rs` | 302 | ⬜ |  |
 | `exception.rs` | 718 | ⬜ |  |
 | `fixmap.rs` | 267 | ⬜ |  |
-| `memory_layout.rs` | 552 | 🔶 | image window constants |
-| `mm_ops.rs` | 2471 | 🔶 | COW 故障快/慢路径、PTE 权限检查 |
+| `memory_layout.rs` | 566 | 🔶🔁 | image window constants; 主线已改动，需重读 |
+| `mm_ops.rs` | 2519 | 🔶🔁 | COW 故障快/慢路径、PTE 权限检查; 主线已改动，需重读 |
 | `mmu_init.rs` | 2162 | 🔶 | kernel image mapping |
 | `mod.rs` | 53 | ⬜ |  |
 | `page_fault.rs` | 1597 | ⬜ |  |
 | `pagetable.rs` | 294 | ⬜ |  |
 
-### kernel/src/arch/x86_64 (7138 lines)
+### kernel/src/arch/x86_64 (7383 lines)
 
 | file | lines | status | note |
 |---|---:|---|---|
-| `boot.S` | 184 | ⬜ |  |
-| `boot.rs` | 240 | ⬜ |  |
+| `boot.S` | 206 | ⬜ |  |
+| `boot.rs` | 242 | ⬜ |  |
 | `context.rs` | 605 | ⬜ |  |
 | `cpu.rs` | 358 | ⬜ |  |
 | `ipi.rs` | 323 | ⬜ |  |
@@ -143,10 +146,10 @@ when the tree gains a file the map does not know about.
 | `smp_trampoline.S` | 182 | ⬜ |  |
 | `thread.rs` | 390 | ⬜ |  |
 | `trap.S` | 577 | ⬜ |  |
-| `trap.rs` | 2583 | 🔶 | TSS/IST interrupt stacks |
+| `trap.rs` | 2804 | 🔶🔁 | TSS/IST interrupt stacks; 主线已改动，需重读 |
 | `uaccess.rs` | 420 | ⬜ |  |
 
-### kernel/src/arch/x86_64/mm (7989 lines)
+### kernel/src/arch/x86_64/mm (8042 lines)
 
 | file | lines | status | note |
 |---|---:|---|---|
@@ -154,38 +157,43 @@ when the tree gains a file the map does not know about.
 | `exception.rs` | 428 | ⬜ |  |
 | `fixmap.rs` | 117 | ⬜ |  |
 | `memory_layout.rs` | 439 | ⬜ |  |
-| `mm_ops.rs` | 2602 | ⬜ |  |
+| `mm_ops.rs` | 2645 | ⬜ |  |
 | `mmu_init.rs` | 2275 | 🔶 | kernel image mapping |
 | `mod.rs` | 36 | ⬜ |  |
-| `page_fault.rs` | 1805 | ⬜ |  |
+| `page_fault.rs` | 1815 | ⬜ |  |
 | `pagetable.rs` | 195 | ⬜ |  |
 
-### kernel/src/dfx (10510 lines)
+### kernel/src/dfx (11908 lines)
 
 | file | lines | status | note |
 |---|---:|---|---|
 | `backtrace.rs` | 354 | 🔶 | symbolized frame printing |
 | `bug.rs` | 98 | 🔶 | WARN/BUG banners |
 | `driftwatch.rs` | 130 | 🔶 | release-site attribution |
-| `fsw.rs` | 324 | ⬜ |  |
+| `fsw.rs` | 379 | ⬜ |  |
 | `hexdump.rs` | 102 | 🔶 | hex dump helper |
 | `hung_task.rs` | 286 | 🔶 | D-state scan |
 | `ksyms.rs` | 131 | ✅ | written by this review (symbol table) |
 | `ksyms_generated.rs` | 18 | ⬜ |  |
+| `leakorigin.rs` | 206 | ⬜ |  |
 | `ledger.rs` | 491 | 🔶 | page census |
 | `memwatch.rs` | 1070 | 🔶 | heap census |
 | `metawatch.rs` | 157 | 🔶 | buddy shadow scan |
-| `mod.rs` | 221 | 🔶 | init, debugfs knob registration |
+| `mod.rs` | 300 | 🔶🔁 | init, debugfs knob registration; 主线已改动，需重读 |
 | `monowatch.rs` | 137 | 🔶 | monotonic jump tripwire |
-| `r83hunt.rs` | 566 | 🔶 | task header audit |
+| `oops.rs` | 250 | ⬜ |  |
+| `pathstash.rs` | 117 | ⬜ |  |
+| `pstore.rs` | 368 | ⬜ |  |
+| `r83hunt.rs` | 583 | 🔶🔁 | task header audit; 主线已改动，需重读 |
 | `sbi_debug.rs` | 76 | 🔶 | raw SBI printers |
 | `schb.rs` | 645 | ⬜ |  |
 | `scribble.rs` | 1658 | 🔶 | task scribble hunter |
 | `softlockup.rs` | 222 | 🔶 | soft lockup detector |
-| `switches.rs` | 433 | ✅ | switch table refactored to one macro |
+| `switches.rs` | 518 | ✅🔁 | switch table refactored to one macro; 主线已改动，需重读 |
 | `syscost.rs` | 2041 | 🔶 | per-syscall cost table |
 | `taint.rs` | 123 | ✅ | the reference kernel taint letters |
 | `taskdump.rs` | 748 | 🔶 | task dump format |
+| `treehunt.rs` | 221 | ⬜ |  |
 | `wildwatch.rs` | 479 | 🔶 | RO-guard tripwire |
 
 ### kernel/src/drivers (2248 lines)
@@ -199,12 +207,12 @@ when the tree gains a file the map does not know about.
 | `rtc.rs` | 123 | ⬜ |  |
 | `watchdog.rs` | 182 | ⬜ |  |
 
-### kernel/src/drivers/blkdev (503 lines)
+### kernel/src/drivers/blkdev (567 lines)
 
 | file | lines | status | note |
 |---|---:|---|---|
 | `iostat.rs` | 156 | ✅ | written by this review |
-| `mod.rs` | 347 | 🔶 | request path, register_disk |
+| `mod.rs` | 411 | 🔶🔁 | request path, register_disk; 主线已改动，需重读 |
 
 ### kernel/src/drivers/drm (2541 lines)
 
@@ -223,15 +231,15 @@ when the tree gains a file the map does not know about.
 | `virtio_cmd.rs` | 52 | ⬜ |  |
 | `virtio_gpu.rs` | 914 | ⬜ |  |
 
-### kernel/src/drivers/input (2251 lines)
+### kernel/src/drivers/input (2467 lines)
 
 | file | lines | status | note |
 |---|---:|---|---|
-| `evdev.rs` | 1026 | ⬜ |  |
+| `evdev.rs` | 1033 | ⬜ |  |
 | `event.rs` | 247 | ⬜ |  |
-| `mod.rs` | 123 | ⬜ |  |
+| `mod.rs` | 310 | ⬜ |  |
 | `ps2.rs` | 260 | ⬜ |  |
-| `virtio_input.rs` | 595 | ⬜ |  |
+| `virtio_input.rs` | 617 | ⬜ |  |
 
 ### kernel/src/drivers/intc (1371 lines)
 
@@ -266,120 +274,121 @@ when the tree gains a file the map does not know about.
 | `riscv64.rs` | 248 | 🔶 | time CSR timebase |
 | `x86_64.rs` | 526 | 🔶 | TSC/HPET timebase |
 
-### kernel/src/drivers/virtio (7162 lines)
+### kernel/src/drivers/virtio (7212 lines)
 
 | file | lines | status | note |
 |---|---:|---|---|
-| `mod.rs` | 3325 | 🔶 | virtio queue handling |
+| `mod.rs` | 3375 | 🔶🔁 | virtio queue handling; 主线已改动，需重读 |
 | `offset.rs` | 48 | ⬜ |  |
 | `probe.rs` | 646 | ⬜ |  |
 | `queue.rs` | 1040 | ⬜ |  |
 | `virtio_pci.rs` | 2103 | ⬜ |  |
 
-### kernel/src/fs (28749 lines)
+### kernel/src/fs (29867 lines)
 
 | file | lines | status | note |
 |---|---:|---|---|
-| `bio.rs` | 1889 | 🔶 | sync_buffers, ordered publications |
+| `bio.rs` | 2313 | 🔶🔁 | sync_buffers, ordered publications; 主线已改动，需重读 |
 | `buffer.rs` | 468 | 🔶 | FileBuffer chunked read/write |
-| `cgroup.rs` | 858 | ⬜ |  |
+| `cgroup.rs` | 859 | ⬜ |  |
 | `char_dev.rs` | 250 | ⬜ |  |
-| `debugfs.rs` | 597 | ✅ | written by this review (debugfs) |
+| `debugfs.rs` | 598 | ✅🔁 | written by this review (debugfs); 主线已改动，需重读 |
 | `dentry.rs` | 760 | 🔶 | per-directory locking |
 | `dev_t.rs` | 137 | ⬜ |  |
 | `elf.rs` | 766 | ⬜ |  |
 | `fifo.rs` | 256 | ⬜ |  |
-| `file.rs` | 1247 | 🔶 | reg_file_read/write/lseek、f_pos_lock；O_APPEND 原子性已修（327b4a52） |
+| `file.rs` | 1472 | 🔶🔁 | reg_file_read/write/lseek、f_pos_lock；O_APPEND 原子性已修（327b4a52）; 主线已改动，需重读 |
 | `fs_struct.rs` | 210 | ⬜ |  |
-| `inode.rs` | 1054 | 🔶 | read_data/write_data/append_data；O_APPEND 原子性已修（327b4a52） |
-| `inotify.rs` | 715 | 🔶 | event notification |
+| `inode.rs` | 1067 | 🔶🔁 | read_data/write_data/append_data；O_APPEND 原子性已修（327b4a52）; 主线已改动，需重读 |
+| `inotify.rs` | 794 | 🔶🔁 | event notification; 主线已改动，需重读 |
 | `io_completion.rs` | 344 | ⬜ |  |
 | `locks.rs` | 1067 | 🔶 | flock/POSIX record locks |
-| `memfd.rs` | 439 | 🔶 | memfd seal semantics |
+| `memfd.rs` | 440 | 🔶🔁 | memfd seal semantics; 主线已改动，需重读 |
 | `mod.rs` | 82 | ⬜ |  |
 | `mount.rs` | 392 | ⬜ |  |
 | `page_cache.rs` | 1394 | 🔶 | get_range_into/put_range |
 | `path.rs` | 389 | ⬜ |  |
 | `permission.rs` | 80 | ⬜ |  |
-| `pipe.rs` | 1340 | ⬜ |  |
+| `pipe.rs` | 1465 | ⬜ |  |
 | `pty.rs` | 930 | ⬜ |  |
 | `readahead.rs` | 100 | ⬜ |  |
-| `rootfs.rs` | 1984 | 🔶 | symlink resolution, MAX_SYMLINKS |
-| `selinuxfs.rs` | 315 | ⬜ |  |
+| `rootfs.rs` | 1985 | 🔶🔁 | symlink resolution, MAX_SYMLINKS; 主线已改动，需重读 |
+| `selinuxfs.rs` | 316 | ⬜ |  |
 | `stat.rs` | 426 | ⬜ |  |
 | `superblock.rs` | 369 | ⬜ |  |
-| `sysfs.rs` | 2065 | 🔶 | sysfs tree, writable attributes |
-| `tmpfs.rs` | 1445 | 🔶 | tmpfs read/write |
+| `sysfs.rs` | 2084 | 🔶🔁 | sysfs tree, writable attributes; 主线已改动，需重读 |
+| `tmpfs.rs` | 1445 | 🔶🔁 | tmpfs read/write; 主线已改动，需重读 |
 | `tty.rs` | 845 | ⬜ |  |
-| `vfs.rs` | 5294 | 🔶 | file_read/file_write dispatch |
+| `vfs.rs` | 5522 | 🔶🔁 | file_read/file_write dispatch; 主线已改动，需重读 |
 | `xattr.rs` | 242 | ⬜ |  |
 
-### kernel/src/fs/devfs (2203 lines)
+### kernel/src/fs/devfs (2204 lines)
 
 | file | lines | status | note |
 |---|---:|---|---|
-| `mod.rs` | 2122 | ⬜ |  |
+| `mod.rs` | 2123 | ⬜ |  |
 | `registry.rs` | 81 | ⬜ |  |
 
-### kernel/src/fs/ext4 (11743 lines)
+### kernel/src/fs/ext4 (11979 lines)
 
 | file | lines | status | note |
 |---|---:|---|---|
-| `allocator.rs` | 828 | ⬜ |  |
+| `allocator.rs` | 826 | ⬜ |  |
 | `csum.rs` | 189 | ⬜ |  |
 | `dir.rs` | 182 | 🔶 | directory ops |
 | `extent.rs` | 1395 | ⬜ |  |
-| `file.rs` | 1921 | 🔶 | read/write/fsync paths |
+| `file.rs` | 2015 | 🔶🔁 | read/write/fsync paths; 主线已改动，需重读 |
 | `indirect.rs` | 321 | ⬜ |  |
-| `inode.rs` | 724 | 🔶 | inode table |
-| `journal.rs` | 215 | 🔶 | jbd2 transaction start/stop |
-| `mod.rs` | 3350 | 🔶 | superblock, mount |
-| `namei.rs` | 2284 | ⬜ |  |
+| `inode.rs` | 751 | 🔶🔁 | inode table; 主线已改动，需重读 |
+| `journal.rs` | 238 | 🔶🔁 | jbd2 transaction start/stop; 主线已改动，需重读 |
+| `mod.rs` | 3351 | 🔶🔁 | superblock, mount; 主线已改动，需重读 |
+| `namei.rs` | 2377 | ⬜ |  |
 | `superblock.rs` | 334 | ⬜ |  |
 
-### kernel/src/fs/jbd2 (3354 lines)
+### kernel/src/fs/jbd2 (3359 lines)
 
 | file | lines | status | note |
 |---|---:|---|---|
 | `checkpoint.rs` | 328 | ⬜ |  |
-| `commit.rs` | 499 | ⬜ |  |
+| `commit.rs` | 502 | ⬜ |  |
 | `journal.rs` | 937 | ⬜ |  |
 | `mod.rs` | 44 | ⬜ |  |
 | `recovery.rs` | 323 | ⬜ |  |
 | `revoke.rs` | 392 | ⬜ |  |
-| `transaction.rs` | 541 | ⬜ |  |
+| `transaction.rs` | 543 | ⬜ |  |
 | `types.rs` | 290 | ⬜ |  |
 
-### kernel/src/fs/procfs (6485 lines)
+### kernel/src/fs/procfs (7279 lines)
 
 | file | lines | status | note |
 |---|---:|---|---|
 | `cmdline.rs` | 35 | ⬜ |  |
-| `configgz.rs` | 69 | ⬜ |  |
+| `configgz.rs` | 70 | ⬜ |  |
 | `cpuinfo.rs` | 62 | ⬜ |  |
 | `diskstats.rs` | 54 | ✅ | written by this review |
 | `interrupts.rs` | 168 | 🔶 | per-IRQ counters |
 | `kallsyms.rs` | 40 | ✅ | written by this review |
 | `loadavg.rs` | 147 | 🔶 | load average |
 | `locks.rs` | 67 | ✅ | written by this review |
-| `meminfo.rs` | 146 | 🔶 | meminfo fields |
-| `mod.rs` | 2359 | 🔶 | node tree, read/write dispatch |
+| `meminfo.rs` | 224 | 🔶🔁 | meminfo fields; 主线已改动，需重读 |
+| `mod.rs` | 2504 | 🔶🔁 | node tree, read/write dispatch; 主线已改动，需重读 |
 | `mounts.rs` | 183 | ⬜ |  |
 | `net.rs` | 335 | ⬜ |  |
-| `pid.rs` | 1195 | 🔶 | status/stat generators |
-| `schedstat.rs` | 93 | ✅ | written by this review |
+| `pid.rs` | 1300 | 🔶🔁 | status/stat generators; 主线已改动，需重读 |
+| `procfile.rs` | 303 | ⬜ |  |
+| `schedstat.rs` | 114 | ✅🔁 | written by this review; 主线已改动，需重读 |
 | `self_proc.rs` | 41 | ⬜ |  |
 | `softirqs.rs` | 73 | ✅ | written by this review |
-| `stat.rs` | 287 | ✅ | written by this review |
+| `stat.rs` | 363 | ✅🔁 | written by this review; 主线已改动，需重读 |
 | `swaps.rs` | 35 | ⬜ |  |
-| `sysctl.rs` | 412 | 🔶 | sysctl tree |
+| `sysctl.rs` | 456 | 🔶🔁 | sysctl tree; 主线已改动，需重读 |
 | `sysrq.rs` | 285 | ✅ | written by this review |
 | `timer_list.rs` | 110 | ⬜ |  |
 | `uptime.rs` | 70 | 🔶 | uptime/idle accounting |
 | `version.rs` | 33 | ⬜ |  |
-| `vmstat.rs` | 186 | ✅ | written by this review |
+| `vmstat.rs` | 207 | ✅🔁 | written by this review; 主线已改动，需重读 |
 
-### kernel/src/interrupt (1965 lines)
+### kernel/src/interrupt (2033 lines)
 
 | file | lines | status | note |
 |---|---:|---|---|
@@ -388,35 +397,35 @@ when the tree gains a file the map does not know about.
 | `irqdesc.rs` | 502 | 🔶 | descriptor registry |
 | `ksoftirqd.rs` | 186 | 🔶 | drain loop |
 | `mod.rs` | 67 | ⬜ |  |
-| `preempt.rs` | 246 | ⬜ |  |
-| `softirq.rs` | 397 | 🔧 | 2ms 预算改为逐 vector 检查（ddfa8abc） |
+| `preempt.rs` | 279 | ⬜ |  |
+| `softirq.rs` | 432 | 🔧🔁 | 2ms 预算改为逐 vector 检查（ddfa8abc）; 主线已改动，需重读 |
 | `tasklet.rs` | 382 | ⬜ |  |
 
-### kernel/src/io_uring (1174 lines)
+### kernel/src/io_uring (1177 lines)
 
 | file | lines | status | note |
 |---|---:|---|---|
-| `mod.rs` | 1174 | ⬜ |  |
+| `mod.rs` | 1177 | ⬜ |  |
 
-### kernel/src/ipc (11802 lines)
+### kernel/src/ipc (13069 lines)
 
 | file | lines | status | note |
 |---|---:|---|---|
 | `access_token.rs` | 388 | ⬜ |  |
-| `binder.rs` | 6424 | 🔶 | ioctl numbers, dispatch |
+| `binder.rs` | 7688 | 🔶🔁 | ioctl numbers, dispatch; 主线已改动，需重读 |
 | `mod.rs` | 31 | ⬜ |  |
-| `posix_mq.rs` | 1157 | 🔶 | open/unlink/send/receive；绝对超时已修（e47b155a） |
+| `posix_mq.rs` | 1157 | 🔶🔁 | open/unlink/send/receive；绝对超时已修（e47b155a）; 主线已改动，需重读 |
 | `sysv_msg.rs` | 1092 | 🔶 | msgsnd/msgrcv |
 | `sysv_sem.rs` | 1273 | 🔶 | semtimedop timeout |
-| `sysv_shm.rs` | 978 | 🔶 | IPC_RMID, attach/detach |
+| `sysv_shm.rs` | 981 | 🔶🔁 | IPC_RMID, attach/detach; 主线已改动，需重读 |
 | `util.rs` | 459 | ✅ | idr allocation, permission checks |
 
-### kernel/src/mm (15554 lines)
+### kernel/src/mm (15869 lines)
 
 | file | lines | status | note |
 |---|---:|---|---|
 | `allocator.rs` | 14 | ⬜ |  |
-| `buddy_allocator.rs` | 1564 | 🔶 | heap allocator, dealloc dispatch |
+| `buddy_allocator.rs` | 1564 | 🔶🔁 | heap allocator, dealloc dispatch; 主线已改动，需重读 |
 | `compact.rs` | 519 | ⬜ |  |
 | `deferred_free.rs` | 202 | ⬜ |  |
 | `hugepage.rs` | 303 | ⬜ |  |
@@ -427,20 +436,20 @@ when the tree gains a file the map does not know about.
 | `meminfo.rs` | 265 | ⬜ |  |
 | `mm_struct.rs` | 1196 | ⬜ |  |
 | `mod.rs` | 249 | ⬜ |  |
-| `oom_kill.rs` | 554 | ⬜ |  |
+| `oom_kill.rs` | 582 | ⬜ |  |
 | `page.rs` | 149 | ⬜ |  |
-| `page_alloc.rs` | 944 | ⬜ |  |
+| `page_alloc.rs` | 993 | ⬜ |  |
 | `page_desc.rs` | 1362 | ⬜ |  |
 | `pagemap.rs` | 72 | ⬜ |  |
 | `pglist.rs` | 381 | ⬜ |  |
 | `rmap.rs` | 481 | ⬜ |  |
 | `slab.rs` | 776 | ⬜ |  |
-| `small_alloc.rs` | 815 | 🔶 | size classes, magazine, alloc/free |
+| `small_alloc.rs` | 886 | 🔶🔁 | size classes, magazine, alloc/free; 主线已改动，需重读 |
 | `swap.rs` | 545 | ⬜ |  |
 | `vdso.rs` | 574 | ⬜ |  |
-| `vma.rs` | 892 | ⬜ |  |
+| `vma.rs` | 1048 | ⬜ |  |
 | `vmemmap.rs` | 221 | ⬜ |  |
-| `vmscan.rs` | 396 | ⬜ |  |
+| `vmscan.rs` | 407 | ⬜ |  |
 | `vmstat.rs` | 69 | ✅ | written by this review (page counters) |
 | `zone.rs` | 1060 | 🔶 | buddy alloc/free, merge, watermarks |
 
@@ -450,7 +459,7 @@ when the tree gains a file the map does not know about.
 |---|---:|---|---|
 | `mod.rs` | 486 | ⬜ |  |
 
-### kernel/src/net (15368 lines)
+### kernel/src/net (15547 lines)
 
 | file | lines | status | note |
 |---|---:|---|---|
@@ -461,11 +470,11 @@ when the tree gains a file the map does not know about.
 | `mod.rs` | 32 | ⬜ |  |
 | `netlink.rs` | 1496 | ⬜ |  |
 | `raw.rs` | 697 | ⬜ |  |
-| `socket.rs` | 1982 | ⬜ |  |
-| `tcp.rs` | 4442 | ⬜ |  |
+| `socket.rs` | 2055 | ⬜ |  |
+| `tcp.rs` | 4461 | ⬜ |  |
 | `tcp_timer.rs` | 409 | ⬜ |  |
 | `udp.rs` | 1464 | ⬜ |  |
-| `unix.rs` | 2536 | ⬜ |  |
+| `unix.rs` | 2623 | ⬜ |  |
 
 ### kernel/src/net/ipv4 (1189 lines)
 
@@ -483,24 +492,30 @@ when the tree gains a file the map does not know about.
 | `icmpv6.rs` | 305 | ⬜ |  |
 | `mod.rs` | 608 | ⬜ |  |
 
-### kernel/src/process (13240 lines)
+### kernel/src/perf (862 lines)
+
+| file | lines | status | note |
+|---|---:|---|---|
+| `mod.rs` | 862 | ⬜ |  |
+
+### kernel/src/process (13939 lines)
 
 | file | lines | status | note |
 |---|---:|---|---|
 | `coredump.rs` | 591 | ⬜ |  |
-| `exec.rs` | 1410 | 🔶 | exec 的信号处置/掩码复位 |
-| `exit.rs` | 1929 | ⬜ |  |
-| `fork.rs` | 947 | 🔶 | task creation paths |
+| `exec.rs` | 1428 | 🔶🔁 | exec 的信号处置/掩码复位; 主线已改动，需重读 |
+| `exit.rs` | 2115 | ⬜ |  |
+| `fork.rs` | 1012 | 🔶🔁 | task creation paths; 主线已改动，需重读 |
 | `kthread.rs` | 274 | ⬜ |  |
 | `mod.rs` | 119 | ⬜ |  |
-| `ns.rs` | 1096 | ⬜ |  |
+| `ns.rs` | 1167 | ⬜ |  |
 | `pid.rs` | 194 | ⬜ |  |
 | `pid_hash.rs` | 266 | 🔶 | task iteration |
-| `ptrace.rs` | 752 | ⬜ |  |
-| `task.rs` | 5220 | 🔶 | task layout, counters, comm |
-| `wait.rs` | 442 | ⬜ |  |
+| `ptrace.rs` | 851 | ⬜ |  |
+| `task.rs` | 5433 | 🔶🔁 | task layout, counters, comm; 主线已改动，需重读 |
+| `wait.rs` | 489 | ⬜ |  |
 
-### kernel/src/sched (10685 lines)
+### kernel/src/sched (11012 lines)
 
 | file | lines | status | note |
 |---|---:|---|---|
@@ -509,11 +524,12 @@ when the tree gains a file the map does not know about.
 | `deadline.rs` | 536 | ⬜ |  |
 | `fair.rs` | 1619 | ⬜ |  |
 | `idle.rs` | 100 | ✅ |  |
-| `mod.rs` | 128 | ⬜ |  |
+| `mod.rs` | 129 | ⬜ |  |
 | `rt.rs` | 639 | 🔶 | enqueue/dequeue/pick/bitmap/priority inversion |
-| `sched.rs` | 5974 | 🔶 | pick/switch path, enqueue/dequeue, preemption checks |
+| `sched.rs` | 6254 | 🔶🔁 | pick/switch path, enqueue/dequeue, preemption checks; 主线已改动，需重读 |
+| `stats.rs` | 41 | ⬜ |  |
 | `stop_task.rs` | 94 | ⬜ |  |
-| `wakewatch.rs` | 452 | ⬜ |  |
+| `wakewatch.rs` | 457 | ⬜ |  |
 
 ### kernel/src/security (559 lines)
 
@@ -524,37 +540,38 @@ when the tree gains a file the map does not know about.
 | `lsm.rs` | 184 | ⬜ |  |
 | `mod.rs` | 98 | ⬜ |  |
 
-### kernel/src/sync (6381 lines)
+### kernel/src/sync (6648 lines)
 
 | file | lines | status | note |
 |---|---:|---|---|
 | `condvar.rs` | 260 | ⬜ |  |
-| `futex.rs` | 3956 | 🔶 | wait/wake/wake_op |
-| `mod.rs` | 30 | ⬜ |  |
+| `futex.rs` | 4007 | 🔶🔁 | wait/wake/wake_op; 主线已改动，需重读 |
+| `mod.rs` | 32 | ⬜ |  |
+| `percpu.rs` | 214 | ⬜ |  |
 | `rcu.rs` | 287 | ⬜ |  |
 | `rwlock.rs` | 486 | ⬜ |  |
 | `semaphore.rs` | 481 | ⬜ |  |
 | `seqlock.rs` | 260 | ⬜ |  |
 | `spinlock.rs` | 621 | ⬜ |  |
 
-### kernel/src/syscall (30776 lines)
+### kernel/src/syscall (31693 lines)
 
 | file | lines | status | note |
 |---|---:|---|---|
-| `dispatch.rs` | 1228 | ⬜ |  |
-| `file.rs` | 5049 | 🔶 | futex2 wrappers, fsync |
-| `io.rs` | 2552 | ⬜ |  |
-| `memory.rs` | 3780 | 🔶 | msync/mprotect/madvise 长度处理；msync 回绕已修（ff6fc39b） |
-| `misc.rs` | 3825 | ⬜ |  |
+| `dispatch.rs` | 1214 | ⬜ |  |
+| `file.rs` | 5117 | 🔶🔁 | futex2 wrappers, fsync; 主线已改动，需重读 |
+| `io.rs` | 2635 | ⬜ |  |
+| `memory.rs` | 3905 | 🔶🔁 | msync/mprotect/madvise 长度处理；msync 回绕已修（ff6fc39b）; 主线已改动，需重读 |
+| `misc.rs` | 3881 | ⬜ |  |
 | `mod.rs` | 438 | ⬜ |  |
-| `network.rs` | 4099 | ⬜ |  |
-| `process.rs` | 5561 | 🔶 | reboot/shutdown cascade |
+| `network.rs` | 4246 | ⬜ |  |
+| `process.rs` | 6013 | 🔶🔁 | reboot/shutdown cascade; 主线已改动，需重读 |
 | `sched.rs` | 1176 | ⬜ |  |
 | `signal.rs` | 739 | ⬜ |  |
-| `time.rs` | 1941 | 🔶 | nanosleep, realtime clock |
+| `time.rs` | 1941 | 🔶🔁 | nanosleep, realtime clock; 主线已改动，需重读 |
 | `x86_compat.rs` | 388 | ⬜ |  |
 
-### kernel/src/tests (11295 lines)
+### kernel/src/tests (11820 lines)
 
 | file | lines | status | note |
 |---|---:|---|---|
@@ -572,10 +589,12 @@ when the tree gains a file the map does not know about.
 | `fdtable.rs` | 147 | ⬜ |  |
 | `file_flags.rs` | 54 | ⬜ |  |
 | `file_open.rs` | 153 | ⬜ |  |
+| `fileops_caps.rs` | 175 | ⬜ |  |
 | `fork.rs` | 53 | ⬜ |  |
 | `framebuffer.rs` | 171 | ⬜ |  |
 | `fstat.rs` | 98 | ⬜ |  |
 | `futex_test.rs` | 76 | ⬜ |  |
+| `getdents_cache.rs` | 200 | ⬜ |  |
 | `getpid.rs` | 51 | ⬜ |  |
 | `heap_allocator.rs` | 72 | ⬜ |  |
 | `icache.rs` | 89 | ⬜ |  |
@@ -590,11 +609,12 @@ when the tree gains a file the map does not know about.
 | `mem_cow.rs` | 96 | ⬜ |  |
 | `mem_mmap.rs` | 95 | ⬜ |  |
 | `mkdir_unlink.rs` | 250 | ⬜ |  |
-| `mod.rs` | 651 | ⬜ |  |
+| `mod.rs` | 691 | ⬜ |  |
 | `mount_flags.rs` | 54 | ⬜ |  |
 | `network.rs` | 184 | ⬜ |  |
 | `page_allocator.rs` | 152 | ⬜ |  |
 | `path.rs` | 67 | ⬜ |  |
+| `percpu.rs` | 110 | ⬜ |  |
 | `pid_test.rs` | 74 | ⬜ |  |
 | `pipe2.rs` | 110 | ⬜ |  |
 | `preemptive_scheduler.rs` | 62 | ⬜ |  |
@@ -625,9 +645,9 @@ when the tree gains a file the map does not know about.
 | `vma_flags.rs` | 80 | ⬜ |  |
 | `wait4.rs` | 88 | ⬜ |  |
 
-### kernel/src/trace (1032 lines)
+### kernel/src/trace (1854 lines)
 
 | file | lines | status | note |
 |---|---:|---|---|
-| `files.rs` | 424 | ✅ | written by this review (tracefs files) |
-| `mod.rs` | 608 | ✅ | written by this review (tracepoint core) |
+| `files.rs` | 485 | ✅🔁 | written by this review (tracefs files); 主线已改动，需重读 |
+| `mod.rs` | 1369 | ✅🔁 | written by this review (tracepoint core); 主线已改动，需重读 |
