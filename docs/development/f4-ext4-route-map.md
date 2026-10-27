@@ -197,6 +197,24 @@ mkdrmdir row (p6 median 55-58 ms strong class, min ~33 ms) is this
 row's measurement handle; the fsw jcommit_fast counter (today 0 on OH,
 should read ≈ rmdir count on pbench) is the mechanism probe.
 
+**Arm-1 measurement status (leg 45): BLOCKED by a kernel failure —
+no-journal root lookup.** The A/B instrument exists
+(pbench_boot.py --nojournal: mkfs the probe rootfs with
+^has_journal,^metadata_csum) but the boot dies at init selection:
+ext4 mounts ("ext4 mounted / [ok]") yet every init candidate reads
+"not found" (work/pbench-pa71nj1-serial.log). The image itself is
+clean: a fresh mkfs passes e2fsck -fn, debugfs lists /test/pbench
+(inode 13), and the only feature deltas vs the working journal image
+are has_journal and orphan_file. The OH userdata image has the same
+no-journal feature set and works on OH boots — but everything ever
+read from it was written by the kernel itself; reading MKFS-WRITTEN
+no-journal metadata appears never to have been exercised anywhere.
+This must be fixed (fs lane) before route-1's expected-effect anchor
+can be measured, and it is a compat hole in its own right
+(mkfs.ext4 -O ^has_journal + use is a real-world pattern). Repro:
+`python3 test/pbench_boot.py --bzimage <kernel> --tag nj
+--nojournal`.
+
 **Arm-2 semantics note (leg 44) — what must be true before a lazy
 revoke can be coded.** Current state, with the exact shapes:
 
