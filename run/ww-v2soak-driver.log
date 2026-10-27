@@ -1,2 +1,0 @@
-qemu-system-x86_64: terminating on signal 15 from pid 2638161 (timeout)
-soak rc=124
