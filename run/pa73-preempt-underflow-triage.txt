@@ -38,8 +38,11 @@ drop-site named)"):
 ltp-b-r66-serial.log (fleet v16-class kernel, Oct 26, BEFORE 488528dc
 even existed; main ancestor 47d96961 = Oct 25) carries the IDENTICAL
 class: 142 PREEMPT-HEAL (was=0x10001, ~0x3e8-0x3ea) + 101
-PREEMPT-UNDERFLOW (sub=1, spinlock.rs guard drop). The r66 PREEMPT-LEAK
-samples around the first heal give the loop's RIPs; symbolized against
+PREEMPT-UNDERFLOW (sub=1, spinlock.rs guard drop) — and r66's wedged
+pid 0x525 is the SAME TEST's parent as r17's 0x1d9: waitid08 (the log
+shows `RES|1311|waitid07|PASS` then waitid08's two TINFO lines then
+the heal storm). The r66 PREEMPT-LEAK samples around the first heal
+give the loop's RIPs; symbolized against
 the v16 image (riscv64-linux-gnu-addr2line):
 
   ffffffff8029e2d0  arch::riscv64::cpu::get_thread_id        cpu.rs:19
@@ -89,11 +92,47 @@ r56/r57 in the THOUSANDS on pre-delta kernels). Nothing about it is new.
 4. DIRECT A/B REPRODUCTION (this leg)
 =====================================
 run/pa73-underflow-ab.sh boots both range ends on the same LTP rootfs
-(snapshot=on) over the waitid window (sweepstart=1290):
+(snapshot=on) over the waitid window (sweepstart=1290), with
+dfx=leakhunt on the cmdline so any PREEMPT-LEAK print names the leaked
+count's ACQUIRE SITE (dfx/leakorigin.rs per-task shadow) — handing the
+producer hunt a direct fingerprint if the wedge fires:
   A = 0f806d8b (main tip, carries the delta)
   B = 488528dc (pre-delta control)
 Verdict rule: class on B => delta exonerated as origin (expected, given
-the v16 evidence). RESULTS: [filled after boots]
+the v16 evidence). RESULTS (2026-10-28 02:33-02:58 boots, host load
+19-25, three concurrent arms, sweepstart=1290):
+
+  arm    kernel                    heals  underflows  shape
+  pa73a  0f806d8b (main tip)         78       77      76x pid=0x251
+                                                       lock=..80c93f80
+  pa73b  488528dc (pre-delta)        77       76      75x pid=0x251
+                                                       lock=..80c78ff8
+  pa73c  488528dc + dfx=leakhunt,    63       63      same pid/lock class
+         wwcensus (origin probe)
+
+Both lock addresses symbolize to PROCESS_TREE_LOCK (task.rs:33) in
+their respective kernels. pid 0x251 = the waitid08 parent (idx 1312).
+The class fires at the SAME RATE, same pid, same lock, same shape on
+BOTH range ends. VERDICT: the 488528dc->979fde80 delta is EXONERATED
+as the origin; the s12 r11/r12 "zero" control was a stochastic miss
+(their own r64/r65 vs r66 show the same flake on one kernel).
+
+LEAK-ORIGIN bonus (pa73c, dfx=leakhunt+wwcensus, on the PRE-DELTA
+kernel): the leaked count's acquire sites on pid 0x251 (per-task
+shadow, last-acquire-wins; cnt_after=1 with age 3-30 jiffies = an
+acquire whose drop is OVERDUE at report time):
+
+  9+6+4+3x  kernel/src/sched/sched.rs:4124   dequeue_if_enqueued's
+             grq().lock_irqsave() (do_wait's rescan/ERESTARTSYS paths)
+  4x        kernel/src/process/wait.rs:361   finish_wait's
+             list.lock_irqsave()
+  3x        kernel/src/sync/spinlock.rs:292  Spinlock::lock (plain
+             guard acquire)
+
+The leak lives in the do_wait scan/prepare/finish machinery's guard
+scopes — on a kernel with NO D-7, NO virtio-input, NO posix_mq delta.
+Handoff: this is the wildwrite-hunt lane's producer; the pa73c serial
+(.ltp/serial-pa73c.log in the perf-audit worktree) is the capture.
 
 5. VERDICT FOR THE COORDINATOR
 ==============================

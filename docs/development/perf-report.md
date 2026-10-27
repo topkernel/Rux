@@ -2184,3 +2184,78 @@ load-gated watcher run/pa72-reanchor.sh holds the board unbanked —
 bank only if load1<=9 AND qemus<=8 opens before the leg ends);
 (4) F4 arm-1 re-queued behind the fs fix (unchanged); (5) Tier-2
 gate anchor unchanged (pb1 DEBUG column).
+
+### 8.10.16 Leg 47 (2026-10-28): the PREEMPT-UNDERFLOW attribution is REFUTED by direct A/B — the waitid-cluster class pre-dates the 488528dc->979fde80 delta and D-7 cannot produce it; leak-origin sites captured on the pre-delta kernel; AF_UNIX read(2) direct user-drain carried to A/B
+
+Main 0f806d8b merged at leg start (b84eba6f). Priority 1 was the
+coordinator-routed triage of stress-fleet s12's finding (PREEMPT-UNDERFLOW
+on waitid/ptrace rows, suspected on the D-7 percpu rework via the
+488528dc->979fde80 delta). Full evidence file:
+run/pa73-preempt-underflow-triage.txt.
+
+**(1) The prints are the heal's own guard-unpair report, not a new
+producer.** Every cluster in the stress lane's r17 logs is
+`PREEMPT-HEAL was=0x10001 held=~0x3f0` followed by the underflow at
+that same guard's drop — the exact "documented guard-unpair path"
+their session-3 verdict banked. was=0x10001 = one PREEMPT bit + the
+tick's own in-flight HARDIRQ_OFFSET; held ~1008 jiffies = the heal's
+10 s threshold.
+
+**(2) The wedge pre-dates the delta.** Fleet ltp-b r66 (v16-class
+kernel, main ancestor 47d96961 = Oct 25, before 488528dc existed)
+carries the identical class: 142 heals + 101 underflows, wedged pid
+0x525 = the SAME test's parent (waitid08), PREEMPT-LEAK pctick=1
+samples whose RIPs symbolize into `do_wait`'s
+`for_each_group_child` scan loop. Fleet rounds r51-r65 tally
+PREEMPT-LEAK routinely (r56/r57 in the thousands) on pre-delta
+kernels.
+
+**(3) Direct A/B on both range ends (pa73, 2026-10-28 02:33, three
+concurrent arms, sweepstart=1290, same LTP rootfs):**
+
+| arm | kernel | heals | underflows | dominant shape |
+|---|---|---|---|---|
+| pa73a | 0f806d8b (tip) | 78 | 77 | 76x pid=0x251 PROCESS_TREE_LOCK |
+| pa73b | 488528dc (pre-delta) | 77 | 76 | 75x pid=0x251 PROCESS_TREE_LOCK |
+| pa73c | 488528dc + leakhunt/wwcensus | 63 | 63 | same pid/lock class |
+
+Same rate, same pid (the waitid08 parent), same lock (both addresses
+symbolize to task.rs:33), same shape. The delta is exonerated as the
+origin; the s12 r11/r12 "zero" control was a stochastic miss (their
+own r64/r65 vs r66 flake the same way on one kernel).
+
+**(4) D-7 is exonerated by mechanism.** CpuLocal::with touches only
+the IRQ flag (save_and_disable_irq/restore) and a per-row in_use
+flag; it never adds/subtracts preempt_count. The small_alloc
+conversion kept identical irq windows and fallbacks (diff-verified
+488528dc..979fde80). The s12 "D-7 per-CPU preempt-count carrier"
+description does not match the code — there is no preempt-count
+carrier in D-7.
+
+**(5) Mechanism + handoff.** A leaked/abandoned PREEMPT +1 (the
+standing wildwrite-hunt producer) makes the holder un-sleepable
+(__schedule refuses a nonzero count); in do_wait the task then spins
+the children-scan loop monopolizing its CPU until the 10 s tick heal
+clears the base; if the heal lands inside a live guard window, that
+guard's drop books -1 on zero = the underflow print. LTP rows are
+unaffected (their own byte-identical failure-set A/B). pa73c's
+dfx=leakhunt+wwcensus boot captured the acquire sites on the
+PRE-DELTA kernel: sched.rs:4124 (dequeue_if_enqueued's
+grq().lock_irqsave), wait.rs:361 (finish_wait's list lock_irqsave),
+spinlock.rs:292 — all do_wait-machinery guard scopes, cnt_after=1
+with the drop overdue. Capture preserved at
+run/pa73-underflow/serial-pa73c.log; the producer hunt stays the
+stress lane's (their instrument, their hunt — now with a kernel-free
+fingerprint on 488528dc).
+
+**(6) AF_UNIX read(2) direct user-drain (leg 46's lever, WIP
+2f66b0b8)**: verified intact post-merge, compiles riscv64 + x86_64
+strong (run/pa74-{main,branch}-strong-bzImage, distinct hashes).
+A/B pair (M,B,B,M interleaved pbench, run/pa74-pair.sh) launched
+this leg; results and the IPC-domain gate (P5 rows +-20% or
+improved) to be banked in the follow-up entry.
+
+Gates so far this leg: dual-arch build rc=0 (riscv64 debug + x86_64
+strong on both range ends and the branch tip); QEMU discipline held
+(2-3 lane boots at a time, own PIDs only, mem floor >=36G throughout,
+boots launched only after the 60-min leg-start hold).
