@@ -1,0 +1,561 @@
+
+OpenSBI v1.8
+   ____                    _____ ____ _____
+  / __ \                  / ____|  _ \_   _|
+ | |  | |_ __   ___ _ __ | (___ | |_) || |
+ | |  | | '_ \ / _ \ '_ \ \___ \|  _ < | |
+ | |__| | |_) |  __/ | | |____) | |_) || |_
+  \____/| .__/ \___|_| |_|_____/|____/_____|
+        | |
+        |_|
+
+Platform Name               : riscv-virtio,qemu
+Platform Features           : medeleg
+Platform HART Count         : 2
+Platform HART Protection    : pmp
+Platform IPI Device         : aclint-mswi
+Platform Timer Device       : aclint-mtimer @ 10000000Hz
+Platform Console Device     : uart8250
+Platform HSM Device         : ---
+Platform PMU Device         : ---
+Platform Reboot Device      : syscon-reboot
+Platform Shutdown Device    : syscon-poweroff
+Platform Suspend Device     : ---
+Platform CPPC Device        : ---
+Firmware Base               : 0x80000000
+Firmware Size               : 333 KB
+Firmware RW Offset          : 0x40000
+Firmware RW Size            : 77 KB
+Firmware Heap Offset        : 0x49000
+Firmware Heap Size          : 41 KB (total), 0 KB (reserved), 12 KB (used), 27 KB (free)
+Firmware Scratch Size       : 4096 B (total), 1464 B (used), 2632 B (free)
+Runtime SBI Version         : 3.0
+Standard SBI Extensions     : ipi,pmu,srst,sse,hsm,rfnc,fwft,time,base,legacy,dbcn,dbtr
+Experimental SBI Extensions : none
+
+Domain0 Name                : root
+Domain0 Boot HART           : 0
+Domain0 HARTs               : 0*,1*
+Domain0 Region00            : 0x0000000080040000-0x000000008005ffff M: (F,R,W) S/U: ()
+Domain0 Region01            : 0x0000000080000000-0x000000008003ffff M: (F,R,X) S/U: ()
+Domain0 Region02            : 0x0000000000100000-0x0000000000100fff M: (I,R,W) S/U: (R,W)
+Domain0 Region03            : 0x0000000010000000-0x0000000010000fff M: (I,R,W) S/U: (R,W)
+Domain0 Region04            : 0x0000000002000000-0x000000000200ffff M: (I,R,W) S/U: ()
+Domain0 Region05            : 0x000000000c400000-0x000000000c5fffff M: (I,R,W) S/U: (R,W)
+Domain0 Region06            : 0x000000000c000000-0x000000000c3fffff M: (I,R,W) S/U: (R,W)
+Domain0 Region07            : 0x0000000000000000-0xffffffffffffffff M: () S/U: (R,W,X)
+Domain0 Next Address        : 0x0000000080200000
+Domain0 Next Arg1           : 0x00000000bfe00000
+Domain0 Next Mode           : S-mode
+Domain0 SysReset            : yes
+Domain0 SysSuspend          : yes
+
+Boot HART ID                : 0
+Boot HART Domain            : root
+Boot HART Priv Version      : v1.12
+Boot HART Base ISA          : rv64imafdcvh
+Boot HART ISA Extensions    : sstc,zicntr,zihpm,zicboz,zicbom,sdtrig,svadu
+Boot HART PMP Count         : 16
+Boot HART PMP Granularity   : 2 bits
+Boot HART PMP Address Bits  : 54
+Boot HART MHPM Info         : 16 (0x0007fff8)
+Boot HART Debug Triggers    : 2 triggers
+Boot HART MIDELEG           : 0x0000000000001666
+Boot HART MEDELEG           : 0x0000000000f4b509
+[36m[1m
+██████  ██    ██ ██   ██
+██   ██ ██    ██  ██ ██
+██████  ██    ██   ███
+██   ██ ██    ██  ██ ██
+██   ██  ██████  ██   ██
+[0m[32m  [ RISC-V 64-bit | POSIX Compatible | v0.1.0 ]
+
+[0mboot: static regions phys_end=0xc0000000 heap_region_end=0xc0000000 heap=0x81400000+0x8000000 slab=0x89400000+0x400000
+[33mKernel starting...
+
+[0m[36mModule            Description                        Status
+----------------  --------------------------------   --------
+[0mconsole:          UART ns16550a driver               [ok]
+trap:             stvec handler installed            [ok]
+trap:             ecall syscall handler              [ok]
+mm:               Sv39 3-level page table            [ok]
+mm:               satp CSR configured                [ok]
+mm:               buddy allocator order 0-12         [ok]
+mm:               heap region 128MB @ 0x81400000     [ok]
+mm:               slab allocator 4MB                 [ok]
+boot:             FDT/DTB parsed                     [ok]
+boot:             cmd: root=/dev/vda rw init=...     [ok]
+console:          console=ttyS0 (ns16550a uart)      [ok]
+mm:               linear mapping 1024 MB             [ok]
+mm:               vmemmap mapping initialized        [ok]
+mm:               layout: kernel=0x80200000-0x8140   [ok]
+mm:               layout: heap=0x81400000-0x894000   [ok]
+mm:               262144 page descriptors (span 10   [ok]
+page_alloc: zone Normal span=262144 pages (1024 MB), seeded=215023 (839 MB), unmanaged-in-span=47121 (184 MB)
+mm:               zone allocator initialized (2621   [ok]
+memblock:         total 1024MB, available 839MB      [ok]
+mm:               device mappings created            [ok]
+irq:              irq_desc array initialized         [ok]
+intc:             PLIC @ 0x0C000000                  [ok]
+intc:             IRQ domain + chip registered       [ok]
+ipi:              SSIP software IRQ + bitmap multi   [ok]
+console:          UART interrupt-driven RX           [ok]
+bio:              buffer cache layer                 [ok]
+fs:               ext4 driver loaded                 [ok]
+fs:               ramfs mounted /                    [ok]
+fs:               procfs initialized                 [ok]
+fs:               procfs mounted /proc               [ok]
+fs:               sysfs mounted /sys                 [ok]
+fsw: off (cmdline fsw param = None)
+fs:               debugfs mounted /sys/kernel/debu   [ok]
+cgroup:           v2 unified hierarchy init          [ok]
+cgroup:           cgroup2 mounted /sys/fs/cgroup     [ok]
+driver:           vda virtio-blk 2621440 sectors     [ok]
+driver:           virtio-blk PCI x1                  [ok]
+driver:           GenDisk registered                 [ok]
+fs:               root /dev/vda -> vda               [done]
+ext4:             journal recovery running           [done]
+fs:               ext4 mounted /                     [ok]
+fs:               procfs remounted /proc             [ok]
+mm:               swap 256 MB tail carve             [ok]
+driver:           virtio-net x1                      [ok]
+vdso:             clock_gettime fast path            [ok]
+security:         capability LSM initialized         [ok]
+sched:            CFS scheduler v1                   [ok]
+sched:            runqueue per-CPU                   [ok]
+sched:            PID allocator init                 [ok]
+sched:            idle task (PID 0)                  [ok]
+mm:               kswapd reclaim thread              [ok]
+dfx:              diagnostic subsystem               [ok]
+ipc:              System V + POSIX MQ                [ok]
+smp:              2 CPUs online (boot hart 0)        [ok]
+softirq:          ksoftirqd per-CPU threads          [ok]
+dfx:              khungtaskd hung-task detector      [ok]
+trap:             sie.SEIE enabled                   [ok]
+[31mdriver:           virtio-gpu not found               [fail][0m
+fs:               devfs mounted /dev                 [ok]
+DEFERFREE: engaged (first MmStruct free held back 1500ms)
+fs:               tmpfs mounted /dev/shm             [ok]
+fs:               tmpfs mounted /run                 [ok]
+driver:           evdev /dev/input/event0            [ok]
+driver:           evdev /dev/input/event1            [ok]
+driver:           PS/2 keyboard (stub)               [ok]
+driver:           PS/2 mouse (stub)                  [ok]
+PARKWALK-ARMED
+init:             ELF /bin/sh loaded                 [ok]
+init:             init task (PID 1) enqueued         [ok]
+
+[1;36mWelcome to [1;32mRux OS[0m [90m(RISC-V 64)[0m
+[90m- [1mmrsh[0m[90m (POSIX shell) | A minimal POSIX-compatible shell[0m
+
+open ENOENT: '/root/.mrsh_history' (pid 1)
+[1;32mroot[0m:[1;34m/[0m# WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/1 hres_next=1844674407368434ms
+WW2: si_runs=173 si_busy=17ms ticks=[0,0] vec=[0,0,0,0,4,0,0,0,170,0]
+WW3: grq=0 cfs=0 idle=0x3 nr=1 cpu0=(pid=0 st=0x0 pc=256) cpu1=(pid=0 st=0x0 pc=0)
+WW: wakes=18 picks=16 avg_run=44ms stranded=0 strand_max=0ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/1 hres_next=1844674407367434ms
+WW2: si_runs=199 si_busy=12ms ticks=[0,0] vec=[0,0,0,0,0,0,0,0,200,0]
+WW3: grq=0 cfs=0 idle=0x3 nr=2 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=0 st=0x0 pc=256)
+WW: wakes=18 picks=16 avg_run=44ms stranded=0 strand_max=0ms
+
+PREEMPT-LEAK cpu=0000000000000001 pid=0000000000000000 pc=0000000000010000 held_nonzero_for=00000000000000c8jiffies rip=ffffffff800cf6fe
+
+PREEMPT-LEAK cpu=0000000000000001 pid=0000000000000000 pc=0000000000010000 held_nonzero_for=00000000000000dcjiffies rip=ffffffff800cf6fe
+
+PREEMPT-LEAK cpu=0000000000000000 pid=0000000000000000 pc=0000000000010000 held_nonzero_for=00000000000000e2jiffies rip=ffffffff800cf6fe
+
+PREEMPT-LEAK cpu=0000000000000000 pid=0000000000000000 pc=0000000000010000 held_nonzero_for=00000000000000f6jiffies rip=ffffffff800cf6fe
+
+PREEMPT-LEAK cpu=0000000000000000 pid=0000000000000000 pc=0000000000010000 held_nonzero_for=000000000000010ajiffies rip=ffffffff800cf6fe
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/1 hres_next=1844674407366434ms
+WW2: si_runs=199 si_busy=14ms ticks=[0,0] vec=[0,0,0,0,0,0,0,0,199,0]
+WW3: grq=0 cfs=0 idle=0x3 nr=2 cpu0=(pid=0 st=0x0 pc=65536) cpu1=(pid=0 st=0x0 pc=256)
+WW: wakes=18 picks=16 avg_run=44ms stranded=0 strand_max=0ms
+
+PREEMPT-LEAK cpu=0000000000000000 pid=0000000000000000 pc=0000000000010000 held_nonzero_for=000000000000011ejiffies rip=ffffffff800cf6fe
+
+PREEMPT-LEAK cpu=0000000000000000 pid=0000000000000000 pc=0000000000010000 held_nonzero_for=0000000000000132jiffies rip=ffffffff800cf6fe
+
+PREEMPT-LEAK cpu=0000000000000000 pid=0000000000000000 pc=0000000000010000 held_nonzero_for=0000000000000146jiffies rip=ffffffff800cf6fe
+
+PREEMPT-LEAK cpu=0000000000000000 pid=0000000000000000 pc=0000000000010000 held_nonzero_for=000000000000015ajiffies rip=ffffffff800cf6fe
+
+PREEMPT-LEAK cpu=0000000000000000 pid=0000000000000000 pc=0000000000010000 held_nonzero_for=000000000000016ejiffies rip=ffffffff800cf6fe
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/1 hres_next=1844674407365434ms
+WW2: si_runs=200 si_busy=12ms ticks=[0,0] vec=[0,0,0,0,0,0,0,0,200,0]
+WW3: grq=0 cfs=0 idle=0x3 nr=2 cpu0=(pid=0 st=0x0 pc=65536) cpu1=(pid=0 st=0x0 pc=256)
+WW: wakes=18 picks=16 avg_run=44ms stranded=0 strand_max=0ms
+
+PREEMPT-LEAK cpu=0000000000000001 pid=0000000000000000 pc=0000000000010000 held_nonzero_for=0000000000000190jiffies rip=ffffffff800cf6fe
+
+PREEMPT-LEAK cpu=0000000000000000 pid=0000000000000000 pc=0000000000010000 held_nonzero_for=0000000000000196jiffies rip=ffffffff800cf6fe
+
+PREEMPT-LEAK cpu=0000000000000000 pid=0000000000000000 pc=0000000000010000 held_nonzero_for=00000000000001aajiffies rip=ffffffff800cf6fe
+
+PREEMPT-LEAK cpu=0000000000000000 pid=0000000000000000 pc=0000000000010000 held_nonzero_for=00000000000001bejiffies rip=ffffffff800cf6fe
+
+PREEMPT-LEAK cpu=0000000000000000 pid=0000000000000000 pc=0000000000010000 held_nonzero_for=00000000000001d2jiffies rip=ffffffff800cf6fe
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/1 hres_next=1844674407364434ms
+WW2: si_runs=200 si_busy=10ms ticks=[0,0] vec=[0,0,0,0,0,0,0,0,200,0]
+WW3: grq=0 cfs=0 idle=0x3 nr=3 cpu0=(pid=0 st=0x0 pc=256) cpu1=(pid=0 st=0x0 pc=256)
+WW: wakes=18 picks=16 avg_run=44ms stranded=0 strand_max=0ms
+
+PREEMPT-LEAK cpu=0000000000000000 pid=0000000000000000 pc=0000000000010000 held_nonzero_for=00000000000001e6jiffies rip=ffffffff800cf6fe
+
+PREEMPT-LEAK cpu=0000000000000000 pid=0000000000000000 pc=0000000000010000 held_nonzero_for=00000000000001fajiffies rip=ffffffff800cf6fe
+
+PREEMPT-LEAK cpu=0000000000000000 pid=0000000000000000 pc=0000000000010000 held_nonzero_for=000000000000020ejiffies rip=ffffffff800cf6fe
+
+PREEMPT-LEAK cpu=0000000000000000 pid=0000000000000000 pc=0000000000010000 held_nonzero_for=0000000000000222jiffies rip=ffffffff800cf6fe
+
+PREEMPT-LEAK cpu=0000000000000000 pid=0000000000000000 pc=0000000000010000 held_nonzero_for=0000000000000236jiffies rip=ffffffff800cf6fe
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/1 hres_next=1844674407363434ms
+WW2: si_runs=200 si_busy=9ms ticks=[0,0] vec=[0,0,0,0,0,0,0,0,200,0]
+WW3: grq=0 cfs=0 idle=0x3 nr=2 cpu0=(pid=0 st=0x0 pc=65536) cpu1=(pid=0 st=0x0 pc=256)
+WW: wakes=18 picks=16 avg_run=44ms stranded=0 strand_max=0ms
+
+PREEMPT-LEAK cpu=0000000000000000 pid=0000000000000000 pc=0000000000010000 held_nonzero_for=000000000000024ajiffies rip=ffffffff800cf6fe
+
+PREEMPT-LEAK cpu=0000000000000000 pid=0000000000000000 pc=0000000000010000 held_nonzero_for=000000000000025ejiffies rip=ffffffff800cf6fe
+
+PREEMPT-LEAK cpu=0000000000000000 pid=0000000000000000 pc=0000000000010000 held_nonzero_for=0000000000000272jiffies rip=ffffffff800cf6fe
+
+PREEMPT-LEAK cpu=0000000000000001 pid=0000000000000000 pc=0000000000010000 held_nonzero_for=0000000000000294jiffies rip=ffffffff800cf6fe
+
+PREEMPT-LEAK cpu=0000000000000000 pid=0000000000000000 pc=0000000000010000 held_nonzero_for=000000000000029ajiffies rip=ffffffff800cf6fe
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/1 hres_next=1844674407362434ms
+WW2: si_runs=200 si_busy=11ms ticks=[0,0] vec=[0,0,0,0,0,0,0,0,200,0]
+WW3: grq=0 cfs=0 idle=0x3 nr=2 cpu0=(pid=0 st=0x0 pc=65536) cpu1=(pid=0 st=0x0 pc=256)
+WW: wakes=18 picks=16 avg_run=44ms stranded=0 strand_max=0ms
+
+PREEMPT-LEAK cpu=0000000000000000 pid=0000000000000000 pc=0000000000010000 held_nonzero_for=00000000000002aejiffies rip=ffffffff800cf6fe
+
+PREEMPT-LEAK cpu=0000000000000000 pid=0000000000000000 pc=0000000000010000 held_nonzero_for=00000000000002c2jiffies rip=ffffffff800cf6fe
+
+PREEMPT-LEAK cpu=0000000000000000 pid=0000000000000000 pc=0000000000010000 held_nonzero_for=00000000000002d6jiffies rip=ffffffff800cf6fe
+
+PREEMPT-LEAK cpu=0000000000000000 pid=0000000000000000 pc=0000000000010000 held_nonzero_for=00000000000002eajiffies rip=ffffffff800cf6fe
+
+PREEMPT-LEAK cpu=0000000000000000 pid=0000000000000000 pc=0000000000010000 held_nonzero_for=00000000000002fejiffies rip=ffffffff800cf6fe
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/1 hres_next=1844674407361434ms
+WW2: si_runs=200 si_busy=10ms ticks=[0,0] vec=[0,0,0,0,0,0,0,0,200,0]
+WW3: grq=0 cfs=0 idle=0x3 nr=1 cpu0=(pid=0 st=0x0 pc=256) cpu1=(pid=0 st=0x0 pc=65536)
+WW: wakes=18 picks=16 avg_run=44ms stranded=0 strand_max=0ms
+
+PREEMPT-LEAK cpu=0000000000000000 pid=0000000000000000 pc=0000000000010000 held_nonzero_for=0000000000000312jiffies rip=ffffffff800cf6fe
+
+PREEMPT-LEAK cpu=0000000000000000 pid=0000000000000000 pc=0000000000010000 held_nonzero_for=0000000000000326jiffies rip=ffffffff800cf6fe
+
+PREEMPT-LEAK cpu=0000000000000000 pid=0000000000000000 pc=0000000000010000 held_nonzero_for=000000000000033ajiffies rip=ffffffff800cf6fe
+
+PREEMPT-LEAK cpu=0000000000000000 pid=0000000000000000 pc=0000000000010000 held_nonzero_for=000000000000034ejiffies rip=ffffffff800cf6fe
+
+PREEMPT-LEAK cpu=0000000000000000 pid=0000000000000000 pc=0000000000010000 held_nonzero_for=0000000000000362jiffies rip=ffffffff800cf6fe
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/1 hres_next=1844674407360434ms
+WW2: si_runs=200 si_busy=9ms ticks=[0,0] vec=[0,0,0,0,0,0,0,0,200,0]
+WW3: grq=0 cfs=0 idle=0x3 nr=2 cpu0=(pid=0 st=0x0 pc=65536) cpu1=(pid=0 st=0x0 pc=256)
+WW: wakes=18 picks=16 avg_run=44ms stranded=0 strand_max=0ms
+
+PREEMPT-LEAK cpu=0000000000000001 pid=0000000000000000 pc=0000000000010000 held_nonzero_for=0000000000000384jiffies rip=ffffffff800cf6fe
+
+PREEMPT-LEAK cpu=0000000000000000 pid=0000000000000000 pc=0000000000010000 held_nonzero_for=000000000000038ajiffies rip=ffffffff800cf6fe
+
+PREEMPT-LEAK cpu=0000000000000000 pid=0000000000000000 pc=0000000000010000 held_nonzero_for=000000000000039ejiffies rip=ffffffff800cf6fe
+
+PREEMPT-LEAK cpu=0000000000000000 pid=0000000000000000 pc=0000000000010000 held_nonzero_for=00000000000003b2jiffies rip=ffffffff800cf6fe
+
+PREEMPT-LEAK cpu=0000000000000000 pid=0000000000000000 pc=0000000000010000 held_nonzero_for=00000000000003c6jiffies rip=ffffffff800cf6fe
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/1 hres_next=1844674407359434ms
+WW2: si_runs=200 si_busy=10ms ticks=[0,0] vec=[0,0,0,0,0,0,0,0,200,0]
+WW3: grq=0 cfs=0 idle=0x3 nr=2 cpu0=(pid=0 st=0x0 pc=65536) cpu1=(pid=0 st=0x0 pc=256)
+WW: wakes=18 picks=16 avg_run=44ms stranded=0 strand_max=0ms
+
+PREEMPT-LEAK cpu=0000000000000000 pid=0000000000000000 pc=0000000000010000 held_nonzero_for=00000000000003dajiffies rip=ffffffff800cf6fe
+
+PREEMPT-LEAK cpu=0000000000000000 pid=0000000000000000 pc=0000000000010000 held_nonzero_for=00000000000003eejiffies rip=ffffffff800cf6fe
+
+PREEMPT-LEAK cpu=0000000000000000 pid=0000000000000000 pc=0000000000010000 held_nonzero_for=0000000000000402jiffies rip=ffffffff800cf6fe
+
+PREEMPT-LEAK cpu=0000000000000000 pid=0000000000000000 pc=0000000000010000 held_nonzero_for=0000000000000416jiffies rip=ffffffff800cf6fe
+
+PREEMPT-LEAK cpu=0000000000000000 pid=0000000000000000 pc=0000000000010000 held_nonzero_for=000000000000042ajiffies rip=ffffffff800cf6fe
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/1 hres_next=1844674407358434ms
+WW2: si_runs=200 si_busy=9ms ticks=[0,0] vec=[0,0,0,0,0,0,0,0,200,0]
+WW3: grq=0 cfs=0 idle=0x3 nr=2 cpu0=(pid=0 st=0x0 pc=65536) cpu1=(pid=0 st=0x0 pc=256)
+WW: wakes=18 picks=16 avg_run=44ms stranded=0 strand_max=0ms
+
+PREEMPT-LEAK cpu=0000000000000000 pid=0000000000000000 pc=0000000000010000 held_nonzero_for=000000000000043ejiffies rip=ffffffff800cf6fe
+
+PREEMPT-LEAK cpu=0000000000000001 pid=0000000000000000 pc=0000000000010000 held_nonzero_for=0000000000000460jiffies rip=ffffffff800cf6fe
+
+PREEMPT-LEAK cpu=0000000000000001 pid=0000000000000000 pc=0000000000010000 held_nonzero_for=0000000000000474jiffies rip=ffffffff800cf6fe
+
+PREEMPT-LEAK cpu=0000000000000000 pid=0000000000000000 pc=0000000000010000 held_nonzero_for=000000000000047ajiffies rip=ffffffff800cf6fe
+
+PREEMPT-LEAK cpu=0000000000000001 pid=0000000000000000 pc=0000000000010000 held_nonzero_for=000000000000049cjiffies rip=ffffffff800cf6fe
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/1 hres_next=1844674407357434ms
+WW2: si_runs=200 si_busy=9ms ticks=[0,0] vec=[0,0,0,0,0,0,0,0,200,0]
+WW3: grq=0 cfs=0 idle=0x3 nr=1 cpu0=(pid=0 st=0x0 pc=256) cpu1=(pid=0 st=0x0 pc=65536)
+WW: wakes=18 picks=16 avg_run=44ms stranded=0 strand_max=0ms
+
+PREEMPT-LEAK cpu=0000000000000001 pid=0000000000000000 pc=0000000000010000 held_nonzero_for=00000000000004b0jiffies rip=ffffffff800cf6fe
+
+PREEMPT-LEAK cpu=0000000000000000 pid=0000000000000000 pc=0000000000010000 held_nonzero_for=00000000000004b6jiffies rip=ffffffff800cf6fe
+
+PREEMPT-LEAK cpu=0000000000000000 pid=0000000000000000 pc=0000000000010000 held_nonzero_for=00000000000004cajiffies rip=ffffffff800cf6fe
+
+PREEMPT-LEAK cpu=0000000000000000 pid=0000000000000000 pc=0000000000010000 held_nonzero_for=00000000000004dejiffies rip=ffffffff800cf6fe
+
+PREEMPT-LEAK cpu=0000000000000000 pid=0000000000000000 pc=0000000000010000 held_nonzero_for=00000000000004f2jiffies rip=ffffffff800cf6fe
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/1 hres_next=1844674407356434ms
+WW2: si_runs=200 si_busy=10ms ticks=[0,0] vec=[0,0,0,0,0,0,0,0,200,0]
+WW3: grq=0 cfs=0 idle=0x3 nr=2 cpu0=(pid=0 st=0x0 pc=65536) cpu1=(pid=0 st=0x0 pc=256)
+WW: wakes=18 picks=16 avg_run=44ms stranded=0 strand_max=0ms
+
+PREEMPT-LEAK cpu=0000000000000000 pid=0000000000000000 pc=0000000000010000 held_nonzero_for=0000000000000506jiffies rip=ffffffff800cf6fe
+
+PREEMPT-LEAK cpu=0000000000000000 pid=0000000000000000 pc=0000000000010000 held_nonzero_for=000000000000051ajiffies rip=ffffffff800cf6fe
+
+PREEMPT-LEAK cpu=0000000000000001 pid=0000000000000000 pc=0000000000010000 held_nonzero_for=000000000000053cjiffies rip=ffffffff800cf6fe
+
+PREEMPT-LEAK cpu=0000000000000000 pid=0000000000000000 pc=0000000000010000 held_nonzero_for=0000000000000542jiffies rip=ffffffff800cf6fe
+
+PREEMPT-LEAK cpu=0000000000000000 pid=0000000000000000 pc=0000000000010000 held_nonzero_for=0000000000000556jiffies rip=ffffffff800cf6fe
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/1 hres_next=1844674407355434ms
+WW2: si_runs=200 si_busy=9ms ticks=[0,0] vec=[0,0,0,0,0,0,0,0,200,0]
+WW3: grq=0 cfs=0 idle=0x3 nr=2 cpu0=(pid=0 st=0x0 pc=65536) cpu1=(pid=0 st=0x0 pc=256)
+WW: wakes=18 picks=16 avg_run=44ms stranded=0 strand_max=0ms
+
+PREEMPT-LEAK cpu=0000000000000000 pid=0000000000000000 pc=0000000000010000 held_nonzero_for=000000000000056ajiffies rip=ffffffff800cf6fe
+
+PREEMPT-LEAK cpu=0000000000000000 pid=0000000000000000 pc=0000000000010000 held_nonzero_for=000000000000057ejiffies rip=ffffffff800cf6fe
+
+PREEMPT-LEAK cpu=0000000000000000 pid=0000000000000000 pc=0000000000010000 held_nonzero_for=0000000000000592jiffies rip=ffffffff800cf6fe
+
+PREEMPT-LEAK cpu=0000000000000000 pid=0000000000000000 pc=0000000000010000 held_nonzero_for=00000000000005a6jiffies rip=ffffffff800cf6fe
+
+PREEMPT-LEAK cpu=0000000000000000 pid=0000000000000000 pc=0000000000010000 held_nonzero_for=00000000000005bajiffies rip=ffffffff800cf6fe
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/1 hres_next=1844674407354434ms
+WW2: si_runs=200 si_busy=9ms ticks=[0,0] vec=[0,0,0,0,0,0,0,0,200,0]
+WW3: grq=0 cfs=0 idle=0x3 nr=2 cpu0=(pid=0 st=0x0 pc=65536) cpu1=(pid=0 st=0x0 pc=256)
+WW: wakes=18 picks=16 avg_run=44ms stranded=0 strand_max=0ms
+
+PREEMPT-LEAK cpu=0000000000000000 pid=0000000000000000 pc=0000000000010000 held_nonzero_for=00000000000005cejiffies rip=ffffffff800cf6fe
+
+PREEMPT-LEAK cpu=0000000000000000 pid=0000000000000000 pc=0000000000010000 held_nonzero_for=00000000000005e2jiffies rip=ffffffff800cf6fe
+
+PREEMPT-LEAK cpu=0000000000000000 pid=0000000000000000 pc=0000000000010000 held_nonzero_for=00000000000005f6jiffies rip=ffffffff800cf6fe
+
+PREEMPT-LEAK cpu=0000000000000000 pid=0000000000000000 pc=0000000000010000 held_nonzero_for=000000000000060ajiffies rip=ffffffff800cf6fe
+
+PREEMPT-LEAK cpu=0000000000000000 pid=0000000000000000 pc=0000000000010000 held_nonzero_for=000000000000061ejiffies rip=ffffffff800cf6fe
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/1 hres_next=1844674407353434ms
+WW2: si_runs=200 si_busy=9ms ticks=[0,0] vec=[0,0,0,0,0,0,0,0,200,0]
+WW3: grq=0 cfs=0 idle=0x3 nr=1 cpu0=(pid=0 st=0x0 pc=256) cpu1=(pid=0 st=0x0 pc=65536)
+WW: wakes=18 picks=16 avg_run=44ms stranded=0 strand_max=0ms
+
+PREEMPT-LEAK cpu=0000000000000000 pid=0000000000000000 pc=0000000000010000 held_nonzero_for=0000000000000632jiffies rip=ffffffff800cf6fe
+
+PREEMPT-LEAK cpu=0000000000000000 pid=0000000000000000 pc=0000000000010000 held_nonzero_for=0000000000000646jiffies rip=ffffffff800cf6fe
+
+PREEMPT-LEAK cpu=0000000000000000 pid=0000000000000000 pc=0000000000010000 held_nonzero_for=000000000000065ajiffies rip=ffffffff800cf6fe
+
+PREEMPT-LEAK cpu=0000000000000000 pid=0000000000000000 pc=0000000000010000 held_nonzero_for=000000000000066ejiffies rip=ffffffff800cf6fe
+
+PREEMPT-LEAK cpu=0000000000000000 pid=0000000000000000 pc=0000000000010000 held_nonzero_for=0000000000000682jiffies rip=ffffffff800cf6fe
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/1 hres_next=1844674407352434ms
+WW2: si_runs=200 si_busy=9ms ticks=[0,0] vec=[0,0,0,0,0,0,0,0,200,0]
+WW3: grq=0 cfs=0 idle=0x3 nr=2 cpu0=(pid=0 st=0x0 pc=65536) cpu1=(pid=0 st=0x0 pc=256)
+WW: wakes=18 picks=16 avg_run=44ms stranded=0 strand_max=0ms
+
+PREEMPT-LEAK cpu=0000000000000000 pid=0000000000000000 pc=0000000000010000 held_nonzero_for=0000000000000696jiffies rip=ffffffff800cf6fe
+
+PREEMPT-LEAK cpu=0000000000000000 pid=0000000000000000 pc=0000000000010000 held_nonzero_for=00000000000006aajiffies rip=ffffffff800cf6fe
+
+PREEMPT-LEAK cpu=0000000000000000 pid=0000000000000000 pc=0000000000010000 held_nonzero_for=00000000000006bejiffies rip=ffffffff800cf6fe
+
+PREEMPT-LEAK cpu=0000000000000000 pid=0000000000000000 pc=0000000000010000 held_nonzero_for=00000000000006d2jiffies rip=ffffffff800cf6fe
+
+PREEMPT-LEAK cpu=0000000000000000 pid=0000000000000000 pc=0000000000010000 held_nonzero_for=00000000000006e6jiffies rip=ffffffff800cf6fe
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/1 hres_next=1844674407351434ms
+WW2: si_runs=200 si_busy=10ms ticks=[0,0] vec=[0,0,0,0,0,0,0,0,200,0]
+WW3: grq=0 cfs=0 idle=0x3 nr=2 cpu0=(pid=0 st=0x0 pc=65536) cpu1=(pid=0 st=0x0 pc=256)
+WW: wakes=18 picks=16 avg_run=44ms stranded=0 strand_max=0ms
+
+PREEMPT-LEAK cpu=0000000000000000 pid=0000000000000000 pc=0000000000010000 held_nonzero_for=00000000000006fajiffies rip=ffffffff800cf6fe
+
+PREEMPT-LEAK cpu=0000000000000000 pid=0000000000000000 pc=0000000000010000 held_nonzero_for=000000000000070ejiffies rip=ffffffff800cf6fe
+
+PREEMPT-LEAK cpu=0000000000000001 pid=0000000000000000 pc=0000000000010000 held_nonzero_for=0000000000000730jiffies rip=ffffffff800cf6fe
+
+PREEMPT-LEAK cpu=0000000000000000 pid=0000000000000000 pc=0000000000010000 held_nonzero_for=0000000000000736jiffies rip=ffffffff800cf6fe
+
+PREEMPT-LEAK cpu=0000000000000000 pid=0000000000000000 pc=0000000000010000 held_nonzero_for=000000000000074ajiffies rip=ffffffff800cf6fe
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/1 hres_next=1844674407350434ms
+WW2: si_runs=200 si_busy=10ms ticks=[0,0] vec=[0,0,0,0,0,0,0,0,200,0]
+WW3: grq=0 cfs=0 idle=0x3 nr=2 cpu0=(pid=0 st=0x0 pc=65536) cpu1=(pid=0 st=0x0 pc=256)
+WW: wakes=18 picks=16 avg_run=44ms stranded=0 strand_max=0ms
+
+PREEMPT-LEAK cpu=0000000000000000 pid=0000000000000000 pc=0000000000010000 held_nonzero_for=000000000000075ejiffies rip=ffffffff800cf6fe
+
+PREEMPT-LEAK cpu=0000000000000000 pid=0000000000000000 pc=0000000000010000 held_nonzero_for=0000000000000772jiffies rip=ffffffff800cf6fe
+
+PREEMPT-LEAK cpu=0000000000000001 pid=0000000000000000 pc=0000000000010000 held_nonzero_for=0000000000000794jiffies rip=ffffffff800cf6fe
+
+PREEMPT-LEAK cpu=0000000000000000 pid=0000000000000000 pc=0000000000010000 held_nonzero_for=000000000000079ajiffies rip=ffffffff800cf6fe
+
+PREEMPT-LEAK cpu=0000000000000000 pid=0000000000000000 pc=0000000000010000 held_nonzero_for=00000000000007aejiffies rip=ffffffff800cf6fe
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/1 hres_next=1844674407349434ms
+WW2: si_runs=200 si_busy=8ms ticks=[0,0] vec=[0,0,0,0,0,0,0,0,200,0]
+WW3: grq=0 cfs=0 idle=0x3 nr=2 cpu0=(pid=0 st=0x0 pc=65536) cpu1=(pid=0 st=0x0 pc=256)
+WW: wakes=18 picks=16 avg_run=44ms stranded=0 strand_max=0ms
+
+PREEMPT-LEAK cpu=0000000000000000 pid=0000000000000000 pc=0000000000010000 held_nonzero_for=00000000000007c2jiffies rip=ffffffff800cf6fe
+
+PREEMPT-LEAK cpu=0000000000000000 pid=0000000000000000 pc=0000000000010000 held_nonzero_for=00000000000007d6jiffies rip=ffffffff800cf6fe
+
+PREEMPT-LEAK cpu=0000000000000001 pid=0000000000000000 pc=0000000000010000 held_nonzero_for=00000000000007f8jiffies rip=ffffffff800cf6fe
+
+PREEMPT-LEAK cpu=0000000000000000 pid=0000000000000000 pc=0000000000010000 held_nonzero_for=00000000000007fejiffies rip=ffffffff800cf6fe
+
+PREEMPT-LEAK cpu=0000000000000000 pid=0000000000000000 pc=0000000000010000 held_nonzero_for=0000000000000812jiffies rip=ffffffff800cf6fe
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/1 hres_next=1844674407348434ms
+WW2: si_runs=200 si_busy=9ms ticks=[0,0] vec=[0,0,0,0,0,0,0,0,200,0]
+WW3: grq=0 cfs=0 idle=0x3 nr=3 cpu0=(pid=0 st=0x0 pc=256) cpu1=(pid=0 st=0x0 pc=257)
+WW: wakes=18 picks=16 avg_run=44ms stranded=0 strand_max=0ms
+
+PREEMPT-LEAK cpu=0000000000000000 pid=0000000000000000 pc=0000000000010000 held_nonzero_for=0000000000000826jiffies rip=ffffffff800cf6fe
+
+PREEMPT-LEAK cpu=0000000000000000 pid=0000000000000000 pc=0000000000010000 held_nonzero_for=000000000000083ajiffies rip=ffffffff800cf6fe
+
+PREEMPT-LEAK cpu=0000000000000000 pid=0000000000000000 pc=0000000000010000 held_nonzero_for=000000000000084ejiffies rip=ffffffff800cf6fe
+
+PREEMPT-LEAK cpu=0000000000000000 pid=0000000000000000 pc=0000000000010000 held_nonzero_for=0000000000000862jiffies rip=ffffffff800cf6fe
+
+PREEMPT-LEAK cpu=0000000000000000 pid=0000000000000000 pc=0000000000010000 held_nonzero_for=0000000000000876jiffies rip=ffffffff800cf6fe
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/1 hres_next=1844674407347434ms
+WW2: si_runs=200 si_busy=16ms ticks=[0,0] vec=[0,0,0,0,0,0,0,0,201,0]
+WW3: grq=0 cfs=0 idle=0x3 nr=3 cpu0=(pid=0 st=0x0 pc=256) cpu1=(pid=0 st=0x0 pc=258)
+WW: wakes=18 picks=16 avg_run=44ms stranded=0 strand_max=0ms
+
+PREEMPT-LEAK cpu=0000000000000000 pid=0000000000000000 pc=0000000000010000 held_nonzero_for=000000000000088ajiffies rip=ffffffff800cf6fe
+
+PREEMPT-LEAK cpu=0000000000000000 pid=0000000000000000 pc=0000000000010000 held_nonzero_for=000000000000089ejiffies rip=ffffffff800cf6fe
+
+PREEMPT-LEAK cpu=0000000000000000 pid=0000000000000000 pc=0000000000010000 held_nonzero_for=00000000000008b2jiffies rip=ffffffff800cf6fe
+
+PREEMPT-LEAK cpu=0000000000000000 pid=0000000000000000 pc=0000000000010000 held_nonzero_for=00000000000008c6jiffies rip=ffffffff800cf6fe
+
+PREEMPT-LEAK cpu=0000000000000000 pid=0000000000000000 pc=0000000000010000 held_nonzero_for=00000000000008dajiffies rip=ffffffff800cf6fe
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/1 hres_next=1844674407346434ms
+WW2: si_runs=199 si_busy=9ms ticks=[0,0] vec=[0,0,0,0,0,0,0,0,199,0]
+WW3: grq=0 cfs=0 idle=0x3 nr=3 cpu0=(pid=0 st=0x0 pc=256) cpu1=(pid=0 st=0x0 pc=256)
+WW: wakes=18 picks=16 avg_run=44ms stranded=0 strand_max=0ms
+
+PREEMPT-LEAK cpu=0000000000000000 pid=0000000000000000 pc=0000000000010000 held_nonzero_for=00000000000008eejiffies rip=ffffffff800cf6fe
+
+PREEMPT-LEAK cpu=0000000000000000 pid=0000000000000000 pc=0000000000010000 held_nonzero_for=0000000000000902jiffies rip=ffffffff800cf6fe
+echo ===WL: arm sched events ===
+===WL: arm sched events ===
+W3-RUNWAKE-REFUSED pid=304 state=0x0 linked=false curr_on=true on_cpu=true pk=1 cpu=0
+TERM-DESCHED engaged pid=304 pc=0x0
+SFDDBG: send->pid1 sig=17 disp=IGN blocked=false pending=0x0
+[1;32mroot[0m:[1;34m/[0m# echo 0 > /sys/kernel/debug/tracing/tracing_on
+W3-RUNWAKE-REFUSED pid=305 state=0x0 linked=false curr_on=true on_cpu=true pk=1 cpu=0
+TERM-DESCHED engaged pid=305 pc=0x0
+SFDDBG: send->pid1 sig=17 disp=IGN blocked=false pending=0x0
+[1;32mroot[0m:[1;34m/[0m# WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/1 hres_next=1844674407345434ms
+WW2: si_runs=203 si_busy=10ms ticks=[0,0] vec=[0,0,0,0,3,0,0,0,200,0]
+WW3: grq=0 cfs=0 idle=0x3 nr=3 cpu0=(pid=0 st=0x0 pc=256) cpu1=(pid=0 st=0x0 pc=256)
+WW: wakes=33 picks=31 avg_run=23ms stranded=0 strand_max=0ms
+echo 1 > /sys/kernel/debug/tracing/events/sched/sc hed_waking/enable
+W3-RUNWAKE-REFUSED pid=306 state=0x0 linked=false curr_on=true on_cpu=true pk=1 cpu=0
+TERM-DESCHED engaged pid=306 pc=0x0
+SFDDBG: send->pid1 sig=17 disp=IGN blocked=false pending=0x0
+[1;32mroot[0m:[1;34m/[0m# echo 1 > /sys/kernel/debug/tracing/events/sched/sc hed_wakeup/enable
+W3-RUNWAKE-REFUSED pid=307 state=0x0 linked=false curr_on=true on_cpu=true pk=1 cpu=0
+TERM-DESCHED engaged pid=307 pc=0x0
+SFDDBG: send->pid1 sig=17 disp=IGN blocked=false pending=0x0
+[1;32mroot[0m:[1;34m/[0m# echo 1 > /sys/kernel/debug/tracing/eveWnW: fires=0 late_max=0ms pidtmiss=0 rearm=0 wheel=0/1 hres_next=1844674407344434sms
+WW2: si_runs=201 si_busy=8ms t/icks=[0,0] vec=[0,0,0,0,0,0,0,0,201,0]s
+WW3: grq=0 cfs=0 idle=0x2 nr=2 cpu0=c(pid=1 st=0x0 pc=0) cpu1=(pid=0 st=0x0 pch=256)
+ed/sc WW: wakes=49 picks=47 avg_run=15ms stranded=0 strandh_max=0ms
+ed_switch/enable
+W3-RUNWAKE-REFUSED pid=308 state=0x0 linked=false curr_on=true on_cpu=true pk=1 cpu=0
+TERM-DESCHED engaged pid=308 pc=0x0
+SFDDBG: send->pid1 sig=17 disp=IGN blocked=false pending=0x0
+[1;32mroot[0m:[1;34m/[0m# echo 1 > /sys/kernel/debug/tracing/tracing_on
+W3-RUNWAKE-REFUSED pid=309 state=0x0 linked=false curr_on=true on_cpu=true pk=1 cpu=0
+TERM-DESCHED engaged pid=309 pc=0x0
+SFDDBG: send->pid1 sig=17 disp=IGN blocked=false pending=0x0
+[1;32mroot[0m:[1;34m/[0m# 
+PREEMPT-LEAK cpu=0000000000000001 pid=0000000000000000 pc=0000000000010000 held_nonzero_for=00000000000000c8jiffies rip=ffffffff800cf6fe
+echo ===WL: churn on ===
+
+PREEMPT-LEAK cpu=0000000000000001 pid=0000000000000000 pc=0000000000010000 held_nonzero_for=00000000000000dcjiffies rip=ffffffff800cf6fe
+===WL: churn on ===
+W3-RUNWAKE-REFUSED pid=310 state=0x0 linked=false curr_on=true on_cpu=true pk=1 cpu=0
+TERM-DESCHED engaged pid=310 pc=0x0
+SFDDBG: send->pid1 sig=17 disp=IGN blocked=false pending=0x0
+[1;32mroot[0m:[1;34m/[0m# i=0; while [ $i -lt 1000000 ]; do ls / >/dev/null  2>&1; cat /proc/self/maps >/dev/null 2>&1; i=$((i+1)); done &
+[1;32mroot[0m:[1;34m/[0m# missstat: ret=-2 nr=79 a0=0xffffffffffffff9c path='[' a2=0x3fffffd1d0 pid=311
+missstat: ret=-2 nr=79 a0=0xffffffffffffff9c path=']' a2=0x3fffffd1d0 pid=311
+W3-RUNWAKE-REFUSED pid=312 state=0x0 linked=false curr_on=true on_cpu=true pk=1 cpu=0
+TERM-DESCHED engaged pid=312 pc=0x0
+
+PREEMPT-LEAK cpu=0000000000000001 pid=0000000000000000 pc=0000000000010000 held_nonzero_for=00000000000000f0jiffies rip=ffffffff800cf6fe
+W3-RUNWAKE-REFUSED pid=313 state=0x0 linked=false curr_on=true on_cpu=true pk=1 cpu=0
+i=0; while [ $i -lt 1000000 ]; do ls / >/dev/null  2>&1; cat /proc/self/maps >/dev/null 2>&1; i=$((i+1)); done &
+[1;32mroot[0m:[1;34m/[0m# missstat: ret=-2 nr=79 a0=0xffffffffffffff9c path='[' a2=0x3fffffd1d0 pid=315
+missstat: ret=-2 nr=79 a0=0xffffffffffffff9c path=']' a2=0x3fffffd1d0 pid=315
+W3-RUNWAKE-REFUSED pid=314 state=0x0 linked=false curr_on=true on_cpu=true pk=1 cpu=0
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/1 hres_next=1844674407343439ms
+WW2: si_runs=201 si_busy=16ms ticks=[0,0] vec=[0,0,0,0,4,0,0,0,197,0]
+WW3: grq=0 cfs=0 idle=0x0 nr=1 cpu0=(pid=311 st=0x0 pc=256) cpu1=(pid=316 st=0x0 pc=1)
+WW: wakes=98 picks=96 avg_run=8ms stranded=0 strand_max=0ms
+W3-RUNWAKE-REFUSED pid=316 state=0x0 linked=false curr_on=true on_cpu=true pk=1 cpu=1
+missstat: ret=-2 nr=79 a0=0xffffffffffffff9c path='[' a2=0x3fffffd1d0 pid=311
+missstat: ret=-2 nr=79 a0=0xffffffffffffff9c path=']' a2=0x3fffffd1d0 pid=311
+W3-RUNWAKE-REFUSED pid=317 state=0x0 linked=false curr_on=true on_cpu=true pk=1 cpu=1
+W3-RUNWAKE-REFUSED pid=319 state=0x0 linked=false curr_on=true on_cpu=true pk=1 cpu=0
+missstat: ret=-2 nr=79 a0=0xffffffffffffff9c path='[' a2=0x3fffffd1d0 pid=315
+missstat: ret=-2 nr=79 a0=0xffffffffffffff9c path=']' a2=0x3fffffd1d0 pid=315
+W3-RUNWAKE-REFUSED pid=318 state=0x0 linked=false curr_on=true on_cpu=true pk=1 cpu=1
+W3-RUNWAKE-REFUSED pid=320 state=0x0 linked=false curr_on=true on_cpu=true pk=1 cpu=1
+W3-RUNWAKE-REFUSED pid=321 state=0x0 linked=false curr_on=true on_cpu=true pk=1 cpu=0
+W3-RUNWAKE-REFUSED pid=322 state=0x0 linked=false curr_on=true on_cpu=true pk=1 cpu=0
+W3-RUNWAKE-REFUSED pid=323 state=0x0 linked=false curr_on=true on_cpu=true pk=1 cpu=1
+missstat: ret=-2 nr=79 a0=0xffffffffffffff9c path='[' a2=0x3fffffd1d0 pid=311
+missstat: ret=-2 nr=79 a0=0xffffffffffffff9c path=']' a2=0x3fffffd1d0 pid=311
+W3-RUNWAKE-REFUSED pid=324 state=0x0 linked=false curr_on=true on_cpu=true pk=1 cpu=1
+missstat: ret=-2 nr=79 a0=0xffffffffffffff9c path='[' a2=0x3fffffd1d0 pid=315
+missstat: ret=-2 nr=79 a0=0xffffffffffffff9c path=']' a2=0x3fffffd1d0 pid=315
+echo ===WL: capture 45 s ===
+W3-RUNWAKE-REFUSED pid=325 state=0x0 linked=false curr_on=true on_cpu=true pk=1 cpu=1
+W3-RUNWAKE-REFUSED pid=326 state=0x0 linked=false curr_on=true on_cpu=true pk=1 cpu=0
+===WL: capture 45 s ===
+W3-RUNWAKE-REFUSED pid=327 state=0x0 linked=false curr_on=true on_cpu=true pk=1 cpu=1
+SFDDBG: send->pid1 sig=17 disp=IGN blocked=false pending=0x0
+[1;32mroot[0m:[1;34m/[0m# U=$(cut -d. -f1 /proc/uptime); E=$((U+45)); while  [ $(cut -d. -f1 /proc/uptime) -lt $E ]; do cat /sys/kernel/debug/tracing/trace_p ipe >> /tmp/wl.txt; done
+W3-RUNWAKE-REFUSED pid=329 state=0x0 linked=false curr_on=true on_cpu=true pk=1 cpu=1
+W3-RUNWAKE-REFUSED pid=328 state=0x0 linked=false curr_on=true on_cpu=true pk=1 cpu=0
+W3-RUNWAKE-REFUSED pid=331 state=0x0 linked=false curr_on=true on_cpu=true pk=1 cpu=1
+W3-RUNWAKE-REFUSED pid=330 state=0x0 linked=false curr_on=true on_cpu=true pk=1 cpu=1
+SFDDBG: send->pid1 sig=17 disp=IGN blocked=false pending=0x0
+trap: user SIGILL pid=1 comm=Ok("sh") epc=0x3c65c insn16=0x2ef3 fs=0x0
+SIGILL-FORENSIC pid=1 epc=0x3c65c page=0x3c000 vmas=6
+  VMA 0x10000-0x4d000 r-x file => EPC /bin/mrsh
+  VMA 0x4d000-0x51000 rw- file /bin/mrsh
+  VMA 0x51000-0x53000 rw- anon 
+  VMA 0x3000000000-0x3000006000 rw- anon 
+  VMA 0x3000007000-0x3000009000 rw- anon 
+  VMA 0x3ffffde000-0x3fffffe000 rw- anon 
+SIGILL-FORENSIC epc-page PTE @0x8b8191e0 = 0x22e2b05b
+SIGILL-FORENSIC epc-frame NOT stamped pfn=0x8b8ac (never a file-fill page, or stamp lost)
+SIGILL-FORENSIC page[0..8]: d0c90be346090609 f613d2c909e3460d d56300b796930016 00b8073366a10406 b50196e6cae316f9 06e3470900094863 e4e90ae3470de0e9 0347d81300b56733
+SIGILL-FORENSIC epc-16..+24: 8082557df5c14505 7135b7c1f8d59ce3 00202ef3832aed06 187d0305d7936821 0107f7b301059713
+SIGDEATH: pid=1 tgid=1 comm=Ok("sh") sig=4 ppid=0 si_pid=0 si_code=0x0
+W3-RUNWAKE-REFUSED pid=1 state=0x0 linked=false curr_on=true on_cpu=true pk=1 cpu=1
+kernel: init exited — powering system down
+reboot: syncing filesystems
+reboot: Power down

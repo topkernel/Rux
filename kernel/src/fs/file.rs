@@ -1419,23 +1419,18 @@ fn reg_file_close(_file: &File) -> i32 {
     0
 }
 
-pub static REG_FILE_OPS: FileOps = FileOps {
-    read: Some(reg_file_read),
-    write: Some(reg_file_write),
-    lseek: Some(reg_file_lseek),
-    close: Some(reg_file_close),
-    poll: None,
-    read_at: None,
-};
+pub static REG_FILE_OPS: FileOps = FileOps::builder()
+    .read(reg_file_read)
+    .write(reg_file_write)
+    .lseek(reg_file_lseek)
+    .close(reg_file_close)
+    .build();
 
-pub static REG_RO_FILE_OPS: FileOps = FileOps {
-    read: Some(reg_file_read),
-    write: None,
-    lseek: Some(reg_file_lseek),
-    close: Some(reg_file_close),
-    poll: None,
-    read_at: None,
-};
+pub static REG_RO_FILE_OPS: FileOps = FileOps::builder()
+    .read(reg_file_read)
+    .lseek(reg_file_lseek)
+    .close(reg_file_close)
+    .build();
 
 /// Directory file operations (shared by all FS types).
 /// Directories are read via getdents64, not via read().
@@ -1470,11 +1465,8 @@ fn dir_file_lseek(file: &File, offset: isize, whence: i32) -> isize {
     new_pos as isize
 }
 
-pub static DIR_FILE_OPS: FileOps = FileOps {
-    read: Some(dir_read_eisdir),
-    write: None,
-    lseek: Some(dir_file_lseek),
-    close: Some(dir_close),
-    poll: None,
-    read_at: None,
-};
+pub static DIR_FILE_OPS: FileOps = FileOps::builder()
+    .read(dir_read_eisdir)
+    .lseek(dir_file_lseek)
+    .close(dir_close)
+    .build();

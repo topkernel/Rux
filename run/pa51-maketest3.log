@@ -21900,3 +21900,1530 @@ WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407254764m
 WW2: si_runs=302 si_busy=46ms ticks=[0,0] vec=[0,302,0,0,0,0,0,0,302,0]
 WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
 WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407253774ms
+WW2: si_runs=299 si_busy=51ms ticks=[0,0] vec=[0,299,0,0,0,0,0,0,299,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407252764ms
+WW2: si_runs=301 si_busy=55ms ticks=[0,0] vec=[0,301,0,0,0,0,0,0,301,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407251764ms
+WW2: si_runs=300 si_busy=48ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407250773ms
+WW2: si_runs=298 si_busy=53ms ticks=[0,0] vec=[0,298,0,0,0,0,0,0,298,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407249764ms
+WW2: si_runs=302 si_busy=41ms ticks=[0,0] vec=[0,302,0,0,0,0,0,0,302,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407248773ms
+WW2: si_runs=298 si_busy=42ms ticks=[0,0] vec=[0,298,0,0,0,0,0,0,298,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407247764ms
+WW2: si_runs=281 si_busy=366ms ticks=[0,0] vec=[0,281,0,0,0,0,0,0,279,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407246773ms
+WW2: si_runs=292 si_busy=174ms ticks=[0,0] vec=[0,292,0,0,0,0,0,0,294,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407245773ms
+WW2: si_runs=296 si_busy=145ms ticks=[0,0] vec=[0,296,0,0,0,0,0,0,296,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407244773ms
+WW2: si_runs=294 si_busy=204ms ticks=[0,0] vec=[0,294,0,0,0,0,0,0,294,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407243773ms
+WW2: si_runs=296 si_busy=156ms ticks=[0,0] vec=[0,296,0,0,0,0,0,0,296,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407242773ms
+WW2: si_runs=300 si_busy=47ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407241773ms
+WW2: si_runs=300 si_busy=45ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407240770ms
+WW2: si_runs=300 si_busy=42ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407239764ms
+WW2: si_runs=302 si_busy=31ms ticks=[0,0] vec=[0,302,0,0,0,0,0,0,302,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407238764ms
+WW2: si_runs=300 si_busy=28ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407237764ms
+WW2: si_runs=300 si_busy=33ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407236763ms
+WW2: si_runs=300 si_busy=30ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407235764ms
+WW2: si_runs=300 si_busy=30ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407234764ms
+WW2: si_runs=300 si_busy=27ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407233764ms
+WW2: si_runs=300 si_busy=22ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407232764ms
+WW2: si_runs=300 si_busy=31ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407231764ms
+WW2: si_runs=300 si_busy=28ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407230764ms
+WW2: si_runs=300 si_busy=31ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407229764ms
+WW2: si_runs=300 si_busy=31ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407228764ms
+WW2: si_runs=300 si_busy=30ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407227764ms
+WW2: si_runs=300 si_busy=32ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407226764ms
+WW2: si_runs=300 si_busy=23ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407225764ms
+WW2: si_runs=300 si_busy=34ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407224760ms
+WW2: si_runs=300 si_busy=38ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407223764ms
+WW2: si_runs=300 si_busy=53ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407222764ms
+WW2: si_runs=300 si_busy=42ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407221764ms
+WW2: si_runs=300 si_busy=35ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407220773ms
+WW2: si_runs=299 si_busy=36ms ticks=[0,0] vec=[0,299,0,0,0,0,0,0,299,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407219764ms
+WW2: si_runs=301 si_busy=32ms ticks=[0,0] vec=[0,301,0,0,0,0,0,0,301,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407218764ms
+WW2: si_runs=300 si_busy=28ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407217764ms
+WW2: si_runs=300 si_busy=30ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407216764ms
+WW2: si_runs=300 si_busy=25ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407215764ms
+WW2: si_runs=300 si_busy=31ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407214765ms
+WW2: si_runs=300 si_busy=24ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407213765ms
+WW2: si_runs=300 si_busy=26ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407212764ms
+WW2: si_runs=300 si_busy=28ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407211764ms
+WW2: si_runs=300 si_busy=31ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407210765ms
+WW2: si_runs=300 si_busy=26ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407209764ms
+WW2: si_runs=300 si_busy=26ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407208763ms
+WW2: si_runs=300 si_busy=36ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407207764ms
+WW2: si_runs=300 si_busy=24ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407206765ms
+WW2: si_runs=300 si_busy=27ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407205764ms
+WW2: si_runs=300 si_busy=28ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407204764ms
+WW2: si_runs=300 si_busy=29ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407203764ms
+WW2: si_runs=300 si_busy=29ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407202764ms
+WW2: si_runs=300 si_busy=36ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407201764ms
+WW2: si_runs=300 si_busy=39ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407200773ms
+WW2: si_runs=298 si_busy=29ms ticks=[0,0] vec=[0,298,0,0,0,0,0,0,298,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407199773ms
+WW2: si_runs=300 si_busy=32ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407198773ms
+WW2: si_runs=300 si_busy=41ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407197764ms
+WW2: si_runs=302 si_busy=33ms ticks=[0,0] vec=[0,302,0,0,0,0,0,0,302,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407196764ms
+WW2: si_runs=300 si_busy=38ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407195764ms
+WW2: si_runs=300 si_busy=20ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407194764ms
+WW2: si_runs=300 si_busy=21ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407193764ms
+WW2: si_runs=300 si_busy=26ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407192762ms
+WW2: si_runs=291 si_busy=181ms ticks=[0,0] vec=[0,291,0,0,0,0,0,0,291,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407191764ms
+WW2: si_runs=300 si_busy=24ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407190764ms
+WW2: si_runs=300 si_busy=20ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407189764ms
+WW2: si_runs=300 si_busy=20ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407188764ms
+WW2: si_runs=300 si_busy=20ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407187764ms
+WW2: si_runs=300 si_busy=32ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407186764ms
+WW2: si_runs=300 si_busy=39ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407185764ms
+WW2: si_runs=300 si_busy=30ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407184764ms
+WW2: si_runs=300 si_busy=26ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407183764ms
+WW2: si_runs=300 si_busy=39ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407182764ms
+WW2: si_runs=300 si_busy=38ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407181764ms
+WW2: si_runs=300 si_busy=38ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407180764ms
+WW2: si_runs=300 si_busy=32ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407179764ms
+WW2: si_runs=300 si_busy=32ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407178764ms
+WW2: si_runs=300 si_busy=38ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407177765ms
+WW2: si_runs=300 si_busy=38ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407176763ms
+WW2: si_runs=300 si_busy=33ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407175765ms
+WW2: si_runs=300 si_busy=27ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407174764ms
+WW2: si_runs=300 si_busy=25ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407173764ms
+WW2: si_runs=300 si_busy=34ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407172764ms
+WW2: si_runs=300 si_busy=35ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407171765ms
+WW2: si_runs=300 si_busy=32ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407170765ms
+WW2: si_runs=300 si_busy=21ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407169765ms
+WW2: si_runs=300 si_busy=21ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407168765ms
+WW2: si_runs=300 si_busy=29ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407167765ms
+WW2: si_runs=300 si_busy=28ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407166765ms
+WW2: si_runs=300 si_busy=25ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407165764ms
+WW2: si_runs=300 si_busy=31ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407164764ms
+WW2: si_runs=300 si_busy=22ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407163764ms
+WW2: si_runs=300 si_busy=25ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407162764ms
+WW2: si_runs=300 si_busy=36ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407161764ms
+WW2: si_runs=300 si_busy=22ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407160763ms
+WW2: si_runs=300 si_busy=22ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407159764ms
+WW2: si_runs=300 si_busy=30ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407158764ms
+WW2: si_runs=300 si_busy=36ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407157764ms
+WW2: si_runs=300 si_busy=32ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407156764ms
+WW2: si_runs=300 si_busy=23ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407155764ms
+WW2: si_runs=300 si_busy=25ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407154764ms
+WW2: si_runs=300 si_busy=29ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407153774ms
+WW2: si_runs=299 si_busy=40ms ticks=[0,0] vec=[0,299,0,0,0,0,0,0,299,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407152774ms
+WW2: si_runs=300 si_busy=42ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407151764ms
+WW2: si_runs=301 si_busy=35ms ticks=[0,0] vec=[0,301,0,0,0,0,0,0,301,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407150773ms
+WW2: si_runs=297 si_busy=35ms ticks=[0,0] vec=[0,297,0,0,0,0,0,0,297,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407149774ms
+WW2: si_runs=302 si_busy=40ms ticks=[0,0] vec=[0,302,0,0,0,0,0,0,302,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407148764ms
+WW2: si_runs=301 si_busy=39ms ticks=[0,0] vec=[0,301,0,0,0,0,0,0,301,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407147745ms
+WW2: si_runs=302 si_busy=27ms ticks=[0,0] vec=[0,302,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407146754ms
+WW2: si_runs=289 si_busy=231ms ticks=[0,0] vec=[0,289,0,0,0,0,0,0,291,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407145744ms
+WW2: si_runs=297 si_busy=85ms ticks=[0,0] vec=[0,297,0,0,0,0,0,0,295,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407144754ms
+WW2: si_runs=294 si_busy=193ms ticks=[0,0] vec=[0,294,0,0,0,0,0,0,296,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407143764ms
+WW2: si_runs=299 si_busy=32ms ticks=[0,0] vec=[0,299,0,0,0,0,0,0,299,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407142754ms
+WW2: si_runs=301 si_busy=22ms ticks=[0,0] vec=[0,301,0,0,0,0,0,0,301,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407141754ms
+WW2: si_runs=300 si_busy=30ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407140754ms
+WW2: si_runs=300 si_busy=30ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407139754ms
+WW2: si_runs=300 si_busy=25ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407138754ms
+WW2: si_runs=300 si_busy=23ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407137754ms
+WW2: si_runs=300 si_busy=35ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407136754ms
+WW2: si_runs=300 si_busy=34ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407135754ms
+WW2: si_runs=300 si_busy=32ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407134754ms
+WW2: si_runs=300 si_busy=33ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407133754ms
+WW2: si_runs=300 si_busy=40ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407132755ms
+WW2: si_runs=300 si_busy=36ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407131764ms
+WW2: si_runs=299 si_busy=35ms ticks=[0,0] vec=[0,299,0,0,0,0,0,0,299,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407130764ms
+WW2: si_runs=299 si_busy=38ms ticks=[0,0] vec=[0,299,0,0,0,0,0,0,299,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407129764ms
+WW2: si_runs=300 si_busy=26ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407128762ms
+WW2: si_runs=299 si_busy=26ms ticks=[0,0] vec=[0,299,0,0,0,0,0,0,299,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407127764ms
+WW2: si_runs=301 si_busy=25ms ticks=[0,0] vec=[0,301,0,0,0,0,0,0,301,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407126764ms
+WW2: si_runs=301 si_busy=32ms ticks=[0,0] vec=[0,301,0,0,0,0,0,0,301,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407125754ms
+WW2: si_runs=301 si_busy=48ms ticks=[0,0] vec=[0,301,0,0,0,0,0,0,301,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407124754ms
+WW2: si_runs=300 si_busy=49ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407123764ms
+WW2: si_runs=298 si_busy=25ms ticks=[0,0] vec=[0,298,0,0,0,0,0,0,298,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407122754ms
+WW2: si_runs=302 si_busy=26ms ticks=[0,0] vec=[0,302,0,0,0,0,0,0,302,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407121754ms
+WW2: si_runs=300 si_busy=29ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407120754ms
+WW2: si_runs=300 si_busy=27ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407119754ms
+WW2: si_runs=300 si_busy=28ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407118754ms
+WW2: si_runs=300 si_busy=24ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407117754ms
+WW2: si_runs=300 si_busy=26ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407116763ms
+WW2: si_runs=299 si_busy=49ms ticks=[0,0] vec=[0,299,0,0,0,0,0,0,299,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407115754ms
+WW2: si_runs=301 si_busy=45ms ticks=[0,0] vec=[0,301,0,0,0,0,0,0,301,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407114754ms
+WW2: si_runs=300 si_busy=29ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407113754ms
+WW2: si_runs=300 si_busy=29ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407112761ms
+WW2: si_runs=298 si_busy=30ms ticks=[0,0] vec=[0,298,0,0,0,0,0,0,298,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407111754ms
+WW2: si_runs=302 si_busy=28ms ticks=[0,0] vec=[0,302,0,0,0,0,0,0,302,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407110754ms
+WW2: si_runs=300 si_busy=23ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407109754ms
+WW2: si_runs=300 si_busy=21ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407108754ms
+WW2: si_runs=300 si_busy=18ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407107754ms
+WW2: si_runs=300 si_busy=18ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407106754ms
+WW2: si_runs=300 si_busy=19ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407105754ms
+WW2: si_runs=300 si_busy=20ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407104754ms
+WW2: si_runs=300 si_busy=20ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407103754ms
+WW2: si_runs=300 si_busy=29ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407102754ms
+WW2: si_runs=300 si_busy=33ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407101754ms
+WW2: si_runs=300 si_busy=32ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407100754ms
+WW2: si_runs=300 si_busy=37ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407099764ms
+WW2: si_runs=299 si_busy=32ms ticks=[0,0] vec=[0,299,0,0,0,0,0,0,299,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407098754ms
+WW2: si_runs=301 si_busy=39ms ticks=[0,0] vec=[0,301,0,0,0,0,0,0,301,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407097754ms
+WW2: si_runs=300 si_busy=40ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407096761ms
+WW2: si_runs=298 si_busy=37ms ticks=[0,0] vec=[0,298,0,0,0,0,0,0,298,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407095754ms
+WW2: si_runs=302 si_busy=38ms ticks=[0,0] vec=[0,302,0,0,0,0,0,0,302,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407094754ms
+WW2: si_runs=300 si_busy=39ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407093754ms
+WW2: si_runs=300 si_busy=37ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407092754ms
+WW2: si_runs=300 si_busy=36ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407091755ms
+WW2: si_runs=300 si_busy=25ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407090755ms
+WW2: si_runs=300 si_busy=23ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407089755ms
+WW2: si_runs=300 si_busy=22ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407088754ms
+WW2: si_runs=300 si_busy=25ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407087754ms
+WW2: si_runs=300 si_busy=38ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407086754ms
+WW2: si_runs=300 si_busy=39ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407085755ms
+WW2: si_runs=300 si_busy=33ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407084755ms
+WW2: si_runs=300 si_busy=23ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407083755ms
+WW2: si_runs=300 si_busy=21ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407082754ms
+WW2: si_runs=300 si_busy=22ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407081754ms
+WW2: si_runs=300 si_busy=30ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407080762ms
+WW2: si_runs=298 si_busy=31ms ticks=[0,0] vec=[0,298,0,0,0,0,0,0,298,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407079754ms
+WW2: si_runs=302 si_busy=31ms ticks=[0,0] vec=[0,302,0,0,0,0,0,0,302,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407078755ms
+WW2: si_runs=300 si_busy=30ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407077755ms
+WW2: si_runs=300 si_busy=29ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407076755ms
+WW2: si_runs=300 si_busy=26ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407075755ms
+WW2: si_runs=300 si_busy=20ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407074755ms
+WW2: si_runs=300 si_busy=19ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407073735ms
+WW2: si_runs=281 si_busy=369ms ticks=[0,0] vec=[0,281,0,0,0,0,0,0,279,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407072735ms
+WW2: si_runs=291 si_busy=223ms ticks=[0,0] vec=[0,291,0,0,0,0,0,0,291,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407071744ms
+WW2: si_runs=296 si_busy=121ms ticks=[0,0] vec=[0,296,0,0,0,0,0,0,298,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407070744ms
+WW2: si_runs=298 si_busy=77ms ticks=[0,0] vec=[0,298,0,0,0,0,0,0,298,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407069744ms
+WW2: si_runs=300 si_busy=28ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407068744ms
+WW2: si_runs=300 si_busy=34ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407067744ms
+WW2: si_runs=300 si_busy=33ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407066744ms
+WW2: si_runs=300 si_busy=32ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407065744ms
+WW2: si_runs=300 si_busy=32ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407064744ms
+WW2: si_runs=300 si_busy=34ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407063744ms
+WW2: si_runs=300 si_busy=33ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407062744ms
+WW2: si_runs=300 si_busy=28ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407061744ms
+WW2: si_runs=300 si_busy=31ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407060744ms
+WW2: si_runs=300 si_busy=31ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407059752ms
+WW2: si_runs=297 si_busy=26ms ticks=[0,0] vec=[0,297,0,0,0,0,0,0,297,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407058744ms
+WW2: si_runs=303 si_busy=30ms ticks=[0,0] vec=[0,303,0,0,0,0,0,0,303,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407057744ms
+WW2: si_runs=300 si_busy=33ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407056744ms
+WW2: si_runs=300 si_busy=35ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407055744ms
+WW2: si_runs=300 si_busy=32ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407054744ms
+WW2: si_runs=300 si_busy=31ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407053744ms
+WW2: si_runs=300 si_busy=33ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407052744ms
+WW2: si_runs=300 si_busy=32ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407051744ms
+WW2: si_runs=300 si_busy=32ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407050744ms
+WW2: si_runs=300 si_busy=29ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407049744ms
+WW2: si_runs=300 si_busy=32ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407048744ms
+WW2: si_runs=300 si_busy=32ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407047745ms
+WW2: si_runs=300 si_busy=31ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407046744ms
+WW2: si_runs=300 si_busy=31ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407045745ms
+WW2: si_runs=300 si_busy=29ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407044745ms
+WW2: si_runs=300 si_busy=24ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407043744ms
+WW2: si_runs=300 si_busy=32ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407042744ms
+WW2: si_runs=300 si_busy=35ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407041744ms
+WW2: si_runs=300 si_busy=35ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407040745ms
+WW2: si_runs=300 si_busy=30ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407039744ms
+WW2: si_runs=300 si_busy=25ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407038745ms
+WW2: si_runs=300 si_busy=29ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407037745ms
+WW2: si_runs=300 si_busy=19ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407036745ms
+WW2: si_runs=300 si_busy=20ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407035744ms
+WW2: si_runs=300 si_busy=24ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407034754ms
+WW2: si_runs=299 si_busy=35ms ticks=[0,0] vec=[0,299,0,0,0,0,0,0,299,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407033744ms
+WW2: si_runs=301 si_busy=42ms ticks=[0,0] vec=[0,301,0,0,0,0,0,0,301,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407032754ms
+WW2: si_runs=299 si_busy=44ms ticks=[0,0] vec=[0,299,0,0,0,0,0,0,299,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407031754ms
+WW2: si_runs=300 si_busy=48ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407030744ms
+WW2: si_runs=301 si_busy=47ms ticks=[0,0] vec=[0,301,0,0,0,0,0,0,301,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407029754ms
+WW2: si_runs=299 si_busy=46ms ticks=[0,0] vec=[0,299,0,0,0,0,0,0,299,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407028745ms
+WW2: si_runs=301 si_busy=34ms ticks=[0,0] vec=[0,301,0,0,0,0,0,0,301,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407027745ms
+WW2: si_runs=300 si_busy=27ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407026744ms
+WW2: si_runs=300 si_busy=37ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407025744ms
+WW2: si_runs=300 si_busy=38ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407024744ms
+WW2: si_runs=300 si_busy=33ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407023745ms
+WW2: si_runs=294 si_busy=129ms ticks=[0,0] vec=[0,296,0,0,0,0,0,0,296,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407022745ms
+WW2: si_runs=296 si_busy=70ms ticks=[0,0] vec=[0,296,0,0,0,0,0,0,296,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407021745ms
+WW2: si_runs=300 si_busy=19ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407020745ms
+WW2: si_runs=300 si_busy=19ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407019744ms
+WW2: si_runs=300 si_busy=24ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407018754ms
+WW2: si_runs=293 si_busy=134ms ticks=[0,0] vec=[0,293,0,0,0,0,0,0,293,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407017744ms
+WW2: si_runs=301 si_busy=21ms ticks=[0,0] vec=[0,301,0,0,0,0,0,0,301,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407016745ms
+WW2: si_runs=300 si_busy=31ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407015745ms
+WW2: si_runs=300 si_busy=22ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407014744ms
+WW2: si_runs=300 si_busy=23ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407013744ms
+WW2: si_runs=300 si_busy=24ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407012745ms
+WW2: si_runs=300 si_busy=21ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407011745ms
+WW2: si_runs=300 si_busy=24ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407010744ms
+WW2: si_runs=300 si_busy=24ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407009744ms
+WW2: si_runs=300 si_busy=22ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407008745ms
+WW2: si_runs=300 si_busy=21ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407007745ms
+WW2: si_runs=300 si_busy=20ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407006745ms
+WW2: si_runs=300 si_busy=20ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407005745ms
+WW2: si_runs=300 si_busy=18ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407004745ms
+WW2: si_runs=300 si_busy=18ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407003745ms
+WW2: si_runs=300 si_busy=20ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407002744ms
+WW2: si_runs=300 si_busy=24ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407001745ms
+WW2: si_runs=297 si_busy=74ms ticks=[0,0] vec=[0,297,0,0,0,0,0,0,297,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674407000744ms
+WW2: si_runs=300 si_busy=20ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674406999745ms
+WW2: si_runs=300 si_busy=24ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674406998744ms
+WW2: si_runs=300 si_busy=33ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674406997744ms
+WW2: si_runs=300 si_busy=26ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674406996744ms
+WW2: si_runs=300 si_busy=26ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674406995744ms
+WW2: si_runs=300 si_busy=33ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674406994744ms
+WW2: si_runs=300 si_busy=24ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674406993744ms
+WW2: si_runs=300 si_busy=22ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674406992744ms
+WW2: si_runs=300 si_busy=22ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674406991744ms
+WW2: si_runs=300 si_busy=26ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674406990744ms
+WW2: si_runs=300 si_busy=38ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674406989754ms
+WW2: si_runs=299 si_busy=38ms ticks=[0,0] vec=[0,299,0,0,0,0,0,0,299,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674406988745ms
+WW2: si_runs=301 si_busy=32ms ticks=[0,0] vec=[0,301,0,0,0,0,0,0,301,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674406987745ms
+WW2: si_runs=300 si_busy=18ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674406986745ms
+WW2: si_runs=300 si_busy=20ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674406985754ms
+WW2: si_runs=299 si_busy=32ms ticks=[0,0] vec=[0,299,0,0,0,0,0,0,299,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674406984745ms
+WW2: si_runs=301 si_busy=24ms ticks=[0,0] vec=[0,301,0,0,0,0,0,0,301,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674406983744ms
+WW2: si_runs=300 si_busy=23ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674406982745ms
+WW2: si_runs=300 si_busy=34ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674406981745ms
+WW2: si_runs=300 si_busy=28ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674406980754ms
+WW2: si_runs=298 si_busy=30ms ticks=[0,0] vec=[0,298,0,0,0,0,0,0,298,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674406979744ms
+WW2: si_runs=302 si_busy=27ms ticks=[0,0] vec=[0,302,0,0,0,0,0,0,302,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674406978753ms
+WW2: si_runs=299 si_busy=38ms ticks=[0,0] vec=[0,299,0,0,0,0,0,0,299,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674406977744ms
+WW2: si_runs=301 si_busy=24ms ticks=[0,0] vec=[0,301,0,0,0,0,0,0,301,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674406976744ms
+WW2: si_runs=300 si_busy=22ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674406975744ms
+WW2: si_runs=300 si_busy=23ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674406974744ms
+WW2: si_runs=300 si_busy=32ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674406973744ms
+WW2: si_runs=300 si_busy=23ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674406972744ms
+WW2: si_runs=300 si_busy=20ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674406971744ms
+WW2: si_runs=300 si_busy=21ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674406970744ms
+WW2: si_runs=300 si_busy=23ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674406969744ms
+WW2: si_runs=300 si_busy=23ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674406968744ms
+WW2: si_runs=300 si_busy=20ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674406967744ms
+WW2: si_runs=300 si_busy=20ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674406966744ms
+WW2: si_runs=300 si_busy=23ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674406965744ms
+WW2: si_runs=300 si_busy=28ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674406964744ms
+WW2: si_runs=300 si_busy=30ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674406963744ms
+WW2: si_runs=300 si_busy=24ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674406962744ms
+WW2: si_runs=300 si_busy=25ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674406961744ms
+WW2: si_runs=300 si_busy=23ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674406960744ms
+WW2: si_runs=300 si_busy=28ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674406959744ms
+WW2: si_runs=300 si_busy=28ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674406958744ms
+WW2: si_runs=300 si_busy=29ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674406957744ms
+WW2: si_runs=291 si_busy=171ms ticks=[0,0] vec=[0,291,0,0,0,0,0,0,291,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674406956744ms
+WW2: si_runs=300 si_busy=27ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674406955744ms
+WW2: si_runs=297 si_busy=88ms ticks=[0,0] vec=[0,297,0,0,0,0,0,0,297,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674406954744ms
+WW2: si_runs=296 si_busy=130ms ticks=[0,0] vec=[0,296,0,0,0,0,0,0,296,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674406953744ms
+WW2: si_runs=300 si_busy=27ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674406952744ms
+WW2: si_runs=300 si_busy=26ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674406951744ms
+WW2: si_runs=300 si_busy=30ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674406950744ms
+WW2: si_runs=296 si_busy=100ms ticks=[0,0] vec=[0,296,0,0,0,0,0,0,296,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674406949745ms
+WW2: si_runs=300 si_busy=25ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674406948744ms
+WW2: si_runs=298 si_busy=80ms ticks=[0,0] vec=[0,298,0,0,0,0,0,0,298,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674406947745ms
+WW2: si_runs=300 si_busy=25ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674406946745ms
+WW2: si_runs=300 si_busy=21ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674406945745ms
+WW2: si_runs=300 si_busy=26ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674406944745ms
+WW2: si_runs=300 si_busy=19ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674406943745ms
+WW2: si_runs=300 si_busy=18ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674406942745ms
+WW2: si_runs=300 si_busy=18ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674406941745ms
+WW2: si_runs=300 si_busy=20ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674406940745ms
+WW2: si_runs=300 si_busy=19ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674406939745ms
+WW2: si_runs=300 si_busy=20ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674406938745ms
+WW2: si_runs=300 si_busy=21ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674406937745ms
+WW2: si_runs=300 si_busy=21ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674406936745ms
+WW2: si_runs=300 si_busy=21ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674406935744ms
+WW2: si_runs=298 si_busy=65ms ticks=[0,0] vec=[0,298,0,0,0,0,0,0,298,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674406934745ms
+WW2: si_runs=300 si_busy=25ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674406933745ms
+WW2: si_runs=300 si_busy=21ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674406932744ms
+WW2: si_runs=300 si_busy=22ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674406931745ms
+WW2: si_runs=300 si_busy=26ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674406930745ms
+WW2: si_runs=300 si_busy=26ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674406929745ms
+WW2: si_runs=300 si_busy=20ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674406928745ms
+WW2: si_runs=300 si_busy=21ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674406927745ms
+WW2: si_runs=300 si_busy=23ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674406926744ms
+WW2: si_runs=300 si_busy=24ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674406925745ms
+WW2: si_runs=300 si_busy=24ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674406924745ms
+WW2: si_runs=300 si_busy=22ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674406923745ms
+WW2: si_runs=300 si_busy=23ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674406922745ms
+WW2: si_runs=300 si_busy=24ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674406921745ms
+WW2: si_runs=300 si_busy=20ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674406920744ms
+WW2: si_runs=300 si_busy=23ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674406919745ms
+WW2: si_runs=300 si_busy=23ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674406918745ms
+WW2: si_runs=300 si_busy=20ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674406917745ms
+WW2: si_runs=300 si_busy=21ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674406916745ms
+WW2: si_runs=300 si_busy=25ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674406915745ms
+WW2: si_runs=300 si_busy=27ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674406914745ms
+WW2: si_runs=300 si_busy=28ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674406913744ms
+WW2: si_runs=300 si_busy=33ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674406912744ms
+WW2: si_runs=300 si_busy=35ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674406911744ms
+WW2: si_runs=300 si_busy=36ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674406910744ms
+WW2: si_runs=300 si_busy=40ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674406909744ms
+WW2: si_runs=300 si_busy=36ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674406908744ms
+WW2: si_runs=300 si_busy=32ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674406907744ms
+WW2: si_runs=300 si_busy=33ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674406906744ms
+WW2: si_runs=300 si_busy=33ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674406905745ms
+WW2: si_runs=300 si_busy=32ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674406904744ms
+WW2: si_runs=300 si_busy=30ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674406903744ms
+WW2: si_runs=300 si_busy=28ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674406902744ms
+WW2: si_runs=300 si_busy=29ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674406901745ms
+WW2: si_runs=300 si_busy=18ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674406900745ms
+WW2: si_runs=300 si_busy=24ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674406899745ms
+WW2: si_runs=300 si_busy=24ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674406898745ms
+WW2: si_runs=300 si_busy=22ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674406897744ms
+WW2: si_runs=300 si_busy=22ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674406896745ms
+WW2: si_runs=300 si_busy=21ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674406895744ms
+WW2: si_runs=300 si_busy=23ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674406894745ms
+WW2: si_runs=300 si_busy=26ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674406893745ms
+WW2: si_runs=300 si_busy=21ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674406892744ms
+WW2: si_runs=300 si_busy=21ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674406891745ms
+WW2: si_runs=300 si_busy=25ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674406890745ms
+WW2: si_runs=300 si_busy=25ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674406889744ms
+WW2: si_runs=300 si_busy=26ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674406888753ms
+WW2: si_runs=297 si_busy=23ms ticks=[0,0] vec=[0,297,0,0,0,0,0,0,297,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674406887754ms
+WW2: si_runs=301 si_busy=26ms ticks=[0,0] vec=[0,301,0,0,0,0,0,0,301,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674406886754ms
+WW2: si_runs=282 si_busy=326ms ticks=[0,0] vec=[0,282,0,0,0,0,0,0,282,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674406885754ms
+WW2: si_runs=276 si_busy=443ms ticks=[0,0] vec=[0,276,0,0,0,0,0,0,276,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674406884754ms
+WW2: si_runs=298 si_busy=83ms ticks=[0,0] vec=[0,298,0,0,0,0,0,0,298,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674406883754ms
+WW2: si_runs=294 si_busy=180ms ticks=[0,0] vec=[0,294,0,0,0,0,0,0,294,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674406882754ms
+WW2: si_runs=300 si_busy=27ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674406881754ms
+WW2: si_runs=300 si_busy=24ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674406880754ms
+WW2: si_runs=300 si_busy=20ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674406879754ms
+WW2: si_runs=300 si_busy=21ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674406878754ms
+WW2: si_runs=300 si_busy=20ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674406877754ms
+WW2: si_runs=300 si_busy=19ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674406876754ms
+WW2: si_runs=300 si_busy=23ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674406875754ms
+WW2: si_runs=300 si_busy=21ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674406874754ms
+WW2: si_runs=300 si_busy=22ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+WW: fires=0 late_max=0ms pidmiss=0 rearm=0 wheel=0/0 hres_next=1844674406873753ms
+WW2: si_runs=300 si_busy=34ms ticks=[0,0] vec=[0,300,0,0,0,0,0,0,300,0]
+WW3: grq=4 cfs=4 idle=0x0 nr=3 cpu0=(pid=0 st=0x0 pc=0) cpu1=(pid=18446744073709551615 st=0x0 pc=0)
+WW: wakes=12 picks=3 avg_run=992ms stranded=1 strand_max=1018ms
+qemu-system-riscv64: terminating on signal 15 from pid 937680 (timeout)
+make: *** [Makefile:116: test] 已终止
+rc=124
