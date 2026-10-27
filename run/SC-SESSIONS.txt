@@ -6686,3 +6686,122 @@ v2, 81c23bc9 notes + patch script). oh-img-p now carries alignguard +
 180first + logdom(v1) + userctl-logdom(v2) + guardread. bzImages tagged
 in run/. Serials sc320B-327B untracked per .gitignore. Quiet window
 for OH-A's perf gate opened 11:15 as arbitrated.
+
+LEG-32B (OH-B fourth leg; launcher-load wall broken; two kernel fixes;
+13:20 close-out) — opened on branch tip a9c599df. Commits: 1e3eb015
+(binder drain child-routing), ab97a866 (uart chunk cond_resched).
+
+MISSION ITEM 1 — LAUNCHER-LOAD WALL: ROOT-CAUSED KERNEL-SIDE AND FIXED.
+  The appspawn close was NEVER the bug. Disassembly of /bin/appspawn
+  (sc326B lines 55972-56010): "DeleteAppSpawnMgr 337 1150" prints
+  (mgr->pid_of_owner, getpid()) — it runs IN THE CHILD (1150); the
+  whole Delete sequence + "OnListenFdClose listen fd: 12" + "OnClose
+  socket fd 20" is the child's own post-fork cleanup of fds/state it
+  inherited from appspawn (pid 337): OnListenFdClose only closes when
+  mgr-owner != getpid(). The spawn handshake SUCCEEDS every time
+  ("Child process:... success", "SendResponse ... result: 0x0").
+  THE REAL WALL (sc326B decode, 189 occurrences/boot): AMS's 0x5-code
+  Schedule oneways to a child-registered node (reg_tgid=1176) park
+  behind the node's busy async slot ("oneway txn 14032 parked on node
+  13085"), and when the slot frees, the BC_FREE_BUFFER drain pushed the
+  parked txn onto the node OWNER's proc todo ("drained to proc 337" =
+  appspawn). Children never enter the binder looper (sc163) so they
+  never pull proc todo; the reg_tgid read gate keeps the daemon's
+  readers off the item; the txn strands; the ability never loads;
+  AMS retried the load forever = LIFECYCLE_TIMEOUT x302. The
+  fresh-enqueue path has had child-thread routing since sc163
+  (post_txn_to_child_thread); the three drain/handoff paths
+  (BC_FREE_BUFFER, sweep_stale_async, sweep_silent_txns retire
+  handoff) never got it.
+  FIX (1e3eb015): drain_deliver_parked_txn — child thread first
+  (post_txn_to_child_thread), owner-proc todo as the old fallback;
+  applied at all three drains; child-thread wakes after WORLD release.
+  VERIFIED sc328B (fix alone, KVM SMP2 4G, oh-img-p + fresh scgold,
+  dfx=txnhunt,wwcensus,leakhunt,ams46): settingsdata DataExtAbility LC
+  x14 early then QUIET (vs x302 sustained on sc326B); render_service
+  faults 0 (guardread patch holding); RS deaths 0.
+
+MISSION ITEM 2 — WAKE-RUN-LEAK: CLASSIFIED AND THE DOMINANT SOURCE FIXED.
+  Classification from sc326B + sc328B (leakhunt armed):
+  - NOT lost wakes: wok>0 on the leak lines (wait-queue entries
+    transition), census "woken+runnable", WAKE-REFUSED census in band.
+  - NOT a lying busy slot: leakorigin tp= prints CONFIRM the cpu_state
+    incumbent is real (tp=pid/pc matches h0 on every sc328B line).
+  - = PICK STARVATION behind long preempt-off kernel sections.
+    Incumbents print pc=1/pc=2 (PREEMPT_OFFSET nesting); PREEMPT-LEAK
+    reporter silent (leakhunt) → counts held-and-released, not leaked.
+  - Dominant source NAMED: hilogd's serial-mirror thread (pid 319,
+    fork of hilogd 315) monopolizes a CPU through uart_write's
+    back-to-back 32-byte chunks (~2.8 ms each at 115200 THRE pacing,
+    console lock IRQ-off per chunk); 4/5 sc328B strand events sit
+    immediately after 148-178-line console bursts. Also decoded:
+    sys=16 cmd 0xc0306201 in TXN-HANG lines is _IOWR('b',1,48) =
+    BINDER_WRITE_READ (not a hilog ioctl as leg-31 guessed).
+  FIX (ab97a866): cond_resched() between uart_write chunks (console
+    lock dropped there, plain task context; same 2026-10-20 discipline
+    as the teardown-sweep points; 32-byte marker atomicity unchanged).
+  Effect sc329B (both fixes): strand events 31->13, max strand
+  21.1 s -> 7.0 s; hilogd no longer the recurring incumbent; residual
+  incumbents now 565/564, 376/377, and the app children themselves
+  (unattributed preempt-off sections — next-leg instrument: incumbent
+  kernel-stack capture at strand time).
+
+MISSION ITEM 3 — DRAWS (oh-img-p + fresh scgold each, SMP2 4G KVM):
+  sc328B (fix 1): LC wall broken as above; next wall = systemui load
+  behind a foundation wedge: OS_IPC_0_799 parked in its BINDER_WRITE_
+  READ (TXN-HANG txn8222 exec up to 511 s; thread hist shows 799
+  RECEIVED txn8222, handled it via a nested call to samgr (txn 8286),
+  then never returned to service the queue) + strand amplification.
+  sc329B (fixes 1+2): FURTHEST EVER — systemui loaded, launcher
+  MainAbility STARTING ("start highest priority extension ability
+  bundleName:com.ohos.launcher ability:MainAbility", AMS ABMS7918),
+  LC warnings near zero (2/2/1/1). Then foundation stopped draining
+  again (TXN-HANGs into pid 799 up to 91.5 s from accessibility/
+  settingsdata/telephonydata), render_service self-aborted (SIGABRT
+  si_code=SI_TKILL — the OH watchdog abort-after-stall response, not
+  the patched guard-read SEGV), init ran the stop-all sweep, and
+  "bootevent.launcher.ready not set" closed the draw. No UI frame;
+  screendump impossible (guest wedged with ticks stopped; monitor
+  unserviced). New-family note: 33 USEGV-FOR lines pid-495-class
+  near-null derefs (cr2 ~ -1024) in appspawn OS_IPC threads — the
+  known pid-1150 memfd-lib family, did not kill the boot.
+  REMAINING CHAIN for next leg, in order: (1) foundation reader
+  exhaustion in nested-call cycles (the distributeddata<->foundation
+  queue cycle from leg-29B + tid-799 reply cycle: all OS_IPC readers
+  parked as clients, proc todo grows, no thread pool growth) —
+  candidate instruments: OS_IPC thread-count-over-time census, Linux
+  binder's spawn-more-threads semantics comparison; (2) residual
+  preempt-off incumbents (incumbent-stack-at-strand print); (3) the
+  pid-495 memfd-lib near-null deref family.
+
+SIDE ITEM (coordinator): reference-kernel boots show ZERO dfx signal-42
+  sampling activity (oh-ref-r1/r2, perf-audit ref-r1..r4): no
+  signalhandler/ProcessDump/dumpcatcher lines; XCollie ticks benignly
+  ("can't open hungtask file" 30 s cadence); the only processdump
+  spawns (246.7 s / 487.2 s on r1) coincide to the second with init's
+  ServiceReap of the perpetually-start-failing usb_host/watchdog_service
+  — exit dumps, not thread sampling. Reference launcher.ready at 10.1 s
+  means no multi-second stalls ever armed the buggy watchdog path.
+  Mechanism (stall-conditional arming) CONFIRMED; no containment
+  semantics to study. Reported to coordinator mid-leg.
+
+GATES (final tree ab97a866):
+  - dual-arch builds rc=0 (x86 r2/r3, rv r2/r5 after test-build
+    overwrites; NOTE: `make test` overwrites target/.../debug/rux with
+    the test build — rebuild before booting the normal kernel).
+  - make test: "All tests passed" on the fix-1 tree (test log 1) AND
+    the fix-2 tree (test2 log).
+  - riscv64 scripted smoke boot (run/rv-smoke-leg32.sh, final run on
+    the fix-2 kernel): panics=0, shell prompt reached, /proc mounted.
+  - Perf Tier-1/Tier-2: BLOCKED at close-out — 13 foreign QEMUs on the
+    host (gate wave), perf-gate.sh refuses to boot (host capacity
+    rule). Retry queued in background (run/perf-gate-leg32b-retry.log).
+    The binder change is a cold-path drain fix (parking requires async
+    slot contention, absent on standard boots); the uart change adds
+    one need_resched branch per 32-byte chunk and strictly shortens
+    IRQ-off monopolies — no regression mechanism identified, but the
+    tiers must still be measured before merge.
+Lane state: branch tip ab97a866; serials sc328B/sc329B untracked per
+.gitignore; /tmp/leg32b holds the extracted appspawn binary + libipc
+for reference. Quiet-window discipline kept (no draw launched until
+foreign QEMU count <= 1; all my QEMUs killed by pidfile/cmdline match).
