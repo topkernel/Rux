@@ -447,11 +447,25 @@ fn parse_mq_timeout(timeout_ptr: *const u8) -> Result<Option<u64>, i32> {
     if ts_sec < 0 || ts_nsec < 0 || ts_nsec >= 1_000_000_000 {
         return Err(-errno::EINVAL);
     }
-    let timeout_jiffies = (ts_sec as u64)
-        .saturating_mul(crate::drivers::timer::HZ as u64)
-        .saturating_add(
-            (ts_nsec as u64) * crate::drivers::timer::HZ as u64 / 1_000_000_000,
-        );
+    // POSIX/Linux: mq_timedreceive() and mq_timedsend() take an ABSOLUTE
+    // CLOCK_REALTIME deadline — "the absolute time specified by
+    // abs_timeout" (the timeout argument is named abs_timeout for
+    // exactly this reason). Rux treated the value as RELATIVE (now +
+    // ts), so a caller passing an absolute deadline waited twice as
+    // long as intended, and a deadline that had already passed blocked
+    // for the full timeout instead of returning ETIMEDOUT at once.
+    //
+    // Convert the absolute deadline into the jiffies deadline the wait
+    // loop uses. An expired deadline lands on "now", so the loop
+    // returns ETIMEDOUT immediately (Linux's behaviour). The
+    // sub-jiffy remainder is rounded UP so the call never returns
+    // ETIMEDOUT before the requested instant.
+    let (now_sec, now_nsec) = crate::syscall::time::realtime_secs_nanos();
+    let now_ns = (now_sec as i128) * 1_000_000_000i128 + (now_nsec as i128);
+    let target_ns = (ts_sec as i128) * 1_000_000_000i128 + (ts_nsec as i128);
+    let delta_ns = if target_ns > now_ns { target_ns - now_ns } else { 0 };
+    let hz = crate::drivers::timer::HZ as u128;
+    let timeout_jiffies = ((delta_ns as u128 * hz + 999_999_999u128) / 1_000_000_000u128) as u64;
     Ok(Some(crate::drivers::timer::get_jiffies() + timeout_jiffies))
 }
 

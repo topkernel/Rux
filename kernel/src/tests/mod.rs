@@ -208,6 +208,8 @@ pub mod page_allocator;
 pub mod buffer_state;
 #[cfg(feature = "unit-test")]
 pub mod mount_flags;
+#[cfg(feature = "unit-test")]
+pub mod percpu;
 
 // ===== Process management =====
 #[cfg(feature = "unit-test")]
@@ -460,6 +462,9 @@ pub fn run_all_tests() {
 
     test_group_start("small_alloc");
     small_alloc::test_small_alloc();
+
+    test_group_start("percpu");
+    percpu::test_percpu();
 
     test_group_start("page_allocator");
     page_allocator::test_page_allocator();
