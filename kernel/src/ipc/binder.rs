@@ -691,7 +691,15 @@ enum Work {
 /// (free_buf's position check fails benignly).
 ///
 /// SAFETY: caller holds WORLD. Returns the number of blocks reclaimed.
-unsafe fn sweep_stale_async(world: &World, target: &Arc<BinderProc>) -> usize {
+/// leg-32B: `wake_out` collects child threads that received a drained
+/// parked txn (drain_deliver_parked_txn) — the caller wakes them after
+/// WORLD is released; the proc-todo fallback keeps its historical
+/// no-wake shape (silent receivers pick the todo up on their next read).
+unsafe fn sweep_stale_async(
+    world: &World,
+    target: &Arc<BinderProc>,
+    wake_out: &mut Vec<Arc<BinderThread>>,
+) -> usize {
     const GRACE_J: u32 = (crate::config::KERNEL_HZ as u32).saturating_mul(30);
     let min_gap: u32 = (crate::config::KERNEL_HZ as u32).max(1);
     let now = crate::drivers::timer::get_jiffies() as u32;
@@ -752,7 +760,12 @@ unsafe fn sweep_stale_async(world: &World, target: &Arc<BinderProc>) -> usize {
                 Some(h) => {
                     unsafe { h.set_holds_async_slot(true) };
                     let tp = h.to_proc.clone();
-                    pm(world, &tp).im().todo.push_back(Work::Transaction(h.clone()));
+                    // leg-32B: child-thread preference for the drained
+                    // txn (see drain_deliver_parked_txn).
+                    let (ct, _pref) = drain_deliver_parked_txn(world, &h, &tp);
+                    if let Some(ct) = ct {
+                        wake_out.push(ct);
+                    }
                     if ams46_on() && ams46_txns_contains(h.id) {
                         crate::pr_warn!(
                             "AMS46 SWEEP slot txn{} -> txn{} (parked code-46 DELIVERED by sweep drain)",
@@ -798,12 +811,17 @@ unsafe fn sweep_stale_async(world: &World, target: &Arc<BinderProc>) -> usize {
 /// binder_on_tgid_exit).
 ///
 /// SAFETY: caller holds WORLD.
-unsafe fn sweep_silent_txns(world: &World) -> (usize, Vec<Arc<BinderProc>>) {
+unsafe fn sweep_silent_txns(
+    world: &World,
+) -> (usize, Vec<Arc<BinderProc>>, Vec<Arc<BinderThread>>) {
     const ONEWAY_SILENCE_J: u32 = (crate::config::KERNEL_HZ as u32).saturating_mul(30);
     const SYNC_SILENCE_J: u32 = (crate::config::KERNEL_HZ as u32).saturating_mul(60);
     let now = crate::drivers::timer::get_jiffies() as u32;
     let mut retired = 0usize;
     let mut wakes: Vec<Arc<BinderProc>> = Vec::new();
+    // leg-32B: child threads that received a handed-on parked txn via
+    // drain_deliver_parked_txn — the caller wakes them after WORLD.
+    let mut wake_ths: Vec<Arc<BinderThread>> = Vec::new();
     let procs = world.procs.clone();
     for p in &procs {
         // 1. Proc todo: retire silent parked transactions.
@@ -910,7 +928,14 @@ unsafe fn sweep_silent_txns(world: &World) -> (usize, Vec<Arc<BinderProc>>) {
                                     hid
                                 );
                             }
-                            pm(world, &tp).im().todo.push_back(Work::Transaction(h));
+                            // leg-32B: child-thread preference for the
+                            // handed-on parked txn (see
+                            // drain_deliver_parked_txn); the proc-todo
+                            // fallback keeps its historical no-wake shape.
+                            let (ct, _pref) = drain_deliver_parked_txn(world, &h, &tp);
+                            if let Some(ct) = ct {
+                                wake_ths.push(ct);
+                            }
                         }
                         None => {
                             n.st().has_async_transaction = false;
@@ -920,7 +945,7 @@ unsafe fn sweep_silent_txns(world: &World) -> (usize, Vec<Arc<BinderProc>>) {
             }
         }
     }
-    (retired, wakes)
+    (retired, wakes, wake_ths)
 }
 
 // sc140 (Session Q): registry of forked appspawn child pids (written by
@@ -1576,6 +1601,43 @@ unsafe fn post_txn_to_child_thread(
     let tid = t.tid;
     t.hist(EV_TXN_TQUEUED, txn.id as u32, tid);
     Some(t)
+}
+
+/// leg-32B: deliver a parked oneway that is being handed the node's
+/// async slot. Three drain/handoff paths do this (BC_FREE_BUFFER's
+/// drain, sweep_stale_async, sweep_silent_txns' retire handoff) and all
+/// three used to push straight onto the node OWNER's proc todo — the
+/// fresh-enqueue path's forked-child preference (post_txn_to_child_thread,
+/// sc163) was never applied here. For a child-registered node the owner
+/// proc is appspawn: children never enter the looper so they never pull
+/// proc todo, and the reg_tgid read gate keeps the daemon's readers off
+/// the item — the drained txn strands forever. sc326B decode: AMS's
+/// 0x5-code Schedule oneways to settingsdata (pid 1176) parked behind a
+/// busy slot on node 13085, then "drained to proc 337" (appspawn); the
+/// ability never loaded and LIFECYCLE_TIMEOUT x302 followed. Route
+/// through the child's thread first; fall back to the owner proc todo
+/// (the pre-leg-32B shape) when no eligible child thread exists.
+/// Returns (child thread to wake AFTER WORLD release, prefer_tgid for
+/// the proc wake when the fallback fired).
+/// SAFETY: caller must hold WORLD.
+unsafe fn drain_deliver_parked_txn(
+    world: &World,
+    txn: &Arc<BinderTxn>,
+    to_proc: &Arc<BinderProc>,
+) -> (Option<Arc<BinderThread>>, u32) {
+    let pref = txn
+        .target_node
+        .as_ref()
+        .map(|n| n.reg_tgid)
+        .filter(|&g| g != 0 && g != to_proc.pid)
+        .unwrap_or(0);
+    if pref != 0 {
+        if let Some(ct) = post_txn_to_child_thread(world, to_proc, pref, txn) {
+            return (Some(ct), 0);
+        }
+    }
+    pm(world, to_proc).im().todo.push_back(Work::Transaction(txn.clone()));
+    (None, pref)
 }
 
 /// binder_select_thread_ilocked + wake: pick one thread of the proc that
@@ -3868,6 +3930,9 @@ pub fn stall_report() {
     }
     let mut owner_dumps: Vec<OwnerDump> = Vec::new();
     let mut retire_wakes: Vec<Arc<BinderProc>> = Vec::new();
+    // leg-32B: child threads that received a retired-slot handoff txn —
+    // woken in the heal block below, outside WORLD.
+    let mut retire_wake_ths: Vec<Arc<BinderThread>> = Vec::new();
     {
         let w = world_lock();
         // SAFETY: read-only traversal under WORLD (pm() casts are only used
@@ -3882,8 +3947,9 @@ pub fn stall_report() {
             // silent past any plausible retry ladder. Frees the dominant
             // floor population (parked oneways, pick_j==0) and unstacks
             // the senders of parked sync calls.
-            let (retired, mut rw) = sweep_silent_txns(world);
+            let (retired, mut rw, mut rth) = sweep_silent_txns(world);
             retire_wakes.append(&mut rw);
+            retire_wake_ths.append(&mut rth);
             if retired > 0 {
                 let _ = writeln!(
                     out,
@@ -4130,6 +4196,10 @@ pub fn stall_report() {
     }
     // Heals, outside WORLD (wake_proc_one takes the world lock itself).
     for t in rekick {
+        wake_thread(&t);
+    }
+    // leg-32B: retired-slot handoff txns delivered to child threads.
+    for t in retire_wake_ths.drain(..) {
         wake_thread(&t);
     }
     for p in retodo {
@@ -4858,7 +4928,10 @@ fn binder_thread_write(
                 };
                 ptr += 8;
                 {
-                    let mut drain_wake: Option<Arc<BinderProc>> = None;
+                    let mut drain_wake: Option<(Arc<BinderProc>, u32)> = None;
+                    // leg-32B: child thread targeted by the drained txn's
+                    // node (reg_tgid) — woken after WORLD release.
+                    let mut drain_wake_thread: Option<Arc<BinderThread>> = None;
                     {
                         let mut w = world_lock();
                         // SAFETY: all inner access below is under WORLD.
@@ -4932,8 +5005,18 @@ fn binder_thread_write(
                                             let tp = h.to_proc.clone();
                                             let tid = h.id;
                                             let tpid = tp.pid;
-                                            pm(world, &tp).im().todo.push_back(Work::Transaction(h));
-                                            drain_wake = Some(tp);
+                                            // leg-32B: apply the forked-child
+                                            // preference to the drained txn
+                                            // (see drain_deliver_parked_txn) —
+                                            // the plain proc-todo push here is
+                                            // what lost AMS's Schedule oneways
+                                            // to appspawn's dead todo.
+                                            let (ct, pref) =
+                                                drain_deliver_parked_txn(world, &h, &tp);
+                                            match ct {
+                                                Some(ct) => drain_wake_thread = Some(ct),
+                                                None => drain_wake = Some((tp, pref)),
+                                            }
                                             if ams46_on() && ams46_txns_contains(tid) {
                                                 crate::pr_warn!(
                                                     "AMS46 slot -> txn{} (parked code-46 DELIVERED by drain)",
@@ -4955,8 +5038,11 @@ fn binder_thread_write(
                             }
                         }
                     }
-                    if let Some(tp) = drain_wake {
-                        wake_proc_one(&tp, 0);
+                    if let Some(t) = drain_wake_thread {
+                        wake_thread(&t);
+                    }
+                    if let Some((tp, pref)) = drain_wake {
+                        wake_proc_one(&tp, pref);
                     }
                 }
             }
@@ -5364,6 +5450,10 @@ fn binder_transaction(
     let oneway = tr.flags & TF_ONE_WAY != 0;
     let data_size = tr.data_size as usize;
     let offsets_size = tr.offsets_size as usize;
+    // Threads to wake directly (thread-targeted delivery). Declared in
+    // the prologue because the pre-alloc stale sweep below can already
+    // collect child-thread wakes for drained parked txns (leg-32B).
+    let mut wake_ths: Vec<Arc<BinderThread>> = Vec::new();
 
     // Bring-up crutch for the samgr-install race — see
     // wait_for_context_manager: stretch bounded client retry budgets
@@ -5610,7 +5700,7 @@ fn binder_transaction(
             // land on their proc todo; no wake is issued (the receivers
             // this heals are silent by definition — they pick the todo
             // up on their next read).
-            let swept = unsafe { sweep_stale_async(world, tp) };
+            let swept = unsafe { sweep_stale_async(world, tp, &mut wake_ths) };
             if swept > 0 {
                 crate::pr_info!(
                     "binder: reclaimed {} stale buffer(s) of pid {}",
@@ -5632,7 +5722,7 @@ fn binder_transaction(
                     if let Some(a) = pm(world, tp).im().alloc.as_mut() {
                         a.last_sweep_j = 0;
                     }
-                    let swept2 = unsafe { sweep_stale_async(world, tp) };
+                    let swept2 = unsafe { sweep_stale_async(world, tp, &mut wake_ths) };
                     match (swept2 > 0).then(|| {
                         pm(world, tp)
                             .im()
@@ -6415,8 +6505,6 @@ fn binder_transaction(
     // aimed at forked-child nodes; wake_proc_one prefers that child's
     // threads so the delivery is not eaten by the daemon's readers.
     let mut wakes_child: Vec<(Arc<BinderProc>, u32)> = Vec::new();
-    // Threads to wake directly (thread-targeted delivery).
-    let mut wake_ths: Vec<Arc<BinderThread>> = Vec::new();
     // BC_REPLY whose originating thread vanished: fail after WORLD is
     // released (release_block/close_installed_fds must not run under it).
     let mut reply_target_gone = false;
