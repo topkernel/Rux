@@ -17,7 +17,8 @@
 //! each minute to avoid the console-emit race with syscost's dump — pa28):
 //! ```text
 //! FSW1 t=123s br=<bread> rd=<dev reads> wr=<dev writes> sd=<sync_dirty>/<skip> ev=<evict>/<dirty> sa=<sync_all> pb=<pub flush>.<records> ps=<scoped>.<own records> pc=<constraint flushes> ph=<high-water drains> pm=<queue max> lvl=<console_loglevel> es=<console emits skipped>
-//! FSW2 t=123s ri=<read_inode> wi=<write_inode> lk=<dir lookups>.<blocks> ls=<list_dir> ni=<new_inode> ar=<alloc runs> fr=<free runs> j=<jstart>.<jstop>.<jlazy>.<jcommit_fast>.<jrevoke> bl=<biglock>.<contended> w=<walks>.<hits>.<misses>
+//! FSW2 t=123s ri=<read_inode> wi=<write_inode> lk=<dir lookups>.<blocks> ls=<list_dir> ni=<new_inode> ar=<alloc runs> fr=<free runs>.<segments>.<blocks> j=<jstart>.<jstop>.<jlazy>.<jcommit_fast>.<jrevoke> bl=<biglock>.<contended> w=<walks>.<hits>.<misses>
+//! FSW3 t=123s bs=<bitmap syncs> bsus=<bitmap sync us> sd=<sync_dirty> br=<bread>
 //! ```
 //!
 //! `lvl`/`es` exist so the two pa28 probe-bug classes are separable from
@@ -87,6 +88,17 @@ pub static NEW_INODE: AtomicU64 = AtomicU64::new(0);
 /// sync write + one group-desc sync write + one SUPERBLOCK sync write each.
 pub static ALLOC_RUN: AtomicU64 = AtomicU64::new(0);
 pub static FREE_RUN: AtomicU64 = AtomicU64::new(0);
+/// leg-37B family B (foundation ftruncate episodes): free-run GROUP
+/// SEGMENTS — each is one read+RMW+sync bitmap round trip under
+/// EXT4_BIG_LOCK (a multi-extent truncate pays one per extent). FREE_BLK
+/// is the block volume behind them.
+pub static FREE_SEG: AtomicU64 = AtomicU64::new(0);
+pub static FREE_BLK: AtomicU64 = AtomicU64::new(0);
+/// Block-bitmap sync writes (write_block_bitmap) and cumulative time
+/// spent inside their sync_dirty_buffer waits, in MICROSECONDS (jiffies
+/// at 100 Hz cannot resolve a single 2-5 ms sync; sched_clock ns → us).
+pub static BITMAP_SYNC: AtomicU64 = AtomicU64::new(0);
+pub static BITMAP_SYNC_US: AtomicU64 = AtomicU64::new(0);
 
 // === jbd2 =================================================================
 pub static J_START: AtomicU64 = AtomicU64::new(0);
@@ -263,6 +275,20 @@ pub fn note_alloc_run() {
 pub fn note_free_run() {
     bump!(FREE_RUN);
 }
+#[inline]
+pub fn note_free_seg(blocks: u64) {
+    if crate::dfx::fsw::on() {
+        FREE_SEG.fetch_add(1, Ordering::Relaxed);
+        FREE_BLK.fetch_add(blocks, Ordering::Relaxed);
+    }
+}
+#[inline]
+pub fn note_bitmap_sync(ns: u64) {
+    if crate::dfx::fsw::on() {
+        BITMAP_SYNC.fetch_add(1, Ordering::Relaxed);
+        BITMAP_SYNC_US.fetch_add(ns / 1000, Ordering::Relaxed);
+    }
+}
 
 // jbd2 notes
 #[inline]
@@ -361,14 +387,39 @@ pub fn dump() {
         crate::printk::console_emit_skipped(),
     );
     crate::pr_warn!(
-        "FSW2 t={}s ri={} wi={} lk={}.{} ls={} ni={} ar={} fr={} j={}.{}.{}.{}.{} bl={}.{} w={}.{}.{}",
+        "FSW2 t={}s ri={} wi={} lk={}.{} ls={} ni={} ar={} fr={}.{}.{} j={}.{}.{}.{}.{} bl={}.{} w={}.{}.{}",
         secs,
         v(&READ_INODE), v(&WRITE_INODE),
         v(&DIR_LOOKUP), v(&DIR_BLOCKS), v(&LIST_DIR),
-        v(&NEW_INODE), v(&ALLOC_RUN), v(&FREE_RUN),
+        v(&NEW_INODE), v(&ALLOC_RUN),
+        v(&FREE_RUN), v(&FREE_SEG), v(&FREE_BLK),
         v(&J_START), v(&J_STOP), v(&J_LAZY),
         v(&J_COMMIT_FAST), v(&J_REVOKE),
         v(&BIGLOCK), v(&BIGLOCK_CONTEND),
         v(&WALK), v(&WALK_HIT), v(&WALK_MISS),
     );
+    crate::pr_warn!(
+        "FSW3 t={}s bs={} bsus={} sd={} br={}",
+        secs,
+        v(&BITMAP_SYNC), v(&BITMAP_SYNC_US),
+        v(&SYNC_DIRTY), v(&BREAD),
+    );
+}
+
+/// leg-37B family B: compact counter snapshot for the TXN-HANG audit —
+/// one line per hung server txn per 5 s burst carries the free-volume and
+/// bitmap-sync numbers AT the hang instants (the 60 s FSW dump cadence and
+/// the 30 s periodic census both straddle the 1-100 s ftruncate episodes;
+/// sc335B proved that unusable). Values are cumulative since boot; deltas
+/// between consecutive bursts are the episode's volume. Counts read 0 when
+/// fsw=1 is off (the notes are armed-gated) — printing them anyway costs
+/// four Relaxed loads on an already-gated audit path.
+pub fn hang_snapshot() -> (u64, u64, u64, u64, u64) {
+    (
+        FREE_RUN.load(Ordering::Relaxed),
+        FREE_SEG.load(Ordering::Relaxed),
+        FREE_BLK.load(Ordering::Relaxed),
+        BITMAP_SYNC.load(Ordering::Relaxed),
+        BITMAP_SYNC_US.load(Ordering::Relaxed),
+    )
 }

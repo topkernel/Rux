@@ -279,6 +279,7 @@ impl<'a> BlockAllocator<'a> {
             let group_idx = cursor / blocks_per_group;
             let offset_in_group = cursor % blocks_per_group;
             let seg = core::cmp::min(remain, blocks_per_group - offset_in_group);
+            crate::dfx::fsw::note_free_seg(seg);
             self.free_block_run_single_group(group_idx, offset_in_group, cursor, seg)?;
             cursor += seg;
             remain -= seg;
@@ -357,6 +358,14 @@ impl<'a> BlockAllocator<'a> {
     /// jbd2_journal_dirty_metadata here without extending commit space
     /// accounting (see commit.rs).
     fn write_block_bitmap(&self, bitmap_block: u64, bitmap: &[u8]) -> Result<(), i32> {
+        // leg-37B family B: time the sync wait (fsw-gated; the clock read
+        // only happens when armed) — the per-extent bitmap sync is the
+        // suspected cost center of the 1-100 s ftruncate episodes.
+        let t0 = if crate::dfx::fsw::on() {
+            crate::sched::fair::sched_clock()
+        } else {
+            0
+        };
         // SAFETY: bh is from bio::bread; b_data is block_size bytes; bitmap fits within.
         unsafe {
             let bh = bio::bread(self.fs.device, bitmap_block)
@@ -365,6 +374,11 @@ impl<'a> BlockAllocator<'a> {
             (*bh).set_state_bit(crate::fs::bio::BufferState::BH_Dirty);
             let sync_res = bio::sync_dirty_buffer(bh);
             bio::brelse(bh);
+            if t0 != 0 {
+                crate::dfx::fsw::note_bitmap_sync(
+                    crate::sched::fair::sched_clock().saturating_sub(t0),
+                );
+            }
             sync_res?;
             Ok(())
         }

@@ -2953,6 +2953,34 @@ impl Ext4BigLock {
         taskdump_dec(woken as u64);
         taskdump_raw_line(b"\n");
     }
+
+    /// leg-37B family B: compact try-lock snapshot for the TXN-HANG audit
+    /// (runs in timer/watchdog context against possibly-running tasks):
+    /// (locked, owner, depth, waiters, queued, held_ms). Same contract as
+    /// dfx_census_line/vw_state — busy locks report sentinel values, never
+    /// block. held_ms is the OUTERMOST acquire age from `acquired_at`, so a
+    /// multi-second hold names the holder (and the holder's syscall, via
+    /// the audit's own entry-frame fields) — the alignment the 30 s census
+    /// could not give for 1-2 s ftruncate episodes (sc335B).
+    pub fn audit_snapshot(&'static self) -> (bool, u32, u32, u32, usize, u64) {
+        let mut held_ms = 0u64;
+        let (locked, owner, depth, waiters) = match self.state.try_lock() {
+            Some(st) => {
+                if st.locked && st.acquired_at != 0 {
+                    let j = crate::drivers::timer::get_jiffies()
+                        .saturating_sub(st.acquired_at);
+                    held_ms = j * 1000 / crate::config::KERNEL_HZ as u64;
+                }
+                (st.locked, st.owner, st.depth, st.waiters)
+            }
+            None => (false, u32::MAX, 0, u32::MAX),
+        };
+        let queued = match self.wait.vw_queue_census_try() {
+            Some((t, _)) => t,
+            None => usize::MAX,
+        };
+        (locked, owner, depth, waiters, queued, held_ms)
+    }
 }
 
 /// Guard: releases on drop (outermost only).

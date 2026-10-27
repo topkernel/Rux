@@ -12,15 +12,27 @@
 //! the stuck open is working on).
 //!
 //! Contract: zero cost when dfx=txnhunt is off (one switch check);
-//! no locks — 8 slots indexed by tid % 8, tid word acts as the
-//! publication flag; diagnostics only, torn reads can mix bytes of
-//! two paths of tasks colliding on a slot, which is cosmetic (bounded
-//! print, utf8-checked).
+//! no locks — open-addressed slots probed from tid%N, tid word acts as
+//! the publication flag; diagnostics only, torn reads can mix bytes of
+//! two paths of tasks colliding on a full probe run, which is cosmetic
+//! (bounded print, utf8-checked).
+//!
+//! leg-37B family B: the 8-slot tid%8 table collided under boot syscall
+//! volume — OP_TRUNC stashes were evicted within the 5 s audit window
+//! (sc333B/335B, collision not a missed stash). Now 128 slots probed
+//! from the key, and lookup scans the whole table for an exact tid
+//! match, so a stash survives unless ~96+ distinct tids stash between
+//! the park and the print.
 
 use core::sync::atomic::{AtomicU32, Ordering};
 
-const N: usize = 8;
+const N: usize = 128;
 const CAP: usize = 128;
+/// Probe budget for stash: own slot, or the first empty slot within this
+/// many positions of tid%N; a full run overwrites the start slot (the
+/// table is saturated at that point — eviction is the documented
+/// fallback, not a correctness issue).
+const PROBE: usize = 32;
 
 struct Slot {
     tid: AtomicU32,
@@ -71,9 +83,33 @@ pub fn stash_file(op: u32, path: &str) {
     }
     let bytes = path.as_bytes();
     let n = bytes.len().min(CAP);
-    // SAFETY: diagnostic write into a static slot; this task is the
-    // only writer for its tid slot, publication ordered via tid/len.
-    let s = unsafe { &mut *core::ptr::addr_of_mut!(SLOTS[(tid as usize) % N]) };
+    // leg-37B keyed slots: probe from tid%N for this tid's own slot or an
+    // empty one — two tids hashing to the same start no longer evict each
+    // other while the table has room (the 8-slot table's failure mode).
+    let start = (tid as usize) % N;
+    let mut idx = start;
+    for _ in 0..PROBE {
+        // SAFETY: diagnostic write into a static slot; publication
+        // ordered via tid/len. All slots are checked unlocked — a
+        // concurrent stash by the same tid is impossible (one task one
+        // thread), a concurrent stash by a colliding tid only races the
+        // same probe decision (both may pick the same slot; last writer
+        // wins, cosmetic for a diagnostic).
+        let s = unsafe { &mut *core::ptr::addr_of_mut!(SLOTS[idx]) };
+        let occ = s.tid.load(Ordering::Relaxed);
+        if occ == tid || occ == 0 {
+            s.tid.store(0, Ordering::Release);
+            s.buf[..n].copy_from_slice(&bytes[..n]);
+            s.op.store(op, Ordering::Release);
+            s.len.store(n as u32, Ordering::Release);
+            s.tid.store(tid, Ordering::Release);
+            return;
+        }
+        idx = (idx + 1) % N;
+    }
+    // Probe run saturated: overwrite the start slot (documented eviction).
+    // SAFETY: as above.
+    let s = unsafe { &mut *core::ptr::addr_of_mut!(SLOTS[start]) };
     s.tid.store(0, Ordering::Release);
     s.buf[..n].copy_from_slice(&bytes[..n]);
     s.op.store(op, Ordering::Release);
@@ -81,24 +117,27 @@ pub fn stash_file(op: u32, path: &str) {
     s.tid.store(tid, Ordering::Release);
 }
 
-/// Look up the last (op, path) stashed by `tid`. Returns None when the
-/// slot is empty, owned by another tid, or the path was never written.
+/// Look up the last (op, path) stashed by `tid`. Returns None when no
+/// slot in the table is owned by `tid` (leg-37B: full-table exact-tid
+/// scan — the stash's probe position is an implementation detail).
 pub fn lookup_file(tid: u32) -> Option<(u32, &'static str)> {
-    let i = (tid as usize) % N;
-    // SAFETY: diagnostic read of the static slot table; the 'static
-    // borrow is derived from the static itself and bytes are
-    // utf8-checked below.
-    let s: &'static Slot = unsafe { &*core::ptr::addr_of!(SLOTS).cast::<Slot>().add(i) };
-    if s.tid.load(Ordering::Acquire) != tid {
-        return None;
+    for i in 0..N {
+        // SAFETY: diagnostic read of the static slot table; the 'static
+        // borrow is derived from the static itself and bytes are
+        // utf8-checked below.
+        let s: &'static Slot = unsafe { &*core::ptr::addr_of!(SLOTS).cast::<Slot>().add(i) };
+        if s.tid.load(Ordering::Acquire) != tid {
+            continue;
+        }
+        let n = s.len.load(Ordering::Acquire) as usize;
+        if n == 0 || n > CAP {
+            return None;
+        }
+        let op = s.op.load(Ordering::Acquire);
+        let p = core::str::from_utf8(&s.buf[..n]).ok()?;
+        return Some((op, p));
     }
-    let n = s.len.load(Ordering::Acquire) as usize;
-    if n == 0 || n > CAP {
-        return None;
-    }
-    let op = s.op.load(Ordering::Acquire);
-    let p = core::str::from_utf8(&s.buf[..n]).ok()?;
-    Some((op, p))
+    None
 }
 
 /// Backward-compatible open-only lookup (leg-28 print).

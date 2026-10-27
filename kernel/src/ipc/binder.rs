@@ -3397,6 +3397,25 @@ pub fn txn_hang_audit() {
                 &h.outstanding
             }
         );
+        // leg-37B family B: EXT4_BIG_LOCK state + the fsw free/bitmap
+        // counters AT the hang instant. Cumulative since boot; the delta
+        // between consecutive 5 s bursts is the episode's volume (the 60 s
+        // FSW cadence and the 30 s census straddle 1-100 s ftruncate
+        // episodes — sc335B proved both unusable for this family).
+        // bl=<locked>.<owner>.<depth>.<waiters>.<queued>.<held_ms>:
+        // owner/held_ms name the holder and its outermost acquire age —
+        // a multi-second held_ms with the audit's own server-tid sys=
+        // ftruncate entry frame is the smoking-gun alignment.
+        {
+            let (bl, owner, depth, waiters, queued, held_ms) =
+                crate::fs::ext4::EXT4_BIG_LOCK.audit_snapshot();
+            let (fr, fseg, fblk, bs, bsus) = crate::dfx::fsw::hang_snapshot();
+            let _ = writeln!(
+                w,
+                "TXN-HANG-FSW txn{} bl={}.{}.{}.{}.{}.{} fr={}.{}.{} bs={}.{}",
+                h.id, bl, owner, depth, waiters, queued, held_ms, fr, fseg, fblk, bs, bsus
+            );
+        }
         // Leg-28 item 2 + leg-29A: name the FILE when the hung server
         // thread is stuck in a file syscall family — the pathstash
         // entry was written by this tid's own entry path (open family:
