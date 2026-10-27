@@ -24,7 +24,7 @@
 | | |
 |---|---|
 | ![Ubuntu GNOME login](docs/images/ubuntu-gnome-login-2026-10-15.png) | ![GNOME Shell desktop frame](docs/images/ubuntu-gnome-shell-frame-2026-10-27.png) |
-| *Ubuntu GNOME login screen on Rux (riscv64) — verify.py 23/23 PASS* | *GNOME Shell desktop on Rux (riscv64) — run gnome-r13walk2, the first full-form shell frame: Activities pill + clock panel, a gsd → shell notification banner, an X client window (xterm) painting its `root@rux:/#` prompt, and the pointer sprite. Evidence is deterministic (frame pixel-diff + per-window XGetImage walk), reproduced in 3 boots, and an attribution A/B (old kernel, same image, calm host: screen never lit) pins the unblock to the kernel merge-set. The session is pointer-interactive: an injected absolute-positioning event moves the on-screen cursor to the exact commanded coordinates (r14live)* |
+| *Ubuntu GNOME login screen on Rux (riscv64) — verify.py 23/23 PASS* | *GNOME Shell desktop on Rux (riscv64) — run gnome-r13walk2, the first full-form shell frame: Activities pill + clock panel, a gsd → shell notification banner, an X client window (xterm) painting its `root@rux:/#` prompt, and the pointer sprite. Evidence is deterministic (frame pixel-diff + per-window XGetImage walk), reproduced in 3 boots, and an attribution A/B (old kernel, same image, calm host: screen never lit) pins the unblock to the kernel merge-set. The session is interactive end to end: an injected absolute-positioning event moves the on-screen cursor to the exact commanded coordinates (r14live), and after a click focuses the xterm, injected keystrokes land in it and the shell answers — `root@rux:/# a` → `a: command not found`, one prompt block per keystroke, 4/4 (r15type)* |
 
 ### OpenHarmony — support status
 
@@ -98,10 +98,12 @@ What is running in these screenshots, all on the Rux kernel:
   listen backlog blocks like Linux instead of returning ECONNREFUSED).
   The shell now composites on screen on riscv64 — panel, clock,
   notification banners and client windows paint (first full-form frame
-  2026-10-27, reproduced in 3 boots, zero panics in 2700 s runs), and
-  pointer input moves the cursor to commanded positions end to end
-  (virtio-input events are now drained on the device interrupt, waking
-  poll/epoll waiters — Xorg's input thread included). See the
+  2026-10-27, reproduced in 3 boots, zero panics in 2700 s runs) — and
+  the session is interactive end to end: injected pointer events move
+  the on-screen cursor to the exact commanded coordinates, and injected
+  keystrokes reach a click-focused xterm and its shell (virtio-input
+  events are now drained on the device interrupt, waking poll/epoll
+  waiters — Xorg's input thread included). See the
   [Roadmap](docs/progress/roadmap.md) for the remaining bring-up items.
 
 ### Try it
