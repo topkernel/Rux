@@ -32,6 +32,127 @@ use crate::config::{KERNEL_HZ, CFS_MIN_GRANULARITY_NS, CFS_LATENCY_NS};
 use crate::process::task::{Task, SchedPolicy};
 use super::class::{SchedClass, RunQueueRef};
 
+// ============================================================================
+// s14 pick-skip history (dfx=schedtrace) — the strand-victim discriminator.
+//
+// PICK-SKIP-ALL reports only the total-failure shape (a pick that found
+// NOTHING pickable). The msg-region WAKE-STRANDED family shows the other
+// shape: a victim refused by every pick AMID pickable candidates —
+// invisible to the report, yet it is the ~1s-grid strand producer
+// (fleet ltp-b r2: 100/100 strands in the msg* region with zero
+// skip-alls). This side table accumulates, per task, the refusal
+// reasons the pick walk issued while it sat queued; wakewatch's strand
+// report prints and clears the history at pick time, so every strand
+// line names WHY the victim was skipped for the whole window.
+// ============================================================================
+
+struct SkipHistSlot {
+    task: AtomicU64,
+    /// Refusal counts by reason (1=ownership/on_cpu/claim-this-cpu,
+    /// 2=foreign claim, 3=affinity, 4=throttled, 5=healed reset).
+    why: [AtomicU64; 5],
+    /// Total refusals recorded.
+    n: AtomicU64,
+    /// jiffies at the FIRST recorded refusal of this episode.
+    first_jif: AtomicU64,
+}
+
+const SKIP_HIST_SLOTS: usize = 256;
+static SKIP_HIST: [SkipHistSlot; SKIP_HIST_SLOTS] = {
+    #[allow(clippy::declare_interior_mutable_const)]
+    const ZERO: SkipHistSlot = SkipHistSlot {
+        task: AtomicU64::new(0),
+        why: [const { AtomicU64::new(0) }; 5],
+        n: AtomicU64::new(0),
+        first_jif: AtomicU64::new(0),
+    };
+    [ZERO; SKIP_HIST_SLOTS]
+};
+
+#[inline]
+fn skip_hist_of(task: *mut Task) -> &'static SkipHistSlot {
+    let a = task as usize;
+    &SKIP_HIST[(a >> 6 ^ a >> 12) & (SKIP_HIST_SLOTS - 1)]
+}
+
+/// Record one pick-walk refusal of `task` (called under the GRQ; only
+/// when dfx=schedtrace is armed).
+pub fn note_pick_skip(task: *mut Task, reason: u8) {
+    let s = skip_hist_of(task);
+    if s.task.load(Ordering::Relaxed) != task as usize as u64 {
+        // New episode for this slot: reset the counters.
+        s.task.store(task as usize as u64, Ordering::Release);
+        for w in &s.why {
+            w.store(0, Ordering::Relaxed);
+        }
+        s.n.store(0, Ordering::Relaxed);
+        s.first_jif.store(crate::drivers::timer::get_jiffies(), Ordering::Release);
+    }
+    if let Some(w) = s.why.get(reason as usize) {
+        w.fetch_add(1, Ordering::Relaxed);
+    }
+    s.n.fetch_add(1, Ordering::Relaxed);
+}
+
+/// Print (direct console, GRQ-held discipline) and clear the recorded
+/// skip history of `task`. Called from wakewatch's strand report.
+pub fn print_skip_history(task: *mut Task) {
+    use crate::console::putchar_no_lock as putchar;
+    let s = skip_hist_of(task);
+    if s.task.load(Ordering::Acquire) != task as usize as u64 {
+        return;
+    }
+    let n = s.n.swap(0, Ordering::AcqRel);
+    if n == 0 {
+        return;
+    }
+    let now = crate::drivers::timer::get_jiffies();
+    let first = s.first_jif.swap(0, Ordering::AcqRel);
+    let mut whys = [0u64; 5];
+    for (i, w) in s.why.iter().enumerate() {
+        whys[i] = w.swap(0, Ordering::AcqRel);
+    }
+    s.task.store(0, Ordering::Release);
+    fn pu(mut v: u64) {
+        use crate::console::putchar_no_lock as putchar;
+        let mut buf = [0u8; 20];
+        let mut k = 0;
+        if v == 0 {
+            putchar(b'0');
+            return;
+        }
+        while v > 0 && k < buf.len() {
+            buf[k] = b'0' + (v % 10) as u8;
+            v /= 10;
+            k += 1;
+        }
+        while k > 0 {
+            k -= 1;
+            putchar(buf[k]);
+        }
+    }
+    for &c in b"\nSKIPHIST skips=" {
+        putchar(c);
+    }
+    pu(n);
+    for (i, cnt) in whys.iter().enumerate() {
+        if *cnt == 0 {
+            continue;
+        }
+        for &c in b" why" {
+            putchar(c);
+        }
+        pu((i + 1) as u64);
+        putchar(b'=');
+        pu(*cnt);
+    }
+    for &c in b" span_ms=" {
+        putchar(c);
+    }
+    pu(now.wrapping_sub(first) * 1000 / crate::config::KERNEL_HZ as u64);
+    putchar(b'\n');
+}
+
 /// Clock frequency (HZ) - from config
 const HZ: u64 = KERNEL_HZ as u64;
 
@@ -1089,6 +1210,17 @@ impl CfsRunQueue {
 
             // Not allowed — remove temporarily and stash
             self.tasks_timeline.remove(&key);
+            // s14 (msg-region strand family): PICK-SKIP-ALL names only
+            // the total-failure shape (nothing pickable). A victim
+            // refused AMID other candidates is invisible — yet that is
+            // the msg* WAKE-STRANDED shape (100/100 strands with zero
+            // skip-alls in ltp-b r2's msg region). Stamp every refusal
+            // into a per-task history so the strand report (wakewatch
+            // check_picked) can name WHY the victim sat unpicked for
+            // the whole strand window. Armed only under dfx=schedtrace.
+            if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SchedTrace) {
+                note_pick_skip(task, skip_reason as u8);
+            }
             if skip_count < skipped.len() {
                 skipped[skip_count] = (key, task, skip_reason);
                 skip_count += 1;

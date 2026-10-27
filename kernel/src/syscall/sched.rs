@@ -990,12 +990,21 @@ pub fn sys_sched_setaffinity(args: SyscallArgs) -> i64 {
     // the SA:10 / bootanimation / launcher chain all died on that
     // starvation.
     let online = {
-        // apic::cpu_count is x86_64-only; riscv64 reports via the SMP
-        // online mask the boot code programs.
-        #[cfg(feature = "x86_64")]
-        let n = crate::drivers::intc::apic::cpu_count();
-        #[cfg(not(feature = "x86_64"))]
-        let n = crate::config::MAX_CPUS as usize;
+        // s14 fleet catch (ltp-b r2 canary): the mask must name CPUs
+        // that are actually ONLINE at runtime. The old cfg-split
+        // trusted apic::cpu_count() (MADT-discovered) on x86_64 and
+        // config::MAX_CPUS on riscv64 — on a boot with fewer CPUs than
+        // MAX_CPUS (fleet lanes: -smp 2 with MAX_CPUS=4) a mask like
+        // 0x8 named a nonexistent hart and passed validation; the task
+        // then stranded forever (every pick refuses it, skip why=3),
+        // wake paths IPI'd the dead hart ("send_ipi to hart 3 failed,
+        // error=-3"), and one such leaked LTP helper produced a
+        // 185-report PICK-SKIP-ALL storm plus the WAKE-STRANDED grid
+        // burst behind it. num_started_cpus() is the started-flag
+        // count on both arches — the exact set the scheduler can pick
+        // on. Linux rejects a mask disjoint from the online set with
+        // EINVAL; so do we (below).
+        let n = crate::arch::smp::num_started_cpus();
         if n == 0 { 1 } else { n }
     };
     let online_mask: u32 = if online >= 32 { u32::MAX } else { (1u32 << online) - 1 };

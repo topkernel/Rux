@@ -223,6 +223,11 @@ pub fn check_picked(task: *mut crate::process::Task, cpu: usize) {
             ww_msg(b"ms");
         }
         ww_msg(b"\n");
+        // s14: name WHY this victim sat unpicked through the whole
+        // strand window — the fair-class refusal history accumulated by
+        // note_pick_skip (dfx=schedtrace). No-op when the history is
+        // empty (skip reasons were never recorded / not armed).
+        super::fair::print_skip_history(task);
     }
 }
 
