@@ -494,20 +494,20 @@ fn handle_timer_interrupt(regs: &mut PtRegs, cpu: usize) {
                     crate::dfx::syscost::tick_user();
                     // perf events (PERF_TYPE_SOFTWARE sampling): stash the
                     // interrupted PC for the softirq charger. Lock-free.
-                    crate::perf::note_tick(regs.epc, crate::perf::MODE_USER, (*task).pid());
+                    crate::perf::note_tick(regs.epc, crate::perf::MODE_USER, (*task).pid(), regs.s0);
                 } else {
                     (*task).stime_ticks.fetch_add(1, Relaxed);
                     crate::dfx::syscost::tick_kern(regs.epc);
-                    crate::perf::note_tick(regs.epc, crate::perf::MODE_KERNEL, (*task).pid());
+                    crate::perf::note_tick(regs.epc, crate::perf::MODE_KERNEL, (*task).pid(), regs.s0);
                 }
             } else {
                 crate::dfx::syscost::tick_idle();
-                crate::perf::note_tick(regs.epc, crate::perf::MODE_IDLE, 0);
+                crate::perf::note_tick(regs.epc, crate::perf::MODE_IDLE, 0, 0);
             }
         }
     } else {
         crate::dfx::syscost::tick_idle();
-        crate::perf::note_tick(regs.epc, crate::perf::MODE_IDLE, 0);
+        crate::perf::note_tick(regs.epc, crate::perf::MODE_IDLE, 0, 0);
     }
 
     // 1. Update jiffies

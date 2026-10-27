@@ -90,6 +90,27 @@ static void spin_user_ms(uint64_t ms)
     (void)sink;
 }
 
+/* User spin interleaved with kernel work (a /proc read per round): the
+ * timer tick then lands in KERNEL mode regularly — what the callchain
+ * section needs sampled. */
+static void spin_mixed_ms(uint64_t ms)
+{
+    volatile uint64_t sink = 0;
+    uint8_t scratch[512];
+    uint64_t t0 = now_ms();
+    while (now_ms() - t0 < ms) {
+        for (int i = 0; i < 20000; i++)
+            sink += i;
+        int fd = open("/proc/1/status", O_RDONLY);
+        if (fd >= 0) {
+            while (read(fd, scratch, sizeof(scratch)) > 0) {
+            }
+            close(fd);
+        }
+    }
+    (void)sink;
+}
+
 struct rec {
     uint32_t type;
     uint16_t misc;
@@ -218,7 +239,105 @@ int main(void)
         close((int)fd);
     }
 
-    // ---- 5. error matrix ----
+    // ---- 5. callchain samples (PERF_SAMPLE_CALLCHAIN) ----
+    // Two shapes must come back:
+    //   a) per-CPU cpu-clock: kernel-mode samples carry nr = 1 +
+    //      frames, ips[0] == PERF_CONTEXT_KERNEL (0xffffffffffffff00),
+    //      ips[1..] kernel text return addresses (the wedge-hunt food);
+    //   b) task-clock on self while spinning in USER mode: records are
+    //      24 bytes with nr = 0 (no user-stack walker — honest empty).
+    {
+        struct pattr c;
+        __builtin_memset(&c, 0, sizeof(c));
+        c.type = PERF_TYPE_SOFTWARE;
+        c.size = 64;
+        c.config = PERF_COUNT_SW_CPU_CLOCK;
+        c.sample_period = 20000000u;
+        c.sample_type = PERF_SAMPLE_IP | (1ULL << 5); /* CALLCHAIN */
+        c.flags1 = 1u << 4; /* exclude_user: kernel-mode samples only */
+        long cfd = pe_open(&c, -1, 0, -1, 0);
+        check("open-chain", cfd >= 0);
+        if (cfd >= 0) {
+            spin_mixed_ms(1200);
+            struct pollfd pfdc = { .fd = (int)cfd, .events = 1 };
+            poll(&pfdc, 1, 3000);
+            n = read((int)cfd, buf, sizeof(buf));
+            int chains = 0, kframes = 0, badc = 0;
+            size_t off = 0;
+            while (n > 0 && off + 8 <= (size_t)n) {
+                struct rec r;
+                __builtin_memcpy(&r, buf + off, 8);
+                if (r.size < 8 || off + r.size > (size_t)n) {
+                    badc++;
+                    break;
+                }
+                if (r.type == PERF_RECORD_SAMPLE && r.size >= 24) {
+                    uint64_t nr;
+                    __builtin_memcpy(&nr, buf + off + 16, 8);
+                    if (r.misc == MISC_KERNEL && nr >= 2) {
+                        uint64_t m0, f1;
+                        __builtin_memcpy(&m0, buf + off + 24, 8);
+                        __builtin_memcpy(&f1, buf + off + 32, 8);
+                        if (m0 == 0xffffffffffffff00ULL && f1 != 0) {
+                            chains++;
+                            kframes += (int)nr - 1;
+                            __builtin_printf("  chain nr=%llu f1=0x%llx\n",
+                                             (unsigned long long)nr,
+                                             (unsigned long long)f1);
+                        } else {
+                            badc++;
+                        }
+                    }
+                }
+                off += r.size;
+            }
+            __builtin_printf("  chain read=%ld chains=%d frames=%d bad=%d\n",
+                             n, chains, kframes, badc);
+            check("chain-kernel", chains > 0 && kframes > 0 && badc == 0);
+            close((int)cfd);
+        }
+
+        // user-mode chain records: nr == 0, size 24.
+        c.config = PERF_COUNT_SW_TASK_CLOCK;
+        c.flags1 = 0;
+        long ufd = pe_open(&c, 0, -1, -1, 0);
+        check("open-chain-user", ufd >= 0);
+        if (ufd >= 0) {
+            spin_user_ms(600);
+            struct pollfd pfdu = { .fd = (int)ufd, .events = 1 };
+            poll(&pfdu, 1, 3000);
+            n = read((int)ufd, buf, sizeof(buf));
+            int empty_chains = 0, badu = 0;
+            size_t off = 0;
+            while (n > 0 && off + 8 <= (size_t)n) {
+                struct rec r;
+                __builtin_memcpy(&r, buf + off, 8);
+                if (r.size < 8 || off + r.size > (size_t)n) {
+                    badu++;
+                    break;
+                }
+                if (r.type == PERF_RECORD_SAMPLE && r.misc == MISC_USER) {
+                    if (r.size == 24) {
+                        uint64_t nr;
+                        __builtin_memcpy(&nr, buf + off + 16, 8);
+                        if (nr == 0)
+                            empty_chains++;
+                        else
+                            badu++;
+                    } else {
+                        badu++;
+                    }
+                }
+                off += r.size;
+            }
+            __builtin_printf("  uchain read=%ld empty=%d bad=%d\n", n,
+                             empty_chains, badu);
+            check("chain-user-empty", empty_chains > 0 && badu == 0);
+            close((int)ufd);
+        }
+    }
+
+    // ---- 6. error matrix ----
     struct pattr b;
     int ok = 1;
 

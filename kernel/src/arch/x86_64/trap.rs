@@ -1371,7 +1371,7 @@ fn handle_timer_tick(regs: &mut PtRegs, cpu: usize) {
                     crate::dfx::syscost::tick_user();
                     // perf events (PERF_TYPE_SOFTWARE sampling): stash the
                     // interrupted PC for the softirq charger. Lock-free.
-                    crate::perf::note_tick(regs.rip, crate::perf::MODE_USER, (*task).pid());
+                    crate::perf::note_tick(regs.rip, crate::perf::MODE_USER, (*task).pid(), regs.rbp);
                 } else {
                     (*task).stime_ticks.fetch_add(1, Relaxed);
                     // sc105 stime-burn attribution: sample WHERE the
@@ -1380,16 +1380,16 @@ fn handle_timer_tick(regs: &mut PtRegs, cpu: usize) {
                     // boot crowd). KILLDUMP prints the table.
                     stime_sample_rip(regs.rip, (*task).comm());
                     crate::dfx::syscost::tick_kern(regs.rip);
-                    crate::perf::note_tick(regs.rip, crate::perf::MODE_KERNEL, (*task).pid());
+                    crate::perf::note_tick(regs.rip, crate::perf::MODE_KERNEL, (*task).pid(), regs.rbp);
                 }
             } else {
                 crate::dfx::syscost::tick_idle();
-                crate::perf::note_tick(regs.rip, crate::perf::MODE_IDLE, 0);
+                crate::perf::note_tick(regs.rip, crate::perf::MODE_IDLE, 0, 0);
             }
         }
     } else {
         crate::dfx::syscost::tick_idle();
-        crate::perf::note_tick(regs.rip, crate::perf::MODE_IDLE, 0);
+        crate::perf::note_tick(regs.rip, crate::perf::MODE_IDLE, 0, 0);
     }
 
     // 1. Update jiffies

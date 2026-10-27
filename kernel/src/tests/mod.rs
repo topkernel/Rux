@@ -454,6 +454,7 @@ pub fn run_all_tests() {
     test_group_start("perf-records");
     crate::perf::tests::test_record_encoding();
     crate::perf::tests::test_ring_roundtrip();
+    crate::perf::tests::test_callchain_record();
     crate::perf::tests::test_short_buffer();
 
     // ===== 3. Memory management =====

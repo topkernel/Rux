@@ -63,6 +63,12 @@ pub const PERF_COUNT_SW_CPU_CLOCK: u64 = 0;
 pub const PERF_COUNT_SW_TASK_CLOCK: u64 = 1;
 /// sample_type bit — record the interrupted instruction pointer.
 pub const PERF_SAMPLE_IP: u64 = 1 << 0;
+/// sample_type bit — record the kernel call chain of the sample
+/// (frame-pointer walk of the interrupted kernel context).
+pub const PERF_SAMPLE_CALLCHAIN: u64 = 1 << 5;
+/// The callchain's kernel-context marker (uapi's PERF_CONTEXT_KERNEL):
+/// the chain opens with it, then kernel addresses follow.
+const PERF_CONTEXT_KERNEL: u64 = u64::MAX - 255;
 
 /// attr bitfield (u64 at offset 40) bits this slice reads.
 const FLAG_DISABLED: u64 = 1 << 0;
@@ -120,6 +126,16 @@ struct TickStash {
     pc: AtomicU64,
     mode: AtomicU8,
     tid: AtomicU32,
+    /// The interrupted kernel frame pointer (for the callchain walk).
+    /// Only meaningful with MODE_KERNEL.
+    fp: AtomicU64,
+    /// The walked kernel chain (return addresses, newest first) and
+    /// its length; walked in the hard IRQ when any event wants
+    /// callchains — softirq time is too late, the stack has moved on
+    /// (the reference walks in the hrtimer overflow callback, the same
+    /// context discipline).
+    chain: [AtomicU64; CHAIN_FRAMES],
+    chain_len: AtomicU8,
     /// Incremented by every armed tick; the softirq charges the
     /// delta since its last pass (normally 1).
     seq: AtomicU64,
@@ -127,11 +143,19 @@ struct TickStash {
     charged: AtomicU64,
 }
 
+/// How many frames a sample chain carries at most (the reference's
+/// default PERF_MAX_STACK_DEEP class; the frame-pointer walker's 32
+/// frames trimmed to the wedge-hunt need).
+pub const CHAIN_FRAMES: usize = 16;
+
 const fn new_stash() -> TickStash {
     TickStash {
         pc: AtomicU64::new(0),
         mode: AtomicU8::new(MODE_IDLE),
         tid: AtomicU32::new(0),
+        fp: AtomicU64::new(0),
+        chain: [const { AtomicU64::new(0) }; CHAIN_FRAMES],
+        chain_len: AtomicU8::new(0),
         seq: AtomicU64::new(0),
         charged: AtomicU64::new(0),
     }
@@ -145,10 +169,17 @@ static STASH: [TickStash; crate::config::MAX_CPUS] = [const { new_stash() }; cra
 /// per tick.
 static ARMED: AtomicUsize = AtomicUsize::new(0);
 
-/// Hard-IRQ tick hook (arch trap paths). `tid` 0 = idle/no task.
-/// Lock-free by contract — see the module doc.
+/// Events wanting PERF_SAMPLE_CALLCHAIN: the hard-IRQ hook walks the
+/// interrupted stack only while some reader asked for chains.
+static CALLCHAIN_ARMED: AtomicUsize = AtomicUsize::new(0);
+
+/// Hard-IRQ tick hook (arch trap paths). `tid` 0 = idle/no task. `fp`
+/// is the interrupted frame pointer (the trap frame's s0/rbp) — kept
+/// for the callchain walk. Lock-free by contract — see the module doc;
+/// the walk itself reads only kernel stack memory through the same
+/// plausibility gates memwatch uses.
 #[inline]
-pub fn note_tick(pc: u64, mode: u8, tid: u32) {
+pub fn note_tick(pc: u64, mode: u8, tid: u32, fp: u64) {
     if ARMED.load(Ordering::Relaxed) == 0 {
         return;
     }
@@ -157,9 +188,33 @@ pub fn note_tick(pc: u64, mode: u8, tid: u32) {
         return;
     }
     let s = &STASH[c];
+    // The chain is walked HERE, in hard-IRQ context, only for
+    // kernel-mode ticks while some event wants it: softirq time is too
+    // late (the stack may have unwound), and a user-mode tick's kernel
+    // stack holds the previous syscall's stale trail — an honest
+    // nr=0 chain answers that case (no user-stack walker exists).
+    let chain_len = if mode == MODE_KERNEL && CALLCHAIN_ARMED.load(Ordering::Relaxed) > 0 {
+        let mut frames = [0u64; CHAIN_FRAMES];
+        // SAFETY: fp is the interrupted context's frame pointer from
+        // the trap frame; the walk validates every hop (kernel-window
+        // plausibility, alignment, monotonicity) before dereferencing.
+        unsafe {
+            crate::dfx::memwatch::walk_fp_chain(fp, &mut frames);
+        }
+        let mut n = 0usize;
+        while n < CHAIN_FRAMES && frames[n] != 0 {
+            s.chain[n].store(frames[n], Ordering::Relaxed);
+            n += 1;
+        }
+        n as u8
+    } else {
+        0
+    };
+    s.chain_len.store(chain_len, Ordering::Relaxed);
     s.pc.store(pc, Ordering::Relaxed);
     s.mode.store(mode, Ordering::Relaxed);
     s.tid.store(tid, Ordering::Relaxed);
+    s.fp.store(fp, Ordering::Relaxed);
     s.seq.fetch_add(1, Ordering::Release);
 }
 
@@ -178,6 +233,8 @@ pub(crate) struct PerfEvent {
     /// PERF_COUNT_SW_CPU_CLOCK / PERF_COUNT_SW_TASK_CLOCK.
     config: u64,
     sample_period: u64,
+    /// PERF_SAMPLE_CALLCHAIN requested in sample_type.
+    wants_callchain: bool,
     /// TID to match (task-scoped events); 0 in per-CPU mode.
     target_tid: u32,
     /// CPU to match; -1 = task-scoped, else per-CPU.
@@ -301,8 +358,28 @@ pub fn softirq_tick() {
                 let mut emitted = 0u64;
                 while inner.counter >= ev.sample_period && ev.sample_period > 0 {
                     inner.counter -= ev.sample_period;
-                    if inner.ring.len() + SAMPLE_REC_LEN <= RING_CAP {
-                        push_sample(&mut inner.ring, pc, mode);
+                    let rec_len = if ev.wants_callchain {
+                        // nr field always; frames only for kernel ticks
+                        // (user ticks carry an honest nr=0).
+                        SAMPLE_REC_LEN as usize
+                            + 8
+                            + if mode == MODE_USER {
+                                0
+                            } else {
+                                8 * (1 + s.chain_len.load(Ordering::Relaxed) as usize)
+                            }
+                    } else {
+                        SAMPLE_REC_LEN as usize
+                    };
+                    if inner.ring.len() + rec_len <= RING_CAP {
+                        push_sample(
+                            &mut inner.ring,
+                            pc,
+                            mode,
+                            ev.wants_callchain,
+                            &s.chain,
+                            s.chain_len.load(Ordering::Relaxed) as usize,
+                        );
                         emitted += 1;
                     } else {
                         inner.lost += 1;
@@ -322,24 +399,68 @@ pub fn softirq_tick() {
     }
 }
 
-/// One PERF_RECORD_SAMPLE with PERF_SAMPLE_IP: header (8 B) + ip (8 B).
+/// One PERF_RECORD_SAMPLE with PERF_SAMPLE_IP: header (8 B) + ip (8 B)
+/// — the minimum record this slice emits.
 const SAMPLE_REC_LEN: usize = 16;
+/// The longest record: IP-only head + nr + [CONTEXT_KERNEL + frames].
+const SAMPLE_REC_MAX: usize = SAMPLE_REC_LEN + 8 + 8 * (1 + CHAIN_FRAMES);
 /// PERF_RECORD_LOST: header (8 B) + u64 id + u64 lost.
 const LOST_REC_LEN: usize = 24;
 
-fn push_sample(ring: &mut VecDeque<u8>, pc: u64, mode: u8) {
+/// Append one sample record. With `callchain`, the ABI's layout after
+/// the header: ip (u64), nr (u64), then `nr` u64 entries — the
+/// PERF_CONTEXT_KERNEL marker followed by the walked kernel return
+/// addresses (the interrupted PC rides in the ip field). Kernel-mode
+/// ticks carry the walked chain; user-mode ticks carry nr=0 — Rux has
+/// no user-stack walker, and an empty chain is the honest value (the
+/// reference emits user chains there; that machinery stays open).
+fn push_sample(
+    ring: &mut VecDeque<u8>,
+    pc: u64,
+    mode: u8,
+    callchain: bool,
+    chain: &[AtomicU64; CHAIN_FRAMES],
+    chain_len: usize,
+) {
     let misc = if mode == MODE_USER {
         PERF_RECORD_MISC_USER
     } else {
         PERF_RECORD_MISC_KERNEL
     };
-    let mut rec = [0u8; SAMPLE_REC_LEN];
+    let n_frames = if callchain && mode != MODE_USER {
+        chain_len.min(CHAIN_FRAMES)
+    } else {
+        0
+    };
+    let nr = if callchain {
+        if mode == MODE_USER {
+            0
+        } else {
+            (1 + n_frames) as u64 // the kernel marker + the frames
+        }
+    } else {
+        // IP-only records do not carry the nr field at all.
+        0
+    };
+    let carries_nr = callchain;
+    let total = SAMPLE_REC_LEN + if carries_nr { 8 + 8 * nr as usize } else { 0 };
+    let mut rec = [0u8; SAMPLE_REC_MAX];
     rec[0..4].copy_from_slice(&PERF_RECORD_SAMPLE.to_le_bytes());
     rec[4..6].copy_from_slice(&misc.to_le_bytes());
-    rec[6..8].copy_from_slice(&(SAMPLE_REC_LEN as u16).to_le_bytes());
+    rec[6..8].copy_from_slice(&(total as u16).to_le_bytes());
     rec[8..16].copy_from_slice(&pc.to_le_bytes());
-    for b in rec {
-        ring.push_back(b);
+    if carries_nr {
+        rec[16..24].copy_from_slice(&nr.to_le_bytes());
+        if nr > 0 {
+            rec[24..32].copy_from_slice(&PERF_CONTEXT_KERNEL.to_le_bytes());
+        }
+        for i in 0..n_frames {
+            let v = chain[i].load(Ordering::Relaxed);
+            rec[32 + i * 8..40 + i * 8].copy_from_slice(&v.to_le_bytes());
+        }
+    }
+    for b in &rec[..total] {
+        ring.push_back(*b);
     }
 }
 
@@ -355,9 +476,10 @@ pub(crate) fn lost_record_bytes(id: u64, lost: u64) -> [u8; LOST_REC_LEN] {
 }
 
 /// Drain whole records into `buf`. Emits the pending LOST record
-/// (if any) first, then samples. Returns bytes copied, or
-/// Some(0)/None semantics: Err(()) = a record is pending but does
-/// not fit `buf` at all (the caller surfaces EINVAL).
+/// (if any) first, then samples (variable length — the header's own
+/// size field says how long each record is). Returns bytes copied;
+/// Err(()) = a record is pending but does not fit `buf` at all (the
+/// caller surfaces EINVAL).
 fn drain_records(ev: &PerfEvent, buf: &mut [u8]) -> Result<usize, ()> {
     let mut inner = ev.inner.lock();
     let mut copied = 0usize;
@@ -374,10 +496,26 @@ fn drain_records(ev: &PerfEvent, buf: &mut [u8]) -> Result<usize, ()> {
     }
 
     while inner.ring.len() >= SAMPLE_REC_LEN && buf.len() - copied >= SAMPLE_REC_LEN {
-        for b in buf[copied..copied + SAMPLE_REC_LEN].iter_mut() {
+        // The record's own length: perf_event_header.size at bytes 6..8
+        // of the queued record.
+        let mut hdr = [0u8; 8];
+        for (i, h) in hdr.iter_mut().enumerate() {
+            *h = *inner.ring.get(i).unwrap_or(&0);
+        }
+        let rec_len = u16::from_le_bytes([hdr[6], hdr[7]]) as usize;
+        if !(SAMPLE_REC_LEN..=SAMPLE_REC_MAX).contains(&rec_len) {
+            // A corrupted queue entry (should not happen): drop one
+            // byte and rescan rather than trust it.
+            inner.ring.pop_front();
+            continue;
+        }
+        if buf.len() - copied < rec_len {
+            break;
+        }
+        for b in buf[copied..copied + rec_len].iter_mut() {
             *b = inner.ring.pop_front().unwrap_or(0);
         }
-        copied += SAMPLE_REC_LEN;
+        copied += rec_len;
     }
 
     if copied == 0 && !inner.ring.is_empty() {
@@ -474,9 +612,13 @@ fn perf_close(file: &crate::fs::File) -> i32 {
     // SAFETY: as above.
     let ev = unsafe { &*(ptr as *const PerfEvent) };
     let id = ev.id;
+    let wants_chain = ev.wants_callchain;
     let was_armed = unregister(id);
     if was_armed {
         ARMED.fetch_sub(1, Ordering::Release);
+    }
+    if wants_chain {
+        CALLCHAIN_ARMED.fetch_sub(1, Ordering::Release);
     }
     // Residual race (mirrors timerfd_close): a reader still inside
     // perf_read holds &File via its own reference; close runs on the
@@ -569,13 +711,17 @@ pub fn sys_perf_event_open(args: crate::syscall::SyscallArgs) -> i64 {
         return -(crate::errno::constants::EINVAL as i64);
     }
 
-    // 4. Sampling mode: period-based, IP-only.
+    // 4. Sampling mode: period-based; sample_type is IP or
+    // IP|CALLCHAIN (this slice fills exactly those).
     if attr.flags1 & FLAG_FREQ != 0 {
         return -(crate::errno::constants::EINVAL as i64); // freq mode not implemented
     }
-    if attr.sample_type != PERF_SAMPLE_IP {
-        return -(crate::errno::constants::EINVAL as i64); // this slice fills exactly IP
+    if attr.sample_type != PERF_SAMPLE_IP
+        && attr.sample_type != (PERF_SAMPLE_IP | PERF_SAMPLE_CALLCHAIN)
+    {
+        return -(crate::errno::constants::EINVAL as i64); // this slice fills exactly IP (+CALLCHAIN)
     }
+    let wants_callchain = attr.sample_type & PERF_SAMPLE_CALLCHAIN != 0;
     if attr.read_format != 0 {
         return -(crate::errno::constants::EINVAL as i64); // no group/total time read formats
     }
@@ -654,6 +800,7 @@ pub fn sys_perf_event_open(args: crate::syscall::SyscallArgs) -> i64 {
         id: 0,
         config: attr.config,
         sample_period: attr.sample_period,
+        wants_callchain,
         target_tid,
         target_cpu,
         exclude_user: attr.flags1 & FLAG_EXCLUDE_USER != 0,
@@ -669,6 +816,10 @@ pub fn sys_perf_event_open(args: crate::syscall::SyscallArgs) -> i64 {
     });
     let ev_ptr = Box::into_raw(ev);
     register(ev_ptr, starts_armed);
+    if wants_callchain {
+        // The hard-IRQ hook walks chains only while a live event asks.
+        CALLCHAIN_ARMED.fetch_add(1, Ordering::Release);
+    }
 
     let file_flags = crate::fs::file::FileFlags::O_RDONLY;
     let file = Arc::new(crate::fs::File::new(
@@ -684,6 +835,9 @@ pub fn sys_perf_event_open(args: crate::syscall::SyscallArgs) -> i64 {
             let was_armed = unregister(unsafe { (*ev_ptr).id });
             if was_armed {
                 ARMED.fetch_sub(1, Ordering::Release);
+            }
+            if unsafe { (*ev_ptr).wants_callchain } {
+                CALLCHAIN_ARMED.fetch_sub(1, Ordering::Release);
             }
             // SAFETY: reclaim the box.
             unsafe { let _ = Box::from_raw(ev_ptr); }
@@ -702,6 +856,9 @@ pub fn sys_perf_event_open(args: crate::syscall::SyscallArgs) -> i64 {
             let was_armed = unregister(unsafe { (*ev_ptr).id });
             if was_armed {
                 ARMED.fetch_sub(1, Ordering::Release);
+            }
+            if unsafe { (*ev_ptr).wants_callchain } {
+                CALLCHAIN_ARMED.fetch_sub(1, Ordering::Release);
             }
             // SAFETY: reclaim the box.
             unsafe { let _ = Box::from_raw(ev_ptr); }
@@ -724,6 +881,31 @@ pub mod tests {
         rec[6..8].copy_from_slice(&(SAMPLE_REC_LEN as u16).to_le_bytes());
         rec[8..16].copy_from_slice(&pc.to_le_bytes());
         rec
+    }
+
+    fn test_event(id: u64, wants_callchain: bool, lost: u64) -> PerfEvent {
+        PerfEvent {
+            id,
+            config: PERF_COUNT_SW_CPU_CLOCK,
+            sample_period: TICK_NS,
+            wants_callchain,
+            target_tid: 0,
+            target_cpu: 0,
+            exclude_user: false,
+            exclude_kernel: false,
+            exclude_idle: false,
+            enabled: AtomicBool::new(true),
+            inner: Spinlock::new(PerfInner {
+                counter: 0,
+                ring: VecDeque::new(),
+                lost,
+            }),
+            wait_queue: WaitQueueHead::new(),
+        }
+    }
+
+    fn zero_chain() -> [AtomicU64; CHAIN_FRAMES] {
+        [const { AtomicU64::new(0) }; CHAIN_FRAMES]
     }
 
     /// Record encoding: sample and lost records match the ABI layout.
@@ -754,27 +936,12 @@ pub mod tests {
 
     /// push_sample/drain round trip through the byte ring.
     pub fn test_ring_roundtrip() {
-        let ev = PerfEvent {
-            id: 42,
-            config: PERF_COUNT_SW_CPU_CLOCK,
-            sample_period: TICK_NS,
-            target_tid: 0,
-            target_cpu: 0,
-            exclude_user: false,
-            exclude_kernel: false,
-            exclude_idle: false,
-            enabled: AtomicBool::new(true),
-            inner: Spinlock::new(PerfInner {
-                counter: 0,
-                ring: VecDeque::new(),
-                lost: 0,
-            }),
-            wait_queue: WaitQueueHead::new(),
-        };
+        let ev = test_event(42, false, 0);
         {
             let mut inner = ev.inner.lock();
-            push_sample(&mut inner.ring, 0xaabb, MODE_KERNEL);
-            push_sample(&mut inner.ring, 0xccdd, MODE_USER);
+            let chain = zero_chain();
+            push_sample(&mut inner.ring, 0xaabb, MODE_KERNEL, false, &chain, 0);
+            push_sample(&mut inner.ring, 0xccdd, MODE_USER, false, &chain, 0);
         }
         let mut buf = [0u8; 40];
         match drain_records(&ev, &mut buf) {
@@ -793,26 +960,12 @@ pub mod tests {
         }
         // Lost-first ordering: a lost count precedes ring samples.
         {
-            let ev2 = PerfEvent {
-                id: 43,
-                config: PERF_COUNT_SW_CPU_CLOCK,
-                sample_period: TICK_NS,
-                target_tid: 0,
-                target_cpu: 0,
-                exclude_user: false,
-                exclude_kernel: false,
-                exclude_idle: false,
-                enabled: AtomicBool::new(true),
-                inner: Spinlock::new(PerfInner {
-                    counter: 0,
-                    ring: VecDeque::new(),
-                    lost: 5,
-                }),
-                wait_queue: WaitQueueHead::new(),
-            };
-            let mut inner = ev2.inner.lock();
-            push_sample(&mut inner.ring, 0x1, MODE_KERNEL);
-            drop(inner);
+            let ev2 = test_event(43, false, 5);
+            {
+                let mut inner = ev2.inner.lock();
+                let chain = zero_chain();
+                push_sample(&mut inner.ring, 0x1, MODE_KERNEL, false, &chain, 0);
+            }
             let mut b2 = [0u8; 64];
             match drain_records(&ev2, &mut b2) {
                 Ok(n) => {
@@ -830,28 +983,76 @@ pub mod tests {
         }
     }
 
-    /// A buffer too small for one record is EINVAL.
-    pub fn test_short_buffer() {
-        let ev = PerfEvent {
-            id: 44,
-            config: PERF_COUNT_SW_CPU_CLOCK,
-            sample_period: TICK_NS,
-            target_tid: 0,
-            target_cpu: 0,
-            exclude_user: false,
-            exclude_kernel: false,
-            exclude_idle: false,
-            enabled: AtomicBool::new(true),
-            inner: Spinlock::new(PerfInner {
-                counter: 0,
-                ring: VecDeque::new(),
-                lost: 0,
-            }),
-            wait_queue: WaitQueueHead::new(),
-        };
+    /// A callchain sample: variable-length record, ABI layout
+    /// (ip, nr, PERF_CONTEXT_KERNEL marker, frames), drained whole.
+    pub fn test_callchain_record() {
+        let ev = test_event(45, true, 0);
         {
             let mut inner = ev.inner.lock();
-            push_sample(&mut inner.ring, 0x99, MODE_USER);
+            let mut chain = zero_chain();
+            chain[0].store(0x8000_1000, Ordering::Relaxed);
+            chain[1].store(0x8000_2000, Ordering::Relaxed);
+            push_sample(&mut inner.ring, 0x5566, MODE_KERNEL, true, &chain, 2);
+        }
+        let mut buf = [0u8; 64];
+        match drain_records(&ev, &mut buf) {
+            Ok(n) => {
+                // 8 hdr + 8 ip + 8 nr + 3*8 ips = 48 bytes.
+                let ok = n == 48
+                    && buf[0..4] == PERF_RECORD_SAMPLE.to_le_bytes()
+                    && buf[6..8] == 48u16.to_le_bytes()
+                    && buf[8..16] == 0x5566u64.to_le_bytes()
+                    && buf[16..24] == 3u64.to_le_bytes()
+                    && buf[24..32] == PERF_CONTEXT_KERNEL.to_le_bytes()
+                    && buf[32..40] == 0x8000_1000u64.to_le_bytes()
+                    && buf[40..48] == 0x8000_2000u64.to_le_bytes();
+                if ok {
+                    crate::tests::test_pass("perf-callchain");
+                } else {
+                    crate::tests::test_fail("perf-callchain", "chain layout mismatch");
+                }
+            }
+            Err(()) => {
+                crate::tests::test_fail("perf-callchain", "unexpected EINVAL");
+            }
+        }
+        // Mixed queue: a 16-byte IP-only record then a chain record —
+        // the drain must respect each record's own length.
+        {
+            let ev3 = test_event(46, false, 0);
+            {
+                let mut inner = ev3.inner.lock();
+                let chain = zero_chain();
+                chain[0].store(0xdead_beef, Ordering::Relaxed);
+                push_sample(&mut inner.ring, 0x1, MODE_USER, false, &chain, 0);
+                push_sample(&mut inner.ring, 0x2, MODE_KERNEL, true, &chain, 1);
+            }
+            let mut b3 = [0u8; 64];
+            match drain_records(&ev3, &mut b3) {
+                Ok(n) => {
+                    let ok = n == 16 + 40
+                        && b3[6..8] == 16u16.to_le_bytes()
+                        && b3[16 + 6..16 + 8] == 40u16.to_le_bytes();
+                    if ok {
+                        crate::tests::test_pass("perf-mixedlen");
+                    } else {
+                        crate::tests::test_fail("perf-mixedlen", "mixed lengths mismatch");
+                    }
+                }
+                Err(()) => {
+                    crate::tests::test_fail("perf-mixedlen", "unexpected EINVAL");
+                }
+            }
+        }
+    }
+
+    /// A buffer too small for one record is EINVAL.
+    pub fn test_short_buffer() {
+        let ev = test_event(44, false, 0);
+        {
+            let mut inner = ev.inner.lock();
+            let chain = zero_chain();
+            push_sample(&mut inner.ring, 0x99, MODE_USER, false, &chain, 0);
         }
         let mut buf = [0u8; 8];
         match drain_records(&ev, &mut buf) {
