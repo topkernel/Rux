@@ -72,11 +72,15 @@
 //!   the reference's multi-dump directory (the newest crash's file is
 //!   the one a plain `cat` reads).
 //!
-//! - **Read once.** A record file that has been read and closed is
-//!   erased: the slot's signature is invalidated and the file
-//!   disappears from the directory (the reference unlinks the record in
-//!   pstore's release path). A boot that reads nothing keeps its
-//!   records for the next boot.
+//! - **Erase on unlink.** A record file lives in /sys/fs/pstore until
+//!   userspace unlinks it: `rm` (or unlink(2)) erases the slot and the
+//!   file — the reference's ONLY erase path (fs/pstore/inode.c:
+//!   pstore_unlink → psi->erase; ramoops.rst: "To delete a stored
+//!   record from RAM, simply unlink the respective pstore file").
+//!   Reading consumes nothing: a record is re-readable any number of
+//!   times (systemd's pstore.service archives then rm's — the flow the
+//!   reference's contract serves). A boot that removes nothing keeps
+//!   its records for the next boot.
 
 use alloc::vec::Vec;
 use core::mem::size_of;
@@ -256,8 +260,8 @@ fn checksum(bytes: &[u8]) -> u32 {
 }
 
 /// After the linear map is up: validate every slot and remember the
-/// live records. Nothing is cleared — a record lives until it is read
-/// once through /sys/fs/pstore (the reference's contract) or
+/// live records. Nothing is cleared — a record lives until it is
+/// unlinked through /sys/fs/pstore (the reference's contract) or
 /// overwritten by a later capture.
 pub fn early_scan() {
     let mut found = 0usize;
@@ -393,8 +397,8 @@ pub fn read_slot(slot: usize) -> Vec<u8> {
     }
 }
 
-/// Consume a record (read-once removal): invalidate the slot so the
-/// next boot does not re-expose it. Idempotent.
+/// Erase a record (unlink removal): invalidate the slot so the next
+/// boot does not re-expose it. Idempotent.
 pub fn consume_slot(slot: usize) {
     if slot >= N_SLOTS {
         return;
@@ -405,7 +409,7 @@ pub fn consume_slot(slot: usize) {
         unsafe {
             core::ptr::write_volatile(virt as *mut u32, 0);
         }
-        crate::pr_info!("pstore: record consumed (slot {})", slot);
+        crate::pr_info!("pstore: record erased (slot {})", slot);
     }
 }
 

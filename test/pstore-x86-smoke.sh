@@ -4,7 +4,8 @@
 # 8042 keyboard-controller pulse AND the triple fault through a NULL
 # IDT — each pinned in isolation via the dfx reset-method knob), the
 # ring keeps both, and /sys/fs/pstore reads them back newest-first
-# with read-once removal.
+# with the reference erase semantics (reads repeatable; unlink(2)
+# erases the record).
 #
 # One QEMU, three boots (a guest reset does not clear RAM):
 #   boot 1: panic=3 on the command line; the /test/px init pins the
@@ -15,8 +16,10 @@
 #           (seq 2); the triple fault resets the guest;
 #   boot 3: reads BOTH records — console-ramoops-0 (boot 2, the
 #           triple-fault survivor) and console-ramoops-1 (boot 1, the
-#           pulse survivor) — checks their identity, and verifies the
-#           read-once consumption (re-open ENOENT, directory empty).
+#           pulse survivor) — checks their identity, re-reads the
+#           newest (byte-identical), and verifies the unlink-erase
+#           contract (unlink removes; re-open ENOENT; second unlink
+#           fails; ordinary sysfs attributes refuse; directory empty).
 #
 # The image is a fresh minimal ext4 (the pbench recipe: mkfs -d over a
 # staging dir holding the static probe).
@@ -112,12 +115,17 @@ else
 fi
 check "boot3 read the newest record" 'PX3: read console-ramoops-0'
 check "boot3 read the oldest record" 'PX3: read console-ramoops-1'
+check "re-read of the newest is byte-identical" 'PX3: re-read identical, still openable'
 check "the newest record carries the panic banner" 'PX3: newest has panic banner'
 check "the newest record carries the Call Trace header" 'PX3: newest has call trace'
 check "newest record = boot2 (triple-fault survivor)" 'PX3: newest is boot2'
 check "oldest record = boot1 (8042-pulse survivor)" 'PX3: oldest is boot1'
-check "read-once removed the consumed record" 'PX3: read-once removed newest'
-check "directory empty after both reads" 'PX3: directory empty'
+check "unlink erased the newest record" 'PX3: unlinked newest'
+check "re-open after unlink answers ENOENT" 'PX3: unlinked newest gone'
+check "second unlink of the same record fails" 'PX3: second unlink fails'
+check "ordinary sysfs attribute unlink refused (EPERM)" 'PX3: ordinary sysfs attr unlink refused'
+check "unlink erased the oldest record" 'PX3: unlinked oldest'
+check "directory empty after both unlinks" 'PX3: directory empty'
 check "boot3 idles cleanly past the dump" 'PX3: record end'
 
 exit $fail

@@ -18,9 +18,14 @@
  *   boot 3: /sys/fs/pstore holds TWO records: console-ramoops-0
  *           (newest = boot 2; its printk tail carries this probe's
  *           "triplefault" pin line) and console-ramoops-1 (boot 1; its
- *           tail carries the "8042" pin line). Both are read fully,
- *           checked, and consumed (read-once removal: a re-open after
- *           the close answers ENOENT).
+ *           tail carries the "8042" pin line). Both are read fully and
+ *           checked; reads are REPEATABLE (a re-read of the newest is
+ *           byte-identical and still openable); erasure follows the
+ *           reference unlink contract — unlink(2) erases the record
+ *           (pstore_unlink -> psi->erase): a re-open after the unlink
+ *           answers ENOENT, a second unlink fails, and unlinking an
+ *           ordinary sysfs attribute is refused (EPERM — sysfs files
+ *           are kernel-owned; only the pstore family is removable).
  *
  * Built static (the pbench toolchain) and staged as /test/px by
  * test/pstore-x86-smoke.sh.
@@ -42,16 +47,17 @@ static int write_file(const char *path, const char *data)
     return (n > 0) ? 0 : -1;
 }
 
-/* Read a whole pstore record (payload <= 32 KiB) in one open. The
- * close after this read consumes it (read-once). Returns bytes read,
- * or -1 when the file is gone. */
+/* Read a whole pstore record (payload <= 32 KiB) in one open. Reading
+ * consumes nothing (the reference contract: erase is unlink-only), so
+ * the file stays openable after this. Returns bytes read, or -1 when
+ * the file is gone. */
 static int read_record(const char *path, char *buf, int cap)
 {
     int fd = open(path, O_RDONLY);
     if (fd < 0)
         return -1;
     ssize_t n = read(fd, buf, cap - 1);
-    close(fd); /* the erase hook fires here */
+    close(fd);
     if (n >= 0)
         buf[n] = '\0';
     return (int)n;
@@ -97,7 +103,7 @@ int main(void)
 
     if (records >= 2) {
         /* ---- boot 3: verify both records, newest first, then the
-         * read-once consumption. ---- */
+         * unlink-erase contract. ---- */
         say("===PX3: two records resurfaced===\n");
 
         int n0 = read_record("/sys/fs/pstore/console-ramoops-0", rec0, sizeof(rec0));
@@ -105,6 +111,16 @@ int main(void)
                     : "===PX3: FAIL open console-ramoops-0===\n");
         if (n0 < 0)
             goto done;
+
+        /* Repeatable reads: a second full read must still succeed and
+         * be byte-identical (the reference reads the same record
+         * buffer until the file is unlinked). */
+        static char again[40960];
+        int n0b = read_record("/sys/fs/pstore/console-ramoops-0", again, sizeof(again));
+        if (n0b == n0 && n0b >= 0 && memcmp(rec0, again, (size_t)n0) == 0)
+            say("===PX3: re-read identical, still openable===\n");
+        else
+            say("===PX3: FAIL re-read differs or refused===\n");
 
         int n1 = read_record("/sys/fs/pstore/console-ramoops-1", rec1, sizeof(rec1));
         say(n1 >= 0 ? "===PX3: read console-ramoops-1===\n"
@@ -136,13 +152,27 @@ int main(void)
                 ? "===PX3: oldest is boot1 (8042 path)===\n"
                 : "===PX3: FAIL oldest not boot1===\n");
 
-        /* Read-once: both records were consumed by their full reads;
-         * a re-open must answer ENOENT and the directory is empty. */
+        /* Unlink-erase: unlink(2) removes the record (the reference's
+         * only erase path). Re-open must then answer ENOENT, a second
+         * unlink must fail, and an ordinary sysfs attribute must
+         * refuse the unlink (EPERM). */
+        int rc = unlink("/sys/fs/pstore/console-ramoops-0");
+        say(rc == 0 ? "===PX3: unlinked newest===\n"
+                    : "===PX3: FAIL unlink newest===\n");
         int fd = open("/sys/fs/pstore/console-ramoops-0", O_RDONLY);
-        say(fd < 0 ? "===PX3: read-once removed newest===\n"
-                   : "===PX3: FAIL newest still openable===\n");
+        say(fd < 0 ? "===PX3: unlinked newest gone (ENOENT)===\n"
+                   : "===PX3: FAIL unlinked newest still openable===\n");
         if (fd >= 0)
             close(fd);
+        rc = unlink("/sys/fs/pstore/console-ramoops-0");
+        say(rc < 0 ? "===PX3: second unlink fails===\n"
+                   : "===PX3: FAIL second unlink succeeded===\n");
+        rc = unlink("/sys/kernel/uevent_seqnum");
+        say(rc < 0 ? "===PX3: ordinary sysfs attr unlink refused===\n"
+                   : "===PX3: FAIL ordinary sysfs attr unlinked===\n");
+        rc = unlink("/sys/fs/pstore/console-ramoops-1");
+        say(rc == 0 ? "===PX3: unlinked oldest===\n"
+                    : "===PX3: FAIL unlink oldest===\n");
         d = opendir("/sys/fs/pstore");
         if (d) {
             struct dirent *e;
@@ -152,7 +182,7 @@ int main(void)
                     left++;
             }
             closedir(d);
-            say(left == 0 ? "===PX3: directory empty (both consumed)===\n"
+            say(left == 0 ? "===PX3: directory empty (both unlinked)===\n"
                           : "===PX3: FAIL directory not empty===\n");
         }
         say("===PX3: record end===\n");

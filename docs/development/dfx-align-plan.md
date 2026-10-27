@@ -648,6 +648,35 @@ multi-dump shape:
   as NUL bytes, so record greps must be bounded (memmem), not
   NUL-terminated strstr.
 
+**Erase-on-unlink correction (batch 8, 2026-10-28).** Batch 7's
+"read-once" consumption was checked against the reference source and
+was WRONG about the trigger. The reference kernel's only erase path is
+UNLINK: `fs/pstore/inode.c` (v5.15) has `pstore_unlink` — "When a file
+is unlinked from our file system we call the platform driver to erase
+the record from persistent store" — which calls `record->psi->erase`
+and then `simple_unlink`; `pstore_file_operations` carries no
+erase-on-release, and ramoops.rst states it outright: "To delete a
+stored record from RAM, simply unlink the respective pstore file."
+Reading consumes nothing — a record is re-readable until removed
+(systemd's pstore.service archives the records, then rm's them; a
+`cat` that destroyed evidence would break that flow). Batch 7's
+design had the two acts inverted: a read+close consumed the record and
+`rm` failed (sysfs had no unlink op at all). The correction:
+
+- sysfs gained an unlink callback (`sysfs_unlink`), dispatching only
+  for attributes that carry an erase hook (the pstore record family):
+  ENOENT for a missing name, EISDIR for a directory child, EPERM for
+  an ordinary attribute (sysfs files are kernel-owned — the reference
+  pstore_unlink also returns EPERM when the backend has no erase),
+  and for a record it runs the hook (slot erased, attribute removed,
+  dead flag set so a stale cached inode answers ENOENT on open).
+- The close-after-read dispatch and its `read_any` bookkeeping are
+  gone: reads are repeatable, each open re-snapshotting the slot.
+- Both smokes now prove the reference contract: a re-read is
+  byte-identical and both records stay listed after full reads; `rm`
+  (unlink(2)) erases — re-open ENOENT, second unlink fails, ordinary
+  sysfs attribute refuses, directory empty after both.
+
 Acceptance: `panic=5` reboots the guest within five seconds of a
 panic; the next boot shows the previous panic's registers.
 

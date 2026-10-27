@@ -153,15 +153,18 @@ pub struct Attribute {
     pub show: Option<Box<dyn Fn() -> Vec<u8> + Send + Sync>>,
     /// write handler — returns 0 or negative errno
     pub store: Option<Box<dyn Fn(&[u8]) -> i32 + Send + Sync>>,
-    /// release hook — runs on file close AFTER that open read bytes
-    /// (read-once semantics: the reference pstore consumes a record
-    /// when its file is read; None for every ordinary attribute)
+    /// unlink hook — runs when userspace unlinks the attribute's file
+    /// (the reference pstore's ONLY erase path: pstore_unlink calls
+    /// psi->erase and then simple_unlinks the dentry; reading a record
+    /// consumes nothing — it is repeatable until removed). None for
+    /// every ordinary attribute: sysfs files are kernel-owned and not
+    /// unlinkable (EPERM, like the reference sysfs).
     pub erase: Option<Box<dyn Fn() + Send + Sync>>,
     /// Set by the erase hook family: a dead attribute answers ENOENT
-    /// on open even though the VFS dentry cache still holds a (stale)
-    /// positive entry for it — pstore's consumed record must not be
-    /// openable twice. Directory listings already dropped it
-    /// (remove_attr), so the only stale path is the cached dentry.
+    /// on open even though the VFS layer may still hold a (stale)
+    /// inode for it — pstore's unlinked record must not be openable
+    /// through the old inode. Directory listings already dropped it
+    /// (remove_attr), so the only stale path is the cached inode.
     pub dead: AtomicBool,
     /// cached content length (updated on open; stat reports 4096 like Linux)
     pub cached_size: AtomicU64,
@@ -269,9 +272,10 @@ impl KObject {
         self.attributes.lock().insert(String::from(name), attr);
     }
 
-    /// Register an attribute with a release hook (`erase`): it runs on
-    /// file close after that open read bytes. pstore's read-once
-    /// contract — the only in-tree user so far.
+    /// Register an attribute with an unlink hook (`erase`): unlinking
+    /// the file runs the hook, which erases the backing record and
+    /// removes the attribute. pstore's unlink contract — the only
+    /// in-tree user so far.
     pub fn set_attr_with_erase(
         &self,
         name: &str,
@@ -1395,11 +1399,14 @@ fn build_tree() -> Arc<KObject> {
     // for panic records, dmesg-ramoops-N for oops records (the
     // reference's two flavors) — mode 0444 (pstore_mkfile's
     // S_IFREG | 0444), id 0 = the newest record of its flavor. The
-    // ring holds several crashes' evidence (N slots); each file is
-    // consumed by its first reader (the reference unlinks the record in
-    // pstore's release path — read once, then gone; the erase hook
-    // below implements it). No records, no files (the reference's
-    // directory is empty after a clean boot).
+    // ring holds several crashes' evidence (N slots). Semantics are
+    // the reference fs/pstore/inode.c contract verbatim: reading is
+    // REPEATABLE (a read consumes nothing), and erasure happens on
+    // UNLINK — pstore_unlink calls the backend's erase and unlinks the
+    // dentry (ramoops.rst: "To delete a stored record from RAM, simply
+    // unlink the respective pstore file"); the sysfs unlink callback
+    // dispatches the erase hook below. No records, no files (the
+    // reference's directory is empty after a clean boot).
     {
         let mut console_id = 0usize;
         let mut dmesg_id = 0usize;
@@ -1881,6 +1888,48 @@ unsafe fn sysfs_iget(parent: &Inode, name: &[u8], ino: Ino) -> Result<Arc<Inode>
     Ok(Arc::new(inode))
 }
 
+/// sysfs unlink: the ONLY removable sysfs files are attributes that
+/// carry an erase hook — the pstore record family, mirroring the
+/// reference pstore directory (fs/pstore/inode.c: pstore_unlink calls
+/// the backend's erase and then simple_unlinks the dentry; that is the
+/// reference's only erase path — a record is re-readable until it is
+/// removed). Everything else is kernel-owned and answers EPERM, like
+/// the reference sysfs, whose directories carry no unlink op at all.
+///
+/// The reference pstore_unlink detail map:
+///   name absent            -> ENOENT (VFS resolution failed first there;
+///                             here the lookup is inside the callback)
+///   directory              -> EISDIR (Linux may_delete)
+///   no erase on the target -> EPERM ("if (!record->psi->erase)
+///                             return -EPERM")
+///   erase ran              -> 0, and the hook's remove_attr+dead make
+///                             the file invisible to later lookups.
+/// SAFETY: VFS callback contract.
+unsafe fn sysfs_unlink(dir: &Inode, name: &[u8]) -> i32 {
+    let entry = match entry_of(dir) {
+        Some(e) => e,
+        None => return errno::Errno::NotADirectory.as_neg_i32(),
+    };
+    if entry.kobj.kind != NodeKind::Directory {
+        return errno::Errno::NotADirectory.as_neg_i32();
+    }
+    // A directory child cannot be unlinked (Linux answers EISDIR).
+    if entry.kobj.find_child(name).is_some() {
+        return errno::Errno::IsADirectory.as_neg_i32();
+    }
+    let attr = match entry.kobj.find_attr(name) {
+        Some(a) => a,
+        None => return errno::Errno::NoSuchFileOrDirectory.as_neg_i32(),
+    };
+    match attr.erase.as_ref() {
+        Some(hook) => {
+            hook();
+            0
+        }
+        None => errno::Errno::OperationNotPermitted.as_neg_i32(),
+    }
+}
+
 /// sysfs getattr.
 /// SAFETY: VFS callback contract.
 unsafe fn sysfs_getattr(inode: &Inode, stat: &mut crate::fs::Stat) -> i32 {
@@ -1994,9 +2043,10 @@ unsafe fn sysfs_open(inode: &Inode, file: &crate::fs::File) -> i32 {
         Some(a) => a,
         None => return 0,
     };
-    // Read-once family: a consumed attribute is gone even though the
-    // VFS dentry cache may still hand back this inode — the reference
-    // unlinks the file at erase, and ENOENT is the observable.
+    // Erased family: an unlinked attribute is gone even though the
+    // VFS layer may still hand back this inode through a cached lookup —
+    // the reference unlinks the file at erase, and ENOENT is the
+    // observable.
     if attr.dead.load(Ordering::Acquire) {
         return errno::Errno::NoSuchFileOrDirectory.as_neg_i32();
     }
@@ -2005,10 +2055,7 @@ unsafe fn sysfs_open(inode: &Inode, file: &crate::fs::File) -> i32 {
         None => Vec::new(),
     };
     attr.cached_size.store(content.len() as u64, Ordering::Relaxed);
-    let snapshot = Box::new(SysfsFileContent {
-        data: content,
-        read_any: false,
-    });
+    let snapshot = Box::new(SysfsFileContent { data: content });
     file.set_private_data(Box::into_raw(snapshot) as *mut u8);
     0
 }
@@ -2038,7 +2085,7 @@ pub static SYSFS_INODE_OPS: INodeOps = INodeOps {
     lookup: Some(sysfs_lookup),
     create: None,      // sysfs is kernel-owned
     link: None,
-    unlink: None,
+    unlink: Some(sysfs_unlink), // erase-hook attributes only (pstore)
     symlink: None,
     mkdir: None,
     rmdir: None,
@@ -2064,30 +2111,25 @@ pub static SYSFS_INODE_OPS: INodeOps = INodeOps {
 pub struct SysfsFileContent {
     /// generated content
     pub data: Vec<u8>,
-    /// did this open hand out bytes? The erase hook (read-once
-    /// semantics) fires on close only for an open that consumed
-    /// something — a bare open/stat must not destroy evidence.
-    pub read_any: bool,
 }
 
 /// read: serve from the open-time snapshot at the file position.
+/// Reads are repeatable and consume nothing — the reference pstore
+/// reads straight out of the record buffer until the file is unlinked.
 fn sysfs_file_read(file: &crate::fs::File, buf: &mut [u8]) -> isize {
-    // SAFETY: private_data was installed by sysfs_open under this File;
-    // the snapshot is owned by this open alone (read_any is written
-    // through the same exclusive provenance).
+    // SAFETY: private_data was installed by sysfs_open under this File.
     let ptr = match unsafe { *file.private_data.get() } {
         Some(p) => p,
         None => return errno::Errno::BadFileNumber.as_neg_i32() as isize,
     };
     // SAFETY: pointer provenance is Box::into_raw in sysfs_open.
-    let content = unsafe { &mut *(ptr as *mut SysfsFileContent) };
+    let content = unsafe { &*(ptr as *mut SysfsFileContent) };
     let offset = file.get_pos() as usize;
     let available = content.data.len().saturating_sub(offset);
     let to_read = buf.len().min(available);
     if to_read > 0 {
         buf[..to_read].copy_from_slice(&content.data[offset..offset + to_read]);
         file.set_pos((offset + to_read) as u64);
-        content.read_any = true;
         to_read as isize
     } else {
         0
@@ -2146,33 +2188,16 @@ fn sysfs_file_lseek(file: &crate::fs::File, offset: isize, whence: i32) -> isize
     new_offset
 }
 
-/// close: free the content snapshot, then run the release hook when
-/// that open consumed bytes (read-once semantics — the reference
-/// pstore's release path consumes the record; ordinary attributes have
-/// no hook).
+/// close: free the content snapshot. No erase dispatch here — the
+/// reference pstore's only erase path is unlink(2) (pstore_unlink →
+/// psi->erase); a read-and-close consumes nothing and the file stays
+/// re-readable until it is removed.
 fn sysfs_file_close(file: &crate::fs::File) -> i32 {
-    // SAFETY: see sysfs_file_read; null-out first to close the race window.
-    let ptr = match unsafe { (*file.private_data.get()).take() } {
-        Some(p) => p,
-        None => return 0,
-    };
-    // SAFETY: provenance is Box::into_raw in sysfs_open.
-    let snapshot = unsafe { Box::from_raw(ptr as *mut SysfsFileContent) };
-    let read_any = snapshot.read_any;
-    let attr = unsafe { (*file.inode.get()).clone() }.and_then(|inode| {
-        // SAFETY: inode provenance is the sysfs iget path.
-        unsafe { entry_of(&inode) }.and_then(|e| e.attr.as_ref().cloned())
-    });
-    drop(snapshot);
-    if read_any {
-        if let Some(attr) = attr {
-            if let Some(hook) = attr.erase.as_ref() {
-                // The hook may drop the attribute from its kobject
-                // (pstore unlinks the record file); the local Arc
-                // keeps the closure alive through the call.
-                hook();
-            }
-        }
+    // SAFETY: provenance is Box::into_raw in sysfs_open; null-out first
+    // to close the race window.
+    if let Some(p) = unsafe { (*file.private_data.get()).take() } {
+        // SAFETY: see above.
+        drop(unsafe { Box::from_raw(p as *mut SysfsFileContent) });
     }
     0
 }
