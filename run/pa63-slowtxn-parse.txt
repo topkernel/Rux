@@ -1,0 +1,5 @@
+FAIL binder SLOW-TXN  n=6  queue>=50ms=0  out-of-band=2
+  classes: {'code1 in-band': 1, 'code23 OUT(8480ms)': 1, 'code23 OUT(5590ms)': 1, 'code7 in-band': 3}
+  max queue ms: 10
+  offending: SLOW-TXN txn2691 code 23 from pid 483 tid 850 to pid 787 tid 861: total 8480 ms (queue 0 ms, exec 8480 ms)
+  offending: SLOW-TXN txn4564 code 23 from pid 594 tid 890 to pid 787 tid 793: total 5590 ms (queue 0 ms, exec 5590 ms)
