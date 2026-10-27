@@ -2303,11 +2303,14 @@ pub fn binder_mmap_handler(
             base = Some(b);
         }
         let b = base.unwrap();
-        let vma = Vma::new(
+        let mut vma = Vma::new(
             crate::mm::page::VirtAddr::new(b),
             crate::mm::page::VirtAddr::new(b + size),
             vma_flags,
         );
+        vma.set_origin(crate::mm::vma::VmaOrigin::from_bits(
+            crate::mm::vma::VmaOrigin::BINDER,
+        ));
         if let Err(_overlap) = vmas.add(vma) {
             drop(vmas);
             free_pages(phys, order);

@@ -204,6 +204,9 @@ pub fn sys_brk(args: [u64; 6]) -> i64 {
                         );
                         let mut heap_vma = heap_vma;
                         heap_vma.set_type(VmaType::Anonymous);
+                        heap_vma.set_origin(crate::mm::vma::VmaOrigin::from_bits(
+                            crate::mm::vma::VmaOrigin::BRK,
+                        ));
                         if vma_mgr.add(heap_vma).is_err() {
                             // Keep the old brk on failure (Linux parity).
                             return current_brk as i64;
@@ -263,6 +266,20 @@ impl MmapEntry {
 const MMAP_NEW: MmapEntry = MmapEntry::new();
 pub static MMAP_RING: [MmapEntry; 1024] = [MMAP_NEW; 1024];
 pub static MMAP_CURSOR: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+
+/// dfx=vmap line budget (leg-31B): the PROT_NONE-shape traces
+/// (MPROTECT-DN, PROTNONE-MAP-S) share one cap so a hunting boot stays
+/// serial-bounded. The switch check lives here — call sites stay naked.
+fn vmap_budget_line(line: impl FnOnce()) {
+    use core::sync::atomic::Ordering::Relaxed;
+    if !crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::VmaProbe) {
+        return;
+    }
+    static VMAP_N: core::sync::atomic::AtomicUsize = core::sync::atomic::AtomicUsize::new(0);
+    if VMAP_N.fetch_add(1, Relaxed) < 600 {
+        line();
+    }
+}
 
 pub fn sys_mmap(args: [u64; 6]) -> i64 {
     let ret = sys_mmap_inner(args);
@@ -1334,6 +1351,27 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
                                     );
                                 }
                             }
+                            // dfx=vmap (leg-31B): small anonymous PROT_NONE
+                            // mmaps — the musl pthread-stack construction
+                            // (mmap PROT_NONE then RW-upgrade) leaves the
+                            // guard with THIS origin; budget-shared with
+                            // the MPROTECT-DN trace in sys_mprotect.
+                            if crate::dfx::switches::enabled(
+                                crate::dfx::switches::DfxSwitch::VmaProbe,
+                            ) && prot_flags == 0
+                                && map_flags & map::MAP_ANONYMOUS != 0
+                                && actual_length < 0x10_0000
+                                && !big_reserve
+                            {
+                                vmap_budget_line(|| {
+                                    crate::pr_info!(
+                                        "PROTNONE-MAP-S pid {} addr {:#x} len {:#x}",
+                                        crate::process::current_pid(),
+                                        mapped_addr.as_usize(),
+                                        actual_length
+                                    );
+                                });
+                            }
                             mapped_addr.as_usize() as i64
                         },
                         Err(e) => {
@@ -1503,6 +1541,25 @@ fn sys_mprotect_inner(args: [u64; 6]) -> i64 {
             addr,
             length
         );
+    }
+
+    // dfx=vmap (leg-31B): the PROT_NONE mprotect family — guard
+    // downgrades (mprotect(PROT_NONE) over a piece of a live RW mapping,
+    // the stack-guard construction pattern; sc321B adjudication:
+    // render_service's 2-page guards on top of thread stacks come from
+    // exactly this syscall). RELRO-class PROT_READ trims (prot=1) are
+    // the bulk of non-writable mprotects and stay quiet, or the shared
+    // line budget dies in pid-1 startup before any guard of interest.
+    if prot == 0 && length <= 0x10_0000 {
+        vmap_budget_line(|| {
+            crate::pr_info!(
+                "MPROTECT-DN pid {} addr {:#x} len {:#x} prot {:#x}",
+                crate::process::current_pid(),
+                addr,
+                length,
+                prot
+            );
+        });
     }
 
     // Validate arguments
@@ -1895,6 +1952,11 @@ fn sys_mprotect_inner(args: [u64; 6]) -> i64 {
                     let old_fd = vma.file_fd();
                     let old_fsz = vma.file_size();
                     let old_off = vma.offset();
+                    // Origin: head/tail pieces preserve the original
+                    // stamp; the covered piece (the one whose flags
+                    // changed) carries MPROTECT — the adjudication
+                    // signal for permission-shape faults.
+                    let old_origin = vma.origin();
 
                     // Head piece [v_start, range_start): keep original flags.
                     let head = if v_start < range_start {
@@ -1904,6 +1966,7 @@ fn sys_mprotect_inner(args: [u64; 6]) -> i64 {
                             full_flags,
                         );
                         h.set_type(old_type);
+                        h.set_origin(old_origin);
                         h.set_file_fd(old_fd);
                         h.set_file_size(old_fsz);
                         h.set_offset(old_off);
@@ -1920,6 +1983,7 @@ fn sys_mprotect_inner(args: [u64; 6]) -> i64 {
                             full_flags,
                         );
                         t.set_type(old_type);
+                        t.set_origin(old_origin);
                         t.set_file_fd(old_fd);
                         t.set_file_size(old_fsz);
                         t.set_offset(old_off + (range_end - v_start));
@@ -1940,6 +2004,9 @@ fn sys_mprotect_inner(args: [u64; 6]) -> i64 {
                         ),
                     );
                     cov.set_type(old_type);
+                    cov.set_origin(crate::mm::vma::VmaOrigin::from_bits(
+                        crate::mm::vma::VmaOrigin::MPROTECT,
+                    ));
                     cov.set_file_fd(old_fd);
                     cov.set_file_size(old_fsz);
                     cov.set_offset(old_off + (cov_start - v_start));
@@ -3155,6 +3222,8 @@ fn sub_vma(v: &crate::mm::vma::Vma, s: usize, e: usize) -> crate::mm::vma::Vma {
     );
     nv.set_offset(v.offset() + page_delta * crate::mm::page::PAGE_SIZE);
     nv.set_type(v.vma_type());
+    // Derived piece keeps the source mapping's origin.
+    nv.set_origin(v.origin());
     nv.set_file_fd(v.file_fd());
     nv.set_file_size(v.file_size());
     nv
