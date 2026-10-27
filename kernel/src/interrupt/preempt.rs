@@ -57,6 +57,18 @@ pub static TICK_ENTRY_PC: [core::sync::atomic::AtomicU32;
     [const { core::sync::atomic::AtomicU32::new(0) };
         crate::config::MAX_CPUS];
 
+/// Per-CPU snapshot of the interrupted instruction pointer at timer-trap
+/// entry (leg-33B incumbent attribution). For a preempt-off incumbent
+/// monopolizing its CPU, the strand census names only pid/pc; the last
+/// tick's interrupted RIP names the kernel function it was spinning in
+/// (symbolize offline with addr2line). Written on the owning CPU from
+/// the same sites as TICK_ENTRY_PC; read from the wakewatch strand
+/// print under dfx=leakhunt.
+pub static TICK_ENTRY_RIP: [core::sync::atomic::AtomicU64;
+    crate::config::MAX_CPUS] =
+    [const { core::sync::atomic::AtomicU64::new(0) };
+        crate::config::MAX_CPUS];
+
 /// Read current task's preempt_count
 #[inline]
 pub fn preempt_count() -> i32 {

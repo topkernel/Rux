@@ -2857,6 +2857,20 @@ pub fn sys_ftruncate(args: SyscallArgs) -> i64 {
     let fd = args[0] as usize;
     let length = args[1] as i64;
 
+    // leg-36B: name the file if this thread later parks inside the
+    // truncate (break_lease / ext4 setattr extent-free IO). The fd is
+    // resolved in this task's own context — the audit cannot walk a
+    // foreign fd table from timer context.
+    {
+        let p = crate::sched::get_current_fdtable()
+            .and_then(|ft| ft.get_file(fd))
+            .map(|f| f.path())
+            .unwrap_or_default();
+        if !p.is_empty() {
+            crate::dfx::pathstash::stash_file(crate::dfx::pathstash::OP_TRUNC, &p);
+        }
+    }
+
     match crate::fs::vfs::vfs_ftruncate(fd, length) {
         Ok(()) => 0,
         Err(e) => e as i64,
@@ -2876,6 +2890,8 @@ pub fn sys_truncate(args: SyscallArgs) -> i64 {
         Ok(p) => p,
         Err(e) => return e as i64,
     };
+    // leg-36B: truncate-family pathstash (see sys_ftruncate).
+    crate::dfx::pathstash::stash_file(crate::dfx::pathstash::OP_TRUNC, full_path.as_ref());
 
     match crate::fs::vfs::vfs_truncate(full_path.as_ref(), length) {
         Ok(()) => 0,
