@@ -37,7 +37,7 @@ pub const RW_CHUNK: usize = 64 * 1024;
 /// syscall — 4KB+ of zeroing on every read(2)/write(2) hot path (file,
 /// pipe, tty) that showed up directly in throughput under TCG.
 #[inline]
-fn alloc_uninit_buf(n: usize) -> alloc::vec::Vec<u8> {
+pub(crate) fn alloc_uninit_buf(n: usize) -> alloc::vec::Vec<u8> {
     let mut v = alloc::vec::Vec::with_capacity(n);
     // SAFETY: capacity is exactly n, so set_len is in bounds. The buffer is
     // filled by the caller before any read of its contents (see doc).
@@ -147,6 +147,20 @@ fn sys_read_inner(args: SyscallArgs) -> i64 {
                     // perf-audit (pa9): positive-read census — which fd
                     // returns the 92K reads/s hilogd.rd_kmsg issues (pa4-8:
                     // not /dev/kmsg, not EOF, not EAGAIN).
+                    if n > 0 {
+                        crate::dfx::syscost::note_read_data(&file, n as usize, fd);
+                    }
+                    return n;
+                }
+                // AF_UNIX socket fast path (leg 44, p5c decomposition):
+                // route read(2)-on-socket through the same engine
+                // recvfrom(2) enters. The generic staging wrapper owned
+                // the 35 us class on the p5c stream row (sendto-parent +
+                // read-child 39 us vs recvfrom-child 4.77 us, pa68).
+                if crate::net::unix::is_unix_file(&file) {
+                    // SAFETY: buf was access_ok-validated above with
+                    // `count` writable bytes.
+                    let n = unsafe { crate::net::unix::unix_read_user(&file, buf, count) } as i64;
                     if n > 0 {
                         crate::dfx::syscost::note_read_data(&file, n as usize, fd);
                     }
@@ -587,6 +601,14 @@ pub fn sys_write(args: SyscallArgs) -> i64 {
                 // matching branch in sys_read).
                 if crate::fs::pipe::is_pipe_file(&file) {
                     return crate::fs::pipe::pipe_write_user(&file, buf, count) as i64;
+                }
+                // AF_UNIX socket fast path (leg 44): twin of the sys_read
+                // branch — socket-native engine, no generic staging
+                // wrapper (see unix_write_user).
+                if crate::net::unix::is_unix_file(&file) {
+                    // SAFETY: buf was access_ok-validated above with
+                    // `count` readable bytes.
+                    return unsafe { crate::net::unix::unix_write_user(&file, buf, count) } as i64;
                 }
                 // Chunked write (SYSA-C1): bounded staging buffer so a huge
                 // count cannot OOM the kernel heap; a partial chunk write
