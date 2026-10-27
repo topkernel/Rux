@@ -1,6 +1,70 @@
 # Rux Development Roadmap
 
-## Current Phase (2026-10-14): GNOME Shell desktop on screen
+## Current Phase (2026-10-27): desktop frames reproducible, OH launcher at MainAbility
+
+**Two fronts moved decisively this week.**
+
+### GNOME on riscv64 — full-form desktop, reproducible
+
+- **Milestone: the full GNOME Shell desktop frame (panel + clock +
+  notification banner + readable xterm content + cursor) renders and is
+  reproducible across boots** — M5 desktop-visible at 480/691/1111s in
+  three independent boots, zero panics; deterministic pixel math (XWALK
+  window-tree walk: client drew, mutter composited, scanout showed).
+- **A/B attribution settled**: old kernel + same image + calm host = the
+  screen never lights; merged kernel = M5 three times — the unblocking
+  variable is the kernel merge-set, not host load.
+- **Input → screen closed (kernel-side)**: virtio-input had no IRQ
+  handler and the only waker ran at drain time — pull-only event flow
+  with sleeping waiters is a deadlock by design (Xorg's InputThread
+  EPSCAN'd twice then slept forever). Now IRQ-driven delivery
+  (shared-INTx top half + input tasklet BH, collect-under-lock /
+  deliver-outside) — merged. Interactivity probes in flight.
+- Standing: LTP r15 = **1,005 / 1,869 (53.8%)**, trend 35 → 524 → 801 →
+  945 → 1,005.
+
+### OpenHarmony — launcher chain at MainAbility loading (deepest ever)
+
+- The render_service crash family is **root-caused image-side and
+  mitigated**: the image's own fault-handler library copies a 936-byte
+  context block past a small-stack thread's top into the loader's own
+  PROT_NONE guard; the reference kernel never hits it because its boot
+  never stalls long enough to arm the watchdog sampler (verified against
+  reference boot logs). Mitigation: 2-byte guard patch in the test
+  image; 0 render faults on patched draws.
+- The launcher-load wall was **kernel-side and fixed**: parked oneway
+  transactions drained to the node owner instead of the child thread on
+  three drain paths, and thread pools could never grow under nested
+  calls (BR_SPAWN_LOOPER gating) — both fixed to reference semantics;
+  lifecycle-timeout lines went 304 → ~23 per boot.
+- Deepest draws now: systemui loads, **launcher MainAbility starts
+  loading**, then a cross-process synchronous cycle parks the chain —
+  the routing of nested sync transactions is under final adjudication
+  (kernel from-walk semantics vs reference).
+
+### Performance & infrastructure (2026-10-27)
+
+- **Scoped publication draining**: durability points (fsync/fdatasync/
+  mkdir) stop paying the whole queue's backlog — fsync **-26%** on the
+  strong profile (2.05× the reference median), one whole-queue drain
+  per boot instead of one per fsync.
+- **getdents listing cache (route-4)**: **-58%** (1351.9 → 570.9 µs).
+- **DFX landed**: kallsyms, tracepoint!-based trace events (sched /
+  binder / block / signal / oom), pstore with the x86 BSS-zero reboot
+  fix, klogd, and perf_event_open (software events, IP samples).
+- **The D-7 lesson, banked as protocol**: a typed per-CPU cache landed
+  as a non-mut static — LLVM placed it in .rodata and deleted every
+  store under optimization, carving 99% of the heap at boot. Root-caused
+  (UnsafeCell re-land) and codified: mm/sched/sync changes get one
+  release-strong boot before "verified".
+- **Serial cleanliness is a gate**: all periodic/always-on kernel
+  prints live behind `dfx=` switches, off by default; ordinary boots
+  stay interactive-clean.
+- Code review at scale: a machine-generated
+  [coverage map](../development/review-coverage.md) tracks end-to-end
+  reads (20 full / 78 partial of 399 files at start).
+
+## (2026-10-14): GNOME Shell desktop on screen
 
 **Milestone: the real GNOME Shell desktop renders on the Rux framebuffer
 — Activities bar, clock, workspace thumbnails and dash painted by

@@ -3181,7 +3181,7 @@ pub fn sys_rt_tgsigqueueinfo(args: SyscallArgs) -> i64 {
     );
     info.set_value_bytes(&payload);
 
-    crate::signal::send_signal_with_info(tid, info)
+    crate::signal::send_signal_with_info_directed(tid, info)
         .map(|_| 0)
         // Propagate the actual errno (EAGAIN on RLIMIT_SIGPENDING, etc.).
         .unwrap_or_else(|e| e as i64)
@@ -4068,8 +4068,12 @@ fn process_vm_rw_locked(
 }
 
 /// sys_perf_event_open - Open performance event
-pub fn sys_perf_event_open(_args: SyscallArgs) -> i64 {
-    -(errno::ENOSYS as i64)
+///
+/// PERF_TYPE_SOFTWARE cpu-clock/task-clock sampling (sample_period +
+/// PERF_SAMPLE_IP records via read(2)). The validation, event table
+/// and record layout live in `kernel/src/perf/mod.rs`.
+pub fn sys_perf_event_open(args: SyscallArgs) -> i64 {
+    crate::perf::sys_perf_event_open(args)
 }
 
 // ============================================================================

@@ -208,6 +208,8 @@ pub mod page_allocator;
 pub mod buffer_state;
 #[cfg(feature = "unit-test")]
 pub mod mount_flags;
+#[cfg(feature = "unit-test")]
+pub mod percpu;
 
 // ===== Process management =====
 #[cfg(feature = "unit-test")]
@@ -448,12 +450,21 @@ pub fn run_all_tests() {
     test_group_start("signal");
     signal::test_signal();
 
+    // perf events: ABI record encoding + ring/drain semantics.
+    test_group_start("perf-records");
+    crate::perf::tests::test_record_encoding();
+    crate::perf::tests::test_ring_roundtrip();
+    crate::perf::tests::test_short_buffer();
+
     // ===== 3. Memory management =====
     test_group_start("heap_allocator");
     heap_allocator::test_heap_allocator();
 
     test_group_start("small_alloc");
     small_alloc::test_small_alloc();
+
+    test_group_start("percpu");
+    percpu::test_percpu();
 
     test_group_start("page_allocator");
     page_allocator::test_page_allocator();

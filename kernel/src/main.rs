@@ -139,6 +139,7 @@ mod io_uring;
 mod timer;
 mod panic_policy;
 mod trace;
+mod perf;
 mod module;
 
 #[cfg(feature = "unit-test")]

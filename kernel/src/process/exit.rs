@@ -1468,6 +1468,34 @@ fn wait_pid_matches(child: &Task, pid: i32, caller_pgid: u32) -> bool {
 /// * `Err(-EFAULT)` - status_ptr unwritable
 pub fn do_wait(pid: i32, status_ptr: *mut i32, options: i32) -> Result<Pid, i32> {
 
+    // The sched:sched_process_wait tracepoint — the reference records
+    // it at do_wait entry with the WAITER's comm/prio and the REQUESTED
+    // pid argument (pid_nr of the wait_opts pid; -1 = any child).
+    if crate::trace::EVENT_SCHED_PROCESS_WAIT.armed() {
+        if let Some(cur) = crate::sched::current() {
+            // SAFETY: current is the calling task, pinned by being the
+            // running context.
+            unsafe {
+                let words = crate::trace::comm_to_words(&*(*cur).comm());
+                crate::trace::record(
+                    &crate::trace::EVENT_SCHED_PROCESS_WAIT,
+                    [
+                        words[0],
+                        words[1],
+                        pid as u64,
+                        (*cur).prio() as u64,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                        0,
+                    ],
+                );
+            }
+        }
+    }
+
     // SAFETY: current is the calling task's raw pointer, valid throughout the wait loop.
     // The task sleeps via schedule() in INTERRUPTIBLE state so it won't be freed.
     unsafe {

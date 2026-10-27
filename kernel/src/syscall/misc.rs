@@ -896,6 +896,9 @@ fn poll_wait_impls(file: &crate::fs::File) -> Option<(PollWaitRegFn, PollWaitUnr
     if is(&SIGNALFD_OPS) {
         return Some((signalfd_poll_wait, signalfd_poll_unwait));
     }
+    if is(&crate::perf::PERF_OPS) {
+        return Some((crate::perf::perf_poll_wait, crate::perf::perf_poll_unwait));
+    }
     None
 }
 

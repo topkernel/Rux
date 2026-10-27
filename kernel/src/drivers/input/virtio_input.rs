@@ -456,6 +456,28 @@ impl VirtioInputDevice {
         self.is_pointer
     }
 
+    /// ISR capability address of this function (the virtio device-side
+    /// EOI register). Read lock-free by the hard-IRQ top half.
+    pub fn isr_cfg_bar(&self) -> u64 {
+        self.pci.isr_cfg_bar
+    }
+
+    /// riscv64 gpex INTx line for this function — the same swizzle the
+    /// virtio-blk PCI registration uses: IRQ = 32 + ((pin-1 + slot) % 4).
+    #[cfg(feature = "riscv64")]
+    pub fn intx_irq_line(&self) -> u32 {
+        let int_pin = self.pci.pci_config.read_config_byte(0x3D) as u32;
+        32 + ((int_pin.saturating_sub(1) + self.pci.pci_slot as u32) % 4)
+    }
+
+    /// x86_64: register this function on its PIC INTx line with the
+    /// shared virtio dispatcher (which reads the ISR and calls `service`
+    /// only when this function raised the line).
+    #[cfg(feature = "x86_64")]
+    pub fn enable_pci_intx_irq(&self, service: fn()) -> Option<u8> {
+        self.pci.enable_pci_intx_irq(service)
+    }
+
     /// Read a code bitmap from the device config (VIRTIO_INPUT_CFG_EV_BITS).
     ///
     /// `ev_type` selects the event type (EV_SYN/EV_KEY/EV_REL/EV_ABS/...);

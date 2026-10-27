@@ -473,27 +473,26 @@ fn parse_mq_timeout(timeout_ptr: *const u8) -> Result<Option<u64>, i32> {
     if ts_sec < 0 || ts_nsec < 0 || ts_nsec >= 1_000_000_000 {
         return Err(-errno::EINVAL);
     }
-    // POSIX: the mq_timedsend/mq_timedreceive timeout is an ABSOLUTE
-    // CLOCK_REALTIME deadline, not a relative sleep. The old relative
-    // reading (jiffies + ts) turned the caller's epoch-based absolute
-    // time (~1.7e9 s) into a deadline thousands of years away — the
-    // blocked sender/receiver never woke and mq_timedsend01/recv01 hung
-    // past every watchdog. Convert against the same realtime base
-    // clock_gettime serves: deadline = now_monotonic + (abs - now_real).
-    let (rt_sec, rt_nsec) = crate::syscall::time::realtime_secs_nanos();
-    let delta_ns = (ts_sec as i128) * 1_000_000_000i128 + ts_nsec as i128
-        - ((rt_sec as i128) * 1_000_000_000i128 + rt_nsec as i128);
-    if delta_ns <= 0 {
-        // Absolute time already reached: expire on the first recheck.
-        return Ok(Some(crate::drivers::timer::get_jiffies()));
-    }
-    // Round the wait up to the next jiffy so a sub-jiffy delta still fires.
-    let hz = crate::drivers::timer::HZ as i128;
-    let delta_jiffies = (delta_ns * hz + 1_000_000_000 - 1) / 1_000_000_000;
-    let deadline = crate::drivers::timer::get_jiffies().saturating_add(
-        delta_jiffies.clamp(0, (i64::MAX / 2) as i128) as u64,
-    );
-    Ok(Some(deadline))
+    // POSIX/Linux: mq_timedreceive() and mq_timedsend() take an ABSOLUTE
+    // CLOCK_REALTIME deadline — "the absolute time specified by
+    // abs_timeout" (the timeout argument is named abs_timeout for
+    // exactly this reason). Rux treated the value as RELATIVE (now +
+    // ts), so a caller passing an absolute deadline waited twice as
+    // long as intended, and a deadline that had already passed blocked
+    // for the full timeout instead of returning ETIMEDOUT at once.
+    //
+    // Convert the absolute deadline into the jiffies deadline the wait
+    // loop uses. An expired deadline lands on "now", so the loop
+    // returns ETIMEDOUT immediately (Linux's behaviour). The
+    // sub-jiffy remainder is rounded UP so the call never returns
+    // ETIMEDOUT before the requested instant.
+    let (now_sec, now_nsec) = crate::syscall::time::realtime_secs_nanos();
+    let now_ns = (now_sec as i128) * 1_000_000_000i128 + (now_nsec as i128);
+    let target_ns = (ts_sec as i128) * 1_000_000_000i128 + (ts_nsec as i128);
+    let delta_ns = if target_ns > now_ns { target_ns - now_ns } else { 0 };
+    let hz = crate::drivers::timer::HZ as u128;
+    let timeout_jiffies = ((delta_ns as u128 * hz + 999_999_999u128) / 1_000_000_000u128) as u64;
+    Ok(Some(crate::drivers::timer::get_jiffies() + timeout_jiffies))
 }
 
 /// sys_mq_timedsend — Send a message to a message queue (NR 182)
