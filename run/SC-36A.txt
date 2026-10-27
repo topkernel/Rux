@@ -1,0 +1,98 @@
+LEG-36A (OH sprint, kernel-side lane; worktree
+/home/william/rux-agents/oh-kernel, branch feature/oh-kernel, opened on
+c5db92de, merged origin/main 0f806d8b as 9d6b006b).
+
+MISSION 1 — WAKE-PLACEMENT RESERVATION: IMPLEMENTED (the 35A decision,
+accepted). Commits d6124bbc + ccfc708e + 2beb2ded.
+
+- Storage: the wakewatch side table (WwSlot gains a packed hint word
+  (pick_pass_seq << 8) | (cpu + 1)) — no Task layout change, per that
+  module's documented discipline. slot.task stays the validity key.
+- Validity clock: per-CPU PICK_PASS_SEQ, bumped at the TOP of
+  pick_next_task (always under the GRQ lock). A reservation is live
+  until the hinted CPU's NEXT pick pass. This deliberately does NOT
+  test the idle bitmap: the wake-side clear_idle already clears the
+  bit BEFORE the hinted CPU runs its pass, so an idle-bit test would
+  have a hole exactly covering the race. The seq transition and the
+  pass's pick decision share one GRQ hold, so there is no interleaving
+  window (unlike the idle-bit form).
+- Stamp sites (both under the GRQ lock, both followed by a resched IPI
+  to the stamped CPU): enqueue_task's find_idle_cpu tail (fork path —
+  the nudge decision moved INSIDE the lock; IPI still sent outside),
+  and wake_up_enqueue when the caller's IPI target (ti_cpu) is
+  idle-marked (the Task::wake_up path — its select_task_rq prefers
+  prev cpu, so the IPI'd CPU and ti_cpu coincide).
+- Heal-path safety (ccfc708e): the stamp is gated on the wake being a
+  real state transition (entry state sleeping/stopped). R56/R46/R49
+  heal re-links reach the same tail but NO IPI follows them — a stamp
+  there could reserve a task for a WFI CPU with no interrupt coming.
+- Pick side: CFS pick_next_cpu skip reason 6, same bounded 32-entry
+  stash as affinity/ownership; RT/DL picks override (counted as steal
+  when live). The hinted CPU never skips its own reservation; an
+  idle-marked CPU never sleeps with nr_running > 0 (R20-2), so a
+  hinted task cannot strand.
+- Census: hint=onor/steal/exp counters consumed at check_picked; the
+  hinted CPU's own in-flight pass reads stamped_seq+1 (bump precedes
+  the scan) and is attributed onor (2beb2ded — the first A/B boot
+  showed onor=0 steal=0 exp=141, which was the misattribution).
+  Heartbeat line extended (dfx=wwcensus-gated; serial-clean default).
+  wresv=0 disables ONLY the skip — one image A/Bs the fix.
+
+GATES (functional, all green):
+- Dual-arch build rc=0 (PLATFORM=x86_64 and default rv).
+- make test: 1122 passed / 0 failed (main added tests since 35A's 1109).
+- riscv64 smp2 1G regression boot on the FINAL tip (dfx=wwcensus):
+  0 panics, 0 PREEMPT-UNDERFLOW, 0 strands, shell prompt reached,
+  hint tail onor=9 steal=0 exp=0 (instrument live).
+
+CONFIRMATOR (wakewatch picked-on-waker vs picked-on-idle):
+- thread=multi under host load1~21 (host NOT oversubscribed, 60
+  cores): BEFORE (wresv=0) onor=274 steal=0 exp=0 — the idle vCPU's
+  host thread wakes promptly; the race window stays shut; p5a sat in
+  the 21us spread class. Matches the classification's "stable spread
+  on a calm host" (even at load 21 with 15 QEMUs, since the host has
+  ~60 cores).
+- thread=single (idle-vCPU delay structural), matched pair:
+    BEFORE (wresv=0): onor=211 steal=2 exp=0  (99.1% idle-picked)
+    AFTER  (skip on): onor=160 steal=0 exp=0  (100% idle-picked)
+  The steal events (waker picked a live-reserved task) exist before
+  and are gone after. CAVEAT recorded: in the single-host-thread
+  debug regime the deferred pick pays round-robin latency (p5a med
+  25.5 -> 33.6us, p99 198 -> 2010us) — the skip converts waker-steals
+  into deferred picks and there is no second host thread to run the
+  hinted vCPU. thread=single is the deterministic-debugging config;
+  the standard flows and the perf gate run thread=multi. Tier-2
+  medians are the binding check for the merged configuration.
+
+MISSION 2 — MERGE QUEUE: leg36b chain (samgr-callback) completed
+02:05:31 with gate rc=0 (Tier-1: census TERM 8 / REFUSED 32, volume
+105.9M in band, GRQ 5317ns, small_alloc 5.3%; their Tier-2 ran within
+the same rc). The launch hold was respected — no QEMU of mine during
+their window. MY perf-gate tiers 1,2 --tag leg36a (with
+--pbench-baseline run/pb1-results.txt so p2_ctxsw and the p5a/b/c rows
+are enforced, not only the default-anchor rows) is armed as a detached
+calm-watcher: run/perf-gate-leg36a-watch.sh (foreign qemu < 2 AND
+load1 < 9, 3-min poll, 4-h deadline; host at 03:10 was load1 ~19 with
+12 foreign QEMUs — wwh-main-kernel x9, samgr-callback x2,
+gnome-bringup x1). Verdicts land in run/perf-gate-leg36a.log.
+
+Branch queue for the merge reviewer (origin/main..HEAD): 44ba45e2,
+52535c72, f798ccd6, ab4ca01c, 88c8d1e4, c5db92de, 9d6b006b (main
+merge), d6124bbc, ccfc708e, 2beb2ded. The shared spawnfix hunk is
+ab4ca01c (canonical); OH-B's leg-36B Tier-1+2 rc=0 above covers the
+same semantics on their side.
+
+MISSION 3 — cross-watch: PREEMPT-UNDERFLOW sightings on x86 pbench
+boots: 3-4 lines/boot, ALL the PREEMPT-HEAL signature on pid 1 (heal
+zeroes a leaked 0x10001/0x10004 count, then an unpaired spinlock
+preempt sub clamps at 0) — consistent with the stress-lane CC-COLLAB
+note (bf26d2d1 fix on their branch) and the origin/main-delta/D-7
+attribution handed to the coordinator. ZERO on riscv64 boots. No
+sched/mm cooperation requested by OH-B so far (their Family B
+ftruncate/biglock work runs on their branch; their 2 QEMUs active).
+
+FALLBACK (armed, not taken): if Tier-2 P2/P5 fail the pb1 anchor by
+more than 20% in the thread=multi gate configuration, register the
+pick-order placement race as an inherent D-1 consequence in
+docs/architecture/design-divergences.md and band the unpinned p5 rows
+for both regimes (per the 35A decision's alternative).
