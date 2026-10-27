@@ -509,6 +509,10 @@ pub fn timer_softirq_handler(_nr: usize) {
             // self-gated + rate-capped inside) — E8-REPAR unlinked-
             // snapshot root-cause hunt.
             crate::dfx::treehunt::tick();
+            // leg-33B: slow-kernel-entry audit (dfx=slowtask, self-gated
+            // + rate-capped inside) — leaf attribution for nested-call
+            // cascades (fs/futex stalls behind reader exhaustion).
+            crate::dfx::slowtask::tick();
         }
     }
 
