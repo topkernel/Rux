@@ -1,0 +1,21 @@
+perf-gate: tiers=[1] tag=pa57main kernel=none secs=780
+== Tier 1: quiet syscost boot (run/pa-pa57main-serial.log) ==
+PASS  kernel panics                      0                            band: = 0
+PASS  OOM lines                          0                            band: = 0
+PASS  census TERM-DESCHED                8                            band: 8 +-2
+PASS  census WAKE-REFUSED                32                           band: 32 +-4
+INFO  census WAKE-STRANDED (organic)     0                            band: no 1001ms grid class
+FAIL tick rate /CPU cpu0=99.43/s LOW, cpu1=99.98/s min 99.5
+FAIL  syscall volume                     85843374                     band: 107500000 +-10%  [boot-depth-sensitive RERUN-ONCE-RULE: rerun in isolation before calling a regression.]
+PASS clock_gettime avg 4us n=36146319 t=720s 3-5us
+PASS nanosleep avg 183181us n=26907 t=720s <=244ms (pa50main 203ms +-20%)
+== Domains: guarded hot paths (run/pa-pa57main-serial.log) ==
+PASS GRQ avg hold 6230ns n=11216731 4080-7320ns
+PASS small_alloc REST share 6.4% (100323ms) <=10%
+SKIP  buffer-cache hit rate              not in this build            band: needs cache-stats instrument
+SKIP  fsw sync-write classes             not in this build            band: needs fsw=1 boot
+(full syscost dump: run/perf-gate-pa57main-parse.txt)
+
+perf-gate done: see verdicts above (PASS/FAIL/SKIP/INFO per metric).
+FAIL does not auto-block: apply the rerun-once rule, then weigh against
+docs/development/perf-gate-baseline.md.

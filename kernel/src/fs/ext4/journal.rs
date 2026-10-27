@@ -181,8 +181,10 @@ impl Ext4FileSystem {
 ///   no-journal ext4 write-back mode;
 /// - the PRE/POST publication capture windows arm, so every deferred
 ///   write keeps the crash ordering the ghost-file fix established
-///   (pre blocks before the entry block, post frees after it) —
-///   `bio::flush_publications` at each drain point enforces it.
+///   (pre blocks before the entry block, post frees after it) — the
+///   scoped publication drains enforce it (per-task records at the
+///   fsync/mkdir points, per-block obligations at every out-of-band
+///   buffer write; see bio.rs).
 /// Crash consistency class: a crash mid-batch loses recent metadata to
 /// the same degree a write-back mount of the reference kernel does;
 /// recovery is e2fsck (documented F4-R2 stance).
