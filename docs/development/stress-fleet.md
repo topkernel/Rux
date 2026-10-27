@@ -1355,3 +1355,593 @@ blocking-wait syscalls in a raw pool need bounded timeout draws.
 - Monkeys stay deferred (host load 17-21 all session; floor never
   threatened, avail >=40G). The vmscan Referenced-flag question
   (file-lru 93% referenced at OOM) stays queued from s11.
+
+## Session 13 (2026-10-28 01:31-...) — roll onto main 0f806d8b; vmscan Referenced question ADJUDICATED (code-level); perf_event_open fuzz arm
+
+### Succession intake
+
+- Predecessor's fleet-onto-main leg died minutes in (quota window):
+  the merge itself landed (6bb7f396 = origin/main 0f806d8b + docs/test
+  deltas; kernel/ is a ZERO delta vs main — branch kernel == pure main
+  0f806d8b), but the image roll, member relaunch, and ledger block did
+  not. Fleet was COLD (no drivers, no sweeper, no stop files).
+- Dual-arch build of the merged tree: rv64 md5 527656b294d44b8e39c0ecb
+  283abd18b, x86 bzImage md5 29be66a7ef51b4f6f6aa3b540cadffc1 (staged
+  working-tree, never committed — big-binary rule).
+- QEMU hold honored 01:31→(chain exit or ~03:43): the perf lane's
+  detached gate chain (perf-gate-leg36b-chain.sh) needs total-QEMU <=1
+  windows. ALL launches (smokes included) deferred; prep done first.
+
+### THE vmscan file-lru 93%-referenced-at-OOM question — code-level adjudication
+
+The queued candidates were (a) mark_page_accessed setting Referenced
+without activation, (b) the scan never clearing Referenced on the
+inactive list, (c) promotion never firing. Code reading of the current
+engine (mm/lru.rs, mm/vmscan.rs, fs/page_cache.rs, mm/page_alloc.rs):
+
+- (b) is FALSE: the eviction walk's second-chance arm
+  (page_cache.rs:1210-1215) clears Referenced and ACTIVATES the page
+  onto the young end of LRU_ACTIVE_FILE; demotion
+  (lru_demote_active_file_oldest, page_cache.rs:1232) also clears it.
+  The flag does cycle.
+- (a) is TRUE and is the EXPLANATION of the census number — by design.
+  All four setters are access paths (get/get_phys/get-range-hits/
+  pin_by_key): every cache HIT sets PG_referenced in place with one
+  bit op, no LRU move, no activation. (No insertion path sets it.)
+  Linux's mark_page_accessed activates an inactive page on its SECOND
+  hit; Rux defers graduation entirely to the reclaim walk. Under any
+  working-set sweep (LTP re-exec'ing the same binaries — every exec
+  maps the same pages), the inactive list accumulates the bit on
+  ~every page between walk sweeps → 88-93% at any instant census.
+  This is the expected state of the policy, not a leaked bit. The
+  hit-path avoidance of lru_lock is a deliberate divergence (record in
+  docs/architecture/design-divergences.md if kept).
+- THE REAL DEFECT the census points at is reclaim DEPTH before OOM,
+  not Referenced semantics. Quantified chain:
+  - evict_one scans at most MAX_SCAN=64 pages per call from the tail;
+    with ~93% referenced, the budget is spent clearing+activating
+    (graduating) pages before the first evictable page is found. When
+    the oldest 128 (2 rounds incl. the demotion retry) are all
+    referenced, evict_one returns FALSE with ZERO pages freed.
+  - shrink() breaks on the first evict_one failure
+    (page_cache.rs:990-992).
+  - balance_pgdat stops as soon as 32 pages (SWAP_CLUSTER_MAX) are
+    reclaimed per call — even at priority 12, the shallowest scan
+    (size>>10 = ~42 pages of a 43k-page list).
+  - The alloc slowpath runs <=8 try_to_free_pages rounds, breaking on
+    freed==0 (page_alloc.rs:126-135).
+  - NET: worst case ~8x32 = 256 pages (~1 MB) of reclaim effort
+    precede the OOM decision — while the s8/s11 censuses measured
+    175-204 MB of clean, unlocked, unevictable-flag-free file cache
+    sitting on the LRUs one list away. The kill fires because the
+    pre-OOM protocol is latency-bounded at ~1 MB of drain against
+    ~200 MB of drainable pages — two orders of magnitude short.
+- FIX DIRECTION (for the reclaim owner, not landed here): deepen the
+  LAST pre-OOM round only — e.g. a final "drain clean file cache"
+  pass with nr_to_reclaim proportional to the shortfall (or simply
+  keep descending priority while ANY progress is made) instead of the
+  flat 32-page stop. Alternatives: adaptive MAX_SCAN under pressure,
+  or Linux-parity activate-on-second-hit (moves graduation cost to the
+  hit path — the divergence-record trade). The r51 forensics (anon
+  1613MB of 2G at kill) mean those OOMs are borderline-correct kills
+  that should have been SLOW ALLOCATIONS instead.
+
+### perf_event_open fuzz surface (mission watch)
+
+- fsfuzz's raw pool drew syscall numbers 1..60 only — perf_event_open
+  (nr 241, asm-generic; x86 298 maps to it) was NEVER touched. The
+  fresh D-7-set implementation (kernel/src/perf/mod.rs) validates
+  defensively (access_ok + size 64..1024, type/config/freq/sample_type
+  gates, flag-mask EINVAL) — now it gets exercised.
+- test/fsfuzz.c seq_perf arm (commit cf6cf99d): per call 3 chaos draws
+  (garbage 128-byte attr blob with targeted size/type/config/period/
+  flags pools, occasional garbage attr pointer for the EFAULT class)
+  + 1 valid-shape SOFTWARE cpu/task-clock open so the lifecycle (ARMED
+  up, read() record drain, close, ARMED down) churns; FSFUZZ-PERF
+  census line every 256 opens; FSFUZZ-ODD perf on unexpected errno.
+  Rootfs staged with the new probe (private image, debugfs injection).
+- Classifier: PREEMPT-UNDERFLOW counter added (WARN at >=5/round) for
+  the session-12 sighting watch; the print row carries pid= count_was=
+  sub= at file:line lock=0x — keep tails on any WARN round.
+
+### The roll (02:06-02:24, after the gate chain got its window)
+
+- Gate chain (perf lane's perf-gate-leg36b-chain.sh) got its 60s quiet
+  window 01:46:50, ran tiers 1+2, exited rc=0 at 02:05:31 — hold
+  released early. 150s LTP smoke on 527656b2: 322 TPASS / 0 panics.
+- Images staged (working tree, never committed): fleet-rv64-rux :=
+  527656b2..., fleet-x86-bzImage := 29be66a7... Members relaunched:
+  fsfuzz r263, ltp-a r16, memstorm r15, dirstorm r32, dirtyscan r17,
+  modchurn r14 + sweeper; monkey-a/b r1 (KVM 4G, first monkey rounds
+  in this home — host headroom allowed: load 13 at launch, avail
+  38-42G, free 3-4G under the s3 page-cache reading all session).
+- Pre-kill round adjudications (predecessor's last, old 140acd4b-class
+  image): ltp-a r14/r15 CRITICAL = known classes (oom01 OOM at 837
+  with kill+SIGDEATH delivered, W3 no-growth wedge after, standing
+  ALLOCTHROW garbage-size ENOMEM 21-24/round, 10s soft-lockup
+  residual; r15 wedgetail re-confirms file-lru[2] 85.7% referenced
+  34867/40664, active referenced=0, dirty=0 — the vmscan census shape
+  on the true-LRU engine). modchurn r13 OOPS=9 = soft lockup 109s
+  CPU#1, the documented host-starvation flake class under the pre-kill
+  load window (s11 precedent). dirstorm r31 PARKED-LEAK-RV=5 /
+  dirtyscan r16 PARKED-LEAK-RV=2: non-OH parked-leak prints on the
+  D-7-delta kernel — likely the count-migration family's parked face;
+  watch continues on the new kernel. fsfuzz r254-r261 exhaustion
+  deaths were pre-fix-kernel rounds (r262 on 140acd4b: 180 beats,
+  ZERO ALLOCTHROW — the pipe fix holds); two `klogd: flush wrote 0/
+  512 (ext4 write error)` lines during the r15 OOM crunch — buffered,
+  bounded, watch for recurrence.
+
+### NEW FINDING: perf ABI divergences (kernel-side, for the perf lane)
+
+1. PERF_FLAG_* encoding: kernel/perf/mod.rs has FD_NO_GROUP=1<<1,
+   PID_CGROUP=1<<4; the Linux uapi defines FD_NO_GROUP=1<<0,
+   FD_OUTPUT=1<<1, PID_CGROUP=1<<2 (FD_CLOEXEC=1<<3 matches).
+   Consequence: userspace passing Linux's FD_NO_GROUP(1) gets spurious
+   EINVAL; Linux's FD_OUTPUT(2) is silently accepted as "no group".
+   No corruption (neither feature implemented), error contract only.
+2. read(perf_fd) BLOCKS until a record arrives (perf_read waits on the
+   event's wait queue). Linux's read(perf_fd) returns the 8-byte
+   counter value and never blocks (records go through mmap+poll). A
+   task-scoped cpu/task-clock event read from the SAME task can never
+   wake: the reader sleeps, its clock stops, no record is generated —
+   deterministic self-deadlock for any same-task profiling reader
+   (my first fuzz arm parked exactly this way; kernel exited the park
+   only via the wedge kill). RECOMMEND: counter-value read semantics
+   (Linux parity) or at minimum make read() honor O_NONBLOCK (it does
+   — but callers cannot know blocking is the default divergence).
+
+### fsfuzz perf arm bring-up (3 probe revisions, all probe-side)
+
+- v1 parked (task-scoped blocking read, see above) — r263/r264 WEDGE
+  215 lines/1 beat, the exact park signature. v2 fixed the park but
+  crashed pid 1 with a STACK CANARY failure: perf read() drains up to
+  COUNT bytes of records into the user buffer (unlike file/pipe reads
+  which the kernel clamps by data availability), so a fuzz-length draw
+  (1MB) with the 512-byte stack buffer smashed the canary (r265/r266
+  rc=0 exits; symbolized to __stack_chk_fail_local in main). Both are
+  probe-contract violations, not kernel defects — on Linux the same
+  calls behave the same way.
+- v3 (228f741d): O_NONBLOCK via F_SETFL, task-scoped fds never read,
+  every perf read clamped to the buffer. Smoke: 172 beats/150s,
+  FSFUZZ-PERF ok=1024 (the valid-shape open+read+close lifecycle runs
+  ~7x/s), 0 segv/panic. FSFUZZ-ODD perf errno=24 = the EMFILE storm
+  class (fdtable full mid-storm), known noise.
+- Kernel-side validation of the chaos surface so far: 0 panics, 0
+  ALLOCTHROW, no NEW class through ~30 min of full-rate fuzzing.
+
+### PREEMPT-UNDERFLOW sightings (watch item, new kernel 0f806d8b)
+
+- memstorm r15 (527656b2): 7 rows, ALL pid=1, sub=1,
+  at kernel/src/sync/rwlock.rs:457 (bare preempt_enable from an
+  rwlock guard drop — a DIFFERENT site than the s12 LTP sighting at
+  spinlock.rs:461/PROCESS_TREE_LOCK). memstorm r14 (pre-merge-class
+  kernel, same D-7 delta): 13 rows same shape. Class persists on
+  0f806d8b at low volume on the fork/mmap-storm surface; perf lane
+  owns the producer triage.
+
+### PRODUCER NAMED (code-level, s13): the mutable current-slot — bookings split across two tasks
+
+The perf lane's leg-47 refutation (pre-delta kernel shows the class
+at the same rate; the s12 attribution withdrawn) handed the producer
+hunt here with the pa73c leak-origin fingerprint (pid 593 stuck
+RUNNING at pc=0x10000, heal/underflow 64/64). Code-level analysis:
+
+- The stuck bit in pa73c is the HARDIRQ bit (offsets: PREEMPT=1,
+  SOFTIRQ=0x100, HARDIRQ=0x10000) — the reported "acquire sites"
+  (sched.rs do_wait/grq guards, wait.rs finish_wait, spinlock.rs) are
+  the LEAKORIGIN shadow's last PREEMPT_OFFSET acquire = noise for a
+  hardirq leak; they only name where the victim was spinning.
+- irq_enter() is called ONLY from the three trap brackets, all
+  instrumented with tp_entry != tp_exit discriminators — and pa73c
+  shows ZERO bracket prints, ZERO SWITCH-COUNT-LEAK (the
+  context_switch discipline-bypass tripwire), while bits still
+  migrate. tp never changes during the leak.
+- THE GAP: preempt_count_add/sub resolve through
+  sched::current() = cpu_state[cpu].current — the MUTABLE SLOT —
+  while every discriminator watches the tp register. The slot has
+  writers that run while the hardware keeps executing a different
+  task: (a) the wake-path orphan heal rewrites a REMOTE CPU's slot to
+  idle (sched.rs curr_on loop, "heal the lying slots"); (b)
+  republish_current_after_abort (arch switch-abort repair) — its own
+  comment: "the task actually continuing here is prev"; (c) the
+  slot-capture steal / harvest_relink machinery the R56 family
+  documents. A bracket (or guard scope) opened before such a rewrite
+  and closed after it books +offset on one task and -offset on the
+  slot task — stranding one (pa73c's 0x10000-on-593; dirstorm's
+  parked pc=1 workers) and underflowing the other (idle 0x5fa in s3;
+  memstorm's pid-1 sub=1 at rwlock preempt_enable). One mechanism,
+  both bit classes, both faces; tp unchanged explains every silent
+  discriminator. __schedule's own R85 block ("tp != prev ... booking
+  the physical truth: prev = tp") proves slot-vs-tp divergence is a
+  recurring live event, not theory.
+- INSTRUMENT LANDED (commit on this branch): all three trap brackets
+  now compare the SLOT across the bracket (cs_entry/cs_exit pointers
+  + pids in the print; when=slot = tp-unchanged-slot-changed = the
+  producer signature). Canary kernel e80e92f0 rolled to a NEW ltp-b
+  member (ltp-a stays the clean-kernel control); smoke 406 TPASS /
+  0 panics. Watch: grep 'IRQ-BRACKET-LEAK.*when=slot' in ltp-b
+  serials — a hit directly witnesses a slot rewrite inside a live
+  bracket.
+- FIX DIRECTION (for the sched owner, once captured): bookings should
+  resolve against the hardware truth (tp) — or the slot rewrites must
+  be bracketed so no add/sub can straddle them. Not changed here:
+  semantics touch on the switch machinery needs the capture first.
+
+### Monkey verdict (s8/s11 queue: KILLDUMP at >500MB HEAP-GROW)
+
+- monkey-a r1 (29be66a7 x86): HEAP-GROW 619684KiB (605MB, past the
+  historical >500MB panic trigger), heap 708MB/1GB, 1548 KILLDUMP
+  census lines INCLUDING the exact old death-site shape (tgid 2074
+  m.ohos.launcher fdtab walk) — and ZERO KERNPANIC; 795 beats, normal
+  timeout. The fb643799-class census fix HOLDS under the heap-pressure
+  trigger on this kernel. monkey-b r1: 188MB growth, clean (WARN for
+  growth alone). Formal "both monkeys >500MB panic-free" still open
+  (monkey-b has not crossed 500MB yet); monkeys keep accumulating.
+  The heap GROWTH itself (OH image-side) remains its own standing
+  item. OOPS=1 = the known 10s soft-lockup residual.
+
+### Fleet map at session-13 close (03:1x)
+
+- Default rv64 image = 527656b2 (main 0f806d8b): ltp-a (r17+),
+  memstorm (r15+), fsfuzz (r268+ on probe v3), dirstorm (r32+),
+  dirtyscan (r17+), modchurn (r14+). x86 = 29be66a7: monkey-a/b (r1+).
+- ltp-b: NEW instrument canary on e80e92f0 (0f806d8b + the slot
+  bracket discriminator), KIMG-pinned.
+- Sweeper live. Host floor: free 3-10G / avail 33-42G under the s3
+  page-cache reading all session; load peaked ~20 during member boot
+  transients.
+- Housekeeping: the 6bb7f396 merge had accidentally committed
+  fleet-x86-bzImage (16MB); untracked (kept in working tree, 29be66a7)
+  — the coordinator may want to squash that out of the merge at
+  main-merge time.
+- Chains (ww-s2/wwload): down since the s10 home move, not restarted
+  (no mission item; old-home artifacts preserved untouched).
+
+### NEW CATCH (kernel, main 0f806d8b): perf REGISTRY multi-CPU spin stall — allocations under spinlocks in softirq context
+
+fsfuzz r268 — the FIRST FULL ROUND of the perf_event_open fuzz arm —
+wedged at ~beat 43776 (~12 min in, right after FSFUZZ-PERF ok=4608):
+
+    DEADLOCK: spinlock stuck cpu=1 lock=0xffffffff808808b8 (= rux::perf::REGISTRY) x67
+    DEADLOCK: spinlock stuck cpu=0 lock=0xffffffd603f15218 (heap-range dynamic lock) x67
+    ra=RawSpinlock::lock on both; 134 watchdog prints until timeout;
+    beat stream stopped cold (serial "growth" = the watchdog printer).
+
+Taskdump at the wedge: pid 1 (fuzzer) preempt=259 (SOFTIRQ|PREEMPT)
+and the cpu1 idle task preempt=257 — BOTH CPUs inside timer-softirq
+processing (softirq_tick runs on whatever task the tick interrupted).
+
+Code defect (kernel/src/perf/mod.rs): softirq_tick holds
+REGISTRY.lock_irqsave() across the whole event iteration and inside
+that section (a) takes ev.inner.lock(), (b) calls to_wake.push() — a
+VEC ALLOCATION UNDER REGISTRY; push_sample grows the ring VecDeque
+inside ev.inner — ALLOCATION UNDER inner; register()'s reg.push()
+allocates under REGISTRY on the open path. Under the fuzzer's
+standing heap-pressure class (the ENOMEM/EMFILE storms; the 128MB
+kernel heap crawls), every under-lock allocation enters the allocator
+slowpath while the other CPU spins on REGISTRY/inner — a
+watchdog-tripping multi-CPU spin stall, 67/67 alternation.
+
+Fix direction (perf owner): no allocation inside any spinlock section
+reached from softirq/irq context — to_wake as a fixed array (events
+are few), ring capacity preallocated at open (RING_CAP becomes the
+reserved capacity so push_sample never grows), registry pre-reserved
+or a fixed table. Evidence:
+run/fleet/evidence/2026-10-28-s13-perf-registry-deadlock-{rootnotes.txt,
+fsfuzz-r268-serial.log}. The member doubles as the standing repro
+(classify WATCHDOG= + lock=0xffffffff808808b8).
+
+### Next-session queue
+
+0. COORDINATOR DIRECTIVES (s13 close-out): (a) when the ltp-b canary
+   captures when=slot, the fix (bookings resolve against tp, or
+   bracket the slot rewrites) goes through the FULL sched-domain merge
+   gates — this closes the longest-standing wedge family in the fleet
+   ledger; (b) the perf REGISTRY spin-stall + the two perf ABI defects
+   are routed to the DFX lane as MERGE-BLOCKING for the perf surface —
+   keep the fsfuzz perf arm hot until their fixes land, then ONE clean
+   round on the fixed kernel closes the catch.
+
+1. ltp-b instrument: grep 'when=slot' — a capture names the producer
+   directly; cross-read the harvest/abort/heal state around the
+   timestamp. Zero prints over several rounds = the slot-rewrite
+   window is NOT the producer; next candidate is a per-CPU count
+   mirror divergence (extend leakorigin to shadow HARDIRQ acquires).
+2. PREEMPT-UNDERFLOW volumes on ltp-a (clean kernel) vs ltp-b
+   (instrument) — rate comparison; the memstorm rwlock face and
+   dirstorm parked face continue as wide capture.
+3. fsfuzz perf arm: the REGISTRY spin-stall catch goes to the perf
+   owner (fix: no allocation under REGISTRY/inner in softirq paths);
+   after the fix, resume first-full-day accumulation (PERF census,
+   chaos classes); perf ABI divergences await the perf lane's call
+   (flag-bit encoding + blocking read).
+4. Monkeys: monkey-b past 500MB growth panic-free closes the formal
+   criterion; heap-growth curve continues.
+5. modchurn/dirstorm soft-lockup + PARKED-LEAK recurrence watch at
+   load1 < 10 (kernel-lead test).
+
+## Session 14 (2026-10-28 03:1x-...) — s13 producer theory REJECTED at code level; canary re-instrumented at booking time; msgstress01 strand burst dissected
+
+Intake: floor at 6G free (15 QEMUs total) — shed by own PIDs per the
+≥10G hard rule: both monkeys (4G x86 KVM each; monkey-a criterion
+already closed at r1 605MB, monkey-b r2 partial ~294MB@25min captured
+in-serial before the kill, zero panics), later ltp-a (r19 next) and
+modchurn (r17 next) as other lanes' boxes re-grew. All member data
+preserved; resume = relaunch fleet-member.sh with the next round
+number.
+
+### Harvest: ltp-b r1 (canary e80e92f0, base main 0f806d8b)
+
+ONE WAKE-STRANDED burst, 390 lines at msgstress01 (sweep 668), plus
+the first-ever PARKED-WILDWRITE firing. Adjudications:
+
+1. **s13 slot-rewrite producer theory: REJECTED, code-level.** Zero
+   IRQ-BRACKET-LEAK prints of ANY kind (slot/pre/in) during the burst.
+   The null is structural, not luck: preempt bookings resolve through
+   sched::current() which reads the ARCH tp REGISTER (sched.rs:5237),
+   NOT cpu_state.current. The slot discriminators watched a path
+   bookings never touch; no slot rewrite can split a bracket's
+   +offset/-offset. Brackets stay as standing negatives.
+2. **PARKED-WILDWRITE = probe false positive.** The paired PARKED-LEAK
+   line shows state=0x0 (RUNNING): a task preempted mid-switch-out
+   holds the GRQ guard while already slotless; the parkwalk's running
+   classifier (slots only, predates R63's SWITCHING_OUT marker)
+   misread it. Fix in 766d60a9 (also stops the 4s PARKED-HEAL from
+   zeroing a live guard mid-switch-out — which would re-open
+   preemption inside the spinlock section).
+3. **The h-field pc census needed picker separation.** check_picked
+   prints under the GRQ: the picking CPU's own incumbent always shows
+   pc=1 LEGALLY. Splitting picker/other (script in evidence dir):
+   other-CPU faces r1 = 52% pc=0, 27% pc=1, 13% pc=65537 — and r2
+   (fresh kernel) shows pc=1/256/65536 incumbents some of which are
+   LEGAL transient states (spinlock-held / softirq / mid-IRQ sampled
+   at print time). The h-fields alone cannot convict an incumbent.
+4. **Half the strands have a CLEAN other-CPU incumbent** rotating
+   every 0-5ms — that half is NOT preempt-count leakage: it is the
+   pick walk skipping a leftmost runnable victim (every strand line
+   carries vr=0ms lead-lag=0ms; saturating_sub also reads 0 when the
+   victim's vruntime is BELOW min_vruntime — a sleeper massively owed
+   CPU). That is the R85 PICK-SKIP shape (why=1/2 legs), a SECOND
+   family tangled with the count leaks.
+5. Zero LEAK-ORIGIN / PARKED-LEAK / PREEMPT-HEAL / IRQ-PAIR prints
+   through r2 partial (101 strands): leaked-count incumbents churn
+   faster than every tripwire window (2s PREEMPT-LEAK, 4s parkwalk,
+   10s tick-heal reset on each incumbent change) — the windows, not
+   the instruments, are the gap.
+
+### s14 instruments (766d60a9) + canary v2 (72e03151)
+
+- leakorigin HARDIRQ shadow (hsite= names the trap bracket that booked
+  a later-stranded 0x10000; irq_enter now #[track_caller]);
+- IRQ-PAIR booking check: per-CPU token of the task irq_enter booked
+  +0x10000 on (riscv S-mode hardirqs cannot nest per-cpu → token
+  strictly outermost); irq_exit verifies the paired sub lands on the
+  same task — split = tp changed inside the bracket, measured at
+  booking time, no trap-boundary sampling hole;
+- parkwalk mid-switch-out adjudication (SWITCHING_OUT);
+- harness 42e6fe52: START/DFX env overrides on the ltp member kind
+  (installed via atomic rename; running loops keep their old inode).
+
+Canary round live: fleet-rv64-instr-rux md5 72e03151f484d99de14162a8b7dad1cc,
+sweepstart=660 (replays the msg region), dfx=watchdog,taskdump,
+leakhunt,wwcensus,schedtrace (schedtrace arms the PICK-SKIP-ALL why=
+reports — the discriminator for adjudication 4; wwcensus arms the
+PREEMPT-LEAK incumbent site reports).
+
+Evidence: run/fleet/evidence/2026-10-28-s14-ltpb-r1-msgstress-strand/
+(analysis.txt, burst excerpt, r2 partial without schedtrace).
+
+### Cross-lane notes
+
+- origin/main 0f806d8b..584c1105 carries NO perf fix yet (fsfuzz perf
+  arm stays hot; catch closure queued behind the DFX lane's merge).
+- main 584c1105 (leakhunt v3) adjudicates the parkwalk against "arch
+  tp slots" — on riscv64 that helper reads cpu_state.current (tp is
+  register-only), i.e. the same slots the walk scanned: x86-effective,
+  riscv-null. Our SWITCHING_OUT extension is the riscv64 complement;
+  edits do not overlap (they touch report_parked_site + wakewatch, we
+  touched the shadow table, preempt.rs, the walk classifier) — merge
+  is clean.
+
+### Next-session queue (s14)
+
+0. Harvest the live canary: PICK-SKIP-ALL why= census against the
+   strand victims (family A verdict), LEAK-ORIGIN/IRQ-PAIR-SPLIT
+   (family B verdict). If why=1/why=2 dominates with slot=0 swout=0,
+   the R85 pick-side heal windows (50 jiffies) are too slow under
+   msgstress churn — that tuning is the fix candidate, sched-domain
+   gates apply.
+1. ltp-a (r19+) and modchurn (r17+) resume when the floor relaxes;
+   monkeys resume for monkey-b's formal 500MB criterion (r2 partial:
+   294MB@25min panic-free, on pace).
+2. perf catch closure: ONE clean fsfuzz round on the fixed kernel when
+   the DFX lane's perf fixes land on main.
+3. vmscan file-lru question stays queued (s13 item 4).
+
+### s14 continued (04:0x-...) — FAMILY A1 CAUGHT, FIXED, VERIFIED; A2 chained to the idle/wake protocol
+
+Canary v3 (72e03151 + schedtrace) split the strand family cleanly by
+instrument:
+
+- **A1 — impossible-affinity stranding: root-caused and FIXED.** An
+  LTP helper born in the nice04 window carried cpus_allowed=0x8 on a
+  -smp 2 boot: sys_sched_setaffinity validated the mask against
+  config::MAX_CPUS (4) on riscv64 (x86 used MADT-discovered count,
+  same gap vs started CPUs). The task could never be picked (every
+  pick refuses it, why=3), wake paths IPI'd the nonexistent hart
+  ("send_ipi to hart 3 failed, error=-3"), and the one leaked child
+  produced 185+75 PICK-SKIP-ALL reports (openat01/nice04) plus strand
+  bursts while both CPUs idled on a runnable queue. Fix (7e9d2ad0):
+  validate against arch::smp::num_started_cpus() on both arches —
+  the exact set picks can run on. VERIFIED on the rolled canary
+  (9a03e78e, ltp-b round preserved as ltp-b-r3-affinityfix-serial.log):
+  why=3 count 175+ -> 0, send_ipi failures -> 0, every remaining skip
+  aff=0xffffffff. Dual-arch build gate rc=0; make test ALL PASSED.
+- **A2 — the msg-region 1s-grid strands: NOT a pick refusal.** The
+  new SKIPHIST instrument (skip-reason histogram per strand victim,
+  appended to every WAKE-STRANDED line under schedtrace) printed
+  NOTHING through 418 strands: the victims are linked (note_wake
+  stamps only on successful link), never refused by the walk, simply
+  not picked for ~1s. Geometry vr=0ms/lead-lag=0ms matches a FRESH
+  task placed at min_vruntime. 418/418 strand lines coincide with an
+  EMPTY grq idle mask (baseline 62% of heartbeats) — the wake tail's
+  find_idle_cpu misses the actually-idle CPU, no resched IPI, and the
+  box waits for the next ~1s-class event. The earlier "ticks=[0,0]
+  timer silence" correlation is INVALID — WW_TICK_IRQ is incremented
+  only on x86_64 (probe gap; one-line fix next session).
+- **PREEMPT-LEAK incumbent reports are idle-tick artifacts**: all 347
+  lines were pid=0 pc=0x10000 pctick=0 — the tick's own in-flight
+  offset measured inside the tick. The probe needs an idle/in-flight
+  exclusion; the pc=1/256/65537 incumbent census in WAKE-STRANDED
+  h-fields is context-noise-dominated (the picking CPU legally holds
+  the GRQ: its own h-field always reads pc>=1; in-tick=0x10000,
+  softirq=0x100 are legal sampled states). Only picker-vs-OTHER split
+  analysis is meaningful (script in the evidence dir).
+
+Gates for 7e9d2ad0 (coordinator runs the final one): dual-arch builds
+rc=0; make test green; Tier-1 syscost boot + Tier-2 pbench on the
+fixed kernel booting in this session (results appended below).
+
+Evidence: run/fleet/evidence/2026-10-28-s14-ltpb-r1-msgstress-strand/
+(analysis.txt, r1 burst, r2 schedtrace pre-fix, r3 affinity-fix
+verification).
+
+### s14 gate results for 7e9d2ad0 (branch stress-fleet-2, ready for coordinator merge)
+
+- Dual-arch builds: rc=0 (x86_64 bzImage 16MB @03:50, riscv64 md5
+  9a03e78e identical pre/post x86 detour).
+- make test: ALL PASSED (run/fleet/logs/s14-maketest.log).
+- Tier 1 quiet syscost boot (pa-boot s14fix, 780s, KVM q35 smp2):
+  ALL PASS — census TERM 8 / REFUSED 31 (bands 6-10 / 28-36), ticks
+  99.52+100.00/s, volume 100.5M (in ±10%), clock_gettime 3us,
+  nanosleep 185.7ms, GRQ hold 5885ns, small_alloc REST 1.1%, 0 panic
+  / 0 OOM. Log run/pa-s14fix-serial.log, parse
+  run/perf-gate-s14fix-parse-parse.txt.
+- Tier 2 pbench (s14fixpb, debug class vs pb1 anchor, medians):
+  ALL 8 rows in ±20% or improved — p1_null +5.1%, p1_clock +2.3%,
+  p2_ctxsw +4.4% (sched-domain row), p3b_cow +8.0%, p6_write_fsync
+  -20.7%, p6_mkdrmdir -11.5%, p6_unlink -29.6%, p6_append +16.9%.
+  Results in work/pbench-s14fixpb-serial.log.
+
+Fleet state at close: memstorm r19, dirstorm r36, dirtyscan r21,
+fsfuzz r272 (perf arm hot on main 0f806d8b image — no perf fix on
+main yet), ltp-a r18 (control), ltp-b r4 (canary 9a03e78e, START=660,
+dfx=watchdog,taskdump,leakhunt,wwcensus,schedtrace — A2 watch with
+SKIPHIST live). PAUSED on floor rule: modchurn (next r16), monkey-a
+(next r2; criterion closed at r1 605MB), monkey-b (next r2; formal
+500MB pending, r2 partial 294MB@25min panic-free).
+
+Next-session queue (s14 close):
+0. ltp-b r4+: A2 watch — if SKIPHIST stays empty through msg-region
+   strands, add the idle-loop phase stamp + slot-vs-tp per CPU to WW3
+   (one-line WW_TICK_IRQ riscv64 increment too); the A2 producer is
+   in the idle-mark/WFI wake protocol (find_idle_cpu misses unmarked
+   idle CPUs; 418/418 idle-mask-empty correlation, 62% baseline).
+1. Coordinator: 7e9d2ad0 (affinity fix) passed tiers 1+2 + make test
+   on stress-fleet-2 — merge-gate ready. The parkwalk fix (766d60a9)
+   is probe-only (dfx-gated) but rides the same branch.
+2. fsfuzz perf catch closure once the DFX lane's perf fixes land.
+3. Resume modchurn/monkeys when the floor relaxes; monkey-b formal
+   500MB criterion pending.
+4. vmscan file-lru question still queued (s13 item 4).
+
+## Session 15 (2026-10-28 06:44-...) — intake repair + NEW CATCH (munmap length-wrap panic); A2 idle-mark theory REFUTED by r6; s15 WW4 instruments live
+
+Intake: the 04:27 fleet relaunch ran FOUR of six members (dirstorm/
+dirtyscan/fsfuzz/ltp-b) from the OLD fleet home
+(/home/william/workspace/Rux/run/fleet — its images/ dir no longer
+exists), so every round died at QEMU start and ltp-b canary r4 — the
+A2 watch — never ran; only memstorm/ltp-a (relaunched from the correct
+worktree home) advanced (r19-r23 / r18-r22). One stale debug boot from
+the dead session (thread=single, no roundtag, 188MB) also lived on.
+All killed by own PIDs; ltp-b relaunched correctly at 06:49 (r4).
+
+### NEW CATCH: munmap length-wrap panic (ltp-a r22, CLOSED at code level, 7d4b4dba)
+
+ltp-a r22 (main 0f806d8b image, sweepstart=519) died to
+`attempt to add with overflow` at arch/riscv64/mm/mm_ops.rs:594 right
+after `BIGMUNMAP pid 1203 addr 0x0 len 0xfffffffffffff000` —
+madvise02's full-range cleanup munmap. The page-round
+`size + PAGE_SIZE_USIZE - 1` evaluates `(size + 4096) - 1`; any user
+length within one page below usize::MAX wraps the add — debug panics
+here, release wraps and survives only by accident via the R7-1 checked
+end bound. The s12 wrap fix covered seven round-ups in
+syscall/memory.rs; munmap rounds one layer deeper (mm_ops) and was
+missed. munmap_legacy (same pattern) is dead code, no callers. Fix
+(7d4b4dba): checked round-up on both arches → EINVAL, matching
+Linux's `len > TASK_SIZE - addr` rejection. Joins the wrap family
+(msync ec87f42b, madvise b42a392b). Dual-arch builds rc=0 (riscv64
+md5 19de1371, x86 bzImage 16MB). Deterministic replay reproduced the
+exact r22 BIGMUNMAP sequence (pids 433/441/469/477/594 line-for-line)
+and ran 2423 lines / mq_timedreceive01 panic-free before being shed
+in the floor event; the madvise02-reaching rerun + make test queued
+(floor window). Evidence:
+run/fleet/evidence/2026-10-28-s15-munmap-wrap-panic/.
+
+### s15 instruments (06d743c4) — WW4 line, rolled fleet-wide
+
+WW_IDLE_PHASE per-CPU idle-loop phase stamps (1=entering-schedule
+2=marked+R20-2-recheck 3=pre-WFI 4=inside-WFI 5=post-WFI), per-CPU
+tick-entry tp-vs-slot mismatch census (slotmm), WW_TICK_IRQ now
+increments on riscv64 (the x86 twin was the only one — WW2
+ticks=[0,0] was a probe gap; smoke shows ticks=[93,102] with
+phase=[4,4] idle, zero panics). New WW4 heartbeat line under
+dfx=wwcensus. NOTE: phase=1 is ambiguous between "idle loop about to
+pick" and "idle task switched away long ago" — discriminate against
+WW3 slot pids (real pid = CPU busy; the idle loop is not executing).
+Kernel md5 19de1371 rolled to BOTH fleet-rv64-instr-rux (ltp-b) and
+fleet-rv64-rux (ltp-a) at the r5/r24 boundaries (r5 had launched 20s
+prematurely on the old image; killed its QEMU so the loop rolled r6
+immediately — one 20-second wasted round).
+
+### r3/r4/r6 canary harvest
+
+- Family B (bracket-split bookings): two-round NULL solid. r3: 122
+  LEAK-ORIGIN, 397/400 of them pid=0 idle-tick in-flight (pctick=0,
+  rip=wfi — the tick sampling idle inside its own bracket;
+  held_nonzero_for grows because pid=0 keys both CPUs); the 3
+  real-task prints adjudicated in-flight too (tick interrupting a
+  spinlock holder at spinlock.rs:292 and a buddy alloc at
+  buddy.rs:737 — the tick's own execution). Zero IRQ-PAIR-SPLIT in
+  any round. The s13 slot-rewrite producer theory stays rejected.
+- A1 (affinity) holds on every post-fix round: why=3 = 0.
+- **A2 idle-mark/WFI theory REFUTED by r6** (the round the WW4
+  instruments landed): 399/399 msg-region strand lines coincide with
+  idle mask 0x0, phase=[1,1], grq=410-418 CFS-RUNNABLE, both WW3
+  slots on REAL pids, need_resched mask 1-3 (set). There IS no idle
+  CPU at strand time — find_idle_cpu has nothing to miss; the "box
+  waits for the next 1s-class event" shape is queue latency plus the
+  pick walk refusing on_cpu-marked candidates (why=1: mid-switch-out
+  transient or stale mark; the 50-jiffy stale-mark confirm window =
+  0.5s, ~2x = the ~1s strand grid; strand_max 4727ms also matches
+  the fair-queue bound for 418 runnable / 2 CPUs). SKIPHIST stays
+  empty (strand victims never refused by the walk they appear in).
+  The surviving producer is the R85 pick-side family (why=1/2 legs,
+  143+21 in r4) under deep-queue churn; the s14 candidate stands —
+  pick-side heal window tuning — and is a sched-domain change
+  needing full gates (census band, pbench P2/P5 ±20%).
+
+### Floor event + semantics change
+
+Mid-session the coordinator flagged free=6G (old free-column rule);
+shed the repro boot + make-test QEMU plus everything not on the
+keep-list (canary pair + fsfuzz + sweeper). Floor semantics then
+changed to available>=10G (buff/cache 40G made the free column
+uninformative; available never dropped below 42G all session).
+Regrown under the new reading: repro3 (munmap verification), make
+test rerun, memstorm r24.
+
+### Fleet state / queue (s15 close)
+
+- ltp-b r6 (19de1371, START=660, full instruments + WW4) — A2/pick
+  watch live; ltp-a r24 (same binary, control); fsfuzz r272 (perf
+  arm standing; main 584c1105 still carries NO perf fix — closure
+  stays blocked on the DFX lane); memstorm r24.
+- Queue: (1) repro3 + make test → message ready-for-merge for
+  7d4b4dba (+ 06d743c4 probes + 7e9d2ad0 chain already gate-ready);
+  (2) ltp-b r7+: WW4 census across more msg-region rounds — if
+  why=1 dominates again, hand the pick-side heal-window question to
+  the sched owner with the r6 numbers; (3) monkeys for monkey-b's
+  formal 500MB criterion when available allows; (4) vmscan file-lru
+  question still queued (s13 item 4).
