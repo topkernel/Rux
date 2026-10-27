@@ -146,3 +146,44 @@ launch dead; the serial log only appears after the cp.
 Boot script: run/oh-boot-30a.sh (oh-img-p referenced read-only via
 snapshot=on,file.locking=off per drive; fresh private scgold userdata copy per
 boot; HDCPORT default 12221).
+
+SC322A FINAL (dfx=wwcensus fsw=1, 45 min, HDC 12233; loop-drawing,
+LIFEC=215) — second axis confirms sc321A:
+- FSW1 final: pb=1.739 ps=21.68 pc=1809 ph=0 pm=739 — again exactly ONE
+  whole-queue drain (the end-of-boot daemon sync(2)); zero from
+  fsync/fdatasync/mkdir.
+- Census on the OH image: TERM-DESCHED 8 / WAKE-REFUSED 28, ZERO
+  1001ms-grid strands (band condition "no grid strand class" holds; sched
+  domain clean under my kernel at OH load).
+- TXN-HANG D-state events: 0 (sc321A's single 2.6 s thermal-config write
+  did not recur). fsync/fdatasync hangs: 0. Panics: 0 (not even the sysrq
+  class). TREE 0, namei split 0.
+
+LEG-30A VERDICT (final):
+1. flush_publications O(pending) — FIXED and verified at every layer:
+   mechanism replaced (pb ~1/boot vs 1/fsync+commit+mkdir before, plus the
+   unbounded racing-publisher loop removed from all per-op paths), gates
+   green, external ABI untouched.
+2. fdatasync/storage re-adjudication — the family is DEAD on both draws:
+   zero sys=74/75 hangs (vs accesstoken 1.2-1.4 s and hiview 43 min
+   pre-fix), storage D-state family absent (0-1 benign 2.6 s writes per
+   boot vs the 5.5->26 s O_CREAT class), queue bounded (739-863 under
+   churn, hiwat 2048 never hit), scoped flushes carry own-record
+   durability, per-block guards carry ordering (pc 1.5-1.8k/boot).
+3. ENTRY_MUTEX pbench check — NO regression: mkdrmdir -12/-23%, unlink
+   -34/-35% vs anchor (both improved).
+
+Handoff notes for the next leg:
+(a) the global-sync(2)-vs-scoped-flush snapshot race (a sync_all
+    hash-order write while a scoped flush holds records in its I/O
+    snapshot) is the same window class the old double-drain had — a
+    "drain epoch" flag would close it if it ever draws;
+(b) pending records of tasks that never hit a durability point linger
+    until the 2048-record hiwat drain or a global sync — bounded and
+    ordered, but a dedicated background drainer could be added if the
+    hiwat producer-paid drain ever shows in a latency profile (ph=0 on
+    every boot so far);
+(c) FSW1 counters print on quiet/minimal boots and on OH only after the
+    serial flood subsides (console-emit contention delays the
+    timer-softirq emission, es= climbs) — known pa28-class behavior, not
+    new.
