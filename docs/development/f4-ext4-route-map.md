@@ -151,3 +151,49 @@ existing seed preference (csum.rs csum_seed()).
 - The jbd2/journal layer is dormant on this workload (all counters 0) —
   journal-commit cost is NOT an OH-boot cost center today; it matters
   for LTP-class workloads on journaled images.
+
+## 5. Leg 43 addendum (2026-10-27): the two armed F4 follow-ons
+
+Route 2 (counters) landed leg-31; route 4 (getdents cache) landed
+leg-39/42 (strong -57.8% off main); route 3's whole-cache drain tail
+was largely replaced by scoped publication draining (c3e5a314, main
+0cd29a75; fsync -25.8%, mkdrmdir -21.7%, unlink -42.4% strong). The
+remaining residuals decompose along the JOURNAL bit, and the two
+targets are different images:
+
+**(a) No-journal mounts — route 1 proper (the GNOME/OH side).** On the
+OH/GNOME boots the journal never engages (fsw `j=` counters read
+0.1010.0.0.0 at t=1710-1830: 1010 lazy stops, zero commits), so every
+metadata write on the no-journal userdata still pays inline
+synchronous I/O through `write_block_from_vec` → `bio::sync_dirty_buffer`
+(namei.rs): bitmaps, group descs, inode-table blocks, dir blocks.
+Design: arm the publication machinery WITHOUT a handle — identity
+blocks become dirty-deferred with publication records (pre = the
+op's bitmap/table/desc blocks, entry = the dir block, post = the
+removal-side writes), drained at the standing durability points
+(fsync/sync_buffers/eviction/high-water) which already enforce H1/H2
+via the constraint flushes. The ordering logic (pre→entry→post) is
+exactly what defer_entry_publication records under a handle; the
+journal gate at its head is what needs a no-journal arm. Risk profile
+unchanged from the map's route-1 row (crash-ordering); verification:
+LTP mutation family + a crash-order review against the ghost-file
+entry in the namei.rs comments. Expected: mkdir/unlink-class avgs on
+no-journal images drop toward the write-back class (the map's <1 ms
+estimate), provisioning window shrinks.
+
+**(b) Journaled mounts — the mkdrmdir residual is the per-rmdir
+REVOKE-FORCED synchronous commit.** jbd2_journal_stop already batches
+commits lazily (LAZY_COMMIT_MAX_BUFFERS=1024, h_sync, or revoke
+records pending). rmdir/unlink take revoke records, and pending
+revokes FORCE the commit at stop: every rmdir pays a full synchronous
+journal commit (descriptor + revoke blocks + write-through of the
+transaction's registered buffers). Making revokes lazy requires
+moving them from the journal-global `revoke_records` vec onto the
+running transaction, committed with it IN ORDER — safe against
+stale-replay only if reallocation of a revoked block before its revoke
+reaches the log is handled (Linux's revoke-cancel records); that
+semantics review is the precondition, not the code move. pbench's
+mkdrmdir row (p6 median 55-58 ms strong class, min ~33 ms) is this
+row's measurement handle; the fsw jcommit_fast counter (today 0 on OH,
+should read ≈ rmdir count on pbench) is the mechanism probe.
+

@@ -1,0 +1,61 @@
+fsfuzz deterministic WEDGE — ROOT CAUSE: probe self-park, NOT a kernel defect
+==============================================================================
+Date: 2026-10-27 12:30-13:00, lane sf2 (wwh-main-kernel, main 57e44a90 kernel)
+
+PRESENTATION
+- fsfuzz member rounds r1-r3 on main 57e44a90: serial frozen at 231-232
+  lines ~2 s after FSFUZZ-START, every round, same last missstat line ->
+  WEDGE classification (correct given a silent serial).
+- Instrumented repro (dfx=taskdump,periodic,wwcensus, gdbstub): machine
+  ALIVE and healthy — both CPUs idle, pid 1 INTERRUPTIBLE-parked with
+  last_syscall_nr=22 (epoll_pwait) a0=0 a1=0x1000; kthreads parked
+  normally; RWFRZ heartbeat alive; wakes ~100/s (hres softirq churn,
+  vec[8]=200/s with no armed hres timer — post-park idle shape, benign).
+
+ROOT CAUSE (deterministic seed=7 stream, decoded by a printf-per-call
+probe variant — run/fleet/logs/eex2-serial.log):
+  1. raw close(0)                     (nr 57, fd pool pick 0)
+  2. raw epoll_create1(0) -> returns fd 0 (lowest free)   [fd 0 now an
+     EMPTY epoll]
+  3. raw epoll_ctl(0, 0, 32768, ...)  -> EBADF (garbage fd), no
+     interests ever registered
+  4. raw close(1)                     -> probe's OWN stdout dies
+  5. next raw call: epoll_pwait(0, 0x1000, c, d, ...) — fd 0 IS a valid
+     (empty) epoll, so the kernel correctly blocks; d drawn from
+     off_pool {-1, 1<<40, ...} = unbounded. Linux blocks identically
+     (events ptr is only touched at delivery). The CALL print for (5)
+     never appeared because stdout was closed at (4).
+
+- ARGUMENT-MATRIX PROBE (test/epollexam.c, run/fleet/logs/
+  epollexam1-serial.log): every epoll_pwait/epoll_wait shape with a
+  non-epoll fd returns EINVAL/EBADF instantly on main 57e44a90 — the
+  kernel's EPOLL_OPS type-confusion guard and argument validation are
+  correct. The park requires the self-created epoll precondition.
+
+HISTORICAL VERDICT (the member has been dead its whole life)
+- The OLD fleet home's "clean" fsfuzz rounds (wildwrite-hunt
+  fsfuzz-r220-serial.log, v16-era kernel): SAME parked state (1 beat at
+  line 214, then wwcensus heartbeats only, nr=3, idle pc=256/258,
+  wakes churning). Those rounds read "clean/WARN lines=7532" purely
+  because the boot carried wwcensus heartbeats (4 lines/s x 1800 s =
+  ~7200 of the 7530 lines). fsfuzz has contributed ~5 s of actual
+  fuzzing per round since the v4 era. The sf2 member boots without
+  wwcensus (serial-clean mandate) — the silence made the long-standing
+  self-park VISIBLE as WEDGE. No kernel behavior changed.
+
+FIX (probe-side, this lane)
+- stdout independence: dup(1) at start; all CALL/BEAT/ODD prints via
+  the saved fd (close(1) can no longer blind the trace).
+- bounded waits: for syscall 22 (and any future blocking-wait nrs in
+  the 1..60 pool) clamp the timeout argument to [0..200] ms before the
+  raw call. The kernel-chaos surface (all nrs, all garbage pointers)
+  is otherwise unchanged.
+- Member image becomes private (fleet-fsfuzz-rootfs.img) so the shared
+  LTP rootfs is untouched.
+
+KEEP-WATCH (kernel-side, not defects today)
+- idle preempt_count 0x100/0x102 leak class (PREEMPT-LEAK at wfi) —
+  present identically on v16-era and main; documented launcher-line
+  tripwire noise.
+- hres softirq 200 Hz churn with sentinel hres_next while all tasks
+  parked — idle shape; revisit if it appears with runnable tasks.
