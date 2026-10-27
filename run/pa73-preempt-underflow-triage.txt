@@ -1,0 +1,108 @@
+PREEMPT-UNDERFLOW triage (perf-audit leg 47, 2026-10-28) — the D-7/range
+attribution from stress-fleet session 12 is WRONG; the class pre-dates the
+488528dc->979fde80 delta and D-7 cannot produce it by mechanism.
+=====================================================================
+
+Question (coordinator, inserted priority): stress-fleet s12 saw
+PREEMPT-UNDERFLOW (spinlock.rs guard drop, PROCESS_TREE_LOCK, waitid/ptrace
+rows) on the 51a7a6c7 kernel (main delta 488528dc->979fde80) and zero on
+fleet rounds r11/r12 (f75a24b2 = 488528dc + madvise); suspect = the D-7
+percpu rework (b3278ad5/UnsafeCell). Mission: root-cause in the D-7 family
+or exonerate + re-bisect.
+
+1. WHAT THE PRINTS ACTUALLY ARE
+===============================
+Every cluster in the stress lane's own r17 logs (read-only,
+ltp-fix-b/.ltp/logs-r17/) is the heal's DOCUMENTED guard-unpair report,
+in the exact shape their session-3 verdict already banked ("the 18 sub=0x1
+reports are the documented guard-unpair path (healed 10 s spinlock holds,
+drop-site named)"):
+
+  PREEMPT-HEAL cpu=0 pid=0x1d9 was=0x10001 held_jiffies=0x3f0
+  PREEMPT-UNDERFLOW pid=0x1d9 count_was=0 sub=1 ... spinlock.rs:461 lock=<static>
+
+- was=0x10001 = base 1 (ONE live/leaked PREEMPT bit) + the tick's own
+  in-flight HARDIRQ_OFFSET at the heal sample (sched.rs round-3c heal).
+- held ~0x3e8-0x3f2 jiffies = the heal fires at its >=1000-jiffy (10 s)
+  threshold, i.e. the observed hold is ~10.08 s — the wedge duration.
+- The underflow is the AFTERMATH: the heal (timer IRQ) cleared the base
+  bit while a SpinlockGuard was live; that guard's drop then books -1 on
+  the zeroed count. Clamp-to-0; no corruption; LTP rows byte-identical
+  with/without any of this (their own A/B: 25-file failure set equal).
+- Locks VARY across clusters: static PROCESS_TREE_LOCK (waitid rows) AND
+  heap Spinlocks (0xffffffd609xxxxxx, cgroup_core rows, pids 0x14e/0x151/
+  0x155/0x156/0x15f). Not one lock's bug — a mechanism.
+
+2. THE WEDGE ITSELF (pre-existing, not the underflow)
+=====================================================
+ltp-b-r66-serial.log (fleet v16-class kernel, Oct 26, BEFORE 488528dc
+even existed; main ancestor 47d96961 = Oct 25) carries the IDENTICAL
+class: 142 PREEMPT-HEAL (was=0x10001, ~0x3e8-0x3ea) + 101
+PREEMPT-UNDERFLOW (sub=1, spinlock.rs guard drop). The r66 PREEMPT-LEAK
+samples around the first heal give the loop's RIPs; symbolized against
+the v16 image (riscv64-linux-gnu-addr2line):
+
+  ffffffff8029e2d0  arch::riscv64::cpu::get_thread_id        cpu.rs:19
+  ffffffff80089b94  Task::sub_preempt_count2_at              task.rs:3919
+  ffffffff80080d42  TaskState::new                            task.rs:513
+  ffffffff800e8eba  RawSpinlock::unlock                       spinlock.rs:251
+  ffffffff80127cba  preempt::preempt_count_add                preempt.rs:108
+  ffffffff800e8e1e  RawSpinlock::lock                         spinlock.rs:141
+  ffffffff80151ef2  Task::for_each_group_child::<do_waitid::closure#1>  task.rs:5041
+
+  pctick=1 on every sample: the PREEMPT bit was set at timer ENTRY.
+
+So the wedged task is spinning in do_wait's children-scan loop
+(for_each_group_child = the PROCESS_TREE_LOCK guard acquire/drop cycle),
+un-sleepable because its preempt count base is 1 — the __schedule
+discipline refuses to switch out a task with a nonzero count ("the
+160-291 s one-activation monopolies", sched.rs). The count's +1 is the
+long-hunted leaked/abandoned PREEMPT bit (their round-3 comment: replayed
+acquire or wild write), or a live guard held across a schedule() attempt;
+either way the task busy-loops the scan at 100% of its CPU until the 10 s
+tick heal clears the base, the next schedule() parks it, and the wait
+proceeds normally (LTP rows unaffected). If the heal landed inside a live
+guard window, that guard's drop prints the underflow.
+
+Producer hunt ownership: this is the stress lane's own standing hunt
+(wildwrite-hunt: PREEMPT-LEAK tallied in fleet rounds r51-r66 regularly,
+r56/r57 in the THOUSANDS on pre-delta kernels). Nothing about it is new.
+
+3. WHY THE S12 ATTRIBUTION FAILED
+=================================
+- Their control (fleet r11/r12 zero) is a stochastic miss: the same
+  pre-delta kernel family produced r64/r65 = ZERO and r66 = 142 heals in
+  adjacent rounds; the wedge is load/timing dependent.
+- The kernel delta 488528dc..979fde80 contains NO preempt-count-semantics
+  change: exit.rs/sched.rs/signal.rs deltas are tracepoint marshalling
+  behind armed(); trap.rs adds a lock-free per-tick PC stash; perf/mod.rs
+  is new but gated; timer.rs adds one relaxed load. The behavioral
+  changes are D-7 small_alloc, virtio input IRQ delivery, posix_mq
+  deadline, madvise, pipe abort plumbing — none touch preempt_count.
+- D-7 SPECIFICALLY is exonerated by mechanism: CpuLocal::with manipulates
+  ONLY the IRQ flag (save_and_disable_irq/restore_irq) and a per-row
+  in_use flag; it never adds or subtracts preempt_count. The small_alloc
+  conversion kept the identical irq windows and fallbacks (diff-verified).
+  The stress lane's "per-CPU preempt-count carrier" description of D-7
+  does not match the code — there is no preempt-count carrier in it.
+
+4. DIRECT A/B REPRODUCTION (this leg)
+=====================================
+run/pa73-underflow-ab.sh boots both range ends on the same LTP rootfs
+(snapshot=on) over the waitid window (sweepstart=1290):
+  A = 0f806d8b (main tip, carries the delta)
+  B = 488528dc (pre-delta control)
+Verdict rule: class on B => delta exonerated as origin (expected, given
+the v16 evidence). RESULTS: [filled after boots]
+
+5. VERDICT FOR THE COORDINATOR
+==============================
+- The PREEMPT-UNDERFLOW prints on waitid/ptrace rows are the containment
+  report of the pre-existing leaked-preempt-bit wedge (stress lane's own
+  hunt), not a regression introduced by 488528dc->979fde80, and not
+  related to the D-7 percpu rework.
+- No ship-blocker: clamp-to-0, no corruption, LTP-identical (their own
+  A/B), 10 s self-healing wedge = the known class.
+- If a bisect is still wanted, bisect the WEDGE (heal firings), not the
+  underflow print — and start it below 47d96961, because the class is
+  present there.
