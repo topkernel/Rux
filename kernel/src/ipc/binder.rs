@@ -3141,6 +3141,18 @@ pub fn txn_hang_audit() {
         ctid: u32,
         exec_ms: u32,
         total_ms: u32,
+        // leg-36B discriminator: the hung SERVER thread's own todo
+        // (length + head item) and its binder read/looper posture. A
+        // thread parked in BINDER_WRITE_READ with work on ITS OWN todo
+        // = lost wake (kernel-side); empty own todo + no outstanding
+        // nested txn anywhere = the handler deferred the reply
+        // userspace-side (image-side, e.g. an FFRT worker that never
+        // completes).
+        thtodo: usize,
+        thtodo_head: alloc::string::String,
+        looper: u32,
+        wfpw: bool,
+        outstanding: alloc::string::String,
     }
     struct Out {
         id: u64,
@@ -3180,6 +3192,40 @@ pub fn txn_hang_audit() {
                         }
                         let exec = now.wrapping_sub(pick);
                         if exec >= 100 && hung.len() < 8 {
+                            // leg-36B: hung-server forensics, all under
+                            // WORLD (outstanding_from_tid contract).
+                            use core::fmt::Write;
+                            let th = t.st();
+                            let thtodo = th.todo.len();
+                            let mut thtodo_head = alloc::string::String::new();
+                            if let Some(wk) = th.todo.front() {
+                                match wk {
+                                    Work::Transaction(xt) => {
+                                        let _ = write!(
+                                            thtodo_head,
+                                            "txn{} code{}",
+                                            xt.id, xt.code
+                                        );
+                                    }
+                                    Work::TransactionComplete => {
+                                        thtodo_head.push_str("txn-complete");
+                                    }
+                                    Work::ReturnError(..) => {
+                                        thtodo_head.push_str("return-error");
+                                    }
+                                    Work::Node(n) => {
+                                        let _ = write!(thtodo_head, "node{}", n.id);
+                                    }
+                                    Work::DeadBinder { .. } => {
+                                        thtodo_head.push_str("dead-binder");
+                                    }
+                                    Work::ClearDeathDone { .. } => {
+                                        thtodo_head.push_str("clear-death-done");
+                                    }
+                                }
+                            }
+                            let outstanding =
+                                outstanding_from_tid(world, proc.pid, t.tid);
                             hung.push(Hung {
                                 id: x.id,
                                 code: x.code,
@@ -3189,6 +3235,11 @@ pub fn txn_hang_audit() {
                                 ctid: x.from_tid.unwrap_or(0),
                                 exec_ms: exec.saturating_mul(10),
                                 total_ms: now.wrapping_sub(x.enq_j).saturating_mul(10),
+                                thtodo,
+                                thtodo_head,
+                                looper: th.looper,
+                                wfpw: th.waiting_for_proc_work,
+                                outstanding,
                             });
                             if hung_n < 4 {
                                 hung_pids[hung_n] = proc.pid;
@@ -3323,6 +3374,28 @@ pub fn txn_hang_audit() {
             rip,
             a0,
             a1
+        );
+        // leg-36B: kernel-vs-image discriminator for the hung server
+        // thread (the sc331B txn14230 shape — picked a txn, parked in
+        // BINDER_WRITE_READ, no nested txn visible). thtodo>0 while the
+        // thread sits in read = work pending on its OWN todo = lost
+        // wake (kernel bug — the read must return it); thtodo=0 and an
+        // empty outstanding list = the reply was deferred userspace-
+        // side (image-side handler).
+        let _ = writeln!(
+            w,
+            "TXN-HANG-OWE txn{} tid{} thtodo={} head=[{}] looper={:#x} wait-proc-work={} outstanding=[{}]",
+            h.id,
+            h.stid,
+            h.thtodo,
+            if h.thtodo_head.is_empty() { "-" } else { &h.thtodo_head },
+            h.looper,
+            h.wfpw,
+            if h.outstanding.is_empty() {
+                "NONE - reply deferred userspace-side"
+            } else {
+                &h.outstanding
+            }
         );
         // Leg-28 item 2 + leg-29A: name the FILE when the hung server
         // thread is stuck in a file syscall family — the pathstash
