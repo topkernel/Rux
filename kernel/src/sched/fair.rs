@@ -65,8 +65,11 @@ pub const PRIO_TO_WEIGHT: [u64; 40] = [
 
 /// Nice value to weight multiplier mapping table (for fast calculation)
 ///
-/// Used to calculate vruntime: delta_exec * weight / lw->weight
-/// Stores NICE_0_LOAD * 2^32 / weight
+/// Used to calculate vruntime. The reference kernel's
+/// `sched_prio_to_invweight[]` holds 2^32 / weight for each nice level
+/// (same values, same order); the vruntime delta is then
+/// `delta_exec * NICE_0_LOAD * inv_weight >> 32`, i.e.
+/// `delta_exec * NICE_0_LOAD / weight`.
 pub const PRIO_TO_WMULT: [u64; 40] = [
     /* -20 */ 48388, 59856, 76040, 92818, 118348,
     /* -15 */ 147320, 184698, 229616, 287308, 360437,
@@ -89,11 +92,17 @@ pub struct LoadWeight {
 
 impl LoadWeight {
     /// Create new load weight
+    ///
+    /// The inverse weight is computed here (2^32 / weight, the reference
+    /// kernel's `__update_inv_weight`) so the vruntime update path never
+    /// has to divide.
     pub fn new(weight: u64) -> Self {
-        Self {
+        let mut lw = Self {
             weight,
             inv_weight: 0,
-        }
+        };
+        lw.update_inv_weight();
+        lw
     }
 
     /// Create load weight from nice value
@@ -240,10 +249,13 @@ impl SchedEntity {
 
     /// Calculate virtual runtime delta
     ///
-    /// vruntime += delta_exec * (NICE_0_LOAD / weight)
+    /// vruntime += delta_exec * (NICE_0_LOAD / process weight)
     ///
-    /// Use multiplier to avoid division:
-    /// vruntime += delta_exec * (inv_weight >> 32)
+    /// The reference kernel's form (kernel/sched/fair.c: __calc_delta) is
+    /// `delta_exec * weight / lw.weight` computed as
+    /// `(delta_exec * (weight * lw->inv_weight)) >> 32`, with
+    /// weight = NICE_0_LOAD and lw->inv_weight = 2^32 / the entity's
+    /// weight — i.e. the same `delta_exec * NICE_0_LOAD / weight`.
     ///
     /// # Arguments
     /// - `delta_exec`: Actual execution time (nanoseconds)
@@ -258,7 +270,8 @@ impl SchedEntity {
 
         // Use multiplication instead of division:
         //   delta = delta_exec * NICE_0_LOAD / weight
-        //         = delta_exec * (inv_weight >> 32)   [inv_weight = NICE_0_LOAD*2^32/weight]
+        //         = (delta_exec * (NICE_0_LOAD * inv_weight)) >> 32
+        //           [inv_weight = 2^32 / weight]
         //
         // Use u128 to prevent overflow when delta_exec is large.
         // Matches kernel/sched/fair.c __calc_delta() semantics.
@@ -1080,7 +1093,8 @@ impl CfsRunQueue {
 
                     self.nr_running.fetch_sub(1, Ordering::AcqRel);
                     self.load_weight.fetch_sub(se.load.weight, Ordering::AcqRel);
-                    self.update_min_vruntime();
+                    // min_vruntime is updated AFTER the skipped entries are
+                    // re-inserted (see the comment at the re-insert loop).
                 }
 
                 result = Some(task);
@@ -1103,6 +1117,23 @@ impl CfsRunQueue {
         for i in (0..skip_count).rev() {
             let (key, task, _) = skipped[i];
             self.tasks_timeline.insert(key, task);
+        }
+
+        // Advance min_vruntime over the COMPLETE timeline. The pick loop
+        // temporarily lifts the entries this CPU cannot run (affinity,
+        // cgroup throttle, ownership) out of the tree; updating
+        // min_vruntime while they were out made the leftmost look further
+        // right than it is. min_vruntime only ever grows, so the drift was
+        // permanent — and min_vruntime is the reference point new tasks
+        // and waking sleepers are placed against (enqueue_inner's
+        // sleep-compensation floor), so a drifted value silently erases
+        // their sleep credit. The reference kernel computes min_vruntime
+        // from the leftmost entry of the full tree
+        // (kernel/sched/fair.c: update_min_vruntime), which is the state
+        // this ordering restores: the picked task is out, every other
+        // entry is back in.
+        if result.is_some() {
+            self.update_min_vruntime();
         }
 
         // GNOME-wedge canary: the timeline held candidates but NONE was

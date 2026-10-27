@@ -373,6 +373,19 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
     let map_flags = args[3] as u32;
     let mut fd = args[4] as i32;
     let offset = args[5] as u64;
+
+    // The file offset must be a multiple of the page size. The reference
+    // kernel's mmap syscall wrapper rejects a misaligned offset with
+    // EINVAL before anything else happens (arch/riscv/kernel/sys_riscv.c:
+    // riscv_sys_mmap; every arch has the same check), and POSIX says the
+    // same. The check is unconditional — it applies to anonymous mappings
+    // too, where the offset is ignored. Without it a misaligned offset
+    // silently shifted the mapping's file extent: the VMA's offset was
+    // stored verbatim (vma.set_offset(offset)) and the fault path then
+    // looked up a page-cache entry at a non-page-aligned offset.
+    if offset % crate::mm::page::PAGE_SIZE as u64 != 0 {
+        return mmap_error::EINVAL;
+    }
     // bring-up trace: every MAP_SHARED file mapping with the raw args —
     // the DRM/dumb-buffer mapping failures need the kernel-side view of
     // what userspace actually passed.
