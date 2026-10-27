@@ -1,0 +1,154 @@
+         [ok]
+trap:             stvec handler installed            [ok]
+trap:             ecall syscall handler              [ok]
+mm:               Sv39 3-level page table            [ok]
+mm:               satp CSR configured                [ok]
+mm:               buddy allocator order 0-12         [ok]
+mm:               heap region 128MB @ 0x81600000     [ok]
+mm:               slab allocator 4MB                 [ok]
+boot:             FDT/DTB parsed                     [ok]
+boot:             cmd: root=/dev/vda rw init=...     [ok]
+console:          console=ttyS0 (ns16550a uart)      [ok]
+mm:               linear mapping 2048 MB             [ok]
+mm:               vmemmap mapping initialized        [ok]
+mm:               layout: kernel=0x80200000-0x8160   [ok]
+mm:               layout: heap=0x81600000-0x896000   [ok]
+mm:               524288 page descriptors (span 20   [ok]
+page_alloc: zone Normal span=524288 pages (2048 MB), seeded=468415 (1829 MB), unmanaged-in-span=55873 (218 MB)
+mm:               zone allocator initialized (5242   [ok]
+memblock:         total 2048MB, available 1829MB     [ok]
+mm:               device mappings created            [ok]
+irq:              irq_desc array initialized         [ok]
+intc:             PLIC @ 0x0C000000                  [ok]
+intc:             IRQ domain + chip registered       [ok]
+ipi:              SSIP software IRQ + bitmap multi   [ok]
+console:          UART interrupt-driven RX           [ok]
+bio:              buffer cache layer                 [ok]
+fs:               ext4 driver loaded                 [ok]
+fs:               ramfs mounted /                    [ok]
+fs:               procfs initialized                 [ok]
+fs:               procfs mounted /proc               [ok]
+fs:               sysfs mounted /sys                 [ok]
+fsw: off (cmdline fsw param = None)
+fs:               debugfs mounted /sys/kernel/debu   [ok]
+cgroup:           v2 unified hierarchy init          [ok]
+cgroup:           cgroup2 mounted /sys/fs/cgroup     [ok]
+driver:           vda virtio-blk 2621440 sectors     [ok]
+driver:           virtio-blk PCI x1                  [ok]
+driver:           GenDisk registered                 [ok]
+fs:               root /dev/vda -> vda               [done]
+fs:               ext4 mounted /                     [ok]
+fs:               procfs remounted /proc             [ok]
+mm:               swap 256 MB tail carve             [ok]
+driver:           virtio-net x1                      [ok]
+vdso:             clock_gettime fast path            [ok]
+security:         capability LSM initialized         [ok]
+sched:            CFS scheduler v1                   [ok]
+sched:            runqueue per-CPU                   [ok]
+sched:            PID allocator init                 [ok]
+sched:            idle task (PID 0)                  [ok]
+mm:               kswapd reclaim thread              [ok]
+dfx: runtime switch 'watchdog' enabled
+dfx: runtime switch 'taskdump' enabled
+dfx:              diagnostic subsystem               [ok]
+DEFERFREE: engaged (first MmStruct free held back 1500ms)
+printk:           persistent log /var/log/kmsg (kl   [ok]
+ipc:              System V + POSIX MQ                [ok]
+smp:              2 CPUs online (boot hart 0)        [ok]
+softirq:          ksoftirqd per-CPU threads          [ok]
+dfx:              khungtaskd hung-task detector      [ok]
+trap:             sie.SEIE enabled                   [ok]
+[31mdriver:           virtio-gpu not found               [fail][0m
+fs:               devfs mounted /dev                 [ok]
+fs:               tmpfs mounted /dev/shm             [ok]
+fs:               tmpfs mounted /run                 [ok]
+driver:           evdev /dev/input/event0            [ok]
+driver:           evdev /dev/input/event1            [ok]
+driver:           PS/2 keyboard (stub)               [ok]
+driver:           PS/2 mouse (stub)                  [ok]
+init:             ELF /test/fsfuzz loaded            [ok]
+init:             init task (PID 1) enqueued         [ok]
+
+[1;36mWelcome to [1;32mRux OS[0m [90m(RISC-V 64)[0m
+[90m- [1mmrsh[0m[90m (POSIX shell) | A minimal POSIX-compatible shell[0m
+
+PARKWALK-ARMED
+FSFUZZ-START seed=7 pid=1
+EFAULTTRAC: pid=1 nr=56 a0=0x7 a1=0xfff
+EFAULTTRAC: pid=1 nr=5 a0=0x64 a1=0x100000
+EFAULTTRAC: pid=1 nr=36 a0=0x7 a1=0xffffffffffffffff
+EFAULTTRAC: pid=1 nr=41 a0=0x64 a1=0xfff
+EFAULTTRAC: pid=1 nr=15 a0=0x3 a1=0x10000
+EFAULTTRAC: pid=1 nr=14 a0=0x7 a1=0x10000
+EFAULTTRAC: pid=1 nr=8 a0=0x3 a1=0x7fffffff
+EFAULTTRAC: pid=1 nr=43 a0=0x3ff a1=0xfffffffffffff000
+EFAULTTRAC: pid=1 nr=17 a0=0x2 a1=0xffffffffffffffff
+EFAULTTRAC: pid=1 nr=48 a0=0x3 a1=0xfffffffffffff000
+EFAULTTRAC: pid=1 nr=8 a0=0xffffffffffffffff a1=0x1000
+EFAULTTRAC: pid=1 nr=34 a0=0x1 a1=0xffffffffffffffff
+EFAULTTRAC: pid=1 nr=33 a0=0x64 a1=0x1
+EFAULTTRAC: pid=1 nr=33 a0=0xffffffffffffffff a1=0xffffffffffffffff
+EFAULTTRAC: pid=1 nr=53 a0=0x2 a1=0x0
+EFAULTTRAC: pid=1 nr=41 a0=0x2 a1=0xfff
+EFAULTTRAC: pid=1 nr=38 a0=0xffffffffffffffff a1=0xffffffffffffffff
+EFAULTTRAC: pid=1 nr=36 a0=0x7 a1=0xfff
+EFAULTTRAC: pid=1 nr=33 a0=0x3 a1=0xfff
+EFAULTTRAC: pid=1 nr=17 a0=0x1 a1=0x1000
+EFAULTTRAC: pid=1 nr=56 a0=0x64 a1=0x100000
+EFAULTTRAC: pid=1 nr=56 a0=0xfffffffffffffffe a1=0xffffffffffffffff
+EFAULTTRAC: pid=1 nr=8 a0=0x7 a1=0x1000
+EFAULTTRAC: pid=1 nr=45 a0=0x1 a1=0x7fffffff
+EFAULTTRAC: pid=1 nr=14 a0=0xfffffffffffffffe a1=0x1000
+EFAULTTRAC: pid=1 nr=6 a0=0x3 a1=0x10000
+EFAULTTRAC: pid=1 nr=41 a0=0x3ff a1=0x100000
+EFAULTTRAC: pid=1 nr=6 a0=0x0 a1=0xfffffffffffff000
+EFAULTTRAC: pid=1 nr=12 a0=0x3 a1=0xffffffffffffffff
+EFAULTTRAC: pid=1 nr=40 a0=0xffffffffffffffff a1=0x7fffffff
+EFAULTTRAC: pid=1 nr=53 a0=0x0 a1=0x0
+EFAULTTRAC: pid=1 nr=45 a0=0x3 a1=0x100000
+EFAULTTRAC: pid=1 nr=59 a0=0xfffffffffffffffe a1=0x0
+EFAULTTRAC: pid=1 nr=9 a0=0xfffffffffffffffe a1=0xfffffffffffff000
+EFAULTTRAC: pid=1 nr=9 a0=0x64 a1=0xffffffffffffffff
+EFAULTTRAC: pid=1 nr=49 a0=0x1 a1=0x10000
+EFAULTTRAC: pid=1 nr=49 a0=0xffffffffffffffff a1=0xffffffffffffffff
+EFAULTTRAC: pid=1 nr=15 a0=0x3 a1=0xffffffffffffffff
+EFAULTTRAC: pid=1 nr=17 a0=0x64 a1=0x100000
+EFAULTTRAC: pid=1 nr=33 a0=0x1 a1=0x1
+EFAULTTRAC: pid=1 nr=45 a0=0x0 a1=0x0
+EFAULTTRAC: pid=1 nr=14 a0=0xfffffffffffffffe a1=0xfff
+EFAULTTRAC: pid=1 nr=6 a0=0x64 a1=0xffffffffffffffff
+EFAULTTRAC: pid=1 nr=49 a0=0x7 a1=0xfff
+EFAULTTRAC: pid=1 nr=59 a0=0xffffffffffffffff a1=0x7fffffff
+EFAULTTRAC: pid=1 nr=43 a0=0xfffffffffffffffe a1=0xfffffffffffff000
+EFAULTTRAC: pid=1 nr=44 a0=0x1 a1=0x100000
+EFAULTTRAC: pid=1 nr=40 a0=0xfffffffffffffffe a1=0x0
+EFAULTTRAC: pid=1 nr=9 a0=0x3ff a1=0x1000
+EFAULTTRAC: pid=1 nr=12 a0=0x64 a1=0xfffffffffffff000
+EFAULTTRAC: pid=1 nr=11 a0=0x3ff a1=0xfffffffffffff000
+EFAULTTRAC: pid=1 nr=41 a0=0x3ff a1=0xffffffffffffffff
+EFAULTTRAC: pid=1 nr=40 a0=0x1 a1=0x0
+EFAULTTRAC: pid=1 nr=41 a0=0x2 a1=0xfff
+EFAULTTRAC: pid=1 nr=41 a0=0x7 a1=0x7fffffff
+EFAULTTRAC: pid=1 nr=11 a0=0x3ff a1=0x7fffffff
+EFAULTTRAC: pid=1 nr=9 a0=0x2 a1=0x7fffffff
+EFAULTTRAC: pid=1 nr=6 a0=0x1 a1=0xfff
+EFAULTTRAC: pid=1 nr=6 a0=0x3 a1=0x100000
+EFAULTTRAC: pid=1 nr=15 a0=0x1 a1=0x100000
+FSFUZZ-BEAT 0
+missstat: ret=-20 nr=33 a0=0x3 path='-' a2=0x8000 pid=309
+missstat: ret=-20 nr=53 a0=0x2 path='ELF' a2=0x241 pid=316
+missstat: ret=-20 nr=33 a0=0x3 path='-' a2=0x241 pid=317
+missstat: ret=-20 nr=34 a0=0x2 path='-' a2=0x7fff pid=320
+missstat: ret=-20 nr=53 a0=0x2 path='ELF' a2=0x1 pid=323
+missstat: ret=-20 nr=38 a0=0x64 path='-' a2=0x8000 pid=323
+missstat: ret=-20 nr=34 a0=0x2 path='-' a2=0x0 pid=323
+missstat: ret=-20 nr=56 a0=0x3 path='-' a2=0x0 pid=324
+missstat: ret=-20 nr=53 a0=0x64 path='ELF' a2=0x8000 pid=324
+missstat: ret=-20 nr=35 a0=0x64 path='-' a2=0x0 pid=326
+missstat: ret=-20 nr=33 a0=0x0 path='-' a2=0x7fff pid=330
+missstat: ret=-20 nr=33 a0=0x1 path='-' a2=0x1 pid=332
+missstat: ret=-20 nr=56 a0=0x1 path='-' a2=0x1a4 pid=351
+missstat: ret=-20 nr=33 a0=0x3 path='-' a2=0x1 pid=353
+missstat: ret=-20 nr=53 a0=0x64 path='ELF' a2=0x1 pid=355
+missstat: ret=-20 nr=38 a0=0x2 path='-' a2=0x7fff pid=356
+missstat: ret=-20 nr=38 a0=0x7 path='-' a2=0x42 pid=359
