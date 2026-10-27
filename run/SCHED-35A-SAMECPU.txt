@@ -1,0 +1,78 @@
+SCHED QUESTION (routed from perf lane leg-46, answered by oh-kernel
+leg-35A, 2026-10-27 22:4x) — "2-vCPU guest under host load: socket
+ping-pong pair intermittently shares one effective CPU; p5b/p5c rows
+flip between 5us and 40us regimes; wakes==picks in both. Why?"
+
+CLASSIFICATION: GRQ PICK-ORDER PLACEMENT RACE. Not an idle-balance
+miss, not affine wake. The wake machinery is exonerated — the
+classification is structural to pick-time placement in a global run
+queue.
+
+EVIDENCE (code, no new boot needed — the routed census already
+discriminates):
+
+1. Wake path is correct and complete. wake_up_enqueue (sched.rs
+   ~3172) enqueues under the GRQ lock, then find_idle_cpu(cpus_allowed)
+   (sched.rs:159, rotating LAST_IDLE_HINT spread) + clear_idle +
+   resched IPI to the idle CPU. The idle loop (sched.rs ~6172) is
+   race-closed: schedule() -> mark_idle -> RE-CHECK nr_running
+   (R20-2 comment: a task enqueued between the schedule fast-path and
+   mark_idle is caught before WFI) -> wfi -> clear_idle on wake.
+   So every wake enqueues AND IPIs an idle CPU when one exists —
+   consistent with the lane's wakes==picks census in BOTH regimes
+   (wakewatch WAKE-REFUSED = state-mismatch lost wakes, in band).
+
+2. NO placement exists at wake time. The fair class's select_task_rq
+   (fair.rs:1517, including its wake_cpu preference) HAS ZERO CALLERS
+   in the tree — dead code; wake_cpu is never written. Enqueue goes
+   straight to the global timeline; nothing binds the woken task to
+   the IPI'd CPU.
+
+3. The pick is placement-blind. pick_next_cpu (fair.rs:868) takes the
+   leftmost-vruntime candidate filtered ONLY by cpus_allowed and the
+   R65/R8-1b ownership bits (on_cpu/claim — those are switch-ownership
+   guards, not placement). cpu_id/prev do not bias selection.
+
+MECHANISM OF THE FLIP: when the sender wakes the receiver and blocks
+(the ping-pong shape), TWO CPUs race to pick the receiver from the
+GRQ: (a) the waker CPU — already inside __schedule() on the send-path
+block, hot, host-scheduled; (b) the IPI'd idle CPU — must exit WFI,
+take the IPI, run schedule(). Whoever picks first owns the task.
+- Idle CPU wins -> spread: the pair overlaps, 5us class.
+- Waker wins -> the pair alternates on ONE CPU: 2 context switches
+  per roundtrip, no overlap, 40us class. The regime is SELF-STICKY
+  (every subsequent hop the waker CPU is again the hot, already-
+  scheduling CPU) — the "two runnable threads land on one CPU"
+  signature.
+- Host-load bias: under TCG thread=multi, the idle vCPU's host thread
+  is precisely the one the host scheduler deprioritizes, stretching
+  (b) past (a). Hence INTERMITTENT under host load, stable spread on
+  a calm host. Linux does not have this race shape because placement
+  is decided at WAKE time (select_task_rq + ttwu onto a per-CPU rq) —
+  the idle CPU, once IPI'd, is guaranteed the task.
+
+NAMED FIX CANDIDATE (sched domain — needs its own gate; do NOT merge
+ungated): wake-placement reservation. In wake_up_enqueue, on
+find_idle_cpu success stamp the task's placement hint (the existing
+never-written wake_cpu field) with the IPI'd CPU under the GRQ lock;
+in pick_next_cpu, skip a candidate whose hint names a CPU that is
+still idle-marked (one bounded skip pass, same machinery as the
+affinity/cgroup skip array); clear the hint at switch-in/mark_picked
+and when the hint CPU is no longer idle (e.g., picked something
+else). Effect: the waker cannot steal a task whose idle target was
+just IPI'd; ping-pong spreads deterministically; cost is one extra
+comparison in the pick scan (guarded hot path — needs the P2/P5 +
+census gate, Tier 2 + sched domain checks).
+ALTERNATIVE if the hot-path cost is judged not worth it: record as an
+inherent GRQ divergence in docs/architecture/design-divergences.md
+and band the unpinned p5 rows for both regimes (on KVM/real hardware
+WFI-exit is fast and spread dominates; the 40us class is a
+TCG-under-host-load artifact of the same mechanism).
+
+For perf-audit leg-46: the discriminator that would directly SEE the
+race in one boot is a wake->pick per-CPU attribution (which CPU
+picked, vs the idle CPU the wake IPI'd) — wakewatch already stamps
+the picking CPU in WAKE-STRANDED lines; extending the heartbeat
+counter with picked-on-waker vs picked-on-idle split would make the
+flip visible without touching the pick hot path (heartbeat-side
+readout only).
