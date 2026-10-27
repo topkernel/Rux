@@ -52,6 +52,11 @@ p.add_argument("--keyprobe", default="",
                help="comma list of elapsed seconds for a single QMP 'a' keypress")
 p.add_argument("--mousemove", default="",
                help="comma list of elapsed seconds for QMP abs pointer moves")
+p.add_argument("--clickprobe", default="",
+               help="comma list of elapsed seconds for a QMP left-button "
+                    "press+release at the current pointer position "
+                    "(focuses the window under it; pairs with "
+                    "--mousemove then --keyprobe for click-then-type)")
 p.add_argument("--qtrace", default="",
                help="comma list of QEMU trace events (simple backend, file in run dir)")
 args = p.parse_args()
@@ -315,6 +320,7 @@ burst_until = -1     # banner-shot burst window (see notify_burst)
 last_burst = -100
 keyprobe = [int(x) for x in args.keyprobe.split(",") if x.strip()]
 mousemove = [int(x) for x in args.mousemove.split(",") if x.strip()]
+clickprobe = [int(x) for x in args.clickprobe.split(",") if x.strip()]
 qmp = None
 exit_reason = "timeout"
 try:
@@ -395,6 +401,36 @@ try:
                           flush=True)
                 except Exception as e:
                     print(f"[fire] t={el}s mousemove error: {e}", flush=True)
+        # --clickprobe 900: abs-move to a point inside the probe xterm's
+        # body (480,380 screen -> device coords 12288/15564), then a
+        # left-button press + release, all in one input-send-event (QEMU
+        # applies the event list in order, so the click lands exactly
+        # there). Pairs with --keyprobe (type after): a click inside a
+        # window is what GNOME's click-to-focus needs, so the follow-up
+        # keystrokes land in the window's text field (r14live proved
+        # pointer+key kernel delivery but the unfocused xterm ate no
+        # glyph).
+        while clickprobe and el >= clickprobe[0]:
+            ct = clickprobe.pop(0)
+            if qmp:
+                try:
+                    r = qmp.cmd("input-send-event", events=[
+                        {"type": "abs", "data": {"axis": "x",
+                                                 "value": 12288}},
+                        {"type": "abs", "data": {"axis": "y",
+                                                 "value": 15564}},
+                        {"type": "btn",
+                         "data": {"down": True, "button": "left"}},
+                        {"type": "btn",
+                         "data": {"down": False, "button": "left"}}])
+                    if isinstance(r, dict) and "error" in r:
+                        print(f"[fire] t={ct}s click QMP error: "
+                              f"{r['error'].get('desc')}", flush=True)
+                    else:
+                        print(f"[fire] t={ct}s click abs(480,380)+left "
+                              f"press+release sent", flush=True)
+                except Exception as e:
+                    print(f"[fire] t={ct}s click error: {e}", flush=True)
         if qmp and el >= (dump_i + 1) * args.dump_every:
             dump_i += 1
             shot = os.path.join(OUT, f"shot-{el:04d}s.ppm")

@@ -23,8 +23,8 @@
 
 | | |
 |---|---|
-| ![Ubuntu GNOME login](docs/images/ubuntu-gnome-login-2026-10-15.png) | ![Ubuntu GNOME desktop](docs/images/ubuntu-gnome-desktop-2026-10-15.png) |
-| *Ubuntu GNOME login screen on Rux (riscv64) — verify.py 23/23 PASS* | *Ubuntu GNOME desktop on Rux (riscv64) — the full udesk session with dock, panel, and apps* |
+| ![Ubuntu GNOME login](docs/images/ubuntu-gnome-login-2026-10-15.png) | ![GNOME Shell desktop frame](docs/images/ubuntu-gnome-shell-frame-2026-10-27.png) |
+| *Ubuntu GNOME login screen on Rux (riscv64) — verify.py 23/23 PASS* | *GNOME Shell desktop on Rux (riscv64) — run gnome-r13walk2, the first full-form shell frame: Activities pill + clock panel, a gsd → shell notification banner, an X client window (xterm) painting its `root@rux:/#` prompt, and the pointer sprite. Evidence is deterministic (frame pixel-diff + per-window XGetImage walk), reproduced in 3 boots, and an attribution A/B (old kernel, same image, calm host: screen never lit) pins the unblock to the kernel merge-set. The session is pointer-interactive: an injected absolute-positioning event moves the on-screen cursor to the exact commanded coordinates (r14live)* |
 
 ### OpenHarmony — support status
 
@@ -96,8 +96,13 @@ What is running in these screenshots, all on the Rux kernel:
   fixed (filesystem AF_UNIX sockets are now keyed by inode identity,
   so `/run` / `/var/run` aliases name the same socket, and a full
   listen backlog blocks like Linux instead of returning ECONNREFUSED).
-  On-screen GNOME bring-up continues (see the
-  [Roadmap](docs/progress/roadmap.md))
+  The shell now composites on screen on riscv64 — panel, clock,
+  notification banners and client windows paint (first full-form frame
+  2026-10-27, reproduced in 3 boots, zero panics in 2700 s runs), and
+  pointer input moves the cursor to commanded positions end to end
+  (virtio-input events are now drained on the device interrupt, waking
+  poll/epoll waiters — Xorg's input thread included). See the
+  [Roadmap](docs/progress/roadmap.md) for the remaining bring-up items.
 
 ### Try it
 
