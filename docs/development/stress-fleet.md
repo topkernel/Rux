@@ -1616,6 +1616,40 @@ RUNNING at pc=0x10000, heal/underflow 64/64). Code-level analysis:
 - Chains (ww-s2/wwload): down since the s10 home move, not restarted
   (no mission item; old-home artifacts preserved untouched).
 
+### NEW CATCH (kernel, main 0f806d8b): perf REGISTRY multi-CPU spin stall — allocations under spinlocks in softirq context
+
+fsfuzz r268 — the FIRST FULL ROUND of the perf_event_open fuzz arm —
+wedged at ~beat 43776 (~12 min in, right after FSFUZZ-PERF ok=4608):
+
+    DEADLOCK: spinlock stuck cpu=1 lock=0xffffffff808808b8 (= rux::perf::REGISTRY) x67
+    DEADLOCK: spinlock stuck cpu=0 lock=0xffffffd603f15218 (heap-range dynamic lock) x67
+    ra=RawSpinlock::lock on both; 134 watchdog prints until timeout;
+    beat stream stopped cold (serial "growth" = the watchdog printer).
+
+Taskdump at the wedge: pid 1 (fuzzer) preempt=259 (SOFTIRQ|PREEMPT)
+and the cpu1 idle task preempt=257 — BOTH CPUs inside timer-softirq
+processing (softirq_tick runs on whatever task the tick interrupted).
+
+Code defect (kernel/src/perf/mod.rs): softirq_tick holds
+REGISTRY.lock_irqsave() across the whole event iteration and inside
+that section (a) takes ev.inner.lock(), (b) calls to_wake.push() — a
+VEC ALLOCATION UNDER REGISTRY; push_sample grows the ring VecDeque
+inside ev.inner — ALLOCATION UNDER inner; register()'s reg.push()
+allocates under REGISTRY on the open path. Under the fuzzer's
+standing heap-pressure class (the ENOMEM/EMFILE storms; the 128MB
+kernel heap crawls), every under-lock allocation enters the allocator
+slowpath while the other CPU spins on REGISTRY/inner — a
+watchdog-tripping multi-CPU spin stall, 67/67 alternation.
+
+Fix direction (perf owner): no allocation inside any spinlock section
+reached from softirq/irq context — to_wake as a fixed array (events
+are few), ring capacity preallocated at open (RING_CAP becomes the
+reserved capacity so push_sample never grows), registry pre-reserved
+or a fixed table. Evidence:
+run/fleet/evidence/2026-10-28-s13-perf-registry-deadlock-{rootnotes.txt,
+fsfuzz-r268-serial.log}. The member doubles as the standing repro
+(classify WATCHDOG= + lock=0xffffffff808808b8).
+
 ### Next-session queue
 
 1. ltp-b instrument: grep 'when=slot' — a capture names the producer
@@ -1626,8 +1660,10 @@ RUNNING at pc=0x10000, heal/underflow 64/64). Code-level analysis:
 2. PREEMPT-UNDERFLOW volumes on ltp-a (clean kernel) vs ltp-b
    (instrument) — rate comparison; the memstorm rwlock face and
    dirstorm parked face continue as wide capture.
-3. fsfuzz perf arm: first full-day accumulation (PERF census, chaos
-   classes); perf ABI divergences await the perf lane's call
+3. fsfuzz perf arm: the REGISTRY spin-stall catch goes to the perf
+   owner (fix: no allocation under REGISTRY/inner in softirq paths);
+   after the fix, resume first-full-day accumulation (PERF census,
+   chaos classes); perf ABI divergences await the perf lane's call
    (flag-bit encoding + blocking read).
 4. Monkeys: monkey-b past 500MB growth panic-free closes the formal
    criterion; heap-growth curve continues.
