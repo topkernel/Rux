@@ -120,6 +120,18 @@ pub unsafe fn uart_write(buf: *const u8, count: usize) -> isize {
             }
         }
         idx = end;
+        // leg-32B (WAKE-STRANDED strand family): a console burst is
+        // hundreds of back-to-back chunks (~2.8 ms each at 115200 THRE
+        // pacing) in ONE task context. With no IRQ-exit preemption the
+        // writer monopolizes its CPU for the whole burst — sc326B/
+        // sc328B stranded every other runnable task 1-13.8 s behind
+        // hilogd's serial mirror (the recurring strand incumbents,
+        // pc!=0, tp=-confirmed). Between chunks the console lock is
+        // dropped and we are in plain task context — a cond_resched
+        // point per the 2026-10-20 discipline (the teardown sweeps got
+        // theirs; this loop did not). 32-byte marker atomicity is
+        // unchanged: the lock is still held across each whole chunk.
+        crate::sched::cond_resched();
     }
     count as isize
 }
