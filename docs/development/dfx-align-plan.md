@@ -562,7 +562,7 @@ scheme rests on, verified by the reboot cycle itself.
   Fix: `__x86_64_start` zeroes `__sbss..__ebss` before
   `early_boot_init` (rep stosq; the boot.S handoff words live in
   `.boot.data`, not `.bss`). This is the kernel's own job on the
-  Linux boot protocol — Linux `startup_64` does the same — and the
+  reference boot protocol — reference `startup_64` does the same — and the
   riscv64 `boot.S` has always done it. Every x86_64 reboot path
   (`panic=`, sysrq b, kreset) was broken by the stale BSS, not just
   pstore.
