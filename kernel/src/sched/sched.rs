@@ -3852,7 +3852,15 @@ pub fn wake_up_enqueue(task: *mut Task) -> bool {
         // and the pick_pass_seq stamp are ordered with every pick pass.
         // A busy or unnamed ti_cpu makes no idle promise — drop any
         // stale reservation instead.
-        if linked_ok {
+        //
+        // Gated on a LEGITIMATE wake state (the entry read `st`):
+        // phantom-heal re-links (RUNNING shapes from the R56 harvester
+        // and the R46/R49 heals) reach this same tail, but NO resched
+        // IPI follows them — stamping there could reserve the task for
+        // a WFI CPU with no interrupt coming. Heals make no placement
+        // promise; placement state from an earlier wake expires on its
+        // own (the hinted CPU's next pass).
+        if linked_ok && (st.is_sleeping() || st.contains(TaskState::STOPPED)) {
             let ipi_cpu = (*task).ti_cpu();
             let ipi_idle = ipi_cpu >= 0
                 && (ipi_cpu as usize) < MAX_CPUS
