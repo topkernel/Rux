@@ -1,0 +1,101 @@
+s12 ROOT CAUSE + FIX: s11 fsfuzz kernel-heap exhaustion — sys_pipe2
+aborts leak the Arc<Pipe> + 64KB ring (one 128KB buddy block per call)
+=======================================================================
+
+Succession note: this session picked up mid-hunt after the 20:00 quota
+kill (last commit 51a7a6c7, 3 kernel files dirty with TEMP-DIAG
+counters, test/forkwait_leak.c untracked, 5 uncommitted fwl boot logs
+already on disk). The predecessor's field work was complete enough to
+close the case from its own artifacts; this file records the chain.
+
+THE CATCH (s11, evidence 2026-10-27-s11-heapexhaustion-fsfuzz.txt)
+-----------------------------------------------------------------
+Every fixed-probe fsfuzz round r8-r108+ on kernel f75a24b2 exhausted
+the 128MB kernel heap: ALLOCTHROW size=65537 align=1 then 2048/8192/
+2686, free=0-64K, pid1 SIGKILL by the task-context defense, some
+rounds a second throw in irq context. Census at death: ~3194 "live"
+raw allocations averaging ~41KB.
+
+FINGERPRINT ARITHMETIC (death dump, second MEMLIVE)
+---------------------------------------------------
+  live=785 a=1565 f=780  sz=65537   <- pipe rings   785*128KB = 98.8MB
+  live=722 a=2544 f=1822 sz=4096    <- mixed 4KB
+  live=654 a=688  f=34   sz=2088    <- SignalStruct (artifact, see below)
+  live=654 a=688  f=34   sz=11064   <- Task         (artifact, see below)
+  live=64  a=688  f=624  sz=131072  <- kernel stacks, 64 = baseline set
+  live=15/16          sz=786432
+65537 = 64KB ring + 1 (pipe.rs PipeBuffer::new ring_len = capacity+1).
+Rings are buddy blocks (dump ptrs 0x20000-strided): each leaked ring
+pins a full 128KB. 785 * 128KB ~= 98.8MB — the exhaustion is the rings.
+
+ROOT CAUSE
+----------
+create_pipe() (fs/pipe.rs) stores the ENTIRE Arc<Pipe> ownership as two
+raw pointers (Arc::into_raw) inside the end Files' private_data; those
+refs are consumed ONLY by pipe_file_close (the PIPE_OPS close op), and
+File::drop runs that op solely once a close_fd committed it
+(close_pending flag, R31-B3 discipline). sys_pipe2 (syscall/io.rs)
+called create_pipe() BEFORE any fd work; every error return between
+creation and install — alloc_fd() None x2 (the EMFILE storm), fdtable
+gone, install_fd failure — dropped the local Arc<File>s with
+close_pending == false, so the close op never ran and BOTH raw Arc<Pipe>
+refs (and the ring) leaked per failed call. fsfuzz's stream holds fds to
+EMFILE then keeps calling pipe(): ~800 failed calls per round x 128KB =
+the whole heap.
+
+The codebase already had the right idiom everywhere else — epoll/
+signalfd/eventfd/timerfd reclaim their raw private_data on alloc_fd
+failure, unix_socketpair unwinds through close_file_fd. sys_pipe2 was
+the one path that forgot; the s11 note "sys_pipe2's EMFILE paths were
+audited clean" was written before the ring site was isolated and is
+superseded by this file.
+
+MINIMAL REPRO (test/forkwait_leak.c, leg 2, kernel f75a24b2)
+------------------------------------------------------------
+Fill the fd table with dup() (1021 fds), then 100 pipe() calls — all
+fail EMFILE. MEMLIVE ring site (all dumps, all 5 pre-fix boots):
+  lsite live=100 a=100 f=0 b=12 sz=65537     <- 100% leak, deterministic
+
+LEG-1 ADJUDICATION: Task/SignalStruct "leak" is an ACCOUNTING ARTIFACT
+-----------------------------------------------------------------------
+The same dumps showed live=654/688 Task (11064B) + SignalStruct (2088B)
+with only 34 freed, while kernel stacks (131072B) freed exactly
+(f=624, live=64 = baseline). The predecessor's last counter boot
+(fwl-cnt, TEMP-DIAG counters, 3000 forks) settled it:
+  RLS-CNT n=3000 pid=3304      release_task entered for EVERY child
+  RLS-EXTRA-REF: 0             refcnt was exactly 1 at every final put
+  TPUT-FREE-CNT n=3000         every freeing put ran
+  TSLOT-DEALLOC-CNT n=3000     alloc::dealloc ran for every Task
+yet MEMLIVE showed f=782. The shadow table (PAGE_SITE per-page marks)
+drops a free's attribution when the first page's mark is 0: packed
+sub-page blocks (11KB Tasks, 2KB SignalStructs) share pages, a
+neighbor's free clears the shared mark, the next free is silently
+unattributed. Page-aligned sites (128KB stacks) attribute exactly.
+No task-lifecycle leak; the TEMP-DIAG counters were reverted. A real
+task leak would still be caught by this probe (leg 1 stays in).
+
+FIX
+---
+fs/pipe.rs: abort_uninstalled_end(file) — run the close op on a
+never-installed pipe end via Arc::get_mut (sole-ref proof) before the
+Arc drops; abort_pipe_creation(read, write) closes both.
+syscall/io.rs sys_pipe2: all four pre-install error returns (fdtable
+gone, alloc_fd x2, install_fd(read)) now abort through it; the
+install_fd(write) failure keeps its correct read-end unwind
+(drop + close_fd, which runs the op on the last ref) and additionally
+aborts the write end. Success path, EFAULT tail (fds installed ->
+close_fd x2), and the pipe data path are untouched.
+
+VERIFICATION (kernel 140acd4b, branch stress-fleet-2)
+-----------------------------------------------------
+fwl-fix1 boot (init=/test/forkwait_leak dfx=periodic,memwatch,watchdog,
+3000 forks + 100 EMFILE pipes + 80s park), run/fleet/logs/
+fwl-fix1-serial.log:
+  ring site:  live=0 a=100  (all three dumps)   [was live=100 f=0]
+  Task site:  live=2140 a=3000 (steady, artifact level as adjudicated)
+  panics/OOM/ALLOCTHROW: 0; FWL-PASS; clean power-down
+fsfuzz-fix1 round (fleet-fsfuzz-rootfs, 1800s): full beat stream past
+42k beats, zero ALLOCTHROW/panic — pre-fix kernels died EVERY round
+(r8-r108+ census; classifier now flags this CRITICAL).
+ltp-fix1 sweep round + unit suite: session-12 gate numbers in
+docs/development/stress-fleet.md.

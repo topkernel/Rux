@@ -218,6 +218,8 @@ can be measured, and it is a compat hole in its own right
 and runs the full probe — orphan_file absence is exonerated; the
 trigger is has_journal absence itself (mount succeeds, journal_ino==0
 skips init_journal, but no mkfs-written path resolves afterward).
+Leg-46 status: the fs fix has NOT landed on main as of 129a41fa; the
+J-vs-NJ re-comparison stays queued on it.
 
 **Arm-2 semantics note (leg 44) — what must be true before a lazy
 revoke can be coded.** Current state, with the exact shapes:
