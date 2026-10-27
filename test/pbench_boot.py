@@ -56,7 +56,8 @@ def build_probe(out, src=None):
     return True
 
 
-def build_image(img, probe, arm=None, nojournal=False, mkfs_features=None):
+def build_image(img, probe, arm=None, nojournal=False, mkfs_features=None,
+                arm_name="arm"):
     staging = os.path.join(WORK, "pbench_root")
     if os.path.exists(staging):
         shutil.rmtree(staging)
@@ -64,8 +65,8 @@ def build_image(img, probe, arm=None, nojournal=False, mkfs_features=None):
     shutil.copyfile(probe, os.path.join(staging, "test", "pbench"))
     os.chmod(os.path.join(staging, "test", "pbench"), 0o755)
     if arm:
-        shutil.copyfile(arm, os.path.join(staging, "test", "arm"))
-        os.chmod(os.path.join(staging, "test", "arm"), 0o755)
+        shutil.copyfile(arm, os.path.join(staging, "test", arm_name))
+        os.chmod(os.path.join(staging, "test", arm_name), 0o755)
     # --nojournal (leg 44, F4 arm-1): mkfs WITHOUT has_journal so the fs
     # rows exercise the no-journal path (route-1 null-journal handle
     # deferral) — the OH/GNOME userdata image class. The standing
@@ -110,6 +111,20 @@ def main():
                     help="leg 45: full -O feature string for the probe "
                          "rootfs (feature-bisect repros; overrides "
                          "--nojournal when given)")
+    ap.add_argument("--long-p5", default=None, metavar="MODE",
+                    choices=["cold", "warm", "pin"],
+                    help="leg 46: stage the p5long wrapper and boot it as "
+                         "init — pbench runs duration-bounded p5c2/p5c3 "
+                         "windows with serial markers (pair with "
+                         "--append-extra dfx=wwcensus so the WW heartbeats "
+                         "bracket the windows). cold = windows only; warm = "
+                         "the board's p5 section first (regime driver), "
+                         "then windows + pinned spread/samecpu variants; "
+                         "pin = the serialized-cycle discriminators "
+                         "(samecpu read 64K/4K, samecpu recvfrom, spread)")
+    ap.add_argument("--append-extra", default=None,
+                    help="leg 46: extra kernel cmdline tokens appended "
+                         "to -append (e.g. 'dfx=wwcensus')")
     args = ap.parse_args()
 
     os.makedirs(WORK, exist_ok=True)
@@ -127,8 +142,21 @@ def main():
         if not build_probe(arm, src=os.path.join(HERE, "pbench_arm.c")):
             return 2
         init_path = "/test/arm"
+    if args.long_p5:
+        # leg 46: stage the wrapper as an extra image file and boot it
+        # (the probe itself is still staged — the wrapper execve's it).
+        # Staged NAME selects the mode (p5long -> longp5,
+        # p5longwarm -> longp5warm, p5longpin -> longp5pin).
+        arm = os.path.join(WORK, "p5long")
+        if not build_probe(arm, src=os.path.join(HERE, "p5long.c")):
+            return 2
+        staged = {None: "p5long", "cold": "p5long",
+                  "warm": "p5longwarm", "pin": "p5longpin"}[args.long_p5]
+        shutil.copyfile(arm, os.path.join(WORK, staged))
+        init_path = "/test/" + staged
     if not build_image(img, probe, arm, nojournal=args.nojournal,
-                       mkfs_features=args.mkfs_features):
+                       mkfs_features=args.mkfs_features,
+                       arm_name=os.path.basename(init_path)):
         return 2
 
     serial = os.path.join(WORK, "pbench-%s-serial.log" % args.tag)
@@ -136,6 +164,8 @@ def main():
         os.remove(serial)
 
     append = "root=/dev/vda rw init=%s console=ttyS0" % init_path
+    if args.append_extra:
+        append += " " + args.append_extra
     cmd = [QEMU, "-M", "q35", "-accel", args.accel, "-cpu", "max",
            "-m", args.mem, "-smp", str(args.smp),
            "-display", "none",
