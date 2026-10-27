@@ -1863,3 +1863,103 @@ Next-session queue (s14 close):
 3. Resume modchurn/monkeys when the floor relaxes; monkey-b formal
    500MB criterion pending.
 4. vmscan file-lru question still queued (s13 item 4).
+
+## Session 15 (2026-10-28 06:44-...) — intake repair + NEW CATCH (munmap length-wrap panic); A2 idle-mark theory REFUTED by r6; s15 WW4 instruments live
+
+Intake: the 04:27 fleet relaunch ran FOUR of six members (dirstorm/
+dirtyscan/fsfuzz/ltp-b) from the OLD fleet home
+(/home/william/workspace/Rux/run/fleet — its images/ dir no longer
+exists), so every round died at QEMU start and ltp-b canary r4 — the
+A2 watch — never ran; only memstorm/ltp-a (relaunched from the correct
+worktree home) advanced (r19-r23 / r18-r22). One stale debug boot from
+the dead session (thread=single, no roundtag, 188MB) also lived on.
+All killed by own PIDs; ltp-b relaunched correctly at 06:49 (r4).
+
+### NEW CATCH: munmap length-wrap panic (ltp-a r22, CLOSED at code level, 7d4b4dba)
+
+ltp-a r22 (main 0f806d8b image, sweepstart=519) died to
+`attempt to add with overflow` at arch/riscv64/mm/mm_ops.rs:594 right
+after `BIGMUNMAP pid 1203 addr 0x0 len 0xfffffffffffff000` —
+madvise02's full-range cleanup munmap. The page-round
+`size + PAGE_SIZE_USIZE - 1` evaluates `(size + 4096) - 1`; any user
+length within one page below usize::MAX wraps the add — debug panics
+here, release wraps and survives only by accident via the R7-1 checked
+end bound. The s12 wrap fix covered seven round-ups in
+syscall/memory.rs; munmap rounds one layer deeper (mm_ops) and was
+missed. munmap_legacy (same pattern) is dead code, no callers. Fix
+(7d4b4dba): checked round-up on both arches → EINVAL, matching
+Linux's `len > TASK_SIZE - addr` rejection. Joins the wrap family
+(msync ec87f42b, madvise b42a392b). Dual-arch builds rc=0 (riscv64
+md5 19de1371, x86 bzImage 16MB). Deterministic replay reproduced the
+exact r22 BIGMUNMAP sequence (pids 433/441/469/477/594 line-for-line)
+and ran 2423 lines / mq_timedreceive01 panic-free before being shed
+in the floor event; the madvise02-reaching rerun + make test queued
+(floor window). Evidence:
+run/fleet/evidence/2026-10-28-s15-munmap-wrap-panic/.
+
+### s15 instruments (06d743c4) — WW4 line, rolled fleet-wide
+
+WW_IDLE_PHASE per-CPU idle-loop phase stamps (1=entering-schedule
+2=marked+R20-2-recheck 3=pre-WFI 4=inside-WFI 5=post-WFI), per-CPU
+tick-entry tp-vs-slot mismatch census (slotmm), WW_TICK_IRQ now
+increments on riscv64 (the x86 twin was the only one — WW2
+ticks=[0,0] was a probe gap; smoke shows ticks=[93,102] with
+phase=[4,4] idle, zero panics). New WW4 heartbeat line under
+dfx=wwcensus. NOTE: phase=1 is ambiguous between "idle loop about to
+pick" and "idle task switched away long ago" — discriminate against
+WW3 slot pids (real pid = CPU busy; the idle loop is not executing).
+Kernel md5 19de1371 rolled to BOTH fleet-rv64-instr-rux (ltp-b) and
+fleet-rv64-rux (ltp-a) at the r5/r24 boundaries (r5 had launched 20s
+prematurely on the old image; killed its QEMU so the loop rolled r6
+immediately — one 20-second wasted round).
+
+### r3/r4/r6 canary harvest
+
+- Family B (bracket-split bookings): two-round NULL solid. r3: 122
+  LEAK-ORIGIN, 397/400 of them pid=0 idle-tick in-flight (pctick=0,
+  rip=wfi — the tick sampling idle inside its own bracket;
+  held_nonzero_for grows because pid=0 keys both CPUs); the 3
+  real-task prints adjudicated in-flight too (tick interrupting a
+  spinlock holder at spinlock.rs:292 and a buddy alloc at
+  buddy.rs:737 — the tick's own execution). Zero IRQ-PAIR-SPLIT in
+  any round. The s13 slot-rewrite producer theory stays rejected.
+- A1 (affinity) holds on every post-fix round: why=3 = 0.
+- **A2 idle-mark/WFI theory REFUTED by r6** (the round the WW4
+  instruments landed): 399/399 msg-region strand lines coincide with
+  idle mask 0x0, phase=[1,1], grq=410-418 CFS-RUNNABLE, both WW3
+  slots on REAL pids, need_resched mask 1-3 (set). There IS no idle
+  CPU at strand time — find_idle_cpu has nothing to miss; the "box
+  waits for the next 1s-class event" shape is queue latency plus the
+  pick walk refusing on_cpu-marked candidates (why=1: mid-switch-out
+  transient or stale mark; the 50-jiffy stale-mark confirm window =
+  0.5s, ~2x = the ~1s strand grid; strand_max 4727ms also matches
+  the fair-queue bound for 418 runnable / 2 CPUs). SKIPHIST stays
+  empty (strand victims never refused by the walk they appear in).
+  The surviving producer is the R85 pick-side family (why=1/2 legs,
+  143+21 in r4) under deep-queue churn; the s14 candidate stands —
+  pick-side heal window tuning — and is a sched-domain change
+  needing full gates (census band, pbench P2/P5 ±20%).
+
+### Floor event + semantics change
+
+Mid-session the coordinator flagged free=6G (old free-column rule);
+shed the repro boot + make-test QEMU plus everything not on the
+keep-list (canary pair + fsfuzz + sweeper). Floor semantics then
+changed to available>=10G (buff/cache 40G made the free column
+uninformative; available never dropped below 42G all session).
+Regrown under the new reading: repro3 (munmap verification), make
+test rerun, memstorm r24.
+
+### Fleet state / queue (s15 close)
+
+- ltp-b r6 (19de1371, START=660, full instruments + WW4) — A2/pick
+  watch live; ltp-a r24 (same binary, control); fsfuzz r272 (perf
+  arm standing; main 584c1105 still carries NO perf fix — closure
+  stays blocked on the DFX lane); memstorm r24.
+- Queue: (1) repro3 + make test → message ready-for-merge for
+  7d4b4dba (+ 06d743c4 probes + 7e9d2ad0 chain already gate-ready);
+  (2) ltp-b r7+: WW4 census across more msg-region rounds — if
+  why=1 dominates again, hand the pick-side heal-window question to
+  the sched owner with the r6 numbers; (3) monkeys for monkey-b's
+  formal 500MB criterion when available allows; (4) vmscan file-lru
+  question still queued (s13 item 4).
