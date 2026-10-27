@@ -12,7 +12,7 @@
   three independent boots, zero panics; deterministic pixel math (XWALK
   window-tree walk: client drew, mutter composited, scanout showed).
 - **A/B attribution settled**: old kernel + same image + calm host = the
-  screen never lights; merged kernel = M5 three times — the unblocking
+  screen stays dark; merged kernel = M5 three times — the unblocking
   variable is the kernel merge-set, not host load.
 - **Input → screen closed (kernel-side)**: virtio-input had no IRQ
   handler and the only waker ran at drain time — pull-only event flow
@@ -23,10 +23,12 @@
   events land 1:1 in every run, and a typed key now renders in the focused
   terminal (echoed glyph, advanced cursor — per-window XGetImage evidence,
   reproduced across boots); the full typed-shell conversation (key echoed,
-  command answered, fresh prompt) is pixel-verified on one run so far — the
-  GNOME "something has gone wrong" dialog still collapses some sessions
-  around injected input, which is the current blocker for the ≥2-boot
-  interactive claim.
+  command answered, fresh prompt, block cursor) is pixel-verified on two
+  boots (r18type, r21type — identical line geometry and cursor cell per
+  the convcheck deterministic decoder) — the ≥2-boot interactive claim is
+  met. Remaining caveat: the GNOME "something has gone wrong" dialog
+  still collapses some interactive sessions (r15type, r19type), so
+  session survival under input is 2-of-4, not every boot.
 - Standing: LTP r15 = **1,005 / 1,869 (53.8%)**, trend 35 → 524 → 801 →
   945 → 1,005.
 
