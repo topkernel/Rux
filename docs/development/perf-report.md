@@ -1709,3 +1709,126 @@ FAIL in every fleet round); my run additionally PASSES rename01/03/04,
 rmdir01, unlink05/07/08 — rows a stressed fleet round (keep-ltp-a-r59)
 had failed — the mutation+epoch-bump paths (mkdir/mknod/unlink/rename/
 creat) and fork09's fdtable walk all hold with the cache in play.
+
+### 8.10.11 Leg 42 (2026-10-27): the branch-strong channel died at D-7 and is reborn — route-4's strong numbers banked off MAIN
+
+**The pa64 B-arm panic was the lane's own D-7 commit, and the fix is a
+revert.** Every release-profile branch kernel since d8d23064 (Oct 26
+07:23) panicked at t=3s: pa63-pair B arm twice, pa64 B arm twice. The
+signature is identical in every repro and in BOTH release shapes
+(strong LTO/CGU1: pa65d7; weak lto=false/cgu=16: pa65d7w2):
+`ALLOCTHROW size=48` at the alloc-error handler, c64 `a=15934402 f=0
+made=252928`, heap free=0K, last console line "slab allocator 4MB [ok]",
+death inside `cmdline::init_from`'s one String allocation. pages-made
+(252928) spans essentially the whole 1GB heap window; the panic (not the
+handler's task-SIGKILL arm) puts the failure in pre-task early boot;
+`-smp 1` panics identically (pa65d7s1), so it is not the AP path. A
+tight refill loop CAN account for 15.9M objects under TCG (the earlier
+"time-infeasible" first read was wrong — MTTCG runs a tight loop at
+near-native speed), so the leading model is: the magazine refill loop
+runs unbounded in release-opt builds, filling the heap with c64 objects
+before the first post-slab allocation. Debug boots clean and the suite
+passed (the D-7 verification ran debug-only — the hole this leg closes
+procedurally, below). Controls: parent 2a54e42c boots strong the FULL
+board (pa65d7p), pure main b7276078 boots strong the full board
+(pa65m1). Exact codegen mechanism unrooted (objdump follow-up queued on
+the non-LTO artifact run/pa64-d7weak-bzImage); evidence file
+run/pa64-d7-strong-break-evidence.txt; REVERTED as 95b0015f. Main is
+unaffected (D-7 was never harvested).
+
+**Protocol consequence (binding for this lane from now): any change
+touching mm/, sched/, sync/ primitives, or anything that runs pre-task
+gets ONE release-strong pbench boot before it is called verified.**
+Debug-only verification is exactly the hole D-7 fell through — opt-level
+0 masks the codegen-dependent behavior and every census/LTP/`make test`
+channel is debug-class.
+
+**Route-4's strong-profile numbers are banked off MAIN, closing the
+debt the pa64 pair was armed for.** Same-day adjacent windows, same
+channel (pbench_boot TCG MTTCG smp2/2G, minimal rootfs): 94c670da
+strong (pa64pb4A, load1=8) vs b7276078 strong (pa65m1, load1=13-14) —
+p6_getdents **1351.9 -> 570.9 us = -57.8%**; guards p6_write_fsync
+12598.9 -> 12808.3 (+1.7% at higher load), p6_append 77.2 -> 81.6
+(+5.7%), p6_mkdrmdir 65582 -> 71239 (+8.6%), p6_unlink 26912 -> 27653
+(+2.8%) — all guard deltas inside the load-noise class, and the LTP
+mutation-family spot (leg 39) already holds the correctness side. The
+route-4 cache delivers on the strong profile at the same magnitude the
+mechanism pair measured in volume (-42..-48% materializations).
+
+**Quiet-window confirmations (pa65main, launched at load1=2.4/qemus=1,
+window ended loaded ~11):** census TERM 8 / REFUSED 33 EXACT-class, ticks
+100.00/99.52, clock_gettime 3us, GRQ 5083ns, small_alloc REST 6.6% —
+all in band. **nanosleep avg 185.2 ms (n=26,901) IN BAND** — the second
+quiet-window reading after pa50main's 203 ms seed; the 174-333 ms
+cross-boot spread that made the row unbankable is resolved (both quiet
+windows land mid-band; the row stays enforced at 203 ms +-20%).
+**Syscall volume read 92.7M vs the 107.5M quiet band — third data
+point on the load-pace model** (107.5M at load1=0 throughout; 93.2M at
+load1 11-17; 92.7M quiet-launch->loaded-window; 77.1M under 14-19
+foreign QEMUs): volume-in-window stays load-gated-only, never enforced
+outside a quiet window.
+
+**D-6 slice 2 (83fe7e58):** the generic VFS tables (REG_FILE_OPS,
+REG_RO_FILE_OPS, DIR_FILE_OPS) convert to the capability builder with
+fileops-caps rows pinning all three matrices (1125 suite rows PASS).
+~49 struct-literal tables remain; opportunistic migration continues.
+
+**main 57e44a90 merged (8be8a315)** after the revert: dual-arch builds
+rc=0, suite 1119 PASS, rv64 minimal-rootfs shell smoke 0 panics.
+Main-side deltas now riding the branch: O_APPEND write atomicity
+(57e44a90 — the p6_append re-verify row), msync-wrap EINVAL (ec87f42b),
+ext4 dir-entry serialize (81fa78af — carries a potential mkdrmdir
+cost), PICK-PC-ZERO sched fix, exit/reparent fixes. The pa66 pair
+(A = 57e44a90 strong vs B = branch strong, interleaved A,B,B,A) armed
+at run/pa66-pair.sh; B arm completes a full board again — the
+branch-strong channel is RESTORED. [Pair medians table appended at
+completion below.]
+
+**Scoped-publication draining landed on main (0cd29a75) DURING this
+leg**: the fsync whole-queue drain collapse is now measurable — merge
++ one fsync-focused strong pair queued next (write_fsync is the closest
+L1 row at 2.7x; re-bank the row per the standing instruction).
+
+**pa66 pair medians (leg 42, 2026-10-27, 4/4 boots rc=0, TCG MTTCG
+smp2/2G, loads 11-17; A = pure main 57e44a90 strong, B = branch
+8be8a315 strong):**
+
+| row | A{1,4} | B{2,3} | verdict |
+|---|---|---|---|
+| p1_null | 0.661, 0.671 | 0.611, 0.671 | flat |
+| p2_ctxsw | 1.548, 2.625 | 1.634, 1.602 | A bimodal across its own boots; B tight — p2 re-verify: all readings in the pa41-strong 1.383 +-load class, row verified |
+| p3b_fault_cow | 3.127, 3.106 | 3.117, 2.974 | flat |
+| p4_fork_exit | 444.4, 458.2 | 662.9, 649.9 | OPEN ITEM (below) |
+| p4_fork_exec | 1616, 1650 | 1941, 1827 | same shape as fork_exit, +15% |
+| p5a_pipe | 3.067, 3.177 | 3.007, 2.844 | flat |
+| p5b_dgram_send | 41.14, 7.10 | 5.29, 5.12 | regime-split (see text) |
+| p5b_recv_peek | 41.25, 7.27 | 4.82, 4.73 | regime-split |
+| p5c_stream_write | 41.91, 44.74 | 40.72, 40.76 | flat |
+| p6_stat | 15.67, 16.50 | 15.61, 16.62 | flat |
+| p6_openclose | 26.98, 28.64 | 27.10, 27.76 | flat |
+| p6_getdents | 576.1, 560.9 | 566.3, 587.9 | flat — route-4 guard holds on the branch stack |
+| p6_read_cached | 37.49, 37.91 | 37.03, 39.57 | flat |
+| p6_write_fsync | 14667, 13398 | 12752, 13763 | flat in the 12.7-14.7ms spread |
+| p6_append | 91.5, 105.2 | 95.2, 139.1 | A spread covers B2; B3 the outlier — pa67 pair adjudicates against the O_APPEND/bio deltas |
+| p6_mkdrmdir | 72968, 68646 | 60286, 73118 | flat inside the +-10% class |
+| p6_unlink | 27838, 28342 | 27911, 29074 | flat |
+
+p5b verdict (direction, not magnitude): B read the 5-class in BOTH
+boots (5.1-5.3 send / 4.7-4.8 recv) while A spanned the documented
+host-regime bimodality (41.1 then 7.1); with pa65m1 (main, 5.03) and
+pa64pb4A (main, 39.7) both regimes exist main-side too, so today's
+-87% magnitude is regime-confounded — the bankable statement is "the
+socket-lever branch is consistently in the fast regime (4 boots
+incl. pa47's med-of-3), main flips". Focused regime-matched rerun
+stays queued.
+
+p4_fork_exit OPEN ITEM: B reads 650-663 in both boots vs A's 444-458
+(4-of-4 ordered) — but main WITH route-4 (pa65m1) reads 429 and the
+branch PARENT 2a54e42c (pre-route-4/D-6 branch stack) reads 420.9, so
+the same patches read low on main and high only on the full branch
+stack: an interaction (route-4's per-File cache meets the fork fd-copy
+path? wake/epoll empty-fast-path on the exit wake?) or a two-boot
+regime coincidence. 2 boots/arm is under the verdict bar — focused
+pair queued (main 57e44a90 vs main+route-4-only vs branch), not
+merge-blocking (the levers reach main individually, each with its own
+pair).
