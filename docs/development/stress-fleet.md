@@ -1176,10 +1176,25 @@ blocking-wait syscalls in a raw pool need bounded timeout draws.
 - OPEN: memwatch-instrumented fsfuzz boot for the growth curve;
   staging-path leak audit; decide heap-exhaustion policy for irq
   context (panic-by-design vs degrade).
+- heapwatch boot DONE (evidence/
+  2026-10-27-s11-heapexhaustion-fsfuzz.txt): clone-gate ENOMEM storm
+  from free~2.9MB, then ALLOCTHROW 65537 -> SIGKILL pid 1 -> second
+  throw (8192) -> klogd (2688) -> down. Census at death: ~3194 LIVE
+  raw allocations hold ~128MB (avg ~41KB each); small-alloc classes
+  hold only a few MB. The staging buffer is the VICTIM not the leaker
+  (RW_CHUNK staging is a properly-dropped local; 65537 is a len+1
+  capacity from elsewhere — site not yet pinned; rawframes did not
+  symbolize). NEXT: capture with dfx backtrace build; audit the
+  41KB-class live set (fork children x stack+fdtable, held pipes'
+  rings, length-derived buffers on raw-syscall paths).
 - Related old-home reminder: monkey-b r20/r24/r26 (stale sweep file)
   show the >500MB HEAP-GROW + KERNPANIC class on the x86 monkeys —
   same exhaustion family at a different scale; resumes with pstore
-  when the monkeys come back.
+  when the monkeys come back. Monkeys DEFERRED this session: host
+  load 16-21 with 23-25 foreign QEMUs (all lanes gate-booting) —
+  2x4G KVM members would breach the courtesy window; relaunch when
+  load1 drops (the 10G floor was never threatened, avail 40G
+  throughout).
 
 ### ec68f275 (madvise wrap -> EINVAL) merge-gate numbers
 
