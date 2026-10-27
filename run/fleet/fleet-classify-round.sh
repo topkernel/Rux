@@ -21,7 +21,13 @@ WARN=""
 # dumps' fault counters — e.g. ltp-a r22's writev03 dump — producing a
 # phantom OOPS=1 on clean v5/v7 rounds. Require kernel-mode phrasing.)
 kernpanic=$(grep -c "KERNPANIC" "$SERIAL" 2>/dev/null)
-oosp=$(grep -ciE "kernel oops|BUG: (soft|hard)|Unable to handle|page fault in (kernel|supervisor)|PANIC: trap" "$SERIAL" 2>/dev/null)
+# s11 gap fix: the ALLOCTHROW exhaustion path (kernel heap full) prints
+# "Kernel panic - not syncing:" / "PANIC: Allocation error" — neither
+# matched the old patterns, so ~100 fsfuzz rounds r8-r107 that each
+# exhausted the 128MB kernel heap read as WARN (FSFUZZ-ODD only). Any
+# ALLOCTHROW or panic line is kernel-side failure evidence.
+oosp=$(grep -ciE "kernel oops|BUG: (soft|hard)|Unable to handle|page fault in (kernel|supervisor)|PANIC: trap|Kernel panic - not syncing|PANIC: Allocation error" "$SERIAL" 2>/dev/null)
+alloct=$(grep -c "ALLOCTHROW" "$SERIAL" 2>/dev/null)
 canary=$(grep -c "WILDWATCH-CANARY" "$SERIAL" 2>/dev/null)
 heal=$(grep -cE "hpet: clock (base|div|offset) healed" "$SERIAL" 2>/dev/null)
 wdog=$(grep -ciE "watchdog.*trip|deadlock detected|spinlock.*stuck" "$SERIAL" 2>/dev/null)
@@ -32,6 +38,7 @@ wdog=$(grep -ciE "watchdog.*trip|deadlock detected|spinlock.*stuck" "$SERIAL" 2>
 usigill=$(grep -c "trap: user SIGILL" "$SERIAL" 2>/dev/null)
 [ "$kernpanic" -gt 0 ] 2>/dev/null && CRIT="${CRIT}KERNPANIC=$kernpanic "
 [ "$oosp" -gt 0 ] 2>/dev/null && CRIT="${CRIT}OOPS=$oosp "
+[ "$alloct" -gt 0 ] 2>/dev/null && CRIT="${CRIT}ALLOCTHROW=$alloct "
 [ "$canary" -gt 0 ] 2>/dev/null && CRIT="${CRIT}CANARY=$canary "
 [ "$heal" -gt 0 ] 2>/dev/null && CRIT="${CRIT}SCRIBBLE-HEAL=$heal "
 [ "$wdog" -gt 0 ] 2>/dev/null && CRIT="${CRIT}WATCHDOG=$wdog "

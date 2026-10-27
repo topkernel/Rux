@@ -1107,3 +1107,116 @@ begins with the saved-fd/clamped-timeout probe (test/fsfuzz.c, this
 session). Probe-design rule recorded: fuzz fd pools must never contain
 the marker-print channel's fd (the F_DUPFD-from-900 escape hatch), and
 blocking-wait syscalls in a raw pool need bounded timeout draws.
+
+## Session 11 (2026-10-27 17:57-...) — cold restart: fleet on main 488528dc, deep-park CLOSED (blocking-call), ec68f275 gates, heap-exhaustion catch
+
+### Restart and image decision (rebuild-vs-restore)
+
+- The 13:48 quota kill left the staged fleet images uncommitted at the
+  0cd29a75-era build (a46464fb/654ca5df, md5-verified against the
+  session-10 notes). Main had since gained D-6 slice 2 (VFS FileOps
+  capability builder), route-4 getdents cache, and wait/misc deltas, so
+  RESTORE was rejected: merged origin/main 488528dc as fe590453
+  (branch kernel delta vs that main = ec68f275's syscall/memory.rs
+  alone), dual-arch rebuilt rc=0, staged f75a24b2 (rv64) / 8383bb3e
+  (x86), committed ba1bfbce with the ltp-a-r3 wedge tail kept and the
+  retracted fsfuzz-r1 artifacts dropped. 150 s LTP smoke: 426 TPASS,
+  0 panics.
+- The fleet member processes survived the agent kill (setsid) and ran
+  until ~14:49 (r85 for fsfuzz) — the 16:46 resume never needed to
+  adopt, only relaunch. Wave 1 up: ltp-a r5+, dirstorm r22+,
+  dirtyscan r7+, fsfuzz r85+, memstorm r5+, modchurn r4+ + sweeper.
+- ltp-a r3/r4 CRITICALs adjudicated: known classes only (oom01
+  10-12 s soft-lockup, LTP OOM output strings, park=1 noise). r3 tail
+  re-confirms the session-9 open lead: file-lru[2] (inactive) is 93%
+  referenced (40243/43394) at the OOM point — the Referenced-flag
+  vmscan question stays open.
+
+### Deep-park adjudication: CLOSED as blocking-call (no kernel defect)
+
+- The gdbstub chase's answer was already on disk: repro2's dfx=taskdump
+  on the frozen guest (line 631) shows
+  `pid=1 state=INTERRUPTIBLE(sleep) comm=fsfuzz lastsys=22(0x0,0x1000)`
+  — syscall 22 = epoll_pwait, a0=0 (epfd 0), a1=0x1000 (maxevents):
+  the SAME valid-but-empty-epoll park signature as the root-caused
+  probe defect (the fd-3 marker-dup variant still landed the marker
+  channel within the fuzz pool's reach).
+- Negative control: with the F_DUPFD-900 + clamped-timeout probe, the
+  park never recurs — r8-r85 (~78 rounds pre-kill) plus r85-r99 on the
+  488528dc kernel, every round a full 55-beat stream, rc=0. A kernel
+  lost-wake on a bounded epoll_pwait would survive the probe fix; it
+  does not. BLOCKING-CALL, probe-defect class, closed.
+
+### NEW CATCH: kernel-heap exhaustion on EVERY fixed-probe fsfuzz round (r8-r108+)
+
+- Not a one-off. repro3 (13:24, kernel a46464fb) first showed the
+  chain; the live member then reproduced it EVERY round on the new
+  kernel (f75a24b2): r106/r107 ALLOCTHROW size=65537 align=1,
+  r108 size=2048, heap size=131072K free=0-64K, small-alloc live
+  objects only ~10k (a few MB) => the 128MB kernel heap is consumed
+  by RAW allocations; pid 1 SIGKILLed by the designed task-context
+  defense; ~most rounds then halt quietly (qemu exits rc=0 — that is
+  why rounds "ended" at 55 beats), occasionally a second ALLOCTHROW
+  in timer-irq context panics (repro3, r108).
+- HARNESS GAP FIXED (fleet-classify-round.sh): neither "Kernel panic -
+  not syncing:" nor "PANIC: Allocation error" matched the CRITICAL
+  patterns, so ~100 exhausting rounds r8-r107 read as WARN
+  (FSFUZZ-ODD). Now ALLOCTHROW=n and both panic phrasings are
+  CRITICAL; r106-r108 re-verify as CRITICAL.
+- Mechanism (narrowing): the stream holds fds until EMFILE (the ODD
+  storm, errno=24) — that caps pid 1 at ~1024 objects, which cannot
+  alone fill 128MB. The failing allocation size=65537 align=1 is the
+  read/write staging-buffer size class (io.rs "staging below costs an
+  alloc + 2 copies per op") — lead hypothesis: a raw read/write/pipe
+  transfer with a garbage user pointer EFAULTs mid-staging and the
+  ~64KB staging buffer leaks per call; ~2000 such calls = 128MB.
+  Candidate audit: kernel/src/syscall/io.rs staging paths + pipe
+  copy-in/copy-out EFAULT returns. sys_pipe2's EMFILE paths were
+  audited clean (Drop-safe, alloc_fd does not reserve slots).
+- OPEN: memwatch-instrumented fsfuzz boot for the growth curve;
+  staging-path leak audit; decide heap-exhaustion policy for irq
+  context (panic-by-design vs degrade).
+- Related old-home reminder: monkey-b r20/r24/r26 (stale sweep file)
+  show the >500MB HEAP-GROW + KERNPANIC class on the x86 monkeys —
+  same exhaustion family at a different scale; resumes with pstore
+  when the monkeys come back.
+
+### ec68f275 (madvise wrap -> EINVAL) merge-gate numbers
+
+- Dual-arch build rc=0 (x86_64 + riscv64); make test 1118/1118 PASS;
+  minimal-rootfs boot 0 panics (unit suite ran green as init, twice);
+  150 s LTP smoke 426 TPASS / 0 panics.
+- LTP madvise family vs the PRE-FIX fleet baseline (ltp-a r3/r4,
+  57e44a90 kernel, same 1081-row list indices):
+  madvise01 FAIL(2)->PASS, madvise02 FAIL(2)->FAIL(1) (remaining
+  TFAILs are the advice rows Linux-LTP expects to fail), madvise06/08
+  FAIL(2) unchanged (procfs gaps: drop_caches EACCES,
+  coredump_filter ENOENT), msync01-03 PASS, msync04/madvise07/09/11/
+  process_madvise01 TCONF (same as baseline). NO regressions; two
+  improvements. Method note: /test/sweep reads /test/sweep.list
+  (N|name|cat|cmd rows, indices preserved — pa48 convention), NOT
+  /test/linux-ltp/chunk.txt (that is ltpscan's file; first attempt
+  edited the wrong file and ran the full list).
+- Tier 1 (sf2g1, 780 s, KVM, host at 25 QEMUs / load ~14-25): PASS
+  panics=0, OOM=0, TERM-DESCHED=8, WAKE-REFUSED=32, clock_gettime
+  4 us, nanosleep 191.6 ms, GRQ hold 6955 ns (4080-7320 band),
+  small_alloc REST share 5.8% (<=10%). FAIL tick cpu1=99.45/s (the
+  documented one-CPU marginal flake under foreign-QEMU load) and FAIL
+  volume 82.1M vs 107.5M +-10% (load-gated row: pa41gate precedent
+  is a flat -35% at 14-19 foreign QEMUs with per-op costs held; our
+  per-op costs are all in band). Volume re-bank needs a load1<=9 /
+  qemus<=8 window — owed when the host calms.
+- Tier 2 (pbench, TCG, same loaded window): vs the pb1 anchor the
+  first branch boot read p2_ctxsw +71%, p6_append +70%, p6_write_fsync
+  +47%, p6_mkdrmdir +40% — but a pure-main 488528dc CONTROL boot under
+  the same load also missed the anchor on the same rows, and the
+  spread did not survive interleaving: a second pair (boots 3+4,
+  adjacent in time) collapsed every pair-1 fs delta to noise
+  (mkdrmdir +73.4% -> +1.4%, write_fsync +80.3% -> -1.1%, stat
+  +42.0% -> -7.1%, append +32.0% -> +0.4%, ctxsw -12.6% -> -4.0%).
+  Only p7_sleep1ms stays noisy (+119% on one boot) — pure host-jitter
+  row. VERDICT: branch (main 488528dc + ec68f275) is performance-
+  indistinguishable from pure main 488528dc within noise; ec68f275
+  (madvise range validation only, no pbench row calls madvise) shows
+  no measurable effect. Tier-2 PASS by paired A/B; anchor-relative
+  FAILs are host-load inflation common to both kernels.
