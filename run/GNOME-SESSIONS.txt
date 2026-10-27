@@ -664,3 +664,24 @@ were storm-inflated):
 - r15stab (2700s, dfx=watchdog,taskdump): panic/OOM read on the fixed
   kernel + mid-session input exercise (mousemove 900/1800, keyprobe
   1200/2100).
+
+### r15type verdict (2100s, 0 panics): KEYBOARD-INTERACTIVE, 1:1
+- M4 @1141s, M5 @1291s (5th M5 boot). INPTRC=38, kbd press+release
+  exactly 4 pairs = the 4 keyprobes, no phantom events between.
+- Click focus: clickprobe abs(480,380)+BTN_LEFT (INPTRC ptr code=272
+  press+release) — the xterm takes focus (GNOME click-to-focus).
+- Type: after the click, EACH 'a' lands in the xterm and dash answers
+  "root@rux:/# a" -> "a: command not found" -> next prompt. 3 keys at
+  shot-1740 -> exactly 3 prompt blocks; 4 keys at shot-2070 -> exactly
+  4 blocks + open prompt with block cursor (proof-type-3keys-2x.png,
+  proof-type-4keys-250pct.png). Full chain: QMP keystroke -> virtio
+  IRQ -> tasklet drain -> evdev buffer -> woken Xorg epoll -> focused
+  xterm -> pty shell -> exec -> rendered error text.
+- README caption raised to "interactive end to end" (pointer exact-
+  coords + click-focus + typed-shell-response); committed.
+
+### Session-idle observation (both live runs, not root-caused)
+- ~120s after the last input the session blanks to wallpaper + a
+  #204040 element (gsd-power idle blank class); a subsequent keystroke
+  did not visibly unblank in r14live. Cosmetic-level question for a
+  later leg (an interactive user would jiggle the mouse anyway).
