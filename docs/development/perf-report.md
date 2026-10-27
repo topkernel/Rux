@@ -1955,11 +1955,20 @@ wake shape, and whatever the stream path does that dgram only
 sometimes pays). Regime-matched rerun stays queued on that
 decomposition, not on more unlabeled boots.
 
-**Standing after this leg:** (1) socket-family p5c/p5b-regime
-decomposition probe (the 14x gap + the convergence clue above); (2)
-L1 F4 two designs armed in f4-ext4-route-map.md — no-journal
-identity-block deferral (route 1; GNOME-side, journal dormant j=0
-there) and the journaled mkdrmdir residual (per-rmdir revoke-forced
-synchronous commit; needs per-transaction revokes + reallocation
-cancel before it can go lazy); (3) Tier-2 gate anchor unchanged
-(pb1 DEBUG column).
+**Standing after this leg:** (1) the socket-family lever is
+DECOMPOSED — the p5c2/p5c3 rows (d07930f1) put the 35 µs in the
+CHILD'S read(2)-on-socket wrapper, not the send side or the stream
+transport (pa68p5c: p5c2 send+read-child 39.15/min 37.3 vs p5c3
+send+recv-child 4.77/min 2.4; phase wall 40.1 vs 20.2 s — half
+throughput with the read wrapper in the drain path). The fix lever is
+armed: pipe-style direct fast path for socket read/write in
+sys_read/sys_write + gating the always-built File::path() format that
+feeds pathstash (stash_file discards it when the switch is off, but
+the String is constructed per call before the check); same question
+applies to the p5b regime flipper (slow-regime p5b converges onto the
+p5c class); (2) L1 F4 two designs armed in f4-ext4-route-map.md —
+no-journal identity-block deferral (route 1; GNOME-side, journal
+dormant j=0 there) and the journaled mkdrmdir residual (per-rmdir
+revoke-forced synchronous commit; needs per-transaction revokes +
+reallocation cancel before it can go lazy); (3) Tier-2 gate anchor
+unchanged (pb1 DEBUG column).
