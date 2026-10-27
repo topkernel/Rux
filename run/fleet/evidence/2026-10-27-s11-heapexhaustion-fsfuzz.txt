@@ -1,0 +1,1631 @@
+
+OpenSBI v1.8
+   ____                    _____ ____ _____
+  / __ \                  / ____|  _ \_   _|
+ | |  | |_ __   ___ _ __ | (___ | |_) || |
+ | |  | | '_ \ / _ \ '_ \ \___ \|  _ < | |
+ | |__| | |_) |  __/ | | |____) | |_) || |_
+  \____/| .__/ \___|_| |_|_____/|____/_____|
+        | |
+        |_|
+
+Platform Name               : riscv-virtio,qemu
+Platform Features           : medeleg
+Platform HART Count         : 2
+Platform HART Protection    : pmp
+Platform IPI Device         : aclint-mswi
+Platform Timer Device       : aclint-mtimer @ 10000000Hz
+Platform Console Device     : uart8250
+Platform HSM Device         : ---
+Platform PMU Device         : ---
+Platform Reboot Device      : syscon-reboot
+Platform Shutdown Device    : syscon-poweroff
+Platform Suspend Device     : ---
+Platform CPPC Device        : ---
+Firmware Base               : 0x80000000
+Firmware Size               : 333 KB
+Firmware RW Offset          : 0x40000
+Firmware RW Size            : 77 KB
+Firmware Heap Offset        : 0x49000
+Firmware Heap Size          : 41 KB (total), 0 KB (reserved), 12 KB (used), 27 KB (free)
+Firmware Scratch Size       : 4096 B (total), 1464 B (used), 2632 B (free)
+Runtime SBI Version         : 3.0
+Standard SBI Extensions     : ipi,pmu,srst,sse,hsm,rfnc,fwft,time,base,legacy,dbcn,dbtr
+Experimental SBI Extensions : none
+
+Domain0 Name                : root
+Domain0 Boot HART           : 0
+Domain0 HARTs               : 0*,1*
+Domain0 Region00            : 0x0000000080040000-0x000000008005ffff M: (F,R,W) S/U: ()
+Domain0 Region01            : 0x0000000080000000-0x000000008003ffff M: (F,R,X) S/U: ()
+Domain0 Region02            : 0x0000000000100000-0x0000000000100fff M: (I,R,W) S/U: (R,W)
+Domain0 Region03            : 0x0000000010000000-0x0000000010000fff M: (I,R,W) S/U: (R,W)
+Domain0 Region04            : 0x0000000002000000-0x000000000200ffff M: (I,R,W) S/U: ()
+Domain0 Region05            : 0x000000000c400000-0x000000000c5fffff M: (I,R,W) S/U: (R,W)
+Domain0 Region06            : 0x000000000c000000-0x000000000c3fffff M: (I,R,W) S/U: (R,W)
+Domain0 Region07            : 0x0000000000000000-0xffffffffffffffff M: () S/U: (R,W,X)
+Domain0 Next Address        : 0x0000000080200000
+Domain0 Next Arg1           : 0x00000000ffe00000
+Domain0 Next Mode           : S-mode
+Domain0 SysReset            : yes
+Domain0 SysSuspend          : yes
+
+Boot HART ID                : 0
+Boot HART Domain            : root
+Boot HART Priv Version      : v1.12
+Boot HART Base ISA          : rv64imafdcvh
+Boot HART ISA Extensions    : sstc,zicntr,zihpm,zicboz,zicbom,sdtrig,svadu
+Boot HART PMP Count         : 16
+Boot HART PMP Granularity   : 2 bits
+Boot HART PMP Address Bits  : 54
+Boot HART MHPM Info         : 16 (0x0007fff8)
+Boot HART Debug Triggers    : 2 triggers
+Boot HART MIDELEG           : 0x0000000000001666
+Boot HART MEDELEG           : 0x0000000000f4b509
+[36m[1m
+██████  ██    ██ ██   ██
+██   ██ ██    ██  ██ ██
+██████  ██    ██   ███
+██   ██ ██    ██  ██ ██
+██   ██  ██████  ██   ██
+[0m[32m  [ RISC-V 64-bit | POSIX Compatible | v0.1.0 ]
+
+[0mboot: static regions phys_end=0x100000000 heap_region_end=0x100000000 heap=0x81600000+0x8000000 slab=0x89600000+0x400000
+[33mKernel starting...
+
+[0m[36mModule            Description                        Status
+----------------  --------------------------------   --------
+[0mconsole:          UART ns16550a driver               [ok]
+trap:             stvec handler installed            [ok]
+trap:             ecall syscall handler              [ok]
+mm:               Sv39 3-level page table            [ok]
+mm:               satp CSR configured                [ok]
+mm:               buddy allocator order 0-12         [ok]
+mm:               heap region 128MB @ 0x81600000     [ok]
+mm:               slab allocator 4MB                 [ok]
+boot:             FDT/DTB parsed                     [ok]
+boot:             cmd: root=/dev/vda rw init=...     [ok]
+console:          console=ttyS0 (ns16550a uart)      [ok]
+mm:               linear mapping 2048 MB             [ok]
+mm:               vmemmap mapping initialized        [ok]
+mm:               layout: kernel=0x80200000-0x8160   [ok]
+mm:               layout: heap=0x81600000-0x896000   [ok]
+mm:               524288 page descriptors (span 20   [ok]
+page_alloc: zone Normal span=524288 pages (2048 MB), seeded=468415 (1829 MB), unmanaged-in-span=55873 (218 MB)
+mm:               zone allocator initialized (5242   [ok]
+memblock:         total 2048MB, available 1829MB     [ok]
+mm:               device mappings created            [ok]
+irq:              irq_desc array initialized         [ok]
+intc:             PLIC @ 0x0C000000                  [ok]
+intc:             IRQ domain + chip registered       [ok]
+ipi:              SSIP software IRQ + bitmap multi   [ok]
+console:          UART interrupt-driven RX           [ok]
+bio:              buffer cache layer                 [ok]
+fs:               ext4 driver loaded                 [ok]
+fs:               ramfs mounted /                    [ok]
+fs:               procfs initialized                 [ok]
+fs:               procfs mounted /proc               [ok]
+fs:               sysfs mounted /sys                 [ok]
+fsw: off (cmdline fsw param = None)
+fs:               debugfs mounted /sys/kernel/debu   [ok]
+cgroup:           v2 unified hierarchy init          [ok]
+cgroup:           cgroup2 mounted /sys/fs/cgroup     [ok]
+driver:           vda virtio-blk 2621440 sectors     [ok]
+driver:           virtio-blk PCI x1                  [ok]
+driver:           GenDisk registered                 [ok]
+fs:               root /dev/vda -> vda               [done]
+fs:               ext4 mounted /                     [ok]
+fs:               procfs remounted /proc             [ok]
+mm:               swap 256 MB tail carve             [ok]
+driver:           virtio-net x1                      [ok]
+vdso:             clock_gettime fast path            [ok]
+security:         capability LSM initialized         [ok]
+sched:            CFS scheduler v1                   [ok]
+sched:            runqueue per-CPU                   [ok]
+sched:            PID allocator init                 [ok]
+sched:            idle task (PID 0)                  [ok]
+mm:               kswapd reclaim thread              [ok]
+dfx: runtime switch 'periodic' enabled
+dfx: runtime switch 'memwatch' enabled
+dfx: runtime switch 'watchdog' enabled
+dfx: runtime switch 'taskdump' enabled
+dfx:              diagnostic subsystem               [ok]
+DEFERFREE: engaged (first MmStruct free held back 1500ms)
+printk:           persistent log /var/log/kmsg (kl   [ok]
+ipc:              System V + POSIX MQ                [ok]
+smp:              2 CPUs online (boot hart 0)        [ok]
+softirq:          ksoftirqd per-CPU threads          [ok]
+dfx:              khungtaskd hung-task detector      [ok]
+trap:             sie.SEIE enabled                   [ok]
+[31mdriver:           virtio-gpu not found               [fail][0m
+fs:               devfs mounted /dev                 [ok]
+fs:               tmpfs mounted /dev/shm             [ok]
+fs:               tmpfs mounted /run                 [ok]
+driver:           evdev /dev/input/event0            [ok]
+driver:           evdev /dev/input/event1            [ok]
+driver:           PS/2 keyboard (stub)               [ok]
+driver:           PS/2 mouse (stub)                  [ok]
+init:             ELF /test/fsfuzz loaded            [ok]
+init:             init task (PID 1) enqueued         [ok]
+
+[1;36mWelcome to [1;32mRux OS[0m [90m(RISC-V 64)[0m
+[90m- [1mmrsh[0m[90m (POSIX shell) | A minimal POSIX-compatible shell[0m
+
+PARKWALK-ARMED
+FSFUZZ-START seed=7 pid=1
+EFAULTTRAC: pid=1 nr=56 a0=0x7 a1=0xfff
+EFAULTTRAC: pid=1 nr=5 a0=0x64 a1=0x100000
+EFAULTTRAC: pid=1 nr=36 a0=0x7 a1=0xffffffffffffffff
+EFAULTTRAC: pid=1 nr=41 a0=0x64 a1=0xfff
+EFAULTTRAC: pid=1 nr=15 a0=0x3 a1=0x10000
+EFAULTTRAC: pid=1 nr=14 a0=0x7 a1=0x10000
+EFAULTTRAC: pid=1 nr=8 a0=0x3 a1=0x7fffffff
+EFAULTTRAC: pid=1 nr=43 a0=0x3ff a1=0xfffffffffffff000
+EFAULTTRAC: pid=1 nr=17 a0=0x2 a1=0xffffffffffffffff
+EFAULTTRAC: pid=1 nr=48 a0=0x3 a1=0xfffffffffffff000
+EFAULTTRAC: pid=1 nr=8 a0=0xffffffffffffffff a1=0x1000
+EFAULTTRAC: pid=1 nr=34 a0=0x1 a1=0xffffffffffffffff
+EFAULTTRAC: pid=1 nr=33 a0=0x64 a1=0x1
+EFAULTTRAC: pid=1 nr=33 a0=0xffffffffffffffff a1=0xffffffffffffffff
+EFAULTTRAC: pid=1 nr=53 a0=0x2 a1=0x0
+EFAULTTRAC: pid=1 nr=41 a0=0x2 a1=0xfff
+EFAULTTRAC: pid=1 nr=38 a0=0xffffffffffffffff a1=0xffffffffffffffff
+EFAULTTRAC: pid=1 nr=36 a0=0x7 a1=0xfff
+EFAULTTRAC: pid=1 nr=33 a0=0x3 a1=0xfff
+EFAULTTRAC: pid=1 nr=17 a0=0x1 a1=0x1000
+EFAULTTRAC: pid=1 nr=56 a0=0x64 a1=0x100000
+EFAULTTRAC: pid=1 nr=56 a0=0xfffffffffffffffe a1=0xffffffffffffffff
+EFAULTTRAC: pid=1 nr=8 a0=0x7 a1=0x1000
+EFAULTTRAC: pid=1 nr=45 a0=0x1 a1=0x7fffffff
+EFAULTTRAC: pid=1 nr=14 a0=0xfffffffffffffffe a1=0x1000
+EFAULTTRAC: pid=1 nr=6 a0=0x3 a1=0x10000
+EFAULTTRAC: pid=1 nr=41 a0=0x3ff a1=0x100000
+EFAULTTRAC: pid=1 nr=6 a0=0x0 a1=0xfffffffffffff000
+EFAULTTRAC: pid=1 nr=12 a0=0x3 a1=0xffffffffffffffff
+EFAULTTRAC: pid=1 nr=40 a0=0xffffffffffffffff a1=0x7fffffff
+EFAULTTRAC: pid=1 nr=53 a0=0x0 a1=0x0
+EFAULTTRAC: pid=1 nr=45 a0=0x3 a1=0x100000
+EFAULTTRAC: pid=1 nr=59 a0=0xfffffffffffffffe a1=0x0
+EFAULTTRAC: pid=1 nr=9 a0=0xfffffffffffffffe a1=0xfffffffffffff000
+EFAULTTRAC: pid=1 nr=9 a0=0x64 a1=0xffffffffffffffff
+EFAULTTRAC: pid=1 nr=49 a0=0x1 a1=0x10000
+EFAULTTRAC: pid=1 nr=49 a0=0xffffffffffffffff a1=0xffffffffffffffff
+EFAULTTRAC: pid=1 nr=15 a0=0x3 a1=0xffffffffffffffff
+EFAULTTRAC: pid=1 nr=17 a0=0x64 a1=0x100000
+EFAULTTRAC: pid=1 nr=33 a0=0x1 a1=0x1
+EFAULTTRAC: pid=1 nr=45 a0=0x0 a1=0x0
+EFAULTTRAC: pid=1 nr=14 a0=0xfffffffffffffffe a1=0xfff
+EFAULTTRAC: pid=1 nr=6 a0=0x64 a1=0xffffffffffffffff
+EFAULTTRAC: pid=1 nr=49 a0=0x7 a1=0xfff
+EFAULTTRAC: pid=1 nr=59 a0=0xffffffffffffffff a1=0x7fffffff
+EFAULTTRAC: pid=1 nr=43 a0=0xfffffffffffffffe a1=0xfffffffffffff000
+EFAULTTRAC: pid=1 nr=44 a0=0x1 a1=0x100000
+EFAULTTRAC: pid=1 nr=40 a0=0xfffffffffffffffe a1=0x0
+EFAULTTRAC: pid=1 nr=9 a0=0x3ff a1=0x1000
+EFAULTTRAC: pid=1 nr=12 a0=0x64 a1=0xfffffffffffff000
+EFAULTTRAC: pid=1 nr=11 a0=0x3ff a1=0xfffffffffffff000
+EFAULTTRAC: pid=1 nr=41 a0=0x3ff a1=0xffffffffffffffff
+EFAULTTRAC: pid=1 nr=40 a0=0x1 a1=0x0
+EFAULTTRAC: pid=1 nr=41 a0=0x2 a1=0xfff
+EFAULTTRAC: pid=1 nr=41 a0=0x7 a1=0x7fffffff
+EFAULTTRAC: pid=1 nr=11 a0=0x3ff a1=0x7fffffff
+EFAULTTRAC: pid=1 nr=9 a0=0x2 a1=0x7fffffff
+EFAULTTRAC: pid=1 nr=6 a0=0x1 a1=0xfff
+EFAULTTRAC: pid=1 nr=6 a0=0x3 a1=0x100000
+EFAULTTRAC: pid=1 nr=15 a0=0x1 a1=0x100000
+FSFUZZ-BEAT 0
+missstat: ret=-20 nr=33 a0=0x3 path='-' a2=0x8000 pid=309
+missstat: ret=-20 nr=53 a0=0x2 path='ELF' a2=0x241 pid=316
+missstat: ret=-20 nr=33 a0=0x3 path='-' a2=0x241 pid=317
+missstat: ret=-20 nr=34 a0=0x2 path='-' a2=0x7fff pid=320
+FSFUZZ-BEAT 64
+missstat: ret=-20 nr=53 a0=0x2 path='ELF' a2=0x1 pid=323
+missstat: ret=-20 nr=38 a0=0x64 path='-' a2=0x8000 pid=323
+missstat: ret=-20 nr=34 a0=0x2 path='-' a2=0x0 pid=323
+missstat: ret=-20 nr=56 a0=0x3 path='-' a2=0x0 pid=324
+missstat: ret=-20 nr=53 a0=0x64 path='ELF' a2=0x8000 pid=324
+missstat: ret=-20 nr=35 a0=0x64 path='-' a2=0x0 pid=326
+missstat: ret=-20 nr=33 a0=0x0 path='-' a2=0x7fff pid=330
+missstat: ret=-20 nr=33 a0=0x1 path='-' a2=0x1 pid=332
+FSFUZZ-BEAT 128
+FSFUZZ-BEAT 192
+missstat: ret=-20 nr=56 a0=0x1 path='-' a2=0x1a4 pid=351
+missstat: ret=-20 nr=33 a0=0x3 path='-' a2=0x1 pid=353
+missstat: ret=-20 nr=53 a0=0x64 path='ELF' a2=0x1 pid=355
+missstat: ret=-20 nr=38 a0=0x2 path='-' a2=0x7fff pid=356
+missstat: ret=-20 nr=38 a0=0x7 path='-' a2=0x42 pid=359
+missstat: ret=-20 nr=38 a0=0x64 path='-' a2=0x1 pid=366
+FSFUZZ-BEAT 256
+missstat: ret=-20 nr=38 a0=0x2 path='-' a2=0x7fff pid=369
+missstat: ret=-20 nr=53 a0=0x1 path='ELF' a2=0x42 pid=373
+missstat: ret=-20 nr=38 a0=0x0 path='-' a2=0x1a4 pid=375
+FSFUZZ-BEAT 320
+missstat: ret=-20 nr=34 a0=0x7 path='-' a2=0x1 pid=377
+missstat: ret=-20 nr=56 a0=0x3 path='-' a2=0x8000 pid=381
+missstat: ret=-20 nr=38 a0=0x64 path='-' a2=0x0 pid=383
+FSFUZZ-BEAT 384
+missstat: ret=-20 nr=34 a0=0x0 path='-' a2=0x42 pid=394
+missstat: ret=-20 nr=56 a0=0x3 path='-' a2=0x1a4 pid=394
+missstat: ret=-20 nr=34 a0=0x1 path='-' a2=0x0 pid=395
+missstat: ret=-20 nr=56 a0=0x3 path='-' a2=0x42 pid=395
+missstat: ret=-20 nr=33 a0=0x0 path='-' a2=0x0 pid=396
+FSFUZZ-BEAT 448
+missstat: ret=-20 nr=38 a0=0x3 path='-' a2=0x1a4 pid=401
+missstat: ret=-20 nr=34 a0=0x3 path='-' a2=0x0 pid=401
+missstat: ret=-20 nr=53 a0=0x7 path='ELF' a2=0x0 pid=404
+missstat: ret=-20 nr=34 a0=0x1 path='-' a2=0x0 pid=409
+STALE-CLAIM-RESET by_cpu=0 pid=1 from_claim=1
+FSFUZZ-BEAT 512
+missstat: ret=-20 nr=53 a0=0x3 path='ELF' a2=0x0 pid=414
+FSFUZZ-BEAT 576
+missstat: ret=-20 nr=48 a0=0x2 path='ELF' a2=0x0 pid=423
+missstat: ret=-20 nr=33 a0=0x7 path='-' a2=0x8000 pid=424
+missstat: ret=-20 nr=34 a0=0x7 path='-' a2=0x1a4 pid=427
+missstat: ret=-20 nr=54 a0=0x3 path='ELF' a2=0x8000 pid=429
+missstat: ret=-20 nr=34 a0=0x3 path='-' a2=0x0 pid=430
+missstat: ret=-20 nr=37 a0=0x7 path='-' a2=0x7fff pid=435
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-BEAT 640
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD open /tmp/fz17198 errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD open /tmp/fz28343 errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD open /tmp/fz98811 errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD open /tmp/fz57230 errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD open /tmp/fz40686 errno=24
+FSFUZZ-BEAT 704
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD open /tmp/fz70050 errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD open /tmp/fz76077 errno=24
+FSFUZZ-ODD open /tmp/fz50389 errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD open /tmp/fz59382 errno=24
+FSFUZZ-ODD open /tmp/fz98540 errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-BEAT 768
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD open /tmp/fz35554 errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD open /tmp/fz66234 errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-BEAT 832
+FSFUZZ-ODD open /tmp/fz84209 errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD open /tmp/fz68587 errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD open /tmp/fz30592 errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD open /tmp/fz59290 errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD open /tmp/fz66756 errno=24
+FSFUZZ-ODD open /tmp/fz59466 errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD open /tmp/fz94052 errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-BEAT 896
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD open /tmp/fz79931 errno=24
+FSFUZZ-ODD open /tmp/fz31635 errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD open /tmp/fz2108 errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD open /tmp/fz37051 errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD open /tmp/fz67364 errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD open /tmp/fz55716 errno=24
+FSFUZZ-BEAT 960
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD open /tmp/fz74468 errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD open /tmp/fz43386 errno=24
+FSFUZZ-ODD open /tmp/fz13623 errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD open /tmp/fz57550 errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD open /tmp/fz2888 errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD open /tmp/fz86761 errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-BEAT 1024
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD open /tmp/fz19631 errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-BEAT 1088
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD open /tmp/fz22353 errno=24
+FSFUZZ-ODD open /tmp/fz85234 errno=24
+FSFUZZ-ODD open /tmp/fz38930 errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD open /tmp/fz11152 errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD open /tmp/fz19560 errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-BEAT 1152
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD open /tmp/fz88111 errno=24
+W3-FROZEN-EXEC-SLOT pid=559 naming_cpu=0 exec=0x0 frozen for 1647jif pk=1 on_cpu=true retaddr=0xffffffff80370cf4
+W3-FROZEN-EXEC-STK pid=559 sp=0xffffffd603f3fee0 w=0x13bc0 0x13856 0x3fffffeab0 0x1a800
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD open /tmp/fz44534 errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD open /tmp/fz7938 errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD open /tmp/fz53780 errno=24
+FSFUZZ-ODD open /tmp/fz75396 errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD open /tmp/fz2407 errno=24
+FSFUZZ-BEAT 1216
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD open /tmp/fz884 errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD open /tmp/fz29204 errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD open /tmp/fz42365 errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD open /tmp/fz87760 errno=24
+FSFUZZ-ODD open /tmp/fz70423 errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD open /tmp/fz30213 errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD open /tmp/fz63310 errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-BEAT 1280
+FSFUZZ-ODD open /tmp/fz87261 errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD open /tmp/fz62016 errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD open /tmp/fz4962 errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD open /tmp/fz1853 errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-BEAT 1344
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD open /tmp/fz66916 errno=24
+FSFUZZ-ODD open /tmp/fz72755 errno=24
+FSFUZZ-ODD open /tmp/fz26340 errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD open /tmp/fz25173 errno=24
+FSFUZZ-ODD open /tmp/fz67337 errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-BEAT 1408
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD open /tmp/fz27756 errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD open /tmp/fz59823 errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD open /tmp/fz90022 errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-BEAT 1472
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD open /tmp/fz80624 errno=24
+STALE-CLAIM-RESET by_cpu=0 pid=1 from_claim=1
+FSFUZZ-ODD open /tmp/fz68765 errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD open /tmp/fz70142 errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD open /tmp/fz95126 errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD open /tmp/fz7999 errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-BEAT 1536
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD open /tmp/fz6597 errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD open /tmp/fz85534 errno=24
+FSFUZZ-ODD open /tmp/fz34623 errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD open /tmp/fz56598 errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-BEAT 1600
+FSFUZZ-ODD open /tmp/fz17395 errno=24
+FSFUZZ-ODD open /tmp/fz71396 errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD open /tmp/fz12235 errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD open /tmp/fz48276 errno=24
+FSFUZZ-ODD open /tmp/fz43922 errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD open /tmp/fz80226 errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-BEAT 1664
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD open /tmp/fz90917 errno=24
+FSFUZZ-ODD open /tmp/fz9826 errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD open /tmp/fz76614 errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-BEAT 1728
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD open /tmp/fz78129 errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD open /tmp/fz93800 errno=24
+FSFUZZ-ODD open /tmp/fz42713 errno=24
+FSFUZZ-ODD open /tmp/fz73580 errno=24
+FSFUZZ-ODD open /tmp/fz69500 errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD open /tmp/fz53667 errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD open /tmp/fz62807 errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-BEAT 1792
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD open /tmp/fz47707 errno=24
+FSFUZZ-ODD open /tmp/fz19840 errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD open /tmp/fz33493 errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-BEAT 1856
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD open /tmp/fz22235 errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD open /tmp/fz71713 errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD open /tmp/fz96681 errno=24
+FSFUZZ-ODD open /tmp/fz64252 errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD open /tmp/fz48609 errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD pipe errno=24
+
+=== DFX TASK DUMP (periodic) ===
+taskoff: ti_flags=0x0000000000000000 ti_kernel_sp=0x0000000000000008 ti_user_sp=0x0000000000000010 ti_cpu=0x0000000000000018 cpus_allowed=0x000000000000001c hung_task_since=0x0000000000000020 task_refcnt=0x0000000000000028 journal_handle=0x0000000000000030 ti_on_cpu=0x0000000000000038 running_on_cpu=0x000000000000003c ti_pick_state=0x0000000000000040
+cpu slots: 0 1 999999 999999
+grq: nr_running=0 cfs=0 rt=0 dl=0 cpu[pid/idle]: 0/i 1/b -/b -/b
+task @0xffffffff80c9bf98 pid=0 tgid=0 state=RUNNING ti_cpu=3 on_cpu=0 claim=-1 pk=0 preempt=0 linked=0 on_rq=0 affinity=0x00000000ffffffff vruntime=0 policy=IDLE comm= lastsys=?
+task @0xffffffff80c99460 pid=0 tgid=0 state=RUNNING ti_cpu=2 on_cpu=0 claim=-1 pk=0 preempt=0 linked=0 on_rq=0 affinity=0x00000000ffffffff vruntime=0 policy=IDLE comm= lastsys=?
+task @0xffffffff80c96928 pid=0 tgid=0 state=RUNNING ti_cpu=1 on_cpu=0 claim=-1 pk=0 preempt=0 linked=0 on_rq=0 affinity=0x00000000ffffffff vruntime=29934687800 policy=IDLE comm= lastsys=?
+task @0xffffffff80c93df0 pid=0 tgid=0 state=RUNNING ti_cpu=0 on_cpu=0 claim=-1 pk=0 preempt=256 linked=0 on_rq=0 affinity=0x00000000ffffffff vruntime=29963316600 policy=IDLE comm= lastsys=?
+task @0xffffffff80d97df8 pid=1 tgid=1 state=RUNNING ti_cpu=1 on_cpu=1 claim=1 pk=1 preempt=1 linked=0 on_rq=0 affinity=0x00000000ffffffff vruntime=20554506900 policy=CFS comm=fsfuzz lastsys=35(ffffffffffffff9c,0000003fffffe848)
+task @0xffffffd6016c0000 pid=300 tgid=300 state=INTERRUPTIBLE(sleep) ti_cpu=0 on_cpu=0 claim=-1 pk=1 preempt=0 linked=0 on_rq=0 affinity=0x00000000ffffffff vruntime=1321500 policy=CFS comm=kswapd lastsys=?
+task @0xffffffd6016d8000 pid=301 tgid=301 state=INTERRUPTIBLE(sleep) ti_cpu=0 on_cpu=0 claim=-1 pk=1 preempt=0 linked=0 on_rq=0 affinity=0x00000000ffffffff vruntime=3554000 policy=CFS comm=klogd lastsys=?
+task @0xffffffd6016dc000 pid=302 tgid=302 state=INTERRUPTIBLE(sleep) ti_cpu=0 on_cpu=0 claim=-1 pk=1 preempt=0 linked=0 on_rq=0 affinity=0x0000000000000001 vruntime=93500 policy=CFS comm=ksoftirqd/0 lastsys=?
+task @0xffffffd601740000 pid=303 tgid=303 state=INTERRUPTIBLE(sleep) ti_cpu=1 on_cpu=0 claim=-1 pk=1 preempt=0 linked=0 on_rq=0 affinity=0x0000000000000002 vruntime=717700 policy=CFS comm=ksoftirqd/1 lastsys=?
+task @0xffffffd601744000 pid=304 tgid=304 state=INTERRUPTIBLE(sleep) ti_cpu=0 on_cpu=0 claim=-1 pk=1 preempt=0 linked=0 on_rq=0 affinity=0x00000000ffffffff vruntime=658500 policy=CFS comm=khungtaskd lastsys=?
+=== 10 tasks ===
+EXT4-BIGLOCK-CENSUS locked=1 owner=1 depth=1 waiters=0 epoch=0 queued=0 wokenflag=0
+
+MEM heap 73752K/131072K a=17604 f=15341 | slab 0pg a=0 f=0FSFUZZ-ODD socket errno=24
+ | pages u=55935 r=55873
+MEMBINS class:net
+ b10(size>512):a=5:f=3:net=2
+ b11(size>1024):a=2463:f=2072:net=391
+ b12(size>2048):a=15267:f=13389:net=1878
+MEMRSITES cnt bucket sz f1..f8
+ rsite cnt=2371 b=6 sz=64 0xffffffff800d29b6 0xffffffff800cf9f2 0xffffffff80158fd0 0xffffffff80159860 0xffffffff802842f8 0xffffffff8028445e 0xffffffff802833f2 0xffffffff8033a47a 0xffffffff8033a436 0xffffffff801384be 0xffffffff801f6306 0xffffffff802bb0f2
+ rsite cnt=2351 b=7 sz=128 0xffffffff800d29b6 0xffffffff800cf9f2 0xffffffff80158fd0 0xffffffff80159860 0xffffffff802842f8 0xffffffff8028445e 0xffffffff802833f2 0xffffffff8033a47a 0xffffffff8033a436 0xffffffff801384be 0xffffffff801f6306 0xffffffff802bb0f2
+ rsite cnt=2331 b=8 sz=256 0xffffffff800d29b6 0xffffffff800cf9f2 0xffffffff80158fd0 0xffffffff80159860 0xffffffff802842f8 0xffffffff8028445e 0xffffffff802833f2 0xffffffff8033a47a 0xffffffff8033a436 0xffffffff801384be 0xffffffff801f6306 0xffffffff802bb0f2
+ rsite cnt=2297 b=9 sz=512 0xffffffff800d29b6 0xffffffff800cf9f2 0xffffffff80158fd0 0xffffffff80159860 0xffffffff802842f8 0xffffffff8028445e 0xffffffff802833f2 0xffffffff8033a47a 0xffffffff8033a436 0xffffffff801384be 0xffffffff801f6306 0xffffffff802bb0f2
+ rsite cnt=2042 b=11 sz=2048 0xffffffff800d29b6 0xffffffff800cf9f2 0xffffffff80158fd0 0xffffffff80159860 0xffffffff802842f8 0xffffffff8028445e 0xffffffff802833f2 0xffffffff8033a47a 0xffffffff8033a436 0xffffffff801384be 0xffffffff801f6306 0xffffffff802bb0f2
+ rsite cnt=1520 b=4 sz=16 0xffffffff800d29b6 0xffffffff800cf9f2 0xffffffff80158fd0 0xffffffff80159860 0xffffffff802842f8 0xffffffff8028445e 0xffffffff80281838 0xffffffff8033ed7c 0xffffffff8033eb2a 0xffffffff801e500a 0xffffffff801077b8 0xffffffff800be138
+MEMLIVE live allocs frees bucket sz f1..f12
+ livebins b10=2 b11=391 b12=1879
+ lsite live=719 a=1429 f=710 b=12 sz=4096 0xffffffff800d2834 0xffffffff802c9670 0xffffffff800cfa2c 0xffffffff801590d0 0xffffffff80159836 0xffffffff802845be 0xffffffff800021c8 0xffffffff80334a06 0xffffffff802d9022 0xffffffff802d9cc2 0xffffffff802dd14e 0xffffffff8010fdc6
+ lsite live=390 a=416 f=26 b=11 sz=2088 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff80107572 0xffffffff8023242a 0xffffffff800a42be 0xffffffff80354566 0xffffffff8039c64e 0xffffffff80394cb2 0xffffffff80370df0 0xffffffff80376eac 0xffffffff80370aaa
+ lsite live=390 a=416 f=26 b=12 sz=11064 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801592e2 0xffffffff800e8f40 0xffffffff800a3544 0xffffffff80354566 0xffffffff8039c64e 0xffffffff80394cb2 0xffffffff80370df0 0xffffffff80376eac 0xffffffff80370aaa 0x0000000000000000
+ lsite live=389 a=896 f=507 b=12 sz=65537 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6 0xffffffff802845d4 0xffffffff80284634 0xffffffff803379ee 0xffffffff80138cba 0xffffffff80139dac 0xffffffff80139fba 0xffffffff8037bada 0xffffffff80396f32
+ lsite live=144 a=285 f=141 b=12 sz=4096 0xffffffff800d2834 0xffffffff802c9670 0xffffffff800cfa2c 0xffffffff801590d0 0xffffffff80159836 0xffffffff802845be 0xffffffff800021c8 0xffffffff80334a06 0xffffffff802d9022 0xffffffff802d9cc2 0xffffffff802dd14e 0xffffffff8010f9aa
+ lsite live=143 a=284 f=141 b=12 sz=4096 0xffffffff800d2834 0xffffffff802c9670 0xffffffff800cfa2c 0xffffffff801590d0 0xffffffff80159836 0xffffffff802845be 0xffffffff800021c8 0xffffffff80334a06 0xffffffff802d9022 0xffffffff802d9cc2 0xffffffff802dd14e 0xffffffff8010f3fa
+ lsite live=64 a=416 f=352 b=12 sz=131072 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801592e2 0xffffffff80093748 0xffffffff80093654 0xffffffff80091eda 0xffffffff8008fa66 0xffffffff800e8f94 0xffffffff800a3544 0xffffffff80354566 0xffffffff8039c64e 0xffffffff80394cb2
+ lsite live=16 a=69 f=53 b=12 sz=786432 0x0000000000000000 0x0000000000000000 0x0000000000000000 0x0000000000000000 0x0000000000000000 0x0000000000000000 0x0000000000000000 0x0000000000000000 0x0000000000000000 0x0000000000000000 0x0000000000000000 0x0000000000000000
+ lsite live=6 a=6 f=0 b=12 sz=4096 0xffffffff800d2834 0xffffffff802c9670 0xffffffff800cfa2c 0xffffffff801590d0 0xffffffff80159836 0xffffffff802845be 0xffffffff800021c8 0xffffffff80334a06 0xffffffff802d9022 0xffffffff802d9cc2 0xffffffff802dd14e 0xffffffff8005bd4a
+ lsite live=2 a=3 f=1 b=10 sz=1536 0x0000000000000000 0x0000000000000000 0x0000000000000000 0x0000000000000000 0x0000000000000000 0x0000000000000000 0x0000000000000000 0x0000000000000000 0x0000000000000000 0x0000000000000000 0x0000000000000000 0x0000000000000000
+ lsite live=2 a=2 f=0 b=12 sz=4096 0xffffffff800d2834 0xffffffff802c9670 0xffffffff800cfa2c 0xffffffff801590d0 0xffffffff80159836 0xffffffff802845be 0xffffffff800021c8 0xffffffff80334a06 0xffffffff802d9022 0xffffffff802d9cc2 0xffffffff802dd14e 0xffffffff8014e968
+ lsite live=1 a=1429 f=1428 b=12 sz=4096 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6 0xffffffff802845d4 0xffffffff80284634 0xffffffff80058f04 0xffffffff8005952c 0xffffffff80361c4c 0xffffffff802d9102 0xffffffff802dbbdc 0xffffffff8010fe66
+MEMFLOW net pages per order (alloc - free)
+ o0=1844pages(7376K)  o1=2pages(8K)  o2=1588pages(6352K)  o3=8pages(32K)  o5=14848pages(59392K)  o8=256pages(1024K) 
+ netpages=74184K
+MEMREFUSE out_of_win dblfree ordmis tasklive ordbig unaligned
+ 0 0 0 0 0 0 
+ refused-ring (addr order metaord metafree):
+MEMBIG last-32 big allocs (size pid f1..f4):
+ big sz=65537 pid=1 ptr=0xffffffd605e20000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd605e40000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=131072 pid=1 ptr=0xffffffd605e60000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801592e2 0xffffffff80093748
+ big sz=65537 pid=1 ptr=0xffffffd605e60000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd605e80000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd605e80000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd605e80000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd605d00000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd605d00000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd605d00000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd605d00000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd605d00000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=131072 pid=1 ptr=0xffffffd605d00000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801592e2 0xffffffff80093748
+ big sz=131072 pid=1 ptr=0xffffffd605d00000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801592e2 0xffffffff80093748
+ big sz=65537 pid=1 ptr=0xffffffd605d00000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd605d00000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=131072 pid=1 ptr=0xffffffd605d00000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801592e2 0xffffffff80093748
+ big sz=65537 pid=1 ptr=0xffffffd605d00000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=131072 pid=1 ptr=0xffffffd605d00000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801592e2 0xffffffff80093748
+ big sz=65537 pid=1 ptr=0xffffffd605d00000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd605d20000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd605d40000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd605d60000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd605d60000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=131072 pid=1 ptr=0xffffffd605d80000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801592e2 0xffffffff80093748
+ big sz=65537 pid=717 ptr=0xffffffd605dc0000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd605de0000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd605d80000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd605da0000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd605e00000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=131072 pid=1 ptr=0xffffffd605e20000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801592e2 0xffffffff80093748
+ big sz=131072 pid=1 ptr=0xffffffd605e20000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801592e2 0xffffffff80093748
+MEMPSITES net allocs frees order f1..f12
+ pgfree_total=6299 mm_drops=416 fut_calls=416 fut_tables=4576 fut_pages=832
+MEMKROOT l1=2 l0=4 uleaf=0 va=0x0x0000000000000000-0x0x0000000050000000
+ psite net=1 a=1664 f=1663 ord=0 0xffffffff8029035c 0xffffffff800dd1b6 0xffffffff800dc6ce 0xffffffff8012e49e 0xffffffff80371c6e 0xffffffff80376ed6 0xffffffff80370aaa 0x0000000000000000 0x0000000000000000 0x0000000000000000 0x0000000000000000 0x0000000000000000
+ psite net=0 a=1664 f=1664 ord=0 0xffffffff800dcc98 0xffffffff801f7750 0xffffffff800a3f2e 0xffffffff80354566 0xffffffff8039c64e 0xffffffff80394cb2 0xffffffff80370df0 0xffffffff80376eac 0xffffffff80370aaa 0x0000000000000000 0x0000000000000000 0x0000000000000000
+ psite net=0 a=2496 f=2496 ord=0 0xffffffff800dcdbc 0xffffffff801f7750 0xffffffff800a3f2e 0xffffffff80354566 0xffffffff8039c64e 0xffffffff80394cb2 0xffffffff80370df0 0xffffffff80376eac 0xffffffff80370aaa 0x0000000000000000 0x0000000000000000 0x0000000000000000
+ psite net=0 a=416 f=416 ord=0 0xffffffff800dcb32 0xffffffff801f7750 0xffffffff800a3f2e 0xffffffff80354566 0xffffffff8039c64e 0xffffffff80394cb2 0xffffffff80370df0 0xffffffff80376eac 0xffffffff80370aaa 0x0000000000000000 0x0000000000000000 0x0000000000000000
+ psite net=0 a=23 f=23 ord=0 0xffffffff8029035c 0xffffffff8028fc58 0xffffffff801e210c 0xffffffff8014a270 0xffffffff8014c984 0xffffffff8014e140 0xffffffff8014d6a0 0xffffffff8037a050 0xffffffff8037a640 0xffffffff80397124 0xffffffff80394cb2 0xffffffff80370df0
+SMALLALLOC cls objs-alloc objs-free pages-made pages-reclaimed
+ c8 a=14059 f=12368 made=36 recl=32 locks=1600
+ c16 a=969 f=704 made=2 recl=0 locks=101
+ c32 a=5899 f=960 made=42 recl=3 locks=407
+ c64 a=8194 f=6464 made=135 recl=106 locks=886
+ c128 a=4114 f=2192 made=98 recl=35 locks=379
+ c256 a=11951 f=10160 made=353 recl=233 locks=1338
+ c512 a=527 f=336 made=76 recl=48 locks=52
+ c1024 a=4318 f=3904 made=1438 recl=1300 locks=498
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-BEAT 1920
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD open /tmp/fz65201 errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD open /tmp/fz93341 errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-BEAT 1984
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD open /tmp/fz63738 errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD open /tmp/fz96886 errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD open /tmp/fz33214 errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD open /tmp/fz10881 errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-BEAT 2048
+FSFUZZ-ODD open /tmp/fz73102 errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD open /tmp/fz4096 errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD open /tmp/fz79876 errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD open /tmp/fz21329 errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-BEAT 2112
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD open /tmp/fz5654 errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD open /tmp/fz13092 errno=24
+FSFUZZ-ODD open /tmp/fz42404 errno=24
+FSFUZZ-ODD open /tmp/fz74406 errno=24
+FSFUZZ-ODD open /tmp/fz8004 errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-BEAT 2176
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD open /tmp/fz69349 errno=24
+FSFUZZ-ODD open /tmp/fz79878 errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD open /tmp/fz90511 errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD open /tmp/fz79387 errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD open /tmp/fz96326 errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD open /tmp/fz15482 errno=24
+FSFUZZ-ODD open /tmp/fz91931 errno=24
+FSFUZZ-BEAT 2240
+FSFUZZ-ODD open /tmp/fz7715 errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD open /tmp/fz33887 errno=24
+FSFUZZ-ODD open /tmp/fz55611 errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD open /tmp/fz63956 errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD open /tmp/fz17924 errno=24
+FSFUZZ-BEAT 2304
+FSFUZZ-ODD open /tmp/fz6794 errno=24
+FSFUZZ-ODD open /tmp/fz54064 errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD open /tmp/fz22908 errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD open /tmp/fz40139 errno=24
+FSFUZZ-ODD open /tmp/fz3446 errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD open /tmp/fz78654 errno=24
+FSFUZZ-BEAT 2368
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD open /tmp/fz95342 errno=24
+FSFUZZ-ODD open /tmp/fz26929 errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD open /tmp/fz10059 errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD open /tmp/fz10770 errno=24
+FSFUZZ-ODD open /tmp/fz43989 errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-BEAT 2432
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD open /tmp/fz93104 errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD open /tmp/fz68133 errno=24
+FSFUZZ-ODD open /tmp/fz23756 errno=24
+FSFUZZ-ODD open /tmp/fz20694 errno=24
+FSFUZZ-ODD open /tmp/fz47823 errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD open /tmp/fz99642 errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD open /tmp/fz50135 errno=24
+FSFUZZ-ODD open /tmp/fz69212 errno=24
+FSFUZZ-BEAT 2496
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD open /tmp/fz85241 errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD open /tmp/fz63094 errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD open /tmp/fz68842 errno=24
+FSFUZZ-BEAT 2560
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD open /tmp/fz70042 errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD open /tmp/fz2977 errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD open /tmp/fz35243 errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD open /tmp/fz20345 errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD open /tmp/fz36329 errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD open /tmp/fz17748 errno=24
+FSFUZZ-ODD open /tmp/fz48208 errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-BEAT 2624
+FSFUZZ-ODD open /tmp/fz4818 errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD open /tmp/fz67567 errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD open /tmp/fz52327 errno=24
+FSFUZZ-ODD open /tmp/fz88775 errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD pipe errno=24
+STALE-CLAIM-RESET by_cpu=0 pid=1 from_claim=1
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD open /tmp/fz84466 errno=24
+FSFUZZ-ODD open /tmp/fz95830 errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-BEAT 2688
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD open /tmp/fz65495 errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD open /tmp/fz25322 errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD open /tmp/fz35485 errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD open /tmp/fz99307 errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-BEAT 2752
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD open /tmp/fz88352 errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD open /tmp/fz71451 errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD open /tmp/fz75353 errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD open /tmp/fz22564 errno=24
+FSFUZZ-ODD open /tmp/fz14510 errno=24
+FSFUZZ-BEAT 2816
+FSFUZZ-ODD open /tmp/fz36105 errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD open /tmp/fz54219 errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD open /tmp/fz7765 errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD open /tmp/fz11296 errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD open /tmp/fz4166 errno=24
+FSFUZZ-ODD open /tmp/fz97124 errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-BEAT 2880
+FSFUZZ-ODD open /tmp/fz45059 errno=24
+FSFUZZ-ODD open /tmp/fz15965 errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD open /tmp/fz57913 errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD open /tmp/fz74175 errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-BEAT 2944
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD open /tmp/fz61154 errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-BEAT 3008
+FSFUZZ-ODD open /tmp/fz91977 errno=24
+FSFUZZ-ODD open /tmp/fz97622 errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD open /tmp/fz56170 errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD open /tmp/fz27050 errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD open /tmp/fz76631 errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-BEAT 3072
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD open /tmp/fz53882 errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD open /tmp/fz35210 errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD open /tmp/fz63053 errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD open /tmp/fz24075 errno=24
+FSFUZZ-BEAT 3136
+FSFUZZ-ODD open /tmp/fz79968 errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD open /tmp/fz89398 errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD open /tmp/fz83753 errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD open /tmp/fz13283 errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD open /tmp/fz88871 errno=24
+FSFUZZ-BEAT 3200
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD pipe errno=24
+clone-gate: ENOMEM comm='fsfuzz' free=8335360/134217728 bytes
+clone-gate: ENOMEM comm='fsfuzz' free=8335360/134217728 bytes
+FSFUZZ-ODD open /tmp/fz26953 errno=24
+FSFUZZ-ODD open /tmp/fz43060 errno=24
+FSFUZZ-ODD pipe errno=24
+clone-gate: ENOMEM comm='fsfuzz' free=8200192/134217728 bytes
+FSFUZZ-ODD open /tmp/fz36750 errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD pipe errno=24
+clone-gate: ENOMEM comm='fsfuzz' free=7278592/134217728 bytes
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD open /tmp/fz52542 errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD socket errno=24
+clone-gate: ENOMEM comm='fsfuzz' free=6881280/134217728 bytes
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD pipe errno=24
+clone-gate: ENOMEM comm='fsfuzz' free=6090752/134217728 bytes
+FSFUZZ-BEAT 3264
+clone-gate: ENOMEM comm='fsfuzz' free=6090752/134217728 bytes
+clone-gate: ENOMEM comm='fsfuzz' free=6090752/134217728 bytes
+clone-gate: ENOMEM comm='fsfuzz' free=5959680/134217728 bytes
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD open /tmp/fz36989 errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD pipe errno=24
+clone-gate: ENOMEM comm='fsfuzz' free=5169152/134217728 bytes
+clone-gate: ENOMEM comm='fsfuzz' free=5169152/134217728 bytes
+clone-gate: ENOMEM comm='fsfuzz' free=5169152/134217728 bytes
+clone-gate: ENOMEM comm='fsfuzz' free=5169152/134217728 bytes
+FSFUZZ-ODD open /tmp/fz72126 errno=24
+clone-gate: ENOMEM comm='fsfuzz' free=5038080/134217728 bytes
+FSFUZZ-ODD open /tmp/fz74961 errno=24
+clone-gate: ENOMEM comm='fsfuzz' free=5029888/134217728 bytes
+clone-gate: ENOMEM comm='fsfuzz' free=5025792/134217728 bytes
+clone-gate: ENOMEM comm='fsfuzz' free=5025792/134217728 bytes
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD pipe errno=24
+clone-gate: ENOMEM comm='fsfuzz' free=4894720/134217728 bytes
+FSFUZZ-ODD open /tmp/fz35852 errno=24
+clone-gate: ENOMEM comm='fsfuzz' free=4894720/134217728 bytes
+FSFUZZ-BEAT 3328
+FSFUZZ-ODD socket errno=24
+clone-gate: ENOMEM comm='fsfuzz' free=4894720/134217728 bytes
+FSFUZZ-ODD pipe errno=24
+clone-gate: ENOMEM comm='fsfuzz' free=4763648/134217728 bytes
+clone-gate: ENOMEM comm='fsfuzz' free=4763648/134217728 bytes
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD open /tmp/fz39649 errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD open /tmp/fz97753 errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD pipe errno=24
+clone-gate: ENOMEM comm='fsfuzz' free=3440640/134217728 bytes
+clone-gate: ENOMEM comm='fsfuzz' free=3440640/134217728 bytes
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD socket errno=24
+clone-gate: ENOMEM comm='fsfuzz' free=3047424/134217728 bytes
+clone-gate: ENOMEM comm='fsfuzz' free=3047424/134217728 bytes
+FSFUZZ-ODD open /tmp/fz45478 errno=24
+FSFUZZ-ODD pipe errno=24
+clone-gate: ENOMEM comm='fsfuzz' free=2916352/134217728 bytes
+clone-gate: ENOMEM comm='fsfuzz' free=2785280/134217728 bytes
+clone-gate: ENOMEM comm='fsfuzz' free=2785280/134217728 bytes
+clone-gate: ENOMEM comm='fsfuzz' free=2654208/134217728 bytes
+clone-gate: ENOMEM comm='fsfuzz' free=2654208/134217728 bytes
+clone-gate: ENOMEM comm='fsfuzz' free=2654208/134217728 bytes
+FSFUZZ-BEAT 3392
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD socket errno=24
+clone-gate: ENOMEM comm='fsfuzz' free=2392064/134217728 bytes
+FSFUZZ-ODD open /tmp/fz96588 errno=24
+clone-gate: ENOMEM comm='fsfuzz' free=2387968/134217728 bytes
+FSFUZZ-ODD open /tmp/fz17452 errno=24
+FSFUZZ-ODD pipe errno=24
+clone-gate: ENOMEM comm='fsfuzz' free=1986560/134217728 bytes
+clone-gate: ENOMEM comm='fsfuzz' free=1986560/134217728 bytes
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD open /tmp/fz17648 errno=24
+FSFUZZ-ODD pipe errno=24
+clone-gate: ENOMEM comm='fsfuzz' free=1458176/134217728 bytes
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD socket errno=24
+clone-gate: ENOMEM comm='fsfuzz' free=1064960/134217728 bytes
+FSFUZZ-ODD open /tmp/fz22269 errno=24
+FSFUZZ-ODD socket errno=24
+clone-gate: ENOMEM comm='fsfuzz' free=1060864/134217728 bytes
+clone-gate: ENOMEM comm='fsfuzz' free=1060864/134217728 bytes
+FSFUZZ-ODD open /tmp/fz72700 errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-BEAT 3456
+FSFUZZ-ODD open /tmp/fz20049 errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD pipe errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD open /tmp/fz74817 errno=24
+FSFUZZ-ODD socket errno=24
+FSFUZZ-ODD open /tmp/fz54433 errno=24
+
+ALLOCTHROW size=65537 align=1 comm=fsfuzz pid=1
+ALLOCTHROW heap: size=131072K free=8K blocks[o0..]=0 1 0 0 0 0 0 0 
+MEMBINS class:net
+ b10(size>512):a=5:f=3:net=2
+ b11(size>1024):a=4794:f=4139:net=655
+ b12(size>2048):a=27125:f=24589:net=2536
+MEMRSITES cnt bucket sz f1..f8
+ rsite cnt=4430 b=6 sz=64 0xffffffff800d29b6 0xffffffff800cf9f2 0xffffffff80158fd0 0xffffffff80159860 0xffffffff802842f8 0xffffffff8028445e 0xffffffff802833f2 0xffffffff8033a47a 0xffffffff8033a436 0xffffffff801384be 0xffffffff801f6306 0xffffffff802bb0f2
+ rsite cnt=4410 b=7 sz=128 0xffffffff800d29b6 0xffffffff800cf9f2 0xffffffff80158fd0 0xffffffff80159860 0xffffffff802842f8 0xffffffff8028445e 0xffffffff802833f2 0xffffffff8033a47a 0xffffffff8033a436 0xffffffff801384be 0xffffffff801f6306 0xffffffff802bb0f2
+ rsite cnt=4390 b=8 sz=256 0xffffffff800d29b6 0xffffffff800cf9f2 0xffffffff80158fd0 0xffffffff80159860 0xffffffff802842f8 0xffffffff8028445e 0xffffffff802833f2 0xffffffff8033a47a 0xffffffff8033a436 0xffffffff801384be 0xffffffff801f6306 0xffffffff802bb0f2
+ rsite cnt=4356 b=9 sz=512 0xffffffff800d29b6 0xffffffff800cf9f2 0xffffffff80158fd0 0xffffffff80159860 0xffffffff802842f8 0xffffffff8028445e 0xffffffff802833f2 0xffffffff8033a47a 0xffffffff8033a436 0xffffffff801384be 0xffffffff801f6306 0xffffffff802bb0f2
+ rsite cnt=4101 b=11 sz=2048 0xffffffff800d29b6 0xffffffff800cf9f2 0xffffffff80158fd0 0xffffffff80159860 0xffffffff802842f8 0xffffffff8028445e 0xffffffff802833f2 0xffffffff8033a47a 0xffffffff8033a436 0xffffffff801384be 0xffffffff801f6306 0xffffffff802bb0f2
+ rsite cnt=2740 b=4 sz=16 0xffffffff800d29b6 0xffffffff800cf9f2 0xffffffff80158fd0 0xffffffff80159860 0xffffffff802842f8 0xffffffff8028445e 0xffffffff80281838 0xffffffff8033ed7c 0xffffffff8033eb2a 0xffffffff801e500a 0xffffffff801077b8 0xffffffff800be138
+MEMLIVE live allocs frees bucket sz f1..f12
+ livebins b10=2 b11=655 b12=2537
+ lsite live=785 a=1565 f=780 b=12 sz=65537 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6 0xffffffff802845d4 0xffffffff80284634 0xffffffff803379ee 0xffffffff80138cba 0xffffffff80139dac 0xffffffff80139fba 0xffffffff8037bada 0xffffffff80396f32
+ lsite live=722 a=2544 f=1822 b=12 sz=4096 0xffffffff800d2834 0xffffffff802c9670 0xffffffff800cfa2c 0xffffffff801590d0 0xffffffff80159836 0xffffffff802845be 0xffffffff800021c8 0xffffffff80334a06 0xffffffff802d9022 0xffffffff802d9cc2 0xffffffff802dd14e 0xffffffff8010fdc6
+ lsite live=654 a=688 f=34 b=11 sz=2088 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff80107572 0xffffffff8023242a 0xffffffff800a42be 0xffffffff80354566 0xffffffff8039c64e 0xffffffff80394cb2 0xffffffff80370df0 0xffffffff80376eac 0xffffffff80370aaa
+ lsite live=654 a=688 f=34 b=12 sz=11064 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801592e2 0xffffffff800e8f40 0xffffffff800a3544 0xffffffff80354566 0xffffffff8039c64e 0xffffffff80394cb2 0xffffffff80370df0 0xffffffff80376eac 0xffffffff80370aaa 0x0000000000000000
+ lsite live=144 a=506 f=362 b=12 sz=4096 0xffffffff800d2834 0xffffffff802c9670 0xffffffff800cfa2c 0xffffffff801590d0 0xffffffff80159836 0xffffffff802845be 0xffffffff800021c8 0xffffffff80334a06 0xffffffff802d9022 0xffffffff802d9cc2 0xffffffff802dd14e 0xffffffff8010f3fa
+ lsite live=144 a=506 f=362 b=12 sz=4096 0xffffffff800d2834 0xffffffff802c9670 0xffffffff800cfa2c 0xffffffff801590d0 0xffffffff80159836 0xffffffff802845be 0xffffffff800021c8 0xffffffff80334a06 0xffffffff802d9022 0xffffffff802d9cc2 0xffffffff802dd14e 0xffffffff8010f9aa
+ lsite live=64 a=688 f=624 b=12 sz=131072 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801592e2 0xffffffff80093748 0xffffffff80093654 0xffffffff80091eda 0xffffffff8008fa66 0xffffffff800e8f94 0xffffffff800a3544 0xffffffff80354566 0xffffffff8039c64e 0xffffffff80394cb2
+ lsite live=15 a=69 f=54 b=12 sz=786432 0x0000000000000000 0x0000000000000000 0x0000000000000000 0x0000000000000000 0x0000000000000000 0x0000000000000000 0x0000000000000000 0x0000000000000000 0x0000000000000000 0x0000000000000000 0x0000000000000000 0x0000000000000000
+ lsite live=5 a=13 f=8 b=12 sz=4096 0xffffffff800d2834 0xffffffff802c9670 0xffffffff800cfa2c 0xffffffff801590d0 0xffffffff80159836 0xffffffff802845be 0xffffffff800021c8 0xffffffff80334a06 0xffffffff802d9022 0xffffffff802d9cc2 0xffffffff802dd14e 0xffffffff8005bd4a
+ lsite live=2 a=3 f=1 b=10 sz=1536 0x0000000000000000 0x0000000000000000 0x0000000000000000 0x0000000000000000 0x0000000000000000 0x0000000000000000 0x0000000000000000 0x0000000000000000 0x0000000000000000 0x0000000000000000 0x0000000000000000 0x0000000000000000
+ lsite live=1 a=4 f=3 b=12 sz=180224 0xffffffff800d2834 0xffffffff800d29dc 0xffffffff800cf9f2 0xffffffff80158fd0 0xffffffff80159860 0xffffffff802842f8 0xffffffff8028445e 0xffffffff802824c4 0xffffffff80338dfe 0xffffffff80338dba 0xffffffff802dbac2 0xffffffff80242b9e
+ lsite live=1 a=2 f=1 b=11 sz=2088 0x0000000000000000 0x0000000000000000 0x0000000000000000 0x0000000000000000 0x0000000000000000 0x0000000000000000 0x0000000000000000 0x0000000000000000 0x0000000000000000 0x0000000000000000 0x0000000000000000 0x0000000000000000
+MEMFLOW net pages per order (alloc - free)
+ o0=2304pages(9216K)  o1=2pages(8K)  o2=2644pages(10576K)  o3=8pages(32K)  o5=27488pages(109952K)  o6=64pages(256K)  o8=256pages(1024K) 
+ netpages=131064K
+MEMREFUSE out_of_win dblfree ordmis tasklive ordbig unaligned
+ 0 0 0 0 0 0 
+ refused-ring (addr order metaord metafree):
+MEMBIG last-32 big allocs (size pid f1..f4):
+ big sz=65537 pid=1 ptr=0xffffffd609500000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd609500000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd609500000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd609500000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd609500000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd609520000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd609520000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd609520000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd609520000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd609540000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd609560000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd609560000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd609560000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd609560000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd609560000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd609560000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd609580000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd6095a0000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd6095c0000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd6095e0000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd6095e0000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd6094a0000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd6094a0000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd6094a0000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd6094a0000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd6094a0000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd6094c0000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd6094c0000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd6094c0000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd6094e0000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd609500000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd609500000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+SMALLALLOC cls objs-alloc objs-free pages-made pages-reclaimed
+ c8 a=25398 f=23040 made=53 recl=48 locks=2934
+ c16 a=1292 f=1024 made=2 recl=0 locks=140
+ c32 a=10693 f=1600 made=82 recl=10 locks=729
+ c64 a=11730 f=9776 made=202 recl=170 locks=1301
+ c128 a=7633 f=5376 made=141 recl=68 locks=785
+ c256 a=20706 f=18080 made=579 recl=403 locks=2348
+ c512 a=986 f=752 made=138 recl=104 locks=105
+ c1024 a=7463 f=6784 made=2480 recl=2253 locks=863
+ rawframes: 0xffffffff801ed7880 0xffffffff801e98e80 0xffffffff803abc120 0xffffffff803abc2c0 0xffffffff8028464e0 0xffffffff803379ee0 0xffffffff80138cba0 0xffffffff80139dac0 0xffffffff80139fba0 0xffffffff8037bada0 0xffffffff80396f320 0xffffffff80394cb20 0xffffffff80370df00 0xffffffff80376eac0 0xffffffff80370aaa0
+ALLOCTHROW -> SIGKILL current task (task-context ENOMEM)
+SIGDEATH: pid=1 tgid=1 comm=Ok("fsfuzz") sig=9 ppid=0 si_pid=0 si_code=0x0
+
+ALLOCTHROW size=8192 align=8 comm=fsfuzz pid=1
+ALLOCTHROW heap: size=131072K free=4K blocks[o0..]=1 0 0 0 0 0 0 0 
+MEMBINS class:net
+ b10(size>512):a=5:f=3:net=2
+ b11(size>1024):a=4795:f=4140:net=655
+ b12(size>2048):a=27126:f=24589:net=2537
+MEMRSITES cnt bucket sz f1..f8
+ rsite cnt=4430 b=6 sz=64 0xffffffff800d29b6 0xffffffff800cf9f2 0xffffffff80158fd0 0xffffffff80159860 0xffffffff802842f8 0xffffffff8028445e 0xffffffff802833f2 0xffffffff8033a47a 0xffffffff8033a436 0xffffffff801384be 0xffffffff801f6306 0xffffffff802bb0f2
+ rsite cnt=4410 b=7 sz=128 0xffffffff800d29b6 0xffffffff800cf9f2 0xffffffff80158fd0 0xffffffff80159860 0xffffffff802842f8 0xffffffff8028445e 0xffffffff802833f2 0xffffffff8033a47a 0xffffffff8033a436 0xffffffff801384be 0xffffffff801f6306 0xffffffff802bb0f2
+ rsite cnt=4390 b=8 sz=256 0xffffffff800d29b6 0xffffffff800cf9f2 0xffffffff80158fd0 0xffffffff80159860 0xffffffff802842f8 0xffffffff8028445e 0xffffffff802833f2 0xffffffff8033a47a 0xffffffff8033a436 0xffffffff801384be 0xffffffff801f6306 0xffffffff802bb0f2
+ rsite cnt=4356 b=9 sz=512 0xffffffff800d29b6 0xffffffff800cf9f2 0xffffffff80158fd0 0xffffffff80159860 0xffffffff802842f8 0xffffffff8028445e 0xffffffff802833f2 0xffffffff8033a47a 0xffffffff8033a436 0xffffffff801384be 0xffffffff801f6306 0xffffffff802bb0f2
+ rsite cnt=4101 b=11 sz=2048 0xffffffff800d29b6 0xffffffff800cf9f2 0xffffffff80158fd0 0xffffffff80159860 0xffffffff802842f8 0xffffffff8028445e 0xffffffff802833f2 0xffffffff8033a47a 0xffffffff8033a436 0xffffffff801384be 0xffffffff801f6306 0xffffffff802bb0f2
+ rsite cnt=2740 b=4 sz=16 0xffffffff800d29b6 0xffffffff800cf9f2 0xffffffff80158fd0 0xffffffff80159860 0xffffffff802842f8 0xffffffff8028445e 0xffffffff80281838 0xffffffff8033ed7c 0xffffffff8033eb2a 0xffffffff801e500a 0xffffffff801077b8 0xffffffff800be138
+MEMLIVE live allocs frees bucket sz f1..f12
+ livebins b10=2 b11=655 b12=2538
+ lsite live=785 a=1565 f=780 b=12 sz=65537 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6 0xffffffff802845d4 0xffffffff80284634 0xffffffff803379ee 0xffffffff80138cba 0xffffffff80139dac 0xffffffff80139fba 0xffffffff8037bada 0xffffffff80396f32
+ lsite live=722 a=2544 f=1822 b=12 sz=4096 0xffffffff800d2834 0xffffffff802c9670 0xffffffff800cfa2c 0xffffffff801590d0 0xffffffff80159836 0xffffffff802845be 0xffffffff800021c8 0xffffffff80334a06 0xffffffff802d9022 0xffffffff802d9cc2 0xffffffff802dd14e 0xffffffff8010fdc6
+ lsite live=654 a=688 f=34 b=11 sz=2088 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff80107572 0xffffffff8023242a 0xffffffff800a42be 0xffffffff80354566 0xffffffff8039c64e 0xffffffff80394cb2 0xffffffff80370df0 0xffffffff80376eac 0xffffffff80370aaa
+ lsite live=654 a=688 f=34 b=12 sz=11064 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801592e2 0xffffffff800e8f40 0xffffffff800a3544 0xffffffff80354566 0xffffffff8039c64e 0xffffffff80394cb2 0xffffffff80370df0 0xffffffff80376eac 0xffffffff80370aaa 0x0000000000000000
+ lsite live=144 a=506 f=362 b=12 sz=4096 0xffffffff800d2834 0xffffffff802c9670 0xffffffff800cfa2c 0xffffffff801590d0 0xffffffff80159836 0xffffffff802845be 0xffffffff800021c8 0xffffffff80334a06 0xffffffff802d9022 0xffffffff802d9cc2 0xffffffff802dd14e 0xffffffff8010f3fa
+ lsite live=144 a=506 f=362 b=12 sz=4096 0xffffffff800d2834 0xffffffff802c9670 0xffffffff800cfa2c 0xffffffff801590d0 0xffffffff80159836 0xffffffff802845be 0xffffffff800021c8 0xffffffff80334a06 0xffffffff802d9022 0xffffffff802d9cc2 0xffffffff802dd14e 0xffffffff8010f9aa
+ lsite live=64 a=688 f=624 b=12 sz=131072 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801592e2 0xffffffff80093748 0xffffffff80093654 0xffffffff80091eda 0xffffffff8008fa66 0xffffffff800e8f94 0xffffffff800a3544 0xffffffff80354566 0xffffffff8039c64e 0xffffffff80394cb2
+ lsite live=15 a=69 f=54 b=12 sz=786432 0x0000000000000000 0x0000000000000000 0x0000000000000000 0x0000000000000000 0x0000000000000000 0x0000000000000000 0x0000000000000000 0x0000000000000000 0x0000000000000000 0x0000000000000000 0x0000000000000000 0x0000000000000000
+ lsite live=5 a=13 f=8 b=12 sz=4096 0xffffffff800d2834 0xffffffff802c9670 0xffffffff800cfa2c 0xffffffff801590d0 0xffffffff80159836 0xffffffff802845be 0xffffffff800021c8 0xffffffff80334a06 0xffffffff802d9022 0xffffffff802d9cc2 0xffffffff802dd14e 0xffffffff8005bd4a
+ lsite live=2 a=3 f=1 b=10 sz=1536 0x0000000000000000 0x0000000000000000 0x0000000000000000 0x0000000000000000 0x0000000000000000 0x0000000000000000 0x0000000000000000 0x0000000000000000 0x0000000000000000 0x0000000000000000 0x0000000000000000 0x0000000000000000
+ lsite live=1 a=4 f=3 b=12 sz=180224 0xffffffff800d2834 0xffffffff800d29dc 0xffffffff800cf9f2 0xffffffff80158fd0 0xffffffff80159860 0xffffffff802842f8 0xffffffff8028445e 0xffffffff802824c4 0xffffffff80338dfe 0xffffffff80338dba 0xffffffff802dbac2 0xffffffff80242b9e
+ lsite live=1 a=2 f=1 b=11 sz=2088 0x0000000000000000 0x0000000000000000 0x0000000000000000 0x0000000000000000 0x0000000000000000 0x0000000000000000 0x0000000000000000 0x0000000000000000 0x0000000000000000 0x0000000000000000 0x0000000000000000 0x0000000000000000
+MEMFLOW net pages per order (alloc - free)
+ o0=2305pages(9220K)  o1=2pages(8K)  o2=2644pages(10576K)  o3=8pages(32K)  o5=27488pages(109952K)  o6=64pages(256K)  o8=256pages(1024K) 
+ netpages=131068K
+MEMREFUSE out_of_win dblfree ordmis tasklive ordbig unaligned
+ 0 0 0 0 0 0 
+ refused-ring (addr order metaord metafree):
+MEMBIG last-32 big allocs (size pid f1..f4):
+ big sz=65537 pid=1 ptr=0xffffffd609500000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd609500000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd609500000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd609500000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd609500000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd609520000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd609520000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd609520000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd609520000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd609540000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd609560000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd609560000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd609560000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd609560000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd609560000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd609560000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd609580000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd6095a0000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd6095c0000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd6095e0000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd6095e0000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd6094a0000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd6094a0000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd6094a0000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd6094a0000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd6094a0000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd6094c0000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd6094c0000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd6094c0000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd6094e0000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd609500000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd609500000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+SMALLALLOC cls objs-alloc objs-free pages-made pages-reclaimed
+ c8 a=25398 f=23040 made=53 recl=48 locks=2934
+ c16 a=1292 f=1024 made=2 recl=0 locks=140
+ c32 a=10693 f=1600 made=82 recl=10 locks=729
+ c64 a=11730 f=9776 made=202 recl=170 locks=1301
+ c128 a=7633 f=5376 made=141 recl=68 locks=785
+ c256 a=20706 f=18080 made=579 recl=403 locks=2348
+ c512 a=986 f=752 made=138 recl=104 locks=105
+ c1024 a=7463 f=6784 made=2480 recl=2253 locks=863
+ rawframes: 0xffffffff801ed7880 0xffffffff801e98e80 0xffffffff803abc120 0xffffffff803abc2c0 0xffffffff80281f820 0xffffffff803385a20 0xffffffff8033855e0 0xffffffff802223420 0xffffffff802162500 0xffffffff802339060 0xffffffff802244360 0xffffffff802107e00 0xffffffff8020caa60 0xffffffff80090eaa0 0xffffffff8032a3e80 0xffffffff801ed8fe0
+
+
+Kernel panic - not syncing:
+
+PANIC: Allocation error: Layout { size: 8192, align: 8 (1 << 3) }
+  Location: kernel/src/main.rs: 277
+
+---[ end Kernel panic - not syncing ]---
+
+Sstatus: 0000000200000020
+Scause : 8000000000000005
+Stval  : 0000000000000000
+Sepc   : ffffffff80059836
+
+Registers:
+  ra  : ffffffff803701d0  sp  : ffffffd6017d8290  gp  : 000000000001a800  tp  : ffffffff80d97df8  
+  t0  : 0000000000000008  t1  : 000000000000000a  t2  : 000000000098967f  s0  : ffffffd6017d83c0  
+  s1  : 000000000001a008  a0  : ffffffd6017d83c8  a1  : ffffffd6017d82a8  a2  : 00000000000000f8  
+  a3  : ffffffd6017d82a8  a4  : ffffffd6017d83a0  a5  : 0000000000000000  a6  : 0000000000000000  
+  a7  : ffffffd6017d836e  s2  : 14057b7ef767814f  s3  : 5851f42d4c957f2d  s4  : cccccccccccccccd  
+  s5  : 0000000000000004  s6  : 00000000000000c8  s7  : e38e38e38e38e38f  s8  : 0000000000000384  
+  s9  : 0000003fffffeac8  s10 : 0000000000000000  s11 : 0000000000000000  t3  : 0000000000002000  
+  t4  : 0000000000000032  t5  : 0000000000000031  t6  : 0000000000000038  
+
+Call Trace:
+  [<ffffffff8036fc64>] rux::dfx::backtrace::dump_stack+0x1c/0xdc (current)
+  [<ffffffd6017d8450>] ?
+
+
+=== DFX TASK DUMP (periodic) ===
+cpu slots: 1 0 999999 999999
+grq: nr_running=0 cfs=0 rt=0 dl=0 cpu[pid/idle]: 1/b 0/i -/b -/b
+task @0xffffffff80c9bf98 pid=0 tgid=0 state=RUNNING ti_cpu=3 on_cpu=0 claim=-1 pk=0 preempt=0 linked=0 on_rq=0 affinity=0x00000000ffffffff vruntime=0 policy=IDLE comm= lastsys=?
+task @0xffffffff80c99460 pid=0 tgid=0 state=RUNNING ti_cpu=2 on_cpu=0 claim=-1 pk=0 preempt=0 linked=0 on_rq=0 affinity=0x00000000ffffffff vruntime=0 policy=IDLE comm= lastsys=?
+task @0xffffffff80c96928 pid=0 tgid=0 state=RUNNING ti_cpu=1 on_cpu=0 claim=-1 pk=0 preempt=256 linked=0 on_rq=0 affinity=0x00000000ffffffff vruntime=59955017800 policy=IDLE comm= lastsys=?
+task @0xffffffff80c93df0 pid=0 tgid=0 state=RUNNING ti_cpu=0 on_cpu=0 claim=-1 pk=0 preempt=0 linked=0 on_rq=0 affinity=0x00000000ffffffff vruntime=56868200100 policy=IDLE comm= lastsys=?
+task @0xffffffff80d97df8 pid=1 tgid=1 state=RUNNING ti_cpu=0 on_cpu=1 claim=0 pk=1 preempt=1 linked=0 on_rq=0 affinity=0x00000000ffffffff vruntime=39352968400 policy=CFS comm=fsfuzz lastsys=59(0000003fffffe9a0,0000000000000000)
+task @0xffffffd6016c0000 pid=300 tgid=300 state=INTERRUPTIBLE(sleep) ti_cpu=0 on_cpu=0 claim=-1 pk=1 preempt=0 linked=0 on_rq=0 affinity=0x00000000ffffffff vruntime=1321500 policy=CFS comm=kswapd lastsys=?
+task @0xffffffd6016d8000 pid=301 tgid=301 state=INTERRUPTIBLE(sleep) ti_cpu=1 on_cpu=0 claim=-1 pk=1 preempt=0 linked=0 on_rq=0 affinity=0x00000000ffffffff vruntime=20594414300 policy=CFS comm=klogd lastsys=?
+task @0xffffffd6016dc000 pid=302 tgid=302 state=INTERRUPTIBLE(sleep) ti_cpu=0 on_cpu=0 claim=-1 pk=1 preempt=0 linked=0 on_rq=0 affinity=0x0000000000000001 vruntime=93500 policy=CFS comm=ksoftirqd/0 lastsys=?
+task @0xffffffd601740000 pid=303 tgid=303 state=INTERRUPTIBLE(sleep) ti_cpu=1 on_cpu=0 claim=-1 pk=1 preempt=0 linked=0 on_rq=0 affinity=0x0000000000000002 vruntime=717700 policy=CFS comm=ksoftirqd/1 lastsys=?
+task @0xffffffd601744000 pid=304 tgid=304 state=INTERRUPTIBLE(sleep) ti_cpu=0 on_cpu=0 claim=-1 pk=1 preempt=0 linked=0 on_rq=0 affinity=0x00000000ffffffff vruntime=658500 policy=CFS comm=khungtaskd lastsys=?
+=== 10 tasks ===
+EXT4-BIGLOCK-CENSUS locked=0 owner=0 depth=0 waiters=0 epoch=0 queued=0 wokenflag=0
+
+MEM heap 131068K/131072K a=31926 f=28732 | slab 0pg a=0 f=0 | pages u=55879 r=55873
+MEMBINS class:net
+ b10(size>512):a=5:f=3:net=2
+ b11(size>1024):a=4795:f=4140:net=655
+ b12(size>2048):a=27126:f=24589:net=2537
+MEMRSITES cnt bucket sz f1..f8
+ rsite cnt=4430 b=6 sz=64 0xffffffff800d29b6 0xffffffff800cf9f2 0xffffffff80158fd0 0xffffffff80159860 0xffffffff802842f8 0xffffffff8028445e 0xffffffff802833f2 0xffffffff8033a47a 0xffffffff8033a436 0xffffffff801384be 0xffffffff801f6306 0xffffffff802bb0f2
+ rsite cnt=4410 b=7 sz=128 0xffffffff800d29b6 0xffffffff800cf9f2 0xffffffff80158fd0 0xffffffff80159860 0xffffffff802842f8 0xffffffff8028445e 0xffffffff802833f2 0xffffffff8033a47a 0xffffffff8033a436 0xffffffff801384be 0xffffffff801f6306 0xffffffff802bb0f2
+ rsite cnt=4390 b=8 sz=256 0xffffffff800d29b6 0xffffffff800cf9f2 0xffffffff80158fd0 0xffffffff80159860 0xffffffff802842f8 0xffffffff8028445e 0xffffffff802833f2 0xffffffff8033a47a 0xffffffff8033a436 0xffffffff801384be 0xffffffff801f6306 0xffffffff802bb0f2
+ rsite cnt=4356 b=9 sz=512 0xffffffff800d29b6 0xffffffff800cf9f2 0xffffffff80158fd0 0xffffffff80159860 0xffffffff802842f8 0xffffffff8028445e 0xffffffff802833f2 0xffffffff8033a47a 0xffffffff8033a436 0xffffffff801384be 0xffffffff801f6306 0xffffffff802bb0f2
+ rsite cnt=4101 b=11 sz=2048 0xffffffff800d29b6 0xffffffff800cf9f2 0xffffffff80158fd0 0xffffffff80159860 0xffffffff802842f8 0xffffffff8028445e 0xffffffff802833f2 0xffffffff8033a47a 0xffffffff8033a436 0xffffffff801384be 0xffffffff801f6306 0xffffffff802bb0f2
+ rsite cnt=2740 b=4 sz=16 0xffffffff800d29b6 0xffffffff800cf9f2 0xffffffff80158fd0 0xffffffff80159860 0xffffffff802842f8 0xffffffff8028445e 0xffffffff80281838 0xffffffff8033ed7c 0xffffffff8033eb2a 0xffffffff801e500a 0xffffffff801077b8 0xffffffff800be138
+MEMLIVE live allocs frees bucket sz f1..f12
+ livebins b10=2 b11=655 b12=2538
+ lsite live=785 a=1565 f=780 b=12 sz=65537 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6 0xffffffff802845d4 0xffffffff80284634 0xffffffff803379ee 0xffffffff80138cba 0xffffffff80139dac 0xffffffff80139fba 0xffffffff8037bada 0xffffffff80396f32
+ lsite live=722 a=2544 f=1822 b=12 sz=4096 0xffffffff800d2834 0xffffffff802c9670 0xffffffff800cfa2c 0xffffffff801590d0 0xffffffff80159836 0xffffffff802845be 0xffffffff800021c8 0xffffffff80334a06 0xffffffff802d9022 0xffffffff802d9cc2 0xffffffff802dd14e 0xffffffff8010fdc6
+ lsite live=654 a=688 f=34 b=11 sz=2088 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff80107572 0xffffffff8023242a 0xffffffff800a42be 0xffffffff80354566 0xffffffff8039c64e 0xffffffff80394cb2 0xffffffff80370df0 0xffffffff80376eac 0xffffffff80370aaa
+ lsite live=654 a=688 f=34 b=12 sz=11064 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801592e2 0xffffffff800e8f40 0xffffffff800a3544 0xffffffff80354566 0xffffffff8039c64e 0xffffffff80394cb2 0xffffffff80370df0 0xffffffff80376eac 0xffffffff80370aaa 0x0000000000000000
+ lsite live=144 a=506 f=362 b=12 sz=4096 0xffffffff800d2834 0xffffffff802c9670 0xffffffff800cfa2c 0xffffffff801590d0 0xffffffff80159836 0xffffffff802845be 0xffffffff800021c8 0xffffffff80334a06 0xffffffff802d9022 0xffffffff802d9cc2 0xffffffff802dd14e 0xffffffff8010f3fa
+ lsite live=144 a=506 f=362 b=12 sz=4096 0xffffffff800d2834 0xffffffff802c9670 0xffffffff800cfa2c 0xffffffff801590d0 0xffffffff80159836 0xffffffff802845be 0xffffffff800021c8 0xffffffff80334a06 0xffffffff802d9022 0xffffffff802d9cc2 0xffffffff802dd14e 0xffffffff8010f9aa
+ lsite live=64 a=688 f=624 b=12 sz=131072 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801592e2 0xffffffff80093748 0xffffffff80093654 0xffffffff80091eda 0xffffffff8008fa66 0xffffffff800e8f94 0xffffffff800a3544 0xffffffff80354566 0xffffffff8039c64e 0xffffffff80394cb2
+ lsite live=15 a=69 f=54 b=12 sz=786432 0x0000000000000000 0x0000000000000000 0x0000000000000000 0x0000000000000000 0x0000000000000000 0x0000000000000000 0x0000000000000000 0x0000000000000000 0x0000000000000000 0x0000000000000000 0x0000000000000000 0x0000000000000000
+ lsite live=5 a=13 f=8 b=12 sz=4096 0xffffffff800d2834 0xffffffff802c9670 0xffffffff800cfa2c 0xffffffff801590d0 0xffffffff80159836 0xffffffff802845be 0xffffffff800021c8 0xffffffff80334a06 0xffffffff802d9022 0xffffffff802d9cc2 0xffffffff802dd14e 0xffffffff8005bd4a
+ lsite live=2 a=3 f=1 b=10 sz=1536 0x0000000000000000 0x0000000000000000 0x0000000000000000 0x0000000000000000 0x0000000000000000 0x0000000000000000 0x0000000000000000 0x0000000000000000 0x0000000000000000 0x0000000000000000 0x0000000000000000 0x0000000000000000
+ lsite live=1 a=4 f=3 b=12 sz=180224 0xffffffff800d2834 0xffffffff800d29dc 0xffffffff800cf9f2 0xffffffff80158fd0 0xffffffff80159860 0xffffffff802842f8 0xffffffff8028445e 0xffffffff802824c4 0xffffffff80338dfe 0xffffffff80338dba 0xffffffff802dbac2 0xffffffff80242b9e
+ lsite live=1 a=2 f=1 b=11 sz=2088 0x0000000000000000 0x0000000000000000 0x0000000000000000 0x0000000000000000 0x0000000000000000 0x0000000000000000 0x0000000000000000 0x0000000000000000 0x0000000000000000 0x0000000000000000 0x0000000000000000 0x0000000000000000
+MEMFLOW net pages per order (alloc - free)
+ o0=2305pages(9220K)  o1=2pages(8K)  o2=2644pages(10576K)  o3=8pages(32K)  o5=27488pages(109952K)  o6=64pages(256K)  o8=256pages(1024K) 
+ netpages=131068K
+MEMREFUSE out_of_win dblfree ordmis tasklive ordbig unaligned
+ 0 0 0 0 0 0 
+ refused-ring (addr order metaord metafree):
+MEMBIG last-32 big allocs (size pid f1..f4):
+ big sz=65537 pid=1 ptr=0xffffffd609500000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd609500000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd609500000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd609500000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd609500000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd609520000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd609520000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd609520000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd609520000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd609540000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd609560000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd609560000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd609560000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd609560000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd609560000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd609560000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd609580000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd6095a0000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd6095c0000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd6095e0000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd6095e0000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd6094a0000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd6094a0000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd6094a0000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd6094a0000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd6094a0000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd6094c0000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd6094c0000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd6094c0000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd6094e0000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd609500000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd609500000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+MEMPSITES net allocs frees order f1..f12
+ pgfree_total=10464 mm_drops=689 fut_calls=689 fut_tables=7579 fut_pages=1421
+MEMKROOT l1=2 l0=4 uleaf=0 va=0x0x0000000000000000-0x0x0000000050000000
+ psite net=0 a=2752 f=2752 ord=0 0xffffffff800dcc98 0xffffffff801f7750 0xffffffff800a3f2e 0xffffffff80354566 0xffffffff8039c64e 0xffffffff80394cb2 0xffffffff80370df0 0xffffffff80376eac 0xffffffff80370aaa 0x0000000000000000 0x0000000000000000 0x0000000000000000
+ psite net=0 a=4128 f=4128 ord=0 0xffffffff800dcdbc 0xffffffff801f7750 0xffffffff800a3f2e 0xffffffff80354566 0xffffffff8039c64e 0xffffffff80394cb2 0xffffffff80370df0 0xffffffff80376eac 0xffffffff80370aaa 0x0000000000000000 0x0000000000000000 0x0000000000000000
+ psite net=0 a=688 f=688 ord=0 0xffffffff800dcb32 0xffffffff801f7750 0xffffffff800a3f2e 0xffffffff80354566 0xffffffff8039c64e 0xffffffff80394cb2 0xffffffff80370df0 0xffffffff80376eac 0xffffffff80370aaa 0x0000000000000000 0x0000000000000000 0x0000000000000000
+ psite net=0 a=52 f=52 ord=0 0xffffffff8029035c 0xffffffff8028fc58 0xffffffff801e210c 0xffffffff8014a270 0xffffffff8014c984 0xffffffff8014e140 0xffffffff8014d6a0 0xffffffff8037a050 0xffffffff8037a640 0xffffffff80397124 0xffffffff80394cb2 0xffffffff80370df0
+ psite net=0 a=2752 f=2752 ord=0 0xffffffff8029035c 0xffffffff800dd1b6 0xffffffff800dc6ce 0xffffffff8012e49e 0xffffffff80371c6e 0xffffffff80376ed6 0xffffffff80370aaa 0x0000000000000000 0x0000000000000000 0x0000000000000000 0x0000000000000000 0x0000000000000000
+SMALLALLOC cls objs-alloc objs-free pages-made pages-reclaimed
+ c8 a=25398 f=23040 made=53 recl=48 locks=2934
+ c16 a=1292 f=1024 made=2 recl=0 locks=140
+ c32 a=10693 f=1600 made=82 recl=10 locks=729
+ c64 a=11730 f=9776 made=202 recl=170 locks=1301
+ c128 a=7633 f=5376 made=141 recl=68 locks=785
+ c256 a=20706 f=18080 made=579 recl=403 locks=2348
+ c512 a=986 f=752 made=138 recl=104 locks=105
+ c1024 a=7463 f=6784 made=2480 recl=2253 locks=863
+
+ALLOCTHROW size=2688 align=8 comm=klogd pid=301
+ALLOCTHROW heap: size=131072K free=0K blocks[o0..]=0 0 0 0 0 0 0 0 
+MEMBINS class:net
+ b10(size>512):a=6:f=3:net=3
+ b11(size>1024):a=4795:f=4140:net=655
+ b12(size>2048):a=27128:f=24591:net=2537
+MEMRSITES cnt bucket sz f1..f8
+ rsite cnt=4430 b=6 sz=64 0xffffffff800d29b6 0xffffffff800cf9f2 0xffffffff80158fd0 0xffffffff80159860 0xffffffff802842f8 0xffffffff8028445e 0xffffffff802833f2 0xffffffff8033a47a 0xffffffff8033a436 0xffffffff801384be 0xffffffff801f6306 0xffffffff802bb0f2
+ rsite cnt=4410 b=7 sz=128 0xffffffff800d29b6 0xffffffff800cf9f2 0xffffffff80158fd0 0xffffffff80159860 0xffffffff802842f8 0xffffffff8028445e 0xffffffff802833f2 0xffffffff8033a47a 0xffffffff8033a436 0xffffffff801384be 0xffffffff801f6306 0xffffffff802bb0f2
+ rsite cnt=4390 b=8 sz=256 0xffffffff800d29b6 0xffffffff800cf9f2 0xffffffff80158fd0 0xffffffff80159860 0xffffffff802842f8 0xffffffff8028445e 0xffffffff802833f2 0xffffffff8033a47a 0xffffffff8033a436 0xffffffff801384be 0xffffffff801f6306 0xffffffff802bb0f2
+ rsite cnt=4356 b=9 sz=512 0xffffffff800d29b6 0xffffffff800cf9f2 0xffffffff80158fd0 0xffffffff80159860 0xffffffff802842f8 0xffffffff8028445e 0xffffffff802833f2 0xffffffff8033a47a 0xffffffff8033a436 0xffffffff801384be 0xffffffff801f6306 0xffffffff802bb0f2
+ rsite cnt=4101 b=11 sz=2048 0xffffffff800d29b6 0xffffffff800cf9f2 0xffffffff80158fd0 0xffffffff80159860 0xffffffff802842f8 0xffffffff8028445e 0xffffffff802833f2 0xffffffff8033a47a 0xffffffff8033a436 0xffffffff801384be 0xffffffff801f6306 0xffffffff802bb0f2
+ rsite cnt=2740 b=4 sz=16 0xffffffff800d29b6 0xffffffff800cf9f2 0xffffffff80158fd0 0xffffffff80159860 0xffffffff802842f8 0xffffffff8028445e 0xffffffff80281838 0xffffffff8033ed7c 0xffffffff8033eb2a 0xffffffff801e500a 0xffffffff801077b8 0xffffffff800be138
+MEMLIVE live allocs frees bucket sz f1..f12
+ livebins b10=3 b11=655 b12=2538
+ lsite live=785 a=1565 f=780 b=12 sz=65537 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6 0xffffffff802845d4 0xffffffff80284634 0xffffffff803379ee 0xffffffff80138cba 0xffffffff80139dac 0xffffffff80139fba 0xffffffff8037bada 0xffffffff80396f32
+ lsite live=721 a=2544 f=1823 b=12 sz=4096 0xffffffff800d2834 0xffffffff802c9670 0xffffffff800cfa2c 0xffffffff801590d0 0xffffffff80159836 0xffffffff802845be 0xffffffff800021c8 0xffffffff80334a06 0xffffffff802d9022 0xffffffff802d9cc2 0xffffffff802dd14e 0xffffffff8010fdc6
+ lsite live=654 a=688 f=34 b=11 sz=2088 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff80107572 0xffffffff8023242a 0xffffffff800a42be 0xffffffff80354566 0xffffffff8039c64e 0xffffffff80394cb2 0xffffffff80370df0 0xffffffff80376eac 0xffffffff80370aaa
+ lsite live=654 a=688 f=34 b=12 sz=11064 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801592e2 0xffffffff800e8f40 0xffffffff800a3544 0xffffffff80354566 0xffffffff8039c64e 0xffffffff80394cb2 0xffffffff80370df0 0xffffffff80376eac 0xffffffff80370aaa 0x0000000000000000
+ lsite live=144 a=506 f=362 b=12 sz=4096 0xffffffff800d2834 0xffffffff802c9670 0xffffffff800cfa2c 0xffffffff801590d0 0xffffffff80159836 0xffffffff802845be 0xffffffff800021c8 0xffffffff80334a06 0xffffffff802d9022 0xffffffff802d9cc2 0xffffffff802dd14e 0xffffffff8010f3fa
+ lsite live=144 a=506 f=362 b=12 sz=4096 0xffffffff800d2834 0xffffffff802c9670 0xffffffff800cfa2c 0xffffffff801590d0 0xffffffff80159836 0xffffffff802845be 0xffffffff800021c8 0xffffffff80334a06 0xffffffff802d9022 0xffffffff802d9cc2 0xffffffff802dd14e 0xffffffff8010f9aa
+ lsite live=64 a=688 f=624 b=12 sz=131072 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801592e2 0xffffffff80093748 0xffffffff80093654 0xffffffff80091eda 0xffffffff8008fa66 0xffffffff800e8f94 0xffffffff800a3544 0xffffffff80354566 0xffffffff8039c64e 0xffffffff80394cb2
+ lsite live=15 a=69 f=54 b=12 sz=786432 0x0000000000000000 0x0000000000000000 0x0000000000000000 0x0000000000000000 0x0000000000000000 0x0000000000000000 0x0000000000000000 0x0000000000000000 0x0000000000000000 0x0000000000000000 0x0000000000000000 0x0000000000000000
+ lsite live=5 a=13 f=8 b=12 sz=4096 0xffffffff800d2834 0xffffffff802c9670 0xffffffff800cfa2c 0xffffffff801590d0 0xffffffff80159836 0xffffffff802845be 0xffffffff800021c8 0xffffffff80334a06 0xffffffff802d9022 0xffffffff802d9cc2 0xffffffff802dd14e 0xffffffff8005bd4a
+ lsite live=2 a=3 f=1 b=10 sz=1536 0x0000000000000000 0x0000000000000000 0x0000000000000000 0x0000000000000000 0x0000000000000000 0x0000000000000000 0x0000000000000000 0x0000000000000000 0x0000000000000000 0x0000000000000000 0x0000000000000000 0x0000000000000000
+ lsite live=1 a=1 f=0 b=12 sz=4096 0xffffffff800d2834 0xffffffff802c9670 0xffffffff800cfa2c 0xffffffff801590d0 0xffffffff80159836 0xffffffff802845be 0xffffffff800021c8 0xffffffff80334a06 0xffffffff802d9022 0xffffffff802d9cc2 0xffffffff802dd14e 0xffffffff80117fe4
+ lsite live=1 a=4 f=3 b=12 sz=180224 0xffffffff800d2834 0xffffffff800d29dc 0xffffffff800cf9f2 0xffffffff80158fd0 0xffffffff80159860 0xffffffff802842f8 0xffffffff8028445e 0xffffffff802824c4 0xffffffff80338dfe 0xffffffff80338dba 0xffffffff802dbac2 0xffffffff80242b9e
+MEMFLOW net pages per order (alloc - free)
+ o0=2306pages(9224K)  o1=2pages(8K)  o2=2644pages(10576K)  o3=8pages(32K)  o5=27488pages(109952K)  o6=64pages(256K)  o8=256pages(1024K) 
+ netpages=131072K
+MEMREFUSE out_of_win dblfree ordmis tasklive ordbig unaligned
+ 0 0 0 0 0 0 
+ refused-ring (addr order metaord metafree):
+MEMBIG last-32 big allocs (size pid f1..f4):
+ big sz=65537 pid=1 ptr=0xffffffd609500000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd609500000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd609500000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd609500000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd609500000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd609520000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd609520000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd609520000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd609520000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd609540000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd609560000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd609560000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd609560000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd609560000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd609560000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd609560000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd609580000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd6095a0000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd6095c0000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd6095e0000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd6095e0000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd6094a0000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd6094a0000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd6094a0000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd6094a0000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd6094a0000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd6094c0000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd6094c0000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd6094c0000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd6094e0000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd609500000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+ big sz=65537 pid=1 ptr=0xffffffd609500000 0xffffffff800d2834 0xffffffff800cf958 0xffffffff801590b8 0xffffffff801598b6
+SMALLALLOC cls objs-alloc objs-free pages-made pages-reclaimed
+ c8 a=25398 f=23040 made=53 recl=48 locks=2934
+ c16 a=1292 f=1024 made=2 recl=0 locks=140
+ c32 a=10693 f=1600 made=82 recl=10 locks=729
+ c64 a=11730 f=9776 made=202 recl=170 locks=1301
+ c128 a=7633 f=5392 made=141 recl=68 locks=786
+ c256 a=20706 f=18080 made=579 recl=403 locks=2348
+ c512 a=986 f=752 made=138 recl=104 locks=105
+ c1024 a=7463 f=6784 made=2480 recl=2253 locks=863
+ rawframes: 0xffffffff801ed7880 0xffffffff801e98e80 0xffffffff803abc120 0xffffffff803abc2c0 0xffffffff80283ea00 0xffffffff8033b8240 0xffffffff8033b7e00 0xffffffff8026a7280 0xffffffff8026aaf20 0xffffffff803767480 0xffffffff80370cf00
+
+
+Kernel panic - not syncing:
+
+PANIC: Allocation error: Layout { size: 2688, align: 8 (1 << 3) }
+  Location: kernel/src/main.rs: 277
+
+---[ end Kernel panic - not syncing ]---
+
+Sstatus: 0000000200000020
+Scause : 8000000000000005
+Stval  : 0000000000000000
+Sepc   : ffffffff800af14e
+
+Registers:
+  ra  : ffffffff803701d0  sp  : ffffffd60171ef30  gp  : 000000000001a800  tp  : ffffffd6016d8000  
+  t0  : 0000000000000008  t1  : 000000000000000a  t2  : 000000000098967f  s0  : ffffffd60171f060  
+  s1  : 0000000000000000  a0  : ffffffd60171f068  a1  : ffffffd60171ef48  a2  : 00000000000000f8  
+  a3  : ffffffd60171ef48  a4  : ffffffd60171f040  a5  : 0000000000000000  a6  : 0000000000000000  
+  a7  : ffffffd60171f00e  s2  : 0000000000000000  s3  : 0000000000000000  s4  : 0000000000000000  
+  s5  : 0000000000000000  s6  : 0000000000000000  s7  : 0000000000000000  s8  : 0000000000000000  
+  s9  : 0000000000000000  s10 : 0000000000000000  s11 : 0000000000000000  t3  : 0000000000000a80  
+  t4  : 0000000000000038  t5  : 0000000000000036  t6  : 0000000000000032  
+
+Call Trace:
+  [<ffffffff8036fc64>] rux::dfx::backtrace::dump_stack+0x1c/0xdc (current)
+  [<ffffffd60171f0f0>] ?
+
+
+=== sf2 session-11 adjudication notes (appended) ===
+Boot: fleet-rv64-rux f75a24b2 (main 488528dc + ec68f275), fsfuzz private
+rootfs, dfx=periodic,memwatch,watchdog,taskdump, 300s window.
+
+Timeline: clone-gate ENOMEM storm begins at heap free ~= 2.9MB (forks
+refused), FSFUZZ-BEAT 3392-3456, then ALLOCTHROW size=65537 align=1
+(the read/write staging-buffer class, RW_CHUNK=65536 -> the 65537 is a
+len+1 capacity, exact site not yet pinned) -> SIGKILL pid 1 ->
+second ALLOCTHROW 8192 (task-context, TIF_MEMDIE latch -> panic path)
+-> klogd pid 301 ALLOCTHROW 2688 -> machine down.
+
+Census at death: MEM heap 131068K/131072K, a=31926 f=28732
+(~3194 LIVE raw allocations holding ~128MB, avg ~= 41KB each),
+pages u=55879 r=55873. Small-alloc classes hold only a few MB.
+
+Open: (1) the ~3k live 41KB-class objects are unidentified — fork
+children (700/round x stack+fdtable), held pipes' rings, or a
+raw-syscall path retaining a length-derived buffer; (2) rawframes
+printed by the throw did not symbolize (no-symbol addresses, fp-chain
+quality on the IRQ stack suspect) — a fresh capture with a
+backtrace-enabled build is owed; (3) policy question for the
+coordinator: heap exhaustion in irq context panics by design (the
+task-kill defense cannot run there) — acceptable, but the underlying
+128MB fixed-heap exhaustion under a single fuzz process reproduces
+EVERY round since r8 (~100 repros) and almost certainly affects pure
+main too (ec68f275 is allocation-neutral).
