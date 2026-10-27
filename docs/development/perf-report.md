@@ -2184,3 +2184,201 @@ load-gated watcher run/pa72-reanchor.sh holds the board unbanked —
 bank only if load1<=9 AND qemus<=8 opens before the leg ends);
 (4) F4 arm-1 re-queued behind the fs fix (unchanged); (5) Tier-2
 gate anchor unchanged (pb1 DEBUG column).
+
+### 8.10.16 Leg 47 (2026-10-28): the PREEMPT-UNDERFLOW attribution is REFUTED by direct A/B — the waitid-cluster class pre-dates the 488528dc->979fde80 delta and D-7 cannot produce it; leak-origin sites captured on the pre-delta kernel; AF_UNIX read(2) direct user-drain carried to A/B
+
+Main 0f806d8b merged at leg start (b84eba6f). Priority 1 was the
+coordinator-routed triage of stress-fleet s12's finding (PREEMPT-UNDERFLOW
+on waitid/ptrace rows, suspected on the D-7 percpu rework via the
+488528dc->979fde80 delta). Full evidence file:
+run/pa73-preempt-underflow-triage.txt.
+
+**(1) The prints are the heal's own guard-unpair report, not a new
+producer.** Every cluster in the stress lane's r17 logs is
+`PREEMPT-HEAL was=0x10001 held=~0x3f0` followed by the underflow at
+that same guard's drop — the exact "documented guard-unpair path"
+their session-3 verdict banked. was=0x10001 = one PREEMPT bit + the
+tick's own in-flight HARDIRQ_OFFSET; held ~1008 jiffies = the heal's
+10 s threshold.
+
+**(2) The wedge pre-dates the delta.** Fleet ltp-b r66 (v16-class
+kernel, main ancestor 47d96961 = Oct 25, before 488528dc existed)
+carries the identical class: 142 heals + 101 underflows, wedged pid
+0x525 = the SAME test's parent (waitid08), PREEMPT-LEAK pctick=1
+samples whose RIPs symbolize into `do_wait`'s
+`for_each_group_child` scan loop. Fleet rounds r51-r65 tally
+PREEMPT-LEAK routinely (r56/r57 in the thousands) on pre-delta
+kernels.
+
+**(3) Direct A/B on both range ends (pa73, 2026-10-28 02:33, three
+concurrent arms, sweepstart=1290, same LTP rootfs):**
+
+| arm | kernel | heals | underflows | dominant shape |
+|---|---|---|---|---|
+| pa73a | 0f806d8b (tip) | 136 | 134 | 37P/3F/5TCONF/6TO, pid=0x251 PROCESS_TREE_LOCK |
+| pa73b | 488528dc (pre-delta) | 148 | 147 | 38P/3F/5TCONF/5TO, pid=0x251 PROCESS_TREE_LOCK |
+| pa73c | 488528dc + leakhunt/wwcensus | 146 | 146 | same pid/lock class |
+
+Same pids (the waitid08 parent 0x251 dominant in every arm), same lock
+(both addresses symbolize to task.rs:33), same shape — and the
+PRE-DELTA kernel fired MORE heals than the tip (148 vs 136; stochastic
+wedge variance). LTP row outcomes equivalent between arms (one TIMEOUT
+apart). The delta is exonerated as the origin; the s12 r11/r12 "zero"
+control was a stochastic miss (their own r64/r65 vs r66 flake the same
+way on one kernel).
+
+**(4) D-7 is exonerated by mechanism.** CpuLocal::with touches only
+the IRQ flag (save_and_disable_irq/restore) and a per-row in_use
+flag; it never adds/subtracts preempt_count. The small_alloc
+conversion kept identical irq windows and fallbacks (diff-verified
+488528dc..979fde80). The s12 "D-7 per-CPU preempt-count carrier"
+description does not match the code — there is no preempt-count
+carrier in D-7.
+
+**(5) Mechanism + handoff.** A leaked/abandoned PREEMPT +1 (the
+standing wildwrite-hunt producer) makes the holder un-sleepable
+(__schedule refuses a nonzero count); in do_wait the task then spins
+the children-scan loop monopolizing its CPU until the 10 s tick heal
+clears the base; if the heal lands inside a live guard window, that
+guard's drop books -1 on zero = the underflow print. LTP rows are
+unaffected (their own byte-identical failure-set A/B). pa73c's
+dfx=leakhunt+wwcensus boot captured the acquire sites on the
+PRE-DELTA kernel: sched.rs:4124 (dequeue_if_enqueued's
+grq().lock_irqsave), wait.rs:361 (finish_wait's list lock_irqsave),
+spinlock.rs:292 — all do_wait-machinery guard scopes, cnt_after=1
+with the drop overdue. Capture preserved at
+run/pa73-underflow/serial-pa73c.log; the producer hunt stays the
+stress lane's (their instrument, their hunt — now with a kernel-free
+fingerprint on 488528dc).
+
+**(6) AF_UNIX read(2) direct user-drain (leg 46's lever, WIP
+2f66b0b8): A/B banked — PARTIAL WIN, gate PASS.** Kernels:
+run/pa74-{main,branch}-strong-bzImage (0f806d8b vs +drain, distinct
+hashes). (a) Deterministic samecpu pin windows (p5longpin, the
+leg-46 discriminators): pin_r64 42.051 -> 35.793 us (-14.9%) and
+pin_r4k 42.521 -> 35.783 (-15.9%) — the serialized read-drain class
+IMPROVED and the pin_r4k chunk-multiplier warning did NOT
+materialize; pin_recv64 5.708 -> 4.668 and spread_r64 4.236 -> 4.668
+(untouched paths, noise band). The leg-46 hoped regime FLIP to the
+5-8 us class did NOT happen: removing the staged alloc + double copy
+buys exactly that share (~6 us) of the receiver's cycle; the residual
+~36 us is the wake->drain->re-block handoff cycle itself — that
+floor belongs to the sched lane's regime-flipper thread, not to
+receive-path staging. (b) Board pairs (M,B,B,M interleaved at load
+17-21 — REJECTED: a host spike spanned both B boots, proven by the
+untouched p5c3_stream_wrecv reading +44% on B; then two clean pairs
+5M/6B and 7M/8B at load ~12): every P5 row within +-20% or improved —
+p5c2_stream_send -1.2%/-8.4%, p5d_rt_read -7.7%/-7.7% (consistent),
+p5c3 +3.2%/-4.2%, p5a +2.5%/-4.5%, p5b -1.6..-7.7%, p5e +6.7%/-2.7%,
+p5f -2.7%/-9.9%. Non-IPC scatter rows (p2_ctxsw +39.7%/+14.6%,
+p6_append +49.2%/-2.8%, p6_unlink +39.6%/-13.6%) flip sign across
+pairs and execute no socket code — adjudicated host noise per the
+session-11/stress-s12 interleaving method; p1_clock ran -7%/-14%
+FASTER on B in the same windows. IPC-domain gate: PASS.
+Correctness gates: dual-arch build rc=0; riscv64 smoke boot 0 panics
+(run/rv-smoke-leg47.sh); `make test` ALL TESTS PASSED on the drain
+kernel; dgram one-record-per-read and O_NONBLOCK/EAGAIN/EOF
+semantics preserved by construction (same unix_recv_ctl engine,
+nonblocking continuations after the first byte).
+
+Gates so far this leg: dual-arch build rc=0 (riscv64 debug + x86_64
+strong on both range ends and the branch tip); QEMU discipline held
+(2-3 lane boots at a time, own PIDs only, mem floor >=36G throughout,
+boots launched only after the 60-min leg-start hold).
+
+**D-7 row re-anchor BANKED (pa75q, 2026-10-28 04:01-04:05).** The
+quiet window the leg began without (OH gate chain held it until
+~03:43) opened at 04:01 (load1<=9, qemus<=8); the watcher
+(run/pa75-reanchor.sh, leg-46 discipline) banked ONE full board on
+the merged-main strong kernel (run/pa74-main-strong-bzImage =
+0f806d8b), rc=0, zero panics, load1=9 at boot end. Key quiet-window
+rows for the standing D-7/p5b regime questions: p1_null 0.611 /
+p1_clock 0.692 / p2_ctxsw 1.373 (the noisy rows settle to their
+quiet class — ctxsw 1.37 vs 1.9-2.0 loaded); p5a_pipe 2.435;
+p5b_dgram_send 5.061 / p5b_dgram_recv_peek 5.943 (the FAST dgram
+regime — quiet windows keep both CPUs effectively free);
+p5c_stream_write 38.745 / p5c2_stream_send 38.604 / p5f 38.224
+(the cross-process serialized class persists even quiet — intrinsic
+to the board's own pairing on SMP2, consistent with 8.10.15's
+same-CPU-serialization verdict); p5c3 4.700, p5d_rt_read 4.670,
+p5d_rt_recv 4.881, p5e_stream_send 4.229; p6_stat 16.165,
+p6_append 80.516, p6_unlink 15980, p6_mkdrmdir 51939, p7_sleep1ms
+932.4. Serial: work/pbench-pa75q-serial.log.
+
+### 8.10.17 Leg 48 (2026-10-28): main 584c1105 merged; the AF_UNIX drain re-gated against the NEW main — IPC gate PASS, ready for merge; p2_ctxsw anchor provenance banked
+
+The leg opened with pa74 (d30f40de) and the pa75q D-7 re-anchor
+(a90f46f0) already committed — leg-47 banked both at 04:11 before the
+quota kill. Remaining was exactly the mission: main had moved
+0f806d8b -> 584c1105 (pipe close fix, console cond_resched cfe0b7c4,
+binder BR_SPAWN_LOOPER/oneway set, leakhunt v3 + slowtask instruments),
+and the console cond_resched change touches serial-burst scheduling —
+the leg-47 A/B anchor was stale for a ready-for-merge verdict.
+
+**Merge + correctness gates (branch tip 9baf390a = 584c1105 +
+drain):** merge clean (no conflicts; branch delta vs main is exactly
+net/unix.rs +145, syscall/io.rs +18, docs, run scripts). Dual-arch
+build rc=0 (x86_64 debug, riscv64 debug). riscv64 minimal-rootfs smoke
+(run/rv-smoke-leg48.sh): 0 panics, suite green in the 150s window.
+`make test`: "All tests passed! Total: 1122 tests" (suite grew with
+main's additions; the make target's nonzero exit is its own timeout
+reaping the parked post-halt QEMU — the in-log verdict is green, same
+pattern the smoke script tolerates by construction).
+
+**pa77 re-gate A/B (kernels run/pa77-{main,branch}-strong-bzImage,
+distinct hashes; M = pure 584c1105, B = tip 9baf390a; driver
+run/pa77-pair.sh; boots 06:54-07:16, load1 9-11 at boot starts, all
+six rc=0, zero panics).**
+
+Deterministic samecpu pin windows (adjacent M,B):
+pin_r64 38.381 -> 36.230 (-5.6%), pin_r4k 37.870 -> 37.042 (-2.2%),
+untouched pin_recv64 5.101 -> 5.242 (+2.8%), spread_r64 5.221 ->
+4.400 (-15.7%) — all in band, target rows improved. NOTE: the leg-47
+-15% pin deltas shrank to -2..-6% because the NEW main itself reads
+~4 us faster in those windows (42.1 -> 38.4 pin_r64) — the console
+cond_resched fix plausibly removed a share of the same serialized
+cost the drain lever attacks. The lever still never regresses a row.
+
+Interleaved board pairs (1M,2B fast-dgram regime; 3B,4M slow regime —
+each pair regime-coherent, the documented p5b bimodality fell between
+pairs, not inside one):
+
+| row | pair1 B-vs-M | pair2 B-vs-M |
+|---|---|---|
+| p5a_pipe | +2.9% | (absent in 3B) |
+| p5b_dgram_send | +5.8% | +3.6% |
+| p5b_dgram_recv_peek | +14.3% | +3.8% |
+| p5d_rt_read (lever target) | -3.1% | -3.4% |
+| p5e_stream_send | (absent in 1M; 2B 4.500 vs 3B 4.490 flat) | |
+| p5e_child_spin | +2.3% | +1.9% |
+| p5c3_stream_wrecv | 2B-only 5.081 (no M co-occurrence; vs pa75q quiet 4.700 = +8.1%) | |
+
+Every P5 row within +-20% or improved; p5d_rt_read consistently
+improved in both pairs (the read(2)-shaped row the lever targets).
+Watch row: p2_ctxsw reads +8.9%/+9.7% on B in both pairs — within the
++-20% scheduling band and inside the documented loaded-window class
+(1.34-1.53 us vs quiet anchor 1.373; loaded ceiling ~2.0), the row
+executes no socket code, and B boots started at load1=9 vs M boots'
+11 (not load-order-explained) — two pairs cannot separate a ~0.13 us
+absolute move from LTO layout shift; flagged for the next board that
+co-occurs the row, not a gate failure.
+
+**Verdict: the AF_UNIX read(2) direct user-drain (2f66b0b8 code,
+d30f40de leg-47 verdict) is READY FOR MERGE at tip 9baf390a** —
+correctness gates green, IPC domain gate PASS against the current
+main anchor with regime-coherent interleaved pairs, target rows
+improved in every interpretable window.
+
+**p2_ctxsw anchor provenance banked** (the standing debt):
+docs/development/perf-gate-baseline.md now carries the P2_CTXSW
+ANCHOR PROVENANCE note — the scheduling domain row is profile-bimodal
+(DEBUG: pb1 15.409 us, what run/perf-gate.sh's anchor JSON carries;
+RELEASE-STRONG: pa41-strong 1.383 us re-banked quiet by pa75q at
+1.373 us, loaded class 1.9-2.0 us) and strong-class gate runs must
+never be judged against the 15.4 debug cell. The pa77 board's own
+p2_ctxsw readings (1.338-1.533 across both arms at load1 9-11) sit
+inside the strong loaded band — consistent with the anchor.
+
+Host discipline: boots strictly sequential (one lane QEMU at a time,
+never above 1), own PIDs only, mem floor >=45G observed throughout, boots interleaved
+around the unattended stress-fleet rounds (4-8 foreign QEMUs).
