@@ -2285,3 +2285,22 @@ Gates so far this leg: dual-arch build rc=0 (riscv64 debug + x86_64
 strong on both range ends and the branch tip); QEMU discipline held
 (2-3 lane boots at a time, own PIDs only, mem floor >=36G throughout,
 boots launched only after the 60-min leg-start hold).
+
+**D-7 row re-anchor BANKED (pa75q, 2026-10-28 04:01-04:05).** The
+quiet window the leg began without (OH gate chain held it until
+~03:43) opened at 04:01 (load1<=9, qemus<=8); the watcher
+(run/pa75-reanchor.sh, leg-46 discipline) banked ONE full board on
+the merged-main strong kernel (run/pa74-main-strong-bzImage =
+0f806d8b), rc=0, zero panics, load1=9 at boot end. Key quiet-window
+rows for the standing D-7/p5b regime questions: p1_null 0.611 /
+p1_clock 0.692 / p2_ctxsw 1.373 (the noisy rows settle to their
+quiet class — ctxsw 1.37 vs 1.9-2.0 loaded); p5a_pipe 2.435;
+p5b_dgram_send 5.061 / p5b_dgram_recv_peek 5.943 (the FAST dgram
+regime — quiet windows keep both CPUs effectively free);
+p5c_stream_write 38.745 / p5c2_stream_send 38.604 / p5f 38.224
+(the cross-process serialized class persists even quiet — intrinsic
+to the board's own pairing on SMP2, consistent with 8.10.15's
+same-CPU-serialization verdict); p5c3 4.700, p5d_rt_read 4.670,
+p5d_rt_recv 4.881, p5e_stream_send 4.229; p6_stat 16.165,
+p6_append 80.516, p6_unlink 15980, p6_mkdrmdir 51939, p7_sleep1ms
+932.4. Serial: work/pbench-pa75q-serial.log.
