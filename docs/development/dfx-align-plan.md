@@ -119,12 +119,12 @@ incomplete or non-reference shape · **--** = absent.
 | Crash | panic handler, `Call Trace:` | PART | banner is the reference kernel's (`Kernel panic - not syncing`); the message sits on its own `PANIC:` line instead of inline; frames symbolized since Tranche 3 |
 | Crash | `Oops` (non-fatal) | OK | T5b: reference-shaped report, task-death policy, pstore dmesg flavor |
 | Crash | `panic=` timeout / reboot | OK | Tranche 5 Part 1 (`panic=N`/`immediate`, both arches reboot) |
-| Crash | pstore / ramoops | OK | Tranche 5: console-ramoops-0 (panic) + dmesg-ramoops-0 (oops), both arches |
+| Crash | pstore / ramoops | OK | Tranche 5 + batch 7: 4-slot record ring (console + dmesg flavors), newest-first ids, read-once removal, survival across both x86 reset paths; both arches |
 | Crash | taint flags | OK | Tranche 1: exported, the reference's letters |
 | Control | SysRq / `/proc/sysrq-trigger` | OK | Tranche 1: upstream command set |
 | Control | debugfs `/sys/kernel/debug` | OK | Tranche 1: new filesystem |
 | Control | tracefs `/sys/kernel/tracing` | OK | Tranche 4: 16 events, tracepoint! table, soak-verified |
-| Control | ftrace / kprobe / uprobe / eBPF / perf | PART | Tranche 4 tracepoints + nop tracer; perf software-clock sampling (`PERF_TYPE_SOFTWARE` cpu/task-clock, `sample_period`, `PERF_SAMPLE_IP` via `read(2)`) landed 2026-10-27; probes/hw events/rings still `ENOSYS`/`EINVAL` |
+| Control | ftrace / kprobe / uprobe / eBPF / perf | PART | Tranche 4 tracepoints + nop tracer (18 events incl. kmem:kmalloc/kfree with the call_site origin); perf software-clock sampling (`PERF_TYPE_SOFTWARE` cpu/task-clock, `sample_period`, `PERF_SAMPLE_IP` + `PERF_SAMPLE_CALLCHAIN` via `read(2)`) landed 2026-10-27; probes/hw events/rings still `ENOSYS`/`EINVAL` |
 | Control | runtime-switchable knobs | OK | Tranche 1: debugfs knobs |
 | Symbols | `/proc/kallsyms` | OK | Tranche 3: full table, default-on (LAYOUT-3) |
 | Symbols | runtime backtrace symbolization | OK | Tranche 3: name+off/size, `?` for non-text |
@@ -405,6 +405,38 @@ it:
   at the BinderTxn construction, the BR read-out, the buffer carve and
   the free chokepoint.
 
+**Done (kmem family, batch 3 2026-10-27 — the alloc-origin events the
+heap-leak hunts read).** This host's tracefs DOES carry
+`events/kmem/{kmalloc,kfree,kmem_cache_alloc,kmem_cache_free,...}`
+(ABI-shaped, `call_site=%pS` origin), so the reference-shaped subset
+landed rather than a parallel interface:
+
+- `kmem:kmalloc` / `kmem:kfree` — the host's field rows and print
+  fmts byte-verbatim (the kmalloc blob's full `__print_flags`
+  expression included, spliced from the live format file and
+  round-trip-verified against it). Sites: the `GlobalAlloc`
+  chokepoint (`mm/buddy_allocator.rs`) — the small-object fast path's
+  return, the buddy path's return, and `dealloc` entry (before the
+  deferred-free interception decides, like the reference's
+  kfree-entry site). `bytes_alloc` is the true serving size (the
+  kmalloc-8..1024 class for small objects — the same bin family the
+  reference's kmalloc caches use — or the buddy block), `gfp_flags`
+  renders `GFP_KERNEL` (Rux's allocator takes no mask; the honest
+  analog of a plain kernel allocation), `node=-1`, `accounted=false`.
+- `call_site` is the ORIGIN: the frame walk at the allocation
+  boundary, first frame above the `__rust_alloc` plumbing
+  (`trace::alloc_call_site` — the reference's `_RET_IP_` semantic),
+  rendered `%pS`-symbolized through the Tranche-3 table. Disabled
+  cost is one branch (the `armed()` contract); armed, one bounded
+  4-frame walk.
+- `kmem_cache_alloc`/`kmem_cache_free` are deliberately NOT emitted:
+  Rux has no named-cache API, and the events' `name=` column would
+  have to be invented; the class surfaces through kmalloc's
+  `bytes_alloc` instead.
+- Guest-verified (`test/trace-kmem-smoke.sh`): the format files, the
+  recorded lines in the reference geometry, the symbolized origin
+  column, the group 0/1 switches.
+
 Verified in-guest (`test/trace-smoke2.sh`, 12/12): the 16-event
 table, the six new format files, recorded lines in the reference
 geometry for both families, and the group 1/0/X mixed states. One
@@ -569,6 +601,53 @@ scheme rests on, verified by the reboot cycle itself.
   (`panic=`, sysrq b, kreset) was broken by the stale BSS, not just
   pstore.
 
+**Multi-record depth + full /sys/fs/pstore semantics (batch 7,
+2026-10-27).** The one-record region became the reference's
+multi-dump shape:
+
+- **Ring of N records.** The 128 KiB region tiles into four 32 KiB
+  slots. Each slot header carries the reference
+  `struct persistent_ram_buffer` shape (`sig`/`start`/`size`) plus
+  the fields a slot ring needs: a persistent sequence number
+  (max(live)+1 per capture — deterministic ordering across reboots),
+  the flavor, jiffies, a format version, and an additive payload
+  checksum (the reference buys torn-write detection with ECC; the sig
+  is still written LAST so a crash mid-capture leaves no half-slot).
+  A capture takes the first dead slot, else the oldest sequence — the
+  reference's zone-reuse rule.
+- **Boot-time scan is non-destructive.** `early_scan` validates every
+  slot (sig, version, size sane, checksum) and announces each live
+  record newest-first — an UNREAD record survives clean reboots now,
+  the reference's contract (the old scheme cleared the magic at scan;
+  read-once removal takes over that role).
+- **Read once.** A record file that was read and closed is consumed:
+  the slot's signature dies, the file leaves the directory listing,
+  and the attribute turns dead so even a stale cached VFS dentry
+  answers ENOENT (the reference unlinks at erase; one deliberate
+  softening — the erase fires on close only when that open read
+  bytes, so a bare open/stat cannot destroy evidence).
+- **Enumeration.** Files are `console-ramoops-N` / `dmesg-ramoops-N`
+  with id 0 = newest of its flavor — the reference multi-dump
+  directory's observable convention, deterministic here through the
+  persistent sequence numbers.
+- **Both x86_64 reset paths verified in isolation.** The new
+  `reset-method` debugfs knob (`/sys/kernel/debug/dfx/reset-method`,
+  x86_64) pins the panic-reset repertoire: `8042` = keyboard pulse
+  only (parks loudly if the platform ignores it), `triplefault` =
+  NULL-IDT fault only, `cascade` = the default repertoire. The
+  pstore-x86 smoke now runs THREE boots: crash by pulse, crash by
+  triple fault, then reads BOTH records back (each record's console
+  tail carries its own boot's pin line — identity proven, not
+  assumed) and verifies the read-once consumption.
+- Guest-verified: riscv64 `test/pstore-smoke.sh` 11/11 (two crashes →
+  two records, newest-first ids, monowatch marker in boot2's tail
+  only, read-once removal, empty directory at the end); x86_64
+  `test/pstore-x86-smoke.sh` (record survives the 8042 pulse AND the
+  triple fault; boot-identity markers; read-once ENOENT). One probe
+  lesson banked: the printk syslog headers render kernel-thread comms
+  as NUL bytes, so record greps must be bounded (memmem), not
+  NUL-terminated strstr.
+
 Acceptance: `panic=5` reboots the guest within five seconds of a
 panic; the next boot shows the previous panic's registers.
 
@@ -628,6 +707,24 @@ lane's pbench can consume in-guest. The choice:
   column. Evidence: `run/evidence/2026-10-26-b5-schedstat-ab.txt`. The
   disabled cost (one relaxed load per edge) rides the Tier-1 quiet-boot
   census rows.
+
+**PERF_SAMPLE_CALLCHAIN slice (2026-10-27).** `sample_type` now also
+accepts `PERF_SAMPLE_IP | PERF_SAMPLE_CALLCHAIN`: sample records grow
+the ABI's callchain section — `nr`, then the
+`PERF_CONTEXT_KERNEL` marker and the walked kernel return addresses.
+The chain is captured in the HARD timer IRQ (the reference walks in
+the hrtimer overflow callback — the same context discipline:
+softirq-time is too late, the stack has moved on): `note_tick` also
+stashes the interrupted frame pointer and walks it there, bounded at
+16 frames, only while some open event wants chains (a second static
+gate — the per-tick cost with no callchain reader stays one relaxed
+load). User-mode samples carry an honest `nr=0` (Rux has no
+user-stack walker; the reference's user-chain machinery stays open).
+Records became variable-length — the drain reads each record's own
+`perf_event_header.size` — so IP-only and chain records interleave in
+one queue. Guest-verified (`test/perf-smoke.sh`): kernel samples
+return marker+frames, user samples return nr=0, the error matrix and
+IP-only paths unchanged.
 
 The rest of Tranche 7 (the full microbench comparison report) belongs
 to the perf lane; the DFX lane's remaining stake is whatever counter

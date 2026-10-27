@@ -1,0 +1,88 @@
+DFX lane batch 7 evidence — 2026-10-27 (branch feature/dfx-align, worktree dfx-align)
+
+Mission legs: pstore hardening (multi-record ring, both x86 reset
+paths, /sys/fs/pstore semantics), kmem tracepoint evaluation +
+subset, perf_event_open PERF_SAMPLE_CALLCHAIN.
+
+================================================================
+1. pstore multi-record ring + read-once semantics (riscv64)
+================================================================
+test/pstore-smoke.sh — one QEMU, three boots (sysrq-c, sysrq-c, read):
+  PASS 11/11 (serial: run/pstore-smoke-serial.log)
+  - two records on boot 3: console-ramoops-0 (newest, boot 2's crash,
+    2344 B) + console-ramoops-1 (boot 1's, 2125 B)
+  - newest-first id mapping verified by CONTENT (boot-2-only
+    "runtime switch 'monowatch' enabled" printk line present in -0,
+    absent in -1; a shell echo never enters the printk ring — the
+    marker must come from a kernel printk)
+  - read-once: cp of -0 consumes it (directory then lists only -1);
+    cp of -1 empties the directory
+  - mode 0444 on both files
+
+================================================================
+2. pstore reset-path survival (x86_64, q35)
+================================================================
+test/pstore-x86-smoke.sh — one QEMU, three boots:
+  PASS 15/15 (serial: run/pstore-x86-serial.log)
+  - boot 1: reset pinned to 8042 pulse -> crash -> pulse reset
+  - boot 2: reset pinned to triple fault -> crash -> NULL-IDT reset
+  - boot 3: BOTH records resurfaced; newest = boot 2's (its tail
+    carries "reset method pinned to triplefault"), oldest = boot 1's
+    ("pinned to 8042") — survival across EACH reset path proven with
+    record identity, not assumed
+  - read-once: re-open of the consumed file answers ENOENT; the
+    directory is empty after both reads
+  Note: the record tail's syslog headers carry NUL bytes (kernel
+    thread comms) — probes must search bounded (memmem), not strstr.
+
+================================================================
+3. kmem tracepoints (riscv64)
+================================================================
+test/trace-kmem-smoke.sh:
+  PASS 11/11 (serial: run/trace-kmem-serial.log)
+  - format files byte-verbatim from this host's tracefs (the kmalloc
+    print fmt's full __print_flags blob spliced programmatically and
+    round-trip-verified == host bytes)
+  - recorded lines in the reference geometry, e.g.
+    kmalloc: call_site=rux::vfs... ptr=0xffffffd6017350b8 bytes_req=6
+            bytes_alloc=8 gfp_flags=GFP_KERNEL node=-1 accounted=false
+  - call_site = the kernel site: the frame walk skips the whole
+    allocation plumbing (GlobalAlloc impl, __rustc::__rust_alloc shim,
+    alloc-crate machinery incl. "<alloc::..." trait impls) and prefers
+    the first rux:: frame; rendered %pS through the kallsyms table
+  - the kmem group enable reads 0 then 1
+  Disabled-path cost at the three GlobalAlloc sites: one branch
+  (event.armed() = two relaxed loads), the tracepoint contract.
+
+================================================================
+4. perf PERF_SAMPLE_CALLCHAIN (riscv64)
+================================================================
+test/perf-smoke.sh:
+  PASS 15/15 (serial: run/perf-smoke-serial.log)
+  - kernel samples: variable-length records, nr = 1 + frames,
+    ips[0] == PERF_CONTEXT_KERNEL (0xffffffffffffff00), then kernel
+    return addresses (captured in the HARD timer IRQ — the reference's
+    hrtimer-callback context discipline)
+  - user samples: nr = 0 (honest empty — no user-stack walker)
+  - IP-only records interleave with chain records in one queue (the
+    drain reads each record's own header size)
+  - error matrix unchanged: extra sample bits still EINVAL,
+    IP|CALLCHAIN accepted, freq/inherit/groups still refused
+  - serial clean (no panic/Oops/BUG)
+
+================================================================
+5. Gates
+================================================================
+- dual-arch build: rc=0 both (riscv64 + x86_64, post-all-changes)
+- riscv64 regression boot (test/serialclean-boot.py): scripted
+  ls /proc + cat /proc/loadavg + sync completed, ZERO panic/Oops/BUG
+  (run/regress-b7-serial.log)
+- make test: see milestone report (suite green; count in report)
+- Tier-1/Tier-2 perf: NOT re-measured in this batch (loaded host,
+  15+ foreign QEMUs through the window). Touched hot paths: the three
+  GlobalAlloc armed()-only branches (mm/ guarded domain), note_tick's
+  extra stash stores + the callchain walk behind its own static
+  (timer/IRQ guarded domain), sysfs close's read_any/erase checks.
+  The disabled-path additions are loads/branches only, same class as
+  the existing tracepoint sites; the quiet-window syscost census and
+  pbench rows belong to the coordinator's merge-gate run.
