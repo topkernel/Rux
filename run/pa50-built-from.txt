@@ -1,0 +1,1 @@
+kernel: PURE main ddb3ed01 (worktree pa50-main), x86_64 debug, built 2026-10-25 15:08:58

@@ -1,0 +1,14 @@
+pa46 series — leg-34 (perf-audit) census-gate pair
+==================================================
+Boot class: q35 KVM smp2 4G syscost quiet boot (pa-boot.sh, 780s,
+APPEND_EXTRA="syscost=1 sprobe=0") — the Tier-1 census channel.
+Kernels (debug profile, the class the census bands were banked on):
+  pa46-main-bzImage   git 47d96961 (origin/main: panic= param; incl.
+                      de41d5ab OH-six: census-peek v3 + censusat=,
+                      KILLDUMP pinning x2, binder stale-async reclaim)
+  pa46-f4r2-bzImage   git 9660dc13 = 47d96961 + cherry-pick fd23662a
+                      (F4-R2 ext4 free-counter deferral, route 2)
+Built in worktrees /home/william/rux-agents/pa46-main and pa46-f4r2.
+Hashes:
+ab9fcdd30dc59dfdcb660ffb85e2a8e52781f4a70dd70273a4132951bd2b8d20  run/pa46-main-bzImage
+d385a61f306db7258f24359ea9dd93d3b2e4dc9e3f5d09d09f22195b235af1ad  run/pa46-f4r2-bzImage
