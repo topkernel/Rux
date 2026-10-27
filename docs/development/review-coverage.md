@@ -23,8 +23,8 @@ when the tree gains a file the map does not know about.
 | source files in kernel/src | 399 |
 | source lines in kernel/src | 249,453 |
 | files fully reviewed | 20 |
-| files partially reviewed | 75 |
-| files not yet reviewed | 304 |
+| files partially reviewed | 78 |
+| files not yet reviewed | 301 |
 | lines in fully reviewed files | 4,676 |
 
 ## Defects found and fixed
@@ -54,7 +54,7 @@ when the tree gains a file the map does not know about.
 | `print.rs` | 73 | ⬜ |  |
 | `printk.rs` | 1850 | 🔶 | ring buffer, console level |
 | `sbi.rs` | 134 | ⬜ |  |
-| `signal.rs` | 2665 | ⬜ |  |
+| `signal.rs` | 2665 | 🔶 | flush_handlers 处置重置语义 |
 | `timer.rs` | 1037 | ⬜ |  |
 
 ### kernel/src/arch (60 lines)
@@ -120,7 +120,7 @@ when the tree gains a file the map does not know about.
 | `exception.rs` | 718 | ⬜ |  |
 | `fixmap.rs` | 267 | ⬜ |  |
 | `memory_layout.rs` | 552 | 🔶 | image window constants |
-| `mm_ops.rs` | 2471 | ⬜ |  |
+| `mm_ops.rs` | 2471 | 🔶 | COW 故障快/慢路径、PTE 权限检查 |
 | `mmu_init.rs` | 2162 | 🔶 | kernel image mapping |
 | `mod.rs` | 53 | ⬜ |  |
 | `page_fault.rs` | 1597 | ⬜ |  |
@@ -488,7 +488,7 @@ when the tree gains a file the map does not know about.
 | file | lines | status | note |
 |---|---:|---|---|
 | `coredump.rs` | 591 | ⬜ |  |
-| `exec.rs` | 1410 | ⬜ |  |
+| `exec.rs` | 1410 | 🔶 | exec 的信号处置/掩码复位 |
 | `exit.rs` | 1929 | ⬜ |  |
 | `fork.rs` | 947 | 🔶 | task creation paths |
 | `kthread.rs` | 274 | ⬜ |  |
