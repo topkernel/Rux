@@ -75,11 +75,16 @@ boot_cmd() { # prints the full qemu argv, %q-quoted for exact eval round-trip
         # KIMG override lets a session roll a candidate kernel to a
         # subset of members before fleet-wide adoption (session-3
         # refresh protocol: merged-tree kernel goes to one member first).
-        local start=$(( (RANDOM * 32768 + RANDOM) % 1080 ))
+        # START override (s14): aim a round at a known wedge-prone sweep
+        # region instead of the random draw (default stays random).
+        # DFX override (s14): arm extra probes on a canary member
+        # (default unchanged: watchdog,taskdump).
+        local start
+        if [ -n "${START:-}" ]; then start="$START"; else start=$(( (RANDOM * 32768 + RANDOM) % 1080 )); fi
         rv_common "$serial"
         rv_drive "$IMG/fleet-ltp-rootfs.img" rootfs
         CMD+=(-kernel "${KIMG:-$IMG/fleet-rv64-rux}"
-              -append "root=/dev/vda rw init=/test/sweep console=ttyS0 sweepstart=$start dfx=watchdog,taskdump roundtag=$MEMBER-r$round")
+              -append "root=/dev/vda rw init=/test/sweep console=ttyS0 sweepstart=$start dfx=${DFX:-watchdog,taskdump} roundtag=$MEMBER-r$round")
         ;;
     ltpm)
         # current-main kernel member: same LTP sweep surface, kernel
