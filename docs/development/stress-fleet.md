@@ -1235,3 +1235,16 @@ blocking-wait syscalls in a raw pool need bounded timeout draws.
   (madvise range validation only, no pbench row calls madvise) shows
   no measurable effect. Tier-2 PASS by paired A/B; anchor-relative
   FAILs are host-load inflation common to both kernels.
+
+### Session-11 late adjudications
+
+- modchurn r4 (OOPS=8) / r5 (OOPS=1): 10 s soft-lockup CPU#0 with
+  TIMER-LATE-FIRE 26ms->400ms during the donor phase — fired exactly
+  in the 18:00-19:10 host window at load 16-21 (all lanes
+  gate-booting). Host-CPU starvation of a TCG vCPU, the documented
+  flake class; r1-r3 clean at lower load. If a soft lockup recurs on
+  modchurn at load1 < 10, treat as a kernel lead (rerun-in-isolation
+  rule).
+- fsfuzz r109+ rounds classify CRITICAL (ALLOCTHROW) under the fixed
+  classifier — the member doubles as the standing repro for the heap
+  exhaustion until that bug is fixed.
