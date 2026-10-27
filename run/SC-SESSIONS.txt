@@ -7034,3 +7034,115 @@ NON-probe-gradient frame.
 Lane state: branch tip a2f9f7ca (3 commits ahead of 0cd6d058); serials
 sc333B/334B/335B + userdata untracked per .gitignore; rux-sc334B-symbols
 saved for addr2line.
+
+LEG-38B (OH-B eighth leg; family B root-caused and fixed; tier-2 chain
+consumed; 03:40 close-out) — opened on branch tip c315c67b with THREE
+uncommitted files from leg-37B (quota death minutes into the
+instrument work; no LEG-37B entry exists).
+
+TRIAGE OF LEG-37B's UNCOMMITTED WORK: kept and completed, none
+discarded. fsw.rs (FREE_SEG/FREE_BLK/BITMAP_SYNC/BITMAP_SYNC_US +
+FSW3 line + hang_snapshot) and allocator.rs (note_free_seg hook +
+write_block_bitmap timing) were code-complete; ext4/mod.rs
+audit_snapshot was defined but unwired. Completed: TXN-HANG-FSW line
+in the binder audit (biglock try-lock snapshot + fsw counters at hang
+instants), keyed pathstash (8-slot tid%8 -> 128 open-addressed slots
+probed from the key, full-table exact-tid scan; the 8-slot table
+collided under boot syscall volume). Commit 9378ce1f, both arches
+rc=0.
+
+MISSION 1 — FAMILY B ROOT-CAUSED AND FIXED.
+Code level: ext4_setattr holds EXT4_BIG_LOCK for the whole truncate;
+the extent-free loop calls free_block_run per extent; every
+group-segment pays write_block_bitmap = bread + RMW +
+sync_dirty_buffer, one synchronous virtio round trip each.
+write_block_bitmap is the LAST inline sync in the path (write_inode
+left its inline sync; F4-R2 deferred the group-desc/superblock
+counters). sc336B (confirm draw, unfixed kernel, fsw=1+txnhunt,
+serial run/oh-sc336B-serial.log): FSW3 counted 2201 bitmap syncs /
+101.97 s cumulative wait in a 34.5-min boot = 46 ms average per sync
+under boot load. That maps the observed episode range exactly: 1.3 s
+episode ~ 30 segments, the 101 s sc333B episode ~ 2300 segments of a
+db file truncated-to-3 and regrown every boot. sc336B itself had NO
+code98 window (chain blocked at the family-A powermgr hang instead)
+so no bl=true/held_ms capture — the confirmation stands on the code
+path + the measured per-sync cost + the sc333B/334B/335B audits.
+
+Fix (411709a7, refined to ATTR_SIZE-only): extract the big-lock-held
+body into ext4_setattr_locked and run it under the F4 route-1 journal
+bracket (null-journal handle on a journal-less fs) — bio::
+sync_dirty_buffer defers while armed, so the bitmap writes and the
+partial-tail zero ride the standing batch points (fsync/sync,
+eviction). Route-1 came to this branch via the origin/main merge
+(8aeeb7c9): main's 22452d60 bracketed the eight namei sites but NOT
+setattr. Only ATTR_SIZE arms (other flavors' single write_inode is
+already deferred; arming them would open a jbd2 transaction per
+atime/chmod for nothing). Crash window = F4-R2 stance (write-back
+metadata, recovery = e2fsck).
+
+sc337B (fix draw, same dfx set): ZERO sys=77 TXN-HANG lines (every
+prior draw wedged 1.3-6.3 s+ per code98; sc333B 101 s). The
+launcher's code98 txn30975 arrived (POOL-TODO line) and completed
+below the audit threshold — the differential proof. 5 code98 calls,
+166 MainAbility mentions, KERNPANIC 0 / SIGABRT 0.
+
+MISSION 2 — CHAIN CONSUMED. IMPORTANT correction preserved for the
+record: my early rebuilds clobbered target/.../bzImage which the
+chain v3 gates BY PATH; rebuilt a2f9f7ca in a scratch worktree and
+restored it (md5 28c82bce) BEFORE the chain fired. Gate verdicts
+(run/perf-gate-leg36b-t2retry.log, 02:05:31): Tier-1 ALL PASS
+(census 8/32, ticks 99.5+, volume 105.9M in +-10%, clock 3us, GRQ
+5317ns, REST 5.3%); Tier-2 four rows out of band vs the pb1 smoke
+anchor — mkdrmdir 63.4ms / unlink 21.1ms / write_fsync 12.6ms all
+FASTER than the -20% floor, p2_ctxsw 21.3us SLOWER (38% over); the
+coordinator accepted the fs-faster rows as anchor-drift-consistent
+and filed p2_ctxsw as the standing load-noise class with re-anchor
+debt. Merge queue CLOSED: origin/main = 584c1105 (the OH-line fix
+set is on main). Merged into this branch as 1469555d (three
+HEAD-side-only conflicts: pool_census call in timer.rs, TXN-HANG-FSW
+in binder.rs, tickrip attribution in wakewatch.rs — main's side had
+zero occurrences of each, kept HEAD) + e55df9d5 (completed the
+c94d12f1 run/ purge the live shotmon watcher had re-created; watcher
+stopped).
+
+MISSION 3 — NO MILESTONE, ADJUDICATED. sc337B advanced the chain
+past the code98 stage (MainAbility attempts 166 vs sc333B's 141) but
+launcher.ready never set: the remaining blocker is family A
+(image-side mutual-ABBA/early-reply, kernel exonerated leg-36B).
+End-state proof of the handoff: foundation MAIN tid 805 — the code98
+handler that used to sit 101 s in ftruncate — finished the truncate
+and instead parked 27 min in a USERSPACE futex (sys=202), with 643
+TXN-HANG-OWE "reply deferred userspace-side" lines; family B is gone
+from the chain and the next wall is exactly family A.
+Screen content = 4772-color frames in bands 3-4 (bootanimation
+class, NOT probe-gradient, NOT launcher UI). Milestone definition
+unchanged for the next leg.
+
+GATES (tip e55df9d5): x86_64 rc=0, riscv64 rc=0 (post-merge tip
+kernel = run/bzImage-leg38b-tip, md5 d79b024a, byte-identical to the
+sc337B fix kernel); make test 1122/0 (run/leg38b-maketest.log; the
+post-halt single-TCG hang killed as own-PID cleanup); riscv smoke
+run/rv-smoke-leg38b2.log: 0 panics, mrsh prompt, /proc mounted (the
+first smoke attempt raced make test's rootfs.img rebuild — known
+hazard, rerun clean). Tier-1+2 on the tip: ARMED as
+run/perf-gate-leg38b-chain.sh (quiet-window watcher, 2 h deadline
+from 03:36, log run/perf-gate-leg38b.log, "gate rc=" line is the
+verdict) — host carried 8 foreign QEMUs at arm time. fs-counter
+evidence in lieu of the gate's structural fsw SKIPs: sc336B vs
+sc337B FSW3 totals are draw-noisy (alloc-path syncs are untouched by
+design; host load varied 1->15 QEMUs across the draws) — the
+family-B-specific signal is the sys=77 hang disappearance, not
+global bs totals.
+
+NEXT LEG: (1) read run/perf-gate-leg38b.log "gate rc=" and consume
+the tip verdicts (merge candidate = e55df9d5); (2) family A remains
+the launcher-UI gate — image-side mitigation design (user-stack
+parkdump instrument from the leg-36B next-leg list) is the unblocked
+work; (3) p2_ctxsw re-anchor debt on main.
+Lane state: branch tip e55df9d5, 6 commits ahead of 584c1105's
+merge-base line (9378ce1f instruments, 8aeeb7c9 merge, 411709a7 fix,
+1469555d merge, e55df9d5 purge); kernels run/bzImage-leg38b-confirm
+(unfixed, instruments) and run/bzImage-leg38b-tip (fix); serials
+sc336B/sc337B untracked per ignore patterns; scratch worktree
+/home/william/rux-agents/sc38b-gatekernel still exists (a2f9f7ca
+build, safe to remove); gate watcher PID 367148 running.
