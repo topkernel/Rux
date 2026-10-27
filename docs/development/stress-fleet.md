@@ -1962,14 +1962,20 @@ test rerun, memstorm r24.
 
 ### Fleet state / queue (s15 close)
 
-- ltp-b r6 (19de1371, START=660, full instruments + WW4) — A2/pick
-  watch live; ltp-a r24 (same binary, control); fsfuzz r272 (perf
-  arm standing; main 584c1105 still carries NO perf fix — closure
-  stays blocked on the DFX lane); memstorm r24.
-- Queue: (1) repro3 + make test → message ready-for-merge for
-  7d4b4dba (+ 06d743c4 probes + 7e9d2ad0 chain already gate-ready);
-  (2) ltp-b r7+: WW4 census across more msg-region rounds — if
-  why=1 dominates again, hand the pick-side heal-window question to
-  the sched owner with the r6 numbers; (3) monkeys for monkey-b's
-  formal 500MB criterion when available allows; (4) vmscan file-lru
-  question still queued (s13 item 4).
+- ltp-b r7+ (19de1371, START=660, full instruments + WW4) — pick-side
+  census accumulating (r7 running at close); ltp-a r25 (same binary,
+  control); fsfuzz r273; memstorm r24 (regrown under the
+  available-floor semantics).
+- fsfuzz r272 (first round on 19de1371): CRITICAL, WATCHDOG=84
+  DEADLOCK prints, wedge=NO, beats=1814 — adjudicated the KNOWN
+  r268 heap-pressure/spin-stall family (static+heap lock pair in the
+  same bss region as r268's 0xffffffff808808b8 stall, transient,
+  non-wedging; the perf fix never landed on main). NOT a branch
+  regression: fsfuzz boots without wwcensus, so the WW4 print path
+  is inert there (zero WW4 lines in the serial); the munmap fix is
+  an errno path holding no locks. r273 accumulates.
+- Queue: (1) 7d4b4dba ready-for-merge (messaged); (2) ltp-b census
+  rounds — if why=1 dominates again, hand the pick-side heal-window
+  question to the sched owner with the r6 numbers; (3) monkeys for
+  monkey-b's formal 500MB criterion when available allows; (4) vmscan
+  file-lru question still queued (s13 item 4).
