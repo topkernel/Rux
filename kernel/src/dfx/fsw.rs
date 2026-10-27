@@ -16,7 +16,7 @@
 //! Dump format (stable, grep-able; two compact lines, emitted at :30 past
 //! each minute to avoid the console-emit race with syscost's dump — pa28):
 //! ```text
-//! FSW1 t=123s br=<bread> rd=<dev reads> wr=<dev writes> sd=<sync_dirty>/<skip> ev=<evict>/<dirty> sa=<sync_all> pb=<pub flush>.<records> lvl=<console_loglevel> es=<console emits skipped>
+//! FSW1 t=123s br=<bread> rd=<dev reads> wr=<dev writes> sd=<sync_dirty>/<skip> ev=<evict>/<dirty> sa=<sync_all> pb=<pub flush>.<records> ps=<scoped>.<own records> pc=<constraint flushes> ph=<high-water drains> pm=<queue max> lvl=<console_loglevel> es=<console emits skipped>
 //! FSW2 t=123s ri=<read_inode> wi=<write_inode> lk=<dir lookups>.<blocks> ls=<list_dir> ni=<new_inode> ar=<alloc runs> fr=<free runs> j=<jstart>.<jstop>.<jlazy>.<jcommit_fast>.<jrevoke> bl=<biglock>.<contended> w=<walks>.<hits>.<misses>
 //! ```
 //!
@@ -58,6 +58,20 @@ pub static SYNC_ALL: AtomicU64 = AtomicU64::new(0);
 /// flush_publications() drains that had work (records processed).
 pub static PUB_FLUSH: AtomicU64 = AtomicU64::new(0);
 pub static PUB_RECORDS: AtomicU64 = AtomicU64::new(0);
+/// Scoped drains (flush_publications_scoped): the calling task's OWN
+/// records published (leg-30A per-cookie fix; the world-drain latency
+/// family — the 43-min hiview fdatasync class — moves off PUB_FLUSH onto
+/// these).
+pub static PUB_SCOPED: AtomicU64 = AtomicU64::new(0);
+pub static PUB_SCOPED_RECORDS: AtomicU64 = AtomicU64::new(0);
+/// Per-block constraint flushes (flush_publication_constraints) before an
+/// out-of-band write of an order-constrained block (commit write-through,
+/// inline sync, eviction).
+pub static PUB_CSTR: AtomicU64 = AtomicU64::new(0);
+/// High-water producer-paid drains (publication_defer past PUB_HIGH_WATER).
+pub static PUB_HIWAT: AtomicU64 = AtomicU64::new(0);
+/// Maximum pending-publication queue length observed.
+pub static PUB_QMAX: AtomicU64 = AtomicU64::new(0);
 
 // === ext4 =================================================================
 pub static READ_INODE: AtomicU64 = AtomicU64::new(0);
@@ -182,6 +196,40 @@ pub fn note_pub_flush(records: usize) {
         PUB_RECORDS.fetch_add(records as u64, Ordering::Relaxed);
     }
 }
+#[inline]
+pub fn note_pub_scoped(records: usize) {
+    if crate::dfx::fsw::on() {
+        PUB_SCOPED.fetch_add(1, Ordering::Relaxed);
+        PUB_SCOPED_RECORDS.fetch_add(records as u64, Ordering::Relaxed);
+    }
+}
+#[inline]
+pub fn note_pub_cstr() {
+    bump!(PUB_CSTR);
+}
+#[inline]
+pub fn note_pub_hiwat() {
+    bump!(PUB_HIWAT);
+}
+#[inline]
+pub fn note_pub_qmax(len: usize) {
+    if crate::dfx::fsw::on() {
+        // Relaxed max (statistics only).
+        let mut cur = PUB_QMAX.load(Ordering::Relaxed);
+        let l = len as u64;
+        while l > cur {
+            match PUB_QMAX.compare_exchange_weak(
+                cur,
+                l,
+                Ordering::Relaxed,
+                Ordering::Relaxed,
+            ) {
+                Ok(_) => break,
+                Err(v) => cur = v,
+            }
+        }
+    }
+}
 
 // ext4 layer notes
 #[inline]
@@ -301,12 +349,14 @@ fn v(c: &AtomicU64) -> u64 {
 pub fn dump() {
     let secs = crate::drivers::timer::get_jiffies() / crate::config::KERNEL_HZ as u64;
     crate::pr_warn!(
-        "FSW1 t={}s br={} rd={} wr={} sd={}{} ev={}/{} sa={} pb={}.{} lvl={} es={}",
+        "FSW1 t={}s br={} rd={} wr={} sd={}{} ev={}/{} sa={} pb={}.{} ps={}.{} pc={} ph={} pm={} lvl={} es={}",
         secs,
         v(&BREAD), v(&DEV_READ), v(&DEV_WRITE),
         v(&SYNC_DIRTY), v(&SYNC_DIRTY_SKIP),
         v(&EVICT), v(&EVICT_DIRTY), v(&SYNC_ALL),
         v(&PUB_FLUSH), v(&PUB_RECORDS),
+        v(&PUB_SCOPED), v(&PUB_SCOPED_RECORDS),
+        v(&PUB_CSTR), v(&PUB_HIWAT), v(&PUB_QMAX),
         crate::printk::get_console_loglevel(),
         crate::printk::console_emit_skipped(),
     );

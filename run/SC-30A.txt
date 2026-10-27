@@ -1,0 +1,189 @@
+LEG-30A (OH sprint, kernel-side lane; worktree /home/william/rux-agents/oh-kernel,
+branch feature/oh-kernel, opened from main ef794efa) — mission: the leg-29A
+close-out's unpatched kernel-side queue, in order (1) bio::flush_publications
+O(pending) fix, (2) hiview fdatasync / storage D-state re-adjudication on the
+patched OH image, (3) ENTRY_MUTEX pbench watch.
+
+DESIGN (implemented, commit c3e5a314 "fix(fs): scoped publication draining"):
+
+Root mechanism (confirms 29A adjudication, one addition): THREE stacked
+world-drains sat under every fsync/fdatasync — ext4_sync_file step 1
+(flush_publications), the forced jbd2 commit (flush_publications at
+jbd2_journal_commit_transaction entry), and the tail bio::sync_buffers (its own
+flush_publications + sync_all whole-cache write). mkdir added a fourth
+(namei.rs post-mkdir sync_buffers). The drain loop ("loop: a racing publisher
+may have appended") has NO exit bound — under sustained create churn an fsync
+loops until creators pause, which is the 43-min hiview draw; the 1.2-1.4 s
+accesstoken WAL syncs are single drains of a large queue.
+
+Fix shape — ordering enforced at the granularity of what each point WRITES:
+- Publication records carry cookie = publishing task address.
+- flush_publications_scoped() (fsync/fdatasync entry, mkdir publication point):
+  publishes the caller's OWN records in full (pre -> entry -> post, per device)
+  plus a minimal cross-record obligation closure (H1: any pending record whose
+  entry block is in the plan contributes its pres; H2: any pending record whose
+  post block is in the plan contributes its entry, which pulls its own H1 set).
+  Foreign records stay pending; foreign POSTS are never written by us. A task
+  with no pending records (the hiview case): one queue scan, zero I/O.
+- flush_publication_constraints(mj,mi,blk) (sync_dirty_buffer guard, evict_one
+  guard): H1/H2 closure for the ONE block about to be written.
+- flush_publications() whole-queue unchanged for the true global points
+  (sync(2)/syncfs/sync_file_range/shutdown).
+- jbd2 commit: whole-drain REMOVED — every fs block the commit writes goes
+  through sync_dirty_buffer, which is now per-block guarded.
+- ext4_sync_file: tail sync_buffers REMOVED; added an explicit sync of the
+  file's own inode-table block (new inode::inode_table_block_of) — covers the
+  no-handle O_TRUNC size-update case that used to ride the tail. Data blocks
+  and the forced commit unchanged.
+- mkdir: post-mkdir sync_buffers -> flush_publications_scoped (its own record
+  only; the r8 mkdtemp ENXIO shape dies too — foreign devices never touched).
+- Queue bound: PUB_HIGH_WATER=2048 records -> producer-paid bounded drain
+  (2 batches) inside publication_defer — backlog reclamation is paid by the
+  creator, bounded, and leftover records stay ordered.
+- fsw=1 counters: FSW1 gains ps=<scoped>.<own records> pc=<constraint flushes>
+  ph=<hiwat drains> pm=<queue max>. No new dfx= switch (SWITCH_COUNT stays 37).
+
+Safety argument (documented in bio.rs block comment): the contract is per
+record pre->entry->post plus H1/H2 for every block written; the scoped flush
+satisfies both for everything IT writes. The pre-existing cross-record window
+(shared cumulative metadata block written "at first mention" can persist a
+later record's free before its entry removal) is the SAME class the
+append-order whole drain always had — no new window class introduced.
+Pre-existing race kept as-is (noted for a future fix): a global sync(2) whose
+flush sees an empty queue while a scoped flush holds records in its I/O
+snapshot can then hash-order-write constrained blocks — identical window
+existed with two concurrent whole drains; not worsened.
+
+Gates so far:
+- Dual-arch builds rc=0 (riscv64 + x86_64).
+- riscv64 minimal-rootfs scripted regression boot (serialclean-boot.py, smp2
+  1G, fsw=1): rc=0, zero panics, all three scripted commands verified.
+  FSW1 on quiet boot: ps=7.39 pc=0 ph=0 pm=16, pb=0.0 — scoped path live,
+  whole-queue drain never fires on the quiet workload.
+- make test: FIRST run timed out at 50 min under 5-QEMU host contention
+  (exit 143, starved not failed); RERUN COMPLETED: "ALL TESTS PASSED"
+  (full suite, /tmp/ohk-maketest.log).
+- Perf-gate tiers 1,2: DONE (details below).
+- OH re-adjudication: sc321A COMPLETE (verdict below); sc322A (wwcensus+fsw)
+  fired 11:36 for the sched-census axis.
+
+PERF-GATE DETAIL (ohk30a = Tier-1 plain syscost boot 10:54 window; ohk30aw =
+Tier-1 rerun with dfx=wwcensus 11:13; ohk30a + ohk30a-r2 = Tier-2 pbench
+runs on the quiet host):
+- Tier 1 (plain): panics 0, OOM 0, ticks 99.50/100.00 PASS, volume 106.7M
+  (±10% of 107.5M) PASS, clock_gettime 3us PASS, nanosleep 185.9ms PASS,
+  GRQ hold 4938ns PASS (4080-7320), small_alloc REST 5.3% PASS (<=10%).
+  Census TERM/REFUSED read 0/0 — the b7870bfd artifact (census needs
+  dfx=wwcensus; silent by design otherwise), not a regression.
+- Tier 1 (wwcensus rerun): census TERM-DESCHED 8 / WAKE-REFUSED 32 —
+  EXACT CENTER of the 8±2 / 32±4 bands. Scheduling domain unchanged.
+  The same boot's tick cpu0=99.45 (one-CPU marginal, documented flake
+  class) and nanosleep 265.9ms read high — both rows PASSED on the plain
+  boot of the SAME kernel, and the delta is the wwcensus printing itself;
+  volume 106.6M / GRQ 4912ns / REST 6.8% agree across both boots.
+- Tier 2 (two quiet-host runs, anchor = pb1 column):
+    p6_write_fsync 14131 / 14145 vs 18124.7 anchor  = -22% IMPROVED (the
+      headline row; also -18% vs this morning's pre-change main-tree
+      gate29a run at 17222)
+    p6_unlink      21722 / 21466 vs 32815.9         = -34% IMPROVED
+    p6_mkdrmdir    73543 / 64357 vs 83192.0         = -12%/-23% IMPROVED
+      (mission item 3: ENTRY_MUTEX rows show NO regression — improved)
+    p6_append      504.9 / 510.5 vs 500.4           = in band
+    p1_null/p1_clock 4.36-4.78                      = in band
+    p2_ctxsw       20.7 / 19.9 vs 15.4 anchor       = +29-34%, ANCHOR
+      DRIFT not a change effect: same-day pre-change main-tree runs read
+      32.5 (gate29a) / 37.3 (gate29b) under load, leg29A quiet read 20.9;
+      my quiet-host value sits at the good end of the recent-kernel family
+      and the diff has zero sched overlap. IPC pipe 26.8-27.1 stable.
+
+SC321A FINAL VERDICT (45-min draw, loop-drawing boot, LIFECYCLE=281,
+1196 TXN-HANG lines):
+- fdatasync re-adjudication: the 1.2-1.4 s accesstoken fdatasync family and
+  the sc310 hiview 43-min fdatasync shape are ABSENT. Hung-server census:
+  1017 futex / 3 nanosleep / 2 writev / 2 ioctl / 1 read / 1 write (D-state)
+  — ZERO sys=74/75 (fsync/fdatasync) entries.
+- Storage D-state family: did NOT draw. Exactly one D-state event in 45 min
+  (powermgr, 2.64 s, sys=1 write of thermal/config/configLevel — named by
+  the leg-29B file-op instrument in one line). No O_CREAT 5.5->26 s class.
+- Mechanism replacement measured (FSW1 final): pb=1.863 ps=19.51 pc=1481
+  ph=0 pm=863 — exactly ONE whole-queue drain in 45 min (863 records, the
+  single sa=1 sync(2) from a daemon; the global point doing its job),
+  vs pre-fix where every fsync/fdatasync/mkdir drained the queue.
+- Kernel health on the OH image: panics = only the deliberate sysrq-c
+  crashdump class (sysrq.rs:34, same as sc316A); namei split panics 0;
+  TREE 0. LIFECYCLE loop persists (image-side samgr/data-layer chain, per
+  legs 26-30B adjudications).
+
+SC321A INTERIM (dfx=txnhunt fsw=1, KVM SMP2 4G, oh-img-p alignguard system +
+fresh scgold, HDC 12232; loop-drawing boot, LIFECYCLE=281 by min 14):
+- FSW1 counters at t=1590s: pb=0.0 ps=19.51 pc=1373 ph=0 pm=789 lvl=7.
+  THE MECHANISM IS REPLACED: ZERO whole-queue drains through 26 min of
+  provisioning churn (before the fix every fsync/fdatasync/mkdir did one);
+  scoped flushes published 51 own records over 19 calls; per-block
+  constraint flushes (pc, ~52/min) carry the ordering; queue bounded at 789
+  (below the 2048 hiwat — ph=0).
+- TXN-HANG census of hung servers: 1017 futex parks (the image-side
+  mutual-wait family), 3 nanosleep, 2 writev, 2 ioctl, 1 read — and ZERO
+  sys=74/75 (fsync/fdatasync) hangs. Leg-29A's sc314A at the same depth
+  already carried the accesstoken 1.2-1.4 s fdatasync family. No hiview
+  43-min draw shape.
+- D-states (0x2): exactly one so far — powermgr tid 762, 2.64 s, sys=1
+  write of /mnt/sandbox/system/data/service/el0/thermal/config/configLevel
+  (file-op=write label; named in one line, the leg-29B instrument working).
+  Short single write stall, not a sync-point stall; watching for growth.
+- Panics 0; namei split panics 0; TREE 0.
+
+PROCESS MISHAP (lesson for me): my first oh-boot-30a.sh launch via setsid
+appeared dead at +20 s because the 4G scgold cp had not finished — it was
+alive and grabbed HDC 12221; my explicit retry then failed ON THAT port and
+I re-ran with 12232, whose script rm -f'd + re-copied the SAME userdata path
+under the first boot (truncating its guest storage). Killed the stray pair
+(own-PID discipline); the surviving serial log belongs to the 12232 boot
+only (the stray qemu wrote to a deleted inode — no interleaving). LESSON:
+wait for the userdata cp (or use per-tag userdata paths) before declaring a
+launch dead; the serial log only appears after the cp.
+
+Boot script: run/oh-boot-30a.sh (oh-img-p referenced read-only via
+snapshot=on,file.locking=off per drive; fresh private scgold userdata copy per
+boot; HDCPORT default 12221).
+
+SC322A FINAL (dfx=wwcensus fsw=1, 45 min, HDC 12233; loop-drawing,
+LIFEC=215) — second axis confirms sc321A:
+- FSW1 final: pb=1.739 ps=21.68 pc=1809 ph=0 pm=739 — again exactly ONE
+  whole-queue drain (the end-of-boot daemon sync(2)); zero from
+  fsync/fdatasync/mkdir.
+- Census on the OH image: TERM-DESCHED 8 / WAKE-REFUSED 28, ZERO
+  1001ms-grid strands (band condition "no grid strand class" holds; sched
+  domain clean under my kernel at OH load).
+- TXN-HANG D-state events: 0 (sc321A's single 2.6 s thermal-config write
+  did not recur). fsync/fdatasync hangs: 0. Panics: 0 (not even the sysrq
+  class). TREE 0, namei split 0.
+
+LEG-30A VERDICT (final):
+1. flush_publications O(pending) — FIXED and verified at every layer:
+   mechanism replaced (pb ~1/boot vs 1/fsync+commit+mkdir before, plus the
+   unbounded racing-publisher loop removed from all per-op paths), gates
+   green, external ABI untouched.
+2. fdatasync/storage re-adjudication — the family is DEAD on both draws:
+   zero sys=74/75 hangs (vs accesstoken 1.2-1.4 s and hiview 43 min
+   pre-fix), storage D-state family absent (0-1 benign 2.6 s writes per
+   boot vs the 5.5->26 s O_CREAT class), queue bounded (739-863 under
+   churn, hiwat 2048 never hit), scoped flushes carry own-record
+   durability, per-block guards carry ordering (pc 1.5-1.8k/boot).
+3. ENTRY_MUTEX pbench check — NO regression: mkdrmdir -12/-23%, unlink
+   -34/-35% vs anchor (both improved).
+
+Handoff notes for the next leg:
+(a) the global-sync(2)-vs-scoped-flush snapshot race (a sync_all
+    hash-order write while a scoped flush holds records in its I/O
+    snapshot) is the same window class the old double-drain had — a
+    "drain epoch" flag would close it if it ever draws;
+(b) pending records of tasks that never hit a durability point linger
+    until the 2048-record hiwat drain or a global sync — bounded and
+    ordered, but a dedicated background drainer could be added if the
+    hiwat producer-paid drain ever shows in a latency profile (ph=0 on
+    every boot so far);
+(c) FSW1 counters print on quiet/minimal boots and on OH only after the
+    serial flood subsides (console-emit contention delays the
+    timer-softirq emission, es= climbs) — known pa28-class behavior, not
+    new.

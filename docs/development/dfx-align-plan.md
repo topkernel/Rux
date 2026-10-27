@@ -97,12 +97,13 @@ These are cheap to fix and actively mislead:
 - `/proc/interrupts` hardcodes the IRQ list to `1..=15` + `32..=47`
   instead of walking the irq descriptor registry.
 - `readdir` on `/proc/[pid]` omits `smaps` and `task`.
-- `printk::persistent_log_init()` is **commented out** at `main.rs`, so
-  the persistent log the DFX plan claims exists never runs.
-- The panic handler halts in a `wfi` loop; there is no `panic=` timeout
-  policy and no reboot-after-panic.
-- There is no non-fatal "Oops" path: every fault goes straight to
-  `panic!`.
+- `printk::persistent_log_init()` was **commented out** at `main.rs`, so
+  the persistent log the DFX plan claims existed never ran. **Fixed in
+  Tranche 5** — re-enabled as the klogd thread (see §Tranche 5).
+- The panic handler halted in a `wfi` loop; no `panic=` timeout policy
+  and no reboot-after-panic. **Fixed in Tranche 5 Part 1** (`panic=N`).
+- There was no non-fatal "Oops" path: every fault went straight to
+  `panic!`. **Fixed in Tranche 5** (the Oops path, both arches).
 
 ## 3. Linux DFX capability matrix
 
@@ -111,11 +112,11 @@ incomplete or non-Linux shape · **--** = absent.
 
 | Family | Linux facility | Rux | Gap |
 |---|---|---|---|
-| Logging | `printk` ring buffer, log levels, `/dev/kmsg` | PART | `/proc/kmsg` format wrong; persistent log disabled |
+| Logging | `printk` ring buffer, log levels, `/dev/kmsg` | PART | `/proc/kmsg` format wrong; persistent log RESTORED (klogd thread, Tranche 5) |
 | Logging | `dmesg -w`, `syslog(2)`, `console_loglevel` | PART | no runtime console level knob from userspace |
-| Crash | panic handler, `Call Trace:` | PART | header case differs, frames never symbolized |
+| Crash | panic handler, `Call Trace:` | PART | banner is Linux's (`Kernel panic - not syncing`); the message sits on its own `PANIC:` line instead of inline; frames symbolized since Tranche 3 |
 | Crash | `Oops` (non-fatal) | OK | T5b: Linux-shaped report, task-death policy, pstore dmesg flavor |
-| Crash | `panic=` timeout / reboot | -- | halt forever |
+| Crash | `panic=` timeout / reboot | OK | Tranche 5 Part 1 (`panic=N`/`immediate`, both arches reboot) |
 | Crash | pstore / ramoops | OK | Tranche 5: console-ramoops-0 (panic) + dmesg-ramoops-0 (oops), both arches |
 | Crash | taint flags | OK | Tranche 1: exported, Linux letters |
 | Control | SysRq / `/proc/sysrq-trigger` | OK | Tranche 1: upstream command set |
@@ -130,7 +131,7 @@ incomplete or non-Linux shape · **--** = absent.
 | Perf | `/proc/vmstat` | -- | absent |
 | Perf | `/proc/schedstat`, `/proc/sched` | PART | per-CPU schedstat rows + per-task /proc/[pid]/schedstat triple (T7 slice); /proc/sched still absent |
 | Perf | `/proc/softirqs` | -- | absent |
-| Perf | `/proc/[pid]/stat` ctxt switches | PART | fields present but always `0` |
+| Perf | `/proc/[pid]/stat` ctxt switches | OK | Tranche 2 Part 1: `note_switch` charges nvcsw/nivcsw in `context_switch`, surfaced in `/proc/[pid]/status` |
 | Perf | PSI `/proc/pressure/*` | -- | absent |
 | Perf | `/proc/buddyinfo`, `/proc/pagetypeinfo`, `/proc/slabinfo` | -- | absent (`print_buddyinfo` is dead code) |
 | Perf | `/proc/diskstats`, `/proc/timer_list`, `/proc/lockstat` | -- | absent |
@@ -514,6 +515,21 @@ scheme rests on, verified by the reboot cycle itself.
   like all RAM). The panic/oops paths never write disk: the crash may
   be the storage stack itself, and a sync waiting on a dead queue
   would defeat the `panic=` timeout (the reference kernel's rule).
+  Batch-5 fix (2026-10-26): the flush writes through
+  `ext4_kernel_write_at` — the write(2) core (big lock + journal +
+  cache-coherence tail), added for exactly this caller. The first
+  implementation called the low-level `ext4_file_write` directly,
+  which updates the buffer cache and the on-disk inode but none of the
+  three surfaces write(2) keeps coherent (the VFS dentry inode's size,
+  the sb-boxed Ext4Inode copy that bounds cached reads, the page-cache
+  write-through) — every periodic flush LANDED on disk (probe-printed
+  offsets advancing) while userspace read the pre-flush cached view
+  forever, the "stuck at the init flush" family that two sessions
+  misdiagnosed as a wake-path bug (the wakes were on time all along:
+  instrumented runs showed all four 30 s deliveries exact). Rule for
+  kernel-side writers: a write that bypasses write(2)'s core is
+  invisible to userspace until an icache miss — route it through
+  `ext4_kernel_write_at`.
 - **x86_64 pstore anchor (done — the design first).** No firmware
   block sits at a fixed low address there: QEMU rebuilds and relocates
   the ACPI tables near the top of low RAM every boot, so the riscv64
@@ -534,9 +550,27 @@ scheme rests on, verified by the reboot cycle itself.
   zero page names the range before any reserve runs, so the carve is
   skipped when the initrd overlaps it (the same no-initrd caveat the
   riscv64 side documents).
+- **x86_64 reboots need BSS zeroing (batch 6, 2026-10-26).** The
+  first end-to-end reboot attempt (pstore-x86 smoke r4) storm-looped:
+  every boot >= 2 died in early mm (the first boot-time page-table
+  allocation failing, then ALLOCTHROWs on inherited heap state), 92
+  banners in one window. Root cause: QEMU's linuxboot ROM reloads
+  only the file-backed bytes on a guest reset — the NOBITS `.bss`
+  tail keeps the previous boot's statics (EARLY_TABLE_NEXT,
+  ALLOC_STAGE, memblock state). The first power-on boot only ever
+  worked because QEMU starts RAM zeroed, which holds exactly once.
+  Fix: `__x86_64_start` zeroes `__sbss..__ebss` before
+  `early_boot_init` (rep stosq; the boot.S handoff words live in
+  `.boot.data`, not `.bss`). This is the kernel's own job on the
+  reference boot protocol — reference `startup_64` does the same — and the
+  riscv64 `boot.S` has always done it. Every x86_64 reboot path
+  (`panic=`, sysrq b, kreset) was broken by the stale BSS, not just
+  pstore.
 
 Acceptance: `panic=5` reboots the guest within five seconds of a
-panic; the next boot shows the previous panic's registers.### Tranche 6 — correctness and lock instrumentation
+panic; the next boot shows the previous panic's registers.
+
+### Tranche 6 — correctness and lock instrumentation
 
 - lockdep-lite: per-lock-class acquisition order recording with a cycle
   report (`INFO: possible circular locking dependency detected`).
@@ -579,6 +613,17 @@ lane's pbench can consume in-guest. The choice:
 - **File shape**: one line, three space-separated decimal numbers,
   `"%llu %llu %lu\n"` — proc.rst's documented triple. The file renders
   (zeros) with the gate off — the honest value of never counted.
+- **Armed cost, measured (batch 5, 2026-10-26).** The A-B ran:
+  `pbench_boot.py --arm-schedstat` (init=/test/arm arms the gate then
+  execs the probe) vs the stock boot, same kernel, same image. p2_ctxsw
+  med 26.369 → 23.202 µs unarmed: **+13.6% (~3.2 µs/switch)** with the
+  gate armed; the fork pair +2.5%; every non-scheduling probe inside
+  the ±8% loaded-host noise band (p1_null −8.2% with no edge at all is
+  the band reference). Loaded-host numbers (load1 ~30 — the quiet gate
+  window never opened that batch); not comparable to the pb1 anchor
+  column. Evidence: `run/evidence/2026-10-26-b5-schedstat-ab.txt`. The
+  disabled cost (one relaxed load per edge) rides the Tier-1 quiet-boot
+  census rows.
 
 The rest of Tranche 7 (the full microbench comparison report) belongs
 to the perf lane; the DFX lane's remaining stake is whatever counter

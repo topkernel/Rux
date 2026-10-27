@@ -36,13 +36,16 @@ pub fn jbd2_journal_commit_transaction(
     journal: &Arc<Journal>,
     commit_transaction: &Arc<Transaction>,
 ) -> Result<(), i32> {
-    // Durability point: pending ordered publications (directory entry
-    // blocks and their pre/post dependencies) must be persisted in queue
-    // order BEFORE this commit's write-through fast path syncs registered
-    // buffers — the fast path could otherwise persist an entry block
-    // ahead of the metadata that initializes the inode it names.
-    let _ = crate::fs::bio::flush_publications();
-
+    // Ordered-publication ordering is enforced PER BLOCK, not by draining
+    // the world's pending publications here: every filesystem block this
+    // commit writes (the write-through fast path below, the slow-path
+    // data blocks, the journal superblock) goes through
+    // bio::sync_dirty_buffer, whose guard satisfies exactly that block's
+    // pre/entry/post obligations first (bio::flush_publication_constraints).
+    // The old whole-queue drain at this entry made every forced commit —
+    // and therefore every fsync/fdatasync, which force a commit — pay the
+    // global publication backlog, looping for as long as creators kept
+    // appending (the sc310 43-min hiview fdatasync family).
     let device = journal.j_bio_device;
     if device.is_null() {
         return Ok(());
