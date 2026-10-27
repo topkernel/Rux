@@ -1373,3 +1373,167 @@ blocking-wait syscalls in a raw pool need bounded timeout draws.
 - Monkeys stay deferred (host load 17-21 all session; floor never
   threatened, avail >=40G). The vmscan Referenced-flag question
   (file-lru 93% referenced at OOM) stays queued from s11.
+
+## Session 13 (2026-10-28 01:31-...) — roll onto main 0f806d8b; vmscan Referenced question ADJUDICATED (code-level); perf_event_open fuzz arm
+
+### Succession intake
+
+- Predecessor's fleet-onto-main leg died minutes in (quota window):
+  the merge itself landed (6bb7f396 = origin/main 0f806d8b + docs/test
+  deltas; kernel/ is a ZERO delta vs main — branch kernel == pure main
+  0f806d8b), but the image roll, member relaunch, and ledger block did
+  not. Fleet was COLD (no drivers, no sweeper, no stop files).
+- Dual-arch build of the merged tree: rv64 md5 527656b294d44b8e39c0ecb
+  283abd18b, x86 bzImage md5 29be66a7ef51b4f6f6aa3b540cadffc1 (staged
+  working-tree, never committed — big-binary rule).
+- QEMU hold honored 01:31→(chain exit or ~03:43): the perf lane's
+  detached gate chain (perf-gate-leg36b-chain.sh) needs total-QEMU <=1
+  windows. ALL launches (smokes included) deferred; prep done first.
+
+### THE vmscan file-lru 93%-referenced-at-OOM question — code-level adjudication
+
+The queued candidates were (a) mark_page_accessed setting Referenced
+without activation, (b) the scan never clearing Referenced on the
+inactive list, (c) promotion never firing. Code reading of the current
+engine (mm/lru.rs, mm/vmscan.rs, fs/page_cache.rs, mm/page_alloc.rs):
+
+- (b) is FALSE: the eviction walk's second-chance arm
+  (page_cache.rs:1210-1215) clears Referenced and ACTIVATES the page
+  onto the young end of LRU_ACTIVE_FILE; demotion
+  (lru_demote_active_file_oldest, page_cache.rs:1232) also clears it.
+  The flag does cycle.
+- (a) is TRUE and is the EXPLANATION of the census number — by design.
+  All four setters are access paths (get/get_phys/get-range-hits/
+  pin_by_key): every cache HIT sets PG_referenced in place with one
+  bit op, no LRU move, no activation. (No insertion path sets it.)
+  Linux's mark_page_accessed activates an inactive page on its SECOND
+  hit; Rux defers graduation entirely to the reclaim walk. Under any
+  working-set sweep (LTP re-exec'ing the same binaries — every exec
+  maps the same pages), the inactive list accumulates the bit on
+  ~every page between walk sweeps → 88-93% at any instant census.
+  This is the expected state of the policy, not a leaked bit. The
+  hit-path avoidance of lru_lock is a deliberate divergence (record in
+  docs/architecture/design-divergences.md if kept).
+- THE REAL DEFECT the census points at is reclaim DEPTH before OOM,
+  not Referenced semantics. Quantified chain:
+  - evict_one scans at most MAX_SCAN=64 pages per call from the tail;
+    with ~93% referenced, the budget is spent clearing+activating
+    (graduating) pages before the first evictable page is found. When
+    the oldest 128 (2 rounds incl. the demotion retry) are all
+    referenced, evict_one returns FALSE with ZERO pages freed.
+  - shrink() breaks on the first evict_one failure
+    (page_cache.rs:990-992).
+  - balance_pgdat stops as soon as 32 pages (SWAP_CLUSTER_MAX) are
+    reclaimed per call — even at priority 12, the shallowest scan
+    (size>>10 = ~42 pages of a 43k-page list).
+  - The alloc slowpath runs <=8 try_to_free_pages rounds, breaking on
+    freed==0 (page_alloc.rs:126-135).
+  - NET: worst case ~8x32 = 256 pages (~1 MB) of reclaim effort
+    precede the OOM decision — while the s8/s11 censuses measured
+    175-204 MB of clean, unlocked, unevictable-flag-free file cache
+    sitting on the LRUs one list away. The kill fires because the
+    pre-OOM protocol is latency-bounded at ~1 MB of drain against
+    ~200 MB of drainable pages — two orders of magnitude short.
+- FIX DIRECTION (for the reclaim owner, not landed here): deepen the
+  LAST pre-OOM round only — e.g. a final "drain clean file cache"
+  pass with nr_to_reclaim proportional to the shortfall (or simply
+  keep descending priority while ANY progress is made) instead of the
+  flat 32-page stop. Alternatives: adaptive MAX_SCAN under pressure,
+  or Linux-parity activate-on-second-hit (moves graduation cost to the
+  hit path — the divergence-record trade). The r51 forensics (anon
+  1613MB of 2G at kill) mean those OOMs are borderline-correct kills
+  that should have been SLOW ALLOCATIONS instead.
+
+### perf_event_open fuzz surface (mission watch)
+
+- fsfuzz's raw pool drew syscall numbers 1..60 only — perf_event_open
+  (nr 241, asm-generic; x86 298 maps to it) was NEVER touched. The
+  fresh D-7-set implementation (kernel/src/perf/mod.rs) validates
+  defensively (access_ok + size 64..1024, type/config/freq/sample_type
+  gates, flag-mask EINVAL) — now it gets exercised.
+- test/fsfuzz.c seq_perf arm (commit cf6cf99d): per call 3 chaos draws
+  (garbage 128-byte attr blob with targeted size/type/config/period/
+  flags pools, occasional garbage attr pointer for the EFAULT class)
+  + 1 valid-shape SOFTWARE cpu/task-clock open so the lifecycle (ARMED
+  up, read() record drain, close, ARMED down) churns; FSFUZZ-PERF
+  census line every 256 opens; FSFUZZ-ODD perf on unexpected errno.
+  Rootfs staged with the new probe (private image, debugfs injection).
+- Classifier: PREEMPT-UNDERFLOW counter added (WARN at >=5/round) for
+  the session-12 sighting watch; the print row carries pid= count_was=
+  sub= at file:line lock=0x — keep tails on any WARN round.
+
+### The roll (02:06-02:24, after the gate chain got its window)
+
+- Gate chain (perf lane's perf-gate-leg36b-chain.sh) got its 60s quiet
+  window 01:46:50, ran tiers 1+2, exited rc=0 at 02:05:31 — hold
+  released early. 150s LTP smoke on 527656b2: 322 TPASS / 0 panics.
+- Images staged (working tree, never committed): fleet-rv64-rux :=
+  527656b2..., fleet-x86-bzImage := 29be66a7... Members relaunched:
+  fsfuzz r263, ltp-a r16, memstorm r15, dirstorm r32, dirtyscan r17,
+  modchurn r14 + sweeper; monkey-a/b r1 (KVM 4G, first monkey rounds
+  in this home — host headroom allowed: load 13 at launch, avail
+  38-42G, free 3-4G under the s3 page-cache reading all session).
+- Pre-kill round adjudications (predecessor's last, old 140acd4b-class
+  image): ltp-a r14/r15 CRITICAL = known classes (oom01 OOM at 837
+  with kill+SIGDEATH delivered, W3 no-growth wedge after, standing
+  ALLOCTHROW garbage-size ENOMEM 21-24/round, 10s soft-lockup
+  residual; r15 wedgetail re-confirms file-lru[2] 85.7% referenced
+  34867/40664, active referenced=0, dirty=0 — the vmscan census shape
+  on the true-LRU engine). modchurn r13 OOPS=9 = soft lockup 109s
+  CPU#1, the documented host-starvation flake class under the pre-kill
+  load window (s11 precedent). dirstorm r31 PARKED-LEAK-RV=5 /
+  dirtyscan r16 PARKED-LEAK-RV=2: non-OH parked-leak prints on the
+  D-7-delta kernel — likely the count-migration family's parked face;
+  watch continues on the new kernel. fsfuzz r254-r261 exhaustion
+  deaths were pre-fix-kernel rounds (r262 on 140acd4b: 180 beats,
+  ZERO ALLOCTHROW — the pipe fix holds); two `klogd: flush wrote 0/
+  512 (ext4 write error)` lines during the r15 OOM crunch — buffered,
+  bounded, watch for recurrence.
+
+### NEW FINDING: perf ABI divergences (kernel-side, for the perf lane)
+
+1. PERF_FLAG_* encoding: kernel/perf/mod.rs has FD_NO_GROUP=1<<1,
+   PID_CGROUP=1<<4; the Linux uapi defines FD_NO_GROUP=1<<0,
+   FD_OUTPUT=1<<1, PID_CGROUP=1<<2 (FD_CLOEXEC=1<<3 matches).
+   Consequence: userspace passing Linux's FD_NO_GROUP(1) gets spurious
+   EINVAL; Linux's FD_OUTPUT(2) is silently accepted as "no group".
+   No corruption (neither feature implemented), error contract only.
+2. read(perf_fd) BLOCKS until a record arrives (perf_read waits on the
+   event's wait queue). Linux's read(perf_fd) returns the 8-byte
+   counter value and never blocks (records go through mmap+poll). A
+   task-scoped cpu/task-clock event read from the SAME task can never
+   wake: the reader sleeps, its clock stops, no record is generated —
+   deterministic self-deadlock for any same-task profiling reader
+   (my first fuzz arm parked exactly this way; kernel exited the park
+   only via the wedge kill). RECOMMEND: counter-value read semantics
+   (Linux parity) or at minimum make read() honor O_NONBLOCK (it does
+   — but callers cannot know blocking is the default divergence).
+
+### fsfuzz perf arm bring-up (3 probe revisions, all probe-side)
+
+- v1 parked (task-scoped blocking read, see above) — r263/r264 WEDGE
+  215 lines/1 beat, the exact park signature. v2 fixed the park but
+  crashed pid 1 with a STACK CANARY failure: perf read() drains up to
+  COUNT bytes of records into the user buffer (unlike file/pipe reads
+  which the kernel clamps by data availability), so a fuzz-length draw
+  (1MB) with the 512-byte stack buffer smashed the canary (r265/r266
+  rc=0 exits; symbolized to __stack_chk_fail_local in main). Both are
+  probe-contract violations, not kernel defects — on Linux the same
+  calls behave the same way.
+- v3 (228f741d): O_NONBLOCK via F_SETFL, task-scoped fds never read,
+  every perf read clamped to the buffer. Smoke: 172 beats/150s,
+  FSFUZZ-PERF ok=1024 (the valid-shape open+read+close lifecycle runs
+  ~7x/s), 0 segv/panic. FSFUZZ-ODD perf errno=24 = the EMFILE storm
+  class (fdtable full mid-storm), known noise.
+- Kernel-side validation of the chaos surface so far: 0 panics, 0
+  ALLOCTHROW, no NEW class through ~30 min of full-rate fuzzing.
+
+### PREEMPT-UNDERFLOW sightings (watch item, new kernel 0f806d8b)
+
+- memstorm r15 (527656b2): 7 rows, ALL pid=1, sub=1,
+  at kernel/src/sync/rwlock.rs:457 (bare preempt_enable from an
+  rwlock guard drop — a DIFFERENT site than the s12 LTP sighting at
+  spinlock.rs:461/PROCESS_TREE_LOCK). memstorm r14 (pre-merge-class
+  kernel, same D-7 delta): 13 rows same shape. Class persists on
+  0f806d8b at low volume on the fork/mmap-storm surface; perf lane
+  owns the producer triage.
