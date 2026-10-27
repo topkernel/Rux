@@ -1,7 +1,9 @@
 #!/bin/bash
 # perf-smoke.sh — perf_event_open software-clock slice smoke:
-# PERF_TYPE_SOFTWARE cpu-clock/task-clock, sample_period,
-# PERF_SAMPLE_IP records through read(2).
+# PERF_TYPE_SOFTWARE cpu-clock/task-clock, sample_period, the reference
+# read(2) counter contract (never blocks; the uapi PERF_FLAG values;
+# the read_format layout), and PERF_SAMPLE_IP / PERF_SAMPLE_CALLCHAIN
+# records through the per-event debugfs drain.
 #
 # Boots the kernel on a private copy of test/rootfs.img with
 # test/perf_probe.c compiled in (musl-static; the shared image is

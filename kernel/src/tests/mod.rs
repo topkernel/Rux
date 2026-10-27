@@ -450,12 +450,15 @@ pub fn run_all_tests() {
     test_group_start("signal");
     signal::test_signal();
 
-    // perf events: ABI record encoding + ring/drain semantics.
+    // perf events: ABI record encoding + ring/drain semantics + the
+    // counter-read layout + the uapi flag values.
     test_group_start("perf-records");
     crate::perf::tests::test_record_encoding();
     crate::perf::tests::test_ring_roundtrip();
     crate::perf::tests::test_callchain_record();
     crate::perf::tests::test_short_buffer();
+    crate::perf::tests::test_flag_values();
+    crate::perf::tests::test_read_layout();
 
     // ===== 3. Memory management =====
     test_group_start("heap_allocator");

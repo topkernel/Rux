@@ -63,9 +63,11 @@ Triggers available before Tranche 1: UART magic `DUMP!` and `LEDGER!`
 
 There is **no** ftrace, **no** tracefs, **no** debugfs, **no**
 full perf_event subsystem (the `PERF_TYPE_SOFTWARE` cpu-clock/
-task-clock sampling slice landed 2026-10-27 — `kernel/src/perf/`;
-hardware events, mmap rings, ioctls and freq mode remain
-unimplemented), **no** kprobe/uprobe, **no** eBPF tracing
+task-clock sampling slice landed 2026-10-27, `kernel/src/perf/`;
+read(2) is the reference's counter read and PERF_FLAG_* carry the
+uapi values since 2026-10-28 — samples drain through the per-event
+debugfs stopgap; hardware events, mmap rings, ioctls and freq mode
+remain unimplemented), **no** kprobe/uprobe, **no** eBPF tracing
 (`sys_bpf` returns `ENOSYS`; the only BPF in the tree is the
 classic-BPF seccomp filter), **no** `/proc/kallsyms`, **no** runtime
 symbolization, **no** SysRq facility, **no** KASAN/UBSAN/Kfence, **no**
@@ -754,6 +756,38 @@ Records became variable-length — the drain reads each record's own
 one queue. Guest-verified (`test/perf-smoke.sh`): kernel samples
 return marker+frames, user samples return nr=0, the error matrix and
 IP-only paths unchanged.
+
+**read(2) + PERF_FLAG ABI corrections (batch 8, 2026-10-28, routed
+from the stress fleet's session-13 fsfuzz arm).** Two reference
+fidelity defects in the perf slice, both fixed with the fleet's repro
+shapes folded into `test/perf-smoke.sh`:
+
+- **PERF_FLAG_\* bit values**: the open-flags family was shifted off
+  the uapi (FD_NO_GROUP at `1<<1`, PID_CGROUP at `1<<4`); reference
+  callers passing the uapi FD_NO_GROUP value got spurious EINVAL.
+  Re-aligned verbatim: FD_NO_GROUP `1<<0`, FD_OUTPUT `1<<1`,
+  PID_CGROUP `1<<2`, FD_CLOEXEC `1<<3`. FD_NO_GROUP is accepted as a
+  no-op (no event groups exist), FD_OUTPUT/PID_CGROUP stay honest
+  EINVAL (the reference EINVALs PID_CGROUP without CONFIG_CGROUP_PERF
+  too), unknown bits EINVAL. Unit test pins the four values.
+- **read(2) was a blocking record drain** — the reference's read(2) is
+  the counter read and NEVER blocks (the man page's reading section:
+  u64 count, then per `attr.read_format` u64 total_time_enabled,
+  total_time_running, id). The blocking shape self-deadlocked by
+  construction on a task-scoped event read from the same task (the
+  reader sleeps, its own ticks never charge it, no sample arrives).
+  read(2) now returns the counter layout immediately —
+  `read_format` accepts TOTAL_TIME_ENABLED/RUNNING/ID (GROUP refused);
+  the counter is the total charged ns (never decremented by sampling);
+  running == the charged ns (the software clock only advances while
+  charging); enabled is the wall ns since the armed open. Sample
+  records are NOT read(2) output — the reference delivers them through
+  the mmap ring (unimplemented); the stopgap record channel is the
+  per-event debugfs drain file `/sys/kernel/debug/perf/<id>/records`
+  (each open drains an 8 KiB batch, LOST report first; created at
+  open, removed at close; the generator resolves the event through
+  the registry by id under the documented registry→inner lock order,
+  so close cannot race it). poll(2) still reports record readiness.
 
 The rest of Tranche 7 (the full microbench comparison report) belongs
 to the perf lane; the DFX lane's remaining stake is whatever counter

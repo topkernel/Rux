@@ -20,7 +20,8 @@
 //!
 //! - The tree is **kernel-owned**: userspace may read entries and, when
 //!   the file mode permits it, write a new value. It cannot create,
-//!   rename or remove entries.
+//!   rename or remove entries (`remove_file` is the in-kernel API for
+//!   the kernel's own dynamic entries — the perf event drain files).
 //! - A knob file is regenerated on every `open()`, so `cat` always shows
 //!   the current value (Linux debugfs uses `seq_file` for the same
 //!   reason).
@@ -193,6 +194,42 @@ where
     let mut children = current.children.lock();
     children.insert(String::from(file_name), node);
     true
+}
+
+/// Remove a regular file by absolute path inside debugfs. Readers that
+/// already opened the node keep their snapshot (nodes are Arc'd); only
+/// new lookups miss. Returns true when the file was present. Does not
+/// remove directories (this fs's files are kernel-owned; the perf
+/// event drain files are the remover use case).
+pub fn remove_file(path: &str) -> bool {
+    let root = match debugfs_root() {
+        Some(r) => r,
+        None => return false,
+    };
+    let mut components: Vec<&str> = path.split('/').filter(|c| !c.is_empty()).collect();
+    let file_name = match components.pop() {
+        Some(n) => n,
+        None => return false,
+    };
+    let mut current = root;
+    for component in components {
+        let existing = {
+            let children = current.children.lock();
+            children.get(component).cloned()
+        };
+        match existing {
+            Some(existing) if existing.is_dir => current = existing,
+            _ => return false,
+        }
+    }
+    let mut children = current.children.lock();
+    match children.get(file_name) {
+        Some(node) if !node.is_dir => {
+            children.remove(file_name);
+            true
+        }
+        _ => false,
+    }
 }
 
 // ============================================================================

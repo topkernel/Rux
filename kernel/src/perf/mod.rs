@@ -7,12 +7,26 @@
 //! Scope of this first slice (the plan doc's perf tranche, part 1):
 //! `PERF_TYPE_SOFTWARE` counters `PERF_COUNT_SW_CPU_CLOCK` (0) and
 //! `PERF_COUNT_SW_TASK_CLOCK` (1) with `sample_period` (ns of counted
-//! time per sample) and `PERF_SAMPLE_IP` records consumed through
-//! `read(2)` on the returned fd. Everything else keeps returning
-//! `EINVAL`/`ENOSYS` as before — no invented interfaces: the attr
-//! layout, the open flag set, the pid/cpu scoping rules, the record
-//! binary layout (`perf_event_header` + u64 ip) and the
-//! `PERF_RECORD_LOST` overflow report are perf_event_open(2)'s.
+//! time per sample) and `PERF_SAMPLE_IP` / `PERF_SAMPLE_CALLCHAIN`
+//! records. Everything else keeps returning `EINVAL`/`ENOSYS` as
+//! before — no invented interfaces: the attr layout, the open flag
+//! set, the pid/cpu scoping rules, the record binary layout
+//! (`perf_event_header` + u64 ip) and the `PERF_RECORD_LOST` overflow
+//! report are perf_event_open(2)'s.
+//!
+//! ## read(2): the reference's counter read (never blocks)
+//!
+//! read(2) on the event fd returns the counter per the man page's
+//! reading section — u64 count, then (per attr.read_format) u64
+//! total_time_enabled, u64 total_time_running, u64 id. Sample records
+//! are NOT read(2) output: the reference delivers samples through the
+//! mmap ring (unimplemented here). The stopgap record channel is the
+//! per-event debugfs drain file `/sys/kernel/debug/perf/<id>/records`
+//! (each open drains up to 8 KiB of pending records — LOST report
+//! first, then samples). A blocking read was the stress fleet's
+//! session-13 self-deadlock: a task-scoped event read from its own
+//! task slept forever, because its samples could only be charged
+//! while that very task ran.
 //!
 //! ## How samples are produced (internal design)
 //!
@@ -78,11 +92,23 @@ const FLAG_EXCLUDE_KERNEL: u64 = 1 << 5;
 const FLAG_EXCLUDE_IDLE: u64 = 1 << 7;
 const FLAG_FREQ: u64 = 1 << 10;
 
-/// perf_event_open flags argument.
-const PERF_FLAG_FD_NO_GROUP: u64 = 1 << 1;
-const PERF_FLAG_FD_OUTPUT: u64 = 1 << 2;
+/// perf_event_open flags argument — the uapi bit values verbatim
+/// (include/uapi/linux/perf_event.h: FD_NO_GROUP 1<<0, FD_OUTPUT 1<<1,
+/// PID_CGROUP 1<<2, FD_CLOEXEC 1<<3). The stress lane's fsfuzz arm
+/// caught this family shifted one off the reference (NO_GROUP at 1<<1,
+/// PID_CGROUP at 1<<4): callers passing the reference's FD_NO_GROUP
+/// got spurious EINVAL.
+const PERF_FLAG_FD_NO_GROUP: u64 = 1 << 0;
+const PERF_FLAG_FD_OUTPUT: u64 = 1 << 1;
+const PERF_FLAG_PID_CGROUP: u64 = 1 << 2;
 const PERF_FLAG_FD_CLOEXEC: u64 = 1 << 3;
-const PERF_FLAG_PID_CGROUP: u64 = 1 << 4;
+
+/// attr.read_format bits (uapi): what read(2) lays out after the
+/// 8-byte counter. ENABLED/RUNNING/ID are implemented; GROUP (1<<3)
+/// and anything else is refused at open.
+const PERF_FORMAT_TOTAL_TIME_ENABLED: u64 = 1 << 0;
+const PERF_FORMAT_TOTAL_TIME_RUNNING: u64 = 1 << 1;
+const PERF_FORMAT_ID: u64 = 1 << 2;
 
 /// Record types (perf_event_header.type).
 const PERF_RECORD_LOST: u32 = 2;
@@ -242,6 +268,11 @@ pub(crate) struct PerfEvent {
     exclude_user: bool,
     exclude_kernel: bool,
     exclude_idle: bool,
+    /// attr.read_format (the accepted subset): read(2)'s tail layout.
+    read_format: u64,
+    /// sched_clock() stamp at open while armed; 0 for a disabled open
+    /// (time_enabled reads 0 until an ENABLE ioctl exists).
+    enabled_at: u64,
     enabled: AtomicBool,
     inner: Spinlock<PerfInner>,
     /// Readers blocked in read() waiting for records.
@@ -251,10 +282,13 @@ pub(crate) struct PerfEvent {
 struct PerfInner {
     /// ns accumulated since the last sample.
     counter: u64,
+    /// Total ns charged since enable — the counter value read(2)
+    /// reports (never decremented by sampling).
+    total: u64,
     /// Pending record bytes (whole records, little-endian).
     ring: VecDeque<u8>,
     /// Samples dropped because the ring was full (reported as
-    /// PERF_RECORD_LOST on the next read).
+    /// PERF_RECORD_LOST on the next record drain).
     lost: u64,
 }
 
@@ -352,9 +386,9 @@ pub fn softirq_tick() {
             }
             let emitted = {
                 let mut inner = ev.inner.lock();
-                inner.counter = inner
-                    .counter
-                    .saturating_add(pending as u64 * TICK_NS);
+                let charge = pending as u64 * TICK_NS;
+                inner.counter = inner.counter.saturating_add(charge);
+                inner.total = inner.total.saturating_add(charge);
                 let mut emitted = 0u64;
                 while inner.counter >= ev.sample_period && ev.sample_period > 0 {
                     inner.counter -= ev.sample_period;
@@ -531,14 +565,53 @@ fn records_pending(ev: &PerfEvent) -> bool {
     !inner.ring.is_empty() || inner.lost > 0
 }
 
+/// Drain one event's pending records into a fresh Vec — the per-event
+/// debugfs file /sys/kernel/debug/perf/<id>/records is the stopgap
+/// sample channel while the mmap ring is unimplemented (read(2) is the
+/// reference's counter read; the reference delivers samples through
+/// the ring only). The registry is held across the drain per the
+/// module's lock order (REGISTRY → inner; close unregisters before it
+/// frees, so the pointer cannot dangle under this lock). Budget: 8 KiB
+/// per open — the drain is repeatable, and the bound keeps the
+/// irqsave section short.
+fn drain_records_by_id(id: u64) -> alloc::vec::Vec<u8> {
+    const DRAIN_BUDGET: usize = 8 * 1024;
+    let reg = REGISTRY.lock_irqsave();
+    let ptr = match reg.iter().find(|&&(i, _)| i == id) {
+        Some(&(_, p)) => p as *const PerfEvent,
+        None => return alloc::vec::Vec::new(),
+    };
+    // SAFETY: registry membership guarantees validity (close
+    // unregisters before freeing, and cannot while REGISTRY is held).
+    let ev = unsafe { &*ptr };
+    let mut out = alloc::vec![0u8; DRAIN_BUDGET + SAMPLE_REC_MAX];
+    match drain_records(ev, &mut out) {
+        Ok(n) => {
+            out.truncate(n);
+            out
+        }
+        Err(()) => alloc::vec::Vec::new(),
+    }
+}
+
 // ==================== File operations ====================
 
-/// read(2): blocking record drain (timerfd read model).
+/// read(2): the reference's counter read — NEVER blocks. The layout
+/// is the man page's reading section verbatim: a u64 counter, then
+/// (per attr.read_format) u64 total_time_enabled, u64 total_time_running,
+/// u64 id. For these software clock events the counter is the ns
+/// charged while the event was counting; running is the same charged
+/// ns (the software clock only advances while charging); enabled is
+/// the wall ns since open while armed. Sample records are NOT read(2)
+/// output — the reference delivers samples through the mmap ring
+/// (unimplemented here); the stopgap record channel is the per-event
+/// debugfs drain file /sys/kernel/debug/perf/<id>/records.
+///
+/// The blocking-drain shape this replaces self-deadlocked by
+/// construction on a task-scoped event read from the same task: the
+/// reader sleeps, the task never runs, no ticks charge it, no sample
+/// ever arrives (stress fleet session 13, fsfuzz perf arm).
 fn perf_read(file: &crate::fs::File, buf: &mut [u8]) -> isize {
-    // The smallest record we can produce is a 16-byte sample.
-    if buf.len() < SAMPLE_REC_LEN {
-        return -(crate::errno::constants::EINVAL as isize);
-    }
     // SAFETY: private_data is an UnsafeCell; we hold &File so no
     // concurrent mutable access.
     let ptr = match unsafe { *file.private_data.get() } {
@@ -548,43 +621,56 @@ fn perf_read(file: &crate::fs::File, buf: &mut [u8]) -> isize {
     // SAFETY: installed by sys_perf_event_open as Box::into_raw; valid
     // while the File exists.
     let ev = unsafe { &*(ptr as *const PerfEvent) };
+    match read_counter(ev, buf) {
+        Some(n) => n as isize,
+        None => -(crate::errno::constants::EINVAL as isize),
+    }
+}
 
-    if !records_pending(ev) {
-        if file.flags().bits() & crate::fs::file::FileFlags::O_NONBLOCK != 0 {
-            return -(crate::errno::constants::EAGAIN as isize);
-        }
-        loop {
-            let current = match crate::sched::current() {
-                Some(t) => t,
-                None => return -(crate::errno::constants::EAGAIN as isize),
-            };
-            ev.wait_queue.prepare_to_wait(current, false, true);
-            if records_pending(ev) {
-                ev.wait_queue.finish_wait(current);
-                // SAFETY: current is the running task's pointer.
-                unsafe { crate::sched::dequeue_task(&*current); }
-                break;
-            }
-            if crate::signal::signal_pending() {
-                ev.wait_queue.finish_wait(current);
-                // SAFETY: as above.
-                unsafe { crate::sched::dequeue_task(&*current); }
-                return -(crate::errno::constants::EINTR) as isize;
-            }
-            crate::arch::cpu::restore_irq(true);
-            crate::sched::schedule();
-            ev.wait_queue.finish_wait(current);
-            if crate::signal::signal_pending() {
-                return -(crate::errno::constants::EINTR) as isize;
-            }
-        }
+/// The counter read's layout core (perf_read's body as a test seam):
+/// u64 count, then (per attr.read_format) u64 total_time_enabled, u64
+/// total_time_running, u64 id. None when `buf` cannot hold the layout.
+fn read_counter(ev: &PerfEvent, buf: &mut [u8]) -> Option<usize> {
+    let fmt = ev.read_format;
+    let mut need = 8usize; // the counter
+    if fmt & PERF_FORMAT_TOTAL_TIME_ENABLED != 0 {
+        need += 8;
+    }
+    if fmt & PERF_FORMAT_TOTAL_TIME_RUNNING != 0 {
+        need += 8;
+    }
+    if fmt & PERF_FORMAT_ID != 0 {
+        need += 8;
+    }
+    if buf.len() < need {
+        return None;
     }
 
-    match drain_records(ev, buf) {
-        Ok(0) => -(crate::errno::constants::EAGAIN as isize), // raced with another reader
-        Ok(n) => n as isize,
-        Err(()) => -(crate::errno::constants::EINVAL as isize),
+    let (count, enabled, running, id) = {
+        let inner = ev.inner.lock();
+        let enabled = if ev.enabled_at != 0 {
+            crate::sched::fair::sched_clock().saturating_sub(ev.enabled_at)
+        } else {
+            0
+        };
+        (inner.total, enabled, inner.total, ev.id)
+    };
+    let mut at = 0usize;
+    let mut put = |v: u64| {
+        buf[at..at + 8].copy_from_slice(&v.to_le_bytes());
+        at += 8;
+    };
+    put(count);
+    if fmt & PERF_FORMAT_TOTAL_TIME_ENABLED != 0 {
+        put(enabled);
     }
+    if fmt & PERF_FORMAT_TOTAL_TIME_RUNNING != 0 {
+        put(running);
+    }
+    if fmt & PERF_FORMAT_ID != 0 {
+        put(id);
+    }
+    Some(at)
 }
 
 fn perf_poll(file: &crate::fs::File, events: u16) -> u16 {
@@ -620,6 +706,13 @@ fn perf_close(file: &crate::fs::File) -> i32 {
     if wants_chain {
         CALLCHAIN_ARMED.fetch_sub(1, Ordering::Release);
     }
+    // Drop the drain file first (after the unregister above, its
+    // generator already answers empty; removing the name ends new
+    // opens). Stale opens keep their snapshot — debugfs nodes are Arc'd.
+    {
+        let path = alloc::format!("/perf/{}", id);
+        crate::fs::debugfs::remove_file(&path);
+    }
     // Residual race (mirrors timerfd_close): a reader still inside
     // perf_read holds &File via its own reference; close runs on the
     // last fd release, and the same one-softirq-pass window applies.
@@ -632,7 +725,9 @@ fn perf_close(file: &crate::fs::File) -> i32 {
     0
 }
 
-/// perf event file operations (timerfd model: read/poll/close).
+/// perf event file operations: read = the reference counter read
+/// (never blocks), poll = record readiness (the drain channel's
+/// signal), close unregisters.
 pub(crate) static PERF_OPS: crate::fs::FileOps = crate::fs::FileOps::builder()
     .read(perf_read)
     .close(perf_close)
@@ -680,10 +775,13 @@ pub fn sys_perf_event_open(args: crate::syscall::SyscallArgs) -> i64 {
     let group_fd = args[3] as i32;
     let flags = args[4];
 
-    // 1. Flags: only the bits this slice can honor.
+    // 1. Flags: only the bits this slice can honor. FD_NO_GROUP is
+    //    accepted as a no-op (no event groups exist here, so every
+    //    event already satisfies it); FD_CLOEXEC is honored on the fd.
+    //    FD_OUTPUT (ring redirect) and PID_CGROUP (cgroup scoping)
+    //    are real ABI features we do not implement — EINVAL, the same
+    //    answer the reference gives PID_CGROUP without CONFIG_CGROUP_PERF.
     if flags & !(PERF_FLAG_FD_NO_GROUP | PERF_FLAG_FD_CLOEXEC) != 0 {
-        // FD_OUTPUT (ring redirect) and PID_CGROUP (cgroup scoping)
-        // are real ABI features we do not implement — EINVAL.
         return -(crate::errno::constants::EINVAL as i64);
     }
 
@@ -722,8 +820,15 @@ pub fn sys_perf_event_open(args: crate::syscall::SyscallArgs) -> i64 {
         return -(crate::errno::constants::EINVAL as i64); // this slice fills exactly IP (+CALLCHAIN)
     }
     let wants_callchain = attr.sample_type & PERF_SAMPLE_CALLCHAIN != 0;
-    if attr.read_format != 0 {
-        return -(crate::errno::constants::EINVAL as i64); // no group/total time read formats
+    // read_format: the counter-read tail bits are implemented;
+    // anything else (PERF_FORMAT_GROUP foremost) is refused — EINVAL.
+    if attr.read_format
+        & !(PERF_FORMAT_TOTAL_TIME_ENABLED
+            | PERF_FORMAT_TOTAL_TIME_RUNNING
+            | PERF_FORMAT_ID)
+        != 0
+    {
+        return -(crate::errno::constants::EINVAL as i64);
     }
     if attr.flags1 & FLAG_INHERIT != 0 {
         return -(crate::errno::constants::EINVAL as i64); // no child inheritance
@@ -806,9 +911,16 @@ pub fn sys_perf_event_open(args: crate::syscall::SyscallArgs) -> i64 {
         exclude_user: attr.flags1 & FLAG_EXCLUDE_USER != 0,
         exclude_kernel: attr.flags1 & FLAG_EXCLUDE_KERNEL != 0,
         exclude_idle: attr.flags1 & FLAG_EXCLUDE_IDLE != 0,
+        read_format: attr.read_format,
+        enabled_at: if starts_armed {
+            crate::sched::fair::sched_clock()
+        } else {
+            0
+        },
         enabled: AtomicBool::new(starts_armed),
         inner: Spinlock::new(PerfInner {
             counter: 0,
+            total: 0,
             ring: VecDeque::new(),
             lost: 0,
         }),
@@ -849,6 +961,23 @@ pub fn sys_perf_event_open(args: crate::syscall::SyscallArgs) -> i64 {
         Ok(()) => {
             if flags & PERF_FLAG_FD_CLOEXEC != 0 {
                 crate::fs::set_cloexec_fd(fd, true);
+            }
+            // The stopgap sample channel: one drain file per event
+            // under /sys/kernel/debug/perf/. Removed at close. A
+            // creation failure (debugfs not mounted) leaves the event
+            // fully functional — the drain channel is optional, the
+            // ABI (read/poll) does not depend on it.
+            {
+                let id = unsafe { (*ev_ptr).id };
+                if crate::fs::debugfs::create_dir("/perf") {
+                    let path = alloc::format!("/perf/{}", id);
+                    crate::fs::debugfs::create_file(
+                        &path,
+                        0o400,
+                        move || drain_records_by_id(id),
+                        None::<fn(&[u8]) -> i32>,
+                    );
+                }
             }
             fd as i64
         }
@@ -894,9 +1023,12 @@ pub mod tests {
             exclude_user: false,
             exclude_kernel: false,
             exclude_idle: false,
+            read_format: 0,
+            enabled_at: 0,
             enabled: AtomicBool::new(true),
             inner: Spinlock::new(PerfInner {
                 counter: 0,
+                total: 0,
                 ring: VecDeque::new(),
                 lost,
             }),
@@ -906,6 +1038,55 @@ pub mod tests {
 
     fn zero_chain() -> [AtomicU64; CHAIN_FRAMES] {
         [const { AtomicU64::new(0) }; CHAIN_FRAMES]
+    }
+
+    /// The PERF_FLAG_* family carries the uapi bit values verbatim
+    /// (the stress lane's fsfuzz arm caught them shifted: NO_GROUP at
+    /// 1<<1, PID_CGROUP at 1<<4 — reference callers got EINVAL).
+    pub fn test_flag_values() {
+        let ok = PERF_FLAG_FD_NO_GROUP == 1 << 0
+            && PERF_FLAG_FD_OUTPUT == 1 << 1
+            && PERF_FLAG_PID_CGROUP == 1 << 2
+            && PERF_FLAG_FD_CLOEXEC == 1 << 3;
+        if ok {
+            crate::tests::test_pass("perf-flag-values");
+        } else {
+            crate::tests::test_fail("perf-flag-values", "flag bits diverge from the uapi");
+        }
+    }
+
+    /// read(2)'s counter layout: 8/16/24/32 bytes per read_format, the
+    /// count first, then enabled/running/id — and it is computed from
+    /// PerfInner.total (never decremented by sampling), not the
+    /// sample-phase residual.
+    pub fn test_read_layout() {
+        let mut ev = test_event(77, false, 0);
+        {
+            let mut inner = ev.inner.lock();
+            inner.total = 1_500_000;
+            inner.counter = 100_000; // residual since last sample
+        }
+        let mut buf = [0u8; 40];
+        // Default (fmt 0): the count alone.
+        ev.read_format = 0;
+        let n = read_counter(&ev, &mut buf);
+        let mut ok = n == 8 && u64::from_le_bytes(buf[0..8].try_into().unwrap()) == 1_500_000;
+        // Both TIME bits: count, enabled (0 — never stamped), running
+        // (== the charged count).
+        ev.read_format =
+            PERF_FORMAT_TOTAL_TIME_ENABLED | PERF_FORMAT_TOTAL_TIME_RUNNING | PERF_FORMAT_ID;
+        let n = read_counter(&ev, &mut buf);
+        ok &= n == 32;
+        let count = u64::from_le_bytes(buf[0..8].try_into().unwrap());
+        let enabled = u64::from_le_bytes(buf[8..16].try_into().unwrap());
+        let running = u64::from_le_bytes(buf[16..24].try_into().unwrap());
+        let id = u64::from_le_bytes(buf[24..32].try_into().unwrap());
+        ok &= count == 1_500_000 && enabled == 0 && running == 1_500_000 && id == 77;
+        if ok {
+            crate::tests::test_pass("perf-read-layout");
+        } else {
+            crate::tests::test_fail("perf-read-layout", "read(2) bytes diverge from the layout");
+        }
     }
 
     /// Record encoding: sample and lost records match the ABI layout.
