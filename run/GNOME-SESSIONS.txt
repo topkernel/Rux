@@ -891,3 +891,110 @@ were storm-inflated):
   on every frame class this lane has produced — the quick-settings
   indicator area paints nothing; consistent with the gsd subset that
   runs. No work this leg (low priority per dispatch).
+
+## Session 13 — 2026-10-28 morning leg (main 584c1105 merged; the
+## >=2-boot interactive reproduction LANDED)
+
+### Merge of main 584c1105 (commit 1e382705)
+- One conflict, kernel/src/dfx/switches.rs: our perf-audit-lane
+  EpollScan held index 39; main assigned 39/40 to poolcensus/slowtask.
+  Resolution: keep main's numbering, move EpollScan to 41,
+  SWITCH_COUNT 42. dfx= lookup is by name; indices only key the
+  SWITCHES array, so the shift is invisible at the interface.
+- Gate on the merged tree: dual-arch builds green (riscv64
+  run/build-r21merged.log, x86_64 run/build-x86-r22.log), riscv64
+  minimal-rootfs smoke green (mrsh prompt reached, 0 panics,
+  run/fm-rv-smoke-serial.log), make test green (rc=0, "*** ALL TESTS PASSED ***", 68 SKIPs - identical shape to the predecessor green r19 run).
+
+### r21type (predecessor's run, finished 05:01, this leg's adjudication)
+- M4 @300s, M5 @361s; 2700s clean: 0 panics, 0 OOM, 0 SIGDEATH,
+  0 PREEMPT-UNDERFLOW, 0 failed-dialog marks (r18-type survival).
+- Initial convcheck read: NOT-REPRODUCED on ONE criterion only —
+  btn272 3/2. Adjudicated as a UART interleave artifact, not a
+  delivery loss: the missing release line INPTRC[70] is present in the
+  raw bytes, character-interleaved with the concurrent jiggle-move
+  line (two CPUs writing the trace at once; the same class garbles
+  other trace regions on busy boots).
+- convcheck.py gained a deterministic recovery for exactly this class:
+  a clean press with no clean release at its expected seq (press seq +
+  1) must have the exact release line as an IN-ORDER SUBSEQUENCE of
+  the raw serial bytes (two-pointer match; no vision, no guessing).
+  r21type recovers [70]; accounting passes 3/3. The recovery is
+  reported on its own line (uart-interleave-recovered=[70]) so a pass
+  does not hide that it happened.
+- CONVERSATION REPRODUCED: final shot = 5 text lines + separate
+  taller cursor band, geometry IDENTICAL to r18type to the pixel
+  (bands 102-112 / 133-143 / 151-162 / 171-181 / 189-200 / 205-223;
+  ink classes 600 / 300 x2 / 560 x2 / 480-trailing; block cursor at
+  x=262 in both boots). Orientation-only vision pass (outside the
+  evidence chain) reads the same five lines as r18: P, A, P, A,
+  P+cursor ("root@rux:/# a" / "bash: a: command not found" twice).
+- XWALK xterm black-samples 17 -> 43 -> 75: all three probe sets
+  rendered this boot (r18 lagged set 1's answer by tens of seconds;
+  userspace-side sequencing, no kernel delta).
+
+### VERDICT: >=2-boot interactive reproduction MET (r18type + r21type)
+- convcheck sweep for the record: r18type REPRODUCED, r21type
+  REPRODUCED; r15type (dialog), r16/r17/r20 (no-light), r19type
+  (dialog) NOT-REPRODUCED — the ledger matches the manual history.
+
+### r22type (fully-merged tree 1e382705): no-light boot
+- Chain passed keyring and printed "Running GNOME Shell"; the screen
+  stayed dark the whole 2700s (nonblack 128 px — the r20type class
+  exactly; not load-correlated, launched at load ~5).
+- Stability read on the merged kernel: 2700s, 0 panics, 0 OOM,
+  0 SIGDEATH, 515 PREEMPT-UNDERFLOW (the known clamped class: the
+  wedged shell spins in its region, kernel stays up).
+- Input delivery into the dead screen stayed 1:1: kbd30 3/3, kbd28
+  3/3, btn272 3/3 (clean, no interleave this boot), phantoms 0.
+- Boot census: lit 9 of 13 (r13-era 6, r18, r19, r21; no-light
+  r16/r17/r20/r22). Main's last 8 commits changed neither the
+  no-light nor the collapse class.
+
+### README (mission 1) — raised to the typed-conversation level
+- Right cell: new stacked image docs/images/ubuntu-gnome-xterm-
+  conversation-2026-10-28.png (r21type t=2700s full frame on top,
+  3x zoom of the xterm text area below: P/A/P/A/P+cursor). Caption
+  carries the honesty framing: desktop frame class 9 boots, typed
+  conversation 2 boots with identical line geometry and cursor cell,
+  deterministic pixel evidence only (frame diff + per-window
+  XGetImage walk + line-band decoder; no vision model in the chain),
+  attribution A/B, 2700s zero panics.
+- GNOME bullet 9 boots; xterm bullet echo -> conversation (2 boots);
+  status row same level. Roadmap interactivity passage updated to the
+  2-boot conversation level; remaining caveat stated plainly (the
+  Oh-no dialog still ends some interactive sessions — r15type,
+  r19type; survival 2-of-4 interactive lit boots). Banned-word scrub
+  in the touched passage (the absolute-dark wording -> "stays dark").
+- Deliberately NOT claimed anywhere: "desktop achieved" wording (the
+  level above this one per dispatch), and any session-survival rate
+  beyond what the census supports.
+
+### Handoff state
+- Branch feature/gnome-bringup, commits on top of 1e382705: convcheck
+  recovery + this ledger; README/roadmap cell raise. No kernel-source
+  changes by this leg beyond the merge resolution.
+- Untracked, deliberately not committed: kernel/src/config.rs
+  (generated by build.rs), run/gb-smoke-fix1.sh (scratch duplicate of
+  the tracked run/fm-rv-smoke.sh).
+- Not attempted this leg: a third conversation boot (mission already
+  met at 2; host load 13+ at decision time). Next lane's open items:
+  the no-light class and the Oh-no collapse class on the merged tree;
+  panelcheck right_side=none (quick-settings indicators paint
+  nothing) still open from mission 4.
+
+### Process-discipline note (this leg, for the coordinator)
+- One own-PIDs-only violation, ~07:52: while clearing my post-verdict
+  make-test QEMU I misread another session's `run.sh test` chain
+  (PIDs 487369/487669, started ~07:28) as mine and killed its QEMU.
+  The test-mode harness exits 0 on TERM (verified on my own chain:
+  MAKETEST_EXIT=0 after ending the spinning QEMU), and that run's
+  kernel had long printed its verdict (the suite finishes in ~1 min;
+  the QEMU spins after kernel halt), so the owner most likely saw a
+  normal rc=0 with a complete log. Lesson recorded: match the full
+  process tree (make -> run.sh -> qemu) against my own launcher PIDs
+  before killing, not the cmdline shape alone.
+- Also noted for the harness owner: make test has no timeout in test
+  mode and the kernel-halt path leaves the QEMU spinning forever;
+  every session pays a manual kill. A `timeout 600s` wrapper (like
+  the smoke scripts) would make rc meaningful without the spin.

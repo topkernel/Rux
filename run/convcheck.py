@@ -118,6 +118,18 @@ def has_block_cursor(img, w, band, y_lo=None, y_hi=None):
     return None
 
 
+def seq_match(hay, needle):
+    """True iff `needle` occurs in `hay` as an in-order subsequence
+    (chars in order, arbitrary interleaved junk between them). Used to
+    recover INPTRC lines character-interleaved on the UART by concurrent
+    writers; a full trace line is 40+ chars in exact order, so accidental
+    subsequence matches are not a practical concern."""
+    if len(needle) > len(hay):
+        return False
+    it = iter(hay)
+    return all(c in it for c in needle)
+
+
 def check_run(dirpath):
     name = os.path.basename(dirpath.rstrip("/"))
     print(f"=== {name} ===")
@@ -157,8 +169,26 @@ def check_run(dirpath):
     absclick = len(re.findall(r"code=0 value=12288", ser))
     phantoms = len(re.findall(r"dev=kbd", ser)) - (kbd30 + kbd30r
                   + kbd28 + kbd28r)
+    recovered = []
+    # UART interleave recovery: two CPUs writing the trace at once can
+    # character-interleave INPTRC lines (observed r21type: the 3rd click's
+    # release interleaved with the concurrent jiggle-move line). The raw
+    # bytes still contain the complete event, so when a clean press has no
+    # clean release at its expected seq (press seq + 1: the click probe
+    # injects press+release back-to-back), look for the exact release line
+    # as an IN-ORDER SUBSEQUENCE of the raw bytes (deterministic
+    # two-pointer match; no guessing, no vision).
+    for m in re.finditer(
+            r"INPTRC\[(\d+)\] dev=ptr type=1 code=272 value=1", ser):
+        nxt = f"INPTRC[{int(m.group(1)) + 1}] dev=ptr type=1 code=272 value=0"
+        if re.search(re.escape(nxt), ser):
+            continue  # paired cleanly
+        if seq_match(ser, nxt):
+            btnr += 1
+            recovered.append(int(m.group(1)) + 1)
     print(f"  INPTRC kbd30={kbd30}/{kbd30r} kbd28={kbd28}/{kbd28r} "
-          f"btn272={btn}/{btnr} click-moves={absclick} kbd-phantoms={phantoms}")
+          f"btn272={btn}/{btnr} click-moves={absclick} kbd-phantoms={phantoms}"
+          + (f" uart-interleave-recovered={recovered}" if recovered else ""))
     ok_lines.append(kbd30 == kbd30r == kbd28 == kbd28r == btn == btnr
                     and kbd30 >= 2 and phantoms == 0)
     # ---- 3. XWALK xterm own-content timeline ----
