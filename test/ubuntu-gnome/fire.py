@@ -219,8 +219,14 @@ PATTERNS = [
     (re.compile(rb"\[runit\] falling back to minimal path"), "fallback_gs"),
     (re.compile(rb"comm=gnome-shell pid=(\d+) state=(\w+)"), "gnome_shell"),
     (re.compile(rb"pid=\d+ tgid=\d+ state=(\w+)[^\n]*comm=gnome-shell "), "gnome_shell"),
+    # merged main's taskdump emits ftrace-style trace events; the comm
+    # names appear as sched_switch prev_/next_ pairs (r13walk2: M3 sat
+    # "not-reached" while the shell provably ran — pattern staleness)
+    (re.compile(rb"next_comm=gnome-shell "), "gnome_shell_trace"),
+    (re.compile(rb"prev_comm=gnome-shell "), "gnome_shell_trace"),
     (re.compile(rb"comm=(gsd-[\w-]+) pid=(\d+)"), "gsd"),
     (re.compile(rb"pid=\d+ tgid=\d+ state=\w+[^\n]*comm=(gsd-[\w-]+) "), "gsd"),
+    (re.compile(rb"next_comm=(gsd-[\w-]+) "), "gsd_trace"),
     (re.compile(rb"comm=mutter"), "mutter_wm"),
     (re.compile(rb"GNOME Shell started at"), "shell_started"),
     (re.compile(rb"comm=xterm"), "xterm_probe"),
@@ -265,6 +271,10 @@ def serial_reader():
                               "shell_started", "xterm_probe", "session_failed",
                               "notify_sent"):
                     note(f"{name} {detail}".rstrip())
+                elif name.endswith("_trace"):
+                    # trace-event comm names fire on every sched_switch;
+                    # mark the milestone once, do not flood the markers
+                    pass
                     if name == "gnome_shell":
                         mark("M3_gnome_shell", detail)
                     elif name == "gsd":
