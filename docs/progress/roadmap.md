@@ -1,6 +1,6 @@
 # Rux Development Roadmap
 
-## Current Phase (2026-10-27): desktop frames reproducible, OH launcher at MainAbility
+## Current Phase (2026-10-28): desktop frames reproducible, OH launcher past the truncate stage
 
 **Two fronts moved decisively this week.**
 
@@ -23,7 +23,7 @@
 - Standing: LTP r15 = **1,005 / 1,869 (53.8%)**, trend 35 → 524 → 801 →
   945 → 1,005.
 
-### OpenHarmony — launcher chain at MainAbility loading (deepest ever)
+### OpenHarmony — launcher clears the data-ability truncate; remaining block image-side
 
 - The render_service crash family is **root-caused image-side and
   mitigated**: the image's own fault-handler library copies a 936-byte
@@ -37,10 +37,32 @@
   three drain paths, and thread pools could never grow under nested
   calls (BR_SPAWN_LOOPER gating) — both fixed to reference semantics;
   lifecycle-timeout lines went 304 → ~23 per boot.
-- Deepest draws now: systemui loads, **launcher MainAbility starts
-  loading**, then a cross-process synchronous cycle parks the chain —
-  the routing of nested sync transactions is under final adjudication
-  (kernel from-walk semantics vs reference).
+- The ftruncate family is **root-caused kernel-side and fixed**: the
+  launcher's code98 data-ability call into foundation wedged 1.3–101 s
+  per call because ext4_setattr held EXT4_BIG_LOCK across the whole
+  truncate while the extent-free loop paid one synchronous bitmap
+  round trip (bread + RMW + sync_dirty_buffer) per group-segment —
+  2201 syncs / 102 s cumulative in one instrumented draw = 46 ms per
+  sync under boot load. Fix: the route-1 null-journal bracket arms on
+  the ATTR_SIZE path so bitmap writes defer to the standing batch
+  points (fsync/sync, eviction), matching the F4-R2 crash stance.
+  The fix draw shows zero ftruncate hang signatures and the launcher
+  code98 transaction completing below the audit threshold.
+- The nested-routing adjudication is **closed — kernel exonerated**:
+  every audited path (delivery, pickup, from-walk nesting, reply-pop
+  discipline) is Linux-identical; an image early-reply was rejected
+  with BR_FAILED_REPLY exactly per Linux 5.15 binder.c:2496. The
+  remaining wall is image-side: HDF handler pairs call back into each
+  other synchronously (mutual ABBA, both threads parked in ioctl with
+  empty todos awaiting the other's reply) or defer replies
+  userspace-side (647 such audit lines in the deepest draw, foundation
+  threads parked up to 27 min in futex). Mitigation needs the image's
+  handler stacks; the kernel-side instrument set (TXN-HANG-OWE, pool
+  census, pathstash) is in place to guide it.
+- Deepest draws now: systemui loads, launcher MainAbility loading
+  clears the code98/truncate stage (166 MainAbility mentions vs 141
+  before the fix) and the chain reaches the ability-lifecycle sync
+  calls, where the image-side family above parks it.
 
 ### Performance & infrastructure (2026-10-27)
 
