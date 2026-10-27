@@ -2215,14 +2215,17 @@ concurrent arms, sweepstart=1290, same LTP rootfs):**
 
 | arm | kernel | heals | underflows | dominant shape |
 |---|---|---|---|---|
-| pa73a | 0f806d8b (tip) | 78 | 77 | 76x pid=0x251 PROCESS_TREE_LOCK |
-| pa73b | 488528dc (pre-delta) | 77 | 76 | 75x pid=0x251 PROCESS_TREE_LOCK |
-| pa73c | 488528dc + leakhunt/wwcensus | 63 | 63 | same pid/lock class |
+| pa73a | 0f806d8b (tip) | 136 | 134 | 37P/3F/5TCONF/6TO, pid=0x251 PROCESS_TREE_LOCK |
+| pa73b | 488528dc (pre-delta) | 148 | 147 | 38P/3F/5TCONF/5TO, pid=0x251 PROCESS_TREE_LOCK |
+| pa73c | 488528dc + leakhunt/wwcensus | 146 | 146 | same pid/lock class |
 
-Same rate, same pid (the waitid08 parent), same lock (both addresses
-symbolize to task.rs:33), same shape. The delta is exonerated as the
-origin; the s12 r11/r12 "zero" control was a stochastic miss (their
-own r64/r65 vs r66 flake the same way on one kernel).
+Same pids (the waitid08 parent 0x251 dominant in every arm), same lock
+(both addresses symbolize to task.rs:33), same shape — and the
+PRE-DELTA kernel fired MORE heals than the tip (148 vs 136; stochastic
+wedge variance). LTP row outcomes equivalent between arms (one TIMEOUT
+apart). The delta is exonerated as the origin; the s12 r11/r12 "zero"
+control was a stochastic miss (their own r64/r65 vs r66 flake the same
+way on one kernel).
 
 **(4) D-7 is exonerated by mechanism.** CpuLocal::with touches only
 the IRQ flag (save_and_disable_irq/restore) and a per-row in_use

@@ -99,23 +99,23 @@ producer hunt a direct fingerprint if the wedge fires:
   A = 0f806d8b (main tip, carries the delta)
   B = 488528dc (pre-delta control)
 Verdict rule: class on B => delta exonerated as origin (expected, given
-the v16 evidence). RESULTS (2026-10-28 02:33-02:58 boots, host load
-19-25, three concurrent arms, sweepstart=1290):
+the v16 evidence). RESULTS (2026-10-28 02:33-03:07 boots, host load
+19-25, three concurrent arms, sweepstart=1290, max-wall 1500 s; the
+flaky wedge fired enough times in every arm for a decisive tally):
 
-  arm    kernel                    heals  underflows  shape
-  pa73a  0f806d8b (main tip)         78       77      76x pid=0x251
-                                                       lock=..80c93f80
-  pa73b  488528dc (pre-delta)        77       76      75x pid=0x251
-                                                       lock=..80c78ff8
-  pa73c  488528dc + dfx=leakhunt,    63       63      same pid/lock class
+  arm    kernel                    heals  underflows  LTP buckets
+  pa73a  0f806d8b (main tip)        136      134      37P/3F/5TCONF/6TO
+  pa73b  488528dc (pre-delta)       148      147      38P/3F/5TCONF/5TO
+  pa73c  488528dc + dfx=leakhunt,   146      146      (probe arm)
          wwcensus (origin probe)
 
-Both lock addresses symbolize to PROCESS_TREE_LOCK (task.rs:33) in
-their respective kernels. pid 0x251 = the waitid08 parent (idx 1312).
-The class fires at the SAME RATE, same pid, same lock, same shape on
-BOTH range ends. VERDICT: the 488528dc->979fde80 delta is EXONERATED
-as the origin; the s12 r11/r12 "zero" control was a stochastic miss
-(their own r64/r65 vs r66 show the same flake on one kernel).
+FINAL: the PRE-DELTA kernel fired MORE heals than the tip (148 vs
+136; run-to-run variance of the stochastic wedge). LTP row outcomes
+are equivalent between arms (one TIMEOUT apart). The class fires at
+the same rate, same pids, same locks on BOTH range ends. VERDICT: the
+488528dc->979fde80 delta is EXONERATED as the origin; the s12 r11/r12
+"zero" control was a stochastic miss (their own r64/r65 vs r66 show
+the same flake on one kernel).
 
 LEAK-ORIGIN bonus (pa73c, dfx=leakhunt+wwcensus, on the PRE-DELTA
 kernel): the leaked count's acquire sites on pid 0x251 (per-task
