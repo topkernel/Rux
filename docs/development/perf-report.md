@@ -1876,3 +1876,99 @@ are the working reference — the Tier-2 GATE anchor in
 perf-gate-baseline.md stays the pb1 DEBUG column per the profile-class
 note (no baseline-doc change until a main-class debug pbench re-anchors
 it).
+
+### 8.10.13 Leg 43 (2026-10-27): D-7 root-caused to a deleted-store family and re-landed behind UnsafeCell; the fork_exit 650-class is the old-bio draining cost, fixed on main
+
+**D-7 (the release-break) is root-caused, machine-verified, and
+re-landed (b3278ad5). Evidence: run/pa68-d7-rootcause.txt; artifact
+perf-audit-pa68 (d8d23064 weak, symbols).** The mechanism, in one
+line: the conversion moved the magazine bank from `static mut` to a
+non-mut `static MAGAZINES: CpuLocal<...>` whose type had NO interior
+mutability (`[Row<T>; N]` + `unsafe impl Sync` — the Sync impl does
+not confer it), so rustc emitted the LLVM global as `constant` and it
+linked into .rodata (readelf: 0xffffffff805039c0, 4608 B). The image
+maps P|RW (cpu.rs WP note), which hid it from hardware — debug builds
+emitted the stores and passed the suite; under opt>=1 LLVM deleted
+every store into the bank and hoisted the loads. The objdump of the
+refill loop (0xffffffff802b87c0) shows ZERO stores and a len pinned in
+registers: `cmovne r15,r13` sets len+1=1 once, `cmp r15,0x10/jb` spins
+forever — one refill call carved 15.9M c64 objects across 252928
+pages (99% of the heap, tilting exactly heap_start→region end — the
+8.10.11 "heap start garbage" model was wrong), returned its first
+object, and the SECOND refill (locks=2) returned null into the
+cmdline String: ALLOCTHROW size=48, t=3s, both release shapes. Fix:
+`rows: UnsafeCell<[Row<T>; N]>` (+ raw-pointer row access, no
+`&`-paths). Post-fix codegen verified on a weak-sym build: MAGAZINES
+in .bss (0xffffffff80edeec0), buf store + len reload/inc/store +
+bounded loop exit all present (0xffffffff802c62e9). Verification per
+the binding protocol: unit suite ALL TESTS PASSED (percpu-shape
+group), release-strong pbench boot pa68d7fix DONE rc=0 full board
+clean power-down — the channel/profile that killed every boot since
+d8d23064. (Forensics note, paid for once: check the target/ artifact
+mtime before reading it — a profile-matched stale ELF answers for the
+new build.) The D-7 divergence entry now carries the incident + rule.
+
+**The p4_fork_exit open item closes: the 650-class was the OLD
+whole-queue-draining bio's cost on the fork/exit path — fixed on main
+by scoped-publication draining (0cd29a75); the branch levers are
+exonerated.** The pa68 pair (M = main 488528dc strong — the FIRST
+main tip carrying the wake/epoll + socket + procfile levers; B8 =
+branch 8be8a315 strong re-run, the kernel that read 662.9/649.9 in
+pa66; interleaved M,B8,B8,M, 4/4 boots rc=0, loads 6→23):
+
+| boot | kernel | load1 | p4_fork_exit | p4_fork_exec |
+|---|---|---|---|---|
+| pa68pb1M | main488 | 6 | **447.6** | 1579 |
+| pa68pb2B8 | branch8b | 20 | 753.4 | 2014 |
+| pa68pb3B8 | branch8b | 22 | 1011.7 | 2594 |
+| pa68pb4M | main488 | 23 | 723.7 | 1695 |
+
+Reading: (1) main WITH all levers reads the 429-458 reference class at
+quiet load (447.6@6) — a fixed lever cost would show there; the levers
+are out. (2) M4's 723.7 came through a uniformly inflated window (its
+p1_null 1.041 vs 0.631, p5a 3.9 vs 2.8, openclose 46 vs 29 — all
++40-60% vs M1): fork_exit is load-coupled on BOTH kernels, ratio
+B8/main ≈ 1.45x at every matched load (pa66: 655/445 at 11-17; today:
+1012/723 at 22-23). (3) So the pa66 delta was real and is B8-stack
+specific: B8's unique kernel delta vs main is the PRE-c3e5a314
+bio.rs/ext4/jbd2 family — every exit-path durability touch paid the
+whole-queue drain. Main is clean at every load observed (429-723
+tracks load; D-7 re-land kernel read 496 at load 25+). NOT
+merge-blocking, nothing owed: verdict = old-bio cost, fixed on main,
+levers exonerated, row is load-coupled (state load1 with any future
+fork_exit number).
+
+**p5b regime: the adjudication stays open, sharpened by a new
+convergence clue.** Today's fast-regime readings: M 4.9/4.6 (load 6)
+and 8.3/8.3 (load 23, uniformly inflated), B8 5.5/5.0 and 5.5/6.3 —
+B8-class stays 4.7-6.3 across all six lever-kernel boots; but the
+D-7fix boot (main-class, load 25+) read the SLOW regime 44.5/44.4 —
+the third main-class slow reading (pa66 A1 41.1, pa64pb4A 39.7).
+New clue: in that boot p5b (44.5) converged exactly onto p5c's
+standing value (44.5) — p5c_stream_write reads 41-44 in EVERY boot of
+every kernel at every load while p5a_pipe reads 2.7-3.9. The
+hypothesis for the next socket-family leg: p5c's unconditional ~38µs
+delta vs pipe IS the regime flipper's cost, and the regime question
+and the p5c lever are one decomposition (14x stream-vs-pipe gap;
+prime suspects: per-write segment alloc/copy under the recvq lock,
+wake shape, and whatever the stream path does that dgram only
+sometimes pays). Regime-matched rerun stays queued on that
+decomposition, not on more unlabeled boots.
+
+**Standing after this leg:** (1) the socket-family lever is
+DECOMPOSED — the p5c2/p5c3 rows (d07930f1) put the 35 µs in the
+CHILD'S read(2)-on-socket wrapper, not the send side or the stream
+transport (pa68p5c: p5c2 send+read-child 39.15/min 37.3 vs p5c3
+send+recv-child 4.77/min 2.4; phase wall 40.1 vs 20.2 s — half
+throughput with the read wrapper in the drain path). The fix lever is
+armed: pipe-style direct fast path for socket read/write in
+sys_read/sys_write + gating the always-built File::path() format that
+feeds pathstash (stash_file discards it when the switch is off, but
+the String is constructed per call before the check); same question
+applies to the p5b regime flipper (slow-regime p5b converges onto the
+p5c class); (2) L1 F4 two designs armed in f4-ext4-route-map.md —
+no-journal identity-block deferral (route 1; GNOME-side, journal
+dormant j=0 there) and the journaled mkdrmdir residual (per-rmdir
+revoke-forced synchronous commit; needs per-transaction revokes +
+reallocation cancel before it can go lazy); (3) Tier-2 gate anchor
+unchanged (pb1 DEBUG column).
