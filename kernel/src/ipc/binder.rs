@@ -3640,6 +3640,10 @@ pub fn pool_census_audit() {
     // Deepest-todo proc's per-thread states: (tid, waiting, stacked).
     let mut detail: alloc::vec::Vec<(u32, bool, bool)> = alloc::vec::Vec::new();
     let mut detail_pid = 0u32;
+    // Deepest-todo proc's first queued items (the strand victims):
+    // (txn id, code, oneway, reg_tgid, sender pid, enqueue age jiffies).
+    let mut todo_items: alloc::vec::Vec<(u64, u32, bool, u32, u32, u32)> =
+        alloc::vec::Vec::new();
     {
         let w = world_lock();
         // SAFETY: read-only POD snapshot under WORLD (sc89 discipline —
@@ -3699,6 +3703,22 @@ pub fn pool_census_audit() {
                         let st = t.st();
                         detail.push((t.tid, st.waiting_for_proc_work, !st.txn_stack.is_empty()));
                     }
+                    // First queued items, with the reg_tgid read-gate
+                    // verdict: a waiting daemon worker takes this item
+                    // only when daemon_readable (reg 0 / daemon-owned).
+                    for w in pim.todo.iter().take(3) {
+                        if let Work::Transaction(t) = w {
+                            let reg = t.target_node.as_ref().map_or(0, |n| n.reg_tgid);
+                            todo_items.push((
+                                t.id,
+                                t.code,
+                                t.flags & TF_ONE_WAY != 0,
+                                reg,
+                                t.from_proc.as_ref().map_or(0, |fp| fp.pid),
+                                now.wrapping_sub(t.enq_j),
+                            ));
+                        }
+                    }
                     detail_pid = deepest_pid;
                 }
             }
@@ -3738,6 +3758,23 @@ pub fn pool_census_audit() {
             );
         }
         crate::pr_warn!("POOL-THR pid={}{}", detail_pid, line);
+    }
+    for (id, code, oneway, reg, from, age) in todo_items.iter() {
+        // daemon_readable: would THIS proc's own waiting worker take the
+        // item (work_readable_by with the daemon tgid)? False = gated to
+        // a child (reg_tgid) — only the child's threads may consume it.
+        let daemon_readable = *reg == 0 || *reg == detail_pid;
+        crate::pr_warn!(
+            "POOL-TODO pid={} txn{} code{} {} reg={} from={} age={}j{}",
+            detail_pid,
+            id,
+            code,
+            if *oneway { "oneway" } else { "sync" },
+            reg,
+            from,
+            age,
+            if daemon_readable { "" } else { " CHILD-GATED" }
+        );
     }
 }
 
