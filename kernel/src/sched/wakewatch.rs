@@ -331,6 +331,16 @@ pub fn check_picked(task: *mut crate::process::Task, cpu: usize) {
                         ww_u64((*tp).preempt_count() as u32 as u64);
                     }
                 }
+                // leg-33B incumbent attribution: the interrupted kernel
+                // instruction from this CPU's LAST tick — for a
+                // preempt-off incumbent this names the loop it spins in
+                // (addr2line-able), which pid/pc alone never could
+                // (sc329B residuals 565/564 and 376/377).
+                ww_msg(b"/tickrip=");
+                ww_hex(
+                    crate::interrupt::preempt::TICK_ENTRY_RIP[c]
+                        .load(core::sync::atomic::Ordering::Relaxed),
+                );
             }
         }
         // vruntime geometry (round 4): the victim's lead/lag against
@@ -412,6 +422,29 @@ fn ww_u64(mut v: u64) {
         while v > 0 && n < buf.len() {
             buf[n] = b'0' + (v % 10) as u8;
             v /= 10;
+            n += 1;
+        }
+    }
+    for i in (0..n).rev() {
+        unsafe { crate::console::putchar_no_lock(buf[i]) };
+    }
+}
+
+/// Hex printer (leg-33B): tick RIPs read as text are unreadable; the
+/// strand census prints them 0x-prefixed for direct addr2line use.
+fn ww_hex(v: u64) {
+    ww_msg(b"0x");
+    let mut buf = [0u8; 16];
+    let mut n = 0;
+    let mut v = v;
+    if v == 0 {
+        buf[0] = b'0';
+        n = 1;
+    } else {
+        while v > 0 && n < buf.len() {
+            let d = (v & 0xf) as u8;
+            buf[n] = if d < 10 { b'0' + d } else { b'a' + d - 10 };
+            v >>= 4;
             n += 1;
         }
     }

@@ -83,6 +83,8 @@ macro_rules! dfx_switch_table {
             SfdDbg => "sfddbg",
             Ams46 => "ams46",
             VmaProbe => "vmap",
+            PoolCensus => "poolcensus",
+            SlowTask => "slowtask",
         }
     };
 }
@@ -345,6 +347,25 @@ pub enum DfxSwitch {
     /// accountmgr→AMS StartUser oneway that returns 0 but never executes
     /// SwitchToUser inside foundation on walled draws. OFF by default.
     Ams46,
+    /// dfx=poolcensus (leg-33B): binder thread-pool census for the
+    /// reader-exhaustion family — every ~5 s, one line per binder proc
+    /// that has queued todo or a worker pool: todo depth, max_threads,
+    /// requested_threads, worker/idle/client-per-thread looper state;
+    /// plus a rate-capped POOL-SPAWN print whenever the done:-shaped
+    /// BR_SPAWN_LOOPER emission fires (the sc329B fix's live proof).
+    /// Adjudicates kernel-issued spawn requests vs image-side pool
+    /// limits at the exact moment draining stops. OFF by default.
+    PoolCensus,
+    /// dfx=slowtask (leg-33B): slow-kernel-entry audit — every ~4 s,
+    /// tasks whose syscall entry (nr/epc) and sleep state persisted
+    /// unchanged across rounds get one SLOWTASK line with args and the
+    /// parked kernel-stack chain (same walker contract as TXN-HANG-STK,
+    /// deeper). fs-family syscalls always reported; lock-family waits
+    /// (futex/epoll/poll) only in the summary count unless they are the
+    /// oldest. Attributes the leaf of nested-call cascades (pwrite64 /
+    /// open / ftruncate stalls behind the foundation reader
+    /// exhaustion). OFF by default.
+    SlowTask,
     /// dfx=vmap (leg-31B): VMA-origin adjudication arsenal, the syscall
     /// side of the Vma origin stamp — traces the two syscall families
     /// that establish PROT_NONE shapes (mprotect of a non-writable prot
@@ -356,7 +377,7 @@ pub enum DfxSwitch {
     VmaProbe,
 }
 
-const SWITCH_COUNT: usize = 39;
+const SWITCH_COUNT: usize = 41;
 
 static SWITCHES: [AtomicBool; SWITCH_COUNT] = [const { AtomicBool::new(false) }; SWITCH_COUNT];
 
@@ -432,6 +453,8 @@ impl DfxSwitch {
             DfxSwitch::SfdDbg => 36,
             DfxSwitch::Ams46 => 37,
             DfxSwitch::VmaProbe => 38,
+            DfxSwitch::PoolCensus => 39,
+            DfxSwitch::SlowTask => 40,
         }
     }
 

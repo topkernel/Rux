@@ -1048,6 +1048,13 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize, vector: u64) {
                             .unwrap_or(0) as u32,
                         core::sync::atomic::Ordering::Relaxed,
                     );
+                    // leg-33B: the interrupted RIP rides the same slot —
+                    // the strand census's incumbent attribution
+                    // (TICK_ENTRY_RIP).
+                    crate::interrupt::preempt::TICK_ENTRY_RIP[cpu_id].store(
+                        regs_ref.rip,
+                        core::sync::atomic::Ordering::Relaxed,
+                    );
                     crate::interrupt::preempt::irq_enter();
                     // LAPIC EOI FIRST (same discipline as the PIC path):
                     // the scheduler call below can switch tasks, and the
