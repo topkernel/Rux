@@ -1652,6 +1652,15 @@ fsfuzz-r268-serial.log}. The member doubles as the standing repro
 
 ### Next-session queue
 
+0. COORDINATOR DIRECTIVES (s13 close-out): (a) when the ltp-b canary
+   captures when=slot, the fix (bookings resolve against tp, or
+   bracket the slot rewrites) goes through the FULL sched-domain merge
+   gates — this closes the longest-standing wedge family in the fleet
+   ledger; (b) the perf REGISTRY spin-stall + the two perf ABI defects
+   are routed to the DFX lane as MERGE-BLOCKING for the perf surface —
+   keep the fsfuzz perf arm hot until their fixes land, then ONE clean
+   round on the fixed kernel closes the catch.
+
 1. ltp-b instrument: grep 'when=slot' — a capture names the producer
    directly; cross-read the harvest/abort/heal state around the
    timestamp. Zero prints over several rounds = the slot-rewrite
