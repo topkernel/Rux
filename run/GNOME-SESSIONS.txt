@@ -685,3 +685,80 @@ were storm-inflated):
   #204040 element (gsd-power idle blank class); a subsequent keystroke
   did not visibly unblank in r14live. Cosmetic-level question for a
   later leg (an interactive user would jiggle the mouse anyway).
+
+## Session 11 (2026-10-27 night, leg-11 — succession after the r15type
+## commit; branch was CLEAN at 5d4af794)
+
+### THE r15type VERDICT IS RETRACTED — its "typed shell answer" was the
+### gnome-session-failed dialog
+- Re-derivation from r15type's own artifacts (this leg, before proposing
+  the README): the text bands the verdict counted as "3/4 prompt
+  blocks" are at root y 189-199 / 353-370 / 384-395 — geometry-matched
+  to a fullscreen 1280x800 window 0x1800003 class "Gnome-session-failed"
+  (map=2, content 100.0% white from the 4th XWALK on). A vision pass
+  over shot-2070 reads it as "Oh no! Something has gone wrong." + "A
+  problem has occurred and the system can't recover..." with the cursor
+  exactly at our clickprobe coordinate (480,385). No Enter was ever
+  injected (keyprobe sent only 'a'; fire.py had no key spec), so a
+  shell answer ("a: command not found") was not POSSIBLE — the claim
+  fails on mechanism, not just pixels.
+- Actual r15type timeline: desktop 3-color state through shot-1590;
+  black fade begins at 1560 (30s after the FIRST keystroke @1540);
+  fullscreen failure page by 1620. Keystrokes 2-4 and the 1840 click
+  all hit the failure screen. INPTRC delivery claims DO hold (4 kbd
+  pairs, 2 BTN_LEFT pairs, no phantoms); the rendering/focus/shell-
+  answer claims do not.
+- Session collapse to Oh-no is the known intermittent (first seen
+  session-8 @1260s); whether a keystroke can TRIGGER it is now an open
+  question the re-test addresses.
+
+### r15stab (completed after session-10's note): 2700s, M4@1080, M5@1231,
+### 6th M5 boot, 0 panics, 0 sigdeath, no kernel OOM (the serial's
+### "OOM" greps are dbus-daemon userspace oom_score_adj-EINVAL errors)
+- BUT the desktop idle-blanked at ~1350 (150s after keyprobe@1200) and
+  stayed blank 1350s->2700; the @2100 keystroke did not unblank. Same
+  class as r14live. So current stability truth: full-form desktop for
+  ~90-120s after last input, then gsd-power blank; session itself stays
+  up (no Oh-no) for the full 2700s.
+
+### Merge + README (main 979fde80, the slim rewrite)
+- Merged; ONLY README.md conflicted. Reconciled by hand into main's new
+  slim structure: GNOME cell swapped back to ubuntu-gnome-shell-frame
+  (r13walk2 full-form frame; old udesk asset kept in-tree, c0dc511e
+  precedent), caption at the corrected evidence-backed level (6 M5
+  boots verified: 480/691/1111/1502/1291/1231, all 0 panics; pointer
+  exact-coords r14live; INPTRC 1:1 delivery; attribution A/B; 2700s
+  holds). The interactive-end-to-end wording is GONE. Status row and
+  the GNOME bullet updated to the same level (5710b6fb).
+- Kernel diff vs main: DFX print-only (evdev INPTRC/INPPL, EPSCAN,
+  switches wiring). Gates: PLATFORM=x86_64 build rc=0, riscv64 rebuild
+  rc=0, make test 1122/1122 PASS (rc=124 is the known halt class —
+  suite completed and printed ALL TESTS PASSED), gb smoke 0 panics.
+
+### fire.py extensions (02fc1d51)
+- --keyprobe time:KEY (QMP qcode; 'ret' = Enter) — click-then-type can
+  now actually execute a command line.
+- --jiggle FROM,EVERY,UNTIL: pointer alternates two corner positions
+  (clear of the xterm) to keep gsd-power fed — the observed blank is
+  ~120-150s after last input and a keystroke does not unblank it.
+- Default --img pinned to work/gnome-r13.img (the old default
+  gnome-riscv64.img is the stale Oct-25 pre-evdev roll; first r16type
+  launch silently used it — killed, relaunched correctly).
+
+### r16type (2700s): STORM-STALL, not a verdict run
+- Load 20-23, 27 host QEMUs: session froze at the keyring stage (the
+  documented storm-stall class — gnome-session log tail never reached
+  "Running GNOME Shell"); screen never lit; probes fired into the void.
+- Still a stability point: 2700s, 0 panics, 0 OOM, jiggles kernel-
+  delivered 1:1 (INPTRC ptr at the exact jiggle coords) — 7th
+  consecutive clean-boot class. Retry at load<16 with click 1750,
+  a 1765, ret 1775 / 2150,2165,2175 / 2550,2565,2575, jiggle
+  1500,60,2690.
+
+### Standing open questions
+- Keyboard-interactive (click-focus + glyph in xterm + shell answer):
+  UNPROVEN at screen level — the honest README level is pointer-
+  interactive + kernel-delivery 1:1. r16type'/r17type re-test pending a
+  calm window.
+- Oh-no collapse trigger: spontaneous intermittent, or input-adjacent?
+- Idle-blank unblank path (keystroke does not wake it).
