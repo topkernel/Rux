@@ -661,6 +661,68 @@ static void b_p5c(void)
     free(t);
 }
 
+/* p5c2/p5c3 (leg 43): entry-path decomposition of the p5c row. p5c
+ * times write(2) on a stream socketpair with a read(2)-draining
+ * child and reads 41-44 us on EVERY boot/kernel while the dgram
+ * p5b sendto row reads 4.9-5.5 fast-regime. Same transport, same
+ * locks, same wake shape — the delta must live in the WRAPPERS:
+ * write(2)/read(2) on a socket fd go through the chunked staging
+ * path (per-call staging alloc + double copy + a per-call
+ * File::path() format for the pathstash hook) while sendto/recvfrom
+ * enter the socket ops directly. p5c2 = sendto/recvfrom on the SAME
+ * stream socketpair; p5c3 = write(2) parent, recvfrom(2)-draining
+ * child (splits the write-side vs read-side wrapper cost).
+ * Reading: p5c2 ~p5b-fast  => the wrappers own the 38 us (fix the
+ *           sys_write/sys_read socket path); p5c2 ~p5c  => the stream
+ *           transport/wake shape owns it. p5c3 splits further. */
+static void b_p5c23(int use_send, int child_recv)
+{
+    const char *tag = use_send ? (child_recv ? "p5c3_stream_wrecv" : "p5c2_stream_send")
+                               : "p5c_stream_write";
+    int sv[2];
+    if (socketpair(AF_UNIX, SOCK_STREAM, 0, sv) < 0) {
+        skip_line(tag, "socketpair-stream-errno");
+        return;
+    }
+    pid_t pid = fork();
+    if (pid < 0) { skip_line(tag, "fork-errno"); close(sv[0]); close(sv[1]); return; }
+    if (pid == 0) {
+        close(sv[0]);
+        char buf[65536];
+        if (child_recv) { while (recvfrom(sv[1], buf, sizeof(buf), 0, 0, 0) > 0) ; }
+        else            { while (read(sv[1], buf, sizeof(buf)) > 0) ; }
+        _exit(0);
+    }
+    close(sv[1]);
+    u64 *t = xmalloc_samples(P5C_N);
+    if (!t) { close(sv[0]); waitpid(pid, 0, 0); return; }
+    char rec[REC_BYTES];
+    memset(rec, 0xa3, sizeof(rec));
+    for (int i = 0; i < 2000; i++) {
+        ssize_t r = use_send ? sendto(sv[0], rec, REC_BYTES, 0, 0, 0)
+                             : write(sv[0], rec, REC_BYTES);
+        if (r != REC_BYTES) break;
+    }
+    size_t n = 0;
+    s64 w = mnr_ns();
+    for (int i = 0; i < P5C_N; i++) {
+        u64 t0 = rdtsc_();
+        ssize_t r = use_send ? sendto(sv[0], rec, REC_BYTES, 0, 0, 0)
+                             : write(sv[0], rec, REC_BYTES);
+        u64 t1 = rdtsc_();
+        if (r != REC_BYTES) break;
+        t[n++] = t1 - t0;
+    }
+    w = mnr_ns() - w;
+    close(sv[0]);
+    waitpid(pid, 0, 0);
+    report_ticks(tag, t, n, w, n < (size_t)P5C_N ? "short=1" : "");
+    free(t);
+}
+
+static void b_p5c2(void) { b_p5c23(1, 0); }
+static void b_p5c3(void) { b_p5c23(1, 1); }
+
 /* ---------------- P6: fs ops on an identical tree ---------------- */
 static void p6_path(char *out, size_t outsz, const char *fmt, long i)
 {
@@ -975,6 +1037,8 @@ int main(int argc, char **argv)
     b_p5a();
     b_p5b();
     b_p5c();
+    b_p5c2();
+    b_p5c3();
     b_p6();
     b_p7();
 
