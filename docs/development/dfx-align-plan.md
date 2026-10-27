@@ -1,11 +1,11 @@
-# DFX Alignment with Linux — Gap Analysis and Phased Plan
+# DFX Alignment with the Reference Kernel — Gap Analysis and Phased Plan
 
 Date: 2026-10-24
 Status: analysis complete; Tranche 1 implemented (see §5)
 Scope: `kernel/src/dfx/` plus the user-visible debug surfaces
 (`/proc`, `/sys`, printk, crash paths).
 
-Design rule for this work: **every surface follows Linux**. Where Linux
+Design rule for this work: **every surface follows the reference kernel**. Where the reference kernel
 has a facility — debugfs, `/proc/sysrq-trigger`, `/proc/kallsyms`,
 `/proc/stat` — Rux uses that facility, with that name, that file format
 and that command semantics. Rux does not invent parallel interfaces.
@@ -25,7 +25,7 @@ and cannot answer performance questions at all because the kernel exposes
 no per-CPU time accounting, no VM statistics, no scheduler statistics and
 no per-process context-switch counts.
 
-This document states the gap against Linux, orders it by what unblocks
+This document states the gap against the reference kernel, orders it by what unblocks
 diagnosis first, and fixes the order of work.
 
 ## 2. What Rux already has (the asset inventory)
@@ -84,15 +84,15 @@ These are cheap to fix and actively mislead:
 
 - `/proc/sys/kernel/tainted` was hardcoded to `0`
   (`fs/procfs/sysctl.rs`) although `dfx/taint.rs` maintained a real
-  mask that WARN/BUG set. **Fixed in Tranche 1** — Linux's format is
+  mask that WARN/BUG set. **Fixed in Tranche 1** — the reference kernel's format is
   numeric, and the value is now the live mask.
-- The taint letters in `dfx/taint.rs` were not Linux's
-  (`b"GFfUvPDdCAcNIOsl"`). **Fixed in Tranche 1** — Linux's set is
+- The taint letters in `dfx/taint.rs` were not the reference kernel's
+  (`b"GFfUvPDdCAcNIOsl"`). **Fixed in Tranche 1** — the reference kernel's set is
   `P F S R M B U D A W C I O E L K`, rendered as a 16-column line with
   `G` in the first column when the proprietary-module bit is clear.
 - `/proc/kmsg` uses the dmesg header format while `/dev/kmsg` uses
-  Linux's `level,seq,timestamp_us,-;` — the two disagree.
-- `/proc/[pid]/stat` reports `vsize` in bytes where Linux reports pages,
+  the reference kernel's `level,seq,timestamp_us,-;` — the two disagree.
+- `/proc/[pid]/stat` reports `vsize` in bytes where the reference reports pages,
   and leaves fields 7–13, 18–22, 24–30, 32–53 as literal `0`.
 - `/proc/interrupts` hardcodes the IRQ list to `1..=15` + `32..=47`
   instead of walking the irq descriptor registry.
@@ -105,20 +105,20 @@ These are cheap to fix and actively mislead:
 - There was no non-fatal "Oops" path: every fault went straight to
   `panic!`. **Fixed in Tranche 5** (the Oops path, both arches).
 
-## 3. Linux DFX capability matrix
+## 3. Reference-kernel DFX capability matrix
 
-Legend: **OK** = present and Linux-shaped · **PART** = present but
-incomplete or non-Linux shape · **--** = absent.
+Legend: **OK** = present and reference-shaped · **PART** = present but
+incomplete or non-reference shape · **--** = absent.
 
-| Family | Linux facility | Rux | Gap |
+| Family | Reference facility | Rux | Gap |
 |---|---|---|---|
 | Logging | `printk` ring buffer, log levels, `/dev/kmsg` | PART | `/proc/kmsg` format wrong; persistent log RESTORED (klogd thread, Tranche 5) |
 | Logging | `dmesg -w`, `syslog(2)`, `console_loglevel` | PART | no runtime console level knob from userspace |
-| Crash | panic handler, `Call Trace:` | PART | banner is Linux's (`Kernel panic - not syncing`); the message sits on its own `PANIC:` line instead of inline; frames symbolized since Tranche 3 |
-| Crash | `Oops` (non-fatal) | OK | T5b: Linux-shaped report, task-death policy, pstore dmesg flavor |
+| Crash | panic handler, `Call Trace:` | PART | banner is the reference kernel's (`Kernel panic - not syncing`); the message sits on its own `PANIC:` line instead of inline; frames symbolized since Tranche 3 |
+| Crash | `Oops` (non-fatal) | OK | T5b: reference-shaped report, task-death policy, pstore dmesg flavor |
 | Crash | `panic=` timeout / reboot | OK | Tranche 5 Part 1 (`panic=N`/`immediate`, both arches reboot) |
 | Crash | pstore / ramoops | OK | Tranche 5: console-ramoops-0 (panic) + dmesg-ramoops-0 (oops), both arches |
-| Crash | taint flags | OK | Tranche 1: exported, Linux letters |
+| Crash | taint flags | OK | Tranche 1: exported, the reference's letters |
 | Control | SysRq / `/proc/sysrq-trigger` | OK | Tranche 1: upstream command set |
 | Control | debugfs `/sys/kernel/debug` | OK | Tranche 1: new filesystem |
 | Control | tracefs `/sys/kernel/tracing` | OK | Tranche 4: 16 events, tracepoint! table, soak-verified |
@@ -143,7 +143,7 @@ incomplete or non-Linux shape · **--** = absent.
 | Locking | RCU stall detector | -- | absent |
 | Storage | `/proc/diskstats`, `/proc/partitions` | PART | partitions present, diskstats absent |
 | Storage | `blktrace`, `scsi_debug` | -- | absent |
-| Network | `/proc/net/*` | OK | present, Linux column layouts |
+| Network | `/proc/net/*` | OK | present, the reference's column layouts |
 | Network | `netstat -s` counters, `sockstat` | PART | `sockstat` present, error counters absent |
 | Time | clocksource exposure, monotonic sanity | PART | `monowatch` exists but console-only |
 | Power | `/sys/power/state` | OK | present |
@@ -160,14 +160,14 @@ symbolized traces.
 ### Tranche 1 — live control surface (implemented)
 
 Goal: every existing instrument becomes armable and observable from
-userspace, without a reboot, through the Linux interfaces.
+userspace, without a reboot, through the reference kernel's interfaces.
 
 1. **debugfs** (`kernel/src/fs/debugfs.rs`): a new filesystem mounted at
-   `/sys/kernel/debug`, exactly like Linux. The mount point is a real
+   `/sys/kernel/debug`, exactly like the reference kernel. The mount point is a real
    sysfs directory (`/sys/kernel/debug`), so sysfs owns the directory
-   and debugfs is mounted over it — the Linux arrangement.
+   and debugfs is mounted over it — the reference kernel's arrangement.
 2. **Switch knobs** at `/sys/kernel/debug/dfx/<switch>`: one file per
-   switch, named after its `dfx=` spelling. Linux's `debugfs_create_bool`
+   switch, named after its `dfx=` spelling. the reference kernel's `debugfs_create_bool`
    convention — the file reads `Y`/`N`, a write of `Y`/`y`/`1` arms the
    instrument and `N`/`n`/`0` disarms it, anything else is `EINVAL`.
    The switch table became a single source of truth: one macro
@@ -181,8 +181,8 @@ userspace, without a reboot, through the Linux interfaces.
    0-9 R`); the ones Rux cannot honour print an explicit "not supported"
    line instead of silently doing nothing.
 4. **Taint fidelity**: `/proc/sys/kernel/tainted` carries the live
-   bitmask in Linux's numeric format, and the "Tainted:" line uses
-   Linux's letters and 16-column layout.
+   bitmask in the reference kernel's numeric format, and the "Tainted:" line uses
+   the reference kernel's letters and 16-column layout.
 
 Acceptance (verified in the guest, `test/dfx-smoke.sh`): the knob
 directory lists all 29 switches; a knob reads `N`, arms to `Y` on
@@ -195,49 +195,49 @@ mask; `/sys/kernel` still lists `uevent`, `uevent_helper`,
 
 Goal: answer "where did the time go" from inside the guest.
 
-**Part 1 — implemented.** `/proc/stat` in Linux's layout
+**Part 1 — implemented.** `/proc/stat` in the reference kernel's layout
 (`kernel/src/fs/procfs/stat.rs`): the aggregate `cpu` line, one line per
 CPU, `intr`, `ctxt`, `btime`, `processes`, `procs_running`,
 `procs_blocked`. The timer tick charges one jiffy to whatever was
 running — idle for the idle task, user for a task hit in user mode,
 system otherwise (a kernel thread is system time, not idle time). The
-per-task context-switch counters (Linux `nvcsw`/`nivcsw`) are counted in
+per-task context-switch counters (the reference's `nvcsw`/`nivcsw`) are counted in
 the scheduler's `context_switch` — a task that went to sleep blocked
 (voluntary), a task still runnable was preempted (involuntary) — and
-surface in `/proc/[pid]/status`. `/proc/[pid]/stat` now has Linux's 52
+surface in `/proc/[pid]/status`. `/proc/[pid]/stat` now has the reference kernel's 52
 fields (it emitted 54) and fills priority, nice, num_threads, rss (in
 pages), processor and policy next to the utime/stime the timer IRQ
 already charged.
 
-**Part 2 — implemented.** `/proc/vmstat` (Linux key names, the page
+**Part 2 — implemented.** `/proc/vmstat` (the reference's key names, the page
 counters live in `kernel/src/mm/vmstat.rs`, the memory manager owning
-them like Linux's mm/vmstat.c), `/proc/buddyinfo` (free pages per order
+them like the reference kernel's mm/vmstat.c), `/proc/buddyinfo` (free pages per order
 per zone, from the zone allocator's per-order free lists),
 `/proc/softirqs` (per-CPU per-vector raise counts, using the vector set
 and names Rux's softirq module already uses) and `/proc/schedstat`
 (version 17: jiffies timestamp plus the nine per-CPU fields, with real
 `yld_count` (sched_yield() calls, as in kernel/sched/syscalls.c) and
-`sched_count` in Linux's field positions). `/proc/stat` also grew Linux's
+`sched_count` in the reference kernel's field positions). `/proc/stat` also grew the reference kernel's
 aggregate `softirq` line.
 
 **Part 3 — partly done.** Per-task minor-fault counters (field 10 of
 `/proc/[pid]/stat`) and `starttime` (field 22) are real now: the fault
 handlers charge the task's `min_flt`, and the task's start time is
 stamped with the jiffies at which it was built. `/proc/locks` is
-implemented in Linux's format (verified against a Linux guest:
+implemented in the reference kernel's format (verified against a reference guest:
 `1: POSIX  ADVISORY  WRITE 28848 08:12:76022103 0 EOF`), and the
-sysrq `d` command prints the same rows, as Linux's does.
+sysrq `d` command prints the same rows, as the reference kernel's does.
 
 **Part 3 — partly done (cont).** `/proc/diskstats` is implemented in
-Linux's layout (the reference host's line:
+the reference kernel's layout (the reference host's line:
 `   7       0 loop0 14 0 34 2 0 0 0 0 0 1 2 0 0 0 0 0 0`): the block
 layer counts reads, writes, sectors and the time spent per device
-(`drivers/blkdev/iostat.rs`, the same place Linux keeps them —
+(`drivers/blkdev/iostat.rs`, the same place the reference keeps them —
 block/genhd.c). Rux merges no requests, has no discard path and no
 separate flush path, so those columns report zero.
 
 **Part 3 — partly done (cont).** `/proc/timer_list` is implemented in
-Linux's structure (verified against a Linux guest: "Timer List Version:
+the reference kernel's structure (verified against a reference guest: "Timer List Version:
 v0.10", the "now at <ns> nsecs" line, the per-CPU clock section and
 the "active timers" entries with their expiry). Rux has no hrtimer
 clock bases and no per-timer callback, so the two fields with no
@@ -421,13 +421,13 @@ read events 1024, then empty).
 
 ### Tranche 5 — crash policy and persistent evidence
 
-**Part 1 — done.** The `panic=` kernel parameter (Linux's
+**Part 1 — done.** The `panic=` kernel parameter (the reference kernel's
 Documentation/admin-guide/kernel-parameters.txt): `panic=N` reboots N
 seconds after the panic, `panic=o` / `panic=O` / `panic=immediate`
 reboot at once, and with no `panic=` (or `panic=0`) the kernel halts —
-Linux's default, and Rux's behaviour until now. The reboot path
+the reference kernel's default, and Rux's behaviour until now. The reboot path
 deliberately does NOT signal init and does NOT sync the filesystems:
-Linux's panic path reboots without touching the disks, because the panic
+the reference kernel's panic path reboots without touching the disks, because the panic
 may well be the storage stack itself, and a sync that hangs in a panic
 would defeat the timeout.
 
@@ -479,7 +479,7 @@ scheme rests on, verified by the reboot cycle itself.
   that used to take the whole machine down (kernel page fault with no
   exception-table fixup, kernel-mode illegal instruction, unhandled
   kernel exceptions — both arches) now run the reference's contract.
-  The report's head line and die banner are Linux 5.15's wording
+  The report's head line and die banner are the reference 5.15's wording
   verbatim (`Unable to handle kernel paging request at virtual
   address …` / `Oops - illegal instruction` + `Oops [#N]` on riscv64,
   `BUG: unable to handle kernel …` + `Oops: 0000 [#N] PREEMPT SMP` on
@@ -585,13 +585,13 @@ panic; the next boot shows the previous panic's registers.
 microbench report: syscall latency per class, fork/exec, fault paths,
 context switch, futex/pipe/binder round trip, TLB shootdown cost,
 mmap/brk/mprotect, IO path — with the same QEMU configuration compared
-against a Linux guest.
+against a reference guest.
 
 **Perf-support slice (done, batch 4 2026-10-26).** The mandate's
 "perf 支持": the smallest useful per-task counter surface the perf
 lane's pbench can consume in-guest. The choice:
 
-- **What**: `/proc/[pid]/schedstat` — Linux's CONFIG_SCHEDSTATS
+- **What**: `/proc/[pid]/schedstat` — the reference kernel's CONFIG_SCHEDSTATS
   per-task triple (on-cpu ns, runqueue-wait ns, timeslices), the file
   that turns a bench's wall time into on-cpu vs waiting per task
   (P2 ctxsw, P4 fork/exec). pbench reads it with a plain file read.
@@ -607,7 +607,7 @@ lane's pbench can consume in-guest. The choice:
   timeslice++, wait window closed — the window opened at
   `enqueue_task_locked`, under the same GRQ lock that guards the pick
   side). A same-task repick (the CPU-bound tick case) is NOT a new
-  timeslice — Linux counts switches-to. Counter cost when armed is
+  timeslice — the reference counts switches-to. Counter cost when armed is
   measured by the pbench P2 A-B (off vs on); the disabled cost is the
   one load, covered by the quiet-boot census rows.
 - **File shape**: one line, three space-separated decimal numbers,
@@ -639,9 +639,9 @@ surface that report finds missing.
   kernel still has open correctness work.
 - **kgdb / kdb**: the project already uses QEMU gdb stubs against the
   unstripped kernel image; the marginal value is low.
-- **Upstreaming the bespoke instruments to Linux shape**: the Rux
+- **Upstreaming the bespoke instruments to reference shape**: the Rux
   instruments (ledger, metawatch, wildwatch, scribble, syscost) are more
-  specific than their Linux equivalents. They stay; the Linux-shaped
+  specific than their reference equivalents. They stay; the reference-shaped
   surfaces are added alongside.
 
 ## 6. Verification method
@@ -655,7 +655,7 @@ Every tranche is verified in the guest, not by inspection:
   Tranche).
 - Confirm the LTP pass rate does not regress
   (`/home/william/rux-agents/ltp-r<N>/results/`).
-- For every new file, compare the output format against a Linux guest
+- For every new file, compare the output format against a reference guest
   running the same command, field by field.
 
 ## 7. File anchors
@@ -695,7 +695,7 @@ owns most /proc additions):
 - Existing files convert opportunistically when touched. The `pad`
   form exists since leg-35 (meminfo shape: `%-16s` key+colon, `%8lu`
   right-justified value, ` <unit>`; a `!`-suffixed key renders
-  unitless — Linux's HugePages_* rows carry no `kB`). Second
+  unitless — the reference kernel's HugePages_* rows carry no `kB`). Second
   conversion: `/proc/meminfo` (declaration order preserved; the
   conversion intentionally REPLACED the old lines' four different key
   paddings and left-flowed values with the reference kernel's exact
@@ -711,9 +711,9 @@ owns most /proc additions):
   through `render_kv`; the dynamic-arity `intr`/`softirq` sum lines
   stay explicit — no fixed field list to derive; whole-file LINE
   ORDER pinned by `stat_file_tests::line_order_check`). Fourth:
-  `/proc/schedstat` (`schedstat_cpu_row`; Linux's literal middle zero
+  `/proc/schedstat` (`schedstat_cpu_row`; the reference kernel's literal middle zero
   kept as the named `alias0` column). Remaining hand-written stat-
   family candidates: `/proc/interrupts`, `/proc/softirqs`,
   `/proc/diskstats` (dynamic-arity row tails, like `intr`).
 - The declaration ORDER is the file's byte order; treat reordering as
-  a Linux-observable change and snapshot-test it.
+  a reference-observable change and snapshot-test it.
