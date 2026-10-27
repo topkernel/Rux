@@ -76,7 +76,13 @@ macro_rules! dfx_switch_table {
             Schb => "schb",
             KsProbe => "ksprobe",
             R83HeapScan => "r83scan",
+            LeakHunt => "leakhunt",
             WwCensus => "wwcensus",
+            TxnHang => "txnhunt",
+            TreeHunt => "treehunt",
+            SfdDbg => "sfddbg",
+            Ams46 => "ams46",
+            VmaProbe => "vmap",
         }
     };
 }
@@ -291,6 +297,14 @@ pub enum DfxSwitch {
     /// dfx instrument. The cheap per-tick header audits stay
     /// unconditional.
     R83HeapScan,
+    /// Leak-origin probe (dfx/leakorigin.rs): records every task's
+    /// OUTERMOST PREEMPT_OFFSET acquire site and trips a report when a
+    /// task returns to userspace (or is seen parked, PREEMPT-LEAK class)
+    /// with a nonzero preempt_count — the producer of the leaked-count
+    /// wake-strand family, named at its acquire site. Hot-path cost when
+    /// armed: one side-table store per outermost guard acquire plus one
+    /// count load per user-mode trap return. OFF by default.
+    LeakHunt,
     /// The ~1 Hz wakewatch/timer census heartbeat lines (WW/WW2/WW3 and
     /// the wakewatch wake/pick line) plus the periodic PREEMPT-LEAK
     /// reporter. These are hunt instruments: they made the serial
@@ -298,9 +312,52 @@ pub enum DfxSwitch {
     /// opt-in via `dfx=wwcensus` (census/forensics boots keep them by
     /// passing the token; ordinary boots get a clean prompt).
     WwCensus,
+    /// dfx=txnhunt (leg-27): in-flight binder transaction audit at ~1 Hz
+    /// — any sync txn picked up by its server but unreplied for >= 1 s
+    /// gets a TXN-HANG line naming the server thread's task state, the
+    /// syscall/rip of its entry frame, and every other in-flight txn
+    /// issued from that server's process (the synchronous fan-out chain
+    /// inside the handler). Answers "what does the 15 s samgr handler
+    /// spend its time on" without waiting for the 60 s khungtaskd
+    /// cadence. Purely diagnostic; OFF by default.
+    TxnHang,
+    /// dfx=treehunt (leg-29A): ~1 Hz process-tree invariant validator —
+    /// flags live tasks whose parent pointer names implausible (freed/
+    /// recycled) memory and thread-group members whose parent snapshot
+    /// diverged from the leader's maintained parent. The E8-REPAR
+    /// "unlinked snapshot" family root-cause hunt (sc304 signal-Arc
+    /// Oops walked such a chain). Purely diagnostic; OFF by default.
+    TreeHunt,
+    /// dfx=sfddbg: the SFDDBG signalfd probes — every signal delivered
+    /// to pid 1 traced through the send path (disposition/block state/
+    /// pending-after) plus the signalfd-registry notify hook. Launcher
+    /// bring-up instrument; ordinary boots must keep a clean serial.
+    /// OFF by default.
+    SfdDbg,
+
+    /// dfx=ams46 (leg-30B): the Gate-1 arsenal — full lifecycle trace of
+    /// IAbilityManager::StartUser (code 46, interface token
+    /// "ohos.aafwk.AbilityManager") binder transactions: enqueue + route
+    /// (proc todo / child looper / async-slot park), read by which
+    /// foundation thread, buffer free + async-slot release, stale-sweep
+    /// reclaim, silence-rule retire, and a ~5 s node census (async slot
+    /// held, async_todo depth, target proc todo depth, waiting readers).
+    /// Adjudicates kernel-delivered vs foundation-dropped for the
+    /// accountmgr→AMS StartUser oneway that returns 0 but never executes
+    /// SwitchToUser inside foundation on walled draws. OFF by default.
+    Ams46,
+    /// dfx=vmap (leg-31B): VMA-origin adjudication arsenal, the syscall
+    /// side of the Vma origin stamp — traces the two syscall families
+    /// that establish PROT_NONE shapes (mprotect of a non-writable prot
+    /// on a sub-1MB range, and small anonymous PROT_NONE mmaps), with a
+    /// shared line budget. Together with the `origin=` field on the
+    /// fault-path VMA dumps it decides image-owned vs kernel-owned for
+    /// permission-shape faults (render_service's 2-page PROT_NONE piece
+    /// on top of a thread stack). OFF by default.
+    VmaProbe,
 }
 
-const SWITCH_COUNT: usize = 33;
+const SWITCH_COUNT: usize = 39;
 
 static SWITCHES: [AtomicBool; SWITCH_COUNT] = [const { AtomicBool::new(false) }; SWITCH_COUNT];
 
@@ -369,7 +426,13 @@ impl DfxSwitch {
             DfxSwitch::Schb => 29,
             DfxSwitch::KsProbe => 30,
             DfxSwitch::R83HeapScan => 31,
-            DfxSwitch::WwCensus => 32,
+            DfxSwitch::LeakHunt => 32,
+            DfxSwitch::WwCensus => 33,
+            DfxSwitch::TxnHang => 34,
+            DfxSwitch::TreeHunt => 35,
+            DfxSwitch::SfdDbg => 36,
+            DfxSwitch::Ams46 => 37,
+            DfxSwitch::VmaProbe => 38,
         }
     }
 
@@ -390,6 +453,9 @@ pub fn set(switch: DfxSwitch, on: bool) {
     SWITCHES[switch.index()].store(on, Ordering::Relaxed);
     if let DfxSwitch::MemWatch = switch {
         super::memwatch::ENABLED.store(on, Ordering::Relaxed);
+    }
+    if let DfxSwitch::LeakHunt = switch {
+        super::leakorigin::ENABLED.store(on, Ordering::Relaxed);
     }
     if let DfxSwitch::Scribble = switch {
         #[cfg(feature = "x86_64")]

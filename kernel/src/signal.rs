@@ -2360,8 +2360,12 @@ unsafe fn send_signal_locked_info(
     // SFDDBG (launcher bring-up): trace every signal TO pid 1 through the
     // send path — disposition, block state, pending-after. OH init blocks
     // SIGCHLD and reads it via signalfd; any silent drop here wedges the
-    // whole service-restart machinery. Rate-limited.
-    if task.pid() == 1 {
+    // whole service-restart machinery. Rate-limited. Serial-cleanliness:
+    // opt-in via dfx=sfddbg (every child exit reaches here on ordinary
+    // boots too).
+    if task.pid() == 1
+        && crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SfdDbg)
+    {
         static SFDDBG_N: core::sync::atomic::AtomicUsize =
             core::sync::atomic::AtomicUsize::new(0);
         if SFDDBG_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 200 {

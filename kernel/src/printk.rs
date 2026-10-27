@@ -1999,13 +1999,6 @@ mod persistent_log {
         };
         // SAFETY: same provenance as resolve_file.
         let fs = unsafe { &*fs_ptr };
-        let mut ext4_inode = match fs.read_inode(ino) {
-            Ok(inode) => inode,
-            Err(_) => {
-                FILE_INO.store(0, Ordering::Relaxed);
-                return;
-            }
-        };
 
         // Stage the delta: records with seq > LAST_SEQ, oldest-first,
         // at most MAX_RECORDS_PER_FLUSH of the newest ones.
@@ -2054,21 +2047,33 @@ mod persistent_log {
         // actually landed). A failed write stops the flush: the
         // remaining records stay buffered in the ring for the next
         // period — the cursor must never pass an unwritten record.
+        //
+        // COHERENCE (2026-10-26, the stuck-at-init-flush root cause): the
+        // flush writes through ext4_kernel_write_at — the write(2) core —
+        // NOT the low-level ext4_file_write. The low-level path only
+        // touches the buffer cache and the on-disk inode; it skips the
+        // three surfaces write(2) keeps coherent (the VFS dentry inode's
+        // size, the sb-boxed Ext4Inode copy that bounds every read, and
+        // the page-cache write-through), so every kernel-side write was
+        // invisible to userspace until some lookup re-read the inode from
+        // disk — the file looked stuck at the init flush forever while
+        // the writes had been landing all along (probe-printed offsets
+        // advancing next to a guest wc -l that never moved).
         let mut offset = WRITE_OFFSET.load(Ordering::Relaxed);
         let mut final_seq = LAST_SEQ.load(Ordering::Relaxed);
         let mut written = 0usize;
         for (seq, line) in &lines {
             let data = &line.buf[..line.len];
-            match crate::fs::ext4::file::ext4_file_write(fs, &mut ext4_inode, offset, data) {
-                Ok(written_len) => {
-                    offset += written_len as u64;
-                    if offset >= MAX_LOG_SIZE {
-                        offset = 0;
-                    }
-                    final_seq = *seq;
-                    written += 1;
+            let n = crate::fs::ext4::file::ext4_kernel_write_at(fs, ino, offset, data);
+            if n > 0 {
+                offset += n as u64;
+                if offset >= MAX_LOG_SIZE {
+                    offset = 0;
                 }
-                Err(_) => break,
+                final_seq = *seq;
+                written += 1;
+            } else {
+                break;
             }
         }
         WRITE_OFFSET.store(offset, Ordering::Relaxed);
@@ -2084,16 +2089,9 @@ mod persistent_log {
                 final_seq + 1
             );
         }
-
-        // Keep the inode size at the high-water mark so a plain read
-        // sees the full window (the wrap semantics of a rotating log).
-        let new_size = if offset == 0 {
-            MAX_LOG_SIZE
-        } else {
-            offset.max(ext4_inode.get_size())
-        };
-        ext4_inode.size = new_size;
-        let _ = crate::fs::ext4::inode::write_inode(fs, ino, &ext4_inode);
+        // No explicit size bookkeeping: ext4_file_write only ever GROWS
+        // the size (never lowers it), so the rotating file's high-water
+        // mark survives the wrap exactly as the old manual pin intended.
     }
 }
 

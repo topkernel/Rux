@@ -1487,7 +1487,7 @@ pub fn ext4_file_write_vfs(file: &File, buf: &[u8]) -> isize {
         };
 
         // SAFETY: fs/inode resolution above; buf is the caller's slice.
-        let written = unsafe { ext4_write_at_core(fs, ext4_ino, inode, offset, buf, 0) };
+        let written = unsafe { ext4_write_at_core(fs, ext4_ino, Some(inode), offset, buf, 0) };
         if written > 0 {
             let end = if offset == u64::MAX {
                 inode.size.load(core::sync::atomic::Ordering::Acquire)
@@ -1523,7 +1523,22 @@ pub unsafe fn ext4_file_write_at_vfs(file: &File, offset: u64, buf: *const u8, c
     };
     let data = core::slice::from_raw_parts(buf, count);
     // SAFETY: fs/inode resolution above; data is the caller's buffer.
-    unsafe { ext4_write_at_core(&*fs_ptr, inode.ino as u32, inode, offset, data, 0) }
+    unsafe { ext4_write_at_core(&*fs_ptr, inode.ino as u32, Some(inode), offset, data, 0) }
+}
+
+/// Kernel-side positional write for callers with no VFS file description
+/// (klogd's /var/log/kmsg flush): the same big-lock + journal +
+/// cache-coherence discipline as write(2), addressed by (fs, ino, offset).
+/// Returns the bytes written, or a negative errno.
+pub fn ext4_kernel_write_at(
+    fs: &crate::fs::ext4::Ext4FileSystem,
+    ext4_ino: u32,
+    offset: u64,
+    buf: &[u8],
+) -> isize {
+    // SAFETY: fs is a valid Ext4FileSystem reference; the core owns all
+    // locking and operates on (fs, ino) exactly like the fd paths.
+    unsafe { ext4_write_at_core(fs, ext4_ino, None, offset, buf, 0) }
 }
 
 /// Explicit-offset ext4 write core shared by write(2) and pwrite/writeback
@@ -1534,10 +1549,40 @@ pub unsafe fn ext4_file_write_at_vfs(file: &File, offset: u64, buf: *const u8, c
 /// divergent copy of the page on the next fault, permanently splitting
 /// mapper views). Same big-lock/bitmap serialization as the old inline
 /// body (review 5.5 high).
+/// Refresh a cached VFS inode's view after a write: the sb-boxed
+/// Ext4Inode copy (bounds every read/stat served from the cache) and the
+/// dentry-visible size. Shared by the fd write paths and the kernel-side
+/// writer (klogd) so both leave identical cache state.
+fn refresh_cached_vfs_inode(
+    vi: &crate::fs::inode::Inode,
+    ext4_inode: &super::inode::Ext4Inode,
+) {
+    // Update cached copy in inode.sb
+    if let Some(ptr) = vi.sb {
+        // SAFETY: sb is the Box<Ext4Inode> this VFS inode owns (leaked
+        // in create_vfs_inode_in); no concurrent fd path frees it while
+        // the ext4 big lock is held (this runs under EXT4_BIG_LOCK).
+        let cached = unsafe { &mut *(ptr as *mut super::inode::Ext4Inode) };
+        cached.block = ext4_inode.block;
+        cached.size = ext4_inode.size;
+        cached.blocks = ext4_inode.blocks;
+        cached.mtime = ext4_inode.mtime;
+        cached.ctime = ext4_inode.ctime;
+    }
+    // Update cached VFS inode size
+    vi.size.store(ext4_inode.get_size(), core::sync::atomic::Ordering::Relaxed);
+}
+
+/// `inode` is the caller's VFS inode when it has one (the fd paths). A
+/// kernel-side writer with no VFS file description passes `None`; the
+/// cache-coherence tail then resolves the cached VFS inode through the
+/// icache — if one exists its size/sb view is refreshed exactly like the
+/// fd path does; if none exists there is nothing stale to refresh (the
+/// next lookup reads the just-written on-disk inode).
 unsafe fn ext4_write_at_core(
     fs: &crate::fs::ext4::Ext4FileSystem,
     ext4_ino: u32,
-    inode: &crate::fs::inode::Inode,
+    inode: Option<&crate::fs::inode::Inode>,
     offset: u64,
     buf: &[u8],
     skip_update_pfn: u64,
@@ -1597,17 +1642,26 @@ unsafe fn ext4_write_at_core(
     let result = match ext4_file_write(fs, &mut ext4_inode, offset, buf) {
         Err(e) => e as isize,
         Ok(written_bytes) => {
-            // Update cached copy in inode.sb
-            if let Some(ptr) = inode.sb {
-                let cached = &mut *(ptr as *mut super::inode::Ext4Inode);
-                cached.block = ext4_inode.block;
-                cached.size = ext4_inode.size;
-                cached.blocks = ext4_inode.blocks;
-                cached.mtime = ext4_inode.mtime;
-                cached.ctime = ext4_inode.ctime;
+            // CACHE COHERENCE TAIL (the klogd lesson, 2026-10-26): the
+            // cached VFS view — the sb-boxed Ext4Inode copy that bounds
+            // every read, plus the dentry-visible size — must move with
+            // the write. The fd paths pass their inode; a kernel-side
+            // writer (klogd's /var/log/kmsg flush) passes None and the
+            // icache resolves whatever cached inode userspace would
+            // otherwise read through. Skipping this tail left direct
+            // kernel writes invisible: the flush landed on disk (offsets
+            // and the on-disk inode advanced, probe-printed) while every
+            // subsequent open/stat/read served the pre-write cached view
+            // forever (the oops-smoke "klog_lines2=3" stuck family — the
+            // wake path was never broken).
+            if let Some(vi) = inode {
+                refresh_cached_vfs_inode(vi, &ext4_inode);
+            } else if let Some(vi) = crate::fs::inode::icache_lookup(
+                ext4_ino as u64,
+                fs as *const crate::fs::ext4::Ext4FileSystem as u64,
+            ) {
+                refresh_cached_vfs_inode(&vi, &ext4_inode);
             }
-            // Update cached VFS inode size
-            inode.size.store(ext4_inode.get_size(), core::sync::atomic::Ordering::Relaxed);
             // Write back inode to disk (registers with journal if handle active)
             match crate::fs::ext4::inode::write_inode(fs, ext4_ino, &ext4_inode) {
                 Ok(()) => {
@@ -1731,7 +1785,7 @@ pub fn ext4_flush_dirty_inode(
             let src = unsafe { core::slice::from_raw_parts(kva, n_bytes) };
             // SAFETY: same inode/fs resolution discipline as write_vfs.
             let written = unsafe {
-                ext4_write_at_core(&*fs_ptr, inode.ino as u32, inode, off, src, pfn)
+                ext4_write_at_core(&*fs_ptr, inode.ino as u32, Some(inode), off, src, pfn)
             };
             done[i] = (idx, pfn, written == n_bytes as isize);
         }

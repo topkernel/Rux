@@ -1,0 +1,33 @@
+T7 schedstat armed-cost A-B (batch 5, 2026-10-26)
+=================================================
+Kernel: feature/dfx-align @ b151df90 (main 94c670da + coherence fix),
+x86_64 debug bzImage, q35 TCG thread=multi, smp2/2G.
+A side: test/pbench_boot.py --arm-schedstat (init=/test/arm arms
+  /proc/sys/kernel/sched_schedstats then execs the probe; [arm] printed)
+B side: stock boot (init=/test/pbench), same kernel, same image recipe.
+Both DONE rc=0. A t=614s, B t=426s.
+
+HOST LOAD CAVEAT: load1 ~30, 28-33 foreign QEMUs the whole window (the
+Tier-1 gate window load1<=9/qemus<=8 never opened this batch). Medians
+under this load carry a roughly +/-8% noise band (p1_null swings -8.2%
+with no scheduling edge at all); fsync-class rows swing +55%. Absolute
+values are NOT gate-comparable to the pb1 anchor column.
+
+Medians (us):
+  probe              armed      stock   delta
+  p2_ctxsw          26.369     23.202   +13.6%   <-- the measured target
+  p4_fork_exit    18168.655  17729.579    +2.5%
+  p4_fork_exec    25516.820  24828.953    +2.8%
+  p1_null            7.823      8.522    -8.2%   (noise band reference)
+  p1_clock           8.485      8.582    -1.1%   (noise band reference)
+  everything else: inside the band, both signs
+
+Reading: arming the per-task schedstat gate costs ~3.2 us per context
+switch in this build class (one sched_clock read + counter updates per
+schedule edge), and a small consistent +2.5% on the fork paths (a switch
+plus the first-enqueue window open). The disabled cost (one relaxed
+atomic load per edge) rides the Tier-1 quiet-boot census rows — still
+owed, the window never opened.
+
+Logs: run/pbench-b5arm-run.log, run/pbench-b5stock-run.log,
+work/pbench-b5arm-serial.log, work/pbench-b5stock-serial.log.
