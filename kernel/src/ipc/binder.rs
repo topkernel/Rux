@@ -3414,6 +3414,9 @@ pub fn txn_hang_audit() {
             Some(crate::dfx::pathstash::OP_WRITE)
         } else if matches!(sys, 74 | 75) {
             Some(crate::dfx::pathstash::OP_SYNC)
+        } else if matches!(sys, 77 | 76) {
+            // x86_64 ABI: 77 ftruncate, 76 truncate (leg-36B).
+            Some(crate::dfx::pathstash::OP_TRUNC)
         } else {
             None
         };
@@ -3424,6 +3427,9 @@ pub fn txn_hang_audit() {
             Some(crate::dfx::pathstash::OP_WRITE)
         } else if matches!(sys, 82 | 83) {
             Some(crate::dfx::pathstash::OP_SYNC)
+        } else if matches!(sys, 46 | 45) {
+            // asm-generic: 46 ftruncate, 45 truncate (leg-36B).
+            Some(crate::dfx::pathstash::OP_TRUNC)
         } else {
             None
         };
@@ -3434,6 +3440,7 @@ pub fn txn_hang_audit() {
                         crate::dfx::pathstash::OP_OPEN => "open",
                         crate::dfx::pathstash::OP_WRITE => "write",
                         crate::dfx::pathstash::OP_SYNC => "sync",
+                        crate::dfx::pathstash::OP_TRUNC => "truncate",
                         _ => "?",
                     };
                     let _ = writeln!(
