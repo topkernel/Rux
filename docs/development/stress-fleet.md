@@ -1678,3 +1678,101 @@ fsfuzz-r268-serial.log}. The member doubles as the standing repro
    criterion; heap-growth curve continues.
 5. modchurn/dirstorm soft-lockup + PARKED-LEAK recurrence watch at
    load1 < 10 (kernel-lead test).
+
+## Session 14 (2026-10-28 03:1x-...) — s13 producer theory REJECTED at code level; canary re-instrumented at booking time; msgstress01 strand burst dissected
+
+Intake: floor at 6G free (15 QEMUs total) — shed by own PIDs per the
+≥10G hard rule: both monkeys (4G x86 KVM each; monkey-a criterion
+already closed at r1 605MB, monkey-b r2 partial ~294MB@25min captured
+in-serial before the kill, zero panics), later ltp-a (r19 next) and
+modchurn (r17 next) as other lanes' boxes re-grew. All member data
+preserved; resume = relaunch fleet-member.sh with the next round
+number.
+
+### Harvest: ltp-b r1 (canary e80e92f0, base main 0f806d8b)
+
+ONE WAKE-STRANDED burst, 390 lines at msgstress01 (sweep 668), plus
+the first-ever PARKED-WILDWRITE firing. Adjudications:
+
+1. **s13 slot-rewrite producer theory: REJECTED, code-level.** Zero
+   IRQ-BRACKET-LEAK prints of ANY kind (slot/pre/in) during the burst.
+   The null is structural, not luck: preempt bookings resolve through
+   sched::current() which reads the ARCH tp REGISTER (sched.rs:5237),
+   NOT cpu_state.current. The slot discriminators watched a path
+   bookings never touch; no slot rewrite can split a bracket's
+   +offset/-offset. Brackets stay as standing negatives.
+2. **PARKED-WILDWRITE = probe false positive.** The paired PARKED-LEAK
+   line shows state=0x0 (RUNNING): a task preempted mid-switch-out
+   holds the GRQ guard while already slotless; the parkwalk's running
+   classifier (slots only, predates R63's SWITCHING_OUT marker)
+   misread it. Fix in 766d60a9 (also stops the 4s PARKED-HEAL from
+   zeroing a live guard mid-switch-out — which would re-open
+   preemption inside the spinlock section).
+3. **The h-field pc census needed picker separation.** check_picked
+   prints under the GRQ: the picking CPU's own incumbent always shows
+   pc=1 LEGALLY. Splitting picker/other (script in evidence dir):
+   other-CPU faces r1 = 52% pc=0, 27% pc=1, 13% pc=65537 — and r2
+   (fresh kernel) shows pc=1/256/65536 incumbents some of which are
+   LEGAL transient states (spinlock-held / softirq / mid-IRQ sampled
+   at print time). The h-fields alone cannot convict an incumbent.
+4. **Half the strands have a CLEAN other-CPU incumbent** rotating
+   every 0-5ms — that half is NOT preempt-count leakage: it is the
+   pick walk skipping a leftmost runnable victim (every strand line
+   carries vr=0ms lead-lag=0ms; saturating_sub also reads 0 when the
+   victim's vruntime is BELOW min_vruntime — a sleeper massively owed
+   CPU). That is the R85 PICK-SKIP shape (why=1/2 legs), a SECOND
+   family tangled with the count leaks.
+5. Zero LEAK-ORIGIN / PARKED-LEAK / PREEMPT-HEAL / IRQ-PAIR prints
+   through r2 partial (101 strands): leaked-count incumbents churn
+   faster than every tripwire window (2s PREEMPT-LEAK, 4s parkwalk,
+   10s tick-heal reset on each incumbent change) — the windows, not
+   the instruments, are the gap.
+
+### s14 instruments (766d60a9) + canary v2 (72e03151)
+
+- leakorigin HARDIRQ shadow (hsite= names the trap bracket that booked
+  a later-stranded 0x10000; irq_enter now #[track_caller]);
+- IRQ-PAIR booking check: per-CPU token of the task irq_enter booked
+  +0x10000 on (riscv S-mode hardirqs cannot nest per-cpu → token
+  strictly outermost); irq_exit verifies the paired sub lands on the
+  same task — split = tp changed inside the bracket, measured at
+  booking time, no trap-boundary sampling hole;
+- parkwalk mid-switch-out adjudication (SWITCHING_OUT);
+- harness 42e6fe52: START/DFX env overrides on the ltp member kind
+  (installed via atomic rename; running loops keep their old inode).
+
+Canary round live: fleet-rv64-instr-rux md5 72e03151f484d99de14162a8b7dad1cc,
+sweepstart=660 (replays the msg region), dfx=watchdog,taskdump,
+leakhunt,wwcensus,schedtrace (schedtrace arms the PICK-SKIP-ALL why=
+reports — the discriminator for adjudication 4; wwcensus arms the
+PREEMPT-LEAK incumbent site reports).
+
+Evidence: run/fleet/evidence/2026-10-28-s14-ltpb-r1-msgstress-strand/
+(analysis.txt, burst excerpt, r2 partial without schedtrace).
+
+### Cross-lane notes
+
+- origin/main 0f806d8b..584c1105 carries NO perf fix yet (fsfuzz perf
+  arm stays hot; catch closure queued behind the DFX lane's merge).
+- main 584c1105 (leakhunt v3) adjudicates the parkwalk against "arch
+  tp slots" — on riscv64 that helper reads cpu_state.current (tp is
+  register-only), i.e. the same slots the walk scanned: x86-effective,
+  riscv-null. Our SWITCHING_OUT extension is the riscv64 complement;
+  edits do not overlap (they touch report_parked_site + wakewatch, we
+  touched the shadow table, preempt.rs, the walk classifier) — merge
+  is clean.
+
+### Next-session queue (s14)
+
+0. Harvest the live canary: PICK-SKIP-ALL why= census against the
+   strand victims (family A verdict), LEAK-ORIGIN/IRQ-PAIR-SPLIT
+   (family B verdict). If why=1/why=2 dominates with slot=0 swout=0,
+   the R85 pick-side heal windows (50 jiffies) are too slow under
+   msgstress churn — that tuning is the fix candidate, sched-domain
+   gates apply.
+1. ltp-a (r19+) and modchurn (r17+) resume when the floor relaxes;
+   monkeys resume for monkey-b's formal 500MB criterion (r2 partial:
+   294MB@25min panic-free, on pace).
+2. perf catch closure: ONE clean fsfuzz round on the fixed kernel when
+   the DFX lane's perf fixes land on main.
+3. vmscan file-lru question stays queued (s13 item 4).
