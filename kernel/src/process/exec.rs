@@ -1080,7 +1080,7 @@ pub(crate) fn do_execve_elf(
 
     // Add stack VMA with GROWSDOWN flag
     {
-        use crate::mm::vma::{Vma, VmaFlags, VmaType};
+        use crate::mm::vma::{Vma, VmaFlags, VmaOrigin, VmaType};
         // `stack_top` here is the argv-slop-adjusted value (raw top - 256,
         // NOT page aligned). VirtAddr::new SILENTLY FLOORS to page
         // granularity, so the VMA used to end one page below the mapped
@@ -1093,11 +1093,12 @@ pub(crate) fn do_execve_elf(
         // UP to cover the whole mapped stack.
         let stack_top_page =
             (stack_top + PAGE_SIZE as u64 - 1) & !(PAGE_SIZE as u64 - 1);
-        let stack_vma = Vma::new(
+        let mut stack_vma = Vma::new(
             crate::mm::page::VirtAddr::new(stack_bottom as usize),
             crate::mm::page::VirtAddr::new(stack_top_page as usize),
             VmaFlags::from_bits(VmaFlags::READ | VmaFlags::WRITE | VmaFlags::GROWSDOWN),
         );
+        stack_vma.set_origin(VmaOrigin::from_bits(VmaOrigin::EXEC_STACK));
         let mut vma_mgr = new_addr_space.vma_write();
         let _ = vma_mgr.add(stack_vma);
 
@@ -1149,6 +1150,7 @@ pub(crate) fn do_execve_elf(
                         vma_flags,
                     );
                     vma.set_type(VmaType::FileBacked);
+                    vma.set_origin(VmaOrigin::from_bits(VmaOrigin::EXEC));
                     vma.set_file_fd(-1);
                     vma.set_file_size(program_data.len() as u64);
                     // File page mapped at vma_start (elf_map:
@@ -1221,11 +1223,12 @@ pub(crate) fn do_execve_elf(
                         // faults identically for an access while preserving
                         // mprotect's whole-range coverage checks).
                         if seg_start > prev_end {
-                            let filler = Vma::new(
+                            let mut filler = Vma::new(
                                 crate::mm::page::VirtAddr::new(prev_end as usize),
                                 crate::mm::page::VirtAddr::new(seg_start as usize),
                                 VmaFlags::from_bits(VmaFlags::PRIVATE),
                             );
+                            filler.set_origin(VmaOrigin::from_bits(VmaOrigin::EXEC));
                             let _ = vma_mgr.add(filler);
                         }
                         let mut seg_flags = VmaFlags::new();
@@ -1239,6 +1242,7 @@ pub(crate) fn do_execve_elf(
                             seg_flags,
                         );
                         vma.set_type(VmaType::FileBacked);
+                        vma.set_origin(VmaOrigin::from_bits(VmaOrigin::EXEC));
                         vma.set_file_fd(-1);
                         vma.set_file_size(interp_bytes.len() as u64);
                         // elf_map: file page mapped at seg_start is
@@ -1258,22 +1262,24 @@ pub(crate) fn do_execve_elf(
                 // Tail filler to the page-rounded image end (BSS tail).
                 let span_end = interp_base + interp_size;
                 if added_any && span_end > prev_end {
-                    let filler = Vma::new(
+                    let mut filler = Vma::new(
                         crate::mm::page::VirtAddr::new(prev_end as usize),
                         crate::mm::page::VirtAddr::new(span_end as usize),
                         VmaFlags::from_bits(VmaFlags::PRIVATE),
                     );
+                    filler.set_origin(VmaOrigin::from_bits(VmaOrigin::EXEC));
                     let _ = vma_mgr.add(filler);
                 }
                 // Degenerate case (no loadable segments parsed here but
                 // interp_max > interp_min): keep the old flat coverage.
                 if !added_any {
                     let interp_flags = VmaFlags::from_bits(VmaFlags::READ | VmaFlags::EXEC | VmaFlags::PRIVATE);
-                    let interp_vma = Vma::new(
+                    let mut interp_vma = Vma::new(
                         crate::mm::page::VirtAddr::new(interp_base as usize),
                         crate::mm::page::VirtAddr::new(span_end as usize),
                         interp_flags,
                     );
+                    interp_vma.set_origin(VmaOrigin::from_bits(VmaOrigin::EXEC));
                     let _ = vma_mgr.add(interp_vma);
                 }
             }

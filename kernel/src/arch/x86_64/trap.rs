@@ -1034,6 +1034,20 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize, vector: u64) {
                 }
 
                 LOCAL_TIMER => {
+                    // Fleet s2 session-6 discriminator, x86_64 twin: the
+                    // interrupted task's OWN preempt_count at tick entry,
+                    // before irq_enter books the tick's HARDIRQ_OFFSET.
+                    // Lets a tick-side PREEMPT-LEAK pc=0x10001 split into
+                    // "task already carried the bit" (pctick!=0) vs "the
+                    // bit landed during the tick" (pctick==0). The riscv64
+                    // twin has written this since fleet s2; the x86 side
+                    // (the OH lane's arch) read a dead 0 until now.
+                    crate::interrupt::preempt::TICK_ENTRY_PC[cpu_id].store(
+                        crate::sched::current()
+                            .map(|t| t.preempt_count())
+                            .unwrap_or(0) as u32,
+                        core::sync::atomic::Ordering::Relaxed,
+                    );
                     crate::interrupt::preempt::irq_enter();
                     // LAPIC EOI FIRST (same discipline as the PIC path):
                     // the scheduler call below can switch tasks, and the
@@ -1073,6 +1087,19 @@ pub extern "C" fn trap_handler(regs: *mut PtRegs, cpu_id: usize, vector: u64) {
 
         // Restore previous PtRegs pointer (handles nested interrupt case)
         CURRENT_PT_REGS[cpu_id].store(prev_pt_regs, core::sync::atomic::Ordering::Relaxed);
+    }
+
+    // Leak-origin tripwire (dfx=leakhunt): this frame returns to
+    // userspace, so the task's preempt_count must be exactly 0 (no
+    // in-flight IRQ, every syscall-path guard dropped). A nonzero count
+    // here is a leaked PREEMPT_OFFSET caught at the earliest possible
+    // moment; the probe's per-task acquire-site shadow names the guard
+    // construction that never balanced. Disabled-path cost: one relaxed
+    // load. (Coroutine note: after an in-handler schedule() this tail
+    // runs in the incoming task's own frozen frame with its own regs, so
+    // the check validates whichever task actually returns to user.)
+    if unsafe { (*regs).user_mode() } {
+        crate::dfx::leakorigin::check_user_return();
     }
 }
 
@@ -1879,17 +1906,23 @@ fn user_segv_forensics(regs: &PtRegs, fault_addr: u64) {
     let addr_space = crate::sched::current().and_then(|t| t.address_space());
     if let Some(aspace) = addr_space.as_ref() {
         let vmas = aspace.vma_read();
-        for &probe in &[regs.rip, fault_addr] {
+        // leg-27: also name the INDIRECT-CALL TARGET (rax at a CFI
+        // slowpath fault = the callee whose shadow slice was touched)
+        // and the stack VMA (rsp inside a file-backed read-only segment
+        // would name a clobbered stack). Print-path only.
+        for &probe in &[regs.rip, fault_addr, regs.rax, regs.rsp] {
             match vmas.find(crate::mm::page::VirtAddr::new(probe as usize)) {
                 Some(v) => crate::pr_err!(
-                    "USEGV-FOR: vma({:#x}) = {:#x}-{:#x} flags={:#x} type={:?} fd={} off={:#x}",
+                    "USEGV-FOR: vma({:#x}) = {:#x}-{:#x} flags={:#x} type={:?} fd={} off={:#x} origin={}{}",
                     probe,
                     v.start().as_usize(),
                     v.end().as_usize(),
                     v.flags().bits(),
                     v.vma_type(),
                     v.file_fd(),
-                    v.offset()
+                    v.offset(),
+                    v.origin().creator_name(),
+                    if v.origin().is_forked() { "+FORK" } else { "" }
                 ),
                 None => crate::pr_err!("USEGV-FOR: vma({:#x}) = NONE", probe),
             }
@@ -2007,13 +2040,15 @@ fn user_segv_forensics(regs: &PtRegs, fault_addr: u64) {
                     break;
                 }
                 crate::pr_err!(
-                    "USEGV-FOR: nearvma {:#x}-{:#x} flags={:#x} type={:?} fd={} off={:#x}",
+                    "USEGV-FOR: nearvma {:#x}-{:#x} flags={:#x} type={:?} fd={} off={:#x} origin={}{}",
                     v.start().as_usize(),
                     v.end().as_usize(),
                     v.flags().bits(),
                     v.vma_type(),
                     v.file_fd(),
-                    v.offset()
+                    v.offset(),
+                    v.origin().creator_name(),
+                    if v.origin().is_forked() { "+FORK" } else { "" }
                 );
                 shown += 1;
             }
@@ -2046,6 +2081,87 @@ fn user_segv_forensics(regs: &PtRegs, fault_addr: u64) {
             let _ = write!(line, " {}:{}", i, val);
         }
         crate::pr_err!("USEGV-FOR: stack@rsp:{}", line);
+        // leg-31B: name the VMA (+origin) behind each stack word that
+        // looks like a user code pointer — the faulting frame's return
+        // addresses name the CALLER library without a guest-side
+        // backtracer (the render_service guard-read fault died inside
+        // ld-musl memcpy; the caller's return address was the only
+        // attribution clue and it lived on the stack).
+        if let Some(vmas2) = addr_space.as_ref().map(|a| a.vma_read()) {
+            for i in 0..8usize {
+                let va = match base.checked_add((i * 8) as u64) {
+                    Some(v) => v,
+                    None => break,
+                };
+                if let Some(val) = fore_read_u64(root, va) {
+                    if val <= 0x1000 || val >= 0x0000_8000_0000_0000 {
+                        continue;
+                    }
+                    if let Some(v) = vmas2
+                        .find(crate::mm::page::VirtAddr::new(val as usize))
+                    {
+                        // Only code-looking mappings (r-x / rwx).
+                        let f = v.flags();
+                        if f.is_executable() {
+                            // Name the backing: fd or the pinned vm_file
+                            // (memfd-loaded libraries are FileBacked with
+                            // an anon_inode path — the pin is the only
+                            // name they have).
+                            let mut backing =
+                                alloc::string::String::new();
+                            if let Some(fl) = aspace.get_vma_file(
+                                v.start().as_usize(),
+                            ) {
+                                use core::fmt::Write;
+                                let _ = write!(
+                                    backing,
+                                    " path={}",
+                                    fl.path()
+                                );
+                            } else if v.file_fd() >= 0 {
+                                use core::fmt::Write;
+                                let _ = write!(
+                                    backing,
+                                    " fd={}",
+                                    v.file_fd()
+                                );
+                            }
+                            crate::pr_err!(
+                                "USEGV-FOR: stkva[{}] {:#x} = {:#x}-{:#x} r-x off={:#x}{} origin={}{}",
+                                i,
+                                val,
+                                v.start().as_usize(),
+                                v.end().as_usize(),
+                                v.offset(),
+                                backing,
+                                v.origin().creator_name(),
+                                if v.origin().is_forked() { "+FORK" } else { "" }
+                            );
+                            // sc324 follow-up: code bytes at the return
+                            // site (16 before, 8 after) read through the
+                            // page-table walk — fingerprints the caller
+                            // even for memfd-backed libraries with no
+                            // on-disk copy to compare against.
+                            let mut cb = alloc::string::String::new();
+                            use core::fmt::Write;
+                            let _ = write!(cb, "USEGV-FOR: stkcode[{}]", i);
+                            let lo = (val - 16) & !7;
+                            for k in 0..3u64 {
+                                match fore_read_u64(root, lo + k * 8) {
+                                    Some(w) => {
+                                        let _ = write!(cb, " {:#x}", w);
+                                    }
+                                    None => {
+                                        let _ = write!(cb, " :?");
+                                    }
+                                }
+                            }
+                            crate::pr_err!("{}", cb);
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
