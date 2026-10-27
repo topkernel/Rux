@@ -2071,6 +2071,10 @@ probes):** dual-arch build rc=0 (riscv64 debug + x86_64 debug +
 x86_64 strong); riscv64 minimal-rootfs regression boot 0 panics,
 shell up; make test ALL TESTS PASSED; IPC guarded-domain pair pa69
 (4 boots) + pa70 parallel A/B — all P5 rows within ±20% or improved.
+The post-revert kernel's own pbench (pa71 j1/j2, journal protocol):
+p6_write_fsync 10120/9853 us, p6_mkdrmdir 67281/57018, p6_unlink
+17047/18782, p6_append 136/114 — every fs row inside the standing
+strong classes, no regression from the net kernel change.
 
 **Standing after this leg:** (1) socket-family residual = the
 cross-process rendezvous decomposition (p5e/p5f armed above); (2) F4:
