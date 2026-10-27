@@ -2304,3 +2304,81 @@ same-CPU-serialization verdict); p5c3 4.700, p5d_rt_read 4.670,
 p5d_rt_recv 4.881, p5e_stream_send 4.229; p6_stat 16.165,
 p6_append 80.516, p6_unlink 15980, p6_mkdrmdir 51939, p7_sleep1ms
 932.4. Serial: work/pbench-pa75q-serial.log.
+
+### 8.10.17 Leg 48 (2026-10-28): main 584c1105 merged; the AF_UNIX drain re-gated against the NEW main — IPC gate PASS, ready for merge; p2_ctxsw anchor provenance banked
+
+The leg opened with pa74 (d30f40de) and the pa75q D-7 re-anchor
+(a90f46f0) already committed — leg-47 banked both at 04:11 before the
+quota kill. Remaining was exactly the mission: main had moved
+0f806d8b -> 584c1105 (pipe close fix, console cond_resched cfe0b7c4,
+binder BR_SPAWN_LOOPER/oneway set, leakhunt v3 + slowtask instruments),
+and the console cond_resched change touches serial-burst scheduling —
+the leg-47 A/B anchor was stale for a ready-for-merge verdict.
+
+**Merge + correctness gates (branch tip 9baf390a = 584c1105 +
+drain):** merge clean (no conflicts; branch delta vs main is exactly
+net/unix.rs +145, syscall/io.rs +18, docs, run scripts). Dual-arch
+build rc=0 (x86_64 debug, riscv64 debug). riscv64 minimal-rootfs smoke
+(run/rv-smoke-leg48.sh): 0 panics, suite green in the 150s window.
+`make test`: "All tests passed! Total: 1122 tests" (suite grew with
+main's additions; the make target's nonzero exit is its own timeout
+reaping the parked post-halt QEMU — the in-log verdict is green, same
+pattern the smoke script tolerates by construction).
+
+**pa77 re-gate A/B (kernels run/pa77-{main,branch}-strong-bzImage,
+distinct hashes; M = pure 584c1105, B = tip 9baf390a; driver
+run/pa77-pair.sh; boots 06:54-07:16, load1 9-11 at boot starts, all
+six rc=0, zero panics).**
+
+Deterministic samecpu pin windows (adjacent M,B):
+pin_r64 38.381 -> 36.230 (-5.6%), pin_r4k 37.870 -> 37.042 (-2.2%),
+untouched pin_recv64 5.101 -> 5.242 (+2.8%), spread_r64 5.221 ->
+4.400 (-15.7%) — all in band, target rows improved. NOTE: the leg-47
+-15% pin deltas shrank to -2..-6% because the NEW main itself reads
+~4 us faster in those windows (42.1 -> 38.4 pin_r64) — the console
+cond_resched fix plausibly removed a share of the same serialized
+cost the drain lever attacks. The lever still never regresses a row.
+
+Interleaved board pairs (1M,2B fast-dgram regime; 3B,4M slow regime —
+each pair regime-coherent, the documented p5b bimodality fell between
+pairs, not inside one):
+
+| row | pair1 B-vs-M | pair2 B-vs-M |
+|---|---|---|
+| p5a_pipe | +2.9% | (absent in 3B) |
+| p5b_dgram_send | +5.8% | +3.6% |
+| p5b_dgram_recv_peek | +14.3% | +3.8% |
+| p5d_rt_read (lever target) | -3.1% | -3.4% |
+| p5e_stream_send | (absent in 1M; 2B 4.500 vs 3B 4.490 flat) | |
+| p5e_child_spin | +2.3% | +1.9% |
+| p5c3_stream_wrecv | 2B-only 5.081 (no M co-occurrence; vs pa75q quiet 4.700 = +8.1%) | |
+
+Every P5 row within +-20% or improved; p5d_rt_read consistently
+improved in both pairs (the read(2)-shaped row the lever targets).
+Watch row: p2_ctxsw reads +8.9%/+9.7% on B in both pairs — within the
++-20% scheduling band and inside the documented loaded-window class
+(1.34-1.53 us vs quiet anchor 1.373; loaded ceiling ~2.0), the row
+executes no socket code, and B boots started at load1=9 vs M boots'
+11 (not load-order-explained) — two pairs cannot separate a ~0.13 us
+absolute move from LTO layout shift; flagged for the next board that
+co-occurs the row, not a gate failure.
+
+**Verdict: the AF_UNIX read(2) direct user-drain (2f66b0b8 code,
+d30f40de leg-47 verdict) is READY FOR MERGE at tip 9baf390a** —
+correctness gates green, IPC domain gate PASS against the current
+main anchor with regime-coherent interleaved pairs, target rows
+improved in every interpretable window.
+
+**p2_ctxsw anchor provenance banked** (the standing debt):
+docs/development/perf-gate-baseline.md now carries the P2_CTXSW
+ANCHOR PROVENANCE note — the scheduling domain row is profile-bimodal
+(DEBUG: pb1 15.409 us, what run/perf-gate.sh's anchor JSON carries;
+RELEASE-STRONG: pa41-strong 1.383 us re-banked quiet by pa75q at
+1.373 us, loaded class 1.9-2.0 us) and strong-class gate runs must
+never be judged against the 15.4 debug cell. The pa77 board's own
+p2_ctxsw readings (1.338-1.533 across both arms at load1 9-11) sit
+inside the strong loaded band — consistent with the anchor.
+
+Host discipline: boots strictly sequential (one lane QEMU at a time,
+never above 1), own PIDs only, mem floor >=45G observed throughout, boots interleaved
+around the unattended stress-fleet rounds (4-8 foreign QEMUs).

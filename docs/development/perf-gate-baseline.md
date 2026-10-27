@@ -43,6 +43,20 @@ release-strong kernel reads 10-30x lower on the floor families — its
 gate anchor is the pa41-strong column (perf-report 8.10.1), and
 cross-class comparison is meaningless.
 
+P2_CTXSW ANCHOR PROVENANCE (leg 48, banked from the pa75q quiet tier
+run, 2026-10-28 04:01, load1=9, rc=0, zero panics): the scheduling
+domain's "context-switch half-rt" row is profile-bimodal and both of
+its columns are now anchored with provenance. DEBUG class: pb1's own
+median 15.409 µs (perf-report 8.10.1) — that is what run/perf-gate.sh's
+anchor JSON carries (value 15.4) and it must never be used to judge a
+strong kernel. RELEASE-STRONG class: pa41-strong 1.383 µs
+(perf-report 8.10.1), re-banked quiet by pa75q at 1.373 µs on the
+merged-main strong 0f806d8b — the quiet class is ~1.37-1.39 µs;
+loaded windows read 1.9-2.0 µs (the pa57 A-arm 3.3 µs cluster is the
+pre-6fdada6b wake-path class, superseded on main). Strong-class gate
+runs judge p2_ctxsw against 1.38 µs ±20% (quiet window) or 2.0 µs
+(loaded window), never against the 15.4 debug cell.
+
 ## Guarded hot-path domains (user mandate: allocation/reclaim, scheduling, filesystem)
 
 | domain | metric | baseline (accepted) | band |
