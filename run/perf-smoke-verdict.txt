@@ -1,0 +1,13 @@
+serial log: /home/william/rux-agents/dfx-align/run/perf-smoke-serial.log
+--- verdicts ---
+  PASS: task-clock open on self
+  PASS: poll reports POLLIN
+  PASS: user-mode samples (misc=1)
+  PASS: short read is EINVAL
+  PASS: per-CPU cpu-clock samples
+  PASS: exclude_user filters user
+  PASS: error matrix (EINVAL/ESRCH/EFAULT)
+  PASS: close + reopen
+  PASS: probe overall PASS
+  PASS: probe reached the end
+  PASS: serial clean (no panic/Oops/BUG)

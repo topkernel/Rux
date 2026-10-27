@@ -62,8 +62,10 @@ Triggers available before Tranche 1: UART magic `DUMP!` and `LEDGER!`
 ### 2.2 What is missing entirely
 
 There is **no** ftrace, **no** tracefs, **no** debugfs, **no**
-perf_event subsystem (`sys_perf_event_open` returns `ENOSYS`,
-`syscall/process.rs`), **no** kprobe/uprobe, **no** eBPF tracing
+full perf_event subsystem (the `PERF_TYPE_SOFTWARE` cpu-clock/
+task-clock sampling slice landed 2026-10-27 — `kernel/src/perf/`;
+hardware events, mmap rings, ioctls and freq mode remain
+unimplemented), **no** kprobe/uprobe, **no** eBPF tracing
 (`sys_bpf` returns `ENOSYS`; the only BPF in the tree is the
 classic-BPF seccomp filter), **no** `/proc/kallsyms`, **no** runtime
 symbolization, **no** SysRq facility, **no** KASAN/UBSAN/Kfence, **no**
@@ -122,7 +124,7 @@ incomplete or non-reference shape · **--** = absent.
 | Control | SysRq / `/proc/sysrq-trigger` | OK | Tranche 1: upstream command set |
 | Control | debugfs `/sys/kernel/debug` | OK | Tranche 1: new filesystem |
 | Control | tracefs `/sys/kernel/tracing` | OK | Tranche 4: 16 events, tracepoint! table, soak-verified |
-| Control | ftrace / kprobe / uprobe / eBPF / perf | PART | Tranche 4 tracepoints + nop tracer; probes/`perf` still `ENOSYS` |
+| Control | ftrace / kprobe / uprobe / eBPF / perf | PART | Tranche 4 tracepoints + nop tracer; perf software-clock sampling (`PERF_TYPE_SOFTWARE` cpu/task-clock, `sample_period`, `PERF_SAMPLE_IP` via `read(2)`) landed 2026-10-27; probes/hw events/rings still `ENOSYS`/`EINVAL` |
 | Control | runtime-switchable knobs | OK | Tranche 1: debugfs knobs |
 | Symbols | `/proc/kallsyms` | OK | Tranche 3: full table, default-on (LAYOUT-3) |
 | Symbols | runtime backtrace symbolization | OK | Tranche 3: name+off/size, `?` for non-text |
@@ -595,9 +597,11 @@ lane's pbench can consume in-guest. The choice:
   per-task triple (on-cpu ns, runqueue-wait ns, timeslices), the file
   that turns a bench's wall time into on-cpu vs waiting per task
   (P2 ctxsw, P4 fork/exec). pbench reads it with a plain file read.
-- **What not**: `perf_event_open` stays ENOSYS this batch — the
-  attr/ring/ioctl ABI is a tranche of its own, and nothing pbench runs
-  today needs it. The matrix line stays PART.
+- **What not**: `perf_event_open` stayed ENOSYS in that batch — the
+  attr/ring/ioctl ABI is a tranche of its own. (Landed since: the
+  software-clock sampling slice — see §2.2 — `PERF_TYPE_SOFTWARE`
+  cpu/task-clock with `sample_period` + `PERF_SAMPLE_IP` records
+  through `read(2)`; rings/ioctls/freq mode remain open.)
 - **The gate**: `/proc/sys/kernel/sched_schedstats` (0/1, default 0 —
   the reference's own knob, static-key-backed there since 4.10).
   Rux's static-key equivalent is one relaxed atomic load at each

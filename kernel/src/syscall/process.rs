@@ -3903,8 +3903,12 @@ fn process_vm_rw_locked(
 }
 
 /// sys_perf_event_open - Open performance event
-pub fn sys_perf_event_open(_args: SyscallArgs) -> i64 {
-    -(errno::ENOSYS as i64)
+///
+/// PERF_TYPE_SOFTWARE cpu-clock/task-clock sampling (sample_period +
+/// PERF_SAMPLE_IP records via read(2)). The validation, event table
+/// and record layout live in `kernel/src/perf/mod.rs`.
+pub fn sys_perf_event_open(args: SyscallArgs) -> i64 {
+    crate::perf::sys_perf_event_open(args)
 }
 
 // ============================================================================
