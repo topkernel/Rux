@@ -45,6 +45,10 @@ swaphit=$(grep -c "SWAPHIT" "$SERIAL" 2>/dev/null)
 [ "$dirtyhit" -gt 0 ] 2>/dev/null && CRIT="${CRIT}DIRTYHIT=$dirtyhit "
 [ "$guardhit" -gt 0 ] 2>/dev/null && CRIT="${CRIT}GUARDHIT=$guardhit "
 [ "$swaphit" -gt 0 ] 2>/dev/null && CRIT="${CRIT}SWAPHIT=$swaphit "
+# session 10 (sf2): directory-entry storm — any content corruption is
+# critical evidence (wild write to fs data, or an ENTRY_MUTEX hole).
+dscorrupt=$(grep -c "DIRSTORM-CORRUPT" "$SERIAL" 2>/dev/null)
+[ "$dscorrupt" -gt 0 ] 2>/dev/null && CRIT="${CRIT}DIRSTORM-CORRUPT=$dscorrupt "
 
 # --- WARN: anomaly candidates ------------------------------------------
 # OOM lines, excluding the image-side known class (init userspace write
@@ -64,6 +68,8 @@ census=$(grep -cE "WAKE-STRANDED [1-9][0-9]{2,}|TERM-DESCHED [0-9]{3,}" "$SERIAL
 # probe self-reported anomalies
 odd=$(grep -c "FSFUZZ-ODD" "$SERIAL" 2>/dev/null)
 [ "$odd" -gt 20 ] 2>/dev/null && WARN="${WARN}FSFUZZ-ODD=$odd "
+dsodd=$(grep -c "DIRSTORM-ODD" "$SERIAL" 2>/dev/null)
+[ "$dsodd" -gt 50 ] 2>/dev/null && WARN="${WARN}DIRSTORM-ODD=$dsodd "
 ffail=$(grep -c "MEMSTORM-FORKFAIL" "$SERIAL" 2>/dev/null)
 [ "$ffail" -gt 10 ] 2>/dev/null && WARN="${WARN}FORKFAIL=$ffail "
 enomap=$(grep -c "MEMSTORM-ENOMAP" "$SERIAL" 2>/dev/null)
