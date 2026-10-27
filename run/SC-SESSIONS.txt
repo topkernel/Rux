@@ -6892,3 +6892,145 @@ does; (3) launcher chain after HDF unwedges.
 Lane state: branch tip 39c098c4 (4 commits ahead of 8d2ef240 lineage);
 serial sc331B + userdata untracked per .gitignore; my QEMUs all dead
 by timeout; shotmon CSV appended.
+
+LEG-36B (OH-B seventh leg; HDF mutual-nesting characterized; kernel
+exonerated on the binder side; ftruncate family opened; 23:05
+close-out) — opened on branch tip 0cd6d058 (dirty shotmon CSV
+committed as bookkeeping f71ac605: sc331B 8-color probe-gradient
+frames, explicitly NOT a launcher-UI milestone). Commits: 5add2b0a
+(TXN-HANG-OWE instrument), a2f9f7ca (OP_TRUNC pathstash family).
+
+MISSION 0 — OH-A VERDICT CONSUMED (their CC-COLLAB, leg-33A 19:20):
+the 5.10 from-walk nested-routing question is CLOSED kernel-side —
+they decoded accesstoken_ser 469 -> foundation 619 end-to-end, the
+nested txn landed on 469's own todo, 469 PICKED it, and their verdict
+is "kernel-side routing is behaving Linux-like as far as we can
+decode". Matches my leg-35B adjudication. Their spawnfix offer
+(44ba45e2, "fires after delivery too") is SUBSUMED by my 635c4502
+(Linux-exact shape: every returning read, started-count cap) —
+coordinator reconciliation note only, nothing to cherry-pick.
+
+MISSION 1 — HDF MUTUAL-NESTING: THE DEADLOCK GRAPH (4 fresh draws,
+dfx=txnhunt+poolcensus set, oh-img-p + fresh scgold each). New
+instrument TXN-HANG-OWE (5add2b0a, rides txnhunt, one line per hung
+server txn per 5 s burst): the hung server thread's OWN todo depth +
+head item + looper bits + the outstanding_from_tid world scan. This
+closed the leg-35B census gap ("one census gap closed for the next
+leg"). Findings, in adjudication order:
+
+(1) THE DEVMGR MUTUAL PAIRS WERE TRANSIENT, NOT DEADLOCKS. sc331B's
+    composer_host<->hdf_devmgr (txn11694/11696) and power_host<->
+    hdf_devmgr (txn2052/2068) printed only ~4 audit lines at fixed
+    exec (5.9 s / 1.6 s) and never again — the nested calls resolved.
+    Same in sc333B/334B/335B (power pair ~5 s, always resolves). The
+    kernel's in-line nesting delivery works; OH-A saw the same.
+
+(2) THE PERMANENT WEDGES ARE A DIFFERENT CLASS, AND THE KERNEL IS
+    CLEAN ON THE BINDER SIDE. sc334B's main wedge, decoded end-to-end
+    by OWE: accesstoken_ser(472) tid472 and device_manager(804) tid841
+    mutually deadlocked — tid472 = [handling txn9009, waiting
+    txn9072+txn9113 -> 841], tid841 = [handling txn9113, waiting
+    txn9009+txn9072 -> 472]. BOTH threads: thtodo=0 (nothing on their
+    own todos = NO lost wake), every txn PICKED (pick_j set = delivery
+    happened), both parked in ioctl(BINDER_WRITE_READ) awaiting
+    replies only the other can send. Kernel state is exactly what
+    Linux would show inside a userspace ABBA; the deadlock is the
+    image's handlers calling back into each other synchronously.
+    sc335B drew the same shape twice more (samgr 328 <-> 878:919
+    txn20418/20421; audio_server -> foundation:806 txn9176 23.6 min,
+    thtodo=0). sc331B's txn14230 (accessibility -> foundation 1209,
+    38 min) got the microproof: serial line 65416 "BC_REPLY stack top
+    not ours (to_tid=None, me=1209)" — foundation replied EARLY while
+    its own nested call was still outstanding; Rux rejected with
+    BR_FAILED_REPLY, which is byte-for-byte the Linux 5.15 semantic
+    (binder.c:2496 "got reply transaction with bad transaction stack"
+    -> BR_FAILED_REPLY, verified against /tmp/binder-5.15.c); the
+    image never retried and the txn stranded. The reply-pop discipline
+    was also code-verified: Rux pops the sender's client-side entry at
+    reply QUEUE time (binder.rs:6841, matches Linux
+    binder_pop_txn_ilocked), and BC_REPLY always pops on validation
+    success — no kernel path can leave the audited shape.
+
+    BOUNDARY: image-side. All kernel evidence (delivery, pickup,
+    nesting, reply validation, no stranded work) is Linux-identical;
+    what differs from the reference Linux boot is the image's handler
+    behavior (mutual sync callbacks / early reply / deferred reply —
+    the "NONE - reply deferred userspace-side" OWE class, 113 lines in
+    sc334B alone). Mitigation needs the image-side handler stacks —
+    next-leg instrument: user-stack parkdump for hung mutual pairs
+    (the sc77 late_parkdumps mechanism, extended to the
+    outstanding-txn case).
+
+(3) FAMILY B — FOUNDATION-MAIN ftruncate LOOP (KERNEL-SUSPECT, OPEN).
+    sc333B: foundation(807) main tid 807 held txn25431 (honydataability
+    code98) while looping ftruncate(fd 23 -> 31, len 3) — UNINTERRUPTIBLE
+    (state=0x2), ~101 s in-syscall per episode, fd advancing per call.
+    sc334B: the LAUNCHER'S OWN call (m.ohos.launcher -> foundation 772
+    main, txn51219 code98) wedged 15.4 s in ftruncate(fd 24, len 3).
+    sc335B: two launcher code98 calls, ftruncate fd 24/23, 1.3-1.9 s.
+    All three draws, always code98 into foundation's MAIN thread, always
+    ftruncate-to-3-bytes on a foundation fd. A file syscall that takes
+    10-100 s on local ext4 is kernel-side territory: ext4_setattr takes
+    EXT4_BIG_LOCK for the whole truncate and frees extents with one
+    SYNC bitmap round trip (bread + sync_dirty_buffer) per
+    group-segment (allocator.rs free_block_run; group-desc + superblock
+    counters already deferred per F4-R2). The 5.10-census (EXT4-
+    BIGLOCK-CENSUS rides dfx=PERIODIC, NOT dfx=taskdump — discovered
+    the hard way; sc334B ran the wrong switch) MISSED the episodes in
+    sc335B: 30 s cadence vs 1-2 s episodes + raw-UART interleaving.
+    OP_TRUNC pathstash (a2f9f7ca) also came up empty — the 8-slot
+    tid%8 stash is evicted within the 5 s audit window under boot
+    syscall volume (collision, not a missed stash). NEXT-LEG: print
+    EXT4_BIG_LOCK state inside the TXN-HANG audit (aligned with hang
+    instants), keyed pathstash slots, and a fsw=1 draw to count
+    free-run volume at the wedge.
+
+MISSION 2 — MERGE QUEUE: the leg-35B tier-2 retry watcher ran its
+FULL 3 h window (18:21-20:35) without firing — foreign-qemu floor 7
+the entire window (log run/perf-gate-leg35b-t2retry.log), so NO tier-2
+verdicts exist yet. NOT ready-for-merge on tier-2; Tier-1 PASS stands.
+Re-armed as chain v3 (run/perf-gate-leg36b-chain.sh, log
+run/perf-gate-leg36b-t2retry.log): after the sc334B + sc335B draws,
+sustained-quiet watch (total qemu <= 1 for 60 s, 5 h overnight
+deadline), then perf-gate --tiers 1,2 on the tip build. Both new
+instruments are dfx-gated and off in gate boots, so the measurement
+is the merge candidate (a2f9f7ca). Read the log's "gate rc=" line in
+the morning; rc absent = still waiting or gave-up line at the 5 h
+mark.
+
+MISSION 3 — DRAWS + MILESTONE: NOT reached, honestly. sc333B/334B/
+335B: launcher MainAbility attempted (141/161/96), launcher.ready
+NEVER set (sc333B's 3 "launcher.ready" grep hits are the 'not set'
+WARNING lines), OnForeground 0, no screendump frame qualifies (no
+non-probe-gradient frame ever appeared). The launcher PROCESS runs
+(m.ohos.launcher comm live in all draws) and its code98 chain into
+foundation is exactly what wedges (family B above). Boot tallies:
+KERNPANIC 0 / SIGABRT 0 / LC 258|329|226 (draw-to-draw variance),
+TXN-HANG 56|2224|285 lines, WAKE-STRANDED 54|40|94. Chain position
+at close: MainAbility load -> foundation code98 handler -> ftruncate
+loop (family B) + mutual ABBA (family A) block the reply ->
+bootevent timeout -> init SIGKILL sweep (KILLTRACE appspawn).
+
+GATES (tip a2f9f7ca): x86 build rc=0 (21:19), riscv build rc=0
+(22:54, rebuilt after make test overwrote the target), make test
+"ALL TESTS PASSED" (run/leg36b-maketest.log; NOTE: two zombie make
+runs from an interrupted task had to be killed — check for strays
+when resuming), riscv smoke (run/rv-smoke-leg36b.sh): panics=0,
+shell prompt, /proc mounted. Perf tiers: Tier-1 PASS (leg-35B
+numbers stand for the binder/uart content; instruments are gated
+cold), Tier-2 + fresh Tier-1 on the tip queued overnight via chain
+v3. My QEMUs all dead (sc333B/334B/335B by timeout; test VMs
+cleaned); stale sc331B shotmon watcher (3 h old) stopped; nothing
+of mine left running except chain v3.
+
+NEXT LEG: (1) family B root-cause — biglock-state-in-audit print,
+keyed pathstash, fsw=1 draw; if it is per-extent sync bitmap IO,
+that is an fs perf-domain fix (Tier-2 pbench rows + fs counters
+required by the merge gate); (2) user-stack parkdump for family A
+mutual pairs -> image-side mitigation design (like guardread);
+(3) relaunch the launcher chain after B; the milestone definition
+stays launcher.ready SET -> OnForeground -> ohgpu screenshot of a
+NON-probe-gradient frame.
+Lane state: branch tip a2f9f7ca (3 commits ahead of 0cd6d058); serials
+sc333B/334B/335B + userdata untracked per .gitignore; rux-sc334B-symbols
+saved for addr2line.
