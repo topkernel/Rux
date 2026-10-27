@@ -207,6 +207,28 @@ pub fn check_picked(task: *mut crate::process::Task, cpu: usize) {
                 ww_u64((*cur).preempt_count() as u32 as u64);
                 ww_msg(b")");
             }
+            // leg-24 leakhunt v3: the slot incumbent can be a stale
+            // identity (R55 family) — print what the ARCH tp slot says
+            // this CPU is actually executing (tp=pid/pc), so a strand
+            // incumbent with pc!=0 is attributed to the task that
+            // really holds the CPU. One line per report, dfx-gated.
+            if crate::dfx::leakorigin::ENABLED
+                .load(core::sync::atomic::Ordering::Relaxed)
+            {
+                let tp = crate::arch::cpu::get_thread_id_of(c)
+                    as *mut crate::process::Task;
+                ww_msg(b" tp=");
+                if tp.is_null() {
+                    ww_msg(b"nil");
+                } else {
+                    // SAFETY: diagnostic reads of stable Task fields.
+                    unsafe {
+                        ww_u64((*tp).pid() as u64);
+                        ww_msg(b"/pc=");
+                        ww_u64((*tp).preempt_count() as u32 as u64);
+                    }
+                }
+            }
         }
         // vruntime geometry (round 4): the victim's lead/lag against
         // min_vruntime and the queue's leftmost. A lead of ~strand_ms
@@ -287,6 +309,29 @@ fn ww_u64(mut v: u64) {
         while v > 0 && n < buf.len() {
             buf[n] = b'0' + (v % 10) as u8;
             v /= 10;
+            n += 1;
+        }
+    }
+    for i in (0..n).rev() {
+        unsafe { crate::console::putchar_no_lock(buf[i]) };
+    }
+}
+
+/// Hex printer (leg-33B): tick RIPs read as text are unreadable; the
+/// strand census prints them 0x-prefixed for direct addr2line use.
+fn ww_hex(v: u64) {
+    ww_msg(b"0x");
+    let mut buf = [0u8; 16];
+    let mut n = 0;
+    let mut v = v;
+    if v == 0 {
+        buf[0] = b'0';
+        n = 1;
+    } else {
+        while v > 0 && n < buf.len() {
+            let d = (v & 0xf) as u8;
+            buf[n] = if d < 10 { b'0' + d } else { b'a' + d - 10 };
+            v >>= 4;
             n += 1;
         }
     }

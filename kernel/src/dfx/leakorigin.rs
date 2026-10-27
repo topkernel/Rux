@@ -115,11 +115,62 @@ pub fn check_user_return() {
 
 /// Append the recorded site for a PARKED-LEAK victim (called from the
 /// sched.rs parkwalk printer, already rate-gated there).
+///
+/// v3: the walk classifies "parked" via the SCHED PER_CPU slots; a task
+/// can be current on NO sched slot yet still EXECUTING (tp names it) —
+/// the R55 stale-slot family would then read as a phantom parked-leak
+/// (a legit live guard on a running task). The report now scans the
+/// ARCH tp slots: `tpcpu=N` (plus the arch-slot count) means the victim
+/// is actually running on N and the parkwalk's parked classification is
+/// the artifact; no tpcpu = genuinely parked, and the +1 is real.
 pub fn report_parked_site(task: *mut crate::process::Task) {
     if !ENABLED.load(Ordering::Relaxed) {
         return;
     }
-    emit(b"\nLEAK-ORIGIN parked", task, unsafe { (*task).preempt_count() });
+    use crate::console::putchar_no_lock as putchar;
+    fn pd(mut v: u64) {
+        use crate::console::putchar_no_lock as putchar;
+        let mut buf = [0u8; 20];
+        let mut n = 0;
+        if v == 0 {
+            buf[0] = b'0';
+            n = 1;
+        } else {
+            while v > 0 && n < buf.len() {
+                buf[n] = b'0' + (v % 10) as u8;
+                v /= 10;
+                n += 1;
+            }
+        }
+        for i in (0..n).rev() {
+            putchar(buf[i]);
+        }
+    }
+    // Scan the arch tp slots for the victim.
+    let mut tpcpu: i32 = -1;
+    let mut tppc: i32 = 0;
+    for c in 0..crate::config::MAX_CPUS {
+        let tp = crate::arch::cpu::get_thread_id_of(c) as *mut crate::process::Task;
+        if tp == task {
+            tpcpu = c as i32;
+            // SAFETY: diagnostic field read.
+            tppc = unsafe { (*tp).preempt_count() };
+            break;
+        }
+    }
+    const A: &[u8] = b"\nLEAK-ORIGIN parked-adjacent tp=";
+    for &c in A {
+        putchar(c);
+    }
+    pd(tpcpu as u64);
+    if tpcpu >= 0 {
+        const B: &[u8] = b" tpc_pc=";
+        for &c in B {
+            putchar(c);
+        }
+        pd(tppc as u64);
+    }
+    emit(b" LEAK-ORIGIN parked", task, unsafe { (*task).preempt_count() });
 }
 
 /// Append the recorded site for the tick-side PREEMPT-LEAK incumbent
