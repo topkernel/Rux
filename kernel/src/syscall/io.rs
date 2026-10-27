@@ -574,10 +574,14 @@ pub fn sys_write(args: SyscallArgs) -> i64 {
                 // in a write(9) loop; entry frame shows only the raw
                 // fd). Stash BEFORE the pipe fast path so a hang in a
                 // pipe/socket writev labels the pipe, not the previous
-                // regular-file write's path.
-                crate::dfx::pathstash::stash_file(
+                // regular-file write's path. Lazy form (leg 44): the
+                // old `&file.path()` built the String on EVERY write(2)
+                // even with the switch off — File::path() walks the
+                // dentry and formats, a per-call probe cost on the
+                // write hot path.
+                crate::dfx::pathstash::stash_file_lazy(
                     crate::dfx::pathstash::OP_WRITE,
-                    &file.path(),
+                    || file.path(),
                 );
                 // Pipe fast path: transfer directly user↔ring (see the
                 // matching branch in sys_read).

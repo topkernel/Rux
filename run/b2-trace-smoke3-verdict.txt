@@ -1,0 +1,13 @@
+serial log: /home/william/rux-agents/dfx-align/run/trace-smoke3-serial.log
+--- verdicts ---
+  PASS: the five new events in available_events
+  PASS: signal_generate format (host field line)
+  PASS: mark_victim format (host print fmt)
+  PASS: binder_wait_for_work format (5.15 print fmt)
+  PASS: sched_process_wait recorded (waiter + requested pid)
+  PASS: signal_generate recorded (SIGCHLD to the shell)
+  PASS: sched_process_free recorded (lifecycle closes)
+  PASS: binder_wait_for_work recorded (reader park)
+  PASS: mark_victim recorded (OOM victim fields)
+  PASS: signal_generate recorded (OOM SIGKILL)
+  PASS: binder probe PASS (park-capable traffic)
