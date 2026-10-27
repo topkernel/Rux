@@ -1776,3 +1776,90 @@ Evidence: run/fleet/evidence/2026-10-28-s14-ltpb-r1-msgstress-strand/
 2. perf catch closure: ONE clean fsfuzz round on the fixed kernel when
    the DFX lane's perf fixes land on main.
 3. vmscan file-lru question stays queued (s13 item 4).
+
+### s14 continued (04:0x-...) — FAMILY A1 CAUGHT, FIXED, VERIFIED; A2 chained to the idle/wake protocol
+
+Canary v3 (72e03151 + schedtrace) split the strand family cleanly by
+instrument:
+
+- **A1 — impossible-affinity stranding: root-caused and FIXED.** An
+  LTP helper born in the nice04 window carried cpus_allowed=0x8 on a
+  -smp 2 boot: sys_sched_setaffinity validated the mask against
+  config::MAX_CPUS (4) on riscv64 (x86 used MADT-discovered count,
+  same gap vs started CPUs). The task could never be picked (every
+  pick refuses it, why=3), wake paths IPI'd the nonexistent hart
+  ("send_ipi to hart 3 failed, error=-3"), and the one leaked child
+  produced 185+75 PICK-SKIP-ALL reports (openat01/nice04) plus strand
+  bursts while both CPUs idled on a runnable queue. Fix (7e9d2ad0):
+  validate against arch::smp::num_started_cpus() on both arches —
+  the exact set picks can run on. VERIFIED on the rolled canary
+  (9a03e78e, ltp-b round preserved as ltp-b-r3-affinityfix-serial.log):
+  why=3 count 175+ -> 0, send_ipi failures -> 0, every remaining skip
+  aff=0xffffffff. Dual-arch build gate rc=0; make test ALL PASSED.
+- **A2 — the msg-region 1s-grid strands: NOT a pick refusal.** The
+  new SKIPHIST instrument (skip-reason histogram per strand victim,
+  appended to every WAKE-STRANDED line under schedtrace) printed
+  NOTHING through 418 strands: the victims are linked (note_wake
+  stamps only on successful link), never refused by the walk, simply
+  not picked for ~1s. Geometry vr=0ms/lead-lag=0ms matches a FRESH
+  task placed at min_vruntime. 418/418 strand lines coincide with an
+  EMPTY grq idle mask (baseline 62% of heartbeats) — the wake tail's
+  find_idle_cpu misses the actually-idle CPU, no resched IPI, and the
+  box waits for the next ~1s-class event. The earlier "ticks=[0,0]
+  timer silence" correlation is INVALID — WW_TICK_IRQ is incremented
+  only on x86_64 (probe gap; one-line fix next session).
+- **PREEMPT-LEAK incumbent reports are idle-tick artifacts**: all 347
+  lines were pid=0 pc=0x10000 pctick=0 — the tick's own in-flight
+  offset measured inside the tick. The probe needs an idle/in-flight
+  exclusion; the pc=1/256/65537 incumbent census in WAKE-STRANDED
+  h-fields is context-noise-dominated (the picking CPU legally holds
+  the GRQ: its own h-field always reads pc>=1; in-tick=0x10000,
+  softirq=0x100 are legal sampled states). Only picker-vs-OTHER split
+  analysis is meaningful (script in the evidence dir).
+
+Gates for 7e9d2ad0 (coordinator runs the final one): dual-arch builds
+rc=0; make test green; Tier-1 syscost boot + Tier-2 pbench on the
+fixed kernel booting in this session (results appended below).
+
+Evidence: run/fleet/evidence/2026-10-28-s14-ltpb-r1-msgstress-strand/
+(analysis.txt, r1 burst, r2 schedtrace pre-fix, r3 affinity-fix
+verification).
+
+### s14 gate results for 7e9d2ad0 (branch stress-fleet-2, ready for coordinator merge)
+
+- Dual-arch builds: rc=0 (x86_64 bzImage 16MB @03:50, riscv64 md5
+  9a03e78e identical pre/post x86 detour).
+- make test: ALL PASSED (run/fleet/logs/s14-maketest.log).
+- Tier 1 quiet syscost boot (pa-boot s14fix, 780s, KVM q35 smp2):
+  ALL PASS — census TERM 8 / REFUSED 31 (bands 6-10 / 28-36), ticks
+  99.52+100.00/s, volume 100.5M (in ±10%), clock_gettime 3us,
+  nanosleep 185.7ms, GRQ hold 5885ns, small_alloc REST 1.1%, 0 panic
+  / 0 OOM. Log run/pa-s14fix-serial.log, parse
+  run/perf-gate-s14fix-parse-parse.txt.
+- Tier 2 pbench (s14fixpb, debug class vs pb1 anchor, medians):
+  ALL 8 rows in ±20% or improved — p1_null +5.1%, p1_clock +2.3%,
+  p2_ctxsw +4.4% (sched-domain row), p3b_cow +8.0%, p6_write_fsync
+  -20.7%, p6_mkdrmdir -11.5%, p6_unlink -29.6%, p6_append +16.9%.
+  Results in work/pbench-s14fixpb-serial.log.
+
+Fleet state at close: memstorm r19, dirstorm r36, dirtyscan r21,
+fsfuzz r272 (perf arm hot on main 0f806d8b image — no perf fix on
+main yet), ltp-a r18 (control), ltp-b r4 (canary 9a03e78e, START=660,
+dfx=watchdog,taskdump,leakhunt,wwcensus,schedtrace — A2 watch with
+SKIPHIST live). PAUSED on floor rule: modchurn (next r16), monkey-a
+(next r2; criterion closed at r1 605MB), monkey-b (next r2; formal
+500MB pending, r2 partial 294MB@25min panic-free).
+
+Next-session queue (s14 close):
+0. ltp-b r4+: A2 watch — if SKIPHIST stays empty through msg-region
+   strands, add the idle-loop phase stamp + slot-vs-tp per CPU to WW3
+   (one-line WW_TICK_IRQ riscv64 increment too); the A2 producer is
+   in the idle-mark/WFI wake protocol (find_idle_cpu misses unmarked
+   idle CPUs; 418/418 idle-mask-empty correlation, 62% baseline).
+1. Coordinator: 7e9d2ad0 (affinity fix) passed tiers 1+2 + make test
+   on stress-fleet-2 — merge-gate ready. The parkwalk fix (766d60a9)
+   is probe-only (dfx-gated) but rides the same branch.
+2. fsfuzz perf catch closure once the DFX lane's perf fixes land.
+3. Resume modchurn/monkeys when the floor relaxes; monkey-b formal
+   500MB criterion pending.
+4. vmscan file-lru question still queued (s13 item 4).
