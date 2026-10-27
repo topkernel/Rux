@@ -762,3 +762,73 @@ were storm-inflated):
   calm window.
 - Oh-no collapse trigger: spontaneous intermittent, or input-adjacent?
 - Idle-blank unblank path (keystroke does not wake it).
+
+## Session 12 (2026-10-28 early, leg-12 — succession at c0207080 + merge
+## main 0f806d8b; predecessor's r17type/r18type were launched but NEVER
+## ANALYZED — this leg's first act was reading them)
+
+### r17type (22:00-22:50): keyring-stall boot, not a verdict run
+- Session chain reached "[runit] starting session chain" then stalled
+  at the documented keyring stage (gnome-session log tail repeats
+  "couldn't access control socket: /tmp/xdg/keyring/control"); "Running
+  GNOME Shell" never appeared; screen never lit (best nonblack 0.0001).
+- Externally terminated at 2537s (QEMU got SIGTERM from a bash pid —
+  the predecessor's session ending), so no full-length stability read.
+- 0 panics, 0 OOM, 0 SIGDEATH. 193 PREEMPT-UNDERFLOW lines — the known
+  origin/main-delta D-7 class (clamped, non-fatal; handed to the
+  coordinator by the stress-fleet lane, 0f806d8b session-12 notes).
+
+### r18type (23:00-23:40): KEYBOARD-INTERACTIVE AT SCREEN LEVEL, 1:1,
+### ON ONE BOOT — the strongest interactive evidence the lane has
+- M4 @630, M5 @751 (8th M5-class boot). Desktop full-form and pixel-
+  stable 751->1400 (22 consecutive shots identical to 4 significant
+  colors; gray-wallpaper class, same as the README asset frame).
+- Probe sets (click abs(480,380)+BTN_LEFT / 'a' / Enter) at
+  1400/1415/1425, 1900/1915/1925, 2400/2415/2425; jiggle 900..2690
+  every 60s. Kernel delivery EXACTLY 1:1 (INPTRC: 3x kbd code 30
+  press+release, 3x code 28 press+release, 3x BTN_LEFT 272 pairs, 3x
+  abs-move 12288/15564, every jiggle; zero phantom events).
+- CLICK -> whole-shell recomposite between shots 1410->1440: root-
+  window XWALK stats flip #222:57.1% -> #fff:42.3% + #038:36.6%; the
+  scanout background repaints from the gray undrawn state to the blue
+  wallpaper (#023c88) and the panel #232323 -> black. Deterministic
+  frame-diff + per-window walk; no new window maps, no failed dialog.
+- TYPED 'a' RENDERS IN THE XTERM: pre-probe the xterm holds exactly
+  one text line (the initial prompt, ink ~221 px in the row band);
+  after set 1 the same line carries the typed glyph + block cursor
+  (ink 460). XWALK xterm own-content black samples 10 -> 18 exactly at
+  set 1, stable before (all walks 660-1380s) and after (1470-2700s).
+- SHELL ANSWER RENDERS: per additional keystroke set exactly one
+  [prompt-class, answer-class] line pair appears (per-row ink profiles
+  289 px and 548 px; line 1 == line 3 and line 2 == line 4 to the
+  pixel). Final state 5 text lines at 19.6 px pitch: [P, A, P, A,
+  P+cursor]; a solid 10x19 px block cursor (single character cell) in
+  the trailing line. Full-resolution pixel decode of the answer line
+  reads "...a: command not found"; an orientation-only vision pass
+  (NOT part of the evidence chain) reads the five lines as
+    root@rux:/# a
+    bash: a: command not found
+    root@rux:/# a
+    bash: a: command not found
+    root@rux:/# (block cursor)
+- NO idle-blank the whole 2700s — first run where the desktop stayed
+  full-form end-to-end (the jiggle cadence keeps gsd-power fed; the
+  @2100-keystroke-does-not-unblank question stays open but becomes
+  moot under continuous pointer activity).
+- 2700s, 0 panics, 0 kernel OOM, 0 SIGDEATH, 0 PREEMPT-UNDERFLOW, no
+  Gnome-session-failed window in ANY walk (the r15type retraction
+  class is absent).
+- Set-1 nuance (noted, not blocking): the answer lines for set 1 are
+  first visible in the 1950s shot (after set 2 fired) — the first
+  Enter's output lagged tens of seconds behind; sets 2/3 answers were
+  prompt. Userspace-side sequencing question, does not affect the
+  pixel facts or the per-set line arithmetic.
+
+### Verdict level after r18type
+- Keyboard-interactive 1:1 at screen level: PROVEN ON 1 BOOT. The
+  >=2-boot reproduction (mission 2) runs tonight as r19type/r20type
+  on the POST-MERGE kernel (the tree now carries d73e3387 sys_pipe2
+  fix + perf-audit merges; the r18 kernel predates them), same probe
+  schedule, after the 02:31 QEMU hold lifts. Caption raise to the
+  interactive level only if a second boot reproduces the
+  [P,A,P,A,P+cursor] conversation signature.
