@@ -1875,7 +1875,7 @@ worktree home) advanced (r19-r23 / r18-r22). One stale debug boot from
 the dead session (thread=single, no roundtag, 188MB) also lived on.
 All killed by own PIDs; ltp-b relaunched correctly at 06:49 (r4).
 
-### NEW CATCH: munmap length-wrap panic (ltp-a r22, CLOSED at code level, 7d4b4dba)
+### NEW CATCH: munmap length-wrap panic (ltp-a r22, CLOSED and VERIFIED, 7d4b4dba)
 
 ltp-a r22 (main 0f806d8b image, sweepstart=519) died to
 `attempt to add with overflow` at arch/riscv64/mm/mm_ops.rs:594 right
@@ -1889,13 +1889,23 @@ syscall/memory.rs; munmap rounds one layer deeper (mm_ops) and was
 missed. munmap_legacy (same pattern) is dead code, no callers. Fix
 (7d4b4dba): checked round-up on both arches → EINVAL, matching
 Linux's `len > TASK_SIZE - addr` rejection. Joins the wrap family
-(msync ec87f42b, madvise b42a392b). Dual-arch builds rc=0 (riscv64
-md5 19de1371, x86 bzImage 16MB). Deterministic replay reproduced the
-exact r22 BIGMUNMAP sequence (pids 433/441/469/477/594 line-for-line)
-and ran 2423 lines / mq_timedreceive01 panic-free before being shed
-in the floor event; the madvise02-reaching rerun + make test queued
-(floor window). Evidence:
+(msync ec87f42b, madvise b42a392b).
+
+Verification (complete): dual-arch builds rc=0 (riscv64 md5 19de1371
+— reproducible pre/post x86 detour; x86 bzImage 16MB); in-kernel
+suite 1128/1128 ALL PASSED on the same binary; sweep replay
+(sweepstart=519) ran 7373 lines panic-free crossing madvise02 —
+though in that run the huge cleanup munmap was diverted by guest
+tmpfs ENOSPC (mkdtemp failed, test aborted before cleanup), so the
+exact input was delivered by the new deterministic probe
+(test/munmapwrap.c, fb8c5fb4): the r22 killer length, len=-1,
+unaligned near-MAX, and base+wrap all return EINVAL, control
+map/unmap passes, zero panics. Evidence:
 run/fleet/evidence/2026-10-28-s15-munmap-wrap-panic/.
+Tier-1/Tier-2 note: the change touches only the munmap error path
+(checked_add replaces the unchecked round; no hot-path surface); the
+s14 Tier-1/Tier-2 gates ran on this branch pre-munmap-fix — final
+merge gate is the coordinator's.
 
 ### s15 instruments (06d743c4) — WW4 line, rolled fleet-wide
 
