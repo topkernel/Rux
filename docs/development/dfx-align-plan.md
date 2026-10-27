@@ -119,7 +119,7 @@ incomplete or non-reference shape · **--** = absent.
 | Crash | panic handler, `Call Trace:` | PART | banner is the reference kernel's (`Kernel panic - not syncing`); the message sits on its own `PANIC:` line instead of inline; frames symbolized since Tranche 3 |
 | Crash | `Oops` (non-fatal) | OK | T5b: reference-shaped report, task-death policy, pstore dmesg flavor |
 | Crash | `panic=` timeout / reboot | OK | Tranche 5 Part 1 (`panic=N`/`immediate`, both arches reboot) |
-| Crash | pstore / ramoops | OK | Tranche 5 + batch 7: 4-slot record ring (console + dmesg flavors), newest-first ids, read-once removal, survival across both x86 reset paths; both arches |
+| Crash | pstore / ramoops | OK | Tranche 5 + batches 7-8: 4-slot record ring (console + dmesg flavors), newest-first ids, reference erase semantics (repeatable reads, unlink erases), survival across both x86 reset paths; both arches |
 | Crash | taint flags | OK | Tranche 1: exported, the reference's letters |
 | Control | SysRq / `/proc/sysrq-trigger` | OK | Tranche 1: upstream command set |
 | Control | debugfs `/sys/kernel/debug` | OK | Tranche 1: new filesystem |
