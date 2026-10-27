@@ -186,6 +186,10 @@ pub struct Vma {
 
     /// File size for file-backed mappings (0 for anonymous)
     file_size: u64,
+
+    /// Origin stamp — which kernel path created this record (see
+    /// [`VmaOrigin`). Forensic-only; fits existing struct padding.
+    origin: VmaOrigin,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -198,6 +202,109 @@ pub enum VmaType {
     Device,
     /// Shared memory
     SharedMemory,
+}
+
+/// Origin stamp: which kernel path CREATED this Vma record.
+///
+/// Forensic attribute for fault-path VMA dumps (leg-31B render_service
+/// adjudication). A fault into an unexpected permission shape — e.g. a
+/// PROT_NONE piece sitting on top of a thread's RW stack — has exactly two
+/// possible owners: the image itself established the shape (its own
+/// mprotect guard, its own PROT_NONE mmap reserve) or a kernel-side
+/// split/copy produced it (fork snapshot, mprotect surgery bug). The
+/// origin names the establishing path in one line at the dump site, with
+/// no new print traffic — it rides the existing fault-only dump lines.
+///
+/// Semantics: the stamp records the path that created THIS Vma node —
+/// after mprotect splits a mapping, the covered piece carries `Mprotect`
+/// while head/tail pieces inherit the original stamp (splits never
+/// change permissions of the pieces they preserve). On fork the child's
+/// copies inherit the parent's stamp plus the `FORKED` modifier bit, so
+/// "mprotect+FORK" reads as "an mprotect established the shape, fork
+/// carried it into this process" — the stamp survives inheritance
+/// without erasing its creator. VMA merges keep the left survivor's
+/// stamp (a merge only extends `end`), so a stamp can under-report the
+/// newest contributor of a merged range — acceptable for adjudication:
+/// permission *changes* always split first, so the changed piece's stamp
+/// is exact.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct VmaOrigin(u8);
+
+impl VmaOrigin {
+    /// Unstamped (default for paths not yet annotated).
+    pub const UNKNOWN: u8 = 0;
+    /// ELF loader: PT_LOAD / interpreter segments / fillers.
+    pub const EXEC: u8 = 1;
+    /// Main-thread stack created at exec.
+    pub const EXEC_STACK: u8 = 2;
+    /// mmap(2) install (fresh placement and MAP_FIXED replacement).
+    pub const MMAP: u8 = 3;
+    /// Covered piece of an mprotect(2) — the piece whose flags changed.
+    pub const MPROTECT: u8 = 4;
+    /// brk(2) heap growth.
+    pub const BRK: u8 = 5;
+    /// mremap(2) derived mapping.
+    pub const MREMAP: u8 = 6;
+    /// SysV shared-memory attach.
+    pub const SHM: u8 = 7;
+    /// binder(4) mmap (the transaction-buffer mapping).
+    pub const BINDER: u8 = 8;
+    /// Misc kernel-established mapping (io_uring, ...).
+    pub const OTHER: u8 = 9;
+    /// Modifier bit: this record was copied into a new mm by fork.
+    pub const FORKED: u8 = 0x80;
+
+    #[inline]
+    pub const fn from_bits(bits: u8) -> Self {
+        Self(bits)
+    }
+
+    /// Stamp a creator (clears any previous creator, keeps FORKED).
+    #[inline]
+    pub fn set_creator(&mut self, creator: u8) {
+        self.0 = (self.0 & Self::FORKED) | (creator & !Self::FORKED);
+    }
+
+    /// Mark this record as fork-copied (adds the modifier bit).
+    #[inline]
+    pub fn mark_forked(&mut self) {
+        self.0 |= Self::FORKED;
+    }
+
+    #[inline]
+    pub fn bits(&self) -> u8 {
+        self.0
+    }
+
+    /// Creator name (without the fork modifier).
+    #[inline]
+    pub fn creator_name(&self) -> &'static str {
+        match self.0 & !Self::FORKED {
+            Self::UNKNOWN => "unknown",
+            Self::EXEC => "exec",
+            Self::EXEC_STACK => "exec-stack",
+            Self::MMAP => "mmap",
+            Self::MPROTECT => "mprotect",
+            Self::BRK => "brk",
+            Self::MREMAP => "mremap",
+            Self::SHM => "shm",
+            Self::BINDER => "binder",
+            Self::OTHER => "other",
+            _ => "?",
+        }
+    }
+
+    /// True when the record was copied into this mm by fork.
+    #[inline]
+    pub fn is_forked(&self) -> bool {
+        self.0 & Self::FORKED != 0
+    }
+}
+
+impl Default for VmaOrigin {
+    fn default() -> Self {
+        Self(Self::UNKNOWN)
+    }
 }
 
 impl Vma {
@@ -215,6 +322,7 @@ impl Vma {
             vma_type: VmaType::Anonymous,
             file_fd: -1,
             file_size: 0,
+            origin: VmaOrigin::default(),
         }
     }
 
@@ -309,6 +417,18 @@ impl Vma {
         self.file_size
     }
 
+    /// Get origin stamp (which path created this Vma record).
+    #[inline]
+    pub fn origin(&self) -> VmaOrigin {
+        self.origin
+    }
+
+    /// Set origin stamp.
+    #[inline]
+    pub fn set_origin(&mut self, origin: VmaOrigin) {
+        self.origin = origin;
+    }
+
     /// Split VMA at specified address
     ///
     /// Returns (first half, second half) or None if address not in range
@@ -333,6 +453,7 @@ impl Vma {
             vma_type: self.vma_type,
             file_fd: self.file_fd,
             file_size: self.file_size,
+            origin: self.origin,
         };
 
         let second = Vma {
@@ -343,6 +464,7 @@ impl Vma {
             vma_type: self.vma_type,
             file_fd: self.file_fd,
             file_size: self.file_size,
+            origin: self.origin,
         };
 
         Some((first, second))
@@ -404,6 +526,7 @@ impl core::fmt::Debug for Vma {
             .field("size", &self.size())
             .field("flags", &self.flags)
             .field("type", &self.vma_type)
+            .field("origin", &self.origin.creator_name())
             .finish()
     }
 }
@@ -814,6 +937,28 @@ mod tests {
         assert!(vma.contains(VirtAddr::new(0x2000)));
         assert!(!vma.contains(VirtAddr::new(0x3000)));
         assert!(!vma.contains(VirtAddr::new(0xfff)));
+    }
+
+    #[test]
+    fn test_vma_origin_stamp_and_split() {
+        // Creator stamp + fork modifier survive splits and set_creator
+        // clears a previous creator while keeping the fork bit.
+        let mut vma = Vma::new(VirtAddr::new(0x1000), VirtAddr::new(0x4000), VmaFlags::new());
+        assert_eq!(vma.origin().creator_name(), "unknown");
+        vma.set_origin(VmaOrigin::from_bits(VmaOrigin::MMAP));
+        let (head, tail) = vma.split(VirtAddr::new(0x2000)).unwrap();
+        assert_eq!(head.origin().creator_name(), "mmap");
+        assert_eq!(tail.origin().creator_name(), "mmap");
+        let mut o = tail.origin();
+        o.mark_forked();
+        assert!(o.is_forked());
+        assert_eq!(o.creator_name(), "mmap");
+        let mut o2 = VmaOrigin::from_bits(VmaOrigin::MPROTECT | VmaOrigin::FORKED);
+        assert_eq!(o2.creator_name(), "mprotect");
+        assert!(o2.is_forked());
+        o2.set_creator(VmaOrigin::MMAP);
+        assert_eq!(o2.creator_name(), "mmap");
+        assert!(o2.is_forked());
     }
 }
 

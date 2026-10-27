@@ -82,6 +82,7 @@ macro_rules! dfx_switch_table {
             TreeHunt => "treehunt",
             SfdDbg => "sfddbg",
             Ams46 => "ams46",
+            VmaProbe => "vmap",
         }
     };
 }
@@ -345,9 +346,18 @@ pub enum DfxSwitch {
     /// accountmgr→AMS StartUser oneway that returns 0 but never executes
     /// SwitchToUser inside foundation on walled draws. OFF by default.
     Ams46,
+    /// dfx=vmap (leg-31B): VMA-origin adjudication arsenal, the syscall
+    /// side of the Vma origin stamp — traces the two syscall families
+    /// that establish PROT_NONE shapes (mprotect of a non-writable prot
+    /// on a sub-1MB range, and small anonymous PROT_NONE mmaps), with a
+    /// shared line budget. Together with the `origin=` field on the
+    /// fault-path VMA dumps it decides image-owned vs kernel-owned for
+    /// permission-shape faults (render_service's 2-page PROT_NONE piece
+    /// on top of a thread stack). OFF by default.
+    VmaProbe,
 }
 
-const SWITCH_COUNT: usize = 38;
+const SWITCH_COUNT: usize = 39;
 
 static SWITCHES: [AtomicBool; SWITCH_COUNT] = [const { AtomicBool::new(false) }; SWITCH_COUNT];
 
@@ -422,6 +432,7 @@ impl DfxSwitch {
             DfxSwitch::TreeHunt => 35,
             DfxSwitch::SfdDbg => 36,
             DfxSwitch::Ams46 => 37,
+            DfxSwitch::VmaProbe => 38,
         }
     }
 

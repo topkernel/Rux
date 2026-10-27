@@ -1250,10 +1250,12 @@ fn handle_page_fault(regs: &mut PtRegs, access_type: u32) {    use crate::arch::
                                         alloc::string::String::from("anon")
                                     };
                                     crate::pr_err!(
-                                        "  segv vma[{:#x}]: {:x}-{:x} {} off={:#x} {}",
+                                        "  segv vma[{:#x}]: {:x}-{:x} {} off={:#x} {} origin={}{}",
                                         a, v.start().as_usize(),
                                         v.end().as_usize(), perms,
-                                        v.offset(), name);
+                                        v.offset(), name,
+                                        v.origin().creator_name(),
+                                        if v.origin().is_forked() { "+FORK" } else { "" });
                                 }
                             }
                         }

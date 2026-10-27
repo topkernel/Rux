@@ -1913,14 +1913,16 @@ fn user_segv_forensics(regs: &PtRegs, fault_addr: u64) {
         for &probe in &[regs.rip, fault_addr, regs.rax, regs.rsp] {
             match vmas.find(crate::mm::page::VirtAddr::new(probe as usize)) {
                 Some(v) => crate::pr_err!(
-                    "USEGV-FOR: vma({:#x}) = {:#x}-{:#x} flags={:#x} type={:?} fd={} off={:#x}",
+                    "USEGV-FOR: vma({:#x}) = {:#x}-{:#x} flags={:#x} type={:?} fd={} off={:#x} origin={}{}",
                     probe,
                     v.start().as_usize(),
                     v.end().as_usize(),
                     v.flags().bits(),
                     v.vma_type(),
                     v.file_fd(),
-                    v.offset()
+                    v.offset(),
+                    v.origin().creator_name(),
+                    if v.origin().is_forked() { "+FORK" } else { "" }
                 ),
                 None => crate::pr_err!("USEGV-FOR: vma({:#x}) = NONE", probe),
             }
@@ -2038,13 +2040,15 @@ fn user_segv_forensics(regs: &PtRegs, fault_addr: u64) {
                     break;
                 }
                 crate::pr_err!(
-                    "USEGV-FOR: nearvma {:#x}-{:#x} flags={:#x} type={:?} fd={} off={:#x}",
+                    "USEGV-FOR: nearvma {:#x}-{:#x} flags={:#x} type={:?} fd={} off={:#x} origin={}{}",
                     v.start().as_usize(),
                     v.end().as_usize(),
                     v.flags().bits(),
                     v.vma_type(),
                     v.file_fd(),
-                    v.offset()
+                    v.offset(),
+                    v.origin().creator_name(),
+                    if v.origin().is_forked() { "+FORK" } else { "" }
                 );
                 shown += 1;
             }
@@ -2077,6 +2081,43 @@ fn user_segv_forensics(regs: &PtRegs, fault_addr: u64) {
             let _ = write!(line, " {}:{}", i, val);
         }
         crate::pr_err!("USEGV-FOR: stack@rsp:{}", line);
+        // leg-31B: name the VMA (+origin) behind each stack word that
+        // looks like a user code pointer — the faulting frame's return
+        // addresses name the CALLER library without a guest-side
+        // backtracer (the render_service guard-read fault died inside
+        // ld-musl memcpy; the caller's return address was the only
+        // attribution clue and it lived on the stack).
+        if let Some(vmas2) = addr_space.as_ref().map(|a| a.vma_read()) {
+            for i in 0..8usize {
+                let va = match base.checked_add((i * 8) as u64) {
+                    Some(v) => v,
+                    None => break,
+                };
+                if let Some(val) = fore_read_u64(root, va) {
+                    if val <= 0x1000 || val >= 0x0000_8000_0000_0000 {
+                        continue;
+                    }
+                    if let Some(v) = vmas2
+                        .find(crate::mm::page::VirtAddr::new(val as usize))
+                    {
+                        // Only code-looking mappings (r-x / rwx).
+                        let f = v.flags();
+                        if f.is_executable() {
+                            crate::pr_err!(
+                                "USEGV-FOR: stkva[{}] {:#x} = {:#x}-{:#x} r-x off={:#x} origin={}{}",
+                                i,
+                                val,
+                                v.start().as_usize(),
+                                v.end().as_usize(),
+                                v.offset(),
+                                v.origin().creator_name(),
+                                if v.origin().is_forked() { "+FORK" } else { "" }
+                            );
+                        }
+                    }
+                }
+            }
+        }
     }
 }
 
