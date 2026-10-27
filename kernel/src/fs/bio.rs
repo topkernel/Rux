@@ -560,12 +560,15 @@ impl BlockCache {
             if (*(*victim).bh).is_dirty() {
                 // Ordered-publication guard: if this block is a pending
                 // entry/post block, writing it here (before its prereqs)
-                // would reopen the ghost-empty-file crash window. Flush
-                // the ordered queue first; it persists this block too, so
-                // the sync below usually becomes a no-op.
+                // would reopen the ghost-empty-file crash window. Satisfy
+                // THIS block's ordering obligations first (per-block
+                // constraint flush — the world-drain version made every
+                // eviction pay the whole publication backlog); the flush
+                // persists the constrained block's prerequisites, so the
+                // sync below usually becomes a no-op.
                 let vkey = (*victim).key;
                 if publication_constrained(vkey.0, vkey.1, vkey.2) {
-                    let _ = flush_publications();
+                    let _ = flush_publication_constraints(vkey.0, vkey.1, vkey.2);
                 }
                 let _ = (*(*victim).bh).sync();
                 crate::dfx::fsw::note_evict(true);
@@ -1525,15 +1528,17 @@ pub fn sync_dirty_buffer(bh: *const BufferHead) -> Result<(), i32> {
     }
     crate::dfx::fsw::note_sync_dirty();
     // Ordered-publication guard: this buffer may be a pending entry/post
-    // block whose order constraints a plain sync would violate. Flush the
-    // queue (which syncs it in order) first.
+    // block whose order constraints a plain sync would violate. Satisfy
+    // THIS block's constraints first (per-block closure — the journal
+    // commit's write-through path and every inline metadata sync come
+    // through here, so the guard must not drain the world's backlog).
     // SAFETY: bh is a raw pointer returned by bread().
     unsafe {
         let bh_ref = &*bh;
         if let Some(dev) = bh_ref.b_device {
             let (mj, mi) = dev_key(dev);
             if publication_constrained(mj, mi, bh_ref.b_blocknr) {
-                let _ = flush_publications();
+                let _ = flush_publication_constraints(mj, mi, bh_ref.b_blocknr);
             }
         }
     }
@@ -1623,12 +1628,16 @@ pub fn init() {
 // (concurrent flush on another CPU) is appended as a fresh post-only
 // record at the END of the queue — still after the entry it follows.
 //
-// Flush triggers: fsync/sync (ext4_sync_file, sync_buffers), the forced
-// jbd2 commit path, and buffer-cache eviction of an order-constrained
-// block (a dirty victim whose block number is a pending entry/post).
-// Eviction of `pre`-role blocks is unconstrained: writing a pre block
-// early is always safe (pre blocks only have "before the entry"
-// obligations).
+// Durability points satisfy the ordering contract for exactly the blocks
+// they write (see the scoped-draining section below): fsync/fdatasync and
+// the mkdir publication point flush the CALLING task's own records
+// (flush_publications_scoped — per-record cookies); the forced jbd2 commit,
+// inline single-buffer syncs, and buffer-cache eviction write order-
+// constrained blocks only after flush_publication_constraints satisfied
+// THAT block's obligations; sync(2)/syncfs/shutdown keep the whole-queue
+// drain (flush_publications) because they write every dirty buffer anyway.
+// A create-heavy workload bounds the queue via a high-water drain that the
+// producer itself pays (see PUB_HIGH_WATER).
 //
 // Locking: PENDING_PUBLICATIONS is a Spinlock<Vec<_>> that is NEVER held
 // across I/O (flush snapshots with mem::take and syncs lock-free). The
@@ -1649,10 +1658,36 @@ pub struct Publication {
     pub entry: Option<u64>,
     /// Blocks that must persist AFTER `entry` (delete-side frees).
     pub post: Vec<u64>,
+    /// Publishing context identity (the publishing task's address; 0 only
+    /// for the no-task early-boot case). Scoped durability points flush
+    /// only their own cookie's records — the leg-29A O(pending) fix: a
+    /// whole-queue drain inside every fsync/fdatasync/mkdir made latency
+    /// proportional to the WORLD's outstanding publications, and the
+    /// drain's racing-publisher loop could pin an fsync for minutes under
+    /// provisioning churn (sc310's 43-min hiview fdatasync).
+    pub cookie: u64,
 }
 
 static PENDING_PUBLICATIONS: Spinlock<Vec<Publication>> = Spinlock::new(Vec::new());
 static NEXT_PUBLICATION_ID: AtomicU64 = AtomicU64::new(1);
+
+/// Queue-length high-water mark: once crossed, the NEXT publication_defer
+/// runs a bounded full drain (PUB_HIWAT_BATCHES batches) so a create-heavy
+/// workload with no global sync(2) cannot grow the queue (and the O(queue)
+/// scans of every scoped flush) without bound. The creator pays — it is
+/// the task generating the backlog.
+const PUB_HIGH_WATER: usize = 2048;
+/// Batches per high-water drain (each batch is one full ordered pass; see
+/// flush_publications_bounded). Leftover records stay pending, ordered.
+const PUB_HIWAT_BATCHES: u32 = 2;
+
+/// Current task's publication cookie (0 when no task context exists).
+fn publication_cookie() -> u64 {
+    match crate::sched::current() {
+        Some(t) => t as *mut _ as u64,
+        None => 0,
+    }
+}
 
 fn dev_key(device: *const blkdev::GenDisk) -> (u32, u32) {
     // SAFETY: callers pass a valid GenDisk pointer (the fs device).
@@ -1680,14 +1715,28 @@ pub fn publication_defer(
             pre.push(b);
         }
     }
-    let mut pend = PENDING_PUBLICATIONS.lock();
-    pend.push(Publication {
-        id,
-        device: dev_key(device),
-        pre,
-        entry: Some(entry_block),
-        post: Vec::new(),
-    });
+    let mut over_hiwat = false;
+    {
+        let mut pend = PENDING_PUBLICATIONS.lock();
+        pend.push(Publication {
+            id,
+            device: dev_key(device),
+            pre,
+            entry: Some(entry_block),
+            post: Vec::new(),
+            cookie: publication_cookie(),
+        });
+        over_hiwat = pend.len() > PUB_HIGH_WATER;
+        crate::dfx::fsw::note_pub_qmax(pend.len());
+    }
+    if over_hiwat {
+        // Bounded ordered drain by the backlog's own producer (see
+        // PUB_HIGH_WATER). No locks are held here and this runs in the
+        // creator's syscall context, exactly where the old synchronous
+        // barrier used to run.
+        crate::dfx::fsw::note_pub_hiwat();
+        let _ = flush_publications_bounded(PUB_HIWAT_BATCHES);
+    }
     id
 }
 
@@ -1700,14 +1749,24 @@ pub fn publication_defer_entry_only(
     entry_block: u64,
 ) -> u64 {
     let id = NEXT_PUBLICATION_ID.fetch_add(1, Ordering::Relaxed);
-    let mut pend = PENDING_PUBLICATIONS.lock();
-    pend.push(Publication {
-        id,
-        device: dev_key(device),
-        pre: Vec::new(),
-        entry: Some(entry_block),
-        post: Vec::new(),
-    });
+    let mut over_hiwat = false;
+    {
+        let mut pend = PENDING_PUBLICATIONS.lock();
+        pend.push(Publication {
+            id,
+            device: dev_key(device),
+            pre: Vec::new(),
+            entry: Some(entry_block),
+            post: Vec::new(),
+            cookie: publication_cookie(),
+        });
+        over_hiwat = pend.len() > PUB_HIGH_WATER;
+        crate::dfx::fsw::note_pub_qmax(pend.len());
+    }
+    if over_hiwat {
+        crate::dfx::fsw::note_pub_hiwat();
+        let _ = flush_publications_bounded(PUB_HIWAT_BATCHES);
+    }
     id
 }
 
@@ -1778,6 +1837,7 @@ fn publication_capture_note_dirty(
                 pre: Vec::new(),
                 entry: None,
                 post: vec![blocknr],
+                cookie: publication_cookie(),
             });
         }
         _ => {}
@@ -1794,12 +1854,372 @@ fn publication_constrained(mj: u32, mi: u32, blocknr: u64) -> bool {
     })
 }
 
+// ============================================================================
+// Scoped publication draining (the leg-29A/30A O(pending) fix)
+// ============================================================================
+//
+// The ordering contract every flush must preserve, stated over the
+// cumulative buffer cache (writing any block persists its NEWEST content,
+// so "record R's entry add reached disk" happens whenever anyone writes
+// that dir block, not only when R itself is flushed):
+//
+//   H1 (no ghost file):  before ANY write of a block that is a pending
+//                       record's `entry`, that record's `pre` blocks are
+//                       on disk.
+//   H2 (no cross-link):  before ANY write of a block in a pending record's
+//                       `post`, that record's `entry` content is on disk
+//                       (and by H1, that entry's own prerequisites too).
+//
+// The old implementation satisfied H1/H2 by draining the ENTIRE queue at
+// every durability point. Under create churn (OH provisioning, thousands
+// of publications) that made every fsync/fdatasync/mkdir pay the world's
+// backlog — and the drain's racing-publisher loop could run unbounded
+// (sc310's hiview fdatasync pinned for 43 min). The scoped forms below
+// satisfy H1/H2 for exactly the blocks they (or their caller) are about
+// to write:
+//
+//   - flush_publications_scoped(): the calling task's OWN records are
+//     published in full (pre -> entry -> post), plus the minimal
+//     cross-record obligations for every block in that write plan
+//     (foreign records' pres/entries when blocks are shared). Foreign
+//     records are never finished here; they stay pending and keep their
+//     obligations for later writers.
+//   - flush_publication_constraints(): H1/H2 for ONE block the caller is
+//     about to write out-of-band (journal-commit registered buffers,
+//     single-buffer sync, eviction victims).
+//   - flush_publications(): whole queue, append order — unchanged, for
+//     the true global points (sync(2)/syncfs/shutdown) that write every
+//     dirty buffer anyway.
+//
+// Cross-record note (pre-existing, unchanged class): a shared metadata
+// block (inode table/bitmap) dirtied by several pending records carries
+// all their effects; the append-order drain writes it "at first mention",
+// which can persist a later record's free before its own entry removal —
+// the same mid-drain window the whole-queue drain has always had. The
+// scoped flush keeps exactly that class: it orders pre -> entry -> post
+// per record, and satisfies H1/H2 for every block IT writes.
+//
+// Locking: PENDING is a leaf lock (also taken under bucket locks by the
+// capture hook). Every function here snapshots with mem::take, releases,
+// does I/O lock-free, then re-merges under a fresh hold. Foreign records
+// are re-merged BEFORE any records appended during the I/O (append order
+// preserved).
+
+/// Ordered write plan for a scoped flush: `pre` blocks (no obligations of
+/// their own), then `entry` blocks (each may complete pending records'
+/// publications — their pres must already be in `pre`), then `post` blocks
+/// (only the caller's own records' posts are ever scheduled). Blocks that
+/// would land in two phases are written in the EARLIEST phase EXCEPT that
+/// a block which is a pending `entry` anywhere in the plan is never
+/// written in `pre` (it must follow its pres) — see `push_*` below.
+struct WritePlan {
+    pre: Vec<u64>,
+    entry: Vec<u64>,
+    post: Vec<u64>,
+    /// All entry-role blocks of the CURRENT queue snapshot (drives the
+    /// pre/entry exclusion rule while the plan is being built).
+    entry_role: Vec<u64>,
+}
+
+impl WritePlan {
+    fn new() -> Self {
+        WritePlan { pre: Vec::new(), entry: Vec::new(), post: Vec::new(), entry_role: Vec::new() }
+    }
+
+    fn note_queue_entries(&mut self, pend: &[Publication], dev: (u32, u32)) {
+        for p in pend {
+            if p.device != dev {
+                continue;
+            }
+            if let Some(e) = p.entry {
+                if !self.entry_role.contains(&e) {
+                    self.entry_role.push(e);
+                }
+            }
+        }
+    }
+
+    fn push_pre(&mut self, b: u64) {
+        // An entry-role block scheduled as someone's pre must NOT go out
+        // in the pre phase (its own H1 pres are only guaranteed before
+        // the entry phase). Push it to the entry phase instead — still
+        // before all posts.
+        if self.entry_role.contains(&b) {
+            self.push_entry(b);
+            return;
+        }
+        if !self.pre.contains(&b) {
+            self.pre.push(b);
+        }
+    }
+
+    fn push_entry(&mut self, b: u64) {
+        if !self.entry.contains(&b) && !self.pre.contains(&b) {
+            self.entry.push(b);
+        }
+    }
+
+    fn push_post(&mut self, b: u64) {
+        // Same exclusion as push_pre: a block that is a pending record's
+        // entry anywhere in the plan must not go out before the entry
+        // phase (its own H1 pres precede it there).
+        if self.entry_role.contains(&b) {
+            self.push_entry(b);
+            return;
+        }
+        if !self.post.contains(&b) && !self.pre.contains(&b) && !self.entry.contains(&b) {
+            self.post.push(b);
+        }
+    }
+}
+
+/// Grow `plan` until every H1/H2 obligation for every block it schedules
+/// is itself scheduled earlier: a pending record whose `entry` is anywhere
+/// in the plan contributes its pres (H1 — writing that entry-block
+/// content, even as another record's pre or the caller's own out-of-band
+/// write, publishes it); a pending record whose `post` intersects the plan
+/// contributes its entry (H2) — and that entry then pulls its own H1 set.
+/// Converges: every iteration either adds a block or stops.
+fn plan_add_constraints(plan: &mut WritePlan, pend: &[Publication], dev: (u32, u32)) {
+    loop {
+        let mut grew = false;
+        for p in pend {
+            if p.device != dev {
+                continue;
+            }
+            // H2: some block we schedule carries this record's frees.
+            let post_hit = p.post.iter().any(|b| plan.scheduled(*b));
+            if post_hit {
+                if let Some(e) = p.entry {
+                    if !plan.scheduled(e) {
+                        plan.push_entry(e);
+                        grew = true;
+                    }
+                }
+                // post-only stragglers (entry None) need nothing: the
+                // flush that raced their capture persisted the entry
+                // before the straggler was appended.
+            }
+            // H1: some block we schedule IS this record's entry.
+            if let Some(e) = p.entry {
+                if plan.scheduled(e) && !plan.scheduled_pre_of(p) {
+                    for &b in &p.pre {
+                        let before = plan.pre.len() + plan.entry.len();
+                        plan.push_pre(b);
+                        if plan.pre.len() + plan.entry.len() > before {
+                            grew = true;
+                        }
+                    }
+                }
+            }
+        }
+        if !grew {
+            return;
+        }
+    }
+}
+
+impl WritePlan {
+    fn scheduled(&self, b: u64) -> bool {
+        self.pre.contains(&b) || self.entry.contains(&b) || self.post.contains(&b)
+    }
+    /// True when this record's pres are already all scheduled (H1 done).
+    fn scheduled_pre_of(&self, p: &Publication) -> bool {
+        p.pre.iter().all(|b| self.scheduled(*b))
+    }
+}
+
+/// Flush the CALLING TASK's own publications (and nothing else of other
+/// tasks'), in dependency-safe order. Called from per-task durability
+/// points: ext4_sync_file (fsync/fdatasync) and the mkdir entry-publication
+/// point. A task with no pending records does one O(queue) scan and zero
+/// I/O — the hiview/accesstoken fdatasync case under foreign churn.
+pub fn flush_publications_scoped() -> Result<(), i32> {
+    let cookie = publication_cookie();
+    loop {
+        let snapshot = core::mem::take(&mut *PENDING_PUBLICATIONS.lock());
+        let mine: Vec<usize> = snapshot
+            .iter()
+            .enumerate()
+            .filter(|(_, p)| p.cookie == cookie && p.cookie != 0)
+            .map(|(i, _)| i)
+            .collect();
+        if mine.is_empty() {
+            // Requeue the untouched snapshot (records may have been
+            // appended during our scan; snapshot is older — prepend).
+            if !snapshot.is_empty() {
+                let mut pend = PENDING_PUBLICATIONS.lock();
+                let rest = core::mem::take(&mut *pend);
+                let mut merged = snapshot;
+                merged.extend(rest);
+                *pend = merged;
+            }
+            return Ok(());
+        }
+        crate::dfx::fsw::note_pub_scoped(mine.len());
+
+        // One plan per device (a task may publish on several mounted
+        // filesystems; blocks and obligations are device-keyed, so the
+        // per-device closures are independent).
+        let mut devs: Vec<(u32, u32)> = Vec::new();
+        for &i in &mine {
+            if !devs.contains(&snapshot[i].device) {
+                devs.push(snapshot[i].device);
+            }
+        }
+        let mut first_err: i32 = 0;
+        for dev in &devs {
+            let mut plan = WritePlan::new();
+            plan.note_queue_entries(&snapshot, *dev);
+            for &i in &mine {
+                let p = &snapshot[i];
+                if p.device != *dev {
+                    continue;
+                }
+                for &b in &p.pre {
+                    plan.push_pre(b);
+                }
+                if let Some(e) = p.entry {
+                    plan.push_entry(e);
+                }
+                for &b in &p.post {
+                    plan.push_post(b);
+                }
+            }
+            plan_add_constraints(&mut plan, &snapshot, *dev);
+
+            for phase in [&plan.pre, &plan.entry, &plan.post] {
+                for &b in phase {
+                    if let Err(e) = sync_block_ordered(*dev, b) {
+                        if first_err == 0 {
+                            first_err = e;
+                        }
+                        break;
+                    }
+                }
+                if first_err != 0 {
+                    break;
+                }
+            }
+            if first_err != 0 {
+                break;
+            }
+        }
+        // Requeue: on success only the untouched foreign records remain;
+        // on error everything goes back (idempotent — already-persisted
+        // blocks sync as no-ops next time). Records appended during our
+        // I/O land after the snapshot (they are newer).
+        let mut foreign: Vec<Publication> = Vec::new();
+        for (i, p) in snapshot.into_iter().enumerate() {
+            if first_err != 0 || !mine.contains(&i) {
+                foreign.push(p);
+            }
+        }
+        {
+            let mut pend = PENDING_PUBLICATIONS.lock();
+            let rest = core::mem::take(&mut *pend);
+            let mut merged = foreign;
+            merged.extend(rest);
+            *pend = merged;
+        }
+        if first_err != 0 {
+            return Err(first_err);
+        }
+        // Loop: the same cookie may have appended during our I/O (other
+        // threads of this task's process).
+    }
+}
+
+/// Satisfy H1/H2 for ONE block the caller is about to write out of band
+/// (journal-commit registered buffers, single dirty-buffer sync, eviction
+/// victims): every pending record whose entry IS this block gets its pres
+/// written first; every pending record whose post CONTAINS this block gets
+/// its entry written first (with that entry's own H1 set). The block
+/// itself is NOT written here. Foreign records stay pending.
+pub fn flush_publication_constraints(mj: u32, mi: u32, blocknr: u64) -> Result<(), i32> {
+    let snapshot = core::mem::take(&mut *PENDING_PUBLICATIONS.lock());
+    let dev = (mj, mi);
+    // Fast path: nothing pending even references this block.
+    let relevant = snapshot.iter().any(|p| {
+        p.device == dev && (p.entry == Some(blocknr) || p.post.contains(&blocknr))
+    });
+    if !relevant {
+        let mut pend = PENDING_PUBLICATIONS.lock();
+        let rest = core::mem::take(&mut *pend);
+        let mut merged = snapshot;
+        merged.extend(rest);
+        *pend = merged;
+        return Ok(());
+    }
+    crate::dfx::fsw::note_pub_cstr();
+
+    let mut plan = WritePlan::new();
+    plan.note_queue_entries(&snapshot, dev);
+    // The caller's imminent write of `blocknr` is the trigger: schedule it
+    // (in whichever phase its role dictates) so the closure pulls in its
+    // H1/H2 obligations. The write loops below skip it — the caller owns
+    // that write.
+    plan.push_pre(blocknr);
+    plan_add_constraints(&mut plan, &snapshot, dev);
+
+    let mut first_err: i32 = 0;
+    for &b in &plan.pre {
+        if b == blocknr {
+            continue; // caller writes this one
+        }
+        if let Err(e) = sync_block_ordered(dev, b) {
+            if first_err == 0 {
+                first_err = e;
+            }
+            break;
+        }
+    }
+    if first_err == 0 {
+        for &b in &plan.entry {
+            if b == blocknr {
+                continue; // caller writes this one
+            }
+            if let Err(e) = sync_block_ordered(dev, b) {
+                if first_err == 0 {
+                    first_err = e;
+                }
+                break;
+            }
+        }
+    }
+    // Post phase is never written by a constraint flush (the caller's own
+    // write is the constrained block, which is not a `post`-only role
+    // write; H2 for posts is handled by pulling entries above).
+    {
+        let mut pend = PENDING_PUBLICATIONS.lock();
+        let rest = core::mem::take(&mut *pend);
+        let mut merged = snapshot;
+        merged.extend(rest);
+        *pend = merged;
+    }
+    if first_err != 0 {
+        Err(first_err)
+    } else {
+        Ok(())
+    }
+}
+
 /// Flush all pending publications in append order (pre -> entry -> post
-/// per record). Called from every durability point (fsync/sync, forced
-/// jbd2 commit) and from the eviction/sync guards. Never holds the
-/// pending lock across I/O; loops until a racing publisher stops
-/// refilling the queue.
+/// per record). Called from the GLOBAL durability points (sync(2)/syncfs/
+/// shutdown paths, sync_buffers) and from the eviction/sync guards. Never
+/// holds the pending lock across I/O; loops until a racing publisher
+/// stops refilling the queue.
 pub fn flush_publications() -> Result<(), i32> {
+    flush_publications_bounded(u32::MAX)
+}
+
+/// flush_publications with a batch cap: each batch is one full ordered
+/// pass over a mem::take snapshot; after `max_batches` batches (or an
+/// empty take) whatever arrived meanwhile stays pending, ordered. Used by
+/// the high-water creator-side drain so backlog reclamation is bounded
+/// even under sustained churn.
+pub fn flush_publications_bounded(max_batches: u32) -> Result<(), i32> {
+    let mut batches = 0u32;
     loop {
         let batch = core::mem::take(&mut *PENDING_PUBLICATIONS.lock());
         if batch.is_empty() {
@@ -1838,6 +2258,10 @@ pub fn flush_publications() -> Result<(), i32> {
             merged.extend(drained);
             *pend = merged;
             return Err(first_err);
+        }
+        batches += 1;
+        if batches >= max_batches {
+            return Ok(());
         }
         // Loop: a racing publisher may have appended during our I/O.
     }

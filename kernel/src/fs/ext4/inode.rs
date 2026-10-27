@@ -571,18 +571,45 @@ pub fn write_inode(
     // transaction — e.g. the O_TRUNC setattr of every open(O_CREAT|..))
     // the buffer is now left DIRTY instead of synced inline: the write
     // rides the buffer cache write-back (eviction sync, sync(2), and the
-    // fsync path — ext4_sync_file ends in bio::sync_buffers, which
-    // flushes everything). The inline sync cost one synchronous virtio
-    // round trip per open(O_TRUNC)/creat, which alone consumed >5s of
-    // the 30s budget of create-heavy LTP tests (creat05/fork09: 1021
-    // files in setup). Ordering safety is unchanged: an inode-table
-    // block never carries entry-publication obligations in the "after"
-    // direction (it is a `pre`-role block at most), and the publication
-    // guards keep entry blocks from jumping their prereqs.
+    // fsync path — ext4_sync_file syncs the file's inode-table block
+    // directly via inode_table_block_of). The inline sync cost one
+    // synchronous virtio round trip per open(O_TRUNC)/creat, which alone
+    // consumed >5s of the 30s budget of create-heavy LTP tests
+    // (creat05/fork09: 1021 files in setup). Ordering safety is
+    // unchanged: an inode-table block never carries entry-publication
+    // obligations in the "after" direction (it is a `pre`-role block at
+    // most), and the publication guards keep entry blocks from jumping
+    // their prereqs.
     // SAFETY: bh valid; release the reference taken by bread above.
     bio::brelse(bh);
 
     Ok(())
+}
+
+/// Block number of the on-disk inode-table block holding `ino` (the
+/// write_inode_disk target block). Used by ext4_sync_file to persist the
+/// inode slot directly — fsync's own metadata obligation — without a
+/// whole-cache flush (leg-30A: the sync_buffers tail is gone).
+pub fn inode_table_block_of(
+    fs: &crate::fs::ext4::Ext4FileSystem,
+    ino: u32,
+) -> Option<u64> {
+    if ino == 0 || ino > fs.total_inodes {
+        return None;
+    }
+    let group = (ino - 1) / fs.inodes_per_group;
+    let index = (ino - 1) % fs.inodes_per_group;
+    let inode_table_start = {
+        let group_descs = fs.group_descs.lock();
+        if group as usize >= group_descs.len() {
+            return None;
+        }
+        let gd = &group_descs[group as usize];
+        (gd.bg_inode_table_lo as u64) | ((gd.bg_inode_table_hi as u64) << 32)
+    };
+    let inodes_per_block = fs.block_size / (fs.inode_size as u32);
+    let block_offset = index / inodes_per_block;
+    Some(inode_table_start + block_offset as u64)
 }
 
 /// Write ext4 inode (on-disk format) back to disk

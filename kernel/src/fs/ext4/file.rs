@@ -1199,9 +1199,20 @@ pub fn ext4_sync_file(
     fs: &crate::fs::ext4::Ext4FileSystem,
     inode: &crate::fs::ext4::inode::Ext4Inode,
 ) -> Result<(), i32> {
-    // Durability point: pending ordered publications (entry blocks and
-    // their dependencies) go out first, in queue order.
-    let _ = bio::flush_publications();
+    // Durability point for THIS task's own publications only (per-cookie
+    // scoped flush). fsync(F) must persist F's data and the metadata
+    // needed to retrieve it — and, when the caller is the file's creator,
+    // its still-pending directory-entry publication (pre blocks, then the
+    // entry block). Other tasks' pending publications are not this
+    // fsync's obligation: the old whole-queue drain here (compounded by
+    // the commit's and the tail sync_buffers) made fdatasync latency
+    // O(global pending publications), and the drain's racing-publisher
+    // loop could pin an fsync for as long as creators kept appending
+    // (sc310's 43-min hiview fdatasync; the 1.2-1.4 s accesstoken WAL
+    // syncs). Ordering for whenever those foreign entry blocks DO reach
+    // disk is enforced per-block at every write site (guards on
+    // sync_dirty_buffer / eviction / commit write-through).
+    let _ = bio::flush_publications_scoped();
 
     // Sync all data blocks of file
     let blocks = inode.get_data_blocks(fs)?;
@@ -1225,6 +1236,29 @@ pub fn ext4_sync_file(
         }
     }
 
+    // Sync the inode-table block: the inode's own durability point. The
+    // write paths leave it in one of three states — already synced
+    // (eager write-through outside a journal handle), registered in the
+    // running transaction (the forced commit below persists it), or dirty
+    // AND unregistered (standalone updates outside any handle, e.g. the
+    // O_TRUNC size rewrite of open(O_CREAT|O_TRUNC) — size is metadata
+    // fsync must persist). Only the third state needs help; syncing the
+    // block is idempotent for the other two.
+    if let Some(tbl_blk) = super::inode::inode_table_block_of(fs, inode.ino) {
+        // SAFETY: bio::bread returns a valid BufferHead on success.
+        unsafe {
+            if let Some(bh) = bio::bread(fs.device, tbl_blk) {
+                let sync_res = if (*bh).is_dirty() {
+                    bio::sync_dirty_buffer(bh)
+                } else {
+                    Ok(())
+                };
+                bio::brelse(bh);
+                sync_res?;
+            }
+        }
+    }
+
     // fsync semantics (review 5.5: ext4_sync_file/fsync 桩): with a journal
     // present, durability requires the current transaction to COMMIT — the
     // journal superblock's s_start then advances past this update, so a
@@ -1242,13 +1276,20 @@ pub fn ext4_sync_file(
         res?;
     }
 
-    // The lazy write-back (bio::sync_dirty_buffer defers while a journal
-    // handle is active) also leaves UNREGISTERED metadata dirty in the
-    // buffer cache — block bitmaps, group descriptors, extent-tree and
-    // directory blocks from the same update. fsync semantics require those
-    // on disk too, so flush the whole cache; the common case (nothing new
-    // dirty) scans the hash buckets only.
-    bio::sync_buffers()?;
+    // NO whole-cache flush here (the old bio::sync_buffers() tail). It
+    // existed to catch unregistered metadata left dirty by the lazy
+    // write-back, but none of it belongs to THIS fsync:
+    // - F's data blocks: synced above.
+    // - F's inode slot: synced above (and by the forced commit).
+    // - F's extent/bitmap updates: each was either synced eagerly at its
+    //   write (no journal handle active) or registered in a transaction
+    //   the forced commit above persists.
+    // - F's directory entry: a pending ordered publication; POSIX leaves
+    //   entry durability to fsync(dirfd). Whenever any writer does flush
+    //   it, the per-block guards order it after its prerequisites.
+    // - Other files' dirty metadata: never fsync(F)'s obligation; the
+    //   buffer-cache write-back (eviction sync) and sync(2) own them.
+    // Dropping the tail removes fsync's O(world-dirty-blocks) cost.
 
     Ok(())
 }
