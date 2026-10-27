@@ -60,11 +60,59 @@ Gates so far:
   1G, fsw=1): rc=0, zero panics, all three scripted commands verified.
   FSW1 on quiet boot: ps=7.39 pc=0 ph=0 pm=16, pb=0.0 — scoped path live,
   whole-queue drain never fires on the quiet workload.
-- make test: first run timed out at 50 min under 5-QEMU host contention
-  (exit 143, no failures observed — just starved); RERUNNING with a progress
-  log.
-- Perf-gate tiers 1,2: pending quiet host (OH-B wave up).
-- OH re-adjudication boot sc321A: IN FLIGHT (see below).
+- make test: FIRST run timed out at 50 min under 5-QEMU host contention
+  (exit 143, starved not failed); RERUN COMPLETED: "ALL TESTS PASSED"
+  (full suite, /tmp/ohk-maketest.log).
+- Perf-gate tiers 1,2: DONE (details below).
+- OH re-adjudication: sc321A COMPLETE (verdict below); sc322A (wwcensus+fsw)
+  fired 11:36 for the sched-census axis.
+
+PERF-GATE DETAIL (ohk30a = Tier-1 plain syscost boot 10:54 window; ohk30aw =
+Tier-1 rerun with dfx=wwcensus 11:13; ohk30a + ohk30a-r2 = Tier-2 pbench
+runs on the quiet host):
+- Tier 1 (plain): panics 0, OOM 0, ticks 99.50/100.00 PASS, volume 106.7M
+  (±10% of 107.5M) PASS, clock_gettime 3us PASS, nanosleep 185.9ms PASS,
+  GRQ hold 4938ns PASS (4080-7320), small_alloc REST 5.3% PASS (<=10%).
+  Census TERM/REFUSED read 0/0 — the b7870bfd artifact (census needs
+  dfx=wwcensus; silent by design otherwise), not a regression.
+- Tier 1 (wwcensus rerun): census TERM-DESCHED 8 / WAKE-REFUSED 32 —
+  EXACT CENTER of the 8±2 / 32±4 bands. Scheduling domain unchanged.
+  The same boot's tick cpu0=99.45 (one-CPU marginal, documented flake
+  class) and nanosleep 265.9ms read high — both rows PASSED on the plain
+  boot of the SAME kernel, and the delta is the wwcensus printing itself;
+  volume 106.6M / GRQ 4912ns / REST 6.8% agree across both boots.
+- Tier 2 (two quiet-host runs, anchor = pb1 column):
+    p6_write_fsync 14131 / 14145 vs 18124.7 anchor  = -22% IMPROVED (the
+      headline row; also -18% vs this morning's pre-change main-tree
+      gate29a run at 17222)
+    p6_unlink      21722 / 21466 vs 32815.9         = -34% IMPROVED
+    p6_mkdrmdir    73543 / 64357 vs 83192.0         = -12%/-23% IMPROVED
+      (mission item 3: ENTRY_MUTEX rows show NO regression — improved)
+    p6_append      504.9 / 510.5 vs 500.4           = in band
+    p1_null/p1_clock 4.36-4.78                      = in band
+    p2_ctxsw       20.7 / 19.9 vs 15.4 anchor       = +29-34%, ANCHOR
+      DRIFT not a change effect: same-day pre-change main-tree runs read
+      32.5 (gate29a) / 37.3 (gate29b) under load, leg29A quiet read 20.9;
+      my quiet-host value sits at the good end of the recent-kernel family
+      and the diff has zero sched overlap. IPC pipe 26.8-27.1 stable.
+
+SC321A FINAL VERDICT (45-min draw, loop-drawing boot, LIFECYCLE=281,
+1196 TXN-HANG lines):
+- fdatasync re-adjudication: the 1.2-1.4 s accesstoken fdatasync family and
+  the sc310 hiview 43-min fdatasync shape are ABSENT. Hung-server census:
+  1017 futex / 3 nanosleep / 2 writev / 2 ioctl / 1 read / 1 write (D-state)
+  — ZERO sys=74/75 (fsync/fdatasync) entries.
+- Storage D-state family: did NOT draw. Exactly one D-state event in 45 min
+  (powermgr, 2.64 s, sys=1 write of thermal/config/configLevel — named by
+  the leg-29B file-op instrument in one line). No O_CREAT 5.5->26 s class.
+- Mechanism replacement measured (FSW1 final): pb=1.863 ps=19.51 pc=1481
+  ph=0 pm=863 — exactly ONE whole-queue drain in 45 min (863 records, the
+  single sa=1 sync(2) from a daemon; the global point doing its job),
+  vs pre-fix where every fsync/fdatasync/mkdir drained the queue.
+- Kernel health on the OH image: panics = only the deliberate sysrq-c
+  crashdump class (sysrq.rs:34, same as sc316A); namei split panics 0;
+  TREE 0. LIFECYCLE loop persists (image-side samgr/data-layer chain, per
+  legs 26-30B adjudications).
 
 SC321A INTERIM (dfx=txnhunt fsw=1, KVM SMP2 4G, oh-img-p alignguard system +
 fresh scgold, HDC 12232; loop-drawing boot, LIFECYCLE=281 by min 14):
