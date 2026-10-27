@@ -1,0 +1,100 @@
+LEG-30A (OH sprint, kernel-side lane; worktree /home/william/rux-agents/oh-kernel,
+branch feature/oh-kernel, opened from main ef794efa) — mission: the leg-29A
+close-out's unpatched kernel-side queue, in order (1) bio::flush_publications
+O(pending) fix, (2) hiview fdatasync / storage D-state re-adjudication on the
+patched OH image, (3) ENTRY_MUTEX pbench watch.
+
+DESIGN (implemented, commit c3e5a314 "fix(fs): scoped publication draining"):
+
+Root mechanism (confirms 29A adjudication, one addition): THREE stacked
+world-drains sat under every fsync/fdatasync — ext4_sync_file step 1
+(flush_publications), the forced jbd2 commit (flush_publications at
+jbd2_journal_commit_transaction entry), and the tail bio::sync_buffers (its own
+flush_publications + sync_all whole-cache write). mkdir added a fourth
+(namei.rs post-mkdir sync_buffers). The drain loop ("loop: a racing publisher
+may have appended") has NO exit bound — under sustained create churn an fsync
+loops until creators pause, which is the 43-min hiview draw; the 1.2-1.4 s
+accesstoken WAL syncs are single drains of a large queue.
+
+Fix shape — ordering enforced at the granularity of what each point WRITES:
+- Publication records carry cookie = publishing task address.
+- flush_publications_scoped() (fsync/fdatasync entry, mkdir publication point):
+  publishes the caller's OWN records in full (pre -> entry -> post, per device)
+  plus a minimal cross-record obligation closure (H1: any pending record whose
+  entry block is in the plan contributes its pres; H2: any pending record whose
+  post block is in the plan contributes its entry, which pulls its own H1 set).
+  Foreign records stay pending; foreign POSTS are never written by us. A task
+  with no pending records (the hiview case): one queue scan, zero I/O.
+- flush_publication_constraints(mj,mi,blk) (sync_dirty_buffer guard, evict_one
+  guard): H1/H2 closure for the ONE block about to be written.
+- flush_publications() whole-queue unchanged for the true global points
+  (sync(2)/syncfs/sync_file_range/shutdown).
+- jbd2 commit: whole-drain REMOVED — every fs block the commit writes goes
+  through sync_dirty_buffer, which is now per-block guarded.
+- ext4_sync_file: tail sync_buffers REMOVED; added an explicit sync of the
+  file's own inode-table block (new inode::inode_table_block_of) — covers the
+  no-handle O_TRUNC size-update case that used to ride the tail. Data blocks
+  and the forced commit unchanged.
+- mkdir: post-mkdir sync_buffers -> flush_publications_scoped (its own record
+  only; the r8 mkdtemp ENXIO shape dies too — foreign devices never touched).
+- Queue bound: PUB_HIGH_WATER=2048 records -> producer-paid bounded drain
+  (2 batches) inside publication_defer — backlog reclamation is paid by the
+  creator, bounded, and leftover records stay ordered.
+- fsw=1 counters: FSW1 gains ps=<scoped>.<own records> pc=<constraint flushes>
+  ph=<hiwat drains> pm=<queue max>. No new dfx= switch (SWITCH_COUNT stays 37).
+
+Safety argument (documented in bio.rs block comment): the contract is per
+record pre->entry->post plus H1/H2 for every block written; the scoped flush
+satisfies both for everything IT writes. The pre-existing cross-record window
+(shared cumulative metadata block written "at first mention" can persist a
+later record's free before its entry removal) is the SAME class the
+append-order whole drain always had — no new window class introduced.
+Pre-existing race kept as-is (noted for a future fix): a global sync(2) whose
+flush sees an empty queue while a scoped flush holds records in its I/O
+snapshot can then hash-order-write constrained blocks — identical window
+existed with two concurrent whole drains; not worsened.
+
+Gates so far:
+- Dual-arch builds rc=0 (riscv64 + x86_64).
+- riscv64 minimal-rootfs scripted regression boot (serialclean-boot.py, smp2
+  1G, fsw=1): rc=0, zero panics, all three scripted commands verified.
+  FSW1 on quiet boot: ps=7.39 pc=0 ph=0 pm=16, pb=0.0 — scoped path live,
+  whole-queue drain never fires on the quiet workload.
+- make test: first run timed out at 50 min under 5-QEMU host contention
+  (exit 143, no failures observed — just starved); RERUNNING with a progress
+  log.
+- Perf-gate tiers 1,2: pending quiet host (OH-B wave up).
+- OH re-adjudication boot sc321A: IN FLIGHT (see below).
+
+SC321A INTERIM (dfx=txnhunt fsw=1, KVM SMP2 4G, oh-img-p alignguard system +
+fresh scgold, HDC 12232; loop-drawing boot, LIFECYCLE=281 by min 14):
+- FSW1 counters at t=1590s: pb=0.0 ps=19.51 pc=1373 ph=0 pm=789 lvl=7.
+  THE MECHANISM IS REPLACED: ZERO whole-queue drains through 26 min of
+  provisioning churn (before the fix every fsync/fdatasync/mkdir did one);
+  scoped flushes published 51 own records over 19 calls; per-block
+  constraint flushes (pc, ~52/min) carry the ordering; queue bounded at 789
+  (below the 2048 hiwat — ph=0).
+- TXN-HANG census of hung servers: 1017 futex parks (the image-side
+  mutual-wait family), 3 nanosleep, 2 writev, 2 ioctl, 1 read — and ZERO
+  sys=74/75 (fsync/fdatasync) hangs. Leg-29A's sc314A at the same depth
+  already carried the accesstoken 1.2-1.4 s fdatasync family. No hiview
+  43-min draw shape.
+- D-states (0x2): exactly one so far — powermgr tid 762, 2.64 s, sys=1
+  write of /mnt/sandbox/system/data/service/el0/thermal/config/configLevel
+  (file-op=write label; named in one line, the leg-29B instrument working).
+  Short single write stall, not a sync-point stall; watching for growth.
+- Panics 0; namei split panics 0; TREE 0.
+
+PROCESS MISHAP (lesson for me): my first oh-boot-30a.sh launch via setsid
+appeared dead at +20 s because the 4G scgold cp had not finished — it was
+alive and grabbed HDC 12221; my explicit retry then failed ON THAT port and
+I re-ran with 12232, whose script rm -f'd + re-copied the SAME userdata path
+under the first boot (truncating its guest storage). Killed the stray pair
+(own-PID discipline); the surviving serial log belongs to the 12232 boot
+only (the stray qemu wrote to a deleted inode — no interleaving). LESSON:
+wait for the userdata cp (or use per-tag userdata paths) before declaring a
+launch dead; the serial log only appears after the cp.
+
+Boot script: run/oh-boot-30a.sh (oh-img-p referenced read-only via
+snapshot=on,file.locking=off per drive; fresh private scgold userdata copy per
+boot; HDCPORT default 12221).
