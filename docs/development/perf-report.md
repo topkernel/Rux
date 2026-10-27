@@ -2083,3 +2083,104 @@ arm-2 revoke checklist banked, route-1 measurement re-queued behind
 the fix; (3) D-7/p5b regime questions unchanged (no quiet window
 this leg — load 10-20 throughout); (4) Tier-2 gate anchor unchanged
 (pb1 DEBUG column).
+
+### 8.10.15 Leg 46 (2026-10-27): the 40-44 us socket class is DECOMPOSED — same-CPU serialization onto a sleeping receiver's drain cycle; lever named (direct user-drain), regime flipper armed for the sched lane
+
+Main 129a41fa merged (fast-forward, 43 commits). Five boots on the
+merged-main strong kernel (run/pa72-main-strong-bzImage, x86 q35
+tcg-multi SMP2/2G), all rc=0, loads 14-24.
+
+**(1) The armed discriminators killed every send-side/wake-loss
+hypothesis.** pa72b (full board + new rows):
+
+| row | med (us) | reading |
+|---|---|---|
+| p5c2 (sendto + read-child) | 38.937 | slow class, unimodal (min 37.5) |
+| p5f (parent MSG_DONTWAIT + read-child) | 38.867 | **eagain=0** — gate never closed |
+| p5e (sendto + O_NONBLOCK spin-read child) | **4.690** | spin child => fast |
+| p5c3 (sendto + recvfrom-child) | 6.374 | p99 82, avg 24 — bimodal |
+| p5d in-process pair (control) | 4.851/4.981 | leg-43 withdrawal stands |
+
+p5f's eagain=0 (sys_sendto DOES pass MSG_DONTWAIT through to
+unix_send's nonblock) proves the class is paid on NEVER-GATED sends:
+flow control is exonerated. The wake machinery is exonerated by the
+census (dfx=wwcensus, 1 Hz WW heartbeat between serial markers):
+every window, slow or fast, shows wakes==picks to +-1 (direct
+handoff per wake, no refusal, no stranding); one benign early-boot
+W3-RUNWAKE-REFUSED in 454 heartbeats; zero unixsend-loop prints.
+
+**(2) Same-CPU pinning reproduces the class ON DEMAND; the receiver's
+syscall choice decides.** pa72e/pa72f duration windows (12 s each,
+exact p5c2 shapes, markers for the census):
+
+| window | pinning | child | med (us) | sends/s | census |
+|---|---|---|---|---|---|
+| p5c2long (pa72e) | none | read 64K | 8.4 | 104K | wakes 20-57K/s |
+| p5c2long_spread | 0/1 | read 64K | 7.8 | 101K | wakes>picks (concurrent) |
+| p5c2long_samecpu | 0/0 | read 64K | **59.4** | 18.8K | wakes==picks ~40K/s |
+| pin_r64 (pa72f) | 0/0 | read 64K | **39.7** | 18.1K | wakes==picks ~33K/s |
+| pin_r4k | 0/0 | read 4K | **64.9** | 14.6K | wakes==picks ~28K/s |
+| pin_recv64 | 0/0 | recvfrom 64K | **8.0** | 27.2K | wakes==picks ~22K/s, avg 36.6 p99 78 |
+| spread_r64 | 0/1 | read 64K | 7.1 | 131K | — |
+
+Same CPU + sleeping receiver (read-child) = the class; same CPU +
+never-sleeping receiver (recvfrom-child, its zero-fill-paced 64K
+staging keeps the queue non-empty at every poll) = 8.0 med with a
+gate-block tail. pin_r4k (16x smaller staging) got WORSE, not better
+— the staged-buffer SIZE is exonerated too (and the 4K chunk-loop
+shape multiplies sleep cycles; see the p5long window comments).
+
+**(3) Verdict.** The 40-44 us cross-process class is per-send
+SERIALIZATION onto a sleeping receiver's drain cycle: it appears
+exactly when (a) the receiving task sleeps on an empty queue —
+receivers whose per-call cycle outpaces the sender (the read(2)
+wrapper shape, the dgram peek+consume protocol; p5b's slow regime is
+the same mechanism, same values) — and (b) sender and receiver
+effectively share one CPU. The parent's sendto median then equals
+the receiver's wake->drain->re-block cycle (~35-40 us on this TCG
+class): every send wakes the child, hands the CPU over (wakes==picks
+census), and waits out the child's whole receive syscall before
+sending again. In the concurrent regime (2 effective CPUs) the same
+cycle runs beside the sender and the parent pays only the enqueue
+(4.5-8.4 us). NOT the enqueue gate, NOT wake loss/refusal, NOT the
+handoff itself (pin_recv64 handoffs at 22K/s at 8.0 us), NOT the
+staging size, NOT the wrapper dispatch (leg-43 withdrawal stands).
+
+**(4) Levers.** (i) Socket-side, real but partial: DIRECT USER-DRAIN
+for AF_UNIX receive (pipe_read_user-style: drain the recvq straight
+into the user buffer, zero staging) — expected end state is the
+p5c3/pin_recv64 regime (med 5-8 us) because a receiver that drains
+faster stops sleeping and decouples through the queue; residual =
+the gate-block tail (p99 ~80 us class). pin_r4k's warning: the lever
+is DIRECTNESS, not staging size — shrinking the staged buffer alone
+multiplies sleep cycles and worsens the class. (ii) Regime-side
+(sched lane, armed as a question, no code lever this leg): WHY the
+pair intermittently shares one effective CPU on a 2-vCPU GRQ guest
+during board runs — the p5b/p5c2 regime flipper (pa72b/pa72d slow vs
+pa72c/pa72e-windows fast, same kernel, load 14-24 throughout). The
+repro + census method are now standing: samecpu pinning, WW
+heartbeat, p5e/p5f/pin windows in pbench (longp5/longp5warm/
+longp5pin modes via test/p5long.c staging).
+
+**(5) F4 arm-1 status: STILL BLOCKED** — the fs lane's no-journal
+root-lookup fix has not landed on main as of 129a41fa; the J-vs-NJ
+p6 re-comparison stays queued on their fix; arm-2 stays design-only
+(checklist in f4-ext4-route-map.md).
+
+**Gates (test-only leg: no kernel source changes; probe + docs +
+run scripts only):** dual-arch build rc=0 (riscv64 debug + x86_64
+strong on merged main); riscv64 boot 0 panics (unit-test rootfs,
+ALL TESTS PASSED); make test green; five x86 pbench boots rc=0
+(pa72b/c/d/e/f), zero panics; host discipline held (<=2 lane QEMUs
+at a time, own PIDs only, mem floor >=10G).
+
+**Standing after this leg:** (1) socket family: the lever (direct
+user-drain) is named with a measured target class; implementation
+belongs to the next socket leg behind this verdict; (2) regime
+flipper (effective same-CPU pairing under load) armed for the sched
+lane with repro + census; (3) D-7 re-anchor: no quiet window in this
+leg's first half (load 18-24, 12-16 foreign QEMUs throughout; the
+load-gated watcher run/pa72-reanchor.sh holds the board unbanked —
+bank only if load1<=9 AND qemus<=8 opens before the leg ends);
+(4) F4 arm-1 re-queued behind the fs fix (unchanged); (5) Tier-2
+gate anchor unchanged (pb1 DEBUG column).
