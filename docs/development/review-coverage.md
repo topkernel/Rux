@@ -22,11 +22,11 @@ when the tree gains a file the map does not know about.
 | metric | value |
 |---|---|
 | source files in kernel/src | 412 |
-| source lines in kernel/src | 261,568 |
-| files fully reviewed | 20 |
-| files partially reviewed | 78 |
-| files not yet reviewed | 314 |
-| lines in fully reviewed files | 5,737 |
+| source lines in kernel/src | 261,679 |
+| files fully reviewed | 21 |
+| files partially reviewed | 80 |
+| files not yet reviewed | 311 |
+| lines in fully reviewed files | 7,387 |
 | reviewed files mainline changed since `47d96961` (need re-read) | 51 |
 
 ## Defects found and fixed
@@ -36,6 +36,8 @@ when the tree gains a file the map does not know about.
 | `ddfa8abc` | `kernel/src/interrupt/softirq.rs` | The 2ms softirq budget was checked once per batch of pending vectors, so a batch of slow handlers could overrun it by the time of every vector left in the batch. the reference kernel checks the budget before every vector and leaves the unreached ones pending. |
 | `327b4a52` | `kernel/src/fs/inode.rs, kernel/src/fs/file.rs` | The generic O_APPEND write read the file size, released the lock and only then took the data lock to write — two appenders on different open descriptions could pick the same offset, and the second write overwrote the first. the reference kernel takes the append position under the inode lock. |
 | `ff6fc39b` | `kernel/src/syscall/memory.rs` | msync had no 'addr + len' wrap check (the reference kernel's mm/msync.c has one). A near-max length wrapped the page-aligned length to 0, so msync reported success without syncing anything; the reference kernel returns EINVAL. |
+| `b433fb13` | `kernel/src/sched/fair.rs` | The CFS pick lifts the entries a CPU cannot run (affinity, cgroup throttle, ownership) out of the timeline and re-inserts them after the pick, but min_vruntime was advanced while they were out: the leftmost looked further right than it is. min_vruntime only ever grows, so the drift was permanent, and it is the reference point new tasks and waking sleepers are placed against - a drifted value silently erased their sleep credit. The reference kernel computes min_vruntime from the leftmost entry of the complete tree (kernel/sched/fair.c: update_min_vruntime). |
+| `b433fb13` | `kernel/src/syscall/memory.rs` | mmap accepted a file offset that is not a multiple of the page size. The reference kernel's mmap wrapper rejects it with EINVAL before anything else, and the check is unconditional - it applies to anonymous mappings too, where the offset is ignored. Without it a misaligned offset silently shifted the mapping's file extent: the VMA stored the raw offset and the fault path then looked up a page-cache entry at a non-page-aligned offset. |
 | `e47b155a` | `kernel/src/ipc/posix_mq.rs` | mq_timedreceive/mq_timedsend take an ABSOLUTE CLOCK_REALTIME deadline (abs_timeout), but Rux read the value as RELATIVE — a caller passing an absolute deadline waited twice as long, and an already-expired deadline blocked for the full timeout instead of returning ETIMEDOUT at once. |
 
 ## Per-file status
@@ -515,14 +517,14 @@ when the tree gains a file the map does not know about.
 | `task.rs` | 5433 | 🔶🔁 | task layout, counters, comm; 主线已改动，需重读 |
 | `wait.rs` | 489 | ⬜ |  |
 
-### kernel/src/sched (11012 lines)
+### kernel/src/sched (11043 lines)
 
 | file | lines | status | note |
 |---|---:|---|---|
 | `cgroup.rs` | 874 | ⬜ |  |
 | `class.rs` | 269 | ⬜ |  |
 | `deadline.rs` | 536 | ⬜ |  |
-| `fair.rs` | 1619 | ⬜ |  |
+| `fair.rs` | 1650 | 🔧 | CFS 核心：vruntime 权重方向、min_vruntime、pick 跳过路径（min_vruntime 越界已修 b433fb13） |
 | `idle.rs` | 100 | ✅ |  |
 | `mod.rs` | 129 | ⬜ |  |
 | `rt.rs` | 639 | 🔶 | enqueue/dequeue/pick/bitmap/priority inversion |
@@ -554,14 +556,14 @@ when the tree gains a file the map does not know about.
 | `seqlock.rs` | 260 | ⬜ |  |
 | `spinlock.rs` | 621 | ⬜ |  |
 
-### kernel/src/syscall (31693 lines)
+### kernel/src/syscall (31706 lines)
 
 | file | lines | status | note |
 |---|---:|---|---|
 | `dispatch.rs` | 1214 | ⬜ |  |
 | `file.rs` | 5117 | 🔶🔁 | futex2 wrappers, fsync; 主线已改动，需重读 |
 | `io.rs` | 2635 | ⬜ |  |
-| `memory.rs` | 3905 | 🔶🔁 | msync/mprotect/madvise 长度处理；msync 回绕已修（ff6fc39b）; 主线已改动，需重读 |
+| `memory.rs` | 3918 | 🔶🔁 | mmap/munmap/mprotect/mremap；msync 回绕已修（ff6fc39b）、mmap 偏移未页对齐已修（b433fb13）; 主线已改动，需重读 |
 | `misc.rs` | 3881 | ⬜ |  |
 | `mod.rs` | 438 | ⬜ |  |
 | `network.rs` | 4246 | ⬜ |  |
@@ -571,7 +573,7 @@ when the tree gains a file the map does not know about.
 | `time.rs` | 1941 | 🔶🔁 | nanosleep, realtime clock; 主线已改动，需重读 |
 | `x86_compat.rs` | 388 | ⬜ |  |
 
-### kernel/src/tests (11820 lines)
+### kernel/src/tests (11887 lines)
 
 | file | lines | status | note |
 |---|---:|---|---|
@@ -620,7 +622,7 @@ when the tree gains a file the map does not know about.
 | `preemptive_scheduler.rs` | 62 | ⬜ |  |
 | `process_tree.rs` | 123 | ⬜ |  |
 | `reparent_safety.rs` | 412 | ⬜ |  |
-| `scheduler.rs` | 69 | ⬜ |  |
+| `scheduler.rs` | 112 | 🔶 | guest 侧调度断言：vruntime 公式与权重方向（b433fb13 新增） |
 | `semaphore.rs` | 79 | ⬜ |  |
 | `sgid_mode.rs` | 51 | ⬜ |  |
 | `signal.rs` | 138 | ⬜ |  |
@@ -631,7 +633,7 @@ when the tree gains a file the map does not know about.
 | `smp_schedule.rs` | 46 | ⬜ |  |
 | `syscall_file.rs` | 544 | ⬜ |  |
 | `syscall_io.rs` | 507 | ⬜ |  |
-| `syscall_memory.rs` | 317 | ⬜ |  |
+| `syscall_memory.rs` | 341 | 🔶 | guest 侧内存 syscall 断言：mmap 偏移非页对齐返回 EINVAL（b433fb13 新增） |
 | `syscall_misc.rs` | 471 | ⬜ |  |
 | `syscall_network.rs` | 470 | ⬜ |  |
 | `syscall_process.rs` | 352 | ⬜ |  |

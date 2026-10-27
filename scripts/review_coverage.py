@@ -18,6 +18,7 @@ Usage: scripts/review_coverage.py [--check]
             status for an unknown file) and exit non-zero on drift
 """
 
+import fnmatch
 import os
 import re
 import sys
@@ -36,6 +37,7 @@ STATUS = {
     "kernel/src/arch/riscv64/mm/memory_layout.rs": ("part", "image window constants"),
     "kernel/src/arch/riscv64/mm/mmu_init.rs": ("part", "kernel image mapping"),
     "kernel/src/arch/riscv64/trap.rs": ("part", "tick accounting, trap entry"),
+    "kernel/src/arch/riscv64/vext.rs": ("todo", ""),
     "kernel/src/arch/x86_64/mm/memory_layout.rs": ("todo", ""),
     "kernel/src/arch/x86_64/mm/mmu_init.rs": ("part", "kernel image mapping"),
     "kernel/src/arch/x86_64/trap.rs": ("part", "TSS/IST interrupt stacks"),
@@ -47,11 +49,15 @@ STATUS = {
     "kernel/src/dfx/hung_task.rs": ("part", "D-state scan"),
     "kernel/src/dfx/ksyms.rs": ("done", "written by this review (symbol table)"),
     "kernel/src/dfx/ledger.rs": ("part", "page census"),
+    "kernel/src/dfx/leakorigin.rs": ("todo", ""),
     "kernel/src/dfx/memwatch.rs": ("part", "heap census"),
     "kernel/src/dfx/metawatch.rs": ("part", "buddy shadow scan"),
     "kernel/src/dfx/mod.rs": ("part", "init, debugfs knob registration"),
     "kernel/src/dfx/monowatch.rs": ("part", "monotonic jump tripwire"),
+    "kernel/src/dfx/oops.rs": ("todo", ""),
     "kernel/src/dfx/r83hunt.rs": ("part", "task header audit"),
+    "kernel/src/dfx/pathstash.rs": ("todo", ""),
+    "kernel/src/dfx/pstore.rs": ("todo", ""),
     "kernel/src/dfx/sbi_debug.rs": ("part", "raw SBI printers"),
     "kernel/src/dfx/scribble.rs": ("part", "task scribble hunter"),
     "kernel/src/dfx/softlockup.rs": ("part", "soft lockup detector"),
@@ -59,6 +65,7 @@ STATUS = {
     "kernel/src/dfx/syscost.rs": ("part", "per-syscall cost table"),
     "kernel/src/dfx/taint.rs": ("done", "the reference kernel taint letters"),
     "kernel/src/dfx/taskdump.rs": ("part", "task dump format"),
+    "kernel/src/dfx/treehunt.rs": ("todo", ""),
     "kernel/src/dfx/wildwatch.rs": ("part", "RO-guard tripwire"),
     "kernel/src/drivers/blkdev/iostat.rs": ("done", "written by this review"),
     "kernel/src/drivers/blkdev/mod.rs": ("part", "request path, register_disk"),
@@ -117,6 +124,7 @@ STATUS = {
     "kernel/src/fs/procfs/mounts.rs": ("todo", ""),
     "kernel/src/fs/procfs/net.rs": ("todo", ""),
     "kernel/src/fs/procfs/pid.rs": ("part", "status/stat generators"),
+    "kernel/src/fs/procfs/procfile.rs": ("todo", ""),
     "kernel/src/fs/procfs/schedstat.rs": ("done", "written by this review"),
     "kernel/src/fs/procfs/self_proc.rs": ("todo", ""),
     "kernel/src/fs/procfs/softirqs.rs": ("done", "written by this review"),
@@ -171,6 +179,7 @@ STATUS = {
     "kernel/src/module/mod.rs": ("todo", ""),
     "kernel/src/net/*": ("todo", ""),
     "kernel/src/panic_policy.rs": ("done", "written by this review (panic= parameter)"),
+    "kernel/src/perf/mod.rs": ("todo", ""),
     "kernel/src/printk.rs": ("part", "ring buffer, console level"),
     "kernel/src/process/coredump.rs": ("todo", ""),
     "kernel/src/process/exec.rs": ("part", "exec 的信号处置/掩码复位"),
@@ -186,11 +195,12 @@ STATUS = {
     "kernel/src/sched/cgroup.rs": ("todo", ""),
     "kernel/src/sched/class.rs": ("todo", ""),
     "kernel/src/sched/deadline.rs": ("todo", ""),
-    "kernel/src/sched/fair.rs": ("todo", ""),
+    "kernel/src/sched/fair.rs": ("fixed", "CFS 核心：vruntime 权重方向、min_vruntime、pick 跳过路径（min_vruntime 越界已修 b433fb13）"),
     "kernel/src/sched/idle.rs": ("done", ""),
     "kernel/src/sched/mod.rs": ("todo", ""),
     "kernel/src/sched/rt.rs": ("part", "enqueue/dequeue/pick/bitmap/priority inversion"),
     "kernel/src/sched/sched.rs": ("part", "pick/switch path, enqueue/dequeue, preemption checks"),
+    "kernel/src/sched/stats.rs": ("todo", ""),
     "kernel/src/sched/stop_task.rs": ("todo", ""),
     "kernel/src/sched/wakewatch.rs": ("todo", ""),
     "kernel/src/security/*": ("todo", ""),
@@ -204,7 +214,7 @@ STATUS = {
     "kernel/src/syscall/dispatch.rs": ("todo", ""),
     "kernel/src/syscall/file.rs": ("part", "futex2 wrappers, fsync"),
     "kernel/src/syscall/io.rs": ("todo", ""),
-    "kernel/src/syscall/memory.rs": ("part", "msync/mprotect/madvise 长度处理；msync 回绕已修（ff6fc39b）"),
+    "kernel/src/syscall/memory.rs": ("part", "mmap/munmap/mprotect/mremap；msync 回绕已修（ff6fc39b）、mmap 偏移未页对齐已修（b433fb13）"),
     "kernel/src/syscall/misc.rs": ("todo", ""),
     "kernel/src/syscall/mod.rs": ("todo", ""),
     "kernel/src/syscall/network.rs": ("todo", ""),
@@ -371,6 +381,7 @@ STATUS = {
     "kernel/src/security/mod.rs": ("todo", ""),
     "kernel/src/signal.rs": ("part", "flush_handlers 处置重置语义"),
     "kernel/src/sync/mod.rs": ("todo", ""),
+    "kernel/src/sync/percpu.rs": ("todo", ""),
     "kernel/src/syscall/sched.rs": ("todo", ""),
     "kernel/src/syscall/signal.rs": ("todo", ""),
     "kernel/src/tests/boundary.rs": ("todo", ""),
@@ -384,6 +395,7 @@ STATUS = {
     "kernel/src/tests/ext4_allocator.rs": ("todo", ""),
     "kernel/src/tests/ext4_file_write.rs": ("todo", ""),
     "kernel/src/tests/fcntl.rs": ("todo", ""),
+    "kernel/src/tests/fileops_caps.rs": ("todo", ""),
     "kernel/src/tests/fdtable.rs": ("todo", ""),
     "kernel/src/tests/file_flags.rs": ("todo", ""),
     "kernel/src/tests/file_open.rs": ("todo", ""),
@@ -392,6 +404,7 @@ STATUS = {
     "kernel/src/tests/fstat.rs": ("todo", ""),
     "kernel/src/tests/futex_test.rs": ("todo", ""),
     "kernel/src/tests/getpid.rs": ("todo", ""),
+    "kernel/src/tests/getdents_cache.rs": ("todo", ""),
     "kernel/src/tests/heap_allocator.rs": ("todo", ""),
     "kernel/src/tests/icache.rs": ("todo", ""),
     "kernel/src/tests/initrd.rs": ("todo", ""),
@@ -410,12 +423,13 @@ STATUS = {
     "kernel/src/tests/network.rs": ("todo", ""),
     "kernel/src/tests/page_allocator.rs": ("todo", ""),
     "kernel/src/tests/path.rs": ("todo", ""),
+    "kernel/src/tests/percpu.rs": ("todo", ""),
     "kernel/src/tests/pid_test.rs": ("todo", ""),
     "kernel/src/tests/pipe2.rs": ("todo", ""),
     "kernel/src/tests/preemptive_scheduler.rs": ("todo", ""),
     "kernel/src/tests/process_tree.rs": ("todo", ""),
     "kernel/src/tests/reparent_safety.rs": ("todo", ""),
-    "kernel/src/tests/scheduler.rs": ("todo", ""),
+    "kernel/src/tests/scheduler.rs": ("part", "guest 侧调度断言：vruntime 公式与权重方向（b433fb13 新增）"),
     "kernel/src/tests/semaphore.rs": ("todo", ""),
     "kernel/src/tests/sgid_mode.rs": ("todo", ""),
     "kernel/src/tests/signal.rs": ("todo", ""),
@@ -426,7 +440,7 @@ STATUS = {
     "kernel/src/tests/smp_schedule.rs": ("todo", ""),
     "kernel/src/tests/syscall_file.rs": ("todo", ""),
     "kernel/src/tests/syscall_io.rs": ("todo", ""),
-    "kernel/src/tests/syscall_memory.rs": ("todo", ""),
+    "kernel/src/tests/syscall_memory.rs": ("part", "guest 侧内存 syscall 断言：mmap 偏移非页对齐返回 EINVAL（b433fb13 新增）"),
     "kernel/src/tests/syscall_misc.rs": ("todo", ""),
     "kernel/src/tests/syscall_network.rs": ("todo", ""),
     "kernel/src/tests/syscall_process.rs": ("todo", ""),
@@ -456,6 +470,20 @@ BUGS = [
      "msync had no 'addr + len' wrap check (the reference kernel's mm/msync.c has one). A near-max length "
      "wrapped the page-aligned length to 0, so msync reported success without syncing "
      "anything; the reference kernel returns EINVAL."),
+    ("b433fb13", "kernel/src/sched/fair.rs",
+     "The CFS pick lifts the entries a CPU cannot run (affinity, cgroup throttle, ownership) out of "
+     "the timeline and re-inserts them after the pick, but min_vruntime was advanced while they "
+     "were out: the leftmost looked further right than it is. min_vruntime only ever grows, so the "
+     "drift was permanent, and it is the reference point new tasks and waking sleepers are placed "
+     "against - a drifted value silently erased their sleep credit. The reference kernel computes "
+     "min_vruntime from the leftmost entry of the complete tree (kernel/sched/fair.c: "
+     "update_min_vruntime)."),
+    ("b433fb13", "kernel/src/syscall/memory.rs",
+     "mmap accepted a file offset that is not a multiple of the page size. The reference kernel's "
+     "mmap wrapper rejects it with EINVAL before anything else, and the check is unconditional - it "
+     "applies to anonymous mappings too, where the offset is ignored. Without it a misaligned offset "
+     "silently shifted the mapping's file extent: the VMA stored the raw offset and the fault path "
+     "then looked up a page-cache entry at a non-page-aligned offset."),
     ("e47b155a", "kernel/src/ipc/posix_mq.rs",
      "mq_timedreceive/mq_timedsend take an ABSOLUTE CLOCK_REALTIME deadline (abs_timeout), "
      "but Rux read the value as RELATIVE — a caller passing an absolute deadline waited "
@@ -471,6 +499,28 @@ MARKS = {"done": "✅", "fixed": "🔧", "part": "🔶", "todo": "⬜"}
 # The mainline commit the reviews were done against (the branch base at
 # the time). Everything mainline touched since then needs a re-read.
 REVIEW_BASE = "47d96961"
+
+
+def status_for(rel):
+    """The map entry for a file: an exact key wins, else the best glob.
+
+    The exact key always wins so a specific file can be lifted out of a
+    directory-wide entry (e.g. kernel/src/sched/idle.rs out of
+    kernel/src/sched/*). Among globs the one with the longest literal
+    prefix wins, so a narrow pattern beats a broad one.
+    """
+    if rel in STATUS:
+        return STATUS[rel]
+    best = None
+    best_prefix = -1
+    for key, value in STATUS.items():
+        if "*" not in key:
+            continue
+        if fnmatch.fnmatchcase(rel, key):
+            prefix = len(key.split("*")[0])
+            if prefix > best_prefix:
+                best, best_prefix = value, prefix
+    return best if best is not None else ("todo", "")
 
 
 def changed_since_base():
@@ -507,7 +557,8 @@ def main():
     by_path = {rel: lines for rel, lines in files}
 
     # Drift detection: a file in the tree that the map does not know.
-    unknown = [rel for rel, _ in files if rel not in STATUS and "*" not in rel]
+    unknown = [rel for rel, _ in files if rel not in STATUS and status_for(rel)[0] == "todo"
+               and not any("*" in k and fnmatch.fnmatchcase(rel, k) for k in STATUS)]
     # A map entry that no longer exists.
     stale = [rel for rel in STATUS if "*" not in rel and rel not in by_path]
 
@@ -532,7 +583,7 @@ def main():
     counts = {"done": 0, "part": 0, "todo": 0, "fixed": 0}
     stale = 0
     for rel, _lines in files:
-        status = STATUS.get(rel, ("todo", ""))[0]
+        status = status_for(rel)[0]
         counts[status] = counts.get(status, 0) + 1
         if status in ("done", "fixed", "part") and rel in changed:
             stale += 1
@@ -540,7 +591,7 @@ def main():
     total_lines = sum(lines for _rel, lines in files)
     reviewed_lines = 0
     for rel, lines in files:
-        if STATUS.get(rel, ("todo", ""))[0] in ("done", "fixed"):
+        if status_for(rel)[0] in ("done", "fixed"):
             reviewed_lines += lines
 
     out = []
@@ -590,7 +641,7 @@ def main():
         out.append("| file | lines | status | note |")
         out.append("|---|---:|---|---|")
         for rel, lines in groups[d]:
-            status, note = STATUS.get(rel, ("todo", ""))
+            status, note = status_for(rel)
             mark = MARKS.get(status, "⬜")
             if status in ("done", "fixed", "part") and rel in changed:
                 mark += "🔁"
