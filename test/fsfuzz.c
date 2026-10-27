@@ -172,7 +172,9 @@ static void seq_perf(void) {
     static const long cpu_pool[] = {-2, -1, 0, 1, 2, 3, 64, 0x7fffffff};
     static const long pflags_pool[] = {0, 1, 2, 3, 4, 8, 9, 0x10, 0xffff, 0x7fffffffffffL};
 
-    unsigned char blob[128];
+    /* _Alignas: the head fields are written through u32/u64 pointers —
+     * riscv64 traps unaligned, which would fake a kernel capture. */
+    static _Alignas(8) unsigned char blob[128];
     unsigned long w;
     for (unsigned i = 0; i < sizeof(blob) / 8; i++) {
         w = rnd();
@@ -213,7 +215,6 @@ static void seq_perf(void) {
                        percpu ? -1L : 0L, percpu ? 0L : -1L, -1L,
                        (rnd() & 1) ? 0L : 8L /* [PERF_FLAG_FD_CLOEXEC] */);
     if (vfd >= 0) {
-        fds[nf++] = (int)vfd;
         perf_ok++;
         if ((perf_ok & 0xff) == 0)
             dprintf(saved_out, "FSFUZZ-PERF ok=%lu\n", perf_ok);
@@ -222,11 +223,37 @@ static void seq_perf(void) {
         dprintf(saved_out, "FSFUZZ-ODD perf errno=%d\n", errno);
     }
 
-    /* lifecycle churn: read() the sample-record drain, then close */
+    /* lifecycle churn: read() the sample-record drain, then close.
+     * PARK RULE (r263 lesson): this kernel's perf read() BLOCKS until
+     * a record arrives, and a TASK-scoped event's counter only
+     * advances while the target task RUNS — a same-task blocking
+     * read can never wake (the reader sleeps, its clock stands
+     * still). Only per-CPU events get tick pushes while we sleep,
+     * and even those get O_NONBLOCK first so an empty ring answers
+     * EAGAIN instead of parking (Linux's perf read() is a
+     * non-blocking counter read — divergence noted in the ledger).
+     * LEN RULE (r265/r266 lesson): unlike file/pipe reads (clamped
+     * by data availability), perf read() copies up to COUNT bytes of
+     * records — passing a fuzz length with a small stack buffer
+     * smashes the canary (Linux would too; the CONTRACT is ours to
+     * honor). Clamp every perf read to the buffer. */
     char rbuf[512];
+    size_t rl;
     for (int k = 0; k < nf; k++) {
-        (void)read(fds[k], rbuf, (size_t)PICK(len_pool));
+        (void)fcntl(fds[k], F_SETFL, O_NONBLOCK);
+        rl = (size_t)PICK(len_pool);
+        if (rl > sizeof(rbuf)) rl = sizeof(rbuf);
+        (void)read(fds[k], rbuf, rl);
         close(fds[k]);
+    }
+    if (vfd >= 0) {
+        if (percpu) { /* per-CPU events receive tick pushes while blocked */
+            (void)fcntl((int)vfd, F_SETFL, O_NONBLOCK);
+            rl = (size_t)PICK(len_pool);
+            if (rl > sizeof(rbuf)) rl = sizeof(rbuf);
+            (void)read((int)vfd, rbuf, rl);
+        }
+        close((int)vfd); /* task-scoped: opened + closed, never read */
     }
 }
 
