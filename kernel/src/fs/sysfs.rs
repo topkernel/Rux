@@ -58,7 +58,7 @@ use alloc::string::String;
 use alloc::sync::{Arc, Weak};
 use alloc::vec;
 use alloc::vec::Vec;
-use core::sync::atomic::{AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU64, Ordering};
 
 use crate::errno;
 use crate::fs::superblock::{FileSystemType, SuperBlock};
@@ -153,6 +153,16 @@ pub struct Attribute {
     pub show: Option<Box<dyn Fn() -> Vec<u8> + Send + Sync>>,
     /// write handler — returns 0 or negative errno
     pub store: Option<Box<dyn Fn(&[u8]) -> i32 + Send + Sync>>,
+    /// release hook — runs on file close AFTER that open read bytes
+    /// (read-once semantics: the reference pstore consumes a record
+    /// when its file is read; None for every ordinary attribute)
+    pub erase: Option<Box<dyn Fn() + Send + Sync>>,
+    /// Set by the erase hook family: a dead attribute answers ENOENT
+    /// on open even though the VFS dentry cache still holds a (stale)
+    /// positive entry for it — pstore's consumed record must not be
+    /// openable twice. Directory listings already dropped it
+    /// (remove_attr), so the only stale path is the cached dentry.
+    pub dead: AtomicBool,
     /// cached content length (updated on open; stat reports 4096 like Linux)
     pub cached_size: AtomicU64,
 }
@@ -252,9 +262,39 @@ impl KObject {
             mode,
             show,
             store,
+            erase: None,
+            dead: AtomicBool::new(false),
             cached_size: AtomicU64::new(0),
         });
         self.attributes.lock().insert(String::from(name), attr);
+    }
+
+    /// Register an attribute with a release hook (`erase`): it runs on
+    /// file close after that open read bytes. pstore's read-once
+    /// contract — the only in-tree user so far.
+    pub fn set_attr_with_erase(
+        &self,
+        name: &str,
+        mode: u32,
+        show: Box<dyn Fn() -> Vec<u8> + Send + Sync>,
+        erase: Box<dyn Fn() + Send + Sync>,
+    ) {
+        let attr = Arc::new(Attribute {
+            ino: alloc_ino(),
+            mode,
+            show: Some(show),
+            store: None,
+            erase: Some(erase),
+            dead: AtomicBool::new(false),
+            cached_size: AtomicU64::new(0),
+        });
+        self.attributes.lock().insert(String::from(name), attr);
+    }
+
+    /// Remove (and drop) an attribute by name. Stale dentries simply
+    /// answer ENOENT on re-lookup (same contract as remove_child).
+    pub fn remove_attr(&self, name: &str) -> Option<Arc<Attribute>> {
+        self.attributes.lock().remove(name)
     }
 
     /// Look up an attribute by name.
@@ -1349,21 +1389,49 @@ fn build_tree() -> Arc<KObject> {
     mk_dir(&sys_fs, "cgroup", KType::Fs);
     let pstore_fs = mk_dir(&sys_fs, "pstore", KType::Fs);
 
-    // pstore-lite: when this boot found the previous boot's record
-    // in the reserved RAM region, publish it exactly like the
-    // reference's ramoops backends: one file named
-    // <type>-<backend>-<id> — console-ramoops-0 for the panic record,
-    // dmesg-ramoops-0 for the oops record (the reference's two
-    // flavors) — mode 0444 (pstore_mkfile's S_IFREG | 0444), one
-    // record deep: the next capture overwrites the region and the
-    // boot after that sees the new record. No record, no file (the
-    // reference's directory is empty after a clean boot).
-    if crate::dfx::pstore::has_record() {
-        attr_ro(
-            &pstore_fs,
-            crate::dfx::pstore::record_name(),
-            crate::dfx::pstore::read_record,
-        );
+    // pstore-lite: publish every record the previous boots left in the
+    // reserved RAM region, exactly like the reference's ramoops
+    // backends: files named <type>-<backend>-<id> — console-ramoops-N
+    // for panic records, dmesg-ramoops-N for oops records (the
+    // reference's two flavors) — mode 0444 (pstore_mkfile's
+    // S_IFREG | 0444), id 0 = the newest record of its flavor. The
+    // ring holds several crashes' evidence (N slots); each file is
+    // consumed by its first reader (the reference unlinks the record in
+    // pstore's release path — read once, then gone; the erase hook
+    // below implements it). No records, no files (the reference's
+    // directory is empty after a clean boot).
+    {
+        let mut console_id = 0usize;
+        let mut dmesg_id = 0usize;
+        for rec in crate::dfx::pstore::live_records() {
+            let id = if rec.kind == crate::dfx::pstore::KIND_DMESG {
+                let id = dmesg_id;
+                dmesg_id += 1;
+                id
+            } else {
+                let id = console_id;
+                console_id += 1;
+                id
+            };
+            let name = crate::dfx::pstore::record_name(rec.kind, id);
+            let slot = rec.slot;
+            let fname = name.clone();
+            let dir = pstore_fs.clone();
+            pstore_fs.set_attr_with_erase(
+                &name,
+                0o444,
+                Box::new(move || crate::dfx::pstore::read_slot(slot)),
+                Box::new(move || {
+                    crate::dfx::pstore::consume_slot(slot);
+                    if let Some(attr) = dir.remove_attr(&fname) {
+                        // Dead beats the stale cached dentry: an open
+                        // through it answers ENOENT (the reference's
+                        // unlink observable).
+                        attr.dead.store(true, Ordering::Release);
+                    }
+                }),
+            );
+        }
     }
 
     mk_dir(&root, "firmware", KType::Firmware);
@@ -1926,12 +1994,21 @@ unsafe fn sysfs_open(inode: &Inode, file: &crate::fs::File) -> i32 {
         Some(a) => a,
         None => return 0,
     };
+    // Read-once family: a consumed attribute is gone even though the
+    // VFS dentry cache may still hand back this inode — the reference
+    // unlinks the file at erase, and ENOENT is the observable.
+    if attr.dead.load(Ordering::Acquire) {
+        return errno::Errno::NoSuchFileOrDirectory.as_neg_i32();
+    }
     let content = match attr.show.as_ref() {
         Some(show) => show(),
         None => Vec::new(),
     };
     attr.cached_size.store(content.len() as u64, Ordering::Relaxed);
-    let snapshot = Box::new(SysfsFileContent { data: content });
+    let snapshot = Box::new(SysfsFileContent {
+        data: content,
+        read_any: false,
+    });
     file.set_private_data(Box::into_raw(snapshot) as *mut u8);
     0
 }
@@ -1987,23 +2064,30 @@ pub static SYSFS_INODE_OPS: INodeOps = INodeOps {
 pub struct SysfsFileContent {
     /// generated content
     pub data: Vec<u8>,
+    /// did this open hand out bytes? The erase hook (read-once
+    /// semantics) fires on close only for an open that consumed
+    /// something — a bare open/stat must not destroy evidence.
+    pub read_any: bool,
 }
 
 /// read: serve from the open-time snapshot at the file position.
 fn sysfs_file_read(file: &crate::fs::File, buf: &mut [u8]) -> isize {
-    // SAFETY: private_data was installed by sysfs_open under this File.
+    // SAFETY: private_data was installed by sysfs_open under this File;
+    // the snapshot is owned by this open alone (read_any is written
+    // through the same exclusive provenance).
     let ptr = match unsafe { *file.private_data.get() } {
         Some(p) => p,
         None => return errno::Errno::BadFileNumber.as_neg_i32() as isize,
     };
     // SAFETY: pointer provenance is Box::into_raw in sysfs_open.
-    let content = unsafe { &*(ptr as *const SysfsFileContent) };
+    let content = unsafe { &mut *(ptr as *mut SysfsFileContent) };
     let offset = file.get_pos() as usize;
     let available = content.data.len().saturating_sub(offset);
     let to_read = buf.len().min(available);
     if to_read > 0 {
         buf[..to_read].copy_from_slice(&content.data[offset..offset + to_read]);
         file.set_pos((offset + to_read) as u64);
+        content.read_any = true;
         to_read as isize
     } else {
         0
@@ -2062,13 +2146,33 @@ fn sysfs_file_lseek(file: &crate::fs::File, offset: isize, whence: i32) -> isize
     new_offset
 }
 
-/// close: free the content snapshot.
+/// close: free the content snapshot, then run the release hook when
+/// that open consumed bytes (read-once semantics — the reference
+/// pstore's release path consumes the record; ordinary attributes have
+/// no hook).
 fn sysfs_file_close(file: &crate::fs::File) -> i32 {
     // SAFETY: see sysfs_file_read; null-out first to close the race window.
-    let ptr = unsafe { (*file.private_data.get()).take() };
-    if let Some(ptr) = ptr {
-        // SAFETY: provenance is Box::into_raw in sysfs_open.
-        drop(unsafe { Box::from_raw(ptr as *mut SysfsFileContent) });
+    let ptr = match unsafe { (*file.private_data.get()).take() } {
+        Some(p) => p,
+        None => return 0,
+    };
+    // SAFETY: provenance is Box::into_raw in sysfs_open.
+    let snapshot = unsafe { Box::from_raw(ptr as *mut SysfsFileContent) };
+    let read_any = snapshot.read_any;
+    let attr = unsafe { (*file.inode.get()).clone() }.and_then(|inode| {
+        // SAFETY: inode provenance is the sysfs iget path.
+        unsafe { entry_of(&inode) }.and_then(|e| e.attr.as_ref().cloned())
+    });
+    drop(snapshot);
+    if read_any {
+        if let Some(attr) = attr {
+            if let Some(hook) = attr.erase.as_ref() {
+                // The hook may drop the attribute from its kobject
+                // (pstore unlinks the record file); the local Arc
+                // keeps the closure alive through the call.
+                hook();
+            }
+        }
     }
     0
 }
