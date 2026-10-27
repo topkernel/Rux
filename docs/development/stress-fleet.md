@@ -1092,3 +1092,18 @@ resource discipline; ramp gated on a 10 min hold + floor check.
 - OPEN: the fixed fsfuzz member still reaches a deep park (~255 lines,
   ~1 beat in, past all prior points); member-argv repro with gdbstub
   (fsfuzz-repro3) running for a last_syscall read on the frozen guest.
+
+### RETRACTION NOTE (session 10, standing): historical fsfuzz rounds carry NO coverage evidence
+
+Every fsfuzz round classified clean/WARN before 2026-10-27 (both fleet
+homes, v4-era through v16-era kernels) was a machine parked ~5 s into
+the round: the deterministic seed-7 stream closed fd 0, let
+epoll_create1 reuse fd 0, closed fd 1 (blinding stdout), and blocked
+in epoll_pwait on the valid-but-empty epoll with an unbounded timeout
+draw. The 7.5k "active" lines per round were wwcensus heartbeats over
+the parked boot. Do not cite those rounds as evidence that the fuzz
+surface was exercised; the first actual coverage from this member
+begins with the saved-fd/clamped-timeout probe (test/fsfuzz.c, this
+session). Probe-design rule recorded: fuzz fd pools must never contain
+the marker-print channel's fd (the F_DUPFD-from-900 escape hatch), and
+blocking-wait syscalls in a raw pool need bounded timeout draws.
