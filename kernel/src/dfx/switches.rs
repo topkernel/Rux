@@ -80,6 +80,7 @@ macro_rules! dfx_switch_table {
             WwCensus => "wwcensus",
             TxnHang => "txnhunt",
             TreeHunt => "treehunt",
+            SfdDbg => "sfddbg",
             Ams46 => "ams46",
             VmaProbe => "vmap",
         }
@@ -327,6 +328,12 @@ pub enum DfxSwitch {
     /// "unlinked snapshot" family root-cause hunt (sc304 signal-Arc
     /// Oops walked such a chain). Purely diagnostic; OFF by default.
     TreeHunt,
+    /// dfx=sfddbg: the SFDDBG signalfd probes — every signal delivered
+    /// to pid 1 traced through the send path (disposition/block state/
+    /// pending-after) plus the signalfd-registry notify hook. Launcher
+    /// bring-up instrument; ordinary boots must keep a clean serial.
+    /// OFF by default.
+    SfdDbg,
     /// dfx=ams46 (leg-30B): the Gate-1 arsenal — full lifecycle trace of
     /// IAbilityManager::StartUser (code 46, interface token
     /// "ohos.aafwk.AbilityManager") binder transactions: enqueue + route
@@ -349,7 +356,7 @@ pub enum DfxSwitch {
     VmaProbe,
 }
 
-const SWITCH_COUNT: usize = 38;
+const SWITCH_COUNT: usize = 39;
 
 static SWITCHES: [AtomicBool; SWITCH_COUNT] = [const { AtomicBool::new(false) }; SWITCH_COUNT];
 
@@ -422,8 +429,9 @@ impl DfxSwitch {
             DfxSwitch::WwCensus => 33,
             DfxSwitch::TxnHang => 34,
             DfxSwitch::TreeHunt => 35,
-            DfxSwitch::Ams46 => 36,
-            DfxSwitch::VmaProbe => 37,
+            DfxSwitch::SfdDbg => 36,
+            DfxSwitch::Ams46 => 37,
+            DfxSwitch::VmaProbe => 38,
         }
     }
 

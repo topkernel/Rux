@@ -1,0 +1,11 @@
+serial log: run/pstore-x86-serial-r5.log
+--- verdicts ---
+  PASS: boot1 crashes (sysrq c)
+  PASS: the panic printed
+  PASS: panic=3 rebooted (boots >= 2)
+  PASS: the pstore announce line names the console flavor
+  PASS: the record carries the panic banner
+  PASS: the record carries the Call Trace header
+  PASS: the record carries the boot-1 sysrq identity
+  PASS: the record ends cleanly (boot2 idle past the dump)
+R5_RC=0

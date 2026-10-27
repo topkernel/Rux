@@ -2094,6 +2094,15 @@ pub fn sys_msync(args: [u64; 6]) -> i64 {
         return mmap_error::EINVAL;
     }
 
+    // Linux's mm/msync.c: "The task's address space is not a fixed
+    // size, so the 'addr + len' overflow check is needed." Without it
+    // the page-aligned length below wraps to 0 for a near-max length
+    // and the call reports success without syncing anything — Linux
+    // returns EINVAL for a range that wraps.
+    if addr.checked_add(length).is_none() {
+        return mmap_error::EINVAL;
+    }
+
     // Above the user address space: EINVAL, not ENOMEM (Linux msync
     // bounds-checks against TASK_SIZE first — LTP msync03 case 3 passes
     // RLIMIT_DATA's max, which lies far above user space).

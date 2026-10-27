@@ -304,7 +304,10 @@ tier2_check() {
         --timeout 1200 > "$ROOT/run/perf-gate-$pbtag.log" 2>&1
     local rc=$?
     local res
-    res=$(ls -t "$ROOT/work"/pbench-results* 2>/dev/null | head -1)
+    # pbench_boot.py writes the PBENCH rows into the boot's serial log
+    # (work/pbench-<tag>-serial.log); there is no separate results file,
+    # so globbing pbench-results* always missed them (false FAIL).
+    res="$ROOT/work/pbench-${pbtag}-serial.log"
     if [ $rc -ne 0 ] || [ -z "$res" ]; then
         verdict FAIL "pbench run" "rc=$rc" "PBENCH DONE rc=0 required"
         return
@@ -324,7 +327,9 @@ res, basefile = sys.argv[1], (sys.argv[2] if len(sys.argv) > 2 else "")
 ANCHOR = {
     "p1_null": 4.57, "p1_clock": 4.95, "p2_ctxsw": 15.4,
     "p3b_cow": 24.6, "p6_write_fsync": 18124.666,
-    "p6_mkdir_rmdir": 83191.968, "p6_unlink": 32815.925,
+    # key spelling must equal pbench's report_ticks() name (p6_mkdrmdir);
+    # the b6 gate run silently skipped this row on the mismatch
+    "p6_mkdrmdir": 83191.968, "p6_unlink": 32815.925,
     "p6_append": 500.378,
 }
 if basefile:
