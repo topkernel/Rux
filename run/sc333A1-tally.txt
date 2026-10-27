@@ -1,0 +1,13 @@
+grep: oh31a-sc333A1-serial.log: 匹配到二进制文件
+grep: oh31a-sc333A1-serial.log: 匹配到二进制文件
+grep: oh31a-sc333A1-serial.log: 匹配到二进制文件
+grep: oh31a-sc333A1-serial.log: 匹配到二进制文件
+grep: oh31a-sc333A1-serial.log: 匹配到二进制文件
+log=oh31a-sc333A1-serial.log lines=432229
+LC=304 (abilityName: DataExtAbility) ABMS7918=2 Launcher_Default=423 spawn_req=77 MainAbility=170/2 launcher.ready=0 rs.ready=4 OnForeground=0 stopall=107
+wedges: TXN-HANG=442 STRANDED=66(max=9213ms) RUN-LEAK=1701(max=18x) USEGV=147 rsfault_rip=0
+census: TERM=8 REFUSED=28  grid_hits=0 panics=0
+fsw1: first=t=210s final=pb=1.607 ps=18.53 pc=1981 ph=0 pm=607 es=435
+binder-drain: parked=508 top-receivers:     186 drained to proc 336     153 drained to proc 456      71 drained to proc 552      23 drained to proc 799      23 drained to proc 753 
+txn-pool census:
+txn-pool lines=0

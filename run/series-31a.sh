@@ -34,7 +34,7 @@ for TAG in $DRAWS; do
     echo "[series] $(date +%H:%M:%S) waiting for calm before draw $TAG" >> series-31a-tally.txt
     wait_calm
     echo "[series] $(date +%H:%M:%S) calm; starting draw $TAG (qemu=$(pgrep -c qemu-system))" >> series-31a-tally.txt
-    HDCPORT="$PORT" SECS=2700 ./oh-boot-31a.sh "$TAG" > "oh31a-$TAG-driver.log" 2>&1
+    HDCPORT="$PORT" SECS=2700 ./oh-boot-31a.sh "$TAG" "$RUN/bzImage-31A-series" > "oh31a-$TAG-driver.log" 2>&1
     echo "[series] $(date +%H:%M:%S) draw $TAG finished; tally:" >> series-31a-tally.txt
     ./tally-31a.sh "oh31a-$TAG-serial.log" >> series-31a-tally.txt 2>&1
 done

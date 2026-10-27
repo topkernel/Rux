@@ -1,0 +1,138 @@
+LEG-33A (OH sprint, kernel-side lane; worktree /home/william/rux-agents/oh-kernel,
+branch feature/oh-kernel, opened from 31A's dirty worktree — see salvage
+below) — mission: (1) salvage 31A's in-flight binder work; (2) full-chain
+draw series on the doubly-fixed stack (main kernel + guardread image):
+where does the chain stop NOW, does it match the reader-exhaustion
+prediction; (3) kernel-side support queue for OH-B's reader-exhaustion
+findings; (4) leg-30A handoffs (snapshot race watch; FSW1 emission-delay
+— already measured and closed by 31A); (5) launcher.ready -> OnForeground
+-> screenshot milestone, report immediately.
+
+SALVAGE OF LEG-31A's IN-FLIGHT WORK (verdict: FINISHED, committed):
+- Dirty state at leg start: kernel/src/ipc/binder.rs (12+/5-) +
+  run/series-31a.sh (pin series kernel) + untracked bzImage-31A-{series,
+  spawnfix}, build/maketest logs, SC-31A.txt, series-31a-tally.txt.
+- The binder edit: remove the `!got_transaction` gate on the
+  BR_SPAWN_LOOPER emission so the pool-growth check runs at the read
+  exit after transaction delivery (Linux v6.1 `done:` semantics), not
+  only on idle returns. Inner conditions unchanged (requested_threads==0,
+  no waiting thread, pool < max_threads, buffer space, sc164 child
+  variant). This is the kernel-side answer to OH-B's named instrument
+  "Linux binder's spawn-more-threads semantics comparison": our pool
+  could never grow under nested-call load because every reader re-parks
+  as a client right after delivery and idle reads never happen — the
+  foundation reader-exhaustion mechanism (sc329B: all OS_IPC readers
+  parked as clients, proc todo grows, no pool growth).
+- 31A had already: built both arches of the spawnfix tree (rc=0) and run
+  make test on it (ALL TESTS PASSED, run/maketest-leg31A-spawnfix.log).
+  bzImage-31A-series verified by timestamps+cmp to be the CLEAN main
+  kernel (12:36 gate build, copied 13:20 before the spawnfix build
+  13:21; 8884 differing bytes vs spawnfix = the one-function change).
+- Committed as 44ba45e2 (binder spawnfix) on feature/oh-kernel.
+
+KERNEL-SIDE SUPPORT QUEUE (mission item 3):
+- TXN-POOL reader-pool census added to the txnhunt audit (52535c72):
+  per hung proc, one line per 5 s burst — th (threads), loop, rd
+  (readers parked in binder_thread_read), wr (of those, eligible for
+  proc work), req/started/max, proc todo depth, per-child pools
+  (sc164 tgid:th/rd/wr). Exhaustion signature: th flat + wr 0 + rd>0 +
+  todo climbing. Spawn-fix signature: th climbing, wr recovering. Rides
+  dfx=txnhunt, no new switch, POD-only under WORLD, prints after guard
+  release; bounded 4 lines/burst; zero cost when off.
+- Not taken (their lane, not named kernel-side): incumbent kernel-stack
+  capture at strand time (32B's next-leg instrument #2), pid-495
+  memfd-lib near-null deref family (#3, image-side lib).
+
+GATES ON THE FINAL TREE (44ba45e2 + 52535c72):
+- Dual-arch: PLATFORM=x86_64 rc=0 (run/build-leg33A-census-x86.log);
+  rm build/.config && make build (riscv64) rc=0 (build-leg33A-census-rv.log).
+- riscv64 scripted regression boot (serialclean-boot.py, smp2 1G,
+  dfx=txnhunt,wwcensus fsw=1): rc=0, zero panics, /proc verified
+  (run/rv-regression-leg33A.log).
+- make test: ALL TESTS PASSED, 1109 (run/maketest-leg33A.log).
+- Perf tiers: pending host calm (see below).
+
+DRAW SERIES (sc333A*, 45 min each, dfx=txnhunt,wwcensus fsw=1 baked;
+oh-img-p read-only -snapshot,file.locking=off; fresh private scgold
+userdata per draw; KVM SMP2 4G; hdc port 1223x):
+
+sc333A1 — CLEAN CONTROL (bzImage-31A-series = main 0cd29a75 state,
+31A's 12:36 gate build; identity verified by timestamps + cmp vs the
+13:21 spawnfix build):
+  LC=304 (launcher 69 / systemui 54 / telephony 32 / settingsdata 6),
+  MainAbility mentions 170, AMS START x2 (first at serial line ~43k),
+  launcher.ready=0, OnForeground=0, stopall=107.
+  binder-drain: parked=508, top receivers appspawn 186 + 456-class 153
+  + 552-class 71 — OH-B's 1e3eb015 prediction draws exactly (drained
+  to the node-owner proc appspawn; children never loop).
+  TXN-HANG=442 (into foundation-799 121), STRANDED=66 max 9.2 s,
+  RUN-LEAK=1701 max 18x, USEGV=147 (pid-1096-class OS_IPC memfd
+  family; rsfault_rip=0 — guardread holding), panics 0, census
+  TERM=8 REFUSED=28 in band, grid 0.
+  FSW1: pb=1.607 (exactly one whole-queue drain), ph=0, pm=607.
+  Late tail: APPTXN-FAIL why=no-ctxmgr from 'm.ohos.launcher' pid 336
+  (post-StopAllServices teardown noise — symptom, not a wall).
+
+sc333A2 — SPAWNFIX + CENSUS (bzImage-33A-draw2 = 44ba45e2 + 52535c72,
+dual-arch + make test green before the draw):
+  LC=336 (systemui navigationbar ServiceExtAbility first), AMS START x2
+  at serial line ~2.2k (~20x EARLIER than the control), LC accumulation
+  STOPS at min ~23 (quiet, like 32B's post-fix sc328B shape).
+  launcher.ready=0, OnForeground=0, stopall=121, rs.ready=16.
+  POOLS GROW (the fix works): census 598 th 6->9, 555 th 12-15
+  (started up to 10/16), 469 th 3-4; started counters pulse.
+  NO READER-EXHAUSTION SIGNATURE EVER DRAWS: todo=0 and wr>0 at every
+  burst of every census proc (1328 TXN-POOL lines, 6 procs).
+  The residual wall decoded end-to-end (txn pair 9351/9329, both
+  exec clocks 1325 s at the end): accesstoken_ser tid 469 --9351-->
+  foundation tid 619; 619's nested call 9329 routed by the 5.10
+  from-walk onto 469's own todo; 469 PICKED it (re-entrancy path
+  works) and parked handling it on a further nested call. A stable
+  cross-proc synchronous cycle — pool growth cannot and should not
+  break it; outermost edge is image-side handler logic (OH-B lane).
+  TXN-HANG=3304 (the audit reprinting the persistent cycle txns every
+  5 s), STRANDED=82 max 101 s (host loaded by the stress fleet
+  mid-draw), RUN-LEAK=2440 max 25x, USEGV=115 (same memfd family),
+  panics 0, census TERM=8 REFUSED=28 in band, grid 0.
+  FSW1: pb=1.371, ph=0, pm=371.
+
+SERIES VERDICT (mission item 2):
+- Where the chain stops NOW: launcher MainAbility loading, both
+  kernels. launcher.ready never sets; no screenshot milestone.
+- Clean kernel: the LC wall via drain-stranding (matches OH-B's
+  1e3eb015 prediction exactly).
+- Spawnfix kernel: LC wall much weaker and passed faster; pools grow;
+  readers stay eligible; the stop is the cross-proc sync cycle.
+- Reader-exhaustion prediction: the MECHANISM it posits (pool cannot
+  grow under nested-call load) was real kernel-side and is fixed
+  (44ba45e2, measured growth); but literal exhaustion (all readers
+  parked as clients + todo climbing) never draws — the residual wall
+  is the cycle itself, image-side.
+
+LEG-30A HANDOFF ITEMS:
+(a) snapshot race — DID NOT DRAW: zero ext4 errors/panics on both
+    draws; sa>0 syncs: one sa=1 + one sa=2 (1-2 records, no error
+    coincidence). Verdict: not drawing; drain-epoch design stays
+    shelved per SC-30A.
+(b) FSW1 emission delay — measured and closed by 31A (SC-31A.txt):
+    es= is printk's CONSOLE_EMIT_SKIPPED; first line NOT delayed under
+    flood (t=90s both sides); at most one window skipped per boot; no
+    action. (This series: first=t=210s/150s under heavier floods,
+    es=435/495 — same bounded class.)
+
+PERF TIERS: standard gates green (dual-arch, rv regression boot,
+make test 1109). Tier-1/2 BLOCKED at close-out by host load (stress
+fleet + foreign OH draws, 12+ QEMUs; perf-gate.sh host-capacity
+refusal). Change-class note for the merge reviewer: the added code
+lives entirely inside binder_thread_read's exit path and the txnhunt
+audit; no standard-boot workload (minimal rootfs, pbench P1-P7)
+exercises binder, so Tier-1/2 would measure no-op paths — the
+binder-domain evidence is the OH draws themselves (chain faster,
+census in band, zero panics). Tiers to be run at merge time on a
+calm host.
+
+MILESTONE (mission item 5): launcher.ready never SET in either draw —
+OnForeground/screenshot steps not reached; nothing to report.
+
+COORDINATION: CC-COLLAB.txt note appended 19:20 for OH-B's sc331B
+(spawnfix cherry-pick offer 44ba45e2, census semantics, cycle decode).

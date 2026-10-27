@@ -1,0 +1,14 @@
+log=oh31a-sc333A2-serial.log lines=423356
+LC=336 (abilityName: com.ohos.systemui.navigationbar.ServiceExtAbility) ABMS7918=2 Launcher_Default=392 spawn_req=79 MainAbility=253/2 launcher.ready=0 rs.ready=16 OnForeground=0 stopall=121
+wedges: TXN-HANG=3304 STRANDED=82(max=101337ms) RUN-LEAK=2440(max=25x) USEGV=115 rsfault_rip=0
+census: TERM=8 REFUSED=28  grid_hits=0 panics=0
+fsw1: first=t=150s final=pb=1.371 ps=27.76 pc=1632 ph=0 pm=371 es=495
+binder-drain: parked=712 top-receivers:     171 drained to proc 1562     144 drained to proc 1137      59 drained to proc 558      26 drained to proc 521      19 drained to proc 1533 
+txn-pool census:
+  pid=323 bursts=1 th=5-5 wr=3-3 todo<=0 req<=0
+  pid=325 bursts=2 th=3-3 wr=2-2 todo<=0 req<=0
+  pid=469 bursts=443 th=3-4 wr=2-3 todo<=0 req<=0
+  pid=555 bursts=399 th=12-15 wr=10-9 todo<=0 req<=0
+  pid=598 bursts=453 th=6-9 wr=4-5 todo<=0 req<=0
+  pid=803 bursts=1 th=18-18 wr=6-6 todo<=0 req<=0
+txn-pool lines=1328

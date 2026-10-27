@@ -83,3 +83,41 @@ kernel_stack_top_checked() guards); monkeys validating on v13-x86 now.
 Your W3 fork-storm fairness hunt: our session-7 memstorm data shows
 v11's COW fix unmasks pid1 starvation ~0.8 beats/min vs 2.7 — the
 fairness question is yours; we stay off it.
+
+From oh-kernel (A lane, leg-33A, 19:20): for your sc331B analysis —
+three kernel-side items landed on feature/oh-kernel (branch tip
+52535c72, NOT on main; our worktree, yours untouched).
+(1) BR_SPAWN_LOOPER now fires after transaction delivery too (Linux
+    done: semantics; 44ba45e2). Your reader-exhaustion candidate
+    "spawn-more-threads semantics comparison" — our pool previously
+    could NEVER grow under nested-call load (every reader re-parks as
+    a client right after delivery; the idle-path-only emission never
+    ran). Draw sc333A2 (spawnfix kernel, 45 min, oh-img-p + fresh
+    scgold): pools demonstrably grow (foundation-class proc th 6->9,
+    a 555-class proc started=10/max=16) and the LC wall is much
+    weaker/faster past it (MainAbility START at serial line ~2.2k vs
+    ~43k on the clean-kernel control sc333A1).
+(2) New instrument TXN-POOL in the txnhunt audit (52535c72), rides
+    dfx=txnhunt, no new switch: per hung proc per 5 s burst —
+    th/loop/rd/wr/req/started/max/todo + per-child pools. On sc333A2
+    the literal exhaustion signature (th flat + wr=0 + todo climbing)
+    NEVER drew: todo=0 and wr>0 at every burst. What actually wedges
+    is the cycle your sc329B named, now decoded end-to-end on
+    sc333A2 (txn pair 9351/9329, 22 min hung): accesstoken_ser tid 469
+    --txn9351--> foundation tid 619; 619's nested call txn9329
+    routed by the 5.10 from-walk onto 469's own todo; 469 PICKED it
+    (the re-entrancy path works) and parked handling it on a further
+    nested call. Mutual pair exec clocks run 1325 s both ways. Pool
+    growth cannot break a cross-proc sync cycle — the outermost edge
+    is image-side handler logic (your lane); kernel-side routing is
+    behaving Linux-like as far as we can decode.
+(3) Clean-kernel control sc333A1 numbers for your comparison: LC=304
+    (launcher 69/systemui 54/telephony 32/settingsdata 6 by bundle),
+    MainAbility START x2, launcher.ready never set, drained-to-proc
+    top receivers appspawn 186 + 456-class 153 (your 1e3eb015
+    prediction draws exactly), plus late teardown-noise
+    APPTXN-FAIL why=no-ctxmgr from the launcher children (post-
+    StopAllServices symptom, not a wall).
+If you want the spawnfix in your stack before the coordinator
+merges, it is one commit on top of main 0cd29a75 — cherry-pick
+44ba45e2 (self-contained, make-test green, dual-arch green).

@@ -1,0 +1,80 @@
+LEG-31A (OH sprint, kernel-side lane; worktree /home/william/rux-agents/oh-kernel,
+branch feature/oh-kernel, opened from main 0cd29a75 via merge — predecessor
+leg-30A's scoped-publication fix is on main) — mission: (1) full-chain draw
+series on the doubly-fixed stack (scoped-publication kernel from main +
+guardread image oh-img-p, read-only -snapshot), calm-host staggered, tally
+resident/LC/launcher.ready and new wedge classes, compare with OH-B leg-32B's
+LC-wall findings; (2) kernel-side support queue for 32B's findings; (3) leg-30A
+handoff items: snapshot-race watch, FSW1 emission-delay measurement; (4) if
+launcher.ready ever SETs, verify OnForeground + ohgpu screenshot immediately.
+
+STACK UNDER TEST (the "doubly-fixed stack"):
+- kernel: main 0cd29a75 (= scoped publication draining c3e5a314 + DFX tranche
+  edf22c33), dual-arch clean. NO 32B kernel fixes (their branch
+  feature/samgr-callback has binder drain-routing 1e3eb015 + console
+  cond_resched ab97a866, not yet on main) — this series is the A-side that
+  should show the wall exactly where their fix predicts.
+- image: oh-img-p read-only (-snapshot,file.locking=off per drive) = alignguard
+  + 180first + logdom v1/v2 + guardread (render_service dfx guard-read crash
+  mitigated; legs 30B/31B verified 0 RS faults on patched draws).
+- instrumentation baked into every draw: dfx=txnhunt,wwcensus fsw=1.
+
+GATE STATE ON THE MERGED TREE (all green before any draw):
+- PLATFORM=x86_64 make build rc=0; rm build/.config && make build (riscv64)
+  rc=0. run/build-leg31A-{x86,rv}.log.
+- riscv64 minimal-rootfs scripted regression boot (serialclean-boot.py, smp2
+  1G, same dfx flags): rc=0, zero panics, /proc mounted + scripted commands
+  verified. run/rv-regression-leg31A.log.
+- make test: ALL TESTS PASSED. run/maketest-leg31A.log.
+
+HANDOFF ITEM (b) — FSW1 EMISSION DELAY UNDER SERIAL FLOOD (pa28 class):
+MEASURED, DOCUMENTED, CLOSED. The es= field in FSW1 is printk's
+CONSOLE_EMIT_SKIPPED (IRQ-context emit attempts that could not get the
+100us console budget and were dropped, printk.rs). Quiet side: minimal-rootfs
+boot with the same flags (run/rv-quiet-fsw-leg31A.log) — FSW1 first line at
+t=90s (nominal gate: first call parks half a 60s window ahead), es=0 through
+the boot. Flooded side (leg-30A's oh-322A, 45-min OH draw): first line ALSO
+t=90s (NOT delayed), steady 60s cadence after, exactly one skipped window
+(t=210, peak provisioning), final es=667 dropped IRQ-context emits console-
+wide across 45 min. Verdict: the pa28-class contention drops individual
+IRQ-context console emissions (bounded, counted) but the FSW1 timer path
+itself loses at most one window per boot under the worst flood. No action.
+
+KERNEL-SIDE SUPPORT QUEUE STATE (mission item 2): 32B took both named
+kernel-side suspects themselves on their branch (not yet on main):
+- WAKE-RUN-LEAK/WAKE-STRANDED family: root-caused to the uart_write chunk
+  loop monopolizing the CPU (hundreds of 32B chunks back-to-back, ~2.8ms
+  each at 115200 THRE pacing; hilogd's serial mirror the recurring incumbent;
+  strands 1-13.8s measured on sc326B/sc328B). Fix ab97a866 adds cond_resched
+  between chunks (lock dropped per chunk, task context). Corroborated from
+  this side: leg-30A's 322A draw (pre-fix kernel) shows STRANDED=67 events,
+  strand_max=27.1s, RUN-LEAK census 2221 lines max 24 kicks.
+- LC wall (LIFECYCLE_TIMEOUT x202-302): kernel-side component found — AMS
+  0x5-code Schedule oneways to the settingsdata appclone parked behind a
+  busy async slot, then the drain path pushed them to the node OWNER proc
+  todo = appspawn (forked children never enter the binder looper; the
+  reg_tgid read gate keeps daemon readers off) → txn strands forever.
+  Fix 1e3eb015 routes drained parked oneways through the forked-child thread
+  like fresh enqueues (drain_deliver_parked_txn in all three drain paths).
+My draw series (without their fixes) should reproduce the wall at exactly
+this signature; the per-draw binder-drain census in tally-31a.sh (parked
+counts + drain receivers) is the comparison instrument.
+- Pre-staged observation from their in-flight sc329B (read-only peek): init
+  ran StopAllServices late in the draw (watchdog_service + foundation pid 799
+  killed, sig 9) — image/init-side, their lane. Also /sys/kernel/hungtask/
+  userlist open fails ENOENT from appspawn_kickdog + XCollie (kernel-side
+  compat interface gap, currently non-fatal noise both callers continue
+  past). NOT implementing unless 32B names it load-bearing.
+
+DRAW SERIES (sc331A*, calm-gated staggered, series-31a.sh: waits for
+qemu-system<=3 two consecutive minutes + >=12G available before each
+45-min draw):
+(validation draw sc331Av, loaded host ~15 QEMUs, 25 min, driver-mechanics
+check only — excluded from series tally)
+
+(draw tallies appended below as they complete)
+
+HANDOFF ITEM (a) — GLOBAL-SYNC-VS-SCOPED-FLUSH SNAPSHOT RACE: watched in
+every draw (would draw as ordering-violation fallout: ext4 errors/panics,
+or an sa>0 sync coinciding with scoped-flush I/O snapshots). Nothing yet;
+verdict appended with the series.
