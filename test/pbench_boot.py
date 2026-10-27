@@ -44,9 +44,10 @@ def foreign_qemus():
         return -1
 
 
-def build_probe(out):
-    cmd = [MUSL_CC, "-static", "-O2", "-Wall", "-o", out,
-           os.path.join(HERE, "pbench.c")]
+def build_probe(out, src=None):
+    if src is None:
+        src = os.path.join(HERE, "pbench.c")
+    cmd = [MUSL_CC, "-static", "-O2", "-Wall", "-o", out, src]
     r = subprocess.run(cmd, capture_output=True, text=True)
     if r.returncode != 0:
         print("[build] compile failed: %s" % r.stderr)
@@ -55,13 +56,16 @@ def build_probe(out):
     return True
 
 
-def build_image(img, probe):
+def build_image(img, probe, arm=None):
     staging = os.path.join(WORK, "pbench_root")
     if os.path.exists(staging):
         shutil.rmtree(staging)
     os.makedirs(os.path.join(staging, "test"))
     shutil.copyfile(probe, os.path.join(staging, "test", "pbench"))
     os.chmod(os.path.join(staging, "test", "pbench"), 0o755)
+    if arm:
+        shutil.copyfile(arm, os.path.join(staging, "test", "arm"))
+        os.chmod(os.path.join(staging, "test", "arm"), 0o755)
     r = subprocess.run([MKFS, "-q", "-F", "-O", "^metadata_csum",
                         "-d", staging, img, "%dM" % SIZE_MB],
                        capture_output=True, text=True)
@@ -80,6 +84,11 @@ def main():
     ap.add_argument("--smp", type=int, default=2)
     ap.add_argument("--mem", default="2G")  # 1G panics: kernel-heap alloc
     # error (4MB layout, main.rs OOM path) during early boot
+    ap.add_argument("--arm-schedstat", action="store_true",
+                    help="A-side of the schedstat cost A-B: stage the "
+                         "pbench_arm wrapper and boot init=/test/arm "
+                         "(arms /proc/sys/kernel/sched_schedstats then "
+                         "execs the probe); the B side is the stock boot")
     args = ap.parse_args()
 
     os.makedirs(WORK, exist_ok=True)
@@ -90,14 +99,21 @@ def main():
     if not build_probe(probe):
         return 2
     img = os.path.join(WORK, "pbench-%s.img" % args.tag)
-    if not build_image(img, probe):
+    arm = None
+    init_path = "/test/pbench"
+    if args.arm_schedstat:
+        arm = os.path.join(WORK, "pbench_arm")
+        if not build_probe(arm, src=os.path.join(HERE, "pbench_arm.c")):
+            return 2
+        init_path = "/test/arm"
+    if not build_image(img, probe, arm):
         return 2
 
     serial = os.path.join(WORK, "pbench-%s-serial.log" % args.tag)
     if os.path.exists(serial):
         os.remove(serial)
 
-    append = "root=/dev/vda rw init=/test/pbench console=ttyS0"
+    append = "root=/dev/vda rw init=%s console=ttyS0" % init_path
     cmd = [QEMU, "-M", "q35", "-accel", args.accel, "-cpu", "max",
            "-m", args.mem, "-smp", str(args.smp),
            "-display", "none",

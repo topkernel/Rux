@@ -327,7 +327,9 @@ res, basefile = sys.argv[1], (sys.argv[2] if len(sys.argv) > 2 else "")
 ANCHOR = {
     "p1_null": 4.57, "p1_clock": 4.95, "p2_ctxsw": 15.4,
     "p3b_cow": 24.6, "p6_write_fsync": 18124.666,
-    "p6_mkdir_rmdir": 83191.968, "p6_unlink": 32815.925,
+    # key spelling must equal pbench's report_ticks() name (p6_mkdrmdir);
+    # the b6 gate run silently skipped this row on the mismatch
+    "p6_mkdrmdir": 83191.968, "p6_unlink": 32815.925,
     "p6_append": 500.378,
 }
 if basefile:

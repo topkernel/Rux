@@ -1,0 +1,37 @@
+=== last dump t=120s ===
+ticks: c0=1009/8514/2417 c1=1001/8100/2878
+cpu0: user 8.5% kernel 71.3% idle 20.2% (n=11940)
+cpu1: user 8.4% kernel 67.6% idle 24.0% (n=11979)
+
+=== syscall table (top 40 by total wall) ===
+nr     name                    n     avg_us       max_ms       tot_ms
+35     ?                    5640     143741        10007       810704
+11     ?                   86911         84           44         7371
+25     ?                    8357        106            5          893
+192    ?                     907         86            0           78
+
+=== kernel-rip pages (top 20) ===
+0xffffffff8060b000 n=634      3% 
+
+=== IF=0 zones (latest dump) ===
+cpu0: tot=20569ms rest=17112ms hard=2525ms soft=843ms uart=88ms nseg=47561309/184344/23667/4862 max=9ms/3ms/6ms/2ms heal=11172n/399ms miss=0n OPEN zone=soft age=0ms
+cpu1: tot=18965ms rest=16601ms hard=1149ms soft=1026ms uart=187ms nseg=44979513/155805/18868/9789 max=9ms/3ms/3ms/1ms heal=10246n/403ms miss=0n
+
+=== REST call sites (latest dump, top 20 by tot) ===
+file:line                                               n     tot_ms     avg_ns     max_ms
+kernel/src/mm/small_alloc.rs:432                 38798883       9894        254          3
+kernel/src/mm/small_alloc.rs:266                 38937778       8047        206          2
+kernel/src/sched/sched.rs:2152                     420733       3568       8482          9
+kernel/src/fs/file.rs:909                         5028194       2543        505          1
+kernel/src/mm/deferred_free.rs:126                4472318       2224        497          5
+kernel/src/ipc/binder.rs:1341                      262433        810       3087          3
+kernel/src/process/wait.rs:161                     679605        791       1165          4
+kernel/src/syscall/misc.rs:190                     292324        630       2155          2
+kernel/src/mm/small_alloc.rs:285                   321644        504       1569          0
+kernel/src/timer.rs:217                            215761        493       2289          0
+kernel/src/process/wait.rs:319                     196969        380       1934          9
+kernel/src/timer.rs:361                            173503        376       2168          0
+kernel/src/fs/bio.rs:1415                           78412        127       1626          1
+kernel/src/syscall/memory.rs:1612                   16170        101       6296          0
+site-table sum: 30488 ms across 14 sites
+overflow row: n=117438 tot=265ms avg=2260ns max=5ms (table-full + missed-edge opens)

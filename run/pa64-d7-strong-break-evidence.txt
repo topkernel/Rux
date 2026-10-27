@@ -1,0 +1,38 @@
+D-7 (d8d23064, typed per-CPU magazine storage) breaks ALL release-profile
+boots of the branch. Evidence 2026-10-26, lane perf-audit.
+
+Reproductions (pbench_boot channel, TCG MTTCG smp2/2G, minimal rootfs):
+  pa64pb2B / pa64pb3B  : 235bd6a7 strong  (LTO/CGU1/strip)  PANIC t=3s
+  pa65d7               : d8d23064 strong  (LTO/CGU1/strip)  PANIC t=3s
+  pa65d7w2             : d8d23064 weak   (lto=false cgu=16) PANIC t=3s
+Controls (same channel, same day):
+  pa64pb4A             : 94c670da strong (pure main)         DONE rc=0
+  pa65m1               : b7276078 strong (pure main + route-4/D-6) DONE rc=0 full board
+  pa65d7p              : 2a54e42c strong (D-7 parent, full branch stack) DONE rc=0 full board
+  pa63 chain debug boots of 235bd6a7 (pa63main 16:51, pa63fswm/fswc): all clean.
+  make test 1110/1110 (pa62-maketest3.log) ran debug only.
+
+Panic signature (identical every repro, incl. the weak build):
+  ALLOCTHROW size=48 align=1  at main.rs:277 (alloc error handler)
+  heap: size=1015808K free=0K blocks[o0..]=0 x8
+  c64 a=15934402 f=0 made=252928 recl=0 locks=2
+  rawframes: 0xffffffff8099b0000-class (kernel-image .bss tail, NOT the
+  0x7e000000 slab region the banner announced)
+  Last console line: "mm: slab allocator 4MB [ok]"; dies before
+  "boot: multiboot cmdline + e820 parsed" (cmdline::init_from window).
+
+Adjudication: a=15.9M real c64 allocations by t=3s under TCG is
+time-infeasible (~8-16M alloc/s sustained under emulation); the count is
+IDENTICAL across LTO and non-LTO release builds; and the class's carved
+"pages" read as kernel-image addresses. The small_alloc static state
+(heap start / class cache) is garbage at the FIRST c64 miss in any
+opt-level>=1 build of d8d23064; debug builds boot and pass the suite.
+Exact codegen mechanism (which static read diverges under opt) is NOT
+rooted here - objdump/addr2line follow-up on the pa65d7w2 ELF
+(run/pa64-d7weak-bzImage, non-LTO, symbols per CGU).
+
+Blast radius: every branch-strong kernel since d8d23064 (Oct 26 07:23)
+is unbootable - pa63 pair B-arm rc=1 x2 (16:59), pa64 B-arm rc=1 x2.
+Main is UNAFFECTED (D-7 never harvested; pa65m1 boots).
+Impact on lane program: blocked the route-4 fs-row strong A/B (the B
+arm of pa64) and any Tier-2 branch measurement.
