@@ -150,5 +150,26 @@ pub fn test_fileops_caps() {
         Expect { read: true, write: true, lseek: true, close: true, poll: false, read_at: true },
     );
 
+    // Generic VFS tables (file.rs, D-6 follow-on slice 2). The
+    // read-write regular-file table and the read-only twin differ ONLY
+    // in write; the directory table carries read (the Eisdir stub) and
+    // lseek/close but no write and no read_at (getdents64 is the
+    // directory read path).
+    check(
+        "reg file caps",
+        &crate::fs::file::REG_FILE_OPS,
+        Expect { read: true, write: true, lseek: true, close: true, poll: false, read_at: false },
+    );
+    check(
+        "reg ro-file caps",
+        &crate::fs::file::REG_RO_FILE_OPS,
+        Expect { read: true, write: false, lseek: true, close: true, poll: false, read_at: false },
+    );
+    check(
+        "dir file caps",
+        &crate::fs::file::DIR_FILE_OPS,
+        Expect { read: true, write: false, lseek: true, close: true, poll: false, read_at: false },
+    );
+
     check_errno_matrix();
 }
