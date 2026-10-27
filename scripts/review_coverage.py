@@ -291,6 +291,7 @@ STATUS = {
     "kernel/src/dfx/fsw.rs": ("todo", ""),
     "kernel/src/dfx/ksyms_generated.rs": ("todo", ""),
     "kernel/src/dfx/schb.rs": ("todo", ""),
+    "kernel/src/dfx/slowtask.rs": ("todo", ""),
     "kernel/src/drivers/access_tokenid.rs": ("todo", ""),
     "kernel/src/drivers/ashmem.rs": ("todo", ""),
     "kernel/src/drivers/gpu/fb_simple.rs": ("todo", ""),
