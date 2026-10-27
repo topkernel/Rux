@@ -30,6 +30,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <unistd.h>
 #include <X11/Xlib.h>
 #include <X11/Xutil.h>
 
@@ -49,10 +50,24 @@ static int xr_atoi(const char *s)
 
 /* Xlib default error handling _exit()s the process; we want a NULL
  * XGetImage (e.g. BadMatch on a window being reparented mid-walk) to
- * just skip that window. */
+ * just skip that window. The handler also STASHES the error code /
+ * request / resourceid: r12walk showed every sizable client window
+ * (xterm probe + its mutter frame) returning getimage-failed while
+ * root-window GetImage of a LARGER rect succeeds in the same process
+ * to the same server — the error code is the next deterministic datum
+ * (BadMatch=8 vs BadDrawable=9 vs garbled-reply land). GetImage is a
+ * replied request: the handler has run by the time XGetImage returns
+ * NULL; the XSync calls are belt-and-braces. */
+static volatile int g_xerr_code, g_xerr_req, g_xerr_minor;
+static volatile unsigned long g_xerr_res;
+
 static int xr_xerr(Display *d, XErrorEvent *ev)
 {
-    (void)d; (void)ev;
+    (void)d;
+    g_xerr_code = ev->error_code;
+    g_xerr_req = ev->request_code;
+    g_xerr_minor = ev->minor_code;
+    g_xerr_res = (unsigned long)ev->resourceid;
     return 0;
 }
 
@@ -123,11 +138,27 @@ static void xr_window_content(Display *d, Window w, int ww, int wh)
 {
     int cw = ww > 480 ? 480 : ww;
     int ch = wh > 320 ? 320 : wh;
+    g_xerr_code = 0; g_xerr_req = 0; g_xerr_minor = 0; g_xerr_res = 0;
+    XSync(d, False); /* drain any stale error */
     XImage *im = XGetImage(d, w, 0, 0, (unsigned)cw, (unsigned)ch,
                            AllPlanes, ZPixmap);
     if (!im) {
-        printf("content=getimage-failed\n");
-        return;
+        XSync(d, False);
+        printf("content=getimage-failed err=%d req=%d minor=%d res=0x%lx",
+               g_xerr_code, g_xerr_req, g_xerr_minor, g_xerr_res);
+        /* one retry after a beat: a transient BadMatch on a window
+         * being reparented mid-walk must not read as a hard failure */
+        usleep(200000);
+        g_xerr_code = 0;
+        im = XGetImage(d, w, 0, 0, (unsigned)cw, (unsigned)ch,
+                       AllPlanes, ZPixmap);
+        if (!im) {
+            XSync(d, False);
+            printf(" retry-err=%d req=%d res=0x%lx\n",
+                   g_xerr_code, g_xerr_req, g_xerr_res);
+            return;
+        }
+        printf(" retry-ok ");
     }
     xr_stats_tail(im, 4);
     XDestroyImage(im);
