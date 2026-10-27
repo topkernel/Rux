@@ -31,6 +31,7 @@
 //! initializer (per-row constructors can come later), and the GRQ
 //! typed lock key named in §3 is the follow-on slice, not this one.
 
+use core::cell::UnsafeCell;
 use core::marker::PhantomData;
 use core::ops::{Deref, DerefMut};
 use core::sync::atomic::{AtomicUsize, Ordering};
@@ -78,8 +79,24 @@ impl<T: Copy> Copy for Row<T> {}
 /// disabled on the acting cpu, so a given row is only ever touched by
 /// the cpu that owns it, and the re-entry tripwire refuses a second
 /// live guard on the same row.
+///
+/// D-7 incident fix (2026-10-27, run/pa68-d7-rootcause.txt): the rows
+/// sit inside [`UnsafeCell`]. The first landing used a plain
+/// `[Row<T>; N]`, and `unsafe impl Sync` does NOT confer interior
+/// mutability — so the `static MAGAZINES: CpuLocal<...>` in
+/// small_alloc was a non-mut static without interior mutability, which
+/// rustc emits as an LLVM `constant` global (.rodata). The kernel maps
+/// the image P|RW, so debug builds booted by luck; under opt>=1 LLVM
+/// deleted every store into the bank (stores to constant memory) and
+/// hoisted the loads, the magazine refill loop never terminated, and
+/// every release-profile boot died at the first c64 miss. UnsafeCell
+/// is the piece that makes the mutation LEGITIMATE to the compiler
+/// instead of invisible to it: the static now lands in writable
+/// memory and the stores survive at every opt level. The release-strong
+/// boot is the standing verification for this family (debug-only
+/// testing cannot see it).
 pub struct CpuLocal<T, const N: usize> {
-    rows: [Row<T>; N],
+    rows: UnsafeCell<[Row<T>; N]>,
 }
 
 // SAFETY: see the struct comment — rows are cpu-private by
@@ -90,10 +107,10 @@ impl<T: Copy, const N: usize> CpuLocal<T, N> {
     /// Const constructor: every cpu's row starts as a copy of `val`.
     pub const fn new(val: T) -> Self {
         CpuLocal {
-            rows: [Row {
+            rows: UnsafeCell::new([Row {
                 val,
                 in_use: false,
-            }; N],
+            }; N]),
         }
     }
 }
@@ -112,17 +129,19 @@ impl<T, const N: usize> CpuLocal<T, N> {
             crate::arch::cpu::restore_irq(flags);
             return None;
         }
-        let row = &self.rows[cpu];
-        // SAFETY (both pointer casts): the row is private to this cpu
-        // for as long as interrupts stay disabled (they are — the
-        // guard restores at drop); the in_use flag read/set below
-        // refuses a second live guard, so the &mut handed out is
-        // exclusive. Writes to in_use go through the raw pointer in
-        // the guard, never through this shared reference.
+        let rows = self.rows.get(); // *mut [Row<T>; N], interior-mutable
+        // SAFETY (pointer arithmetic and both field pointers): `cpu`
+        // is bounds-checked above; the row is private to this cpu for
+        // as long as interrupts stay disabled (they are — the guard
+        // restores at drop); the in_use flag read/set below refuses a
+        // second live guard, so the &mut handed out is exclusive. All
+        // access goes through raw pointers derived from the UnsafeCell
+        // — never through a `&`-path (the D-7 incident family).
+        let row = unsafe { rows.cast::<Row<T>>().add(cpu) }; // *mut Row<T>
         let (val, in_use): (*mut T, *mut bool) = unsafe {
             (
-                core::ptr::addr_of!(row.val) as *mut T,
-                core::ptr::addr_of!(row.in_use) as *mut bool,
+                core::ptr::addr_of_mut!((*row).val),
+                core::ptr::addr_of_mut!((*row).in_use),
             )
         };
         if unsafe { *in_use } {

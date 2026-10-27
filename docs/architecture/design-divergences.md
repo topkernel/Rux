@@ -221,7 +221,25 @@ typed lock key, the other §3 item, is the follow-on slice.
 
 **Guard.** `percpu-shape` unit-test group; the small_alloc REST-share
 domain row and Tier-1 census rows of the perf gate cover the
-converted allocator hot paths.
+converted allocator hot paths; and — binding since the incident
+below — a release-strong pbench boot before any re-land/extension of
+this type (debug-only verification cannot see the codegen family).
+
+**Incident and fix (2026-10-26/27, run/pa68-d7-rootcause.txt).** The
+first landing placed the bank in a non-mut `static` whose type had no
+interior mutability (`[Row<T>; N]` + `unsafe impl Sync` — the Sync
+impl does NOT confer mutability), so rustc emitted the LLVM global as
+`constant` (.rodata). The kernel image maps P|RW, which hid it from
+hardware: debug builds emitted the stores and booted; under opt>=1
+LLVM deleted every store into the bank and hoisted the loads — the
+magazine refill loop never terminated and every release-profile boot
+died at the first c64 miss (ALLOCTHROW t=3 s, 15.9 M objects carved
+across 2 lock holds, 99% of the heap). Reverted as 95b0015f; re-landed
+with `rows: UnsafeCell<[Row<T>; N]>` — interior mutability is the
+piece that makes the mutation legitimate to the compiler instead of
+invisible to it. Post-fix artifacts verified: MAGAZINES in .bss,
+refill-loop stores present in the opt>=1 disassembly, release-strong
+boot clean.
 
 ---
 
