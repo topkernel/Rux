@@ -517,3 +517,77 @@ mutter + gsd) visible and stable on the Ubuntu 22.04 riscv64 image.
   tests, but the coordinator's gate should run them).
 
 
+
+## Session 9 (2026-10-27, leg-9 — after the overnight quota death)
+
+### Re-anchor + merge state
+- Briefing's named asset /home/william/rux-agents/gnome-img/gnome.img +
+  fire6.py does NOT exist (lost before session 1); this lane's canonical
+  assets are work/gnome-r*.img + test/ubuntu-gnome/fire.py. Coordinator
+  acknowledged.
+- Found UNCOMMITTED leg-9 prep from an undocumented Oct-26 16:43-16:47
+  leg (died mid-edit: notify_burst.set() referenced an undefined name).
+  Completed + committed 1f2ebc30 (runit notify probe + GLX server TFP
+  check + XWALK call; xregion -w walk mode; fire.py burst wiring).
+- Merged origin/main (29 commits: VMA-origin probes, ams46, msync wrap,
+  O_APPEND atomic, ext4 dirent serialization, exit reparent fixes, new
+  dfx families). Kernel diff vs main still ONLY the dfx=inputtrace
+  evdev INPTRC block. Dual-arch build green.
+- Rolled r12 (walk probes) and r13 (walk + X-error-code probe) images.
+
+### THE MILESTONE: first full-form desktop frame (runs/gnome-r13walk2)
+Kernel = merged a3d6d6b4, image r13, smp2/2G, dfx=watchdog,taskdump,
+2700s, host calm-ish (M4 @391s — fastest ever; historic 900-1441s walks
+were storm-inflated):
+- M4_screen_lit @391s (wallpaper), M5_desktop_visible @480s — FIRST M5
+  ever on riscv64 (6 significant colors).
+- shot-0570s.ppm + proof-window-2x.png / proof-banner-panel.png: panel
+  (Activities + clock "Oct 27 04:09"), REAL notification banner
+  ("Logged in as a privileged user" — gsd -> shell notification daemon),
+  the xterm probe window PAINTING with readable "root@rux:/#" prompt +
+  block cursor, dash element, mouse cursor.
+- XWALK deterministic: xterm client 0x160000c 904x536 backing pixels
+  99.5% #fff + 0.2% black glyph px; mutter frame 0x400020 924x591
+  83.6% white. Client drew -> mutter composited -> scanout showed.
+- "GNOME Shell started" printed; init walk ~317s calm vs ~888s storm.
+- 2700s FULL RUN: zero panics, zero SIGDEATH, desktop held (clock strip
+  updates 1230->1500s = live redraw, not a frozen frame).
+
+### The old "getimage-failed" mystery — CLOSED
+- Early-boot walks: frame window XGetImage -> err=8 BadMatch req=73
+  (GetImage), deterministic across retry — mid-manage state before the
+  composite backing exists. Later walks image the SAME windows fine
+  (99.5% white content). Transient, explained, not a kernel bug.
+
+### Input -> screen: still NOT working in-session
+- keyprobe 'a' @1500s/@2100s and mousemove @1200s: ZERO pixel change
+  (deterministic diffs 1470->1500->1530, 1170->1230). The desktop is
+  live (clock ticks) but QMP stimulus produces no visible effect.
+- Xorg side config is right (evdev RuxKbd/RuxPtr loaded, "always
+  reports core events"). Kernel side proven in r11cat2 (reader drains
+  eventqs). OPEN: does Xorg's evdev read loop drain during the live
+  session? r13repro runs dfx=inputtrace + early keyprobes to split
+  kernel-delivery vs Xorg/client-level.
+
+### Notify-probe wiring nit (probe never fired)
+- runit's shell_started() tails /tmp/gnome-shell.log; the marker line
+  only reached the CONSOLE copy, not the log file. Banner painting is
+  already proven by gsd's own banner; fix the trigger (runit watches
+  its own tee of the console stream) in a future image roll.
+
+### fire.py M3 staleness
+- Merged main's taskdump is ftrace-style (prev_/next_comm=); old
+  patterns never matched (M3 "not-reached" while shell ran). Fixed with
+  gnome_shell_trace/gsd_trace mark-only patterns (9654200b).
+
+### r13walk VM killed externally at 263s
+- "terminating on signal 15 from pid 720114" (short-lived, unidentifiable;
+  coordinator says not their cleanup). Relaunch (r13walk2) survived —
+  no active killer. If it recurs, capture killer pid/comm and escalate.
+
+### In flight at note-time
+- r13repro: reproduction boot (current kernel, r13 image,
+  dfx=inputtrace, keyprobe 600/1200, mousemove 500/900, 1800s).
+- /tmp/rux-oldk = kernel 65f35f47 built (r10win-era) for the
+  attribution A/B: old kernel + r13 image + calm host -> windows paint
+  or not. Decides calm-host vs merge-set as the unblocking variable.
