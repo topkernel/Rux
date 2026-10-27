@@ -1832,3 +1832,47 @@ regime coincidence. 2 boots/arm is under the verdict bar — focused
 pair queued (main 57e44a90 vs main+route-4-only vs branch), not
 merge-blocking (the levers reach main individually, each with its own
 pair).
+
+### 8.10.12 Leg 42 (2026-10-27): scoped-publication draining re-banks three fs rows at once (pa67 pair)
+
+The OH line's scoped publication draining landed on main as 0cd29a75
+mid-leg; the owed re-measure ran as the pa67 interleaved pair (A = pure
+main 0cd29a75 strong, B = pure main 57e44a90 strong = pre-bio control,
+orders A,B,B,A, loads 13-17, 4/4 boots rc=0; kernels
+run/pa67-c-bio-bzImage / run/pa66-a-main57-bzImage, script
+run/pa67-pair.sh):
+
+| row | A (bio) {1,4} | B (pre-bio) {2,3} | delta |
+|---|---|---|---|
+| p6_write_fsync | 10123, 9767 | 13281, 13325 | **-25.8%** |
+| p6_mkdrmdir | 55457, 56173 | 72089, 69436 | **-21.7%** |
+| p6_unlink | 16326, 16091 | 28693, 27738 | **-42.4%** |
+| p6_append | 89.4, 122.9 | 118.8, — | within-noise both directions |
+
+Every adjacent A-B comparison is ordered on all three moved rows (A1-B2
+and A4-B3). **The write_fsync strong-class reference re-banks from the
+12.7-14.7 ms class to 9.8-10.1 ms** (vs the reference kernel's 4755 us
+median: 2.7x -> 2.05x); unlink's strong column drops 29.3 -> 16.1 ms
+(1085x -> ~596x vs the 27 us reference median); mkdrmdir 76.4 -> 5.6e4
+class (-22%; the f4 map's identity-block syncs remain the dominant
+residual). The bio fix did what the whole-queue-drain model predicted:
+durability points now pay for their own writes, not the queue's. The
+p6_append row is NOT moved by bio (both arms carry O_APPEND atomicity
+57e44a90; today's append spread 89-123 us straddles both arms in both
+directions — the atomicity change is performance-neutral in this
+channel, as intended: correctness hardening).
+
+Boot-1 board of the bio kernel also re-anchors two ladder facts:
+p4_fork_exit reads 441 on main-class (the branch-only 650-660 class
+from the pa66 pair stays branch-side, strengthening the interaction
+hypothesis), and p5b read the 41-class in the same window the pa66 A
+boot did (the regime is environmental, both kernels visit it).
+
+Standing after this leg: (1) D-7 codegen root-cause (objdump on
+run/pa64-d7weak-bzImage) before any re-land of typed per-CPU storage;
+(2) p4_fork_exit branch-vs-main focused pair; (3) p5b regime-matched
+socket rerun; (4) the strong-class gate anchor columns in this report
+are the working reference — the Tier-2 GATE anchor in
+perf-gate-baseline.md stays the pb1 DEBUG column per the profile-class
+note (no baseline-doc change until a main-class debug pbench re-anchors
+it).
