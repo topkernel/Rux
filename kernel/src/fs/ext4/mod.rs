@@ -2037,6 +2037,60 @@ unsafe fn ext4_setattr(inode: &Inode, attr: u32, arg1: u64, arg2: u64) -> i32 {
         Ok(fs) => fs,
         Err(e) => return e,
     };
+
+    // leg-38B family B: bracket the ATTR_SIZE work (big lock already
+    // held) with a journal handle — on a journal-less fs this is route-1's
+    // null-journal handle whose only role is making bio::sync_dirty_buffer
+    // DEFER. The truncate path's per-extent-segment block-bitmap writes
+    // (allocator write_block_bitmap) were the last inline synchronous
+    // virtio round trips here (write_inode and the group-desc/superblock
+    // counters are deferred already): a fragmented multi-extent ftruncate
+    // paid one sync per extent UNDER EXT4_BIG_LOCK, so foundation's MAIN
+    // thread looped ftruncate(fd,3) for 1.3-101 s uninterruptible while
+    // every other ext4 task queued behind the big lock (the launcher
+    // code98 wedge, family B). Persistence moves to the standing batch
+    // points (fsync/sync, buffer-cache eviction) — the F4-R2 / route-1
+    // stance. Only ATTR_SIZE arms: the other flavors' single write is
+    // write_inode, already deferred unconditionally, and arming them on a
+    // journaled fs would open a jbd2 transaction per atime/chmod update
+    // for nothing. Handle-start failure (journaled fs, no journal space)
+    // falls back to the old inline-sync behavior instead of failing the
+    // setattr; stop's result is discarded — the VFS work already happened
+    // by then and the commit is the journal's own async responsibility.
+    let mut handle = if attr == setattr_attr::ATTR_SIZE {
+        journal::ext4_journal_start(fs, 4).ok()
+    } else {
+        None
+    };
+    if let Some(h) = handle.as_mut() {
+        // SAFETY: set/clear bracket this syscall on the current task
+        // (namei::set_current_handle contract).
+        unsafe { namei::set_current_handle(h as *mut _) };
+    }
+    let result = ext4_setattr_locked(fs, inode, attr, arg1, arg2);
+    if handle.is_some() {
+        // SAFETY: paired clear on the same task.
+        unsafe { namei::clear_current_handle() };
+    }
+    if let Some(h) = handle.as_mut() {
+        let _ = journal::ext4_journal_stop(h);
+    }
+    result
+}
+
+/// Big-lock-held setattr body (leg-38B extraction): everything below the
+/// EXT4_BIG_LOCK acquire in ext4_setattr, run under the route-1 journal
+/// bracket above so its metadata writes defer instead of syncing inline.
+// SAFETY: VFS callback contract; pointers are valid for the scope of this block
+unsafe fn ext4_setattr_locked(
+    fs: &'static Ext4FileSystem,
+    inode: &Inode,
+    attr: u32,
+    arg1: u64,
+    arg2: u64,
+) -> i32 {
+    use crate::fs::inode::setattr_attr;
+
     let ext4_ino = inode.ino as u32;
 
     let mut ext4_inode = match fs.read_inode(ext4_ino) {
