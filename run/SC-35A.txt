@@ -1,0 +1,79 @@
+LEG-35A (OH sprint, kernel-side lane; worktree
+/home/william/rux-agents/oh-kernel, branch feature/oh-kernel, opened
+on f798ccd6) — mission: spawnfix reconciliation, perf tiers for the
+branch's code commits, from-walk adjudication. Full adjudication
+write-up: run/SPAWNFIX-RECON-35A.txt (for the coordinator).
+
+MISSION 1 — SPAWNFIX RECONCILIATION: DONE, CANONICAL FORM LANDED.
+- Diffed our 44ba45e2 vs OH-B's 635c4502 (their branch
+  feature/samgr-callback, tip 0cd6d058). Shared core: both removed
+  the !got_transaction gate (spawn check runs at the read exit after
+  delivery). Two semantic differences remained: pool cap
+  (ours threads.len() < max; theirs requested_threads_started < max)
+  and the returning-thread looper check (ours absent, theirs present).
+  Theirs also restricts the sc164 child count to looper workers.
+- Re-checked the reference MYSELF (not from either note):
+  /tmp/binder-{5.10,5.15,6.1}.c done: labels are WORD-IDENTICAL —
+  requested_threads==0 && waiting_threads empty &&
+  requested_threads_started < max_threads && returning thread is
+  REGISTERED|ENTERED. OH-B's predicate set is the faithful one.
+- Live proof both directions, no new draw needed: (a) our own
+  sc333A2 TXN-POOL census shows the blocking shape (pid 1533
+  th=25 started=5 max=16; pid 803 th=18 started=8 max=16 — under
+  threads.len() those procs can never spawn again); (b) OH-B's
+  sc331B ran the exact-shape commit live (POOL-SPAWN across procs,
+  pools grow, LC 181 -> 0).
+- Canonical form committed as ab4ca01c on our branch (the two spawn
+  cores are now semantically identical; merge either, drop the
+  other's hunk). Rux-side started-counter lifetime verified sound
+  (BC_REGISTER_LOOPER is the only increment, never decremented).
+- Staging-position nuance documented (Linux overwrites the leading
+  BR_NOOP at buffer[0]; we append after the one sync txn — both
+  valid return streams, ABI intact).
+
+MISSION 2 — PERF TIERS: watcher armed, verdicts pending calm host.
+Standard gates on ab4ca01c: x86 build rc=0; riscv64 build rc=0;
+make test 1109/1109; riscv64 scripted regression boot (smp2 1G,
+dfx=txnhunt,wwcensus fsw=1) zero panics, shell + /proc verified.
+Tier 1,2 = run/perf-gate-leg35A-watch.sh (detached, polls 5-min,
+launches when foreign QEMU count < 2, 3-h window) -> logs land in
+run/perf-gate-leg35A.log + run/perf-gate-leg35A-parse.txt. Change
+class for the reviewer: binder read-exit emission predicate + dfx
+census; Tier-1/2 workloads (quiet syscost, pbench P1-P7) do not
+exercise binder, so expect no-op-path numbers; the binder-domain
+evidence is the OH draws (sc333A2 pools grow; sc331B LC 181->0).
+NOTE for the merge reviewer: OH-B's leg-35B also owes tier-2 rerun
+verdicts on the SAME spawn semantics (their close-out item); one
+tier-1+2 run on whichever branch merges is sufficient for the
+shared hunk.
+
+MISSION 3 — FROM-WALK ADJUDICATION (predecessor's open question):
+CLOSED, KERNEL-FAITHFUL. 35B's notes assert in-line nesting is
+Linux protocol; verified verbatim: 5.10 binder_transaction
+(/tmp/binder-5.10.c:3018-3038) walks the transaction-stack from
+chain on every sync call; from->proc == target_proc ->
+target_thread = from; binder_proc_transaction (2727) then enqueues
+on the target THREAD todo and wakes it. Rux binder.rs ~6734 does
+exactly this. The sc333A2 cycle decode (accesstoken_ser-469 <->
+foundation-619) is Linux behavior, and OH-B's HDF pairs
+(composer_host <-> hdf_devmgr txn11694/11696; power_host <->
+hdf_devmgr) are image-side synchronous ABBA inversions. No kernel
+change; image-side lane owns them.
+
+MISSION 4 — DRAWS: none needed this leg (see mission 1: both
+directions already drawn on sc333A2/sc331B; a third draw would
+duplicate evidence).
+
+OPS NOTES: one leftover test QEMU from a failed background make
+test was killed (matched by cwd = this worktree; pid 157930);
+make test's post-pass halt does not exit QEMU — killed by pid
+after the pass line (same as predecessors' signal-15 shape). A
+regression-boot rerun was needed because make test had left the
+test-feature ELF in the target path (first attempt ran the boot
+suite instead of the shell; log preserved as
+run/maketest-boot-leg35A-extra.log — an unintended second
+1109/1109 pass on the same tree).
+
+Lane state: branch tip ab4ca01c (5 commits ahead of main's base
+lineage), working tree clean except untracked run/ artifacts;
+perf-gate watcher running detached; no QEMUs of mine left running.

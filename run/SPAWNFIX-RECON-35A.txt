@@ -1,0 +1,119 @@
+SPAWNFIX RECONCILIATION (leg-35A, OH-A kernel lane, 2026-10-27 20:5x)
+For the coordinator — one canonical form decision for BR_SPAWN_LOOPER.
+
+THE TWO COMMITS
+- A-lane 44ba45e2 (feature/oh-kernel, base 0cd29a75): removed the
+  !got_transaction gate so the spawn check runs at the read-exit after
+  transaction delivery. Kept the OLD pool cap `threads.len() <
+  max_threads`; no returning-thread looper check.
+- B-lane 635c4502 (feature/samgr-callback, base 8d2ef240): same
+  de-gating, PLUS pool cap switched to `requested_threads_started <
+  max_threads` PLUS returning thread must be REGISTERED|ENTERED, PLUS
+  child-path count restricted to looper workers, PLUS their poolcensus
+  instruments (POOL/POOL-THR/POOL-SPAWN/POOL-TODO, TXN-HANG-STK2).
+
+REFERENCE (verbatim, re-checked this leg, not taken from either note)
+/tmp/binder-5.10.c:4529, /tmp/binder-5.15.c:4200, /tmp/binder-6.1.c:4700
+— the `done:` condition is WORD-IDENTICAL in all three:
+
+    if (proc->requested_threads == 0 &&
+        list_empty(&thread->proc->waiting_threads) &&
+        proc->requested_threads_started < proc->max_threads &&
+        (thread->looper & (BINDER_LOOPER_STATE_REGISTERED |
+         BINDER_LOOPER_STATE_ENTERED))) { proc->requested_threads++;
+        put_user(BR_SPAWN_LOOPER, buffer) }
+
+Facts drawn from it:
+1. done: is reached from every loop break, including after delivering
+   a transaction — both commits agree here (the shared core fix), and
+   both are CORRECT.
+2. The cap is requested_threads_started (spawned-and-REGISTERED
+   loopers), never the raw thread count. 635c4502 is right; 44ba45e2's
+   threads.len() cap is a divergence (client-only BinderThread entries
+   — FFRT workers, spawned children acting as clients — eat the
+   max_threads budget they must not consume in Linux).
+3. The returning thread must itself be a looper. 635c4502 has it;
+   44ba45e2 does not (a client thread's reply-return could request
+   spawns — Linux never does).
+4. Rux-side soundness of the started counter (verified in our tree):
+   requested_threads_started increments ONLY in BC_REGISTER_LOOPER
+   (guarded by requested_threads>0, which it decrements) and is never
+   decremented anywhere — exactly Linux's lifetime.
+
+LIVE PROOF OF THE DIVERGENCE (no new draw needed)
+- Our own sc333A2 census (spawnfix tree 44ba45e2, TXN-POOL lines,
+  run/oh31a-sc333A2-serial.log): pid 1533 th=25 started=5 max=16 and
+  pid 803 th=18 started=8 max=16. Under threads.len() cap those procs
+  can NEVER emit again (25>=16, 18>=16 — permanently blocked) while
+  Linux still offers 11/8 further spawns. That is the exact
+  client-pollution shape 635c4502's message names, drawn by our own
+  instrument on our own tree.
+- OH-B's sc331B ran the exact-shape commit live: POOL-SPAWN events
+  across many procs, foundation pool grows on demand (st=3 w=5
+  wwait=5), POOL-TODO never fires, LC family 181 -> 0.
+Conclusion: reference word-identical across three versions + our
+census shows the blocking shape + their draw shows the canonical form
+working. A fresh discriminating draw would duplicate existing
+evidence on both sides; skipped deliberately.
+
+CANONICAL FORM (this branch: ab4ca01c, on top of f798ccd6)
+Adopted 635c4502's predicate set verbatim into our binder.rs:
+- non-child: requested_threads==0 && !ready && max_threads>0 &&
+  requested_threads_started < max_threads &&
+  (looper & (ENTERED|REGISTERED)) != 0
+- child (sc164): child_n now counts only looper workers (children
+  never REGISTER; client-only child threads must not eat the child
+  budget — same principle).
+`ready` = any thread waiting_for_proc_work = Linux's
+list_empty(waiting_threads) inverted (same as before). The
+`max_threads>0` guard both trees keep is redundant-but-harmless
+(Linux relies on started<max being false at max==0).
+The two branches' spawnfix cores are now SEMANTICALLY IDENTICAL;
+merge either — the other's hunk drops out trivially. Their tree still
+additionally carries poolcensus instruments; ours carries TXN-POOL.
+
+STAGING-POSITION NUANCE (documented, no action)
+Linux put_user's BR_SPAWN_LOOPER at buffer[0], OVERWRITING the
+leading BR_NOOP staged at entry; Rux appends it after the (at most
+one) sync transaction with a space check (staged.len()+4<=read_size,
+sc79 discipline). Both produce valid return-command streams (NOOP and
+SPAWN_LOOPER are no-payload commands; userspace processes them
+sequentially) — external ABI intact.
+
+FROM-WALK ADJUDICATION (predecessor's open question — CLOSED)
+Question: is routing a nested sync call onto the SENDER's own todo
+(the 5.10 from-walk) kernel-faithful, i.e. is the HDF mutual nesting
+truly image-side?
+Reference /tmp/binder-5.10.c:3018-3038 (binder_transaction):
+sync call from a thread with a transaction stack walks tmp->from (via
+from_parent); `from && from->proc == target_proc` -> target_thread =
+from. binder_proc_transaction (2727) then enqueues on the TARGET
+THREAD's todo (`binder_enqueue_thread_work_ilocked`) and wakes it
+sync. Rux binder.rs ~6734 does exactly this (txn_stack rev walk,
+from_proc == target, deliver to originator thread todo, wake) — the
+sc333A2 decode ("619's nested call routed onto 469's own todo; 469
+picked it, parked on a further nested call") is Linux behavior
+verbatim.
+Verdict: KERNEL ROUTING IS FAITHFUL. The residual wedges — our
+sc333A2 accesstoken_ser-469 <-> foundation-619 cycle, OH-B's
+composer_host <-> hdf_devmgr (txn11694/11696) and power_host <->
+hdf_devmgr pairs — are image-side synchronous ABBA inversions; pool
+growth cannot and should not break them. Image-side lane (OH-B) owns
+them. No kernel change.
+
+INVENTORY FOR THE MERGE REVIEWER
+- feature/oh-kernel (this branch) now: 44ba45e2 (de-gating) +
+  52535c72 (TXN-POOL census) + ab4ca01c (canonical predicate) +
+  notes. Binder domain. Standard gates re-run this leg on ab4ca01c:
+  x86 build rc=0 (run/build-leg35A-canonical-x86.log), riscv64 build
+  rc=0 (run/build-leg35A-canonical-rv.log), make test 1109/1109
+  (run/maketest-leg35A.log), riscv64 scripted regression boot zero
+  panics + shell + /proc (run/rv-regression-leg35A.log). Perf tiers
+  1,2: watcher armed (run/perf-gate-leg35A-watch.sh), verdicts will
+  land in run/perf-gate-leg35A.log when the host calms.
+- feature/samgr-callback carries the same spawn core + their
+  poolcensus family + POOL-TODO + TXN-HANG-STK2 + 1e3eb015 lineage.
+- Recommendation: one spawnfix merge is enough; whichever lands first
+  wins the hunk and the other branch's spawn commit is dropped at
+  cherry-pick. Instruments are complementary and all dfx-gated;
+  keeping both families is cheap, coordinator's call.

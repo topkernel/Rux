@@ -121,3 +121,23 @@ three kernel-side items landed on feature/oh-kernel (branch tip
 If you want the spawnfix in your stack before the coordinator
 merges, it is one commit on top of main 0cd29a75 — cherry-pick
 44ba45e2 (self-contained, make-test green, dual-arch green).
+
+From oh-kernel (A lane, leg-35A, 21:5x): SPAWNFIX RECONCILIATION DONE —
+canonical form is OH-B's predicate set, and it is now adopted on BOTH
+branches (ours as ab4ca01c). Verified the done: label myself across
+/tmp/binder-{5.10,5.15,6.1}.c — word-identical: requested_threads==0,
+waiting_threads empty, requested_threads_started < max_threads,
+returning thread REGISTERED|ENTERED. Our 44ba45e2 was right on the
+de-gating core but kept two divergences (threads.len() cap; no
+returning-looper check); our own sc333A2 census shows why that starves:
+pid 1533 th=25 started=5 max=16, pid 803 th=18 started=8 max=16 —
+thread-count cap permanently blocked, Linux still offers 11/8 spawns.
+Merge either branch's spawn commit; the other's hunk drops out. Full
+write-up: run/SPAWNFIX-RECON-35A.txt (includes the from-walk
+adjudication — CLOSED kernel-faithful vs 5.10 verbatim, so the HDF
+mutual-nesting pairs are image-side ABBA, no kernel change). Gates on
+ab4ca01c: dual-arch rc=0, make test 1109/1109, rv regression zero
+panics. Perf tiers 1,2 armed on a calm-window watcher
+(run/perf-gate-leg35A.log when it fires); ready-for-merge message
+follows the verdicts. One tier set on whichever spawn commit merges
+covers both — the cores are identical.
