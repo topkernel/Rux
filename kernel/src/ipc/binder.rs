@@ -3706,6 +3706,9 @@ pub fn pool_census_audit() {
                     // First queued items, with the reg_tgid read-gate
                     // verdict: a waiting daemon worker takes this item
                     // only when daemon_readable (reg 0 / daemon-owned).
+                    // Non-Transaction items are named by kind — a
+                    // stranded Node/DeadBinder/ReturnError work item is
+                    // a different protocol stall than a parked txn.
                     for w in pim.todo.iter().take(3) {
                         if let Work::Transaction(t) = w {
                             let reg = t.target_node.as_ref().map_or(0, |n| n.reg_tgid);
@@ -3717,6 +3720,16 @@ pub fn pool_census_audit() {
                                 t.from_proc.as_ref().map_or(0, |fp| fp.pid),
                                 now.wrapping_sub(t.enq_j),
                             ));
+                        } else {
+                            let kind = match w {
+                                Work::TransactionComplete => 0x7C01,
+                                Work::ReturnError(..) => 0x7C02,
+                                Work::Node(..) => 0x7C03,
+                                Work::DeadBinder { .. } => 0x7C04,
+                                Work::ClearDeathDone { .. } => 0x7C05,
+                                Work::Transaction(..) => unreachable!(),
+                            };
+                            todo_items.push((kind, 0, false, 0, 0, 0));
                         }
                     }
                     detail_pid = deepest_pid;
@@ -3764,17 +3777,29 @@ pub fn pool_census_audit() {
         // item (work_readable_by with the daemon tgid)? False = gated to
         // a child (reg_tgid) — only the child's threads may consume it.
         let daemon_readable = *reg == 0 || *reg == detail_pid;
-        crate::pr_warn!(
-            "POOL-TODO pid={} txn{} code{} {} reg={} from={} age={}j{}",
-            detail_pid,
-            id,
-            code,
-            if *oneway { "oneway" } else { "sync" },
-            reg,
-            from,
-            age,
-            if daemon_readable { "" } else { " CHILD-GATED" }
-        );
+        let kind = match *id {
+            0x7C01 => "txn-complete",
+            0x7C02 => "return-error",
+            0x7C03 => "node-refs",
+            0x7C04 => "dead-binder",
+            0x7C05 => "clear-death-done",
+            _ => "",
+        };
+        if kind.is_empty() {
+            crate::pr_warn!(
+                "POOL-TODO pid={} txn{} code{} {} reg={} from={} age={}j{}",
+                detail_pid,
+                id,
+                code,
+                if *oneway { "oneway" } else { "sync" },
+                reg,
+                from,
+                age,
+                if daemon_readable { "" } else { " CHILD-GATED" }
+            );
+        } else {
+            crate::pr_warn!("POOL-TODO pid={} item={}", detail_pid, kind);
+        }
     }
 }
 
