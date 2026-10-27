@@ -433,6 +433,32 @@ fn evdev_file_poll(file: &File, events: u16) -> u16 {
         if device.has_event() {
             ready |= POLLIN | POLLRDNORM;
         }
+        // dfx=inputtrace (leg-9 epoll hunt): one line per POLL dispatch,
+        // raw-console (loglevel-proof; pr_info is dropped at loglevel=3).
+        // The r13ep2/r13ep3 A/B proved the virtqueues ARE drained during
+        // an epoll-only boot (14 INPTRC) yet epoll_wait returned idle —
+        // this line ties every dispatch to its caller's file and result,
+        // splitting "dispatch never ran" from "dispatch ran, reported
+        // ready, but the waiter still idled". Rate-limited: first 600
+        // then 1-in-50 (a spinning poller must not flood the console).
+        if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::InputTrace) {
+            use core::sync::atomic::{AtomicU64, Ordering};
+            static PL_N: AtomicU64 = AtomicU64::new(0);
+            let n = PL_N.fetch_add(1, Ordering::Relaxed);
+            if n < 600 || n % 50 == 0 {
+                it_msg(b"INPPL[");
+                it_u64(n);
+                it_msg(b"] file=");
+                it_u64(file.file_id);
+                it_msg(b" mask=");
+                it_u64(events as u64);
+                it_msg(b" ready=");
+                it_u64(ready as u64);
+                it_msg(b" has=");
+                it_u64(if device.has_event() { 1 } else { 0 });
+                it_msg(b"\n");
+            }
+        }
     }
     if events & POLLOUT != 0 {
         // evdev is never writable.
