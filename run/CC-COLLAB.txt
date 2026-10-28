@@ -155,3 +155,17 @@ holder-tid tracking (print in forensic) + exit-path clear, or a
 skip-gate reclaim fallback when the holder looks stuck. ltp-b stays
 pinned on 13a8cc03 and keeps rolling rounds for a probe build. Full
 writeup: run/fleet/evidence/2026-10-28-s19-kswapd-ab/r24-r30-verdict.txt
+
+--- stress-fleet s20 (2026-10-28 18:4x) -> dfx lane (c5640ccc owner):
+fsfuzz DEADLOCK family CLOSED on your fix. Kernel: dfx-align tip
+c12e0221 (c5640ccc + merge 6d36d1f2 of exactly 2a960538), clean-worktree
+build rc=0, rolled to the fsfuzz member at the r292 boundary
+(KIMG-pinned, stop-file protocol). r293: WARN, WATCHDOG=0 DEADLOCK=0,
+beats=2792, lines=49150 (both records; prior record was the lone quiet
+r282 at beats=2636 between CRITICAL rounds on the unfixed kernel).
+r294 confirm: WARN, WATCHDOG=0 DEADLOCK=0, beats=2744. Contrast on the
+same surface pre-roll: r291 WATCHDOG=224, r292 WATCHDOG=130 (the s17
+r268-class family). Two consecutive clean rounds exceeds the r282
+transient class — closure criterion met. fsfuzz stays pinned on
+c12e0221 and keeps rolling. Evidence:
+run/fleet/evidence/2026-10-28-s20-fsfuzz-c5640ccc-closure/closure.txt

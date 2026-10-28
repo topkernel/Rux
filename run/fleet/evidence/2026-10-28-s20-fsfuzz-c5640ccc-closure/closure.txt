@@ -1,0 +1,31 @@
+== fsfuzz DEADLOCK family closure on c5640ccc — stress-fleet s20 ==
+
+CRITERION (s18 note): one clean round (zero WATCHDOG/DEADLOCK prints)
+on a kernel carrying c5640ccc.
+
+KERNEL: feature/dfx-align tip c12e0221 = c5640ccc lineage + merge 6d36d1f2
+of exactly 2a960538 (fleet base) + docs tip. Built clean-worktree in
+sf2-main538 (rc=0), md5 5afcb19cc0efadb6044a83ad18fb9d91, size 67,355,056,
+rolled as images/fleet-rv64-c12e0221-rux via KIMG-pinned driver restart
+at the r292 boundary (stop-file protocol, s20-fsfuzz-roll script).
+
+RESULT — CLOSED, with the flake-discipline confirm (2 consecutive):
+- r293 (17:46-18:16): WARN, WATCHDOG=0 DEADLOCK=0, beats=2792, lines=49150
+  (beats and lines both record-class for this member; prior record was
+  the lone quiet r282: beats=2636, lines=45858).
+- r294 (18:16-18:46): WARN, WATCHDOG=0 DEADLOCK=0, beats=2744, lines=48382.
+- Contrast on the SAME surface immediately before, unfixed kernel
+  (fleet-rv64-rux = 2a960538): r291 CRITICAL WATCHDOG=224, r292 CRITICAL
+  WATCHDOG=130; historical family rounds r277=91, r281=258, r283=118
+  (same 59/59 two-lock alternation, ra=0xffffffff80256100 — the s17
+  r268-class family). The one prior quiet round (r282) sat BETWEEN
+  CRITICAL rounds on the unfixed kernel; two consecutive clean rounds
+  on the fixed kernel exceed that transient class.
+- FSFUZZ-ODD errno=24 noise unchanged (known class, not the family).
+
+Fleet state after this session: fsfuzz member stays KIMG-pinned on
+c12e0221 (driver rounds 295+ self-running); ltp-b stays pinned on
+13a8cc03 (r24+, A/B arm — adjudicated REFUTED, see
+2026-10-28-s19-kswapd-ab/r24-r30-verdict.txt); ltp-a control on
+cb314f43; memstorm/monkey-b on defaults. Signal to the dfx lane:
+c5640ccc validated on the fleet surface from our side.
