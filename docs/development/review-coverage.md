@@ -22,11 +22,11 @@ when the tree gains a file the map does not know about.
 | metric | value |
 |---|---|
 | source files in kernel/src | 415 |
-| source lines in kernel/src | 294,121 |
-| files fully reviewed | 35 |
-| files partially reviewed | 82 |
-| files not yet reviewed | 298 |
-| lines in fully reviewed files | 20,648 |
+| source lines in kernel/src | 294,173 |
+| files fully reviewed | 38 |
+| files partially reviewed | 81 |
+| files not yet reviewed | 296 |
+| lines in fully reviewed files | 24,990 |
 | reviewed files mainline changed since `47d96961` (need re-read) | 92 |
 
 ## Defects found and fixed
@@ -123,7 +123,7 @@ when the tree gains a file the map does not know about.
 | `uaccess.rs` | 451 | ⬜ |  |
 | `vext.rs` | 386 | ⬜ |  |
 
-### kernel/src/arch/riscv64/mm (8522 lines)
+### kernel/src/arch/riscv64/mm (8477 lines)
 
 | file | lines | status | note |
 |---|---:|---|---|
@@ -134,7 +134,7 @@ when the tree gains a file the map does not know about.
 | `mm_ops.rs` | 2563 | 🔶🔁 | COW 故障快/慢路径、PTE 权限检查、mmap/MAP_FIXED/munmap/fork 的 VMA 手术与记账（e32cdfef）; 主线已改动，需重读 |
 | `mmu_init.rs` | 2162 | 🔶 | kernel image mapping |
 | `mod.rs` | 53 | ⬜ |  |
-| `page_fault.rs` | 1597 | ⬜ |  |
+| `page_fault.rs` | 1552 | 🔧 | R-SC-RV64: file-fault path re-derived (vma_start, file, effective_size) in 4 separately locked lookups (shared-alias site took TWO back-to-back vma_read acquisitions) - mismatched generations could pair one file with another VMA's start and pin a foreign file's cache page; single entry-time snapshot ported from the x86_64 twin (3 finds + up to 4 pin-table lookups per file fault -> 1) + devfs live-size (b74) parity |
 | `pagetable.rs` | 294 | ⬜ |  |
 
 ### kernel/src/arch/x86_64 (7411 lines)
@@ -171,7 +171,7 @@ when the tree gains a file the map does not know about.
 | `page_fault.rs` | 1815 | ⬜ |  |
 | `pagetable.rs` | 199 | ⬜ |  |
 
-### kernel/src/dfx (36379 lines)
+### kernel/src/dfx (36464 lines)
 
 | file | lines | status | note |
 |---|---:|---|---|
@@ -182,7 +182,7 @@ when the tree gains a file the map does not know about.
 | `hexdump.rs` | 102 | 🔶 | hex dump helper |
 | `hung_task.rs` | 286 | 🔶 | D-state scan |
 | `ksyms.rs` | 135 | ✅🔁 | written by this review (symbol table); 主线已改动，需重读 |
-| `ksyms_generated.rs` | 23959 | ⬜ |  |
+| `ksyms_generated.rs` | 24044 | ⬜ |  |
 | `leakorigin.rs` | 257 | ⬜ |  |
 | `ledger.rs` | 491 | 🔶 | page census |
 | `memwatch.rs` | 1084 | 🔶🔁 | heap census; 主线已改动，需重读 |
@@ -315,7 +315,7 @@ when the tree gains a file the map does not know about.
 | `memfd.rs` | 458 | 🔧🔁 | memfd_create 的参数校验与 seal 语义（参数校验已对齐 879328f3）; 主线已改动，需重读 |
 | `mod.rs` | 82 | ⬜ |  |
 | `mount.rs` | 392 | ⬜ |  |
-| `page_cache.rs` | 1416 | 🔶🔁 | get_range_into/put_range; 主线已改动，需重读 |
+| `page_cache.rs` | 1416 | ✅🔁 | end to end (pcache Option B assumption audit; no defect); 主线已改动，需重读 |
 | `path.rs` | 393 | ⬜ |  |
 | `permission.rs` | 84 | ⬜ |  |
 | `pipe.rs` | 1465 | ⬜ |  |
@@ -429,7 +429,7 @@ when the tree gains a file the map does not know about.
 | `sysv_shm.rs` | 1091 | 🔶🔁 | IPC_RMID, attach/detach; 主线已改动，需重读 |
 | `util.rs` | 463 | ✅🔁 | idr allocation, permission checks; 主线已改动，需重读 |
 
-### kernel/src/mm (16239 lines)
+### kernel/src/mm (16251 lines)
 
 | file | lines | status | note |
 |---|---:|---|---|
@@ -448,7 +448,7 @@ when the tree gains a file the map does not know about.
 | `oom_kill.rs` | 582 | ⬜ |  |
 | `page.rs` | 153 | ⬜ |  |
 | `page_alloc.rs` | 1076 | 🔶🔁 | 分配快路径、OOM 判定、直接回收闸门、free 的各路防护; 主线已改动，需重读 |
-| `page_desc.rs` | 1362 | ⬜ |  |
+| `page_desc.rs` | 1374 | 🔧 | stale Page.mapping/index field-contract docs corrected (mapping is the cache eviction key, never rmap slot 0); Chinese comment translated |
 | `pagemap.rs` | 76 | ⬜ |  |
 | `pglist.rs` | 381 | ⬜ |  |
 | `rmap.rs` | 481 | ⬜ |  |

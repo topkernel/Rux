@@ -498,6 +498,46 @@ pub fn handle_mm_fault(
     let vma_start = vma.start().as_usize();
     let vma_end = vma.end().as_usize();
 
+    // R-SC-RV64 (x86_64 twin parity): capture everything the file paths
+    // need ONCE here, under the guard we already hold. The old shape
+    // re-derived (vma_start, file, effective_size) in FOUR separately
+    // locked lookups (SIGBUS gate, shared-alias resolution, private pin,
+    // fill arm), each a sched::current() round trip + a fresh vma_read()
+    // .find() + pin-table lookup — the shared-alias site even took TWO
+    // vma_read() acquisitions back to back (file from one, vma_start from
+    // the other). Between any two of those lookups a CLONE_VM sibling
+    // could munmap/mremap/split the VMA, yielding a mismatched
+    // (file, vma_offset, vma_start) triple: a wrong-offset fill or, in
+    // the worst case, a cache pin taken under ANOTHER file's
+    // (fs_id, ino, index) key. It is also pure overhead — 3 finds and up
+    // to 4 pin-table lookups per file fault (the twin's own rationale:
+    // x25600 faults for a 100 MB lib load). The guard is dropped before
+    // any read_at below (the R73 preemption/EXT4_BIG_LOCK pinch rule is
+    // about holding it across I/O, not about cloning an Arc under it).
+    let vm_file = if vma_type == VmaType::FileBacked && vma_file_fd >= 0 {
+        addr_space.get_vma_file(vma_start)
+    } else {
+        None
+    };
+    let file_offset = vma_offset + (page_virt_addr.as_usize() - vma_start);
+    // Effective size: CURRENT inode size (a file grown or truncated since
+    // mmap must serve/shrink accordingly); devfs regular files additionally
+    // consult the live entry (b74 ftruncate snapshot — the x86_64 twin has
+    // consulted it since its session-14 snapshot). The mmap-time snapshot
+    // stays as the no-file fallback. One computation serves the SIGBUS
+    // gate, the cache-population size gate and the private-fill arm.
+    let effective_size = vm_file
+        .as_ref()
+        .and_then(|f| {
+            if let Some(live) = crate::fs::devfs::devfs_reg_current_size(f.as_ref()) {
+                return Some(live as usize);
+            }
+            // SAFETY: inode cell written at open time; read-only.
+            let inode_opt = unsafe { &*f.inode.get() };
+            inode_opt.as_ref().map(|i| i.get_size() as usize)
+        })
+        .unwrap_or(vma_file_size as usize);
+
     // Verify permissions
     let is_write = flags & FaultFlags::WRITE != 0;
     let is_exec = flags & FaultFlags::EXEC != 0;
@@ -592,26 +632,13 @@ pub fn handle_mm_fault(
     // File-backed fault BEYOND the file's end is SIGBUS, not a zero page
     // (Linux filemap_fault: no page at/after EOF can be served for a
     // mapping — LTP mmap13 truncates a mapped file and expects the next
-    // touch of the cut page to raise SIGBUS). The effective size is the
+    // touch of the cut page to raise SIGBUS). Decided on the single
+    // entry-time snapshot (R-SC-RV64 above) — the effective size is the
     // CURRENT inode size (a truncate after mmap shrinks it), falling
     // back to the snapshot taken at mmap time.
     if vma_type == VmaType::FileBacked && vma_file_fd >= 0 {
-        if let Some(aspace) = crate::sched::current().and_then(|t| t.address_space()) {
-            if let Some(found_vma) = aspace.vma_read().find(page_virt_addr) {
-                let vma_start = found_vma.start().as_usize();
-                let file_offset = vma_offset + (page_virt_addr.as_usize() - vma_start);
-                let effective_size = addr_space
-                    .get_vma_file(vma_start)
-                    .and_then(|f| {
-                        // SAFETY: inode cell written at open time; read-only.
-                        let inode_opt = unsafe { &*f.inode.get() };
-                        inode_opt.as_ref().map(|i| i.get_size())
-                    })
-                    .unwrap_or(vma_file_size) as usize;
-                if file_offset >= effective_size {
-                    return MmFaultResult::BusError;
-                }
-            }
+        if file_offset >= effective_size {
+            return MmFaultResult::BusError;
         }
     }
 
@@ -640,37 +667,21 @@ pub fn handle_mm_fault(
     // files keep the legacy permanent-pin alias.
     let (shared_alias_phys, shared_pcache): (Option<u64>, bool) =
         if vma_type == VmaType::FileBacked && vma_flags.is_shared() {
-            let file = addr_space
-                .get_vma_file(
-                    addr_space
-                        .vma_read()
-                        .find(page_virt_addr)
-                        .map(|v| v.start().as_usize())
-                        .unwrap_or(0),
-                )
-                .or_else(|| {
-                    if vma_file_fd >= 0 {
-                        unsafe { crate::fs::get_file_fd(vma_file_fd as usize) }
-                    } else {
-                        None
-                    }
-                });
-            let vma_start = addr_space
-                .vma_read()
-                .find(page_virt_addr)
-                .map(|v| v.start().as_usize());
-            match (file, vma_start) {
-                (Some(f), Some(vs)) => {
-                    let file_offset = vma_offset + (page_virt_addr.as_usize() - vs);
+            // R-SC-RV64: (vm_file, file_offset) come from the single
+            // entry-time snapshot — the old shape resolved the file from
+            // one vma_read() lookup and vma_start from a second, so a
+            // concurrent VMA mutation could pair one file with another
+            // VMA's start and pin a foreign file's cache page.
+            let file = vm_file.clone().or_else(|| {
+                if vma_file_fd >= 0 {
+                    unsafe { crate::fs::get_file_fd(vma_file_fd as usize) }
+                } else {
+                    None
+                }
+            });
+            match file {
+                Some(f) => {
                     if crate::fs::ext4::file::is_ext4_file(f.as_ref()) {
-                        // Effective size: CURRENT inode size (a file grown
-                        // by write(2) after the mmap must serve its new
-                        // pages), the mmap-time snapshot as fallback —
-                        // same rule as the private arm.
-                        let effective_size = unsafe { &*f.inode.get() }
-                            .as_ref()
-                            .map(|i| i.get_size())
-                            .unwrap_or(vma_file_size) as usize;
                         match filemap_pin_cache_page(f.as_ref(), file_offset, effective_size, true)
                         {
                             Some(phys) => {
@@ -706,7 +717,7 @@ pub fn handle_mm_fault(
                         }
                     }
                 }
-                _ => (None, false),
+                None => (None, false),
             }
         } else {
             (None, false)
@@ -728,41 +739,12 @@ pub fn handle_mm_fault(
         && !vma_flags.is_shared()
         && !is_write
     {
-        if let Some(aspace) = crate::sched::current().and_then(|t| t.address_space()) {
-            // R73: scope the VMA read guard to the lookup itself; the file
-            // pin table and the populate read below stay OUTSIDE it (the
-            // pin may do file I/O through the ext4 machinery — never hold
-            // a guard across it; same shape as the fill arm below and the
-            // x86_64 twin).
-            let vma_start_opt = {
-                let vmas = aspace.vma_read();
-                vmas.find(page_virt_addr).map(|v| v.start().as_usize())
-            };
-            if let Some(vs) = vma_start_opt {
-                let file = aspace.get_vma_file(vs);
-                // Effective size: CURRENT inode size (a file grown by
-                // write(2) after the mmap must serve its new pages), the
-                // mmap-time snapshot as fallback — same rule as the fill
-                // arm below.
-                let effective_size = file
-                    .as_ref()
-                    .and_then(|f| {
-                        // SAFETY: inode cell written at open time; read-only.
-                        let inode_opt = unsafe { &*f.inode.get() };
-                        inode_opt.as_ref().map(|i| i.get_size())
-                    })
-                    .unwrap_or(vma_file_size) as usize;
-                if let Some(f) = file {
-                    let file_offset = vma_offset + (page_virt_addr.as_usize() - vs);
-                    filemap_pin_cache_page(&f, file_offset, effective_size, false)
-                } else {
-                    None
-                }
-            } else {
-                None
-            }
-        } else {
-            None
+        // R-SC-RV64: the pinned file, offset and size gate all come from
+        // the entry-time snapshot (the old shape re-found the VMA and the
+        // pin-table entry here — a second, independently racy lookup).
+        match vm_file {
+            Some(ref f) => filemap_pin_cache_page(f, file_offset, effective_size, false),
+            None => None,
         }
     } else {
         None
@@ -806,85 +788,58 @@ pub fn handle_mm_fault(
                 // mapped a 1-page file, grew it to 384 pages, and read
                 // stale zeros through the snapshot.)
                 if vma_file_fd >= 0 {
-                    if let Some(aspace) = crate::sched::current().and_then(|t| t.address_space()) {
-                        // R73: scope the VMA read guard to the lookup
-                        // itself. The guard is a spinlock rwlock read
-                        // (preempt-disable while held); keeping it alive
-                        // across file.read_at() below meant every
-                        // demand-fault file read ran with preempt_count
-                        // != 0 — the EXT4_BIG_LOCK waiter then refused
-                        // its sleep path (lock_fair can_sleep) and
-                        // pure-spinned, pinching all 4 CPUs while the
-                        // lock holder waited for block I/O (GNOME
-                        // r72-fire2 wedge: 4 CPUs in lock_fair, gs-b
-                        // starved, screen frozen at M4).
-                        let vma_start_opt = {
-                            let vmas = aspace.vma_read();
-                            vmas.find(page_virt_addr).map(|v| v.start().as_usize())
-                        };
-                        if let Some(vma_start) = vma_start_opt {
-                            let page_offset_in_mapping = page_virt_addr.as_usize() - vma_start;
-                            let file_offset = vma_offset + page_offset_in_mapping;
+                    // R-SC-RV64: file, offset and size all come from the
+                    // entry-time snapshot; no VMA guard is taken here at
+                    // all (the R73 rule — never hold a guard across
+                    // read_at's file I/O — is satisfied trivially, and the
+                    // old pre-read re-lookup's extra rwlock acquisition is
+                    // gone).
+                    //
+                    // Read from file if within file bounds
+                    if file_offset < effective_size {
+                        // Prefer the VMA's pinned file (Linux vm_file):
+                        // the mapping fd may already be closed —
+                        // resolving by fd number failed silently and
+                        // produced zero pages (Ubuntu ld.so).
+                        let file = vm_file
+                            .clone()
+                            .or_else(|| unsafe { crate::fs::get_file_fd(vma_file_fd as usize) });
+                        if let Some(file) = file {
+                            let bytes_to_read = core::cmp::min(
+                                PAGE_SIZE_USIZE,
+                                effective_size.saturating_sub(file_offset),
+                            );
+                            // R71: positional read — the old
+                            // get_pos/set_pos/read/restore dance
+                            // raced against concurrent plain
+                            // read()s on the same pinned vm_file
+                            // (CLONE_VM threads faulting while
+                            // peers read): the interleaving read
+                            // from the OTHER thread's offset and
+                            // mapped .rodata bytes over a .text
+                            // page (GNOME family: Xorg InputThread
+                            // refault livelock, gnome-session
+                            // stack smash, lost tmpfs pages).
+                            // read_at never touches the shared
+                            // file position.
+                            let bytes_read = unsafe {
+                                file.read_at(
+                                    file_offset as u64,
+                                    page_ptr,
+                                    bytes_to_read,
+                                )
+                            };
 
-                            // Effective size: CURRENT inode size (grown or
-                            // truncated since mmap), mmap snapshot as
-                            // fallback.
-                            let effective_size = aspace
-                                .get_vma_file(vma_start)
-                                .and_then(|f| {
-                                    // SAFETY: inode cell written at open time; read-only.
-                                    let inode_opt = unsafe { &*f.inode.get() };
-                                    inode_opt.as_ref().map(|i| i.get_size())
-                                })
-                                .unwrap_or(vma_file_size) as usize;
-
-                            // Read from file if within file bounds
-                            if file_offset < effective_size {
-                                // Prefer the VMA's pinned file (Linux vm_file):
-                                // the mapping fd may already be closed —
-                                // resolving by fd number failed silently and
-                                // produced zero pages (Ubuntu ld.so).
-                                let file = addr_space
-                                    .get_vma_file(vma_start)
-                                    .or_else(|| unsafe { crate::fs::get_file_fd(vma_file_fd as usize) });
-                                if let Some(file) = file {
-                                    let bytes_to_read = core::cmp::min(
-                                        PAGE_SIZE_USIZE,
-                                        effective_size.saturating_sub(file_offset),
-                                    );
-                                    // R71: positional read — the old
-                                    // get_pos/set_pos/read/restore dance
-                                    // raced against concurrent plain
-                                    // read()s on the same pinned vm_file
-                                    // (CLONE_VM threads faulting while
-                                    // peers read): the interleaving read
-                                    // from the OTHER thread's offset and
-                                    // mapped .rodata bytes over a .text
-                                    // page (GNOME family: Xorg InputThread
-                                    // refault livelock, gnome-session
-                                    // stack smash, lost tmpfs pages).
-                                    // read_at never touches the shared
-                                    // file position.
-                                    let bytes_read = unsafe {
-                                        file.read_at(
-                                            file_offset as u64,
-                                            page_ptr,
-                                            bytes_to_read,
-                                        )
-                                    };
-
-                                    // Zero remaining bytes after file data (partial last page)
-                                    if bytes_read > 0 && (bytes_read as usize) < PAGE_SIZE_USIZE {
-                                        core::ptr::write_bytes(
-                                            page_ptr.add(bytes_read as usize), 0,
-                                            PAGE_SIZE_USIZE - bytes_read as usize,
-                                        );
-                                    }
-                                }
+                            // Zero remaining bytes after file data (partial last page)
+                            if bytes_read > 0 && (bytes_read as usize) < PAGE_SIZE_USIZE {
+                                core::ptr::write_bytes(
+                                    page_ptr.add(bytes_read as usize), 0,
+                                    PAGE_SIZE_USIZE - bytes_read as usize,
+                                );
                             }
-                            // Beyond file size: page stays zero-filled (sparse / hole)
                         }
                     }
+                    // Beyond file size: page stays zero-filled (sparse / hole)
                 }
             }
             VmaType::Device => {

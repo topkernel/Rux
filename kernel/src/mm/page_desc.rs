@@ -173,7 +173,7 @@ pub enum PageType {
 /// - _mapcount: 4 bytes (map count, -1 means unmapped)
 /// - _refcount: 4 bytes (reference count)
 /// - private: 8 bytes (private data)
-/// - mapping: 8 bytes (rmap slot 0: mm ptr / address_space)
+/// - mapping: 8 bytes (page-cache eviction key for cache frames)
 /// - index: 8 bytes (rmap slot 0: virtual page number)
 /// - rmap_alt: 48 bytes (rmap slots 1..3: (mm ptr, vpn) pairs)
 /// - _type: 4 bytes (page type)
@@ -206,12 +206,21 @@ pub struct Page {
     /// - File system: stores buffer_head
     private: AtomicUsize,
 
-    /// rmap slot 0: associated address_space / owning mm pointer
-    /// This field is rmap-only; LRU uses the dedicated lru_next/lru_prev.
+    /// Page-cache eviction key for cache-owned frames (the combined
+    /// (fs_id, ino) cache_key from fs::page_cache; set by insert/
+    /// insert_batch, cleared by release_page_frame). NOT an rmap slot:
+    /// page_record_mapping deliberately never writes this field — the
+    /// mm-side release path (release_cache_mapping_pin) and eviction
+    /// reverse-resolve the cache entry through it. Zero for non-cache
+    /// frames. (The legacy page_add_file_rmap would clobber it, but has
+    /// no live callers — fault paths set their fields directly.)
     mapping: AtomicUsize,
 
-    /// rmap slot 0: virtual page number in the owning mm
-    /// This field is rmap-only; LRU uses the dedicated lru_next/lru_prev.
+    /// rmap slot 0: virtual page number in the owning mm. (rmap's slot-0
+    /// record writes ONLY this field; see rmap.rs page_record_mapping.
+    /// The page cache uses the `mapping` field above as its eviction key —
+    /// cache-owned frames therefore take no rmap slot-0 record, see the
+    /// PCACHE arms in the fault paths.)
     index: AtomicUsize,
 
     /// rmap slots 1..3: (mm pointer, virtual page number) pairs for
@@ -427,10 +436,13 @@ impl Page {
         }
         self.lru_next.store(0, Ordering::Release);
         self.lru_prev.store(0, Ordering::Release);
-        // R15-5 (探针误报根因): init_free 漏重置 next_free。描述符内存
-        // 上电为 0，未进过空闲链表的页 next_free=0 而非 FREE_LIST_NULL
-        // ——TDF 探针(next_free!=MAX)把每个首次释放都误报成双重释放
-        // (idle 193/nettest 483 次全是误报)。补上重置，判据恢复可靠。
+        // R15-5 (probe false-positive root cause): init_free used to skip
+        // next_free. Descriptor memory powers on as 0, so a page that had
+        // never been on a freelist carried next_free=0 instead of
+        // FREE_LIST_NULL — the TDF probe (next_free != MAX) then reported
+        // every first release as a double free (idle 193 / nettest 483
+        // hits were all false positives). Reset it here; the criterion is
+        // reliable again.
         self.next_free.store(usize::MAX, Ordering::Release);
         self.flags.clear(PageFlag::OnFreelist);
     }
