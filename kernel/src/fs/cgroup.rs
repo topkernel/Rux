@@ -548,8 +548,8 @@ unsafe fn ino_data(inode: &Inode) -> Option<&'static CgroupInoData> {
 
 /// cgroupfs lookup: child cgroup directory or a control file.
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
-unsafe fn cgroupfs_lookup(dir: &Inode, name: &[u8]) -> Result<Ino, i32> {
-    let data = ino_data(dir).ok_or(errno::Errno::NotADirectory.as_neg_i32())?;
+unsafe fn cgroupfs_lookup(dir: &Inode, name: &[u8]) -> Result<Ino, errno::Errno> {
+    let data = ino_data(dir).ok_or(errno::Errno::NotADirectory)?;
 
     // Control files take precedence over same-named cgroup children
     // (mirrors kernfs: control files cannot be shadowed).
@@ -562,19 +562,19 @@ unsafe fn cgroupfs_lookup(dir: &Inode, name: &[u8]) -> Result<Ino, i32> {
         return Ok(ino_of_dir(unsafe { &*(Arc::as_ptr(&child) as *const CgroupNode) }));
     }
 
-    Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())
+    Err(errno::Errno::NoSuchFileOrDirectory)
 }
 
 /// cgroupfs mkdir: create a child cgroup.
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
-unsafe fn cgroupfs_mkdir(dir: &Inode, name: &[u8], _mode: InodeMode) -> Result<Arc<Inode>, i32> {
-    let data = ino_data(dir).ok_or(errno::Errno::NotADirectory.as_neg_i32())?;
+unsafe fn cgroupfs_mkdir(dir: &Inode, name: &[u8], _mode: InodeMode) -> Result<Arc<Inode>, errno::Errno> {
+    let data = ino_data(dir).ok_or(errno::Errno::NotADirectory)?;
     let name_str = core::str::from_utf8(name)
         .map_err(|_| errno::Errno::InvalidArgument.as_neg_i32())?;
 
     // Control-file names are reserved.
     if control_file_by_name(name).is_some() {
-        return Err(errno::Errno::FileExists.as_neg_i32());
+        return Err(errno::Errno::FileExists);
     }
 
     let node = cgroup::cgroup_create(&data.node, name_str)?;
@@ -645,8 +645,8 @@ unsafe fn cgroupfs_readdir(inode: &Inode) -> Option<Vec<VfsDirEntry>> {
 
 /// cgroupfs iget: instantiate the VFS inode for (parent, name, ino).
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
-unsafe fn cgroupfs_iget(parent: &Inode, name: &[u8], ino: Ino) -> Result<Arc<Inode>, i32> {
-    let data = ino_data(parent).ok_or(errno::Errno::NotADirectory.as_neg_i32())?;
+unsafe fn cgroupfs_iget(parent: &Inode, name: &[u8], ino: Ino) -> Result<Arc<Inode>, errno::Errno> {
+    let data = ino_data(parent).ok_or(errno::Errno::NotADirectory)?;
 
     // Control file?
     if let Some(kind) = control_file_by_name(name) {
@@ -665,7 +665,7 @@ unsafe fn cgroupfs_iget(parent: &Inode, name: &[u8], ino: Ino) -> Result<Arc<Ino
         }
     }
 
-    Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())
+    Err(errno::Errno::NoSuchFileOrDirectory)
 }
 
 /// cgroupfs getattr.

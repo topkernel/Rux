@@ -1828,14 +1828,14 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
                                                 "'{}' fs lookup '{}' -> {} | parent {} | crossed={} | trail={}",
                                                 normalized,
                                                 component,
-                                                e,
+                                                e.as_neg_i32(),
                                                 sbx_dentry_state(&current),
                                                 crossed,
                                                 trail
                                             ),
                                         );
                                     }
-                                    return Err(e);
+                                    return Err(e.as_neg_i32());
                                 }
                             }
                         }
@@ -1844,7 +1844,7 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
 
                     // Call iget to instantiate the VFS Inode
                     let child_inode = match ops.iget {
-                        Some(iget_fn) => iget_fn(&*dir_inode, component.as_bytes(), ino)?,
+                        Some(iget_fn) => iget_fn(&*dir_inode, component.as_bytes(), ino).map_err(|e| e.as_neg_i32())?,
                         None => return Err(errno::Errno::NotADirectory.as_neg_i32()),
                     };
 
@@ -2140,14 +2140,14 @@ fn follow_symlink(
                                     // No negative-dentry caching on ENOENT
                                     // (same unbounded-leak reasoning as the
                                     // other path-walk variant).
-                                    return Err(e);
+                                    return Err(e.as_neg_i32());
                                 }
                             }
                         }
                         None => return Err(errno::Errno::NotADirectory.as_neg_i32()),
                     };
                     let child_inode = match ops.iget {
-                        Some(iget_fn) => iget_fn(&*dir_inode, component.as_bytes(), ino)?,
+                        Some(iget_fn) => iget_fn(&*dir_inode, component.as_bytes(), ino).map_err(|e| e.as_neg_i32())?,
                         None => return Err(errno::Errno::NotADirectory.as_neg_i32()),
                     };
                     let name = String::from(*component);
@@ -2449,6 +2449,7 @@ pub fn vfs_mkdir(pathname: &str, mode: u32) -> Result<(), i32> {
             let new_inode = match mkdir_fn(parent_inode.as_ref(), name.as_bytes(), inode_mode) {
                 Ok(i) => i,
                 Err(e) => {
+                    let e = e.as_neg_i32();
                     sbx_mkdir_stage("fs-mkdir", e);
                     return Err(e);
                 }
@@ -2568,7 +2569,7 @@ pub fn vfs_mknod(pathname: &str, mode: u32, dev: u64) -> Result<(), i32> {
             Some(mknod_fn) => {
                 let inode_mode =
                     crate::fs::inode::InodeMode::new(mode & 0o170000 | (mode & 0o7777));
-                mknod_fn(parent_inode.as_ref(), name.as_bytes(), inode_mode, dev)?;
+                mknod_fn(parent_inode.as_ref(), name.as_bytes(), inode_mode, dev).map_err(|e| e.as_neg_i32())?;
                 vfs_dir_epoch_bump();
 
                 // Invalidate any stale (negative) dentry, the same
@@ -2621,7 +2622,7 @@ pub fn vfs_symlink(pathname: &str, target: &str) -> Result<(), i32> {
     // SAFETY: ops.symlink is a VFS callback; parent_inode Arc is valid in scope
     unsafe {
         if let Some(symlink_fn) = ops.symlink {
-            let new_inode = symlink_fn(parent_inode.as_ref(), name.as_bytes(), target.as_bytes())?;
+            let new_inode = symlink_fn(parent_inode.as_ref(), name.as_bytes(), target.as_bytes()).map_err(|e| e.as_neg_i32())?;
             vfs_dir_epoch_bump();
 
             // Invalidate negative dentry and cache the new one
@@ -3926,7 +3927,7 @@ pub fn file_open(filename: &str, flags: u32, mode: u32) -> Result<usize, i32> {
                     };
                     let filtered_mode =
                         prepare_create_mode(parent_mode_bits, parent_gid, mode);
-                    let new_inode = create_fn(&*parent_inode, child_name.as_bytes(), crate::fs::inode::InodeMode::new(filtered_mode))?;
+                    let new_inode = create_fn(&*parent_inode, child_name.as_bytes(), crate::fs::inode::InodeMode::new(filtered_mode)).map_err(|e| e.as_neg_i32())?;
                     // Linux inode_init_owner(): a setgid parent hands its
                     // gid to everything created inside it (LTP creat09,
                     // CVE-2018-13405 family).

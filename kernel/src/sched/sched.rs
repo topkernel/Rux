@@ -41,17 +41,28 @@ use crate::config::MAX_TASKS;
 
 /// Global run queue — one instance for the whole system.
 ///
-/// Protected by a single keyed spinlock (`KeyedRawSpinlock<GrqKey>`,
-/// §3 typed lock keys: the lock's position in the INV-LOCK hierarchy is
-/// part of its type; INV-LOCK-5's forward direction — GRQ nests inside
-/// the futex bucket lock — is the `CanNestInside<FutexBucketKey> for
-/// GrqKey` impl, and the reverse does not compile once the bucket side
-/// migrates to keys).  All enqueue / dequeue / pick_next operations
-/// must hold this lock.  Timer-tick updates (`scheduler_tick`) only
-/// touch the per-CPU `current` task and do NOT need the lock.
+/// Protected by a single `RawSpinlock`.  All enqueue / dequeue / pick_next
+/// operations must hold this lock.  Timer-tick updates (`scheduler_tick`)
+/// only touch the per-CPU `current` task and do NOT need the lock.
+///
+/// NOTE (2b092c49 withdrawal, 2026-10-29): this lock was briefly a
+/// `KeyedRawSpinlock<GrqKey>` (§3 typed lock keys pilot). That swap —
+/// a supposedly protocol-identical delegate wrapper — is CONVICTED as
+/// the trigger of the d2a58ccb stochastic panic family by a 13-boot
+/// paired adjudication (identical tree differing only by the swap):
+/// WITH the swap, 6/6 x86 exitwalk boots panic in the CFS timeline
+/// btree walk (navigate.rs:552 next_unchecked unwrap, stack:
+/// pick_next_cpu → Iter::next) and the riscv64 orphan-storm churn
+/// panics on a torn-context wild epc right after an R74-DOUBLE-SEED;
+/// WITHOUT it (revert arm + all pre-swap kernels), 7/7 boots run the
+/// full churn clean on both arches. The mechanism (the wrapper adds no
+/// logic — the swap shifts codegen/timing enough to unmask a latent
+/// GRQ-protocol race, or interacts with something subtler) stays OPEN;
+/// the swap itself is withdrawn until that is understood. The lockkey
+/// module and its standalone tests stay.
 pub struct GlobalRunQueue {
     /// Protects dl_rq, rt_rq, cfs_rq, nr_running
-    lock: crate::sync::lockkey::KeyedRawSpinlock<crate::sync::lockkey::GrqKey>,
+    lock: crate::sync::spinlock::RawSpinlock,
     /// Deadline queue (EDF sorted by deadline)
     pub dl_rq: crate::sched::deadline::DlRunQueue,
     /// Real-time queue (bitmap + per-priority lists)
@@ -74,7 +85,7 @@ impl GlobalRunQueue {
     /// Create a new GlobalRunQueue (NOT const — BTreeMap::new() is not const).
     fn new() -> Self {
         Self {
-            lock: crate::sync::lockkey::KeyedRawSpinlock::new(),
+            lock: crate::sync::spinlock::RawSpinlock::new(),
             dl_rq: crate::sched::deadline::DlRunQueue::new(),
             rt_rq: {
                 let mut rt = crate::sched::rt::RtRunQueue::new();
@@ -99,6 +110,24 @@ impl GlobalRunQueue {
         GrqGuard { grq: self as *const Self as *mut Self, flags, _marker: core::marker::PhantomData }
     }
 
+    /// Nested variant of [`lock_irqsave`]: acquires with the same
+    /// protocol, but ONLY callable while an `Outer`-class keyed lock is
+    /// held (the proof is minted by that outer guard) and only when
+    /// `GrqKey: CanNestInside<Outer>` — INV-LOCK-5's forward direction
+    /// as a compile fact. The proof is zero-sized; the runtime protocol
+    /// is identical to lock_irqsave.
+    #[inline]
+    #[track_caller]
+    pub fn lock_irqsave_nested<'a, Outer: crate::sync::lockkey::NestKey>(
+        &self,
+        _proof: &crate::sync::lockkey::NestProof<'a, Outer>,
+    ) -> GrqGuard<'_>
+    where
+        crate::sync::lockkey::GrqKey: crate::sync::lockkey::CanNestInside<Outer>,
+    {
+        self.lock_irqsave()
+    }
+
     /// Lock without IRQ save (for non-interrupt contexts like init).
     #[inline]
     pub fn lock_plain(&self) -> GrqPlainGuard<'_> {
@@ -121,7 +150,7 @@ impl GlobalRunQueue {
         crate::interrupt::preempt::preempt_count_add(
             crate::interrupt::preempt::PREEMPT_OFFSET,
         );
-        if self.lock.try_lock_claim() {
+        if self.lock.try_lock() {
             Some(GrqGuard {
                 grq: self as *const Self as *mut Self,
                 flags,
@@ -3330,10 +3359,36 @@ pub fn steer_task_cpu(task: *mut Task, target: i32) {
 ///     set_state(RUNNING)).
 /// Returns true if the task was transitioned and enqueued.
 pub fn wake_up_enqueue(task: *mut Task) -> bool {
+    wake_up_enqueue_opt(task, None)
+}
+
+/// INV-LOCK-5 load-bearing twin: wake while a futex bucket lock is
+/// held (futex_wake's R12-2 section). The proof is required by
+/// `lock_irqsave_nested`, which only exists for the
+/// GrqKey-inside-FutexBucketKey impl — the nesting that used to be a
+/// comment is now a compile fact.
+pub fn wake_up_enqueue_nested<'a>(
+    task: *mut Task,
+    proof: &crate::sync::lockkey::NestProof<'a, crate::sync::lockkey::FutexBucketKey>,
+) -> bool {
+    wake_up_enqueue_opt(task, Some(proof))
+}
+
+/// Shared body of the wake-up enqueue entry points. `nested` selects
+/// the proof-checked GRQ acquire (one predictable branch; the proof
+/// itself is zero-sized). Public for `Task::wake_up_impl`'s call sites
+/// (task.rs).
+pub fn wake_up_enqueue_opt(
+    task: *mut Task,
+    nested: Option<&crate::sync::lockkey::NestProof<'_, crate::sync::lockkey::FutexBucketKey>>,
+) -> bool {
     if task.is_null() {
         return false;
     }
-    let mut grq_guard = grq().lock_irqsave();
+    let mut grq_guard = match nested {
+        Some(proof) => grq().lock_irqsave_nested(proof),
+        None => grq().lock_irqsave(),
+    };
     // SAFETY: task is non-null and validated by the caller (Task::wake_up's
     // poison check plus an unlocked wakeable-state filter, or a pinned
     // pid-hash lookup); the GRQ lock is held across the state transition so

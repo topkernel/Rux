@@ -42,7 +42,15 @@ def build_init():
         [CC, "-static", "-nostdlib", "-O2"] + MARCH.split() + ["-DHELLO", "-o", hello, src],
         check=True,
     )
-    return out, hello
+    # MSMOVE variant (relative-source MS_MOVE / switch_root guard) —
+    # packed as 'init' when argv[2] == "msmove".
+    msmove = os.path.join(HERE, "init-msmove")
+    subprocess.run(
+        [CC, "-static", "-nostdlib", "-O2"] + MARCH.split()
+        + ["-DMSMOVE", "-o", msmove, src],
+        check=True,
+    )
+    return out, hello, msmove
 
 
 def field(v):
@@ -62,8 +70,11 @@ def entry(name, mode, filesize, data, ino, nlink=1):
 
 
 def main():
-    init, hello = build_init()
-    init_data = open(init, "rb").read()
+    init, hello, msmove = build_init()
+    # argv[2] selects which variant is packed as 'init': default the
+    # boot-test init; "msmove" packs the switch_root MS_MOVE probe.
+    variant = sys.argv[2] if len(sys.argv) > 2 else ""
+    init_data = open(msmove if variant == "msmove" else init, "rb").read()
     hello_data = open(hello, "rb").read()
 
     out = b""

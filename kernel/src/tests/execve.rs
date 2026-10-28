@@ -3,6 +3,10 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 
+// Framekernel layer policy (docs/architecture/framekernel-layers.md):
+// this module must stay Safe Rust.
+#![forbid(unsafe_code)]
+
 use crate::syscall::SyscallNo;
 use crate::syscall::process::sys_kill;
 use crate::syscall::process::sys_uname;

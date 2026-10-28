@@ -3,6 +3,10 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 
+// Framekernel layer policy (docs/architecture/framekernel-layers.md):
+// this module must stay Safe Rust.
+#![forbid(unsafe_code)]
+
 use crate::fs::ext4::indirect::{Ext4BlockIterator, POINTERS_PER_BLOCK, max_file_size, get_indirect_level};
 use super::{test_pass, test_fail, test_group_start};
 

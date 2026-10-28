@@ -9,6 +9,10 @@
 //! from completion: the submitter creates an IoCompletion, passes it to
 //! an async I/O function, then calls `wait()` later (or never, if polling).
 
+// Framekernel layer policy (docs/architecture/framekernel-layers.md):
+// this module must stay Safe Rust.
+#![forbid(unsafe_code)]
+
 use core::sync::atomic::{AtomicBool, AtomicI32, AtomicUsize, Ordering};
 use crate::drivers::timer::msecs_to_jiffies;
 use crate::process::wait::WaitQueueHead;

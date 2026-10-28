@@ -19,6 +19,10 @@
 //! | `X` | (0) | executable unless NX; non-exec is expressed with `NX` |
 //! | `IO` | PWT\|PCD | uncached device memory |
 
+// Framekernel layer policy (docs/architecture/framekernel-layers.md):
+// this module must stay Safe Rust.
+#![forbid(unsafe_code)]
+
 /// Page table entry (also page-directory entries: non-leaf PTEs point down a level)
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 #[repr(transparent)]

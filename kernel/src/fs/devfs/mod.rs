@@ -1133,12 +1133,12 @@ use crate::errno;
 /// Devfs lookup: given a parent directory inode and a child name, return child's ino.
 /// We use a simple hash of the name as the inode number since devfs has no real inodes.
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
-unsafe fn devfs_lookup(dir: &Inode, name: &[u8]) -> Result<Ino, i32> {
-    let entry_ptr = dir.private_data.ok_or(errno::Errno::NotADirectory.as_neg_i32())?;
+unsafe fn devfs_lookup(dir: &Inode, name: &[u8]) -> Result<Ino, errno::Errno> {
+    let entry_ptr = dir.private_data.ok_or(errno::Errno::NotADirectory)?;
     let entry = &*(entry_ptr as *const DevfsEntry);
 
     if !entry.is_dir() {
-        return Err(errno::Errno::NotADirectory.as_neg_i32());
+        return Err(errno::Errno::NotADirectory);
     }
 
     let name_str = core::str::from_utf8(name)
@@ -1149,13 +1149,13 @@ unsafe fn devfs_lookup(dir: &Inode, name: &[u8]) -> Result<Ino, i32> {
         // Use a simple hash as inode number
         Ok(devfs_ino_hash(name_str))
     } else {
-        Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())
+        Err(errno::Errno::NoSuchFileOrDirectory)
     }
 }
 
 /// Devfs iget: instantiate a VFS Inode from (parent_inode, name, child_ino).
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
-unsafe fn devfs_iget(parent: &Inode, name: &[u8], _ino: Ino) -> Result<alloc::sync::Arc<Inode>, i32> {
+unsafe fn devfs_iget(parent: &Inode, name: &[u8], _ino: Ino) -> Result<alloc::sync::Arc<Inode>, errno::Errno> {
     let entry_ptr = parent.private_data.ok_or(errno::Errno::NotADirectory.as_neg_i32())?;
     let parent_entry = &*(entry_ptr as *const DevfsEntry);
 
@@ -1447,18 +1447,18 @@ fn devfs_rel_path(target: &DevfsEntry) -> Option<String> {
 /// bb_make_directory() needs at least EEXIST semantics for existing
 /// directories ("/dev/input" already exists when event nodes are created).
 /// SAFETY: VFS callback contract; private_data is a leaked Arc<DevfsEntry>.
-unsafe fn devfs_mkdir(dir: &Inode, name: &[u8], mode: InodeMode) -> Result<Arc<Inode>, i32> {
-    let entry_ptr = dir.private_data.ok_or(errno::Errno::NotADirectory.as_neg_i32())?;
+unsafe fn devfs_mkdir(dir: &Inode, name: &[u8], mode: InodeMode) -> Result<Arc<Inode>, errno::Errno> {
+    let entry_ptr = dir.private_data.ok_or(errno::Errno::NotADirectory)?;
     let entry = &*(entry_ptr as *const DevfsEntry);
     if !entry.is_dir() {
-        return Err(errno::Errno::NotADirectory.as_neg_i32());
+        return Err(errno::Errno::NotADirectory);
     }
     let name = core::str::from_utf8(name)
         .map_err(|_| errno::Errno::InvalidArgument.as_neg_i32())?;
 
     let mut children = entry.children.lock_irqsave();
     if children.contains_key(name) {
-        return Err(errno::Errno::FileExists.as_neg_i32());
+        return Err(errno::Errno::FileExists);
     }
     let mut dir_entry = DevfsEntry::new_dir(name);
     if mode.bits() & 0o777 != 0 {
@@ -1485,18 +1485,18 @@ unsafe fn devfs_mkdir(dir: &Inode, name: &[u8], mode: InodeMode) -> Result<Arc<I
 /// at /dev/__parameters__ (param_watcher/workspaces are plain files the
 /// service ftruncates and mmaps). Device nodes still need mknod.
 /// SAFETY: VFS callback contract; private_data is a leaked Arc<DevfsEntry>.
-unsafe fn devfs_create(dir: &Inode, name: &[u8], mode: InodeMode) -> Result<Arc<Inode>, i32> {
-    let entry_ptr = dir.private_data.ok_or(errno::Errno::NotADirectory.as_neg_i32())?;
+unsafe fn devfs_create(dir: &Inode, name: &[u8], mode: InodeMode) -> Result<Arc<Inode>, errno::Errno> {
+    let entry_ptr = dir.private_data.ok_or(errno::Errno::NotADirectory)?;
     let entry = &*(entry_ptr as *const DevfsEntry);
     if !entry.is_dir() {
-        return Err(errno::Errno::NotADirectory.as_neg_i32());
+        return Err(errno::Errno::NotADirectory);
     }
     let name = core::str::from_utf8(name)
         .map_err(|_| errno::Errno::InvalidArgument.as_neg_i32())?;
 
     let mut children = entry.children.lock_irqsave();
     if children.contains_key(name) {
-        return Err(errno::Errno::FileExists.as_neg_i32());
+        return Err(errno::Errno::FileExists);
     }
     let file_entry = Arc::new(DevfsEntry::new_file(name, mode.bits()));
     children.insert(String::from(name), file_entry.clone());

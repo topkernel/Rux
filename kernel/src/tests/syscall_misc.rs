@@ -6,6 +6,10 @@
 //!
 //! Includes: prlimit64, getrandom, select, pselect6, eventfd, epoll, poll
 
+// Framekernel layer policy (docs/architecture/framekernel-layers.md):
+// this module must stay Safe Rust.
+#![forbid(unsafe_code)]
+
 use crate::syscall::misc::{sys_getrandom, sys_pselect6, sys_eventfd, sys_eventfd2,
     sys_epoll_create1, sys_epoll_ctl, sys_epoll_pwait, sys_poll, sys_select, sys_ppoll};
 use crate::syscall::process::sys_prlimit64;

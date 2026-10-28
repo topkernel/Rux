@@ -9,6 +9,10 @@
 //!
 //! High-level VMA operations (brk, mmap, munmap) are provided in platform implementations
 
+// Framekernel layer policy (docs/architecture/framekernel-layers.md):
+// this module must stay Safe Rust.
+#![forbid(unsafe_code)]
+
 // Platform-specific AddressSpace re-export (canonical type: crate::mm)
 pub use crate::mm::mm_struct::AddressSpace;
 

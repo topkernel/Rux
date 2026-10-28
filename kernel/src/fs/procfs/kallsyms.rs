@@ -21,6 +21,10 @@
 //! unprivileged readers) — Rux has no such knob and prints the real
 //! addresses, which is what a debugging kernel wants.
 
+// Framekernel layer policy (docs/architecture/framekernel-layers.md):
+// this module must stay Safe Rust.
+#![forbid(unsafe_code)]
+
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;

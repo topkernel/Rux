@@ -20,6 +20,10 @@
 //! Discipline: one arming print per boot; ZERO traffic until a hit
 //! (transient pass-1 states are counted, never printed).
 
+// Framekernel layer policy (docs/architecture/framekernel-layers.md):
+// this module must stay Safe Rust.
+#![forbid(unsafe_code)]
+
 use core::sync::atomic::{AtomicBool, AtomicU64, AtomicUsize, Ordering};
 
 use crate::mm::buddy_allocator::{self, MetaFinding, EMPTY_FINDING};

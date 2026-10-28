@@ -96,6 +96,28 @@ impl RtRunQueue {
         self.rt_nr_running.load(Ordering::Acquire) == 0
     }
 
+    /// Decrement with a CHECKED subtract (the fair-class twin, see
+    /// fair.rs nr_running_dec): a raw fetch_sub on an unbalanced
+    /// decrement wraps the u32 to ~4e9 — is_empty() then reads false
+    /// forever and the idle fast path dies (the P08 comment's underflow
+    /// hazard, now structural).
+    fn rt_nr_dec(&self) {
+        let _ = self.rt_nr_running.fetch_update(
+            Ordering::AcqRel,
+            Ordering::Acquire,
+            |v| v.checked_sub(1),
+        );
+    }
+
+    /// rr_nr_running twin of rt_nr_dec.
+    fn rr_nr_dec(&self) {
+        let _ = self.rr_nr_running.fetch_update(
+            Ordering::AcqRel,
+            Ordering::Acquire,
+            |v| v.checked_sub(1),
+        );
+    }
+
     /// Find the highest priority with runnable tasks
     ///
     /// Returns the bitmap index (0-99) or None if empty; bit 0 is the
@@ -215,10 +237,10 @@ impl RtRunQueue {
             }
 
             // Update counters
-            self.rt_nr_running.fetch_sub(1, Ordering::AcqRel);
+            self.rt_nr_dec();
 
             if t.policy() == SchedPolicy::Rr {
-                self.rr_nr_running.fetch_sub(1, Ordering::AcqRel);
+                self.rr_nr_dec();
             }
 
             // Update highest priority if needed
@@ -306,11 +328,13 @@ impl RtRunQueue {
             // Counters: rt_nr_running/rr_nr_running may already be
             // consistent (a normally-linked task) or drifted; clamp at 0
             // so a double-decrement cannot underflow.
-            if self.rt_nr_running.load(Ordering::Acquire) > 0 {
-                self.rt_nr_running.fetch_sub(1, Ordering::AcqRel);
-            }
-            if t.policy() == SchedPolicy::Rr && self.rr_nr_running.load(Ordering::Acquire) > 0 {
-                self.rr_nr_running.fetch_sub(1, Ordering::AcqRel);
+            // Counters: may already be consistent (a normally-linked
+            // task) or drifted; the checked subtract clamps at 0 so a
+            // double-decrement cannot underflow-wrap (the raw load>0
+            // guard raced a concurrent decrement).
+            self.rt_nr_dec();
+            if t.policy() == SchedPolicy::Rr {
+                self.rr_nr_dec();
             }
 
             if self.is_empty() {

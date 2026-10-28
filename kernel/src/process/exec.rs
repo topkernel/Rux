@@ -309,13 +309,16 @@ pub(crate) fn do_execve_elf(
     if ec2_on { ec2_map = crate::arch::cpu::read_time(); }
 
     // Initial stack at the top of user space (one guard page below
-    // USER_END). Mapped RW here; the VMA below marks it GROWSDOWN.
+    // USER_END). Mapped RW here; the VMA below marks it GROWSDOWN. The
+    // mapped range may span multiple floor-pow2 blocks — the args block
+    // is installed through the page-table walk below, never through the
+    // returned phys base.
     let user_end = crate::arch::mm::user_addr::USER_END as u64;
     let stack_top = user_end - PAGE_SIZE as u64;
     let stack_bottom = stack_top - initial_stack_size;
-    let stack_phys_base = unsafe {
+    let _stack_phys_base = unsafe {
         alloc_and_map_to_user_table(user_ppn, stack_bottom, initial_stack_size, flags)
-    }.ok_or(crate::errno::Errno::OutOfMemory.as_neg_i32())? as usize;
+    }.ok_or(crate::errno::Errno::OutOfMemory.as_neg_i32())?;
 
     // NOTE (abi-review session 1): no explicit zeroing here. BOTH arch
     // alloc_and_map_to_user_table implementations zero every page before
@@ -586,43 +589,85 @@ pub(crate) fn do_execve_elf(
 
         // SAFETY: user_ppn is valid page table root, interp_base/interp_size describe the
         // interpreter's virtual memory range, flags are valid user PTE bits.
-        let interp_phys = unsafe {
+        // The range may span multiple floor-pow2 blocks (a 300-page ld.so
+        // maps as 256+32+16+4) — the segment copies below go through the
+        // page-table walk, never through a phys base (abi-review session 2:
+        // this retires ElfLoader::load_dynamic_to, whose linear
+        // dest_kva + (p_vaddr - min) writes assumed a single block).
+        let _interp_phys = unsafe {
             alloc_and_map_to_user_table(user_ppn, interp_base, interp_size, flags)
         }.ok_or(crate::errno::Errno::OutOfMemory.as_neg_i32())?;
 
-        let interp_kva = phys_to_virt(PhysAddr::new(interp_phys as u64)).bits();
+        // Copy each PT_LOAD through the walker. BSS needs no explicit
+        // zeroing: the allocator pre-zeroes every mapped page.
+        for i in 0..interp_ehdr.e_phnum as usize {
+            // SAFETY: i < e_phnum and interp_bytes is a valid ELF file.
+            if let Some(phdr) = unsafe { interp_ehdr.get_program_header(interp_bytes, i) } {
+                if phdr.is_load() && phdr.p_filesz > 0 {
+                    let offset = phdr.p_offset as usize;
+                    let filesz = phdr.p_filesz as usize;
+                    if !offset.checked_add(filesz).map_or(false, |end| end <= interp_bytes.len()) {
+                        return Err(crate::errno::Errno::ExecFormatError.as_neg_i32());
+                    }
+                    let dst = interp_base + (phdr.p_vaddr - interp_min_vaddr);
+                    // SAFETY: user_ppn is this fresh address space's root;
+                    // dst lies inside the freshly mapped interp range.
+                    if !unsafe {
+                        copy_user_image(user_ppn, dst, &interp_bytes[offset..offset + filesz])
+                    } {
+                        return Err(crate::errno::Errno::OutOfMemory.as_neg_i32());
+                    }
+                }
+            }
+        }
 
-        // SAFETY: interp_bytes is a valid ELF file, interp_kva is the kernel virtual
-        // address of the freshly mapped interpreter memory region.
-        let (entry_offset, _) = unsafe {
-            crate::fs::elf::ElfLoader::load_dynamic_to(interp_bytes, interp_kva)
-        }.map_err(|_| crate::errno::Errno::ExecFormatError.as_neg_i32())?;
-
+        let entry_offset = interp_ehdr
+            .e_entry
+            .checked_sub(interp_min_vaddr)
+            .ok_or(crate::errno::Errno::ExecFormatError.as_neg_i32())?;
         let interp_entry = interp_base + entry_offset;
 
-        // DIVERGENCE CHECK for the interpreter image: read the just-copied
-        // entry word back through the USER PTE path and compare with the
-        // linear-map view. A mismatch means ld.so executes different bytes
-        // than we verified.
+        // READBACK probe: the installed entry word through the USER PTE
+        // path must equal the source image's entry word (the copy and the
+        // readback share one translation, so a mismatch means the copy
+        // itself corrupted — the old linear-vs-PTE IDIVERGE window is
+        // gone by construction). The entry's FILE offset is resolved
+        // through the PT_LOAD that contains its vaddr (p_offset +
+        // (e_entry - p_vaddr)), never assumed to equal the vaddr.
         {
             use crate::arch::mm::mm_ops::PageTableWalker;
             let entry_va = interp_base + entry_offset;
-            let lin = unsafe {
-                core::ptr::read_volatile((interp_kva + entry_offset) as *const u64)
-            };
-            match unsafe { PageTableWalker::walk(user_ppn, entry_va) } {
-                Some((ppn, _)) => {
-                    let pva = phys_to_virt(PhysAddr::new(ppn as u64 * 4096)).bits()
-                        + (entry_va & 0xFFF);
-                    let ptev = unsafe { core::ptr::read_volatile(pva as *const u64) };
-                    if ptev != lin {
-                        crate::pr_err!(
-                            "IDIVERGE pid={} entry={:#x} lin={:#x} pte={:#x} ppn={:#x}",
-                            crate::process::current_pid(), entry_va, lin, ptev, ppn
-                        );
+            let mut src_off = None;
+            for i in 0..interp_ehdr.e_phnum as usize {
+                // SAFETY: i < e_phnum and interp_bytes is a valid ELF file.
+                if let Some(ph) = unsafe { interp_ehdr.get_program_header(interp_bytes, i) } {
+                    if ph.is_load()
+                        && interp_ehdr.e_entry >= ph.p_vaddr
+                        && interp_ehdr.e_entry + 8 <= ph.p_vaddr + ph.p_filesz
+                    {
+                        src_off = Some((ph.p_offset + (interp_ehdr.e_entry - ph.p_vaddr)) as usize);
+                        break;
                     }
                 }
-                None => crate::pr_err!("IDIVERGE pid={} entry UNMAPPED", crate::process::current_pid()),
+            }
+            if let Some(src_off) = src_off {
+                let mut wb = [0u8; 8];
+                wb.copy_from_slice(&interp_bytes[src_off..src_off + 8]);
+                let want = u64::from_le_bytes(wb);
+                match unsafe { PageTableWalker::walk(user_ppn, entry_va) } {
+                    Some((ppn, _)) => {
+                        let pva = phys_to_virt(PhysAddr::new(ppn as u64 * 4096)).bits()
+                            + (entry_va & 0xFFF);
+                        let ptev = unsafe { core::ptr::read_volatile(pva as *const u64) };
+                        if ptev != want {
+                            crate::pr_err!(
+                                "IDIVERGE pid={} entry={:#x} want={:#x} pte={:#x} ppn={:#x}",
+                                crate::process::current_pid(), entry_va, want, ptev, ppn
+                            );
+                        }
+                    }
+                    None => crate::pr_err!("IDIVERGE pid={} entry UNMAPPED", crate::process::current_pid()),
+                }
             }
         }
 
@@ -739,9 +784,6 @@ pub(crate) fn do_execve_elf(
     // Set up stack (Linux reserves 256 bytes of slop below the raw top).
     if ec2_on { ec2_it = crate::arch::cpu::read_time(); }
     let stack_top = stack_top - 256;
-    let phys_stack_top = stack_phys_base + (initial_stack_size as usize - 256);
-
-    let stack_virt_addr = phys_to_virt(PhysAddr::new(phys_stack_top as u64)).bits();
 
     // auxv constants
     const AT_NULL: u64 = 0;
@@ -801,209 +843,197 @@ pub(crate) fn do_execve_elf(
     // misaligned accesses, which is why the twin never tripped.
     let adjusted_stack_top = adjusted_stack_top & !0xFu64;
 
-    let adjusted_phys_stack_top =
-        stack_phys_base + (adjusted_stack_top - stack_bottom) as usize;
-
-    let adjusted_stack_virt_addr = phys_to_virt(PhysAddr::new(adjusted_phys_stack_top as u64)).bits();
+    // Build the args block in a KERNEL buffer, then install it with ONE
+    // page-table-walking copy (abi-review session 2): the allocator now
+    // serves floor-pow2 chunks — a 33-page initial stack maps as 32+1,
+    // two blocks, NOT physically contiguous — so the old
+    // phys_base + offset linear writer is gone by necessity. Writing
+    // through the walker also removes the phys-view-vs-PTE-view DIVERGE
+    // window by construction (write and readback use the same
+    // translation); the readback probe below now compares the installed
+    // words against this buffer.
+    let mut args_buf: alloc::vec::Vec<u8> = alloc::vec![0u8; total_slots * 8];
+    let put_u64 = |buf: &mut [u8], byte_off: usize, v: u64| {
+        buf[byte_off..byte_off + 8].copy_from_slice(&v.to_le_bytes());
+    };
 
     // Saved auxv for core dumps (NT_AUXV): the (type, value) words exactly
     // as written to the user stack below, including the AT_NULL pair.
     // Handed to the new mm after it is created — Linux mm->saved_auxv.
     let mut auxv_words: alloc::vec::Vec<u64> = alloc::vec::Vec::with_capacity(auxv_slots + 2);
 
-    // SAFETY: adjusted_stack_virt_addr points into freshly mapped and allocated user stack
-    // memory. All offsets are pre-calculated to stay within the allocation bounds.
-    unsafe {
-        let stack_ptr = adjusted_stack_virt_addr as *mut u64;
-        let mut offset: isize = 0;
-
-        // Linux semantics: AT_PHDR must point at the phdr table INSIDE the
-        // mapped image (load bias + PT_PHDR.p_vaddr). musl's ld.so computes
-        // the main program's load bias as AT_PHDR - PT_PHDR.p_vaddr; pointing
-        // AT_PHDR at the stack copy made that bias a stack address, so every
-        // PIE relocation landed in garbage and the loader died silently
-        // (found via musl dynlink.c; review PROC-P05). Segments are mapped
-        // at their p_vaddr (bias 0), so the mapped address IS p_vaddr.
-        let mapped_phdr: Option<u64> = {
-            let mut found = None;
-            for i in 0..ehdr.e_phnum as usize {
-                // SAFETY: get_program_header bounds-checks e_phoff/idx against
-                // program_data (Wave 1 central check).
-                if let Some(ph) = unsafe { ehdr.get_program_header(program_data, i) } {
-                    if ph.p_type == crate::fs::elf::ElfPtType::PT_PHDR as u32 {
-                        found = Some(exec_load_bias + ph.p_vaddr);
-                        break;
-                    }
+    // Linux semantics: AT_PHDR must point at the phdr table INSIDE the
+    // mapped image (load bias + PT_PHDR.p_vaddr). musl's ld.so computes
+    // the main program's load bias as AT_PHDR - PT_PHDR.p_vaddr; pointing
+    // AT_PHDR at the stack copy made that bias a stack address, so every
+    // PIE relocation landed in garbage and the loader died silently
+    // (found via musl dynlink.c; review PROC-P05). Segments are mapped
+    // at their p_vaddr (bias 0), so the mapped address IS p_vaddr.
+    let mapped_phdr: Option<u64> = {
+        let mut found = None;
+        for i in 0..ehdr.e_phnum as usize {
+            // SAFETY: get_program_header bounds-checks e_phoff/idx against
+            // program_data (Wave 1 central check).
+            if let Some(ph) = unsafe { ehdr.get_program_header(program_data, i) } {
+                if ph.p_type == crate::fs::elf::ElfPtType::PT_PHDR as u32 {
+                    found = Some(exec_load_bias + ph.p_vaddr);
+                    break;
                 }
             }
-            found
-        };
-        let phdr_addr = mapped_phdr
-            .unwrap_or(adjusted_stack_top + (phdr_offset * 8) as u64);
-        let random_vaddr = adjusted_stack_top + (random_offset * 8) as u64;
-        let execfn_vaddr = adjusted_stack_top + (execfn_string_offset * 8) as u64;
-
-        // Copy program header table
-        let src_ptr = program_data.as_ptr().add(ehdr.e_phoff as usize);
-        let dst_ptr = (stack_ptr as *mut u8).add(phdr_offset * 8);
-        core::ptr::copy_nonoverlapping(src_ptr, dst_ptr, phsize);
-
-        // Write argv strings
-        let mut argv_addrs: alloc::vec::Vec<u64> = alloc::vec::Vec::with_capacity(argv_count);
-        let mut current_string_offset = string_offset;
-
-        for arg in argv.iter() {
-            let string_pos = current_string_offset * 8;
-            let arg_bytes = arg.as_bytes();
-            for (i, &b) in arg_bytes.iter().enumerate() {
-                core::ptr::write_volatile(
-                    (stack_ptr as *mut u8).offset((string_pos + i) as isize),
-                    b
-                );
-            }
-            core::ptr::write_volatile(
-                (stack_ptr as *mut u8).offset((string_pos + arg_bytes.len()) as isize),
-                0
-            );
-            argv_addrs.push(adjusted_stack_top + string_pos as u64);
-            current_string_offset += ((arg.len() + 1 + 7) / 8);
         }
+        found
+    };
+    let phdr_addr = mapped_phdr
+        .unwrap_or(adjusted_stack_top + (phdr_offset * 8) as u64);
+    let random_vaddr = adjusted_stack_top + (random_offset * 8) as u64;
+    let execfn_vaddr = adjusted_stack_top + (execfn_string_offset * 8) as u64;
 
-        // Write envp strings
-        let mut envp_addrs: alloc::vec::Vec<u64> = alloc::vec::Vec::with_capacity(envp_count);
-        let mut current_env_string_offset = env_string_offset;
+    // Copy program header table (bounds validated by get_program_headers:
+    // e_phoff + phsize <= program_data.len()).
+    let phdr_src = ehdr.e_phoff as usize;
+    args_buf[phdr_offset * 8..phdr_offset * 8 + phsize]
+        .copy_from_slice(&program_data[phdr_src..phdr_src + phsize]);
 
-        for env in envp.iter() {
-            let string_pos = current_env_string_offset * 8;
-            let env_bytes = env.as_bytes();
-            for (i, &b) in env_bytes.iter().enumerate() {
-                core::ptr::write_volatile(
-                    (stack_ptr as *mut u8).offset((string_pos + i) as isize),
-                    b
-                );
-            }
-            core::ptr::write_volatile(
-                (stack_ptr as *mut u8).offset((string_pos + env_bytes.len()) as isize),
-                0
-            );
-            envp_addrs.push(adjusted_stack_top + string_pos as u64);
-            current_env_string_offset += ((env.len() + 1 + 7) / 8);
-        }
+    // Write argv strings
+    let mut argv_addrs: alloc::vec::Vec<u64> = alloc::vec::Vec::with_capacity(argv_count);
+    let mut current_string_offset = string_offset;
 
-        // Write pathname string for AT_EXECFN
-        {
-            let execfn_pos = execfn_string_offset * 8;
-            let path_bytes = pathname.as_bytes();
-            for (i, &b) in path_bytes.iter().enumerate() {
-                core::ptr::write_volatile(
-                    (stack_ptr as *mut u8).offset((execfn_pos + i) as isize),
-                    b
-                );
-            }
-            core::ptr::write_volatile(
-                (stack_ptr as *mut u8).offset((execfn_pos + path_bytes.len()) as isize),
-                0
-            );
-        }
-
-        // argc
-        core::ptr::write_volatile(stack_ptr, argc);
-        offset += 1;
-
-        // argv
-        for &addr in &argv_addrs {
-            core::ptr::write_volatile(stack_ptr.offset(offset), addr);
-            offset += 1;
-        }
-
-        // argv terminator
-        core::ptr::write_volatile(stack_ptr.offset(offset), 0u64);
-        offset += 1;
-
-        // envp pointers
-        for &addr in &envp_addrs {
-            core::ptr::write_volatile(stack_ptr.offset(offset), addr);
-            offset += 1;
-        }
-
-        // envp terminator
-        core::ptr::write_volatile(stack_ptr.offset(offset), 0u64);
-        offset += 1;
-
-        // auxv
-        // AT_UID/AT_EUID/AT_GID/AT_EGID come from the (possibly just
-        // setuid-updated) credentials; AT_SECURE=1 makes musl/glibc scrub
-        // unsafe environment variables on privileged execs.
-        let (at_uid, at_euid, at_gid, at_egid) = unsafe {
-            let cred = (*task_ptr).cred();
-            (cred.uid as u64, cred.euid as u64, cred.gid as u64, cred.egid as u64)
-        };
-        let auxv = &[
-            (AT_PHDR, phdr_addr),
-            (AT_PHENT, phent),
-            (AT_PHNUM, phnum),
-            (AT_PAGESZ, PAGE_SIZE as u64),
-            (AT_BASE, at_base),
-            // Linux AT_ENTRY is the main executable's entry (load bias +
-            // e_entry), even when control is first transferred to the
-            // interpreter.
-            (AT_ENTRY, exec_load_bias + entry),
-            (AT_UID, at_uid),
-            (AT_EUID, at_euid),
-            (AT_GID, at_gid),
-            (AT_EGID, at_egid),
-            (AT_HWCAP, 0),
-            (AT_CLKTCK, 100),
-            (AT_SECURE, secure_exec as u64),
-            (AT_RANDOM, random_vaddr),
-            (AT_EXECFN, execfn_vaddr),
-            // P2 vDSO: libc resolves __vdso_clock_gettime & co. through
-            // this ELF mapping and skips the syscall for gettime paths.
-            // (AT_SYSINFO_EHDR, crate::mm::vdso::vdso_ehdr()), // P2-fix: vDSO data page is outside the linear mapping — disable until the page is allocated from linear-mapped memory
-        ];
-
-        for (typ, val) in auxv {
-            core::ptr::write_volatile(stack_ptr.offset(offset), *typ);
-            core::ptr::write_volatile(stack_ptr.offset(offset + 1), *val);
-            auxv_words.push(*typ);
-            auxv_words.push(*val);
-            offset += 2;
-        }
-
-
-        // AT_NULL
-        core::ptr::write_volatile(stack_ptr.offset(offset), AT_NULL);
-        core::ptr::write_volatile(stack_ptr.offset(offset + 1), 0u64);
-        auxv_words.push(AT_NULL);
-        auxv_words.push(0);
-
-        // 16 random bytes AT AT_RANDOM's address (time-seeded LCG; a real
-        // entropy source is a separate work item).
-        let seed = crate::arch::cpu::read_time();
-        let mut state = seed;
-        state = state.wrapping_mul(1103515245).wrapping_add(12345);
-        let rand0 = state;
-        state = state.wrapping_mul(1103515245).wrapping_add(12345);
-        let rand1 = state;
-        core::ptr::write_volatile(stack_ptr.offset(random_offset as isize), rand0);
-        core::ptr::write_volatile(stack_ptr.offset(random_offset as isize + 1), rand1);
+    for arg in argv.iter() {
+        let string_pos = current_string_offset * 8;
+        let arg_bytes = arg.as_bytes();
+        args_buf[string_pos..string_pos + arg_bytes.len()].copy_from_slice(arg_bytes);
+        // The NUL terminator (and the 8-byte padding) is already zero.
+        argv_addrs.push(adjusted_stack_top + string_pos as u64);
+        current_string_offset += ((arg.len() + 1 + 7) / 8);
     }
 
-    // DIVERGENCE CHECK: read the just-written stack back through the USER
-    // PTE path and compare with the phys-pointer view.
-    let probe = |vaddr: u64, label: &str| unsafe {
+    // Write envp strings
+    let mut envp_addrs: alloc::vec::Vec<u64> = alloc::vec::Vec::with_capacity(envp_count);
+    let mut current_env_string_offset = env_string_offset;
+
+    for env in envp.iter() {
+        let string_pos = current_env_string_offset * 8;
+        let env_bytes = env.as_bytes();
+        args_buf[string_pos..string_pos + env_bytes.len()].copy_from_slice(env_bytes);
+        envp_addrs.push(adjusted_stack_top + string_pos as u64);
+        current_env_string_offset += ((env.len() + 1 + 7) / 8);
+    }
+
+    // Write pathname string for AT_EXECFN
+    {
+        let execfn_pos = execfn_string_offset * 8;
+        let path_bytes = pathname.as_bytes();
+        args_buf[execfn_pos..execfn_pos + path_bytes.len()].copy_from_slice(path_bytes);
+    }
+
+    // argc
+    let mut offset: usize = 0;
+    put_u64(&mut args_buf, offset * 8, argc);
+    offset += 1;
+
+    // argv
+    for &addr in &argv_addrs {
+        put_u64(&mut args_buf, offset * 8, addr);
+        offset += 1;
+    }
+
+    // argv terminator
+    put_u64(&mut args_buf, offset * 8, 0);
+    offset += 1;
+
+    // envp pointers
+    for &addr in &envp_addrs {
+        put_u64(&mut args_buf, offset * 8, addr);
+        offset += 1;
+    }
+
+    // envp terminator
+    put_u64(&mut args_buf, offset * 8, 0);
+    offset += 1;
+
+    // auxv
+    // AT_UID/AT_EUID/AT_GID/AT_EGID come from the (possibly just
+    // setuid-updated) credentials; AT_SECURE=1 makes musl/glibc scrub
+    // unsafe environment variables on privileged execs.
+    let (at_uid, at_euid, at_gid, at_egid) = unsafe {
+        let cred = (*task_ptr).cred();
+        (cred.uid as u64, cred.euid as u64, cred.gid as u64, cred.egid as u64)
+    };
+    let auxv = &[
+        (AT_PHDR, phdr_addr),
+        (AT_PHENT, phent),
+        (AT_PHNUM, phnum),
+        (AT_PAGESZ, PAGE_SIZE as u64),
+        (AT_BASE, at_base),
+        // Linux AT_ENTRY is the main executable's entry (load bias +
+        // e_entry), even when control is first transferred to the
+        // interpreter.
+        (AT_ENTRY, exec_load_bias + entry),
+        (AT_UID, at_uid),
+        (AT_EUID, at_euid),
+        (AT_GID, at_gid),
+        (AT_EGID, at_egid),
+        (AT_HWCAP, 0),
+        (AT_CLKTCK, 100),
+        (AT_SECURE, secure_exec as u64),
+        (AT_RANDOM, random_vaddr),
+        (AT_EXECFN, execfn_vaddr),
+        // P2 vDSO: libc resolves __vdso_clock_gettime & co. through
+        // this ELF mapping and skips the syscall for gettime paths.
+        // (AT_SYSINFO_EHDR, crate::mm::vdso::vdso_ehdr()), // P2-fix: vDSO data page is outside the linear mapping — disable until the page is allocated from linear-mapped memory
+    ];
+
+    for (typ, val) in auxv {
+        put_u64(&mut args_buf, offset * 8, *typ);
+        put_u64(&mut args_buf, (offset + 1) * 8, *val);
+        auxv_words.push(*typ);
+        auxv_words.push(*val);
+        offset += 2;
+    }
+
+    // AT_NULL
+    put_u64(&mut args_buf, offset * 8, AT_NULL);
+    put_u64(&mut args_buf, (offset + 1) * 8, 0);
+    auxv_words.push(AT_NULL);
+    auxv_words.push(0);
+
+    // 16 random bytes AT AT_RANDOM's address (time-seeded LCG; a real
+    // entropy source is a separate work item).
+    let seed = crate::arch::cpu::read_time();
+    let mut state = seed;
+    state = state.wrapping_mul(1103515245).wrapping_add(12345);
+    let rand0 = state;
+    state = state.wrapping_mul(1103515245).wrapping_add(12345);
+    let rand1 = state;
+    put_u64(&mut args_buf, random_offset * 8, rand0);
+    put_u64(&mut args_buf, (random_offset + 1) * 8, rand1);
+
+    // Install the block through the page-table walk (one copy; the range
+    // may span multiple physical blocks — copy_user_image resolves each
+    // page).
+    // SAFETY: user_ppn is this fresh address space's root and
+    // [adjusted_stack_top, adjusted_stack_top + args_buf.len()) lies
+    // inside the freshly mapped stack region.
+    if !unsafe { copy_user_image(user_ppn, adjusted_stack_top, &args_buf) } {
+        return Err(crate::errno::Errno::OutOfMemory.as_neg_i32());
+    }
+
+    // READBACK probe: the installed words through the USER PTE path must
+    // equal the buffer we just copied (argc, AT_RANDOM, AT_EXECFN).
+    let probe = |byte_off: usize, label: &str| unsafe {
         use crate::arch::mm::mm_ops::PageTableWalker;
-        let phys_view = core::ptr::read_volatile(
-            (adjusted_stack_virt_addr + (vaddr - adjusted_stack_top)) as *const u64
-        );
+        let mut wb = [0u8; 8];
+        wb.copy_from_slice(&args_buf[byte_off..byte_off + 8]);
+        let want = u64::from_le_bytes(wb);
+        let vaddr = adjusted_stack_top + byte_off as u64;
         match PageTableWalker::walk(user_ppn, vaddr) {
             Some((ppn, _)) => {
                 let va = phys_to_virt(PhysAddr::new(ppn as u64 * 4096)).bits();
                 let v = core::ptr::read_volatile((va + (vaddr & 0xFFF)) as *const u64);
-                if v != phys_view {
+                if v != want {
                     crate::pr_err!(
-                        "DIVERGE pid={} {}: phys={:#x} pte={:#x} mapped_ppn={:#x} block={:#x}",
-                        crate::process::current_pid(), label, phys_view, v, ppn, stack_phys_base
+                        "DIVERGE pid={} {}: want={:#x} pte={:#x} mapped_ppn={:#x}",
+                        crate::process::current_pid(), label, want, v, ppn
                     );
                 }
             }
@@ -1013,9 +1043,9 @@ pub(crate) fn do_execve_elf(
             }
         }
     };
-    probe(adjusted_stack_top, "argc");
-    probe(adjusted_stack_top + (random_offset * 8) as u64, "at_random");
-    probe(adjusted_stack_top + (execfn_string_offset * 8) as u64, "at_execfn");
+    probe(0, "argc");
+    probe(random_offset * 8, "at_random");
+    probe(execfn_string_offset * 8, "at_execfn");
 
     // Create new address space structure
     // SAFETY: user_ppn is a freshly allocated page table root with no prior users.

@@ -1256,7 +1256,7 @@ pub fn mount_procfs() -> Result<(), i32> {
 
 /// ProcFS inode lookup operation
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
-unsafe fn procfs_lookup(dir: &Inode, name: &[u8]) -> Result<Ino, i32> {
+unsafe fn procfs_lookup(dir: &Inode, name: &[u8]) -> Result<Ino, errno::Errno> {
     // PID directory parent: looking up files inside /proc/[pid]/
     if dir.private_data.is_none() && pid::is_valid_pid(dir.ino) {
         let pid_val = dir.ino;
@@ -1312,7 +1312,7 @@ unsafe fn procfs_lookup(dir: &Inode, name: &[u8]) -> Result<Ino, i32> {
                         return Ok(pid_val * 10000 + FD_LINK_INO_OFF + fd_num);
                     }
                 }
-                return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
+                return Err(errno::Errno::NoSuchFileOrDirectory);
             }
         };
         // Use pid * stride + kind as inode number. Stride must exceed max kind value.
@@ -1331,7 +1331,7 @@ unsafe fn procfs_lookup(dir: &Inode, name: &[u8]) -> Result<Ino, i32> {
             b"sockcreate" => 3,
             b"prev" => 4,
             b"keycreate" => 5,
-            _ => return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32()),
+            _ => return Err(errno::Errno::NoSuchFileOrDirectory),
         };
         return Ok(pid_val * 10000 + ATTR_FILE_INO_OFF + off);
     }
@@ -1344,7 +1344,7 @@ unsafe fn procfs_lookup(dir: &Inode, name: &[u8]) -> Result<Ino, i32> {
                 return Ok(tid);
             }
         }
-        return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
+        return Err(errno::Errno::NoSuchFileOrDirectory);
     }
 
     // /proc/[pid]/fdinfo directory: a numeric entry is an fd of the
@@ -1359,14 +1359,14 @@ unsafe fn procfs_lookup(dir: &Inode, name: &[u8]) -> Result<Ino, i32> {
                 return Ok(pid_val * 10000 + FDINFO_FILE_INO_OFF + fd_num);
             }
         }
-        return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
+        return Err(errno::Errno::NoSuchFileOrDirectory);
     }
 
-    let node_ptr = dir.private_data.ok_or(errno::Errno::NotADirectory.as_neg_i32())?;
+    let node_ptr = dir.private_data.ok_or(errno::Errno::NotADirectory)?;
     let node = &*(node_ptr as *const ProcFSNode);
 
     if !node.is_dir() {
-        return Err(errno::Errno::NotADirectory.as_neg_i32());
+        return Err(errno::Errno::NotADirectory);
     }
 
     // Check for PID directory
@@ -1378,12 +1378,12 @@ unsafe fn procfs_lookup(dir: &Inode, name: &[u8]) -> Result<Ino, i32> {
                 return Ok(pid_val);  // Use PID as inode number
             }
         }
-        return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
+        return Err(errno::Errno::NoSuchFileOrDirectory);
     }
 
     match node.find_child(name) {
         Some(child) => Ok(child.ino),
-        None => Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32()),
+        None => Err(errno::Errno::NoSuchFileOrDirectory),
     }
 }
 
@@ -1637,7 +1637,7 @@ unsafe fn procfs_readlink(inode: &Inode, buf: &mut [u8]) -> isize {
 
 /// ProcFS iget: instantiate a VFS Inode from (parent_inode, name, child_ino).
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
-unsafe fn procfs_iget(parent: &Inode, name: &[u8], ino: Ino) -> Result<Arc<Inode>, i32> {
+unsafe fn procfs_iget(parent: &Inode, name: &[u8], ino: Ino) -> Result<Arc<Inode>, errno::Errno> {
     // PID directory parent: creating inode for files inside /proc/[pid]/
     if parent.private_data.is_none() && pid::is_valid_pid(parent.ino) {
         let pid_val = parent.ino;
@@ -1726,7 +1726,7 @@ unsafe fn procfs_iget(parent: &Inode, name: &[u8], ino: Ino) -> Result<Arc<Inode
                     // procfs_readlink below.
                     return Ok(Arc::new(inode));
                 }
-                return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
+                return Err(errno::Errno::NoSuchFileOrDirectory);
             }
         };
 
@@ -1782,13 +1782,13 @@ unsafe fn procfs_iget(parent: &Inode, name: &[u8], ino: Ino) -> Result<Arc<Inode
                 return Ok(Arc::new(inode));
             }
         }
-        return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
+        return Err(errno::Errno::NoSuchFileOrDirectory);
     }
 
     // Parent is the /proc/[pid]/attr directory: build the label file.
     if parent.private_data.is_none() && is_attr_dir(parent.ino) {
         let Some((_, which)) = attr_file_kind_of(ino) else {
-            return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
+            return Err(errno::Errno::NoSuchFileOrDirectory);
         };
         let kind = match which {
             0 => PidFileKind::AttrExec,
@@ -1841,7 +1841,7 @@ unsafe fn procfs_iget(parent: &Inode, name: &[u8], ino: Ino) -> Result<Arc<Inode
     // generated on read through the ProcFSNode's fdinfo_fd.
     if parent.private_data.is_none() && is_fdinfo_dir(parent.ino) {
         let Some((_, fd)) = fdinfo_file_of(ino) else {
-            return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
+            return Err(errno::Errno::NoSuchFileOrDirectory);
         };
         let proc_node = Arc::new(ProcFSNode {
             name: name.to_vec(),
@@ -1867,7 +1867,7 @@ unsafe fn procfs_iget(parent: &Inode, name: &[u8], ino: Ino) -> Result<Arc<Inode
         return Ok(Arc::new(inode));
     }
 
-    let node_ptr = parent.private_data.ok_or(errno::Errno::NotADirectory.as_neg_i32())?;
+    let node_ptr = parent.private_data.ok_or(errno::Errno::NotADirectory)?;
     let parent_node = &*(node_ptr as *const ProcFSNode);
 
     // Check for PID directory
@@ -1883,11 +1883,11 @@ unsafe fn procfs_iget(parent: &Inode, name: &[u8], ino: Ino) -> Result<Arc<Inode
                 return Ok(Arc::new(inode));
             }
         }
-        return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
+        return Err(errno::Errno::NoSuchFileOrDirectory);
     }
 
     let child = parent_node.find_child(name)
-        .ok_or(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())?;
+        .ok_or(errno::Errno::NoSuchFileOrDirectory)?;
 
     let mode = if child.is_dir() {
         InodeMode::new(InodeMode::S_IFDIR | 0o555)
@@ -2369,14 +2369,14 @@ pub static PROCFS_INODE_OPS: INodeOps = INodeOps {
 
 /// Lookup inside the ns directory: "<kind>" → ns-link ino.
 /// SAFETY: VFS callback contract; private_data stores the PID.
-unsafe fn procfs_ns_dir_lookup(dir: &Inode, name: &[u8]) -> Result<Ino, i32> {
+unsafe fn procfs_ns_dir_lookup(dir: &Inode, name: &[u8]) -> Result<Ino, errno::Errno> {
     let pid_val = match dir.private_data {
         Some(p) => p as usize as u64,
-        None => return Err(errno::Errno::NotADirectory.as_neg_i32()),
+        None => return Err(errno::Errno::NotADirectory),
     };
     match crate::process::ns::NsKind::from_name(name) {
         Some(kind) => Ok(pid_val * 10000 + NS_LINK_INO_OFF + kind.index()),
-        None => Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32()),
+        None => Err(errno::Errno::NoSuchFileOrDirectory),
     }
 }
 
@@ -2387,7 +2387,7 @@ unsafe fn procfs_ns_dir_iget(
     _parent: &Inode,
     _name: &[u8],
     ino: Ino,
-) -> Result<Arc<Inode>, i32> {
+) -> Result<Arc<Inode>, errno::Errno> {
     let mut inode = Inode::new(ino, InodeMode::new(InodeMode::S_IFLNK | 0o777));
     inode.fs_id = crate::fs::inode::FS_ID_PROCFS;
     inode.ops = Some(&PROCFS_INODE_OPS);
@@ -2449,20 +2449,20 @@ unsafe fn procfs_ns_dir_getattr(inode: &Inode, stat: &mut crate::fs::Stat) -> i3
 /// PATH — with lookup: None the walk failed ENOTDIR and every
 /// socket-owning OH service child died at its socket chmod.
 /// SAFETY: VFS callback contract; private_data stores the PID.
-pub unsafe fn procfs_fd_dir_lookup(dir: &Inode, name: &[u8]) -> Result<Ino, i32> {
+pub unsafe fn procfs_fd_dir_lookup(dir: &Inode, name: &[u8]) -> Result<Ino, errno::Errno> {
     let pid_val = match dir.private_data {
         Some(p) => p as usize as u64,
-        None => return Err(errno::Errno::NotADirectory.as_neg_i32()),
+        None => return Err(errno::Errno::NotADirectory),
     };
     // Up to 6 digits: MAX_FDS is 1024 today (fds 1000-1023 exist — a
     // 3-digit cap made them ENOENT by path), and the bound below rejects
     // anything past the real table anyway.
     if name.is_empty() || name.len() > 6 || !name.iter().all(|b| b.is_ascii_digit()) {
-        return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
+        return Err(errno::Errno::NoSuchFileOrDirectory);
     }
     let fd: u64 = name.iter().fold(0u64, |acc, b| acc * 10 + (b - b'0') as u64);
     if fd as usize >= crate::fs::file::MAX_FDS {
-        return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
+        return Err(errno::Errno::NoSuchFileOrDirectory);
     }
     // Closed (or out-of-range) fds are ENOENT, like Linux.
     let open = crate::process::find_task_by_pid(pid_val as u32)
@@ -2474,7 +2474,7 @@ pub unsafe fn procfs_fd_dir_lookup(dir: &Inode, name: &[u8]) -> Result<Ino, i32>
         .map(|ft| ft.get_file(fd as usize).is_some())
         .unwrap_or(false);
     if !open {
-        return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
+        return Err(errno::Errno::NoSuchFileOrDirectory);
     }
     Ok(pid_val * 10000 + FD_LINK_INO_OFF + fd)
 }
@@ -2486,7 +2486,7 @@ pub unsafe fn procfs_fd_dir_iget(
     _parent: &Inode,
     _name: &[u8],
     ino: Ino,
-) -> Result<Arc<Inode>, i32> {
+) -> Result<Arc<Inode>, errno::Errno> {
     let mut inode = Inode::new(ino, InodeMode::new(InodeMode::S_IFLNK | 0o777));
     inode.fs_id = crate::fs::inode::FS_ID_PROCFS;
     inode.ops = Some(&PROCFS_INODE_OPS);

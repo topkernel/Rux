@@ -138,16 +138,27 @@ impl CanNestInside<NetQueueKey> for NetStatsKey    // INV-LOCK-6 forward
 
 Migration is opportunistic (the D-6/D-4 doctrine): unkeyed spinlocks
 keep compiling; a pair adopts keys when its invariant is named here,
-and the adoption must not widen the subsystem's public API. Adopted so
-far: the GRQ lock itself (`GlobalRunQueue.lock:
-KeyedRawSpinlock<GrqKey>` — internal type swap only, the GrqGuard API
-and the raw protocol around the lock are unchanged; merge of the sched/
-side rides the scheduling-domain sign-off). Pending pairs: the futex
-`HASH_HEADS` buckets (which completes INV-LOCK-5's compile fence: the
-wake path's nesting becomes `grq_lock.lock_nested(&bucket_guard)`),
-then the INV-LOCK-6 stats/queue pair. The unit group `lockkey` pins the
-positive mechanics; the negative half is a compile-time fact (two
-snippets that must not build are documented in the test).
+and the adoption must not widen the subsystem's public API. Adopted
+so far: the GRQ lock itself (`GlobalRunQueue.lock:
+KeyedRawSpinlock<GrqKey>`) and the futex `HASH_HEADS` buckets
+(`KeyedSpinlock<FutexBucketKey, Option<usize>>`) — INV-LOCK-5's fence
+is LOAD-BEARING end to end: a held guard mints a zero-sized `NestProof`
+(guards are the only minters), futex_wake's R12-2 section calls
+`Task::wake_up_in_futex_bucket(task, &head.proof())` ->
+`wake_up_enqueue_nested` -> `lock_irqsave_nested(&proof)`, and every
+hop of that chain demands the proof; the reverse direction (bucket
+inside GRQ) still compiles nowhere because no impl exists, and the
+same-class double-bucket acquire of FUTEX_REQUEUE (lo/hi, index
+ordered) deliberately stays on the plain API — the keyed surface
+fences ACROSS classes, not within one. Pending pairs: the INV-LOCK-6
+stats/queue pair. The futex WAITER_POOL slot locks are keyed
+(`WaiterSlotKey`, slot-inside-bucket impl): the wake-chain walk and
+the diagnostic scan acquire proof-checked; the top-level allocator/
+free paths stay plain, and the requeue relink window's same-class
+double-slot holds stay plain by design. The unit group `lockkey` pins the
+positive mechanics incl. the data-guard proof chain; the negative half
+is a compile-time fact (snippets that must not build are documented in
+the test).
 
 The irqsave/preempt discipline (INV-LOCK-1/2/3) is deliberately NOT
 keyed — that window is typed by CpuLocal's guard (divergence D-7); one

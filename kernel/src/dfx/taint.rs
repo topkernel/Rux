@@ -7,6 +7,10 @@
 //! Taint flags for tracking kernel state anomalies.
 //! Used by WARN, BUG, panic, softlockup, and other DFX modules.
 
+// Framekernel layer policy (docs/architecture/framekernel-layers.md):
+// this module must stay Safe Rust.
+#![forbid(unsafe_code)]
+
 use core::sync::atomic::{AtomicU32, Ordering};
 
 bitflags::bitflags! {

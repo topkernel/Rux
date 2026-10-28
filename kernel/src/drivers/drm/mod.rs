@@ -637,14 +637,10 @@ fn drmdev_write(_file: &crate::fs::file::File, buf: &[u8]) -> isize {
 }
 
 /// File ops for /dev/dri/card0 and /dev/dri/renderD128.
-pub static DRM_OPS: crate::fs::file::FileOps = crate::fs::file::FileOps {
-    read: Some(drmdev_read),
-    write: Some(drmdev_write),
-    lseek: None,
-    close: None,
-    poll: None,
-    read_at: None,
-};
+pub static DRM_OPS: crate::fs::file::FileOps = crate::fs::file::FileOps::builder()
+    .read(drmdev_read)
+    .write(drmdev_write)
+    .build();
 
 /// True when the File is one of the /dev/dri nodes.
 pub fn is_drm_file(file: &crate::fs::file::File) -> bool {
@@ -704,14 +700,12 @@ fn prime_lseek(file: &crate::fs::file::File, offset: isize, whence: i32) -> isiz
     target as isize
 }
 
-pub static PRIME_OPS: crate::fs::file::FileOps = crate::fs::file::FileOps {
-    read: Some(prime_read),
-    write: Some(prime_write),
-    lseek: Some(prime_lseek),
-    close: Some(prime_close),
-    poll: None,
-    read_at: None,
-};
+pub static PRIME_OPS: crate::fs::file::FileOps = crate::fs::file::FileOps::builder()
+    .read(prime_read)
+    .write(prime_write)
+    .lseek(prime_lseek)
+    .close(prime_close)
+    .build();
 
 /// True when the File is an exported DRM prime fd.
 pub fn is_prime_file(file: &crate::fs::file::File) -> bool {

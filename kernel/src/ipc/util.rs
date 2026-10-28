@@ -3,6 +3,10 @@
 //! Provides the central IPC object registry (ipc_ids), permission checking,
 //! and ID encoding/decoding following the Linux kernel's design.
 
+// Framekernel layer policy (docs/architecture/framekernel-layers.md):
+// this module must stay Safe Rust.
+#![forbid(unsafe_code)]
+
 use crate::sync::spinlock::Spinlock;
 use crate::sched;
 use core::sync::atomic::{AtomicU32, AtomicUsize, Ordering};

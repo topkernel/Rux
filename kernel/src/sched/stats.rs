@@ -23,6 +23,10 @@
 //! and in `enqueue_task_locked` (the wait-window open, under the GRQ
 //! lock).
 
+// Framekernel layer policy (docs/architecture/framekernel-layers.md):
+// this module must stay Safe Rust.
+#![forbid(unsafe_code)]
+
 use core::sync::atomic::{AtomicBool, Ordering};
 
 /// The runtime gate (the sysctl's storage). Default OFF, like the

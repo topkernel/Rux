@@ -19,6 +19,7 @@ use alloc::sync::Arc;
 use alloc::vec;
 use alloc::vec::Vec;
 
+use crate::errno;
 use crate::fs::file::File;
 use crate::fs::inode::{Inode, InodeMode, Ino, INodeOps, VfsDirEntry};
 use crate::fs::FileOps;
@@ -131,7 +132,7 @@ fn build_child_inode(idx: usize) -> Arc<Inode> {
 /// selinuxfs at all" (samgr SA-gate forensics, boots b50+).
 static NODE_TOUCHED: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
 
-unsafe fn selinuxfs_lookup(dir: &Inode, name: &[u8]) -> Result<Ino, i32> {
+unsafe fn selinuxfs_lookup(dir: &Inode, name: &[u8]) -> Result<Ino, errno::Errno> {
     if dir.ino != ROOT_INO {
         // Class discovery probes (`class/<name>/index`) land here — log
         // the first few: they show which security classes libselinux
@@ -147,7 +148,7 @@ unsafe fn selinuxfs_lookup(dir: &Inode, name: &[u8]) -> Result<Ino, i32> {
                 );
             }
         }
-        return Err(-20); // ENOTDIR: child dirs are empty
+        return Err(errno::Errno::NotADirectory); // child dirs are empty
     }
     match node_index(name) {
         Some(idx) => {
@@ -162,17 +163,17 @@ unsafe fn selinuxfs_lookup(dir: &Inode, name: &[u8]) -> Result<Ino, i32> {
             }
             Ok(child_ino(idx))
         }
-        None => Err(-2), // ENOENT
+        None => Err(errno::Errno::NoSuchFileOrDirectory), // ENOENT
     }
 }
 
-unsafe fn selinuxfs_iget(parent: &Inode, _name: &[u8], ino: Ino) -> Result<Arc<Inode>, i32> {
+unsafe fn selinuxfs_iget(parent: &Inode, _name: &[u8], ino: Ino) -> Result<Arc<Inode>, errno::Errno> {
     if parent.ino != ROOT_INO {
-        return Err(-2);
+        return Err(errno::Errno::NoSuchFileOrDirectory);
     }
     match ino.checked_sub(100) {
         Some(i) if (i as usize) < NODES.len() => Ok(build_child_inode(i as usize)),
-        _ => Err(-2),
+        _ => Err(errno::Errno::NoSuchFileOrDirectory),
     }
 }
 

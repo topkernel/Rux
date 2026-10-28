@@ -1187,23 +1187,38 @@ impl Drop for MmStruct {
             // Teardown-context witness (FUT-STALE family): a teardown in a
             // context that is not the (still-live) owner names a
             // deferred/wrong-context drop — the shape the PTLEDGER
-            // DOUBLE-FREE ring then attributes. ZOMBIE owners have already
-            // dropped their mm (they just await reaping) and are NOT
-            // counted. Cheap, bounded print.
+            // DOUBLE-FREE ring then attributes. The owner counts as
+            // still-live ONLY when it can still reach THIS mm: not
+            // PF_EXITING (do_exit's first store — exit_mm clears the
+            // slot long before the ZOMBIE transition, and the exitwalk
+            // churn showed every MM-DROP-CTX hit was an owner inside
+            // exactly that window while a /proc maps walker's pinned Arc
+            // dropped last in the walker's context — the designed
+            // deferred drop, not a UAF) and its slot still names this
+            // MmStruct (identity compare; a slot-held Arc keeps the
+            // refcount above zero, so a live slot here would mean the
+            // refcount itself is corrupt — the real UAF signal).
             {
                 let owner = self.owner_pid();
                 let cur = crate::sched::get_current_pid() as i32;
                 let owner_live = crate::process::find_task_by_pid(owner as u32)
                     .map(|t| {
                         let st = t.state();
-                        !st.is_dead() && !st.contains(crate::process::task::TaskState::ZOMBIE)
+                        !st.is_dead()
+                            && !st.contains(crate::process::task::TaskState::ZOMBIE)
+                            && t.ti_flags()
+                                & crate::process::task::task_flags::TaskFlags::PF_EXITING
+                                    .bits()
+                                == 0
+                            && t.mm_ptr_peek()
+                                == Some(self as *const MmStruct as *const AddressSpace)
                     })
                     .unwrap_or(false);
                 if owner > 0 && owner != cur && owner_live {
                     static DEFER_REPORTS: AtomicUsize = AtomicUsize::new(0);
                     if DEFER_REPORTS.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 8 {
                         crate::pr_warn!(
-                            "MM-DROP-CTX: mm root={:#x} owner pid={} still alive, dropped in pid={} context",
+                            "MM-DROP-CTX: mm root={:#x} owner pid={} still holds this mm, dropped in pid={} context",
                             self.pgd, owner, cur
                         );
                     }

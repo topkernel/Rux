@@ -3,6 +3,10 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 
+// Framekernel layer policy (docs/architecture/framekernel-layers.md):
+// this module must stay Safe Rust.
+#![forbid(unsafe_code)]
+
 //! Dentry cache unit test
 use crate::fs::dentry;
 use alloc::sync::Arc;

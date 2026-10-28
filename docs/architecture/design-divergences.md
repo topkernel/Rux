@@ -42,6 +42,22 @@ launcher execution in-sandbox.
 and cache-locality loss versus per-CPU queues. Acceptable at MAX_CPUS ≤ 4
 (current config); revisit if core counts grow.
 
+**Status (user ruling, 2026-10-28): the GRQ stays.** Per-CPU queueing was
+re-evaluated and rejected as over-engineering at 4 cores with low
+contention; the performance lane's follow-up is GRQ slimming only, not a
+queue-model change. Two anchors for whoever revisits D-1 later:
+
+- Churn control is pinned by configuration, not left to accident:
+  `cfs_min_granularity_ns = 700_000` with the wakeup granularity at the
+  same value, at a 100 Hz tick — a task that is prequeued cannot lose the
+  CPU before ~0.7 ms of service, and the 10 ms tick bounds the re-queue
+  rate, so wake storms do not churn the queue.
+- The "small hold cost" claim above is decomposed by measurement (wake
+  hold = runqueue accounting / dequeue-enqueue / pick / stats segments,
+  from the wakewatch/WW census instruments); future D-1 work should
+  compare segment-wise against that decomposition rather than only the
+  5.1–6.1 µs aggregate.
+
 **Guard.** Perf-gate scheduling domain: GRQ average hold band (5.1–6.1 µs
 ±20%), census in band (TERM 8±2 / REFUSED 32±4), pbench P2 context-switch
 median ±20% — any change touching `sched/` reports these.
@@ -173,9 +189,11 @@ behavior-preserving fallbacks (both old fallback shapes reduce to the
 same event bits). First conversions: the §1 incident family
 (epoll/eventfd/timerfd/signalfd/pipe/inotify).
 
-**Known cost.** Opportunistic migration — the only struct-literal
-tables left are drm x2 (GNOME-lane files, convert when that lane
-rests); everything else builds (D-4 procfile precedent). The refactor
+**Known cost.** Migration COMPLETE: the last two struct-literal
+tables (drm x2 — DRM_OPS/PRIME_OPS, GNOME-lane signed off) converted
+in the refactor lane's final slice; every FileOps table in the tree is
+now a capability declaration (D-4 procfile precedent for the
+opportunistic doctrine that got here). The refactor
 lane converted: slice 3, the pseudo-filesystem cluster (devfs x7 incl.
 the null/zero/full/random char devices, pty x2, procfs, sysfs,
 debugfs, selinuxfs, rootfs, memfd, fifo, char_dev uart, cgroup, vfs
@@ -452,9 +470,12 @@ the surrounding semantics.
 **Design.** Lock-ordering classes carry zero-sized key types
 (`GrqKey`, `FutexBucketKey`, `NetQueueKey`, `NetStatsKey`); a
 PERMITTED nesting is an explicit `impl CanNestInside<Outer> for
-Inner`, and acquiring a keyed lock while another keyed lock is held
-goes through `lock_nested(&outer_guard)`, which only compiles when the
-impl exists. The mainstream approach this replaces is a documented
+Inner`. A held keyed guard mints a zero-sized `NestProof` (guards are
+the only minters — no public constructor), and acquiring a keyed lock
+while another is held consumes that proof (`lock_nested(&proof)`,
+`lock_irqsave_nested(&proof)`), which only compiles when the impl
+exists. The proof's lifetime ties it to the guard, so it cannot
+outlive the held section. The mainstream approach this replaces is a documented
 lock-ordering file plus review plus a post-hoc deadlock watchdog; the
 paid incident class is any INV-LOCK-* reverse-order introduction —
 review-enforced discipline that silently fails under refactor pressure
@@ -472,10 +493,25 @@ the reverse order is an instant machine-wide deadlock).
 **Compatibility evidence.** First adoption is the GRQ's own lock —
 internal type swap (`RawSpinlock` -> `KeyedRawSpinlock<GrqKey>`), the
 GrqGuard API, the irqsave/preempt protocol and every call site
-unchanged; unit suite green with the `lockkey` group (mechanics:
-guard hold/drop, INV-LOCK-5/6 forward nesting, the GRQ claim/unlock
-pattern). The compile-fence becomes load-bearing when the futex bucket
-side migrates (follow-on slice, rides the scheduling sign-off).
+unchanged. SECOND SLICE (coordinator-approved): the fence is
+LOAD-BEARING — the futex `HASH_HEADS` buckets are
+`KeyedSpinlock<FutexBucketKey, Option<usize>>` (same lock_irqsave
+discipline, Deref/DerefMut call sites unchanged), and futex_wake's
+R12-2 wake-under-bucket call is `Task::wake_up_in_futex_bucket(task,
+&head.proof())` -> `wake_up_enqueue_nested` ->
+`GlobalRunQueue::lock_irqsave_nested`, a chain whose every hop
+demands the proof; the bucket->GRQ nesting is now a compile fact
+(the reverse direction remains watchdog-enforced). The requeue path's
+same-class ordered double-bucket acquire (lo/hi) stays on the plain
+API by design. Unit suite green with the `lockkey` group extended
+(guard hold/drop, INV-LOCK-5/6 forward nesting, the GRQ claim/unlock
+pattern, the data-guard proof chain). THIRD SLICE: the futex
+WAITER_POOL slot locks are `KeyedSpinlock<WaiterSlotKey, Option<Waiter>>`
+(`impl CanNestInside<FutexBucketKey> for WaiterSlotKey`); the
+wake-chain walk and the diagnostic scan acquire proof-checked via
+`KeyedSpinlock::lock_nested`; the top-level allocator/free paths and
+the requeue relink window's same-class double-slot holds stay on the
+plain API by design.
 
 **Known cost.** Opportunistic migration (D-4/D-6 doctrine): unkeyed
 locks keep compiling; only pairs named in lock-ordering.md adopt keys,
@@ -504,14 +540,28 @@ compared against a byte count, or returned where a positive errno was
 meant — the error type is an enum, and `Result` is `#[must_use]`, so
 an ignored failure is a build warning, not a silent drop.
 
-**Compatibility evidence.** First conversion: the file-locks subsystem
-(`fs/locks.rs` — flock, POSIX/OFD record locks, leases): the four
-public functions return `Result<(), Errno>`; the six call sites
-(sys_flock in syscall/io.rs, F_SETLK/F_SETLEASE in vfs.rs, three
-break_lease propagation sites) each map once with `as_neg_i32()`.
-Errno values byte-identical (EAGAIN/EINTR/EINVAL/EDEADLK; the enum
-gained the missing `Deadlock = 35` variant). Suite green; the LTP
-fcntl/flock families are the behavioral guard.
+**Compatibility evidence.** Conversions so far: (1) the file-locks
+subsystem (`fs/locks.rs` — flock, POSIX/OFD record locks, leases):
+the four public functions return `Result<(), Errno>`; the six call
+sites (sys_flock in syscall/io.rs, F_SETLK/F_SETLEASE in vfs.rs,
+three break_lease propagation sites) each map once with
+`as_neg_i32()`; the enum gained the missing `Deadlock = 35` variant.
+(2) the xattr subsystem (`fs/xattr.rs` — check_name/may_set/set/get/
+list/remove, 20 error sites, the densest raw-errno file in fs/): all
+typed, the internal ?-propagation type-uniform, the do_* wrappers in
+syscall/file.rs mapping once per arm; the enum gained
+`ResultTooLarge = 34`, `NoData = 61`, `OperationNotSupported = 95`
+(the file's two local errno-constant duplicates are deleted). Errno
+values byte-identical throughout; suite green; the LTP fcntl/flock
+and setxattr/getxattr/listxattr/removexattr families are the
+behavioral guards. (3) the VFS inode-operations table (`fs/inode.rs`
+- the lookup/create/symlink/mkdir/mknod/iget slots, their op_*
+wrappers, and the 26 implementer functions across tmpfs/ext4/procfs/
+devfs/rootfs/sysfs/selinuxfs/debugfs/cgroup): the whole create-class
+path-resolution API is typed. The deep internal layers not yet
+converted (ext4 namei/inode, the sched cgroup helpers) bridge through
+`Errno::from_neg_i32` / `From<i32>` - a documented, visible marker to
+retire as those layers convert.
 
 **Known cost.** Opportunistic adoption: the i32 errno convention
 dominates the tree and keeps compiling; subsystems convert when

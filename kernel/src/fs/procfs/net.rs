@@ -14,6 +14,10 @@
 //! - route    IPv4 routing table
 //! - sockstat socket statistics summary
 
+// Framekernel layer policy (docs/architecture/framekernel-layers.md):
+// this module must stay Safe Rust.
+#![forbid(unsafe_code)]
+
 use alloc::string::String;
 use alloc::vec::Vec;
 
