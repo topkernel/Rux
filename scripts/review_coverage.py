@@ -215,7 +215,7 @@ STATUS = {
     "kernel/src/syscall/file.rs": ("part", "futex2 wrappers, fsync"),
     "kernel/src/syscall/io.rs": ("part", "read/write/pread64 的分块与用户指针校验"),
     "kernel/src/syscall/memory.rs": ("part", "mmap/munmap/mprotect/mremap/brk；msync 回绕已修（ff6fc39b）、mmap 偏移未页对齐已修（b433fb13）、brk 记账已修（e32cdfef）"),
-    "kernel/src/syscall/misc.rs": ("todo", ""),
+    "kernel/src/syscall/misc.rs": ("part", "timerfd 族已对齐 v6.6（sys_timerfd_settime 契约已修 4e1f6110）；epoll/poll/eventfd/signalfd 未读"),
     "kernel/src/syscall/mod.rs": ("todo", ""),
     "kernel/src/syscall/network.rs": ("todo", ""),
     "kernel/src/syscall/process.rs": ("part", "reboot/shutdown 级联、memfd_create 的参数校验（已对齐 879328f3）"),
@@ -494,6 +494,16 @@ BUGS = [
      "but Rux read the value as RELATIVE — a caller passing an absolute deadline waited "
      "twice as long, and an already-expired deadline blocked for the full timeout instead "
      "of returning ETIMEDOUT at once."),
+    ("4e1f6110", "kernel/src/syscall/misc.rs",
+     "sys_timerfd_settime broke the reference contract (kernel/fs/timerfd.c) four ways: "
+     "the old timer was cancelled BEFORE the itimerspec validation (the reference validates "
+     "itimerspec64_valid() first, so an EINVAL call must leave the running timer armed — Rux "
+     "silently disarmed it); old_value was copied out BEFORE the reprogramming (the reference "
+     "reads the new value first, reprograms, then copies the old snapshot out — a faulting "
+     "copy is EFAULT with the NEW timer already programmed); a disarm (it_value == 0) "
+     "returned early keeping the OLD interval and the stale expiration count (timerfd_setup() "
+     "sets ctx->tintv and ctx->ticks = 0 in both the arming and disarming paths); and the "
+     "arming call ran even for total_nsec == 0, arming a dead timer slot."),
 ]
 
 MARKS = {"done": "✅", "fixed": "🔧", "part": "🔶", "todo": "⬜"}
