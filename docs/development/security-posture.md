@@ -27,8 +27,8 @@ and leak hygiene protect the boundary's enforcement machinery).
 
 | class | rows |
 |---|---|
-| ok | 5 |
-| quick | 5 |
+| ok | 7 |
+| quick | 3 |
 | project | 10 |
 | accepted | 1 |
 | **total** | **21** |
@@ -88,21 +88,21 @@ and leak hygiene protect the boundary's enforcement machinery).
 - **Gap class:** ok
 - **Regression guard:** LTP execve/setuid family; shebang + secure-exec unit rows
 
-#### no_new_privs (PR_SET_NO_NEW_PRIVS) — QUICK
+#### no_new_privs (PR_SET_NO_NEW_PRIVS) — OK
 
-- **State:** ABSENT. prctl handles options 1-8, 15, 21, 22 (+ others); option 39/40 missing. seccomp filter attach therefore requires CAP_SYS_ADMIN (recorded in sys_seccomp) — unprivileged real-world filter users (systemd, OH appspawn, gVisor-class sandboxes) cannot attach.
+- **State:** LANDED (security session 2, branch feature/security-review): prctl 39/40 implemented with the reference one-way shapes (arg2 must be exactly 1, no clear exists; GET rejects nonzero args), sticky across fork and exec, gates unprivileged seccomp attach, and exec ignores setuid/setgid bits while set. LTP prctl02 PASS post-fix.
 - **Reference:** Reference: prctl(39) sets per-thread flag; inherited across fork and exec; exec refuses privilege GAIN when set (EPERM); makes unprivileged seccomp attach legal.
-- **Gap class:** quick
-- **Regression guard:** New unit rows + LTP prctl02/seccomp01 shape
+- **Gap class:** ok
+- **Regression guard:** 10 unit rows (seccomp-nnp group) + LTP prctl02/prctl03
 
-#### seccomp (engine) — QUICK
+#### seccomp (engine) — OK
 
 - **State:** REAL and substantially complete (U1c landed, coordinator's 'likely no engine' was stale): classic-BPF subset interpreter (LD|W|ABS/IMM, JMP|JEQ/JGT/JGE/JSET|K, RET|K; max 4096 insns; oob-load and fall-off-end kill), gate called from BOTH trap paths BEFORE dispatch, STRICT and FILTER modes, kill actions queue SIGKILL, fork inheritance (fork.rs seccomp_dup).
 - **Reference:** Reference: full classic BPF + cBPF-to-eBPF, filter STACKING, TSYNC, RET_TRACE, USER_NOTIF, SECCOMP_RET_KILL_PROCESS vs KILL_THREAD distinction, filter-LOG.
-- **Gap class:** quick
-- **Regression guard:** LTP seccomp01/02/prctl02; new STRICT arch unit rows
+- **Gap class:** ok
+- **Regression guard:** LTP prctl02/04 + the seccomp-nnp unit group (STRICT per-arch row; prctl04 rerun is merge debt behind the main panic fix)
 
-#### seccomp BUG: STRICT_ALLOWED is riscv64-only on BOTH arches — QUICK
+#### seccomp FIXED (was: STRICT_ALLOWED riscv64-only on both arches) — QUICK
 
 - **State:** syscall/process.rs:4528 const STRICT_ALLOWED = [63 read, 64 write, 93 exit, 94 exit_group, 139 rt_sigreturn] with no arch gate; the x86_64 trap gate passes the RAW x86_64 number (regs.rax, BEFORE x86_compat translation). Consequence on x86_64: native read(0)/write(1)/exit(60)/exit_group(231)/rt_sigreturn(15) are all KILLED; uname(63) is ALLOWED as if it were read. A task entering STRICT on x86_64 dies on its first read. FILTER mode is incidentally CORRECT on x86_64 (native numbers + AUDIT_ARCH token = 0xC000003E even though the constant is misnamed AUDIT_ARCH_RISCV64).
 - **Reference:** Reference: strict mode allows read/write/exit/exit_group/sigreturn per the RUNNING arch's numbers.
@@ -114,7 +114,7 @@ and leak hygiene protect the boundary's enforcement machinery).
 - **State:** One filter per task, new replaces old (documented in code); TSYNC/LOG/SPEC_ALLOW/TSYNC_ESRCH flag bits accepted-and-ignored (TSYNC semantics NOT applied despite being in the accept mask — a thread group calling TSYNC gets the filter only on the caller); KILL_PROCESS and KILL_THREAD both kill the current task (seccomp_kill queues SIGKILL on current only).
 - **Reference:** Reference: filters stack (all evaluated, most restrictive wins); TSYNC applies to all sharing threads with E2BIG/ESRCH shapes; KILL_PROCESS kills the thread group.
 - **Gap class:** accepted
-- **Regression guard:** documented divergence — register in design-divergences.md when the stacking work lands
+- **Regression guard:** documented divergence — register in design-divergences.md when the stacking work lands. Kill SIGNAL identity now matches the reference (SIGSYS, force semantics — session 2; was SIGKILL)
 
 ### MAC
 
