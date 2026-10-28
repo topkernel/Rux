@@ -12,6 +12,7 @@
 //! - `struct inode_operations`: Inode operation function pointers
 
 use alloc::sync::Arc;
+use crate::errno::Errno;
 use crate::sync::spinlock::Spinlock;
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 use crate::fs::buffer::FileBuffer;
@@ -173,10 +174,10 @@ pub struct INodeOps {
 
     /// Lookup entry in directory
     /// Returns inode number if found, or error
-    pub lookup: Option<unsafe fn(&Inode, &[u8]) -> Result<Ino, i32>>,
+    pub lookup: Option<unsafe fn(&Inode, &[u8]) -> Result<Ino, Errno>>,
 
     /// Create regular file
-    pub create: Option<unsafe fn(&Inode, &[u8], InodeMode) -> Result<Arc<Inode>, i32>>,
+    pub create: Option<unsafe fn(&Inode, &[u8], InodeMode) -> Result<Arc<Inode>, Errno>>,
 
     /// Create hard link
     /// Arguments: (dir, name, target_inode)
@@ -187,16 +188,16 @@ pub struct INodeOps {
 
     /// Create symbolic link
     /// Arguments: (dir, name, target_path)
-    pub symlink: Option<unsafe fn(&Inode, &[u8], &[u8]) -> Result<Arc<Inode>, i32>>,
+    pub symlink: Option<unsafe fn(&Inode, &[u8], &[u8]) -> Result<Arc<Inode>, Errno>>,
 
     /// Create directory
-    pub mkdir: Option<unsafe fn(&Inode, &[u8], InodeMode) -> Result<Arc<Inode>, i32>>,
+    pub mkdir: Option<unsafe fn(&Inode, &[u8], InodeMode) -> Result<Arc<Inode>, Errno>>,
 
     /// Remove empty directory
     pub rmdir: Option<unsafe fn(&Inode, &[u8]) -> i32>,
 
     /// Create device node (mknod)
-    pub mknod: Option<unsafe fn(&Inode, &[u8], InodeMode, u64) -> Result<Arc<Inode>, i32>>,
+    pub mknod: Option<unsafe fn(&Inode, &[u8], InodeMode, u64) -> Result<Arc<Inode>, Errno>>,
 
     /// Rename file/directory
     /// Arguments: (old_dir, old_name, new_dir, new_name)
@@ -257,7 +258,7 @@ pub struct INodeOps {
     /// Instantiate a VFS Inode from (parent_inode, name, child_ino).
     /// Called by dentry-based path_lookup after op_lookup returns the inode number.
     /// Each filesystem implements this to create a fully populated VFS Inode.
-    pub iget: Option<unsafe fn(&Inode, &[u8], Ino) -> Result<Arc<Inode>, i32>>,
+    pub iget: Option<unsafe fn(&Inode, &[u8], Ino) -> Result<Arc<Inode>, Errno>>,
 
     // ==================== Inode Lifecycle ====================
 
@@ -564,35 +565,35 @@ impl Inode {
     /// - `Ok(ino)`: Inode number of found entry
     /// - `Err(errno)`: Error code
     #[inline]
-    pub fn op_lookup(&self, name: &[u8]) -> Result<Ino, i32> {
+    pub fn op_lookup(&self, name: &[u8]) -> Result<Ino, Errno> {
         if let Some(ops) = self.ops {
             if let Some(lookup_fn) = ops.lookup {
                 return unsafe { lookup_fn(self, name) };
             }
         }
-        Err(crate::errno::Errno::FunctionNotImplemented.as_neg_i32())
+        Err(crate::errno::Errno::FunctionNotImplemented)
     }
 
     /// Create regular file in this directory
     #[inline]
-    pub fn op_create(&self, name: &[u8], mode: InodeMode) -> Result<Arc<Inode>, i32> {
+    pub fn op_create(&self, name: &[u8], mode: InodeMode) -> Result<Arc<Inode>, Errno> {
         if let Some(ops) = self.ops {
             if let Some(create_fn) = ops.create {
                 return unsafe { create_fn(self, name, mode) };
             }
         }
-        Err(crate::errno::Errno::FunctionNotImplemented.as_neg_i32())
+        Err(crate::errno::Errno::FunctionNotImplemented)
     }
 
     /// Create directory in this directory
     #[inline]
-    pub fn op_mkdir(&self, name: &[u8], mode: InodeMode) -> Result<Arc<Inode>, i32> {
+    pub fn op_mkdir(&self, name: &[u8], mode: InodeMode) -> Result<Arc<Inode>, Errno> {
         if let Some(ops) = self.ops {
             if let Some(mkdir_fn) = ops.mkdir {
                 return unsafe { mkdir_fn(self, name, mode) };
             }
         }
-        Err(crate::errno::Errno::FunctionNotImplemented.as_neg_i32())
+        Err(crate::errno::Errno::FunctionNotImplemented)
     }
 
     /// Remove directory entry (unlink file)
@@ -630,13 +631,13 @@ impl Inode {
 
     /// Create symbolic link
     #[inline]
-    pub fn op_symlink(&self, name: &[u8], target: &[u8]) -> Result<Arc<Inode>, i32> {
+    pub fn op_symlink(&self, name: &[u8], target: &[u8]) -> Result<Arc<Inode>, Errno> {
         if let Some(ops) = self.ops {
             if let Some(symlink_fn) = ops.symlink {
                 return unsafe { symlink_fn(self, name, target) };
             }
         }
-        Err(crate::errno::Errno::FunctionNotImplemented.as_neg_i32())
+        Err(crate::errno::Errno::FunctionNotImplemented)
     }
 
     /// Rename file/directory

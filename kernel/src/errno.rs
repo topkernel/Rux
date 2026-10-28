@@ -151,6 +151,60 @@ impl Errno {
         -(self as i32)
     }
 
+    /// MIGRATION BRIDGE (divergence D-10, §5): rebuild an `Errno` from
+    /// the ABI's negated form, for call sites where a CONVERTED
+    /// function calls into a not-yet-converted internal layer (the
+    /// ext4 namei/inode paths, the sched cgroup helpers) via `?`.
+    /// Prefer converting the layer — every `?` that resolves through
+    /// this impl is a marker to retire. Codes outside the enum map to
+    /// `IOError` (documented fallback; no in-tree producer emits a code
+    /// the enum does not name).
+    #[inline]
+    pub const fn from_neg_i32(v: i32) -> Self {
+        match -v {
+            1 => Self::OperationNotPermitted,
+            2 => Self::NoSuchFileOrDirectory,
+            3 => Self::NoSuchProcess,
+            4 => Self::InterruptedSystemCall,
+            5 => Self::IOError,
+            6 => Self::NoSuchDeviceOrAddress,
+            7 => Self::ArgumentListTooLong,
+            8 => Self::ExecFormatError,
+            9 => Self::BadFileNumber,
+            10 => Self::NoChild,
+            11 => Self::TryAgain,
+            12 => Self::OutOfMemory,
+            13 => Self::PermissionDenied,
+            14 => Self::BadAddress,
+            15 => Self::BlockDeviceRequired,
+            16 => Self::DeviceOrResourceBusy,
+            17 => Self::FileExists,
+            18 => Self::CrossDeviceLink,
+            19 => Self::NoSuchDevice,
+            20 => Self::NotADirectory,
+            21 => Self::IsADirectory,
+            22 => Self::InvalidArgument,
+            23 => Self::FileTableOverflow,
+            24 => Self::TooManyOpenFiles,
+            25 => Self::NotATypewriter,
+            28 => Self::NoSpaceLeftOnDevice,
+            29 => Self::IllegalSeek,
+            27 => Self::FileTooLarge,
+            30 => Self::ReadOnlyFileSystem,
+            31 => Self::TooManyLinks,
+            32 => Self::BrokenPipe,
+            35 => Self::Deadlock,
+            34 => Self::ResultTooLarge,
+            61 => Self::NoData,
+            95 => Self::OperationNotSupported,
+            39 => Self::DirectoryNotEmpty,
+            40 => Self::TooManySymbolicLinks,
+            38 => Self::FunctionNotImplemented,
+            75 => Self::ValueTooLarge,
+            _ => Self::IOError,
+        }
+    }
+
     /// Get negative value of error code (u64, for system call return)
     #[inline]
     pub const fn as_neg_u64(self) -> u64 {
@@ -232,5 +286,15 @@ mod tests {
         assert_eq!(constants::ENOENT, 2);
         assert_eq!(constants::EBADF, 9);
         assert_eq!(constants::EINVAL, 22);
+    }
+}
+
+/// MIGRATION BRIDGE (see `Errno::from_neg_i32`): lets `?` in a
+/// Result<_, Errno> function absorb a Result<_, i32> from an
+/// unconverted layer. Retire with the deep-layer conversions.
+impl From<i32> for Errno {
+    #[inline]
+    fn from(v: i32) -> Self {
+        Self::from_neg_i32(v)
     }
 }

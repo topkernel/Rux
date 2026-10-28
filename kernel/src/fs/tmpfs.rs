@@ -680,25 +680,25 @@ fn tmpfs_subtree_contains(node: &TmpfsNode, candidate: &TmpfsNode) -> bool {
 }
 
 // SAFETY: VFS callback contract — pointers are valid for the call.
-unsafe fn tmpfs_lookup(dir: &Inode, name: &[u8]) -> Result<Ino, i32> {
+unsafe fn tmpfs_lookup(dir: &Inode, name: &[u8]) -> Result<Ino, errno::Errno> {
     let node = node_of(dir)?;
     if !node.is_dir() {
-        return Err(errno::Errno::NotADirectory.as_neg_i32());
+        return Err(errno::Errno::NotADirectory);
     }
     match node.find_child(name) {
         Some(child) => Ok(child.ino),
-        None => Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32()),
+        None => Err(errno::Errno::NoSuchFileOrDirectory),
     }
 }
 
 // SAFETY: VFS callback contract — pointers are valid for the call.
-unsafe fn tmpfs_create(dir: &Inode, name: &[u8], mode: InodeMode) -> Result<Arc<Inode>, i32> {
+unsafe fn tmpfs_create(dir: &Inode, name: &[u8], mode: InodeMode) -> Result<Arc<Inode>, errno::Errno> {
     let node = node_of(dir)?;
     if !node.is_dir() {
-        return Err(errno::Errno::NotADirectory.as_neg_i32());
+        return Err(errno::Errno::NotADirectory);
     }
     if node.find_child(name).is_some() {
-        return Err(errno::Errno::FileExists.as_neg_i32());
+        return Err(errno::Errno::FileExists);
     }
     let sb = node.sb as *const TmpfsSuperBlock;
     // SAFETY: sb is a leaked mount-lifetime superblock.
@@ -712,13 +712,13 @@ unsafe fn tmpfs_create(dir: &Inode, name: &[u8], mode: InodeMode) -> Result<Arc<
 }
 
 // SAFETY: VFS callback contract — pointers are valid for the call.
-unsafe fn tmpfs_mkdir(dir: &Inode, name: &[u8], mode: InodeMode) -> Result<Arc<Inode>, i32> {
+unsafe fn tmpfs_mkdir(dir: &Inode, name: &[u8], mode: InodeMode) -> Result<Arc<Inode>, errno::Errno> {
     let node = node_of(dir)?;
     if !node.is_dir() {
-        return Err(errno::Errno::NotADirectory.as_neg_i32());
+        return Err(errno::Errno::NotADirectory);
     }
     if node.find_child(name).is_some() {
-        return Err(errno::Errno::FileExists.as_neg_i32());
+        return Err(errno::Errno::FileExists);
     }
     let sb = node.sb as *const TmpfsSuperBlock;
     // SAFETY: sb is a leaked mount-lifetime superblock.
@@ -731,13 +731,13 @@ unsafe fn tmpfs_mkdir(dir: &Inode, name: &[u8], mode: InodeMode) -> Result<Arc<I
 }
 
 // SAFETY: VFS callback contract — pointers are valid for the call.
-unsafe fn tmpfs_symlink(dir: &Inode, name: &[u8], target: &[u8]) -> Result<Arc<Inode>, i32> {
+unsafe fn tmpfs_symlink(dir: &Inode, name: &[u8], target: &[u8]) -> Result<Arc<Inode>, errno::Errno> {
     let node = node_of(dir)?;
     if !node.is_dir() {
-        return Err(errno::Errno::NotADirectory.as_neg_i32());
+        return Err(errno::Errno::NotADirectory);
     }
     if node.find_child(name).is_some() {
-        return Err(errno::Errno::FileExists.as_neg_i32());
+        return Err(errno::Errno::FileExists);
     }
     let sb = node.sb as *const TmpfsSuperBlock;
     // SAFETY: sb is a leaked mount-lifetime superblock.
@@ -759,13 +759,13 @@ unsafe fn tmpfs_mknod(
     name: &[u8],
     mode: InodeMode,
     dev: u64,
-) -> Result<Arc<Inode>, i32> {
+) -> Result<Arc<Inode>, errno::Errno> {
     let node = node_of(dir)?;
     if !node.is_dir() {
-        return Err(errno::Errno::NotADirectory.as_neg_i32());
+        return Err(errno::Errno::NotADirectory);
     }
     if node.find_child(name).is_some() {
-        return Err(errno::Errno::FileExists.as_neg_i32());
+        return Err(errno::Errno::FileExists);
     }
 
     // may_mknod (Linux): S_IFDIR → EPERM, S_IFLNK/unknown → EINVAL; a
@@ -776,8 +776,8 @@ unsafe fn tmpfs_mknod(
     match ftype {
         InodeMode::S_IFCHR | InodeMode::S_IFBLK | InodeMode::S_IFIFO
         | InodeMode::S_IFSOCK | InodeMode::S_IFREG | 0 => {}
-        InodeMode::S_IFDIR => return Err(errno::Errno::OperationNotPermitted.as_neg_i32()),
-        _ => return Err(errno::Errno::InvalidArgument.as_neg_i32()),
+        InodeMode::S_IFDIR => return Err(errno::Errno::OperationNotPermitted),
+        _ => return Err(errno::Errno::InvalidArgument),
     }
     let ftype = if ftype == 0 { InodeMode::S_IFREG } else { ftype };
 
@@ -1100,10 +1100,10 @@ unsafe fn tmpfs_readdir(inode: &Inode) -> Option<Vec<VfsDirEntry>> {
 }
 
 // SAFETY: VFS callback contract — pointers are valid for the call.
-unsafe fn tmpfs_iget(parent: &Inode, name: &[u8], ino: Ino) -> Result<Arc<Inode>, i32> {
+unsafe fn tmpfs_iget(parent: &Inode, name: &[u8], ino: Ino) -> Result<Arc<Inode>, errno::Errno> {
     let node = node_of(parent)?;
     if !node.is_dir() {
-        return Err(errno::Errno::NotADirectory.as_neg_i32());
+        return Err(errno::Errno::NotADirectory);
     }
     let child = node
         .find_child(name)
