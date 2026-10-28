@@ -2603,6 +2603,17 @@ pub fn unix_socket_from_fd(fd: usize) -> Option<Arc<UnixSocket>> {
 pub fn unix_file_of(fd: usize) -> Option<(Arc<UnixSocket>, bool)> {
     let fdtable = crate::sched::get_current_fdtable()?;
     let file = fdtable.get_file(fd)?;
+    unix_file_of_file(&file)
+}
+
+/// Leg-52 lever A (perf-audit): the sendto/recvfrom/recvmsg/writev
+/// classification ladders resolved the SAME fd up to five times
+/// (get_file_fd + one *_file_of per family, each a fresh get_file —
+/// 132-144M get_file calls/boot against ~40-60M fd syscalls). The
+/// ladder heads now resolve the File ONCE and pass it down through
+/// these &_of_file variants; the fd-shaped wrappers stay for cold
+/// callers. Same identity check, same (socket, nonblock) product.
+pub fn unix_file_of_file(file: &Arc<File>) -> Option<(Arc<UnixSocket>, bool)> {
     {
         let ops = unsafe { *file.ops.get() };
         match ops {
@@ -2612,7 +2623,7 @@ pub fn unix_file_of(fd: usize) -> Option<(Arc<UnixSocket>, bool)> {
     }
     let nonblock = (file.flags().bits() & FileFlags::O_NONBLOCK) != 0;
     // SAFETY: ops identity confirmed above.
-    let socket = unsafe { unix_of_file(&file) }?;
+    let socket = unsafe { unix_of_file(file) }?;
     Some((socket, nonblock))
 }
 

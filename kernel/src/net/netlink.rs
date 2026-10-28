@@ -1080,6 +1080,12 @@ pub fn netlink_socket_from_fd(fd: usize) -> Option<Arc<NetlinkSocket>> {
 pub fn netlink_file_of(fd: usize) -> Option<(Arc<NetlinkSocket>, bool)> {
     let fdtable = crate::sched::get_current_fdtable()?;
     let file = fdtable.get_file(fd)?;
+    netlink_file_of_file(&file)
+}
+
+/// Leg-52 lever A: fd resolved once by the classification ladder head;
+/// see unix_file_of_file for the amplification note.
+pub fn netlink_file_of_file(file: &Arc<File>) -> Option<(Arc<NetlinkSocket>, bool)> {
     {
         let ops = unsafe { *file.ops.get() };
         match ops {
@@ -1089,7 +1095,7 @@ pub fn netlink_file_of(fd: usize) -> Option<(Arc<NetlinkSocket>, bool)> {
     }
     let nonblock = (file.flags().bits() & FileFlags::O_NONBLOCK) != 0;
     // SAFETY: ops identity confirmed above.
-    let socket = unsafe { netlink_of_file(&file) }?;
+    let socket = unsafe { netlink_of_file(file) }?;
     Some((socket, nonblock))
 }
 
