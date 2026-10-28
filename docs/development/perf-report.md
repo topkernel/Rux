@@ -3084,3 +3084,54 @@ sched-lane field addition (accessor + field, not policy) — coordinate
 before design freeze; the slowpath's nested with() under the class
 lock's irqsave stays flag-correct (vacuous-tripwire case documented in
 small_alloc.rs:289).
+
+### 8.10.24 Leg 54 (2026-10-29): the sampler verdict — 94% KERNEL / 6% user; the target list decomposes into TWO levers (and a boot-arg gift for the OH lane)
+
+**The sample (sc357, in-kernel dfx=ripsample, launcher-only, 242K
+kernel samples vs 15K user).** Mode split: launcher utime=1583 /
+stime=22093 ticks — the ~100x cold-start gap is KERNEL time on the
+launcher's behalf (syscall/fault paths under 100MB of page-by-page
+faulted libs); zero samples in libark_jsruntime. Kernel pages (all
+dumps aggregated, mine — the coordinator's list was one dump's slice):
+
+| n (share) | page | content |
+|---|---|---|
+| 54605 (22.6%) | 80231000 | arch cpu primitives: save_and_disable_irq/restore_irq + rmap stubs — the IRQ-SAVE PAIR ITSELF, i.e. the aggregated entry cost of every irqsave section |
+| 39317 (16.2%) | 80473000 | PageCache put/put_by_key/put_range/flush_done try_update+fetch_update monomorphizations, MmStruct::sub_rss CAS, SB atomic_loads |
+| 25431 (10.5%) | 807e3000 | CStr::to_owned/clone_into + CString::from + String write_fmt + log crate |
+| 20701 (8.5%) | 80474000 | atomic_store monomorphizations (VfsMount/SB/Task ptrs + all widths) + CAS u8/u32 |
+| 20493 (8.5%) | 80228000 | ConsoleWriter::write_str + flush_publications_scoped closure + TwoWaySearcher + sysfs MultiCharEqSearcher |
+| 15844 (6.5%) | 802c0000 | Atomic<usize/u8/u16/i32> fetch_sub/CAS/load/store wrappers (Arc drop paths) |
+| 27114 (11.2%) | 80805000+80803000 | compiler_builtins memcmp/bcmp/strlen + the whole core::fmt family |
+| 6674 (2.8%) | 807ee000 | fmt::Formatter/pad/fill |
+
+Two levers + one gift: **(1) ATOMIC/IRQ WRAPPERS, ~54%** (pages 1+2+4+6)
+— the per-op cost of lock/atomic/irqsave instruction sequences across
+the hot paths. CAVEAT: tip8 is PRE-leg-52 content (verified: no lever
+symbols in the ELF) — the fdtable's per-lookup lock_irqsave (fixed on
+main by lever B) and per-CPU magazine irqsave (nominated) were feeding
+pages 1/4/6 then. The UNTOUCHED member is the page-cache entry state
+machine (page 2, 16.2%): every faulted page's pin/release runs
+fetch_update CAS LOOPS **under the global inodes mutex** — the
+atomics are redundant (ref_count is private to page_cache.rs; all
+accessor sites hold the lock; verified get/get_phys/pin_by_key/
+get_range_into/collect + put/put_by_key/put_range/flush_done).
+**Item A: convert the lock-covered state ops to locked-plain mutations**
+(get_mut on the atomic storage — no LOCKED prefix, no retry, layout
+stable): the four put-family fetch_updates + the five pin fetch_adds +
+flush_done's dirty store + the follow-up loads. Item B: MmStruct
+sub_rss's CAS — same audit, same treatment if mm-locked. **(2) STRING/
+FMT/CONSOLE, ~33%** (pages 3+5+7+9): printk already filters BEFORE
+formatting (printk.rs:203) — this is REAL EMITTED volume: the sc357
+boot runs loglevel=7 and writes 7.3MB of serial, every byte through
+fmt+ConsoleWriter+UART exits. The GIFT for the OH lane: boot with
+`loglevel=4` + the existing `quietcon` param (console sink stashes to
+the dmesg ring, UART idle — printk.rs ring_stash_console) — an
+image-side change worth a large slice of the 33% with zero kernel
+work; plus their userspace le_epoll `timeout:-1` WARNING loop (500+
+repeats) is pure spam. Kernel-side item C (after A/B): console TX
+batching if the UART path is per-byte — check console.rs. The
+TwoWaySearcher/memcmp share is path-component comparison per lookup —
+a namei-level specialization study, later. **Re-sample request routed
+to the OH lane: same rig on CURRENT main** — leg-52's levers reshaped
+pages 1/4/6 and the real remaining distribution needs one boot.
