@@ -3,6 +3,10 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 
+// Framekernel layer policy (docs/architecture/framekernel-layers.md):
+// this module must stay Safe Rust.
+#![forbid(unsafe_code)]
+
 // Test: Page allocator
 use crate::mm::page::{PhysAddr, VirtAddr, PhysFrame, VirtPage, PAGE_SIZE, PAGE_MASK};
 use super::{test_pass, test_fail, test_group_start};

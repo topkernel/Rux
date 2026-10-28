@@ -3,6 +3,10 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 
+// Framekernel layer policy (docs/architecture/framekernel-layers.md):
+// this module must stay Safe Rust.
+#![forbid(unsafe_code)]
+
 use crate::net::ipv4::checksum::{ip_checksum, verify_ip_checksum, pseudo_header_checksum};
 use super::{test_pass, test_fail, test_group_start};
 

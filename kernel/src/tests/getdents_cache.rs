@@ -17,6 +17,10 @@
 //!     and an entry created mid-walk is visible to the SAME stream.
 //! Plus the dot-synthesis helper shape (pure function, no fs).
 
+// Framekernel layer policy (docs/architecture/framekernel-layers.md):
+// this module must stay Safe Rust.
+#![forbid(unsafe_code)]
+
 use super::{test_fail, test_group_start, test_pass};
 
 /// Walk `fd` with a 512-byte buffer until exhaustion; returns the set

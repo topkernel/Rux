@@ -4,6 +4,10 @@
 //!
 //! epoll system call test
 
+// Framekernel layer policy (docs/architecture/framekernel-layers.md):
+// this module must stay Safe Rust.
+#![forbid(unsafe_code)]
+
 use crate::syscall::{EPollEvent, epoll_events, epoll_ctl_ops, SyscallNo};
 use crate::syscall::misc::{sys_epoll_create1, sys_epoll_ctl, sys_epoll_pwait};
 use crate::fs::file_close;

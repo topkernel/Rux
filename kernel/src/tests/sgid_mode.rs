@@ -3,6 +3,10 @@
 //! mirroring Linux fs/namei.c vfs_prepare_mode() and fs/inode.c
 //! mode_strip_sgid() / inode_init_owner().
 
+// Framekernel layer policy (docs/architecture/framekernel-layers.md):
+// this module must stay Safe Rust.
+#![forbid(unsafe_code)]
+
 use super::{test_fail, test_group_start, test_pass};
 
 pub fn test_sgid_mode() {

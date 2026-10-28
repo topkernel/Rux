@@ -4,6 +4,10 @@
 //!
 //! poll system call test
 
+// Framekernel layer policy (docs/architecture/framekernel-layers.md):
+// this module must stay Safe Rust.
+#![forbid(unsafe_code)]
+
 use crate::syscall::{PollFd, poll_events, sys_poll, SyscallNo};
 use crate::syscall::misc::sys_ppoll;
 use super::{test_pass, test_fail, test_skip, test_group_start};

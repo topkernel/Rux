@@ -3,6 +3,10 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 
+// Framekernel layer policy (docs/architecture/framekernel-layers.md):
+// this module must stay Safe Rust.
+#![forbid(unsafe_code)]
+
 //! Process related system call test
 //!
 //! Includes: clone, execve, exit, wait4, getpid, getppid, kill, set_tid_address, uname
