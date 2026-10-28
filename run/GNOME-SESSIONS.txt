@@ -1483,3 +1483,81 @@ gdm/logind's display bookkeeping (TakeControl/vt allocation) may
 still need /dev/tty0 + VT ioctls + /sys/class/tty. Also gdm3's own
 log is uncaptured (daemonized; syslog-less image) — a /dev/log sink
 is the instrument if the greeter still does not launch.
+
+### Session 17 addendum — r6/r7: gdm names its own gate; udev database
+### is the frontier
+
+- r6 (udevd + trigger + settle before logind): logind's udev monitor
+  ENABLED (the "udev service seems not active" line is gone); gdm3
+  daemonized and STAYED UP; a client (gdm3) actively called login1
+  ListSeats. Still no greeter X.
+- r7 (the /dev/log sink — a tiny AF_UNIX DGRAM reader in runit bound
+  to /dev/log appending to /tmp/gdm-syslog.log — FINALLY captures
+  gdm3's syslog stream; plus ground-truth dumps: udevadm info -e,
+  seat0 CanGraphical, ListSessions): gdm3's own narrative on serial:
+  "Changing user:group to gdm:gdm" (the privilege drop works),
+  "GDM starting to manage displays", "Successfully connected to
+  D-Bus", "New displays on seat0 will use x11", "Checking if udev
+  has settled enough to support graphics", "udev timed out,
+  proceeding anyway", and the retry loop: "seat0 doesn't yet support
+  graphics.  Waiting 10 seconds to try again." / "udev has no
+  candidate graphics devices available yet."
+  Ground truth: udevadm info --export-db is EMPTY (the r6 trigger
+  populated nothing); gdbus seat0 CanGraphical -> "Unknown object
+  /org/freedesktop/login1/seat0" (logind prints "New seat seat0."
+  but its seat bus object is not exported until the seat gets a
+  device); ListSessions -> ().
+- READ: gdm is healthy and waiting on ONE property: seat0.CanGraphical,
+  which logind computes ONLY from udev-database device tags
+  (71-seat.rules master-of-seat on card0). The frontier is the empty
+  udev database: either udevadm trigger enumerates no devices, or
+  udevd discards the Rux uevents (DEVPATH shape / sysfs symlink
+  canonicalization — the same realpath family as the r10
+  xf86-input-libinput "Invalid path" kernel-hunt item). r8 (in
+  flight) adds: verbose re-trigger (enumeration listing), /run/udev
+  + /run/udev/data listing, ps -ef for udevd/logind/gdm liveness,
+  then export-db again — naming which side fails.
+- Operational note (lesson re-learned): the r7 first attempt raced my
+  own make test — gdm-img.sh's mkfs+e2fsck phase ran ~35 min (the
+  staging tree grew with the gdm closure), fire.py loaded the kernel
+  exactly while cargo wrote the test kernel, and the boot panicked at
+  tests/framebuffer.rs fill_rect (0x81a00000 — the v2a signature).
+  Never launch a build+boot chain and a make test in overlapping
+  windows; the kernel load happens at chain END, not launch. Functional
+  gate for the kernel fixes is GREEN and unaffected (run in a clean
+  window): x86_64 rc=0, make test ALL TESTS PASSED, kernel restored
+  (md5 f4715ca4f724, verified against the pre-test snapshot).
+
+### Session 17 addendum 2 — r8 verdict: udev enumeration finds ZERO
+### devices; the kernel item is the sysfs `subsystem` symlink
+
+- r8 diagnostics (verbose re-trigger, /run/udev listing, ps -ef):
+  `udevadm trigger --verbose --subsystem-match=drm,input,graphics`
+  printed NOTHING — sd-device enumeration produced zero candidates.
+  /run/udev exists with the control socket udevd made, but no data/
+  directory was ever created (zero events processed into the db).
+  ps -ef WORKS on Rux (procps) and shows the full chain alive as
+  PID-1 orphans: polkitd(323), systemd-udevd(330),
+  systemd-logind(333), gdm3(336).
+- READ: the break is BEFORE udevd — in sd-device's device discovery.
+  Leading suspect: Rux sysfs device directories lack the `subsystem`
+  readlink (Linux: /sys/devices/.../drm/card0/subsystem ->
+  ../../../../class/drm) that sd_device_get_subsystem resolves;
+  without it the enumerator silently skips every candidate (same
+  family as the uevent-READ content question: Rux's uevent attr read
+  returns MAJOR/MINOR/DEVNAME without SUBSYSTEM). Follow-up kernel
+  work item, precisely scoped: add the `subsystem` symlink to every
+  sysfs device kobject dir (input, drm, net, block, tty) and include
+  SUBSYSTEM= in uevent attr reads; then re-run gdmr8 — gdm's
+  seat0.CanGraphical gate is the very next domino.
+- Session summary: gdm → greeter → PAM → logind → accountsservice
+  chain state on Rux after r1-r8 — accountsservice up (runit),
+  polkitd dbus-activates (setuid helper works), systemd-logind runs
+  STANDALONE (kernel fixes: netlink getsockname/addrlen, SOL_NETLINK
+  sockopts, cgroup2 statfs magic), owns login1, creates seat0;
+  gdm3 daemonizes, drops to gdm:gdm, connects, chooses x11, and
+  idles in its 10s retry loop on seat0.CanGraphical blocked only by
+  the empty udev database (sysfs device discovery). The greeter X,
+  PAM (user rux/rux shadow-hash staged), and the login screen have
+  NOT yet been reached — they are the next milestones once the udev
+  db populates.
