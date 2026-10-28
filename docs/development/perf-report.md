@@ -2184,3 +2184,407 @@ load-gated watcher run/pa72-reanchor.sh holds the board unbanked —
 bank only if load1<=9 AND qemus<=8 opens before the leg ends);
 (4) F4 arm-1 re-queued behind the fs fix (unchanged); (5) Tier-2
 gate anchor unchanged (pb1 DEBUG column).
+
+### 8.10.16 Leg 47 (2026-10-28): the PREEMPT-UNDERFLOW attribution is REFUTED by direct A/B — the waitid-cluster class pre-dates the 488528dc->979fde80 delta and D-7 cannot produce it; leak-origin sites captured on the pre-delta kernel; AF_UNIX read(2) direct user-drain carried to A/B
+
+Main 0f806d8b merged at leg start (b84eba6f). Priority 1 was the
+coordinator-routed triage of stress-fleet s12's finding (PREEMPT-UNDERFLOW
+on waitid/ptrace rows, suspected on the D-7 percpu rework via the
+488528dc->979fde80 delta). Full evidence file:
+run/pa73-preempt-underflow-triage.txt.
+
+**(1) The prints are the heal's own guard-unpair report, not a new
+producer.** Every cluster in the stress lane's r17 logs is
+`PREEMPT-HEAL was=0x10001 held=~0x3f0` followed by the underflow at
+that same guard's drop — the exact "documented guard-unpair path"
+their session-3 verdict banked. was=0x10001 = one PREEMPT bit + the
+tick's own in-flight HARDIRQ_OFFSET; held ~1008 jiffies = the heal's
+10 s threshold.
+
+**(2) The wedge pre-dates the delta.** Fleet ltp-b r66 (v16-class
+kernel, main ancestor 47d96961 = Oct 25, before 488528dc existed)
+carries the identical class: 142 heals + 101 underflows, wedged pid
+0x525 = the SAME test's parent (waitid08), PREEMPT-LEAK pctick=1
+samples whose RIPs symbolize into `do_wait`'s
+`for_each_group_child` scan loop. Fleet rounds r51-r65 tally
+PREEMPT-LEAK routinely (r56/r57 in the thousands) on pre-delta
+kernels.
+
+**(3) Direct A/B on both range ends (pa73, 2026-10-28 02:33, three
+concurrent arms, sweepstart=1290, same LTP rootfs):**
+
+| arm | kernel | heals | underflows | dominant shape |
+|---|---|---|---|---|
+| pa73a | 0f806d8b (tip) | 136 | 134 | 37P/3F/5TCONF/6TO, pid=0x251 PROCESS_TREE_LOCK |
+| pa73b | 488528dc (pre-delta) | 148 | 147 | 38P/3F/5TCONF/5TO, pid=0x251 PROCESS_TREE_LOCK |
+| pa73c | 488528dc + leakhunt/wwcensus | 146 | 146 | same pid/lock class |
+
+Same pids (the waitid08 parent 0x251 dominant in every arm), same lock
+(both addresses symbolize to task.rs:33), same shape — and the
+PRE-DELTA kernel fired MORE heals than the tip (148 vs 136; stochastic
+wedge variance). LTP row outcomes equivalent between arms (one TIMEOUT
+apart). The delta is exonerated as the origin; the s12 r11/r12 "zero"
+control was a stochastic miss (their own r64/r65 vs r66 flake the same
+way on one kernel).
+
+**(4) D-7 is exonerated by mechanism.** CpuLocal::with touches only
+the IRQ flag (save_and_disable_irq/restore) and a per-row in_use
+flag; it never adds/subtracts preempt_count. The small_alloc
+conversion kept identical irq windows and fallbacks (diff-verified
+488528dc..979fde80). The s12 "D-7 per-CPU preempt-count carrier"
+description does not match the code — there is no preempt-count
+carrier in D-7.
+
+**(5) Mechanism + handoff.** A leaked/abandoned PREEMPT +1 (the
+standing wildwrite-hunt producer) makes the holder un-sleepable
+(__schedule refuses a nonzero count); in do_wait the task then spins
+the children-scan loop monopolizing its CPU until the 10 s tick heal
+clears the base; if the heal lands inside a live guard window, that
+guard's drop books -1 on zero = the underflow print. LTP rows are
+unaffected (their own byte-identical failure-set A/B). pa73c's
+dfx=leakhunt+wwcensus boot captured the acquire sites on the
+PRE-DELTA kernel: sched.rs:4124 (dequeue_if_enqueued's
+grq().lock_irqsave), wait.rs:361 (finish_wait's list lock_irqsave),
+spinlock.rs:292 — all do_wait-machinery guard scopes, cnt_after=1
+with the drop overdue. Capture preserved at
+run/pa73-underflow/serial-pa73c.log; the producer hunt stays the
+stress lane's (their instrument, their hunt — now with a kernel-free
+fingerprint on 488528dc).
+
+**(6) AF_UNIX read(2) direct user-drain (leg 46's lever, WIP
+2f66b0b8): A/B banked — PARTIAL WIN, gate PASS.** Kernels:
+run/pa74-{main,branch}-strong-bzImage (0f806d8b vs +drain, distinct
+hashes). (a) Deterministic samecpu pin windows (p5longpin, the
+leg-46 discriminators): pin_r64 42.051 -> 35.793 us (-14.9%) and
+pin_r4k 42.521 -> 35.783 (-15.9%) — the serialized read-drain class
+IMPROVED and the pin_r4k chunk-multiplier warning did NOT
+materialize; pin_recv64 5.708 -> 4.668 and spread_r64 4.236 -> 4.668
+(untouched paths, noise band). The leg-46 hoped regime FLIP to the
+5-8 us class did NOT happen: removing the staged alloc + double copy
+buys exactly that share (~6 us) of the receiver's cycle; the residual
+~36 us is the wake->drain->re-block handoff cycle itself — that
+floor belongs to the sched lane's regime-flipper thread, not to
+receive-path staging. (b) Board pairs (M,B,B,M interleaved at load
+17-21 — REJECTED: a host spike spanned both B boots, proven by the
+untouched p5c3_stream_wrecv reading +44% on B; then two clean pairs
+5M/6B and 7M/8B at load ~12): every P5 row within +-20% or improved —
+p5c2_stream_send -1.2%/-8.4%, p5d_rt_read -7.7%/-7.7% (consistent),
+p5c3 +3.2%/-4.2%, p5a +2.5%/-4.5%, p5b -1.6..-7.7%, p5e +6.7%/-2.7%,
+p5f -2.7%/-9.9%. Non-IPC scatter rows (p2_ctxsw +39.7%/+14.6%,
+p6_append +49.2%/-2.8%, p6_unlink +39.6%/-13.6%) flip sign across
+pairs and execute no socket code — adjudicated host noise per the
+session-11/stress-s12 interleaving method; p1_clock ran -7%/-14%
+FASTER on B in the same windows. IPC-domain gate: PASS.
+Correctness gates: dual-arch build rc=0; riscv64 smoke boot 0 panics
+(run/rv-smoke-leg47.sh); `make test` ALL TESTS PASSED on the drain
+kernel; dgram one-record-per-read and O_NONBLOCK/EAGAIN/EOF
+semantics preserved by construction (same unix_recv_ctl engine,
+nonblocking continuations after the first byte).
+
+Gates so far this leg: dual-arch build rc=0 (riscv64 debug + x86_64
+strong on both range ends and the branch tip); QEMU discipline held
+(2-3 lane boots at a time, own PIDs only, mem floor >=36G throughout,
+boots launched only after the 60-min leg-start hold).
+
+**D-7 row re-anchor BANKED (pa75q, 2026-10-28 04:01-04:05).** The
+quiet window the leg began without (OH gate chain held it until
+~03:43) opened at 04:01 (load1<=9, qemus<=8); the watcher
+(run/pa75-reanchor.sh, leg-46 discipline) banked ONE full board on
+the merged-main strong kernel (run/pa74-main-strong-bzImage =
+0f806d8b), rc=0, zero panics, load1=9 at boot end. Key quiet-window
+rows for the standing D-7/p5b regime questions: p1_null 0.611 /
+p1_clock 0.692 / p2_ctxsw 1.373 (the noisy rows settle to their
+quiet class — ctxsw 1.37 vs 1.9-2.0 loaded); p5a_pipe 2.435;
+p5b_dgram_send 5.061 / p5b_dgram_recv_peek 5.943 (the FAST dgram
+regime — quiet windows keep both CPUs effectively free);
+p5c_stream_write 38.745 / p5c2_stream_send 38.604 / p5f 38.224
+(the cross-process serialized class persists even quiet — intrinsic
+to the board's own pairing on SMP2, consistent with 8.10.15's
+same-CPU-serialization verdict); p5c3 4.700, p5d_rt_read 4.670,
+p5d_rt_recv 4.881, p5e_stream_send 4.229; p6_stat 16.165,
+p6_append 80.516, p6_unlink 15980, p6_mkdrmdir 51939, p7_sleep1ms
+932.4. Serial: work/pbench-pa75q-serial.log.
+
+### 8.10.17 Leg 48 (2026-10-28): main 584c1105 merged; the AF_UNIX drain re-gated against the NEW main — IPC gate PASS, ready for merge; p2_ctxsw anchor provenance banked
+
+The leg opened with pa74 (d30f40de) and the pa75q D-7 re-anchor
+(a90f46f0) already committed — leg-47 banked both at 04:11 before the
+quota kill. Remaining was exactly the mission: main had moved
+0f806d8b -> 584c1105 (pipe close fix, console cond_resched cfe0b7c4,
+binder BR_SPAWN_LOOPER/oneway set, leakhunt v3 + slowtask instruments),
+and the console cond_resched change touches serial-burst scheduling —
+the leg-47 A/B anchor was stale for a ready-for-merge verdict.
+
+**Merge + correctness gates (branch tip 9baf390a = 584c1105 +
+drain):** merge clean (no conflicts; branch delta vs main is exactly
+net/unix.rs +145, syscall/io.rs +18, docs, run scripts). Dual-arch
+build rc=0 (x86_64 debug, riscv64 debug). riscv64 minimal-rootfs smoke
+(run/rv-smoke-leg48.sh): 0 panics, suite green in the 150s window.
+`make test`: "All tests passed! Total: 1122 tests" (suite grew with
+main's additions; the make target's nonzero exit is its own timeout
+reaping the parked post-halt QEMU — the in-log verdict is green, same
+pattern the smoke script tolerates by construction).
+
+**pa77 re-gate A/B (kernels run/pa77-{main,branch}-strong-bzImage,
+distinct hashes; M = pure 584c1105, B = tip 9baf390a; driver
+run/pa77-pair.sh; boots 06:54-07:16, load1 9-11 at boot starts, all
+six rc=0, zero panics).**
+
+Deterministic samecpu pin windows (adjacent M,B):
+pin_r64 38.381 -> 36.230 (-5.6%), pin_r4k 37.870 -> 37.042 (-2.2%),
+untouched pin_recv64 5.101 -> 5.242 (+2.8%), spread_r64 5.221 ->
+4.400 (-15.7%) — all in band, target rows improved. NOTE: the leg-47
+-15% pin deltas shrank to -2..-6% because the NEW main itself reads
+~4 us faster in those windows (42.1 -> 38.4 pin_r64) — the console
+cond_resched fix plausibly removed a share of the same serialized
+cost the drain lever attacks. The lever still never regresses a row.
+
+Interleaved board pairs (1M,2B fast-dgram regime; 3B,4M slow regime —
+each pair regime-coherent, the documented p5b bimodality fell between
+pairs, not inside one):
+
+| row | pair1 B-vs-M | pair2 B-vs-M |
+|---|---|---|
+| p5a_pipe | +2.9% | (absent in 3B) |
+| p5b_dgram_send | +5.8% | +3.6% |
+| p5b_dgram_recv_peek | +14.3% | +3.8% |
+| p5d_rt_read (lever target) | -3.1% | -3.4% |
+| p5e_stream_send | (absent in 1M; 2B 4.500 vs 3B 4.490 flat) | |
+| p5e_child_spin | +2.3% | +1.9% |
+| p5c3_stream_wrecv | 2B-only 5.081 (no M co-occurrence; vs pa75q quiet 4.700 = +8.1%) | |
+
+Every P5 row within +-20% or improved; p5d_rt_read consistently
+improved in both pairs (the read(2)-shaped row the lever targets).
+Watch row: p2_ctxsw reads +8.9%/+9.7% on B in both pairs — within the
++-20% scheduling band and inside the documented loaded-window class
+(1.34-1.53 us vs quiet anchor 1.373; loaded ceiling ~2.0), the row
+executes no socket code, and B boots started at load1=9 vs M boots'
+11 (not load-order-explained) — two pairs cannot separate a ~0.13 us
+absolute move from LTO layout shift; flagged for the next board that
+co-occurs the row, not a gate failure.
+
+**Verdict: the AF_UNIX read(2) direct user-drain (2f66b0b8 code,
+d30f40de leg-47 verdict) is READY FOR MERGE at tip 9baf390a** —
+correctness gates green, IPC domain gate PASS against the current
+main anchor with regime-coherent interleaved pairs, target rows
+improved in every interpretable window.
+
+**p2_ctxsw anchor provenance banked** (the standing debt):
+docs/development/perf-gate-baseline.md now carries the P2_CTXSW
+ANCHOR PROVENANCE note — the scheduling domain row is profile-bimodal
+(DEBUG: pb1 15.409 us, what run/perf-gate.sh's anchor JSON carries;
+RELEASE-STRONG: pa41-strong 1.383 us re-banked quiet by pa75q at
+1.373 us, loaded class 1.9-2.0 us) and strong-class gate runs must
+never be judged against the 15.4 debug cell. The pa77 board's own
+p2_ctxsw readings (1.338-1.533 across both arms at load1 9-11) sit
+inside the strong loaded band — consistent with the anchor.
+
+Host discipline: boots strictly sequential (one lane QEMU at a time,
+never above 1), own PIDs only, mem floor >=45G observed throughout, boots interleaved
+around the unattended stress-fleet rounds (4-8 foreign QEMUs).
+
+### 8.10.18 Leg 49 (2026-10-28): F4 arm-2 LANDED — lazy per-transaction revokes; mkdrmdir -71.4%, unlink -99.5% (pa78, regime-coherent pairs); the semantics note preceded the code and cleared with no cancel records; track-1 carried R37 (timer slot table)
+
+The leg opened on merged main f15b9660 (leg-48 merge 0901b581 +
+gnome-bringup). Three tracks: the arm-2 design item end-to-end, the
+track-1 lever pick, and the standing arm-1 watch.
+
+**Arm-2 semantics note BEFORE code (the ledger's own rule).**
+f4-ext4-route-map.md §6 records the corrected model re-read surfaced
+four facts the leg-44 checklist did not carry: (F-a) sync_dirty_buffer
+DEFERS under an active task handle — journaled ops are not written
+through inline (the stale Phase 2.5 comment is fixed); (F-b) slow-path
+journal records are BORN DEAD (Phase 4 advances s_start past its own
+records; a completed slow commit leaves the op's real metadata in dirty
+RAM); (F-c) the replayable set at crash is at most ONE transaction
+(single running txn, sequential inline commits); (F-d) today's rmdir
+commit already left rmdir metadata unpersisted — going lazy weakens
+nothing. Decisions: R1 per-transaction set + journal-level SPILL for
+non-Running issuers (claimed by the next txn at creation); R2 NO cancel
+records in memory or on disk (a revoke's tid can never exceed the tid
+of a transaction whose descriptors carry post-revoke content;
+same-tid suppression skips a redundant replay) — recorded as
+design-divergences.md D-8; R2' the slow path GAINS the fast path's
+write-through loop (mixed batches must not flip fast→slow and lose
+persistence); R3 the global revoke force is deleted, replaced by a
+per-txn high-water LAZY_COMMIT_MAX_REVOKES=510 (ext4 reserves no revoke
+credits, so delete-only volume had no other bounder); R4 recovery
+unchanged (format identical); R5 no cancel hook; R6 the plan below.
+Design CLEARED; implementation d4addcfc.
+
+**Correctness gates (branch tip through the change):** dual-arch build
+rc=0 (riscv64 + x86_64 debug); `make test` 1122/1122 green in-log (rc
+124 = the documented post-halt park, reaped); riscv64 minimal-rootfs
+smoke zero panics, suite green (run/rv-smoke-leg49.sh).
+
+**pa78 A/B (release-strong x86_64 q35, M = pure main f15b9660,
+B = lazy revoke d4addcfc; interleaved M,B,B,M; all six boots rc=0
+including the fsw pair; load1 8-14, mem floor >=35G).**
+
+| row (median us) | M1 | M2 | B1 | B2 | verdict |
+|---|---|---|---|---|---|
+| p6_mkdrmdir (TARGET) | 51564 | 55096 | 14837 | 15693 | **-71.4%** |
+| p6_unlink (TARGET) | 15982 | 16524 | 77.0 | 79.9 | **-99.5%** |
+| p6_write_fsync | 8675 | 9257 | 11698 | 8551 | flat (pair2 -7.6%; B1's +35% carries a 1.3s p99 host stall — adjudicated noise, contradicted by pair 2) |
+| p6_append | 87.2 | 91.6 | 86.7 | 89.2 | in band |
+| p6_stat | 15.0 | 15.5 | 14.8 | 15.3 | in band |
+| p6_getdents | 570 | 580 | 577 | 607 | in band (+3.0%) |
+| p6_read_cached | 34.1 | 35.6 | 33.3 | 33.6 | improved |
+| p2_ctxsw | 1.298 | 1.343 | 1.328 | 1.398 | in band (strong loaded class) |
+| p5a_pipe / p5d_rt_read | 2.04/4.21 | 2.22/4.38 | 2.12/4.13 | 2.40/4.36 | in band |
+| p7_sleep1ms | 930.8 | 965.8 | 932.6 | 931.9 | in band |
+
+**Mechanism probe (two independent confirmations).** (1) fsw
+j-counters: on M, jstop - jlazy - jcommit_fast tracks jrevoke exactly
+(2001 = 2001 — every revoke-carrying stop forces a commit); on B the
+same arithmetic reads 0 with 996 revokes — they batch lazily.
+(2) PROBE49 instrumented boot (temporary prints, removed): the txn set
+accumulates (250, 500 at tid 1003), the high-water fires EXACTLY once
+at 510 revokes (forced commit), the next transaction (tid 1004)
+carries the remainder, and the SPILL branch is never taken on this
+workload. The earlier suspicion that the high-water never fired was an
+artifact of dump-timing arithmetic, not the code.
+
+**The mkdrmdir residual (~14-16 ms flat floor, min=14.2 ms) is NOT the
+journal**: it is the per-mkdir scoped publication flush
+(flush_publications_scoped, the leg-29A ghost-file protection: the new
+inode's table/bitmap blocks + the entry block, 1-2 sync I/Os per
+mkdir). unlink pays no scoped flush and dropped to 77 us. That flush
+is the fs lane's next lever, explicitly out of this change's scope.
+
+**Track-1 lever pick: R37 landed (design note first).** The headroom
+list's §1/§3/§4 precedents are done (D-4/D-5/D-6/D-7); §2 is
+multi-leg scope; §8's virtio guards are cheap and R-numbered (poor
+ROI for one leg). §7's first slice had a COMPLETE design note waiting
+since R36 (r37-timer-slotted-table-draft.rs) that never landed:
+timer.rs still ran the BTreeMap pair with node allocations inside the
+TIMERS->ACTIONS locks — the R36 OOM-deadlock family. The landing
+decision (§ header of the draft) reconciles the draft with everything
+the live file gained (R34 per-CPU scratch, hres entries, WW
+instruments, periodic-delivery, one-shot take) and swaps exactly the
+storage layer: fixed-slot table (1024 x 56 B + 128 B bitmap ≈ 57 KB
+.bss) behind ONE lock; add/del/mod/pending/get_state/snapshot are
+plain stores and bitmap walks (7ef5a170). Gates: dual-arch rc=0,
+make test 1122/1122, rv smoke zero panics. The pa80 A/B (M = lazy
+revoke kernel, B = +slot table — the delta is exactly the timer file)
+and the Tier-1 census boot run at leg close (results appended below).
+
+**Arm-1 standing watch:** the no-journal root-lookup fix has NOT
+landed on main as of 478ece08 (stress-fleet docs only since f15b9660).
+The J-vs-NJ p6 comparison stays queued on the fs lane's fix.
+
+**p2_ctxsw discipline:** all strong-class boots this leg read
+1.298-1.398 (loaded band, load1 8-14) — judged against the strong
+anchors (quiet 1.373, loaded ceiling ~2.0), never the 15.4 debug cell.
+
+**pa80 timer A/B result (Tier-2 PASS).** M = lazy-revoke kernel
+(d4addcfc), B = +R37 slot table (7ef5a170) — the delta is exactly
+kernel/src/timer.rs. Interleaved M,B,B,M, all rc=0, load1 9-14:
+p7_sleep1ms (target) 1047.5/969.4 (M) vs 940.4/964.0 (B) — -5.6% on
+averages, right direction, within the row's own load spread; every
+other row within +-20% (max drift p1_null +7.9%, p4_fork_exit +7.4%,
+both flip across pairs — LTO layout + load noise class). Verdict: the
+slot table is performance-neutral-to-positive on the board and removes
+the R36 OOM-deadlock class structurally; the Tier-1 census boot is
+queued with the quiet-gated chain (pa81) covering the combined tip.
+
+### 8.10.19 Leg 49B (2026-10-28): vmscan pre-OOM reclaim-depth — ADJUDICATION (coordinator-routed from stress-fleet s17): design CLEARS with one correction; the fix is the deep final round + the active-list bridge
+
+The stress lane's s17 quantified chain (kill fires while 175-204 MB of
+clean file cache remains, ~1 MB = 8x32 pages of pre-OOM drain) was
+re-derived against the code. Verdict on each link:
+
+- L1 (rate bound) CONFIRMED: alloc slowpath runs <=8 rounds of
+  try_to_free_pages (page_alloc.rs, the `for _ in 0..8` under the
+  IN_DIRECT_RECLAIM gate), each bounded by balance_pgdat's
+  nr_to_reclaim = max(1<<order, SWAP_CLUSTER_MAX=32); the freed==0
+  break aborts earlier when a round yields nothing. Worst case ~256
+  pages of drain precede `return 0` — the kill decision.
+- L2 (shrink breaks on first evict_one failure) CONFIRMED but NOT the
+  binding wall: evict_one's BTreeMap fallback (page_cache.rs, after the
+  2-round LRU walk) scans the WHOLE cache map for any clean
+  unreferenced page regardless of list placement, so evict_one false
+  requires the map itself to hold nothing clean+unreferenced. The LRU
+  wall (93% referenced inactive tail, MAX_SCAN=64/round) makes each
+  call SLOW (O(map) via the fallback), not necessarily fruitless.
+- L3 (the active list is never scanned) CONFIRMED and corrected: s17's
+  "one list away" is literal — shrink_lruvec scans only
+  LRU_INACTIVE_ANON + LRU_INACTIVE_FILE ("TODO: shrink_active_list");
+  the census's active list (referenced=0, dirty=0 — graduated clean
+  pages) is reachable only through the 32-per-call demotion bridge
+  (which lands pages at the YOUNG/inactive end, behind the referenced
+  wall) or the fallback's O(map) scan. The unreachable-pool mechanism
+  stands, with the fallback as the slow leak that keeps rounds
+  technically "progressing" (freed>0) while the batch rate stays
+  32/round.
+- L4 (latency rationale?) REFUTED: the comments justify SWAP_CLUSTER_MAX
+  and the 8-round bound as steady-state pace/anti-crawl measures (the
+  OH crawl incident); NOTHING bounds the pre-OOM round deliberately.
+  Linux's pre-OOM effort is deeper (retry while did_some_progress, OOM
+  only after a full no-progress pass). The shallowness is an accident
+  of composing three steady-state bounds — the s17 thesis.
+
+**Design (cleared; the deep final round + the bridge):**
+- One function, `vmscan::drain_file_cache_before_oom(nr_to_reclaim)`:
+  caller (the slowpath, INSIDE the held IN_DIRECT_RECLAIM gate, after
+  the 8th round, before `return 0`) computes the shortfall against the
+  allocating zone's WMARK_LOW + request, clamped [32, 8192] pages.
+- The drain loops (bounded passes, target-capped): PAGE_CACHE.shrink
+  chunk (<=256) interleaved with a BULK active demotion
+  (lru_demote_active_file_oldest(256)) whenever a chunk starves — the
+  bridge that makes the one-list-away pool reachable at batch rate
+  instead of O(map)/page. Stops on target met, or one full pass with
+  zero freed AND zero demoted (nothing left: the kill is then correct).
+- Steady-state paths are untouched byte-for-byte (shrink, evict_one,
+  balance_pgdat, kswapd): all new depth lives on the doomed path only,
+  so "no reclaim-slowpath emergence on standard boots" reduces to the
+  deep pass never running there (separate counter, verifiable in the
+  census).
+- Instrument (the change's own DFX duty): counters + one
+  OOM-DEEP-PASS serial line per invocation (freed/target/demoted/
+  passes) — the storm fleet's next rounds read it directly; standard
+  boots print nothing.
+- Verification: functional A/B with a new oomchurn `fake <cacheMB>
+  <anonMB>` mode (fill clean page cache, then touch anon with progress
+  prints — the s17 shape deterministic on a 1G VM): M dies at a small
+  fraction with clean cache resident; B converts the kill into slow
+  allocations and touches through, or dies at the true ceiling.
+  Correctness gates as usual; Tier-1 census (already queued for the
+  combined tip) additionally reads the deep-pass counter = 0 on the
+  standard boot.
+- Out of scope, recorded: mapped-page reclamation (may_unmap is set but
+  no unmap path exists in the page-cache reclaim), dirty-page
+  writeback drain (the shrink_dirty variant exists for direct reclaim
+  callers), anon/swap. If the deep pass still cannot reach its target
+  because every clean page is pinned by mappings, the kill fires as
+  today and the follow-up is the unmap path, not more depth.
+
+**8.10.19 results (leg 49B close).** Functional A/B (oomchurn fake
+500MB cache + 800MB anon on a 1G riscv64 VM, smp2, TCG; M = 7ef5a170,
+B = 39a515a5; run/pa81-{m,b}-fake*.log): M reproduced the s17 fake-OOM
+deterministically — kill at 576 MB anon with the forensic showing
+file-lru[3] (ACTIVE) walked=64001 dirty=0 referenced=0 (250 MB of
+perfectly evictable clean cache) and INACTIVE FILE EMPTY (lru[2]=0):
+shrink_lruvec's file scan reads the INACTIVE list size, so once
+graduation empties it the reclaim engine stops calling the page-cache
+shrinker AT ALL — the blind spot is structural, sharper than the rate
+bound alone. B PASSED: all 800 MB anon touched; OOM-DEEP-PASS fired 24
+times, each freeing its full target (1158 pages = the WMARK_LOW
+shortfall exactly), no demotion needed on this shape (evict_one's
+internal bridge suffices; the bulk demotion stays armed for the fleet
+storms). Correctness: dual-arch rc=0, make test 1122/1122, rv smoke 0
+panics. Tier-2 (pa82, strong x86, M,B,B,M + one adjacent isolation
+pair): every row within +-20%; the p7_sleep1ms row read +24% on the
+interleaved B boots (load1 13-14 window) and was adjudicated by the
+adjacent isolation pair — M 984.7 vs B 943.0 (-4.2%, B faster); window
+noise, not a regression. deep_lines=0 on all six boots (the
+no-reclaim-slowpath-emergence discipline holds for the new path). The
+Tier-1 census chain (pa83, quiet-gated, detached) carries the combined
+tip's census + the OOM-DEEP-PASS absence assertion; if its 6 h window
+never opens it skips with logged debt for the next quiet window.
+
+Standing: arm-1 (J-vs-NJ) still queued on the fs lane's nojournal fix
+(not on main at 478ece08). The mkdrmdir residual (~14-16 ms, the
+per-mkdir scoped publication flush) is named for the fs lane. p2_ctxsw
+judged against the strong anchors throughout (1.26-1.52 across this
+leg's loaded boots).

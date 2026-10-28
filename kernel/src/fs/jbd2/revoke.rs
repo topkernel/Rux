@@ -68,9 +68,13 @@ pub fn block_is_revoked_for(journal: &Arc<Journal>, blocknr: u64, tid: Tid) -> b
     records.iter().any(|&(b, t)| b == blocknr && t >= tid)
 }
 
-/// Take (drain) the pending revoke records for commit writing.
-pub fn take_revoke_records(journal: &Arc<Journal>) -> alloc::vec::Vec<(u64, Tid)> {
-    core::mem::take(&mut *journal.revoke_records.lock())
+/// Take (drain) the pending revoke records of a transaction for commit
+/// writing. Arm-2: only the COMMITTING transaction's own set is written
+/// (plus what it inherited from the spill at creation); the journal-global
+/// vec is never drained here — it holds recovery state or the next
+/// transaction's spill.
+pub fn take_revoke_records(commit_transaction: &Arc<Transaction>) -> alloc::vec::Vec<(u64, Tid)> {
+    core::mem::take(&mut *commit_transaction.t_revoke_records.lock())
 }
 
 // ============================================================================
@@ -116,7 +120,28 @@ pub fn jbd2_journal_revoke(
 
     // Record (block, tid): commit writes a revoke block; recovery skips
     // replaying older journal entries for this block.
-    insert_revoke_hash(&journal, blocknr, txn.t_tid)?;
+    //
+    // Arm-2 routing (f4-ext4-route-map.md §6.2 R1): the record goes to
+    // the ISSUING transaction's own set while that transaction is still
+    // Running — so it is logged by that transaction's commit and forces
+    // nothing. If the transaction is no longer Running (an SMP handle
+    // that joined a committing transaction — start_this_handle does not
+    // check t_state — or a stale handle on a Finished one), the record
+    // spills to the journal-level vec and is claimed by the next
+    // transaction at creation. The spill never feeds the stop condition;
+    // it only rides forward.
+    let state_ok = matches!(
+        *txn.t_state.lock(),
+        super::journal::TransactionState::Running
+    );
+    if state_ok {
+        let mut set = txn.t_revoke_records.lock();
+        if !set.iter().any(|&(b, t)| b == blocknr && t == txn.t_tid) {
+            set.push((blocknr, txn.t_tid));
+        }
+    } else {
+        insert_revoke_hash(&journal, blocknr, txn.t_tid)?;
+    }
     crate::dfx::fsw::note_j_revoke();
 
     Ok(())
@@ -126,6 +151,21 @@ pub fn jbd2_journal_revoke(
 ///
 /// Called from jbd2_journal_get_write_access when a buffer is being
 /// modified again in the same transaction.
+///
+/// Arm-2 decision (f4-ext4-route-map.md §6.2 R2): this stays a NO-OP,
+/// deliberately. Linux needs revoke-cancel records because a revoke can
+/// land in the log AFTER a newer descriptor for the same block,
+/// suppressing the replay of the new content. That direction cannot
+/// arise here: revokes are stamped with their issuing transaction's tid
+/// and logged by that transaction (or a later one, via the spill), so a
+/// revoke's tid is never greater than the tid of a transaction whose
+/// descriptors carry post-revoke content for the block — the recovery
+/// filter (`revoke.tid >= desc_tid`) does not suppress it. Same-tid
+/// suppression (reallocation inside the issuing transaction) skips
+/// replay of the block's own commit-time snapshot, which is redundant:
+/// the commit's write-through pass has already persisted the live
+/// content at the block's final location. See design-divergences.md
+/// D-8 for the recorded divergence.
 pub fn jbd2_journal_cancel_revoke(handle: &mut Handle, jh: &mut JournalHead) {
     let txn = match &handle.h_transaction {
         Some(t) => t,
@@ -179,7 +219,7 @@ pub fn jbd2_journal_write_revoke_records(
         return Ok(0);
     }
 
-    let records = take_revoke_records(journal);
+    let records = take_revoke_records(commit_transaction);
     if records.is_empty() {
         return Ok(0);
     }

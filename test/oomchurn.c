@@ -79,6 +79,78 @@ static int mode_anon(long mb)
     return 0;
 }
 
+/*
+ * fake <cacheMB> <anonMB> — the stress-fleet s17 fake-OOM shape,
+ * deterministic (leg 49B): fill the page cache with CLEAN file pages
+ * (write + fsync a file of cacheMB, then re-read it), then touch
+ * anonMB. On a kernel whose pre-OOM reclaim is shallow, the anon touch
+ * dies at a small fraction with the clean cache still resident (the
+ * fake-OOM signature); on a kernel that drains before killing, the
+ * touch converts to slow allocations and completes, or dies at the
+ * true (RAM - kernel) ceiling.
+ */
+static void print_memfree(void);
+
+static int mode_fake(long cache_mb, long anon_mb)
+{
+    const char *path = "/bigfile";
+    long want = cache_mb * 1024 * 1024;
+    int fd = open(path, O_RDWR | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0) {
+        printf("fake: open %s failed errno=%d\n", path, errno);
+        return 1;
+    }
+    static char buf[64 * 1024];
+    memset(buf, 0x5a, sizeof(buf));
+    long wrote = 0;
+    while (wrote < want) {
+        long n = sizeof(buf);
+        if (want - wrote < n)
+            n = want - wrote;
+        if (write(fd, buf, n) != n) {
+            printf("fake: write failed at %ldMB errno=%d\n",
+                   wrote / (1024 * 1024), errno);
+            close(fd);
+            return 1;
+        }
+        wrote += n;
+    }
+    if (fsync(fd) != 0)
+        printf("fake: fsync errno=%d (continuing)\n", errno);
+    close(fd);
+    printf("fake: wrote+fsynced %ldMB file -- re-reading for clean cache residency\n",
+           cache_mb);
+
+    /* Re-read the whole file: populates the page cache with clean
+     * (fsynced) pages that no process holds mapped. */
+    fd = open(path, O_RDONLY);
+    if (fd < 0) {
+        printf("fake: reopen failed errno=%d\n", errno);
+        return 1;
+    }
+    long got = 0;
+    long n;
+    while ((n = read(fd, buf, sizeof(buf))) > 0)
+        got += n;
+    close(fd);
+    printf("fake: re-read %ldMB through the cache\n", got / (1024 * 1024));
+    print_memfree();
+
+    printf("fake: touching %ldMB anon under clean-cache pressure\n", anon_mb);
+    void *p = mmap(NULL, anon_mb * 1024 * 1024, PROT_READ | PROT_WRITE,
+                   MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (p == MAP_FAILED) {
+        printf("fake: mmap %ldMB failed errno=%d (%s)\n", anon_mb, errno,
+               strerror(errno));
+        return 1;
+    }
+    long s = touch_anon_mb(anon_mb, p);
+    printf("fake: ALL %ldMB anon touched ok (sum=%ld) -- reclaim drained the clean cache\nOOMCHURN-FAKE-PASS\n",
+           anon_mb, s);
+    munmap(p, anon_mb * 1024 * 1024);
+    return 0;
+}
+
 static void print_memfree(void)
 {
     FILE *f = fopen("/proc/meminfo", "r");
@@ -368,6 +440,8 @@ int main(int argc, char **argv)
     }
     if (strcmp(argv[1], "anon") == 0)
         return mode_anon(atol(argv[2]));
+    if (strcmp(argv[1], "fake") == 0)
+        return mode_fake(atol(argv[2]), atol(argv[3]));
     if (strcmp(argv[1], "fork") == 0)
         return mode_fork(atoi(argv[2]), atol(argv[3]));
     if (strcmp(argv[1], "churn") == 0)

@@ -112,6 +112,127 @@ static void dump_log(const char *path) {
     dump_log_prefix(path, 40);
 }
 
+// X-state probe: ground truth for the "windows never paint" hunt
+// (leg-6). Clients like gnome-session-failed run for the whole session
+// yet no window ever appears on screen — the shell's own chrome
+// (panel/wallpaper/cursor) paints fine, so the open question is
+// whether client windows ever MAP and get MANAGED before blaming the
+// compositing (GLX texture-from-pixmap) path. xwininfo -tree -root
+// lists every window with map state and geometry; xprop then shows
+// which windows the WM reports as its clients (_NET_CLIENT_LIST).
+// x11-xserver-utils ships both. Console-only, ~30 lines when idle.
+static void dump_xstate(void) {
+    static const char *const probes[][4] = {
+        { "== dump X tree (xwininfo -root -tree) ==",
+          "/usr/bin/xwininfo", "-root", "-tree" },
+        { "== dump X clients (xprop _NET_CLIENT_LIST) ==",
+          "/usr/bin/xprop", "-root", "_NET_CLIENT_LIST _NET_SUPPORTING_WM_CHECK" },
+        // GLX capabilities as seen by a CLIENT on this stack (mesa-utils
+        // joined the image in r8): server glX extensions string incl.
+        // GLX_EXT_texture_from_pixmap — the capability mutter's X11
+        // compositing needs. Windows map+frame but never paint; if TFP
+        // is missing from this string the silent-drop hypothesis is
+        // settled image-side, if present the hunt moves to
+        // glXCreatePixmap texturing (leg-7).
+        { "== dump GLX caps (glxinfo -B) ==",
+          "/usr/bin/glxinfo", "-B", "" },
+    };
+    for (unsigned i = 0; i < sizeof probes / sizeof probes[0]; i++) {
+        printf("%s\n", probes[i][0]);
+        fflush(stdout);
+        pid_t d = fork();
+        if (d == 0) {
+            int con = open("/dev/console", O_WRONLY);
+            if (con >= 0) { dup2(con, STDOUT_FILENO); dup2(con, STDERR_FILENO); }
+            setenv("DISPLAY", ":0", 1);
+            if (probes[i][3][0])
+                execl(probes[i][1], "probe", probes[i][2], probes[i][3],
+                      (char *)NULL);
+            else
+                execl(probes[i][1], "probe", probes[i][2], (char *)NULL);
+            _exit(127);
+        }
+        int st; waitpid(d, &st, 0);
+        if (st != 0)
+            printf("[runit] xprobe %s exited st=%d\n", probes[i][1], st);
+    }
+    // Server GLX extension string (leg-8): glxinfo -B prints only the
+    // brief block; the full run's "server glx extensions" list is where
+    // GLX_EXT_texture_from_pixmap (mutter's X11 composite texture path)
+    // appears or does not. sh -c so the pipe lives guest-side.
+    {
+        printf("== dump GLX server extensions (TFP check) ==\n");
+        fflush(stdout);
+        pid_t d = fork();
+        if (d == 0) {
+            int con = open("/dev/console", O_WRONLY);
+            if (con >= 0) { dup2(con, STDOUT_FILENO); dup2(con, STDERR_FILENO); }
+            setenv("DISPLAY", ":0", 1);
+            execl("/bin/sh", "sh", "-c",
+                  "/usr/bin/glxinfo 2>/dev/null | "
+                  "sed -n '/server glx extensions/,+8p'; "
+                  "/usr/bin/glxinfo 2>/dev/null | grep -c texture_from_pixmap "
+                  "| sed 's/^/tfp-lines=/'; "
+                  "/usr/bin/glxinfo 2>/dev/null | grep -m2 'GLX visual\\|GLX fbconfig'",
+                  (char *)NULL);
+            _exit(127);
+        }
+        int st; waitpid(d, &st, 0);
+    }
+    // Per-window content walk (leg-8): XGetImage every sizable window's
+    // own content. An xterm body with white-with-glyph pixels in its own
+    // window (absent from scanout) convicts the mutter composite path;
+    // an all-black xterm window convicts client drawing. Replaces the
+    // hard-coded rects as the primary frontier instrument (the two rect
+    // probes stay for root-vs-scanout continuity).
+    {
+        printf("== dump XWALK (per-window content) ==\n");
+        fflush(stdout);
+        pid_t d = fork();
+        if (d == 0) {
+            int con = open("/dev/console", O_WRONLY);
+            if (con >= 0) { dup2(con, STDOUT_FILENO); dup2(con, STDERR_FILENO); }
+            setenv("DISPLAY", ":0", 1);
+            execl("/usr/local/bin/xregion", "xregion", "-w", "100",
+                  (char *)NULL);
+            _exit(127);
+        }
+        int st; waitpid(d, &st, 0);
+        if (st != 0)
+            printf("[runit] xregion -w exited st=%d\n", st);
+    }
+    // Composited-content probe (leg-7): XGetImage the root window where
+    // the xterm probe window should be (its geometry has been 904x536 at
+    // +140+90 or +140+127 — sample the interior so either placement is
+    // covered), plus the panel strip. If XREGION shows the window body
+    // in the root but the QMP screendump of the same area does not, the
+    // break is Xorg->scanout; if the root lacks it too, mutter never
+    // composited the client (GLX texture-from-pixmap hunt).
+    {
+        static const char *const rects[][5] = {
+            { "window-body", "200", "200", "700", "300" },
+            { "panel-strip", "0", "0", "1280", "30" },
+        };
+        for (unsigned i = 0; i < sizeof rects / sizeof rects[0]; i++) {
+            printf("== dump XREGION %s ==\n", rects[i][0]);
+            fflush(stdout);
+            pid_t d = fork();
+            if (d == 0) {
+                int con = open("/dev/console", O_WRONLY);
+                if (con >= 0) { dup2(con, STDOUT_FILENO); dup2(con, STDERR_FILENO); }
+                setenv("DISPLAY", ":0", 1);
+                execl("/usr/local/bin/xregion", "xregion",
+                      rects[i][1], rects[i][2], rects[i][3], rects[i][4],
+                      (char *)NULL);
+                _exit(127);
+            }
+            int st; waitpid(d, &st, 0);
+            if (st != 0)
+                printf("[runit] xregion %s exited st=%d\n", rects[i][0], st);
+        }
+    }
+}
+
 // --- kernel trace forensics (merged-main tracing subsystem) ---
 // /sys/kernel/debug/tracing is auto-mounted by the kernel. Arm the
 // sched + page-fault events before the session chain starts so any
@@ -192,6 +313,49 @@ static void read_knob(const char *path, char *buf, size_t cap) {
     }
 }
 
+// --- notification-banner probe (leg-8) ---
+// The shell's org.freedesktop.Notifications daemon registers at the END
+// of the JS init walk ("GNOME Shell started"), so a banner can only be
+// tested once that line appears. Watch /tmp/gnome-shell.log for the
+// marker; on first sight (then every 200s) fire a Notify call with a
+// long expire-time and print NOTIFY-SENT — fire.py sees the marker and
+// takes a burst of screendumps timed to the banner lifetime, so the
+// banner check does not depend on the 30s idle shot cadence.
+static int shell_started(void)
+{
+    // Cheap tail scan: the marker is printed by the shell itself and
+    // also mirrored by the periodic log tailer, so the last 8 KiB is
+    // enough.
+    int fd = open("/tmp/gnome-shell.log", O_RDONLY);
+    if (fd < 0) return 0;
+    char buf[8192];
+    ssize_t n = read(fd, buf, sizeof buf - 1);
+    close(fd);
+    if (n <= 0) return 0;
+    buf[n] = 0;
+    return strstr(buf, "GNOME Shell started") != NULL;
+}
+
+static void fire_notify_banner(void)
+{
+    pid_t d = fork();
+    if (d == 0) {
+        int con = open("/dev/console", O_WRONLY);
+        if (con >= 0) { dup2(con, STDOUT_FILENO); dup2(con, STDERR_FILENO); }
+        execl("/usr/bin/gdbus", "gdbus", "call", "--session",
+              "--dest", "org.freedesktop.Notifications",
+              "--object-path", "/org/freedesktop/Notifications",
+              "--method", "org.freedesktop.Notifications.Notify",
+              "rux-probe", "0", "", "Rux banner probe",
+              "banner body alpha 24680", "[]", "{}", "45000",
+              (char *)NULL);
+        _exit(127);
+    }
+    int st; waitpid(d, &st, 0);
+    printf("[runit] NOTIFY-SENT gdbus st=%d\n", st);
+    fflush(stdout);
+}
+
 int main(void) {
     // NOTE: SIGCHLD must stay SIG_DFL — SIG_IGN is inherited across
     // fork AND exec, and it makes gnome-session/glib waitpid() calls
@@ -237,6 +401,14 @@ int main(void) {
     setenv("XDG_CURRENT_DESKTOP", "GNOME", 1);
     setenv("LIBGL_ALWAYS_SOFTWARE", "1", 1);
     setenv("GALLIUM_DRIVER", "llvmpipe", 1);
+    // NO_AT_BRIDGE: every GTK app and gsd plugin retries the missing
+    // org.a11y.Bus for the whole session ("AT-SPI: Error retrieving
+    // accessibility bus address" — dozens of dbind warnings per boot,
+    // each potentially costing a serialized dbus round trip in the
+    // 25s-timeout shell init walk). GTK respects this env by skipping
+    // the a11y bridge entirely. Cheaper than shipping at-spi correctly
+    // and removes a whole timeout class from the init walk (leg-7).
+    setenv("NO_AT_BRIDGE", "1", 1);
     mkdir("/tmp/xdg", 0700);
 
     // auto-clear stale X locks (an unclean prior run would wedge Xorg)
@@ -270,6 +442,29 @@ int main(void) {
                                 (const char *const []){ "upowerd", NULL });
         (void)u;
         printf("[runit] upowerd started (pid %d)\n", (int)u);
+    }
+
+    // accounts-daemon from PID1, same reasoning as upowerd (leg-7): the
+    // shell's ActUserManager and gsd-xsettings talk to
+    // org.freedesktop.Accounts on the SYSTEM bus. With the service
+    // absent every proxy creation runs the activator, times out or
+    // errors ("ActUserManager: user (null) has no username", the
+    // accountsservice-CRITICAL spam in every serial so far), and the
+    // per-plugin waits serialize into the shell init walk. The daemon
+    // is small and idles quietly once up. jammy ships it under
+    // /usr/libexec; the legacy /usr/lib/accountsservice path is the
+    // fallback.
+    {
+        const char *acct = "/usr/libexec/accounts-daemon";
+        if (access(acct, X_OK) != 0)
+            acct = "/usr/lib/accountsservice/accounts-daemon";
+        pid_t a = launch_logged("/tmp/accounts-daemon.log", acct,
+                                "accounts-daemon",
+                                (const char *const []){ "accounts-daemon",
+                                                        NULL });
+        (void)a;
+        printf("[runit] accounts-daemon started (pid %d, %s)\n",
+               (int)a, acct);
     }
 
     printf("[runit] starting Xorg (fbdev)\n");
@@ -320,6 +515,7 @@ int main(void) {
         pid_t tp = fork();
         if (tp == 0) {
             int cyc = 0;
+            int notified = 0;
             for (;;) {
                 sleep(20);
                 cyc++;
@@ -331,6 +527,15 @@ int main(void) {
                     if (stat(logs[i], &st) != 0) continue;
                     dump_log_prefix(logs[i], 150);
                 }
+                // notification-banner probe (leg-8): fire on the shell
+                // marker, re-fire every 10 cycles so at least one lands
+                // in a calm window (each call prints NOTIFY-SENT).
+                if (shell_started()) {
+                    if (!notified || (cyc % 10) == 0) {
+                        notified = 1;
+                        fire_notify_banner();
+                    }
+                }
                 if (TRACE && (cyc % 3) == 0) {
                     dump_log_prefix(TRACE_BASE "/per_cpu/cpu0/stats", 4);
                     // Short scheduling snapshot every minute: names the
@@ -338,6 +543,12 @@ int main(void) {
                     // run) during long stalls like the slow Shell boot.
                     dump_log_prefix(TRACE_BASE "/trace", 24);
                 }
+                // X window-state snapshot every minute: window map/
+                // manage ground truth (see dump_xstate). Once the
+                // desktop is up this is ~20 lines; before X starts the
+                // probes just fail fast on connect.
+                if ((cyc % 3) == 0)
+                    dump_xstate();
             }
             _exit(0);
         }

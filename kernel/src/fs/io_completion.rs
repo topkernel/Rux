@@ -60,6 +60,20 @@ pub struct IoCompletion {
     /// every return (its frame — and the completion with it — often dies
     /// at return), and abandon drains it before reporting -ETIMEDOUT.
     delivering: AtomicUsize,
+    /// Device-truth token of the delivery that set `done` (the
+    /// zero-serve guard): the DMA data-buffer pointer the DRIVER recorded
+    /// in the pending entry, stamped by [`Self::complete_with_token`].
+    ///
+    /// 0 = the signal came from an internal path (bio cache hit,
+    /// in-flight branch, dup-path re-settle) that did not go through a
+    /// device completion walker. `wait()` drains deliveries before
+    /// returning, so a subsequent [`Self::delivered_token`] load is
+    /// stable. The waiter (bread_wait) compares the token against its own
+    /// buffer: a mismatch means the walker delivered SOME OTHER chain's
+    /// completion — the buffer's DMA may not have landed, so the waiter
+    /// must NOT treat the data as valid (the no-journal ext4 root-lookup
+    /// zero-serve family).
+    token: AtomicUsize,
     /// Tasks sleeping for completion.
     wait_queue: WaitQueueHead,
 }
@@ -71,6 +85,7 @@ impl IoCompletion {
             done: AtomicBool::new(false),
             status: AtomicI32::new(0),
             delivering: AtomicUsize::new(0),
+            token: AtomicUsize::new(0),
             wait_queue: WaitQueueHead::new(),
         }
     }
@@ -118,7 +133,8 @@ impl IoCompletion {
         true
     }
 
-    /// Mark completion as done with the given status.
+    /// Mark completion as done with the given status (internal signal:
+    /// not attributed to a device chain).
     ///
     /// Wakes all waiters. Safe to call from interrupt context
     /// (no allocation, no BKL).
@@ -130,11 +146,34 @@ impl IoCompletion {
     /// GNOME deadlock family. Debug builds panic at the violation point
     /// instead of wedging the machine.
     pub fn complete(&self, status: i32) {
+        self.complete_with_token(status, 0);
+    }
+
+    /// Mark completion as done with the given status, stamped with the
+    /// device-truth token of the chain whose completion is being
+    /// delivered (the pending entry's DMA data-buffer pointer).
+    ///
+    /// Called by the completion walkers (PCI and MMIO) with the pending
+    /// entry's data pointer. `bread_wait` compares [`Self::delivered_token`]
+    /// against its own buffer and refuses to publish data whose DMA the
+    /// delivery did not prove — a misattributed delivery (wrong pending
+    /// entry fired by another chain's used-ring entry) must surface as a
+    /// loud EIO, never as silent zeros (the no-journal ext4 root-lookup
+    /// zero-serve family).
+    pub fn complete_with_token(&self, status: i32, token: usize) {
         #[cfg(debug_assertions)]
         crate::drivers::virtio::assert_no_virtio_lock("IoCompletion::complete");
         self.status.store(status, Ordering::Release);
+        self.token.store(token, Ordering::Release);
         self.done.store(true, Ordering::Release);
         self.wait_queue.wake_up_all();
+    }
+
+    /// Device-truth token of the delivery that set `done`. Only meaningful
+    /// after `wait()` returned: the delivery-drain handshake guarantees the
+    /// delivering walker finished, so the load is stable.
+    pub fn delivered_token(&self) -> usize {
+        self.token.load(Ordering::Acquire)
     }
 
     /// Block until completion is signaled. Returns the status code, or
@@ -327,6 +366,7 @@ impl IoCompletion {
     pub fn reset(&self) {
         self.done.store(false, Ordering::Release);
         self.status.store(0, Ordering::Release);
+        self.token.store(0, Ordering::Release);
     }
 }
 

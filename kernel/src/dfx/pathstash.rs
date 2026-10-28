@@ -42,6 +42,11 @@ static mut SLOTS: [Slot; N] = [const {
 pub const OP_OPEN: u32 = 1;
 pub const OP_WRITE: u32 = 2;
 pub const OP_SYNC: u32 = 3;
+/// leg-36B: truncate family. sc333B's foundation-main wedge sat in
+/// ftruncate(fd, len) 80+ s while holding a server txn; the serial only
+/// showed the raw fd. Both truncate entries stash their resolved path
+/// so TXN-HANG can name the file.
+pub const OP_TRUNC: u32 = 4;
 
 /// Record the current task's last resolved open path. Called from
 /// sys_openat after resolution; arm-gated.

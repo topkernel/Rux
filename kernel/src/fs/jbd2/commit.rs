@@ -89,7 +89,9 @@ pub fn jbd2_journal_commit_transaction(
     // (A revoke-only transaction — e.g. a pure block-freeing operation —
     // MUST still write its revoke block + commit block, or recovery would
     // replay the stale records the revoke was meant to suppress.)
-    if dirty_buffers.is_empty() && journal.revoke_records.lock().is_empty() {
+    // Arm-2: the gate reads the COMMITTING transaction's own set, not the
+    // journal-global vec.
+    if dirty_buffers.is_empty() && commit_transaction.t_revoke_records.lock().is_empty() {
         *commit_transaction.t_state.lock() = TransactionState::Finished;
         return Ok(());
     }
@@ -107,7 +109,7 @@ pub fn jbd2_journal_commit_transaction(
     // takes a small ext4 write from ~60ms (five-plus waits, the LTP
     // post-exec "hang" family: every test writing a few KB of setup data
     // in <32B chunks blew the 30s wall clock) back to ~one wait.
-    if journal.revoke_records.lock().is_empty() {
+    if commit_transaction.t_revoke_records.lock().is_empty() {
         crate::dfx::fsw::note_j_commit_fast(dirty_buffers.len());
         let mut first_err: i32 = 0;
         for (blocknr, _kind) in &dirty_buffers {
@@ -174,6 +176,50 @@ pub fn jbd2_journal_commit_transaction(
         return Ok(());
     }
 
+    // Arm-2 (f4-ext4-route-map.md §6.2 R2'): the slow path now runs the
+    // fast path's write-through loop FIRST. With revokes riding the
+    // transaction (lazy batching), mixed batches — writes plus any
+    // pending free — take this path where they used to take the fast
+    // one; without write-through that would silently drop fast-path
+    // persistence for them (the old slow path left every registered
+    // buffer dirty in RAM). With the loop, slow ≡ fast + revoke/commit/
+    // superblock bookkeeping: the registered buffers reach their final
+    // locations identically on both paths, and the journal-area copies
+    // below stay format-compatible belt-and-suspenders. The syncs go
+    // through bio::sync_dirty_buffer's per-block publication-constraint
+    // guard, exactly like the fast path.
+    {
+        let mut first_err: i32 = 0;
+        for (blocknr, _kind) in &dirty_buffers {
+            // SAFETY: same contract as the fast path above — bread on a
+            // valid device returns a cached or freshly-read buffer head.
+            match bio::bread(device, *blocknr) {
+                Some(bh) => {
+                    // SAFETY: bh is valid; b_data is block_size bytes.
+                    unsafe {
+                        let bh_ref = &mut *bh;
+                        bh_ref.set_state_bit(bio::BufferState::BH_Dirty);
+                        let sync_res = bio::sync_dirty_buffer(bh);
+                        bio::brelse(bh);
+                        if let Err(e) = sync_res {
+                            first_err = e;
+                            break;
+                        }
+                    }
+                }
+                None => {
+                    first_err = EIO;
+                    break;
+                }
+            }
+        }
+        if first_err != 0 {
+            journal.abort(first_err);
+            *commit_transaction.t_state.lock() = TransactionState::Finished;
+            return Err(first_err);
+        }
+    }
+
     // Phase 2: Write to journal
     {
         crate::dfx::fsw::note_j_commit_slow();
@@ -200,7 +246,11 @@ pub fn jbd2_journal_commit_transaction(
     // Plus revoke descriptor blocks, plus 1 commit block
     let num_buffers = dirty_buffers.len();
     let num_desc_blocks = (num_buffers + tags_per_block - 1) / tags_per_block;
-    let revoke_entries = journal.revoke_records.lock().len();
+    // Arm-2: size the revoke blocks from the COMMITTING transaction's own
+    // set. This runs before Phase 2.6's write_revoke_records takes the
+    // set, so the count is exact at sizing time (nothing else drains it
+    // in between — inserts after this point spill, per the R1 routing).
+    let revoke_entries = commit_transaction.t_revoke_records.lock().len();
     let revoke_entry_size = journal.revoke_entry_size();
     let per_revoke_block = if revoke_entry_size > 0 {
         (block_size - size_of::<journal_header_t>() - size_of::<u32>()) / revoke_entry_size
@@ -368,11 +418,13 @@ pub fn jbd2_journal_commit_transaction(
     }
 
     // Phase 2.5: data=ordered flush
-    // Each metadata buffer was already synced individually via
-    // sync_dirty_buffer during the operation (write_block_from_vec,
-    // write_inode_disk, etc.) and again during Phase 2 journal writes.
-    // A full sync_buffers scan is redundant and causes SMP contention
-    // on the block cache bucket spinlocks.
+    // The write-through pass at the head of the slow path has already
+    // synced every registered buffer to its final location (Arm-2 R2';
+    // the old comment here claimed the ops themselves had synced inline —
+    // that predates bio::sync_dirty_buffer's under-handle deferral, which
+    // leaves op-time metadata dirty in the buffer cache). A full
+    // sync_buffers scan would still be redundant and would add SMP
+    // contention on the block-cache bucket spinlocks.
 
     // Phase 2.6: revoke records (review 5.6 high: revoke 全空壳). Written
     // BEFORE the commit block: a crash between data blocks and here simply

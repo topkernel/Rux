@@ -231,6 +231,17 @@ pub fn current_task_ptr() -> u64 {
     PER_CPU[crate::arch::cpu_id() as usize].current_task.load(Ordering::Acquire)
 }
 
+/// Read ANOTHER CPU's current-task slot (leakorigin v3: adjudicates a
+/// sched-slot "parked" classification against the arch tp truth — a
+/// stale sched slot names someone else while the task still runs).
+pub fn current_task_ptr_of(cpu: usize) -> u64 {
+    if cpu < PER_CPU.len() {
+        PER_CPU[cpu].current_task.load(Ordering::Acquire)
+    } else {
+        0
+    }
+}
+
 pub fn set_current_task_ptr(task: u64) {
     PER_CPU[crate::arch::cpu_id() as usize].current_task.store(task, Ordering::Release);
 }

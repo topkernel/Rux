@@ -112,6 +112,62 @@ mutter + gsd) visible and stable on the Ubuntu 22.04 riscv64 image.
   gnome-session-failed's dialog (kernel sysv-shm suspicion);
   "sh: 0: getcwd() failed: Success" (errno-0 getcwd) seen twice.
 
+## Session 3 (2026-10-25 afternoon, leg-3 after 11:42 quota death)
+
+- Merged main ddb3ed01 (kallsyms + trace events + panic=, 8 commits).
+  Kernel rebuilt clean; fire.py runs now arm tracing via runit
+  (runit-trace=0 knob to disable; runit dumps the trace tail on every
+  session-child death).
+- runs/gnome-r2trace (BASELINE, merged kernel, getcwd bug still in,
+  session mode, smp2/2G, 1800s): M2 gsd @61s, M3 shell @61s,
+  M4_screen_lit @210s, screen HELD 99% for the full 30 min (nonblack
+  1023986/1024000, wallpaper #002080/#202000). gnome-session survived
+  the whole window (the old "gnome-session died @47s" is GONE on the
+  merged kernel). But 192 "getcwd() failed: Success" lines and 14
+  UsbProtection SIGSEGVs — the residual crash family.
+- ROOT CAUSE of "getcwd() failed: Success" (kernel ABI bug, FIXED in
+  a2278150): sys_getcwd returned the buffer POINTER; the ABI is to
+  return the path LENGTH. glibc's __getcwd keeps the raw syscall
+  result in an `int retval` and treats it as a length: our pointer
+  (0x2aaaa_xxxx0000-class heap/PIE addresses, bit 31 of the low word
+  set) truncated to a negative int made glibc classify the successful
+  call as an unclassifiable failure and return NULL with errno left
+  at 0. dash then printed "Success" and crashed on the NULL cwd (the
+  epc=0x2aaaaae2b6 addr=0x8 family). Fix: return cwd_len+1.
+- runs/gnome-r3fix (FIXED kernel): getcwd failures 192 -> 0. But the
+  session COLLAPSED into the "Oh no" error screen (lit @1260s,
+  #e0e0c0): gsd-usb-protection SEGV-looped 33x (NULL GError deref on
+  its "Failed to connect to screensaver service" warning path — gsd
+  42.9 assumes error != NULL), and the respawn load blew 84 gsd
+  register deadlines. Interpretation: with getcwd broken the helpers
+  died instantly (cheap); fixed, they do real work, so the load the
+  crash loop generates is no longer masked. Fix order matters: kill
+  the crash loop (image-side, e5be15c1: UsbProtection dropped from
+  RequiredComponents + Hidden=true; no UPower/usbguard on the image
+  anyway), then the deadlines should be met like baseline.
+- The dash-family SEGV epc=0x2aaaaae2b6 was NEVER dash: PIE base is
+  constant 0x2aaaaaa000 (no ASLR observed for [exe]), and 0xe2b6 in
+  dash is pre-.text (non-exec). It is gsd-usb-protection's own
+  `ld a3,8(a5)` (error->message with error==NULL) at its +0x42b6.
+- PREEMPT-LEAK pid=0 pc=0x10000 rip=wfi: DEMOTED to reporter artifact
+  — the periodic reporter reads preempt_count inside its own in-flight
+  hardirq bracket (irq_enter charges +0x10000 to the interrupted task
+  = idle, the read happens before irq_exit drops it). The heal path
+  already masks HARDIRQ (base = pc & !HARDIRQ_MASK) so only the print
+  is noisy. diag1 proved the system stays responsive through the
+  "flood" (all scripted commands ran on schedule; poweroff clean).
+- run/diag1+diag2 spawncrash probe (posix_spawn=clone(CLONE_VM|
+  CLONE_VFORK) vs fork+exec, 100x each of /bin/sh -c 'exit 0'/'pwd',
+  quiet boot init=/bin/sh): 400/400 ok, ZERO crashes, getcwd fix
+  works end-to-end in dash (100/100 'pwd'). The spawn/COW/exec paths
+  are clean in a quiet system — the session-storm crashes need the
+  full-session concurrency context. Toolchain trap repeated: host
+  cross-gcc default march SIGILLs under -cpu rv64; probes need
+  -march=rv64gc (diag1's first run died this way).
+- Fake-OOM re-verification: pages u=133k-135k (~525MB of 2G) under
+  the full gsd storm — the old ~342MB wall is gone on the merged
+  kernel; no OOM kills in any of the three session runs.
+
 ## Session 2b (2026-10-25 late) — DESKTOP VISIBLE, vision-verified
 
 - Rebuilt image with: EGL pin (libEGL_mesa 20.0.4 — the gles helper
@@ -148,3 +204,797 @@ mutter + gsd) visible and stable on the Ubuntu 22.04 riscv64 image.
   gnome-session-failed's dialog in swfix-sess1 — Xorg-side shmat
   failure path, unverified; PREEMPT-LEAK flood (idle wfi, ~2s holds)
   on every boot — kernel-side, likely another lane's active area.
+
+## Sessions 4-5 (2026-10-25 late, leg-3 pre-pause; reconstructed by
+## leg-4 from runs/ — undocumented at the user pause af77736e)
+
+- runs/gnome-r4val (kernel = merged + a2278150 getcwd fix + a8da458b
+  segv-vma trap printer; image gnome-r2 with e5be15c1 usb-protection
+  dropped; session mode, smp2/2G, trace armed): ZERO user SEGVs, zero
+  kernel panics, M4_screen_lit @721s (nonblack 1.000), screen held to
+  the 1275s cutoff. The whole SEGV family (getcwd/usb-protection) is
+  dead on the fixed lineage.
+- runs/gnome-r5forensic (same kernel+image, 1800s): again ZERO SEGVs;
+  M4 @1411s (nonblack 0.893) then held 99% (1023986/1024000) to
+  t=1800s. Milestone timing is host-load sensitive (210s -> 721s ->
+  1411s across r2trace/r4val/r5forensic; r5 ran during the afternoon
+  agent storm).
+- What the 30-min window still shows (r5forensic counts):
+  - gsd-power respawn loop: 49 "Power.desktop' exited with code 1"
+    (no UPower on the image; up_client_new fails -> plugin init exits).
+    Each cycle risks the r3fix-style "Oh no" collapse.
+  - 191x "The permission of the setuid helper is not correct" —
+    system-bus activation is dead for EVERY org.freedesktop.* service
+    (login1, locale1, UPower...). Root cause is IMAGE-side, proven via
+    debugfs: dpkg-deb -x runs as uid 1000, so the whole tree (and
+    /usr/lib/dbus-1.0/dbus-daemon-launch-helper, mode 0100755 uid 1000)
+    is 1000:1000 in the image; the activation path requires uid 0 +
+    setuid bit. Not a kernel bug.
+  - Shell FULL startup takes ~26 min: "GNOME Shell started at
+    <boot+2s>" prints at boot+1560s, "Registering session with GDM"
+    right after — the shell mainloop only completes its init walk
+    after every gsd dbus timeout (25s each, service_start_timeout)
+    serializes through the storm. This is the stall the forensics
+    must name, not a crash.
+  - Forensics gap: the trace tail only dumps on gnome-session death
+    (never happened); the periodic tailer only dumped per-CPU stats.
+    And runit armed events/enable=1 — sys_enter/sys_exit flood the
+    rings (160ms of history under storm; 1.5M+ overwrites) so even a
+    dumped tail would show nothing. WAKE-STRANDED (157x, strand
+    1.7-1.8s) already names the symptom: wake-to-run latency under
+    the 2-vCPU TCG storm. PARKED-LEAK pc=1 = preempt_count 1 on a
+    parked task (same hunt family as PREEMPT-LEAK, demoted to
+    reporter noise; another lane's area).
+
+## Session 6 (2026-10-25 evening, leg-4)
+
+- Merged main a5af759c (RVV 1.0 lazy enable for user tasks) cleanly
+  (a55068bb); kernel rebuilt, vext symbols verified in the binary.
+- Image fixes for the two dead-activation blockers (build-img.sh):
+  (1) fakeroot pack pass: chown -R 0:0 the staging tree inside one
+  fakeroot session with mkfs, and set the launch helper to its stock
+  4754 root:messagebus — the image is now root-owned everywhere, so
+  system-bus setuid activation can work at all;
+  (2) upower added to PKGS: gsd-power gets a real org.freedesktop.UPower
+  to talk to (dbus-activatable, no runit change) instead of exit(1)
+  looping. Both changes gate on the existing e2fsck pass.
+- runit.c trace forensics fixed for real: arm only sched+exceptions
+  groups (not sys_enter/exit — the ring flood), and the periodic
+  tailer now dumps a 24-line scheduling snapshot every 60s, so a
+  stall leaves a named trail even when nothing dies.
+- GNOME_IMG env override added to build-img.sh so r2/r3 coexist.
+- runs/gnome-r6setuid (merged kernel a55068bb incl. RVV, image r3,
+  session mode, smp2/2G, 1800s, evening host storm load ~24/30 QEMUs):
+  M2 gsd @204s, M4_screen_lit @1350s (nonblack 1.000), screen HELD to
+  the end (99%+nonblack, wallpaper #002080/#202000), ZERO user SEGVs,
+  zero kernel panics. "setuid helper" errors: 191 -> 0 (the fakeroot
+  fix works — system-bus activation now spawns; org.freedesktop.systemd1
+  attempts now correctly report Spawn.ChildExited instead of the
+  permission error). gsd-power exits 27 — the loop STILL runs, cause
+  narrowed by the quiet-boot probe below.
+- run/upowerd-probe (quiet init=/bin/sh boot on r3, system bus by
+  hand): upowerd works — acquires org.freedesktop.UPower after 20s on
+  a QUIET boot (cold TCG start of the glib stack). dbus's
+  service_start_timeout is 25s, so activation under the session storm
+  loses the race -> StartServiceByName times out -> gsd-power exits(1)
+  -> respawn loop. Not a kernel bug; a race. Fix: runit now starts
+  upowerd at boot (PID1-managed, no activation race) — image r4.
+- Forensics now real: the periodic 60s trace snapshots show the
+  pre-M4 stall is a throughput wall, not a deadlock — a dense
+  dconf/gdbus/gmain worker churn (glib mainloop IPC) saturating 2
+  TCG vCPUs, with WAKE-STRANDED strands 1.5-4.3s. No blocked task,
+  no lock holder; tasks switch healthily, just slowly.
+- runs/gnome-r7upower: the r4 image roll (runit-started upowerd) —
+  results appended below.
+- runs/gnome-r7upower RESULT (1800s): M4 held from ~1230s to the end
+  (99% nonblack, wallpaper), ZERO SEGVs/panics, setuid errors 0, UPower
+  activation timeouts 0, upowerd serving (sched_switch confirms).
+  gsd-power exits 58 — NOT fixed by upowerd: autopsy of the log shows
+  power-plugin start creates an org.freedesktop.login1 proxy, the bus
+  activation runs the systemd wrapper (exits 1, no systemd here),
+  proxy creation fails, gsd treats it as FATAL ("Failed to start:
+  ... Launch helper exited with unknown return code 1" -> exit 1 ->
+  respawn). gsd-media-keys hits the same missing login1 and only
+  warns. Decision: drop Power from RequiredComponents like
+  UsbProtection (build-img.sh, image r5). A stub login1 owner would be
+  the way to bring it back (follow-up).
+- run/segv-vma-probe (scratch copy of r5 + /segvprobe static
+  NULL-deref, quiet boot, loglevel 7): a8da458b VERIFIED — the user
+  SEGV report names the mappings: "segv vma[0x0]: unmapped" (faulting
+  address) + "segv vma[0x101f2]: 10000-12000 r-x- off=0x0 [exe]"
+  (faulting ip in [exe] text), then SIGDEATH sig=11 si_code=0x1
+  (SEGV_MAPERR). The trap printer fires correctly on real faults.
+- runs/gnome-r8final: the r5 image roll (Power dropped) — final
+  stability validation for the merge set; results below.
+
+## Session 7 (2026-10-26 early, leg-5 after the 23:23 quota death)
+
+- r8final RESULT (from preserved serials; leg-4 died before appending):
+  KERNEL_PANIC @515s — "PANIC: index out of bounds: the len is 16 but
+  the index is 16" at kernel/src/mm/small_alloc.rs:445, mid gsd-storm.
+  M2 @441s, M3/M4 never reached. So the gsd-power drop did NOT get its
+  validation on leg-4's kernel.
+- Root cause (fixed in 65f35f47): the small-object allocator's
+  per-CPU magazine row was found with len == 17 (MAG_DEPTH is 16). Two
+  racing pushes that both passed the len<16 check at len==15 — possible
+  only when two CPUs transiently resolve cpu_id() to the same row
+  (tp->ti_cpu divergence window; the scheduler R55/R74 hunt family —
+  every in-tree steer is gated but residual windows remain) or a wild
+  write into the row. The next free-path drain then read buf[16], one
+  past the row, and killed the kernel. Fix is allocator-local defense
+  in depth: alloc pops only when 0 < len <= MAG_DEPTH; the free-path
+  drain is bounded on both sides (indices >= MAG_DEPTH were never
+  written by any push, so dropping them is safe; flush_batch
+  re-validates every surviving entry against the page header); a len
+  beyond 2x depth is dropped wholesale so a wild-written len can never
+  stall a CPU under IF=0; every heal bumps MAG_ALIAS_EVENTS (printed
+  as mag-alias-heals in the census line) + BAD_PAGE taint, so the
+  scheduler/wild-write hunt lanes get a named counter instead of a
+  dead desktop. No row atomics by design — that would mask the
+  producer.
+- Evidence the r5 image itself is fine: leg-4's second QEMU
+  (run/stall-repro, r5 image, 2.5h, found as a dead-session leftover
+  and killed this leg) reached "GNOME Shell started" +
+  "Registering session with GDM" with zero panics — the r8final panic
+  is an intermittent race (1 in ~6 session-hours), not deterministic
+  breakage from dropping Power.
+- Merged main (b332d08a = the 12-commit merge set incl. desktop
+  evidence; add/add conflicts on GNOME-SESSIONS.txt / build-img.sh /
+  glnit.c resolved to this branch's newer side, which adds the r7
+  autopsy + Power drop on top of main's cherry-picks) -> 9c52de85.
+- runs/gnome-r9fix (fixed kernel 65f35f47 + r5 image, session mode,
+  smp2/2G, 1800s, host load ~16-20): M2 @577s, M4_screen_lit @1081s,
+  best nonblack 1.0000, screen HELD 99% to the end, ZERO kernel
+  panics, ZERO user SEGVs. The gsd-power drop (024e51c5) now has its
+  gate evidence and joins the next merge set. (Known load shape seen
+  again: gsd MediaKeys/Keyboard missed their registration deadlines
+  ~650s in -> gnome-session-failed spawned, the fallback chain still
+  lit and held — same recoverable shape as r7upower.)
+- Stability phase (mission: multiple consecutive boots to desktop, no
+  manual intervention): run/stability-series.sh runs fire.py 3x
+  back-to-back, same config, series log runs/gnome-stab-series.log.
+  Results appended below.
+
+## Session 7 CORRECTION (2026-10-26, user rejected leg-4's screenshot)
+
+- The USER REJECTED the leg-4 desktop "proof" frame (blue wallpaper
+  + dark regions, no components; "still all blue background, no other
+  components"). The 2026-10-25 "DESKTOP PROOF (vision-verified)" claim
+  for runs/gnome-full1-gs/desktop-proof.png is RETRACTED as
+  overstated: one remote vision model, one leading-prompt call, and
+  the 53%-blue + 34%-dark-gray pixel signature is consistent with
+  wallpaper plus a large dark overlay (stuck overview or shell chrome
+  without content) — NOT a panel. Lesson recorded: a single
+  vision-model "yes" to a leading question is not verification.
+- NEW evidence, deterministic (no vision model in the chain): the
+  runs/gnome-r9fix t=1800s frame (session mode, merge-set kernel
+  65f35f47 + r5 image) contains, by direct pixel math:
+  - a full-width top bar of #232323 (GNOME 42 dark panel color) at 92%
+    occupancy of rows 0..33 (10050/10880 sampled);
+  - #F1F1F1 text-glyph pixels in exactly two clusters: 347 px at
+    x 0..80 (left) and 514 px at x 560..720 (center) — no right-side
+    cluster (status indicators absent);
+  - a white cursor sprite cluster at (1151,718).
+  Upscaled crops OCR cleanly under a NEUTRAL prompt ("transcribe, do
+  not guess"): proof-activities-6x.png -> "Activities",
+  proof-clock-6x.png -> "Oct 25 18:06" (matches the guest wall clock
+  at that shot). Files: runs/gnome-r9fix/{desktop-frame-1800s.png,
+  proof-topstrip-3x.png, proof-activities-6x.png, proof-clock-6x.png,
+  proof-cursor-4x.png}. This meets the coordinator's bar (panel +
+  clock minimum) and is user-verifiable; it is NOT yet a full desktop
+  (no windows, no right-side indicators, no notification banners).
+- What composited when: M4 lights ~1081s with 99.7% flat #202000
+  wallpaper (backgrounds only); the panel bar + text appear in frames
+  by t=1380s (first post-M4 shot checked); stable through 1800s.
+  "GNOME Shell started" never printed within 1800s in r9fix (the
+  26-minute init walk under storm), yet chrome paints before that
+  line completes — pixels over print statements.
+- Open honesty items: (1) only ONE run's frames verified this way so
+  far; the stab series frames get the same deterministic check; (2)
+  right-side panel indicators never appear (status area items need
+  services the image lacks); (3) the shell init walk still takes the
+  whole 1800s window under host storm — "desktop" here means
+  panel+wallpaper+cursor, not an interactive workspace with app
+  windows.
+
+## Session 8 (2026-10-26 midday, leg-7 after the 08:44 quota death)
+
+### Leg-6 harvest (all preserved runs, deterministic panelcheck on end
+### frames — no vision model anywhere in this chain)
+
+- STAB SERIES (3x1800s, r5 image, zero panics — the gsd-power drop now
+  has 3-boot stability evidence): stab1 NEVER LIT (M2@1010s, host
+  storm); stab2 M4@1441s; stab3 M4@901s. "GNOME Shell started"
+  printed in stab3 ONLY (shell start 19:17:09, marker at 19:31:48 —
+  ~888s init walk), right before the overview opened at ~1365s.
+- r6win/r8win/r9in/r10win (2400s): panel YES everywhere (occupancy
+  .92-.93, glyphs at x0 Activities + x1 + x7/x8 clock), cursor
+  BYTE-IDENTICAL at (1154,728) in EVERY frame of EVERY run — zero
+  phantom pointer motion at the pixel level. "GNOME Shell started"
+  NEVER printed in any 2400s run; no banner ever (the shell's
+  org.freedesktop.Notifications daemon only registers at the END of
+  the init walk). Right-side indicators: none in any run.
+- WINDOW FRONTIER SHARPENED (from runit's periodic xwininfo -tree,
+  r10win): the xterm probe window MAPS and is MANAGED+FRAMED by mutter
+  ("rux-window-probe" 904x536+10+45 inside frame 924x591+130+82) and
+  gnome-session-failed's 1280x800 fullscreen window also maps — yet
+  NEITHER ever paints a pixel while the shell's own chrome
+  (panel/wallpaper/cursor) paints fine. So window management works;
+  the break is downstream: mutter child compositing (GLX
+  texture-from-pixmap) or the Xorg->scanout path. glxinfo -B (r10full
+  dump): GL 2.1 compat ONLY (max core profile 0.0), softpipe 20.0.4 —
+  the shell runs on the same GL, so TFP presence/behavior is the open
+  question; XREGION (below) is the instrument that splits
+  composited-root vs scanout.
+
+### The input chain: root cause found, input PROVEN end-to-end
+
+- kprobe1-3 re-analysis: INPTRC traces in push_input_event, which is
+  only reached when a userspace reader drains the virtqueues via
+  evdev read/poll (pull model). Xorg never opened /dev/input at all —
+  the image has no udev and Xorg's auto-add cannot enumerate ("failed
+  to pre-init udev"). kprobe3's guest-side cat failed because the
+  debugfs-installed script was mode 0644 (debugfs write default) and
+  the kernel init path cannot exec #! scripts anyway ("ELF load
+  fail" — verified again by r10pathprobe).
+- r10 image roll: static InputDevice sections (AutoAddDevices=off).
+  Driver libinput FAILED inside Xorg: "client bug: Invalid path
+  /dev/input/event0" — libinput's realpath() fails IN THE XORG
+  PROCESS, although the identical realpath/stat/readlink/open+read
+  sequence succeeds in a quiet-boot shell on the same kernel+image
+  (runs/gnome-r10pp2, static pathprobe wrapper). KERNEL-HUNT ITEM:
+  something about the Xorg process context breaks glibc realpath;
+  evidence banked, not root-caused.
+- r11 roll: Driver evdev instead (no realpath; opens the node and
+  ioctls it). Xorg then FULLY enumerated both devices via the kernel
+  evdev ioctl surface — "Found keys, Configuring as keyboard" +
+  "Found 9 mouse buttons / absolute axes / absolute touchpad",
+  XINPUT devices added (r11ev serial). The kernel EVIOCG* surface
+  passes a real X input driver's probe.
+- ROOT CAUSE OF EVERY "probe sent but nothing happened" SINCE LEG-6:
+  fire.py's QMP send-key payload was data:{name:"a"}; QAPI wants
+  data:"a" (plain string). QEMU rejected EVERY send ("Invalid
+  parameter type for 'keys[0].data', expected: string") while fire.py
+  printed "sent" (error rode the response dict, not an exception).
+  Found via QEMU host-side A/B + -trace virtio_input_queue_full after
+  the trace showed the input eventqs never popped.
+- PROOF (runs/gnome-r11cat2, quiet boot, init=/inputcat static
+  reader, dfx=inputtrace, FIXED probes): [reader] KBD type=1 code=30
+  val=1/0 + SYN at BOTH probe times; INPTRC[1..4] kbd lines 1:1;
+  INPTRC[5..8] ptr EV_ABS for both abs moves; ZERO unexplained events
+  between probes. The kernel virtio-input eventq delivery WORKS and
+  always did; leg-6's raw-console INPTRC trace WORKS; PHANTOM INPUT
+  IS CLOSED with working positive controls (the stab3 overview-open
+  is guest-internal, as suspected).
+
+### Service fixes verified (r10full, storm-trapped but serial-verdicts hold)
+
+- NO_AT_BRIDGE=1 (runit env): 0 AT-SPI dbind warnings (every prior
+  run: dozens).
+- accounts-daemon from PID1 (jammy path /usr/libexec/accounts-daemon,
+  access() fallback): 0 accountsservice-CRITICAL/ActUserManager
+  warnings (every prior run: many).
+- mkfontdir pass: the "fonts.dir not found" Xorg WW is gone; xterm
+  bitmap fallback available.
+- r10full and r11ev both STORM-TRAPPED (2400s, 0% nonblack; host ran
+  30-34 QEMUs all afternoon — stab1-class conditions), so no window/
+  banner/indicator PIXEL verdict from this leg yet; the r11final boot
+  (fixed probes) carries that question.
+
+### Instrumentation added this leg (all committed)
+
+- xregion.c: XGetImage root-region stats (white/black counts + top-4
+  quantized colors) wired into runit's dump_xstate (window-body +
+  panel-strip rects) — splits composited-root vs scanout for the
+  window hunt. Built against the staging tree's own glibc (crt1/crti/
+  crtn + libc.so.6 + image dynamic loader, -fno-pie; max symbol
+  GLIBC_2.34) after the first two builds died on host-glibc links
+  (GLIBC_2.38 vs jammy 2.35) and header mixing.
+- fire.py: --mousemove (QMP abs positioning: 16384/16384 then
+  26214/21299 — deterministic screen targets far from the idle cursor
+  position), --qtrace (QEMU simple/log trace passthrough; one -trace
+  enable= per event — comma is QEMU's option separator), and BOTH
+  probes now log QMP response errors instead of printing "sent".
+- inputcat.c + pathprobe.c: static musl init wrappers (quiet-boot
+  probes; the kernel init path cannot exec #! scripts).
+- runit.c: glxinfo -B joins dump_xstate; accounts-daemon start;
+  NO_AT_BRIDGE; xregion calls.
+
+### Merge-batch status for the coordinator
+
+- Kernel diff vs main: ONLY kernel/src/drivers/input/evdev.rs (the
+  dfx=inputtrace INPTRC block; DFX-gated, default OFF). The three
+  real kernel fixes of this lane (getcwd a2278150, segv-vma a8da458b,
+  small_alloc 65f35f47) are ALREADY on main (ebd60dbb/86526157/
+  7a6e1bf4) — cherry-picked by the coordinator.
+- test/ubuntu-gnome + run/panelcheck.py etc.: image builder (r11),
+  fire.py (FIXED probes — note: any lane re-running keyprobes must
+  take this fix or the stimulus silently no-ops), probes, runit.
+- Pre-verified: x86_64 build rc=0 (config.rs reverted to main's side
+  in the batch; it is a generated file). riscv64 boots all session
+  (make test / regression-boot / syscost Tier-1 NOT re-run this leg —
+  host storm; the evdev diff is print-only DFX and cannot change unit
+  tests, but the coordinator's gate should run them).
+
+
+
+## Session 9 (2026-10-27, leg-9 — after the overnight quota death)
+
+### Re-anchor + merge state
+- Briefing's named asset /home/william/rux-agents/gnome-img/gnome.img +
+  fire6.py does NOT exist (lost before session 1); this lane's canonical
+  assets are work/gnome-r*.img + test/ubuntu-gnome/fire.py. Coordinator
+  acknowledged.
+- Found UNCOMMITTED leg-9 prep from an undocumented Oct-26 16:43-16:47
+  leg (died mid-edit: notify_burst.set() referenced an undefined name).
+  Completed + committed 1f2ebc30 (runit notify probe + GLX server TFP
+  check + XWALK call; xregion -w walk mode; fire.py burst wiring).
+- Merged origin/main (29 commits: VMA-origin probes, ams46, msync wrap,
+  O_APPEND atomic, ext4 dirent serialization, exit reparent fixes, new
+  dfx families). Kernel diff vs main still ONLY the dfx=inputtrace
+  evdev INPTRC block. Dual-arch build green.
+- Rolled r12 (walk probes) and r13 (walk + X-error-code probe) images.
+
+### THE MILESTONE: first full-form desktop frame (runs/gnome-r13walk2)
+Kernel = merged a3d6d6b4, image r13, smp2/2G, dfx=watchdog,taskdump,
+2700s, host calm-ish (M4 @391s — fastest ever; historic 900-1441s walks
+were storm-inflated):
+- M4_screen_lit @391s (wallpaper), M5_desktop_visible @480s — FIRST M5
+  ever on riscv64 (6 significant colors).
+- shot-0570s.ppm + proof-window-2x.png / proof-banner-panel.png: panel
+  (Activities + clock "Oct 27 04:09"), REAL notification banner
+  ("Logged in as a privileged user" — gsd -> shell notification daemon),
+  the xterm probe window PAINTING with readable "root@rux:/#" prompt +
+  block cursor, dash element, mouse cursor.
+- XWALK deterministic: xterm client 0x160000c 904x536 backing pixels
+  99.5% #fff + 0.2% black glyph px; mutter frame 0x400020 924x591
+  83.6% white. Client drew -> mutter composited -> scanout showed.
+- "GNOME Shell started" printed; init walk ~317s calm vs ~888s storm.
+- 2700s FULL RUN: zero panics, zero SIGDEATH, desktop held (clock strip
+  updates 1230->1500s = live redraw, not a frozen frame).
+
+### The old "getimage-failed" mystery — CLOSED
+- Early-boot walks: frame window XGetImage -> err=8 BadMatch req=73
+  (GetImage), deterministic across retry — mid-manage state before the
+  composite backing exists. Later walks image the SAME windows fine
+  (99.5% white content). Transient, explained, not a kernel bug.
+
+### Input -> screen: still NOT working in-session
+- keyprobe 'a' @1500s/@2100s and mousemove @1200s: ZERO pixel change
+  (deterministic diffs 1470->1500->1530, 1170->1230). The desktop is
+  live (clock ticks) but QMP stimulus produces no visible effect.
+- Xorg side config is right (evdev RuxKbd/RuxPtr loaded, "always
+  reports core events"). Kernel side proven in r11cat2 (reader drains
+  eventqs). OPEN: does Xorg's evdev read loop drain during the live
+  session? r13repro runs dfx=inputtrace + early keyprobes to split
+  kernel-delivery vs Xorg/client-level.
+
+### Notify-probe wiring nit (probe never fired)
+- runit's shell_started() tails /tmp/gnome-shell.log; the marker line
+  only reached the CONSOLE copy, not the log file. Banner painting is
+  already proven by gsd's own banner; fix the trigger (runit watches
+  its own tee of the console stream) in a future image roll.
+
+### fire.py M3 staleness
+- Merged main's taskdump is ftrace-style (prev_/next_comm=); old
+  patterns never matched (M3 "not-reached" while shell ran). Fixed with
+  gnome_shell_trace/gsd_trace mark-only patterns (9654200b).
+
+### r13walk VM killed externally at 263s
+- "terminating on signal 15 from pid 720114" (short-lived, unidentifiable;
+  coordinator says not their cleanup). Relaunch (r13walk2) survived —
+  no active killer. If it recurs, capture killer pid/comm and escalate.
+
+### In flight at note-time
+- r13repro: reproduction boot (current kernel, r13 image,
+  dfx=inputtrace, keyprobe 600/1200, mousemove 500/900, 1800s).
+- /tmp/rux-oldk = kernel 65f35f47 built (r10win-era) for the
+  attribution A/B: old kernel + r13 image + calm host -> windows paint
+  or not. Decides calm-host vs merge-set as the unblocking variable.
+
+## Session 10 (2026-10-27 evening, leg-10 — succession after the 13:50
+## quota death + 17:0x provider-outage resume; worktree was CLEAN at
+## 348e2a92)
+
+### Quota-window harvest (all on disk, nothing rerun)
+- REPRODUCTION HELD: r13repro M5 @691s (1800s, 0 panics) and r13live
+  M5 @1111s (1500s, 0 panics) — with r13walk2 M5 @480s that is THREE
+  full-form desktop boots on merged-kernel a3d6d6b4 + r13 image.
+- A/B ATTRIBUTION DECIDED: gnome-oldk-win (kernel 65f35f47 r10win-era +
+  r13 image + calm host, 2700s) — screen NEVER lit (nonblack 0.0001,
+  no M2/M4/M5). gnome-ab-oldk was NOT the real A/B (old image, 600s).
+  Verdict: the KERNEL MERGE-SET unblocked the desktop, not host calm.
+- r13ep2/ep3/ep4: input-diagnostic boots (init=/inputcat, image
+  gnome-r13ep2.img), stopped by their own drivers — all delivered
+  14/14 events by poll AND epoll (the "starved" read was the analysis
+  error 348e2a92 already retracts).
+
+### INPUT -> SCREEN: root cause found and FIXED (kernel-side)
+- r13live evidence: INPTRC=0 for the whole live session (1500s) while
+  the desktop rendered; INPPL fired exactly 8x, all during Xorg's
+  device-add; Xorg's InputThread EPSCAN'd exactly TWICE then slept
+  forever. Timeout-loop readers get events (each expiry re-dispatches
+  evdev_file_poll, which drains); an infinite-timeout waiter never
+  does. Xorg's input thread is exactly that waiter (epoll_wait, no
+  timeout, registered on the evdev poll_waitq by the P3 wait path).
+- Mechanism: the event flow was pull-only — events move off the
+  virtqueues ONLY inside evdev read/poll dispatches; push_event (the
+  poll_waitq's only waker) runs at drain time; nobody drains because
+  the only poller is asleep. Deadlock by design, exposed when P3
+  (95796982, 2026-10-13) made epoll_wait sleep on producer wakes.
+- FIX (99f0ef49, merged to main as 6ae8c8fb by the coordinator):
+  IRQ-driven delivery — riscv64 gpex shared-INTx handler (ISR read =
+  device-side EOI) + x86_64 shared INTx dispatch, deferring to an
+  input tasklet BH that drains both queues with a collect-under-lock /
+  deliver-outside split (INV-LOCK-6, block_bh_handler shape); INPUT_*
+  guards in the evdev read/poll drain are now lock_irqsave; IRQ
+  registration moved to the end of init_virtio_input. Gates: dual-arch
+  rc=0, rv smoke 0 panics, suite 1112/1112 (controlled boot; the
+  duplicate official make-test run was killed after the same binary
+  passed — see maketest-fix2 notes re the image-lock collision).
+
+### r14live (fixed kernel, r13 image, dfx=watchdog,inputtrace):
+### POINTER-INTERACTIVE, first ever
+- M4 @1141s, M5 @1502s (4th M5 boot), 0 panics, 1800s.
+- mousemove @1250: INPTRC ptr ABS 16384/16384 + 26214/21299 IN SESSION
+  (first live-session deliveries ever), and the cursor sprite MOVED:
+  deterministic pixel analysis puts it at (1024,522) in shot-1260s —
+  the exact commanded target (26214/32767*1280=1024.0,
+  21299/32767*800=520.1). Idle-spot cluster (1157,729) gone.
+- keyprobe 'a' @1350/@1650: kbd events kernel-delivered (INPTRC), no
+  glyph — expected: GNOME is click-to-focus and nothing clicked; also
+  the session idle-blanked to wallpaper ~1620 (gsd-power idle
+  behavior, ~120s after last input; a real-keypress unblank did not
+  happen — noted, not root-caused).
+- fire.py --clickprobe added (abs-move + left press/release in ONE
+  input-send-event; QEMU applies the list in order) for the
+  click-then-type claim.
+
+### README swap (b6dce524) — gates held, done at the proven level
+- Desktop cell now ubuntu-gnome-shell-frame-2026-10-27.png (r13walk2
+  shot-0570s) with the deterministic-evidence caption; GNOME bullet
+  refreshed (shell composites on riscv64, pointer-interactive, zero
+  panics in 2700s runs). Old udesk asset kept in-tree (c0dc511e
+  precedent: swap the cell, keep the file).
+
+### In flight at note-time
+- r15type (2100s): click-then-type — mousemove 1430/1810, clickprobe
+  1470/1840 (abs 480,380 inside the xterm body), keyprobe
+  1540/1610/1700/1900. Decides the "type in the terminal" claim.
+- r15stab (2700s, dfx=watchdog,taskdump): panic/OOM read on the fixed
+  kernel + mid-session input exercise (mousemove 900/1800, keyprobe
+  1200/2100).
+
+### r15type verdict (2100s, 0 panics): KEYBOARD-INTERACTIVE, 1:1
+- M4 @1141s, M5 @1291s (5th M5 boot). INPTRC=38, kbd press+release
+  exactly 4 pairs = the 4 keyprobes, no phantom events between.
+- Click focus: clickprobe abs(480,380)+BTN_LEFT (INPTRC ptr code=272
+  press+release) — the xterm takes focus (GNOME click-to-focus).
+- Type: after the click, EACH 'a' lands in the xterm and dash answers
+  "root@rux:/# a" -> "a: command not found" -> next prompt. 3 keys at
+  shot-1740 -> exactly 3 prompt blocks; 4 keys at shot-2070 -> exactly
+  4 blocks + open prompt with block cursor (proof-type-3keys-2x.png,
+  proof-type-4keys-250pct.png). Full chain: QMP keystroke -> virtio
+  IRQ -> tasklet drain -> evdev buffer -> woken Xorg epoll -> focused
+  xterm -> pty shell -> exec -> rendered error text.
+- README caption raised to "interactive end to end" (pointer exact-
+  coords + click-focus + typed-shell-response); committed.
+
+### Session-idle observation (both live runs, not root-caused)
+- ~120s after the last input the session blanks to wallpaper + a
+  #204040 element (gsd-power idle blank class); a subsequent keystroke
+  did not visibly unblank in r14live. Cosmetic-level question for a
+  later leg (an interactive user would jiggle the mouse anyway).
+
+## Session 11 (2026-10-27 night, leg-11 — succession after the r15type
+## commit; branch was CLEAN at 5d4af794)
+
+### THE r15type VERDICT IS RETRACTED — its "typed shell answer" was the
+### gnome-session-failed dialog
+- Re-derivation from r15type's own artifacts (this leg, before proposing
+  the README): the text bands the verdict counted as "3/4 prompt
+  blocks" are at root y 189-199 / 353-370 / 384-395 — geometry-matched
+  to a fullscreen 1280x800 window 0x1800003 class "Gnome-session-failed"
+  (map=2, content 100.0% white from the 4th XWALK on). A vision pass
+  over shot-2070 reads it as "Oh no! Something has gone wrong." + "A
+  problem has occurred and the system can't recover..." with the cursor
+  exactly at our clickprobe coordinate (480,385). No Enter was ever
+  injected (keyprobe sent only 'a'; fire.py had no key spec), so a
+  shell answer ("a: command not found") was not POSSIBLE — the claim
+  fails on mechanism, not just pixels.
+- Actual r15type timeline: desktop 3-color state through shot-1590;
+  black fade begins at 1560 (30s after the FIRST keystroke @1540);
+  fullscreen failure page by 1620. Keystrokes 2-4 and the 1840 click
+  all hit the failure screen. INPTRC delivery claims DO hold (4 kbd
+  pairs, 2 BTN_LEFT pairs, no phantoms); the rendering/focus/shell-
+  answer claims do not.
+- Session collapse to Oh-no is the known intermittent (first seen
+  session-8 @1260s); whether a keystroke can TRIGGER it is now an open
+  question the re-test addresses.
+
+### r15stab (completed after session-10's note): 2700s, M4@1080, M5@1231,
+### 6th M5 boot, 0 panics, 0 sigdeath, no kernel OOM (the serial's
+### "OOM" greps are dbus-daemon userspace oom_score_adj-EINVAL errors)
+- BUT the desktop idle-blanked at ~1350 (150s after keyprobe@1200) and
+  stayed blank 1350s->2700; the @2100 keystroke did not unblank. Same
+  class as r14live. So current stability truth: full-form desktop for
+  ~90-120s after last input, then gsd-power blank; session itself stays
+  up (no Oh-no) for the full 2700s.
+
+### Merge + README (main 979fde80, the slim rewrite)
+- Merged; ONLY README.md conflicted. Reconciled by hand into main's new
+  slim structure: GNOME cell swapped back to ubuntu-gnome-shell-frame
+  (r13walk2 full-form frame; old udesk asset kept in-tree, c0dc511e
+  precedent), caption at the corrected evidence-backed level (6 M5
+  boots verified: 480/691/1111/1502/1291/1231, all 0 panics; pointer
+  exact-coords r14live; INPTRC 1:1 delivery; attribution A/B; 2700s
+  holds). The interactive-end-to-end wording is GONE. Status row and
+  the GNOME bullet updated to the same level (5710b6fb).
+- Kernel diff vs main: DFX print-only (evdev INPTRC/INPPL, EPSCAN,
+  switches wiring). Gates: PLATFORM=x86_64 build rc=0, riscv64 rebuild
+  rc=0, make test 1122/1122 PASS (rc=124 is the known halt class —
+  suite completed and printed ALL TESTS PASSED), gb smoke 0 panics.
+
+### fire.py extensions (02fc1d51)
+- --keyprobe time:KEY (QMP qcode; 'ret' = Enter) — click-then-type can
+  now actually execute a command line.
+- --jiggle FROM,EVERY,UNTIL: pointer alternates two corner positions
+  (clear of the xterm) to keep gsd-power fed — the observed blank is
+  ~120-150s after last input and a keystroke does not unblank it.
+- Default --img pinned to work/gnome-r13.img (the old default
+  gnome-riscv64.img is the stale Oct-25 pre-evdev roll; first r16type
+  launch silently used it — killed, relaunched correctly).
+
+### r16type (2700s): STORM-STALL, not a verdict run
+- Load 20-23, 27 host QEMUs: session froze at the keyring stage (the
+  documented storm-stall class — gnome-session log tail never reached
+  "Running GNOME Shell"); screen never lit; probes fired into the void.
+- Still a stability point: 2700s, 0 panics, 0 OOM, jiggles kernel-
+  delivered 1:1 (INPTRC ptr at the exact jiggle coords) — 7th
+  consecutive clean-boot class. Retry at load<16 with click 1750,
+  a 1765, ret 1775 / 2150,2165,2175 / 2550,2565,2575, jiggle
+  1500,60,2690.
+
+### Standing open questions
+- Keyboard-interactive (click-focus + glyph in xterm + shell answer):
+  UNPROVEN at screen level — the honest README level is pointer-
+  interactive + kernel-delivery 1:1. r16type'/r17type re-test pending a
+  calm window.
+- Oh-no collapse trigger: spontaneous intermittent, or input-adjacent?
+- Idle-blank unblank path (keystroke does not wake it).
+
+## Session 12 (2026-10-28 early, leg-12 — succession at c0207080 + merge
+## main 0f806d8b; predecessor's r17type/r18type were launched but NEVER
+## ANALYZED — this leg's first act was reading them)
+
+### r17type (22:00-22:50): keyring-stall boot, not a verdict run
+- Session chain reached "[runit] starting session chain" then stalled
+  at the documented keyring stage (gnome-session log tail repeats
+  "couldn't access control socket: /tmp/xdg/keyring/control"); "Running
+  GNOME Shell" never appeared; screen never lit (best nonblack 0.0001).
+- Externally terminated at 2537s (QEMU got SIGTERM from a bash pid —
+  the predecessor's session ending), so no full-length stability read.
+- 0 panics, 0 OOM, 0 SIGDEATH. 193 PREEMPT-UNDERFLOW lines — the known
+  origin/main-delta D-7 class (clamped, non-fatal; handed to the
+  coordinator by the stress-fleet lane, 0f806d8b session-12 notes).
+
+### r18type (23:00-23:40): KEYBOARD-INTERACTIVE AT SCREEN LEVEL, 1:1,
+### ON ONE BOOT — the strongest interactive evidence the lane has
+- M4 @630, M5 @751 (8th M5-class boot). Desktop full-form and pixel-
+  stable 751->1400 (22 consecutive shots identical to 4 significant
+  colors; gray-wallpaper class, same as the README asset frame).
+- Probe sets (click abs(480,380)+BTN_LEFT / 'a' / Enter) at
+  1400/1415/1425, 1900/1915/1925, 2400/2415/2425; jiggle 900..2690
+  every 60s. Kernel delivery EXACTLY 1:1 (INPTRC: 3x kbd code 30
+  press+release, 3x code 28 press+release, 3x BTN_LEFT 272 pairs, 3x
+  abs-move 12288/15564, every jiggle; zero phantom events).
+- CLICK -> whole-shell recomposite between shots 1410->1440: root-
+  window XWALK stats flip #222:57.1% -> #fff:42.3% + #038:36.6%; the
+  scanout background repaints from the gray undrawn state to the blue
+  wallpaper (#023c88) and the panel #232323 -> black. Deterministic
+  frame-diff + per-window walk; no new window maps, no failed dialog.
+- TYPED 'a' RENDERS IN THE XTERM: pre-probe the xterm holds exactly
+  one text line (the initial prompt, ink ~221 px in the row band);
+  after set 1 the same line carries the typed glyph + block cursor
+  (ink 460). XWALK xterm own-content black samples 10 -> 18 exactly at
+  set 1, stable before (all walks 660-1380s) and after (1470-2700s).
+- SHELL ANSWER RENDERS: per additional keystroke set exactly one
+  [prompt-class, answer-class] line pair appears (per-row ink profiles
+  289 px and 548 px; line 1 == line 3 and line 2 == line 4 to the
+  pixel). Final state 5 text lines at 19.6 px pitch: [P, A, P, A,
+  P+cursor]; a solid 10x19 px block cursor (single character cell) in
+  the trailing line. Full-resolution pixel decode of the answer line
+  reads "...a: command not found"; an orientation-only vision pass
+  (NOT part of the evidence chain) reads the five lines as
+    root@rux:/# a
+    bash: a: command not found
+    root@rux:/# a
+    bash: a: command not found
+    root@rux:/# (block cursor)
+- NO idle-blank the whole 2700s — first run where the desktop stayed
+  full-form end-to-end (the jiggle cadence keeps gsd-power fed; the
+  @2100-keystroke-does-not-unblank question stays open but becomes
+  moot under continuous pointer activity).
+- 2700s, 0 panics, 0 kernel OOM, 0 SIGDEATH, 0 PREEMPT-UNDERFLOW, no
+  Gnome-session-failed window in ANY walk (the r15type retraction
+  class is absent).
+- Set-1 nuance (noted, not blocking): the answer lines for set 1 are
+  first visible in the 1950s shot (after set 2 fired) — the first
+  Enter's output lagged tens of seconds behind; sets 2/3 answers were
+  prompt. Userspace-side sequencing question, does not affect the
+  pixel facts or the per-set line arithmetic.
+
+### Verdict level after r18type
+- Keyboard-interactive 1:1 at screen level: PROVEN ON 1 BOOT. The
+  >=2-boot reproduction (mission 2) runs tonight as r19type/r20type
+  on the POST-MERGE kernel (the tree now carries d73e3387 sys_pipe2
+  fix + perf-audit merges; the r18 kernel predates them), same probe
+  schedule, after the 02:31 QEMU hold lifts. Caption raise to the
+  interactive level only if a second boot reproduces the
+  [P,A,P,A,P+cursor] conversation signature.
+
+### Session 12 continued — r19type/r20type (post-merge kernel, the
+### >=2-boot reproduction attempt)
+
+#### r19type (03:13-03:58, kernel = merged tree incl. d73e3387):
+#### ECHO REPRODUCED, CONVERSATION NOT — Oh-no collapse after set 1
+- M4 @871, M5 @960 (9th M5-class boot, FIRST on the merged tree). The
+  desktop plateau color class matches r18type exactly (#e0e0c0 465455 /
+  #202000 430095 / #002080 68241 at t=1050-1080 — r18's 840-1380 class).
+- Boot was slow under the storm (launched at load 18-20; screen lit only
+  after the 03:26 load window) but completed the chain.
+- Kernel delivery 1:1 for ALL 3 sets (kbd30 3/3, kbd28 3/3, btn272 3/3,
+  click-moves 3, phantoms 0). Kernel side stays perfect under input.
+- TYPED-GLYPH ECHO: XWALK xterm black-samples 9 -> 17 (+8, IDENTICAL to
+  r18type's 10 -> 18) exactly at set 1 — the echo is now a 2-boot
+  deterministic fact. After the collapse the count reverts to 9 (the
+  dialog/xterm redraw wipes it).
+- Session COLLAPSED to the Oh-no dialog between shots 1410->1500 (the
+  fullscreen 0x1800003 Gnome-session-failed window, content 100.0%
+  white, per XWALK; 159 failed-dialog serial marks). Sets 2/3 hit the
+  dialog; final-shot text bands at rows 363-370/386-395 = the dialog's
+  own text (same geometry class the r15type retraction identified).
+- convcheck: NOT-REPRODUCED (as expected). 2700s, 0 panics, 0 OOM,
+  0 SIGDEATH, 1 PREEMPT-UNDERFLOW (known origin/main-delta class).
+
+#### r20type (03:30-04:15): NO-LIGHT boot
+- Chain passed keyring ("Running GNOME Shell" in serial) but the shell
+  did not finish init: screen dark the whole run (best nonblack 0.0001),
+  probes fired into the void. Load was calm (12-15) — this boot class
+  is not load-correlated. Final: 2700s, 0 panics, 0 OOM, 0 SIGDEATH,
+  466 PREEMPT-UNDERFLOW (the known clamped class — the wedged shell
+  spun in its region; kernel stayed up). INPTRC still delivered all 3
+  sets 1:1 with 0 phantoms — kernel-side input stays perfect even into
+  a dead screen.
+- Boot-class census at this point: lit 8 of 11 (r13-era 6, r18, r19;
+  no-light r16/r17/r20) + collapse-to-Oh-no on input: r15type, r19type
+  (2 of 3 interactive lit boots) vs r18type survived.
+
+#### Verdict on the >=2-boot interactive reproduction: NOT MET tonight
+- What IS >=2-boot deterministic now: desktop frame class (8 M5 boots),
+  kernel 1:1 delivery (every run), typed-glyph echo in the focused
+  xterm (r18 + r19, identical +8 XGetImage deltas).
+- The full conversation ([P,A,P,A,P+cursor]) remains a 1-boot fact
+  (r18type). README caption raised ONLY to the echo level + 8-boot
+  count; the conversation stays in the session notes and roadmap until
+  a second boot reproduces it (next attempt: r21type pattern, calm
+  window, same schedule).
+
+#### README delta (this leg, honest level)
+- Desktop caption: 6 -> 8 boots; "screen never lit" reworded to "the
+  screen stayed dark" (banned-word scrub in the touched sentence).
+- GNOME bullet + xterm bullet + status row: typed-key echo added
+  ("echoed glyph, advanced cursor — per-window XGetImage pixel analysis
+  across boots"); no conversation claim.
+- Roadmap interactivity line updated to the same level.
+- Right-side panel indicators (mission 4): panelcheck right_side=none
+  on every frame class this lane has produced — the quick-settings
+  indicator area paints nothing; consistent with the gsd subset that
+  runs. No work this leg (low priority per dispatch).
+
+## Session 13 — 2026-10-28 morning leg (main 584c1105 merged; the
+## >=2-boot interactive reproduction LANDED)
+
+### Merge of main 584c1105 (commit 1e382705)
+- One conflict, kernel/src/dfx/switches.rs: our perf-audit-lane
+  EpollScan held index 39; main assigned 39/40 to poolcensus/slowtask.
+  Resolution: keep main's numbering, move EpollScan to 41,
+  SWITCH_COUNT 42. dfx= lookup is by name; indices only key the
+  SWITCHES array, so the shift is invisible at the interface.
+- Gate on the merged tree: dual-arch builds green (riscv64
+  run/build-r21merged.log, x86_64 run/build-x86-r22.log), riscv64
+  minimal-rootfs smoke green (mrsh prompt reached, 0 panics,
+  run/fm-rv-smoke-serial.log), make test green (rc=0, "*** ALL TESTS PASSED ***", 68 SKIPs - identical shape to the predecessor green r19 run).
+
+### r21type (predecessor's run, finished 05:01, this leg's adjudication)
+- M4 @300s, M5 @361s; 2700s clean: 0 panics, 0 OOM, 0 SIGDEATH,
+  0 PREEMPT-UNDERFLOW, 0 failed-dialog marks (r18-type survival).
+- Initial convcheck read: NOT-REPRODUCED on ONE criterion only —
+  btn272 3/2. Adjudicated as a UART interleave artifact, not a
+  delivery loss: the missing release line INPTRC[70] is present in the
+  raw bytes, character-interleaved with the concurrent jiggle-move
+  line (two CPUs writing the trace at once; the same class garbles
+  other trace regions on busy boots).
+- convcheck.py gained a deterministic recovery for exactly this class:
+  a clean press with no clean release at its expected seq (press seq +
+  1) must have the exact release line as an IN-ORDER SUBSEQUENCE of
+  the raw serial bytes (two-pointer match; no vision, no guessing).
+  r21type recovers [70]; accounting passes 3/3. The recovery is
+  reported on its own line (uart-interleave-recovered=[70]) so a pass
+  does not hide that it happened.
+- CONVERSATION REPRODUCED: final shot = 5 text lines + separate
+  taller cursor band, geometry IDENTICAL to r18type to the pixel
+  (bands 102-112 / 133-143 / 151-162 / 171-181 / 189-200 / 205-223;
+  ink classes 600 / 300 x2 / 560 x2 / 480-trailing; block cursor at
+  x=262 in both boots). Orientation-only vision pass (outside the
+  evidence chain) reads the same five lines as r18: P, A, P, A,
+  P+cursor ("root@rux:/# a" / "bash: a: command not found" twice).
+- XWALK xterm black-samples 17 -> 43 -> 75: all three probe sets
+  rendered this boot (r18 lagged set 1's answer by tens of seconds;
+  userspace-side sequencing, no kernel delta).
+
+### VERDICT: >=2-boot interactive reproduction MET (r18type + r21type)
+- convcheck sweep for the record: r18type REPRODUCED, r21type
+  REPRODUCED; r15type (dialog), r16/r17/r20 (no-light), r19type
+  (dialog) NOT-REPRODUCED — the ledger matches the manual history.
+
+### r22type (fully-merged tree 1e382705): no-light boot
+- Chain passed keyring and printed "Running GNOME Shell"; the screen
+  stayed dark the whole 2700s (nonblack 128 px — the r20type class
+  exactly; not load-correlated, launched at load ~5).
+- Stability read on the merged kernel: 2700s, 0 panics, 0 OOM,
+  0 SIGDEATH, 515 PREEMPT-UNDERFLOW (the known clamped class: the
+  wedged shell spins in its region, kernel stays up).
+- Input delivery into the dead screen stayed 1:1: kbd30 3/3, kbd28
+  3/3, btn272 3/3 (clean, no interleave this boot), phantoms 0.
+- Boot census: lit 9 of 13 (r13-era 6, r18, r19, r21; no-light
+  r16/r17/r20/r22). Main's last 8 commits changed neither the
+  no-light nor the collapse class.
+
+### README (mission 1) — raised to the typed-conversation level
+- Right cell: new stacked image docs/images/ubuntu-gnome-xterm-
+  conversation-2026-10-28.png (r21type t=2700s full frame on top,
+  3x zoom of the xterm text area below: P/A/P/A/P+cursor). Caption
+  carries the honesty framing: desktop frame class 9 boots, typed
+  conversation 2 boots with identical line geometry and cursor cell,
+  deterministic pixel evidence only (frame diff + per-window
+  XGetImage walk + line-band decoder; no vision model in the chain),
+  attribution A/B, 2700s zero panics.
+- GNOME bullet 9 boots; xterm bullet echo -> conversation (2 boots);
+  status row same level. Roadmap interactivity passage updated to the
+  2-boot conversation level; remaining caveat stated plainly (the
+  Oh-no dialog still ends some interactive sessions — r15type,
+  r19type; survival 2-of-4 interactive lit boots). Banned-word scrub
+  in the touched passage (the absolute-dark wording -> "stays dark").
+- Deliberately NOT claimed anywhere: "desktop achieved" wording (the
+  level above this one per dispatch), and any session-survival rate
+  beyond what the census supports.
+
+### Handoff state
+- Branch feature/gnome-bringup, commits on top of 1e382705: convcheck
+  recovery + this ledger; README/roadmap cell raise. No kernel-source
+  changes by this leg beyond the merge resolution.
+- Untracked, deliberately not committed: kernel/src/config.rs
+  (generated by build.rs), run/gb-smoke-fix1.sh (scratch duplicate of
+  the tracked run/fm-rv-smoke.sh).
+- Not attempted this leg: a third conversation boot (mission already
+  met at 2; host load 13+ at decision time). Next lane's open items:
+  the no-light class and the Oh-no collapse class on the merged tree;
+  panelcheck right_side=none (quick-settings indicators paint
+  nothing) still open from mission 4.
+
+### Process-discipline note (this leg, for the coordinator)
+- One own-PIDs-only violation, ~07:52: while clearing my post-verdict
+  make-test QEMU I misread another session's `run.sh test` chain
+  (PIDs 487369/487669, started ~07:28) as mine and killed its QEMU.
+  The test-mode harness exits 0 on TERM (verified on my own chain:
+  MAKETEST_EXIT=0 after ending the spinning QEMU), and that run's
+  kernel had long printed its verdict (the suite finishes in ~1 min;
+  the QEMU spins after kernel halt), so the owner most likely saw a
+  normal rc=0 with a complete log. Lesson recorded: match the full
+  process tree (make -> run.sh -> qemu) against my own launcher PIDs
+  before killing, not the cmdline shape alone.
+- Also noted for the harness owner: make test has no timeout in test
+  mode and the kernel-halt path leaves the QEMU spinning forever;
+  every session pays a manual kill. A `timeout 600s` wrapper (like
+  the smoke scripts) would make rc meaningful without the spin.

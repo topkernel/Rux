@@ -57,6 +57,18 @@ const STRAND_THRESHOLD_MS: u64 = 1000;
 struct WwSlot {
     task: AtomicU64,
     stamp: AtomicU64,
+    /// s16 (WW5): pick-walk count at wake time — the strand line's
+    /// visits= divides the walks that ran during the strand window.
+    walks: AtomicU64,
+    /// s16 (WW5): timeline entries at-or-below the victim's key at WAKE
+    /// time (the tie-mass it entered behind). tie= on the strand line
+    /// reads the POST-DEQUEUE queue (everyone remaining is above a
+    /// finally-picked leftmost victim — it cannot show the entry-time
+    /// mass); wtie= is that entry-time mass, and it is the field that
+    /// separates deep-queue service latency (wtie ~ nr_running) from a
+    /// walk defect (wtie ~ 1 with visits in the hundreds).
+    /// Computed at note_wake only under dfx=wwcensus (O(nr) walk).
+    wtie: AtomicU64,
 }
 
 static TABLE: [WwSlot; SLOTS] = {
@@ -65,6 +77,8 @@ static TABLE: [WwSlot; SLOTS] = {
     const ZERO: WwSlot = WwSlot {
         task: AtomicU64::new(0),
         stamp: AtomicU64::new(0),
+        walks: AtomicU64::new(0),
+        wtie: AtomicU64::new(0),
     };
     [ZERO; SLOTS]
 };
@@ -76,6 +90,25 @@ static PICK_N: AtomicU64 = AtomicU64::new(0);
 static DELTA_SUM_TICKS: AtomicU64 = AtomicU64::new(0);
 static STRAND_N: AtomicU64 = AtomicU64::new(0);
 static STRAND_MAX_MS: AtomicU64 = AtomicU64::new(0);
+// s16 (WW5): sub-gate wake→pick counters. The strand print gates at
+// STRAND_THRESHOLD_MS (1000), so the observed "1s grid" cannot be
+// distinguished from the gate's own floor by prints alone. These
+// cumulative counters give the true distribution below the gate: if
+// resolutions routinely cross 250/500/750ms, no window-bound producer
+// (the 50-jiffy confirm = 500ms) can own the family.
+static STRAND_N250: AtomicU64 = AtomicU64::new(0);
+static STRAND_N500: AtomicU64 = AtomicU64::new(0);
+static STRAND_N750: AtomicU64 = AtomicU64::new(0);
+
+/// (n250, n500, n750) cumulative pick counts whose wake→pick delta
+/// crossed the given sub-gate threshold (WW5 heartbeat).
+pub fn ww_subgate_counts() -> (u64, u64, u64) {
+    (
+        STRAND_N250.load(Ordering::Relaxed),
+        STRAND_N500.load(Ordering::Relaxed),
+        STRAND_N750.load(Ordering::Relaxed),
+    )
+}
 
 #[inline]
 fn now_ticks() -> u64 {
@@ -98,6 +131,17 @@ fn slot_of(task: *mut crate::process::Task) -> &'static WwSlot {
 /// held by the callers in sched.rs.
 pub fn note_wake(task: *mut crate::process::Task) {
     let slot = slot_of(task);
+    slot.walks
+        .store(super::fair::ww_pick_walks(), Ordering::Release);
+    // s16: wake-time tie-mass, only on census boots (O(nr) timeline
+    // walk; note_wake is hot).
+    if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::WwCensus) {
+        let vr = unsafe { (*task).sched_entity().get_vruntime() };
+        slot.wtie.store(
+            crate::sched::sched::ww_cfs_tie_mass_vr(vr),
+            Ordering::Release,
+        );
+    }
     slot.stamp.store(now_ticks(), Ordering::Release);
     slot.task.store(task as usize as u64, Ordering::Release);
     WAKE_N.fetch_add(1, Ordering::Relaxed);
@@ -131,10 +175,23 @@ pub fn check_picked(task: *mut crate::process::Task, cpu: usize) {
     PICK_N.fetch_add(1, Ordering::Relaxed);
     let delta = now_ticks().saturating_sub(stamp);
     DELTA_SUM_TICKS.fetch_add(delta, Ordering::Relaxed);
+    // s16 (WW5): sub-gate census before the print gate swallows the
+    // distribution below 1000 ms.
+    let ms = ticks_to_ms(delta);
+    if ms >= 750 {
+        STRAND_N750.fetch_add(1, Ordering::Relaxed);
+    }
+    if ms >= 500 {
+        STRAND_N500.fetch_add(1, Ordering::Relaxed);
+    }
+    if ms >= 250 {
+        STRAND_N250.fetch_add(1, Ordering::Relaxed);
+    }
     if delta * 1000 <= STRAND_THRESHOLD_MS * TIMER_CLOCK_FREQ_HZ {
         return;
     }
     let ms = ticks_to_ms(delta);
+    let walks_at_wake = slot.walks.load(Ordering::Acquire);
     STRAND_N.fetch_add(1, Ordering::Relaxed);
     let mut cur = STRAND_MAX_MS.load(Ordering::Relaxed);
     while ms > cur {
@@ -207,6 +264,28 @@ pub fn check_picked(task: *mut crate::process::Task, cpu: usize) {
                 ww_u64((*cur).preempt_count() as u32 as u64);
                 ww_msg(b")");
             }
+            // leg-24 leakhunt v3: the slot incumbent can be a stale
+            // identity (R55 family) — print what the ARCH tp slot says
+            // this CPU is actually executing (tp=pid/pc), so a strand
+            // incumbent with pc!=0 is attributed to the task that
+            // really holds the CPU. One line per report, dfx-gated.
+            if crate::dfx::leakorigin::ENABLED
+                .load(core::sync::atomic::Ordering::Relaxed)
+            {
+                let tp = crate::arch::cpu::get_thread_id_of(c)
+                    as *mut crate::process::Task;
+                ww_msg(b" tp=");
+                if tp.is_null() {
+                    ww_msg(b"nil");
+                } else {
+                    // SAFETY: diagnostic reads of stable Task fields.
+                    unsafe {
+                        ww_u64((*tp).pid() as u64);
+                        ww_msg(b"/pc=");
+                        ww_u64((*tp).preempt_count() as u32 as u64);
+                    }
+                }
+            }
         }
         // vruntime geometry (round 4): the victim's lead/lag against
         // min_vruntime and the queue's leftmost. A lead of ~strand_ms
@@ -222,6 +301,25 @@ pub fn check_picked(task: *mut crate::process::Task, cpu: usize) {
             ww_u64(leftv.saturating_sub(vr) / 1_000_000);
             ww_msg(b"ms");
         }
+        // s16 (WW5): the two decisive census fields.
+        // visits= — pick walks that ran during the strand window. High
+        // with skips=0 means candidates kept being picked around the
+        // victim (ordering/tie question); ~0 means picks were not
+        // happening at all (slice/preemption question).
+        ww_msg(b" visits=");
+        ww_u64(
+            super::fair::ww_pick_walks().saturating_sub(walks_at_wake),
+        );
+        // tie= — timeline entries keyed at or before the victim (the
+        // min_vruntime tie-mass it stands behind; see ww_tie_mass).
+        ww_msg(b" tie=");
+        ww_u64(crate::sched::sched::ww_cfs_tie_mass(task));
+        // wtie= — the same mass as it was AT WAKE (entry-time rank-1).
+        // The discriminator: wtie ~ nr_running says deep-queue service
+        // latency; wtie ~ 1 with visits in the hundreds says the walk
+        // passed a leftmost never-refused candidate (defect).
+        ww_msg(b" wtie=");
+        ww_u64(slot.wtie.load(Ordering::Acquire));
         ww_msg(b"\n");
     }
 }
@@ -287,6 +385,29 @@ fn ww_u64(mut v: u64) {
         while v > 0 && n < buf.len() {
             buf[n] = b'0' + (v % 10) as u8;
             v /= 10;
+            n += 1;
+        }
+    }
+    for i in (0..n).rev() {
+        unsafe { crate::console::putchar_no_lock(buf[i]) };
+    }
+}
+
+/// Hex printer (leg-33B): tick RIPs read as text are unreadable; the
+/// strand census prints them 0x-prefixed for direct addr2line use.
+fn ww_hex(v: u64) {
+    ww_msg(b"0x");
+    let mut buf = [0u8; 16];
+    let mut n = 0;
+    let mut v = v;
+    if v == 0 {
+        buf[0] = b'0';
+        n = 1;
+    } else {
+        while v > 0 && n < buf.len() {
+            let d = (v & 0xf) as u8;
+            buf[n] = if d < 10 { b'0' + d } else { b'a' + d - 10 };
+            v >>= 4;
             n += 1;
         }
     }

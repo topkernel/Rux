@@ -9,7 +9,7 @@
 # Cross-arch safe: no chroot. apt resolves the riscv64 closure from
 # ubuntu-ports with APT::Architecture=riscv64, packages are unpacked
 # with dpkg-deb -x, runit is cross-compiled with the repo musl
-# toolchain. Output: work/gnome-riscv64.img
+# toolchain. Output: $GNOME_IMG (default work/gnome-r13.img)
 #
 # Boot: python3 test/ubuntu-gnome/fire.py (headless ignition driver).
 set -euo pipefail
@@ -80,7 +80,32 @@ EOS
 # (49 deaths per 30-min boot observed, each trip risking the "Oh no"
 # error screen). upowerd is dbus-activatable, so no runit change is
 # needed — the system bus starts it on first StartServiceByName.
-PKGS="dash bash xserver-xorg-core xserver-xorg-video-fbdev x11-xserver-utils dbus dbus-x11 libgl1-mesa-dri libgl1-mesa-glx gnome-session-bin gnome-session gnome-shell gnome-settings-daemon librsvg2-common xterm fonts-dejavu-core util-linux coreutils procps upower"
+# ibus: gnome-shell's IBusManager launches ibus-daemon itself at
+# startup; without the binary every boot logs "Failed to launch
+# ibus-daemon: No such file or directory" and the input-method
+# plumbing never comes up (leg-6 adds it).
+# libnotify-bin: notify-send for the deterministic notification-banner
+# probe (leg-6). at-spi2-core: org.a11y.Bus — every GTK app and every
+# gsd plugin retries the missing a11y bus for the whole session
+# ("AT-SPI: Error retrieving accessibility bus address" spam); with the
+# service present those retries stop and gsd's a11y plugins get a real
+# proxy (leg-6).
+# adwaita-icon-theme + hicolor-icon-theme: without an installed icon
+# theme every pixbuf load fails ("Could not load a pixbuf from icon
+# theme", r6win serial) — shell chrome sprites, panel status-area
+# indicators and notification banner icons are all SVG icon loads, so
+# the theme IS the right-side-indicator/banner fix (leg-6).
+# xserver-xorg-input-libinput + -evdev (leg-7): the image has no udev,
+# so Xorg's device auto-add can never enumerate anything ("failed to
+# pre-init udev", r10win serial) and the session runs on Xorg's dummy
+# core devices — NO keyboard/pointer path exists at all. Both drivers
+# accept an explicit Option "Device" (libinput via its path context,
+# evdev directly), which works without udev; the static InputDevice
+# sections below wire /dev/input/event{0,1} in.
+# accountsservice (leg-7): org.freedesktop.Accounts on the system bus
+# for the shell's ActUserManager and gsd-xsettings (started by runit,
+# like upowerd, to dodge the 25s activation-timeout race).
+PKGS="dash bash xserver-xorg-core xserver-xorg-video-fbdev x11-xserver-utils x11-utils mesa-utils dbus dbus-x11 libgl1-mesa-dri libgl1-mesa-glx gnome-session-bin gnome-session gnome-shell gnome-settings-daemon librsvg2-common adwaita-icon-theme hicolor-icon-theme xterm fonts-dejavu-core xfonts-base util-linux coreutils procps upower ibus libnotify-bin at-spi2-core xserver-xorg-input-libinput xserver-xorg-input-evdev accountsservice"
 
 AOPTS=(-o Dir::Etc::sourcelist="$APT_SRC" -o Dir::Etc::sourceparts=-
        -o Dir::State::lists="$APT_LIST" -o Dir::State::status=/dev/null
@@ -263,9 +288,99 @@ if [ -f "$PWRDE" ]; then
     printf 'Hidden=true\n' >> "$PWRDE"
 fi
 
-# Xorg fbdev config (software rendering, no KMS/DRM — Rux has fbdev only)
+# --- leg-6 window + notification probes --------------------------------
+# The honest desktop gap list after r9fix/stab: panel+clock+Activities
+#+cursor paint, but no app window ever appears (gnome-session-failed
+# ran for whole sessions without a visible pixel) and no notification
+# banner has ever been shown. Two deterministic probes:
+#
+# (1) xterm window probe: a stock /etc/xdg/autostart entry, so
+# gnome-session launches it in the Applications phase exactly like the
+# gsd entries (those demonstrably spawn). White bg / black fg pinned on
+# the command line so the expected screen signature is exact: a large
+# bright rectangle below the panel. If the window maps+manages (see
+# runit's xwininfo probe) but no rectangle paints, the frontier moves
+# to mutter's compositing (GLX texture-from-pixmap) — kernel-side hunt.
+# -fa "DejaVu Sans Mono": the first r6 probe died with "cannot load
+# font -misc-fixed..." (no bitmap fonts on a minimal image); the
+# antialias face uses fontconfig + fonts-dejavu-core, which ships.
+# xfonts-base joins PKGS anyway so the stock "fixed" alias exists.
+mkdir -p "$ROOT/etc/xdg/autostart"
+cat > "$ROOT/etc/xdg/autostart/rux-xterm-probe.desktop" <<'EOX'
+[Desktop Entry]
+Type=Application
+Name=Rux Window Probe
+Exec=xterm -title rux-window-probe -bg white -fg black -fa "DejaVu Sans Mono" -fs 12 -geometry 90x28+140+90
+OnlyShowIn=GNOME;
+X-GNOME-Autostart-enabled=true
+EOX
+
+# x11-utils: xwininfo/xprop/xdpyinfo/xev — the runit X-state probe
+# needs them (jammy moved xwininfo out of x11-xserver-utils) and they
+# are the window map/manage ground-truth tools. mesa-utils: glxinfo,
+# for the GLX_EXT_texture_from_pixmap check if windows still refuse to
+# paint.
+# (2) notification banner probe: waits for the shell to own its bus
+# name, then sends ONE critical-urgency notification — critical banners
+# do not auto-dismiss, so a single success leaves the banner resident.
+# Do NOT use notify-send -r/--replace-id: jammy ships libnotify 0.7.9
+# whose notify-send lacks the option ("Unknown option -r" — the r6win
+# serial shows the probe failing exactly there; zero banners ever
+# sent), and without -r an unconditional re-send stacks a new banner
+# every 60s. Latch on the first successful send instead.
+cat > "$ROOT/usr/local/bin/rux-notify-probe.sh" <<'EON'
+#!/bin/sh
+# Deterministic notification-banner probe (leg-6). Loop until the
+# shell owns org.gnome.Shell on the session bus AND notify-send
+# succeeds (it fails while the shell's notification daemon is not
+# listening); the critical banner then stays on screen, no re-sends.
+while :; do
+    [ -e /tmp/xdg/banner-sent ] && break
+    if gdbus call --session --dest org.gnome.Shell \
+         --object-path /org/gnome/Shell \
+         --method org.freedesktop.DBus.Peer.Ping >/dev/null 2>&1; then
+        if notify-send -u critical \
+                "Rux leg-6" "notification banner probe"; then
+            mkdir -p /tmp/xdg
+            : > /tmp/xdg/banner-sent
+            echo "[runit] notify-probe banner sent"
+        fi
+    fi
+    sleep 60
+done
+EON
+chmod 0755 "$ROOT/usr/local/bin/rux-notify-probe.sh"
+cat > "$ROOT/etc/xdg/autostart/rux-notify-probe.desktop" <<'EON'
+[Desktop Entry]
+Type=Application
+Name=Rux Notification Probe
+Exec=/usr/local/bin/rux-notify-probe.sh
+OnlyShowIn=GNOME;
+X-GNOME-Autostart-enabled=true
+EON
+
+# Xorg fbdev config (software rendering, no KMS/DRM — Rux has fbdev only).
+# Input (leg-7): the image has no udev, so device auto-add cannot work
+# ("failed to pre-init udev" every boot so far) and Xorg silently falls
+# back to dummy core devices — nothing in the guest reads /dev/input,
+# which is also why every INPTRC keyprobe produced zero lines (the trace
+# fires when the evdev read/poll path DRAINS the virtqueue; no reader =
+# no drain). Static InputDevice sections with explicit Device paths need
+# no udev. Driver is EVDEV, not libinput: xf86-input-libinput calls
+# realpath() on the Device path inside the Xorg process and fails with
+# "client bug: Invalid path /dev/input/event0" (r10full serial) even
+# though the identical realpath succeeds in a quiet-boot shell on the
+# same kernel+image (r10pp2 pathprobe: rc=0; stat/readlink/open+read
+# all fine) — kernel-hunt item, evidence recorded. xf86-evdev opens the
+# node directly and ioctls it (EVIOCGVERSION/ID/BIT/ABS all implemented
+# kernel-side). /dev/input/event0 = kernel's VirtIO Keyboard, event1 =
+# VirtIO Tablet (kernel evdev registration order, see evdev.rs
+# init_evdev). AutoAddDevices=off stops the udev probe failure spam.
 mkdir -p "$ROOT/etc/X11"
 cat > "$ROOT/etc/X11/xorg-fbdev.conf" <<'EOX'
+Section "ServerFlags"
+    Option "AutoAddDevices" "off"
+EndSection
 Section "Device"
     Identifier "RuxFbdev"
     Driver     "fbdev"
@@ -283,7 +398,73 @@ Section "Screen"
         Modes "1280x800"
     EndSubSection
 EndSection
+Section "InputDevice"
+    Identifier "RuxKbd"
+    Driver "evdev"
+    Option "Device" "/dev/input/event0"
+EndSection
+Section "InputDevice"
+    Identifier "RuxPtr"
+    Driver "evdev"
+    Option "Device" "/dev/input/event1"
+    Option "Mode" "Absolute"
+EndSection
+Section "ServerLayout"
+    Identifier "Layout0"
+    Screen "Screen0"
+    InputDevice "RuxKbd" "CoreKeyboard"
+    InputDevice "RuxPtr" "CorePointer"
+EndSection
 EOX
+
+# xregion probe (leg-7): XGetImage stats of a root-window rect, called
+# from runit's periodic dump_xstate. Built against the STAGING tree's
+# own glibc (explicit crt1/crti/crtn + libc.so.6 + the image's dynamic
+# loader): linking with the cross toolchain's default sysroot drags in
+# the host's newer glibc (first r10 build died at runtime with
+# "GLIBC_2.38 not found" — the image runs jammy's 2.35; the linked
+# binary needs at most GLIBC_2.34). -fno-pie + crt1 (not Scrt1) because
+# the cross-gcc defaults to PIE. libX11 is linked by VERSIONED soname —
+# the -dev .so symlink depends on which dev packages the resolver
+# pulled. Headers: expose ONLY staging's X11/ subdir — mixing staging
+# glibc headers with the toolchain's breaks feature-test macros.
+# xr_atoi in the source avoids the host headers' __isoc23_strtol
+# redirect (glibc 2.38-only). -march=rv64gc pins the ISA below what
+# QEMU -cpu rv64 provides.
+if [ -f "$ROOT/usr/lib/riscv64-linux-gnu/libX11.so.6" ] && \
+   [ -f "$ROOT/usr/lib/riscv64-linux-gnu/crt1.o" ] && \
+   [ -d "$ROOT/usr/include/X11" ]; then
+    XRINC="$WORK/xregion-include"
+    rm -rf "$XRINC" && mkdir -p "$XRINC"
+    ln -s "$ROOT/usr/include/X11" "$XRINC/X11"
+    SL="$ROOT/usr/lib/riscv64-linux-gnu"
+    riscv64-linux-gnu-gcc -O2 -march=rv64gc -fno-pie -no-pie -nostdlib \
+        -Wl,-dynamic-linker,/lib/ld-linux-riscv64-lp64d.so.1 \
+        -I"$XRINC" \
+        "$SL/crt1.o" "$SL/crti.o" \
+        "$WT/test/ubuntu-gnome/xregion.c" \
+        "$SL/libX11.so.6" "$SL/libc.so.6" "$SL/crtn.o" \
+        -Wl,-rpath-link,"$SL" \
+        $(riscv64-linux-gnu-gcc -print-libgcc-file-name) \
+        -o "$ROOT/usr/local/bin/xregion" || \
+        echo "warn: xregion build failed (dump_xstate will show st=127)"
+else
+    echo "warn: staging libX11/crt/headers missing — xregion not installed"
+fi
+
+# fonts.dir (leg-7): dpkg -x skips the postinst that runs mkfontdir, so
+# Xorg drops /usr/share/fonts/X11/misc from the font path every boot
+# ("fonts.dir not found" WW) and xterm has no bitmap-font fallback if
+# the fontconfig face ever fails. xfonts-utils ships mkfontdir (pulled
+# in by xfonts-base).
+if command -v mkfontdir >/dev/null; then
+    for d in "$ROOT"/usr/share/fonts/X11/*; do
+        [ -d "$d" ] || continue
+        mkfontdir "$d" 2>/dev/null || true
+    done
+    # refresh the top-level fonts.alias-driven dir list
+    mkfontdir "$ROOT/usr/share/fonts/X11" 2>/dev/null || true
+fi
 
 # ---------------------------------------------------------------------------
 # Pack the image (Rux ext4 constraints: 4K blocks, no metadata_csum).
