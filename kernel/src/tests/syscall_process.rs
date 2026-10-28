@@ -38,6 +38,31 @@ pub fn test_syscall_process() {
 
     // Test 8: Syscall number verification
     test_syscall_numbers();
+
+    // Test 9: shebang interpreter-line parsing (binfmt_script parity)
+    test_shebang_parse();
+
+    // Test 10: resolve_exec_file errno shapes (exec ladder single-walk
+    // resolution): a directory is EACCES (reference may_open S_ISDIR),
+    // a missing path is ENOENT.
+    match resolve_exec_file("/") {
+        Err(e) if e == -(errno::EACCES as i32) => {
+            test_pass("resolve_exec_file directory -> EACCES");
+        }
+        other => {
+            test_fail("resolve_exec_file directory -> EACCES",
+                &alloc::format!("got {:?}", other.err()));
+        }
+    }
+    match resolve_exec_file("/nonexistent-exec-target") {
+        Err(e) if e == -(errno::ENOENT as i32) => {
+            test_pass("resolve_exec_file missing -> ENOENT");
+        }
+        other => {
+            test_fail("resolve_exec_file missing -> ENOENT",
+                &alloc::format!("got {:?}", other.err()));
+        }
+    }
 }
 
 fn test_sys_getpid() {
@@ -348,5 +373,87 @@ fn test_syscall_numbers() {
         test_pass("process syscall numbers");
     } else {
         test_fail("process syscall numbers", "mismatch");
+    }
+}
+
+/// parse_shebang must mirror binfmt_script (fs/binfmt_script.c): the
+/// optional argument is the WHOLE rest of the line after the first
+/// whitespace run, trailing whitespace is trimmed, and a 255-byte line
+/// without a newline is still a valid interpreter line. ABI-review
+/// session 1 (divergence class a: `env -S` scripts lost every argument
+/// word after the first).
+pub fn test_shebang_parse() {
+    test_group_start("shebang-parse");
+
+    use crate::syscall::process::parse_shebang;
+
+    let cases: &[(&[u8], Option<(&str, Option<&str>)>)] = &[
+        // Plain interpreter.
+        (b"#!/bin/sh\nrest", Some(("/bin/sh", None))),
+        // Single argument.
+        (b"#!/usr/bin/awk -f\n", Some(("/usr/bin/awk", Some("-f")))),
+        // Multi-word argument: ONE argument with embedded spaces
+        // (binfmt_script i_arg is the rest of the line).
+        (
+            b"#!/usr/bin/env -S python3 -u\n",
+            Some(("/usr/bin/env", Some("-S python3 -u"))),
+        ),
+        // Tabs separate too; the argument keeps later spaces verbatim.
+        (
+            b"#!/bin/sh\t-e -u\n",
+            Some(("/bin/sh", Some("-e -u"))),
+        ),
+        // Leading whitespace before the interpreter is skipped.
+        (b"#!   /bin/sh\n", Some(("/bin/sh", None))),
+        // Trailing whitespace after the argument is trimmed.
+        (
+            b"#!/bin/sh -e   \n",
+            Some(("/bin/sh", Some("-e"))),
+        ),
+        // Trailing whitespace with no argument at all.
+        (b"#!/bin/sh  \t \n", Some(("/bin/sh", None))),
+        // No newline at EOF (short file): still valid.
+        (b"#!/bin/sh", Some(("/bin/sh", None))),
+        (b"#!/usr/bin/awk -f", Some(("/usr/bin/awk", Some("-f")))),
+        // No newline and the line fills the whole 256-byte binprm buffer:
+        // binfmt_script parses up to the buffer end instead of failing.
+        (
+            &{
+                let mut v = alloc::vec![b'x'; 256];
+                v[0] = b'#';
+                v[1] = b'!';
+                for (i, b) in b"/bin/interp ".iter().enumerate() {
+                    v[2 + i] = *b;
+                }
+                v
+            },
+            Some(("/bin/interp", Some(&"x".repeat(242)))),
+        ),
+        // Empty interpreter after "#!" is not a script.
+        (b"#!\n#!/bin/sh\n", None),
+        (b"#!   \n", None),
+        // Not a shebang.
+        (b"\x7fELF....", None),
+        (b"#/bin/sh\n", None),
+    ];
+
+    let mut all_ok = true;
+    for (idx, (input, expect)) in cases.iter().enumerate() {
+        let got = parse_shebang(input);
+        let ok = match (got, expect) {
+            (None, None) => true,
+            (Some((gi, ga)), Some((ei, ea))) => gi == *ei && ga == *ea,
+            _ => false,
+        };
+        if !ok {
+            all_ok = false;
+            test_fail(
+                "shebang-parse",
+                &alloc::format!("case {}: input={:?} got={:?} want={:?}", idx, &input[..input.len().min(40)], got, expect),
+            );
+        }
+    }
+    if all_ok {
+        test_pass("parse_shebang binfmt_script parity (14 cases)");
     }
 }

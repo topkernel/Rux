@@ -182,7 +182,7 @@ STATUS = {
     "kernel/src/perf/mod.rs": ("todo", ""),
     "kernel/src/printk.rs": ("part", "ring buffer, console level"),
     "kernel/src/process/coredump.rs": ("todo", ""),
-    "kernel/src/process/exec.rs": ("part", "exec 的信号处置/掩码复位、装载的 VMA 记账（e32cdfef）"),
+    "kernel/src/process/exec.rs": ("fixed", "read end to end (abi-review s1): image/stack/interp load, auxv, entry frames; redundant zeroing fixed, linear stack/interp writers audited safe-by-single-block"),
     "kernel/src/process/exit.rs": ("todo", ""),
     "kernel/src/process/fork.rs": ("part", "task creation paths"),
     "kernel/src/process/kthread.rs": ("todo", ""),
@@ -218,7 +218,7 @@ STATUS = {
     "kernel/src/syscall/misc.rs": ("todo", ""),
     "kernel/src/syscall/mod.rs": ("todo", ""),
     "kernel/src/syscall/network.rs": ("todo", ""),
-    "kernel/src/syscall/process.rs": ("part", "reboot/shutdown 级联、memfd_create 的参数校验（已对齐 879328f3）"),
+    "kernel/src/syscall/process.rs": ("part", "exec ladder + credentials + shebang + EXECCOST instrument (abi-review s1); reboot cascade, clone/wait/ptrace ladders still pending"),
     "kernel/src/syscall/time.rs": ("part", "nanosleep, realtime clock"),
     "kernel/src/syscall/x86_compat.rs": ("todo", ""),
     "kernel/src/tests/*": ("todo", ""),
@@ -322,7 +322,7 @@ STATUS = {
     "kernel/src/errno.rs": ("todo", ""),
     "kernel/src/fs/dev_t.rs": ("todo", ""),
     "kernel/src/fs/devfs/registry.rs": ("todo", ""),
-    "kernel/src/fs/elf.rs": ("todo", ""),
+    "kernel/src/fs/elf.rs": ("fixed", "read end to end (abi-review s1): Ehdr/Phdr parsing, validate/load/load_dynamic_to; interp BSS double-zero removed"),
     "kernel/src/fs/ext4/allocator.rs": ("todo", ""),
     "kernel/src/fs/ext4/csum.rs": ("todo", ""),
     "kernel/src/fs/ext4/indirect.rs": ("todo", ""),
@@ -458,6 +458,19 @@ STATUS = {
 
 # Bugs found and fixed by this review line.
 BUGS = [
+    ("6c56c0b6", "kernel/src/syscall/process.rs",
+     "The shebang optional argument was truncated at the next whitespace after the "
+     "first word; the reference kernel (binfmt_script) passes the WHOLE rest of the "
+     "interpreter line as one argument, so '#!/usr/bin/env -S python3 -u' lost "
+     "'python3 -u'. A 255-byte interpreter line without a newline was also rejected "
+     "instead of parsed. Fixed to binfmt_script parity with 14 unit rows."),
+    ("2fbb5a64", "kernel/src/syscall/process.rs, kernel/src/process/exec.rs, kernel/src/fs/elf.rs",
+     "execve of a directory returned ENOENT (failed read) instead of EACCES (may_open "
+     "S_ISDIR); the PT_INTERP interpreter was opened without the MAY_EXEC gate; and "
+     "the exec ladder walked the exe path four times plus double-zeroed every freshly "
+     "mapped page (the arch allocators already zero before mapping). Fixed with "
+     "resolve_exec_file (one walk feeds gate/stat/read/vm_file pin) and removal of "
+     "the redundant zero passes."),
     ("ddfa8abc", "kernel/src/interrupt/softirq.rs",
      "The 2ms softirq budget was checked once per batch of pending vectors, so a batch of "
      "slow handlers could overrun it by the time of every vector left in the batch. the reference kernel "

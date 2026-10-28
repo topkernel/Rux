@@ -2986,3 +2986,77 @@ commits; the fs-lane handoffs are the SYNC_WALK_NULL_BH producer hunt
 and (unchanged) the mkdir scoped flush; the p5b optimization decision
 waits on pa91's pair; the baseline whole-table refresh waits on pa91's
 boards per the merge-gate rules.
+### 8.10.23 abi-review session 1 (2026-10-28): exec decomposed (dfx=execcost) — ladder kernel work -172.5 us (-17.5%); the remaining 814 us is 44% eager image map + 18% old-mm teardown
+
+Lane: feature/abi-review (the positive-review lane's first perf entry; the
+process-creation subsystem is its standing thesis — p4_fork_exec ~70x is
+the biggest unowned reference multiple). New instrument: dfx=execcost
+(DfxSwitch::ExecCost, OFF by default) — two rate-limited lines per exec:
+the ladder stages (path build/lookup/read/parse/interp/creds/de_thread+pin)
+and the image stages (address-space create/map/stack/copy/tighten/interp/
+fill/vma/switch), raw read_time() ticks (10 MHz domain — 100 ns/tick).
+
+**Decomposition (release-strong, TCG smp2/2G, pbench channel, 76 KB static
+exec target, quiet-cluster med-of-24; kernels run/abi1-branch-strong-bzImage
+pre-fix vs run/abi1-branch2-strong-bzImage post-fix):**
+
+| stage | pre (us) | post (us) | note |
+|---|---|---|---|
+| ladder: path string build | 3.6 | 3.1 | cwd concat |
+| ladder: path walk (MAY_EXEC gate) | 36.1 | 34.9 | ONE walk post-fix |
+| ladder: content read 76 KB | 110.4 | 46.9 | was open+walk+unsized Vec; now presized Arc read |
+| ladder: creds (setuid stat) | 18.8 | 2.9 | stat walk eliminated |
+| ladder: de_thread + vm_file pins | 17.1 | 0.4 | second/third walks eliminated |
+| image: address-space create | 8.4 | 7.5 | |
+| **image: eager image map (19 pages)** | **382.9** | **359.8** | THE #1 remaining cost — allocator zeroes the pow2-rounded block + frees the excess page-by-page |
+| image: eager stack 128 KB (33 pages) | 76.4 | 56.1 | zero pass removed; eager map remains |
+| image: segment copy | 13.5 | 11.7 | |
+| image: switch + old-mm teardown | 158.2 | 146.8 | #2 remaining — the forked mm (eager copy) is destroyed here |
+| **ladder TOTAL** | **986.5** | **814.0** | **-172.5 us (-17.5%)** |
+
+pbench p4_fork_exec medians (M = pure main strong, B = branch strong;
+interleaved M,B,B,M + one B instrument boot): M 1633/1609, B 1441/1754/
+1490 — B beats both M boots in its window (-11.8% vs M1); the B3 window
+was uniformly inflated (its p2_ctxsw 1.87 vs the 1.28-1.36 class), the
+known host-regime confound. The instrument's same-window med-of-24 is the
+load-robust arbiter (it counts kernel work only). Guards flat: p6_stat
+19.3/19.1 vs 19.4/18.7, p6_openclose 34.8/32.8 vs 33.0/32.9, p1_null and
+p2 within their classes.
+
+**North-star row state: p4_fork_exec ~1490-1620 us vs reference median
+22.37 us = ~66-72x (2x target 11.19 us).** The instrument now names every
+remaining us; the next levers, in measured order:
+
+1. **Eager image map 360 us (44% of exec)** — code-level: the arch
+   allocators (riscv64 + x86_64 alloc_and_map_to_user_table twins) zero
+   block_pages (the pow2-rounded block: 128 KB zeroed for a 76 KB image,
+   256 KB for a 132 KB stack) and free the excess PAGE-BY-ORDER-0. Zero
+   only the mapped prefix + cascade-free the excess as merged sub-blocks
+   = mm-domain change (alloc/reclaim guarded domain; Tier-2 + small_alloc/
+   zone domain checks + release-strong boot per the D-7 protocol).
+   Architecture-level (the real win): lazy file-backed mapping — the
+   exec-time VMAs are already FileBacked-typed with vm_file pinned, but
+   the image is eagerly copied into anon frames; a fault-in path would
+   make map cost proportional to touched pages, exactly the reference
+   kernel's shape.
+2. **Switch-stage 147 us (18%)** — the old-mm teardown: fork eagerly
+   copies the parent mm and exec destroys it immediately. Architectural
+   (fork COW / lazy fork); shared with the fork side of p4_fork_exit
+   (450 us, ~39x).
+3. **Eager initial stack 56 us** — shrink the 128 KB eager prefix (the
+   GROWSDOWN VMA + growth fault path exist and look complete; needs
+   growth-path stress evidence before shrinking — candidate, ledgered).
+4. execve's remaining ladder read 47 us for 76 KB — page-cache-hot
+   buffered read; direct-to-frame reads would halve the copies (needs the
+   read moved into do_execve_elf — deferred with the walk work done).
+
+**Functional side of the session (the ABI-review charter):** shebang
+binfmt_script parity (the optional argument is the WHOLE rest of the line
+— `env -S` scripts work; 255-byte no-newline lines parse), execve of a
+directory now EACCES (was ENOENT), PT_INTERP opened with MAY_EXEC (was a
+permission-less read). LTP exec family spot (execve01-06, execveat01-03)
+on the branch riscv64 kernel: PASS/FAIL set byte-identical to pure main
+(execve04 ETXTBSY-missing and execveat01/02 ELOOP/ENOENT shapes are
+pre-existing gaps, ledgered as next-session ABI targets). make test ALL
+TESTS PASSED (incl. 14 new shebang-parse rows + resolve_exec_file errno
+rows); dual-arch build rc=0.

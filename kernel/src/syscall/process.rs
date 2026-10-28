@@ -491,39 +491,62 @@ const MAX_BINPRM_RECURSION: u32 = 4;
 
 /// Parse shebang (#!) line from file data.
 /// Returns (interpreter_path, optional_argument) if present.
-fn parse_shebang(data: &[u8]) -> Option<(&str, Option<&str>)> {
+///
+/// Mirrors the reference kernel's fs/binfmt_script.c load_script():
+/// - the interpreter line is the first BINPRM_BUF_SIZE bytes, terminated
+///   at the first '\n' or at the buffer end (a 255-byte line with no
+///   newline is still a valid interpreter line, not an error);
+/// - trailing ' '/'\t' of the line are trimmed;
+/// - the interpreter name is the first word; the OPTIONAL ARGUMENT is
+///   the ENTIRE rest of the line after the separating whitespace run —
+///   including embedded spaces (`#!/usr/bin/env -S python3 -u` must
+///   hand env the single argument "-S python3 -u"; env -S then splits
+///   it). Truncating at the next whitespace dropped every word after
+///   the first, breaking the `env -S` script convention.
+/// - the whitespace class is ' ' and '\t' only (binfmt_script's checks
+///   are exactly these two bytes; a broader trim also diverges on
+///   exotic-but-legal interpreter paths).
+pub(crate) fn parse_shebang(data: &[u8]) -> Option<(&str, Option<&str>)> {
     if data.len() < 2 || data[0] != b'#' || data[1] != b'!' {
         return None;
     }
 
-    let line = if let Some(pos) = data[2..BINPRM_BUF_SIZE.min(data.len())].iter().position(|&c| c == b'\n') {
-        core::str::from_utf8(&data[2..2 + pos]).ok()?
-    } else if data.len() >= BINPRM_BUF_SIZE {
-        return None; // line too long
+    let window = BINPRM_BUF_SIZE.min(data.len());
+    let raw = if let Some(rel) = data[2..window].iter().position(|&c| c == b'\n') {
+        &data[2..2 + rel]
     } else {
-        core::str::from_utf8(&data[2..]).ok()?
+        // No newline in the window: the line runs to the buffer end —
+        // same as binfmt_script (cp = buf + BINPRM_BUF_SIZE - 1).
+        &data[2..window]
     };
 
-    // Skip leading spaces after #!
-    let line = line.trim_start();
+    // binfmt_script first trims trailing spaces/tabs of the whole line.
+    let mut line_end = raw.len();
+    while line_end > 0 && (raw[line_end - 1] == b' ' || raw[line_end - 1] == b'\t') {
+        line_end -= 1;
+    }
+    let line = core::str::from_utf8(&raw[..line_end]).ok()?;
 
-    // Split into interpreter and optional single argument
-    if let Some(space_pos) = line.find(|c: char| c == ' ' || c == '\t') {
-        let interp = &line[..space_pos];
-        let rest = line[space_pos..].trim_start();
-        let arg = if rest.is_empty() { None } else {
-            Some(if let Some(end) = rest.find(|c: char| c == ' ' || c == '\t') {
-                &rest[..end]
+    // Skip leading spaces/tabs after "#!".
+    let line = line.trim_start_matches([' ', '\t']);
+
+    // Interpreter name = first word; optional argument = the WHOLE rest.
+    match line.find([' ', '\t']) {
+        Some(space_pos) => {
+            let interp = &line[..space_pos];
+            let rest = line[space_pos..].trim_start_matches([' ', '\t']);
+            if interp.is_empty() {
+                return None;
+            }
+            Some((interp, if rest.is_empty() { None } else { Some(rest) }))
+        }
+        None => {
+            if line.is_empty() {
+                None
             } else {
-                rest
-            })
-        };
-        if interp.is_empty() { return None; }
-        Some((interp, arg))
-    } else if line.is_empty() {
-        None
-    } else {
-        Some((line, None))
+                Some((line, None))
+            }
+        }
     }
 }
 
@@ -577,6 +600,88 @@ fn read_exec_file(path: &str) -> Option<alloc::vec::Vec<u8>> {
 /// leaves the VMAs without a pinned file (offset bookkeeping stands).
 pub(crate) fn open_file_arc(path: &str) -> Option<alloc::sync::Arc<crate::fs::file::File>> {
     crate::fs::vfs::open_file_arc_nofd(path)
+}
+
+/// One-resolution exec file handle (abi-review session 1): a single
+/// `path_lookup` yields the inode for the MAY_EXEC gate, the setuid
+/// stat bits, the content read, AND the VMA-pinning File Arc. The old
+/// ladder walked the path FOUR times per exec (pre-flight lookup,
+/// read_exec_file's internal file_open, stat_file_by_path,
+/// open_file_arc) plus twice more for a dynamic interpreter — the
+/// EXECCOST decomposition measured ~3 us of string build + ~35 us per
+/// walk on the p4_fork_exec shape.
+pub(crate) struct ExecFile {
+    /// Kernel-internal read-only File on the resolved inode (no fdtable
+    /// slot, invisible to inotify — Linux get_empty_filp semantics).
+    pub file: alloc::sync::Arc<crate::fs::file::File>,
+    /// st_mode bits (S_ISUID/S_ISGID/x-bit checks without re-statting).
+    pub mode: u32,
+    pub uid: u32,
+    pub gid: u32,
+    /// Inode size, used to presize the content read buffer.
+    pub size: u64,
+}
+
+/// Resolve an exec target with ONE path walk. Error shapes match the
+/// reference kernel's do_open_execat: walk errors propagate verbatim
+/// (ENOENT/ENOTDIR/ENAMETOOLONG/EACCES...), a directory is EACCES
+/// (may_open: S_ISDIR), missing execute permission is EACCES (even
+/// root needs one x bit — LTP execve03).
+pub(crate) fn resolve_exec_file(path: &str) -> Result<ExecFile, i32> {
+    let vpath = crate::fs::vfs::path_lookup(path, 0)?;
+    let inode = vpath
+        .inode
+        .clone()
+        .or_else(|| vpath.dentry.as_ref().and_then(|d| d.get_inode()))
+        .ok_or(-(errno::ENOENT as i32))?;
+    if inode.mode.is_directory() {
+        return Err(-(errno::EACCES as i32));
+    }
+    if !crate::fs::permission::inode_permission(&inode, crate::fs::permission::MAY_EXEC) {
+        return Err(-(errno::EACCES as i32));
+    }
+    // SAFETY: vpath came from a successful path_lookup; construction is
+    // the fd-free kernel open (same as open_file_arc_nofd).
+    let file = unsafe { crate::fs::vfs::open_file_arc_from_vpath(&vpath) }
+        .ok_or(-(errno::EACCES as i32))?;
+    use core::sync::atomic::Ordering::Relaxed;
+    Ok(ExecFile {
+        file,
+        mode: inode.mode.bits(),
+        uid: inode.uid.load(Relaxed),
+        gid: inode.gid.load(Relaxed),
+        size: inode.size.load(Relaxed),
+    })
+}
+
+/// Read the whole file through a kernel-internal File Arc, presized from
+/// the inode size so the doubling-growth realloc copies of the old loop
+/// disappear (the exec target is a regular file; a bogus hint only costs
+/// one wrong-size allocation, correctness never depends on it).
+/// Returns None when nothing could be read.
+fn read_file_via(
+    file: &alloc::sync::Arc<crate::fs::file::File>,
+    size_hint: u64,
+) -> Option<alloc::vec::Vec<u8>> {
+    let cap = usize::try_from(size_hint).unwrap_or(0).min(64 * 1024 * 1024);
+    let mut data = alloc::vec::Vec::with_capacity(cap);
+    let mut chunk = [0u8; 16384];
+    loop {
+        // SAFETY: file is a live Arc<File>; chunk is a valid kernel buffer.
+        let n = unsafe { file.read(chunk.as_mut_ptr(), chunk.len()) };
+        if n <= 0 {
+            break;
+        }
+        data.extend_from_slice(&chunk[..n as usize]);
+        if (n as usize) < chunk.len() {
+            break;
+        }
+    }
+    if data.is_empty() {
+        None
+    } else {
+        Some(data)
+    }
 }
 
 /// ARG_MAX approximation for execve argument limits (Linux uses a 2MB-ish
@@ -669,12 +774,38 @@ fn copy_envp_from_user(envp_ptr: *const *const u8) -> Result<alloc::vec::Vec<all
     Ok(envs)
 }
 
+/// EXECCOST (dfx=execcost, abi-review lane): per-stage execve cost
+/// breakdown in raw read_time() ticks. Two lines per exec — the ladder
+/// stages here, the image stages in do_execve_elf (EXECCOST2). Prints
+/// only when the switch is armed, and only for recursion depth 0
+/// (user-visible execs), rate-limited to the first 64 plus every 512th
+/// afterwards. Purpose: decompose the p4_fork_exec reference gap
+/// (~1.1 ms exec vs ~11 us reference median).
+fn execcost_armed(n: u64) -> bool {
+    if !crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::ExecCost) {
+        return false;
+    }
+    n < 64 || n % 512 == 0
+}
+
 /// Core execve implementation: load and execute an ELF binary.
 /// Handles shebang (#!) scripts by recursing with the interpreter.
 fn do_execve(pathname: &str, argv: &[alloc::string::String], envp: &[alloc::string::String], recursion_depth: u32) -> u64 {
     use crate::fs::elf::{ElfLoader, Elf64Ehdr};
     use alloc::string::String;
     use alloc::vec::Vec;
+
+    // EXECCOST: single rate-limit counter, armed check once.
+    static EXECCOST_N: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+    let ec_n = if recursion_depth == 0 {
+        EXECCOST_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed)
+    } else {
+        u64::MAX
+    };
+    let ec = execcost_armed(ec_n);
+    let ec_t0: u64 = if ec { crate::arch::cpu::read_time() } else { 0 };
+    let (mut ec_path, mut ec_lookup, mut ec_read, mut ec_parse, mut ec_interp, mut ec_cred, mut ec_pre) =
+        (0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64);
 
     // EXECTRACE (dbus-activation hunt): activation children have been
     // observed dying with their FORK comm (never exec'd). Trace execs of
@@ -738,44 +869,30 @@ fn do_execve(pathname: &str, argv: &[alloc::string::String], envp: &[alloc::stri
         }
     };
 
-    // Pre-flight VFS validation (Linux do_open_execat runs through the
-    // normal path walk before reading a byte): a >NAME_MAX component is
-    // ENAMETOOLONG, walking through a non-directory is ENOTDIR, and the
-    // target must carry at least one execute bit for the caller (EACCES —
-    // even root needs one x bit). Reading the file raw from ext4 skipped
-    // all of this and reported ENOENT/ENOEXEC instead (LTP execve03).
-    match crate::fs::vfs::path_lookup(full_path.as_ref(), 0) {
-        Ok(vp) => {
-            let inode = vp
-                .inode
-                .clone()
-                .or_else(|| vp.dentry.as_ref().and_then(|d| d.get_inode()));
-            let inode_ok = inode
-                .as_ref()
-                .map(|inode| {
-                    // MAY_EXEC honors the caller's cred: owner/group/other
-                    // bits, CAP_DAC_OVERRIDE still needs one x bit.
-                    crate::fs::permission::inode_permission(
-                        inode,
-                        crate::fs::permission::MAY_EXEC,
-                    )
-                })
-                .unwrap_or(false);
-            if !inode_ok {
-                return -errno::EACCES as u64;
-            }
-        }
+    // ONE resolution gates and feeds everything downstream (Linux
+    // do_open_execat: the walk, MAY_EXEC, and the struct file are one
+    // operation): a >NAME_MAX component is ENAMETOOLONG, walking through
+    // a non-directory is ENOTDIR, a directory itself is EACCES (may_open),
+    // and the target must carry at least one execute bit for the caller
+    // (EACCES — even root needs one x bit). The resolved inode also
+    // serves the setuid stat and the VMA file pinning below.
+    if ec { ec_path = crate::arch::cpu::read_time(); }
+    let exec_res = resolve_exec_file(full_path.as_ref());
+    if ec { ec_lookup = crate::arch::cpu::read_time(); }
+    let exec_file = match exec_res {
+        Ok(f) => f,
         Err(e) => return (e as i64) as u64,
-    }
+    };
 
-    // Read file from file system. The read can fail TRANSIENTLY under
-    // concurrent block I/O (same family as the PT_INTERP read below —
-    // buffer-cache pressure right after a killed task's teardown), which
-    // surfaced in the LTP sweep as spurious execve ENOENT of binaries
-    // that plainly exist (creat08, asapi_02, pipeio, fs_fill, ...).
-    // Retry a bounded number of times before reporting ENOENT, like the
-    // interpreter path does.
-    let mut program_data = read_exec_file(full_path.as_ref());
+    // Read file content through the resolved kernel File (fd-free). The
+    // read can fail TRANSIENTLY under concurrent block I/O (same family
+    // as the PT_INTERP read below — buffer-cache pressure right after a
+    // killed task's teardown), which surfaced in the LTP sweep as
+    // spurious execve ENOENT of binaries that plainly exist (creat08,
+    // asapi_02, pipeio, fs_fill, ...). Retry a bounded number of times,
+    // then fall back to the raw path readers once, before reporting
+    // ENOENT.
+    let mut program_data = read_file_via(&exec_file.file, exec_file.size);
     let mut main_attempt = 1;
     while program_data.is_none() && main_attempt < 3 {
         crate::pr_err!(
@@ -784,13 +901,17 @@ fn do_execve(pathname: &str, argv: &[alloc::string::String], envp: &[alloc::stri
             crate::process::current_pid(),
             main_attempt
         );
-        program_data = read_exec_file(full_path.as_ref());
+        program_data = read_file_via(&exec_file.file, exec_file.size);
         main_attempt += 1;
+    }
+    if program_data.is_none() {
+        program_data = read_exec_file(full_path.as_ref());
     }
     let program_data = match program_data {
         Some(d) => d,
         None => return -errno::ENOENT as u64,
     };
+    if ec { ec_read = crate::arch::cpu::read_time(); }
 
     // Check for shebang (#!) script — binfmt_script behavior
     if let Some((interp, opt_arg)) = parse_shebang(&program_data) {
@@ -832,32 +953,49 @@ fn do_execve(pathname: &str, argv: &[alloc::string::String], envp: &[alloc::stri
         Some(e) => e,
         None => return -errno::ENOEXEC as u64,
     };
+    if ec { ec_parse = crate::arch::cpu::read_time(); }
 
     // Check for PT_INTERP (dynamic executable)
-    let mut interp_path_str: Option<&str> = None;
+    let mut interp_exec: Option<ExecFile> = None;
     let interp_data: Option<alloc::vec::Vec<u8>> = if let Some(interp_path) = ElfLoader::get_interpreter(&program_data) {
         let interp_str = match core::str::from_utf8(interp_path) {
             Ok(s) => s,
             Err(_) => return -errno::ENOEXEC as u64,
         };
-        // A dynamic executable MUST have its interpreter. The old code fell
-        // back to running the image STATICALLY when this read failed
-        // transiently — main() then jumped through file-initial PLTGOT
-        // entries (0x4710 -> unresolved resolver path) and died at an
-        // unmapped heap address (the 0x1c29c family). Retry a few times
-        // for transient block-I/O failures, then fail the exec with
-        // ENOENT, exactly like Linux.
-        let mut data = read_exec_file(interp_str);
-        let mut attempt = 1;
-        while data.is_none() && attempt < 3 {
-            data = read_exec_file(interp_str);
+        // A dynamic executable MUST have its interpreter, opened with the
+        // same exec semantics as the main file (Linux open_exec: walk +
+        // MAY_EXEC; a missing or non-executable interpreter is the walk's
+        // own errno, ENOENT/EACCES). The old code fell back to running
+        // the image STATICALLY when this read failed transiently —
+        // main() then jumped through file-initial PLTGOT entries
+        // (0x4710 -> unresolved resolver path) and died at an unmapped
+        // heap address (the 0x1c29c family). Retry a few times for
+        // transient block-I/O failures, then fail the exec.
+        let mut data = None;
+        let mut attempt = 0;
+        while attempt < 3 {
+            match resolve_exec_file(interp_str) {
+                Ok(f) => {
+                    data = read_file_via(&f.file, f.size);
+                    if data.is_some() {
+                        interp_exec = Some(f);
+                        break;
+                    }
+                }
+                Err(e) => {
+                    crate::pr_err!(
+                        "exec: interpreter resolve failed for {} (pid {}) — err {}",
+                        interp_str,
+                        crate::process::current_pid(),
+                        e
+                    );
+                    return (e as i64) as u64;
+                }
+            }
             attempt += 1;
         }
         match data {
-            Some(d) => {
-                interp_path_str = Some(interp_str);
-                Some(d)
-            }
+            Some(d) => Some(d),
             None => {
                 crate::pr_err!(
                     "exec: interpreter read failed for {} (pid {}) — ENOENT",
@@ -870,6 +1008,7 @@ fn do_execve(pathname: &str, argv: &[alloc::string::String], envp: &[alloc::stri
     } else {
         None
     };
+    if ec { ec_interp = crate::arch::cpu::read_time(); }
 
     // Build final argv (use provided argv, fallback to full_path if empty)
     let final_argv: Vec<String> = if argv.is_empty() {
@@ -893,34 +1032,36 @@ fn do_execve(pathname: &str, argv: &[alloc::string::String], envp: &[alloc::stri
     let mut secure_exec = false;
     let mut cred_saved: Option<crate::process::task::Cred> = None;
     {
-        use crate::fs::stat_file_by_path;
         use crate::security::capability::Cap;
 
         const S_ISUID: u32 = 0o4000;
         const S_ISGID: u32 = 0o2000;
 
-        let mut file_stat = crate::fs::Stat::new();
-        if stat_file_by_path(full_path.as_ref(), &mut file_stat).is_ok() {
-            let file_mode = file_stat.st_mode;
-            let file_uid = file_stat.st_uid;
-            let file_gid = file_stat.st_gid;
-            let is_setuid = (file_mode & S_ISUID) != 0;
-            let is_setgid = (file_mode & S_ISGID) != 0;
+        // Mode/uid/gid come from the ONE resolution at the ladder head —
+        // stat_file_by_path re-walked the path just for these bits.
+        let file_mode = exec_file.mode;
+        let file_uid = exec_file.uid;
+        let file_gid = exec_file.gid;
+        let is_setuid = (file_mode & S_ISUID) != 0;
+        let is_setgid = (file_mode & S_ISGID) != 0;
 
-            // Execute permission check (review P26/M-07): without any x bit
-            // the file must not be executable regardless of setuid bits.
-            const S_IXUSR: u32 = 0o100;
-            const S_IXGRP: u32 = 0o010;
-            const S_IXOTH: u32 = 0o001;
-            let has_x = (file_mode & (S_IXUSR | S_IXGRP | S_IXOTH)) != 0;
-            if !has_x {
-                return -(errno::EACCES as i64) as u64;
-            }
+        // Execute permission check (review P26/M-07): without any x bit
+        // the file must not be executable regardless of setuid bits.
+        // (Redundant with the resolve gate today — kept as a guard right
+        // at the credential decision, like Linux re-checks in
+        // bprm_fill_uid's caller.)
+        const S_IXUSR: u32 = 0o100;
+        const S_IXGRP: u32 = 0o010;
+        const S_IXOTH: u32 = 0o001;
+        let has_x = (file_mode & (S_IXUSR | S_IXGRP | S_IXOTH)) != 0;
+        if !has_x {
+            return -(errno::EACCES as i64) as u64;
+        }
 
-            // SAFETY: current is a valid, non-null task pointer from
-            // sched::current(); cred_mut() gives exclusive cred access.
-            unsafe {
-                let cred = (*current).cred_mut();
+        // SAFETY: current is a valid, non-null task pointer from
+        // sched::current(); cred_mut() gives exclusive cred access.
+        unsafe {
+            let cred = (*current).cred_mut();
                 // Snapshot BEFORE any mutation — the rollback path must
                 // restore the pre-exec credentials, not the elevated ones.
                 cred_saved = Some(cred.clone());
@@ -992,7 +1133,6 @@ fn do_execve(pathname: &str, argv: &[alloc::string::String], envp: &[alloc::stri
                 secure_exec = is_setuid || is_setgid
                     || cred.euid != cred.uid
                     || cred.egid != cred.gid;
-            }
         }
     }
 
@@ -1006,6 +1146,7 @@ fn do_execve(pathname: &str, argv: &[alloc::string::String], envp: &[alloc::stri
             !name.starts_with("LD_")
         });
     }
+    if ec { ec_cred = crate::arch::cpu::read_time(); }
 
     // Execute ELF loading
     let phdr_count_usize = if phdr_count > 1024 {
@@ -1025,17 +1166,39 @@ fn do_execve(pathname: &str, argv: &[alloc::string::String], envp: &[alloc::stri
     }
 
     // Pinned file identities for the exec-time segment VMAs (vm_file
-    // semantics — see open_file_arc). Best-effort: a failure only drops
-    // the /proc/<pid>/maps path column, never the exec.
-    let exe_file_arc = open_file_arc(full_path.as_ref());
-    let interp_file_arc = interp_path_str.and_then(open_file_arc);
+    // semantics — see ExecFile). Both come from the single resolutions
+    // above; a None only drops the /proc/<pid>/maps path column, never
+    // the exec.
+    let exe_file_arc = Some(exec_file.file);
+    let interp_file_arc = interp_exec.map(|f| f.file);
+    if ec { ec_pre = crate::arch::cpu::read_time(); }
     if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SyscallTrace) {
         crate::pr_info!("LVMA-DBG pid {} exe_pin={} interp_pin={} path {}",
             crate::process::current_pid(),
             exe_file_arc.is_some(), interp_file_arc.is_some(), full_path.as_ref());
     }
 
-    match do_execve_elf(current, &program_data, &final_argv, &final_envp, entry, phdr_count_usize, &ehdr, full_path.as_ref(), interp_data.as_deref(), secure_exec, exe_file_arc.as_ref(), interp_file_arc.as_ref()) {
+    let elf_result = do_execve_elf(current, &program_data, &final_argv, &final_envp, entry, phdr_count_usize, &ehdr, full_path.as_ref(), interp_data.as_deref(), secure_exec, exe_file_arc.as_ref(), interp_file_arc.as_ref());
+    let ec_t1: u64 = if ec { crate::arch::cpu::read_time() } else { 0 };
+    if ec {
+        crate::pr_info!(
+            "EXECCOST n={} pid={} path={} pstr={} lk={} rd={} parse={} it={} cred={} pre={} elf={} tot={} sz={}",
+            ec_n,
+            crate::process::current_pid(),
+            full_path.as_ref(),
+            ec_path - ec_t0,
+            ec_lookup - ec_path,
+            ec_read - ec_lookup,
+            ec_parse - ec_read,
+            ec_interp - ec_parse,
+            ec_cred - ec_interp,
+            ec_pre - ec_cred,
+            ec_t1 - ec_pre,
+            ec_t1 - ec_t0,
+            program_data.len() + interp_data.as_ref().map(|d| d.len()).unwrap_or(0)
+        );
+    }
+    match elf_result {
         Ok(()) => {
             // The image changed: the parent may no longer setpgid us
             // (Linux sys_setpgid EACCES after exec; LTP setpgid03).
