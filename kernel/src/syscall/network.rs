@@ -1435,6 +1435,27 @@ pub fn sys_getsockname(args: SyscallArgs) -> i64 {
         return 0;
     }
 
+    // P0-2: AF_NETLINK — sockaddr_nl { family, portid, groups } is 12
+    // bytes, SHORTER than sockaddr_in: dispatch BEFORE the inet
+    // addrlen<16 gate (same exemption AF_UNIX gets). The gate used to
+    // run first and turned every getsockname on a netlink socket with a
+    // correctly-sized buffer into EINVAL — systemd-logind's uevent
+    // monitor died at "Failed to set address: Invalid argument" and
+    // took the whole gdm login chain down with it (gdm bring-up r3).
+    if let Some(nlsock) = crate::net::netlink::netlink_socket_from_fd(fd) {
+        if addrlen_early < 12 {
+            return -(errno::EINVAL as i64);
+        }
+        if !crate::arch::uaccess::access_ok(addr_ptr as usize, 12) {
+            return -(errno::EFAULT as i64);
+        }
+        // SAFETY: addr_ptr validated with access_ok; exception-table copy.
+        unsafe {
+            crate::net::netlink::put_sockaddr_nl_bound(addr_ptr, addrlen_ptr, nlsock.portid);
+        }
+        return 0;
+    }
+
     // Inet path: a sockaddr_in needs the full 16 bytes.
     // SAFETY: addrlen_ptr validated with access_ok(4); get_user is the
     // exception-table copy path (SUM=0 safe). A faulting read (unaligned
@@ -1448,18 +1469,6 @@ pub fn sys_getsockname(args: SyscallArgs) -> i64 {
     }
     if !crate::arch::uaccess::access_ok(addr_ptr as usize, 16) {
         return -(errno::EFAULT as i64);
-    }
-
-    // P0-2: AF_NETLINK — sockaddr_nl { family, portid, groups }.
-    if let Some(nlsock) = crate::net::netlink::netlink_socket_from_fd(fd) {
-        if !crate::arch::uaccess::access_ok(addr_ptr as usize, 12) {
-            return -(errno::EFAULT as i64);
-        }
-        // SAFETY: addr_ptr validated with access_ok; exception-table copy.
-        unsafe {
-            crate::net::netlink::put_sockaddr_nl_bound(addr_ptr, addrlen_ptr, nlsock.portid);
-        }
-        return 0;
     }
 
     // P0-2: AF_INET SOCK_RAW / AF_PACKET — sockaddr_in / sockaddr_ll.
@@ -1739,6 +1748,18 @@ pub fn sys_setsockopt(args: SyscallArgs) -> i64 {
         ) as i64;
     }
     if let Some(nlsock) = crate::net::netlink::netlink_socket_from_fd(fd) {
+        // SOL_NETLINK (270): NETLINK_ADD_MEMBERSHIP (1) /
+        // NETLINK_DROP_MEMBERSHIP (2) / NETLINK_PKTINFO (3) etc. —
+        // accept and ignore. Rux's uevent broadcast fans every kernel
+        // uevent out to ALL NETLINK_KOBJECT_UEVENT sockets already, so
+        // group membership is bookkeeping-only. Returning an error here
+        // killed systemd-logind's device monitor
+        // ("Failed to create udev watchers") and with it the whole gdm
+        // login chain (gdm bring-up r3).
+        const SOL_NETLINK_LEVEL: i32 = 270;
+        if level == SOL_NETLINK_LEVEL {
+            return 0;
+        }
         return match level {
             SOL_SOCKET => match optname {
                 SO_RCVTIMEO | SO_SNDTIMEO => {

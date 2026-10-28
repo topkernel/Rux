@@ -112,6 +112,35 @@ static void dump_log(const char *path) {
     dump_log_prefix(path, 40);
 }
 
+// Run `file argv` with stdout/stderr on the console; wait up to
+// `max_sec` seconds (SIGKILL a straggler) and return its exit status
+// (-1 on timeout/fork failure). Used by the gdm branch for the
+// synchronous udev coldplug steps.
+static int run_console_wait(const char *file, const char *const argv[],
+                            int max_sec) {
+    pid_t pid = fork();
+    if (pid < 0) return -1;
+    if (pid == 0) {
+        int con = open("/dev/console", O_WRONLY);
+        if (con >= 0) { dup2(con, STDOUT_FILENO); dup2(con, STDERR_FILENO); }
+        int devnull = open("/dev/null", O_RDONLY);
+        if (devnull >= 0) { dup2(devnull, STDIN_FILENO); close(devnull); }
+        execv(file, (char *const *)argv);
+        _exit(127);
+    }
+    for (int i = 0; i < max_sec; i++) {
+        int st;
+        pid_t r = waitpid(pid, &st, WNOHANG);
+        if (r == pid) return st;
+        if (r < 0) return -1;
+        sleep(1);
+    }
+    kill(pid, SIGKILL);
+    waitpid(pid, NULL, 0);
+    printf("[runit] %s timed out after %ds\n", file, max_sec);
+    return -1;
+}
+
 // X-state probe: ground truth for the "windows never paint" hunt
 // (leg-6). Clients like gnome-session-failed run for the whole session
 // yet no window ever appears on screen — the shell's own chrome
@@ -376,8 +405,12 @@ int main(void) {
     char modebuf[16] = "";
     read_knob("/etc/runit-mode", modebuf, sizeof modebuf);
     // "gs" = unsupervised gnome-shell --replace (TCG-friendly: no 20s
-    // register deadline). Default "session" = full gnome-session chain.
-    const char *MODE = (modebuf[0] == 'g') ? "gs" : "session";
+    // register deadline). "gdm" = stock display-manager chain (logind +
+    // gdm3; see the gdm branch below). Default "session" = full
+    // gnome-session chain. Exact match only — "g" alone is NOT gs.
+    const char *MODE = "session";
+    if (strcmp(modebuf, "gs") == 0) MODE = "gs";
+    else if (strcmp(modebuf, "gdm") == 0) MODE = "gdm";
     printf("[runit] mode=%s\n", MODE);
 
     char tracebuf[8] = "";
@@ -488,24 +521,35 @@ int main(void) {
     }
     // Xorg output goes to the serial console (console=ttyS0) for
     // headless bring-up diagnosis; the log file copy stays as well.
-    pid_t xpid = fork();
-    if (xpid == 0) {
-        int xlog = open("/tmp/Xorg.log", O_WRONLY | O_CREAT | O_TRUNC, 0644);
-        if (xlog >= 0) { dup2(xlog, STDOUT_FILENO); dup2(xlog, STDERR_FILENO); }
-        int con = open("/dev/console", O_WRONLY);
-        if (con >= 0) { dup2(con, STDOUT_FILENO); dup2(con, STDERR_FILENO); }
-        int devnull = open("/dev/null", O_RDONLY);
-        if (devnull >= 0) { dup2(devnull, STDIN_FILENO); close(devnull); }
-        setsid();
-        // The riscv64 kernel does interpret shebangs, but exec the real
-        // server binary directly anyway — same as the proven x86 path.
-        execl("/usr/lib/xorg/Xorg", "Xorg", ":0",
-              "-config", "/etc/X11/xorg-fbdev.conf",
-              "-noreset", "-verbose", "3", (char *)NULL);
-        _exit(127);
+    // Xorg is runit's OWN bring-up server for the session/gs modes. In
+    // gdm mode gdm3 owns the display stack completely (its greeter X
+    // server, its vt/display bookkeeping) — a second Xorg from PID1
+    // would squat :0 and gdm's display would collide with it (r4: both
+    // ran; gdm3 died on an option anyway, but the design is single
+    // owner). gdk-pixbuf cache + stale-lock cleanup stay: cheap and
+    // idempotent, and the greeter wants the loaders cache too.
+    pid_t xpid = -1;
+    if (strcmp(MODE, "gdm") != 0) {
+        pid_t xfork = fork();
+        if (xfork == 0) {
+            int xlog = open("/tmp/Xorg.log", O_WRONLY | O_CREAT | O_TRUNC, 0644);
+            if (xlog >= 0) { dup2(xlog, STDOUT_FILENO); dup2(xlog, STDERR_FILENO); }
+            int con = open("/dev/console", O_WRONLY);
+            if (con >= 0) { dup2(con, STDOUT_FILENO); dup2(con, STDERR_FILENO); }
+            int devnull = open("/dev/null", O_RDONLY);
+            if (devnull >= 0) { dup2(devnull, STDIN_FILENO); close(devnull); }
+            setsid();
+            // The riscv64 kernel does interpret shebangs, but exec the real
+            // server binary directly anyway — same as the proven x86 path.
+            execl("/usr/lib/xorg/Xorg", "Xorg", ":0",
+                  "-config", "/etc/X11/xorg-fbdev.conf",
+                  "-noreset", "-verbose", "3", (char *)NULL);
+            _exit(127);
+        }
+        xpid = xfork;
+        wait_for_x(30);
+        sleep(2); // let GLX initialize before the first client connects
     }
-    wait_for_x(30);
-    sleep(2); // let GLX initialize before the first client connects
 
     printf("[runit] starting session chain (mode=%s session=%s)\n", MODE, SESSION);
     // Periodic log tailer: every 20s push the tail of the session logs
@@ -519,10 +563,18 @@ int main(void) {
             for (;;) {
                 sleep(20);
                 cyc++;
-                const char *logs[3] = { "/tmp/gnome-session.log",
+                // gdm-mode logs ride along (stat-guarded; missing files
+                // are skipped) so the first display-manager boots leave
+                // their forensics on the serial console too.
+                const char *logs[7] = { "/tmp/gnome-session.log",
                                         "/tmp/gnome-shell.log",
-                                        "/tmp/Xorg.log" };
-                for (int i = 0; i < 3; i++) {
+                                        "/tmp/Xorg.log",
+                                        "/tmp/logind.log",
+                                        "/tmp/gdm3.log",
+                                        // gdm's X server logs (root-written)
+                                        "/var/log/Xorg.0.log",
+                                        NULL };
+                for (int i = 0; i < 6; i++) {
                     struct stat st;
                     if (stat(logs[i], &st) != 0) continue;
                     dump_log_prefix(logs[i], 150);
@@ -551,6 +603,86 @@ int main(void) {
                     dump_xstate();
             }
             _exit(0);
+        }
+    }
+    if (strcmp(MODE, "gdm") == 0) {
+        // Real display-manager path (gdm bring-up, session 17): runit
+        // starts ONLY the background daemons and hands the display to
+        // gdm3, which owns Xorg, the greeter session (gnome-shell
+        // --mode=gdm via gdm-session-worker), PAM authentication and
+        // the logged-in user session. No manual Xorg, no manual session
+        // bus, no session chain — everything past this point is stock.
+        // - /run/systemd/system makes sd_booted() return true for gdm
+        //   and libsystemd clients without systemd as PID1.
+        // - logind runs STANDALONE from the systemd package: it owns
+        //   org.freedesktop.login1 on the system bus, needs the cgroup2
+        //   mount (already up) and /dev/tty0 (kernel VT layer — the
+        //   bring-up question this mode maps).
+        mkdir("/run/systemd", 0755);
+        mkdir("/run/systemd/system", 0755);
+        // logind does NOT take --debug (r2 lesson: "unrecognized
+        // option" -> exit 1); debug level comes from this env var.
+        // G_MESSAGES_DEBUG=all: gdm3 logs through GLib to stderr —
+        // without it /tmp/gdm3.log stays empty (its syslog() calls go
+        // nowhere; there is no /dev/log on this image).
+        setenv("SYSTEMD_LOG_LEVEL", "debug", 1);
+        setenv("G_MESSAGES_DEBUG", "all", 1);
+        // udevd + coldplug (r5 lesson): gdm3 never launches the greeter
+        // while seat0's CanGraphical is false, and logind's seat0 gets
+        // graphics devices ONLY through udev database tags
+        // (71-seat.rules: master-of-seat) — without udevd logind runs
+        // fine but its seat stays graphics-less and gdm idles forever.
+        // The kernel already broadcasts userspace-triggered uevents
+        // (write "add" to any /sys/.../uevent — sysfs uevent attr), so
+        // stock udevadm trigger coldplugs drm/input/graphics.
+        {
+            const char *const uargv[] = { "systemd-udevd", "--daemon", NULL };
+            pid_t upid = launch_logged("/tmp/udevd.log",
+                                       "/lib/systemd/systemd-udevd",
+                                       "systemd-udevd", uargv);
+            printf("[runit] systemd-udevd started (pid %d)\n", (int)upid);
+            sleep(3);
+            // Synchronous coldplug of the seat-relevant subsystems
+            // (full-tree trigger is slow under TCG for zero seat value).
+            const char *const trig[] = {
+                "udevadm", "trigger", "--action=add",
+                "--subsystem-match=drm",
+                "--subsystem-match=input",
+                "--subsystem-match=graphics", NULL };
+            run_console_wait("/usr/bin/udevadm", trig, 120);
+            const char *const settle[] = {
+                "udevadm", "settle", "--timeout=15", NULL };
+            run_console_wait("/usr/bin/udevadm", settle, 30);
+        }
+        {
+            const char *logind = "/lib/systemd/systemd-logind";
+            if (access(logind, X_OK) != 0)
+                logind = "/usr/lib/systemd/systemd-logind";
+            const char *const largv[] = { "systemd-logind", NULL };
+            pid_t lpid = launch_logged("/tmp/logind.log", logind,
+                                       "systemd-logind", largv);
+            printf("[runit] logind started (pid %d, %s)\n", (int)lpid, logind);
+            sleep(3); // own login1 on the system bus before gdm asks
+        }
+        {
+            // No --no-daemon: gdm 42 rejects it ("Failed to parse
+            // options", r4). It daemonizes; the detached daemon keeps
+            // running like dbus-daemon --fork. Debug logging rides on
+            // [debug] Enable in custom.conf (syslog-less image: GLib
+            // warnings still reach stderr only pre-daemonize).
+            const char *const gargv[] = { "gdm3", NULL };
+            pid_t gpid2 = launch_logged("/tmp/gdm3.log", "/usr/sbin/gdm3",
+                                        "gdm3", gargv);
+            printf("[runit] gdm3 started (pid %d)\n", (int)gpid2);
+            (void)gpid2;
+        }
+        for (;;) {
+            int st;
+            pid_t p = wait(&st);
+            if (p > 0)
+                printf("[runit] child %d exited st=%d\n", (int)p, st);
+            else
+                sleep(2);
         }
     }
     if (strcmp(MODE, "gs") == 0) {

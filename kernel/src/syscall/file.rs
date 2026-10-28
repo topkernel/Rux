@@ -2931,6 +2931,20 @@ fn fill_statfs_for_inode(inode: &crate::fs::inode::Inode, buf: &mut Statfs) {
     }
     if inode
         .ops
+        .is_some_and(|o| core::ptr::eq(o as *const _, &crate::fs::cgroup::CGROUP_INODE_OPS as *const _))
+    {
+        // cgroup2: f_type MUST be CGROUP2_SUPER_MAGIC (0x63677270) —
+        // systemd-logind statfs's the cgroup mount and treats any other
+        // magic as "Unknown filesystem type ... mounted on /sys/fs/cgroup"
+        // (gdm bring-up r3: the rootfs fallback leaked ROOTFS_MAGIC
+        // 0x73636673 and logind degraded its cgroup accounting).
+        fill_rootfs_statfs(buf);
+        buf.f_type = 0x6367_7270; // CGROUP2_SUPER_MAGIC
+        buf.f_fsid = [0x6367_7270, 0];
+        return;
+    }
+    if inode
+        .ops
         .is_some_and(|o| core::ptr::eq(o as *const _, &crate::fs::selinuxfs::SELINUXFS_INODE_OPS as *const _))
     {
         // selinuxfs: f_type MUST be SELINUX_MAGIC (0xf97cff8c) —

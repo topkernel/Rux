@@ -1404,3 +1404,82 @@ yields to the r26gate gate run, then at the next <2-foreign window
 boots v2quiet (BASE_T=815), runs convcheck-v2, and if verified
 boots v2quiet2 for the cross-boot geometry check the asset rule
 requires. Log: run/v2quiet-watch.log.
+
+## Session 17 — gdm login bring-up: first boots, blocker map through
+## logind-up (kernel netlink + statfs fixes)
+
+Mission (user-facing): the real gdm login screen — gdm → greeter →
+PAM → logind seat → accountsservice. Scope from the image + ignition
+driver (all committed):
+
+SCOPE (what the stack had vs needed):
+- The r13 chain skips the entire login layer: runit (PID1) starts
+  system dbus, session dbus, upowerd, accounts-daemon, Xorg (root,
+  static fbdev config) and gnome-session AS ROOT. No gdm, no PAM, no
+  logind, no udev, no non-root users, no VTs.
+- Kernel gaps found by scoping: NO VT layer (/dev/tty0-7, VT_*/KD_*
+  ioctls, /sys/class/tty) — may still bite at the greeter-X stage;
+  netlink only ROUTE+KOBJECT_UEVENT (no AUDIT — tolerated by logind);
+  cgroup2 mkdir EXISTS (session scopes can be created); uevent WRITE
+  on /sys/.../uevent already broadcasts Linux-format uevents (U1a) —
+  stock udevd should coldplug.
+- gdm3 42 closure: do NOT let apt-cache --recurse walk gdm3's Depends
+  (the "ubuntu-session | gnome-session | x-session-manager |
+  x-window-manager | ..." alternative chain pulls EVERY provider:
+  enlightenment-data 382M, soundfonts, clisp, guile — 800+ debs).
+  Explicit concrete list + gdm3 deb without recursion + DT_NEEDED
+  verification: 195 debs, all present (run/gdm-img.sh).
+
+IMAGE (run/gdm-img.sh → work/gnome-gdm-r1.img, r13 staging + layer):
+- gdm3 + systemd (logind source) + udev + libpam + policykit-1 +
+  gdm's runtime libs; users gdm (120) + rux (1000, password "rux",
+  sha512-crypt fixed salt); pam_loginuid downgraded to optional (no
+  /proc/self/loginuid on Rux); custom.conf: WaylandEnable=false,
+  [debug] Enable, [server-X0] pinned to the PROVEN fbdev Xorg
+  invocation (gdm's autoconfig otherwise picks modesetting on
+  /dev/dri/card0 — Rux's DRM node — an unproven path); runit rebuilt
+  with a "gdm" mode (kernel cmdline runit-mode=gdm, -snapshot keeps
+  session/gs boots possible on the same image).
+
+BOOT MAP (all logs runs/gdmr1..r6*-driver.log):
+- r1: system bus up; logind started then EXITED 1 (image bug: --debug
+  is not a systemd-logind option); gdm3 SURVIVED, dbus-activation
+  WORKS (polkitd auto-started via the setuid launch helper); gdm's
+  Xorg ran via autoconfig→DRM. Screen black.
+- r2 (tailer fixed): logind's true failure captured:
+  "sd-device-monitor: Failed to set address: Invalid argument" →
+  "Failed to create udev watchers" → exit. Plus "Unknown filesystem
+  type 73636673 on /sys/fs/cgroup" (statfs magic leak).
+- KERNEL FIXES (r3 kernel): (1) sys_getsockname dispatched the
+  AF_NETLINK branch AFTER a generic addrlen<16→EINVAL gate, but
+  sockaddr_nl is 12 bytes — EVERY netlink getsockname failed EINVAL;
+  moved the netlink branch before the gate (same exemption AF_UNIX
+  has), requiring ≥12. (2) setsockopt(SOL_NETLINK=270,...) returned
+  ENOPROTOOPT — now accepted (membership is bookkeeping-only: Rux
+  fans uevents to all listeners). (3) statfs on cgroup2 inodes fell
+  to the rootfs filler (f_type 0x73636673) — CGROUP_INODE_OPS branch
+  added returning CGROUP2_SUPER_MAGIC 0x63677270.
+- r4: WITH THE FIXES — logind FULLY UP: "Found cgroup2 on
+  /sys/fs/cgroup/, full unified hierarchy", device monitor degraded
+  (no udev daemon) but NON-FATAL, bus HELLO→RUNNING, "Successfully
+  acquired requested service name" (org.freedesktop.login1 owned),
+  "New seat seat0." Also: gdm 42 has NO --no-daemon (option parse
+  exit); runit's own Xorg must not run in gdm mode (display :0
+  collision). Xorg writes /var/log/Xorg.0.log even under gdm —
+  tailer updated.
+- r5 (runit owns nothing; gdm3 daemonized+alive; logind up): gdm3
+  IDLES — no greeter X, no gdm-session-worker, screen black at 420 s.
+  Read: seat0.CanGraphical never becomes true — logind attaches
+  graphics devices to the seat ONLY via udev database tags
+  (71-seat.rules master-of-seat); with no udev daemon the tags are
+  absent and gdm's local display factory waits forever.
+- r6 (in flight): udev package added (udevadm + 71-seat.rules);
+  runit gdm mode now starts systemd-udevd --daemon, udevadm trigger
+  (drm/input/graphics) + settle BEFORE logind — the stock chain on
+  top of Rux's existing uevent-broadcast kernel support.
+
+NEXT (if r6 stalls): the VT layer is the remaining scoping risk —
+gdm/logind's display bookkeeping (TakeControl/vt allocation) may
+still need /dev/tty0 + VT ioctls + /sys/class/tty. Also gdm3's own
+log is uncaptured (daemonized; syslog-less image) — a /dev/log sink
+is the instrument if the greeter still does not launch.
