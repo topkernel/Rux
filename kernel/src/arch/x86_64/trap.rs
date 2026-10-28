@@ -1376,6 +1376,9 @@ fn handle_timer_tick(regs: &mut PtRegs, cpu: usize) {
                 if regs.user_mode() {
                     (*task).utime_ticks.fetch_add(1, Relaxed);
                     crate::dfx::syscost::tick_user();
+                    // leg-40C perf rider: user-mode rip sampling for
+                    // launcher-comm tasks (dfx-gated inside).
+                    utime_sample_rip(regs.rip, (*task).comm());
                     // perf events (PERF_TYPE_SOFTWARE sampling): stash the
                     // interrupted PC for the softirq charger. Lock-free.
                     crate::perf::note_tick(regs.rip, crate::perf::MODE_USER, (*task).pid());
@@ -1386,6 +1389,9 @@ fn handle_timer_tick(regs: &mut PtRegs, cpu: usize) {
                     // task comm, so one task's burn is separable from the
                     // boot crowd). KILLDUMP prints the table.
                     stime_sample_rip(regs.rip, (*task).comm());
+                    if comm_has_launcher((*task).comm()) {
+                        STIME_LAUNCHER_TICKS.fetch_add(1, Relaxed);
+                    }
                     crate::dfx::syscost::tick_kern(regs.rip);
                     crate::perf::note_tick(regs.rip, crate::perf::MODE_KERNEL, (*task).pid());
                 }
@@ -1409,6 +1415,9 @@ fn handle_timer_tick(regs: &mut PtRegs, cpu: usize) {
         let j = crate::drivers::timer::x86_64::get_jiffies();
         if j % crate::config::KERNEL_HZ as u64 == 0 {
             crate::drivers::timer::x86_64::resync_tsc_against_hpet();
+            // leg-40C perf rider: 1 Hz boundary rides the drift block;
+            // self-throttled to 60 s inside.
+            utime_ripsample_report();
         }
     }
 
@@ -2687,6 +2696,147 @@ static STIME_FOCUS: [StimeSample; STIME_SLOTS] = {
     };
     [EMPTY; STIME_SLOTS]
 };
+
+// ==================== leg-40C perf rider: user-mode rip sampling ====================
+// The cold-start wall is compute-bound ArkTS work in the launcher's
+// user space; stime_sample_rip only sees kernel-mode ticks. These
+// tables mirror the pattern for USER-mode rips (module attribution
+// offline via the byte-matched .so inventory — launcher mmaps are
+// deterministic, no ASLR), plus raw utime/stime tick counts for the
+// mode split. Printed every 60 s by utime_ripsample_report (called
+// from the 1 Hz drift block in the tick path, dfx-gated).
+
+const UTIME_SLOTS: usize = 32;
+
+struct UtimeSample {
+    page: core::sync::atomic::AtomicU64,
+    count: core::sync::atomic::AtomicU64,
+}
+
+static UTIME_HIST: [UtimeSample; UTIME_SLOTS] = {
+    const EMPTY: UtimeSample = UtimeSample {
+        page: core::sync::atomic::AtomicU64::new(0),
+        count: core::sync::atomic::AtomicU64::new(0),
+    };
+    [EMPTY; UTIME_SLOTS]
+};
+
+/// launcher-comm user ticks (mode split numerator).
+static UTIME_LAUNCHER_TICKS: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+/// launcher-comm kernel ticks.
+static STIME_LAUNCHER_TICKS: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+
+fn comm_has_launcher(comm: &[u8; 16]) -> bool {
+    let mut run = 0u8;
+    for &b in comm.iter() {
+        if b == 0 {
+            break;
+        }
+        run = if b == b"launcher"[run as usize] {
+            run + 1
+        } else if b == b"launcher"[0] {
+            1
+        } else {
+            0
+        };
+        if run as usize == b"launcher".len() {
+            return true;
+        }
+    }
+    false
+}
+
+/// Record one USER-mode tick at `rip` for a launcher-comm task.
+fn utime_sample_rip(rip: u64, comm: &[u8; 16]) {
+    use core::sync::atomic::Ordering::Relaxed;
+    if !comm_has_launcher(comm) {
+        return;
+    }
+    UTIME_LAUNCHER_TICKS.fetch_add(1, Relaxed);
+    let page = rip & !0xFFFu64;
+    let mut min_idx = 0usize;
+    let mut min_count = u64::MAX;
+    for i in 0..UTIME_SLOTS {
+        let p = UTIME_HIST[i].page.load(Relaxed);
+        if p == 0 {
+            if UTIME_HIST[i]
+                .page
+                .compare_exchange(
+                    0,
+                    page,
+                    core::sync::atomic::Ordering::AcqRel,
+                    core::sync::atomic::Ordering::Acquire,
+                )
+                .is_ok()
+            {
+                UTIME_HIST[i].count.store(1, Relaxed);
+                return;
+            }
+            continue;
+        }
+        if p == page {
+            UTIME_HIST[i].count.fetch_add(1, Relaxed);
+            return;
+        }
+        let c = UTIME_HIST[i].count.load(Relaxed);
+        if c < min_count {
+            min_count = c;
+            min_idx = i;
+        }
+    }
+    if UTIME_HIST[min_idx]
+        .count
+        .compare_exchange(
+            min_count,
+            1,
+            core::sync::atomic::Ordering::AcqRel,
+            core::sync::atomic::Ordering::Acquire,
+        )
+        .is_ok()
+    {
+        UTIME_HIST[min_idx].page.store(page, Relaxed);
+    }
+}
+
+/// Periodic report (dfx=ripsample): the launcher's user-rip histogram
+/// + utime/stime split + the kernel-mode focus table. Self-throttled
+/// to one print every 60 s.
+pub fn utime_ripsample_report() {
+    use core::sync::atomic::Ordering::Relaxed;
+    if !crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::RipSample) {
+        return;
+    }
+    static LAST: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+    let j = crate::drivers::timer::x86_64::get_jiffies();
+    if j < LAST.load(Relaxed) + 60 * crate::config::KERNEL_HZ as u64 {
+        return;
+    }
+    LAST.store(j, Relaxed);
+    let u = UTIME_LAUNCHER_TICKS.load(Relaxed);
+    let s = STIME_LAUNCHER_TICKS.load(Relaxed);
+    crate::pr_warn!("RIPSAMPLE: launcher utime={} stime={}", u, s);
+    for i in 0..UTIME_SLOTS {
+        let p = UTIME_HIST[i].page.load(Relaxed);
+        let c = UTIME_HIST[i].count.load(Relaxed);
+        if p != 0 && c > 0 {
+            crate::pr_warn!("RIPSAMPLE: u-page={:#x} n={}", p, c);
+        }
+    }
+    for i in 0..STIME_SLOTS {
+        let p = STIME_FOCUS[i].page.load(Relaxed);
+        let c = STIME_FOCUS[i].count.load(Relaxed);
+        if p != 0 && c > 0 {
+            let mut comm = [0u8; 16];
+            for jx in 0..16 {
+                comm[jx] = STIME_FOCUS[i].comm[jx].load(Relaxed);
+            }
+            let name = core::str::from_utf8(&comm[..]).unwrap_or("").trim_end_matches('\0');
+            crate::pr_warn!("RIPSAMPLE: k-page={:#x} n={} comm={}", p, c, name);
+        }
+    }
+}
 
 /// Record one kernel-mode tick at `rip` for `comm`.
 fn stime_sample_rip(rip: u64, comm: &[u8; 16]) {

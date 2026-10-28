@@ -92,6 +92,8 @@ macro_rules! dfx_switch_table {
             SlowTask => "slowtask",
             ExtHunt => "exthunt",
             ExecCost => "execcost",
+            ThPark => "thpark",
+            RipSample => "ripsample",
         }
     };
 }
@@ -403,9 +405,25 @@ pub enum DfxSwitch {
     /// the first 64 execs. For decomposing the p4_fork_exec reference
     /// gap; prints only when explicitly enabled. OFF by default.
     ExecCost,
+    /// dfx=thpark (leg-40B family A): user-stack park dump of hung
+    /// binder SERVER threads from the txn-hunt audit — 48 frame words
+    /// above the parked syscall's entry sp, VMA+fileoff+instruction
+    /// bytes for offline symbolize against the image's libraries.
+    /// Names the image-side handler chain that entered a nested sync
+    /// txn (the mutual-ABBA candidate side, sc334B tid472<->841
+    /// shape). Deliberately SEPARATE from ParkDump: that switch also
+    /// arms the freeze-scan full-tgid dumps whose UART volume is the
+    /// known boot-timing dodge amplifier (sc186-188); this one is
+    /// latched (once per tid per boot, 2 per 5 s burst, 16 per boot).
+    /// OFF by default.
+    ThPark,
+    /// leg-40C perf rider: user-mode rip sampling for launcher-comm
+    /// tasks (page-bucketed histogram + utime/stime split), reported
+    /// every 60 s from the tick path. OFF by default.
+    RipSample,
 }
 
-const SWITCH_COUNT: usize = 44;
+const SWITCH_COUNT: usize = 46;
 
 static SWITCHES: [AtomicBool; SWITCH_COUNT] = [const { AtomicBool::new(false) }; SWITCH_COUNT];
 
@@ -490,6 +508,8 @@ impl DfxSwitch {
             DfxSwitch::EpollScan => 41,
             DfxSwitch::ExtHunt => 42,
             DfxSwitch::ExecCost => 43,
+            DfxSwitch::ThPark => 44,
+            DfxSwitch::RipSample => 45,
         }
     }
 
