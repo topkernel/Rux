@@ -634,8 +634,10 @@ static int vfork_test(void)
 {
     static unsigned long stack[4096] __attribute__((aligned(16)));
     unsigned long flags = SIGCHLD | (vfork_redir_inner(1) ? (CLONE_VM | CLONE_VFORK) : 0);
-    long (*clone_fn)(void *, unsigned long, unsigned long) =
-        (void *(*)(void *, unsigned long, unsigned long))(long)0;
+    /* placeholder kept for readability; the actual call goes through
+     * my_clone below (gcc-14 makes the old void*-cast initializer an
+     * error, and the pointer was never called through anyway) */
+    long (*clone_fn)(void *, unsigned long, unsigned long) = 0;
     (void)clone_fn;
     /* call my_clone(func, stack_top, flags) via extern symbol */
     extern long my_clone(void *fn, unsigned long sp, unsigned long fl);

@@ -564,6 +564,12 @@ verdict_for() {
         echo "HARNESS FAIL"
         return
     fi
+    # Wrappers report their own skips (a missing image, toolchain or
+    # kernel): an environment gap, not a kernel defect.
+    if grep -aEq "PROBE-RESULT: SKIP" "$log"; then
+        echo "SKIP (probe skip)"
+        return
+    fi
     if grep -aEq "WEDGE|STALL|no serial progress" "$log"; then
         echo "WEDGE"
         return
