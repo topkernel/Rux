@@ -7446,3 +7446,29 @@ gone /tmp; deterministic; media verified).
 sc359 IN FLIGHT at log time (quota-reset first-light boot, tip8 +
 ripsample for continued perf sampling, 2.5 h window; host load 21 at
 launch — flake-zone risk noted).
+
+LEG-40C round 5 (sc359 final verdict): the second unbounded window
+did NOT complete cold start. QEMU ran its full 9000 s and exited on
+its own timeout (no manual kill); shotmon stopped after exit. Final
+counters utime=12329 stime=190987 ticks (~123 s user + ~1910 s kernel
+= ~34 min CPU, 6%/94% split — half of sc358's 64 min CPU; host load
+21 at launch cut the machine share). launcher.ready 0, OnForeground
+0 across the whole boot. Screen: black -> 8-color bootanim frame
+@04:53:58 -> 5013-distinct-color partial mid-band frame @04:56:31
+(bands 3-4 of 1280 rows, 1.30% non-black), then pixel-identical for
+the remaining 2.4 h. The partial-frame class is NOT new — sc358 also
+showed it (4281 colors / 2.61%) before flipping back to 8-color.
+Final ripsample report = same target list as the sc358 full-grind
+histogram: k-page 0x...80231000 (mm/rmap page_record_mapping) n=25177
+top, 0x...80473000 (atomic fetch_update) n=21474, 0x...807e3000
+(alloc Box/CStr) n=14665, 0x...80228000 (str TwoWaySearcher + bio)
+n=11877, 0x...80474000 (ext4 atomic_store) n=10920, 0x...802c0000
+(Atomic fetch_max) n=8378, 0x...80805000 (__mulsf3 soft-float)
+n=7689; user side all libc pages (0x3fbf1xxxxx class), ~25 samples
+in libark_jsruntime (negligible). CONCLUSION: two independent
+unbounded windows (64 min and 34 min mostly-kernel CPU) both failed
+to finish the launcher load phase — at current Rux speed the load
+phase needs more than ~1 h of mostly-kernel CPU. Per lane policy:
+NO more tip8-class grind boots; next boot class is the perf lane's
+current-main strong kernel with loglevel=4 + ripsample ON (handoff
+not yet posted in CC-COLLAB.txt as of 07:30).
