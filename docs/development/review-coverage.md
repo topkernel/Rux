@@ -23,10 +23,10 @@ when the tree gains a file the map does not know about.
 |---|---|
 | source files in kernel/src | 413 |
 | source lines in kernel/src | 291,838 |
-| files fully reviewed | 30 |
-| files partially reviewed | 85 |
+| files fully reviewed | 31 |
+| files partially reviewed | 84 |
 | files not yet reviewed | 298 |
-| lines in fully reviewed files | 11,004 |
+| lines in fully reviewed files | 11,643 |
 | reviewed files mainline changed since `47d96961` (need re-read) | 70 |
 
 ## Defects found and fixed
@@ -531,7 +531,7 @@ when the tree gains a file the map does not know about.
 | `fair.rs` | 1847 | 🔧🔁 | CFS 核心：vruntime 权重方向、min_vruntime、pick 跳过路径（min_vruntime 越界已修 b433fb13）；基线 188d844d 已重读 main 增量（dfx 埋点 SKIPHIST/普查计数/ww_tie_mass、inv_weight 预计算=参考 __update_inv_weight），无新缺陷; 主线已改动，需重读 |
 | `idle.rs` | 100 | ✅ |  |
 | `mod.rs` | 129 | ✅🔁 | 纯 re-export 层; 主线已改动，需重读 |
-| `rt.rs` | 639 | 🔶 | enqueue/dequeue/pick/bitmap/priority inversion |
+| `rt.rs` | 639 | ✅ | 全文读完：位图反相(bit0=prio99)、head/tail 入队、P08 空转 dequeue、force_unlink 防御、RR timeslice=100ms 均与参考一致；注意无 RT 带宽控制(sched_rt_runtime_us, 参考默认 950ms)——留待 sched.rs 轮次 |
 | `sched.rs` | 6392 | 🔶🔁 | pick/switch path, enqueue/dequeue, preemption checks; 主线已改动，需重读 |
 | `stats.rs` | 41 | ✅🔁 | sched_schedstats 运行时门：默认关、Relaxed 读，与参考 sysctl 语义一致; 主线已改动，需重读 |
 | `stop_task.rs` | 94 | ✅ | stop 类为 PerCpuState 直管的 stub，next_class 链正确 |
