@@ -51,7 +51,7 @@ pub fn journal_current_handle(journal: &Arc<Journal>) -> Option<Arc<Handle>> {
 pub fn jbd2_get_transaction(journal: &Arc<Journal>) -> Transaction {
     let tid = journal.j_transaction_sequence.fetch_add(1, Ordering::SeqCst);
 
-    Transaction {
+    let mut txn = Transaction {
         t_journal: Some(journal.clone()),
         t_tid: tid,
         t_state: Spinlock::new(TransactionState::Running),
@@ -81,7 +81,24 @@ pub fn jbd2_get_transaction(journal: &Arc<Journal>) -> Transaction {
         t_synchronous_commit: false,
         t_need_data_flush: 0,
         t_dirty_buffers: Spinlock::new(alloc::vec::Vec::new()),
+        t_revoke_records: Spinlock::new(alloc::vec::Vec::new()),
+    };
+
+    // Arm-2 spill inheritance (f4-ext4-route-map.md §6.2 R1): revokes
+    // that arrived while their issuing transaction was no longer Running
+    // (SMP handle joining a committing transaction, stale handle on a
+    // Finished one) wait in the journal-level vec and are claimed by the
+    // NEXT transaction here. Lock order: the caller holds
+    // j_running_transaction while creating this transaction, and no path
+    // takes the revoke vec first and then the running-transaction lock.
+    {
+        let spill = core::mem::take(&mut *journal.revoke_records.lock());
+        if !spill.is_empty() {
+            txn.t_revoke_records.lock().extend(spill);
+        }
     }
+
+    txn
 }
 
 // ============================================================================
@@ -225,7 +242,7 @@ pub fn jbd2_journal_stop(handle: &mut Handle) -> Result<(), i32> {
     //   - the caller asked for durability (h_sync — fsync/sync paths), or
     //   - the batch is large (>= LAZY_COMMIT_MAX_BUFFERS registered
     //     metadata buffers), or
-    //   - revoke records are pending (the slow path must suppress them).
+    //   - the batch carries many revokes (>= LAZY_COMMIT_MAX_REVOKES).
     // Metadata durability between forced commits relies on the buffer
     // cache write-back (eviction syncs dirty buffers) and sync(2).
     //
@@ -242,10 +259,21 @@ pub fn jbd2_journal_stop(handle: &mut Handle) -> Result<(), i32> {
     // exhaustion in start_this_handle bounds the batch at
     // j_max_transaction_buffers anyway.
     const LAZY_COMMIT_MAX_BUFFERS: usize = 1024;
+    // Arm-2 (f4-ext4-route-map.md §6.2 R3): revokes used to force a
+    // synchronous slow-path commit at the NEXT stop after any free
+    // (unlink/rmdir/rename-replace) — 8-12 virtio round trips per delete
+    // op, the whole journaled mkdrmdir residual. They now ride the
+    // transaction that issued them and batch like everything else. The
+    // high-water bounds the per-transaction set (memory + one revoke
+    // block's worth of log space): ext4 callers start handles with plain
+    // ext4_journal_start(nblocks) — no revoke-credit reservation — so an
+    // unlink loop's revoke-only volume has no other bounder. 510 = one
+    // revoke block at the smallest entry size, (4096 - 12) / 8.
+    const LAZY_COMMIT_MAX_REVOKES: usize = 510;
     if err == 0 && !handle.h_sync {
         let dirty_len = txn.t_dirty_buffers.lock().len();
-        let revokes_pending = !journal.revoke_records.lock().is_empty();
-        if dirty_len < LAZY_COMMIT_MAX_BUFFERS && !revokes_pending {
+        let revoke_len = txn.t_revoke_records.lock().len();
+        if dirty_len < LAZY_COMMIT_MAX_BUFFERS && revoke_len < LAZY_COMMIT_MAX_REVOKES {
             // Leave j_running_transaction in place: the next
             // start_this_handle joins this transaction.
             crate::dfx::fsw::note_j_lazy();
