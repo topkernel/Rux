@@ -468,9 +468,12 @@ the surrounding semantics.
 **Design.** Lock-ordering classes carry zero-sized key types
 (`GrqKey`, `FutexBucketKey`, `NetQueueKey`, `NetStatsKey`); a
 PERMITTED nesting is an explicit `impl CanNestInside<Outer> for
-Inner`, and acquiring a keyed lock while another keyed lock is held
-goes through `lock_nested(&outer_guard)`, which only compiles when the
-impl exists. The mainstream approach this replaces is a documented
+Inner`. A held keyed guard mints a zero-sized `NestProof` (guards are
+the only minters — no public constructor), and acquiring a keyed lock
+while another is held consumes that proof (`lock_nested(&proof)`,
+`lock_irqsave_nested(&proof)`), which only compiles when the impl
+exists. The proof's lifetime ties it to the guard, so it cannot
+outlive the held section. The mainstream approach this replaces is a documented
 lock-ordering file plus review plus a post-hoc deadlock watchdog; the
 paid incident class is any INV-LOCK-* reverse-order introduction —
 review-enforced discipline that silently fails under refactor pressure
@@ -488,10 +491,19 @@ the reverse order is an instant machine-wide deadlock).
 **Compatibility evidence.** First adoption is the GRQ's own lock —
 internal type swap (`RawSpinlock` -> `KeyedRawSpinlock<GrqKey>`), the
 GrqGuard API, the irqsave/preempt protocol and every call site
-unchanged; unit suite green with the `lockkey` group (mechanics:
-guard hold/drop, INV-LOCK-5/6 forward nesting, the GRQ claim/unlock
-pattern). The compile-fence becomes load-bearing when the futex bucket
-side migrates (follow-on slice, rides the scheduling sign-off).
+unchanged. SECOND SLICE (coordinator-approved): the fence is
+LOAD-BEARING — the futex `HASH_HEADS` buckets are
+`KeyedSpinlock<FutexBucketKey, Option<usize>>` (same lock_irqsave
+discipline, Deref/DerefMut call sites unchanged), and futex_wake's
+R12-2 wake-under-bucket call is `Task::wake_up_in_futex_bucket(task,
+&head.proof())` -> `wake_up_enqueue_nested` ->
+`GlobalRunQueue::lock_irqsave_nested`, a chain whose every hop
+demands the proof; the bucket->GRQ nesting is now a compile fact
+(the reverse direction remains watchdog-enforced). The requeue path's
+same-class ordered double-bucket acquire (lo/hi) stays on the plain
+API by design. Unit suite green with the `lockkey` group extended
+(guard hold/drop, INV-LOCK-5/6 forward nesting, the GRQ claim/unlock
+pattern, the data-guard proof chain).
 
 **Known cost.** Opportunistic migration (D-4/D-6 doctrine): unkeyed
 locks keep compiling; only pairs named in lock-ordering.md adopt keys,

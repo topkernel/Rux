@@ -8,7 +8,8 @@
 // keyed locks, and the GRQ pilot itself rides the whole suite (every
 // schedule/pick/wake path takes the keyed lock).
 use crate::sync::lockkey::{
-    FutexBucketKey, GrqKey, KeyedRawSpinlock, NestKey, NetQueueKey, NetStatsKey,
+    FutexBucketKey, GrqKey, KeyedRawSpinlock, KeyedSpinlock, NestKey, NestProof, NetQueueKey,
+    NetStatsKey,
 };
 use super::{test_fail, test_group_start, test_pass};
 
@@ -54,9 +55,31 @@ pub fn test_lockkey() {
     let bucket: KeyedRawSpinlock<FutexBucketKey> = KeyedRawSpinlock::new();
     {
         let bg = bucket.lock();
-        let gg = grq.lock_nested(&bg); // INV-LOCK-5 forward
+        let gg = grq.lock_nested(&bg.proof()); // INV-LOCK-5 forward
         drop(gg);
         drop(bg);
+    }
+    // The DATA-CARRYING keyed lock (the HASH_HEADS shape) mints the
+    // same proof class: the mini end-to-end mechanics of the real
+    // wake chain (bucket guard -> proof -> nested GRQ acquire), plus
+    // the guard's Deref/DerefMut to the data.
+    let heads: KeyedSpinlock<FutexBucketKey, Option<usize>> = KeyedSpinlock::new(None);
+    {
+        let mut head = heads.lock_irqsave();
+        assert!(head.is_none(), "fresh bucket head must read None");
+        *head = Some(7);
+        let gg = grq.lock_nested(&head.proof()); // same compile check
+        drop(gg);
+        assert_eq!(*head, Some(7), "bucket data corrupted across nested section");
+    }
+    // The data persists (a lock guard does not restore data); the lock
+    // being free again is proven by this acquire succeeding.
+    match *heads.lock_irqsave() {
+        Some(7) => test_pass("data guard proof chain"),
+        v => {
+            test_fail("data guard proof chain", &alloc::format!("head value lost: {:?}", v));
+            return;
+        }
     }
     // Same lock classes must be free again.
     if bucket.try_lock().is_none() || grq.try_lock().is_none() {
@@ -70,7 +93,7 @@ pub fn test_lockkey() {
     let stats: KeyedRawSpinlock<NetStatsKey> = KeyedRawSpinlock::new();
     {
         let qg = nq.lock();
-        let sg = stats.lock_nested(&qg);
+        let sg = stats.lock_nested(&qg.proof());
         drop(sg);
         drop(qg);
     }
@@ -94,6 +117,8 @@ pub fn test_lockkey() {
     // Documentation of the negative half (compile-time, so asserted
     // here only as a comment the shape group pins): the following MUST
     // NOT compile —
+    //   let _p: NestProof<'_, FutexBucketKey> = unsafe { core::mem::zeroed() };
+    //       (no public constructor — only a live guard mints proofs)
     //   let gg = grq.lock();
     //   let bg = bucket.lock_nested(&gg);   // no impl CanNestInside<GrqKey>
     //                                       // for FutexBucketKey (INV-LOCK-5

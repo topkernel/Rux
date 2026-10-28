@@ -99,6 +99,24 @@ impl GlobalRunQueue {
         GrqGuard { grq: self as *const Self as *mut Self, flags, _marker: core::marker::PhantomData }
     }
 
+    /// Nested variant of [`lock_irqsave`]: acquires with the same
+    /// protocol, but ONLY callable while an `Outer`-class keyed lock is
+    /// held (the proof is minted by that outer guard) and only when
+    /// `GrqKey: CanNestInside<Outer>` — INV-LOCK-5's forward direction
+    /// as a compile fact. The proof is zero-sized; the runtime protocol
+    /// is identical to lock_irqsave.
+    #[inline]
+    #[track_caller]
+    pub fn lock_irqsave_nested<'a, Outer: crate::sync::lockkey::NestKey>(
+        &self,
+        _proof: &crate::sync::lockkey::NestProof<'a, Outer>,
+    ) -> GrqGuard<'_>
+    where
+        crate::sync::lockkey::GrqKey: crate::sync::lockkey::CanNestInside<Outer>,
+    {
+        self.lock_irqsave()
+    }
+
     /// Lock without IRQ save (for non-interrupt contexts like init).
     #[inline]
     pub fn lock_plain(&self) -> GrqPlainGuard<'_> {
@@ -3330,10 +3348,36 @@ pub fn steer_task_cpu(task: *mut Task, target: i32) {
 ///     set_state(RUNNING)).
 /// Returns true if the task was transitioned and enqueued.
 pub fn wake_up_enqueue(task: *mut Task) -> bool {
+    wake_up_enqueue_opt(task, None)
+}
+
+/// INV-LOCK-5 load-bearing twin: wake while a futex bucket lock is
+/// held (futex_wake's R12-2 section). The proof is required by
+/// `lock_irqsave_nested`, which only exists for the
+/// GrqKey-inside-FutexBucketKey impl — the nesting that used to be a
+/// comment is now a compile fact.
+pub fn wake_up_enqueue_nested<'a>(
+    task: *mut Task,
+    proof: &crate::sync::lockkey::NestProof<'a, crate::sync::lockkey::FutexBucketKey>,
+) -> bool {
+    wake_up_enqueue_opt(task, Some(proof))
+}
+
+/// Shared body of the wake-up enqueue entry points. `nested` selects
+/// the proof-checked GRQ acquire (one predictable branch; the proof
+/// itself is zero-sized). Public for `Task::wake_up_impl`'s call sites
+/// (task.rs).
+pub fn wake_up_enqueue_opt(
+    task: *mut Task,
+    nested: Option<&crate::sync::lockkey::NestProof<'_, crate::sync::lockkey::FutexBucketKey>>,
+) -> bool {
     if task.is_null() {
         return false;
     }
-    let mut grq_guard = grq().lock_irqsave();
+    let mut grq_guard = match nested {
+        Some(proof) => grq().lock_irqsave_nested(proof),
+        None => grq().lock_irqsave(),
+    };
     // SAFETY: task is non-null and validated by the caller (Task::wake_up's
     // poison check plus an unlocked wakeable-state filter, or a pinned
     // pid-hash lookup); the GRQ lock is held across the state transition so

@@ -40,6 +40,8 @@ pub use sched::{
     dequeue_task,
     dequeue_if_enqueued,
     wake_up_enqueue,
+    wake_up_enqueue_nested,
+    wake_up_enqueue_opt,
     steer_task_cpu,
     change_task_policy,
     init,

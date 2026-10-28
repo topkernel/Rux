@@ -173,22 +173,93 @@ impl<K: NestKey> KeyedRawSpinlock<K> {
 
 impl<Inner: NestKey> KeyedRawSpinlock<Inner> {
     /// Compile-checked nested acquire: take this (`Inner`-class) lock
-    /// while an `Outer`-class keyed lock is held. The `_outer` guard is
-    /// the PROOF the outer lock is held (and pins its class); the call
-    /// only compiles when `Inner: CanNestInside<Outer>` — the trait
-    /// impl list IS the permitted-nesting table of
-    /// lock-ordering.md. Violations (reverse order, same class) are
-    /// compile errors, not deadlocks.
+    /// while an `Outer`-class keyed lock is held. The proof is minted
+    /// by the OUTER guard (`guard.proof()`); the call only compiles
+    /// when `Inner: CanNestInside<Outer>` — the trait impl list IS the
+    /// permitted-nesting table of lock-ordering.md. Violations (reverse
+    /// order, same class) are compile errors, not deadlocks.
     #[inline]
     #[track_caller]
-    pub fn lock_nested<Outer: NestKey>(
+    pub fn lock_nested<'a, Outer: NestKey>(
         &self,
-        _outer: &KeyedGuard<'_, Outer>,
+        _outer: &NestProof<'a, Outer>,
     ) -> KeyedGuard<'_, Inner>
     where
         Inner: CanNestInside<Outer>,
     {
         self.lock()
+    }
+}
+
+/// Zero-sized PROOF that a keyed lock of class `K` is currently held
+/// by THIS thread. MINTED ONLY by a live keyed guard's `proof()`
+/// (no public constructor); consumed by `lock_nested` /
+/// `lock_irqsave_nested`, which only compile when the nesting is
+/// permitted. The lifetime ties the proof to the guard that minted
+/// it, so it cannot outlive the held section.
+pub struct NestProof<'a, K: NestKey> {
+    _key: PhantomData<K>,
+    _hold: PhantomData<&'a ()>,
+}
+
+/// A [`Spinlock<T>`](super::spinlock::Spinlock) whose position in the
+/// lock hierarchy is part of its type — the data-carrying twin of
+/// [`KeyedRawSpinlock`]. `lock_irqsave` returns the same protocol
+/// guard wrapped with the key (call sites unchanged: Deref/DerefMut to
+/// the data); the ONLY new capability is `guard.proof()`, which mints
+/// the [`NestProof`] other keyed locks require for a nested acquire.
+pub struct KeyedSpinlock<K: NestKey, T> {
+    inner: super::spinlock::Spinlock<T>,
+    _key: PhantomData<K>,
+}
+
+// SAFETY: same rule as Spinlock itself — the atomic protocol
+// synchronizes; the key is zero-sized and carries no data.
+unsafe impl<K: NestKey, T: Send> Sync for KeyedSpinlock<K, T> {}
+
+impl<K: NestKey, T> KeyedSpinlock<K, T> {
+    pub const fn new(data: T) -> Self {
+        Self { inner: super::spinlock::Spinlock::new(data), _key: PhantomData }
+    }
+
+    /// Top-level acquire with the full irqsave protocol (the bucket
+    /// locks' historical discipline — unchanged bytes at the call
+    /// sites).
+    #[inline]
+    #[track_caller]
+    pub fn lock_irqsave(&self) -> KeyedIrqGuard<'_, K, T> {
+        KeyedIrqGuard { inner: self.inner.lock_irqsave(), _key: PhantomData }
+    }
+
+}
+
+/// Guard for the data-carrying keyed spinlock: derefs to `T`; mints
+/// [`NestProof`] for nested acquisitions while held.
+pub struct KeyedIrqGuard<'a, K: NestKey, T: ?Sized> {
+    inner: super::spinlock::SpinlockIrqGuard<'a, T>,
+    _key: PhantomData<K>,
+}
+
+impl<K: NestKey, T: ?Sized> KeyedIrqGuard<'_, K, T> {
+    /// Mint the held-section proof (see [`NestProof`]).
+    #[inline]
+    pub fn proof(&self) -> NestProof<'_, K> {
+        NestProof { _key: PhantomData, _hold: PhantomData }
+    }
+}
+
+impl<K: NestKey, T: ?Sized> core::ops::Deref for KeyedIrqGuard<'_, K, T> {
+    type Target = T;
+    #[inline]
+    fn deref(&self) -> &T {
+        self.inner.deref()
+    }
+}
+
+impl<K: NestKey, T: ?Sized> core::ops::DerefMut for KeyedIrqGuard<'_, K, T> {
+    #[inline]
+    fn deref_mut(&mut self) -> &mut T {
+        self.inner.deref_mut()
     }
 }
 
@@ -205,6 +276,14 @@ impl<K: NestKey> Drop for KeyedGuard<'_, K> {
     #[inline]
     fn drop(&mut self) {
         unsafe { (*self.lock).raw.unlock() };
+    }
+}
+
+impl<K: NestKey> KeyedGuard<'_, K> {
+    /// Mint the held-section proof (see [`NestProof`]).
+    #[inline]
+    pub fn proof(&self) -> NestProof<'_, K> {
+        NestProof { _key: PhantomData, _hold: PhantomData }
     }
 }
 

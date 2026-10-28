@@ -269,9 +269,21 @@ static WAITER_POOL: [Spinlock<Option<Waiter>>; WAITER_POOL_SIZE] = {
 /// Hash bucket count - from config
 const HASH_SIZE: usize = crate::config::FUTEX_HASH_SIZE;
 
-/// Waiter list head for each bucket
-static HASH_HEADS: [Spinlock<Option<usize>>; HASH_SIZE] = {
-    const INIT: Spinlock<Option<usize>> = Spinlock::new(None);
+/// Waiter list head for each bucket. D-11 keyed (FutexBucketKey): the
+/// guard's `proof()` is what the nested GRQ acquire in the wake path
+/// requires — the bucket->GRQ nesting of INV-LOCK-5 (R12-2) is a
+/// compile fact. NOTE: FUTEX_REQUEUE holds TWO buckets (lo/hi, index
+/// ordered) via plain lock_irqsave — a same-class ordered double
+/// acquire, deliberately outside the keyed-nesting API (which exists
+/// to fence ACROSS classes).
+static HASH_HEADS: [crate::sync::lockkey::KeyedSpinlock<
+    crate::sync::lockkey::FutexBucketKey,
+    Option<usize>,
+>; HASH_SIZE] = {
+    const INIT: crate::sync::lockkey::KeyedSpinlock<
+        crate::sync::lockkey::FutexBucketKey,
+        Option<usize>,
+    > = crate::sync::lockkey::KeyedSpinlock::new(None);
     [INIT; HASH_SIZE]
 };
 
@@ -591,7 +603,10 @@ pub fn futex_wake_in_mm(uaddr: usize, mm: usize, flags: u32, nr_wake: i32, bitse
         let woken_n = wake_list.len();
     for task in wake_list {
         if !task.is_null() {
-            Task::wake_up(task);
+            // R12-2 wake-under-bucket, now compile-checked: the proof
+            // minted by the bucket guard is what the nested GRQ acquire
+            // requires (INV-LOCK-5 forward; D-11).
+            Task::wake_up_in_futex_bucket(task, &head.proof());
         }
     }
     drop(head);

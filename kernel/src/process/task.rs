@@ -2960,6 +2960,33 @@ impl Task {
 
     #[inline(never)]
     pub fn wake_up(task: *mut Task) -> bool {
+        Self::wake_up_impl(task, None)
+    }
+
+    /// INV-LOCK-5 load-bearing twin of [`wake_up`]: wake a task while a
+    /// futex bucket lock is held (futex_wake's R12-2 section). The
+    /// proof — minted by the bucket guard — is required all the way
+    /// down to the GRQ acquire (`wake_up_enqueue_nested` ->
+    /// `lock_irqsave_nested`), so the bucket->GRQ nesting is a compile
+    /// fact, not a review comment. Same body as `wake_up` (shared
+    /// `wake_up_impl`); the proof argument is zero-sized.
+    #[inline(never)]
+    pub fn wake_up_in_futex_bucket<'a>(
+        task: *mut Task,
+        proof: &'a crate::sync::lockkey::NestProof<'a, crate::sync::lockkey::FutexBucketKey>,
+    ) -> bool {
+        Self::wake_up_impl(task, Some(proof))
+    }
+
+    /// Shared wake body (`wake_up` / `wake_up_in_futex_bucket`). The
+    /// `bucket` proof, when present, routes the GRQ acquire through the
+    /// compile-checked nested variant (one predictable branch; the
+    /// proof is zero-sized).
+    #[inline(never)]
+    fn wake_up_impl(
+        task: *mut Task,
+        bucket: Option<&crate::sync::lockkey::NestProof<'_, crate::sync::lockkey::FutexBucketKey>>,
+    ) -> bool {
         if task.is_null() {
             return false;
         }
@@ -3085,7 +3112,7 @@ impl Task {
                 // stack (__switch_to loads thread.sp into sp) — the observed
                 // trap-with-sp-on-heap-address full-system wedge. The locked
                 // re-check refuses ZOMBIE/DEAD/RUNNING.
-                if !crate::sched::wake_up_enqueue(task) {
+                if !crate::sched::wake_up_enqueue_opt(task, bucket) {
                     // W2 (sc78): a SLEEPING target's enqueue+heal both
                     // refused — per the R39/R41/R42 design this is
                     // unreachable, yet the binder ring proves replies sit
@@ -3158,7 +3185,7 @@ impl Task {
                 // wake_up_enqueue's authoritative current-slot scan sorts
                 // them apart.
                 if old_state == TaskState::new(TaskState::RUNNING) {
-                    if !crate::sched::wake_up_enqueue(task) {
+                    if !crate::sched::wake_up_enqueue_opt(task, bucket) {
                         return false;
                     }
                     // Linked again — nudge its last CPU so it is picked
