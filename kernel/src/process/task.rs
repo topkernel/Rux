@@ -5,7 +5,7 @@
 
 //! Task Control Block
 
-use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use core::ptr;
 use crate::sync::spinlock::Spinlock;
 use crate::mm::pagemap::AddressSpace;
@@ -1356,6 +1356,12 @@ pub struct Task {
     /// Loaded classic-BPF filter program (single program; loading a new one
     /// replaces it — Linux stacks filters, recorded divergence).
     pub seccomp_filter: Spinlock<Option<alloc::vec::Vec<SockFilter>>>,
+    /// no_new_privs attribute (PR_SET_NO_NEW_PRIVS, Linux task_struct::
+    /// no_new_privs): when set, execve ignores setuid/setgid bits (and
+    /// file capabilities) — the exec'd program runs with the same
+    /// credentials — and seccomp filter attach is legal without
+    /// CAP_SYS_ADMIN. Inherited across fork and exec (Linux semantics).
+    pub no_new_privs: AtomicBool,
 
     // ==================== cgroup v2 (U1b) ====================
 
@@ -1654,6 +1660,7 @@ impl Task {
             ns_local_pid: pid,
             seccomp_mode: AtomicU32::new(0),
             seccomp_filter: Spinlock::new(None),
+            no_new_privs: AtomicBool::new(false),
             cgroup_ptr: ptr::null_mut(),
             cgroup_mem_charged: AtomicU64::new(0),
         };
@@ -2193,6 +2200,10 @@ impl Task {
         ptr::write(
             (ptr as usize + offset_of!(Task, seccomp_filter)) as *mut Spinlock<Option<alloc::vec::Vec<SockFilter>>>,
             Spinlock::new(None),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, no_new_privs)) as *mut AtomicBool,
+            AtomicBool::new(false),
         );
         ptr::write(
             (ptr as usize + offset_of!(Task, ns_local_pid)) as *mut u32,
@@ -2788,6 +2799,10 @@ impl Task {
         ptr::write(
             (ptr as usize + offset_of!(Task, seccomp_filter)) as *mut Spinlock<Option<alloc::vec::Vec<SockFilter>>>,
             Spinlock::new(None),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, no_new_privs)) as *mut AtomicBool,
+            AtomicBool::new(false),
         );
         ptr::write(
             (ptr as usize + offset_of!(Task, ns_local_pid)) as *mut u32,
@@ -5318,6 +5333,15 @@ impl Task {
     /// Set seccomp mode.
     pub fn set_seccomp_mode(&self, mode: u32) {
         self.seccomp_mode.store(mode, Ordering::Release);
+    }
+
+    /// no_new_privs attribute (PR_SET_NO_NEW_PRIVS / PR_GET_NO_NEW_PRIVS).
+    pub fn no_new_privs(&self) -> bool {
+        self.no_new_privs.load(Ordering::Acquire)
+    }
+
+    pub fn set_no_new_privs(&self, v: bool) {
+        self.no_new_privs.store(v, Ordering::Release);
     }
 
     /// Seccomp kill helper (signal.rs): force-queue SIGKILL to this task

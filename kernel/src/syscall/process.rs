@@ -1042,8 +1042,15 @@ fn do_execve(pathname: &str, argv: &[alloc::string::String], envp: &[alloc::stri
         let file_mode = exec_file.mode;
         let file_uid = exec_file.uid;
         let file_gid = exec_file.gid;
-        let is_setuid = (file_mode & S_ISUID) != 0;
-        let is_setgid = (file_mode & S_ISGID) != 0;
+        // no_new_privs (prctl 39): execve grants NO privileges — the
+        // setuid/setgid bits are IGNORED (capabilities(7): "execve(2)
+        // will not grant privileges ... the set-user-ID and set-group-ID
+        // mode bits and file capabilities are all ignored"). The task
+        // keeps its credentials; the normal-exec capability transition
+        // below still runs with the unchanged ids.
+        let nnp = (*current).no_new_privs();
+        let is_setuid = if nnp { false } else { (file_mode & S_ISUID) != 0 };
+        let is_setgid = if nnp { false } else { (file_mode & S_ISGID) != 0 };
 
         // Execute permission check (review P26/M-07): without any x bit
         // the file must not be executable regardless of setuid bits.
@@ -2945,6 +2952,28 @@ pub fn sys_prctl(args: SyscallArgs) -> i64 {
             // arg3 = struct sock_fprog *).
             prctl_set_seccomp(arg2, arg3)
         }
+        39 => {
+            // PR_SET_NO_NEW_PRIVS (seccomp-grade sandboxing prerequisite):
+            // set the calling thread's no_new_privs attribute. arg2 must
+            // be 0 or 1; arg3..arg5 must be 0 (prctl(2) EINVAL shapes).
+            // When set: execve ignores setuid/setgid bits (the exec'd
+            // program runs with the caller's credentials) and seccomp
+            // filter attach is legal without CAP_SYS_ADMIN.
+            if arg3 != 0 || arg4 != 0 || args[4] != 0 {
+                return -(errno::EINVAL as i64);
+            }
+            if arg2 > 1 {
+                return -(errno::EINVAL as i64);
+            }
+            // SAFETY: current is a valid task pointer.
+            unsafe { (*current).set_no_new_privs(arg2 == 1); }
+            0
+        }
+        40 => {
+            // PR_GET_NO_NEW_PRIVS: returns the attribute (0 or 1).
+            // SAFETY: current is a valid task pointer.
+            unsafe { (*current).no_new_privs() as i64 }
+        }
         7 => {
             // PR_GET_KEEPCAPS
             // SAFETY: current is a valid task pointer.
@@ -4278,11 +4307,15 @@ const SECCOMP_RET_LOG: u32 = 0x7ffc_0000;
 const SECCOMP_RET_ALLOW: u32 = 0x7fff_0000;
 
 /// AUDIT_ARCH: __AUDIT_ARCH_64BIT | __AUDIT_ARCH_LE | EM_<arch>.
-/// riscv64: EM_RISCV(243); x86_64: EM_X86_64(62).
+/// The filter's seccomp_data.arch token must name the arch whose NATIVE
+/// syscall numbers the filter sees (the gate runs on the raw trap number:
+/// riscv64 native = the generic table, x86_64 native = the x86_64 table —
+/// the gate runs BEFORE x86_compat translation, which matches the
+/// reference kernel where filters always see native numbers).
 #[cfg(feature = "riscv64")]
-const AUDIT_ARCH_RISCV64: u32 = 0x8000_0000 | 0x4000_0000 | 243;
+const AUDIT_ARCH: u32 = 0x8000_0000 | 0x4000_0000 | 243; // AUDIT_ARCH_RISCV64
 #[cfg(feature = "x86_64")]
-const AUDIT_ARCH_RISCV64: u32 = 0x8000_0000 | 0x4000_0000 | 62;
+const AUDIT_ARCH: u32 = 0x8000_0000 | 0x4000_0000 | 62; // AUDIT_ARCH_X86_64
 
 /// Classic-BPF instruction classes/ops (uapi/linux/filter.h subset).
 const BPF_LD: u16 = 0x00;
@@ -4398,12 +4431,11 @@ pub fn sys_seccomp(args: SyscallArgs) -> i64 {
             // Privilege gate at attach time (Linux order: program
             // copy/validation above reports EFAULT/EINVAL first; the
             // capability check happens when the filter attaches).
-            // prctl(2)/seccomp(2): installing a filter requires
-            // no_new_privs OR CAP_SYS_ADMIN; PR_SET_NO_NEW_PRIVS is not
-            // implemented in this kernel, so the gate is CAP_SYS_ADMIN
-            // alone → EACCES otherwise. LTP prctl02 case #5 drops
-            // CAP_SYS_ADMIN/CAP_SETPCAP and requires EACCES.
-            if !crate::security::capable(crate::security::CAP_SYS_ADMIN) {
+            // seccomp(2)/prctl(2): installing a filter requires the
+            // no_new_privs attribute OR CAP_SYS_ADMIN → EACCES otherwise.
+            // (LTP prctl02 case #5 drops CAP_SYS_ADMIN and requires
+            // EACCES; prctl03-style NNP users attach unprivileged.)
+            if !seccomp_attach_allowed() {
                 return -(errno::EACCES as i64);
             }
 
@@ -4428,6 +4460,7 @@ pub fn sys_seccomp(args: SyscallArgs) -> i64 {
             let action = u32::from_ne_bytes(val);
             match action {
                 SECCOMP_RET_KILL_PROCESS
+                | SECCOMP_RET_KILL_THREAD
                 | SECCOMP_RET_ERRNO
                 | SECCOMP_RET_LOG
                 | SECCOMP_RET_ALLOW => 0,
@@ -4452,10 +4485,24 @@ pub fn sys_seccomp(args: SyscallArgs) -> i64 {
     }
 }
 
+/// Filter-attach privilege decision (seccomp(2)): the no_new_privs
+/// attribute OR CAP_SYS_ADMIN. Exposed pub(crate) for the unit rows.
+pub(crate) fn seccomp_attach_allowed() -> bool {
+    crate::sched::current()
+        .map(|t| t.no_new_privs())
+        .unwrap_or(false)
+        || crate::security::capable(crate::security::CAP_SYS_ADMIN)
+}
+
+/// STRICT-mode allowed set, for the unit rows (per-arch native numbers).
+#[cfg(any(target_arch = "riscv64", target_arch = "x86_64"))]
+pub(crate) fn strict_allowed_for_test() -> &'static [u64; 5] {
+    &STRICT_ALLOWED
+}
+
 /// Enter STRICT mode. Cannot be entered once FILTER mode is active
 /// (Linux: EPERM — filters cannot be detached).
-fn seccomp_set_strict() -> Result<(), i32> {
-    let Some(task) = crate::sched::current() else {
+fn seccomp_set_strict() -> Result<(), i32> {    let Some(task) = crate::sched::current() else {
         return Err(-(errno::ESRCH as i32));
     };
     if task.seccomp_mode() == SECCOMP_MODE_FILTER {
@@ -4524,13 +4571,27 @@ fn seccomp_set_filter(filter: alloc::vec::Vec<crate::process::task::SockFilter>)
     Ok(())
 }
 
-/// Syscalls allowed in STRICT mode (riscv64 numbers).
+/// Syscalls allowed in STRICT mode — the RUNNING ARCH'S NATIVE numbers,
+/// because the trap gate hands the raw trap number to seccomp_syscall_gate
+/// (riscv64: the generic table; x86_64: regs.rax BEFORE x86_compat
+/// translation). The single riscv64-only list was an ABI bug: on x86_64
+/// a STRICT task was SIGKILLed on its first native read(0)/write(1) and
+/// uname(63) slipped through as if it were read.
+#[cfg(feature = "riscv64")]
 const STRICT_ALLOWED: [u64; 5] = [
     63,  // read
     64,  // write
     93,  // exit
     94,  // exit_group
     139, // rt_sigreturn
+];
+#[cfg(feature = "x86_64")]
+const STRICT_ALLOWED: [u64; 5] = [
+    0,   // read
+    1,   // write
+    60,  // exit
+    231, // exit_group
+    15,  // rt_sigreturn
 ];
 
 /// seccomp gate result: None = allow, Some(rv) = block with syscall return
@@ -4594,7 +4655,7 @@ fn seccomp_run(
     // seccomp_data as u32 words (little-endian layout).
     let mut data = [0u32; 16];
     data[0] = nr as u32;
-    data[1] = AUDIT_ARCH_RISCV64;
+    data[1] = AUDIT_ARCH;
     let ip = regs.instruction_pointer();
     data[2] = ip as u32;
     data[3] = (ip >> 32) as u32;
