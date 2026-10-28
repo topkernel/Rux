@@ -245,6 +245,12 @@ pub fn translate(nr: u64, args: &SyscallArgs) -> Option<(u64, SyscallArgs)> {
         227 => Some((112, *args)), // clock_settime
         228 => Some((113, *args)), // clock_gettime
         229 => Some((114, *args)), // clock_getres
+        // time(2): return value = seconds, optional tloc store — NOT
+        // shape-compatible with gettimeofday (buffer layout + return
+        // semantics differ), so it gets its own internal generic slot.
+        // Without this, static glibc's time() returns -1 forever (no
+        // vDSO) — ohlite's second-stage never computed a nonzero uptime.
+        201 => Some((1180, *args)), // time
         230 => Some((115, *args)), // clock_nanosleep
         231 => Some((94, *args)), // exit_group
         233 => Some((21, *args)), // epoll_ctl

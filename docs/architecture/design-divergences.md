@@ -42,6 +42,22 @@ launcher execution in-sandbox.
 and cache-locality loss versus per-CPU queues. Acceptable at MAX_CPUS ≤ 4
 (current config); revisit if core counts grow.
 
+**Status (user ruling, 2026-10-28): the GRQ stays.** Per-CPU queueing was
+re-evaluated and rejected as over-engineering at 4 cores with low
+contention; the performance lane's follow-up is GRQ slimming only, not a
+queue-model change. Two anchors for whoever revisits D-1 later:
+
+- Churn control is pinned by configuration, not left to accident:
+  `cfs_min_granularity_ns = 700_000` with the wakeup granularity at the
+  same value, at a 100 Hz tick — a task that is prequeued cannot lose the
+  CPU before ~0.7 ms of service, and the 10 ms tick bounds the re-queue
+  rate, so wake storms do not churn the queue.
+- The "small hold cost" claim above is decomposed by measurement (wake
+  hold = runqueue accounting / dequeue-enqueue / pick / stats segments,
+  from the wakewatch/WW census instruments); future D-1 work should
+  compare segment-wise against that decomposition rather than only the
+  5.1–6.1 µs aggregate.
+
 **Guard.** Perf-gate scheduling domain: GRQ average hold band (5.1–6.1 µs
 ±20%), census in band (TERM 8±2 / REFUSED 32±4), pbench P2 context-switch
 median ±20% — any change touching `sched/` reports these.

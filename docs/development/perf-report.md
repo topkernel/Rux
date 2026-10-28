@@ -3139,3 +3139,205 @@ e6a9b886, same two-stage gate, 8h deadline).
 **Leg-53 standing:** mkdir flush landed; dgram item closed by lever A
 at the pa91 med-of-2; standing by for the OH lane's cold-start sampler
 report (the next primary mission per the coordinator).
+
+**Leg-54 nomination (standby filler): percpu.rs:126 is the next named
+lever — 429.9M calls/boot, 80.3s REST, ~187ns each, the #2 site after
+sched.** All of it is small_alloc's MAGAZINES (mm/small_alloc.rs:264/
+300/439/523): every magazine alloc/free pays CpuLocal::with's full
+save_and_disable_irq (CSR pair on riscv) + cpu_id (tp deref chain) +
+in_use tripwire + restore. Design sketch for the next leg: the section
+needs (a) no migration and (b) same-CPU re-entry refusal — it does NOT
+need irqs off if (a) comes from a tp-relative preempt_count (Linux
+layout; riscv64's tp IS the task pointer, and both cpu_id paths
+already deref it) and (b) is already provided by the in_use tripwire,
+whose REFUSE-AND-FALLBACK is exactly the documented r8final discipline
+for irq-context re-entry. Expected: the ~187ns class toward ~50-70ns
+AND ~80s/boot of irq-off wall leaves the interrupts domain's IF=0
+share (Tier-3 row). PRECONDITION: preempt_count in task_struct is a
+sched-lane field addition (accessor + field, not policy) — coordinate
+before design freeze; the slowpath's nested with() under the class
+lock's irqsave stays flag-correct (vacuous-tripwire case documented in
+small_alloc.rs:289).
+
+### 8.10.24 Leg 54 (2026-10-29): the sampler verdict — 94% KERNEL / 6% user; the target list decomposes into TWO levers (and a boot-arg gift for the OH lane)
+
+**The sample (sc357, in-kernel dfx=ripsample, launcher-only, 242K
+kernel samples vs 15K user).** Mode split: launcher utime=1583 /
+stime=22093 ticks — the ~100x cold-start gap is KERNEL time on the
+launcher's behalf (syscall/fault paths under 100MB of page-by-page
+faulted libs); zero samples in libark_jsruntime. Kernel pages (all
+dumps aggregated, mine — the coordinator's list was one dump's slice):
+
+| n (share) | page | content |
+|---|---|---|
+| 54605 (22.6%) | 80231000 | arch cpu primitives: save_and_disable_irq/restore_irq + rmap stubs — the IRQ-SAVE PAIR ITSELF, i.e. the aggregated entry cost of every irqsave section |
+| 39317 (16.2%) | 80473000 | PageCache put/put_by_key/put_range/flush_done try_update+fetch_update monomorphizations, MmStruct::sub_rss CAS, SB atomic_loads |
+| 25431 (10.5%) | 807e3000 | CStr::to_owned/clone_into + CString::from + String write_fmt + log crate |
+| 20701 (8.5%) | 80474000 | atomic_store monomorphizations (VfsMount/SB/Task ptrs + all widths) + CAS u8/u32 |
+| 20493 (8.5%) | 80228000 | ConsoleWriter::write_str + flush_publications_scoped closure + TwoWaySearcher + sysfs MultiCharEqSearcher |
+| 15844 (6.5%) | 802c0000 | Atomic<usize/u8/u16/i32> fetch_sub/CAS/load/store wrappers (Arc drop paths) |
+| 27114 (11.2%) | 80805000+80803000 | compiler_builtins memcmp/bcmp/strlen + the whole core::fmt family |
+| 6674 (2.8%) | 807ee000 | fmt::Formatter/pad/fill |
+
+Two levers + one gift: **(1) ATOMIC/IRQ WRAPPERS, ~54%** (pages 1+2+4+6)
+— the per-op cost of lock/atomic/irqsave instruction sequences across
+the hot paths. CAVEAT: tip8 is PRE-leg-52 content (verified: no lever
+symbols in the ELF) — the fdtable's per-lookup lock_irqsave (fixed on
+main by lever B) and per-CPU magazine irqsave (nominated) were feeding
+pages 1/4/6 then. The UNTOUCHED member is the page-cache entry state
+machine (page 2, 16.2%): every faulted page's pin/release runs
+fetch_update CAS LOOPS **under the global inodes mutex** — the
+atomics are redundant (ref_count is private to page_cache.rs; all
+accessor sites hold the lock; verified get/get_phys/pin_by_key/
+get_range_into/collect + put/put_by_key/put_range/flush_done).
+**Item A: convert the lock-covered state ops to locked-plain mutations**
+(get_mut on the atomic storage — no LOCKED prefix, no retry, layout
+stable): the four put-family fetch_updates + the five pin fetch_adds +
+flush_done's dirty store + the follow-up loads. Item B: MmStruct
+sub_rss's CAS — same audit, same treatment if mm-locked. **(2) STRING/
+FMT/CONSOLE, ~33%** (pages 3+5+7+9): printk already filters BEFORE
+formatting (printk.rs:203) — this is REAL EMITTED volume: the sc357
+boot runs loglevel=7 and writes 7.3MB of serial, every byte through
+fmt+ConsoleWriter+UART exits. The GIFT for the OH lane: boot with
+`loglevel=4` + the existing `quietcon` param (console sink stashes to
+the dmesg ring, UART idle — printk.rs ring_stash_console) — an
+image-side change worth a large slice of the 33% with zero kernel
+work; plus their userspace le_epoll `timeout:-1` WARNING loop (500+
+repeats) is pure spam. Kernel-side item C (after A/B): console TX
+batching if the UART path is per-byte — check console.rs. The
+TwoWaySearcher/memcmp share is path-component comparison per lookup —
+a namei-level specialization study, later. **Re-sample request routed
+to the OH lane: same rig on CURRENT main** — leg-52's levers reshaped
+pages 1/4/6 and the real remaining distribution needs one boot.
+
+### 8.10.25 Leg 55 (2026-10-29): GRQ slimming design (code frozen behind the main-tip panic) + the mkdir-flush reversal + ITEM 2 doc
+
+**BLOCKER first (routes to the exec lane): main tip d2a58ccb panics
+reproducibly on the x86 release-strong pbench boot** —
+`Option::unwrap() on None` at alloc btree navigate.rs:552, t=6-9s,
+right after PBENCH p1_null + p1_clock, 4 prints (SMP). Reproduced on
+PURE main (pa97, run/pa97-main-tip-strong-bzImage md5 130f4f9b built
+from a detached d2a58ccb worktree) AND on my branch post-merge
+(pa96/pa96b); does NOT reproduce on my pre-merge leg-54 stack
+(pa93j/pa95b/pa95c all DONE). BTreeMap navigate unwrap = concurrent
+unsynchronized mutation of some tree. Suspect range 188d844d..d2a58ccb
+kernel delta: the exec rewrite (60fe05cd/2fbb5a64/6c56c0b6, process.rs
+375 lines) is the largest; timerfd 4e1f6110, lockkey 2b092c49,
+cpuinfo 845d26bb the others. All board validation in my lane is
+BLOCKED until this is fixed; the GRQ kernel edits below are written
+but NOT committed (they touch exactly the suspect neighborhood — fair.rs
+must be panic-free before any of it is judged).
+
+**The mkdir-flush reversal (fab0e029, READY TO MERGE independent of the
+panic).** My leg-53 gate miss, stated plainly: e3c1ec35 carried a
+p6_unlink regression I did not check on the pa93 boards — the row was
+IN the serial log at 10.2ms and I read only append/mkdrmdir/panics.
+Evidence: pa92j (flush present) unlink 89.5us; pa93j/pa95b/pa95c
+(absent, hiwat 2048/256) 10.2-17.3ms med, p99 47-49ms — 100x off the
+77-119us baseline row. Mechanism (pa95f fsw board: pc=1030 constraint
+flushes, pl=1004): with records pending, every unlink's dir-block
+write is H2-constrained by the previous delete-side post record on the
+same dir block → an entry+pre sync PER UNLINK — the deferred bill
+lands on the next out-of-band writer, serialized per op. The 31x
+mkdrmdir win was a hidden 100x unlink loss. The flush is restored;
+the lazy-variant follow-up needs delete-side records BATCHED per
+transaction window (the jbd2 shape) so H2 stops serializing — design
+work, not a flag flip. PUB_LAZY (FSW1 pl=) stays for it. Two
+smaller leg-54 commits stand on their own evidence (page-cache locked
+state ops 86a458f9; console TX batching 007a876a — boards rc=0;
+pending-pub index 5e7f0d0a — correct-by-construction, harmless) and
+ride the next full battery once boards work again. Item B (sub_rss
+CAS) adjudicated NO-GO: rss is genuinely lock-free (fault paths, all
+CPUs) — the atomics are required.
+
+**ITEM 1 design — GRQ critical-section slimming (D-1 structure
+untouched; audit of fair.rs/sched.rs complete).** The measured GRQ
+hold (5.4-7.0us class) decomposes per the audit into:
+
+(a) TREE-WALK ELIMINATION (the big one, all under GRQ today):
+  1. `dequeue()` LINEAR-SCANS the whole tasks_timeline by pointer
+     (fair.rs ~770: `for (&key,&ptr) in iter()`) — O(n) per
+     dequeue/preempt under the lock. FIX: store the enqueued
+     `timeline_key: Option<VruntimeKey>` in SchedEntity at
+     enqueue_inner (it generates the key anyway); dequeue removes
+     O(log n) by the stored key; `is_linked`'s O(n) scan (R41) becomes
+     an O(log n) exact check `get(&key) == Some(&task)` — same
+     authority (actual tree membership), no stale-on_rq weakness.
+  2. `pick_next` double-walks (iter().next() then `get(&key)`) —
+     collapse to one read.
+  3. `pick_next_cpu`'s per-skip remove+reinsert (2 walks per skipped
+     candidate, up to 32) stays — bounded and correctness-critical —
+     but the leftmost read per loop pass collapses via (b).
+  4. `update_min_vruntime` walks the leftmost on EVERY
+     enqueue/dequeue/pick/update_curr — with (b) it reads the cache.
+
+(b) LEFTMOST CACHE: `leftmost: Option<(VruntimeKey, *mut Task)>` on
+CfsRunQueue. Invariant under GRQ: insert(k): if cache none or k <
+cache.0 → cache = k; remove(k): if k == cache.0 → invalidate
+(lazily recomputed from iter().next() on next use — one walk per
+structurally-changing op instead of per read); empty → None. All five
+readers (pick_next, pick_next_cpu's loop head, peek_next,
+leftmost_vruntime, update_min_vruntime) go through one
+`leftmost_entry()` helper. An alternative lighter structure (skip
+list / doubly-linked sorted list with O(1) min) was evaluated and
+REJECTED for this leg: BTreeMap + cache reaches O(1) reads with
+O(log n) mutations and zero new unsafe; a new structure would re-open
+every R41/R65/b50 invariant for marginal gain.
+
+(c) ACCOUNTING MOVES (the coordinator's (a), justified per field):
+`update_curr` charges se.exec_runtime and se.vruntime (delta_exec) —
+BOTH are owner-task-private (curr is unlinked while running; no other
+CPU reads a running se's vruntime — the tree only holds LINKED
+entities). They can charge OUTSIDE the GRQ if update_curr's callers
+are split: the now/delta math owner-side, with only the
+min_vruntime advance (which reads the leftmost) left inside. The
+schedstat counters are already Relaxed per-task fields. THE MOVE IS
+WRITTEN but gated on the panic fix: it touches update_curr's call
+sites in __schedule/tick, and no board can validate it while main-tip
+dies at t=9s.
+
+Target restated: GRQ hold 5.4us -> <=2us (steps 1+2 alone remove the
+O(n) dequeue scan and O(log n) leftmost walks from EVERY pick;
+expected dominant), GRQ REST 96s -> <=40s, P2 in band, syscost
+track_caller verifies per-site.
+
+**ITEM 2 (done, doc): minimum scheduling period.** Documented in
+docs/architecture/riscv64-sched-note.md (new, one page): tick cadence
+KERNEL_HZ=100 (10ms), SCHED_MIN_GRANULARITY_NS = 700_000 (0.7ms,
+fair.rs) = wakeup granularity, SCHED_LATENCY_NS window, sched_slice =
+max(period*weight/total, 0.7ms); the "no frequent queue churn"
+property = a task runs >= 0.7ms once picked and preemption decisions
+evaluate at tick/wakeup boundaries only.
+
+**Evidence pack for the fab0e029 revert (coordinator request — carry
+into the merge commit message; all paths relative to the perf-audit
+worktree):**
+
+| board | kernel (md5-12) | p6_unlink med | p6_mkdrmdir med | serial log |
+|---|---|---|---|---|
+| pa92j BEFORE (flush present) | e20eebb38eaf (leg-52 stack) | **89.534 us** | 16750 us | work/pbench-pa92j-serial.log |
+| pa93j AFTER (flush deleted, hiwat 2048) | e6a9b8861173 (e3c1ec35) | **10216.427 us** | 497.015 us | work/pbench-pa93j-serial.log |
+| pa95j (deleted, pre-index) | (leg-54 wip) | 10766.990 us | 501.681 us | work/pbench-pa95j-serial.log |
+| pa95b (deleted + pending index) | 0818732eb22b | 17294.277 us | 830.999 us | work/pbench-pa95b-serial.log |
+| pa95c (deleted, hiwat 256) | 880d54aa9e70 | 9184.348 us | 501.961 us | work/pbench-pa95c-serial.log |
+| pa95f (fsw=1 mechanism board) | 880d54aa9e70 | 9536.277 us | 830.395 us | work/pbench-pa95f-serial.log (FSW1: pc=1030 constraint flushes, pl=1004 lazy mkdirs) |
+
+Mechanism probe: FSW1 in pa95f shows pc=1030 publication-constraint
+flushes against pl=1004 lazy mkdirs — with records pending, each
+unlink's dir-block write is H2-constrained by the previous delete-side
+post record on the same dir block, forcing an entry+pre sync per
+unlink (hiwat 256 did not fix it: the bill is per-op, not
+queue-volume). Before row provenance: pa92j booted the leg-52 stack
+(e20eebb3) where every create drained its own record at mkdir-return,
+so the unlink phase faced an empty pending queue. The 114x median gap
+and the 47-49ms p99s are the deferred bill landing on the next
+out-of-band writer, serialized per op.
+
+Main-tip panic pointers (for the exec lane, already sent): pure-main
+strong run/pa97-main-tip-strong-bzImage (md5 130f4f9b6bb1, built from
+a detached d2a58ccb worktree — the worktree was removed after the
+build; rebuild per the ledger command if needed), work/
+pbench-pa97-serial.log (4 panics, t=6s after p1_null+p1_clock) and
+work/pbench-pa96b-serial.log (4 panics, t=9s, my branch post-merge).
+Signature: `Option::unwrap() on None` at
+library/alloc/src/collections/btree/navigate.rs:552.

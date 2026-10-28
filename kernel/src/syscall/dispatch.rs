@@ -500,6 +500,11 @@ fn syscall_handler_inner(regs: &mut PtRegs) {
         167 => process::sys_prctl(args),       // prctl
         168 => process::sys_getcpu(args),      // getcpu
         169 => time::sys_gettimeofday(args),   // gettimeofday
+        // 1180: internal slot for time(2) — the asm-generic ABI has no
+        // time(2) (riscv64 glibc derives it from clock_gettime); x86_64
+        // glibc calls SYS_time directly when no vDSO is provided, so
+        // x86_compat translates NR 201 here. Return value = seconds.
+        1180 => time::sys_time(args),
         170 => time::sys_settimeofday(args),   // settimeofday
         171 => time::sys_adjtimex(args),       // adjtimex
         172 => process::sys_getpid(args),      // getpid

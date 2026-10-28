@@ -1998,14 +1998,52 @@ fn sys_mount_inner(args: SyscallArgs, ph: &mut MntPhases) -> i64 {
     // fresh instance: the VfsMountInternal (flags included) moves.
     const MS_MOVE: u64 = 8192;
     if args[3] & MS_MOVE != 0 {
-        return match ph.t(6, || crate::fs::vfs::vfs_move_mount(source, target)) {
+        // Linux do_move_mount resolves the OLD path with user_path_at
+        // (AT_FDCWD, LOOKUP_FOLLOW): a relative source resolves against
+        // the CALLER'S CWD. busybox/OH switch_root's core move is
+        // mount(".", "/", MS_MOVE) after chdir into the new root — the
+        // raw "." handed down made vfs_move_mount's walk look up a
+        // literal "." child under the VFS root and ENOENT (the ohlite
+        // boot died exactly there). Join with the cwd (same discipline
+        // as the target join above) and normalize the dot components so
+        // the vfs walk receives a clean absolute path.
+        let source_owned = ph.t(6, || {
+            if source.starts_with('/') {
+                return alloc::string::String::from(source);
+            }
+            match crate::sched::current() {
+                Some(t) => {
+                    let cwd = unsafe { (*t).get_cwd() };
+                    let mut abs = alloc::vec::Vec::with_capacity(cwd.len() + 1 + source.len());
+                    abs.extend_from_slice(&cwd);
+                    if !cwd.ends_with(&[b'/']) {
+                        abs.push(b'/');
+                    }
+                    abs.extend_from_slice(source.as_bytes());
+                    match alloc::string::String::from_utf8(abs) {
+                        Ok(s) => s,
+                        Err(_) => alloc::string::String::new(), // EINVAL below
+                    }
+                }
+                None => alloc::string::String::from(source),
+            }
+        });
+        // from_utf8 failure path (same contract as the target join).
+        if source_owned.is_empty() && !source.is_empty() {
+            return -(errno::EINVAL as i64);
+        }
+        let source_abs = crate::fs::path::path_normalize(&source_owned);
+        return match ph.t(6, || crate::fs::vfs::vfs_move_mount(&source_abs, target)) {
             Ok(()) => {
                 // Keep the /proc/mounts row pointed at the new target.
+                // Try BOTH the raw and the cwd-normalized source: a
+                // relative MS_MOVE source (".") only matches the
+                // registry's absolute mountpoint via source_abs.
                 let existing = ph
                     .t(7, || {
                         crate::fs::mount::get_mounts()
                             .into_iter()
-                            .find(|(_, mp, _, _)| mp == source)
+                            .find(|(_, mp, _, _)| *mp == source_abs || mp == source)
                     })
                     .map(|(device, _, fs_type, flags)| (device, fs_type, flags));
                 if let Some((device, fs_type, flags)) = existing {

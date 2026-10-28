@@ -118,6 +118,48 @@ struct CachedPage {
     dirty: core::sync::atomic::AtomicBool,
 }
 
+impl CachedPage {
+    /// Leg-54 item A (perf-report 8.10.24, sampler page 80473000 = 16.2%
+    /// of launcher kernel time): every ref_count / released / dirty
+    /// transition happens under PageCache::inodes' lock — the CAS-loop
+    /// atomics were machinery the mutex already subsumed (verified at all
+    /// accessor sites: get/get_phys/get_range_into/pin_by_key/collect pin
+    /// paths and the put/put_by_key/put_range/flush_done/mark_dirty
+    /// release paths). The STORAGE stays atomic for layout stability;
+    /// these locked helpers do plain loads/stores through get_mut, which
+    /// is sound ONLY while the inodes lock is held — new sites must keep
+    /// that invariant (read-only scans elsewhere stay atomic loads).
+    #[inline]
+    fn pin_locked(&mut self) {
+        *self.ref_count.get_mut() += 1;
+    }
+    /// R14-16 floor discipline preserved: a put on an already-zero count
+    /// (stale put) returns false and never underflows.
+    #[inline]
+    fn unpin_locked(&mut self) -> bool {
+        let c = self.ref_count.get_mut();
+        if *c == 0 {
+            return false;
+        }
+        *c -= 1;
+        true
+    }
+    #[inline]
+    fn count_locked(&self) -> u32 {
+        self.ref_count.load(Ordering::Relaxed)
+    }
+    /// R14-17 one-shot latch, locked form: true = this caller releases.
+    #[inline]
+    fn take_released_locked(&mut self) -> bool {
+        let r = self.released.get_mut();
+        if *r {
+            return false;
+        }
+        *r = true;
+        true
+    }
+}
+
 /// Per-inode page cache.
 struct InodePageCache {
     /// page_index → cached page.
@@ -171,16 +213,16 @@ impl PageCache {
     /// On miss: returns None.
     pub fn get(&self, fs_id: u64, ino: u64, page_index: u64) -> Option<*const u8> {
         let key = cache_key(fs_id, ino);
-        let cache = self.inodes.lock();
-        let inode_cache = cache.get(&key)?;
-        let page = inode_cache.pages.get(&page_index)?;
+        let mut cache = self.inodes.lock();
+        let inode_cache = cache.get_mut(&key)?;
+        let page = inode_cache.pages.get_mut(&page_index)?;
         if page.invalidated {
             // Stale (a write invalidated it while pinned) — serve a miss so
             // the caller re-reads current data from disk.
             return None;
         }
         STAT_HITS.fetch_add(1, Ordering::Relaxed);
-        page.ref_count.fetch_add(1, Ordering::AcqRel);
+        page.pin_locked();
 
         // Mark page as recently accessed for LRU rotation
         let page_desc = pfn_to_page_mut(page.pfn);
@@ -199,14 +241,14 @@ impl PageCache {
     /// The returned pin is owned by that PTE mapping for its lifetime.
     pub fn get_phys(&self, fs_id: u64, ino: u64, page_index: u64) -> Option<u64> {
         let key = cache_key(fs_id, ino);
-        let cache = self.inodes.lock();
-        let inode_cache = cache.get(&key)?;
-        let page = inode_cache.pages.get(&page_index)?;
+        let mut cache = self.inodes.lock();
+        let inode_cache = cache.get_mut(&key)?;
+        let page = inode_cache.pages.get_mut(&page_index)?;
         if page.invalidated {
             return None;
         }
         STAT_HITS.fetch_add(1, Ordering::Relaxed);
-        page.ref_count.fetch_add(1, Ordering::AcqRel);
+        page.pin_locked();
         let page_desc = pfn_to_page_mut(page.pfn);
         if !page_desc.is_null() {
             unsafe {
@@ -500,12 +542,12 @@ impl PageCache {
         }
         let count = out.len();
         let mut n = 0usize;
-        let cache = self.inodes.lock();
-        let Some(inode_cache) = cache.get(&key) else {
+        let mut cache = self.inodes.lock();
+        let Some(inode_cache) = cache.get_mut(&key) else {
             return 0;
         };
         let mut expected = page_index;
-        for (&idx, page) in inode_cache.pages.range(page_index..page_index + count as u64) {
+        for (&idx, page) in inode_cache.pages.range_mut(page_index..page_index + count as u64) {
             if idx != expected {
                 break; // gap: page `expected` is not cached — stop here
             }
@@ -513,7 +555,7 @@ impl PageCache {
                 break;
             }
             STAT_HITS.fetch_add(1, Ordering::Relaxed);
-            page.ref_count.fetch_add(1, Ordering::AcqRel);
+            page.pin_locked();
             let page_desc = pfn_to_page_mut(page.pfn);
             if !page_desc.is_null() {
                 unsafe {
@@ -539,16 +581,11 @@ impl PageCache {
             if let Some(page) = inode_cache.pages.get_mut(&page_index) {
                 // Same release discipline as put(): only a put that actually
                 // decremented may release an invalidated page's frame.
-                let decremented = page
-                    .ref_count
-                    .fetch_update(Ordering::AcqRel, Ordering::Acquire, |v| {
-                        v.checked_sub(1)
-                    })
-                    .is_ok();
+                let decremented = page.unpin_locked();
                 if decremented
-                    && page.ref_count.load(Ordering::Acquire) == 0
+                    && page.count_locked() == 0
                     && page.invalidated
-                    && !page.released.swap(true, Ordering::AcqRel)
+                    && page.take_released_locked()
                 {
                     let pfn = page.pfn;
                     inode_cache.pages.remove(&page_index);
@@ -577,18 +614,13 @@ impl PageCache {
                 // two stale puts (or a stale put after the real one) each
                 // released the SAME frame: the zone double-free stream
                 // (pfn 544551/2/5...) behind the surviving corruption.
-                let decremented = page
-                    .ref_count
-                    .fetch_update(Ordering::AcqRel, Ordering::Acquire, |v| {
-                        v.checked_sub(1)
-                    })
-                    .is_ok();
+                let decremented = page.unpin_locked();
                 // R7-C2: invalidate_inode left this page in place because a
                 // reader held a pin — now that the pin is gone, free it.
                 if decremented
-                    && page.ref_count.load(Ordering::Acquire) == 0
+                    && page.count_locked() == 0
                     && page.invalidated
-                    && !page.released.swap(true, Ordering::AcqRel)
+                    && page.take_released_locked()
                 {
                     let pfn = page.pfn;
                     inode_cache.pages.remove(&page_index);
@@ -617,16 +649,11 @@ impl PageCache {
         let mut cache = self.inodes.lock();
         if let Some(inode_cache) = cache.get_mut(&key) {
             if let Some(page) = inode_cache.pages.get_mut(&page_index) {
-                let decremented = page
-                    .ref_count
-                    .fetch_update(Ordering::AcqRel, Ordering::Acquire, |v| {
-                        v.checked_sub(1)
-                    })
-                    .is_ok();
+                let decremented = page.unpin_locked();
                 if decremented
-                    && page.ref_count.load(Ordering::Acquire) == 0
+                    && page.count_locked() == 0
                     && page.invalidated
-                    && !page.released.swap(true, Ordering::AcqRel)
+                    && page.take_released_locked()
                 {
                     let pfn = page.pfn;
                     inode_cache.pages.remove(&page_index);
@@ -657,10 +684,10 @@ impl PageCache {
     /// another mapping's frame). Returns false when the entry is gone
     /// entirely (no pin possible; the frame is no longer cache-owned).
     pub fn pin_by_key(&self, key: u64, page_index: u64) -> bool {
-        let cache = self.inodes.lock();
-        if let Some(inode_cache) = cache.get(&key) {
-            if let Some(page) = inode_cache.pages.get(&page_index) {
-                page.ref_count.fetch_add(1, Ordering::AcqRel);
+        let mut cache = self.inodes.lock();
+        if let Some(inode_cache) = cache.get_mut(&key) {
+            if let Some(page) = inode_cache.pages.get_mut(&page_index) {
+                page.pin_locked();
                 let page_desc = pfn_to_page_mut(page.pfn);
                 if !page_desc.is_null() {
                     unsafe {
@@ -831,18 +858,18 @@ impl PageCache {
             return 0;
         }
         let mut n = 0usize;
-        let cache = self.inodes.lock();
-        let Some(inode_cache) = cache.get(&key) else {
+        let mut cache = self.inodes.lock();
+        let Some(inode_cache) = cache.get_mut(&key) else {
             return 0;
         };
-        for (&idx, page) in inode_cache.pages.range(first_index..=last_index) {
+        for (&idx, page) in inode_cache.pages.range_mut(first_index..=last_index) {
             if n == out.len() {
                 break;
             }
             if page.invalidated || !page.dirty.load(Ordering::Acquire) {
                 continue;
             }
-            page.ref_count.fetch_add(1, Ordering::AcqRel);
+            page.pin_locked();
             out[n] = (idx, page.pfn as u64);
             n += 1;
         }
@@ -888,23 +915,18 @@ impl PageCache {
                 // coherent for every reader through the frame (POSIX
                 // deferred-writeback latitude).
                 let mut clear_dirty = false;
-                let decremented = page
-                    .ref_count
-                    .fetch_update(Ordering::AcqRel, Ordering::Acquire, |v| {
-                        v.checked_sub(1)
-                    })
-                    .is_ok();
+                let decremented = page.unpin_locked();
                 if decremented {
-                    let now = page.ref_count.load(Ordering::Acquire);
-                    clear_dirty = now == 0 && !page.invalidated && write_ok;
+                    clear_dirty =
+                        page.count_locked() == 0 && !page.invalidated && write_ok;
                 }
                 if clear_dirty {
                     page.dirty.store(false, Ordering::Release);
                 }
                 if decremented
-                    && page.ref_count.load(Ordering::Acquire) == 0
+                    && page.count_locked() == 0
                     && page.invalidated
-                    && !page.released.swap(true, Ordering::AcqRel)
+                    && page.take_released_locked()
                 {
                     let pfn = page.pfn;
                     inode_cache.pages.remove(&page_index);

@@ -384,6 +384,111 @@ impl Uart {
             }
         }
     }
+
+    /// Leg-54 item C (perf-report 8.10.24: the sampler's fmt/console block
+    /// is ~33% of launcher kernel time, and the sc357 OH boot emits 7.3MB
+    /// of serial — per-byte putc costs one LSR `inb` + one THR `outb` = 2
+    /// VM exits per byte under KVM). Batched TX: one bounded THRE wait +
+    /// ONE `rep outsb` string-IO per FIFO-sized burst (the 16550 TX FIFO
+    /// is 16 bytes with FCR enabled at init; THRE means the FIFO can take
+    /// a full burst) — 2 exits per 16 bytes instead of 2 per byte. The
+    /// stall latch discipline is the same shape as putc's: a burst that
+    /// cannot see THRE within UART_THRE_WAIT_TICKS latches the stall and
+    /// the REST of the batch is dropped (byte-dropping under a stalled
+    /// chardev is the documented putc contract).
+    pub fn puts_batch(&self, bytes: &[u8]) {
+        if bytes.is_empty() {
+            return;
+        }
+        // pstore-lite must still see every byte (plain stores, no IO).
+        for &b in bytes {
+            crate::dfx::pstore::sink(b);
+        }
+        #[cfg(feature = "riscv64")]
+        {
+            // MMIO stores under TCG: per-byte stays for now (the riscv
+            // fleet's console row is its own measurement).
+            unsafe {
+                let addr = get_uart_base();
+                for &b in bytes {
+                    asm!("sb t1, 0(a0)", in("a0") addr, in("t1") b, options(nostack, nomem));
+                }
+            }
+        }
+        #[cfg(feature = "x86_64")]
+        {
+            const FIFO_BURST: usize = 16;
+            let probe = crate::dfx::syscost::on();
+            let t0 = if probe { crate::arch::cpu::read_counter() } else { 0 };
+            let if0 = probe && !crate::arch::cpu::get_interrupts_state();
+            if if0 {
+                crate::dfx::syscost::zone_uart_push();
+            }
+            let mut polls: u64 = 0;
+            let mut consumed: usize = 0;
+            'batch: for chunk in bytes.chunks(FIFO_BURST) {
+                let drop_rest = |consumed: usize| {
+                    TX_DROPPED.fetch_add(
+                        (bytes.len().saturating_sub(consumed)) as u64,
+                        Ordering::Relaxed,
+                    );
+                };
+                if TX_STALLED.load(Ordering::Acquire) {
+                    if TX_SINCE_PROBE.fetch_add(1, Ordering::Relaxed) < 32 {
+                        drop_rest(consumed);
+                        break 'batch;
+                    }
+                    TX_SINCE_PROBE.store(0, Ordering::Relaxed);
+                    polls += 1;
+                    if read_reg(COM1_BASE, UART_LSR) & LSR_THRE != 0 {
+                        TX_STALLED.store(false, Ordering::Release);
+                        TX_RECOVERY_PENDING.store(true, Ordering::Release);
+                    } else {
+                        drop_rest(consumed);
+                        break 'batch;
+                    }
+                }
+                // Bounded THRE wait (same wall-clock budget as putc).
+                let start = crate::arch::cpu::read_time();
+                polls += 1;
+                while read_reg(COM1_BASE, UART_LSR) & LSR_THRE == 0 {
+                    polls += 1;
+                    if crate::arch::cpu::read_time().saturating_sub(start)
+                        >= UART_THRE_WAIT_TICKS
+                    {
+                        TX_STALLED.store(true, Ordering::Release);
+                        TX_SINCE_PROBE.store(0, Ordering::Relaxed);
+                        drop_rest(consumed);
+                        break 'batch;
+                    }
+                    core::hint::spin_loop();
+                }
+                // SAFETY: COM1 THR is the standard 8250 data port; the
+                // string IO writes exactly chunk.len() bytes from chunk.
+                // DF is cleared per the ABI before `rep` (belt: `cld`).
+                unsafe {
+                    core::arch::asm!(
+                        "cld",
+                        "rep outsb",
+                        in("dx") COM1_BASE,
+                        in("rcx") chunk.len() as u64,
+                        in("rsi") chunk.as_ptr(),
+                        lateout("rcx") _,
+                        lateout("rsi") _,
+                        options(nostack)
+                    );
+                }
+                consumed += chunk.len();
+            }
+            if if0 {
+                crate::dfx::syscost::zone_uart_pop();
+            }
+            if probe {
+                let dt = crate::arch::cpu::read_counter().saturating_sub(t0);
+                crate::dfx::syscost::uart_putc_note(dt, polls, if0);
+            }
+        }
+    }
 }
 
 /// Global UART console (protected by spinlock, SMP safe)
@@ -788,12 +893,10 @@ pub fn putchar_no_lock(c: u8) {
     uart.putc(c);
 }
 
-/// Interrupt-safe string output (no lock)
+/// Interrupt-safe string output (no lock) — batched TX (leg-54 item C).
 pub fn puts_no_lock(s: &str) {
     let uart = Uart::new();
-    for b in s.bytes() {
-        uart.putc(b);
-    }
+    uart.puts_batch(s.as_bytes());
 }
 
 // ============================================================================

@@ -369,15 +369,26 @@ fn emit_to_console(text: &[u8]) {
         CONSOLE_EMIT_SKIPPED.fetch_add(1, Ordering::Relaxed);
         return; // record is in the ring buffer; console line skipped
     }
-    let mut emitted = 0usize; // syscost probe
+    // Leg-54 item C: one batched TX pass per record (CR expansion into a
+    // stack buffer, then Uart::puts_batch — one THRE poll + one string-IO
+    // per 16 bytes instead of two exits per byte).
+    let mut buf = [0u8; RECORD_TEXT_SIZE * 2];
+    let mut n = 0usize;
     for &b in text {
         if b == b'\n' {
-            crate::console::putchar_no_lock(b'\r');
-            emitted += 1;
+            if n < buf.len() {
+                buf[n] = b'\r';
+                n += 1;
+            }
         }
-        crate::console::putchar_no_lock(b);
-        emitted += 1;
+        if n < buf.len() {
+            buf[n] = b;
+            n += 1;
+        }
     }
+    let uart = crate::console::Uart::new();
+    uart.puts_batch(&buf[..n]);
+    let emitted = n; // syscost probe
     crate::dfx::syscost::note_printk_con(emitted); // syscost probe
     CONSOLE_EMIT_LOCK.store(false, Ordering::Release);
 }

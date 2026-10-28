@@ -94,11 +94,17 @@ echo "updater filler (keeps system at vdb)" > "$OUT/updater/updater_ready"
 
 echo "[5/5] packing images"
 python3 "$HERE/mkcpio.py" "$RD" "$IMAGES/ramdisk.img"
-mke2fs -q -t ext4 -b 4096 -L ohlite-system -d "$SYS" \
+# Rux ext4 requirements (the repo-wide image convention): 4K blocks,
+# no metadata_csum. e2fsprogs 1.47 additionally defaults
+# metadata_csum_seed (incompat 0x2000) and orphan_file — the kernel
+# refuses both at mount with ENODEV ("unsupported incompat features
+# 0x2000"), which stalls the second-stage boot at "no /usr".
+OFLAG='-O ^metadata_csum,^metadata_csum_seed,^orphan_file'
+mke2fs -q -t ext4 -b 4096 $OFLAG -L ohlite-system -d "$SYS" \
     "$IMAGES/system.img" 32768
-mke2fs -q -t ext4 -b 4096 -L ohlite-vendor -d "$OUT/vendor" \
+mke2fs -q -t ext4 -b 4096 $OFLAG -L ohlite-vendor -d "$OUT/vendor" \
     "$IMAGES/vendor.img" 4096
-mke2fs -q -t ext4 -b 4096 -L ohlite-updater -d "$OUT/updater" \
+mke2fs -q -t ext4 -b 4096 $OFLAG -L ohlite-updater -d "$OUT/updater" \
     "$IMAGES/updater.img" 2048
 
 ls -la "$IMAGES"

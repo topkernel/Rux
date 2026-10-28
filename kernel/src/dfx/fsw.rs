@@ -70,9 +70,9 @@ pub static PUB_SCOPED_RECORDS: AtomicU64 = AtomicU64::new(0);
 pub static PUB_CSTR: AtomicU64 = AtomicU64::new(0);
 /// High-water producer-paid drains (publication_defer past PUB_HIGH_WATER).
 pub static PUB_HIWAT: AtomicU64 = AtomicU64::new(0);
-/// Leg 53: mkdirs that returned WITHOUT an inline scoped drain (the
-/// write-back shape); the fs mechanism probe row for the removed flush.
-static PUB_LAZY: AtomicU64 = AtomicU64::new(0);
+/// Leg-55: mkdirs counted at the scoped-flush point (the lazy-variant
+/// follow-up reads this against the phase mix).
+pub static PUB_LAZY: AtomicU64 = AtomicU64::new(0);
 /// Maximum pending-publication queue length observed.
 pub static PUB_QMAX: AtomicU64 = AtomicU64::new(0);
 

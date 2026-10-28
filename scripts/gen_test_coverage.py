@@ -175,7 +175,7 @@ SUBSYSTEM_NOTES = {
     "net": "loopback/virtio-net: unit tests + nettest probe (ABI-correct per-arch rt_sigaction check after the 2026-10-28 adjudication), slirp_test needs user networking",
     "dfx": "syscost/trace/watchdog: dfx-smoke, tracefs-smoke, kallsyms-smoke, dfx-x86 probe",
     "arch-trap": "trap paths: decode/cfi probes (cfi wired on riscv), oops-smoke; KERNPANIC printer",
-    "x86-port": "x86_64 boot: pstore-x86, dfx-x86, binder4-x86 legs (need PLATFORM=x86_64 bzImage; monkey-x86 also needs work/ubuntu-x86.img)",
+    "x86-port": "x86_64: pstore-x86, dfx-x86, binder4-x86, faultlat/2/3, tgsig, monostat, decode, subreap, exitwalk, watchdog, taskcomm, selinux-mmap, loader-vma, mmapfix, heapwatch-x86, ohlite-x86 legs (bzImage via PLATFORM=x86_64 make build; monkey-x86 also needs work/ubuntu-x86.img; several drivers need -mem 2G: the x86 heap starts at the 1GiB mark)",
     "pstore": "pstore/ramoops: pstore-smoke (riscv), pstore-x86-smoke (x86)",
     "process": "fork/exec/wait/reaper: unit tests + execloop/orphan_storm/subreap churns",
     "signal": "unit tests + tgsig probe",
@@ -187,7 +187,7 @@ SUBSYSTEM_NOTES = {
     "drivers-input": "input: xinput_probe",
     "module": "module loader: modchurn (needs module build env)",
     "perf": "perf subsystem: perf_probe; run/perf-gate.sh tier legs",
-    "oh": "OpenHarmony boots: oh2_probe + oh-* scripts (special images)",
+    "oh": "oh2-probe wired (riscv; currently FAILs 15/68 checks on stale expectations — memfd NULL-name EFAULT and the access-token registry are kernel-correct per the OH feature work; OH lane to adjudicate); ohlite-x86 wired (blocked on the MS_MOVE relative-source kernel gap)",
     "boot": "initrd/boot path: initrd suite (subdir)",
     "lib": "lib-level units only",
     "misc": "uncategorized",
@@ -285,6 +285,24 @@ WRAPPER_ALIAS = {
     "perf_probe": "perf-smoke.sh",
     "binder4_probe": "binder4-x86-probe.sh",
     "pbench": "matrix:perf-gate (via run/perf-gate.sh tier 2)",
+    # x86-driver family: wrappers carry the -x86- name so the suite
+    # routes them to the x86_64 leg
+    "faultlat": "faultlat-x86-probe.sh",
+    "faultlat2": "faultlat2-x86-probe.sh",
+    "faultlat3": "faultlat3-x86-probe.sh",
+    "tgsig": "tgsig-x86-probe.sh",
+    "monostat": "monostat-x86-probe.sh",
+    "subreap_churn": "subreap-x86-probe.sh",
+    "exitwalk_churn": "exitwalk-x86-probe.sh",
+    "watchdog_probe": "watchdog-x86-probe.sh",
+    "taskcomm_probe": "taskcomm-x86-probe.sh",
+    "selinux_mmap": "selinux-mmap-x86-probe.sh",
+    "loader_vma": "loader-vma-x86-probe.sh",
+    "mmapfix": "mmapfix-x86-probe.sh",
+    "decode_probe": "decode-x86-probe.sh",
+    "sleep_probe": "sleep-x86-probe.sh",
+    "oh2_probe": "oh2-probe.sh",
+    "brksegv_churn": "brksegv-x86-probe.sh",
 }
 
 
@@ -551,12 +569,14 @@ def main():
     o.append("| suite | entry point | wired | note |")
     o.append("|---|---|---|---|")
     subdirs = [
-        ("test/cowrace", "cow_race.c (no runner)", "manual",
-         "COW fork race; needs a boot driver wrapper"),
-        ("test/heapwatch", "run-boot.sh", "manual",
-         "heap watch boot; riscv kernel compile was broken at b3586f69 "
-         "(dispatch.rs i64/u64 cfg(x86_64) cast), x86 initrd variant "
-         "boots the prebuilt cpio"),
+        ("test/cowrace", "cowrace-probe.sh", "suite",
+         "wired: musl pthread build, tiny-image init boot, asserts "
+         "COWRACE-PASS (the fake-OOM COW race repro)"),
+        ("test/heapwatch", "run-boot.sh", "suite",
+         "wired on x86 (heapwatch-x86-smoke.sh: prebuilt initrd cpio, "
+         "HEAPWATCH-START + beats, no damage report); riscv64 path "
+         "needs a musl recipe in mkinitrd-hw.py (plain static glibc "
+         "SIGILLs via vector ifuncs)"),
         ("test/hotplug", "run.py", "manual",
          "CPU/PCI hotplug uevent probe; build-img.sh needs the shared "
          "gate rootfs at /home/william/rux-gate/ubuntu/rootfs (absent)"),
@@ -566,8 +586,9 @@ def main():
          "a build artifact: gcc-15 default march emits zcb the boot CPU "
          "lacks, and without -fno-builtin gcc folds the memset shim "
          "into infinite recursion, walking sp to the stack floor)"),
-        ("test/ohlite", "mkohlite.sh", "manual",
-         "OpenHarmony lite initrd image build (OH lane flows)"),
+        ("test/ohlite", "mkohlite.sh + run-oh.sh", "suite",
+         "wired on x86 (ohlite-x86-smoke.sh: builds the 4-image set, "
+         "boots via run-oh.sh, asserts the 60s BOOT GATE PASS)"),
         ("test/stress", "monkey.py (suite monkey legs)", "suite",
          "randomised command churn; riscv leg runs, x86 needs "
          "work/ubuntu-x86.img"),

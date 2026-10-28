@@ -1836,7 +1836,88 @@ pub struct Publication {
     pub cookie: u64,
 }
 
-static PENDING_PUBLICATIONS: Spinlock<Vec<Publication>> = Spinlock::new(Vec::new());
+static PENDING_PUBLICATIONS: Spinlock<PendingPublications> =
+    Spinlock::new(PendingPublications::new());
+
+/// Leg-54 fix (the e3c1ec35 displacement, pa93j/pa95j evidence): the
+/// pending-publication queue with a CONSTRAINED-BLOCK INDEX. The old
+/// `Vec<Publication>` made `publication_constrained` — which runs at
+/// EVERY out-of-band buffer write (sync_dirty_buffer, eviction victims,
+/// journal commit write-through) — a linear scan of the whole queue and
+/// each record's post list: with the post-mkdir flush deleted the queue
+/// legitimately holds thousands of records during provisioning churn,
+/// and every unlink's buffer writes paid O(queue x post-len) — p6_unlink
+/// 10.2-10.8ms vs the 77-119us class. The index maps (device, block) ->
+/// number of pending records constraining that block (entry == block or
+/// post contains block, H1/H2's exact sets); membership checks are
+/// O(log n). Mutations maintain it; wholesale take/requeue (the drain
+/// snapshot pattern) rebuilds it once per requeue — drains are per
+/// durability point, never per write.
+#[allow(dead_code)]
+pub struct PendingPublications {
+    list: Vec<Publication>,
+    index: alloc::collections::BTreeMap<((u32, u32), u64), u32>,
+}
+
+impl PendingPublications {
+    pub const fn new() -> Self {
+        PendingPublications {
+            list: Vec::new(),
+            index: alloc::collections::BTreeMap::new(),
+        }
+    }
+    fn index_record(index: &mut alloc::collections::BTreeMap<((u32, u32), u64), u32>, r: &Publication) {
+        if let Some(e) = r.entry {
+            *index.entry((r.device, e)).or_insert(0) += 1;
+        }
+        for &b in &r.post {
+            *index.entry((r.device, b)).or_insert(0) += 1;
+        }
+    }
+    pub fn push(&mut self, r: Publication) {
+        Self::index_record(&mut self.index, &r);
+        self.list.push(r);
+    }
+    /// Post-block capture on an existing record (the delete-side window).
+    pub fn post_capture(&mut self, capture_id: u64, blocknr: u64) {
+        for p in self.list.iter_mut().rev() {
+            if p.id == capture_id {
+                if !p.post.contains(&blocknr) {
+                    p.post.push(blocknr);
+                    *self.index.entry((p.device, blocknr)).or_insert(0) += 1;
+                }
+                return;
+            }
+        }
+    }
+    /// Wholesale take (the drain-snapshot pattern): empties both halves.
+    pub fn take_list(&mut self) -> Vec<Publication> {
+        self.index.clear();
+        core::mem::take(&mut self.list)
+    }
+    /// Wholesale replace (the requeue pattern): rebuilds the index once.
+    pub fn set_list(&mut self, v: Vec<Publication>) {
+        self.index.clear();
+        for r in &v {
+            Self::index_record(&mut self.index, r);
+        }
+        self.list = v;
+    }
+    pub fn is_empty(&self) -> bool {
+        self.list.is_empty()
+    }
+    pub fn len(&self) -> usize {
+        self.list.len()
+    }
+    pub fn iter(&self) -> core::slice::Iter<'_, Publication> {
+        self.list.iter()
+    }
+    /// H1/H2 membership: is this (device, block) any pending record's
+    /// entry or post block?
+    pub fn constrained(&self, mj: u32, mi: u32, blocknr: u64) -> bool {
+        self.index.contains_key(&((mj, mi), blocknr))
+    }
+}
 static NEXT_PUBLICATION_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Queue-length high-water mark: once crossed, the NEXT publication_defer
@@ -1987,14 +2068,7 @@ fn publication_capture_note_dirty(
         }
         CAPTURE_POST => {
             let mut pend = PENDING_PUBLICATIONS.lock();
-            for p in pend.iter_mut().rev() {
-                if p.id == capture_id {
-                    if !p.post.contains(&blocknr) {
-                        p.post.push(blocknr);
-                    }
-                    return;
-                }
-            }
+            pend.post_capture(capture_id, blocknr);
             // The record was flushed while our capture window was open
             // (another CPU hit a durability point). Append a post-only
             // record at the END of the queue — still after the entry
@@ -2015,11 +2089,7 @@ fn publication_capture_note_dirty(
 /// Is this block a pending `entry` or `post` block (order-constrained,
 /// must not be persisted out of band)?
 fn publication_constrained(mj: u32, mi: u32, blocknr: u64) -> bool {
-    let pend = PENDING_PUBLICATIONS.lock();
-    pend.iter().any(|p| {
-        p.device == (mj, mi)
-            && (p.entry == Some(blocknr) || p.post.contains(&blocknr))
-    })
+    PENDING_PUBLICATIONS.lock().constrained(mj, mi, blocknr)
 }
 
 // ============================================================================
@@ -2205,7 +2275,7 @@ impl WritePlan {
 pub fn flush_publications_scoped() -> Result<(), i32> {
     let cookie = publication_cookie();
     loop {
-        let snapshot = core::mem::take(&mut *PENDING_PUBLICATIONS.lock());
+        let mut snapshot = PENDING_PUBLICATIONS.lock().take_list();
         let mine: Vec<usize> = snapshot
             .iter()
             .enumerate()
@@ -2217,10 +2287,9 @@ pub fn flush_publications_scoped() -> Result<(), i32> {
             // appended during our scan; snapshot is older — prepend).
             if !snapshot.is_empty() {
                 let mut pend = PENDING_PUBLICATIONS.lock();
-                let rest = core::mem::take(&mut *pend);
-                let mut merged = snapshot;
-                merged.extend(rest);
-                *pend = merged;
+                let rest = pend.take_list();
+                snapshot.extend(rest);
+                pend.set_list(snapshot);
             }
             return Ok(());
         }
@@ -2285,10 +2354,9 @@ pub fn flush_publications_scoped() -> Result<(), i32> {
         }
         {
             let mut pend = PENDING_PUBLICATIONS.lock();
-            let rest = core::mem::take(&mut *pend);
-            let mut merged = foreign;
-            merged.extend(rest);
-            *pend = merged;
+            let rest = pend.take_list();
+            foreign.extend(rest);
+            pend.set_list(foreign);
         }
         if first_err != 0 {
             return Err(first_err);
@@ -2305,7 +2373,7 @@ pub fn flush_publications_scoped() -> Result<(), i32> {
 /// its entry written first (with that entry's own H1 set). The block
 /// itself is NOT written here. Foreign records stay pending.
 pub fn flush_publication_constraints(mj: u32, mi: u32, blocknr: u64) -> Result<(), i32> {
-    let snapshot = core::mem::take(&mut *PENDING_PUBLICATIONS.lock());
+    let mut snapshot = PENDING_PUBLICATIONS.lock().take_list();
     let dev = (mj, mi);
     // Fast path: nothing pending even references this block.
     let relevant = snapshot.iter().any(|p| {
@@ -2313,10 +2381,9 @@ pub fn flush_publication_constraints(mj: u32, mi: u32, blocknr: u64) -> Result<(
     });
     if !relevant {
         let mut pend = PENDING_PUBLICATIONS.lock();
-        let rest = core::mem::take(&mut *pend);
-        let mut merged = snapshot;
-        merged.extend(rest);
-        *pend = merged;
+        let rest = pend.take_list();
+        snapshot.extend(rest);
+        pend.set_list(snapshot);
         return Ok(());
     }
     crate::dfx::fsw::note_pub_cstr();
@@ -2360,10 +2427,9 @@ pub fn flush_publication_constraints(mj: u32, mi: u32, blocknr: u64) -> Result<(
     // write; H2 for posts is handled by pulling entries above).
     {
         let mut pend = PENDING_PUBLICATIONS.lock();
-        let rest = core::mem::take(&mut *pend);
-        let mut merged = snapshot;
-        merged.extend(rest);
-        *pend = merged;
+        let rest = pend.take_list();
+        snapshot.extend(rest);
+        pend.set_list(snapshot);
     }
     if first_err != 0 {
         Err(first_err)
@@ -2389,7 +2455,7 @@ pub fn flush_publications() -> Result<(), i32> {
 pub fn flush_publications_bounded(max_batches: u32) -> Result<(), i32> {
     let mut batches = 0u32;
     loop {
-        let batch = core::mem::take(&mut *PENDING_PUBLICATIONS.lock());
+        let mut batch = PENDING_PUBLICATIONS.lock().take_list();
         if batch.is_empty() {
             return Ok(());
         }
@@ -2421,10 +2487,9 @@ pub fn flush_publications_bounded(max_batches: u32) -> Result<(), i32> {
         if first_err != 0 {
             // Requeue what we did not get to; the error is reported.
             let mut pend = PENDING_PUBLICATIONS.lock();
-            let drained = core::mem::take(&mut *pend);
-            let mut merged = batch;
-            merged.extend(drained);
-            *pend = merged;
+            let drained = pend.take_list();
+            batch.extend(drained);
+            pend.set_list(batch);
             return Err(first_err);
         }
         batches += 1;
