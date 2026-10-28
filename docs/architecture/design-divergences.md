@@ -189,9 +189,11 @@ behavior-preserving fallbacks (both old fallback shapes reduce to the
 same event bits). First conversions: the §1 incident family
 (epoll/eventfd/timerfd/signalfd/pipe/inotify).
 
-**Known cost.** Opportunistic migration — the only struct-literal
-tables left are drm x2 (GNOME-lane files, convert when that lane
-rests); everything else builds (D-4 procfile precedent). The refactor
+**Known cost.** Migration COMPLETE: the last two struct-literal
+tables (drm x2 — DRM_OPS/PRIME_OPS, GNOME-lane signed off) converted
+in the refactor lane's final slice; every FileOps table in the tree is
+now a capability declaration (D-4 procfile precedent for the
+opportunistic doctrine that got here). The refactor
 lane converted: slice 3, the pseudo-filesystem cluster (devfs x7 incl.
 the null/zero/full/random char devices, pty x2, procfs, sysfs,
 debugfs, selinuxfs, rootfs, memfd, fifo, char_dev uart, cgroup, vfs
