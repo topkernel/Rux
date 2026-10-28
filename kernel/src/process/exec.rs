@@ -131,6 +131,22 @@ pub(crate) fn do_execve_elf(
     };
     use crate::mm::alloc_and_map_user_table as alloc_and_map_to_user_table;
 
+    // EXECCOST (dfx=execcost): image-side stage stamps, raw read_time()
+    // ticks. Paired with the ladder line (EXECCOST) from do_execve — same
+    // switch, its own rate-limit counter (approximate lockstep; both lines
+    // carry pid+path for pairing).
+    static EXECCOST2_N: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+    let ec2 = crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::ExecCost);
+    let ec2_n = if ec2 {
+        EXECCOST2_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed)
+    } else {
+        u64::MAX
+    };
+    let ec2_on = ec2 && (ec2_n < 64 || ec2_n % 512 == 0);
+    let ec2_t0: u64 = if ec2_on { crate::arch::cpu::read_time() } else { 0 };
+    let (mut ec2_as, mut ec2_map, mut ec2_stack, mut ec2_copy, mut ec2_tig, mut ec2_it, mut ec2_fill, mut ec2_vma) =
+        (0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64);
+
     // Capture the trap frame ONCE, before any blocking I/O below — but
     // derive it from THE TASK, never from the per-CPU current_pt_regs()
     // slot. That slot can be STALE for the syscall frame (observed:
@@ -302,6 +318,7 @@ pub(crate) fn do_execve_elf(
         }
     }
     let _guard = UserAddrSpaceGuard(user_ppn);
+    if ec2_on { ec2_as = crate::arch::cpu::read_time(); }
 
     // Start with RW (no X) — permissions will be tightened per-segment below.
     let flags = PageTableEntry::V | PageTableEntry::U |
@@ -317,6 +334,7 @@ pub(crate) fn do_execve_elf(
     let _image_phys_base = unsafe {
         alloc_and_map_to_user_table(user_ppn, image_start, total_size, flags)
     }.ok_or(crate::errno::Errno::OutOfMemory.as_neg_i32())?;
+    if ec2_on { ec2_map = crate::arch::cpu::read_time(); }
 
     // Initial stack at the top of user space (one guard page below
     // USER_END). Mapped RW here; the VMA below marks it GROWSDOWN.
@@ -377,6 +395,7 @@ pub(crate) fn do_execve_elf(
     }
 
     // Load each segment
+    if ec2_on { ec2_stack = crate::arch::cpu::read_time(); }
     for i in 0..phdr_count {
         // SAFETY: Same as above — i < phdr_count and program_data is a valid ELF slice.
         let phdr = unsafe { ehdr.get_program_header(program_data, i) }
@@ -426,6 +445,7 @@ pub(crate) fn do_execve_elf(
 
     // Tighten PTE permissions per-segment based on ELF p_flags.
     // Initial mapping was RW (no X); now set exact R/W/X from program headers.
+    if ec2_on { ec2_copy = crate::arch::cpu::read_time(); }
     for i in 0..phdr_count {
         let phdr = unsafe { ehdr.get_program_header(program_data, i) }
             .ok_or(crate::errno::Errno::FunctionNotImplemented.as_neg_i32())?;
@@ -575,6 +595,7 @@ pub(crate) fn do_execve_elf(
     }
 
     // Load interpreter (dynamic linker) if present
+    if ec2_on { ec2_tig = crate::arch::cpu::read_time(); }
     let (actual_entry, at_base) = if let Some(interp_bytes) = interp_data {        let interp_base: u64 = INTERP_BASE as u64;  // mmap_start - 16MB
 
         // SAFETY: interp_bytes is a validated ELF interpreter file loaded earlier.
@@ -751,6 +772,7 @@ pub(crate) fn do_execve_elf(
     };
 
     // Set up stack (Linux reserves 256 bytes of slop below the raw top).
+    if ec2_on { ec2_it = crate::arch::cpu::read_time(); }
     let stack_top = stack_top - 256;
     let phys_stack_top = stack_phys_base + (initial_stack_size as usize - 256);
 
@@ -1032,6 +1054,7 @@ pub(crate) fn do_execve_elf(
 
     // Create new address space structure
     // SAFETY: user_ppn is a freshly allocated page table root with no prior users.
+    if ec2_on { ec2_fill = crate::arch::cpu::read_time(); }
     let new_addr_space = unsafe { crate::mm::MmStruct::new_user(user_ppn) };
 
     // Reset the heap to the NEW image: exec used to leave the task's brk
@@ -1289,6 +1312,7 @@ pub(crate) fn do_execve_elf(
     // Update process
     // SAFETY: task_ptr is the current task, valid throughout this execve operation.
     // We are replacing the task's address space and trap frame for the new program.
+    if ec2_on { ec2_vma = crate::arch::cpu::read_time(); }
     unsafe {
         // Capture the new mm's ASID before the Arc takes ownership.
         let new_asid = new_addr_space.asid();
@@ -1423,6 +1447,24 @@ pub(crate) fn do_execve_elf(
     }
 
     // Success — prevent RAII guard from freeing page tables
+    if ec2_on {
+        let t = crate::arch::cpu::read_time();
+        crate::pr_info!(
+            "EXECCOST2 n={} pid={} as={} map={} stk={} cpy={} tig={} itr={} fill={} vma={} sw={} tot={}",
+            ec2_n,
+            crate::process::current_pid(),
+            ec2_as - ec2_t0,
+            ec2_map - ec2_as,
+            ec2_stack - ec2_map,
+            ec2_copy - ec2_stack,
+            ec2_tig - ec2_copy,
+            ec2_it - ec2_tig,
+            ec2_fill - ec2_it,
+            ec2_vma - ec2_fill,
+            t - ec2_vma,
+            t - ec2_t0
+        );
+    }
     core::mem::forget(_guard);
     Ok(())
 }

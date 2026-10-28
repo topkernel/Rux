@@ -87,6 +87,7 @@ macro_rules! dfx_switch_table {
             PoolCensus => "poolcensus",
             SlowTask => "slowtask",
             ExtHunt => "exthunt",
+            ExecCost => "execcost",
         }
     };
 }
@@ -390,9 +391,17 @@ pub enum DfxSwitch {
     /// lost-index-block for the ftest04 all-zeros readback family.
     /// OFF by default.
     ExtHunt,
+    /// dfx=execcost (abi-review lane): per-stage execve cost breakdown
+    /// in raw clock ticks (read_time) — one ladder line (path lookup /
+    /// file read / interpreter read / creds / de_thread) and one image
+    /// line (address-space create / image map / stack / segment copy /
+    /// PTE tighten / VMA build / switch) per exec, rate-limited after
+    /// the first 64 execs. For decomposing the p4_fork_exec reference
+    /// gap; prints only when explicitly enabled. OFF by default.
+    ExecCost,
 }
 
-const SWITCH_COUNT: usize = 43;
+const SWITCH_COUNT: usize = 44;
 
 static SWITCHES: [AtomicBool; SWITCH_COUNT] = [const { AtomicBool::new(false) }; SWITCH_COUNT];
 
@@ -476,6 +485,7 @@ impl DfxSwitch {
             DfxSwitch::SlowTask => 40,
             DfxSwitch::EpollScan => 41,
             DfxSwitch::ExtHunt => 42,
+            DfxSwitch::ExecCost => 43,
         }
     }
 
