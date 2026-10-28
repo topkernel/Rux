@@ -65,8 +65,11 @@ pub const XATTR_REPLACE: i32 = 2;
 /// Validate an xattr name and check create permission for its namespace.
 /// Returns Ok(()) or a negative errno.
 fn check_name(name: &[u8]) -> Result<(), i32> {
+    // Linux xattr name length check returns ERANGE — LTP setxattr01 cases
+    // 2 (over XATTR_NAME_MAX) and 7 (zero-length key) both expect ERANGE,
+    // not EINVAL.
     if name.is_empty() || name.len() > XATTR_NAME_MAX {
-        return Err(-(errno::constants::EINVAL as i32));
+        return Err(-(errno::constants::ERANGE as i32));
     }
     let dot = match name.iter().position(|&b| b == b'.') {
         Some(d) => d,
@@ -118,6 +121,32 @@ pub fn set(inode: &Inode, name: &[u8], value: &[u8], flags: i32) -> Result<(), i
     }
     check_name(name)?;
     may_set(name)?;
+
+    // xattr on a non-regular, non-dir inode (fifo / chr / blk / sock / symlink)
+    // is EOPNOTSUPP per Linux fs/xattr.c simple_setxattr paths. LTP
+    // setxattr02 enumerates these and expects EOPNOTSUPP.
+    {
+        let mode = inode.mode.bits();
+        const S_IFREG: u32 = 0o0100000;
+        const S_IFDIR: u32 = 0o0040000;
+        const S_IFMT: u32  = 0o0170000;
+        let kind = mode & S_IFMT;
+        if kind != S_IFREG && kind != S_IFDIR {
+            return Err(-EOPNOTSUPP);
+        }
+    }
+
+    // Immutable / append-only files (chattr +i, +a). Linux refuses xattr
+    // mutation on these (capability CAP_LINUX_IMMUTABLE otherwise). LTP
+    // setxattr03 sets both bits via chattr and expects EPERM.
+    {
+        let ioc = inode.ioc_flags.load(core::sync::atomic::Ordering::Relaxed);
+        const FS_IMMUTABLE_FL: u32 = 0x0000_0010;
+        const FS_APPEND_FL: u32 = 0x0000_0020;
+        if ioc & (FS_IMMUTABLE_FL | FS_APPEND_FL) != 0 {
+            return Err(-(errno::constants::EPERM as i32));
+        }
+    }
 
     // user.* requires write permission on the target (Linux
     // xattr_permission MAY_WRITE gate for the user namespace).

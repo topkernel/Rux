@@ -44,10 +44,14 @@ pub fn generic_permission(
 
     let mode = inode_mode as u32;
 
-    if cred.euid == inode_uid {
+    // Linux's generic_permission compares against the FILESYSTEM ids
+    // (current_fsuid/current_fsgid), not euid/egid — setfsuid/setfsgid
+    // change exactly these (LTP setfsuid04: fsuid to nobody then open a
+    // 0644 root file O_RDWR must EACCES).
+    if cred.fsuid == inode_uid {
         // Owner permission bits (bits 8-6)
         ((mode >> 6) & 0o7) & mask == mask
-    } else if cred.in_group(inode_gid) {
+    } else if cred.fsgid == inode_gid || cred.groups.iter().any(|&g| g == inode_gid) {
         // Group permission bits (bits 5-3) — checks egid + supplementary groups
         ((mode >> 3) & 0o7) & mask == mask
     } else {

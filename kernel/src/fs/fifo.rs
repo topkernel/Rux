@@ -245,12 +245,12 @@ fn fifo_file_close(file: &File) -> i32 {
     0
 }
 
-/// FIFO file operations: pipe data path + FIFO-aware close.
-pub static FIFO_OPS: FileOps = FileOps {
-    read: Some(fifo_file_read),
-    write: Some(fifo_file_write),
-    lseek: None, // unseekable (ESPIPE via the default in File::lseek)
-    close: Some(fifo_file_close),
-    poll: Some(fifo_file_poll),
-    read_at: None,
-};
+/// FIFO file operations: pipe data path + FIFO-aware close. Unseekable
+/// by declared absence — lseek takes the central ESPIPE default in
+/// File::lseek.
+pub static FIFO_OPS: FileOps = FileOps::builder()
+    .read(fifo_file_read)
+    .write(fifo_file_write)
+    .close(fifo_file_close)
+    .poll(fifo_file_poll)
+    .build();

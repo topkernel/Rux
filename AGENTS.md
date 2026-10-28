@@ -166,6 +166,11 @@ concurrency without waiting for instructions. The user only ever says
 - Long scans run detached (`setsid`) so tool timeouts don't kill them.
 - Host memory is often near capacity: if QEMU fails to start, wait and
   retry instead of piling on.
+- **The main-repo root stays clean (user rule, violated repeatedly): no
+  scratch scripts, drivers, logs, or images there — not even gitignored
+  ones. Boot drivers and temp scripts live in YOUR worktree's `run/`
+  directory. If a script must be shared, it goes in `test/` or `run/`
+  with a committed purpose.**
 
 **Known-flaky vs real regressions:** when a full LTP scan shows new
 failures, rerun those cases in isolation (2x) before treating them as

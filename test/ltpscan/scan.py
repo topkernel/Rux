@@ -85,6 +85,10 @@ def run_chunk(image, kernel, tests, qemu_timeout, smp, mem, log_path):
     with open(log_path, "wb") as log:
         proc = subprocess.Popen(cmd, stdout=log, stderr=subprocess.STDOUT)
         deadline = time.time() + qemu_timeout
+        boot_deadline = time.time() + 240   # boot+banner must appear in 4 min
+        last_res_count = -1
+        last_progress = time.time()
+        STALL_LIMIT = 420                   # 7 min without a new RES line = wedge
         while time.time() < deadline and proc.poll() is None:
             time.sleep(3)
             try:
@@ -94,10 +98,37 @@ def run_chunk(image, kernel, tests, qemu_timeout, smp, mem, log_path):
                         or b"kernel panic" in data:
                     time.sleep(2)  # let the last serial bytes drain
                     break
+                # Stall detector: serial may stay "alive" (PREEMPT-LEAK /
+                # hung-task spam keeps growing the log) while the runner
+                # makes no progress. No new RES| line for 7 minutes — or
+                # no banner within 4 minutes of launch — means the boot is
+                # wedged; a fresh boot recovers it.
+                res_count = data.count(b"\nRES|")
+                if b"SCAN_BEGIN" in data or b"\nRES|" in data:
+                    boot_deadline = None
+                if res_count != last_res_count:
+                    last_res_count = res_count
+                    last_progress = time.time()
+                if boot_deadline is not None and time.time() > boot_deadline:
+                    print("[scan] boot stall: no runner banner in 240s", flush=True)
+                    time.sleep(2)
+                    break
+                if time.time() - last_progress > STALL_LIMIT:
+                    print(f"[scan] RES stall: {STALL_LIMIT}s without progress",
+                          flush=True)
+                    time.sleep(2)
+                    break
                 # Kernel spinlock watchdog: repeated DEADLOCK lines mean the
                 # kernel is wedged — bail out now instead of burning the
                 # whole chunk budget.
                 if data.count(b"DEADLOCK: spinlock stuck") >= 3:
+                    time.sleep(2)
+                    break
+                # Hung-task detector storm: tasks blocked >120s with no RES
+                # progress (observed: heap-exhaustion SIGKILL leaves the
+                # sweep runner stuck in waitpid forever; retrying the tail
+                # in a fresh boot recovers everything after the culprit).
+                if data.count(b"blocked for more than") >= 3:
                     time.sleep(2)
                     break
             except OSError:
@@ -168,6 +199,17 @@ def main():
                     rc, tail = got[name]
                     results[name] = (classify(rc), rc, tail)
             remaining = [t for t in remaining if t not in got]
+            # Culpable-test parking: if this attempt made progress and then
+            # stalled, the first unreported test was in flight at the wedge
+            # and is the likely trigger. Re-running it first on the next
+            # attempt would re-wedge the fresh boot and lose the rest of
+            # the chunk — park it as POISON (one test) and continue past
+            # it. POISON tests get individually re-verified with run1.sh.
+            if got and remaining and attempt < args.attempts:
+                poison = remaining.pop(0)
+                results[poison] = ("POISON", "", "")
+                print(f"[scan] chunk@{ci}: parked {poison} as POISON "
+                      f"(in-flight at stall)", flush=True)
             done = len(chunk) - len(remaining)
             print(f"[scan] chunk@{ci}: attempt {attempt} reported {len(got)}, "
                   f"cumulative {done}/{len(chunk)}, elapsed {time.time()-t0:.0f}s",

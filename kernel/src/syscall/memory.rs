@@ -520,6 +520,12 @@ fn sys_mmap_inner(args: [u64; 6]) -> i64 {
             Some(file) => {
                 let accmode = file.flags().bits()
                     & crate::fs::file::FileFlags::O_ACCMODE;
+                // O_PATH descriptors cannot back a mapping — Linux rejects
+                // them before the access-mode rules (LTP open13: mmap on
+                // an O_PATH fd must fail).
+                if file.flags().bits() & crate::fs::file::FileFlags::O_PATH != 0 {
+                    return mmap_error::EBADF;
+                }
                 let readable = accmode != crate::fs::file::FileFlags::O_WRONLY;
                 let writable = accmode == crate::fs::file::FileFlags::O_RDWR
                     || accmode == crate::fs::file::FileFlags::O_WRONLY;
@@ -2874,9 +2880,13 @@ pub fn sys_madvise(args: [u64; 6]) -> i64 {
             }
         }
 
-        // For MADV_DONTNEED and MADV_REMOVE, need entire range to be in VMA
-        if advice == MADV_DONTNEED || advice == MADV_REMOVE {
-            // Find VMA covering entire range
+        // The ENTIRE range must be mapped for EVERY advice (Linux
+        // madvise_walk_vmas: a hole inside the range returns -ENOMEM).
+        // The old code only enforced this for DONTNEED/REMOVE, so
+        // MADV_NORMAL/MADV_WILLNEED over a partially unmapped file
+        // succeeded (LTP madvise02 cases 7/8 expect ENOMEM over the
+        // last-page-unmapped file2).
+        {
             let mut check_addr = addr;
             while check_addr < end_of_range {
                 match vma_mgr.find(VirtAddr::new(check_addr)) {

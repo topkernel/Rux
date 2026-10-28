@@ -1435,9 +1435,9 @@ pub extern "C" fn rust_main() -> ! {
         // Contiguous-usable clamp: the carve must not cross a memory hole
         // (x86_64 q35 4G: usable ends 0x7ffcd000, hole to 0x80000000, more
         // RAM above 4G — a span bound alone put the heap tail + slab in
-        // unmapped hole DRAM; writes faulted with no fixup at first-frame
-        // composition, rs-egl r12/r13/r15). On hole-free machines (riscv64)
-        // the region end equals the span end and this is a no-op.
+        // unmapped hole DRAM; writes faulted at first-frame composition,
+        // rs-egl r12/r13/r15). On hole-free machines (riscv64) the region
+        // end equals the span end and this is a no-op.
         let heap_region_end = mm::layout::heap_region_end(&memory_regions, KERNEL_HEAP_PHYS);
         let eff = mm::layout::effective_static_regions(
             MEMORY_PHYS_BASE,

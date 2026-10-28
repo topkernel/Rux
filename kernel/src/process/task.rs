@@ -1093,6 +1093,15 @@ pub struct Task {
     /// Used for sigprocmask syscall
     pub sigmask: u64,
 
+    /// Process execution domain (personality(2)).
+    ///
+    /// Store-and-readback semantics: personality(x) stores x and returns
+    /// the previous value; personality(0xffffffff) is the query sentinel
+    /// (returns the current value unchanged). Inherited across fork,
+    /// kept across execve (exec domains like setarch --addr-no-randomize
+    /// rely on the flag surviving exec). 0 = PER_LINUX.
+    pub personality: u32,
+
     /// Signal stack (sigaltstack)
     pub sigstack: crate::signal::SignalStack,
 
@@ -1135,6 +1144,10 @@ pub struct Task {
 
     /// Session ID
     sid: u32,
+    /// Set at the first successful execve: once a process has exec'd, its
+    /// parent may no longer move it between process groups (Linux
+    /// sys_setpgid EACCES; LTP setpgid03).
+    execed: core::sync::atomic::AtomicBool,
 
     /// Children list
     ///
@@ -1563,6 +1576,7 @@ impl Task {
             signal,
             pending,
             sigmask: 0,  // Initial signal mask is empty
+            personality: 0, // PER_LINUX
             sigstack,
             sigframe_addr: 0,
             sigframe: None,
@@ -1576,6 +1590,7 @@ impl Task {
             dumpable: 1, // SUID_DUMP_USER (Linux default)
             pgid: pid,
             sid: pid,
+            execed: core::sync::atomic::AtomicBool::new(false),
             children: ListHead::new(),
             sibling: ListHead::new(),
             parent_children_head: ptr::null_mut(),
@@ -4777,6 +4792,18 @@ impl Task {
     #[inline]
     pub fn set_sid(&mut self, sid: u32) {
         self.sid = sid;
+    }
+
+    /// Has this task exec'd at least once? (setpgid EACCES rule)
+    #[inline]
+    pub fn has_execed(&self) -> bool {
+        self.execed.load(core::sync::atomic::Ordering::Acquire)
+    }
+
+    /// Mark this task as having exec'd (first successful execve).
+    #[inline]
+    pub fn mark_execed(&self) {
+        self.execed.store(true, core::sync::atomic::Ordering::Release);
     }
 
     // ==================== Process Tree Management ====================

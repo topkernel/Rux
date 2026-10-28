@@ -72,7 +72,14 @@ impl UtsNamespace {
         Self {
             inum,
             hostname: Spinlock::new([0u8; UTS_LEN]),
-            domainname: Spinlock::new([0u8; UTS_LEN]),
+            // Linux init_uts_ns default domainname is "(none)" — an
+            // empty default makes setdomainname-restore fail EINVAL
+            // (LTP setdomainname02's cleanup path warns).
+            domainname: Spinlock::new({
+                let mut d = [0u8; UTS_LEN];
+                d[..6].copy_from_slice(b"(none)");
+                d
+            }),
         }
     }
 
@@ -1075,14 +1082,19 @@ fn ns_file_close(file: &crate::fs::File) -> i32 {
     0
 }
 
-static NS_FILE_OPS: crate::fs::FileOps = crate::fs::FileOps {
-    read: Some(ns_file_read),
-    write: None,
-    lseek: None,
-    close: Some(ns_file_close),
-    poll: None,
-    read_at: None,
-};
+static NS_FILE_OPS: crate::fs::FileOps = crate::fs::FileOps::builder()
+    .read(ns_file_read)
+    .close(ns_file_close)
+    .build();
+
+/// D-6 shape-test accessor: expose the private table to the unit-test
+/// group `fileops-caps` without widening the runtime API.
+#[cfg(any(test, feature = "unit-test"))]
+pub mod caps_shape {
+    pub fn ns_file_ops() -> &'static crate::fs::file::FileOps {
+        &super::NS_FILE_OPS
+    }
+}
 
 /// Intercept /proc/[pid]/ns/<kind> opens from sys_openat. Returns
 /// Some(fd-or-negative-errno) when the path matched.

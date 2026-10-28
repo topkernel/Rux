@@ -373,20 +373,81 @@ pub fn generate_threads_max() -> Vec<u8> {
     alloc::format!("31418\n").into_bytes()
 }
 
-/// /proc/sys/kernel/shmmax — max segment size. Mirrors the constant the
-/// shmctl(IPC_INFO) path reports (LTP shmctl03 asserts equality).
+/// /proc/sys/kernel/printk — four loglevels as on Linux:
+/// `<console_loglevel> <default_message_loglevel> <minimum_console_loglevel>
+/// <default_console_loglevel>`. The first number is live: syslog(2)
+/// actions 6/7/8 store into the same CONSOLE_LOGLEVEL this reads, so LTP
+/// syslog11 can observe level changes through the file.
+pub fn generate_printk() -> Vec<u8> {
+    let cur = crate::printk::get_console_loglevel();
+    alloc::format!("{} 4 1 7\n", cur).into_bytes()
+}
+
+/// Write side: the first integer sets the console loglevel (Linux
+/// printk_sysctl bounds 1..=15; single-number writes are what sysctl(8)
+/// and LTP's save/restore emit).
+pub fn write_printk(input: &[u8]) -> i32 {
+    match parse_u64(input) {
+        Ok(v) => {
+            if !(1..=15).contains(&v) {
+                return -(crate::errno::constants::EINVAL as i32);
+            }
+            crate::printk::set_console_loglevel(v as u8);
+            0
+        }
+        Err(e) => e,
+    }
+}
+
+/// /proc/sys/kernel/shmmax — max segment size. Live: the shmget size
+/// check and shmctl(IPC_INFO) both consult it (writable; LTP shmget02
+/// lowers it to 8192, shmctl03 asserts IPC_INFO equality).
 pub fn generate_shmmax() -> Vec<u8> {
-    alloc::format!("{}\n", 256 * 4096u64).into_bytes()
+    alloc::format!("{}\n", crate::ipc::sysv_shm::shm_ctlmax()).into_bytes()
 }
 
-/// /proc/sys/kernel/shmmni — max segments system-wide.
+pub fn write_shmmax(input: &[u8]) -> i32 {
+    match parse_u64(input) {
+        Ok(v) => {
+            crate::ipc::sysv_shm::SHM_CTLMAX.store(v, Ordering::Release);
+            0
+        }
+        Err(e) => e,
+    }
+}
+
+/// /proc/sys/kernel/shmmni — max segments system-wide (LTP shmget03 reads
+/// it and creates exactly that many segments).
 pub fn generate_shmmni() -> Vec<u8> {
-    alloc::format!("{}\n", crate::ipc::util::IPC_IDS_MAX).into_bytes()
+    alloc::format!("{}\n", crate::ipc::sysv_shm::shm_ctlni()).into_bytes()
 }
 
-/// /proc/sys/kernel/shmall — total shm pages.
+pub fn write_shmmni(input: &[u8]) -> i32 {
+    match parse_u64(input) {
+        Ok(v) => {
+            // The fixed slot table caps the real limit at IPC_IDS_MAX;
+            // clamp so the file never promises more than the kernel has.
+            let capped = v.min(crate::ipc::util::IPC_IDS_MAX as u64);
+            crate::ipc::sysv_shm::SHM_CTLNI.store(capped, Ordering::Release);
+            0
+        }
+        Err(e) => e,
+    }
+}
+
+/// /proc/sys/kernel/shmall — total shm page budget (ENOSPC past it).
 pub fn generate_shmall() -> Vec<u8> {
-    alloc::format!("{}\n", 256 * 256u64).into_bytes()
+    alloc::format!("{}\n", crate::ipc::sysv_shm::shm_ctlall()).into_bytes()
+}
+
+pub fn write_shmall(input: &[u8]) -> i32 {
+    match parse_u64(input) {
+        Ok(v) => {
+            crate::ipc::sysv_shm::SHM_CTLALL.store(v, Ordering::Release);
+            0
+        }
+        Err(e) => e,
+    }
 }
 
 /// /proc/sys/fs/mqueue/queues_max — writable POSIX mq count limit.
@@ -453,4 +514,69 @@ pub fn write_core_pattern(input: &[u8]) -> i32 {
     pat.buf[..s.len()].copy_from_slice(s);
     pat.len = s.len();
     0
+}
+
+// ============================================================================
+// /proc/sys/fs/inotify — read by LTP inotify05/06/12 and glib's GFileMonitor
+// ============================================================================
+
+/// /proc/sys/fs/inotify/max_queued_events — per-instance event-queue cap.
+/// Live: the inotify enqueue path consults it (rw; LTP inotify05 reads it
+/// and relies on the IN_Q_OVERFLOW-last semantics when it is exceeded).
+pub fn generate_inotify_max_queued_events() -> Vec<u8> {
+    alloc::format!("{}\n", crate::fs::inotify::max_queued_events()).into_bytes()
+}
+
+pub fn write_inotify_max_queued_events(input: &[u8]) -> i32 {
+    match parse_u64(input) {
+        Ok(v) => {
+            // Linux accepts >= 0 (0 means "overflow on the first event");
+            // cap at a sane bound to keep the queue a VecDeque of events.
+            if v > (1 << 20) {
+                return -(crate::errno::constants::EINVAL as i32);
+            }
+            crate::fs::inotify::MAX_QUEUED_EVENTS_SYSCTL
+                .store(v as usize, Ordering::Release);
+            0
+        }
+        Err(e) => e,
+    }
+}
+
+/// /proc/sys/fs/inotify/max_user_instances — per-user instance cap
+/// (Linux default 128). Stored only: no per-user accounting exists yet;
+/// inotify06 raises the limit before its churn loop.
+pub static INOTIFY_MAX_USER_INSTANCES: AtomicU64 = AtomicU64::new(128);
+
+pub fn generate_inotify_max_user_instances() -> Vec<u8> {
+    alloc::format!("{}\n", INOTIFY_MAX_USER_INSTANCES.load(Ordering::Relaxed)).into_bytes()
+}
+
+pub fn write_inotify_max_user_instances(input: &[u8]) -> i32 {
+    match parse_u64(input) {
+        Ok(v) => {
+            INOTIFY_MAX_USER_INSTANCES.store(v, Ordering::Release);
+            0
+        }
+        Err(e) => e,
+    }
+}
+
+/// /proc/sys/fs/inotify/max_user_watches — per-user watch cap (Linux
+/// default 1048576). Stored only for now (no per-user accounting);
+/// raising it is what userland (inotify06, desktop file managers) does.
+pub static INOTIFY_MAX_USER_WATCHES: AtomicU64 = AtomicU64::new(1048576);
+
+pub fn generate_inotify_max_user_watches() -> Vec<u8> {
+    alloc::format!("{}\n", INOTIFY_MAX_USER_WATCHES.load(Ordering::Relaxed)).into_bytes()
+}
+
+pub fn write_inotify_max_user_watches(input: &[u8]) -> i32 {
+    match parse_u64(input) {
+        Ok(v) => {
+            INOTIFY_MAX_USER_WATCHES.store(v, Ordering::Release);
+            0
+        }
+        Err(e) => e,
+    }
 }

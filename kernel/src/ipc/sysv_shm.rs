@@ -11,7 +11,7 @@ use crate::mm::zone::GfpFlags;
 use crate::mm::vma::{Vma, VmaFlags, VmaType};
 use crate::sync::spinlock::Spinlock;
 use crate::syscall::errno;
-use core::sync::atomic::{AtomicI32, AtomicI64, AtomicIsize, AtomicU32, Ordering};
+use core::sync::atomic::{AtomicI32, AtomicI64, AtomicIsize, AtomicU32, AtomicU64, Ordering};
 
 use super::util::*;
 
@@ -155,6 +155,60 @@ impl ShmSegment {
 
 static SHM_IDS: IpcIds<ShmSegment> = IpcIds::new();
 
+// ============================================================================
+// Writable /proc/sys/kernel limits (shmget/shmctl consult these live)
+// ============================================================================
+
+/// SHMMAX — max segment size in bytes. Writable via
+/// /proc/sys/kernel/shmmax (LTP shmget02 lowers it to 8192 and expects
+/// shmget sizes above it to fail EINVAL); shmctl(IPC_INFO) reports the
+/// same value (shmctl03 asserts equality with the sysctl file).
+pub static SHM_CTLMAX: AtomicU64 = AtomicU64::new(1 << 30);
+/// SHMMNI — max segments system-wide. Capped in practice by the fixed
+/// IPC_IDS_MAX slot table; /proc/sys/kernel/shmmni reports this value
+/// (shmget03 creates exactly this many segments and expects ENOSPC after).
+pub static SHM_CTLNI: AtomicU64 = AtomicU64::new(IPC_IDS_MAX as u64);
+/// SHMALL — max total shm pages system-wide (shmget returns ENOSPC past
+/// it). 1 GiB worth of pages: generous for the LTP workloads while still
+/// bounding runaway allocation.
+pub static SHM_CTLALL: AtomicU64 = AtomicU64::new(1 << 18);
+
+/// Linux SHMMIN: the smallest segment size shmget accepts.
+pub const SHMMIN: u64 = 1;
+
+pub fn shm_ctlmax() -> u64 {
+    SHM_CTLMAX.load(Ordering::Relaxed)
+}
+pub fn shm_ctlni() -> u64 {
+    SHM_CTLNI.load(Ordering::Relaxed)
+}
+pub fn shm_ctlall() -> u64 {
+    SHM_CTLALL.load(Ordering::Relaxed)
+}
+
+/// Total pages currently held by live segments (SHM_INFO/SHMALL accounting).
+fn shm_total_pages() -> u64 {
+    let mut total: u64 = 0;
+    let slots = SHM_IDS.slots.lock();
+    for entry in slots.iter() {
+        if let Some(ref e) = entry {
+            if !e.deleted {
+                total += (e.inner.segsz + 4095) / 4096;
+            }
+        }
+    }
+    total
+}
+
+/// Live (non-deleted, slot-occupying) segment count — the SHMMNI budget.
+fn shm_live_ids() -> u64 {
+    let slots = SHM_IDS.slots.lock();
+    slots
+        .iter()
+        .filter(|e| matches!(e, Some(x) if !x.deleted))
+        .count() as u64
+}
+
 /// Whether a shm id has been removed (IPC_RMID'd) or no longer exists.
 ///
 /// Used by the remap_file_pages() emulation: Linux's post-4.0 emulation
@@ -191,26 +245,8 @@ pub fn sys_shmget(args: [u64; 6]) -> i64 {
     let size = args[1] as u64;
     let shmflg = args[2] as i32;
 
-    // SHMMAX (review IPC L: shmget SHMMAX) — 1 GiB cap, mirroring a typical
-    // Linux default; anything above is rejected with EINVAL.
-    const SHMMAX: u64 = 1 << 30;
-    if size > SHMMAX {
-        return -(errno::EINVAL as i64);
-    }
-
-    // Round up to page boundary with overflow checking (review IPC L:
-    // shm size 回绕 checked — size near u64::MAX used to wrap to 0).
-    let size = if size == 0 {
-        0
-    } else {
-        match size.checked_add(PAGE_SIZE as u64 - 1) {
-            Some(rounded) => rounded & !(PAGE_SIZE as u64 - 1),
-            None => return -(errno::EINVAL as i64),
-        }
-    };
-
-    // Validate size against existing segment (per Linux shmget): if key
-    // already exists, the requested size must not exceed the existing size.
+    // Validate size against an existing segment FIRST (per Linux
+    // shm_more_checks): a found key only requires size <= existing segsz.
     if key != 0 {
         if let Some(existing_idx) = SHM_IDS.find_by_key(key) {
             let slots = SHM_IDS.slots.lock();
@@ -221,6 +257,40 @@ pub fn sys_shmget(args: [u64; 6]) -> i64 {
             }
         }
     }
+
+    // New-segment limits (Linux newseg()): SHMMIN <= size <= shm_ctlmax.
+    // The sysctl values are live (LTP shmget02 lowers shmmax to 8192 and
+    // expects sizes above it to fail EINVAL).
+    if size < SHMMIN || size > shm_ctlmax() {
+        return -(errno::EINVAL as i64);
+    }
+
+    // SHM_HUGETLB (0o4000) has no backing here — a kernel without hugetlb
+    // configured rejects the flag (LTP shmget02's final cases expect
+    // EINVAL when CONFIG_HUGETLBFS is off).
+    if shmflg & 0o4000 != 0 {
+        return -(errno::EINVAL as i64);
+    }
+
+    // Capacity: SHMMNI ids / SHMALL pages system-wide (ENOSPC past either;
+    // shmget03 fills to SHMMNI and expects ENOSPC on the next shmget).
+    // The id limit counts LIVE slots (Some && !deleted), not the cached
+    // count atomic: IPC_RMID'd-but-still-attached entries hold a slot
+    // (Linux counts them against SHMMNI too), while the atomic can drift
+    // from teardown paths — a false ENOSPC at 255/256 broke shmget03's
+    // setup loop after any earlier shm test ran in the same boot.
+    if shm_live_ids() >= shm_ctlni() {
+        return -(errno::ENOSPC as i64);
+    }
+    let new_pages = (size + 4095) / 4096;
+    if shm_total_pages() + new_pages > shm_ctlall() {
+        return -(errno::ENOSPC as i64);
+    }
+
+    // The segment keeps the REQUESTED size (IPC_STAT's shm_segsz must
+    // equal what shmget was called with — LTP shmat01 creates a 4-byte
+    // segment; page rounding happens inside the page allocator and at
+    // shmat/mmap time).
 
     let segment = match ShmSegment::new(key, size, (shmflg & 0o777) as u16) {
         Some(s) => s,
@@ -418,24 +488,51 @@ pub fn sys_shmctl(args: [u64; 6]) -> i64 {
             // SAFETY: buf_ptr was null-checked and access_ok-validated for 48 bytes above;
             // clear_user/put_user are the exception-table copy paths (SUM=0 safe).
             unsafe { clear_user(buf_ptr, 48) };
-            let _ = unsafe { put_user(buf_ptr as *mut u64, 256 * 4096u64) };
+            // Live limits — the same values /proc/sys/kernel/{shmmax,
+            // shmmni,shmall} reports (shmctl03 asserts the equality).
+            let _ = unsafe { put_user(buf_ptr as *mut u64, shm_ctlmax()) };
             let _ = unsafe { put_user(buf_ptr.add(8) as *mut u64, 1u64) };
-            let _ = unsafe { put_user(buf_ptr.add(16) as *mut u64, 256u64) };
+            let _ = unsafe { put_user(buf_ptr.add(16) as *mut u64, shm_ctlni()) };
             let _ = unsafe { put_user(buf_ptr.add(24) as *mut u64, 4096u64) };
-            let _ = unsafe { put_user(buf_ptr.add(32) as *mut u64, 256 * 256u64) };
+            let _ = unsafe { put_user(buf_ptr.add(32) as *mut u64, shm_ctlall()) };
             SHM_IDS.count() as i64
         }
         11 => {
-            // SHM_LOCK — requires CAP_IPC_LOCK (per Linux)
+            // SHM_LOCK — requires CAP_IPC_LOCK (per Linux). Sets the
+            // SHM_LOCKED bit (02000) in shm_perm.mode — IPC_STAT must
+            // report it (LTP shmctl07 checks the bit right after locking).
             if !crate::security::capable(crate::security::CAP_IPC_LOCK) {
                 return -(errno::EPERM as i64);
+            }
+            let idx = match SHM_IDS.find(shmid) {
+                Some(i) => i,
+                None => return -(errno::EINVAL as i64),
+            };
+            let mut slots = SHM_IDS.slots.lock();
+            if let Some(ref mut entry) = slots[idx] {
+                if entry.deleted {
+                    return -(errno::EIDRM as i64);
+                }
+                entry.inner.perm.mode |= 0o2000;
             }
             0
         }
         12 => {
-            // SHM_UNLOCK — requires CAP_IPC_LOCK (per Linux)
+            // SHM_UNLOCK — requires CAP_IPC_LOCK (per Linux). Clears the
+            // SHM_LOCKED bit.
             if !crate::security::capable(crate::security::CAP_IPC_LOCK) {
                 return -(errno::EPERM as i64);
+            }
+            let idx = match SHM_IDS.find(shmid) {
+                Some(i) => i,
+                None => return -(errno::EINVAL as i64),
+            };
+            let mut slots = SHM_IDS.slots.lock();
+            if let Some(ref mut entry) = slots[idx] {
+                if entry.deleted {
+                    return -(errno::EIDRM as i64);
+                }
+                entry.inner.perm.mode &= !0o2000;
             }
             0
         }
@@ -641,7 +738,7 @@ pub fn sys_shmat(args: [u64; 6]) -> i64 {
         );
     }
     let attach_addr = if shmaddr != 0 {
-        if shmaddr & PAGE_MASK != 0 {
+        let resolved = if shmaddr & PAGE_MASK != 0 {
             if (shmflg & 0o20000) != 0 { // SHM_RND
                 shmaddr & !PAGE_MASK
             } else {
@@ -649,6 +746,19 @@ pub fn sys_shmat(args: [u64; 6]) -> i64 {
             }
         } else {
             shmaddr
+        };
+        if resolved == 0 {
+            // SHM_RND rounded the request down to the NULL page: treat it
+            // as the NULL case — the kernel picks an address instead of
+            // mapping page 0 (Linux ipc/shm.c; mapping the null page was
+            // LTP issue #319, shmat03). Same placement call as the
+            // shmaddr==0 arm below.
+            match addr_space.find_free_area(size_aligned) {
+                Ok(a) => a.as_usize(),
+                Err(_) => return -(errno::ENOMEM as i64),
+            }
+        } else {
+            resolved
         }
     } else {
         // Linux do_shmat: the kernel-chosen address comes from

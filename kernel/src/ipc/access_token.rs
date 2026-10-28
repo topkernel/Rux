@@ -372,14 +372,10 @@ fn at_poll(_file: &crate::fs::File, _events: u16) -> u16 {
     crate::syscall::misc::poll_events::POLLIN | crate::syscall::misc::poll_events::POLLRDNORM
 }
 
-pub static ACCESS_TOKEN_OPS: FileOps = FileOps {
-    read: None,
-    write: None,
-    lseek: None,
-    close: Some(at_close),
-    poll: Some(at_poll),
-    read_at: None,
-};
+pub static ACCESS_TOKEN_OPS: FileOps = FileOps::builder()
+    .close(at_close)
+    .poll(at_poll)
+    .build();
 
 /// Register the char device (called from devfs init, next to binder).
 pub fn register() {

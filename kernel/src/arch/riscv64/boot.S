@@ -330,7 +330,10 @@ _start:
     // either disabled outright or capped at 1MiB of names, which covers
     // only the first ~1.7MB of .text (sched/trap/syscall hot paths
     // symbolized to '?'). Window, heap, reservation and KERNEL_SIZE move
-    // 14MB->18MB together, same rule as LAYOUT-2.
+    // 14MB->18MB together, same rule as LAYOUT-2. (An intermediate
+    // branch-local bump 14MB->16MB for the static buddy BlockMeta/free
+    // bitmap arrays in .data — ~350KB over the linker ASSERT — was
+    // subsumed by this larger move.)
     li t4, KERNEL_PHYS
     li t6, 0xE00000              // 14MB
     add t4, t4, t6

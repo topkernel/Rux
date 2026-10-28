@@ -2674,3 +2674,175 @@ Standing: pa86 chain in flight (8 h deadline, skip logged as debt);
 the mkdrmdir flush stays the fs lane's; track-2 lever nomination
 waits for the pa86 quiet data (the REST-site and census re-reads name
 the next non-fs candidate).
+
+### 8.10.21 Leg 51 (2026-10-28): kswapd-leg deep drain LANDED on-branch — the s18 finding closed the design's missing leg; solo-shape kills on main are proven CORRECT, the s18 early-kill needs the fleet's multi-process wall (A/B handed off)
+
+The stress lane's s18 root-cause (CC-COLLAB, wwh-main-kernel; evidence
+r19-oomforensic-kswapd-leg.txt): the fleet rolled onto 2a960538 and
+the oom01 kills were UNCHANGED (OOM=8, same stall) with ZERO
+OOM-DEEP-PASS lines while OOM-FORENSIC #33 showed 172 MB of clean
+file cache one wall away — file-lru[2]=36048 pages at 78% referenced
++ file-lru[3]=7933 graduated clean, dirty=0, unevictable=0, locked=0,
+anon 1647 MB, zone free=16, in_direct_reclaim=1. 39a515a5 wired the
+deep drain into the page_alloc slowpath only; the kill fires from
+kswapd's escalation (16 consecutive zero-reclaim balance_pgdat passes
+-> out_of_memory, kswapd.rs KSWAPD_MAX_FAILURES=16), which outruns the
+slowpath's own deep drain (each pass through the referenced wall is
+O(cache-map) slow via evict_one's fallback; sixteen cheap zero passes
+complete while the faulting task is still mid-rounds — or the victim
+IS the task inside the slowpath, and its death leaks the
+IN_DIRECT_RECLAIM gate for every later allocation).
+
+**The fix (13a8cc03): one deep pass at the escalation point.** When
+kswapd reaches 16 consecutive zero-reclaim passes, before calling
+out_of_memory it now runs the same drain_file_cache_before_oom the
+slowpath runs before its `return 0` — chunked shrink past the wall +
+bulk active-list demotion — sized by the first initialized zone's
+WMARK_LOW shortfall (+ request, clamped [32, 8192]; the same sizing
+contract as the slowpath leg). deep_freed > 0 means the escalation
+was premature: the failure counter resets and the kill is skipped
+(the loop re-checks watermarks against the freed pages). A dry pool
+(the drain's own break-on-no-progress returns 0) falls through to the
+OOM — a kill that is now VERIFIED dry, twice (16 passes AND the deep
+drain). Context class: kswapd already calls shrink_reclaim through
+balance_pgdat today, so the drain's dirty-writeback sleeps are the
+pre-existing kswapd shape; the IN_DIRECT_RECLAIM gate serializes
+DIRECT reclaimers only and is deliberately NOT waited on (kswapd
+draining concurrently with a direct reclaimer is the pre-existing
+balance_pgdat concurrency; waiting would invert against the very
+task the kill would rescue). Escalation-gated by construction: the
+branch runs only after 16 consecutive zero-reclaim passes, which
+standard boots never produce — the DEEP_PASS counters stay zero and
+the Tier-1 drct=0 discipline is untouched.
+
+**Repro work (pa87, the honest finding).** oomchurn gained a fakehot
+mode (the s18 wall shape: after the cache fill, a child re-reads the
+file in a loop so page-cache hits keep re-setting Referenced while
+the parent touches anon). On THIS rig (2G riscv64 smp2 TCG, load1
+15-17): (1) M fakehot 400/1500 PASSES — a single TCG child cannot
+hold the wall (a full 400 MB re-read loop takes tens of seconds; the
+drain consumes the pages between visits); the fleet's wall is a
+multi-process equilibrium (msgstress + suite). (2) M fake 400/1900
+(overcommit, no wall) kills at 1824 MB anon — a CORRECT kill: both
+file LRUs walked=0, the direct-path drain ran 28 times and freed all
+50,688 cache pages (197 MB), all 524,288 pages anon/reserved, zone
+free=0. Solo-shape kills on main are at the true ceiling, not fake.
+So the s18 early-kill cannot be reproduced with a single-process
+probe on this rig — the discriminating A/B is the fleet's ltp-b
+member (their CC-COLLAB offer stands; hash 13a8cc03 handed over).
+What the solo shapes DO prove on B: no regression where the leg must
+be inert — B fake 400/1500 PASS and B fakehot 400/1500 PASS, both
+with ZERO OOM-DEEP-PASS lines (the escalation never fired).
+
+**Gates:** dual-arch build rc=0 (riscv64 ELF + x86_64 bzImage, debug
+class); `make test` 1122/1122 green (rc=0); riscv64 minimal-rootfs
+smoke zero panics, deep-pass lines 0 (run/rv-smoke-leg51.sh). Tier-1
+quiet census boot on the leg tree queued behind pa86 (run/
+pa88-quiet-chain.sh, two-stage gate, census token explicit, DEEP_PASS
+absence + census-band asserts) — in flight at leg close.
+
+Standing: the fleet A/B on 13a8cc03 decides the merge verdict for
+the s18 surface; pa86 (re-anchor) and pa88 (leg Tier-1) chains both
+in flight; the IN_DIRECT_RECLAIM death-leak question (a task killed
+while holding the gate leaves it at 1 — the forensic's
+in_direct_reclaim=1 is consistent with a live slow holder OR this
+leak) is recorded as a separate bug for the mm lane, not touched
+here.
+
+### 8.10.22 Leg 52 (2026-10-28): fdtable get_file — the design note precedes the code; the 143.7M REST calls decompose into a LOOKUP-COUNT problem stacked on a LOCK problem
+
+Assignment (user-unparked track-2): file.rs:941 get_file — 143.7M
+calls/boot at the 342 ns REST class = 49.2 s/boot of irq-off wall,
+the single biggest measured non-fs cost. pa86's parse (board 1:
+132.3M/50.8 s/383 ns; the coordinator's 143.7M/342 ns is board 2)
+also ranks it #3 behind sched.rs:2251 (95.8 s, a sched-lane row) and
+percpu.rs:126 (82.2 s — every CpuLocal::with pays its own
+save_and_disable_irq; noted as a future lever nomination, NOT this
+leg's).
+
+**Decomposition first (static audit of the call sites).** The fd
+syscall volume on the same boards is ~40-60M (writev 13.2M,
+recvfrom 13.5M, sendto 20.5M, recvmsg 13.5M, read/write ~1.4M,
+census extras). get_file runs 132-144M — an amplification factor of
+2-5x. Sources found by reading the ladders:
+
+- sys_sendto / sys_recvfrom: an entry-classification `get_file_fd`
+  (Arc dropped immediately) + `unix_file_of(fd)` + `netlink_file_of
+  (fd)` + `raw_file_of(fd)` (which itself resolves the fd TWICE:
+  raw_socket_from_fd + its own lookup) + `get_socket_from_fd(fd)` —
+  up to 5-6 lookups per call, one used.
+- sys_writev: `unix_file_of(fd)` + a second `get_file_fd(fd)` on the
+  gathered dgram path; the STREAM path calls sys_write per iovec —
+  one fresh lookup per iov.
+- sys_readv: same per-iov shape.
+
+**Lever A (lookup-count, zero concurrency change): one lookup per
+syscall.** Every `*_file_of(fd)` family helper is an ops-identity
+check on the File plus a private_data cast; the fdtable part of each
+is boilerplate. Plan: resolve the File ONCE at the ladder head
+(EBADF when None), classify by `file.ops` identity, pass `&Arc<File>`
+down — new `unix_of_file/netlink_of_file/raw_of_file/ socket_of_file
+(&Arc<File>)` variants with the old fd-shaped wrappers kept for
+cold callers. writev/readv stream loops write/read through the one
+resolved file via an extracted buffered helper instead of re-entering
+sys_write/sys_read per iov. Expected volume: ~132M down to ~63M
+(-50%), i.e. ~25 s of REST before the per-call cost is even touched.
+Semantics preserved exactly: EBADF at the head, ENOTSOCK where the
+family ladder exhausts (the generic get_socket_from_fd None arm).
+
+**Lever B (per-call cost): lock-free slot reads under per-CPU reader
+banks + writer park-and-drain.** The current get_file takes
+entry.lock_irqsave() (irq_save + preempt_disable + TTAS RMW) per
+lookup; the entry Spinlock line is per-TABLE, so every CLONE_FILES
+thread and every cross-CPU peeker serializes on one line 143M times.
+The obvious seqcount shape has a hole the coordinator's brief names
+correctly but does not close: a reader that loads a slot pointer can
+race close_fd's final Arc drop and increment a freed refcount —
+seqcount validation cannot fix a post-validation window, and any
+reader-side shared-line write (global reader count) recreates the
+contention being removed. The shape that closes it:
+
+- slots become `[AtomicPtr<File>; MAX_FDS]` OUTSIDE the entry lock
+  (8-byte aligned stores, no tears; null = empty). Writers mutate
+  slots under the entry lock exactly as today; single-word atomic
+  stores publish.
+- Readers NEVER take the lock: local irqsave (no preempt machinery,
+  no TTAS) + `readers[cpu].fetch_add(1, SeqCst)` on a PER-CPU,
+  cacheline-padded bank (SeqCst RMW = aqrl AMO on riscv / locked
+  xadd on x86: the reader's interest is globally visible before the
+  slot load executes), slot load, `Arc::increment_strong_count` +
+  `Arc::from_raw` (the clone), bank fetch_sub, irq restore. With
+  irqs off the section cannot be preempted, migrated, or re-entered
+  by a softirq on the same CPU — banks are counts, so even an NMI
+  nesting would be correct.
+- Lifetime safety: ANY writer that removes a slot (close_fd, dup2
+  displacement, exec-cloexec, Drop) parks the removed Arc in a tiny
+  per-table `retired` vec and, after releasing the entry lock and a
+  SeqCst fence, drains once every bank reads 0 — reader sections are
+  irq-off and bounded (~100 ns), so the wait is a few scans; a spin
+  cap leaves the vec for the next writer rather than spinning long.
+  At the drain the existing last-reference discipline runs verbatim
+  (posix_release_for_file, count==1 -> close op, else close_pending
+  for the final dropper — R13-4/R14-5/R10-2 all preserved, the
+  count==1 decision now SOUND because quiescence proves no in-flight
+  clone can bump). FdTable::drop drains without waiting (no &self
+  borrowers can exist at drop).
+- Readers of the fdtable gain no new lock nesting (they take no
+  lock); writers add one nesting only between entry-lock release and
+  the retired lock — no inversion surface. fork_from keeps ONE entry
+  lock pass (slots immutable under it; concurrent reader clones are
+  just refcount RMWs).
+
+Reader cost delta per call: REMOVE irq_save+preempt+TTAS-acquire+
+TTAS-release+preempt+irq_restore around the clone; ADD one SeqCst
+RMW + one Release RMW on a CPU-private line. The shared-line RMWs
+disappear from the read path; the only shared RMW left is the
+inherent Arc strong-count increment (per-FILE line, naturally
+sharded across the table's files). IF=0 time per call shrinks with
+it (guarded-domain: interrupts).
+
+Gates (both levers, each its own commit): make test green; dual-arch
+rc=0 (config.rs restore after x86); pbench fd-heavy + P5 rows in
+band; syscost REST recount — file.rs:941 volume materially down
+(lever A) and per-call class down (lever B), zero new panic/OOM
+classes, census in band. fs/+ipc/ domain check reported explicitly.

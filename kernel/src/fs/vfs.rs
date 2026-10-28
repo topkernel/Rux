@@ -1811,14 +1811,15 @@ pub fn path_lookup(pathname: &str, flags: u32) -> Result<VfsPath, i32> {
                             match lookup_fn(&*dir_inode, component.as_bytes()) {
                                 Ok(ino) => ino,
                                 Err(e) => {
-                                    // Cache negative dentry on ENOENT
-                                    if e == -(errno::Errno::NoSuchFileOrDirectory.as_neg_i32()) {
-                                        let name = String::from(*component);
-                                        let d = Arc::new(Dentry::new(name.clone()));
-                                        d.set_negative();
-                                        d.set_parent(current.clone());
-                                        current.add_child(name, d);
-                                    }
+                                    // Do NOT cache a negative dentry here:
+                                    // with no dcache reclaim path, every
+                                    // ENOENT lookup would pin a Dentry +
+                                    // name String in the parent's child map
+                                    // forever (kernel-heap leak under
+                                    // existence-probe-heavy workloads; see
+                                    // the unlink detach note). Misses simply
+                                    // fall through to the filesystem next
+                                    // time.
                                     if sbx_tracing {
                                         sbx_trace(
                                             "walk",
@@ -1963,7 +1964,53 @@ fn follow_symlink(
         return Ok(dentry);
     }
 
-
+    // /proc/[pid]/fd/N magic link: resolution goes straight to the target
+    // descriptor's dentry, never through the target path STRING — the
+    // printed path is stale for unlinked files (O_TMPFILE linkat, LTP
+    // open14/openat03) and unwalkable for pipes/sockets. This mirrors
+    // Linux proc magic-link semantics (nd_jump_link).
+    if inode.fs_id == crate::fs::inode::FS_ID_PROCFS && inode.private_data.is_none() {
+        let pid_val = inode.ino / 10000;
+        let rem = inode.ino % 10000;
+        if crate::fs::procfs::pid::is_valid_pid(pid_val)
+            && rem >= crate::fs::procfs::FD_LINK_INO_OFF
+            && rem < crate::fs::procfs::FD_LINK_INO_OFF + 1024
+        {
+            if let Some(file) = crate::fs::procfs::pid::get_fd_file(
+                pid_val,
+                (rem - crate::fs::procfs::FD_LINK_INO_OFF) as u32,
+            ) {
+                // SAFETY: dentry written once at open; read-only access.
+                let target = unsafe { &*file.dentry.get() }.clone();
+                if let Some(d) = target {
+                    // Unlinked-while-open (O_TMPFILE, or any fd surviving
+                    // an unlink): vfs_unlink strips the dentry's inode to
+                    // keep readdir honest, but the DESCRIPTOR still pins
+                    // the inode — exactly like Linux's unhashed-but-live
+                    // dentry. A magic-link walk referencing this fd
+                    // re-attaches the live inode so linkat/chmod/stat
+                    // through /proc/[pid]/fd/N work on the real file.
+                    if d.get_inode().is_none() {
+                        // SAFETY: inode written once at open; read-only.
+                        let live = unsafe { &*file.inode.get() }.clone();
+                        if let Some(inode_arc) = live {
+                            d.set_inode(inode_arc);
+                            d.clear_negative();
+                        }
+                    }
+                    *depth += 1;
+                    if *depth > crate::config::MAX_SYMLINKS {
+                        return Err(errno::Errno::TooManySymbolicLinks.as_neg_i32());
+                    }
+                    return Ok(follow_mount(d));
+                }
+            }
+            // No dentry (pipe/socket/anon inode) or task gone: fall
+            // through to the string-based walk below, which reports
+            // ENOENT for the unwalkable target — same observable errno
+            // as Linux for these.
+        }
+    }
 
     *depth += 1;
     // Linux MAXSYMLINKS = 40 (review 5.1: was 8, rejecting deep-but-legal
@@ -2090,13 +2137,9 @@ fn follow_symlink(
                             match lookup_fn(&*dir_inode, component.as_bytes()) {
                                 Ok(ino) => ino,
                                 Err(e) => {
-                                    if e == -(errno::Errno::NoSuchFileOrDirectory.as_neg_i32()) {
-                                        let name = String::from(*component);
-                                        let d = alloc::sync::Arc::new(Dentry::new(name.clone()));
-                                        d.set_negative();
-                                        d.set_parent(current.clone());
-                                        current.add_child(name, d);
-                                    }
+                                    // No negative-dentry caching on ENOENT
+                                    // (same unbounded-leak reasoning as the
+                                    // other path-walk variant).
                                     return Err(e);
                                 }
                             }
@@ -2666,11 +2709,16 @@ pub fn vfs_rmdir(pathname: &str) -> Result<(), i32> {
                 if let Some((ino, fs_id)) = target_ino_and_fs_id {
                     crate::fs::inode::icache_remove(ino, fs_id);
                 }
-                // Replace dentry with negative entry
+                // Kill the cached dentry the same way unlink does: negative
+                // flag for fds still holding an Arc (getdents02), inode
+                // dropped, entry detached from the parent's child map —
+                // cached-forever negative dentries are an unbounded heap
+                // leak under mkdir/rmdir churn.
                 if let Some(ref parent_dentry) = parent_vpath.dentry {
                     if let Some(child) = parent_dentry.lookup_child(&name) {
                         child.set_negative();
                         *child.inode.lock() = None;
+                        parent_dentry.remove_child(&name);
                     }
                 }
                 // inotify: IN_DELETE|IN_ISDIR on the parent (named) and
@@ -2795,11 +2843,19 @@ pub fn vfs_unlink(pathname: &str) -> Result<(), i32> {
                         }
                     }
                 }
-                // Replace dentry with negative entry
+                // Kill the cached dentry: mark it negative first (fds that
+                // still hold their own Arc must observe the deletion —
+                // getdents02's unlinked-directory readdir), clear its inode,
+                // then DETACH it from the parent's child map. Keeping the
+                // negative entry cached forever leaked one Dentry + name
+                // String per deleted file (no dcache reclaim exists), which
+                // exhausted the 128MB kernel heap under creat/unlink churn
+                // (LTP inode02: ALLOCTHROW storm ~40s into the run).
                 if let Some(ref parent_dentry) = parent_vpath.dentry {
                     if let Some(child) = parent_dentry.lookup_child(&name) {
                         child.set_negative();
                         *child.inode.lock() = None;
+                        parent_dentry.remove_child(&name);
                     }
                 }
 
@@ -2960,11 +3016,58 @@ fn vfs_rename_locked(oldpath: &str, newpath: &str) -> Result<(), i32> {
     // requires owning the replaced entry (if any) — mirrors Linux
     // may_delete() on both ends (review 5.1 high).
     let source_vpath = path_lookup(oldpath, 0).ok();
-    check_sticky(old_parent, source_vpath.as_ref().and_then(|vp| vp.inode.as_ref().map(|a| a.as_ref())))?;
+    // The source must exist (ENOENT) — checked before any no-op logic so
+    // rename(missing, x) reports ENOENT (rename13's control case).
+    let src_inode = source_vpath
+        .as_ref()
+        .and_then(|vp| vp.inode.as_ref())
+        .ok_or(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())?
+        .clone();
+    check_sticky(old_parent, Some(src_inode.as_ref()))?;
     let replaced_vpath = path_lookup(newpath, 0).ok();
+    let replaced_inode = replaced_vpath
+        .as_ref()
+        .and_then(|vp| vp.inode.as_ref())
+        .map(|a| a.clone());
     if replaced_vpath.is_some() {
-        check_sticky(new_parent, replaced_vpath.as_ref().and_then(|vp| vp.inode.as_ref().map(|a| a.as_ref())))?;
+        check_sticky(
+            new_parent,
+            replaced_vpath.as_ref().and_then(|vp| vp.inode.as_ref()).map(|a| a.as_ref()),
+        )?;
     }
+
+    // Final-component length: a destination name over NAME_MAX would be
+    // uncreatable (rename10: a 256-char single component must fail
+    // ENAMETOOLONG even when the total path is short).
+    const NAME_MAX: usize = 255;
+    if new_name.len() > NAME_MAX || old_name.len() > NAME_MAX {
+        return Err(-(errno::constants::ENAMETOOLONG));
+    }
+
+    // Renaming onto the same entry (identical path or hard link) is a
+    // successful no-op (rename(2): "If oldpath and newpath are ... hard
+    // links referring to the same file, rename() does nothing and returns
+    // success" — rename13).
+    if let Some(ref ri) = replaced_inode {
+        if Arc::ptr_eq(&ri, &src_inode) {
+            return Ok(());
+        }
+    }
+
+    // Type clash (may_delete/may_create parity): a non-directory cannot
+    // replace an existing directory (EISDIR — rename05), and a directory
+    // cannot replace an existing non-directory (ENOTDIR — rename07).
+    if let Some(ref ri) = replaced_inode {
+        let src_is_dir = src_inode.mode.is_directory();
+        let dst_is_dir = ri.mode.is_directory();
+        if !src_is_dir && dst_is_dir {
+            return Err(errno::Errno::IsADirectory.as_neg_i32());
+        }
+        if src_is_dir && !dst_is_dir {
+            return Err(errno::Errno::NotADirectory.as_neg_i32());
+        }
+    }
+
 
     // Rename a directory into itself or its own subdirectory would create a
     // ".." cycle — check the ancestor chain of the new parent (review 5.5:
@@ -3359,6 +3462,17 @@ pub fn vfs_truncate(pathname: &str, new_size: i64) -> Result<(), i32> {
         return Err(errno::Errno::InvalidArgument.as_neg_i32());
     }
 
+    // RLIMIT_FSIZE: growing the file past the soft limit fails EFBIG
+    // before any lookup work (Linux do_truncate checks in
+    // truncate_setsize's callers; LTP truncate03 sets the limit in
+    // setup and expects the 32MiB truncate to fail EFBIG).
+    if let Some(task) = crate::sched::current() {
+        let (fsz_cur, _) = task.rlimit(crate::process::task::rlimit_res::FSIZE);
+        if fsz_cur != u64::MAX && new_size as u64 > fsz_cur {
+            return Err(errno::Errno::FileTooLarge.as_neg_i32());
+        }
+    }
+
     let vpath = path_lookup(pathname, 0)?;
     let inode = vpath.inode.as_ref()
         .ok_or(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())?;
@@ -3409,6 +3523,14 @@ pub fn vfs_truncate(pathname: &str, new_size: i64) -> Result<(), i32> {
 pub fn vfs_ftruncate(fd: usize, new_size: i64) -> Result<(), i32> {
     if new_size < 0 {
         return Err(errno::Errno::InvalidArgument.as_neg_i32());
+    }
+
+    // RLIMIT_FSIZE parity with vfs_truncate (Linux do_ftruncate path).
+    if let Some(task) = crate::sched::current() {
+        let (fsz_cur, _) = task.rlimit(crate::process::task::rlimit_res::FSIZE);
+        if fsz_cur != u64::MAX && new_size as u64 > fsz_cur {
+            return Err(errno::Errno::FileTooLarge.as_neg_i32());
+        }
     }
 
     // SAFETY: get_file_fd returns a valid Arc<File> for the given fd
@@ -3605,6 +3727,70 @@ fn inherit_setgid_dir_gid(parent_inode: &Arc<Inode>, new_inode: &Arc<Inode>) {
 /// - O_CREAT: create file if it does not exist
 /// - O_EXCL: used with O_CREAT, returns error if file already exists
 /// - O_TRUNC: truncate file to empty
+/// Open an unnamed temporary file inside `dirpath` (O_TMPFILE semantics).
+///
+/// Linux creates a fresh inode in the directory with NO directory entry;
+/// the descriptor is the only handle until the file is materialized via
+/// linkat("/proc/self/fd/N"). Implemented on top of the ordinary create
+/// path: create a uniquely-named file, open it, then immediately unlink
+/// the name — the descriptor's dentry keeps the inode reachable (POSIX
+/// unlink-while-open) and the /proc/[pid]/fd/N magic link resolves to
+/// that dentry (see follow_symlink), so linkat re-links it exactly as on
+/// Linux (LTP open14 / openat03).
+pub fn file_open_tmpfile(dirpath: &str, flags: u32, mode: u32) -> Result<usize, i32> {
+    static TMPFILE_SEQ: core::sync::atomic::AtomicU64 =
+        core::sync::atomic::AtomicU64::new(0);
+
+    let dir = path_lookup(dirpath, 0)?;
+    let dir_inode = dir.inode
+        .ok_or(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())?;
+    if !dir_inode.mode.is_directory() {
+        return Err(errno::Errno::NotADirectory.as_neg_i32());
+    }
+    // Creating the inode needs write+search on the directory (Linux
+    // O_TMPFILE -> MAY_WRITE|MAY_EXEC on the parent).
+    if !crate::fs::permission::inode_permission(
+        &dir_inode,
+        crate::fs::permission::MAY_WRITE | crate::fs::permission::MAY_EXEC,
+    ) {
+        return Err(errno::Errno::PermissionDenied.as_neg_i32());
+    }
+
+    // Strip the directory-shaped bits; add create-exclusive so the name
+    // can never collide. Access mode (O_RDWR/O_WRONLY) passes through.
+    let open_flags = (flags & !(FileFlags::O_DIRECTORY as u32
+        | 0o20000000 /*__O_TMPFILE*/
+        | FileFlags::O_TRUNC as u32))
+        | FileFlags::O_CREAT as u32
+        | FileFlags::O_EXCL as u32;
+
+    let seq = TMPFILE_SEQ.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+    let unique = alloc::format!(
+        ".rux-tmpfile-{}-{}",
+        crate::process::current_pid(),
+        seq
+    );
+    let full = if dirpath.ends_with('/') {
+        alloc::format!("{}{}", dirpath, unique)
+    } else {
+        alloc::format!("{}/{}", dirpath, unique)
+    };
+
+    let fd = file_open(&full, open_flags, mode)?;
+
+    // Remove the name right away: the directory must report empty (the
+    // descriptor holds the inode alive). A failed unlink leaks a name —
+    // close the descriptor and surface the error instead.
+    if let Err(e) = vfs_unlink(&full) {
+        // SAFETY: fd was just installed in the current task's table.
+        unsafe {
+            let _ = crate::fs::close_file_fd(fd);
+        }
+        return Err(e);
+    }
+    Ok(fd)
+}
+
 pub fn file_open(filename: &str, flags: u32, mode: u32) -> Result<usize, i32> {
     // SAFETY: file descriptor operations use well-defined VFS callbacks and Arc-based refcounting
     unsafe {
@@ -5268,14 +5454,20 @@ fn mem_file_close(file: &File) -> i32 {
     0
 }
 
-static MEM_FILE_OPS: FileOps = FileOps {
-    read: Some(mem_file_read),
-    write: None,
-    lseek: Some(mem_file_lseek),
-    close: Some(mem_file_close),
-    poll: None,
-    read_at: None,
-};
+static MEM_FILE_OPS: FileOps = FileOps::builder()
+    .read(mem_file_read)
+    .lseek(mem_file_lseek)
+    .close(mem_file_close)
+    .build();
+
+/// D-6 shape-test accessor: expose the private table to the unit-test
+/// group `fileops-caps` without widening the runtime API.
+#[cfg(any(test, feature = "unit-test"))]
+pub mod caps_shape {
+    pub fn mem_file_ops() -> &'static crate::fs::file::FileOps {
+        &super::MEM_FILE_OPS
+    }
+}
 
 // ============================================================================
 // fallocate / utimensat (fs-side helpers)

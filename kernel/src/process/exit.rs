@@ -565,6 +565,19 @@ pub fn do_exit(exit_code: i32) -> ! {
         }
     };
 
+    // Leg-52 item 0 (fleet s19/s24-r30, stress-lane A/B verdict):
+    // release the direct-reclaim gate if THIS task dies while still
+    // holding it. The gate's CAS (mm/page_alloc.rs) has exits only at
+    // the reclaim block's own returns; a task killed mid-block funnels
+    // here without unwinding them, which used to leave IN_DIRECT_RECLAIM
+    // stuck at 1 forever — every later allocation then took the
+    // no-drain skip path (the fake-OOM family). One CAS on our own pid:
+    // a gate already released or held by another task is untouched.
+    // SAFETY: current is the raw pointer to the calling task, valid
+    // because we are it and do_exit never returns.
+    let dying_pid = unsafe { (*current).pid() };
+    crate::mm::page_alloc::reclaim_gate_exit_release(dying_pid);
+
     // The sched:sched_process_exit tracepoint, recorded at do_exit entry
     // (the reference's record point). group_dead: this exit takes the
     // thread group to its last live thread — nr_threads has not been
@@ -885,7 +898,9 @@ pub fn do_exit(exit_code: i32) -> ! {
         // - set_address_space(None) swaps the slot under the mm-slot lock
         //   and drops our Arc after it; if it is the last reference the
         //   teardown (grace wait + PT free + VMA release) runs in THIS
-        //   context, after the satp switch.
+        //   context, after the satp switch. SysV shm detach (nattch) runs
+        //   inside MmStruct::drop — exactly once per mm, which subsumes
+        //   the old strong_count==1 pre-check here (LTP shmat01 family).
         if (*current).address_space_arc().is_some() {
             let kernel_ppn = crate::arch::mm::mmu_init::root_page_table_ppn();
             let current_ppn = crate::arch::mm::read_satp() as u64 & 0xF_FFFF_FFFF_FFFF;
@@ -1119,6 +1134,20 @@ pub fn do_exit_group(exit_code: i32) -> ! {
         Some(c) => c as *mut Task,
         None => do_exit(exit_code),
     };
+    // Publish the group exit status BEFORE stopping the siblings: the
+    // SIGKILL below makes each member's fatal-signal path re-enter
+    // do_exit_group with THIS code, so the whole group — the leader
+    // included — reports the clean status instead of "killed by
+    // signal 9" (Linux signal_group_exit; LTP mq_notify03 exit(0)
+    // from the mq callback thread).
+    // SAFETY: current is the running task (matched above), non-null.
+    let signal_arc = unsafe { (*current).signal_arc() };
+    if let Some(ss) = signal_arc {
+        ss.group_exit_code
+            .store(exit_code, core::sync::atomic::Ordering::Release);
+        ss.group_exiting
+            .store(true, core::sync::atomic::Ordering::Release);
+    }
     kill_other_threads(current);
     do_exit(exit_code)
 }

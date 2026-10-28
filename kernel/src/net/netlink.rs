@@ -525,6 +525,15 @@ impl NetlinkSocket {
         self.recv_queue.lock().push_back(msg);
         self.wait_queue.wake_up_all();
     }
+
+    /// Kernel-originated unicast message (one recvmsg delivers it whole).
+    ///
+    /// Used by POSIX mqueue SIGEV_THREAD notification: Linux pushes a
+    /// 32-byte message onto the helper's netlink socket
+    /// (do_mq_notify -> netlink_unicast).
+    pub fn push_kernel_message(&self, msg: Vec<u8>) {
+        self.push_response(msg);
+    }
 }
 
 /// One blocking wait round (same discipline as unix.rs / socket.rs).
@@ -981,14 +990,12 @@ fn netlink_file_poll(file: &File, events: u16) -> u16 {
 }
 
 /// AF_NETLINK socket file operations.
-pub static NETLINK_OPS: FileOps = FileOps {
-    read: Some(netlink_file_read),
-    write: Some(netlink_file_write),
-    lseek: None,
-    close: Some(netlink_file_close),
-    poll: Some(netlink_file_poll),
-    read_at: None,
-};
+pub static NETLINK_OPS: FileOps = FileOps::builder()
+    .read(netlink_file_read)
+    .write(netlink_file_write)
+    .close(netlink_file_close)
+    .poll(netlink_file_poll)
+    .build();
 
 // ============================================================================
 // Socket creation / fd plumbing
@@ -1080,6 +1087,12 @@ pub fn netlink_socket_from_fd(fd: usize) -> Option<Arc<NetlinkSocket>> {
 pub fn netlink_file_of(fd: usize) -> Option<(Arc<NetlinkSocket>, bool)> {
     let fdtable = crate::sched::get_current_fdtable()?;
     let file = fdtable.get_file(fd)?;
+    netlink_file_of_file(&file)
+}
+
+/// Leg-52 lever A: fd resolved once by the classification ladder head;
+/// see unix_file_of_file for the amplification note.
+pub fn netlink_file_of_file(file: &Arc<File>) -> Option<(Arc<NetlinkSocket>, bool)> {
     {
         let ops = unsafe { *file.ops.get() };
         match ops {
@@ -1089,7 +1102,7 @@ pub fn netlink_file_of(fd: usize) -> Option<(Arc<NetlinkSocket>, bool)> {
     }
     let nonblock = (file.flags().bits() & FileFlags::O_NONBLOCK) != 0;
     // SAFETY: ops identity confirmed above.
-    let socket = unsafe { netlink_of_file(&file) }?;
+    let socket = unsafe { netlink_of_file(file) }?;
     Some((socket, nonblock))
 }
 

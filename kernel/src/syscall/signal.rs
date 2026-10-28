@@ -701,7 +701,15 @@ pub fn sys_pause(_args: SyscallArgs) -> i64 {
 /// # Returns
 /// Returns 0 on success, negative error code on failure
 pub fn sys_tkill(args: SyscallArgs) -> i64 {
-    let tid = args[0] as u32;
+    // Linux do_tkill() rejects a negative tid with EINVAL before any
+    // table lookup — the cast below would otherwise fold -1 into
+    // u32::MAX and trip find_task_by_pid into ESRCH. LTP tkill02
+    // exercises tkill(-1, SIGUSR1) and expects EINVAL.
+    let tid_raw = args[0] as i32;
+    if tid_raw < 0 {
+        return -(errno::EINVAL as i64);
+    }
+    let tid = tid_raw as u32;
     let sig = args[1] as i32;
 
     // Validate signal number

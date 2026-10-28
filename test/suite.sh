@@ -779,7 +779,7 @@ LTP_CMD="echo 'no LTP suite at $LTP_DIR (need tests-all.txt)'; exit 3"
 if [ -f "$LTP_DIR/tests-all.txt" ] && [ -f "$ROOT/test/rootfs.img" ]; then
     LTP_PRIVATE="$OUT/ltp-rootfs.img"
     LTP_LIST="$(grep -v '^#' "$LTP_DIR/tests-all.txt" | head -30 | paste -sd, -)"
-    LTP_CMD="cp '$ROOT/test/rootfs.img' '$LTP_PRIVATE' && KERNEL='__KERNEL__' IMAGE='$LTP_PRIVATE' test/ltpscan/run1.sh -t __LTP__ '$LTP_LIST'"
+    LTP_CMD="cp '$ROOT/test/rootfs.img' '$LTP_PRIVATE' && LTP_OUT_DIR='$OUT/ltp' KERNEL='__KERNEL__' IMAGE='$LTP_PRIVATE' test/ltpscan/run1.sh -t __LTP__ '$LTP_LIST'"
 fi
 
 : > "$OUT/summary.tsv"

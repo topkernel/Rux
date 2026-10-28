@@ -68,7 +68,7 @@ run_kernel() {
         -smp 4 \
         -nographic \
         -serial mon:stdio \
-        -drive file=test/rootfs.img,if=none,id=rootfs,format=raw \
+        -drive file=${ROOTFS_IMG:-test/rootfs.img},if=none,id=rootfs,format=raw \
         -device virtio-blk-pci,disable-legacy=on,drive=rootfs \
         -device virtio-gpu-pci \
         -kernel target/riscv64gc-unknown-none-elf/debug/rux \
@@ -86,7 +86,7 @@ run_kernel_gui() {
         -m 2G \
         -smp 4 \
         -serial mon:stdio \
-        -drive file=test/rootfs.img,if=none,id=rootfs,format=raw \
+        -drive file=${ROOTFS_IMG:-test/rootfs.img},if=none,id=rootfs,format=raw \
         -device virtio-blk-pci,disable-legacy=on,drive=rootfs \
         -device virtio-gpu-pci \
         -device virtio-keyboard-pci \
@@ -111,7 +111,7 @@ main() {
             -m 2G \
             -smp 4 \
             -nographic \
-            -drive file=test/rootfs.img,if=none,id=rootfs,format=raw \
+            -drive file=${ROOTFS_IMG:-test/rootfs.img},if=none,id=rootfs,format=raw \
             -device virtio-blk-pci,disable-legacy=on,drive=rootfs \
             -kernel target/riscv64gc-unknown-none-elf/debug/rux
     elif [ "$MODE" = "gui" ]; then

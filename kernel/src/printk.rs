@@ -530,7 +530,14 @@ fn write_to_ring_buffer(level: u8, text: &[u8], timestamp: u64) {
 pub fn sys_syslog(args: [u64; 6]) -> i64 {
     let action = args[0] as i32;
     let bufp = args[1] as *mut u8;
-    let len = args[2] as usize;
+    // syslog: a negative `len` is EINVAL (LTP syslog12). Without the
+    // signed check, args[2] cast to usize wraps negative to a huge
+    // positive and access_ok(bufp, huge) returns false → EFAULT.
+    let len_signed = args[2] as i64;
+    if len_signed < 0 {
+        return -(crate::syscall::errno::EINVAL as i64);
+    }
+    let len = len_signed as usize;
 
     // Permission check (Linux check_syslog_permissions): everything except
     // the size queries (3/10 with dmesg_restrict=0 semantics) requires
@@ -823,8 +830,14 @@ fn format_record_header(buf: &mut [u8; MAX_HEADER_LEN], level: u8, pid: u32, cpu
 
 /// Read records sequentially from where the last read left off.
 fn syslog_read_sequential(bufp: *mut u8, maxlen: usize) -> i64 {
-    if maxlen == 0 || bufp.is_null() {
+    // Linux do_syslog: NULL buffer is EINVAL, but a zero length is a
+    // successful empty read (LTP syslog11 calls read/read_all with
+    // len=0 and expects >= 0).
+    if bufp.is_null() {
         return -(crate::syscall::errno::EINVAL as i64);
+    }
+    if maxlen == 0 {
+        return 0;
     }
     if !crate::arch::uaccess::access_ok(bufp as usize, maxlen) {
         return -(crate::syscall::errno::EFAULT as i64);
@@ -897,8 +910,13 @@ fn syslog_read_sequential(bufp: *mut u8, maxlen: usize) -> i64 {
 
 /// Read all records from the ring buffer, oldest first.
 fn syslog_read_all(bufp: *mut u8, maxlen: usize, clear: bool) -> i64 {
-    if maxlen == 0 || bufp.is_null() {
+    // Same as the sequential read: NULL buffer is EINVAL, zero length
+    // is a successful empty read.
+    if bufp.is_null() {
         return -(crate::syscall::errno::EINVAL as i64);
+    }
+    if maxlen == 0 {
+        return 0;
     }
     if !crate::arch::uaccess::access_ok(bufp as usize, maxlen) {
         return -(crate::syscall::errno::EFAULT as i64);
@@ -1407,14 +1425,12 @@ fn kmsg_file_lseek(file: &crate::fs::file::File, offset: isize, whence: i32) -> 
 }
 
 /// FileOps for /dev/kmsg
-pub static KMSG_OPS: crate::fs::file::FileOps = crate::fs::file::FileOps {
-    read: Some(kmsg_file_read),
-    write: Some(kmsg_file_write),
-    lseek: Some(kmsg_file_lseek),
-    close: None,
-    poll: Some(kmsg_file_poll),
-    read_at: None,
-};
+pub static KMSG_OPS: crate::fs::file::FileOps = crate::fs::file::FileOps::builder()
+    .read(kmsg_file_read)
+    .write(kmsg_file_write)
+    .lseek(kmsg_file_lseek)
+    .poll(kmsg_file_poll)
+    .build();
 
 /// Initialize /dev/kmsg device node.
 ///
@@ -1619,14 +1635,12 @@ fn proc_kmsg_lseek(_file: &crate::fs::file::File, _offset: isize, _whence: i32) 
 
 /// FileOps for the /proc/kmsg stream (attached by procfs_get_file_ops
 /// for the node whose content_generator is generate_kmsg).
-pub static PROC_KMSG_OPS: crate::fs::file::FileOps = crate::fs::file::FileOps {
-    read: Some(proc_kmsg_read),
-    write: None,
-    lseek: Some(proc_kmsg_lseek),
-    close: Some(proc_kmsg_close),
-    poll: Some(proc_kmsg_poll),
-    read_at: None,
-};
+pub static PROC_KMSG_OPS: crate::fs::file::FileOps = crate::fs::file::FileOps::builder()
+    .read(proc_kmsg_read)
+    .lseek(proc_kmsg_lseek)
+    .close(proc_kmsg_close)
+    .poll(proc_kmsg_poll)
+    .build();
 
 // ==================== Convenience Macros ====================
 

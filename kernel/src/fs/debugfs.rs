@@ -588,11 +588,9 @@ fn debugfs_file_close(file: &crate::fs::File) -> i32 {
 }
 
 /// debugfs file operations.
-pub static DEBUGFS_FILE_OPS: crate::fs::FileOps = crate::fs::FileOps {
-    read: Some(debugfs_file_read),
-    write: Some(debugfs_file_write),
-    lseek: Some(debugfs_file_lseek),
-    close: Some(debugfs_file_close),
-    poll: None,
-    read_at: None,
-};
+pub static DEBUGFS_FILE_OPS: crate::fs::FileOps = crate::fs::FileOps::builder()
+    .read(debugfs_file_read)
+    .write(debugfs_file_write)
+    .lseek(debugfs_file_lseek)
+    .close(debugfs_file_close)
+    .build();

@@ -91,6 +91,112 @@ static int mode_anon(long mb)
  */
 static void print_memfree(void);
 
+/*
+ * fakehot <cacheMB> <anonMB> — the stress-fleet s18 shape (leg 51):
+ * like fake, but a child process re-reads the cache file in a loop so
+ * the file pages stay REFERENCED (the s18 wall: 78% of the inactive
+ * file list referenced while the anon hog churns; the fleet's kills
+ * fired with zero OOM-DEEP-PASS lines because kswapd's 16-pass
+ * escalation outran the page_alloc slowpath's own deep drain).
+ * On a kernel with the kswapd-leg deep pass, the wall is consumed in
+ * bulk (OOM-DEEP-PASS lines present) and the touch converts to slow
+ * allocations instead of a kill.
+ */
+static int mode_fakehot(long cache_mb, long anon_mb)
+{
+    const char *path = "/bigfile";
+    long want = cache_mb * 1024 * 1024;
+    int fd = open(path, O_RDWR | O_CREAT | O_TRUNC, 0644);
+    if (fd < 0) {
+        printf("fakehot: open %s failed errno=%d\n", path, errno);
+        return 1;
+    }
+    static char buf[64 * 1024];
+    memset(buf, 0x5a, sizeof(buf));
+    long wrote = 0;
+    while (wrote < want) {
+        long n = sizeof(buf);
+        if (want - wrote < n)
+            n = want - wrote;
+        if (write(fd, buf, n) != n) {
+            printf("fakehot: write failed at %ldMB errno=%d\n",
+                   wrote / (1024 * 1024), errno);
+            close(fd);
+            return 1;
+        }
+        wrote += n;
+    }
+    if (fsync(fd) != 0)
+        printf("fakehot: fsync errno=%d (continuing)\n", errno);
+    close(fd);
+    printf("fakehot: wrote+fsynced %ldMB file -- re-reading once\n", cache_mb);
+    fd = open(path, O_RDONLY);
+    if (fd < 0) {
+        printf("fakehot: reopen failed errno=%d\n", errno);
+        return 1;
+    }
+    long got = 0, n;
+    while ((n = read(fd, buf, sizeof(buf))) > 0)
+        got += n;
+    close(fd);
+    printf("fakehot: re-read %ldMB once (got=%ldMB)\n",
+           cache_mb, got / (1024 * 1024));
+    print_memfree();
+
+    /* The reference wall: a child that keeps re-reading the file so
+     * every page-cache hit re-sets Referenced. Its pipe read-end is
+     * O_NONBLOCK: EAGAIN while the parent lives, EOF (0) once the
+     * parent closes — the exit signal, no poll needed. */
+    int hop[2];
+    if (pipe(hop) != 0) {
+        printf("fakehot: pipe errno=%d\n", errno);
+        return 1;
+    }
+    pid_t rd = fork();
+    if (rd < 0) {
+        printf("fakehot: fork errno=%d\n", errno);
+        return 1;
+    }
+    if (rd == 0) {
+        close(hop[1]);
+        int fl = fcntl(hop[0], F_GETFL);
+        fcntl(hop[0], F_SETFL, fl | O_NONBLOCK);
+        for (;;) {
+            char b;
+            if (read(hop[0], &b, 1) == 0)
+                break; /* parent closed: done */
+            int rfd = open(path, O_RDONLY);
+            if (rfd < 0)
+                break;
+            while ((n = read(rfd, buf, sizeof(buf))) > 0)
+                ;
+            close(rfd);
+            sleep(1);
+        }
+        _exit(0);
+    }
+    close(hop[0]);
+    printf("fakehot: wall child pid=%d looping re-reads; touching %ldMB anon\n",
+           rd, anon_mb);
+    void *p = mmap(NULL, anon_mb * 1024 * 1024, PROT_READ | PROT_WRITE,
+                   MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (p == MAP_FAILED) {
+        printf("fakehot: mmap %ldMB failed errno=%d (%s)\n", anon_mb, errno,
+               strerror(errno));
+        return 1;
+    }
+    long s = touch_anon_mb(anon_mb, p);
+    close(hop[1]); /* release the wall child */
+    int st;
+    waitpid(rd, &st, 0);
+    printf("fakehot: ALL %ldMB anon touched ok (sum=%ld) -- the wall was drained, not killed\nOOMCHURN-FAKEHOT-PASS\n",
+           anon_mb, s);
+    munmap(p, anon_mb * 1024 * 1024);
+    return 0;
+}
+
+static void print_memfree(void);
+
 static int mode_fake(long cache_mb, long anon_mb)
 {
     const char *path = "/bigfile";
@@ -442,6 +548,8 @@ int main(int argc, char **argv)
         return mode_anon(atol(argv[2]));
     if (strcmp(argv[1], "fake") == 0)
         return mode_fake(atol(argv[2]), atol(argv[3]));
+    if (strcmp(argv[1], "fakehot") == 0)
+        return mode_fakehot(atol(argv[2]), atol(argv[3]));
     if (strcmp(argv[1], "fork") == 0)
         return mode_fork(atoi(argv[2]), atol(argv[3]));
     if (strcmp(argv[1], "churn") == 0)
