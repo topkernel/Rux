@@ -129,129 +129,141 @@ fn sys_read_inner(args: SyscallArgs) -> i64 {
     }
 
     // SAFETY: get_file_fd returns valid File or None; kernel_buf is a fresh allocation.
-    let ret = unsafe {
+    unsafe {
         match get_file_fd(fd) {
-            Some(file) => {
-                // Linux: reading from an O_WRONLY-only descriptor fails with
-                // EBADF (the fd is "not open for reading") — LTP read03.
-                let mode = file.flags.load(core::sync::atomic::Ordering::Relaxed)
-                    & crate::fs::file::FileFlags::O_ACCMODE;
-                if mode == crate::fs::file::FileFlags::O_WRONLY {
-                    return -errno::EBADF as i64;
-                }
-                // O_PATH descriptors permit no I/O — the fast paths below
-                // bypass File::read's gates (LTP open13).
-                if file.flags.load(core::sync::atomic::Ordering::Relaxed)
-                    & crate::fs::file::FileFlags::O_PATH != 0
-                {
-                    return -errno::EBADF as i64;
-                }
-                // Pipe fast path: transfer directly user↔ring. The generic
-                // staging below costs an alloc + 2 copies per op; on pipes
-                // that was ~half the per-syscall time under TCG.
-                if crate::fs::pipe::is_pipe_file(&file) {
-                    let n = crate::fs::pipe::pipe_read_user(&file, buf, count) as i64;
-                    // perf-audit (pa9): positive-read census — which fd
-                    // returns the 92K reads/s hilogd.rd_kmsg issues (pa4-8:
-                    // not /dev/kmsg, not EOF, not EAGAIN).
-                    if n > 0 {
-                        crate::dfx::syscost::note_read_data(&file, n as usize, fd);
-                    }
-                    return n;
-                }
-                // AF_UNIX fast path (leg 46, ledger 8.10.15): read(2) on a
-                // unix socket drains the receive queue directly into the
-                // user buffer with an on-stack bounce — no per-call heap
-                // staging. Inside a serialized sender/receiver cycle (the
-                // same-CPU regime), the generic path's staged alloc +
-                // double copy were the kernel-owned share of the 40-44 us
-                // cross-process class; the dispatch itself was proven free
-                // (p5d control row), so only the staging goes.
-                if crate::net::unix::is_unix_file(&file) {
-                    // SAFETY: buf was access_ok-validated against count at
-                    // sys_read entry (same contract as the pipe path).
-                    let n =
-                        unsafe { crate::net::unix::unix_read_user(&file, buf, count) } as i64;
-                    if n > 0 {
-                        crate::dfx::syscost::note_read_data(&file, n as usize, fd);
-                    }
-                    return n;
-                }
-                // ext4 fast path: page cache → user memory without the
-                // staging buffer (O_DIRECT keeps the generic staged path —
-                // it serves straight from the block layer).
-                if file.flags_bits() & crate::fs::file::FileFlags::O_DIRECT == 0
-                    && crate::fs::ext4::file::is_ext4_file(&file)
-                {
-                    let n = crate::fs::ext4::file::ext4_file_read_user_vfs(&file, buf, count) as i64;
-                    if n > 0 {
-                        crate::dfx::syscost::note_read_data(&file, n as usize, fd);
-                    }
-                    return n;
-                }
-                // Chunked read (SYSA-C1): stage at most RW_CHUNK at a time so
-                // a huge count can never OOM the kernel heap. A short chunk
-                // (EOF / pipe drained) ends the loop and returns what we
-                // have — pipe reads still return as soon as data exists
-                // (pipe capacity 16KB < RW_CHUNK).
-                //
-                // UNINIT staging: the file layer fills exactly the `n`
-                // bytes it returns before copy_to_user reads them, so
-                // zero-filling the buffer was a 4KB memset per read(2) —
-                // measurable on every hot path (file, pipe, tty).
-                let mut kernel_buf = alloc_uninit_buf(count.min(RW_CHUNK));
-                let mut total: usize = 0;
-                let mut user_ptr = buf;
-                let mut remaining = count;
-                loop {
-                    let chunk = remaining.min(RW_CHUNK);
-                    if chunk == 0 {
-                        break;
-                    }
-                    let result = file.read(kernel_buf.as_mut_ptr(), chunk);
-                    if result < 0 {
-                        if total > 0 {
-                            crate::dfx::syscost::note_read_data(&file, total, fd);
-                        }
-                        return if total > 0 { total as i64 } else { result as i32 as i64 };
-                    }
-                    if result == 0 {
-                        // perf-audit (pa4): EOF-spin census — a reader
-                        // whose fd hit EOF is a spin candidate (pa3:
-                        // hilogd.rd_kmsg at 92K reads/s never touches
-                        // /dev/kmsg's counters, so it is looping on some
-                        // EOF fd). Record (comm, path) once per comm;
-                        // syscost dumps print the table.
-                        crate::dfx::syscost::note_read_eof(&file);
-                        break;
-                    }
-                    let n = result as usize;
-                    // SAFETY: user_ptr stays within the access_ok-validated
-                    // [buf, buf+count) window; exception-table copy.
-                    let uncopied = crate::arch::uaccess::copy_to_user(
-                        user_ptr,
-                        kernel_buf.as_ptr(),
-                        n,
-                    );
-                    if uncopied > 0 {
-                        return if total > 0 { total as i64 } else { -errno::EFAULT as i64 };
-                    }
-                    total += n;
-                    remaining -= n;
-                    user_ptr = user_ptr.add(n);
-                    if n < chunk {
-                        break; // short read: EOF or nothing more available now
-                    }
-                }
-                if total > 0 {
-                    crate::dfx::syscost::note_read_data(&file, total, fd);
-                }
-                total as i64
-            }
-            None => -errno::EBADF as i64
+            Some(file) => read_file_core(fd, &file, buf, count),
+            None => -errno::EBADF as i64,
         }
-    };
-    ret
+    }
+}
+
+/// Leg-52 lever A: post-lookup read core shared by sys_read and sys_readv's
+/// loop. readv/writev previously re-resolved the fd PER IOVEC through
+/// sys_read/sys_write — one fresh fdtable get_file per iov on the hottest
+/// vector paths (perf-report 8.10.22: the 132-144M get_file/boot REST
+/// volume decomposes into 2-5x amplification of exactly this shape).
+/// `fd` rides along for the dfx census attribution.
+///
+/// SAFETY: buf..buf+count must be access_ok-validated by the caller
+/// (same contract the sys_read path had at its lookup point).
+fn read_file_core(fd: usize, file: &alloc::sync::Arc<crate::fs::file::File>, buf: *mut u8, count: usize) -> i64 {
+    unsafe {
+    // Linux: reading from an O_WRONLY-only descriptor fails with
+    // EBADF (the fd is "not open for reading") — LTP read03.
+    let mode = file.flags.load(core::sync::atomic::Ordering::Relaxed)
+        & crate::fs::file::FileFlags::O_ACCMODE;
+    if mode == crate::fs::file::FileFlags::O_WRONLY {
+        return -errno::EBADF as i64;
+    }
+    // O_PATH descriptors permit no I/O — the fast paths below
+    // bypass File::read's gates (LTP open13).
+    if file.flags.load(core::sync::atomic::Ordering::Relaxed)
+        & crate::fs::file::FileFlags::O_PATH != 0
+    {
+        return -errno::EBADF as i64;
+    }
+    // Pipe fast path: transfer directly user↔ring. The generic
+    // staging below costs an alloc + 2 copies per op; on pipes
+    // that was ~half the per-syscall time under TCG.
+    if crate::fs::pipe::is_pipe_file(&file) {
+        let n = crate::fs::pipe::pipe_read_user(&file, buf, count) as i64;
+        // perf-audit (pa9): positive-read census — which fd
+        // returns the 92K reads/s hilogd.rd_kmsg issues (pa4-8:
+        // not /dev/kmsg, not EOF, not EAGAIN).
+        if n > 0 {
+            crate::dfx::syscost::note_read_data(&file, n as usize, fd);
+        }
+        return n;
+    }
+    // AF_UNIX fast path (leg 46, ledger 8.10.15): read(2) on a
+    // unix socket drains the receive queue directly into the
+    // user buffer with an on-stack bounce — no per-call heap
+    // staging. Inside a serialized sender/receiver cycle (the
+    // same-CPU regime), the generic path's staged alloc +
+    // double copy were the kernel-owned share of the 40-44 us
+    // cross-process class; the dispatch itself was proven free
+    // (p5d control row), so only the staging goes.
+    if crate::net::unix::is_unix_file(&file) {
+        // SAFETY: buf was access_ok-validated against count at
+        // sys_read entry (same contract as the pipe path).
+        let n =
+            unsafe { crate::net::unix::unix_read_user(&file, buf, count) } as i64;
+        if n > 0 {
+            crate::dfx::syscost::note_read_data(&file, n as usize, fd);
+        }
+        return n;
+    }
+    // ext4 fast path: page cache → user memory without the
+    // staging buffer (O_DIRECT keeps the generic staged path —
+    // it serves straight from the block layer).
+    if file.flags_bits() & crate::fs::file::FileFlags::O_DIRECT == 0
+        && crate::fs::ext4::file::is_ext4_file(&file)
+    {
+        let n = crate::fs::ext4::file::ext4_file_read_user_vfs(&file, buf, count) as i64;
+        if n > 0 {
+            crate::dfx::syscost::note_read_data(&file, n as usize, fd);
+        }
+        return n;
+    }
+    // Chunked read (SYSA-C1): stage at most RW_CHUNK at a time so
+    // a huge count can never OOM the kernel heap. A short chunk
+    // (EOF / pipe drained) ends the loop and returns what we
+    // have — pipe reads still return as soon as data exists
+    // (pipe capacity 16KB < RW_CHUNK).
+    //
+    // UNINIT staging: the file layer fills exactly the `n`
+    // bytes it returns before copy_to_user reads them, so
+    // zero-filling the buffer was a 4KB memset per read(2) —
+    // measurable on every hot path (file, pipe, tty).
+    let mut kernel_buf = alloc_uninit_buf(count.min(RW_CHUNK));
+    let mut total: usize = 0;
+    let mut user_ptr = buf;
+    let mut remaining = count;
+    loop {
+        let chunk = remaining.min(RW_CHUNK);
+        if chunk == 0 {
+            break;
+        }
+        let result = file.read(kernel_buf.as_mut_ptr(), chunk);
+        if result < 0 {
+            if total > 0 {
+                crate::dfx::syscost::note_read_data(&file, total, fd);
+            }
+            return if total > 0 { total as i64 } else { result as i32 as i64 };
+        }
+        if result == 0 {
+            // perf-audit (pa4): EOF-spin census — a reader
+            // whose fd hit EOF is a spin candidate (pa3:
+            // hilogd.rd_kmsg at 92K reads/s never touches
+            // /dev/kmsg's counters, so it is looping on some
+            // EOF fd). Record (comm, path) once per comm;
+            // syscost dumps print the table.
+            crate::dfx::syscost::note_read_eof(&file);
+            break;
+        }
+        let n = result as usize;
+        // SAFETY: user_ptr stays within the access_ok-validated
+        // [buf, buf+count) window; exception-table copy.
+        let uncopied = crate::arch::uaccess::copy_to_user(
+            user_ptr,
+            kernel_buf.as_ptr(),
+            n,
+        );
+        if uncopied > 0 {
+            return if total > 0 { total as i64 } else { -errno::EFAULT as i64 };
+        }
+        total += n;
+        remaining -= n;
+        user_ptr = user_ptr.add(n);
+        if n < chunk {
+            break; // short read: EOF or nothing more available now
+        }
+    }
+    if total > 0 {
+        crate::dfx::syscost::note_read_data(&file, total, fd);
+    }
+    total as i64
+    }
 }
 
 /// sys_pread64 - Read from file descriptor at a given offset
@@ -532,141 +544,151 @@ pub fn sys_write(args: SyscallArgs) -> i64 {
     // SAFETY: get_file_fd returns valid File or None; user pointers validated above.
     unsafe {
         match get_file_fd(fd) {
-            Some(file) => {
-                // Linux: writing to a read-only (O_RDONLY) descriptor fails
-                // with EBADF (the fd is "not open for writing") — LTP
-                // write03/write04.
-                let mode = file.flags.load(core::sync::atomic::Ordering::Relaxed)
-                    & crate::fs::file::FileFlags::O_ACCMODE;
-                if mode == crate::fs::file::FileFlags::O_RDONLY {
-                    return -errno::EBADF as i64;
-                }
-                // O_PATH descriptors permit no I/O (LTP open13).
-                if file.flags.load(core::sync::atomic::Ordering::Relaxed)
-                    & crate::fs::file::FileFlags::O_PATH != 0
-                {
-                    return -errno::EBADF as i64;
-                }
-                // Check if this is the original console (UART) stdout/stderr
-                // by checking if the file ops match UART_OPS
-                use crate::fs::char_dev::UART_OPS;
-                let ops = (*file).get_ops();
-
-                if (fd == 1 || fd == 2) && ops.is_some_and(|o| core::ptr::eq(o, &UART_OPS as *const _)) {
-                    // Console output: write directly to UART fixmap address
-                    // Use a small stack buffer to avoid heap allocation
-                    const CHUNK_SIZE: usize = 256;
-                    let mut kernel_buf = [0u8; CHUNK_SIZE];
-                    let mut remaining = count;
-                    let mut total_written = 0;
-                    let mut user_ptr = buf;
-
-                    while remaining > 0 {
-                        let to_copy = core::cmp::min(remaining, CHUNK_SIZE);
-
-                        let uncopied = crate::arch::uaccess::copy_from_user(
-                            kernel_buf.as_mut_ptr(),
-                            user_ptr,
-                            to_copy
-                        );
-
-                        if uncopied > 0 {
-                            // Failed to copy some bytes
-                            if total_written == 0 {
-                                return -errno::EFAULT as i64;
-                            }
-                            break;
-                        }
-
-                        // Output the copied bytes through the console UART
-                        // (arch-generic: MMIO on riscv64, PIO 0x3f8 on
-                        // x86_64 — the old fixmap write_volatile addressed
-                        // a riscv-only MMIO window and silently dumped
-                        // user bytes into VA 0 on x86).
-                        let uart = crate::console::lock();
-                        for &b in &kernel_buf[..to_copy] {
-                            if b == b'\n' {
-                                uart.putc(b'\r');
-                            }
-                            uart.putc(b);
-                        }
-                        drop(uart);
-
-                        total_written += to_copy;
-                        remaining -= to_copy;
-                        user_ptr = user_ptr.add(to_copy);
-                    }
-                    return total_written as i64;
-                }
-
-                // Regular file or redirected output
-                // dfx=txnhunt (leg-29A): name the file when this write
-                // later draws a TXN-HANG (sc303's storage family parked
-                // in a write(9) loop; entry frame shows only the raw
-                // fd). Stash BEFORE the pipe fast path so a hang in a
-                // pipe/socket writev labels the pipe, not the previous
-                // regular-file write's path. Lazy form (leg 44): the
-                // old `&file.path()` built the String on EVERY write(2)
-                // even with the switch off — File::path() walks the
-                // dentry and formats, a per-call probe cost on the
-                // write hot path.
-                crate::dfx::pathstash::stash_file_lazy(
-                    crate::dfx::pathstash::OP_WRITE,
-                    || file.path(),
-                );
-                // Pipe fast path: transfer directly user↔ring (see the
-                // matching branch in sys_read).
-                if crate::fs::pipe::is_pipe_file(&file) {
-                    return crate::fs::pipe::pipe_write_user(&file, buf, count) as i64;
-                }
-                // Chunked write (SYSA-C1): bounded staging buffer so a huge
-                // count cannot OOM the kernel heap; a partial chunk write
-                // ends the loop and returns what was accepted (POSIX
-                // partial-write semantics).
-                let mut kernel_buf = alloc_uninit_buf(count.min(RW_CHUNK));
-                let mut total: usize = 0;
-                let mut user_ptr = buf;
-                let mut remaining = count;
-                let mut first_err: i32 = 0;
-                loop {
-                    let chunk = remaining.min(RW_CHUNK);
-                    if chunk == 0 {
-                        break;
-                    }
-                    let uncopied = crate::arch::uaccess::copy_from_user(
-                        kernel_buf.as_mut_ptr(),
-                        user_ptr,
-                        chunk,
-                    );
-                    if uncopied > 0 {
-                        if total == 0 {
-                            return -errno::EFAULT as i64;
-                        }
-                        break;
-                    }
-                    let result = file.write(kernel_buf.as_ptr(), chunk);
-                    if result <= 0 {
-                        if result < 0 && total == 0 {
-                            first_err = result as i32;
-                        }
-                        break;
-                    }
-                    let n = result as usize;
-                    total += n;
-                    remaining -= n;
-                    user_ptr = user_ptr.add(n);
-                    if n < chunk {
-                        break; // short write: destination full / non-blocking
-                    }
-                }
-                if total > 0 {
-                    total as i64
-                } else {
-                    first_err as i64
-                }
-            }
+            Some(file) => write_file_core(fd, &file, buf, count),
             None => -errno::EBADF as i64,
         }
+    }
+}
+
+/// Leg-52 lever A: post-lookup write core shared by sys_write and
+/// sys_writev's stream loop (see read_file_core's note — the old writev
+/// paid one fdtable lookup per iovec through sys_write). `fd` rides
+/// along for the console fast-path check and the dfx stashes.
+///
+/// SAFETY: buf..buf+count must be access_ok-validated by the caller.
+fn write_file_core(fd: usize, file: &alloc::sync::Arc<crate::fs::file::File>, buf: *const u8, count: usize) -> i64 {
+    unsafe {
+    // Linux: writing to a read-only (O_RDONLY) descriptor fails
+    // with EBADF (the fd is "not open for writing") — LTP
+    // write03/write04.
+    let mode = file.flags.load(core::sync::atomic::Ordering::Relaxed)
+        & crate::fs::file::FileFlags::O_ACCMODE;
+    if mode == crate::fs::file::FileFlags::O_RDONLY {
+        return -errno::EBADF as i64;
+    }
+    // O_PATH descriptors permit no I/O (LTP open13).
+    if file.flags.load(core::sync::atomic::Ordering::Relaxed)
+        & crate::fs::file::FileFlags::O_PATH != 0
+    {
+        return -errno::EBADF as i64;
+    }
+    // Check if this is the original console (UART) stdout/stderr
+    // by checking if the file ops match UART_OPS
+    use crate::fs::char_dev::UART_OPS;
+    let ops = (*file).get_ops();
+
+    if (fd == 1 || fd == 2) && ops.is_some_and(|o| core::ptr::eq(o, &UART_OPS as *const _)) {
+        // Console output: write directly to UART fixmap address
+        // Use a small stack buffer to avoid heap allocation
+        const CHUNK_SIZE: usize = 256;
+        let mut kernel_buf = [0u8; CHUNK_SIZE];
+        let mut remaining = count;
+        let mut total_written = 0;
+        let mut user_ptr = buf;
+
+        while remaining > 0 {
+            let to_copy = core::cmp::min(remaining, CHUNK_SIZE);
+
+            let uncopied = crate::arch::uaccess::copy_from_user(
+                kernel_buf.as_mut_ptr(),
+                user_ptr,
+                to_copy
+            );
+
+            if uncopied > 0 {
+                // Failed to copy some bytes
+                if total_written == 0 {
+                    return -errno::EFAULT as i64;
+                }
+                break;
+            }
+
+            // Output the copied bytes through the console UART
+            // (arch-generic: MMIO on riscv64, PIO 0x3f8 on
+            // x86_64 — the old fixmap write_volatile addressed
+            // a riscv-only MMIO window and silently dumped
+            // user bytes into VA 0 on x86).
+            let uart = crate::console::lock();
+            for &b in &kernel_buf[..to_copy] {
+                if b == b'\n' {
+                    uart.putc(b'\r');
+                }
+                uart.putc(b);
+            }
+            drop(uart);
+
+            total_written += to_copy;
+            remaining -= to_copy;
+            user_ptr = user_ptr.add(to_copy);
+        }
+        return total_written as i64;
+    }
+
+    // Regular file or redirected output
+    // dfx=txnhunt (leg-29A): name the file when this write
+    // later draws a TXN-HANG (sc303's storage family parked
+    // in a write(9) loop; entry frame shows only the raw
+    // fd). Stash BEFORE the pipe fast path so a hang in a
+    // pipe/socket writev labels the pipe, not the previous
+    // regular-file write's path. Lazy form (leg 44): the
+    // old `&file.path()` built the String on EVERY write(2)
+    // even with the switch off — File::path() walks the
+    // dentry and formats, a per-call probe cost on the
+    // write hot path.
+    crate::dfx::pathstash::stash_file_lazy(
+        crate::dfx::pathstash::OP_WRITE,
+        || file.path(),
+    );
+    // Pipe fast path: transfer directly user↔ring (see the
+    // matching branch in sys_read).
+    if crate::fs::pipe::is_pipe_file(&file) {
+        return crate::fs::pipe::pipe_write_user(&file, buf, count) as i64;
+    }
+    // Chunked write (SYSA-C1): bounded staging buffer so a huge
+    // count cannot OOM the kernel heap; a partial chunk write
+    // ends the loop and returns what was accepted (POSIX
+    // partial-write semantics).
+    let mut kernel_buf = alloc_uninit_buf(count.min(RW_CHUNK));
+    let mut total: usize = 0;
+    let mut user_ptr = buf;
+    let mut remaining = count;
+    let mut first_err: i32 = 0;
+    loop {
+        let chunk = remaining.min(RW_CHUNK);
+        if chunk == 0 {
+            break;
+        }
+        let uncopied = crate::arch::uaccess::copy_from_user(
+            kernel_buf.as_mut_ptr(),
+            user_ptr,
+            chunk,
+        );
+        if uncopied > 0 {
+            if total == 0 {
+                return -errno::EFAULT as i64;
+            }
+            break;
+        }
+        let result = file.write(kernel_buf.as_ptr(), chunk);
+        if result <= 0 {
+            if result < 0 && total == 0 {
+                first_err = result as i32;
+            }
+            break;
+        }
+        let n = result as usize;
+        total += n;
+        remaining -= n;
+        user_ptr = user_ptr.add(n);
+        if n < chunk {
+            break; // short write: destination full / non-blocking
+        }
+    }
+    if total > 0 {
+        total as i64
+    } else {
+        first_err as i64
+    }
     }
 }
 
@@ -723,6 +745,17 @@ pub fn sys_writev(args: SyscallArgs) -> i64 {
         return e;
     }
 
+    // Leg-52 lever A: resolve the descriptor ONCE for the whole vector —
+    // the old shape paid a fresh get_file for the unix family probe, a
+    // second one on the gathered dgram path, and one PER IOVEC through
+    // sys_write on the stream path (perf-report 8.10.22). EBADF moves to
+    // the head, the errno the first iov's sys_write used to produce.
+    // SAFETY: fdtable read only; the Arc is dropped at function exit.
+    let file = match unsafe { crate::fs::get_file_fd(fd) } {
+        Some(f) => f,
+        None => return -errno::EBADF as i64,
+    };
+
     // Datagram writev must gather (Linux semantics): one writev() on a
     // SOCK_DGRAM/SOCK_SEQPACKET unix socket is ONE datagram built from
     // all iovecs concatenated — never one datagram per iovec. libhilog
@@ -733,7 +766,7 @@ pub fn sys_writev(args: SyscallArgs) -> i64 {
     // saw orphaned binary headers and bare tag/content fragments).
     // SOCK_STREAM keeps the per-iov loop: a byte stream has no record
     // boundaries, so sequential writes are indistinguishable.
-    if let Some((usock, _)) = crate::net::unix::unix_file_of(fd) {
+    if let Some((usock, _)) = crate::net::unix::unix_file_of_file(&file) {
         if matches!(
             usock.kind,
             crate::net::unix::UnixKind::Dgram | crate::net::unix::UnixKind::Seqpacket
@@ -786,25 +819,19 @@ pub fn sys_writev(args: SyscallArgs) -> i64 {
             if gathered.is_empty() {
                 return 0;
             }
-            use crate::fs::get_file_fd;
-            // SAFETY: fd validated by unix_file_of above; the gathered
-            // buffer is a kernel slice, so file.write needs no user copy.
-            return unsafe {
-                match get_file_fd(fd) {
-                    Some(file) => {
-                        // O_RDONLY writev fails EBADF like write (write03/04
-                        // parity; the stream path below inherits the check
-                        // from sys_write, this gathered path needs its own).
-                        let mode = file.flags.load(core::sync::atomic::Ordering::Relaxed)
-                            & crate::fs::file::FileFlags::O_ACCMODE;
-                        if mode == crate::fs::file::FileFlags::O_RDONLY {
-                            return -errno::EBADF as i64;
-                        }
-                        file.write(gathered.as_ptr(), gathered.len()) as i64
-                    }
-                    None => -errno::EBADF as i64,
-                }
+            // Leg-52 lever A: write through the file resolved at the head
+            // (the gathered buffer is a kernel slice, so file.write needs
+            // no user copy).
+            // O_RDONLY writev fails EBADF like write (write03/04 parity;
+            // the stream path below inherits the check from
+            // write_file_core, this gathered path needs its own).
+            let mode = file.flags.load(core::sync::atomic::Ordering::Relaxed)
+                & crate::fs::file::FileFlags::O_ACCMODE;
+            if mode == crate::fs::file::FileFlags::O_RDONLY {
+                return -errno::EBADF as i64;
             }
+            // SAFETY: `gathered` is a kernel slice of exactly len bytes.
+            return unsafe { file.write(gathered.as_ptr(), gathered.len()) as i64 };
         }
     }
 
@@ -843,8 +870,8 @@ pub fn sys_writev(args: SyscallArgs) -> i64 {
             // Check each iov buffer using access_ok
             if len > 0 && crate::arch::uaccess::access_ok(base, len) {
                 has_valid_iov = true;
-                let write_args = [fd as u64, iov.iov_base as u64, len as u64, 0, 0, 0];
-                let result = sys_write(write_args);
+                // Leg-52 lever A: one lookup per writev, not per iovec.
+                let result = write_file_core(fd, &file, iov.iov_base as *const u8, len);
 
                 if result < 0 {
                     if total_written == 0 {
@@ -885,6 +912,15 @@ pub fn sys_readv(args: SyscallArgs) -> i64 {
         return e;
     }
 
+    // Leg-52 lever A: one fdtable lookup per readv (was one per iovec
+    // through sys_read). EBADF at the head matches the errno the first
+    // iov's sys_read used to produce.
+    // SAFETY: fdtable read only; the Arc is dropped at function exit.
+    let file = match unsafe { crate::fs::get_file_fd(fd) } {
+        Some(f) => f,
+        None => return -errno::EBADF as i64,
+    };
+
     let mut total_read: isize = 0;
     let mut has_valid_iov = false;
 
@@ -920,8 +956,8 @@ pub fn sys_readv(args: SyscallArgs) -> i64 {
             // Check each iov buffer using access_ok
             if len > 0 && crate::arch::uaccess::access_ok(base, len) {
                 has_valid_iov = true;
-                let read_args = [fd as u64, iov.iov_base as u64, len as u64, 0, 0, 0];
-                let result = sys_read(read_args);
+                // Leg-52 lever A: one lookup per readv, not per iovec.
+                let result = read_file_core(fd, &file, iov.iov_base as *mut u8, len);
 
                 if result < 0 {
                     if total_read == 0 {

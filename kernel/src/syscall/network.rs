@@ -726,8 +726,14 @@ unsafe fn deliver_netlink_cred_cmsg(msg_ptr: *mut u8) -> Result<usize, i64> {
 fn socket_file_of(fd: usize) -> Option<(alloc::sync::Arc<crate::net::socket::Socket>, bool)> {
     let fdtable = crate::sched::get_current_fdtable()?;
     let file = fdtable.get_file(fd)?;
+    socket_file_ref(&file)
+}
+
+/// Leg-52 lever A: the file-resolved arm of `socket_file_of` (one lookup
+/// at the ladder head, none inside).
+fn socket_file_ref(file: &alloc::sync::Arc<crate::fs::file::File>) -> Option<(alloc::sync::Arc<crate::net::socket::Socket>, bool)> {
     let nonblock = (file.flags().bits() & crate::fs::file::FileFlags::O_NONBLOCK) != 0;
-    let socket = crate::net::socket::get_socket_from_fd(fd)?;
+    let socket = crate::net::socket::socket_of_arc(file)?;
     Some((socket, nonblock))
 }
 
@@ -736,14 +742,16 @@ fn socket_file_of(fd: usize) -> Option<(alloc::sync::Arc<crate::net::socket::Soc
 /// conflates the two into ENOTSOCK (LTP sendmmsg02/recvmmsg01 pass fd=-1
 /// and expect EBADF).
 fn socket_file_of_checked(fd: i32) -> Result<(alloc::sync::Arc<crate::net::socket::Socket>, bool), i64> {
+    // Leg-52 lever A: one fdtable lookup for both classifications.
     let fdtable = match crate::sched::get_current_fdtable() {
         Some(t) => t,
         None => return Err(-(errno::EBADF as i64)),
     };
-    if fdtable.get_file(fd as usize).is_none() {
-        return Err(-(errno::EBADF as i64));
-    }
-    match socket_file_of(fd as usize) {
+    let file = match fdtable.get_file(fd as usize) {
+        Some(f) => f,
+        None => return Err(-(errno::EBADF as i64)),
+    };
+    match socket_file_ref(&file) {
         Some(s) => Ok(s),
         None => Err(-(errno::ENOTSOCK as i64)),
     }
@@ -1124,10 +1132,16 @@ pub fn sys_sendto(args: SyscallArgs) -> i64 {
     // Entry fd classification (sendto(2)): not-open is EBADF, open but
     // not a socket is ENOTSOCK (LTP sendto01 cases 1-2; the ENOTSOCK
     // side falls out of the family probes + get_socket_from_fd below).
-    // SAFETY: fdtable read only; the Arc is dropped immediately.
-    if unsafe { crate::fs::get_file_fd(fd) }.is_none() {
-        return -(errno::EBADF as i64);
-    }
+    // Leg-52 lever A: resolve the descriptor ONCE here and pass &file
+    // through the family ladder — the old shape did a fresh get_file per
+    // family probe (unix + netlink + raw x2 + generic = up to 6 lookups
+    // per call), the single biggest contributor to the 132-144M
+    // get_file/boot REST volume (perf-report 8.10.22).
+    // SAFETY: fdtable read only; the Arc is dropped at function exit.
+    let file = match unsafe { crate::fs::get_file_fd(fd) } {
+        Some(f) => f,
+        None => return -(errno::EBADF as i64),
+    };
     // Destination length contract (move_addr_to_kernel): a tolen that
     // is negative or larger than sockaddr_storage is EINVAL (LTP
     // sendto01 "invalid to buffer length" passes -1).
@@ -1155,7 +1169,7 @@ pub fn sys_sendto(args: SyscallArgs) -> i64 {
 
     // P0-1: AF_UNIX sendto — stage the payload and route through the unix
     // send engine (sendto cannot carry cmsg data; SCM_RIGHTS is sendmsg).
-    if let Some((usock, file_nonblock)) = crate::net::unix::unix_file_of(fd) {
+    if let Some((usock, file_nonblock)) = crate::net::unix::unix_file_of_file(&file) {
         let stage = len.min(crate::syscall::io::RW_CHUNK);
         let mut kbuf = alloc::vec::Vec::new();
         if kbuf.try_reserve_exact(stage).is_err() {
@@ -1205,7 +1219,7 @@ pub fn sys_sendto(args: SyscallArgs) -> i64 {
 
     // P0-2: AF_NETLINK — the buffer is/are rtnetlink request message(s);
     // execution queues the responses for the matching recv.
-    if let Some((nlsock, _)) = crate::net::netlink::netlink_file_of(fd) {
+    if let Some((nlsock, _)) = crate::net::netlink::netlink_file_of_file(&file) {
         let stage = len.min(crate::syscall::io::RW_CHUNK);
         let mut kbuf = alloc::vec::Vec::new();
         if kbuf.try_reserve_exact(stage).is_err() {
@@ -1227,7 +1241,7 @@ pub fn sys_sendto(args: SyscallArgs) -> i64 {
 
     // P0-2: AF_INET SOCK_RAW / AF_PACKET — the buffer is a complete
     // ICMP/IP packet; the sockaddr supplies the destination.
-    if let Some((rsock, _)) = crate::net::raw::raw_file_of(fd) {
+    if let Some((rsock, _)) = crate::net::raw::raw_file_of_file(&file) {
         let stage = len.min(crate::syscall::io::RW_CHUNK);
         let mut kbuf = alloc::vec::Vec::new();
         if kbuf.try_reserve_exact(stage).is_err() {
@@ -1255,7 +1269,7 @@ pub fn sys_sendto(args: SyscallArgs) -> i64 {
     // code first indexed the GLOBAL socket table with the process fd and
     // then "fell back" to indexing the protocol tables with it — both wrong
     // namespaces.
-    let socket = match crate::net::socket::get_socket_from_fd(fd) {
+    let socket = match crate::net::socket::socket_of_arc(&file) {
         Some(s) => s,
         // W3: fd resolves but is not a socket -> ENOTSOCK
         None => return -(errno::ENOTSOCK as i64),
@@ -2828,11 +2842,19 @@ pub fn sys_sendmsg(args: SyscallArgs) -> i64 {
         }
     }
 
+    // Leg-52 lever A: resolve the descriptor ONCE for the family ladder
+    // (see sys_sendto's note). sendmsg deliberately keeps NO separate
+    // EBADF head: an unopened fd falls through every family probe to the
+    // generic ENOTSOCK below, exactly the errno shape the old per-family
+    // lookups produced.
+    // SAFETY: fdtable read only; the Arc is dropped at function exit.
+    let file_opt = unsafe { crate::fs::get_file_fd(fd as usize) };
+
     // P0-1: AF_UNIX sendmsg — full path with SCM_RIGHTS support. Runs
     // BEFORE the total_len==0 early return: a zero-length payload with
     // ancillary data (SCM_RIGHTS/SCM_CREDENTIALS) is a legal message and
     // must be delivered, not silently dropped.
-    if let Some((usock, file_nonblock)) = crate::net::unix::unix_file_of(fd as usize) {
+    if let Some((usock, file_nonblock)) = file_opt.as_ref().and_then(crate::net::unix::unix_file_of_file) {
         // Parse SCM_RIGHTS / SCM_CREDENTIALS cmsg(s) from msg_control
         // (msghdr offsets 32/40).
         let (scm_files, want_cred) = match parse_unix_cmsgs(msg_ptr) {
@@ -2894,7 +2916,7 @@ pub fn sys_sendmsg(args: SyscallArgs) -> i64 {
     }
 
     // P0-2: AF_NETLINK — execute the rtnetlink request(s) in the buffer.
-    if let Some((nlsock, _)) = crate::net::netlink::netlink_file_of(fd as usize) {
+    if let Some((nlsock, _)) = file_opt.as_ref().and_then(crate::net::netlink::netlink_file_of_file) {
         return match crate::net::netlink::netlink_send(&nlsock, &buf) {
             Ok(n) => n as i64,
             Err(e) => e as i64,
@@ -2903,7 +2925,7 @@ pub fn sys_sendmsg(args: SyscallArgs) -> i64 {
 
     // P0-2: AF_INET SOCK_RAW / AF_PACKET — complete ICMP/IP packet in the
     // iovs; msg_name is the destination (sockaddr_in / sockaddr_ll).
-    if let Some((rsock, _)) = crate::net::raw::raw_file_of(fd as usize) {
+    if let Some((rsock, _)) = file_opt.as_ref().and_then(crate::net::raw::raw_file_of_file) {
         let dest = if !msg_name_ptr.is_null() && msg_namelen >= 16 {
             match parse_raw_send_dest(&rsock, msg_name_ptr) {
                 Ok(d) => Some(d),
@@ -2944,7 +2966,9 @@ pub fn sys_sendmsg(args: SyscallArgs) -> i64 {
     };
 
     // Get socket and send (W3: through the blocking send engine).
-    match socket_file_of(fd as usize) {
+    // Leg-52 lever A: resolve through the already-held File instead of a
+    // fresh fdtable lookup.
+    match file_opt.as_ref().and_then(socket_file_ref) {
         Some((socket, file_nonblock)) => {
             // W3: a UDP datagram above 65507 bytes cannot be represented
             // in the 16-bit length field — EMSGSIZE up front (not a late
@@ -3014,10 +3038,13 @@ pub fn sys_recvmsg(args: SyscallArgs) -> i64 {
     // open is EBADF (LTP recvmsg01 "bad file descriptor" uses fd 400);
     // an open descriptor that is not a socket stays ENOTSOCK via the
     // get_socket_from_fd gate further down.
-    // SAFETY: fdtable read only; the Arc is dropped immediately.
-    if unsafe { crate::fs::get_file_fd(fd as usize) }.is_none() {
-        return -(errno::EBADF as i64);
-    }
+    // Leg-52 lever A: resolve the descriptor ONCE and pass &file through
+    // the family ladder (see sys_sendto's note).
+    // SAFETY: fdtable read only; the Arc is dropped at function exit.
+    let file = match unsafe { crate::fs::get_file_fd(fd as usize) } {
+        Some(f) => f,
+        None => return -(errno::EBADF as i64),
+    };
 
     // Linux ABI: on return, msg_controllen holds the number of control
     // bytes ACTUALLY written — 0 when the message carries no cmsgs. Every
@@ -3090,7 +3117,7 @@ pub fn sys_recvmsg(args: SyscallArgs) -> i64 {
 
     // P0-1: AF_UNIX recvmsg — one receive with SCM_RIGHTS delivery and a
     // sockaddr_un source address.
-    if let Some((usock, file_nonblock)) = crate::net::unix::unix_file_of(fd as usize) {
+    if let Some((usock, file_nonblock)) = crate::net::unix::unix_file_of_file(&file) {
         let nonblock = file_nonblock || (flags & MSG_DONTWAIT) != 0;
         let deadline = usock.rcvtimeo_deadline();
         let peek = (flags & MSG_PEEK) != 0;
@@ -3186,7 +3213,7 @@ pub fn sys_recvmsg(args: SyscallArgs) -> i64 {
 
     // P0-2: AF_NETLINK recvmsg — exactly one rtnetlink message per call,
     // source address = kernel sockaddr_nl.
-    if let Some((nlsock, file_nonblock)) = crate::net::netlink::netlink_file_of(fd as usize) {
+    if let Some((nlsock, file_nonblock)) = crate::net::netlink::netlink_file_of_file(&file) {
         let nonblock = file_nonblock || (flags & MSG_DONTWAIT) != 0;
         let deadline = nlsock.rcvtimeo_deadline();
         let n = match crate::net::netlink::netlink_recv(&nlsock, &mut buf, nonblock, deadline) {
@@ -3251,7 +3278,7 @@ pub fn sys_recvmsg(args: SyscallArgs) -> i64 {
 
     // P0-2: AF_INET SOCK_RAW / AF_PACKET recvmsg — one datagram per call
     // with the peer sockaddr (sockaddr_in / sockaddr_ll) as msg_name.
-    if let Some((rsock, file_nonblock)) = crate::net::raw::raw_file_of(fd as usize) {
+    if let Some((rsock, file_nonblock)) = crate::net::raw::raw_file_of_file(&file) {
         let nonblock = file_nonblock || (flags & MSG_DONTWAIT) != 0;
         let deadline = rsock.rcvtimeo_deadline();
         let (n, src) =
@@ -3316,7 +3343,7 @@ pub fn sys_recvmsg(args: SyscallArgs) -> i64 {
     }
 
     // Get socket and receive (W3: through the blocking recv engine).
-    let (socket, file_nonblock) = match socket_file_of(fd as usize) {
+    let (socket, file_nonblock) = match socket_file_ref(&file) {
         Some(s) => s,
         None => return -(errno::ENOTSOCK as i64),
     };
@@ -3530,8 +3557,10 @@ pub fn sys_sendmmsg(args: SyscallArgs) -> i64 {
     // P0-1/P0-2: AF_UNIX / AF_NETLINK — route each mmsghdr through the
     // single-message sys_sendmsg (an mmsghdr's first 56 bytes ARE an
     // msghdr; msg_len is written back at offset 56).
-    if crate::net::unix::unix_file_of(fd as usize).is_some()
-        || crate::net::netlink::netlink_file_of(fd as usize).is_some()
+    // Leg-52 lever A: one lookup shared by both family probes.
+    let fam_file = crate::sched::get_current_fdtable().and_then(|t| t.get_file(fd as usize));
+    if fam_file.as_ref().and_then(crate::net::unix::unix_file_of_file).is_some()
+        || fam_file.as_ref().and_then(crate::net::netlink::netlink_file_of_file).is_some()
     {
         let mut total_sent = 0u32;
         for i in 0..vlen as usize {
@@ -3739,8 +3768,10 @@ pub fn sys_recvmmsg(args: SyscallArgs) -> i64 {
     // P0-1/P0-2: AF_UNIX / AF_NETLINK — route each mmsghdr through the
     // single-message sys_recvmsg (msg_len written back at offset 56; the
     // recvmmsg batch timeout is approximated by SO_RCVTIMEO here).
-    if crate::net::unix::unix_file_of(fd as usize).is_some()
-        || crate::net::netlink::netlink_file_of(fd as usize).is_some()
+    // Leg-52 lever A: one lookup shared by both family probes.
+    let fam_file = crate::sched::get_current_fdtable().and_then(|t| t.get_file(fd as usize));
+    if fam_file.as_ref().and_then(crate::net::unix::unix_file_of_file).is_some()
+        || fam_file.as_ref().and_then(crate::net::netlink::netlink_file_of_file).is_some()
     {
         let mut total_recv = 0u32;
         for i in 0..vlen as usize {
@@ -3954,10 +3985,14 @@ pub fn sys_recvfrom(args: SyscallArgs) -> i64 {
     // (LTP recvfrom01 cases 1-2). The address pointers are deliberately
     // NOT validated here — the source address is written back only after
     // a successful receive (see the write-back block at the end).
-    // SAFETY: fdtable read only; the Arc is dropped immediately.
-    if unsafe { crate::fs::get_file_fd(fd) }.is_none() {
-        return -(errno::EBADF as i64);
-    }
+    // Leg-52 lever A: resolve the descriptor ONCE and pass &file through
+    // the family ladder (see sys_sendto's note) — the old shape paid one
+    // get_file per family probe on every recvfrom.
+    // SAFETY: fdtable read only; the Arc is dropped at function exit.
+    let file = match unsafe { crate::fs::get_file_fd(fd) } {
+        Some(f) => f,
+        None => return -(errno::EBADF as i64),
+    };
 
     // Check buffer pointer validity
     if buf_ptr.is_null() {
@@ -3974,7 +4009,7 @@ pub fn sys_recvfrom(args: SyscallArgs) -> i64 {
     }
 
     // P0-1: AF_UNIX — receive into a kernel buffer, report the sender path.
-    if let Some((usock, file_nonblock)) = crate::net::unix::unix_file_of(fd) {
+    if let Some((usock, file_nonblock)) = crate::net::unix::unix_file_of_file(&file) {
         let stage = len.min(crate::syscall::io::RW_CHUNK);
         let mut kbuf = alloc::vec::Vec::new();
         if kbuf.try_reserve_exact(stage).is_err() {
@@ -4022,7 +4057,7 @@ pub fn sys_recvfrom(args: SyscallArgs) -> i64 {
     }
 
     // P0-2: AF_NETLINK — one rtnetlink message + sockaddr_nl source.
-    if let Some((nlsock, file_nonblock)) = crate::net::netlink::netlink_file_of(fd) {
+    if let Some((nlsock, file_nonblock)) = crate::net::netlink::netlink_file_of_file(&file) {
         let stage = len.min(crate::syscall::io::RW_CHUNK);
         let mut kbuf = alloc::vec::Vec::new();
         if kbuf.try_reserve_exact(stage).is_err() {
@@ -4060,7 +4095,7 @@ pub fn sys_recvfrom(args: SyscallArgs) -> i64 {
     }
 
     // P0-2: AF_INET SOCK_RAW / AF_PACKET — one datagram + source sockaddr.
-    if let Some((rsock, file_nonblock)) = crate::net::raw::raw_file_of(fd) {
+    if let Some((rsock, file_nonblock)) = crate::net::raw::raw_file_of_file(&file) {
         let stage = len.min(crate::syscall::io::RW_CHUNK);
         let mut kbuf = alloc::vec::Vec::new();
         if kbuf.try_reserve_exact(stage).is_err() {
@@ -4115,7 +4150,7 @@ pub fn sys_recvfrom(args: SyscallArgs) -> i64 {
     }
 
     // Get socket through the per-process fd table (review NET-C3)
-    let socket = match crate::net::socket::get_socket_from_fd(fd) {
+    let socket = match crate::net::socket::socket_of_arc(&file) {
         Some(s) => s,
         None => return -(errno::ENOTSOCK as i64),
     };

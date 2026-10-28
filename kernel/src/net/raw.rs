@@ -620,6 +620,12 @@ pub fn raw_socket_create(type_: i32, protocol: i32) -> Result<usize, i32> {
 pub fn raw_socket_from_fd(fd: usize) -> Option<Arc<RawSocket>> {
     let fdtable = crate::sched::get_current_fdtable()?;
     let file = fdtable.get_file(fd)?;
+    raw_socket_of_file(&file)
+}
+
+/// Leg-52 lever A: fd resolved once by the classification ladder head;
+/// see unix_file_of_file for the amplification note.
+pub fn raw_socket_of_file(file: &Arc<File>) -> Option<Arc<RawSocket>> {
     {
         let ops = unsafe { *file.ops.get() };
         match ops {
@@ -628,14 +634,22 @@ pub fn raw_socket_from_fd(fd: usize) -> Option<Arc<RawSocket>> {
         }
     }
     // SAFETY: ops identity confirmed; private_data is a leaked Arc.
-    unsafe { raw_of_file(&file) }
+    unsafe { raw_of_file(file) }
 }
 
 /// (RawSocket, file O_NONBLOCK) for a fd.
 pub fn raw_file_of(fd: usize) -> Option<(Arc<RawSocket>, bool)> {
-    let socket = raw_socket_from_fd(fd)?;
     let fdtable = crate::sched::get_current_fdtable()?;
     let file = fdtable.get_file(fd)?;
+    raw_file_of_file(&file)
+}
+
+/// Leg-52 lever A: one ops check + one private_data cast — the old
+/// fd-shaped helper resolved the fd TWICE (raw_socket_from_fd plus its
+/// own get_file), so a raw-socket sendto paid three lookups before the
+/// generic tail even ran.
+pub fn raw_file_of_file(file: &Arc<File>) -> Option<(Arc<RawSocket>, bool)> {
+    let socket = raw_socket_of_file(file)?;
     let nonblock = (file.flags().bits() & FileFlags::O_NONBLOCK) != 0;
     Some((socket, nonblock))
 }

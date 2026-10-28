@@ -1946,7 +1946,12 @@ fn unwind_accepted(file: &Arc<File>, tcp_fd: i32) {
 pub fn get_socket_from_fd(fd: usize) -> Option<Arc<Socket>> {
     let fdtable = crate::sched::get_current_fdtable()?;
     let file = fdtable.get_file(fd)?;
+    socket_of_arc(&file)
+}
 
+/// Leg-52 lever A: fd resolved once by the classification ladder head;
+/// see unix_file_of_file for the amplification note.
+pub fn socket_of_arc(file: &Arc<File>) -> Option<Arc<Socket>> {
     // W3: verify the file actually IS a socket. private_data holds
     // arbitrary per-file-type pointers (pipes, devices, ...), and the old
     // code blindly cast them to Socket — type confusion for every network
