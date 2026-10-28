@@ -36,16 +36,22 @@ FUNCTIONAL GATES ON THE MERGED TIP fb27b8ff — ALL GREEN:
   live, zero steals, same shape as leg-36A's onor=9 steal=0.
 
 PERF TIERS 1,2 (the binding check): watcher
-run/perf-gate-leg37a-watch.sh (detached, PID in ps; poll 3 min;
-conditions: foreign qemu < 2 AND load1 < 9 AND MemAvailable >= 12G —
-the last added because the Tier-1 boot is a 4G q35 KVM guest and the
-host free floor 10G is hard; 5 h deadline from 07:08). Gate kernel
-SNAPSHOTTED at run/bzImage-leg37A-tip (md5 3236b48b7946992664b3faacf
-66619ce, = the fb27b8ff x86_64 build) so a later rebuild can never
-swap the image under the gate. rc=3 (another lane took the window)
-keeps polling instead of exiting. Verdicts land in
-run/perf-gate-leg37a.log ("gate rc=" line in perf-gate-leg37a-watch.log
-is the completion marker).
+run/perf-gate-leg37a-watch.sh v2 (detached, PID
+run/perf-gate-leg37a-watch.pid; poll 3 min; conditions: foreign qemu
+< 2 AND load1 < 9 AND MemAvailable >= 12G — the last added because
+the Tier-1 boot is a 4G q35 KVM guest and the host free floor 10G is
+hard; 8 h deadline from 09:04; heartbeat line every 30 min so a
+quiet log is distinguishable from a dead watcher). The calm window
+DID NOT occur during this leg (07:08-09:05 observed: 8-12 foreign
+QEMUs continuously, load1 9-15.7; fleet lanes memstorm r23-r25,
+ltp-a r24, ltp-b r6, fsfuzz r272-r274 churning rounds plus other
+agents' make-test boots). Gate kernel SNAPSHOTTED at
+run/bzImage-leg37A-tip (md5 3236b48b7946992664b3faacf66619ce, = the
+fb27b8ff x86_64 build) so a later rebuild can never swap the image
+under the gate. rc=3 (another lane took the window) keeps polling
+instead of exiting. Verdicts land in run/perf-gate-leg37a.log
+("gate rc=" line in perf-gate-leg37a-watch.log is the completion
+marker).
 
 VERDICT CONSUMPTION (mission rule, from the 35A decision): the
 multi-thread reading decides —
@@ -79,3 +85,18 @@ item). Family A (mutual-ABBA/early-reply) is adjudicated image-side;
 the user-stack parkdump extension is on their own next-leg list, not
 an ask to us. No sched/mm cooperation requested anywhere in
 CC-COLLAB.txt (last entry remains our leg-35A message).
+
+LEG STATUS AT CLOSE (09:05): merge done (fb27b8ff), functional gates
+green, tier verdicts PENDING the calm window — watcher carries them
+(8 h deadline). SUCCESSOR FLOW: (a) if run/perf-gate-leg37a.log
+exists, consume the verdict per the rule above (ready-for-merge vs
+D-1 fallback), add the D-1 consequence note with the steal counts,
+commit, done; (b) if the watcher gave up, re-arm it unchanged; (c)
+do not run the gate outside the calm conditions — the volume row and
+the p5 medians are only comparable in-window. Branch queue for the
+merge reviewer (origin/main..HEAD): 44ba45e2, 52535c72, f798ccd6,
+ab4ca01c, 88c8d1e4, c5db92de, 9d6b006b, d6124bbc, ccfc708e, 2beb2ded,
+6e6970c3, fb27b8ff (main merge — binder spawnfix hunks resolve to
+main's landed form, TXN-POOL rides along), e9dec3e8, ef9d21b3. The
+wake-placement hunks are d6124bbc/ccfc708e/2beb2ded; their merge
+gate is exactly the tier set this watcher owes.

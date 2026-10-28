@@ -6,19 +6,26 @@
 # later rebuild can never swap the image under the gate).
 # Calm = foreign qemu < 2 AND load1 < 9 AND MemAvailable >= 12G (the
 # host free floor 10G is hard; the gate boots one 4G QEMU at a time).
-# Polls every 3 min; 5 h deadline; window log run/perf-gate-leg37a-watch.log;
-# verdicts land in run/perf-gate-leg37a.log.
+# Polls every 3 min; 8 h deadline; window log run/perf-gate-leg37a-watch.log;
+# verdicts land in run/perf-gate-leg37a.log. A one-line heartbeat every
+# 30 min keeps the log non-empty while waiting (the leg-36A lesson:
+# an empty log was indistinguishable from a dead watcher).
 # perf-gate rc=3 (preflight refused — another lane's QEMU took the
 # window between the poll and the launch) -> keep polling, not exit.
 cd /home/william/rux-agents/oh-kernel || exit 1
-DEADLINE=$(( $(date +%s) + 5*3600 ))
+DEADLINE=$(( $(date +%s) + 8*3600 ))
 TAG=leg37a
 KERNEL="$PWD/run/bzImage-leg37A-tip"
 LOGW=run/perf-gate-leg37a-watch.log
+NEXT_HB=$(( $(date +%s) + 1800 ))
 while [ "$(date +%s)" -lt "$DEADLINE" ]; do
     n=$(pgrep -c qemu-system 2>/dev/null || echo 0)
     l1=$(cut -d. -f1 /proc/loadavg)
     avail=$(awk '/MemAvailable/{print int($2/1048576)}' /proc/meminfo)
+    if [ "$(date +%s)" -ge "$NEXT_HB" ]; then
+        echo "$(date +%m%d-%H:%M:%S) still waiting (qemu=$n load1=$l1 avail=${avail}G)" >> "$LOGW"
+        NEXT_HB=$(( $(date +%s) + 1800 ))
+    fi
     if [ "${n:-9}" -lt 2 ] && [ "${l1:-99}" -lt 9 ] && [ "${avail:-0}" -ge 12 ]; then
         {
             echo "$(date +%m%d-%H:%M:%S) calm (qemu=$n load1=$l1 avail=${avail}G) — launching perf-gate tiers 1,2"
@@ -40,5 +47,5 @@ while [ "$(date +%s)" -lt "$DEADLINE" ]; do
     fi
     sleep 180
 done
-echo "$(date +%m%d-%H:%M:%S) no calm window in 5 h — giving up" >> "$LOGW"
+echo "$(date +%m%d-%H:%M:%S) no calm window in 8 h — giving up" >> "$LOGW"
 exit 2
