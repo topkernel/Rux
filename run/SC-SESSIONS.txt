@@ -7146,3 +7146,193 @@ merge-base line (9378ce1f instruments, 8aeeb7c9 merge, 411709a7 fix,
 sc336B/sc337B untracked per ignore patterns; scratch worktree
 /home/william/rux-agents/sc38b-gatekernel still exists (a2f9f7ca
 build, safe to remove); gate watcher PID 367148 running.
+
+LEG-40B (OH-B ninth leg; launcher-UI sprint; merge queue re-armed on
+current tip; family A root-shape located and image-mitigated; first
+launcher PROCESS spawn of the campaign; 15:00 close-out) — opened on
+branch tip fc65fb2b, merged origin/main 2a960538 as b6904e71 (one
+conflict, wakewatch.rs WwSlot: HEAD enq_lead/enq_lag + main walks/wtie
+kept side by side — both sides' uses present in the auto-merged body).
+
+MISSION 1 — MERGE QUEUE. The leg-38B (2 h) and leg-39B (6 h, mem-floor)
+watchers BOTH expired without a quiet window (leg39b log: only
+"waiting" lines, host load 7-15 throughout). Re-armed on the CURRENT
+tip as run/perf-gate-leg40b-chain.sh (kernel run/bzImage-leg40b-tip2,
+md5 c0dbe9be = merge + dfx=thpark instrument + latch fix; 8 h
+deadline, log run/perf-gate-leg40b.log, "gate rc=" is the verdict;
+instruments dfx-gated cold in gate boots). Gate prerequisites on the
+tip: x86_64 build rc=0, riscv64 build rc=0 (rm build/.config flow),
+make test ALL PASSED (run/leg40b-maketest.log), riscv smoke
+run/rv-smoke-leg40b.log panics=0 + mrsh prompt + /proc (NOTE the
+12:22 make-test overwrote target/.../rux with the test build — the
+known hazard; rebuilt before smoke).
+
+MISSION 2 — FAMILY A: FORENSICS FROZEN (coordinator directive
+mid-leg), then MITIGATED. Instrument: new dfx=thpark switch +
+TXN-HANG-PARK user-stack parkdump for hung binder SERVER threads
+(48 frame words, VMA+fileoff+bytes), committed 90d68b1c + latch fix
+(claim a dump slot only on a real print; sc338B: dead-tid silent
+early-returns filled the 16-slot latch and live wedges never dumped).
+KNOWN DEBT: the hook prints its probe ("hook alive hung=N nested=M")
+but its PARK-STACK output never appears even with live wedges, while
+the OLD stall-scan path dumps the same tids fine — unresolved, the
+probe commit is temporary; the stall path delivered the needed frames
+so this did not block.
+
+sc338B (last instrument round, 45 min, KERNPANIC 0/SIGABRT 0,
+launcher.ready 0, screen 8-color class): the wall is NOT a binder-ABBA.
+The OWE decode shows the web funnels: powermgr tid800 handling
+txn16227 -> nested txn16228 (code3) INTO hdf_devmgr t674; foundation
+tid1056 handling txn13158 (code24 from ui_service) -> nested txn15919
+(code7) INTO samgr t331. BOTH terminal handlers park in a USERSPACE
+futex (sys=202) with outstanding=NONE/thtodo=0: reply deferred
+userspace-side. The sc77-path park dump of samgr t331 resolved
+(offline byte-match, /tmp/oh-legs extracts): frame inside
+libbegetutil.z.so SystemSetParameter's wait (worker 0x1ab10, frame
+0x1ad12 right after the send+wait call; pthread_mutex_lock + ETIMEDOUT
+cmp in the region). Param-service side stays healthy (45 Handle lines,
+PCTL-SEND/RECV pairs, bootevent sets flowing) — the park is the
+CLIENT-side synchronized wait, image-side per the leg-36B kernel
+exoneration (delivery/pickup/nesting all Linux-identical).
+
+MITIGATION (run/patch-begetutil-setnowait.sh, APPLIED to
+run/oh-img-p/system.img inode 2517, the one real
+/system/lib64/chipset-sdk-sp/libbegetutil.z.so; platformsdk +
+chipset-pub-sdk are symlinks to it): SystemSetParameter and
+SystemSetParameterNoWait are identical wrappers around worker
+0x1ab10 differing ONLY in edx (0xF wait-mode vs 0); one byte at file
+offset 0x19ab8 (vaddr 0x1aab8, the mov $0xf,%edx immediate) flips
+0x0F->0x00 so every set uses NoWait semantics (send only, never
+block on the ack; mutex discipline unchanged). Original saved in
+run/forensics-leg40B/. Cost: no set-completion errors / no
+read-after-write ordering — accepted for bring-up, reversible.
+
+BOOT-DRIVER HAZARD (bit twice, coordinator caught both): someone
+edited run/oh-boot-w.sh IMGDIR from oh-img-p BACK to oh-img after my
+initial read — sc339B and sc340 silently booted the UNPATCHED shared
+image (sc339B showed the old park family again, tid687 exec 219s+).
+Fix: relaunch through run/oh-boot-p.sh and VERIFY the live /proc/<pid>
+/cmdline shows run/oh-img-p drives within 60 s of every launch.
+
+sc341 (first VERIFIED mitigated boot, oh-img-p + tip2, 40 min
+window): THE CHAIN ADVANCED FARTHER THAN ANY PRIOR DRAW. AMS started
+the launcher ("start highest priority extension ability
+bundleName:com.ohos.launcher"), appspawn built the spawn message,
+"Child process:com.ohos.launcher success pid:2097", sandbox bind
+mounts done, ability-runtime service lookups flowed (samgr/Rosen/
+aafwk parcels), the process forked worker 2139 and went quiet;
+screen: frozen 4343-color bootanimation frame until 13:34, then the
+8-color test pattern (bootanimation exited its window; launcher never
+drew). OnForeground 0, launcher.ready 0. The old samgr/devmgr param
+parks are GONE from the audit; the remaining held txns (netmanager/
+telecom code5 into foundation t798/t1015, 716-920 s, reply deferred
+userspace-side, threads back in binder read) did NOT block the spawn.
+sc342 (in flight at close: same recipe + sleepsnap, 60-min window)
+carries the launcher-process-early-init wall: expected evidence =
+sleep_snapshot of pid 2097-class threads.
+
+MISSION 3 — REFERENCE COMPARISON (final record for family A): on the
+reference Linux boot (run/oh-refw1-serial.log, 360 s window) every
+param family the wedge-web depends on completes quickly — 113 Handle
+lines including 30 persist.* sets and bootevent.hdf_devmgr.ready at
+5.87 s, zero parked-client families. Under Rux the same sends are
+delivered kernel-side but a client subset parks indefinitely in the
+begetutil wait. Classification: BEHAVIORAL DIFFERENCE in the image's
+client-service exchange under Rux, not a timing race (the reference
+shows every direction completing; Rux shows the same calls parking).
+
+Lane state: branch tip = probe commit (temporary thpark probe, remove
+after diagnosis); kernels run/bzImage-leg40b-tip2 (gate, c0dbe9be) and
+run/bzImage-leg40b-tip3 (sc342, 5ff41489, probe build); gate watcher
+PID in run/perf-gate-leg40b.log (8 h from 12:57); image mitigation
+applied + reversible; sc342 serial run/oh-sc342-serial.log.
+
+LEG-40C (OH-B tenth leg; launcher-UI sprint continued; join-wall
+removed by image v2; wall moved to the AMS lifecycle timeout; image
+v3 ratio patch in test) — opened on branch tip 35e9091d.
+
+WALL ADJUDICATION (sc342/sc343/sc344 + offline decode): sc342 stalled
+PRE-spawn (render_service-class cond park, tid1315 txn16981 held
+27 min — same flake family hit sc345; NOT the launcher wall).
+sc343/344: launcher mains (56/39 instances) ALL park at
+rip=0x3fbf11aaa8 = musl pthread_join+0x48, futex word 0x7ff09b032b44
+(&td->tid, td+0x44) — FUTEX_WAIT|PRIVATE, NO timeout (musl join
+disasm-confirmed). Byte-matched caller frames (Session F method):
+libc++ std::thread::join+0x18 <- libhicollie static 0x13fa5 (the
+join call site inside WatchdogInner::Stop(), OH source
+watchdog_inner.cpp:1630-1645: SetIPCProxyLimit(0), unregister
+looper watcher, isNeedStop_=true, notify_all, join) <-
+hicollie StopWatchdog+0x1a <- appkit Watchdog::Stop+0xd5
+(ability_runtime frameworks/native/appkit/dfr/watchdog.cpp:102).
+honydataability mains park identically (11x); services' hicollie
+workers (OS_DfxWatchdog tids 317-1084) are ALIVE and parked in
+pthread_cond_clockwait — app children's workers are ABSENT from
+every census (no OS_DfxWatchdog above tid 1084): the worker exits
+(or dies) without the kernel-side CLONE_CHILD_CLEARTID clear+wake
+ever reaching the joiner -> eternal join -> appspawn kickdog SIGKILL
+-> AMS respawn = the respawn loop. Trigger for Stop() during early
+init: NOT the debug-launch branch (BMS db shows launcher
+debug=false; IsDeveloperModeOpen=true is the image's own
+const.debuggable=1, same on reference) — it is the teardown path
+(AMS lifecycle-timeout terminate / ~MainThread). Reference boot
+(oh-refw1): zero appspawn slog lines (hilog suppressed) but
+bootevent.launcher.ready set at 16.09 s — the same image completes
+this join on Linux in microseconds.
+KERNEL-SIDE DEBT (for the futex lane, deferred): T1 (exit-clear
+never ran / worker stuck non-INTERRUPTIBLE) vs T2 (clear ran, wake
+lost) is NOT yet adjudicated — the tip4 probe (WORD reader: prints
+expected a2 + current word value for each parked joiner; census a2)
+was built+committed (c53ac957) but the detach patch (below) removes
+the launcher's join park, so no boot since has join-park victims;
+adjudicate later on a reverted image or via another join victim.
+Rux futex keying (uaddr-only buckets, waiter-private matches by
+uaddr+mm) DOES match the exit wake on paper (exit.rs:133
+exit_clear_child_tid wakes with the exiting task's mm).
+
+IMAGE v2 (hicollie detach): the predecessor had ALREADY applied
+patch-hicollie-skipjoin.sh at 14:47 (NOP of the join call) AFTER
+sc344 opened its snapshot — sc345/346 were the first patched-view
+boots. Disassembly of Stop()'s post-join sequence (0x13fa5: reload
+threadLoop_, zero the slot, ~thread(), operator delete) shows v1
+destroys a STILL-JOINABLE std::thread -> libc++ terminate ->
+SIGABRT. v2 (run/patch-hicollie-detachjoin.sh, applied): redirect
+the call join@plt(0x38340) -> detach@plt(0x38730),
+e89b430200 -> e88b470200 at fileoff 0x12fa0 (inode 2543) — detach
+takes the same this-in-rdi, clears joinable, destructor-safe;
+verified in image (5-byte readback). sc347 (first v2 boot): join
+park GONE; launcher instances run the FULL cold start — appspawn
+sandbox, ArkTS runtime, launcher's own ArkTS code executing
+(Launcher_Default: LauncherAbilityManager, CommonBundleManager,
+OsAccountJsKit napi async work) — then die cleanly exit(0) at the
+~41 s ability-load lifecycle timeout (AMSI7903
+LIFECYCLE_HALF/TIMEOUT_WARNING; spawn->exit ~= 41 s measured via
+txn9640's exec-timer clock: 38638 lines = 82.3 s). 16 instances,
+OnForeground never reached.
+
+IMAGE v3 (AMS timeout ratio): load timeout =
+AmsConfigurationParameter::GetAppStartTimeoutTime()
+= timeoutUnitTime_ (default 1000 ms; no ams JSON override in image)
+* AppUtils ratio = param
+persist.sys.abilityms.timeout_unit_time_ratio (default 1,
+/system/etc/param/appfwk.para:25; scgold userdata param persist dirs
+empty — no override). Patched '1'->'9' (same byte length, fileoff
+1223, inode 1392; run/patch-appfwk-timeoutratio.sh, verified) ->
+~6 min budget per launch attempt.
+
+BOOTS this leg: sc345 (tip4, v2 view): stalled pre-spawn
+(render_service tid1315 txn16981 25+ min — sc342-class flake;
+VERDICT: no launcher data, flake family noted for the render park
+lane). sc346 (tip4, v1-NOP view, 2400 s): no spawn in window,
+superseded by sc347. sc347 (tip4, v2): join wall CONFIRMED removed,
+41 s timeout wall identified; killed after data complete.
+sc348 (tip4, v3): IN FLIGHT at log time — cmdline verified 6x
+oh-img-p, shotmon live, watching for OnForeground /
+bootevent.launcher.ready / launcher pixels.
+
+Lane state: branch tip 35128d7c (probes c53ac957/c973ce4b + ratio
+patch script committed; detach/skipjoin scripts committed with it);
+kernel run/bzImage-leg40b-tip4; image oh-img-p carries THREE
+mitigations (begetutil NoWait @0x19ab8, hicollie detach-join
+@0x12fa0, appfwk ratio 9 @1223) — all reversible, originals in
+run/forensics-leg40B/; gate watcher state unchanged (leg40b chain);
+sc348 serial run/oh-sc348-serial.log.
