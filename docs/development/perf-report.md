@@ -3209,3 +3209,102 @@ TwoWaySearcher/memcmp share is path-component comparison per lookup —
 a namei-level specialization study, later. **Re-sample request routed
 to the OH lane: same rig on CURRENT main** — leg-52's levers reshaped
 pages 1/4/6 and the real remaining distribution needs one boot.
+
+### 8.10.25 Leg 55 (2026-10-29): GRQ slimming design (code frozen behind the main-tip panic) + the mkdir-flush reversal + ITEM 2 doc
+
+**BLOCKER first (routes to the exec lane): main tip d2a58ccb panics
+reproducibly on the x86 release-strong pbench boot** —
+`Option::unwrap() on None` at alloc btree navigate.rs:552, t=6-9s,
+right after PBENCH p1_null + p1_clock, 4 prints (SMP). Reproduced on
+PURE main (pa97, run/pa97-main-tip-strong-bzImage md5 130f4f9b built
+from a detached d2a58ccb worktree) AND on my branch post-merge
+(pa96/pa96b); does NOT reproduce on my pre-merge leg-54 stack
+(pa93j/pa95b/pa95c all DONE). BTreeMap navigate unwrap = concurrent
+unsynchronized mutation of some tree. Suspect range 188d844d..d2a58ccb
+kernel delta: the exec rewrite (60fe05cd/2fbb5a64/6c56c0b6, process.rs
+375 lines) is the largest; timerfd 4e1f6110, lockkey 2b092c49,
+cpuinfo 845d26bb the others. All board validation in my lane is
+BLOCKED until this is fixed; the GRQ kernel edits below are written
+but NOT committed (they touch exactly the suspect neighborhood — fair.rs
+must be panic-free before any of it is judged).
+
+**The mkdir-flush reversal (fab0e029, READY TO MERGE independent of the
+panic).** My leg-53 gate miss, stated plainly: e3c1ec35 carried a
+p6_unlink regression I did not check on the pa93 boards — the row was
+IN the serial log at 10.2ms and I read only append/mkdrmdir/panics.
+Evidence: pa92j (flush present) unlink 89.5us; pa93j/pa95b/pa95c
+(absent, hiwat 2048/256) 10.2-17.3ms med, p99 47-49ms — 100x off the
+77-119us baseline row. Mechanism (pa95f fsw board: pc=1030 constraint
+flushes, pl=1004): with records pending, every unlink's dir-block
+write is H2-constrained by the previous delete-side post record on the
+same dir block → an entry+pre sync PER UNLINK — the deferred bill
+lands on the next out-of-band writer, serialized per op. The 31x
+mkdrmdir win was a hidden 100x unlink loss. The flush is restored;
+the lazy-variant follow-up needs delete-side records BATCHED per
+transaction window (the jbd2 shape) so H2 stops serializing — design
+work, not a flag flip. PUB_LAZY (FSW1 pl=) stays for it. Two
+smaller leg-54 commits stand on their own evidence (page-cache locked
+state ops 86a458f9; console TX batching 007a876a — boards rc=0;
+pending-pub index 5e7f0d0a — correct-by-construction, harmless) and
+ride the next full battery once boards work again. Item B (sub_rss
+CAS) adjudicated NO-GO: rss is genuinely lock-free (fault paths, all
+CPUs) — the atomics are required.
+
+**ITEM 1 design — GRQ critical-section slimming (D-1 structure
+untouched; audit of fair.rs/sched.rs complete).** The measured GRQ
+hold (5.4-7.0us class) decomposes per the audit into:
+
+(a) TREE-WALK ELIMINATION (the big one, all under GRQ today):
+  1. `dequeue()` LINEAR-SCANS the whole tasks_timeline by pointer
+     (fair.rs ~770: `for (&key,&ptr) in iter()`) — O(n) per
+     dequeue/preempt under the lock. FIX: store the enqueued
+     `timeline_key: Option<VruntimeKey>` in SchedEntity at
+     enqueue_inner (it generates the key anyway); dequeue removes
+     O(log n) by the stored key; `is_linked`'s O(n) scan (R41) becomes
+     an O(log n) exact check `get(&key) == Some(&task)` — same
+     authority (actual tree membership), no stale-on_rq weakness.
+  2. `pick_next` double-walks (iter().next() then `get(&key)`) —
+     collapse to one read.
+  3. `pick_next_cpu`'s per-skip remove+reinsert (2 walks per skipped
+     candidate, up to 32) stays — bounded and correctness-critical —
+     but the leftmost read per loop pass collapses via (b).
+  4. `update_min_vruntime` walks the leftmost on EVERY
+     enqueue/dequeue/pick/update_curr — with (b) it reads the cache.
+
+(b) LEFTMOST CACHE: `leftmost: Option<(VruntimeKey, *mut Task)>` on
+CfsRunQueue. Invariant under GRQ: insert(k): if cache none or k <
+cache.0 → cache = k; remove(k): if k == cache.0 → invalidate
+(lazily recomputed from iter().next() on next use — one walk per
+structurally-changing op instead of per read); empty → None. All five
+readers (pick_next, pick_next_cpu's loop head, peek_next,
+leftmost_vruntime, update_min_vruntime) go through one
+`leftmost_entry()` helper. An alternative lighter structure (skip
+list / doubly-linked sorted list with O(1) min) was evaluated and
+REJECTED for this leg: BTreeMap + cache reaches O(1) reads with
+O(log n) mutations and zero new unsafe; a new structure would re-open
+every R41/R65/b50 invariant for marginal gain.
+
+(c) ACCOUNTING MOVES (the coordinator's (a), justified per field):
+`update_curr` charges se.exec_runtime and se.vruntime (delta_exec) —
+BOTH are owner-task-private (curr is unlinked while running; no other
+CPU reads a running se's vruntime — the tree only holds LINKED
+entities). They can charge OUTSIDE the GRQ if update_curr's callers
+are split: the now/delta math owner-side, with only the
+min_vruntime advance (which reads the leftmost) left inside. The
+schedstat counters are already Relaxed per-task fields. THE MOVE IS
+WRITTEN but gated on the panic fix: it touches update_curr's call
+sites in __schedule/tick, and no board can validate it while main-tip
+dies at t=9s.
+
+Target restated: GRQ hold 5.4us -> <=2us (steps 1+2 alone remove the
+O(n) dequeue scan and O(log n) leftmost walks from EVERY pick;
+expected dominant), GRQ REST 96s -> <=40s, P2 in band, syscost
+track_caller verifies per-site.
+
+**ITEM 2 (done, doc): minimum scheduling period.** Documented in
+docs/architecture/riscv64-sched-note.md (new, one page): tick cadence
+KERNEL_HZ=100 (10ms), SCHED_MIN_GRANULARITY_NS = 700_000 (0.7ms,
+fair.rs) = wakeup granularity, SCHED_LATENCY_NS window, sched_slice =
+max(period*weight/total, 0.7ms); the "no frequent queue churn"
+property = a task runs >= 0.7ms once picked and preemption decisions
+evaluate at tick/wakeup boundaries only.
