@@ -2674,3 +2674,77 @@ Standing: pa86 chain in flight (8 h deadline, skip logged as debt);
 the mkdrmdir flush stays the fs lane's; track-2 lever nomination
 waits for the pa86 quiet data (the REST-site and census re-reads name
 the next non-fs candidate).
+
+### 8.10.21 Leg 51 (2026-10-28): kswapd-leg deep drain LANDED on-branch — the s18 finding closed the design's missing leg; solo-shape kills on main are proven CORRECT, the s18 early-kill needs the fleet's multi-process wall (A/B handed off)
+
+The stress lane's s18 root-cause (CC-COLLAB, wwh-main-kernel; evidence
+r19-oomforensic-kswapd-leg.txt): the fleet rolled onto 2a960538 and
+the oom01 kills were UNCHANGED (OOM=8, same stall) with ZERO
+OOM-DEEP-PASS lines while OOM-FORENSIC #33 showed 172 MB of clean
+file cache one wall away — file-lru[2]=36048 pages at 78% referenced
++ file-lru[3]=7933 graduated clean, dirty=0, unevictable=0, locked=0,
+anon 1647 MB, zone free=16, in_direct_reclaim=1. 39a515a5 wired the
+deep drain into the page_alloc slowpath only; the kill fires from
+kswapd's escalation (16 consecutive zero-reclaim balance_pgdat passes
+-> out_of_memory, kswapd.rs KSWAPD_MAX_FAILURES=16), which outruns the
+slowpath's own deep drain (each pass through the referenced wall is
+O(cache-map) slow via evict_one's fallback; sixteen cheap zero passes
+complete while the faulting task is still mid-rounds — or the victim
+IS the task inside the slowpath, and its death leaks the
+IN_DIRECT_RECLAIM gate for every later allocation).
+
+**The fix (13a8cc03): one deep pass at the escalation point.** When
+kswapd reaches 16 consecutive zero-reclaim passes, before calling
+out_of_memory it now runs the same drain_file_cache_before_oom the
+slowpath runs before its `return 0` — chunked shrink past the wall +
+bulk active-list demotion — sized by the first initialized zone's
+WMARK_LOW shortfall (+ request, clamped [32, 8192]; the same sizing
+contract as the slowpath leg). deep_freed > 0 means the escalation
+was premature: the failure counter resets and the kill is skipped
+(the loop re-checks watermarks against the freed pages). A dry pool
+(the drain's own break-on-no-progress returns 0) falls through to the
+OOM — a kill that is now VERIFIED dry, twice (16 passes AND the deep
+drain). Context class: kswapd already calls shrink_reclaim through
+balance_pgdat today, so the drain's dirty-writeback sleeps are the
+pre-existing kswapd shape; the IN_DIRECT_RECLAIM gate serializes
+DIRECT reclaimers only and is deliberately NOT waited on (kswapd
+draining concurrently with a direct reclaimer is the pre-existing
+balance_pgdat concurrency; waiting would invert against the very
+task the kill would rescue). Escalation-gated by construction: the
+branch runs only after 16 consecutive zero-reclaim passes, which
+standard boots never produce — the DEEP_PASS counters stay zero and
+the Tier-1 drct=0 discipline is untouched.
+
+**Repro work (pa87, the honest finding).** oomchurn gained a fakehot
+mode (the s18 wall shape: after the cache fill, a child re-reads the
+file in a loop so page-cache hits keep re-setting Referenced while
+the parent touches anon). On THIS rig (2G riscv64 smp2 TCG, load1
+15-17): (1) M fakehot 400/1500 PASSES — a single TCG child cannot
+hold the wall (a full 400 MB re-read loop takes tens of seconds; the
+drain consumes the pages between visits); the fleet's wall is a
+multi-process equilibrium (msgstress + suite). (2) M fake 400/1900
+(overcommit, no wall) kills at 1824 MB anon — a CORRECT kill: both
+file LRUs walked=0, the direct-path drain ran 28 times and freed all
+50,688 cache pages (197 MB), all 524,288 pages anon/reserved, zone
+free=0. Solo-shape kills on main are at the true ceiling, not fake.
+So the s18 early-kill cannot be reproduced with a single-process
+probe on this rig — the discriminating A/B is the fleet's ltp-b
+member (their CC-COLLAB offer stands; hash 13a8cc03 handed over).
+What the solo shapes DO prove on B: no regression where the leg must
+be inert — B fake 400/1500 PASS and B fakehot 400/1500 PASS, both
+with ZERO OOM-DEEP-PASS lines (the escalation never fired).
+
+**Gates:** dual-arch build rc=0 (riscv64 ELF + x86_64 bzImage, debug
+class); `make test` 1122/1122 green (rc=0); riscv64 minimal-rootfs
+smoke zero panics, deep-pass lines 0 (run/rv-smoke-leg51.sh). Tier-1
+quiet census boot on the leg tree queued behind pa86 (run/
+pa88-quiet-chain.sh, two-stage gate, census token explicit, DEEP_PASS
+absence + census-band asserts) — in flight at leg close.
+
+Standing: the fleet A/B on 13a8cc03 decides the merge verdict for
+the s18 surface; pa86 (re-anchor) and pa88 (leg Tier-1) chains both
+in flight; the IN_DIRECT_RECLAIM death-leak question (a task killed
+while holding the gate leaves it at 1 — the forensic's
+in_direct_reclaim=1 is consistent with a live slow holder OR this
+leak) is recorded as a separate bug for the mm lane, not touched
+here.
