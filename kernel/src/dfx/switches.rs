@@ -88,6 +88,7 @@ macro_rules! dfx_switch_table {
             SlowTask => "slowtask",
             ExtHunt => "exthunt",
             ThPark => "thpark",
+            RipSample => "ripsample",
         }
     };
 }
@@ -402,9 +403,13 @@ pub enum DfxSwitch {
     /// latched (once per tid per boot, 2 per 5 s burst, 16 per boot).
     /// OFF by default.
     ThPark,
+    /// leg-40C perf rider: user-mode rip sampling for launcher-comm
+    /// tasks (page-bucketed histogram + utime/stime split), reported
+    /// every 60 s from the tick path. OFF by default.
+    RipSample,
 }
 
-const SWITCH_COUNT: usize = 44;
+const SWITCH_COUNT: usize = 45;
 
 static SWITCHES: [AtomicBool; SWITCH_COUNT] = [const { AtomicBool::new(false) }; SWITCH_COUNT];
 
@@ -489,6 +494,7 @@ impl DfxSwitch {
             DfxSwitch::EpollScan => 41,
             DfxSwitch::ExtHunt => 42,
             DfxSwitch::ThPark => 43,
+            DfxSwitch::RipSample => 44,
         }
     }
 
