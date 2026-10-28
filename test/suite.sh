@@ -363,7 +363,7 @@ unit-guest|unit|riscv64|900|make test
 unit-verify|unit|host|600|make verify
 formal-spin|formal|host|600|make spin
 formal-kani|formal|host|1800|make kani
-formal-miri|formal|host|1800|make miri
+formal-miri|formal|host|4200|make miri
 perf-gate|perf|riscv64|1200|run/perf-gate.sh --tiers 1 --kernel __KERNEL__
 stress-oomchurn|stress|riscv64|__STRESS__|python3 test/oomchurn_boot.py --kernel __KERNEL__ --secs __STRESS__ --mode fake --mb 400 --fork-n 2 --mem 2G
 stability-boot|stability|riscv64|__STAB__|python3 test/boot-soak-fast.py --seconds __STAB__ --kernel __KERNEL__

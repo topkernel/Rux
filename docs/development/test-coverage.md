@@ -8,7 +8,7 @@ with `python3 scripts/gen_test_coverage.py` after changing
 any test wiring; CI-style drift check:
 `scripts/gen_test_coverage.py --check`.
 
-Generated: 2026-10-28T12:47Z
+Generated: 2026-10-28T13:06Z
 
 ## Headline
 
@@ -236,11 +236,13 @@ feature lanes.
 
 ## Formal verification
 
+Miri runs the whole kernel/verify crate under interpretation: >28 min on this host (the suite leg carries a 4200 s budget; every test completed so far was ok). Kani's cargo plugin is installed but its CBMC bundle download (github.com releases) hangs on this host — honest SKIP until the bundle is fetched from a reachable mirror.
+
 | tool | host status | suite leg |
 |---|---|---|
 | SPIN | NOT INSTALLED | formal-spin (runs) |
-| Kani | NOT INSTALLED (no kani cargo plugin) | formal-kani (SKIP when absent) |
-| Miri | miri 0.1.0 (ea137335b7 2026-10-05) | formal-miri (SKIP when absent) |
+| Kani | NOT INSTALLED (no kani cargo plugin) | formal-kani (SKIP until the bundle exists) |
+| Miri | miri 0.1.0 (ea137335b7 2026-10-05) | formal-miri (runs, 4200 s budget) |
 
 ## Current gaps (recomputed each refresh)
 

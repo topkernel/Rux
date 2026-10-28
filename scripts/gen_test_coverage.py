@@ -631,11 +631,19 @@ def main():
     # ---- formal ----------------------------------------------------------
     o.append("## Formal verification")
     o.append("")
+    o.append("Miri runs the whole kernel/verify crate under"
+             " interpretation: >28 min on this host (the suite leg"
+             " carries a 4200 s budget; every test completed so far"
+             " was ok). Kani's cargo plugin is installed but its CBMC"
+             " bundle download (github.com releases) hangs on this"
+             " host — honest SKIP until the bundle is fetched from a"
+             " reachable mirror.")
+    o.append("")
     o.append("| tool | host status | suite leg |")
     o.append("|---|---|---|")
     o.append("| SPIN | %s | formal-spin (runs) |" % spin)
-    o.append("| Kani | %s | formal-kani (SKIP when absent) |" % kani)
-    o.append("| Miri | %s | formal-miri (SKIP when absent) |" % miri)
+    o.append("| Kani | %s | formal-kani (SKIP until the bundle exists) |" % kani)
+    o.append("| Miri | %s | formal-miri (runs, 4200 s budget) |" % miri)
     o.append("")
 
     # ---- gaps ------------------------------------------------------------
