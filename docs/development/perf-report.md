@@ -2558,3 +2558,33 @@ re-derived against the code. Verdict on each link:
   callers), anon/swap. If the deep pass still cannot reach its target
   because every clean page is pinned by mappings, the kill fires as
   today and the follow-up is the unmap path, not more depth.
+
+**8.10.19 results (leg 49B close).** Functional A/B (oomchurn fake
+500MB cache + 800MB anon on a 1G riscv64 VM, smp2, TCG; M = 7ef5a170,
+B = 39a515a5; run/pa81-{m,b}-fake*.log): M reproduced the s17 fake-OOM
+deterministically — kill at 576 MB anon with the forensic showing
+file-lru[3] (ACTIVE) walked=64001 dirty=0 referenced=0 (250 MB of
+perfectly evictable clean cache) and INACTIVE FILE EMPTY (lru[2]=0):
+shrink_lruvec's file scan reads the INACTIVE list size, so once
+graduation empties it the reclaim engine stops calling the page-cache
+shrinker AT ALL — the blind spot is structural, sharper than the rate
+bound alone. B PASSED: all 800 MB anon touched; OOM-DEEP-PASS fired 24
+times, each freeing its full target (1158 pages = the WMARK_LOW
+shortfall exactly), no demotion needed on this shape (evict_one's
+internal bridge suffices; the bulk demotion stays armed for the fleet
+storms). Correctness: dual-arch rc=0, make test 1122/1122, rv smoke 0
+panics. Tier-2 (pa82, strong x86, M,B,B,M + one adjacent isolation
+pair): every row within +-20%; the p7_sleep1ms row read +24% on the
+interleaved B boots (load1 13-14 window) and was adjudicated by the
+adjacent isolation pair — M 984.7 vs B 943.0 (-4.2%, B faster); window
+noise, not a regression. deep_lines=0 on all six boots (the
+no-reclaim-slowpath-emergence discipline holds for the new path). The
+Tier-1 census chain (pa83, quiet-gated, detached) carries the combined
+tip's census + the OOM-DEEP-PASS absence assertion; if its 6 h window
+never opens it skips with logged debt for the next quiet window.
+
+Standing: arm-1 (J-vs-NJ) still queued on the fs lane's nojournal fix
+(not on main at 478ece08). The mkdrmdir residual (~14-16 ms, the
+per-mkdir scoped publication flush) is named for the fs lane. p2_ctxsw
+judged against the strong anchors throughout (1.26-1.52 across this
+leg's loaded boots).
