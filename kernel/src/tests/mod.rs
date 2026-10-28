@@ -430,6 +430,10 @@ pub fn run_all_tests() {
     // tab shape and value formats pinned against a live render.
     crate::fs::procfs::pid::status_file_tests::shape_check();
     crate::fs::procfs::pid::status_file_tests::order_check();
+    // D-4 kvtab_pad slice (refactor lane): /proc/cpuinfo per-block key
+    // order + `key<tabs>: value` shape (per-arch, compiled per-arch).
+    crate::fs::procfs::cpuinfo::cpuinfo_file_tests::shape_check();
+    crate::fs::procfs::cpuinfo::cpuinfo_file_tests::order_check();
 
     // tmpfs page-budget tests (mount option size=). Implemented in
     // fs::tmpfs itself (needs private TmpfsSuperBlock access).

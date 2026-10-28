@@ -87,7 +87,8 @@ shape test; the cols form derives the row function's argument list from
 the column list. The kvtab form (`Key:\t<value>\n`, one Display value
 per row, preformatted composites for multi-part rows) carries the
 /proc/[pid]/status family, with STATUS_FIELDS pinning the key sequence
-against a live render.
+against a live render; kvtab_pad (`key<tabs>: value\n`, padding in
+the key, empty value drops the space) carries /proc/cpuinfo.
 
 **Advantage.** Kills the format-drift class (five byte-format defects
 survived review into a merged tree once); format and data become one
@@ -97,12 +98,16 @@ artifact; call sites cannot swap columns.
 column-exact vs the live host reference; stat/schedstat line order
 unit-pinned; full suite green; three full pbench boots DONE rc=0.
 
-**Known cost.** Opportunistic conversion — ~19 hand-written files
+**Known cost.** Opportunistic conversion — ~18 hand-written files
 remain (the derived set grew in the refactor lane's slices: diskstats
 via cols with the merged/discard/flush zeros named as columns and an
-exact-bytes snapshot pin; /proc/[pid]/status via the new kvtab form
-with its key sequence pinned against a live render); dynamic-arity
-lines (interrupts/intr/softirqs) stay explicit by design.
+exact-bytes snapshot pin; /proc/[pid]/status via the kvtab form with
+its key sequence pinned against a live render; /proc/cpuinfo via the
+kvtab_pad form — per-arch declared rows whose keys carry the tab
+padding, per-block order pinned; the x86 list preserves the
+pre-conversion duplicate processor row until the coordinator decides
+that fix); dynamic-arity lines (interrupts/intr/softirqs) stay
+explicit by design.
 
 **Guard.** procfile-shape unit-test group + per-file order/snapshot
 pins; the DFX plan's adoption rule requires the macro for new files.
