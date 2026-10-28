@@ -3415,3 +3415,121 @@ further kernel-side fmt work is justified until volume is cut.
    length-first compare / interned names — bounded, mechanical.
 4. Console/log volume (OH lane's boot-arg) + already-held TX batching.
 5. soft-float: CLOSED (no runtime float user; the page is memcmp).
+
+### 8.10.27 Leg 56B (2026-10-29): design notes for the two surviving cold-start targets (no kernel commits until the exec panic clears — the standing rule)
+
+**TARGET 1 — the fault-path page-cache cluster.** Current shape
+(page_cache.rs:177): ONE global `Spinlock<BTreeMap<u64,
+InodePageCache>>` (16 lock sites) guarding everything; every fault
+pays lock + walk-1 (inode map, O(log n) on the mixed cache_key) +
+walk-2 (the inode's pages BTreeMap) + the state op (already
+locked-plain since 86a458f9) + unlock. Under the grind's load phase
+(100MB of libs faulted page-by-page, 4 CPUs, thousands of distinct
+inodes) every fault serializes on the one lock and pays both walks;
+the group-desc-compare share (~7% of the old #1 page) and the
+BTreeMap-compare glue in #2 are this cluster's instruction noise.
+
+*Option A — SHARD the global map* (N=8 shards by cache_key mix, each
+Spinlock<BTreeMap>): mechanical, preserves every existing invariant
+verbatim (each shard independently maintains the same discipline),
+cuts cross-key contention ~Nx. Does NOT remove the per-fault lock
+acquisition or the two walks — it only spreads them. Least risk,
+least gain.
+
+*Option B — per-inode locks + lock-free global lookup* (the fdtable
+lever-B shape, the in-house precedent): the per-fault path becomes
+(1) lock-free read of the inode-map slot — readers take NO lock via
+the claim protocol (per-CPU cacheline-padded reader banks, SeqCst
+claim before the slot load; bank-range fallback serializes through a
+slow-read lock, r8final discipline), (2) the InodePageCache's OWN new
+per-inode Spinlock for the pages map — cross-INODE contention goes to
+zero (the load phase faults many files at once; within one inode the
+faults of a single file are naturally serialized by the VFS/mm side
+anyway), (3) global-map WRITES (inode entry insert/remove) stay
+behind the global lock and are rare (open/first-touch/evict), with
+whole-entry replacement using park-and-drain (SeqCst fence +
+all-banks-zero Acquire scans + slow-read exclusion; drop only at the
+drain) exactly as FdTable.retired. Stage 2 if walks still show:
+shard the global map on top (A composes with B).
+
+*PICK: B (stage 1), A optional after.* Rationale: the grind is
+cross-inode by construction; A leaves the dominant serialization
+(per-fault global-lock acquire across 4 CPUs) in place; B removes it
+with a protocol already proven in-tree at a hotter call rate
+(fdtable: 94.5M/boot vs pcache lookups ~fault-rate).
+
+*Invariants the design must preserve (the R-series ledger):*
+page-cache coherence vs the VFS cached view (the klogd lesson — the
+write path's refresh tail and writeback_update_range must see the
+same per-inode map: they become readers of the same slot protocol);
+R7-C2 birth-ref-0 (unchanged — state ops stay inside the per-inode
+lock); R14-16 stale-put floor and R14-17 one-shot release latch
+(unchanged, same critical sections, just a different lock); R7-C2/
+R8-3 invalidate accounting (invalidate_inode takes the per-inode lock
+and the global drain for whole-entry removal); eviction (evict_one
+walks page DESCRIPTORS, not the maps — verify it never reads an
+InodePageCache lock-free before sign-off); MAP_SHARED pin discipline
+(flush paths become per-inode-lock readers); total_pages global
+atomic (already independent). The writeback_update_range and
+ext4_flush_dirty_inode callers enumerate by key — they ride the
+reader protocol (snapshot iteration under claim, or per-inode lock;
+no lockless structural iteration — the stdlib iterator rule from
+is_linked's comment applies to BTreeMap too).
+
+*Measurement plan:* (a) BEFORE per-fault decomposition on the grind
+shape — the pbench p3c_fault_file row (0.070us med, pa91q2) is
+single-threaded warm-cache and does NOT see the contention: a
+CONCURRENT fault probe is owed (4 procs mmap-touching distinct files;
+add as a pbench row — instrument debt, gated off by default per the
+DFX rule); (b) syscost REST attribution at the pcache lock site
+(track_caller) before/after; (c) the grind re-sample: the pcache
+family pages (#2's fetch_update share is gone; the BTreeMap-compare
+glue should halve) on a current-main kernel with the OH lane's rig;
+(d) make test + the fs-domain pbench rows in band (append/mkdrmdir/
+unlink/write_fsync).
+
+**TARGET 2 — namei per-component path compare.** Current shape
+(ext4/namei.rs:~1534): per directory entry — read name_len (1 byte),
+length check, then `entry_name == name` on two &[u8] slices → memcmp
+CALL per candidate. Under the load phase each dlopen path resolution
+walks dirs with tens-to-hundreds of entries; names are ~8-20 bytes,
+so the memcmp call + prologue dominates the compare itself (short
+strings, this toolchain: the call is a third of the cost). The grind
+pages: memcmp/bcmp/strlen (the mislabeled "#6") + TwoWaySearcher
+share ("#3", 72% of that page — the `find`/`contains` family, of
+which the publication scans' share is fixed and the rest is path
+work).
+
+*Option A — inline u64-chunk length-first compare:* when lens match,
+compare the first 8 bytes as one unaligned u64 load pair, then the
+tail — inline in the entry loop, no call, mispredict-friendly (most
+entries mismatch in the first 8 bytes). Cost model: mismatch ≈ 3-6
+cycles inline vs ~15-30 for the memcmp call; a 100-entry lookup
+saves ~1-2.5us per component resolution. Zero structure change, zero
+format risk, mechanically verifiable. ENDIAN/ALIGNMENT: both sides
+are byte buffers — read_unaligned u64 + == is correct on both
+targets (x86 little-endian any-order-equal works because equality is
+order-independent for full-width chunks; only the TAIL needs
+byte-wise care).
+
+*Option B — interned-name / per-dir hash index:* hash the query name
+once, consult a per-directory cached hash→entry-offset index (built
+lazily on first lookup, invalidated on dir mutation). Replaces the
+per-entry scan with one probe: the bigger win for cold dirs (100+
+entries), but it is a NEW cache with mkdir/unlink/rename invalidation
+— exactly the deferral/interaction surface where the F4 family keeps
+finding bodies — and it duplicates what the dcache layer (positive
+lookups) already provides in front. ext4's on-disk names cannot be
+interned (format fixed); the index is purely in-memory.
+
+*PICK: A now, B only if the post-A re-sample still shows the family*
+(and B then belongs with the fs lane's route-4 dir-cache sibling, not
+this lane). Rationale: A is mechanical, ABI-clean, and captures most
+of the call-overhead share; B's invalidation risk is not justified
+while the dcache already fronts positive lookups — the grind's
+compare volume is dominated by MISS-side scans (negative components,
+revalidations), which A cheapens directly.
+
+Both designs are implementation-ready the moment the panic fix lands;
+the concurrent-fault probe (Target 1's instrument debt) can be built
+under the same gate.
