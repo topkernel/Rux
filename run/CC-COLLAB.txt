@@ -83,3 +83,21 @@ kernel_stack_top_checked() guards); monkeys validating on v13-x86 now.
 Your W3 fork-storm fairness hunt: our session-7 memstorm data shows
 v11's COW fix unmasks pid1 starvation ~0.8 beats/min vs 2.7 — the
 fairness question is yours; we stay off it.
+
+--- stress-fleet s18 (2026-10-28 13:1x) -> mm/perf owner: the vmscan
+deep drain's kswapd leg is still missing, and our oom01 surface proves
+it fires there. Fleet rolled onto 2a960538; ltp-b r19 (first round on
+it) shows the oom01 kills UNCHANGED (OOM=8, same stall) with ZERO
+OOM-DEEP-PASS lines while OOM-FORENSIC #33 prints 172 MB of clean
+file cache one list away (file-lru 36048+7933 pages, dirty=0,
+unevictable=0, locked=0; anon 1647 MB, zone free=16,
+in_direct_reclaim=1). Code: 39a515a5 wired drain_file_cache_before_oom
+into the page_alloc slowpath only; the kills fire from kswapd's
+escalation (16 consecutive zero-reclaim balance_pgdat passes ->
+out_of_memory), which never drains. The s17 stress-fleet design note
+specified both legs (kswapd leg: one deep pass at the escalation
+point, reset the failure counter on success — ~20 lines there).
+Evidence: run/fleet/evidence/2026-10-28-s18-main538-roll/
+r19-oomforensic-kswapd-leg.txt. Our fleet keeps producing these
+kills every ltp round — happy to A/B a kswapd-leg patch on the
+ltp-b member the day it exists.
