@@ -3020,6 +3020,8 @@ pub fn sleep_snapshot() {
     // leg-40B: (tid, futex word) pairs collected during the walk,
     // deduped by word — one user-stack dump per distinct park word.
     let mut futex_parked: alloc::vec::Vec<(u32, u64, u64)> = alloc::vec::Vec::new();
+    // leg-40C: connect(2) retry-loop victims — (tid, sockaddr ptr).
+    let mut connect_args: alloc::vec::Vec<(u32, u64)> = alloc::vec::Vec::new();
     use core::fmt::Write as _;
     crate::sched::for_each_task(|task| {
         // SAFETY: callback runs under the pid-hash bucket lock (same
@@ -3109,6 +3111,14 @@ pub fn sleep_snapshot() {
             {
                 futex_parked.push((tk.pid(), a0, a2));
             }
+            // leg-40C connect-loop hunt: sc354's launcher main spins in
+            // connect(2) on an AF_UNIX socket (a2=110) with retries —
+            // the sockaddr bytes at a1 name the target service. Collect
+            // (tid, addr) for connect-class syscalls, read post-walk.
+            if sys == 42 && connect_args.len() < 4 && !connect_args.iter().any(|&(_, x)| x == a1)
+            {
+                connect_args.push((tk.pid(), a1));
+            }
         }
     });
     // Emit with every pid-hash bucket released (see the sc207 note
@@ -3178,6 +3188,24 @@ pub fn sleep_snapshot() {
                 user_park_stack_dump_stid(tid, "sleepsnap-PARK:", 48)
             };
         }
+    }
+    // leg-40C connect-loop hunt: dump 32 bytes of each connect(2)
+    // victim's sockaddr — an AF_UNIX sun_path names the target service
+    // (read once per distinct address; kthread context, no locks).
+    for (tid, addr) in connect_args {
+        let w0 = unsafe { futex_word_of_stid(tid, addr) };
+        let w1 = unsafe { futex_word_of_stid(tid, addr + 8) };
+        let w2 = unsafe { futex_word_of_stid(tid, addr + 16) };
+        let w3 = unsafe { futex_word_of_stid(tid, addr + 24) };
+        crate::pr_warn!(
+            "sleepsnap-CONN: tid {} addr={:#x} w0={:#018x} w1={:#018x} w2={:#018x} w3={:#018x}",
+            tid,
+            addr,
+            w0.1,
+            w1.1,
+            w2.1,
+            w3.1
+        );
     }
 }
 
