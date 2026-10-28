@@ -16,15 +16,24 @@
 # leaves behind a directory of records that the assistant can read later
 # and turn into fixes. The intended division of labour:
 #
-#   quota exhausted  ->  the patrol starts this script, scaled to what the
-#                        host can actually carry right now, and goes quiet.
-#                        The tests keep running; the records accumulate.
+#   quota exhausted  ->  the patrol starts this script as a DAEMON
+#                        (`--mode auto --daemon`), scaled to what the host
+#                        can actually carry right now, and goes quiet.
+#                        The daemon keeps running ROUNDS (a fresh record
+#                        directory each) until it is stopped or its hours
+#                        run out, re-reading the host load before every
+#                        round, so the machine never idles while the
+#                        assistant is gone. A `quota-window-start` marker
+#                        notes when the unattended window opened.
 #   quota restored   ->  the patrol FIRST runs `--status` to read the
-#                        digest of everything that ran, then runs `--stop`
-#                        to shut the test machines down (so the host is
-#                        free for the debugging it is about to do), then
-#                        fixes what the digest reports, and only then
-#                        resumes its normal work.
+#                        digest of the newest round PLUS the aggregate of
+#                        every round since the quota window opened (new
+#                        failures across rounds are what matter — a flake
+#                        that repeats every round is a bug), then runs
+#                        `--stop` to shut the test machines down (so the
+#                        host is free for the debugging it is about to
+#                        do), then fixes what the digest reports, and
+#                        only then resumes its normal work.
 #
 # Nothing here decides what to fix. It only decides what to RUN, HOW MANY
 # machines the host can carry, and WHERE the evidence lands.
@@ -41,13 +50,15 @@
 #               test/*-probe.sh in the tree; new probes are picked up
 #               automatically, no list to maintain)
 #   perf        the performance gate (run/perf-gate.sh) and the perf probe
-#   stress      memory pressure / churn workloads
+#   stress      memory pressure / churn workloads (oomchurn boots)
 #   stability   long boots and soaks (the wedge shapes only appear after
 #               minutes, not seconds)
-#   monkey      randomised command churn across many parallel machines
+#   monkey      randomised command churn across many parallel machines,
+#               both architectures (x86_64 via its own kernel + image)
 #   fuzz        the filesystem fuzzer against the fleet images
-#   integration whole-suite runs (LTP) — only when a suite directory is
-#               named explicitly; the standing LTP scans are not touched
+#   integration whole-suite runs (LTP): a bounded sample of the suite
+#               list through test/ltpscan/run1.sh on a private image
+#               copy; the standing full scans are not touched
 #
 # Architectures: riscv64 (primary) and x86_64. The x86_64 leg needs its
 # own kernel build and image, and is skipped with a recorded reason when
@@ -87,6 +98,9 @@
 #   --arch LIST      comma-separated: riscv64 | x86_64 | both (default both)
 #   --concurrency N  parallel machines (default: derived from the load)
 #   --minutes M      duration of the long legs (monkey, stability, fuzz)
+#   --hours H        daemon lifetime in hours (default 6; 0 = until
+#                    stopped) — the quota windows are ~2 h, the default
+#                    simply outlasts them
 #   --out DIR        record directory (default run/suite/<UTC stamp>)
 #   --kernel PATH    kernel image to test (default: the built riscv64 one)
 #   --ltp-dir DIR    integration leg: an LTP suite directory to run
@@ -128,6 +142,7 @@ MODE="auto"
 ARCHES="both"
 CONCURRENCY=""
 MINUTES=5
+HOURS=6
 OUT=""
 LTP_DIR=""
 ONLY=""
@@ -136,7 +151,7 @@ DO_STATUS=0
 DO_STOP=0
 DO_DAEMON=0
 
-usage() { sed -n '2,110p' "$0"; exit "${1:-0}"; }
+usage() { sed -n '2,145p' "$0"; exit "${1:-0}"; }
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -144,6 +159,7 @@ while [ $# -gt 0 ]; do
         --arch) ARCHES="${2:-}"; shift 2 ;;
         --concurrency) CONCURRENCY="${2:-}"; shift 2 ;;
         --minutes) MINUTES="${2:-}"; shift 2 ;;
+        --hours) HOURS="${2:-}"; shift 2 ;;
         --out) OUT="${2:-}"; shift 2 ;;
         --kernel) KERNEL_DEFAULT="${2:-}"; shift 2 ;;
         --ltp-dir) LTP_DIR="${2:-}"; shift 2 ;;
@@ -216,14 +232,21 @@ if [ "$DO_DAEMON" = 1 ]; then
         [ "$a" = "--daemon" ] && continue
         daemon_args+=("$a")
     done
-    # The daemon runs from a SNAPSHOT of this script: bash reads a script
-    # incrementally as it executes, so editing the file while a run is in
-    # flight corrupts the running shell's parse (it dies with an
-    # "unexpected EOF" at whatever offset it had reached).
+    # A stale stop file would kill the new daemon's first round; the
+    # quota-window marker says "unattended testing since <stamp>" and is
+    # removed by --stop (it scopes the --status aggregate).
+    rm -f "$SUITE_ROOT/stop"
+    date -u +%FT%TZ > "$SUITE_ROOT/quota-window-start"
+    # The daemon snapshot: bash reads a script incrementally, so editing
+    # the file while a run is in flight corrupts the running shell's
+    # parse (it dies with an "unexpected EOF" at whatever offset it had
+    # reached).
     DAEMON_SCRIPT="$SUITE_ROOT/.suite-daemon.sh"
     cp "$0" "$DAEMON_SCRIPT"
     chmod +x "$DAEMON_SCRIPT"
-    RUX_ROOT="$ROOT" setsid nohup "$DAEMON_SCRIPT" "${daemon_args[@]}" --_detached >> "$DETACH_LOG" 2>&1 < /dev/null &
+    if [ "$HOURS" = 0 ]; then SUITE_DEADLINE=9999999999; else SUITE_DEADLINE=$(( $(date +%s) + HOURS * 3600 )); fi
+    RUX_ROOT="$ROOT" SUITE_LOOP=1 SUITE_DEADLINE="$SUITE_DEADLINE" \
+        setsid nohup "$DAEMON_SCRIPT" "${daemon_args[@]}" --_detached >> "$DETACH_LOG" 2>&1 < /dev/null &
     echo $! > "$DAEMON_PID_FILE"
     echo "suite daemon started (pid $(cat "$DAEMON_PID_FILE")), log $DETACH_LOG"
     exit 0
@@ -244,6 +267,20 @@ if [ "$DO_STATUS" = 1 ]; then
         exit 1
     fi
     echo "=== newest run: $latest ==="
+    # The aggregate across the whole unattended window: a leg that fails
+    # in one round and passes in the next was host noise; a leg that
+    # fails in every round is the first thing to look at. This is the
+    # table the assistant reads on quota recovery.
+    if [ -f "$SUITE_ROOT/quota-window-start" ]; then
+        echo
+        echo "=== aggregate since quota window opened ($(cat "$SUITE_ROOT/quota-window-start")) ==="
+        find "$SUITE_ROOT" -maxdepth 2 -name summary.tsv -newer "$SUITE_ROOT/quota-window-start" 2>/dev/null \
+            | sort | xargs -r cat 2>/dev/null \
+            | awk -F'\t' '{ key=$1"|"$4; n[key]++ }
+                END { for (k in n) { split(k, a, "|"); tot[a[1]]=tot[a[1]]" "a[2]"x"n[k] }
+                      for (t in tot) printf "    %-24s %s\n", t, tot[t] }' | sort
+    fi
+    echo
     if [ -f "$latest/summary.md" ]; then
         cat "$latest/summary.md"
     else
@@ -265,7 +302,11 @@ if [ "$DO_STOP" = 1 ]; then
         exit 0
     fi
     killed=0
-    # the daemon itself first, so it cannot start new work
+    # the daemon itself first, so it cannot start new work; the stop file
+    # stops any round already exec-ing; the quota marker closes the
+    # aggregate window.
+    : > "$SUITE_ROOT/stop"
+    rm -f "$SUITE_ROOT/quota-window-start"
     if [ -f "$SUITE_ROOT/daemon.pid" ]; then
         d="$(cat "$SUITE_ROOT/daemon.pid" 2>/dev/null)"
         if [ -n "$d" ] && [ -d "/proc/$d" ]; then
@@ -324,8 +365,10 @@ formal-spin|formal|host|600|make spin
 formal-kani|formal|host|1800|make kani
 formal-miri|formal|host|1800|make miri
 perf-gate|perf|riscv64|1200|run/perf-gate.sh --tiers 1 --kernel __KERNEL__
+stress-oomchurn|stress|riscv64|__STRESS__|python3 test/oomchurn_boot.py --kernel __KERNEL__ --secs __STRESS__ --mode fake --mb 400 --fork-n 2 --mem 2G
 stability-boot|stability|riscv64|__STAB__|python3 test/boot-soak-fast.py --seconds __STAB__ --kernel __KERNEL__
 monkey-riscv64|monkey|riscv64|__MONKEY__|python3 test/stress/monkey.py --kernel __KERNEL__ --rootfs test/rootfs.img --instances __INSTANCES__ --minutes __MONKEY_MIN__ --arch riscv64 --out __OUT__/monkey-riscv64
+monkey-x86_64|monkey|x86_64|__MONKEY__|python3 test/stress/monkey.py --kernel __X86_KERNEL__ --rootfs __X86_IMAGE__ --instances __INSTANCES__ --minutes __MONKEY_MIN__ --arch x86_64 --out __OUT__/monkey-x86_64
 fuzz-fs|fuzz|riscv64|__FUZZ__|__FUZZ_FS__
 integration-ltp|integration|riscv64|__LTP__|__LTP_CMD__
 ROWS
@@ -466,9 +509,9 @@ run_one() {
 
     verdict="$(verdict_for "$name" "$log" "$rc")"
     case "$verdict" in
-        PASS) status=PASS ;;
+        PASS*) status=PASS ;;
         SKIP*) status=SKIP ;;
-        *)    status=FAIL ;;
+        *)     status=FAIL ;;
     esac
     printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
         "$name" "$kind" "$arch" "$status" "$((end - start))" "$verdict" "$log" \
@@ -503,8 +546,10 @@ verdict_for() {
         echo "PANIC"
         return
     fi
-    # The harness verdict lines.
-    if grep -aEq "ALL TESTS PASSED|ALL .* passed|Result: PASS|PROBE-RESULT: PASS" "$log"; then
+    # The harness verdict lines (case-insensitive: make test prints
+    # "All tests passed!", make verify "=== All verify steps passed ===",
+    # kani/miri/spin have their own phrasings).
+    if grep -aqiE "all tests passed|all [a-z ]*steps passed|all [a-z ]*checks (passed|complete)|all [a-z ]*proofs passed|result: pass|probe-result: pass" "$log"; then
         if grep -aEq "FAIL|Failed: [1-9]|failed" "$log"; then
             # A mixed log: let the failure win.
             if grep -aEq "PROBE-FAIL|FAIL: " "$log"; then
@@ -525,8 +570,9 @@ verdict_for() {
     fi
     # A missing prerequisite (a prebuilt image, a toolchain, a guest disk)
     # is an environment gap, not a kernel defect: report it as a skip so
-    # the digest does not cry wolf.
-    if grep -aEq "Could not open '[^']*': No such file or directory|No such file or directory$|command not found|not found: " "$log"; then
+    # the digest does not cry wolf. The verification tools (kani, miri)
+    # are optional extras that may simply not be installed.
+    if grep -aEq "Could not open '[^']*': No such file or directory|No such file or directory$|command not found|not found: |is not installed for the toolchain|find a package to install" "$log"; then
         if grep -aEq "KERNPANIC|panic!|Oops:" "$log"; then
             echo "PANIC"
         else
@@ -614,6 +660,7 @@ if [ "$DO_LIST" = 1 ]; then
         tmo="${tmo//__STAB__/${MINUTES:-5}60}"
         tmo="${tmo//__MONKEY__/${MINUTES:-5}60}"
         tmo="${tmo//__FUZZ__/${MINUTES:-5}60}"
+        tmo="${tmo//__STRESS__/${MINUTES:-5}60}"
         tmo="${tmo//__LTP__/${MINUTES:-5}60}"
         printf '%-11s %-9s %-7s  %s\n' "$kind" "$arch" "${tmo}s" "$name"
     done
@@ -674,7 +721,12 @@ STAB=$(( MINUTES * 60 ))
 MONKEY=$(( MINUTES * 60 ))
 MONKEY_MIN="$MINUTES"
 FUZZ=$(( MINUTES * 60 ))
+STRESS=$(( MINUTES * 60 ))
 LTP=$(( MINUTES * 60 ))
+# the sample needs at least a quarter hour to be worth its image copy
+[ "$LTP" -lt 900 ] && LTP=900
+# a churn boot shorter than this says almost nothing about the OOM paths
+[ "$STRESS" -lt 600 ] && STRESS=600
 INSTANCES="$CONCURRENCY"
 [ "$INSTANCES" -lt 2 ] && INSTANCES=2
 
@@ -694,9 +746,17 @@ if [ -f "$FLEET_FSFUZZ" ]; then
     FUZZ_FS_CMD="timeout ${FUZZ}s qemu-system-riscv64 -M virt -accel tcg,thread=multi -cpu rv64,zbb=true,zba=true,zbs=true,zcb=true,v=true -m 1G -smp 2 -display none -serial stdio -snapshot -drive file=$FLEET_FSFUZZ,if=none,id=rootfs,format=raw,file.locking=off -device virtio-blk-pci,disable-legacy=on,drive=rootfs -kernel __KERNEL__ -append 'root=/dev/vda rw init=/test/fsfuzz console=ttyS0 dfx=watchdog,taskdump'"
 fi
 
-LTP_CMD="echo 'no LTP directory named (--ltp-dir)'; exit 3"
-if [ -n "$LTP_DIR" ] && [ -d "$LTP_DIR" ]; then
-    LTP_CMD="cd $LTP_DIR && ls"
+# The LTP leg runs a bounded sample of the suite list through the
+# ltpscan PID-1 runner on a PRIVATE image copy (both the shared
+# test/rootfs.img and the copy's /test/linux-ltp/chunk.txt would
+# otherwise fight a standing scan). The full 1869-test scans stay with
+# the LTP lane; this leg is the unattended smoke of the suite.
+LTP_DIR="${LTP_DIR:-$ROOT/test/ltpscan}"
+LTP_CMD="echo 'no LTP suite at $LTP_DIR (need tests-all.txt)'; exit 3"
+if [ -f "$LTP_DIR/tests-all.txt" ] && [ -f "$ROOT/test/rootfs.img" ]; then
+    LTP_PRIVATE="$OUT/ltp-rootfs.img"
+    LTP_LIST="$(grep -v '^#' "$LTP_DIR/tests-all.txt" | head -30 | paste -sd, -)"
+    LTP_CMD="cp '$ROOT/test/rootfs.img' '$LTP_PRIVATE' && KERNEL='__KERNEL__' IMAGE='$LTP_PRIVATE' test/ltpscan/run1.sh -t __LTP__ '$LTP_LIST'"
 fi
 
 : > "$OUT/summary.tsv"
@@ -723,15 +783,31 @@ all_rows | while IFS='|' read -r name kind arch tmo cmd; do
         continue
     fi
     cmd="${cmd//__KERNEL__/$KERNEL_DEFAULT}"
+    cmd="${cmd//__X86_KERNEL__/$X86_KERNEL}"
+    cmd="${cmd//__X86_IMAGE__/$X86_IMAGE}"
     cmd="${cmd//__STAB__/$STAB}"
     cmd="${cmd//__MONKEY__/$MONKEY}"
     cmd="${cmd//__MONKEY_MIN__/$MONKEY_MIN}"
     cmd="${cmd//__FUZZ__/$FUZZ}"
+    cmd="${cmd//__STRESS__/$STRESS}"
     cmd="${cmd//__LTP__/$LTP}"
     cmd="${cmd//__INSTANCES__/$INSTANCES}"
     cmd="${cmd//__OUT__/$OUT}"
     cmd="${cmd//__FUZZ_FS__/$FUZZ_FS_CMD}"
     cmd="${cmd//__LTP_CMD__/$LTP_CMD}"
+    # perf numbers from a busy host are noise dressed as data: the perf
+    # leg only runs when the host is actually quiet, and says so when it
+    # does not.
+    if [ "$kind" = perf ]; then
+        fnow="$(foreign_qemus "$PIDFILE")"
+        if [ "$fnow" -gt 2 ]; then
+            echo "  $name: SKIP (host busy: $fnow foreign QEMUs — perf needs quiet)"
+            printf '%s\t%s\t%s\t%s\t%s\t%s\t%s\n' \
+                "$name" "$kind" "$arch" "SKIP" "0" "host busy (foreign=$fnow)" "$OUT/$name.log" \
+                >> "$OUT/summary.tsv"
+            continue
+        fi
+    fi
     echo "$name|$kind|$arch|$tmo|$cmd" >> "$OUT/.rows"
     echo "  $name ($kind/$arch)"
 done
@@ -748,3 +824,42 @@ write_summary
 echo
 echo "records: $OUT"
 echo "digest : $OUT/summary.md"
+
+# --------------------------------------------------------------------------
+# the daemon loop
+# --------------------------------------------------------------------------
+# A quota window outlasts a single pass of the matrix, so the daemon
+# child (marked SUITE_LOOP=1 by the launcher) starts its NEXT round here
+# by exec-ing a fresh copy of itself with a fresh record directory —
+# until --stop drops the stop file or the --hours deadline passes. The
+# load is re-read by the new round from scratch, so the suite follows
+# the host: heavy legs join when the lanes go quiet, drop out when they
+# come back.
+if [ "${SUITE_LOOP:-0}" = 1 ]; then
+    if [ -f "$SUITE_ROOT/stop" ]; then
+        echo "daemon: stop file present — shutting down after this round"
+        rm -f "$SUITE_ROOT/stop" "$SUITE_ROOT/daemon.pid" "$SUITE_ROOT/quota-window-start"
+        exit 0
+    fi
+    if [ "$(date +%s)" -ge "${SUITE_DEADLINE:-0}" ]; then
+        echo "daemon: hours elapsed — shutting down after this round"
+        rm -f "$SUITE_ROOT/daemon.pid" "$SUITE_ROOT/quota-window-start"
+        exit 0
+    fi
+    # next round: same selections, new stamp (drop any --out so the
+    # records do not mix, drop --_detached before re-adding it)
+    next_args=()
+    skip_out=0
+    for a in "$@"; do
+        [ "$skip_out" = 1 ] && skip_out=0 && continue
+        case "$a" in
+            --out) skip_out=1; continue ;;
+            --_detached) continue ;;
+        esac
+        next_args+=("$a")
+    done
+    echo "daemon: next round in 30 s (deadline $(date -u -d "@${SUITE_DEADLINE}" +%H:%M:%SZ 2>/dev/null || echo '?'))"
+    sleep 30
+    exec env RUX_ROOT="$ROOT" SUITE_LOOP=1 SUITE_DEADLINE="$SUITE_DEADLINE" \
+        "$0" "${next_args[@]}" --_detached
+fi
