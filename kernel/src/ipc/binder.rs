@@ -3031,23 +3031,23 @@ pub fn sleep_snapshot() {
                 return;
             }
             let state = tk.state();
-            // leg-40C wedge hunt: the census must also show NON-parked
-            // app-main threads — sc349's launcher main (tid 1198) never
-            // appeared in any census for 20 min while wedged (not
-            // INTERRUPTIBLE), leaving the wedge site invisible. Include
-            // m.ohos.* comm tasks in ANY state (bounded: a handful of
-            // app processes), plus all UNINTERRUPTIBLE tasks.
+            // leg-40C wedge hunt v2: the sc350 census caught the launcher
+            // main RUNNING exactly once (sys=20 writev) then never again —
+            // the main RENAMES its comm (no longer m.ohos*) and a RUNNABLE
+            // renamed task is still invisible to every filter. Print every
+            // non-zombie/non-dead task: the runnable set at snapshot time
+            // is a handful of lines.
+            if state.bits()
+                & (crate::process::task::TaskState::ZOMBIE
+                    | crate::process::task::TaskState::DEAD)
+                != 0
+            {
+                return;
+            }
             let comm = tk.comm();
             let name = core::str::from_utf8(&comm[..])
                 .unwrap_or("")
                 .trim_end_matches('\0');
-            let is_app_main = name.len() >= 6 && &name[..6] == "m.ohos";
-            if !state.contains(crate::process::task::TaskState::INTERRUPTIBLE)
-                && !is_app_main
-                && !state.contains(crate::process::task::TaskState::UNINTERRUPTIBLE)
-            {
-                return;
-            }
             // Stack-freed guard (KILLDUMP census race class): the walk
             // can visit a task whose exit already freed its stack.
             let Some(top) = tk.kernel_stack_top_checked() else {
