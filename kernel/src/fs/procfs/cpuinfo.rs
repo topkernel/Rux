@@ -13,6 +13,10 @@
 //! separate candidate fix; a behavior-preserving conversion must not
 //! change it here.
 
+// Framekernel layer policy (docs/architecture/framekernel-layers.md):
+// this module must stay Safe Rust.
+#![forbid(unsafe_code)]
+
 use alloc::string::String;
 use alloc::vec::Vec;
 

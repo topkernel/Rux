@@ -9,6 +9,10 @@
 //! Checkpointing is the process of ensuring that a section of the log is
 //! committed fully to disk, so that that portion of the log can be reused.
 
+// Framekernel layer policy (docs/architecture/framekernel-layers.md):
+// this module must stay Safe Rust.
+#![forbid(unsafe_code)]
+
 use core::sync::atomic::{AtomicI32, AtomicU32, Ordering};
 use alloc::sync::Arc;
 use alloc::vec::Vec;

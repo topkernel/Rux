@@ -15,6 +15,10 @@
 //! blocks — valid gzip that any zlib/toybox zcat decompresses, without
 //! a compressor in the kernel.
 
+// Framekernel layer policy (docs/architecture/framekernel-layers.md):
+// this module must stay Safe Rust.
+#![forbid(unsafe_code)]
+
 /// The config text served under /proc/config.gz.
 const CONFIG_TEXT: &[u8] = b"#\n\
 # Rux kernel configuration (IKCONFIG-style; mirrors implemented features)\n\

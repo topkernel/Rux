@@ -23,6 +23,10 @@
 //! - anything else without a `<ns>.` shape → EINVAL; unknown namespace →
 //!   EOPNOTSUPP (Linux returns EOPNOTSUPP when no handler matches).
 
+// Framekernel layer policy (docs/architecture/framekernel-layers.md):
+// this module must stay Safe Rust.
+#![forbid(unsafe_code)]
+
 use alloc::vec::Vec;
 
 use crate::errno;

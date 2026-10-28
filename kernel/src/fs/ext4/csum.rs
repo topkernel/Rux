@@ -34,6 +34,10 @@
 //! the kernel's ext4_chksum(); the stored values are the running state
 //! truncated to their field widths.
 
+// Framekernel layer policy (docs/architecture/framekernel-layers.md):
+// this module must stay Safe Rust.
+#![forbid(unsafe_code)]
+
 /// crc32c (Castagnoli, reflected 0x82F63B78) table.
 const CRC32C_TABLE: [u32; 256] = make_table();
 
