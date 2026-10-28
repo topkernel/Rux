@@ -7,11 +7,7 @@
 //! D-4 kvtab_pad conversion (refactor lane): the per-CPU block is one
 //! declared row list per arch; keys carry their own tab padding (the
 //! byte alignment belongs to the key, matching Linux's riscv/x86
-//! layouts). The x86 row list PRESERVES a pre-conversion quirk: the
-//! `processor` row appears twice per block (once before vendor_id,
-//! once after cache_alignment) — reported to the coordinator as a
-//! separate candidate fix; a behavior-preserving conversion must not
-//! change it here.
+//! layouts).
 
 // Framekernel layer policy (docs/architecture/framekernel-layers.md):
 // this module must stay Safe Rust.
@@ -33,9 +29,11 @@ pub const CPUINFO_RISCV_FIELDS: &[&str] = &[
     "mimpid\t\t",
 ];
 
-/// Declared key order of one /proc/cpuinfo block, x86_64. The trailing
-/// duplicate `processor` row is the preserved pre-conversion shape
-/// (see the module doc) until the coordinator decides the fix.
+/// Declared key order of one /proc/cpuinfo block, x86_64. Linux emits
+/// `processor` exactly once per block, at the top (arch/x86/kernel/cpu/
+/// proc.c show_cpuinfo); the pre-conversion code duplicated it after
+/// cache_alignment, which the D-4 conversion preserved byte-for-byte —
+/// removed here.
 pub const CPUINFO_X86_FIELDS: &[&str] = &[
     "processor\t",
     "vendor_id\t",
@@ -45,7 +43,6 @@ pub const CPUINFO_X86_FIELDS: &[&str] = &[
     "flags\t\t",
     "clflush size\t",
     "cache_alignment\t",
-    "processor\t",
 ];
 
 /// Generate /proc/cpuinfo content
@@ -89,8 +86,6 @@ pub fn generate() -> Vec<u8> {
                 ("flags\t\t", &""), // no flags: `flags\t\t:\n` byte shape
                 ("clflush size\t", &"64"),
                 ("cache_alignment\t", &"64"),
-                // Preserved pre-conversion duplicate (module doc).
-                ("processor\t", &cpu),
             ];
             content.push_str(&super::procfile::render_kvtab_pad(rows));
         }
