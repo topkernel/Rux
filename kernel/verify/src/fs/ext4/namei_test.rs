@@ -26,6 +26,13 @@ fn find_entry_space(block_data: &[u8], name_len: usize, block_size: usize) -> Op
         if rec_len == 0 || rec_len < 8 {
             break;
         }
+        // Corrupt/oversized record: an entry may never claim space past
+        // the block end. Treat as no-space (the caller falls through to
+        // allocating a fresh block) instead of splitting past 4096 and
+        // panicking the kernel.
+        if offset + rec_len as usize > block_size {
+            break;
+        }
 
         // Check if this is a deleted/unused entry (inode == 0)
         let ino = u32::from_le_bytes([

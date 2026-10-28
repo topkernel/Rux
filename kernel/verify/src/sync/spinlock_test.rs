@@ -31,13 +31,27 @@ impl RawSpinlock {
 
     #[inline]
     pub fn try_lock(&self) -> bool {
-        self.locked.compare_exchange(0, 1, Ordering::Acquire, Ordering::Acquire).is_ok()
+        let ok = self.locked.compare_exchange(0, 1, Ordering::Acquire, Ordering::Acquire).is_ok();
+        if ok {
+            self.record_owner();
+        }
+        ok
     }
 
     #[inline]
     pub fn unlock(&self) {
+        self.clear_owner();
         self.locked.store(0, Ordering::Release);
     }
+
+    /// The kernel records the lock owner for its deadlock detector; the
+    /// copy keeps the shape with an inert stub.
+    #[inline]
+    fn record_owner(&self) {}
+
+    /// See record_owner().
+    #[inline]
+    fn clear_owner(&self) {}
 
     #[inline]
     pub fn is_locked(&self) -> bool {
