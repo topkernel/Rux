@@ -20,18 +20,26 @@ CC = os.environ.get("CC", "riscv64-linux-gnu-gcc")
 def build_init():
     src = os.path.join(HERE, "init.c")
     out = os.path.join(HERE, "init")
+    # Explicit -march: Ubuntu gcc 15's default ISA string includes zcb
+    # (C.LBU) and friends, which the test QEMU's cpu string
+    # (rv64,zbb,zba,zbs) does not implement — the freestanding init
+    # SIGILLs at .text+0 on a bare C.LBU (observed: insn16=0x811c at
+    # epc=.text start). Same lesson as probe6s: freestanding probes pin
+    # the march to what the repo's QEMU drivers actually provide.
+    # -fno-builtin: without it gcc self-folds the memset/memcpy shims in
+    # init.c into recursive calls to themselves (observed: memset's fill
+    # loop compiled to `jal memset`), which walks sp to the stack floor
+    # and faults ~8MB below USER_STACK_TOP — looks exactly like a
+    # stack-growth bug but is a build artifact.
+    MARCH = os.environ.get(
+        "MARCH", "-march=rv64imac -mabi=lp64 -fno-builtin")
     subprocess.run(
-        # march pinned WITHOUT vector: the gcc-15 default march emits
-        # RVV insns the no-V boot CPU SIGILLs on (same lesson as
-        # mkrootfs.sh / test/musl_build.py).
-        [CC, "-march=rv64gc_zba_zbb_zbs", "-static", "-nostdlib", "-O2",
-         "-o", out, src],
+        [CC, "-static", "-nostdlib", "-O2"] + MARCH.split() + ["-o", out, src],
         check=True,
     )
     hello = os.path.join(HERE, "hello")
     subprocess.run(
-        [CC, "-march=rv64gc_zba_zbb_zbs", "-static", "-nostdlib", "-O2",
-         "-DHELLO", "-o", hello, src],
+        [CC, "-static", "-nostdlib", "-O2"] + MARCH.split() + ["-DHELLO", "-o", hello, src],
         check=True,
     )
     return out, hello
