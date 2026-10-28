@@ -2119,11 +2119,9 @@ fn sysfs_file_close(file: &crate::fs::File) -> i32 {
 }
 
 /// SysFS attribute file operations.
-pub static SYSFS_FILE_OPS: crate::fs::FileOps = crate::fs::FileOps {
-    read: Some(sysfs_file_read),
-    write: Some(sysfs_file_write),
-    lseek: Some(sysfs_file_lseek),
-    close: Some(sysfs_file_close),
-    poll: None,
-    read_at: None,
-};
+pub static SYSFS_FILE_OPS: crate::fs::FileOps = crate::fs::FileOps::builder()
+    .read(sysfs_file_read)
+    .write(sysfs_file_write)
+    .lseek(sysfs_file_lseek)
+    .close(sysfs_file_close)
+    .build();

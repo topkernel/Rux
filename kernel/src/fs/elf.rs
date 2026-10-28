@@ -698,11 +698,15 @@ impl ElfLoader {
                         core::ptr::copy_nonoverlapping(src, dst, filesz);
                     }
 
-                    // Zero BSS
-                    if memsz > filesz {
-                        let bss_start = seg_kva + filesz as u64;
-                        core::ptr::write_bytes(bss_start as *mut u8, 0, memsz - filesz);
-                    }
+                    // BSS: NOT zeroed here. The only caller (exec's
+                    // interpreter load) maps the destination through
+                    // alloc_and_map_to_user_table, which pre-zeroes every
+                    // mapped page on both arches — the old BSS memset
+                    // re-zeroed the same frames on every exec. A future
+                    // caller that does NOT pre-zero must zero BSS itself
+                    // (the ELF contract requires zero-filled p_memsz >
+                    // p_filesz tails).
+                    let _ = memsz;
                 }
             }
         }

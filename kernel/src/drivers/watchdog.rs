@@ -74,14 +74,10 @@ fn watchdog_read(_file: &crate::fs::file::File, _buf: &mut [u8]) -> isize {
 }
 
 /// /dev/watchdog file operations.
-pub static WATCHDOG_OPS: crate::fs::FileOps = crate::fs::FileOps {
-    read: Some(watchdog_read),
-    write: Some(watchdog_write),
-    lseek: None,
-    close: None,
-    poll: None,
-    read_at: None,
-};
+pub static WATCHDOG_OPS: crate::fs::FileOps = crate::fs::FileOps::builder()
+    .read(watchdog_read)
+    .write(watchdog_write)
+    .build();
 
 /// True when `file` is an open /dev/watchdog description.
 pub fn is_watchdog_file(file: &crate::fs::file::File) -> bool {

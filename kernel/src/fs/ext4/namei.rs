@@ -988,6 +988,10 @@ fn ext4_mkdir_no_journal(
     if let Err(e) = bio::flush_publications_scoped() {
         crate::pr_warn!("ext4: post-mkdir publication flush failed (errno {})", e);
     }
+    // Leg-55: counted even on the flushed path — the lazy-variant
+    // follow-up reads this against the phase mix (the flush is a
+    // fixed cost per mkdir; see the reversal note in the ledger).
+    crate::dfx::fsw::note_pub_lazy();
 
     Ok(new_ino)
 }
@@ -1372,6 +1376,29 @@ fn ext4_link_inner(
     Ok(())
 }
 
+/// Reap a deferred-deleted inode: dtime-mark it, free its data blocks and
+/// its inode number (called from ext4_destroy_inode / the pending queue).
+///
+/// Idempotent via the on-disk marker: an inode with dtime != 0 was already
+/// reaped and is skipped, so duplicate VFS objects for one disk inode (an
+/// icache eviction can leave two) cannot double-free.
+pub(crate) fn ext4_reap_unlinked(
+    fs: &Ext4FileSystem,
+    ino: u32,
+) -> Result<(), i32> {
+    let mut inode = super::inode::read_inode(fs, ino)?;
+    if inode.i_links_count != 0 || inode.i_dtime != 0 {
+        // Still linked, or already reaped — nothing to do.
+        return Ok(());
+    }
+    // R20-FS1 order (same as the old eager path): persist the dead inode
+    // FIRST (dtime set), then free blocks, then the inode number.
+    inode.i_dtime = 1;
+    super::inode::write_inode_disk(fs, ino, &inode)?;
+    free_inode_blocks(fs, &inode)?;
+    free_inode(fs, ino)
+}
+
 // ============================================================================
 // unlink implementation
 // ============================================================================
@@ -1694,22 +1721,16 @@ fn ext4_unlink_inner(
         inode.i_links_count -= 1;
     }
 
-    // If link count is 0, free data blocks and inode
-    if inode.i_links_count == 0 {
-        inode.i_dtime = 1; // TODO: get current time
-
-        // R20-FS1 (F5 order, same fix rename got in r17): persist the dead
-        // inode FIRST (dtime set), then free blocks and the inode number.
-        // The old order wrote the inode back AFTER free_inode — writing a
-        // recycled inode slot / resurrecting freed-block pointers whenever
-        // the number got reallocated in the window.
-        super::inode::write_inode_disk(fs, entry_ino, &inode)?;
-        free_inode_blocks(fs, &inode)?;
-        free_inode(fs, entry_ino)?;
-        return Ok(());
-    }
-
-    // Write inode back (link count decrement for surviving links)
+    // POSIX deferred deletion: when the last link goes away the inode
+    // number and data blocks are NOT freed here — descriptors may still
+    // hold the file (unlink-while-open, O_TMPFILE before linkat). The
+    // on-disk state "links == 0 && dtime == 0" marks the pending delete;
+    // ext4_destroy_inode (the last VFS inode reference dropping = last
+    // close) performs the free. Freeing eagerly here let the allocator
+    // hand the number to the next mkdir/create while a descriptor still
+    // used the inode — the new directory cross-linked to the old file
+    // (LTP open14 test03: chdir(tst03_1) ENOTDIR, stat showed the
+    // tmpfile's mode).
     super::inode::write_inode_disk(fs, entry_ino, &inode)?;
 
     Ok(())
@@ -1925,7 +1946,7 @@ fn is_dir_empty(fs: &Ext4FileSystem, inode: &Ext4InodeOnDisk) -> Result<bool, i3
 }
 
 /// Free an inode in the bitmap
-fn free_inode(fs: &Ext4FileSystem, ino: u32) -> Result<(), i32> {
+pub(crate) fn free_inode(fs: &Ext4FileSystem, ino: u32) -> Result<(), i32> {
     // Drop every cache keyed by this inode BEFORE the number can be
     // reallocated (review EXT4-H8 + icache variant):
     // - page cache: a reader that cached pages of the dying file would
@@ -2040,7 +2061,7 @@ fn revoke_freed_block(fs: &Ext4FileSystem, block: u64) {
 }
 
 /// Free all blocks associated with an inode
-fn free_inode_blocks(fs: &Ext4FileSystem, inode: &Ext4InodeOnDisk) -> Result<(), i32> {
+pub(crate) fn free_inode_blocks(fs: &Ext4FileSystem, inode: &Ext4InodeOnDisk) -> Result<(), i32> {
     let allocator = BlockAllocator::new(fs);
 
     // Fast symlinks store the target STRING inside i_block — there are no

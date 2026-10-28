@@ -280,7 +280,10 @@ impl MmStruct {
                         vma_flags,
                     );
                     vma.set_origin(VmaOrigin::from_bits(VmaOrigin::BRK));
+                    // Account the page like every other installed VMA.
+                    let brk_page = vma.page_count() as u64;
                     let _ = vma_mgr.add(vma);
+                    self.add_total_vm(brk_page);
                 }
                 addr += PAGE_SIZE_USIZE;
             }
@@ -547,6 +550,15 @@ impl MmStruct {
             // Remove the overlapped VMAs, then re-add the preserved
             // pieces — under the SAME guard (see ATOMICITY above).
             for (vma, _) in overlapping.iter() {
+                // The replaced range leaves the mapping: release its
+                // virtual-size charge (the preserved head/tail pieces stay
+                // charged, the replacement VMA is charged below).
+                self.release_unmapped_pages(
+                    vma.start().as_usize(),
+                    vma.end().as_usize(),
+                    start.as_usize(),
+                    fixed_end.as_usize(),
+                );
                 let _ = vma_mgr.remove(vma.start());
                 self.unpin_vma_file(vma.start().as_usize());
             }
@@ -752,6 +764,10 @@ impl MmStruct {
                 if ve <= addr.as_usize() || vs >= end_addr {
                     continue;
                 }
+                // The pages of this VMA inside the unmapped range leave the
+                // mapping: release their virtual-size charge. The preserved
+                // head and tail pieces stay charged.
+                self.release_unmapped_pages(vs, ve, addr.as_usize(), end_addr);
                 let pinned = self.get_vma_file(vs);
                 rm.push(vma.start());
                 if vs < addr.as_usize() {
@@ -1236,7 +1252,14 @@ impl MmStruct {
                     if vma_type == crate::mm::vma::VmaType::SharedMemory && file_fd >= 0 {
                         crate::ipc::sysv_shm::shm_attach_vma(file_fd);
                     }
+                    // Fork copy: the child's mapping carries the same
+                    // virtual size as the parent's (the reference kernel
+                    // copies mm->total_vm with the VMA set). Charge the
+                    // copied VMA's own pages; the merge the manager may
+                    // perform keeps the neighbour's charge intact.
+                    let copied_pages = new_vma.page_count() as u64;
                     let _ = new_vma_mgr.add(new_vma);
+                    new_space.add_total_vm(copied_pages);
                 }
             }
         }

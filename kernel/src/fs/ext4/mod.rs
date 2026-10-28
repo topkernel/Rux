@@ -1583,7 +1583,7 @@ pub fn ext4_fallocate_on(
                     fs, &mut ext4_inode, needed_blocks, current_blocks, &allocator, goal_group,
                 )
             } else {
-                file::allocate_blocks_for_file(fs, &mut ext4_inode, needed_blocks)
+                file::allocate_blocks_for_file(fs, &mut ext4_inode, needed_blocks, current_blocks)
             };
             if let Err(e) = alloc_res {
                 // The allocators mark blocks used in the on-disk bitmap as
@@ -1831,7 +1831,7 @@ fn append_dir_block(
 
     // First allocate the block in the inode's extent tree/indirect blocks
     // This will give us the physical block number
-    file::allocate_blocks_for_file(fs, &mut parent_inode, new_block_index + 1)?;
+    file::allocate_blocks_for_file(fs, &mut parent_inode, new_block_index + 1, new_block_index)?;
 
     // Now get the actual block number that was allocated
     let new_block = parent_inode.get_data_block(fs, new_block_index)?;
@@ -2281,12 +2281,57 @@ unsafe fn ext4_setattr(inode: &Inode, attr: u32, arg1: u64, arg2: u64) -> i32 {
     }
 }
 
-/// Ext4 destroy_inode: reclaim the Box<Ext4Inode> stored in inode.sb.
+/// Deferred-delete queue: (filesystem, ino) pairs reaped by the next
+/// ext4 entry point. ext4_destroy_inode runs in arbitrary Drop contexts
+/// (close_fd, scope ends inside unrelated syscalls) where taking
+/// EXT4_BIG_LOCK or issuing block I/O directly could invert lock order;
+/// destroying only QUEUES the reap, and the wrappers below drain the
+/// queue at their start under their own lock discipline.
+static PENDING_REAPS: crate::sync::spinlock::Spinlock<
+    alloc::vec::Vec<(&'static Ext4FileSystem, u32)>,
+> = crate::sync::spinlock::Spinlock::new(alloc::vec::Vec::new());
+
+/// Drain the deferred-delete queue. Called from ext4 entry points that
+/// already serialize on EXT4_BIG_LOCK (unlink/create/mkdir wrappers);
+/// each item is reaped under the big lock, one at a time.
+fn flush_pending_reaps() {
+    loop {
+        let item = {
+            let mut q = PENDING_REAPS.lock();
+            match q.pop() {
+                Some(it) => it,
+                None => return,
+            }
+        };
+        let _guard = EXT4_BIG_LOCK.lock_fair();
+        let _ = namei::ext4_reap_unlinked(item.0, item.1);
+    }
+}
+
+/// Ext4 destroy_inode: reclaim the Box<Ext4Inode> stored in inode.sb and
+/// queue the POSIX deferred deletion.
+///
+/// The Drop that lands here is the last VFS reference — for an unlinked
+/// file that means the last descriptor just closed (unlink keeps the
+/// number/blocks until then; see ext4_unlink_inner). The reap itself is
+/// deferred to the next ext4 entry point (PENDING_REAPS note above).
 unsafe fn ext4_destroy_inode(inode: &mut crate::fs::inode::Inode) {
     if let Some(ptr) = inode.sb {
         // ptr was created by Box::into_raw(Box::new(ext4_inode.clone()))
         let _ = alloc::boxed::Box::from_raw(ptr as *mut inode::Ext4Inode);
         inode.sb = None;
+    }
+    if let Ok(fs) = get_ext4_fs_from_inode(inode) {
+        // SAFETY: read_inode only touches the block layer under the big
+        // lock taken below; queueing avoids I/O in this Drop context.
+        unsafe {
+            if let Ok(disk) = inode::read_inode(fs, inode.ino as u32) {
+                if disk.i_links_count == 0 && disk.i_dtime == 0 {
+                    let mut q = PENDING_REAPS.lock();
+                    q.push((fs, inode.ino as u32));
+                }
+            }
+        }
     }
 }
 
@@ -3010,6 +3055,7 @@ unsafe fn ext4_iget(parent: &Inode, _name: &[u8], ino: Ino) -> Result<alloc::syn
 /// Wrapper for ext4_mkdir to match VFS signature
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
 unsafe fn ext4_mkdir_wrapper(dir: &Inode, name: &[u8], mode: InodeMode) -> Result<alloc::sync::Arc<Inode>, i32> {
+    flush_pending_reaps();
     let _ext4_guard = EXT4_BIG_LOCK.lock_fair();
     let fs = get_ext4_fs_rw_from_inode(dir)?;
 
@@ -3076,6 +3122,7 @@ unsafe fn ext4_rmdir_wrapper(dir: &Inode, name: &[u8]) -> i32 {
 /// Wrapper for ext4_create to match VFS signature
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
 unsafe fn ext4_create_wrapper(dir: &Inode, name: &[u8], mode: InodeMode) -> Result<alloc::sync::Arc<Inode>, i32> {
+    flush_pending_reaps();
     let _ext4_guard = EXT4_BIG_LOCK.lock_fair();
     let fs = get_ext4_fs_rw_from_inode(dir)?;
     let new_ino = namei::ext4_create(fs, dir.ino as u32, name, mode.bits() as u16)?;
@@ -3154,6 +3201,7 @@ unsafe fn ext4_link_wrapper(dir: &Inode, name: &[u8], target: &Inode) -> i32 {
 /// Wrapper for ext4_unlink to match VFS signature
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
 unsafe fn ext4_unlink_wrapper(dir: &Inode, name: &[u8]) -> i32 {
+    flush_pending_reaps();
     let _ext4_guard = EXT4_BIG_LOCK.lock_fair();
     let fs = match get_ext4_fs_rw_from_inode(dir) {
         Ok(f) => f,

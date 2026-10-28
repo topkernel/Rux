@@ -336,6 +336,13 @@ unsafe impl Send for BlockCache {}
 // Spinlocks; raw pointer access is always under the appropriate bucket lock.
 unsafe impl Sync for BlockCache {}
 
+/// Leg-52 dfx counter: sync_all/sync_all_excluding walked a LINKED
+/// cache entry whose bh was NULL (the R11-1 crash family's read side).
+/// Non-zero names the residual producer for the fs lane; the walks skip
+/// those entries instead of faulting.
+static SYNC_WALK_NULL_BH: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+
 impl BlockCache {
     fn new(hash_size: usize, max_entries: usize, block_size: u32) -> Self {
         let mut buckets = Vec::with_capacity(hash_size);
@@ -546,6 +553,18 @@ impl BlockCache {
         }
         // bucket lock released; entry is unpinnable and unhashed
 
+        // dfx=exthunt: the victim left the hash — from here until the
+        // Phase-4 sync lands, every lookup of this key misses and may
+        // fabricate a fresh entry over stale disk (the unhashed-victim
+        // window; see the tracers in ext4/extent.rs).
+        let vkey = unsafe { (*victim).key };
+        let v_dirty = unsafe { (*(*victim).bh).is_dirty() };
+        if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::ExtHunt)
+            && crate::fs::ext4::extent::exthunt_phys_watched(vkey.2)
+        {
+            crate::fs::ext4::extent::exthunt_evict_unhash(vkey.2, v_dirty);
+        }
+
         {
             let mut lru = self.lru.lock_irqsave();
             // SAFETY: victim is a valid CacheEntry pointer picked from the
@@ -557,7 +576,7 @@ impl BlockCache {
         // SAFETY: victim is unhashed, unlinked and unpinnable; its bh field
         // points to a valid BufferHead owned by this entry.
         unsafe {
-            if (*(*victim).bh).is_dirty() {
+            if v_dirty {
                 // Ordered-publication guard: if this block is a pending
                 // entry/post block, writing it here (before its prereqs)
                 // would reopen the ghost-empty-file crash window. Satisfy
@@ -566,11 +585,18 @@ impl BlockCache {
                 // eviction pay the whole publication backlog); the flush
                 // persists the constrained block's prerequisites, so the
                 // sync below usually becomes a no-op.
-                let vkey = (*victim).key;
                 if publication_constrained(vkey.0, vkey.1, vkey.2) {
                     let _ = flush_publication_constraints(vkey.0, vkey.1, vkey.2);
                 }
-                let _ = (*(*victim).bh).sync();
+                let sync_rc = match (*(*victim).bh).sync() {
+                    Ok(()) => 0,
+                    Err(e) => e,
+                };
+                if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::ExtHunt)
+                    && crate::fs::ext4::extent::exthunt_phys_watched(vkey.2)
+                {
+                    crate::fs::ext4::extent::exthunt_evict_done(vkey.2, sync_rc);
+                }
                 crate::dfx::fsw::note_evict(true);
             } else {
                 crate::dfx::fsw::note_evict(false);
@@ -590,6 +616,7 @@ impl BlockCache {
             let index = self.hash_index(device_major, device_minor, blocknr);
 
             // Phase 1: Lookup under bucket lock
+            let mut skipped_evicting = false;
             {
                 let mut bucket = self.buckets[index].lock();
                 let mut prev: Option<*mut CacheEntry> = None;
@@ -601,6 +628,11 @@ impl BlockCache {
                         // Being evicted: treat as not found — pinning it
                         // would hand out a buffer that is about to be
                         // freed (R7-C1 resurrection race).
+                        // dfx=exthunt: same-key eviction = miss-causing
+                        // event (see bread_async Phase 1).
+                        if entry.key == (device_major, device_minor, blocknr) {
+                            skipped_evicting = true;
+                        }
                         prev = Some(entry_ptr);
                         current = entry.hash_next;
                         continue;
@@ -730,6 +762,8 @@ impl BlockCache {
             }
 
             // Phase 2: Read from disk (no locks held)
+            // dfx=exthunt: fresh-entry fabrication, sync path.
+            crate::fs::ext4::extent::exthunt_fab(blocknr, skipped_evicting, true);
             let mut bh = Box::new(BufferHead::new(blocknr, self.block_size));
 
             if let Err(_) = blkdev::blkdev_read(
@@ -934,9 +968,16 @@ impl BlockCache {
                 // bucket lock is held so the entry cannot be freed concurrently.
                 unsafe {
                     let entry = &*entry_ptr;
-                    if (*entry.bh).is_dirty() {
+                    // Leg-52 (route-1 exposure): a linked entry with a null
+                    // bh has been observed (evict_one Phase 1 guards the
+                    // same shape; R11-1's family ends in exactly this
+                    // NULL+0x30 b_state panic). Skip and count — do not
+                    // dereference. The fs lane owns the producer hunt.
+                    if !entry.bh.is_null() && (*entry.bh).is_dirty() {
                         (*entry.bh).get();
                         dirty_list.push(entry.bh);
+                    } else if entry.bh.is_null() {
+                        SYNC_WALK_NULL_BH.fetch_add(1, Ordering::Relaxed);
                     }
                     current = entry.hash_next;
                 }
@@ -991,6 +1032,13 @@ impl BlockCache {
                 // concurrently.
                 unsafe {
                     let entry = &*entry_ptr;
+                    // Leg-52: same null-bh guard as sync_all (the pa92nj
+                    // crash chain faulted HERE first).
+                    if entry.bh.is_null() {
+                        SYNC_WALK_NULL_BH.fetch_add(1, Ordering::Relaxed);
+                        current = entry.hash_next;
+                        continue;
+                    }
                     let bh = &*entry.bh;
                     if bh.is_dirty() && bh.b_device == Some(device) && Some(bh.b_blocknr) != skip {
                         bh.get();
@@ -1235,6 +1283,7 @@ pub fn bread_async(
         let index = cache.hash_index(device_major, device_minor, blocknr);
 
         // Phase 1: Lookup under bucket lock
+        let mut skipped_evicting = false;
         {
             let mut bucket = cache.buckets[index].lock_irqsave();
             let mut prev: Option<*mut CacheEntry> = None;
@@ -1245,6 +1294,14 @@ pub fn bread_async(
                 // R9-9: same guards as get() — skip entries being evicted
                 // and dead (freed/reused) BufferHeads.
                 if entry.evicting {
+                    // dfx=exthunt: an evicting entry with OUR key is the
+                    // miss-causing event — its Phase-4 sync may not have
+                    // landed, so a Phase-2 fabrication would read stale
+                    // disk over a block whose only dirty copy is the
+                    // victim. Recorded for the Phase-2 print.
+                    if entry.key == (device_major, device_minor, blocknr) {
+                        skipped_evicting = true;
+                    }
                     prev = Some(entry_ptr);
                     current = entry.hash_next;
                     continue;
@@ -1301,6 +1358,18 @@ pub fn bread_async(
                     // wake-nested-in-a-driver-lock site; INV-LOCK-6).
                     drop(lru);
                     drop(bucket);
+                    // dfx=exthunt: block-cache hit truth (buffer pointer +
+                    // first bytes) — see exthunt_rxbit/exthunt_rxbhit.
+                    // SAFETY: hit_bh passed the b_data length guard above.
+                    unsafe {
+                        let d = &(*hit_bh).b_data;
+                        crate::fs::ext4::extent::exthunt_rxbhit(
+                            blocknr,
+                            d.as_ptr(),
+                            d[0],
+                            d[1],
+                        );
+                    }
                     completion.complete(0);
                     return Some(hit_bh);
                 }
@@ -1322,6 +1391,9 @@ pub fn bread_async(
         // Phase 2: Cache miss — submit async I/O (no lock held).
         // Uninit buffer: the device DMA fills every byte; zero-filling 4 KiB
         // per block was measurable waste on the batch read-ahead path.
+        // dfx=exthunt: fresh-entry fabrication (adjudicates the unhashed
+        // evicting-victim race — see the tracers in ext4/extent.rs).
+        crate::fs::ext4::extent::exthunt_fab(blocknr, skipped_evicting, false);
         let block_size = cache.block_size;
         let mut bh = Box::new(BufferHead::new_uninit(blocknr, block_size));
         bh.set_device(device);
@@ -1501,12 +1573,19 @@ pub fn block_cached(device: *const blkdev::GenDisk, blocknr: u64) -> bool {
         let cache = get_block_cache();
         let index = cache.hash_index(device_major, device_minor, blocknr);
         let bucket = cache.buckets[index].lock_irqsave();
+        // dfx=exthunt: detect the guard's blind spot under the lock (an
+        // evicting same-key entry makes this lookup return false while the
+        // victim's dirty data may not be on disk yet); print after release.
+        let mut evicting_match = false;
         let mut current = bucket.head;
         while let Some(entry_ptr) = current {
             let entry = &*entry_ptr;
             // Same validity guards as bread_async Phase 1: skip entries
             // being evicted and dead (freed/reused) BufferHeads.
             if entry.evicting {
+                if entry.key == (device_major, device_minor, blocknr) {
+                    evicting_match = true;
+                }
                 current = entry.hash_next;
                 continue;
             }
@@ -1518,6 +1597,10 @@ pub fn block_cached(device: *const blkdev::GenDisk, blocknr: u64) -> bool {
                 return true; // SpinlockGuard drops on early return
             }
             current = entry.hash_next;
+        }
+        drop(bucket);
+        if evicting_match {
+            crate::fs::ext4::extent::exthunt_bc_blind(blocknr);
         }
         false
     }
@@ -1753,7 +1836,88 @@ pub struct Publication {
     pub cookie: u64,
 }
 
-static PENDING_PUBLICATIONS: Spinlock<Vec<Publication>> = Spinlock::new(Vec::new());
+static PENDING_PUBLICATIONS: Spinlock<PendingPublications> =
+    Spinlock::new(PendingPublications::new());
+
+/// Leg-54 fix (the e3c1ec35 displacement, pa93j/pa95j evidence): the
+/// pending-publication queue with a CONSTRAINED-BLOCK INDEX. The old
+/// `Vec<Publication>` made `publication_constrained` — which runs at
+/// EVERY out-of-band buffer write (sync_dirty_buffer, eviction victims,
+/// journal commit write-through) — a linear scan of the whole queue and
+/// each record's post list: with the post-mkdir flush deleted the queue
+/// legitimately holds thousands of records during provisioning churn,
+/// and every unlink's buffer writes paid O(queue x post-len) — p6_unlink
+/// 10.2-10.8ms vs the 77-119us class. The index maps (device, block) ->
+/// number of pending records constraining that block (entry == block or
+/// post contains block, H1/H2's exact sets); membership checks are
+/// O(log n). Mutations maintain it; wholesale take/requeue (the drain
+/// snapshot pattern) rebuilds it once per requeue — drains are per
+/// durability point, never per write.
+#[allow(dead_code)]
+pub struct PendingPublications {
+    list: Vec<Publication>,
+    index: alloc::collections::BTreeMap<((u32, u32), u64), u32>,
+}
+
+impl PendingPublications {
+    pub const fn new() -> Self {
+        PendingPublications {
+            list: Vec::new(),
+            index: alloc::collections::BTreeMap::new(),
+        }
+    }
+    fn index_record(index: &mut alloc::collections::BTreeMap<((u32, u32), u64), u32>, r: &Publication) {
+        if let Some(e) = r.entry {
+            *index.entry((r.device, e)).or_insert(0) += 1;
+        }
+        for &b in &r.post {
+            *index.entry((r.device, b)).or_insert(0) += 1;
+        }
+    }
+    pub fn push(&mut self, r: Publication) {
+        Self::index_record(&mut self.index, &r);
+        self.list.push(r);
+    }
+    /// Post-block capture on an existing record (the delete-side window).
+    pub fn post_capture(&mut self, capture_id: u64, blocknr: u64) {
+        for p in self.list.iter_mut().rev() {
+            if p.id == capture_id {
+                if !p.post.contains(&blocknr) {
+                    p.post.push(blocknr);
+                    *self.index.entry((p.device, blocknr)).or_insert(0) += 1;
+                }
+                return;
+            }
+        }
+    }
+    /// Wholesale take (the drain-snapshot pattern): empties both halves.
+    pub fn take_list(&mut self) -> Vec<Publication> {
+        self.index.clear();
+        core::mem::take(&mut self.list)
+    }
+    /// Wholesale replace (the requeue pattern): rebuilds the index once.
+    pub fn set_list(&mut self, v: Vec<Publication>) {
+        self.index.clear();
+        for r in &v {
+            Self::index_record(&mut self.index, r);
+        }
+        self.list = v;
+    }
+    pub fn is_empty(&self) -> bool {
+        self.list.is_empty()
+    }
+    pub fn len(&self) -> usize {
+        self.list.len()
+    }
+    pub fn iter(&self) -> core::slice::Iter<'_, Publication> {
+        self.list.iter()
+    }
+    /// H1/H2 membership: is this (device, block) any pending record's
+    /// entry or post block?
+    pub fn constrained(&self, mj: u32, mi: u32, blocknr: u64) -> bool {
+        self.index.contains_key(&((mj, mi), blocknr))
+    }
+}
 static NEXT_PUBLICATION_ID: AtomicU64 = AtomicU64::new(1);
 
 /// Queue-length high-water mark: once crossed, the NEXT publication_defer
@@ -1904,14 +2068,7 @@ fn publication_capture_note_dirty(
         }
         CAPTURE_POST => {
             let mut pend = PENDING_PUBLICATIONS.lock();
-            for p in pend.iter_mut().rev() {
-                if p.id == capture_id {
-                    if !p.post.contains(&blocknr) {
-                        p.post.push(blocknr);
-                    }
-                    return;
-                }
-            }
+            pend.post_capture(capture_id, blocknr);
             // The record was flushed while our capture window was open
             // (another CPU hit a durability point). Append a post-only
             // record at the END of the queue — still after the entry
@@ -1932,11 +2089,7 @@ fn publication_capture_note_dirty(
 /// Is this block a pending `entry` or `post` block (order-constrained,
 /// must not be persisted out of band)?
 fn publication_constrained(mj: u32, mi: u32, blocknr: u64) -> bool {
-    let pend = PENDING_PUBLICATIONS.lock();
-    pend.iter().any(|p| {
-        p.device == (mj, mi)
-            && (p.entry == Some(blocknr) || p.post.contains(&blocknr))
-    })
+    PENDING_PUBLICATIONS.lock().constrained(mj, mi, blocknr)
 }
 
 // ============================================================================
@@ -2122,7 +2275,7 @@ impl WritePlan {
 pub fn flush_publications_scoped() -> Result<(), i32> {
     let cookie = publication_cookie();
     loop {
-        let snapshot = core::mem::take(&mut *PENDING_PUBLICATIONS.lock());
+        let mut snapshot = PENDING_PUBLICATIONS.lock().take_list();
         let mine: Vec<usize> = snapshot
             .iter()
             .enumerate()
@@ -2134,10 +2287,9 @@ pub fn flush_publications_scoped() -> Result<(), i32> {
             // appended during our scan; snapshot is older — prepend).
             if !snapshot.is_empty() {
                 let mut pend = PENDING_PUBLICATIONS.lock();
-                let rest = core::mem::take(&mut *pend);
-                let mut merged = snapshot;
-                merged.extend(rest);
-                *pend = merged;
+                let rest = pend.take_list();
+                snapshot.extend(rest);
+                pend.set_list(snapshot);
             }
             return Ok(());
         }
@@ -2202,10 +2354,9 @@ pub fn flush_publications_scoped() -> Result<(), i32> {
         }
         {
             let mut pend = PENDING_PUBLICATIONS.lock();
-            let rest = core::mem::take(&mut *pend);
-            let mut merged = foreign;
-            merged.extend(rest);
-            *pend = merged;
+            let rest = pend.take_list();
+            foreign.extend(rest);
+            pend.set_list(foreign);
         }
         if first_err != 0 {
             return Err(first_err);
@@ -2222,7 +2373,7 @@ pub fn flush_publications_scoped() -> Result<(), i32> {
 /// its entry written first (with that entry's own H1 set). The block
 /// itself is NOT written here. Foreign records stay pending.
 pub fn flush_publication_constraints(mj: u32, mi: u32, blocknr: u64) -> Result<(), i32> {
-    let snapshot = core::mem::take(&mut *PENDING_PUBLICATIONS.lock());
+    let mut snapshot = PENDING_PUBLICATIONS.lock().take_list();
     let dev = (mj, mi);
     // Fast path: nothing pending even references this block.
     let relevant = snapshot.iter().any(|p| {
@@ -2230,10 +2381,9 @@ pub fn flush_publication_constraints(mj: u32, mi: u32, blocknr: u64) -> Result<(
     });
     if !relevant {
         let mut pend = PENDING_PUBLICATIONS.lock();
-        let rest = core::mem::take(&mut *pend);
-        let mut merged = snapshot;
-        merged.extend(rest);
-        *pend = merged;
+        let rest = pend.take_list();
+        snapshot.extend(rest);
+        pend.set_list(snapshot);
         return Ok(());
     }
     crate::dfx::fsw::note_pub_cstr();
@@ -2277,10 +2427,9 @@ pub fn flush_publication_constraints(mj: u32, mi: u32, blocknr: u64) -> Result<(
     // write; H2 for posts is handled by pulling entries above).
     {
         let mut pend = PENDING_PUBLICATIONS.lock();
-        let rest = core::mem::take(&mut *pend);
-        let mut merged = snapshot;
-        merged.extend(rest);
-        *pend = merged;
+        let rest = pend.take_list();
+        snapshot.extend(rest);
+        pend.set_list(snapshot);
     }
     if first_err != 0 {
         Err(first_err)
@@ -2306,7 +2455,7 @@ pub fn flush_publications() -> Result<(), i32> {
 pub fn flush_publications_bounded(max_batches: u32) -> Result<(), i32> {
     let mut batches = 0u32;
     loop {
-        let batch = core::mem::take(&mut *PENDING_PUBLICATIONS.lock());
+        let mut batch = PENDING_PUBLICATIONS.lock().take_list();
         if batch.is_empty() {
             return Ok(());
         }
@@ -2338,10 +2487,9 @@ pub fn flush_publications_bounded(max_batches: u32) -> Result<(), i32> {
         if first_err != 0 {
             // Requeue what we did not get to; the error is reported.
             let mut pend = PENDING_PUBLICATIONS.lock();
-            let drained = core::mem::take(&mut *pend);
-            let mut merged = batch;
-            merged.extend(drained);
-            *pend = merged;
+            let drained = pend.take_list();
+            batch.extend(drained);
+            pend.set_list(batch);
             return Err(first_err);
         }
         batches += 1;

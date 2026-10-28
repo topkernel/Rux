@@ -28,9 +28,10 @@ fn monotonic_time() -> (u64, u64) {
 
 /// Current CLOCK_REALTIME (monotonic + wall epoch offset) as (secs, nanos).
 /// FIX8: shared by the adjtimex GET path (tx.time) and ADJ_SETOFFSET.
-///
-/// Also used by the POSIX message queues, whose timeout is an ABSOLUTE
-/// CLOCK_REALTIME deadline (see ipc/posix_mq.rs).
+/// Also shared with the POSIX-mq absolute-timeout conversion
+/// (kernel/src/ipc/posix_mq.rs), whose timeout is an ABSOLUTE
+/// CLOCK_REALTIME deadline interpreted against the same base
+/// clock_gettime serves.
 pub(crate) fn realtime_secs_nanos() -> (i64, u64) {
     let (s, ns) = monotonic_time();
     let total_ns = (s as u128 * 1_000_000_000u128 + ns as u128)
@@ -311,6 +312,24 @@ fn nanosleep_impl(req: &Timespec, rem_ptr: *mut Timespec) -> i64 {
     // is NEVER woken early (LTP clock_nanosleep02: any early sample is a
     // failure). The jiffy wheel alone truncates and wakes up to one tick
     // (10 ms) short.
+    //
+    // PR_SET_TIMERSLACK: Linux hrtimer rounds the sleep deadline up to a
+    // multiple of the caller's timer slack (range_round_up in hrtimer.c)
+    // before arming — a slack of N ns delays the wake by at most N ns.
+    // LTP's tst_timer_test reads PR_GET_TIMERSLACK and widens its
+    // precision threshold accordingly.
+    let timer_slack_ns = crate::sched::current()
+        .and_then(|t| unsafe { (*t).signal.as_ref() })
+        .map(|s| s.timer_slack_ns.load(core::sync::atomic::Ordering::Relaxed))
+        .unwrap_or(50_000)
+        .max(1);
+    // total_nanos is validated non-negative above; do the round-up in u64.
+    let total_nanos = {
+        let ns = total_nanos as u64;
+        let rem = ns % timer_slack_ns;
+        let add = (timer_slack_ns - rem) % timer_slack_ns;
+        (ns + add) as i64
+    };
     let freq_hz = crate::config::TIMER_CLOCK_FREQ_HZ;
     let now0 = timer::read_time();
     let ns_to_ticks = ((total_nanos as u64).saturating_mul(freq_hz) / 1_000_000_000).saturating_add(1);
@@ -1170,7 +1189,11 @@ pub fn sys_timer_settime(args: SyscallArgs) -> i64 {
         None => return -(errno::EINVAL as i64),
     };
 
-    // Write old_value (the CURRENT settings — real values, not zeros)
+    // Write old_value (the CURRENT settings — real values, not zeros).
+    // A bad old_value pointer fails the WHOLE call with EFAULT (Linux
+    // sys_timer_settime checks access_ok on old_value before arming;
+    // LTP timer_settime02's last case passes tst_get_bad_addr and
+    // requires EFAULT, not a silent zero-filled old_value).
     if !old_value.is_null() {
         if !crate::arch::uaccess::access_ok(old_value as usize, 32) {
             return -(errno::EFAULT as i64);
@@ -1181,10 +1204,10 @@ pub fn sys_timer_settime(args: SyscallArgs) -> i64 {
         unsafe {
             let p = old_value as *mut i64;
             let put = crate::arch::uaccess::put_user;
-            let _ = put(p, oi);
-            let _ = put(p.add(1), on);
-            let _ = put(p.add(2), ov);
-            let _ = put(p.add(3), vn);
+            let ok = put(p, oi) & put(p.add(1), on) & put(p.add(2), ov) & put(p.add(3), vn);
+            if !ok {
+                return -(errno::EFAULT as i64);
+            }
         }
     }
 
@@ -1223,10 +1246,17 @@ pub fn sys_timer_settime(args: SyscallArgs) -> i64 {
             .sched_entity()
             .sum_exec_runtime
             .load(core::sync::atomic::Ordering::Acquire);
-        timer.cputime_deadline_ns.store(
-            now_cpu_ns.saturating_add(total_nsec as u64),
-            core::sync::atomic::Ordering::Release,
-        );
+        // TIMER_ABSTIME targets the CPU-time clock directly: the test
+        // passes clock_gettime(cputime)+delta, which must be taken as an
+        // absolute deadline — adding it to "now" again re-based a ~1 s
+        // absolute target ~1 s into the future (LTP timer_settime01's
+        // TIMER_ABSTIME tcase on both CPU clocks). Relative is now+delta.
+        let deadline_ns = if flags & 1 != 0 {
+            total_nsec as u64
+        } else {
+            now_cpu_ns.saturating_add(total_nsec as u64)
+        };
+        timer.cputime_deadline_ns.store(deadline_ns, core::sync::atomic::Ordering::Release);
         timer.overrun_count = 0;
         return 0;
     }
@@ -1470,6 +1500,35 @@ fn set_realtime_from_secs_nanos(tv_sec: i64, tv_nsec: i64) -> i64 {
     let offset_ns = target_ns.saturating_sub(mono_total_ns);
     set_wall_epoch_offset_ns(offset_ns);
     0
+}
+
+/// sys_time - time(2) (x86_64 NR 201; internal dispatch slot 1180 — the
+/// asm-generic ABI has no time(2), riscv64 glibc derives it from
+/// clock_gettime, but x86_64 glibc calls SYS_time directly when no vDSO
+/// is provided, and a static glibc binary gets -1 forever without this:
+/// ohlite's second-stage init computed "uptime = time() - time()" = 0
+/// and never reached its 60s BOOT GATE).
+///
+/// Linux semantics: returns the seconds since the Epoch as the return
+/// value; if `tloc` is non-NULL it also stores the same value there
+/// (EFAULT if that store faults).
+pub fn sys_time(args: SyscallArgs) -> i64 {
+    let (secs, _ns) = realtime_secs_nanos();
+    let tloc = args[0] as *mut i64;
+    if !tloc.is_null() {
+        if !crate::arch::uaccess::access_ok(tloc as usize, 8) {
+            return -(errno::EFAULT as i64);
+        }
+        // SAFETY: tloc access_ok'd above; put_user is the exception-table
+        // copy path — a faulting store surfaces as EFAULT, not a kernel
+        // fault.
+        unsafe {
+            if !crate::arch::uaccess::put_user(tloc, secs) {
+                return -(errno::EFAULT as i64);
+            }
+        }
+    }
+    secs
 }
 
 /// sys_settimeofday - Set wall-clock time (NR 170)

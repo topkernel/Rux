@@ -428,15 +428,51 @@ pub fn cgroup_lookup_child(parent: &Arc<CgroupNode>, name: &str) -> Option<Arc<C
 /// SAFETY contract (callers may rely on it): the pointer was obtained from
 /// an `Arc<CgroupNode>` that is never freed (rmdir leaks the allocation),
 /// and it is never written through. NULL → implicit root / no limits.
+///
+/// R90 containment: the sched_setscheduler04/proc_sched_rt01 panic family
+/// walked a Task whose cgroup_ptr was neither NULL nor a live node (a
+/// deterministic garbage value, e.g. 0x652aa009e52a45e1) — the task page
+/// was most likely freed while still linked into a scheduler structure.
+/// Validate the pointer against the kernel heap range before the walk:
+/// a dead pointer logs once (task identity + value) and reads as "no
+/// cgroup" instead of pfault-panicking the whole box (which took down
+/// the r9 and r10tail sweeps).
 #[inline]
 pub fn task_cgroup(task: *const Task) -> Option<&'static CgroupNode> {
     let ptr = unsafe { (*task).cgroup_ptr() };
     if ptr.is_null() {
-        None
-    } else {
-        // SAFETY: see contract above.
-        Some(unsafe { &*ptr })
+        return None;
     }
+    {
+        use crate::arch::mm::memory_layout::HEAP_START;
+        let addr = ptr as usize as u64;
+        let heap_end = HEAP_START + crate::config::KERNEL_HEAP_SIZE as u64;
+        let in_heap = addr >= HEAP_START && addr < heap_end;
+        // Small kernel allocations (Arc<CgroupNode> included) come from the
+        // slab-backed global allocator, whose pages live in their own region
+        // past the heap — those addresses are valid node pointers too.
+        let in_slab = crate::mm::slab::slab_region()
+            .map(|(base, end)| {
+                let addr = ptr as usize;
+                addr >= base && addr < end
+            })
+            .unwrap_or(false);
+        if !in_heap && !in_slab {
+            static REPORTED: core::sync::atomic::AtomicBool =
+                core::sync::atomic::AtomicBool::new(false);
+            if !REPORTED.swap(true, core::sync::atomic::Ordering::AcqRel) {
+                let (pid, policy) = unsafe { ((*task).pid(), (*task).policy()) };
+                crate::pr_err!(
+                    "cgroup: DEAD cgroup_ptr={:#x} on task pid={} policy={:?} — \
+                     treating as root (freed-task walk, R90 containment)",
+                    addr, pid, policy
+                );
+            }
+            return None;
+        }
+    }
+    // SAFETY: see contract above.
+    Some(unsafe { &*ptr })
 }
 
 /// Attach a task to a cgroup (sets cgroup_ptr and records the pid).

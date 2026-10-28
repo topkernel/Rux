@@ -491,39 +491,62 @@ const MAX_BINPRM_RECURSION: u32 = 4;
 
 /// Parse shebang (#!) line from file data.
 /// Returns (interpreter_path, optional_argument) if present.
-fn parse_shebang(data: &[u8]) -> Option<(&str, Option<&str>)> {
+///
+/// Mirrors the reference kernel's fs/binfmt_script.c load_script():
+/// - the interpreter line is the first BINPRM_BUF_SIZE bytes, terminated
+///   at the first '\n' or at the buffer end (a 255-byte line with no
+///   newline is still a valid interpreter line, not an error);
+/// - trailing ' '/'\t' of the line are trimmed;
+/// - the interpreter name is the first word; the OPTIONAL ARGUMENT is
+///   the ENTIRE rest of the line after the separating whitespace run —
+///   including embedded spaces (`#!/usr/bin/env -S python3 -u` must
+///   hand env the single argument "-S python3 -u"; env -S then splits
+///   it). Truncating at the next whitespace dropped every word after
+///   the first, breaking the `env -S` script convention.
+/// - the whitespace class is ' ' and '\t' only (binfmt_script's checks
+///   are exactly these two bytes; a broader trim also diverges on
+///   exotic-but-legal interpreter paths).
+pub(crate) fn parse_shebang(data: &[u8]) -> Option<(&str, Option<&str>)> {
     if data.len() < 2 || data[0] != b'#' || data[1] != b'!' {
         return None;
     }
 
-    let line = if let Some(pos) = data[2..BINPRM_BUF_SIZE.min(data.len())].iter().position(|&c| c == b'\n') {
-        core::str::from_utf8(&data[2..2 + pos]).ok()?
-    } else if data.len() >= BINPRM_BUF_SIZE {
-        return None; // line too long
+    let window = BINPRM_BUF_SIZE.min(data.len());
+    let raw = if let Some(rel) = data[2..window].iter().position(|&c| c == b'\n') {
+        &data[2..2 + rel]
     } else {
-        core::str::from_utf8(&data[2..]).ok()?
+        // No newline in the window: the line runs to the buffer end —
+        // same as binfmt_script (cp = buf + BINPRM_BUF_SIZE - 1).
+        &data[2..window]
     };
 
-    // Skip leading spaces after #!
-    let line = line.trim_start();
+    // binfmt_script first trims trailing spaces/tabs of the whole line.
+    let mut line_end = raw.len();
+    while line_end > 0 && (raw[line_end - 1] == b' ' || raw[line_end - 1] == b'\t') {
+        line_end -= 1;
+    }
+    let line = core::str::from_utf8(&raw[..line_end]).ok()?;
 
-    // Split into interpreter and optional single argument
-    if let Some(space_pos) = line.find(|c: char| c == ' ' || c == '\t') {
-        let interp = &line[..space_pos];
-        let rest = line[space_pos..].trim_start();
-        let arg = if rest.is_empty() { None } else {
-            Some(if let Some(end) = rest.find(|c: char| c == ' ' || c == '\t') {
-                &rest[..end]
+    // Skip leading spaces/tabs after "#!".
+    let line = line.trim_start_matches([' ', '\t']);
+
+    // Interpreter name = first word; optional argument = the WHOLE rest.
+    match line.find([' ', '\t']) {
+        Some(space_pos) => {
+            let interp = &line[..space_pos];
+            let rest = line[space_pos..].trim_start_matches([' ', '\t']);
+            if interp.is_empty() {
+                return None;
+            }
+            Some((interp, if rest.is_empty() { None } else { Some(rest) }))
+        }
+        None => {
+            if line.is_empty() {
+                None
             } else {
-                rest
-            })
-        };
-        if interp.is_empty() { return None; }
-        Some((interp, arg))
-    } else if line.is_empty() {
-        None
-    } else {
-        Some((line, None))
+                Some((line, None))
+            }
+        }
     }
 }
 
@@ -577,6 +600,88 @@ fn read_exec_file(path: &str) -> Option<alloc::vec::Vec<u8>> {
 /// leaves the VMAs without a pinned file (offset bookkeeping stands).
 pub(crate) fn open_file_arc(path: &str) -> Option<alloc::sync::Arc<crate::fs::file::File>> {
     crate::fs::vfs::open_file_arc_nofd(path)
+}
+
+/// One-resolution exec file handle (abi-review session 1): a single
+/// `path_lookup` yields the inode for the MAY_EXEC gate, the setuid
+/// stat bits, the content read, AND the VMA-pinning File Arc. The old
+/// ladder walked the path FOUR times per exec (pre-flight lookup,
+/// read_exec_file's internal file_open, stat_file_by_path,
+/// open_file_arc) plus twice more for a dynamic interpreter — the
+/// EXECCOST decomposition measured ~3 us of string build + ~35 us per
+/// walk on the p4_fork_exec shape.
+pub(crate) struct ExecFile {
+    /// Kernel-internal read-only File on the resolved inode (no fdtable
+    /// slot, invisible to inotify — Linux get_empty_filp semantics).
+    pub file: alloc::sync::Arc<crate::fs::file::File>,
+    /// st_mode bits (S_ISUID/S_ISGID/x-bit checks without re-statting).
+    pub mode: u32,
+    pub uid: u32,
+    pub gid: u32,
+    /// Inode size, used to presize the content read buffer.
+    pub size: u64,
+}
+
+/// Resolve an exec target with ONE path walk. Error shapes match the
+/// reference kernel's do_open_execat: walk errors propagate verbatim
+/// (ENOENT/ENOTDIR/ENAMETOOLONG/EACCES...), a directory is EACCES
+/// (may_open: S_ISDIR), missing execute permission is EACCES (even
+/// root needs one x bit — LTP execve03).
+pub(crate) fn resolve_exec_file(path: &str) -> Result<ExecFile, i32> {
+    let vpath = crate::fs::vfs::path_lookup(path, 0)?;
+    let inode = vpath
+        .inode
+        .clone()
+        .or_else(|| vpath.dentry.as_ref().and_then(|d| d.get_inode()))
+        .ok_or(-(errno::ENOENT as i32))?;
+    if inode.mode.is_directory() {
+        return Err(-(errno::EACCES as i32));
+    }
+    if !crate::fs::permission::inode_permission(&inode, crate::fs::permission::MAY_EXEC) {
+        return Err(-(errno::EACCES as i32));
+    }
+    // SAFETY: vpath came from a successful path_lookup; construction is
+    // the fd-free kernel open (same as open_file_arc_nofd).
+    let file = unsafe { crate::fs::vfs::open_file_arc_from_vpath(&vpath) }
+        .ok_or(-(errno::EACCES as i32))?;
+    use core::sync::atomic::Ordering::Relaxed;
+    Ok(ExecFile {
+        file,
+        mode: inode.mode.bits(),
+        uid: inode.uid.load(Relaxed),
+        gid: inode.gid.load(Relaxed),
+        size: inode.size.load(Relaxed),
+    })
+}
+
+/// Read the whole file through a kernel-internal File Arc, presized from
+/// the inode size so the doubling-growth realloc copies of the old loop
+/// disappear (the exec target is a regular file; a bogus hint only costs
+/// one wrong-size allocation, correctness never depends on it).
+/// Returns None when nothing could be read.
+fn read_file_via(
+    file: &alloc::sync::Arc<crate::fs::file::File>,
+    size_hint: u64,
+) -> Option<alloc::vec::Vec<u8>> {
+    let cap = usize::try_from(size_hint).unwrap_or(0).min(64 * 1024 * 1024);
+    let mut data = alloc::vec::Vec::with_capacity(cap);
+    let mut chunk = [0u8; 16384];
+    loop {
+        // SAFETY: file is a live Arc<File>; chunk is a valid kernel buffer.
+        let n = unsafe { file.read(chunk.as_mut_ptr(), chunk.len()) };
+        if n <= 0 {
+            break;
+        }
+        data.extend_from_slice(&chunk[..n as usize]);
+        if (n as usize) < chunk.len() {
+            break;
+        }
+    }
+    if data.is_empty() {
+        None
+    } else {
+        Some(data)
+    }
 }
 
 /// ARG_MAX approximation for execve argument limits (Linux uses a 2MB-ish
@@ -669,12 +774,38 @@ fn copy_envp_from_user(envp_ptr: *const *const u8) -> Result<alloc::vec::Vec<all
     Ok(envs)
 }
 
+/// EXECCOST (dfx=execcost, abi-review lane): per-stage execve cost
+/// breakdown in raw read_time() ticks. Two lines per exec — the ladder
+/// stages here, the image stages in do_execve_elf (EXECCOST2). Prints
+/// only when the switch is armed, and only for recursion depth 0
+/// (user-visible execs), rate-limited to the first 64 plus every 512th
+/// afterwards. Purpose: decompose the p4_fork_exec reference gap
+/// (~1.1 ms exec vs ~11 us reference median).
+fn execcost_armed(n: u64) -> bool {
+    if !crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::ExecCost) {
+        return false;
+    }
+    n < 64 || n % 512 == 0
+}
+
 /// Core execve implementation: load and execute an ELF binary.
 /// Handles shebang (#!) scripts by recursing with the interpreter.
 fn do_execve(pathname: &str, argv: &[alloc::string::String], envp: &[alloc::string::String], recursion_depth: u32) -> u64 {
     use crate::fs::elf::{ElfLoader, Elf64Ehdr};
     use alloc::string::String;
     use alloc::vec::Vec;
+
+    // EXECCOST: single rate-limit counter, armed check once.
+    static EXECCOST_N: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+    let ec_n = if recursion_depth == 0 {
+        EXECCOST_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed)
+    } else {
+        u64::MAX
+    };
+    let ec = execcost_armed(ec_n);
+    let ec_t0: u64 = if ec { crate::arch::cpu::read_time() } else { 0 };
+    let (mut ec_path, mut ec_lookup, mut ec_read, mut ec_parse, mut ec_interp, mut ec_cred, mut ec_pre) =
+        (0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64);
 
     // EXECTRACE (dbus-activation hunt): activation children have been
     // observed dying with their FORK comm (never exec'd). Trace execs of
@@ -738,44 +869,30 @@ fn do_execve(pathname: &str, argv: &[alloc::string::String], envp: &[alloc::stri
         }
     };
 
-    // Pre-flight VFS validation (Linux do_open_execat runs through the
-    // normal path walk before reading a byte): a >NAME_MAX component is
-    // ENAMETOOLONG, walking through a non-directory is ENOTDIR, and the
-    // target must carry at least one execute bit for the caller (EACCES —
-    // even root needs one x bit). Reading the file raw from ext4 skipped
-    // all of this and reported ENOENT/ENOEXEC instead (LTP execve03).
-    match crate::fs::vfs::path_lookup(full_path.as_ref(), 0) {
-        Ok(vp) => {
-            let inode = vp
-                .inode
-                .clone()
-                .or_else(|| vp.dentry.as_ref().and_then(|d| d.get_inode()));
-            let inode_ok = inode
-                .as_ref()
-                .map(|inode| {
-                    // MAY_EXEC honors the caller's cred: owner/group/other
-                    // bits, CAP_DAC_OVERRIDE still needs one x bit.
-                    crate::fs::permission::inode_permission(
-                        inode,
-                        crate::fs::permission::MAY_EXEC,
-                    )
-                })
-                .unwrap_or(false);
-            if !inode_ok {
-                return -errno::EACCES as u64;
-            }
-        }
+    // ONE resolution gates and feeds everything downstream (Linux
+    // do_open_execat: the walk, MAY_EXEC, and the struct file are one
+    // operation): a >NAME_MAX component is ENAMETOOLONG, walking through
+    // a non-directory is ENOTDIR, a directory itself is EACCES (may_open),
+    // and the target must carry at least one execute bit for the caller
+    // (EACCES — even root needs one x bit). The resolved inode also
+    // serves the setuid stat and the VMA file pinning below.
+    if ec { ec_path = crate::arch::cpu::read_time(); }
+    let exec_res = resolve_exec_file(full_path.as_ref());
+    if ec { ec_lookup = crate::arch::cpu::read_time(); }
+    let exec_file = match exec_res {
+        Ok(f) => f,
         Err(e) => return (e as i64) as u64,
-    }
+    };
 
-    // Read file from file system. The read can fail TRANSIENTLY under
-    // concurrent block I/O (same family as the PT_INTERP read below —
-    // buffer-cache pressure right after a killed task's teardown), which
-    // surfaced in the LTP sweep as spurious execve ENOENT of binaries
-    // that plainly exist (creat08, asapi_02, pipeio, fs_fill, ...).
-    // Retry a bounded number of times before reporting ENOENT, like the
-    // interpreter path does.
-    let mut program_data = read_exec_file(full_path.as_ref());
+    // Read file content through the resolved kernel File (fd-free). The
+    // read can fail TRANSIENTLY under concurrent block I/O (same family
+    // as the PT_INTERP read below — buffer-cache pressure right after a
+    // killed task's teardown), which surfaced in the LTP sweep as
+    // spurious execve ENOENT of binaries that plainly exist (creat08,
+    // asapi_02, pipeio, fs_fill, ...). Retry a bounded number of times,
+    // then fall back to the raw path readers once, before reporting
+    // ENOENT.
+    let mut program_data = read_file_via(&exec_file.file, exec_file.size);
     let mut main_attempt = 1;
     while program_data.is_none() && main_attempt < 3 {
         crate::pr_err!(
@@ -784,13 +901,17 @@ fn do_execve(pathname: &str, argv: &[alloc::string::String], envp: &[alloc::stri
             crate::process::current_pid(),
             main_attempt
         );
-        program_data = read_exec_file(full_path.as_ref());
+        program_data = read_file_via(&exec_file.file, exec_file.size);
         main_attempt += 1;
+    }
+    if program_data.is_none() {
+        program_data = read_exec_file(full_path.as_ref());
     }
     let program_data = match program_data {
         Some(d) => d,
         None => return -errno::ENOENT as u64,
     };
+    if ec { ec_read = crate::arch::cpu::read_time(); }
 
     // Check for shebang (#!) script — binfmt_script behavior
     if let Some((interp, opt_arg)) = parse_shebang(&program_data) {
@@ -832,32 +953,49 @@ fn do_execve(pathname: &str, argv: &[alloc::string::String], envp: &[alloc::stri
         Some(e) => e,
         None => return -errno::ENOEXEC as u64,
     };
+    if ec { ec_parse = crate::arch::cpu::read_time(); }
 
     // Check for PT_INTERP (dynamic executable)
-    let mut interp_path_str: Option<&str> = None;
+    let mut interp_exec: Option<ExecFile> = None;
     let interp_data: Option<alloc::vec::Vec<u8>> = if let Some(interp_path) = ElfLoader::get_interpreter(&program_data) {
         let interp_str = match core::str::from_utf8(interp_path) {
             Ok(s) => s,
             Err(_) => return -errno::ENOEXEC as u64,
         };
-        // A dynamic executable MUST have its interpreter. The old code fell
-        // back to running the image STATICALLY when this read failed
-        // transiently — main() then jumped through file-initial PLTGOT
-        // entries (0x4710 -> unresolved resolver path) and died at an
-        // unmapped heap address (the 0x1c29c family). Retry a few times
-        // for transient block-I/O failures, then fail the exec with
-        // ENOENT, exactly like Linux.
-        let mut data = read_exec_file(interp_str);
-        let mut attempt = 1;
-        while data.is_none() && attempt < 3 {
-            data = read_exec_file(interp_str);
+        // A dynamic executable MUST have its interpreter, opened with the
+        // same exec semantics as the main file (Linux open_exec: walk +
+        // MAY_EXEC; a missing or non-executable interpreter is the walk's
+        // own errno, ENOENT/EACCES). The old code fell back to running
+        // the image STATICALLY when this read failed transiently —
+        // main() then jumped through file-initial PLTGOT entries
+        // (0x4710 -> unresolved resolver path) and died at an unmapped
+        // heap address (the 0x1c29c family). Retry a few times for
+        // transient block-I/O failures, then fail the exec.
+        let mut data = None;
+        let mut attempt = 0;
+        while attempt < 3 {
+            match resolve_exec_file(interp_str) {
+                Ok(f) => {
+                    data = read_file_via(&f.file, f.size);
+                    if data.is_some() {
+                        interp_exec = Some(f);
+                        break;
+                    }
+                }
+                Err(e) => {
+                    crate::pr_err!(
+                        "exec: interpreter resolve failed for {} (pid {}) — err {}",
+                        interp_str,
+                        crate::process::current_pid(),
+                        e
+                    );
+                    return (e as i64) as u64;
+                }
+            }
             attempt += 1;
         }
         match data {
-            Some(d) => {
-                interp_path_str = Some(interp_str);
-                Some(d)
-            }
+            Some(d) => Some(d),
             None => {
                 crate::pr_err!(
                     "exec: interpreter read failed for {} (pid {}) — ENOENT",
@@ -870,6 +1008,7 @@ fn do_execve(pathname: &str, argv: &[alloc::string::String], envp: &[alloc::stri
     } else {
         None
     };
+    if ec { ec_interp = crate::arch::cpu::read_time(); }
 
     // Build final argv (use provided argv, fallback to full_path if empty)
     let final_argv: Vec<String> = if argv.is_empty() {
@@ -893,34 +1032,36 @@ fn do_execve(pathname: &str, argv: &[alloc::string::String], envp: &[alloc::stri
     let mut secure_exec = false;
     let mut cred_saved: Option<crate::process::task::Cred> = None;
     {
-        use crate::fs::stat_file_by_path;
         use crate::security::capability::Cap;
 
         const S_ISUID: u32 = 0o4000;
         const S_ISGID: u32 = 0o2000;
 
-        let mut file_stat = crate::fs::Stat::new();
-        if stat_file_by_path(full_path.as_ref(), &mut file_stat).is_ok() {
-            let file_mode = file_stat.st_mode;
-            let file_uid = file_stat.st_uid;
-            let file_gid = file_stat.st_gid;
-            let is_setuid = (file_mode & S_ISUID) != 0;
-            let is_setgid = (file_mode & S_ISGID) != 0;
+        // Mode/uid/gid come from the ONE resolution at the ladder head —
+        // stat_file_by_path re-walked the path just for these bits.
+        let file_mode = exec_file.mode;
+        let file_uid = exec_file.uid;
+        let file_gid = exec_file.gid;
+        let is_setuid = (file_mode & S_ISUID) != 0;
+        let is_setgid = (file_mode & S_ISGID) != 0;
 
-            // Execute permission check (review P26/M-07): without any x bit
-            // the file must not be executable regardless of setuid bits.
-            const S_IXUSR: u32 = 0o100;
-            const S_IXGRP: u32 = 0o010;
-            const S_IXOTH: u32 = 0o001;
-            let has_x = (file_mode & (S_IXUSR | S_IXGRP | S_IXOTH)) != 0;
-            if !has_x {
-                return -(errno::EACCES as i64) as u64;
-            }
+        // Execute permission check (review P26/M-07): without any x bit
+        // the file must not be executable regardless of setuid bits.
+        // (Redundant with the resolve gate today — kept as a guard right
+        // at the credential decision, like Linux re-checks in
+        // bprm_fill_uid's caller.)
+        const S_IXUSR: u32 = 0o100;
+        const S_IXGRP: u32 = 0o010;
+        const S_IXOTH: u32 = 0o001;
+        let has_x = (file_mode & (S_IXUSR | S_IXGRP | S_IXOTH)) != 0;
+        if !has_x {
+            return -(errno::EACCES as i64) as u64;
+        }
 
-            // SAFETY: current is a valid, non-null task pointer from
-            // sched::current(); cred_mut() gives exclusive cred access.
-            unsafe {
-                let cred = (*current).cred_mut();
+        // SAFETY: current is a valid, non-null task pointer from
+        // sched::current(); cred_mut() gives exclusive cred access.
+        unsafe {
+            let cred = (*current).cred_mut();
                 // Snapshot BEFORE any mutation — the rollback path must
                 // restore the pre-exec credentials, not the elevated ones.
                 cred_saved = Some(cred.clone());
@@ -992,7 +1133,6 @@ fn do_execve(pathname: &str, argv: &[alloc::string::String], envp: &[alloc::stri
                 secure_exec = is_setuid || is_setgid
                     || cred.euid != cred.uid
                     || cred.egid != cred.gid;
-            }
         }
     }
 
@@ -1006,6 +1146,7 @@ fn do_execve(pathname: &str, argv: &[alloc::string::String], envp: &[alloc::stri
             !name.starts_with("LD_")
         });
     }
+    if ec { ec_cred = crate::arch::cpu::read_time(); }
 
     // Execute ELF loading
     let phdr_count_usize = if phdr_count > 1024 {
@@ -1025,18 +1166,44 @@ fn do_execve(pathname: &str, argv: &[alloc::string::String], envp: &[alloc::stri
     }
 
     // Pinned file identities for the exec-time segment VMAs (vm_file
-    // semantics — see open_file_arc). Best-effort: a failure only drops
-    // the /proc/<pid>/maps path column, never the exec.
-    let exe_file_arc = open_file_arc(full_path.as_ref());
-    let interp_file_arc = interp_path_str.and_then(open_file_arc);
+    // semantics — see ExecFile). Both come from the single resolutions
+    // above; a None only drops the /proc/<pid>/maps path column, never
+    // the exec.
+    let exe_file_arc = Some(exec_file.file);
+    let interp_file_arc = interp_exec.map(|f| f.file);
+    if ec { ec_pre = crate::arch::cpu::read_time(); }
     if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::SyscallTrace) {
         crate::pr_info!("LVMA-DBG pid {} exe_pin={} interp_pin={} path {}",
             crate::process::current_pid(),
             exe_file_arc.is_some(), interp_file_arc.is_some(), full_path.as_ref());
     }
 
-    match do_execve_elf(current, &program_data, &final_argv, &final_envp, entry, phdr_count_usize, &ehdr, full_path.as_ref(), interp_data.as_deref(), secure_exec, exe_file_arc.as_ref(), interp_file_arc.as_ref()) {
+    let elf_result = do_execve_elf(current, &program_data, &final_argv, &final_envp, entry, phdr_count_usize, &ehdr, full_path.as_ref(), interp_data.as_deref(), secure_exec, exe_file_arc.as_ref(), interp_file_arc.as_ref());
+    let ec_t1: u64 = if ec { crate::arch::cpu::read_time() } else { 0 };
+    if ec {
+        crate::pr_info!(
+            "EXECCOST n={} pid={} path={} pstr={} lk={} rd={} parse={} it={} cred={} pre={} elf={} tot={} sz={}",
+            ec_n,
+            crate::process::current_pid(),
+            full_path.as_ref(),
+            ec_path - ec_t0,
+            ec_lookup - ec_path,
+            ec_read - ec_lookup,
+            ec_parse - ec_read,
+            ec_interp - ec_parse,
+            ec_cred - ec_interp,
+            ec_pre - ec_cred,
+            ec_t1 - ec_pre,
+            ec_t1 - ec_t0,
+            program_data.len() + interp_data.as_ref().map(|d| d.len()).unwrap_or(0)
+        );
+    }
+    match elf_result {
         Ok(()) => {
+            // The image changed: the parent may no longer setpgid us
+            // (Linux sys_setpgid EACCES after exec; LTP setpgid03).
+            // SAFETY: current is the running task.
+            unsafe { (*current).mark_execed(); }
             if xt_on {
                 crate::pr_info!(
                     "EXECTRACE: OK pid={} path={} dt_jiffies={}",
@@ -1886,9 +2053,15 @@ pub fn sys_setreuid(args: SyscallArgs) -> i64 {
             cred.uid = new_ruid;
             cred.euid = new_euid;
             cred.fsuid = new_euid;
-            // Linux sys_setreuid: the saved uid follows the new euid when
-            // EITHER argument is specified (not just when ruid is set).
-            if ruid != -1 || euid != -1 {
+            // Linux __sys_setreuid: the saved uid follows the new euid
+            // only when ruid was set, OR when euid was set to a value
+            // DIFFERENT from the old real uid ("suid = euid" if
+            // ruid != -1 || (euid != -1 && euid != old->uid)). The old
+            // "either argument" rule updated suid on setreuid(-1, root)
+            // from uid 0 — LTP setreuid02 expects the saved uid to stay
+            // nobody there, and setregid03's setregid(-1, secondary)
+            // wrongly EPERM'd because sgid had followed the wrong egid.
+            if ruid != -1 || (euid != -1 && new_euid != old_ruid) {
                 cred.suid = new_euid;
             }
             // Leaving euid 0 drops all capabilities (Linux commit_creds)
@@ -1951,9 +2124,10 @@ pub fn sys_setregid(args: SyscallArgs) -> i64 {
             cred.gid = new_rgid;
             cred.egid = new_egid;
             cred.fsgid = new_egid;
-            // Linux sys_setregid: the saved gid follows the new egid when
-            // EITHER argument is specified (mirror of setreuid).
-            if rgid != -1 || egid != -1 {
+            // Linux __sys_setregid mirror of setreuid: the saved gid
+            // follows the new egid only when rgid was set, OR when egid
+            // was set to a value DIFFERENT from the old real gid.
+            if rgid != -1 || (egid != -1 && new_egid != old_rgid) {
                 cred.sgid = new_egid;
             }
         }
@@ -2281,12 +2455,19 @@ pub fn sys_setgroups(args: SyscallArgs) -> i64 {
     // so a partial read leaves zero group ids rather than garbage.
     let mut groups = alloc::vec::Vec::new();
     groups.resize(size as usize, 0u32);
+    // SAFETY: copy_from_user is the exception-table copy path; a partial
+    // fault (guarded buffers, bad pointers) MUST surface as EFAULT — the
+    // return value was previously dropped and the syscall silently
+    // installed zero-filled groups (LTP setgroups03's EFAULT case).
     unsafe {
-        crate::arch::uaccess::copy_from_user(
+        if crate::arch::uaccess::copy_from_user(
             groups.as_mut_ptr() as *mut u8,
             list_ptr as *const u8,
             size as usize * 4,
-        );
+        ) != 0
+        {
+            return -(errno::EFAULT as i64);
+        }
     }
 
     // Store in task credentials
@@ -2314,6 +2495,11 @@ pub fn sys_setpgid(args: SyscallArgs) -> i64 {
     // SAFETY: current is a valid task pointer from sched::current().
     let current_pid = unsafe { (*current).pid() };
 
+    // A negative pgid is EINVAL (LTP setpgid02: setpgid(pid, -1)).
+    if pgid < 0 {
+        return -(errno::EINVAL as i64);
+    }
+
     // Resolve target pid
     let target_pid = if target_pid == 0 {
         current_pid as i32
@@ -2328,13 +2514,28 @@ pub fn sys_setpgid(args: SyscallArgs) -> i64 {
         pgid
     };
 
+    // The target process group must exist: a pgid names a process-group
+    // LEADER (a live pid). Joining a nonexistent group is EPERM (LTP
+    // setpgid02's pid_max case).
+    if pgid != target_pid
+        && unsafe { crate::sched::find_task_by_pid(pgid as u32) }.is_null()
+    {
+        return -(errno::EPERM as i64);
+    }
+
     // Cannot set pgid for processes in different sessions
     if target_pid as u32 == current_pid {
         // Setting own pgid
         // SAFETY: current is a valid task pointer from sched::current().
         unsafe {
-            if (*current).sid() != pgid as u32 {
-                // pgid must be in same session (simplified: just check it's valid)
+            // Joining a process group whose LEADER lives in another
+            // session is EPERM (LTP setpgid03: parent joins the
+            // setsid()'d child's group).
+            if pgid as u32 != current_pid {
+                let leader = crate::sched::find_task_by_pid(pgid as u32);
+                if leader.is_null() || (*leader).sid() != (*current).sid() {
+                    return -(errno::EPERM as i64);
+                }
             }
             (*current).set_pgid(pgid as u32);
         }
@@ -2354,6 +2555,12 @@ pub fn sys_setpgid(args: SyscallArgs) -> i64 {
             // Target must be in same session
             if (*target).sid() != (*current).sid() {
                 return -(errno::EPERM as i64);
+            }
+            // Once the child has exec'd, the parent may no longer move it
+            // between groups (Linux sys_setpgid EACCES; LTP setpgid03's
+            // exec'd-child case).
+            if (*target).has_execed() {
+                return -(errno::EACCES as i64);
             }
             (*target).set_pgid(pgid as u32);
         }
@@ -2503,6 +2710,16 @@ pub fn sys_prlimit64(args: SyscallArgs) -> i64 {
 
         if req_cur > req_max {
             return -(errno::EINVAL as i64);
+        }
+
+        // RLIMIT_NOFILE hard-limit ceiling (Linux do_prlimit): raising
+        // rlim_max above the fs.nr_open sysctl default (1024*1024) is
+        // EPERM even for root. musl's setrlimit() maps to prlimit64 on
+        // the generic 64-bit syscall table (no setrlimit there), so this
+        // check must live HERE as well (LTP setrlimit03 sets
+        // rlim_max = nr_open+1 as root and requires EPERM).
+        if resource == rlimit_res::NOFILE && req_max > 1024 * 1024 {
+            return -(errno::EPERM as i64);
         }
 
         // Raising the hard limit — or the soft above the old hard —
@@ -2659,13 +2876,62 @@ pub fn sys_prctl(args: SyscallArgs) -> i64 {
             0
         }
         37 => {
-            // PR_GET_CHILD_SUBREAPER
+            // PR_GET_CHILD_SUBREAPER: the value is WRITTEN to the (int *)
+            // in arg2 and the syscall returns 0 (Linux kernel/sys.c:
+            // put_user(!!sig->is_child_subreaper, (int __user *)arg2)).
+            // Returning the flag itself left the caller's variable
+            // uninitialized — LTP prctl03's final check read stack garbage
+            // (0) after a successful PR_SET, and the check that expected 0
+            // passed only by luck.
+            // SAFETY: current is a valid task pointer; signal field is an Option.
+            unsafe {
+                let val: i32 = if let Some(ref sig) = (*current).signal {
+                    sig.is_child_subreaper.load(core::sync::atomic::Ordering::Relaxed) as i32
+                } else {
+                    0
+                };
+                // Returns uncopied byte count (0 = success).
+                if crate::arch::uaccess::copy_to_user(
+                    arg2 as *mut u8,
+                    val.to_ne_bytes().as_ptr(),
+                    4,
+                ) == 0
+                {
+                    0
+                } else {
+                    -14  // EFAULT
+                }
+            }
+        }
+        29 => {
+            // PR_SET_TIMERSLACK: nanoseconds; 0 resets to the process's
+            // DEFAULT slack (Linux kernel/sys.c PR_SET_TIMERSLACK). The
+            // default is set at fork to the parent's CURRENT value
+            // (kernel/fork.c copy_process), so a forked child that resets
+            // lands on the inherited value, not the boot 50 us — LTP
+            // prctl08 "Child process" case.
             // SAFETY: current is a valid task pointer; signal field is an Option.
             unsafe {
                 if let Some(ref sig) = (*current).signal {
-                    sig.is_child_subreaper.load(core::sync::atomic::Ordering::Relaxed) as i64
+                    let slack_ns = if arg2 == 0 {
+                        sig.timer_slack_default_ns
+                            .load(core::sync::atomic::Ordering::Relaxed)
+                    } else {
+                        arg2
+                    };
+                    sig.timer_slack_ns.store(slack_ns, core::sync::atomic::Ordering::Relaxed);
+                }
+            }
+            0
+        }
+        30 => {
+            // PR_GET_TIMERSLACK
+            // SAFETY: current is a valid task pointer; signal field is an Option.
+            unsafe {
+                if let Some(ref sig) = (*current).signal {
+                    sig.timer_slack_ns.load(core::sync::atomic::Ordering::Relaxed) as i64
                 } else {
-                    0
+                    50_000
                 }
             }
         }
@@ -2738,6 +3004,13 @@ pub fn sys_prctl(args: SyscallArgs) -> i64 {
             if arg2 > 0xff {
                 return -(errno::EINVAL as i64);
             }
+            // Capability gate (prctl(2)): raising securebits requires
+            // CAP_SETPCAP, else EPERM. Root init holds every capability;
+            // LTP prctl02 case #16 drops CAP_SETPCAP+CAP_SYS_ADMIN and
+            // requires EPERM where we used to succeed.
+            if !crate::security::capable(crate::security::CAP_SETPCAP) {
+                return -(errno::EPERM as i64);
+            }
             // SAFETY: current is a valid task pointer; cred_mut returns
             // the task's own credential structure.
             unsafe {
@@ -2803,6 +3076,13 @@ pub fn sys_prctl(args: SyscallArgs) -> i64 {
                     0
                 }
                 PR_CAP_AMBIENT_CLEAR_ALL => {
+                    // Linux validates the unused arguments: arg3/arg4/arg5
+                    // must be zero for CLEAR_ALL (kernel/sys.c PR_CAP_AMBIENT
+                    // arg validation; LTP prctl02 case #13 passes arg3=1 and
+                    // requires EINVAL where we used to succeed).
+                    if arg3 != 0 || arg4 != 0 || _arg5 != 0 {
+                        return -(errno::EINVAL as i64);
+                    }
                     // SAFETY: current is a valid task pointer.
                     unsafe { (*current).cred_mut().cap_ambient = crate::security::capability::Cap::EMPTY; }
                     0
@@ -2850,8 +3130,17 @@ pub fn sys_prctl(args: SyscallArgs) -> i64 {
 /// - args[1]: tid - thread ID (exact thread)
 /// - args[2]: sig - signal number
 pub fn sys_tgkill(args: SyscallArgs) -> i64 {
-    let tgid = args[0] as u32;
-    let tid = args[1] as u32;
+    // Linux do_tgkill() rejects tgid <= 0 || tid <= 0 with EINVAL
+    // BEFORE looking up any task. The naked `as u32` cast below would
+    // otherwise turn -1 into u32::MAX and produce ESRCH for what should
+    // be a clear EINVAL. LTP tgkill03 / tgkill02 both rely on this.
+    let tgid_raw = args[0] as i32;
+    let tid_raw = args[1] as i32;
+    if tgid_raw <= 0 || tid_raw <= 0 {
+        return -(errno::EINVAL as i64);
+    }
+    let tgid = tgid_raw as u32;
+    let tid = tid_raw as u32;
     let sig = args[2] as i32;
 
     if sig < 0 || sig > 64 {
@@ -2886,7 +3175,11 @@ pub fn sys_tgkill(args: SyscallArgs) -> i64 {
     // suicide etc.) reports si_pid=0 and the sender is unattributable.
     crate::signal::send_signal_from_user_tkill(tid, sig)
         .map(|_| 0)
-        .unwrap_or(-(errno::EINVAL as i64))
+        // send_signal_* returns the negated errno in Err (e.g. -EAGAIN
+        // when RLIMIT_SIGPENDING is hit on an RT signal). Surface that
+        // to userspace instead of clobbering every failure into EINVAL
+        // — LTP tgkill02 expects EAGAIN (errno 11), not EINVAL (22).
+        .unwrap_or_else(|e| e as i64)
 }
 
 /// sys_rt_sigqueueinfo - send signal with data to a PROCESS
@@ -2970,7 +3263,10 @@ pub fn sys_rt_sigqueueinfo(args: SyscallArgs) -> i64 {
 
     crate::signal::send_signal_with_info(tgid, info)
         .map(|_| 0)
-        .unwrap_or(-(errno::EINVAL as i64))
+        // Propagate the actual errno from send_signal_with_info (e.g.
+        // EAGAIN on RLIMIT_SIGPENDING exhaustion). Previous behavior
+        // masked every send failure into EINVAL.
+        .unwrap_or_else(|e| e as i64)
 }
 
 /// sys_rt_tgsigqueueinfo - send signal with data to a precise THREAD
@@ -3050,7 +3346,8 @@ pub fn sys_rt_tgsigqueueinfo(args: SyscallArgs) -> i64 {
 
     crate::signal::send_signal_with_info_directed(tid, info)
         .map(|_| 0)
-        .unwrap_or(-(errno::EINVAL as i64))
+        // Propagate the actual errno (EAGAIN on RLIMIT_SIGPENDING, etc.).
+        .unwrap_or_else(|e| e as i64)
 }
 
 /// sys_rt_sigtimedwait - synchronously wait for signals
@@ -3312,11 +3609,37 @@ pub fn sys_setfsuid(args: SyscallArgs) -> i64 {
         // return references to the task's credential structure.
         unsafe {
             let old_fsuid = (*task).cred().fsuid;
-            let cred = (*task).cred_mut();
-            if crate::security::capable(crate::security::CAP_SETUID) {
-                cred.fsuid = fsuid;
-            } else if fsuid == cred.uid || fsuid == cred.euid || fsuid == cred.suid {
-                cred.fsuid = fsuid;
+            // (uid_t)-1 leaves fsuid unchanged (verified on Linux 7.0:
+            // setfsuid((uid_t)-1) twice as root returns 0 both times —
+            // LTP setfsuid02; the old code let -1 become the new fsuid).
+            let mut changed_to = None;
+            if fsuid != u32::MAX {
+                let cred = (*task).cred_mut();
+                if crate::security::capable(crate::security::CAP_SETUID) {
+                    cred.fsuid = fsuid;
+                    changed_to = Some(fsuid);
+                } else if fsuid == cred.uid || fsuid == cred.euid || fsuid == cred.suid {
+                    cred.fsuid = fsuid;
+                    changed_to = Some(fsuid);
+                }
+            }
+            // Linux commit_creds CAP_FS_MASK rule: leaving fsuid 0 drops
+            // the filesystem capabilities (CHOWN, DAC_OVERRIDE,
+            // DAC_READ_SEARCH, FOWNER, FSETID — bits 0..4) from the
+            // EFFECTIVE set; returning to fsuid 0 restores them from the
+            // permitted set. Without this, setfsuid(nobody) still opened
+            // root files O_RDWR through CAP_DAC_OVERRIDE (LTP setfsuid04).
+            if let Some(new_fsuid) = changed_to {
+                const CAP_FS_MASK: u64 = 0x1f;
+                let cred = (*task).cred_mut();
+                if old_fsuid == 0 && new_fsuid != 0 {
+                    let eff = cred.cap_effective.bits() & !CAP_FS_MASK;
+                    cred.cap_effective = crate::security::capability::Cap::new(eff);
+                } else if old_fsuid != 0 && new_fsuid == 0 {
+                    let eff = cred.cap_effective.bits()
+                        | (cred.cap_permitted.bits() & CAP_FS_MASK);
+                    cred.cap_effective = crate::security::capability::Cap::new(eff);
+                }
             }
             old_fsuid as i64
         }
@@ -3336,11 +3659,16 @@ pub fn sys_setfsgid(args: SyscallArgs) -> i64 {
         // return references to the task's credential structure.
         unsafe {
             let old_fsgid = (*task).cred().fsgid;
-            let cred = (*task).cred_mut();
-            if crate::security::capable(crate::security::CAP_SETGID) {
-                cred.fsgid = fsgid;
-            } else if fsgid == cred.gid || fsgid == cred.egid || fsgid == cred.sgid {
-                cred.fsgid = fsgid;
+            // (gid_t)-1 leaves fsgid unchanged (LTP setfsgid01: the old
+            // code stored 0xFFFFFFFF and the next call's return, read as
+            // a signed syscall result, surfaced as -1).
+            if fsgid != u32::MAX {
+                let cred = (*task).cred_mut();
+                if crate::security::capable(crate::security::CAP_SETGID) {
+                    cred.fsgid = fsgid;
+                } else if fsgid == cred.gid || fsgid == cred.egid || fsgid == cred.sgid {
+                    cred.fsgid = fsgid;
+                }
             }
             old_fsgid as i64
         }
@@ -4067,6 +4395,18 @@ pub fn sys_seccomp(args: SyscallArgs) -> i64 {
                 });
             }
 
+            // Privilege gate at attach time (Linux order: program
+            // copy/validation above reports EFAULT/EINVAL first; the
+            // capability check happens when the filter attaches).
+            // prctl(2)/seccomp(2): installing a filter requires
+            // no_new_privs OR CAP_SYS_ADMIN; PR_SET_NO_NEW_PRIVS is not
+            // implemented in this kernel, so the gate is CAP_SYS_ADMIN
+            // alone → EACCES otherwise. LTP prctl02 case #5 drops
+            // CAP_SYS_ADMIN/CAP_SETPCAP and requires EACCES.
+            if !crate::security::capable(crate::security::CAP_SYS_ADMIN) {
+                return -(errno::EACCES as i64);
+            }
+
             match seccomp_set_filter(filter) {
                 Ok(()) => 0,
                 Err(e) => e as i64,
@@ -4584,10 +4924,26 @@ pub fn sys_capset(args: SyscallArgs) -> i64 {
 }
 
 /// sys_personality - Set process execution domain
+///
+/// Store-and-readback contract: personality(x) stores x and returns the
+/// PREVIOUS personality; personality(0xffffffff) is the query sentinel —
+/// the value is returned unchanged with nothing stored. The stored value
+/// inherits across fork and survives execve (setarch-style flag
+/// personalities like ADDR_NO_RANDOMIZE depend on the exec survival).
+/// 0 = PER_LINUX. No validation: the execution-domain table semantics
+/// were retired upstream, so any value stores and reads back verbatim.
 pub fn sys_personality(args: SyscallArgs) -> i64 {
-    let _persona = args[0] as u64;
-    // Return current personality (0 = PER_LINUX)
-    0
+    let new = args[0] as u32;
+    match crate::sched::current() {
+        Some(current) => {
+            let old = unsafe { (*current).personality };
+            if new != 0xffffffff {
+                unsafe { (*current).personality = new; }
+            }
+            old as i64
+        }
+        None => 0,
+    }
 }
 
 /// sys_pivot_root - Change root filesystem (NR 41, U1c)
@@ -4879,6 +5235,15 @@ pub fn sys_setrlimit(args: SyscallArgs) -> i64 {
         return -(errno::EINVAL as i64);
     }
 
+    // RLIMIT_NOFILE hard-limit ceiling (Linux do_prlimit): raising
+    // rlim_max above the fs.nr_open sysctl default (1024*1024) is EPERM
+    // even for root — the kernel refuses descriptors beyond the fdtable
+    // encoding. LTP setrlimit03 sets rlim_max = nr_open+1 as root and
+    // requires EPERM, not success.
+    if resource == rlimit_res::NOFILE && rlim_max > 1024 * 1024 {
+        return -(errno::EPERM as i64);
+    }
+
     let current = match crate::sched::current() {
         Some(t) => t,
         None => return -(errno::ESRCH as i64),
@@ -5010,8 +5375,14 @@ pub fn sys_sethostname(args: SyscallArgs) -> i64 {
         return -(errno::EPERM as i64);
     }
 
-    if name_ptr.is_null() || len == 0 || len > 64 {
+    if len == 0 || len > 64 {
         return -(errno::EINVAL as i64);
+    }
+    if name_ptr.is_null() {
+        // Linux fails the strncpy_from_user on NULL with EFAULT (LTP
+        // setdomainname02 / sethostname02 "name == NULL" cases) — not
+        // EINVAL.
+        return -(errno::EFAULT as i64);
     }
     if !crate::arch::uaccess::access_ok(name_ptr as usize, len) {
         return -(errno::EFAULT as i64);
@@ -5043,8 +5414,14 @@ pub fn sys_setdomainname(args: SyscallArgs) -> i64 {
         return -(errno::EPERM as i64);
     }
 
-    if name_ptr.is_null() || len == 0 || len > 64 {
+    if len == 0 || len > 64 {
         return -(errno::EINVAL as i64);
+    }
+    if name_ptr.is_null() {
+        // Linux fails the strncpy_from_user on NULL with EFAULT (LTP
+        // setdomainname02 / sethostname02 "name == NULL" cases) — not
+        // EINVAL.
+        return -(errno::EFAULT as i64);
     }
     if !crate::arch::uaccess::access_ok(name_ptr as usize, len) {
         return -(errno::EFAULT as i64);
@@ -5492,8 +5869,22 @@ pub fn sys_unshare(args: SyscallArgs) -> i64 {
         return -(errno::EINVAL as i64);
     }
 
-    // CLONE_FS/CLONE_FILES unsharing is not implemented (the fs struct and
-    // fd table are already per-fork); accept as a no-op.
+    // CLONE_FILES: copy the fd table away from any CLONE_FILES sharers
+    // (Linux unshare_fdtable) — a thread that unshares must not close the
+    // group's descriptors. CLONE_FS stays a no-op (the fs struct is
+    // per-fork here; nothing shares it).
+    if flags & 0x00000400 != 0 {
+        if let Some(task) = crate::sched::current() {
+            unsafe {
+                if let Some(arc) = (*task).fdtable_arc() {
+                    if alloc::sync::Arc::strong_count(&arc) > 2 {
+                        let copy = alloc::sync::Arc::new(crate::fs::FdTable::fork_from(&*arc));
+                        (*task).set_fdtable(Some(copy));
+                    }
+                }
+            }
+        }
+    }
 
     match crate::process::ns::unshare_namespaces(flags) {
         Ok(()) => 0,
@@ -5518,26 +5909,28 @@ pub fn sys_syncfs(_args: SyscallArgs) -> i64 {
 /// F_ADD_SEALS/F_GET_SEALS when MFD_ALLOW_SEALING is passed).
 ///
 /// # Arguments
-/// - args[0]: name - file name (can be NULL; advisory only)
+/// - args[0]: name - file name (advisory only)
 /// - args[1]: flags - MFD_CLOEXEC, MFD_ALLOW_SEALING, MFD_NOEXEC_SEAL,
 ///   MFD_EXEC, MFD_NONBLOCK (MFD_HUGETLB is EINVAL — no hugetlbfs)
 pub fn sys_memfd_create(args: SyscallArgs) -> i64 {
     let name_ptr = args[0] as *const u8;
     let flags = args[1] as u32;
 
-    // Linux copies the name with strnlen_user(NAME_MAX + 1): NULL is fine,
-    // a name longer than NAME_MAX (255) is EINVAL. The name is advisory in
-    // this kernel (kept out — no dentry to name).
+    // The reference kernel reads the name with strnlen_user() bounded by
+    // MFD_NAME_MAX_LEN + 1: a NULL pointer faults in that read and the
+    // kernel answers EFAULT (the read returns a length of zero, which the
+    // reference rejects), and a name longer than MFD_NAME_MAX_LEN is
+    // EINVAL. The name itself is advisory in this kernel (kept out — there
+    // is no dentry to name).
+    if name_ptr.is_null() {
+        return -(errno::EFAULT as i64);
+    }
     let mut name_buf = [0u8; 256];
-    let name: &[u8] = if name_ptr.is_null() {
-        &[]
-    } else {
-        match crate::arch::uaccess::strncpy_from_user(name_ptr, 256, &mut name_buf) {
-            Ok(s) => s,
-            Err(e) => return e as i64,
-        }
+    let name: &[u8] = match crate::arch::uaccess::strncpy_from_user(name_ptr, 256, &mut name_buf) {
+        Ok(s) => s,
+        Err(e) => return e as i64,
     };
-    if name.len() > 255 {
+    if name.len() > crate::fs::memfd::MFD_NAME_MAX_LEN {
         return -(errno::EINVAL as i64);
     }
 
@@ -5950,6 +6343,27 @@ pub fn sys_close_range(args: SyscallArgs) -> i64 {
     }
     if flags & !(CLOSE_RANGE_CLOEXEC | CLOSE_RANGE_UNSHARE) != 0 {
         return -(errno::EINVAL as i64);
+    }
+
+    // CLOSE_RANGE_UNSHARE: copy the fd table before closing when it is
+    // shared with CLONE_FILES siblings (Linux unshare_fdtable_221b8ba —
+    // the close must not reach the sharers' table). LTP close_range01/02:
+    // a CLONE_FILES child doing close_range(..., UNSHARE) must leave the
+    // parent's descriptors open; without the copy the child closed the
+    // shared table and the parent's very next fcntl died EBADF.
+    if flags & CLOSE_RANGE_UNSHARE != 0 {
+        if let Some(task) = crate::sched::current() {
+            unsafe {
+                if let Some(arc) = (*task).fdtable_arc() {
+                    // fdtable_arc() itself holds one reference: >2 means a
+                    // real sharer exists beyond the caller's own.
+                    if alloc::sync::Arc::strong_count(&arc) > 2 {
+                        let copy = alloc::sync::Arc::new(crate::fs::FdTable::fork_from(&*arc));
+                        (*task).set_fdtable(Some(copy));
+                    }
+                }
+            }
+        }
     }
 
     let fdtable = match crate::sched::get_current_fdtable() {

@@ -449,6 +449,19 @@ pub struct SignalStruct {
     pub mask: AtomicU64,
     /// Whether this process is a child subreaper (init-style reaper)
     pub is_child_subreaper: core::sync::atomic::AtomicBool,
+    /// PR_SET_TIMERSLACK value in nanoseconds (default 50 us). Linux keeps
+    /// this per task_struct, inherited across fork and reset to the default
+    /// by PR_SET_TIMERSLACK(0). Stored on the shared signal struct so every
+    /// thread of the group sees writes, which matches LTP's single-threaded
+    /// prctl09 usage; the value only feeds sleep-deadline rounding.
+    pub timer_slack_ns: core::sync::atomic::AtomicU64,
+    /// The "default" timerslack PR_SET_TIMERSLACK(0) resets the current
+    /// value to (Linux task_struct default_timer_slack_ns). At fork the
+    /// child's default becomes the parent's CURRENT value (kernel/fork.c
+    /// copy_process: p->default_timer_slack_ns = current->timer_slack_ns),
+    /// so a forked child that resets its slack lands on the inherited
+    /// value, not the boot 50 us — LTP prctl08 "Child process" case.
+    pub timer_slack_default_ns: core::sync::atomic::AtomicU64,
     /// exit_group in progress: every member of the group must die with
     /// THIS status (Linux signal_group_exit). Without it, the SIGKILL
     /// that exit_group uses to stop siblings makes the group LEADER die
@@ -474,6 +487,8 @@ impl SignalStruct {
             action: RwSpinlock::new(actions),
             mask: AtomicU64::new(0),
             is_child_subreaper: core::sync::atomic::AtomicBool::new(false),
+            timer_slack_ns: core::sync::atomic::AtomicU64::new(50_000),
+            timer_slack_default_ns: core::sync::atomic::AtomicU64::new(50_000),
             group_exiting: core::sync::atomic::AtomicBool::new(false),
             group_exit_code: core::sync::atomic::AtomicI32::new(0),
         }
@@ -580,8 +595,23 @@ impl Clone for SignalStruct {
         Self {
             action: RwSpinlock::new(*actions),
             mask: AtomicU64::new(self.mask.load(Ordering::Acquire)),
-            is_child_subreaper: core::sync::atomic::AtomicBool::new(
-                self.is_child_subreaper.load(Ordering::Acquire),
+            // Linux copy_signal() does NOT inherit the subreaper flag at
+            // fork — only the cached has_child_subreaper bit derives from
+            // the parent (fork.c: p->signal->has_child_subreaper =
+            // real_parent's has_child_subreaper || is_child_subreaper).
+            // Our reparent walk checks each ancestor's is_child_subreaper
+            // directly (exit.rs), so leaving the child's flag clear keeps
+            // both semantics: the child is not itself a subreaper, but its
+            // orphans still climb to the subreaper ancestor — LTP prctl03
+            // expects GET to return 0 in a forked child.
+            is_child_subreaper: core::sync::atomic::AtomicBool::new(false),
+            timer_slack_ns: core::sync::atomic::AtomicU64::new(
+                self.timer_slack_ns.load(Ordering::Acquire),
+            ),
+            // fork.c copy_process: the child's DEFAULT slack is the
+            // parent's CURRENT slack (not the parent's default).
+            timer_slack_default_ns: core::sync::atomic::AtomicU64::new(
+                self.timer_slack_ns.load(Ordering::Acquire),
             ),
             group_exiting: core::sync::atomic::AtomicBool::new(false),
             group_exit_code: core::sync::atomic::AtomicI32::new(0),

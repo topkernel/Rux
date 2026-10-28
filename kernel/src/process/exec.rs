@@ -74,34 +74,6 @@ unsafe fn copy_user_image(root_ppn: u64, vaddr: u64, src: &[u8]) -> bool {
     true
 }
 
-/// Zero a freshly mapped user range page by page (same rationale as
-/// copy_user_image: no physical-contiguity assumptions).
-///
-/// # Safety
-/// `root_ppn` must be a valid user page-table root whose range
-/// [vaddr, vaddr+len) is fully mapped and exclusively owned.
-unsafe fn zero_user_range(root_ppn: u64, vaddr: u64, len: usize) {
-    use crate::arch::mm::mm_ops::PageTableWalker;
-    use crate::arch::mm::{phys_to_virt, PhysAddr, PAGE_SHIFT, PAGE_SIZE};
-
-    let mut done = 0usize;
-    while done < len {
-        let va = vaddr + done as u64;
-        let in_page = (va as usize) & (PAGE_SIZE as usize - 1);
-        let chunk = core::cmp::min(len - done, PAGE_SIZE as usize - in_page);
-        if let Some((ppn, pte)) = PageTableWalker::walk(root_ppn, va) {
-            if pte & 1 != 0 {
-                let kva = phys_to_virt(PhysAddr::new(ppn << PAGE_SHIFT)).bits() as usize + in_page;
-                // SAFETY: page-resolved frame of this address space.
-                unsafe {
-                    core::ptr::write_bytes(kva as *mut u8, 0, chunk);
-                }
-            }
-        }
-        done += chunk;
-    }
-}
-
 /// Execute ELF loading (execve internal function)
 ///
 /// This function will:
@@ -130,6 +102,22 @@ pub(crate) fn do_execve_elf(
         PAGE_SIZE, PageTableEntry, phys_to_virt, PhysAddr,
     };
     use crate::mm::alloc_and_map_user_table as alloc_and_map_to_user_table;
+
+    // EXECCOST (dfx=execcost): image-side stage stamps, raw read_time()
+    // ticks. Paired with the ladder line (EXECCOST) from do_execve — same
+    // switch, its own rate-limit counter (approximate lockstep; both lines
+    // carry pid+path for pairing).
+    static EXECCOST2_N: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+    let ec2 = crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::ExecCost);
+    let ec2_n = if ec2 {
+        EXECCOST2_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed)
+    } else {
+        u64::MAX
+    };
+    let ec2_on = ec2 && (ec2_n < 64 || ec2_n % 512 == 0);
+    let ec2_t0: u64 = if ec2_on { crate::arch::cpu::read_time() } else { 0 };
+    let (mut ec2_as, mut ec2_map, mut ec2_stack, mut ec2_copy, mut ec2_tig, mut ec2_it, mut ec2_fill, mut ec2_vma) =
+        (0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64, 0u64);
 
     // Capture the trap frame ONCE, before any blocking I/O below — but
     // derive it from THE TASK, never from the per-CPU current_pt_regs()
@@ -302,6 +290,7 @@ pub(crate) fn do_execve_elf(
         }
     }
     let _guard = UserAddrSpaceGuard(user_ppn);
+    if ec2_on { ec2_as = crate::arch::cpu::read_time(); }
 
     // Start with RW (no X) — permissions will be tightened per-segment below.
     let flags = PageTableEntry::V | PageTableEntry::U |
@@ -317,6 +306,7 @@ pub(crate) fn do_execve_elf(
     let _image_phys_base = unsafe {
         alloc_and_map_to_user_table(user_ppn, image_start, total_size, flags)
     }.ok_or(crate::errno::Errno::OutOfMemory.as_neg_i32())?;
+    if ec2_on { ec2_map = crate::arch::cpu::read_time(); }
 
     // Initial stack at the top of user space (one guard page below
     // USER_END). Mapped RW here; the VMA below marks it GROWSDOWN.
@@ -327,25 +317,21 @@ pub(crate) fn do_execve_elf(
         alloc_and_map_to_user_table(user_ppn, stack_bottom, initial_stack_size, flags)
     }.ok_or(crate::errno::Errno::OutOfMemory.as_neg_i32())? as usize;
 
-    // Zero the WHOLE initial stack: the frames come from the recycler and
-    // carry the previous owner's data (old stack residue: pointers, saved
-    // frames). argv/envp/auxv only overwrite part of the top area; gaps
-    // kept residue that ld.so parsed as garbage auxv/link_map state —
-    // observed as jumps to parent-image addresses (0x1cbc0) and the
-    // "main_map == _ns_loaded" assertion right after a successful exec.
-    // SAFETY: the walk touches only pages of this fresh address space.
-    unsafe {
-        zero_user_range(user_ppn, stack_bottom, initial_stack_size as usize);
-        // FORENSIC ring: every initial-stack zeroing (pid, phys range). At a
-        // crash, a victim stack page whose PPN falls in ANOTHER pid's range
-        // proves the frame was handed out twice.
-        {
-            use core::sync::atomic::Ordering::Relaxed;
-            let i = STACKZERO_CURSOR.fetch_add(1, Relaxed) % STACKZERO_RING.len();
-            STACKZERO_RING[i].pid.store(crate::process::current_pid(), Relaxed);
-            STACKZERO_RING[i].base.store(stack_bottom, Relaxed);
-            STACKZERO_RING[i].len.store(initial_stack_size as u64, Relaxed);
-        }
+    // NOTE (abi-review session 1): no explicit zeroing here. BOTH arch
+    // alloc_and_map_to_user_table implementations zero every page before
+    // mapping it (the "Zero BEFORE mapping" leak-window fix) — the old
+    // full-stack zero_user_range re-walked and re-zeroed all 33+ pages
+    // through the page tables on every exec (measured ~30-40 us of the
+    // ~73 us stack-map stage on the p4_fork_exec shape, EXECCOST2 'stk').
+    // The forensic ring below still records the initial-stack range for
+    // crash correlation (its value is the (pid, range) record, not the
+    // act of zeroing).
+    {
+        use core::sync::atomic::Ordering::Relaxed;
+        let i = STACKZERO_CURSOR.fetch_add(1, Relaxed) % STACKZERO_RING.len();
+        STACKZERO_RING[i].pid.store(crate::process::current_pid(), Relaxed);
+        STACKZERO_RING[i].base.store(stack_bottom, Relaxed);
+        STACKZERO_RING[i].len.store(initial_stack_size as u64, Relaxed);
     }
 
     // Signal-return trampoline (R+X page): RISC-V glibc installs handlers
@@ -377,6 +363,7 @@ pub(crate) fn do_execve_elf(
     }
 
     // Load each segment
+    if ec2_on { ec2_stack = crate::arch::cpu::read_time(); }
     for i in 0..phdr_count {
         // SAFETY: Same as above — i < phdr_count and program_data is a valid ELF slice.
         let phdr = unsafe { ehdr.get_program_header(program_data, i) }
@@ -414,18 +401,16 @@ pub(crate) fn do_execve_elf(
                 }
             }
 
-            // Zero BSS
-            if mem_size > file_size {
-                let bss_size = (mem_size - file_size) as usize;
-                unsafe {
-                    zero_user_range(user_ppn, virt_addr + file_size, bss_size);
-                }
-            }
+            // BSS: no explicit zeroing — the whole image range was
+            // pre-zeroed by alloc_and_map_to_user_table before mapping
+            // (both arches; the old per-segment zero_user_range re-walked
+            // and re-zeroed the same pages through the page tables).
         }
     }
 
     // Tighten PTE permissions per-segment based on ELF p_flags.
     // Initial mapping was RW (no X); now set exact R/W/X from program headers.
+    if ec2_on { ec2_copy = crate::arch::cpu::read_time(); }
     for i in 0..phdr_count {
         let phdr = unsafe { ehdr.get_program_header(program_data, i) }
             .ok_or(crate::errno::Errno::FunctionNotImplemented.as_neg_i32())?;
@@ -575,6 +560,7 @@ pub(crate) fn do_execve_elf(
     }
 
     // Load interpreter (dynamic linker) if present
+    if ec2_on { ec2_tig = crate::arch::cpu::read_time(); }
     let (actual_entry, at_base) = if let Some(interp_bytes) = interp_data {        let interp_base: u64 = INTERP_BASE as u64;  // mmap_start - 16MB
 
         // SAFETY: interp_bytes is a validated ELF interpreter file loaded earlier.
@@ -751,6 +737,7 @@ pub(crate) fn do_execve_elf(
     };
 
     // Set up stack (Linux reserves 256 bytes of slop below the raw top).
+    if ec2_on { ec2_it = crate::arch::cpu::read_time(); }
     let stack_top = stack_top - 256;
     let phys_stack_top = stack_phys_base + (initial_stack_size as usize - 256);
 
@@ -1032,6 +1019,7 @@ pub(crate) fn do_execve_elf(
 
     // Create new address space structure
     // SAFETY: user_ppn is a freshly allocated page table root with no prior users.
+    if ec2_on { ec2_fill = crate::arch::cpu::read_time(); }
     let new_addr_space = unsafe { crate::mm::MmStruct::new_user(user_ppn) };
 
     // Reset the heap to the NEW image: exec used to leave the task's brk
@@ -1100,7 +1088,13 @@ pub(crate) fn do_execve_elf(
         );
         stack_vma.set_origin(VmaOrigin::from_bits(VmaOrigin::EXEC_STACK));
         let mut vma_mgr = new_addr_space.vma_write();
+        // Account the exec image: the reference kernel charges every VMA
+        // it installs (mm->total_vm += pages), so the image, the stack
+        // and the interpreter count towards RLIMIT_AS and show up in the
+        // reported VmSize.
+        let stack_pages = stack_vma.page_count() as u64;
         let _ = vma_mgr.add(stack_vma);
+        new_addr_space.add_total_vm(stack_pages);
 
         // Add VMAs for each ELF PT_LOAD segment
         let mut first_exec_set = false;
@@ -1161,7 +1155,9 @@ pub(crate) fn do_execve_elf(
                     if let Some(f) = exe_file {
                         new_addr_space.pin_vma_file(vma_start as usize, f.clone());
                     }
+                    let seg_pages = vma.page_count() as u64;
                     let _ = vma_mgr.add(vma);
+                    new_addr_space.add_total_vm(seg_pages);
                 }
             }
         }
@@ -1229,7 +1225,9 @@ pub(crate) fn do_execve_elf(
                                 VmaFlags::from_bits(VmaFlags::PRIVATE),
                             );
                             filler.set_origin(VmaOrigin::from_bits(VmaOrigin::EXEC));
+                            let filler_pages = filler.page_count() as u64;
                             let _ = vma_mgr.add(filler);
+                            new_addr_space.add_total_vm(filler_pages);
                         }
                         let mut seg_flags = VmaFlags::new();
                         if phdr.is_readable() { seg_flags.insert(VmaFlags::READ); }
@@ -1254,7 +1252,9 @@ pub(crate) fn do_execve_elf(
                         if let Some(f) = interp_file {
                             new_addr_space.pin_vma_file(seg_start as usize, f.clone());
                         }
+                        let seg_pages = vma.page_count() as u64;
                         let _ = vma_mgr.add(vma);
+                        new_addr_space.add_total_vm(seg_pages);
                         added_any = true;
                         prev_end = seg_end;
                     }
@@ -1268,7 +1268,9 @@ pub(crate) fn do_execve_elf(
                         VmaFlags::from_bits(VmaFlags::PRIVATE),
                     );
                     filler.set_origin(VmaOrigin::from_bits(VmaOrigin::EXEC));
+                    let filler_pages = filler.page_count() as u64;
                     let _ = vma_mgr.add(filler);
+                    new_addr_space.add_total_vm(filler_pages);
                 }
                 // Degenerate case (no loadable segments parsed here but
                 // interp_max > interp_min): keep the old flat coverage.
@@ -1280,7 +1282,9 @@ pub(crate) fn do_execve_elf(
                         interp_flags,
                     );
                     interp_vma.set_origin(VmaOrigin::from_bits(VmaOrigin::EXEC));
+                    let interp_pages = interp_vma.page_count() as u64;
                     let _ = vma_mgr.add(interp_vma);
+                    new_addr_space.add_total_vm(interp_pages);
                 }
             }
         }
@@ -1289,6 +1293,7 @@ pub(crate) fn do_execve_elf(
     // Update process
     // SAFETY: task_ptr is the current task, valid throughout this execve operation.
     // We are replacing the task's address space and trap frame for the new program.
+    if ec2_on { ec2_vma = crate::arch::cpu::read_time(); }
     unsafe {
         // Capture the new mm's ASID before the Arc takes ownership.
         let new_asid = new_addr_space.asid();
@@ -1423,6 +1428,24 @@ pub(crate) fn do_execve_elf(
     }
 
     // Success — prevent RAII guard from freeing page tables
+    if ec2_on {
+        let t = crate::arch::cpu::read_time();
+        crate::pr_info!(
+            "EXECCOST2 n={} pid={} as={} map={} stk={} cpy={} tig={} itr={} fill={} vma={} sw={} tot={}",
+            ec2_n,
+            crate::process::current_pid(),
+            ec2_as - ec2_t0,
+            ec2_map - ec2_as,
+            ec2_stack - ec2_map,
+            ec2_copy - ec2_stack,
+            ec2_tig - ec2_copy,
+            ec2_it - ec2_tig,
+            ec2_fill - ec2_it,
+            ec2_vma - ec2_fill,
+            t - ec2_vma,
+            t - ec2_t0
+        );
+    }
     core::mem::forget(_guard);
     Ok(())
 }

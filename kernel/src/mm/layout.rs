@@ -29,8 +29,11 @@ pub const KERNEL_ENTRY: usize = 0x80200000;
 // single source for the heap size; a second 32MB constant here silently
 // drifted from the config, review 4.20.)
 
-/// Default slab size (4MB)
-pub const DEFAULT_SLAB_SIZE: usize = 4 * 1024 * 1024;
+/// Default slab size. 16MB: the slab serves every small kernel allocation,
+/// and the old 4MB filled under LTP fs-churn workloads (SlabPages is bounded
+/// by this static region — it does not grow from buddy). RAM clamping in
+/// `effective_static_regions` drops the slab to 0 on machines without room.
+pub const DEFAULT_SLAB_SIZE: usize = 16 * 1024 * 1024;
 
 /// Effective static-region sizing for machines smaller than the config
 /// assumes (the -m 512M boot panic family).

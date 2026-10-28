@@ -33,9 +33,12 @@ def build_image(img):
         shutil.rmtree(staging)
     os.makedirs(os.path.join(staging, "test"))
     probe = os.path.join(WT, "work", "binder2_probe")
-    subprocess.run([CC, "-static", "-O2", "-Wall",
-                    "-o", probe, os.path.join(HERE, "binder2_probe.c")],
-                   check=True)
+    # musl SDK recipe: static glibc's vector ifuncs SIGILL on the no-V
+    # boot CPU (see test/musl_build.py).
+    sys.path.insert(0, HERE)
+    from musl_build import build_musl
+    if not build_musl("binder2_probe.c", probe):
+        return False
     shutil.copyfile(probe, os.path.join(staging, "test", "binder2_probe"))
     os.chmod(os.path.join(staging, "test", "binder2_probe"), 0o755)
     r = subprocess.run([MKFS, "-q", "-F", "-O", "^metadata_csum,^flex_bg",

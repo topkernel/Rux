@@ -267,6 +267,27 @@ pub fn sys_openat(args: SyscallArgs) -> i64 {
         }
     }
 
+    // O_TMPFILE (__O_TMPFILE | O_DIRECTORY): an unnamed writable inode
+    // inside the directory (LTP open14/openat03). Must run before the
+    // O_DIRECTORY dispatch — O_TMPFILE carries the O_DIRECTORY bit and
+    // must not open the directory itself.
+    const __O_TMPFILE: u32 = 0o20000000;
+    const O_PATH_BIT: u32 = 0o10000000;
+    if flags & __O_TMPFILE != 0 {
+        if flags & O_DIRECTORY == 0 || flags & O_PATH_BIT != 0 {
+            // Linux build_open_flags: O_TMPFILE without O_DIRECTORY (the
+            // macro always includes it) or with O_PATH is EINVAL.
+            return -(errno::EINVAL as i64);
+        }
+        return match crate::fs::vfs::file_open_tmpfile(&full_path, flags, mode) {
+            Ok(fd) => {
+                if (flags & O_CLOEXEC) != 0 { crate::fs::set_cloexec_fd(fd, true); }
+                fd as i64
+            }
+            Err(e) => e as i64,
+        };
+    }
+
     let result = if (flags & O_DIRECTORY) != 0 {
         crate::fs::vfs::file_opendir(&full_path, flags)
     } else {
@@ -1218,6 +1239,11 @@ pub fn sys_readlinkat(args: SyscallArgs) -> i64 {
     let buf = args[2] as *mut u8;
     let bufsize = args[3] as usize;
 
+    // Linux: bufsiz == 0 is EINVAL unconditionally (a zero-length buffer
+    // can never receive a link target; LTP readlink03's SYM_FILE2 case).
+    if bufsize == 0 {
+        return -(errno::EINVAL as i64);
+    }
     if buf.is_null() {
         return -(errno::EFAULT as i64);
     }
@@ -1972,14 +1998,52 @@ fn sys_mount_inner(args: SyscallArgs, ph: &mut MntPhases) -> i64 {
     // fresh instance: the VfsMountInternal (flags included) moves.
     const MS_MOVE: u64 = 8192;
     if args[3] & MS_MOVE != 0 {
-        return match ph.t(6, || crate::fs::vfs::vfs_move_mount(source, target)) {
+        // Linux do_move_mount resolves the OLD path with user_path_at
+        // (AT_FDCWD, LOOKUP_FOLLOW): a relative source resolves against
+        // the CALLER'S CWD. busybox/OH switch_root's core move is
+        // mount(".", "/", MS_MOVE) after chdir into the new root — the
+        // raw "." handed down made vfs_move_mount's walk look up a
+        // literal "." child under the VFS root and ENOENT (the ohlite
+        // boot died exactly there). Join with the cwd (same discipline
+        // as the target join above) and normalize the dot components so
+        // the vfs walk receives a clean absolute path.
+        let source_owned = ph.t(6, || {
+            if source.starts_with('/') {
+                return alloc::string::String::from(source);
+            }
+            match crate::sched::current() {
+                Some(t) => {
+                    let cwd = unsafe { (*t).get_cwd() };
+                    let mut abs = alloc::vec::Vec::with_capacity(cwd.len() + 1 + source.len());
+                    abs.extend_from_slice(&cwd);
+                    if !cwd.ends_with(&[b'/']) {
+                        abs.push(b'/');
+                    }
+                    abs.extend_from_slice(source.as_bytes());
+                    match alloc::string::String::from_utf8(abs) {
+                        Ok(s) => s,
+                        Err(_) => alloc::string::String::new(), // EINVAL below
+                    }
+                }
+                None => alloc::string::String::from(source),
+            }
+        });
+        // from_utf8 failure path (same contract as the target join).
+        if source_owned.is_empty() && !source.is_empty() {
+            return -(errno::EINVAL as i64);
+        }
+        let source_abs = crate::fs::path::path_normalize(&source_owned);
+        return match ph.t(6, || crate::fs::vfs::vfs_move_mount(&source_abs, target)) {
             Ok(()) => {
                 // Keep the /proc/mounts row pointed at the new target.
+                // Try BOTH the raw and the cwd-normalized source: a
+                // relative MS_MOVE source (".") only matches the
+                // registry's absolute mountpoint via source_abs.
                 let existing = ph
                     .t(7, || {
                         crate::fs::mount::get_mounts()
                             .into_iter()
-                            .find(|(_, mp, _, _)| mp == source)
+                            .find(|(_, mp, _, _)| *mp == source_abs || mp == source)
                     })
                     .map(|(device, _, fs_type, flags)| (device, fs_type, flags));
                 if let Some((device, fs_type, flags)) = existing {
@@ -2692,6 +2756,11 @@ pub fn sys_fchmodat(args: SyscallArgs) -> i64 {
     let pathname_ptr = args[1] as *const u8;
     let mode = args[2] as u32;
 
+    // Note: Linux fchmodat (53) ignores flags entirely — AT_EMPTY_PATH
+    // and flag validation live in fchmodat2 (452) only. Verified on
+    // Linux 7.0: fchmodat(path, mode, 999) succeeds on a real path and
+    // an empty pathname yields ENOENT regardless of AT_EMPTY_PATH.
+
     // Magic-link shortcut (see sys_fstatat): chmod("/proc/*/fd/<n>")
     // chmods the file the fd refers to.
     if !crate::fs::vfs::chrooted() {
@@ -2748,11 +2817,59 @@ pub fn sys_fchownat(args: SyscallArgs) -> i64 {
         return -(errno::EINVAL as i64);
     }
 
+    // Magic-link shortcut (see sys_fchmodat / sys_fstatat): musl's fchown()
+    // falls back to fchownat(AT_FDCWD, "/proc/self/fd/<n>") when the direct
+    // SYS_fchown returns EBADF — for an O_PATH fd that fallback must hit
+    // the SAME fd-based O_PATH rejection (LTP open13's fchown case), not
+    // re-resolve the link to the real file and succeed.
+    if !crate::fs::vfs::chrooted() && flags & AT_SYMLINK_NOFOLLOW == 0 {
+        let mut probe = [0u8; 64];
+        if !pathname_ptr.is_null()
+            && crate::arch::uaccess::access_ok(pathname_ptr as usize, probe.len())
+            && unsafe {
+                crate::arch::uaccess::copy_from_user(
+                    probe.as_mut_ptr(), pathname_ptr, probe.len())
+            } == 0
+        {
+            let len = probe.iter().position(|&b| b == 0).unwrap_or(probe.len());
+            if let Ok(p) = core::str::from_utf8(&probe[..len]) {
+                if let Some((_, fd)) = proc_fd_magic(p) {
+                    return sys_fchown([
+                        fd as u64, uid as u64, gid as u64, 0, 0, 0,
+                    ]);
+                }
+            }
+        }
+    }
+
+    // AT_EMPTY_PATH: operate on the dirfd's own file (Linux; musl maps
+    // fchown() to fchownat(fd, "", AT_EMPTY_PATH) on the generic 64-bit
+    // syscall table, which has no fchown). Delegating to sys_fchown keeps
+    // one implementation of the ownership rules — including the O_PATH
+    // EBADF rejection (LTP open13's fchown case runs through here).
+    if flags & AT_EMPTY_PATH != 0 {
+        let mut probe = [0u8; 1];
+        let empty = unsafe {
+            pathname_ptr.is_null()
+                || (crate::arch::uaccess::access_ok(pathname_ptr as usize, 1)
+                    && crate::arch::uaccess::copy_from_user(
+                        probe.as_mut_ptr(), pathname_ptr, 1) == 0
+                    && probe[0] == 0)
+        };
+        if empty {
+            if dirfd < 0 {
+                return -(errno::EBADF as i64);
+            }
+            return sys_fchown([
+                dirfd as u64, uid as u64, gid as u64, 0, 0, 0,
+            ]);
+        }
+    }
+
     let full_path = match resolve_user_path(dirfd, pathname_ptr) {
         Ok(p) => p,
         Err(e) => return e as i64,
     };
-
     // AT_SYMLINK_NOFOLLOW: lchown(2) semantics — the ownership change
     // applies to the SYMBOLIC LINK itself, never the target. musl maps
     // lchown() to fchownat(..., AT_SYMLINK_NOFOLLOW), so ignoring the flag
@@ -3293,12 +3410,41 @@ pub fn sys_openat2(args: SyscallArgs) -> i64 {
     // OpenHow is #[repr(C)] with 3 u64 fields = 24 bytes, so read is valid.
     let how: OpenHow = unsafe { core::ptr::read_unaligned(buf.as_ptr() as *const OpenHow) };
 
-    // Validate flags: reject O_CREAT/O_EXCL/O_TRUNC for now (simplification)
-    // Actually, just pass through — sys_openat handles these
-    // Validate resolve flags: only accept known bits
+    // Flag and mode validation (Linux build_open_flags, openat2-only
+    // strictness): unknown O_ bits are EINVAL, and a mode with bits
+    // outside 07777 alongside O_CREAT is EINVAL (LTP openat203).
+    {
+        const O_VALID_FLAGS: u64 = 0o3 /*access mode*/
+            | 0o100 /*O_CREAT*/ | 0o200 /*O_EXCL*/ | 0o400 /*O_NOCTTY*/
+            | 0o1000 /*O_TRUNC*/ | 0o2000 /*O_APPEND*/ | 0o4000 /*O_NONBLOCK*/
+            | 0o10000 /*O_DSYNC*/ | 0o20000 /*FASYNC*/ | 0o40000 /*O_DIRECT*/
+            | 0o100000 /*O_LARGEFILE*/ | 0o200000 /*O_DIRECTORY*/
+            | 0o400000 /*O_NOFOLLOW*/ | 0o1000000 /*O_NOATIME*/
+            | 0o2000000 /*O_CLOEXEC*/ | 0o4000000 /*__O_SYNC*/
+            | 0o10000000 /*O_PATH*/ | 0o20000000 /*__O_TMPFILE*/;
+        if how.flags & !O_VALID_FLAGS != 0 {
+            return -(errno::EINVAL as i64);
+        }
+        if (how.flags & 0o100 /*O_CREAT*/) != 0 && (how.mode & !0o7777) != 0 {
+            return -(errno::EINVAL as i64);
+        }
+        // mode must be zero unless O_CREAT/O_TMPFILE is set (open_how
+        // contract; LTP openat203 invalid-flags passes O_RDONLY with
+        // S_IWUSR).
+        if (how.flags & (0o100 /*O_CREAT*/ | 0o20000000 /*__O_TMPFILE*/)) == 0
+            && how.mode != 0
+        {
+            return -(errno::EINVAL as i64);
+        }
+    }
+
+    // Validate resolve flags: only accept known bits (openat2.h values:
+    // Validate resolve flags: only accept known bits (openat2.h values:
+    // NO_MAGICLINKS is 0x02, NO_SYMLINKS is 0x04 — these two were swapped
+    // here before, so each LTP case enforcing one silently got the other).
     const RESOLVE_NO_XDEV: u64 = 0x01;
-    const RESOLVE_NO_SYMLINKS: u64 = 0x02;
-    const RESOLVE_NO_MAGICLINKS: u64 = 0x04;
+    const RESOLVE_NO_MAGICLINKS: u64 = 0x02;
+    const RESOLVE_NO_SYMLINKS: u64 = 0x04;
     const RESOLVE_BENEATH: u64 = 0x08;
     const RESOLVE_IN_ROOT: u64 = 0x10;
     const RESOLVE_CACHED: u64 = 0x20;
@@ -3309,15 +3455,175 @@ pub fn sys_openat2(args: SyscallArgs) -> i64 {
         return -(errno::EINVAL as i64);
     }
 
-    // TODO: Implement RESOLVE_* semantics (currently just delegate to openat)
-    let openat_args = [
-        dirfd as u64,
-        pathname_ptr as u64,
-        how.flags,
-        how.mode,
-        0, 0,
-    ];
-    sys_openat(openat_args)
+    // RESOLVE_* semantics. Without any resolve bit openat2 is openat with
+    // explicit args — delegate unchanged. With resolve bits the path is
+    // normalized lexically against the dirfd (or cwd) and each restriction
+    // enforced before the open; the CLEANED path is then opened directly
+    // (IN_ROOT rewrites absolute paths under the dirfd — impossible to
+    // express through a dirfd-relative delegation).
+    if how.resolve & !RESOLVE_CACHED == 0 {
+        let openat_args = [
+            dirfd as u64,
+            pathname_ptr as u64,
+            how.flags,
+            how.mode,
+            0, 0,
+        ];
+        return sys_openat(openat_args);
+    }
+
+    // Copy the pathname (NUL-terminated, capped like PATH_MAX).
+    if pathname_ptr.is_null() {
+        return -(errno::EFAULT as i64);
+    }
+    if !crate::arch::uaccess::access_ok(pathname_ptr as usize, 1) {
+        return -(errno::EFAULT as i64);
+    }
+    let mut raw = [0u8; 4096];
+    // SAFETY: pathname_ptr access_ok-checked; read a bounded window and
+    // stop at the first NUL below.
+    unsafe {
+        crate::arch::uaccess::copy_from_user(raw.as_mut_ptr(), pathname_ptr, 4096);
+    }
+    let nul = raw.iter().position(|&b| b == 0).unwrap_or(4096);
+    let user_path = match core::str::from_utf8(&raw[..nul]) {
+        Ok(p) => p,
+        Err(_) => return -(errno::EINVAL as i64),
+    };
+
+    // Resolve the base: dirfd's path (AT_FDCWD → cwd).
+    let base: alloc::string::String = if dirfd == -100 {
+        match crate::sched::current() {
+            Some(t) => unsafe {
+                let cwd = (*t).get_cwd();
+                alloc::string::String::from_utf8_lossy(&cwd).into_owned()
+            },
+            None => return -(errno::ESRCH as i64),
+        }
+    } else {
+        match unsafe { crate::fs::get_file_fd(dirfd as usize) } {
+            Some(f) => f.path(),
+            None => return -(errno::EBADF as i64),
+        }
+    };
+
+    let is_absolute = user_path.starts_with('/');
+    if (how.resolve & RESOLVE_BENEATH) != 0 && is_absolute {
+        return -(errno::EXDEV as i64);
+    }
+
+    // Lexical normalization. An ABSOLUTE path walks from the filesystem
+    // root (the base is only the anchor for relative paths and for
+    // IN_ROOT rewrites) — prepending the dirfd/cwd base to absolute
+    // inputs broke every /proc-based resolve case. depth counts
+    // components pushed past the anchor; ".." at depth 0 escapes
+    // (BENEATH → EXDEV, IN_ROOT → clamp at the anchor).
+    let mut comps: alloc::vec::Vec<&str> = if is_absolute {
+        // RESOLVE_IN_ROOT rewrites absolute paths UNDER the dirfd; every
+        // other resolve mode walks absolute paths from the real root.
+        if (how.resolve & RESOLVE_IN_ROOT) != 0 {
+            base.split('/').filter(|s| !s.is_empty()).collect()
+        } else {
+            alloc::vec::Vec::new()
+        }
+    } else {
+        base.split('/').filter(|s| !s.is_empty()).collect()
+    };
+    let base_depth = comps.len();
+    let mut depth = 0usize;
+    let mut escaped = false;
+    for c in user_path.split('/') {
+        match c {
+            "" | "." => {}
+            ".." => {
+                if depth == 0 {
+                    escaped = true;
+                } else {
+                    depth -= 1;
+                    comps.pop();
+                }
+            }
+            _ => {
+                depth += 1;
+                comps.push(c);
+            }
+        }
+    }
+    if escaped {
+        if (how.resolve & RESOLVE_BENEATH) != 0 {
+            return -(errno::EXDEV as i64);
+        }
+        // IN_ROOT: clamped — comps stay at base_depth (nothing popped).
+    }
+
+    let cleaned: alloc::string::String = {
+        let mut s = alloc::string::String::new();
+        for c in &comps {
+            s.push('/');
+            s.push_str(c);
+        }
+        if s.is_empty() { s.push('/'); }
+        s
+    };
+
+    // RESOLVE_NO_SYMLINKS / NO_MAGICLINKS: every component of the cleaned
+    // path must not be a symlink (magiclinks checks only under /proc —
+    // procfs magic links like /proc/self/exe). Prefixes are built from the
+    // comps themselves: for relative paths the base components are already
+    // in comps, for absolute paths comps walk from the root.
+    let no_symlinks = (how.resolve & RESOLVE_NO_SYMLINKS) != 0;
+    let no_magiclinks = (how.resolve & RESOLVE_NO_MAGICLINKS) != 0;
+    if no_symlinks || no_magiclinks {
+        let mut prefix = alloc::string::String::new();
+        for c in comps.iter() {
+            prefix.push('/');
+            prefix.push_str(c);
+            // Our procfs models /proc/self as a directory (Linux presents
+            // it as a magic symlink) — under RESOLVE_NO_MAGICLINKS it must
+            // behave like one (LTP openat202).
+            if no_magiclinks && prefix == "/proc/self" {
+                return -(errno::ELOOP as i64);
+            }
+            let check = no_symlinks
+                || (no_magiclinks && prefix.starts_with("/proc"));
+            if check {
+                let mut st = crate::fs::Stat::default();
+                if crate::fs::vfs::stat_file_by_path_with_flags(
+                    &prefix, &mut st, crate::fs::vfs::LOOKUP_NOFOLLOW,
+                ).is_ok() && (st.st_mode & 0o170000) == 0o120000 {
+                    return -(errno::ELOOP as i64);
+                }
+            }
+        }
+    }
+
+    // RESOLVE_NO_XDEV: the resolved path must stay on the dirfd's
+    // filesystem (st_dev comparison — LTP openat202 crosses from a
+    // tmpdir on the root fs into procfs).
+    if (how.resolve & RESOLVE_NO_XDEV) != 0 {
+        let mut st_base = crate::fs::Stat::default();
+        let mut st_final = crate::fs::Stat::default();
+        let base_ok = crate::fs::vfs::stat_file_by_path(&base, &mut st_base).is_ok();
+        let final_ok = crate::fs::vfs::stat_file_by_path(&cleaned, &mut st_final).is_ok();
+        if base_ok && final_ok && st_base.st_dev != st_final.st_dev {
+            return -(errno::EXDEV as i64);
+        }
+    }
+
+    // Open (and, with O_CREAT, create) under the CLEANED path — resolve
+    // semantics must apply to creation too: LTP openat202 passes
+    // O_RDONLY|O_CREAT with every resolve flag, and IN_ROOT's
+    // "/tmp/<tmpdir>/proc/version" must ENOENT (no intermediate "proc"),
+    // not silently create/resolve the caller's original absolute path.
+    match crate::fs::vfs::file_open(&cleaned, how.flags as u32, how.mode as u32) {
+        Ok(fd) => {
+            if (how.flags as u32 & 0o2000000 /*O_CLOEXEC*/) != 0 {
+                crate::fs::set_cloexec_fd(fd, true);
+            }
+            fd as i64
+        }
+        Err(e) => e as i64,
+    }
 }
 
 /// sys_mknodat - create a filesystem node
@@ -3532,6 +3838,11 @@ pub fn sys_fchmod(args: SyscallArgs) -> i64 {
     // SAFETY: fd is a valid file descriptor; get_file_fd returns valid File or None.
     match unsafe { crate::fs::get_file_fd(fd as usize) } {
         Some(file) => {
+            // O_PATH descriptors permit no I/O nor metadata changes (Linux
+            // chmod_common rejects non-readable/writable fds; LTP open13).
+            if file.flags().bits() & crate::fs::file::FileFlags::O_PATH != 0 {
+                return -(errno::EBADF as i64);
+            }
             // EROFS: fd-based chmod on a read-only mount (LTP fchmod06).
             if crate::fs::vfs::file_on_readonly_mount(&file) {
                 return -(errno::EROFS as i64);
@@ -3752,6 +4063,11 @@ fn xattr_inode_by_fd(fd: u64) -> Result<alloc::sync::Arc<crate::fs::inode::Inode
     // SAFETY: fd comes from the syscall args; get_file_fd validates it.
     let file = unsafe { crate::fs::get_file_fd(fd as usize) }
         .ok_or(-(errno::EBADF as i32))?;
+    // O_PATH descriptors permit no xattr operations either — Linux rejects
+    // them with EBADF before touching the inode (LTP open13).
+    if file.flags().bits() & crate::fs::file::FileFlags::O_PATH != 0 {
+        return Err(-(errno::EBADF as i32));
+    }
     // SAFETY: inode written once at open; read-only access.
     unsafe { (*file.inode.get()).clone() }
         .ok_or(-(errno::EBADF as i32))
@@ -4281,6 +4597,11 @@ pub fn sys_fchown(args: SyscallArgs) -> i64 {
     // SAFETY: fd is a valid non-negative i32; get_file_fd returns None for invalid fds.
     match unsafe { crate::fs::get_file_fd(fd as usize) } {
         Some(file) => {
+            // O_PATH descriptors permit no metadata changes either (LTP
+            // open13: fchown on an O_PATH fd is EBADF).
+            if file.flags().bits() & crate::fs::file::FileFlags::O_PATH != 0 {
+                return -(errno::EBADF as i64);
+            }
             // SAFETY: inode.get() points to an Option<Arc<Inode>> initialized during file open.
             let inode_opt = unsafe { &*file.inode.get() };
             match inode_opt.as_ref() {
@@ -4713,15 +5034,148 @@ pub fn sys_copy_file_range(args: SyscallArgs) -> i64 {
 }
 
 /// sys_preadv2 - Read from fd into vectors v2 (NR 286)
+/// RWF_* flag bits accepted by preadv2/pwritev2 (include/linux/rw_hint.h
+/// layout). Unknown bits are EINVAL (Linux vfs_readv/vfs_writev).
+mod rwf {
+    pub const HIPRI: u32 = 0x01;
+    pub const DSYNC: u32 = 0x02;
+    pub const SYNC: u32 = 0x04;
+    pub const NOWAIT: u32 = 0x08;
+    pub const APPEND: u32 = 0x10;
+    pub const VALID: u32 = HIPRI | DSYNC | SYNC | NOWAIT | APPEND;
+}
+
+/// Validate RWF_* flags shared by preadv2/pwritev2. Unsupported or unknown
+/// flag bits -> EOPNOTSUPP (Linux kiocb_set_rw_flags; LTP preadv202/
+/// pwritev202 "flag is invalid" cases pass flags=-1 and expect EOPNOTSUPP).
+fn rwf_check(flags: u32) -> Result<(), i64> {
+    const RWF_VALID: u32 = rwf::VALID;
+    if flags & (!RWF_VALID) != 0 || flags & rwf::HIPRI != 0 {
+        return Err(-(errno::EOPNOTSUPP as i64));
+    }
+    Ok(())
+}
+
+/// Combine the split (pos_l, pos_h) register pair of preadv2/pwritev2 into
+/// the 64-bit offset — Linux pos_from_hilo() semantics: (high << 32) | low.
+/// LO_HI_LONG(-1) arrives as (u64::MAX, 0xFFFFFFFF) and reassembles to -1.
+#[inline]
+fn pos_from_hilo(pos_l: u64, pos_h: u64) -> u64 {
+    ((pos_h & 0xFFFF_FFFF) << 32) | pos_l
+}
+
+/// sys_preadv2 - preadv with per-call flags (NR 286)
+///
+/// Native asm-generic ABI (6 args): (fd, iov, iovcnt, pos_l, pos_h, flags).
+/// The rootfs's musl has no preadv2 wrapper, so LTP's lapi fallback issues
+/// exactly this form (LO_HI_LONG split). Semantics over plain preadv
+/// (LTP preadv201/202/203):
+/// - unknown/unsupported RWF bits and RWF_HIPRI -> EOPNOTSUPP (rwf_check)
+/// - pos == -1: operate at the CURRENT fd position and advance it —
+///   the readv-equivalent mode. Explicit offsets never touch the position.
 pub fn sys_preadv2(args: SyscallArgs) -> i64 {
-    // Same as preadv, ignoring flags
-    crate::syscall::io::sys_preadv(args)
+    let flags = args[5] as u32;
+    if let Err(e) = rwf_check(flags) {
+        return e;
+    }
+    let pos = pos_from_hilo(args[3], args[4]);
+    if pos != u64::MAX {
+        let mut a = args;
+        a[3] = pos;
+        return crate::syscall::io::sys_preadv(a);
+    }
+    // Current-position mode: snapshot the pos, delegate each iov to the
+    // explicit-offset path, then advance the fd position by the total.
+    let fd = args[0] as usize;
+    // SAFETY: read-only fd-table lookup; File methods used are &self.
+    let start = unsafe {
+        match crate::fs::get_file_fd(fd) {
+            Some(f) => f.get_pos(),
+            None => return -(errno::EBADF as i64),
+        }
+    };
+    let mut a = args;
+    a[3] = start;
+    let result = crate::syscall::io::sys_preadv(a);
+    if result > 0 {
+        unsafe {
+            if let Some(f) = crate::fs::get_file_fd(fd) {
+                f.set_pos(start + result as u64);
+            }
+        }
+    }
+    result
 }
 
 /// sys_pwritev2 - Write vectors to fd v2 (NR 287)
+///
+/// Native asm-generic ABI (6 args): (fd, iov, iovcnt, pos_l, pos_h, flags)
+/// — the rootfs's musl lacks pwritev2, so LTP's lapi fallback issues the
+/// LO_HI_LONG split form. Semantics over plain pwritev (LTP pwritev201/202):
+/// - unknown/unsupported RWF bits and RWF_HIPRI -> EOPNOTSUPP (rwf_check)
+/// - RWF_APPEND: write at the CURRENT END of file regardless of the passed
+///   offset (POSIX O_APPEND semantics forced per-call)
+/// - pos == -1: writev-equivalent — operate at (and advance) the current
+///   fd position. Explicit offsets never touch the position.
 pub fn sys_pwritev2(args: SyscallArgs) -> i64 {
-    // Same as pwritev, ignoring flags
-    crate::syscall::io::sys_pwritev(args)
+    let flags = args[5] as u32;
+    if let Err(e) = rwf_check(flags) {
+        return e;
+    }
+    let fd = args[0] as usize;
+    let pos = pos_from_hilo(args[3], args[4]);
+
+    // RWF_APPEND: the current file size IS the offset (the passed one is
+    // ignored). Only meaningful for inode-backed files; on inode-less
+    // unseekables (pipe/socket) the flag is inert and the -1/writev path
+    // below applies (Linux only honors APPEND in the regular-file write
+    // iterator).
+    if flags & rwf::APPEND != 0 {
+        // SAFETY: read-only fd-table lookup; inode.size read is atomic.
+        let end = unsafe {
+            match crate::fs::get_file_fd(fd) {
+                Some(f) => {
+                    let inode = &*f.inode.get();
+                    match inode.as_ref() {
+                        Some(i) => Some(i.get_size()),
+                        None => None,
+                    }
+                }
+                None => return -(errno::EBADF as i64),
+            }
+        };
+        if let Some(end) = end {
+            let mut a = args;
+            a[3] = end;
+            return crate::syscall::io::sys_pwritev(a);
+        }
+    }
+
+    if pos != u64::MAX {
+        let mut a = args;
+        a[3] = pos;
+        return crate::syscall::io::sys_pwritev(a);
+    }
+    // Current-position mode (writev-equivalent): snapshot pos, delegate,
+    // advance.
+    // SAFETY: read-only fd-table lookup; File methods used are &self.
+    let start = unsafe {
+        match crate::fs::get_file_fd(fd) {
+            Some(f) => f.get_pos(),
+            None => return -(errno::EBADF as i64),
+        }
+    };
+    let mut a = args;
+    a[3] = start;
+    let result = crate::syscall::io::sys_pwritev(a);
+    if result > 0 {
+        unsafe {
+            if let Some(f) = crate::fs::get_file_fd(fd) {
+                f.set_pos(start + result as u64);
+            }
+        }
+    }
+    result
 }
 
 // ============================================================================

@@ -796,7 +796,6 @@ pub const MAX_FDS: usize = 1024;
 
 /// FdTable entry stored on the heap
 struct FdTableEntry {
-    fds: [Option<Arc<File>>; MAX_FDS],
     /// Per-descriptor close-on-exec bits. FD_CLOEXEC belongs to the
     /// DESCRIPTOR in POSIX, not the underlying description: a file opened
     /// O_CLOEXEC at fd N and dup2'd to fd M must leave M WITHOUT the flag.
@@ -804,28 +803,90 @@ struct FdTableEntry {
     /// shells open redirections O_CLOEXEC, dup2 to stdio, exec, and lost
     /// their stdio fds (found via musl __init_libc's deliberate NULL-crash
     /// on POLLNVAL + missing /dev/null).
+    ///
+    /// (Leg-52 lever B: the `fds` array moved OUT of the entry into
+    /// FdTable::slots — a lock-free AtomicPtr array the read path never
+    /// takes the entry lock for. This struct now holds only metadata.)
     cloexec_bits: [u64; MAX_FDS / 64],
     next_fd: usize,
     count: usize,
 }
 
+/// Number of per-CPU reader banks (leg-52 lever B). Kernel.toml's SMP
+/// ceiling is 4; 8 leaves headroom. A cpu id at or above this bound
+/// falls back to the slow-path lock (the r8final discipline — bank
+/// selection happens with interrupts off, so the id is stable).
+const FD_READER_BANKS: usize = 8;
+
+/// One per-CPU reader-nesting counter, padded to its own cacheline so
+/// the CPUs' counter RMWs never share a line — the fast path's whole
+/// point is that a get_file touches no cross-CPU line except the File's
+/// own refcount.
+#[repr(align(64))]
+struct FdReaderBank(core::sync::atomic::AtomicUsize);
+
+/// One lock-free fd slot: the Arc<File> as a raw pointer, null = empty.
+/// Single-word aligned stores, so a lock-free load can never observe a
+/// torn value.
+struct FdSlot(core::sync::atomic::AtomicPtr<File>);
+
+/// Drain-give-up counter (dfx observability): a drain that could not
+/// observe all reader banks at zero within its spin budget defers the
+/// retired drop to the next writer / the final Drop. Correctness is
+/// never affected; a non-zero count on a standard boot would name a
+/// reader-starvation shape worth looking at.
+static FD_DRAIN_DEFERS: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+
 pub struct FdTable {
-    /// Heap-allocated entry protected by a spinlock for concurrent access.
-    /// Replaces the old UnsafeCell which relied on the BKL for safety.
+    /// Lock-free slot array (leg-52 lever B, perf-report 8.10.22):
+    /// get_file ran 132-144M times/boot through entry.lock_irqsave —
+    /// an irq_save + preempt_count pair + a contended per-TABLE TTAS RMW
+    /// per lookup. Readers now take NO lock: irqs off for the section,
+    /// a SeqCst bump of this CPU's reader bank, an Acquire slot load,
+    /// a strong-count increment, a Release bank drop. Writers mutate
+    /// slots with single-word stores under the entry lock and park any
+    /// removed occupant in `retired` until a reader-quiescent drain.
+    slots: alloc::boxed::Box<[FdSlot; MAX_FDS]>,
+    /// Per-CPU reader-nesting banks (see get_file for the protocol).
+    readers: [FdReaderBank; FD_READER_BANKS],
+    /// Slot occupants removed by close/dup2/displacement, parked until a
+    /// drain can drop them with no reader mid-clone.
+    retired: crate::sync::spinlock::Spinlock<alloc::vec::Vec<Arc<File>>>,
+    /// Slow-path exclusion for readers whose cpu id falls outside the
+    /// bank range (r8final family); drains hold it across the drop.
+    slow_read: crate::sync::spinlock::Spinlock<()>,
+    /// Writer serialization + descriptor metadata (cloexec bits,
+    /// allocation hint, count).
     entry: crate::sync::spinlock::Spinlock<Box<FdTableEntry>>,
 }
 
 impl FdTable {
     /// Create new file descriptor table
     pub fn new() -> Self {
-        let entry = Box::new(FdTableEntry {
-            fds: [const { None }; MAX_FDS],
-            cloexec_bits: [0; MAX_FDS / 64],
-            next_fd: 0,
-            count: 0,
-        });
-
-        Self { entry: crate::sync::spinlock::Spinlock::new(entry) }
+        Self {
+            slots: Box::new(
+                [const {
+                    FdSlot(core::sync::atomic::AtomicPtr::new(
+                        core::ptr::null_mut(),
+                    ))
+                }; MAX_FDS],
+            ),
+            readers: [const {
+                FdReaderBank(core::sync::atomic::AtomicUsize::new(0))
+            }; FD_READER_BANKS],
+            retired: crate::sync::spinlock::Spinlock::new(
+                alloc::vec::Vec::new(),
+            ),
+            slow_read: crate::sync::spinlock::Spinlock::new(()),
+            entry: crate::sync::spinlock::Spinlock::new(Box::new(
+                FdTableEntry {
+                    cloexec_bits: [0; MAX_FDS / 64],
+                    next_fd: 0,
+                    count: 0,
+                },
+            )),
+        }
     }
 
     /// Fork-time deep copy of a parent table: every installed descriptor
@@ -835,30 +896,34 @@ impl FdTable {
     /// per fork under TCG (measured: FORKPROF fd-copy ~100K CLINT cycles),
     /// which is a third of every fork-heavy workload's budget.
     pub fn fork_from(parent: &FdTable) -> Self {
-        let mut child_entry = Box::new(FdTableEntry {
-            fds: [const { None }; MAX_FDS],
-            cloexec_bits: [0; MAX_FDS / 64],
-            next_fd: 0,
-            count: 0,
-        });
+        // Allocate the child BEFORE taking the parent's entry lock (the
+        // deepest fork contexts do not need the allocation under it).
+        let mut child = Self::new();
         let g = parent.entry.lock_irqsave();
-        // Leg-16 stack-depth fix (the 89,368B KSTACK-HW chain, comm
-        // 'usb_host'): the old `child_entry.fds = g.fds.clone()` array
-        // clone went through SpecArrayClone/try_from_fn's wrapper copies
-        // — several full [Option<Arc<File>>; 1024] temporaries on the
-        // kernel stack, and this runs in the FORK path (the deepest
-        // calling contexts in the boot). Element-wise clone-into-place
-        // moves nothing larger than one slot.
-        let mut i = 0usize;
-        while i < MAX_FDS {
-            child_entry.fds[i] = g.fds[i].clone();
-            i += 1;
+        // Parent slots are immutable for the duration of its entry lock
+        // (every writer serializes there), so the child copies raw
+        // pointers and takes its own reference per occupied slot in one
+        // pass — element-wise, nothing larger than one slot moves (the
+        // leg-16 stack-depth discipline). Concurrent lock-free READERS
+        // only bump strong counts; no interference with the copy.
+        for i in 0..MAX_FDS {
+            let p = parent.slots[i].0.load(core::sync::atomic::Ordering::Acquire);
+            if !p.is_null() {
+                // SAFETY: p was published by a writer (install/dup/fork)
+                // and the parent table holds its reference for as long
+                // as the entry lock we hold blocks removal.
+                unsafe { Arc::increment_strong_count(p) };
+                child.slots[i].0.store(p, core::sync::atomic::Ordering::Release);
+            }
         }
-        child_entry.cloexec_bits = g.cloexec_bits;
-        child_entry.count = g.count;
-        child_entry.next_fd = g.next_fd;
+        {
+            let mut ce = child.entry.lock_irqsave();
+            ce.cloexec_bits = g.cloexec_bits;
+            ce.count = g.count;
+            ce.next_fd = g.next_fd;
+        }
         drop(g);
-        Self { entry: crate::sync::spinlock::Spinlock::new(child_entry) }
+        child
     }
 
     /// RLIMIT_NOFILE ceiling for the calling task: the table size, or the
@@ -893,7 +958,7 @@ impl FdTable {
 
         // Search from start up to the RLIMIT_NOFILE/table ceiling
         for fd in start..ceiling {
-            if entry.fds[fd].is_none() {
+            if self.slots[fd].0.load(Ordering::Relaxed).is_null() {
                 entry.next_fd = (fd + 1) % MAX_FDS;
                 return Some(fd);
             }
@@ -904,7 +969,7 @@ impl FdTable {
         // if a future path frees a slot without adjusting next_fd.
         if start > min_fd {
             for fd in min_fd..start.min(ceiling) {
-                if entry.fds[fd].is_none() {
+                if self.slots[fd].0.load(Ordering::Relaxed).is_null() {
                     entry.next_fd = (fd + 1) % MAX_FDS;
                     return Some(fd);
                 }
@@ -921,10 +986,14 @@ impl FdTable {
         }
 
         let mut entry = self.entry.lock_irqsave();
-        if entry.fds[fd].is_some() {
+        // The entry lock serializes writers, so this emptiness check is
+        // stable against concurrent installs.
+        if !self.slots[fd].0.load(Ordering::Relaxed).is_null() {
             return Err(());
         }
-        entry.fds[fd] = Some(file);
+        // The slot now owns one reference (published with Release so the
+        // File's fields are visible to lock-free readers' Acquire loads).
+        self.slots[fd].0.store(Arc::into_raw(file) as *mut File, Ordering::Release);
         // Clear any stale CLOEXEC bit from a previous occupant of this fd
         // number (regression round 5, MED: closed CLOEXEC fds leaked the
         // bit to the next file that reused the number).
@@ -933,12 +1002,72 @@ impl FdTable {
         Ok(())
     }
 
-    /// Get file object for file descriptor
+    /// Get file object for file descriptor.
+    ///
+    /// Leg-52 lever B fast path — NO entry lock, NO preempt machinery:
+    /// with irqs off for the section, bump this CPU's reader bank (a
+    /// SeqCst RMW — aqrl AMO on riscv, locked xadd on x86 — so the claim
+    /// is globally visible before the slot load below executes), load
+    /// the slot (Acquire — pairs the installer's Release store so the
+    /// File's fields are visible through the reconstructed Arc), clone
+    /// via a strong-count increment, and drop the claim.
+    ///
+    /// SAFETY of the increment (the reason the bank exists): a slot's
+    /// Arc is owned by the table while published; any writer that
+    /// removes it (close / dup2 displacement) parks the Arc in
+    /// `retired`, and the drain drops it only after observing EVERY
+    /// bank at zero with the slow-path lock held. A reader can therefore
+    /// only load a pointer whose reference is provably alive: either the
+    /// slot still publishes it (the table's reference), or the removing
+    /// writer's drain is waiting for THIS reader's bank to return to
+    /// zero before its drop. The reader's SeqCst claim-before-load and
+    /// the drain's SeqCst-fence-then-scan close the store-load ordering
+    /// hole (a reader whose claim was not yet visible may load a
+    /// pre-removal pointer — but in that ordering the drain's scan read
+    /// the bank before the claim, so it cannot have completed the drop).
     pub fn get_file(&self, fd: usize) -> Option<Arc<File>> {
         if fd >= MAX_FDS {
             return None;
         }
-        self.entry.lock_irqsave().fds[fd].clone()
+        let flags = crate::arch::cpu::save_and_disable_irq();
+        let cpu = crate::arch::cpu_id() as usize;
+        let out = if cpu < FD_READER_BANKS {
+            let bank = &self.readers[cpu];
+            bank.0.fetch_add(1, Ordering::SeqCst);
+            let p = self.slots[fd].0.load(Ordering::Acquire);
+            let out = if !p.is_null() {
+                // SAFETY: p was stored by a writer from an owned Arc
+                // (install/dup/fork) and is kept alive by the slot or by
+                // `retired` until a drain observes all banks zero — our
+                // bank claim is exactly what that drain waits for.
+                unsafe {
+                    Arc::increment_strong_count(p);
+                    Some(Arc::from_raw(p))
+                }
+            } else {
+                None
+            };
+            bank.0.fetch_sub(1, Ordering::Release);
+            out
+        } else {
+            // r8final family: cpu id outside the bank range. Serialize
+            // with drains through slow_read instead of a bank claim.
+            let _slow = self.slow_read.lock_irqsave();
+            let p = self.slots[fd].0.load(Ordering::Acquire);
+            if !p.is_null() {
+                // SAFETY: drains hold slow_read across the drop of
+                // retired Arcs (see drain_retired), so either the slot
+                // or a parked reference keeps p alive here.
+                unsafe {
+                    Arc::increment_strong_count(p);
+                    Some(Arc::from_raw(p))
+                }
+            } else {
+                None
+            }
+        };
+        crate::arch::cpu::restore_irq(flags);
+        out
     }
 
     /// Visit every open descriptor (fd, File) under one entry-lock hold.
@@ -946,11 +1075,23 @@ impl FdTable {
     /// where possible, and must NOT call back into FdTable mutators.
     pub fn for_each_file(&self, mut f: impl FnMut(usize, &Arc<File>)) {
         let entry = self.entry.lock_irqsave();
-        for (fd, slot) in entry.fds.iter().enumerate() {
-            if let Some(file) = slot {
-                f(fd, file);
+        // Slots are stable under the entry lock (every writer serializes
+        // there), so each non-null pointer still has its table reference;
+        // present it through a temporary owning clone.
+        for (fd, slot) in self.slots.iter().enumerate() {
+            let p = slot.0.load(Ordering::Acquire);
+            if !p.is_null() {
+                // SAFETY: published by a writer; the table's reference is
+                // held by the slot for the duration of our lock.
+                unsafe {
+                    Arc::increment_strong_count(p);
+                    let file = Arc::from_raw(p);
+                    f(fd, &file);
+                    drop(file);
+                }
             }
         }
+        drop(entry);
     }
 
     /// Close file descriptor
@@ -959,29 +1100,26 @@ impl FdTable {
             return Err(());
         }
 
-        // R13-4: capture the last-reference decision INSIDE the entry
-        // lock. Reading strong_count after the release let a concurrent
-        // get_file clone land between the slot clear and the check — the
-        // count read 2, the close op was skipped forever, and the pipe
-        // EOF was never delivered (hang face). Under the lock the slot is
-        // gone, so any clone racing us is either already counted or will
-        // see the empty slot; count==1 here is stable because the only
-        // remaining holder is the one we are dropping.
-        // R14-5: the last-reference DECISION stays inside the entry lock
-        // (a concurrent get_file clone must not slip in between slot-clear
-        // and count read), but the close op EXECUTES after the lock is
-        // dropped — running it under entry.lock_irqsave held socket closes
-        // into a multi-second virtio spin with IRQs off, wedging every fd
-        // operation of every CLONE_FILES thread. Safe to run late: the
-        // slot is gone so no NEW references can appear; our local Arc is
-        // still the last one by construction.
-        let run_close;
-        let file_opt = {
+        // R13-4/R14-5 (lock-free slots update): the removal — slot null
+        // store + metadata — runs under the entry lock exactly as before;
+        // the removed Arc is PARKED in `retired` and the last-reference
+        // close decision runs at the DRAIN point outside the lock. The
+        // drain is where the count==1 decision is sound now: lock-free
+        // readers do not pass through the entry lock, so the old
+        // "decision under the lock" argument does not hold against them —
+        // quiescence (every reader bank at zero) is what proves no
+        // in-flight get_file clone can bump the count. The close op still
+        // never executes with IRQs off under the entry lock (R14-5), and
+        // it still runs at close_fd return time in practice (reader
+        // sections are ~100ns, so the drain's wait is a scan or two).
+        let removed: Option<Arc<File>> = {
             let mut entry = self.entry.lock_irqsave();
-            if entry.fds[fd].is_none() {
+            // SAFETY: the swap atomically takes the slot's reference; the
+            // null return means the fd was not open.
+            let p = self.slots[fd].0.swap(core::ptr::null_mut(), Ordering::Release);
+            if p.is_null() {
                 return Err(());
             }
-            let file_opt = core::mem::replace(&mut entry.fds[fd], None);
             entry.count -= 1;
             // Linux put_unused_fd semantics: freeing a slot BELOW next_fd
             // pulls the search hint back down, preserving the invariant
@@ -995,55 +1133,126 @@ impl FdTable {
             if fd < entry.next_fd {
                 entry.next_fd = fd;
             }
-            // R10-2 (PIPE2 EBADF root cause): release only on the LAST
-            // Arc reference — running the close op per EVENT let
-            // pipe_file_close STEAL private_data from the File that fd 1
-            // still pointed at after `dup3(w,1); close(w)`.
-            run_close = match file_opt {
-                Some(ref file) => Arc::strong_count(file) == 1,
-                None => false,
-            };
-            file_opt
+            Some(unsafe { Arc::from_raw(p) })
         };
-        // P0-5 POSIX record locks: closing ANY fd referring to the file
-        // releases ALL of the closing process's record locks on it (the
-        // classic POSIX semantic) — even when other fds (dup'd or
-        // separately opened) stay open. Runs on every close, before the
-        // close op, outside the entry lock.
-        if let Some(ref file) = file_opt {
-            crate::fs::locks::posix_release_for_file(file);
+        if let Some(file) = removed {
+            self.park_and_drain(file);
         }
+        Ok(())
+    }
 
-        // R31-B3 (v2): if we hold the last reference, run the op now; if an
-        // in-flight syscall holds a clone (count was 2), set close_pending
-        // so the FINAL drop runs it — the flag lives on the File itself.
-        if run_close {
-            if let Some(file) = file_opt {
-                unsafe {
-                    let file_ptr = Arc::as_ptr(&file) as *mut File;
-                    // Clear any close_pending left behind by an earlier
-                    // close of a dup'd slot: count==2 back then meant "another
-                    // fd still holds this file", not an in-flight clone, and
-                    // we run the op right here — a stale flag would make the
-                    // final Drop run the op a SECOND time (dup2 + close of
-                    // both fds double-closed pipes/epoll).
-                    (*file_ptr).close_pending.store(false, Ordering::Release);
-                    let ops_ptr = (*file_ptr).ops.get();
-                    if !ops_ptr.is_null() && !(*ops_ptr).is_none() {
-                        (*file_ptr).close();
+    /// Park a removed slot occupant and attempt the drain. Writers call
+    /// this AFTER releasing the entry lock (R14-5: nothing here may spin
+    /// or run close ops under it).
+    fn park_and_drain(&self, file: Arc<File>) {
+        {
+            let mut r = self.retired.lock_irqsave();
+            r.push(file);
+        }
+        self.drain_retired(false);
+    }
+
+    /// Drop retired slot occupants once no reader can be mid-clone.
+    ///
+    /// Quiescence: every bank reads 0 (each scan load Acquire — reading
+    /// 0 synchronizes with that reader's Release decrement, so its
+    /// strong-count increment has completed) AND the slow-path lock is
+    /// held across the take (excludes the bank-range fallback readers).
+    /// Readers that START after a successful scan cannot load these Arcs:
+    /// their slots were nulled before the park, the null stores precede
+    /// this drain's SeqCst fence, and a fresh reader's slot load follows
+    /// its own SeqCst bank claim.
+    ///
+    /// `final_drop`: at FdTable::drop no &self borrowers can exist, so no
+    /// reader can run at all — skip the wait.
+    fn drain_retired(&self, final_drop: bool) {
+        {
+            // Cheap emptiness check first: most writers park nothing and
+            // most drains find a previous drain already took the vec.
+            let r = self.retired.lock_irqsave();
+            if r.is_empty() {
+                return;
+            }
+        }
+        if !final_drop {
+            let mut scans: usize = 0;
+            loop {
+                // The fence orders the writer's earlier slot-null stores
+                // before the bank reads below (the reader side of the
+                // handshake is its SeqCst bank claim before its slot
+                // load — see get_file).
+                core::sync::atomic::fence(Ordering::SeqCst);
+                let mut all_zero = true;
+                for b in self.readers.iter() {
+                    if b.0.load(Ordering::Acquire) != 0 {
+                        all_zero = false;
+                        break;
                     }
                 }
+                if all_zero {
+                    break;
+                }
+                scans += 1;
+                if scans >= 8192 {
+                    // Defer, never fail: reader sections are irq-off and
+                    // bounded, so this is practically unreachable; the
+                    // next writer op and the final Drop retry. Only the
+                    // close-op TIMING can be delayed, never correctness.
+                    FD_DRAIN_DEFERS.fetch_add(1, Ordering::Relaxed);
+                    return;
+                }
+                core::hint::spin_loop();
             }
-        } else if let Some(ref file) = file_opt {
-            // Someone else still holds a reference and we removed the slot:
+        }
+        let taken = {
+            let _slow = self.slow_read.lock_irqsave();
+            let mut r = self.retired.lock_irqsave();
+            core::mem::take(&mut *r)
+        };
+        for file in taken {
+            Self::displaced_close_decision(&file);
+        }
+    }
+
+    /// The last-reference close discipline shared by the drain (close_fd,
+    /// dup2 displacement, exec-cloexec) and the Drop path — R13-4/R14-5/
+    /// R10-2/R31-B3/P0-5 preserved verbatim in shape: POSIX record-lock
+    /// release first, then run the close op NOW when this is the last
+    /// reference, else arm close_pending for the final dropper.
+    fn displaced_close_decision(file: &Arc<File>) {
+        // P0-5 POSIX record locks: closing ANY fd referring to the file
+        // releases ALL of the closing process's record locks on it —
+        // even when other fds (dup'd or separately opened) stay open.
+        // Runs before the close op, outside every lock.
+        crate::fs::locks::posix_release_for_file(file);
+        // R10-2 (PIPE2 EBADF root cause): release only on the LAST Arc
+        // reference — running the close op per EVENT let pipe_file_close
+        // STEAL private_data from the File that fd 1 still pointed at
+        // after `dup3(w,1); close(w)`. At a drain this count is QUIESCENT
+        // (no in-flight clone can race it).
+        if Arc::strong_count(file) == 1 {
+            unsafe {
+                let file_ptr = Arc::as_ptr(file) as *mut File;
+                // Clear any close_pending left behind by an earlier close
+                // of a dup'd slot: count==2 back then meant "another fd
+                // still holds this file", not an in-flight clone, and we
+                // run the op right here — a stale flag would make the
+                // final Drop run the op a SECOND time (dup2 + close of
+                // both fds double-closed pipes/epoll).
+                (*file_ptr).close_pending.store(false, Ordering::Release);
+                let ops_ptr = (*file_ptr).ops.get();
+                if !ops_ptr.is_null() && !(*ops_ptr).is_none() {
+                    (*file_ptr).close();
+                }
+            }
+        } else {
+            // Someone else still holds a reference and the slot is gone:
             // mark for the final dropper to run the op.
             unsafe {
                 let file_ptr = Arc::as_ptr(file) as *mut File;
-                (*file_ptr).close_pending.store(true, core::sync::atomic::Ordering::Release);
+                (*file_ptr).close_pending.store(true, Ordering::Release);
             }
         }
-
-        Ok(())
     }
 
     /// Duplicate file descriptor
@@ -1105,41 +1314,32 @@ impl FdTable {
         // and install the duplicated file — all under the entry lock.
         let displaced: Option<Arc<File>> = {
             let mut entry = self.entry.lock_irqsave();
-            let file = entry.fds[oldfd].clone()?;
-            let displaced = core::mem::replace(&mut entry.fds[newfd], Some(file));
+            let src = self.slots[oldfd].0.load(Ordering::Acquire);
+            if src.is_null() {
+                return None;
+            }
+            // SAFETY: src is published and the entry lock blocks removal,
+            // so the table's reference keeps it alive through our own
+            // clone (the dup'd descriptor's reference).
+            unsafe { Arc::increment_strong_count(src) };
+            let dup_arc = unsafe { Arc::from_raw(src) };
+            // SAFETY: the swap takes the previous occupant's reference out
+            // atomically (single-word, no torn window for readers).
+            let prev = self.slots[newfd].0.swap(Arc::into_raw(dup_arc) as *mut File, Ordering::Release);
             // dup2 clears FD_CLOEXEC on the new descriptor (POSIX);
             // install_fd already cleared the stale bit only when the slot
             // was empty, so clear it here unconditionally.
             entry.cloexec_bits[newfd / 64] &= !(1u64 << (newfd % 64));
-            entry.count = entry.count.saturating_sub(if displaced.is_some() { 1 } else { 0 });
+            entry.count = entry.count.saturating_sub(if prev.is_null() { 0 } else { 1 });
             entry.count += 1;
-            displaced
+            if prev.is_null() { None } else { Some(unsafe { Arc::from_raw(prev) }) }
         };
 
-        // Run the displaced file's close decision outside the entry lock,
-        // mirroring close_fd's last-reference discipline.
+        // Run the displaced file's close decision at the drain, outside
+        // the entry lock — the same quiescent last-reference discipline
+        // as close_fd (P0-5 lock release + R10-2/R31-B3 decision).
         if let Some(file) = displaced {
-            // P0-5: dup2 displacing an fd IS a close of that fd — the
-            // POSIX record-lock release rule applies (see close_fd).
-            crate::fs::locks::posix_release_for_file(&file);
-            let run_close = Arc::strong_count(&file) == 1;
-            if run_close {
-                unsafe {
-                    let file_ptr = Arc::as_ptr(&file) as *mut File;
-                    // Clear a possibly-stale deferred flag before running the
-                    // op ourselves (double-close hazard, see close_fd).
-                    (*file_ptr).close_pending.store(false, Ordering::Release);
-                    let ops_ptr = (*file_ptr).ops.get();
-                    if !ops_ptr.is_null() && !(*ops_ptr).is_none() {
-                        (*file_ptr).close();
-                    }
-                }
-            } else {
-                unsafe {
-                    let file_ptr = Arc::as_ptr(&file) as *mut File;
-                    (*file_ptr).close_pending.store(true, Ordering::Release);
-                }
-            }
+            self.park_and_drain(file);
         }
 
         Some(newfd)
@@ -1191,60 +1391,38 @@ impl FdTable {
 
 impl Drop for FdTable {
     fn drop(&mut self) {
-        // R20-FS3 (R14-5 for Drop): make the last-reference DECISION under the
-        // entry lock but run the close ops AFTER releasing it — the old Drop
-        // ran ops.close (socket close = multi-second virtio spin) with IRQs
-        // off while holding the entry lock, wedging every fd operation of
-        // every CLONE_FILES thread, exactly the hazard R14-5 fixed in
-        // close_fd but never applied here.
+        // R20-FS3 (R14-5 for Drop): the close DECISIONS run after the
+        // entry lock is released — the old Drop ran ops.close (socket
+        // close = multi-second virtio spin) with IRQs off while holding
+        // the entry lock, wedging every fd operation of every
+        // CLONE_FILES thread, exactly the hazard R14-5 fixed in close_fd
+        // but never applied here.
+        //
+        // Lock-free slots note: at drop no &self borrowers can exist, so
+        // no lock-free reader can be mid-clone — everything parks into
+        // `retired` and the final drain runs WITHOUT the bank wait.
         let mut to_close: alloc::vec::Vec<Arc<File>> = alloc::vec::Vec::new();
         {
             let mut entry = self.entry.lock_irqsave();
             for fd in 0..MAX_FDS {
-                if entry.fds[fd].is_some() {
-                    let file_opt = core::mem::replace(&mut entry.fds[fd], None);
-                    entry.count -= 1;
-                    if let Some(file) = file_opt {
-                        // P0-5: process teardown drops every fd — release
-                        // the dying task's record locks on each file (the
-                        // fdtable is normally dropped in the exiting task's
-                        // own context, so the tgid is correct; locks of
-                        // owners that somehow survive this path are reaped
-                        // as stale on the next conflict check anyway).
-                        crate::fs::locks::posix_release_for_file(&file);
-                        // R10-2: last-reference-only release — see close_fd.
-                        // R31-B3 (v2 completion): dup'd files live in several
-                        // slots of the SAME table, so a count>1 here means a
-                        // syscall-local clone is still outstanding — defer to
-                        // the final dropper via close_pending exactly like
-                        // close_fd does.  (The v1 "let _ = file;" erasure
-                        // skipped the close op entirely: process exit never
-                        // closed pipes, so readers never saw EOF.)
-                        if Arc::strong_count(&file) == 1 {
-                            to_close.push(file);
-                        } else {
-                            unsafe {
-                                let file_ptr = Arc::as_ptr(&file) as *mut File;
-                                (*file_ptr).close_pending.store(true, Ordering::Release);
-                            }
-                        }
-                    }
+                // SAFETY: the swap takes the slot's reference; null = the
+                // descriptor was not open.
+                let p = self.slots[fd].0.swap(core::ptr::null_mut(), Ordering::Relaxed);
+                if !p.is_null() {
+                    entry.count = entry.count.saturating_sub(1);
+                    to_close.push(unsafe { Arc::from_raw(p) });
                 }
             }
         }
-        for file in to_close {
-            unsafe {
-                let file_ptr = Arc::as_ptr(&file) as *mut File;
-                // Clear a possibly-stale deferred flag before running the op
-                // ourselves — same double-close hazard as close_fd.
-                (*file_ptr).close_pending.store(false, Ordering::Release);
-                let ops_ptr = (*file_ptr).ops.get();
-                if !ops_ptr.is_null() && !(*ops_ptr).is_none() {
-                    (*file_ptr).close();
-                }
-            }
+        // Merge with anything a deferring drain left behind, then run the
+        // shared discipline (P0-5 record-lock release, R10-2/R31-B3
+        // last-reference / close_pending) for every displaced file.
+        {
+            let mut r = self.retired.lock_irqsave();
+            r.extend(to_close);
         }
-        // Box will be automatically deallocated
+        self.drain_retired(true);
+        // Boxes are deallocated automatically after this.
     }
 }
 
@@ -1355,8 +1533,40 @@ fn reg_file_write(file: &File, buf: &[u8]) -> isize {
         // (Also against reg_file_read now — see the io_lock field note.)
         let _write_guard = file.io_lock.guard();
 
+        // RLIMIT_FSIZE (Linux generic_write_checks): a write whose start
+        // position is at/after the soft limit fails EFBIG with SIGXFSZ; a
+        // write that would CROSS the limit is silently truncated to the
+        // boundary (no signal) — LTP setrlimit01 case 2 sets the limit to
+        // 10, writes 26 bytes and requires write() to return exactly 10.
+        // For O_APPEND the effective start is the file size (the position
+        // append_data takes under the inode data lock). Regular files
+        // only: pipes/sockets never enter reg_file_write, matching Linux
+        // (only regular-file write paths check).
+        let mut buf = buf;
+        if let Some(task) = crate::sched::current() {
+            let (fsz_cur, _) = task.rlimit(crate::process::task::rlimit_res::FSIZE);
+            if fsz_cur != u64::MAX {
+                let start = if file.flags.load(Ordering::Acquire) & FileFlags::O_APPEND != 0 {
+                    inode.get_size()
+                } else {
+                    file.get_pos()
+                };
+                if start >= fsz_cur {
+                    let _ = crate::signal::send_signal(
+                        task.pid() as u32,
+                        crate::signal::Signal::SIGXFSZ as i32,
+                    );
+                    return crate::errno::Errno::FileTooLarge.as_neg_i32() as isize;
+                }
+                let allowed = (fsz_cur - start) as usize;
+                if buf.len() > allowed {
+                    buf = &buf[..allowed];
+                }
+            }
+        }
+
         // O_APPEND: the offset is taken under the inode's data lock, so
-        // two appenders on different open descriptions cannot pick the
+        // that two appenders on different open descriptions cannot pick the
         // same offset (Linux: generic_write_checks takes the position
         // under the inode lock). The ext4 path does the same under the
         // filesystem lock; this is the in-memory-file twin.

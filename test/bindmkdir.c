@@ -6,12 +6,15 @@
 //   /a                = sandbox root (pivot target stand-in)
 //   /a/mnt            = bind of the real root "/" (MS_BIND|MS_REC) — init's
 //                       system-sandbox /mnt bind (source "/", recursive)
-//   chroot("/a")      = the pivoted services' root (string-prefix jail)
+//   chroot("/a")      = the pivoted services' root (real chroot; the
+//                       jail's /mnt is the bind of "/", so in-jail
+//                       paths still resolve through it)
 // Then: mkdir("/mnt/<name>") inside the jail must cross the bind and create
 // <name> in the real root; a pre-stat (negative dentry) must not poison it.
 #define _GNU_SOURCE
 #include <sys/mount.h>
 #include <sys/stat.h>
+#include <sys/wait.h>
 #include <unistd.h>
 #include <errno.h>
 #include <stdio.h>
@@ -58,24 +61,42 @@ int main(void) {
     // /dev INSIDE (the target walk crosses the self-bind), jail, open
     // /dev/null. This is the appspawn child shape that dies at
     // appspawn_common.c:350 'open dev_null error: 2'.
-    rep("mkdir /a2", mkdir("/a2", 0755));
-    rep("self-bind /a2 -> /a2 (BIND|REC)",
-        mount("/a2", "/a2", NULL, MS_BIND | MS_REC, NULL));
-    rep("stat /dev (global, post-selfbind)", exists("/dev"));
-    rep("stat /proc (global, post-selfbind)", exists("/proc"));
-    rep("mkdir /a2/dev", mkdir("/a2/dev", 0755));
-    rep("stat /dev (global, post-mkdir)", exists("/dev"));
-    rep("bind /dev -> /a2/dev (BIND|REC)",
-        mount("/dev", "/a2/dev", NULL, MS_BIND | MS_REC, NULL));
-    rep("chroot /a2", chroot("/a2"));
-    rep("chdir /", chdir("/"));
-    {
-        int fd = open("/dev/null", O_RDWR);
-        rep("open /dev/null (app-sandbox jail)", fd >= 0 ? 0 : -1);
-        if (fd >= 0) close(fd);
+    // Runs in a FORKED CHILD: chroot is a real root change now (the
+    // old string-prefix jail let the later chroot("/a") resolve "/a"
+    // against the ORIGINAL root; a real chroot makes that impossible
+    // from inside the /a2 jail, so the parent stays un-jailed for the
+    // pivoted-services section below).
+    if (fork() == 0) {
+        rep("mkdir /a2", mkdir("/a2", 0755));
+        rep("self-bind /a2 -> /a2 (BIND|REC)",
+            mount("/a2", "/a2", NULL, MS_BIND | MS_REC, NULL));
+        rep("stat /dev (global, post-selfbind)", exists("/dev"));
+        rep("stat /proc (global, post-selfbind)", exists("/proc"));
+        rep("mkdir /a2/dev", mkdir("/a2/dev", 0755));
+        rep("stat /dev (global, post-mkdir)", exists("/dev"));
+        rep("bind /dev -> /a2/dev (BIND|REC)",
+            mount("/dev", "/a2/dev", NULL, MS_BIND | MS_REC, NULL));
+        rep("chroot /a2", chroot("/a2"));
+        rep("chdir /", chdir("/"));
+        {
+            int fd = open("/dev/null", O_RDWR);
+            rep("open /dev/null (app-sandbox jail)", fd >= 0 ? 0 : -1);
+            if (fd >= 0) close(fd);
+        }
+        printf("BMD-SANDBOX-CHILD-DONE\n");
+        _exit(0);
     }
+    wait(NULL);
 
-    // The pivoted-services view: string-prefix jail.
+    // /dev inside the /a jail: the sandbox child bound /dev into /a2,
+    // not into /a — the jail's /dev/null comes through this bind.
+    rep("mkdir /a/dev", mkdir("/a/dev", 0755));
+    rep("bind /dev -> /a/dev (BIND|REC)",
+        mount("/dev", "/a/dev", NULL, MS_BIND | MS_REC, NULL));
+
+    // The pivoted-services view: real chroot onto the sandbox root
+    // whose /mnt is the bind of the real root — every path inside the
+    // jail still resolves through that bind.
     rep("chroot /a", chroot("/a"));
     rep("chdir /", chdir("/"));
 

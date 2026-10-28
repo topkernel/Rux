@@ -65,5 +65,48 @@ pub fn test_scheduler() {
     // Test 7: Verify schedule function exists
     test_pass("schedule() function available");
 
+    // Test 8: the CFS vruntime formula and its WEIGHT DIRECTION.
+    //
+    // The reference kernel advances a task's vruntime by
+    //   delta_exec * NICE_0_LOAD / weight
+    // (kernel/sched/fair.c: __calc_delta). A HIGHER weight must make the
+    // vruntime advance SLOWER, so the heavier task runs longer before it
+    // catches up with its peers — that is what hands a nice -20 task more
+    // CPU than a nice 19 task. Inverting the factor starves the
+    // low-priority tasks, so the direction is pinned here.
+    {
+        use crate::sched::fair::SchedEntity;
+        const DELTA: u64 = 1_000_000; // 1ms
+
+        let hi = SchedEntity::from_nice(-20);
+        let mid = SchedEntity::from_nice(0);
+        let lo = SchedEntity::from_nice(19);
+
+        let d_hi = hi.calc_delta_fair(DELTA);
+        let d_mid = mid.calc_delta_fair(DELTA);
+        let d_lo = lo.calc_delta_fair(DELTA);
+
+        if d_mid == DELTA && d_hi == 11_536 && d_lo == 68_266_666 {
+            test_pass("CFS vruntime delta = NICE_0_LOAD * delta / weight");
+        } else {
+            test_fail(
+                "CFS vruntime delta = NICE_0_LOAD * delta / weight",
+                &format!(
+                    "nice -20: {} (want 11536), nice 0: {} (want {}), nice 19: {} (want 68266666)",
+                    d_hi, d_mid, DELTA, d_lo
+                ),
+            );
+        }
+
+        if d_hi < d_mid && d_lo > d_mid {
+            test_pass("CFS vruntime advances slower for the heavier task");
+        } else {
+            test_fail(
+                "CFS vruntime advances slower for the heavier task",
+                &format!("hi={} mid={} lo={}", d_hi, d_mid, d_lo),
+            );
+        }
+    }
+
     test_println!("test: Scheduler testing completed.");
 }

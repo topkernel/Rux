@@ -2392,11 +2392,16 @@ pub fn binder_mmap_handler(
         vma.set_origin(crate::mm::vma::VmaOrigin::from_bits(
             crate::mm::vma::VmaOrigin::BINDER,
         ));
+        // Account the mapped zone like any other VMA (the reference
+        // kernel charges every installed VMA, so the binder buffer counts
+        // towards RLIMIT_AS and shows up in the reported VmSize).
+        let binder_pages = vma.page_count() as u64;
         if let Err(_overlap) = vmas.add(vma) {
             drop(vmas);
             free_pages(phys, order);
             return Err(-12);
         }
+        addr_space.add_total_vm(binder_pages);
         b
     };
 
@@ -2676,14 +2681,10 @@ fn binder_poll(file: &crate::fs::File, _events: u16) -> u16 {
 }
 
 /// File operations for /dev/binder (registered in the devfs char registry).
-pub static BINDER_OPS: crate::fs::FileOps = crate::fs::FileOps {
-    read: None,
-    write: None,
-    lseek: None,
-    close: Some(binder_close),
-    poll: Some(binder_poll),
-    read_at: None,
-};
+pub static BINDER_OPS: crate::fs::FileOps = crate::fs::FileOps::builder()
+    .close(binder_close)
+    .poll(binder_poll)
+    .build();
 
 // ============================================================================
 // ioctl entry (sys_ioctl dispatch for BINDER_OPS files)

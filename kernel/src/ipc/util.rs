@@ -50,7 +50,7 @@ pub const SHM_EXEC: i32 = 0o100000;
 // POSIX MQ open flags
 pub const O_CREAT_MQ: i32 = 0o100;
 pub const O_EXCL_MQ: i32 = 0o200;
-pub const O_NONBLOCK_MQ: i32 = 0o400;
+pub const O_NONBLOCK_MQ: i32 = 0o4000; // Linux O_NONBLOCK (was 0o400 = O_NOCTTY — never matched the userspace flag)
 pub const O_CLOEXEC_MQ: i32 = 0o2000000;
 
 // Maximum number of IPC objects per type

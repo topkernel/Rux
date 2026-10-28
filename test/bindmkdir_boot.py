@@ -138,8 +138,13 @@ def main():
         fails = [ln for ln in out.splitlines()
                  if ln.startswith("BMD[") and "rc=0" not in ln
                  and "openmiss probe" not in ln]
-        # The openmiss probe line legitimately reports the missing file.
-        hard = [ln for ln in fails if "missing" not in ln]
+        # Steps whose FAILURE is the expected outcome: the openmiss
+        # probe reports the missing file, the negative-dentry primes
+        # must fail ENOENT, and the re-mkdir wants EEXIST (errno=17).
+        hard = [ln for ln in fails
+                if "missing" not in ln
+                and "(prime)" not in ln
+                and not ("want EEXIST" in ln and "errno=17" in ln)]
         if hard:
             print("[verdict] BMD-DONE with failing steps:")
             for ln in hard:

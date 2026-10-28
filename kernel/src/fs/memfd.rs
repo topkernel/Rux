@@ -51,6 +51,13 @@ pub const F_SEAL_GROW: u32 = 0x0004;
 pub const F_SEAL_WRITE: u32 = 0x0008;
 pub const F_SEAL_FUTURE_WRITE: u32 = 0x0010;
 
+/// The longest name memfd_create accepts, in bytes (excluding the NUL).
+///
+/// The reference kernel's limit is NAME_MAX (255) minus the length of
+/// the "memfd:" prefix it prepends to the file name
+/// (kernel/mm/memfd.c: MFD_NAME_MAX_LEN = NAME_MAX - MFD_NAME_PREFIX_LEN).
+pub const MFD_NAME_MAX_LEN: usize = 249;
+
 /// All seal bits accepted by F_ADD_SEALS.
 const F_SEAL_KNOWN: u32 =
     F_SEAL_SEAL | F_SEAL_SHRINK | F_SEAL_GROW | F_SEAL_WRITE | F_SEAL_FUTURE_WRITE;
@@ -236,14 +243,21 @@ static MEMFD_INODE_OPS: INodeOps = INodeOps {
 /// `name` is advisory only (kept out of the kernel for now — it appears in
 /// /proc/self/fd in Linux; we have no memfd dentry to name). Returns the fd.
 pub fn memfd_create(name: &[u8], flags: u32) -> Result<usize, i32> {
-    // Linux validates the name length (name may be NULL, else <= NAME_MAX).
-    if name.len() > 255 {
+    // The reference kernel reads the name with strnlen_user() bounded by
+    // MFD_NAME_MAX_LEN + 1 and rejects a longer name with EINVAL.
+    if name.len() > MFD_NAME_MAX_LEN {
         return Err(-(errno::constants::EINVAL as i32));
     }
 
     // Flag validation. MFD_HUGETLB needs a hugetlbfs pool we do not have;
     // MFD_ALLOW_SEALING enables the F_ADD_SEALS/F_GET_SEALS interface (see
     // module docs). Unknown bits are EINVAL like Linux.
+    //
+    // MFD_NONBLOCK is an extension: the flag does not exist in the
+    // reference UAPI (nor upstream at all), so no conformant caller can
+    // pass it; it is accepted and mapped onto O_NONBLOCK rather than
+    // rejected, so a caller that hardcodes the bit still gets a working
+    // file. Every other accepted bit is in the reference's MFD_ALL_FLAGS.
     const KNOWN: u32 = MFD_CLOEXEC
         | MFD_ALLOW_SEALING
         | MFD_HUGETLB
@@ -251,6 +265,12 @@ pub fn memfd_create(name: &[u8], flags: u32) -> Result<usize, i32> {
         | MFD_EXEC
         | MFD_NONBLOCK;
     if flags & !KNOWN != 0 {
+        return Err(-(errno::constants::EINVAL as i32));
+    }
+    // MFD_EXEC and MFD_NOEXEC_SEAL are mutually exclusive (the reference
+    // kernel rejects the combination with EINVAL, kernel/mm/memfd.c:
+    // "Invalid if both EXEC and NOEXEC_SEAL are set").
+    if flags & MFD_EXEC != 0 && flags & MFD_NOEXEC_SEAL != 0 {
         return Err(-(errno::constants::EINVAL as i32));
     }
     if flags & MFD_HUGETLB != 0 {
@@ -336,14 +356,12 @@ fn memfd_file_close(file: &File) -> i32 {
 
 /// File ops for memfd files: identical to REG_FILE_OPS except the write
 /// path enforces F_SEAL_WRITE.
-pub static MEMFD_FILE_OPS: crate::fs::file::FileOps = crate::fs::file::FileOps {
-    read: Some(memfd_file_read),
-    write: Some(memfd_file_write),
-    lseek: Some(memfd_file_lseek),
-    close: Some(memfd_file_close),
-    poll: None,
-    read_at: None,
-};
+pub static MEMFD_FILE_OPS: crate::fs::file::FileOps = crate::fs::file::FileOps::builder()
+    .read(memfd_file_read)
+    .write(memfd_file_write)
+    .lseek(memfd_file_lseek)
+    .close(memfd_file_close)
+    .build();
 
 // ============================================================================
 // fcntl F_ADD_SEALS / F_GET_SEALS

@@ -41,7 +41,11 @@ WEDGE_LINE = re.compile(
     rb"Kernel panic|panic: |DEADLOCK: spinlock stuck|BUG: soft lockup|"
     rb"trap: #GP|trap: #PF|general protection fault")
 FORENSIC_LINE = re.compile(
-    rb"FUT-STALE|PTLEDGER: DOUBLE-FREE|FUT: REPEAT teardown|MM-DROP-CTX|"
+    # "FUT: REPEAT teardown" was in this class while hunting the
+    # exit-walk family; the kernel prints it on every ordinary boot now
+    # (it is routine noise in LTP serial too), so it can no longer be
+    # a defect classifier.
+    rb"FUT-STALE|PTLEDGER: DOUBLE-FREE|MM-DROP-CTX|"
     rb"EARLY-ROOT-FREE|PT-WALK-STALE")
 
 

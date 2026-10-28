@@ -10,6 +10,7 @@
 use crate::syscall::SyscallNo;
 use crate::syscall::memory::{sys_brk, sys_mmap, sys_munmap, sys_mprotect};
 use super::{test_pass, test_fail, test_skip, test_group_start};
+use alloc::format;
 
 pub fn test_syscall_memory() {
     test_group_start("syscall: memory");
@@ -101,6 +102,29 @@ fn test_sys_mmap() {
         test_pass("sys_mmap MAP flags");
     } else {
         test_fail("sys_mmap MAP flags", "mismatch");
+    }
+
+    // A file offset that is not a multiple of the page size is rejected
+    // with EINVAL. The reference kernel's mmap wrapper does this before
+    // anything else (arch/riscv/kernel/sys_riscv.c: riscv_sys_mmap), and
+    // the check applies to anonymous mappings too, where the offset is
+    // ignored. The check runs before any allocation, so it is testable
+    // here.
+    let misaligned = sys_mmap([
+        0,                                    // addr = NULL
+        4096,                                 // length
+        (PROT_READ | PROT_WRITE) as u64,     // prot
+        (MAP_PRIVATE | MAP_ANONYMOUS) as u64, // flags
+        (-1i64 as u64),                       // fd = -1
+        1,                                    // offset — not page aligned
+    ]);
+    if misaligned == -22 {
+        test_pass("sys_mmap rejects a misaligned file offset (EINVAL)");
+    } else {
+        test_fail(
+            "sys_mmap rejects a misaligned file offset (EINVAL)",
+            &format!("returned {}", misaligned),
+        );
     }
 
     // Test anonymous mapping

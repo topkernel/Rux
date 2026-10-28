@@ -283,6 +283,11 @@ pub struct Socket {
     /// must see EAGAIN while data is held, then one datagram of
     /// held+flush bytes. Best-effort flushed on close.
     pub more_stage: Spinlock<alloc::vec::Vec<u8>>,
+    /// shutdown(SHUT_RD / SHUT_RDWR) ran on this socket (Linux
+    /// sk_shutdown & RCV_SHUTDOWN). poll(2)-level: a poll/epoll asking
+    /// for POLLRDHUP/EPOLLRDHUP must see it (LTP epoll_wait05 shuts the
+    /// read side and expects the RDHUP event).
+    pub shut_rd: core::sync::atomic::AtomicBool,
 }
 
 // SAFETY: Socket uses Spinlocks for all mutable shared state.
@@ -314,6 +319,7 @@ impl Socket {
             wait_queue: WaitQueueHead::new(),
             options: Spinlock::new(SocketOptions::new()),
             more_stage: Spinlock::new(alloc::vec::Vec::new()),
+            shut_rd: core::sync::atomic::AtomicBool::new(false),
         }
     }
 
@@ -1449,6 +1455,18 @@ fn socket_file_poll(file: &File, events: u16) -> u16 {
         // R34: irqsave — same recv_queue reentrancy discipline as recv()
         // (enqueue_packet runs from the NetRx softirq).
         let mut readable = !socket.recv_queue.lock_irqsave().is_empty();
+        // R42: a TCP LISTENER is readable when a child connection is
+        // established and not yet accepted — the handshake-complete wake
+        // already targets the parent's wait queue (tcp_write_out wakes
+        // w.parent), but the readiness re-check never asked the listener
+        // question, so a select()/poll() waiter on a listening socket
+        // (LTP recv01's server child) slept through pending connections.
+        if !readable && *socket.state.lock() == SocketState::Listening {
+            let tfd = socket.tcp_fd.load(core::sync::atomic::Ordering::Acquire);
+            if tfd >= 0 {
+                readable = crate::net::tcp::tcp_accept_pending(tfd);
+            }
+        }
         // R22-4: TCP data lands in the protocol table's recv_buffer, not
         // recv_queue — poll never reported readable and clients spun.
         // R32-N6: take the table lock while peeking at the protocol slot —
@@ -1506,18 +1524,27 @@ fn socket_file_poll(file: &File, events: u16) -> u16 {
         }
     }
 
+    // shutdown(SHUT_RD/SHUT_RDWR) read-hangup (Linux sk_shutdown &
+    // RCV_SHUTDOWN → tcp_poll's EPOLLRDHUP). Maskable: reported only when
+    // the poll asked for POLLRDHUP (LTP epoll_wait05).
+    if events & POLLRDHUP != 0
+        && socket
+            .shut_rd
+            .load(core::sync::atomic::Ordering::Acquire)
+    {
+        ready |= POLLRDHUP;
+    }
+
     ready
 }
 
 /// Socket file operations
-pub static SOCKET_OPS: FileOps = FileOps {
-    read: Some(socket_read),
-    write: Some(socket_write),
-    lseek: None,
-    close: Some(socket_close),
-    poll: Some(socket_file_poll),
-    read_at: None,
-};
+pub static SOCKET_OPS: FileOps = FileOps::builder()
+    .read(socket_read)
+    .write(socket_write)
+    .close(socket_close)
+    .poll(socket_file_poll)
+    .build();
 
 // ============================================================================
 // Poll-wait registration (P3: event-driven poll/select)
@@ -1919,7 +1946,12 @@ fn unwind_accepted(file: &Arc<File>, tcp_fd: i32) {
 pub fn get_socket_from_fd(fd: usize) -> Option<Arc<Socket>> {
     let fdtable = crate::sched::get_current_fdtable()?;
     let file = fdtable.get_file(fd)?;
+    socket_of_arc(&file)
+}
 
+/// Leg-52 lever A: fd resolved once by the classification ladder head;
+/// see unix_file_of_file for the amplification note.
+pub fn socket_of_arc(file: &Arc<File>) -> Option<Arc<Socket>> {
     // W3: verify the file actually IS a socket. private_data holds
     // arbitrary per-file-type pointers (pipes, devices, ...), and the old
     // code blindly cast them to Socket — type confusion for every network

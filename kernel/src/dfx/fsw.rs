@@ -70,6 +70,9 @@ pub static PUB_SCOPED_RECORDS: AtomicU64 = AtomicU64::new(0);
 pub static PUB_CSTR: AtomicU64 = AtomicU64::new(0);
 /// High-water producer-paid drains (publication_defer past PUB_HIGH_WATER).
 pub static PUB_HIWAT: AtomicU64 = AtomicU64::new(0);
+/// Leg-55: mkdirs counted at the scoped-flush point (the lazy-variant
+/// follow-up reads this against the phase mix).
+pub static PUB_LAZY: AtomicU64 = AtomicU64::new(0);
 /// Maximum pending-publication queue length observed.
 pub static PUB_QMAX: AtomicU64 = AtomicU64::new(0);
 
@@ -210,6 +213,10 @@ pub fn note_pub_cstr() {
 #[inline]
 pub fn note_pub_hiwat() {
     bump!(PUB_HIWAT);
+}
+#[inline]
+pub fn note_pub_lazy() {
+    bump!(PUB_LAZY);
 }
 #[inline]
 pub fn note_pub_qmax(len: usize) {
@@ -354,14 +361,14 @@ pub fn dump() {
         // pair had to guess the split: read 31765|408 vs 70770|0).
         // 0cd29a75 merge: main's scoped-publication counters (ps/pc/ph/pm)
         // carried in alongside; slot count unchanged.
-        "FSW1 t={}s br={} rd={} wr={} sd={}/{} ev={}/{} sa={} pb={}.{} ps={}.{} pc={} ph={} pm={} lvl={} es={}",
+        "FSW1 t={}s br={} rd={} wr={} sd={}/{} ev={}/{} sa={} pb={}.{} ps={}.{} pc={} ph={} pm={} pl={} lvl={} es={}",
         secs,
         v(&BREAD), v(&DEV_READ), v(&DEV_WRITE),
         v(&SYNC_DIRTY), v(&SYNC_DIRTY_SKIP),
         v(&EVICT), v(&EVICT_DIRTY), v(&SYNC_ALL),
         v(&PUB_FLUSH), v(&PUB_RECORDS),
         v(&PUB_SCOPED), v(&PUB_SCOPED_RECORDS),
-        v(&PUB_CSTR), v(&PUB_HIWAT), v(&PUB_QMAX),
+        v(&PUB_CSTR), v(&PUB_HIWAT), v(&PUB_QMAX), v(&PUB_LAZY),
         crate::printk::get_console_loglevel(),
         crate::printk::console_emit_skipped(),
     );
