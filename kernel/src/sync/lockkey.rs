@@ -175,6 +175,17 @@ impl<K: NestKey> KeyedRawSpinlock<K> {
         self.raw.try_lock()
     }
 
+    /// Unconditional guard-less claim — the claim twin of
+    /// [`try_lock_claim`], for a protocol wrapper's blocking acquire.
+    /// The 2b092c49 conviction rule: a subsystem with its own guard
+    /// type must claim HERE, never through the guard-returning
+    /// [`lock`] (whose discarded return silently releases).
+    #[inline]
+    #[track_caller]
+    pub fn lock_claim(&self) {
+        self.raw.lock()
+    }
+
     /// Unlock without a guard (for subsystems whose guard wraps the
     /// full irqsave/preempt protocol around the raw lock — the GRQ
     /// pattern). Delegates to the raw protocol; the key neither adds
@@ -267,6 +278,7 @@ impl<Inner: NestKey, T> KeyedSpinlock<Inner, T> {
 
 /// Guard for the data-carrying keyed spinlock: derefs to `T`; mints
 /// [`NestProof`] for nested acquisitions while held.
+#[must_use = "a discarded keyed-lock guard releases the lock immediately (the 2b092c49 conviction)"]
 pub struct KeyedIrqGuard<'a, K: NestKey, T: ?Sized> {
     inner: super::spinlock::SpinlockIrqGuard<'a, T>,
     _key: PhantomData<K>,
@@ -298,6 +310,18 @@ impl<K: NestKey, T: ?Sized> core::ops::DerefMut for KeyedIrqGuard<'_, K, T> {
 /// Guard for a keyed lock — unlocks on drop (raw lock only; the
 /// irqsave/preempt layers wrap it from the outside, exactly as
 /// `GrqGuard` wraps `RawSpinlock` today).
+///
+/// `#[must_use]` is LOAD-BEARING (the 2b092c49 conviction): the GRQ
+/// adoption's pre-existing `self.lock.lock();` statement — written for
+/// `RawSpinlock::lock() -> ()` — silently DISCARDED this guard under
+/// the wrapper, whose Drop released the lock at the end of the
+/// statement. Every "GRQ-locked" section then ran unexcluded
+/// (x86: 6/6 CFS-timeline BTreeMap corruption; riscv64: R74
+/// double-run). A discarded keyed guard is now a compile warning; a
+/// subsystem wrapping its own guard protocol must use
+/// `lock_claim`/`try_lock_claim`/`unlock`, never the guard-returning
+/// `lock()`.
+#[must_use = "a discarded keyed-lock guard releases the lock immediately (the 2b092c49 conviction)"]
 pub struct KeyedGuard<'a, K: NestKey> {
     lock: *mut KeyedRawSpinlock<K>,
     _key: PhantomData<K>,
