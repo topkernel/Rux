@@ -760,6 +760,68 @@ pub fn switching_out_mask(task: *mut Task) -> u32 {
     m
 }
 
+/// R86 (exit-side lost-release adjudication): the exit-path twin of the
+/// R85 pick-side heal. free_dead_member's `while member.on_cpu()` wait
+/// assumes the member's final __switch_to release store will land —
+/// true for every legitimate in-flight switch-out (the member is named
+/// by its CPU's slot until the pick completes, and by SWITCHING_OUT
+/// until the release store has landed, both published under the GRQ).
+/// But a DEAD, unlinked member showing {on_cpu=1, claim=X} while named
+/// by NO slot and NO in-flight switch is the R85 lost-release terminal
+/// microstate striking the EXIT path: no picker ever scans it again
+/// (it is not linked), so the pick-side heal cannot reach it, and the
+/// reaper spins here forever — one CPU lost per wedged sweep, and the
+/// GNOME no-light class when it lands during shell init (r16type/r20type:
+/// both SMP2 CPUs spinning in this loop behind lost releases, shell
+/// wakeups WAKE-STRANDED, screen dark for the whole 2700 s run while
+/// the kernel stayed panic-free).
+///
+/// Adjudicate under the GRQ (the same discipline as the pick-side heal:
+/// the slot flip and SWITCHING_OUT publish share one GRQ hold, so a
+/// GRQ-held reader can never observe the publish half-done and free a
+/// task whose switch-out is still writing its saved context). When no
+/// owner is found, release the marks with the exact store the switch
+/// protocol would have made — idempotent if the real release ever
+/// lands — and report loudly (first 8 per boot).
+pub fn member_release_stale_ownership(member: *mut Task) -> bool {
+    if member.is_null() {
+        return false;
+    }
+    let guard = grq().lock_irqsave();
+    if pick_owner_live(member) {
+        return false; // guard drops here — legitimately owned, keep waiting
+    }
+    // SAFETY: the member is DEAD and unlinked (the caller's dead-list
+    // invariant); no picker can touch it, and the GRQ hold above excludes
+    // every in-flight switch-out, so the qword write races nothing.
+    unsafe {
+        let pid = (*member).pid();
+        let claim = (*member).running_on_cpu.load(core::sync::atomic::Ordering::Acquire);
+        let pk = (*member).ti_pick_state.load(core::sync::atomic::Ordering::Acquire);
+        let st = (*member).state().bits();
+        let tcpu = (*member).ti_cpu() as u32;
+        let slot = owner_slot_mask(member);
+        let swout = switching_out_mask(member);
+        (*member).release_pick_ownership();
+        static FDM_STALE_SEEN: core::sync::atomic::AtomicU32 =
+            core::sync::atomic::AtomicU32::new(0);
+        let n = FDM_STALE_SEEN.fetch_add(1, core::sync::atomic::Ordering::Relaxed);
+        if n < 8 {
+            crate::pr_warn!(
+                "FDM-STALE-RELEASE pid={} claim={} pk={} st={:#x} tcpu={} slot={:#x} swout={:#x}",
+                pid,
+                claim,
+                pk,
+                st,
+                tcpu,
+                slot,
+                swout
+            );
+        }
+    }
+    true
+}
+
 /// R85: pick-side time confirmation for a stale-ownership adjudication.
 /// Wraps the harvester's orphan watch (same table, same exec-frozen
 /// refresh discipline — R81): a mid-switch-out transient or a briefly
