@@ -23,11 +23,11 @@ when the tree gains a file the map does not know about.
 |---|---|
 | source files in kernel/src | 413 |
 | source lines in kernel/src | 291,838 |
-| files fully reviewed | 23 |
+| files fully reviewed | 24 |
 | files partially reviewed | 85 |
-| files not yet reviewed | 305 |
-| lines in fully reviewed files | 8,447 |
-| reviewed files mainline changed since `47d96961` (need re-read) | 65 |
+| files not yet reviewed | 304 |
+| lines in fully reviewed files | 9,357 |
+| reviewed files mainline changed since `47d96961` (need re-read) | 66 |
 
 ## Defects found and fixed
 
@@ -525,7 +525,7 @@ when the tree gains a file the map does not know about.
 
 | file | lines | status | note |
 |---|---:|---|---|
-| `cgroup.rs` | 910 | ⬜ |  |
+| `cgroup.rs` | 910 | ✅🔁 | cpu/pids/memory controller core: simplified v2 model read clean — rmdir/pids-fork/charge-rollback semantics match the reference contract surface; containment guards (R90/b61) documented; 主线已改动，需重读 |
 | `class.rs` | 269 | ⬜ |  |
 | `deadline.rs` | 536 | ⬜ |  |
 | `fair.rs` | 1847 | 🔧🔁 | CFS 核心：vruntime 权重方向、min_vruntime、pick 跳过路径（min_vruntime 越界已修 b433fb13）; 主线已改动，需重读 |

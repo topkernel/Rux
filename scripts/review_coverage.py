@@ -192,7 +192,7 @@ STATUS = {
     "kernel/src/process/ptrace.rs": ("todo", ""),
     "kernel/src/process/task.rs": ("part", "task layout, counters, comm"),
     "kernel/src/process/wait.rs": ("todo", ""),
-    "kernel/src/sched/cgroup.rs": ("todo", ""),
+    "kernel/src/sched/cgroup.rs": ("done", "cpu/pids/memory controller core: simplified v2 model read clean — rmdir/pids-fork/charge-rollback semantics match the reference contract surface; containment guards (R90/b61) documented"),
     "kernel/src/sched/class.rs": ("todo", ""),
     "kernel/src/sched/deadline.rs": ("todo", ""),
     "kernel/src/sched/fair.rs": ("fixed", "CFS 核心：vruntime 权重方向、min_vruntime、pick 跳过路径（min_vruntime 越界已修 b433fb13）"),
