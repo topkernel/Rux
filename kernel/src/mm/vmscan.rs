@@ -98,6 +98,113 @@ pub fn try_to_free_pages(order: i32) -> usize {
     r
 }
 
+// ==================== Deep pre-OOM drain (stress-fleet s17, leg 49B) ====
+
+/// Counters for the deep pre-OOM drain — the change's own instrument
+/// (the merge gate's "add the DFX tool that measures it" duty). They
+/// stay zero on every standard boot (the drain runs only on the
+/// doomed slowpath, after the 8 steady-state rounds have failed to
+/// satisfy the allocation); the storm fleet reads them on the serial
+/// OOM-DEEP-PASS line and the census can assert the zero.
+pub static DEEP_PASS_RUNS: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+pub static DEEP_PASS_FREED: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+pub static DEEP_PASS_DEMOTED: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+
+/// Deep final pre-OOM reclaim round (design: perf-report.md 8.10.19;
+/// the stress lane's s17 evidence: the kill fired while 175-204 MB of
+/// clean file cache sat on the LRUs — the pre-OOM protocol drained at
+/// most ~8x32 = 256 pages, two orders of magnitude short).
+///
+/// WHY this is a separate function and not a bigger SWAP_CLUSTER_MAX:
+/// the steady-state bounds (32-page batch, 8 rounds, MAX_SCAN=64 per
+/// evict_one, break-on-failure in shrink) are pace/anti-crawl measures
+/// for the COMMON slowpath — they stay untouched. All extra depth lives
+/// here, on the path where the allocation is about to fail anyway:
+///
+///   - chunked `shrink_reclaim` (the direct-reclaim variant with dirty
+///     writeback — same contract as shrink_inactive_list's caller: task
+///     context, IN_DIRECT_RECLAIM held by the caller);
+///   - a BULK active-list demotion between starved chunks: the active
+///     file list (graduated clean pages — referenced=0, dirty=0 in the
+///     storm censuses) is NEVER scanned by shrink_lruvec ("TODO:
+///     shrink_active_list"); it is reachable only through the
+///     32-per-call demotion bridge, which lands pages at the young end
+///     BEHIND the referenced wall. Demoting in bulk here makes the
+///     one-list-away pool reachable at batch rate.
+///
+/// Stops when `nr_to_reclaim` pages are freed, or one full pass frees
+/// nothing AND demotes nothing (the pool is genuinely dry — pinning,
+/// dirtiness, or references everywhere — and the kill that follows is
+/// then correct, not fake). Bounded by `MAX_PASSES` regardless.
+///
+/// Returns pages freed. Prints one OOM-DEEP-PASS line per invocation
+/// (the doomed path already prints forensics; standard boots never run
+/// here, so ordinary serial stays clean).
+pub fn drain_file_cache_before_oom(nr_to_reclaim: usize) -> usize {
+    const CHUNK: usize = 256;
+    const DEMOTE_BATCH: usize = 256;
+    const MAX_PASSES: usize = 64;
+
+    DEEP_PASS_RUNS.fetch_add(1, Ordering::Relaxed);
+
+    let cache = crate::fs::page_cache::get_page_cache();
+    let mut freed_total = 0usize;
+    let mut demoted_total = 0usize;
+    let mut passes = 0usize;
+
+    while freed_total < nr_to_reclaim && passes < MAX_PASSES {
+        passes += 1;
+        let want = core::cmp::min(CHUNK, nr_to_reclaim - freed_total);
+        let freed = cache.shrink_reclaim(want);
+        freed_total += freed;
+        if freed < want {
+            // Chunk starved: the inactive walk hit the referenced wall
+            // (evict_one's LRU rounds exhaust MAX_SCAN graduating pages)
+            // and the map fallback is O(cache) per single page — bridge
+            // the active list in bulk so the next chunk has material.
+            demoted_total += lru::lru_demote_active_file_oldest(DEMOTE_BATCH);
+        }
+        if freed == 0 && demoted_total == 0 {
+            // A full pass with zero progress on both axes: nothing
+            // clean is reachable. More depth cannot help; the OOM
+            // decision that follows is exercising a genuinely dry pool.
+            break;
+        }
+        // freed==0 with demoted>0 keeps looping one more pass (the
+        // demotion itself is progress toward evictable pages).
+    }
+
+    DEEP_PASS_FREED.fetch_add(freed_total as u64, Ordering::Relaxed);
+    DEEP_PASS_DEMOTED.fetch_add(demoted_total as u64, Ordering::Relaxed);
+    // Rate-limited report line (10 jiffies = 100 ms at HZ=100): a storm
+    // of doomed allocations each run the drain, and unbounded prints
+    // would burn serial bandwidth at exactly the moment the machine is
+    // dying. The counters above keep the full accounting.
+    static LAST_PRINT_J: core::sync::atomic::AtomicU64 =
+        core::sync::atomic::AtomicU64::new(0);
+    let now = crate::drivers::timer::get_jiffies();
+    let last = LAST_PRINT_J.load(Ordering::Relaxed);
+    if now.saturating_sub(last) >= 10
+        && LAST_PRINT_J
+            .compare_exchange(last, now, Ordering::Relaxed, Ordering::Relaxed)
+            .is_ok()
+    {
+        crate::pr_info!(
+            "OOM-DEEP-PASS target={} freed={} demoted={} passes={} runs={} tot_freed={} (deep pre-OOM file-cache drain)",
+            nr_to_reclaim,
+            freed_total,
+            demoted_total,
+            passes,
+            DEEP_PASS_RUNS.load(Ordering::Relaxed),
+            DEEP_PASS_FREED.load(Ordering::Relaxed)
+        );
+    }
+    freed_total
+}
+
 // ==================== Internal: shrink_* ====================
 
 /// Per-node reclaim: iterate zones that are below watermark.
