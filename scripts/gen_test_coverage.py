@@ -171,11 +171,11 @@ SUBSYSTEM_NOTES = {
     "mm": "buddy/small_alloc/COW/fault: unit tests + the faultlat family, vma_storm, reclaimwb; oomchurn stress leg",
     "fs": "ext4/vfs: unit tests + filemap/filedrain/bindmkdir probes; pbench fs rows; fuzz-fs leg (fleet image)",
     "ipc": "pipes/unix/eventfd: unit tests; pbench P5; LTP syscalls family",
-    "binder": "binder.rs: binder/binder2/binder4 probes (driver-based)",
-    "net": "loopback/virtio-net: unit tests + nettest/slirp_test (rootfs)",
-    "dfx": "syscost/trace/watchdog: dfx-smoke, tracefs-smoke, kallsyms-smoke, watchdog probe",
-    "arch-trap": "trap paths: decode_probe, cfi_shadow; oops-smoke; KERNPANIC printer",
-    "x86-port": "x86_64 boot: pstore-x86 smoke + monkey-x86 (both SKIP when bzImage/image absent)",
+    "binder": "binder.rs: binder/binder2 probes (riscv), binder4 probe (x86 leg) — all wired",
+    "net": "loopback/virtio-net: unit tests + nettest probe (currently FAILING: rt_sigaction oldact sa_mask round-trip), slirp_test needs user networking",
+    "dfx": "syscost/trace/watchdog: dfx-smoke, tracefs-smoke, kallsyms-smoke, dfx-x86 probe",
+    "arch-trap": "trap paths: decode/cfi probes (cfi wired on riscv), oops-smoke; KERNPANIC printer",
+    "x86-port": "x86_64 boot: pstore-x86, dfx-x86, binder4-x86 legs (need PLATFORM=x86_64 bzImage; monkey-x86 also needs work/ubuntu-x86.img)",
     "pstore": "pstore/ramoops: pstore-smoke (riscv), pstore-x86-smoke (x86)",
     "process": "fork/exec/wait/reaper: unit tests + execloop/orphan_storm/subreap churns",
     "signal": "unit tests + tgsig probe",
@@ -283,8 +283,25 @@ def boot_driver_for(base):
 WRAPPER_ALIAS = {
     "pstore_x86test": "pstore-x86-smoke.sh",
     "perf_probe": "perf-smoke.sh",
+    "binder4_probe": "binder4-x86-probe.sh",
     "pbench": "matrix:perf-gate (via run/perf-gate.sh tier 2)",
 }
+
+
+def wrapper_candidates(base):
+    """Wrapper file names a probe's suite leg may carry: the plain base,
+    the hyphen-normalized base (binder_probe -> binder-probe.sh), and
+    any explicit alias. Every candidate ends in -smoke.sh/-probe.sh —
+    those are the only names test/suite.sh auto-discovers."""
+    hyph = base.replace("_", "-")
+    cands = [WRAPPER_ALIAS.get(base), base + "-smoke.sh", base + "-probe.sh"]
+    if hyph != base:
+        cands += [hyph + "-smoke.sh", hyph + "-probe.sh"]
+        # a *_probe base absorbs its suffix: binder_probe's wrapper is
+        # binder-probe.sh (not binder-probe-probe.sh)
+        if base.endswith("_probe") or base.endswith("_smoke"):
+            cands.append(hyph + ".sh")
+    return [c for c in cands if c]
 
 
 def collect_probes():
@@ -300,10 +317,9 @@ def collect_probes():
         base = os.path.basename(c)[:-2]
         driver = boot_driver_for(base)
         wrapper = None
-        for w in (WRAPPER_ALIAS.get(base), base + "-smoke.sh",
-                  base + "-probe.sh"):
-            if w and (w.startswith("matrix:") or
-                      os.path.isfile(os.path.join(ROOT, "test", w))):
+        for w in wrapper_candidates(base):
+            if w.startswith("matrix:") or \
+                    os.path.isfile(os.path.join(ROOT, "test", w)):
                 wrapper = w
                 break
         in_matrix = re.search(r"\b%s\b" % re.escape(base), suite) is not None
@@ -538,15 +554,22 @@ def main():
         ("test/cowrace", "cow_race.c (no runner)", "manual",
          "COW fork race; needs a boot driver wrapper"),
         ("test/heapwatch", "run-boot.sh", "manual",
-         "heap watch boot (x86 initrd variant inside)"),
+         "heap watch boot; riscv kernel compile was broken at b3586f69 "
+         "(dispatch.rs i64/u64 cfg(x86_64) cast), x86 initrd variant "
+         "boots the prebuilt cpio"),
         ("test/hotplug", "run.py", "manual",
-         "CPU hotplug uevent probe; own image build"),
-        ("test/initrd", "run-initrd.sh", "manual",
-         "initrd boot path + uevent"),
+         "CPU/PCI hotplug uevent probe; build-img.sh needs the shared "
+         "gate rootfs at /home/william/rux-gate/ubuntu/rootfs (absent)"),
+        ("test/initrd", "run-initrd.sh", "suite",
+         "wired as test/initrd-boot-probe.sh (packs the cpio, requires "
+         "all markers); currently FAILS on a kernel finding — init "
+         "faults at sp inside devtmpfs_mknod_probe after the tmpfs "
+         "/dev overmount"),
         ("test/ohlite", "mkohlite.sh", "manual",
-         "OpenHarmony lite initrd image build"),
+         "OpenHarmony lite initrd image build (OH lane flows)"),
         ("test/stress", "monkey.py (suite monkey legs)", "suite",
-         "randomised command churn; riscv leg runs, x86 needs image"),
+         "randomised command churn; riscv leg runs, x86 needs "
+         "work/ubuntu-x86.img"),
         ("test/ltpscan", "run1.sh (suite integration leg)", "suite",
          "bounded LTP sample on a private image copy"),
     ]
@@ -622,8 +645,11 @@ def main():
     o.append("1. %d of %d guest probes are unwired (no suite wrapper);"
              " the driver-based ones are one thin wrapper away."
              % (len(unwired), len(probes)))
-    o.append("2. x86 legs SKIP in the main repo: bzImage and"
-             " work/ubuntu-x86.img are not built there.")
+    o.append("2. x86 legs need target/x86_64-unknown-none/debug/bzImage"
+             " in the repo they run from (untracked build artifact —"
+             " rebuilt via PLATFORM=x86_64 make build); monkey-x86 also"
+             " needs work/ubuntu-x86.img (built by"
+             " test/ubuntu-x86/build-img.sh).")
     o.append("3. fuzz-fs and fleet stress legs SKIP without"
              " run/fleet/images/* (stress-lane artifacts, gitignored).")
     o.append("4. Sub-directory suites (cowrace, hotplug, initrd,"

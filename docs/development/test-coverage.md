@@ -8,16 +8,16 @@ with `python3 scripts/gen_test_coverage.py` after changing
 any test wiring; CI-style drift check:
 `scripts/gen_test_coverage.py --check`.
 
-Generated: 2026-10-28T10:43Z
+Generated: 2026-10-28T12:47Z
 
 ## Headline
 
 | what | count |
 |---|---:|
 | guest probes in test/*.c | 80 |
-| probes wired to the unattended suite | 5 |
-| probes unwired | 75 |
-| probe wrapper legs auto-discovered by suite.sh | 10 |
+| probes wired to the unattended suite | 24 |
+| probes unwired | 56 |
+| probe wrapper legs auto-discovered by suite.sh | 30 |
 | named suite matrix rows | 12 |
 | in-kernel unit test files | 68 |
 | host verify-crate sources | 151 |
@@ -32,32 +32,32 @@ rows and stress coverage that apply.
 
 | subsystem | unit | verify | probes (wired/total) | coverage notes |
 |---|---:|---:|---|---|
-| arch-trap | 1 | - | 0/2 | trap paths: decode_probe, cfi_shadow; oops-smoke; KERNPANIC printer |
-| binder | - | - | 0/3 | binder.rs: binder/binder2/binder4 probes (driver-based) |
+| arch-trap | 1 | - | 1/2 | trap paths: decode/cfi probes (cfi wired on riscv), oops-smoke; KERNPANIC printer |
+| binder | - | - | 3/3 | binder.rs: binder/binder2 probes (riscv), binder4 probe (x86 leg) — all wired |
 | boot | 1 | - | 0/0 | initrd/boot path: initrd suite (subdir) |
-| dfx | - | - | 0/2 | syscost/trace/watchdog: dfx-smoke, tracefs-smoke, kallsyms-smoke, watchdog probe |
+| dfx | - | - | 1/2 | syscost/trace/watchdog: dfx-smoke, tracefs-smoke, kallsyms-smoke, dfx-x86 probe |
 | drivers | 2 | 11 | 0/0 | virtio/block drivers |
 | drivers-gpu | - | - | 0/7 | drm/gpu/fb: drm/egl/gbm/fb probes (image-dependent) |
 | drivers-input | - | - | 0/1 | input: xinput_probe |
-| fs | 19 | 36 | 1/10 | ext4/vfs: unit tests + filemap/filedrain/bindmkdir probes; pbench fs rows; fuzz-fs leg (fleet image) |
+| fs | 19 | 36 | 5/10 | ext4/vfs: unit tests + filemap/filedrain/bindmkdir probes; pbench fs rows; fuzz-fs leg (fleet image) |
 | ipc | 5 | 4 | 0/8 | pipes/unix/eventfd: unit tests; pbench P5; LTP syscalls family |
 | lib | 7 | 1 | 0/0 | lib-level units only |
 | misc | 2 | - | 0/1 | uncategorized |
-| mm | 6 | 29 | 1/15 | buddy/small_alloc/COW/fault: unit tests + the faultlat family, vma_storm, reclaimwb; oomchurn stress leg |
+| mm | 6 | 29 | 5/15 | buddy/small_alloc/COW/fault: unit tests + the faultlat family, vma_storm, reclaimwb; oomchurn stress leg |
 | module | - | - | 0/2 | module loader: modchurn (needs module build env) |
-| net | 4 | 17 | 0/2 | loopback/virtio-net: unit tests + nettest/slirp_test (rootfs) |
+| net | 4 | 17 | 1/2 | loopback/virtio-net: unit tests + nettest probe (currently FAILING: rt_sigaction oldact sa_mask round-trip), slirp_test needs user networking |
 | oh | - | - | 0/1 | OpenHarmony boots: oh2_probe + oh-* scripts (special images) |
 | perf | - | - | 2/3 | perf subsystem: perf_probe; run/perf-gate.sh tier legs |
-| printk | - | - | 0/1 | printk ring: printk_flood (rootfs) |
-| process | 8 | 9 | 0/9 | fork/exec/wait/reaper: unit tests + execloop/orphan_storm/subreap churns |
+| printk | - | - | 1/1 | printk ring: printk_flood (rootfs) |
+| process | 8 | 9 | 3/9 | fork/exec/wait/reaper: unit tests + execloop/orphan_storm/subreap churns |
 | pstore | - | - | 1/1 | pstore/ramoops: pstore-smoke (riscv), pstore-x86-smoke (x86) |
-| sched | 6 | 8 | 0/1 | GRQ/sched classes: unit tests + biglock_fair probe; perf gate P2 |
+| sched | 6 | 8 | 1/1 | GRQ/sched classes: unit tests + biglock_fair probe; perf gate P2 |
 | security | - | 5 | 0/1 | selinux/caps: selinux_mmap probe; LTP caps family |
 | signal | 3 | 5 | 0/1 | unit tests + tgsig probe |
 | smp | 1 | - | 0/0 | SMP bringup |
 | sync | 2 | 7 | 0/5 | futex/semaphore: unit tests + futex_min/futex_lost, pthread probes |
 | time | 1 | - | 0/4 | timers/clock: unit tests + timer_probe, sleep_probe (x86 driver), monostat |
-| x86-port | - | - | 0/0 | x86_64 boot: pstore-x86 smoke + monkey-x86 (both SKIP when bzImage/image absent) |
+| x86-port | - | - | 0/0 | x86_64 boot: pstore-x86, dfx-x86, binder4-x86 legs (need PLATFORM=x86_64 bzImage; monkey-x86 also needs work/ubuntu-x86.img) |
 
 ## Unattended suite legs (test/suite.sh)
 
@@ -78,7 +78,7 @@ Static matrix rows:
 | fuzz-fs | fuzz | riscv64 |
 | integration-ltp | integration | riscv64 |
 
-Plus every `test/*-smoke.sh` / `test/*-probe.sh` (10 today),
+Plus every `test/*-smoke.sh` / `test/*-probe.sh` (30 today),
 auto-discovered as probe legs. x86 legs need `target/x86_64-unknown-none/debug/bzImage` and `work/ubuntu-x86.img`; the fuzz leg needs `run/fleet/images/fleet-fsfuzz-rootfs.img`.
 
 ## Guest probe inventory (test/*.c)
@@ -87,23 +87,23 @@ wired = has a suite wrapper (`test/<name>-smoke.sh` or `-probe.sh`) or a named s
 
 | probe | subsystem | driver | rootfs | wrapper | wired | note |
 |---|---|---|---|---|---|---|
-| biglock_fair | sched | - | yes | - | UNWIRED | global lock fairness under fork churn |
-| binder2_probe | binder | binder2_boot.py | - | - | UNWIRED | binder threads + death recursion |
-| binder4_probe | binder | binder4_boot.py | - | - | UNWIRED | binder stress/transactions |
-| binder_probe | binder | binder_probe_boot.py | yes | - | UNWIRED | closed-loop ioctl transaction sweep |
-| bindmkdir | fs | bindmkdir_boot.py | - | - | UNWIRED | bind-mount + mkdir visibility |
+| biglock_fair | sched | - | yes | biglock-fair-probe.sh | WIRED | global lock fairness under fork churn |
+| binder2_probe | binder | binder2_boot.py | - | binder2-probe.sh | WIRED | binder threads + death recursion |
+| binder4_probe | binder | binder4_boot.py | - | binder4-x86-probe.sh | WIRED | binder stress/transactions |
+| binder_probe | binder | binder_probe_boot.py | yes | binder-probe.sh | WIRED | closed-loop ioctl transaction sweep |
+| bindmkdir | fs | bindmkdir_boot.py | - | bindmkdir-probe.sh | WIRED | bind-mount + mkdir visibility |
 | brksegv_churn | mm | - | - | - | UNWIRED | brk/segv fault churn |
-| cfi_shadow | arch-trap | cfi_shadow_boot.py | yes | - | UNWIRED | CFI shadow mapping behavior |
-| chrootcwd | fs | - | yes | - | UNWIRED | chroot cwd/getcwd semantics |
-| coredump_probe | process | - | yes | - | UNWIRED | coredump file production |
+| cfi_shadow | arch-trap | cfi_shadow_boot.py | yes | cfi-shadow-probe.sh | WIRED | CFI shadow mapping behavior |
+| chrootcwd | fs | - | yes | chrootcwd-probe.sh | WIRED | chroot cwd/getcwd semantics |
+| coredump_probe | process | - | yes | coredump-probe.sh | WIRED | coredump file production |
 | decode_probe | arch-trap | decode_probe_boot.py | - | - | UNWIRED | trap-decode of faulting instructions |
 | decshim | misc | - | - | - | UNWIRED | decode shim helper |
-| dfx_x86_probe | dfx | - | - | - | UNWIRED | x86 DFX surfaces (needs x86 kernel) |
+| dfx_x86_probe | dfx | - | - | dfx-x86-probe.sh | WIRED | x86 DFX surfaces (needs x86 kernel) |
 | drm_probe | drivers-gpu | drm_probe_boot.py | - | - | UNWIRED | DRM device probe |
 | egl_painter | drivers-gpu | - | - | - | UNWIRED | EGL painting loop |
 | egl_probe | drivers-gpu | egl_probe_boot.py | - | - | UNWIRED | EGL initialization |
 | epollexam | ipc | - | - | - | UNWIRED | epoll semantics exam |
-| execloop | process | - | yes | - | UNWIRED | exec loop churn |
+| execloop | process | - | yes | execloop-probe.sh | WIRED | exec loop churn |
 | exitwalk_churn | process | - | - | - | UNWIRED | exit-path walk churn |
 | faultaround | mm | faultaround_boot.py | - | - | UNWIRED | fault-around page population |
 | faultlat | mm | faultlat_boot.py | - | - | UNWIRED | page-fault latency |
@@ -111,45 +111,45 @@ wired = has a suite wrapper (`test/<name>-smoke.sh` or `-probe.sh`) or a named s
 | faultlat3 | mm | faultlat3_boot.py | - | - | UNWIRED | page-fault latency variant 3 |
 | fbdraw | drivers-gpu | - | - | - | UNWIRED | framebuffer drawing |
 | fbterm | drivers-gpu | - | - | - | UNWIRED | framebuffer terminal |
-| filedrain | fs | filedrain_boot.py | - | - | UNWIRED | page-cache drain behavior |
+| filedrain | fs | filedrain_boot.py | - | filedrain-probe.sh | WIRED | page-cache drain behavior |
 | filelock_probe | fs | - | - | - | UNWIRED | flock/POSIX lock semantics |
-| filemap | fs | filemap_boot.py | - | - | UNWIRED | file-backed mmap coherence |
+| filemap | fs | filemap_boot.py | - | filemap-probe.sh | WIRED | file-backed mmap coherence |
 | forkcold | process | - | - | - | UNWIRED | fork cold-start cost |
 | forkwait_leak | process | - | - | - | UNWIRED | fork/wait resource leaks |
 | fsfuzz | fs | - | - | matrix | WIRED | filesystem fuzz workload (fleet image) |
 | futex_lost | sync | - | - | - | UNWIRED | lost futex wakeup |
 | futex_min | sync | - | - | - | UNWIRED | minimal futex wait/wake |
 | gbm_probe | drivers-gpu | gbm_probe_boot.py | - | - | UNWIRED | GBM buffer allocation |
-| gwp_churn | mm | - | yes | - | UNWIRED | guard-page write churn |
+| gwp_churn | mm | - | yes | gwp-churn-probe.sh | WIRED | guard-page write churn |
 | inotify_probe | fs | - | - | - | UNWIRED | inotify event delivery |
 | jchurn | mm | - | - | - | UNWIRED | jmalloc churn |
 | loader_vma | mm | loader_vma_boot.py | - | - | UNWIRED | loader VMA placement |
 | mdprobe | fs | - | - | - | UNWIRED | multidisk probe |
-| megapage_mmap | mm | - | yes | - | UNWIRED | megapage mmap |
+| megapage_mmap | mm | - | yes | megapage-mmap-probe.sh | WIRED | megapage mmap |
 | mmapfix | mm | mmapfix_boot.py | - | - | UNWIRED | mmap edge cases |
 | modchurn | module | - | - | - | UNWIRED | module load/unload churn |
 | modchurn_lib | module | - | - | - | UNWIRED | modchurn payload library |
 | monostat | time | monostat_boot.py | - | - | UNWIRED | monotonic clock stats |
 | mrpar | ipc | - | - | - | UNWIRED | mr par client/server |
 | munmapwrap | mm | - | - | - | UNWIRED | munmap wrap edge cases |
-| nettest | net | - | yes | - | UNWIRED | network stack smoke |
+| nettest | net | - | yes | nettest-probe.sh | WIRED | network stack smoke |
 | oh2_probe | oh | oh2_probe_boot.py | - | - | UNWIRED | OpenHarmony S2 bringup probe |
 | oomchurn | mm | oomchurn_boot.py | - | matrix | WIRED | OOM pressure churn (suite stress leg) |
 | oomtouch | mm | - | - | - | UNWIRED | OOM touch workload |
-| orphan_storm | process | - | yes | - | UNWIRED | orphan reparenting storm |
+| orphan_storm | process | - | yes | orphan-storm-probe.sh | WIRED | orphan reparenting storm |
 | p5long | ipc | - | - | - | UNWIRED | pbench P5 long-run variant |
 | pbench | perf | pbench_boot.py | - | matrix:perf-gate (via run/perf-gate.sh tier 2) | WIRED | the perf-gate benchmark (P1-P7) |
 | pbench_arm | perf | - | - | - | UNWIRED | pbench arm variant |
 | perf_probe | perf | - | - | perf-smoke.sh | WIRED | perf subsystem probe |
 | permcheck | fs | - | - | - | UNWIRED | permission checks |
 | pollburn | ipc | - | - | - | UNWIRED | poll busy-loop |
-| printk_flood | printk | - | yes | - | UNWIRED | printk flood pressure |
+| printk_flood | printk | - | yes | printk-flood-probe.sh | WIRED | printk flood pressure |
 | pstore_x86test | pstore | - | - | pstore-x86-smoke.sh | WIRED | x86 pstore init probe |
 | pthread_min | sync | - | - | - | UNWIRED | minimal pthread test |
 | pthread_staged | sync | - | - | - | UNWIRED | staged pthread test |
 | pthread_test | sync | - | - | - | UNWIRED | pthread futex test |
 | reboot_probe | process | - | yes | - | UNWIRED | reboot syscall probe |
-| reclaimwb | mm | reclaimwb_boot.py | - | - | UNWIRED | reclaim writeback behavior |
+| reclaimwb | mm | reclaimwb_boot.py | - | reclaimwb-probe.sh | WIRED | reclaim writeback behavior |
 | selinux_mmap | security | selinux_mmap_boot.py | - | - | UNWIRED | selinux mmap policy |
 | sleep_probe | time | sleep_probe_boot.py | - | - | UNWIRED | sleep precision |
 | slirp_test | net | - | yes | - | UNWIRED | slirp networking test |
@@ -163,7 +163,7 @@ wired = has a suite wrapper (`test/<name>-smoke.sh` or `-probe.sh`) or a named s
 | tokwrap | ipc | - | - | - | UNWIRED | token ipc wrapper |
 | unixstress | ipc | - | - | - | UNWIRED | unix socket stress |
 | unixwake | ipc | - | - | - | UNWIRED | unix socket wakeup |
-| vma_storm | mm | vma_storm_boot.py | - | - | UNWIRED | VMA churn storm |
+| vma_storm | mm | vma_storm_boot.py | - | vma-storm-probe.sh | WIRED | VMA churn storm |
 | watchdog_probe | dfx | watchdog_probe_boot.py | - | - | UNWIRED | watchdog detector probe |
 | writestorm | fs | - | - | - | UNWIRED | write storm |
 | xinput_probe | drivers-input | - | - | - | UNWIRED | xinput device probe |
@@ -173,11 +173,11 @@ wired = has a suite wrapper (`test/<name>-smoke.sh` or `-probe.sh`) or a named s
 | suite | entry point | wired | note |
 |---|---|---|---|
 | test/cowrace | cow_race.c (no runner) | manual | COW fork race; needs a boot driver wrapper |
-| test/heapwatch | run-boot.sh | manual | heap watch boot (x86 initrd variant inside) |
-| test/hotplug | run.py | manual | CPU hotplug uevent probe; own image build |
-| test/initrd | run-initrd.sh | manual | initrd boot path + uevent |
-| test/ohlite | mkohlite.sh | manual | OpenHarmony lite initrd image build |
-| test/stress | monkey.py (suite monkey legs) | suite | randomised command churn; riscv leg runs, x86 needs image |
+| test/heapwatch | run-boot.sh | manual | heap watch boot; riscv kernel compile was broken at b3586f69 (dispatch.rs i64/u64 cfg(x86_64) cast), x86 initrd variant boots the prebuilt cpio |
+| test/hotplug | run.py | manual | CPU/PCI hotplug uevent probe; build-img.sh needs the shared gate rootfs at /home/william/rux-gate/ubuntu/rootfs (absent) |
+| test/initrd | run-initrd.sh | suite | wired as test/initrd-boot-probe.sh (packs the cpio, requires all markers); currently FAILS on a kernel finding — init faults at sp inside devtmpfs_mknod_probe after the tmpfs /dev overmount |
+| test/ohlite | mkohlite.sh | manual | OpenHarmony lite initrd image build (OH lane flows) |
+| test/stress | monkey.py (suite monkey legs) | suite | randomised command churn; riscv leg runs, x86 needs work/ubuntu-x86.img |
 | test/ltpscan | run1.sh (suite integration leg) | suite | bounded LTP sample on a private image copy |
 
 ## LTP
@@ -240,15 +240,15 @@ feature lanes.
 |---|---|---|
 | SPIN | NOT INSTALLED | formal-spin (runs) |
 | Kani | NOT INSTALLED (no kani cargo plugin) | formal-kani (SKIP when absent) |
-| Miri | NOT INSTALLED (no nightly/miri component) | formal-miri (SKIP when absent) |
+| Miri | miri 0.1.0 (ea137335b7 2026-10-05) | formal-miri (SKIP when absent) |
 
 ## Current gaps (recomputed each refresh)
 
-1. 75 of 80 guest probes are unwired (no suite wrapper); the driver-based ones are one thin wrapper away.
-2. x86 legs SKIP in the main repo: bzImage and work/ubuntu-x86.img are not built there.
+1. 56 of 80 guest probes are unwired (no suite wrapper); the driver-based ones are one thin wrapper away.
+2. x86 legs need target/x86_64-unknown-none/debug/bzImage in the repo they run from (untracked build artifact — rebuilt via PLATFORM=x86_64 make build); monkey-x86 also needs work/ubuntu-x86.img (built by test/ubuntu-x86/build-img.sh).
 3. fuzz-fs and fleet stress legs SKIP without run/fleet/images/* (stress-lane artifacts, gitignored).
 4. Sub-directory suites (cowrace, hotplug, initrd, heapwatch, ohlite) have no suite discovery.
 5. Kani/Miri depend on nightly toolchain components being installed on the host.
 
-Unwired probes right now: biglock_fair, binder2_probe, binder4_probe, binder_probe, bindmkdir, brksegv_churn, cfi_shadow, chrootcwd, coredump_probe, decode_probe, decshim, dfx_x86_probe, drm_probe, egl_painter, egl_probe, epollexam, execloop, exitwalk_churn, faultaround, faultlat, faultlat2, faultlat3, fbdraw, fbterm, filedrain, filelock_probe, filemap, forkcold, forkwait_leak, futex_lost, futex_min, gbm_probe, gwp_churn, inotify_probe, jchurn, loader_vma, mdprobe, megapage_mmap, mmapfix, modchurn, modchurn_lib, monostat, mrpar, munmapwrap, nettest, oh2_probe, oomtouch, orphan_storm, p5long, pbench_arm, permcheck, pollburn, printk_flood, pthread_min, pthread_staged, pthread_test, reboot_probe, reclaimwb, selinux_mmap, sleep_probe, slirp_test, subreap_churn, sysfs_drm_probe, taskcomm_probe, tgsig, timer_probe, timer_runit, tokprobe, tokwrap, unixstress, unixwake, vma_storm, watchdog_probe, writestorm, xinput_probe
+Unwired probes right now: brksegv_churn, decode_probe, decshim, drm_probe, egl_painter, egl_probe, epollexam, exitwalk_churn, faultaround, faultlat, faultlat2, faultlat3, fbdraw, fbterm, filelock_probe, forkcold, forkwait_leak, futex_lost, futex_min, gbm_probe, inotify_probe, jchurn, loader_vma, mdprobe, mmapfix, modchurn, modchurn_lib, monostat, mrpar, munmapwrap, oh2_probe, oomtouch, p5long, pbench_arm, permcheck, pollburn, pthread_min, pthread_staged, pthread_test, reboot_probe, selinux_mmap, sleep_probe, slirp_test, subreap_churn, sysfs_drm_probe, taskcomm_probe, tgsig, timer_probe, timer_runit, tokprobe, tokwrap, unixstress, unixwake, watchdog_probe, writestorm, xinput_probe
 
