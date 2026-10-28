@@ -116,6 +116,15 @@ pub enum Errno {
     /// Resource deadlock avoided (EDEADLK, 35)
     Deadlock = 35,
 
+    /// Result too large / buffer too small for the xattr (ERANGE, 34)
+    ResultTooLarge = 34,
+
+    /// No data available (ENODATA, 61)
+    NoData = 61,
+
+    /// Operation not supported (EOPNOTSUPP, 95)
+    OperationNotSupported = 95,
+
     /// Directory not empty (ENOTEMPTY, 39)
     DirectoryNotEmpty = 39,
 

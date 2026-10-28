@@ -4128,7 +4128,7 @@ fn do_setxattr(inode: &crate::fs::inode::Inode, args: SyscallArgs) -> i64 {
     };
     match crate::fs::xattr::set(inode, &name, &value, args[4] as i32) {
         Ok(()) => 0,
-        Err(e) => e as i64,
+        Err(e) => e.as_neg_i32() as i64,
     }
 }
 
@@ -4143,7 +4143,7 @@ fn do_getxattr(inode: &crate::fs::inode::Inode, args: SyscallArgs) -> i64 {
     if size == 0 {
         return match crate::fs::xattr::get(inode, &name, None) {
             Ok(n) => n as i64,
-            Err(e) => e as i64,
+            Err(e) => e.as_neg_i32() as i64,
         };
     }
     if value_ptr == 0 || !crate::arch::uaccess::access_ok(value_ptr, size) {
@@ -4165,7 +4165,7 @@ fn do_getxattr(inode: &crate::fs::inode::Inode, args: SyscallArgs) -> i64 {
             }
             n as i64
         }
-        Err(e) => e as i64,
+        Err(e) => e.as_neg_i32() as i64,
     }
 }
 
@@ -4176,7 +4176,7 @@ fn do_listxattr(inode: &crate::fs::inode::Inode, args: SyscallArgs) -> i64 {
     if size == 0 {
         return match crate::fs::xattr::list(inode, None) {
             Ok(n) => n as i64,
-            Err(e) => e as i64,
+            Err(e) => e.as_neg_i32() as i64,
         };
     }
     if list_ptr == 0 || !crate::arch::uaccess::access_ok(list_ptr, size) {
@@ -4198,7 +4198,7 @@ fn do_listxattr(inode: &crate::fs::inode::Inode, args: SyscallArgs) -> i64 {
             }
             n as i64
         }
-        Err(e) => e as i64,
+        Err(e) => e.as_neg_i32() as i64,
     }
 }
 
@@ -4210,7 +4210,7 @@ fn do_removexattr(inode: &crate::fs::inode::Inode, args: SyscallArgs) -> i64 {
     };
     match crate::fs::xattr::remove(inode, &name) {
         Ok(()) => 0,
-        Err(e) => e as i64,
+        Err(e) => e.as_neg_i32() as i64,
     }
 }
 
@@ -4413,7 +4413,7 @@ pub fn sys_setxattrat(args: SyscallArgs) -> i64 {
     };
     match crate::fs::xattr::set(&inode, &name, &value, flags) {
         Ok(()) => 0,
-        Err(e) => e as i64,
+        Err(e) => e.as_neg_i32() as i64,
     }
 }
 
@@ -4433,7 +4433,7 @@ pub fn sys_getxattrat(args: SyscallArgs) -> i64 {
     if size == 0 {
         return match crate::fs::xattr::get(&inode, &name, None) {
             Ok(n) => n as i64,
-            Err(e) => e as i64,
+            Err(e) => e.as_neg_i32() as i64,
         };
     }
     if value_ptr == 0
@@ -4457,7 +4457,7 @@ pub fn sys_getxattrat(args: SyscallArgs) -> i64 {
             }
             n as i64
         }
-        Err(e) => e as i64,
+        Err(e) => e.as_neg_i32() as i64,
     }
 }
 
@@ -4473,7 +4473,7 @@ pub fn sys_listxattrat(args: SyscallArgs) -> i64 {
     if size == 0 {
         return match crate::fs::xattr::list(&inode, None) {
             Ok(n) => n as i64,
-            Err(e) => e as i64,
+            Err(e) => e.as_neg_i32() as i64,
         };
     }
     if list_ptr == 0 || !crate::arch::uaccess::access_ok(list_ptr as usize, size as usize)
@@ -4496,7 +4496,7 @@ pub fn sys_listxattrat(args: SyscallArgs) -> i64 {
             }
             n as i64
         }
-        Err(e) => e as i64,
+        Err(e) => e.as_neg_i32() as i64,
     }
 }
 
@@ -4511,7 +4511,7 @@ pub fn sys_removexattrat(args: SyscallArgs) -> i64 {
     };
     match crate::fs::xattr::remove(&inode, &name) {
         Ok(()) => 0,
-        Err(e) => e as i64,
+        Err(e) => e.as_neg_i32() as i64,
     }
 }
 

@@ -28,10 +28,6 @@ use alloc::vec::Vec;
 use crate::errno;
 use crate::fs::inode::Inode;
 
-/// Local errno constants not present in errno.rs's primary set.
-const ENODATA: i32 = 61;
-const EOPNOTSUPP: i32 = 95;
-
 /// XATTR_NAME_SELINUX (UAPI): the LSM label attribute.
 const XATTR_NAME_SELINUX: &[u8] = b"security.selinux";
 
@@ -63,20 +59,20 @@ pub const XATTR_CREATE: i32 = 1;
 pub const XATTR_REPLACE: i32 = 2;
 
 /// Validate an xattr name and check create permission for its namespace.
-/// Returns Ok(()) or a negative errno.
-fn check_name(name: &[u8]) -> Result<(), i32> {
+/// Typed `Errno` on failure (mapped to the ABI at the boundary).
+fn check_name(name: &[u8]) -> Result<(), errno::Errno> {
     // Linux xattr name length check returns ERANGE — LTP setxattr01 cases
     // 2 (over XATTR_NAME_MAX) and 7 (zero-length key) both expect ERANGE,
     // not EINVAL.
     if name.is_empty() || name.len() > XATTR_NAME_MAX {
-        return Err(-(errno::constants::ERANGE as i32));
+        return Err(errno::Errno::ResultTooLarge);
     }
     let dot = match name.iter().position(|&b| b == b'.') {
         Some(d) => d,
-        None => return Err(-(errno::constants::EINVAL as i32)), // no namespace prefix
+        None => return Err(errno::Errno::InvalidArgument), // no namespace prefix
     };
     if dot == 0 {
-        return Err(-(errno::constants::EINVAL as i32)); // empty namespace
+        return Err(errno::Errno::InvalidArgument); // empty namespace
     }
     Ok(())
 }
@@ -85,7 +81,7 @@ fn check_name(name: &[u8]) -> Result<(), i32> {
 /// `user.*` needs write permission on the inode (checked by caller via the
 /// plain DAC path — we approximate with MAY_WRITE), `trusted.*` /
 /// `security.*` need CAP_SYS_ADMIN, `system.*` is read-only.
-fn may_set(name: &[u8]) -> Result<(), i32> {
+fn may_set(name: &[u8]) -> Result<(), errno::Errno> {
     let ns: &[u8] = &name[..name.iter().position(|&b| b == b'.').unwrap()];
     match ns {
         b"user" => Ok(()),
@@ -98,26 +94,27 @@ fn may_set(name: &[u8]) -> Result<(), i32> {
             if crate::security::has_capability(&cred, crate::security::CAP_SYS_ADMIN) {
                 Ok(())
             } else {
-                Err(-(errno::constants::EPERM as i32))
+                Err(errno::Errno::OperationNotPermitted)
             }
         }
-        b"system" => Err(-(errno::constants::EPERM as i32)), // reserved / read-only
-        _ => Err(-EOPNOTSUPP), // unknown namespace: no handler
+        b"system" => Err(errno::Errno::OperationNotPermitted), // reserved / read-only
+        _ => Err(errno::Errno::OperationNotSupported), // unknown namespace: no handler
     }
 }
 
 /// setxattr core. `value`/`name` are kernel copies already validated for
 /// length. Flags: XATTR_CREATE (fail EEXIST when present), XATTR_REPLACE
-/// (fail ENODATA when absent); both at once is EINVAL.
-pub fn set(inode: &Inode, name: &[u8], value: &[u8], flags: i32) -> Result<(), i32> {
+/// (fail ENODATA when absent); both at once is EINVAL. Typed `Errno` on
+/// failure (mapped to the ABI at the boundary).
+pub fn set(inode: &Inode, name: &[u8], value: &[u8], flags: i32) -> Result<(), errno::Errno> {
     if flags & !(XATTR_CREATE | XATTR_REPLACE) != 0 {
-        return Err(-(errno::constants::EINVAL as i32));
+        return Err(errno::Errno::InvalidArgument);
     }
     if flags & XATTR_CREATE != 0 && flags & XATTR_REPLACE != 0 {
-        return Err(-(errno::constants::EINVAL as i32));
+        return Err(errno::Errno::InvalidArgument);
     }
     if value.len() > XATTR_SIZE_MAX {
-        return Err(-(errno::constants::E2BIG as i32));
+        return Err(errno::Errno::ArgumentListTooLong);
     }
     check_name(name)?;
     may_set(name)?;
@@ -132,7 +129,7 @@ pub fn set(inode: &Inode, name: &[u8], value: &[u8], flags: i32) -> Result<(), i
         const S_IFMT: u32  = 0o0170000;
         let kind = mode & S_IFMT;
         if kind != S_IFREG && kind != S_IFDIR {
-            return Err(-EOPNOTSUPP);
+            return Err(errno::Errno::OperationNotSupported);
         }
     }
 
@@ -144,7 +141,7 @@ pub fn set(inode: &Inode, name: &[u8], value: &[u8], flags: i32) -> Result<(), i
         const FS_IMMUTABLE_FL: u32 = 0x0000_0010;
         const FS_APPEND_FL: u32 = 0x0000_0020;
         if ioc & (FS_IMMUTABLE_FL | FS_APPEND_FL) != 0 {
-            return Err(-(errno::constants::EPERM as i32));
+            return Err(errno::Errno::OperationNotPermitted);
         }
     }
 
@@ -152,7 +149,7 @@ pub fn set(inode: &Inode, name: &[u8], value: &[u8], flags: i32) -> Result<(), i
     // xattr_permission MAY_WRITE gate for the user namespace).
     if name.starts_with(b"user.") {
         if !crate::fs::permission::inode_permission(inode, crate::fs::permission::MAY_WRITE) {
-            return Err(-(errno::constants::EACCES as i32));
+            return Err(errno::Errno::PermissionDenied);
         }
     }
 
@@ -160,7 +157,7 @@ pub fn set(inode: &Inode, name: &[u8], value: &[u8], flags: i32) -> Result<(), i
     if flags & XATTR_CREATE != 0 {
         if let Some(map) = guard.as_ref() {
             if map.contains_key(name) {
-                return Err(-(errno::constants::EEXIST as i32));
+                return Err(errno::Errno::FileExists);
             }
         }
     }
@@ -169,7 +166,7 @@ pub fn set(inode: &Inode, name: &[u8], value: &[u8], flags: i32) -> Result<(), i
     }
     let map = guard.as_mut().unwrap();
     if flags & XATTR_REPLACE != 0 && !map.contains_key(name) {
-        return Err(-ENODATA);
+        return Err(errno::Errno::NoData);
     }
     map.insert(name.to_vec(), value.to_vec());
     Ok(())
@@ -177,7 +174,7 @@ pub fn set(inode: &Inode, name: &[u8], value: &[u8], flags: i32) -> Result<(), i
 
 /// getxattr core. `out` is the user buffer length (`size == 0` means "query
 /// the needed size"). Returns the value length on success.
-pub fn get(inode: &Inode, name: &[u8], out: Option<&mut [u8]>) -> Result<usize, i32> {
+pub fn get(inode: &Inode, name: &[u8], out: Option<&mut [u8]>) -> Result<usize, errno::Errno> {
     check_name(name)?;
 
     // Read gate (minimal): trusted.* readable only with CAP_SYS_ADMIN.
@@ -188,7 +185,7 @@ pub fn get(inode: &Inode, name: &[u8], out: Option<&mut [u8]>) -> Result<usize, 
             crate::process::task::Cred::new_init()
         };
         if !crate::security::has_capability(&cred, crate::security::CAP_SYS_ADMIN) {
-            return Err(-(errno::constants::EACCES as i32));
+            return Err(errno::Errno::PermissionDenied);
         }
     }
 
@@ -201,7 +198,7 @@ pub fn get(inode: &Inode, name: &[u8], out: Option<&mut [u8]>) -> Result<usize, 
                 // never fails this read with ENODATA.
                 DEFAULT_SELINUX_CONTEXT
             } else {
-                return Err(-ENODATA);
+                return Err(errno::Errno::NoData);
             }
         }
     };
@@ -209,7 +206,7 @@ pub fn get(inode: &Inode, name: &[u8], out: Option<&mut [u8]>) -> Result<usize, 
         None => Ok(value.len()),
         Some(buf) => {
             if buf.len() < value.len() {
-                return Err(-(errno::constants::ERANGE as i32));
+                return Err(errno::Errno::ResultTooLarge);
             }
             buf[..value.len()].copy_from_slice(value);
             Ok(value.len())
@@ -219,7 +216,7 @@ pub fn get(inode: &Inode, name: &[u8], out: Option<&mut [u8]>) -> Result<usize, 
 
 /// listxattr core. Returns the total serialized length (names + NULs);
 /// copies into `out` when given, ERANGE when too small.
-pub fn list(inode: &Inode, out: Option<&mut [u8]>) -> Result<usize, i32> {
+pub fn list(inode: &Inode, out: Option<&mut [u8]>) -> Result<usize, errno::Errno> {
     let guard = inode.xattrs.lock();
     let empty;
     let empty_map: &alloc::collections::BTreeMap<Vec<u8>, Vec<u8>> = match guard.as_ref() {
@@ -232,13 +229,13 @@ pub fn list(inode: &Inode, out: Option<&mut [u8]>) -> Result<usize, i32> {
 
     let total: usize = empty_map.keys().map(|k| k.len() + 1).sum();
     if total > XATTR_LIST_MAX {
-        return Err(-(errno::constants::E2BIG as i32));
+        return Err(errno::Errno::ArgumentListTooLong);
     }
     match out {
         None => Ok(total),
         Some(buf) => {
             if buf.len() < total {
-                return Err(-(errno::constants::ERANGE as i32));
+                return Err(errno::Errno::ResultTooLarge);
             }
             let mut off = 0;
             for k in empty_map.keys() {
@@ -252,7 +249,7 @@ pub fn list(inode: &Inode, out: Option<&mut [u8]>) -> Result<usize, i32> {
 }
 
 /// removexattr core. ENODATA when the attribute is absent.
-pub fn remove(inode: &Inode, name: &[u8]) -> Result<(), i32> {
+pub fn remove(inode: &Inode, name: &[u8]) -> Result<(), errno::Errno> {
     check_name(name)?;
     may_set(name)?; // same permission gate as set (Linux uses __vfs_setxattr path)
 
@@ -266,6 +263,6 @@ pub fn remove(inode: &Inode, name: &[u8]) -> Result<(), i32> {
             }
             Ok(())
         }
-        None => Err(-ENODATA),
+        None => Err(errno::Errno::NoData),
     }
 }

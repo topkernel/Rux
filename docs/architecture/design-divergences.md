@@ -532,14 +532,21 @@ compared against a byte count, or returned where a positive errno was
 meant — the error type is an enum, and `Result` is `#[must_use]`, so
 an ignored failure is a build warning, not a silent drop.
 
-**Compatibility evidence.** First conversion: the file-locks subsystem
-(`fs/locks.rs` — flock, POSIX/OFD record locks, leases): the four
-public functions return `Result<(), Errno>`; the six call sites
-(sys_flock in syscall/io.rs, F_SETLK/F_SETLEASE in vfs.rs, three
-break_lease propagation sites) each map once with `as_neg_i32()`.
-Errno values byte-identical (EAGAIN/EINTR/EINVAL/EDEADLK; the enum
-gained the missing `Deadlock = 35` variant). Suite green; the LTP
-fcntl/flock families are the behavioral guard.
+**Compatibility evidence.** Conversions so far: (1) the file-locks
+subsystem (`fs/locks.rs` — flock, POSIX/OFD record locks, leases):
+the four public functions return `Result<(), Errno>`; the six call
+sites (sys_flock in syscall/io.rs, F_SETLK/F_SETLEASE in vfs.rs,
+three break_lease propagation sites) each map once with
+`as_neg_i32()`; the enum gained the missing `Deadlock = 35` variant.
+(2) the xattr subsystem (`fs/xattr.rs` — check_name/may_set/set/get/
+list/remove, 20 error sites, the densest raw-errno file in fs/): all
+typed, the internal ?-propagation type-uniform, the do_* wrappers in
+syscall/file.rs mapping once per arm; the enum gained
+`ResultTooLarge = 34`, `NoData = 61`, `OperationNotSupported = 95`
+(the file's two local errno-constant duplicates are deleted). Errno
+values byte-identical throughout; suite green; the LTP fcntl/flock
+and setxattr/getxattr/listxattr/removexattr families are the
+behavioral guards.
 
 **Known cost.** Opportunistic adoption: the i32 errno convention
 dominates the tree and keeps compiling; subsystems convert when
