@@ -221,6 +221,46 @@ skips init_journal, but no mkfs-written path resolves afterward).
 Leg-46 status: the fs fix has NOT landed on main as of 129a41fa; the
 J-vs-NJ re-comparison stays queued on it.
 
+**Arm-1 MEASURED (leg 50, pa85 — unblocked by main's zero-serve fix
+1e27b095, in 2a960538: the root cause was a buffer-cache entry
+published BH_Uptodate while its DMA had not landed; the no-journal
+lookup death and the LTP all-zeros family were one bug).** One
+release-strong kernel (run/pa84-main-strong-bzImage, a8a5afac =
+2a960538 content), six boots rc=0 (interleaved J,NJ,NJ,J at load1
+11-16 + one fsw=1 boot per arm). NJ boots now run the FULL probe —
+the unblock is total. p6 medians (us), J1/J2 vs NJ1/NJ2:
+
+| row | J | NJ | NJ/J | reading |
+|---|---|---|---|---|
+| p6_append | 85.5 / 90.4 | 2004 / 2058 | **23.1x** | every extending 4K write pays inline sync on no-journal — route-1's live target |
+| p6_mkdrmdir | 15372 / 16272 | 16360 / 16148 | 1.03x | median FLAT: the ~15.5 ms per-mkdir scoped publication flush is journal-independent (both arms pay it; the fs lane's named residual) |
+| p6_unlink | 113 / 82.8 | 78.8 / 78.5 | 0.80x | no-journal unlink already at write-back class (nothing to revoke/commit) |
+| p6_write_fsync | 9612 / 10186 | 8821 / 9276 | 0.91x | fsync marginally cheaper without the journal commit |
+| p6_stat / getdents / read_cached | 15.7-16.3 / 609-647 / 38.3-39.4 | 16.0-17.0 / 612-672 / 35.9-38.9 | ~1.0x | in band |
+
+Tail exposure: NJ1's mkdrmdir avg read 167.8 ms (p99 3.78 s, max
+12.3 s) vs the J arms' 19-21 ms — one NJ boot of two; NJ2 was clean
+(19.2 ms avg). The medians are the honest comparison; the tail is a
+risk note for bursty provisioning on no-journal images.
+
+fsw mechanism (end-of-boot cumulative): J wr=15119 device writes,
+sd=3083 real sync-dirty out of 22403 calls (19403 skipped under the
+journal handle), j=7047.7046.6044.1002.853 (1002 fast commits, 853
+revokes); NJ wr=17465 (+15%), sd=9360 real sync-dirty (**3.0x**, out
+of 32389 calls), j=0.4009.0.0.0 (journal fully dormant). Scoped
+publication flushes similar (859 vs 1006).
+
+**Verdict (the expected-effect anchor for route 1, superseding the
+map's phase-A estimates):** on CURRENT main, route-1's remaining
+value is the WRITE path — ~1.95 ms per extending write (23x), with
+the achievable target class proven by the J arm on the same kernel
+(~88 us deferred). The map's "mkdir/pwrite/unlink-class avgs drop to
+<1 ms" is superseded: unlink is already there (arm-2 + scoped
+publication), the mkdir median is owned by the scoped flush (a
+different lever, named for the fs lane), and append/pwrite-extension
+is the live 23x target. Tail insurance on bursty metadata
+(mkdrmdir p99 3.8 s) is secondary value.
+
 **Arm-2 semantics note (leg 44) — what must be true before a lazy
 revoke can be coded.** Current state, with the exact shapes:
 

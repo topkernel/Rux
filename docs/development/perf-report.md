@@ -2588,3 +2588,89 @@ Standing: arm-1 (J-vs-NJ) still queued on the fs lane's nojournal fix
 per-mkdir scoped publication flush) is named for the fs lane. p2_ctxsw
 judged against the strong anchors throughout (1.26-1.52 across this
 leg's loaded boots).
+
+### 8.10.20 Leg 50 (2026-10-28): pa83 debt adjudicated (instrument gap, not a regression); F4 arm-1 MEASURED on the zero-serve main — append 23.1x is route-1's live target, the mkdir flush is journal-independent; pa86 quiet chain re-anchors Tier-1 + the P6 strong classes
+
+The leg opened on merged main: branch feafe1b6 fast-forwarded to
+a8a5afac (2a960538 kernel content + a README docs commit). The leg-49
+merge carried everything this lane shipped (vmscan deep drain, arm-2
+lazy revokes, R37) PLUS main's own 1e27b095 "device-truthed completion
+delivery" — whose commit message roots the no-journal ext4 root-lookup
+failure (leg 45's arm-1 blocker) in the same buffer-cache zero-serve
+family as the LTP all-zeros rows: a buffer published BH_Uptodate while
+its DMA had not landed. One fix unblocks arm-1 AND moves every
+synchronous-IO row — hence the re-anchor mission.
+
+**pa83 adjudication (the leg-49 Tier-1 debt).** The chain did NOT die
+with the quota kill: its log shows the window opened 10:51:14
+(load1=9, foreign=8), the boot completed 11:04:16 rc=0. Two defects in
+the chain itself, both found by re-parsing the surviving stamped log
+(run/pa-pa83tip-stamped.log, `bash run/perf-gate.sh --skip-boot --log
+... --tag pa83rec`): (1) the gate-parse line invoked `python3
+test/perf-gate.sh` — no such path (it is run/perf-gate.sh and bash);
+the "rc=0" the chain logged was the rc of the `$(stamp)` command
+substitution inside the echo, not python3's. (2) The boot's
+APPEND_EXTRA="syscost=1 fsw=1" OVERRIDE dropped pa-boot.sh's default
+`dfx=wwcensus` token — so the census rows read 0/0 by construction:
+every quiet census boot pa50-pa76 with the token reads exactly
+TERM=8 / REFUSED=32. Not a scheduler regression. The re-parse PASSes:
+panics 0, OOM 0, ticks 99.50-99.98/s/CPU sustained, GRQ hold 6308 ns
+(in 4080-7320), small_alloc REST 1.2%, clock_gettime 3 us,
+nanosleep 195 ms, deep_lines=0 (the vmscan deep pass never runs on a
+standard boot — the leg-49-specific discipline holds). The volume row
+read 95.6M (-11% vs the 107.5M base): the quiet-boot swing class
+(pa57main 85.8M, pa76drain 99.4M, pa50main 107.5M — no leg-49
+attribution possible inside that spread). Census + volume re-read
+ride pa86's census-armed boot.
+
+**F4 arm-1 (pa85): J-vs-NJ on ONE kernel, six boots rc=0.** Kernel
+run/pa84-main-strong-bzImage (release-strong, a8a5afac); driver
+run/pa85-f4nj-pair.sh; interleaved J,NJ,NJ,J boards at load1 11-16
+(mem floor 40-41G) + one fsw=1 boot per arm. THE UNBLOCK IS TOTAL:
+NJ boots complete the full probe (leg-45's init-selection death is
+gone). Verdict table, p6 medians (us) J1/J2 vs NJ1/NJ2:
+
+| row | J | NJ | ratio |
+|---|---|---|---|
+| p6_append | 85.5 / 90.4 | 2004 / 2058 | **23.1x** |
+| p6_mkdrmdir | 15372 / 16272 | 16360 / 16148 | 1.03x (flat) |
+| p6_unlink | 113 / 82.8 | 78.8 / 78.5 | 0.80x |
+| p6_write_fsync | 9612 / 10186 | 8821 / 9276 | 0.91x |
+| all non-fs rows | - | - | within +-3% |
+
+Readings: (1) **the no-journal penalty on current main is the WRITE
+path** — every extending 4K O_APPEND write pays ~1.95 ms of inline
+sync (23.1x; four boards consistent to +-1.5%); the J arm's 88 us is
+the deferred class route-1 can reach, proven on the same kernel. (2)
+**the mkdir median is journal-independent** — the ~15.5 ms per-mkdir
+scoped publication flush dominates both arms (1.03x flat; the fs
+lane's named residual, untouched here). NJ tail risk: NJ1's mkdrmdir
+avg read 167.8 ms (p99 3.78 s, max 12.3 s) vs J's 19-21 ms, NJ2 clean
+at 19.2 ms — bursty provisioning on no-journal images can stall. (3)
+NJ unlink/fsync are AT OR BELOW the J class (no revokes to commit, no
+journal commit on fsync). (4) fsw mechanism: NJ does 9360 real
+sync-dirty (3.0x J's 3083; J skipped 19403 under the handle), 17465
+device writes (+15%), journal counters 0.4009.0.0.0 (dormant),
+scoped flushes similar (859 vs 1006). (5) p7_sleep1ms swung 963-2099
+across all four boards uncorrelated with arm — the host-timer regime
+class under load1 11-16, same family as the pa82 adjudication.
+
+Route-1's expected-effect anchor is banked in
+f4-ext4-route-map.md §5(a): the map's "mkdir/pwrite/unlink <1 ms"
+estimate is superseded — unlink is already at write-back, mkdir is
+the flush lever (fs lane), APPEND is the 23x target.
+
+**Standing classes on the new main (strong class, loaded window
+load1 11-16, med-of-2 per arm):** p6_mkdrmdir 15.4-16.3 ms (arm-2
+class holds through the zero-serve merge), p6_unlink 83-113 us,
+p6_write_fsync 8.8-10.2 ms, p6_append 85-90 us (J class), p6_stat
+15.7-17.0, p6_getdents 609-672, p2_ctxsw 1.62-1.91 (strong loaded
+band). The QUIET cells wait on pa86 (armed 12:13, held at gate 12/10
+at 12:39): census-armed syscost boot (the pa83 re-read, token
+explicit this time) + a med-of-2 quiet pbench board to settle the
+standing classes for perf-gate-baseline per the refresh rules.
+
+Standing: pa86 chain in flight (8 h deadline, skip logged as debt);
+the mkdrmdir flush stays the fs lane's; track-2 lever nomination
+waits for the pa86 quiet data (the REST-site and census re-reads name
+the next non-fs candidate).
