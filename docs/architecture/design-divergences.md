@@ -401,3 +401,44 @@ delete load.
 **Guard.** fs-domain perf-gate rows (p6_mkdrmdir, p6_unlink,
 p6_write_fsync, p6_append) plus the fsw jcommit counters; the
 release-strong boot requirement for any change touching this path.
+
+---
+
+## D-9: Kernel-side LD_* environment scrub on secure exec
+
+**Design.** When an exec transitions credentials (setuid/setgid bits
+taken, or euid!=uid/egid!=gid — the AT_SECURE condition), the KERNEL
+removes every `LD_*` environment variable from the envp it installs on
+the new image, before ld.so ever runs. The mainstream approach leaves
+the environment untouched and sets AT_SECURE=1; the userspace dynamic
+loader scrubs its own environ copy.
+
+**Advantage.**
+- Defense in depth independent of libc behavior: glibc and musl both
+  scrub when AT_SECURE, but static binaries with custom libc stacks,
+  future loaders, or partially-linked images get the guarantee from the
+  kernel unconditionally.
+- The scrub also covers loader-tunable variables a given libc's secure
+  list may not know yet.
+
+**Compatibility evidence.** The trigger condition is exactly the
+reference kernel's secureexec rule (review P15-era fix: capabilities
+alone no longer mark every root exec secure). Ubuntu 22.04 and OH images
+boot with their full service sets (every setuid helper — mount, su,
+appspawn — passes through this path). LTP exec family green on the rows
+that exercise envp handling (execve01/02/03/05/06 pass; the loader
+behaves identically because it re-scrubs what is already absent).
+
+**Known cost.** One visible divergence: `/proc/<pid>/environ` of a
+secure-exec'd process does NOT list LD_* strings, where the reference
+kernel's environ (read from the initial stack region) still shows them —
+ld.so there only repoints the environ array, the stack strings remain.
+Cosmetic-to-benign (no known consumer relies on seeing LD_* in a setuid
+process's environ), recorded so the difference is a registered design,
+not an accident.
+
+**Guard.** The exec ladder (kernel/src/syscall/process.rs do_execve) is
+the single scrub site; resolve_exec_file (session 1) keeps the
+AT_SECURE inputs on the one-walk resolution path, and the shebang-parse/
+resolve_exec_file unit rows plus the LTP execve-family spot run watch
+the surrounding semantics.

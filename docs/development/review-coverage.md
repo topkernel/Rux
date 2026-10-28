@@ -20,17 +20,19 @@ when the tree gains a file the map does not know about.
 
 | metric | value |
 |---|---|
-| source files in kernel/src | 399 |
-| source lines in kernel/src | 249,453 |
-| files fully reviewed | 20 |
-| files partially reviewed | 78 |
-| files not yet reviewed | 301 |
-| lines in fully reviewed files | 4,676 |
+| source files in kernel/src | 413 |
+| source lines in kernel/src | 292,293 |
+| files fully reviewed | 22 |
+| files partially reviewed | 77 |
+| files not yet reviewed | 314 |
+| lines in fully reviewed files | 8,066 |
 
 ## Defects found and fixed
 
 | commit | file | defect |
 |---|---|---|
+| `6c56c0b6` | `kernel/src/syscall/process.rs` | The shebang optional argument was truncated at the next whitespace after the first word; the reference kernel (binfmt_script) passes the WHOLE rest of the interpreter line as one argument, so '#!/usr/bin/env -S python3 -u' lost 'python3 -u'. A 255-byte interpreter line without a newline was also rejected instead of parsed. Fixed to binfmt_script parity with 14 unit rows. |
+| `2fbb5a64` | `kernel/src/syscall/process.rs, kernel/src/process/exec.rs, kernel/src/fs/elf.rs` | execve of a directory returned ENOENT (failed read) instead of EACCES (may_open S_ISDIR); the PT_INTERP interpreter was opened without the MAY_EXEC gate; and the exec ladder walked the exe path four times plus double-zeroed every freshly mapped page (the arch allocators already zero before mapping). Fixed with resolve_exec_file (one walk feeds gate/stat/read/vm_file pin) and removal of the redundant zero passes. |
 | `ddfa8abc` | `kernel/src/interrupt/softirq.rs` | The 2ms softirq budget was checked once per batch of pending vectors, so a batch of slow handlers could overrun it by the time of every vector left in the batch. the reference kernel checks the budget before every vector and leaves the unreached ones pending. |
 | `327b4a52` | `kernel/src/fs/inode.rs, kernel/src/fs/file.rs` | The generic O_APPEND write read the file size, released the lock and only then took the data lock to write — two appenders on different open descriptions could pick the same offset, and the second write overwrote the first. the reference kernel takes the append position under the inode lock. |
 | `ff6fc39b` | `kernel/src/syscall/memory.rs` | msync had no 'addr + len' wrap check (the reference kernel's mm/msync.c has one). A near-max length wrapped the page-aligned length to 0, so msync reported success without syncing anything; the reference kernel returns EINVAL. |
@@ -38,24 +40,24 @@ when the tree gains a file the map does not know about.
 
 ## Per-file status
 
-### kernel/src (11456 lines)
+### kernel/src (12460 lines)
 
 | file | lines | status | note |
 |---|---:|---|---|
-| `cmdline.rs` | 874 | 🔶 | parameter parsing |
+| `cmdline.rs` | 979 | 🔶 | parameter parsing |
 | `config.rs` | 307 | ⬜ |  |
-| `console.rs` | 1024 | ⬜ |  |
+| `console.rs` | 1030 | ⬜ |  |
 | `errno.rs` | 224 | ⬜ |  |
 | `init.rs` | 489 | ⬜ |  |
 | `initrd.rs` | 781 | ⬜ |  |
 | `list.rs` | 273 | ⬜ |  |
-| `main.rs` | 1631 | 🔶 | boot sequence, panic handler, layout constants |
+| `main.rs` | 1742 | 🔶 | boot sequence, panic handler, layout constants |
 | `panic_policy.rs` | 94 | ✅ | written by this review (panic= parameter) |
 | `print.rs` | 73 | ⬜ |  |
-| `printk.rs` | 1850 | 🔶 | ring buffer, console level |
+| `printk.rs` | 2122 | 🔶 | ring buffer, console level |
 | `sbi.rs` | 134 | ⬜ |  |
-| `signal.rs` | 2665 | 🔶 | flush_handlers 处置重置语义 |
-| `timer.rs` | 1037 | ⬜ |  |
+| `signal.rs` | 2911 | 🔶 | flush_handlers 处置重置语义 |
+| `timer.rs` | 1301 | ⬜ |  |
 
 ### kernel/src/arch (60 lines)
 
@@ -93,60 +95,61 @@ when the tree gains a file the map does not know about.
 | `page_fault.rs` | 7 | ⬜ |  |
 | `pagetable.rs` | 7 | ⬜ |  |
 
-### kernel/src/arch/riscv64 (7014 lines)
+### kernel/src/arch/riscv64 (7963 lines)
 
 | file | lines | status | note |
 |---|---:|---|---|
-| `boot.S` | 592 | ⬜ |  |
+| `boot.S` | 657 | ⬜ |  |
 | `boot.rs` | 32 | ⬜ |  |
-| `context.rs` | 583 | ⬜ |  |
-| `cpu.rs` | 161 | ⬜ |  |
+| `context.rs` | 587 | ⬜ |  |
+| `cpu.rs` | 184 | ⬜ |  |
 | `ipi.rs` | 487 | ⬜ |  |
-| `mod.rs` | 131 | ⬜ |  |
-| `process.rs` | 320 | ⬜ |  |
+| `mod.rs` | 132 | ⬜ |  |
+| `process.rs` | 325 | ⬜ |  |
 | `pt_regs.rs` | 454 | ⬜ |  |
 | `smp.rs` | 345 | ⬜ |  |
-| `thread.rs` | 403 | ⬜ |  |
+| `thread.rs` | 525 | ⬜ |  |
 | `trap.S` | 1215 | ⬜ |  |
-| `trap.rs` | 1455 | 🔶 | tick accounting, trap entry |
+| `trap.rs` | 1798 | 🔶 | tick accounting, trap entry |
 | `uaccess.S` | 385 | ⬜ |  |
 | `uaccess.rs` | 451 | ⬜ |  |
+| `vext.rs` | 386 | ⬜ |  |
 
-### kernel/src/arch/riscv64/mm (8416 lines)
+### kernel/src/arch/riscv64/mm (8490 lines)
 
 | file | lines | status | note |
 |---|---:|---|---|
 | `asid.rs` | 302 | ⬜ |  |
 | `exception.rs` | 718 | ⬜ |  |
 | `fixmap.rs` | 267 | ⬜ |  |
-| `memory_layout.rs` | 552 | 🔶 | image window constants |
-| `mm_ops.rs` | 2471 | 🔶 | COW 故障快/慢路径、PTE 权限检查 |
+| `memory_layout.rs` | 566 | 🔶 | image window constants |
+| `mm_ops.rs` | 2531 | 🔶 | COW 故障快/慢路径、PTE 权限检查 |
 | `mmu_init.rs` | 2162 | 🔶 | kernel image mapping |
 | `mod.rs` | 53 | ⬜ |  |
 | `page_fault.rs` | 1597 | ⬜ |  |
 | `pagetable.rs` | 294 | ⬜ |  |
 
-### kernel/src/arch/x86_64 (7138 lines)
+### kernel/src/arch/x86_64 (7407 lines)
 
 | file | lines | status | note |
 |---|---:|---|---|
-| `boot.S` | 184 | ⬜ |  |
-| `boot.rs` | 240 | ⬜ |  |
+| `boot.S` | 206 | ⬜ |  |
+| `boot.rs` | 242 | ⬜ |  |
 | `context.rs` | 605 | ⬜ |  |
-| `cpu.rs` | 358 | ⬜ |  |
+| `cpu.rs` | 364 | ⬜ |  |
 | `ipi.rs` | 323 | ⬜ |  |
 | `mod.rs` | 51 | ⬜ |  |
 | `process.rs` | 154 | ⬜ |  |
 | `pt_regs.rs` | 341 | ⬜ |  |
 | `setup.S` | 128 | ⬜ |  |
-| `smp.rs` | 602 | ⬜ |  |
+| `smp.rs` | 613 | ⬜ |  |
 | `smp_trampoline.S` | 182 | ⬜ |  |
 | `thread.rs` | 390 | ⬜ |  |
 | `trap.S` | 577 | ⬜ |  |
-| `trap.rs` | 2583 | 🔶 | TSS/IST interrupt stacks |
+| `trap.rs` | 2811 | 🔶 | TSS/IST interrupt stacks |
 | `uaccess.rs` | 420 | ⬜ |  |
 
-### kernel/src/arch/x86_64/mm (7989 lines)
+### kernel/src/arch/x86_64/mm (8049 lines)
 
 | file | lines | status | note |
 |---|---:|---|---|
@@ -154,57 +157,63 @@ when the tree gains a file the map does not know about.
 | `exception.rs` | 428 | ⬜ |  |
 | `fixmap.rs` | 117 | ⬜ |  |
 | `memory_layout.rs` | 439 | ⬜ |  |
-| `mm_ops.rs` | 2602 | ⬜ |  |
+| `mm_ops.rs` | 2652 | ⬜ |  |
 | `mmu_init.rs` | 2275 | 🔶 | kernel image mapping |
 | `mod.rs` | 36 | ⬜ |  |
-| `page_fault.rs` | 1805 | ⬜ |  |
+| `page_fault.rs` | 1815 | ⬜ |  |
 | `pagetable.rs` | 195 | ⬜ |  |
 
-### kernel/src/dfx (10510 lines)
+### kernel/src/dfx (37059 lines)
 
 | file | lines | status | note |
 |---|---:|---|---|
 | `backtrace.rs` | 354 | 🔶 | symbolized frame printing |
 | `bug.rs` | 98 | 🔶 | WARN/BUG banners |
 | `driftwatch.rs` | 130 | 🔶 | release-site attribution |
-| `fsw.rs` | 324 | ⬜ |  |
+| `fsw.rs` | 379 | ⬜ |  |
 | `hexdump.rs` | 102 | 🔶 | hex dump helper |
 | `hung_task.rs` | 286 | 🔶 | D-state scan |
 | `ksyms.rs` | 131 | ✅ | written by this review (symbol table) |
-| `ksyms_generated.rs` | 18 | ⬜ |  |
+| `ksyms_generated.rs` | 24674 | ⬜ |  |
+| `leakorigin.rs` | 257 | ⬜ |  |
 | `ledger.rs` | 491 | 🔶 | page census |
-| `memwatch.rs` | 1070 | 🔶 | heap census |
+| `memwatch.rs` | 1084 | 🔶 | heap census |
 | `metawatch.rs` | 157 | 🔶 | buddy shadow scan |
-| `mod.rs` | 221 | 🔶 | init, debugfs knob registration |
+| `mod.rs` | 305 | 🔶 | init, debugfs knob registration |
 | `monowatch.rs` | 137 | 🔶 | monotonic jump tripwire |
-| `r83hunt.rs` | 566 | 🔶 | task header audit |
+| `oops.rs` | 250 | ⬜ |  |
+| `pathstash.rs` | 122 | ⬜ |  |
+| `pstore.rs` | 368 | ⬜ |  |
+| `r83hunt.rs` | 583 | 🔶 | task header audit |
 | `sbi_debug.rs` | 76 | 🔶 | raw SBI printers |
 | `schb.rs` | 645 | ⬜ |  |
 | `scribble.rs` | 1658 | 🔶 | task scribble hunter |
+| `slowtask.rs` | 367 | ⬜ |  |
 | `softlockup.rs` | 222 | 🔶 | soft lockup detector |
-| `switches.rs` | 433 | ✅ | switch table refactored to one macro |
+| `switches.rs` | 571 | ✅ | switch table refactored to one macro |
 | `syscost.rs` | 2041 | 🔶 | per-syscall cost table |
 | `taint.rs` | 123 | ✅ | the reference kernel taint letters |
 | `taskdump.rs` | 748 | 🔶 | task dump format |
+| `treehunt.rs` | 221 | ⬜ |  |
 | `wildwatch.rs` | 479 | 🔶 | RO-guard tripwire |
 
-### kernel/src/drivers (2248 lines)
+### kernel/src/drivers (2238 lines)
 
 | file | lines | status | note |
 |---|---:|---|---|
-| `access_tokenid.rs` | 169 | ⬜ |  |
-| `ashmem.rs` | 758 | ⬜ |  |
+| `access_tokenid.rs` | 165 | ⬜ |  |
+| `ashmem.rs` | 756 | ⬜ |  |
 | `loop_dev.rs` | 988 | ⬜ |  |
 | `mod.rs` | 28 | ⬜ |  |
 | `rtc.rs` | 123 | ⬜ |  |
-| `watchdog.rs` | 182 | ⬜ |  |
+| `watchdog.rs` | 178 | ⬜ |  |
 
-### kernel/src/drivers/blkdev (503 lines)
+### kernel/src/drivers/blkdev (567 lines)
 
 | file | lines | status | note |
 |---|---:|---|---|
 | `iostat.rs` | 156 | ✅ | written by this review |
-| `mod.rs` | 347 | 🔶 | request path, register_disk |
+| `mod.rs` | 411 | 🔶 | request path, register_disk |
 
 ### kernel/src/drivers/drm (2541 lines)
 
@@ -212,26 +221,26 @@ when the tree gains a file the map does not know about.
 |---|---:|---|---|
 | `mod.rs` | 2541 | ⬜ |  |
 
-### kernel/src/drivers/gpu (1982 lines)
+### kernel/src/drivers/gpu (1978 lines)
 
 | file | lines | status | note |
 |---|---:|---|---|
 | `fb_simple.rs` | 72 | ⬜ |  |
-| `fbdev.rs` | 590 | ⬜ |  |
+| `fbdev.rs` | 586 | ⬜ |  |
 | `framebuffer.rs` | 259 | ⬜ |  |
 | `mod.rs` | 95 | ⬜ |  |
 | `virtio_cmd.rs` | 52 | ⬜ |  |
 | `virtio_gpu.rs` | 914 | ⬜ |  |
 
-### kernel/src/drivers/input (2251 lines)
+### kernel/src/drivers/input (2562 lines)
 
 | file | lines | status | note |
 |---|---:|---|---|
-| `evdev.rs` | 1026 | ⬜ |  |
+| `evdev.rs` | 1128 | ⬜ |  |
 | `event.rs` | 247 | ⬜ |  |
-| `mod.rs` | 123 | ⬜ |  |
+| `mod.rs` | 310 | ⬜ |  |
 | `ps2.rs` | 260 | ⬜ |  |
-| `virtio_input.rs` | 595 | ⬜ |  |
+| `virtio_input.rs` | 617 | ⬜ |  |
 
 ### kernel/src/drivers/intc (1371 lines)
 
@@ -266,120 +275,121 @@ when the tree gains a file the map does not know about.
 | `riscv64.rs` | 248 | 🔶 | time CSR timebase |
 | `x86_64.rs` | 526 | 🔶 | TSC/HPET timebase |
 
-### kernel/src/drivers/virtio (7162 lines)
+### kernel/src/drivers/virtio (7404 lines)
 
 | file | lines | status | note |
 |---|---:|---|---|
-| `mod.rs` | 3325 | 🔶 | virtio queue handling |
+| `mod.rs` | 3567 | 🔶 | virtio queue handling |
 | `offset.rs` | 48 | ⬜ |  |
 | `probe.rs` | 646 | ⬜ |  |
 | `queue.rs` | 1040 | ⬜ |  |
 | `virtio_pci.rs` | 2103 | ⬜ |  |
 
-### kernel/src/fs (28749 lines)
+### kernel/src/fs (30348 lines)
 
 | file | lines | status | note |
 |---|---:|---|---|
-| `bio.rs` | 1889 | 🔶 | sync_buffers, ordered publications |
+| `bio.rs` | 2460 | 🔶 | sync_buffers, ordered publications |
 | `buffer.rs` | 468 | 🔶 | FileBuffer chunked read/write |
-| `cgroup.rs` | 858 | ⬜ |  |
-| `char_dev.rs` | 250 | ⬜ |  |
-| `debugfs.rs` | 597 | ✅ | written by this review (debugfs) |
+| `cgroup.rs` | 857 | ⬜ |  |
+| `char_dev.rs` | 259 | ⬜ |  |
+| `debugfs.rs` | 596 | ✅ | written by this review (debugfs) |
 | `dentry.rs` | 760 | 🔶 | per-directory locking |
 | `dev_t.rs` | 137 | ⬜ |  |
-| `elf.rs` | 766 | ⬜ |  |
+| `elf.rs` | 770 | 🔧 | read end to end (abi-review s1): Ehdr/Phdr parsing, validate/load/load_dynamic_to; interp BSS double-zero removed |
 | `fifo.rs` | 256 | ⬜ |  |
-| `file.rs` | 1247 | 🔶 | reg_file_read/write/lseek、f_pos_lock；O_APPEND 原子性已修（327b4a52） |
+| `file.rs` | 1504 | 🔶 | reg_file_read/write/lseek、f_pos_lock；O_APPEND 原子性已修（327b4a52） |
 | `fs_struct.rs` | 210 | ⬜ |  |
-| `inode.rs` | 1054 | 🔶 | read_data/write_data/append_data；O_APPEND 原子性已修（327b4a52） |
-| `inotify.rs` | 715 | 🔶 | event notification |
-| `io_completion.rs` | 344 | ⬜ |  |
+| `inode.rs` | 1067 | 🔶 | read_data/write_data/append_data；O_APPEND 原子性已修（327b4a52） |
+| `inotify.rs` | 812 | 🔶 | event notification |
+| `io_completion.rs` | 384 | ⬜ |  |
 | `locks.rs` | 1067 | 🔶 | flock/POSIX record locks |
-| `memfd.rs` | 439 | 🔶 | memfd seal semantics |
+| `memfd.rs` | 438 | 🔶 | memfd seal semantics |
 | `mod.rs` | 82 | ⬜ |  |
 | `mount.rs` | 392 | ⬜ |  |
 | `page_cache.rs` | 1394 | 🔶 | get_range_into/put_range |
 | `path.rs` | 389 | ⬜ |  |
-| `permission.rs` | 80 | ⬜ |  |
-| `pipe.rs` | 1340 | ⬜ |  |
-| `pty.rs` | 930 | ⬜ |  |
+| `permission.rs` | 84 | ⬜ |  |
+| `pipe.rs` | 1465 | ⬜ |  |
+| `pty.rs` | 926 | ⬜ |  |
 | `readahead.rs` | 100 | ⬜ |  |
-| `rootfs.rs` | 1984 | 🔶 | symlink resolution, MAX_SYMLINKS |
-| `selinuxfs.rs` | 315 | ⬜ |  |
+| `rootfs.rs` | 1983 | 🔶 | symlink resolution, MAX_SYMLINKS |
+| `selinuxfs.rs` | 322 | ⬜ |  |
 | `stat.rs` | 426 | ⬜ |  |
 | `superblock.rs` | 369 | ⬜ |  |
-| `sysfs.rs` | 2065 | 🔶 | sysfs tree, writable attributes |
+| `sysfs.rs` | 2082 | 🔶 | sysfs tree, writable attributes |
 | `tmpfs.rs` | 1445 | 🔶 | tmpfs read/write |
 | `tty.rs` | 845 | ⬜ |  |
-| `vfs.rs` | 5294 | 🔶 | file_read/file_write dispatch |
-| `xattr.rs` | 242 | ⬜ |  |
+| `vfs.rs` | 5728 | 🔶 | file_read/file_write dispatch |
+| `xattr.rs` | 271 | ⬜ |  |
 
-### kernel/src/fs/devfs (2203 lines)
+### kernel/src/fs/devfs (2202 lines)
 
 | file | lines | status | note |
 |---|---:|---|---|
-| `mod.rs` | 2122 | ⬜ |  |
+| `mod.rs` | 2121 | ⬜ |  |
 | `registry.rs` | 81 | ⬜ |  |
 
-### kernel/src/fs/ext4 (11743 lines)
+### kernel/src/fs/ext4 (12627 lines)
 
 | file | lines | status | note |
 |---|---:|---|---|
-| `allocator.rs` | 828 | ⬜ |  |
+| `allocator.rs` | 826 | ⬜ |  |
 | `csum.rs` | 189 | ⬜ |  |
 | `dir.rs` | 182 | 🔶 | directory ops |
-| `extent.rs` | 1395 | ⬜ |  |
-| `file.rs` | 1921 | 🔶 | read/write/fsync paths |
+| `extent.rs` | 1851 | ⬜ |  |
+| `file.rs` | 2142 | 🔶 | read/write/fsync paths |
 | `indirect.rs` | 321 | ⬜ |  |
-| `inode.rs` | 724 | 🔶 | inode table |
-| `journal.rs` | 215 | 🔶 | jbd2 transaction start/stop |
-| `mod.rs` | 3350 | 🔶 | superblock, mount |
-| `namei.rs` | 2284 | ⬜ |  |
+| `inode.rs` | 751 | 🔶 | inode table |
+| `journal.rs` | 238 | 🔶 | jbd2 transaction start/stop |
+| `mod.rs` | 3399 | 🔶 | superblock, mount |
+| `namei.rs` | 2394 | ⬜ |  |
 | `superblock.rs` | 334 | ⬜ |  |
 
-### kernel/src/fs/jbd2 (3354 lines)
+### kernel/src/fs/jbd2 (3489 lines)
 
 | file | lines | status | note |
 |---|---:|---|---|
 | `checkpoint.rs` | 328 | ⬜ |  |
-| `commit.rs` | 499 | ⬜ |  |
-| `journal.rs` | 937 | ⬜ |  |
+| `commit.rs` | 554 | ⬜ |  |
+| `journal.rs` | 947 | ⬜ |  |
 | `mod.rs` | 44 | ⬜ |  |
 | `recovery.rs` | 323 | ⬜ |  |
-| `revoke.rs` | 392 | ⬜ |  |
-| `transaction.rs` | 541 | ⬜ |  |
+| `revoke.rs` | 432 | ⬜ |  |
+| `transaction.rs` | 571 | ⬜ |  |
 | `types.rs` | 290 | ⬜ |  |
 
-### kernel/src/fs/procfs (6485 lines)
+### kernel/src/fs/procfs (7667 lines)
 
 | file | lines | status | note |
 |---|---:|---|---|
 | `cmdline.rs` | 35 | ⬜ |  |
-| `configgz.rs` | 69 | ⬜ |  |
+| `configgz.rs` | 70 | ⬜ |  |
 | `cpuinfo.rs` | 62 | ⬜ |  |
-| `diskstats.rs` | 54 | ✅ | written by this review |
+| `diskstats.rs` | 127 | ✅ | written by this review |
 | `interrupts.rs` | 168 | 🔶 | per-IRQ counters |
 | `kallsyms.rs` | 40 | ✅ | written by this review |
 | `loadavg.rs` | 147 | 🔶 | load average |
 | `locks.rs` | 67 | ✅ | written by this review |
-| `meminfo.rs` | 146 | 🔶 | meminfo fields |
-| `mod.rs` | 2359 | 🔶 | node tree, read/write dispatch |
+| `meminfo.rs` | 224 | 🔶 | meminfo fields |
+| `mod.rs` | 2538 | 🔶 | node tree, read/write dispatch |
 | `mounts.rs` | 183 | ⬜ |  |
 | `net.rs` | 335 | ⬜ |  |
-| `pid.rs` | 1195 | 🔶 | status/stat generators |
-| `schedstat.rs` | 93 | ✅ | written by this review |
+| `pid.rs` | 1438 | 🔶 | status/stat generators |
+| `procfile.rs` | 320 | ⬜ |  |
+| `schedstat.rs` | 114 | ✅ | written by this review |
 | `self_proc.rs` | 41 | ⬜ |  |
 | `softirqs.rs` | 73 | ✅ | written by this review |
-| `stat.rs` | 287 | ✅ | written by this review |
+| `stat.rs` | 363 | ✅ | written by this review |
 | `swaps.rs` | 35 | ⬜ |  |
-| `sysctl.rs` | 412 | 🔶 | sysctl tree |
+| `sysctl.rs` | 582 | 🔶 | sysctl tree |
 | `sysrq.rs` | 285 | ✅ | written by this review |
 | `timer_list.rs` | 110 | ⬜ |  |
 | `uptime.rs` | 70 | 🔶 | uptime/idle accounting |
 | `version.rs` | 33 | ⬜ |  |
-| `vmstat.rs` | 186 | ✅ | written by this review |
+| `vmstat.rs` | 207 | ✅ | written by this review |
 
-### kernel/src/interrupt (1965 lines)
+### kernel/src/interrupt (2045 lines)
 
 | file | lines | status | note |
 |---|---:|---|---|
@@ -388,59 +398,59 @@ when the tree gains a file the map does not know about.
 | `irqdesc.rs` | 502 | 🔶 | descriptor registry |
 | `ksoftirqd.rs` | 186 | 🔶 | drain loop |
 | `mod.rs` | 67 | ⬜ |  |
-| `preempt.rs` | 246 | ⬜ |  |
-| `softirq.rs` | 397 | 🔧 | 2ms 预算改为逐 vector 检查（ddfa8abc） |
+| `preempt.rs` | 291 | ⬜ |  |
+| `softirq.rs` | 432 | 🔧 | 2ms 预算改为逐 vector 检查（ddfa8abc） |
 | `tasklet.rs` | 382 | ⬜ |  |
 
-### kernel/src/io_uring (1174 lines)
+### kernel/src/io_uring (1173 lines)
 
 | file | lines | status | note |
 |---|---:|---|---|
-| `mod.rs` | 1174 | ⬜ |  |
+| `mod.rs` | 1173 | ⬜ |  |
 
-### kernel/src/ipc (11802 lines)
+### kernel/src/ipc (13793 lines)
 
 | file | lines | status | note |
 |---|---:|---|---|
-| `access_token.rs` | 388 | ⬜ |  |
-| `binder.rs` | 6424 | 🔶 | ioctl numbers, dispatch |
+| `access_token.rs` | 384 | ⬜ |  |
+| `binder.rs` | 8123 | 🔶 | ioctl numbers, dispatch |
 | `mod.rs` | 31 | ⬜ |  |
-| `posix_mq.rs` | 1157 | 🔶 | open/unlink/send/receive；绝对超时已修（e47b155a） |
+| `posix_mq.rs` | 1303 | 🔶 | open/unlink/send/receive；绝对超时已修（e47b155a） |
 | `sysv_msg.rs` | 1092 | 🔶 | msgsnd/msgrcv |
-| `sysv_sem.rs` | 1273 | 🔶 | semtimedop timeout |
-| `sysv_shm.rs` | 978 | 🔶 | IPC_RMID, attach/detach |
+| `sysv_sem.rs` | 1310 | 🔶 | semtimedop timeout |
+| `sysv_shm.rs` | 1091 | 🔶 | IPC_RMID, attach/detach |
 | `util.rs` | 459 | ✅ | idr allocation, permission checks |
 
-### kernel/src/mm (15554 lines)
+### kernel/src/mm (16165 lines)
 
 | file | lines | status | note |
 |---|---:|---|---|
 | `allocator.rs` | 14 | ⬜ |  |
-| `buddy_allocator.rs` | 1564 | 🔶 | heap allocator, dealloc dispatch |
+| `buddy_allocator.rs` | 1583 | 🔶 | heap allocator, dealloc dispatch |
 | `compact.rs` | 519 | ⬜ |  |
 | `deferred_free.rs` | 202 | ⬜ |  |
 | `hugepage.rs` | 303 | ⬜ |  |
-| `kswapd.rs` | 215 | ⬜ |  |
-| `layout.rs` | 531 | ⬜ |  |
+| `kswapd.rs` | 289 | ⬜ |  |
+| `layout.rs` | 534 | ⬜ |  |
 | `lru.rs` | 545 | ⬜ |  |
 | `memblock.rs` | 660 | ⬜ |  |
 | `meminfo.rs` | 265 | ⬜ |  |
 | `mm_struct.rs` | 1196 | ⬜ |  |
 | `mod.rs` | 249 | ⬜ |  |
-| `oom_kill.rs` | 554 | ⬜ |  |
+| `oom_kill.rs` | 582 | ⬜ |  |
 | `page.rs` | 149 | ⬜ |  |
-| `page_alloc.rs` | 944 | ⬜ |  |
+| `page_alloc.rs` | 1076 | ⬜ |  |
 | `page_desc.rs` | 1362 | ⬜ |  |
 | `pagemap.rs` | 72 | ⬜ |  |
 | `pglist.rs` | 381 | ⬜ |  |
 | `rmap.rs` | 481 | ⬜ |  |
-| `slab.rs` | 776 | ⬜ |  |
-| `small_alloc.rs` | 815 | 🔶 | size classes, magazine, alloc/free |
+| `slab.rs` | 786 | ⬜ |  |
+| `small_alloc.rs` | 886 | 🔶 | size classes, magazine, alloc/free |
 | `swap.rs` | 545 | ⬜ |  |
 | `vdso.rs` | 574 | ⬜ |  |
-| `vma.rs` | 892 | ⬜ |  |
+| `vma.rs` | 1048 | ⬜ |  |
 | `vmemmap.rs` | 221 | ⬜ |  |
-| `vmscan.rs` | 396 | ⬜ |  |
+| `vmscan.rs` | 514 | ⬜ |  |
 | `vmstat.rs` | 69 | ✅ | written by this review (page counters) |
 | `zone.rs` | 1060 | 🔶 | buddy alloc/free, merge, watermarks |
 
@@ -450,7 +460,7 @@ when the tree gains a file the map does not know about.
 |---|---:|---|---|
 | `mod.rs` | 486 | ⬜ |  |
 
-### kernel/src/net (15368 lines)
+### kernel/src/net (15758 lines)
 
 | file | lines | status | note |
 |---|---:|---|---|
@@ -459,13 +469,13 @@ when the tree gains a file the map does not know about.
 | `ethernet.rs` | 585 | ⬜ |  |
 | `icmp.rs` | 428 | ⬜ |  |
 | `mod.rs` | 32 | ⬜ |  |
-| `netlink.rs` | 1496 | ⬜ |  |
-| `raw.rs` | 697 | ⬜ |  |
-| `socket.rs` | 1982 | ⬜ |  |
-| `tcp.rs` | 4442 | ⬜ |  |
+| `netlink.rs` | 1509 | ⬜ |  |
+| `raw.rs` | 709 | ⬜ |  |
+| `socket.rs` | 2087 | ⬜ |  |
+| `tcp.rs` | 4461 | ⬜ |  |
 | `tcp_timer.rs` | 409 | ⬜ |  |
 | `udp.rs` | 1464 | ⬜ |  |
-| `unix.rs` | 2536 | ⬜ |  |
+| `unix.rs` | 2777 | ⬜ |  |
 
 ### kernel/src/net/ipv4 (1189 lines)
 
@@ -483,37 +493,44 @@ when the tree gains a file the map does not know about.
 | `icmpv6.rs` | 305 | ⬜ |  |
 | `mod.rs` | 608 | ⬜ |  |
 
-### kernel/src/process (13240 lines)
+### kernel/src/perf (862 lines)
+
+| file | lines | status | note |
+|---|---:|---|---|
+| `mod.rs` | 862 | ⬜ |  |
+
+### kernel/src/process (14043 lines)
 
 | file | lines | status | note |
 |---|---:|---|---|
 | `coredump.rs` | 591 | ⬜ |  |
-| `exec.rs` | 1410 | 🔶 | exec 的信号处置/掩码复位 |
-| `exit.rs` | 1929 | ⬜ |  |
-| `fork.rs` | 947 | 🔶 | task creation paths |
+| `exec.rs` | 1435 | 🔧 | read end to end (abi-review s1): image/stack/interp load, auxv, entry frames; redundant zeroing fixed, linear stack/interp writers audited safe-by-single-block |
+| `exit.rs` | 2169 | ⬜ |  |
+| `fork.rs` | 1016 | 🔶 | task creation paths |
 | `kthread.rs` | 274 | ⬜ |  |
 | `mod.rs` | 119 | ⬜ |  |
-| `ns.rs` | 1096 | ⬜ |  |
+| `ns.rs` | 1179 | ⬜ |  |
 | `pid.rs` | 194 | ⬜ |  |
 | `pid_hash.rs` | 266 | 🔶 | task iteration |
-| `ptrace.rs` | 752 | ⬜ |  |
-| `task.rs` | 5220 | 🔶 | task layout, counters, comm |
-| `wait.rs` | 442 | ⬜ |  |
+| `ptrace.rs` | 851 | ⬜ |  |
+| `task.rs` | 5460 | 🔶 | task layout, counters, comm |
+| `wait.rs` | 489 | ⬜ |  |
 
-### kernel/src/sched (10685 lines)
+### kernel/src/sched (11504 lines)
 
 | file | lines | status | note |
 |---|---:|---|---|
-| `cgroup.rs` | 874 | ⬜ |  |
+| `cgroup.rs` | 910 | ⬜ |  |
 | `class.rs` | 269 | ⬜ |  |
 | `deadline.rs` | 536 | ⬜ |  |
-| `fair.rs` | 1619 | ⬜ |  |
+| `fair.rs` | 1816 | ⬜ |  |
 | `idle.rs` | 100 | ✅ |  |
-| `mod.rs` | 128 | ⬜ |  |
+| `mod.rs` | 129 | ⬜ |  |
 | `rt.rs` | 639 | 🔶 | enqueue/dequeue/pick/bitmap/priority inversion |
-| `sched.rs` | 5974 | 🔶 | pick/switch path, enqueue/dequeue, preemption checks |
+| `sched.rs` | 6392 | 🔶 | pick/switch path, enqueue/dequeue, preemption checks |
+| `stats.rs` | 41 | ⬜ |  |
 | `stop_task.rs` | 94 | ⬜ |  |
-| `wakewatch.rs` | 452 | ⬜ |  |
+| `wakewatch.rs` | 578 | ⬜ |  |
 
 ### kernel/src/security (559 lines)
 
@@ -524,37 +541,38 @@ when the tree gains a file the map does not know about.
 | `lsm.rs` | 184 | ⬜ |  |
 | `mod.rs` | 98 | ⬜ |  |
 
-### kernel/src/sync (6381 lines)
+### kernel/src/sync (6648 lines)
 
 | file | lines | status | note |
 |---|---:|---|---|
 | `condvar.rs` | 260 | ⬜ |  |
-| `futex.rs` | 3956 | 🔶 | wait/wake/wake_op |
-| `mod.rs` | 30 | ⬜ |  |
+| `futex.rs` | 4007 | 🔶 | wait/wake/wake_op |
+| `mod.rs` | 32 | ⬜ |  |
+| `percpu.rs` | 214 | ⬜ |  |
 | `rcu.rs` | 287 | ⬜ |  |
 | `rwlock.rs` | 486 | ⬜ |  |
 | `semaphore.rs` | 481 | ⬜ |  |
 | `seqlock.rs` | 260 | ⬜ |  |
 | `spinlock.rs` | 621 | ⬜ |  |
 
-### kernel/src/syscall (30776 lines)
+### kernel/src/syscall (32833 lines)
 
 | file | lines | status | note |
 |---|---:|---|---|
-| `dispatch.rs` | 1228 | ⬜ |  |
-| `file.rs` | 5049 | 🔶 | futex2 wrappers, fsync |
-| `io.rs` | 2552 | ⬜ |  |
-| `memory.rs` | 3780 | 🔶 | msync/mprotect/madvise 长度处理；msync 回绕已修（ff6fc39b） |
-| `misc.rs` | 3825 | ⬜ |  |
+| `dispatch.rs` | 1214 | ⬜ |  |
+| `file.rs` | 5563 | 🔶 | futex2 wrappers, fsync |
+| `io.rs` | 2712 | ⬜ |  |
+| `memory.rs` | 3915 | 🔶 | msync/mprotect/madvise 长度处理；msync 回绕已修（ff6fc39b） |
+| `misc.rs` | 3972 | ⬜ |  |
 | `mod.rs` | 438 | ⬜ |  |
-| `network.rs` | 4099 | ⬜ |  |
-| `process.rs` | 5561 | 🔶 | reboot/shutdown cascade |
+| `network.rs` | 4312 | ⬜ |  |
+| `process.rs` | 6425 | 🔶 | exec ladder + credentials + shebang + EXECCOST instrument (abi-review s1); reboot cascade, clone/wait/ptrace ladders still pending |
 | `sched.rs` | 1176 | ⬜ |  |
-| `signal.rs` | 739 | ⬜ |  |
-| `time.rs` | 1941 | 🔶 | nanosleep, realtime clock |
+| `signal.rs` | 747 | ⬜ |  |
+| `time.rs` | 1971 | 🔶 | nanosleep, realtime clock |
 | `x86_compat.rs` | 388 | ⬜ |  |
 
-### kernel/src/tests (11295 lines)
+### kernel/src/tests (12127 lines)
 
 | file | lines | status | note |
 |---|---:|---|---|
@@ -572,10 +590,12 @@ when the tree gains a file the map does not know about.
 | `fdtable.rs` | 147 | ⬜ |  |
 | `file_flags.rs` | 54 | ⬜ |  |
 | `file_open.rs` | 153 | ⬜ |  |
+| `fileops_caps.rs` | 367 | ⬜ |  |
 | `fork.rs` | 53 | ⬜ |  |
 | `framebuffer.rs` | 171 | ⬜ |  |
 | `fstat.rs` | 98 | ⬜ |  |
 | `futex_test.rs` | 76 | ⬜ |  |
+| `getdents_cache.rs` | 200 | ⬜ |  |
 | `getpid.rs` | 51 | ⬜ |  |
 | `heap_allocator.rs` | 72 | ⬜ |  |
 | `icache.rs` | 89 | ⬜ |  |
@@ -590,11 +610,12 @@ when the tree gains a file the map does not know about.
 | `mem_cow.rs` | 96 | ⬜ |  |
 | `mem_mmap.rs` | 95 | ⬜ |  |
 | `mkdir_unlink.rs` | 250 | ⬜ |  |
-| `mod.rs` | 651 | ⬜ |  |
+| `mod.rs` | 699 | ⬜ |  |
 | `mount_flags.rs` | 54 | ⬜ |  |
 | `network.rs` | 184 | ⬜ |  |
 | `page_allocator.rs` | 152 | ⬜ |  |
 | `path.rs` | 67 | ⬜ |  |
+| `percpu.rs` | 110 | ⬜ |  |
 | `pid_test.rs` | 74 | ⬜ |  |
 | `pipe2.rs` | 110 | ⬜ |  |
 | `preemptive_scheduler.rs` | 62 | ⬜ |  |
@@ -614,7 +635,7 @@ when the tree gains a file the map does not know about.
 | `syscall_memory.rs` | 317 | ⬜ |  |
 | `syscall_misc.rs` | 471 | ⬜ |  |
 | `syscall_network.rs` | 470 | ⬜ |  |
-| `syscall_process.rs` | 352 | ⬜ |  |
+| `syscall_process.rs` | 459 | ⬜ |  |
 | `syscall_sched.rs` | 285 | ⬜ |  |
 | `syscall_signal.rs` | 537 | ⬜ |  |
 | `syscall_time.rs` | 404 | ⬜ |  |
@@ -625,9 +646,9 @@ when the tree gains a file the map does not know about.
 | `vma_flags.rs` | 80 | ⬜ |  |
 | `wait4.rs` | 88 | ⬜ |  |
 
-### kernel/src/trace (1032 lines)
+### kernel/src/trace (1854 lines)
 
 | file | lines | status | note |
 |---|---:|---|---|
-| `files.rs` | 424 | ✅ | written by this review (tracefs files) |
-| `mod.rs` | 608 | ✅ | written by this review (tracepoint core) |
+| `files.rs` | 485 | ✅ | written by this review (tracefs files) |
+| `mod.rs` | 1369 | ✅ | written by this review (tracepoint core) |
