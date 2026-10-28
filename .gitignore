@@ -140,3 +140,6 @@ run/**/*.wedgetail
 runs/
 oh-*.log
 oh-boot-tmp.sh
+
+# unattended test-suite records (test/suite.sh output)
+run/suite/

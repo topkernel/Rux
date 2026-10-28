@@ -8,7 +8,6 @@
 
 use proptest::prelude::*;
 use std::collections::BTreeMap;
-use std::sync::atomic::{AtomicU32, Ordering};
 
 // ============================================================================
 // Copied types from kernel/src/mm/page.rs
@@ -78,6 +77,10 @@ pub struct Vma {
     vma_type: VmaType,
     file_fd: i32,
     file_size: u64,
+    /// The origin stamp (the kernel's VmaOrigin bitfield). It is inert
+    /// here - the verify copy only needs the field so the copied split()
+    /// keeps the kernel's shape.
+    origin: u8,
 }
 
 impl Vma {
@@ -94,6 +97,7 @@ impl Vma {
             vma_type: VmaType::Anonymous,
             file_fd: -1,
             file_size: 0,
+            origin: 0,
         }
     }
 
@@ -152,6 +156,7 @@ impl Vma {
             vma_type: self.vma_type,
             file_fd: self.file_fd,
             file_size: self.file_size,
+            origin: self.origin,
         };
 
         let second = Vma {
@@ -162,18 +167,30 @@ impl Vma {
             vma_type: self.vma_type,
             file_fd: self.file_fd,
             file_size: self.file_size,
+            origin: self.origin,
         };
 
         Some((first, second))
     }
 
     pub fn can_merge(&self, other: &Vma) -> bool {
-        self.end.as_usize() == other.start.as_usize()
-            && self.flags.bits() == other.flags.bits()
-            && self.vma_type == other.vma_type
-            && self.file_fd == other.file_fd
-            && self.file_size == other.file_size
-            && self.offset == other.offset
+        if self.end.as_usize() != other.start.as_usize() {
+            return false;
+        }
+        if self.flags.bits() != other.flags.bits()
+            || self.vma_type != other.vma_type
+            || self.file_fd != other.file_fd
+            || self.file_size != other.file_size
+        {
+            return false;
+        }
+        match self.vma_type {
+            VmaType::Anonymous | VmaType::SharedMemory => true,
+            _ => {
+                let self_pages = (self.end.as_usize() - self.start.as_usize()) / PAGE_SIZE;
+                self.offset + self_pages * PAGE_SIZE == other.offset
+            }
+        }
     }
 
     pub fn merge(&mut self, other: Vma) -> bool {
@@ -212,7 +229,6 @@ pub enum VmaError {
 pub struct VmaManager {
     vmas: BTreeMap<VirtAddr, Vma>,
     max_end: VirtAddr,
-    count: AtomicU32,
 }
 
 impl VmaManager {
@@ -220,7 +236,6 @@ impl VmaManager {
         Self {
             vmas: BTreeMap::new(),
             max_end: VirtAddr::new(0),
-            count: AtomicU32::new(0),
         }
     }
 
@@ -272,7 +287,6 @@ impl VmaManager {
                 merged_vma.merge_at_end(next_end);
                 self.vmas.remove(&next_start);
                 self.vmas.insert(start, merged_vma);
-                self.count.fetch_sub(1, Ordering::Release);
                 if next_end.as_usize() > self.max_end.as_usize() {
                     self.max_end = next_end;
                 }
@@ -291,7 +305,6 @@ impl VmaManager {
 
         // Insert into BTreeMap
         self.vmas.insert(start, vma);
-        self.count.fetch_add(1, Ordering::Release);
         Ok(())
     }
 
@@ -317,7 +330,6 @@ impl VmaManager {
                     .max()
                     .unwrap_or(VirtAddr::new(0));
             }
-            self.count.fetch_sub(1, Ordering::Release);
             Ok(())
         } else {
             Err(VmaError::NotFound)

@@ -116,7 +116,11 @@ proptest! {
     }
 
     #[test]
-    fn test_heap_usage_percent_half(heap_total in 2usize..1_000_000usize) {
+    fn test_heap_usage_percent_half(heap_total in 100usize..1_000_000usize) {
+        // For odd totals below 100 the floor of integer division puts
+        // half-usage legitimately below 49 (25 -> 12 -> 48%), so the
+        // ~1% band only holds from 100 up: worst case 101 -> 50 ->
+        // 49.5% -> floor 49.
         let half = heap_total / 2;
         let pct = heap_usage_percent(heap_total, half);
         assert!(pct >= 49 && pct <= 50, "expected ~50%, got {}", pct);
