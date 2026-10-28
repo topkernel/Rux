@@ -21,8 +21,8 @@ done
 for a in "$@"; do TESTS="$a"; done
 
 FIRST="${TESTS%%,*}"
-LOG=".ltp/diag/${FIRST}.log"
-mkdir -p .ltp/diag
+LOG="${LTP_OUT_DIR:-.ltp}/diag/${FIRST}.log"
+mkdir -p "${LTP_OUT_DIR:-.ltp}/diag"
 
 # IMAGE override: set IMAGE=.ltp/rootfs-XXX.img to run against a private
 # copy instead of test/rootfs.img (mandatory while a scan is driving the
