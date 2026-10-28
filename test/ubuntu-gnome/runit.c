@@ -12,6 +12,8 @@
 //     rv64). See test/ubuntu-gui/build-img.sh.
 #include <sys/types.h>
 #include <sys/stat.h>
+#include <sys/socket.h>
+#include <sys/un.h>
 #include <sys/wait.h>
 #include <fcntl.h>
 #include <signal.h>
@@ -110,6 +112,35 @@ static void dump_log_prefix(const char *path, int n) {
 
 static void dump_log(const char *path) {
     dump_log_prefix(path, 40);
+}
+
+// Run `file argv` with stdout/stderr on the console; wait up to
+// `max_sec` seconds (SIGKILL a straggler) and return its exit status
+// (-1 on timeout/fork failure). Used by the gdm branch for the
+// synchronous udev coldplug steps.
+static int run_console_wait(const char *file, const char *const argv[],
+                            int max_sec) {
+    pid_t pid = fork();
+    if (pid < 0) return -1;
+    if (pid == 0) {
+        int con = open("/dev/console", O_WRONLY);
+        if (con >= 0) { dup2(con, STDOUT_FILENO); dup2(con, STDERR_FILENO); }
+        int devnull = open("/dev/null", O_RDONLY);
+        if (devnull >= 0) { dup2(devnull, STDIN_FILENO); close(devnull); }
+        execv(file, (char *const *)argv);
+        _exit(127);
+    }
+    for (int i = 0; i < max_sec; i++) {
+        int st;
+        pid_t r = waitpid(pid, &st, WNOHANG);
+        if (r == pid) return st;
+        if (r < 0) return -1;
+        sleep(1);
+    }
+    kill(pid, SIGKILL);
+    waitpid(pid, NULL, 0);
+    printf("[runit] %s timed out after %ds\n", file, max_sec);
+    return -1;
 }
 
 // X-state probe: ground truth for the "windows never paint" hunt
@@ -356,6 +387,43 @@ static void fire_notify_banner(void)
     fflush(stdout);
 }
 
+// Minimal /dev/log sink (gdm bring-up r7): gdm3's [debug] output goes
+// to syslog(3); with no syslog daemon and no /dev/log socket every
+// line is silently DROPPED — the single biggest evidence gap in the
+// display-manager bring-up. A tiny AF_UNIX SOCK_DGRAM reader bound to
+// /dev/log, appending everything to /tmp/gdm-syslog.log (tailer dumps
+// it). Protocol: syslog(3) sends "<pri>message" — stored verbatim.
+static void start_devlog_sink(void) {
+    pid_t p = fork();
+    if (p != 0) return; // PID1 side: fire and forget
+    int s = socket(AF_UNIX, SOCK_DGRAM, 0);
+    if (s < 0) _exit(1);
+    struct sockaddr_un a;
+    memset(&a, 0, sizeof a);
+    a.sun_family = AF_UNIX;
+    strcpy(a.sun_path, "/dev/log");
+    unlink("/dev/log");
+    if (bind(s, (struct sockaddr *)&a, sizeof a) < 0) _exit(2);
+    chmod("/dev/log", 0666);
+    for (;;) {
+        char buf[2048];
+        ssize_t n = recv(s, buf, sizeof buf - 1, 0);
+        if (n <= 0) { sleep(1); continue; }
+        buf[n] = 0;
+        int f = open("/tmp/gdm-syslog.log",
+                     O_WRONLY | O_CREAT | O_APPEND, 0644);
+        if (f >= 0) {
+            ssize_t off = 0;
+            while (off < n) {
+                ssize_t w = write(f, buf + off, n - off);
+                if (w <= 0) break;
+                off += w;
+            }
+            close(f);
+        }
+    }
+}
+
 int main(void) {
     // NOTE: SIGCHLD must stay SIG_DFL — SIG_IGN is inherited across
     // fork AND exec, and it makes gnome-session/glib waitpid() calls
@@ -376,8 +444,12 @@ int main(void) {
     char modebuf[16] = "";
     read_knob("/etc/runit-mode", modebuf, sizeof modebuf);
     // "gs" = unsupervised gnome-shell --replace (TCG-friendly: no 20s
-    // register deadline). Default "session" = full gnome-session chain.
-    const char *MODE = (modebuf[0] == 'g') ? "gs" : "session";
+    // register deadline). "gdm" = stock display-manager chain (logind +
+    // gdm3; see the gdm branch below). Default "session" = full
+    // gnome-session chain. Exact match only — "g" alone is NOT gs.
+    const char *MODE = "session";
+    if (strcmp(modebuf, "gs") == 0) MODE = "gs";
+    else if (strcmp(modebuf, "gdm") == 0) MODE = "gdm";
     printf("[runit] mode=%s\n", MODE);
 
     char tracebuf[8] = "";
@@ -488,24 +560,35 @@ int main(void) {
     }
     // Xorg output goes to the serial console (console=ttyS0) for
     // headless bring-up diagnosis; the log file copy stays as well.
-    pid_t xpid = fork();
-    if (xpid == 0) {
-        int xlog = open("/tmp/Xorg.log", O_WRONLY | O_CREAT | O_TRUNC, 0644);
-        if (xlog >= 0) { dup2(xlog, STDOUT_FILENO); dup2(xlog, STDERR_FILENO); }
-        int con = open("/dev/console", O_WRONLY);
-        if (con >= 0) { dup2(con, STDOUT_FILENO); dup2(con, STDERR_FILENO); }
-        int devnull = open("/dev/null", O_RDONLY);
-        if (devnull >= 0) { dup2(devnull, STDIN_FILENO); close(devnull); }
-        setsid();
-        // The riscv64 kernel does interpret shebangs, but exec the real
-        // server binary directly anyway — same as the proven x86 path.
-        execl("/usr/lib/xorg/Xorg", "Xorg", ":0",
-              "-config", "/etc/X11/xorg-fbdev.conf",
-              "-noreset", "-verbose", "3", (char *)NULL);
-        _exit(127);
+    // Xorg is runit's OWN bring-up server for the session/gs modes. In
+    // gdm mode gdm3 owns the display stack completely (its greeter X
+    // server, its vt/display bookkeeping) — a second Xorg from PID1
+    // would squat :0 and gdm's display would collide with it (r4: both
+    // ran; gdm3 died on an option anyway, but the design is single
+    // owner). gdk-pixbuf cache + stale-lock cleanup stay: cheap and
+    // idempotent, and the greeter wants the loaders cache too.
+    pid_t xpid = -1;
+    if (strcmp(MODE, "gdm") != 0) {
+        pid_t xfork = fork();
+        if (xfork == 0) {
+            int xlog = open("/tmp/Xorg.log", O_WRONLY | O_CREAT | O_TRUNC, 0644);
+            if (xlog >= 0) { dup2(xlog, STDOUT_FILENO); dup2(xlog, STDERR_FILENO); }
+            int con = open("/dev/console", O_WRONLY);
+            if (con >= 0) { dup2(con, STDOUT_FILENO); dup2(con, STDERR_FILENO); }
+            int devnull = open("/dev/null", O_RDONLY);
+            if (devnull >= 0) { dup2(devnull, STDIN_FILENO); close(devnull); }
+            setsid();
+            // The riscv64 kernel does interpret shebangs, but exec the real
+            // server binary directly anyway — same as the proven x86 path.
+            execl("/usr/lib/xorg/Xorg", "Xorg", ":0",
+                  "-config", "/etc/X11/xorg-fbdev.conf",
+                  "-noreset", "-verbose", "3", (char *)NULL);
+            _exit(127);
+        }
+        xpid = xfork;
+        wait_for_x(30);
+        sleep(2); // let GLX initialize before the first client connects
     }
-    wait_for_x(30);
-    sleep(2); // let GLX initialize before the first client connects
 
     printf("[runit] starting session chain (mode=%s session=%s)\n", MODE, SESSION);
     // Periodic log tailer: every 20s push the tail of the session logs
@@ -519,10 +602,18 @@ int main(void) {
             for (;;) {
                 sleep(20);
                 cyc++;
-                const char *logs[3] = { "/tmp/gnome-session.log",
+                // gdm-mode logs ride along (stat-guarded; missing files
+                // are skipped) so the first display-manager boots leave
+                // their forensics on the serial console too.
+                const char *logs[7] = { "/tmp/gnome-session.log",
                                         "/tmp/gnome-shell.log",
-                                        "/tmp/Xorg.log" };
-                for (int i = 0; i < 3; i++) {
+                                        "/tmp/Xorg.log",
+                                        "/tmp/logind.log",
+                                        "/tmp/gdm-syslog.log",
+                                        // gdm's X server logs (root-written)
+                                        "/var/log/Xorg.0.log",
+                                        NULL };
+                for (int i = 0; i < 6; i++) {
                     struct stat st;
                     if (stat(logs[i], &st) != 0) continue;
                     dump_log_prefix(logs[i], 150);
@@ -551,6 +642,140 @@ int main(void) {
                     dump_xstate();
             }
             _exit(0);
+        }
+    }
+    if (strcmp(MODE, "gdm") == 0) {
+        // Real display-manager path (gdm bring-up, session 17): runit
+        // starts ONLY the background daemons and hands the display to
+        // gdm3, which owns Xorg, the greeter session (gnome-shell
+        // --mode=gdm via gdm-session-worker), PAM authentication and
+        // the logged-in user session. No manual Xorg, no manual session
+        // bus, no session chain — everything past this point is stock.
+        // - /run/systemd/system makes sd_booted() return true for gdm
+        //   and libsystemd clients without systemd as PID1.
+        // - logind runs STANDALONE from the systemd package: it owns
+        //   org.freedesktop.login1 on the system bus, needs the cgroup2
+        //   mount (already up) and /dev/tty0 (kernel VT layer — the
+        //   bring-up question this mode maps).
+        mkdir("/run/systemd", 0755);
+        mkdir("/run/systemd/system", 0755);
+        // logind does NOT take --debug (r2 lesson: "unrecognized
+        // option" -> exit 1); debug level comes from this env var.
+        // G_MESSAGES_DEBUG=all: gdm3 logs through GLib to stderr —
+        // without it /tmp/gdm3.log stays empty (its syslog() calls go
+        // nowhere; there is no /dev/log on this image).
+        setenv("SYSTEMD_LOG_LEVEL", "debug", 1);
+        setenv("G_MESSAGES_DEBUG", "all", 1);
+        // /dev/log sink BEFORE gdm3: its syslog(3) lines are the
+        // primary debug stream (see start_devlog_sink).
+        start_devlog_sink();
+        // udevd + coldplug (r5 lesson): gdm3 never launches the greeter
+        // while seat0's CanGraphical is false, and logind's seat0 gets
+        // graphics devices ONLY through udev database tags
+        // (71-seat.rules: master-of-seat) — without udevd logind runs
+        // fine but its seat stays graphics-less and gdm idles forever.
+        // The kernel already broadcasts userspace-triggered uevents
+        // (write "add" to any /sys/.../uevent — sysfs uevent attr), so
+        // stock udevadm trigger coldplugs drm/input/graphics.
+        {
+            const char *const uargv[] = { "systemd-udevd", "--daemon", NULL };
+            pid_t upid = launch_logged("/tmp/udevd.log",
+                                       "/lib/systemd/systemd-udevd",
+                                       "systemd-udevd", uargv);
+            printf("[runit] systemd-udevd started (pid %d)\n", (int)upid);
+            sleep(3);
+            // Synchronous coldplug of the seat-relevant subsystems
+            // (full-tree trigger is slow under TCG for zero seat value).
+            const char *const trig[] = {
+                "udevadm", "trigger", "--action=add",
+                "--subsystem-match=drm",
+                "--subsystem-match=input",
+                "--subsystem-match=graphics", NULL };
+            run_console_wait("/usr/bin/udevadm", trig, 120);
+            const char *const settle[] = {
+                "udevadm", "settle", "--timeout=15", NULL };
+            run_console_wait("/usr/bin/udevadm", settle, 30);
+        }
+        {
+            const char *logind = "/lib/systemd/systemd-logind";
+            if (access(logind, X_OK) != 0)
+                logind = "/usr/lib/systemd/systemd-logind";
+            const char *const largv[] = { "systemd-logind", NULL };
+            pid_t lpid = launch_logged("/tmp/logind.log", logind,
+                                       "systemd-logind", largv);
+            printf("[runit] logind started (pid %d, %s)\n", (int)lpid, logind);
+            sleep(3); // own login1 on the system bus before gdm asks
+        }
+        {
+            const char *const gargv[] = { "gdm3", NULL };
+            pid_t gpid2 = launch_logged("/tmp/gdm3.log", "/usr/sbin/gdm3",
+                                        "gdm3", gargv);
+            printf("[runit] gdm3 started (pid %d)\n", (int)gpid2);
+            (void)gpid2;
+        }
+        // Ground-truth dumps (r7): 60 s after gdm3 starts, name the
+        // exact stall point on the console —
+        //   - udev database export (did the trigger tag card0
+        //     master-of-seat?)
+        //   - seat0 CanGraphical AS LOGININD SEES IT (gdm's gate)
+        //   - login1 ListSessions (any greeter session yet?)
+        // then every 120 s: shorter re-dumps so state transitions are
+        // visible. run_console_wait(60) bounds each probe.
+        {
+            pid_t d = fork();
+            if (d == 0) {
+                for (int cyc = 0;; cyc++) {
+                    sleep(cyc == 0 ? 60 : 120);
+                    int con = open("/dev/console", O_WRONLY);
+                    if (con >= 0) {
+                        dup2(con, STDOUT_FILENO); dup2(con, STDERR_FILENO);
+                    }
+                    printf("== gdm ground truth (cycle %d) ==\n", cyc);
+                    fflush(stdout);
+                    // (r8) verbose re-trigger FIRST: does enumeration
+                    // find the drm/input nodes at all, and does a live
+                    // trigger populate the udev db afterwards?
+                    const char *const trig2[] = {
+                        "udevadm", "trigger", "--action=add", "--verbose",
+                        "--subsystem-match=drm",
+                        "--subsystem-match=input",
+                        "--subsystem-match=graphics", NULL };
+                    run_console_wait("/usr/bin/udevadm", trig2, 60);
+                    const char *const rundump[] = {
+                        "sh", "-c",
+                        "echo '-- /run/udev --'; ls -la /run/udev /run/udev/data 2>&1 | head -14; "
+                        "echo '-- ps --'; ps -ef 2>&1 | grep -E 'udevd|logind|gdm|polkit' | grep -v grep | head -8",
+                        NULL };
+                    run_console_wait("/bin/sh", rundump, 20);
+                    const char *const uinfo[] = {
+                        "udevadm", "info", "--export-db", NULL };
+                    run_console_wait("/usr/bin/udevadm", uinfo, 30);
+                    const char *const cg[] = {
+                        "gdbus", "call", "--system",
+                        "--dest", "org.freedesktop.login1",
+                        "--object-path", "/org/freedesktop/login1/seat0",
+                        "--method", "org.freedesktop.DBus.Properties.Get",
+                        "org.freedesktop.login1.Seat", "CanGraphical", NULL };
+                    run_console_wait("/usr/bin/gdbus", cg, 25);
+                    const char *const ls[] = {
+                        "gdbus", "call", "--system",
+                        "--dest", "org.freedesktop.login1",
+                        "--object-path", "/org/freedesktop/login1",
+                        "--method",
+                        "org.freedesktop.login1.Manager.ListSessions",
+                        NULL };
+                    run_console_wait("/usr/bin/gdbus", ls, 25);
+                }
+            }
+            (void)d;
+        }
+        for (;;) {
+            int st;
+            pid_t p = wait(&st);
+            if (p > 0)
+                printf("[runit] child %d exited st=%d\n", (int)p, st);
+            else
+                sleep(2);
         }
     }
     if (strcmp(MODE, "gs") == 0) {

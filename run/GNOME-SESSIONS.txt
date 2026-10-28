@@ -998,3 +998,566 @@ were storm-inflated):
   mode and the kernel-halt path leaves the QEMU spinning forever;
   every session pays a manual kill. A `timeout 600s` wrapper (like
   the smoke scripts) would make rc meaningful without the spin.
+
+## Session 14 — 2026-10-28 day leg (main f15b9660 merged; the no-light
+## class ROOT-CAUSED and cut at the exit path)
+
+### Merge of main f15b9660 (trivial: our 49e41c06 is its second parent)
+- Kernel-source delta vs the predecessor's tree 1e382705: munmap wrap
+  fix (b5576562), wakewatch WW4 instruments, AF_UNIX read(2) direct
+  user-drain. 7 kernel files.
+
+### The no-light fork: root cause (mission 1) — VERDICT DELIVERED
+- Census separation is total. Every no-light boot (r16/r17/r20/r22)
+  carries 193-515 PREEMPT-HEAL firings (was=0x10001: leaked base
+  preempt bit 1 under the tick offset, held and re-leaked across every
+  10 s heal); every lit boot carries 0 (r19: 1 paint-class print).
+  The heal census alone separates the classes 4-vs-4.
+- Mechanism (r20, fully legible in the serial): during shell init a
+  thread-group member exits and parks DEAD on its leader's
+  dead_threads list, but its ownership qword {on_cpu=1, claim=X} is
+  never released — the R85 lost-release terminal microstate, this
+  time on the EXIT side. The reaper entering free_dead_member
+  (exit.rs) spins `while member.on_cpu()` FOREVER (FDM-WAIT
+  sweeper=538 member=677; r16: sweeper=535; both CPUs wedged in r20:
+  sweepers 538+544, 233 heals EACH). The pick-side R85 heal cannot
+  reach the member (it is unlinked; pick scans see linked tasks
+  only). With SMP=2 the two wedged sweepers starve the box: shell
+  wakeups WAKE-STRANDED behind them (pid=363 h1=(538/2610ms/pc=1),
+  strands 1-38 s), shell init never completes, xwininfo shows the
+  gnome-shell windows stuck 1x1, screen dark for the whole 2700 s.
+  Kernel stays panic-free and input delivery stays 1:1 into the dead
+  screen — every prior observation of the class falls out of this one
+  wedge.
+- Subclass split of the 4 dark boots: r16/r20 = the FDM lost-release
+  spin (fix below covers these). r17 = same census class but a
+  different un-sleepable loop (heal pid 482; NOT a sweeper — all its
+  FDM sweeps cleared; likely the do_wait/finish_wait family pa73
+  triaged; needs a taskdump capture to name). r22 = userspace heap
+  corruption ("malloc(): corrupted top size") aborting gnome-session
+  st=6 after 82 s, then the fallback path (gnome-shell --replace)
+  and runit itself wedge (pid=1 + 0x1cd heals) — a distinct subclass,
+  not kernel-scheduling.
+- FIX (commit a384048c, R86): the exit-side twin of the R85 pick-side
+  adjudication. free_dead_member's wait is bounded at 300 jiffies
+  (3 s, ~1000x the legitimate TCG switch-out window); past the
+  deadline member_release_stale_ownership (sched.rs) adjudicates
+  under the GRQ — a DEAD, unlinked member named by NO CPU slot and NO
+  in-flight SWITCHING_OUT executes nowhere and nothing will ever
+  release its marks — and releases them with the exact store the
+  switch protocol would have made (idempotent), with a capped
+  FDM-STALE-RELEASE report carrying the R85 context tail. A live
+  owner re-arms the deadline: legitimate windows behave exactly as
+  before. GRQ-held read is required and sufficient: the slot flip and
+  SWITCHING_OUT publish share one GRQ hold, so the reader can never
+  free a task whose switch-out is still writing its saved context.
+- Gate for the fix: dual-arch build rc=0 (riscv64+x86_64); minimal-
+  rootfs rv smoke 0 panics, prompt reached; make test ALL TESTS
+  PASSED (exit 0, self-cleaned by the new bounded runner).
+
+### Oh-no collapse (mission 2) — trigger identified, same producer family
+- Both collapse boots show the SAME trigger: gsd daemons miss the
+  session registration deadline — r15: Color/XSettings/Wacom/
+  MediaKeys/Keyboard "failed to register before timeout"; r19:
+  MediaKeys/Keyboard/Color. gnome-session then declares failure and
+  paints the fullscreen Gnome-session-failed dialog (the "Oh-no").
+- At the same wall-clock windows the serial shows WAKE-STRANDED
+  bursts whose HOLDERS carry leaked counts (pc=1 base; pc=65536/7/8
+  leaked hardirq nesting) stranding wakes 1-6 s. Lit boots show the
+  same holder kinds at 3-per-boot background level and ZERO
+  registration timeouts (r18/r21/r23val: 0). The collapse is the
+  milder form of the same leak-producer family: transient
+  un-preemptible holders stretch gsd startup past its 20 s-class
+  registration window. NOT a shell bug.
+- Fix directions: kernel leak producers (stress-fleet/wildwrite-hunt
+  lanes own them) or image-side registration-timeout raise. No
+  image change this leg.
+
+### r23val (first validation boot on the fixed tree): LIT + survived
+- M4 @450 s, M5 @571 s, full 2700 s, 0 panics/OOM/SIGDEATH, 0
+  registration timeouts, 0 failed-dialog marks, 0 PREEMPT-HEAL, 0
+  FDM-STALE-RELEASE (the producer did not strike this boot — the heal
+  path stayed unexercised; honest limit), 1 paint-class underflow
+  (pid=deadbeef count_was=c3c3c3c3 at sched.rs:0x145 — the freed-slot
+  guard print, not a wedge). 142 WAKE-STRANDED (r21's churn class).
+- Input 3/3 1:1 with 0 phantoms; XWALK xterm black-samples
+  18->45->79: every probe set rendered IMMEDIATELY (r18 lagged set 1
+  by tens of seconds; this boot had no lag). convcheck: echo level
+  held, conversation-signature NO — final shot shows 7 text lines
+  (a taller ink-907 band + a 309-326 band r18/r21 never had) and no
+  block cursor; the xterm content itself changed this boot. The
+  2-boot conversation claim stays at r18type+r21type (unchanged;
+  geometry class not reproduced here).
+- Boot census on the fixed tree: lit 1/1 so far (r24val running as
+  this is written; prior-tree rate was 9/13).
+
+### Infra (mission 4b): make-test timeout wrapper — LANDED (c7406c4c)
+- test/run.sh test mode now wraps QEMU in timeout(1) (TERM, KILL
+  after 30 s, MAKETEST_TIMEOUT overrides the 600 s default) and
+  derives the exit code from the captured suite verdict: green
+  verdict + wrapper kill = exit 0 (the kernel-halt spin no longer
+  fails the build), failures = 1, no verdict before the timeout = 1
+  with the log path kept. Verified end-to-end this leg: "test: suite
+  verdict green; QEMU wrapper rc=124 (killed after kernel halt)",
+  MAKETEST_EXIT=0, temp log self-cleaned. Console/gui modes unchanged.
+
+### Right-side indicators (mission 4a): unchanged, still open
+- panelcheck on r23val shot-2700s: right_side=none (identical to
+  every prior frame class). Consistent with the gsd subset that
+  survives registration; needs the indicator services chain healthy
+  first — tied to the Oh-no/registration story above.
+
+### Handoff state
+- Branch feature/gnome-bringup at 18bc8e5b (merge f15b9660 + R86 fix
+  a384048c + run.sh wrapper c7406c4c + this ledger). No kernel-source
+  changes beyond the R86 fix.
+- Perf-gate pre-verification (Tier 1 syscost / Tier 2 pbench) still
+  owed for the R86 merge — host was at load 11-15 all leg; the gate
+  script refused ("11 foreign QEMUs already running", its own
+  host-capacity guard); an auto-retry watcher is armed for the next
+  quiet window (run/perf-gate-r23gate.log when it lands). The change
+  sits off every measured hot path (exit-sweep wait loop only; the
+  adjudication fires at most once per 3 s per stuck member), so the
+  expectation is no movement, but the gate wants the numbers.
+
+### r24val addendum (second validation boot on the fixed tree): LIT +
+### survived — fixed-tree census now 2/2
+- M4 @420 s, M5 @511 s, full 2700 s, 0 panics/OOM/SIGDEATH, 0
+  registration timeouts, 0 failed-dialog marks, 0 FDM-STALE-RELEASE.
+- ONE transient PREEMPT-HEAL (pid 0x200, was=0x1 — a pure base-bit
+  leak, single firing, held exactly the 10 s heal window, no re-leak):
+  the leak producer struck ONCE in its mild form and the task
+  recovered. This is the first boot where the producer is VISIBLE on
+  the fixed tree without producing a wedge or a dark screen.
+- Interactive variance (userspace-side, not kernel): convcheck
+  kbd30=1/1 kbd28=1/1 (clean pairs, 0 phantoms — kernel delivery
+  clean), but the XWALK xterm black-samples stayed flat at 17 — only
+  the first probe set echoed into the xterm; sets 2/3 did not land in
+  the window (focus/content variance between boots, the same
+  userspace-side sequencing family r18 lagged on). Conversation
+  signature NO this boot (2 text lines + block cursor at x=262); the
+  2-boot conversation claim stays r18type+r21type.
+- Fixed-tree boot census: lit 2/2, survived-with-probes 2/2 (prior
+  tree: lit 9/13, survived 2/4 of interactive lit boots). Small
+  numbers, honest read: two clean boots, no dark boot yet on the
+  fixed tree, and the heal path remains unexercised live — the
+  producer did not strike an FDM sweep in either boot.
+
+## Session 15 — 2026-10-28 (r24val/r25val harvest; r24val record
+## corrected; origin/main merged; census + Oh-no verdicts; merge queue
+## closed to ready-with-debt)
+
+### r25val (third validation boot on the fixed tree): DARK from the
+### start — the producer's hard early-boot live-leak form; NOT the FDM
+### subclass
+- Never reached M4 (best nonblack 0.0001). start_gnome markers repeat
+  at 8.4/28.4/30.9 s (session restarts); xwininfo in-guest shows the
+  gnome-shell window stuck 1x1 — the same visible shape as the prior
+  dark boots.
+- Mechanism, from the clean serial log: a continuous leak loop, not a
+  wedge behind an exit. Holder census: pid 1 (cpu1) leaks pc=65537
+  first, then pid 480 (cpu0) holds with growing windows 721 ms ->
+  16.7 s; 510 PREEMPT-HEALs to the end of the 2700 s run = the heal
+  loop alternating cpu0/pid-480 and cpu1/pid-1, both healed from
+  was=0x10001 (base+hardirq bits) every 10 s window, each heal
+  followed by an unpaired decrement clamped to 0 — the counts re-leak
+  immediately; this is a standing leak, not a transient one like
+  r24val's single base-bit heal. 21 WAKE-STRANDED (holders pc=1..2,
+  257/258, 65537/65538) strand wakes 1-16 s through session bring-up.
+- FDM-STALE-RELEASE fired ZERO times: the R86 adjudication path never
+  triggered. This boot is NOT the exit-side dead-member subclass the
+  fix heals (r16/r20); it is the LIVE leaked-holder storm — the same
+  family as r17's live-loop subclass (heal pid 482 there). By
+  construction R86 cannot cover it: it adjudicates DEAD members named
+  by no slot; pid 1 and pid 480 are alive and continuously re-leak.
+- leakhunt fingerprints: PARKED-WILDWRITE pid 357 + PARKED-LEAK pids
+  357/519 through the boot (low rate) — consistent with the producer
+  shape the stress-fleet/wildwrite-hunt lanes are chasing; the leak
+  producer itself remains their work, per the lane split.
+- No Oh-no: zero "failed to register" lines — the session died before
+  the gsd registration deadline was ever reached, so r25val is not
+  evidence for or against the Oh-no mechanism.
+
+### r24val record CORRECTED: lit and interactive for the first ~1870 s,
+### then WEDGED (deadlock-watchdog storm) to the end — not "survived"
+- The r24val addendum above missed this: the clean serial log carries
+  45 "DEADLOCK: spinlock stuck cpu=0 lock=0xffffffd6044e61b0
+  ra=spinlock.rs:143" prints. Onset between the t=1860 s and t=1890 s
+  shots (~2 prints per 30 s window from there to 2700 s = the
+  watchdog period). Task dumps show cpu0 running pid 564 and cpu1's
+  GRQ slot reading 0xdeadbeef (the freed-slot paint) marked busy.
+- The screen kept 96% nonblack only because virtio-gpu scanout holds
+  the last frame: shots from t=1890 s to t=2670 s are pixel-identical
+  (top-color counts all equal). Input probe sets 2 (t=1915/1925) and
+  3 (t=2415/2425) fell after onset and did not echo — XWALK flat at
+  17 (= set 1 only) is the wedge, not focus variance as the addendum
+  read it. Set 1 (t=1415/1425) landed while the box was healthy.
+- Producer fingerprints at onset: 21 PARKED-LEAK/WILDWRITE lines
+  spread through the boot; the last (pid 500, pc=0x10000 — hardirq
+  class) lands ~100 serial lines before the first DEADLOCK print.
+  Strand holders include 3 leaked-hardirq samples (2x pc=65536, 1x
+  pc=65538) — the r15/r19 collapse signature present at low volume
+  WITHOUT any registration timeout (the session was long up; the
+  20 s-class deadline was past).
+- Reclassified verdict: LIT (M4@420, M5@511), interactive through
+  probe set 1, wedged ~=t=1870..2700, no panic/OOM/SIGDEATH, kernel
+  kept scheduling enough for the watchdog to print every period. For
+  the census below it counts as lit-but-wedged-late, NOT a clean
+  survival; the addendum's "survived 2/2" claim was wrong and is
+  superseded by this entry.
+
+### Fixed-tree boot census (mission 4): lit 2/3, clean-to-2700 s 1/3 —
+### no lit-rate claim
+- r23val LIT clean (2700 s, 1 transient paint-guard print), r24val
+  LIT then wedged ~=t=1870, r25val DARK from the start. FDM-subclass
+  dark boots: 0/3 on the fixed tree (prior tree: 2 of its 4 dark
+  boots were the FDM pair r16/r20) — the subclass the fix targets did
+  not recur. The live-leak subclass did (r25val), and it produced the
+  late wedge on r24val too.
+- Against the prior tree's 9/13 lit rate, 2/3 says nothing at this n;
+  the honest claim is subclass-level: the exit-side FDM wedge is gone
+  from the observed set; the producer's live-leak form still kills
+  boots and is not this lane's to fix.
+
+### Oh-no verdict (mission 2): absent on all 3 validation boots — but
+### its death is NOT attributable to the R86 fix
+- Zero "failed to register" and zero failed-dialog marks on r23val,
+  r24val (both reached a live session), r25val (died pre-gsd, not
+  evidence). The mild producer form DID appear on r24val — one
+  transient base-bit PREEMPT-HEAL, recovered in its 10 s window, no
+  registration timeout — and the harder forms appeared as r25val's
+  standing loop and r24val's late wedge.
+- Read: R86 heals the exit-side wedge; the Oh-no trigger (leaked
+  holders stretching gsd startup) is producer behavior the fix does
+  not touch. Three boots with the producer visible and zero
+  registration timeouts is a positive signal, not proof — recorded as
+  such. The producer itself stays with the stress-fleet/wildwrite-hunt
+  lanes.
+
+### Right-side indicators (mission 3): unchanged
+- panelcheck on the r24val healthy lit frame (shot-1440s, pre-wedge):
+  right_side=none, identical to every prior frame class. Still gated
+  on the gsd indicator chain.
+
+### Merge queue for the R86 fix (a384048c) — closed to READY-WITH-DEBT
+- origin/main 2a960538 merged into the branch (merge 259a0ec5; brings
+  vmscan deep drain, F4 arm-2 revokes, R37 timer slot table, munmap
+  wrap fix, leakhunt instrument). No conflicts; R86 fix verified
+  present in HEAD.
+- Functional gate on the MERGED tree: PLATFORM=x86_64 build rc=0;
+  default (riscv64) rebuild rc=0; make test ALL TESTS PASSED 1122/0
+  (run/maketest-r26merge.log); minimal-rootfs rv smoke 0 panics,
+  prompt reached, /proc up (run/rv-smoke-r26merge-out.log, rc=0).
+- Tier 1 syscost + Tier 2 pbench (sched/ is a Tier-2 domain) remain
+  the owed numbers: the host has run 12 foreign QEMUs all day (10 of
+  them the wwh lane's, actively spawning), the gate's capacity guard
+  refuses, and the predecessor's 27-minute watcher expired. A patient
+  watcher is armed: run/r26gate-watch.sh (detached; polls 5-minute
+  intervals for 6 h; fires run/perf-gate.sh --tiers 1,2 --tag r26gate
+  the first time foreign QEMU count < 2; log
+  run/perf-gate-r26gate.log). Expected result is no movement — the
+  change sits off every measured hot path — but the numbers are owed
+  and the watcher will produce them at the first quiet window.
+- This mirrors main's own head (2a960538 merged with "Tier-1 pa83
+  queued behind quiet gate as recorded debt"): functional gate green,
+  tier numbers as recorded debt with an armed watcher. Ready for the
+  coordinator subject to that same debt pattern.
+
+## Session 15 addendum — README v2 asset reshoot (user feedback
+## 2026-10-28): NOT DELIVERED; merged-tree interactive regression
+## found instead (merge-queue verdict REVISED)
+
+Mission: replace the 'a'-probe conversation asset with `echo rux` +
+`uname -r`, single-canvas inset composition. Scripts landed (all
+committed): run/v2type-boot.sh (types both commands, click-to-focus,
+jiggle, BASE_T-shifted schedule), run/convcheck-v2.py (exact key-
+sequence INPTRC subsequence check + byte-level release recovery +
+window-pixel diff "typed-text-rendered" check + line-band decode +
+block-cursor + cross-boot geometry), run/readme-v2-compose.py (single
+canvas: desktop frame + highlight rect on the exact source region +
+connector lines + 3x NEAREST inset; dry-run verified on r21type).
+
+Boot log (all on the merged tree 259a0ec5 = main 2a960538 + R86):
+- v2a attempt 1: kernel PANIC at t=2s — operational slip, NOT a code
+  regression: a parallel `make test` (test mode forces the unit-test
+  feature) raced the normal rebuild and left a test kernel in
+  target/.../debug/rux; its boot self-test [118] framebuffer test
+  painted the real virtio-gpu and faulted (pfault 0x81a00000,
+  tests/framebuffer.rs:42 fill_rect). Runs kept as
+  runs/gnome-v2a-unitkernel. Lesson recorded: never run `make build`
+  and `make test` concurrently on one target dir; after make test,
+  rebuild before booting normal images. (This panic also shows the
+  boot self-test suite paints the live GPU when present — worth a
+  lane note; the minimal-rootfs gate never sees it.)
+- v2a attempt 2: dark from the start (leak-storm class, 0 session
+  markers by 900 s) — killed early, archived runs/gnome-v2a-dark1.
+- v2a attempt 3 (typing at 1415/1465): lit 601/751; kernel delivered
+  all 18 keys (script subsequence YES, 0 phantoms); xterm rendered
+  NOTHING (pixel-diff vs 1350: only title-bar repaint + one 9px
+  cursor-cell move); session collapsed ~1440-1470 to the Oh-no
+  dialog (gnome-session-failed), zero "failed to register" lines.
+- v2b (1415/1465): lit 511; INPTRC 18/18 fully paired; xterm content
+  flat all boot (XWALK black 17->9); scanout froze at ~570 s with the
+  first desktop frame (the "conversation" first read into that frame
+  was an eyeball artifact — pixel decode shows prompt+cursor+one
+  pre-existing status line only; decode-not-eyeball discipline
+  upheld); final state = Oh-no dialog, same final-frame hash as v2c.
+- v2c (typing moved EARLY, 815/865, away from the collapse window):
+  lit 331/390; INPTRC 18/18; title bar repainted in the typing
+  windows (bash title escape sequences processed = keys REACHED
+  bash via the pty); text rows never changed; Oh-no by 900 s.
+
+THE FINDING (for the merge handoff — REVISES the session-15
+ready-with-debt verdict):
+- On the merged tree, 3/3 boots: kernel input delivery clean, the
+  xterm's OWN window content never updates (client-drawn text path
+  broken — WM/title repaints land, client content does not; the
+  image's known Xorg/mutter texture-from-pixmap frontier), and every
+  session ends in the Oh-no dialog with ZERO gsd registration-timeout
+  prints (a different collapse signature than r15/r19).
+- Pre-merge boots (r24val on f15b9660+R86, same image, same driver
+  family): typed probes rendered (XWALK 18->45->79). The break
+  arrived with main 2a960538's content (vmscan deep drain / F4 arm-2
+  revokes / R37 timer slot table are the candidates touching this).
+- Confounder, stated honestly: the host ran 20+ foreign QEMUs all
+  afternoon (wwh lane); a load-sensitive render path could produce
+  the same 0/3. A quiet-host rerun of ONE v2 boot settles it: if the
+  text renders, it is load sensitivity; if not, the merge carries a
+  GNOME-image interactive regression and main needs it fixed before
+  the GNOME lane can merge forward. The r26gate quiet-window watcher
+  is already armed for the perf tiers; the same window serves this.
+- Census impact: the three v2 boots add 1 dark + 2 Oh-no-collapse
+  boots on the merged tree (r25val-class dark + the new collapse
+  shape); no lit-rate claim either way at these numbers.
+- The v1 README asset stays in place until a healthy boot verifies
+  the v2 conversation; every production/verification script is
+  committed so the asset is one verified boot away.
+
+## Session 16 — AB adjudication: the merged-tree "interactive
+## regression" is LOAD SENSITIVITY, not a 2a960538 regression
+
+The interleaved A/B chain (dispatched at the end of session 15)
+completed during the session break: runs/ab-adjudication.log shows
+ab-a1 A rc=3 / ab-b1 B rc=3 / ab-a2 A rc=3 / ab-b2 B rc=3. All four
+boots adjudicated from their full artifact sets
+(runs/gnome-ab-a1|b1|a2|b2 + ab-*-driver.log).
+
+Setup (verified from cmdline.txt and git rev-parse, not assumed):
+- Arm A = the merged tree 259a0ec5 content (worktree kernel, the
+  12:39 r26merge-rv3 build; HEAD 7235e6f2 is tooling-only on top).
+- Arm B = pre-merge control 18bc8e5b = f15b9660 + R86 (a384048c) +
+  the test-wrapper/ledger commits, kernel /tmp/rux-abB (built 14:22).
+- Same image (work/gnome-r13.img), same driver family, same typing
+  schedule as the v2 asset boots: click-to-focus t=800, `echo rux`
+  815..831, `uname -r` 865..881; 965 s per boot; dfx=watchdog,
+  inputtrace; smp2/2G snapshot. Interleaved A,B,A,B under 16-20
+  foreign QEMUs (wwh/oh-display lanes).
+
+What rc=3 was, per boot (none is an early-terminate or driver error):
+fire.py's FIRE-PARTIAL milestone verdict after the FULL 965 s —
+- ab-a1 (A): M4 lit @270 s, M5 desktop @301 s; collapsed ~850-870 s
+  (right after the typing window) to the Oh-no final class.
+- ab-b1 (B): never lit — dark the whole boot (best nonblack 0.0001),
+  the r25val leak-storm shape (18 PARKED-LEAK/WILDWRITE lines).
+- ab-a2 (A): M4 lit @240 s, M5 never reached; final = uniform
+  background (no dialog elements).
+- ab-b2 (B): M4 lit @391 s, M5 desktop @480 s; collapsed after the
+  typing window to the Oh-no final class.
+M2_gsd_daemon / M3_gnome_shell serial milestones missing on ALL FOUR
+boots including the control — they never distinguish anything at
+loglevel=3 on this image. Zero panics / OOM / SIGDEATH on all four.
+
+The three load-bearing equalities (convcheck-v2 + pixel decode):
+1. Kernel input delivery perfect on BOTH arms: 18/18 presses paired,
+   0 phantoms, script subsequence YES — all four boots.
+2. Typed text rendered on NEITHER arm: XWALK xterm content-grew=NO
+   everywhere (a1 17->9, b2 18->10 = the end-of-session window
+   destroy, not typing); final frames decode as one giant ink band.
+3. The failure CLASSES cross the arms: the Oh-no final-frame class
+   (#202000:x1007425/1007457 with the identical #2080c0:x1344
+   element, same class as the v2b/v2c finals) landed on ab-a1 (A)
+   AND ab-b2 (B); the dark class landed on arm B; the
+   uniform-background class on arm A. at-spi "Failed to register
+   client" warnings (AlreadyRegistered/AuthenticationAgent — NOT the
+   r15/r19 gsd 20 s-deadline class) appear a1=19, b2=19, a2=5, b1=4:
+   they track how far the session got, not the arm. Leak markers on
+   all four (a1=13, b1=18, b2=15, a2=2).
+
+VERDICT: NOT a 2a960538 regression. Under equal load the pre-merge
+control fails identically — no typed-text render, the same Oh-no
+final class, and one fully-dark boot (worse than either A boot: A
+lit 2/2 with desktop 1/2; B lit 1/2 with desktop 1/2). Per-boot
+variance dominates arm variance. Session 15's "merged-tree
+interactive regression" is reclassified as LOAD SENSITIVITY of the
+render/session path that predates the merge (r24val rendered only on
+a quieter host). No one-variable bisection (vmscan/F4/R37) is
+warranted for the GNOME gate; the R86 merge-queue verdict un-blocks
+on the GNOME side. Confirmation step kept: the quiet-host v2 boot
+(armed below) must still produce a healthy typed render — that boot
+is simultaneously the asset prerequisite; if it fails on a genuinely
+quiet host, the question re-opens with new evidence.
+
+Quiet-window machinery: the r26gate watcher (armed 12:10, 6 h ->
+expires ~18:10, still waiting at 17:14 with 16 foreign QEMUs up)
+serves Tier-1/Tier-2. run/v2quiet-watch.sh is armed after it: it
+yields to the r26gate gate run, then at the next <2-foreign window
+boots v2quiet (BASE_T=815), runs convcheck-v2, and if verified
+boots v2quiet2 for the cross-boot geometry check the asset rule
+requires. Log: run/v2quiet-watch.log.
+
+## Session 17 — gdm login bring-up: first boots, blocker map through
+## logind-up (kernel netlink + statfs fixes)
+
+Mission (user-facing): the real gdm login screen — gdm → greeter →
+PAM → logind seat → accountsservice. Scope from the image + ignition
+driver (all committed):
+
+SCOPE (what the stack had vs needed):
+- The r13 chain skips the entire login layer: runit (PID1) starts
+  system dbus, session dbus, upowerd, accounts-daemon, Xorg (root,
+  static fbdev config) and gnome-session AS ROOT. No gdm, no PAM, no
+  logind, no udev, no non-root users, no VTs.
+- Kernel gaps found by scoping: NO VT layer (/dev/tty0-7, VT_*/KD_*
+  ioctls, /sys/class/tty) — may still bite at the greeter-X stage;
+  netlink only ROUTE+KOBJECT_UEVENT (no AUDIT — tolerated by logind);
+  cgroup2 mkdir EXISTS (session scopes can be created); uevent WRITE
+  on /sys/.../uevent already broadcasts Linux-format uevents (U1a) —
+  stock udevd should coldplug.
+- gdm3 42 closure: do NOT let apt-cache --recurse walk gdm3's Depends
+  (the "ubuntu-session | gnome-session | x-session-manager |
+  x-window-manager | ..." alternative chain pulls EVERY provider:
+  enlightenment-data 382M, soundfonts, clisp, guile — 800+ debs).
+  Explicit concrete list + gdm3 deb without recursion + DT_NEEDED
+  verification: 195 debs, all present (run/gdm-img.sh).
+
+IMAGE (run/gdm-img.sh → work/gnome-gdm-r1.img, r13 staging + layer):
+- gdm3 + systemd (logind source) + udev + libpam + policykit-1 +
+  gdm's runtime libs; users gdm (120) + rux (1000, password "rux",
+  sha512-crypt fixed salt); pam_loginuid downgraded to optional (no
+  /proc/self/loginuid on Rux); custom.conf: WaylandEnable=false,
+  [debug] Enable, [server-X0] pinned to the PROVEN fbdev Xorg
+  invocation (gdm's autoconfig otherwise picks modesetting on
+  /dev/dri/card0 — Rux's DRM node — an unproven path); runit rebuilt
+  with a "gdm" mode (kernel cmdline runit-mode=gdm, -snapshot keeps
+  session/gs boots possible on the same image).
+
+BOOT MAP (all logs runs/gdmr1..r6*-driver.log):
+- r1: system bus up; logind started then EXITED 1 (image bug: --debug
+  is not a systemd-logind option); gdm3 SURVIVED, dbus-activation
+  WORKS (polkitd auto-started via the setuid launch helper); gdm's
+  Xorg ran via autoconfig→DRM. Screen black.
+- r2 (tailer fixed): logind's true failure captured:
+  "sd-device-monitor: Failed to set address: Invalid argument" →
+  "Failed to create udev watchers" → exit. Plus "Unknown filesystem
+  type 73636673 on /sys/fs/cgroup" (statfs magic leak).
+- KERNEL FIXES (r3 kernel): (1) sys_getsockname dispatched the
+  AF_NETLINK branch AFTER a generic addrlen<16→EINVAL gate, but
+  sockaddr_nl is 12 bytes — EVERY netlink getsockname failed EINVAL;
+  moved the netlink branch before the gate (same exemption AF_UNIX
+  has), requiring ≥12. (2) setsockopt(SOL_NETLINK=270,...) returned
+  ENOPROTOOPT — now accepted (membership is bookkeeping-only: Rux
+  fans uevents to all listeners). (3) statfs on cgroup2 inodes fell
+  to the rootfs filler (f_type 0x73636673) — CGROUP_INODE_OPS branch
+  added returning CGROUP2_SUPER_MAGIC 0x63677270.
+- r4: WITH THE FIXES — logind FULLY UP: "Found cgroup2 on
+  /sys/fs/cgroup/, full unified hierarchy", device monitor degraded
+  (no udev daemon) but NON-FATAL, bus HELLO→RUNNING, "Successfully
+  acquired requested service name" (org.freedesktop.login1 owned),
+  "New seat seat0." Also: gdm 42 has NO --no-daemon (option parse
+  exit); runit's own Xorg must not run in gdm mode (display :0
+  collision). Xorg writes /var/log/Xorg.0.log even under gdm —
+  tailer updated.
+- r5 (runit owns nothing; gdm3 daemonized+alive; logind up): gdm3
+  IDLES — no greeter X, no gdm-session-worker, screen black at 420 s.
+  Read: seat0.CanGraphical never becomes true — logind attaches
+  graphics devices to the seat ONLY via udev database tags
+  (71-seat.rules master-of-seat); with no udev daemon the tags are
+  absent and gdm's local display factory waits forever.
+- r6 (in flight): udev package added (udevadm + 71-seat.rules);
+  runit gdm mode now starts systemd-udevd --daemon, udevadm trigger
+  (drm/input/graphics) + settle BEFORE logind — the stock chain on
+  top of Rux's existing uevent-broadcast kernel support.
+
+NEXT (if r6 stalls): the VT layer is the remaining scoping risk —
+gdm/logind's display bookkeeping (TakeControl/vt allocation) may
+still need /dev/tty0 + VT ioctls + /sys/class/tty. Also gdm3's own
+log is uncaptured (daemonized; syslog-less image) — a /dev/log sink
+is the instrument if the greeter still does not launch.
+
+### Session 17 addendum — r6/r7: gdm names its own gate; udev database
+### is the frontier
+
+- r6 (udevd + trigger + settle before logind): logind's udev monitor
+  ENABLED (the "udev service seems not active" line is gone); gdm3
+  daemonized and STAYED UP; a client (gdm3) actively called login1
+  ListSeats. Still no greeter X.
+- r7 (the /dev/log sink — a tiny AF_UNIX DGRAM reader in runit bound
+  to /dev/log appending to /tmp/gdm-syslog.log — FINALLY captures
+  gdm3's syslog stream; plus ground-truth dumps: udevadm info -e,
+  seat0 CanGraphical, ListSessions): gdm3's own narrative on serial:
+  "Changing user:group to gdm:gdm" (the privilege drop works),
+  "GDM starting to manage displays", "Successfully connected to
+  D-Bus", "New displays on seat0 will use x11", "Checking if udev
+  has settled enough to support graphics", "udev timed out,
+  proceeding anyway", and the retry loop: "seat0 doesn't yet support
+  graphics.  Waiting 10 seconds to try again." / "udev has no
+  candidate graphics devices available yet."
+  Ground truth: udevadm info --export-db is EMPTY (the r6 trigger
+  populated nothing); gdbus seat0 CanGraphical -> "Unknown object
+  /org/freedesktop/login1/seat0" (logind prints "New seat seat0."
+  but its seat bus object is not exported until the seat gets a
+  device); ListSessions -> ().
+- READ: gdm is healthy and waiting on ONE property: seat0.CanGraphical,
+  which logind computes ONLY from udev-database device tags
+  (71-seat.rules master-of-seat on card0). The frontier is the empty
+  udev database: either udevadm trigger enumerates no devices, or
+  udevd discards the Rux uevents (DEVPATH shape / sysfs symlink
+  canonicalization — the same realpath family as the r10
+  xf86-input-libinput "Invalid path" kernel-hunt item). r8 (in
+  flight) adds: verbose re-trigger (enumeration listing), /run/udev
+  + /run/udev/data listing, ps -ef for udevd/logind/gdm liveness,
+  then export-db again — naming which side fails.
+- Operational note (lesson re-learned): the r7 first attempt raced my
+  own make test — gdm-img.sh's mkfs+e2fsck phase ran ~35 min (the
+  staging tree grew with the gdm closure), fire.py loaded the kernel
+  exactly while cargo wrote the test kernel, and the boot panicked at
+  tests/framebuffer.rs fill_rect (0x81a00000 — the v2a signature).
+  Never launch a build+boot chain and a make test in overlapping
+  windows; the kernel load happens at chain END, not launch. Functional
+  gate for the kernel fixes is GREEN and unaffected (run in a clean
+  window): x86_64 rc=0, make test ALL TESTS PASSED, kernel restored
+  (md5 f4715ca4f724, verified against the pre-test snapshot).
+
+### Session 17 addendum 2 — r8 verdict: udev enumeration finds ZERO
+### devices; the kernel item is the sysfs `subsystem` symlink
+
+- r8 diagnostics (verbose re-trigger, /run/udev listing, ps -ef):
+  `udevadm trigger --verbose --subsystem-match=drm,input,graphics`
+  printed NOTHING — sd-device enumeration produced zero candidates.
+  /run/udev exists with the control socket udevd made, but no data/
+  directory was ever created (zero events processed into the db).
+  ps -ef WORKS on Rux (procps) and shows the full chain alive as
+  PID-1 orphans: polkitd(323), systemd-udevd(330),
+  systemd-logind(333), gdm3(336).
+- READ: the break is BEFORE udevd — in sd-device's device discovery.
+  Leading suspect: Rux sysfs device directories lack the `subsystem`
+  readlink (Linux: /sys/devices/.../drm/card0/subsystem ->
+  ../../../../class/drm) that sd_device_get_subsystem resolves;
+  without it the enumerator silently skips every candidate (same
+  family as the uevent-READ content question: Rux's uevent attr read
+  returns MAJOR/MINOR/DEVNAME without SUBSYSTEM). Follow-up kernel
+  work item, precisely scoped: add the `subsystem` symlink to every
+  sysfs device kobject dir (input, drm, net, block, tty) and include
+  SUBSYSTEM= in uevent attr reads; then re-run gdmr8 — gdm's
+  seat0.CanGraphical gate is the very next domino.
+- Session summary: gdm → greeter → PAM → logind → accountsservice
+  chain state on Rux after r1-r8 — accountsservice up (runit),
+  polkitd dbus-activates (setuid helper works), systemd-logind runs
+  STANDALONE (kernel fixes: netlink getsockname/addrlen, SOL_NETLINK
+  sockopts, cgroup2 statfs magic), owns login1, creates seat0;
+  gdm3 daemonizes, drops to gdm:gdm, connects, chooses x11, and
+  idles in its 10s retry loop on seat0.CanGraphical blocked only by
+  the empty udev database (sysfs device discovery). The greeter X,
+  PAM (user rux/rux shadow-hash staged), and the login screen have
+  NOT yet been reached — they are the next milestones once the udev
+  db populates.

@@ -68,6 +68,15 @@ p.add_argument("--jiggle", default="",
                     "defeats the gsd-power idle blank (~120-150 s after "
                     "the last input the session blanks to wallpaper), the "
                     "same thing a human wiggling the mouse does")
+p.add_argument("--serial-cmd", default="",
+               help="comma list of elapsed-seconds:STRING to write to the "
+                    "guest serial at that moment (e.g. 900:DUMP! — no "
+                    "commas or colons inside the payload). This driver "
+                    "owns the ONLY live connection to the serial chardev; "
+                    "a second external connect is silently queued by QEMU "
+                    "and its bytes never reach the guest, so the kernel's "
+                    "dfx=taskdump 'DUMP!' magic (uart_rx_debug_magic) can "
+                    "only be triggered through this option")
 args = p.parse_args()
 
 OUT = os.path.join(WT, "runs", f"gnome-{args.tag}")
@@ -348,6 +357,19 @@ if args.jiggle:
 jiggle_state = [jiggle[0] if jiggle else 1 << 30, False]
 mousemove = [int(x) for x in args.mousemove.split(",") if x.strip()]
 clickprobe = [int(x) for x in args.clickprobe.split(",") if x.strip()]
+# --serial-cmd 300:DUMP![,600:...]: raw bytes to the guest serial at
+# each listed elapsed second. Uses THIS driver's ser socket — the only
+# live client of the chardev.
+serialcmd = []
+for x in args.serial_cmd.split(","):
+    x = x.strip()
+    if not x:
+        continue
+    if ":" not in x:
+        p.error("--serial-cmd needs TIME:STRING (e.g. 900:DUMP!)")
+    t, payload = x.split(":", 1)
+    serialcmd.append((int(t), payload.encode("utf-8", "strict")))
+serialcmd.sort(key=lambda e: e[0])
 qmp = None
 exit_reason = "timeout"
 try:
@@ -460,6 +482,19 @@ try:
                               f"press+release sent", flush=True)
                 except Exception as e:
                     print(f"[fire] t={ct}s click error: {e}", flush=True)
+        # --serial-cmd TIME:STRING: raw bytes to the guest serial (this
+        # driver's own chardev connection). Primary use: the kernel's
+        # dfx=taskdump "DUMP!" magic — dump_all_tasks on demand, e.g. to
+        # name the wedged pids of a dark boot (r25val: an external
+        # second connect was queued by QEMU and the magic never arrived).
+        while serialcmd and el >= serialcmd[0][0]:
+            st_, payload = serialcmd.pop(0)
+            try:
+                ser.sendall(payload)
+                print(f"[fire] t={st_}s serial-cmd "
+                      f"{payload!r} sent", flush=True)
+            except Exception as e:
+                print(f"[fire] t={st_}s serial-cmd error: {e}", flush=True)
         # --jiggle FROM,EVERY,UNTIL: alternate the pointer between two
         # bottom-right corner positions (clear of the probe xterm at
         # (150,172)-(1054,708)) — keeps gsd-power's idle monitor fed so

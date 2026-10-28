@@ -245,8 +245,23 @@ unsafe fn free_dead_member(member: *mut Task) {
     // DFX (4-thread hang hunt): report a stuck wait loudly instead of
     // spinning silently — a member whose on_cpu never clears wedges every
     // later exiter (and their CPUs) here.
+    //
+    // R86 (GNOME no-light wedge): the wait is now BOUNDED. A legitimate
+    // final switch-out clears on_cpu in micro-to-milliseconds even under
+    // TCG storms; 300 jiffies (3 s) is ~1000x that margin. Past the
+    // deadline the ownership is adjudicated against scheduler truth
+    // (member_release_stale_ownership): a DEAD, unlinked member named by
+    // no CPU slot and no in-flight switch-out is in the R85 lost-release
+    // terminal state — nothing will ever clear on_cpu, and the old
+    // forever-spin here cost this CPU for the rest of the boot (r16type/
+    // r20type: both SMP2 CPUs lost mid shell-init, screen dark 2700 s,
+    // PREEMPT-HEAL 255/466 firings, kernel otherwise healthy). A live
+    // owner re-arms the deadline; the wait then behaves exactly as
+    // before for the legitimate window.
+    const FDM_STALE_RELEASE_JIFFIES: u64 = 300;
     {
         let mut spins: u32 = 0;
+        let mut armed_at = crate::drivers::timer::get_jiffies();
         while (*member).on_cpu() {
             if spins == 0 {
                 let cur_pid = crate::sched::current().map(|c| c.pid()).unwrap_or(0);
@@ -263,6 +278,16 @@ unsafe fn free_dead_member(member: *mut Task) {
                     crate::dfx::taskdump::taskdump_raw_line(&[(if nb < 10 { b'0' + nb } else { b'a' + nb - 10 })]);
                 }
                 crate::dfx::taskdump::taskdump_raw_line(b"\n");
+            }
+            if crate::drivers::timer::get_jiffies()
+                .wrapping_sub(armed_at)
+                >= FDM_STALE_RELEASE_JIFFIES
+            {
+                // R86: past the deadline — adjudicate the ownership. A
+                // true heal (stale marks released) makes on_cpu false and
+                // exits the loop; a live owner re-arms and keeps waiting.
+                crate::sched::sched::member_release_stale_ownership(member);
+                armed_at = crate::drivers::timer::get_jiffies();
             }
             spins = spins.wrapping_add(1);
             core::hint::spin_loop();
