@@ -2322,3 +2322,56 @@ slowpath change ~40 lines, counters ~30).
   kernel closes it.
 - monkey-b margin rounds continue (r4+). New-capture tripwires
   armed (WILDWATCH-CANARY, slotmm>0 sustained, new panic classes).
+
+### Cross-lane: GNOME exit-side on_cpu lost-release (a384048c) mapped onto our producer families
+
+Coordinator relay: the GNOME dark-boot producer is a DEAD, UNLINKED
+thread-group member whose on_cpu ownership qword was never released
+(R85 lost-release, EXIT-side variant); the reaper parks in
+free_dead_member's unbounded `while member.on_cpu()` spin
+(exit.rs:250 on this branch — pre-fix) and the pick-side R85 heal
+cannot reach unlinked members. Their fix (a384048c, gated) bounds
+the wait, checks the owner under GRQ, and releases protocol-exact.
+Code-level mapping, this lane's evidence:
+
+1. **Slot-reuse propagation REFUTED for both faces.** new_task_at
+   (task.rs:2206) re-initializes the recycled Task page field-wise:
+   ti_preempt_count=0 (task.rs:2282), ti_on_cpu=false (2298),
+   running_on_cpu=-1 (2303). A freed member's leaked count
+   (PARKED-LEAK face) or stale qword cannot reach the next slot
+   occupant. The known residual on this path is the heal-after-free
+   race (m25 capture), already handled by the try_pin discipline
+   (task.rs:4043 region) — not an exit-path mechanism.
+2. **Same bookend, different writer, different failure.** The final
+   __switch_to clears on_cpu; irq_exit pairs the preempt-count sub.
+   A tp switch inside an IRQ bracket (our count-migration deep
+   class, still open) breaks only the count pairing — the qword
+   clear still executes in __switch_to. The lost-release requires
+   the switch-out's own clear to be lost for a dead-unlinked
+   member — a distinct exit-side defect; the two faces are
+   siblings, not one mechanism.
+3. **FDM-WAIT fleet census (their family's observable on our
+   kernels): the precondition fires fleet-wide, the terminal state
+   zero times.** Prints exist on both monkey members (5-7/round,
+   monkey-a r1, monkey-b r3/r4/r5 — all resolved, rounds completed)
+   and on the LTP control arm: ltp-a r25 tail line 12272 = the
+   exact DEAD(0x10)+on_cpu window under oom01's SIGKILL storm
+   (member 4195, sweeper 4192, preceded by
+   `EARLY-ROOT-FREE root=0xecfdd owner pid=4193 ALIVE, freed in
+   pid=4195 context`); the tail CONTINUES past it (TFAIL/TINFO
+   lines follow) — the window closed. No round of ours ends inside
+   the FDM spin; our wedge tails remain the W3 pc=0x100 shape.
+   Consistent with their rare-terminal adjudication; also means
+   our SIGKILL-thread-churn loads (oom01, monkey kills) exercise
+   their fix's path every round — the before-side census for it is
+   these FDM-WAIT lines.
+4. **Family B unlink.** slotmm measures per-CPU cpu_state tp-slot
+   pid mismatch — a different slot population from Task-page reuse;
+   with (1) refuting page-reuse propagation, exit-path transitions
+   have no current evidence path into family B. Census stays null
+   (r9: 1061x[0,0]+1x[0,7]; r10: 1068x[0,0]+1x[0,8] — transient
+   switch-window sampling).
+5. When a384048c reaches main we will watch the FDM lines convert
+   (bounded-wait timeout prints replacing silent spins) on the
+   oom01-storm rounds; EARLY-ROOT-FREE owner-ALIVE in the same tail
+   is noted as an adjacent signal, not chased here.
