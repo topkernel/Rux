@@ -95,6 +95,10 @@
 #   --list           print the matrix and exit
 #   --status         print the digest of the newest run and exit
 #   --stop           kill the machines of the newest run and exit
+#   --daemon         run the whole suite DETACHED and return immediately:
+#                    the run keeps going after the shell that started it
+#                    has gone, which is what "the quota is out" looks
+#                    like. One daemon at a time; --stop ends it.
 #
 # Records of a run land in run/suite/<stamp>/:
 #   <test>.log      the raw output of one test
@@ -107,7 +111,12 @@
 
 set -uo pipefail
 
-ROOT="$(cd "$(dirname "$0")/.." && pwd)"
+ORIG_ARGS=("$@")
+
+# The repository root. RUX_ROOT lets the detached daemon run from a
+# snapshot copy of this script (kept next to the records) without losing
+# the root it belongs to.
+ROOT="${RUX_ROOT:-$(cd "$(dirname "$0")/.." && pwd)}"
 cd "$ROOT"
 
 SUITE_ROOT="$ROOT/run/suite"
@@ -125,6 +134,7 @@ ONLY=""
 DO_LIST=0
 DO_STATUS=0
 DO_STOP=0
+DO_DAEMON=0
 
 usage() { sed -n '2,110p' "$0"; exit "${1:-0}"; }
 
@@ -141,6 +151,8 @@ while [ $# -gt 0 ]; do
         --list) DO_LIST=1; shift ;;
         --status) DO_STATUS=1; shift ;;
         --stop) DO_STOP=1; shift ;;
+        --daemon) DO_DAEMON=1; shift ;;
+        --_detached) shift ;;
         -h|--help) usage 0 ;;
         *) echo "unknown option: $1" >&2; usage 2 ;;
     esac
@@ -179,18 +191,56 @@ foreign_qemus() {
 # run directory
 # --------------------------------------------------------------------------
 
-if [ -z "$OUT" ]; then
-    STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
-    OUT="$SUITE_ROOT/$STAMP"
+# The run directory is created only for an actual run: the query modes
+# (--status, --stop) and the daemon launcher must not leave empty
+# directories behind.
+PIDFILE=""
+if [ "$DO_DAEMON" = 1 ]; then
+    # Re-exec detached so the whole run survives the caller's shell. The
+    # suite's purpose is to keep the kernel under test while nobody is
+    # watching; a run that dies with the shell would defeat that.
+    mkdir -p "$SUITE_ROOT"
+    DETACH_LOG="$SUITE_ROOT/daemon.log"
+    DAEMON_PID_FILE="$SUITE_ROOT/daemon.pid"
+    : > "$DETACH_LOG"
+    if [ -f "$DAEMON_PID_FILE" ]; then
+        old="$(cat "$DAEMON_PID_FILE" 2>/dev/null)"
+        if [ -n "$old" ] && [ -d "/proc/$old" ]; then
+            echo "a suite daemon is already running (pid $old)"
+            exit 0
+        fi
+    fi
+    # the re-exec drops --daemon (otherwise the child would detach again)
+    daemon_args=()
+    for a in "${ORIG_ARGS[@]}"; do
+        [ "$a" = "--daemon" ] && continue
+        daemon_args+=("$a")
+    done
+    # The daemon runs from a SNAPSHOT of this script: bash reads a script
+    # incrementally as it executes, so editing the file while a run is in
+    # flight corrupts the running shell's parse (it dies with an
+    # "unexpected EOF" at whatever offset it had reached).
+    DAEMON_SCRIPT="$SUITE_ROOT/.suite-daemon.sh"
+    cp "$0" "$DAEMON_SCRIPT"
+    chmod +x "$DAEMON_SCRIPT"
+    RUX_ROOT="$ROOT" setsid nohup "$DAEMON_SCRIPT" "${daemon_args[@]}" --_detached >> "$DETACH_LOG" 2>&1 < /dev/null &
+    echo $! > "$DAEMON_PID_FILE"
+    echo "suite daemon started (pid $(cat "$DAEMON_PID_FILE")), log $DETACH_LOG"
+    exit 0
 fi
-mkdir -p "$OUT"
-PIDFILE="$OUT/pids"
-: > "$PIDFILE"
 
 if [ "$DO_STATUS" = 1 ]; then
-    latest="$(ls -1dt "$SUITE_ROOT"/*/ 2>/dev/null | head -1)"
+    # the newest run that produced a summary (a directory without one is a
+    # run that was started and then cut short)
+    latest=""
+    for d in $(ls -1dt "$SUITE_ROOT"/*/ 2>/dev/null); do
+        if [ -f "$d/summary.tsv" ] || [ -f "$d/summary.md" ]; then
+            latest="$d"
+            break
+        fi
+    done
     if [ -z "$latest" ]; then
-        echo "no suite run found under $SUITE_ROOT"
+        echo "no completed suite run found under $SUITE_ROOT"
         exit 1
     fi
     echo "=== newest run: $latest ==="
@@ -203,12 +253,26 @@ if [ "$DO_STATUS" = 1 ]; then
 fi
 
 if [ "$DO_STOP" = 1 ]; then
-    latest="$(ls -1dt "$SUITE_ROOT"/*/ 2>/dev/null | head -1)"
-    if [ -z "$latest" ] || [ ! -f "$latest/pids" ]; then
+    latest=""
+    for d in $(ls -1dt "$SUITE_ROOT"/*/ 2>/dev/null); do
+        if [ -f "$d/pids" ]; then
+            latest="$d"
+            break
+        fi
+    done
+    if [ -z "$latest" ]; then
         echo "no suite run with a pid file found"
         exit 0
     fi
     killed=0
+    # the daemon itself first, so it cannot start new work
+    if [ -f "$SUITE_ROOT/daemon.pid" ]; then
+        d="$(cat "$SUITE_ROOT/daemon.pid" 2>/dev/null)"
+        if [ -n "$d" ] && [ -d "/proc/$d" ]; then
+            kill -TERM "$d" 2>/dev/null && killed=$((killed + 1))
+        fi
+        rm -f "$SUITE_ROOT/daemon.pid"
+    fi
     while read -r p; do
         [ -n "$p" ] || continue
         if [ -d "/proc/$p" ]; then
@@ -556,6 +620,14 @@ if [ "$DO_LIST" = 1 ]; then
     exit 0
 fi
 
+if [ -z "$OUT" ]; then
+    STAMP="$(date -u +%Y%m%dT%H%M%SZ)"
+    OUT="$SUITE_ROOT/$STAMP"
+fi
+mkdir -p "$OUT"
+PIDFILE="$OUT/pids"
+: > "$PIDFILE"
+
 # --- the environment the results were produced with ------------------------
 {
     echo "date        : $(date -u +%FT%TZ)"
@@ -578,14 +650,16 @@ MEMAV="$(mem_available_mb)"
 if [ -z "$CONCURRENCY" ]; then
     # each machine wants ~1G of guest RAM plus the TCG overhead; leave a
     # 4G floor for the other lanes and for the host itself
-    CONCURRENCY=$(( (MEMAV - 4096) / 1536 ))
-    [ "$CONCURRENCY" -lt 1 ] && CONCURRENCY=1
-    # never fight the other lanes: halve the share per foreign machine
+    by_mem=$(( (MEMAV - 4096) / 1536 ))
+    [ "$by_mem" -lt 1 ] && by_mem=1
+    CONCURRENCY=$by_mem
+    [ "$CONCURRENCY" -gt 4 ] && CONCURRENCY=4
+    # never fight the other lanes: every foreign machine already running
+    # takes a slot's worth of host capacity away from us
     if [ "$FOREIGN" -gt 0 ]; then
         CONCURRENCY=$(( CONCURRENCY - FOREIGN / 2 ))
         [ "$CONCURRENCY" -lt 1 ] && CONCURRENCY=1
     fi
-    [ "$CONCURRENCY" -gt 4 ] && CONCURRENCY=4
 fi
 echo "host: $FOREIGN foreign QEMU(s), ${MEMAV}MB free -> concurrency $CONCURRENCY"
 
