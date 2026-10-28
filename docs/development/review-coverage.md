@@ -23,11 +23,11 @@ when the tree gains a file the map does not know about.
 |---|---|
 | source files in kernel/src | 413 |
 | source lines in kernel/src | 291,838 |
-| files fully reviewed | 25 |
+| files fully reviewed | 30 |
 | files partially reviewed | 85 |
-| files not yet reviewed | 303 |
-| lines in fully reviewed files | 9,935 |
-| reviewed files mainline changed since `47d96961` (need re-read) | 67 |
+| files not yet reviewed | 298 |
+| lines in fully reviewed files | 11,004 |
+| reviewed files mainline changed since `47d96961` (need re-read) | 70 |
 
 ## Defects found and fixed
 
@@ -308,7 +308,7 @@ when the tree gains a file the map does not know about.
 | `inode.rs` | 1067 | 🔶🔁 | read_data/write_data/append_data；O_APPEND 原子性已修（327b4a52）; 主线已改动，需重读 |
 | `inotify.rs` | 812 | 🔶🔁 | event notification; 主线已改动，需重读 |
 | `io_completion.rs` | 384 | ⬜ |  |
-| `locks.rs` | 1067 | 🔶 | flock/POSIX record locks |
+| `locks.rs` | 1067 | 🔶🔁 | flock/POSIX record locks; 主线已改动，需重读 |
 | `memfd.rs` | 458 | 🔧🔁 | memfd_create 的参数校验与 seal 语义（参数校验已对齐 879328f3）; 主线已改动，需重读 |
 | `mod.rs` | 82 | ⬜ |  |
 | `mount.rs` | 392 | ⬜ |  |
@@ -526,15 +526,15 @@ when the tree gains a file the map does not know about.
 | file | lines | status | note |
 |---|---:|---|---|
 | `cgroup.rs` | 910 | ✅🔁 | cpu/pids/memory controller core: simplified v2 model read clean — rmdir/pids-fork/charge-rollback semantics match the reference contract surface; containment guards (R90/b61) documented; 主线已改动，需重读 |
-| `class.rs` | 269 | ⬜ |  |
-| `deadline.rs` | 536 | ⬜ |  |
+| `class.rs` | 269 | ✅ | sched_class trait 层：类序 stop>dl>rt>fair>idle、SCHED_IDLE 归 fair(weight 3) 均与参考一致；WF_*/ENQUEUE_* 数值与 Linux 不同但纯内部量，非 ABI |
+| `deadline.rs` | 536 | ✅ | EDF/CBS 结构与实体：双入队守卫(R7-B4)/dequeue 返回契约(R32-DL2)/attr_deadline 读回契约正确；注意 get_bw 为死代码、无全局带宽准入(__dl_overflow)——留待 syscall/sched.rs 轮次 |
 | `fair.rs` | 1847 | 🔧🔁 | CFS 核心：vruntime 权重方向、min_vruntime、pick 跳过路径（min_vruntime 越界已修 b433fb13）; 主线已改动，需重读 |
 | `idle.rs` | 100 | ✅ |  |
-| `mod.rs` | 129 | ⬜ |  |
+| `mod.rs` | 129 | ✅🔁 | 纯 re-export 层; 主线已改动，需重读 |
 | `rt.rs` | 639 | 🔶 | enqueue/dequeue/pick/bitmap/priority inversion |
 | `sched.rs` | 6392 | 🔶🔁 | pick/switch path, enqueue/dequeue, preemption checks; 主线已改动，需重读 |
-| `stats.rs` | 41 | ⬜ |  |
-| `stop_task.rs` | 94 | ⬜ |  |
+| `stats.rs` | 41 | ✅🔁 | sched_schedstats 运行时门：默认关、Relaxed 读，与参考 sysctl 语义一致; 主线已改动，需重读 |
+| `stop_task.rs` | 94 | ✅ | stop 类为 PerCpuState 直管的 stub，next_class 链正确 |
 | `wakewatch.rs` | 578 | ✅🔁 | DFX wake-latency instrument: no contract surface; side-table validity/free-invalidation sound, sc207/sc215 softirq deadlock discipline in place; 主线已改动，需重读 |
 
 ### kernel/src/security (559 lines)
