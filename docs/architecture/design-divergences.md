@@ -448,3 +448,36 @@ hand-rolled guard protocol and must not grow new users.
 **Guard.** `lockkey` unit-test group; INV-LOCK-5/6 remain watchdog-
 and SPIN-verified in the meantime; the sched/ side of any adoption
 rides the scheduling-domain perf gate (GRQ hold band, census, P2).
+
+---
+
+## D-10: Result-typed internal error APIs (§5 pilot)
+
+**Design.** Internal kernel functions return `Result<T, Errno>` (the
+typed enum, not raw negated `i32`s); the negative-errno ABI mapping
+happens exactly once per call chain, at the syscall/VFS boundary via
+`Errno::as_neg_i32()`. The mainstream approach threads `-errno` ints
+through every layer, where sign bugs and errno-mangling recur (the
+paid incidents: the u32-microsecond wrap that killed an SA host; the
+negated-nice encoding bug).
+
+**Advantage.** An `Err(-EAGAIN)` cannot be accidentally re-negated,
+compared against a byte count, or returned where a positive errno was
+meant — the error type is an enum, and `Result` is `#[must_use]`, so
+an ignored failure is a build warning, not a silent drop.
+
+**Compatibility evidence.** First conversion: the file-locks subsystem
+(`fs/locks.rs` — flock, POSIX/OFD record locks, leases): the four
+public functions return `Result<(), Errno>`; the six call sites
+(sys_flock in syscall/io.rs, F_SETLK/F_SETLEASE in vfs.rs, three
+break_lease propagation sites) each map once with `as_neg_i32()`.
+Errno values byte-identical (EAGAIN/EINTR/EINVAL/EDEADLK; the enum
+gained the missing `Deadlock = 35` variant). Suite green; the LTP
+fcntl/flock families are the behavioral guard.
+
+**Known cost.** Opportunistic adoption: the i32 errno convention
+dominates the tree and keeps compiling; subsystems convert when
+touched. Mixed APIs coexist exactly as D-4/D-6 conversions do.
+
+**Guard.** LTP fcntl/flock families; the errno_test unit group pins
+the enum values.

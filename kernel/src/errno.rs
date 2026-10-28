@@ -113,6 +113,9 @@ pub enum Errno {
     /// Broken pipe (EPIPE, 32)
     BrokenPipe = 32,
 
+    /// Resource deadlock avoided (EDEADLK, 35)
+    Deadlock = 35,
+
     /// Directory not empty (ENOTEMPTY, 39)
     DirectoryNotEmpty = 39,
 
