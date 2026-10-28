@@ -1115,10 +1115,25 @@ pub fn do_signal(regs: *mut crate::arch::pt_regs::PtRegs) -> bool {
                     core::str::from_utf8_unchecked((*current).comm())
                         .trim_end_matches('\0'),
                     match &qi {
-                        Some(i) => alloc::format!(
-                            "signo={} code={:#x} pid={} uid={}",
-                            i.si_signo, i.si_code, i.si_pid, i.si_uid
-                        ),
+                        Some(i) => {
+                            let st = unsafe {
+                                crate::sched::find_task_by_pid(i.si_pid as u32)
+                            };
+                            let scomm = if st.is_null() {
+                                alloc::string::String::from("GONE")
+                            } else {
+                                unsafe {
+                                    alloc::string::String::from(
+                                        core::str::from_utf8_unchecked((*st).comm())
+                                            .trim_end_matches('\0'),
+                                    )
+                                }
+                            };
+                            alloc::format!(
+                                "signo={} code={:#x} pid={}({}) uid={}",
+                                i.si_signo, i.si_code, i.si_pid, scomm, i.si_uid
+                            )
+                        }
                         None => alloc::string::String::from("NONE (bare bitmap)"),
                     }
                 );
@@ -2713,6 +2728,32 @@ impl SigInfo {
 /// Thread-group-directed (the reference's PIDTYPE_TGID): kill(2)/SIGCHLD/
 /// sigqueue family — the signal_generate `grp` word is 1.
 pub fn send_signal_with_info(pid: u32, info: SigInfo) -> Result<(), i32> {
+
+    // gdm bring-up r17: EVERY info-carrying send funnels here — the
+    // storm's SI_USER(9,sender) infos bypassed all the wrapper prints,
+    // so name caller + target + info at the core itself.
+    if info.si_signo == 9 || info.si_signo == 15 {
+        static SWI_N: core::sync::atomic::AtomicUsize =
+            core::sync::atomic::AtomicUsize::new(0);
+        if SWI_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 120 {
+            let (cp, cc) = crate::sched::current()
+                .map(|t| unsafe {
+                    (
+                        (*t).pid(),
+                        alloc::string::String::from(
+                            core::str::from_utf8_unchecked((*t).comm())
+                                .trim_end_matches('\0'),
+                        ),
+                    )
+                })
+                .unwrap_or((0, alloc::string::String::from("kernel")));
+            crate::pr_err!(
+                "SWI{}: caller pid={}({}) -> pid={} info signo={} code={:#x} sipid={} siuid={}",
+                info.si_signo, cp, cc, pid,
+                info.si_signo, info.si_code, info.si_pid, info.si_uid
+            );
+        }
+    }
     send_signal_with_info_g(pid, info, 1)
 }
 

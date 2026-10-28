@@ -1629,3 +1629,37 @@ is the instrument if the greeter still does not launch.
 - r26gate gave up at 00:14:30 without a quiet window (foreign QEMUs
   7-10 all evening); re-armed after this commit for another 6h. The
   v2quiet watcher (expires ~03:14) yields to it as before.
+
+## Session 19 — synced main (e3d8236a); storm sender confirmed by
+## DEQUEUE; SWI core instrument added; host load gates evidence boots
+
+- Merged origin/main e3d8236a (MS_MOVE relative-source + SYS_time —
+  both directly useful to this chain). The exit.rs conflict resolution
+  KEPT BOTH sides: main's group-exit-status publish (the fix for the
+  TERM-reaped-as-st=9 status overwrite OBSERVED LIVE in gdm r14/r15 —
+  accounts-daemon self-TERMed yet reaped st=9) and the temporary
+  EXITGRP diagnostic. Dual-arch riscv64 build rc=0; minimal-rootfs
+  smoke 0 panics, prompt reached.
+- r16 DEQUEUE ground truth (committed 3c052aa6): every storm death
+  carries queued info signo=9 code=0x0 (SI_USER) pid=330 uid=0, and
+  pid 330 also SIGKILLs PID 1 (discarded by init protection — why
+  runit survives). First legit kill in the log: dbus 307 killing its
+  failed activation helper (sender uid=102 = messagebus). PID 330's
+  comm='udevadm' (r15 EXITGRP) — and since /lib/systemd/systemd-udevd
+  is a SYMLINK to the multi-call /bin/udevadm, the daemon itself
+  carries comm 'udevadm': the killer is udevd, not my settle child.
+- Eliminations since: pidfd_send_signal is an ENOSYS stub (excluded);
+  rt_sigqueueinfo rejects si_code>=0 so no user SI_USER infos (the
+  queued SI_USER shape must be constructed kernel-side);
+  send_signal_from_user prints nothing (K9_N<80 budget unused).
+- r17 (SWI instrument at the send_signal_with_info core + sender-comm
+  in DEQUEUE): the boot STALLED at "starting system dbus" — not a
+  wedge: host load 22 with 10 foreign QEMUs gave ~35 s of guest
+  progress in 13 min. Evidence boots are unusable at this pace.
+  Queued run/gdm-evidence-watch.sh (armed 05:12, 8h): fires gdmr17b
+  at <5 foreign (looser than the gate's <2) and yields to any running
+  perf-gate attempt; log run/gdm-evidence.log.
+- Watchers now standing: r26gate-watch2 (clean kernel stash, to
+  ~06:37), v2quiet (yield check fixed to match watch*, to ~10:38),
+  gdm-evidence (to ~13:12). If watch2 expires unquiet again, re-arm
+  per the standing debt pattern.
