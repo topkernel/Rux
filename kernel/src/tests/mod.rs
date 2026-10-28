@@ -421,6 +421,10 @@ pub fn run_all_tests() {
     crate::fs::procfs::stat::stat_row_shape::shape_check();
     crate::fs::procfs::stat::stat_file_tests::line_order_check();
     crate::fs::procfs::schedstat::schedstat_row_shape::shape_check();
+    // D-4 slice (refactor lane): /proc/diskstats rows — cols form with
+    // the zero columns declared by name, plus the exact-bytes snapshot.
+    crate::fs::procfs::diskstats::diskstats_row_shape::shape_check();
+    crate::fs::procfs::diskstats::diskstats_file_tests::snapshot_check();
 
     // tmpfs page-budget tests (mount option size=). Implemented in
     // fs::tmpfs itself (needs private TmpfsSuperBlock access).

@@ -95,8 +95,11 @@ column-exact vs the live host reference; stat/schedstat line order
 unit-pinned; full suite green; three full pbench boots DONE rc=0.
 
 **Known cost.** Opportunistic conversion — ~20 hand-written files
-remain; dynamic-arity lines (interrupts/intr/softirqs) stay explicit
-by design.
+remain (diskstats joined the derived set in the refactor lane's first
+slice: its 20-field row is a cols declaration with the
+merged/discard/flush zeros named as columns, plus an exact-bytes
+snapshot pin); dynamic-arity lines (interrupts/intr/softirqs) stay
+explicit by design.
 
 **Guard.** procfile-shape unit-test group + per-file order/snapshot
 pins; the DFX plan's adoption rule requires the macro for new files.
