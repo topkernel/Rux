@@ -30,6 +30,11 @@ mkdir -p .ltp/diag
 # SNAP=off additionally drops -snapshot so guest writes persist in $IMAGE
 # (post-mortem host-side inspection via debugfs).
 IMAGE="${IMAGE:-test/rootfs.img}"
+# KERNEL override: boot an alternate kernel binary (e.g. a side-target-dir
+# build while a scan is driving the default path — cargo honors
+# CARGO_TARGET_DIR, so `CARGO_TARGET_DIR=.ltp/tgt-xh make build` produces
+# one without touching target/riscv64gc-unknown-none-elf/debug/rux).
+KERNEL="${KERNEL:-target/riscv64gc-unknown-none-elf/debug/rux}"
 SNAP_ARGS="-snapshot"
 if [ "${SNAP:-on}" = "off" ]; then SNAP_ARGS=""; fi
 
@@ -45,7 +50,7 @@ timeout "$TIMEOUT" qemu-system-riscv64 -M virt -accel tcg,thread=single \
   -serial mon:stdio \
   -drive file="$IMAGE",if=none,id=rootfs,format=raw,file.locking=off \
   -device virtio-blk-pci,disable-legacy=on,drive=rootfs \
-  -kernel target/riscv64gc-unknown-none-elf/debug/rux \
+  -kernel "$KERNEL" \
   -append "root=/dev/vda rw init=/test/ltpscan console=ttyS0 $EXTRA" \
   > "$LOG" 2>&1 || true
 echo "=== log: $LOG (tail) ==="
