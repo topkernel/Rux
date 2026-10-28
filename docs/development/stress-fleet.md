@@ -2047,3 +2047,40 @@ Fleet state at this point: ltp-b r8 on the old image (19de1371, census
 continues), r9+ on f49227de (WW5 live); ltp-a image rolled to f49227de
 too (instruments dfx-gated, control semantics unchanged); fsfuzz r273;
 monkey-b r2 running (formal 500MB criterion); floor 40G available.
+
+### s16 continued (08:2x) — monkey-b r2: 500MB criterion CROSSED
+
+R2 (08:29 classification): heap 191244 -> 770456 KiB, HEAP-GROW
+579212KiB = **566MB growth, over the 500MB criterion**, wedge=no,
+beats=503, full 30-min round. Kernel-defect signature sweep: KERNPANIC 0,
+WILDWATCH-CANARY 0, ALLOCTHROW 0. The classifier's CRITICAL flags
+adjudicate as follows:
+
+- OOM=74: the known image-side fake-OOM class ("oom: out of memory
+  (order=0, gfp=0x0)" at 770MB/4G — the same order-0/gfp-0 report
+  shape the gnome effort tracks); non-fatal, round continued 15+ min
+  past the first print.
+- OOPS=6 = 4x "BUG: soft lockup - CPU stuck for 10s" + 1 Kernel
+  panic + 1 end marker. The soft lockups are the SAME class as
+  monkey-a's ACCEPTED criterion round (r1 605MB, OOPS=1: CPU#0 stuck
+  10s at 708MB heap, timer_irq advancing — KVM host-deschedule noise
+  with 10+ QEMUs sharing the host, not a kernel stall). The Kernel
+  panic is "PANIC: sysrq 'c' — deliberate crash" (procfs sysrq.rs:34)
+  — the OH image's own crash handler triggered a deliberate crash
+  dump after its services segfaulted under the monkey's kills; the
+  kernel serviced a legitimate sysrq write correctly. Image-side,
+  not a kernel defect.
+- WATCHDOG=2: OS_DfxWatchdog thread dumps (image's own watchdog
+  service, lastsys=98 futex) — the known noisy class.
+
+Verdict: criterion met at r2 (566MB, zero kernel-defect signatures).
+r3 (started 08:29) runs as a free confirmation round; formal close
+when it lands clean or with the same adjudicated-only flags.
+
+Also this wave: make test on the WW5 kernel f49227de — ALL TESTS
+PASSED. WW4 moved to its own pr_info (89/89 heartbeats parseable,
+was ~5%: the per-CPU wakewatch heartbeat garbled the block tail);
+slotmm census now meaningful: 88x [0,0] + 1x [0,8] per boot — the
+[0,8] single-second blip is transient switch-window tick sampling,
+not a lying slot; family B stays null. Fleet kernel rolled to
+cb314f43 (ltp-b r9+ and ltp-a next round). Floor 36-40G available.
