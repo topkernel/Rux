@@ -3039,3 +3039,29 @@ delta Linux ships. Gates: before/after p6_mkdrmdir boards on BOTH arms
 (before banked: J 15.4-16.4ms, NJ 16.0-16.4ms), make test, dual-arch,
 fsw pub_scoped counter (drops to fsync-only volume), LTP-sanity via
 make test's fs family.
+
+**Leg-53 item 1 landed (e3c1ec35): the post-mkdir scoped publication
+flush is DELETED — p6_mkdrmdir 15.4-16.4ms -> 497.0us (J) / 495.1us
+(NJ), 31-33x on both arms, journal-independent exactly as the
+diagnosis predicted.** The flush was eager durability POSIX does not
+promise (entry durability belongs to fsync(dirfd)); ordering was
+always the per-block guards' job at every out-of-band write, and the
+2048-record high-water + fsync/sync/eviction drains bound the
+laziness. fsw's FSW1 line gains a pl= (lazy mkdirs) field before lvl=.
+Boards: pa93j DONE rc=0 t=159s (append 104.4us J class holds), pa93nj
+DONE rc=0 t=392s (append 135.3us route-1 class holds), zero
+KERNPANIC/DEADLOCK on both. make test 1159/1159 (main's merge brought
+37 new tests). The provisioning-window read: a mkdtemp storm no longer
+pays ~8ms of synchronous round trips per directory (the p99 also
+collapsed: 42-98ms tails -> 0.94-0.98ms).
+
+**Baseline whole-table refresh committed (f4193980)** with the pa91
+cells (the 2d3df4a7 merge class) + pa93's mkdrmdir rows marked
+PRE-MERGE; sched-sensitive cells (census, p2_ctxsw) flagged for
+post-CFS re-bank — the pa94 chain is ARMED for exactly that (census +
+med-of-2 on post-CFS + mkdir-flush content, kernels md5 1614d5f8 /
+e6a9b886, same two-stage gate, 8h deadline).
+
+**Leg-53 standing:** mkdir flush landed; dgram item closed by lever A
+at the pa91 med-of-2; standing by for the OH lane's cold-start sampler
+report (the next primary mission per the coordinator).
