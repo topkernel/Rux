@@ -902,6 +902,35 @@ fn poll_wait_impls(file: &crate::fs::File) -> Option<(PollWaitRegFn, PollWaitUnr
     None
 }
 
+
+// Raw-console writers for the dfx=epollscan trace (leg-9 epoll hunt):
+// pr_info is dropped whole at session loglevel=3, so the scan trace uses
+// the same putchar_no_lock path as sched/wakewatch's ww_msg and evdev's
+// INPTRC/INPPL lines.
+fn eps_msg(msg: &[u8]) {
+    for &b in msg {
+        crate::console::putchar_no_lock(b);
+    }
+}
+
+fn eps_u64(mut v: u64) {
+    let mut buf = [0u8; 20];
+    let mut n = 0;
+    if v == 0 {
+        buf[0] = b'0';
+        n = 1;
+    } else {
+        while v > 0 && n < buf.len() {
+            buf[n] = b'0' + (v % 10) as u8;
+            v /= 10;
+            n += 1;
+        }
+    }
+    for i in (0..n).rev() {
+        crate::console::putchar_no_lock(buf[i]);
+    }
+}
+
 /// Result of one event-driven wait round.
 enum PollEventWait {
     /// Slept and was woken (event, timeout, or spurious): re-check readiness.
@@ -1919,7 +1948,9 @@ pub fn sys_epoll_wait(args: SyscallArgs) -> i64 {
         // reuse without EPOLL_CTL_DEL).
         let mut dead_fds: alloc::vec::Vec<usize> = alloc::vec::Vec::new();
 
+        let mut nent: usize = 0;
         for entry in entries.iter_mut() {
+            nent += 1;
             // Linux epoll_wait never consumes readiness it does not deliver:
             // events beyond `maxevents` stay on the ready list and are
             // re-reported by the next wait. Our snapshot-scan model must
@@ -2037,6 +2068,37 @@ pub fn sys_epoll_wait(args: SyscallArgs) -> i64 {
             entries.retain(|e| !dead_fds.contains(&(e.fd as usize)));
         }
         drop(entries);
+
+        // dfx=epollscan (leg-9 epoll hunt): one raw-console line per scan —
+        // the r13ep2 boot had 14 events drained into the device queue yet
+        // every epoll_wait returned idle, so the missing datum is whether
+        // the scan ran at all, how many interests it saw, and what it
+        // collected. Rate-limited: first 400 then 1-in-100.
+        if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::EpollScan) {
+            use core::sync::atomic::{AtomicU64, Ordering};
+            static SC_N: AtomicU64 = AtomicU64::new(0);
+            let n = SC_N.fetch_add(1, Ordering::Relaxed);
+            if n < 400 || n % 100 == 0 {
+                eps_msg(b"EPSCAN[");
+                eps_u64(n);
+                eps_msg(b"] pid=");
+                if let Some(cur) = crate::sched::current() {
+                    // SAFETY: read-only pid/comm access on the current task.
+                    let (pid, comm) = unsafe { ((*cur).pid(), (*cur).comm()) };
+                    eps_u64(pid as u64);
+                    eps_msg(b" ");
+                    for &c in comm.iter() {
+                        if c == 0 { break; }
+                        crate::console::putchar_no_lock(c);
+                    }
+                }
+                eps_msg(b" nent=");
+                eps_u64(nent as u64);
+                eps_msg(b" ready=");
+                eps_u64(ready_events.len() as u64);
+                eps_msg(b"\n");
+            }
+        }
 
         if !ready_events.is_empty() {
             // dfx=epolltrace: who got woken by which fd. Rate-limited to the

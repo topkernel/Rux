@@ -530,6 +530,15 @@ pub struct Transaction {
     /// journal-area path now also snapshots the live buffer at commit
     /// time (content >= any registration image by the same argument).
     pub t_dirty_buffers: Spinlock<alloc::vec::Vec<(u64, TxnBufferKind)>>,
+    /// Revoke records issued into THIS transaction: (blocknr, issuing
+    /// tid), deduped per pair. Arm-2 (f4-ext4-route-map.md §6): revokes
+    /// ride the transaction that issued them and are logged by its
+    /// commit (or the next one, via the journal-level spill, when the
+    /// issuing transaction was no longer Running). The journal-global
+    /// `Journal::revoke_records` is NOT read by the commit/stop paths
+    /// anymore — it only serves recovery (scan accumulator) and the
+    /// spill.
+    pub t_revoke_records: Spinlock<alloc::vec::Vec<(u64, Tid)>>,
     /// Number of buffers on the t_buffers list
     pub t_nr_buffers: i32,
     /// Doubly-linked circular list of all reserved but not yet modified buffers
@@ -602,6 +611,7 @@ impl Transaction {
             t_synchronous_commit: false,
             t_need_data_flush: 0,
             t_dirty_buffers: Spinlock::new(alloc::vec::Vec::new()),
+            t_revoke_records: Spinlock::new(alloc::vec::Vec::new()),
         }
     }
 }
