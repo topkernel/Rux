@@ -415,7 +415,9 @@ int main(void)
             n_user = n_kernel = n_lost = bad = 0;
         }
         struct cread crx;
-        int fast = read_counter((int)fd, 0, &crx) == 0;
+        /* The event carries RF_ID — read(2) answers ITS layout (16 B),
+         * so the helper must expect the event's format, not 0. */
+        int fast = read_counter((int)fd, a.read_format, &crx) == 0;
         __builtin_printf("  excl poll=%d drain=%ld recs=%d kern=%d\n", pr,
                          n, nrec, n_kernel);
         check("excl-user", fast && n >= 0 && n_user == 0 && bad == 0);

@@ -189,6 +189,28 @@ pub fn follow_mount(dentry: Arc<Dentry>) -> Arc<Dentry> {
     }
 }
 
+/// Kernel-side dcache prune: drop the CACHED dentry of `path`'s final
+/// component so later lookups miss the dcache and consult the
+/// filesystem again. Walks the dcache ONLY (dcache hit, mount crossing
+/// included) — a component not cached means nothing stale can answer a
+/// lookup, so there is nothing to do. Held-open files keep their
+/// snapshot: the File holds the inode Arc; only NEW lookups change
+/// behavior. Userspace unlink(2) runs the VFS's own remove path, which
+/// prunes; in-kernel pseudo-fs removals (debugfs remove_file — the perf
+/// drain file's close contract found the stale dentry still answering
+/// opens after the fs-side node was gone) bypass it, so they call this.
+pub fn prune_cached_dentry(path: &str) {
+    let Some(root) = VFS_STATE.lock().root_dentry.clone() else { return };
+    let comps: Vec<&str> = path.split('/').filter(|c| !c.is_empty()).collect();
+    let Some((last, parents)) = comps.split_last() else { return };
+    let mut cur = follow_mount(root);
+    for c in parents {
+        let Some(child) = cur.lookup_child(c) else { return };
+        cur = follow_mount(child);
+    }
+    cur.remove_child(last);
+}
+
 /// Mount flags governing an ABSOLUTE dentry-tree path: walk the components
 /// crossing mount points (exactly like lookups do) and remember the flags of
 /// the LAST mount crossed. None = never left the root filesystem.

@@ -223,13 +223,30 @@ pub fn remove_file(path: &str) -> bool {
         }
     }
     let mut children = current.children.lock();
-    match children.get(file_name) {
+    let removed = match children.get(file_name) {
         Some(node) if !node.is_dir => {
             children.remove(file_name);
             true
         }
         _ => false,
+    };
+    drop(children);
+    if removed {
+        prune_vfs_dentry(path);
     }
+    removed
+}
+
+/// Drop the VFS-side cached dentry for an inside-debugfs `path` (see
+/// vfs::prune_cached_dentry — kernel-side removals have no unlink(2)
+/// to run the VFS's own dcache prune, and a stale cached dentry keeps
+/// answering opens after the node is gone).
+fn prune_vfs_dentry(inner_path: &str) {
+    // The mount point is fixed at boot (mount_debugfs).
+    crate::fs::vfs::prune_cached_dentry(&alloc::format!(
+        "/sys/kernel/debug/{}",
+        inner_path.trim_start_matches('/')
+    ));
 }
 
 /// Remove an EMPTY directory by absolute path inside debugfs (rmdir
@@ -262,7 +279,7 @@ pub fn remove_dir_if_empty(path: &str) -> bool {
         }
     }
     let mut children = current.children.lock();
-    match children.get(dir_name) {
+    let removed = match children.get(dir_name) {
         Some(node) if node.is_dir => {
             let empty = node.children.lock().is_empty();
             if empty {
@@ -273,7 +290,12 @@ pub fn remove_dir_if_empty(path: &str) -> bool {
             }
         }
         _ => false,
+    };
+    drop(children);
+    if removed {
+        prune_vfs_dentry(path);
     }
+    removed
 }
 
 // ============================================================================
