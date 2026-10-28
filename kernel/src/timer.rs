@@ -1055,9 +1055,20 @@ fn ww_heartbeat(now_time: u64) {
         "WW5: walks={} oncpu_heal={} claim_heal={} s250={} s500={} s750={}",
         walks_d, oh_d, ch_d, s250, s500, s750
     );
+    // s16: WW4 (phase/slotmm) in its own pr_info too — as the TAIL of
+    // the big block it was the part most often garbled by the per-CPU
+    // wakewatch heartbeat racing the UART, and slotmm is the family-B
+    // standing watch (it must stay parseable).
+    crate::pr_info!(
+        "WW4: phase=[{},{}] slotmm=[{},{}]",
+        phase0,
+        phase1,
+        mm_d[0],
+        mm_d[1]
+    );
 
     crate::pr_info!(
-        "WW: fires={} late_max={}ms pidmiss={} rearm={} wheel={}/{} hres_next={}ms\nWW2: si_runs={} si_busy={}ms ticks=[{},{}] vec=[{},{},{},{},{},{},{},{},{},{}]\nWW3: grq={} cfs={} idle={:#x} nr={} cpu0=(pid={} st={:#x} pc={}) cpu1=(pid={} st={:#x} pc={})\nWW4: phase=[{},{}] slotmm=[{},{}]",
+        "WW: fires={} late_max={}ms pidmiss={} rearm={} wheel={}/{} hres_next={}ms\nWW2: si_runs={} si_busy={}ms ticks=[{},{}] vec=[{},{},{},{},{},{},{},{},{},{}]\nWW3: grq={} cfs={} idle={:#x} nr={} cpu0=(pid={} st={:#x} pc={}) cpu1=(pid={} st={:#x} pc={})",
         fire_n,
         late_max,
         pidmiss,
@@ -1073,11 +1084,7 @@ fn ww_heartbeat(now_time: u64) {
         vecs[5], vecs[6], vecs[7], vecs[8], vecs[9],
         sched[0], sched[1], sched[2], sched[3],
         sched[4], sched[5], sched[6],
-        sched[7], sched[8], sched[9],
-        phase0,
-        phase1,
-        mm_d[0],
-        mm_d[1]
+        sched[7], sched[8], sched[9]
     );
     crate::sched::wakewatch::heartbeat();
     // sc158 (Session R): one-shot park dump for wedged foundation/sa_main
