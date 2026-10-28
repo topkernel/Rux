@@ -41,17 +41,28 @@ use crate::config::MAX_TASKS;
 
 /// Global run queue — one instance for the whole system.
 ///
-/// Protected by a single keyed spinlock (`KeyedRawSpinlock<GrqKey>`,
-/// §3 typed lock keys: the lock's position in the INV-LOCK hierarchy is
-/// part of its type; INV-LOCK-5's forward direction — GRQ nests inside
-/// the futex bucket lock — is the `CanNestInside<FutexBucketKey> for
-/// GrqKey` impl, and the reverse does not compile once the bucket side
-/// migrates to keys).  All enqueue / dequeue / pick_next operations
-/// must hold this lock.  Timer-tick updates (`scheduler_tick`) only
-/// touch the per-CPU `current` task and do NOT need the lock.
+/// Protected by a single `RawSpinlock`.  All enqueue / dequeue / pick_next
+/// operations must hold this lock.  Timer-tick updates (`scheduler_tick`)
+/// only touch the per-CPU `current` task and do NOT need the lock.
+///
+/// NOTE (2b092c49 withdrawal, 2026-10-29): this lock was briefly a
+/// `KeyedRawSpinlock<GrqKey>` (§3 typed lock keys pilot). That swap —
+/// a supposedly protocol-identical delegate wrapper — is CONVICTED as
+/// the trigger of the d2a58ccb stochastic panic family by a 13-boot
+/// paired adjudication (identical tree differing only by the swap):
+/// WITH the swap, 6/6 x86 exitwalk boots panic in the CFS timeline
+/// btree walk (navigate.rs:552 next_unchecked unwrap, stack:
+/// pick_next_cpu → Iter::next) and the riscv64 orphan-storm churn
+/// panics on a torn-context wild epc right after an R74-DOUBLE-SEED;
+/// WITHOUT it (revert arm + all pre-swap kernels), 7/7 boots run the
+/// full churn clean on both arches. The mechanism (the wrapper adds no
+/// logic — the swap shifts codegen/timing enough to unmask a latent
+/// GRQ-protocol race, or interacts with something subtler) stays OPEN;
+/// the swap itself is withdrawn until that is understood. The lockkey
+/// module and its standalone tests stay.
 pub struct GlobalRunQueue {
     /// Protects dl_rq, rt_rq, cfs_rq, nr_running
-    lock: crate::sync::lockkey::KeyedRawSpinlock<crate::sync::lockkey::GrqKey>,
+    lock: crate::sync::spinlock::RawSpinlock,
     /// Deadline queue (EDF sorted by deadline)
     pub dl_rq: crate::sched::deadline::DlRunQueue,
     /// Real-time queue (bitmap + per-priority lists)
@@ -74,7 +85,7 @@ impl GlobalRunQueue {
     /// Create a new GlobalRunQueue (NOT const — BTreeMap::new() is not const).
     fn new() -> Self {
         Self {
-            lock: crate::sync::lockkey::KeyedRawSpinlock::new(),
+            lock: crate::sync::spinlock::RawSpinlock::new(),
             dl_rq: crate::sched::deadline::DlRunQueue::new(),
             rt_rq: {
                 let mut rt = crate::sched::rt::RtRunQueue::new();
@@ -121,7 +132,7 @@ impl GlobalRunQueue {
         crate::interrupt::preempt::preempt_count_add(
             crate::interrupt::preempt::PREEMPT_OFFSET,
         );
-        if self.lock.try_lock_claim() {
+        if self.lock.try_lock() {
             Some(GrqGuard {
                 grq: self as *const Self as *mut Self,
                 flags,

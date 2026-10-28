@@ -613,23 +613,79 @@ impl CfsRunQueue {
     /// grq-level counter already uses this exact discipline
     /// (sched.rs); a refused decrement leaves the value at 0 and
     /// grq_diag_counts() names the drift.
+    #[track_caller]
     fn nr_running_dec(&self) {
-        let _ = self.nr_running.fetch_update(
-            Ordering::SeqCst,
-            Ordering::SeqCst,
-            |v| v.checked_sub(1),
-        );
+        if self.nr_running
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| v.checked_sub(1))
+            .is_err()
+        {
+            // DOUBLE-DECREMENT PROOF: the counter was already 0 when a
+            // removal path decremented again (the fair.rs:1569 wrap-panic
+            // family — the raw fetch_sub used to wrap here and panic
+            // sched_slice under churn). Rate-limited direct console (may
+            // run under the GRQ); names the offending caller site.
+            static LAST: core::sync::atomic::AtomicU64 =
+                core::sync::atomic::AtomicU64::new(0);
+            let now = crate::drivers::timer::get_jiffies();
+            let last = LAST.load(Ordering::Acquire);
+            if now.wrapping_sub(last) >= 10
+                && LAST.compare_exchange(last, now, Ordering::AcqRel, Ordering::Acquire).is_ok()
+            {
+                let loc = core::panic::Location::caller();
+                let pid = crate::sched::get_current_pid();
+                use crate::console::putchar_no_lock as putchar;
+                for &b in b"\nNRUN-DOUBLE-DEC pid=0x" { putchar(b); }
+                let mut v = pid as u64;
+                for _ in 0..8 {
+                    putchar(b'0' + ((v >> 28) & 0xF) as u8);
+                    v <<= 4;
+                }
+                for &b in b" at " { putchar(b); }
+                let f = loc.file();
+                let base = f.rfind('/').map(|i| i + 1).unwrap_or(0);
+                for &b in f.as_bytes()[base..].iter() {
+                    putchar(b);
+                }
+                putchar(b':');
+                let mut ln = loc.line() as u64;
+                let mut buf = [0u8; 10];
+                let mut n = 0;
+                if ln == 0 { putchar(b'0'); } else {
+                    while ln > 0 && n < 10 { buf[n] = b'0' + (ln % 10) as u8; ln /= 10; n += 1; }
+                    while n > 0 { n -= 1; putchar(buf[n]); }
+                }
+                putchar(b'\n');
+            }
+        }
     }
 
     /// Same no-wrap discipline for the aggregated weight: a wrapped
     /// load_weight reads as a huge total and collapses every task's
     /// slice to the minimum granularity.
+    #[track_caller]
     fn load_weight_sub(&self, weight: u64) {
-        let _ = self.load_weight.fetch_update(
-            Ordering::SeqCst,
-            Ordering::SeqCst,
-            |v| v.checked_sub(weight),
-        );
+        if self.load_weight
+            .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| v.checked_sub(weight))
+            .is_err()
+        {
+            static LASTW: core::sync::atomic::AtomicU64 =
+                core::sync::atomic::AtomicU64::new(0);
+            let now = crate::drivers::timer::get_jiffies();
+            let last = LASTW.load(Ordering::Acquire);
+            if now.wrapping_sub(last) >= 10
+                && LASTW.compare_exchange(last, now, Ordering::AcqRel, Ordering::Acquire).is_ok()
+            {
+                let loc = core::panic::Location::caller();
+                use crate::console::putchar_no_lock as putchar;
+                for &b in b"\nLWEIGHT-UNDERFLOW at " { putchar(b); }
+                let f = loc.file();
+                let base = f.rfind('/').map(|i| i + 1).unwrap_or(0);
+                for &b in f.as_bytes()[base..].iter() {
+                    putchar(b);
+                }
+                putchar(b'\n');
+            }
+        }
     }
 
     /// Check if run queue is empty
@@ -1593,6 +1649,19 @@ impl CfsRunQueue {
         // Calculate scheduling period
         // If process count is high, use min_granularity * nr_running
         // Otherwise use fixed scheduling latency
+        // Garbage tripwire: with the checked-sub discipline the count can
+        // no longer wrap; anything beyond any possible task bound is a
+        // corrupted read of the counter itself — name it once per boot.
+        if nr_running > 1_000_000 {
+            static GARBAGE_SEEN: core::sync::atomic::AtomicBool =
+                core::sync::atomic::AtomicBool::new(false);
+            if !GARBAGE_SEEN.swap(true, core::sync::atomic::Ordering::AcqRel) {
+                crate::pr_warn!(
+                    "sched_slice: nr_running={} is impossible (corrupted read)",
+                    nr_running
+                );
+            }
+        }
         let sched_period = if nr_running > SCHED_LATENCY_NS / SCHED_MIN_GRANULARITY_NS {
             // Saturating: a garbage/huge count must not panic the tick —
             // belt-and-braces for nr_running_dec (see its doc).
