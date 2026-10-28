@@ -3341,3 +3341,77 @@ pbench-pa97-serial.log (4 panics, t=6s after p1_null+p1_clock) and
 work/pbench-pa96b-serial.log (4 panics, t=9s, my branch post-merge).
 Signature: `Option::unwrap() on None` at
 library/alloc/src/collections/btree/navigate.rs:552.
+
+### 8.10.26 Leg 56 (2026-10-29): the full-grind histogram re-decomposed — the page labels carry confounds; the symbol-size splits re-rank the targets
+
+**Method note first (it changes the ranking): the sampler buckets by
+4KB page, and the OH-lane symbolizer labeled each page by leading
+symbols.** nm -S size-splits of each hot page against the tip8 ELF
+show two big labeling artifacts and re-rank everything:
+
+**#1 "rmap page_record_mapping 19%" (80231000, n=65359):** rmap's
+stubs are 1% of the page's bytes. The page is 65% FOUR
+`core::slice::cmp::SliceContains::slice_contains` monomorphizations
+(u8/u16/u32/u64), 7% Ext4GroupDesc Ord/PartialOrd (BTreeMap key
+compares), ~5% arch-cpu primitives, the rest misc. **The 19% is
+~12%-of-kernel slice.contains — and its hot instance is
+publication_constrained's `p.post.contains(&blocknr)` inside the
+old linear queue scan, plus the flush paths' `devs.contains`** — the
+sc310-family cost the sampler caught red-handed. BOTH halves are
+already fixed on main as of tonight: 5e7f0d0a (the constrained-set
+index — O(log n) guard) and fab0e029 (the flush restored — queue
+stays near-empty). **The "cold-start wall" headline is substantially
+ALREADY DEAD on main; the grind measured tip8.** The surviving ~7% is
+the BTreeMap key-compare family (ext4 group-desc Ord — allocator/
+bitmap selection walks) and ~5% arch-cpu (partially addressed by the
+fdtable/page-cache/percpu levers, more below).
+
+**#6 "soft-float 4.5%" (80805000, n=15762):** the page is 31% ___multf3
+(f128 multiply) BY SIZE — but a full static xref of all 26 float
+symbols shows their ONLY callers are core::fmt's float Display/Debug/
+LowerExp impls, and CURRENT MAIN HAS NO RUNTIME FLOAT FORMATTING
+(loadavg/uptime are integer fixed-point; the dcache/icache hit-rate
+f64s are unit-test-only; syscost's percent is integer math). The
+runtime weight in that page is **memcmp/bcmp/strlen/compare_bytes
+(38% of its bytes; path-component comparison per namei lookup)** plus
+the fmt-float code that only runs if someone ever formats a float.
+**No soft-float conversion is owed; the real #6 target is the path
+string-compare family** (namei's per-component equals → length-first
+u64-chunk compares or an interned name key).
+
+**#2 "atomic fetch_update 10%" (80473000):** evenly smeared across
+dozens of atomic monomorphizations — the page-cache state machine's
+share (the sampler's short-window #2 from sc357) is on main already
+(86a458f9). What remains here is the long tail of every fetch_update
+caller (wait.rs futex paths, mm rss — adjudicated NO-GO, timers).
+
+**#3 "TwoWaySearcher/ConsoleWriter 8%" (80228000):** 72% str::pattern
+TwoWaySearcher monomorphizations — `str::contains`/`find` on hot
+paths. WHO: the same publication/bio scans' `post.contains` (fixed),
+path `find('/')` componentization per lookup (namei — real), and
+log-string searches (pstore?). Same family as the memcmp note above.
+
+**#4 atomic_store/CAS (5.5%+):** 45% the generic compare_exchange
+bodies (every CAS retry loop's instruction sequence — includes my
+fdtable reader banks' SeqCst RMW and the pre-lever-B lock CAS).
+Largely the aggregate per-op atomic tax; the levers on main cut its
+principal feeders.
+
+**#8 fmt::Formatter (2.9%):** the formatting machinery per log line.
+Downstream of VOLUME, not of any one caller — the loglevel=4 +
+quietcon boot-arg gift to the OH lane kills the volume; my held
+console TX batching (007a876a, on main) kills the UART side. No
+further kernel-side fmt work is justified until volume is cut.
+
+**Net re-ranking of the cold-start mission (post-main-fixes):**
+1. RE-SAMPLE FIRST (sc359 or a fresh grind on CURRENT main) — the
+   two biggest grind pages measured code that no longer exists in the
+   hot shape it ran in; every ranking below that is extrapolation.
+2. The fault-path BTreeMap+lock cluster (pcache inodes global lock +
+   two map walks per fault; the ~7% group-desc compares): sharded
+   page cache or per-inode lock-free reads — the biggest structural
+   item left standing.
+3. namei per-component string work (memcmp + TwoWaySearcher family):
+   length-first compare / interned names — bounded, mechanical.
+4. Console/log volume (OH lane's boot-arg) + already-held TX batching.
+5. soft-float: CLOSED (no runtime float user; the page is memcmp).
