@@ -7420,3 +7420,29 @@ launcher spawned, sampler delivered —
 0x40000000-401a8000 launcher bin, 0x7ff000b16000-bb3000 libc++,
 0x7ff0819d2000-81f9000 hicollie, 0x7ff083d26000-45a4000
 libark_jsruntime, 0x7ff08a82b000-a90e000 libappkit_native.
+
+LEG-40C round 4 (sc358 final verdict + quota reset): sc358 (ams JSON
+9999999 via debugfs rewrite — the ams=999 of round 3 parses as
+SECONDS: instances died at ~15 min; 9999999 is effectively
+unbounded): ONE instance ground the whole ~2.5 h window — final
+utime=37283 stime=346742 ticks (~372 s user + ~3467 s kernel, ~64 min
+CPU) — WITHOUT completing cold start (launcher.ready 0, OnForeground
+0, screen 8-color class throughout). BOUND ESTABLISHED: ~1 h of
+mostly-kernel CPU is insufficient for the launcher's load phase at
+current Rux speed.
+FULL-GRIND HISTOGRAM (346k kernel ticks, perf-lane target list;
+final-report counts, tip8-ELF symbolized): 0x80231000 n=65359 (19%)
+= mm/rmap page_record_mapping (FAULT reverse-mapping); 0x80473000
+n=35781 atomic fetch_update monomorphs (locking); 0x80228000 n=28890
+core::str TwoWaySearcher + ConsoleWriter + bio; 0x80474000 n=18940
+ext4/atomic_store monomorphs; 0x807e3000 n=17128 alloc Box/CStr;
+0x80805000 n=15762 compiler_builtins __mulsf3 (SOFT-FLOAT mul in a
+kernel hot path); 0x802c0000 n=13279 Atomic fetch_max; 0x807ee000
+n=9960 core::fmt (kernel logging). User side 9.7%: all libc
+(string/memcpy/malloc) — zero libark_jsruntime samples.
+Fold-ins landed (195c0db2): oh2-probe EFAULT + real-token
+expectations; scripts/make_decode_media.py committed (was only in a
+gone /tmp; deterministic; media verified).
+sc359 IN FLIGHT at log time (quota-reset first-light boot, tip8 +
+ripsample for continued perf sampling, 2.5 h window; host load 21 at
+launch — flake-zone risk noted).
