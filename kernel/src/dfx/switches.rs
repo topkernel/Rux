@@ -87,6 +87,7 @@ macro_rules! dfx_switch_table {
             PoolCensus => "poolcensus",
             SlowTask => "slowtask",
             ExtHunt => "exthunt",
+            ThPark => "thpark",
         }
     };
 }
@@ -389,9 +390,21 @@ pub enum DfxSwitch {
     /// lost-index-block for the ftest04 all-zeros readback family.
     /// OFF by default.
     ExtHunt,
+    /// dfx=thpark (leg-40B family A): user-stack park dump of hung
+    /// binder SERVER threads from the txn-hang audit — 48 frame words
+    /// above the parked syscall's entry sp, VMA+fileoff+instruction
+    /// bytes for offline symbolize against the image's libraries.
+    /// Names the image-side handler chain that entered a nested sync
+    /// txn (the mutual-ABBA candidate side, sc334B tid472<->841
+    /// shape). Deliberately SEPARATE from ParkDump: that switch also
+    /// arms the freeze-scan full-tgid dumps whose UART volume is the
+    /// known boot-timing dodge amplifier (sc186-188); this one is
+    /// latched (once per tid per boot, 2 per 5 s burst, 16 per boot).
+    /// OFF by default.
+    ThPark,
 }
 
-const SWITCH_COUNT: usize = 43;
+const SWITCH_COUNT: usize = 44;
 
 static SWITCHES: [AtomicBool; SWITCH_COUNT] = [const { AtomicBool::new(false) }; SWITCH_COUNT];
 
@@ -475,6 +488,7 @@ impl DfxSwitch {
             DfxSwitch::SlowTask => 40,
             DfxSwitch::EpollScan => 41,
             DfxSwitch::ExtHunt => 42,
+            DfxSwitch::ThPark => 43,
         }
     }
 

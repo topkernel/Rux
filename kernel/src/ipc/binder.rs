@@ -3153,6 +3153,10 @@ pub fn txn_hang_audit() {
         looper: u32,
         wfpw: bool,
         outstanding: alloc::string::String,
+        // leg-40B family A: true when the outstanding scan found nested
+        // txns FROM this hung server thread — the mutual-ABBA candidate
+        // side (sc334B tid472<->841 shape). Drives the parkdump hook.
+        nested: bool,
     }
     struct Out {
         id: u64,
@@ -3226,6 +3230,7 @@ pub fn txn_hang_audit() {
                             }
                             let outstanding =
                                 outstanding_from_tid(world, proc.pid, t.tid);
+                            let nested = !outstanding.is_empty();
                             hung.push(Hung {
                                 id: x.id,
                                 code: x.code,
@@ -3240,6 +3245,7 @@ pub fn txn_hang_audit() {
                                 looper: th.looper,
                                 wfpw: th.waiting_for_proc_work,
                                 outstanding,
+                                nested,
                             });
                             if hung_n < 4 {
                                 hung_pids[hung_n] = proc.pid;
@@ -3324,6 +3330,8 @@ pub fn txn_hang_audit() {
     };
     let mut w = crate::dfx::backtrace::ConsoleWriter::new();
     use core::fmt::Write as _;
+    // leg-40B: parkdump bursts-per-audit cap (see the TXN-HANG-PARK hook).
+    let mut burst_dumps = 0u32;
     for h in &hung {
         let srv = unsafe { crate::sched::find_task_by_pid(h.stid) };
         let (state, sys, rip, a0, a1) = if srv.is_null() {
@@ -3415,6 +3423,53 @@ pub fn txn_hang_audit() {
                 "TXN-HANG-FSW txn{} bl={}.{}.{}.{}.{}.{} fr={}.{}.{} bs={}.{}",
                 h.id, bl, owner, depth, waiters, queued, held_ms, fr, fseg, fblk, bs, bsus
             );
+        }
+        // leg-40B family A: user-stack park dump of the hung server
+        // thread (dfx=thpark — deliberately its own switch, NOT
+        // ParkDump, which also arms the freeze-scan full-tgid dumps
+        // that dodge boot timing, sc186-188). Names the image-side
+        // handler call chain above the parked syscall — the input the
+        // oh-img-p mitigation needs for the mutual-ABBA pair. Once per
+        // tid per boot (wedge stacks are frozen), max 2 per burst and
+        // 16 per boot: UART volume stays tightly latched.
+        if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::ThPark)
+            && burst_dumps < 2
+        {
+            // Once-per-tid latch: 0 = free slot.
+            #[allow(clippy::declare_interior_mutable_const)]
+            const ZERO_TID: core::sync::atomic::AtomicU32 =
+                core::sync::atomic::AtomicU32::new(0);
+            static DUMPED_TIDS: [core::sync::atomic::AtomicU32; 64] = [ZERO_TID; 64];
+            static DUMP_N: core::sync::atomic::AtomicU32 =
+                core::sync::atomic::AtomicU32::new(0);
+            use core::sync::atomic::Ordering::Relaxed as Rel;
+            if DUMP_N.load(Rel) < 16 {
+                let seen = DUMPED_TIDS
+                    .iter()
+                    .any(|d| d.load(Rel) == h.stid);
+                if !seen {
+                    for d in DUMPED_TIDS.iter() {
+                        if d
+                            .compare_exchange(0, h.stid, Rel, Rel)
+                            .is_ok()
+                        {
+                            break;
+                        }
+                    }
+                    DUMP_N.fetch_add(1, Rel);
+                    burst_dumps += 1;
+                    // SAFETY: read-only diagnostic walk of the parked
+                    // thread's user pages, outside WORLD
+                    // (user_park_stack_dump_stid contract).
+                    unsafe {
+                        user_park_stack_dump_stid(
+                            h.stid,
+                            "TXN-HANG-PARK:",
+                            48,
+                        )
+                    };
+                }
+            }
         }
         // Leg-28 item 2 + leg-29A: name the FILE when the hung server
         // thread is stuck in a file syscall family — the pathstash
@@ -4014,7 +4069,22 @@ fn hist_line_of(tid: u32, ring: &[(u8, u32, u32, u32); BHIST]) -> alloc::string:
 /// page-walk dumps that made the old WORLD-held stall_report a ~500 ms
 /// IRQ-off window (sc82, khungtaskd death).
 unsafe fn user_park_stack_dump(t: &Arc<BinderThread>) {
-    let task = crate::sched::find_task_by_pid(t.tid);
+    // SAFETY: tid-only core, same contract (leg-40B).
+    unsafe { user_park_stack_dump_stid(t.tid, "binder-stall:  ", 16) }
+}
+
+/// leg-40B (family A): tid-taking core of the sc77 park dump so the
+/// txn-hang audit can dump a hung SERVER thread without holding a
+/// BinderThread ref. `words` is the frame-window depth above the
+/// parked syscall's entry sp: 16 keeps the sc77 stall-scan shape, 48
+/// covers ~6 handler frames for the audit — the OH handler chain that
+/// entered the nested txn is what the image-side ABBA mitigation
+/// needs named. `tag` prefixes every line so audit dumps are greppable
+/// apart from binder-stall dumps.
+/// SAFETY: same contract as user_park_stack_dump — read-only walk of
+/// the target task's own page tables; run OUTSIDE the WORLD guard.
+unsafe fn user_park_stack_dump_stid(tid: u32, tag: &str, words: u64) {
+    let task = crate::sched::find_task_by_pid(tid);
     if task.is_null() {
         return;
     }
@@ -4060,15 +4130,16 @@ unsafe fn user_park_stack_dump(t: &Arc<BinderThread>) {
     #[cfg(not(any(feature = "x86_64", feature = "riscv64")))]
     let (rsp, rip) = (0u64, 0u64);
     crate::pr_warn!(
-        "binder-stall:   PARK-STACK tid {} rip={:#x} rsp={:#x}",
-        t.tid,
+        "{} PARK-STACK tid {} rip={:#x} rsp={:#x}",
+        tag,
+        tid,
         rip,
         rsp
     );
-    // 16 candidate frame words above rsp; each that lands in a mapped
+    // Candidate frame words above rsp; each that lands in a mapped
     // exec-looking VMA prints with the file offset for offline symbolize.
     let vmas = aspace.vma_read();
-    for i in 0..16u64 {
+    for i in 0..words {
         let Some(v) = read_u64_at(rsp + 8 * i) else { continue };
         // Skip obvious non-pointers (small ints, non-canonical).
         if v < 0x1000 || v > 0x7fff_ffff_ffff {
@@ -4080,7 +4151,8 @@ unsafe fn user_park_stack_dump(t: &Arc<BinderThread>) {
             // search these bytes at fileoff in the debugfs-extracted .so).
             let bytes = read_u64_at(v).unwrap_or(0);
             crate::pr_warn!(
-                "binder-stall:   ustack[{}]={:#x} vma={:#x}-{:#x} fd={} fileoff={:#x} bytes={:#018x}",
+                "{} ustack[{}]={:#x} vma={:#x}-{:#x} fd={} fileoff={:#x} bytes={:#018x}",
+                tag,
                 i,
                 v,
                 vm.start().as_usize(),
