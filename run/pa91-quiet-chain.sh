@@ -24,7 +24,7 @@
 cd "$(dirname "$0")/.." || exit 1
 LOG=run/pa91-quiet.log
 DBG=run/pa91-dbg-bzImage
-STRONG=run/pa90-leverB-strong-bzImage
+STRONG=run/pa92-route1-strong-bzImage
 
 stamp() { date '+%F %T'; }
 l1() { awk '{printf "%d", $1}' /proc/loadavg; }
