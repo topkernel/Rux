@@ -314,3 +314,146 @@ mkdrmdir median 55-58 ms strong class → single-digit ms (the commit's
 3-6 synchronous I/Os vanish; what remains is the scoped drain of the
 op's own publication records).
 
+## 6. Arm-2 semantics decision (leg 49): the lazy revoke CLEARS — per-transaction sets, no cancel records, slow path gains write-through
+
+The leg-44 checklist above was written against Linux's shape. Re-reading
+the code before touching it surfaced four facts about OUR jbd2 that
+change the weight of the hazards, so this section records the corrected
+model and the decisions it forces. Written before any code, per the
+ledger's own rule.
+
+### 6.1 Corrected facts (what our jbd2 actually does)
+
+F-a. **Metadata is deferred, not written through, during ops.**
+`bio::sync_dirty_buffer` (bio.rs) skips the sync whenever the current
+task holds an active ext4 journal handle — the buffer stays BH_Dirty.
+Persistence points are: the commit's write-through fast path, fsync/sync
+(paths that set h_sync or call sync_buffers), and buffer-cache eviction.
+(The Phase 2.5 comment in commit.rs claiming "already synced during the
+operation" predates the deferral and is stale.)
+
+F-b. **Slow-path journal records are born dead.** The slow path (taken
+when revokes are pending) writes journal-area copies of the registered
+blocks, revoke blocks, a commit block, then Phase 4 sets
+tail = head and writes s_start past ALL of it. A COMPLETED slow commit
+therefore leaves the operation's real metadata only in dirty RAM
+buffers; recovery at next mount starts at s_start and never sees the
+records. The commit's Phase 4 comment says as much ("this
+implementation writes every journaled buffer THROUGH ... the log region
+is immediately reusable") — but the write-through it describes is the
+FAST path's loop; the slow path itself never syncs the registered
+buffers' final locations.
+
+F-c. **The replayable set at crash is at most one transaction.** Commits
+are synchronous and inline in jbd2_journal_stop; there is one running
+transaction at a time; each completed commit advances tail = head. So
+the only records recovery can replay are those of a commit that was in
+flight at crash time — specifically the window between its commit block
+landing and its journal-superblock write (before the commit block,
+PASS_SCAN requires one and replays nothing). Multi-transaction replay
+sets cannot occur in this design.
+
+F-d. **Today's rmdir commit already leaves rmdir metadata unpersisted.**
+The per-rmdir forced commit takes the slow path (revokes pending), which
+per F-b does not write through. So going lazy does not weaken rmdir's
+own persistence: both before and after, the freeing metadata rides dirty
+buffers to the later drain points, and recovery is e2fsck (the standing
+F4-R2 stance).
+
+### 6.2 Decisions on R1-R6
+
+**R1 — per-transaction set + a spill, no global force.** Revokes move
+to `Transaction::t_revoke_records: Spinlock<Vec<(u64, Tid)>>`, deduped
+per (block, tid). `Journal::revoke_records` keeps two residual roles:
+the RECOVERY accumulator (scan_revoke_block fills it, PASS_REPLAY's
+filter reads it, recovery clears it — unchanged), and a SPILL for the
+rare revoke issued while its transaction is no longer Running (an SMP
+handle joining a committing transaction — start_this_handle does not
+check t_state — or a stale handle on a Finished transaction). The spill
+is drained into the next transaction at creation
+(jbd2_get_transaction). Lock order: j_running_transaction, then the
+revoke vec(s); no path takes them in reverse. The spill choice is R1's
+"inherited unresolved ones" option, scoped to the only case that needs
+it.
+
+**R2 — no cancel records, in memory or on disk.** The dangerous
+direction (a revoke suppressing the replay of NEWER content) requires
+revoke.tid >= the descriptor's tid with the content newer than the
+revoke. With per-transaction sets that cannot arise: a revoke is stamped
+with its issuing transaction's tid and is logged by that transaction (or
+a later one, via the spill, under a still-later header tid), while any
+descriptor carrying post-revoke content for the block belongs to a
+transaction with a strictly greater tid — the filter
+(`revoke.tid >= desc_tid`) does not suppress it. Same-tid suppression
+(realloc inside the issuing transaction) skips replay of that block's
+own commit-time snapshot; the content still reaches disk through the
+commit's write-through pass (R2') and the standing deferral drain
+points. This divergence from Linux (no JBD2_FLAG_REVOKE_CANCEL needed)
+is a consequence of the write-through commit model, not an oversight;
+recorded in docs/architecture/design-divergences.md.
+`jbd2_journal_cancel_revoke` stays a stub, its comment upgraded to say
+why.
+
+**R2' — the slow path gains the fast path's write-through loop.** With
+revokes riding transactions, mixed batches (writes + a pending revoke)
+would flip commits that are fast-path today into slow-path — and per
+F-b the slow path does not persist. Without this addition the change
+would silently widen the dirty window for write-heavy batches sharing a
+window with any pending revoke. With it, slow ≡ fast + revoke/commit/
+superblock bookkeeping: sync every registered buffer to its final
+location first (same loop, same per-block publication-constraint guard),
+then write the journal-area copies, revoke blocks, commit block, and
+superblock exactly as now. The journal-area copies stay for format
+compatibility; they remain born dead per F-b (documented there).
+
+**R3 — drop the global force; bound with a revoke high-water.** The
+lazy-skip condition in jbd2_journal_stop stops reading
+journal.revoke_records and instead forces a commit when the
+transaction's OWN set reaches `LAZY_COMMIT_MAX_REVOKES = 510` (one
+revoke block's worth at the smallest entry size: (4096 - 12) / 8).
+Rationale: ext4 callers use plain ext4_journal_start(nblocks) — no
+revoke-credit reservation — so no existing bounder covers revoke-only
+volume (an unlink loop registers a handful of unique buffers but
+thousands of revokes); tids and log space stay bounded at one revoke
+block per forced commit. The forcing condition reads no other
+transaction's state (R3's own requirement).
+
+**R4 — recovery unchanged.** The on-disk format does not change: revoke
+blocks already carry the committing transaction's tid in their header,
+entries are plain block numbers, PASS_SCAN collects them into the
+recovery table, PASS_REPLAY filters by `revoke.tid >= desc_tid`, and
+for the single-transaction replay sets (F-c) that is exactly log-order
+semantics. In-memory entry tids are bookkeeping only; recovery
+re-derives tid from block headers.
+
+**R5 — no cancel hook in get_create_access.** Follows from R2: same-tid
+suppression is benign (content is delivered by write-through), cross-tid
+is not suppressed. The allocation reuse paths need no change.
+
+**R6 — verification.** (i) pbench A/B on release-strong kernels
+(M = merged main control, B = branch): p6_mkdrmdir and p6_unlink are
+the target rows (prediction below); p6_write_fsync, p6_append, p6_stat
+and the P5 rows are the in-band guards (fsync still forces commits, now
+carrying the write-through pass — watch row). (ii) fsw mechanism probe:
+jcommit_slow under the pbench boot drops from ≈ unlink+rmdir count to a
+handful (batch count); jlazy absorbs the rest. (iii) Correctness:
+dual-arch build rc=0, riscv64 minimal-rootfs smoke zero panics,
+`make test` green. (iv) Crash-consistency class is unchanged per F-d
+(rmdir metadata was already dirty-after-commit; the change adds
+persistence via R2', removes none); the standing e2fsck stance applies
+unchanged.
+
+### 6.3 Expected effect (updated with the deferral model)
+
+Per rmdir today: one forced slow commit = 1 descriptor + k journal-area
+copies (k = unique registered blocks: dir block, parent dir, inode
+table, bitmap, group desc, superblock — deduped by blocknr, so ~5-8) +
+1 revoke block + 1 commit block + 1 journal superblock ≈ 8-12
+synchronous virtio round trips, matching the 52-58 ms strong median
+class. After the change: 0 synchronous I/Os per op; one batch commit per
+510 revokes / 1024 unique buffers / fsync, with the shared identity
+blocks deduped to one write each. Prediction: p6_mkdrmdir strong median
+→ single-digit ms; p6_unlink (same per-op forced commit, ~16 ms class
+today) → low ms; the amortized batch commit adds ≤ (2k + 3) syncs per
+~500 delete ops.
+
