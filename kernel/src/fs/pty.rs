@@ -499,14 +499,12 @@ fn ptmx_close(file: &File) -> i32 {
 
 /// /dev/ptmx file operations (every open description allocates its own pty;
 /// per-pair state lives in private_data).
-pub static PTMX_OPS: FileOps = FileOps {
-    read: Some(ptmx_read),
-    write: Some(ptmx_write),
-    lseek: None,
-    close: Some(ptmx_close),
-    poll: Some(ptmx_poll),
-    read_at: None,
-};
+pub static PTMX_OPS: FileOps = FileOps::builder()
+    .read(ptmx_read)
+    .write(ptmx_write)
+    .close(ptmx_close)
+    .poll(ptmx_poll)
+    .build();
 
 // ============================================================================
 // Slave file operations (/dev/pts/N)
@@ -654,14 +652,12 @@ fn pty_slave_close(file: &File) -> i32 {
 }
 
 /// /dev/pts/N file operations (shared table; per-pair state in private_data).
-pub static PTY_SLAVE_OPS: FileOps = FileOps {
-    read: Some(pty_slave_read),
-    write: Some(pty_slave_write),
-    lseek: None,
-    close: Some(pty_slave_close),
-    poll: Some(pty_slave_poll),
-    read_at: None,
-};
+pub static PTY_SLAVE_OPS: FileOps = FileOps::builder()
+    .read(pty_slave_read)
+    .write(pty_slave_write)
+    .close(pty_slave_close)
+    .poll(pty_slave_poll)
+    .build();
 
 // ============================================================================
 // Per-fd tty ioctl dispatch

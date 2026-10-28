@@ -150,14 +150,11 @@ fn uart_file_poll(_file: &crate::fs::File, events: u16) -> u16 {
 }
 
 /// UART character device file operations (public access)
-pub static UART_OPS: crate::fs::FileOps = crate::fs::FileOps {
-    read: Some(uart_file_read),
-    write: Some(uart_file_write),
-    lseek: None,
-    close: None,
-    poll: Some(uart_file_poll),
-    read_at: None,
-};
+pub static UART_OPS: crate::fs::FileOps = crate::fs::FileOps::builder()
+    .read(uart_file_read)
+    .write(uart_file_write)
+    .poll(uart_file_poll)
+    .build();
 
 /// Synthetic st_dev for kernel-console char-device Files (no other Rux
 /// filesystem uses this id, so it can never alias a pipe or a real file).

@@ -2379,14 +2379,12 @@ fn unix_file_poll(file: &File, events: u16) -> u16 {
 }
 
 /// AF_UNIX socket file operations.
-pub static UNIX_SOCKET_OPS: FileOps = FileOps {
-    read: Some(unix_file_read),
-    write: Some(unix_file_write),
-    lseek: None,
-    close: Some(unix_file_close),
-    poll: Some(unix_file_poll),
-    read_at: None,
-};
+pub static UNIX_SOCKET_OPS: FileOps = FileOps::builder()
+    .read(unix_file_read)
+    .write(unix_file_write)
+    .close(unix_file_close)
+    .poll(unix_file_poll)
+    .build();
 
 // ============================================================================
 // Poll-wait registration (P3: event-driven poll/select)

@@ -299,14 +299,20 @@ fn selinuxfs_read_at(file: &File, offset: u64, buf: &mut [u8]) -> isize {
     n as isize
 }
 
-static SELINUXFS_FILE_OPS: FileOps = FileOps {
-    read: Some(selinuxfs_read),
-    write: Some(selinuxfs_write),
-    lseek: None,
-    close: None,
-    poll: None,
-    read_at: Some(selinuxfs_read_at),
-};
+static SELINUXFS_FILE_OPS: FileOps = FileOps::builder()
+    .read(selinuxfs_read)
+    .write(selinuxfs_write)
+    .read_at(selinuxfs_read_at)
+    .build();
+
+/// D-6 shape-test accessor: expose the private table to the unit-test
+/// group `fileops-caps` without widening the runtime API.
+#[cfg(any(test, feature = "unit-test"))]
+pub mod caps_shape {
+    pub fn selinuxfs_ops() -> &'static crate::fs::file::FileOps {
+        &super::SELINUXFS_FILE_OPS
+    }
+}
 
 /// Build the root inode for a selinuxfs mount.
 pub fn create_root_inode() -> Arc<Inode> {

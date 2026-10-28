@@ -551,14 +551,12 @@ fn evdev_file_write(file: &File, buf: &[u8]) -> isize {
 }
 
 /// evdev FileOps
-pub static EVDEV_OPS: FileOps = FileOps {
-    read: Some(evdev_file_read),
-    write: Some(evdev_file_write),
-    lseek: None,
-    close: Some(evdev_file_close),
-    poll: Some(evdev_file_poll),
-    read_at: None,
-};
+pub static EVDEV_OPS: FileOps = FileOps::builder()
+    .read(evdev_file_read)
+    .write(evdev_file_write)
+    .close(evdev_file_close)
+    .poll(evdev_file_poll)
+    .build();
 
 // ============================================================================
 // ioctl (per-file, dispatched from sys_ioctl via ops identity)

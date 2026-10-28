@@ -1539,14 +1539,12 @@ fn socket_file_poll(file: &File, events: u16) -> u16 {
 }
 
 /// Socket file operations
-pub static SOCKET_OPS: FileOps = FileOps {
-    read: Some(socket_read),
-    write: Some(socket_write),
-    lseek: None,
-    close: Some(socket_close),
-    poll: Some(socket_file_poll),
-    read_at: None,
-};
+pub static SOCKET_OPS: FileOps = FileOps::builder()
+    .read(socket_read)
+    .write(socket_write)
+    .close(socket_close)
+    .poll(socket_file_poll)
+    .build();
 
 // ============================================================================
 // Poll-wait registration (P3: event-driven poll/select)

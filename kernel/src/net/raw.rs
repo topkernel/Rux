@@ -517,14 +517,12 @@ fn raw_file_poll(file: &File, events: u16) -> u16 {
 }
 
 /// Shared file ops for both raw socket kinds.
-pub static RAW_OPS: FileOps = FileOps {
-    read: Some(raw_file_read),
-    write: Some(raw_file_write),
-    lseek: None,
-    close: Some(raw_file_close),
-    poll: Some(raw_file_poll),
-    read_at: None,
-};
+pub static RAW_OPS: FileOps = FileOps::builder()
+    .read(raw_file_read)
+    .write(raw_file_write)
+    .close(raw_file_close)
+    .poll(raw_file_poll)
+    .build();
 
 // ============================================================================
 // Socket creation / fd plumbing

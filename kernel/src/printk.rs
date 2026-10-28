@@ -1425,14 +1425,12 @@ fn kmsg_file_lseek(file: &crate::fs::file::File, offset: isize, whence: i32) -> 
 }
 
 /// FileOps for /dev/kmsg
-pub static KMSG_OPS: crate::fs::file::FileOps = crate::fs::file::FileOps {
-    read: Some(kmsg_file_read),
-    write: Some(kmsg_file_write),
-    lseek: Some(kmsg_file_lseek),
-    close: None,
-    poll: Some(kmsg_file_poll),
-    read_at: None,
-};
+pub static KMSG_OPS: crate::fs::file::FileOps = crate::fs::file::FileOps::builder()
+    .read(kmsg_file_read)
+    .write(kmsg_file_write)
+    .lseek(kmsg_file_lseek)
+    .poll(kmsg_file_poll)
+    .build();
 
 /// Initialize /dev/kmsg device node.
 ///
@@ -1637,14 +1635,12 @@ fn proc_kmsg_lseek(_file: &crate::fs::file::File, _offset: isize, _whence: i32) 
 
 /// FileOps for the /proc/kmsg stream (attached by procfs_get_file_ops
 /// for the node whose content_generator is generate_kmsg).
-pub static PROC_KMSG_OPS: crate::fs::file::FileOps = crate::fs::file::FileOps {
-    read: Some(proc_kmsg_read),
-    write: None,
-    lseek: Some(proc_kmsg_lseek),
-    close: Some(proc_kmsg_close),
-    poll: Some(proc_kmsg_poll),
-    read_at: None,
-};
+pub static PROC_KMSG_OPS: crate::fs::file::FileOps = crate::fs::file::FileOps::builder()
+    .read(proc_kmsg_read)
+    .lseek(proc_kmsg_lseek)
+    .close(proc_kmsg_close)
+    .poll(proc_kmsg_poll)
+    .build();
 
 // ==================== Convenience Macros ====================
 

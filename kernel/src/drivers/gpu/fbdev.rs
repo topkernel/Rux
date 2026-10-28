@@ -326,14 +326,10 @@ pub fn create_var_screeninfo(info: &FrameBufferInfo) -> FbVarScreeninfo {
 
 /// /dev/fb0 file operations: a real char device so ioctls and mmap
 /// dispatch on the FILE's ops identity (no fd-number heuristics).
-pub static FB_OPS: crate::fs::FileOps = crate::fs::FileOps {
-    read: Some(fb_read),
-    write: Some(fb_write),
-    lseek: None,
-    close: None,
-    poll: None,
-    read_at: None,
-};
+pub static FB_OPS: crate::fs::FileOps = crate::fs::FileOps::builder()
+    .read(fb_read)
+    .write(fb_write)
+    .build();
 
 fn fb_read(_file: &crate::fs::File, _buf: &mut [u8]) -> isize {
     -29 // ESPIPE-like: reads unsupported (mmap instead)

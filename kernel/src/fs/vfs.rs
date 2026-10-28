@@ -5454,14 +5454,20 @@ fn mem_file_close(file: &File) -> i32 {
     0
 }
 
-static MEM_FILE_OPS: FileOps = FileOps {
-    read: Some(mem_file_read),
-    write: None,
-    lseek: Some(mem_file_lseek),
-    close: Some(mem_file_close),
-    poll: None,
-    read_at: None,
-};
+static MEM_FILE_OPS: FileOps = FileOps::builder()
+    .read(mem_file_read)
+    .lseek(mem_file_lseek)
+    .close(mem_file_close)
+    .build();
+
+/// D-6 shape-test accessor: expose the private table to the unit-test
+/// group `fileops-caps` without widening the runtime API.
+#[cfg(any(test, feature = "unit-test"))]
+pub mod caps_shape {
+    pub fn mem_file_ops() -> &'static crate::fs::file::FileOps {
+        &super::MEM_FILE_OPS
+    }
+}
 
 // ============================================================================
 // fallocate / utimensat (fs-side helpers)

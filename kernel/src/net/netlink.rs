@@ -990,14 +990,12 @@ fn netlink_file_poll(file: &File, events: u16) -> u16 {
 }
 
 /// AF_NETLINK socket file operations.
-pub static NETLINK_OPS: FileOps = FileOps {
-    read: Some(netlink_file_read),
-    write: Some(netlink_file_write),
-    lseek: None,
-    close: Some(netlink_file_close),
-    poll: Some(netlink_file_poll),
-    read_at: None,
-};
+pub static NETLINK_OPS: FileOps = FileOps::builder()
+    .read(netlink_file_read)
+    .write(netlink_file_write)
+    .close(netlink_file_close)
+    .poll(netlink_file_poll)
+    .build();
 
 // ============================================================================
 // Socket creation / fd plumbing

@@ -484,14 +484,10 @@ fn io_uring_poll(_file: &File, events: u16) -> u16 {
     ready
 }
 
-pub static IO_URING_OPS: FileOps = FileOps {
-    read: None,
-    write: None,
-    lseek: None,
-    close: Some(io_uring_close),
-    poll: Some(io_uring_poll),
-    read_at: None,
-};
+pub static IO_URING_OPS: FileOps = FileOps::builder()
+    .close(io_uring_close)
+    .poll(io_uring_poll)
+    .build();
 
 // ==================== mmap Handler ====================
 

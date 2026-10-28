@@ -2676,14 +2676,10 @@ fn binder_poll(file: &crate::fs::File, _events: u16) -> u16 {
 }
 
 /// File operations for /dev/binder (registered in the devfs char registry).
-pub static BINDER_OPS: crate::fs::FileOps = crate::fs::FileOps {
-    read: None,
-    write: None,
-    lseek: None,
-    close: Some(binder_close),
-    poll: Some(binder_poll),
-    read_at: None,
-};
+pub static BINDER_OPS: crate::fs::FileOps = crate::fs::FileOps::builder()
+    .close(binder_close)
+    .poll(binder_poll)
+    .build();
 
 // ============================================================================
 // ioctl entry (sys_ioctl dispatch for BINDER_OPS files)
