@@ -81,10 +81,13 @@ domain (Tier 1 census/ticks, Tier 2 fork rows).
 ## D-4: Derived proc-file formatters (procfile! macro)
 
 **Design.** /proc text formats derive from one field-declaration list
-(kv/pad/cols forms) instead of hand-written format strings; the
+(kv/pad/cols/kvtab forms) instead of hand-written format strings; the
 declaration mints the renderer, an ordered FIELDS/COLUMNS const, and a
 shape test; the cols form derives the row function's argument list from
-the column list.
+the column list. The kvtab form (`Key:\t<value>\n`, one Display value
+per row, preformatted composites for multi-part rows) carries the
+/proc/[pid]/status family, with STATUS_FIELDS pinning the key sequence
+against a live render.
 
 **Advantage.** Kills the format-drift class (five byte-format defects
 survived review into a merged tree once); format and data become one
@@ -94,12 +97,12 @@ artifact; call sites cannot swap columns.
 column-exact vs the live host reference; stat/schedstat line order
 unit-pinned; full suite green; three full pbench boots DONE rc=0.
 
-**Known cost.** Opportunistic conversion — ~20 hand-written files
-remain (diskstats joined the derived set in the refactor lane's first
-slice: its 20-field row is a cols declaration with the
-merged/discard/flush zeros named as columns, plus an exact-bytes
-snapshot pin); dynamic-arity lines (interrupts/intr/softirqs) stay
-explicit by design.
+**Known cost.** Opportunistic conversion — ~19 hand-written files
+remain (the derived set grew in the refactor lane's slices: diskstats
+via cols with the merged/discard/flush zeros named as columns and an
+exact-bytes snapshot pin; /proc/[pid]/status via the new kvtab form
+with its key sequence pinned against a live render); dynamic-arity
+lines (interrupts/intr/softirqs) stay explicit by design.
 
 **Guard.** procfile-shape unit-test group + per-file order/snapshot
 pins; the DFX plan's adoption rule requires the macro for new files.

@@ -213,8 +213,10 @@ pub fn generate_status(pid: u64) -> Vec<u8> {
     let task = match task {
         Some(t) => t,
         None => {
-            content.push_str(&format!("Pid:\t{}\n", pid));
-            content.push_str("State:\tX (dead)\n");
+            content.push_str(&super::procfile::render_kvtab(&[
+                ("Pid", &pid),
+                ("State", &"X (dead)"),
+            ]));
             return content.into_bytes();
         }
     };
@@ -226,18 +228,6 @@ pub fn generate_status(pid: u64) -> Vec<u8> {
     let tgid = task.tgid();
     let cred = task.cred();
 
-    content.push_str(&format!("Name:\t{}\n", name_str));
-    content.push_str("Umask:\t0022\n");
-    content.push_str(&format!("State:\t{} ({})\n", state_char, state_str));
-    content.push_str(&format!("Tgid:\t{}\n", tgid));
-    content.push_str(&format!("Ngid:\t0\n"));
-    content.push_str(&format!("Pid:\t{}\n", pid));
-    content.push_str(&format!("PPid:\t{}\n", ppid));
-    content.push_str(&format!("TracerPid:\t0\n"));
-    content.push_str(&format!("Uid:\t{}\t{}\t{}\t{}\n", cred.uid, cred.euid, cred.suid, cred.fsuid));
-    content.push_str(&format!("Gid:\t{}\t{}\t{}\t{}\n", cred.gid, cred.egid, cred.sgid, cred.fsgid));
-    content.push_str(&format!("FDSize:\t64\n"));
-    content.push_str("Groups:\t\n");
     // Real VM counters (pages → kB). VmLck sums whole VMAs carrying
     // VM_LOCKED — our mlock pins at VMA granularity, so the locked size
     // is the locked VMA span (LTP mmap14 mlocks a 1MB mapping and reads
@@ -261,17 +251,6 @@ pub fn generate_status(pid: u64) -> Vec<u8> {
         };
         (total * page_kb, rss * page_kb, lck_pages * page_kb)
     };
-    content.push_str(&format!("VmPeak:\t{} kB\n", vm_size_kb));
-    content.push_str(&format!("VmSize:\t{} kB\n", vm_size_kb));
-    content.push_str(&format!("VmLck:\t{} kB\n", vm_lck_kb));
-    content.push_str(&format!("VmRSS:\t{} kB\n", vm_rss_kb));
-    content.push_str("VmData:\t0 kB\n");
-    content.push_str("VmStk:\t0 kB\n");
-    content.push_str("VmExe:\t0 kB\n");
-    content.push_str("VmLib:\t0 kB\n");
-    // No swap on Rux: report 0 like non-swapping Linux boxes. LTP
-    // getrusage03 scans this line after each mlockall+touch round.
-    content.push_str("VmSwap:\t0 kB\n");
 
     // Threads: live thread count from the thread-group leader (P2: real
     // count — single-threaded processes report 1, CLONE_THREAD groups
@@ -280,7 +259,6 @@ pub fn generate_status(pid: u64) -> Vec<u8> {
         let leader = unsafe { &*task.group_leader_ptr() };
         leader.nr_threads().max(1)
     };
-    content.push_str(&format!("Threads:\t{}\n", threads));
 
     // Signal masks (P2: real values). SigPnd = this task's private
     // pending set; ShdPnd shares it (no separate shared queue yet).
@@ -293,34 +271,174 @@ pub fn generate_status(pid: u64) -> Vec<u8> {
         .as_ref()
         .map(|s| s.ign_cgt_masks())
         .unwrap_or((0, 0));
-    content.push_str("SigQ:\t0/0\n");
-    content.push_str(&format!("SigPnd:\t{:016x}\n", sig_pnd));
-    content.push_str(&format!("ShdPnd:\t{:016x}\n", sig_pnd));
-    content.push_str(&format!("SigBlk:\t{:016x}\n", sig_blk));
-    content.push_str(&format!("SigIgn:\t{:016x}\n", sig_ign));
-    content.push_str(&format!("SigCgt:\t{:016x}\n", sig_cgt));
     // Capability sets (real values — libcap-ng's capng_get_caps_process()
     // parses CapBnd from here; all-zero values made capng_change_id() fail
     // and killed dbus-daemon startup).
-    content.push_str(&format!("CapInh:\t{:016x}\n", cred.cap_inheritable.bits()));
-    content.push_str(&format!("CapPrm:\t{:016x}\n", cred.cap_permitted.bits()));
-    content.push_str(&format!("CapEff:\t{:016x}\n", cred.cap_effective.bits()));
-    content.push_str(&format!("CapBnd:\t{:016x}\n", cred.cap_bounding.bits()));
-    content.push_str("Seccomp:\t0\n");
-
+    let (cap_inh, cap_prm, cap_eff, cap_bnd) = (
+        cred.cap_inheritable.bits(),
+        cred.cap_permitted.bits(),
+        cred.cap_effective.bits(),
+        cred.cap_bounding.bits(),
+    );
     // Context-switch counters (Linux /proc/[pid]/status tail): a
     // voluntary switch is one where the task went to sleep, an
     // involuntary one where it was preempted while still runnable.
-    content.push_str(&format!(
-        "voluntary_ctxt_switches:\t{}\n",
-        task.nvcsw.load(core::sync::atomic::Ordering::Relaxed)
-    ));
-    content.push_str(&format!(
-        "nonvoluntary_ctxt_switches:\t{}\n",
-        task.nivcsw.load(core::sync::atomic::Ordering::Relaxed)
-    ));
+    use core::sync::atomic::Ordering::Relaxed;
+    let (nvcsw, nivcsw) = (
+        task.nvcsw.load(Relaxed),
+        task.nivcsw.load(Relaxed),
+    );
+
+    // The row list IS the file (D-4 kvtab form): keys in Linux's
+    // fs/proc/array.c order, one Display value per row — multi-part
+    // rows (Uid/Gid quadruples, `kB` suffixes, hex masks) arrive as one
+    // preformatted value, so the `Key:\t<value>\n` discipline lives in
+    // the single renderer. STATUS_FIELDS (pinned by the shape test)
+    // must name these keys in exactly this order.
+    let rows: &[(&'static str, &dyn core::fmt::Display)] = &[
+        ("Name", &name_str),
+        ("Umask", &"0022"),
+        ("State", &alloc::format!("{} ({})", state_char, state_str)),
+        ("Tgid", &tgid),
+        ("Ngid", &0),
+        ("Pid", &pid),
+        ("PPid", &ppid),
+        ("TracerPid", &0),
+        ("Uid", &alloc::format!("{}\t{}\t{}\t{}", cred.uid, cred.euid, cred.suid, cred.fsuid)),
+        ("Gid", &alloc::format!("{}\t{}\t{}\t{}", cred.gid, cred.egid, cred.sgid, cred.fsgid)),
+        ("FDSize", &64),
+        ("Groups", &""),
+        // No swap on Rux: VmSwap reports 0 like non-swapping Linux
+        // boxes. LTP getrusage03 scans this line after each
+        // mlockall+touch round.
+        ("VmPeak", &alloc::format!("{} kB", vm_size_kb)),
+        ("VmSize", &alloc::format!("{} kB", vm_size_kb)),
+        ("VmLck", &alloc::format!("{} kB", vm_lck_kb)),
+        ("VmRSS", &alloc::format!("{} kB", vm_rss_kb)),
+        ("VmData", &"0 kB"),
+        ("VmStk", &"0 kB"),
+        ("VmExe", &"0 kB"),
+        ("VmLib", &"0 kB"),
+        ("VmSwap", &"0 kB"),
+        ("Threads", &threads),
+        ("SigQ", &"0/0"),
+        ("SigPnd", &alloc::format!("{:016x}", sig_pnd)),
+        ("ShdPnd", &alloc::format!("{:016x}", sig_pnd)),
+        ("SigBlk", &alloc::format!("{:016x}", sig_blk)),
+        ("SigIgn", &alloc::format!("{:016x}", sig_ign)),
+        ("SigCgt", &alloc::format!("{:016x}", sig_cgt)),
+        ("CapInh", &alloc::format!("{:016x}", cap_inh)),
+        ("CapPrm", &alloc::format!("{:016x}", cap_prm)),
+        ("CapEff", &alloc::format!("{:016x}", cap_eff)),
+        ("CapBnd", &alloc::format!("{:016x}", cap_bnd)),
+        ("Seccomp", &0),
+        ("voluntary_ctxt_switches", &nvcsw),
+        ("nonvoluntary_ctxt_switches", &nivcsw),
+    ];
+    content.push_str(&super::procfile::render_kvtab(rows));
 
     content.into_bytes()
+}
+
+/// Declared key order of /proc/[pid]/status (Linux fs/proc/array.c) —
+/// the drift floor for the kvtab conversion above. The shape test
+/// asserts a live render carries exactly these keys, in this order,
+/// each as `Key:\t<value>\n`.
+pub const STATUS_FIELDS: &[&str] = &[
+    "Name",
+    "Umask",
+    "State",
+    "Tgid",
+    "Ngid",
+    "Pid",
+    "PPid",
+    "TracerPid",
+    "Uid",
+    "Gid",
+    "FDSize",
+    "Groups",
+    "VmPeak",
+    "VmSize",
+    "VmLck",
+    "VmRSS",
+    "VmData",
+    "VmStk",
+    "VmExe",
+    "VmLib",
+    "VmSwap",
+    "Threads",
+    "SigQ",
+    "SigPnd",
+    "ShdPnd",
+    "SigBlk",
+    "SigIgn",
+    "SigCgt",
+    "CapInh",
+    "CapPrm",
+    "CapEff",
+    "CapBnd",
+    "Seccomp",
+    "voluntary_ctxt_switches",
+    "nonvoluntary_ctxt_switches",
+];
+
+/// Conversion pins for /proc/[pid]/status (D-4 kvtab slice): the key
+/// sequence, the `Key:\t<value>\n` byte shape, and the hex-mask/kB
+/// value formats are pinned against a live render of the CURRENT task
+/// (the unit-test runner itself is a task, so the renderer runs for
+/// real). Callable bodies for the in-kernel unit-test suite.
+#[cfg(any(test, feature = "unit-test"))]
+pub mod status_file_tests {
+    /// Mechanical floor: every declared key renders `Key:\t0\n`-shaped
+    /// (colon, ONE tab, value, newline; empty value → trailing tab).
+    pub fn shape_check() {
+        for k in super::STATUS_FIELDS {
+            let got = crate::fs::procfs::procfile::render_kvtab(&[(k, &0u64)]);
+            assert_eq!(got, alloc::format!("{}:\t0\n", k), "kvtab shape drifted for {}", k);
+        }
+        // The empty-value row keeps its trailing tab (status's Groups).
+        let got = crate::fs::procfs::procfile::render_kvtab(&[("Groups", &"")]);
+        assert_eq!(got, "Groups:\t\n", "kvtab empty-value shape drifted");
+    }
+
+    /// Live pin: the current task's status file carries exactly
+    /// STATUS_FIELDS, in order, one row each.
+    pub fn order_check() {
+        let pid = crate::process::current_pid() as u64;
+        let bytes = super::generate_status(pid);
+        let text = alloc::string::String::from_utf8(bytes)
+            .unwrap_or_else(|_| panic!("/proc/[pid]/status must be UTF-8"));
+        let keys: alloc::vec::Vec<&str> = text
+            .lines()
+            .map(|l| l.split_once(":\t").map(|(k, _)| k).unwrap_or(l))
+            .collect();
+        assert_eq!(
+            keys, super::STATUS_FIELDS,
+            "/proc/[pid]/status key order drifted"
+        );
+        // Value-format pins: the hex masks are 16 lower-hex digits, the
+        // Vm rows carry the kB suffix, Uid/Gid are four tab-separated
+        // fields.
+        for line in text.lines() {
+            if let Some(v) = line.strip_prefix("SigBlk:\t") {
+                assert_eq!(v.len(), 16, "SigBlk mask width drifted: {:?}", v);
+                assert!(v.bytes().all(|b| b.is_ascii_hexdigit()), "SigBlk not hex: {:?}", v);
+            }
+            if let Some(v) = line.strip_prefix("VmRSS:\t") {
+                assert!(v.ends_with(" kB"), "VmRSS unit suffix drifted: {:?}", v);
+            }
+            if let Some(v) = line.strip_prefix("Uid:\t") {
+                assert_eq!(v.split('\t').count(), 4, "Uid quadruple drifted: {:?}", v);
+            }
+        }
+    }
+
+    #[cfg(test)]
+    #[test]
+    fn status_shape() {
+        shape_check();
+        order_check();
+    }
 }
 
 /// Read a range of USER memory from an arbitrary task's address space.
