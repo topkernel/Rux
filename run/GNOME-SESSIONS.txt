@@ -1108,14 +1108,37 @@ were storm-inflated):
   first — tied to the Oh-no/registration story above.
 
 ### Handoff state
-- Branch feature/gnome-bringup at c7406c4c (merge f15b9660 + R86 fix
-  + run.sh wrapper). No kernel-source changes beyond the R86 fix.
-- r24val (second validation boot, same schedule) auto-chained after
-  r23val; watch for: FDM-STALE-RELEASE lines (the live-exercise
-  proof), M4 timing, Oh-no survival.
+- Branch feature/gnome-bringup at 18bc8e5b (merge f15b9660 + R86 fix
+  a384048c + run.sh wrapper c7406c4c + this ledger). No kernel-source
+  changes beyond the R86 fix.
 - Perf-gate pre-verification (Tier 1 syscost / Tier 2 pbench) still
-  owed for the R86 merge — host was at load 11-15 all leg; run at the
-  next quiet window (run/perf-gate.sh --tiers 1,2). The change sits
-  off every measured hot path (exit-sweep wait loop only; the
+  owed for the R86 merge — host was at load 11-15 all leg; the gate
+  script refused ("11 foreign QEMUs already running", its own
+  host-capacity guard); an auto-retry watcher is armed for the next
+  quiet window (run/perf-gate-r23gate.log when it lands). The change
+  sits off every measured hot path (exit-sweep wait loop only; the
   adjudication fires at most once per 3 s per stuck member), so the
   expectation is no movement, but the gate wants the numbers.
+
+### r24val addendum (second validation boot on the fixed tree): LIT +
+### survived — fixed-tree census now 2/2
+- M4 @420 s, M5 @511 s, full 2700 s, 0 panics/OOM/SIGDEATH, 0
+  registration timeouts, 0 failed-dialog marks, 0 FDM-STALE-RELEASE.
+- ONE transient PREEMPT-HEAL (pid 0x200, was=0x1 — a pure base-bit
+  leak, single firing, held exactly the 10 s heal window, no re-leak):
+  the leak producer struck ONCE in its mild form and the task
+  recovered. This is the first boot where the producer is VISIBLE on
+  the fixed tree without producing a wedge or a dark screen.
+- Interactive variance (userspace-side, not kernel): convcheck
+  kbd30=1/1 kbd28=1/1 (clean pairs, 0 phantoms — kernel delivery
+  clean), but the XWALK xterm black-samples stayed flat at 17 — only
+  the first probe set echoed into the xterm; sets 2/3 did not land in
+  the window (focus/content variance between boots, the same
+  userspace-side sequencing family r18 lagged on). Conversation
+  signature NO this boot (2 text lines + block cursor at x=262); the
+  2-boot conversation claim stays r18type+r21type.
+- Fixed-tree boot census: lit 2/2, survived-with-probes 2/2 (prior
+  tree: lit 9/13, survived 2/4 of interactive lit boots). Small
+  numbers, honest read: two clean boots, no dark boot yet on the
+  fixed tree, and the heal path remains unexercised live — the
+  producer did not strike an FDM sweep in either boot.
