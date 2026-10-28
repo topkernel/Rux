@@ -3065,3 +3065,22 @@ e6a9b886, same two-stage gate, 8h deadline).
 **Leg-53 standing:** mkdir flush landed; dgram item closed by lever A
 at the pa91 med-of-2; standing by for the OH lane's cold-start sampler
 report (the next primary mission per the coordinator).
+
+**Leg-54 nomination (standby filler): percpu.rs:126 is the next named
+lever — 429.9M calls/boot, 80.3s REST, ~187ns each, the #2 site after
+sched.** All of it is small_alloc's MAGAZINES (mm/small_alloc.rs:264/
+300/439/523): every magazine alloc/free pays CpuLocal::with's full
+save_and_disable_irq (CSR pair on riscv) + cpu_id (tp deref chain) +
+in_use tripwire + restore. Design sketch for the next leg: the section
+needs (a) no migration and (b) same-CPU re-entry refusal — it does NOT
+need irqs off if (a) comes from a tp-relative preempt_count (Linux
+layout; riscv64's tp IS the task pointer, and both cpu_id paths
+already deref it) and (b) is already provided by the in_use tripwire,
+whose REFUSE-AND-FALLBACK is exactly the documented r8final discipline
+for irq-context re-entry. Expected: the ~187ns class toward ~50-70ns
+AND ~80s/boot of irq-off wall leaves the interrupts domain's IF=0
+share (Tier-3 row). PRECONDITION: preempt_count in task_struct is a
+sched-lane field addition (accessor + field, not policy) — coordinate
+before design freeze; the slowpath's nested with() under the class
+lock's irqsave stays flag-correct (vacuous-tripwire case documented in
+small_alloc.rs:289).
