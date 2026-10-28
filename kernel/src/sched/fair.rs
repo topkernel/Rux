@@ -619,11 +619,13 @@ impl CfsRunQueue {
             .fetch_update(Ordering::SeqCst, Ordering::SeqCst, |v| v.checked_sub(1))
             .is_err()
         {
-            // DOUBLE-DECREMENT PROOF: the counter was already 0 when a
-            // removal path decremented again (the fair.rs:1569 wrap-panic
-            // family — the raw fetch_sub used to wrap here and panic
-            // sched_slice under churn). Rate-limited direct console (may
-            // run under the GRQ); names the offending caller site.
+            // REGRESSION GUARD: the counter was already 0 when a
+            // removal path decremented again. The one historical producer
+            // was the 2b092c49 discarded-guard GRQ unlock (every critical
+            // section unexcluded — see the GlobalRunQueue doc note); with
+            // mutual exclusion intact this must never fire. Rate-limited
+            // direct console (may run under the GRQ); names the offending
+            // caller site via #[track_caller].
             static LAST: core::sync::atomic::AtomicU64 =
                 core::sync::atomic::AtomicU64::new(0);
             let now = crate::drivers::timer::get_jiffies();
@@ -661,7 +663,9 @@ impl CfsRunQueue {
 
     /// Same no-wrap discipline for the aggregated weight: a wrapped
     /// load_weight reads as a huge total and collapses every task's
-    /// slice to the minimum granularity.
+    /// slice to the minimum granularity. Regression-guard twin of
+    /// nr_running_dec above (the 2b092c49 unexcluded sections were the
+    /// one historical producer).
     #[track_caller]
     fn load_weight_sub(&self, weight: u64) {
         if self.load_weight
@@ -1649,9 +1653,11 @@ impl CfsRunQueue {
         // Calculate scheduling period
         // If process count is high, use min_granularity * nr_running
         // Otherwise use fixed scheduling latency
-        // Garbage tripwire: with the checked-sub discipline the count can
-        // no longer wrap; anything beyond any possible task bound is a
-        // corrupted read of the counter itself — name it once per boot.
+        // Garbage tripwire (regression guard): with the checked-sub
+        // discipline the count can no longer wrap; anything beyond any
+        // possible task bound is a corrupted read of the counter itself
+        // (the 2b092c49 unexcluded-section family could produce it) —
+        // name it once per boot.
         if nr_running > 1_000_000 {
             static GARBAGE_SEEN: core::sync::atomic::AtomicBool =
                 core::sync::atomic::AtomicBool::new(false);

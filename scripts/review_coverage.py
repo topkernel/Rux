@@ -521,9 +521,20 @@ BUGS = [
      "churn clean on both arches. fdtable lever B (ac53dd6e), NJ deferred "
      "writes (306d7cf6), the exec one-path (2fbb5a64), mkdir-flush deletion "
      "(e3c1ec35) and the code-review round's fixes (b433fb13 family) are all "
-     "EXONERATED - they are in the clean pre-swap midpoints. The wrapper adds "
-     "no logic, so the mechanism is a codegen/timing shift unmasking a latent "
-     "GRQ-protocol race (OPEN hunt); the swap is withdrawn until understood."),
+     "EXONERATED - they are in the clean pre-swap midpoints. MECHANISM "
+     "CORRECTED same day by the refactor lane (75dbf637): the initial "
+     "'latent GRQ race' theory was WRONG - KeyedRawSpinlock::lock() returns "
+     "a guard while RawSpinlock::lock() returns (), and the swap kept the "
+     "bare 'self.lock.lock();' statement, so the guard was DISCARDED at "
+     "end-of-statement and its Drop released the GRQ lock immediately: "
+     "every critical section ran unexcluded. The R74-DOUBLE-SEED shape was "
+     "the expected downstream of a lock that never held; there is NO latent "
+     "GRQ pick/ownership race and the protocol is exonerated. Guards are "
+     "#[must_use] now (the discard class is dead) and protocol-wrapping "
+     "subsystems use lock_claim(); the NRUN-DOUBLE-DEC/LWEIGHT/garbage "
+     "tripwires stay as plain regression guards. The withdrawal itself "
+     "stands until the corrected re-adoption passes its own paired "
+     "adjudication."),
     ("4e1f6110", "kernel/src/syscall/misc.rs",
      "sys_timerfd_settime broke the reference contract (kernel/fs/timerfd.c) four ways: "
      "the old timer was cancelled BEFORE the itimerspec validation (the reference validates "

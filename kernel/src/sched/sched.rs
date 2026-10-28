@@ -45,21 +45,31 @@ use crate::config::MAX_TASKS;
 /// operations must hold this lock.  Timer-tick updates (`scheduler_tick`)
 /// only touch the per-CPU `current` task and do NOT need the lock.
 ///
-/// NOTE (2b092c49 withdrawal, 2026-10-29): this lock was briefly a
-/// `KeyedRawSpinlock<GrqKey>` (§3 typed lock keys pilot). That swap —
-/// a supposedly protocol-identical delegate wrapper — is CONVICTED as
-/// the trigger of the d2a58ccb stochastic panic family by a 13-boot
-/// paired adjudication (identical tree differing only by the swap):
-/// WITH the swap, 6/6 x86 exitwalk boots panic in the CFS timeline
-/// btree walk (navigate.rs:552 next_unchecked unwrap, stack:
+/// NOTE (2b092c49 withdrawal, 2026-10-29; mechanism corrected same day
+/// by the refactor lane, 75dbf637): this lock was briefly a
+/// `KeyedRawSpinlock<GrqKey>` (§3 typed lock keys pilot). That swap is
+/// CONVICTED as the trigger of the d2a58ccb stochastic panic family by
+/// a 13-boot paired adjudication (identical tree differing only by the
+/// swap): WITH the swap, 6/6 x86 exitwalk boots panic in the CFS
+/// timeline btree walk (navigate.rs:552 next_unchecked unwrap, stack:
 /// pick_next_cpu → Iter::next) and the riscv64 orphan-storm churn
 /// panics on a torn-context wild epc right after an R74-DOUBLE-SEED;
 /// WITHOUT it (revert arm + all pre-swap kernels), 7/7 boots run the
-/// full churn clean on both arches. The mechanism (the wrapper adds no
-/// logic — the swap shifts codegen/timing enough to unmask a latent
-/// GRQ-protocol race, or interacts with something subtler) stays OPEN;
-/// the swap itself is withdrawn until that is understood. The lockkey
-/// module and its standalone tests stay.
+/// full churn clean on both arches.
+///
+/// TRUE ROOT CAUSE (75dbf637 — the initial "latent GRQ race" theory
+/// was WRONG): `RawSpinlock::lock()` returns `()` — the statement IS
+/// the acquire — while `KeyedRawSpinlock::lock()` returns a guard, and
+/// the swap kept the bare `self.lock.lock();` statement: the guard was
+/// DISCARDED at the end of the statement and its Drop released the
+/// lock immediately, so EVERY GRQ critical section ran unexcluded.
+/// The R74-DOUBLE-SEED shape was the expected downstream of a lock
+/// that never held. There is NO latent GRQ pick/ownership race; the
+/// protocol is exonerated. The guard class is now `#[must_use]` (the
+/// discard no longer compiles silently) and protocol-wrapping
+/// subsystems use `lock_claim()`; a corrected re-adoption is staged
+/// with its own fresh paired adjudication. This struct stays on
+/// RawSpinlock until that lands.
 pub struct GlobalRunQueue {
     /// Protects dl_rq, rt_rq, cfs_rq, nr_running
     lock: crate::sync::spinlock::RawSpinlock,
