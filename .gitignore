@@ -143,3 +143,5 @@ oh-boot-tmp.sh
 
 # unattended test-suite records (test/suite.sh output)
 run/suite/
+kernel/src/config.rs
+run/**/*.started
