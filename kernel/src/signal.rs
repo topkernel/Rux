@@ -1064,6 +1064,37 @@ pub fn do_signal(regs: *mut crate::arch::pt_regs::PtRegs) -> bool {
             (*current).sigmask_restore_valid = false;
         }
 
+        // gdm bring-up r16: name the dequeued fatal signal's queued info
+        // (non-destructive front PEEK — first_info() would consume it).
+        // si_code/si_pid distinguish a real sender (SI_USER/SI_TKILL
+        // carry one) from a bare/stale bitmap bit (empty queue). The
+        // storm's SIGKILLs bypassed every send-path print; this is the
+        // delivery-side ground truth.
+        if sig == 9 || sig == 15 {
+            static DQ_N: core::sync::atomic::AtomicUsize =
+                core::sync::atomic::AtomicUsize::new(0);
+            if DQ_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 120 {
+                let qi = {
+                    let q = (*current).pending.queue.inner.lock();
+                    q.front().cloned()
+                };
+                crate::pr_err!(
+                    "DEQUEUE sig={} pid={} comm='{}' info={}",
+                    sig,
+                    (*current).pid(),
+                    core::str::from_utf8_unchecked((*current).comm())
+                        .trim_end_matches('\0'),
+                    match &qi {
+                        Some(i) => alloc::format!(
+                            "signo={} code={:#x} pid={} uid={}",
+                            i.si_signo, i.si_code, i.si_pid, i.si_uid
+                        ),
+                        None => alloc::string::String::from("NONE (bare bitmap)"),
+                    }
+                );
+            }
+        }
+
         // If a handler is already active (sigframe armed), a recorded
         // frame whose region the current sp sits inside MIGHT be live.
         // SMP livelock fix: do NOT drop the delivery on this heuristic.

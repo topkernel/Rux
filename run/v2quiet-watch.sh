@@ -23,7 +23,7 @@ while [ "$tries" -lt 120 ]; do          # 10 h at 300 s
   n="${n:-0}"
   gate_done=0
   grep -q '^gate rc=' run/perf-gate-r26gate.log 2>/dev/null && gate_done=1
-  pgrep -f r26gate-watch.sh >/dev/null 2>&1 || gate_done=1
+  pgrep -f r26gate-watch >/dev/null 2>&1 || gate_done=1
   if [ "$n" -lt 2 ] && [ "$gate_done" = 1 ]; then
     echo "quiet window at $(date) (foreign=$n) — firing v2quiet boot 1" >> "$LOG"
     bash run/v2type-boot.sh v2quiet 815 >> "$LOG" 2>&1
