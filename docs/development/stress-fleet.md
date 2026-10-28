@@ -2375,3 +2375,31 @@ Code-level mapping, this lane's evidence:
    (bounded-wait timeout prints replacing silent spins) on the
    oom01-storm rounds; EARLY-ROOT-FREE owner-ALIVE in the same tail
    is noted as an adjacent signal, not chased here.
+
+### s17 leg close (10:3x) — watches still open, fleet steady
+
+origin/main sat at 478ece08 (the WW5-batch merge, 09:23) through
+the whole leg — NEITHER awaited change landed (OH-A wake-placement,
+DFX perf fixes), so both closure rounds stay queued for the next
+leg with the runbook: build from a clean origin/main worktree (the
+merged main already carries the WW5 instruments), atomic-rename the
+kernel over images/fleet-rv64-instr-rux at an ltp-b round boundary
+(ltp-a stays on cb314f43 as control), one full round, harvest.sh
+diff vs the r9/r10 baseline; fsfuzz closure = same build rolled to
+its image, one clean round.
+
+Fleet at close: ltp-b r13 (census accumulating, same known classes
+every round: OOM=8/ALLOCTHROW=3 storm, PREEMPT-LEAK ~1100
+sampling family, wedge markers = known W3 tail); ltp-a r29 (r29 =
+the known mmap3 print-storm shape: 1.36M userspace `pagefault:`
+lines of 1.4M total); fsfuzz r277 CRITICAL WATCHDOG=91 adjudicated
+the KNOWN r268/r272 static+heap lock-pair family (lock
+0xffffffff808818d8, same bss region, same ra, wedge=no beats=1802
+— the exact class the DFX perf fix targets); memstorm r28 (trio
+family WARN); monkey-b r6 margin rounds (heap growth 159-188MB,
+zero flags). Tripwires clean all leg: WILDWATCH-CANARY 0
+everywhere, slotmm [0,0] + single-second transient blips only
+(family B null through r12: 1126x[0,0] + 1x[0,9]). Floor 39-41G
+available. main-watch.sh stays armed (PID in main-watch.log; stop
+file run/fleet/main-watch.stop). Commits this leg: a9b2e45b (s17
+open + design note + watcher), 1006ace5 (cross-lane map).
