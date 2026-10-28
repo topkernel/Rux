@@ -1100,7 +1100,13 @@ pub(crate) fn do_execve_elf(
         );
         stack_vma.set_origin(VmaOrigin::from_bits(VmaOrigin::EXEC_STACK));
         let mut vma_mgr = new_addr_space.vma_write();
+        // Account the exec image: the reference kernel charges every VMA
+        // it installs (mm->total_vm += pages), so the image, the stack
+        // and the interpreter count towards RLIMIT_AS and show up in the
+        // reported VmSize.
+        let stack_pages = stack_vma.page_count() as u64;
         let _ = vma_mgr.add(stack_vma);
+        new_addr_space.add_total_vm(stack_pages);
 
         // Add VMAs for each ELF PT_LOAD segment
         let mut first_exec_set = false;
@@ -1161,7 +1167,9 @@ pub(crate) fn do_execve_elf(
                     if let Some(f) = exe_file {
                         new_addr_space.pin_vma_file(vma_start as usize, f.clone());
                     }
+                    let seg_pages = vma.page_count() as u64;
                     let _ = vma_mgr.add(vma);
+                    new_addr_space.add_total_vm(seg_pages);
                 }
             }
         }
@@ -1229,7 +1237,9 @@ pub(crate) fn do_execve_elf(
                                 VmaFlags::from_bits(VmaFlags::PRIVATE),
                             );
                             filler.set_origin(VmaOrigin::from_bits(VmaOrigin::EXEC));
+                            let filler_pages = filler.page_count() as u64;
                             let _ = vma_mgr.add(filler);
+                            new_addr_space.add_total_vm(filler_pages);
                         }
                         let mut seg_flags = VmaFlags::new();
                         if phdr.is_readable() { seg_flags.insert(VmaFlags::READ); }
@@ -1254,7 +1264,9 @@ pub(crate) fn do_execve_elf(
                         if let Some(f) = interp_file {
                             new_addr_space.pin_vma_file(seg_start as usize, f.clone());
                         }
+                        let seg_pages = vma.page_count() as u64;
                         let _ = vma_mgr.add(vma);
+                        new_addr_space.add_total_vm(seg_pages);
                         added_any = true;
                         prev_end = seg_end;
                     }
@@ -1268,7 +1280,9 @@ pub(crate) fn do_execve_elf(
                         VmaFlags::from_bits(VmaFlags::PRIVATE),
                     );
                     filler.set_origin(VmaOrigin::from_bits(VmaOrigin::EXEC));
+                    let filler_pages = filler.page_count() as u64;
                     let _ = vma_mgr.add(filler);
+                    new_addr_space.add_total_vm(filler_pages);
                 }
                 // Degenerate case (no loadable segments parsed here but
                 // interp_max > interp_min): keep the old flat coverage.
@@ -1280,7 +1294,9 @@ pub(crate) fn do_execve_elf(
                         interp_flags,
                     );
                     interp_vma.set_origin(VmaOrigin::from_bits(VmaOrigin::EXEC));
+                    let interp_pages = interp_vma.page_count() as u64;
                     let _ = vma_mgr.add(interp_vma);
+                    new_addr_space.add_total_vm(interp_pages);
                 }
             }
         }

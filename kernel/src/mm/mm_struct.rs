@@ -690,9 +690,44 @@ impl MmStruct {
     }
 
     /// Subtract from total virtual memory page count
+    ///
+    /// Saturating at 0 (like sub_rss): the counter is an accounting
+    /// mirror of the live mapping, and an accounting gap must never wrap
+    /// it around — a wrapped counter would make every later mapping look
+    /// far past RLIMIT_AS.
     #[inline]
     pub fn sub_total_vm(&self, pages: u64) {
-        self.total_vm.fetch_sub(pages, Ordering::AcqRel);
+        let _ = self
+            .total_vm
+            .fetch_update(Ordering::AcqRel, Ordering::Acquire, |v| v.checked_sub(pages));
+    }
+
+    /// Release the virtual-size charge of the pages that leave the mapping.
+    ///
+    /// The reference kernel keeps `mm->total_vm` equal to the LIVE mapping
+    /// size: every page that is unmapped leaves the count (kernel/mm/mmap.c:
+    /// vm_stat_account(mm, vma->vm_flags, -nrpages) for each removed VMA).
+    /// The VMA surgery removes whole VMAs and re-adds the preserved head
+    /// and tail pieces, so only the part of each VMA that is actually
+    /// unmapped is released — the preserved pieces stay charged.
+    ///
+    /// Without this the counter only ever grows: RLIMIT_AS (checked
+    /// against mm->total_vm) would refuse mappings that fit, and the
+    /// reported VmSize/vsize would describe every mapping the process ever
+    /// made.
+    pub fn release_unmapped_pages(
+        &self,
+        vma_start: usize,
+        vma_end: usize,
+        range_start: usize,
+        range_end: usize,
+    ) {
+        let cut_start = vma_start.max(range_start);
+        let cut_end = vma_end.min(range_end);
+        if cut_end > cut_start {
+            let pages = ((cut_end - cut_start) / crate::mm::page::PAGE_SIZE) as u64;
+            self.sub_total_vm(pages);
+        }
     }
 
     /// Get locked memory page count
