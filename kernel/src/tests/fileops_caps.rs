@@ -274,5 +274,42 @@ pub fn test_fileops_caps() {
         Expect { read: true, write: false, lseek: true, close: true, poll: false, read_at: false },
     );
 
+    // D-6 refactor-lane slice 4: the printk streams, the char-device
+    // stragglers and the nsfile. kmsg/procmmsg carry lseek+poll (the
+    // record-ring consumers position and wait); evdev is the stream
+    // set with close; watchdog and fb are write-only-control shaped
+    // (read exists but no poll — always-ready fallback); the nsfile
+    // is ioctl-only (read/close, no write/seek/poll).
+    check(
+        "kmsg caps",
+        &crate::printk::KMSG_OPS,
+        Expect { read: true, write: true, lseek: true, close: false, poll: true, read_at: false },
+    );
+    check(
+        "proc-kmsg caps",
+        &crate::printk::PROC_KMSG_OPS,
+        Expect { read: true, write: false, lseek: true, close: true, poll: true, read_at: false },
+    );
+    check(
+        "watchdog caps",
+        &crate::drivers::watchdog::WATCHDOG_OPS,
+        Expect { read: true, write: true, lseek: false, close: false, poll: false, read_at: false },
+    );
+    check(
+        "evdev caps",
+        &crate::drivers::input::evdev::EVDEV_OPS,
+        Expect { read: true, write: true, lseek: false, close: true, poll: true, read_at: false },
+    );
+    check(
+        "fb caps",
+        &crate::drivers::gpu::fbdev::FB_OPS,
+        Expect { read: true, write: true, lseek: false, close: false, poll: false, read_at: false },
+    );
+    check(
+        "nsfile caps",
+        crate::process::ns::caps_shape::ns_file_ops(),
+        Expect { read: true, write: false, lseek: false, close: true, poll: false, read_at: false },
+    );
+
     check_errno_matrix();
 }
