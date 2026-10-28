@@ -1332,3 +1332,75 @@ ready-with-debt verdict):
 - The v1 README asset stays in place until a healthy boot verifies
   the v2 conversation; every production/verification script is
   committed so the asset is one verified boot away.
+
+## Session 16 — AB adjudication: the merged-tree "interactive
+## regression" is LOAD SENSITIVITY, not a 2a960538 regression
+
+The interleaved A/B chain (dispatched at the end of session 15)
+completed during the session break: runs/ab-adjudication.log shows
+ab-a1 A rc=3 / ab-b1 B rc=3 / ab-a2 A rc=3 / ab-b2 B rc=3. All four
+boots adjudicated from their full artifact sets
+(runs/gnome-ab-a1|b1|a2|b2 + ab-*-driver.log).
+
+Setup (verified from cmdline.txt and git rev-parse, not assumed):
+- Arm A = the merged tree 259a0ec5 content (worktree kernel, the
+  12:39 r26merge-rv3 build; HEAD 7235e6f2 is tooling-only on top).
+- Arm B = pre-merge control 18bc8e5b = f15b9660 + R86 (a384048c) +
+  the test-wrapper/ledger commits, kernel /tmp/rux-abB (built 14:22).
+- Same image (work/gnome-r13.img), same driver family, same typing
+  schedule as the v2 asset boots: click-to-focus t=800, `echo rux`
+  815..831, `uname -r` 865..881; 965 s per boot; dfx=watchdog,
+  inputtrace; smp2/2G snapshot. Interleaved A,B,A,B under 16-20
+  foreign QEMUs (wwh/oh-display lanes).
+
+What rc=3 was, per boot (none is an early-terminate or driver error):
+fire.py's FIRE-PARTIAL milestone verdict after the FULL 965 s —
+- ab-a1 (A): M4 lit @270 s, M5 desktop @301 s; collapsed ~850-870 s
+  (right after the typing window) to the Oh-no final class.
+- ab-b1 (B): never lit — dark the whole boot (best nonblack 0.0001),
+  the r25val leak-storm shape (18 PARKED-LEAK/WILDWRITE lines).
+- ab-a2 (A): M4 lit @240 s, M5 never reached; final = uniform
+  background (no dialog elements).
+- ab-b2 (B): M4 lit @391 s, M5 desktop @480 s; collapsed after the
+  typing window to the Oh-no final class.
+M2_gsd_daemon / M3_gnome_shell serial milestones missing on ALL FOUR
+boots including the control — they never distinguish anything at
+loglevel=3 on this image. Zero panics / OOM / SIGDEATH on all four.
+
+The three load-bearing equalities (convcheck-v2 + pixel decode):
+1. Kernel input delivery perfect on BOTH arms: 18/18 presses paired,
+   0 phantoms, script subsequence YES — all four boots.
+2. Typed text rendered on NEITHER arm: XWALK xterm content-grew=NO
+   everywhere (a1 17->9, b2 18->10 = the end-of-session window
+   destroy, not typing); final frames decode as one giant ink band.
+3. The failure CLASSES cross the arms: the Oh-no final-frame class
+   (#202000:x1007425/1007457 with the identical #2080c0:x1344
+   element, same class as the v2b/v2c finals) landed on ab-a1 (A)
+   AND ab-b2 (B); the dark class landed on arm B; the
+   uniform-background class on arm A. at-spi "Failed to register
+   client" warnings (AlreadyRegistered/AuthenticationAgent — NOT the
+   r15/r19 gsd 20 s-deadline class) appear a1=19, b2=19, a2=5, b1=4:
+   they track how far the session got, not the arm. Leak markers on
+   all four (a1=13, b1=18, b2=15, a2=2).
+
+VERDICT: NOT a 2a960538 regression. Under equal load the pre-merge
+control fails identically — no typed-text render, the same Oh-no
+final class, and one fully-dark boot (worse than either A boot: A
+lit 2/2 with desktop 1/2; B lit 1/2 with desktop 1/2). Per-boot
+variance dominates arm variance. Session 15's "merged-tree
+interactive regression" is reclassified as LOAD SENSITIVITY of the
+render/session path that predates the merge (r24val rendered only on
+a quieter host). No one-variable bisection (vmscan/F4/R37) is
+warranted for the GNOME gate; the R86 merge-queue verdict un-blocks
+on the GNOME side. Confirmation step kept: the quiet-host v2 boot
+(armed below) must still produce a healthy typed render — that boot
+is simultaneously the asset prerequisite; if it fails on a genuinely
+quiet host, the question re-opens with new evidence.
+
+Quiet-window machinery: the r26gate watcher (armed 12:10, 6 h ->
+expires ~18:10, still waiting at 17:14 with 16 foreign QEMUs up)
+serves Tier-1/Tier-2. run/v2quiet-watch.sh is armed after it: it
+yields to the r26gate gate run, then at the next <2-foreign window
+boots v2quiet (BASE_T=815), runs convcheck-v2, and if verified
+boots v2quiet2 for the cross-boot geometry check the asset rule
+requires. Log: run/v2quiet-watch.log.

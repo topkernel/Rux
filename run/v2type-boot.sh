@@ -35,4 +35,5 @@ python3 "$ROOT/test/ubuntu-gnome/fire.py" \
   --jiggle 200,30,"$SECS" \
   --clickprobe "$CLICK" \
   --keyprobe "$KEYS" \
+  ${KERNEL:+--kernel "$KERNEL"} \
   > "$ROOT/runs/${TAG#gnome-}-driver.log" 2>&1
