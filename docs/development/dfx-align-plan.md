@@ -808,6 +808,61 @@ The rest of Tranche 7 (the full microbench comparison report) belongs
 to the perf lane; the DFX lane's remaining stake is whatever counter
 surface that report finds missing.
 
+### Batch-8 gate fallout (fixed 2026-10-28, commits 04cb558f / cf2c2353 / 184e499b)
+
+The detached b8 gate chain failed four steps; root causes, in the order
+found:
+
+- **make-test rc=2** was a compile failure of the unit-test feature
+  (the new read-layout test compared `Option` to a bare int) — fixed
+  in 39c4030c. Two gate-harness shapes came with it: the unit-test
+  kernel `wfi()`-loops forever after "All tests passed!" so `make
+  test` never exits on its own (run/dfx-b8-gates.sh now wraps it in a
+  timeout and takes the verdict from the log), and it leaves the
+  unit-test-feature binary at the smoke path (the chain now rebuilds
+  the normal kernel first and restores it after).
+- **perf-smoke**: the drain file was created AT `/perf/<id>` (a regular
+  file) while the documented contract and probe open
+  `/sys/kernel/debug/perf/<id>/records` — every records open walked a
+  file component and got ENOTDIR, failing drain-file and all five
+  sample checks at once. Open now builds the per-event directory and
+  the records leaf; close drops the leaf and the now-empty directory
+  (debugfs gained `remove_dir_if_empty`).
+- **perf-smoke fmt-layout**: the charge is nominal (ticks × TICK_NS)
+  while enabled is measured wall ns, so running could exceed enabled
+  (observed 200000000 > 199586800). read(2) clamps count and running
+  to the measured enabled — both monotone, the invariant restored.
+- **perf-smoke drain-gone**: close removed the debugfs node (readdir
+  answered empty) but the OPEN still succeeded — the VFS dcache served
+  the stale dentry, and kernel-side removals have no unlink(2) to run
+  the VFS's own prune. `vfs::prune_cached_dentry` walks the dcache
+  (mount crossings included, misses mean nothing to prune) and drops
+  the final component; the debugfs removers call it through the fixed
+  /sys/kernel/debug mount point. New lookups now miss the cache, fall
+  to debugfs_lookup, and answer ENOENT.
+- **trace-kmem-smoke**: the kmalloc geometry verdict matched call_site
+  with `[^ ]+`, but %pS demangles Rust generic impls as `<T as
+  Trait>::f` — spaces around "as" — so every kmalloc row (the
+  BuddyAllocator-as-GlobalAlloc origin) was rejected. The verdicts
+  accept any symbol text.
+- **printk 256-byte truncation (stress-lane WW5 relay)**: a record
+  longer than RECORD_TEXT_SIZE was silently cut. Audit: the b8 batch
+  adds no printk calls and its long lines (kmem trace view) go through
+  the trace ring's heap formatter, not printk. The class is closed for
+  everyone: BufferWriter counts total bytes past the buffer end and an
+  over-budget record carries a `<len=N>` tail marker naming the FULL
+  length (hand-formatted, no allocation, IRQ-safe; console, ring, and
+  the raw-bytes path all carry it). Verified with a 281-byte /dev/kmsg
+  write.
+
+Gate record (chain r7, tip 184e499b): make-test 1126/1126 (main 1122,
++4 from the perf pin tests), regression-boot clean, pstore-smoke and
+pstore-x86-smoke PASS — the x86 smoke exercised BOTH reset paths (the
+8042-pulse reset to boot2 and the triple-fault reset to boot3) with
+the full erase-on-unlink contract (both records erased, ENOENT on
+re-open, EPERM on an ordinary attribute, directory empty) —
+trace-kmem-smoke 11/11, perf-smoke 15/15.
+
 ## 5. Explicit non-goals
 
 - **eBPF**: the verifier and JIT are out of scope. A tracepoint + ring
