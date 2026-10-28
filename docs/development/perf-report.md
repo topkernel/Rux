@@ -2748,3 +2748,101 @@ while holding the gate leaves it at 1 — the forensic's
 in_direct_reclaim=1 is consistent with a live slow holder OR this
 leak) is recorded as a separate bug for the mm lane, not touched
 here.
+
+### 8.10.22 Leg 52 (2026-10-28): fdtable get_file — the design note precedes the code; the 143.7M REST calls decompose into a LOOKUP-COUNT problem stacked on a LOCK problem
+
+Assignment (user-unparked track-2): file.rs:941 get_file — 143.7M
+calls/boot at the 342 ns REST class = 49.2 s/boot of irq-off wall,
+the single biggest measured non-fs cost. pa86's parse (board 1:
+132.3M/50.8 s/383 ns; the coordinator's 143.7M/342 ns is board 2)
+also ranks it #3 behind sched.rs:2251 (95.8 s, a sched-lane row) and
+percpu.rs:126 (82.2 s — every CpuLocal::with pays its own
+save_and_disable_irq; noted as a future lever nomination, NOT this
+leg's).
+
+**Decomposition first (static audit of the call sites).** The fd
+syscall volume on the same boards is ~40-60M (writev 13.2M,
+recvfrom 13.5M, sendto 20.5M, recvmsg 13.5M, read/write ~1.4M,
+census extras). get_file runs 132-144M — an amplification factor of
+2-5x. Sources found by reading the ladders:
+
+- sys_sendto / sys_recvfrom: an entry-classification `get_file_fd`
+  (Arc dropped immediately) + `unix_file_of(fd)` + `netlink_file_of
+  (fd)` + `raw_file_of(fd)` (which itself resolves the fd TWICE:
+  raw_socket_from_fd + its own lookup) + `get_socket_from_fd(fd)` —
+  up to 5-6 lookups per call, one used.
+- sys_writev: `unix_file_of(fd)` + a second `get_file_fd(fd)` on the
+  gathered dgram path; the STREAM path calls sys_write per iovec —
+  one fresh lookup per iov.
+- sys_readv: same per-iov shape.
+
+**Lever A (lookup-count, zero concurrency change): one lookup per
+syscall.** Every `*_file_of(fd)` family helper is an ops-identity
+check on the File plus a private_data cast; the fdtable part of each
+is boilerplate. Plan: resolve the File ONCE at the ladder head
+(EBADF when None), classify by `file.ops` identity, pass `&Arc<File>`
+down — new `unix_of_file/netlink_of_file/raw_of_file/ socket_of_file
+(&Arc<File>)` variants with the old fd-shaped wrappers kept for
+cold callers. writev/readv stream loops write/read through the one
+resolved file via an extracted buffered helper instead of re-entering
+sys_write/sys_read per iov. Expected volume: ~132M down to ~63M
+(-50%), i.e. ~25 s of REST before the per-call cost is even touched.
+Semantics preserved exactly: EBADF at the head, ENOTSOCK where the
+family ladder exhausts (the generic get_socket_from_fd None arm).
+
+**Lever B (per-call cost): lock-free slot reads under per-CPU reader
+banks + writer park-and-drain.** The current get_file takes
+entry.lock_irqsave() (irq_save + preempt_disable + TTAS RMW) per
+lookup; the entry Spinlock line is per-TABLE, so every CLONE_FILES
+thread and every cross-CPU peeker serializes on one line 143M times.
+The obvious seqcount shape has a hole the coordinator's brief names
+correctly but does not close: a reader that loads a slot pointer can
+race close_fd's final Arc drop and increment a freed refcount —
+seqcount validation cannot fix a post-validation window, and any
+reader-side shared-line write (global reader count) recreates the
+contention being removed. The shape that closes it:
+
+- slots become `[AtomicPtr<File>; MAX_FDS]` OUTSIDE the entry lock
+  (8-byte aligned stores, no tears; null = empty). Writers mutate
+  slots under the entry lock exactly as today; single-word atomic
+  stores publish.
+- Readers NEVER take the lock: local irqsave (no preempt machinery,
+  no TTAS) + `readers[cpu].fetch_add(1, SeqCst)` on a PER-CPU,
+  cacheline-padded bank (SeqCst RMW = aqrl AMO on riscv / locked
+  xadd on x86: the reader's interest is globally visible before the
+  slot load executes), slot load, `Arc::increment_strong_count` +
+  `Arc::from_raw` (the clone), bank fetch_sub, irq restore. With
+  irqs off the section cannot be preempted, migrated, or re-entered
+  by a softirq on the same CPU — banks are counts, so even an NMI
+  nesting would be correct.
+- Lifetime safety: ANY writer that removes a slot (close_fd, dup2
+  displacement, exec-cloexec, Drop) parks the removed Arc in a tiny
+  per-table `retired` vec and, after releasing the entry lock and a
+  SeqCst fence, drains once every bank reads 0 — reader sections are
+  irq-off and bounded (~100 ns), so the wait is a few scans; a spin
+  cap leaves the vec for the next writer rather than spinning long.
+  At the drain the existing last-reference discipline runs verbatim
+  (posix_release_for_file, count==1 -> close op, else close_pending
+  for the final dropper — R13-4/R14-5/R10-2 all preserved, the
+  count==1 decision now SOUND because quiescence proves no in-flight
+  clone can bump). FdTable::drop drains without waiting (no &self
+  borrowers can exist at drop).
+- Readers of the fdtable gain no new lock nesting (they take no
+  lock); writers add one nesting only between entry-lock release and
+  the retired lock — no inversion surface. fork_from keeps ONE entry
+  lock pass (slots immutable under it; concurrent reader clones are
+  just refcount RMWs).
+
+Reader cost delta per call: REMOVE irq_save+preempt+TTAS-acquire+
+TTAS-release+preempt+irq_restore around the clone; ADD one SeqCst
+RMW + one Release RMW on a CPU-private line. The shared-line RMWs
+disappear from the read path; the only shared RMW left is the
+inherent Arc strong-count increment (per-FILE line, naturally
+sharded across the table's files). IF=0 time per call shrinks with
+it (guarded-domain: interrupts).
+
+Gates (both levers, each its own commit): make test green; dual-arch
+rc=0 (config.rs restore after x86); pbench fd-heavy + P5 rows in
+band; syscost REST recount — file.rs:941 volume materially down
+(lever A) and per-call class down (lever B), zero new panic/OOM
+classes, census in band. fs/+ipc/ domain check reported explicitly.
