@@ -41,18 +41,21 @@ pub const HASH_SIZE: usize = 64;
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub struct FutexKey {
     pub uaddr: usize,
-    pub pid: u32,
+    /// Address-space identity for private futexes (the kernel's mm
+    /// pointer): shared by all CLONE_VM threads of one process, distinct
+    /// across processes and across fork().
+    pub mm: usize,
     pub flags: u32,
 }
 
 impl FutexKey {
-    pub fn new(uaddr: usize, pid: u32, flags: u32) -> Self {
-        Self { uaddr, pid, flags }
+    pub fn new(uaddr: usize, mm: usize, flags: u32) -> Self {
+        Self { uaddr, mm, flags }
     }
 
     pub fn matches(&self, other: &FutexKey) -> bool {
         if !(self.flags & FLAGS_SHARED != 0) {
-            self.uaddr == other.uaddr && self.pid == other.pid
+            self.uaddr == other.uaddr && self.mm == other.mm
         } else {
             self.uaddr == other.uaddr
         }
@@ -60,7 +63,7 @@ impl FutexKey {
 }
 
 pub fn futex_hash(key: &FutexKey) -> usize {
-    let hash = key.uaddr.wrapping_add(key.pid as usize);
+    let hash = key.uaddr.wrapping_add(key.mm);
     hash % HASH_SIZE
 }
 
@@ -84,26 +87,26 @@ pub fn bitset_matches(waiter_bitset: u32, wake_bitset: u32) -> bool {
 // ============================================================================
 
 proptest! {
-    /// INV-FX-1: Private key matches only when uaddr and pid match
+    /// INV-FX-1: Private key matches only when uaddr and mm match
     #[test]
     fn test_private_key_match(
         uaddr in 0usize..0xFFFFusize,
-        pid in 1u32..1000u32,
+        mm in 1usize..1000usize,
     ) {
-        let k1 = FutexKey::new(uaddr, pid, 0); // no FLAGS_SHARED
-        let k2 = FutexKey::new(uaddr, pid, 0);
+        let k1 = FutexKey::new(uaddr, mm, 0); // no FLAGS_SHARED
+        let k2 = FutexKey::new(uaddr, mm, 0);
         prop_assert!(k1.matches(&k2));
     }
 
-    /// INV-FX-2: Private key rejects different pid
+    /// INV-FX-2: Private key rejects a different address space
     #[test]
-    fn test_private_key_pid_mismatch(
+    fn test_private_key_mm_mismatch(
         uaddr in 0usize..0xFFFFusize,
-        pid1 in 1u32..500u32,
-        pid2 in 501u32..1000u32,
+        mm1 in 1usize..500usize,
+        mm2 in 501usize..1000usize,
     ) {
-        let k1 = FutexKey::new(uaddr, pid1, 0);
-        let k2 = FutexKey::new(uaddr, pid2, 0);
+        let k1 = FutexKey::new(uaddr, mm1, 0);
+        let k2 = FutexKey::new(uaddr, mm2, 0);
         prop_assert!(!k1.matches(&k2));
     }
 
@@ -112,22 +115,23 @@ proptest! {
     fn test_private_key_uaddr_mismatch(
         uaddr1 in 0usize..0x7FFFusize,
         uaddr2 in 0x8000usize..0xFFFFusize,
-        pid in 1u32..1000u32,
+        mm in 1usize..1000usize,
     ) {
-        let k1 = FutexKey::new(uaddr1, pid, 0);
-        let k2 = FutexKey::new(uaddr2, pid, 0);
+        let k1 = FutexKey::new(uaddr1, mm, 0);
+        let k2 = FutexKey::new(uaddr2, mm, 0);
         prop_assert!(!k1.matches(&k2));
     }
 
-    /// INV-FX-4: Shared key matches on uaddr only (ignores pid)
+    /// INV-FX-4: Shared key matches on uaddr only (ignores the address
+    /// space)
     #[test]
     fn test_shared_key_match(
         uaddr in 0usize..0xFFFFusize,
-        pid1 in 1u32..500u32,
-        pid2 in 501u32..1000u32,
+        mm1 in 1usize..500usize,
+        mm2 in 501usize..1000usize,
     ) {
-        let k1 = FutexKey::new(uaddr, pid1, FLAGS_SHARED);
-        let k2 = FutexKey::new(uaddr, pid2, FLAGS_SHARED);
+        let k1 = FutexKey::new(uaddr, mm1, FLAGS_SHARED);
+        let k2 = FutexKey::new(uaddr, mm2, FLAGS_SHARED);
         prop_assert!(k1.matches(&k2));
     }
 
@@ -135,24 +139,25 @@ proptest! {
     #[test]
     fn test_hash_in_range(
         uaddr in 0usize..usize::MAX,
-        pid in 0u32..u32::MAX,
+        mm in 0usize..usize::MAX,
     ) {
-        let key = FutexKey::new(uaddr, pid, 0);
+        let key = FutexKey::new(uaddr, mm, 0);
         let h = futex_hash(&key);
         prop_assert!(h < HASH_SIZE);
     }
 
-    /// INV-FX-6: Same uaddr with pid difference 1 gives different hashes
+    /// INV-FX-6: Same uaddr with an address-space difference of 1 gives
+    /// different hashes
     #[test]
-    fn test_hash_different_pids(
+    fn test_hash_different_mms(
         uaddr in 0usize..10000usize,
-        pid in 0u32..1000u32,
+        mm in 0usize..1000usize,
     ) {
-        let k1 = FutexKey::new(uaddr, pid, 0);
-        let k2 = FutexKey::new(uaddr, pid + 1, 0);
+        let k1 = FutexKey::new(uaddr, mm, 0);
+        let k2 = FutexKey::new(uaddr, mm + 1, 0);
         let h1 = futex_hash(&k1);
         let h2 = futex_hash(&k2);
-        // (uaddr + pid) % 64 vs (uaddr + pid + 1) % 64 — always differ by 1 mod 64
+        // (uaddr + mm) % 64 vs (uaddr + mm + 1) % 64 — always differ by 1 mod 64
         prop_assert_ne!(h1, h2);
     }
 
@@ -230,10 +235,10 @@ proptest! {
     #[test]
     fn test_key_reflexive(
         uaddr in 0usize..usize::MAX,
-        pid in 0u32..u32::MAX,
+        mm in 0usize..usize::MAX,
         flags in 0u32..0xFFFFu32,
     ) {
-        let k = FutexKey::new(uaddr, pid, flags);
+        let k = FutexKey::new(uaddr, mm, flags);
         prop_assert!(k.matches(&k));
     }
 
@@ -242,12 +247,12 @@ proptest! {
     fn test_key_symmetric(
         uaddr1 in 0usize..usize::MAX,
         uaddr2 in 0usize..usize::MAX,
-        pid1 in 0u32..u32::MAX,
-        pid2 in 0u32..u32::MAX,
+        mm1 in 0usize..usize::MAX,
+        mm2 in 0usize..usize::MAX,
         flags in 0u32..0xFFFFu32,
     ) {
-        let k1 = FutexKey::new(uaddr1, pid1, flags);
-        let k2 = FutexKey::new(uaddr2, pid2, flags);
+        let k1 = FutexKey::new(uaddr1, mm1, flags);
+        let k2 = FutexKey::new(uaddr2, mm2, flags);
         prop_assert_eq!(k1.matches(&k2), k2.matches(&k1));
     }
 }
