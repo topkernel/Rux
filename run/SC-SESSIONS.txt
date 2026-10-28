@@ -7360,3 +7360,33 @@ page-by-page under host load). AbilityScheduler stub registered
 (+7114 lines after spawn — ability-runtime milestone). Screen still
 bootanimation class. Watching for OnForeground / launcher.ready /
 first pixels; boot window 3600 s.
+
+LEG-40C round 2 (sc349-sc355; four walls removed; remaining wall =
+compute-bound cold start): sc349 (v4-AMS JSON, first long-window
+boot): instance lived ~20 min then AMS-terminated WITHOUT new ArkTS
+markers — wedge. tip5/tip6 census probes added wedge visibility (any
+state; tip6 prints every non-zombie task). sc350: caught the main
+once RUNNING in writev+0x13 fd=3 iovcnt=3 (hilog socket). sc351:
+pre-spawn flake wedge (accountmgr zone, host load 15). sc352+sc353
+(parallel): CONFIRMED writev spin — every census sample of the
+wedged main in both boots = writev fd 3, varying iovec stack
+offsets; applied const.debuggable=1->0 (ohos.para inode 1467 @173,
+run/patch-ohos-debuggable.sh) to kill the debug-log flood. sc354
+(debuggable=0): writev spin GONE; main moved to a connect(2) loop
+fd 3 (AF_UNIX addrlen 110); tip7 (sockaddr dumper) built; killed for
+tip7 relaunch. sc355 (tip7, IN FLIGHT): main mostly ON-CPU
+(censuses rarely see it; caught once parked in its event-loop cond
+via stkfutex: op=0x80 main-stack word) — COMPUTE-BOUND ArkTS init;
+instance 1205 alive 50+ min with live activity (3 forks/min from
+worker 1235's subtree, 316 faults/min, slog flowing) — real slow
+progress, not a wedge. launcher.ready still 0.
+COLD-START GAP (recorded for the perf lane): reference Linux boots
+to bootevent.launcher.ready in 16 s TOTAL; Rux needs >20 min to the
+same point and has not completed — ~100x workload gap class on the
+app cold start (appspawn SPAWNCHILD alone 1.26 s).
+Image stack now (all reversible, originals in forensics-leg40B/):
+begetutil NoWait @0x19ab8, hicollie detach-join @0x12fa0, appfwk
+ratio 9 @1223 (inert, kept harmless), ams_service_config 999/9999/
+9999, ohos const.debuggable=0. Kernels: tip4 (WORD probe), tip5
+(any-state census), tip6 (all non-zombie census), tip7 (+connect
+sockaddr dumper); probes temporary, remove after diagnosis.
