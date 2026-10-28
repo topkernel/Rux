@@ -101,6 +101,21 @@ impl NestKey for NetQueueKey {
     const NAME: &'static str = "net-queue";
 }
 
+/// A futex waiter-pool SLOT lock (`sync::futex::WAITER_POOL`). Slot
+/// locks are taken inside the bucket lock that owns the chain the slot
+/// is linked into (the wait/wake/exit/requeue paths); the allocator
+/// and the free path take them top-level.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct WaiterSlotKey;
+impl NestKey for WaiterSlotKey {
+    const NAME: &'static str = "futex-waiter-slot";
+}
+/// A slot may be acquired while its bucket lock is held (the shape of
+/// every chain walk under a bucket guard). Same-class double-slot
+/// acquisition (the requeue relink window) stays on the plain API —
+/// the keyed surface fences ACROSS classes.
+impl CanNestInside<FutexBucketKey> for WaiterSlotKey {}
+
 // ---- The keyed lock ----------------------------------------------
 
 /// A [`RawSpinlock`] whose position in the lock hierarchy is part of
@@ -230,7 +245,24 @@ impl<K: NestKey, T> KeyedSpinlock<K, T> {
     pub fn lock_irqsave(&self) -> KeyedIrqGuard<'_, K, T> {
         KeyedIrqGuard { inner: self.inner.lock_irqsave(), _key: PhantomData }
     }
+}
 
+impl<Inner: NestKey, T> KeyedSpinlock<Inner, T> {
+    /// Compile-checked nested acquire — the data-carrying twin of
+    /// [`KeyedRawSpinlock::lock_nested`]: only compiles when
+    /// `Inner: CanNestInside<Outer>`; same guard (Deref/DerefMut,
+    /// proof-minting) as the top-level acquire.
+    #[inline]
+    #[track_caller]
+    pub fn lock_nested<'a, Outer: NestKey>(
+        &self,
+        _proof: &NestProof<'a, Outer>,
+    ) -> KeyedIrqGuard<'_, Inner, T>
+    where
+        Inner: CanNestInside<Outer>,
+    {
+        self.lock_irqsave()
+    }
 }
 
 /// Guard for the data-carrying keyed spinlock: derefs to `T`; mints

@@ -9,7 +9,7 @@
 // schedule/pick/wake path takes the keyed lock).
 use crate::sync::lockkey::{
     FutexBucketKey, GrqKey, KeyedRawSpinlock, KeyedSpinlock, NestKey, NestProof, NetQueueKey,
-    NetStatsKey,
+    NetStatsKey, WaiterSlotKey,
 };
 use super::{test_fail, test_group_start, test_pass};
 
@@ -87,6 +87,17 @@ pub fn test_lockkey() {
         return;
     }
     test_pass("nested INV-LOCK-5 forward");
+
+    // D-11 slice 3: a waiter SLOT inside the bucket (the shape of
+    // every chain walk) — the data-guard lock_nested twin.
+    let slots: KeyedSpinlock<WaiterSlotKey, Option<usize>> = KeyedSpinlock::new(None);
+    {
+        let h = heads.lock_irqsave();
+        let s = slots.lock_nested(&h.proof()); // slot inside bucket
+        drop(s);
+        drop(h);
+    }
+    test_pass("nested slot-in-bucket");
 
     // INV-LOCK-6 forward: stats inside a net-queue lock.
     let nq: KeyedRawSpinlock<NetQueueKey> = KeyedRawSpinlock::new();

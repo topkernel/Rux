@@ -151,8 +151,11 @@ inside GRQ) still compiles nowhere because no impl exists, and the
 same-class double-bucket acquire of FUTEX_REQUEUE (lo/hi, index
 ordered) deliberately stays on the plain API — the keyed surface
 fences ACROSS classes, not within one. Pending pairs: the INV-LOCK-6
-stats/queue pair; the futex WAITER_POOL slot locks (nested inside
-buckets) are the natural follow-on. The unit group `lockkey` pins the
+stats/queue pair. The futex WAITER_POOL slot locks are keyed
+(`WaiterSlotKey`, slot-inside-bucket impl): the wake-chain walk and
+the diagnostic scan acquire proof-checked; the top-level allocator/
+free paths stay plain, and the requeue relink window's same-class
+double-slot holds stay plain by design. The unit group `lockkey` pins the
 positive mechanics incl. the data-guard proof chain; the negative half
 is a compile-time fact (snippets that must not build are documented in
 the test).

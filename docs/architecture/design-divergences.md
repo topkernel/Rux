@@ -505,7 +505,13 @@ demands the proof; the bucket->GRQ nesting is now a compile fact
 same-class ordered double-bucket acquire (lo/hi) stays on the plain
 API by design. Unit suite green with the `lockkey` group extended
 (guard hold/drop, INV-LOCK-5/6 forward nesting, the GRQ claim/unlock
-pattern, the data-guard proof chain).
+pattern, the data-guard proof chain). THIRD SLICE: the futex
+WAITER_POOL slot locks are `KeyedSpinlock<WaiterSlotKey, Option<Waiter>>`
+(`impl CanNestInside<FutexBucketKey> for WaiterSlotKey`); the
+wake-chain walk and the diagnostic scan acquire proof-checked via
+`KeyedSpinlock::lock_nested`; the top-level allocator/free paths and
+the requeue relink window's same-class double-slot holds stay on the
+plain API by design.
 
 **Known cost.** Opportunistic migration (D-4/D-6 doctrine): unkeyed
 locks keep compiling; only pairs named in lock-ordering.md adopt keys,
