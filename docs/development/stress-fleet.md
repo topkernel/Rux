@@ -2084,3 +2084,54 @@ slotmm census now meaningful: 88x [0,0] + 1x [0,8] per boot — the
 [0,8] single-second blip is transient switch-window tick sampling,
 not a lying slot; family B stays null. Fleet kernel rolled to
 cb314f43 (ltp-b r9+ and ltp-a next round). Floor 36-40G available.
+
+### s16 r9 full-round census (cb314f43, START=660, WW5 live) — the OH-A package, counter-exact
+
+393 strands, full 30-min round (harvest script kept at
+run/fleet/evidence/2026-10-28-s16-ww5-census/harvest.sh):
+
+- **oncpu_heal = 0 events, every heartbeat of the round** — the R85
+  on_cpu stale-mark heal (the 50-jiffy confirm-window path tied to the
+  why=1 family) fires EXACTLY ZERO times through 393 strands. This is
+  now counter-exact at fleet scale, not a print-null.
+- **claim_heal = 17 events/round** (15 of them pid=1) — the why=2-leg
+  heal DOES fire, on other pids, uncorrelated with strand resolution
+  (corrects the smoke2 wording "claim_heal=0 across the boot": the
+  120 s smoke was simply too short to see them).
+- **Sub-gate cumulative: s250=27793 s500=15501 s750=7211** — 56%/26%
+  smooth decay into the 393 printed strands. A 500ms-window-bound
+  producer would step at s500; there is no step.
+- **wtie mode 350-400 (209/393), then 300-350 (113/393)**: victims
+  enter the timeline behind a 300-400-deep tie-mass (grq 410-418 in
+  the same round). Entry-rank, not leftmost.
+- **visits min 452 / avg 601 / max 2164**: every strand had hundreds
+  of pick-walk opportunities; no pick starvation anywhere.
+- **strand ms min 1000 / avg 1143 / max 4071** — same distribution as
+  r6/r7/r8 (the 1000 floor is the print gate).
+- **SKIPHIST coll=1 on 393/393** — the 256-slot refusal-history table
+  is always stolen under this load; the r6 "victims never refused"
+  inference is formally unproven (noted as a caveat, not evidence).
+- **slotmm 1061x [0,0] + 1x [0,7]**: family B (slot-rewrite producer)
+  stays null; the single-second blip is transient switch-window tick
+  sampling.
+- why= details: 180 why=1 / 64 why=2 — other candidates' transient
+  refusals under churn (zero pid overlap with the 103 strand-victim
+  pids in r7's equivalent census).
+- ALLOCTHROW=3/OOM=8 at the OOM-storm region: the known 128MB-heap
+  class (32MB sweep alloc, SIGKILL-current ENOMEM), identical counts
+  r7/r8/r9 — pre-existing, not WW5-related.
+
+**OH-A verdict (final form for the sched owner): the msg-region ~1s
+strand family is fair-queue service latency under a 350-418-deep
+runnable queue.** Victims enter behind wtie~350-400 (msgstress wake
+churn clamped at min_vruntime), are served at a steady ~600 walks per
+strand once the mass drains, grq returns to 0 after the region (no
+runnable leak), the control arm shows the same family on the plain
+boot, and neither R85 heal leg is in the resolution path (oncpu heal
+exactly 0; claim heal 17x on unrelated pids). The 50-jiffy
+confirm-window correlation is REFUTED at count level; heal-window
+tuning cannot move this family. Linux CFS under the same load shows
+the same order (period = nr_running x min_granularity; 418 x ~3ms /
+2 CPUs ~ 0.6-1.2s). Any further sched question here is a
+latency-policy question (wakeup placement/boost under 400-deep
+queues), not a correctness defect.
