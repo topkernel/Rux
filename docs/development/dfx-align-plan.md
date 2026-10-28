@@ -863,6 +863,21 @@ the full erase-on-unlink contract (both records erased, ENOENT on
 re-open, EPERM on an ordinary attribute, directory empty) —
 trace-kmem-smoke 11/11, perf-smoke 15/15.
 
+Gate record (chain r8, merged tip 6d36d1f2 = branch + origin/main
+2a960538, 2026-10-28): dual-arch build rc=0 both (x86_64 first, then
+riscv64 after `rm build/.config`); make-test 1126/1126 (the merge
+delta adds no in-kernel tests — main stays 1122, this branch +4),
+regression-boot clean, pstore-smoke 18/18, trace-kmem-smoke 11/11,
+perf-smoke 15/15, pstore-x86-smoke 20/20 with the both-reset-path
+proof re-verified on the merged tree (newest record = boot2, the
+triple-fault survivor; oldest = boot1, the 8042-pulse survivor; full
+erase-on-unlink contract). The perf-gate tiers 1,2 were again
+REFUSED on host capacity (13 foreign QEMUs at chain step 7 — the
+fleet relaunch); a fleet-gap watcher (run/dfx-b8-perfgate-watch2.sh,
+8 h window, fires at <2 foreign QEMUs and >=10G available) runs them
+the moment a window opens and writes
+run/dfx-b8-perfgate-r8-out.txt.
+
 ## 5. Explicit non-goals
 
 - **eBPF**: the verifier and JIT are out of scope. A tracepoint + ring
