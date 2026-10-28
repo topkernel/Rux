@@ -481,14 +481,20 @@ pub fn test_seccomp_nnp() {
             return;
         }
     };
-    // SAFETY: cur is a live task pointer.
+    // SAFETY: cur is a live task pointer; the test context starts with
+    // NNP clear (prctl 39 is set-only, so a previous group cannot have
+    // left it set — but pin the observed state for the rows below).
     let saved_nnp = unsafe { (*cur).no_new_privs() };
     if !saved_nnp {
         let r = sys_prctl([40, 0, 0, 0, 0, 0]);
         test_assert_eq!(r, 0, "PR_GET_NO_NEW_PRIVS default is 0");
     }
 
-    // --- EINVAL shapes (prctl(2)): arg2 > 1; arg3/4/5 nonzero ---
+    // --- EINVAL shapes (reference: kernel/sys.c, pinned by LTP prctl02):
+    // the attribute is ONE-WAY (arg2 must be exactly 1; no clear exists)
+    // and every extra arg must be 0 for both SET and GET. ---
+    let r = sys_prctl([39, 0, 0, 0, 0, 0]);
+    test_assert_eq!(r, -(errno::EINVAL as i64), "PR_SET_NNP arg2=0 (clear) -> EINVAL");
     let r = sys_prctl([39, 2, 0, 0, 0, 0]);
     test_assert_eq!(r, -(errno::EINVAL as i64), "PR_SET_NNP arg2=2 -> EINVAL");
     let r = sys_prctl([39, 1, 1, 0, 0, 0]);
@@ -497,16 +503,20 @@ pub fn test_seccomp_nnp() {
     test_assert_eq!(r, -(errno::EINVAL as i64), "PR_SET_NNP arg4!=0 -> EINVAL");
     let r = sys_prctl([39, 1, 0, 0, 1, 0]);
     test_assert_eq!(r, -(errno::EINVAL as i64), "PR_SET_NNP arg5!=0 -> EINVAL");
+    let r = sys_prctl([40, 1, 0, 0, 0, 0]);
+    test_assert_eq!(r, -(errno::EINVAL as i64), "PR_GET_NNP arg2!=0 -> EINVAL");
 
-    // --- set/clear round trip ---
-    let r = sys_prctl([39, 1, 0, 0, 0, 0]);
-    test_assert_eq!(r, 0, "PR_SET_NNP(1) succeeds");
-    let r = sys_prctl([40, 0, 0, 0, 0, 0]);
-    test_assert_eq!(r, 1, "PR_GET_NNP returns 1 after set");
-    let r = sys_prctl([39, 0, 0, 0, 0, 0]);
-    test_assert_eq!(r, 0, "PR_SET_NNP(0) succeeds");
-    let r = sys_prctl([40, 0, 0, 0, 0, 0]);
-    test_assert_eq!(r, 0, "PR_GET_NNP returns 0 after clear");
+    // --- set + sticky: once set, GET reports 1 and stays 1 ---
+    if !saved_nnp {
+        let r = sys_prctl([39, 1, 0, 0, 0, 0]);
+        test_assert_eq!(r, 0, "PR_SET_NNP(1) succeeds");
+        let r = sys_prctl([40, 0, 0, 0, 0, 0]);
+        test_assert_eq!(r, 1, "PR_GET_NNP returns 1 after set");
+        let r = sys_prctl([39, 0, 0, 0, 0, 0]);
+        test_assert_eq!(r, -(errno::EINVAL as i64), "NNP is one-way: prctl clear is EINVAL");
+        let r = sys_prctl([40, 0, 0, 0, 0, 0]);
+        test_assert_eq!(r, 1, "PR_GET_NNP still 1 (sticky)");
+    }
 
     // --- attach privilege decision: NNP OR CAP_SYS_ADMIN ---
     // Baseline: as root the decision is true (CAP_SYS_ADMIN held).
@@ -514,11 +524,11 @@ pub fn test_seccomp_nnp() {
         test_assert!(seccomp_attach_allowed(), "attach allowed with CAP_SYS_ADMIN");
         // Drop CAP_SYS_ADMIN + NNP off -> denied.
         // SAFETY: cur is a live task pointer; cred_mut is exclusive here.
-        let saved = unsafe { *(*cur).cred_mut() }.clone();
+        let saved = unsafe { (*cur).cred_mut().clone() };
         unsafe {
-            (*(*cur).cred_mut()).cap_effective =
-                (*(*cur).cred_mut()).cap_effective
-                    .intersect(crate::security::Cap::new(!(1u64 << CAP_SYS_ADMIN)));
+            let cred = (*cur).cred_mut();
+            cred.cap_effective = cred.cap_effective
+                .intersect(crate::security::Cap::new(!(1u64 << CAP_SYS_ADMIN)));
         }
         unsafe { (*cur).set_no_new_privs(false); }
         test_assert!(
@@ -531,10 +541,12 @@ pub fn test_seccomp_nnp() {
             seccomp_attach_allowed(),
             "attach allowed with NNP set (caps still dropped)"
         );
-        // Restore.
+        // Restore (set_no_new_privs is the kernel-internal API — the
+        // prctl ABI is one-way, but the test must leave the context as
+        // it found it).
         unsafe {
             *(*cur).cred_mut() = saved;
-            (*cur).set_no_new_privs(false);
+            (*cur).set_no_new_privs(saved_nnp);
         }
         test_assert!(capable(CAP_SYS_ADMIN), "credentials restored after NNP rows");
     } else {

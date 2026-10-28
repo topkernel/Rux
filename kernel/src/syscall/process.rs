@@ -2953,24 +2953,27 @@ pub fn sys_prctl(args: SyscallArgs) -> i64 {
             prctl_set_seccomp(arg2, arg3)
         }
         39 => {
-            // PR_SET_NO_NEW_PRIVS (seccomp-grade sandboxing prerequisite):
-            // set the calling thread's no_new_privs attribute. arg2 must
-            // be 0 or 1; arg3..arg5 must be 0 (prctl(2) EINVAL shapes).
-            // When set: execve ignores setuid/setgid bits (the exec'd
-            // program runs with the caller's credentials) and seccomp
-            // filter attach is legal without CAP_SYS_ADMIN.
-            if arg3 != 0 || arg4 != 0 || args[4] != 0 {
-                return -(errno::EINVAL as i64);
-            }
-            if arg2 > 1 {
+            // PR_SET_NO_NEW_PRIVS (seccomp-grade sandboxing prerequisite).
+            // Reference shape (kernel/sys.c, pinned by LTP prctl02): the
+            // attribute is ONE-WAY — arg2 must be exactly 1 (there is no
+            // clear; un-setting would defeat the flag's purpose), and
+            // arg3..arg5 must all be 0; anything else is EINVAL. Once
+            // set: execve ignores setuid/setgid bits (the exec'd program
+            // runs with the caller's credentials) and seccomp filter
+            // attach is legal without CAP_SYS_ADMIN.
+            if arg2 != 1 || arg3 != 0 || arg4 != 0 || args[4] != 0 {
                 return -(errno::EINVAL as i64);
             }
             // SAFETY: current is a valid task pointer.
-            unsafe { (*current).set_no_new_privs(arg2 == 1); }
+            unsafe { (*current).set_no_new_privs(true); }
             0
         }
         40 => {
-            // PR_GET_NO_NEW_PRIVS: returns the attribute (0 or 1).
+            // PR_GET_NO_NEW_PRIVS: returns the attribute (0 or 1); any
+            // nonzero arg2..arg5 is EINVAL (reference shape, prctl02).
+            if arg2 != 0 || arg3 != 0 || arg4 != 0 || args[4] != 0 {
+                return -(errno::EINVAL as i64);
+            }
             // SAFETY: current is a valid task pointer.
             unsafe { (*current).no_new_privs() as i64 }
         }
