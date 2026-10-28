@@ -8,6 +8,10 @@
 //! mm/vmstat.c); `fs/procfs/vmstat.rs` renders them in Linux's
 //! key/value format.
 
+// Framekernel layer policy (docs/architecture/framekernel-layers.md):
+// this module must stay Safe Rust.
+#![forbid(unsafe_code)]
+
 use core::sync::atomic::{AtomicU64, Ordering};
 
 use crate::mm::zone::ZoneType;

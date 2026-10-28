@@ -11,6 +11,10 @@
 //!   bit  [20]    NMI_MASK       — NMI count
 //!   bit  [26]    PREEMPT_ACTIVE — actively preempting
 
+// Framekernel layer policy (docs/architecture/framekernel-layers.md):
+// this module must stay Safe Rust.
+#![forbid(unsafe_code)]
+
 // ============================================================================
 // Bit masks
 // ============================================================================
