@@ -244,14 +244,11 @@ fn nulldev_poll(_file: &crate::fs::file::File, _events: u16) -> u16 {
     POLLIN | POLLRDNORM | POLLOUT | POLLWRNORM
 }
 
-static NULLDEV_OPS: crate::fs::file::FileOps = crate::fs::file::FileOps {
-    read: Some(nulldev_read),
-    write: Some(nulldev_write),
-    lseek: None,
-    close: None,
-    poll: Some(nulldev_poll),
-    read_at: None,
-};
+static NULLDEV_OPS: crate::fs::file::FileOps = crate::fs::file::FileOps::builder()
+    .read(nulldev_read)
+    .write(nulldev_write)
+    .poll(nulldev_poll)
+    .build();
 
 // ============================================================================
 // devtmpfs node stock: console/tty, mem(1) devices, random
@@ -331,14 +328,11 @@ fn condev_poll(_file: &crate::fs::file::File, events: u16) -> u16 {
     ready
 }
 
-pub(crate) static CONDEV_OPS: crate::fs::file::FileOps = crate::fs::file::FileOps {
-    read: Some(condev_read),
-    write: Some(condev_write),
-    lseek: None,
-    close: None,
-    poll: Some(condev_poll),
-    read_at: None,
-};
+pub(crate) static CONDEV_OPS: crate::fs::file::FileOps = crate::fs::file::FileOps::builder()
+    .read(condev_read)
+    .write(condev_write)
+    .poll(condev_poll)
+    .build();
 
 /// /dev/zero — reads return zeros, writes discard.
 fn zerodev_read(_file: &crate::fs::file::File, buf: &mut [u8]) -> isize {
@@ -356,28 +350,22 @@ fn zerodev_poll(_file: &crate::fs::file::File, _events: u16) -> u16 {
     POLLIN | POLLRDNORM | POLLOUT | POLLWRNORM
 }
 
-static ZERODEV_OPS: crate::fs::file::FileOps = crate::fs::file::FileOps {
-    read: Some(zerodev_read),
-    write: Some(zerodev_write),
-    lseek: None,
-    close: None,
-    poll: Some(zerodev_poll),
-    read_at: None,
-};
+static ZERODEV_OPS: crate::fs::file::FileOps = crate::fs::file::FileOps::builder()
+    .read(zerodev_read)
+    .write(zerodev_write)
+    .poll(zerodev_poll)
+    .build();
 
 /// /dev/full — reads return zeros, writes fail with ENOSPC.
 fn fulldev_write(_file: &crate::fs::file::File, _buf: &[u8]) -> isize {
     -(crate::errno::constants::ENOSPC as isize)
 }
 
-static FULLDEV_OPS: crate::fs::file::FileOps = crate::fs::file::FileOps {
-    read: Some(zerodev_read),
-    write: Some(fulldev_write),
-    lseek: None,
-    close: None,
-    poll: Some(zerodev_poll),
-    read_at: None,
-};
+static FULLDEV_OPS: crate::fs::file::FileOps = crate::fs::file::FileOps::builder()
+    .read(zerodev_read)
+    .write(fulldev_write)
+    .poll(zerodev_poll)
+    .build();
 
 /// xorshift* PRNG state for /dev/random + /dev/urandom nodes (the real
 /// CRNG lives behind the getrandom(2) syscall; this node-side source
@@ -411,14 +399,29 @@ fn randdev_poll(_file: &crate::fs::file::File, _events: u16) -> u16 {
     POLLIN | POLLRDNORM | POLLOUT | POLLWRNORM
 }
 
-static RANDDEV_OPS: crate::fs::file::FileOps = crate::fs::file::FileOps {
-    read: Some(randdev_read),
-    write: Some(zerodev_write),
-    lseek: None,
-    close: None,
-    poll: Some(randdev_poll),
-    read_at: None,
-};
+static RANDDEV_OPS: crate::fs::file::FileOps = crate::fs::file::FileOps::builder()
+    .read(randdev_read)
+    .write(zerodev_write)
+    .poll(randdev_poll)
+    .build();
+
+/// D-6 shape-test accessors: expose the private char-device tables to
+/// the unit-test group `fileops-caps` without widening the runtime API.
+#[cfg(any(test, feature = "unit-test"))]
+pub mod caps_shape {
+    pub fn nulldev_ops() -> &'static crate::fs::file::FileOps {
+        &super::NULLDEV_OPS
+    }
+    pub fn zerodev_ops() -> &'static crate::fs::file::FileOps {
+        &super::ZERODEV_OPS
+    }
+    pub fn fulldev_ops() -> &'static crate::fs::file::FileOps {
+        &super::FULLDEV_OPS
+    }
+    pub fn randdev_ops() -> &'static crate::fs::file::FileOps {
+        &super::RANDDEV_OPS
+    }
+}
 
 /// /dev/kmsg is owned by printk.rs's record-ring implementation
 /// (KMSG_OPS): blocking reads in the `prio,seq,timestamp_us,-;text`
@@ -1263,14 +1266,11 @@ fn devfs_ino_hash(name: &str) -> u64 {
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
 /// Loop-family file ops: everything routes through the devno stashed on
 /// the open file (open) and the loop ioctl dispatcher (sys_ioctl).
-pub static LOOP_FILE_OPS: crate::fs::file::FileOps = crate::fs::file::FileOps {
-    read: Some(crate::drivers::loop_dev::loop_file_read),
-    write: Some(crate::drivers::loop_dev::loop_file_write),
-    lseek: Some(crate::drivers::loop_dev::loop_file_lseek),
-    close: None,
-    poll: None,
-    read_at: None,
-};
+pub static LOOP_FILE_OPS: crate::fs::file::FileOps = crate::fs::file::FileOps::builder()
+    .read(crate::drivers::loop_dev::loop_file_read)
+    .write(crate::drivers::loop_dev::loop_file_write)
+    .lseek(crate::drivers::loop_dev::loop_file_lseek)
+    .build();
 
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
 unsafe fn devfs_open(inode: &Inode, file: &crate::fs::File) -> i32 {
@@ -1910,14 +1910,12 @@ fn devfs_file_read_at(file: &crate::fs::File, offset: u64, buf: &mut [u8]) -> is
 /// no behavioral gain on this path.)
 
 /// File ops for devfs regular files (devtmpfs).
-pub static DEVFS_REG_FILE_OPS: FileOps = FileOps {
-    read: Some(devfs_file_read),
-    write: Some(devfs_file_write),
-    lseek: Some(devfs_file_lseek),
-    close: None,
-    poll: None,
-    read_at: Some(devfs_file_read_at),
-};
+pub static DEVFS_REG_FILE_OPS: FileOps = FileOps::builder()
+    .read(devfs_file_read)
+    .write(devfs_file_write)
+    .lseek(devfs_file_lseek)
+    .read_at(devfs_file_read_at)
+    .build();
 
 /// unlink on devfs (userspace): remove a device node (rm /dev/vda before
 /// mdev/udev recreates it, mdev remove events, ...).

@@ -336,14 +336,12 @@ fn memfd_file_close(file: &File) -> i32 {
 
 /// File ops for memfd files: identical to REG_FILE_OPS except the write
 /// path enforces F_SEAL_WRITE.
-pub static MEMFD_FILE_OPS: crate::fs::file::FileOps = crate::fs::file::FileOps {
-    read: Some(memfd_file_read),
-    write: Some(memfd_file_write),
-    lseek: Some(memfd_file_lseek),
-    close: Some(memfd_file_close),
-    poll: None,
-    read_at: None,
-};
+pub static MEMFD_FILE_OPS: crate::fs::file::FileOps = crate::fs::file::FileOps::builder()
+    .read(memfd_file_read)
+    .write(memfd_file_write)
+    .lseek(memfd_file_lseek)
+    .close(memfd_file_close)
+    .build();
 
 // ============================================================================
 // fcntl F_ADD_SEALS / F_GET_SEALS

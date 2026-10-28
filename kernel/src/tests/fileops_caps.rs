@@ -171,5 +171,108 @@ pub fn test_fileops_caps() {
         Expect { read: true, write: false, lseek: true, close: true, poll: false, read_at: false },
     );
 
+    // D-6 refactor-lane slice 3: the pseudo-filesystem cluster. The char
+    // devices (null/zero/full/random, console, uart) carry the
+    // stream-with-poll set; the synthetic filesystems (proc/sys/debug/
+    // cgroup/root/memfd) carry the positional set; loop and devfs-reg
+    // are the block-backed positional set with read_at; selinuxfs is
+    // positional WITHOUT lseek (its read_at is the native entry); the
+    // vfs mem-file is read-only positional.
+    check(
+        "nulldev caps",
+        crate::fs::devfs::caps_shape::nulldev_ops(),
+        Expect { read: true, write: true, lseek: false, close: false, poll: true, read_at: false },
+    );
+    check(
+        "zerodev caps",
+        crate::fs::devfs::caps_shape::zerodev_ops(),
+        Expect { read: true, write: true, lseek: false, close: false, poll: true, read_at: false },
+    );
+    check(
+        "fulldev caps",
+        crate::fs::devfs::caps_shape::fulldev_ops(),
+        Expect { read: true, write: true, lseek: false, close: false, poll: true, read_at: false },
+    );
+    check(
+        "randdev caps",
+        crate::fs::devfs::caps_shape::randdev_ops(),
+        Expect { read: true, write: true, lseek: false, close: false, poll: true, read_at: false },
+    );
+    check(
+        "condev caps",
+        &crate::fs::devfs::CONDEV_OPS,
+        Expect { read: true, write: true, lseek: false, close: false, poll: true, read_at: false },
+    );
+    check(
+        "loop file caps",
+        &crate::fs::devfs::LOOP_FILE_OPS,
+        Expect { read: true, write: true, lseek: true, close: false, poll: false, read_at: false },
+    );
+    check(
+        "devfs reg file caps",
+        &crate::fs::devfs::DEVFS_REG_FILE_OPS,
+        Expect { read: true, write: true, lseek: true, close: false, poll: false, read_at: true },
+    );
+    check(
+        "ptmx caps",
+        &crate::fs::pty::PTMX_OPS,
+        Expect { read: true, write: true, lseek: false, close: true, poll: true, read_at: false },
+    );
+    check(
+        "pty slave caps",
+        &crate::fs::pty::PTY_SLAVE_OPS,
+        Expect { read: true, write: true, lseek: false, close: true, poll: true, read_at: false },
+    );
+    check(
+        "fifo caps",
+        &crate::fs::fifo::FIFO_OPS,
+        Expect { read: true, write: true, lseek: false, close: true, poll: true, read_at: false },
+    );
+    check(
+        "uart caps",
+        &crate::fs::char_dev::UART_OPS,
+        Expect { read: true, write: true, lseek: false, close: false, poll: true, read_at: false },
+    );
+    check(
+        "procfs file caps",
+        &crate::fs::procfs::PROCFS_FILE_OPS,
+        Expect { read: true, write: true, lseek: true, close: true, poll: false, read_at: false },
+    );
+    check(
+        "sysfs file caps",
+        &crate::fs::sysfs::SYSFS_FILE_OPS,
+        Expect { read: true, write: true, lseek: true, close: true, poll: false, read_at: false },
+    );
+    check(
+        "debugfs file caps",
+        &crate::fs::debugfs::DEBUGFS_FILE_OPS,
+        Expect { read: true, write: true, lseek: true, close: true, poll: false, read_at: false },
+    );
+    check(
+        "cgroup file caps",
+        &crate::fs::cgroup::CGROUP_FILE_OPS,
+        Expect { read: true, write: true, lseek: true, close: true, poll: false, read_at: false },
+    );
+    check(
+        "rootfs file caps",
+        &crate::fs::rootfs::ROOTFS_FILE_OPS,
+        Expect { read: true, write: true, lseek: true, close: true, poll: false, read_at: false },
+    );
+    check(
+        "memfd file caps",
+        &crate::fs::memfd::MEMFD_FILE_OPS,
+        Expect { read: true, write: true, lseek: true, close: true, poll: false, read_at: false },
+    );
+    check(
+        "selinuxfs file caps",
+        crate::fs::selinuxfs::caps_shape::selinuxfs_ops(),
+        Expect { read: true, write: true, lseek: false, close: false, poll: false, read_at: true },
+    );
+    check(
+        "vfs mem-file caps",
+        crate::fs::vfs::caps_shape::mem_file_ops(),
+        Expect { read: true, write: false, lseek: true, close: true, poll: false, read_at: false },
+    );
+
     check_errno_matrix();
 }

@@ -1797,14 +1797,12 @@ fn rootfs_file_close(_file: &crate::fs::File) -> i32 {
 }
 
 /// RootFS file operations table
-pub static ROOTFS_FILE_OPS: crate::fs::FileOps = crate::fs::FileOps {
-    read: Some(rootfs_file_read),
-    write: Some(rootfs_file_write),
-    lseek: Some(rootfs_file_lseek),
-    close: Some(rootfs_file_close),
-    poll: None,
-    read_at: None,
-};
+pub static ROOTFS_FILE_OPS: crate::fs::FileOps = crate::fs::FileOps::builder()
+    .read(rootfs_file_read)
+    .write(rootfs_file_write)
+    .lseek(rootfs_file_lseek)
+    .close(rootfs_file_close)
+    .build();
 
 /// RootFS get_file_ops
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block

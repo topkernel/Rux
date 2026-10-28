@@ -165,9 +165,13 @@ behavior-preserving fallbacks (both old fallback shapes reduce to the
 same event bits). First conversions: the §1 incident family
 (epoll/eventfd/timerfd/signalfd/pipe/inotify).
 
-**Known cost.** Opportunistic migration — ~40 struct-literal tables
+**Known cost.** Opportunistic migration — ~27 struct-literal tables
 remain and still compile (D-4 procfile precedent); they convert as
-their areas are touched. The builder does not yet catch a FIRST
+their areas are touched. The refactor lane's slice 3 converted the
+pseudo-filesystem cluster (devfs x7 incl. the null/zero/full/random
+char devices, pty x2, procfs, sysfs, debugfs, selinuxfs, rootfs,
+memfd, fifo, char_dev uart, cgroup, vfs mem-file — 19 tables, each
+pinned in `fileops-caps`). The builder does not yet catch a FIRST
 install of a capability a type should not have — that guard is the
 shape test, per converted type.
 

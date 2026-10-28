@@ -2055,14 +2055,12 @@ unsafe fn procfs_setattr(_inode: &Inode, attr: u32, _arg1: u64, _arg2: u64) -> i
 }
 
 /// ProcFS file operations table
-pub static PROCFS_FILE_OPS: crate::fs::FileOps = crate::fs::FileOps {
-    read: Some(procfs_file_read),
-    write: Some(procfs_file_write),
-    lseek: Some(procfs_file_lseek),
-    close: Some(procfs_file_close),
-    poll: None,
-    read_at: None,
-};
+pub static PROCFS_FILE_OPS: crate::fs::FileOps = crate::fs::FileOps::builder()
+    .read(procfs_file_read)
+    .write(procfs_file_write)
+    .lseek(procfs_file_lseek)
+    .close(procfs_file_close)
+    .build();
 
 /// ProcFS get_file_ops: return ops based on inode type
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block

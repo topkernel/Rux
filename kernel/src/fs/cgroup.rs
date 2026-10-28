@@ -849,11 +849,9 @@ fn cgroupfs_file_close(file: &crate::fs::File) -> i32 {
 }
 
 /// cgroupfs file operations table.
-pub static CGROUP_FILE_OPS: crate::fs::FileOps = crate::fs::FileOps {
-    read: Some(cgroupfs_file_read),
-    write: Some(cgroupfs_file_write),
-    lseek: Some(cgroupfs_file_lseek),
-    close: Some(cgroupfs_file_close),
-    poll: None,
-    read_at: None,
-};
+pub static CGROUP_FILE_OPS: crate::fs::FileOps = crate::fs::FileOps::builder()
+    .read(cgroupfs_file_read)
+    .write(cgroupfs_file_write)
+    .lseek(cgroupfs_file_lseek)
+    .close(cgroupfs_file_close)
+    .build();
