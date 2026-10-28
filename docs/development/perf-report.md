@@ -2928,3 +2928,61 @@ rule owes; (b) med-of-2 pbench boards on run/pa90-leverB-strong-bzImage
 — item-1 pbench gate rows + the p5b adjacent pair + standing classes
 for the baseline refresh. Deferred heavy measurements behind the quiet
 gate as required (foreign QEMU 13-14 at arm time).
+
+**Item 3 landed (306d7cf6): route-1 deferred writes on no-journal
+images — the 23.1x append target closed.** The mechanism the route map
+named already existed (ext4_journal_start returns the NULL-JOURNAL
+handle for journal-less filesystems; the NJ create/mkdir paths arm it);
+ext4_write_at_core simply never did — its `Err(0)` arm left every
+inline sync_dirty_buffer in the write paying a real round trip. The
+write core now arms the null handle (false only for O_SYNC/O_DSYNC
+descriptions — their write-return durability on NJ is the inline sync,
+and the null handle's stop commits nothing), and ext4_sync_file's NJ
+arm persists the per-file REACHABILITY set: data blocks + inode slot
+(the existing loops) + indirect-chain blocks for indirect-mapped files
+(depth-0 extent files need nothing); bitmaps/group-descs are
+e2fsck-recomputable and ride sync(2)/eviction — Linux's own NJ
+write-back stance. Two honest detours, both documented in the commit:
+the first fsync arm was a device-wide dirty flush and was WRONG twice
+(O(world-dirty) per fsync = the sc310 anti-pattern; and the cache walk
+faulted on a linked entry whose bh read NULL — is_dirty CAS on
+NULL+0x30, R11-1's documented family — heavy deferral grew sync(2)'s
+walk ~50x and exposed the pre-existing race); the walks
+(sync_all/sync_all_excluding) now carry the same !bh.is_null() guard
+evict_one Phase 1 already uses, count skips in SYNC_WALK_NULL_BH, and
+the producer hunt (who links a null-bh entry) is handed to the fs lane
+with the pa92nj frame chains as evidence. Boards: NJ p6_append med
+113-164us across three boards (17.7x vs 2004-2058us — AT the J class),
+write_fsync NJ 0.75-0.85x of pa85, mkdrmdir flat (fs lane's flush),
+final board zero KERNPANIC/DEADLOCK/STALL; J board in class (append
+102.6us). make test 1122/1122, dual-arch rc=0.
+
+**Provenance correction (supersedes the pa90func reading above): the
+pa90func/pa89func boards booted STALE pa84-era bzImages** (the root
+Makefile does not forward build-release-opt when build/.config is
+absent — target/release/bzImage was 12:11 content; pa90's copy matched
+its byte size). All strong-kernel boards were then re-run on
+md5-verified fresh builds: pa92j (J arm, levers A+B, DONE rc=0 t=153s)
+and the pa92nj series. The p5b dgram 4-4.8us observation REPRODUCED on
+the verified pa92j board (send 4.78 / recv 4.08 med, min 2.30) — on a
+t=141-153s LIGHT window where every pa85/pa86 board ran load1 11-16:
+the fast class is REAL on this kernel class in light windows; whether
+lever A owns it or the documented bimodality flipped with the window is
+exactly what pa91's quiet adjacent pair decides. All measurement
+kernels are now provisioned by explicit `cd build && PLATFORM=x86_64
+make build[-release-opt]` with .config pinned and md5-recorded in the
+chain logs.
+
+**pa91 chain update:** STRONG repointed at run/pa92-route1-strong-bzImage
+(the full leg-52 stack: item 0 + A + B + route-1, md5 e20eebb3...);
+DBG = run/pa91-dbg-bzImage (129f9ab0...). Still gated on the quiet
+window at leg close; the REST recount (file.rs get_file volume+class),
+pbench med-of-2 (fd-heavy rows + p5b adjacent pair), and the volume
+isolation rerun land with it.
+
+**Leg-52 standing:** four commits on the branch (cceb808f gate-leak
+fix, fd5034e3 lever A, ac53dd6e lever B, 306d7cf6 route-1) + ledger
+commits; the fs-lane handoffs are the SYNC_WALK_NULL_BH producer hunt
+and (unchanged) the mkdir scoped flush; the p5b optimization decision
+waits on pa91's pair; the baseline whole-table refresh waits on pa91's
+boards per the merge-gate rules.
