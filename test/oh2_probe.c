@@ -115,11 +115,16 @@ static void memfd_tests(void)
     char buf[64];
     struct stat st;
 
-    int fd = (int)sys_memfd(NULL, 0);
-    if (fd < 0) { bad("memfd_create(NULL,0)", fd, 1); goto out; }
-    ok("memfd_create(NULL,0) returns fd");
+    /* NULL name: reference parity — strnlen_user(NULL) faults, so
+     * memfd_create(NULL, 0) returns EFAULT (abi-review memfd fix,
+     * 2026-10-28). The probe originally expected success; flipped. */
+    CHECK_ERR(sys_memfd(NULL, 0), EFAULT, "memfd_create(NULL,0) EFAULT");
 
     CHECK_ERR(sys_memfd("x", 0xffffffffU), EINVAL, "memfd_create bad flags EINVAL");
+
+    int fd = (int)sys_memfd("oh2", 0);
+    if (fd < 0) { bad("memfd_create(oh2,0)", fd, 1); goto out; }
+    ok("memfd_create(oh2,0) returns fd");
 
     CHECK_EQ(write(fd, "hello memfd", 11), 11, "memfd write");
     CHECK_EQ(lseek(fd, 0, SEEK_SET), 0, "memfd lseek");
@@ -350,7 +355,10 @@ static void tokenid_tests(void)
 
     uint64_t tok = 0, ftok = 0;
     CHECK_EQ(ioctl(fd, ACCESS_TOKENID_GET_TOKENID, &tok), 0, "GET_TOKENID ret");
-    CHECK_EQ((long)tok, 0, "initial token 0");
+    /* The registry now hands out REAL tokens (native 0x28xxxxxx class,
+     * allocated by the access-token service at process start) instead of
+     * the early-bringup 0 stub — flipped 2026-10-28. */
+    CHECK_EQ((long)tok != 0, 1, "initial token nonzero (real token)");
 
     uint64_t want_tok = 0x1234abcdULL;
     CHECK_EQ(ioctl(fd, ACCESS_TOKENID_SET_TOKENID, &want_tok), 0,
