@@ -38,6 +38,31 @@ pub fn test_syscall_process() {
 
     // Test 8: Syscall number verification
     test_syscall_numbers();
+
+    // Test 9: shebang interpreter-line parsing (binfmt_script parity)
+    test_shebang_parse();
+
+    // Test 10: resolve_exec_file errno shapes (exec ladder single-walk
+    // resolution): a directory is EACCES (reference may_open S_ISDIR),
+    // a missing path is ENOENT.
+    match resolve_exec_file("/") {
+        Err(e) if e == -(errno::EACCES as i32) => {
+            test_pass("resolve_exec_file directory -> EACCES");
+        }
+        other => {
+            test_fail("resolve_exec_file directory -> EACCES",
+                &alloc::format!("got {:?}", other.err()));
+        }
+    }
+    match resolve_exec_file("/nonexistent-exec-target") {
+        Err(e) if e == -(errno::ENOENT as i32) => {
+            test_pass("resolve_exec_file missing -> ENOENT");
+        }
+        other => {
+            test_fail("resolve_exec_file missing -> ENOENT",
+                &alloc::format!("got {:?}", other.err()));
+        }
+    }
 }
 
 fn test_sys_getpid() {

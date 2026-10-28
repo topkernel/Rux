@@ -74,34 +74,6 @@ unsafe fn copy_user_image(root_ppn: u64, vaddr: u64, src: &[u8]) -> bool {
     true
 }
 
-/// Zero a freshly mapped user range page by page (same rationale as
-/// copy_user_image: no physical-contiguity assumptions).
-///
-/// # Safety
-/// `root_ppn` must be a valid user page-table root whose range
-/// [vaddr, vaddr+len) is fully mapped and exclusively owned.
-unsafe fn zero_user_range(root_ppn: u64, vaddr: u64, len: usize) {
-    use crate::arch::mm::mm_ops::PageTableWalker;
-    use crate::arch::mm::{phys_to_virt, PhysAddr, PAGE_SHIFT, PAGE_SIZE};
-
-    let mut done = 0usize;
-    while done < len {
-        let va = vaddr + done as u64;
-        let in_page = (va as usize) & (PAGE_SIZE as usize - 1);
-        let chunk = core::cmp::min(len - done, PAGE_SIZE as usize - in_page);
-        if let Some((ppn, pte)) = PageTableWalker::walk(root_ppn, va) {
-            if pte & 1 != 0 {
-                let kva = phys_to_virt(PhysAddr::new(ppn << PAGE_SHIFT)).bits() as usize + in_page;
-                // SAFETY: page-resolved frame of this address space.
-                unsafe {
-                    core::ptr::write_bytes(kva as *mut u8, 0, chunk);
-                }
-            }
-        }
-        done += chunk;
-    }
-}
-
 /// Execute ELF loading (execve internal function)
 ///
 /// This function will:
@@ -345,25 +317,21 @@ pub(crate) fn do_execve_elf(
         alloc_and_map_to_user_table(user_ppn, stack_bottom, initial_stack_size, flags)
     }.ok_or(crate::errno::Errno::OutOfMemory.as_neg_i32())? as usize;
 
-    // Zero the WHOLE initial stack: the frames come from the recycler and
-    // carry the previous owner's data (old stack residue: pointers, saved
-    // frames). argv/envp/auxv only overwrite part of the top area; gaps
-    // kept residue that ld.so parsed as garbage auxv/link_map state —
-    // observed as jumps to parent-image addresses (0x1cbc0) and the
-    // "main_map == _ns_loaded" assertion right after a successful exec.
-    // SAFETY: the walk touches only pages of this fresh address space.
-    unsafe {
-        zero_user_range(user_ppn, stack_bottom, initial_stack_size as usize);
-        // FORENSIC ring: every initial-stack zeroing (pid, phys range). At a
-        // crash, a victim stack page whose PPN falls in ANOTHER pid's range
-        // proves the frame was handed out twice.
-        {
-            use core::sync::atomic::Ordering::Relaxed;
-            let i = STACKZERO_CURSOR.fetch_add(1, Relaxed) % STACKZERO_RING.len();
-            STACKZERO_RING[i].pid.store(crate::process::current_pid(), Relaxed);
-            STACKZERO_RING[i].base.store(stack_bottom, Relaxed);
-            STACKZERO_RING[i].len.store(initial_stack_size as u64, Relaxed);
-        }
+    // NOTE (abi-review session 1): no explicit zeroing here. BOTH arch
+    // alloc_and_map_to_user_table implementations zero every page before
+    // mapping it (the "Zero BEFORE mapping" leak-window fix) — the old
+    // full-stack zero_user_range re-walked and re-zeroed all 33+ pages
+    // through the page tables on every exec (measured ~30-40 us of the
+    // ~73 us stack-map stage on the p4_fork_exec shape, EXECCOST2 'stk').
+    // The forensic ring below still records the initial-stack range for
+    // crash correlation (its value is the (pid, range) record, not the
+    // act of zeroing).
+    {
+        use core::sync::atomic::Ordering::Relaxed;
+        let i = STACKZERO_CURSOR.fetch_add(1, Relaxed) % STACKZERO_RING.len();
+        STACKZERO_RING[i].pid.store(crate::process::current_pid(), Relaxed);
+        STACKZERO_RING[i].base.store(stack_bottom, Relaxed);
+        STACKZERO_RING[i].len.store(initial_stack_size as u64, Relaxed);
     }
 
     // Signal-return trampoline (R+X page): RISC-V glibc installs handlers
@@ -433,13 +401,10 @@ pub(crate) fn do_execve_elf(
                 }
             }
 
-            // Zero BSS
-            if mem_size > file_size {
-                let bss_size = (mem_size - file_size) as usize;
-                unsafe {
-                    zero_user_range(user_ppn, virt_addr + file_size, bss_size);
-                }
-            }
+            // BSS: no explicit zeroing — the whole image range was
+            // pre-zeroed by alloc_and_map_to_user_table before mapping
+            // (both arches; the old per-segment zero_user_range re-walked
+            // and re-zeroed the same pages through the page tables).
         }
     }
 

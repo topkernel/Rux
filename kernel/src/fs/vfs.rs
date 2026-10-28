@@ -4120,31 +4120,45 @@ pub fn open_file_arc_nofd(path: &str) -> Option<alloc::sync::Arc<File>> {
     // to "/" with no current task); File construction mirrors file_open's.
     unsafe {
         let vpath = path_lookup(path, 0).ok()?;
-        let inode = vpath.inode?;
-        if inode.mode.is_directory() {
-            return None;
-        }
-        let file = alloc::sync::Arc::new(File::new(FileFlags::new(
-            FileFlags::O_RDONLY,
-        )));
-        file.set_inode(alloc::sync::Arc::clone(&inode));
-        if let Some(d) = vpath.dentry.clone() {
-            file.set_dentry(d);
-        }
-        if let Some(ops) = inode.ops {
-            if let Some(get_file_ops_fn) = ops.get_file_ops {
-                if let Some(file_ops) = get_file_ops_fn(&*inode) {
-                    file.set_ops(file_ops);
-                }
-            }
-            if let Some(open_fn) = ops.open {
-                if open_fn(&*inode, &*file) != 0 {
-                    return None;
-                }
-            }
-        }
-        Some(file)
+        open_file_arc_from_vpath(&vpath)
     }
+}
+
+/// Build the kernel-internal read-only File from an ALREADY-RESOLVED
+/// VfsPath — the File-construction half of [`open_file_arc_nofd`],
+/// split so callers that resolved the path themselves (the exec ladder's
+/// single-lookup fast path) do not walk the path a second time. Same
+/// semantics: no fdtable slot, invisible to inotify, None on a missing
+/// inode or a directory.
+///
+/// # Safety
+/// `vpath` must come from a successful `path_lookup` (its dentry/inode
+/// pointers are live).
+pub unsafe fn open_file_arc_from_vpath(vpath: &VfsPath) -> Option<alloc::sync::Arc<File>> {
+    let inode = vpath.inode.as_ref()?;
+    if inode.mode.is_directory() {
+        return None;
+    }
+    let file = alloc::sync::Arc::new(File::new(FileFlags::new(
+        FileFlags::O_RDONLY,
+    )));
+    file.set_inode(alloc::sync::Arc::clone(inode));
+    if let Some(d) = vpath.dentry.clone() {
+        file.set_dentry(d);
+    }
+    if let Some(ops) = inode.ops {
+        if let Some(get_file_ops_fn) = ops.get_file_ops {
+            if let Some(file_ops) = get_file_ops_fn(&**inode) {
+                file.set_ops(file_ops);
+            }
+        }
+        if let Some(open_fn) = ops.open {
+            if open_fn(&**inode, &*file) != 0 {
+                return None;
+            }
+        }
+    }
+    Some(file)
 }
 
 ///
