@@ -3019,7 +3019,7 @@ pub fn sleep_snapshot() {
     let mut out = alloc::string::String::new();
     // leg-40B: (tid, futex word) pairs collected during the walk,
     // deduped by word — one user-stack dump per distinct park word.
-    let mut futex_parked: alloc::vec::Vec<(u32, u64)> = alloc::vec::Vec::new();
+    let mut futex_parked: alloc::vec::Vec<(u32, u64, u64)> = alloc::vec::Vec::new();
     use core::fmt::Write as _;
     crate::sched::for_each_task(|task| {
         // SAFETY: callback runs under the pid-hash bucket lock (same
@@ -3040,42 +3040,53 @@ pub fn sleep_snapshot() {
                 return;
             };
             #[cfg(feature = "x86_64")]
-            let (rip, sys, a0, a1) = if top == 0 {
-                (0, 0, 0, 0)
+            let (rip, sys, a0, a1, a2) = if top == 0 {
+                (0, 0, 0, 0, 0)
             } else {
                 let regs = (top.wrapping_sub(
                     crate::arch::x86_64::pt_regs::PT_REGS_SIZE,
                 )) as *const crate::arch::x86_64::pt_regs::PtRegs;
-                // SAFETY: diagnostic read of this task's own entry frame;
+                // SAFETY: diagnostic read of the task's own entry frame;
                 // owns_kernel_stack checked above (sc261).
-                unsafe { ((*regs).rip, (*regs).orig_rax, (*regs).rdi, (*regs).rsi) }
+                // leg-40C: a2 = futex val argument (the expected word
+                // value at park time — the sc345 join-word adjudicator).
+                unsafe {
+                    (
+                        (*regs).rip,
+                        (*regs).orig_rax,
+                        (*regs).rdi,
+                        (*regs).rsi,
+                        (*regs).rdx,
+                    )
+                }
             };
             #[cfg(feature = "riscv64")]
-            let (rip, sys, a0, a1) = if top == 0 {
-                (0, 0, 0, 0)
+            let (rip, sys, a0, a1, a2) = if top == 0 {
+                (0, 0, 0, 0, 0)
             } else {
                 let regs = (top.wrapping_sub(
                     crate::arch::riscv64::pt_regs::PT_REGS_SIZE,
                 )) as *const crate::arch::riscv64::pt_regs::PtRegs;
                 // SAFETY: same contract as the x86_64 twin above.
-                unsafe { ((*regs).epc, (*regs).a7, (*regs).a0, (*regs).a1) }
+                unsafe { ((*regs).epc, (*regs).a7, (*regs).a0, (*regs).a1, (*regs).a2) }
             };
             #[cfg(not(any(feature = "x86_64", feature = "riscv64")))]
-            let (rip, sys, a0, a1) = (0u64, 0u64, 0u64, 0u64);
+            let (rip, sys, a0, a1, a2) = (0u64, 0u64, 0u64, 0u64, 0u64);
             let comm = tk.comm();
             let name = core::str::from_utf8(&comm[..])
                 .unwrap_or("")
                 .trim_end_matches('\0');
             let _ = writeln!(
                 out,
-                "sleepsnap: {} tid {} state={:#x} sys={} rip={:#x} a0={:#x} a1={:#x}",
+                "sleepsnap: {} tid {} state={:#x} sys={} rip={:#x} a0={:#x} a1={:#x} a2={:#x}",
                 name,
                 tk.pid(),
                 state.bits(),
                 sys,
                 rip,
                 a0,
-                a1
+                a1,
+                a2
             );
             // leg-40B: futex-parked tasks are user-stack dump
             // candidates (the sc343 launcher decode: main parked in
@@ -3084,9 +3095,9 @@ pub fn sleep_snapshot() {
             // walks under the pid-hash bucket lock (sc207).
             if sys == 202
                 && futex_parked.len() < 8
-                && !futex_parked.iter().any(|&(_, wa)| wa == a0)
+                && !futex_parked.iter().any(|&( _, wa, _)| wa == a0)
             {
-                futex_parked.push((tk.pid(), a0));
+                futex_parked.push((tk.pid(), a0, a2));
             }
         }
     });
@@ -3121,7 +3132,7 @@ pub fn sleep_snapshot() {
         const ZERO_W: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
         static SEEN_W: [core::sync::atomic::AtomicU64; 32] = [ZERO_W; 32];
         use core::sync::atomic::Ordering::Relaxed as Rel;
-        for (tid, wa) in futex_parked {
+        for (tid, wa, expected) in futex_parked {
             let seen = SEEN_W.iter().any(|s| s.load(Rel) == wa);
             if seen {
                 continue;
@@ -3131,6 +3142,25 @@ pub fn sleep_snapshot() {
                     break;
                 }
             }
+            // leg-40C join-word adjudicator: read the CURRENT value of
+            // the parked futex word from the parked task's user page.
+            // expected = the val argument the waiter passed (a2): the
+            // word value it SAW when entering the wait. word==0 while
+            // the waiter still sleeps => the exiter cleared it but the
+            // WAKE never reached the waiter (lost-wake shape); word still
+            // == expected => the exit-time clear never ran (musl relies
+            // on CLONE_CHILD_CLEARTID's exit hook for the join word).
+            // SAFETY: read-only page-walk of the parked task, kthread
+            // context, no locks held (same contract as the dump below).
+            let word = unsafe { futex_word_of_stid(tid, wa) };
+            crate::pr_warn!(
+                "sleepsnap-PARK: WORD tid {} a0={:#x} expected={:#x} word_now={:#x}{}",
+                tid,
+                wa,
+                expected,
+                word.1,
+                if word.0 { "" } else { " <unreadable>" }
+            );
             // SAFETY: read-only diagnostic walk of the parked task's
             // user pages, no locks held (user_park_stack_dump_stid
             // contract; kthread context, sc89/sc207 discipline).
@@ -4165,6 +4195,36 @@ unsafe fn user_park_stack_dump(t: &Arc<BinderThread>) {
 /// freed tids cannot silently consume the dump budget (sc338B: the
 /// 16-slot latch filled with silent early-returns and the live wedge
 /// tids never got dumped).
+/// leg-40C: read one u64 of the PARKED task's user memory at `va`
+/// (the futex word it sleeps on). Returns (ok, value). Read-only page
+/// walk of the target task, kthread context, no locks — the same
+/// discipline as user_park_stack_dump_stid.
+unsafe fn futex_word_of_stid(tid: u32, va: u64) -> (bool, u64) {
+    let task = crate::sched::find_task_by_pid(tid);
+    if task.is_null() {
+        return (false, 0);
+    }
+    let tk = &*task;
+    let Some(aspace) = tk.address_space() else {
+        return (false, 0);
+    };
+    let root = aspace.root_ppn();
+    // SAFETY: read-only diagnostic walk of the parked task's tables.
+    let Some((ppn, _)) = crate::arch::mm::mm_ops::PageTableWalker::walk(root, va & !0xfff)
+    else {
+        return (false, 0);
+    };
+    let pa = (ppn as usize) << 12;
+    let kv = crate::arch::mm::phys_to_virt(crate::arch::mm::PhysAddr::new(pa as u64)).bits()
+        as usize
+        + (va & 0xfff) as usize;
+    if va & 0xfff > 0xff8 {
+        return (false, 0); // crosses a page
+    }
+    // SAFETY: one volatile u64 in the parked task's mapped user page.
+    (true, unsafe { core::ptr::read_volatile(kv as *const u64) })
+}
+
 unsafe fn user_park_stack_dump_stid(tid: u32, tag: &str, words: u64) -> bool {
     let task = crate::sched::find_task_by_pid(tid);
     if task.is_null() {
