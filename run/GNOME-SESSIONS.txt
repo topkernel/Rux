@@ -1262,3 +1262,73 @@ were storm-inflated):
   queued behind quiet gate as recorded debt"): functional gate green,
   tier numbers as recorded debt with an armed watcher. Ready for the
   coordinator subject to that same debt pattern.
+
+## Session 15 addendum — README v2 asset reshoot (user feedback
+## 2026-10-28): NOT DELIVERED; merged-tree interactive regression
+## found instead (merge-queue verdict REVISED)
+
+Mission: replace the 'a'-probe conversation asset with `echo rux` +
+`uname -r`, single-canvas inset composition. Scripts landed (all
+committed): run/v2type-boot.sh (types both commands, click-to-focus,
+jiggle, BASE_T-shifted schedule), run/convcheck-v2.py (exact key-
+sequence INPTRC subsequence check + byte-level release recovery +
+window-pixel diff "typed-text-rendered" check + line-band decode +
+block-cursor + cross-boot geometry), run/readme-v2-compose.py (single
+canvas: desktop frame + highlight rect on the exact source region +
+connector lines + 3x NEAREST inset; dry-run verified on r21type).
+
+Boot log (all on the merged tree 259a0ec5 = main 2a960538 + R86):
+- v2a attempt 1: kernel PANIC at t=2s — operational slip, NOT a code
+  regression: a parallel `make test` (test mode forces the unit-test
+  feature) raced the normal rebuild and left a test kernel in
+  target/.../debug/rux; its boot self-test [118] framebuffer test
+  painted the real virtio-gpu and faulted (pfault 0x81a00000,
+  tests/framebuffer.rs:42 fill_rect). Runs kept as
+  runs/gnome-v2a-unitkernel. Lesson recorded: never run `make build`
+  and `make test` concurrently on one target dir; after make test,
+  rebuild before booting normal images. (This panic also shows the
+  boot self-test suite paints the live GPU when present — worth a
+  lane note; the minimal-rootfs gate never sees it.)
+- v2a attempt 2: dark from the start (leak-storm class, 0 session
+  markers by 900 s) — killed early, archived runs/gnome-v2a-dark1.
+- v2a attempt 3 (typing at 1415/1465): lit 601/751; kernel delivered
+  all 18 keys (script subsequence YES, 0 phantoms); xterm rendered
+  NOTHING (pixel-diff vs 1350: only title-bar repaint + one 9px
+  cursor-cell move); session collapsed ~1440-1470 to the Oh-no
+  dialog (gnome-session-failed), zero "failed to register" lines.
+- v2b (1415/1465): lit 511; INPTRC 18/18 fully paired; xterm content
+  flat all boot (XWALK black 17->9); scanout froze at ~570 s with the
+  first desktop frame (the "conversation" first read into that frame
+  was an eyeball artifact — pixel decode shows prompt+cursor+one
+  pre-existing status line only; decode-not-eyeball discipline
+  upheld); final state = Oh-no dialog, same final-frame hash as v2c.
+- v2c (typing moved EARLY, 815/865, away from the collapse window):
+  lit 331/390; INPTRC 18/18; title bar repainted in the typing
+  windows (bash title escape sequences processed = keys REACHED
+  bash via the pty); text rows never changed; Oh-no by 900 s.
+
+THE FINDING (for the merge handoff — REVISES the session-15
+ready-with-debt verdict):
+- On the merged tree, 3/3 boots: kernel input delivery clean, the
+  xterm's OWN window content never updates (client-drawn text path
+  broken — WM/title repaints land, client content does not; the
+  image's known Xorg/mutter texture-from-pixmap frontier), and every
+  session ends in the Oh-no dialog with ZERO gsd registration-timeout
+  prints (a different collapse signature than r15/r19).
+- Pre-merge boots (r24val on f15b9660+R86, same image, same driver
+  family): typed probes rendered (XWALK 18->45->79). The break
+  arrived with main 2a960538's content (vmscan deep drain / F4 arm-2
+  revokes / R37 timer slot table are the candidates touching this).
+- Confounder, stated honestly: the host ran 20+ foreign QEMUs all
+  afternoon (wwh lane); a load-sensitive render path could produce
+  the same 0/3. A quiet-host rerun of ONE v2 boot settles it: if the
+  text renders, it is load sensitivity; if not, the merge carries a
+  GNOME-image interactive regression and main needs it fixed before
+  the GNOME lane can merge forward. The r26gate quiet-window watcher
+  is already armed for the perf tiers; the same window serves this.
+- Census impact: the three v2 boots add 1 dark + 2 Oh-no-collapse
+  boots on the merged tree (r25val-class dark + the new collapse
+  shape); no lit-rate claim either way at these numbers.
+- The v1 README asset stays in place until a healthy boot verifies
+  the v2 conversation; every production/verification script is
+  committed so the asset is one verified boot away.
