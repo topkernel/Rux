@@ -336,6 +336,13 @@ unsafe impl Send for BlockCache {}
 // Spinlocks; raw pointer access is always under the appropriate bucket lock.
 unsafe impl Sync for BlockCache {}
 
+/// Leg-52 dfx counter: sync_all/sync_all_excluding walked a LINKED
+/// cache entry whose bh was NULL (the R11-1 crash family's read side).
+/// Non-zero names the residual producer for the fs lane; the walks skip
+/// those entries instead of faulting.
+static SYNC_WALK_NULL_BH: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+
 impl BlockCache {
     fn new(hash_size: usize, max_entries: usize, block_size: u32) -> Self {
         let mut buckets = Vec::with_capacity(hash_size);
@@ -934,9 +941,16 @@ impl BlockCache {
                 // bucket lock is held so the entry cannot be freed concurrently.
                 unsafe {
                     let entry = &*entry_ptr;
-                    if (*entry.bh).is_dirty() {
+                    // Leg-52 (route-1 exposure): a linked entry with a null
+                    // bh has been observed (evict_one Phase 1 guards the
+                    // same shape; R11-1's family ends in exactly this
+                    // NULL+0x30 b_state panic). Skip and count — do not
+                    // dereference. The fs lane owns the producer hunt.
+                    if !entry.bh.is_null() && (*entry.bh).is_dirty() {
                         (*entry.bh).get();
                         dirty_list.push(entry.bh);
+                    } else if entry.bh.is_null() {
+                        SYNC_WALK_NULL_BH.fetch_add(1, Ordering::Relaxed);
                     }
                     current = entry.hash_next;
                 }
@@ -991,6 +1005,13 @@ impl BlockCache {
                 // concurrently.
                 unsafe {
                     let entry = &*entry_ptr;
+                    // Leg-52: same null-bh guard as sync_all (the pa92nj
+                    // crash chain faulted HERE first).
+                    if entry.bh.is_null() {
+                        SYNC_WALK_NULL_BH.fetch_add(1, Ordering::Relaxed);
+                        current = entry.hash_next;
+                        continue;
+                    }
                     let bh = &*entry.bh;
                     if bh.is_dirty() && bh.b_device == Some(device) && Some(bh.b_blocknr) != skip {
                         bh.get();
