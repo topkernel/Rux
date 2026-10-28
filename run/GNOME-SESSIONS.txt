@@ -998,3 +998,124 @@ were storm-inflated):
   mode and the kernel-halt path leaves the QEMU spinning forever;
   every session pays a manual kill. A `timeout 600s` wrapper (like
   the smoke scripts) would make rc meaningful without the spin.
+
+## Session 14 — 2026-10-28 day leg (main f15b9660 merged; the no-light
+## class ROOT-CAUSED and cut at the exit path)
+
+### Merge of main f15b9660 (trivial: our 49e41c06 is its second parent)
+- Kernel-source delta vs the predecessor's tree 1e382705: munmap wrap
+  fix (b5576562), wakewatch WW4 instruments, AF_UNIX read(2) direct
+  user-drain. 7 kernel files.
+
+### The no-light fork: root cause (mission 1) — VERDICT DELIVERED
+- Census separation is total. Every no-light boot (r16/r17/r20/r22)
+  carries 193-515 PREEMPT-HEAL firings (was=0x10001: leaked base
+  preempt bit 1 under the tick offset, held and re-leaked across every
+  10 s heal); every lit boot carries 0 (r19: 1 paint-class print).
+  The heal census alone separates the classes 4-vs-4.
+- Mechanism (r20, fully legible in the serial): during shell init a
+  thread-group member exits and parks DEAD on its leader's
+  dead_threads list, but its ownership qword {on_cpu=1, claim=X} is
+  never released — the R85 lost-release terminal microstate, this
+  time on the EXIT side. The reaper entering free_dead_member
+  (exit.rs) spins `while member.on_cpu()` FOREVER (FDM-WAIT
+  sweeper=538 member=677; r16: sweeper=535; both CPUs wedged in r20:
+  sweepers 538+544, 233 heals EACH). The pick-side R85 heal cannot
+  reach the member (it is unlinked; pick scans see linked tasks
+  only). With SMP=2 the two wedged sweepers starve the box: shell
+  wakeups WAKE-STRANDED behind them (pid=363 h1=(538/2610ms/pc=1),
+  strands 1-38 s), shell init never completes, xwininfo shows the
+  gnome-shell windows stuck 1x1, screen dark for the whole 2700 s.
+  Kernel stays panic-free and input delivery stays 1:1 into the dead
+  screen — every prior observation of the class falls out of this one
+  wedge.
+- Subclass split of the 4 dark boots: r16/r20 = the FDM lost-release
+  spin (fix below covers these). r17 = same census class but a
+  different un-sleepable loop (heal pid 482; NOT a sweeper — all its
+  FDM sweeps cleared; likely the do_wait/finish_wait family pa73
+  triaged; needs a taskdump capture to name). r22 = userspace heap
+  corruption ("malloc(): corrupted top size") aborting gnome-session
+  st=6 after 82 s, then the fallback path (gnome-shell --replace)
+  and runit itself wedge (pid=1 + 0x1cd heals) — a distinct subclass,
+  not kernel-scheduling.
+- FIX (commit a384048c, R86): the exit-side twin of the R85 pick-side
+  adjudication. free_dead_member's wait is bounded at 300 jiffies
+  (3 s, ~1000x the legitimate TCG switch-out window); past the
+  deadline member_release_stale_ownership (sched.rs) adjudicates
+  under the GRQ — a DEAD, unlinked member named by NO CPU slot and NO
+  in-flight SWITCHING_OUT executes nowhere and nothing will ever
+  release its marks — and releases them with the exact store the
+  switch protocol would have made (idempotent), with a capped
+  FDM-STALE-RELEASE report carrying the R85 context tail. A live
+  owner re-arms the deadline: legitimate windows behave exactly as
+  before. GRQ-held read is required and sufficient: the slot flip and
+  SWITCHING_OUT publish share one GRQ hold, so the reader can never
+  free a task whose switch-out is still writing its saved context.
+- Gate for the fix: dual-arch build rc=0 (riscv64+x86_64); minimal-
+  rootfs rv smoke 0 panics, prompt reached; make test ALL TESTS
+  PASSED (exit 0, self-cleaned by the new bounded runner).
+
+### Oh-no collapse (mission 2) — trigger identified, same producer family
+- Both collapse boots show the SAME trigger: gsd daemons miss the
+  session registration deadline — r15: Color/XSettings/Wacom/
+  MediaKeys/Keyboard "failed to register before timeout"; r19:
+  MediaKeys/Keyboard/Color. gnome-session then declares failure and
+  paints the fullscreen Gnome-session-failed dialog (the "Oh-no").
+- At the same wall-clock windows the serial shows WAKE-STRANDED
+  bursts whose HOLDERS carry leaked counts (pc=1 base; pc=65536/7/8
+  leaked hardirq nesting) stranding wakes 1-6 s. Lit boots show the
+  same holder kinds at 3-per-boot background level and ZERO
+  registration timeouts (r18/r21/r23val: 0). The collapse is the
+  milder form of the same leak-producer family: transient
+  un-preemptible holders stretch gsd startup past its 20 s-class
+  registration window. NOT a shell bug.
+- Fix directions: kernel leak producers (stress-fleet/wildwrite-hunt
+  lanes own them) or image-side registration-timeout raise. No
+  image change this leg.
+
+### r23val (first validation boot on the fixed tree): LIT + survived
+- M4 @450 s, M5 @571 s, full 2700 s, 0 panics/OOM/SIGDEATH, 0
+  registration timeouts, 0 failed-dialog marks, 0 PREEMPT-HEAL, 0
+  FDM-STALE-RELEASE (the producer did not strike this boot — the heal
+  path stayed unexercised; honest limit), 1 paint-class underflow
+  (pid=deadbeef count_was=c3c3c3c3 at sched.rs:0x145 — the freed-slot
+  guard print, not a wedge). 142 WAKE-STRANDED (r21's churn class).
+- Input 3/3 1:1 with 0 phantoms; XWALK xterm black-samples
+  18->45->79: every probe set rendered IMMEDIATELY (r18 lagged set 1
+  by tens of seconds; this boot had no lag). convcheck: echo level
+  held, conversation-signature NO — final shot shows 7 text lines
+  (a taller ink-907 band + a 309-326 band r18/r21 never had) and no
+  block cursor; the xterm content itself changed this boot. The
+  2-boot conversation claim stays at r18type+r21type (unchanged;
+  geometry class not reproduced here).
+- Boot census on the fixed tree: lit 1/1 so far (r24val running as
+  this is written; prior-tree rate was 9/13).
+
+### Infra (mission 4b): make-test timeout wrapper — LANDED (c7406c4c)
+- test/run.sh test mode now wraps QEMU in timeout(1) (TERM, KILL
+  after 30 s, MAKETEST_TIMEOUT overrides the 600 s default) and
+  derives the exit code from the captured suite verdict: green
+  verdict + wrapper kill = exit 0 (the kernel-halt spin no longer
+  fails the build), failures = 1, no verdict before the timeout = 1
+  with the log path kept. Verified end-to-end this leg: "test: suite
+  verdict green; QEMU wrapper rc=124 (killed after kernel halt)",
+  MAKETEST_EXIT=0, temp log self-cleaned. Console/gui modes unchanged.
+
+### Right-side indicators (mission 4a): unchanged, still open
+- panelcheck on r23val shot-2700s: right_side=none (identical to
+  every prior frame class). Consistent with the gsd subset that
+  survives registration; needs the indicator services chain healthy
+  first — tied to the Oh-no/registration story above.
+
+### Handoff state
+- Branch feature/gnome-bringup at c7406c4c (merge f15b9660 + R86 fix
+  + run.sh wrapper). No kernel-source changes beyond the R86 fix.
+- r24val (second validation boot, same schedule) auto-chained after
+  r23val; watch for: FDM-STALE-RELEASE lines (the live-exercise
+  proof), M4 timing, Oh-no survival.
+- Perf-gate pre-verification (Tier 1 syscost / Tier 2 pbench) still
+  owed for the R86 merge — host was at load 11-15 all leg; run at the
+  next quiet window (run/perf-gate.sh --tiers 1,2). The change sits
+  off every measured hot path (exit-sweep wait loop only; the
+  adjudication fires at most once per 3 s per stuck member), so the
+  expectation is no movement, but the gate wants the numbers.
