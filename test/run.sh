@@ -103,8 +103,22 @@ main() {
     if [ "$MODE" = "test" ]; then
         # Test mode: use unit-test feature, force recompile
         ensure_kernel "riscv64,unit-test" true
-        echo "Starting QEMU (4 cores, unit tests)..."
-        qemu-system-riscv64 \
+        # Bounded run + self-cleanup (test-infra fix, 2026-10-28): the
+        # kernel prints its suite verdict and halts, but nothing wires
+        # QEMU to exit on halt, so the process spins forever and every
+        # session paid a manual kill. Wrap the boot in timeout(1)
+        # (TERM, KILL 30 s later; MAKETEST_TIMEOUT overrides the 600 s
+        # default) and derive the script's exit code from the SUITE
+        # VERDICT captured in the log, not from how QEMU exited: a TERM
+        # after a green verdict is success, a timeout with no verdict is
+        # a real failure.
+        local TIMEOUT_SECS="${MAKETEST_TIMEOUT:-600}"
+        local LOG
+        LOG="$(mktemp /tmp/rux-maketest.XXXXXX.log)"
+        local QRC=0
+        echo "Starting QEMU (4 cores, unit tests, timeout=${TIMEOUT_SECS}s)..."
+        timeout --signal=TERM --kill-after=30 "$TIMEOUT_SECS" \
+            qemu-system-riscv64 \
             -M virt \
             -accel tcg,thread=single \
             -cpu rv64,zbb=true,zba=true,zbs=true \
@@ -113,7 +127,22 @@ main() {
             -nographic \
             -drive file=test/rootfs.img,if=none,id=rootfs,format=raw \
             -device virtio-blk-pci,disable-legacy=on,drive=rootfs \
-            -kernel target/riscv64gc-unknown-none-elf/debug/rux
+            -kernel target/riscv64gc-unknown-none-elf/debug/rux 2>&1 | tee "$LOG"
+        QRC="${PIPESTATUS[0]}"
+        if grep -q 'ALL TESTS PASSED' "$LOG"; then
+            if [ "$QRC" -ne 0 ]; then
+                echo "test: suite verdict green; QEMU wrapper rc=$QRC (killed after kernel halt)"
+            fi
+            rm -f "$LOG"
+            exit 0
+        elif grep -q 'TESTS FAILED' "$LOG"; then
+            echo "test: suite reported failures (wrapper rc=$QRC)" >&2
+            rm -f "$LOG"
+            exit 1
+        else
+            echo "test: no suite verdict reached (wrapper rc=$QRC); log kept: $LOG" >&2
+            exit 1
+        fi
     elif [ "$MODE" = "gui" ]; then
         # GUI mode: enable VirtIO-GPU display
         ensure_kernel "riscv64" false
