@@ -175,6 +175,10 @@ pub fn init() {
 struct BufferWriter<'a> {
     buf: &'a mut [u8],
     pos: usize,
+    /// TOTAL bytes handed to the writer, including those past `buf`
+    /// (pos saturates at buf.len(); this does not) — the truncation
+    /// marker's evidence.
+    total: usize,
 }
 
 impl<'a> fmt::Write for BufferWriter<'a> {
@@ -183,8 +187,51 @@ impl<'a> fmt::Write for BufferWriter<'a> {
         let to_write = s.as_bytes().len().min(remaining.len());
         remaining[..to_write].copy_from_slice(&s.as_bytes()[..to_write]);
         self.pos += to_write;
+        self.total += s.as_bytes().len();
         Ok(())
     }
+}
+
+/// Bake a visible truncation marker into the tail of a FULL record
+/// buffer (`tail.len() == RECORD_TEXT_SIZE`, called only when the full
+/// formatted length exceeded it). The marker names the FULL length, so
+/// a reader computes the loss exactly: visible payload =
+/// RECORD_TEXT_SIZE - marker.len(), missing = `total_len` - that.
+///
+/// Silent 256-byte truncation ate instrument output unnoticed (stress
+/// lane WW5: an extended heartbeat line was cut with no trace) — this
+/// marker is the audit trail. No allocation, fixed stack work: safe
+/// under the printk ring lock and in IRQ context.
+fn bake_truncation_marker(tail: &mut [u8], total_len: usize) {
+    let mut m = [0u8; 32];
+    m[0] = b'<';
+    m[1] = b'l';
+    m[2] = b'e';
+    m[3] = b'n';
+    m[4] = b'=';
+    // usize digits fit 20 places (u64); format by hand — no alloc.
+    let mut digits = [0u8; 20];
+    let mut dn = 0usize;
+    let mut n = total_len;
+    loop {
+        digits[dn] = b'0' + (n % 10) as u8;
+        dn += 1;
+        n /= 10;
+        if n == 0 || dn == digits.len() {
+            break;
+        }
+    }
+    let mut at = 5usize;
+    while dn > 0 {
+        dn -= 1;
+        m[at] = digits[dn];
+        at += 1;
+    }
+    m[at] = b'>';
+    at += 1;
+    let marker = &m[..at];
+    let start = tail.len() - marker.len();
+    tail[start..].copy_from_slice(marker);
 }
 
 /// Write a formatted message to the kernel log (no trailing newline).
@@ -229,9 +276,16 @@ fn printk_ring_always(level: u8, args: fmt::Arguments) {
 
     // Format into a stack-allocated buffer
     let mut buf = [0u8; RECORD_TEXT_SIZE];
-    let mut writer = BufferWriter { buf: &mut buf, pos: 0 };
-    let _ = fmt::Write::write_fmt(&mut writer, args);
-    let text_len = writer.pos.min(RECORD_TEXT_SIZE);
+    let (text_len, total) = {
+        let mut writer = BufferWriter { buf: &mut buf, pos: 0, total: 0 };
+        let _ = fmt::Write::write_fmt(&mut writer, args);
+        (writer.pos.min(RECORD_TEXT_SIZE), writer.total)
+    };
+    if total > RECORD_TEXT_SIZE {
+        // Over-budget line: the marker names the full length (console
+        // and ring both carry it — see bake_truncation_marker).
+        bake_truncation_marker(&mut buf, total);
+    }
 
     // Write to ring buffer (if initialized)
     if PRINTK_INITIALIZED.load(Ordering::Relaxed) {
@@ -434,9 +488,16 @@ pub fn printk_ln(level: u8, args: fmt::Arguments) {
     }
     // Format with newline into a local buffer to avoid borrow conflict
     let mut buf = [0u8; RECORD_TEXT_SIZE];
-    let mut writer = BufferWriter { buf: &mut buf, pos: 0 };
-    let _ = fmt::Write::write_fmt(&mut writer, format_args!("{}\n", args));
-    let text_len = writer.pos.min(RECORD_TEXT_SIZE);
+    let (text_len, total) = {
+        let mut writer = BufferWriter { buf: &mut buf, pos: 0, total: 0 };
+        let _ = fmt::Write::write_fmt(&mut writer, format_args!("{}\n", args));
+        (writer.pos.min(RECORD_TEXT_SIZE), writer.total)
+    };
+    if total > RECORD_TEXT_SIZE + 1 {
+        // +1: the newline this wrapper appends; a line of exactly 255
+        // payload bytes plus '\n' fills the record uncropped.
+        bake_truncation_marker(&mut buf, total - 1);
+    }
     printk_bytes(level, &buf[..text_len]);
 }
 
@@ -490,6 +551,13 @@ fn write_to_ring_buffer(level: u8, text: &[u8], timestamp: u64) {
     let copy_len = text.len().min(RECORD_TEXT_SIZE);
     record.text[..copy_len].copy_from_slice(&text[..copy_len]);
     record.text_len = copy_len as u16;
+    if text.len() > RECORD_TEXT_SIZE {
+        // Raw-bytes callers (ring_stash_console) can exceed the record
+        // without passing through a BufferWriter — same audit marker.
+        // The marker overwrites the tail INSIDE the already-copied 256
+        // bytes; text_len stays RECORD_TEXT_SIZE.
+        bake_truncation_marker(&mut record.text, text.len());
+    }
 
     // Advance write index (wrap around)
     rb.write_idx = (idx + 1) % RING_BUFFER_CAPACITY;
