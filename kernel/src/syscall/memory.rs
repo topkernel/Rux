@@ -207,10 +207,18 @@ pub fn sys_brk(args: [u64; 6]) -> i64 {
                         heap_vma.set_origin(crate::mm::vma::VmaOrigin::from_bits(
                             crate::mm::vma::VmaOrigin::BRK,
                         ));
+                        // The heap grows by the new VMA's own pages:
+                        // charge them (the reference kernel accounts a brk
+                        // growth as mm->total_vm += pages, kernel/mm/mmap.c:
+                        // do_brk_flags) so RLIMIT_AS and the reported
+                        // VmSize see the heap. The brk shrink below goes
+                        // through munmap, which releases the same pages.
+                        let heap_pages = heap_vma.page_count() as u64;
                         if vma_mgr.add(heap_vma).is_err() {
                             // Keep the old brk on failure (Linux parity).
                             return current_brk as i64;
                         }
+                        addr_space.add_total_vm(heap_pages);
                     }
                 }
 
