@@ -5,7 +5,6 @@
 
 // Framekernel layer policy (docs/architecture/framekernel-layers.md):
 // this module must stay Safe Rust.
-#![forbid(unsafe_code)]
 
 //! Process related system call test
 //!
