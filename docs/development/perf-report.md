@@ -2382,3 +2382,179 @@ inside the strong loaded band — consistent with the anchor.
 Host discipline: boots strictly sequential (one lane QEMU at a time,
 never above 1), own PIDs only, mem floor >=45G observed throughout, boots interleaved
 around the unattended stress-fleet rounds (4-8 foreign QEMUs).
+
+### 8.10.18 Leg 49 (2026-10-28): F4 arm-2 LANDED — lazy per-transaction revokes; mkdrmdir -71.4%, unlink -99.5% (pa78, regime-coherent pairs); the semantics note preceded the code and cleared with no cancel records; track-1 carried R37 (timer slot table)
+
+The leg opened on merged main f15b9660 (leg-48 merge 0901b581 +
+gnome-bringup). Three tracks: the arm-2 design item end-to-end, the
+track-1 lever pick, and the standing arm-1 watch.
+
+**Arm-2 semantics note BEFORE code (the ledger's own rule).**
+f4-ext4-route-map.md §6 records the corrected model re-read surfaced
+four facts the leg-44 checklist did not carry: (F-a) sync_dirty_buffer
+DEFERS under an active task handle — journaled ops are not written
+through inline (the stale Phase 2.5 comment is fixed); (F-b) slow-path
+journal records are BORN DEAD (Phase 4 advances s_start past its own
+records; a completed slow commit leaves the op's real metadata in dirty
+RAM); (F-c) the replayable set at crash is at most ONE transaction
+(single running txn, sequential inline commits); (F-d) today's rmdir
+commit already left rmdir metadata unpersisted — going lazy weakens
+nothing. Decisions: R1 per-transaction set + journal-level SPILL for
+non-Running issuers (claimed by the next txn at creation); R2 NO cancel
+records in memory or on disk (a revoke's tid can never exceed the tid
+of a transaction whose descriptors carry post-revoke content;
+same-tid suppression skips a redundant replay) — recorded as
+design-divergences.md D-8; R2' the slow path GAINS the fast path's
+write-through loop (mixed batches must not flip fast→slow and lose
+persistence); R3 the global revoke force is deleted, replaced by a
+per-txn high-water LAZY_COMMIT_MAX_REVOKES=510 (ext4 reserves no revoke
+credits, so delete-only volume had no other bounder); R4 recovery
+unchanged (format identical); R5 no cancel hook; R6 the plan below.
+Design CLEARED; implementation d4addcfc.
+
+**Correctness gates (branch tip through the change):** dual-arch build
+rc=0 (riscv64 + x86_64 debug); `make test` 1122/1122 green in-log (rc
+124 = the documented post-halt park, reaped); riscv64 minimal-rootfs
+smoke zero panics, suite green (run/rv-smoke-leg49.sh).
+
+**pa78 A/B (release-strong x86_64 q35, M = pure main f15b9660,
+B = lazy revoke d4addcfc; interleaved M,B,B,M; all six boots rc=0
+including the fsw pair; load1 8-14, mem floor >=35G).**
+
+| row (median us) | M1 | M2 | B1 | B2 | verdict |
+|---|---|---|---|---|---|
+| p6_mkdrmdir (TARGET) | 51564 | 55096 | 14837 | 15693 | **-71.4%** |
+| p6_unlink (TARGET) | 15982 | 16524 | 77.0 | 79.9 | **-99.5%** |
+| p6_write_fsync | 8675 | 9257 | 11698 | 8551 | flat (pair2 -7.6%; B1's +35% carries a 1.3s p99 host stall — adjudicated noise, contradicted by pair 2) |
+| p6_append | 87.2 | 91.6 | 86.7 | 89.2 | in band |
+| p6_stat | 15.0 | 15.5 | 14.8 | 15.3 | in band |
+| p6_getdents | 570 | 580 | 577 | 607 | in band (+3.0%) |
+| p6_read_cached | 34.1 | 35.6 | 33.3 | 33.6 | improved |
+| p2_ctxsw | 1.298 | 1.343 | 1.328 | 1.398 | in band (strong loaded class) |
+| p5a_pipe / p5d_rt_read | 2.04/4.21 | 2.22/4.38 | 2.12/4.13 | 2.40/4.36 | in band |
+| p7_sleep1ms | 930.8 | 965.8 | 932.6 | 931.9 | in band |
+
+**Mechanism probe (two independent confirmations).** (1) fsw
+j-counters: on M, jstop - jlazy - jcommit_fast tracks jrevoke exactly
+(2001 = 2001 — every revoke-carrying stop forces a commit); on B the
+same arithmetic reads 0 with 996 revokes — they batch lazily.
+(2) PROBE49 instrumented boot (temporary prints, removed): the txn set
+accumulates (250, 500 at tid 1003), the high-water fires EXACTLY once
+at 510 revokes (forced commit), the next transaction (tid 1004)
+carries the remainder, and the SPILL branch is never taken on this
+workload. The earlier suspicion that the high-water never fired was an
+artifact of dump-timing arithmetic, not the code.
+
+**The mkdrmdir residual (~14-16 ms flat floor, min=14.2 ms) is NOT the
+journal**: it is the per-mkdir scoped publication flush
+(flush_publications_scoped, the leg-29A ghost-file protection: the new
+inode's table/bitmap blocks + the entry block, 1-2 sync I/Os per
+mkdir). unlink pays no scoped flush and dropped to 77 us. That flush
+is the fs lane's next lever, explicitly out of this change's scope.
+
+**Track-1 lever pick: R37 landed (design note first).** The headroom
+list's §1/§3/§4 precedents are done (D-4/D-5/D-6/D-7); §2 is
+multi-leg scope; §8's virtio guards are cheap and R-numbered (poor
+ROI for one leg). §7's first slice had a COMPLETE design note waiting
+since R36 (r37-timer-slotted-table-draft.rs) that never landed:
+timer.rs still ran the BTreeMap pair with node allocations inside the
+TIMERS->ACTIONS locks — the R36 OOM-deadlock family. The landing
+decision (§ header of the draft) reconciles the draft with everything
+the live file gained (R34 per-CPU scratch, hres entries, WW
+instruments, periodic-delivery, one-shot take) and swaps exactly the
+storage layer: fixed-slot table (1024 x 56 B + 128 B bitmap ≈ 57 KB
+.bss) behind ONE lock; add/del/mod/pending/get_state/snapshot are
+plain stores and bitmap walks (7ef5a170). Gates: dual-arch rc=0,
+make test 1122/1122, rv smoke zero panics. The pa80 A/B (M = lazy
+revoke kernel, B = +slot table — the delta is exactly the timer file)
+and the Tier-1 census boot run at leg close (results appended below).
+
+**Arm-1 standing watch:** the no-journal root-lookup fix has NOT
+landed on main as of 478ece08 (stress-fleet docs only since f15b9660).
+The J-vs-NJ p6 comparison stays queued on the fs lane's fix.
+
+**p2_ctxsw discipline:** all strong-class boots this leg read
+1.298-1.398 (loaded band, load1 8-14) — judged against the strong
+anchors (quiet 1.373, loaded ceiling ~2.0), never the 15.4 debug cell.
+
+**pa80 timer A/B result (Tier-2 PASS).** M = lazy-revoke kernel
+(d4addcfc), B = +R37 slot table (7ef5a170) — the delta is exactly
+kernel/src/timer.rs. Interleaved M,B,B,M, all rc=0, load1 9-14:
+p7_sleep1ms (target) 1047.5/969.4 (M) vs 940.4/964.0 (B) — -5.6% on
+averages, right direction, within the row's own load spread; every
+other row within +-20% (max drift p1_null +7.9%, p4_fork_exit +7.4%,
+both flip across pairs — LTO layout + load noise class). Verdict: the
+slot table is performance-neutral-to-positive on the board and removes
+the R36 OOM-deadlock class structurally; the Tier-1 census boot is
+queued with the quiet-gated chain (pa81) covering the combined tip.
+
+### 8.10.19 Leg 49B (2026-10-28): vmscan pre-OOM reclaim-depth — ADJUDICATION (coordinator-routed from stress-fleet s17): design CLEARS with one correction; the fix is the deep final round + the active-list bridge
+
+The stress lane's s17 quantified chain (kill fires while 175-204 MB of
+clean file cache remains, ~1 MB = 8x32 pages of pre-OOM drain) was
+re-derived against the code. Verdict on each link:
+
+- L1 (rate bound) CONFIRMED: alloc slowpath runs <=8 rounds of
+  try_to_free_pages (page_alloc.rs, the `for _ in 0..8` under the
+  IN_DIRECT_RECLAIM gate), each bounded by balance_pgdat's
+  nr_to_reclaim = max(1<<order, SWAP_CLUSTER_MAX=32); the freed==0
+  break aborts earlier when a round yields nothing. Worst case ~256
+  pages of drain precede `return 0` — the kill decision.
+- L2 (shrink breaks on first evict_one failure) CONFIRMED but NOT the
+  binding wall: evict_one's BTreeMap fallback (page_cache.rs, after the
+  2-round LRU walk) scans the WHOLE cache map for any clean
+  unreferenced page regardless of list placement, so evict_one false
+  requires the map itself to hold nothing clean+unreferenced. The LRU
+  wall (93% referenced inactive tail, MAX_SCAN=64/round) makes each
+  call SLOW (O(map) via the fallback), not necessarily fruitless.
+- L3 (the active list is never scanned) CONFIRMED and corrected: s17's
+  "one list away" is literal — shrink_lruvec scans only
+  LRU_INACTIVE_ANON + LRU_INACTIVE_FILE ("TODO: shrink_active_list");
+  the census's active list (referenced=0, dirty=0 — graduated clean
+  pages) is reachable only through the 32-per-call demotion bridge
+  (which lands pages at the YOUNG/inactive end, behind the referenced
+  wall) or the fallback's O(map) scan. The unreachable-pool mechanism
+  stands, with the fallback as the slow leak that keeps rounds
+  technically "progressing" (freed>0) while the batch rate stays
+  32/round.
+- L4 (latency rationale?) REFUTED: the comments justify SWAP_CLUSTER_MAX
+  and the 8-round bound as steady-state pace/anti-crawl measures (the
+  OH crawl incident); NOTHING bounds the pre-OOM round deliberately.
+  Linux's pre-OOM effort is deeper (retry while did_some_progress, OOM
+  only after a full no-progress pass). The shallowness is an accident
+  of composing three steady-state bounds — the s17 thesis.
+
+**Design (cleared; the deep final round + the bridge):**
+- One function, `vmscan::drain_file_cache_before_oom(nr_to_reclaim)`:
+  caller (the slowpath, INSIDE the held IN_DIRECT_RECLAIM gate, after
+  the 8th round, before `return 0`) computes the shortfall against the
+  allocating zone's WMARK_LOW + request, clamped [32, 8192] pages.
+- The drain loops (bounded passes, target-capped): PAGE_CACHE.shrink
+  chunk (<=256) interleaved with a BULK active demotion
+  (lru_demote_active_file_oldest(256)) whenever a chunk starves — the
+  bridge that makes the one-list-away pool reachable at batch rate
+  instead of O(map)/page. Stops on target met, or one full pass with
+  zero freed AND zero demoted (nothing left: the kill is then correct).
+- Steady-state paths are untouched byte-for-byte (shrink, evict_one,
+  balance_pgdat, kswapd): all new depth lives on the doomed path only,
+  so "no reclaim-slowpath emergence on standard boots" reduces to the
+  deep pass never running there (separate counter, verifiable in the
+  census).
+- Instrument (the change's own DFX duty): counters + one
+  OOM-DEEP-PASS serial line per invocation (freed/target/demoted/
+  passes) — the storm fleet's next rounds read it directly; standard
+  boots print nothing.
+- Verification: functional A/B with a new oomchurn `fake <cacheMB>
+  <anonMB>` mode (fill clean page cache, then touch anon with progress
+  prints — the s17 shape deterministic on a 1G VM): M dies at a small
+  fraction with clean cache resident; B converts the kill into slow
+  allocations and touches through, or dies at the true ceiling.
+  Correctness gates as usual; Tier-1 census (already queued for the
+  combined tip) additionally reads the deep-pass counter = 0 on the
+  standard boot.
+- Out of scope, recorded: mapped-page reclamation (may_unmap is set but
+  no unmap path exists in the page-cache reclaim), dirty-page
+  writeback drain (the shrink_dirty variant exists for direct reclaim
+  callers), anon/swap. If the deep pass still cannot reach its target
+  because every clean page is pinned by mappings, the kill fires as
+  today and the follow-up is the unmap path, not more depth.
