@@ -199,7 +199,7 @@ STATUS = {
     "kernel/src/sched/idle.rs": ("done", ""),
     "kernel/src/sched/mod.rs": ("done", "纯 re-export 层"),
     "kernel/src/sched/rt.rs": ("done", "全文读完：位图反相(bit0=prio99)、head/tail 入队、P08 空转 dequeue、force_unlink 防御、RR timeslice=100ms 均与参考一致；RT 带宽控制在 sched.rs（全局 950ms×MAX_CPUS/1s，比参考的 per-root-domain 粗，pick 时跳过 RT 类）；rt/rr 计数已改 checked-sub 防回绕"),
-    "kernel/src/sched/sched.rs": ("done", "188d844d 全文读完：GRQ 核心、pick 序 stop>dl>rt>cfs>idle、DL CBS 节流+replenish、RT 带宽、tick(slice 抢占=check_preempt_tick)、idle 循环 R20-2 复查、延迟 SIGCHLD、RLIMIT_CPU/itimer/cputime、task 槽分配/R47 毒化、R46-R85 heal 机器（均有捕获史注释）；无新缺陷。DL 无全局带宽准入(get_bw 死代码)——见 deadline.rs 注"),
+    "kernel/src/sched/sched.rs": ("fixed", "188d844d 全文读完（见前注）；2b092c49 GRQ 锁交换已撤回（623c4736，13-boot 配对判决= d2a58ccb panic 家族触发器；机制为 codegen/时序揭示的潜在 GRQ 协议竞争，R74-DOUBLE-SEED 为线索，OPEN）"),
     "kernel/src/sched/stats.rs": ("done", "sched_schedstats 运行时门：默认关、Relaxed 读，与参考 sysctl 语义一致"),
     "kernel/src/sched/stop_task.rs": ("done", "stop 类为 PerCpuState 直管的 stub，next_class 链正确"),
     "kernel/src/sched/wakewatch.rs": ("done", "DFX wake-latency instrument: no contract surface; side-table validity/free-invalidation sound, sc207/sc215 softirq deadlock discipline in place"),
@@ -508,6 +508,22 @@ BUGS = [
      "but Rux read the value as RELATIVE — a caller passing an absolute deadline waited "
      "twice as long, and an already-expired deadline blocked for the full timeout instead "
      "of returning ETIMEDOUT at once."),
+    ("623c4736", "kernel/src/sched/sched.rs, kernel/src/sync/lockkey.rs",
+     "The 2b092c49 GRQ typed-lock-key swap (KeyedRawSpinlock<GrqKey> wrapping "
+     "RawSpinlock as a pure delegate) is CONVICTED as the trigger of the d2a58ccb "
+     "stochastic panic family by a 13-boot paired adjudication: identical tree "
+     "differing only by the 3-line swap. WITH the swap: 6/6 x86 exitwalk boots "
+     "panic in the CFS timeline btree walk (navigate.rs:552 next_unchecked "
+     "unwrap; stack: pick_next_cpu -> Iter::next -> pick_next_task), and the "
+     "riscv64 orphan-storm churn panics on a torn-context wild epc immediately "
+     "after an R74-DOUBLE-SEED print (two harts executing one task). WITHOUT it "
+     "(revert arm 3/3 + all pre-swap kernels 4/4): every boot runs the full "
+     "churn clean on both arches. fdtable lever B (ac53dd6e), NJ deferred "
+     "writes (306d7cf6), the exec one-path (2fbb5a64), mkdir-flush deletion "
+     "(e3c1ec35) and the code-review round's fixes (b433fb13 family) are all "
+     "EXONERATED - they are in the clean pre-swap midpoints. The wrapper adds "
+     "no logic, so the mechanism is a codegen/timing shift unmasking a latent "
+     "GRQ-protocol race (OPEN hunt); the swap is withdrawn until understood."),
     ("4e1f6110", "kernel/src/syscall/misc.rs",
      "sys_timerfd_settime broke the reference contract (kernel/fs/timerfd.c) four ways: "
      "the old timer was cancelled BEFORE the itimerspec validation (the reference validates "
