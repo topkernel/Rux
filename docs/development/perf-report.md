@@ -3308,3 +3308,36 @@ fair.rs) = wakeup granularity, SCHED_LATENCY_NS window, sched_slice =
 max(period*weight/total, 0.7ms); the "no frequent queue churn"
 property = a task runs >= 0.7ms once picked and preemption decisions
 evaluate at tick/wakeup boundaries only.
+
+**Evidence pack for the fab0e029 revert (coordinator request — carry
+into the merge commit message; all paths relative to the perf-audit
+worktree):**
+
+| board | kernel (md5-12) | p6_unlink med | p6_mkdrmdir med | serial log |
+|---|---|---|---|---|
+| pa92j BEFORE (flush present) | e20eebb38eaf (leg-52 stack) | **89.534 us** | 16750 us | work/pbench-pa92j-serial.log |
+| pa93j AFTER (flush deleted, hiwat 2048) | e6a9b8861173 (e3c1ec35) | **10216.427 us** | 497.015 us | work/pbench-pa93j-serial.log |
+| pa95j (deleted, pre-index) | (leg-54 wip) | 10766.990 us | 501.681 us | work/pbench-pa95j-serial.log |
+| pa95b (deleted + pending index) | 0818732eb22b | 17294.277 us | 830.999 us | work/pbench-pa95b-serial.log |
+| pa95c (deleted, hiwat 256) | 880d54aa9e70 | 9184.348 us | 501.961 us | work/pbench-pa95c-serial.log |
+| pa95f (fsw=1 mechanism board) | 880d54aa9e70 | 9536.277 us | 830.395 us | work/pbench-pa95f-serial.log (FSW1: pc=1030 constraint flushes, pl=1004 lazy mkdirs) |
+
+Mechanism probe: FSW1 in pa95f shows pc=1030 publication-constraint
+flushes against pl=1004 lazy mkdirs — with records pending, each
+unlink's dir-block write is H2-constrained by the previous delete-side
+post record on the same dir block, forcing an entry+pre sync per
+unlink (hiwat 256 did not fix it: the bill is per-op, not
+queue-volume). Before row provenance: pa92j booted the leg-52 stack
+(e20eebb3) where every create drained its own record at mkdir-return,
+so the unlink phase faced an empty pending queue. The 114x median gap
+and the 47-49ms p99s are the deferred bill landing on the next
+out-of-band writer, serialized per op.
+
+Main-tip panic pointers (for the exec lane, already sent): pure-main
+strong run/pa97-main-tip-strong-bzImage (md5 130f4f9b6bb1, built from
+a detached d2a58ccb worktree — the worktree was removed after the
+build; rebuild per the ledger command if needed), work/
+pbench-pa97-serial.log (4 panics, t=6s after p1_null+p1_clock) and
+work/pbench-pa96b-serial.log (4 panics, t=9s, my branch post-merge).
+Signature: `Option::unwrap() on None` at
+library/alloc/src/collections/btree/navigate.rs:552.
