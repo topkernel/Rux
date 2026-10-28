@@ -523,6 +523,27 @@ hand-rolled guard protocol and must not grow new users.
 and SPIN-verified in the meantime; the sched/ side of any adoption
 rides the scheduling-domain perf gate (GRQ hold band, census, P2).
 
+**Incident, conviction and root cause (2026-10-29, the 2b092c49
+withdrawal).** The first GRQ adoption (`KeyedRawSpinlock<GrqKey>`
+field swap, 13-boot paired-bisection convicted, withdrawn in 623c4736)
+failed by an API-SHAPE bug, not by the keyed design and not by a GRQ
+protocol race: `GlobalRunQueue::lock_irqsave`'s pre-existing
+`self.lock.lock();` statement was written for `RawSpinlock::lock()`,
+which returns `()`. Under the wrapper, `KeyedRawSpinlock::lock()`
+returns a guard — the statement DISCARDED it, and the guard's Drop
+released the lock at the end of the statement. Every "GRQ-locked"
+section in the convicted kernel ran unexcluded: concurrent CFS
+timeline mutation (x86 6/6 navigate.rs unwrap panics) and concurrent
+picks of one task (riscv64 R74-DOUBLE-SEED double-run, torn context).
+The GRQ pick/ownership protocol itself is exonerated — the R74 shape
+was the expected downstream of a lock that never held. Fixes landed
+with this entry: both keyed guard types are `#[must_use]` (a
+discarded guard is a compile warning naming the conviction), and the
+claim surface (`lock_claim`/`try_lock_claim`/`unlock`) exists so a
+protocol-wrapping subsystem never touches the guard-returning `lock`.
+Any re-adoption of the GRQ swap goes through `lock_claim` and a fresh
+adjudication.
+
 ---
 
 ## D-10: Result-typed internal error APIs (§5 pilot)

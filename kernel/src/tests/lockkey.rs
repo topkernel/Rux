@@ -115,9 +115,20 @@ pub fn test_lockkey() {
     test_pass("nested INV-LOCK-6 forward");
 
     // The GRQ pattern's claim/unlock pair (guard-less claim; the
-    // subsystem's own guard wraps the irqsave/preempt protocol).
+    // subsystem's own guard wraps the irqsave/preempt protocol). The
+    // 2b092c49 conviction rule: protocol wrappers claim — they never
+    // call the guard-returning lock() as a statement (the guards are
+    // #[must_use]; a discard is a compile warning naming the incident).
     let grq2: KeyedRawSpinlock<GrqKey> = KeyedRawSpinlock::new();
     if grq2.try_lock_claim() {
+        grq2.unlock();
+        // The unconditional claim twin: claim, verify exclusion, free.
+        grq2.lock_claim();
+        if grq2.try_lock_claim() {
+            test_fail("claim/unlock pair", "claim was not exclusive");
+            grq2.unlock();
+            return;
+        }
         grq2.unlock();
         if grq2.try_lock_claim() {
             grq2.unlock();
