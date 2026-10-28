@@ -93,8 +93,11 @@ def build_image(img, args):
         argline = "%s %d" % (args.mode, args.mb)
     with open(os.path.join(staging, "test", "args"), "w") as f:
         f.write(argline + "\n")
+    # fake mode writes a cache-filling file of --mb MB inside the guest:
+    # size the image to hold it (default 128M as before).
+    img_mbs = "%dM" % (args.mb + 64) if args.mode == "fake" else "128M"
     r = subprocess.run([MKFS, "-q", "-F", "-O", "^metadata_csum,^flex_bg",
-                        "-d", staging, img, "128M"],
+                        "-d", staging, img, img_mbs],
                        capture_output=True, text=True)
     if r.returncode != 0:
         print("[img] mkfs failed: %s" % r.stderr)
