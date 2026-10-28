@@ -7336,3 +7336,27 @@ mitigations (begetutil NoWait @0x19ab8, hicollie detach-join
 @0x12fa0, appfwk ratio 9 @1223) — all reversible, originals in
 run/forensics-leg40B/; gate watcher state unchanged (leg40b chain);
 sc348 serial run/oh-sc348-serial.log.
+
+LEG-40C addendum (image v3->v4; sc348/sc349): the appfwk.para ratio
+param is INEFFECTIVE on this image — libabilityms.z.so has ZERO
+string hits for timeout_unit_time_ratio (a newer-master knob); the
+image's AMS reads /system/etc/ams_service_config.json instead
+(service_startup_config: ams_timeout_time=180,
+app_not_response_process_timeout_time=1000,
+timeout_unit_time=1000; also root_launcher_restart_max=15 — a
+respawn cap to watch). sc348 measured the real timeout: HALF at
+~53 s, full LIFECYCLE_TIMEOUT at ~86 s, death ~109 s after spawn
+(txn10429 exec-timer clock, 0.012 s/line local rate). Image v4
+(run/patch-ams-timeouts.sh, applied+verified, all same byte length):
+ams 180->999, anr 1000->9999, unit 1000->9999 — window >=8 min.
+sc348 verdict: ratio-9 patch inert (86 s kills continued, 7
+instances), killed for the v4 relaunch.
+sc349 (v4, IN FLIGHT): first launcher instance (pid 1198) ALIVE
+past every prior limit (>=15 min at log time); FFRT workers now
+parked idle; the main NEVER appears in any census (not
+INTERRUPTIBLE) — running or uninterruptible; steady pagefault-cow
+stream from its ranges (the ~100 MB Ark/lib footprint faults in
+page-by-page under host load). AbilityScheduler stub registered
+(+7114 lines after spawn — ability-runtime milestone). Screen still
+bootanimation class. Watching for OnForeground / launcher.ready /
+first pixels; boot window 3600 s.
