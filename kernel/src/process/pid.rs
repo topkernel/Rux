@@ -14,6 +14,10 @@
 //! RESERVED_PIDS when reaching PID_MAX_DEFAULT, matching Linux's
 //! cyclic PID reuse semantics.
 
+// Framekernel layer policy (docs/architecture/framekernel-layers.md):
+// this module must stay Safe Rust.
+#![forbid(unsafe_code)]
+
 use crate::sync::spinlock::Spinlock;
 use core::sync::atomic::{AtomicU32, Ordering};
 
