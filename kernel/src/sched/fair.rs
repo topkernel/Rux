@@ -604,6 +604,34 @@ impl CfsRunQueue {
         self.nr_running.load(Ordering::Acquire)
     }
 
+    /// Decrement the runnable count with a CHECKED subtract. A raw
+    /// `fetch_sub` on an unbalanced decrement WRAPS to u64::MAX, and the
+    /// next sched_slice() then panics on
+    /// `SCHED_MIN_GRANULARITY_NS * nr_running` (multiply overflow — the
+    /// x86 power-off teardown capture: both CPUs panicked in
+    /// scheduler_tick -> sched_slice right after init's reboot()). The
+    /// grq-level counter already uses this exact discipline
+    /// (sched.rs); a refused decrement leaves the value at 0 and
+    /// grq_diag_counts() names the drift.
+    fn nr_running_dec(&self) {
+        let _ = self.nr_running.fetch_update(
+            Ordering::SeqCst,
+            Ordering::SeqCst,
+            |v| v.checked_sub(1),
+        );
+    }
+
+    /// Same no-wrap discipline for the aggregated weight: a wrapped
+    /// load_weight reads as a huge total and collapses every task's
+    /// slice to the minimum granularity.
+    fn load_weight_sub(&self, weight: u64) {
+        let _ = self.load_weight.fetch_update(
+            Ordering::SeqCst,
+            Ordering::SeqCst,
+            |v| v.checked_sub(weight),
+        );
+    }
+
     /// Check if run queue is empty
     #[inline]
     pub fn is_empty(&self) -> bool {
@@ -787,8 +815,8 @@ impl CfsRunQueue {
                 se.set_on_rq(false);
 
                 // Update task count and total weight
-                self.nr_running.fetch_sub(1, Ordering::AcqRel);
-                self.load_weight.fetch_sub(se.load.weight, Ordering::AcqRel);
+                self.nr_running_dec();
+                self.load_weight_sub(se.load.weight);
 
                 // Update minimum vruntime
                 self.update_min_vruntime();
@@ -1027,7 +1055,7 @@ impl CfsRunQueue {
             // pointer must never reach the deref below.
             if !crate::sched::sched::kernel_task_ptr_range_ok(task as *const u8) {
                 self.tasks_timeline.remove(&key);
-                self.nr_running.fetch_sub(1, Ordering::AcqRel);
+                self.nr_running_dec();
                 crate::sched::sched::report_poisoned_rq_entry(usize::MAX, task as usize);
                 return None;
             }
@@ -1043,8 +1071,8 @@ impl CfsRunQueue {
                 se.set_on_rq(false);
 
                 // Update task count and total weight
-                self.nr_running.fetch_sub(1, Ordering::AcqRel);
-                self.load_weight.fetch_sub(se.load.weight, Ordering::AcqRel);
+                self.nr_running_dec();
+                self.load_weight_sub(se.load.weight);
 
                 // Update minimum vruntime
                 self.update_min_vruntime();
@@ -1117,7 +1145,7 @@ impl CfsRunQueue {
             // stale: reading it would deref the same garbage.
             if !crate::sched::sched::kernel_task_ptr_range_ok(task as *const u8) {
                 self.tasks_timeline.remove(&key);
-                self.nr_running.fetch_sub(1, Ordering::AcqRel);
+                self.nr_running_dec();
                 crate::sched::sched::report_poisoned_rq_entry(cpu_id, task as usize);
                 continue;
             }
@@ -1288,8 +1316,8 @@ impl CfsRunQueue {
                     let se = task_ref.sched_entity();
                     se.set_on_rq(false);
 
-                    self.nr_running.fetch_sub(1, Ordering::AcqRel);
-                    self.load_weight.fetch_sub(se.load.weight, Ordering::AcqRel);
+                    self.nr_running_dec();
+                    self.load_weight_sub(se.load.weight);
                     // min_vruntime is updated AFTER the skipped entries are
                     // re-inserted (see the comment at the re-insert loop).
                 }
@@ -1566,7 +1594,9 @@ impl CfsRunQueue {
         // If process count is high, use min_granularity * nr_running
         // Otherwise use fixed scheduling latency
         let sched_period = if nr_running > SCHED_LATENCY_NS / SCHED_MIN_GRANULARITY_NS {
-            SCHED_MIN_GRANULARITY_NS * nr_running
+            // Saturating: a garbage/huge count must not panic the tick —
+            // belt-and-braces for nr_running_dec (see its doc).
+            SCHED_MIN_GRANULARITY_NS.saturating_mul(nr_running)
         } else {
             SCHED_LATENCY_NS
         };

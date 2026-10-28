@@ -22,12 +22,12 @@ when the tree gains a file the map does not know about.
 | metric | value |
 |---|---|
 | source files in kernel/src | 415 |
-| source lines in kernel/src | 292,638 |
-| files fully reviewed | 34 |
+| source lines in kernel/src | 292,928 |
+| files fully reviewed | 35 |
 | files partially reviewed | 82 |
-| files not yet reviewed | 299 |
-| lines in fully reviewed files | 20,271 |
-| reviewed files mainline changed since `47d96961` (need re-read) | 71 |
+| files not yet reviewed | 298 |
+| lines in fully reviewed files | 20,483 |
+| reviewed files mainline changed since `47d96961` (need re-read) | 72 |
 
 ## Defects found and fixed
 
@@ -170,7 +170,7 @@ when the tree gains a file the map does not know about.
 | `page_fault.rs` | 1815 | ⬜ |  |
 | `pagetable.rs` | 195 | ⬜ |  |
 
-### kernel/src/dfx (36327 lines)
+### kernel/src/dfx (36542 lines)
 
 | file | lines | status | note |
 |---|---:|---|---|
@@ -181,7 +181,7 @@ when the tree gains a file the map does not know about.
 | `hexdump.rs` | 102 | 🔶 | hex dump helper |
 | `hung_task.rs` | 286 | 🔶 | D-state scan |
 | `ksyms.rs` | 131 | ✅ | written by this review (symbol table) |
-| `ksyms_generated.rs` | 23935 | ⬜ |  |
+| `ksyms_generated.rs` | 24150 | ⬜ |  |
 | `leakorigin.rs` | 257 | ⬜ |  |
 | `ledger.rs` | 491 | 🔶 | page census |
 | `memwatch.rs` | 1084 | 🔶🔁 | heap census; 主线已改动，需重读 |
@@ -366,13 +366,13 @@ when the tree gains a file the map does not know about.
 | `transaction.rs` | 571 | ⬜ |  |
 | `types.rs` | 290 | ⬜ |  |
 
-### kernel/src/fs/procfs (7777 lines)
+### kernel/src/fs/procfs (7772 lines)
 
 | file | lines | status | note |
 |---|---:|---|---|
 | `cmdline.rs` | 35 | ⬜ |  |
 | `configgz.rs` | 70 | ⬜ |  |
-| `cpuinfo.rs` | 152 | ⬜ |  |
+| `cpuinfo.rs` | 147 | 🔧🔁 | x86 块重复 processor 行已修（真实 x86 每 CPU 块仅块首一次）；kvtab_pad pins 自洽; 主线已改动，需重读 |
 | `diskstats.rs` | 127 | ✅🔁 | written by this review; 主线已改动，需重读 |
 | `interrupts.rs` | 168 | 🔶 | per-IRQ counters |
 | `kallsyms.rs` | 40 | ✅ | written by this review |
@@ -428,7 +428,7 @@ when the tree gains a file the map does not know about.
 | `sysv_shm.rs` | 1091 | 🔶🔁 | IPC_RMID, attach/detach; 主线已改动，需重读 |
 | `util.rs` | 459 | ✅🔁 | idr allocation, permission checks; 主线已改动，需重读 |
 
-### kernel/src/mm (16200 lines)
+### kernel/src/mm (16215 lines)
 
 | file | lines | status | note |
 |---|---:|---|---|
@@ -442,7 +442,7 @@ when the tree gains a file the map does not know about.
 | `lru.rs` | 545 | ⬜ |  |
 | `memblock.rs` | 660 | ⬜ |  |
 | `meminfo.rs` | 265 | ⬜ |  |
-| `mm_struct.rs` | 1231 | 🔶🔁 | total_vm/rss 记账、VMA 增删；记账只增不减已修（e32cdfef）; 主线已改动，需重读 |
+| `mm_struct.rs` | 1246 | 🔶🔁 | total_vm/rss 记账、VMA 增删；记账只增不减已修（e32cdfef）; 主线已改动，需重读 |
 | `mod.rs` | 249 | ⬜ |  |
 | `oom_kill.rs` | 582 | ⬜ |  |
 | `page.rs` | 149 | ⬜ |  |
@@ -523,17 +523,17 @@ when the tree gains a file the map does not know about.
 | `task.rs` | 5460 | 🔶🔁 | task layout, counters, comm; 主线已改动，需重读 |
 | `wait.rs` | 489 | ⬜ |  |
 
-### kernel/src/sched (11540 lines)
+### kernel/src/sched (11605 lines)
 
 | file | lines | status | note |
 |---|---:|---|---|
 | `cgroup.rs` | 910 | ✅🔁 | cpu/pids/memory controller core: simplified v2 model read clean — rmdir/pids-fork/charge-rollback semantics match the reference contract surface; containment guards (R90/b61) documented; 主线已改动，需重读 |
 | `class.rs` | 269 | ✅ | sched_class trait 层：类序 stop>dl>rt>fair>idle、SCHED_IDLE 归 fair(weight 3) 均与参考一致；WF_*/ENQUEUE_* 数值与 Linux 不同但纯内部量，非 ABI |
-| `deadline.rs` | 536 | ✅ | EDF/CBS 结构与实体：双入队守卫(R7-B4)/dequeue 返回契约(R32-DL2)/attr_deadline 读回契约正确；注意 get_bw 为死代码、无全局带宽准入(__dl_overflow)——留待 syscall/sched.rs 轮次 |
-| `fair.rs` | 1847 | 🔧🔁 | CFS 核心：vruntime 权重方向、min_vruntime、pick 跳过路径（min_vruntime 越界已修 b433fb13）；基线 188d844d 已重读 main 增量（dfx 埋点 SKIPHIST/普查计数/ww_tie_mass、inv_weight 预计算=参考 __update_inv_weight），无新缺陷; 主线已改动，需重读 |
+| `deadline.rs` | 547 | ✅ | EDF/CBS 结构与实体：双入队守卫(R7-B4)/dequeue 返回契约(R32-DL2)/attr_deadline 读回契约正确；注意 get_bw 为死代码、无全局带宽准入(__dl_overflow)——留待 syscall/sched.rs 轮次；dl 计数已改 checked-sub 防回绕 |
+| `fair.rs` | 1877 | 🔧🔁 | CFS 核心：vruntime 权重方向、min_vruntime、pick 跳过路径（min_vruntime 越界已修 b433fb13）；基线 188d844d 已重读 main 增量（dfx 埋点 SKIPHIST/普查计数/ww_tie_mass、inv_weight 预计算=参考 __update_inv_weight），无新缺陷；类计数 fetch_sub 回绕→sched_slice 乘法溢出 panic 已修（nr_running_dec/load_weight_sub checked-sub + saturating）; 主线已改动，需重读 |
 | `idle.rs` | 100 | ✅ |  |
 | `mod.rs` | 129 | ✅🔁 | 纯 re-export 层; 主线已改动，需重读 |
-| `rt.rs` | 639 | ✅ | 全文读完：位图反相(bit0=prio99)、head/tail 入队、P08 空转 dequeue、force_unlink 防御、RR timeslice=100ms 均与参考一致；RT 带宽控制在 sched.rs（全局 950ms×MAX_CPUS/1s，比参考的 per-root-domain 粗，pick 时跳过 RT 类） |
+| `rt.rs` | 663 | ✅ | 全文读完：位图反相(bit0=prio99)、head/tail 入队、P08 空转 dequeue、force_unlink 防御、RR timeslice=100ms 均与参考一致；RT 带宽控制在 sched.rs（全局 950ms×MAX_CPUS/1s，比参考的 per-root-domain 粗，pick 时跳过 RT 类）；rt/rr 计数已改 checked-sub 防回绕 |
 | `sched.rs` | 6397 | ✅🔁 | 188d844d 全文读完：GRQ 核心、pick 序 stop>dl>rt>cfs>idle、DL CBS 节流+replenish、RT 带宽、tick(slice 抢占=check_preempt_tick)、idle 循环 R20-2 复查、延迟 SIGCHLD、RLIMIT_CPU/itimer/cputime、task 槽分配/R47 毒化、R46-R85 heal 机器（均有捕获史注释）；无新缺陷。DL 无全局带宽准入(get_bw 死代码)——见 deadline.rs 注; 主线已改动，需重读 |
 | `stats.rs` | 41 | ✅🔁 | sched_schedstats 运行时门：默认关、Relaxed 读，与参考 sysctl 语义一致; 主线已改动，需重读 |
 | `stop_task.rs` | 94 | ✅ | stop 类为 PerCpuState 直管的 stub，next_class 链正确 |
