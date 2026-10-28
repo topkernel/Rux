@@ -1034,6 +1034,28 @@ fn ww_heartbeat(now_time: u64) {
 
     let sched = crate::sched::sched::ww_sched_snapshot();
 
+    // s16 (WW5, A2 census): pick-walk and heal deltas plus cumulative
+    // sub-gate strand counts — the counter-based adjudication of the
+    // msg-region strand family (see fair.rs WW_* counters). OWN pr_info:
+    // the WW..WW4 block above is already ~250 bytes and printk truncates
+    // at RECORD_TEXT_SIZE (256) — appending here silently cut the tail.
+    static LAST_WALKS: AtomicU64 = AtomicU64::new(0);
+    static LAST_OH: AtomicU64 = AtomicU64::new(0);
+    static LAST_CH: AtomicU64 = AtomicU64::new(0);
+    let walks_total = crate::sched::fair::ww_pick_walks();
+    let walks_d = walks_total.saturating_sub(LAST_WALKS.load(Ordering::Relaxed));
+    LAST_WALKS.store(walks_total, Ordering::Relaxed);
+    let (oh, ch) = crate::sched::fair::ww_heals();
+    let oh_d = oh.saturating_sub(LAST_OH.load(Ordering::Relaxed));
+    let ch_d = ch.saturating_sub(LAST_CH.load(Ordering::Relaxed));
+    LAST_OH.store(oh, Ordering::Relaxed);
+    LAST_CH.store(ch, Ordering::Relaxed);
+    let (s250, s500, s750) = crate::sched::wakewatch::ww_subgate_counts();
+    crate::pr_info!(
+        "WW5: walks={} oncpu_heal={} claim_heal={} s250={} s500={} s750={}",
+        walks_d, oh_d, ch_d, s250, s500, s750
+    );
+
     crate::pr_info!(
         "WW: fires={} late_max={}ms pidmiss={} rearm={} wheel={}/{} hres_next={}ms\nWW2: si_runs={} si_busy={}ms ticks=[{},{}] vec=[{},{},{},{},{},{},{},{},{},{}]\nWW3: grq={} cfs={} idle={:#x} nr={} cpu0=(pid={} st={:#x} pc={}) cpu1=(pid={} st={:#x} pc={})\nWW4: phase=[{},{}] slotmm=[{},{}]",
         fire_n,

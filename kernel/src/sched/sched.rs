@@ -1202,6 +1202,21 @@ pub fn ww_cfs_geometry(task: *mut Task) -> (u64, u64, u64) {
     }
 }
 
+/// s16 (A2 census): count of timeline entries keyed at or before the
+/// victim's vruntime — the tie-mass it stands behind (see
+/// CfsRunQueue::ww_tie_mass). Rate-gated strand print path only, GRQ
+/// held by the caller.
+pub fn ww_cfs_tie_mass(task: *mut Task) -> u64 {
+    // SAFETY: scalar sched-entity read of the task being picked (GRQ held).
+    let vr = unsafe { (*task).sched_entity().get_vruntime() };
+    ww_cfs_tie_mass_vr(vr)
+}
+
+/// s16 variant taking the vruntime directly (note_wake side).
+pub fn ww_cfs_tie_mass_vr(vr: u64) -> u64 {
+    grq().cfs_rq.ww_tie_mass(vr)
+}
+
 /// Wakewatch: diagnostic state of a possibly-stalled CPU for the
 /// TIMER-SOFTIRQ-STALL report — its current task's pid and preempt_count
 /// plus the RIP of its most recent trap frame. Values race live
