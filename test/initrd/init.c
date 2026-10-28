@@ -53,6 +53,26 @@ static unsigned long makedev_l(unsigned maj, unsigned min)
     return ((min & 0xffu) | ((maj & 0xfffu) << 8) | ((min & ~0xffu) << 12));
 }
 
+/* Freestanding shims: gcc 15 lowers local `{0}` array inits (b[8], st[160])
+ * to memset calls even at -O2/-nostdlib; without these the link fails.
+ * Behavior-neutral for the probe: only zero-fills stack scratch arrays. */
+void *memset(void *dst, int c, unsigned long n)
+{
+    unsigned char *p = dst;
+    while (n--)
+        *p++ = (unsigned char)c;
+    return dst;
+}
+
+void *memcpy(void *dst, const void *src, unsigned long n)
+{
+    unsigned char *d = dst;
+    const unsigned char *s = src;
+    while (n--)
+        *d++ = *s++;
+    return dst;
+}
+
 struct timespec { long tv_sec; long tv_nsec; };
 
 /* Force a writable PT_LOAD: the freestanding binary otherwise has a single
