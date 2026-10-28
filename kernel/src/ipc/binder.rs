@@ -3619,6 +3619,11 @@ pub fn txn_hang_audit() {
     // skipped for the rest of the boot so live wedges are not
     // starved by retry churn.
     if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::ThPark) {
+        crate::pr_warn!(
+            "TXN-HANG-PARK: hook alive hung={} nested={}",
+            hung.len(),
+            hung.iter().filter(|h| h.nested).count()
+        );
         #[allow(clippy::declare_interior_mutable_const)]
         const ZERO_TID: core::sync::atomic::AtomicU32 =
             core::sync::atomic::AtomicU32::new(0);
