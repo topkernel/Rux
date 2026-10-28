@@ -202,7 +202,7 @@ STATUS = {
     "kernel/src/sched/sched.rs": ("part", "pick/switch path, enqueue/dequeue, preemption checks"),
     "kernel/src/sched/stats.rs": ("todo", ""),
     "kernel/src/sched/stop_task.rs": ("todo", ""),
-    "kernel/src/sched/wakewatch.rs": ("todo", ""),
+    "kernel/src/sched/wakewatch.rs": ("done", "DFX wake-latency instrument: no contract surface; side-table validity/free-invalidation sound, sc207/sc215 softirq deadlock discipline in place"),
     "kernel/src/security/*": ("todo", ""),
     "kernel/src/sync/condvar.rs": ("todo", ""),
     "kernel/src/sync/futex.rs": ("part", "wait/wake/wake_op"),

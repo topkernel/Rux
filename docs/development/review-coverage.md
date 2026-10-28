@@ -23,11 +23,11 @@ when the tree gains a file the map does not know about.
 |---|---|
 | source files in kernel/src | 413 |
 | source lines in kernel/src | 291,838 |
-| files fully reviewed | 24 |
+| files fully reviewed | 25 |
 | files partially reviewed | 85 |
-| files not yet reviewed | 304 |
-| lines in fully reviewed files | 9,357 |
-| reviewed files mainline changed since `47d96961` (need re-read) | 66 |
+| files not yet reviewed | 303 |
+| lines in fully reviewed files | 9,935 |
+| reviewed files mainline changed since `47d96961` (need re-read) | 67 |
 
 ## Defects found and fixed
 
@@ -535,7 +535,7 @@ when the tree gains a file the map does not know about.
 | `sched.rs` | 6392 | 🔶🔁 | pick/switch path, enqueue/dequeue, preemption checks; 主线已改动，需重读 |
 | `stats.rs` | 41 | ⬜ |  |
 | `stop_task.rs` | 94 | ⬜ |  |
-| `wakewatch.rs` | 578 | ⬜ |  |
+| `wakewatch.rs` | 578 | ✅🔁 | DFX wake-latency instrument: no contract surface; side-table validity/free-invalidation sound, sc207/sc215 softirq deadlock discipline in place; 主线已改动，需重读 |
 
 ### kernel/src/security (559 lines)
 
