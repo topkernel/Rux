@@ -86,17 +86,60 @@ the user-stack parkdump extension is on their own next-leg list, not
 an ask to us. No sched/mm cooperation requested anywhere in
 CC-COLLAB.txt (last entry remains our leg-35A message).
 
-LEG STATUS AT CLOSE (09:05): merge done (fb27b8ff), functional gates
+A2 FLIP RELAYED BY THE COORDINATOR (mid-leg, stress s16 package in
+docs/development/stress-fleet.md s16) — ADDRESSED, KERNEL-SIDE
+ANALYSIS RECORDED:
+- The flip: the ~1s msg-region strand family is fair-queue service
+  latency under a 350-418-deep runnable queue (oncpu_heal=0 across
+  393 strands, smooth sub-gate decay, reference CFS same order),
+  not the 50-jiffy confirm-window heal. The "1000ms floor" everyone
+  cited was STRAND_THRESHOLD_MS — the print gate; sub-1s strands
+  were invisible before the s16 sub-gates.
+- Mechanical relation to the wake-placement reservation: in the
+  family's OWN regime the reservation is inert by construction. A
+  stamp requires find_idle_cpu SUCCESS at the wake (sched.rs ~3168
+  fork path and ~3870 wake path both take clear_placement when no
+  idle CPU exists — "this wake makes no placement promise"); under a
+  350-418-deep queue with both CPUs busy there is no idle CPU, so
+  no stamps, and the pick-side skip short-circuits on a zero hint
+  (one branch on a word the scan already loads). Expected census on
+  such a draw: onor/steal/exp all ~0. Neither shrink nor growth of
+  the strand family is possible through the skip; the wake-path
+  cost of the clear arm is what Tier-2 p2/p5 measures.
+- Where the lever DOES live: the idle-capacity regime — wakes that
+  find an idle CPU (the p5a/b/c flip class, wakes==picks). The
+  reservation IS the wakeup-placement lever for that regime, and it
+  cannot trade deep-queue latency for spread: a live reservation is
+  bounded by the hinted CPU's NEXT pick pass, and an IPI'd idle CPU
+  runs that pass immediately (microseconds), so the worst-case
+  added wait for a skipped candidate is one IPI-to-schedule
+  interval — noise against a 0.6-1.2s service-latency floor.
+- FOLLOW-UP, SEQUENCED AFTER THE TIER VERDICTS (the coordinator's
+  conditional): deep-queue confirmator on a stress-lane-class
+  workload (the WW5 census region / sweepRES~702 shape) booted on
+  THIS branch's kernel, reading (a) the WW hint counters — expect
+  ~0 stamp activity, proving the inertness claim live, and (b) the
+  s16 sub-gate strand census vs the main-class control — expect
+  unchanged. Sequencing reason: any QEMU of mine now keeps the
+  total count >= 2 and blocks the calm-window watcher (it counts
+  all QEMUs), and the tier verdicts are the merge-blocking item.
+  If (b) surprises (strands move), that is a real finding for the
+  A2 family: it would mean the family's regime touches idle
+  capacity more than the s16 correlation showed.
+
+LEG STATUS AT CLOSE (09:1x): merge done (fb27b8ff), functional gates
 green, tier verdicts PENDING the calm window — watcher carries them
-(8 h deadline). SUCCESSOR FLOW: (a) if run/perf-gate-leg37a.log
-exists, consume the verdict per the rule above (ready-for-merge vs
-D-1 fallback), add the D-1 consequence note with the steal counts,
-commit, done; (b) if the watcher gave up, re-arm it unchanged; (c)
-do not run the gate outside the calm conditions — the volume row and
-the p5 medians are only comparable in-window. Branch queue for the
-merge reviewer (origin/main..HEAD): 44ba45e2, 52535c72, f798ccd6,
-ab4ca01c, 88c8d1e4, c5db92de, 9d6b006b, d6124bbc, ccfc708e, 2beb2ded,
-6e6970c3, fb27b8ff (main merge — binder spawnfix hunks resolve to
-main's landed form, TXN-POOL rides along), e9dec3e8, ef9d21b3. The
-wake-placement hunks are d6124bbc/ccfc708e/2beb2ded; their merge
+(8 h deadline from 09:04). SUCCESSOR FLOW: (a) if
+run/perf-gate-leg37a.log exists, consume the verdict per the rule
+above (ready-for-merge vs D-1 fallback), add the D-1 consequence
+note with the steal counts, commit, done; (b) if the watcher gave
+up, re-arm it unchanged; (c) do not run the gate outside the calm
+conditions — the volume row and the p5 medians are only comparable
+in-window; (d) after the verdict, the A2 deep-queue confirmator
+above is the named follow-up. Branch queue for the merge reviewer
+(origin/main..HEAD): 44ba45e2, 52535c72, f798ccd6, ab4ca01c,
+88c8d1e4, c5db92de, 9d6b006b, d6124bbc, ccfc708e, 2beb2ded, 6e6970c3,
+fb27b8ff (main merge — binder spawnfix hunks resolve to main's landed
+form, TXN-POOL rides along), e9dec3e8, ef9d21b3 + the note commits.
+The wake-placement hunks are d6124bbc/ccfc708e/2beb2ded; their merge
 gate is exactly the tier set this watcher owes.
