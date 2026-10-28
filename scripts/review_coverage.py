@@ -459,6 +459,15 @@ STATUS = {
 
 # Bugs found and fixed by this review line.
 BUGS = [
+    ("92377595", "kernel/src/arch/riscv64/mm/page_fault.rs",
+     "R-SC-RV64: the riscv64 file-fault path re-derived (vma_start, file, effective_size) in FOUR "
+     "separately locked lookups (SIGBUS gate, shared-alias resolution, private cache pin, fill arm); "
+     "the shared-alias site took TWO back-to-back vma_read() acquisitions (file from one, vma_start "
+     "from the other). A CLONE_VM sibling mutating the VMA tree between the lookups could pair one "
+     "file with another VMA's start: wrong-offset fill, or a page-cache pin taken under ANOTHER "
+     "file's (fs_id, ino, index) key. Fixed with a single entry-time snapshot (x86_64 twin parity) "
+     "plus the devfs live-size consult (b74) the twin has had since its session-14; 3 VMA finds and "
+     "up to 4 pin-table lookups per file fault become 1 each."),
     ("6c56c0b6", "kernel/src/syscall/process.rs",
      "The shebang optional argument was truncated at the next whitespace after the "
      "first word; the reference kernel (binfmt_script) passes the WHOLE rest of the "
