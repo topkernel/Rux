@@ -3424,53 +3424,6 @@ pub fn txn_hang_audit() {
                 h.id, bl, owner, depth, waiters, queued, held_ms, fr, fseg, fblk, bs, bsus
             );
         }
-        // leg-40B family A: user-stack park dump of the hung server
-        // thread (dfx=thpark — deliberately its own switch, NOT
-        // ParkDump, which also arms the freeze-scan full-tgid dumps
-        // that dodge boot timing, sc186-188). Names the image-side
-        // handler call chain above the parked syscall — the input the
-        // oh-img-p mitigation needs for the mutual-ABBA pair. Once per
-        // tid per boot (wedge stacks are frozen), max 2 per burst and
-        // 16 per boot: UART volume stays tightly latched.
-        if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::ThPark)
-            && burst_dumps < 2
-        {
-            // Once-per-tid latch: 0 = free slot.
-            #[allow(clippy::declare_interior_mutable_const)]
-            const ZERO_TID: core::sync::atomic::AtomicU32 =
-                core::sync::atomic::AtomicU32::new(0);
-            static DUMPED_TIDS: [core::sync::atomic::AtomicU32; 64] = [ZERO_TID; 64];
-            static DUMP_N: core::sync::atomic::AtomicU32 =
-                core::sync::atomic::AtomicU32::new(0);
-            use core::sync::atomic::Ordering::Relaxed as Rel;
-            if DUMP_N.load(Rel) < 16 {
-                let seen = DUMPED_TIDS
-                    .iter()
-                    .any(|d| d.load(Rel) == h.stid);
-                if !seen {
-                    for d in DUMPED_TIDS.iter() {
-                        if d
-                            .compare_exchange(0, h.stid, Rel, Rel)
-                            .is_ok()
-                        {
-                            break;
-                        }
-                    }
-                    DUMP_N.fetch_add(1, Rel);
-                    burst_dumps += 1;
-                    // SAFETY: read-only diagnostic walk of the parked
-                    // thread's user pages, outside WORLD
-                    // (user_park_stack_dump_stid contract).
-                    unsafe {
-                        user_park_stack_dump_stid(
-                            h.stid,
-                            "TXN-HANG-PARK:",
-                            48,
-                        )
-                    };
-                }
-            }
-        }
         // Leg-28 item 2 + leg-29A: name the FILE when the hung server
         // thread is stuck in a file syscall family — the pathstash
         // entry was written by this tid's own entry path (open family:
@@ -3646,6 +3599,79 @@ pub fn txn_hang_audit() {
                     );
                     if !extra.is_empty() {
                         let _ = writeln!(w, "TXN-HANG-STK2 txn{}{}", h.id, extra);
+                    }
+                }
+            }
+        }
+    }
+    // leg-40B family A: user-stack park dump of hung server threads
+    // (dfx=thpark — deliberately its own switch, NOT ParkDump, which
+    // also arms the freeze-scan full-tgid dumps that dodge boot
+    // timing, sc186-188). Names the image-side handler call chain
+    // above the parked syscall — the input the oh-img-p mitigation
+    // needs for the mutual-ABBA pair. Candidates are ordered
+    // nested-outstanding first (the ABBA side), then the
+    // reply-deferred class. Once per tid per boot (wedge stacks are
+    // frozen), max 2 per burst and 16 per boot. sc338B lesson: a
+    // latch slot is claimed ONLY when the dump actually printed —
+    // dead/exited tids return false and must not silently consume
+    // the budget; a tid that fails to print once is recorded and
+    // skipped for the rest of the boot so live wedges are not
+    // starved by retry churn.
+    if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::ThPark) {
+        #[allow(clippy::declare_interior_mutable_const)]
+        const ZERO_TID: core::sync::atomic::AtomicU32 =
+            core::sync::atomic::AtomicU32::new(0);
+        static DUMPED_TIDS: [core::sync::atomic::AtomicU32; 64] = [ZERO_TID; 64];
+        static FAIL_TIDS: [core::sync::atomic::AtomicU32; 64] = [ZERO_TID; 64];
+        static DUMP_N: core::sync::atomic::AtomicU32 =
+            core::sync::atomic::AtomicU32::new(0);
+        use core::sync::atomic::Ordering::Relaxed as Rel;
+        let mut cands: alloc::vec::Vec<u32> = alloc::vec::Vec::new();
+        for h in hung.iter().filter(|h| h.nested) {
+            if !cands.contains(&h.stid) {
+                cands.push(h.stid);
+            }
+        }
+        for h in hung.iter().filter(|h| !h.nested) {
+            if !cands.contains(&h.stid) {
+                cands.push(h.stid);
+            }
+        }
+        for tid in cands {
+            if burst_dumps >= 2 || DUMP_N.load(Rel) >= 16 {
+                break;
+            }
+            if DUMPED_TIDS.iter().any(|d| d.load(Rel) == tid) {
+                continue;
+            }
+            if FAIL_TIDS.iter().any(|d| d.load(Rel) == tid) {
+                continue; // two silent attempts already burned
+            }
+            // SAFETY: read-only diagnostic walk of the parked
+            // thread's user pages, outside WORLD
+            // (user_park_stack_dump_stid contract).
+            let printed = unsafe {
+                user_park_stack_dump_stid(tid, "TXN-HANG-PARK:", 48)
+            };
+            if printed {
+                for d in DUMPED_TIDS.iter() {
+                    if d.compare_exchange(0, tid, Rel, Rel).is_ok() {
+                        break;
+                    }
+                }
+                DUMP_N.fetch_add(1, Rel);
+                burst_dumps += 1;
+            } else {
+                // Silent (task gone / stack freed): record the tid so
+                // it is not retried every burst; it cannot become
+                // printable later within a boot's audit window.
+                for d in FAIL_TIDS.iter() {
+                    if d.load(Rel) == tid {
+                        break;
+                    }
+                    if d.compare_exchange(0, tid, Rel, Rel).is_ok() {
+                        break;
                     }
                 }
             }
@@ -4070,7 +4096,7 @@ fn hist_line_of(tid: u32, ring: &[(u8, u32, u32, u32); BHIST]) -> alloc::string:
 /// IRQ-off window (sc82, khungtaskd death).
 unsafe fn user_park_stack_dump(t: &Arc<BinderThread>) {
     // SAFETY: tid-only core, same contract (leg-40B).
-    unsafe { user_park_stack_dump_stid(t.tid, "binder-stall:  ", 16) }
+    let _ = unsafe { user_park_stack_dump_stid(t.tid, "binder-stall:  ", 16) };
 }
 
 /// leg-40B (family A): tid-taking core of the sc77 park dump so the
@@ -4083,13 +4109,19 @@ unsafe fn user_park_stack_dump(t: &Arc<BinderThread>) {
 /// apart from binder-stall dumps.
 /// SAFETY: same contract as user_park_stack_dump — read-only walk of
 /// the target task's own page tables; run OUTSIDE the WORLD guard.
-unsafe fn user_park_stack_dump_stid(tid: u32, tag: &str, words: u64) {
+/// Returns true iff the PARK-STACK header was actually printed (the
+/// task was found with a live address space and kernel stack) — the
+/// leg-40B audit latch claims a slot only on a real print, so dead /
+/// freed tids cannot silently consume the dump budget (sc338B: the
+/// 16-slot latch filled with silent early-returns and the live wedge
+/// tids never got dumped).
+unsafe fn user_park_stack_dump_stid(tid: u32, tag: &str, words: u64) -> bool {
     let task = crate::sched::find_task_by_pid(tid);
     if task.is_null() {
-        return;
+        return false;
     }
     let tk = &*task;
-    let Some(aspace) = tk.address_space() else { return };
+    let Some(aspace) = tk.address_space() else { return false };
     let root = aspace.root_ppn();
     let read_u64_at = |va: u64| -> Option<u64> {
         // SAFETY: read-only diagnostic walk of the holder's tables.
@@ -4107,7 +4139,7 @@ unsafe fn user_park_stack_dump_stid(tid: u32, tag: &str, words: u64) {
     // Stack-freed guard (KILLDUMP census race class): the holder may
     // have exited and freed its stack — skip, never fault.
     let Some(top) = tk.kernel_stack_top_checked() else {
-        return;
+        return false;
     };
     #[cfg(feature = "x86_64")]
     let (rsp, rip) = if top == 0 {
@@ -4163,6 +4195,7 @@ unsafe fn user_park_stack_dump_stid(tid: u32, tag: &str, words: u64) {
             );
         }
     }
+    true
 }
 
 /// Wait-queue census + task state for a stalled reader — the live-wake
