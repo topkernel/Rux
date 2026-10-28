@@ -1,0 +1,76 @@
+== kswapd-leg A/B (13a8cc03) adjudication — stress-fleet, 2026-10-28 17:1x ==
+
+VERDICT: REFUTED — both prediction arms. The oom01 early kills are
+UNCHANGED on the kswapd-leg kernel; the kills fire from the PAGEFAULT
+OOM path with the IN_DIRECT_RECLAIM gate stuck at 1, so BOTH deep-drain
+legs (39a515a5 page_alloc slowpath AND 13a8cc03 kswapd escalation) are
+unreachable. Adjacent suspect CONFIRMED as the blocking mechanism:
+the leaked IN_DIRECT_RECLAIM gate (no exit-path cleanup; perf lane
+ledger 8.10.21 suspicion, now with fleet evidence).
+
+== Kernel provenance (r24+ ARE on 13a8cc03) ==
+- s19 built in /home/william/rux-agents/sf2-kswapdfix (detached HEAD at
+  13a8cc03, tree clean except untracked generated kernel/src/config.rs;
+  kernel/ delta vs 2a960538 is kswapd.rs +74 only).
+- build mtime 14:02:39, md5 687db75ce905823b07f4bf88cb97adf0,
+  size 66,737,184 — identical md5 to
+  run/fleet/images/fleet-rv64-instr-rux (born 14:05:39; s19's roll).
+- ltp-b driver env: KIMG=images/fleet-rv64-instr-rux, START=660,
+  DFX=watchdog,taskdump,leakhunt,wwcensus,schedtrace.
+- r24 started 14:22:49 = FIRST round on 13a8cc03. r24-r30 all on it.
+- Control arm r19-r23: pre-14:05 instr content = 2a960538-class build
+  (s18 roll). Control image fleet-rv64-rux md5 96f67cbd = 2a960538.
+
+== A/B result (driver classification lines) ==
+Control  r19-r23 (2a960538): OOM=8,8,8,8,8 ... (8,8,8,5,8 by log)
+Treatment r24-r29 (13a8cc03): OOM=5,8,5,5,8,5 — same class, every round.
+Both arms: rc=124 wedge=yes beats=0 sweepRES=702 sweepWEDGE=0
+OOPS=1 ALLOCTHROW=3. NO behavioral change on the leg kernel.
+OOM-DEEP-PASS lines: ZERO in every treatment round (r24-r30 live check
+included). The kswapd leg never fired once in 7 fleet rounds.
+
+== Kill-site identification (treatment forensics) ==
+Every forensic block tagged "@ pagefault OOM" (one "@ alloc_pages
+failed with free_cnt>0"), i.e. fault_oom_kill_or_retry ->
+out_of_memory (kernel/src/mm/oom_kill.rs:429), NOT kswapd's 16-pass
+escalation. kswapd appears in serials only in the boot banner.
+- in_direct_reclaim=1 at EVERY forensic block, including each boot's
+  FIRST dump (#1 blocks in r24/r26/r27/r29/r30) — gate already stuck
+  before the first observed kill.
+- File cache at kill time (treatment): r28 lru[2]=41248 lru[3]=2813
+  (172 MB), r29 lru[2]=28371 lru[3]=15492 (171 MB) — same
+  one-referenced-wall-away shape as control OOM-FORENSIC #33
+  (36048+7933). NOT walked-empty: prediction (b) condition fails.
+
+== Mechanism (code + evidence) ==
+kernel/src/mm/page_alloc.rs: the entire direct-reclaim block — 8x
+try_to_free_pages AND the 39a515a5 deep final-round drain (line 159) —
+sits behind the IN_DIRECT_RECLAIM CAS (line 110). Gate-wait loop is
+bounded at 64 attempts; a holder that never releases makes every
+!GFP_ATOMIC alloc skip ALL reclaim -> return 0 -> pagefault OOM kill.
+Any gate holder that COMPLETED the block would print OOM-DEEP-PASS
+(drain prints unconditionally per invocation, vmscan.rs:196); zero
+prints across all rounds = no holder ever completes. Gate clears exist
+only at page_alloc.rs:129/164/168 (block exit paths); grep of the whole
+kernel/src finds NO exit/do_exit cleanup — a task killed while holding
+the gate leaks it permanently. This also explains wedge-after-kill:
+post-kill, remaining tasks still cannot reclaim (gate stuck), the
+oom01 sweep region never completes (sweepRES=702 beats=0 every round,
+both arms).
+
+== Notes for the mm/perf owner ==
+1. 13a8cc03 is inert on this surface but NOT harmful: round class
+   identical to control on all 7 rounds. Merge decision unchanged by
+   fleet data (its own gates already passed); it just does not close
+   the s18 fake-OOM.
+2. The blocking fix candidate is gate liveness: owner tracking (holder
+   tid + print in forensic) and exit-path clear, or skip-gate fallback
+   to reclaim when the gate looks stuck. Current instruments cannot
+   identify the stuck holder (taskdump shows no attribution) — the
+   holder identity (dead task vs blocked-in-reclaim live task) is the
+   one open diagnostic question. ltp-b stays pinned on 13a8cc03
+   (KIMG=instr) and keeps producing rounds for any follow-up probe.
+
+Evidence pointers: keep-ltp-b-r{24..29}-serial-tail.log,
+ltp-b-r30-serial.log (live), ltp-b-rounds.log, s18 control baseline in
+run/fleet/evidence/2026-10-28-s18-main538-roll/.
