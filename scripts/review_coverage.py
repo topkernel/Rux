@@ -192,17 +192,17 @@ STATUS = {
     "kernel/src/process/ptrace.rs": ("todo", ""),
     "kernel/src/process/task.rs": ("part", "task layout, counters, comm"),
     "kernel/src/process/wait.rs": ("todo", ""),
-    "kernel/src/sched/cgroup.rs": ("todo", ""),
-    "kernel/src/sched/class.rs": ("todo", ""),
-    "kernel/src/sched/deadline.rs": ("todo", ""),
-    "kernel/src/sched/fair.rs": ("fixed", "CFS 核心：vruntime 权重方向、min_vruntime、pick 跳过路径（min_vruntime 越界已修 b433fb13）"),
+    "kernel/src/sched/cgroup.rs": ("done", "cpu/pids/memory controller core: simplified v2 model read clean — rmdir/pids-fork/charge-rollback semantics match the reference contract surface; containment guards (R90/b61) documented"),
+    "kernel/src/sched/class.rs": ("done", "sched_class trait 层：类序 stop>dl>rt>fair>idle、SCHED_IDLE 归 fair(weight 3) 均与参考一致；WF_*/ENQUEUE_* 数值与 Linux 不同但纯内部量，非 ABI"),
+    "kernel/src/sched/deadline.rs": ("done", "EDF/CBS 结构与实体：双入队守卫(R7-B4)/dequeue 返回契约(R32-DL2)/attr_deadline 读回契约正确；注意 get_bw 为死代码、无全局带宽准入(__dl_overflow)——留待 syscall/sched.rs 轮次"),
+    "kernel/src/sched/fair.rs": ("fixed", "CFS 核心：vruntime 权重方向、min_vruntime、pick 跳过路径（min_vruntime 越界已修 b433fb13）；基线 188d844d 已重读 main 增量（dfx 埋点 SKIPHIST/普查计数/ww_tie_mass、inv_weight 预计算=参考 __update_inv_weight），无新缺陷"),
     "kernel/src/sched/idle.rs": ("done", ""),
-    "kernel/src/sched/mod.rs": ("todo", ""),
-    "kernel/src/sched/rt.rs": ("part", "enqueue/dequeue/pick/bitmap/priority inversion"),
-    "kernel/src/sched/sched.rs": ("part", "pick/switch path, enqueue/dequeue, preemption checks"),
-    "kernel/src/sched/stats.rs": ("todo", ""),
-    "kernel/src/sched/stop_task.rs": ("todo", ""),
-    "kernel/src/sched/wakewatch.rs": ("todo", ""),
+    "kernel/src/sched/mod.rs": ("done", "纯 re-export 层"),
+    "kernel/src/sched/rt.rs": ("done", "全文读完：位图反相(bit0=prio99)、head/tail 入队、P08 空转 dequeue、force_unlink 防御、RR timeslice=100ms 均与参考一致；RT 带宽控制在 sched.rs（全局 950ms×MAX_CPUS/1s，比参考的 per-root-domain 粗，pick 时跳过 RT 类）"),
+    "kernel/src/sched/sched.rs": ("done", "188d844d 全文读完：GRQ 核心、pick 序 stop>dl>rt>cfs>idle、DL CBS 节流+replenish、RT 带宽、tick(slice 抢占=check_preempt_tick)、idle 循环 R20-2 复查、延迟 SIGCHLD、RLIMIT_CPU/itimer/cputime、task 槽分配/R47 毒化、R46-R85 heal 机器（均有捕获史注释）；无新缺陷。DL 无全局带宽准入(get_bw 死代码)——见 deadline.rs 注"),
+    "kernel/src/sched/stats.rs": ("done", "sched_schedstats 运行时门：默认关、Relaxed 读，与参考 sysctl 语义一致"),
+    "kernel/src/sched/stop_task.rs": ("done", "stop 类为 PerCpuState 直管的 stub，next_class 链正确"),
+    "kernel/src/sched/wakewatch.rs": ("done", "DFX wake-latency instrument: no contract surface; side-table validity/free-invalidation sound, sc207/sc215 softirq deadlock discipline in place"),
     "kernel/src/security/*": ("todo", ""),
     "kernel/src/sync/condvar.rs": ("todo", ""),
     "kernel/src/sync/futex.rs": ("part", "wait/wake/wake_op"),
@@ -215,7 +215,7 @@ STATUS = {
     "kernel/src/syscall/file.rs": ("part", "futex2 wrappers, fsync"),
     "kernel/src/syscall/io.rs": ("part", "read/write/pread64 的分块与用户指针校验"),
     "kernel/src/syscall/memory.rs": ("part", "mmap/munmap/mprotect/mremap/brk；msync 回绕已修（ff6fc39b）、mmap 偏移未页对齐已修（b433fb13）、brk 记账已修（e32cdfef）"),
-    "kernel/src/syscall/misc.rs": ("todo", ""),
+    "kernel/src/syscall/misc.rs": ("part", "timerfd 族已对齐 v6.6（sys_timerfd_settime 契约已修 4e1f6110）；epoll/poll/eventfd/signalfd 未读"),
     "kernel/src/syscall/mod.rs": ("todo", ""),
     "kernel/src/syscall/network.rs": ("todo", ""),
     "kernel/src/syscall/process.rs": ("part", "exec ladder + credentials + shebang + EXECCOST instrument (abi-review s1); reboot cascade, clone/wait/ptrace ladders still pending"),
@@ -507,6 +507,16 @@ BUGS = [
      "but Rux read the value as RELATIVE — a caller passing an absolute deadline waited "
      "twice as long, and an already-expired deadline blocked for the full timeout instead "
      "of returning ETIMEDOUT at once."),
+    ("4e1f6110", "kernel/src/syscall/misc.rs",
+     "sys_timerfd_settime broke the reference contract (kernel/fs/timerfd.c) four ways: "
+     "the old timer was cancelled BEFORE the itimerspec validation (the reference validates "
+     "itimerspec64_valid() first, so an EINVAL call must leave the running timer armed — Rux "
+     "silently disarmed it); old_value was copied out BEFORE the reprogramming (the reference "
+     "reads the new value first, reprograms, then copies the old snapshot out — a faulting "
+     "copy is EFAULT with the NEW timer already programmed); a disarm (it_value == 0) "
+     "returned early keeping the OLD interval and the stale expiration count (timerfd_setup() "
+     "sets ctx->tintv and ctx->ticks = 0 in both the arming and disarming paths); and the "
+     "arming call ran even for total_nsec == 0, arming a dead timer slot."),
 ]
 
 MARKS = {"done": "✅", "fixed": "🔧", "part": "🔶", "todo": "⬜"}
