@@ -1502,6 +1502,35 @@ fn set_realtime_from_secs_nanos(tv_sec: i64, tv_nsec: i64) -> i64 {
     0
 }
 
+/// sys_time - time(2) (x86_64 NR 201; internal dispatch slot 1180 — the
+/// asm-generic ABI has no time(2), riscv64 glibc derives it from
+/// clock_gettime, but x86_64 glibc calls SYS_time directly when no vDSO
+/// is provided, and a static glibc binary gets -1 forever without this:
+/// ohlite's second-stage init computed "uptime = time() - time()" = 0
+/// and never reached its 60s BOOT GATE).
+///
+/// Linux semantics: returns the seconds since the Epoch as the return
+/// value; if `tloc` is non-NULL it also stores the same value there
+/// (EFAULT if that store faults).
+pub fn sys_time(args: SyscallArgs) -> i64 {
+    let (secs, _ns) = realtime_secs_nanos();
+    let tloc = args[0] as *mut i64;
+    if !tloc.is_null() {
+        if !crate::arch::uaccess::access_ok(tloc as usize, 8) {
+            return -(errno::EFAULT as i64);
+        }
+        // SAFETY: tloc access_ok'd above; put_user is the exception-table
+        // copy path — a faulting store surfaces as EFAULT, not a kernel
+        // fault.
+        unsafe {
+            if !crate::arch::uaccess::put_user(tloc, secs) {
+                return -(errno::EFAULT as i64);
+            }
+        }
+    }
+    secs
+}
+
 /// sys_settimeofday - Set wall-clock time (NR 170)
 pub fn sys_settimeofday(args: SyscallArgs) -> i64 {
     let tv_ptr = args[0] as *const u8;

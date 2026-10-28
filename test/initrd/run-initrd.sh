@@ -17,7 +17,7 @@ set -u
 
 SCRIPT_DIR="$(cd "$(dirname "$BASH_SOURCE")" && pwd)"
 PROJECT_ROOT="$(dirname "$(dirname "$SCRIPT_DIR")")"
-KERNEL="$PROJECT_ROOT/target/riscv64gc-unknown-none-elf/debug/rux"
+KERNEL="${KERNEL:-$PROJECT_ROOT/target/riscv64gc-unknown-none-elf/debug/rux}"
 INITRD="${1:-$SCRIPT_DIR/initrd.cpio.gz}"
 LOG="$SCRIPT_DIR/initrd-boot.log"
 DURATION="${2:-60}"

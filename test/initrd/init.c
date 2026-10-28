@@ -327,6 +327,74 @@ void _start(void)
     sys3(SYS_exit, 0, 0, 0);
     __builtin_unreachable();
 }
+#elif defined(MSMOVE)
+/* OH/switch_root relative-source MS_MOVE probe: mirrors busybox/OH
+ * init's exact dance (mount /proc, fresh root, move mounts under it,
+ * chdir, mount(".", "/", MS_MOVE), chroot("."), chdir("/"), verify).
+ * The relative-source move is the fix guard: before it, the raw "."
+ * ENOENTed in the vfs walk. Markers start with "MSMOVE:". */
+void _start(void)
+{
+    __asm__ volatile(
+        ".option push\n"
+        ".option norelax\n"
+        "la gp, __global_pointer$\n"
+        ".option pop\n"
+        :
+        :
+        : "gp");
+
+#define SYS_mkdirat 34
+#define SYS_chdir   49
+#define SYS_chroot  51
+#define SYS_openat  56
+#define O_WRONLY    01
+#define O_CREAT     0100
+#define MS_NOSUID   2
+#define MS_NODEV    4
+#define MS_MOVE_    8192
+
+    puts_("MSMOVE: start\n");
+    long r = sys5(SYS_mount, (long)"proc", (long)"/proc", (long)"proc",
+                  MS_NOSUID | MS_NODEV, 0);
+    puts_(r == 0 ? "MSMOVE: proc mounted\n" : "MSMOVE: proc mount skipped\n");
+
+    r = sys3(SYS_mkdirat, AT_FDCWD, (long)"/newroot", 0755);
+    if (r != 0) { puts_("MSMOVE: FAIL mkdir /newroot\n"); sys3(SYS_exit, 1, 0, 0); }
+    r = sys5(SYS_mount, (long)"none", (long)"/newroot", (long)"tmpfs", 0, 0);
+    if (r != 0) { puts_("MSMOVE: FAIL tmpfs /newroot\n"); sys3(SYS_exit, 1, 0, 0); }
+
+    /* Absolute-source move first (regression guard for the old path). */
+    sys3(SYS_mkdirat, AT_FDCWD, (long)"/newroot/proc", 0755);
+    r = sys5(SYS_mount, (long)"/proc", (long)"/newroot/proc", 0, MS_MOVE_, 0);
+    puts_(r == 0 ? "MSMOVE: abs move /proc -> /newroot/proc ok\n"
+                 : "MSMOVE: abs move /proc FAILED (tolerated)\n");
+
+    r = sys3(SYS_chdir, (long)"/newroot", 0, 0);
+    if (r != 0) { puts_("MSMOVE: FAIL chdir /newroot\n"); sys3(SYS_exit, 1, 0, 0); }
+    r = sys5(SYS_mount, (long)".", (long)"/", 0, MS_MOVE_, 0);
+    if (r != 0) { puts_("MSMOVE: FAIL mount(\".\", \"/\", MS_MOVE)\n"); sys3(SYS_exit, 1, 0, 0); }
+    puts_("MSMOVE: relative move . -> / ok\n");
+
+    r = sys3(SYS_chroot, (long)".", 0, 0);
+    if (r != 0) { puts_("MSMOVE: FAIL chroot\n"); sys3(SYS_exit, 1, 0, 0); }
+    sys3(SYS_chdir, (long)"/", 0, 0);
+
+    long fd = sys4(SYS_openat, AT_FDCWD, (long)"/msmove-marker",
+                   O_WRONLY | O_CREAT, 0644);
+    if (fd < 0) { puts_("MSMOVE: FAIL create /msmove-marker\n"); sys3(SYS_exit, 1, 0, 0); }
+    sys3(SYS_write, fd, (long)"ok", 2);
+    sys3(SYS_close, fd, 0, 0);
+    puts_("MSMOVE: PASS marker created in the moved root\n");
+
+    int beat = 0;
+    struct timespec ts = { 2, 0 };
+    while (1) {
+        sys4(SYS_clock_nanosleep, 1, 0, (long)&ts, 0);
+        beat++;
+        puts_(beat % 5 == 0 ? "MSMOVE: still alive (10s)\n" : "MSMOVE: beat\n");
+    }
+}
 #else
 void _start(void)
 {
