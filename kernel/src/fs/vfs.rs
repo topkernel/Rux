@@ -3499,7 +3499,8 @@ pub fn vfs_truncate(pathname: &str, new_size: i64) -> Result<(), i32> {
 
     // File leases: truncation conflicts with BOTH read and write leases
     // (Linux break_lease on ATTR_SIZE).
-    crate::fs::locks::break_lease(inode, true)?;
+    crate::fs::locks::break_lease(inode, true)
+        .map_err(|e| e.as_neg_i32())?;
 
     let result = inode.op_setattr(setattr_attr::ATTR_SIZE, new_size as u64, 0);
     if result == 0 {
@@ -3572,7 +3573,8 @@ pub fn vfs_ftruncate(fd: usize, new_size: i64) -> Result<(), i32> {
     }
 
     // File leases: ftruncate conflicts with read AND write leases.
-    crate::fs::locks::break_lease(inode, true)?;
+    crate::fs::locks::break_lease(inode, true)
+        .map_err(|e| e.as_neg_i32())?;
 
     let result = inode.op_setattr(setattr_attr::ATTR_SIZE, new_size as u64, 0);
     if result == 0 {
@@ -4006,7 +4008,8 @@ pub fn file_open(filename: &str, flags: u32, mode: u32) -> Result<usize, i32> {
         // Directories never carry leases (set_lease rejects them).
         if inode.mode.is_regular_file() {
             let writer = flags & FileFlags::O_ACCMODE != FileFlags::O_RDONLY;
-            crate::fs::locks::break_lease(&inode, writer)?;
+            crate::fs::locks::break_lease(&inode, writer)
+            .map_err(|e| e.as_neg_i32())?;
         }
 
         // O_NOATIME (Linux): requires the caller to OWN the file or hold
@@ -4742,6 +4745,7 @@ pub fn file_fcntl(fd: usize, cmd: usize, arg: usize) -> Result<usize, i32> {
 
                 crate::fs::locks::posix_set_lock(&file, owner, kind, start, end, wait)
                     .map(|_| 0)
+                    .map_err(|e| e.as_neg_i32())
             }
 
             // F_SETOWN (8): set the O_ASYNC signal recipient. arg > 0 is a
@@ -4998,7 +5002,9 @@ pub fn file_fcntl(fd: usize, cmd: usize, arg: usize) -> Result<usize, i32> {
                     Some(f) => f,
                     None => return Err(errno::Errno::BadFileNumber.as_neg_i32()),
                 };
-                crate::fs::locks::set_lease(&file, arg as i16).map(|_| 0)
+                crate::fs::locks::set_lease(&file, arg as i16)
+                    .map(|_| 0)
+                    .map_err(|e| e.as_neg_i32())
             }
 
             // F_GETLEASE (1025): the lease held by this description.

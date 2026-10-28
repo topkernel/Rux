@@ -242,8 +242,9 @@ fn flock_conflicts(key: (u64, u64), file_id: u64, exclusive: bool) -> bool {
 }
 
 /// flock(2) core. `operation` is LOCK_SH/LOCK_EX/LOCK_UN optionally ORed
-/// with LOCK_NB. Returns negative errno on failure.
-pub fn flock_lock(file: &File, operation: i32) -> Result<(), i32> {
+/// with LOCK_NB. Typed `Errno` on failure (§5: the negative-errno ABI
+/// mapping happens once, at the syscall boundary).
+pub fn flock_lock(file: &File, operation: i32) -> Result<(), crate::errno::Errno> {
     use flock_ops::*;
 
     let nonblock = operation & LOCK_NB != 0;
@@ -292,7 +293,7 @@ pub fn flock_lock(file: &File, operation: i32) -> Result<(), i32> {
                 }
                 if nonblock {
                     // EWOULDBLOCK == EAGAIN on Linux.
-                    return Err(-crate::errno::constants::EAGAIN);
+                    return Err(crate::errno::Errno::TryAgain);
                 }
                 // Blocking: wait until no other description holds a
                 // conflicting lock (interruptible, prepare_to_wait
@@ -302,13 +303,13 @@ pub fn flock_lock(file: &File, operation: i32) -> Result<(), i32> {
                     !flock_conflicts(key, file_id, exclusive)
                 );
                 if ret != 0 {
-                    return Err(-crate::errno::constants::EINTR);
+                    return Err(crate::errno::Errno::InterruptedSystemCall);
                 }
                 // Loop: re-check AND install atomically (another waiter
                 // may have won the race between the wake and our lock).
             }
         }
-        _ => Err(-crate::errno::constants::EINVAL),
+        _ => Err(crate::errno::Errno::InvalidArgument),
     }
 }
 
@@ -604,7 +605,7 @@ fn apply_owner_lock(
 /// F_SETLK / F_SETLKW / F_OFD_SETLK / F_OFD_SETLKW core. `owner` is the
 /// requesting owner token (process for POSIX, description for OFD);
 /// `kind` is one of F_*_KIND; `wait` selects blocking behaviour.
-/// Returns negative errno on failure.
+/// Typed `Errno` on failure (mapped to the ABI at the boundary).
 pub fn posix_set_lock(
     file: &File,
     owner: LockOwner,
@@ -612,12 +613,12 @@ pub fn posix_set_lock(
     start: u64,
     end: u64,
     wait: bool,
-) -> Result<(), i32> {
+) -> Result<(), crate::errno::Errno> {
     if start >= end {
         // Zero/negative-length region: POSIX EINVAL for malformed input
         // (empty regions can never hold a lock; callers already reject
         // l_len < 0 making start>end, this catches the residual).
-        return Err(-crate::errno::constants::EINVAL);
+        return Err(crate::errno::Errno::InvalidArgument);
     }
     let key = file_lock_key(file);
     let exclusive = kind == F_WRLCK_KIND;
@@ -637,7 +638,7 @@ pub fn posix_set_lock(
                     if deadlock_check(&table, &wf, owner, key, start, end) {
                         drop(wf);
                         drop(table);
-                        return Err(-crate::errno::constants::EDEADLK);
+                        return Err(crate::errno::Errno::Deadlock);
                     }
                 }
                 if let Some(conflict) = table.iter().find(|l| {
@@ -682,7 +683,7 @@ pub fn posix_set_lock(
             Outcome::Conflict => {
                 if !wait {
                     // Linux returns EAGAIN (== EACCES on some systems).
-                    return Err(-crate::errno::constants::EAGAIN);
+                    return Err(crate::errno::Errno::TryAgain);
                 }
                 // Publish the pending request for other waiters' deadlock
                 // checks, then sleep until the conflict clears.
@@ -695,7 +696,7 @@ pub fn posix_set_lock(
                     !(*o == owner && *k == key && *s0 == start && *e0 == end)
                 });
                 if ret != 0 {
-                    return Err(-crate::errno::constants::EINTR);
+                    return Err(crate::errno::Errno::InterruptedSystemCall);
                 }
                 // Loop: re-check and grant atomically.
             }
@@ -858,19 +859,18 @@ pub fn inode_open_unregister(file: &File) {
 }
 
 /// F_SETLEASE core. `lease_type` is the user's flock l_type value:
-/// F_RDLCK(0) / F_WRLCK(1) / F_UNLCK(2). Returns negative errno.
-pub fn set_lease(file: &File, lease_type: i16) -> Result<(), i32> {
-    const EINVAL: i32 = -crate::errno::constants::EINVAL;
-    const EAGAIN: i32 = -crate::errno::constants::EAGAIN;
+/// F_RDLCK(0) / F_WRLCK(1) / F_UNLCK(2). Typed `Errno` on failure
+/// (mapped to the ABI at the boundary).
+pub fn set_lease(file: &File, lease_type: i16) -> Result<(), crate::errno::Errno> {
 
     // Only regular files can carry leases (Linux fcntl_setlease).
     // SAFETY: inode written once at open; read-only access.
     let inode = match unsafe { &*file.inode.get() }.as_ref() {
         Some(i) => i,
-        None => return Err(EINVAL),
+        None => return Err(crate::errno::Errno::InvalidArgument),
     };
     if !inode.mode.is_regular_file() {
-        return Err(EINVAL);
+        return Err(crate::errno::Errno::InvalidArgument);
     }
     let key = inode_lock_key(inode);
     let file_id = file.file_id;
@@ -886,7 +886,7 @@ pub fn set_lease(file: &File, lease_type: i16) -> Result<(), i32> {
     let exclusive = match lease_type {
         flock_types_late::F_RDLCK => false,
         flock_types_late::F_WRLCK => true,
-        _ => return Err(EINVAL),
+        _ => return Err(crate::errno::Errno::InvalidArgument),
     };
 
     // Grant checks under both tables (open counts + leases).
@@ -902,13 +902,13 @@ pub fn set_lease(file: &File, lease_type: i16) -> Result<(), i32> {
             // the WRLCK→RDLCK downgrade against an O_WRONLY/O_RDWR open
             // to fail with EAGAIN).
             if writers > 0 || breaking_writers > 0 {
-                return Err(EAGAIN);
+                return Err(crate::errno::Errno::TryAgain);
             }
         } else {
             // Write lease: we must be the ONLY open description and no
             // breaker may be in flight.
             if total > 1 || breaking_total > 0 {
-                return Err(EAGAIN);
+                return Err(crate::errno::Errno::TryAgain);
             }
         }
         drop(opens);
@@ -920,7 +920,7 @@ pub fn set_lease(file: &File, lease_type: i16) -> Result<(), i32> {
                 continue;
             }
             if exclusive || e.exclusive {
-                return Err(EAGAIN);
+                return Err(crate::errno::Errno::TryAgain);
             }
         }
     }
@@ -986,9 +986,10 @@ pub fn lease_conflicts(inode: &Inode, writer: bool) -> bool {
 /// (`writer` = write-mode open / truncate). Sends SIGIO to every lease
 /// holder and blocks until they release/downgrade, the caller is
 /// signalled, or fs.lease-break-time elapses (then the kernel breaks
-/// the lease by force, as Linux does). Returns negative errno on
-/// interrupt; Ok(()) when the open may proceed.
-pub fn break_lease(inode: &Inode, writer: bool) -> Result<(), i32> {
+/// the lease by force, as Linux does). Typed `Errno` on interrupt
+/// (mapped to the ABI at the boundary); Ok(()) when the open may
+/// proceed.
+pub fn break_lease(inode: &Inode, writer: bool) -> Result<(), crate::errno::Errno> {
     let key = inode_lock_key(inode);
     // Fast path: no conflicting lease.
     if !lease_conflicts(inode, writer) {
@@ -1041,7 +1042,7 @@ pub fn break_lease(inode: &Inode, writer: bool) -> Result<(), i32> {
         if crate::signal::signal_pending() {
             // No global ERESTARTSYS restart machinery — report EINTR
             // like the F_SETLKW waiter path does.
-            break Err(-crate::errno::constants::EINTR);
+            break Err(crate::errno::Errno::InterruptedSystemCall);
         }
         crate::wait_event_interruptible!(&LEASE_WAIT, {
             !lease_conflicts(inode, writer)

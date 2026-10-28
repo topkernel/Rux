@@ -87,7 +87,8 @@ shape test; the cols form derives the row function's argument list from
 the column list. The kvtab form (`Key:\t<value>\n`, one Display value
 per row, preformatted composites for multi-part rows) carries the
 /proc/[pid]/status family, with STATUS_FIELDS pinning the key sequence
-against a live render.
+against a live render; kvtab_pad (`key<tabs>: value\n`, padding in
+the key, empty value drops the space) carries /proc/cpuinfo.
 
 **Advantage.** Kills the format-drift class (five byte-format defects
 survived review into a merged tree once); format and data become one
@@ -97,12 +98,16 @@ artifact; call sites cannot swap columns.
 column-exact vs the live host reference; stat/schedstat line order
 unit-pinned; full suite green; three full pbench boots DONE rc=0.
 
-**Known cost.** Opportunistic conversion — ~19 hand-written files
+**Known cost.** Opportunistic conversion — ~18 hand-written files
 remain (the derived set grew in the refactor lane's slices: diskstats
 via cols with the merged/discard/flush zeros named as columns and an
-exact-bytes snapshot pin; /proc/[pid]/status via the new kvtab form
-with its key sequence pinned against a live render); dynamic-arity
-lines (interrupts/intr/softirqs) stay explicit by design.
+exact-bytes snapshot pin; /proc/[pid]/status via the kvtab form with
+its key sequence pinned against a live render; /proc/cpuinfo via the
+kvtab_pad form — per-arch declared rows whose keys carry the tab
+padding, per-block order pinned; the x86 list preserves the
+pre-conversion duplicate processor row until the coordinator decides
+that fix); dynamic-arity lines (interrupts/intr/softirqs) stay
+explicit by design.
 
 **Guard.** procfile-shape unit-test group + per-file order/snapshot
 pins; the DFX plan's adoption rule requires the macro for new files.
@@ -442,3 +447,75 @@ the single scrub site; resolve_exec_file (session 1) keeps the
 AT_SECURE inputs on the one-walk resolution path, and the shebang-parse/
 resolve_exec_file unit rows plus the LTP execve-family spot run watch
 the surrounding semantics.
+## D-11: Typed lock keys — the lock hierarchy as trait impls
+
+**Design.** Lock-ordering classes carry zero-sized key types
+(`GrqKey`, `FutexBucketKey`, `NetQueueKey`, `NetStatsKey`); a
+PERMITTED nesting is an explicit `impl CanNestInside<Outer> for
+Inner`, and acquiring a keyed lock while another keyed lock is held
+goes through `lock_nested(&outer_guard)`, which only compiles when the
+impl exists. The mainstream approach this replaces is a documented
+lock-ordering file plus review plus a post-hoc deadlock watchdog; the
+paid incident class is any INV-LOCK-* reverse-order introduction —
+review-enforced discipline that silently fails under refactor pressure
+(the futex-wake path nests GRQ inside the bucket lock on every wake;
+the reverse order is an instant machine-wide deadlock).
+
+**Advantage.**
+- The nesting table is not documentation — it is the impl list; a
+  reverse or same-level acquisition of migrated pairs does not compile.
+- The key name reaches the deadlock watchdog output (class-level
+  attribution even before a pair migrates).
+- Zero runtime cost: the key is `PhantomData`, the acquire paths
+  inline to the raw protocol's instructions.
+
+**Compatibility evidence.** First adoption is the GRQ's own lock —
+internal type swap (`RawSpinlock` -> `KeyedRawSpinlock<GrqKey>`), the
+GrqGuard API, the irqsave/preempt protocol and every call site
+unchanged; unit suite green with the `lockkey` group (mechanics:
+guard hold/drop, INV-LOCK-5/6 forward nesting, the GRQ claim/unlock
+pattern). The compile-fence becomes load-bearing when the futex bucket
+side migrates (follow-on slice, rides the scheduling sign-off).
+
+**Known cost.** Opportunistic migration (D-4/D-6 doctrine): unkeyed
+locks keep compiling; only pairs named in lock-ordering.md adopt keys,
+and adoption must not widen a subsystem's public API. The
+guard-less `try_lock_claim`/`unlock` pair exists for the GRQ's
+hand-rolled guard protocol and must not grow new users.
+
+**Guard.** `lockkey` unit-test group; INV-LOCK-5/6 remain watchdog-
+and SPIN-verified in the meantime; the sched/ side of any adoption
+rides the scheduling-domain perf gate (GRQ hold band, census, P2).
+
+---
+
+## D-10: Result-typed internal error APIs (§5 pilot)
+
+**Design.** Internal kernel functions return `Result<T, Errno>` (the
+typed enum, not raw negated `i32`s); the negative-errno ABI mapping
+happens exactly once per call chain, at the syscall/VFS boundary via
+`Errno::as_neg_i32()`. The mainstream approach threads `-errno` ints
+through every layer, where sign bugs and errno-mangling recur (the
+paid incidents: the u32-microsecond wrap that killed an SA host; the
+negated-nice encoding bug).
+
+**Advantage.** An `Err(-EAGAIN)` cannot be accidentally re-negated,
+compared against a byte count, or returned where a positive errno was
+meant — the error type is an enum, and `Result` is `#[must_use]`, so
+an ignored failure is a build warning, not a silent drop.
+
+**Compatibility evidence.** First conversion: the file-locks subsystem
+(`fs/locks.rs` — flock, POSIX/OFD record locks, leases): the four
+public functions return `Result<(), Errno>`; the six call sites
+(sys_flock in syscall/io.rs, F_SETLK/F_SETLEASE in vfs.rs, three
+break_lease propagation sites) each map once with `as_neg_i32()`.
+Errno values byte-identical (EAGAIN/EINTR/EINVAL/EDEADLK; the enum
+gained the missing `Deadlock = 35` variant). Suite green; the LTP
+fcntl/flock families are the behavioral guard.
+
+**Known cost.** Opportunistic adoption: the i32 errno convention
+dominates the tree and keeps compiling; subsystems convert when
+touched. Mixed APIs coexist exactly as D-4/D-6 conversions do.
+
+**Guard.** LTP fcntl/flock families; the errno_test unit group pins
+the enum values.

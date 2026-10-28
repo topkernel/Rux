@@ -18,6 +18,7 @@ pub mod rwlock;
 pub mod seqlock;
 pub mod rcu;
 pub mod percpu;
+pub mod lockkey;
 
 pub use semaphore::Mutex;
 pub use futex::{futex_wait, futex_wake, do_futex, sys_futex_handler};
