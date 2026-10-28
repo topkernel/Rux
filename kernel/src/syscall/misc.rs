@@ -2763,24 +2763,47 @@ fn timerfd_poll(file: &crate::fs::File, events: u16) -> u16 {
 /// Write old timer settings (for timerfd_gettime / timerfd_settime old_value).
 /// Returns false when a user store faulted (callers must surface EFAULT —
 /// LTP timerfd_settime01 case 2 passes a bad old_value pointer).
-fn timerfd_write_olds(tfd: &TimerFd, old_value: *mut u64) -> bool {
-    // SAFETY: old_value validated with access_ok(32 bytes) by callers;
-    // put_user is the exception-table copy path (SUM=0 safe).
+/// Snapshot a timerfd's current settings as the four itimerspec fields
+/// (it_interval.sec, it_interval.nsec, it_value.sec, it_value.nsec).
+///
+/// The reference kernel takes this snapshot after cancelling the old
+/// timer and before programming the new one (kernel/fs/timerfd.c:
+/// do_timerfd_settime() fills `old` between the cancel loop and
+/// timerfd_setup()), so the values describe the state the timer had
+/// BEFORE the new settings were applied.
+fn timerfd_old_values(tfd: &TimerFd) -> (i64, i64, i64, i64) {
+    // it_interval (ns-precise from the stored interval)
+    let interval_ms = crate::drivers::timer::jiffies_to_msecs(tfd.interval_jiffies);
+    let interval_ns = (interval_ms as u64).saturating_mul(1_000_000);
+    // it_value: real remaining time from the wheel
+    let (val_sec, val_nsec) = tfd_remaining(tfd);
+    (
+        (interval_ns / 1_000_000_000) as i64,
+        (interval_ns % 1_000_000_000) as i64,
+        val_sec,
+        val_nsec,
+    )
+}
+
+/// Copy an itimerspec snapshot out to the user pointer.
+///
+/// SAFETY: old_value must be validated with access_ok(32 bytes) by the
+/// caller; put_user is the exception-table copy path (SUM=0 safe).
+fn timerfd_put_olds(old_value: *mut u64, vals: (i64, i64, i64, i64)) -> bool {
     unsafe {
         let p = old_value as *mut i64;
         let put = crate::arch::uaccess::put_user;
         let mut ok = true;
-        // it_interval (ns-precise from the stored interval)
-        let interval_ms = crate::drivers::timer::jiffies_to_msecs(tfd.interval_jiffies);
-        let interval_ns = (interval_ms as u64).saturating_mul(1_000_000);
-        ok &= put(p, (interval_ns / 1_000_000_000) as i64);
-        ok &= put(p.add(1), (interval_ns % 1_000_000_000) as i64);
-        // it_value: real remaining time from the wheel
-        let (val_sec, val_nsec) = tfd_remaining(tfd);
-        ok &= put(p.add(2), val_sec);
-        ok &= put(p.add(3), val_nsec);
+        ok &= put(p, vals.0);
+        ok &= put(p.add(1), vals.1);
+        ok &= put(p.add(2), vals.2);
+        ok &= put(p.add(3), vals.3);
         ok
     }
+}
+
+fn timerfd_write_olds(tfd: &TimerFd, old_value: *mut u64) -> bool {
+    timerfd_put_olds(old_value, timerfd_old_values(tfd))
 }
 
 /// Current (it_value) of a timerfd as (sec, nsec): 0/0 when disarmed.
@@ -3507,19 +3530,10 @@ pub fn sys_timerfd_settime(args: SyscallArgs) -> i64 {
     // SAFETY: ptr came from Box::into_raw in sys_timerfd_create; valid and unique.
     let tfd = unsafe { &mut *(ptr as *mut TimerFd) };
 
-    // Write old_value (current settings) — a faulting store is EFAULT
-    // (LTP timerfd_settime01 case 2 passes a bad old_value pointer and
-    // the old code silently swallowed the failure).
-    if !old_value.is_null() {
-        if !crate::arch::uaccess::access_ok(old_value as usize, 32) {
-            return -(errno::EFAULT as i64);
-        }
-        if !timerfd_write_olds(tfd, old_value) {
-            return -(errno::EFAULT as i64);
-        }
-    }
-
     // Read struct itimerspec { struct timespec it_interval, struct timespec it_value }
+    //
+    // The reference reads the new value FIRST (kernel/fs/timerfd.c:
+    // get_itimerspec64() → EFAULT) and only then touches the timer state.
     // SAFETY: new_value validated with access_ok(32 bytes); get_user is the
     // exception-table copy path (SUM=0 safe). Unreadable fields read as 0.
     let (int_sec, int_nsec, val_sec, val_nsec) = unsafe {
@@ -3533,26 +3547,34 @@ pub fn sys_timerfd_settime(args: SyscallArgs) -> i64 {
         )
     };
 
-    // Disarm existing timer
-    if tfd.kernel_timer_id != 0 {
-        crate::timer::del_timer(tfd.kernel_timer_id);
-        tfd.kernel_timer_id = 0;
-    }
-
     // Linux (timerfd_rearm path): tv_nsec of BOTH members must be a
     // normalized [0, 1e9) value and tv_sec non-negative — anything else is
-    // EINVAL before any timer state changes (LTP timerfd_settime02).
+    // EINVAL (LTP timerfd_settime02).
+    //
+    // The check comes BEFORE the old timer is cancelled: the reference
+    // validates itimerspec64_valid() before it cancels the hrtimer, so a
+    // rejected call leaves the running timer alone. Cancelling first
+    // silently disarmed the caller's timer on every rejected call.
     if int_sec < 0 || int_nsec < 0 || int_nsec > 999_999_999
         || val_sec < 0 || val_nsec < 0 || val_nsec > 999_999_999
     {
         return -(errno::EINVAL as i64);
     }
 
-    // If value is zero, timer is disarmed
-    let total_nsec = val_sec.saturating_mul(1_000_000_000).saturating_add(val_nsec); // M-19
-    if total_nsec <= 0 {
-        return 0;
+    // Snapshot the settings the timer had BEFORE the reprogramming (the
+    // reference fills `old` between the cancel and the setup).
+    let old_values = timerfd_old_values(tfd);
+
+    // Disarm existing timer
+    if tfd.kernel_timer_id != 0 {
+        crate::timer::del_timer(tfd.kernel_timer_id);
+        tfd.kernel_timer_id = 0;
     }
+
+    // If value is zero, timer is disarmed. The old settings are still
+    // copied out in that case (the reference programs the timer - or does
+    // not - and copies `old` out afterwards in both paths).
+    let total_nsec = val_sec.saturating_mul(1_000_000_000).saturating_add(val_nsec); // M-19
 
     // Convert to jiffies
     let value_msecs = (total_nsec / 1_000_000) as u64;
@@ -3607,17 +3629,40 @@ pub fn sys_timerfd_settime(args: SyscallArgs) -> i64 {
     // alone never woke anyone, so a blocking read would sleep forever).
     let tfd_addr = tfd as *const TimerFd as u64;
 
-    let new_kernel_id = crate::timer::add_timer_with_action(
-        expires,
-        0, // no signal
-        0, // no signal
-        interval_jiffies,
-        tfd_addr,
-    );
+    if total_nsec > 0 {
+        let new_kernel_id = crate::timer::add_timer_with_action(
+            expires,
+            0, // no signal
+            0, // no signal
+            interval_jiffies,
+            tfd_addr,
+        );
 
-    tfd.kernel_timer_id = new_kernel_id;
+        tfd.kernel_timer_id = new_kernel_id;
+    }
+
+    // The reference updates the interval and clears the tick counter in
+    // BOTH cases - timerfd_setup() sets ctx->tintv and ctx->ticks = 0
+    // before it decides whether to start the hrtimer
+    // (kernel/fs/timerfd.c: timerfd_setup()). A disarm therefore keeps
+    // the NEW interval and clears the expirations.
     tfd.interval_jiffies = interval_jiffies;
     tfd.expiration_count.store(0, core::sync::atomic::Ordering::Relaxed);
+
+    // Copy the old settings out LAST: the reference copies them after the
+    // timer has been reprogrammed (kernel/fs/timerfd.c: do_timerfd_settime()
+    // then put_itimerspec64()), so a failing copy returns EFAULT with the
+    // new timer already programmed. A faulting store is EFAULT (LTP
+    // timerfd_settime01 case 2 passes a bad old_value pointer and the old
+    // code silently swallowed the failure).
+    if !old_value.is_null() {
+        if !crate::arch::uaccess::access_ok(old_value as usize, 32) {
+            return -(errno::EFAULT as i64);
+        }
+        if !timerfd_put_olds(old_value, old_values) {
+            return -(errno::EFAULT as i64);
+        }
+    }
 
     0
 }
