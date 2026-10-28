@@ -11,6 +11,10 @@
 //! - signal() wakes one waiting process
 //! - broadcast() wakes all waiting processes
 
+// Framekernel layer policy (docs/architecture/framekernel-layers.md):
+// this module must stay Safe Rust.
+#![forbid(unsafe_code)]
+
 use crate::process::wait::WaitQueueHead;
 
 /// Condition Variable
