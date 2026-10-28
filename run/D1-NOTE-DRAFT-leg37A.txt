@@ -1,0 +1,59 @@
+D-1 REGISTER NOTE DRAFTS (leg-37A) — paste ONE variant into
+docs/architecture/design-divergences.md under "D-1: Global run queue
+(single GRQ)" when the tier verdict lands, as a new paragraph after
+the Guard section. Pick by the mission rule: any of
+p2_ctxsw/p5a_pipe/p5b_dgram_send/p5b_dgram_recv_peek/p5c_stream_write
+median > +20% vs run/pb1-results.txt (ceilings 18.491 / 25.820 /
+151.508 / 330.534 / 67.468) => VARIANT B; otherwise VARIANT A.
+
+--------------------------------------------------------------------
+VARIANT A — verdicts within band or improved (ready-for-merge):
+
+**Consequence note: wake-placement reservation (2026-10-28).** The
+GRQ's pick-order placement race — a wake enqueues globally and IPIs an
+idle CPU, but nothing bound the wakee to that CPU, so the waker
+(already inside __schedule() on its send-path block) could win the
+queue and pick the wakee first, collapsing a ping-pong pair onto one
+CPU (the 40 µs p5 class; classification in run/SCHED-35A-SAMECPU.txt)
+— is closed inside the D-1 design rather than by adopting wake-time
+per-CPU placement. The wake path stamps a reservation (hinted CPU +
+that CPU's pick-pass sequence, under the GRQ lock) when the wake found
+an idle CPU; a CFS pick on any other CPU skips a candidate whose
+hinted CPU has not yet run its pick pass (bounded 32-entry skip stash,
+the same machinery as the affinity/ownership skips); the reservation
+expires at the hinted CPU's next pass — no timer, no clearing pass.
+RT/DL picks override and are counted as steals; `wresv=0` disables
+only the skip (one-image A/B). Under saturation (no idle CPU at wake)
+no stamp is created and the skip short-circuits on a zero hint — the
+reservation is inert by construction in the deep-queue regime
+(stress-fleet s16 family; see run/SC-37A.txt). Confirmator (wakewatch
+picked-on-waker vs picked-on-idle census, before = wresv=0): waker-
+steals 2 -> 0 on the thread=single matched pair (idle-picked 99.1% ->
+100%; onor=211/steal=2 -> 160/0), 0 -> 0 on thread=multi (the window
+was already shut there by the idle vCPU's host thread). Tier-2 gate
+(thread=multi, the merged configuration, vs the pb1 anchor): [FILL:
+per-row medians and PASS/FAIL of p2_ctxsw + p5a/p5b/p5c].
+
+--------------------------------------------------------------------
+VARIANT B — a binding row regressed > +20% (fallback taken; the
+reservation set does NOT merge as-is — coordinate with the reviewer
+whether only the census part lands):
+
+**Known cost addendum (2026-10-28): pick-order placement race.** The
+inherent cost the register had not named: with placement decided only
+at pick time, a wake that IPIs an idle CPU cannot bind the wakee to
+it; the waker can win the queue first and serialize a ping-pong pair
+onto one CPU (the 40 µs p5 class, regime-flip under host load —
+classification and mechanism in run/SCHED-35A-SAMECPU.txt; Linux does
+not share the shape because ttwu places at wake time). A reservation-
+based fix (wake stamps hinted CPU + pick-pass seq; other CPUs' picks
+skip until the hinted CPU's next pass) closed the race in A/B
+census (waker-steals 2 -> 0 thread=single, matched pair) but its
+hot-path cost failed the Tier-2 gate on [FILL: row(s) and numbers],
+so the divergence stands registered instead: the unpinned p5 rows
+(p5a_pipe, p5b_dgram_send, p5b_dgram_recv_peek, p5c_stream_write and
+p2_ctxsw where unpinned) are banded for BOTH regimes — thread=multi
+on a calm host: [FILL band]; thread=single / host-loaded TCG: the
+same-CPU 40 µs class is an expected artifact of the mechanism, not a
+regression. Guard unchanged: the perf-gate scheduling domain rows;
+any future placement change re-runs Tier-2 before merging.
