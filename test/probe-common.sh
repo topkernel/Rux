@@ -117,6 +117,48 @@ leg_run_driver() {
     esac
 }
 
+# ---- shape 1b: x86 python boot driver -----------------------------------
+#
+# leg_run_x86_driver <script.py> [args...] — same contract, prereq is
+# the x86 bzImage instead of the riscv ELF (the x86 drivers default to
+# the worktree bzImage path, which is exactly LEG_X86_KERNEL).
+LEG_X86_KERNEL="${LEG_X86_KERNEL:-$LEG_ROOT/target/x86_64-unknown-none/debug/bzImage}"
+
+leg_need_x86_kernel() {
+    [ -f "$LEG_X86_KERNEL" ] || leg_result SKIP "x86 bzImage not built at $LEG_X86_KERNEL (PLATFORM=x86_64 make build)"
+}
+
+leg_run_x86_driver() {
+    local script="$1"; shift
+    leg_need_x86_kernel
+    command -v python3 >/dev/null 2>&1 || leg_result SKIP "python3 not found"
+    mkdir -p "$LEG_LOGDIR"
+    : > "$LEG_LOG"
+    timeout "$LEG_TIMECAP" python3 "$LEG_ROOT/$script" "$@" >> "$LEG_LOG" 2>&1
+    local rc=$?
+    tail -20 "$LEG_LOG"
+    case "$rc" in
+        0) leg_result PASS "driver $script completed cleanly" ;;
+        124) leg_result FAIL "driver $script timed out after ${LEG_TIMECAP}s" ;;
+        *) leg_result FAIL "driver $script exited rc=$rc" ;;
+    esac
+}
+
+# leg_x86_musl_loader — materialize the dynamic musl loader the older
+# x86 drivers expect at fixed /tmp paths (/tmp/ohroot/lib64,
+# /tmp/ww-loader). musl's libc.so IS the loader; the canonical copy in
+# this tree is run/oh-x/rd/lib/ld-musl-x86_64.so.1 (untracked OH
+# bring-up artifact). Prints nothing; caller handles absence.
+leg_x86_musl_loader() {
+    local src="$LEG_ROOT/run/oh-x/rd/lib/ld-musl-x86_64.so.1"
+    [ -f "$src" ] || return 1
+    mkdir -p /tmp/ohroot/lib64 /tmp/ww-loader
+    [ -f /tmp/ohroot/lib64/ld-musl-x86_64.so.1 ] || cp "$src" /tmp/ohroot/lib64/ld-musl-x86_64.so.1
+    [ -f /tmp/ohroot/lib64/libc.so ] || cp "$src" /tmp/ohroot/lib64/libc.so
+    [ -f /tmp/ww-loader/ld-musl.so ] || cp "$src" /tmp/ww-loader/ld-musl.so
+    return 0
+}
+
 # ---- shape 2: boot the rootfs and run the probe -------------------------
 #
 # leg_boot_rootfs <name> <probe-binary> <boot-delay> <guest-script-file>

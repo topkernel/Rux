@@ -17,7 +17,7 @@ machines, monitors milestones, advances the merge queue, and enforces the
 model-quota policy (unattended full test execution while the quota is
 exhausted; continuous agent work while the quota is available).
 
-## 2. Agent roster (8 concurrent agents, subject to phase adjustments)
+## 2. Agent roster (9 concurrent agents, subject to phase adjustments)
 
 | # | Role | Worktree / branch | Responsibility |
 |---|------|-------------------|----------------|
@@ -29,11 +29,12 @@ exhausted; continuous agent work while the quota is available).
 | 6 | Observability tooling agent | `dfx-align` / `feature/dfx-align` | In-kernel diagnostics aligned with upstream interfaces (perf, trace, pstore, kallsyms) |
 | 7 | Test completeness agent | `test-coverage` / `feature/test-coverage` | Test-coverage ledger; wiring unwired probes; architecture coverage; LTP TCONF triage |
 | 8 | Code review and conformance agent | `abi-review` / `feature/abi-review` | Thesis-driven review against the reference kernel, POSIX and the ABI; fixes functional, compatibility and performance findings; target: every metric at ≤0.5x the reference median |
+| 9 | Line-by-line review agent | `code-review` / `feature/code-review` | File-by-file review driven by `docs/development/review-coverage.md`; fixes bugs directly with gates; coordinate marks with agent 8 to avoid double coverage |
 
-Two scheduler entries support the patrol and are specified here for
-completeness: the coordination patrol itself (every 30 minutes) and the
-line-by-line review automation (every 20 minutes, worktree
-`rux-agents/code-review`, driven by `docs/development/review-coverage.md`).
+The line-by-line review was originally a scheduler entry of its own; it moved
+to a standing agent (2026-10-28) after the entry was found disabled, so the
+review runs continuously while quota is available instead of in 20-minute
+bursts.
 
 ## 3. Liveness adjudication
 
@@ -102,10 +103,10 @@ a green verdict line is observed.
 ```
 Rux 内核项目——多代理协调巡检规范（每 30 分钟执行一次）
 
-主仓库：/home/william/workspace/Rux。当前模式：8 个开发代理并行工作，每个代理使用独立的 git 工作树（/home/william/rux-agents/<名称>/），由主协调会话统一管理。本巡检是协调工作的周期性心跳，规范文档见 test/patrol-runbook.md，巡检提示语必须与该文档第 9 节保持一致。
+主仓库：/home/william/workspace/Rux。当前模式：9 个开发代理并行工作，每个代理使用独立的 git 工作树（/home/william/rux-agents/<名称>/），由主协调会话统一管理。本巡检是协调工作的周期性心跳，规范文档见 test/patrol-runbook.md，巡检提示语必须与该文档第 9 节保持一致。
 
 每轮动作：
-1. 代理存活判定：对每个代理当前的任务标识执行 TaskOutput 仲裁。任务标识随批次轮换，以实际派发为准，提示语中不固化标识列表。代理角色：OpenHarmony launcher 启动代理、GNOME 桌面集成代理、LTP 一致性测试代理、长时压力测试代理、性能优化代理、可观测性工具代理、测试完备度代理、代码检视与一致性代理。
+1. 代理存活判定：对每个代理当前的任务标识执行 TaskOutput 仲裁。任务标识随批次轮换，以实际派发为准，提示语中不固化标识列表。代理角色：OpenHarmony launcher 启动代理、GNOME 桌面集成代理、LTP 一致性测试代理、长时压力测试代理、性能优化代理、可观测性工具代理、测试完备度代理、代码检视与一致性代理、逐行代码检视代理。
 2. 死亡分类与处置：模型额度耗尽（5 小时用量上限）→ 静默记录，窗口内不重启代理，重置时间过后重启；服务提供方超时 → 携完整上下文立即重启。正常结束的代理通过 SendMessage 恢复或以自包含任务书重新拉起。
 3. 孤儿虚拟机清理：仅杀死属主已死亡且自身无终止超时的虚拟机；按具体 PID 加命令行核对后终止，严禁 pkill。仍在产出有效数据且带超时上限的虚拟机令其自然结束并回收数据。
 4. 里程碑监测：OpenHarmony launcher（bootevent.launcher.ready 置位、OnForeground、首批界面帧；探针色阶渐变不计入）；GNOME（交互桌面已达成，跟踪 README 证据资产与不少于两次引导的交互复现，以及 gdm 登录链推进）；LTP 通过数（当前裁定基线 r19=1018/1869）；性能门禁分层判定、基线刷新与冷启动差距跟踪。
@@ -119,5 +120,7 @@ Rux 内核项目——多代理协调巡检规范（每 30 分钟执行一次）
 ## 10. Change history
 
 - 2026-10-28: initial formal runbook; supersedes the ad-hoc six-lane
-  patrol text; roster grown to 8 agents; quota policy and root-cleanliness
-  rules incorporated.
+  patrol text; quota policy and root-cleanliness rules incorporated.
+- 2026-10-28 (late): roster grown to 9 agents — the line-by-line review
+  moved from a disabled scheduler entry to a standing agent so review
+  runs continuously while quota is available.

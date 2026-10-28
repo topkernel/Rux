@@ -3499,7 +3499,8 @@ pub fn vfs_truncate(pathname: &str, new_size: i64) -> Result<(), i32> {
 
     // File leases: truncation conflicts with BOTH read and write leases
     // (Linux break_lease on ATTR_SIZE).
-    crate::fs::locks::break_lease(inode, true)?;
+    crate::fs::locks::break_lease(inode, true)
+        .map_err(|e| e.as_neg_i32())?;
 
     let result = inode.op_setattr(setattr_attr::ATTR_SIZE, new_size as u64, 0);
     if result == 0 {
@@ -3572,7 +3573,8 @@ pub fn vfs_ftruncate(fd: usize, new_size: i64) -> Result<(), i32> {
     }
 
     // File leases: ftruncate conflicts with read AND write leases.
-    crate::fs::locks::break_lease(inode, true)?;
+    crate::fs::locks::break_lease(inode, true)
+        .map_err(|e| e.as_neg_i32())?;
 
     let result = inode.op_setattr(setattr_attr::ATTR_SIZE, new_size as u64, 0);
     if result == 0 {
@@ -4006,7 +4008,8 @@ pub fn file_open(filename: &str, flags: u32, mode: u32) -> Result<usize, i32> {
         // Directories never carry leases (set_lease rejects them).
         if inode.mode.is_regular_file() {
             let writer = flags & FileFlags::O_ACCMODE != FileFlags::O_RDONLY;
-            crate::fs::locks::break_lease(&inode, writer)?;
+            crate::fs::locks::break_lease(&inode, writer)
+            .map_err(|e| e.as_neg_i32())?;
         }
 
         // O_NOATIME (Linux): requires the caller to OWN the file or hold
@@ -4120,31 +4123,45 @@ pub fn open_file_arc_nofd(path: &str) -> Option<alloc::sync::Arc<File>> {
     // to "/" with no current task); File construction mirrors file_open's.
     unsafe {
         let vpath = path_lookup(path, 0).ok()?;
-        let inode = vpath.inode?;
-        if inode.mode.is_directory() {
-            return None;
-        }
-        let file = alloc::sync::Arc::new(File::new(FileFlags::new(
-            FileFlags::O_RDONLY,
-        )));
-        file.set_inode(alloc::sync::Arc::clone(&inode));
-        if let Some(d) = vpath.dentry.clone() {
-            file.set_dentry(d);
-        }
-        if let Some(ops) = inode.ops {
-            if let Some(get_file_ops_fn) = ops.get_file_ops {
-                if let Some(file_ops) = get_file_ops_fn(&*inode) {
-                    file.set_ops(file_ops);
-                }
-            }
-            if let Some(open_fn) = ops.open {
-                if open_fn(&*inode, &*file) != 0 {
-                    return None;
-                }
-            }
-        }
-        Some(file)
+        open_file_arc_from_vpath(&vpath)
     }
+}
+
+/// Build the kernel-internal read-only File from an ALREADY-RESOLVED
+/// VfsPath — the File-construction half of [`open_file_arc_nofd`],
+/// split so callers that resolved the path themselves (the exec ladder's
+/// single-lookup fast path) do not walk the path a second time. Same
+/// semantics: no fdtable slot, invisible to inotify, None on a missing
+/// inode or a directory.
+///
+/// # Safety
+/// `vpath` must come from a successful `path_lookup` (its dentry/inode
+/// pointers are live).
+pub unsafe fn open_file_arc_from_vpath(vpath: &VfsPath) -> Option<alloc::sync::Arc<File>> {
+    let inode = vpath.inode.as_ref()?;
+    if inode.mode.is_directory() {
+        return None;
+    }
+    let file = alloc::sync::Arc::new(File::new(FileFlags::new(
+        FileFlags::O_RDONLY,
+    )));
+    file.set_inode(alloc::sync::Arc::clone(inode));
+    if let Some(d) = vpath.dentry.clone() {
+        file.set_dentry(d);
+    }
+    if let Some(ops) = inode.ops {
+        if let Some(get_file_ops_fn) = ops.get_file_ops {
+            if let Some(file_ops) = get_file_ops_fn(&**inode) {
+                file.set_ops(file_ops);
+            }
+        }
+        if let Some(open_fn) = ops.open {
+            if open_fn(&**inode, &*file) != 0 {
+                return None;
+            }
+        }
+    }
+    Some(file)
 }
 
 ///
@@ -4728,6 +4745,7 @@ pub fn file_fcntl(fd: usize, cmd: usize, arg: usize) -> Result<usize, i32> {
 
                 crate::fs::locks::posix_set_lock(&file, owner, kind, start, end, wait)
                     .map(|_| 0)
+                    .map_err(|e| e.as_neg_i32())
             }
 
             // F_SETOWN (8): set the O_ASYNC signal recipient. arg > 0 is a
@@ -4984,7 +5002,9 @@ pub fn file_fcntl(fd: usize, cmd: usize, arg: usize) -> Result<usize, i32> {
                     Some(f) => f,
                     None => return Err(errno::Errno::BadFileNumber.as_neg_i32()),
                 };
-                crate::fs::locks::set_lease(&file, arg as i16).map(|_| 0)
+                crate::fs::locks::set_lease(&file, arg as i16)
+                    .map(|_| 0)
+                    .map_err(|e| e.as_neg_i32())
             }
 
             // F_GETLEASE (1025): the lease held by this description.

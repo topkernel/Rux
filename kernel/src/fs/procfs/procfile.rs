@@ -118,6 +118,26 @@ pub fn render_kvtab(rows: &[(&'static str, &dyn core::fmt::Display)]) -> String 
     out
 }
 
+/// Pure `kvtab_pad` renderer (the /proc/cpuinfo shape): keys carry
+/// their own tab padding, then `": "` and the value — `flags\t\t:\n`'s
+/// empty-value row drops the space (colon then newline, no trailing
+/// space; that byte belongs to this file's real layout).
+pub fn render_kvtab_pad(rows: &[(&'static str, &dyn core::fmt::Display)]) -> String {
+    let mut out = String::with_capacity(rows.len() * 24);
+    for (k, v) in rows {
+        out.push_str(k);
+        let v = alloc::format!("{}", v);
+        if v.is_empty() {
+            out.push_str(":\n");
+        } else {
+            out.push_str(": ");
+            out.push_str(&v);
+            out.push('\n');
+        }
+    }
+    out
+}
+
 /// Pure `cols` row renderer (Linux stat-family row shape): `label`
 /// then one space-separated value per column, newline, no trailing
 /// space. The label may carry a trailing space when Linux's layout

@@ -1819,7 +1819,7 @@ pub fn sys_flock(args: SyscallArgs) -> i64 {
 
     match crate::fs::locks::flock_lock(&file, operation) {
         Ok(()) => 0,
-        Err(e) => e as i64,
+        Err(e) => e.as_neg_i32() as i64, // the one ABI mapping for flock
     }
 }
 

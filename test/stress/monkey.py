@@ -118,8 +118,12 @@ def run_one(idx: int, args, rng_seed: int, workdir: str) -> dict:
 
     if args.arch == "x86_64":
         qemu = "qemu-system-x86_64"
+        # -nographic already multiplexes a console onto stdio; a plain
+        # "-serial stdio" then claims stdio a SECOND time and qemu
+        # aborts ("cannot use stdio by multiple character devices") —
+        # mon:stdio replaces the implicit one, matching the riscv leg.
         cmdline = [qemu, "-M", "q35", "-accel", "tcg,thread=single", "-cpu", "max",
-                   "-m", args.mem, "-smp", str(args.smp), "-nographic", "-serial", "stdio"]
+                   "-m", args.mem, "-smp", str(args.smp), "-nographic", "-serial", "mon:stdio"]
         kernel_args = ["-kernel", args.kernel]
         append = "root=/dev/vda rw init=/bin/sh console=ttyS0"
         disk = ["-drive", f"file={img},if=virtio,format=raw"]

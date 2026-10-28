@@ -21,7 +21,12 @@ QEMU = "qemu-system-x86_64"
 MKFS = "/usr/sbin/mkfs.ext4"
 BZIMAGE = os.path.join(WT, "target", "x86_64-unknown-none", "debug", "bzImage")
 MUSL = os.path.join(WT, "toolchain", "x86_64-rux-linux-musl")
-SYSROOT = "/mnt/ccsys/system"  # loop-mounted read-only system.img
+SYSROOT = os.environ.get(
+    "DECODE_SYSROOT",
+    "/mnt/ccsys/system")  # default: loop-mounted read-only system.img;
+# DECODE_SYSROOT points at any tree with the same lib64/ layout (the
+# suite wrapper uses the OH syslib copy staged under /tmp by the OH
+# lanes when the loop mount is not up).
 LOADER = "/tmp/ohroot/lib64/ld-musl-x86_64.so.1"
 MARKER = "DECODE_PROBE RESULT:"
 WORK = os.path.join(WT, "work")

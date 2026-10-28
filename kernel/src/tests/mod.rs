@@ -210,6 +210,7 @@ pub mod buffer_state;
 pub mod mount_flags;
 #[cfg(feature = "unit-test")]
 pub mod percpu;
+pub mod lockkey;
 
 // ===== Process management =====
 #[cfg(feature = "unit-test")]
@@ -429,6 +430,10 @@ pub fn run_all_tests() {
     // tab shape and value formats pinned against a live render.
     crate::fs::procfs::pid::status_file_tests::shape_check();
     crate::fs::procfs::pid::status_file_tests::order_check();
+    // D-4 kvtab_pad slice (refactor lane): /proc/cpuinfo per-block key
+    // order + `key<tabs>: value` shape (per-arch, compiled per-arch).
+    crate::fs::procfs::cpuinfo::cpuinfo_file_tests::shape_check();
+    crate::fs::procfs::cpuinfo::cpuinfo_file_tests::order_check();
 
     // tmpfs page-budget tests (mount option size=). Implemented in
     // fs::tmpfs itself (needs private TmpfsSuperBlock access).
@@ -473,6 +478,11 @@ pub fn run_all_tests() {
 
     test_group_start("percpu");
     percpu::test_percpu();
+
+    // Typed lock keys (§3 GRQ typed-key slice): the CanNestInside
+    // mechanics + the GRQ claim pattern.
+    test_group_start("lockkey");
+    lockkey::test_lockkey();
 
     test_group_start("page_allocator");
     page_allocator::test_page_allocator();

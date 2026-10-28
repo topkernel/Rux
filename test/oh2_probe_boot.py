@@ -36,7 +36,11 @@ MARKER = "OH2_PROBE RESULT:"
 
 def build_probe(out):
     """Compile the probe as a static musl binary (toolchain/README recipe)."""
-    cmd = [CC, "-static", "-nostdlib", "-O2", "-Wall",
+    # -march pinned WITHOUT vector: gcc-15's default march emits RVV/zcb
+    # insns the no-V boot CPU SIGILLs on (the repo-wide lesson; see
+    # test/musl_build.py).
+    cmd = [CC, "-march=rv64gc_zba_zbb_zbs", "-static", "-nostdlib", "-O2",
+           "-Wall",
            "-I", os.path.join(MUSL, "include"),
            "-o", out, os.path.join(HERE, "oh2_probe.c"),
            os.path.join(MUSL, "lib", "crt1.o"),
