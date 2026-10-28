@@ -1561,3 +1561,71 @@ is the instrument if the greeter still does not launch.
   PAM (user rux/rux shadow-hash staged), and the login screen have
   NOT yet been reached — they are the next milestones once the udev
   db populates.
+
+## Session 18 — the gdm domino: coldplug WORKS, and a new kernel bug
+## (silent SIGKILL storm) surfaced behind it
+
+- r8 CORRECTION first: "enumeration finds zero devices" was an
+  artifact of my own probe — udevadm lives at /bin/udevadm (and
+  /lib/systemd/systemd-udevd is a symlink to the same multi-call
+  binary); every /usr/bin/udevadm exec ENOENT'd with silent exit 127,
+  so the coldplug never ran. Fixed in runit (all four exec sites +
+  rc prints). The r8 "subsystem readlink" kernel item was therefore
+  NOT the blocker; the DRM/block sysfs shape was already
+  Linux-correct. Still landed (harmless, Linux-parity): SUBSYSTEM= in
+  both uevent-attr READ generators (add_uevent_attr + a now
+  subsystem-parameterized add_env_uevent_attr — its write side had
+  hardcoded "input" for the PCI function's uevent, fixed), drm/input
+  subsystem links now point at the BUS hubs (bus/drm, bus/input), and
+  build_tree creates /sys/bus/{drm,input}/devices hubs +
+  register_drm_device links bus/drm/devices/{card0,renderD128}.
+- r9: with the path fix the coldplug RUNS: "udevadm trigger rc=0",
+  and the verbose re-trigger enumerates REAL DEVICES —
+  /sys/class/input/input0, input1,
+  /sys/devices/pci0000:00/0000:00:02.0/drm/card0, renderD128.
+  THEN the new blocker shows: a mass kill storm — settle child dies
+  st=9, then system+session dbus, upowerd, accounts-daemon, the
+  runit tailer + devlog sink, polkitd, logind (exit 1, starved of the
+  dead bus), gdm3 itself. Screen stays black.
+- r10/r11 (loglevel=7): storm reproduces bit-for-bit with ZERO
+  kernel prints — no SIGKILL-SEND (sys_kill trace), no OOM, no
+  sysrq, no watchdog. Instrumented the PID-namespace teardown kill
+  (exit.rs, "PIDNS-KILL"): silent in r11 — excluded.
+- r12: instrumented kill_other_threads ("KOT-KILL"): fires only
+  LEGITIMATELY (upowerd/polkitd/accounts tearing down their OWN GLib
+  thread pools on exit) — excluded as the storm source.
+- r13: instrumented the core kernel-origin signal entry
+  (send_signal_g, "KSIG9/KSIG15"): only the same-group teardowns
+  print. dbus/accounts/tailer/gdm3's killers still invisible.
+- r14: instrumented tkill/tgkill delivery ("TKSIG"): only two legit
+  SIGTERM self-raises (accounts-daemon, polkitd raise(SIGTERM) on
+  fatal errors — GLib normal). Excluded.
+- r15: instrumented do_exit_group — THE funnel ("EXITGRP: pid comm
+  code pending"). The storm decodes: EVERY victim dies via the
+  FATAL-SIGNAL path (do_signal's default-action branch calls
+  do_exit_group(-sig); signal.rs:2020) with code=-9 AND
+  pending=0x100 (SIGKILL bit set) — first victim is pid 321
+  comm='dbus-daemon' (a dbus activation-launch-helper child,
+  pre-exec), then system dbus 307, session dbus 309, upowerd,
+  accounts, ... i.e. a SIGKILL is queued DIRECTLY into pending
+  bitmaps through a path that bypasses every send_* function
+  (KILLTRACE in the send core never fires either).
+  Remaining candidates after elimination: direct pending.add writers
+  — seccomp_kill (its gate prints — silent, excluded unless called
+  from elsewhere), PTRACE_KILL (needs a tracer), or STALE pending
+  bits on recycled task memory that activate when TIF_SIGPENDING
+  gets set (Task::new zero-initializes pending, so this needs a
+  task-struct reuse path that skips init). NEXT STEP (one boot):
+  print inside do_signal's dequeue (siginfo queue contents + sender
+  attribution of the dequeued SIGKILL) — the EXITGRP instrument
+  already catches every death; the dequeue print names the queued
+  info's si_code/si_pid, which distinguishes send-with-info from a
+  bare bitmap bit.
+- Functional gate on the kernel changes so far (sysfs SUBSYSTEM +
+  bus hubs): riscv64 build rc=0; minimal-rootfs smoke 0 panics,
+  prompt reached. Full dual-arch + make test re-run owed after the
+  diagnostic prints come out (they must not ride into the tier gate
+  or the merge).
+- r26gate gave up at 00:14:30 without a quiet window (foreign QEMUs
+  7-10 all evening); re-armed after this commit for another 6h. The
+  v2quiet watcher (expires ~03:14) yields to it as before.

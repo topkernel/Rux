@@ -2087,6 +2087,34 @@ pub fn send_signal_from_user(pid: u32, sig: i32) -> Result<(), i32> {
 /// forensics printed si_pid=0/si_code=0 and the real sender stayed
 /// invisible (gnome-session-binary SIGTERM hunt, fire-gate-merged-r1).
 pub fn send_signal_from_user_tkill(tid: u32, sig: i32) -> Result<(), i32> {
+    // gdm bring-up r9-r13: the mass SIGKILL storm bypassed every other
+    // instrumented path; tkill/tgkill delivery was the silent one (the
+    // legacy sys_tkill has NO tgid restriction — any process can
+    // tkill(ANY_PID, SIGKILL)). Name caller + target for fatal signals.
+    if sig == 9 || sig == 15 {
+        static TK_N: core::sync::atomic::AtomicUsize =
+            core::sync::atomic::AtomicUsize::new(0);
+        if TK_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 120 {
+            let (cp, cc) = crate::sched::current()
+                .map(|t| unsafe {
+                    (
+                        (*t).pid(),
+                        alloc::string::String::from(
+                            core::str::from_utf8_unchecked((*t).comm())
+                                .trim_end_matches('\0'),
+                        ),
+                    )
+                })
+                .unwrap_or((0, alloc::string::String::from("kernel")));
+            crate::pr_err!(
+                "TKSIG{}: caller pid={} comm='{}' -> tid={}",
+                sig,
+                cp,
+                cc,
+                tid
+            );
+        }
+    }
     if sig < 1 || sig > 64 {
         return Err(crate::errno::Errno::InvalidArgument.as_neg_i32());
     }
@@ -2156,6 +2184,38 @@ pub fn send_signal_directed(pid: u32, sig: i32) -> Result<(), i32> {
 fn send_signal_g(pid: u32, sig: i32, group: i32) -> Result<(), i32> {
     if sig < 1 || sig > 64 {
         return Err(crate::errno::Errno::InvalidArgument.as_neg_i32());
+    }
+
+    // gdm bring-up r9-r12: the mass-SIGKILL storm's sender is still
+    // unnamed after excluding sys_kill (prints), OOM (prints), sysrq
+    // (prints), PID-ns teardown (instrumented, silent) and
+    // kill_other_threads (instrumented, legitimate). This is the CORE
+    // kernel-origin entry — name caller + target for every kernel
+    // SIGKILL/SIGTERM until the storm is attributed.
+    if sig == 9 || sig == 15 {
+        static KS_N: core::sync::atomic::AtomicUsize =
+            core::sync::atomic::AtomicUsize::new(0);
+        if KS_N.fetch_add(1, core::sync::atomic::Ordering::Relaxed) < 120 {
+            let (cp, cc) = crate::sched::current()
+                .map(|t| unsafe {
+                    (
+                        (*t).pid(),
+                        alloc::string::String::from(
+                            core::str::from_utf8_unchecked((*t).comm())
+                                .trim_end_matches('\0'),
+                        ),
+                    )
+                })
+                .unwrap_or((0, alloc::string::String::from("kernel")));
+            crate::pr_err!(
+                "KSIG{}: caller pid={} comm='{}' -> target pid={} group={}",
+                sig,
+                cp,
+                cc,
+                pid,
+                group
+            );
+        }
     }
 
     // SAFETY: pid_hash_lookup_pinned returns a valid Task pointer or null;

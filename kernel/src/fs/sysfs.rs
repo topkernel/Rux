@@ -378,6 +378,7 @@ fn add_uevent_attr(dev: &Arc<KObject>) {
     // Copy everything the closures need — they must be 'static.
     let devpath = dev.path();
     let subsystem = String::from(dev.ktype.subsystem().unwrap_or("kernel"));
+    let subsystem_show = subsystem.clone();
     let devno = *dev.devno.lock();
     let devname = dev.devname.lock().clone();
     let devname_show = devname.clone();
@@ -386,7 +387,14 @@ fn add_uevent_attr(dev: &Arc<KObject>) {
         "uevent",
         move || {
             // Show side: the static env keys (newline-separated).
+            // SUBSYSTEM= since the gdm bring-up: sd-device accepts it
+            // from the uevent file as one of its subsystem resolution
+            // paths (alongside the `subsystem` readlink), and the
+            // empty-udev-db hunt showed both paths must carry it.
             let mut out = String::new();
+            out.push_str("SUBSYSTEM=");
+            out.push_str(&subsystem_show);
+            out.push('\n');
             if let Some((major, minor)) = devno {
                 use core::fmt::Write as _;
                 let _ = write!(out, "MAJOR={}\nMINOR={}", major, minor);
@@ -844,17 +852,30 @@ impl InputEventReg {
 }
 
 /// A uevent attribute whose environment is a fixed key=value set (the
-/// input_dev kobject: PRODUCT/NAME/PROP/EV/...). Same read/write contract
-/// as `add_uevent_attr` — read returns the env block, write of
+/// input_dev kobject: PRODUCT/NAME/PROP/EV/...; also the PCI function
+/// kobject: DRIVER/PCI_SLOT_NAME/MODALIAS). Same read/write contract
+/// as `add_uevent_attr` — read returns the env block (SUBSYSTEM=
+/// prepended since the gdm bring-up: sd-device resolves subsystem from
+/// the uevent file as well as the `subsystem` readlink), write of
 /// add/remove/change re-broadcasts it on the netlink socket.
-fn add_env_uevent_attr(dev: &Arc<KObject>, devpath: &str, env: Vec<(String, String)>) {
+fn add_env_uevent_attr(
+    dev: &Arc<KObject>,
+    devpath: &str,
+    subsystem: &str,
+    env: Vec<(String, String)>,
+) {
     let env_show = env.clone();
     let devpath = String::from(devpath);
+    let subsystem = String::from(subsystem);
+    let subsystem_show = subsystem.clone();
     attr_rw(
         dev,
         "uevent",
         move || {
             let mut out = String::new();
+            out.push_str("SUBSYSTEM=");
+            out.push_str(&subsystem_show);
+            out.push('\n');
             for (k, v) in env_show.iter() {
                 out.push_str(k);
                 out.push('=');
@@ -870,7 +891,7 @@ fn add_env_uevent_attr(dev: &Arc<KObject>, devpath: &str, env: Vec<(String, Stri
             };
             let extra: Vec<(&str, &str)> =
                 env.iter().map(|(k, v)| (k.as_str(), v.as_str())).collect();
-            uevent_send_full(&devpath, action, "input", &extra);
+            uevent_send_full(&devpath, action, &subsystem, &extra);
             0
         },
     );
@@ -941,13 +962,14 @@ pub fn register_input_event(reg: &InputEventReg) -> u64 {
         });
     }
 
-    // subsystem link: resolves to /sys/class/input (basename "input", the
-    // value GetSubsystem()-style consumers take after the last '/').
-    mk_link(&input_dev, "subsystem", "../../../class/input");
+    // subsystem link: resolves to /sys/bus/input (Linux-exact bus hub;
+    // basename "input" is the value GetSubsystem()-style consumers take
+    // after the last '/').
+    mk_link(&input_dev, "subsystem", "../../../bus/input");
 
     let devpath_dev = format!("/devices/virtual/input/{}", reg.input_name);
     let dev_env = reg.dev_env();
-    add_env_uevent_attr(&input_dev, &devpath_dev, dev_env.clone());
+    add_env_uevent_attr(&input_dev, &devpath_dev, "input", dev_env.clone());
 
     // ---- event node kobject (/sys/class/input/inputN/eventM) ----
     let evnode = mk_dir(&input_dev, &reg.event_name, KType::Input);
@@ -958,7 +980,7 @@ pub fn register_input_event(reg: &InputEventReg) -> u64 {
     let ev_minor = reg.minor;
     attr_ro(&evnode, "dev", move || format!("{}:{}\n", ev_major, ev_minor).into_bytes());
     add_uevent_attr(&evnode);
-    mk_link(&evnode, "subsystem", "../../../../class/input");
+    mk_link(&evnode, "subsystem", "../../../../bus/input");
 
     // ---- links: /sys/class/input/eventM and /sys/dev/char/<maj:min> ----
     let target = format!("../../devices/virtual/input/{}/{}", reg.input_name, reg.event_name);
@@ -1081,6 +1103,7 @@ pub fn register_drm_device(slot_name: &str) {
     add_env_uevent_attr(
         &func,
         &format!("/devices/pci0000:00/{}", slot_name),
+        "pci",
         vec![
             (String::from("DRIVER"), String::from("virtio-pci")),
             (String::from("PCI_SLOT_NAME"), String::from(slot_name)),
@@ -1106,8 +1129,9 @@ pub fn register_drm_device(slot_name: &str) {
         // <node>/device -> the PCI function (libdrm's legacy
         // "<node-path>/device" walk).
         mk_link(&node, "device", "../..");
-        // <node>/subsystem -> the drm class dir.
-        mk_link(&node, "subsystem", "../../../../../class/drm");
+        // <node>/subsystem -> the drm BUS hub (Linux-exact: bus/drm,
+        // not class/drm — sd-device resolves subsystem here).
+        mk_link(&node, "subsystem", "../../../../../bus/drm");
         add_uevent_attr(&node);
     }
 
@@ -1129,6 +1153,18 @@ pub fn register_drm_device(slot_name: &str) {
     }
     if let Some(pci_devices) = lookup_path("bus/pci/devices") {
         mk_link(&pci_devices, slot_name, &format!("../../../devices/pci0000:00/{}", slot_name));
+    }
+    // /sys/bus/drm/devices/<node> -> ../../../devices/pci0000:00/<slot>/drm/<node>
+    // (sd-device-enumerator also scans /sys/bus/<sub>/devices; Linux
+    // bus_register shape, added for the gdm/udev bring-up).
+    if let Some(drm_bus_devices) = lookup_path("bus/drm/devices") {
+        for node_name in ["card0", "renderD128"] {
+            mk_link(
+                &drm_bus_devices,
+                node_name,
+                &format!("../../../devices/pci0000:00/{}/drm/{}", slot_name, node_name),
+            );
+        }
     }
 
     // Broadcast the node "add" uevents (coldboot parity; the events are
@@ -1432,6 +1468,15 @@ fn build_tree() -> Arc<KObject> {
     mk_dir(&bus, "platform", KType::Generic);
     let _virtio_bus = mk_dir(&bus, "virtio", KType::Generic);
     let _block_bus = mk_dir(&bus, "block", KType::Block);
+    // drm/input bus hubs with devices/ subdirs — Linux bus_register
+    // shape; udev's sd-device resolves a device's subsystem through the
+    // `subsystem` readlink, and the canonical Linux target is the BUS
+    // hub (class dirs are userspace convenience). The DRM nodes'
+    // subsystem links point here since the gdm bring-up.
+    let drm_bus = mk_dir(&bus, "drm", KType::Drm);
+    let _drm_bus_devices = mk_dir(&drm_bus, "devices", KType::Generic);
+    let input_bus = mk_dir(&bus, "input", KType::Input);
+    let _input_bus_devices = mk_dir(&input_bus, "devices", KType::Generic);
     // /sys/bus/pci/devices — the per-function symlinks libdrm's
     // drmGetDevice falls back to when /sys/dev/char is not usable
     // ("/sys/bus/pci/devices/%04x:%02x:%02x.%d" is in the image's
