@@ -116,3 +116,23 @@ both instruments preserved) + the note commits. The wake-placement
 hunks are d6124bbc/ccfc708e/2beb2ded; their merge gate is exactly the
 tier set this watcher owes. If a NEWER main lands before this branch
 merges, re-merge and re-gate again (pick hot path rule).
+
+COORDINATOR PIVOT ADJUDICATION (12:4x, launcher-priority directive):
+the "staged perf parses ohk30a/ohk30aw" named in the directive were
+checked and are NOT a pending 38A parse — they are leg-30A artifacts
+(Oct 27 11:07/11:26; untracked leftovers), already consumed by leg-30A
+at 3fb586d2 (SC-30A.txt: Tier-1 center PASS, Tier-2 fs rows improved
+on the leg-30A tip). They predate the wake-placement reservation
+(d6124bbc, Oct 28 01:45) by ~15 h, so they carry NO Tier numbers for
+the wake-placement set; the only certifying run for it is the calm-
+window gate (watcher v3, armed). The parse files are committed as
+artifacts now to stop the recurring stale-inventory confusion. No
+verdict is being written from them. Per the same directive: the A2
+deep-queue confirmator is DEFERRED (not launcher-critical; script
+staged unrun), the optional reference-boot comparison is NOT started,
+and this leg stops after the handover. Watcher v3 stays armed — it
+only launches on a genuinely quiet host (qemu<2 load1<9 avail>=12G),
+which by construction does not compete with launcher boots; kill PID
+in run/perf-gate-leg38a-watch.pid if strict no-boot compliance is
+wanted instead.
+
