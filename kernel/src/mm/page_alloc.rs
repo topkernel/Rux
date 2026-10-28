@@ -26,7 +26,47 @@ static LEGACY_ALLOCS: AtomicUsize = AtomicUsize::new(0);
 /// set while a task is inside vmscan's reclaim loop, so allocations made
 /// BY reclaim (swap I/O paths) fail fast instead of recursing into
 /// another try_to_free_pages round.
+///
+/// Leg-52 item 0 (fleet s19/s24-r30, stress-lane A/B verdict): the value
+/// is the HOLDER'S PID (0 = free), not a bare 0/1 flag. The old flag had
+/// exits only at the reclaim block's own returns (below); a task KILLED
+/// while inside the block (the pagefault-OOM path can select the
+/// sleeping holder itself, or any fatal SIGKILL lands mid-writeback
+/// wait) funnels into do_exit without unwinding them, leaving the gate
+/// stuck at 1 — every later allocation then takes the no-drain skip
+/// path (the fake-OOM family; every fleet forensic block read
+/// in_direct_reclaim=1, including each boot's first dump). do_exit now
+/// clears the gate BY IDENTITY (reclaim_gate_exit_release), so the leak
+/// is closed deterministically instead of hoping the block's exits ran.
 static IN_DIRECT_RECLAIM: AtomicUsize = AtomicUsize::new(0);
+
+/// How many times the exit path has cleared a gate the dying task still
+/// held (each occurrence was a would-be permanent leak on the old
+/// flag). Printed in the OOM-FORENSIC block; non-zero on a repro run is
+/// the verification handle that the fix fires where the old kernel
+/// wedged.
+static RECLAIM_GATE_EXIT_RELEASES: AtomicUsize = AtomicUsize::new(0);
+
+/// Leg-52 item 0: called from do_exit with the dying task's pid. Clears
+/// the direct-reclaim gate IFF this task is still the recorded holder —
+/// a gate already released (or held by another task) is untouched, so
+/// the hook is a no-op on every normal exit (one failed CAS).
+pub fn reclaim_gate_exit_release(pid: u32) {
+    let holder = if pid == 0 { usize::MAX } else { pid as usize };
+    if IN_DIRECT_RECLAIM
+        .compare_exchange(holder, 0, Ordering::AcqRel, Ordering::Acquire)
+        .is_ok()
+    {
+        let n = RECLAIM_GATE_EXIT_RELEASES.fetch_add(1, Ordering::Relaxed) + 1;
+        // Bounded by actual mid-block deaths (rare by construction), so
+        // each one is worth a serial line on the repro runs.
+        crate::pr_info!(
+            "RECLAIM-GATE: pid {} died holding IN_DIRECT_RECLAIM; cleared ({} releases total)",
+            pid,
+            n
+        );
+    }
+}
 
 /// Allocate 2^order contiguous physical pages
 ///
@@ -106,9 +146,16 @@ fn alloc_pages_inner(gfp_flags: GfpFlags, order: usize) -> usize {
                     // holder falls through to the old skip path.
                     let mut gate_attempts = 0u32;
                     let mut held_gate = false;
+                    // Item 0: stamp the holder's pid into the gate (0 is
+                    // "free", so a pre-sched context claims usize::MAX) —
+                    // do_exit clears a gate its dying task still holds.
+                    let holder = {
+                        let pid = crate::process::current_pid();
+                        if pid == 0 { usize::MAX } else { pid as usize }
+                    };
                     while gate_attempts < 64 {
                         if IN_DIRECT_RECLAIM
-                            .compare_exchange(0, 1, Ordering::AcqRel, Ordering::Acquire)
+                            .compare_exchange(0, holder, Ordering::AcqRel, Ordering::Acquire)
                             .is_ok()
                         {
                             held_gate = true;
@@ -255,7 +302,11 @@ pub fn oom_forensic_dump(site: &str) {
     super::super::dfx::ledger::dump(&alloc::format!("oom: {}", site));
 
     crate::println!("==== OOM-FORENSIC #{} @ {} ====", DUMPS.load(Ordering::Relaxed), site);
-    crate::println!("OOM-FORENSIC: in_direct_reclaim={}", IN_DIRECT_RECLAIM.load(Ordering::Relaxed));
+    crate::println!(
+        "OOM-FORENSIC: in_direct_reclaim={} (holder pid; 0=free) gate_exit_releases={}",
+        IN_DIRECT_RECLAIM.load(Ordering::Relaxed),
+        RECLAIM_GATE_EXIT_RELEASES.load(Ordering::Relaxed)
+    );
 
     // Zone state: counters vs walkable chains
     // SAFETY: diagnostic read-only node access.

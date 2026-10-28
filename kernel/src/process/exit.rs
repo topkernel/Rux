@@ -565,6 +565,19 @@ pub fn do_exit(exit_code: i32) -> ! {
         }
     };
 
+    // Leg-52 item 0 (fleet s19/s24-r30, stress-lane A/B verdict):
+    // release the direct-reclaim gate if THIS task dies while still
+    // holding it. The gate's CAS (mm/page_alloc.rs) has exits only at
+    // the reclaim block's own returns; a task killed mid-block funnels
+    // here without unwinding them, which used to leave IN_DIRECT_RECLAIM
+    // stuck at 1 forever — every later allocation then took the
+    // no-drain skip path (the fake-OOM family). One CAS on our own pid:
+    // a gate already released or held by another task is untouched.
+    // SAFETY: current is the raw pointer to the calling task, valid
+    // because we are it and do_exit never returns.
+    let dying_pid = unsafe { (*current).pid() };
+    crate::mm::page_alloc::reclaim_gate_exit_release(dying_pid);
+
     // The sched:sched_process_exit tracepoint, recorded at do_exit entry
     // (the reference's record point). group_dead: this exit takes the
     // thread group to its last live thread — nr_threads has not been
