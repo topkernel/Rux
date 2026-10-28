@@ -22,12 +22,12 @@ when the tree gains a file the map does not know about.
 | metric | value |
 |---|---|
 | source files in kernel/src | 413 |
-| source lines in kernel/src | 262,700 |
+| source lines in kernel/src | 262,810 |
 | files fully reviewed | 21 |
-| files partially reviewed | 80 |
-| files not yet reviewed | 312 |
+| files partially reviewed | 83 |
+| files not yet reviewed | 309 |
 | lines in fully reviewed files | 7,410 |
-| reviewed files mainline changed since `47d96961` (need re-read) | 51 |
+| reviewed files mainline changed since `47d96961` (need re-read) | 54 |
 
 ## Defects found and fixed
 
@@ -36,6 +36,7 @@ when the tree gains a file the map does not know about.
 | `ddfa8abc` | `kernel/src/interrupt/softirq.rs` | The 2ms softirq budget was checked once per batch of pending vectors, so a batch of slow handlers could overrun it by the time of every vector left in the batch. the reference kernel checks the budget before every vector and leaves the unreached ones pending. |
 | `327b4a52` | `kernel/src/fs/inode.rs, kernel/src/fs/file.rs` | The generic O_APPEND write read the file size, released the lock and only then took the data lock to write — two appenders on different open descriptions could pick the same offset, and the second write overwrote the first. the reference kernel takes the append position under the inode lock. |
 | `ff6fc39b` | `kernel/src/syscall/memory.rs` | msync had no 'addr + len' wrap check (the reference kernel's mm/msync.c has one). A near-max length wrapped the page-aligned length to 0, so msync reported success without syncing anything; the reference kernel returns EINVAL. |
+| `e32cdfef` | `kernel/src/mm/mm_struct.rs, kernel/src/arch/*/mm/mm_ops.rs, kernel/src/syscall/memory.rs, kernel/src/process/exec.rs, kernel/src/ipc/binder.rs` | mm->total_vm only ever grew: the VMA removal paths (munmap, the MAP_FIXED replacement) never released the pages that left the mapping, and the VMA-installing paths that do not go through mmap (the brk heap, the exec image, the forked child's copy, the binder zone) never charged theirs. The reference kernel keeps the counter equal to the live mapping size - every installed VMA is charged and every removed one gives its pages back - and checks RLIMIT_AS against that live value. The drift made /proc/<pid>/status VmSize and /proc/<pid>/stat vsize describe every mapping the process ever made, and refused mappings that fit once the counter had grown past a finite RLIMIT_AS. |
 | `b433fb13` | `kernel/src/sched/fair.rs` | The CFS pick lifts the entries a CPU cannot run (affinity, cgroup throttle, ownership) out of the timeline and re-inserts them after the pick, but min_vruntime was advanced while they were out: the leftmost looked further right than it is. min_vruntime only ever grows, so the drift was permanent, and it is the reference point new tasks and waking sleepers are placed against - a drifted value silently erased their sleep credit. The reference kernel computes min_vruntime from the leftmost entry of the complete tree (kernel/sched/fair.c: update_min_vruntime). |
 | `b433fb13` | `kernel/src/syscall/memory.rs` | mmap accepted a file offset that is not a multiple of the page size. The reference kernel's mmap wrapper rejects it with EINVAL before anything else, and the check is unconditional - it applies to anonymous mappings too, where the offset is ignored. Without it a misaligned offset silently shifted the mapping's file extent: the VMA stored the raw offset and the fault path then looked up a page-cache entry at a non-page-aligned offset. |
 | `e47b155a` | `kernel/src/ipc/posix_mq.rs` | mq_timedreceive/mq_timedsend take an ABSOLUTE CLOCK_REALTIME deadline (abs_timeout), but Rux read the value as RELATIVE — a caller passing an absolute deadline waited twice as long, and an already-expired deadline blocked for the full timeout instead of returning ETIMEDOUT at once. |
@@ -117,7 +118,7 @@ when the tree gains a file the map does not know about.
 | `uaccess.rs` | 451 | ⬜ |  |
 | `vext.rs` | 386 | ⬜ |  |
 
-### kernel/src/arch/riscv64/mm (8478 lines)
+### kernel/src/arch/riscv64/mm (8501 lines)
 
 | file | lines | status | note |
 |---|---:|---|---|
@@ -125,7 +126,7 @@ when the tree gains a file the map does not know about.
 | `exception.rs` | 718 | ⬜ |  |
 | `fixmap.rs` | 267 | ⬜ |  |
 | `memory_layout.rs` | 566 | 🔶🔁 | image window constants; 主线已改动，需重读 |
-| `mm_ops.rs` | 2519 | 🔶🔁 | COW 故障快/慢路径、PTE 权限检查; 主线已改动，需重读 |
+| `mm_ops.rs` | 2542 | 🔶🔁 | COW 故障快/慢路径、PTE 权限检查、mmap/MAP_FIXED/munmap/fork 的 VMA 手术与记账（e32cdfef）; 主线已改动，需重读 |
 | `mmu_init.rs` | 2162 | 🔶 | kernel image mapping |
 | `mod.rs` | 53 | ⬜ |  |
 | `page_fault.rs` | 1597 | ⬜ |  |
@@ -151,7 +152,7 @@ when the tree gains a file the map does not know about.
 | `trap.rs` | 2811 | 🔶🔁 | TSS/IST interrupt stacks; 主线已改动，需重读 |
 | `uaccess.rs` | 420 | ⬜ |  |
 
-### kernel/src/arch/x86_64/mm (8042 lines)
+### kernel/src/arch/x86_64/mm (8065 lines)
 
 | file | lines | status | note |
 |---|---:|---|---|
@@ -159,7 +160,7 @@ when the tree gains a file the map does not know about.
 | `exception.rs` | 428 | ⬜ |  |
 | `fixmap.rs` | 117 | ⬜ |  |
 | `memory_layout.rs` | 439 | ⬜ |  |
-| `mm_ops.rs` | 2645 | ⬜ |  |
+| `mm_ops.rs` | 2668 | 🔶🔁 | mmap/MAP_FIXED/munmap/fork 的 VMA 手术与记账（与 riscv64 同构，e32cdfef）; 主线已改动，需重读 |
 | `mmu_init.rs` | 2275 | 🔶 | kernel image mapping |
 | `mod.rs` | 36 | ⬜ |  |
 | `page_fault.rs` | 1815 | ⬜ |  |
@@ -410,12 +411,12 @@ when the tree gains a file the map does not know about.
 |---|---:|---|---|
 | `mod.rs` | 1177 | ⬜ |  |
 
-### kernel/src/ipc (13508 lines)
+### kernel/src/ipc (13513 lines)
 
 | file | lines | status | note |
 |---|---:|---|---|
 | `access_token.rs` | 388 | ⬜ |  |
-| `binder.rs` | 8127 | 🔶🔁 | ioctl numbers, dispatch; 主线已改动，需重读 |
+| `binder.rs` | 8132 | 🔶🔁 | ioctl numbers, dispatch, mmap 区的 VMA 记账（e32cdfef）; 主线已改动，需重读 |
 | `mod.rs` | 31 | ⬜ |  |
 | `posix_mq.rs` | 1157 | 🔶🔁 | open/unlink/send/receive；绝对超时已修（e47b155a）; 主线已改动，需重读 |
 | `sysv_msg.rs` | 1092 | 🔶 | msgsnd/msgrcv |
@@ -423,7 +424,7 @@ when the tree gains a file the map does not know about.
 | `sysv_shm.rs` | 981 | 🔶🔁 | IPC_RMID, attach/detach; 主线已改动，需重读 |
 | `util.rs` | 459 | ✅ | idr allocation, permission checks |
 
-### kernel/src/mm (15869 lines)
+### kernel/src/mm (15904 lines)
 
 | file | lines | status | note |
 |---|---:|---|---|
@@ -437,7 +438,7 @@ when the tree gains a file the map does not know about.
 | `lru.rs` | 545 | ⬜ |  |
 | `memblock.rs` | 660 | ⬜ |  |
 | `meminfo.rs` | 265 | ⬜ |  |
-| `mm_struct.rs` | 1196 | ⬜ |  |
+| `mm_struct.rs` | 1231 | 🔶 | total_vm/rss 记账、VMA 增删；记账只增不减已修（e32cdfef） |
 | `mod.rs` | 249 | ⬜ |  |
 | `oom_kill.rs` | 582 | ⬜ |  |
 | `page.rs` | 149 | ⬜ |  |
@@ -450,7 +451,7 @@ when the tree gains a file the map does not know about.
 | `small_alloc.rs` | 886 | 🔶🔁 | size classes, magazine, alloc/free; 主线已改动，需重读 |
 | `swap.rs` | 545 | ⬜ |  |
 | `vdso.rs` | 574 | ⬜ |  |
-| `vma.rs` | 1048 | ⬜ |  |
+| `vma.rs` | 1048 | 🔶🔁 | VMA 结构、split/merge、can_merge 的文件偏移连续性、VmaManager 增删查; 主线已改动，需重读 |
 | `vmemmap.rs` | 221 | ⬜ |  |
 | `vmscan.rs` | 407 | ⬜ |  |
 | `vmstat.rs` | 69 | ✅ | written by this review (page counters) |
@@ -501,12 +502,12 @@ when the tree gains a file the map does not know about.
 |---|---:|---|---|
 | `mod.rs` | 862 | ⬜ |  |
 
-### kernel/src/process (13939 lines)
+### kernel/src/process (13955 lines)
 
 | file | lines | status | note |
 |---|---:|---|---|
 | `coredump.rs` | 591 | ⬜ |  |
-| `exec.rs` | 1428 | 🔶🔁 | exec 的信号处置/掩码复位; 主线已改动，需重读 |
+| `exec.rs` | 1444 | 🔶🔁 | exec 的信号处置/掩码复位、装载的 VMA 记账（e32cdfef）; 主线已改动，需重读 |
 | `exit.rs` | 2115 | ⬜ |  |
 | `fork.rs` | 1012 | 🔶🔁 | task creation paths; 主线已改动，需重读 |
 | `kthread.rs` | 274 | ⬜ |  |
@@ -525,7 +526,7 @@ when the tree gains a file the map does not know about.
 | `cgroup.rs` | 874 | ⬜ |  |
 | `class.rs` | 269 | ⬜ |  |
 | `deadline.rs` | 536 | ⬜ |  |
-| `fair.rs` | 1650 | 🔧 | CFS 核心：vruntime 权重方向、min_vruntime、pick 跳过路径（min_vruntime 越界已修 b433fb13） |
+| `fair.rs` | 1650 | 🔧🔁 | CFS 核心：vruntime 权重方向、min_vruntime、pick 跳过路径（min_vruntime 越界已修 b433fb13）; 主线已改动，需重读 |
 | `idle.rs` | 100 | ✅ |  |
 | `mod.rs` | 129 | ⬜ |  |
 | `rt.rs` | 639 | 🔶 | enqueue/dequeue/pick/bitmap/priority inversion |
@@ -557,14 +558,14 @@ when the tree gains a file the map does not know about.
 | `seqlock.rs` | 260 | ⬜ |  |
 | `spinlock.rs` | 621 | ⬜ |  |
 
-### kernel/src/syscall (31722 lines)
+### kernel/src/syscall (31730 lines)
 
 | file | lines | status | note |
 |---|---:|---|---|
 | `dispatch.rs` | 1214 | ⬜ |  |
 | `file.rs` | 5133 | 🔶🔁 | futex2 wrappers, fsync; 主线已改动，需重读 |
 | `io.rs` | 2635 | ⬜ |  |
-| `memory.rs` | 3918 | 🔶🔁 | mmap/munmap/mprotect/mremap；msync 回绕已修（ff6fc39b）、mmap 偏移未页对齐已修（b433fb13）; 主线已改动，需重读 |
+| `memory.rs` | 3926 | 🔶🔁 | mmap/munmap/mprotect/mremap/brk；msync 回绕已修（ff6fc39b）、mmap 偏移未页对齐已修（b433fb13）、brk 记账已修（e32cdfef）; 主线已改动，需重读 |
 | `misc.rs` | 3881 | ⬜ |  |
 | `mod.rs` | 438 | ⬜ |  |
 | `network.rs` | 4246 | ⬜ |  |
