@@ -712,6 +712,13 @@ if [ ! -f "$KERNEL_DEFAULT" ] || [ "$MODE" != "quick" ]; then
         exit 2
     fi
 fi
+# Snapshot the kernel for THIS round: the shared target/.../rux can be
+# flipped back to a unit-test build mid-round by a concurrent `make test`
+# (the coordinator's merge gates do exactly that) — every leg of a round
+# must boot the same plain kernel the round started with.
+KERNEL_SNAPSHOT="$SUITE_ROOT/kernel-$(date -u +%Y%m%dT%H%M%SZ)"
+cp "$KERNEL_DEFAULT" "$KERNEL_SNAPSHOT" || exit 2
+KERNEL_DEFAULT="$KERNEL_SNAPSHOT"
 
 # --- how many machines the host can carry -------------------------------
 if [ -z "$CONCURRENCY" ]; then
