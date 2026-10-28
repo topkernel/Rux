@@ -5518,26 +5518,28 @@ pub fn sys_syncfs(_args: SyscallArgs) -> i64 {
 /// F_ADD_SEALS/F_GET_SEALS when MFD_ALLOW_SEALING is passed).
 ///
 /// # Arguments
-/// - args[0]: name - file name (can be NULL; advisory only)
+/// - args[0]: name - file name (advisory only)
 /// - args[1]: flags - MFD_CLOEXEC, MFD_ALLOW_SEALING, MFD_NOEXEC_SEAL,
 ///   MFD_EXEC, MFD_NONBLOCK (MFD_HUGETLB is EINVAL — no hugetlbfs)
 pub fn sys_memfd_create(args: SyscallArgs) -> i64 {
     let name_ptr = args[0] as *const u8;
     let flags = args[1] as u32;
 
-    // Linux copies the name with strnlen_user(NAME_MAX + 1): NULL is fine,
-    // a name longer than NAME_MAX (255) is EINVAL. The name is advisory in
-    // this kernel (kept out — no dentry to name).
+    // The reference kernel reads the name with strnlen_user() bounded by
+    // MFD_NAME_MAX_LEN + 1: a NULL pointer faults in that read and the
+    // kernel answers EFAULT (the read returns a length of zero, which the
+    // reference rejects), and a name longer than MFD_NAME_MAX_LEN is
+    // EINVAL. The name itself is advisory in this kernel (kept out — there
+    // is no dentry to name).
+    if name_ptr.is_null() {
+        return -(errno::EFAULT as i64);
+    }
     let mut name_buf = [0u8; 256];
-    let name: &[u8] = if name_ptr.is_null() {
-        &[]
-    } else {
-        match crate::arch::uaccess::strncpy_from_user(name_ptr, 256, &mut name_buf) {
-            Ok(s) => s,
-            Err(e) => return e as i64,
-        }
+    let name: &[u8] = match crate::arch::uaccess::strncpy_from_user(name_ptr, 256, &mut name_buf) {
+        Ok(s) => s,
+        Err(e) => return e as i64,
     };
-    if name.len() > 255 {
+    if name.len() > crate::fs::memfd::MFD_NAME_MAX_LEN {
         return -(errno::EINVAL as i64);
     }
 
