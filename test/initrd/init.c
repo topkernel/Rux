@@ -10,24 +10,6 @@
  * Compile: riscv64-linux-gnu-gcc -static -nostdlib -O2 [-DHELLO]
  */
 
-/* Freestanding environments must still provide the compiler's four
- * implicit functions (gcc emits memset for aggregate zero-init; the
- * gcc-15 default -O2 pulls it into devtmpfs_mknod_probe). */
-void *memset(void *s, int c, unsigned long n) {
-    unsigned char *p = s;
-    while (n--)
-        *p++ = (unsigned char)c;
-    return s;
-}
-
-void *memcpy(void *d, const void *s, unsigned long n) {
-    unsigned char *p = d;
-    const unsigned char *q = s;
-    while (n--)
-        *p++ = *q++;
-    return d;
-}
-
 #define SYS_write       64
 #define SYS_openat      56
 #define SYS_close       57

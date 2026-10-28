@@ -299,24 +299,45 @@ static int trunc_test(void)
 #define __NR_rt_sigtimedwait 137
 #define __NR_getpid 172
 #define SIGUSR2 12
-#define SA_RESTORER 0x04000000
 
-/* ABI + sigwait: rt_sigaction 32-byte layout round-trip, sigtimedwait
+/* rt_sigaction's user ABI is per-arch:
+ *   riscv64 (asm-generic, no SA_RESTORER): {handler +0, flags +8,
+ *     mask +16}, 24 bytes — musl 1.2.5 arch/riscv64/bits/signal.h and
+ *     jammy glibc agree (adjudication 2026-10-28: kernel correct,
+ *     LTP rt_sigaction01-03 pass 2x solo);
+ *   x86_64: {handler, flags, restorer +16, mask +24}, 32 bytes, and
+ *     glibc always sets SA_RESTORER (kernel x86_64 cfg implements it).
+ */
+#if defined(__x86_64__)
+#define SA_RESTORER 0x04000000
+#define SIGACT_WORDS 4
+#define ACT_MASK 3
+#else
+#define SIGACT_WORDS 3
+#define ACT_MASK 2
+#endif
+
+/* ABI + sigwait: rt_sigaction layout round-trip, sigtimedwait
  * consumes a pending blocked signal, zero timeout → EAGAIN */
 static int sig_test(void)
 {
-    /* 1. sigaction set/query round-trip (32-byte user ABI) */
+    /* 1. sigaction set/query round-trip (per-arch user ABI above) */
     puts_("M-s1\n");
-    u64 act[4] = { 1 /*SIG_IGN*/, SA_RESTORER, 0x1234 /*restorer*/, 0x000000ff /*mask*/ };
-    u64 old[4] = { 0, 0, 0, 0 };
+#if defined(__x86_64__)
+    u64 act[SIGACT_WORDS] = { 1 /*SIG_IGN*/, SA_RESTORER, 0x1234 /*restorer*/, 0x000000ff /*mask*/ };
+#else
+    u64 act[SIGACT_WORDS] = { 1 /*SIG_IGN*/, 0 /*flags*/, 0x000000ff /*mask*/ };
+#endif
+    u64 old[SIGACT_WORDS] = { 0, 0, 0 };
     s64 ret = sys6(__NR_rt_sigaction, SIGUSR2, (s64)act, (s64)old, 8, 0, 0);
     if (ret != 0) return 60;
     /* install again with a different mask; oldact must return the first */
-    u64 act2[4] = { 0 /*SIG_DFL — pending must stick for sigwait*/, 0, 0, 0x0000f000 };
+    u64 act2[SIGACT_WORDS] = { 0 /*SIG_DFL — pending must stick for sigwait*/ };
+    act2[ACT_MASK] = 0x0000f000;
     ret = sys6(__NR_rt_sigaction, SIGUSR2, (s64)act2, (s64)old, 8, 0, 0);
     if (ret != 0) return 61;
-    if (old[0] != 1) return 62;            /* handler */
-    if (old[3] != 0x000000ff) return 63;   /* sa_mask at offset 24 (ABI) */
+    if (old[0] != 1) return 62;                 /* handler */
+    if (old[ACT_MASK] != 0x000000ff) return 63; /* sa_mask (per-arch offset) */
 
     /* 2. block SIGUSR2, self-send, sigtimedwait must consume it */
     puts_("M-s2\n");
@@ -339,7 +360,7 @@ static int sig_test(void)
     if (ret != -11) return 67;
 
     /* restore ignore + unblock */
-    u64 ign[4] = { 1, 0, 0, 0 };
+    u64 ign[SIGACT_WORDS] = { 1, 0, 0 };
     sys6(__NR_rt_sigaction, SIGUSR2, (s64)ign, 0, 8, 0, 0);
     u64 unblk = ~blk;
     sys6(__NR_rt_sigprocmask, 1 /*SIG_UNBLOCK*/, (s64)&blk, 0, 8, 0, 0);

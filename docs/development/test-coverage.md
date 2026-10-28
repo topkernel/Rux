@@ -8,7 +8,7 @@ with `python3 scripts/gen_test_coverage.py` after changing
 any test wiring; CI-style drift check:
 `scripts/gen_test_coverage.py --check`.
 
-Generated: 2026-10-28T13:22Z
+Generated: 2026-10-28T14:01Z
 
 ## Headline
 
@@ -45,7 +45,7 @@ rows and stress coverage that apply.
 | misc | 2 | - | 0/9 | uncategorized |
 | mm | 6 | 29 | 5/15 | buddy/small_alloc/COW/fault: unit tests + the faultlat family, vma_storm, reclaimwb; oomchurn stress leg |
 | module | - | - | 0/2 | module loader: modchurn (needs module build env) |
-| net | 4 | 17 | 1/2 | loopback/virtio-net: unit tests + nettest probe (currently FAILING: rt_sigaction oldact sa_mask round-trip), slirp_test needs user networking |
+| net | 4 | 17 | 1/2 | loopback/virtio-net: unit tests + nettest probe (ABI-correct per-arch rt_sigaction check after the 2026-10-28 adjudication), slirp_test needs user networking |
 | oh | - | - | 0/1 | OpenHarmony boots: oh2_probe + oh-* scripts (special images) |
 | perf | - | - | 2/3 | perf subsystem: perf_probe; run/perf-gate.sh tier legs |
 | printk | - | - | 1/1 | printk ring: printk_flood (rootfs) |
@@ -183,7 +183,7 @@ wired = has a suite wrapper (`test/<name>-smoke.sh` or `-probe.sh`) or a named s
 | test/cowrace | cow_race.c (no runner) | manual | COW fork race; needs a boot driver wrapper |
 | test/heapwatch | run-boot.sh | manual | heap watch boot; riscv kernel compile was broken at b3586f69 (dispatch.rs i64/u64 cfg(x86_64) cast), x86 initrd variant boots the prebuilt cpio |
 | test/hotplug | run.py | manual | CPU/PCI hotplug uevent probe; build-img.sh needs the shared gate rootfs at /home/william/rux-gate/ubuntu/rootfs (absent) |
-| test/initrd | run-initrd.sh | suite | wired as test/initrd-boot-probe.sh (packs the cpio, requires all markers); currently FAILS on a kernel finding — init faults at sp inside devtmpfs_mknod_probe after the tmpfs /dev overmount |
+| test/initrd | run-initrd.sh | suite | wired as test/initrd-boot-probe.sh (packs the cpio, requires all 11 markers — passing; the reported fault was adjudicated a build artifact: gcc-15 default march emits zcb the boot CPU lacks, and without -fno-builtin gcc folds the memset shim into infinite recursion, walking sp to the stack floor) |
 | test/ohlite | mkohlite.sh | manual | OpenHarmony lite initrd image build (OH lane flows) |
 | test/stress | monkey.py (suite monkey legs) | suite | randomised command churn; riscv leg runs, x86 needs work/ubuntu-x86.img |
 | test/ltpscan | run1.sh (suite integration leg) | suite | bounded LTP sample on a private image copy |

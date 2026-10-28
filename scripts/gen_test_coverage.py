@@ -172,7 +172,7 @@ SUBSYSTEM_NOTES = {
     "fs": "ext4/vfs: unit tests + filemap/filedrain/bindmkdir probes; pbench fs rows; fuzz-fs leg (fleet image)",
     "ipc": "pipes/unix/eventfd: unit tests; pbench P5; LTP syscalls family",
     "binder": "binder.rs: binder/binder2 probes (riscv), binder4 probe (x86 leg) — all wired",
-    "net": "loopback/virtio-net: unit tests + nettest probe (currently FAILING: rt_sigaction oldact sa_mask round-trip), slirp_test needs user networking",
+    "net": "loopback/virtio-net: unit tests + nettest probe (ABI-correct per-arch rt_sigaction check after the 2026-10-28 adjudication), slirp_test needs user networking",
     "dfx": "syscost/trace/watchdog: dfx-smoke, tracefs-smoke, kallsyms-smoke, dfx-x86 probe",
     "arch-trap": "trap paths: decode/cfi probes (cfi wired on riscv), oops-smoke; KERNPANIC printer",
     "x86-port": "x86_64 boot: pstore-x86, dfx-x86, binder4-x86 legs (need PLATFORM=x86_64 bzImage; monkey-x86 also needs work/ubuntu-x86.img)",
@@ -562,9 +562,10 @@ def main():
          "gate rootfs at /home/william/rux-gate/ubuntu/rootfs (absent)"),
         ("test/initrd", "run-initrd.sh", "suite",
          "wired as test/initrd-boot-probe.sh (packs the cpio, requires "
-         "all markers); currently FAILS on a kernel finding — init "
-         "faults at sp inside devtmpfs_mknod_probe after the tmpfs "
-         "/dev overmount"),
+         "all 11 markers — passing; the reported fault was adjudicated "
+         "a build artifact: gcc-15 default march emits zcb the boot CPU "
+         "lacks, and without -fno-builtin gcc folds the memset shim "
+         "into infinite recursion, walking sp to the stack floor)"),
         ("test/ohlite", "mkohlite.sh", "manual",
          "OpenHarmony lite initrd image build (OH lane flows)"),
         ("test/stress", "monkey.py (suite monkey legs)", "suite",
