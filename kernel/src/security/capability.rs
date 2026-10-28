@@ -7,6 +7,10 @@
 //! Provides the `Cap` type (equivalent to Linux's `kernel_cap_t`) and all 41
 //! `CAP_*` constants matching the Linux UAPI numbering exactly.
 
+// Framekernel layer policy (docs/architecture/framekernel-layers.md):
+// this module must stay Safe Rust.
+#![forbid(unsafe_code)]
+
 /// Capability bitmask — 41 capabilities fit in a single u64.
 ///
 /// Equivalent to Linux's `kernel_cap_t`.  Copy-friendly, no heap allocation.
