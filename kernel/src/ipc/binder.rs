@@ -3031,7 +3031,21 @@ pub fn sleep_snapshot() {
                 return;
             }
             let state = tk.state();
-            if !state.contains(crate::process::task::TaskState::INTERRUPTIBLE) {
+            // leg-40C wedge hunt: the census must also show NON-parked
+            // app-main threads — sc349's launcher main (tid 1198) never
+            // appeared in any census for 20 min while wedged (not
+            // INTERRUPTIBLE), leaving the wedge site invisible. Include
+            // m.ohos.* comm tasks in ANY state (bounded: a handful of
+            // app processes), plus all UNINTERRUPTIBLE tasks.
+            let comm = tk.comm();
+            let name = core::str::from_utf8(&comm[..])
+                .unwrap_or("")
+                .trim_end_matches('\0');
+            let is_app_main = name.len() >= 6 && &name[..6] == "m.ohos";
+            if !state.contains(crate::process::task::TaskState::INTERRUPTIBLE)
+                && !is_app_main
+                && !state.contains(crate::process::task::TaskState::UNINTERRUPTIBLE)
+            {
                 return;
             }
             // Stack-freed guard (KILLDUMP census race class): the walk
@@ -3072,10 +3086,6 @@ pub fn sleep_snapshot() {
             };
             #[cfg(not(any(feature = "x86_64", feature = "riscv64")))]
             let (rip, sys, a0, a1, a2) = (0u64, 0u64, 0u64, 0u64, 0u64);
-            let comm = tk.comm();
-            let name = core::str::from_utf8(&comm[..])
-                .unwrap_or("")
-                .trim_end_matches('\0');
             let _ = writeln!(
                 out,
                 "sleepsnap: {} tid {} state={:#x} sys={} rip={:#x} a0={:#x} a1={:#x} a2={:#x}",
