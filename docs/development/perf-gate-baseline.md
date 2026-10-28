@@ -57,6 +57,33 @@ pre-6fdada6b wake-path class, superseded on main). Strong-class gate
 runs judge p2_ctxsw against 1.38 µs ±20% (quiet window) or 2.0 µs
 (loaded window), never against the 15.4 debug cell.
 
+## Whole-table refresh (2026-10-29, leg 52/53 — the 2d3df4a7 merge passed its own tier via the pa91 chain)
+
+Refreshed cells from the pa91 chain (census+REST boot on the leg-52
+stack pre-CFS-fix; med-of-2 pbench boards at load1 13-15, strong class)
+and the pa93 boards (branch e3c1ec35, pre-merge, the mkdir-flush rows).
+Provenance labels matter: the CFS min_vruntime fix landed on main AFTER
+pa91's boots — sched-sensitive cells (census, p2_ctxsw) re-bank on the
+next main-class board (pa94 chain armed).
+
+| metric | old baseline | refreshed | window/provenance |
+|---|---|---|---|
+| TERM / REFUSED census | 8 / 32 | 8 / 32 (pa91, unchanged) | syscost census boot rc=0 |
+| tick rate per CPU | 99.74-99.98 | 99.50-100.00 (pa86/pa88/pa91) | quiet-relaxed windows |
+| syscall volume | ~107.5M +-10% | 85-107M swing family (pa86 87.4M, pa88 96.6M, pa91 91.4M) — enforce only load-gated; the swing class is adjudicated, not a regression family | all three boots load1 9-15 |
+| clock_gettime avg | 3-4 us | 3 us (pa91 n=38.4M) | syscost |
+| nanosleep avg | 203 ms | 168-190 ms family (pa86 175, pa88 168, pa91 190) | +-20% of 203 stays the band |
+| GRQ avg hold | 5.1-6.1 us | 6.3-7.0 us family (pa86 7.0, pa88 6.5, pa91 6.3) — inside the 4080-7320 gate band; the 5.1-6.1 text was the pre-leg-48 class | syscost |
+| small_alloc REST share | 9.2% | 1.1-1.2% (pa86/pa88/pa91) | syscost |
+| get_file REST site | (not a row) | file.rs:1032: 94.5M calls / 31.2s / 330ns (was :941 132.3M / 50.8s / 383ns pre-leg-52) — NEW guarded row (fdtable) | syscost, leg-52 A+B |
+| p5b_dgram send/recv | 39-43 us loaded class | 4.3/3.8 us med-of-2 (pa91q; the class moved with lever A at the SAME load1 13-15 window) | strong, loaded |
+| p2_ctxsw strong | 1.37-1.39 quiet / 1.9-2.0 loaded | 1.30-1.31 at load1 13-15 (pa91) — re-banks post-CFS | strong, loaded |
+| p6_append J | 85-90 us | 82.7-104 us family (pa91q 82.7/84.2, pa93j 104.4) | strong, loaded |
+| p6_mkdrmdir | 15.4-16.4 ms | 495-497 us (pa93, branch e3c1ec35 PRE-MERGE — adopts when the coordinator merges) | strong, loaded, both arms |
+| p6_openclose | 27.4-29.4 | 28.8/28.9 (pa91q) | strong, loaded |
+| p5a_pipe / p5c3 / p5e | 2.1-2.3 / 4.9 / 4.4-4.5 | 2.17-2.24 / 4.35 / 3.92-4.12 (pa91q) | strong, loaded |
+| p6_stat / getdents | 15.2-16.1 / 599-615 | 15.7 / 570-570 (pa91q) | strong, loaded |
+
 ## Guarded hot-path domains (user mandate: allocation/reclaim, scheduling, filesystem)
 
 | domain | metric | baseline (accepted) | band |

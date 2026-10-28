@@ -3060,3 +3060,82 @@ on the branch riscv64 kernel: PASS/FAIL set byte-identical to pure main
 pre-existing gaps, ledgered as next-session ABI targets). make test ALL
 TESTS PASSED (incl. 14 new shebang-parse rows + resolve_exec_file errno
 rows); dual-arch build rc=0.
+
+### 8.10.23 Leg 53 (2026-10-29): mkdir's scoped publication flush — the design note precedes the code (again)
+
+**pa91 consumed first (the leg-52 measurement debt):** census boot rc=0
+in band (TERM 8 / REFUSED 32 / deep 0), Tier-1 PASS except the volume
+row (91.4M — the third point inside the 85-107M quiet-swing class after
+pa86 87.4M and pa88 96.6M; the isolation rerun stays a formality).
+**REST recount, levers A+B (file.rs get_file row, now line 1032):
+132.3M calls / 50.8s / 383ns (pa86) -> 94.5M / 31.2s / 330ns** — volume
+-28.6% (lever A: the boot's fd-syscall floor is ~1 lookup/call now;
+amplification ratio 1.51 -> 1.03), per-call -14% (lever B; the
+contention half of B's win needs SMP load, not a syscost boot), site
+REST total **-39% (-19.6s/boot)**. **p5b adjacent pair (pa91q1/q2
+med-of-2, load1 13-15 — the SAME window class every 39-43us board ran
+in): send 4.29/4.37, recv 3.83/3.85** — the fast class is stable on the
+lever-A kernel; the regime moved with the kernel, not the window:
+**lever A owns the p5b improvement; no dgram-specific work is owed.**
+p6/p4/p2 rows in class (append 84.2/82.7 J class; fork_exit 455/455;
+ctxsw 1.30/1.31; openclose 28.8/28.9). Neither pa91 board rolled the
+mkdrmdir/write_fsync/unlink rows (16-row budget) — banked from
+pa85/pa86/pa92 instead.
+
+**Leg-53 item 1 design note — DELETE the post-mkdir scoped flush
+(namei.rs ext4_mkdir_no_journal tail), keeping ordering to the guards.**
+The flush drains THIS mkdir's publication record (pre: bitmap/inode-
+table/group-desc; entry: dir block) with synchronous sync_block_ordered
+round trips at every mkdir return — the 15.4-16.4ms p6_mkdrmdir median
+on BOTH journal arms (journal-independent, the route map's fs lever;
+pa85 J/NJ flat at 1.03x proved it). What the flush actually buys is
+EAGER DURABILITY at mkdir-return — which POSIX does not promise: entry
+durability belongs to fsync(dirfd) (the kernel's own ext4_sync_file
+comment states exactly this contract). Crash ORDERING (the ghost-file
+window, H1/H2: pres before entry, entry before posts) is NOT what the
+inline drain provides — ordering is enforced at every OUT-OF-BAND write
+site by the per-block guards (publication_constrained +
+flush_publication_constraints at sync_dirty_buffer, evict_one Phase 4,
+and the journal commit's write-through), which hold under ANY write
+order. The laziness safety net is already complete: (1) the guards,
+(2) the 2048-record high-water creator-side bounded drain, (3) the
+standing durability points (fsync/sync_buffers/eviction; the J arm's
+lazy commit batches at 1024 buffers or h_sync). Removing the inline
+drain makes mkdir write-back-shaped exactly like Linux: the mkdir's
+metadata defers (handle already armed on both arms), the storm's IO
+batches at the drains, and a crash mid-batch loses recent entries to
+the same degree a reference write-back mount does (e2fsck recovery —
+the documented F4-R2 stance). rename/unlink publication records are
+untouched (they never had an inline drain). Risk profile: none new in
+ordering (guards predate this and are the enforcement); the behavior
+delta is exactly "mkdir returns before its blocks hit disk" — the
+delta Linux ships. Gates: before/after p6_mkdrmdir boards on BOTH arms
+(before banked: J 15.4-16.4ms, NJ 16.0-16.4ms), make test, dual-arch,
+fsw pub_scoped counter (drops to fsync-only volume), LTP-sanity via
+make test's fs family.
+
+**Leg-53 item 1 landed (e3c1ec35): the post-mkdir scoped publication
+flush is DELETED — p6_mkdrmdir 15.4-16.4ms -> 497.0us (J) / 495.1us
+(NJ), 31-33x on both arms, journal-independent exactly as the
+diagnosis predicted.** The flush was eager durability POSIX does not
+promise (entry durability belongs to fsync(dirfd)); ordering was
+always the per-block guards' job at every out-of-band write, and the
+2048-record high-water + fsync/sync/eviction drains bound the
+laziness. fsw's FSW1 line gains a pl= (lazy mkdirs) field before lvl=.
+Boards: pa93j DONE rc=0 t=159s (append 104.4us J class holds), pa93nj
+DONE rc=0 t=392s (append 135.3us route-1 class holds), zero
+KERNPANIC/DEADLOCK on both. make test 1159/1159 (main's merge brought
+37 new tests). The provisioning-window read: a mkdtemp storm no longer
+pays ~8ms of synchronous round trips per directory (the p99 also
+collapsed: 42-98ms tails -> 0.94-0.98ms).
+
+**Baseline whole-table refresh committed (f4193980)** with the pa91
+cells (the 2d3df4a7 merge class) + pa93's mkdrmdir rows marked
+PRE-MERGE; sched-sensitive cells (census, p2_ctxsw) flagged for
+post-CFS re-bank — the pa94 chain is ARMED for exactly that (census +
+med-of-2 on post-CFS + mkdir-flush content, kernels md5 1614d5f8 /
+e6a9b886, same two-stage gate, 8h deadline).
+
+**Leg-53 standing:** mkdir flush landed; dgram item closed by lever A
+at the pa91 med-of-2; standing by for the OH lane's cold-start sampler
+report (the next primary mission per the coordinator).
