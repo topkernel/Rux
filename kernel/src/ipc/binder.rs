@@ -3017,6 +3017,9 @@ pub fn sleep_snapshot() {
     // pid_hash::lock_bucket from stallwatch_tick). Collect lines here,
     // print ONCE after the walk with every bucket released.
     let mut out = alloc::string::String::new();
+    // leg-40B: (tid, futex word) pairs collected during the walk,
+    // deduped by word — one user-stack dump per distinct park word.
+    let mut futex_parked: alloc::vec::Vec<(u32, u64)> = alloc::vec::Vec::new();
     use core::fmt::Write as _;
     crate::sched::for_each_task(|task| {
         // SAFETY: callback runs under the pid-hash bucket lock (same
@@ -3073,7 +3076,19 @@ pub fn sleep_snapshot() {
                 rip,
                 a0,
                 a1
-            );        }
+            );
+            // leg-40B: futex-parked tasks are user-stack dump
+            // candidates (the sc343 launcher decode: main parked in
+            // pthread_join needs its caller frame named). COLLECT
+            // here, dump AFTER the walk — no task lookups or page
+            // walks under the pid-hash bucket lock (sc207).
+            if sys == 202
+                && futex_parked.len() < 8
+                && !futex_parked.iter().any(|&(_, wa)| wa == a0)
+            {
+                futex_parked.push((tk.pid(), a0));
+            }
+        }
     });
     // Emit with every pid-hash bucket released (see the sc207 note
     // above). One printk for the whole snapshot: ring records have a
@@ -3092,6 +3107,36 @@ pub fn sleep_snapshot() {
             let (chunk, tail) = rest.split_at(cut);
             crate::pr_info!("{}", chunk);
             rest = tail;
+        }
+    }
+    // leg-40B: user-stack dumps of the futex-parked candidates,
+    // kthread context with every bucket released — the same context
+    // the stall-scan park dumps run in (they print fine here, unlike
+    // the unresolved timer-context silence of the TXN-HANG-PARK
+    // hook). Once per distinct futex word per BOOT via a0 latch
+    // (respawn loops re-park the same word: sc343 drew the identical
+    // a0 across 10 launcher instances).
+    {
+        #[allow(clippy::declare_interior_mutable_const)]
+        const ZERO_W: core::sync::atomic::AtomicU64 = core::sync::atomic::AtomicU64::new(0);
+        static SEEN_W: [core::sync::atomic::AtomicU64; 32] = [ZERO_W; 32];
+        use core::sync::atomic::Ordering::Relaxed as Rel;
+        for (tid, wa) in futex_parked {
+            let seen = SEEN_W.iter().any(|s| s.load(Rel) == wa);
+            if seen {
+                continue;
+            }
+            for s in SEEN_W.iter() {
+                if s.compare_exchange(0, wa, Rel, Rel).is_ok() {
+                    break;
+                }
+            }
+            // SAFETY: read-only diagnostic walk of the parked task's
+            // user pages, no locks held (user_park_stack_dump_stid
+            // contract; kthread context, sc89/sc207 discipline).
+            let _ = unsafe {
+                user_park_stack_dump_stid(tid, "sleepsnap-PARK:", 48)
+            };
         }
     }
 }
