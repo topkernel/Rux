@@ -2684,6 +2684,16 @@ pub fn sys_shutdown(args: SyscallArgs) -> i64 {
     }
 
     if let Some(socket) = crate::net::socket::get_socket_from_fd(fd) {
+        if how == 0 || how == 2 {
+            // SHUT_RD (alone or in SHUT_RDWR): mark the read side shut
+            // (Linux sk_shutdown |= RCV_SHUTDOWN) — poll/epoll asking for
+            // POLLRDHUP/EPOLLRDHUP then see the hangup (LTP epoll_wait05).
+            socket
+                .shut_rd
+                .store(true, core::sync::atomic::Ordering::Release);
+            // Wake poll/epoll waiters: the RDHUP edge just appeared.
+            socket.wait_queue.wake_up_all();
+        }
         if how == 1 || how == 2 {
             // SHUT_WR or SHUT_RDWR: send FIN for TCP (review NET-M12 — the
             // old code only flipped a state bit and never emitted a FIN).

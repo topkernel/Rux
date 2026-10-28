@@ -471,6 +471,10 @@ pub fn exthunt_read_hole(ino: u32, i_block: &[u32; 15], logical_block: u64) {
 const HUNT_CAP_WR: usize = 500;
 const HUNT_CAP_RD: usize = 500;
 const HUNT_WATCH: usize = 8;
+// leg-11: raised so a full 5-file zzprobe4 pass (every chunk's data
+// block + read prints incl. the O_DIRECT phase) fits before the caps.
+const HUNT_CAP_WR2: usize = 3000;
+const HUNT_CAP_RD2: usize = 3000;
 
 static HUNT_WR_N: core::sync::atomic::AtomicUsize =
     core::sync::atomic::AtomicUsize::new(0);
@@ -499,24 +503,34 @@ fn hunt_watched(ino: u64) -> bool {
 }
 
 /// Writer truth: ext4_file_write copied `pat` into `phys` for `logical`.
+/// `buf_ptr` is the destination buffer's b_data pointer — the read side
+/// prints the served entry's pointer, so a mismatch proves two live
+/// buffers for one key even when the dup counter never fired.
 /// Only prints for watched inos (inos seen in a recent read) so kernel
 /// append-only files (kmsg) cannot flood the console into a feedback
 /// loop with printk persistence.
-pub fn exthunt_wr_put(ino: u32, logical: u64, phys: u64, pat: u8) {
+pub fn exthunt_wr_put(ino: u32, logical: u64, phys: u64, pat: u8, buf_ptr: *const u8) {
     use core::sync::atomic::Ordering;
-    if !hunt_on() || !hunt_watched(ino as u64) {
+    if !hunt_on() {
         return;
     }
-    if HUNT_WR_N.fetch_add(1, Ordering::Relaxed) >= HUNT_CAP_WR {
+    // Feed the phys watch ring unconditionally (watch-gated ino check
+    // below only gates the print): the block-cache tracers key on phys.
+    hunt_phys_watch(phys);
+    if !hunt_watched(ino as u64) {
+        return;
+    }
+    if HUNT_WR_N.fetch_add(1, Ordering::Relaxed) >= HUNT_CAP_WR2 {
         return;
     }
     crate::pr_info!(
-        "EXT-HUNT-WRPUT pid={} ino={} logical={} phys={} pat={:02x}",
+        "EXT-HUNT-WRPUT pid={} ino={} logical={} phys={} pat={:02x} buf={:p}",
         unsafe { crate::process::current_pid() },
         ino,
         logical,
         phys,
-        pat
+        pat,
+        buf_ptr
     );
 }
 
@@ -528,7 +542,7 @@ pub fn exthunt_rd_serve(ino: u64, logical: u64, phys: u64, b0: u8, b1: u8) {
         return;
     }
     hunt_watch(ino as u32);
-    if HUNT_RD_N.fetch_add(1, Ordering::Relaxed) >= HUNT_CAP_RD {
+    if HUNT_RD_N.fetch_add(1, Ordering::Relaxed) >= HUNT_CAP_RD2 {
         return;
     }
     crate::pr_info!(
@@ -551,7 +565,7 @@ pub fn exthunt_rd_batch(ino: u64, logical: u64, phys: u64, nblocks: u32) {
         return;
     }
     hunt_watch(ino as u32);
-    if HUNT_RD_N.fetch_add(1, Ordering::Relaxed) >= HUNT_CAP_RD {
+    if HUNT_RD_N.fetch_add(1, Ordering::Relaxed) >= HUNT_CAP_RD2 {
         return;
     }
     crate::pr_info!(
@@ -565,23 +579,24 @@ pub fn exthunt_rd_batch(ino: u64, logical: u64, phys: u64, nblocks: u32) {
 }
 
 /// Reader truth: O_DIRECT serve — first two bytes off the block.
-pub fn exthunt_rd_od(ino: u64, logical: u64, phys: u64, b0: u8, b1: u8) {
+pub fn exthunt_rd_od(ino: u64, logical: u64, phys: u64, b0: u8, b1: u8, buf_ptr: *const u8) {
     use core::sync::atomic::Ordering;
     if !hunt_on() {
         return;
     }
     hunt_watch(ino as u32);
-    if HUNT_RD_N.fetch_add(1, Ordering::Relaxed) >= HUNT_CAP_RD {
+    if HUNT_RD_N.fetch_add(1, Ordering::Relaxed) >= HUNT_CAP_RD2 {
         return;
     }
     crate::pr_info!(
-        "EXT-HUNT-RDOD pid={} ino={} logical={} phys={} b0={:02x}{:02x}",
+        "EXT-HUNT-RDOD pid={} ino={} logical={} phys={} b0={:02x}{:02x} buf={:p}",
         unsafe { crate::process::current_pid() },
         ino,
         logical,
         phys,
         b0,
-        b1
+        b1,
+        buf_ptr
     );
 }
 
@@ -594,7 +609,7 @@ pub fn exthunt_rd_hit(ino: u64, logical: u64, b0: u8, b1: u8) {
         return;
     }
     hunt_watch(ino as u32);
-    if HUNT_RD_N.fetch_add(1, Ordering::Relaxed) >= HUNT_CAP_RD {
+    if HUNT_RD_N.fetch_add(1, Ordering::Relaxed) >= HUNT_CAP_RD2 {
         return;
     }
     crate::pr_info!(
@@ -604,6 +619,188 @@ pub fn exthunt_rd_hit(ino: u64, logical: u64, b0: u8, b1: u8) {
         logical,
         b0,
         b1
+    );
+}
+
+// ---- dfx=exthunt block-cache eviction/fabrication tracers (leg-11) ----
+//
+// The last open gap between EXT-HUNT-WRPUT pat=XX and EXT-HUNT-RDHIT
+// b0=0000 on identical (logical, phys): a read DMA that races an
+// unhashed evicting dirty victim. evict_one() unhooks the victim from
+// the hash (evicting=true) BEFORE its Phase-4 sync writes the dirty
+// data to disk; every cache lookup (bread_async Phase 1, get() Phase 1,
+// block_cached) skips evicting entries, so in that window the block
+// looks absent and a fresh entry is fabricated on top of STALE disk
+// bytes — the guard cannot see an UNHASHED victim. These tracers close
+// the gap on one boot:
+//
+//   EVICT   blk=P dirty=1 — a watched block left the hash (data now
+//            lives only in the victim's buffer)
+//   EVICTED blk=P rc=0     — the eviction's sync landed (disk truth)
+//   FAB     blk=P skip=1   — a cache miss fabricated a fresh entry;
+//            skip=1 means Phase 1 walked past an evicting same-key
+//            entry (the miss was eviction-caused)
+//   BCBLIND blk=P          — block_cached() returned false for a block
+//            whose evicting same-key entry sits in the chain (the
+//            coherence guard's blind spot)
+//
+// The phys watch ring is fed by WRPUT (the writer's physical blocks);
+// FAB also prints unwatched blocks when skip=1 (the rare adjudicating
+// event), all under a print cap. OFF by default, like every exthunt.
+
+const HUNT_CAP_EV: usize = 400;
+const HUNT_PHYS: usize = 2048;
+
+static HUNT_EV_N: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+static HUNT_FAB_N: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+static HUNT_PHYS_RING: [core::sync::atomic::AtomicU64; HUNT_PHYS] =
+    [const { core::sync::atomic::AtomicU64::new(0) }; HUNT_PHYS];
+static HUNT_PHYS_NEXT: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+
+fn hunt_phys_watch(phys: u64) {
+    use core::sync::atomic::Ordering;
+    let i = HUNT_PHYS_NEXT.fetch_add(1, Ordering::Relaxed) % HUNT_PHYS;
+    HUNT_PHYS_RING[i].store(phys, Ordering::Relaxed);
+}
+
+/// Is this physical block in the WRPUT-fed watch set? Called from the
+/// block-cache layer (bio.rs), which has no inode context.
+pub fn exthunt_phys_watched(blocknr: u64) -> bool {
+    use core::sync::atomic::Ordering;
+    HUNT_PHYS_RING
+        .iter()
+        .any(|w| w.load(Ordering::Relaxed) == blocknr)
+}
+
+/// An eviction unhashed a watched block; `dirty` is the victim's state
+/// at the sync point (dirty data exists only in that victim).
+pub fn exthunt_evict_unhash(blocknr: u64, dirty: bool) {
+    use core::sync::atomic::Ordering;
+    if !hunt_on() {
+        return;
+    }
+    if HUNT_EV_N.fetch_add(1, Ordering::Relaxed) >= HUNT_CAP_EV {
+        return;
+    }
+    crate::pr_info!(
+        "EXT-HUNT-EVICT pid={} blk={} dirty={}",
+        unsafe { crate::process::current_pid() },
+        blocknr,
+        dirty as u8
+    );
+}
+
+/// The eviction's Phase-4 sync returned `rc` for a watched block — the
+/// disk-truth point a racing fabrication could have missed.
+pub fn exthunt_evict_done(blocknr: u64, rc: i32) {
+    use core::sync::atomic::Ordering;
+    if !hunt_on() {
+        return;
+    }
+    if HUNT_EV_N.fetch_add(1, Ordering::Relaxed) >= HUNT_CAP_EV {
+        return;
+    }
+    crate::pr_info!(
+        "EXT-HUNT-EVICTED pid={} blk={} rc={}",
+        unsafe { crate::process::current_pid() },
+        blocknr,
+        rc
+    );
+}
+
+/// A cache miss fabricated a fresh entry (Phase 2). `skipped_evicting`
+/// records whether the Phase-1 walk stepped over an evicting entry with
+/// the SAME key — the miss was eviction-caused, and the fabricated DMA
+/// may be reading disk the victim's sync has not updated yet.
+pub fn exthunt_fab(blocknr: u64, skipped_evicting: bool, sync_path: bool) {
+    use core::sync::atomic::Ordering;
+    if !hunt_on() {
+        return;
+    }
+    if !skipped_evicting && !exthunt_phys_watched(blocknr) {
+        return;
+    }
+    if HUNT_FAB_N.fetch_add(1, Ordering::Relaxed) >= HUNT_CAP_EV {
+        return;
+    }
+    crate::pr_info!(
+        "EXT-HUNT-FAB pid={} blk={} skip={} path={}",
+        unsafe { crate::process::current_pid() },
+        blocknr,
+        skipped_evicting as u8,
+        if sync_path { "sync" } else { "async" }
+    );
+}
+
+/// block_cached() was about to return false while an evicting same-key
+/// entry sits in the chain — the coherence guard's blind spot that lets
+/// the multi-block direct DMA bypass a dirty victim mid-eviction.
+pub fn exthunt_bc_blind(blocknr: u64) {
+    use core::sync::atomic::Ordering;
+    if !hunt_on() {
+        return;
+    }
+    if HUNT_EV_N.fetch_add(1, Ordering::Relaxed) >= HUNT_CAP_EV {
+        return;
+    }
+    crate::pr_info!(
+        "EXT-HUNT-BCBLIND pid={} blk={}",
+        unsafe { crate::process::current_pid() },
+        blocknr
+    );
+}
+
+/// Block-cache hit truth (bread_async Phase 1): the entry's buffer
+/// pointer and first two bytes at the moment of the serve. The WRPUT
+/// print carries the writer's buffer pointer — a mismatch on the same
+/// key proves two live buffers where the dup counter saw none.
+pub fn exthunt_rxbhit(blocknr: u64, buf_ptr: *const u8, b0: u8, b1: u8) {
+    use core::sync::atomic::Ordering;
+    if !hunt_on() {
+        return;
+    }
+    if !exthunt_phys_watched(blocknr) {
+        return;
+    }
+    if HUNT_FAB_N.fetch_add(1, Ordering::Relaxed) >= HUNT_CAP_EV {
+        return;
+    }
+    crate::pr_info!(
+        "EXT-HUNT-RXBHIT pid={} blk={} b0={:02x}{:02x} buf={:p}",
+        unsafe { crate::process::current_pid() },
+        blocknr,
+        b0,
+        b1,
+        buf_ptr
+    );
+}
+
+/// Extent-path zeroing truth: the write path is about to zero a block
+/// via getblk_zero — `kind` is "mat" (unwritten materialization) or
+/// "hole" (hole-fill allocation). Printed for watched inos; a hit here
+/// AFTER a WRPUT for the same phys is the zero-overwrite smoking gun.
+pub fn exthunt_zzero(kind: &str, ino: u32, logical: u64, phys: u64) {
+    use core::sync::atomic::Ordering;
+    if !hunt_on() {
+        return;
+    }
+    hunt_phys_watch(phys);
+    if !hunt_watched(ino as u64) {
+        return;
+    }
+    if HUNT_EV_N.fetch_add(1, Ordering::Relaxed) >= HUNT_CAP_EV {
+        return;
+    }
+    crate::pr_info!(
+        "EXT-HUNT-ZZERO-{} pid={} ino={} logical={} phys={}",
+        kind,
+        unsafe { crate::process::current_pid() },
+        ino,
+        logical,
+        phys
     );
 }
 

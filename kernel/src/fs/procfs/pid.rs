@@ -975,6 +975,26 @@ pub fn generate_maps(pid: u64) -> Vec<u8> {
     content.into_bytes()
 }
 
+/// Fetch the `File` backing a descriptor of a task.
+///
+/// Shared backend for the /proc/[pid]/fd magic-link machinery: readlink
+/// content (generate_fd_link), fd-dir lookup existence checks, and the
+/// VFS magic-link redirect (follow_symlink) all resolve through here so
+/// they can never disagree about whether a descriptor exists.
+pub fn get_fd_file(pid: u64, fd: u32) -> Option<alloc::sync::Arc<crate::fs::File>> {
+    use crate::process::{current_task, current_pid, find_task_by_pid};
+
+    let task = if current_pid() as u64 == pid {
+        current_task()
+    } else {
+        find_task_by_pid(pid as u32)
+    };
+
+    let task = task?;
+    let fdtable = task.try_fdtable()?;
+    fdtable.get_file(fd as usize)
+}
+
 /// List file descriptors for /proc/[pid]/fd/
 ///
 /// Returns a list of (fd_number, path_string) tuples.

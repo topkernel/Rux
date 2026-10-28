@@ -7,7 +7,7 @@ use crate::arch::uaccess::{access_ok, copy_from_user, copy_to_user, put_user};
 use crate::process::wait::WaitQueueHead;
 use crate::sync::spinlock::Spinlock;
 use crate::syscall::errno;
-use core::sync::atomic::{AtomicI32, AtomicI64, Ordering};
+use core::sync::atomic::{AtomicI32, AtomicI64, AtomicU64, Ordering};
 
 use super::util::*;
 
@@ -85,6 +85,14 @@ pub struct PosixMq {
     notify_pid: AtomicI32,
     /// Signal number for notification.
     notify_signo: AtomicI32,
+    /// sigev_value payload delivered with the notification signal
+    /// (SI_MESGQ rt sigval — LTP mq_notify01's SIGEV_* handlers decode
+    /// it as si_value).
+    notify_value: AtomicU64,
+    /// SIGEV_THREAD target: the netlink socket musl/glibc's helper
+    /// registered (sigev_signo carries its fd). Linux delivers the
+    /// notification by pushing a 32-byte message onto that socket.
+    notify_sock: Spinlock<Option<alloc::sync::Arc<crate::net::netlink::NetlinkSocket>>>,
 }
 
 impl PosixMq {
@@ -122,6 +130,8 @@ impl PosixMq {
             wq_recv: WaitQueueHead::new(),
             notify_pid: AtomicI32::new(0),
             notify_signo: AtomicI32::new(0),
+            notify_value: AtomicU64::new(0),
+            notify_sock: Spinlock::new(None),
         }
     }
 
@@ -352,6 +362,7 @@ pub fn sys_mq_open(args: [u64; 6]) -> i64 {
             };
 
             mq.refcount.fetch_add(1, Ordering::Relaxed);
+            apply_open_nonblock(&mq, oflag);
             return fd as i64;
         }
 
@@ -381,7 +392,22 @@ pub fn sys_mq_open(args: [u64; 6]) -> i64 {
                 return -(errno::EMFILE as i64);
             }
         };
+        apply_open_nonblock(&mq, oflag);
         return fd as i64;
+    }
+}
+
+/// mq_open's O_NONBLOCK is a descriptor flag (Linux stores it per-open;
+/// our side-namespace model keeps one attr per queue). Persist it into
+/// mq_attr.mq_flags so mq_timedsend/mq_timedreceive honor it — without
+/// this, a receive on an empty O_NONBLOCK queue BLOCKED forever (LTP
+/// mq_timedreceive01's EAGAIN case hung to the framework timeout).
+fn apply_open_nonblock(mq: &alloc::sync::Arc<PosixMq>, oflag: i32) {
+    let mut attr = mq.attr.lock();
+    if oflag & O_NONBLOCK_MQ as i32 != 0 {
+        attr.mq_flags |= O_NONBLOCK_MQ as i64;
+    } else {
+        attr.mq_flags &= !(O_NONBLOCK_MQ as i64);
     }
 }
 
@@ -487,10 +513,6 @@ pub fn sys_mq_timedsend(args: [u64; 6]) -> i64 {
         None => return -(errno::EBADF as i64),
     };
 
-    if mq.is_unlinked() && mq.refcount.load(Ordering::Relaxed) <= 1 {
-        return -(errno::EINVAL as i64);
-    }
-
     // Check message size (acquire messages first, then attr — consistent lock ordering)
     {
         let messages = mq.messages.lock();
@@ -569,9 +591,38 @@ pub fn sys_mq_timedsend(args: [u64; 6]) -> i64 {
             if was_empty {
                 let notify_pid = mq.notify_pid.swap(0, Ordering::Relaxed);
                 if notify_pid != 0 {
+                    // SIGEV_THREAD: push the 32-byte message onto the
+                    // helper's netlink socket (Linux netlink_unicast from
+                    // do_mq_notify; musl checks n==32 && buf[31]==1 and
+                    // then runs the user callback).
+                    if let Some(sock) = mq.notify_sock.lock().take() {
+                        let mut msg = [0u8; 32];
+                        msg[31] = 1;
+                        sock.push_kernel_message(msg.to_vec());
+                    }
                     let signo = mq.notify_signo.load(Ordering::Relaxed);
                     if signo > 0 {
-                        let _ = crate::signal::send_signal(notify_pid as u32, signo);
+                        // Linux sends a queued SI_MESGQ signal carrying the
+                        // registered sigev_value and the SENDER's pid/uid —
+                        // SA_SIGINFO handlers (and libc's SIGEV_THREAD
+                        // helper, which sigwaits it) decode all of them
+                        // (LTP mq_notify01 cmp_ok).
+                        let sival = mq.notify_value.load(Ordering::Relaxed);
+                        let (spid, suid) = match crate::sched::current() {
+                            Some(t) => (t.pid() as u32, t.cred().uid),
+                            None => (0, 0),
+                        };
+                        let info = crate::signal::SigInfo::new(
+                            signo,
+                            crate::signal::si_code::SI_MESGQ,
+                            spid,
+                            suid,
+                        )
+                        .with_sigval(sival);
+                        let _ = crate::signal::send_signal_with_info(
+                            notify_pid as u32,
+                            info,
+                        );
                     }
                 }
             }
@@ -674,10 +725,6 @@ pub fn sys_mq_timedreceive(args: [u64; 6]) -> i64 {
         Some(m) => m,
         None => return -(errno::EBADF as i64),
     };
-
-    if mq.is_unlinked() && mq.refcount.load(Ordering::Relaxed) <= 1 {
-        return -(errno::EINVAL as i64);
-    }
 
     // Check permission
     if !ipc_check_permissions_mq(mq.uid, mq.gid, mq.mode, 0o4) {
@@ -818,10 +865,13 @@ pub fn sys_mq_timedreceive(args: [u64; 6]) -> i64 {
 /// SIGEV notification constants (UAPI values — same in musl, glibc and
 /// Linux asm-generic/siginfo.h; the old table had NONE/SIGNAL swapped,
 /// which made every SIGEV_SIGNAL registration take the SIGEV_NONE arm).
+// libc/uapi ABI values (musl signal.h): SIGEV_SIGNAL=0, SIGEV_NONE=1,
+// SIGEV_THREAD=2 (kernel-side netlink delivery), SIGEV_THREAD_ID=3
+// (glibc/musl internal helper-thread targeting).
 const SIGEV_SIGNAL: i32 = 0;
 const SIGEV_NONE: i32 = 1;
 const SIGEV_THREAD: i32 = 2;
-const SIGEV_THREAD_ID: i32 = 4;
+const SIGEV_THREAD_ID: i32 = 3;
 
 /// struct sigevent layout for RV64 (first two fields needed for mq_notify).
 /// sigev_value (8 bytes) is at offset 8, but we only need sigev_notify (offset 0)
@@ -831,6 +881,19 @@ struct SigEvent {
     sigev_value: u64,    // union { int, void*, void(*)(sigval_t) }
     sigev_signo: i32,
     sigev_notify: i32,
+    // union at offset 16: _sigev_notify_thread_id (pid_t) overlaps the
+    // notify function pointer / attributes — libc's SIGEV_THREAD helper
+    // registers SIGEV_THREAD_ID with the helper's tid here.
+    sigev_un: [u8; 8],
+}
+
+impl SigEvent {
+    /// sigev_notify_thread_id (pid_t, first 4 bytes of the union).
+    fn notify_thread_id(&self) -> i32 {
+        i32::from_ne_bytes([
+            self.sigev_un[0], self.sigev_un[1], self.sigev_un[2], self.sigev_un[3],
+        ])
+    }
 }
 
 /// sys_mq_notify — Register for notification when message arrives (NR 184)
@@ -863,14 +926,24 @@ pub fn sys_mq_notify(args: [u64; 6]) -> i64 {
         let s = unsafe { sev_buf.assume_init() };
 
         // Validate the notification type and signal number up front.
+        // Linux do_mq_notify accepts SIGEV_NONE, SIGEV_SIGNAL and
+        // SIGEV_THREAD_ID; SIGEV_THREAD never reaches the kernel (libc
+        // converts it to a helper thread + SIGEV_THREAD_ID) and raw
+        // SIGEV_THREAD / anything else is EINVAL.
         match s.sigev_notify {
             SIGEV_NONE => {}
-            SIGEV_SIGNAL => {
+            SIGEV_SIGNAL | SIGEV_THREAD_ID => {
                 // sigev_signo must be a valid signal (LTP passes _NSIG+1
                 // and expects EINVAL). RT signals up to SIGRTMAX count.
                 if !(1..=crate::signal::SIGRTMAX).contains(&s.sigev_signo) {
                     return -(errno::EINVAL as i64);
                 }
+            }
+            SIGEV_THREAD => {
+                // Linux do_mq_notify: sigev_signo is a SOCKET fd here —
+                // libc's SIGEV_THREAD helper passes a netlink socket and
+                // waits for a 32-byte kernel message. Fd validation is
+                // EBADF/EINVAL below (sockfd_lookup order).
             }
             _ => return -(errno::EINVAL as i64),
         }
@@ -883,35 +956,87 @@ pub fn sys_mq_notify(args: [u64; 6]) -> i64 {
         None => return -(errno::EBADF as i64),
     };
 
-    if mq.is_unlinked() && mq.refcount.load(Ordering::Relaxed) <= 1 {
-        return -(errno::EINVAL as i64);
-    }
-
-    // Deregister if sevp is NULL or SIGEV_NONE
+    // Deregister if sevp is NULL or SIGEV_NONE (also clears a pending
+    // SIGEV_THREAD socket registration).
     let sev = match sev {
         None => {
             mq.notify_pid.store(0, Ordering::Relaxed);
+            *mq.notify_sock.lock() = None;
             return 0;
         }
         Some(s) => s,
     };
 
     if sev.sigev_notify == SIGEV_NONE {
-        mq.notify_pid.store(0, Ordering::Relaxed);
+        // SIGEV_NONE REGISTERS (Linux do_mq_notify): ANY existing
+        // registration (even SIGEV_NONE, even own) blocks a new one with
+        // EBUSY; nothing fires on send. Only a NULL sevp deregisters.
+        let my_pid = crate::sched::current().map(|t| t.pid() as i32).unwrap_or(0);
+        let old_pid = mq.notify_pid.swap(my_pid, Ordering::Relaxed);
+        if old_pid != 0 {
+            mq.notify_pid.store(old_pid, Ordering::Relaxed);
+            return -(errno::EBUSY as i64);
+        }
+        mq.notify_signo.store(0, Ordering::Relaxed);
+        *mq.notify_sock.lock() = None;
         return 0;
     }
 
-    // SIGEV_SIGNAL (validated above)
+    if sev.sigev_notify == SIGEV_THREAD {
+        // Linux: ANY existing registration blocks a new one (EBUSY),
+        // regardless of owner.
+        let old_pid = mq.notify_pid.load(Ordering::Relaxed);
+        let my_pid = crate::sched::current().map(|t| t.pid() as i32).unwrap_or(0);
+        if old_pid != 0 {
+            return -(errno::EBUSY as i64);
+        }
+        // sigev_signo is the helper's netlink socket fd (Linux
+        // sockfd_lookup): EBADF for a bad fd, EINVAL for a non-netlink
+        // file.
+        match crate::net::netlink::netlink_socket_from_fd(sev.sigev_signo as usize) {
+            Some(sock) => {
+                mq.notify_pid.store(my_pid, Ordering::Relaxed);
+                mq.notify_signo.store(0, Ordering::Relaxed);
+                mq.notify_value.store(sev.sigev_value, Ordering::Relaxed);
+                *mq.notify_sock.lock() = Some(sock);
+                return 0;
+            }
+            None => {
+                // Distinguish bad fd from wrong file type the cheap way:
+                // an fd that exists but is not a netlink socket is EINVAL.
+                let exists = crate::sched::get_current_fdtable()
+                    .map(|ft| ft.get_file(sev.sigev_signo as usize).is_some())
+                    .unwrap_or(false);
+                return if exists {
+                    -(errno::EINVAL as i64)
+                } else {
+                    -(errno::EBADF as i64)
+                };
+            }
+        }
+    }
+
+    // SIGEV_SIGNAL / SIGEV_THREAD_ID (validated above)
     {
-        let pid = crate::sched::current().map(|t| t.pid() as i32).unwrap_or(0);
-        // Only allow registration if no one else is registered
+        let pid = if sev.sigev_notify == SIGEV_THREAD_ID {
+            // Target the registering helper THREAD (musl/glibc SIGEV_THREAD
+            // support): the tid came in sigev_notify_thread_id.
+            let tid = sev.notify_thread_id();
+            if tid <= 0 {
+                return -(errno::EINVAL as i64);
+            }
+            tid
+        } else {
+            crate::sched::current().map(|t| t.pid() as i32).unwrap_or(0)
+        };
+        // Linux: ANY existing registration blocks a new one (EBUSY).
         let old_pid = mq.notify_pid.swap(pid, Ordering::Relaxed);
-        if old_pid != 0 && old_pid != pid {
-            // Another process already registered — per POSIX, this is EBUSY
+        if old_pid != 0 {
             mq.notify_pid.store(old_pid, Ordering::Relaxed);
             return -(errno::EBUSY as i64);
         }
         mq.notify_signo.store(sev.sigev_signo, Ordering::Relaxed);
+        mq.notify_value.store(sev.sigev_value, Ordering::Relaxed);
         return 0;
     }
 }
@@ -919,8 +1044,14 @@ pub fn sys_mq_notify(args: [u64; 6]) -> i64 {
 /// sys_mq_getsetattr — Get/set message queue attributes (NR 185)
 pub fn sys_mq_getsetattr(args: [u64; 6]) -> i64 {
     let mqdes = args[0] as i32;
-    let attr_ptr = args[1] as *mut MqAttr;
-    let newattr_ptr = args[2] as *const MqAttr;
+    // Argument order is mq_getsetattr(mqdes, NEWattr, OLDattr): the setter
+    // pointer comes FIRST. The previous args[1]/args[2] swap turned every
+    // mq_getattr(fd, &a) into "set flags from &a, copy out nothing" —
+    // callers saw zeroed attributes (mq_curmsgs=0 with a full queue), and
+    // LTP's mq_timedsend01/mq_timedreceive01 cleanup_queue drained nothing,
+    // so the next case's pre-fill blocked forever on the full queue.
+    let newattr_ptr = args[1] as *const MqAttr;
+    let attr_ptr = args[2] as *mut MqAttr;
 
     // Get the MQ from the fd
     let mq = match get_mq_fd(mqdes as usize) {
@@ -1027,9 +1158,18 @@ static MQ_FD_TABLE: Spinlock<[Option<MqFdSlot>; MQ_FDS_MAX]> =
 /// reference in one critical section (see R32 NEW-6 note in sys_mq_open).
 fn allocate_and_store_mq_fd(mq: alloc::sync::Arc<PosixMq>) -> Option<i32> {
     let pid = crate::sched::current().map(|t| t.pid() as u32).unwrap_or(0);
+    // RLIMIT_NOFILE applies to POSIX mq descriptors too (they are real
+    // fds on Linux; LTP mq_open01 lowers the soft limit to 0 and expects
+    // EMFILE).
+    let nofile = crate::sched::current()
+        .map(|t| t.rlimit(crate::process::task::rlimit_res::NOFILE).0)
+        .unwrap_or(u64::MAX);
     let mut table = MQ_FD_TABLE.lock();
     for i in 0..MQ_FDS_MAX {
         if table[i].is_none() {
+            if (512 + i) as u64 >= nofile {
+                return None; // caller maps exhaustion to EMFILE
+            }
             table[i] = Some(MqFdSlot { pid, mq });
             return Some((512 + i) as i32);
         }
@@ -1046,10 +1186,16 @@ fn get_mq_fd(fd: usize) -> Option<alloc::sync::Arc<PosixMq>> {
     if idx >= MQ_FDS_MAX {
         return None;
     }
-    let pid = crate::sched::current().map(|t| t.pid() as u32).unwrap_or(0);
+    // POSIX mqdes are process-wide: any THREAD of the owning process can
+    // use them (libc's mq_notify SIGEV_THREAD helper issues the syscall
+    // from its own thread — tid != tgid). Match the owner pid against
+    // both the caller's tgid and tid.
+    let (pid, tgid) = crate::sched::current()
+        .map(|t| (t.pid() as u32, t.tgid() as u32))
+        .unwrap_or((0, 0));
     let table = MQ_FD_TABLE.lock();
     table[idx].as_ref().and_then(|slot| {
-        if slot.pid == pid {
+        if slot.pid == pid || slot.pid == tgid {
             Some(slot.mq.clone())
         } else {
             None

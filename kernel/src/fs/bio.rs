@@ -546,6 +546,18 @@ impl BlockCache {
         }
         // bucket lock released; entry is unpinnable and unhashed
 
+        // dfx=exthunt: the victim left the hash — from here until the
+        // Phase-4 sync lands, every lookup of this key misses and may
+        // fabricate a fresh entry over stale disk (the unhashed-victim
+        // window; see the tracers in ext4/extent.rs).
+        let vkey = unsafe { (*victim).key };
+        let v_dirty = unsafe { (*(*victim).bh).is_dirty() };
+        if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::ExtHunt)
+            && crate::fs::ext4::extent::exthunt_phys_watched(vkey.2)
+        {
+            crate::fs::ext4::extent::exthunt_evict_unhash(vkey.2, v_dirty);
+        }
+
         {
             let mut lru = self.lru.lock_irqsave();
             // SAFETY: victim is a valid CacheEntry pointer picked from the
@@ -557,7 +569,7 @@ impl BlockCache {
         // SAFETY: victim is unhashed, unlinked and unpinnable; its bh field
         // points to a valid BufferHead owned by this entry.
         unsafe {
-            if (*(*victim).bh).is_dirty() {
+            if v_dirty {
                 // Ordered-publication guard: if this block is a pending
                 // entry/post block, writing it here (before its prereqs)
                 // would reopen the ghost-empty-file crash window. Satisfy
@@ -566,11 +578,18 @@ impl BlockCache {
                 // eviction pay the whole publication backlog); the flush
                 // persists the constrained block's prerequisites, so the
                 // sync below usually becomes a no-op.
-                let vkey = (*victim).key;
                 if publication_constrained(vkey.0, vkey.1, vkey.2) {
                     let _ = flush_publication_constraints(vkey.0, vkey.1, vkey.2);
                 }
-                let _ = (*(*victim).bh).sync();
+                let sync_rc = match (*(*victim).bh).sync() {
+                    Ok(()) => 0,
+                    Err(e) => e,
+                };
+                if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::ExtHunt)
+                    && crate::fs::ext4::extent::exthunt_phys_watched(vkey.2)
+                {
+                    crate::fs::ext4::extent::exthunt_evict_done(vkey.2, sync_rc);
+                }
                 crate::dfx::fsw::note_evict(true);
             } else {
                 crate::dfx::fsw::note_evict(false);
@@ -590,6 +609,7 @@ impl BlockCache {
             let index = self.hash_index(device_major, device_minor, blocknr);
 
             // Phase 1: Lookup under bucket lock
+            let mut skipped_evicting = false;
             {
                 let mut bucket = self.buckets[index].lock();
                 let mut prev: Option<*mut CacheEntry> = None;
@@ -601,6 +621,11 @@ impl BlockCache {
                         // Being evicted: treat as not found — pinning it
                         // would hand out a buffer that is about to be
                         // freed (R7-C1 resurrection race).
+                        // dfx=exthunt: same-key eviction = miss-causing
+                        // event (see bread_async Phase 1).
+                        if entry.key == (device_major, device_minor, blocknr) {
+                            skipped_evicting = true;
+                        }
                         prev = Some(entry_ptr);
                         current = entry.hash_next;
                         continue;
@@ -730,6 +755,8 @@ impl BlockCache {
             }
 
             // Phase 2: Read from disk (no locks held)
+            // dfx=exthunt: fresh-entry fabrication, sync path.
+            crate::fs::ext4::extent::exthunt_fab(blocknr, skipped_evicting, true);
             let mut bh = Box::new(BufferHead::new(blocknr, self.block_size));
 
             if let Err(_) = blkdev::blkdev_read(
@@ -1235,6 +1262,7 @@ pub fn bread_async(
         let index = cache.hash_index(device_major, device_minor, blocknr);
 
         // Phase 1: Lookup under bucket lock
+        let mut skipped_evicting = false;
         {
             let mut bucket = cache.buckets[index].lock_irqsave();
             let mut prev: Option<*mut CacheEntry> = None;
@@ -1245,6 +1273,14 @@ pub fn bread_async(
                 // R9-9: same guards as get() — skip entries being evicted
                 // and dead (freed/reused) BufferHeads.
                 if entry.evicting {
+                    // dfx=exthunt: an evicting entry with OUR key is the
+                    // miss-causing event — its Phase-4 sync may not have
+                    // landed, so a Phase-2 fabrication would read stale
+                    // disk over a block whose only dirty copy is the
+                    // victim. Recorded for the Phase-2 print.
+                    if entry.key == (device_major, device_minor, blocknr) {
+                        skipped_evicting = true;
+                    }
                     prev = Some(entry_ptr);
                     current = entry.hash_next;
                     continue;
@@ -1301,6 +1337,18 @@ pub fn bread_async(
                     // wake-nested-in-a-driver-lock site; INV-LOCK-6).
                     drop(lru);
                     drop(bucket);
+                    // dfx=exthunt: block-cache hit truth (buffer pointer +
+                    // first bytes) — see exthunt_rxbit/exthunt_rxbhit.
+                    // SAFETY: hit_bh passed the b_data length guard above.
+                    unsafe {
+                        let d = &(*hit_bh).b_data;
+                        crate::fs::ext4::extent::exthunt_rxbhit(
+                            blocknr,
+                            d.as_ptr(),
+                            d[0],
+                            d[1],
+                        );
+                    }
                     completion.complete(0);
                     return Some(hit_bh);
                 }
@@ -1322,6 +1370,9 @@ pub fn bread_async(
         // Phase 2: Cache miss — submit async I/O (no lock held).
         // Uninit buffer: the device DMA fills every byte; zero-filling 4 KiB
         // per block was measurable waste on the batch read-ahead path.
+        // dfx=exthunt: fresh-entry fabrication (adjudicates the unhashed
+        // evicting-victim race — see the tracers in ext4/extent.rs).
+        crate::fs::ext4::extent::exthunt_fab(blocknr, skipped_evicting, false);
         let block_size = cache.block_size;
         let mut bh = Box::new(BufferHead::new_uninit(blocknr, block_size));
         bh.set_device(device);
@@ -1501,12 +1552,19 @@ pub fn block_cached(device: *const blkdev::GenDisk, blocknr: u64) -> bool {
         let cache = get_block_cache();
         let index = cache.hash_index(device_major, device_minor, blocknr);
         let bucket = cache.buckets[index].lock_irqsave();
+        // dfx=exthunt: detect the guard's blind spot under the lock (an
+        // evicting same-key entry makes this lookup return false while the
+        // victim's dirty data may not be on disk yet); print after release.
+        let mut evicting_match = false;
         let mut current = bucket.head;
         while let Some(entry_ptr) = current {
             let entry = &*entry_ptr;
             // Same validity guards as bread_async Phase 1: skip entries
             // being evicted and dead (freed/reused) BufferHeads.
             if entry.evicting {
+                if entry.key == (device_major, device_minor, blocknr) {
+                    evicting_match = true;
+                }
                 current = entry.hash_next;
                 continue;
             }
@@ -1518,6 +1576,10 @@ pub fn block_cached(device: *const blkdev::GenDisk, blocknr: u64) -> bool {
                 return true; // SpinlockGuard drops on early return
             }
             current = entry.hash_next;
+        }
+        drop(bucket);
+        if evicting_match {
+            crate::fs::ext4::extent::exthunt_bc_blind(blocknr);
         }
         false
     }

@@ -25,6 +25,13 @@ use super::taskdump::{taskdump_dec, taskdump_raw_line};
 /// Runtime switch state (set by `dfx=memwatch` on the cmdline).
 pub static ENABLED: AtomicBool = AtomicBool::new(false);
 
+/// Dealloc-refusal diagnostics (buddy_allocator.rs dealloc early-returns).
+/// Every refused free permanently leaks the block's pages — a nonzero,
+/// growing counter is a direct heap-exhaustion contributor.
+pub static DEALLOC_OUTSIDE: AtomicUsize = AtomicUsize::new(0);
+pub static DEALLOC_BIGORDER: AtomicUsize = AtomicUsize::new(0);
+pub static DEALLOC_MISALIGNED: AtomicUsize = AtomicUsize::new(0);
+
 /// Number of size-class buckets: sizes 1..=2^(NUM_BINS-1), plus overflow.
 pub const NUM_BINS: usize = 13; // buckets: 1,2,4,...,4096 (>4096 clamps to last)
 
@@ -801,6 +808,13 @@ pub fn dump_mem() {
     put_dec(pg.used_pages as u64);
     taskdump_raw_line(b" r=");
     put_dec(pg.reserved_pages as u64);
+    // Dealloc-refusal diagnostics: each is a silent page leak.
+    taskdump_raw_line(b" | dref out=");
+    put_dec(DEALLOC_OUTSIDE.load(Ordering::Relaxed) as u64);
+    taskdump_raw_line(b" big=");
+    put_dec(DEALLOC_BIGORDER.load(Ordering::Relaxed) as u64);
+    taskdump_raw_line(b" mis=");
+    put_dec(DEALLOC_MISALIGNED.load(Ordering::Relaxed) as u64);
     taskdump_raw_line(b"\n");
 
     if !ENABLED.load(Ordering::Relaxed) {

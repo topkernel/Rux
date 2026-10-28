@@ -735,6 +735,15 @@ impl ProcFSSuperBlock {
             sysctl::generate_cap_last_cap,
             self.alloc_ino(),
         )));
+        // Console loglevels "<cur> <default> <min> <boot>" — the first
+        // number is the live console_loglevel (LTP syslog11 reads it
+        // around syslog(2) level actions; tst_sys_conf saves/restores it).
+        kernel.add_child(Arc::new(ProcFSNode::new_sysctl_file(
+            b"printk".to_vec(),
+            sysctl::generate_printk,
+            sysctl::write_printk,
+            self.alloc_ino(),
+        )));
         // Core dump file name pattern (consumed by process::coredump).
         kernel.add_child(Arc::new(ProcFSNode::new_sysctl_file(
             b"core_pattern".to_vec(),
@@ -761,21 +770,25 @@ impl ProcFSSuperBlock {
             sysctl::generate_msgmnb,
             self.alloc_ino(),
         )));
-        // SysV shm limits — read by LTP shmget03 (shmmni) and shmctl03
-        // (cross-checked against shmctl IPC_INFO values).
-        kernel.add_child(Arc::new(ProcFSNode::new_dynamic_file(
+        // SysV shm limits — live and writable: shmget consults shmmax/
+        // shmmni/shmall (LTP shmget02/03), shmctl03 cross-checks IPC_INFO
+        // against the files.
+        kernel.add_child(Arc::new(ProcFSNode::new_sysctl_file(
             b"shmmax".to_vec(),
             sysctl::generate_shmmax,
+            sysctl::write_shmmax,
             self.alloc_ino(),
         )));
-        kernel.add_child(Arc::new(ProcFSNode::new_dynamic_file(
+        kernel.add_child(Arc::new(ProcFSNode::new_sysctl_file(
             b"shmmni".to_vec(),
             sysctl::generate_shmmni,
+            sysctl::write_shmmni,
             self.alloc_ino(),
         )));
-        kernel.add_child(Arc::new(ProcFSNode::new_dynamic_file(
+        kernel.add_child(Arc::new(ProcFSNode::new_sysctl_file(
             b"shmall".to_vec(),
             sysctl::generate_shmall,
+            sysctl::write_shmall,
             self.alloc_ino(),
         )));
 
@@ -820,6 +833,28 @@ impl ProcFSSuperBlock {
             b"lease-break-time".to_vec(),
             sysctl::generate_lease_break_time,
             sysctl::write_lease_break_time,
+            self.alloc_ino(),
+        )));
+        // /proc/sys/fs/inotify — the three tunables every inotify consumer
+        // (LTP inotify05/06/12, glib GFileMonitor) reads.
+        let inodir = Arc::new(ProcFSNode::new_dir(b"inotify".to_vec(), self.alloc_ino()));
+        fsdir.add_child(inodir.clone());
+        inodir.add_child(Arc::new(ProcFSNode::new_sysctl_file(
+            b"max_queued_events".to_vec(),
+            sysctl::generate_inotify_max_queued_events,
+            sysctl::write_inotify_max_queued_events,
+            self.alloc_ino(),
+        )));
+        inodir.add_child(Arc::new(ProcFSNode::new_sysctl_file(
+            b"max_user_instances".to_vec(),
+            sysctl::generate_inotify_max_user_instances,
+            sysctl::write_inotify_max_user_instances,
+            self.alloc_ino(),
+        )));
+        inodir.add_child(Arc::new(ProcFSNode::new_sysctl_file(
+            b"max_user_watches".to_vec(),
+            sysctl::generate_inotify_max_user_watches,
+            sysctl::write_inotify_max_user_watches,
             self.alloc_ino(),
         )));
         // POSIX mq limits — LTP mq_open01 reads+writes queues_max.
@@ -1060,23 +1095,11 @@ pub fn read_file(path: &str) -> Option<Vec<u8>> {
         }
     }
 
-    // Match /proc/[pid]/fd/N (fd symlink target)
-    if components.len() == 4 && components[0] == "proc" && components[2] == "fd" {
-        let first = if components[1] == "self" {
-            alloc::format!("{}", current_pid())
-        } else {
-            alloc::string::String::from(components[1])
-        };
-
-        if let Some(pid) = pid::parse_pid(first.as_bytes()) {
-            if let Ok(fd) = components[3].parse::<u32>() {
-                let target = pid::generate_fd_link(pid, fd);
-                if !target.is_empty() {
-                    return Some(target);
-                }
-            }
-        }
-    }
+    // NOTE: /proc/[pid]/fd/N is intentionally NOT matched here. Serving the
+    // link target string as file CONTENT made open("/proc/self/fd/N") hand
+    // back a memory file containing the path text; fd links must resolve
+    // through the generic VFS walk (PROCFS_DIR_OPS.lookup -> FD_LINK inode
+    // -> follow_symlink magic redirect to the target dentry).
 
     // Match /proc/[pid]/attr/<file> (4 components)
     if components.len() == 4 && components[0] == "proc" && components[2] == "attr" {
@@ -1367,6 +1390,13 @@ unsafe fn procfs_lookup(dir: &Inode, name: &[u8]) -> Result<Ino, i32> {
 /// ProcFS getattr operation
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
 unsafe fn procfs_getattr(inode: &Inode, stat: &mut crate::fs::Stat) -> i32 {
+    // Distinct st_dev for procfs (Linux s_dev of procfs instances): the
+    // root ext4 reports its own fs_id and procfs used to leave st_dev at
+    // 0 — with both filesystems effectively sharing a device id,
+    // RESOLVE_NO_XDEV (openat2 st_dev comparison) and any statfs/dev
+    // based cross-mount logic could never distinguish them (LTP
+    // openat202's resolve-no-xdev case).
+    stat.st_dev = 0x9e90; // "proc" instance id, chosen non-zero and stable
     // PID directory: private_data is None, inode.ino stores the PID
     if inode.private_data.is_none() && pid::is_valid_pid(inode.ino) {
         let pid = inode.ino;
@@ -2426,10 +2456,16 @@ pub unsafe fn procfs_fd_dir_lookup(dir: &Inode, name: &[u8]) -> Result<Ino, i32>
         Some(p) => p as usize as u64,
         None => return Err(errno::Errno::NotADirectory.as_neg_i32()),
     };
-    if name.is_empty() || name.len() > 3 || !name.iter().all(|b| b.is_ascii_digit()) {
+    // Up to 6 digits: MAX_FDS is 1024 today (fds 1000-1023 exist — a
+    // 3-digit cap made them ENOENT by path), and the bound below rejects
+    // anything past the real table anyway.
+    if name.is_empty() || name.len() > 6 || !name.iter().all(|b| b.is_ascii_digit()) {
         return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
     }
     let fd: u64 = name.iter().fold(0u64, |acc, b| acc * 10 + (b - b'0') as u64);
+    if fd as usize >= crate::fs::file::MAX_FDS {
+        return Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32());
+    }
     // Closed (or out-of-range) fds are ENOENT, like Linux.
     let open = crate::process::find_task_by_pid(pid_val as u32)
         .or_else(|| {

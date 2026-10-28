@@ -885,7 +885,9 @@ pub fn do_exit(exit_code: i32) -> ! {
         // - set_address_space(None) swaps the slot under the mm-slot lock
         //   and drops our Arc after it; if it is the last reference the
         //   teardown (grace wait + PT free + VMA release) runs in THIS
-        //   context, after the satp switch.
+        //   context, after the satp switch. SysV shm detach (nattch) runs
+        //   inside MmStruct::drop — exactly once per mm, which subsumes
+        //   the old strong_count==1 pre-check here (LTP shmat01 family).
         if (*current).address_space_arc().is_some() {
             let kernel_ppn = crate::arch::mm::mmu_init::root_page_table_ppn();
             let current_ppn = crate::arch::mm::read_satp() as u64 & 0xF_FFFF_FFFF_FFFF;
@@ -1119,6 +1121,20 @@ pub fn do_exit_group(exit_code: i32) -> ! {
         Some(c) => c as *mut Task,
         None => do_exit(exit_code),
     };
+    // Publish the group exit status BEFORE stopping the siblings: the
+    // SIGKILL below makes each member's fatal-signal path re-enter
+    // do_exit_group with THIS code, so the whole group — the leader
+    // included — reports the clean status instead of "killed by
+    // signal 9" (Linux signal_group_exit; LTP mq_notify03 exit(0)
+    // from the mq callback thread).
+    // SAFETY: current is the running task (matched above), non-null.
+    let signal_arc = unsafe { (*current).signal_arc() };
+    if let Some(ss) = signal_arc {
+        ss.group_exit_code
+            .store(exit_code, core::sync::atomic::Ordering::Release);
+        ss.group_exiting
+            .store(true, core::sync::atomic::Ordering::Release);
+    }
     kill_other_threads(current);
     do_exit(exit_code)
 }

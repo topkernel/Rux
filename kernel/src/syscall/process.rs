@@ -1037,6 +1037,10 @@ fn do_execve(pathname: &str, argv: &[alloc::string::String], envp: &[alloc::stri
 
     match do_execve_elf(current, &program_data, &final_argv, &final_envp, entry, phdr_count_usize, &ehdr, full_path.as_ref(), interp_data.as_deref(), secure_exec, exe_file_arc.as_ref(), interp_file_arc.as_ref()) {
         Ok(()) => {
+            // The image changed: the parent may no longer setpgid us
+            // (Linux sys_setpgid EACCES after exec; LTP setpgid03).
+            // SAFETY: current is the running task.
+            unsafe { (*current).mark_execed(); }
             if xt_on {
                 crate::pr_info!(
                     "EXECTRACE: OK pid={} path={} dt_jiffies={}",
@@ -1886,9 +1890,15 @@ pub fn sys_setreuid(args: SyscallArgs) -> i64 {
             cred.uid = new_ruid;
             cred.euid = new_euid;
             cred.fsuid = new_euid;
-            // Linux sys_setreuid: the saved uid follows the new euid when
-            // EITHER argument is specified (not just when ruid is set).
-            if ruid != -1 || euid != -1 {
+            // Linux __sys_setreuid: the saved uid follows the new euid
+            // only when ruid was set, OR when euid was set to a value
+            // DIFFERENT from the old real uid ("suid = euid" if
+            // ruid != -1 || (euid != -1 && euid != old->uid)). The old
+            // "either argument" rule updated suid on setreuid(-1, root)
+            // from uid 0 — LTP setreuid02 expects the saved uid to stay
+            // nobody there, and setregid03's setregid(-1, secondary)
+            // wrongly EPERM'd because sgid had followed the wrong egid.
+            if ruid != -1 || (euid != -1 && new_euid != old_ruid) {
                 cred.suid = new_euid;
             }
             // Leaving euid 0 drops all capabilities (Linux commit_creds)
@@ -1951,9 +1961,10 @@ pub fn sys_setregid(args: SyscallArgs) -> i64 {
             cred.gid = new_rgid;
             cred.egid = new_egid;
             cred.fsgid = new_egid;
-            // Linux sys_setregid: the saved gid follows the new egid when
-            // EITHER argument is specified (mirror of setreuid).
-            if rgid != -1 || egid != -1 {
+            // Linux __sys_setregid mirror of setreuid: the saved gid
+            // follows the new egid only when rgid was set, OR when egid
+            // was set to a value DIFFERENT from the old real gid.
+            if rgid != -1 || (egid != -1 && new_egid != old_rgid) {
                 cred.sgid = new_egid;
             }
         }
@@ -2281,12 +2292,19 @@ pub fn sys_setgroups(args: SyscallArgs) -> i64 {
     // so a partial read leaves zero group ids rather than garbage.
     let mut groups = alloc::vec::Vec::new();
     groups.resize(size as usize, 0u32);
+    // SAFETY: copy_from_user is the exception-table copy path; a partial
+    // fault (guarded buffers, bad pointers) MUST surface as EFAULT — the
+    // return value was previously dropped and the syscall silently
+    // installed zero-filled groups (LTP setgroups03's EFAULT case).
     unsafe {
-        crate::arch::uaccess::copy_from_user(
+        if crate::arch::uaccess::copy_from_user(
             groups.as_mut_ptr() as *mut u8,
             list_ptr as *const u8,
             size as usize * 4,
-        );
+        ) != 0
+        {
+            return -(errno::EFAULT as i64);
+        }
     }
 
     // Store in task credentials
@@ -2314,6 +2332,11 @@ pub fn sys_setpgid(args: SyscallArgs) -> i64 {
     // SAFETY: current is a valid task pointer from sched::current().
     let current_pid = unsafe { (*current).pid() };
 
+    // A negative pgid is EINVAL (LTP setpgid02: setpgid(pid, -1)).
+    if pgid < 0 {
+        return -(errno::EINVAL as i64);
+    }
+
     // Resolve target pid
     let target_pid = if target_pid == 0 {
         current_pid as i32
@@ -2328,13 +2351,28 @@ pub fn sys_setpgid(args: SyscallArgs) -> i64 {
         pgid
     };
 
+    // The target process group must exist: a pgid names a process-group
+    // LEADER (a live pid). Joining a nonexistent group is EPERM (LTP
+    // setpgid02's pid_max case).
+    if pgid != target_pid
+        && unsafe { crate::sched::find_task_by_pid(pgid as u32) }.is_null()
+    {
+        return -(errno::EPERM as i64);
+    }
+
     // Cannot set pgid for processes in different sessions
     if target_pid as u32 == current_pid {
         // Setting own pgid
         // SAFETY: current is a valid task pointer from sched::current().
         unsafe {
-            if (*current).sid() != pgid as u32 {
-                // pgid must be in same session (simplified: just check it's valid)
+            // Joining a process group whose LEADER lives in another
+            // session is EPERM (LTP setpgid03: parent joins the
+            // setsid()'d child's group).
+            if pgid as u32 != current_pid {
+                let leader = crate::sched::find_task_by_pid(pgid as u32);
+                if leader.is_null() || (*leader).sid() != (*current).sid() {
+                    return -(errno::EPERM as i64);
+                }
             }
             (*current).set_pgid(pgid as u32);
         }
@@ -2354,6 +2392,12 @@ pub fn sys_setpgid(args: SyscallArgs) -> i64 {
             // Target must be in same session
             if (*target).sid() != (*current).sid() {
                 return -(errno::EPERM as i64);
+            }
+            // Once the child has exec'd, the parent may no longer move it
+            // between groups (Linux sys_setpgid EACCES; LTP setpgid03's
+            // exec'd-child case).
+            if (*target).has_execed() {
+                return -(errno::EACCES as i64);
             }
             (*target).set_pgid(pgid as u32);
         }
@@ -2503,6 +2547,16 @@ pub fn sys_prlimit64(args: SyscallArgs) -> i64 {
 
         if req_cur > req_max {
             return -(errno::EINVAL as i64);
+        }
+
+        // RLIMIT_NOFILE hard-limit ceiling (Linux do_prlimit): raising
+        // rlim_max above the fs.nr_open sysctl default (1024*1024) is
+        // EPERM even for root. musl's setrlimit() maps to prlimit64 on
+        // the generic 64-bit syscall table (no setrlimit there), so this
+        // check must live HERE as well (LTP setrlimit03 sets
+        // rlim_max = nr_open+1 as root and requires EPERM).
+        if resource == rlimit_res::NOFILE && req_max > 1024 * 1024 {
+            return -(errno::EPERM as i64);
         }
 
         // Raising the hard limit — or the soft above the old hard —
@@ -2659,13 +2713,62 @@ pub fn sys_prctl(args: SyscallArgs) -> i64 {
             0
         }
         37 => {
-            // PR_GET_CHILD_SUBREAPER
+            // PR_GET_CHILD_SUBREAPER: the value is WRITTEN to the (int *)
+            // in arg2 and the syscall returns 0 (Linux kernel/sys.c:
+            // put_user(!!sig->is_child_subreaper, (int __user *)arg2)).
+            // Returning the flag itself left the caller's variable
+            // uninitialized — LTP prctl03's final check read stack garbage
+            // (0) after a successful PR_SET, and the check that expected 0
+            // passed only by luck.
+            // SAFETY: current is a valid task pointer; signal field is an Option.
+            unsafe {
+                let val: i32 = if let Some(ref sig) = (*current).signal {
+                    sig.is_child_subreaper.load(core::sync::atomic::Ordering::Relaxed) as i32
+                } else {
+                    0
+                };
+                // Returns uncopied byte count (0 = success).
+                if crate::arch::uaccess::copy_to_user(
+                    arg2 as *mut u8,
+                    val.to_ne_bytes().as_ptr(),
+                    4,
+                ) == 0
+                {
+                    0
+                } else {
+                    -14  // EFAULT
+                }
+            }
+        }
+        29 => {
+            // PR_SET_TIMERSLACK: nanoseconds; 0 resets to the process's
+            // DEFAULT slack (Linux kernel/sys.c PR_SET_TIMERSLACK). The
+            // default is set at fork to the parent's CURRENT value
+            // (kernel/fork.c copy_process), so a forked child that resets
+            // lands on the inherited value, not the boot 50 us — LTP
+            // prctl08 "Child process" case.
             // SAFETY: current is a valid task pointer; signal field is an Option.
             unsafe {
                 if let Some(ref sig) = (*current).signal {
-                    sig.is_child_subreaper.load(core::sync::atomic::Ordering::Relaxed) as i64
+                    let slack_ns = if arg2 == 0 {
+                        sig.timer_slack_default_ns
+                            .load(core::sync::atomic::Ordering::Relaxed)
+                    } else {
+                        arg2
+                    };
+                    sig.timer_slack_ns.store(slack_ns, core::sync::atomic::Ordering::Relaxed);
+                }
+            }
+            0
+        }
+        30 => {
+            // PR_GET_TIMERSLACK
+            // SAFETY: current is a valid task pointer; signal field is an Option.
+            unsafe {
+                if let Some(ref sig) = (*current).signal {
+                    sig.timer_slack_ns.load(core::sync::atomic::Ordering::Relaxed) as i64
                 } else {
-                    0
+                    50_000
                 }
             }
         }
@@ -2738,6 +2841,13 @@ pub fn sys_prctl(args: SyscallArgs) -> i64 {
             if arg2 > 0xff {
                 return -(errno::EINVAL as i64);
             }
+            // Capability gate (prctl(2)): raising securebits requires
+            // CAP_SETPCAP, else EPERM. Root init holds every capability;
+            // LTP prctl02 case #16 drops CAP_SETPCAP+CAP_SYS_ADMIN and
+            // requires EPERM where we used to succeed.
+            if !crate::security::capable(crate::security::CAP_SETPCAP) {
+                return -(errno::EPERM as i64);
+            }
             // SAFETY: current is a valid task pointer; cred_mut returns
             // the task's own credential structure.
             unsafe {
@@ -2803,6 +2913,13 @@ pub fn sys_prctl(args: SyscallArgs) -> i64 {
                     0
                 }
                 PR_CAP_AMBIENT_CLEAR_ALL => {
+                    // Linux validates the unused arguments: arg3/arg4/arg5
+                    // must be zero for CLEAR_ALL (kernel/sys.c PR_CAP_AMBIENT
+                    // arg validation; LTP prctl02 case #13 passes arg3=1 and
+                    // requires EINVAL where we used to succeed).
+                    if arg3 != 0 || arg4 != 0 || _arg5 != 0 {
+                        return -(errno::EINVAL as i64);
+                    }
                     // SAFETY: current is a valid task pointer.
                     unsafe { (*current).cred_mut().cap_ambient = crate::security::capability::Cap::EMPTY; }
                     0
@@ -2850,8 +2967,17 @@ pub fn sys_prctl(args: SyscallArgs) -> i64 {
 /// - args[1]: tid - thread ID (exact thread)
 /// - args[2]: sig - signal number
 pub fn sys_tgkill(args: SyscallArgs) -> i64 {
-    let tgid = args[0] as u32;
-    let tid = args[1] as u32;
+    // Linux do_tgkill() rejects tgid <= 0 || tid <= 0 with EINVAL
+    // BEFORE looking up any task. The naked `as u32` cast below would
+    // otherwise turn -1 into u32::MAX and produce ESRCH for what should
+    // be a clear EINVAL. LTP tgkill03 / tgkill02 both rely on this.
+    let tgid_raw = args[0] as i32;
+    let tid_raw = args[1] as i32;
+    if tgid_raw <= 0 || tid_raw <= 0 {
+        return -(errno::EINVAL as i64);
+    }
+    let tgid = tgid_raw as u32;
+    let tid = tid_raw as u32;
     let sig = args[2] as i32;
 
     if sig < 0 || sig > 64 {
@@ -2886,7 +3012,11 @@ pub fn sys_tgkill(args: SyscallArgs) -> i64 {
     // suicide etc.) reports si_pid=0 and the sender is unattributable.
     crate::signal::send_signal_from_user_tkill(tid, sig)
         .map(|_| 0)
-        .unwrap_or(-(errno::EINVAL as i64))
+        // send_signal_* returns the negated errno in Err (e.g. -EAGAIN
+        // when RLIMIT_SIGPENDING is hit on an RT signal). Surface that
+        // to userspace instead of clobbering every failure into EINVAL
+        // — LTP tgkill02 expects EAGAIN (errno 11), not EINVAL (22).
+        .unwrap_or_else(|e| e as i64)
 }
 
 /// sys_rt_sigqueueinfo - send signal with data to a PROCESS
@@ -2970,7 +3100,10 @@ pub fn sys_rt_sigqueueinfo(args: SyscallArgs) -> i64 {
 
     crate::signal::send_signal_with_info(tgid, info)
         .map(|_| 0)
-        .unwrap_or(-(errno::EINVAL as i64))
+        // Propagate the actual errno from send_signal_with_info (e.g.
+        // EAGAIN on RLIMIT_SIGPENDING exhaustion). Previous behavior
+        // masked every send failure into EINVAL.
+        .unwrap_or_else(|e| e as i64)
 }
 
 /// sys_rt_tgsigqueueinfo - send signal with data to a precise THREAD
@@ -3050,7 +3183,8 @@ pub fn sys_rt_tgsigqueueinfo(args: SyscallArgs) -> i64 {
 
     crate::signal::send_signal_with_info_directed(tid, info)
         .map(|_| 0)
-        .unwrap_or(-(errno::EINVAL as i64))
+        // Propagate the actual errno (EAGAIN on RLIMIT_SIGPENDING, etc.).
+        .unwrap_or_else(|e| e as i64)
 }
 
 /// sys_rt_sigtimedwait - synchronously wait for signals
@@ -3312,11 +3446,37 @@ pub fn sys_setfsuid(args: SyscallArgs) -> i64 {
         // return references to the task's credential structure.
         unsafe {
             let old_fsuid = (*task).cred().fsuid;
-            let cred = (*task).cred_mut();
-            if crate::security::capable(crate::security::CAP_SETUID) {
-                cred.fsuid = fsuid;
-            } else if fsuid == cred.uid || fsuid == cred.euid || fsuid == cred.suid {
-                cred.fsuid = fsuid;
+            // (uid_t)-1 leaves fsuid unchanged (verified on Linux 7.0:
+            // setfsuid((uid_t)-1) twice as root returns 0 both times —
+            // LTP setfsuid02; the old code let -1 become the new fsuid).
+            let mut changed_to = None;
+            if fsuid != u32::MAX {
+                let cred = (*task).cred_mut();
+                if crate::security::capable(crate::security::CAP_SETUID) {
+                    cred.fsuid = fsuid;
+                    changed_to = Some(fsuid);
+                } else if fsuid == cred.uid || fsuid == cred.euid || fsuid == cred.suid {
+                    cred.fsuid = fsuid;
+                    changed_to = Some(fsuid);
+                }
+            }
+            // Linux commit_creds CAP_FS_MASK rule: leaving fsuid 0 drops
+            // the filesystem capabilities (CHOWN, DAC_OVERRIDE,
+            // DAC_READ_SEARCH, FOWNER, FSETID — bits 0..4) from the
+            // EFFECTIVE set; returning to fsuid 0 restores them from the
+            // permitted set. Without this, setfsuid(nobody) still opened
+            // root files O_RDWR through CAP_DAC_OVERRIDE (LTP setfsuid04).
+            if let Some(new_fsuid) = changed_to {
+                const CAP_FS_MASK: u64 = 0x1f;
+                let cred = (*task).cred_mut();
+                if old_fsuid == 0 && new_fsuid != 0 {
+                    let eff = cred.cap_effective.bits() & !CAP_FS_MASK;
+                    cred.cap_effective = crate::security::capability::Cap::new(eff);
+                } else if old_fsuid != 0 && new_fsuid == 0 {
+                    let eff = cred.cap_effective.bits()
+                        | (cred.cap_permitted.bits() & CAP_FS_MASK);
+                    cred.cap_effective = crate::security::capability::Cap::new(eff);
+                }
             }
             old_fsuid as i64
         }
@@ -3336,11 +3496,16 @@ pub fn sys_setfsgid(args: SyscallArgs) -> i64 {
         // return references to the task's credential structure.
         unsafe {
             let old_fsgid = (*task).cred().fsgid;
-            let cred = (*task).cred_mut();
-            if crate::security::capable(crate::security::CAP_SETGID) {
-                cred.fsgid = fsgid;
-            } else if fsgid == cred.gid || fsgid == cred.egid || fsgid == cred.sgid {
-                cred.fsgid = fsgid;
+            // (gid_t)-1 leaves fsgid unchanged (LTP setfsgid01: the old
+            // code stored 0xFFFFFFFF and the next call's return, read as
+            // a signed syscall result, surfaced as -1).
+            if fsgid != u32::MAX {
+                let cred = (*task).cred_mut();
+                if crate::security::capable(crate::security::CAP_SETGID) {
+                    cred.fsgid = fsgid;
+                } else if fsgid == cred.gid || fsgid == cred.egid || fsgid == cred.sgid {
+                    cred.fsgid = fsgid;
+                }
             }
             old_fsgid as i64
         }
@@ -4067,6 +4232,18 @@ pub fn sys_seccomp(args: SyscallArgs) -> i64 {
                 });
             }
 
+            // Privilege gate at attach time (Linux order: program
+            // copy/validation above reports EFAULT/EINVAL first; the
+            // capability check happens when the filter attaches).
+            // prctl(2)/seccomp(2): installing a filter requires
+            // no_new_privs OR CAP_SYS_ADMIN; PR_SET_NO_NEW_PRIVS is not
+            // implemented in this kernel, so the gate is CAP_SYS_ADMIN
+            // alone → EACCES otherwise. LTP prctl02 case #5 drops
+            // CAP_SYS_ADMIN/CAP_SETPCAP and requires EACCES.
+            if !crate::security::capable(crate::security::CAP_SYS_ADMIN) {
+                return -(errno::EACCES as i64);
+            }
+
             match seccomp_set_filter(filter) {
                 Ok(()) => 0,
                 Err(e) => e as i64,
@@ -4584,10 +4761,26 @@ pub fn sys_capset(args: SyscallArgs) -> i64 {
 }
 
 /// sys_personality - Set process execution domain
+///
+/// Store-and-readback contract: personality(x) stores x and returns the
+/// PREVIOUS personality; personality(0xffffffff) is the query sentinel —
+/// the value is returned unchanged with nothing stored. The stored value
+/// inherits across fork and survives execve (setarch-style flag
+/// personalities like ADDR_NO_RANDOMIZE depend on the exec survival).
+/// 0 = PER_LINUX. No validation: the execution-domain table semantics
+/// were retired upstream, so any value stores and reads back verbatim.
 pub fn sys_personality(args: SyscallArgs) -> i64 {
-    let _persona = args[0] as u64;
-    // Return current personality (0 = PER_LINUX)
-    0
+    let new = args[0] as u32;
+    match crate::sched::current() {
+        Some(current) => {
+            let old = unsafe { (*current).personality };
+            if new != 0xffffffff {
+                unsafe { (*current).personality = new; }
+            }
+            old as i64
+        }
+        None => 0,
+    }
 }
 
 /// sys_pivot_root - Change root filesystem (NR 41, U1c)
@@ -4879,6 +5072,15 @@ pub fn sys_setrlimit(args: SyscallArgs) -> i64 {
         return -(errno::EINVAL as i64);
     }
 
+    // RLIMIT_NOFILE hard-limit ceiling (Linux do_prlimit): raising
+    // rlim_max above the fs.nr_open sysctl default (1024*1024) is EPERM
+    // even for root — the kernel refuses descriptors beyond the fdtable
+    // encoding. LTP setrlimit03 sets rlim_max = nr_open+1 as root and
+    // requires EPERM, not success.
+    if resource == rlimit_res::NOFILE && rlim_max > 1024 * 1024 {
+        return -(errno::EPERM as i64);
+    }
+
     let current = match crate::sched::current() {
         Some(t) => t,
         None => return -(errno::ESRCH as i64),
@@ -5010,8 +5212,14 @@ pub fn sys_sethostname(args: SyscallArgs) -> i64 {
         return -(errno::EPERM as i64);
     }
 
-    if name_ptr.is_null() || len == 0 || len > 64 {
+    if len == 0 || len > 64 {
         return -(errno::EINVAL as i64);
+    }
+    if name_ptr.is_null() {
+        // Linux fails the strncpy_from_user on NULL with EFAULT (LTP
+        // setdomainname02 / sethostname02 "name == NULL" cases) — not
+        // EINVAL.
+        return -(errno::EFAULT as i64);
     }
     if !crate::arch::uaccess::access_ok(name_ptr as usize, len) {
         return -(errno::EFAULT as i64);
@@ -5043,8 +5251,14 @@ pub fn sys_setdomainname(args: SyscallArgs) -> i64 {
         return -(errno::EPERM as i64);
     }
 
-    if name_ptr.is_null() || len == 0 || len > 64 {
+    if len == 0 || len > 64 {
         return -(errno::EINVAL as i64);
+    }
+    if name_ptr.is_null() {
+        // Linux fails the strncpy_from_user on NULL with EFAULT (LTP
+        // setdomainname02 / sethostname02 "name == NULL" cases) — not
+        // EINVAL.
+        return -(errno::EFAULT as i64);
     }
     if !crate::arch::uaccess::access_ok(name_ptr as usize, len) {
         return -(errno::EFAULT as i64);
@@ -5492,8 +5706,22 @@ pub fn sys_unshare(args: SyscallArgs) -> i64 {
         return -(errno::EINVAL as i64);
     }
 
-    // CLONE_FS/CLONE_FILES unsharing is not implemented (the fs struct and
-    // fd table are already per-fork); accept as a no-op.
+    // CLONE_FILES: copy the fd table away from any CLONE_FILES sharers
+    // (Linux unshare_fdtable) — a thread that unshares must not close the
+    // group's descriptors. CLONE_FS stays a no-op (the fs struct is
+    // per-fork here; nothing shares it).
+    if flags & 0x00000400 != 0 {
+        if let Some(task) = crate::sched::current() {
+            unsafe {
+                if let Some(arc) = (*task).fdtable_arc() {
+                    if alloc::sync::Arc::strong_count(&arc) > 2 {
+                        let copy = alloc::sync::Arc::new(crate::fs::FdTable::fork_from(&*arc));
+                        (*task).set_fdtable(Some(copy));
+                    }
+                }
+            }
+        }
+    }
 
     match crate::process::ns::unshare_namespaces(flags) {
         Ok(()) => 0,
@@ -5950,6 +6178,27 @@ pub fn sys_close_range(args: SyscallArgs) -> i64 {
     }
     if flags & !(CLOSE_RANGE_CLOEXEC | CLOSE_RANGE_UNSHARE) != 0 {
         return -(errno::EINVAL as i64);
+    }
+
+    // CLOSE_RANGE_UNSHARE: copy the fd table before closing when it is
+    // shared with CLONE_FILES siblings (Linux unshare_fdtable_221b8ba —
+    // the close must not reach the sharers' table). LTP close_range01/02:
+    // a CLONE_FILES child doing close_range(..., UNSHARE) must leave the
+    // parent's descriptors open; without the copy the child closed the
+    // shared table and the parent's very next fcntl died EBADF.
+    if flags & CLOSE_RANGE_UNSHARE != 0 {
+        if let Some(task) = crate::sched::current() {
+            unsafe {
+                if let Some(arc) = (*task).fdtable_arc() {
+                    // fdtable_arc() itself holds one reference: >2 means a
+                    // real sharer exists beyond the caller's own.
+                    if alloc::sync::Arc::strong_count(&arc) > 2 {
+                        let copy = alloc::sync::Arc::new(crate::fs::FdTable::fork_from(&*arc));
+                        (*task).set_fdtable(Some(copy));
+                    }
+                }
+            }
+        }
     }
 
     let fdtable = match crate::sched::get_current_fdtable() {
