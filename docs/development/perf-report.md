@@ -556,6 +556,20 @@ per bench (`PBENCH <name> n=<N> med=<us> p99=<us> min=<us> ...`).
 | P6 | fs ops on ext4 (userdata) | a prep pass builds an identical tree (1000-entry dir, 1000 x 4 KB files) on the private userdata copy, then: stat, open+close, getdents, unlink, mkdir+rmdir, 4 KB write+fsync, page-cached read, append; N=1e3-1e4 each | steady-state row-4 numbers free of boot phase mix; same ext4 contents on both sides |
 | P7 | sleep resolution | nanosleep(1 ms) x 1e4, report avg overshoot | post-tick-fix regression guard (221 ms boot avg is the mixed tail; this isolates the healthy path) |
 
+**Probe backlog (standing items, coordinator-acknowledged 2026-10-29):**
+
+- **P3d — CONCURRENT file-fault contention row (OWED, gates the pcache
+  Option-B verdict).** 4 processes, each mmap-touching a DISTINCT
+  file's pages (N faults counted per proc, medians per proc + a
+  combined wall row). Motivation: the existing P3 rows are
+  single-process warm-cache (p3c_fault_file med 0.070us, pa91q2) and
+  CANNOT see the global-inodes-lock contention the OH load phase
+  creates (100MB libs, thousands of inodes, 4 CPUs); ledger 8.10.27's
+  measurement plan needs this row BEFORE the Option-B implementation
+  lands, so the before/after pair exists. Gated off by default like
+  the heavy rows; same parsable PBENCH line format. Build ticket rides
+  the namei-A + pcache-B implementation batch (panic-fix-gated).
+
 Not probed (deliberately): CPU-bound user loops (kernel report, not a
 CPU survey), memory bandwidth (same), TCP loopback (unix dgram is the
 workload shape; TCP can be a v1.6 addition).
