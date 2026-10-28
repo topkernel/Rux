@@ -87,12 +87,17 @@ def build_image(img, args):
         argline = "%s %d %d /storm/wrfile" % (args.mode, args.mb, args.rounds)
     elif args.mode == "mix":
         argline = "%s %d %d" % (args.mode, args.rounds, args.mb)
+    elif args.mode == "fake":
+        argline = "%s %d %d" % (args.mode, args.mb, args.mb2)
     else:
         argline = "%s %d" % (args.mode, args.mb)
     with open(os.path.join(staging, "test", "args"), "w") as f:
         f.write(argline + "\n")
+    # fake mode writes a cache-filling file of --mb MB inside the guest:
+    # size the image to hold it (default 128M as before).
+    img_mbs = "%dM" % (args.mb + 64) if args.mode == "fake" else "128M"
     r = subprocess.run([MKFS, "-q", "-F", "-O", "^metadata_csum,^flex_bg",
-                        "-d", staging, img, "128M"],
+                        "-d", staging, img, img_mbs],
                        capture_output=True, text=True)
     if r.returncode != 0:
         print("[img] mkfs failed: %s" % r.stderr)
@@ -108,10 +113,12 @@ def main():
     ap.add_argument("--secs", type=int, default=600)
     ap.add_argument("--mode", default="anon",
                     choices=["anon", "fork", "churn", "exec", "mapfile",
-                             "wrstorm", "mix"])
+                             "wrstorm", "mix", "fake"])
     ap.add_argument("--mb", type=int, default=1200)
     ap.add_argument("--fork-n", type=int, default=8)
     ap.add_argument("--rounds", type=int, default=4)
+    ap.add_argument("--mb2", type=int, default=0,
+                    help="fake mode: anon MB after the cache fill")
     ap.add_argument("--kernel", default=DEFAULT_KERNEL)
     ap.add_argument("--extra-append", default="")
     ap.add_argument("--keep-img", action="store_true")

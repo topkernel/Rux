@@ -5,8 +5,25 @@
 //! Kernel Timer Wheel
 //!
 //! Provides a simple timer mechanism for software timers.
-//! Timers are stored in a BTreeMap keyed by timer ID, and the
-//! Hrtimer softirq handler scans for expired timers on each tick.
+//! Timers live in a FIXED-SLOT table (static .bss storage, no heap), and
+//! the Hrtimer softirq handler scans occupied slots on each tick.
+//!
+//! R37 (landed leg 49; design note in
+//! docs/development/r37-timer-slotted-table-draft.rs): the old pair of
+//! `BTreeMap<u64, TimerEntry>` / `BTreeMap<u64, TimerAction>` tables
+//! (TIMERS + ACTIONS locks) allocated BTreeMap NODES INSIDE the locks
+//! on `insert()`. R34 had already made the softirq expiry path
+//! zero-allocation (EXPIRY_BUDGET + in-place re-arm), but the add path
+//! still allocated under TIMERS→ACTIONS. On allocation failure
+//! `alloc_error_handler` panics (no unwinding, panic = abort), parking
+//! the CPU in `wfi` with the lock held while the other CPUs spin on it
+//! forever — the R36 run6 TIMERS deadlock family. The slot table makes
+//! EVERY path under the lock allocation-free by construction: slots are
+//! fixed .bss storage, occupancy is tracked in a fixed bitmap, and
+//! entry+action are inlined in one slot (which also merges the two
+//! tables into ONE lock, deleting the TIMERS→ACTIONS nesting edge).
+//! Cost: 1024 × 56-byte slots + 128-byte bitmap ≈ 57 KB of .bss —
+//! accepted.
 //!
 //! Callbacks run in softirq context — must not sleep.
 //!
@@ -15,7 +32,6 @@
 //! timer ID during expiry.
 
 use core::sync::atomic::{AtomicU64, Ordering};
-use alloc::collections::BTreeMap;
 use crate::sync::spinlock::Spinlock;
 use crate::drivers::timer;
 
@@ -25,20 +41,9 @@ const MAX_TIMERS: usize = 1024;
 /// Global timer ID counter.
 static NEXT_TIMER_ID: AtomicU64 = AtomicU64::new(1);
 
-/// A timer entry in the active set.
-struct TimerEntry {
-    /// Jiffies when this timer fires (jiffy-only timers; bookkeeping for
-    /// high-resolution entries — see `expires_time`).
-    expires: u64,
-    /// Optional HIGH-RESOLUTION absolute expiry (time CSR ticks, 100ns
-    /// each; 0 = jiffies-only timer). When set, the timer fires EXACTLY
-    /// when read_time() reaches it and never otherwise — nanosleep-class
-    /// callers must never be woken early, and the jiffies counter can lag
-    /// the time grid under load, so a jiffy fallback for these entries
-    /// fired early and consumed the one-shot wake (lost-wakeup root
-    /// cause; LTP clock_nanosleep02 also forbids early wakes).
-    expires_time: u64,
-}
+/// Earliest outstanding high-resolution deadline (time CSR ticks);
+/// u64::MAX when none. Drives timer re-arming: the per-hart timer is
+/// programmed to min(next grid tick, this value).
 
 /// Earliest outstanding high-resolution deadline (time CSR ticks);
 /// u64::MAX when none. Drives timer re-arming: the per-hart timer is
@@ -81,20 +86,33 @@ pub fn hres_next_deadline() -> u64 {
 }
 
 /// Recompute HRES_NEXT from the active timer set (min expires_time > 0).
-/// Caller holds no locks requirement — takes TIMERS internally.
+/// Caller holds no locks requirement — takes TIMER_TABLE internally.
 fn recompute_hres_next() {
-    let timers = TIMERS.lock_irqsave();
+    let table = TIMER_TABLE.lock_irqsave();
     let mut next = u64::MAX;
-    for entry in timers.values() {
-        if entry.expires_time != 0 && entry.expires_time < next {
-            next = entry.expires_time;
+    for w in 0..TIMER_WORDS {
+        let mut word = table.bitmap[w];
+        while word != 0 {
+            let bit = word.trailing_zeros() as usize;
+            word &= !(1u64 << bit);
+            if let Some(slot) = &table.slots[w * 64 + bit] {
+                if slot.expires_time != 0 && slot.expires_time < next {
+                    next = slot.expires_time;
+                }
+            }
         }
     }
-    drop(timers);
+    drop(table);
     HRES_NEXT.store(next, Ordering::Release);
 }
 
 /// A timer action: what to do when a timer expires.
+///
+/// Detached snapshot type — copied out of the slot table under the lock
+/// and delivered after the lock is released (R12-3). Only the
+/// delivery-relevant fields are carried: `interval_jiffies` is consumed
+/// during the scan itself (in-place re-arm reads it from the slot), so
+/// the snapshot has no use for it.
 #[derive(Clone, Copy)]
 struct TimerAction {
     /// Target PID (0 = no signal delivery).
@@ -123,6 +141,132 @@ impl TimerAction {
     };
 }
 
+/// One slot: timer entry (id + expiry pair) with its action INLINED.
+/// R37 (landed leg 49, see docs/development/r37-timer-slotted-table-draft.rs):
+/// merging the old TIMERS/ACTIONS BTreeMap pair into one slot removes
+/// the TIMERS→ACTIONS lock nesting AND the transient state where an
+/// entry was visible without its action.
+#[derive(Clone, Copy)]
+struct TimerSlot {
+    /// Timer ID occupying this slot (monotonic, never reused — a freed
+    /// slot's id can never falsely match a recycled slot).
+    id: u64,
+    /// Jiffies when this timer fires (jiffy-only timers; bookkeeping for
+    /// high-resolution entries — see `expires_time`).
+    expires: u64,
+    /// Optional HIGH-RESOLUTION absolute expiry (time CSR ticks, 100ns
+    /// each; 0 = jiffies-only timer). When set, the timer fires EXACTLY
+    /// when read_time() reaches it and never otherwise (see the expiry
+    /// decision in timer_softirq_handler for the early-fire history).
+    expires_time: u64,
+    // ---- action fields (old TimerAction, inlined) ----
+    pid: u32,
+    signo: i32,
+    interval_jiffies: u64,
+    tfd_addr: u64,
+    wake_pid: u32,
+}
+
+impl TimerSlot {
+    /// Copy the action half out (for the lock-external delivery
+    /// snapshot).
+    fn action(&self) -> TimerAction {
+        TimerAction {
+            pid: self.pid,
+            signo: self.signo,
+            interval_jiffies: self.interval_jiffies,
+            tfd_addr: self.tfd_addr,
+            wake_pid: self.wake_pid,
+        }
+    }
+}
+
+/// Occupancy bitmap words (1 bit per slot).
+const TIMER_WORDS: usize = MAX_TIMERS / 64;
+
+// Compile-time sanity: the bitmap must cover the slot array exactly.
+const _: () = assert!(MAX_TIMERS % 64 == 0);
+
+/// The fixed-slot timer table: slot array + occupancy bitmap, guarded by
+/// ONE spinlock. R37: all mutations (occupy/free/re-arm) are plain
+/// stores — no code path under TIMER_TABLE can touch the heap, so no
+/// alloc_error_handler panic can ever fire with the lock held (the R36
+/// OOM-deadlock family: BTreeMap node insert under TIMERS→ACTIONS, the
+/// panicking CPU parked in wfi with the lock held, every other CPU
+/// spinning on it forever).
+struct TimerTable {
+    /// Occupancy bitmap: bit i set ⇔ slots[i] is occupied. Lets the
+    /// softirq scan and the id lookup skip whole runs of empty slots
+    /// with one word compare (mostly-empty table ⇒ ~16 loads per pass).
+    bitmap: [u64; TIMER_WORDS],
+    /// Fixed slot array (None = free).
+    slots: [Option<TimerSlot>; MAX_TIMERS],
+}
+
+impl TimerTable {
+    /// Find the first free slot (lowest index). Scans ≤ TIMER_WORDS
+    /// bitmap words — no allocation, no failure mode other than
+    /// "pool full".
+    fn find_free_slot(&self) -> Option<usize> {
+        for w in 0..TIMER_WORDS {
+            let word = self.bitmap[w];
+            if word != u64::MAX {
+                let bit = (!word).trailing_zeros() as usize;
+                return Some(w * 64 + bit);
+            }
+        }
+        None
+    }
+
+    /// Mark a slot occupied. Caller guarantees `idx` is currently free.
+    fn occupy(&mut self, idx: usize, slot: TimerSlot) {
+        self.slots[idx] = Some(slot);
+        self.bitmap[idx / 64] |= 1u64 << (idx % 64);
+    }
+
+    /// Free a slot (one-shot expiry or del_timer). Plain stores —
+    /// cannot fail, cannot allocate.
+    fn free(&mut self, idx: usize) {
+        self.slots[idx] = None;
+        self.bitmap[idx / 64] &= !(1u64 << (idx % 64));
+    }
+
+    /// Find the occupied slot holding `id`. Bitmap-accelerated walk:
+    /// ids are unique and monotonic, so the first match is THE timer
+    /// (a stale id matches nothing).
+    fn find_by_id(&self, id: u64) -> Option<usize> {
+        for w in 0..TIMER_WORDS {
+            let mut word = self.bitmap[w];
+            while word != 0 {
+                let bit = word.trailing_zeros() as usize;
+                word &= !(1u64 << bit);
+                let idx = w * 64 + bit;
+                if let Some(slot) = &self.slots[idx] {
+                    if slot.id == id {
+                        return Some(idx);
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    /// Number of occupied slots (bitmap popcount — the old
+    /// `timers.len()`).
+    fn len(&self) -> usize {
+        self.bitmap.iter().map(|w| w.count_ones() as usize).sum()
+    }
+}
+
+/// The timer table: ONE lock replaces the old TIMERS + ACTIONS pair,
+/// deleting the TIMERS→ACTIONS nesting edge from the lock graph.
+/// ~57 KB of .bss (1024 slots × 56 B + 128 B bitmap) — accepted by the
+/// R37 design note.
+static TIMER_TABLE: Spinlock<TimerTable> = Spinlock::new(TimerTable {
+    bitmap: [0; TIMER_WORDS],
+    slots: [None; MAX_TIMERS],
+});
+
 /// A pending timer, as /proc/timer_list reports it.
 #[derive(Clone, Copy)]
 pub struct TimerSnapshot {
@@ -146,32 +290,34 @@ pub struct TimerSnapshot {
 }
 
 /// A snapshot of the pending timers, copied out under the timer table
-/// locks so the caller never prints while they are held.
+/// lock so the caller never prints while it is held. R37: snapshot order
+/// is slot order (was id-ascending under the BTreeMap); /proc/timer_list
+/// has no ordering contract and its consumer is the wakewatch census,
+/// which counts.
 pub fn snapshot_timers() -> alloc::vec::Vec<TimerSnapshot> {
-    let timers = TIMERS.lock();
-    let actions = ACTIONS.lock();
-    let mut out = alloc::vec::Vec::with_capacity(timers.len());
-    for (id, entry) in timers.iter() {
-        let action = actions.get(id).copied().unwrap_or(TimerAction::EMPTY);
-        out.push(TimerSnapshot {
-            id: *id,
-            expires_time: entry.expires_time,
-            expires: entry.expires,
-            pid: action.pid,
-            signo: action.signo,
-            interval_jiffies: action.interval_jiffies,
-            wake_pid: action.wake_pid,
-            tfd_addr: action.tfd_addr,
-        });
+    let table = TIMER_TABLE.lock();
+    let mut out = alloc::vec::Vec::with_capacity(table.len());
+    for w in 0..TIMER_WORDS {
+        let mut word = table.bitmap[w];
+        while word != 0 {
+            let bit = word.trailing_zeros() as usize;
+            word &= !(1u64 << bit);
+            if let Some(slot) = &table.slots[w * 64 + bit] {
+                out.push(TimerSnapshot {
+                    id: slot.id,
+                    expires_time: slot.expires_time,
+                    expires: slot.expires,
+                    pid: slot.pid,
+                    signo: slot.signo,
+                    interval_jiffies: slot.interval_jiffies,
+                    wake_pid: slot.wake_pid,
+                    tfd_addr: slot.tfd_addr,
+                });
+            }
+        }
     }
     out
 }
-
-/// Active timers: timer_id → TimerEntry.
-static TIMERS: Spinlock<BTreeMap<u64, TimerEntry>> = Spinlock::new(BTreeMap::new());
-
-/// Timer actions: timer_id → TimerAction.
-static ACTIONS: Spinlock<BTreeMap<u64, TimerAction>> = Spinlock::new(BTreeMap::new());
 
 /// Last-processed jiffies value.
 static LAST_TICK: AtomicU64 = AtomicU64::new(0);
@@ -209,8 +355,10 @@ pub fn add_timer_wakeup(expires: u64, wake_pid: u32) -> u64 {
         return 0;
     }
 
-    let entry = TimerEntry { expires, expires_time: 0 };
-    let action = TimerAction {
+    let slot = TimerSlot {
+        id,
+        expires,
+        expires_time: 0,
         pid: 0,
         signo: 0,
         interval_jiffies: 0,
@@ -218,16 +366,17 @@ pub fn add_timer_wakeup(expires: u64, wake_pid: u32) -> u64 {
         wake_pid,
     };
 
-    let mut timers = TIMERS.lock_irqsave();
-    if timers.len() >= MAX_TIMERS {
-        return 0;
+    // R37: fixed-slot occupy — a plain store, replacing the old
+    // `timers.insert()` / `actions.insert()` BTreeMap node allocations
+    // under the TIMERS→ACTIONS locks (the R36 OOM-deadlock family).
+    let mut table = TIMER_TABLE.lock_irqsave();
+    match table.find_free_slot() {
+        Some(idx) => {
+            table.occupy(idx, slot);
+            id
+        }
+        None => 0, // pool full (the old `timers.len() >= MAX_TIMERS` check)
     }
-    timers.insert(id, entry);
-
-    let mut actions = ACTIONS.lock_irqsave();
-    actions.insert(id, action);
-
-    id
 }
 
 /// Add a one-shot HIGH-RESOLUTION wake timer: fires when the time CSR
@@ -243,8 +392,10 @@ pub fn add_timer_wakeup_hres(expires: u64, expires_time: u64, wake_pid: u32) -> 
         return 0;
     }
 
-    let entry = TimerEntry { expires, expires_time };
-    let action = TimerAction {
+    let slot = TimerSlot {
+        id,
+        expires,
+        expires_time,
         pid: 0,
         signo: 0,
         interval_jiffies: 0,
@@ -252,20 +403,18 @@ pub fn add_timer_wakeup_hres(expires: u64, expires_time: u64, wake_pid: u32) -> 
         wake_pid,
     };
 
-    let mut timers = TIMERS.lock_irqsave();
-    if timers.len() >= MAX_TIMERS {
-        return 0;
-    }
-    timers.insert(id, entry);
+    let mut table = TIMER_TABLE.lock_irqsave();
+    let idx = match table.find_free_slot() {
+        Some(idx) => idx,
+        None => return 0, // pool full
+    };
+    table.occupy(idx, slot);
     // Keep the global earliest-hres view current so the caller (on its own
     // hart, before sleeping) can re-arm the hart timer to the earlier
     // deadline.
     if expires_time != 0 && expires_time < HRES_NEXT.load(Ordering::Acquire) {
         HRES_NEXT.store(expires_time, Ordering::Release);
     }
-
-    let mut actions = ACTIONS.lock_irqsave();
-    actions.insert(id, action);
 
     id
 }
@@ -294,8 +443,10 @@ pub fn add_timer_with_action(
         return 0;
     }
 
-    let entry = TimerEntry { expires, expires_time: 0 };
-    let action = TimerAction {
+    let slot = TimerSlot {
+        id,
+        expires,
+        expires_time: 0,
         pid,
         signo,
         interval_jiffies,
@@ -303,16 +454,15 @@ pub fn add_timer_with_action(
         wake_pid: 0,
     };
 
-    let mut timers = TIMERS.lock_irqsave();
-    if timers.len() >= MAX_TIMERS {
-        return 0;
+    // R37: zero allocation under the lock (see add_timer_wakeup).
+    let mut table = TIMER_TABLE.lock_irqsave();
+    match table.find_free_slot() {
+        Some(idx) => {
+            table.occupy(idx, slot);
+            id
+        }
+        None => 0, // pool full
     }
-    timers.insert(id, entry);
-
-    let mut actions = ACTIONS.lock_irqsave();
-    actions.insert(id, action);
-
-    id
 }
 
 /// add_timer_with_action with a HIGH-RESOLUTION absolute deadline (POSIX
@@ -332,8 +482,10 @@ pub fn add_timer_with_action_hres(
         return 0;
     }
 
-    let entry = TimerEntry { expires, expires_time };
-    let action = TimerAction {
+    let slot = TimerSlot {
+        id,
+        expires,
+        expires_time,
         pid,
         signo,
         interval_jiffies,
@@ -341,17 +493,15 @@ pub fn add_timer_with_action_hres(
         wake_pid: 0,
     };
 
-    let mut timers = TIMERS.lock_irqsave();
-    if timers.len() >= MAX_TIMERS {
-        return 0;
-    }
-    timers.insert(id, entry);
+    let mut table = TIMER_TABLE.lock_irqsave();
+    let idx = match table.find_free_slot() {
+        Some(idx) => idx,
+        None => return 0, // pool full
+    };
+    table.occupy(idx, slot);
     if expires_time != 0 && expires_time < HRES_NEXT.load(Ordering::Acquire) {
         HRES_NEXT.store(expires_time, Ordering::Release);
     }
-
-    let mut actions = ACTIONS.lock_irqsave();
-    actions.insert(id, action);
 
     id
 }
@@ -361,45 +511,61 @@ pub fn add_timer_with_action_hres(
 /// # Returns
 /// `true` if timer was found and removed.
 pub fn del_timer(id: u64) -> bool {
-    // Lock order: TIMERS then ACTIONS — matches add_timer / softirq handler
-    let mut timers = TIMERS.lock_irqsave();
-    let removed_hres = timers.get(&id).map(|e| e.expires_time != 0).unwrap_or(false);
-    let removed = timers.remove(&id).is_some();
-    if removed_hres {
-        // The deleted timer may have been the global hres minimum; the
-        // cheap next recompute in the softirq will fix the value, but do it
-        // now so hart re-arms stop over-firing sooner.
-        let mut next = u64::MAX;
-        for entry in timers.values() {
-            if entry.expires_time != 0 && entry.expires_time < next {
-                next = entry.expires_time;
+    // R37: single lock — the old TIMERS→ACTIONS nesting (the lock-order
+    // comment used to live here) is gone: entry and action are one slot.
+    let mut table = TIMER_TABLE.lock_irqsave();
+    match table.find_by_id(id) {
+        Some(idx) => {
+            let removed_hres =
+                table.slots[idx].map(|s| s.expires_time != 0).unwrap_or(false);
+            table.free(idx);
+            if removed_hres {
+                // The deleted timer may have been the global hres minimum;
+                // the cheap next recompute in the softirq will fix the
+                // value, but do it now so hart re-arms stop over-firing
+                // sooner.
+                let mut next = u64::MAX;
+                for w in 0..TIMER_WORDS {
+                    let mut word = table.bitmap[w];
+                    while word != 0 {
+                        let bit = word.trailing_zeros() as usize;
+                        word &= !(1u64 << bit);
+                        if let Some(slot) = &table.slots[w * 64 + bit] {
+                            if slot.expires_time != 0 && slot.expires_time < next {
+                                next = slot.expires_time;
+                            }
+                        }
+                    }
+                }
+                HRES_NEXT.store(next, Ordering::Release);
             }
+            true
         }
-        HRES_NEXT.store(next, Ordering::Release);
+        None => false,
     }
-    let mut actions = ACTIONS.lock_irqsave();
-    actions.remove(&id);
-    removed
 }
 
 /// Modify a timer's expiration time.
 ///
 /// If the timer does not exist, does nothing and returns false.
 pub fn mod_timer(id: u64, new_expires: u64) -> bool {
-    let mut timers = TIMERS.lock_irqsave();
-    if let Some(entry) = timers.get_mut(&id) {
-        entry.expires = new_expires;
-        entry.expires_time = 0;
-        true
-    } else {
-        false
+    let mut table = TIMER_TABLE.lock_irqsave();
+    match table.find_by_id(id) {
+        Some(idx) => {
+            if let Some(slot) = table.slots[idx].as_mut() {
+                slot.expires = new_expires;
+                slot.expires_time = 0;
+            }
+            true
+        }
+        None => false,
     }
 }
 
 /// Check if a timer is currently active.
 pub fn timer_pending(id: u64) -> bool {
-    let timers = TIMERS.lock_irqsave();
-    timers.contains_key(&id)
+    let table = TIMER_TABLE.lock_irqsave();
+    table.find_by_id(id).is_some()
 }
 
 /// Query a pending timer's absolute state.
@@ -408,12 +574,9 @@ pub fn timer_pending(id: u64) -> bool {
 /// pending; `interval_jiffies` is 0 for one-shot timers. Used by
 /// getitimer/setitimer to report the remaining ITIMER_REAL time.
 pub fn get_timer_state(id: u64) -> Option<(u64, u64)> {
-    // Lock order: TIMERS then ACTIONS — matches add/del paths.
-    let timers = TIMERS.lock_irqsave();
-    let expires = timers.get(&id)?.expires;
-    let actions = ACTIONS.lock_irqsave();
-    let interval_jiffies = actions.get(&id).map(|a| a.interval_jiffies).unwrap_or(0);
-    Some((expires, interval_jiffies))
+    let table = TIMER_TABLE.lock_irqsave();
+    let slot = table.slots[table.find_by_id(id)?].as_ref()?;
+    Some((slot.expires, slot.interval_jiffies))
 }
 
 // ==================== Softirq Handler ====================
@@ -603,93 +766,110 @@ pub fn timer_softirq_handler(_nr: usize) {
         unsafe { (core::ptr::addr_of_mut!(EXPIRED_LEN) as *mut usize).add(cpu) };
     unsafe { *len_ptr = 0 };
     {
-        let mut timers = TIMERS.lock_irqsave();
-        let mut actions = ACTIONS.lock_irqsave();
+        let mut table = TIMER_TABLE.lock_irqsave();
         let mut budget = EXPIRY_BUDGET;
-        timers.retain(|&id, entry| {
-            // Expiry. High-resolution entries (expires_time != 0) fire ONLY
-            // on the precise time-CSR compare — the old `||
-            // entry.expires <= current` jiffy fallback ALSO fired them, and
-            // that is the lost-timer-wakeup root cause (timer-fix hunt,
-            // unix_wedge TIMER-STALL / GNOME final blocker):
-            //
-            //   `expires` is computed as get_jiffies() + ceil(...) + 1 at
-            //   ARM time, but jiffies advance only inside
-            //   increment_jiffies() on some hart's timer IRQ — under load
-            //   (long SIE=0 windows) the counter LAGS the time grid by more
-            //   than the +1 grid-tick margin, so `expires` lands BEFORE the
-            //   real time that hres_deadline represents. When ticks resume,
-            //   jiffies jump forward (max-with-nominal) and the scan fires
-            //   the entry EARLY — observed 100us..2.4ms before
-            //   expires_time (TIMER-EARLY-FIRE ... via=2 tripwire), always
-            //   immediately followed by a permanently sleeping task.
-            //
-            // Why that is fatal: the one-shot wake is the ONLY waker for
-            // nanosleep-class sleepers. An early fire consumes the token;
-            // the sleeper's re-check still sees time < hres_deadline, so it
-            // goes back to INTERRUPTIBLE sleep — with no timer left. The
-            // task hangs in state=S forever (timer_probe reproduces at
-            // ~60%/60s; unix_wedge PROC-STALL epw/srv state=S).
-            //
-            // The jiffy fallback is also redundant for hres entries:
-            // collection is guaranteed by ANY later scan, because
-            // `expires_time <= now_time` eventually holds on the jiffy
-            // grid alone (now_time only grows). Jiffy-only entries
-            // (expires_time == 0: poll_sleep_slice, unix_wait_round,
-            // itimers ...) keep firing on `expires <= current` — their
-            // callers re-check against the same jiffies clock, so an
-            // early-by-grid-jump fire is unobservable to them.
-            let due = if entry.expires_time != 0 {
-                entry.expires_time <= now_time
-            } else {
-                entry.expires <= current
-            };
-            if due {
+        // R37: bitmap walk — empty words cost one compare each; bits
+        // already visited are cleared from the local `word` copy, so
+        // freeing a one-shot slot (which clears the bit in table.bitmap)
+        // cannot cause a double visit.
+        for w in 0..TIMER_WORDS {
+            let mut word = table.bitmap[w];
+            while word != 0 {
+                let bit = word.trailing_zeros() as usize;
+                word &= !(1u64 << bit);
+                let idx = w * 64 + bit;
+                // Copy the slot out (TimerSlot is Copy) so no borrow is
+                // held across the in-place re-arm / free below.
+                let slot = match table.slots[idx] {
+                    Some(s) => s,
+                    None => continue, // impossible (occupy/free keep in sync); no-panic fallback
+                };
+                // Expiry. High-resolution entries (expires_time != 0) fire
+                // ONLY on the precise time-CSR compare — the old `||
+                // slot.expires <= current` jiffy fallback ALSO fired them,
+                // and that is the lost-timer-wakeup root cause (timer-fix
+                // hunt, unix_wedge TIMER-STALL / GNOME final blocker):
+                //
+                //   `expires` is computed as get_jiffies() + ceil(...) + 1
+                //   at ARM time, but jiffies advance only inside
+                //   increment_jiffies() on some hart's timer IRQ — under
+                //   load (long SIE=0 windows) the counter LAGS the time
+                //   grid by more than the +1 grid-tick margin, so `expires`
+                //   lands BEFORE the real time that hres_deadline
+                //   represents. When ticks resume, jiffies jump forward
+                //   (max-with-nominal) and the scan fires the entry EARLY —
+                //   observed 100us..2.4ms before expires_time (TIMER-EARLY-
+                //   FIRE ... via=2 tripwire), always immediately followed
+                //   by a permanently sleeping task.
+                //
+                // Why that is fatal: the one-shot wake is the ONLY waker
+                // for nanosleep-class sleepers. An early fire consumes the
+                // token; the sleeper's re-check still sees time <
+                // hres_deadline, so it goes back to INTERRUPTIBLE sleep —
+                // with no timer left. The task hangs in state=S forever
+                // (timer_probe reproduces at ~60%/60s; unix_wedge
+                // PROC-STALL epw/srv state=S).
+                //
+                // The jiffy fallback is also redundant for hres entries:
+                // collection is guaranteed by ANY later scan, because
+                // `expires_time <= now_time` eventually holds on the jiffy
+                // grid alone (now_time only grows). Jiffy-only entries
+                // (expires_time == 0: poll_sleep_slice, unix_wait_round,
+                // itimers ...) keep firing on `expires <= current` — their
+                // callers re-check against the same jiffies clock, so an
+                // early-by-grid-jump fire is unobservable to them.
+                let due = if slot.expires_time != 0 {
+                    slot.expires_time <= now_time
+                } else {
+                    slot.expires <= current
+                };
+                if !due {
+                    continue;
+                }
                 if budget == 0 {
-                    // Budget exhausted: keep the entry — it is re-scanned on
-                    // the next jiffy. Never let the critical section allocate.
-                    return true;
+                    // Budget exhausted: keep the entry — it is re-scanned
+                    // on the next jiffy. Never let the critical section
+                    // allocate.
+                    continue;
                 }
                 budget -= 1;
-                if let Some(action) = actions.get(&id) {
-                    if action.interval_jiffies > 0 {
-                        // Periodic: re-arm IN PLACE (same id, node kept) —
-                        // semantically identical to the old remove+re-insert
-                        // of the same key, but without the under-lock
-                        // dealloc+alloc pair. Bonus: del_timer can no longer
-                        // miss the briefly-removed id (orphan-timer race).
-                        // The action stays in ACTIONS untouched.
-                        entry.expires = current + action.interval_jiffies;
-                        // R37: a PERIODIC timer must also DELIVER on every
-                        // expiry — the old path only re-armed, so repeating
-                        // ITIMER_REAL (setitimer with it_interval != 0) and
-                        // periodic posix timers armed through the wheel
-                        // never sent a single signal (LTP setitimer01/
-                        // timer_settime hangs). Queue a COPY of the action
-                        // for the outside-locks delivery pass below; the
-                        // map keeps its own entry for the next expiry.
-                        unsafe {
-                            if *len_ptr < EXPIRY_BUDGET {
-                                (*buf_ptr)[*len_ptr] = (id, *action, 0); *len_ptr += 1;
-                            }
-                        }
+                if slot.interval_jiffies > 0 {
+                    // Periodic: re-arm IN PLACE (same id, same slot, only
+                    // the expiry mutated) — semantically identical to the
+                    // old remove+re-insert of the same key, but without
+                    // the under-lock dealloc+alloc pair. Bonus: del_timer
+                    // can no longer miss the briefly-removed id
+                    // (orphan-timer race).
+                    // R37: a PERIODIC timer must also DELIVER on every
+                    // expiry — the old path only re-armed, so repeating
+                    // ITIMER_REAL (setitimer with it_interval != 0) and
+                    // periodic posix timers armed through the wheel never
+                    // sent a single signal (LTP setitimer01/timer_settime
+                    // hangs). Queue a COPY of the action for the
+                    // outside-locks delivery pass below; the slot keeps
+                    // its own entry for the next expiry.
+                    if let Some(s) = table.slots[idx].as_mut() {
+                        s.expires = current + slot.interval_jiffies;
                         // Periodic re-arm is jiffy-based — drop any stale
                         // high-resolution deadline so it cannot re-fire the
                         // very next scan.
-                        entry.expires_time = 0;
-                        return true;
+                        s.expires_time = 0;
                     }
-                }
-                // One-shot: TAKE the action out (remove = dealloc only,
-                // cannot allocate — the no-alloc-under-lock discipline is
-                // preserved). The old code copied it with `actions.get`
-                // and left the entry in ACTIONS forever, so every one-shot
-                // timer (nanosleep / glib timeout / timerfd tick in GNOME)
-                // leaked one TimerAction: the ACTIONS BTreeMap grew
-                // ~4.8 nodes/s until the 128MB kernel heap died at ~65min
-                // (the GNOME-oom leak; memwatch live-site evidence:
-                // add_timer_wakeup leaf/internal nodes live=3000+, frees=4).
-                if let Some(action) = actions.remove(&id) {
+                    unsafe {
+                        if *len_ptr < EXPIRY_BUDGET {
+                            (*buf_ptr)[*len_ptr] = (slot.id, slot.action(), 0);
+                            *len_ptr += 1;
+                        }
+                    }
+                } else {
+                    // One-shot: TAKE the action and free the slot — both
+                    // plain stores, no allocation, no failure mode (the
+                    // no-alloc-under-lock discipline is now structural).
+                    // The old code left the action in ACTIONS forever, so
+                    // every one-shot timer (nanosleep / glib timeout /
+                    // timerfd tick in GNOME) leaked one TimerAction (the
+                    // GNOME-oom leak; see the R34 history above).
+                    table.free(idx);
                     unsafe {
                         // SAFETY: budget > 0 guarantees *len < EXPIRY_BUDGET;
                         // per-CPU buffer, non-reentrant via SOFTIRQ guard.
@@ -699,32 +879,30 @@ pub fn timer_softirq_handler(_nr: usize) {
                         // expires_time is 0 and (now - 0) would report the
                         // whole uptime as "lateness" (probe bug found on
                         // wt5: late_max tracked boot age, not delay).
-                        let late = if entry.expires_time != 0 {
-                            now_time.saturating_sub(entry.expires_time)
+                        let late = if slot.expires_time != 0 {
+                            now_time.saturating_sub(slot.expires_time)
                         } else {
                             0
                         };
-                        (*buf_ptr)[n] = (id, action, late);
+                        (*buf_ptr)[n] = (slot.id, slot.action(), late);
                         *len_ptr = n + 1;
                     }
                 }
-                false // one-shot: remove (dealloc cannot fail)
-            } else {
-                true
             }
-        });
+        }
 
         // R12-3: the wake/signal/slot-free work moved OUT of the
-        // TIMERS/ACTIONS critical section — holding both while calling
-        // wake_up_process (TIMERS -> GRQ nesting) was the observed TIMERS
-        // wedge ingredient (3 CPUs spinning on the TIMERS lock after a
-        // pipeline). The `expired` list is a detached local snapshot, so
-        // concurrency here is only against del_timer on the same ids.
-        // The tfd increment is a plain atomic (H48's close-race protection
-        // is the refcount on the fd side; the H48 comment applied to
-        // freeing, which does not happen in this loop).
-        // (Delivery happens after the locks drop — see the moved block.)
-    } // TIMERS + ACTIONS released here
+        // TIMER_TABLE critical section — holding the lock while calling
+        // wake_up_process (timer-table -> GRQ nesting) was the observed
+        // TIMERS wedge ingredient (3 CPUs spinning on the timer lock
+        // after a pipeline). The `expired` list is a detached local
+        // snapshot, so concurrency here is only against del_timer on the
+        // same ids. The tfd increment is a plain atomic (H48's
+        // close-race protection is the refcount on the fd side; the H48
+        // comment applied to freeing, which does not happen in this
+        // loop).
+        // (Delivery happens after the lock drops — see the moved block.)
+    } // TIMER_TABLE released here
 
     // Refresh the earliest-hres view: fired/removed timers may have been
     // the minimum. Cheap scan under TIMERS only.
@@ -1019,14 +1197,21 @@ fn ww_heartbeat(now_time: u64) {
     let phase1 = crate::sched::sched::WW_IDLE_PHASE[1].load(Ordering::Acquire);
 
     // Wheel census (short lock; heartbeat is 1 Hz and holds no timer
-    // locks at this point).
+    // locks at this point). R37: bitmap walk over the slot table.
     let (wheel_len, overdue) = {
-        let timers = TIMERS.lock_irqsave();
-        let len = timers.len();
+        let table = TIMER_TABLE.lock_irqsave();
+        let len = table.len();
         let mut od = 0u64;
-        for e in timers.values() {
-            if e.expires_time != 0 && e.expires_time <= now_time {
-                od += 1;
+        for w in 0..TIMER_WORDS {
+            let mut word = table.bitmap[w];
+            while word != 0 {
+                let bit = word.trailing_zeros() as usize;
+                word &= !(1u64 << bit);
+                if let Some(slot) = &table.slots[w * 64 + bit] {
+                    if slot.expires_time != 0 && slot.expires_time <= now_time {
+                        od += 1;
+                    }
+                }
             }
         }
         (len, od)
@@ -1034,8 +1219,41 @@ fn ww_heartbeat(now_time: u64) {
 
     let sched = crate::sched::sched::ww_sched_snapshot();
 
+    // s16 (WW5, A2 census): pick-walk and heal deltas plus cumulative
+    // sub-gate strand counts — the counter-based adjudication of the
+    // msg-region strand family (see fair.rs WW_* counters). OWN pr_info:
+    // the WW..WW4 block above is already ~250 bytes and printk truncates
+    // at RECORD_TEXT_SIZE (256) — appending here silently cut the tail.
+    static LAST_WALKS: AtomicU64 = AtomicU64::new(0);
+    static LAST_OH: AtomicU64 = AtomicU64::new(0);
+    static LAST_CH: AtomicU64 = AtomicU64::new(0);
+    let walks_total = crate::sched::fair::ww_pick_walks();
+    let walks_d = walks_total.saturating_sub(LAST_WALKS.load(Ordering::Relaxed));
+    LAST_WALKS.store(walks_total, Ordering::Relaxed);
+    let (oh, ch) = crate::sched::fair::ww_heals();
+    let oh_d = oh.saturating_sub(LAST_OH.load(Ordering::Relaxed));
+    let ch_d = ch.saturating_sub(LAST_CH.load(Ordering::Relaxed));
+    LAST_OH.store(oh, Ordering::Relaxed);
+    LAST_CH.store(ch, Ordering::Relaxed);
+    let (s250, s500, s750) = crate::sched::wakewatch::ww_subgate_counts();
     crate::pr_info!(
-        "WW: fires={} late_max={}ms pidmiss={} rearm={} wheel={}/{} hres_next={}ms\nWW2: si_runs={} si_busy={}ms ticks=[{},{}] vec=[{},{},{},{},{},{},{},{},{},{}]\nWW3: grq={} cfs={} idle={:#x} nr={} cpu0=(pid={} st={:#x} pc={}) cpu1=(pid={} st={:#x} pc={})\nWW4: phase=[{},{}] slotmm=[{},{}]",
+        "WW5: walks={} oncpu_heal={} claim_heal={} s250={} s500={} s750={}",
+        walks_d, oh_d, ch_d, s250, s500, s750
+    );
+    // s16: WW4 (phase/slotmm) in its own pr_info too — as the TAIL of
+    // the big block it was the part most often garbled by the per-CPU
+    // wakewatch heartbeat racing the UART, and slotmm is the family-B
+    // standing watch (it must stay parseable).
+    crate::pr_info!(
+        "WW4: phase=[{},{}] slotmm=[{},{}]",
+        phase0,
+        phase1,
+        mm_d[0],
+        mm_d[1]
+    );
+
+    crate::pr_info!(
+        "WW: fires={} late_max={}ms pidmiss={} rearm={} wheel={}/{} hres_next={}ms\nWW2: si_runs={} si_busy={}ms ticks=[{},{}] vec=[{},{},{},{},{},{},{},{},{},{}]\nWW3: grq={} cfs={} idle={:#x} nr={} cpu0=(pid={} st={:#x} pc={}) cpu1=(pid={} st={:#x} pc={})",
         fire_n,
         late_max,
         pidmiss,
@@ -1051,11 +1269,7 @@ fn ww_heartbeat(now_time: u64) {
         vecs[5], vecs[6], vecs[7], vecs[8], vecs[9],
         sched[0], sched[1], sched[2], sched[3],
         sched[4], sched[5], sched[6],
-        sched[7], sched[8], sched[9],
-        phase0,
-        phase1,
-        mm_d[0],
-        mm_d[1]
+        sched[7], sched[8], sched[9]
     );
     crate::sched::wakewatch::heartbeat();
     // sc158 (Session R): one-shot park dump for wedged foundation/sa_main

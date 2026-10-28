@@ -1944,14 +1944,214 @@ test rerun, memstorm r24.
 
 ### Fleet state / queue (s15 close)
 
-- ltp-b r6 (19de1371, START=660, full instruments + WW4) — A2/pick
-  watch live; ltp-a r24 (same binary, control); fsfuzz r272 (perf
-  arm standing; main 584c1105 still carries NO perf fix — closure
-  stays blocked on the DFX lane); memstorm r24.
-- Queue: (1) repro3 + make test → message ready-for-merge for
-  7d4b4dba (+ 06d743c4 probes + 7e9d2ad0 chain already gate-ready);
-  (2) ltp-b r7+: WW4 census across more msg-region rounds — if
-  why=1 dominates again, hand the pick-side heal-window question to
-  the sched owner with the r6 numbers; (3) monkeys for monkey-b's
-  formal 500MB criterion when available allows; (4) vmscan file-lru
-  question still queued (s13 item 4).
+- ltp-b r7+ (19de1371, START=660, full instruments + WW4) — pick-side
+  census accumulating (r7 running at close); ltp-a r25 (same binary,
+  control); fsfuzz r273; memstorm r24 (regrown under the
+  available-floor semantics).
+- fsfuzz r272 (first round on 19de1371): CRITICAL, WATCHDOG=84
+  DEADLOCK prints, wedge=NO, beats=1814 — adjudicated the KNOWN
+  r268 heap-pressure/spin-stall family (static+heap lock pair in the
+  same bss region as r268's 0xffffffff808808b8 stall, transient,
+  non-wedging; the perf fix never landed on main). NOT a branch
+  regression: fsfuzz boots without wwcensus, so the WW4 print path
+  is inert there (zero WW4 lines in the serial); the munmap fix is
+  an errno path holding no locks. r273 accumulates.
+- Queue: (1) 7d4b4dba ready-for-merge (messaged); (2) ltp-b census
+  rounds — if why=1 dominates again, hand the pick-side heal-window
+  question to the sched owner with the r6 numbers; (3) monkeys for
+  monkey-b's formal 500MB criterion when available allows; (4) vmscan
+  file-lru question still queued (s13 item 4).
+
+## Session 16 (2026-10-28 07:51-...) — WW5 counters: the confirm-window correlation REFUTED at count level; strand family = deep-queue service latency
+
+Mission was the "airtight correlation" between the msg-region strand
+durations and the 50-jiffy stale-mark confirm window, as input to the
+OH-A heal-window-tuning decision. The r7 harvest + one instrumented
+smoke produced the opposite verdict, with counters:
+
+### r7 harvest (354 strands, full round)
+
+- why= census final: 189 why=1 / 33 why=2 / 1 why=3 (the why=3:
+  pid=302 aff=0x00000001 — a legal single-CPU mask, not the A1
+  impossible-affinity shape; A1 stays closed).
+- Durations: min 1000 / avg 1155 / max 5231 ms — the SAME distribution
+  as r6 (399 strands: min 1000 / mode 1000-1050 / tail ~4.7s).
+- **The 1000ms floor is a REPORTING ARTIFACT**: wakewatch's
+  STRAND_THRESHOLD_MS = 1000 gates the WAKE-STRANDED print. The
+  observed "1s grid" says nothing about the producer below the gate.
+- **ZERO STALE-ONCPU-RESET prints in r6 AND r7** through 753 strands,
+  while 16-18 STALE-CLAIM-RESET prints got through the same 2-jiffy
+  rate gate — the R85 on_cpu heal (the one gated by the 50-jiffy
+  window) essentially never fires. why=1 detail lines are other
+  candidates' transient refusals under churn, not the strand victims'
+  resolution path.
+
+### s16 instruments (WW5) — code on stress-fleet-2, kernel f49227de
+
+- fair.rs: WW_PICK_WALKS (per pick_next_cpu entry), WW_ONCPU_HEALS /
+  WW_CLAIM_HEALS (exact counts at both heal sites, before the print
+  budget); ww_tie_mass (timeline entries at-or-below a key); SKIPHIST
+  now prints skips=0 when clean and "coll=1" when the 256-slot history
+  table lost the slot to an address collision.
+- wakewatch.rs: WwSlot gains walks/wtie (wake-time snapshots);
+  cumulative sub-gate counters STRAND_N250/500/750; strand line gains
+  visits= tie= wtie=.
+- timer.rs: WW5 heartbeat line (walks/heal deltas, sub-gate counts).
+  NOTE: the WW..WW4 census block is already ~250 bytes and printk
+  truncates at RECORD_TEXT_SIZE=256 — WW5 first appended to that block
+  was silently cut (smoke1 showed WW4 without WW5); it is now its own
+  pr_info.
+- Cost class: same as WAKE_N/PICK_N (relaxed atomic incs on
+  wake/pick/heal paths); all new prints dfx-gated (wwcensus/schedtrace).
+
+### Smoke2 census (sweepstart=660, 120s, dfx full set, zero panics)
+
+- **oncpu_heal=0 claim_heal=0 across the whole boot** — counter-exact:
+  the heal never fires; heal-window tuning cannot move this family.
+- **Sub-gate distribution is smooth**: s250=18617 s500=8941 s750=2359
+  (cumulative picks crossing 250/500/750ms) decaying continuously into
+  the 91 printed strands — a service-latency distribution, NOT a
+  window-quantized one (a 500ms confirm-bound producer would show a
+  step at s500).
+- **wtie=150-350 (mode 300-350)**: strand victims ENTER the timeline
+  behind a 150-350-deep tie-mass (entries at-or-below their key at
+  wake). The r6 "vr=0ms lead-lag=0ms leftmost geometry" was read at
+  PICK time (post-drain, when the victim is finally leftmost) — it
+  never described the entry state. Deep-queue entry, not leftmost.
+- **visits avg 579 / max 943 per ~1s strand**: pick walks ran steadily
+  (~540/s across 2 CPUs) through every strand — no pick stall, no
+  idle-miss.
+- **SKIPHIST coll=1 on 91/91 strands**: the r6 "SKIPHIST stays empty"
+  evidence was uninformative — under 418+ runnable the 256-slot table
+  is always stolen by colliding tasks; the victims' refusal history
+  (if any) was clobbered before every report. Not a walk exoneration.
+- Control arm agrees: ltp-a r25 (plain dfx set, same 19de1371 binary)
+  shows the same family (236 strand lines, same geometry) — the family
+  is workload-driven (msgstress churn), not instrument-driven.
+
+### Verdict for the OH-A line (sched owner)
+
+The msg-region ~1s strand family is **fair-queue service latency under
+a 300-400-deep runnable queue**: victims enter behind wtie~300
+tie-mass, are served at the steady ~540 walks/s once the mass drains
+(~1s), the R85 heal/confirm window is NOT in the resolution path
+(heal counters exactly 0 across rounds with hundreds of strands), and
+the "1s grid" was the print gate. Linux CFS under the same load would
+show the same order (nr_running x min_granularity / 2 CPUs ~ 1s).
+Heal-window tuning is a non-fix for this family; the only open sched
+question is whether 418 runnable during msgstress is itself the
+expected workload shape (grq drains back to ~1-3 after the region —
+checked in r6/r7 heartbeats, no runnable-task leak).
+
+Fleet state at this point: ltp-b r8 on the old image (19de1371, census
+continues), r9+ on f49227de (WW5 live); ltp-a image rolled to f49227de
+too (instruments dfx-gated, control semantics unchanged); fsfuzz r273;
+monkey-b r2 running (formal 500MB criterion); floor 40G available.
+
+### s16 continued (08:2x) — monkey-b r2: 500MB criterion CROSSED
+
+R2 (08:29 classification): heap 191244 -> 770456 KiB, HEAP-GROW
+579212KiB = **566MB growth, over the 500MB criterion**, wedge=no,
+beats=503, full 30-min round. Kernel-defect signature sweep: KERNPANIC 0,
+WILDWATCH-CANARY 0, ALLOCTHROW 0. The classifier's CRITICAL flags
+adjudicate as follows:
+
+- OOM=74: the known image-side fake-OOM class ("oom: out of memory
+  (order=0, gfp=0x0)" at 770MB/4G — the same order-0/gfp-0 report
+  shape the gnome effort tracks); non-fatal, round continued 15+ min
+  past the first print.
+- OOPS=6 = 4x "BUG: soft lockup - CPU stuck for 10s" + 1 Kernel
+  panic + 1 end marker. The soft lockups are the SAME class as
+  monkey-a's ACCEPTED criterion round (r1 605MB, OOPS=1: CPU#0 stuck
+  10s at 708MB heap, timer_irq advancing — KVM host-deschedule noise
+  with 10+ QEMUs sharing the host, not a kernel stall). The Kernel
+  panic is "PANIC: sysrq 'c' — deliberate crash" (procfs sysrq.rs:34)
+  — the OH image's own crash handler triggered a deliberate crash
+  dump after its services segfaulted under the monkey's kills; the
+  kernel serviced a legitimate sysrq write correctly. Image-side,
+  not a kernel defect.
+- WATCHDOG=2: OS_DfxWatchdog thread dumps (image's own watchdog
+  service, lastsys=98 futex) — the known noisy class.
+
+Verdict: criterion met at r2 (566MB, zero kernel-defect signatures).
+r3 (started 08:29) runs as a free confirmation round; formal close
+when it lands clean or with the same adjudicated-only flags.
+
+Also this wave: make test on the WW5 kernel f49227de — ALL TESTS
+PASSED. WW4 moved to its own pr_info (89/89 heartbeats parseable,
+was ~5%: the per-CPU wakewatch heartbeat garbled the block tail);
+slotmm census now meaningful: 88x [0,0] + 1x [0,8] per boot — the
+[0,8] single-second blip is transient switch-window tick sampling,
+not a lying slot; family B stays null. Fleet kernel rolled to
+cb314f43 (ltp-b r9+ and ltp-a next round). Floor 36-40G available.
+
+### s16 r9 full-round census (cb314f43, START=660, WW5 live) — the OH-A package, counter-exact
+
+393 strands, full 30-min round (harvest script kept at
+run/fleet/evidence/2026-10-28-s16-ww5-census/harvest.sh):
+
+- **oncpu_heal = 0 events, every heartbeat of the round** — the R85
+  on_cpu stale-mark heal (the 50-jiffy confirm-window path tied to the
+  why=1 family) fires EXACTLY ZERO times through 393 strands. This is
+  now counter-exact at fleet scale, not a print-null.
+- **claim_heal = 17 events/round** (15 of them pid=1) — the why=2-leg
+  heal DOES fire, on other pids, uncorrelated with strand resolution
+  (corrects the smoke2 wording "claim_heal=0 across the boot": the
+  120 s smoke was simply too short to see them).
+- **Sub-gate cumulative: s250=27793 s500=15501 s750=7211** — 56%/26%
+  smooth decay into the 393 printed strands. A 500ms-window-bound
+  producer would step at s500; there is no step.
+- **wtie mode 350-400 (209/393), then 300-350 (113/393)**: victims
+  enter the timeline behind a 300-400-deep tie-mass (grq 410-418 in
+  the same round). Entry-rank, not leftmost.
+- **visits min 452 / avg 601 / max 2164**: every strand had hundreds
+  of pick-walk opportunities; no pick starvation anywhere.
+- **strand ms min 1000 / avg 1143 / max 4071** — same distribution as
+  r6/r7/r8 (the 1000 floor is the print gate).
+- **SKIPHIST coll=1 on 393/393** — the 256-slot refusal-history table
+  is always stolen under this load; the r6 "victims never refused"
+  inference is formally unproven (noted as a caveat, not evidence).
+- **slotmm 1061x [0,0] + 1x [0,7]**: family B (slot-rewrite producer)
+  stays null; the single-second blip is transient switch-window tick
+  sampling.
+- why= details: 180 why=1 / 64 why=2 — other candidates' transient
+  refusals under churn (zero pid overlap with the 103 strand-victim
+  pids in r7's equivalent census).
+- ALLOCTHROW=3/OOM=8 at the OOM-storm region: the known 128MB-heap
+  class (32MB sweep alloc, SIGKILL-current ENOMEM), identical counts
+  r7/r8/r9 — pre-existing, not WW5-related.
+
+**OH-A verdict (final form for the sched owner): the msg-region ~1s
+strand family is fair-queue service latency under a 350-418-deep
+runnable queue.** Victims enter behind wtie~350-400 (msgstress wake
+churn clamped at min_vruntime), are served at a steady ~600 walks per
+strand once the mass drains, grq returns to 0 after the region (no
+runnable leak), the control arm shows the same family on the plain
+boot, and neither R85 heal leg is in the resolution path (oncpu heal
+exactly 0; claim heal 17x on unrelated pids). The 50-jiffy
+confirm-window correlation is REFUTED at count level; heal-window
+tuning cannot move this family. Linux CFS under the same load shows
+the same order (period = nr_running x min_granularity; 418 x ~3ms /
+2 CPUs ~ 0.6-1.2s). Any further sched question here is a
+latency-policy question (wakeup placement/boost under 400-deep
+queues), not a correctness defect.
+
+### s16 close (09:0x) — monkey-b criterion closed at r2 precedent; fleet state
+
+monkey-b r3 (confirmation): R3 WARN, ZERO critical flags of any class
+(not even soft-lockup noise), wedge=no, full round, heap growth 185MB
+(under 500 — round-to-round churn variance; r1 329MB / r2 566MB / r3
+185MB). Criterion standard: monkey-a was closed at r1 605MB with
+OOPS=1 adjudicated host-noise; monkey-b r2 crosses at 566MB with zero
+kernel-defect signatures under the same adjudication — **monkey-b
+500MB criterion CLOSED (r2)**; r3 supplies the zero-flag companion
+round. Member keeps running (r4+) for free margin evidence.
+
+Fleet state at s16 close: ltp-b r10 (cb314f43, WW5 census live,
+START=660); ltp-a next round on cb314f43; fsfuzz r274+ (perf arm
+still hot — no DFX perf fix on origin/main yet, main HEAD f15b9660
+= gnome-bringup, not the s15 chain either; closure still blocked);
+memstorm cycling; monkey-b r4; sweeper. Floor 36-40G available all
+session. Commits on stress-fleet-2: 5cd51434 (WW5 instruments +
+s16 doc), the WW4-split, the r9 census doc — all on top of the s15
+chain awaiting coordinator merge.

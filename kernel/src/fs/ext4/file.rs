@@ -76,6 +76,12 @@ pub fn ext4_file_read(
         // block 0 (superblock-backup garbage) — review 5.5 (稀疏洞读盘块 0,
         // 非缓存路径).
         if blocks[block_index] == 0 {
+            // dfx=exthunt: O_DIRECT hole verdict — see exthunt_read_hole.
+            crate::fs::ext4::extent::exthunt_read_hole(
+                inode.ino,
+                &inode.block,
+                block_index as u64,
+            );
             let remaining = to_read - total_read;
             let available_in_block = block_size - block_offset;
             let zero_len = core::cmp::min(remaining, available_in_block);
@@ -95,6 +101,14 @@ pub fn ext4_file_read(
                 .ok_or(errno::Errno::IOError.as_neg_i32())?;
 
             let data = &(*bh).b_data;
+            // dfx=exthunt: O_DIRECT serve truth (see exthunt_rd_od).
+            crate::fs::ext4::extent::exthunt_rd_od(
+                inode.ino as u64,
+                block_index as u64,
+                blocks[block_index],
+                data[0],
+                data[1],
+            );
             let remaining = to_read - total_read;
             let available_in_block = block_size - block_offset;
             let read_in_block = core::cmp::min(remaining, available_in_block);
@@ -254,6 +268,21 @@ fn ext4_file_read_cached_dst(
             for (i, (_idx, page_data)) in run[..run_len].iter().enumerate() {
                 let in_page_off = if i == 0 { page_offset } else { 0 };
                 let remaining_now = to_read - total_read;
+                // dfx=exthunt: frame-hit truth for the run's first page
+                // (a poisoned frame shows zeros here) — see exthunt_rd_hit.
+                if i == 0 {
+                    // SAFETY: page_data is a valid page-aligned pointer of
+                    // block_size bytes pinned by get_range_into.
+                    unsafe {
+                        let pd = *page_data;
+                        crate::fs::ext4::extent::exthunt_rd_hit(
+                            ino,
+                            page_index,
+                            *pd,
+                            *pd.add(1),
+                        );
+                    }
+                }
                 // SAFETY: page_data is a valid page-aligned pointer of
                 // block_size bytes pinned by get_range_into; the copy length
                 // is bounded by the page size and the remaining request bytes.
@@ -348,6 +377,15 @@ fn ext4_file_read_cached_dst(
                 unsafe {
                     if let Some(bh) = bio::bread(fs.device, block_nr) {
                         let data = &(*bh).b_data;
+                        // dfx=exthunt: sync-fallback serve truth (see
+                        // exthunt_rd_serve).
+                        crate::fs::ext4::extent::exthunt_rd_serve(
+                            ino,
+                            page_index,
+                            block_nr,
+                            data[0],
+                            data[1],
+                        );
                         let avail = block_size_usize - page_offset;
                         let copy_len = core::cmp::min(remaining, avail);
                         match dst.put(buf_offset, data.as_ptr().add(page_offset), copy_len) {
@@ -372,6 +410,11 @@ fn ext4_file_read_cached_dst(
                 return Err(errno::Errno::IOError.as_neg_i32());
             }
             // True hole: zero-fill in place.
+            crate::fs::ext4::extent::exthunt_read_hole(
+                inode.ino as u32,
+                &inode.block,
+                page_index,
+            );
             let avail = block_size_usize - page_offset;
             let zero_len = core::cmp::min(remaining, avail);
             // SAFETY: dst validity documented on ReadDst::put_zeroes.
@@ -477,6 +520,13 @@ fn fill_page_cache_batch(
             Err(_) => break, // metadata failure: stop extending the batch
         };
         if block_nr == 0 {
+            // dfx=exthunt: the reader just verdict "hole" from the cached
+            // root — see exthunt_read_hole.
+            crate::fs::ext4::extent::exthunt_read_hole(
+                inode.ino as u32,
+                &inode.block,
+                idx,
+            );
             idx += 1;
             continue;
         }
@@ -527,6 +577,13 @@ fn fill_page_cache_batch(
 
         match bio::bread_async_multi(fs.device, block_nr, submit_blocks, &completions[count]) {
             Some(bh) => {
+                // dfx=exthunt: batch submit truth (see exthunt_rd_batch).
+                crate::fs::ext4::extent::exthunt_rd_batch(
+                    ino,
+                    run_first,
+                    block_nr,
+                    submit_blocks,
+                );
                 bh_ptrs[count] = bh;
                 ra_idx[count] = run_first;
                 ra_blk[count] = block_nr;
@@ -806,6 +863,14 @@ pub fn ext4_file_write(
             // Write data to block
             data[block_offset..block_offset + write_in_block]
                 .copy_from_slice(&buf[buf_offset..buf_offset + write_in_block]);
+
+            // dfx=exthunt: the writer's (logical, phys, pattern) truth.
+            crate::fs::ext4::extent::exthunt_wr_put(
+                inode.ino,
+                block_index,
+                block_num,
+                buf[buf_offset],
+            );
 
             // Deferred write-back: leave the buffer BH_Dirty in the block
             // cache instead of syncing it here. A synchronous write per

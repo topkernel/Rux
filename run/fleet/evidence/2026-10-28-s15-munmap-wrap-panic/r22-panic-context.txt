@@ -1,0 +1,36 @@
+passed   0
+failed   0
+broken   1
+skipped  0
+warnings 4
+SWEEP RES|735|madvise01|FAIL|6|0
+tst_test.c:1733: [1;34mTINFO: [0mLTP version: 20240524
+tst_test.c:1617: [1;34mTINFO: [0mTimeout per run is 0h 01m 00s
+madvise02.c:135: [1;31mTBROK: [0mwrite(3,0x3b178,32) failed: ENOSPC (28)
+madvise02.c:185: [1;35mTWARN: [0mmunmap(0,0) failed: EINVAL (22)
+BIGMUNMAP pid 1203 addr 0x0 len 0xfffffffffffff000
+
+
+Kernel panic - not syncing:
+
+PANIC: attempt to add with overflow
+  Location: kernel/src/arch/riscv64/mm/mm_ops.rs: 594
+
+---[ end Kernel panic - not syncing ]---
+
+Sstatus: 8000000200006022
+Scause : 8000000000000005
+Stval  : 0000000000000000
+Sepc   : ffffffff800a1e52
+
+Registers:
+  ra  : ffffffff8034e8be  sp  : ffffffd607579990  gp  : 000000000004e138  tp  : ffffffd6051e8000  
+  t0  : 0000000000000008  t1  : 000000000000000a  t2  : 0000000000000006  s0  : ffffffd607579ac0  
+  s1  : 00000000000000ba  a0  : ffffffd607579ac8  a1  : ffffffd6075799a8  a2  : 00000000000000f8  
+  a3  : ffffffd6075799a8  a4  : ffffffd607579aa0  a5  : 0000000000000000  a6  : 0000000000000000  
+  a7  : ffffffd607579a6e  s2  : 0000000000000000  s3  : 0000000000000003  s4  : ffffffffffffffff  
+  s5  : 0000000000000001  s6  : 0000000000000020  s7  : 000000000003b178  s8  : ffffffffffffffff  
+  s9  : 0000000000000020  s10 : 000000000004eb58  s11 : 0000000000000002  t3  : ffffffd607579c4c  
+  t4  : 0000000000000064  t5  : 000000000098967f  t6  : 00000000000004b3  
+
+Call Trace:

@@ -528,6 +528,9 @@ impl VirtIOBlkDevice {
 
             // Snapshot actual used ring index for per-desc matching
             let prev = queue.get_used();
+            // This chain's submission ordinal (read BEFORE the increment
+            // below names it), for the sync-chain tombstone.
+            let ordinal = get_mmio_expected_used_idx();
 
             // Submit to available ring
             queue.submit(header_desc_idx);
@@ -537,6 +540,12 @@ impl VirtIOBlkDevice {
 
             // Keep global counter in sync for async pending slot tracking
             increment_mmio_expected_used_idx();
+
+            // Sync-chain tombstone: the device-truthed walker discards
+            // this chain's used-ring entry by head_desc instead of
+            // counting it unmatched (or worse — under the old positional
+            // walk — firing a live async pending with it).
+            mmio_publish_sync_tombstone(ordinal, header_desc_idx);
 
             let used_ptr = queue.used_ring_ptr();
             let q_size = queue.queue_size;
@@ -714,6 +723,9 @@ impl VirtIOBlkDevice {
 
             // Snapshot actual used ring index for per-desc matching
             let prev = queue.get_used();
+            // This chain's submission ordinal (read BEFORE the increment
+            // below names it), for the sync-chain tombstone.
+            let ordinal = get_mmio_expected_used_idx();
 
             // Submit to available ring
             queue.submit(header_desc_idx);
@@ -723,6 +735,12 @@ impl VirtIOBlkDevice {
 
             // Keep global counter in sync for async pending slot tracking
             increment_mmio_expected_used_idx();
+
+            // Sync-chain tombstone: the device-truthed walker discards
+            // this chain's used-ring entry by head_desc instead of
+            // counting it unmatched (or worse — under the old positional
+            // walk — firing a live async pending with it).
+            mmio_publish_sync_tombstone(ordinal, header_desc_idx);
 
             let used_ptr = queue.used_ring_ptr();
             let q_size = queue.queue_size;
@@ -960,12 +978,23 @@ impl VirtIOBlkDevice {
             resp_layout,
             header_ptr,
             header_layout,
-            // Unused on the MMIO path: its queue admits ONE in-flight chain
-            // (queue_size 8 / 3 descs), so completion order is trivially
-            // submission order and the ordinal-indexed walk below is sound.
-            head_desc: 0,
-            ordinal: 0,
+            // Device-truth keys for the walker below (same discipline as
+            // the PCI path): the chain's head descriptor id — what the
+            // used ring's UsedElem.id names when the chain completes —
+            // plus the submission ordinal. The walk used to rely purely on
+            // the ordinal position ("single in-flight chain, so completion
+            // order is submission order"), but any chain that consumed an
+            // ordinal WITHOUT producing a used-ring entry (a dropped
+            // header-less chain, an abandoned-but-unconsumed slot) skews
+            // every later positional take by one — firing each pending one
+            // chain EARLY with a later chain's OK status while its own DMA
+            // never landed: the zero-serve family. Match by head_desc.
+            head_desc: header_desc_idx as u32,
+            ordinal: prev,
             timed_out: false,
+            // Zero-serve guard: the walker stamps this into the delivered
+            // completion; bread_wait verifies it against its own buffer.
+            data_ptr: buf.as_ptr() as usize,
             // block:block_rq_complete geometry for the walker below.
             trace_dev: ((self.disk.major << 20) | self.disk.first_minor) as u32,
             trace_sector: sector,
@@ -1432,6 +1461,14 @@ struct PendingIo {
     /// increment — leaked_chains then tracks only chains whose completion
     /// has genuinely not landed yet, instead of accumulating forever.
     timed_out: bool,
+    /// DMA data-buffer pointer of this chain (async chains only): the
+    /// device-truth token the completion walker stamps into
+    /// `IoCompletion::complete_with_token`. `bread_wait` compares it
+    /// against its own buffer — a mismatch means the walker delivered
+    /// ANOTHER chain's completion and this buffer's DMA may not have
+    /// landed (the zero-serve guard; the no-journal ext4 root-lookup
+    /// family). 0 on tombstones (nothing fires through them).
+    data_ptr: usize,
     /// block:block_rq_complete geometry (dev as major<<20|minor, first
     /// sector, sector count), stored at async submit so the completion
     /// walker can record the event without any lookup. Zero on
@@ -1453,6 +1490,12 @@ static VIRTIO_MMIO_PENDING: Spinlock<[Option<PendingIo>; MAX_PENDING_IO]> =
 /// Last processed used index for async completions (MMIO).
 static VIRTIO_MMIO_LAST_PROCESSED: core::sync::atomic::AtomicU16 = core::sync::atomic::AtomicU16::new(0);
 
+/// Used-ring entries on the MMIO device that matched no live pending
+/// (device-truthed walk — see the walker). Loud, rate-limited counter:
+/// every hit is a dispatch accounting hole, not a silent misfire.
+static VIRTIO_MMIO_UNMATCHED_EVENTS: core::sync::atomic::AtomicU64 =
+    core::sync::atomic::AtomicU64::new(0);
+
 /// Get current MMIO expected used index (call before submitting request, under queue lock)
 #[inline]
 fn get_mmio_expected_used_idx() -> u16 {
@@ -1463,6 +1506,43 @@ fn get_mmio_expected_used_idx() -> u16 {
 #[inline]
 fn increment_mmio_expected_used_idx() {
     VIRTIO_MMIO_EXPECTED_USED_IDX.fetch_add(1, core::sync::atomic::Ordering::Release);
+}
+
+/// Publish a NULL-completion reservation ("tombstone") for a synchronous
+/// MMIO chain, mirroring the PCI path (`pci_publish_sync_chain`): the
+/// sync chains consume a submission ordinal and produce a used-ring entry
+/// but have no IoCompletion. Without a tombstone their used entries hit
+/// the walker's unmatched accounting (noise), and under the old
+/// positional walk they could be misattributed to a live async pending
+/// sitting at the same slot index. The tombstone carries the chain's
+/// head_desc so the device-truthed walker finds and discards it.
+///
+/// Published only into a FREE slot: an occupied slot means the walker is
+/// lagging behind MAX_PENDING_IO chains — in that case skip (the used
+/// entry counts as unmatched, loud but harmless) rather than overwrite a
+/// live reservation. Callers hold the MMIO virtqueue lock (mutual
+/// exclusion against the walker's collection pass) and have already
+/// submitted the chain.
+fn mmio_publish_sync_tombstone(ordinal: u16, head_desc: u16) {
+    let slot = ordinal as usize % MAX_PENDING_IO;
+    let mut table = VIRTIO_MMIO_PENDING.lock_irqsave();
+    if table[slot].is_some() {
+        return;
+    }
+    table[slot] = Some(PendingIo {
+        completion: core::ptr::null_mut(),
+        resp_ptr: core::ptr::null_mut(),
+        resp_layout: alloc::alloc::Layout::from_size_align(1, 1).unwrap(),
+        header_ptr: core::ptr::null_mut(),
+        header_layout: alloc::alloc::Layout::from_size_align(1, 1).unwrap(),
+        head_desc: head_desc as u32,
+        ordinal,
+        timed_out: false,
+        data_ptr: 0,
+        trace_dev: 0,
+        trace_sector: 0,
+        trace_nr_sector: 0,
+    });
 }
 
 /// Per-slot expected used.idx (for tracking I/O completion status).
@@ -1771,6 +1851,7 @@ pub fn pci_publish_sync_chain(disk: usize, queue_size: u32, ordinal: u16, head_d
         head_desc: head_desc as u32,
         ordinal,
         timed_out: false,
+        data_ptr: 0,
         trace_dev: 0,
         trace_sector: 0,
         trace_nr_sector: 0,
@@ -1860,6 +1941,7 @@ pub fn abandon_pending_completion(
                         head_desc: p.head_desc,
                         ordinal: p.ordinal,
                         timed_out: true,
+                        data_ptr: 0,
                         trace_dev: 0,
                         trace_sector: 0,
                         trace_nr_sector: 0,
@@ -1909,6 +1991,7 @@ pub fn abandon_pending_completion(
                         head_desc: p.head_desc,
                         ordinal: p.ordinal,
                         timed_out: false,
+                        data_ptr: 0,
                         trace_dev: 0,
                         trace_sector: 0,
                         trace_nr_sector: 0,
@@ -2102,6 +2185,9 @@ unsafe fn pci_submit_read_async(
                         head_desc: header_desc_idx as u32,
                         ordinal: prev_expected,
                         timed_out: false,
+                        // Zero-serve guard: the walker stamps this into the
+                        // delivered completion; bread_wait verifies it.
+                        data_ptr: buf.as_ptr() as usize,
                         // block:block_rq_complete geometry for the walker.
                         trace_dev: (((*disk).major << 20) | (*disk).first_minor) as u32,
                         trace_sector: sector,
@@ -2648,8 +2734,15 @@ pub fn pci_process_async_completions_slot(slot: usize) -> usize {
             }
             // SAFETY: the delivering-protocol count taken under the table
             // lock keeps the waiter (and its stack) alive across this call
-            // — abandon waits for it before unwinding.
-            unsafe { (*pending.completion).complete(io_status); }
+            // — abandon waits for it before unwinding. Token = the chain's
+            // DMA data pointer: bread_wait's zero-serve guard uses it to
+            // prove THIS buffer's chain completed.
+            unsafe {
+                (*pending.completion).complete_with_token(
+                    io_status,
+                    pending.data_ptr,
+                );
+            }
             unsafe { (*pending.completion).end_delivery(); }
         }
 
@@ -3219,26 +3312,118 @@ pub fn block_bh_handler(_vec: usize) {
                     let last_processed = VIRTIO_MMIO_LAST_PROCESSED
                         .load(core::sync::atomic::Ordering::Acquire);
 
-                    // Collect each newly completed descriptor's pending I/O.
-                    // TOMBSTONEs (timed-out waiter / sync chain) are taken
-                    // too — their used-ring entry releases the slot — but
-                    // are skipped at delivery time below.
+                    // Collect each newly completed descriptor's pending I/O,
+                    // matched by DEVICE TRUTH (the completed chain's head
+                    // descriptor id, read from the used ring) — the same
+                    // discipline as the PCI walker. TOMBSTONEs (timed-out
+                    // waiter / sync chain) are taken too — their used-ring
+                    // entry releases the slot — but are skipped at delivery
+                    // time below.
+                    //
+                    // The walk used to be purely positional (used-ring index
+                    // i -> table slot i % MAX_PENDING_IO) on the assumption
+                    // that the single-in-flight MMIO queue keeps completion
+                    // order equal to submission order. That assumption
+                    // breaks the moment ANY chain consumes a submission
+                    // ordinal without producing a used-ring entry (a chain
+                    // the device dropped, or a submit that failed after the
+                    // ordinal was taken): every later positional take is
+                    // then off by one and fires each pending one chain EARLY
+                    // — with a later chain's OK status while the fired
+                    // pending's own DMA never lands. bread_wait then
+                    // publishes the uninit (zero) buffer as uptodate: the
+                    // no-journal ext4 root-lookup zero-serve family. The
+                    // head_desc match makes a misfire impossible: an entry
+                    // is fired ONLY by the used-ring entry that names its
+                    // own chain.
+                    let queue_sz = queue.queue_size as usize;
+                    let mut unmatched = 0usize;
                     let mut i = last_processed;
                     while i != used_idx {
-                        let slot = i as usize % MAX_PENDING_IO;
-                        let mut pending = VIRTIO_MMIO_PENDING.lock_irqsave();
-                        if let Some(pending) = pending[slot].take() {
+                        core::sync::atomic::fence(
+                            core::sync::atomic::Ordering::Acquire,
+                        );
+                        // The completed chain's head descriptor id
+                        // (UsedElem.id; the device publishes it only after
+                        // the chain — including its DMA writes — is done).
+                        // SAFETY: ring position `i % queue_sz` is within the
+                        // used ring.
+                        let ring_pos = (i as usize) % queue_sz;
+                        let entry_id = core::ptr::read_volatile(
+                            (used_ring as usize + 4 + ring_pos * 8)
+                                as *const u32,
+                        );
+                        let ordinal_slot = i as usize % MAX_PENDING_IO;
+                        let mut fired: Option<PendingIo> = None;
+                        {
+                            let mut table = VIRTIO_MMIO_PENDING.lock_irqsave();
+                            let positional_match = match table[ordinal_slot]
+                                .as_ref()
+                            {
+                                Some(p) => p.head_desc == entry_id,
+                                None => false,
+                            };
+                            if positional_match {
+                                fired = table[ordinal_slot].take();
+                            } else {
+                                // Out-of-order or slot skew: scan for the
+                                // entry whose chain the device ACTUALLY
+                                // completed. Tombstones match too (their
+                                // used-ring entry releases the slot).
+                                for e in table.iter_mut() {
+                                    if let Some(p) = e {
+                                        if p.head_desc == entry_id {
+                                            fired = e.take();
+                                            break;
+                                        }
+                                    }
+                                }
+                            }
                             // Same walker-vs-abandon delivery handshake as
-                            // the PCI path (see IoCompletion::delivering).
-                            if !pending.completion.is_null() {
-                                (*pending.completion).begin_delivery();
+                            // the PCI path (see IoCompletion::delivering):
+                            // mark as under delivery BEFORE the table lock
+                            // drops.
+                            if let Some(p) = fired.as_ref() {
+                                if !p.completion.is_null() {
+                                    (*p.completion).begin_delivery();
+                                }
                             }
-                            if collected < MAX_PENDING_IO {
-                                done[collected] = Some(pending);
-                                collected += 1;
+                        }
+                        match fired {
+                            Some(p) => {
+                                if collected < MAX_PENDING_IO {
+                                    done[collected] = Some(p);
+                                    collected += 1;
+                                }
+                                // Overflow cannot happen (table holds at
+                                // most MAX_PENDING_IO Somes); keep the
+                                // walker moving.
                             }
-                            // Overflow cannot happen (table holds at most
-                            // MAX_PENDING_IO Somes); keep the walker moving.
+                            None => {
+                                // No live pending claims this used-ring
+                                // entry. With head_desc truthing this is a
+                                // dispatch accounting hole (an untracked
+                                // chain completed), never a silent
+                                // misfire: count it loudly and move on so
+                                // one bad entry cannot stall the queue.
+                                unmatched += 1;
+                                let n = VIRTIO_MMIO_UNMATCHED_EVENTS
+                                    .fetch_add(
+                                        1,
+                                        core::sync::atomic::Ordering::AcqRel,
+                                    )
+                                    + 1;
+                                if n == 1 || n % 4096 == 0 {
+                                    crate::pr_err!(
+                                        "virtio-blk mmio: used entry {} \
+                                         (head {}) matched no pending — \
+                                         dispatch accounting hole #{}",
+                                        i,
+                                        entry_id,
+                                        n
+                                    );
+                                }
+                            }
                         }
                         i = i.wrapping_add(1);
                     }
@@ -3287,9 +3472,16 @@ pub fn block_bh_handler(_vec: usize) {
                         );
                     }
 
-                    // Signal completion
-                    (*pending.completion).complete(io_status);
-                    (*pending.completion).end_delivery();
+                    // Signal completion, stamped with the chain's DMA data
+                    // pointer: bread_wait's zero-serve guard verifies it
+                    // against the waiter's own buffer.
+                    unsafe {
+                        (*pending.completion).complete_with_token(
+                            io_status,
+                            pending.data_ptr,
+                        );
+                    }
+                    unsafe { (*pending.completion).end_delivery(); }
                 }
             }
             mmio_collected = collected;
