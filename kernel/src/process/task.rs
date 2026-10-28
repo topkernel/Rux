@@ -5,7 +5,7 @@
 
 //! Task Control Block
 
-use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
+use core::sync::atomic::{AtomicBool, AtomicU32, AtomicU64, Ordering};
 use core::ptr;
 use crate::sync::spinlock::Spinlock;
 use crate::mm::pagemap::AddressSpace;
@@ -1356,6 +1356,15 @@ pub struct Task {
     /// Loaded classic-BPF filter program (single program; loading a new one
     /// replaces it — Linux stacks filters, recorded divergence).
     pub seccomp_filter: Spinlock<Option<alloc::vec::Vec<SockFilter>>>,
+    /// no_new_privs attribute (PR_SET_NO_NEW_PRIVS, Linux task_struct::
+    /// no_new_privs): when set, execve ignores setuid/setgid bits (and
+    /// file capabilities) — the exec'd program runs with the same
+    /// credentials — and seccomp filter attach is legal without
+    /// CAP_SYS_ADMIN. ONE-WAY at the prctl ABI (arg2 must be exactly 1;
+    /// no clear exists); this setter is the kernel-internal API used by
+    /// prctl, fork inheritance, and tests. Inherited across fork and
+    /// exec (Linux semantics).
+    pub no_new_privs: AtomicBool,
 
     // ==================== cgroup v2 (U1b) ====================
 
@@ -1654,6 +1663,7 @@ impl Task {
             ns_local_pid: pid,
             seccomp_mode: AtomicU32::new(0),
             seccomp_filter: Spinlock::new(None),
+            no_new_privs: AtomicBool::new(false),
             cgroup_ptr: ptr::null_mut(),
             cgroup_mem_charged: AtomicU64::new(0),
         };
@@ -2193,6 +2203,10 @@ impl Task {
         ptr::write(
             (ptr as usize + offset_of!(Task, seccomp_filter)) as *mut Spinlock<Option<alloc::vec::Vec<SockFilter>>>,
             Spinlock::new(None),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, no_new_privs)) as *mut AtomicBool,
+            AtomicBool::new(false),
         );
         ptr::write(
             (ptr as usize + offset_of!(Task, ns_local_pid)) as *mut u32,
@@ -2788,6 +2802,10 @@ impl Task {
         ptr::write(
             (ptr as usize + offset_of!(Task, seccomp_filter)) as *mut Spinlock<Option<alloc::vec::Vec<SockFilter>>>,
             Spinlock::new(None),
+        );
+        ptr::write(
+            (ptr as usize + offset_of!(Task, no_new_privs)) as *mut AtomicBool,
+            AtomicBool::new(false),
         );
         ptr::write(
             (ptr as usize + offset_of!(Task, ns_local_pid)) as *mut u32,
@@ -5347,12 +5365,41 @@ impl Task {
         self.seccomp_mode.store(mode, Ordering::Release);
     }
 
+    /// no_new_privs attribute (PR_SET_NO_NEW_PRIVS / PR_GET_NO_NEW_PRIVS).
+    pub fn no_new_privs(&self) -> bool {
+        self.no_new_privs.load(Ordering::Acquire)
+    }
+
+    pub fn set_no_new_privs(&self, v: bool) {
+        self.no_new_privs.store(v, Ordering::Release);
+    }
+
     /// Seccomp kill helper (signal.rs): force-queue SIGKILL to this task
     /// bypassing disposition/mask checks. Used by the STRICT mode gate and
     /// SECCOMP_RET_KILL — the default action of SIGKILL terminates the task
     /// on return to user mode.
     pub fn seccomp_kill(&self) {
-        self.pending.add(crate::signal::Signal::SIGKILL as i32);
+        // Reference kernel semantics (kernel/seccomp.c do_seccomp /
+        // seccomp_log + force_sig): a seccomp kill terminates the task
+        // with SIGSYS (si_code SYS_SECCOMP) — NOT SIGKILL. LTP prctl04
+        // pins the shape: the parent expects WTERMSIG == SIGSYS for both
+        // STRICT and FILTER violations. force_sig also bypasses the
+        // target's blocked mask and any caught handler: unblock SIGSYS
+        // and reset its action to default before queueing, so the normal
+        // delivery scan picks it up no matter what the target did.
+        const SIGSYS: i32 = 31;
+        // SAFETY: seccomp_kill is invoked on the CURRENT task from the
+        // syscall gate (or on a fork-fresh child before it is shared);
+        // the raw-pointer write mirrors how other &self helpers on Task
+        // mutate plain fields under &self (the Task is never const).
+        let task = self as *const Task as *mut Task;
+        unsafe {
+            (*task).sigmask &= !(1u64 << (SIGSYS - 1));
+        }
+        if let Some(sig_struct) = self.signal.as_ref() {
+            let _ = sig_struct.set_action(SIGSYS, crate::signal::SigAction::new());
+        }
+        self.pending.add(SIGSYS);
         self.set_ti_flag(TIF_SIGPENDING);
         // SAFETY: signal_wake_up takes a valid task pointer; this method is
         // called with &self of a live task.

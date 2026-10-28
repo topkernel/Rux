@@ -63,6 +63,9 @@ pub fn test_syscall_process() {
                 &alloc::format!("got {:?}", other.err()));
         }
     }
+
+    // Test 11: seccomp/no_new_privs hardening (security lane session 1).
+    test_seccomp_nnp();
 }
 
 fn test_sys_getpid() {
@@ -455,5 +458,122 @@ pub fn test_shebang_parse() {
     }
     if all_ok {
         test_pass("parse_shebang binfmt_script parity (14 cases)");
+    }
+}
+
+/// seccomp / no_new_privs hardening rows (security lane, session 1):
+/// PR_SET_NO_NEW_PRIVS / PR_GET_NO_NEW_PRIVS prctl shapes, the attach
+/// privilege decision (NNP OR CAP_SYS_ADMIN), and the per-arch STRICT
+/// allowed sets (the riscv64-only list was an ABI bug on x86_64: native
+/// read(0)/write(1) were killed and uname(63) allowed).
+pub fn test_seccomp_nnp() {
+    test_group_start("seccomp-nnp");
+
+    use crate::syscall::process::{sys_prctl, seccomp_attach_allowed};
+    use crate::security::{capable, CAP_SYS_ADMIN};
+    use crate::sched;
+
+    // --- PR_GET_NO_NEW_PRIVS default 0 ---
+    let cur = match sched::current() {
+        Some(t) => t,
+        None => {
+            test_skip("seccomp-nnp", "no current task in test context");
+            return;
+        }
+    };
+    // SAFETY: cur is a live task pointer; the test context starts with
+    // NNP clear (prctl 39 is set-only, so a previous group cannot have
+    // left it set — but pin the observed state for the rows below).
+    let saved_nnp = unsafe { (*cur).no_new_privs() };
+    if !saved_nnp {
+        let r = sys_prctl([40, 0, 0, 0, 0, 0]);
+        test_assert_eq!(r, 0, "PR_GET_NO_NEW_PRIVS default is 0");
+    }
+
+    // --- EINVAL shapes (reference: kernel/sys.c, pinned by LTP prctl02):
+    // the attribute is ONE-WAY (arg2 must be exactly 1; no clear exists)
+    // and every extra arg must be 0 for both SET and GET. ---
+    let r = sys_prctl([39, 0, 0, 0, 0, 0]);
+    test_assert_eq!(r, -(errno::EINVAL as i64), "PR_SET_NNP arg2=0 (clear) -> EINVAL");
+    let r = sys_prctl([39, 2, 0, 0, 0, 0]);
+    test_assert_eq!(r, -(errno::EINVAL as i64), "PR_SET_NNP arg2=2 -> EINVAL");
+    let r = sys_prctl([39, 1, 1, 0, 0, 0]);
+    test_assert_eq!(r, -(errno::EINVAL as i64), "PR_SET_NNP arg3!=0 -> EINVAL");
+    let r = sys_prctl([39, 1, 0, 1, 0, 0]);
+    test_assert_eq!(r, -(errno::EINVAL as i64), "PR_SET_NNP arg4!=0 -> EINVAL");
+    let r = sys_prctl([39, 1, 0, 0, 1, 0]);
+    test_assert_eq!(r, -(errno::EINVAL as i64), "PR_SET_NNP arg5!=0 -> EINVAL");
+    let r = sys_prctl([40, 1, 0, 0, 0, 0]);
+    test_assert_eq!(r, -(errno::EINVAL as i64), "PR_GET_NNP arg2!=0 -> EINVAL");
+
+    // --- set + sticky: once set, GET reports 1 and stays 1 ---
+    if !saved_nnp {
+        let r = sys_prctl([39, 1, 0, 0, 0, 0]);
+        test_assert_eq!(r, 0, "PR_SET_NNP(1) succeeds");
+        let r = sys_prctl([40, 0, 0, 0, 0, 0]);
+        test_assert_eq!(r, 1, "PR_GET_NNP returns 1 after set");
+        let r = sys_prctl([39, 0, 0, 0, 0, 0]);
+        test_assert_eq!(r, -(errno::EINVAL as i64), "NNP is one-way: prctl clear is EINVAL");
+        let r = sys_prctl([40, 0, 0, 0, 0, 0]);
+        test_assert_eq!(r, 1, "PR_GET_NNP still 1 (sticky)");
+    }
+
+    // --- attach privilege decision: NNP OR CAP_SYS_ADMIN ---
+    // Baseline: as root the decision is true (CAP_SYS_ADMIN held).
+    if capable(CAP_SYS_ADMIN) {
+        test_assert!(seccomp_attach_allowed(), "attach allowed with CAP_SYS_ADMIN");
+        // Drop CAP_SYS_ADMIN + NNP off -> denied.
+        // SAFETY: cur is a live task pointer; cred_mut is exclusive here.
+        let saved = unsafe { (*cur).cred_mut().clone() };
+        unsafe {
+            let cred = (*cur).cred_mut();
+            cred.cap_effective = cred.cap_effective
+                .intersect(crate::security::Cap::new(!(1u64 << CAP_SYS_ADMIN)));
+        }
+        unsafe { (*cur).set_no_new_privs(false); }
+        test_assert!(
+            !seccomp_attach_allowed(),
+            "attach denied without NNP and without CAP_SYS_ADMIN"
+        );
+        // NNP on (cap still dropped) -> allowed: the unprivileged attach path.
+        unsafe { (*cur).set_no_new_privs(true); }
+        test_assert!(
+            seccomp_attach_allowed(),
+            "attach allowed with NNP set (caps still dropped)"
+        );
+        // Restore (set_no_new_privs is the kernel-internal API — the
+        // prctl ABI is one-way, but the test must leave the context as
+        // it found it).
+        unsafe {
+            *(*cur).cred_mut() = saved;
+            (*cur).set_no_new_privs(saved_nnp);
+        }
+        test_assert!(capable(CAP_SYS_ADMIN), "credentials restored after NNP rows");
+    } else {
+        test_skip("seccomp-nnp attach rows", "test context lacks CAP_SYS_ADMIN");
+    }
+
+    // --- STRICT allowed sets are per-arch native numbers ---
+    #[cfg(feature = "riscv64")]
+    {
+        // Generic table: read 63, write 64, exit 93, exit_group 94,
+        // rt_sigreturn 139.
+        let want: [u64; 5] = [63, 64, 93, 94, 139];
+        test_assert_eq!(
+            crate::syscall::process::strict_allowed_for_test(),
+            &want,
+            "STRICT_ALLOWED == riscv64 native numbers"
+        );
+    }
+    #[cfg(feature = "x86_64")]
+    {
+        // x86_64 table: read 0, write 1, exit 60, exit_group 231,
+        // rt_sigreturn 15. The gate sees regs.rax BEFORE translation.
+        let want: [u64; 5] = [0, 1, 60, 231, 15];
+        test_assert_eq!(
+            crate::syscall::process::strict_allowed_for_test(),
+            &want,
+            "STRICT_ALLOWED == x86_64 native numbers"
+        );
     }
 }
