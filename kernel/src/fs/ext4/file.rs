@@ -108,6 +108,7 @@ pub fn ext4_file_read(
                 blocks[block_index],
                 data[0],
                 data[1],
+                data.as_ptr(),
             );
             let remaining = to_read - total_read;
             let available_in_block = block_size - block_offset;
@@ -780,6 +781,10 @@ pub fn ext4_file_write(
                             // a freshly allocated block whose disk contents
                             // are irrelevant — getblk_zero creates a zeroed
                             // dirty buffer without the disk read.
+                            // dfx=exthunt: unwritten-materialization zero.
+                            crate::fs::ext4::extent::exthunt_zzero(
+                                "mat", inode.ino, block_index, phys,
+                            );
                             unsafe {
                                 if let Some(bh) = bio::getblk_zero(fs.device, phys) {
                                     (*bh).set_state_bit(crate::fs::bio::BufferState::BH_Dirty);
@@ -808,6 +813,10 @@ pub fn ext4_file_write(
                             // SAFETY: freshly allocated block; getblk_zero
                             // fabricates the zeroed dirty buffer without a
                             // disk read (full-block overwrite follows).
+                            // dfx=exthunt: hole-fill allocation zero.
+                            crate::fs::ext4::extent::exthunt_zzero(
+                                "hole", inode.ino, block_index, new_block,
+                            );
                             unsafe {
                                 if let Some(bh) = bio::getblk_zero(fs.device, new_block) {
                                     bio::brelse(bh);
@@ -882,6 +891,7 @@ pub fn ext4_file_write(
                 block_index,
                 block_num,
                 buf[buf_offset],
+                data.as_ptr(),
             );
 
             // Deferred write-back: leave the buffer BH_Dirty in the block
