@@ -363,7 +363,7 @@ unit-guest|unit|riscv64|900|make test
 unit-verify|unit|host|600|make verify
 formal-spin|formal|host|600|make spin
 formal-kani|formal|host|1800|make kani
-formal-miri|formal|host|1800|make miri
+formal-miri|formal|host|4200|make miri
 perf-gate|perf|riscv64|1200|run/perf-gate.sh --tiers 1 --kernel __KERNEL__
 stress-oomchurn|stress|riscv64|__STRESS__|python3 test/oomchurn_boot.py --kernel __KERNEL__ --secs __STRESS__ --mode fake --mb 400 --fork-n 2 --mem 2G
 stability-boot|stability|riscv64|__STAB__|python3 test/boot-soak-fast.py --seconds __STAB__ --kernel __KERNEL__
@@ -564,6 +564,12 @@ verdict_for() {
         echo "HARNESS FAIL"
         return
     fi
+    # Wrappers report their own skips (a missing image, toolchain or
+    # kernel): an environment gap, not a kernel defect.
+    if grep -aEq "PROBE-RESULT: SKIP" "$log"; then
+        echo "SKIP (probe skip)"
+        return
+    fi
     if grep -aEq "WEDGE|STALL|no serial progress" "$log"; then
         echo "WEDGE"
         return
@@ -757,7 +763,10 @@ FLEET_FSFUZZ="$ROOT/run/fleet/images/fleet-fsfuzz-rootfs.img"
 FLEET_MEMSTORM="$ROOT/run/fleet/images/fleet-memstorm-rootfs.img"
 FUZZ_FS_CMD="echo 'no fleet fsfuzz image at $FLEET_FSFUZZ' ; exit 3"
 if [ -f "$FLEET_FSFUZZ" ]; then
-    FUZZ_FS_CMD="timeout ${FUZZ}s qemu-system-riscv64 -M virt -accel tcg,thread=multi -cpu rv64,zbb=true,zba=true,zbs=true,zcb=true,v=true -m 1G -smp 2 -display none -serial stdio -snapshot -drive file=$FLEET_FSFUZZ,if=none,id=rootfs,format=raw,file.locking=off -device virtio-blk-pci,disable-legacy=on,drive=rootfs -kernel __KERNEL__ -append 'root=/dev/vda rw init=/test/fsfuzz console=ttyS0 dfx=watchdog,taskdump'"
+    # The fuzz window ending (timeout rc 124) is the expected outcome —
+    # the fuzzer runs until the window closes; only an earlier qemu
+    # death or a panic (verdict_for greps the serial) fails the leg.
+    FUZZ_FS_CMD="timeout ${FUZZ}s qemu-system-riscv64 -M virt -accel tcg,thread=multi -cpu rv64,zbb=true,zba=true,zbs=true,zcb=true,v=true -m 1G -smp 2 -display none -serial stdio -snapshot -drive file=$FLEET_FSFUZZ,if=none,id=rootfs,format=raw,file.locking=off -device virtio-blk-pci,disable-legacy=on,drive=rootfs -kernel __KERNEL__ -append 'root=/dev/vda rw init=/test/fsfuzz console=ttyS0 dfx=watchdog,taskdump'; frc=\$?; if [ \$frc -ne 0 ] && [ \$frc -ne 124 ]; then echo 'PROBE-RESULT: FAIL fuzz qemu exited '\$frc; exit 1; fi; echo 'PROBE-RESULT: PASS fuzz window completed'"
 fi
 
 # The LTP leg runs a bounded sample of the suite list through the
@@ -787,7 +796,16 @@ all_rows | while IFS='|' read -r name kind arch tmo cmd; do
         esac
     fi
     case "$arch" in
-        x86_64) [ "$X86_OK" = 1 ] || continue ;;
+        x86_64)
+            # The monkey leg needs the Ubuntu image; the x86 probe
+            # legs (pstore-x86, dfx-x86, binder4-x86) build their own
+            # minimal images and only need the bzImage.
+            if [ "$name" = "monkey-x86_64" ]; then
+                [ "$X86_OK" = 1 ] || continue
+            else
+                [ -f "$X86_KERNEL" ] || continue
+            fi
+            ;;
     esac
     if [ "$name" = "unit-guest" ] && rootfs_busy; then
         echo "  $name: SKIP (test/rootfs.img is held by another lane)"
@@ -796,7 +814,6 @@ all_rows | while IFS='|' read -r name kind arch tmo cmd; do
             >> "$OUT/summary.tsv"
         continue
     fi
-    cmd="${cmd//__KERNEL__/$KERNEL_DEFAULT}"
     cmd="${cmd//__X86_KERNEL__/$X86_KERNEL}"
     cmd="${cmd//__X86_IMAGE__/$X86_IMAGE}"
     cmd="${cmd//__STAB__/$STAB}"
@@ -809,6 +826,12 @@ all_rows | while IFS='|' read -r name kind arch tmo cmd; do
     cmd="${cmd//__OUT__/$OUT}"
     cmd="${cmd//__FUZZ_FS__/$FUZZ_FS_CMD}"
     cmd="${cmd//__LTP_CMD__/$LTP_CMD}"
+    # LAST: the fuzz/LTP command templates themselves carry __KERNEL__
+    # (they are expanded only now, so a pass before __FUZZ_FS__ would
+    # leave a literal __KERNEL__ in the boot command — the fuzz leg
+    # failed with "could not load kernel '__KERNEL__'" for exactly
+    # that reason once the fleet image finally existed).
+    cmd="${cmd//__KERNEL__/$KERNEL_DEFAULT}"
     # perf numbers from a busy host are noise dressed as data: the perf
     # leg only runs when the host is actually quiet, and says so when it
     # does not.

@@ -21,12 +21,17 @@ def build_init():
     src = os.path.join(HERE, "init.c")
     out = os.path.join(HERE, "init")
     subprocess.run(
-        [CC, "-static", "-nostdlib", "-O2", "-o", out, src],
+        # march pinned WITHOUT vector: the gcc-15 default march emits
+        # RVV insns the no-V boot CPU SIGILLs on (same lesson as
+        # mkrootfs.sh / test/musl_build.py).
+        [CC, "-march=rv64gc_zba_zbb_zbs", "-static", "-nostdlib", "-O2",
+         "-o", out, src],
         check=True,
     )
     hello = os.path.join(HERE, "hello")
     subprocess.run(
-        [CC, "-static", "-nostdlib", "-O2", "-DHELLO", "-o", hello, src],
+        [CC, "-march=rv64gc_zba_zbb_zbs", "-static", "-nostdlib", "-O2",
+         "-DHELLO", "-o", hello, src],
         check=True,
     )
     return out, hello

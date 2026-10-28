@@ -151,6 +151,11 @@ struct binder_sender_info {
 #define BINDER_SET_MAX_THREADS _IOW('b', 5, uint32_t)
 #define BINDER_SET_CONTEXT_MGR _IOW('b', 7, int32_t)
 #define BINDER_VERSION _IOWR('b', 9, struct binder_version)
+/* OH extensions (kernel/src/ipc/binder.rs): 5 x u64 out record,
+ * rec[4] = sender pid; answered from the calling thread's txn stack.
+ * The kernel numbers these dir=3 (READ|WRITE) size=40; spelled out
+ * raw because _IOWR would take sizeof of the literal. */
+#define BINDER_GET_SENDER_INFO ((3u << 30) | (40u << 16) | ('b' << 8) | 32)
 
 struct binder_version {
     int32_t protocol_version;
@@ -967,11 +972,32 @@ static int run_service(int ready_pipe, int ok_pipe)
             if (s.txn.target.ptr != SVC_PTR || s.txn.cookie != SVC_COOKIE)
                 die2("service: txn target not our object");
             if (sec != 0) {
-                struct binder_sender_info *si = (struct binder_sender_info *)(uintptr_t)sec;
-                if (si->pid != s.txn.sender_pid)
-                    die2("service: secctx pid mismatch");
-                if (si->uid != getuid())
-                    die2("service: secctx uid mismatch");
+                /* Linux/OH parity: the secctx payload is a
+                 * NUL-terminated security-context STRING (the kernel
+                 * synthesizes "u:r:init:s0"; OH libbinder casts the
+                 * pointer to const char* for callerSid_). The old
+                 * binary binder_sender_info record this check read was
+                 * removed with the b45 wedge fix — reading string bytes
+                 * as pid/uid is what made this die. */
+                const char *sid = (const char *)(uintptr_t)sec;
+                size_t sn = 0;
+                while (sn < 64 && sid[sn] != '\0')
+                    sn++;
+                if (sn == 0 || sn >= 64)
+                    die2("service: secctx string not NUL-terminated");
+                if (sid[0] != 'u' || sid[1] != ':' )
+                    die2("service: secctx string malformed");
+                /* sender identity cross-check via the OH extension
+                 * ioctl, answered while this txn is on our stack. Sync
+                 * txns only: oneway carries no from_proc, the ioctl
+                 * would answer 0. */
+                if (!(s.txn.flags & TF_ONE_WAY)) {
+                    uint64_t rec[5] = {0, 0, 0, 0, 0};
+                    if (ioctl(g_fd, BINDER_GET_SENDER_INFO, rec) < 0)
+                        die2("service: GET_SENDER_INFO failed");
+                    if ((int32_t)rec[4] != s.txn.sender_pid)
+                        die2("service: secctx pid mismatch");
+                }
                 secctx_seen++;
             } else {
                 secctx_missing++;

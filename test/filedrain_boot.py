@@ -159,6 +159,18 @@ def main():
                 proc.wait(5)
             except subprocess.TimeoutExpired:
                 proc.kill()
+    # Final read: the kernel powers down right after FDR-PASS, so the
+    # poll loop can break on the qemu exit BEFORE the marker's poll
+    # lands (observed: FDR-PASS on serial, verdict None, rc 1).
+    if verdict is None and os.path.exists(serial):
+        data = open(serial, "rb").read()
+        if b"FDR-PASS" in data:
+            verdict = "PASS"
+        elif b"FDR-FAIL" in data:
+            verdict = "FAIL"
+        elif b"KERNPANIC" in data or b"Kernel panic" in data:
+            verdict = "PANIC"
+            panicked = True
     oom = 0
     ser_txt = ""
     if os.path.exists(serial):
