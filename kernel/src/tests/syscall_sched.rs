@@ -4,6 +4,10 @@
 //!
 //! Scheduler related system call test
 
+// Framekernel layer policy (docs/architecture/framekernel-layers.md):
+// this module must stay Safe Rust.
+#![forbid(unsafe_code)]
+
 use crate::syscall::sched::{
     sys_sched_yield, sys_getpriority, sys_setpriority,
     PRIO_PROCESS, PRIO_PGRP, PRIO_USER, MIN_NICE, MAX_NICE,

@@ -14,6 +14,10 @@
 //! PerCpuState (sched.rs). The SchedClass methods are simplified because
 //! the actual scheduling logic operates on PerCpuState directly.
 
+// Framekernel layer policy (docs/architecture/framekernel-layers.md):
+// this module must stay Safe Rust.
+#![forbid(unsafe_code)]
+
 use crate::process::task::Task;
 use super::class::{SchedClass, RunQueueRef};
 

@@ -1419,6 +1419,28 @@ MAPPINGS = [
         "skip": [],
         "check_new": False,
     },
+    # ---- Framekernel mappings (uaccess bounds rail) ----
+    {
+        "name": "arch/uaccess_bounds",
+        "verify": "kernel/verify/src/arch/riscv64/mm/uaccess_test.rs",
+        "kernel": "kernel/src/arch/riscv64/uaccess.rs",
+        "type": None,
+        "compare": ["access_ok"],
+        "skip": [],
+        # kernel body opens with `use super::mm::user_addr::...`; the verify
+        # copy defines USER_START/USER_END as module constants instead
+        "skip_diff": ["access_ok"],
+        "check_new": False,
+    },
+    {
+        "name": "syscall/clamp_rw_count",
+        "verify": "kernel/verify/src/arch/riscv64/mm/uaccess_test.rs",
+        "kernel": "kernel/src/syscall/io.rs",
+        "type": None,
+        "compare": ["clamp_rw_count"],
+        "skip": [],
+        "check_new": False,
+    },
 ]
 
 

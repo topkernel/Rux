@@ -13,6 +13,10 @@
 //! it fall through: several x86 numbers collide with DIFFERENT
 //! generic syscalls, e.g. x86 35 nanosleep vs generic 35 unlinkat).
 
+// Framekernel layer policy (docs/architecture/framekernel-layers.md):
+// this module must stay Safe Rust.
+#![forbid(unsafe_code)]
+
 use crate::syscall::SyscallArgs;
 
 const AT_FDCWD: u64 = -100i64 as u64;

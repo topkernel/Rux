@@ -13,6 +13,10 @@
 //! - Per-CPU Pages cache
 //! - Page descriptor status
 
+// Framekernel layer policy (docs/architecture/framekernel-layers.md):
+// this module must stay Safe Rust.
+#![forbid(unsafe_code)]
+
 use super::pglist::first_online_node;
 use super::buddy_allocator::buddy_stats;
 use super::slab::slab_stats;

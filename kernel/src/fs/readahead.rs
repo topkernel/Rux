@@ -8,6 +8,10 @@
 //! After detecting consecutive sequential reads, prefetches upcoming blocks
 //! into the page cache to reduce VirtIO round-trips.
 
+// Framekernel layer policy (docs/architecture/framekernel-layers.md):
+// this module must stay Safe Rust.
+#![forbid(unsafe_code)]
+
 /// Maximum number of blocks to read ahead per trigger.
 ///
 /// 512 blocks = 2 MiB per batch: one sleep/wake cycle covers a whole

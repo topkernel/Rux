@@ -35,6 +35,10 @@
 //! "1" when every event is enabled, "0" when none is, "X" when the
 //! set is mixed.
 
+// Framekernel layer policy (docs/architecture/framekernel-layers.md):
+// this module must stay Safe Rust.
+#![forbid(unsafe_code)]
+
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;

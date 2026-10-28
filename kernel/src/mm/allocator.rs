@@ -7,6 +7,10 @@
 //! This module re-exports the Buddy System allocator's public interface.
 //! The Buddy System is an efficient memory allocation algorithm that supports O(log n) allocation and deallocation.
 
+// Framekernel layer policy (docs/architecture/framekernel-layers.md):
+// this module must stay Safe Rust.
+#![forbid(unsafe_code)]
+
 pub use crate::mm::buddy_allocator::{BuddyAllocator, init_heap, init_heap_sized, HEAP_ALLOCATOR};
 
 // The old BumpAllocator has been deprecated, but the type alias is kept to avoid breaking changes

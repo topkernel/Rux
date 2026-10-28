@@ -6,6 +6,10 @@
 //!
 //! evdev compatible input event interface
 
+// Framekernel layer policy (docs/architecture/framekernel-layers.md):
+// this module must stay Safe Rust.
+#![forbid(unsafe_code)]
+
 // ============================================================================
 // Event type constants (input.h)
 // ============================================================================

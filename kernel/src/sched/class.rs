@@ -6,6 +6,10 @@
 //!
 //! Defines the SchedClass trait and scheduling flags
 
+// Framekernel layer policy (docs/architecture/framekernel-layers.md):
+// this module must stay Safe Rust.
+#![forbid(unsafe_code)]
+
 use crate::process::task::Task;
 
 /// Enqueue flags

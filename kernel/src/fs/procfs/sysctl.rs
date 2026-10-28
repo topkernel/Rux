@@ -21,6 +21,10 @@
 //! sysctls; netns/utsns isolation does not exist (namespaces are a
 //! separate P1).
 
+// Framekernel layer policy (docs/architecture/framekernel-layers.md):
+// this module must stay Safe Rust.
+#![forbid(unsafe_code)]
+
 use alloc::vec::Vec;
 use core::sync::atomic::{AtomicU32, AtomicU64, Ordering};
 

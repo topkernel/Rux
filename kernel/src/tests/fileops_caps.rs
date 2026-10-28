@@ -1,3 +1,7 @@
+
+// Framekernel layer policy (docs/architecture/framekernel-layers.md):
+// this module must stay Safe Rust.
+#![forbid(unsafe_code)]
 // Capability-matrix shape tests (rust-design-headroom §1, divergence
 // D-6). Pin which ops each builder-converted file type carries: the
 // point of the capability declaration is that a type's matrix is a
