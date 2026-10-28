@@ -339,20 +339,20 @@ fn resolve_child(dir: &DebugFsNode, name: &[u8]) -> Option<Arc<DebugFsNode>> {
 
 /// debugfs lookup: child inode number.
 /// SAFETY: VFS callback contract.
-unsafe fn debugfs_lookup(dir: &Inode, name: &[u8]) -> Result<Ino, i32> {
-    let entry = entry_of(dir).ok_or(errno::Errno::NotADirectory.as_neg_i32())?;
+unsafe fn debugfs_lookup(dir: &Inode, name: &[u8]) -> Result<Ino, errno::Errno> {
+    let entry = entry_of(dir).ok_or(errno::Errno::NotADirectory)?;
     match resolve_child(&entry.node, name) {
         Some(child) => Ok(child.ino),
-        None => Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32()),
+        None => Err(errno::Errno::NoSuchFileOrDirectory),
     }
 }
 
 /// debugfs iget: instantiate the VFS Inode for a resolved child.
 /// SAFETY: VFS callback contract.
-unsafe fn debugfs_iget(parent: &Inode, name: &[u8], ino: Ino) -> Result<Arc<Inode>, i32> {
-    let parent_entry = entry_of(parent).ok_or(errno::Errno::NotADirectory.as_neg_i32())?;
+unsafe fn debugfs_iget(parent: &Inode, name: &[u8], ino: Ino) -> Result<Arc<Inode>, errno::Errno> {
+    let parent_entry = entry_of(parent).ok_or(errno::Errno::NotADirectory)?;
     let node = resolve_child(&parent_entry.node, name)
-        .ok_or(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())?;
+        .ok_or(errno::Errno::NoSuchFileOrDirectory)?;
 
     let mode = if node.is_dir {
         InodeMode::new(InodeMode::S_IFDIR | 0o755)

@@ -554,7 +554,14 @@ syscall/file.rs mapping once per arm; the enum gained
 (the file's two local errno-constant duplicates are deleted). Errno
 values byte-identical throughout; suite green; the LTP fcntl/flock
 and setxattr/getxattr/listxattr/removexattr families are the
-behavioral guards.
+behavioral guards. (3) the VFS inode-operations table (`fs/inode.rs`
+- the lookup/create/symlink/mkdir/mknod/iget slots, their op_*
+wrappers, and the 26 implementer functions across tmpfs/ext4/procfs/
+devfs/rootfs/sysfs/selinuxfs/debugfs/cgroup): the whole create-class
+path-resolution API is typed. The deep internal layers not yet
+converted (ext4 namei/inode, the sched cgroup helpers) bridge through
+`Errno::from_neg_i32` / `From<i32>` - a documented, visible marker to
+retire as those layers convert.
 
 **Known cost.** Opportunistic adoption: the i32 errno convention
 dominates the tree and keeps compiling; subsystems convert when

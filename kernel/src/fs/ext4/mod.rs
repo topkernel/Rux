@@ -1892,12 +1892,12 @@ use crate::fs::Stat;
 
 /// Ext4 inode lookup operation
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
-unsafe fn ext4_lookup(dir: &Inode, name: &[u8]) -> Result<Ino, i32> {
-    let fs_ptr = dir.private_data.ok_or(errno::Errno::IOError.as_neg_i32())?;
+unsafe fn ext4_lookup(dir: &Inode, name: &[u8]) -> Result<Ino, errno::Errno> {
+    let fs_ptr = dir.private_data.ok_or(errno::Errno::IOError)?;
     let fs = &*(fs_ptr as *const Ext4FileSystem);
 
     // Get ext4 inode from parent's private_data
-    let parent_ext4_inode = dir.sb.ok_or(errno::Errno::NotADirectory.as_neg_i32())?;
+    let parent_ext4_inode = dir.sb.ok_or(errno::Errno::NotADirectory)?;
     let parent_inode = &*(parent_ext4_inode as *const inode::Ext4Inode);
 
     // Convert name to str
@@ -3039,7 +3039,7 @@ pub static EXT4_INODE_OPS: INodeOps = INodeOps {
 ///
 /// Reads the child inode from disk using the parent's filesystem pointer.
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
-unsafe fn ext4_iget(parent: &Inode, _name: &[u8], ino: Ino) -> Result<alloc::sync::Arc<Inode>, i32> {
+unsafe fn ext4_iget(parent: &Inode, _name: &[u8], ino: Ino) -> Result<alloc::sync::Arc<Inode>, errno::Errno> {
     let fs_ptr = parent.private_data.ok_or(errno::Errno::IOError.as_neg_i32())?;
     let fs = &*(fs_ptr as *const Ext4FileSystem);
 
@@ -3054,7 +3054,7 @@ unsafe fn ext4_iget(parent: &Inode, _name: &[u8], ino: Ino) -> Result<alloc::syn
 
 /// Wrapper for ext4_mkdir to match VFS signature
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
-unsafe fn ext4_mkdir_wrapper(dir: &Inode, name: &[u8], mode: InodeMode) -> Result<alloc::sync::Arc<Inode>, i32> {
+unsafe fn ext4_mkdir_wrapper(dir: &Inode, name: &[u8], mode: InodeMode) -> Result<alloc::sync::Arc<Inode>, errno::Errno> {
     flush_pending_reaps();
     let _ext4_guard = EXT4_BIG_LOCK.lock_fair();
     let fs = get_ext4_fs_rw_from_inode(dir)?;
@@ -3121,7 +3121,7 @@ unsafe fn ext4_rmdir_wrapper(dir: &Inode, name: &[u8]) -> i32 {
 
 /// Wrapper for ext4_create to match VFS signature
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
-unsafe fn ext4_create_wrapper(dir: &Inode, name: &[u8], mode: InodeMode) -> Result<alloc::sync::Arc<Inode>, i32> {
+unsafe fn ext4_create_wrapper(dir: &Inode, name: &[u8], mode: InodeMode) -> Result<alloc::sync::Arc<Inode>, errno::Errno> {
     flush_pending_reaps();
     let _ext4_guard = EXT4_BIG_LOCK.lock_fair();
     let fs = get_ext4_fs_rw_from_inode(dir)?;
@@ -3139,7 +3139,7 @@ unsafe fn ext4_create_wrapper(dir: &Inode, name: &[u8], mode: InodeMode) -> Resu
 
 /// Wrapper for ext4_mknod to match VFS signature (device/FIFO nodes).
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
-unsafe fn ext4_mknod_wrapper(dir: &Inode, name: &[u8], mode: InodeMode, dev: u64) -> Result<alloc::sync::Arc<Inode>, i32> {
+unsafe fn ext4_mknod_wrapper(dir: &Inode, name: &[u8], mode: InodeMode, dev: u64) -> Result<alloc::sync::Arc<Inode>, errno::Errno> {
     let _ext4_guard = EXT4_BIG_LOCK.lock_fair();
     let fs = get_ext4_fs_rw_from_inode(dir)?;
     let new_ino = namei::ext4_mknod(fs, dir.ino as u32, name, mode.bits() as u16, dev)?;
@@ -3156,7 +3156,7 @@ unsafe fn ext4_mknod_wrapper(dir: &Inode, name: &[u8], mode: InodeMode, dev: u64
 
 /// Wrapper for ext4_symlink to match VFS signature
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
-unsafe fn ext4_symlink_wrapper(dir: &Inode, name: &[u8], target: &[u8]) -> Result<alloc::sync::Arc<Inode>, i32> {
+unsafe fn ext4_symlink_wrapper(dir: &Inode, name: &[u8], target: &[u8]) -> Result<alloc::sync::Arc<Inode>, errno::Errno> {
     let _ext4_guard = EXT4_BIG_LOCK.lock_fair();
     let fs = get_ext4_fs_rw_from_inode(dir)?;
     let new_ino = namei::ext4_symlink(fs, dir.ino as u32, name, target)?;
