@@ -693,6 +693,20 @@ PIDFILE="$OUT/pids"
 FOREIGN="$(foreign_qemus "$PIDFILE")"
 MEMAV="$(mem_available_mb)"
 
+# --- a NORMAL kernel, or every probe boots the wrong machine ----------
+# `make test` overwrites target/.../rux with a unit-test build whose
+# boot runs the 1122 in-kernel tests and halts — no shell, no klogd, no
+# sysrq. The unattended window has no agents to collide with, so the
+# round can safely rebuild the plain kernel first (the same ELF-flip
+# the GNOME lane hit once). A failed build fails the round honestly.
+if [ ! -f "$KERNEL_DEFAULT" ] || [ "$MODE" != "quick" ]; then
+    echo "ensuring a plain kernel build (make build)..."
+    if ! make build > "$OUT/build.log" 2>&1; then
+        echo "round aborted: make build failed (see $OUT/build.log)" >&2
+        exit 2
+    fi
+fi
+
 # --- how many machines the host can carry -------------------------------
 if [ -z "$CONCURRENCY" ]; then
     # each machine wants ~1G of guest RAM plus the TCG overhead; leave a
