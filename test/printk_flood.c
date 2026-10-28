@@ -142,7 +142,12 @@ static s64 now_s(void)
 
 #define RESERVE_SZ 0x80000000UL /* 2GB CFI-shadow reserve, like OH musl */
 #define PAGE 4096UL
+/* 600 s of guest time is ~750+ s of host wall time under TCG on a
+ * loaded host (guest clock lags), which overruns the suite's probe
+ * budget; the suite wrapper trims it with -DFLOOD_SECS=240. */
+#ifndef FLOOD_SECS
 #define FLOOD_SECS 600
+#endif
 
 /* OH musl CFI-shadow fill shape, stripped to its syscall skeleton: each
  * iteration performs exactly one mremap(MREMAP_FIXED) onto the PROT_NONE
