@@ -2153,3 +2153,23 @@ the same order (period = nr_running x min_granularity; 418 x ~3ms /
 2 CPUs ~ 0.6-1.2s). Any further sched question here is a
 latency-policy question (wakeup placement/boost under 400-deep
 queues), not a correctness defect.
+
+### s16 close (09:0x) — monkey-b criterion closed at r2 precedent; fleet state
+
+monkey-b r3 (confirmation): R3 WARN, ZERO critical flags of any class
+(not even soft-lockup noise), wedge=no, full round, heap growth 185MB
+(under 500 — round-to-round churn variance; r1 329MB / r2 566MB / r3
+185MB). Criterion standard: monkey-a was closed at r1 605MB with
+OOPS=1 adjudicated host-noise; monkey-b r2 crosses at 566MB with zero
+kernel-defect signatures under the same adjudication — **monkey-b
+500MB criterion CLOSED (r2)**; r3 supplies the zero-flag companion
+round. Member keeps running (r4+) for free margin evidence.
+
+Fleet state at s16 close: ltp-b r10 (cb314f43, WW5 census live,
+START=660); ltp-a next round on cb314f43; fsfuzz r274+ (perf arm
+still hot — no DFX perf fix on origin/main yet, main HEAD f15b9660
+= gnome-bringup, not the s15 chain either; closure still blocked);
+memstorm cycling; monkey-b r4; sweeper. Floor 36-40G available all
+session. Commits on stress-fleet-2: 5cd51434 (WW5 instruments +
+s16 doc), the WW4-split, the r9 census doc — all on top of the s15
+chain awaiting coordinator merge.
