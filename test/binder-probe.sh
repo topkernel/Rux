@@ -10,5 +10,6 @@ set -uo pipefail
 HERE="$(cd "$(dirname "$0")" && pwd)"
 # shellcheck source=probe-common.sh
 source "$HERE/probe-common.sh"
+: "${LEG_TIMECAP:=300}"
 
 leg_run_driver test/binder_probe_boot.py --kernel "$LEG_KERNEL" --timeout "${LEG_TIMECAP}"
