@@ -7390,3 +7390,33 @@ ratio 9 @1223 (inert, kept harmless), ams_service_config 999/9999/
 9999, ohos const.debuggable=0. Kernels: tip4 (WORD probe), tip5
 (any-state census), tip6 (all non-zombie census), tip7 (+connect
 sockaddr dumper); probes temporary, remove after diagnosis.
+
+LEG-40C round 3 (perf rider delivered; sc356/357): tip8 (committed)
+added dfx=ripsample — the x86_64 tick path already samples the
+interrupted rip with user/kernel discrimination (trap.rs utime/
+stime split + perf::note_tick); added the launcher-focused USER rip
+histogram (32 page buckets), launcher utime/stime counters, and a
+60s report riding the 1 Hz drift block.
+sc356 (first sampling attempt, 2.5 h window): wedged pre-spawn in
+the accountmgr flake zone (4th hit: sc342/345/351/356; holder
+txn11773 code24 foundation->pid1122 53 min + txn14657 code1 51 min);
+killed, relabeled sc357.
+sc357 (tip8, SECS=9000, the sampling boot): PAST the flake zone,
+launcher spawned, sampler delivered —
+  MODE SPLIT: utime=1583 stime=22093 = 6% user / 94% KERNEL.
+  USER hist: all top pages in LIBC (string/memcpy/malloc pages) —
+  zero samples in libark_jsruntime; even user time is module-load
+  relocation work.
+  KERNEL hist (page-bucketed, tip8-ELF symbolized): 0x80474000
+  n=1222 (VFS mount/superblock atomic_store family page),
+  0x80228000 n=1152 (core::str TwoWaySearcher + ConsoleWriter +
+  bio flush), 0x8043a000 n=204 (alloc RawVec grow/alloc), 0x8044b000
+  n=189 (sched current/schedule/yield), 0x80696000 n=142 (mm
+  add_vma/rss bookkeeping), 0x802d0000 n=140 (unix_listener_snapshot).
+  Verdict: broad per-syscall/per-fault kernel tax during the dynamic
+  LOAD phase (100 MB of libs faulting page-by-page); no single
+  hotspot; perf-lane material (syscall fast paths + fault handling).
+. so attribution table (byte-matched): 0x3fbf077000-138000 libc,
+0x40000000-401a8000 launcher bin, 0x7ff000b16000-bb3000 libc++,
+0x7ff0819d2000-81f9000 hicollie, 0x7ff083d26000-45a4000
+libark_jsruntime, 0x7ff08a82b000-a90e000 libappkit_native.
