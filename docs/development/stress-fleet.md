@@ -2173,3 +2173,152 @@ memstorm cycling; monkey-b r4; sweeper. Floor 36-40G available all
 session. Commits on stress-fleet-2: 5cd51434 (WW5 instruments +
 s16 doc), the WW4-split, the r9 census doc — all on top of the s15
 chain awaiting coordinator merge.
+
+## Session 17 (2026-10-28 09:1x-...) — handover leg: census baseline grows (r10); wedge flags adjudicated known-class; vmscan pre-OOM depth DESIGN NOTE; both main-watches open
+
+Handover from s16 (fleet on cb314f43; ltp-b WW5 census r10+, ltp-a
+control, fsfuzz r275+, memstorm, monkey-b r4+, sweeper). origin/main
+at session open: f15b9660 — NEITHER awaited merge is visible (no
+OH-A wake-placement change, no DFX perf fix); both watch items stay
+queued. Working-tree drift repaired: the round-rotation had deleted
+four tracked .wedge markers (ltp-a r24/r25, ltp-b r6/r7) — restored
+to match 5cd51434's committed state; untracked artifacts (images/,
+bzImage, config.rs) stay uncommitted per the big-binary rule.
+
+### Fleet health sweep + wedge adjudications (no new capture)
+
+- ltp-b r7-r10 all classifier-CRITICAL with wedge=yes: adjudicated
+  the KNOWN W3/oom01 pc=0x100 softirq-strand stall-tail family
+  (r10 tail: cpu0 pc=256, grq=0, oom01 SIGKILL delivered + SIGDEATH
+  printed, then >=300 s serial silence; s7 evidence chain, s8
+  canary: wedge survives the COW fix, owned by the W3/OH lane).
+  r7-r9 ran their full window (rc=124) — the stall is transient
+  mid-round, marker not round-ending; r10 ended early at ~7 min
+  (wedge kill won the race). OOM=5-8 / ALLOCTHROW=3 = the standing
+  oom01 storm classes; PREEMPT-LEAK ~1000-1220 = the s6-adjudicated
+  sampling-artifact family. Nothing new.
+- ltp-a r25-r27 (control arm): same wedge class at the oom01
+  position (sweepRES=837 twice); r26's 932K lines are 883K
+  userspace `pagefault:` prints from the mmap3 storm round (guest
+  noise, not kernel output); PARKED-LEAK-RV 1-2 + PREEMPT-UNDERFLOW
+  121 = the count-migration trio (root-caused, heal-arm prints).
+- fsfuzz r274/r275: WARN (FSFUZZ-ODD 42-44k = standing errno-oddity
+  census; perf arm churning — FSFUZZ-PERF lines present). Closure
+  round still blocked on the DFX perf fixes reaching main.
+- memstorm r25/r26: WARN, PREEMPT-UNDERFLOW 8-10 (trio family),
+  heap growth modest (13->24 MB, 12->51 MB). monkey-b r4 in flight
+  (margin evidence; criterion already closed at r2).
+- Floor 40G available all sweep. All driver loops alive; the two
+  wedged QEMUs were reaped by wedge_watch and the loops rolled
+  r11/r28 within a minute.
+
+### r10 census continuation (cb314f43, second WW5 round banked)
+
+363 strands, same distribution as r9 (393): oncpu_heal=0 AND
+claim_heal=0 this round (r9's claim_heal=17 was pid=1-leg noise);
+sub-gates smooth s250=27982 s500=15614 s750=6666; wtie mode 350-400
+(167) then 300-350 (125); visits min 440 / avg 593 / max 2469;
+strand ms min 1000 / avg 1154 / max 4882; SKIPHIST coll=1 363/363
+(known caveat); slotmm 1068x [0,0] + 1x [0,8] (transient
+switch-window sampling) — family B stays null; why= 171/1 + 38/2.
+The fair-queue-service-latency verdict stands unchanged. This is
+the second pre-fix baseline round; when the OH-A wake-placement
+change lands on main, the delta round runs on it with this same
+harvest (run/fleet/evidence/2026-10-28-s16-ww5-census/harvest.sh).
+
+### vmscan pre-OOM reclaim depth — DESIGN NOTE (owner decision requested; s13 item, no lane has claimed it)
+
+Problem. At genuine-OOM decision points the pre-kill reclaim
+protocol drains ~1 MB while 175-204 MB of clean, unlocked,
+unevictable-flag-free file cache sits on the LRUs (s8/s11/r51
+OOM-FORENSIC censuses; r51: anon 1613 MB of 2G, dirty=0, ~204 MB
+clean inactive-file unevicted at the kill). Those kills are
+borderline-correct — memory IS nearly full — but they should have
+been SLOW ALLOCATIONS: the drainable residue was two orders of
+magnitude beyond the protocol's reach.
+
+Stop chain, current code (all four points):
+
+1. `balance_pgdat` (kernel/src/mm/vmscan.rs:67-85): nr_to_reclaim =
+   max(1<<order, SWAP_CLUSTER_MAX=32) — a flat 32-page target; the
+   priority loop exits the moment 32 pages are back.
+2. `nr_to_scan` = size >> (priority-2) (vmscan.rs:141-160): the
+   deep whole-list scan exists only at priority 1-2 and is still
+   target-capped by (1). `shrink_node` engages only zones below
+   WMARK_LOW (vmscan.rs:113).
+3. Page-allocator slowpath (kernel/src/mm/page_alloc.rs:126-135):
+   <=8 `try_to_free_pages` rounds, breaking on freed==0. NET worst
+   case ~8x32 = 256 pages (~1 MB) of drain before the caller gives
+   up.
+4. kswapd escalation (kernel/src/mm/kswapd.rs:93-125): 16
+   consecutive zero-reclaim passes -> out_of_memory. Under the
+   88-93%-Referenced inactive list (adjudicated by-design, s13) each
+   `evict_one` (kernel/src/fs/page_cache.rs:1152-1282) spends its
+   2x64 LRU walk + demote-32 + BTreeMap fallback budget graduating
+   referenced pages; a pass that finds no
+   unreferenced-clean-refcnt0 page anywhere in budget returns 0 —
+   that is the observed zero-reclaim pass (empirically; the reason
+   counter below makes it exact).
+
+Proposed fix — deepen the LAST pre-OOM round only (minimal surface):
+
+- kswapd leg: at the escalation point (kswapd.rs, immediately
+  before out_of_memory, after KSWAPD_MAX_FAILURES trips) run ONE
+  deep drain pass: ScanControl with nr_to_reclaim set to the
+  shortfall (zone managed-free, capped e.g. at 64K pages) at
+  priority 1. The priority-1 scan already exists; the only semantic
+  change is the stop target. If it frees >= the needed order, reset
+  the failure counter instead of killing.
+- Direct-reclaim leg: on the 8th (final) slowpath round only, pass
+  the same deepened target. Rounds 1-7 keep the 32-page latency
+  shape, so steady-state reclaim latency is untouched — the deep
+  pass fires only at the OOM boundary.
+- Both legs are bounded by the existing freed==0 progress breaks;
+  the pass cannot spin on pinned pages.
+- NOT changed: Referenced semantics (adjudicated by design), MAX_SCAN
+  (latency guard), the dirty-writeback shape of shrink_reclaim.
+
+Measurement (merge-gate mandate — measuring is part of the change):
+
+- evict_one failure-reason counter (all-referenced / all-dirty /
+  all-pinned / empty), printed in the OOM-FORENSIC one-shot dump.
+  This also answers the s8 queue-2 question ("a
+  shrink-eviction-reason counter would decide") with data.
+- OOM-FORENSIC gains "final-drain freed=N in M passes" when the
+  deep round runs. Every OOM print then adjudicates numerically:
+  final-drain freed ~0 = genuine exhaustion (kill correct); freed
+  pages yet still killed = protocol bug elsewhere.
+
+Alternatives (s13 list, trade-offs): adaptive MAX_SCAN under
+pressure (widens each call but keeps the 32-target — depth problem
+remains, more latency variance); Linux-parity
+activate-on-second-hit (kills the 93%-referenced state at the
+source, but puts lru_lock on second cache hits — fs hot-path gate
+applies, and the design-divergences record would need updating).
+
+Expected fleet effect: oom01-region kills (ltp-a/ltp-b round tails)
+should convert to slow allocations; if the W3 pc=0x100 stall grind
+is the alloc slowpath retrying under exhaustion (s7 strand dump:
+GFP_USER slowpath inside the PTE section, now pre-lock), the deep
+pass may thin that family too — measurable as the wedge-marker rate
+on the ltp members. NOT targeted: the monkey/gnome fake-OOM
+(free_cnt>0) family — allocator-state defect, gnome lane owns it.
+
+Gates for whoever lands it (mm/ guarded domain): Tier-1 syscost
+(census band, syscall volume +/-10%, no reclaim-slowpath emergence,
+drct=0 class), Tier-2 pbench mm rows, small_alloc REST wall, zone
+free floor unchanged — plus the two new counters reported on one
+oom01-sweep round. This lane can implement on request (kswapd +
+slowpath change ~40 lines, counters ~30).
+
+### Watch state (open at close of this leg's first sweep)
+
+- OH-A wake-placement fix: NOT on origin/main (still f15b9660).
+  When it lands: one deep-queue census round on the fixed kernel,
+  harvest.sh diff vs r9/r10 baseline (strand count, wtie mass,
+  sub-gate steps, visits) = the cross-lane verdict data.
+- fsfuzz perf-catch closure: still blocked on the DFX perf fixes
+  (origin/main beyond f15b9660); one clean round on the fixed
+  kernel closes it.
+- monkey-b margin rounds continue (r4+). New-capture tripwires
+  armed (WILDWATCH-CANARY, slotmm>0 sustained, new panic classes).
