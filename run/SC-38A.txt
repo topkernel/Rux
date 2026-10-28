@@ -1,0 +1,118 @@
+LEG-38A (OH sprint, kernel-side lane; worktree
+/home/william/rux-agents/oh-kernel, branch feature/oh-kernel, opened on
+581b5a60 after the leg-37A close-out).
+
+MISSION 0 — leg-37A watcher verdicts at leg open: NONE (log
+run/perf-gate-leg37a-watch.log showed only heartbeats, qemu 6-10 all
+morning). Direct-run check per the mission rule: qemu=6 and RISING at
+12:02 (the relaunch wave — ltp-a r18, ltp-b r4, fsfuzz r272 drivers
+spun up 12:01-12:08), never <= 2, so no direct gate. The leg-37A
+watcher (PID 536241, own-lane) was KILLED AND REPLACED rather than
+left armed: it was pointing at the superseded fb27b8ff snapshot
+(bzImage-leg37A-tip), and a new main had landed (SC-37A merge-order
+tip: re-merge + re-gate on the new tip).
+
+MERGE OF origin/main 2a960538: DONE as 1b8be5a3. One content conflict,
+kernel/src/sched/wakewatch.rs — main's WW5 census fields (walks/wtie
+slot fields, STRAND_N250/500/750, visits=/tie=/wtie= strand-line
+extension) unioned with our reservation hint field + counters; both
+instruments read independent slot fields, no semantic interaction.
+fair.rs and sched.rs auto-merged and were hand-verified: the
+reservation skip (skip_reason=6, shared 32-entry stash) sits inside
+the pick loop after affinity/throttle; fork-path (~3231) and
+wake-path (~3934) note/clear_placement call sites intact with the
+legitimate-wake gate; main's WW_IDLE_PHASE/R56/R83 idle-loop hunks
+coexist; R20-2 recheck present. Residual diff vs origin/main is
+exactly our lane's set: sched/fair.rs+25, sched/sched.rs+92,
+sched/wakewatch.rs+162, ipc/binder.rs TXN-POOL +133, run/ artifacts.
+
+FUNCTIONAL GATES ON THE MERGED TIP 1b8be5a3 — ALL GREEN:
+- x86_64 build rc=0 (run/build-leg38A-x86.log, gitignored, local).
+- riscv64 build rc=0 (run/build-leg38A-rv.log; built AFTER make test
+  to dodge the ELF-overwrite hazard this time — leg-37A's known trap
+  avoided).
+- make test: 1122 passed / 0 failed (run/maketest-leg38A.log).
+- riscv64 scripted regression boot (run/rv-regress-leg38A.sh, smp2 1G,
+  dfx=wwcensus): 0 panics, 0 PREEMPT-UNDERFLOW, 0 WAKE-STRANDED, shell
+  prompt reached, hint tail onor=9 steal=0 exp=1 — instrument live,
+  zero steals; exp=1 is one normal expiry (hinted CPU passed and picked
+  someone else), same class as leg-37A's onor=6 steal=0 exp=0.
+
+PERF TIERS 1,2 (the binding check): watcher v3
+run/perf-gate-leg38a-watch.sh ARMED 12:23:34 (detached PID 613379 =
+run/perf-gate-leg38a-watch.pid; poll 3 min; conditions foreign qemu
+< 2 AND load1 < 9 AND MemAvailable >= 12G; 8 h deadline -> ~20:23;
+heartbeat every 30 min). Gate kernel SNAPSHOTTED at
+run/bzImage-leg38A-tip (md5 3cb00423801d571859139abef620c942, = the
+1b8be5a3 x86_64 build). rc=3 keeps polling. Verdicts land in
+run/perf-gate-leg38a.log; "gate rc=" in
+run/perf-gate-leg38a-watch.log is the completion marker.
+
+VERDICT CONSUMPTION (unchanged rule, from the 35A decision): the
+multi-thread reading decides —
+  any of p2_ctxsw / p5a_pipe / p5b_dgram_send / p5b_dgram_recv_peek /
+  p5c_stream_write median > +20% vs run/pb1-results.txt
+    => FALLBACK: register the pick-order placement race as an inherent
+       D-1 consequence in docs/architecture/design-divergences.md and
+       band the unpinned p5 rows for both regimes (write-up material:
+       run/SCHED-35A-SAMECPU.txt).
+  within band or improved
+    => ready-for-merge message; add the D-1 register consequence note
+       with before/after steal counts.
+pb1 +20% ceilings for the five binding rows: p2_ctxsw 18.491,
+p5a_pipe 25.820, p5b_dgram_send 151.508, p5b_dgram_recv_peek 330.534,
+p5c_stream_write 67.468. Extract with:
+  grep -E 'pbench (p2_ctxsw|p5a_pipe|p5b_dgram_send|p5b_dgram_recv_peek|p5c_stream_write) ' \
+    run/perf-gate-leg38a.log
+Note the gate now certifies the 1b8be5a3 tip (not fb27b8ff): its Tier-1
+also covers main 2a960538's own recorded Tier-1 debt (pa83 queued
+behind the quiet gate on the perf-audit lane). Draft note variants for
+BOTH outcomes sit in run/D1-NOTE-DRAFT-leg37A.txt (fill slots for the
+tier numbers; steal counts below).
+
+Before/after steal counts for the note (leg-36A confirmator,
+ww-confirm-leg36a.sh): thread=single matched pair — BEFORE (wresv=0)
+onor=211 steal=2 (99.1% idle-picked); AFTER onor=160 steal=0 (100%).
+thread=multi BEFORE onor=274 steal=0 (window already shut by the idle
+vCPU's host thread). leg-38A rv regression (2a960538 merged):
+onor=9 steal=0 exp=1.
+
+MISSION 3 — A2 deep-queue confirmator: STAGED, sequenced after the
+tier verdicts (do not run it while the watcher could take a window —
+a second own QEMU during the gate's Tier-1 boot pollutes the volume
+row and the p5 medians). run/ww-deepqueue-leg38A.sh boots the shared
+fleet LTP image (wwh-main-kernel/run/fleet/images/fleet-ltp-rootfs.img,
+snapshot=on + file.locking=off only, smp2 2G TCG, nice 10) on THIS
+branch's rv kernel with sweepstart=660 dfx=wwcensus, SECS=600 default,
+then harvests (a) the hint counter SERIES (every WW: heartbeat — the
+inertness read is that onor/steal/exp freeze while the deep phase
+churns; the early-boot idle phase shows a few honors, that is the
+known onor~6-9 shape) and (b) the s16 sub-gate census vs the recorded
+main-class control (stress-fleet.md s16 smoke2 at 120 s: s250=18617
+s500=8941 s750=2359 smooth decay, wtie mode 300-350, visits avg ~540+
+at ~540 walks/s, oncpu_heal/claim_heal exactly 0). Movement in (a)
+during the deep phase, or a census cliff/heal in (b), is the real-
+finding path for the A2 family (regime touching idle capacity more
+than the s16 correlation showed).
+
+MISSION 4 — OH-B Family-A aftermath asks: NONE (CC-COLLAB.txt
+untouched since Oct 27 21:47; last entry remains our leg-35A message;
+no oh-b worktree exists under that name — their lane runs elsewhere
+and left nothing addressed to us).
+
+LEG STATUS: merge done (1b8be5a3), functional gates green, tier
+verdicts PENDING the calm window — watcher v3 carries them (8 h from
+12:23). SUCCESSOR FLOW: (a) if run/perf-gate-leg38a.log exists and
+"gate rc=" says 0/1, consume per the rule above (ready-for-merge vs
+D-1 fallback), paste the chosen D1-NOTE-DRAFT variant with numbers,
+commit, done; (b) if the watcher gave up (rc=2 line), re-arm it
+unchanged; (c) do not run the gate outside the calm conditions; (d)
+after the verdict, run the A2 confirmator above. Branch queue for the
+merge reviewer (origin/main..HEAD): 44ba45e2, 52535c72, f798ccd6,
+ab4ca01c, 88c8d1e4, c5db92de, 9d6b006b, d6124bbc, ccfc708e, 2beb2ded,
+6e6970c3, fb27b8ff, e9dec3e8, ef9d21b3, ba482513, 1967ed30, 581b5a60,
+1b8be5a3 (main merge — wakewatch hunks resolve to the field-union,
+both instruments preserved) + the note commits. The wake-placement
+hunks are d6124bbc/ccfc708e/2beb2ded; their merge gate is exactly the
+tier set this watcher owes. If a NEWER main lands before this branch
+merges, re-merge and re-gate again (pick hot path rule).
