@@ -118,6 +118,41 @@ block-scoped to the two counter updates.
 | INV-LOCK-6 | stats nests inside virtio-net queue locks, never reverse | virtio_net poll/xmit (drivers/net) |
 | INV-LOCK-7 | leaf-PTE exclusion: vma_manager -> PTE section (global epoch + per-mm pte_lock) -> page_desc; global-epoch WRITE sections never nest inside ANY PTE section; per-mm PTE sections of the same mm never nest | mm/mm_struct.rs PteLock, arch mm_ops PTE_MODIFY_LOCK |
 
+## Typed lock keys (the hierarchy as types, 2026-10)
+
+`kernel/src/sync/lockkey.rs` gives the ordering classes of the table
+above a TYPE surface: each class is a zero-sized key
+(`GrqKey`, `FutexBucketKey`, `NetQueueKey`, `NetStatsKey`) and a
+permitted nesting is an explicit `impl CanNestInside<Outer> for Inner`.
+Acquiring a keyed lock while another keyed lock is held goes through
+`KeyedRawSpinlock::lock_nested(&outer_guard)`, which only compiles when
+that impl exists — INV-LOCK-5's reverse order (bucket inside GRQ) and
+same-level nesting are compile errors, not deadlocks:
+
+```text
+impl CanNestInside<FutexBucketKey> for GrqKey      // INV-LOCK-5 forward
+impl CanNestInside<NetQueueKey> for NetStatsKey    // INV-LOCK-6 forward
+// reverse and same-class impls DO NOT EXIST — that absence IS the
+// invariant
+```
+
+Migration is opportunistic (the D-6/D-4 doctrine): unkeyed spinlocks
+keep compiling; a pair adopts keys when its invariant is named here,
+and the adoption must not widen the subsystem's public API. Adopted so
+far: the GRQ lock itself (`GlobalRunQueue.lock:
+KeyedRawSpinlock<GrqKey>` — internal type swap only, the GrqGuard API
+and the raw protocol around the lock are unchanged; merge of the sched/
+side rides the scheduling-domain sign-off). Pending pairs: the futex
+`HASH_HEADS` buckets (which completes INV-LOCK-5's compile fence: the
+wake path's nesting becomes `grq_lock.lock_nested(&bucket_guard)`),
+then the INV-LOCK-6 stats/queue pair. The unit group `lockkey` pins the
+positive mechanics; the negative half is a compile-time fact (two
+snippets that must not build are documented in the test).
+
+The irqsave/preempt discipline (INV-LOCK-1/2/3) is deliberately NOT
+keyed — that window is typed by CpuLocal's guard (divergence D-7); one
+mechanism per concern.
+
 ## Per-mm PTE lock (leaf-PTE exclusion, 2026-10)
 
 User-half leaf-PTE writers exclude through a two-level scheme that

@@ -210,6 +210,7 @@ pub mod buffer_state;
 pub mod mount_flags;
 #[cfg(feature = "unit-test")]
 pub mod percpu;
+pub mod lockkey;
 
 // ===== Process management =====
 #[cfg(feature = "unit-test")]
@@ -473,6 +474,11 @@ pub fn run_all_tests() {
 
     test_group_start("percpu");
     percpu::test_percpu();
+
+    // Typed lock keys (§3 GRQ typed-key slice): the CanNestInside
+    // mechanics + the GRQ claim pattern.
+    test_group_start("lockkey");
+    lockkey::test_lockkey();
 
     test_group_start("page_allocator");
     page_allocator::test_page_allocator();

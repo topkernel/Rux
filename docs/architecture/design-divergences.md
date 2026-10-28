@@ -401,3 +401,45 @@ delete load.
 **Guard.** fs-domain perf-gate rows (p6_mkdrmdir, p6_unlink,
 p6_write_fsync, p6_append) plus the fsw jcommit counters; the
 release-strong boot requirement for any change touching this path.
+
+---
+
+## D-9: Typed lock keys — the lock hierarchy as trait impls
+
+**Design.** Lock-ordering classes carry zero-sized key types
+(`GrqKey`, `FutexBucketKey`, `NetQueueKey`, `NetStatsKey`); a
+PERMITTED nesting is an explicit `impl CanNestInside<Outer> for
+Inner`, and acquiring a keyed lock while another keyed lock is held
+goes through `lock_nested(&outer_guard)`, which only compiles when the
+impl exists. The mainstream approach this replaces is a documented
+lock-ordering file plus review plus a post-hoc deadlock watchdog; the
+paid incident class is any INV-LOCK-* reverse-order introduction —
+review-enforced discipline that silently fails under refactor pressure
+(the futex-wake path nests GRQ inside the bucket lock on every wake;
+the reverse order is an instant machine-wide deadlock).
+
+**Advantage.**
+- The nesting table is not documentation — it is the impl list; a
+  reverse or same-level acquisition of migrated pairs does not compile.
+- The key name reaches the deadlock watchdog output (class-level
+  attribution even before a pair migrates).
+- Zero runtime cost: the key is `PhantomData`, the acquire paths
+  inline to the raw protocol's instructions.
+
+**Compatibility evidence.** First adoption is the GRQ's own lock —
+internal type swap (`RawSpinlock` -> `KeyedRawSpinlock<GrqKey>`), the
+GrqGuard API, the irqsave/preempt protocol and every call site
+unchanged; unit suite green with the `lockkey` group (mechanics:
+guard hold/drop, INV-LOCK-5/6 forward nesting, the GRQ claim/unlock
+pattern). The compile-fence becomes load-bearing when the futex bucket
+side migrates (follow-on slice, rides the scheduling sign-off).
+
+**Known cost.** Opportunistic migration (D-4/D-6 doctrine): unkeyed
+locks keep compiling; only pairs named in lock-ordering.md adopt keys,
+and adoption must not widen a subsystem's public API. The
+guard-less `try_lock_claim`/`unlock` pair exists for the GRQ's
+hand-rolled guard protocol and must not grow new users.
+
+**Guard.** `lockkey` unit-test group; INV-LOCK-5/6 remain watchdog-
+and SPIN-verified in the meantime; the sched/ side of any adoption
+rides the scheduling-domain perf gate (GRQ hold band, census, P2).
