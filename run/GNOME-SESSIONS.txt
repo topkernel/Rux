@@ -1142,3 +1142,123 @@ were storm-inflated):
   numbers, honest read: two clean boots, no dark boot yet on the
   fixed tree, and the heal path remains unexercised live — the
   producer did not strike an FDM sweep in either boot.
+
+## Session 15 — 2026-10-28 (r24val/r25val harvest; r24val record
+## corrected; origin/main merged; census + Oh-no verdicts; merge queue
+## closed to ready-with-debt)
+
+### r25val (third validation boot on the fixed tree): DARK from the
+### start — the producer's hard early-boot live-leak form; NOT the FDM
+### subclass
+- Never reached M4 (best nonblack 0.0001). start_gnome markers repeat
+  at 8.4/28.4/30.9 s (session restarts); xwininfo in-guest shows the
+  gnome-shell window stuck 1x1 — the same visible shape as the prior
+  dark boots.
+- Mechanism, from the clean serial log: a continuous leak loop, not a
+  wedge behind an exit. Holder census: pid 1 (cpu1) leaks pc=65537
+  first, then pid 480 (cpu0) holds with growing windows 721 ms ->
+  16.7 s; 510 PREEMPT-HEALs to the end of the 2700 s run = the heal
+  loop alternating cpu0/pid-480 and cpu1/pid-1, both healed from
+  was=0x10001 (base+hardirq bits) every 10 s window, each heal
+  followed by an unpaired decrement clamped to 0 — the counts re-leak
+  immediately; this is a standing leak, not a transient one like
+  r24val's single base-bit heal. 21 WAKE-STRANDED (holders pc=1..2,
+  257/258, 65537/65538) strand wakes 1-16 s through session bring-up.
+- FDM-STALE-RELEASE fired ZERO times: the R86 adjudication path never
+  triggered. This boot is NOT the exit-side dead-member subclass the
+  fix heals (r16/r20); it is the LIVE leaked-holder storm — the same
+  family as r17's live-loop subclass (heal pid 482 there). By
+  construction R86 cannot cover it: it adjudicates DEAD members named
+  by no slot; pid 1 and pid 480 are alive and continuously re-leak.
+- leakhunt fingerprints: PARKED-WILDWRITE pid 357 + PARKED-LEAK pids
+  357/519 through the boot (low rate) — consistent with the producer
+  shape the stress-fleet/wildwrite-hunt lanes are chasing; the leak
+  producer itself remains their work, per the lane split.
+- No Oh-no: zero "failed to register" lines — the session died before
+  the gsd registration deadline was ever reached, so r25val is not
+  evidence for or against the Oh-no mechanism.
+
+### r24val record CORRECTED: lit and interactive for the first ~1870 s,
+### then WEDGED (deadlock-watchdog storm) to the end — not "survived"
+- The r24val addendum above missed this: the clean serial log carries
+  45 "DEADLOCK: spinlock stuck cpu=0 lock=0xffffffd6044e61b0
+  ra=spinlock.rs:143" prints. Onset between the t=1860 s and t=1890 s
+  shots (~2 prints per 30 s window from there to 2700 s = the
+  watchdog period). Task dumps show cpu0 running pid 564 and cpu1's
+  GRQ slot reading 0xdeadbeef (the freed-slot paint) marked busy.
+- The screen kept 96% nonblack only because virtio-gpu scanout holds
+  the last frame: shots from t=1890 s to t=2670 s are pixel-identical
+  (top-color counts all equal). Input probe sets 2 (t=1915/1925) and
+  3 (t=2415/2425) fell after onset and did not echo — XWALK flat at
+  17 (= set 1 only) is the wedge, not focus variance as the addendum
+  read it. Set 1 (t=1415/1425) landed while the box was healthy.
+- Producer fingerprints at onset: 21 PARKED-LEAK/WILDWRITE lines
+  spread through the boot; the last (pid 500, pc=0x10000 — hardirq
+  class) lands ~100 serial lines before the first DEADLOCK print.
+  Strand holders include 3 leaked-hardirq samples (2x pc=65536, 1x
+  pc=65538) — the r15/r19 collapse signature present at low volume
+  WITHOUT any registration timeout (the session was long up; the
+  20 s-class deadline was past).
+- Reclassified verdict: LIT (M4@420, M5@511), interactive through
+  probe set 1, wedged ~=t=1870..2700, no panic/OOM/SIGDEATH, kernel
+  kept scheduling enough for the watchdog to print every period. For
+  the census below it counts as lit-but-wedged-late, NOT a clean
+  survival; the addendum's "survived 2/2" claim was wrong and is
+  superseded by this entry.
+
+### Fixed-tree boot census (mission 4): lit 2/3, clean-to-2700 s 1/3 —
+### no lit-rate claim
+- r23val LIT clean (2700 s, 1 transient paint-guard print), r24val
+  LIT then wedged ~=t=1870, r25val DARK from the start. FDM-subclass
+  dark boots: 0/3 on the fixed tree (prior tree: 2 of its 4 dark
+  boots were the FDM pair r16/r20) — the subclass the fix targets did
+  not recur. The live-leak subclass did (r25val), and it produced the
+  late wedge on r24val too.
+- Against the prior tree's 9/13 lit rate, 2/3 says nothing at this n;
+  the honest claim is subclass-level: the exit-side FDM wedge is gone
+  from the observed set; the producer's live-leak form still kills
+  boots and is not this lane's to fix.
+
+### Oh-no verdict (mission 2): absent on all 3 validation boots — but
+### its death is NOT attributable to the R86 fix
+- Zero "failed to register" and zero failed-dialog marks on r23val,
+  r24val (both reached a live session), r25val (died pre-gsd, not
+  evidence). The mild producer form DID appear on r24val — one
+  transient base-bit PREEMPT-HEAL, recovered in its 10 s window, no
+  registration timeout — and the harder forms appeared as r25val's
+  standing loop and r24val's late wedge.
+- Read: R86 heals the exit-side wedge; the Oh-no trigger (leaked
+  holders stretching gsd startup) is producer behavior the fix does
+  not touch. Three boots with the producer visible and zero
+  registration timeouts is a positive signal, not proof — recorded as
+  such. The producer itself stays with the stress-fleet/wildwrite-hunt
+  lanes.
+
+### Right-side indicators (mission 3): unchanged
+- panelcheck on the r24val healthy lit frame (shot-1440s, pre-wedge):
+  right_side=none, identical to every prior frame class. Still gated
+  on the gsd indicator chain.
+
+### Merge queue for the R86 fix (a384048c) — closed to READY-WITH-DEBT
+- origin/main 2a960538 merged into the branch (merge 259a0ec5; brings
+  vmscan deep drain, F4 arm-2 revokes, R37 timer slot table, munmap
+  wrap fix, leakhunt instrument). No conflicts; R86 fix verified
+  present in HEAD.
+- Functional gate on the MERGED tree: PLATFORM=x86_64 build rc=0;
+  default (riscv64) rebuild rc=0; make test ALL TESTS PASSED 1122/0
+  (run/maketest-r26merge.log); minimal-rootfs rv smoke 0 panics,
+  prompt reached, /proc up (run/rv-smoke-r26merge-out.log, rc=0).
+- Tier 1 syscost + Tier 2 pbench (sched/ is a Tier-2 domain) remain
+  the owed numbers: the host has run 12 foreign QEMUs all day (10 of
+  them the wwh lane's, actively spawning), the gate's capacity guard
+  refuses, and the predecessor's 27-minute watcher expired. A patient
+  watcher is armed: run/r26gate-watch.sh (detached; polls 5-minute
+  intervals for 6 h; fires run/perf-gate.sh --tiers 1,2 --tag r26gate
+  the first time foreign QEMU count < 2; log
+  run/perf-gate-r26gate.log). Expected result is no movement — the
+  change sits off every measured hot path — but the numbers are owed
+  and the watcher will produce them at the first quiet window.
+- This mirrors main's own head (2a960538 merged with "Tier-1 pa83
+  queued behind quiet gate as recorded debt"): functional gate green,
+  tier numbers as recorded debt with an armed watcher. Ready for the
+  coordinator subject to that same debt pattern.
