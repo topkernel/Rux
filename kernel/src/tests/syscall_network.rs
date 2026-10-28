@@ -6,6 +6,10 @@
 //!
 //! Includes: socket, bind, listen, accept, connect, sendto, recvfrom, setsockopt, getsockopt
 
+// Framekernel layer policy (docs/architecture/framekernel-layers.md):
+// this module must stay Safe Rust.
+#![forbid(unsafe_code)]
+
 use crate::syscall::SyscallNo;
 use crate::syscall::network::{sys_socket, sys_bind, sys_listen, sys_accept, sys_connect, sys_sendto, sys_recvfrom};
 use crate::net::socket::sys_socket_create;

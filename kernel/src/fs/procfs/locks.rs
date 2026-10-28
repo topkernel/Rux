@@ -21,6 +21,10 @@
 //! id rather than a device number, and the rest of Rux's procfs (the
 //! maps line) reports the same "00:00" device.
 
+// Framekernel layer policy (docs/architecture/framekernel-layers.md):
+// this module must stay Safe Rust.
+#![forbid(unsafe_code)]
+
 use alloc::format;
 use alloc::string::{String, ToString};
 use alloc::vec::Vec;

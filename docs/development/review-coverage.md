@@ -22,12 +22,12 @@ when the tree gains a file the map does not know about.
 | metric | value |
 |---|---|
 | source files in kernel/src | 415 |
-| source lines in kernel/src | 292,638 |
-| files fully reviewed | 34 |
+| source lines in kernel/src | 292,817 |
+| files fully reviewed | 35 |
 | files partially reviewed | 82 |
-| files not yet reviewed | 299 |
-| lines in fully reviewed files | 20,271 |
-| reviewed files mainline changed since `47d96961` (need re-read) | 71 |
+| files not yet reviewed | 298 |
+| lines in fully reviewed files | 20,563 |
+| reviewed files mainline changed since `47d96961` (need re-read) | 90 |
 
 ## Defects found and fixed
 
@@ -43,6 +43,7 @@ when the tree gains a file the map does not know about.
 | `b433fb13` | `kernel/src/sched/fair.rs` | The CFS pick lifts the entries a CPU cannot run (affinity, cgroup throttle, ownership) out of the timeline and re-inserts them after the pick, but min_vruntime was advanced while they were out: the leftmost looked further right than it is. min_vruntime only ever grows, so the drift was permanent, and it is the reference point new tasks and waking sleepers are placed against - a drifted value silently erased their sleep credit. The reference kernel computes min_vruntime from the leftmost entry of the complete tree (kernel/sched/fair.c: update_min_vruntime). |
 | `b433fb13` | `kernel/src/syscall/memory.rs` | mmap accepted a file offset that is not a multiple of the page size. The reference kernel's mmap wrapper rejects it with EINVAL before anything else, and the check is unconditional - it applies to anonymous mappings too, where the offset is ignored. Without it a misaligned offset silently shifted the mapping's file extent: the VMA stored the raw offset and the fault path then looked up a page-cache entry at a non-page-aligned offset. |
 | `e47b155a` | `kernel/src/ipc/posix_mq.rs` | mq_timedreceive/mq_timedsend take an ABSOLUTE CLOCK_REALTIME deadline (abs_timeout), but Rux read the value as RELATIVE — a caller passing an absolute deadline waited twice as long, and an already-expired deadline blocked for the full timeout instead of returning ETIMEDOUT at once. |
+| `623c4736` | `kernel/src/sched/sched.rs, kernel/src/sync/lockkey.rs` | The 2b092c49 GRQ typed-lock-key swap (KeyedRawSpinlock<GrqKey> wrapping RawSpinlock as a pure delegate) is CONVICTED as the trigger of the d2a58ccb stochastic panic family by a 13-boot paired adjudication: identical tree differing only by the 3-line swap. WITH the swap: 6/6 x86 exitwalk boots panic in the CFS timeline btree walk (navigate.rs:552 next_unchecked unwrap; stack: pick_next_cpu -> Iter::next -> pick_next_task), and the riscv64 orphan-storm churn panics on a torn-context wild epc immediately after an R74-DOUBLE-SEED print (two harts executing one task). WITHOUT it (revert arm 3/3 + all pre-swap kernels 4/4): every boot runs the full churn clean on both arches. fdtable lever B (ac53dd6e), NJ deferred writes (306d7cf6), the exec one-path (2fbb5a64), mkdir-flush deletion (e3c1ec35) and the code-review round's fixes (b433fb13 family) are all EXONERATED - they are in the clean pre-swap midpoints. The wrapper adds no logic, so the mechanism is a codegen/timing shift unmasking a latent GRQ-protocol race (OPEN hunt); the swap is withdrawn until understood. |
 | `4e1f6110` | `kernel/src/syscall/misc.rs` | sys_timerfd_settime broke the reference contract (kernel/fs/timerfd.c) four ways: the old timer was cancelled BEFORE the itimerspec validation (the reference validates itimerspec64_valid() first, so an EINVAL call must leave the running timer armed — Rux silently disarmed it); old_value was copied out BEFORE the reprogramming (the reference reads the new value first, reprograms, then copies the old snapshot out — a faulting copy is EFAULT with the NEW timer already programmed); a disarm (it_value == 0) returned early keeping the OLD interval and the stale expiration count (timerfd_setup() sets ctx->tintv and ctx->ticks = 0 in both the arming and disarming paths); and the arming call ran even for total_nsec == 0, arming a dead timer slot. |
 
 ## Per-file status
@@ -59,7 +60,7 @@ when the tree gains a file the map does not know about.
 | `initrd.rs` | 781 | ⬜ |  |
 | `list.rs` | 273 | ⬜ |  |
 | `main.rs` | 1742 | 🔶🔁 | boot sequence, panic handler, layout constants; 主线已改动，需重读 |
-| `panic_policy.rs` | 94 | ✅ | written by this review (panic= parameter) |
+| `panic_policy.rs` | 94 | ✅🔁 | written by this review (panic= parameter); 主线已改动，需重读 |
 | `print.rs` | 73 | ⬜ |  |
 | `printk.rs` | 2122 | 🔶🔁 | ring buffer, console level; 主线已改动，需重读 |
 | `sbi.rs` | 134 | ⬜ |  |
@@ -170,24 +171,24 @@ when the tree gains a file the map does not know about.
 | `page_fault.rs` | 1815 | ⬜ |  |
 | `pagetable.rs` | 195 | ⬜ |  |
 
-### kernel/src/dfx (36327 lines)
+### kernel/src/dfx (36351 lines)
 
 | file | lines | status | note |
 |---|---:|---|---|
 | `backtrace.rs` | 354 | 🔶 | symbolized frame printing |
 | `bug.rs` | 98 | 🔶 | WARN/BUG banners |
-| `driftwatch.rs` | 130 | 🔶 | release-site attribution |
+| `driftwatch.rs` | 130 | 🔶🔁 | release-site attribution; 主线已改动，需重读 |
 | `fsw.rs` | 386 | ⬜ |  |
 | `hexdump.rs` | 102 | 🔶 | hex dump helper |
 | `hung_task.rs` | 286 | 🔶 | D-state scan |
-| `ksyms.rs` | 131 | ✅ | written by this review (symbol table) |
-| `ksyms_generated.rs` | 23935 | ⬜ |  |
+| `ksyms.rs` | 131 | ✅🔁 | written by this review (symbol table); 主线已改动，需重读 |
+| `ksyms_generated.rs` | 23959 | ⬜ |  |
 | `leakorigin.rs` | 257 | ⬜ |  |
 | `ledger.rs` | 491 | 🔶 | page census |
 | `memwatch.rs` | 1084 | 🔶🔁 | heap census; 主线已改动，需重读 |
-| `metawatch.rs` | 157 | 🔶 | buddy shadow scan |
+| `metawatch.rs` | 157 | 🔶🔁 | buddy shadow scan; 主线已改动，需重读 |
 | `mod.rs` | 305 | 🔶🔁 | init, debugfs knob registration; 主线已改动，需重读 |
-| `monowatch.rs` | 137 | 🔶 | monotonic jump tripwire |
+| `monowatch.rs` | 137 | 🔶🔁 | monotonic jump tripwire; 主线已改动，需重读 |
 | `oops.rs` | 250 | ⬜ |  |
 | `pathstash.rs` | 122 | ⬜ |  |
 | `pstore.rs` | 368 | ⬜ |  |
@@ -199,7 +200,7 @@ when the tree gains a file the map does not know about.
 | `softlockup.rs` | 222 | 🔶 | soft lockup detector |
 | `switches.rs` | 571 | ✅🔁 | switch table refactored to one macro; 主线已改动，需重读 |
 | `syscost.rs` | 2041 | 🔶 | per-syscall cost table |
-| `taint.rs` | 123 | ✅ | the reference kernel taint letters |
+| `taint.rs` | 123 | ✅🔁 | the reference kernel taint letters; 主线已改动，需重读 |
 | `taskdump.rs` | 748 | 🔶 | task dump format |
 | `treehunt.rs` | 221 | ⬜ |  |
 | `wildwatch.rs` | 479 | 🔶 | RO-guard tripwire |
@@ -219,7 +220,7 @@ when the tree gains a file the map does not know about.
 
 | file | lines | status | note |
 |---|---:|---|---|
-| `iostat.rs` | 156 | ✅ | written by this review |
+| `iostat.rs` | 156 | ✅🔁 | written by this review; 主线已改动，需重读 |
 | `mod.rs` | 411 | 🔶🔁 | request path, register_disk; 主线已改动，需重读 |
 
 ### kernel/src/drivers/drm (2541 lines)
@@ -314,7 +315,7 @@ when the tree gains a file the map does not know about.
 | `memfd.rs` | 458 | 🔧🔁 | memfd_create 的参数校验与 seal 语义（参数校验已对齐 879328f3）; 主线已改动，需重读 |
 | `mod.rs` | 82 | ⬜ |  |
 | `mount.rs` | 392 | ⬜ |  |
-| `page_cache.rs` | 1394 | 🔶 | get_range_into/put_range |
+| `page_cache.rs` | 1394 | 🔶🔁 | get_range_into/put_range; 主线已改动，需重读 |
 | `path.rs` | 389 | ⬜ |  |
 | `permission.rs` | 84 | ⬜ |  |
 | `pipe.rs` | 1465 | ⬜ |  |
@@ -366,18 +367,18 @@ when the tree gains a file the map does not know about.
 | `transaction.rs` | 571 | ⬜ |  |
 | `types.rs` | 290 | ⬜ |  |
 
-### kernel/src/fs/procfs (7777 lines)
+### kernel/src/fs/procfs (7772 lines)
 
 | file | lines | status | note |
 |---|---:|---|---|
 | `cmdline.rs` | 35 | ⬜ |  |
 | `configgz.rs` | 70 | ⬜ |  |
-| `cpuinfo.rs` | 152 | ⬜ |  |
+| `cpuinfo.rs` | 147 | 🔧🔁 | x86 块重复 processor 行已修（真实 x86 每 CPU 块仅块首一次）；kvtab_pad pins 自洽; 主线已改动，需重读 |
 | `diskstats.rs` | 127 | ✅🔁 | written by this review; 主线已改动，需重读 |
-| `interrupts.rs` | 168 | 🔶 | per-IRQ counters |
-| `kallsyms.rs` | 40 | ✅ | written by this review |
-| `loadavg.rs` | 147 | 🔶 | load average |
-| `locks.rs` | 67 | ✅ | written by this review |
+| `interrupts.rs` | 168 | 🔶🔁 | per-IRQ counters; 主线已改动，需重读 |
+| `kallsyms.rs` | 40 | ✅🔁 | written by this review; 主线已改动，需重读 |
+| `loadavg.rs` | 147 | 🔶🔁 | load average; 主线已改动，需重读 |
+| `locks.rs` | 67 | ✅🔁 | written by this review; 主线已改动，需重读 |
 | `meminfo.rs` | 224 | 🔶🔁 | meminfo fields; 主线已改动，需重读 |
 | `mod.rs` | 2538 | 🔶🔁 | 节点树、read/write 分发、/proc/<pid> 路径解析; 主线已改动，需重读 |
 | `mounts.rs` | 183 | ⬜ |  |
@@ -386,13 +387,13 @@ when the tree gains a file the map does not know about.
 | `procfile.rs` | 340 | ⬜ |  |
 | `schedstat.rs` | 114 | ✅🔁 | written by this review; 主线已改动，需重读 |
 | `self_proc.rs` | 41 | ⬜ |  |
-| `softirqs.rs` | 73 | ✅ | written by this review |
+| `softirqs.rs` | 73 | ✅🔁 | written by this review; 主线已改动，需重读 |
 | `stat.rs` | 363 | ✅🔁 | written by this review; 主线已改动，需重读 |
 | `swaps.rs` | 35 | ⬜ |  |
 | `sysctl.rs` | 582 | 🔶🔁 | sysctl tree; 主线已改动，需重读 |
 | `sysrq.rs` | 285 | ✅ | written by this review |
 | `timer_list.rs` | 110 | ⬜ |  |
-| `uptime.rs` | 70 | 🔶 | uptime/idle accounting |
+| `uptime.rs` | 70 | 🔶🔁 | uptime/idle accounting; 主线已改动，需重读 |
 | `version.rs` | 33 | ⬜ |  |
 | `vmstat.rs` | 207 | ✅🔁 | written by this review; 主线已改动，需重读 |
 
@@ -428,7 +429,7 @@ when the tree gains a file the map does not know about.
 | `sysv_shm.rs` | 1091 | 🔶🔁 | IPC_RMID, attach/detach; 主线已改动，需重读 |
 | `util.rs` | 459 | ✅🔁 | idr allocation, permission checks; 主线已改动，需重读 |
 
-### kernel/src/mm (16200 lines)
+### kernel/src/mm (16215 lines)
 
 | file | lines | status | note |
 |---|---:|---|---|
@@ -442,7 +443,7 @@ when the tree gains a file the map does not know about.
 | `lru.rs` | 545 | ⬜ |  |
 | `memblock.rs` | 660 | ⬜ |  |
 | `meminfo.rs` | 265 | ⬜ |  |
-| `mm_struct.rs` | 1231 | 🔶🔁 | total_vm/rss 记账、VMA 增删；记账只增不减已修（e32cdfef）; 主线已改动，需重读 |
+| `mm_struct.rs` | 1246 | 🔶🔁 | total_vm/rss 记账、VMA 增删；记账只增不减已修（e32cdfef）; 主线已改动，需重读 |
 | `mod.rs` | 249 | ⬜ |  |
 | `oom_kill.rs` | 582 | ⬜ |  |
 | `page.rs` | 149 | ⬜ |  |
@@ -458,7 +459,7 @@ when the tree gains a file the map does not know about.
 | `vma.rs` | 1048 | 🔶🔁 | VMA 结构、split/merge、can_merge 的文件偏移连续性、VmaManager 增删查; 主线已改动，需重读 |
 | `vmemmap.rs` | 221 | ⬜ |  |
 | `vmscan.rs` | 514 | ⬜ |  |
-| `vmstat.rs` | 69 | ✅ | written by this review (page counters) |
+| `vmstat.rs` | 69 | ✅🔁 | written by this review (page counters); 主线已改动，需重读 |
 | `zone.rs` | 1060 | 🔶 | buddy alloc/free、split/merge、水位线；水位公式与参考内核的 6.6 形式有量级很小的差异（更早唤醒 kswapd） |
 
 ### kernel/src/module (486 lines)
@@ -523,20 +524,20 @@ when the tree gains a file the map does not know about.
 | `task.rs` | 5460 | 🔶🔁 | task layout, counters, comm; 主线已改动，需重读 |
 | `wait.rs` | 489 | ⬜ |  |
 
-### kernel/src/sched (11540 lines)
+### kernel/src/sched (11685 lines)
 
 | file | lines | status | note |
 |---|---:|---|---|
 | `cgroup.rs` | 910 | ✅🔁 | cpu/pids/memory controller core: simplified v2 model read clean — rmdir/pids-fork/charge-rollback semantics match the reference contract surface; containment guards (R90/b61) documented; 主线已改动，需重读 |
-| `class.rs` | 269 | ✅ | sched_class trait 层：类序 stop>dl>rt>fair>idle、SCHED_IDLE 归 fair(weight 3) 均与参考一致；WF_*/ENQUEUE_* 数值与 Linux 不同但纯内部量，非 ABI |
-| `deadline.rs` | 536 | ✅ | EDF/CBS 结构与实体：双入队守卫(R7-B4)/dequeue 返回契约(R32-DL2)/attr_deadline 读回契约正确；注意 get_bw 为死代码、无全局带宽准入(__dl_overflow)——留待 syscall/sched.rs 轮次 |
-| `fair.rs` | 1847 | 🔧🔁 | CFS 核心：vruntime 权重方向、min_vruntime、pick 跳过路径（min_vruntime 越界已修 b433fb13）；基线 188d844d 已重读 main 增量（dfx 埋点 SKIPHIST/普查计数/ww_tie_mass、inv_weight 预计算=参考 __update_inv_weight），无新缺陷; 主线已改动，需重读 |
-| `idle.rs` | 100 | ✅ |  |
+| `class.rs` | 269 | ✅🔁 | sched_class trait 层：类序 stop>dl>rt>fair>idle、SCHED_IDLE 归 fair(weight 3) 均与参考一致；WF_*/ENQUEUE_* 数值与 Linux 不同但纯内部量，非 ABI; 主线已改动，需重读 |
+| `deadline.rs` | 547 | ✅ | EDF/CBS 结构与实体：双入队守卫(R7-B4)/dequeue 返回契约(R32-DL2)/attr_deadline 读回契约正确；注意 get_bw 为死代码、无全局带宽准入(__dl_overflow)——留待 syscall/sched.rs 轮次；dl 计数已改 checked-sub 防回绕 |
+| `fair.rs` | 1946 | 🔧🔁 | CFS 核心：vruntime 权重方向、min_vruntime、pick 跳过路径（min_vruntime 越界已修 b433fb13）；基线 188d844d 已重读 main 增量（dfx 埋点 SKIPHIST/普查计数/ww_tie_mass、inv_weight 预计算=参考 __update_inv_weight），无新缺陷；类计数 fetch_sub 回绕→sched_slice 乘法溢出 panic 已修（nr_running_dec/load_weight_sub checked-sub + saturating）; 主线已改动，需重读 |
+| `idle.rs` | 100 | ✅🔁 | 主线已改动，需重读 |
 | `mod.rs` | 129 | ✅🔁 | 纯 re-export 层; 主线已改动，需重读 |
-| `rt.rs` | 639 | ✅ | 全文读完：位图反相(bit0=prio99)、head/tail 入队、P08 空转 dequeue、force_unlink 防御、RR timeslice=100ms 均与参考一致；RT 带宽控制在 sched.rs（全局 950ms×MAX_CPUS/1s，比参考的 per-root-domain 粗，pick 时跳过 RT 类） |
-| `sched.rs` | 6397 | ✅🔁 | 188d844d 全文读完：GRQ 核心、pick 序 stop>dl>rt>cfs>idle、DL CBS 节流+replenish、RT 带宽、tick(slice 抢占=check_preempt_tick)、idle 循环 R20-2 复查、延迟 SIGCHLD、RLIMIT_CPU/itimer/cputime、task 槽分配/R47 毒化、R46-R85 heal 机器（均有捕获史注释）；无新缺陷。DL 无全局带宽准入(get_bw 死代码)——见 deadline.rs 注; 主线已改动，需重读 |
+| `rt.rs` | 663 | ✅ | 全文读完：位图反相(bit0=prio99)、head/tail 入队、P08 空转 dequeue、force_unlink 防御、RR timeslice=100ms 均与参考一致；RT 带宽控制在 sched.rs（全局 950ms×MAX_CPUS/1s，比参考的 per-root-domain 粗，pick 时跳过 RT 类）；rt/rr 计数已改 checked-sub 防回绕 |
+| `sched.rs` | 6408 | 🔧🔁 | 188d844d 全文读完（见前注）；2b092c49 GRQ 锁交换已撤回（623c4736，13-boot 配对判决= d2a58ccb panic 家族触发器；机制为 codegen/时序揭示的潜在 GRQ 协议竞争，R74-DOUBLE-SEED 为线索，OPEN）; 主线已改动，需重读 |
 | `stats.rs` | 41 | ✅🔁 | sched_schedstats 运行时门：默认关、Relaxed 读，与参考 sysctl 语义一致; 主线已改动，需重读 |
-| `stop_task.rs` | 94 | ✅ | stop 类为 PerCpuState 直管的 stub，next_class 链正确 |
+| `stop_task.rs` | 94 | ✅🔁 | stop 类为 PerCpuState 直管的 stub，next_class 链正确; 主线已改动，需重读 |
 | `wakewatch.rs` | 578 | ✅🔁 | DFX wake-latency instrument: no contract surface; side-table validity/free-invalidation sound, sc207/sc215 softirq deadlock discipline in place; 主线已改动，需重读 |
 
 ### kernel/src/security (559 lines)

@@ -20,6 +20,10 @@
 //! Rux merges no requests, has no discard path and no separate flush
 //! path, so those columns report zero.
 
+// Framekernel layer policy (docs/architecture/framekernel-layers.md):
+// this module must stay Safe Rust.
+#![forbid(unsafe_code)]
+
 use alloc::format;
 use alloc::string::String;
 use alloc::vec::Vec;

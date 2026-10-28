@@ -884,6 +884,9 @@ pub fn do_clone(args: CloneArgs) -> Result<Pid, i32> {
             let parent_filter = (*current_ptr).seccomp_filter.lock();
             *(*task_ptr).seccomp_filter.lock() = parent_filter.clone();
         }
+        // no_new_privs is inherited across fork and exec alike (prctl(2)
+        // PR_SET_NO_NEW_PRIVS semantics).
+        (*task_ptr).set_no_new_privs((*current_ptr).no_new_privs());
 
         // Handle CLONE_VFORK: block parent until child execs/exits.
         // The child shares parent's address space (CLONE_VM is expected

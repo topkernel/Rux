@@ -32,6 +32,10 @@
 //! update `last` (the next tick re-reports against the same baseline
 //! until the clock passes it, capped by the rate limit).
 
+// Framekernel layer policy (docs/architecture/framekernel-layers.md):
+// this module must stay Safe Rust.
+#![forbid(unsafe_code)]
+
 use core::sync::atomic::{AtomicU64, Ordering};
 
 /// Observation period in jiffies (100 = 1 s at HZ=100).

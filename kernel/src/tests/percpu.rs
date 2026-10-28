@@ -1,3 +1,7 @@
+
+// Framekernel layer policy (docs/architecture/framekernel-layers.md):
+// this module must stay Safe Rust.
+#![forbid(unsafe_code)]
 // Typed per-CPU storage shape tests (rust-design-headroom §3,
 // divergence D-7). Pin the properties the type promises, so an edit
 // that weakens them fails here before it can drift into the tree:

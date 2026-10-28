@@ -4,6 +4,10 @@
 //!
 //! VirtIO PCI register offsets
 
+// Framekernel layer policy (docs/architecture/framekernel-layers.md):
+// this module must stay Safe Rust.
+#![forbid(unsafe_code)]
+
 /// VirtIO Common CFG register offsets (Modern VirtIO 1.0+)
 pub const DEVICE_FEATURE_SELECT: u32 = 0;    // VIRTIO_PCI_COMMON_DFSELECT
 pub const DEVICE_FEATURES: u32 = 4;          // VIRTIO_PCI_COMMON_DF

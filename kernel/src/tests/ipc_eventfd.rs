@@ -3,6 +3,10 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 
+// Framekernel layer policy (docs/architecture/framekernel-layers.md):
+// this module must stay Safe Rust.
+#![forbid(unsafe_code)]
+
 use crate::syscall::misc::{sys_eventfd, sys_eventfd2};
 use super::{test_pass, test_fail, test_skip, test_group_start};
 

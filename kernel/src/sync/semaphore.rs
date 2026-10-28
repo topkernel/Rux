@@ -9,6 +9,10 @@
 //! - P operation (down/down_interruptible): acquire semaphore, may block
 //! - V operation (up): release semaphore, wake up waiting processes
 
+// Framekernel layer policy (docs/architecture/framekernel-layers.md):
+// this module must stay Safe Rust.
+#![forbid(unsafe_code)]
+
 use core::sync::atomic::{AtomicI32, Ordering};
 use crate::process::wait::WaitQueueHead;
 

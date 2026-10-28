@@ -3,6 +3,10 @@
 //! Copyright (c) 2026 Fei Wang
 //!
 
+// Framekernel layer policy (docs/architecture/framekernel-layers.md):
+// this module must stay Safe Rust.
+#![forbid(unsafe_code)]
+
 use crate::process::pid::{
     PID_SWAPPER, PID_INIT, PID_MAX_LIMIT, PID_MAX_DEFAULT, RESERVED_PIDS,
     alloc_pid, free_pid,

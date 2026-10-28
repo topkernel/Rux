@@ -1788,6 +1788,17 @@ pub unsafe fn alloc_and_map_to_kernel_table(
 /// alloc_and_map_user_memory — the returned phys base is the FIRST block
 /// only; callers that need to write the whole range must walk the page
 /// tables, not assume phys contiguity).
+///
+/// Chunk sizing is BINARY DECOMPOSITION (abi-review session 2, twin of
+/// the riscv64 implementation): each iteration takes the largest
+/// power-of-two block that FITS in the remaining request (floor), never
+/// a rounded-up block whose excess must be freed back. The old ceil-pow2
+/// path zeroed the whole rounded block (128 KB zeroed for a 76 KB image,
+/// 256 KB for a 132 KB stack — measured as the #1 exec cost center,
+/// perf-report 8.10.23 'map') and paid one zone-locked order-0 free per
+/// excess page (12 for a 19-page image, 31 for a 33-page stack). A
+/// 33-page request maps as 32+1 — two blocks, NOT contiguous; only the
+/// page-table walk may address the range.
 pub unsafe fn alloc_and_map_to_user_table(
     user_ppn: u64,
     virt_addr: u64,
@@ -1804,11 +1815,10 @@ pub unsafe fn alloc_and_map_to_user_table(
     let mut mapped_pages = 0usize;
     while mapped_pages < page_count {
         let remain = page_count - mapped_pages;
-        let order = if remain == 1 {
-            0
-        } else {
-            (remain.next_power_of_two().trailing_zeros() as usize).min(crate::mm::zone::MAX_ORDER)
-        };
+        // floor(log2(remain)), capped at MAX_ORDER; block_pages <= remain
+        // always, so chunk == block and no excess exists.
+        let order = ((usize::BITS - 1 - remain.leading_zeros()) as usize)
+            .min(crate::mm::zone::MAX_ORDER);
         let block_pages = 1usize << order;
         let chunk_pages = remain.min(block_pages);
         let chunk_bytes = chunk_pages * PAGE_SIZE as usize;
@@ -1819,12 +1829,15 @@ pub unsafe fn alloc_and_map_to_user_table(
         }
 
         // Zero BEFORE mapping (same leak-window fix): the frames come from
-        // the buddy and may carry a previous owner's data.
+        // the buddy and may carry a previous owner's data. With floor-pow2
+        // chunks every allocated page is mapped, so zeroing chunk_bytes
+        // zeroes the whole block — the old block_pages zero covered the
+        // rounded-up excess too, pure waste.
         let virt_addr_ptr = phys_to_virt(PhysAddr::new(phys_addr as u64));
         core::ptr::write_bytes(
             virt_addr_ptr.bits() as *mut u8,
             0,
-            block_pages * PAGE_SIZE as usize,
+            chunk_bytes,
         );
 
         map_user_region(
@@ -1834,14 +1847,6 @@ pub unsafe fn alloc_and_map_to_user_table(
             chunk_bytes as u64,
             user_flags,
         );
-
-        // R7-C5: free the rounded-up block's unmapped excess at once.
-        if block_pages > chunk_pages {
-            let base_pfn = phys_addr >> PAGE_SHIFT;
-            for pfn in (base_pfn + chunk_pages)..(base_pfn + block_pages) {
-                crate::mm::page_alloc::free_pages(pfn << PAGE_SHIFT, 0);
-            }
-        }
 
         if mapped_pages == 0 {
             first_phys = phys_addr as u64;

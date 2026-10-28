@@ -189,9 +189,11 @@ behavior-preserving fallbacks (both old fallback shapes reduce to the
 same event bits). First conversions: the §1 incident family
 (epoll/eventfd/timerfd/signalfd/pipe/inotify).
 
-**Known cost.** Opportunistic migration — the only struct-literal
-tables left are drm x2 (GNOME-lane files, convert when that lane
-rests); everything else builds (D-4 procfile precedent). The refactor
+**Known cost.** Migration COMPLETE: the last two struct-literal
+tables (drm x2 — DRM_OPS/PRIME_OPS, GNOME-lane signed off) converted
+in the refactor lane's final slice; every FileOps table in the tree is
+now a capability declaration (D-4 procfile precedent for the
+opportunistic doctrine that got here). The refactor
 lane converted: slice 3, the pseudo-filesystem cluster (devfs x7 incl.
 the null/zero/full/random char devices, pty x2, procfs, sysfs,
 debugfs, selinuxfs, rootfs, memfd, fifo, char_dev uart, cgroup, vfs
@@ -468,9 +470,12 @@ the surrounding semantics.
 **Design.** Lock-ordering classes carry zero-sized key types
 (`GrqKey`, `FutexBucketKey`, `NetQueueKey`, `NetStatsKey`); a
 PERMITTED nesting is an explicit `impl CanNestInside<Outer> for
-Inner`, and acquiring a keyed lock while another keyed lock is held
-goes through `lock_nested(&outer_guard)`, which only compiles when the
-impl exists. The mainstream approach this replaces is a documented
+Inner`. A held keyed guard mints a zero-sized `NestProof` (guards are
+the only minters — no public constructor), and acquiring a keyed lock
+while another is held consumes that proof (`lock_nested(&proof)`,
+`lock_irqsave_nested(&proof)`), which only compiles when the impl
+exists. The proof's lifetime ties it to the guard, so it cannot
+outlive the held section. The mainstream approach this replaces is a documented
 lock-ordering file plus review plus a post-hoc deadlock watchdog; the
 paid incident class is any INV-LOCK-* reverse-order introduction —
 review-enforced discipline that silently fails under refactor pressure
@@ -488,10 +493,25 @@ the reverse order is an instant machine-wide deadlock).
 **Compatibility evidence.** First adoption is the GRQ's own lock —
 internal type swap (`RawSpinlock` -> `KeyedRawSpinlock<GrqKey>`), the
 GrqGuard API, the irqsave/preempt protocol and every call site
-unchanged; unit suite green with the `lockkey` group (mechanics:
-guard hold/drop, INV-LOCK-5/6 forward nesting, the GRQ claim/unlock
-pattern). The compile-fence becomes load-bearing when the futex bucket
-side migrates (follow-on slice, rides the scheduling sign-off).
+unchanged. SECOND SLICE (coordinator-approved): the fence is
+LOAD-BEARING — the futex `HASH_HEADS` buckets are
+`KeyedSpinlock<FutexBucketKey, Option<usize>>` (same lock_irqsave
+discipline, Deref/DerefMut call sites unchanged), and futex_wake's
+R12-2 wake-under-bucket call is `Task::wake_up_in_futex_bucket(task,
+&head.proof())` -> `wake_up_enqueue_nested` ->
+`GlobalRunQueue::lock_irqsave_nested`, a chain whose every hop
+demands the proof; the bucket->GRQ nesting is now a compile fact
+(the reverse direction remains watchdog-enforced). The requeue path's
+same-class ordered double-bucket acquire (lo/hi) stays on the plain
+API by design. Unit suite green with the `lockkey` group extended
+(guard hold/drop, INV-LOCK-5/6 forward nesting, the GRQ claim/unlock
+pattern, the data-guard proof chain). THIRD SLICE: the futex
+WAITER_POOL slot locks are `KeyedSpinlock<WaiterSlotKey, Option<Waiter>>`
+(`impl CanNestInside<FutexBucketKey> for WaiterSlotKey`); the
+wake-chain walk and the diagnostic scan acquire proof-checked via
+`KeyedSpinlock::lock_nested`; the top-level allocator/free paths and
+the requeue relink window's same-class double-slot holds stay on the
+plain API by design.
 
 **Known cost.** Opportunistic migration (D-4/D-6 doctrine): unkeyed
 locks keep compiling; only pairs named in lock-ordering.md adopt keys,
@@ -502,6 +522,27 @@ hand-rolled guard protocol and must not grow new users.
 **Guard.** `lockkey` unit-test group; INV-LOCK-5/6 remain watchdog-
 and SPIN-verified in the meantime; the sched/ side of any adoption
 rides the scheduling-domain perf gate (GRQ hold band, census, P2).
+
+**Incident, conviction and root cause (2026-10-29, the 2b092c49
+withdrawal).** The first GRQ adoption (`KeyedRawSpinlock<GrqKey>`
+field swap, 13-boot paired-bisection convicted, withdrawn in 623c4736)
+failed by an API-SHAPE bug, not by the keyed design and not by a GRQ
+protocol race: `GlobalRunQueue::lock_irqsave`'s pre-existing
+`self.lock.lock();` statement was written for `RawSpinlock::lock()`,
+which returns `()`. Under the wrapper, `KeyedRawSpinlock::lock()`
+returns a guard — the statement DISCARDED it, and the guard's Drop
+released the lock at the end of the statement. Every "GRQ-locked"
+section in the convicted kernel ran unexcluded: concurrent CFS
+timeline mutation (x86 6/6 navigate.rs unwrap panics) and concurrent
+picks of one task (riscv64 R74-DOUBLE-SEED double-run, torn context).
+The GRQ pick/ownership protocol itself is exonerated — the R74 shape
+was the expected downstream of a lock that never held. Fixes landed
+with this entry: both keyed guard types are `#[must_use]` (a
+discarded guard is a compile warning naming the conviction), and the
+claim surface (`lock_claim`/`try_lock_claim`/`unlock`) exists so a
+protocol-wrapping subsystem never touches the guard-returning `lock`.
+Any re-adoption of the GRQ swap goes through `lock_claim` and a fresh
+adjudication.
 
 ---
 
@@ -520,14 +561,28 @@ compared against a byte count, or returned where a positive errno was
 meant — the error type is an enum, and `Result` is `#[must_use]`, so
 an ignored failure is a build warning, not a silent drop.
 
-**Compatibility evidence.** First conversion: the file-locks subsystem
-(`fs/locks.rs` — flock, POSIX/OFD record locks, leases): the four
-public functions return `Result<(), Errno>`; the six call sites
-(sys_flock in syscall/io.rs, F_SETLK/F_SETLEASE in vfs.rs, three
-break_lease propagation sites) each map once with `as_neg_i32()`.
-Errno values byte-identical (EAGAIN/EINTR/EINVAL/EDEADLK; the enum
-gained the missing `Deadlock = 35` variant). Suite green; the LTP
-fcntl/flock families are the behavioral guard.
+**Compatibility evidence.** Conversions so far: (1) the file-locks
+subsystem (`fs/locks.rs` — flock, POSIX/OFD record locks, leases):
+the four public functions return `Result<(), Errno>`; the six call
+sites (sys_flock in syscall/io.rs, F_SETLK/F_SETLEASE in vfs.rs,
+three break_lease propagation sites) each map once with
+`as_neg_i32()`; the enum gained the missing `Deadlock = 35` variant.
+(2) the xattr subsystem (`fs/xattr.rs` — check_name/may_set/set/get/
+list/remove, 20 error sites, the densest raw-errno file in fs/): all
+typed, the internal ?-propagation type-uniform, the do_* wrappers in
+syscall/file.rs mapping once per arm; the enum gained
+`ResultTooLarge = 34`, `NoData = 61`, `OperationNotSupported = 95`
+(the file's two local errno-constant duplicates are deleted). Errno
+values byte-identical throughout; suite green; the LTP fcntl/flock
+and setxattr/getxattr/listxattr/removexattr families are the
+behavioral guards. (3) the VFS inode-operations table (`fs/inode.rs`
+- the lookup/create/symlink/mkdir/mknod/iget slots, their op_*
+wrappers, and the 26 implementer functions across tmpfs/ext4/procfs/
+devfs/rootfs/sysfs/selinuxfs/debugfs/cgroup): the whole create-class
+path-resolution API is typed. The deep internal layers not yet
+converted (ext4 namei/inode, the sched cgroup helpers) bridge through
+`Errno::from_neg_i32` / `From<i32>` - a documented, visible marker to
+retire as those layers convert.
 
 **Known cost.** Opportunistic adoption: the i32 errno convention
 dominates the tree and keeps compiling; subsystems convert when

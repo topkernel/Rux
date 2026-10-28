@@ -77,6 +77,17 @@ impl DlRunQueue {
         self.dl_nr_running.load(Ordering::Acquire)
     }
 
+    /// Decrement with a CHECKED subtract (the fair-class twin, see
+    /// fair.rs nr_running_dec): a raw fetch_sub wraps on an unbalanced
+    /// decrement and is_empty() then reads false forever.
+    fn dl_nr_dec(&self) {
+        let _ = self.dl_nr_running.fetch_update(
+            Ordering::AcqRel,
+            Ordering::Acquire,
+            |v| v.checked_sub(1),
+        );
+    }
+
     /// Enqueue a task
     /// Returns true if the task was actually inserted (R7-B5).
     pub fn enqueue(&mut self, task: *mut Task) -> bool {
@@ -165,7 +176,7 @@ impl DlRunQueue {
                 self.tasks.remove(&key);
 
                 // Update counters
-                self.dl_nr_running.fetch_sub(1, Ordering::AcqRel);
+                self.dl_nr_dec();
 
                 // Update earliest deadline
                 if let Some((&next_key, _)) = self.tasks.iter().next() {
@@ -201,7 +212,7 @@ impl DlRunQueue {
             self.tasks.remove(&_key);
 
             // Update counters
-            self.dl_nr_running.fetch_sub(1, Ordering::AcqRel);
+            self.dl_nr_dec();
 
             // Update earliest deadline
             if let Some((&next_key, _)) = self.tasks.iter().next() {
@@ -258,7 +269,7 @@ impl DlRunQueue {
             // pointer must never reach the deref below.
             if !crate::sched::sched::kernel_task_ptr_range_ok(task as *const u8) {
                 self.tasks.remove(&key);
-                self.dl_nr_running.fetch_sub(1, Ordering::AcqRel);
+                self.dl_nr_dec();
                 crate::sched::sched::report_poisoned_rq_entry(cpu_id, task as usize);
                 continue;
             }
@@ -279,7 +290,7 @@ impl DlRunQueue {
             if allowed {
                 // Found a match — remove and return it
                 self.tasks.remove(&key);
-                self.dl_nr_running.fetch_sub(1, Ordering::AcqRel);
+                self.dl_nr_dec();
 
                 if let Some((&next_key, _)) = self.tasks.iter().next() {
                     self.earliest_dl.store(next_key.deadline, Ordering::Release);

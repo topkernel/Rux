@@ -1,3 +1,7 @@
+
+// Framekernel layer policy (docs/architecture/framekernel-layers.md):
+// this module must stay Safe Rust.
+#![forbid(unsafe_code)]
 // Capability-matrix shape tests (rust-design-headroom §1, divergence
 // D-6). Pin which ops each builder-converted file type carries: the
 // point of the capability declaration is that a type's matrix is a
@@ -361,6 +365,22 @@ pub fn test_fileops_caps() {
         "binder caps",
         &crate::ipc::binder::BINDER_OPS,
         Expect { read: false, write: false, lseek: false, close: true, poll: true, read_at: false },
+    );
+
+    // D-6 final slice (GNOME-lane signed off): the DRM pair. The card
+    // node is the stream-control set (Xorg and the greeter open
+    // /dev/dri/card0; EOF reads until the event stream exists); the
+    // prime fd is dma-buf shaped — seekable to the buffer size, close
+    // drops the exported GEM.
+    check(
+        "drm caps",
+        &crate::drivers::drm::DRM_OPS,
+        Expect { read: true, write: true, lseek: false, close: false, poll: false, read_at: false },
+    );
+    check(
+        "prime caps",
+        &crate::drivers::drm::PRIME_OPS,
+        Expect { read: true, write: true, lseek: true, close: true, poll: false, read_at: false },
     );
 
     check_errno_matrix();

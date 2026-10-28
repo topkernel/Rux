@@ -6,6 +6,10 @@
 //!
 //! JBD2 data types
 
+// Framekernel layer policy (docs/architecture/framekernel-layers.md):
+// this module must stay Safe Rust.
+#![forbid(unsafe_code)]
+
 #![allow(non_camel_case_types)]
 
 use core::mem::size_of;

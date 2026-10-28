@@ -260,18 +260,40 @@ unsafe impl Sync for Waiter {}
 /// Waiter pool size - from config
 const WAITER_POOL_SIZE: usize = crate::config::FUTEX_WAITER_POOL_SIZE;
 
-/// Waiter pool
-static WAITER_POOL: [Spinlock<Option<Waiter>>; WAITER_POOL_SIZE] = {
-    const INIT: Spinlock<Option<Waiter>> = Spinlock::new(None);
+/// Waiter pool. D-11 keyed (WaiterSlotKey, slice 3): slot locks taken
+/// under a bucket guard go through `lock_nested(&bucket.proof())` (the
+/// wake chain walk and the diagnostic scan do); the top-level
+/// allocator and free paths stay plain. The requeue relink window's
+/// same-class double-slot holds stay plain by design.
+static WAITER_POOL: [crate::sync::lockkey::KeyedSpinlock<
+    crate::sync::lockkey::WaiterSlotKey,
+    Option<Waiter>,
+>; WAITER_POOL_SIZE] = {
+    const INIT: crate::sync::lockkey::KeyedSpinlock<
+        crate::sync::lockkey::WaiterSlotKey,
+        Option<Waiter>,
+    > = crate::sync::lockkey::KeyedSpinlock::new(None);
     [INIT; WAITER_POOL_SIZE]
 };
 
 /// Hash bucket count - from config
 const HASH_SIZE: usize = crate::config::FUTEX_HASH_SIZE;
 
-/// Waiter list head for each bucket
-static HASH_HEADS: [Spinlock<Option<usize>>; HASH_SIZE] = {
-    const INIT: Spinlock<Option<usize>> = Spinlock::new(None);
+/// Waiter list head for each bucket. D-11 keyed (FutexBucketKey): the
+/// guard's `proof()` is what the nested GRQ acquire in the wake path
+/// requires — the bucket->GRQ nesting of INV-LOCK-5 (R12-2) is a
+/// compile fact. NOTE: FUTEX_REQUEUE holds TWO buckets (lo/hi, index
+/// ordered) via plain lock_irqsave — a same-class ordered double
+/// acquire, deliberately outside the keyed-nesting API (which exists
+/// to fence ACROSS classes).
+static HASH_HEADS: [crate::sync::lockkey::KeyedSpinlock<
+    crate::sync::lockkey::FutexBucketKey,
+    Option<usize>,
+>; HASH_SIZE] = {
+    const INIT: crate::sync::lockkey::KeyedSpinlock<
+        crate::sync::lockkey::FutexBucketKey,
+        Option<usize>,
+    > = crate::sync::lockkey::KeyedSpinlock::new(None);
     [INIT; HASH_SIZE]
 };
 
@@ -290,7 +312,7 @@ pub fn waiter_of(task: *mut Task) -> Option<(usize, usize, bool)> {
             // lock; slots are freed only under both locks, so the entry we
             // copy out stays live for the duration of the read.
             let (entry, next) = {
-                let slot = WAITER_POOL[i].lock_irqsave();
+                let slot = WAITER_POOL[i].lock_nested(&h.proof());
                 match *slot {
                     Some(ref w) => (
                         Some((w.key.uaddr, w.key.mm, w.woken, core::ptr::eq(w.task, task))),
@@ -519,7 +541,8 @@ pub fn futex_wake_in_mm(uaddr: usize, mm: usize, flags: u32, nr_wake: i32, bitse
             break;
         }
 
-        let mut waiter_slot = WAITER_POOL[idx].lock_irqsave();
+        // Slot under the bucket guard — proof-checked (D-11 slice 3).
+        let mut waiter_slot = WAITER_POOL[idx].lock_nested(&head.proof());
         let should_wake = match *waiter_slot {
             Some(ref waiter) => {
                 waiter.key.matches(&key) && (waiter.bitset & bitset) != 0
@@ -547,7 +570,7 @@ pub fn futex_wake_in_mm(uaddr: usize, mm: usize, flags: u32, nr_wake: i32, bitse
             if prev_idx.is_none() {
                 *head = next_idx;
             } else if let Some(prev) = prev_idx {
-                let mut prev_slot = WAITER_POOL[prev].lock_irqsave();
+                let mut prev_slot = WAITER_POOL[prev].lock_nested(&head.proof());
                 if let Some(ref mut pw) = *prev_slot {
                     pw.next = next_idx;
                 }
@@ -591,7 +614,10 @@ pub fn futex_wake_in_mm(uaddr: usize, mm: usize, flags: u32, nr_wake: i32, bitse
         let woken_n = wake_list.len();
     for task in wake_list {
         if !task.is_null() {
-            Task::wake_up(task);
+            // R12-2 wake-under-bucket, now compile-checked: the proof
+            // minted by the bucket guard is what the nested GRQ acquire
+            // requires (INV-LOCK-5 forward; D-11).
+            Task::wake_up_in_futex_bucket(task, &head.proof());
         }
     }
     drop(head);

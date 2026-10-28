@@ -9,6 +9,10 @@
 //!
 //! Updated every LOAD_FREQ (5*HZ) jiffies from scheduler_tick().
 
+// Framekernel layer policy (docs/architecture/framekernel-layers.md):
+// this module must stay Safe Rust.
+#![forbid(unsafe_code)]
+
 use alloc::vec::Vec;
 use alloc::format;
 use core::sync::atomic::{AtomicU64, AtomicU32, Ordering};

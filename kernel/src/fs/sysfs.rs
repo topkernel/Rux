@@ -1822,20 +1822,20 @@ fn resolve_child(
 
 /// sysfs lookup: child kobject ino, attribute ino, or ENOENT.
 /// SAFETY: VFS callback contract.
-unsafe fn sysfs_lookup(dir: &Inode, name: &[u8]) -> Result<Ino, i32> {
-    let entry = entry_of(dir).ok_or(errno::Errno::NotADirectory.as_neg_i32())?;
+unsafe fn sysfs_lookup(dir: &Inode, name: &[u8]) -> Result<Ino, errno::Errno> {
+    let entry = entry_of(dir).ok_or(errno::Errno::NotADirectory)?;
     match resolve_child(entry, name) {
         Some((kobj, _, _)) => Ok(kobj.ino),
-        None => Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32()),
+        None => Err(errno::Errno::NoSuchFileOrDirectory),
     }
 }
 
 /// sysfs iget: instantiate the VFS Inode for a resolved child.
 /// SAFETY: VFS callback contract.
-unsafe fn sysfs_iget(parent: &Inode, name: &[u8], ino: Ino) -> Result<Arc<Inode>, i32> {
-    let parent_entry = entry_of(parent).ok_or(errno::Errno::NotADirectory.as_neg_i32())?;
+unsafe fn sysfs_iget(parent: &Inode, name: &[u8], ino: Ino) -> Result<Arc<Inode>, errno::Errno> {
+    let parent_entry = entry_of(parent).ok_or(errno::Errno::NotADirectory)?;
     let (kobj, attr, link) = resolve_child(parent_entry, name)
-        .ok_or(errno::Errno::NoSuchFileOrDirectory.as_neg_i32())?;
+        .ok_or(errno::Errno::NoSuchFileOrDirectory)?;
 
     let (mode, node_ino) = if let Some(attr) = attr.as_ref() {
         (InodeMode::new(InodeMode::S_IFREG | attr.mode), attr.ino)

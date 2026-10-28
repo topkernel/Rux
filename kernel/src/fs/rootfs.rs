@@ -1300,25 +1300,25 @@ use crate::fs::inode::{Inode, InodeMode, INodeOps, Ino};
 
 /// RootFS inode lookup operation
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
-unsafe fn rootfs_lookup(dir: &Inode, name: &[u8]) -> Result<Ino, i32> {
+unsafe fn rootfs_lookup(dir: &Inode, name: &[u8]) -> Result<Ino, errno::Errno> {
     // Get RootFSNode from inode's private_data
-    let node_ptr = dir.private_data.ok_or(errno::Errno::NotADirectory.as_neg_i32())?;
+    let node_ptr = dir.private_data.ok_or(errno::Errno::NotADirectory)?;
     let node = &*(node_ptr as *const RootFSNode);
 
     if !node.is_dir() {
-        return Err(errno::Errno::NotADirectory.as_neg_i32());
+        return Err(errno::Errno::NotADirectory);
     }
 
     // Lookup child
     match node.find_child(name) {
         Some(child) => Ok(child.ino),
-        None => Err(errno::Errno::NoSuchFileOrDirectory.as_neg_i32()),
+        None => Err(errno::Errno::NoSuchFileOrDirectory),
     }
 }
 
 /// RootFS mkdir operation
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
-unsafe fn rootfs_mkdir(dir: &Inode, name: &[u8], mode: InodeMode) -> Result<alloc::sync::Arc<Inode>, i32> {
+unsafe fn rootfs_mkdir(dir: &Inode, name: &[u8], mode: InodeMode) -> Result<alloc::sync::Arc<Inode>, errno::Errno> {
     let _ = mode; // Mode not used in RootFS
 
     // Get RootFSNode from inode's private_data
@@ -1326,18 +1326,18 @@ unsafe fn rootfs_mkdir(dir: &Inode, name: &[u8], mode: InodeMode) -> Result<allo
     let node = &*(node_ptr as *const RootFSNode);
 
     if !node.is_dir() {
-        return Err(errno::Errno::NotADirectory.as_neg_i32());
+        return Err(errno::Errno::NotADirectory);
     }
 
     // Check if already exists
     if node.find_child(name).is_some() {
-        return Err(errno::Errno::FileExists.as_neg_i32());
+        return Err(errno::Errno::FileExists);
     }
 
     // Get superblock to allocate inode number
     let sb_ptr = GLOBAL_ROOTFS_SB.load(Ordering::Acquire);
     if sb_ptr.is_null() {
-        return Err(errno::Errno::IOError.as_neg_i32());
+        return Err(errno::Errno::IOError);
     }
     let sb = &*sb_ptr;
     let ino = sb.alloc_ino();
@@ -1427,7 +1427,7 @@ unsafe fn rootfs_rmdir(dir: &Inode, name: &[u8]) -> i32 {
 
 /// RootFS create operation
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
-unsafe fn rootfs_create(dir: &Inode, name: &[u8], mode: InodeMode) -> Result<alloc::sync::Arc<Inode>, i32> {
+unsafe fn rootfs_create(dir: &Inode, name: &[u8], mode: InodeMode) -> Result<alloc::sync::Arc<Inode>, errno::Errno> {
     let _ = mode; // Mode not used in RootFS
 
     // Get RootFSNode from inode's private_data
@@ -1435,18 +1435,18 @@ unsafe fn rootfs_create(dir: &Inode, name: &[u8], mode: InodeMode) -> Result<all
     let node = &*(node_ptr as *const RootFSNode);
 
     if !node.is_dir() {
-        return Err(errno::Errno::NotADirectory.as_neg_i32());
+        return Err(errno::Errno::NotADirectory);
     }
 
     // Check if already exists
     if node.find_child(name).is_some() {
-        return Err(errno::Errno::FileExists.as_neg_i32());
+        return Err(errno::Errno::FileExists);
     }
 
     // Get superblock to allocate inode number
     let sb_ptr = GLOBAL_ROOTFS_SB.load(Ordering::Acquire);
     if sb_ptr.is_null() {
-        return Err(errno::Errno::IOError.as_neg_i32());
+        return Err(errno::Errno::IOError);
     }
     let sb = &*sb_ptr;
     let ino = sb.alloc_ino();
@@ -1465,24 +1465,24 @@ unsafe fn rootfs_create(dir: &Inode, name: &[u8], mode: InodeMode) -> Result<all
 
 /// RootFS symlink operation
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
-unsafe fn rootfs_symlink(dir: &Inode, name: &[u8], target: &[u8]) -> Result<alloc::sync::Arc<Inode>, i32> {
+unsafe fn rootfs_symlink(dir: &Inode, name: &[u8], target: &[u8]) -> Result<alloc::sync::Arc<Inode>, errno::Errno> {
     // Get RootFSNode from inode's private_data
     let node_ptr = dir.private_data.ok_or(errno::Errno::NotADirectory.as_neg_i32())?;
     let node = &*(node_ptr as *const RootFSNode);
 
     if !node.is_dir() {
-        return Err(errno::Errno::NotADirectory.as_neg_i32());
+        return Err(errno::Errno::NotADirectory);
     }
 
     // Check if already exists
     if node.find_child(name).is_some() {
-        return Err(errno::Errno::FileExists.as_neg_i32());
+        return Err(errno::Errno::FileExists);
     }
 
     // Get superblock to allocate inode number
     let sb_ptr = GLOBAL_ROOTFS_SB.load(Ordering::Acquire);
     if sb_ptr.is_null() {
-        return Err(errno::Errno::IOError.as_neg_i32());
+        return Err(errno::Errno::IOError);
     }
     let sb = &*sb_ptr;
     let ino = sb.alloc_ino();
@@ -1885,7 +1885,7 @@ pub static ROOTFS_INODE_OPS: INodeOps = INodeOps {
 /// The parent inode's private_data points to a RootFSNode.
 /// We find the child by name and create a VFS Inode.
 // SAFETY: VFS callback contract; pointers are valid for the scope of this block
-unsafe fn rootfs_iget(parent: &Inode, name: &[u8], ino: Ino) -> Result<alloc::sync::Arc<Inode>, i32> {
+unsafe fn rootfs_iget(parent: &Inode, name: &[u8], ino: Ino) -> Result<alloc::sync::Arc<Inode>, errno::Errno> {
     let node_ptr = parent.private_data.ok_or(errno::Errno::NotADirectory.as_neg_i32())?;
     let node = &*(node_ptr as *const RootFSNode);
 
