@@ -390,7 +390,221 @@ pub fn ext4_ext_get_block(
         return Err(errno::Errno::IOError.as_neg_i32());
     }
 
-    find_block_in_extent_tree(fs, i_block, logical_block, 0)
+    let r = find_block_in_extent_tree(fs, i_block, logical_block, 0);
+    // dfx=exthunt: a read-side miss on a DEEP tree (depth >= 1) — the
+    // reader is about to serve a hole for a file that grew past its
+    // root. Print the root view so a stale cached root (old depth /
+    // fewer entries) is distinguishable from a broken index block.
+    if header.eh_depth >= 1
+        && (r.is_err() || *r.as_ref().unwrap_or(&0) == 0)
+        && crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::ExtHunt)
+    {
+        use core::sync::atomic::{AtomicUsize, Ordering};
+        static MISSES: AtomicUsize = AtomicUsize::new(0);
+        if MISSES.fetch_add(1, Ordering::Relaxed) < 60 {
+            crate::pr_info!(
+                "EXT-HUNT-MISS logical={} root[magic={:x} depth={} entries={} max={}] -> {:?}",
+                logical_block,
+                header.eh_magic,
+                header.eh_depth,
+                header.eh_entries,
+                header.eh_max,
+                r
+            );
+        }
+    }
+    r
+}
+
+/// dfx=exthunt read-side companion to EXT-HUNT-MISS: call wherever a read
+/// path concludes "hole" (mapping 0) and is about to zero-fill — the page
+/// cache batch fill, the synchronous fallback, and the O_DIRECT reader all
+/// map through the CACHED inode's root, NOT through ext4_ext_get_block,
+/// so EXT-HUNT-MISS alone cannot see the reader's verdict. Prints the
+/// reader's root view so a stale/reverted cached root is distinguishable
+/// from a legitimately sparse file: a file that already grew past its
+/// root (see EXT-HUNT-GROW) should never again report a shallow root.
+pub fn exthunt_read_hole(ino: u32, i_block: &[u32; 15], logical_block: u64) {
+    if !crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::ExtHunt) {
+        return;
+    }
+    use core::sync::atomic::{AtomicUsize, Ordering};
+    // Hole verdicts are reads too: register the ino so the following
+    // writes (the C2 write-after-hole shape) are captured.
+    hunt_watch(ino);
+    static HOLES: AtomicUsize = AtomicUsize::new(0);
+    if HOLES.fetch_add(1, Ordering::Relaxed) >= 80 {
+        return;
+    }
+    let header = get_extent_header(i_block);
+    crate::pr_info!(
+        "EXT-HUNT-READHOLE pid={} ino={} logical={} root[magic={:x} depth={} entries={} max={}]",
+        unsafe { crate::process::current_pid() },
+        ino,
+        logical_block,
+        header.eh_magic,
+        header.eh_depth,
+        header.eh_entries,
+        header.eh_max
+    );
+}
+
+// ---- dfx=exthunt write/read adjudication probes (ltp-fix-b leg-10) ----
+//
+// The ftest04/zzprobe4 all-zeros family needs the write-side vs read-side
+// (logical -> phys) story on ONE boot: which physical block each side
+// touched and which bytes the reader actually served. Static audit of the
+// write path (buffer-cache deferred-dirty under the journal handle),
+// read paths (page-cache fill through the block_cached coherence guard),
+// fsync, and eviction found every link individually coherent — so the
+// divergence point must be observed live:
+//
+// - WRPUT: every data-block copy in ext4_file_write (the writer's truth).
+// - RDSERVE / RDBATCH / RDOD / RDHIT: the reader's resolutions — sync
+//   fallback, batch-fill submit, O_DIRECT, and page-cache frame hit —
+//   with the first two bytes each actually served.
+//
+// Read prints are filtered to inodes seen in a recent WRPUT (the watch
+// ring) so boot-time I/O cannot eat the caps before the probe file's
+// story is captured. OFF by default, like every exthunt probe.
+
+const HUNT_CAP_WR: usize = 500;
+const HUNT_CAP_RD: usize = 500;
+const HUNT_WATCH: usize = 8;
+
+static HUNT_WR_N: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+static HUNT_RD_N: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+static HUNT_WATCH_RING: [core::sync::atomic::AtomicU32; HUNT_WATCH] =
+    [const { core::sync::atomic::AtomicU32::new(0) }; HUNT_WATCH];
+static HUNT_WATCH_NEXT: core::sync::atomic::AtomicUsize =
+    core::sync::atomic::AtomicUsize::new(0);
+
+fn hunt_on() -> bool {
+    crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::ExtHunt)
+}
+
+fn hunt_watch(ino: u32) {
+    use core::sync::atomic::Ordering;
+    let i = HUNT_WATCH_NEXT.fetch_add(1, Ordering::Relaxed) % HUNT_WATCH;
+    HUNT_WATCH_RING[i].store(ino, Ordering::Relaxed);
+}
+
+fn hunt_watched(ino: u64) -> bool {
+    use core::sync::atomic::Ordering;
+    HUNT_WATCH_RING
+        .iter()
+        .any(|w| w.load(Ordering::Relaxed) as u64 == ino)
+}
+
+/// Writer truth: ext4_file_write copied `pat` into `phys` for `logical`.
+/// Only prints for watched inos (inos seen in a recent read) so kernel
+/// append-only files (kmsg) cannot flood the console into a feedback
+/// loop with printk persistence.
+pub fn exthunt_wr_put(ino: u32, logical: u64, phys: u64, pat: u8) {
+    use core::sync::atomic::Ordering;
+    if !hunt_on() || !hunt_watched(ino as u64) {
+        return;
+    }
+    if HUNT_WR_N.fetch_add(1, Ordering::Relaxed) >= HUNT_CAP_WR {
+        return;
+    }
+    crate::pr_info!(
+        "EXT-HUNT-WRPUT pid={} ino={} logical={} phys={} pat={:02x}",
+        unsafe { crate::process::current_pid() },
+        ino,
+        logical,
+        phys,
+        pat
+    );
+}
+
+/// Reader truth: synchronous single-block serve — `b0 b1` are the first
+/// two bytes the buffer actually handed out.
+pub fn exthunt_rd_serve(ino: u64, logical: u64, phys: u64, b0: u8, b1: u8) {
+    use core::sync::atomic::Ordering;
+    if !hunt_on() {
+        return;
+    }
+    hunt_watch(ino as u32);
+    if HUNT_RD_N.fetch_add(1, Ordering::Relaxed) >= HUNT_CAP_RD {
+        return;
+    }
+    crate::pr_info!(
+        "EXT-HUNT-RDSERVE pid={} ino={} logical={} phys={} b0={:02x}{:02x}",
+        unsafe { crate::process::current_pid() },
+        ino,
+        logical,
+        phys,
+        b0,
+        b1
+    );
+}
+
+/// Reader truth: batch fill submitted a coalesced run starting at
+/// `logical` -> `phys` (bread_async_multi; single-block runs delegate to
+/// the cache-aware bread_async).
+pub fn exthunt_rd_batch(ino: u64, logical: u64, phys: u64, nblocks: u32) {
+    use core::sync::atomic::Ordering;
+    if !hunt_on() {
+        return;
+    }
+    hunt_watch(ino as u32);
+    if HUNT_RD_N.fetch_add(1, Ordering::Relaxed) >= HUNT_CAP_RD {
+        return;
+    }
+    crate::pr_info!(
+        "EXT-HUNT-RDBATCH pid={} ino={} logical={} phys={} n={}",
+        unsafe { crate::process::current_pid() },
+        ino,
+        logical,
+        phys,
+        nblocks
+    );
+}
+
+/// Reader truth: O_DIRECT serve — first two bytes off the block.
+pub fn exthunt_rd_od(ino: u64, logical: u64, phys: u64, b0: u8, b1: u8) {
+    use core::sync::atomic::Ordering;
+    if !hunt_on() {
+        return;
+    }
+    hunt_watch(ino as u32);
+    if HUNT_RD_N.fetch_add(1, Ordering::Relaxed) >= HUNT_CAP_RD {
+        return;
+    }
+    crate::pr_info!(
+        "EXT-HUNT-RDOD pid={} ino={} logical={} phys={} b0={:02x}{:02x}",
+        unsafe { crate::process::current_pid() },
+        ino,
+        logical,
+        phys,
+        b0,
+        b1
+    );
+}
+
+/// Reader truth: page-cache frame hit — first two bytes of the served
+/// frame (a poisoned frame shows zeros here long after any disk/block
+/// state was repaired).
+pub fn exthunt_rd_hit(ino: u64, logical: u64, b0: u8, b1: u8) {
+    use core::sync::atomic::Ordering;
+    if !hunt_on() {
+        return;
+    }
+    hunt_watch(ino as u32);
+    if HUNT_RD_N.fetch_add(1, Ordering::Relaxed) >= HUNT_CAP_RD {
+        return;
+    }
+    crate::pr_info!(
+        "EXT-HUNT-RDHIT pid={} ino={} logical={} b0={:02x}{:02x}",
+        unsafe { crate::process::current_pid() },
+        ino,
+        logical,
+        b0,
+        b1
+    );
 }
 
 /// Find logical block in extent tree
@@ -489,13 +703,43 @@ fn find_block_in_external_extent_ex(
             .ok_or(errno::Errno::IOError.as_neg_i32())?;
         let data = &(*bh).b_data;
         let header = &*(data.as_ptr() as *const Ext4ExtentHeader);
-        if header.eh_magic != EXT4_EXT_MAGIC {
+        if header.eh_magic != EXT4_EXT_MAGIC
+            || header.eh_entries > header.eh_max
+        {
+            // dfx=exthunt: the walk below the root just failed — the
+            // reader will turn this Err into a hole (zeros). Dump the
+            // block header + first bytes so zeros / foreign data / a
+            // reverted header are distinguishable.
+            if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::ExtHunt) {
+                use core::sync::atomic::{AtomicUsize, Ordering};
+                static BADS: AtomicUsize = AtomicUsize::new(0);
+                if BADS.fetch_add(1, Ordering::Relaxed) < 40 {
+                    let mut hex = [0u8; 48];
+                    let mut n = 0usize;
+                    for b in data.iter().take(16) {
+                        let hi = b >> 4;
+                        let lo = b & 0xf;
+                        hex[n] = if hi < 10 { b'0' + hi } else { b'a' + hi - 10 };
+                        hex[n + 1] = if lo < 10 { b'0' + lo } else { b'a' + lo - 10 };
+                        n += 2;
+                    }
+                    crate::pr_info!(
+                        "EXT-HUNT-IDXBAD block={} hdr[magic={:x} depth={} entries={} max={}] first16={}",
+                        block_num,
+                        header.eh_magic,
+                        header.eh_depth,
+                        header.eh_entries,
+                        header.eh_max,
+                        core::str::from_utf8(&hex[..n]).unwrap_or("??")
+                    );
+                }
+            }
             bio::brelse(bh);
             return Err(errno::Errno::IOError.as_neg_i32());
         }
         let max_slots = (fs.block_size as usize - core::mem::size_of::<Ext4ExtentHeader>())
             / core::mem::size_of::<Ext4Extent>();
-        if header.eh_entries > header.eh_max || header.eh_max as usize > max_slots {
+        if header.eh_max as usize > max_slots {
             bio::brelse(bh);
             return Err(errno::Errno::IOError.as_neg_i32());
         }
@@ -986,6 +1230,21 @@ pub fn ext4_ext_append(
                 slot2.ei_unused = 0;
             }
             node_header_mut(&mut root).eh_entries = 2;
+            // dfx=exthunt: the tree just grew one level — the event the
+            // ftest04/zzprobe4 all-zeros family correlates with.
+            if crate::dfx::switches::enabled(crate::dfx::switches::DfxSwitch::ExtHunt) {
+                use core::sync::atomic::{AtomicUsize, Ordering};
+                static GROWS: AtomicUsize = AtomicUsize::new(0);
+                if GROWS.fetch_add(1, Ordering::Relaxed) < 20 {
+                    crate::pr_info!(
+                        "EXT-HUNT-GROW new_depth={} down={} split_child={} split_ei_block={}",
+                        new_depth,
+                        down,
+                        split.child,
+                        split.ei_block
+                    );
+                }
+            }
         }
     }
 

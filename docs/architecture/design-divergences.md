@@ -336,3 +336,54 @@ views after 1.56 M ring overwrites (`test/trace-soak.sh`).
 syscall dispatch, scheduler and block-IO paths): per-op syscall
 averages and pbench rows must hold band with every event disabled —
 the disabled cost is the thing the gate watches.
+
+---
+
+## D-8: Write-through jbd2 commit (no replay window, no revoke cancels)
+
+**Design.** The jbd2 commit persists a transaction by syncing its
+registered buffers THROUGH to their final on-disk locations (the
+write-through loop), then advances the log tail/head past the
+transaction's journal-area records in the same commit. A completed
+commit therefore leaves nothing replayable: recovery starts at s_start,
+which already points past the records the commit just wrote. The
+journal-area copies remain on the slow path for format compatibility
+only. Consequence: jbd2 revoke records need none of Linux's
+revoke-cancel machinery (JBD2_FLAG_REVOKE_CANCEL). A revoke stamped
+with its issuing transaction's tid can never suppress a descriptor of a
+strictly later transaction (the filter is `revoke.tid >= desc_tid`
+with strictly increasing tids), and same-transaction suppression is
+benign because the suppressed replay is redundant — the content is
+already at its final location via the write-through pass. Revokes are
+per-transaction sets (lazy, bounded by a revoke high-water), not a
+journal-global force.
+
+**Advantage.**
+- The per-op synchronous journal commit that Linux's revoke semantics
+  would otherwise force on every unlink/rmdir (descriptor + copies +
+  revoke + commit + superblock, 8-12 round trips) is gone: delete-class
+  operations batch exactly like writes (p6_mkdrmdir 52-58 ms strong
+  median class → single-digit ms; see
+  docs/development/f4-ext4-route-map.md §6).
+- One persistence model to reason about (write-through + dirty-buffer
+  drain points) instead of two (write-back journal replay for metadata,
+  write-through for the rest) — the crash-consistency stance is uniform:
+  recovery is e2fsck, as on a write-back mount of the reference kernel.
+
+**Cost.** The journal-area records written by the slow path are dead
+weight (born dead per the tail advance); a future real
+checkpoint-replay journal would have to drop the tail advance or write
+replayable records. Same-transaction free-then-realloc of a block skips
+its replay — harmless only while replay stays redundant, i.e. while the
+write-through pass runs on every commit path.
+
+**Compatibility evidence.** The on-disk jbd2 format is unchanged
+(descriptor/revoke/commit blocks, header tids, recovery scan); journal
+images mount and recover unchanged. LTP mutation families (creat,
+unlink, rmdir, rename, fsync classes) green; pbench fs rows in band
+(the fs domain gate); fsw jcommit_slow drops to batch count under
+delete load.
+
+**Guard.** fs-domain perf-gate rows (p6_mkdrmdir, p6_unlink,
+p6_write_fsync, p6_append) plus the fsw jcommit counters; the
+release-strong boot requirement for any change touching this path.

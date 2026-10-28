@@ -133,6 +133,38 @@ fn alloc_pages_inner(gfp_flags: GfpFlags, order: usize) -> usize {
                                 break; // no progress — do not spin
                             }
                         }
+                        // DEEP FINAL ROUND (stress-fleet s17, leg 49B;
+                        // design in perf-report.md 8.10.19): the 8
+                        // steady-state rounds above drained at most
+                        // ~8x32 = 256 pages — measured against kills
+                        // that fired while 175-204 MB of clean file
+                        // cache sat on the LRUs, two orders of magnitude
+                        // short (the bounds are steady-state pace
+                        // measures; nothing deliberately limits the
+                        // pre-OOM effort). Before giving up: ONE deep
+                        // drain sized to the actual shortfall, with the
+                        // bulk active-list demotion that makes the
+                        // never-scanned active pool reachable. Still
+                        // inside the IN_DIRECT_RECLAIM gate (the drain
+                        // uses shrink_reclaim, the direct-reclaim
+                        // variant with dirty writeback). Standard boots
+                        // never reach here (the rounds above satisfy
+                        // them); the drain's counters read zero on the
+                        // Tier-1 census.
+                        let wmark_low = zone.watermark(super::zone::WMARK_LOW);
+                        let shortfall = wmark_low
+                            .saturating_add(1usize << order)
+                            .saturating_sub(zone.nr_free());
+                        let deep_target = shortfall.clamp(32, 8192);
+                        let deep_freed =
+                            super::vmscan::drain_file_cache_before_oom(deep_target);
+                        if deep_freed > 0 {
+                            if let Some(pfn) = zone.alloc_pages(order) {
+                                ZONE_ALLOCS.fetch_add(1, Ordering::Relaxed);
+                                IN_DIRECT_RECLAIM.store(0, Ordering::Release);
+                                return pfn_to_phys(pfn);
+                            }
+                        }
                         IN_DIRECT_RECLAIM.store(0, Ordering::Release);
                     }
                 }

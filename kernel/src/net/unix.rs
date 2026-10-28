@@ -2179,6 +2179,151 @@ fn unix_file_write(file: &File, buf: &[u8]) -> isize {
     }
 }
 
+// ============================================================================
+// read(2)-on-socket direct-drain fast path (perf-audit leg 46, ledger
+// 8.10.15's lever)
+// ============================================================================
+
+/// True when `file` is an AF_UNIX socket description (UNIX_SOCKET_OPS) —
+/// lets sys_read take the direct-drain fast path below, mirroring
+/// `is_pipe_file`.
+pub fn is_unix_file(file: &File) -> bool {
+    file.get_ops()
+        .is_some_and(|ops| core::ptr::eq(ops as *const _, &UNIX_SOCKET_OPS as *const _))
+}
+
+/// Size of the on-stack drain bounce (see unix_read_user). Kernel-stack
+/// safe; covers hilogd-class records (74 B), the pbench p5 record shape,
+/// and the few-segment queue depths the serialized regime produces.
+const READ_BOUNCE: usize = 1024;
+
+/// read(2)-on-socket fast path: drain the receive queue DIRECTLY into
+/// the user buffer with an on-stack bounce — no per-call heap staging
+/// (the generic path allocs min(count, RW_CHUNK) = up to 64 KB and
+/// double-copies on every call).
+///
+/// Why this shape (leg 46, perf-report 8.10.15): the 40-44 us
+/// cross-process class is per-send serialization onto a SLEEPING
+/// receiver's drain cycle — when sender and receiver share one CPU,
+/// every sendto waits out the receiver's whole receive syscall, and the
+/// staged alloc + double copy are the part of that cycle the kernel
+/// owns. The reverted b99b70f8 routed read(2) around the wrapper but
+/// KEPT the 64 KB staging (zero benefit, withdrawn); the lever is
+/// DIRECTNESS, not dispatch. pin_r4k's warning applies: continuation
+/// engine calls are NONBLOCKING — after the first byte the loop never
+/// blocks for more data (POSIX read(2): return what is available), so
+/// a faster drain cannot multiply sleep cycles the way the generic
+/// chunk loop's blocking second read did.
+///
+/// Semantics preserved vs the generic staged path:
+/// - Stream: everything queued up to `count`, one bounce at a time
+///   (short-read on queue-empty; blocking only until the first byte
+///   when the socket is blocking).
+/// - Dgram/Seqpacket: ONE record per read(2), truncated to min(count,
+///   record) — the single-record contract. A count larger than the
+///   bounce (rare for read(2)-on-dgram) takes the old one-shot heap
+///   stage so a big record is still returned whole up to count.
+/// - EOF (peer closed, queue empty) returns 0; O_NONBLOCK empty queue
+///   returns EAGAIN; SO_RCVTIMEO expiry surfaces as EAGAIN; a pending
+///   signal returns the partial count when bytes already landed.
+/// - Ancillary data is discarded (unix_file_read's existing contract).
+///
+/// # Safety
+/// `dst` must be a validated user pointer with `count` writable bytes
+/// (access_ok was checked by the caller).
+pub unsafe fn unix_read_user(file: &File, dst: *mut u8, count: usize) -> isize {
+    // SAFETY: ops identity verified by the dispatcher (is_unix_file) —
+    // private_data holds the UnixSocket Arc installed at open.
+    let socket = match unsafe { unix_of_file(file) } {
+        Some(s) => s,
+        None => return -9, // EBADF
+    };
+    let nonblock = unix_file_nonblock(file);
+    let deadline = socket.rcvtimeo_deadline();
+
+    // Dgram/Seqpacket with a count above the bounce: one-shot staged
+    // receive so a large record still returns whole (single record per
+    // call; the bounce loop would split it across records — wrong).
+    if !matches!(socket.kind, UnixKind::Stream) && count > READ_BOUNCE {
+        let stage = count.min(crate::syscall::io::RW_CHUNK);
+        let mut kbuf = alloc::vec![0u8; stage];
+        return match unix_recv_ctl(&socket, &mut kbuf, nonblock, deadline, false) {
+            Ok(r) => {
+                if r.len == 0 {
+                    return 0; // EOF
+                }
+                // SAFETY: dst validated with access_ok(count) by the
+                // caller; r.len <= stage <= count.
+                if unsafe {
+                    crate::arch::uaccess::copy_to_user(dst, kbuf.as_ptr(), r.len)
+                } != 0
+                {
+                    return -14; // EFAULT
+                }
+                r.len as isize
+            }
+            Err(e) => e as isize,
+        };
+    }
+
+    let mut bounce = [0u8; READ_BOUNCE];
+    let mut total: usize = 0;
+    let mut user_ptr = dst;
+    let mut remaining = count;
+    loop {
+        let chunk = remaining.min(READ_BOUNCE);
+        if chunk == 0 {
+            break;
+        }
+        // First engine call honors the socket's blocking semantics;
+        // continuations NEVER block (read(2) returns what arrived —
+        // blocking again mid-call is the pin_r4k cycle-multiplier).
+        let call_nonblock = total > 0 || nonblock;
+        let call_deadline = if total > 0 { None } else { deadline };
+        match unix_recv_ctl(
+            &socket,
+            &mut bounce[..chunk],
+            call_nonblock,
+            call_deadline,
+            false,
+        ) {
+            Ok(r) => {
+                let n = r.len;
+                if n == 0 {
+                    break; // peer EOF
+                }
+                // SAFETY: user_ptr stays within the access_ok-validated
+                // [dst, dst+count) window; only the n bytes unix_recv
+                // wrote are read out of the bounce.
+                if unsafe {
+                    crate::arch::uaccess::copy_to_user(user_ptr, bounce.as_ptr(), n)
+                } != 0
+                {
+                    // Partial fault: report what already landed (POSIX
+                    // partial-read semantics), like the generic path.
+                    return if total > 0 { total as isize } else { -14 };
+                }
+                total += n;
+                remaining -= n;
+                user_ptr = user_ptr.add(n);
+                if !matches!(socket.kind, UnixKind::Stream) {
+                    break; // one record per read(2)
+                }
+                if n < chunk {
+                    break; // queue drained — short read
+                }
+            }
+            Err(e) => {
+                // EAGAIN/EINTR on a continuation is a short read, not an
+                // error (bytes already landed); on the first call it
+                // propagates.
+                return if total > 0 { total as isize } else { e as isize };
+            }
+        }
+    }
+    total as isize
+}
+
 fn unix_file_close(file: &File) -> i32 {
     // SAFETY: private_data was installed from Arc::into_raw(Arc<UnixSocket>)
     // and this is the final close of the description.
