@@ -19,6 +19,10 @@
 //! zero-put — rare — and one per refused free); no locks, no printk, safe
 //! from any context including the zone-lock-held free path.
 
+// Framekernel layer policy (docs/architecture/framekernel-layers.md):
+// this module must stay Safe Rust.
+#![forbid(unsafe_code)]
+
 use core::sync::atomic::{AtomicUsize, Ordering};
 
 /// Release sites that can land a refcount on 0. Keep in sync with

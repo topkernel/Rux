@@ -31,6 +31,10 @@
 //! 4 — dump must stay at pr_warn or louder). Both fields are read once
 //! per dump; no hot-path cost.
 
+// Framekernel layer policy (docs/architecture/framekernel-layers.md):
+// this module must stay Safe Rust.
+#![forbid(unsafe_code)]
+
 use core::sync::atomic::{AtomicU8, AtomicU64, Ordering};
 
 /// Dump cadence in seconds (same as syscost's 60 s).
